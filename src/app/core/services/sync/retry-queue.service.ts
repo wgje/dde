@@ -706,8 +706,9 @@ export class RetryQueueService {
   cleanExpired(): number {
     const now = Date.now();
     const originalLength = this.queue.length;
+    const originalHiddenLength = this.hiddenQueueItems.length;
     
-    this.queue = this.queue.filter(item => {
+    const shouldKeep = (item: RetryQueueItem): boolean => {
       const isExpired = now - item.createdAt > this.MAX_ITEM_AGE;
       const isMaxRetried = item.retryCount >= this.MAX_RETRIES;
       
@@ -730,13 +731,17 @@ export class RetryQueueService {
       }
       
       return true;
-    });
+    };
+
+    this.queue = this.queue.filter(shouldKeep);
+    // 同步清理隐藏队列（其它账号的过期条目），防止长期内存/存储泄漏
+    this.hiddenQueueItems = this.hiddenQueueItems.filter(shouldKeep);
     
-    const cleaned = originalLength - this.queue.length;
+    const cleaned = (originalLength - this.queue.length) + (originalHiddenLength - this.hiddenQueueItems.length);
     if (cleaned > 0) {
       this.touchQueueState();
       this.saveToStorage();
-      this.logger.info('清理队列', { cleaned, remaining: this.queue.length });
+      this.logger.info('清理队列', { cleaned, remaining: this.queue.length, hiddenRemaining: this.hiddenQueueItems.length });
     }
     
     return cleaned;

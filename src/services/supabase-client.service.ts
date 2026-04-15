@@ -550,23 +550,26 @@ export class SupabaseClientService {
         reason,
         remainingMs,
       });
-      const { error: refreshError } = await client.auth.refreshSession();
-      if (refreshError) {
-        this.logger.warn('恢复时主动刷新 session 失败', { reason, error: refreshError.message });
-        // 【鲁棒性 5】记录失败指标
+      try {
+        const { error: refreshError } = await client.auth.refreshSession();
+        if (refreshError) {
+          this.logger.warn('恢复时主动刷新 session 失败', { reason, error: refreshError.message });
+          this.proactiveRefreshMetrics.failureCount++;
+          this.proactiveRefreshMetrics.lastFailureAt = Date.now();
+        } else {
+          this.logger.debug('恢复时主动刷新 session 成功', { reason });
+          this.proactiveRefreshMetrics.successCount++;
+          this.proactiveRefreshMetrics.lastRefreshAt = Date.now();
+        }
+      } catch (refreshError) {
+        // refreshSession 本身抛出（网络异常等），计入失败（totalAttempts 已递增，保证分母一致）
+        this.logger.debug('恢复时主动刷新 session 抛出异常', { reason, error: refreshError });
         this.proactiveRefreshMetrics.failureCount++;
         this.proactiveRefreshMetrics.lastFailureAt = Date.now();
-      } else {
-        this.logger.debug('恢复时主动刷新 session 成功', { reason });
-        // 【鲁棒性 5】记录成功指标
-        this.proactiveRefreshMetrics.successCount++;
-        this.proactiveRefreshMetrics.lastRefreshAt = Date.now();
       }
     } catch (error) {
-      // 任何错误都不阻塞后续流程，交给既有的自愈路径处理
+      // getSession() 等早期步骤抛出，未到达阈值判断，不计入刷新指标
       this.logger.debug('恢复时主动校验 session 异常', { reason, error });
-      // 【鲁棒性 5】异常也计入失败指标
-      this.proactiveRefreshMetrics.failureCount++;
     }
   }
 
@@ -751,10 +754,10 @@ export class SupabaseClientService {
               const retryResponse = await this.fetchWithTimeout(url, retryOptions);
               this.fetch401RetryCount.delete(retryKey);
               return retryResponse;
-            } catch {
+            } catch (retryError) {
               // 重试请求本身抛出（如网络断开），清除计数器让下次请求重新尝试
               this.fetch401RetryCount.delete(retryKey);
-              throw;
+              throw retryError;
             }
           }
         }
