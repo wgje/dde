@@ -134,7 +134,10 @@ export class SyncOperationHelperService {
     const client = this.getClient();
     if (!client) {
       if (addToRetryQueueOnFailure && !fromRetryQueue && retryEntityType && retryOperation && retryData) {
-        this.retryQueue.add(retryEntityType, retryOperation, retryData, projectId);
+          const enqueued = this.retryQueue.add(retryEntityType, retryOperation, retryData, projectId);
+          if (!enqueued) {
+            this.logger.warn('execute: 重试队列已满，操作丢失（无客户端）', { entityId, operationName });
+          }
       }
       return { 
         success: false, 
@@ -319,8 +322,12 @@ export class SyncOperationHelperService {
       this.logger.debug(`${operationName}: 失败 (${enhanced.errorType})`, { entityId, message: enhanced.message });
       
       if (addToRetryQueueOnFailure && !fromRetryQueue && retryEntityType && retryOperation && retryData) {
-        this.retryQueue.add(retryEntityType, retryOperation, retryData, projectId);
-        this.logger.debug(`${operationName}: 已加入重试队列`, { entityId });
+          const enqueued = this.retryQueue.add(retryEntityType, retryOperation, retryData, projectId);
+          if (enqueued) {
+            this.logger.debug(`${operationName}: 已加入重试队列`, { entityId });
+          } else {
+            this.logger.warn(`${operationName}: 重试队列已满，操作丢失`, { entityId });
+          }
       }
     } else {
       this.logger.error(`${operationName}: 不可重试的错误`, { entityId, error: enhanced });
