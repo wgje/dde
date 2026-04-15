@@ -774,6 +774,7 @@ export class RealtimePollingService {
 
     if (this.userActiveTimer) {
       clearTimeout(this.userActiveTimer);
+      this.userActiveTimer = null;
     }
 
     // 移除用户活跃状态事件监听器

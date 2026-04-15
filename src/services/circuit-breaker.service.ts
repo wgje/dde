@@ -229,11 +229,15 @@ export class CircuitBreakerService {
       violations.push(...schemaViolations);
     }
     
-    // 更新历史记录
-    this.updateTaskCountHistory(project.id, currentCount);
-    
     // 计算最终结果
     const result = this.calculateResult(violations, project.id);
+    
+    // 仅在同步未被阻断时更新历史基线
+    // 若 L2/L3 阻断后仍更新基线，下次校验的 prevCount 将变为异常低值，
+    // 导致熔断器对后续相同异常数据失去保护能力
+    if (!result.shouldBlock) {
+      this.updateTaskCountHistory(project.id, currentCount);
+    }
     
     // 执行熔断行为
     this.executeCircuitAction(result, project.id);
@@ -396,9 +400,10 @@ export class CircuitBreakerService {
     const dropCount = previousCount - currentCount;
     const dropRatio = dropCount / previousCount;
     
-    // 计算动态阈值（大项目更宽松）
+    // 计算动态阈值（大项目更宽松：阈值随项目规模上浮，上限 0.95）
+    // 注意：Math.min(cap, base + x) 而非 Math.min(base, base+x)（后者始终等于 base）
     const dynamicL3Threshold = Math.min(
-      config.L3_HARD_BLOCK_THRESHOLD,
+      0.95,
       config.L3_HARD_BLOCK_THRESHOLD + (previousCount * config.DYNAMIC_THRESHOLD_FACTOR)
     );
     
