@@ -730,10 +730,12 @@ export class BlackBoxSyncService {
       if (error) {
         const enhanced = supabaseErrorToError(error);
 
-        // 【JWT 自愈】检测到 session 过期时主动刷新一次并重试，避免控制台刷屏
+        // 【JWT 自愈】检测到 session 过期时主动刷新一次并重试，避免控制台刷屏。
+        // 使用 tryRefreshSessionWithSession（allowWhenExpired: true）绕过 syncState
+        // .sessionExpired 短路，刷新成功后 SessionManager 会自动重置 flag。
         if (this.sessionManager.isSessionExpiredError(enhanced)) {
-          const refreshed = await this.sessionManager.tryRefreshSession('BlackBoxSync.pullChanges');
-          if (refreshed) {
+          const refreshResult = await this.sessionManager.tryRefreshSessionWithSession('BlackBoxSync.pullChanges');
+          if (refreshResult.refreshed) {
             this.logger.info('BlackBox pullChanges 会话已刷新，重试增量拉取');
             const retry = await client
               .from('black_box_entries')

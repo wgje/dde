@@ -213,7 +213,12 @@ export class ProjectDataService {
    *
    * 背景：Supabase JS 的 autoRefreshToken 在长时间页面挂起或设备休眠恢复后
    * 可能未能及时刷新，导致读请求 401 刷屏。写路径已统一在失败时主动
-   * `tryRefreshSession`，读路径此前缺失该能力——本 helper 补齐读路径自愈。
+   * 刷新，读路径此前缺失该能力——本 helper 补齐读路径自愈。
+   *
+   * 关键：使用 tryRefreshSessionWithSession (allowWhenExpired: true)，即使
+   * syncState.sessionExpired 已被其他写路径设为 true，仍能执行刷新，
+   * 刷新成功后 SessionManager 会自动重置 flag，避免“flag 死锁”导致后续
+   * 读请求永远不再尝试刷新。
    *
    * 约定：fn 中抛出的错误由 helper 拦截并尝试刷新；刷新成功则重试一次，
    * 否则原样抛出，交由调用方既有 catch 分支处理（warn + 降级）。
@@ -227,8 +232,8 @@ export class ProjectDataService {
         throw error;
       }
 
-      const refreshed = await this.sessionManager.tryRefreshSession(context);
-      if (!refreshed) {
+      const refreshResult = await this.sessionManager.tryRefreshSessionWithSession(context);
+      if (!refreshResult.refreshed) {
         throw error;
       }
 
@@ -256,9 +261,27 @@ export class ProjectDataService {
     try {
       this.logger.debug('使用 RPC 批量加载项目', { projectId });
       
-      const { data, error } = await client.rpc('get_full_project_data', {
+      let { data, error } = await client.rpc('get_full_project_data', {
         p_project_id: projectId
       });
+
+      // 【JWT 自愈】RPC 返回 401/JWT expired 时主动刷新并重试一次，避免徒劳走
+      // fallback 链路再次触发 401。使用 tryRefreshSessionWithSession 绕过
+      // syncState.sessionExpired 短路。
+      if (error) {
+        const enhanced = supabaseErrorToError(error);
+        if (this.sessionManager.isSessionExpiredError(enhanced)) {
+          const refreshResult = await this.sessionManager.tryRefreshSessionWithSession('loadFullProjectOptimized');
+          if (refreshResult.refreshed) {
+            this.logger.info('loadFullProjectOptimized 会话已刷新，重试 RPC', { projectId });
+            const retry = await client.rpc('get_full_project_data', {
+              p_project_id: projectId
+            });
+            data = retry.data;
+            error = retry.error;
+          }
+        }
+      }
 
       if (error) {
         const isBatchRpcMissing = this.isBatchRpcMissingError(error);

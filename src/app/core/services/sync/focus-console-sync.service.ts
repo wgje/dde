@@ -70,8 +70,9 @@ export class FocusConsoleSyncService {
 
   /**
    * 远端读请求执行器：在检测到 JWT 过期/401 时自动刷新 session 并重试一次。
-   * 与 ProjectDataService.withAuthRetry 语义一致：fn 抛错 → 判断是否为
-   * session-expired → 刷新成功则重试一次，否则原样抛出交由调用方既有 catch 处理。
+   * 与 ProjectDataService.withAuthRetry 语义一致：使用 tryRefreshSessionWithSession
+   * (allowWhenExpired: true) 绕过 syncState.sessionExpired 短路，避免写路径一旦
+   * 将 flag 设为 true 后读路径永远无法触发刷新的死锁。
    */
   private async withAuthRetry<T>(context: string, fn: () => Promise<T>): Promise<T> {
     try {
@@ -81,8 +82,8 @@ export class FocusConsoleSyncService {
       if (!this.sessionManager.isSessionExpiredError(enhanced)) {
         throw error;
       }
-      const refreshed = await this.sessionManager.tryRefreshSession(context);
-      if (!refreshed) {
+      const refreshResult = await this.sessionManager.tryRefreshSessionWithSession(context);
+      if (!refreshResult.refreshed) {
         throw error;
       }
       this.logger.info('会话已刷新，重试远端读请求', { context });
