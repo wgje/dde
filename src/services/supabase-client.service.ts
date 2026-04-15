@@ -26,6 +26,21 @@ type SupabaseConnectivityListener = (change: SupabaseConnectivityChange) => void
  */
 const SENSITIVE_KEY_PATTERNS = ['service_role', 'secret', 'private', 'admin'];
 
+function decodeBase64UrlJson(segment: string): Record<string, unknown> | null {
+  if (!segment) return null;
+
+  const normalized = segment.replace(/-/g, '+').replace(/_/g, '/');
+  const paddingLength = normalized.length % 4;
+  const padded = paddingLength === 0 ? normalized : `${normalized}${'='.repeat(4 - paddingLength)}`;
+
+  try {
+    const decoded = atob(padded);
+    return JSON.parse(decoded) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
 @Injectable({
   providedIn: 'root'
 })
@@ -112,21 +127,20 @@ export class SupabaseClientService {
   private isSensitiveKey(key: string): boolean {
     if (!key) return false;
 
-    try {
-      // JWT 格式：header.payload.signature
-      const parts = key.split('.');
-      if (parts.length === 3) {
-        // 解码 payload（不需要验证签名，只检查内容）
-        const payload = JSON.parse(atob(parts[1]));
+    // JWT 格式：header.payload.signature
+    const parts = key.split('.');
+    if (parts.length === 3) {
+      const payload = decodeBase64UrlJson(parts[1]);
+      const role = typeof payload?.['role'] === 'string' ? payload['role'] : null;
 
-        // 检查 role 字段
-        if (payload.role && payload.role !== 'anon') {
-          this.logger.error('检测到非匿名角色密钥，已阻止使用', { role: payload.role });
-          return true;
-        }
+      if (role === 'anon') {
+        return false;
       }
-    } catch (_e) {
-      // 解析失败，不是有效的 JWT，检查字符串模式
+
+      if (role) {
+        this.logger.error('检测到非匿名角色密钥，已阻止使用', { role });
+        return true;
+      }
     }
 
     // 字符串模式检测（备用）
@@ -606,8 +620,13 @@ export class SupabaseClientService {
 
     const response = await this.fetchWithTimeout(url, options);
 
-    // 仅对业务端点 401 自愈；/auth/v1/token 的刷新请求本身跳过以防递归
-    if (response.status === 401 && this.shouldAttemptJwtRefreshForFetch(url) && this.looksLikeJwtAuthFailure(response)) {
+    // 【精准自愈策略】
+    // 1. 401 + JWT 问题特征 → 刷新重试
+    // 2. 5xx 网关错误 → 不刷新（与认证无关）
+    // 3. 其他 4xx / 3xx / 2xx → 直接返回（非自愈场景）
+    if (response.status === 401 && 
+        this.shouldAttemptJwtRefreshForFetch(url) && 
+        this.looksLikeJwtAuthFailure(response)) {
       try {
         const client = this.supabase;
         if (client) {
@@ -721,8 +740,15 @@ export class SupabaseClientService {
       }
       return response;
     } catch (error: unknown) {
+      // 【鲁棒性增强】在标记离线前，再次检查当前网络状态，避免瞬时波动误报
       if (this.shouldMarkOfflineFromFetchFailure(error)) {
-        this.setOfflineModeState(true, 'request');
+        // 延迟 100ms 再次确认，过滤一次性网络波动
+        await new Promise(r => setTimeout(r, 100));
+        if (typeof navigator !== 'undefined' && navigator.onLine) {
+          this.logger.debug('获取失败但网络已恢复，不标记离线', { error });
+        } else {
+          this.setOfflineModeState(true, 'request');
+        }
       }
       throw error;
     } finally {
