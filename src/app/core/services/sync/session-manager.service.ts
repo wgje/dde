@@ -55,6 +55,18 @@ export class SessionManagerService {
   // 【鲁棒性 2】刷新失败快速断路，避免频繁撞 Supabase 速率限制
   private lastRefreshFailureTime = 0;
   private readonly REFRESH_FAILURE_COOLDOWN_MS = 5000; // 5s 内失败则断路
+
+  // 【鲁棒性 6】session 刷新操作指标
+  private readonly sessionRefreshMetrics = {
+    totalAttempts: 0,
+    successCount: 0,
+    failureCount: 0,
+    circuitBreakerTrips: 0, // 被快速断路的次数
+    lastAttemptAt: 0,
+    lastSuccessAt: 0,
+    lastFailureAt: 0
+  };
+
   private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly supabase = inject(SupabaseClientService);
   private readonly loggerService = inject(LoggerService);
@@ -276,6 +288,8 @@ export class SessionManagerService {
     // 【鲁棒性 2】快速断路：5s 内有失败过，则短路拒绝，避免刷屏
     const timeSinceLastFailure = Date.now() - this.lastRefreshFailureTime;
     if (timeSinceLastFailure < this.REFRESH_FAILURE_COOLDOWN_MS && this.lastRefreshFailureTime > 0) {
+      // 【鲁棒性 6】记录被断路的次数
+      this.sessionRefreshMetrics.circuitBreakerTrips++;
       this.logger.debug('刷新失败冷却期内，短路拒绝', { context, remainingCooldownMs: this.REFRESH_FAILURE_COOLDOWN_MS - timeSinceLastFailure });
       return { refreshed: false, reason: 'refresh-failed' };
     }
@@ -289,6 +303,10 @@ export class SessionManagerService {
       this.logger.debug('会话已标记过期，跳过刷新尝试', { context });
       return { refreshed: false, reason: 'refresh-failed' };
     }
+    
+    // 【鲁棒性 6】记录尝试
+    this.sessionRefreshMetrics.totalAttempts++;
+    this.sessionRefreshMetrics.lastAttemptAt = Date.now();
     
     const { client, reason } = await this.getSupabaseClient();
     if (!client) {
@@ -351,11 +369,19 @@ export class SessionManagerService {
         
         // 【鲁棒性 2】刷新成功则清除冷却期
         this.lastRefreshFailureTime = 0;
+        
+        // 【鲁棒性 6】记录成功
+        this.sessionRefreshMetrics.successCount++;
+        this.sessionRefreshMetrics.lastSuccessAt = Date.now();
+        
         return { refreshed: true, session: data.session };
       } else {
         this.logger.warn('刷新返回空 session', { context });
         // 【鲁棒性 2】空 session 也算失败
         this.lastRefreshFailureTime = Date.now();
+        // 【鲁棒性 6】记录失败
+        this.sessionRefreshMetrics.failureCount++;
+        this.sessionRefreshMetrics.lastFailureAt = Date.now();
         return { refreshed: false, reason: 'no-session' };
       }
     } catch (e) {
@@ -368,14 +394,35 @@ export class SessionManagerService {
         this.logger.warn('会话刷新异常：刷新令牌已失效', { context, error: e });
         // 【鲁棒性 2】异常也启动冷却
         this.lastRefreshFailureTime = Date.now();
+        // 【鲁棒性 6】记录失败
+        this.sessionRefreshMetrics.failureCount++;
+        this.sessionRefreshMetrics.lastFailureAt = Date.now();
         return { refreshed: false, reason: 'no-session' };
       }
 
       this.logger.warn('会话刷新异常', { context, error: e });
       // 【鲁棒性 2】所有其他异常也启动冷却
       this.lastRefreshFailureTime = Date.now();
+      // 【鲁棒性 6】记录失败
+      this.sessionRefreshMetrics.failureCount++;
+      this.sessionRefreshMetrics.lastFailureAt = Date.now();
       return { refreshed: false, reason: 'refresh-failed' };
     }
+  }
+
+  /**
+   * 【鲁棒性 6】获取 session 刷新指标（供调试/监控使用）
+   */
+  getSessionRefreshMetrics() {
+    return {
+      ...this.sessionRefreshMetrics,
+      successRate: this.sessionRefreshMetrics.totalAttempts > 0
+        ? (this.sessionRefreshMetrics.successCount / this.sessionRefreshMetrics.totalAttempts * 100).toFixed(2) + '%'
+        : 'N/A',
+      failureRate: this.sessionRefreshMetrics.totalAttempts > 0
+        ? (this.sessionRefreshMetrics.failureCount / this.sessionRefreshMetrics.totalAttempts * 100).toFixed(2) + '%'
+        : 'N/A'
+    };
   }
 
   private isRetryableRefreshFailure(error: unknown): boolean {
