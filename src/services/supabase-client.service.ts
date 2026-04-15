@@ -53,6 +53,17 @@ export class SupabaseClientService {
   // key: 请求 URL + method，value: 已重试次数
   private readonly fetch401RetryCount = new Map<string, number>();
   private readonly MAX_FETCH_401_RETRIES = 1; // 最多重试一次（总共 2 次请求）
+
+  // 【鲁棒性 5】token 续签指标收集
+  private readonly proactiveRefreshMetrics = {
+    totalAttempts: 0,
+    successCount: 0,
+    failureCount: 0,
+    nearingExpiryCount: 0, // 发现即将过期的次数
+    lastRefreshAt: 0,
+    lastFailureAt: 0
+  };
+  
   private reachabilityProbePromise: Promise<boolean> | null = null;
   private readonly connectivityListeners = new Set<SupabaseConnectivityListener>();
   private lastReachabilityProbeAt = 0;
@@ -507,6 +518,7 @@ export class SupabaseClientService {
     reason: 'client-init' | 'visibilitychange' | 'pageshow' | 'online' | 'offline' | 'resume-timer'
   ): Promise<void> {
     try {
+      this.proactiveRefreshMetrics.totalAttempts++;
       const { data, error } = await client.auth.getSession();
       if (error || !data.session) {
         return;
@@ -522,6 +534,7 @@ export class SupabaseClientService {
       if (remainingMs > REFRESH_THRESHOLD_MS) {
         return;
       }
+      this.proactiveRefreshMetrics.nearingExpiryCount++;
       this.logger.debug('浏览器恢复时 token 临近/已过期，主动刷新', {
         reason,
         remainingMs,
@@ -529,13 +542,33 @@ export class SupabaseClientService {
       const { error: refreshError } = await client.auth.refreshSession();
       if (refreshError) {
         this.logger.warn('恢复时主动刷新 session 失败', { reason, error: refreshError.message });
+        // 【鲁棒性 5】记录失败指标
+        this.proactiveRefreshMetrics.failureCount++;
+        this.proactiveRefreshMetrics.lastFailureAt = Date.now();
       } else {
         this.logger.debug('恢复时主动刷新 session 成功', { reason });
+        // 【鲁棒性 5】记录成功指标
+        this.proactiveRefreshMetrics.successCount++;
+        this.proactiveRefreshMetrics.lastRefreshAt = Date.now();
       }
     } catch (error) {
       // 任何错误都不阻塞后续流程，交给既有的自愈路径处理
       this.logger.debug('恢复时主动校验 session 异常', { reason, error });
+      // 【鲁棒性 5】异常也计入失败指标
+      this.proactiveRefreshMetrics.failureCount++;
     }
+  }
+
+  /**
+   * 【鲁棒性 5】获取 token 续签指标（供调试/监控使用）
+   */
+  getProactiveRefreshMetrics() {
+    return {
+      ...this.proactiveRefreshMetrics,
+      successRate: this.proactiveRefreshMetrics.totalAttempts > 0
+        ? (this.proactiveRefreshMetrics.successCount / this.proactiveRefreshMetrics.totalAttempts * 100).toFixed(2) + '%'
+        : 'N/A'
+    };
   }
 
   private async stopAuthAutoRefresh(
