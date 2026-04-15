@@ -49,6 +49,13 @@ interface SessionRefreshResult {
   providedIn: 'root'
 })
 export class SessionManagerService {
+  // 【鲁棒性 1】防止并发 refresh 导致 token 版本竞争
+  private sessionRefreshInProgress = false;
+  private sessionRefreshPromise: Promise<SessionRefreshResult> | null = null;
+
+  // 【鲁棒性 2】刷新失败快速断路，避免频繁撞 Supabase 速率限制
+  private lastRefreshFailureTime = 0;
+  private readonly REFRESH_FAILURE_COOLDOWN_MS = 5000; // 5s 内失败则断路
   private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly supabase = inject(SupabaseClientService);
   private readonly loggerService = inject(LoggerService);
@@ -205,6 +212,19 @@ export class SessionManagerService {
   ): Promise<SessionRefreshResult> {
     const { allowWhenExpired = false } = options;
 
+    // 【鲁棒性 1】防并发：如果已有 refresh 在进行，直接等待该结果，不新开
+    if (this.sessionRefreshInProgress && this.sessionRefreshPromise) {
+      this.logger.debug('会话刷新已在进行中，复用结果', { context });
+      return await this.sessionRefreshPromise;
+    }
+
+    // 【鲁棒性 2】快速断路：5s 内有失败过，则短路拒绝，避免刷屏
+    const timeSinceLastFailure = Date.now() - this.lastRefreshFailureTime;
+    if (timeSinceLastFailure < this.REFRESH_FAILURE_COOLDOWN_MS && this.lastRefreshFailureTime > 0) {
+      this.logger.debug('刷新失败冷却期内，短路拒绝', { context, remainingCooldownMs: this.REFRESH_FAILURE_COOLDOWN_MS - timeSinceLastFailure });
+      return { refreshed: false, reason: 'refresh-failed' };
+    }
+
     if (isBrowserNetworkSuspendedWindow()) {
       this.logger.info('浏览器网络挂起窗口内延后会话刷新', { context });
       return { refreshed: false, reason: 'client-unready' };
@@ -222,6 +242,22 @@ export class SessionManagerService {
     }
     
     try {
+      // 【鲁棒性 1】设置 pending 标志并创建 promise，其他并发调用会 await 这个 promise
+      this.sessionRefreshInProgress = true;
+      const result = await this.executeRefresh(context, client);
+      this.sessionRefreshInProgress = false;
+      this.sessionRefreshPromise = null;
+      return result;
+    } catch (e) {
+      this.sessionRefreshInProgress = false;
+      this.sessionRefreshPromise = null;
+      // 在 catch 前已处理过，这里只做后续逻辑
+      throw e;
+    }
+  }
+
+  private async executeRefresh(context: string, client: SupabaseClient<Database>): Promise<SessionRefreshResult> {
+    try {
       this.logger.info('尝试自动刷新会话', { context });
       
       const { data, error } = await client.auth.refreshSession();
@@ -234,10 +270,14 @@ export class SessionManagerService {
 
         if (this.isAuthenticationRefreshFailure(error)) {
           this.logger.warn('会话刷新失败：刷新令牌已失效', { context, error: error.message });
+          // 【鲁棒性 2】真失败时启动冷却期
+          this.lastRefreshFailureTime = Date.now();
           return { refreshed: false, reason: 'no-session' };
         }
 
         this.logger.warn('会话刷新失败', { context, error: error.message });
+        // 【鲁棒性 2】其他失败也启动冷却
+        this.lastRefreshFailureTime = Date.now();
         return { refreshed: false, reason: 'refresh-failed' };
       }
       
@@ -254,9 +294,13 @@ export class SessionManagerService {
           this.logger.info('会话过期标志已重置');
         }
         
+        // 【鲁棒性 2】刷新成功则清除冷却期
+        this.lastRefreshFailureTime = 0;
         return { refreshed: true, session: data.session };
       } else {
         this.logger.warn('刷新返回空 session', { context });
+        // 【鲁棒性 2】空 session 也算失败
+        this.lastRefreshFailureTime = Date.now();
         return { refreshed: false, reason: 'no-session' };
       }
     } catch (e) {
@@ -267,10 +311,14 @@ export class SessionManagerService {
 
       if (this.isAuthenticationRefreshFailure(e)) {
         this.logger.warn('会话刷新异常：刷新令牌已失效', { context, error: e });
+        // 【鲁棒性 2】异常也启动冷却
+        this.lastRefreshFailureTime = Date.now();
         return { refreshed: false, reason: 'no-session' };
       }
 
       this.logger.warn('会话刷新异常', { context, error: e });
+      // 【鲁棒性 2】所有其他异常也启动冷却
+      this.lastRefreshFailureTime = Date.now();
       return { refreshed: false, reason: 'refresh-failed' };
     }
   }
@@ -282,6 +330,26 @@ export class SessionManagerService {
 
     if (typeof navigator !== 'undefined' && navigator.onLine === false) {
       return true;
+    }
+
+    // 网络超时、连接重置等瞬时错误 → 可重试
+    if (error instanceof TypeError) {
+      const msg = (error.message ?? '').toLowerCase();
+      if (msg.includes('failed to fetch') ||
+          msg.includes('network') ||
+          msg.includes('timeout') ||
+          msg.includes('reset') ||
+          msg.includes('econnreset')) {
+        return true;
+      }
+    }
+
+    // DOMException: 网络错误、abort 等
+    if (error instanceof DOMException) {
+      const msg = (error.message ?? '').toLowerCase();
+      if (msg.includes('network') || msg.includes('abort')) {
+        return true;
+      }
     }
 
     return supabaseErrorToError(error).isRetryable;
