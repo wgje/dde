@@ -4,6 +4,7 @@ import { LoggerService } from './logger.service';
 import { environment } from '../environments/environment';
 import type { Database } from '../types/supabase';
 import { FEATURE_FLAGS } from '../config/feature-flags.config';
+import { SUPABASE_CLIENT_FETCH_MAX_MS } from '../config/timeout.config';
 import {
   createBrowserNetworkSuspendedError,
   ensureBrowserNetworkSuspensionTracking,
@@ -578,6 +579,134 @@ export class SupabaseClientService {
     await client.auth.signOut();
   }
 
+  /**
+   * 【根本修复】Supabase 客户端 fetch 层 401 自愈拦截器。
+   *
+   * 问题：REST/Functions/Storage 端点收到 401（JWT expired）后，Supabase JS 自身不会
+   * 自动刷新+重试，而是把错误抛回调用方；各调用点必须自行实现 withAuthRetry。这种
+   * 分散式自愈容易遗漏路径（如未经测试的冷门端点），造成控制台刷 401。
+   *
+   * 方案：把自愈逻辑下沉到 fetch 层——所有经 Supabase 客户端发出的请求都透明地获得
+   *   "401 → refreshSession → retry once" 能力。Refresh token 自身请求（/auth/v1/token）
+   *   绕过本逻辑以避免递归。每个请求最多重试一次，避免风暴。
+   *
+   * 这是三层防御的最内层：预防（proactivelyRefreshIfNearingExpiry）+ 拦截（本方法）
+   * + 兜底（上层的 withAuthRetry 仍保留）。任何一层单独都能解决大部分问题，三层叠加
+   *   逼近零可见 401 错误。
+   */
+  private async supabaseFetch(url: RequestInfo | URL, options: RequestInit = {}): Promise<Response> {
+    if (isBrowserNetworkSuspendedWindow()) {
+      return Promise.reject(createBrowserNetworkSuspendedError());
+    }
+
+    // 离线时直接拒绝，避免等待超时产生 AbortError
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      return Promise.reject(new DOMException('Device is offline', 'NetworkError'));
+    }
+
+    const response = await this.fetchWithTimeout(url, options);
+
+    // 仅对业务端点 401 自愈；/auth/v1/token 的刷新请求本身跳过以防递归
+    if (response.status === 401 && this.shouldAttemptJwtRefreshForFetch(url)) {
+      try {
+        const client = this.supabase;
+        if (client) {
+          const { data, error } = await client.auth.refreshSession();
+          if (!error && data.session) {
+            this.logger.info('fetch 层捕获 401，已主动刷新 session，重试一次', {
+              url: this.redactSupabaseUrl(url),
+            });
+            // 注意：不能 clone 原 response 再 consume，因为 options.headers 已由 Supabase JS
+            // 以旧 token 构造。Supabase JS 会在内存中维护 Authorization 头的派生，这里直接
+            // 重新 fetch 即可——Supabase JS 下一次请求会用新 token（同一个 session 对象）。
+            // 但本次重试的 options.headers 里仍是旧 token！需要替换 Authorization。
+            const retryOptions = this.replaceAuthorizationHeader(options, data.session.access_token);
+            return await this.fetchWithTimeout(url, retryOptions);
+          }
+        }
+      } catch (refreshError) {
+        this.logger.debug('fetch 层 401 自愈刷新异常，沿用原 401 响应', { error: refreshError });
+      }
+    }
+
+    return response;
+  }
+
+  /**
+   * 判断一个请求是否应该参与 401 自愈拦截。
+   * 排除 /auth/v1/ 自身的请求（refresh token、signIn 等）以防递归。
+   */
+  private shouldAttemptJwtRefreshForFetch(url: RequestInfo | URL): boolean {
+    const urlStr = typeof url === 'string'
+      ? url
+      : url instanceof URL
+        ? url.href
+        : (url as Request).url;
+    if (!urlStr) return false;
+    // 排除 auth 端点避免递归
+    if (urlStr.includes('/auth/v1/')) return false;
+    return true;
+  }
+
+  private replaceAuthorizationHeader(options: RequestInit, accessToken: string): RequestInit {
+    const headers = new Headers(options.headers ?? {});
+    headers.set('Authorization', `Bearer ${accessToken}`);
+    return { ...options, headers };
+  }
+
+  private redactSupabaseUrl(url: RequestInfo | URL): string {
+    const raw = typeof url === 'string'
+      ? url
+      : url instanceof URL
+        ? url.href
+        : (url as Request).url;
+    if (!raw) return '';
+    // 去除 query 里可能的敏感信息
+    const qIndex = raw.indexOf('?');
+    return qIndex >= 0 ? raw.slice(0, qIndex) : raw;
+  }
+
+  /**
+   * 从原 fetch 包装中抽出：承担「超时 + 离线探测 + 错误分级」等副作用。
+   */
+  private async fetchWithTimeout(url: RequestInfo | URL, options: RequestInit): Promise<Response> {
+    const callerSignal = options.signal;
+    const controller = new AbortController();
+    // 【超时治理 2026-04-16】原先写死 120_000 魔数；改用 SUPABASE_CLIENT_FETCH_MAX_MS
+    // 语义保持不变：整个客户端 fetch 的「最后防线」超时
+    const timeoutId = setTimeout(() => controller.abort(), SUPABASE_CLIENT_FETCH_MAX_MS);
+
+    let mergedSignal: AbortSignal;
+    if (callerSignal && typeof AbortSignal !== 'undefined' && 'any' in AbortSignal) {
+      mergedSignal = (AbortSignal as unknown as { any: (signals: AbortSignal[]) => AbortSignal }).any([
+        callerSignal,
+        controller.signal
+      ]);
+    } else {
+      mergedSignal = callerSignal ?? controller.signal;
+    }
+
+    try {
+      const response = await fetch(url, {
+        ...options,
+        signal: mergedSignal,
+      });
+      // 收到 HTTP 响应表示网络可达，但 502-504 网关错误不清除离线模式
+      const isGatewayError = response.status >= 502 && response.status <= 504;
+      if (this.isOfflineMode() && !isGatewayError) {
+        this.setOfflineModeState(false, 'request');
+      }
+      return response;
+    } catch (error: unknown) {
+      if (this.shouldMarkOfflineFromFetchFailure(error)) {
+        this.setOfflineModeState(true, 'request');
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
   private buildClientOptions() {
     return {
       auth: {
@@ -619,47 +748,7 @@ export class SupabaseClientService {
       global: {
         // 保留请求超时保护，并优先复用调用方 signal
         // 离线时快速失败，避免 120s 超时爆出 AbortError
-        fetch: (url: RequestInfo | URL, options: RequestInit = {}) => {
-          if (isBrowserNetworkSuspendedWindow()) {
-            return Promise.reject(createBrowserNetworkSuspendedError());
-          }
-
-          // 离线时直接拒绝，避免等待超时产生 AbortError
-          if (typeof navigator !== 'undefined' && !navigator.onLine) {
-            return Promise.reject(new DOMException('Device is offline', 'NetworkError'));
-          }
-
-          const callerSignal = options.signal;
-          const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 120000);
-
-          let mergedSignal: AbortSignal;
-          if (callerSignal && typeof AbortSignal !== 'undefined' && 'any' in AbortSignal) {
-            mergedSignal = (AbortSignal as unknown as { any: (signals: AbortSignal[]) => AbortSignal }).any([
-              callerSignal,
-              controller.signal
-            ]);
-          } else {
-            mergedSignal = callerSignal ?? controller.signal;
-          }
-
-          return fetch(url, {
-            ...options,
-            signal: mergedSignal,
-          }).then((response) => {
-            // 收到 HTTP 响应表示网络可达，但 502-504 网关错误不清除离线模式
-            const isGatewayError = response.status >= 502 && response.status <= 504;
-            if (this.isOfflineMode() && !isGatewayError) {
-              this.setOfflineModeState(false, 'request');
-            }
-            return response;
-          }).catch((error: unknown) => {
-            if (this.shouldMarkOfflineFromFetchFailure(error)) {
-              this.setOfflineModeState(true, 'request');
-            }
-            throw error;
-          }).finally(() => clearTimeout(timeoutId));
-        },
+        fetch: (url: RequestInfo | URL, options: RequestInit = {}) => this.supabaseFetch(url, options),
       },
       db: {
         schema: 'public' as const,
