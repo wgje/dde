@@ -5,6 +5,7 @@ import { FlowTaskDetailComponent } from './flow-task-detail.component';
 import { UiStateService } from '../../../../services/ui-state.service';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { UserSessionService } from '../../../../services/user-session.service';
+import { UndoService } from '../../../../services/undo.service';
 import { ChangeTrackerService } from '../../../../services/change-tracker.service';
 import { LoggerService } from '../../../../services/logger.service';
 import { FlowTaskOperationsService } from '../services/flow-task-operations.service';
@@ -17,6 +18,7 @@ describe('FlowTaskDetailComponent - Task Switching Fix', () => {
   let mockUiState: any;
   let mockProjectState: any;
   let mockUserSession: any;
+  let mockUndoService: any;
   let mockChangeTracker: any;
   let mockFlowTaskOps: any;
   const defaultRequestAnimationFrame: typeof globalThis.requestAnimationFrame =
@@ -96,6 +98,10 @@ describe('FlowTaskDetailComponent - Task Switching Fix', () => {
       currentUserId: signal('user-1'),
     };
 
+    mockUndoService = {
+      appliedReplay: signal(null),
+    };
+
     mockChangeTracker = {
       lockTaskField: vi.fn(),
       unlockTaskField: vi.fn(),
@@ -123,6 +129,7 @@ describe('FlowTaskDetailComponent - Task Switching Fix', () => {
         { provide: UiStateService, useValue: mockUiState },
         { provide: ProjectStateService, useValue: mockProjectState },
         { provide: UserSessionService, useValue: mockUserSession },
+        { provide: UndoService, useValue: mockUndoService },
         { provide: ChangeTrackerService, useValue: mockChangeTracker },
         { provide: FlowTaskOperationsService, useValue: mockFlowTaskOps },
         { provide: LoggerService, useValue: mockLoggerService },
@@ -354,6 +361,36 @@ describe('FlowTaskDetailComponent - Task Switching Fix', () => {
       // 验证 localContent 保持用户编辑的值（Split-Brain 防护）
       expect(component['localContent']()).toBe('Local Edit');
     });
+
+    it('应该在撤销回放命中当前任务内容时覆盖聚焦中的本地缓冲', () => {
+      const task = createMockTask('task-a', 'Task A', 'Content A');
+
+      (component as any)['task'] = signal(task);
+      fixture.detectChanges();
+
+      component.onInputFocus('content');
+      component['localContent'].set('');
+
+      (component as any)['task'].set({ ...task, content: 'Recovered Content' });
+      fixture.detectChanges();
+      expect(component['localContent']()).toBe('');
+
+      mockUndoService.appliedReplay.set({
+        sequence: 1,
+        kind: 'undo',
+        projectId: 'project-1',
+        taskFieldChanges: { 'task-a': ['content'] },
+      });
+      fixture.detectChanges();
+
+      expect(component['localContent']()).toBe('Recovered Content');
+
+      component['localContent'].set('Resume Edit');
+      (component as any)['task'].set({ ...task, content: 'Remote Update After Replay' });
+      fixture.detectChanges();
+
+      expect(component['localContent']()).toBe('Resume Edit');
+    });
   });
 
   describe('编辑模式切换', () => {
@@ -490,6 +527,44 @@ describe('FlowTaskDetailComponent - Task Switching Fix', () => {
       component.onDocumentClick(createClickEvent(301));
       expect(component.isEditMode()).toBe(false);
       expect(component['isTogglingMode']()).toBe(false);
+
+      vi.useRealTimers();
+    });
+
+    it('存在文本选区时第一次外部点击应只清空选区，第二次才退出编辑态', () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-03-11T00:00:00.000Z'));
+
+      const task = createMockTask('task-a', 'Task A', 'Content A');
+      (component as any)['task'] = signal(task);
+      fixture.detectChanges();
+
+      vi.advanceTimersByTime(181);
+
+      component.onPreviewClick(createClickEvent(400));
+      expect(component.isEditMode()).toBe(true);
+
+      const removeAllRanges = vi.fn();
+      const getSelectionSpy = vi.spyOn(window, 'getSelection').mockReturnValue({
+        toString: () => 'Task',
+        rangeCount: 1,
+        isCollapsed: false,
+        removeAllRanges,
+      } as unknown as Selection);
+
+      try {
+        component.onDocumentClick(createClickEvent(401));
+
+        expect(removeAllRanges).toHaveBeenCalledTimes(1);
+        expect(component.isEditMode()).toBe(true);
+
+        component.onDocumentClick(createClickEvent(402));
+
+        expect(component.isEditMode()).toBe(false);
+        expect(component['isTogglingMode']()).toBe(false);
+      } finally {
+        getSelectionSpy.mockRestore();
+      }
 
       vi.useRealTimers();
     });

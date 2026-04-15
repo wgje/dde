@@ -2,7 +2,9 @@ import { Injectable, inject, signal, effect } from '@angular/core';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { ChangeTrackerService } from '../../../../services/change-tracker.service';
 import { LoggerService } from '../../../../services/logger.service';
+import { UndoService, type UndoAppliedReplay } from '../../../../services/undo.service';
 import { Task } from '../../../../models';
+import { clearActiveTextSelection, hasActiveTextSelection } from '../../../../utils/text-selection';
 
 /**
  * 任务详情面板：Split-Brain 表单状态管理服务
@@ -20,6 +22,7 @@ export class FlowTaskDetailFormService {
   private readonly projectState = inject(ProjectStateService);
   private readonly changeTracker = inject(ChangeTrackerService);
   private readonly loggerService = inject(LoggerService);
+  private readonly undoService = inject(UndoService);
   private readonly logger = this.loggerService.category('FlowTaskDetailForm');
 
   // ========== Split-Brain 本地状态 ==========
@@ -48,6 +51,7 @@ export class FlowTaskDetailFormService {
    * 在任务切换期间阻止 ngModelChange 事件发射，防止旧任务的值被错误地发射到新任务
    */
   private isTaskSwitching = false;
+  private lastConsumedReplay: UndoAppliedReplay | null = this.undoService.appliedReplay();
 
   /**
    * 初始化 Split-Brain 同步 effect
@@ -71,6 +75,32 @@ export class FlowTaskDetailFormService {
         }
       } else {
         this.handleTaskClear();
+      }
+    });
+
+    effect(() => {
+      const replay = this.undoService.appliedReplay();
+      if (!replay || replay === this.lastConsumedReplay) {
+        return;
+      }
+
+      this.lastConsumedReplay = replay;
+
+      const task = taskSignal();
+      if (!task) {
+        return;
+      }
+
+      const changedFields = replay.taskFieldChanges[task.id];
+      if (!changedFields) {
+        return;
+      }
+
+      if (changedFields.includes('title')) {
+        this.localTitle.set(task.title || '');
+      }
+      if (changedFields.includes('content')) {
+        this.localContent.set(task.content || '');
       }
     });
   }
@@ -206,15 +236,21 @@ export class FlowTaskDetailFormService {
     if (!this.isEditMode()) return false;
     if (this.isSelecting) return false;
 
-    const selection = window.getSelection();
-    if (selection && selection.toString().length > 0) return false;
-
     const isInteractiveElement = target.tagName === 'INPUT' ||
       target.tagName === 'TEXTAREA' ||
       target.tagName === 'BUTTON' ||
       target.tagName === 'svg' ||
       target.tagName === 'path' ||
       target.closest('input, textarea, button, svg') !== null;
+
+    if (hasActiveTextSelection()) {
+      if (isInteractiveElement) {
+        return false;
+      }
+
+      clearActiveTextSelection();
+      return false;
+    }
 
     if (isInteractiveElement) {
       this.logger.debug('点击可交互元素，保持编辑模式');

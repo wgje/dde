@@ -5,6 +5,13 @@ import { ToastService } from './toast.service';
 import { UiStateService } from './ui-state.service';
 import { LoggerService } from './logger.service';
 
+export interface UndoAppliedReplay {
+  readonly sequence: number;
+  readonly kind: 'undo' | 'redo';
+  readonly projectId: string;
+  readonly taskFieldChanges: Readonly<Record<string, readonly ('title' | 'content')[]>>;
+}
+
 /** 持久化数据结构 @internal */
 interface PersistedUndoData {
   version: number;
@@ -43,6 +50,9 @@ export class UndoService {
   readonly canUndo = computed(() => this.undoStack().length > 0);
   /** 是否可以重做 */
   readonly canRedo = computed(() => this.redoStack().length > 0);
+  /** 最近一次已应用到 Store 的撤销/重做回放 */
+  private readonly _appliedReplay = signal<UndoAppliedReplay | null>(null);
+  readonly appliedReplay = this._appliedReplay.asReadonly();
   
   /** 撤销栈大小 */
   readonly undoCount = computed(() => this.undoStack().length);
@@ -67,6 +77,7 @@ export class UndoService {
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingAction: Omit<UndoAction, 'timestamp'> | null = null;
   private lastActionTime = 0;
+  private replaySequence = 0;
   
   /** 防抖配置 */
   private readonly DEBOUNCE_DELAY = 800; // 800ms 内的连续编辑合并
@@ -306,6 +317,21 @@ export class UndoService {
       this.recordAction(this.pendingAction);
       this.pendingAction = null;
     }
+  }
+
+  notifyReplayApplied(
+    kind: 'undo' | 'redo',
+    projectId: string,
+    appliedSnapshot: Partial<Project>,
+    previousSnapshot?: Partial<Project>,
+  ): void {
+    this.replaySequence += 1;
+    this._appliedReplay.set({
+      sequence: this.replaySequence,
+      kind,
+      projectId,
+      taskFieldChanges: this.getTaskFieldChanges(appliedSnapshot, previousSnapshot),
+    });
   }
 
   /**
@@ -587,6 +613,8 @@ export class UndoService {
     this.pendingAction = null;
     this.lastActionTime = 0;
     this.isUndoRedoing = false;
+    this.replaySequence = 0;
+    this._appliedReplay.set(null);
   }
   
   /**
@@ -615,6 +643,8 @@ export class UndoService {
     this.lastActionTime = 0;
     this.isUndoRedoing = false;
     this._truncatedCount.set(0);
+    this.replaySequence = 0;
+    this._appliedReplay.set(null);
     
     // 【P0 安全修复】清除 sessionStorage 中的持久化撤销数据
     this.clearPersistedData();
@@ -653,6 +683,35 @@ export class UndoService {
       `最早的 ${count} 条记录已被移除`,
       4000
     );
+  }
+
+  private getTaskFieldChanges(
+    appliedSnapshot: Partial<Project>,
+    previousSnapshot?: Partial<Project>,
+  ): Readonly<Record<string, readonly ('title' | 'content')[]>> {
+    const appliedTasks = new Map((appliedSnapshot.tasks ?? []).map(task => [task.id, task]));
+    const previousTasks = new Map((previousSnapshot?.tasks ?? []).map(task => [task.id, task]));
+    const taskIds = new Set([...appliedTasks.keys(), ...previousTasks.keys()]);
+    const changes: Record<string, ('title' | 'content')[]> = {};
+
+    for (const taskId of taskIds) {
+      const appliedTask = appliedTasks.get(taskId);
+      const previousTask = previousTasks.get(taskId);
+      const changedFields: ('title' | 'content')[] = [];
+
+      if ((appliedTask?.title ?? '') !== (previousTask?.title ?? '')) {
+        changedFields.push('title');
+      }
+      if ((appliedTask?.content ?? '') !== (previousTask?.content ?? '')) {
+        changedFields.push('content');
+      }
+
+      if (changedFields.length > 0) {
+        changes[taskId] = changedFields;
+      }
+    }
+
+    return changes;
   }
   
   // ==================== 持久化方法 (v5.8) ====================

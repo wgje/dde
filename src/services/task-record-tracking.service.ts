@@ -18,6 +18,7 @@ import { OptimisticStateService } from './optimistic-state.service';
 import { ToastService } from './toast.service';
 import { UiStateService } from './ui-state.service';
 import { LoggerService } from './logger.service';
+import { POLLING_CHECK_DELAY } from '../config/timeout.config';
 import { Project, Task, Connection } from '../models';
 
 @Injectable({
@@ -87,13 +88,19 @@ export class TaskRecordTrackingService {
       );
       const action = this.undoService.forceUndo();
       if (action) {
-        this.applyProjectSnapshot(action.projectId, action.data.before);
+        this.applyProjectSnapshot(action.projectId, action.data.before, {
+          kind: 'undo',
+          previousSnapshot: action.data.after,
+        });
       }
       return;
     }
 
     const action = result;
-    this.applyProjectSnapshot(action.projectId, action.data.before);
+    this.applyProjectSnapshot(action.projectId, action.data.before, {
+      kind: 'undo',
+      previousSnapshot: action.data.after,
+    });
     this.logger.info('撤销操作成功', { projectId: action.projectId, type: action.type });
   }
 
@@ -119,12 +126,19 @@ export class TaskRecordTrackingService {
     }
 
     const action = result;
-    this.applyProjectSnapshot(action.projectId, action.data.after);
+    this.applyProjectSnapshot(action.projectId, action.data.after, {
+      kind: 'redo',
+      previousSnapshot: action.data.before,
+    });
     this.logger.info('重做操作成功', { projectId: action.projectId, type: action.type });
   }
 
   /** 应用项目快照 */
-  private applyProjectSnapshot(projectId: string, snapshot: Partial<Project>): void {
+  private applyProjectSnapshot(
+    projectId: string,
+    snapshot: Partial<Project>,
+    replay?: { kind: 'undo' | 'redo'; previousSnapshot?: Partial<Project> },
+  ): void {
     this.projectState.updateProjects(projects => projects.map(p => {
       if (p.id === projectId) {
         return this.layoutService.rebalance({
@@ -137,6 +151,9 @@ export class TaskRecordTrackingService {
     }));
     this.syncCoordinator.markLocalChanges('structure');
     this.syncCoordinator.schedulePersist();
+    if (replay) {
+      this.undoService.notifyReplayApplied(replay.kind, projectId, snapshot, replay.previousSnapshot);
+    }
   }
 
   // ========== 记录与更新 ==========
@@ -269,14 +286,14 @@ export class TaskRecordTrackingService {
 
       const snapshot = this.optimisticState['snapshots'].get(snapshotId);
       if (snapshot && Date.now() - snapshot.createdAt < 30000) {
-        setTimeout(checkSync, 500);
+        setTimeout(checkSync, POLLING_CHECK_DELAY.CONDITION_READY);
       } else {
         this.logger.debug('同步超时，假定成功', { snapshotId });
         this.optimisticState.commitSnapshot(snapshotId);
       }
     };
 
-    setTimeout(checkSync, 200);
+    setTimeout(checkSync, POLLING_CHECK_DELAY.SYNC_READY);
   }
 
   // ========== 变更追踪 ==========

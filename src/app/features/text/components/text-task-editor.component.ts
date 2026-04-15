@@ -4,12 +4,14 @@ import { TaskOperationAdapterService } from '../../../../services/task-operation
 import { ChangeTrackerService } from '../../../../services/change-tracker.service';
 import { UiStateService } from '../../../../services/ui-state.service';
 import { ProjectStateService, TaskConnectionInfo } from '../../../../services/project-state.service';
+import { UndoService, type UndoAppliedReplay } from '../../../../services/undo.service';
 import { AttachmentService } from '../../../../services/attachment.service';
 import { ToastService } from '../../../../services/toast.service';
 import { Task, Attachment } from '../../../../models';
 import { SafeMarkdownPipe } from '../../../shared/pipes/safe-markdown.pipe';
 import { TextTaskConnectionsComponent } from './text-task-connections.component';
 import { toggleMarkdownTodo, getTodoIndexFromClick, handleMarkdownLinkAction } from '../../../../utils/markdown';
+import { clearActiveTextSelection, hasActiveTextSelection } from '../../../../utils/text-selection';
 
 /**
  * 任务编辑器组件（展开态）
@@ -355,6 +357,7 @@ export class TextTaskEditorComponent implements OnDestroy {
   private readonly changeTracker = inject(ChangeTrackerService);
   private readonly uiState = inject(UiStateService);
   private readonly projectState = inject(ProjectStateService);
+  private readonly undoService = inject(UndoService);
   private readonly elementRef = inject(ElementRef);
   private readonly attachmentService = inject(AttachmentService);
   private readonly toast = inject(ToastService);
@@ -409,6 +412,7 @@ export class TextTaskEditorComponent implements OnDestroy {
   };
   /** 解锁延迟定时器*/
   private unlockTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
+  private lastConsumedReplay: UndoAppliedReplay | null = this.undoService.appliedReplay();
 
   /** 标记是否正在进行文本选择操作 */
   isSelecting = false;
@@ -441,6 +445,32 @@ export class TextTaskEditorComponent implements OnDestroy {
           this.localExpectedMinutes.set(task.expected_minutes == null ? '' : String(task.expected_minutes));
           this.localWaitMinutes.set(task.wait_minutes == null ? '' : String(task.wait_minutes));
           this.localCognitiveLoad.set(task.cognitive_load ?? '');
+        }
+      });
+
+      effect(() => {
+        const replay = this.undoService.appliedReplay();
+        if (!replay || replay === this.lastConsumedReplay) {
+          return;
+        }
+
+        this.lastConsumedReplay = replay;
+
+        const task = this.task();
+        if (!task) {
+          return;
+        }
+
+        const changedFields = replay.taskFieldChanges[task.id];
+        if (!changedFields) {
+          return;
+        }
+
+        if (changedFields.includes('title')) {
+          this.localTitle.set(task.title || '');
+        }
+        if (changedFields.includes('content')) {
+          this.localContent.set(task.content || '');
         }
       });
     } catch {
@@ -519,24 +549,26 @@ export class TextTaskEditorComponent implements OnDestroy {
       return;
     }
 
-    // 如果已经是预览模式，无需处理
-    if (this.isPreview()) return;
+    const clickedInside = this.isEventInsideEditor(event);
+    const clickedInTaskCard = this.isEventInsideCurrentTaskCard(event);
 
-    // 如果正在进行文本选择，不处理
+    // 拖拽选择过程中不打断浏览器原生选区行为。
     if (this.isSelecting) return;
 
-    const selection = window.getSelection();
-    if (selection && selection.toString().length > 0) {
-      // 有文本被选中，不切换模式
+    if (hasActiveTextSelection()) {
+      if (clickedInside) {
+        return;
+      }
+
+      clearActiveTextSelection();
       return;
     }
 
-    const clickedInside = this.isEventInsideEditor(event);
+    // 如果已经是预览模式，无需处理
+    if (this.isPreview()) return;
 
     // 如果点击在编辑器内部，不做任何处理（允许正常编辑与文本选择）
     if (clickedInside) return;
-
-    const clickedInTaskCard = this.isEventInsideCurrentTaskCard(event);
 
     if (!clickedInTaskCard) {
       // 点击完全在任务卡片外，切换到预览模式

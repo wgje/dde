@@ -115,6 +115,7 @@ describe('TaskRecordTrackingService', () => {
       createProjectSnapshot: vi.fn((p: Project) => ({ tasks: p.tasks, connections: p.connections })),
       recordAction: vi.fn(),
       recordActionDebounced: vi.fn(),
+      notifyReplayApplied: vi.fn(),
       forceUndo: vi.fn(),
       clearOutdatedHistory: vi.fn(),
       isProcessing: false,
@@ -238,6 +239,7 @@ describe('TaskRecordTrackingService', () => {
       expect(mockProjectState.updateProjects).toHaveBeenCalled();
       expect(mockSyncCoordinator.markLocalChanges).toHaveBeenCalledWith('structure');
       expect(mockSyncCoordinator.schedulePersist).toHaveBeenCalled();
+      expect(mockUndoService.notifyReplayApplied).toHaveBeenCalledWith('undo', 'proj-1', snapshot, {});
     });
 
     it('should handle version-mismatch-forceable result', () => {
@@ -290,6 +292,7 @@ describe('TaskRecordTrackingService', () => {
 
       expect(mockProjectState.updateProjects).toHaveBeenCalled();
       expect(mockSyncCoordinator.markLocalChanges).toHaveBeenCalledWith('structure');
+      expect(mockUndoService.notifyReplayApplied).toHaveBeenCalledWith('redo', 'proj-1', snapshot, {});
     });
   });
 

@@ -18,6 +18,7 @@ import { FlowTaskDetailFormService } from './flow-task-detail-form.service';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { ChangeTrackerService } from '../../../../services/change-tracker.service';
 import { LoggerService } from '../../../../services/logger.service';
+import { UndoService } from '../../../../services/undo.service';
 import type { Task } from '../../../../models';
 
 // ==================== Mock 依赖 ====================
@@ -40,6 +41,10 @@ const mockProjectState = {
 const mockChangeTracker = {
   lockTaskField: vi.fn(),
   unlockTaskField: vi.fn(),
+};
+
+const mockUndoService = {
+  appliedReplay: vi.fn(() => null),
 };
 
 // ==================== 辅助函数 ====================
@@ -79,6 +84,7 @@ describe('FlowTaskDetailFormService', () => {
         FlowTaskDetailFormService,
         { provide: ProjectStateService, useValue: mockProjectState },
         { provide: ChangeTrackerService, useValue: mockChangeTracker },
+        { provide: UndoService, useValue: mockUndoService },
         { provide: LoggerService, useValue: mockLoggerService },
       ],
     });
@@ -559,20 +565,28 @@ describe('FlowTaskDetailFormService', () => {
       vi.useRealTimers();
     });
 
-    it('存在文字选中时应返回 false', () => {
+    it('存在文字选中时点击非交互区域应清空选区并保留编辑态', () => {
       vi.useFakeTimers();
       service.toggleEditMode();
 
-      vi.spyOn(window, 'getSelection').mockReturnValue({
+      const removeAllRanges = vi.fn();
+      const getSelectionSpy = vi.spyOn(window, 'getSelection').mockReturnValue({
         toString: () => 'selected text',
-        length: 13,
+        rangeCount: 1,
+        isCollapsed: false,
+        removeAllRanges,
       } as unknown as Selection);
 
-      const divEl = document.createElement('div');
+      try {
+        const divEl = document.createElement('div');
 
-      const result = service.shouldExitEditMode(divEl, containerEl);
+        const result = service.shouldExitEditMode(divEl, containerEl);
 
-      expect(result).toBe(false);
+        expect(result).toBe(false);
+        expect(removeAllRanges).toHaveBeenCalledTimes(1);
+      } finally {
+        getSelectionSpy.mockRestore();
+      }
 
       vi.runAllTimers();
       vi.useRealTimers();

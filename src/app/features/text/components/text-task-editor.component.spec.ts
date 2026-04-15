@@ -1,4 +1,5 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { signal } from '@angular/core';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { TextTaskEditorComponent } from './text-task-editor.component';
@@ -6,6 +7,7 @@ import { TaskOperationAdapterService } from '../../../../services/task-operation
 import { ChangeTrackerService } from '../../../../services/change-tracker.service';
 import { UiStateService } from '../../../../services/ui-state.service';
 import { ProjectStateService, TaskConnectionInfo } from '../../../../services/project-state.service';
+import { UndoService } from '../../../../services/undo.service';
 import { AttachmentService } from '../../../../services/attachment.service';
 import { ToastService } from '../../../../services/toast.service';
 import type { Task } from '../../../../models';
@@ -50,6 +52,10 @@ describe('TextTaskEditorComponent', () => {
     markAsDeleted: vi.fn(),
   };
 
+  const mockUndoService = {
+    appliedReplay: signal(null),
+  };
+
   const mockToast = {
     info: vi.fn(),
     warning: vi.fn(),
@@ -82,6 +88,7 @@ describe('TextTaskEditorComponent', () => {
 
   const render = (taskOverrides: Partial<Task> = {}) => {
     fixture = TestBed.createComponent(TextTaskEditorComponent);
+    let currentTask = createTask(taskOverrides);
     const component = fixture.componentInstance as unknown as {
       task: () => Task;
       connections: () => TaskConnectionInfo | null;
@@ -91,18 +98,25 @@ describe('TextTaskEditorComponent', () => {
       initialPreview: () => boolean;
     };
 
-    component.task = () => createTask(taskOverrides);
+    component.task = () => currentTask;
     component.connections = () => null;
     component.isMobile = () => false;
     component.userId = () => null;
     component.projectId = () => null;
     component.initialPreview = () => true;
     fixture.detectChanges();
+
+    return {
+      setTask(nextTask: Task): void {
+        currentTask = nextTask;
+      },
+    };
   };
 
   beforeEach(async () => {
     vi.clearAllMocks();
     mockProjectState.getTask.mockReturnValue(null);
+    mockUndoService.appliedReplay.set(null);
 
     await TestBed.configureTestingModule({
       imports: [TextTaskEditorComponent],
@@ -111,6 +125,7 @@ describe('TextTaskEditorComponent', () => {
         { provide: ChangeTrackerService, useValue: mockChangeTracker },
         { provide: UiStateService, useValue: mockUiState },
         { provide: ProjectStateService, useValue: mockProjectState },
+        { provide: UndoService, useValue: mockUndoService },
         { provide: AttachmentService, useValue: mockAttachmentService },
         { provide: ToastService, useValue: mockToast },
       ],
@@ -205,6 +220,129 @@ describe('TextTaskEditorComponent', () => {
 
       expect(component.isPreview()).toBe(true);
     } finally {
+      vi.runOnlyPendingTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('should clear preview text selection when clicking outside while already in preview mode', () => {
+    render({ content: '联系供应商确认规格。' });
+
+    const component = fixture.componentInstance as unknown as {
+      onDocumentClick: (event: MouseEvent) => void;
+      isPreview: () => boolean;
+    };
+    const removeAllRanges = vi.fn();
+    const getSelectionSpy = vi.spyOn(window, 'getSelection').mockReturnValue({
+      toString: () => '供应商',
+      rangeCount: 1,
+      isCollapsed: false,
+      removeAllRanges,
+    } as unknown as Selection);
+
+    try {
+      component.onDocumentClick(createClickEvent(Date.now(), document.body));
+
+      expect(removeAllRanges).toHaveBeenCalledTimes(1);
+      expect(component.isPreview()).toBe(true);
+    } finally {
+      getSelectionSpy.mockRestore();
+    }
+  });
+
+  it('should clear selected editor text on the first outside click and collapse on the next click', () => {
+    vi.useFakeTimers();
+    try {
+      render({ content: '联系供应商确认规格。' });
+
+      const component = fixture.componentInstance as unknown as {
+        onDocumentClick: (event: MouseEvent) => void;
+        isPreview: () => boolean;
+      };
+      const titlePreview = fixture.nativeElement.querySelector('[data-testid="task-title-preview"]') as HTMLButtonElement | null;
+      titlePreview?.click();
+      fixture.detectChanges();
+      vi.runAllTimers();
+      fixture.detectChanges();
+
+      const removeAllRanges = vi.fn();
+      const getSelectionSpy = vi.spyOn(window, 'getSelection').mockReturnValue({
+        toString: () => '零件',
+        rangeCount: 1,
+        isCollapsed: false,
+        removeAllRanges,
+      } as unknown as Selection);
+
+      try {
+        component.onDocumentClick(createClickEvent(Date.now(), document.body));
+        fixture.detectChanges();
+
+        expect(removeAllRanges).toHaveBeenCalledTimes(1);
+        expect(component.isPreview()).toBe(false);
+      } finally {
+        getSelectionSpy.mockRestore();
+      }
+
+      component.onDocumentClick(createClickEvent(Date.now(), document.body));
+      fixture.detectChanges();
+
+      expect(component.isPreview()).toBe(true);
+    } finally {
+      vi.runOnlyPendingTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('should collapse native input selection before leaving edit mode on outside click', () => {
+    vi.useFakeTimers();
+    const activeElementDescriptor = Object.getOwnPropertyDescriptor(document, 'activeElement');
+
+    try {
+      render({ content: '联系供应商确认规格。' });
+
+      const component = fixture.componentInstance as unknown as {
+        onDocumentClick: (event: MouseEvent) => void;
+        isPreview: () => boolean;
+      };
+      const titlePreview = fixture.nativeElement.querySelector('[data-testid="task-title-preview"]') as HTMLButtonElement | null;
+      titlePreview?.click();
+      fixture.detectChanges();
+      vi.runAllTimers();
+      fixture.detectChanges();
+
+      const titleInput = fixture.nativeElement.querySelector('[data-testid="task-title-input"]') as HTMLInputElement | null;
+      expect(titleInput).not.toBeNull();
+
+      const setSelectionRangeSpy = vi.spyOn(titleInput!, 'setSelectionRange');
+      Object.defineProperty(titleInput!, 'selectionStart', {
+        configurable: true,
+        get: () => 0,
+      });
+      Object.defineProperty(titleInput!, 'selectionEnd', {
+        configurable: true,
+        get: () => 2,
+      });
+      Object.defineProperty(document, 'activeElement', {
+        configurable: true,
+        get: () => titleInput,
+      });
+
+      const getSelectionSpy = vi.spyOn(window, 'getSelection').mockReturnValue(null);
+
+      try {
+        component.onDocumentClick(createClickEvent(Date.now(), document.body));
+        fixture.detectChanges();
+
+        expect(setSelectionRangeSpy).toHaveBeenCalledWith(2, 2);
+        expect(component.isPreview()).toBe(false);
+      } finally {
+        getSelectionSpy.mockRestore();
+        setSelectionRangeSpy.mockRestore();
+      }
+    } finally {
+      if (activeElementDescriptor) {
+        Object.defineProperty(document, 'activeElement', activeElementDescriptor);
+      }
       vi.runOnlyPendingTimers();
       vi.useRealTimers();
     }
@@ -388,5 +526,41 @@ describe('TextTaskEditorComponent', () => {
         Reflect.deleteProperty(navigator as object, 'clipboard');
       }
     }
+  });
+
+  it('should replay recovered content into the focused local editor after undo', () => {
+    const task = createTask({ content: '旧内容' });
+    const rendered = render({ content: '旧内容' });
+
+    const component = fixture.componentInstance as unknown as {
+      enterEditMode: (field: 'title' | 'content', event?: Event) => void;
+      onInputFocus: (field: 'title' | 'content' | 'todo') => void;
+      localContent: { (): string; set: (value: string) => void };
+    };
+
+    component.enterEditMode('content');
+    fixture.detectChanges();
+    component.onInputFocus('content');
+    component.localContent.set('');
+
+    rendered.setTask({ ...task, content: '恢复后的内容' });
+    fixture.detectChanges();
+    expect(component.localContent()).toBe('');
+
+    mockUndoService.appliedReplay.set({
+      sequence: 1,
+      kind: 'undo',
+      projectId: 'project-1',
+      taskFieldChanges: { 'task-1': ['content'] },
+    });
+    fixture.detectChanges();
+
+    expect(component.localContent()).toBe('恢复后的内容');
+
+    component.localContent.set('继续编辑');
+    rendered.setTask({ ...task, content: '回放后的远端更新' });
+    fixture.detectChanges();
+
+    expect(component.localContent()).toBe('继续编辑');
   });
 });

@@ -182,20 +182,30 @@ export class ConnectionAdapterService {
       );
       const action = this.undoService.forceUndo();
       if (action) {
-        this.applyProjectSnapshot(action.projectId, action.data.before);
+        this.applyProjectSnapshot(action.projectId, action.data.before, {
+          kind: 'undo',
+          previousSnapshot: action.data.after,
+        });
       }
       return;
     }
     
     const action = result;
-    this.applyProjectSnapshot(action.projectId, action.data.before);
+    this.applyProjectSnapshot(action.projectId, action.data.before, {
+      kind: 'undo',
+      previousSnapshot: action.data.after,
+    });
     this.logger.info('撤销操作成功', { projectId: action.projectId, type: action.type });
   }
   
   /**
    * 应用项目快照（内部方法）
    */
-  private applyProjectSnapshot(projectId: string, snapshot: Partial<Project>): void {
+  private applyProjectSnapshot(
+    projectId: string,
+    snapshot: Partial<Project>,
+    replay?: { kind: 'undo' | 'redo'; previousSnapshot?: Partial<Project> },
+  ): void {
     this.projectState.updateProjects(projects => projects.map(p => {
       if (p.id === projectId) {
         return this.layoutService.rebalance({
@@ -208,5 +218,8 @@ export class ConnectionAdapterService {
     }));
     this.syncCoordinator.markLocalChanges('structure');
     this.syncCoordinator.schedulePersist();
+    if (replay) {
+      this.undoService.notifyReplayApplied(replay.kind, projectId, snapshot, replay.previousSnapshot);
+    }
   }
 }
