@@ -63,6 +63,16 @@ export class SupabaseClientService {
     lastRefreshAt: 0,
     lastFailureAt: 0
   };
+
+  // 【鲁棒性 8】请求去重缓存 - 防止网络不稳定时同一请求重复发送
+  // key: 请求签名（method+url+body hash），value: { promise, createdAt, response }
+  private readonly requestDeduplicationCache = new Map<string, {
+    promise: Promise<Response>;
+    createdAt: number;
+    response?: Response;
+    error?: unknown;
+  }>();
+  private readonly REQUEST_DEDUP_TTL_MS = 5000; // 5s 内去重
   
   private reachabilityProbePromise: Promise<boolean> | null = null;
   private readonly connectivityListeners = new Set<SupabaseConnectivityListener>();
@@ -656,7 +666,42 @@ export class SupabaseClientService {
       return Promise.reject(new DOMException('Device is offline', 'NetworkError'));
     }
 
-    const response = await this.fetchWithTimeout(url, options);
+    // 【鲁棒性 8】请求去重：5s 内的重复请求复用前一个结果
+    const signature = this.buildRequestSignature(url, options);
+    const cached = this.requestDeduplicationCache.get(signature);
+    
+    if (cached && Date.now() - cached.createdAt < this.REQUEST_DEDUP_TTL_MS) {
+      this.logger.debug('请求去重命中，复用缓存结果', { signature });
+      if (cached.response) {
+        return cached.response.clone();
+      }
+      if (cached.error) {
+        return Promise.reject(cached.error);
+      }
+      // 否则 await 共享的 promise
+      return await cached.promise;
+    }
+
+    // 清理过期缓存
+    this.cleanupDeduplicationCache();
+
+    // 【鲁棒性 8】缓存本次请求的 promise，后续请求会 await 它而不是重新发送
+    const fetchPromise = (async () => {
+      const response = await this.fetchWithTimeout(url, options);
+      // 缓存响应供后续去重使用
+      const cacheEntry = this.requestDeduplicationCache.get(signature);
+      if (cacheEntry) {
+        cacheEntry.response = response.clone();
+      }
+      return response;
+    })();
+
+    this.requestDeduplicationCache.set(signature, {
+      promise: fetchPromise,
+      createdAt: Date.now()
+    });
+
+    const response = await fetchPromise;
 
     // 【精准自愈策略】
     // 1. 401 + JWT 问题特征 + 未超过重试上限 → 刷新重试
@@ -764,6 +809,35 @@ export class SupabaseClientService {
     const method = options.method?.toUpperCase() ?? 'GET';
     // 基于 URL + HTTP method 作为重试计数的 key，粒度更细致
     return `${method}:${urlStr}`;
+  }
+
+  /**
+   * 【鲁棒性 8】生成请求签名用于去重
+   */
+  private buildRequestSignature(url: RequestInfo | URL, options: RequestInit): string {
+    const urlStr = typeof url === 'string'
+      ? url
+      : url instanceof URL
+        ? url.href
+        : (url as Request).url;
+    const method = options.method?.toUpperCase() ?? 'GET';
+    const body = typeof options.body === 'string' ? options.body : '';
+    
+    // 简单签名：method + url + body 前 100 字符哈希
+    const bodyHash = body.substring(0, 100);
+    return `${method}:${urlStr}:${bodyHash}`;
+  }
+
+  /**
+   * 【鲁棒性 8】清理过期的去重缓存
+   */
+  private cleanupDeduplicationCache(): void {
+    const now = Date.now();
+    for (const [key, entry] of this.requestDeduplicationCache) {
+      if (now - entry.createdAt > this.REQUEST_DEDUP_TTL_MS) {
+        this.requestDeduplicationCache.delete(key);
+      }
+    }
   }
 
   /**
