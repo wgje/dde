@@ -503,7 +503,7 @@ export class SupabaseClientService {
       if (remainingMs > REFRESH_THRESHOLD_MS) {
         return;
       }
-      this.logger.info('浏览器恢复时 token 临近/已过期，主动刷新', {
+      this.logger.debug('浏览器恢复时 token 临近/已过期，主动刷新', {
         reason,
         remainingMs,
       });
@@ -511,7 +511,7 @@ export class SupabaseClientService {
       if (refreshError) {
         this.logger.warn('恢复时主动刷新 session 失败', { reason, error: refreshError.message });
       } else {
-        this.logger.info('恢复时主动刷新 session 成功', { reason });
+        this.logger.debug('恢复时主动刷新 session 成功', { reason });
       }
     } catch (error) {
       // 任何错误都不阻塞后续流程，交给既有的自愈路径处理
@@ -613,7 +613,8 @@ export class SupabaseClientService {
         if (client) {
           const { data, error } = await client.auth.refreshSession();
           if (!error && data.session) {
-            this.logger.info('fetch 层捕获 401，已主动刷新 session，重试一次', {
+            // 使用 debug 级别避免正常 token 轮换时刷屏；真正异常走下面 warn/error 分支
+            this.logger.debug('fetch 层捕获 401，已主动刷新 session，重试一次', {
               url: this.redactSupabaseUrl(url),
             });
             // 注意：不能 clone 原 response 再 consume，因为 options.headers 已由 Supabase JS
