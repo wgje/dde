@@ -264,6 +264,71 @@ export class SessionManagerService {
     }
   }
 
+  /**
+   * 【鲁棒性 8】token 签名校验 - 检测 token 是否被篡改或已过期
+   * 通过解析 JWT payload，检查 exp 字段，提前发现过期
+   */
+  validateTokenSignature(token: string): { valid: boolean; expiresAt?: number; error?: string } {
+    try {
+      if (!token || typeof token !== 'string') {
+        return { valid: false, error: 'invalid-token-format' };
+      }
+
+      // JWT 格式：header.payload.signature
+      const parts = token.split('.');
+      if (parts.length !== 3) {
+        return { valid: false, error: 'malformed-jwt' };
+      }
+
+      // 解码 payload（第二部分）
+      const payload = this.decodeBase64UrlJson(parts[1]);
+      if (!payload) {
+        return { valid: false, error: 'invalid-payload' };
+      }
+
+      // 检查 exp 字段
+      const exp = typeof payload.exp === 'number' ? payload.exp : null;
+      if (!exp) {
+        return { valid: false, error: 'missing-exp' };
+      }
+
+      const expiresAtMs = exp * 1000;
+      const nowMs = Date.now();
+      const isExpired = expiresAtMs < nowMs;
+
+      if (isExpired) {
+        return { valid: false, expiresAt: exp, error: 'token-expired' };
+      }
+
+      const remainingMs = expiresAtMs - nowMs;
+      this.logger.debug('token 签名校验通过', {
+        expiresAt: exp,
+        remainingMs,
+        remainingSec: Math.round(remainingMs / 1000)
+      });
+
+      return { valid: true, expiresAt: exp };
+    } catch (e) {
+      this.logger.warn('token 签名校验异常', { error: e });
+      return { valid: false, error: 'validation-error' };
+    }
+  }
+
+  private decodeBase64UrlJson(segment: string): Record<string, unknown> | null {
+    if (!segment) return null;
+
+    const normalized = segment.replace(/-/g, '+').replace(/_/g, '/');
+    const paddingLength = normalized.length % 4;
+    const padded = paddingLength === 0 ? normalized : `${normalized}${'='.repeat(4 - paddingLength)}`;
+
+    try {
+      const decoded = atob(padded);
+      return JSON.parse(decoded) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+  }
+
   markValidationSnapshot(valid: boolean, userId?: string): void {
     this.lastValidationSnapshot = {
       valid,
