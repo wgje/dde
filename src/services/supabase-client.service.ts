@@ -666,52 +666,68 @@ export class SupabaseClientService {
       return Promise.reject(new DOMException('Device is offline', 'NetworkError'));
     }
 
-    // 【鲁棒性 8】请求去重：5s 内的重复请求复用前一个结果
-    const signature = this.buildRequestSignature(url, options);
-    const cached = this.requestDeduplicationCache.get(signature);
-    
-    if (cached && Date.now() - cached.createdAt < this.REQUEST_DEDUP_TTL_MS) {
-      this.logger.debug('请求去重命中，复用缓存结果', { signature });
-      if (cached.response) {
-        return cached.response.clone();
+    // 【鲁棒性 8】请求去重：5s 内的重复幂等请求复用前一个结果（仅限 GET/HEAD，写操作不去重）
+    const httpMethod = options?.method?.toUpperCase() ?? 'GET';
+    const isIdempotentRequest = httpMethod === 'GET' || httpMethod === 'HEAD';
+
+    if (isIdempotentRequest) {
+      const signature = this.buildRequestSignature(url, options);
+      const cached = this.requestDeduplicationCache.get(signature);
+
+      if (cached && Date.now() - cached.createdAt < this.REQUEST_DEDUP_TTL_MS) {
+        this.logger.debug('请求去重命中，复用缓存结果', { signature });
+        if (cached.response) {
+          return cached.response.clone();
+        }
+        if (cached.error) {
+          return Promise.reject(cached.error);
+        }
+        return await cached.promise;
       }
-      if (cached.error) {
-        return Promise.reject(cached.error);
-      }
-      // 否则 await 共享的 promise
-      return await cached.promise;
+
+      // 清理过期缓存
+      this.cleanupDeduplicationCache();
+
+      // 缓存本次请求的 promise，后续请求会 await 它而不是重新发送
+      const fetchPromise = (async () => {
+        const response = await this.fetchWithTimeout(url, options);
+        const cacheEntry = this.requestDeduplicationCache.get(signature);
+        if (cacheEntry) {
+          cacheEntry.response = response.clone();
+        }
+        return response;
+      })();
+
+      this.requestDeduplicationCache.set(signature, {
+        promise: fetchPromise,
+        createdAt: Date.now()
+      });
+
+      const dedupResponse = await fetchPromise;
+      return await this.handle401Retry(url, options, dedupResponse);
     }
 
-    // 清理过期缓存
-    this.cleanupDeduplicationCache();
+    // 非幂等请求（POST/PATCH/PUT/DELETE 等）：直接发送，不去重
+    const directResponse = await this.fetchWithTimeout(url, options);
+    return await this.handle401Retry(url, options, directResponse);
+  }
 
-    // 【鲁棒性 8】缓存本次请求的 promise，后续请求会 await 它而不是重新发送
-    const fetchPromise = (async () => {
-      const response = await this.fetchWithTimeout(url, options);
-      // 缓存响应供后续去重使用
-      const cacheEntry = this.requestDeduplicationCache.get(signature);
-      if (cacheEntry) {
-        cacheEntry.response = response.clone();
-      }
-      return response;
-    })();
-
-    this.requestDeduplicationCache.set(signature, {
-      promise: fetchPromise,
-      createdAt: Date.now()
-    });
-
-    const response = await fetchPromise;
-
-    // 【精准自愈策略】
-    // 1. 401 + JWT 问题特征 + 未超过重试上限 → 刷新重试
-    // 2. 5xx 网关错误 → 不刷新（与认证无关）
-    // 3. 其他 4xx / 3xx / 2xx → 直接返回（非自愈场景）
+  /**
+   * 【精准自愈策略】处理 401 响应的重试逻辑：
+   * 1. 401 + JWT 问题特征 + 未超过重试上限 → 刷新重试
+   * 2. 5xx 网关错误 → 不刷新（与认证无关）
+   * 3. 其他 4xx / 3xx / 2xx → 直接返回（非自愈场景）
+   */
+  private async handle401Retry(
+    url: RequestInfo | URL,
+    options: RequestInit,
+    response: Response
+  ): Promise<Response> {
     const retryKey = this.buildFetch401RetryKey(url, options);
     const currentRetryCount = this.fetch401RetryCount.get(retryKey) ?? 0;
 
-    if (response.status === 401 && 
-        this.shouldAttemptJwtRefreshForFetch(url) && 
+    if (response.status === 401 &&
+        this.shouldAttemptJwtRefreshForFetch(url) &&
         this.looksLikeJwtAuthFailure(response) &&
         currentRetryCount < this.MAX_FETCH_401_RETRIES) {
       try {
@@ -719,19 +735,12 @@ export class SupabaseClientService {
         if (client) {
           const { data, error } = await client.auth.refreshSession();
           if (!error && data.session) {
-            // 使用 debug 级别避免正常 token 轮换时刷屏；真正异常走下面 warn/error 分支
             this.logger.debug('fetch 层捕获 401，已主动刷新 session，重试一次', {
               url: this.redactSupabaseUrl(url),
             });
-            // 【鲁棒性 3】记录重试次数
             this.fetch401RetryCount.set(retryKey, currentRetryCount + 1);
-            // 注意：不能 clone 原 response 再 consume，因为 options.headers 已由 Supabase JS
-            // 以旧 token 构造。Supabase JS 会在内存中维护 Authorization 头的派生，这里直接
-            // 重新 fetch 即可——Supabase JS 下一次请求会用新 token（同一个 session 对象）。
-            // 但本次重试的 options.headers 里仍是旧 token！需要替换 Authorization。
             const retryOptions = this.replaceAuthorizationHeader(options, data.session.access_token);
             const retryResponse = await this.fetchWithTimeout(url, retryOptions);
-            // 【鲁棒性 3】重试成功后清除计数器
             this.fetch401RetryCount.delete(retryKey);
             return retryResponse;
           }

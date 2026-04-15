@@ -395,17 +395,17 @@ export class SessionManagerService {
       return { refreshed: false, reason };
     }
     
+    // 【鲁棒性 1】先赋值 promise 再 await，确保并发调用能复用同一个 promise
+    this.sessionRefreshInProgress = true;
+    this.sessionRefreshPromise = this.executeRefresh(context, client);
     try {
-      // 【鲁棒性 1】设置 pending 标志并创建 promise，其他并发调用会 await 这个 promise
-      this.sessionRefreshInProgress = true;
-      const result = await this.executeRefresh(context, client);
+      const result = await this.sessionRefreshPromise;
       this.sessionRefreshInProgress = false;
       this.sessionRefreshPromise = null;
       return result;
     } catch (e) {
       this.sessionRefreshInProgress = false;
       this.sessionRefreshPromise = null;
-      // 在 catch 前已处理过，这里只做后续逻辑
       throw e;
     }
   }
