@@ -2,6 +2,7 @@ import { Injectable, inject } from '@angular/core';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { SupabaseClientService } from '../../../../services/supabase-client.service';
 import { LoggerService } from '../../../../services/logger.service';
+import { SessionManagerService } from './session-manager.service';
 import {
   DockSnapshot,
   FocusSessionRecord,
@@ -54,6 +55,7 @@ interface RoutineTaskRow {
 export class FocusConsoleSyncService {
   private readonly supabase = inject(SupabaseClientService);
   private readonly logger = inject(LoggerService).category('FocusConsoleSync');
+  private readonly sessionManager = inject(SessionManagerService);
 
   /** 短时请求去重：同一 userId 的 inflight loadFocusSession 共享同一 Promise */
   private loadInflight: Map<string, Promise<Result<DockSnapshot | null, OperationError>>> = new Map();
@@ -65,6 +67,29 @@ export class FocusConsoleSyncService {
       reason: 'browser-network-suspended',
     });
   }
+
+  /**
+   * 远端读请求执行器：在检测到 JWT 过期/401 时自动刷新 session 并重试一次。
+   * 与 ProjectDataService.withAuthRetry 语义一致：fn 抛错 → 判断是否为
+   * session-expired → 刷新成功则重试一次，否则原样抛出交由调用方既有 catch 处理。
+   */
+  private async withAuthRetry<T>(context: string, fn: () => Promise<T>): Promise<T> {
+    try {
+      return await fn();
+    } catch (error) {
+      const enhanced = supabaseErrorToError(error);
+      if (!this.sessionManager.isSessionExpiredError(enhanced)) {
+        throw error;
+      }
+      const refreshed = await this.sessionManager.tryRefreshSession(context);
+      if (!refreshed) {
+        throw error;
+      }
+      this.logger.info('会话已刷新，重试远端读请求', { context });
+      return await fn();
+    }
+  }
+
 
   /**
    * Supabase client 安全获取：未就绪或未配置时返回 null，
@@ -122,14 +147,17 @@ export class FocusConsoleSyncService {
     }
 
     try {
-      const { data, error } = await client
-        .from('focus_sessions')
-        .select('id,user_id,started_at,ended_at,session_state,updated_at')
-        .eq('user_id', userId)
-        .order('updated_at', { ascending: false })
-        .limit(1)
-        .maybeSingle();
-      if (error) throw supabaseErrorToError(error);
+      const data = await this.withAuthRetry('loadFocusSession', async () => {
+        const { data: row, error } = await client
+          .from('focus_sessions')
+          .select('id,user_id,started_at,ended_at,session_state,updated_at')
+          .eq('user_id', userId)
+          .order('updated_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        if (error) throw supabaseErrorToError(error);
+        return row;
+      });
       if (!data) return success(null);
 
       const row = data as FocusSessionRow;
@@ -227,12 +255,15 @@ export class FocusConsoleSyncService {
     }
 
     try {
-      const { data, error } = await client
-        .from('routine_tasks')
-        .select('id,user_id,title,max_times_per_day,is_enabled,updated_at')
-        .eq('user_id', userId)
-        .order('updated_at', { ascending: false });
-      if (error) throw supabaseErrorToError(error);
+      const data = await this.withAuthRetry('listRoutineTasks', async () => {
+        const { data: rows, error } = await client
+          .from('routine_tasks')
+          .select('id,user_id,title,max_times_per_day,is_enabled,updated_at')
+          .eq('user_id', userId)
+          .order('updated_at', { ascending: false });
+        if (error) throw supabaseErrorToError(error);
+        return rows;
+      });
 
       const rows = Array.isArray(data) ? (data as RoutineTaskRow[]) : [];
       return success(rows.map(row => ({

@@ -17,6 +17,7 @@ import { AuthService } from '../../../../services/auth.service';
 import { LoggerService } from '../../../../services/logger.service';
 import { RequestThrottleService } from '../../../../services/request-throttle.service';
 import { SyncStateService } from './sync-state.service';
+import { SessionManagerService } from './session-manager.service';
 import { TombstoneService } from './tombstone.service';
 import { Task, Project, Connection } from '../../../../models';
 import { TaskRow, ProjectRow, ConnectionRow } from '../../../../models/supabase-types';
@@ -103,6 +104,7 @@ export class ProjectDataService {
   private readonly logger = this.loggerService.category('ProjectData');
   private readonly throttle = inject(RequestThrottleService);
   private readonly syncState = inject(SyncStateService);
+  private readonly sessionManager = inject(SessionManagerService);
   private readonly tombstoneService = inject(TombstoneService);
   
   /** 是否正在从远程加载 */
@@ -203,6 +205,35 @@ export class ProjectDataService {
       this.syncState.setSyncError(failure.message);
       // eslint-disable-next-line no-restricted-syntax -- 按既有契约返回 null，调用方据此切换到本地快照分支
       return null;
+    }
+  }
+
+  /**
+   * 远端读请求执行器：在检测到 JWT 过期/401 时自动刷新 session 并重试一次。
+   *
+   * 背景：Supabase JS 的 autoRefreshToken 在长时间页面挂起或设备休眠恢复后
+   * 可能未能及时刷新，导致读请求 401 刷屏。写路径已统一在失败时主动
+   * `tryRefreshSession`，读路径此前缺失该能力——本 helper 补齐读路径自愈。
+   *
+   * 约定：fn 中抛出的错误由 helper 拦截并尝试刷新；刷新成功则重试一次，
+   * 否则原样抛出，交由调用方既有 catch 分支处理（warn + 降级）。
+   */
+  private async withAuthRetry<T>(context: string, fn: () => Promise<T>): Promise<T> {
+    try {
+      return await fn();
+    } catch (error) {
+      const enhanced = supabaseErrorToError(error);
+      if (!this.sessionManager.isSessionExpiredError(enhanced)) {
+        throw error;
+      }
+
+      const refreshed = await this.sessionManager.tryRefreshSession(context);
+      if (!refreshed) {
+        throw error;
+      }
+
+      this.logger.info('会话已刷新，重试远端读请求', { context });
+      return await fn();
     }
   }
   
@@ -333,7 +364,7 @@ export class ProjectDataService {
       // 1. 加载项目元数据
       const projectData = await this.throttle.execute(
         `project-meta:${projectId}`,
-        async () => {
+        async () => this.withAuthRetry('loadFullProject.meta', async () => {
           const { data, error } = await client
             .from('projects')
             .select(FIELD_SELECT_CONFIG.PROJECT_LIST_FIELDS)
@@ -342,7 +373,7 @@ export class ProjectDataService {
             .maybeSingle();
           if (error) throw supabaseErrorToError(error);
           return data;
-        },
+        }),
         { 
           deduplicate: true, 
           priority: 'normal',
@@ -429,7 +460,7 @@ export class ProjectDataService {
     try {
       const projectList = await this.throttle.execute(
         this.buildProjectListMetadataRequestKey(userId, timeout, retries),
-        async () => {
+        async () => this.withAuthRetry('loadProjectListMetadataFromCloud', async () => {
           const { data, error } = await client
             .from('projects')
             .select(FIELD_SELECT_CONFIG.PROJECT_LIST_FIELDS)
@@ -439,7 +470,7 @@ export class ProjectDataService {
 
           if (error) throw supabaseErrorToError(error);
           return data || [];
-        },
+        }),
         {
           deduplicate: true,
           priority: 'high',
@@ -519,7 +550,7 @@ export class ProjectDataService {
       // 1. 加载项目列表
       const projectList = await this.throttle.execute(
         `project-list:${userId}`,
-        async () => {
+        async () => this.withAuthRetry('loadProjectsFromCloud', async () => {
           const { data, error } = await client
             .from('projects')
             .select(FIELD_SELECT_CONFIG.PROJECT_LIST_FIELDS)
@@ -529,7 +560,7 @@ export class ProjectDataService {
           
           if (error) throw supabaseErrorToError(error);
           return data || [];
-        },
+        }),
         { 
           deduplicate: true, 
           priority: 'high',
@@ -605,23 +636,25 @@ export class ProjectDataService {
     if (!client) return null;
 
     try {
-      const { data, error } = await client.rpc('get_project_sync_watermark', {
-        p_project_id: projectId
+      return await this.withAuthRetry('getProjectSyncWatermark', async () => {
+        const { data, error } = await client.rpc('get_project_sync_watermark', {
+          p_project_id: projectId
+        });
+
+        if (error) {
+          throw supabaseErrorToError(error);
+        }
+
+        if (typeof data === 'string') {
+          return data;
+        }
+
+        if (Array.isArray(data) && data.length > 0 && typeof data[0] === 'string') {
+          return data[0];
+        }
+
+        return null;
       });
-
-      if (error) {
-        throw supabaseErrorToError(error);
-      }
-
-      if (typeof data === 'string') {
-        return data;
-      }
-
-      if (Array.isArray(data) && data.length > 0 && typeof data[0] === 'string') {
-        return data[0];
-      }
-
-      return null;
     } catch (e) {
       this.logger.warn('获取项目同步水位失败', {
         projectId,
@@ -640,18 +673,20 @@ export class ProjectDataService {
     if (!client) return null;
 
     try {
-      const { data, error } = await client.rpc('get_user_projects_watermark');
-      if (error) {
-        throw supabaseErrorToError(error);
-      }
+      return await this.withAuthRetry('getUserProjectsWatermark', async () => {
+        const { data, error } = await client.rpc('get_user_projects_watermark');
+        if (error) {
+          throw supabaseErrorToError(error);
+        }
 
-      if (typeof data === 'string') {
-        return data;
-      }
-      if (Array.isArray(data) && data.length > 0 && typeof data[0] === 'string') {
-        return data[0];
-      }
-      return null;
+        if (typeof data === 'string') {
+          return data;
+        }
+        if (Array.isArray(data) && data.length > 0 && typeof data[0] === 'string') {
+          return data[0];
+        }
+        return null;
+      });
     } catch (e) {
       this.logger.warn('获取用户项目域同步水位失败', {
         error: supabaseErrorToError(e).message
@@ -671,21 +706,23 @@ export class ProjectDataService {
     if (!client) return [];
 
     try {
-      const { data, error } = await client.rpc('list_project_heads_since', {
-        p_since: watermark
-      });
-      if (error) {
-        throw supabaseErrorToError(error);
-      }
+      return await this.withAuthRetry('listProjectHeadsSince', async () => {
+        const { data, error } = await client.rpc('list_project_heads_since', {
+          p_since: watermark
+        });
+        if (error) {
+          throw supabaseErrorToError(error);
+        }
 
-      const rows = Array.isArray(data) ? data : [];
-      return rows
-        .map((row) => ({
-          id: String((row as Record<string, unknown>)['project_id'] ?? ''),
-          updatedAt: String((row as Record<string, unknown>)['updated_at'] ?? ''),
-          version: Number((row as Record<string, unknown>)['version'] ?? 1),
-        }))
-        .filter((row) => !!row.id && !!row.updatedAt);
+        const rows = Array.isArray(data) ? data : [];
+        return rows
+          .map((row) => ({
+            id: String((row as Record<string, unknown>)['project_id'] ?? ''),
+            updatedAt: String((row as Record<string, unknown>)['updated_at'] ?? ''),
+            version: Number((row as Record<string, unknown>)['version'] ?? 1),
+          }))
+          .filter((row) => !!row.id && !!row.updatedAt);
+      });
     } catch (e) {
       this.logger.warn('拉取项目头信息失败', {
         watermark,
@@ -709,23 +746,25 @@ export class ProjectDataService {
     if (!client) return null;
 
     try {
-      const { data, error } = await client.rpc('get_accessible_project_probe', {
-        p_project_id: projectId
-      });
-      if (error) {
-        throw supabaseErrorToError(error);
-      }
+      return await this.withAuthRetry('getAccessibleProjectProbe', async () => {
+        const { data, error } = await client.rpc('get_accessible_project_probe', {
+          p_project_id: projectId
+        });
+        if (error) {
+          throw supabaseErrorToError(error);
+        }
 
-      const row = Array.isArray(data) ? data[0] : data;
-      if (!row || typeof row !== 'object') {
-        return null;
-      }
-      const record = row as Record<string, unknown>;
-      return {
-        projectId: String(record['project_id'] ?? projectId),
-        accessible: Boolean(record['accessible']),
-        watermark: record['watermark'] ? String(record['watermark']) : null,
-      };
+        const row = Array.isArray(data) ? data[0] : data;
+        if (!row || typeof row !== 'object') {
+          return null;
+        }
+        const record = row as Record<string, unknown>;
+        return {
+          projectId: String(record['project_id'] ?? projectId),
+          accessible: Boolean(record['accessible']),
+          watermark: record['watermark'] ? String(record['watermark']) : null,
+        };
+      });
     } catch (e) {
       this.logger.warn('获取项目访问探测失败', {
         projectId,
@@ -744,18 +783,20 @@ export class ProjectDataService {
     if (!client) return null;
 
     try {
-      const { data, error } = await client.rpc('get_black_box_sync_watermark');
-      if (error) {
-        throw supabaseErrorToError(error);
-      }
+      return await this.withAuthRetry('getBlackBoxSyncWatermark', async () => {
+        const { data, error } = await client.rpc('get_black_box_sync_watermark');
+        if (error) {
+          throw supabaseErrorToError(error);
+        }
 
-      if (typeof data === 'string') {
-        return data;
-      }
-      if (Array.isArray(data) && data.length > 0 && typeof data[0] === 'string') {
-        return data[0];
-      }
-      return null;
+        if (typeof data === 'string') {
+          return data;
+        }
+        if (Array.isArray(data) && data.length > 0 && typeof data[0] === 'string') {
+          return data[0];
+        }
+        return null;
+      });
     } catch (e) {
       this.logger.warn('获取黑匣子同步水位失败', {
         error: supabaseErrorToError(e).message
@@ -780,26 +821,28 @@ export class ProjectDataService {
     if (!client) return null;
 
     try {
-      const { data, error } = await client.rpc('get_resume_recovery_probe', {
-        p_project_id: projectId ?? null,
-      });
-      if (error) {
-        throw supabaseErrorToError(error);
-      }
+      return await this.withAuthRetry('getResumeRecoveryProbe', async () => {
+        const { data, error } = await client.rpc('get_resume_recovery_probe', {
+          p_project_id: projectId ?? null,
+        });
+        if (error) {
+          throw supabaseErrorToError(error);
+        }
 
-      const row = Array.isArray(data) ? data[0] : data;
-      if (!row || typeof row !== 'object') {
-        return null;
-      }
-      const record = row as Record<string, unknown>;
-      return {
-        activeProjectId: record['active_project_id'] ? String(record['active_project_id']) : null,
-        activeAccessible: Boolean(record['active_accessible']),
-        activeWatermark: record['active_watermark'] ? String(record['active_watermark']) : null,
-        projectsWatermark: record['projects_watermark'] ? String(record['projects_watermark']) : null,
-        blackboxWatermark: record['blackbox_watermark'] ? String(record['blackbox_watermark']) : null,
-        serverNow: record['server_now'] ? String(record['server_now']) : null,
-      };
+        const row = Array.isArray(data) ? data[0] : data;
+        if (!row || typeof row !== 'object') {
+          return null;
+        }
+        const record = row as Record<string, unknown>;
+        return {
+          activeProjectId: record['active_project_id'] ? String(record['active_project_id']) : null,
+          activeAccessible: Boolean(record['active_accessible']),
+          activeWatermark: record['active_watermark'] ? String(record['active_watermark']) : null,
+          projectsWatermark: record['projects_watermark'] ? String(record['projects_watermark']) : null,
+          blackboxWatermark: record['blackbox_watermark'] ? String(record['blackbox_watermark']) : null,
+          serverNow: record['server_now'] ? String(record['server_now']) : null,
+        };
+      });
     } catch (e) {
       this.logger.warn('恢复链路聚合探测失败，降级为分步探测', {
         projectId,
@@ -1575,67 +1618,69 @@ export class ProjectDataService {
     const removedTaskIds = new Set<string>();
 
     try {
-      let parkedQuery = client
-        .from('tasks')
-        .select(selectFields)
-        .not('parking_meta', 'is', null);
+      return await this.withAuthRetry('pullParkedTasksDelta', async () => {
+        let parkedQuery = client
+          .from('tasks')
+          .select(selectFields)
+          .not('parking_meta', 'is', null);
 
-      if (since) {
-        parkedQuery = parkedQuery.gt('updated_at', since);
-      }
+        if (since) {
+          parkedQuery = parkedQuery.gt('updated_at', since);
+        }
 
-      const { data: parkedRows, error: parkedError } = await parkedQuery;
-      if (parkedError) {
-        throw supabaseErrorToError(parkedError);
-      }
+        const { data: parkedRows, error: parkedError } = await parkedQuery;
+        if (parkedError) {
+          throw supabaseErrorToError(parkedError);
+        }
 
-      for (const rawRow of (parkedRows ?? []) as ParkedTaskDeltaRow[]) {
-        const projectId = rawRow.project_id ? String(rawRow.project_id) : '';
-        if (!projectId || !rawRow.id) continue;
-        const task = this.rowToTask(rawRow);
-        entryMap.set(task.id, { task, projectId });
-        updatedRows.push(rawRow);
-      }
+        for (const rawRow of (parkedRows ?? []) as ParkedTaskDeltaRow[]) {
+          const projectId = rawRow.project_id ? String(rawRow.project_id) : '';
+          if (!projectId || !rawRow.id) continue;
+          const task = this.rowToTask(rawRow);
+          entryMap.set(task.id, { task, projectId });
+          updatedRows.push(rawRow);
+        }
 
-      // 仅对“已知停泊任务”做增量核验，找出已移出停泊的任务
-      if (since && knownParkedTaskIds.length > 0) {
-        for (const chunk of this.chunkTaskIds(knownParkedTaskIds, 100)) {
-          const { data: changedRows, error: changedError } = await client
-            .from('tasks')
-            .select(selectFields)
-            .in('id', chunk)
-            .gt('updated_at', since);
+        // 仅对“已知停泊任务”做增量核验，找出已移出停泊的任务
+        if (since && knownParkedTaskIds.length > 0) {
+          for (const chunk of this.chunkTaskIds(knownParkedTaskIds, 100)) {
+            const { data: changedRows, error: changedError } = await client
+              .from('tasks')
+              .select(selectFields)
+              .in('id', chunk)
+              .gt('updated_at', since);
 
-          if (changedError) {
-            throw supabaseErrorToError(changedError);
-          }
-
-          for (const rawRow of (changedRows ?? []) as ParkedTaskDeltaRow[]) {
-            updatedRows.push(rawRow);
-            if (!rawRow.id) continue;
-
-            const isParked = (rawRow as { parking_meta?: unknown }).parking_meta !== null
-              && (rawRow as { parking_meta?: unknown }).parking_meta !== undefined;
-            if (!isParked) {
-              removedTaskIds.add(String(rawRow.id));
-              entryMap.delete(String(rawRow.id));
-              continue;
+            if (changedError) {
+              throw supabaseErrorToError(changedError);
             }
 
-            const projectId = rawRow.project_id ? String(rawRow.project_id) : '';
-            if (!projectId) continue;
-            const task = this.rowToTask(rawRow);
-            entryMap.set(task.id, { task, projectId });
+            for (const rawRow of (changedRows ?? []) as ParkedTaskDeltaRow[]) {
+              updatedRows.push(rawRow);
+              if (!rawRow.id) continue;
+
+              const isParked = (rawRow as { parking_meta?: unknown }).parking_meta !== null
+                && (rawRow as { parking_meta?: unknown }).parking_meta !== undefined;
+              if (!isParked) {
+                removedTaskIds.add(String(rawRow.id));
+                entryMap.delete(String(rawRow.id));
+                continue;
+              }
+
+              const projectId = rawRow.project_id ? String(rawRow.project_id) : '';
+              if (!projectId) continue;
+              const task = this.rowToTask(rawRow);
+              entryMap.set(task.id, { task, projectId });
+            }
           }
         }
-      }
 
-      const nextCursor = this.computeParkedCursor(since, updatedRows);
-      return {
-        entries: Array.from(entryMap.values()),
-        removedTaskIds: Array.from(removedTaskIds),
-        nextCursor,
-      };
+        const nextCursor = this.computeParkedCursor(since, updatedRows);
+        return {
+          entries: Array.from(entryMap.values()),
+          removedTaskIds: Array.from(removedTaskIds),
+          nextCursor,
+        };
+      });
     } catch (error) {
       if (isBrowserNetworkSuspendedError(error)) {
         this.logger.debug('浏览器网络挂起期间已跳过停泊任务增量拉取', { since });

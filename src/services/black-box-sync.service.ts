@@ -33,6 +33,7 @@ import { NetworkAwarenessService } from './network-awareness.service';
 import { LoggerService } from './logger.service';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { AuthService } from './auth.service';
+import { SessionManagerService } from '../app/core/services/sync/session-manager.service';
 import { AUTH_CONFIG } from '../config/auth.config';
 
 /**
@@ -61,6 +62,7 @@ export class BlackBoxSyncService {
   private supabase = inject(SupabaseClientService);
   private network = inject(NetworkAwarenessService);
   private auth = inject(AuthService);
+  private readonly sessionManager = inject(SessionManagerService);
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('BlackBoxSync');
   private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
@@ -719,7 +721,7 @@ export class BlackBoxSyncService {
       this.logger.debug(`Pulling changes since: ${effectiveLastSync}`);
 
       // 增量拉取
-      const { data, error } = await client
+      let { data, error } = await client
         .from('black_box_entries')
         .select('*')
         .gt('updated_at', effectiveLastSync)
@@ -727,9 +729,27 @@ export class BlackBoxSyncService {
 
       if (error) {
         const enhanced = supabaseErrorToError(error);
-        this.logger.error('Failed to pull changes', enhanced.message);
-        await this.loadFromLocal();
-        return;
+
+        // 【JWT 自愈】检测到 session 过期时主动刷新一次并重试，避免控制台刷屏
+        if (this.sessionManager.isSessionExpiredError(enhanced)) {
+          const refreshed = await this.sessionManager.tryRefreshSession('BlackBoxSync.pullChanges');
+          if (refreshed) {
+            this.logger.info('BlackBox pullChanges 会话已刷新，重试增量拉取');
+            const retry = await client
+              .from('black_box_entries')
+              .select('*')
+              .gt('updated_at', effectiveLastSync)
+              .order('updated_at', { ascending: true });
+            data = retry.data;
+            error = retry.error;
+          }
+        }
+
+        if (error) {
+          this.logger.error('Failed to pull changes', supabaseErrorToError(error).message);
+          await this.loadFromLocal();
+          return;
+        }
       }
 
       // 合并到本地
