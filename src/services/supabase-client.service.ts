@@ -48,6 +48,11 @@ export class SupabaseClientService {
   private readonly logger = inject(LoggerService).category('SupabaseClient');
   private supabase: SupabaseClient<Database> | null = null;
   private initPromise: Promise<SupabaseClient<Database> | null> | null = null;
+
+  // 【鲁棒性 3】fetch 层 401 重试计数，防止无限重试
+  // key: 请求 URL + method，value: 已重试次数
+  private readonly fetch401RetryCount = new Map<string, number>();
+  private readonly MAX_FETCH_401_RETRIES = 1; // 最多重试一次（总共 2 次请求）
   private reachabilityProbePromise: Promise<boolean> | null = null;
   private readonly connectivityListeners = new Set<SupabaseConnectivityListener>();
   private lastReachabilityProbeAt = 0;
@@ -621,12 +626,16 @@ export class SupabaseClientService {
     const response = await this.fetchWithTimeout(url, options);
 
     // 【精准自愈策略】
-    // 1. 401 + JWT 问题特征 → 刷新重试
+    // 1. 401 + JWT 问题特征 + 未超过重试上限 → 刷新重试
     // 2. 5xx 网关错误 → 不刷新（与认证无关）
     // 3. 其他 4xx / 3xx / 2xx → 直接返回（非自愈场景）
+    const retryKey = this.buildFetch401RetryKey(url, options);
+    const currentRetryCount = this.fetch401RetryCount.get(retryKey) ?? 0;
+
     if (response.status === 401 && 
         this.shouldAttemptJwtRefreshForFetch(url) && 
-        this.looksLikeJwtAuthFailure(response)) {
+        this.looksLikeJwtAuthFailure(response) &&
+        currentRetryCount < this.MAX_FETCH_401_RETRIES) {
       try {
         const client = this.supabase;
         if (client) {
@@ -636,12 +645,17 @@ export class SupabaseClientService {
             this.logger.debug('fetch 层捕获 401，已主动刷新 session，重试一次', {
               url: this.redactSupabaseUrl(url),
             });
+            // 【鲁棒性 3】记录重试次数
+            this.fetch401RetryCount.set(retryKey, currentRetryCount + 1);
             // 注意：不能 clone 原 response 再 consume，因为 options.headers 已由 Supabase JS
             // 以旧 token 构造。Supabase JS 会在内存中维护 Authorization 头的派生，这里直接
             // 重新 fetch 即可——Supabase JS 下一次请求会用新 token（同一个 session 对象）。
             // 但本次重试的 options.headers 里仍是旧 token！需要替换 Authorization。
             const retryOptions = this.replaceAuthorizationHeader(options, data.session.access_token);
-            return await this.fetchWithTimeout(url, retryOptions);
+            const retryResponse = await this.fetchWithTimeout(url, retryOptions);
+            // 【鲁棒性 3】重试成功后清除计数器
+            this.fetch401RetryCount.delete(retryKey);
+            return retryResponse;
           }
         }
       } catch (refreshError) {
@@ -706,6 +720,17 @@ export class SupabaseClientService {
     // 去除 query 里可能的敏感信息
     const qIndex = raw.indexOf('?');
     return qIndex >= 0 ? raw.slice(0, qIndex) : raw;
+  }
+
+  private buildFetch401RetryKey(url: RequestInfo | URL, options: RequestInit): string {
+    const urlStr = typeof url === 'string'
+      ? url
+      : url instanceof URL
+        ? url.href
+        : (url as Request).url;
+    const method = options.method?.toUpperCase() ?? 'GET';
+    // 基于 URL + HTTP method 作为重试计数的 key，粒度更细致
+    return `${method}:${urlStr}`;
   }
 
   /**
