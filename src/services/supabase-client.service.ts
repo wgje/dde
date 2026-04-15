@@ -4,7 +4,7 @@ import { LoggerService } from './logger.service';
 import { environment } from '../environments/environment';
 import type { Database } from '../types/supabase';
 import { FEATURE_FLAGS } from '../config/feature-flags.config';
-import { SUPABASE_CLIENT_FETCH_MAX_MS } from '../config/timeout.config';
+import { SUPABASE_CLIENT_FETCH_MAX_MS, NETWORK_OFFLINE_DEBOUNCE_MS } from '../config/timeout.config';
 import {
   createBrowserNetworkSuspendedError,
   ensureBrowserNetworkSuspensionTracking,
@@ -900,7 +900,7 @@ export class SupabaseClientService {
       // 【鲁棒性增强】在标记离线前，再次检查当前网络状态，避免瞬时波动误报
       if (this.shouldMarkOfflineFromFetchFailure(error)) {
         // 延迟 100ms 再次确认，过滤一次性网络波动
-        await new Promise(r => setTimeout(r, 100));
+        await new Promise(r => setTimeout(r, NETWORK_OFFLINE_DEBOUNCE_MS));
         if (typeof navigator !== 'undefined' && navigator.onLine) {
           this.logger.debug('获取失败但网络已恢复，不标记离线', { error });
         } else {

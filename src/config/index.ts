@@ -48,6 +48,7 @@ export {
   TIMEOUT_CONFIG,
   RETRY_POLICY
 } from './timeout.config';
+export { BATCH_RETRY_BASE_MS, NETWORK_OFFLINE_DEBOUNCE_MS } from './timeout.config';
 export type { TimeoutLevel } from './timeout.config';
 
 // 附件配置

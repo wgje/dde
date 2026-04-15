@@ -4,6 +4,7 @@ import { LoggerService } from './logger.service';
 import { Task, Connection } from '../models';
 import { supabaseErrorToError } from '../utils/supabase-error';
 import { FIELD_SELECT_CONFIG } from '../config/sync.config';
+import { BATCH_RETRY_BASE_MS } from '../config/timeout.config';
 import type { TaskRow, ConnectionRow } from './task-repository.types';
 
 /**
@@ -59,7 +60,7 @@ export class TaskRepositoryBatchService {
           retryCount++;
           if (retryCount <= MAX_RETRIES) {
             // 指数退避重试
-            await new Promise(resolve => setTimeout(resolve, 100 * Math.pow(2, retryCount)));
+            await new Promise(resolve => setTimeout(resolve, BATCH_RETRY_BASE_MS * Math.pow(2, retryCount)));
             this.logger.warn(`任务批次 ${i}-${i + batch.length} 保存失败，重试 ${retryCount}/${MAX_RETRIES}`, { error: error.message });
           } else {
             this.logger.error(`任务批次 ${i}-${i + batch.length} 保存失败，已达最大重试次数`, error);
@@ -163,7 +164,7 @@ export class TaskRepositoryBatchService {
             
             if (batchErrors.length > 0) {
               if (retry < MAX_RETRIES) {
-                await new Promise(r => setTimeout(r, 100 * (retry + 1)));
+                await new Promise(r => setTimeout(r, BATCH_RETRY_BASE_MS * (retry + 1)));
               } else {
                 errors.push(`批量软删除连接失败（${i}-${i + batch.length}）: ${batchErrors.join(', ')}`);
               }
@@ -196,7 +197,7 @@ export class TaskRepositoryBatchService {
 
             if (insertError) {
               if (retry < MAX_RETRIES) {
-                await new Promise(r => setTimeout(r, 100 * (retry + 1)));
+                await new Promise(r => setTimeout(r, BATCH_RETRY_BASE_MS * (retry + 1)));
               } else {
                 errors.push(`批量插入连接失败（${i}-${i + batch.length}）: ${insertError.message}`);
               }
@@ -224,7 +225,7 @@ export class TaskRepositoryBatchService {
           
           if (error) {
             if (retry < MAX_RETRIES) {
-              await new Promise(r => setTimeout(r, 100 * (retry + 1)));
+              await new Promise(r => setTimeout(r, BATCH_RETRY_BASE_MS * (retry + 1)));
             } else {
               errors.push(`更新连接失败 ${conn.source}->${conn.target}: ${error.message}`);
             }
@@ -319,7 +320,7 @@ export class TaskRepositoryBatchService {
           
           if (error) {
             if (retry < MAX_RETRIES) {
-              await new Promise(r => setTimeout(r, 100 * (retry + 1)));
+              await new Promise(r => setTimeout(r, BATCH_RETRY_BASE_MS * (retry + 1)));
             } else {
               errors.push(`批量删除任务失败（${i}-${i + batch.length}）: ${error.message}`);
             }
@@ -347,7 +348,7 @@ export class TaskRepositoryBatchService {
           
           if (error) {
             if (retry < MAX_RETRIES) {
-              await new Promise(r => setTimeout(r, 100 * (retry + 1)));
+              await new Promise(r => setTimeout(r, BATCH_RETRY_BASE_MS * (retry + 1)));
             } else {
               errors.push(`批量创建任务失败（${i}-${i + batch.length}）: ${error.message}`);
             }
@@ -388,7 +389,7 @@ export class TaskRepositoryBatchService {
           
           if (error) {
             if (retry < MAX_RETRIES) {
-              await new Promise(r => setTimeout(r, 100 * (retry + 1)));
+              await new Promise(r => setTimeout(r, BATCH_RETRY_BASE_MS * (retry + 1)));
             } else {
               errors.push(`批量更新任务失败（${i}-${i + batch.length}）: ${error.message}`);
             }
@@ -446,7 +447,7 @@ export class TaskRepositoryBatchService {
             
             if (error) {
               if (retry < MAX_RETRIES) {
-                await new Promise(r => setTimeout(r, 100 * (retry + 1)));
+                await new Promise(r => setTimeout(r, BATCH_RETRY_BASE_MS * (retry + 1)));
               } else {
                 errors.push(`删除连接失败 ${conn.source}->${conn.target}: ${error.message}`);
               }
@@ -480,7 +481,7 @@ export class TaskRepositoryBatchService {
           
           if (error) {
             if (retry < MAX_RETRIES) {
-              await new Promise(r => setTimeout(r, 100 * (retry + 1)));
+              await new Promise(r => setTimeout(r, BATCH_RETRY_BASE_MS * (retry + 1)));
             } else {
               errors.push(`批量创建连接失败（${i}-${i + batch.length}）: ${error.message}`);
             }
@@ -513,7 +514,7 @@ export class TaskRepositoryBatchService {
           
           if (error) {
             if (retry < MAX_RETRIES) {
-              await new Promise(r => setTimeout(r, 100 * (retry + 1)));
+              await new Promise(r => setTimeout(r, BATCH_RETRY_BASE_MS * (retry + 1)));
             } else {
               errors.push(`批量更新连接失败（${i}-${i + batch.length}）: ${error.message}`);
             }
