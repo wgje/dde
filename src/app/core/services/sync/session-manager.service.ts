@@ -67,6 +67,10 @@ export class SessionManagerService {
     lastFailureAt: 0
   };
 
+  // 【鲁棒性 7】adaptive cooldown - 根据连续失败次数调整冷却倍数
+  private consecutiveFailures = 0;
+  private readonly ADAPTIVE_COOLDOWN_MULTIPLIER_MAX = 5; // 最多 25s 冷却
+
   private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly supabase = inject(SupabaseClientService);
   private readonly loggerService = inject(LoggerService);
@@ -287,10 +291,22 @@ export class SessionManagerService {
 
     // 【鲁棒性 2】快速断路：5s 内有失败过，则短路拒绝，避免刷屏
     const timeSinceLastFailure = Date.now() - this.lastRefreshFailureTime;
-    if (timeSinceLastFailure < this.REFRESH_FAILURE_COOLDOWN_MS && this.lastRefreshFailureTime > 0) {
+    // 【鲁棒性 7】自适应断路倍数：连续失败越多，冷却时间越长
+    const cooldownMultiplier = Math.min(
+      1 + this.consecutiveFailures,
+      this.ADAPTIVE_COOLDOWN_MULTIPLIER_MAX
+    );
+    const effectiveCooldownMs = this.REFRESH_FAILURE_COOLDOWN_MS * cooldownMultiplier;
+    
+    if (timeSinceLastFailure < effectiveCooldownMs && this.lastRefreshFailureTime > 0) {
       // 【鲁棒性 6】记录被断路的次数
       this.sessionRefreshMetrics.circuitBreakerTrips++;
-      this.logger.debug('刷新失败冷却期内，短路拒绝', { context, remainingCooldownMs: this.REFRESH_FAILURE_COOLDOWN_MS - timeSinceLastFailure });
+      this.logger.debug('刷新失败冷却期内，短路拒绝', { 
+        context, 
+        remainingCooldownMs: effectiveCooldownMs - timeSinceLastFailure,
+        consecutiveFailures: this.consecutiveFailures,
+        cooldownMultiplier
+      });
       return { refreshed: false, reason: 'refresh-failed' };
     }
 
@@ -369,6 +385,8 @@ export class SessionManagerService {
         
         // 【鲁棒性 2】刷新成功则清除冷却期
         this.lastRefreshFailureTime = 0;
+        // 【鲁棒性 7】成功则重置连续失败计数
+        this.consecutiveFailures = 0;
         
         // 【鲁棒性 6】记录成功
         this.sessionRefreshMetrics.successCount++;
@@ -379,6 +397,8 @@ export class SessionManagerService {
         this.logger.warn('刷新返回空 session', { context });
         // 【鲁棒性 2】空 session 也算失败
         this.lastRefreshFailureTime = Date.now();
+        // 【鲁棒性 7】记录连续失败
+        this.consecutiveFailures++;
         // 【鲁棒性 6】记录失败
         this.sessionRefreshMetrics.failureCount++;
         this.sessionRefreshMetrics.lastFailureAt = Date.now();
@@ -394,6 +414,8 @@ export class SessionManagerService {
         this.logger.warn('会话刷新异常：刷新令牌已失效', { context, error: e });
         // 【鲁棒性 2】异常也启动冷却
         this.lastRefreshFailureTime = Date.now();
+        // 【鲁棒性 7】记录连续失败
+        this.consecutiveFailures++;
         // 【鲁棒性 6】记录失败
         this.sessionRefreshMetrics.failureCount++;
         this.sessionRefreshMetrics.lastFailureAt = Date.now();
@@ -403,11 +425,33 @@ export class SessionManagerService {
       this.logger.warn('会话刷新异常', { context, error: e });
       // 【鲁棒性 2】所有其他异常也启动冷却
       this.lastRefreshFailureTime = Date.now();
+      // 【鲁棒性 7】记录连续失败
+      this.consecutiveFailures++;
       // 【鲁棒性 6】记录失败
       this.sessionRefreshMetrics.failureCount++;
       this.sessionRefreshMetrics.lastFailureAt = Date.now();
       return { refreshed: false, reason: 'refresh-failed' };
     }
+  }
+
+  /**
+   * 【鲁棒性 7】获取自适应冷却状态（供诊断使用）
+   */
+  getAdaptiveCooldownStatus() {
+    const cooldownMultiplier = Math.min(
+      1 + this.consecutiveFailures,
+      this.ADAPTIVE_COOLDOWN_MULTIPLIER_MAX
+    );
+    const effectiveCooldownMs = this.REFRESH_FAILURE_COOLDOWN_MS * cooldownMultiplier;
+    const timeSinceLastFailure = Date.now() - this.lastRefreshFailureTime;
+    
+    return {
+      consecutiveFailures: this.consecutiveFailures,
+      cooldownMultiplier,
+      effectiveCooldownMs,
+      remainingCooldownMs: Math.max(0, effectiveCooldownMs - timeSinceLastFailure),
+      isInCooldown: timeSinceLastFailure < effectiveCooldownMs && this.lastRefreshFailureTime > 0
+    };
   }
 
   /**
