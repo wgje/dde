@@ -465,10 +465,57 @@ export class SupabaseClientService {
         }
 
         this.clearAuthAutoRefreshResumeTimer();
+        // 【根本修复】页面恢复/网络恢复瞬间主动检查 token 是否已过期 / 即将过期，
+        // 是则立即 await refreshSession，确保之后发出的首批业务请求不会带过期 token。
+        // 这从源头消除了"恢复后控制台刷 401 → 重试恢复"的可见错误窗口。
+        if (reason === 'visibilitychange' || reason === 'pageshow' || reason === 'online' || reason === 'resume-timer') {
+          await this.proactivelyRefreshIfNearingExpiry(client, reason);
+        }
         await this.startAuthAutoRefresh(client, reason);
       });
 
     return this.authAutoRefreshSyncChain;
+  }
+
+  /**
+   * 【根本修复】在页面/网络恢复时，若当前 session 已过期或 60s 内即将过期，
+   * 主动 await refreshSession 强制刷新，避免业务请求带过期 token 后再触发 401 自愈。
+   * autoRefreshToken 的 setTimeout 在浏览器挂起时会停摆，恢复后来不及触发——这里填补这个空档。
+   */
+  private async proactivelyRefreshIfNearingExpiry(
+    client: SupabaseClient<Database>,
+    reason: 'client-init' | 'visibilitychange' | 'pageshow' | 'online' | 'offline' | 'resume-timer'
+  ): Promise<void> {
+    try {
+      const { data, error } = await client.auth.getSession();
+      if (error || !data.session) {
+        return;
+      }
+      const expiresAt = data.session.expires_at;
+      if (!expiresAt) {
+        return;
+      }
+      const expiresAtMs = expiresAt * 1000;
+      const remainingMs = expiresAtMs - Date.now();
+      // token 已过期或 60 秒内即将过期 → 主动刷新
+      const REFRESH_THRESHOLD_MS = 60_000;
+      if (remainingMs > REFRESH_THRESHOLD_MS) {
+        return;
+      }
+      this.logger.info('浏览器恢复时 token 临近/已过期，主动刷新', {
+        reason,
+        remainingMs,
+      });
+      const { error: refreshError } = await client.auth.refreshSession();
+      if (refreshError) {
+        this.logger.warn('恢复时主动刷新 session 失败', { reason, error: refreshError.message });
+      } else {
+        this.logger.info('恢复时主动刷新 session 成功', { reason });
+      }
+    } catch (error) {
+      // 任何错误都不阻塞后续流程，交给既有的自愈路径处理
+      this.logger.debug('恢复时主动校验 session 异常', { reason, error });
+    }
   }
 
   private async stopAuthAutoRefresh(

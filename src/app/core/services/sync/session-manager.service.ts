@@ -142,10 +142,16 @@ export class SessionManagerService {
   }
 
   /**
-   * 尝试刷新会话
+   * 尝试刷新会话。
+   * 【根本修复】默认使用 allowWhenExpired: true，绕过 syncState.sessionExpired flag 短路。
+   * 原默认值 false 会导致一旦写路径将 flag 置 true，所有读/写路径的后续刷新尝试都被静默拒绝，
+   * 形成"flag 死锁"——必须等用户重新登录才能恢复。改为 true 后：
+   *   - 仍然每次只实际发一次 refreshSession；
+   *   - 刷新失败不会加剧问题（本来就是失败的）；
+   *   - 刷新成功则自动重置 flag（见 tryRefreshSessionDetailed 内），彻底打破死锁。
    */
   async tryRefreshSession(context: string): Promise<boolean> {
-    const result = await this.tryRefreshSessionDetailed(context);
+    const result = await this.tryRefreshSessionDetailed(context, { allowWhenExpired: true });
     return result.refreshed;
   }
 
