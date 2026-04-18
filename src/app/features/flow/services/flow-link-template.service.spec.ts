@@ -12,4 +12,14 @@ describe('flow-link-template.service.ts', () => {
     expect(source).toContain('...(isMobile ? {} : {');
     expect(source).toContain('minSize: new go.Size(44, 24)');
   });
+
+  it('应在 LinkingTool 结束后清空临时起点端口状态，避免下一次拉线串用旧 source', () => {
+    const sourcePath = join(process.cwd(), 'src/app/features/flow/services/flow-link-template.service.ts');
+    const source = readFileSync(sourcePath, 'utf8');
+
+    expect(source).toContain('const pointerPort = findEdgePortAtPointer(this);');
+    expect(source).toContain('toolExt.startPort = null;');
+    expect(source).toContain('toolExt.fromPort = null;');
+    expect(source).toContain('toolExt.originalFromPort = null;');
+  });
 });

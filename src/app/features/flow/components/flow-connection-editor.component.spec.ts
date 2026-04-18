@@ -179,6 +179,100 @@ describe('FlowConnectionEditorComponent', () => {
     expect(component.isEditMode()).toBe(false);
   });
 
+  it('预览态文本被选中时，空白外部点击第一次只清选区，第二次关闭', () => {
+    const closeSpy = vi.spyOn(component.close, 'emit');
+
+    (component as any).position = signal({ x: 160, y: 240 });
+    (component as any).readOnly = signal(false);
+    (component as any).connectionTasks = signal({
+      source: createTask({ id: 'source-task', displayId: 'A' }),
+      target: createTask({ id: 'target-task', displayId: 'B' }),
+    });
+    (component as any).data = signal<any>({
+      sourceId: 'source-task',
+      targetId: 'target-task',
+      title: '依赖',
+      description: '需要先完成前置任务',
+      x: 160,
+      y: 240,
+      isCrossTree: true,
+      mode: 'preview',
+    });
+
+    fixture.detectChanges();
+    vi.advanceTimersByTime(60);
+    fixture.detectChanges();
+
+    const removeAllRanges = vi.fn();
+    const getSelectionSpy = vi.spyOn(window, 'getSelection').mockReturnValue({
+      toString: () => '前置任务',
+      rangeCount: 1,
+      isCollapsed: false,
+      removeAllRanges,
+    } as unknown as Selection);
+
+    try {
+      const outsideBlank = document.createElement('div');
+      component.onDocumentClick(createPreviewMouseEvent(outsideBlank));
+
+      expect(removeAllRanges).toHaveBeenCalledTimes(1);
+      expect(closeSpy).not.toHaveBeenCalled();
+
+      getSelectionSpy.mockRestore();
+      component.onDocumentClick(createPreviewMouseEvent(outsideBlank));
+
+      expect(closeSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      getSelectionSpy.mockRestore();
+    }
+  });
+
+  it('预览态文本被选中时，外部按钮点击应同次清选区并关闭', () => {
+    const closeSpy = vi.spyOn(component.close, 'emit');
+
+    (component as any).position = signal({ x: 160, y: 240 });
+    (component as any).readOnly = signal(false);
+    (component as any).connectionTasks = signal({
+      source: createTask({ id: 'source-task', displayId: 'A' }),
+      target: createTask({ id: 'target-task', displayId: 'B' }),
+    });
+    (component as any).data = signal<any>({
+      sourceId: 'source-task',
+      targetId: 'target-task',
+      title: '依赖',
+      description: '需要先完成前置任务',
+      x: 160,
+      y: 240,
+      isCrossTree: true,
+      mode: 'preview',
+    });
+
+    fixture.detectChanges();
+    vi.advanceTimersByTime(60);
+    fixture.detectChanges();
+
+    const removeAllRanges = vi.fn();
+    const getSelectionSpy = vi.spyOn(window, 'getSelection').mockReturnValue({
+      toString: () => '前置任务',
+      rangeCount: 1,
+      isCollapsed: false,
+      removeAllRanges,
+    } as unknown as Selection);
+
+    try {
+      const outsideButton = document.createElement('button');
+      const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      outsideButton.appendChild(icon);
+
+      component.onDocumentClick(createPreviewMouseEvent(icon));
+
+      expect(removeAllRanges).toHaveBeenCalledTimes(1);
+      expect(closeSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      getSelectionSpy.mockRestore();
+    }
+  });
+
   it('点击本地路径链接时应尝试打开并保持预览态', async () => {
     const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
     const writeText = vi.fn().mockResolvedValue(undefined);

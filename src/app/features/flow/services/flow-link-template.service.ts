@@ -442,6 +442,22 @@ export class FlowLinkTemplateService {
       if (!port || !port.portId) return false;
       return allowedPortIds.includes(port.portId);
     };
+
+    const findEdgePortAtPointer = (tool: go.LinkingTool): (go.GraphObject & { portId?: string }) | null => {
+      const dia = tool.diagram;
+      const input = dia?.lastInput;
+      if (!dia || !input) return null;
+
+      return dia.findObjectAt(input.documentPoint, (obj: go.GraphObject | null) => {
+        if (obj && typeof (obj as go.GraphObject & { portId?: string }).portId === 'string') {
+          const portId = (obj as go.GraphObject & { portId: string }).portId;
+          if (portId.length > 0 && allowedPortIds.includes(portId)) {
+            return obj;
+          }
+        }
+        return null;
+      }, null) as (go.GraphObject & { portId?: string }) | null;
+    };
     
     // 偷梁换柱：激活后替换为主节点端口
     const originalDoActivate = linkingTool.doActivate;
@@ -449,13 +465,17 @@ export class FlowLinkTemplateService {
       originalDoActivate.call(this);
       
       const toolExt = this as go.LinkingTool & GojsLinkingToolExt;
-      const startPort = toolExt.startPort 
+      const pointerPort = findEdgePortAtPointer(this);
+      const startPort = pointerPort
+        || toolExt.startPort 
         || toolExt.originalFromPort 
         || toolExt.fromPort;
       
       let edgePortObj: (go.GraphObject & { portId?: string }) | null = null;
       
-      if (startPort && typeof startPort === 'object' && (startPort as go.GraphObject & { portId?: string }).portId) {
+      if (pointerPort) {
+        edgePortObj = pointerPort;
+      } else if (startPort && typeof startPort === 'object' && (startPort as go.GraphObject & { portId?: string }).portId) {
         edgePortObj = startPort as go.GraphObject & { portId?: string };
       } else if (startPort && typeof startPort === 'string' && allowedPortIds.includes(startPort)) {
         const originalNode = toolExt.originalFromNode || toolExt.fromNode;
@@ -502,8 +522,13 @@ export class FlowLinkTemplateService {
         (mainPort as go.GraphObject).toLinkable = toolExt._savedToLinkable ?? false;
         toolExt._tempMainPort = null;
       }
-      toolExt._originNode = null;
       originalDoDeactivate.call(this);
+      toolExt._originNode = null;
+      toolExt.startPort = null;
+      toolExt.fromPort = null;
+      toolExt.originalFromPort = null;
+      toolExt._savedFromLinkable = undefined;
+      toolExt._savedToLinkable = undefined;
     };
     
     // 禁止自连接

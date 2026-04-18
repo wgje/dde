@@ -1149,7 +1149,7 @@ export function handleMarkdownLinkAction(
 /**
  * 提取纯文本摘要（用于预览）
  */
-function extractPlainText(content: string, maxLength: number = 100): string {
+export function extractPlainText(content: string, maxLength: number = 100): string {
   if (!content) return '';
   
   // 移除 Markdown 语法

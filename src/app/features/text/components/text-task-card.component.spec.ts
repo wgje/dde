@@ -157,6 +157,36 @@ describe('TextTaskCardComponent', () => {
     expect(stopPropagation).toHaveBeenCalledTimes(2);
   });
 
+  it('should clear selection and still keep button-contained svg clicks non-selecting', () => {
+    const component = createComponent(false) as unknown as {
+      onCardClick: (event: Event) => void;
+      select: { emit: ReturnType<typeof vi.fn> };
+    };
+    const button = document.createElement('button');
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    button.appendChild(svg);
+
+    const stopPropagation = vi.fn();
+    const emitSpy = vi.spyOn(component.select, 'emit');
+    const removeAllRanges = vi.fn();
+    const getSelectionSpy = vi.spyOn(window, 'getSelection').mockReturnValue({
+      toString: () => '零件',
+      rangeCount: 1,
+      isCollapsed: false,
+      removeAllRanges,
+    } as unknown as Selection);
+
+    try {
+      component.onCardClick({ target: svg, stopPropagation } as unknown as Event);
+
+      expect(removeAllRanges).not.toHaveBeenCalled();
+      expect(emitSpy).not.toHaveBeenCalled();
+      expect(stopPropagation).toHaveBeenCalledTimes(1);
+    } finally {
+      getSelectionSpy.mockRestore();
+    }
+  });
+
   it('should ignore a late click when the task input is no longer available', () => {
     const component = createComponent(false) as unknown as {
       task: () => Task;

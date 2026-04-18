@@ -11,6 +11,7 @@ import { Task } from '../../../../models';
 import { getErrorMessage, isFailure } from '../../../../utils/result';
 import { TextViewDragDropService } from './text-view-drag-drop.service';
 import { PARKING_CONFIG } from '../../../../config/parking.config';
+import { clearActiveTextSelection, isInteractiveSelectionTarget } from '../../../../utils/text-selection';
 
 function isNavigableLinkedTask(task: Task | undefined | null): task is Task {
   return !!task && !task.deletedAt && task.status !== 'archived';
@@ -115,9 +116,19 @@ export class TextViewTaskOpsService {
 
     const target = event.target as HTMLElement;
     if (this.eventPathContains(event, node => this.isTaskContainerNode(node))) return;
-    if (this.eventPathContains(event, node => this.isInteractiveNode(node))) return;
     if (target.closest('[data-task-id]') || target.closest('[data-unassigned-task]')) return;
-    if (target.closest('button, input, textarea, a, [role="button"]')) return;
+    const isInteractiveTarget = this.eventPathContains(event, node => this.isInteractiveNode(node))
+      || isInteractiveSelectionTarget(target);
+    const clearedSelection = clearActiveTextSelection();
+
+    if (isInteractiveTarget) {
+      return;
+    }
+
+    if (clearedSelection) {
+      return;
+    }
+
     if (this.ctx.selectedTaskId()) {
       this.ctx.selectedTaskId.set(null);
     }
@@ -132,11 +143,7 @@ export class TextViewTaskOpsService {
   }
 
   private isInteractiveNode(node: EventTarget): boolean {
-    if (!(node instanceof HTMLElement)) {
-      return false;
-    }
-
-    return node.matches('button, input, textarea, a, [role="button"]');
+    return isInteractiveSelectionTarget(node);
   }
 
   private eventPathContains(event: Event, predicate: (node: EventTarget) => boolean): boolean {

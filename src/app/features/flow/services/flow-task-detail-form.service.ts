@@ -4,7 +4,7 @@ import { ChangeTrackerService } from '../../../../services/change-tracker.servic
 import { LoggerService } from '../../../../services/logger.service';
 import { UndoService, type UndoAppliedReplay } from '../../../../services/undo.service';
 import { Task } from '../../../../models';
-import { clearActiveTextSelection, hasActiveTextSelection } from '../../../../utils/text-selection';
+import { clearActiveTextSelection, hasActiveTextSelection, isInteractiveSelectionTarget } from '../../../../utils/text-selection';
 
 /**
  * 任务详情面板：Split-Brain 表单状态管理服务
@@ -232,24 +232,25 @@ export class FlowTaskDetailFormService {
    * 判断点击/触摸事件是否应导致退出编辑模式
    * @returns true 表示应切换到预览模式
    */
-  shouldExitEditMode(target: HTMLElement, _containerElement: HTMLElement): boolean {
+  shouldExitEditMode(target: HTMLElement, containerElement: HTMLElement): boolean {
     if (!this.isEditMode()) return false;
     if (this.isSelecting) return false;
 
-    const isInteractiveElement = target.tagName === 'INPUT' ||
-      target.tagName === 'TEXTAREA' ||
-      target.tagName === 'BUTTON' ||
-      target.tagName === 'svg' ||
-      target.tagName === 'path' ||
-      target.closest('input, textarea, button, svg') !== null;
+    const clickedInsideContainer = containerElement.contains(target);
+    const isInteractiveTarget = isInteractiveSelectionTarget(target);
+    const isInteractiveElement = clickedInsideContainer && isInteractiveTarget;
+    const selection = window.getSelection();
+    const activeElement = this.getScopedActiveElement(containerElement);
 
-    if (hasActiveTextSelection()) {
+    if (this.hasScopedTextSelection(containerElement, selection, activeElement)) {
       if (isInteractiveElement) {
         return false;
       }
 
-      clearActiveTextSelection();
-      return false;
+      clearActiveTextSelection(selection, activeElement);
+      if (!isInteractiveTarget) {
+        return false;
+      }
     }
 
     if (isInteractiveElement) {
@@ -321,5 +322,42 @@ export class FlowTaskDetailFormService {
     queueMicrotask(() => {
       this.isTaskSwitching = false;
     });
+  }
+
+  private hasScopedTextSelection(
+    containerElement: HTMLElement,
+    selection: Selection | null,
+    activeElement: Element | null,
+  ): boolean {
+    if (activeElement && hasActiveTextSelection(selection, activeElement)) {
+      return true;
+    }
+
+    if (!selection || selection.rangeCount === 0 || selection.isCollapsed) {
+      return false;
+    }
+
+    const anchorNode = selection.anchorNode;
+    const focusNode = selection.focusNode;
+    if (!anchorNode && !focusNode) {
+      return selection.toString().length > 0;
+    }
+
+    return [anchorNode, focusNode].some((node) => {
+      if (!(node instanceof Node)) {
+        return false;
+      }
+
+      return containerElement.contains(node.nodeType === Node.TEXT_NODE ? node.parentNode : node);
+    });
+  }
+
+  private getScopedActiveElement(containerElement: HTMLElement): Element | null {
+    const activeElement = document.activeElement;
+    if (!(activeElement instanceof Element)) {
+      return null;
+    }
+
+    return containerElement.contains(activeElement) ? activeElement : null;
   }
 }

@@ -11,7 +11,7 @@ import { Task, Attachment } from '../../../../models';
 import { SafeMarkdownPipe } from '../../../shared/pipes/safe-markdown.pipe';
 import { TextTaskConnectionsComponent } from './text-task-connections.component';
 import { toggleMarkdownTodo, getTodoIndexFromClick, handleMarkdownLinkAction } from '../../../../utils/markdown';
-import { clearActiveTextSelection, hasActiveTextSelection } from '../../../../utils/text-selection';
+import { clearActiveTextSelection, hasActiveTextSelection, isInteractiveSelectionTarget } from '../../../../utils/text-selection';
 
 /**
  * 任务编辑器组件（展开态）
@@ -420,6 +420,7 @@ export class TextTaskEditorComponent implements OnDestroy {
   private focusRequestTimer: ReturnType<typeof setTimeout> | null = null;
   private suppressNextDocumentClick = false;
   private clearDocumentClickGuardTimer: ReturnType<typeof setTimeout> | null = null;
+  private skipNextEditorAutoSelect = false;
 
   /** 最大附件数量*/
   private readonly maxAttachments = 5;
@@ -545,10 +546,15 @@ export class TextTaskEditorComponent implements OnDestroy {
   @HostListener('document:click', ['$event'])
   onDocumentClick(event: MouseEvent) {
     if (this.suppressNextDocumentClick) {
+      this.skipNextEditorAutoSelect = true;
+      setTimeout(() => {
+        this.skipNextEditorAutoSelect = false;
+      }, 0);
       this.clearDocumentClickGuard();
       return;
     }
 
+    const isInteractiveTarget = isInteractiveSelectionTarget(event.target);
     const clickedInside = this.isEventInsideEditor(event);
     const clickedInTaskCard = this.isEventInsideCurrentTaskCard(event);
 
@@ -561,7 +567,9 @@ export class TextTaskEditorComponent implements OnDestroy {
       }
 
       clearActiveTextSelection();
-      return;
+      if (!isInteractiveTarget) {
+        return;
+      }
     }
 
     // 如果已经是预览模式，无需处理
@@ -932,7 +940,11 @@ export class TextTaskEditorComponent implements OnDestroy {
       const input = this.resolveEditorFieldElement(field);
 
       input?.focus();
-      input?.select?.();
+      if (this.skipNextEditorAutoSelect) {
+        this.skipNextEditorAutoSelect = false;
+      } else {
+        input?.select?.();
+      }
       this.focusRequestTimer = null;
     }, 0);
   }

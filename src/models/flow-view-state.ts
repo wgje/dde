@@ -109,7 +109,7 @@ export interface UnassignedTouchState {
 /**
  * 流程图视图完整状态
  */
-interface FlowViewState {
+export interface FlowViewState {
   // ========== 选中状态 ==========
   /** 当前选中的任务ID */
   selectedTaskId: string | null;

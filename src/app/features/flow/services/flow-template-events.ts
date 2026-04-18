@@ -46,7 +46,7 @@ export const flowTemplateEventHandlers: FlowTemplateEventHandlers = {};
 /**
  * 事件名称常量（供日志使用）
  */
-const FLOW_TEMPLATE_EVENTS = {
+export const FLOW_TEMPLATE_EVENTS = {
   NODE_CLICKED: 'NodeClicked',
   NODE_DOUBLE_CLICKED: 'NodeDoubleClicked',
   LINK_CLICKED: 'LinkClicked',

@@ -7,6 +7,7 @@ import { ToastService } from '../../../../services/toast.service';
 import { LoggerService } from '../../../../services/logger.service';
 import { FlowCommandService } from '../services/flow-command.service';
 import { FlowDiagramService } from '../services/flow-diagram.service';
+import { FlowLogicExportService } from '../services/flow-logic-export.service';
 import { FlowZoomService } from '../services/flow-zoom.service';
 import { FlowSelectionService } from '../services/flow-selection.service';
 import { FlowLayoutService } from '../services/flow-layout.service';
@@ -98,6 +99,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   
   // 核心服务
   readonly diagram = inject(FlowDiagramService);
+  private readonly logicExport = inject(FlowLogicExportService);
   private readonly zoomService = inject(FlowZoomService);
   readonly selectionService = inject(FlowSelectionService);
   private readonly layoutService = inject(FlowLayoutService);
@@ -474,6 +476,21 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   
   exportToSvg(): void {
     this.diagram.exportToSvg();
+  }
+
+  /** 导出 Mermaid 逻辑骨架（供 AI 审查整体结构） */
+  exportLogicMermaid(): void {
+    this.logicExport.exportMermaid();
+  }
+
+  /** 导出 YAML 数据流（供 AI 审查字段、不变式） */
+  exportLogicYaml(): void {
+    this.logicExport.exportYaml();
+  }
+
+  /** 导出逻辑审查包（Mermaid + YAML + 不变式，合并 Markdown） */
+  exportLogicPack(): void {
+    this.logicExport.exportLogicPack();
   }
   
   /** 保存到云端的结果 Promise，供 toolbar 回调使用 */

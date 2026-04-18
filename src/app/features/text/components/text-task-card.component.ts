@@ -9,6 +9,7 @@ import { SafeMarkdownPipe } from '../../../shared/pipes/safe-markdown.pipe';
 import { TextTaskEditorComponent } from './text-task-editor.component';
 import { TextViewTaskOpsService } from '../services/text-view-task-ops.service';
 import { handleMarkdownLinkAction } from '../../../../utils/markdown';
+import { clearActiveTextSelection, hasActiveTextSelection, isInteractiveSelectionTarget } from '../../../../utils/text-selection';
 import type { TaskTouchStartPayload } from './text-view.types';
 
 @Component({
@@ -253,18 +254,9 @@ export class TextTaskCardComponent {
 
   onCardClick(event: Event) {
     const currentTask = this.readTask();
-    const targetElement = event.target instanceof HTMLElement ? event.target : null;
+    const targetElement = event.target instanceof Element ? event.target : null;
 
-    if (
-      targetElement
-      && (
-        targetElement.tagName === 'INPUT'
-        || targetElement.tagName === 'TEXTAREA'
-        || targetElement.tagName === 'BUTTON'
-        || targetElement.tagName === 'A'
-        || !!targetElement.closest('input, textarea, button, a')
-      )
-    ) {
+    if (isInteractiveSelectionTarget(targetElement)) {
       event.stopPropagation();
       this.lastClickWasNonEdit = false;
       return;
@@ -275,6 +267,10 @@ export class TextTaskCardComponent {
       event.stopPropagation();
       this.lastClickWasNonEdit = false;
       return;
+    }
+
+    if (hasActiveTextSelection()) {
+      clearActiveTextSelection();
     }
 
     // 已选中时，点击卡片内部（头部区域等）不应取消选中

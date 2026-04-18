@@ -348,6 +348,45 @@ describe('TextTaskEditorComponent', () => {
     }
   });
 
+  it('should clear selection and collapse immediately when the outside target is a button', () => {
+    vi.useFakeTimers();
+    try {
+      render({ content: '联系供应商确认规格。' });
+
+      const component = fixture.componentInstance as unknown as {
+        onDocumentClick: (event: MouseEvent) => void;
+        isPreview: () => boolean;
+      };
+      const titlePreview = fixture.nativeElement.querySelector('[data-testid="task-title-preview"]') as HTMLButtonElement | null;
+      titlePreview?.click();
+      fixture.detectChanges();
+      vi.runAllTimers();
+      fixture.detectChanges();
+
+      const removeAllRanges = vi.fn();
+      const getSelectionSpy = vi.spyOn(window, 'getSelection').mockReturnValue({
+        toString: () => '规格',
+        rangeCount: 1,
+        isCollapsed: false,
+        removeAllRanges,
+      } as unknown as Selection);
+
+      try {
+        const outsideButton = document.createElement('button');
+        component.onDocumentClick(createClickEvent(Date.now(), outsideButton));
+        fixture.detectChanges();
+
+        expect(removeAllRanges).toHaveBeenCalledTimes(1);
+        expect(component.isPreview()).toBe(true);
+      } finally {
+        getSelectionSpy.mockRestore();
+      }
+    } finally {
+      vi.runOnlyPendingTimers();
+      vi.useRealTimers();
+    }
+  });
+
   it('should suppress the same document click when entering content editing from the empty preview button', () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-04-05T00:00:00.000Z'));

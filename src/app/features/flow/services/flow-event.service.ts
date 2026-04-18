@@ -26,7 +26,7 @@ import type { GoJSLinkData } from '../../../../types/gojs-extended';
 import * as go from 'gojs';
 
 // ========== 自定义事件名称常量（供向后兼容） ==========
-const FLOW_EVENTS = {
+export const FLOW_EVENTS = {
   NODE_CLICKED: 'NodeClicked',
   NODE_DOUBLE_CLICKED: 'NodeDoubleClicked',
   LINK_CLICKED: 'LinkClicked',
@@ -423,10 +423,22 @@ export class FlowEventService {
     if (!this.diagram || !this.diagramDiv) return;
     
     const link = e.subject;
-    const fromNode = link?.fromNode;
+    const linkingTool = this.diagram.toolManager.linkingTool as go.LinkingTool & { _originNode?: go.Node | null };
+    const originNode = linkingTool.isActive && linkingTool._originNode instanceof go.Node
+      ? linkingTool._originNode
+      : null;
+    const fromNode = originNode ?? link?.fromNode;
     const toNode = link?.toNode;
     const sourceId = fromNode?.data?.key;
     const targetId = toNode?.data?.key;
+
+    if (originNode && link?.fromNode && originNode !== link.fromNode) {
+      this.logger.warn('LinkDrawn 源节点与本次手势起点不一致，已优先采用手势起点', {
+        gestureSourceId: originNode.data?.key,
+        linkSourceId: link.fromNode.data?.key,
+        targetId,
+      });
+    }
 
     if (!sourceId || !targetId) return;
 

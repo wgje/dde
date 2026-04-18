@@ -7,6 +7,7 @@ import { ToastService } from '../../../../services/toast.service';
 import { SafeMarkdownPipe } from '../../../shared/pipes/safe-markdown.pipe';
 import { LoggerService } from '../../../../services/logger.service';
 import { handleMarkdownLinkAction } from '../../../../utils/markdown';
+import { clearActiveTextSelection, hasActiveTextSelection, isInteractiveSelectionTarget } from '../../../../utils/text-selection';
 
 export { ConnectionEditorData, ConnectionEditorMode };
 
@@ -23,6 +24,9 @@ export interface ConnectionEditorSavePayload {
 }
 
 type ConnectionEditorSaveContext = Pick<ConnectionEditorData, 'sourceId' | 'targetId' | 'title' | 'description'>;
+
+const OPEN_CLICK_GUARD_MS = 50;
+const MODE_SWITCH_CLICK_GUARD_MS = 220;
 
 /**
  * 联系块编辑器组件
@@ -274,7 +278,7 @@ export class FlowConnectionEditorComponent implements OnInit, OnDestroy {
     const shouldRefreshOutsideGuard = isNewSession || (!currentIsEditMode && nextIsEditMode);
 
     if (shouldRefreshOutsideGuard) {
-      this.ignoreOutsideUntil = Date.now() + 200;
+      this.ignoreOutsideUntil = Date.now() + OPEN_CLICK_GUARD_MS;
     }
 
     if (previousSessionKey && previousContext && isNewSession && !this.closeRequested && !this.deleteRequested) {
@@ -317,7 +321,7 @@ export class FlowConnectionEditorComponent implements OnInit, OnDestroy {
             this.persistCurrentEdits(previousContext ?? undefined);
           }
           // 防止同一次外部点击在预览态分支被当作“点击外部关闭”处理
-          this.ignoreOutsideUntil = Date.now() + 220;
+          this.ignoreOutsideUntil = Date.now() + MODE_SWITCH_CLICK_GUARD_MS;
         }
         this.isEditMode.set(nextIsEditMode);
         if (currentIsEditMode && !nextIsEditMode && readOnly) {
@@ -354,17 +358,13 @@ export class FlowConnectionEditorComponent implements OnInit, OnDestroy {
     }
   });
   
-  // 计算当前标题（优先显示编辑中的内容）
-  readonly currentTitle = computed(() => {
-    const data = this.data();
-    return this.editingTitle || data?.title || '';
-  });
-  
-  // 计算当前描述（优先显示编辑中的内容）
-  readonly currentDescription = computed(() => {
-    const data = this.data();
-    return this.editingDescription || data?.description || '';
-  });
+  // 预览态显示已持久化的内容（data），而非未保存的 editingTitle/Description。
+  // 过去使用 `editingTitle || data?.title || ''` 有两个坑：
+  //   1) editingTitle 是普通字段，非 signal，在 computed 中不会被追踪；
+  //   2) `||` 把空字符串视为 falsy，清空标题会回退显示旧值，造成“输入被吞”错觉。
+  // 编辑态输入由模板中的 [(ngModel)]="editingTitle" 直接驱动，与此处无关。
+  readonly currentTitle = computed(() => this.data()?.title ?? '');
+  readonly currentDescription = computed(() => this.data()?.description ?? '');
   
   // 计算限制在视口内的位置（已由服务端处理，这里做兜底）
   readonly clampedPosition = computed(() => {
@@ -387,10 +387,18 @@ export class FlowConnectionEditorComponent implements OnInit, OnDestroy {
   }
 
   ngOnDestroy(): void {
-    // 清理定时器
+    // 销毁前 flush 一次，避免 500ms 防抖期内因切换/关闭丢字。
+    // 使用 activeSessionContext 作为基准，配合 lastEmittedPayloadKey 去重，不会重复 emit。
     if (this.saveTimer) {
       clearTimeout(this.saveTimer);
       this.saveTimer = null;
+      if (this.activeSessionContext && !this.deleteRequested) {
+        try {
+          this.saveContent(this.activeSessionContext);
+        } catch {
+          // 销毁期间忽略保存异常，避免阻塞组件销毁
+        }
+      }
     }
     if (this.focusTimer) {
       clearTimeout(this.focusTimer);
@@ -408,37 +416,52 @@ export class FlowConnectionEditorComponent implements OnInit, OnDestroy {
     if (this.closeRequested) return;
     if (!this.editorContainer) return;
     if (Date.now() < this.ignoreOutsideUntil) return;
-    
-    // 如果正在进行文本选择，不处理
+
     if (this.isSelecting) return;
-    
-    // 检查是否有文本被选中
-    const selection = window.getSelection();
-    if (selection && selection.toString().length > 0) {
-      return;
-    }
-    
+
     const target = event.target as HTMLElement;
     const editorEl = this.editorContainer.nativeElement;
     const clickedInside = editorEl && editorEl.contains(target);
-    
+    const isInteractiveTarget = isInteractiveSelectionTarget(target);
+    const isInteractiveElement = clickedInside && isInteractiveTarget;
+
+    if (hasActiveTextSelection()) {
+      if (isInteractiveElement) {
+        return;
+      }
+
+      clearActiveTextSelection();
+      if (!isInteractiveTarget) {
+        return;
+      }
+    }
+
     if (this.isEditMode()) {
-      // 编辑模式下的处理
-      // 检查是否点击了可交互元素（输入框、按钮等）
-      const isInteractiveElement = clickedInside && (
-        target.tagName === 'INPUT' ||
-        target.tagName === 'TEXTAREA' ||
-        target.tagName === 'BUTTON' ||
-        target.tagName === 'svg' ||
-        target.tagName === 'path' ||
-        target.closest('input, textarea, button, svg') !== null
-      );
-      
       if (isInteractiveElement) {
         this.logger.debug('点击可交互元素，保持编辑模式');
         return;
       }
-      
+
+      // 正在 IME 输入中的点击延迟处理，等待 compositionend，避免最后一个中文字符被吞。
+      // exitEditMode/saveAndClose 内部会再次检查 isComposing 并递归等待。
+      if (this.isComposing()) {
+        const delay = 100;
+        if (clickedInside) {
+          setTimeout(() => {
+            if (!this.closeRequested && this.isEditMode()) {
+              this.exitEditMode(true);
+            }
+          }, delay);
+        } else {
+          setTimeout(() => {
+            if (!this.closeRequested) {
+              this.saveAndClose();
+            }
+          }, delay);
+        }
+        return;
+      }
+
        if (clickedInside) {
          // 点击在编辑器内部但不是可交互元素（如标题栏、空白区域），退出编辑模式
          this.logger.debug('点击编辑器空白区域，退出编辑模式');
@@ -468,20 +491,26 @@ export class FlowConnectionEditorComponent implements OnInit, OnDestroy {
     if (this.closeRequested) return;
     if (!this.editorContainer) return;
     if (Date.now() < this.ignoreOutsideUntil) return;
-    
-    // 如果正在进行文本选择，不处理
+
     if (this.isSelecting) return;
-    
-    // 检查是否有文本被选中
-    const selection = window.getSelection();
-    if (selection && selection.toString().length > 0) {
-      return;
-    }
-    
+
     const target = event.target as HTMLElement;
     const editorEl = this.editorContainer.nativeElement;
     const clickedInside = editorEl && editorEl.contains(target);
-    
+    const isInteractiveTarget = isInteractiveSelectionTarget(target);
+    const isInteractiveElement = clickedInside && isInteractiveTarget;
+
+    if (hasActiveTextSelection()) {
+      if (isInteractiveElement) {
+        return;
+      }
+
+      clearActiveTextSelection();
+      if (!isInteractiveTarget) {
+        return;
+      }
+    }
+
     // 在事件开始时捕获当前模式状态，防止 GoJS backgroundClick 事件先修改模式导致竞争条件
     const wasEditMode = this.isEditMode();
     
@@ -492,16 +521,6 @@ export class FlowConnectionEditorComponent implements OnInit, OnDestroy {
     }
     
     if (wasEditMode) {
-      // 编辑模式下的处理
-      const isInteractiveElement = clickedInside && (
-        target.tagName === 'INPUT' ||
-        target.tagName === 'TEXTAREA' ||
-        target.tagName === 'BUTTON' ||
-        target.tagName === 'svg' ||
-        target.tagName === 'path' ||
-        target.closest('input, textarea, button, svg') !== null
-      );
-      
       if (isInteractiveElement) {
         this.logger.debug('触摸可交互元素，保持编辑模式');
         return;
@@ -513,7 +532,7 @@ export class FlowConnectionEditorComponent implements OnInit, OnDestroy {
         // 使用延迟确保 blur 事件先完成
         setTimeout(() => {
           if (!this.closeRequested) {
-            this.exitEditMode();
+            this.exitEditMode(this.isComposing());
           }
         }, delayMs);
        } else {
@@ -522,7 +541,7 @@ export class FlowConnectionEditorComponent implements OnInit, OnDestroy {
          this.logger.debug('触摸编辑器外部，保存并切换到预览模式');
          setTimeout(() => {
            if (!this.closeRequested) {
-             this.exitEditMode();
+             this.exitEditMode(this.isComposing());
            }
          }, delayMs);
        }
@@ -586,10 +605,25 @@ export class FlowConnectionEditorComponent implements OnInit, OnDestroy {
   /**
    * 退出编辑模式
    * 注意：必须先同步 DOM 状态再切换模式，否则输入框被销毁后无法获取最新值
+   * 若正在 IME 输入（compositionstart ~ compositionend 之间），需等待组合完成再读取 DOM value，
+   * 否则最后一个中文字符未 commit 就被保存，表现为“吞字”。
    */
-  exitEditMode(): void {
+  exitEditMode(force = false): void {
     if (!this.isEditMode()) {
       return;
+    }
+    if (this.isComposing() && !force) {
+      this.logger.debug('exitEditMode: IME 输入中，延迟等待组合结束');
+      setTimeout(() => {
+        if (this.isEditMode()) {
+          this.exitEditMode();
+        }
+      }, 100);
+      return;
+    }
+    if (force && this.isComposing()) {
+      this.composingState.title = false;
+      this.composingState.description = false;
     }
     // 先同步 DOM 状态（此时输入框还存在）
     this.syncEditorStateFromDom();
@@ -833,6 +867,13 @@ export class FlowConnectionEditorComponent implements OnInit, OnDestroy {
       return override;
     }
 
+    // 默认使用会话初始基准（activeSessionContext），而不是被 saveConnectionContent 回流覆盖过的 data()。
+    // 去重完全交给 lastEmittedPayloadKey，避免“data 已被回流 → context 与 payload 相同 → 跳过保存”
+    // 导致后续输入无法落盘的隐形漏保存。
+    if (this.activeSessionContext) {
+      return this.activeSessionContext;
+    }
+
     const data = this.data();
     if (data) {
       return {
@@ -843,7 +884,7 @@ export class FlowConnectionEditorComponent implements OnInit, OnDestroy {
       };
     }
 
-    return this.activeSessionContext;
+    return null;
   }
   
 }

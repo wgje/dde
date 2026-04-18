@@ -212,25 +212,75 @@ describe('TextViewTaskOpsService', () => {
     expect(mockToast.info).toHaveBeenCalledWith('会话确认中', '创建任务暂不可用，owner 确认完成前保持只读');
   });
 
-  it('should clear the current selection when clicking the container blank area', () => {
+  it('should clear browser text selection on the first blank-area click and deselect on the next click', () => {
     const selectedTaskId = signal<string | null>('task-1');
+    const removeAllRanges = vi.fn();
+    const getSelectionSpy = vi.spyOn(window, 'getSelection').mockReturnValue({
+      toString: () => '供应商',
+      rangeCount: 1,
+      isCollapsed: false,
+      removeAllRanges,
+    } as unknown as Selection);
 
-    service.init({
-      selectedTaskId,
-      deleteConfirmTask: signal<Task | null>(null),
-      deleteKeepChildren: signal(false),
-      focusFlowNode: { emit: vi.fn() } as never,
-      isMobile: signal(false),
-      getStagesRef: () => undefined,
-      getUnassignedRef: () => undefined,
-    });
+    try {
+      service.init({
+        selectedTaskId,
+        deleteConfirmTask: signal<Task | null>(null),
+        deleteKeepChildren: signal(false),
+        focusFlowNode: { emit: vi.fn() } as never,
+        isMobile: signal(false),
+        getStagesRef: () => undefined,
+        getUnassignedRef: () => undefined,
+      });
 
-    const outside = document.createElement('div');
-    hostElement.appendChild(outside);
+      const outside = document.createElement('div');
+      hostElement.appendChild(outside);
 
-    service.onContainerClick({ target: outside } as unknown as Event);
+      service.onContainerClick({ target: outside } as unknown as Event);
 
-    expect(selectedTaskId()).toBeNull();
+      expect(removeAllRanges).toHaveBeenCalledTimes(1);
+      expect(selectedTaskId()).toBe('task-1');
+
+      getSelectionSpy.mockRestore();
+      service.onContainerClick({ target: outside } as unknown as Event);
+
+      expect(selectedTaskId()).toBeNull();
+    } finally {
+      getSelectionSpy.mockRestore();
+    }
+  });
+
+  it('should clear browser text selection and keep task selection on outside button clicks', () => {
+    const selectedTaskId = signal<string | null>('task-1');
+    const removeAllRanges = vi.fn();
+    const getSelectionSpy = vi.spyOn(window, 'getSelection').mockReturnValue({
+      toString: () => '供应商',
+      rangeCount: 1,
+      isCollapsed: false,
+      removeAllRanges,
+    } as unknown as Selection);
+
+    try {
+      service.init({
+        selectedTaskId,
+        deleteConfirmTask: signal<Task | null>(null),
+        deleteKeepChildren: signal(false),
+        focusFlowNode: { emit: vi.fn() } as never,
+        isMobile: signal(false),
+        getStagesRef: () => undefined,
+        getUnassignedRef: () => undefined,
+      });
+
+      const outsideButton = document.createElement('button');
+      hostElement.appendChild(outsideButton);
+
+      service.onContainerClick({ target: outsideButton } as unknown as Event);
+
+      expect(removeAllRanges).toHaveBeenCalledTimes(1);
+      expect(selectedTaskId()).toBe('task-1');
+    } finally {
+      getSelectionSpy.mockRestore();
+    }
   });
 
   it('should keep the current selection when clicking inside a task card', () => {

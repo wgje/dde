@@ -513,17 +513,33 @@ describe('FlowTaskDetailFormService', () => {
       vi.useRealTimers();
     });
 
-    it('点击 svg 元素时应返回 false', () => {
+    it('点击按钮内的 svg 图标时应返回 false', () => {
+      vi.useFakeTimers();
+      service.toggleEditMode();
+
+      const buttonEl = document.createElement('button');
+      const svgEl = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      buttonEl.appendChild(svgEl);
+      containerEl.appendChild(buttonEl);
+
+      const result = service.shouldExitEditMode(svgEl as unknown as HTMLElement, containerEl);
+
+      expect(result).toBe(false);
+
+      vi.runAllTimers();
+      vi.useRealTimers();
+    });
+
+    it('点击裸 svg 装饰元素时应返回 true', () => {
       vi.useFakeTimers();
       service.toggleEditMode();
 
       const svgEl = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
       containerEl.appendChild(svgEl);
 
-      // svg 的 tagName 是小写的 'svg'
       const result = service.shouldExitEditMode(svgEl as unknown as HTMLElement, containerEl);
 
-      expect(result).toBe(false);
+      expect(result).toBe(true);
 
       vi.runAllTimers();
       vi.useRealTimers();

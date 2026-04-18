@@ -95,24 +95,56 @@ function buildParentAndChildrenMaps(
   parentMap: Map<string, string>;
   childrenMap: Map<string, AutoLayoutNodeData[]>;
 } {
-  const parentMap = new Map<string, string>();
-  const childrenMap = new Map<string, AutoLayoutNodeData[]>();
-
+  // 【鲁棒性 2026-04-16】多父场景下先收集所有候选父，再按"阶段差最小 + rank 最大"
+  // 择优，而非原先的"先到先得"，避免链路顺序扰动布局。单父场景行为保持不变。
+  const candidateParents = new Map<string, AutoLayoutNodeData[]>();
   for (const link of links) {
     if (link.isCrossTree) {
       continue;
     }
-
     const parent = assignedNodeMap.get(link.from);
     const child = assignedNodeMap.get(link.to);
-    if (!parent || !child || parentMap.has(child.key)) {
+    if (!parent || !child) {
+      continue;
+    }
+    const list = candidateParents.get(child.key) ?? [];
+    list.push(parent);
+    candidateParents.set(child.key, list);
+  }
+
+  const parentMap = new Map<string, string>();
+  const childrenMap = new Map<string, AutoLayoutNodeData[]>();
+
+  for (const [childKey, parents] of candidateParents) {
+    const child = assignedNodeMap.get(childKey);
+    if (!child || !isAssignedLayoutNode(child) || parents.length === 0) {
       continue;
     }
 
-    parentMap.set(child.key, parent.key);
-    const siblings = childrenMap.get(parent.key) ?? [];
+    let bestParent: AutoLayoutNodeData = parents[0];
+    let bestStageDiff = isAssignedLayoutNode(bestParent)
+      ? Math.abs(child.stage - bestParent.stage)
+      : Number.MAX_SAFE_INTEGER;
+
+    for (let i = 1; i < parents.length; i += 1) {
+      const candidate = parents[i];
+      if (!isAssignedLayoutNode(candidate)) {
+        continue;
+      }
+      const diff = Math.abs(child.stage - candidate.stage);
+      if (
+        diff < bestStageDiff ||
+        (diff === bestStageDiff && (candidate.rank ?? 0) > (bestParent.rank ?? 0))
+      ) {
+        bestParent = candidate;
+        bestStageDiff = diff;
+      }
+    }
+
+    parentMap.set(child.key, bestParent.key);
+    const siblings = childrenMap.get(bestParent.key) ?? [];
     siblings.push(child);
-    childrenMap.set(parent.key, siblings);
+    childrenMap.set(bestParent.key, siblings);
   }
 
   for (const siblings of childrenMap.values()) {
@@ -264,6 +296,99 @@ function buildFamilyBlocks(
 }
 
 /**
+ * 家族块按跨树连接贪心重排，将强关联家族放置到相邻位置。
+ *
+ * 【商用级优化 2026-04-16】原实现按根 rank 静态排序，若两个家族之间存在
+ * 跨树连接，图上会表现为长跨距连接线，视觉上难以追踪。本函数采用贪心
+ * 最近邻策略：以"原始第一家族"（最低 rank 根）为锚点，每一步选择与
+ * *当前家族* 跨树连接最强的未访问家族接续；无跨树亲和度时回退到原始
+ * 家族顺序，保证无跨树场景下行为与旧版完全一致。
+ *
+ * 输入不变性：
+ * - 不修改家族内部节点顺序与本地行号
+ * - 家族数 ≤ 2 或无跨树连接时直接返回原顺序的浅拷贝
+ *
+ * @param familyBlocks 原始家族块（按根 rank 升序）
+ * @param links 全部连线（含 cross-tree 标记）
+ * @returns 重排后的家族块数组（新数组，不修改入参）
+ */
+function optimizeFamilyOrder(
+  familyBlocks: readonly FamilyLayoutBlock[],
+  links: readonly AutoLayoutLinkData[],
+): FamilyLayoutBlock[] {
+  if (familyBlocks.length <= 2) {
+    return familyBlocks.slice();
+  }
+
+  const keyToFamily = new Map<string, number>();
+  familyBlocks.forEach((block, index) => {
+    block.nodes.forEach(node => keyToFamily.set(node.key, index));
+  });
+
+  const pairKey = (a: number, b: number): string => (a < b ? `${a}-${b}` : `${b}-${a}`);
+  const affinity = new Map<string, number>();
+  let hasAnyAffinity = false;
+
+  for (const link of links) {
+    if (!link.isCrossTree) {
+      continue;
+    }
+    const a = keyToFamily.get(link.from);
+    const b = keyToFamily.get(link.to);
+    if (a === undefined || b === undefined || a === b) {
+      continue;
+    }
+    const key = pairKey(a, b);
+    affinity.set(key, (affinity.get(key) ?? 0) + 1);
+    hasAnyAffinity = true;
+  }
+
+  if (!hasAnyAffinity) {
+    return familyBlocks.slice();
+  }
+
+  const visited = new Set<number>([0]);
+  const order: number[] = [0];
+
+  while (order.length < familyBlocks.length) {
+    const current = order[order.length - 1];
+    let bestIndex = -1;
+    let bestAffinity = 0;
+
+    for (let i = 0; i < familyBlocks.length; i += 1) {
+      if (visited.has(i)) {
+        continue;
+      }
+      const aff = affinity.get(pairKey(current, i)) ?? 0;
+      if (aff > bestAffinity) {
+        bestAffinity = aff;
+        bestIndex = i;
+      }
+    }
+
+    if (bestIndex === -1) {
+      // 无跨树关联，按原始顺序接续下一个家族
+      for (let i = 0; i < familyBlocks.length; i += 1) {
+        if (!visited.has(i)) {
+          bestIndex = i;
+          break;
+        }
+      }
+    }
+
+    if (bestIndex === -1) {
+      // 理论不可达（while 条件已保证有未访问家族）
+      break;
+    }
+
+    visited.add(bestIndex);
+    order.push(bestIndex);
+  }
+
+  return order.map(index => familyBlocks[index]);
+}
+
+/**
  * 计算“主任务家族区块”自动布局。
  * 同一阶段仍在同一列，但每个主任务家族会保留独立纵向区块，
  * 防止前一个主任务的子孙任务侵入下一个主任务的视觉领地。
@@ -288,7 +413,10 @@ export function computeFamilyBlockAutoLayout(
   const { parentMap, childrenMap } = buildParentAndChildrenMaps(assignedNodeMap, links);
   const stageNums = Array.from(new Set(assignedNodes.map(node => node.stage!))).sort((a, b) => a - b);
   const stageIndexMap = new Map(stageNums.map((stage, index) => [stage, index]));
-  const familyBlocks = buildFamilyBlocks(assignedNodes, parentMap, childrenMap);
+  const naturalFamilyBlocks = buildFamilyBlocks(assignedNodes, parentMap, childrenMap);
+  // 【商用级优化】按跨树连接亲和度重排家族，使关联家族尽量相邻，
+  // 减少跨树连线视觉跨距、提升可读性
+  const familyBlocks = optimizeFamilyOrder(naturalFamilyBlocks, links);
 
   const positionMap = new Map<string, NodePosition>();
   const familyIndexMap = new Map<string, number>();

@@ -114,6 +114,9 @@
         (goBackToText)="goBackToText.emit()"
         (exportPng)="exportToPng()"
         (exportSvg)="exportToSvg()"
+        (exportMermaid)="exportLogicMermaid()"
+        (exportYaml)="exportLogicYaml()"
+        (exportLogicPack)="exportLogicPack()"
         (saveToCloud)="saveToCloud()"
         [saveToCloudCallback]="saveToCloudBound"
         (toggleSelectMode)="toggleSelectMode()">
@@ -330,6 +333,9 @@
       (goBackToText)="goBackToText.emit()"
       (exportPng)="exportToPng()"
       (exportSvg)="exportToSvg()"
+      (exportMermaid)="exportLogicMermaid()"
+      (exportYaml)="exportLogicYaml()"
+      (exportLogicPack)="exportLogicPack()"
       (saveToCloud)="saveToCloud()"
       [saveToCloudCallback]="saveToCloudBound"
       (toggleSelectMode)="toggleSelectMode()">

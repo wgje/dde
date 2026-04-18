@@ -20,6 +20,123 @@ export class TaskConnectionService {
   private readonly projectState = inject(ProjectStateService);
   private readonly recorder = inject(TaskRecordTrackingService);
 
+  private getConnectionFreshnessTimestamp(connection: Pick<Connection, 'updatedAt' | 'deletedAt'>): number {
+    const toTimestamp = (value?: string | null): number => {
+      if (!value) return 0;
+      const timestamp = new Date(value).getTime();
+      return Number.isNaN(timestamp) ? 0 : timestamp;
+    };
+
+    return Math.max(toTimestamp(connection.updatedAt), toTimestamp(connection.deletedAt));
+  }
+
+  private getActiveConnectionsByPair(project: Project, sourceId: string, targetId: string): Connection[] {
+    return project.connections.filter(
+      connection => connection.source === sourceId && connection.target === targetId && !connection.deletedAt
+    );
+  }
+
+  private compareConnectionFreshness(left: Connection, right: Connection): number {
+    const leftTimestamp = this.getConnectionFreshnessTimestamp(left);
+    const rightTimestamp = this.getConnectionFreshnessTimestamp(right);
+
+    if (leftTimestamp !== rightTimestamp) {
+      return leftTimestamp - rightTimestamp;
+    }
+
+    if (left.id === right.id) {
+      return 0;
+    }
+
+    return left.id > right.id ? 1 : -1;
+  }
+
+  private pickNewestActiveConnection(connections: Connection[]): Connection | undefined {
+    if (connections.length === 0) {
+      return undefined;
+    }
+
+    return connections.reduce((latest, current) => {
+      return this.compareConnectionFreshness(current, latest) >= 0 ? current : latest;
+    });
+  }
+
+  private collapseDuplicateActiveConnections(
+    connections: Connection[],
+    sourceId: string,
+    targetId: string,
+    now: string,
+    canonicalUpdater?: (connection: Connection) => Connection,
+  ): Connection[] {
+    const activeConnections = connections.filter(
+      connection => connection.source === sourceId && connection.target === targetId && !connection.deletedAt
+    );
+
+    if (activeConnections.length === 0) {
+      return connections;
+    }
+
+    const canonicalConnection = this.pickNewestActiveConnection(activeConnections);
+    if (!canonicalConnection) {
+      return connections;
+    }
+
+    if (activeConnections.length > 1) {
+      this.logger.warn('检测到同端点重复活跃连接，已自动收口', {
+        sourceId,
+        targetId,
+        activeConnectionIds: activeConnections.map(connection => connection.id),
+        keptConnectionId: canonicalConnection.id,
+      });
+    }
+
+    return connections.map(connection => {
+      const isActivePair = connection.source === sourceId && connection.target === targetId && !connection.deletedAt;
+      if (!isActivePair) {
+        return connection;
+      }
+
+      if (connection.id === canonicalConnection.id) {
+        return canonicalUpdater ? canonicalUpdater(connection) : connection;
+      }
+
+      return {
+        ...connection,
+        deletedAt: now,
+        updatedAt: now,
+      };
+    });
+  }
+
+  private softDeleteActiveConnections(
+    connections: Connection[],
+    sourceId: string,
+    targetId: string,
+    now: string,
+  ): Connection[] {
+    const activeConnections = connections.filter(
+      connection => connection.source === sourceId && connection.target === targetId && !connection.deletedAt
+    );
+
+    if (activeConnections.length === 0) {
+      return connections;
+    }
+
+    if (activeConnections.length > 1) {
+      this.logger.warn('删除连接时检测到同端点重复活跃连接，已全部软删', {
+        sourceId,
+        targetId,
+        activeConnectionIds: activeConnections.map(connection => connection.id),
+      });
+    }
+
+    return connections.map(connection => (
+      connection.source === sourceId && connection.target === targetId && !connection.deletedAt
+        ? { ...connection, deletedAt: now, updatedAt: now }
+        : connection
+    ));
+  }
+
   // ========== 公共 API ==========
 
   private pickNewestDeletedConnection(connections: Connection[], sourceId: string, targetId: string): Connection | undefined {
@@ -31,16 +148,8 @@ export class TaskConnectionService {
       return undefined;
     }
 
-    const toTimestamp = (value?: string | null): number => {
-      if (!value) return 0;
-      const timestamp = new Date(value).getTime();
-      return Number.isNaN(timestamp) ? 0 : timestamp;
-    };
-
     return deletedConnections.reduce((latest, current) => {
-      const latestTimestamp = Math.max(toTimestamp(latest.updatedAt), toTimestamp(latest.deletedAt));
-      const currentTimestamp = Math.max(toTimestamp(current.updatedAt), toTimestamp(current.deletedAt));
-      return currentTimestamp >= latestTimestamp ? current : latest;
+      return this.compareConnectionFreshness(current, latest) >= 0 ? current : latest;
     });
   }
 
@@ -80,13 +189,21 @@ export class TaskConnectionService {
     if (!activeP) return;
     if (!this.hasValidConnectionEndpoints(activeP, sourceId, targetId)) return;
     const now = new Date().toISOString();
-    
-    const activeConnection = activeP.connections.find(
-      c => c.source === sourceId && c.target === targetId && !c.deletedAt
-    );
-    
+
+    const activeConnections = this.getActiveConnectionsByPair(activeP, sourceId, targetId);
+
     // 如果存在且未删除，跳过
-    if (activeConnection) return;
+    if (activeConnections.length > 0) {
+      if (activeConnections.length === 1) {
+        return;
+      }
+
+      this.recordAndUpdate(p => ({
+        ...p,
+        connections: this.collapseDuplicateActiveConnections(p.connections, sourceId, targetId, now),
+      }));
+      return;
+    }
 
     this.recordAndUpdate(p => ({
       ...p,
@@ -124,22 +241,19 @@ export class TaskConnectionService {
         return p;
       }
 
-      const oldActiveConnection = p.connections.find(
-        c => c.source === oldSourceId && c.target === oldTargetId && !c.deletedAt
-      );
-      const activeTargetConnection = p.connections.find(
-        c => c.source === newSourceId && c.target === newTargetId && !c.deletedAt
-      );
-      const duplicateExists = !!activeTargetConnection;
+      const oldActiveConnections = this.getActiveConnectionsByPair(p, oldSourceId, oldTargetId);
+      const activeTargetConnections = this.getActiveConnectionsByPair(p, newSourceId, newTargetId);
+      const duplicateExists = activeTargetConnections.length > 0;
 
-      if (!oldActiveConnection) {
+      if (oldActiveConnections.length === 0) {
         return p;
       }
-      
-      const updatedConnections = p.connections.map(c => 
-        (c.id === oldActiveConnection.id)
-          ? { ...c, deletedAt: now, updatedAt: now }
-          : c
+
+      const updatedConnections = this.softDeleteActiveConnections(
+        p.connections,
+        oldSourceId,
+        oldTargetId,
+        now,
       );
       
       if (!duplicateExists) {
@@ -149,8 +263,18 @@ export class TaskConnectionService {
           target: newTargetId,
           updatedAt: now,
         });
+      } else {
+        return {
+          ...p,
+          connections: this.collapseDuplicateActiveConnections(
+            updatedConnections,
+            newSourceId,
+            newTargetId,
+            now,
+          ),
+        };
       }
-      
+
       return { ...p, connections: updatedConnections };
     });
   }
@@ -162,21 +286,15 @@ export class TaskConnectionService {
   removeConnection(sourceId: string, targetId: string): void {
     const now = new Date().toISOString();
     this.recordAndUpdate(p => {
-      const activeConnection = p.connections.find(
-        c => c.source === sourceId && c.target === targetId && !c.deletedAt
-      );
+      const activeConnections = this.getActiveConnectionsByPair(p, sourceId, targetId);
 
-      if (!activeConnection) {
+      if (activeConnections.length === 0) {
         return p;
       }
 
       return {
         ...p,
-        connections: p.connections.map(c => 
-          (c.id === activeConnection.id)
-            ? { ...c, deletedAt: now, updatedAt: now }
-            : c
-        )
+        connections: this.softDeleteActiveConnections(p.connections, sourceId, targetId, now)
       };
     });
   }
@@ -187,20 +305,25 @@ export class TaskConnectionService {
   updateConnectionContent(sourceId: string, targetId: string, title: string, description: string): void {
     const now = new Date().toISOString();
     this.recordAndUpdateDebounced(p => {
-      const activeConnection = p.connections.find(
-        c => c.source === sourceId && c.target === targetId && !c.deletedAt
-      );
+      const activeConnections = this.getActiveConnectionsByPair(p, sourceId, targetId);
 
-      if (!activeConnection) {
+      if (activeConnections.length === 0) {
         return p;
       }
 
       return {
         ...p,
-        connections: p.connections.map(c => 
-          (c.id === activeConnection.id) 
-            ? { ...c, title, description, updatedAt: now } 
-            : c
+        connections: this.collapseDuplicateActiveConnections(
+          p.connections,
+          sourceId,
+          targetId,
+          now,
+          connection => ({
+            ...connection,
+            title,
+            description,
+            updatedAt: now,
+          }),
         )
       };
     });

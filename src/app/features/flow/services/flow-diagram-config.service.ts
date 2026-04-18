@@ -180,6 +180,11 @@ export class FlowDiagramConfigService {
         title: task.title || '未命名任务',
         displayId: this.compressDisplayId(task.displayId),
         stage: task.stage,
+        // 【关键修复 2026-04-16】rank 字段必须下沉到 nodeDataArray，否则
+        // 自动布局服务 (FlowLayoutService) 的 compareLayoutNodes/compareRootNodes
+        // 会读到 undefined，退化为仅按 key 字符串排序，rank 这个用户意图
+        // 最核心的因子将被彻底忽略。
+        rank: task.rank,
         loc,
         color: nodeColor,
         borderColor: isParked ? '#d97706' : borderColor, // Amber-600 outline if parked
