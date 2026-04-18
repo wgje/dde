@@ -1,6 +1,6 @@
 import { Injectable, inject, computed } from '@angular/core';
 import { Task, Project } from '../models';
-import { TaskStore } from './stores';
+import { TaskStore } from '../app/core/state/stores';
 import { ProjectStateService } from './project-state.service';
 import { UiStateService } from './ui-state.service';
 

@@ -2,6 +2,8 @@ import { Injectable, inject, signal } from '@angular/core';
 import type { LaunchSnapshot } from './launch-snapshot.service';
 import { BootStageService } from './boot-stage.service';
 import { resolveRouteIntent } from '../utils/route-intent';
+import { readRuntimePlatformSnapshot } from '../utils/runtime-platform';
+import { resolveStartupEntryRouteIntent } from '../utils/startup-entry-intent';
 import { pushStartupTrace } from '../utils/startup-trace';
 
 export type HandoffResultKind =
@@ -57,11 +59,18 @@ export function shouldDegradeMobileStartupRoute(routeUrl: string, isMobile: bool
 }
 
 function resolveHandoffResult(input: HandoffDecisionInput): HandoffResult {
-  const routeIntent = input.snapshot?.routeIntent ?? resolveRouteIntent(input.routeUrl, input.activeProjectId);
+  const startupEntryRouteIntent = resolveStartupEntryRouteIntent(input.routeUrl);
+  const routeIntent = startupEntryRouteIntent
+    ?? input.snapshot?.routeIntent
+    ?? resolveRouteIntent(input.routeUrl, input.activeProjectId);
   const wantsSpecificProject = routeIntent.kind !== 'projects';
-  const mobileDegraded = input.snapshot?.mobileDegraded === true
-    || shouldDegradeMobileStartupRoute(input.routeUrl, input.isMobile);
-  const mobileDegradeReason = input.snapshot?.degradeReason ?? 'mobile-default-text';
+  const mobileDegraded = startupEntryRouteIntent === null && (
+    input.snapshot?.mobileDegraded === true
+      || shouldDegradeMobileStartupRoute(input.routeUrl, input.isMobile)
+  );
+  const mobileDegradeReason = startupEntryRouteIntent === null
+    ? input.snapshot?.degradeReason ?? 'mobile-default-text'
+    : 'mobile-default-text';
 
   // 【P0 秒开修复 2026-03-28】快照感知：快照中有项目时视为 hasProjects=true，
   // 避免 effect 异步时序导致 prehydrate 结果未被 signal 反映而卡在 pending。
@@ -153,6 +162,7 @@ export class HandoffCoordinatorService {
 
   resolve(input: HandoffDecisionInput): HandoffResult {
     const next = resolveHandoffResult(input);
+    const runtimePlatform = readRuntimePlatformSnapshot();
     this.resultState.set(next);
     pushStartupTrace('handoff.resolve', {
       routeUrl: input.routeUrl,
@@ -164,6 +174,10 @@ export class HandoffCoordinatorService {
       bootstrapFailed: input.bootstrapFailed,
       resultKind: next.kind,
       degradeReason: next.degradeReason,
+      runtimePlatform: runtimePlatform.surface,
+      runtimeOs: runtimePlatform.os,
+      runtimeDisplayModes: runtimePlatform.displayModes,
+      runtimeAndroidHostPackage: runtimePlatform.androidHostPackage,
       hidden: typeof document !== 'undefined' ? document.hidden : null,
       online: typeof navigator !== 'undefined' ? navigator.onLine : null,
     });

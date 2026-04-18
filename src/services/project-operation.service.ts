@@ -23,6 +23,7 @@ import { UndoService } from './undo.service';
 import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
 import { ChangeTrackerService } from './change-tracker.service';
+// eslint-disable-next-line no-restricted-imports -- RetryQueueService 尚未迁移到 src/services/，暂保持此引用
 import { RetryQueueService } from '../app/core/services/sync/retry-queue.service';
 import { Project } from '../models';
 import { type ConflictResolutionPlan } from './conflict-resolution.types';

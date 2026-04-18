@@ -207,6 +207,8 @@ export const REQUEST_THROTTLE_CONFIG = {
   DEDUPE_TTL: 5000,
   /** 请求队列最大长度 */
   MAX_QUEUE_SIZE: 100,
+  /** 序列化连接操作间隔（毫秒）- 避免连续写操作触发 Supabase 速率限制 */
+  SEQUENTIAL_OP_DELAY_MS: 200,
 } as const;
 
 /**

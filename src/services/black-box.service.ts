@@ -16,8 +16,7 @@ import {
   deleteBlackBoxEntry as _deleteFromStore,
   getTodayDate
 } from '../state/focus-stores';
-import { BlackBoxSyncService } from './black-box-sync.service';
-import type { PullChangesOptions } from './black-box-sync.service';
+import { BlackBoxSyncService, type PullChangesOptions } from './black-box-sync.service';
 import { AuthService } from './auth.service';
 import { LoggerService } from './logger.service';
 import { AUTH_CONFIG } from '../config/auth.config';

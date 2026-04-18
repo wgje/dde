@@ -3,7 +3,7 @@
  * 
  * 数据库行类型和映射辅助类型
  */
-import { Task, Connection, Attachment } from '../models';
+import { Attachment } from '../models';
 
 /**
  * 数据库任务行类型

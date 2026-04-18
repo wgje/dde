@@ -9,6 +9,7 @@
 import { DestroyRef, Injectable, WritableSignal, effect, inject } from '@angular/core';
 import { PARKING_CONFIG } from '../config/parking.config';
 import { DOCK_NOTIFICATION } from '../config/dock-i18n.config';
+import { IDLE_SCHEDULE_CONFIG } from '../config/timeout.config';
 import {
   DockEntry,
   DockPendingDecision,
@@ -322,7 +323,8 @@ export class DockEngineLifecycleService {
       if (typeof requestIdleCallback === 'function') {
         requestIdleCallback(cb);
       } else {
-        setTimeout(cb, 2000);
+        // 【超时治理 2026-04-16】常量化为 IDLE_SCHEDULE_CONFIG.STANDARD_MS
+        setTimeout(cb, IDLE_SCHEDULE_CONFIG.STANDARD_MS);
       }
     };
     scheduleIdle(() => {

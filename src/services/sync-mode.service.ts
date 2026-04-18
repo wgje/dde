@@ -17,6 +17,7 @@
 import { Injectable, inject, signal, computed, DestroyRef } from '@angular/core';
 import { LoggerService } from './logger.service';
 import { APP_LIFECYCLE_CONFIG } from '../config/app-lifecycle.config';
+import { CONFIG_OPERATION_DELAY } from '../config/timeout.config';
 
 /**
  * 同步模式枚举
@@ -447,8 +448,8 @@ export class SyncModeService {
             newInterval: DEFAULT_SYNC_INTERVAL
           });
           merged.interval = DEFAULT_SYNC_INTERVAL;
-          // 保存迁移后的配置
-          setTimeout(() => this.saveConfig(), 100);
+          // 保存迁移后的配置（稳定化延迟，给加载过程充足时间）
+          setTimeout(() => this.saveConfig(), CONFIG_OPERATION_DELAY.SAVE_STABILIZE);
         }
         
         // 【安全检查】确保 interval 在有效范围内

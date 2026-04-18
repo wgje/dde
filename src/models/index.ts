@@ -228,7 +228,7 @@ export interface UndoAction {
  * - automatic: 自动模式 - 按间隔自动同步 * - manual: 手动模式 - 仅在用户手动触发或应用启动/退出时同步
  * - completely-manual: 完全手动模式 - 用户必须明确选择"上传"/"下载"
  */
-type SyncMode = 'automatic' | 'manual' | 'completely-manual';
+export type SyncMode = 'automatic' | 'manual' | 'completely-manual';
 
 // ============================================
 // GoJS 边界类型导出

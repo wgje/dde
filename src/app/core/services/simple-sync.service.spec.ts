@@ -50,7 +50,6 @@ import { PermanentFailureError } from '../../../utils/permanent-failure-error';
 
 // vitest 4.x: vi.fn() 类型为 Mock<Procedure | Constructable>，不可直接调用；
 // 使用交集类型让 mock 对象既保留 Mock 方法又可直接调用
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 type MockFn = ReturnType<typeof vi.fn> & ((...args: any[]) => any);
 
 // 使用 SentryLazyLoaderService mock（来自 test-setup.mocks.ts）

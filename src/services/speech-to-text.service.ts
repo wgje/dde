@@ -18,6 +18,7 @@ import { FOCUS_CONFIG } from '../config/focus.config';
 import { ErrorCodes, ErrorMessages } from '../utils/result';
 import { openIndexedDBAdaptive } from '../utils/indexeddb-open';
 import { environment } from '../environments/environment';
+// eslint-disable-next-line no-restricted-imports -- SessionManagerService 尚未迁移到 src/services/，语音转写恢复需复用其会话校验能力
 import { SessionManagerService } from '../app/core/services/sync/session-manager.service';
 import type { Session } from '@supabase/supabase-js';
 import { 

@@ -65,6 +65,19 @@ CREATE TABLE IF NOT EXISTS public.routine_completions (
     FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE
 );
 
+-- 1.4 routine_completion_events —— 幂等完成事件表
+CREATE TABLE IF NOT EXISTS public.routine_completion_events (
+  id              UUID PRIMARY KEY,
+  routine_id      UUID NOT NULL,
+  user_id         UUID NOT NULL,
+  date_key        DATE NOT NULL,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT routine_completion_events_routine_id_fkey
+    FOREIGN KEY (routine_id) REFERENCES public.routine_tasks(id) ON DELETE CASCADE,
+  CONSTRAINT routine_completion_events_user_id_fkey
+    FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE
+);
+
 -- ============================================================================
 -- §1b UUID 迁移兼容处理
 -- ============================================================================
@@ -377,6 +390,8 @@ ALTER TABLE public.routine_tasks ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.routine_tasks FORCE ROW LEVEL SECURITY;
 ALTER TABLE public.routine_completions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.routine_completions FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.routine_completion_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.routine_completion_events FORCE ROW LEVEL SECURITY;
 ALTER TABLE public.black_box_entries FORCE ROW LEVEL SECURITY;
 
 -- ============================================================================
@@ -392,6 +407,7 @@ REVOKE ALL ON TABLE public.black_box_entries FROM anon;
 REVOKE ALL ON TABLE public.focus_sessions FROM anon;
 REVOKE ALL ON TABLE public.routine_tasks FROM anon;
 REVOKE ALL ON TABLE public.routine_completions FROM anon;
+REVOKE ALL ON TABLE public.routine_completion_events FROM anon;
 REVOKE ALL ON TABLE public.transcription_usage FROM anon;
 
 -- 墓碑/协作表
@@ -435,8 +451,11 @@ GRANT ALL ON TABLE public.focus_sessions TO authenticated;
 GRANT ALL ON TABLE public.focus_sessions TO service_role;
 GRANT ALL ON TABLE public.routine_tasks TO authenticated;
 GRANT ALL ON TABLE public.routine_tasks TO service_role;
-GRANT ALL ON TABLE public.routine_completions TO authenticated;
+GRANT SELECT ON TABLE public.routine_completions TO authenticated;
 GRANT ALL ON TABLE public.routine_completions TO service_role;
+REVOKE INSERT, UPDATE, DELETE ON TABLE public.routine_completions FROM authenticated;
+GRANT ALL ON TABLE public.routine_completion_events TO service_role;
+REVOKE ALL ON TABLE public.routine_completion_events FROM authenticated;
 GRANT ALL ON TABLE public.transcription_usage TO authenticated;
 GRANT ALL ON TABLE public.transcription_usage TO service_role;
 GRANT ALL ON TABLE public.task_tombstones TO authenticated;
@@ -515,24 +534,12 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 -- 7.3 routine_completions: 优化策略
 DO $$ BEGIN DROP POLICY IF EXISTS "routine_completions_all" ON public.routine_completions; EXCEPTION WHEN undefined_object THEN NULL; END $$;
+DO $$ BEGIN DROP POLICY IF EXISTS "routine_completions_insert" ON public.routine_completions; EXCEPTION WHEN undefined_object THEN NULL; END $$;
+DO $$ BEGIN DROP POLICY IF EXISTS "routine_completions_update" ON public.routine_completions; EXCEPTION WHEN undefined_object THEN NULL; END $$;
+DO $$ BEGIN DROP POLICY IF EXISTS "routine_completions_delete" ON public.routine_completions; EXCEPTION WHEN undefined_object THEN NULL; END $$;
 
 DO $$ BEGIN
   CREATE POLICY "routine_completions_select" ON public.routine_completions FOR SELECT
-    TO authenticated USING ((SELECT auth.uid()) = user_id);
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-
-DO $$ BEGIN
-  CREATE POLICY "routine_completions_insert" ON public.routine_completions FOR INSERT
-    TO authenticated WITH CHECK ((SELECT auth.uid()) = user_id);
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-
-DO $$ BEGIN
-  CREATE POLICY "routine_completions_update" ON public.routine_completions FOR UPDATE
-    TO authenticated USING ((SELECT auth.uid()) = user_id);
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-
-DO $$ BEGIN
-  CREATE POLICY "routine_completions_delete" ON public.routine_completions FOR DELETE
     TO authenticated USING ((SELECT auth.uid()) = user_id);
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
@@ -558,11 +565,10 @@ DO $$ BEGIN
     TO authenticated WITH CHECK (user_id = (SELECT auth.uid()));
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
--- 7.6 cleanup_logs: authenticated 只读（仅限本用户记录）
+-- 7.6 cleanup_logs: 仅 service_role 可访问（无 user_id 列，不对 authenticated 暴露）
 DO $$ BEGIN
-  CREATE POLICY "cleanup_logs_authenticated_select" ON public.cleanup_logs FOR SELECT
-    TO authenticated USING (user_id = (SELECT auth.uid()));
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+  DROP POLICY IF EXISTS "cleanup_logs_authenticated_select" ON public.cleanup_logs;
+EXCEPTION WHEN undefined_object THEN NULL; END $$;
 
 -- ============================================================================
 -- §8  RPC 函数安全分级
@@ -580,6 +586,71 @@ DO $$ BEGIN
   REVOKE ALL ON FUNCTION public.cleanup_expired_scan_records() FROM authenticated;
   GRANT EXECUTE ON FUNCTION public.cleanup_expired_scan_records() TO service_role;
 EXCEPTION WHEN undefined_function THEN NULL; END $$;
+
+DO $$ BEGIN
+  CREATE INDEX IF NOT EXISTS idx_routine_completion_events_user_routine_date
+    ON public.routine_completion_events (user_id, routine_id, date_key);
+
+  CREATE OR REPLACE FUNCTION public.increment_routine_completion(
+    p_completion_id uuid,
+    p_routine_id uuid,
+    p_date_key date
+  )
+  RETURNS integer
+  LANGUAGE plpgsql
+  SECURITY DEFINER
+  SET search_path = 'pg_catalog', 'public'
+  AS $fn$
+  DECLARE
+    v_user_id uuid;
+    v_next_count integer;
+  BEGIN
+    v_user_id := auth.uid();
+
+    IF v_user_id IS NULL THEN
+      RAISE EXCEPTION 'Authentication required'
+        USING ERRCODE = '42501';
+    END IF;
+
+    PERFORM 1
+    FROM public.routine_tasks
+    WHERE id = p_routine_id
+      AND user_id = v_user_id;
+
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'Routine not found'
+        USING ERRCODE = '42501';
+    END IF;
+
+    INSERT INTO public.routine_completion_events (id, routine_id, user_id, date_key)
+    VALUES (p_completion_id, p_routine_id, v_user_id, p_date_key)
+    ON CONFLICT (id) DO NOTHING;
+
+    IF NOT FOUND THEN
+      SELECT count
+      INTO v_next_count
+      FROM public.routine_completions
+      WHERE user_id = v_user_id
+        AND routine_id = p_routine_id
+        AND date_key = p_date_key;
+
+      RETURN COALESCE(v_next_count, 0);
+    END IF;
+
+    INSERT INTO public.routine_completions (id, routine_id, user_id, date_key, count)
+    VALUES (p_completion_id, p_routine_id, v_user_id, p_date_key, 1)
+    ON CONFLICT (user_id, routine_id, date_key) DO UPDATE
+    SET count = public.routine_completions.count + 1
+    RETURNING count INTO v_next_count;
+
+    RETURN v_next_count;
+  END;
+  $fn$;
+
+  REVOKE ALL ON FUNCTION public.increment_routine_completion(uuid, uuid, date) FROM PUBLIC;
+  REVOKE ALL ON FUNCTION public.increment_routine_completion(uuid, uuid, date) FROM anon;
+  GRANT EXECUTE ON FUNCTION public.increment_routine_completion(uuid, uuid, date) TO authenticated;
+EXCEPTION WHEN undefined_table THEN NULL; END $$;
 
 DO $$ BEGIN
   REVOKE ALL ON FUNCTION public.cleanup_old_deleted_connections() FROM PUBLIC;

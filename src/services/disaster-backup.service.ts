@@ -34,6 +34,21 @@ const ACTION_QUEUE_BACKUP_STORE_NAME = 'queue-backup';
 const OFFLINE_SNAPSHOT_STORAGE_KEY = 'nanoflow.offline-cache-v2';
 const OFFLINE_SNAPSHOT_RECORD_PREFIX = 'offline-snapshot:';
 
+/**
+ * 允许被动态查询的备份表白名单
+ *
+ * 【2026-04-16 T0-3】任何动态表名必须先经过此白名单；
+ * 禁止直接把用户输入或未审核的字符串传入 `supabase.from()`。
+ */
+const BACKUP_TABLES = [
+  'user_preferences',
+  'focus_sessions',
+  'transcription_usage',
+  'routine_tasks',
+  'routine_completions',
+] as const;
+type BackupTable = (typeof BACKUP_TABLES)[number];
+
 export interface LocalDisasterBackupOptions {
   autoBackupEnabled: boolean;
   autoBackupIntervalMs: number;
@@ -350,14 +365,22 @@ export class DisasterBackupService {
     };
   }
 
-  private async fetchUserScopedRows<T>(table: string, userId: string | null): Promise<T[]> {
+  private async fetchUserScopedRows<T>(table: BackupTable, userId: string | null): Promise<T[]> {
+    // 白名单断言（防御性），阻止未来误传非白名单字符串
+    if (!BACKUP_TABLES.includes(table)) {
+      throw new Error(`[disaster-backup] Unsupported backup table: ${String(table)}`);
+    }
+
     if (!userId || !this.supabase.isConfigured) {
       return [];
     }
 
     const client = this.supabase.client();
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- 动态表名无法在编译期推断，运行时安全
-    const query = (client.from as any)(table).select('*');
+    // Supabase 客户端类型对动态表名 union 推导较慢，使用 unknown 收敛于入口
+    // 实际类型由白名单 + `T` 参数保证
+    const query = (client.from as unknown as (t: BackupTable) => {
+      select(cols: string): { eq(col: string, val: string): Promise<{ data: unknown; error: { message: string } | null }> };
+    })(table).select('*');
     const result = await query.eq('user_id', userId);
 
     if (result.error) {
@@ -613,7 +636,7 @@ export class DisasterBackupService {
     try {
       return localStorage.getItem(key);
     } catch {
-      return null;
+        return null; // eslint-disable-line no-restricted-syntax -- localStorage 访问异常时"无数据"语义正确，null 触发调用方降级
     }
   }
 
@@ -622,7 +645,7 @@ export class DisasterBackupService {
     try {
       return JSON.parse(value);
     } catch {
-      return null;
+        return null; // eslint-disable-line no-restricted-syntax -- JSON 解析失败时"无数据"语义正确，null 触发调用方降级
     }
   }
 

@@ -325,7 +325,7 @@ export class SessionManagerService {
       const decoded = atob(padded);
       return JSON.parse(decoded) as Record<string, unknown>;
     } catch {
-      return null;
+      return null; // eslint-disable-line no-restricted-syntax -- JWT 载荷解析失败按无效令牌处理，返回 null 供上层触发恢复流程
     }
   }
 

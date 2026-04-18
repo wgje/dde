@@ -857,7 +857,7 @@ export class ImportService {
       
       return { metadata, projects };
     } catch {
-      return null;
+      return null; // eslint-disable-line no-restricted-syntax -- 文件解析失败时"无法读取"语义正确，null 触发调用方抛错提示
     }
   }
   

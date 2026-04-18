@@ -37,7 +37,7 @@ function decodeBase64UrlJson(segment: string): Record<string, unknown> | null {
     const decoded = atob(padded);
     return JSON.parse(decoded) as Record<string, unknown>;
   } catch {
-    return null;
+     return null; // eslint-disable-line no-restricted-syntax -- JWT payload 解析边界：atob/JSON.parse 失败等同于"无效 token"，null 是正确语义
   }
 }
 
@@ -70,7 +70,6 @@ export class SupabaseClientService {
     promise: Promise<Response>;
     createdAt: number;
     response?: Response;
-    error?: unknown;
   }>();
   private readonly REQUEST_DEDUP_TTL_MS = 5000; // 5s 内去重
   
@@ -187,7 +186,7 @@ export class SupabaseClientService {
     try {
       return `sb-${new URL(this.supabaseUrl).hostname.split('.')[0]}-auth-token`;
     } catch {
-      return null;
+        return null; // eslint-disable-line no-restricted-syntax -- URL 解析失败时 auth token key 不可用，null 是正确语义
     }
   }
 
@@ -683,9 +682,6 @@ export class SupabaseClientService {
         if (cached.response) {
           return cached.response.clone();
         }
-        if (cached.error) {
-          return Promise.reject(cached.error);
-        }
         return await cached.promise;
       }
 
@@ -901,9 +897,7 @@ export class SupabaseClientService {
       if (this.shouldMarkOfflineFromFetchFailure(error)) {
         // 延迟 100ms 再次确认，过滤一次性网络波动
         await new Promise(r => setTimeout(r, NETWORK_OFFLINE_DEBOUNCE_MS));
-        if (typeof navigator !== 'undefined' && navigator.onLine) {
-          this.logger.debug('获取失败但网络已恢复，不标记离线', { error });
-        } else {
+        if (!isBrowserNetworkSuspendedWindow()) {
           this.setOfflineModeState(true, 'request');
         }
       }

@@ -8,7 +8,7 @@
  */
 
 import { Injectable, inject, signal, OnDestroy } from '@angular/core';
-import { TaskStore, ProjectStore } from './stores';
+import { TaskStore, ProjectStore } from '../app/core/state/stores';
 import { ParkingReminder, ParkingNotice } from '../models';
 import { PARKING_CONFIG } from '../config/parking.config';
 import { ParkingService } from './parking.service';

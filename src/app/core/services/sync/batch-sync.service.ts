@@ -732,6 +732,15 @@ export class BatchSyncService {
             );
             // 位置增量更新失败时，立即回退到完整 upsert，避免 406 导致依赖断裂
             if (!positionSuccess) {
+              // 【鲁棒性 2026-04-16】浏览器网络挂起：降级为 debug，避免控制台刷屏
+              if (isBrowserNetworkSuspendedWindow()) {
+                this.logger.debug('浏览器网络挂起，跳过位置增量回退', {
+                  projectId: projectSnapshot.id,
+                  taskId: task.id
+                });
+                failedTaskIds.push(task.id);
+                continue;
+              }
               this.logger.warn('任务位置增量推送失败，回退完整任务推送', {
                 projectId: projectSnapshot.id,
                 taskId: task.id

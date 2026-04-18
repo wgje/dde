@@ -1,5 +1,6 @@
 import { Injectable, signal, computed } from '@angular/core';
 import { environment } from '../environments/environment';
+import { IDLE_SCHEDULE_CONFIG } from '../config/timeout.config';
 import {
   getRemainingBrowserNetworkResumeDelayMs,
   isBrowserNetworkSuspendedWindow,
@@ -200,11 +201,12 @@ export class SentryLazyLoaderService {
     // 使用 requestIdleCallback 在浏览器空闲时初始化
     // 超时 5s 确保 Sentry 不在关键渲染路径上
     // 【性能优化 2026-02-05】从 2s 增加到 5s，减少对 LCP 的影响
+    // 【超时治理 2026-04-16】常量化为 IDLE_SCHEDULE_CONFIG.LONG_MS
     if (typeof requestIdleCallback !== 'undefined') {
-      requestIdleCallback(initCallback, { timeout: 5000 });
+      requestIdleCallback(initCallback, { timeout: IDLE_SCHEDULE_CONFIG.LONG_MS });
     } else {
       // Safari 等不支持 requestIdleCallback 的浏览器
-      setTimeout(initCallback, 5000);
+      setTimeout(initCallback, IDLE_SCHEDULE_CONFIG.LONG_MS);
     }
   }
 

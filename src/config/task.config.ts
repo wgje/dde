@@ -40,3 +40,9 @@ export const UNDO_CONFIG = {
     MAX_PERSISTED_ITEMS: 50,
   },
 } as const;
+
+/**
+ * 任务优先级枚举值
+ * 【集中定义】所有优先级验证、类型检查、UI 展示应通过此常量
+ */
+export const TASK_PRIORITY_LIST = ['low', 'medium', 'high', 'urgent'] as const;

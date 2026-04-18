@@ -367,7 +367,7 @@ export class DockSnapshotPersistenceService {
         code: ErrorCodes.DOCK_IDB_RESTORE_FAILED,
         error: err,
       });
-      return null;
+        return null; // eslint-disable-line no-restricted-syntax -- IDB 读取失败时"无快照"语义正确，null 触发调用方降级到 localStorage
     }
   }
 
@@ -383,7 +383,7 @@ export class DockSnapshotPersistenceService {
         code: ErrorCodes.DOCK_IDB_RESTORE_FAILED,
         error: err,
       });
-      return null;
+        return null; // eslint-disable-line no-restricted-syntax -- localStorage 读取/解析失败时"无快照"语义正确，null 触发调用方降级
     }
   }
 

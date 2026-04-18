@@ -20,7 +20,7 @@ import { AuthService } from './auth.service';
 import { LoggerService } from './logger.service';
 import { ConflictStorageService } from './conflict-storage.service';
 import { ToastService } from './toast.service';
-import { Project, Task, UserPreferences } from '../models';
+import { Project } from '../models';
 import { AUTH_CONFIG } from '../config/auth.config';
 import {
   FocusSessionPayload,
@@ -36,7 +36,6 @@ import {
 import {
   FocusSessionRecord,
   RoutineCompletionMutation,
-  RoutineTask,
 } from '../models/parking-dock';
 
 type ProjectSyncResult = {

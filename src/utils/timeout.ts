@@ -214,7 +214,7 @@ async function fetchWithTimeout(
  * 创建带超时和重试的 fetch 请求
  * 仅适用于 GET 等幂等请求
  */
-async function fetchWithRetry(
+export async function fetchWithRetry(
   url: string,
   init?: RequestInit,
   options: RetryOptions = {}
@@ -241,6 +241,8 @@ async function supabaseWithTimeout<T>(
 ): Promise<T> {
   return withTimeout(Promise.resolve(queryFn()), { timeout });
 }
+
+export { supabaseWithTimeout };
 
 /**
  * 为 Supabase 幂等读取操作创建超时+重试包装

@@ -22,7 +22,6 @@ import {
   failure,
   ErrorCodes,
 } from '../../../../utils/result';
-import { PARKING_CONFIG } from '../../../../config/parking.config';
 
 /** 最小化运行时校验：DockSnapshot 至少含合法 version */
 function isDockSnapshotLike(value: unknown): value is DockSnapshot {
@@ -101,7 +100,7 @@ export class FocusConsoleSyncService {
     try {
       return this.supabase.client();
     } catch {
-      return null;
+      return null; // eslint-disable-line no-restricted-syntax -- Supabase 未就绪时返回 null，调用方统一转为离线分支
     }
   }
 
@@ -165,6 +164,7 @@ export class FocusConsoleSyncService {
 
       // H-LWW fix: 用 epoch ms 比较时间戳，避免 ISO 字符串格式差异
       // LWW：本地更新时间 > 远端时，跳过远端数据（本地赢）
+      // 注意：等时情况此处保持"远端赢"（与历史语义一致）。
       if (localUpdatedAt && row.updated_at) {
         const remoteMs = new Date(row.updated_at).getTime();
         const localMs = new Date(localUpdatedAt).getTime();
@@ -327,11 +327,7 @@ export class FocusConsoleSyncService {
 
   /**
    * 递增日常任务完成计数。
-   * 【HR-3 修复】冲突时自动重试（读取最新 count 后再更新），
-   * 避免静默丢弃增量。
-   * DATA-C3 fix: 改为迭代循环，遵守禁递归规则。
-   * TODO(NF-ROUTINE-RPC): 替换为 Supabase RPC `increment_routine_completion`
-   * 实现真正的原子 `UPDATE ... SET count = count + 1`。
+   * 通过幂等事件 + 原子聚合 RPC 避免并发丢增量和队列重放双计数。
    */
   async incrementRoutineCompletion(
     mutation: RoutineCompletionMutation,
@@ -344,79 +340,22 @@ export class FocusConsoleSyncService {
     const client = this.getSupabaseClient();
     if (!client) return failure(ErrorCodes.SYNC_OFFLINE, '当前离线');
 
-    const maxRetries = PARKING_CONFIG.CLOUD_PULL_MAX_RETRIES;
-
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
-      try {
-        // Step 1: 尝试插入（首次完成）
-        const { error: insertError } = await client
-          .from('routine_completions')
-          .insert({
-            id: mutation.completionId,
-            routine_id: mutation.routineId,
-            user_id: mutation.userId,
-            date_key: mutation.dateKey,
-            count: 1,
-          });
-
-        if (!insertError) return success(undefined);
-
-        // 非唯一约束冲突(23505)则为真正错误
-        const pgCode = (insertError as unknown as Record<string, unknown>).code;
-        if (pgCode !== '23505') {
-          throw supabaseErrorToError(insertError);
-        }
-
-        // Step 2: 已存在 — 读取当前 count 并乐观更新
-        const { data, error } = await client
-          .from('routine_completions')
-          .select('id,count')
-          .eq('user_id', mutation.userId)
-          .eq('routine_id', mutation.routineId)
-          .eq('date_key', mutation.dateKey)
-          .maybeSingle();
-        if (error) throw supabaseErrorToError(error);
-
-        if (!data) {
-          this.logger.warn('incrementRoutineCompletion: row disappeared after conflict');
-          return failure(ErrorCodes.FOCUS_CONSOLE_INCREMENT_FAILED, '完成记录意外消失');
-        }
-
-        const record = data as Record<string, unknown>;
-        const existingCount = Number(record.count ?? 0);
-        const existingId = String(record.id ?? '');
-        const nextCount = Math.max(1, existingCount + 1);
-
-        // 乐观并发：filter on expected count 检测并发修改
-        const { data: updateResult, error: updateError } = await client
-          .from('routine_completions')
-          .update({ count: nextCount })
-          .eq('id', existingId)
-          .eq('user_id', mutation.userId)
-          .eq('count', existingCount)
-          .select('id');
-        if (updateError) throw supabaseErrorToError(updateError);
-
-        if (updateResult && updateResult.length > 0) {
-          return success(undefined);
-        }
-
-        // 并发冲突，继续下一次迭代重试
-        if (attempt < maxRetries) {
-          this.logger.warn(`incrementRoutineCompletion: conflict detected, retry ${attempt + 1}/${maxRetries}`);
-        }
-      } catch (error) {
-        if (isBrowserNetworkSuspendedError(error)) {
-          this.logger.debug('incrementRoutineCompletion: 浏览器网络挂起窗口内跳过远端写入');
-          return this.buildBrowserSuspendedFailure();
-        }
-
-        this.logger.warn('incrementRoutineCompletion failed', error);
-        return failure(ErrorCodes.FOCUS_CONSOLE_INCREMENT_FAILED, '完成记录更新失败');
+    try {
+      const { error } = await client.rpc('increment_routine_completion', {
+        p_completion_id: mutation.completionId,
+        p_routine_id: mutation.routineId,
+        p_date_key: mutation.dateKey,
+      });
+      if (error) throw supabaseErrorToError(error);
+      return success(undefined);
+    } catch (error) {
+      if (isBrowserNetworkSuspendedError(error)) {
+        this.logger.debug('incrementRoutineCompletion: 浏览器网络挂起窗口内跳过远端写入');
+        return this.buildBrowserSuspendedFailure();
       }
-    }
 
-    this.logger.warn('incrementRoutineCompletion: conflict persists after retry');
-    return failure(ErrorCodes.SYNC_CONFLICT, '并发修改冲突');
+      this.logger.warn('incrementRoutineCompletion failed', error);
+      return failure(ErrorCodes.FOCUS_CONSOLE_INCREMENT_FAILED, '完成记录更新失败');
+    }
   }
 }

@@ -26,6 +26,15 @@ const mockLoggerCategory = {
   info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(),
 };
 
+function createJwtLikeToken(payload: Record<string, unknown>): string {
+  const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' }), 'utf8')
+    .toString('base64url');
+  const body = Buffer.from(JSON.stringify(payload), 'utf8')
+    .toString('base64url');
+
+  return `${header}.${body}.signature`;
+}
+
 function setVisibilityState(state: DocumentVisibilityState): void {
   Object.defineProperty(document, 'visibilityState', {
     configurable: true,
@@ -86,6 +95,24 @@ describe('SupabaseClientService', () => {
   describe('isConfigured', () => {
     it('无环境配置时为特定值', () => {
       expect(typeof service.isConfigured).toBe('boolean');
+    });
+  });
+
+  describe('sensitive key guard', () => {
+    it('应拒绝 base64url 编码的 service_role JWT', () => {
+      const token = createJwtLikeToken({ role: 'service_role', marker: '࠾' });
+      const candidate = service as unknown as { isSensitiveKey: (key: string) => boolean };
+
+      expect(token.split('.')[1]).toContain('-');
+      expect(candidate.isSensitiveKey(token)).toBe(true);
+    });
+
+    it('应允许 base64url 编码的 anon JWT', () => {
+      const token = createJwtLikeToken({ role: 'anon', marker: '࠾' });
+      const candidate = service as unknown as { isSensitiveKey: (key: string) => boolean };
+
+      expect(token.split('.')[1]).not.toContain('=');
+      expect(candidate.isSensitiveKey(token)).toBe(false);
     });
   });
 

@@ -42,6 +42,7 @@ describe('HandoffCoordinatorService', () => {
   afterEach(() => {
     vi.runOnlyPendingTimers();
     vi.useRealTimers();
+    delete (window as Window & { __NANOFLOW_STARTUP_TRACE__?: unknown }).__NANOFLOW_STARTUP_TRACE__;
   });
 
   it('should stay pending until layout is marked stable', () => {
@@ -117,6 +118,110 @@ describe('HandoffCoordinatorService', () => {
 
     expect(result.kind).toBe('full');
     expect(result.degradeReason).toBeNull();
+  });
+
+  it('should prefer explicit shortcut entry over snapshot deep-link restore', () => {
+    service.markLayoutStable();
+
+    const result = service.resolve({
+      routeUrl: '/projects?entry=shortcut&intent=open-workspace',
+      isMobile: false,
+      hasProjects: true,
+      activeProjectId: null,
+      authConfigured: false,
+      authRuntimeState: 'ready',
+      isCheckingSession: false,
+      showLoginRequired: false,
+      bootstrapFailed: false,
+      snapshot: launchSnapshot({
+        routeIntent: { kind: 'task', projectId: 'p-1', taskId: 't-9' },
+      }),
+      snapshotProjectsTrusted: true,
+    });
+
+    expect(result.kind).toBe('full');
+    expect(result.degradeReason).toBeNull();
+  });
+
+  it('should keep explicit twa entry as full handoff on mobile', () => {
+    service.markLayoutStable();
+
+    const result = service.resolve({
+      routeUrl: '/projects/p-1/flow?entry=twa&intent=open-workspace',
+      isMobile: true,
+      hasProjects: true,
+      activeProjectId: 'p-1',
+      authConfigured: false,
+      authRuntimeState: 'ready',
+      isCheckingSession: false,
+      showLoginRequired: false,
+      bootstrapFailed: false,
+      snapshot: launchSnapshot({
+        routeIntent: { kind: 'flow', projectId: 'p-1', taskId: null },
+        mobileDegraded: true,
+        degradeReason: 'mobile-default-text',
+      }),
+      snapshotProjectsTrusted: true,
+    });
+
+    expect(result.kind).toBe('full');
+    expect(result.degradeReason).toBeNull();
+  });
+
+  it('should include runtime platform details in the startup trace payload', () => {
+    vi.stubGlobal('navigator', {
+      userAgent: 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/123.0.0.0 Mobile Safari/537.36',
+      onLine: true,
+    });
+
+    Object.defineProperty(document, 'referrer', {
+      configurable: true,
+      value: 'android-app://app.nanoflow.twa/',
+    });
+
+    const matchMediaSpy = vi.fn((query: string) => ({
+      matches: query === '(display-mode: standalone)',
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }));
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: matchMediaSpy,
+    });
+
+    service.markLayoutStable();
+    service.resolve({
+      routeUrl: '/projects?entry=twa&intent=open-workspace',
+      isMobile: true,
+      hasProjects: true,
+      activeProjectId: 'p-1',
+      authConfigured: false,
+      authRuntimeState: 'ready',
+      isCheckingSession: false,
+      showLoginRequired: false,
+      bootstrapFailed: false,
+      snapshot: launchSnapshot(),
+      snapshotProjectsTrusted: true,
+    });
+
+    const records = (
+      window as Window & {
+        __NANOFLOW_STARTUP_TRACE__?: Array<{ event: string; data?: Record<string, unknown> | null }>;
+      }
+    ).__NANOFLOW_STARTUP_TRACE__ ?? [];
+    const trace = records.find(entry => entry.event === 'handoff.resolve');
+
+    expect(trace?.data).toEqual(expect.objectContaining({
+      runtimePlatform: 'twa-shell',
+      runtimeOs: 'android',
+      runtimeAndroidHostPackage: 'app.nanoflow.twa',
+      runtimeDisplayModes: ['standalone'],
+    }));
   });
 
   it('should fall back to empty-workspace when no local projects are available', () => {

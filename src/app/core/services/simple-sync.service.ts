@@ -1,17 +1,24 @@
 /**
- * SimpleSyncService - 简化的同步服务（门面模式）
- * 
- * 核心原则（来自 agents.md）：
+ * SimpleSyncService - 同步服务（门面模式）
+ *
+ * 核心原则（来自 AGENTS.md）：
  * - 采用 Last-Write-Wins (LWW) 策略
  * - 用户操作 → 立即写入本地 → 后台推送到 Supabase
  * - 错误处理：失败放入 RetryQueue，网络恢复自动重试
- * 
- * 【技术债务重构】2026-02-01
- * - 从 3499 行重构为 ≤800 行门面服务
- * - 任务同步逻辑委托给 TaskSyncOperationsService
- * - 连接同步逻辑委托给 ConnectionSyncOperationsService
- * - 重试队列逻辑整合到 RetryQueueService
- * - 项目同步逻辑委托给 ProjectDataService
+ *
+ * 委托拓扑：
+ * - 任务同步：TaskSyncOperationsService
+ * - 连接同步：ConnectionSyncOperationsService
+ * - 项目同步：ProjectDataService
+ * - 重试队列：RetryQueueService
+ *
+ * 【技术债务 · 尺寸红线（2026-04-16 校正）】
+ * AGENTS.md §12 规定单文件硬顶 800 行。本文件仍明显越界。
+ * 2026-02-01 的重构说明曾声称「≤800 行门面」，但随着 P0 修复持续合并，
+ * 门面本身再次膨胀。后续工作必须只做「下切」：
+ *   - 抽离 setupXxx/handleXxx 私有方法到独立子服务
+ *   - 任何新加的业务分支都应落到子服务，而不是继续堆在这里
+ *   - 不得在此处再写「已重构为 X 行」的承诺直到 line count 实际达标
  */
 
 import { Injectable, inject, signal, computed, DestroyRef, Injector } from '@angular/core';
@@ -511,8 +518,7 @@ export class SimpleSyncService {
 
     this.clearConnectivityRecoveryTimer();
     const recoveryEpoch = this.connectivityRecoveryEpoch;
-    let recoveryPromise: Promise<void>;
-    recoveryPromise = this.restoreRemoteConnectivityInternal(reason, recoveryEpoch)
+    const recoveryPromise: Promise<void> = this.restoreRemoteConnectivityInternal(reason, recoveryEpoch)
       .finally(() => {
         if (this.connectivityRecoveryPromise === recoveryPromise) {
           this.connectivityRecoveryPromise = null;

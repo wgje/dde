@@ -255,7 +255,7 @@ export interface ZoneAssignment {
  * StatusHUD 预设位置偏好（策划案 §5.5）
  * 注意：与 dock-hud-position.ts 中的 HudPosition { x, y } 坐标类型不同
  */
-type HudPresetPosition = 'top-right' | 'top-left' | 'bottom-right' | 'bottom-left';
+export type HudPresetPosition = 'top-right' | 'top-left' | 'bottom-right' | 'bottom-left';
 
 /**
  * 日常任务定义（策划案 §10.1）

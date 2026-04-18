@@ -12,51 +12,37 @@
  *
  * 【2026-02-15 修复】在 bulk 操作中增加脏检查，避免数据未变化时
  * 触发级联 computed/effect 风暴导致页面卡死
+ *
+ * 【2026-04-16 T1-1 PR-B】判等权威从手写字段清单改为 `updatedAt`+`deletedAt`：
+ * - 历史代码用 isTaskEqual/isProjectEqual/isConnectionEqual 枚举 14/4/4 个业务字段，
+ *   新增字段（例如 A3.2 parkingMeta 子字段、parking_meta.reminder.snoozeCount 等）
+ *   若忘记同步进判等函数，脏检查会静默吞除该字段变更 → 数据回档类故障。
+ * - 按 Hard Rule：updatedAt 是 LWW 的权威，任何业务字段变更都应同步 bump updatedAt；
+ *   deletedAt 变化代表软删除/恢复，也是变更信号。
+ * - 此次重构用 `a.updatedAt === b.updatedAt && a.deletedAt === b.deletedAt` 作为
+ *   "完全相同可跳过" 的信号。若 updatedAt 未变而其它字段变了，说明调用方未遵守
+ *   LWW 约定——那是调用方的 bug，不应由 store 层兜底放行。
  */
 
 import { Injectable, signal, computed } from '@angular/core';
 import { Project, Task, Connection } from '../../../models';
 
 /**
- * 比较两个 Task 是否在业务关键字段上相同
- * 用于脏检查，避免无变化时触发 signal 通知
- * 【A3.2】新增 parkingMeta 关键字段比较，避免停泊状态变更被脏检查吞除
+ * 判断两个实体在同步意义上是否"完全相同"。
+ *
+ * 权威字段：`updatedAt`（LWW 单调时间戳）+ `deletedAt`（软删除/恢复标记）。
+ * 任何业务字段变更都必须伴随 `updatedAt` 更新，这是 Hard Rule；否则云端也无法
+ * 通过增量同步 `updated_at > last_sync_time` 感知变化。因此在 Store 层用这两个
+ * 字段作为判等权威是充分的。
+ *
+ * 【2026-04-16 T1-1 PR-B】替代历史 `isTaskEqual` 14 字段枚举清单。
  */
-function isTaskEqual(a: Task, b: Task): boolean {
-  return a.updatedAt === b.updatedAt
-    && a.content === b.content
-    && a.title === b.title
-    && a.stage === b.stage
-    && a.order === b.order
-    && a.x === b.x
-    && a.y === b.y
-    && a.rank === b.rank
-    && a.parentId === b.parentId
-    && a.deletedAt === b.deletedAt
-    && a.parkingMeta?.state === b.parkingMeta?.state
-    && a.parkingMeta?.parkedAt === b.parkingMeta?.parkedAt
-    && a.parkingMeta?.reminder?.reminderAt === b.parkingMeta?.reminder?.reminderAt
-    && a.parkingMeta?.reminder?.snoozeCount === b.parkingMeta?.reminder?.snoozeCount
-    && a.parkingMeta?.pinned === b.parkingMeta?.pinned;
-}
-
-/**
- * 比较两个 Project 是否在业务关键字段上相同
- */
-function isProjectEqual(a: Project, b: Project): boolean {
-  return a.updatedAt === b.updatedAt
-    && a.name === b.name
-    && a.description === b.description;
-}
-
-/**
- * 比较两个 Connection 是否在业务关键字段上相同
- */
-function isConnectionEqual(a: Connection, b: Connection): boolean {
-  return a.source === b.source
-    && a.target === b.target
-    && a.description === b.description
-    && a.deletedAt === b.deletedAt;
+function isSameRevision(
+  a: { updatedAt?: string; deletedAt?: string | null } | undefined,
+  b: { updatedAt?: string; deletedAt?: string | null } | undefined,
+): boolean {
+  if (!a || !b) return false;
+  return a.updatedAt === b.updatedAt && a.deletedAt === b.deletedAt;
 }
 
 /**
@@ -137,7 +123,7 @@ export class TaskStore {
   setTask(task: Task, projectId: string): void {
     const existing = this.tasksMap().get(task.id);
     // 脏检查：数据未变化时跳过 signal 通知
-    if (existing && isTaskEqual(existing, task)) return;
+    if (existing && isSameRevision(existing, task)) return;
     const previousProjectId = this.taskProjectMap().get(task.id);
     this.tasksMap.update(map => { map.set(task.id, task); return map; });
     this.tasksByProject.update(map => {
@@ -205,7 +191,7 @@ export class TaskStore {
     let hasChange = false;
     for (const t of tasks) {
       const existing = map.get(t.id);
-      if (!existing || !isTaskEqual(existing, t)) {
+      if (!existing || !isSameRevision(existing, t)) {
         map.set(t.id, t);
         this.taskProjectMap().set(t.id, projectId);
         hasChange = true;
@@ -351,7 +337,7 @@ export class ProjectStore {
   /** 设置项目 - 原地修改，O(1)，含脏检查 */
   setProject(project: Project): void {
     const existing = this.projectsMap().get(project.id);
-    if (existing && isProjectEqual(existing, project)) return;
+    if (existing && isSameRevision(existing, project)) return;
     this.projectsMap.update(map => { map.set(project.id, project); return map; });
   }
 
@@ -381,7 +367,7 @@ export class ProjectStore {
     let hasChange = false;
     for (const p of projects) {
       const existing = map.get(p.id);
-      if (!existing || !isProjectEqual(existing, p)) {
+      if (!existing || !isSameRevision(existing, p)) {
         map.set(p.id, p);
         hasChange = true;
       }
@@ -446,7 +432,7 @@ export class ConnectionStore {
   /** 设置连接 - 原地修改，O(1)，含脏检查 */
   setConnection(connection: Connection, projectId: string): void {
     const existing = this.connectionsMap().get(connection.id);
-    if (existing && isConnectionEqual(existing, connection)) return;
+    if (existing && isSameRevision(existing, connection)) return;
     this.connectionsMap.update(map => { map.set(connection.id, connection); return map; });
     this.connectionsByProject.update(map => {
       if (!map.has(projectId)) map.set(projectId, new Set());
@@ -476,7 +462,7 @@ export class ConnectionStore {
     let hasChange = false;
     for (const c of connections) {
       const existing = map.get(c.id);
-      if (!existing || !isConnectionEqual(existing, c)) {
+      if (!existing || !isSameRevision(existing, c)) {
         map.set(c.id, c);
         hasChange = true;
       }

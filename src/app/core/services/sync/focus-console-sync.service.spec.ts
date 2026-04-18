@@ -13,6 +13,7 @@ describe('FocusConsoleSyncService', () => {
   let service: FocusConsoleSyncService;
   const mockClient = {
     from: vi.fn(),
+    rpc: vi.fn(),
   };
 
   const mockSupabaseClientService = {
@@ -39,6 +40,7 @@ describe('FocusConsoleSyncService', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockClient.from.mockReset();
+    mockClient.rpc.mockReset();
     mockSupabaseClientService.client.mockClear();
     resetBrowserNetworkSuspensionTrackingForTests();
     ensureBrowserNetworkSuspensionTracking();
@@ -223,21 +225,10 @@ describe('FocusConsoleSyncService', () => {
   // TODO(L-28): Add test for upsertRoutineTask — verify upsert payload shape and error handling
   // TODO(L-28): Add test for importLegacyDockSnapshot — verify it reads from user_preferences table
   // TODO(L-28): Add test for saveFocusSession success path — verify it returns true and upsert payload
-  // TODO(L-28): Add test for incrementRoutineCompletion conflict path (23505 → optimistic update)
+  // TODO(L-28): Add test for incrementRoutineCompletion 挂起窗口外的 retry-queue 协同行为
 
-  it('incrementRoutineCompletion should write using date_key path', async () => {
-    const maybeSingle = vi.fn().mockResolvedValue({ data: null, error: null });
-    const eqDate = vi.fn(() => ({ maybeSingle }));
-    const eqRoutine = vi.fn(() => ({ eq: eqDate }));
-    const eqUser = vi.fn(() => ({ eq: eqRoutine }));
-    const select = vi.fn(() => ({ eq: eqUser }));
-    const insert = vi.fn().mockResolvedValue({ error: null });
-    mockClient.from.mockImplementation((table: string) => {
-      if (table === 'routine_completions') {
-        return { select, insert };
-      }
-      return {};
-    });
+  it('incrementRoutineCompletion should call atomic rpc with date_key path', async () => {
+    mockClient.rpc.mockResolvedValue({ data: 1, error: null });
 
     const result = await service.incrementRoutineCompletion({
       completionId: 'comp-1',
@@ -247,10 +238,26 @@ describe('FocusConsoleSyncService', () => {
     });
 
     expect(result.ok).toBe(true);
-    expect(insert).toHaveBeenCalledWith(
-      expect.objectContaining({
-        date_key: '2026-03-03',
-      }),
-    );
+    expect(mockClient.rpc).toHaveBeenCalledWith('increment_routine_completion', {
+      p_completion_id: 'comp-1',
+      p_routine_id: 'routine-1',
+      p_date_key: '2026-03-03',
+    });
+  });
+
+  it('incrementRoutineCompletion should return failure when atomic rpc fails', async () => {
+    mockClient.rpc.mockResolvedValue({
+      data: null,
+      error: { message: 'rpc failed' },
+    });
+
+    const result = await service.incrementRoutineCompletion({
+      completionId: 'comp-1',
+      userId: 'user-1',
+      routineId: 'routine-1',
+      dateKey: '2026-03-03',
+    });
+
+    expect(result.ok).toBe(false);
   });
 });

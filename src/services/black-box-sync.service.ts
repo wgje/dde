@@ -23,6 +23,10 @@ import { isValidUUID } from '../utils/validation';
 import { supabaseErrorToError } from '../utils/supabase-error';
 import { openIndexedDBAdaptive } from '../utils/indexeddb-open';
 import {
+  isBrowserNetworkSuspendedError,
+  isBrowserNetworkSuspendedWindow,
+} from '../utils/browser-network-suspension';
+import {
   blackBoxEntriesMap,
   setBlackBoxEntries,
   updateBlackBoxEntry,
@@ -487,6 +491,7 @@ export class BlackBoxSyncService {
         ? AUTH_CONFIG.LOCAL_MODE_USER_ID
         : null;
     } catch {
+      // eslint-disable-next-line no-restricted-syntax -- localStorage 访问异常时静默返回 null
       return null;
     }
   }
@@ -748,7 +753,14 @@ export class BlackBoxSyncService {
         }
 
         if (error) {
-          this.logger.error('Failed to pull changes', supabaseErrorToError(error).message);
+          const finalErr = supabaseErrorToError(error);
+          // 【鲁棒性 2026-04-16】浏览器网络挂起属瞬时错误，降级为 debug，回退到本地快照但不报 ERROR
+          if (isBrowserNetworkSuspendedError(finalErr) || isBrowserNetworkSuspendedWindow()) {
+            this.logger.debug('BlackBox 浏览器网络挂起，跳过增量拉取', { message: finalErr.message });
+            await this.loadFromLocal();
+            return;
+          }
+          this.logger.error('Failed to pull changes', finalErr.message);
           await this.loadFromLocal();
           return;
         }
@@ -773,6 +785,12 @@ export class BlackBoxSyncService {
 
       this.logger.info(`Pulled changes from server: ${data?.length ?? 0} entries`);
     } catch (error) {
+      // 【鲁棒性 2026-04-16】浏览器网络挂起：debug，不污染错误日志
+      if (isBrowserNetworkSuspendedError(error) || isBrowserNetworkSuspendedWindow()) {
+        this.logger.debug('BlackBox 浏览器网络挂起，跳过本轮增量拉取');
+        await this.loadFromLocal();
+        return;
+      }
       this.logger.error('Pull changes error', error instanceof Error ? error.message : String(error));
       await this.loadFromLocal();
     }

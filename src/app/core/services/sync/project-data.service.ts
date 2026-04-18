@@ -332,6 +332,13 @@ export class ProjectDataService {
           });
           return null;
         }
+        // 【鲁棒性 2026-04-16】浏览器网络 IO 挂起属瞬时错误（后台/节流/切页），
+        // 不走 fallback，否则顺序加载也会命中同样异常，累积 ERROR 风暴。
+        const rpcErrEnhanced = supabaseErrorToError(error);
+        if (isBrowserNetworkSuspendedError(rpcErrEnhanced) || isBrowserNetworkSuspendedWindow()) {
+          this.logger.debug('浏览器网络挂起，跳过 RPC 回退', { projectId });
+          return null;
+        }
         // 其他错误（网络、超时等）仍走 fallback 顺序加载
         this.logger.warn('RPC 调用失败，回退到顺序加载', { error: error.message });
         return this.loadFullProject(projectId);
@@ -366,6 +373,11 @@ export class ProjectDataService {
       return project;
     } catch (e) {
       const err = supabaseErrorToError(e);
+      // 【鲁棒性 2026-04-16】浏览器网络挂起错误降级为 debug，不上报 Sentry，不走 fallback
+      if (isBrowserNetworkSuspendedError(err) || isBrowserNetworkSuspendedWindow()) {
+        this.logger.debug('浏览器网络挂起，跳过批量加载', { projectId });
+        return null;
+      }
       this.logger.error('批量加载项目失败', err);
       this.sentryLazyLoader.captureException(err, {
         tags: { operation: 'loadFullProjectOptimized' },
@@ -449,6 +461,12 @@ export class ProjectDataService {
       return project;
     } catch (e) {
       const err = supabaseErrorToError(e);
+      // 【鲁棒性 2026-04-16】浏览器网络挂起：降级为 debug，不上报 Sentry
+      if (isBrowserNetworkSuspendedError(err) || isBrowserNetworkSuspendedWindow()) {
+        this.logger.debug('浏览器网络挂起，跳过顺序加载', { projectId });
+        // eslint-disable-next-line no-restricted-syntax -- 瞬时挂起：返回 null 让上层沿用本地快照
+        return null;
+      }
       this.logger.error('加载项目失败', err);
       this.sentryLazyLoader.captureException(err, {
         tags: { operation: 'loadFullProject' },
@@ -523,6 +541,7 @@ export class ProjectDataService {
           ...(options.purpose ? { purpose: options.purpose } : {}),
         }
       });
+      // eslint-disable-next-line no-restricted-syntax -- 元数据加载失败时返回 null 触发调用方降级到本地快照
       return null;
     }
   }
@@ -561,6 +580,12 @@ export class ProjectDataService {
     // 本地模式不查询 Supabase
     if (userId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
       this.logger.debug('本地模式，跳过云端加载');
+      return [];
+    }
+
+    // 【鲁棒性 2026-04-16】浏览器网络挂起窗口内短路，避免整批进入失败级联
+    if (isBrowserNetworkSuspendedWindow()) {
+      this.logger.debug('浏览器网络挂起，跳过云端项目列表加载', { userId });
       return [];
     }
 
@@ -603,17 +628,28 @@ export class ProjectDataService {
       
       const projects: Project[] = [];
       let failedCount = 0;
+      let suspendedCount = 0;
       
       for (let i = 0; i < results.length; i++) {
         const result = results[i];
         if (result.status === 'fulfilled' && result.value) {
           projects.push(result.value);
         } else if (result.status === 'fulfilled') {
+          // 【鲁棒性 2026-04-16】网络挂起导致的 null 不计失败，仅降级调试
+          if (isBrowserNetworkSuspendedWindow()) {
+            suspendedCount++;
+            continue;
+          }
           failedCount++;
           this.logger.warn('加载项目返回空结果', {
             projectId: projectList[i]?.id,
           });
         } else if (result.status === 'rejected') {
+          // 【鲁棒性 2026-04-16】分类浏览器网络挂起：debug 级别，不计失败
+          if (isBrowserNetworkSuspendedError(result.reason) || isBrowserNetworkSuspendedWindow()) {
+            suspendedCount++;
+            continue;
+          }
           failedCount++;
           this.logger.warn('加载项目失败', { 
             projectId: projectList[i]?.id,
@@ -622,6 +658,13 @@ export class ProjectDataService {
         }
       }
       
+      if (suspendedCount > 0) {
+        this.logger.debug('部分项目因浏览器网络挂起跳过', {
+          total: projectList.length,
+          suspended: suspendedCount,
+          success: projects.length,
+        });
+      }
       if (failedCount > 0) {
         this.logger.warn('部分项目加载失败', { 
           total: projectList.length, 
@@ -632,6 +675,11 @@ export class ProjectDataService {
       
       return projects;
     } catch (e) {
+      // 【鲁棒性 2026-04-16】浏览器网络挂起：debug，不上报 Sentry
+      if (isBrowserNetworkSuspendedError(e) || isBrowserNetworkSuspendedWindow()) {
+        this.logger.debug('浏览器网络挂起，跳过云端项目列表加载');
+        return [];
+      }
       this.logger.error('加载项目列表失败', e);
       this.sentryLazyLoader.captureException(e, {
         tags: { operation: 'loadProjectsFromCloud' }
@@ -655,6 +703,10 @@ export class ProjectDataService {
    * 用于恢复链路先判变更再决定是否拉取完整项目。
    */
   async getProjectSyncWatermark(projectId: string): Promise<string | null> {
+    if (isBrowserNetworkSuspendedWindow()) {
+      // eslint-disable-next-line no-restricted-syntax -- 挂起窗口：静默返回 null 触发调用方降级
+      return null;
+    }
     const client = await this.getSupabaseClient();
     if (!client) return null;
 
@@ -679,6 +731,10 @@ export class ProjectDataService {
         return null;
       });
     } catch (e) {
+      if (isBrowserNetworkSuspendedError(e) || isBrowserNetworkSuspendedWindow()) {
+        // eslint-disable-next-line no-restricted-syntax -- 挂起窗口：静默返回 null
+        return null;
+      }
       this.logger.warn('获取项目同步水位失败', {
         projectId,
         error: supabaseErrorToError(e).message
@@ -692,6 +748,10 @@ export class ProjectDataService {
    * 获取当前用户项目域聚合同步水位
    */
   async getUserProjectsWatermark(): Promise<string | null> {
+    if (isBrowserNetworkSuspendedWindow()) {
+      // eslint-disable-next-line no-restricted-syntax -- 挂起窗口：静默降级
+      return null;
+    }
     const client = await this.getSupabaseClient();
     if (!client) return null;
 
@@ -711,6 +771,10 @@ export class ProjectDataService {
         return null;
       });
     } catch (e) {
+      if (isBrowserNetworkSuspendedError(e) || isBrowserNetworkSuspendedWindow()) {
+        // eslint-disable-next-line no-restricted-syntax -- 挂起窗口：静默降级
+        return null;
+      }
       this.logger.warn('获取用户项目域同步水位失败', {
         error: supabaseErrorToError(e).message
       });
@@ -725,6 +789,9 @@ export class ProjectDataService {
   async listProjectHeadsSince(
     watermark: string | null
   ): Promise<Array<{ id: string; updatedAt: string; version: number }>> {
+    if (isBrowserNetworkSuspendedWindow()) {
+      return [];
+    }
     const client = await this.getSupabaseClient();
     if (!client) return [];
 
@@ -747,6 +814,9 @@ export class ProjectDataService {
           .filter((row) => !!row.id && !!row.updatedAt);
       });
     } catch (e) {
+      if (isBrowserNetworkSuspendedError(e) || isBrowserNetworkSuspendedWindow()) {
+        return [];
+      }
       this.logger.warn('拉取项目头信息失败', {
         watermark,
         error: supabaseErrorToError(e).message
@@ -765,6 +835,10 @@ export class ProjectDataService {
     accessible: boolean;
     watermark: string | null;
   } | null> {
+    if (isBrowserNetworkSuspendedWindow()) {
+      // eslint-disable-next-line no-restricted-syntax -- 挂起窗口：静默降级
+      return null;
+    }
     const client = await this.getSupabaseClient();
     if (!client) return null;
 
@@ -789,6 +863,10 @@ export class ProjectDataService {
         };
       });
     } catch (e) {
+      if (isBrowserNetworkSuspendedError(e) || isBrowserNetworkSuspendedWindow()) {
+        // eslint-disable-next-line no-restricted-syntax -- 挂起窗口：静默降级
+        return null;
+      }
       this.logger.warn('获取项目访问探测失败', {
         projectId,
         error: supabaseErrorToError(e).message
@@ -802,6 +880,10 @@ export class ProjectDataService {
    * 获取黑匣子域聚合同步水位（当前用户）
    */
   async getBlackBoxSyncWatermark(): Promise<string | null> {
+    if (isBrowserNetworkSuspendedWindow()) {
+      // eslint-disable-next-line no-restricted-syntax -- 挂起窗口：静默降级
+      return null;
+    }
     const client = await this.getSupabaseClient();
     if (!client) return null;
 
@@ -821,6 +903,10 @@ export class ProjectDataService {
         return null;
       });
     } catch (e) {
+      if (isBrowserNetworkSuspendedError(e) || isBrowserNetworkSuspendedWindow()) {
+        // eslint-disable-next-line no-restricted-syntax -- 挂起窗口：静默降级
+        return null;
+      }
       this.logger.warn('获取黑匣子同步水位失败', {
         error: supabaseErrorToError(e).message
       });
@@ -840,6 +926,10 @@ export class ProjectDataService {
     blackboxWatermark: string | null;
     serverNow: string | null;
   } | null> {
+    if (isBrowserNetworkSuspendedWindow()) {
+      // eslint-disable-next-line no-restricted-syntax -- 挂起窗口：静默降级
+      return null;
+    }
     const client = await this.getSupabaseClient();
     if (!client) return null;
 
@@ -867,6 +957,10 @@ export class ProjectDataService {
         };
       });
     } catch (e) {
+      if (isBrowserNetworkSuspendedError(e) || isBrowserNetworkSuspendedWindow()) {
+        // eslint-disable-next-line no-restricted-syntax -- 挂起窗口：静默降级
+        return null;
+      }
       this.logger.warn('恢复链路聚合探测失败，降级为分步探测', {
         projectId,
         error: supabaseErrorToError(e).message
@@ -1214,6 +1308,7 @@ export class ProjectDataService {
       return null;
     } catch (e) {
       this.logger.warn('离线快照加载失败（localStorage）', e);
+      // eslint-disable-next-line no-restricted-syntax -- localStorage 访问异常时返回 null 触发上层降级
       return null;
     }
   }

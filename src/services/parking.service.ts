@@ -10,7 +10,7 @@
  */
 
 import { Injectable, inject, signal, computed, OnDestroy } from '@angular/core';
-import { TaskStore, ProjectStore } from './stores';
+import { TaskStore, ProjectStore } from '../app/core/state/stores';
 import {
   Task,
   TaskParkingMeta,
@@ -22,6 +22,7 @@ import {
   Project,
 } from '../models';
 import { PARKING_CONFIG } from '../config/parking.config';
+import { POLLING_CHECK_DELAY } from '../config/timeout.config';
 import { ToastService } from './toast.service';
 import { UndoService } from './undo.service';
 import { LoggerService } from './logger.service';
@@ -533,7 +534,7 @@ export class ParkingService implements OnDestroy {
         this.evictionReadyCheckTimer = null;
         this.armFirstInteractionForEviction();
       } else {
-        this.evictionReadyCheckTimer = setTimeout(checkReady, 500);
+        this.evictionReadyCheckTimer = setTimeout(checkReady, POLLING_CHECK_DELAY.CONDITION_READY);
       }
     };
     checkReady();

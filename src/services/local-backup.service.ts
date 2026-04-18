@@ -504,7 +504,7 @@ export class LocalBackupService implements OnDestroy {
       return await fileHandle.getFile();
     } catch (error) {
       this.logger.error('读取备份文件失败', { filename, error });
-      return null;
+        return null; // eslint-disable-line no-restricted-syntax -- 文件读取失败时"无法获取"语义正确，null 触发调用方错误提示
     }
   }
   

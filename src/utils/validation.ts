@@ -1,5 +1,6 @@
 import { Attachment, AttachmentType, Connection, Project, Task, TaskStatus } from '../models';
 import { ATTACHMENT_CONFIG } from '../config/attachment.config';
+import { TASK_PRIORITY_LIST } from '../config/task.config';
 import { nowISO } from './date';
 import { sanitizePlannerFields } from './planner-fields';
 import { utilLogger } from './standalone-logger';
@@ -195,8 +196,7 @@ export function validateTask(task: Partial<Task>): ValidationResult {
   }
 
   if (task.priority !== undefined) {
-    const validPriorities = ['low', 'medium', 'high', 'urgent'];
-    if (!validPriorities.includes(task.priority)) {
+    if (!TASK_PRIORITY_LIST.includes(task.priority)) {
       errors.push(`任务 ${task.id} 的优先级无效: ${String(task.priority)}`);
     }
   }
@@ -366,11 +366,10 @@ export function sanitizeTask(rawTask: unknown): Task {
     ? (task.tags as unknown[]).filter((item): item is string => typeof item === 'string' && item.length > 0)
     : undefined;
 
-  const validPriorities = ['low', 'medium', 'high', 'urgent'] as const;
   const rawPriority = task.priority as string | undefined;
   const priority =
-    rawPriority && validPriorities.includes(rawPriority as (typeof validPriorities)[number])
-      ? (rawPriority as (typeof validPriorities)[number])
+    rawPriority && TASK_PRIORITY_LIST.includes(rawPriority as (typeof TASK_PRIORITY_LIST)[number])
+      ? (rawPriority as (typeof TASK_PRIORITY_LIST)[number])
       : undefined;
 
   let dueDate: string | null | undefined;
@@ -587,4 +586,45 @@ export function sanitizeProject(rawProject: unknown): Project {
     flowchartThumbnailUrl:
       typeof project.flowchartThumbnailUrl === 'string' ? sanitizeUrlValue(project.flowchartThumbnailUrl) : undefined,
   };
+}
+
+export function detectCycles(tasks: Task[]): { hasCycle: boolean; cycleNodes: string[] } {
+  const taskMap = new Map(tasks.map(task => [task.id, task] as const));
+  const cycleNodes: string[] = [];
+
+  for (const task of tasks) {
+    if (!task.parentId) continue;
+
+    const visited = new Set<string>();
+    let current: string | null = task.parentId;
+
+    while (current) {
+      if (current === task.id) {
+        cycleNodes.push(task.id);
+        break;
+      }
+      if (visited.has(current)) break;
+      visited.add(current);
+      const parent = taskMap.get(current);
+      current = parent?.parentId || null;
+    }
+  }
+
+  return {
+    hasCycle: cycleNodes.length > 0,
+    cycleNodes,
+  };
+}
+
+export function detectOrphans(tasks: Task[]): string[] {
+  const taskIds = new Set(tasks.map(task => task.id));
+  const orphans: string[] = [];
+
+  for (const task of tasks) {
+    if (task.parentId && !taskIds.has(task.parentId)) {
+      orphans.push(task.id);
+    }
+  }
+
+  return orphans;
 }

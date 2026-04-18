@@ -29,7 +29,6 @@ import { FOCUS_CONFIG } from '../config/focus.config';
 
 // StrataItem 类型已从 focus 模型导出，供外部模块使用
 export type { StrataItem } from '../models/focus';
-import { Task } from '../models';
 
 // ============================================
 // 日期工具函数
