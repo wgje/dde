@@ -31,6 +31,8 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 import { StartupPlaceholderStateService } from '../../../../services/startup-placeholder-state.service';
 import {
+  createBrowserNetworkSuspendedError,
+  getRemainingBrowserNetworkResumeDelayMs,
   isBrowserNetworkSuspendedError,
   isBrowserNetworkSuspendedWindow,
 } from '../../../../utils/browser-network-suspension';
@@ -394,6 +396,14 @@ export class ProjectDataService {
   async loadFullProject(projectId: string): Promise<Project | null> {
     const client = await this.getSupabaseClient();
     if (!client) return null;
+
+    if (isBrowserNetworkSuspendedWindow()) {
+      this.logger.debug('浏览器网络挂起，跳过顺序加载', {
+        projectId,
+        resumeDelayMs: getRemainingBrowserNetworkResumeDelayMs(),
+      });
+      return null;
+    }
     
     try {
       // 1. 加载项目元数据
@@ -426,12 +436,29 @@ export class ProjectDataService {
       const connectionsData = await this.throttle.execute(
         `connections:${projectId}`,
         async () => {
+          if (isBrowserNetworkSuspendedWindow()) {
+            this.logger.debug('浏览器网络挂起，延后连接查询', {
+              projectId,
+              resumeDelayMs: getRemainingBrowserNetworkResumeDelayMs(),
+            });
+            throw createBrowserNetworkSuspendedError();
+          }
+
           const { data, error } = await client
             .from('connections')
             .select(FIELD_SELECT_CONFIG.CONNECTION_FIELDS)
             .eq('project_id', projectId);
           if (error) {
-            this.logger.error('连接查询失败', { projectId, error: error.message });
+            const enhanced = supabaseErrorToError(error);
+            if (isBrowserNetworkSuspendedError(enhanced) || isBrowserNetworkSuspendedWindow()) {
+              this.logger.debug('浏览器网络挂起，延后连接查询', {
+                projectId,
+                resumeDelayMs: getRemainingBrowserNetworkResumeDelayMs(),
+              });
+              throw createBrowserNetworkSuspendedError();
+            }
+
+            this.logger.error('连接查询失败', { projectId, error: enhanced.message });
             return [];
           }
           return data || [];

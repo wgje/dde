@@ -24,6 +24,11 @@
 import { Injectable, inject, signal, DestroyRef } from '@angular/core';
 import { LoggerService } from './logger.service';
 import { REQUEST_THROTTLE_CONFIG } from '../config';
+import {
+  createBrowserNetworkSuspendedError,
+  isBrowserNetworkSuspendedError,
+  isBrowserNetworkSuspendedWindow,
+} from '../utils/browser-network-suspension';
 
 /** 请求配置选项 */
 export interface ThrottleOptions {
@@ -160,16 +165,27 @@ export class RequestThrottleService {
       this.queueLength.set(this.queue.length);
       this.processQueue();
     });
+
+    let cacheablePromise = promise;
+    if (opts.deduplicate) {
+      cacheablePromise = promise.catch(error => {
+        const cached = this.dedupeCache.get(key);
+        if (cached?.promise === cacheablePromise) {
+          this.dedupeCache.delete(key);
+        }
+        throw error;
+      });
+    }
     
     // 如果启用去重，缓存 Promise
     if (opts.deduplicate) {
       this.dedupeCache.set(key, {
-        promise,
+        promise: cacheablePromise,
         expiresAt: Date.now() + THROTTLE_CONFIG.DEDUPE_TTL,
       });
     }
     
-    return promise;
+    return cacheablePromise;
   }
   
   /**
@@ -239,6 +255,11 @@ export class RequestThrottleService {
     this.activeRequests.set(this.activeCount);
     
     try {
+      if (isBrowserNetworkSuspendedWindow()) {
+        request.reject(createBrowserNetworkSuspendedError());
+        return;
+      }
+
       // 添加超时保护
       const result = await this.withTimeout(
         request.executor(),
@@ -293,6 +314,11 @@ export class RequestThrottleService {
   ): Promise<T> {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
+        if (isBrowserNetworkSuspendedWindow()) {
+          reject(createBrowserNetworkSuspendedError());
+          return;
+        }
+
         reject(new Error(`请求超时 (${timeout}ms): ${key}`));
       }, timeout);
       
@@ -303,6 +329,11 @@ export class RequestThrottleService {
         })
         .catch(error => {
           clearTimeout(timer);
+          if (isBrowserNetworkSuspendedError(error) || isBrowserNetworkSuspendedWindow()) {
+            reject(createBrowserNetworkSuspendedError());
+            return;
+          }
+
           reject(error);
         });
     });
@@ -315,6 +346,14 @@ export class RequestThrottleService {
     // 【#95057880 修复】PermanentFailureError 绝不重试（会话过期、版本冲突等）
     if (error instanceof Error && 
         ('isPermanentFailure' in error && (error as { isPermanentFailure?: boolean }).isPermanentFailure === true)) {
+      return false;
+    }
+
+    if (isBrowserNetworkSuspendedError(error)) {
+      return false;
+    }
+
+    if (isBrowserNetworkSuspendedWindow()) {
       return false;
     }
     
