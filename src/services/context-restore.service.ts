@@ -12,12 +12,13 @@
  */
 
 import { Injectable, inject, Injector } from '@angular/core';
-import { TaskStore, ProjectStore } from './stores';
+import { TaskStore, ProjectStore } from '../app/core/state/stores';
 import { ParkingSnapshot, ParkingStructuralAnchor, ParkingScrollAnchor, ParkingFlowViewport } from '../models';
 import { UiStateService } from './ui-state.service';
 import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
 import { PARKING_CONFIG } from '../config/parking.config';
+import { UI_FEEDBACK_DELAY } from '../config/timeout.config';
 
 @Injectable({
   providedIn: 'root'
@@ -311,7 +312,7 @@ export class ContextRestoreService {
       if (!flowService) return null;
       return flowService.getFlowParkingSnapshot() ?? null;
     } catch {
-      return null;
+        return null; // eslint-disable-line no-restricted-syntax -- lazy import 或 FlowDiagramService 初始化失败时"无视口快照"语义正确
     }
   }
 
@@ -465,7 +466,7 @@ export class ContextRestoreService {
       // 三段式：亮起 200ms → 保持 500ms → 淡出 300ms
       setTimeout(() => {
         highlightEl.style.opacity = '0';
-        setTimeout(() => highlightEl.remove(), 300);
+        setTimeout(() => highlightEl.remove(), UI_FEEDBACK_DELAY.HIGHLIGHT_CLEAR);
       }, 700);
     }
   }

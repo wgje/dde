@@ -62,6 +62,488 @@ describe('WorkspaceShellComponent 数据保护提醒', () => {
   });
 });
 
+describe('WorkspaceShellComponent Windows widget bridge', () => {
+  it('应在收到 runtime 实例状态变更消息时推进同步 tick', () => {
+    const addEventListener = vi.fn();
+    vi.stubGlobal('navigator', {
+      serviceWorker: {
+        addEventListener,
+      },
+    });
+
+    try {
+      const update = vi.fn();
+      const context = {
+        pendingWindowsWidgetBindingTick: { update },
+      } as unknown as WorkspaceShellComponent;
+
+      (WorkspaceShellComponent.prototype as unknown as {
+        setupWidgetRuntimeMessageListener: (this: WorkspaceShellComponent) => void;
+      }).setupWidgetRuntimeMessageListener.call(context);
+
+      expect(addEventListener).toHaveBeenCalledWith('message', expect.any(Function));
+      const handler = addEventListener.mock.calls[0]?.[1] as ((event: MessageEvent<{ type?: string }>) => void) | undefined;
+      expect(handler).toBeTypeOf('function');
+
+      handler?.({ data: { type: 'IGNORED' } } as MessageEvent<{ type?: string }>);
+      handler?.({ data: { type: 'WIDGET_INSTANCE_STATE_CHANGED' } } as MessageEvent<{ type?: string }>);
+
+      expect(update).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe('WorkspaceShellComponent Android widget bootstrap', () => {
+  it('应捕获有效的 Android bootstrap 路由并清掉敏感 query', () => {
+    const pendingAndroidWidgetBootstrap = signal<unknown>(null);
+    const deferredStartupEntryIntent = signal<unknown>(null);
+    const consumeStartupEntryIntent = vi.fn();
+    const persistPendingAndroidWidgetBootstrapToStorage = vi.fn();
+    const persistDeferredStartupEntryIntentToStorage = vi.fn();
+    const context = {
+      androidWidgetBootstrapCaptureKey: null,
+      pendingAndroidWidgetBootstrap,
+      deferredStartupEntryIntent,
+      isTrustedAndroidWidgetBootstrapSurface: vi.fn(() => true),
+      persistPendingAndroidWidgetBootstrapToStorage,
+      persistDeferredStartupEntryIntentToStorage,
+      consumeStartupEntryIntent,
+      logger: { warn: vi.fn() },
+    } as unknown as WorkspaceShellComponent & { androidWidgetBootstrapCaptureKey: string | null };
+
+    const result = (WorkspaceShellComponent.prototype as unknown as {
+      captureAndroidWidgetBootstrapFromRoute: (this: WorkspaceShellComponent, routeUrl: string | null) => boolean;
+    }).captureAndroidWidgetBootstrapFromRoute.call(
+      context,
+      '/projects?entry=twa&intent=open-workspace&widgetBootstrap=1'
+      + '&widgetBootstrapReturnUri=nanoflow-widget%3A%2F%2Fbootstrap'
+      + '&widgetInstallationId=11111111-1111-4111-8111-111111111111'
+      + '&widgetDeviceId=22222222-2222-4222-8222-222222222222'
+      + '&widgetDeviceSecret=super-secret-device-key'
+      + '&widgetInstanceId=33333333-3333-4333-8333-333333333333'
+      + '&widgetHostInstanceId=42'
+      + '&widgetSizeBucket=4x2'
+      + '&widgetBootstrapNonce=44444444-4444-4444-8444-444444444444',
+    );
+
+    expect(result).toBe(true);
+    expect(pendingAndroidWidgetBootstrap()).toEqual({
+      callbackUri: 'nanoflow-widget://bootstrap',
+      clientVersion: null,
+      installationId: '11111111-1111-4111-8111-111111111111',
+      deviceId: '22222222-2222-4222-8222-222222222222',
+      deviceSecret: 'super-secret-device-key',
+      instanceId: '33333333-3333-4333-8333-333333333333',
+      hostInstanceId: '42',
+      sizeBucket: '4x2',
+      bootstrapNonce: '44444444-4444-4444-8444-444444444444',
+      pendingPushToken: null,
+    });
+    expect(deferredStartupEntryIntent()).toEqual({
+      entry: 'twa',
+      intent: 'open-workspace',
+      rawIntent: 'open-workspace',
+    });
+    expect(persistPendingAndroidWidgetBootstrapToStorage).toHaveBeenCalledWith({
+      callbackUri: 'nanoflow-widget://bootstrap',
+      clientVersion: null,
+      installationId: '11111111-1111-4111-8111-111111111111',
+      deviceId: '22222222-2222-4222-8222-222222222222',
+      deviceSecret: 'super-secret-device-key',
+      instanceId: '33333333-3333-4333-8333-333333333333',
+      hostInstanceId: '42',
+      sizeBucket: '4x2',
+      bootstrapNonce: '44444444-4444-4444-8444-444444444444',
+      pendingPushToken: null,
+    });
+    expect(persistDeferredStartupEntryIntentToStorage).toHaveBeenCalledWith({
+      entry: 'twa',
+      intent: 'open-workspace',
+      rawIntent: 'open-workspace',
+    });
+    expect(consumeStartupEntryIntent).toHaveBeenCalledTimes(1);
+  });
+
+  it('应忽略非 TWA 环境中的 Android bootstrap 请求', () => {
+    const deferredStartupEntryIntent = signal<unknown>(null);
+    const consumeStartupEntryIntent = vi.fn();
+    const persistPendingAndroidWidgetBootstrapToStorage = vi.fn();
+    const persistDeferredStartupEntryIntentToStorage = vi.fn();
+    const warn = vi.fn();
+    const context = {
+      androidWidgetBootstrapCaptureKey: null,
+      pendingAndroidWidgetBootstrap: signal<unknown>(null),
+      deferredStartupEntryIntent,
+      isTrustedAndroidWidgetBootstrapSurface: vi.fn(() => false),
+      persistPendingAndroidWidgetBootstrapToStorage,
+      persistDeferredStartupEntryIntentToStorage,
+      consumeStartupEntryIntent,
+      logger: { warn },
+    } as unknown as WorkspaceShellComponent & { androidWidgetBootstrapCaptureKey: string | null };
+
+    const result = (WorkspaceShellComponent.prototype as unknown as {
+      captureAndroidWidgetBootstrapFromRoute: (this: WorkspaceShellComponent, routeUrl: string | null) => boolean;
+    }).captureAndroidWidgetBootstrapFromRoute.call(
+      context,
+      '/projects?entry=twa&intent=open-workspace&widgetBootstrap=1'
+      + '&widgetBootstrapReturnUri=nanoflow-widget%3A%2F%2Fbootstrap'
+      + '&widgetInstallationId=11111111-1111-4111-8111-111111111111'
+      + '&widgetDeviceId=22222222-2222-4222-8222-222222222222'
+      + '&widgetDeviceSecret=super-secret-device-key'
+      + '&widgetInstanceId=33333333-3333-4333-8333-333333333333'
+      + '&widgetHostInstanceId=42'
+      + '&widgetSizeBucket=4x2'
+      + '&widgetBootstrapNonce=44444444-4444-4444-8444-444444444444',
+    );
+
+    expect(result).toBe(true);
+    expect(persistPendingAndroidWidgetBootstrapToStorage).toHaveBeenCalledWith(null);
+    expect(persistDeferredStartupEntryIntentToStorage).toHaveBeenCalledWith({
+      entry: 'twa',
+      intent: 'open-workspace',
+      rawIntent: 'open-workspace',
+    });
+    expect(warn).toHaveBeenCalledWith('忽略非 TWA 环境中的 Android widget bootstrap 请求');
+    expect(consumeStartupEntryIntent).toHaveBeenCalledTimes(1);
+  });
+
+  it('应在 bootstrap 参数损坏时仍清掉敏感 query 并记录告警', () => {
+    const deferredStartupEntryIntent = signal<unknown>(null);
+    const consumeStartupEntryIntent = vi.fn();
+    const persistPendingAndroidWidgetBootstrapToStorage = vi.fn();
+    const persistDeferredStartupEntryIntentToStorage = vi.fn();
+    const warn = vi.fn();
+    const context = {
+      androidWidgetBootstrapCaptureKey: null,
+      pendingAndroidWidgetBootstrap: signal<unknown>(null),
+      deferredStartupEntryIntent,
+      persistPendingAndroidWidgetBootstrapToStorage,
+      persistDeferredStartupEntryIntentToStorage,
+      consumeStartupEntryIntent,
+      logger: { warn },
+    } as unknown as WorkspaceShellComponent & { androidWidgetBootstrapCaptureKey: string | null };
+
+    const result = (WorkspaceShellComponent.prototype as unknown as {
+      captureAndroidWidgetBootstrapFromRoute: (this: WorkspaceShellComponent, routeUrl: string | null) => boolean;
+    }).captureAndroidWidgetBootstrapFromRoute.call(
+      context,
+      '/projects?entry=twa&intent=open-workspace&widgetBootstrap=1'
+      + '&widgetBootstrapReturnUri=https%3A%2F%2Fevil.invalid%2Fcallback'
+      + '&widgetInstallationId=11111111-1111-4111-8111-111111111111',
+    );
+
+    expect(result).toBe(true);
+    expect(deferredStartupEntryIntent()).toEqual({
+      entry: 'twa',
+      intent: 'open-workspace',
+      rawIntent: 'open-workspace',
+    });
+    expect(persistPendingAndroidWidgetBootstrapToStorage).toHaveBeenCalledWith(null);
+    expect(persistDeferredStartupEntryIntentToStorage).toHaveBeenCalledWith({
+      entry: 'twa',
+      intent: 'open-workspace',
+      rawIntent: 'open-workspace',
+    });
+    expect(warn).toHaveBeenCalledWith('忽略损坏的 Android widget bootstrap 参数');
+    expect(consumeStartupEntryIntent).toHaveBeenCalledTimes(1);
+  });
+
+  it('应从 sessionStorage 恢复 pending Android bootstrap 和 startup intent', () => {
+    window.sessionStorage.setItem('nanoflow.android-widget-bootstrap', JSON.stringify({
+      callbackUri: 'nanoflow-widget://bootstrap',
+      clientVersion: null,
+      installationId: '11111111-1111-4111-8111-111111111111',
+      deviceId: '22222222-2222-4222-8222-222222222222',
+      deviceSecret: 'super-secret-device-key',
+      instanceId: '33333333-3333-4333-8333-333333333333',
+      hostInstanceId: '42',
+      sizeBucket: '4x2',
+      bootstrapNonce: '44444444-4444-4444-8444-444444444444',
+      pendingPushToken: 'fcm-token',
+    }));
+    window.sessionStorage.setItem('nanoflow.android-widget-startup-intent', JSON.stringify({
+      entry: 'twa',
+      intent: 'open-focus-tools',
+      rawIntent: 'open-focus-tools',
+    }));
+
+    const pendingAndroidWidgetBootstrap = signal<unknown>(null);
+    const deferredStartupEntryIntent = signal<unknown>(null);
+    const context = {
+      pendingAndroidWidgetBootstrap,
+      deferredStartupEntryIntent,
+      persistPendingAndroidWidgetBootstrapToStorage: vi.fn(),
+      persistDeferredStartupEntryIntentToStorage: vi.fn(),
+      restoreDeferredStartupEntryIntentFromStorage: (WorkspaceShellComponent.prototype as unknown as {
+        restoreDeferredStartupEntryIntentFromStorage: (this: WorkspaceShellComponent) => void;
+      }).restoreDeferredStartupEntryIntentFromStorage,
+    } as unknown as WorkspaceShellComponent;
+
+    try {
+      (WorkspaceShellComponent.prototype as unknown as {
+        restorePendingAndroidWidgetBootstrapFromStorage: (this: WorkspaceShellComponent) => void;
+      }).restorePendingAndroidWidgetBootstrapFromStorage.call(context);
+
+      expect(pendingAndroidWidgetBootstrap()).toEqual({
+        callbackUri: 'nanoflow-widget://bootstrap',
+        clientVersion: null,
+        installationId: '11111111-1111-4111-8111-111111111111',
+        deviceId: '22222222-2222-4222-8222-222222222222',
+        deviceSecret: 'super-secret-device-key',
+        instanceId: '33333333-3333-4333-8333-333333333333',
+        hostInstanceId: '42',
+        sizeBucket: '4x2',
+        bootstrapNonce: '44444444-4444-4444-8444-444444444444',
+        pendingPushToken: 'fcm-token',
+      });
+      expect(deferredStartupEntryIntent()).toEqual({
+        entry: 'twa',
+        intent: 'open-focus-tools',
+        rawIntent: 'open-focus-tools',
+      });
+    } finally {
+      window.sessionStorage.removeItem('nanoflow.android-widget-bootstrap');
+      window.sessionStorage.removeItem('nanoflow.android-widget-startup-intent');
+    }
+  });
+
+  it('bootstrap 失败时应清理 pending 状态并提示重新打开小组件', async () => {
+    const setPending = vi.fn();
+    const setDeferredStartupEntryIntent = vi.fn();
+    const warn = vi.fn();
+    const warning = vi.fn();
+    const persistPendingAndroidWidgetBootstrapToStorage = vi.fn();
+    const persistDeferredStartupEntryIntentToStorage = vi.fn();
+    const context = {
+      widgetBinding: {
+        completeAndroidBootstrap: vi.fn().mockResolvedValue({
+          ok: false,
+          error: {
+            code: 'OPERATION_FAILED',
+            message: 'network down',
+          },
+        }),
+      },
+      pendingAndroidWidgetBootstrap: { set: setPending },
+      deferredStartupEntryIntent: { set: setDeferredStartupEntryIntent },
+      persistPendingAndroidWidgetBootstrapToStorage,
+      persistDeferredStartupEntryIntentToStorage,
+      logger: { warn },
+      toast: { warning },
+      androidWidgetBootstrapInFlight: true,
+    } as unknown as WorkspaceShellComponent & { androidWidgetBootstrapInFlight: boolean };
+
+    await (WorkspaceShellComponent.prototype as unknown as {
+      completeAndroidWidgetBootstrap: (this: WorkspaceShellComponent, bootstrapRequest: {
+        callbackUri: string;
+        installationId: string;
+        deviceId: string;
+        deviceSecret: string;
+        instanceId: string;
+        hostInstanceId: string;
+        sizeBucket: string;
+        bootstrapNonce: string;
+        pendingPushToken: string | null;
+      }) => Promise<void>;
+    }).completeAndroidWidgetBootstrap.call(context, {
+      callbackUri: 'nanoflow-widget://bootstrap',
+      clientVersion: null,
+      installationId: '11111111-1111-4111-8111-111111111111',
+      deviceId: '22222222-2222-4222-8222-222222222222',
+      deviceSecret: 'super-secret-device-key',
+      instanceId: '33333333-3333-4333-8333-333333333333',
+      hostInstanceId: '42',
+      sizeBucket: '4x2',
+      bootstrapNonce: '44444444-4444-4444-8444-444444444444',
+      pendingPushToken: null,
+    });
+
+    expect(context.androidWidgetBootstrapInFlight).toBe(false);
+    expect(setPending).toHaveBeenCalledWith(null);
+    expect(setDeferredStartupEntryIntent).toHaveBeenCalledWith(null);
+    expect(persistPendingAndroidWidgetBootstrapToStorage).toHaveBeenCalledWith(null);
+    expect(persistDeferredStartupEntryIntentToStorage).toHaveBeenCalledWith(null);
+    expect(warn).toHaveBeenCalledWith('Android widget bootstrap 失败', {
+      code: 'OPERATION_FAILED',
+      message: 'network down',
+      hostInstanceId: '42',
+    });
+    expect(warning).toHaveBeenCalledWith('Android 小组件初始化失败', '绑定未完成，请重新打开 NanoFlow 小组件');
+  });
+
+  it('bootstrap 成功时应清理 pending 状态并跳转到 native callback', async () => {
+    const originalLocation = window.location;
+    const assign = vi.fn();
+    const replace = vi.fn();
+
+    delete (window as Window & { location?: Location }).location;
+    window.location = { ...originalLocation, assign, replace } as Location;
+
+    try {
+      const setPending = vi.fn();
+      const setDeferredStartupEntryIntent = vi.fn();
+      const setPendingManualCallback = vi.fn();
+      const persistPendingAndroidWidgetBootstrapToStorage = vi.fn();
+      const persistDeferredStartupEntryIntentToStorage = vi.fn();
+      const context = {
+        widgetBinding: {
+          completeAndroidBootstrap: vi.fn().mockResolvedValue({
+            ok: true,
+            value: {
+              callbackUrl: 'nanoflow-widget://bootstrap#widgetToken=android-token',
+              callbackIntentUrl: 'intent://bootstrap?widgetToken=android-token#Intent;scheme=nanoflow-widget;end',
+            },
+          }),
+        },
+        pendingAndroidWidgetBootstrap: { set: setPending },
+        pendingAndroidWidgetManualCallback: { set: setPendingManualCallback },
+        deferredStartupEntryIntent: { set: setDeferredStartupEntryIntent },
+        navigateToAndroidWidgetCallback: (WorkspaceShellComponent.prototype as unknown as Record<string, unknown>)['navigateToAndroidWidgetCallback'],
+        persistPendingAndroidWidgetBootstrapToStorage,
+        persistDeferredStartupEntryIntentToStorage,
+        logger: { warn: vi.fn() },
+        toast: { warning: vi.fn() },
+        androidWidgetBootstrapInFlight: true,
+      } as unknown as WorkspaceShellComponent & { androidWidgetBootstrapInFlight: boolean };
+
+      await (WorkspaceShellComponent.prototype as unknown as {
+        completeAndroidWidgetBootstrap: (this: WorkspaceShellComponent, bootstrapRequest: {
+          callbackUri: string;
+          installationId: string;
+          deviceId: string;
+          deviceSecret: string;
+          instanceId: string;
+          hostInstanceId: string;
+          sizeBucket: string;
+          bootstrapNonce: string;
+          pendingPushToken: string | null;
+        }) => Promise<void>;
+      }).completeAndroidWidgetBootstrap.call(context, {
+        callbackUri: 'nanoflow-widget://bootstrap',
+        clientVersion: null,
+        installationId: '11111111-1111-4111-8111-111111111111',
+        deviceId: '22222222-2222-4222-8222-222222222222',
+        deviceSecret: 'super-secret-device-key',
+        instanceId: '33333333-3333-4333-8333-333333333333',
+        hostInstanceId: '42',
+        sizeBucket: '4x2',
+        bootstrapNonce: '44444444-4444-4444-8444-444444444444',
+        pendingPushToken: null,
+      });
+
+      expect(context.androidWidgetBootstrapInFlight).toBe(false);
+      expect(setPending).toHaveBeenCalledWith(null);
+      expect(setDeferredStartupEntryIntent).toHaveBeenCalledWith(null);
+      expect(persistPendingAndroidWidgetBootstrapToStorage).toHaveBeenCalledWith(null);
+      expect(persistDeferredStartupEntryIntentToStorage).toHaveBeenCalledWith(null);
+      expect(setPendingManualCallback).not.toHaveBeenCalled();
+      expect(assign).toHaveBeenCalledWith('nanoflow-widget://bootstrap#widgetToken=android-token');
+      expect(replace).not.toHaveBeenCalled();
+    } finally {
+      delete (window as Window & { location?: Location }).location;
+      window.location = originalLocation;
+    }
+  });
+
+  it('bootstrap 成功时 Android 浏览器应改为等待用户显式回跳', async () => {
+    const originalLocation = window.location;
+    const originalVisibilityState = Object.getOwnPropertyDescriptor(document, 'visibilityState');
+    const assign = vi.fn();
+    const replace = vi.fn();
+
+    vi.stubGlobal('navigator', {
+      userAgent: 'Mozilla/5.0 (Linux; Android 14; 24018RPACC) AppleWebKit/537.36 Chrome/123.0.0.0 Mobile Safari/537.36',
+    });
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => 'visible',
+    });
+    delete (window as Window & { location?: Location }).location;
+    window.location = {
+      ...originalLocation,
+      href: 'https://dde-eight.vercel.app/#/projects',
+      assign,
+      replace,
+    } as Location;
+
+    try {
+      const setPending = vi.fn();
+      const setDeferredStartupEntryIntent = vi.fn();
+      const setPendingManualCallback = vi.fn();
+      const persistPendingAndroidWidgetBootstrapToStorage = vi.fn();
+      const persistDeferredStartupEntryIntentToStorage = vi.fn();
+      const warn = vi.fn();
+      const context = {
+        widgetBinding: {
+          completeAndroidBootstrap: vi.fn().mockResolvedValue({
+            ok: true,
+            value: {
+              callbackUrl: 'nanoflow-widget://bootstrap#widgetToken=android-token',
+              callbackIntentUrl: 'intent://bootstrap?widgetToken=android-token#Intent;scheme=nanoflow-widget;end',
+            },
+          }),
+        },
+        pendingAndroidWidgetBootstrap: { set: setPending },
+        pendingAndroidWidgetManualCallback: { set: setPendingManualCallback },
+        deferredStartupEntryIntent: { set: setDeferredStartupEntryIntent },
+        navigateToAndroidWidgetCallback: (WorkspaceShellComponent.prototype as unknown as Record<string, unknown>)['navigateToAndroidWidgetCallback'],
+        persistPendingAndroidWidgetBootstrapToStorage,
+        persistDeferredStartupEntryIntentToStorage,
+        logger: { warn },
+        toast: { warning: vi.fn() },
+        androidWidgetBootstrapInFlight: true,
+      } as unknown as WorkspaceShellComponent & { androidWidgetBootstrapInFlight: boolean };
+
+      await (WorkspaceShellComponent.prototype as unknown as {
+        completeAndroidWidgetBootstrap: (this: WorkspaceShellComponent, bootstrapRequest: {
+          callbackUri: string;
+          installationId: string;
+          deviceId: string;
+          deviceSecret: string;
+          instanceId: string;
+          hostInstanceId: string;
+          sizeBucket: string;
+          bootstrapNonce: string;
+          pendingPushToken: string | null;
+        }) => Promise<void>;
+      }).completeAndroidWidgetBootstrap.call(context, {
+        callbackUri: 'nanoflow-widget://bootstrap',
+        clientVersion: null,
+        installationId: '11111111-1111-4111-8111-111111111111',
+        deviceId: '22222222-2222-4222-8222-222222222222',
+        deviceSecret: 'super-secret-device-key',
+        instanceId: '33333333-3333-4333-8333-333333333333',
+        hostInstanceId: '42',
+        sizeBucket: '4x2',
+        bootstrapNonce: '44444444-4444-4444-8444-444444444444',
+        pendingPushToken: null,
+      });
+
+      expect(context.androidWidgetBootstrapInFlight).toBe(false);
+      expect(setPending).toHaveBeenCalledWith(null);
+      expect(setDeferredStartupEntryIntent).toHaveBeenCalledWith(null);
+      expect(persistPendingAndroidWidgetBootstrapToStorage).toHaveBeenCalledWith(null);
+      expect(persistDeferredStartupEntryIntentToStorage).toHaveBeenCalledWith(null);
+      expect(setPendingManualCallback).toHaveBeenCalledWith({
+        callbackUrl: 'nanoflow-widget://bootstrap#widgetToken=android-token',
+        callbackIntentUrl: 'intent://bootstrap?widgetToken=android-token#Intent;scheme=nanoflow-widget;end',
+      });
+      expect(assign).not.toHaveBeenCalled();
+      expect(replace).not.toHaveBeenCalled();
+      expect(warn).toHaveBeenCalledWith('Android widget callback 改为等待用户显式回跳');
+    } finally {
+      if (originalVisibilityState) {
+        Object.defineProperty(document, 'visibilityState', originalVisibilityState);
+      }
+      delete (window as Window & { location?: Location }).location;
+      window.location = originalLocation;
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
 describe('WorkspaceShellComponent 输入事件处理', () => {
   it('onUnifiedSearchInput 应转发输入值到 onUnifiedSearchChange', () => {
     const onUnifiedSearchChange = vi.fn();
@@ -1334,7 +1816,7 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
   it('signOut 应复位 focus-entry 状态，避免下个会话复用旧 intent', async () => {
     const resetFocusEntrySyncPulseState = vi.fn();
     const destroySyncPulse = vi.fn();
-    const signOut = vi.fn().mockResolvedValue(undefined);
+    const signOut = vi.fn().mockResolvedValue(true);
     const clearState = vi.fn();
     const set = vi.fn();
     const context = {
@@ -1354,9 +1836,33 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
     expect(set).toHaveBeenCalledWith('');
   });
 
+  it('signOut 在远端吊销中断时不应提前清理工作区状态', async () => {
+    const resetFocusEntrySyncPulseState = vi.fn();
+    const destroySyncPulse = vi.fn();
+    const signOut = vi.fn().mockResolvedValue(false);
+    const clearState = vi.fn();
+    const set = vi.fn();
+    const context = {
+      resetFocusEntrySyncPulseState,
+      destroySyncPulse,
+      authCoord: { signOut },
+      projectCoord: { clearState },
+      unifiedSearchQuery: { set },
+    } as unknown as WorkspaceShellComponent;
+
+    await WorkspaceShellComponent.prototype.signOut.call(context);
+
+    expect(signOut).toHaveBeenCalledTimes(1);
+    expect(resetFocusEntrySyncPulseState).not.toHaveBeenCalled();
+    expect(destroySyncPulse).not.toHaveBeenCalled();
+    expect(clearState).not.toHaveBeenCalled();
+    expect(set).not.toHaveBeenCalled();
+  });
+
   it('syncStateFromRoute 应在 /projects 根路由回填启动项目，避免主内容空壳', () => {
     const setActiveProjectId = vi.fn();
     const context = {
+      getCurrentStartupEntryIntent: () => null,
       route: {
         snapshot: { params: {} },
         firstChild: null,
@@ -1392,10 +1898,55 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
     expect(setActiveProjectId).toHaveBeenCalledWith('project-2');
   });
 
+  it('applyStartupEntryIntent 应在 focus/blackbox shortcut 下打开侧边栏并预加载工具', () => {
+    const setSidebarOpen = vi.fn();
+    const preloadSidebarTools = vi.fn();
+    const loadBlackBoxRecorderComponent = vi.fn();
+    const context = {
+      isSidebarOpen: { set: setSidebarOpen },
+      preloadSidebarTools,
+      loadBlackBoxRecorderComponent,
+      focusPrefs: {
+        isBlackBoxEnabled: () => true,
+      },
+    } as unknown as WorkspaceShellComponent;
+
+    (WorkspaceShellComponent.prototype as unknown as {
+      applyStartupEntryIntent: (this: WorkspaceShellComponent, startupEntryIntent: {
+        entry: 'shortcut' | 'widget' | 'twa';
+        intent: 'open-focus-tools' | 'open-blackbox-recorder' | 'open-workspace' | null;
+        rawIntent: string | null;
+      }) => void;
+    }).applyStartupEntryIntent.call(context, {
+      entry: 'shortcut',
+      intent: 'open-blackbox-recorder',
+      rawIntent: 'open-blackbox-recorder',
+    });
+
+    expect(setSidebarOpen).toHaveBeenCalledWith(true);
+    expect(preloadSidebarTools).toHaveBeenCalledWith('intent');
+    expect(loadBlackBoxRecorderComponent).toHaveBeenCalledTimes(1);
+  });
+
+  it('consumeStartupEntryIntent 应在执行后保留当前深链接并清理一次性 startup query', () => {
+    const navigate = vi.fn();
+    const context = {
+      router: { navigate },
+      routeUrl: () => '/projects/project-1/task/task-1?entry=widget&intent=open-workspace',
+    } as unknown as WorkspaceShellComponent;
+
+    (WorkspaceShellComponent.prototype as unknown as {
+      consumeStartupEntryIntent: (this: WorkspaceShellComponent) => void;
+    }).consumeStartupEntryIntent.call(context);
+
+    expect(navigate).toHaveBeenCalledWith(['/projects', 'project-1', 'task', 'task-1'], { replaceUrl: true });
+  });
+
   it('syncStateFromRoute 应在项目异步到达后补上深链接项目选择', () => {
     const setActiveProjectId = vi.fn();
     const navigate = vi.fn();
     const context = {
+      getCurrentStartupEntryIntent: () => null,
       route: {
         snapshot: { params: {} },
         firstChild: {
@@ -1428,6 +1979,7 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
     const setActiveProjectId = vi.fn();
     const navigate = vi.fn();
     const context = {
+      getCurrentStartupEntryIntent: () => null,
       route: {
         snapshot: { params: {} },
         firstChild: {
@@ -1459,6 +2011,7 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
   it('syncStateFromRoute 应在项目目录已 resolved 且目标不存在时回退到 /projects', () => {
     const navigate = vi.fn();
     const context = {
+      getCurrentStartupEntryIntent: () => null,
       route: {
         snapshot: { params: {} },
         firstChild: {

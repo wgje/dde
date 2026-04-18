@@ -14,13 +14,13 @@ import { ToastService } from './toast.service';
 import { GlobalErrorHandler } from './global-error-handler.service';
 import { type ConflictData } from './modal.service';
 import { DynamicModalService, type ModalRef } from './dynamic-modal.service';
+/* eslint-disable no-restricted-imports */
 import { ModalLoaderService } from '../app/core/services/modal-loader.service';
 import { ProjectStateService } from './project-state.service';
 import { ProjectOperationService } from './project-operation.service';
-import { SyncCoordinatorService } from './sync-coordinator.service';
 import { AppAuthCoordinatorService } from '../app/core/services/app-auth-coordinator.service';
+/* eslint-enable no-restricted-imports */
 import type { StorageEscapeData } from '../app/shared/modals';
-import type { ConflictResolutionPlan } from './conflict-resolution.types';
 import { ThemeType, Project } from '../models';
 
 @Injectable({ providedIn: 'root' })
@@ -32,7 +32,6 @@ export class WorkspaceModalCoordinatorService {
   private readonly modalLoader = inject(ModalLoaderService);
   private readonly projectState = inject(ProjectStateService);
   private readonly projectOps = inject(ProjectOperationService);
-  private readonly syncCoordinator = inject(SyncCoordinatorService);
   private readonly authCoord = inject(AppAuthCoordinatorService);
 
   // ── State ───────────────────────────────────────────────────────────
@@ -136,31 +135,20 @@ export class WorkspaceModalCoordinatorService {
 
   // ── Dashboard ──────────────────────────────────────────────────────
 
-  private _dashboardModalRef: ModalRef | null = null;
-
   async openDashboardFromSettings(): Promise<void> {
     this.dynamicModal.close(); // close settings first
     await this.openDashboard();
   }
 
   async openDashboard(): Promise<void> {
-    if (this._dashboardModalRef || this.isModalLoading('dashboard')) return;
+    if (this.isModalLoading('dashboard')) return;
     this.setModalLoading('dashboard', true);
     try {
       const component = await this.modalLoader.loadDashboardModal();
-      const dashboardModalRef = this.dynamicModal.open(component, {
+      this.dynamicModal.open(component, {
         outputs: {
-          close: () => {
-            this._dashboardModalRef = null;
-            this.dynamicModal.close();
-          },
+          close: () => this.dynamicModal.close(),
           openConflictCenter: () => this.openConflictCenterFromDashboard()
-        }
-      });
-      this._dashboardModalRef = dashboardModalRef;
-      void dashboardModalRef.result.finally(() => {
-        if (this._dashboardModalRef === dashboardModalRef) {
-          this._dashboardModalRef = null;
         }
       });
     } catch {
@@ -171,10 +159,8 @@ export class WorkspaceModalCoordinatorService {
   }
 
   openConflictCenterFromDashboard(): void {
-    this._dashboardModalRef = null;
     this.dynamicModal.close();
-    // 重新打开仪表盘并自动跳转到冲突 tab
-    void this.openDashboard();
+    this.toast.info('冲突解决中心', '请从项目列表中选择有冲突的项目进行处理');
   }
 
   // ── Login ──────────────────────────────────────────────────────────
@@ -389,7 +375,6 @@ export class WorkspaceModalCoordinatorService {
           resolveLocal: () => this.resolveConflictLocal(),
           resolveRemote: () => this.resolveConflictRemote(),
           resolveMerge: () => this.resolveConflictMerge(),
-          applyPlan: (event: unknown) => { void this.applyConflictResolutionPlan(event as ConflictResolutionPlan); },
           cancel: () => this.cancelConflictResolution()
         },
         closeOnBackdropClick: false,
@@ -410,10 +395,7 @@ export class WorkspaceModalCoordinatorService {
     try {
       const data = this._pendingConflict;
       if (data) {
-        const resolved = await this.projectOps.resolveConflict(data.projectId, strategy);
-        if (!resolved) {
-          return;
-        }
+        await this.projectOps.resolveConflict(data.projectId, strategy);
       }
       this._conflictModalRef?.close({ choice: strategy });
       this._pendingConflict = null;
@@ -435,30 +417,8 @@ export class WorkspaceModalCoordinatorService {
     return this.resolveConflictWith('merge');
   }
 
-  async applyConflictResolutionPlan(plan: ConflictResolutionPlan): Promise<void> {
-    if (this._isResolvingConflict) return;
-    this._isResolvingConflict = true;
-    try {
-      const data = this._pendingConflict;
-      if (data) {
-        const resolved = await this.projectOps.resolveConflictWithPlan(data.projectId, plan);
-        if (!resolved) {
-          return;
-        }
-      }
-
-      this._conflictModalRef?.close({ choice: 'merge' });
-      this._pendingConflict = null;
-      this._conflictModalRef = null;
-      this.toast.success('冲突已处理', '已按系统建议应用当前冲突解决方案');
-    } finally {
-      this._isResolvingConflict = false;
-    }
-  }
-
   cancelConflictResolution(): void {
     this._conflictModalRef?.close({ choice: 'cancel' });
-    this.syncCoordinator.clearActiveConflict();
     this._pendingConflict = null;
     this._conflictModalRef = null;
     this.toast.info('冲突待解决，下次同步时会再次提示');

@@ -57,13 +57,25 @@ import { HandoffCoordinatorService } from './services/handoff-coordinator.servic
 import { LaunchSnapshotService } from './services/launch-snapshot.service';
 import { TaskStore } from './services/stores';
 import { DockEngineService } from './services/dock-engine.service';
+import { WidgetBindingService, type AndroidWidgetBootstrapCallbackResult } from './services/widget-binding.service';
 import { reloadViaForceClearCache } from './utils/force-clear-cache';
+import {
+  hasAndroidWidgetBootstrapFlag,
+  normalizeAndroidWidgetBootstrapRequest,
+  normalizeStartupEntryIntent,
+  resolveAndroidWidgetBootstrapRequest,
+  resolveStartupEntryIntent,
+  resolveStartupEntryRouteIntent,
+  type AndroidWidgetBootstrapRequest,
+  type StartupEntryIntent,
+} from './utils/startup-entry-intent';
 import { APP_LIFECYCLE_CONFIG } from './config/app-lifecycle.config';
 import { STARTUP_PERF_CONFIG } from './config/startup-performance.config';
 import {
   resolveDockFocusChromeLayoutLocked,
   type DockFocusChromePhase,
 } from './utils/dock-focus-phase';
+import { readRuntimePlatformSnapshot } from './utils/runtime-platform';
 
 function readTextInputValue(event: Event | string): string {
   if (typeof event === 'string') return event;
@@ -94,6 +106,8 @@ type StartupDiagnosticsLike = {
 
 const DATA_PROTECTION_REMINDER_TITLE = '数据备份提醒';
 const DATA_PROTECTION_REMINDER_MESSAGE = '已超过 7 天未完成数据备份，建议前往设置执行导出或本地备份。';
+const ANDROID_WIDGET_BOOTSTRAP_STORAGE_KEY = 'nanoflow.android-widget-bootstrap';
+const ANDROID_WIDGET_STARTUP_INTENT_STORAGE_KEY = 'nanoflow.android-widget-startup-intent';
 
 /**
  * 应用根组件
@@ -173,6 +187,7 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
   }
   readonly focusPrefs = inject(FocusPreferenceService);
   private readonly authService = inject(AuthService);
+  private readonly widgetBinding = inject(WidgetBindingService);
 
   /** 认证协调器 — 管理所有认证相关状态和操作 */
   readonly authCoord = inject(AppAuthCoordinatorService);
@@ -856,6 +871,14 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
   private startupDiagnosticsPromise: Promise<StartupDiagnosticsLike[] | null> | null = null;
   private workspaceHandoffSignaled = false;
   private workspaceReadyCommitted = false;
+  private handledStartupEntryIntentKey: string | null = null;
+  private readonly pendingAndroidWidgetBootstrap = signal<AndroidWidgetBootstrapRequest | null>(null);
+  readonly pendingAndroidWidgetManualCallback = signal<AndroidWidgetBootstrapCallbackResult | null>(null);
+  private readonly deferredStartupEntryIntent = signal<StartupEntryIntent | null>(null);
+  private readonly pendingWindowsWidgetBindingTick = signal(0);
+  private androidWidgetBootstrapCaptureKey: string | null = null;
+  private androidWidgetBootstrapInFlight = false;
+  private windowsWidgetBindingInFlight = false;
   private readonly launchSnapshotWriteBlocked = signal(false);
 
   constructor() {
@@ -911,6 +934,8 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
     // 从 launch-snapshot 预填充项目状态，使 hasProjects=true 立即成立，
     // 解除 handoff 对 auth + 数据加载的串行阻塞依赖。
     this.userSession.prehydrateFromSnapshot();
+    this.restorePendingAndroidWidgetBootstrapFromStorage();
+    this.setupWidgetRuntimeMessageListener();
     
     // effect() 必须在注入上下文中调用（构造函数），否则抛 NG0203
     this.setupSignalEffects();
@@ -1103,6 +1128,10 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
     this.setupDataProtectionEffect();
     this.setupLaunchSnapshotEffect();
     this.setupRouteProjectSelectionEffect();
+    this.setupAndroidWidgetBootstrapCaptureEffect();
+    this.setupAndroidWidgetBootstrapProcessingEffect();
+    this.setupWindowsWidgetBindingEffect();
+    this.setupStartupEntryIntentEffect();
     this.setupHandoffEffect();
     this.setupWorkspaceReadyEffect();
     this.setupFocusProbeEffect();
@@ -1113,6 +1142,18 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
     this.setupSyncPulseEffect();
     this.setupSessionRestoredHandler();
     this.setupSessionInvalidatedHandler();
+  }
+
+  private setupWidgetRuntimeMessageListener(): void {
+    if (typeof navigator === 'undefined' || !navigator.serviceWorker) {
+      return;
+    }
+
+    navigator.serviceWorker.addEventListener('message', (event: MessageEvent<{ type?: string }>) => {
+      if (event.data?.type === 'WIDGET_INSTANCE_STATE_CHANGED') {
+        this.pendingWindowsWidgetBindingTick.update(value => value + 1);
+      }
+    });
   }
 
   /** 模态框请求信号监听（可恢复错误 / 登录 / 迁移） */
@@ -1280,6 +1321,355 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
       this.projectState.activeProjectId();
       this.syncStateFromRoute();
     });
+  }
+
+  private setupStartupEntryIntentEffect(): void {
+    effect(() => {
+      const startupEntryIntent = this.getCurrentStartupEntryIntent() ?? this.deferredStartupEntryIntent();
+      if (!startupEntryIntent) {
+        this.handledStartupEntryIntentKey = null;
+        return;
+      }
+
+      if (!this.bootStage.isApplicationReady()) {
+        return;
+      }
+
+      const startupEntryIntentKey = `${startupEntryIntent.entry}:${startupEntryIntent.rawIntent ?? ''}:${this.routeUrl()}`;
+      if (this.handledStartupEntryIntentKey === startupEntryIntentKey) {
+        return;
+      }
+
+      this.handledStartupEntryIntentKey = startupEntryIntentKey;
+      this.applyStartupEntryIntent(startupEntryIntent);
+      this.deferredStartupEntryIntent.set(null);
+      this.persistDeferredStartupEntryIntentToStorage(null);
+      if (this.getCurrentStartupEntryIntent()) {
+        this.consumeStartupEntryIntent();
+      }
+    });
+  }
+
+  private setupAndroidWidgetBootstrapCaptureEffect(): void {
+    effect(() => {
+      const routeUrl = typeof this.routeUrl === 'function' ? this.routeUrl() : null;
+      this.captureAndroidWidgetBootstrapFromRoute(typeof routeUrl === 'string' ? routeUrl : null);
+    });
+  }
+
+  private setupAndroidWidgetBootstrapProcessingEffect(): void {
+    effect(() => {
+      const bootstrapRequest = this.pendingAndroidWidgetBootstrap();
+      const currentUserId = this.currentUserId();
+      const sessionInitialized = this.authService.sessionInitialized();
+
+      if (!bootstrapRequest || !sessionInitialized || !currentUserId || this.androidWidgetBootstrapInFlight) {
+        return;
+      }
+
+      this.androidWidgetBootstrapInFlight = true;
+      void this.completeAndroidWidgetBootstrap(bootstrapRequest);
+    });
+  }
+
+  private isTrustedAndroidWidgetBootstrapSurface(
+    bootstrapRequest: AndroidWidgetBootstrapRequest,
+    routeUrl: string | null,
+  ): boolean {
+    const runtimePlatform = readRuntimePlatformSnapshot();
+    if (runtimePlatform.isTwa) {
+      return true;
+    }
+
+    const pendingBootstrap = this.pendingAndroidWidgetBootstrap();
+    if (!pendingBootstrap) {
+      return false;
+    }
+
+    const expectedCaptureKey = `${pendingBootstrap.installationId}:${pendingBootstrap.deviceId}:${pendingBootstrap.hostInstanceId}:${pendingBootstrap.bootstrapNonce}:${routeUrl}`;
+    const nextCaptureKey = `${bootstrapRequest.installationId}:${bootstrapRequest.deviceId}:${bootstrapRequest.hostInstanceId}:${bootstrapRequest.bootstrapNonce}:${routeUrl}`;
+    return expectedCaptureKey === nextCaptureKey;
+  }
+
+  private setupWindowsWidgetBindingEffect(): void {
+    effect(() => {
+      this.pendingWindowsWidgetBindingTick();
+      const currentUserId = this.currentUserId();
+      const sessionInitialized = this.authService.sessionInitialized();
+
+      if (!currentUserId || !sessionInitialized || this.windowsWidgetBindingInFlight) {
+        return;
+      }
+
+      this.windowsWidgetBindingInFlight = true;
+      void this.syncWindowsWidgetBindings();
+    });
+  }
+
+  private getCurrentStartupEntryIntent(): StartupEntryIntent | null {
+    const routeUrl = typeof this.routeUrl === 'function' ? this.routeUrl() : null;
+    return resolveStartupEntryIntent(typeof routeUrl === 'string' ? routeUrl : null);
+  }
+
+  private applyStartupEntryIntent(startupEntryIntent: StartupEntryIntent): void {
+    if (
+      startupEntryIntent.intent !== 'open-focus-tools'
+      && startupEntryIntent.intent !== 'open-blackbox-recorder'
+    ) {
+      return;
+    }
+
+    this.isSidebarOpen.set(true);
+    this.preloadSidebarTools('intent');
+
+    if (startupEntryIntent.intent === 'open-blackbox-recorder' && this.focusPrefs.isBlackBoxEnabled()) {
+      void this.loadBlackBoxRecorderComponent();
+    }
+  }
+
+  private consumeStartupEntryIntent(): void {
+    const routeUrl = typeof this.routeUrl === 'function' ? this.routeUrl() : null;
+    const routeIntent = resolveStartupEntryRouteIntent(typeof routeUrl === 'string' ? routeUrl : null);
+
+    if (!routeIntent?.projectId) {
+      void this.router.navigate(['/projects'], {
+        replaceUrl: true,
+      });
+      return;
+    }
+
+    switch (routeIntent.kind) {
+      case 'task':
+        if (routeIntent.taskId) {
+          void this.router.navigate(['/projects', routeIntent.projectId, 'task', routeIntent.taskId], {
+            replaceUrl: true,
+          });
+          return;
+        }
+        break;
+      case 'flow':
+        void this.router.navigate(['/projects', routeIntent.projectId, 'flow'], {
+          replaceUrl: true,
+        });
+        return;
+      case 'text':
+        void this.router.navigate(['/projects', routeIntent.projectId, 'text'], {
+          replaceUrl: true,
+        });
+        return;
+      case 'project':
+        void this.router.navigate(['/projects', routeIntent.projectId], {
+          replaceUrl: true,
+        });
+        return;
+      default:
+        break;
+    }
+
+    void this.router.navigate(['/projects'], {
+      replaceUrl: true,
+    });
+  }
+
+  private captureAndroidWidgetBootstrapFromRoute(routeUrl: string | null): boolean {
+    const bootstrapRequest = resolveAndroidWidgetBootstrapRequest(routeUrl);
+    const hasBootstrapFlag = hasAndroidWidgetBootstrapFlag(routeUrl);
+
+    if (!bootstrapRequest) {
+      if (hasBootstrapFlag && routeUrl && this.androidWidgetBootstrapCaptureKey !== routeUrl) {
+        this.androidWidgetBootstrapCaptureKey = routeUrl;
+        this.persistPendingAndroidWidgetBootstrapToStorage(null);
+        const startupEntryIntent = resolveStartupEntryIntent(routeUrl);
+        this.deferredStartupEntryIntent.set(startupEntryIntent);
+        this.persistDeferredStartupEntryIntentToStorage(startupEntryIntent);
+        this.logger.warn('忽略损坏的 Android widget bootstrap 参数');
+        this.consumeStartupEntryIntent();
+        return true;
+      }
+
+      if (!hasBootstrapFlag) {
+        this.androidWidgetBootstrapCaptureKey = null;
+      }
+      return false;
+    }
+
+    const captureKey = `${bootstrapRequest.installationId}:${bootstrapRequest.deviceId}:${bootstrapRequest.hostInstanceId}:${bootstrapRequest.bootstrapNonce}:${routeUrl}`;
+    if (!this.isTrustedAndroidWidgetBootstrapSurface(bootstrapRequest, routeUrl)) {
+      if (routeUrl && this.androidWidgetBootstrapCaptureKey !== routeUrl) {
+        this.androidWidgetBootstrapCaptureKey = routeUrl;
+        this.persistPendingAndroidWidgetBootstrapToStorage(null);
+        const startupEntryIntent = resolveStartupEntryIntent(routeUrl);
+        this.deferredStartupEntryIntent.set(startupEntryIntent);
+        this.persistDeferredStartupEntryIntentToStorage(startupEntryIntent);
+        this.logger.warn('忽略非 TWA 环境中的 Android widget bootstrap 请求');
+        this.consumeStartupEntryIntent();
+        return true;
+      }
+
+      return false;
+    }
+
+    if (this.androidWidgetBootstrapCaptureKey === captureKey) {
+      return false;
+    }
+
+    this.androidWidgetBootstrapCaptureKey = captureKey;
+    this.pendingAndroidWidgetBootstrap.set(bootstrapRequest);
+    this.persistPendingAndroidWidgetBootstrapToStorage(bootstrapRequest);
+    const startupEntryIntent = resolveStartupEntryIntent(routeUrl);
+    this.deferredStartupEntryIntent.set(startupEntryIntent);
+    this.persistDeferredStartupEntryIntentToStorage(startupEntryIntent);
+    this.consumeStartupEntryIntent();
+    return true;
+  }
+
+  private async completeAndroidWidgetBootstrap(bootstrapRequest: AndroidWidgetBootstrapRequest): Promise<void> {
+    const result = await this.widgetBinding.completeAndroidBootstrap(bootstrapRequest);
+    this.androidWidgetBootstrapInFlight = false;
+    this.deferredStartupEntryIntent.set(null);
+    this.persistDeferredStartupEntryIntentToStorage(null);
+
+    if (!result.ok) {
+      this.pendingAndroidWidgetBootstrap.set(null);
+      this.persistPendingAndroidWidgetBootstrapToStorage(null);
+      this.logger.warn('Android widget bootstrap 失败', {
+        code: result.error.code,
+        message: result.error.message,
+        hostInstanceId: bootstrapRequest.hostInstanceId,
+      });
+      this.toast.warning('Android 小组件初始化失败', '绑定未完成，请重新打开 NanoFlow 小组件');
+      return;
+    }
+
+    this.pendingAndroidWidgetBootstrap.set(null);
+    this.persistPendingAndroidWidgetBootstrapToStorage(null);
+
+    this.navigateToAndroidWidgetCallback(result.value);
+  }
+
+  private navigateToAndroidWidgetCallback(callback: AndroidWidgetBootstrapCallbackResult): void {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    const isAndroidBrowser = typeof navigator !== 'undefined' && /Android/i.test(navigator.userAgent);
+    if (!isAndroidBrowser || typeof document === 'undefined') {
+      window.location.assign(callback.callbackUrl);
+      return;
+    }
+
+    this.logger.warn('Android widget callback 改为等待用户显式回跳');
+    this.pendingAndroidWidgetManualCallback.set(callback);
+  }
+
+  continueAndroidWidgetManualCallback(): void {
+    const callback = this.pendingAndroidWidgetManualCallback();
+    if (!callback || typeof window === 'undefined') {
+      return;
+    }
+
+    this.logger.warn('Android widget callback 使用显式确认回跳');
+    window.location.assign(callback.callbackUrl);
+  }
+
+  useAndroidWidgetIntentFallback(): void {
+    const callback = this.pendingAndroidWidgetManualCallback();
+    if (!callback || typeof window === 'undefined') {
+      return;
+    }
+
+    this.logger.warn('Android widget callback 使用显式 intent fallback');
+    window.location.replace(callback.callbackIntentUrl);
+  }
+
+  dismissAndroidWidgetManualCallback(): void {
+    this.pendingAndroidWidgetManualCallback.set(null);
+  }
+
+  private async syncWindowsWidgetBindings(): Promise<void> {
+    const result = await this.widgetBinding.syncWindowsPwaBindings();
+    this.windowsWidgetBindingInFlight = false;
+
+    if (!result.ok) {
+      this.logger.warn('Windows Widget 绑定同步失败', {
+        code: result.error.code,
+        message: result.error.message,
+      });
+    }
+  }
+
+  private restorePendingAndroidWidgetBootstrapFromStorage(): void {
+    if (typeof window === 'undefined' || typeof window.sessionStorage === 'undefined') {
+      return;
+    }
+
+    this.restoreDeferredStartupEntryIntentFromStorage();
+
+    try {
+      const raw = window.sessionStorage.getItem(ANDROID_WIDGET_BOOTSTRAP_STORAGE_KEY);
+      if (!raw) {
+        return;
+      }
+
+      const parsed = normalizeAndroidWidgetBootstrapRequest(JSON.parse(raw));
+      if (!parsed) {
+        this.persistPendingAndroidWidgetBootstrapToStorage(null);
+        return;
+      }
+
+      this.pendingAndroidWidgetBootstrap.set(parsed);
+    } catch {
+      this.persistPendingAndroidWidgetBootstrapToStorage(null);
+    }
+  }
+
+  private restoreDeferredStartupEntryIntentFromStorage(): void {
+    if (typeof window === 'undefined' || typeof window.sessionStorage === 'undefined') {
+      return;
+    }
+
+    try {
+      const raw = window.sessionStorage.getItem(ANDROID_WIDGET_STARTUP_INTENT_STORAGE_KEY);
+      if (!raw) {
+        return;
+      }
+
+      const parsed = normalizeStartupEntryIntent(JSON.parse(raw));
+      if (!parsed) {
+        this.persistDeferredStartupEntryIntentToStorage(null);
+        return;
+      }
+
+      this.deferredStartupEntryIntent.set(parsed);
+    } catch {
+      this.persistDeferredStartupEntryIntentToStorage(null);
+    }
+  }
+
+  private persistPendingAndroidWidgetBootstrapToStorage(request: AndroidWidgetBootstrapRequest | null): void {
+    if (typeof window === 'undefined' || typeof window.sessionStorage === 'undefined') {
+      return;
+    }
+
+    if (!request) {
+      window.sessionStorage.removeItem(ANDROID_WIDGET_BOOTSTRAP_STORAGE_KEY);
+      return;
+    }
+
+    window.sessionStorage.setItem(ANDROID_WIDGET_BOOTSTRAP_STORAGE_KEY, JSON.stringify(request));
+  }
+
+  private persistDeferredStartupEntryIntentToStorage(startupEntryIntent: StartupEntryIntent | null): void {
+    if (typeof window === 'undefined' || typeof window.sessionStorage === 'undefined') {
+      return;
+    }
+
+    if (!startupEntryIntent) {
+      window.sessionStorage.removeItem(ANDROID_WIDGET_STARTUP_INTENT_STORAGE_KEY);
+      return;
+    }
+
+    window.sessionStorage.setItem(ANDROID_WIDGET_STARTUP_INTENT_STORAGE_KEY, JSON.stringify(startupEntryIntent));
   }
 
   private resolveStartupProjectFallbackId(projects: Project[]): string | null {
@@ -2240,9 +2630,13 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
   switchToResetPassword() { this.authCoord.switchToResetPassword(); }
 
 async signOut() {
-  this.resetFocusEntrySyncPulseState(false);
+    const signedOut = await this.authCoord.signOut();
+    if (!signedOut) {
+      return;
+    }
+
+    this.resetFocusEntrySyncPulseState(false);
     this.destroySyncPulse();
-    await this.authCoord.signOut();
     this.projectCoord.clearState();
     this.unifiedSearchQuery.set('');
   }

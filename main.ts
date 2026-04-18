@@ -290,11 +290,41 @@ function scheduleSupabaseSdkPrewarmAfterShell(): void {
   fallbackTimer = window.setTimeout(() => kickoff(), 4000);
 }
 
+function readStartupTraceLocationSummary(): Record<string, unknown> {
+  const searchParams = new URLSearchParams(window.location.search || '');
+  const rawHash = window.location.hash || '';
+  const routeHash = rawHash.startsWith('#/') ? rawHash : '';
+  const routeHashQueryIndex = routeHash.indexOf('?');
+  const hashPath = routeHash
+    ? routeHash.slice(0, routeHashQueryIndex >= 0 ? routeHashQueryIndex : routeHash.length)
+    : '';
+  const hashParams = new URLSearchParams(
+    routeHashQueryIndex >= 0 ? routeHash.slice(routeHashQueryIndex + 1) : ''
+  );
+  const searchEntry = searchParams.get('entry');
+  const hashEntry = hashParams.get('entry');
+  const searchIntent = searchParams.get('intent');
+  const hashIntent = hashParams.get('intent');
+
+  return {
+    pathname: window.location.pathname,
+    hashPath,
+    hasSearch: Boolean(window.location.search),
+    hasOpaqueHash: Boolean(rawHash) && !routeHash,
+    entryCarrier: hashEntry ? 'hash' : (searchEntry ? 'search' : null),
+    entry: hashEntry ?? searchEntry ?? null,
+    intent: hashIntent ?? searchIntent ?? null,
+    projectIdPresent: Boolean(hashParams.get('projectId') ?? searchParams.get('projectId')),
+    taskIdPresent: Boolean(hashParams.get('taskId') ?? searchParams.get('taskId')),
+  };
+}
+
 // ========== 应用启动函数 ==========
 async function startApplication() {
   log('🏗️ 准备启动 Angular...');
   pushStartupTrace('app.start', {
     startTime: START_TIME,
+    ...readStartupTraceLocationSummary(),
   });
   
   // 添加启动超时保护（15秒）
@@ -358,8 +388,9 @@ async function startApplication() {
             paramsInheritanceStrategy: 'always'
           })
         ),
-        // Service Worker: 启用以检测应用更新
-        provideServiceWorker('ngsw-worker.js', {
+        // Service Worker: 组合 SW (NGSW + Widget Runtime)
+        // sw-composed.js importScripts ngsw-worker.js + widgets/widget-runtime.js
+        provideServiceWorker('sw-composed.js', {
           enabled: !isDevMode(),
           registrationStrategy: createPostHandoffSwRegistrationStrategy({
             delayMs: 250,

@@ -1,5 +1,6 @@
 import { Injectable, signal, computed } from '@angular/core';
 import { Project } from '../models';
+import { UI_FEEDBACK_DELAY } from '../config/timeout.config';
 
 /**
  * 模态框类型
@@ -148,7 +149,7 @@ export class ModalService {
       if (existing) {
         // 触发闪烁效果提示用户该模态框已打开
         this.flashModalType.set(type);
-        setTimeout(() => this.flashModalType.set(null), 300);
+        setTimeout(() => this.flashModalType.set(null), UI_FEEDBACK_DELAY.FLASH_CLEAR);
         
         // 返回默认的取消结果
         resolve(this.getDefaultResult(type) as ModalResult<T>);
@@ -174,7 +175,7 @@ export class ModalService {
     if (existing) {
       // 触发闪烁效果提示用户该模态框已打开
       this.flashModalType.set(type);
-      setTimeout(() => this.flashModalType.set(null), 300);
+      setTimeout(() => this.flashModalType.set(null), UI_FEEDBACK_DELAY.FLASH_CLEAR);
       return;
     }
     

@@ -43,4 +43,21 @@ describe('startup launch contract', () => {
 
     expect(manifest.id).toBe('/launch.html');
   });
+
+  it('manifest should expose the approved static shortcut intents', () => {
+    const manifestPath = path.join(process.cwd(), 'public', 'manifest.webmanifest');
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+
+    expect(manifest.shortcuts).toEqual([
+      expect.objectContaining({
+        url: './#/projects?entry=shortcut&intent=open-workspace',
+      }),
+      expect.objectContaining({
+        url: './#/projects?entry=shortcut&intent=open-focus-tools',
+      }),
+      expect.objectContaining({
+        url: './#/projects?entry=shortcut&intent=open-blackbox-recorder',
+      }),
+    ]);
+  });
 });

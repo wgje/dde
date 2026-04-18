@@ -22,6 +22,11 @@ describe('resolveRouteIntent', () => {
     expect(result).toEqual({ kind: 'project', projectId: 'p-1', taskId: null });
   });
 
+  it('should keep project routes when startup query params are present', () => {
+    const result = resolveRouteIntent('/projects/p-1?entry=widget&intent=open-workspace', null);
+    expect(result).toEqual({ kind: 'project', projectId: 'p-1', taskId: null });
+  });
+
   it('should return projects intent for unknown route with no active project', () => {
     const result = resolveRouteIntent('/some/unknown', null);
     expect(result).toEqual({ kind: 'projects', projectId: null, taskId: null });
@@ -48,7 +53,12 @@ describe('resolveRouteIntent', () => {
   });
 
   it('should handle URL with query params and hash in task route', () => {
-    const result = resolveRouteIntent('/projects/p-1/task/t-2', null);
+    const result = resolveRouteIntent('/projects/p-1/task/t-2?entry=widget&intent=open-workspace', null);
     expect(result).toEqual({ kind: 'task', projectId: 'p-1', taskId: 't-2' });
+  });
+
+  it('should keep flow routes when startup query params are present', () => {
+    const result = resolveRouteIntent('/projects/p-1/flow?entry=twa&intent=open-workspace', null);
+    expect(result).toEqual({ kind: 'flow', projectId: 'p-1', taskId: null });
   });
 });

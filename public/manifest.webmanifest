@@ -8,6 +8,47 @@
   "start_url": "./",
   "theme_color": "#111827",
   "background_color": "#111827",
+  "shortcuts": [
+    {
+      "name": "打开工作区",
+      "short_name": "工作区",
+      "description": "直接进入 NanoFlow 工作区",
+      "url": "./#/projects?entry=shortcut&intent=open-workspace",
+      "icons": [
+        {
+          "src": "icons/icon-192x192.png",
+          "sizes": "192x192",
+          "type": "image/png"
+        }
+      ]
+    },
+    {
+      "name": "打开专注工具",
+      "short_name": "专注",
+      "description": "打开工作区并预加载专注模式工具",
+      "url": "./#/projects?entry=shortcut&intent=open-focus-tools",
+      "icons": [
+        {
+          "src": "icons/icon-192x192.png",
+          "sizes": "192x192",
+          "type": "image/png"
+        }
+      ]
+    },
+    {
+      "name": "打开黑匣子录音",
+      "short_name": "黑匣子",
+      "description": "打开工作区并预加载黑匣子录音组件",
+      "url": "./#/projects?entry=shortcut&intent=open-blackbox-recorder",
+      "icons": [
+        {
+          "src": "icons/icon-192x192.png",
+          "sizes": "192x192",
+          "type": "image/png"
+        }
+      ]
+    }
+  ],
   "icons": [
     {
       "src": "icons/icon-72x72.png",
@@ -56,6 +97,28 @@
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "maskable any"
+    }
+  ],
+  "widgets": [
+    {
+      "name": "NanoFlow 专注摘要",
+      "short_name": "NanoFlow",
+      "description": "当前专注任务、停泊坞与黑匣子的只读概览",
+      "tag": "nanoflow-focus-summary",
+      "ms_ac_template": "widgets/templates/focus-summary.json",
+      "data": "widgets/templates/focus-data.json",
+      "type": "application/json",
+      "multiple": false,
+      "icons": [
+        {
+          "src": "icons/icon-96x96.png",
+          "sizes": "96x96",
+          "type": "image/png"
+        }
+      ],
+      "screenshots": [],
+      "auth": false,
+      "update": 900
     }
   ]
 }

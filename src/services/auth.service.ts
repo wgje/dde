@@ -12,6 +12,7 @@ import { isLocalModeEnabled, saveAuthCache } from './guards/auth.guard';
 import { pushStartupTrace } from '../utils/startup-trace';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { AUTH_CONFIG } from '../config/auth.config';
+import { POLLING_CHECK_DELAY } from '../config/timeout.config';
 import {
   isBrowserNetworkSuspendedError,
   isBrowserNetworkSuspendedWindow,
@@ -325,7 +326,7 @@ export class AuthService {
       const userId = (user as Record<string, unknown>)['id'];
       return typeof userId === 'string' && userId.length > 0 ? userId : null;
     } catch {
-      return null;
+        return null; // eslint-disable-line no-restricted-syntax -- localStorage 读取/JSON 解析失败时"无会话"语义正确，null 触发调用方降级
     }
   }
 
@@ -452,7 +453,7 @@ export class AuthService {
       if (shouldLog) {
         this.logger.debug('[FastPath] 本地会话读取失败，回退到网络检查', e);
       }
-      return null;
+        return null; // eslint-disable-line no-restricted-syntax -- 本地会话读取失败降级为网络检查，null 是正确语义
     }
   }
 
@@ -635,7 +636,7 @@ export class AuthService {
         (window as Window & { requestIdleCallback: (cb: () => void, opts?: { timeout: number }) => number })
           .requestIdleCallback(() => task(), { timeout: 3000 });
       } else {
-        setTimeout(task, 500);
+        setTimeout(task, POLLING_CHECK_DELAY.CONDITION_READY);
       }
     };
 

@@ -12,6 +12,7 @@ import { ConflictStorageService } from './conflict-storage.service';
 import { LayoutService } from './layout.service';
 import { LoggerService } from './logger.service';
 import { SupabaseClientService } from './supabase-client.service';
+// eslint-disable-next-line no-restricted-imports -- RetryQueueService 尚未迁移到 src/services/，会话切换需直接清理重试队列
 import { RetryQueueService } from '../app/core/services/sync/retry-queue.service';
 import { Project, Task, Connection } from '../models';
 import { CACHE_CONFIG, SYNC_CONFIG } from '../config/sync.config';
@@ -25,6 +26,7 @@ import {
 import { StartupPlaceholderStateService } from './startup-placeholder-state.service';
 import { FEATURE_FLAGS } from '../config/feature-flags.config';
 import { isFailure } from '../utils/result';
+import { mergeByLww, mergeByLwwWithTombstone } from '../utils/lww-merge';
 import { ToastService } from './toast.service';
 import { pushStartupTrace } from '../utils/startup-trace';
 import { isValidUUID } from '../utils/validation';
@@ -2201,72 +2203,14 @@ export class UserSessionService {
     }
   }
   
-  /** LWW 合并任务列表 */
+  /** LWW 合并任务列表（委托给 `utils/lww-merge`，保持历史私有入口以免外部调用） */
   private mergeTasksWithLWW(localTasks: Task[], cloudTasks: Task[]): Task[] {
-    const taskMap = new Map<string, Task>();
-    
-    // 先添加云端任务
-    for (const task of cloudTasks) {
-      taskMap.set(task.id, task);
-    }
-    
-    // 用本地更新的任务覆盖
-    for (const task of localTasks) {
-      const cloudTask = taskMap.get(task.id);
-      if (!cloudTask) {
-        // 本地新建的任务
-        taskMap.set(task.id, task);
-      } else if (task.updatedAt && cloudTask.updatedAt && task.updatedAt > cloudTask.updatedAt) {
-        // 本地任务更新时间更晚，保留本地
-        taskMap.set(task.id, task);
-      }
-      // 否则保留云端（已在 map 中）
-    }
-    
-    return Array.from(taskMap.values());
+    return mergeByLww(localTasks, cloudTasks);
   }
-  
-  /** LWW 合并连接列表（Tombstone Wins + updatedAt 比较） */
+
+  /** LWW 合并连接列表（Tombstone Wins + updatedAt 比较，委托给通用实现） */
   private mergeConnectionsWithLWW(localConns: Connection[], cloudConns: Connection[]): Connection[] {
-    const connMap = new Map<string, Connection>();
-    
-    // 先添加云端连接
-    for (const conn of cloudConns) {
-      connMap.set(conn.id, conn);
-    }
-    
-    // 合并本地连接：使用 updatedAt LWW + 删除优先策略
-    for (const conn of localConns) {
-      const cloudConn = connMap.get(conn.id);
-      if (!cloudConn) {
-        // 本地新建的连接，直接添加
-        connMap.set(conn.id, conn);
-      } else {
-        // 两边都有，应用 Tombstone Wins 策略
-        if (cloudConn.deletedAt && !conn.deletedAt) {
-          // 云端已删除、本地未删除 → 保持云端删除状态，防止删除被逆转
-          // 不做操作，保留 cloudConn（已在 map 中）
-        } else if (!cloudConn.deletedAt && conn.deletedAt) {
-          // 本地已删除、云端未删除 → 保持本地删除状态
-          connMap.set(conn.id, conn);
-        } else if (cloudConn.deletedAt && conn.deletedAt) {
-          // 两边都删除了，保留较早的删除时间
-          const cloudTime = new Date(cloudConn.deletedAt).getTime();
-          const localTime = new Date(conn.deletedAt).getTime();
-          connMap.set(conn.id, cloudTime < localTime ? cloudConn : conn);
-        } else {
-          // 两边都未删除，使用 updatedAt LWW
-          const cloudTime = cloudConn.updatedAt ? new Date(cloudConn.updatedAt).getTime() : 0;
-          const localTime = conn.updatedAt ? new Date(conn.updatedAt).getTime() : 0;
-          if (localTime > cloudTime) {
-            connMap.set(conn.id, conn);
-          }
-          // 否则保留云端版本（已在 map 中）
-        }
-      }
-    }
-    
-    return Array.from(connMap.values());
+    return mergeByLwwWithTombstone(localConns, cloudConns);
   }
   
   /**

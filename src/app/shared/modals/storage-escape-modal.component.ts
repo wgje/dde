@@ -3,6 +3,12 @@ import { CommonModule } from '@angular/common';
 import { QueuedAction, DeadLetterItem } from '../../../services/action-queue.service';
 
 /**
+ * 复制成功 toast 的显示时长（毫秒）。
+ * 命名常量取代重复散落的 `3000` 字面量。
+ */
+const COPY_SUCCESS_TOAST_MS = 3000;
+
+/**
  * 存储失败逃生数据
  */
 export interface StorageEscapeData {
@@ -209,7 +215,7 @@ export class StorageEscapeModalComponent {
     try {
       await navigator.clipboard.writeText(this.formattedJsonData());
       this.copySuccess.set(true);
-      setTimeout(() => this.copySuccess.set(false), 3000);
+      setTimeout(() => this.copySuccess.set(false), COPY_SUCCESS_TOAST_MS);
     } catch (e) {
       // 降级方案：使用 document.execCommand
       const textarea = document.createElement('textarea');
@@ -219,7 +225,7 @@ export class StorageEscapeModalComponent {
       document.execCommand('copy');
       document.body.removeChild(textarea);
       this.copySuccess.set(true);
-      setTimeout(() => this.copySuccess.set(false), 3000);
+      setTimeout(() => this.copySuccess.set(false), COPY_SUCCESS_TOAST_MS);
     }
   }
   

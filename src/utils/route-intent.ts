@@ -17,22 +17,22 @@ export function resolveRouteIntent(
     };
   }
 
-  const taskMatch = routeUrl.match(/\/projects\/([^/?#]+)\/task\/([^/?#]+)/);
+  const taskMatch = routeUrl.match(/\/projects\/([^/?#]+)\/task\/([^/?#]+)(?:[?#].*)?$/);
   if (taskMatch) {
     return { kind: 'task', projectId: taskMatch[1], taskId: taskMatch[2] };
   }
 
-  const flowMatch = routeUrl.match(/\/projects\/([^/?#]+)\/flow$/);
+  const flowMatch = routeUrl.match(/\/projects\/([^/?#]+)\/flow(?:[?#].*)?$/);
   if (flowMatch) {
     return { kind: 'flow', projectId: flowMatch[1], taskId: null };
   }
 
-  const textMatch = routeUrl.match(/\/projects\/([^/?#]+)\/text$/);
+  const textMatch = routeUrl.match(/\/projects\/([^/?#]+)\/text(?:[?#].*)?$/);
   if (textMatch) {
     return { kind: 'text', projectId: textMatch[1], taskId: null };
   }
 
-  const projectMatch = routeUrl.match(/\/projects\/([^/?#]+)$/);
+  const projectMatch = routeUrl.match(/\/projects\/([^/?#]+)(?:[?#].*)?$/);
   if (projectMatch) {
     return { kind: 'project', projectId: projectMatch[1], taskId: null };
   }

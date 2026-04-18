@@ -212,9 +212,30 @@
       if (records.length > 200) records = records.slice(records.length - 200);
       window.__NANOFLOW_STARTUP_TRACE__ = records;
     };
-    window.__NANOFLOW_PUSH_STARTUP_TRACE__('loader.initial_visible', {
-      pathname: window.location.pathname
-    });
+    window.__NANOFLOW_PUSH_STARTUP_TRACE__('loader.initial_visible', (function() {
+      var searchParams = new URLSearchParams(window.location.search || '');
+      var rawHash = window.location.hash || '';
+      var routeHash = rawHash.indexOf('#/') === 0 ? rawHash : '';
+      var routeHashQueryIndex = routeHash.indexOf('?');
+      var hashPath = routeHash ? (routeHashQueryIndex >= 0 ? routeHash.slice(0, routeHashQueryIndex) : routeHash) : '';
+      var hashParams = new URLSearchParams(routeHashQueryIndex >= 0 ? routeHash.slice(routeHashQueryIndex + 1) : '');
+      var searchEntry = searchParams.get('entry');
+      var hashEntry = hashParams.get('entry');
+      var searchIntent = searchParams.get('intent');
+      var hashIntent = hashParams.get('intent');
+
+      return {
+        pathname: window.location.pathname,
+        hashPath: hashPath,
+        hasSearch: !!window.location.search,
+        hasOpaqueHash: !!rawHash && !routeHash,
+        entryCarrier: hashEntry ? 'hash' : (searchEntry ? 'search' : null),
+        entry: hashEntry || searchEntry || null,
+        intent: hashIntent || searchIntent || null,
+        projectIdPresent: !!(hashParams.get('projectId') || searchParams.get('projectId')),
+        taskIdPresent: !!(hashParams.get('taskId') || searchParams.get('taskId'))
+      };
+    })());
   </script>
   <!-- LAUNCH_SHARED_BOOT_FLAGS_START -->
   <script>
@@ -278,8 +299,8 @@
         return;
       }
 
-      var SUPABASE_URL = 'YOUR_SUPABASE_URL';
-      var SUPABASE_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY';
+      var SUPABASE_URL = 'https://fkhihclpghmmtbbywvoj.supabase.co';
+      var SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZraGloY2xwZ2htbXRiYnl3dm9qIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjgwNDIyMTgsImV4cCI6MjA4MzYxODIxOH0.4Z5eylbmBA-YFiDRvDtom4lTHavHP3JfVmrU0yH9oVo';
 
       if (!SUPABASE_URL || SUPABASE_URL === 'YOUR_SUPABASE_URL') return;
       if (!SUPABASE_ANON_KEY || SUPABASE_ANON_KEY === 'YOUR_SUPABASE_ANON_KEY') return;
@@ -424,8 +445,8 @@
           if (tokenExpiresAt <= Math.floor(Date.now() / 1000) + 300) return;
         } else { return; }
 
-        var supabaseUrl = 'YOUR_SUPABASE_URL';
-        var supabaseAnonKey = 'YOUR_SUPABASE_ANON_KEY';
+        var supabaseUrl = 'https://fkhihclpghmmtbbywvoj.supabase.co';
+        var supabaseAnonKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZraGloY2xwZ2htbXRiYnl3dm9qIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjgwNDIyMTgsImV4cCI6MjA4MzYxODIxOH0.4Z5eylbmBA-YFiDRvDtom4lTHavHP3JfVmrU0yH9oVo';
         var headers = { 'apikey': supabaseAnonKey, 'Authorization': 'Bearer ' + authToken, 'Content-Type': 'application/json' };
         var baseUrl = supabaseUrl + '/rest/v1';
         fetch(baseUrl + '/rpc/get_server_time', { method: 'POST', headers: headers })

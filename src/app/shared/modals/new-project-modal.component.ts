@@ -10,6 +10,7 @@ import {
   signal,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
+import { UI_FEEDBACK_DELAY } from '../../../config/timeout.config';
 
 @Component({
   selector: 'app-new-project-modal',
@@ -69,8 +70,8 @@ export class NewProjectModalComponent implements AfterViewInit {
   readonly canSubmit = computed(() => this.projectName().trim().length > 0);
   
   ngAfterViewInit() {
-    // 自动聚焦到名称输入框
-    setTimeout(() => this.projNameInput?.nativeElement?.focus(), 100);
+    // 自动聚焦到名称输入框（DOM 稳定后再聚焦，避免抢占）
+    setTimeout(() => this.projNameInput?.nativeElement?.focus(), UI_FEEDBACK_DELAY.INITIAL_FOCUS);
   }
 
   onNameInput(event: Event): void {

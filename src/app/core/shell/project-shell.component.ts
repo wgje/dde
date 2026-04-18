@@ -39,6 +39,7 @@ import { PARKING_CONFIG } from '../../../config/parking.config';
 import { HandoffCoordinatorService, shouldDegradeMobileStartupRoute } from '../../../services/handoff-coordinator.service';
 import { LaunchSnapshotService } from '../../../services/launch-snapshot.service';
 import { reloadViaForceClearCache } from '../../../utils/force-clear-cache';
+import { resolveStartupEntryIntent } from '../../../utils/startup-entry-intent';
 import {
   type DockFocusChromePhase,
 } from '../../../utils/dock-focus-phase';
@@ -586,8 +587,9 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
     const childSnapshot = snapshot.firstChild;
     const taskId = childSnapshot?.params['taskId'];
     const currentUrl = this.router.url;
+    const startupEntryIntent = resolveStartupEntryIntent(currentUrl);
     const handoffResult = this.handoffCoordinator.result();
-    const snapshotRouteIntent = this.startupLaunchSnapshot?.routeIntent;
+    const snapshotRouteIntent = startupEntryIntent ? null : this.startupLaunchSnapshot?.routeIntent;
     const snapshotMatchesCurrentRoute =
       !!snapshotRouteIntent
       && snapshotRouteIntent.projectId === projectId
@@ -600,6 +602,7 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
     const degradeMobileStartupRoute =
       FEATURE_FLAGS.SNAPSHOT_HANDOFF_V2 &&
       !this.startupRouteDecisionResolved &&
+      !startupEntryIntent &&
       (
         handoffResult.kind === 'degraded-to-text'
         || (this.startupLaunchSnapshot?.mobileDegraded === true && snapshotMatchesCurrentRoute)
@@ -616,9 +619,9 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
     }
     
     // 处理任务深链接定位
-    if (taskId && !degradeMobileStartupRoute) {
-      this.handleTaskDeepLink(taskId);
-    }
+    const taskDeepLinkResult = taskId && !degradeMobileStartupRoute
+      ? this.handleTaskDeepLink(taskId, { degradeToWorkspaceOnMissing: startupEntryIntent !== null })
+      : null;
     
     // 根据 URL 确定视图模式
     const isFlowRoute = currentUrl.endsWith('/flow');
@@ -644,7 +647,7 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
       return;
     }
 
-    if (isFlowRoute || isTaskDeepLink) {
+    if (isFlowRoute || (isTaskDeepLink && taskDeepLinkResult !== 'workspace' && taskDeepLinkResult !== 'flow')) {
       this.cancelFlowStateAwareTimers();
       this.activateFlowIntent(isTaskDeepLink ? 'deeplink' : 'route');
       this.setActiveView('flow');
@@ -862,82 +865,112 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
    * 等待任务数据加载后定位到指定任务
    * 使用指数退避策略减少不必要的等待
    */
-  private handleTaskDeepLink(taskId: string) {
+  private handleTaskDeepLink(
+    taskId: string,
+    options?: { degradeToWorkspaceOnMissing?: boolean }
+  ): 'flow' | 'workspace' | 'pending' {
     const maxRetries = 10;
     const baseDelay = 100;
     const maxDelay = 2000;
     let retries = 0;
-    
-    const tryFocusTask = () => {
+
+    const maybeDegradeToWorkspace = (): boolean => {
+      if (!options?.degradeToWorkspaceOnMissing) {
+        return false;
+      }
+
+      this.toast.warning('任务不存在', '请求的任务已失效，已返回工作区');
+      this.navigateToProjectList();
+      return true;
+    };
+
+    const tryFocusTask = (): void => {
       // 检查组件是否已销毁，停止递归
-      if (this.isDestroyed) return;
-      
+      if (this.isDestroyed) {
+        return;
+      }
+
       retries++;
       const tasks = this.projectState.tasks();
       const task = this.projectState.getTask(taskId);
       const isLoading = this.syncCoordinator.isLoadingRemote?.() ?? (tasks.length === 0);
-      
+
       if (task) {
         // 任务存在，通过命令服务发送居中请求
         // FlowCommandService 会缓存命令直到 FlowView 就绪
         this.activateFlowIntent('deeplink');
         this.setActiveView('flow');
-        
+
         // 等待图表渲染后定位
         this.deepLinkRetryTimer = setTimeout(() => {
-          if (this.isDestroyed) return;
+          if (this.isDestroyed) {
+            return;
+          }
           this.flowCommand.centerOnNode(taskId, true);
-          
+
           // 🔥 不再更新 URL - 避免触发路由导航销毁组件
           // 僵尸模式需要组件保持存活
         }, 100);
-      } else if (retries < maxRetries && (isLoading || !task)) {
+        return;
+      }
+
+      if (!isLoading && !task && maybeDegradeToWorkspace()) {
+        return;
+      }
+
+      if (retries < maxRetries && isLoading) {
         // 数据尚未加载，继续重试，使用指数退避
         const delay = Math.min(baseDelay * Math.pow(1.5, retries - 1), maxDelay);
         this.deepLinkRetryTimer = setTimeout(tryFocusTask, delay);
-      } else {
-        // 超时未找到任务，导航到流程图视图并提示用户
-        // 🔥 不再更新 URL - 避免触发路由导航销毁组件
-        this.activateFlowIntent('deeplink');
-        this.setActiveView('flow');
-        
-        // 根据情况显示不同提示，并提供明确的下一步操作
-        if (!isLoading && !task) {
-          // 任务确实不存在 - 提供创建新任务的选项
-          this.toast.warning(
-            '任务不存在', 
-            '请求的任务可能已被删除或您没有访问权限',
-            {
-              duration: 10000,
-              action: {
-                label: '新建任务',
-                onClick: () => {
-                  // 触发创建新任务
-                  this.taskOpsAdapter.addFloatingTask('新任务', '', 100, 100);
-                  this.toast.success('已创建新任务');
-                }
-              }
-            }
-          );
-        } else if (isLoading) {
-          // 加载超时 - 提供重试选项
-          this.toast.info(
-            '加载超时', 
-            '数据仍在加载中',
-            {
-              duration: 8000,
-              action: {
-                label: '刷新页面',
-                onClick: () => reloadViaForceClearCache()
-              }
-            }
-          );
-        }
+        return;
       }
+
+      // 超时未找到任务，导航到流程图视图并提示用户
+      // 🔥 不再更新 URL - 避免触发路由导航销毁组件
+      this.activateFlowIntent('deeplink');
+      this.setActiveView('flow');
+
+      if (!isLoading && !task) {
+        // 任务确实不存在 - 提供创建新任务的选项
+        this.toast.warning(
+          '任务不存在',
+          '请求的任务可能已被删除或您没有访问权限',
+          {
+            duration: 10000,
+            action: {
+              label: '新建任务',
+              onClick: () => {
+                this.taskOpsAdapter.addFloatingTask('新任务', '', 100, 100);
+                this.toast.success('已创建新任务');
+              }
+            }
+          }
+        );
+        return;
+      }
+
+      this.toast.info(
+        '加载超时',
+        '数据仍在加载中',
+        {
+          duration: 8000,
+          action: {
+            label: '刷新页面',
+            onClick: () => reloadViaForceClearCache()
+          }
+        }
+      );
     };
-    
-    // 开始尝试定位
-    this.deepLinkRetryTimer = setTimeout(tryFocusTask, 100);
+
+    const initialTasks = this.projectState.tasks();
+    const initialTask = this.projectState.getTask(taskId);
+    const initialIsLoading = this.syncCoordinator.isLoadingRemote?.() ?? (initialTasks.length === 0);
+    const initialResult: 'flow' | 'workspace' | 'pending' = initialTask
+      ? 'flow'
+      : (!initialIsLoading ? (options?.degradeToWorkspaceOnMissing ? 'workspace' : 'flow') : 'pending');
+
+    tryFocusTask();
+    return initialResult;
   }
   
   ngOnDestroy() {

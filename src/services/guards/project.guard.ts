@@ -7,6 +7,9 @@ import { ToastService } from '../toast.service';
 import { GUARD_CONFIG } from '../../config';
 import { guardLogger } from '../../utils/standalone-logger';
 
+/** 等待种子数据稳定（毫秒）- 让 loadProjects 内部初始化完成 */
+const SEED_DATA_STABILIZE_MS = 100;
+
 /**
  * 【重构】本地优先的数据初始化检查
  * 
@@ -58,7 +61,7 @@ async function ensureDataAvailable(
       });
       
       // 再等待一小段时间让种子数据生成
-      await new Promise(resolve => setTimeout(resolve, 100));
+        await new Promise(resolve => setTimeout(resolve, SEED_DATA_STABILIZE_MS));
     }
     
     // 如果还是没有数据，说明是首次加载或加载失败

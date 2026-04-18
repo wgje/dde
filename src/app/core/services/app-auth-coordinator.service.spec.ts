@@ -10,6 +10,7 @@ import { ToastService } from '../../../services/toast.service';
 import { LoggerService } from '../../../services/logger.service';
 import { OptimisticStateService } from '../../../services/optimistic-state.service';
 import { UndoService } from '../../../services/undo.service';
+import { WidgetBindingService } from '../../../services/widget-binding.service';
 import { ProjectDataService } from './sync/project-data.service';
 
 vi.mock('../../../services/guards', async () => {
@@ -110,6 +111,10 @@ function setup(options?: {
     navigateByUrl: vi.fn().mockResolvedValue(true),
   };
 
+  const widgetBindingMock = {
+    revokeAllBindings: vi.fn().mockResolvedValue({ ok: true as const, value: { revokedCount: 0 } }),
+  };
+
   const injector = Injector.create({
     providers: [
       { provide: AppAuthCoordinatorService, useClass: AppAuthCoordinatorService },
@@ -137,6 +142,7 @@ function setup(options?: {
           onUserLogout: vi.fn(),
         },
       },
+      { provide: WidgetBindingService, useValue: widgetBindingMock },
       { provide: Router, useValue: routerMock },
     ],
   });
@@ -152,6 +158,7 @@ function setup(options?: {
     modalMock,
     toastMock,
     routerMock,
+    widgetBindingMock,
     userId,
     projects,
     activeProjectId,
@@ -236,7 +243,7 @@ describe('signOut resilience', () => {
     userId.set('user-1');
     userSessionMock.clearAllLocalData.mockRejectedValueOnce(new Error('indexeddb blocked'));
 
-    await expect(service.signOut()).resolves.toBeUndefined();
+    await expect(service.signOut()).resolves.toBe(true);
 
     expect(authMock.signOut).toHaveBeenCalledOnce();
     expect(userSessionMock.setCurrentUser).toHaveBeenCalledWith(null, {
@@ -249,18 +256,47 @@ describe('signOut resilience', () => {
     expect(logger.error).toHaveBeenCalledWith('本地数据清理失败，继续完成登出流程', expect.any(Error));
   });
 
+  it('Widget 远端吊销失败时应中断登出并提示重试', async () => {
+    const { service, authMock, toastMock, userId, logger, widgetBindingMock, userSessionMock } = setup();
+    userId.set('user-1');
+    widgetBindingMock.revokeAllBindings.mockResolvedValueOnce({
+      ok: false as const,
+      error: {
+        code: 'OPERATION_FAILED',
+        message: 'Widget revoke-all 超时',
+      },
+    });
+
+    await expect(service.signOut()).resolves.toBe(false);
+
+    expect(authMock.signOut).not.toHaveBeenCalled();
+    expect(userSessionMock.setCurrentUser).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledWith('Widget 远端吊销失败，中断登出流程', {
+      code: 'OPERATION_FAILED',
+      message: 'Widget revoke-all 超时',
+    });
+    expect(toastMock.error).toHaveBeenCalledWith(
+      '设备吊销失败',
+      expect.stringContaining('当前不会退出登录')
+    );
+  });
+
   it('应在 auth.signOut 清空 currentUserId 前先执行 userSession teardown', async () => {
-    const { service, userSessionMock, authMock, userId } = setup();
+    const { service, userSessionMock, authMock, userId, widgetBindingMock } = setup();
     userId.set('user-1');
     authMock.signOut.mockImplementation(async () => {
       userId.set(null);
     });
 
-    await service.signOut();
+    await expect(service.signOut()).resolves.toBe(true);
 
     expect(userSessionMock.setCurrentUser).toHaveBeenCalledWith(null, {
       skipPersistentReload: true,
     });
+    expect(widgetBindingMock.revokeAllBindings).toHaveBeenCalledOnce();
+    expect(widgetBindingMock.revokeAllBindings.mock.invocationCallOrder[0]).toBeLessThan(
+      userSessionMock.setCurrentUser.mock.invocationCallOrder[0]
+    );
     expect(userSessionMock.setCurrentUser.mock.invocationCallOrder[0]).toBeLessThan(
       authMock.signOut.mock.invocationCallOrder[0]
     );
@@ -714,7 +750,7 @@ describe('bootstrapSession forceLoad', () => {
     }, 'waitWithTimeout').mockResolvedValue('timeout');
 
     await (service as unknown as { bootstrapSession: () => Promise<void> }).bootstrapSession();
-    await service.signOut();
+    await expect(service.signOut()).resolves.toBe(true);
 
     // @ts-expect-error TS2349 - closure reassignment defeats CFA
     rejectBackgroundLoad?.(new Error('background load failed'));

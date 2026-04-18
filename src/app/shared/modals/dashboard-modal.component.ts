@@ -7,7 +7,7 @@ import { ConflictStorageService, ConflictRecord } from '../../../services/confli
 import { ProjectOperationService } from '../../../services/project-operation.service';
 import { ToastService } from '../../../services/toast.service';
 import { SyncCoordinatorService } from '../../../services/sync-coordinator.service';
-import { ConflictAutoResolverService, AutoResolutionReport, TaskResolutionRecommendation } from '../../../services/conflict-auto-resolver.service';
+import { ConflictAutoResolverService, AutoResolutionReport } from '../../../services/conflict-auto-resolver.service';
 import { type ConflictResolutionPlan, type TaskResolutionChoice } from '../../../services/conflict-resolution.types';
 import { Task } from '../../../models';
 import { ConflictTaskDiffComponent, TaskResolutionMap } from '../components/conflict-task-diff.component';

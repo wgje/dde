@@ -1,5 +1,6 @@
 import { ChangeDetectionStrategy, Component, DestroyRef, computed, effect, inject, input, output } from '@angular/core';
 import { FEATURE_FLAGS } from '../../../config/feature-flags.config';
+import { IDLE_SCHEDULE_CONFIG } from '../../../config/timeout.config';
 import { PwaInstallPromptService } from '../../../services/pwa-install-prompt.service';
 import { ToastService } from '../../../services/toast.service';
 
@@ -132,6 +133,6 @@ export class PwaInstallPromptBannerComponent {
       return;
     }
 
-    idleTimer = setTimeout(initOnce, 1500);
+    idleTimer = setTimeout(initOnce, IDLE_SCHEDULE_CONFIG.SHORT_MS);
   }
 }

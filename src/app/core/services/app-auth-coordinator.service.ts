@@ -8,6 +8,7 @@ import { ToastService } from '../../../services/toast.service';
 import { LoggerService } from '../../../services/logger.service';
 import { OptimisticStateService } from '../../../services/optimistic-state.service';
 import { UndoService } from '../../../services/undo.service';
+import { WidgetBindingService } from '../../../services/widget-binding.service';
 import { enableLocalMode, disableLocalMode } from '../../../services/guards';
 import { getErrorMessage, isFailure, humanizeErrorMessage, type OperationError } from '../../../utils/result';
 import { AUTH_CONFIG } from '../../../config/auth.config';
@@ -41,6 +42,7 @@ export class AppAuthCoordinatorService {
   private readonly router = inject(Router);
   private readonly optimisticState = inject(OptimisticStateService);
   private readonly undoService = inject(UndoService);
+  private readonly widgetBinding = inject(WidgetBindingService);
 
   private attachmentServiceRef: AttachmentService | null = null;
   private attachmentServicePromise: Promise<AttachmentService | null> | null = null;
@@ -591,14 +593,28 @@ export class AppAuthCoordinatorService {
 
   /**
    * 执行认证相关的登出清理
-   * 返回后，调用方需要自行清理组件级别的状态
+    * 返回 true 表示登出完成；返回 false 表示远端吊销失败，调用方必须保留当前登录态
    */
-  async signOut(): Promise<void> {
+  async signOut(): Promise<boolean> {
     this.authLoadGeneration++;
     this.migrationCheckGeneration++;
     const currentUserId = this.auth.currentUserId();
     let localCleanupFailed = false;
-    
+
+    if (
+      currentUserId
+      && currentUserId !== AUTH_CONFIG.LOCAL_MODE_USER_ID
+      && this.auth.isConfigured
+    ) {
+      const revokeResult = await this.widgetBinding.revokeAllBindings();
+      if (isFailure(revokeResult)) {
+        const message = humanizeErrorMessage(getErrorMessage(revokeResult.error));
+        this.logger.error('Widget 远端吊销失败，中断登出流程', revokeResult.error);
+        this.toast.error('设备吊销失败', `${message}；请在网络恢复后重试，当前不会退出登录`);
+        return false;
+      }
+    }
+
     // 【P0 安全修复】在清理本地数据前，先调用各服务的 onUserLogout
     // 防止跨用户数据泄露：乐观更新快照、撤销历史、附件 URL 缓存
     try {
@@ -638,6 +654,8 @@ export class AppAuthCoordinatorService {
     if (localCleanupFailed) {
       this.toast.warning('本地清理未完成', '已退出登录；若需彻底清理本地缓存，请关闭其他标签页后重试');
     }
+
+    return true;
   }
 
   // ========== 模态框事件处理 ==========
