@@ -59,7 +59,7 @@ function isWidgetsOnlyShortcutOptOut(value) {
 /** 从 shortcut.url (可能是相对路径) 提取 intent query 值 */
 function extractIntent(rawUrl) {
   if (typeof rawUrl !== 'string') return null;
-  // 支持 ./#/projects?entry=shortcut&intent=open-focus-tools 这类 hash+query
+  // 支持 `./#/projects?entry=shortcut&intent=open-focus-tools` 这类 hash+query
   const qIndex = rawUrl.indexOf('?');
   if (qIndex < 0) return null;
   const query = rawUrl.slice(qIndex + 1);

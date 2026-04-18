@@ -16,14 +16,26 @@ const MARKER_BEGIN = '# >>> dde/check-secrets BEGIN (do not edit)';
 const MARKER_END = '# <<< dde/check-secrets END';
 
 const HOOK_CONTENT = `${MARKER_BEGIN}
-# 自动生成：扫描 staged 文件中的敏感信息
+# 自动生成：提交前两道防线
+#   1) 敏感信息扫描（防密钥外泄）
+#   2) 编码/行尾守卫（防 CRLF、mojibake、可疑问号回流 CI）
+# 二者与 CI 的 quality:guard:encoding + check-secrets 保持一致，保证本地先行阻断。
 # 如需临时跳过（慎用）：git commit --no-verify
 node scripts/contracts/check-secrets.cjs
-status=$?
-if [ $status -ne 0 ]; then
+secrets_status=$?
+if [ $secrets_status -ne 0 ]; then
   echo ""
-  echo "[pre-commit] aborting due to check-secrets failure (exit $status)"
-  exit $status
+  echo "[pre-commit] aborting due to check-secrets failure (exit $secrets_status)"
+  exit $secrets_status
+fi
+
+node scripts/contracts/check-encoding-corruption.cjs
+encoding_status=$?
+if [ $encoding_status -ne 0 ]; then
+  echo ""
+  echo "[pre-commit] aborting due to encoding guard failure (exit $encoding_status)"
+  echo "[pre-commit] 根因通常是 CRLF 行尾或注释中裸 URL 的 \\"?\\"；用编辑器改回 LF / 把 URL 用反引号包裹即可。"
+  exit $encoding_status
 fi
 ${MARKER_END}
 `;
