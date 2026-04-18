@@ -16,30 +16,21 @@
 - 同步模型：Supabase + 增量同步 + LWW（Last-Write-Wins）。
 - ID 策略：客户端 `crypto.randomUUID()` 生成所有业务实体 ID。
 - 离线优先：IndexedDB 本地先写，后台异步同步，失败进入 RetryQueue。
-- 状态管理：Angular Signals（非 RxJS Store）。
+- 状态管理：Angular Signals 为响应式状态主干；允许 RxJS Observable 处理事件流/HTTP，但禁止 NgRx 等 RxJS Store 类全局状态库。
 
-## Hard Rules
+## Hard Rules（权威定义）
 
-1. ID 规则
-- 所有实体 ID 必须在客户端生成：`crypto.randomUUID()`。
-- 禁止自增 ID、临时 ID、同步时做 ID 映射转换。
+> **单事实源**：Hard Rules 的权威定义在 [AGENTS.md §5](../AGENTS.md#5-hard-rules不可违反) 中维护。
+> 本节提供快速清单，如有冲突以 `AGENTS.md` 为准。
 
-2. Offline-first 数据流
-- 读取：`IndexedDB -> 后台增量拉取(updated_at > last_sync_time)`。
-- 写入：本地先写 + UI 立即更新 -> 防抖推送（3s）-> 失败入 RetryQueue。
-- 冲突：LWW。
+**清单**：
+1. **ID 策略** — 客户端 `crypto.randomUUID()`，禁止自增/临时 ID/ID 映射转换。
+2. **Offline-first** — IndexedDB 先写 + 增量拉取 + 3s 防抖 + RetryQueue；LWW 冲突策略。
+3. **GoJS（移动端）** — Text 默认视图；Flow 图 `@defer` 懒加载；销毁/重建，禁止 `visibility:hidden` 保活。
+4. **树遍历** — 仅迭代；深度上限 `MAX_SUBTREE_DEPTH = 100`。
+5. **依赖注入** — 直接注入具体 Store（`TaskStore`/`ProjectStore`/`ConnectionStore`）或具体子服务；禁止新建「门面 Store」聚合类。
 
-3. GoJS（移动端）
-- 手机默认 Text 视图，Flow 图按需 `@defer` 懒加载。
-- 禁止 `visibility:hidden` 保活 GoJS，必须彻底销毁/重建。
-
-4. 树操作
-- 仅使用迭代算法。
-- 必须遵守 `MAX_SUBTREE_DEPTH = 100`。
-
-5. 依赖注入
-- 禁止 `inject(StoreService)`。
-- 必须直接注入具体子服务。
+> 具体字段、实现细节、历史背景、缓解措施、常见陷阱参见 `AGENTS.md §5-§7`。
 
 ## 技术基线
 
@@ -57,6 +48,27 @@
 - 错误处理使用 Result Pattern：`success(...)` / `failure(...)`。
 - Supabase 错误统一通过 `supabaseErrorToError()` 转换。
 - 注释语言：中文解释业务逻辑；标识符保持英文。
+
+### 代码尺寸与复杂度（ESLint 已落位）
+
+以下限额由 `eslint.config.js` 以 `warn` 级别强制，AGENTS.md §12 的自律条款：
+
+- `max-lines: 800`（单文件，跳过空行与注释）
+- `max-lines-per-function: 50`（跳过空行与注释，IIFE 不算）
+- `max-depth: 4`
+- `complexity: 20`
+
+**已超限的历史文件**：不要求一次性清零，但新增代码不得继续加码。抽离时优先沿业务边界拆分成独立 `@Injectable({ providedIn: 'root' })` 服务，组件内保留同名 delegate 方法以维持既有 spec 合约（参考 2026-04-16 `FocusModePreloadService` / `FocusToolsLoaderService` 抽离范式）。
+
+### 超时与空闲调度常量化
+
+禁止在业务代码里使用裸 `setTimeout(fn, 1200)` / `setTimeout(fn, 5000)` 这类魔数。统一走：
+
+- `TIMEOUT_CONFIG.*`（QUICK / STANDARD / HEAVY / UPLOAD / REALTIME）
+- `IDLE_SCHEDULE_CONFIG.*`（SHORT_MS / STANDARD_MS / LONG_MS）—— `requestIdleCallback` 的 fallback 超时
+- `SUPABASE_CLIENT_FETCH_MAX_MS` —— Supabase 客户端全局 fetch 兜底超时
+
+UI 层瞬时动画/toast 常量（例如 300ms highlight、3000ms 复制成功提示）可保留为组件内部 `const FOO_MS = ...`，但**不得复制粘贴**，必须命名化。
 
 ## 安全与合规
 

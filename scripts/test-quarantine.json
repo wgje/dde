@@ -19,7 +19,9 @@
       "lastSeenAt": "2026-02-15T00:00:00.000Z",
       "healthyStreakDays": 0,
       "sampleCount": 0,
-      "failureSamples": 0
+      "failureSamples": 0,
+      "owner": "unassigned",
+      "note": "schema v2 新增 owner/note 字段（2026-04-16 T2-4）；请认领者根因分析后更新本字段。"
     }
   ],
   "sources": {

@@ -1,6 +1,9 @@
 #!/bin/bash
 # 此脚本用于从 Git 历史中移除敏感的环境配置文件
 # 警告：此操作会重写 Git 历史，请谨慎使用！
+#
+# 【2026-04-16】日常只读审计请使用 `npm run audit:secrets`（scripts/contracts/check-secrets.cjs）。
+# 本脚本仅在"确认已有敏感文件误入 Git 历史且需要彻底抹除"的紧急场景使用。
 
 set -e
 

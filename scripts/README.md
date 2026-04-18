@@ -89,6 +89,7 @@
 |------|------|
 | `seed-supabase.js` | 填充测试数据（开发用） |
 | `setup-storage-bucket.cjs` | 脚本方式创建 Storage 桶 |
+| `setup-miui-widget-device.ps1` | 固化 Xiaomi/MIUI 真机上的 Chrome + TWA host appops 基线（`android:miui:init`） |
 | `analyze-bundle.sh` | 分析打包体积 |
 | `analyze-performance.sh` | Lighthouse 性能分析 |
 | `performance-benchmark.sh` | 性能基准测试 |
@@ -98,6 +99,26 @@
 | `cleanup-sensitive-files.sh` | 清理敏感文件 |
 | `scan-placeholder-interactions.sh` | 扫描未实现的占位交互 |
 | `start-chrome-debug.sh` | 启动 Chrome 调试实例 |
+
+### Xiaomi / MIUI 设备初始化
+
+用于 Android widget 真机回归前，快速恢复 Xiaomi/MIUI 上验证过的 Chrome + `app.nanoflow.twa` appops 基线。
+
+```powershell
+npm run android:miui:init -- -DeviceSerial a472af56
+```
+
+仅查看当前状态：
+
+```powershell
+npm run android:miui:init -- -DeviceSerial a472af56 -StatusOnly
+```
+
+如需同时打开 MIUI 的 Auto Start / Background 管理页做人工复核：
+
+```powershell
+npm run android:miui:init -- -DeviceSerial a472af56 -OpenSettings
+```
 
 ## 测试策略（本地反馈优先）
 

@@ -62,6 +62,7 @@
     "src/tests/contracts/focus-quota-consistency.contract.spec.ts": 4,
     "src/tests/contracts/incremental-sync-default.contract.spec.ts": 5,
     "src/tests/contracts/transcribe-cors.contract.spec.ts": 2,
+    "src/tests/contracts/widget-backend.contract.spec.ts": 2,
     "src/tests/scripts/patch-ngsw-html-hashes.spec.ts": 4,
     "src/tests/scripts/perf-startup-guard.spec.ts": 6,
     "src/tests/scripts/update-test-duration-baseline.spec.ts": 99,

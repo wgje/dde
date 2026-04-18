@@ -36,7 +36,7 @@
 - ID：实体 ID 由客户端 `crypto.randomUUID()` 生成。
 - 离线：PWA + IndexedDB（idb-keyval）先写后同步。
 - 监控：Sentry 按需懒加载。
-- 状态：Angular Signals，避免 RxJS Store 化。
+- 状态：Angular Signals 为主（响应式状态）；允许局部使用 RxJS Observable（事件流、HTTP），但禁止引入 NgRx/RxJS Store 类全局状态库。
 
 ## 5. Hard Rules（不可违反）
 
@@ -60,8 +60,9 @@
 - 深度上限：`FLOATING_TREE_CONFIG.MAX_SUBTREE_DEPTH = 100`。
 
 ### 5.5 依赖注入
-- 禁止 `inject(StoreService)`。
-- 必须直接注入具体子服务（StoreService 仅兼容保留）。
+- 服务层直接注入具体 Store（`TaskStore` / `ProjectStore` / `ConnectionStore`）或具体子服务。
+- 禁止引入新的「门面 Store」聚合类（避免循环依赖与职责膨胀）。
+- 历史注释中提到的 `StoreService` 已拆分移除。2026-04-16 T2-1 删除了 `src/services/stores.ts` 过渡期重导出桥，`services/` 层改为直接从 `app/core/state/stores` 导入三个 Store 类；`eslint.config.js` 对 `services/ → app/core/services|shell` 反向引用升级为 `error` 级。
 
 ## 6. 核心架构速览
 
@@ -72,7 +73,7 @@
 - **`ProjectStore`**：`projectsMap`、`activeProjectId`、`activeProject`
 - **`ConnectionStore`**：`connectionsMap`、`connectionsByProject`（private）
 
-通过 `src/services/stores.ts` 重导出供服务层使用。
+通过 `app/core/state/stores` 直接导入供服务层使用（过渡期桥接 `src/services/stores.ts` 已于 T2-1 删除）。
 
 要求：结构扁平、避免深层嵌套，统一使用 `signal()/computed()/effect()`。
 

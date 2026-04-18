@@ -278,7 +278,13 @@ function coerceEntry(raw, fallbackReason, fallbackTimestamp) {
     ? raw.lastSeenAt
     : firstSeenAt;
 
-  return {
+  // 【2026-04-16 T2-4】保留人工维护字段，防止 scheduler 覆写丢失 owner/note 信息
+  // owner：负责跟踪此 quarantine 条目的 GitHub handle 或 team
+  // note：人工备注（根因初步判断、关联 PR/issue 等）
+  const owner = typeof raw.owner === 'string' && raw.owner.trim() ? raw.owner.trim() : undefined;
+  const note = typeof raw.note === 'string' && raw.note.trim() ? raw.note.trim() : undefined;
+
+  const result = {
     file,
     reason: typeof raw.reason === 'string' && raw.reason.trim() ? raw.reason : fallbackReason,
     firstSeenAt,
@@ -289,6 +295,9 @@ function coerceEntry(raw, fallbackReason, fallbackTimestamp) {
     sampleCount: Math.floor(parseNonNegativeNumber(raw.sampleCount) ?? 0),
     failureSamples: Math.floor(parseNonNegativeNumber(raw.failureSamples) ?? 0),
   };
+  if (owner !== undefined) result.owner = owner;
+  if (note !== undefined) result.note = note;
+  return result;
 }
 
 function loadExistingQuarantine(quarantinePath, nowIso) {

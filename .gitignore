@@ -49,6 +49,9 @@ playwright-report/
 .cache/
 .parcel-cache/
 .vercel
+android/.gradle/
+android/local.properties
+android/**/build/
 
 # Generated artifacts (local dev / test runners)
 __azurite_db_table__.json
@@ -56,3 +59,9 @@ AzuriteConfig
 trace.json.gz
 tmp/
 playwright-report/
+
+# AI session transcripts (local working files, never commit)
+ai_conversations/
+
+.vercel
+.env*.local
