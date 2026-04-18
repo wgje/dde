@@ -150,6 +150,21 @@ import { TIMEOUT_CONFIG } from '../../../../config';
               </button>
             }
             
+            <!-- 逻辑网导出快捷按钮：无需展开二级菜单即可一键导出审查包（Mermaid+YAML+不变式） -->
+            <button
+              (click)="onExportLogicPack()"
+              class="theme-toolbar-btn backdrop-blur rounded-lg shadow-sm border"
+              [class.p-2]="!uiState.isMobile()"
+              [class.p-1.5]="uiState.isMobile()"
+              title="逻辑网导出：一键下载 Mermaid + YAML + 不变式审查包（Markdown）">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"
+                     [class.h-5]="!uiState.isMobile()" [class.w-5]="!uiState.isMobile()"
+                     [class.h-4]="uiState.isMobile()" [class.w-4]="uiState.isMobile()">
+                  <!-- 节点+连线图标：代表「逻辑网」 -->
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 8a2 2 0 100-4 2 2 0 000 4zm14 0a2 2 0 100-4 2 2 0 000 4zM12 20a2 2 0 100-4 2 2 0 000 4zM6.8 7.3l4.4 7.4M17.2 7.3l-4.4 7.4" />
+                </svg>
+            </button>
+
             <!-- 导出按钮 -->
             <div class="relative" #exportMenu>
               <button 
@@ -207,7 +222,7 @@ import { TIMEOUT_CONFIG } from '../../../../config';
                       <svg class="w-4 h-4 theme-text-muted" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
                       </svg>
-                      导出逻辑审查
+                      逻辑网导出
                     </button>
                     <button
                       type="button"

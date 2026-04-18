@@ -112,7 +112,7 @@ import { readTaskDragPayload, writeTaskDragPayload } from '../../../../utils/tas
       [class.transition-none]="isResizing()">>
 
       <!-- 侧边栏内容 -->
-      <div class="flex-1 flex flex-col w-full h-full min-w-0">
+      <div class="flex-1 flex flex-col w-full h-full min-w-0 min-h-0">
         
         <!-- 1. 项目头部 -->
         <div class="shrink-0 px-3 py-2 border-b border-stone-100 dark:border-stone-800 bg-white dark:bg-stone-900">
@@ -193,7 +193,7 @@ import { readTaskDragPayload, writeTaskDragPayload } from '../../../../utils/tas
             }
           </div>
 
-          <div class="flex-1 overflow-y-auto custom-scroll p-3" #workbenchSection>
+          <div class="flex-1 min-h-0 overflow-y-auto custom-scroll p-3" #workbenchSection>
             @if (activeWorkbenchTab() === 'unfinished') {
               <ul class="space-y-2">
                 @for (item of projectState.unfinishedItems(); track item.taskId + '-' + item.todoIndex) {
@@ -273,7 +273,7 @@ import { readTaskDragPayload, writeTaskDragPayload } from '../../../../utils/tas
                  </button>
                </div>
             } @else if (activeWorkbenchTab() === 'blackbox') {
-               <div #blackboxSection>
+               <div class="min-h-0" #blackboxSection>
                  <app-black-box-panel [expandToken]="blackBoxExpandToken()"></app-black-box-panel>
                </div>
             }

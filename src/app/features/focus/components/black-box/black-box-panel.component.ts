@@ -92,7 +92,12 @@ import {
       </div>
     }
   `,
-  styles: [],
+  styles: [`
+    :host {
+      display: block;
+      min-height: 0;
+    }
+  `],
   changeDetection: ChangeDetectionStrategy.OnPush
 })
 export class BlackBoxPanelComponent implements OnInit {
