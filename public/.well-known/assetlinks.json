@@ -1,0 +1,15 @@
+[
+  {
+    "relation": [
+      "delegate_permission/common.handle_all_urls",
+      "delegate_permission/common.use_as_origin"
+    ],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "app.nanoflow.twa",
+      "sha256_cert_fingerprints": [
+        "BC:6A:31:F3:41:40:25:C1:32:FB:DB:B1:0D:AB:82:BB:6E:E6:32:E2:9D:67:C7:49:A9:40:80:4F:D9:C6:CF:71"
+      ]
+    }
+  }
+]
