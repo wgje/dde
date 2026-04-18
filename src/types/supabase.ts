@@ -368,6 +368,38 @@ export type Database = {
           },
         ]
       }
+      routine_completion_events: {
+        Row: {
+          created_at: string
+          date_key: string
+          id: string
+          routine_id: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          date_key: string
+          id: string
+          routine_id: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          date_key?: string
+          id?: string
+          routine_id?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "routine_completion_events_routine_id_fkey"
+            columns: ["routine_id"]
+            isOneToOne: false
+            referencedRelation: "routine_tasks"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       routine_tasks: {
         Row: {
           created_at: string
@@ -393,6 +425,213 @@ export type Database = {
           is_enabled?: boolean
           max_times_per_day?: number
           title?: string
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
+      widget_devices: {
+        Row: {
+          binding_generation: number
+          capabilities: Json
+          created_at: string
+          expires_at: string
+          id: string
+          installation_id: string
+          last_bound_user_hash: string
+          last_seen_at: string
+          platform: string
+          push_token: string | null
+          push_token_updated_at: string | null
+          revoke_reason: string | null
+          revoked_at: string | null
+          secret_hash: string
+          token_hash: string | null
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          binding_generation?: number
+          capabilities?: Json
+          created_at?: string
+          expires_at: string
+          id: string
+          installation_id: string
+          last_bound_user_hash: string
+          last_seen_at?: string
+          platform: string
+          push_token?: string | null
+          push_token_updated_at?: string | null
+          revoke_reason?: string | null
+          revoked_at?: string | null
+          secret_hash: string
+          token_hash?: string | null
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          binding_generation?: number
+          capabilities?: Json
+          created_at?: string
+          expires_at?: string
+          id?: string
+          installation_id?: string
+          last_bound_user_hash?: string
+          last_seen_at?: string
+          platform?: string
+          push_token?: string | null
+          push_token_updated_at?: string | null
+          revoke_reason?: string | null
+          revoked_at?: string | null
+          secret_hash?: string
+          token_hash?: string | null
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
+      widget_instances: {
+        Row: {
+          binding_generation: number
+          config_scope: string
+          created_at: string
+          device_id: string
+          host_instance_id: string
+          id: string
+          installed_at: string
+          last_seen_at: string
+          platform: string
+          privacy_mode: string
+          size_bucket: string
+          uninstalled_at: string | null
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          binding_generation?: number
+          config_scope?: string
+          created_at?: string
+          device_id: string
+          host_instance_id: string
+          id: string
+          installed_at?: string
+          last_seen_at?: string
+          platform: string
+          privacy_mode?: string
+          size_bucket: string
+          uninstalled_at?: string | null
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          binding_generation?: number
+          config_scope?: string
+          created_at?: string
+          device_id?: string
+          host_instance_id?: string
+          id?: string
+          installed_at?: string
+          last_seen_at?: string
+          platform?: string
+          privacy_mode?: string
+          size_bucket?: string
+          uninstalled_at?: string | null
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
+      widget_request_rate_limits: {
+        Row: {
+          blocked_until: string | null
+          call_count: number
+          created_at: string
+          last_decision: string
+          scope_key: string
+          scope_type: string
+          updated_at: string
+          window_start: string
+        }
+        Insert: {
+          blocked_until?: string | null
+          call_count?: number
+          created_at?: string
+          last_decision?: string
+          scope_key: string
+          scope_type: string
+          updated_at?: string
+          window_start?: string
+        }
+        Update: {
+          blocked_until?: string | null
+          call_count?: number
+          created_at?: string
+          last_decision?: string
+          scope_key?: string
+          scope_type?: string
+          updated_at?: string
+          window_start?: string
+        }
+        Relationships: []
+      }
+      widget_notify_events: {
+        Row: {
+          created_at: string
+          event_type: string
+          last_status: string
+          processed_at: string
+          source_table: string
+          summary_cursor: string | null
+          updated_at: string
+          user_id: string | null
+          webhook_id: string
+        }
+        Insert: {
+          created_at?: string
+          event_type: string
+          last_status?: string
+          processed_at?: string
+          source_table: string
+          summary_cursor?: string | null
+          updated_at?: string
+          user_id?: string | null
+          webhook_id: string
+        }
+        Update: {
+          created_at?: string
+          event_type?: string
+          last_status?: string
+          processed_at?: string
+          source_table?: string
+          summary_cursor?: string | null
+          updated_at?: string
+          user_id?: string | null
+          webhook_id?: string
+        }
+        Relationships: []
+      }
+      widget_notify_throttle: {
+        Row: {
+          created_at: string
+          last_event_id: string | null
+          last_notified_at: string
+          last_summary_version: string | null
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          last_event_id?: string | null
+          last_notified_at?: string
+          last_summary_version?: string | null
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          last_event_id?: string | null
+          last_notified_at?: string
+          last_summary_version?: string | null
           updated_at?: string
           user_id?: string
         }
@@ -784,6 +1023,28 @@ export type Database = {
       cleanup_old_deleted_tasks: { Args: never; Returns: number }
       cleanup_old_logs: { Args: never; Returns: number }
       cleanup_personal_retention_artifacts: { Args: never; Returns: Json }
+      increment_routine_completion: {
+        Args: {
+          p_completion_id: string
+          p_date_key: string
+          p_routine_id: string
+        }
+        Returns: number
+      }
+      consume_widget_rate_limit: {
+        Args: {
+          p_block_seconds?: number
+          p_max_calls: number
+          p_scope_key: string
+          p_scope_type: string
+          p_window_seconds?: number
+        }
+        Returns: {
+          allowed: boolean
+          remaining_calls: number
+          retry_after_seconds: number
+        }[]
+      }
       current_user_id: { Args: never; Returns: string }
       get_accessible_project_probe: {
         Args: { p_project_id: string }
@@ -910,7 +1171,7 @@ type DatabaseWithoutInternals = Omit<Database, "__InternalSupabase">
 
 type DefaultSchema = DatabaseWithoutInternals[Extract<keyof Database, "public">]
 
-type Tables<
+export type Tables<
   DefaultSchemaTableNameOrOptions extends
     | keyof (DefaultSchema["Tables"] & DefaultSchema["Views"])
     | { schema: keyof DatabaseWithoutInternals },
@@ -939,7 +1200,7 @@ type Tables<
       : never
     : never
 
-type TablesInsert<
+export type TablesInsert<
   DefaultSchemaTableNameOrOptions extends
     | keyof DefaultSchema["Tables"]
     | { schema: keyof DatabaseWithoutInternals },
@@ -964,7 +1225,7 @@ type TablesInsert<
       : never
     : never
 
-type TablesUpdate<
+export type TablesUpdate<
   DefaultSchemaTableNameOrOptions extends
     | keyof DefaultSchema["Tables"]
     | { schema: keyof DatabaseWithoutInternals },
@@ -989,7 +1250,7 @@ type TablesUpdate<
       : never
     : never
 
-type Enums<
+export type Enums<
   DefaultSchemaEnumNameOrOptions extends
     | keyof DefaultSchema["Enums"]
     | { schema: keyof DatabaseWithoutInternals },
@@ -1006,7 +1267,7 @@ type Enums<
     ? DefaultSchema["Enums"][DefaultSchemaEnumNameOrOptions]
     : never
 
-type CompositeTypes<
+export type CompositeTypes<
   PublicCompositeTypeNameOrOptions extends
     | keyof DefaultSchema["CompositeTypes"]
     | { schema: keyof DatabaseWithoutInternals },

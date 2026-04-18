@@ -8,11 +8,20 @@
 [functions.transcribe]
 verify_jwt = false
 
+[functions.widget-register]
+verify_jwt = false
+
+[functions.widget-summary]
+verify_jwt = false
+
+[functions.widget-notify]
+verify_jwt = false
+
 # 详细说明：
 # - 默认情况下，Supabase Edge Functions 会在网关层验证 JWT
 # - 如果 JWT 无效，请求会返回 401，不会到达你的函数代码
 # - 设置 verify_jwt = false 会跳过网关层的 JWT 验证
-# - 当前 transcribe 函数已在函数内部通过 auth.getUser(token) 做显式认证
+# - 当前 transcribe / widget-register 函数已在函数内部通过 auth.getUser(token) 做显式认证
 # - 线上项目出现 REST 接受 access token、Functions 网关却统一返回 Invalid JWT 的异常时，
 #   这里必须保持 false，避免网关层错误拦截有效会话
 

@@ -668,8 +668,18 @@ CREATE TABLE IF NOT EXISTS public.routine_completions (
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS public.routine_completion_events (
+  id              UUID PRIMARY KEY,
+  routine_id      UUID NOT NULL REFERENCES public.routine_tasks(id) ON DELETE CASCADE,
+  user_id         UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  date_key        DATE NOT NULL,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE UNIQUE INDEX IF NOT EXISTS uq_routine_completions_user_routine_date_key
   ON public.routine_completions (user_id, routine_id, date_key);
+CREATE INDEX IF NOT EXISTS idx_routine_completion_events_user_routine_date
+  ON public.routine_completion_events (user_id, routine_id, date_key);
 
 -- 注：idx_routine_completions_routine_id 已删除（routine 功能尚未上线，0 次使用）
 
@@ -680,6 +690,8 @@ CREATE TRIGGER trg_routine_completions_updated_at
 
 ALTER TABLE public.routine_completions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.routine_completions FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.routine_completion_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.routine_completion_events FORCE ROW LEVEL SECURITY;
 
 DO $$ BEGIN
   CREATE POLICY "routine_completions_select"
@@ -688,30 +700,16 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
-DO $$ BEGIN
-  CREATE POLICY "routine_completions_insert"
-    ON routine_completions FOR INSERT
-    TO authenticated WITH CHECK ((SELECT auth.uid()) = user_id);
-EXCEPTION WHEN duplicate_object THEN NULL;
-END $$;
+DROP POLICY IF EXISTS "routine_completions_insert" ON public.routine_completions;
+DROP POLICY IF EXISTS "routine_completions_update" ON public.routine_completions;
+DROP POLICY IF EXISTS "routine_completions_delete" ON public.routine_completions;
 
-DO $$ BEGIN
-  CREATE POLICY "routine_completions_update"
-    ON routine_completions FOR UPDATE
-    TO authenticated USING ((SELECT auth.uid()) = user_id);
-EXCEPTION WHEN duplicate_object THEN NULL;
-END $$;
-
-DO $$ BEGIN
-  CREATE POLICY "routine_completions_delete"
-    ON routine_completions FOR DELETE
-    TO authenticated USING ((SELECT auth.uid()) = user_id);
-EXCEPTION WHEN duplicate_object THEN NULL;
-END $$;
-
--- anon 不允许访问用户数据表
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.routine_completions TO authenticated;
+REVOKE INSERT, UPDATE, DELETE ON TABLE public.routine_completions FROM authenticated;
+GRANT SELECT ON TABLE public.routine_completions TO authenticated;
 GRANT ALL ON TABLE public.routine_completions TO service_role;
+REVOKE ALL ON TABLE public.routine_completion_events FROM authenticated;
+REVOKE ALL ON TABLE public.routine_completion_events FROM anon;
+GRANT ALL ON TABLE public.routine_completion_events TO service_role;
 
 -- ============================================
 -- 6. 清理日志表 (cleanup_logs)
@@ -1643,7 +1641,9 @@ CREATE INDEX IF NOT EXISTS idx_cleanup_logs_created_at ON public.cleanup_logs (c
 CREATE INDEX IF NOT EXISTS idx_cleanup_logs_type ON public.cleanup_logs (type);
 
 -- 7. 授予必要的权限
-GRANT SELECT, INSERT ON cleanup_logs TO service_role;
+REVOKE ALL ON TABLE public.cleanup_logs FROM authenticated;
+REVOKE ALL ON TABLE public.cleanup_logs FROM anon;
+GRANT ALL ON TABLE public.cleanup_logs TO service_role;
 GRANT EXECUTE ON FUNCTION cleanup_old_deleted_tasks() TO service_role;
 GRANT EXECUTE ON FUNCTION cleanup_old_logs() TO service_role;
 -- ============================================================
@@ -3984,8 +3984,67 @@ DO $$ BEGIN
   CREATE POLICY "circuit_breaker_logs_insert_own" ON public.circuit_breaker_logs FOR INSERT TO authenticated WITH CHECK (user_id = (SELECT auth.uid()));
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 DO $$ BEGIN
-  CREATE POLICY "cleanup_logs_authenticated_select" ON public.cleanup_logs FOR SELECT TO authenticated USING (true);
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+  DROP POLICY IF EXISTS "cleanup_logs_authenticated_select" ON public.cleanup_logs;
+EXCEPTION WHEN undefined_object THEN NULL; END $$;
+
+CREATE OR REPLACE FUNCTION public.increment_routine_completion(
+  p_completion_id uuid,
+  p_routine_id uuid,
+  p_date_key date
+)
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = 'pg_catalog', 'public'
+AS $$
+DECLARE
+  v_user_id uuid;
+  v_next_count integer;
+BEGIN
+  v_user_id := auth.uid();
+
+  IF v_user_id IS NULL THEN
+    RAISE EXCEPTION 'Authentication required'
+      USING ERRCODE = '42501';
+  END IF;
+
+  PERFORM 1
+  FROM public.routine_tasks
+  WHERE id = p_routine_id
+    AND user_id = v_user_id;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Routine not found'
+      USING ERRCODE = '42501';
+  END IF;
+
+  INSERT INTO public.routine_completion_events (id, routine_id, user_id, date_key)
+  VALUES (p_completion_id, p_routine_id, v_user_id, p_date_key)
+  ON CONFLICT (id) DO NOTHING;
+
+  IF NOT FOUND THEN
+    SELECT count
+    INTO v_next_count
+    FROM public.routine_completions
+    WHERE user_id = v_user_id
+      AND routine_id = p_routine_id
+      AND date_key = p_date_key;
+
+    RETURN COALESCE(v_next_count, 0);
+  END IF;
+
+  INSERT INTO public.routine_completions (id, routine_id, user_id, date_key, count)
+  VALUES (p_completion_id, p_routine_id, v_user_id, p_date_key, 1)
+  ON CONFLICT (user_id, routine_id, date_key) DO UPDATE
+  SET count = public.routine_completions.count + 1
+  RETURNING count INTO v_next_count;
+
+  RETURN v_next_count;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.increment_routine_completion(uuid, uuid, date) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.increment_routine_completion(uuid, uuid, date) TO authenticated;
 
 -- 自动 VACUUM 阈值调优（小表默认 50 太高）
 ALTER TABLE public.tasks SET (autovacuum_vacuum_threshold = 10, autovacuum_analyze_threshold = 10);
@@ -4325,6 +4384,561 @@ GRANT EXECUTE ON FUNCTION public.batch_get_tombstones(UUID[]) TO authenticated;
 
 COMMENT ON FUNCTION public.batch_get_tombstones IS
   '批量获取多项目 tombstone：1 次 RPC 替代 N 次查询，降低免费 tier API 消耗';
+
+-- ============================================================
+-- [MIGRATION] 20260412143000_widget_backend_foundation.sql
+-- Widget backend foundation: device auth, instance boundaries,
+-- rate limiting, notify dedupe, and kill switch defaults.
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS public.widget_devices (
+  id UUID PRIMARY KEY,
+  user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  platform TEXT NOT NULL CHECK (platform IN ('windows-pwa', 'windows-widget', 'android-widget')),
+  installation_id TEXT NOT NULL,
+  push_token TEXT NULL,
+  push_token_updated_at TIMESTAMPTZ NULL,
+  secret_hash TEXT NOT NULL,
+  token_hash TEXT NULL,
+  capabilities JSONB NOT NULL DEFAULT '{}'::jsonb,
+  binding_generation INTEGER NOT NULL DEFAULT 1 CHECK (binding_generation >= 1),
+  expires_at TIMESTAMPTZ NOT NULL,
+  last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_bound_user_hash TEXT NOT NULL,
+  revoked_at TIMESTAMPTZ NULL,
+  revoke_reason TEXT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (platform, installation_id)
+);
+
+ALTER TABLE public.widget_devices
+  ADD COLUMN IF NOT EXISTS token_hash TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_widget_devices_user_platform_active
+  ON public.widget_devices (user_id, platform, updated_at DESC)
+  WHERE revoked_at IS NULL;
+
+CREATE INDEX IF NOT EXISTS idx_widget_devices_expires_at
+  ON public.widget_devices (expires_at);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_widget_devices_token_hash
+  ON public.widget_devices (token_hash)
+  WHERE token_hash IS NOT NULL;
+
+DROP TRIGGER IF EXISTS trg_widget_devices_updated_at ON public.widget_devices;
+CREATE TRIGGER trg_widget_devices_updated_at
+  BEFORE UPDATE ON public.widget_devices
+  FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
+
+ALTER TABLE public.widget_devices ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.widget_devices FORCE ROW LEVEL SECURITY;
+
+CREATE TABLE IF NOT EXISTS public.widget_instances (
+  id UUID PRIMARY KEY,
+  device_id UUID NOT NULL REFERENCES public.widget_devices(id) ON DELETE CASCADE,
+  user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  platform TEXT NOT NULL CHECK (platform IN ('windows-pwa', 'windows-widget', 'android-widget')),
+  host_instance_id TEXT NOT NULL,
+  size_bucket TEXT NOT NULL,
+  config_scope TEXT NOT NULL DEFAULT 'global-summary' CHECK (config_scope IN ('global-summary')),
+  privacy_mode TEXT NOT NULL DEFAULT 'minimal' CHECK (privacy_mode IN ('minimal')),
+  binding_generation INTEGER NOT NULL DEFAULT 1 CHECK (binding_generation >= 1),
+  installed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  uninstalled_at TIMESTAMPTZ NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (device_id, host_instance_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_widget_instances_device_active
+  ON public.widget_instances (device_id, updated_at DESC)
+  WHERE uninstalled_at IS NULL;
+
+CREATE INDEX IF NOT EXISTS idx_widget_instances_user_platform
+  ON public.widget_instances (user_id, platform, updated_at DESC);
+
+DROP TRIGGER IF EXISTS trg_widget_instances_updated_at ON public.widget_instances;
+CREATE TRIGGER trg_widget_instances_updated_at
+  BEFORE UPDATE ON public.widget_instances
+  FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
+
+ALTER TABLE public.widget_instances ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.widget_instances FORCE ROW LEVEL SECURITY;
+
+CREATE TABLE IF NOT EXISTS public.widget_request_rate_limits (
+  scope_type TEXT NOT NULL CHECK (scope_type IN ('device', 'user', 'ip')),
+  scope_key TEXT NOT NULL,
+  call_count INTEGER NOT NULL DEFAULT 0 CHECK (call_count >= 0),
+  window_start TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  blocked_until TIMESTAMPTZ NULL,
+  last_decision TEXT NOT NULL DEFAULT 'allow' CHECK (last_decision IN ('allow', 'deny')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (scope_type, scope_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_widget_request_rate_limits_blocked_until
+  ON public.widget_request_rate_limits (blocked_until)
+  WHERE blocked_until IS NOT NULL;
+
+DROP TRIGGER IF EXISTS trg_widget_request_rate_limits_updated_at ON public.widget_request_rate_limits;
+CREATE TRIGGER trg_widget_request_rate_limits_updated_at
+  BEFORE UPDATE ON public.widget_request_rate_limits
+  FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
+
+ALTER TABLE public.widget_request_rate_limits ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.widget_request_rate_limits FORCE ROW LEVEL SECURITY;
+
+CREATE TABLE IF NOT EXISTS public.widget_notify_events (
+  webhook_id TEXT PRIMARY KEY,
+  user_id UUID NULL REFERENCES auth.users(id) ON DELETE SET NULL,
+  source_table TEXT NOT NULL CHECK (source_table IN ('focus_sessions', 'black_box_entries', 'tasks', 'projects')),
+  event_type TEXT NOT NULL CHECK (event_type IN ('INSERT', 'UPDATE', 'DELETE')),
+  summary_cursor TEXT NULL,
+  last_status TEXT NOT NULL DEFAULT 'processing',
+  processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_widget_notify_events_user_processed
+  ON public.widget_notify_events (user_id, processed_at DESC);
+
+DROP TRIGGER IF EXISTS trg_widget_notify_events_updated_at ON public.widget_notify_events;
+CREATE TRIGGER trg_widget_notify_events_updated_at
+  BEFORE UPDATE ON public.widget_notify_events
+  FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
+
+ALTER TABLE public.widget_notify_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.widget_notify_events FORCE ROW LEVEL SECURITY;
+
+CREATE TABLE IF NOT EXISTS public.widget_notify_throttle (
+  user_id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+  last_notified_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_summary_version TEXT NULL,
+  last_event_id TEXT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+DROP TRIGGER IF EXISTS trg_widget_notify_throttle_updated_at ON public.widget_notify_throttle;
+CREATE TRIGGER trg_widget_notify_throttle_updated_at
+  BEFORE UPDATE ON public.widget_notify_throttle
+  FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
+
+ALTER TABLE public.widget_notify_throttle ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.widget_notify_throttle FORCE ROW LEVEL SECURITY;
+
+CREATE OR REPLACE FUNCTION public.consume_widget_rate_limit(
+  p_scope_type TEXT,
+  p_scope_key TEXT,
+  p_max_calls INTEGER,
+  p_window_seconds INTEGER DEFAULT 60,
+  p_block_seconds INTEGER DEFAULT 300
+)
+RETURNS TABLE (
+  allowed BOOLEAN,
+  retry_after_seconds INTEGER,
+  remaining_calls INTEGER
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+DECLARE
+  v_record public.widget_request_rate_limits%ROWTYPE;
+  v_now TIMESTAMPTZ := NOW();
+  v_next_count INTEGER;
+  v_retry_after INTEGER := 0;
+BEGIN
+  IF p_scope_type NOT IN ('device', 'user', 'ip') THEN
+    RAISE EXCEPTION 'Invalid widget rate limit scope';
+  END IF;
+  IF COALESCE(length(trim(p_scope_key)), 0) = 0 THEN
+    RAISE EXCEPTION 'Invalid widget rate limit scope key';
+  END IF;
+  IF p_max_calls < 1 THEN
+    RAISE EXCEPTION 'Invalid widget rate limit max calls';
+  END IF;
+
+  INSERT INTO public.widget_request_rate_limits (
+    scope_type,
+    scope_key,
+    call_count,
+    window_start,
+    blocked_until,
+    last_decision,
+    created_at,
+    updated_at
+  )
+  VALUES (
+    p_scope_type,
+    p_scope_key,
+    0,
+    v_now,
+    NULL,
+    'allow',
+    v_now,
+    v_now
+  )
+  ON CONFLICT (scope_type, scope_key) DO NOTHING;
+
+  SELECT *
+  INTO v_record
+  FROM public.widget_request_rate_limits
+  WHERE scope_type = p_scope_type
+    AND scope_key = p_scope_key
+  FOR UPDATE;
+
+  IF v_record.blocked_until IS NOT NULL AND v_record.blocked_until > v_now THEN
+    v_retry_after := GREATEST(1, CEIL(EXTRACT(EPOCH FROM (v_record.blocked_until - v_now)))::INTEGER);
+    UPDATE public.widget_request_rate_limits
+    SET last_decision = 'deny', updated_at = v_now
+    WHERE scope_type = p_scope_type AND scope_key = p_scope_key;
+    RETURN QUERY SELECT FALSE, v_retry_after, 0;
+    RETURN;
+  END IF;
+
+  IF v_record.window_start <= v_now - make_interval(secs => GREATEST(p_window_seconds, 1)) THEN
+    v_next_count := 1;
+    UPDATE public.widget_request_rate_limits
+    SET call_count = v_next_count,
+        window_start = v_now,
+        blocked_until = NULL,
+        last_decision = 'allow',
+        updated_at = v_now
+    WHERE scope_type = p_scope_type AND scope_key = p_scope_key;
+    RETURN QUERY SELECT TRUE, 0, GREATEST(p_max_calls - v_next_count, 0);
+    RETURN;
+  END IF;
+
+  v_next_count := v_record.call_count + 1;
+  IF v_next_count > p_max_calls THEN
+    UPDATE public.widget_request_rate_limits
+    SET call_count = v_next_count,
+        blocked_until = v_now + make_interval(secs => GREATEST(p_block_seconds, 1)),
+        last_decision = 'deny',
+        updated_at = v_now
+    WHERE scope_type = p_scope_type AND scope_key = p_scope_key;
+    RETURN QUERY SELECT FALSE, GREATEST(p_block_seconds, 1), 0;
+    RETURN;
+  END IF;
+
+  UPDATE public.widget_request_rate_limits
+  SET call_count = v_next_count,
+      last_decision = 'allow',
+      updated_at = v_now
+  WHERE scope_type = p_scope_type AND scope_key = p_scope_key;
+
+  RETURN QUERY SELECT TRUE, 0, GREATEST(p_max_calls - v_next_count, 0);
+END;
+$$;
+
+REVOKE ALL ON TABLE public.widget_devices FROM anon, authenticated;
+REVOKE ALL ON TABLE public.widget_instances FROM anon, authenticated;
+REVOKE ALL ON TABLE public.widget_request_rate_limits FROM anon, authenticated;
+REVOKE ALL ON TABLE public.widget_notify_events FROM anon, authenticated;
+REVOKE ALL ON TABLE public.widget_notify_throttle FROM anon, authenticated;
+GRANT ALL ON TABLE public.widget_devices TO service_role;
+GRANT ALL ON TABLE public.widget_instances TO service_role;
+GRANT ALL ON TABLE public.widget_request_rate_limits TO service_role;
+GRANT ALL ON TABLE public.widget_notify_events TO service_role;
+GRANT ALL ON TABLE public.widget_notify_throttle TO service_role;
+
+REVOKE ALL ON FUNCTION public.consume_widget_rate_limit(TEXT, TEXT, INTEGER, INTEGER, INTEGER)
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.consume_widget_rate_limit(TEXT, TEXT, INTEGER, INTEGER, INTEGER)
+  TO service_role;
+
+INSERT INTO public.app_config (key, value, description)
+VALUES (
+  'widget_capabilities',
+  jsonb_build_object(
+    'widgetEnabled', true,
+    'installAllowed', true,
+    'refreshAllowed', true,
+    'pushAllowed', false,
+    'reason', NULL,
+    'rules', jsonb_build_array()
+  ),
+  'Widget backend capability gates and kill switch defaults'
+)
+ON CONFLICT (key) DO NOTHING;
+
+INSERT INTO public.app_config (key, value, description)
+VALUES (
+  'widget_limits',
+  jsonb_build_object(
+    'registerUserPerMinute', 10,
+    'registerIpPerMinute', 20,
+    'summaryDevicePerMinute', 30,
+    'summaryUserPerMinute', 60,
+    'summaryIpPerMinute', 120,
+    'notifyUserPerMinute', 120,
+    'notifyIpPerMinute', 600,
+    'blockSeconds', 300,
+    'tokenTtlDays', 30,
+    'freshThresholdMinutes', 5,
+    'agingThresholdMinutes', 60
+  ),
+  'Widget backend rate limits and freshness thresholds'
+)
+ON CONFLICT (key) DO NOTHING;
+
+-- ============================================================
+-- [MIGRATION] 20260413102000_widget_notify_webhook_hmac.sql
+-- Widget notify direct webhook wiring via pg_net + Vault-backed HMAC headers.
+-- ============================================================
+
+CREATE OR REPLACE FUNCTION public.invoke_widget_notify_webhook()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, vault, extensions
+AS $$
+DECLARE
+  v_base_url TEXT;
+  v_secret TEXT;
+  v_timestamp TEXT;
+  v_event_id TEXT;
+  v_payload JSONB;
+  v_signature TEXT;
+BEGIN
+  v_base_url := public.get_vault_secret('widget_notify_base_url');
+  v_secret := public.get_vault_secret('widget_notify_webhook_secret');
+
+  IF COALESCE(trim(v_base_url), '') = '' OR COALESCE(trim(v_secret), '') = '' THEN
+    RAISE LOG 'widget-notify webhook secrets are missing; skip enqueue';
+    RETURN NULL;
+  END IF;
+
+  v_timestamp := floor(extract(epoch FROM clock_timestamp()))::bigint::text;
+  v_event_id := gen_random_uuid()::text;
+  v_payload := jsonb_build_object(
+    'type', TG_OP,
+    'table', TG_TABLE_NAME,
+    'schema', TG_TABLE_SCHEMA,
+    'record', CASE WHEN TG_OP = 'DELETE' THEN NULL ELSE to_jsonb(NEW) END,
+    'old_record', CASE WHEN TG_OP = 'INSERT' THEN NULL ELSE to_jsonb(OLD) END
+  );
+
+  v_signature := encode(
+    hmac(
+      convert_to(v_timestamp || '.' || v_payload::text, 'utf8'),
+      convert_to(v_secret, 'utf8'),
+      'sha256'
+    ),
+    'hex'
+  );
+
+  PERFORM net.http_post(
+    url := rtrim(v_base_url, '/') || '/functions/v1/widget-notify',
+    headers := jsonb_build_object(
+      'Content-Type', 'application/json',
+      'x-widget-webhook-event-id', v_event_id,
+      'x-widget-webhook-timestamp', v_timestamp,
+      'x-widget-webhook-signature', v_signature
+    ),
+    body := v_payload
+  );
+
+  RETURN NULL;
+EXCEPTION WHEN OTHERS THEN
+  RAISE LOG 'widget-notify webhook enqueue failed: %', SQLERRM;
+  RETURN NULL;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.invoke_widget_notify_webhook() FROM PUBLIC, anon, authenticated;
+
+DROP TRIGGER IF EXISTS widget_notify_focus_session_change ON public.focus_sessions;
+CREATE TRIGGER widget_notify_focus_session_change
+  AFTER INSERT OR UPDATE OR DELETE ON public.focus_sessions
+  FOR EACH ROW
+  EXECUTE FUNCTION public.invoke_widget_notify_webhook();
+
+DROP TRIGGER IF EXISTS widget_notify_black_box_change ON public.black_box_entries;
+CREATE TRIGGER widget_notify_black_box_change
+  AFTER INSERT OR UPDATE OR DELETE ON public.black_box_entries
+  FOR EACH ROW
+  EXECUTE FUNCTION public.invoke_widget_notify_webhook();
+
+DROP TRIGGER IF EXISTS widget_notify_task_change ON public.tasks;
+CREATE TRIGGER widget_notify_task_change
+  AFTER INSERT OR UPDATE OR DELETE ON public.tasks
+  FOR EACH ROW
+  EXECUTE FUNCTION public.invoke_widget_notify_webhook();
+
+DROP TRIGGER IF EXISTS widget_notify_project_change ON public.projects;
+CREATE TRIGGER widget_notify_project_change
+  AFTER INSERT OR UPDATE OR DELETE ON public.projects
+  FOR EACH ROW
+  EXECUTE FUNCTION public.invoke_widget_notify_webhook();
+
+-- ============================================================
+-- [MIGRATION] 20260413113000_widget_notify_hmac_replay_fix.sql
+-- Bind event_id into HMAC and tighten SECURITY DEFINER search_path.
+-- ============================================================
+
+CREATE OR REPLACE FUNCTION public.invoke_widget_notify_webhook()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, vault, extensions
+AS $$
+DECLARE
+  v_base_url TEXT;
+  v_secret TEXT;
+  v_timestamp TEXT;
+  v_event_id TEXT;
+  v_payload JSONB;
+  v_signature TEXT;
+BEGIN
+  v_base_url := public.get_vault_secret('widget_notify_base_url');
+  v_secret := public.get_vault_secret('widget_notify_webhook_secret');
+
+  IF COALESCE(trim(v_base_url), '') = '' OR COALESCE(trim(v_secret), '') = '' THEN
+    RAISE LOG 'widget-notify webhook secrets are missing; skip enqueue';
+    RETURN NULL;
+  END IF;
+
+  v_timestamp := floor(extract(epoch FROM clock_timestamp()))::bigint::text;
+  v_event_id := extensions.gen_random_uuid()::text;
+  v_payload := jsonb_build_object(
+    'type', TG_OP,
+    'table', TG_TABLE_NAME,
+    'schema', TG_TABLE_SCHEMA,
+    'record', CASE WHEN TG_OP = 'DELETE' THEN NULL ELSE to_jsonb(NEW) END,
+    'old_record', CASE WHEN TG_OP = 'INSERT' THEN NULL ELSE to_jsonb(OLD) END
+  );
+
+  v_signature := encode(
+    extensions.hmac(
+      convert_to(v_event_id || '.' || v_timestamp || '.' || v_payload::text, 'utf8'),
+      convert_to(v_secret, 'utf8'),
+      'sha256'
+    ),
+    'hex'
+  );
+
+  PERFORM net.http_post(
+    url := rtrim(v_base_url, '/') || '/functions/v1/widget-notify',
+    headers := jsonb_build_object(
+      'Content-Type', 'application/json',
+      'x-widget-webhook-event-id', v_event_id,
+      'x-widget-webhook-timestamp', v_timestamp,
+      'x-widget-webhook-signature', v_signature
+    ),
+    body := v_payload
+  );
+
+  RETURN NULL;
+EXCEPTION WHEN OTHERS THEN
+  RAISE LOG 'widget-notify webhook enqueue failed: %', SQLERRM;
+  RETURN NULL;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.invoke_widget_notify_webhook() FROM PUBLIC, anon, authenticated;
+
+-- ============================================================
+-- [MIGRATION] 20260413120000_widget_notify_secret_normalization.sql
+-- Normalize webhook secret before signing to match Edge verification semantics.
+-- ============================================================
+
+CREATE OR REPLACE FUNCTION public.invoke_widget_notify_webhook()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, vault, extensions
+AS $$
+DECLARE
+  v_base_url TEXT;
+  v_secret TEXT;
+  v_timestamp TEXT;
+  v_event_id TEXT;
+  v_payload JSONB;
+  v_signature TEXT;
+BEGIN
+  v_base_url := public.get_vault_secret('widget_notify_base_url');
+  v_secret := regexp_replace(trim(public.get_vault_secret('widget_notify_webhook_secret')), '^v1,whsec_', '');
+
+  IF COALESCE(trim(v_base_url), '') = '' OR COALESCE(v_secret, '') = '' THEN
+    RAISE LOG 'widget-notify webhook secrets are missing; skip enqueue';
+    RETURN NULL;
+  END IF;
+
+  v_timestamp := floor(extract(epoch FROM clock_timestamp()))::bigint::text;
+  v_event_id := extensions.gen_random_uuid()::text;
+  v_payload := jsonb_build_object(
+    'type', TG_OP,
+    'table', TG_TABLE_NAME,
+    'schema', TG_TABLE_SCHEMA,
+    'record', CASE WHEN TG_OP = 'DELETE' THEN NULL ELSE to_jsonb(NEW) END,
+    'old_record', CASE WHEN TG_OP = 'INSERT' THEN NULL ELSE to_jsonb(OLD) END
+  );
+
+  v_signature := encode(
+    extensions.hmac(
+      convert_to(v_event_id || '.' || v_timestamp || '.' || v_payload::text, 'utf8'),
+      convert_to(v_secret, 'utf8'),
+      'sha256'
+    ),
+    'hex'
+  );
+
+  PERFORM net.http_post(
+    url := rtrim(v_base_url, '/') || '/functions/v1/widget-notify',
+    headers := jsonb_build_object(
+      'Content-Type', 'application/json',
+      'x-widget-webhook-event-id', v_event_id,
+      'x-widget-webhook-timestamp', v_timestamp,
+      'x-widget-webhook-signature', v_signature
+    ),
+    body := v_payload
+  );
+
+  RETURN NULL;
+EXCEPTION WHEN OTHERS THEN
+  RAISE LOG 'widget-notify webhook enqueue failed: %', SQLERRM;
+  RETURN NULL;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.invoke_widget_notify_webhook() FROM PUBLIC, anon, authenticated;
+
+-- ============================================================
+-- [MIGRATION] 20260413121000_widget_notify_limits_backfill.sql
+-- Backfill notify-specific rate limits into app_config for existing projects.
+-- ============================================================
+
+INSERT INTO public.app_config (key, value, description)
+VALUES (
+  'widget_limits',
+  jsonb_build_object(
+    'registerUserPerMinute', 10,
+    'registerIpPerMinute', 20,
+    'summaryDevicePerMinute', 30,
+    'summaryUserPerMinute', 60,
+    'summaryIpPerMinute', 120,
+    'notifyUserPerMinute', 120,
+    'notifyIpPerMinute', 600,
+    'blockSeconds', 300,
+    'tokenTtlDays', 30,
+    'freshThresholdMinutes', 5,
+    'agingThresholdMinutes', 60
+  ),
+  'Widget backend rate limits and freshness thresholds'
+)
+ON CONFLICT (key) DO UPDATE
+SET value = COALESCE(public.app_config.value, '{}'::jsonb) || jsonb_build_object(
+      'notifyUserPerMinute', COALESCE((public.app_config.value ->> 'notifyUserPerMinute')::INTEGER, 120),
+      'notifyIpPerMinute', COALESCE((public.app_config.value ->> 'notifyIpPerMinute')::INTEGER, 600)
+    ),
+    description = EXCLUDED.description,
+    updated_at = NOW();
 
 -- ============================================================
 -- 初始化完成

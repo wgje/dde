@@ -23,7 +23,7 @@ export type Json =
 /**
  * Supabase 数据库 Schema 定义
  */
-interface Database {
+export interface Database {
   public: {
     Tables: {
       /** 项目表 */
@@ -134,6 +134,42 @@ interface Database {
         Insert: RoutineCompletionInsert;
         Update: RoutineCompletionUpdate;
       };
+      /** 日常任务完成事件表 - Focus Console v3 */
+      routine_completion_events: {
+        Row: RoutineCompletionEventRow;
+        Insert: RoutineCompletionEventInsert;
+        Update: RoutineCompletionEventUpdate;
+      };
+      /** Widget 设备绑定表 */
+      widget_devices: {
+        Row: WidgetDeviceRow;
+        Insert: WidgetDeviceInsert;
+        Update: WidgetDeviceUpdate;
+      };
+      /** Widget 实例元数据表 */
+      widget_instances: {
+        Row: WidgetInstanceRow;
+        Insert: WidgetInstanceInsert;
+        Update: WidgetInstanceUpdate;
+      };
+      /** Widget 请求限流表 */
+      widget_request_rate_limits: {
+        Row: WidgetRequestRateLimitRow;
+        Insert: WidgetRequestRateLimitInsert;
+        Update: WidgetRequestRateLimitUpdate;
+      };
+      /** Widget Webhook 去重事件表 */
+      widget_notify_events: {
+        Row: WidgetNotifyEventRow;
+        Insert: WidgetNotifyEventInsert;
+        Update: WidgetNotifyEventUpdate;
+      };
+      /** Widget 推送节流表 */
+      widget_notify_throttle: {
+        Row: WidgetNotifyThrottleRow;
+        Insert: WidgetNotifyThrottleInsert;
+        Update: WidgetNotifyThrottleUpdate;
+      };
     };
     Views: {
       /** 活跃任务视图（排除软删除） */
@@ -165,6 +201,15 @@ interface Database {
       cleanup_deleted_attachments: {
         Args: { retention_days?: number };
         Returns: { deleted_count: number; storage_paths: string[] }[];
+      };
+      /** 原子递增日常任务完成计数 */
+      increment_routine_completion: {
+        Args: {
+          p_completion_id: string;
+          p_routine_id: string;
+          p_date_key: string;
+        };
+        Returns: number;
       };
       /** 获取完整项目数据（任务 + 连接） */
       get_full_project_data: {
@@ -296,6 +341,21 @@ interface Database {
       user_accessible_project_ids: {
         Args: Record<string, never>;
         Returns: string[];
+      };
+      /** Widget 公网摘要接口三维限流 */
+      consume_widget_rate_limit: {
+        Args: {
+          p_scope_type: string;
+          p_scope_key: string;
+          p_max_calls: number;
+          p_window_seconds?: number;
+          p_block_seconds?: number;
+        };
+        Returns: {
+          allowed: boolean;
+          retry_after_seconds: number;
+          remaining_calls: number;
+        }[];
       };
       /** 迁移单个项目到 v2 */
       migrate_project_data_to_v2: {
@@ -996,4 +1056,229 @@ export interface RoutineCompletionInsert {
 export interface RoutineCompletionUpdate {
   count?: number;
   date_key?: string;
+}
+
+/** 日常任务完成事件行数据 */
+export interface RoutineCompletionEventRow {
+  id: string;
+  routine_id: string;
+  user_id: string;
+  date_key: string;
+  created_at: string;
+}
+
+/** 日常任务完成事件插入数据 */
+export interface RoutineCompletionEventInsert {
+  id: string;
+  routine_id: string;
+  user_id: string;
+  date_key: string;
+  created_at?: string;
+}
+
+/** 日常任务完成事件更新数据 */
+export interface RoutineCompletionEventUpdate {
+  date_key?: string;
+  created_at?: string;
+}
+
+// ============================================
+// Widget 设备绑定表 (widget_devices)
+// ============================================
+
+export interface WidgetDeviceRow {
+  id: string;
+  user_id: string;
+  platform: string;
+  installation_id: string;
+  push_token: string | null;
+  push_token_updated_at: string | null;
+  secret_hash: string;
+  token_hash: string | null;
+  capabilities: Json;
+  binding_generation: number;
+  expires_at: string;
+  last_seen_at: string;
+  last_bound_user_hash: string;
+  revoked_at: string | null;
+  revoke_reason: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WidgetDeviceInsert {
+  id: string;
+  user_id: string;
+  platform: string;
+  installation_id: string;
+  secret_hash: string;
+  token_hash?: string | null;
+  expires_at: string;
+  last_bound_user_hash: string;
+  push_token?: string | null;
+  push_token_updated_at?: string | null;
+  capabilities?: Json;
+  binding_generation?: number;
+  last_seen_at?: string;
+  revoked_at?: string | null;
+  revoke_reason?: string | null;
+}
+
+export interface WidgetDeviceUpdate {
+  user_id?: string;
+  platform?: string;
+  installation_id?: string;
+  push_token?: string | null;
+  push_token_updated_at?: string | null;
+  secret_hash?: string;
+  token_hash?: string | null;
+  capabilities?: Json;
+  binding_generation?: number;
+  expires_at?: string;
+  last_seen_at?: string;
+  last_bound_user_hash?: string;
+  revoked_at?: string | null;
+  revoke_reason?: string | null;
+}
+
+// ============================================
+// Widget 实例元数据表 (widget_instances)
+// ============================================
+
+export interface WidgetInstanceRow {
+  id: string;
+  device_id: string;
+  user_id: string;
+  platform: string;
+  host_instance_id: string;
+  size_bucket: string;
+  config_scope: string;
+  privacy_mode: string;
+  binding_generation: number;
+  installed_at: string;
+  last_seen_at: string;
+  uninstalled_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WidgetInstanceInsert {
+  id: string;
+  device_id: string;
+  user_id: string;
+  platform: string;
+  host_instance_id: string;
+  size_bucket: string;
+  config_scope?: string;
+  privacy_mode?: string;
+  binding_generation?: number;
+  installed_at?: string;
+  last_seen_at?: string;
+  uninstalled_at?: string | null;
+}
+
+export interface WidgetInstanceUpdate {
+  device_id?: string;
+  user_id?: string;
+  platform?: string;
+  host_instance_id?: string;
+  size_bucket?: string;
+  config_scope?: string;
+  privacy_mode?: string;
+  binding_generation?: number;
+  installed_at?: string;
+  last_seen_at?: string;
+  uninstalled_at?: string | null;
+}
+
+// ============================================
+// Widget 请求限流表 (widget_request_rate_limits)
+// ============================================
+
+export interface WidgetRequestRateLimitRow {
+  scope_type: string;
+  scope_key: string;
+  call_count: number;
+  window_start: string;
+  blocked_until: string | null;
+  last_decision: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WidgetRequestRateLimitInsert {
+  scope_type: string;
+  scope_key: string;
+  call_count?: number;
+  window_start?: string;
+  blocked_until?: string | null;
+  last_decision?: string;
+}
+
+export interface WidgetRequestRateLimitUpdate {
+  call_count?: number;
+  window_start?: string;
+  blocked_until?: string | null;
+  last_decision?: string;
+}
+
+// ============================================
+// Widget Webhook 去重事件表 (widget_notify_events)
+// ============================================
+
+export interface WidgetNotifyEventRow {
+  webhook_id: string;
+  user_id: string | null;
+  source_table: string;
+  event_type: string;
+  summary_cursor: string | null;
+  last_status: string;
+  processed_at: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WidgetNotifyEventInsert {
+  webhook_id: string;
+  event_type: string;
+  source_table: string;
+  user_id?: string | null;
+  summary_cursor?: string | null;
+  last_status?: string;
+  processed_at?: string;
+}
+
+export interface WidgetNotifyEventUpdate {
+  user_id?: string | null;
+  source_table?: string;
+  event_type?: string;
+  summary_cursor?: string | null;
+  last_status?: string;
+  processed_at?: string;
+}
+
+// ============================================
+// Widget 推送节流表 (widget_notify_throttle)
+// ============================================
+
+export interface WidgetNotifyThrottleRow {
+  user_id: string;
+  last_notified_at: string;
+  last_summary_version: string | null;
+  last_event_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WidgetNotifyThrottleInsert {
+  user_id: string;
+  last_notified_at?: string;
+  last_summary_version?: string | null;
+  last_event_id?: string | null;
+}
+
+export interface WidgetNotifyThrottleUpdate {
+  last_notified_at?: string;
+  last_summary_version?: string | null;
+  last_event_id?: string | null;
 }
