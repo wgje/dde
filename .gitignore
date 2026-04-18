@@ -62,6 +62,9 @@ playwright-report/
 
 # AI session transcripts (local working files, never commit)
 ai_conversations/
+.copilot-tracking/
+.feedback_images/
+supabase/.temp/
 
 .vercel
 .env*.local
