@@ -221,11 +221,9 @@ class NanoflowWidgetActionFactory(
   }
 
   private fun resolveMaxVisibleTabs(model: WidgetRenderModel): Int {
-    return when (model.sizeTier) {
-      WidgetSizeTier.LARGE -> 4
-      WidgetSizeTier.MEDIUM,
-      WidgetSizeTier.SMALL -> 3
-    }
+    // 2026-04-19：与 Renderer.maxVisibleTabsFor 统一为 3，避免 LARGE 档返回 4 项
+    // 但 Renderer 只设 numColumns=3 导致 GridView 回退到 2 行的视觉错位。
+    return 3
   }
 
   private fun tabLabelFor(
