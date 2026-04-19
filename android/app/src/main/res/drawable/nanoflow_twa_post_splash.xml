@@ -1,16 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  2026-04-19 白屏瞬时闪修复：Activity post-splash 窗口背景。
-  从 Android 12 SystemSplash 消退到 Chrome CCT 接管之间，LauncherActivity 的 window 会
-  短暂显示 postSplashScreenTheme 的 windowBackground。若仅用纯色 #F9F8F6，会看到一帧
-  白色；此 layer-list 在纯色底上叠加居中 logo，视觉上与 SystemSplash 保持一致，用户
-  看到的是同一张 icon splash 直到 Chrome CustomTabActivity 真正接管。
+  2026-04-19 深挖补强：LauncherActivity 现在会把 Android 12+ 系统 splash 保持到 TWA
+  handoff 或超时上限，因此 post-splash 阶段不再需要重复叠加 launcher logo。
+  仅保留统一背景色，避免系统 splash icon 与 windowBackground icon 交替出现，形成
+  用户可感知的 logo 闪烁。
 -->
 <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
     <item android:drawable="@color/nanoflow_twa_launch_background" />
-    <item android:gravity="center">
-        <bitmap
-            android:src="@drawable/nanoflow_launcher_icon"
-            android:gravity="center" />
-    </item>
 </layer-list>

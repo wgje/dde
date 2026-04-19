@@ -6,6 +6,8 @@ import { UnassignedTouchState, createInitialUnassignedTouchState } from '../../.
 import { UI_CONFIG } from '../../../../config';
 import * as go from 'gojs';
 
+const POINTER_FALLBACK_GRACE_MS = 800;
+
 /**
  * 触摸拖放回调
  */
@@ -47,6 +49,10 @@ export class FlowTouchService {
   private lastTouchClientY = 0;
   /** 当前被追踪的触点 ID，避免多指场景下用错 changedTouches。 */
   private activeTouchId: number | null = null;
+  /** touchcancel 后等待 pointerup/pointercancel 兜底的短暂窗口。 */
+  private pendingPointerFallbackCleanup: ReturnType<typeof setTimeout> | null = null;
+  /** 进入 pointer fallback 后，由 pointermove 继续维持拖拽会话。 */
+  private awaitingPointerFallback = false;
 
   // ========== 流程图节点拖拽幽灵（移动端） ==========
 
@@ -198,6 +204,42 @@ export class FlowTouchService {
     this.cleanup();
   }
 
+  /**
+   * 某些移动端浏览器在手指拖出源区域时会先发 touchcancel，再补 pointerup。
+   * 拖拽中遇到该场景时先保留会话，等待 pointer 兜底完成真正 drop。
+   */
+  deferCancelForPointerFallback(): boolean {
+    if (!this.touchState.task || !this.touchState.isDragging) {
+      return false;
+    }
+
+    this.awaitingPointerFallback = true;
+    this.armPointerFallbackCleanup();
+
+    return true;
+  }
+
+  /**
+   * touchcancel 后继续通过 pointermove 更新拖拽预览与坐标。
+   * 只在 fallback 窗口中生效，避免和正常 touchmove 双重驱动。
+   */
+  handlePointerFallbackMove(clientX: number, clientY: number): boolean {
+    if (!this.awaitingPointerFallback || !this.touchState.task || !this.touchState.isDragging) {
+      return false;
+    }
+
+    this.lastTouchClientX = clientX;
+    this.lastTouchClientY = clientY;
+
+    if (this.touchState.ghost) {
+      this.touchState.ghost.style.left = `${clientX - 40}px`;
+      this.touchState.ghost.style.top = `${clientY - 20}px`;
+    }
+
+    this.armPointerFallbackCleanup();
+    return true;
+  }
+
   get hasActiveTouchSession(): boolean {
     return !!this.touchState.task;
   }
@@ -253,8 +295,13 @@ export class FlowTouchService {
     if (this.touchState.longPressTimer) {
       clearTimeout(this.touchState.longPressTimer);
     }
+    if (this.pendingPointerFallbackCleanup) {
+      clearTimeout(this.pendingPointerFallbackCleanup);
+      this.pendingPointerFallbackCleanup = null;
+    }
     this.removeGhostElement();
     this.draggingId.set(null);
+    this.awaitingPointerFallback = false;
     this.touchState = createInitialUnassignedTouchState();
     this.lastTouchClientX = 0;
     this.lastTouchClientY = 0;
@@ -506,6 +553,17 @@ export class FlowTouchService {
   private recordTouchActivity(touch: Touch): void {
     this.lastTouchClientX = touch.clientX;
     this.lastTouchClientY = touch.clientY;
+  }
+
+  private armPointerFallbackCleanup(): void {
+    if (this.pendingPointerFallbackCleanup) {
+      clearTimeout(this.pendingPointerFallbackCleanup);
+    }
+
+    this.pendingPointerFallbackCleanup = setTimeout(() => {
+      this.pendingPointerFallbackCleanup = null;
+      this.cleanup();
+    }, POINTER_FALLBACK_GRACE_MS);
   }
   
   /**

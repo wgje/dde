@@ -194,6 +194,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   private readonly boundGlobalTouchMove = this.handleGlobalTouchMove.bind(this);
   private readonly boundGlobalTouchEnd = this.handleGlobalTouchEnd.bind(this);
   private readonly boundGlobalTouchCancel = this.handleGlobalTouchCancel.bind(this);
+  private readonly boundGlobalPointerMove = this.handleGlobalPointerMove.bind(this);
   private readonly boundGlobalPointerUp = this.handleGlobalPointerUp.bind(this);
   private readonly boundGlobalPointerCancel = this.handleGlobalPointerCancel.bind(this);
   
@@ -313,6 +314,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
       document.addEventListener('touchmove', this.boundGlobalTouchMove, { capture: true, passive: false });
       document.addEventListener('touchend', this.boundGlobalTouchEnd, { capture: true, passive: false });
       document.addEventListener('touchcancel', this.boundGlobalTouchCancel, { capture: true, passive: false });
+      document.addEventListener('pointermove', this.boundGlobalPointerMove, { capture: true, passive: true });
       document.addEventListener('pointerup', this.boundGlobalPointerUp, { capture: true });
       document.addEventListener('pointercancel', this.boundGlobalPointerCancel, { capture: true });
     });
@@ -348,6 +350,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
       document.removeEventListener('touchmove', this.boundGlobalTouchMove, { capture: true } as EventListenerOptions);
       document.removeEventListener('touchend', this.boundGlobalTouchEnd, { capture: true } as EventListenerOptions);
       document.removeEventListener('touchcancel', this.boundGlobalTouchCancel, { capture: true } as EventListenerOptions);
+      document.removeEventListener('pointermove', this.boundGlobalPointerMove, { capture: true } as EventListenerOptions);
       document.removeEventListener('pointerup', this.boundGlobalPointerUp, { capture: true } as EventListenerOptions);
       document.removeEventListener('pointercancel', this.boundGlobalPointerCancel, { capture: true } as EventListenerOptions);
     });
@@ -651,6 +654,9 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   }
 
   onUnassignedTouchCancel(_event: TouchEvent): void {
+    if (this.touch.deferCancelForPointerFallback()) {
+      return;
+    }
     this.cancelUnassignedTouchDrop();
   }
 
@@ -703,9 +709,25 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     this.zone.run(() => this.finishUnassignedTouchDrop(false, event));
   }
 
+  private handleGlobalPointerMove(event: PointerEvent): void {
+    if (event.pointerType !== 'touch') return;
+    if (!event.isPrimary) return;
+    if (!this.hasPendingUnassignedTouch()) return;
+
+    const shouldKeepDragging = this.touch.handlePointerFallbackMove(event.clientX, event.clientY);
+    if (!shouldKeepDragging) return;
+
+    event.stopPropagation();
+  }
+
   private handleGlobalTouchCancel(_event: TouchEvent): void {
     if (!this.hasPendingUnassignedTouch()) return;
-    this.zone.run(() => this.cancelUnassignedTouchDrop());
+    this.zone.run(() => {
+      if (this.touch.deferCancelForPointerFallback()) {
+        return;
+      }
+      this.cancelUnassignedTouchDrop();
+    });
   }
 
   private handleGlobalPointerUp(event: PointerEvent): void {

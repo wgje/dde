@@ -38,7 +38,7 @@ import { writeTaskDragPayload } from '../../../../utils/task-drag-payload';
         
         <!-- 1. 待办事项 (To-Do) -->
         <div class="flex-none transition-all duration-300 overflow-hidden rounded-xl bg-orange-50/60 dark:bg-stone-800/60 border border-orange-100/50 dark:border-stone-700/50 backdrop-blur-md">
-          <div (click)="isUnfinishedOpen.set(!isUnfinishedOpen())" 
+          <div (click)="toggleUnfinishedOpen()" 
                class="px-3 py-2.5 cursor-pointer flex justify-between items-center group select-none hover:bg-orange-100/30 dark:hover:bg-stone-700/30 transition-colors">
             <span class="font-bold text-stone-700 dark:text-stone-100 text-xs flex items-center gap-2">
               <span class="w-1.5 h-1.5 rounded-full bg-orange-500 shadow-[0_0_6px_rgba(249,115,22,0.4)]"></span>
@@ -78,7 +78,7 @@ import { writeTaskDragPayload } from '../../../../utils/task-drag-payload';
 
         <!-- 2. 待分配区域 (To-Assign) -->
         <div class="flex-none transition-all duration-300 overflow-hidden rounded-xl bg-teal-50/60 dark:bg-stone-800/60 border border-teal-100/50 dark:border-stone-700/50 backdrop-blur-md">
-          <div (click)="isUnassignedOpen.set(!isUnassignedOpen())" 
+          <div (click)="toggleUnassignedOpen()" 
                class="px-3 py-2.5 cursor-pointer flex justify-between items-center group select-none hover:bg-teal-100/30 dark:hover:bg-stone-700/30 transition-colors">
             <span class="font-bold text-stone-700 dark:text-stone-100 text-xs flex items-center gap-2">
               <span class="w-1.5 h-1.5 rounded-full bg-teal-500 shadow-[0_0_6px_rgba(20,184,166,0.4)]"></span>
@@ -195,6 +195,8 @@ export class MobileTodoDrawerComponent implements OnDestroy {
   private pendingUnassignedAutoCollapseRaf: number | null = null;
   private shouldAutoOpenUnfinishedOnFirstContent = this.projectState.unfinishedItems().length === 0;
   private shouldAutoOpenUnassignedOnFirstContent = this.projectState.unassignedTasks().length === 0;
+  private preserveUnfinishedOpenAfterLoading = false;
+  private preserveUnassignedOpenAfterLoading = false;
 
   constructor() {
     // 没有待办/待分配任务时默认折叠；仅在“从有到无”时再次自动收起，避免用户手动展开空状态后被反复打断。
@@ -211,6 +213,12 @@ export class MobileTodoDrawerComponent implements OnDestroy {
       }
 
       if (currentCount === 0 && this.lastUnfinishedCount !== 0) {
+        if (this.preserveUnfinishedOpenAfterLoading) {
+          this.cancelPendingAutoCollapse('unfinished');
+          this.lastUnfinishedCount = 0;
+          this.preserveUnfinishedOpenAfterLoading = false;
+          return;
+        }
         this.scheduleAutoCollapse('unfinished');
       } else if (currentCount > 0) {
         this.cancelPendingAutoCollapse('unfinished');
@@ -218,6 +226,7 @@ export class MobileTodoDrawerComponent implements OnDestroy {
           this.isUnfinishedOpen.set(true);
           this.shouldAutoOpenUnfinishedOnFirstContent = false;
         }
+        this.preserveUnfinishedOpenAfterLoading = false;
       }
 
       this.lastUnfinishedCount = currentCount;
@@ -236,6 +245,12 @@ export class MobileTodoDrawerComponent implements OnDestroy {
       }
 
       if (currentCount === 0 && this.lastUnassignedCount !== 0) {
+        if (this.preserveUnassignedOpenAfterLoading) {
+          this.cancelPendingAutoCollapse('unassigned');
+          this.lastUnassignedCount = 0;
+          this.preserveUnassignedOpenAfterLoading = false;
+          return;
+        }
         this.scheduleAutoCollapse('unassigned');
       } else if (currentCount > 0) {
         this.cancelPendingAutoCollapse('unassigned');
@@ -243,6 +258,7 @@ export class MobileTodoDrawerComponent implements OnDestroy {
           this.isUnassignedOpen.set(true);
           this.shouldAutoOpenUnassignedOnFirstContent = false;
         }
+        this.preserveUnassignedOpenAfterLoading = false;
       }
 
       this.lastUnassignedCount = currentCount;
@@ -336,6 +352,48 @@ export class MobileTodoDrawerComponent implements OnDestroy {
 
     this.lastDraggedTaskClickGuard = null;
     this.taskClick.emit(task);
+  }
+
+  toggleUnfinishedOpen(): void {
+    const nextOpen = !this.isUnfinishedOpen();
+    this.isUnfinishedOpen.set(nextOpen);
+
+    if (!this.syncCoordinator.isLoadingRemote()) {
+      if (!nextOpen) {
+        this.preserveUnfinishedOpenAfterLoading = false;
+      }
+      return;
+    }
+
+    if (nextOpen && this.projectState.unfinishedItems().length === 0) {
+      this.preserveUnfinishedOpenAfterLoading = true;
+      return;
+    }
+
+    if (!nextOpen) {
+      this.preserveUnfinishedOpenAfterLoading = false;
+    }
+  }
+
+  toggleUnassignedOpen(): void {
+    const nextOpen = !this.isUnassignedOpen();
+    this.isUnassignedOpen.set(nextOpen);
+
+    if (!this.syncCoordinator.isLoadingRemote()) {
+      if (!nextOpen) {
+        this.preserveUnassignedOpenAfterLoading = false;
+      }
+      return;
+    }
+
+    if (nextOpen && this.projectState.unassignedTasks().length === 0) {
+      this.preserveUnassignedOpenAfterLoading = true;
+      return;
+    }
+
+    if (!nextOpen) {
+      this.preserveUnassignedOpenAfterLoading = false;
+    }
   }
 
   ngOnDestroy(): void {

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  仅供 splash hold 超时兜底使用的宿主背景。
+  正常路径依赖 system splash 覆盖以消除 logo 闪烁；只有 Chrome/TWA handoff 超过 1500ms 时，
+  才切回这张带 logo 的背景，避免用户在极慢设备上看到纯色空窗。
+-->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@color/nanoflow_twa_launch_background" />
+    <item android:gravity="center">
+        <bitmap
+            android:src="@drawable/nanoflow_launcher_icon"
+            android:gravity="center" />
+    </item>
+</layer-list>

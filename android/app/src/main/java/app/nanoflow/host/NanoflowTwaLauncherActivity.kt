@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.os.SystemClock
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import com.google.androidbrowserhelper.trusted.LauncherActivity
 import com.google.androidbrowserhelper.trusted.TwaProviderPicker
@@ -13,10 +14,29 @@ import kotlinx.coroutines.runBlocking
 class NanoflowTwaLauncherActivity : LauncherActivity() {
   private var cachedLaunchRequest: LaunchRequest? = null
   private var cachedLaunchUri: Uri? = null
+  private var splashHoldStartElapsedMs = 0L
+  private var isSplashHoldActive = false
 
   override fun onCreate(savedInstanceState: Bundle?) {
     // 让原生启动窗口和 Web 初始 loader 使用同一套启动面，避免 TWA provider 接管前露出白底窗口。
-    installSplashScreen()
+    // 2026-04-19 深挖补强：久置后 Chrome / CustomTabs service 需要重建 session 时，LauncherActivity
+    // 可能会在系统 splash 消退后短暂暴露自己的 windowBackground。这里保留系统 splash，直到
+    // handoff 触发 onStop() 或超过保底上限，避免用户把这段空白等待误感知成“白屏卡住”。
+    splashHoldStartElapsedMs = SystemClock.elapsedRealtime()
+    isSplashHoldActive = true
+    installSplashScreen().setKeepOnScreenCondition {
+      if (!isSplashHoldActive) {
+        return@setKeepOnScreenCondition false
+      }
+
+      val elapsedMs = SystemClock.elapsedRealtime() - splashHoldStartElapsedMs
+      if (elapsedMs >= LAUNCHER_SPLASH_MAX_HOLD_MS) {
+        releaseSplashHold("timeout")
+        return@setKeepOnScreenCondition false
+      }
+
+      true
+    }
     // 2026-04-19 白屏闪退修复：强制向 ABH LauncherActivity 基类传入 null 作为 savedInstanceState。
     // ABH 基类 onCreate 存在以下致命分支：
     //   if (savedInstanceState != null
@@ -32,6 +52,16 @@ class NanoflowTwaLauncherActivity : LauncherActivity() {
     // 传 null 绕过这条恢复路径；LauncherActivity 自己不关心任何恢复的 UI 状态，无副作用。
     super.onCreate(null)
     launchFromCurrentIntent()
+  }
+
+  override fun onDestroy() {
+    releaseSplashHold("activity-destroyed")
+    super.onDestroy()
+  }
+
+  override fun onStop() {
+    releaseSplashHold("activity-stopped")
+    super.onStop()
   }
 
   override fun onNewIntent(intent: Intent) {
@@ -81,6 +111,25 @@ class NanoflowTwaLauncherActivity : LauncherActivity() {
   private fun resetLaunchCache() {
     cachedLaunchRequest = null
     cachedLaunchUri = null
+  }
+
+  private fun releaseSplashHold(reason: String) {
+    if (!isSplashHoldActive) {
+      return
+    }
+
+    if (reason == SPLASH_HOLD_RELEASE_REASON_TIMEOUT) {
+      window.setBackgroundDrawableResource(R.drawable.nanoflow_twa_post_splash_timeout)
+    }
+
+    isSplashHoldActive = false
+    NanoflowWidgetTelemetry.info(
+      event = "widget_twa_splash_hold_released",
+      fields = mapOf(
+        "reason" to reason,
+        "elapsedMs" to (SystemClock.elapsedRealtime() - splashHoldStartElapsedMs),
+      ),
+    )
   }
 
   private fun logLaunchStarted() {
@@ -147,6 +196,8 @@ class NanoflowTwaLauncherActivity : LauncherActivity() {
   )
 
   companion object {
+    private const val LAUNCHER_SPLASH_MAX_HOLD_MS = 1500L
+    private const val SPLASH_HOLD_RELEASE_REASON_TIMEOUT = "timeout"
     private const val EXTRA_APP_WIDGET_ID = "extra.APP_WIDGET_ID"
     private const val EXTRA_LAUNCH_INTENT = "extra.LAUNCH_INTENT"
     private const val EXTRA_ENTRY_SOURCE = "extra.ENTRY_SOURCE"
