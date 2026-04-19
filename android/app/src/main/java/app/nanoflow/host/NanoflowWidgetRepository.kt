@@ -1053,6 +1053,14 @@ class NanoflowWidgetRepository(private val context: Context) {
       return true
     }
 
+    // 2026-04-19 trust elevation：provisional 状态也要重新 bootstrap 以给 RPC
+    // 重新签发 nonce、让 server 端校验并升级为 trusted 的机会。之前仅在
+    // auth-required 时触发，导致 provisional 永远 stick。上层 WidgetReceiver
+    // 的刷新防抖（30s）保证不会 RPC 风暴。
+    if (summary.trustState == "provisional") {
+      return true
+    }
+
     return summary.trustState == "auth-required"
   }
 

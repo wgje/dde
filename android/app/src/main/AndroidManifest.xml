@@ -55,15 +55,18 @@
             <meta-data
                 android:name="android.support.customtabs.trusted.NAVIGATION_BAR_COLOR_DARK"
                 android:resource="@color/nanoflow_twa_launch_background" />
-            <meta-data
-                android:name="android.support.customtabs.trusted.SPLASH_IMAGE_DRAWABLE"
-                android:resource="@drawable/nanoflow_launcher_icon" />
-            <meta-data
-                android:name="android.support.customtabs.trusted.SPLASH_SCREEN_BACKGROUND_COLOR"
-                android:resource="@color/nanoflow_twa_launch_background" />
-            <meta-data
-                android:name="android.support.customtabs.trusted.SPLASH_SCREEN_FADE_OUT_DURATION"
-                android:value="300" />
+            <!--
+              2026-04-19 白屏修复：移除 SPLASH_IMAGE_DRAWABLE / SPLASH_SCREEN_BACKGROUND_COLOR /
+              SPLASH_SCREEN_FADE_OUT_DURATION 三项 meta-data。
+              原因：Chrome 147 与 ABH 2.5.0 的 PwaWrapperSplashScreenStrategy 在 FileProvider
+              splash bitmap 传递握手阶段卡住（SmartPower 日志：CustomTabsConnectionService 绑定
+              3s 后因无 session 创建被 idle 解绑），导致 launchWhenSplashScreenReady 的
+              completion runnable 永远不触发，CCT intent 永不发出，Activity 自身窗口背景
+              (#F9F8F6) 被用户感知为"闪白屏"。去掉 SPLASH_IMAGE_DRAWABLE 后
+              LauncherActivityMetadata.splashImageDrawableId==0 → splashScreenNeeded()==false
+              → TwaLauncher 跳过 splash 传输阶段，直接 launchWhenSplashScreenReady，立即发
+              TrustedWebActivity intent 给 Chrome。Activity 的 windowBackground/SystemSplash
+              仍提供视觉连续性。 -->
             <meta-data
                 android:name="android.support.customtabs.trusted.FILE_PROVIDER_AUTHORITY"
                 android:value="${applicationId}.fileprovider" />
