@@ -527,6 +527,16 @@ export class DockTaskFlowService {
     if (this.ctx.entries().length === 0) {
       this.ctx.pendingDecision.set(null);
       this.ctx.highlightedIds.set(new Set());
+      // 约束：停泊坞无任务时不允许保持专注模式。
+      // 若此时 focusMode=true，会导致向云端发布 focusMode=true + entries=[] 的
+      // 快照（mainTaskId=null），widget-summary 将返回 focus.valid=false，
+      // 小组件显示「今日大门已清空」—— 与专注灯亮的状态矛盾。
+      // 见 docs/focus-console-design.md：停泊坞无任务则灯泡置灰。
+      if (this.ctx.focusMode()) {
+        this.logger.info('removeFromDock 清空停泊坞，自动退出专注模式以维持快照一致性');
+        this.ctx.focusMode.set(false);
+        this.exitFocusMode();
+      }
     }
     this.lifecycle.refreshSuspendRecommendationLock();
   }
