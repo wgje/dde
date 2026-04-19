@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import com.google.androidbrowserhelper.trusted.LauncherActivity
 import com.google.androidbrowserhelper.trusted.TwaProviderPicker
 import kotlinx.coroutines.runBlocking
@@ -14,6 +15,8 @@ class NanoflowTwaLauncherActivity : LauncherActivity() {
   private var cachedLaunchUri: Uri? = null
 
   override fun onCreate(savedInstanceState: Bundle?) {
+    // 让原生启动窗口和 Web 初始 loader 使用同一套启动面，避免 TWA provider 接管前露出白底窗口。
+    installSplashScreen()
     super.onCreate(savedInstanceState)
     launchFromCurrentIntent()
   }

@@ -235,9 +235,9 @@ export class ThemeService {
     let color: string;
     if (typeof document !== 'undefined') {
       const bg = getComputedStyle(document.documentElement).getPropertyValue('--theme-bg').trim();
-      color = bg || (this.effectiveColorMode() === 'dark' ? '#1a1a1a' : '#f5f5f4');
+      color = bg || (this.effectiveColorMode() === 'dark' ? '#1a1a1a' : '#F9F8F6');
     } else {
-      color = this.effectiveColorMode() === 'dark' ? '#1a1a1a' : '#f5f5f4';
+      color = this.effectiveColorMode() === 'dark' ? '#1a1a1a' : '#F9F8F6';
     }
     
     // 更新 meta 标签
