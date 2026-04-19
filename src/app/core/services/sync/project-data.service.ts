@@ -174,6 +174,27 @@ export class ProjectDataService {
       normalized.includes('schema cache')
     );
   }
+
+  private resolveRemoteSessionUserId(): string | null {
+    const currentUserId = this.authService?.currentUserId() ?? null;
+    if (typeof currentUserId === 'string' && currentUserId.length > 0) {
+      return currentUserId;
+    }
+
+    const authSettling = !!this.authService
+      && (!this.authService.sessionInitialized()
+        || this.authService.authState().isCheckingSession
+        || this.authService.runtimeState() === 'pending');
+
+    if (!authSettling) {
+      return null;
+    }
+
+    const persistedSessionUserId = this.authService?.peekPersistedSessionIdentity?.()?.userId ?? null;
+    return typeof persistedSessionUserId === 'string' && persistedSessionUserId.length > 0
+      ? persistedSessionUserId
+      : null;
+  }
   
   /**
    * 获取 Supabase 客户端
@@ -194,6 +215,10 @@ export class ProjectDataService {
     }
     if (this.isSyncStateOfflineMode() || this.isSupabaseOfflineMode()) {
       this.logger.debug('连接中断模式下跳过 ProjectData 远端读取');
+      return null;
+    }
+    if (!this.resolveRemoteSessionUserId()) {
+      this.logger.debug('会话不可用，跳过 ProjectData 远端读取');
       return null;
     }
     try {

@@ -5,6 +5,8 @@ import { GateService } from './gate.service';
 import { LoggerService } from './logger.service';
 import { FEATURE_FLAGS } from '../config/feature-flags.config';
 
+type FocusProbeSource = 'startup' | 'resume-local' | 'resume-remote' | 'manual';
+
 @Injectable({ providedIn: 'root' })
 export class FocusStartupProbeService {
   private readonly auth = inject(AuthService);
@@ -21,44 +23,7 @@ export class FocusStartupProbeService {
   private probeVersion = 0;
 
   initialize(): void {
-    if (!FEATURE_FLAGS.FOCUS_STARTUP_THROTTLED_CHECK_V1) {
-      this.probeDoneSignal.set(true);
-      this.pendingGateWorkSignal.set(false);
-      return;
-    }
-
-    const userId = this.auth.currentUserId();
-    if (!userId) {
-      this.initializedForUser = null;
-      this.probeDoneSignal.set(false);
-      this.pendingGateWorkSignal.set(false);
-      return;
-    }
-
-    if (this.initializedForUser === userId && (this.probeDoneSignal() || this.probePromise)) {
-      return;
-    }
-
-    // 用户切换时标记之前正在运行的探测为已中止
-    if (this.initializedForUser !== null && this.initializedForUser !== userId && this.probePromise) {
-      // 【修复 P1-06】递增版本号使旧 probe 的结果失效
-      this.probeVersion++;
-      // 【修复 M-18】清除 probePromise，避免旧 promise 阻塞新用户的探测
-      this.probePromise = null;
-    }
-
-    this.initializedForUser = userId;
-    this.probeDoneSignal.set(false);
-    this.pendingGateWorkSignal.set(false);
-
-    if (this.probePromise) {
-      return;
-    }
-
-    const capturedVersion = this.probeVersion;
-    this.probePromise = this.runLocalProbe(capturedVersion).finally(() => {
-      this.probePromise = null;
-    });
+    void this.startProbe({ force: false, reloadLocal: true, source: 'startup' });
   }
 
   isProbeDone(): boolean {
@@ -69,9 +34,72 @@ export class FocusStartupProbeService {
     return this.pendingGateWorkSignal();
   }
 
-  private async runLocalProbe(version: number): Promise<void> {
+  async recheckGate(options: { reloadLocal?: boolean; source?: FocusProbeSource } = {}): Promise<void> {
+    await this.startProbe({
+      force: true,
+      reloadLocal: options.reloadLocal ?? true,
+      source: options.source ?? 'manual',
+    });
+  }
+
+  private async startProbe(options: {
+    force: boolean;
+    reloadLocal: boolean;
+    source: FocusProbeSource;
+  }): Promise<void> {
+    if (!FEATURE_FLAGS.FOCUS_STARTUP_THROTTLED_CHECK_V1) {
+      this.probeDoneSignal.set(true);
+      this.pendingGateWorkSignal.set(false);
+      return;
+    }
+
+    const userId = this.auth.currentUserId() ?? (options.force
+      ? this.auth.peekPersistedSessionIdentity?.()?.userId
+        ?? this.auth.peekPersistedOwnerHint?.()
+        ?? this.initializedForUser
+      : null);
+    if (!userId) {
+      this.initializedForUser = null;
+      this.probeDoneSignal.set(false);
+      this.pendingGateWorkSignal.set(false);
+      return;
+    }
+
+    if (!options.force && this.initializedForUser === userId && (this.probeDoneSignal() || this.probePromise)) {
+      return;
+    }
+
+    // 用户切换时标记之前正在运行的探测为已中止
+    if (this.initializedForUser !== null && this.initializedForUser !== userId && this.probePromise) {
+      this.probeVersion++;
+      this.probePromise = null;
+    }
+
+    this.initializedForUser = userId;
+    this.probeDoneSignal.set(false);
+    this.pendingGateWorkSignal.set(false);
+
+    if (this.probePromise) {
+      await this.probePromise;
+      return;
+    }
+
+    const capturedVersion = ++this.probeVersion;
+    this.probePromise = this.runProbe(capturedVersion, options).finally(() => {
+      this.probePromise = null;
+    });
+
+    await this.probePromise;
+  }
+
+  private async runProbe(
+    version: number,
+    options: { reloadLocal: boolean; source: FocusProbeSource }
+  ): Promise<void> {
     try {
-      await this.blackBoxSync.loadFromLocal();
+      if (options.reloadLocal) {
+        await this.blackBoxSync.loadFromLocal();
+      }
 
       // 【修复 P1-06】探测期间用户已切换，版本号不匹配则放弃本次结果
       if (version !== this.probeVersion) {
@@ -82,11 +110,17 @@ export class FocusStartupProbeService {
       this.gateService.checkGate();
       // 通过 GateService 抽象访问 gate 状态，不直接访问 store
       this.pendingGateWorkSignal.set(this.gateService.state() === 'reviewing');
-      this.logger.debug('Focus 启动探针完成', {
+      this.logger.debug('Focus 大门探针完成', {
+        source: options.source,
+        reloadLocal: options.reloadLocal,
         pendingGateWork: this.pendingGateWorkSignal(),
       });
     } catch (error) {
-      this.logger.warn('Focus 启动探针失败', error);
+      this.logger.warn('Focus 大门探针失败', {
+        source: options.source,
+        reloadLocal: options.reloadLocal,
+        error,
+      });
       this.pendingGateWorkSignal.set(false);
     } finally {
       this.probeDoneSignal.set(true);

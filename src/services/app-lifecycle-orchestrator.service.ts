@@ -1,4 +1,4 @@
-import { DestroyRef, Injectable, inject, signal } from '@angular/core';
+import { DestroyRef, Injectable, Injector, inject, signal } from '@angular/core';
 import { APP_LIFECYCLE_CONFIG } from '../config/app-lifecycle.config';
 import { FEATURE_FLAGS } from '../config/feature-flags.config';
 import { LoggerService } from './logger.service';
@@ -7,6 +7,8 @@ import { ToastService } from './toast.service';
 import { NetworkAwarenessService } from './network-awareness.service';
 import { SimpleSyncService, SessionManagerService } from '../core-bridge';
 import { SyncCoordinatorService } from './sync-coordinator.service';
+import { FocusStartupProbeService } from './focus-startup-probe.service';
+import { FOCUS_CONFIG } from '../config/focus.config';
 import { reloadViaForceClearCache } from '../utils/force-clear-cache';
 import { getRemainingBrowserNetworkResumeDelayMs } from '../utils/browser-network-suspension';
 
@@ -35,6 +37,7 @@ export class AppLifecycleOrchestratorService {
   private readonly simpleSync = inject(SimpleSyncService);
   private readonly sessionManager = inject(SessionManagerService);
   private readonly syncCoordinator = inject(SyncCoordinatorService);
+  private readonly injector = inject(Injector);
   private readonly destroyRef = inject(DestroyRef);
 
   private readonly isResumingSignal = signal(false);
@@ -62,8 +65,13 @@ export class AppLifecycleOrchestratorService {
   private visibilityHandler: (() => void) | null = null;
   private pageshowHandler: ((event: PageTransitionEvent) => void) | null = null;
   private onlineHandler: (() => void) | null = null;
+  private _focusStartupProbe?: FocusStartupProbeService;
 
   private static readonly AUTO_RELOAD_COUNTER_KEY = 'nanoflow.lifecycle.auto-reload';
+
+  private get focusStartupProbe(): FocusStartupProbeService {
+    return (this._focusStartupProbe ??= this.injector.get(FocusStartupProbeService));
+  }
 
   constructor() {
     this.destroyRef.onDestroy(() => this.cleanup());
@@ -386,6 +394,8 @@ export class AppLifecycleOrchestratorService {
       this.measurePerformance('resume.interaction_ready_ms', `${perfPrefix}:start`, `${perfPrefix}:interaction-ready`);
     }
 
+    await this.recheckFocusGateIfNeeded(reason, 'resume-local');
+
     if (!heavy) {
       return { deferred: false, interactionReadyMs };
     }
@@ -396,6 +406,11 @@ export class AppLifecycleOrchestratorService {
       this.isHeavyRecoveryInCooldown()
     ) {
       this.recordRecoveryStep('sync-recovery-heavy-suppressed', reason);
+      if (this.shouldRecheckFocusGate(reason)) {
+        this.recordRecoveryStep('blackbox-recovery', reason);
+        await this.syncCoordinator.refreshBlackBoxWatermarkIfNeeded('resume');
+        await this.recheckFocusGateIfNeeded(reason, 'resume-remote');
+      }
       return { deferred: false, interactionReadyMs };
     }
 
@@ -420,6 +435,7 @@ export class AppLifecycleOrchestratorService {
 
     this.recordRecoveryStep('blackbox-recovery', reason);
     const blackBoxResult = await this.syncCoordinator.refreshBlackBoxWatermarkIfNeeded('resume');
+    await this.recheckFocusGateIfNeeded(reason, 'resume-remote');
 
     this.recordRecoveryStep('ui-correction', reason);
     if (typeof window !== 'undefined') {
@@ -503,6 +519,7 @@ export class AppLifecycleOrchestratorService {
         this.recordRecoveryStep('blackbox-recovery', reason);
         const blackboxRefresh = await this.syncCoordinator.refreshBlackBoxWatermarkIfNeeded('resume');
         fastPathHit = blackboxRefresh.skipped;
+        await this.recheckFocusGateIfNeeded(reason, 'resume-remote');
 
         this.recordRecoveryStep('ui-correction', reason);
         if (typeof window !== 'undefined') {
@@ -552,6 +569,36 @@ export class AppLifecycleOrchestratorService {
 
     this.runIdleTask(() => {
       void runCompensation();
+    });
+  }
+
+  private shouldRecheckFocusGate(reason: AppResumeReason): boolean {
+    if (!FEATURE_FLAGS.FOCUS_STARTUP_THROTTLED_CHECK_V1) {
+      return false;
+    }
+
+    if (reason === 'manual' || reason === 'online') {
+      return false;
+    }
+
+    if (reason === 'pageshow') {
+      return true;
+    }
+
+    return this.lastBackgroundDurationMs >= FOCUS_CONFIG.GATE.IDLE_RECHECK_THRESHOLD;
+  }
+
+  private async recheckFocusGateIfNeeded(
+    reason: AppResumeReason,
+    source: 'resume-local' | 'resume-remote'
+  ): Promise<void> {
+    if (!this.shouldRecheckFocusGate(reason)) {
+      return;
+    }
+
+    await this.focusStartupProbe.recheckGate({
+      source,
+      reloadLocal: source === 'resume-local',
     });
   }
 

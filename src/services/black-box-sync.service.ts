@@ -83,7 +83,7 @@ export class BlackBoxSyncService {
   private pendingPushEntries: Map<string, BlackBoxEntry> = new Map();
 
   // 防重保护：single-flight + freshness window
-  private pullInFlight: Promise<void> | null = null;
+  private pullInFlight: Promise<boolean> | null = null;
   /** 上次成功拉取的时间戳（毫秒），用于 freshness window 判断 */
   private lastPullTime = 0;
   private lastResumePullAt = 0;
@@ -460,12 +460,27 @@ export class BlackBoxSyncService {
 
           const { _localVersion, ...entry } = e;
           return entry;
-        }).filter(entry => visibleUserId ? entry.userId === visibleUserId : false);
+        });
+
+        if (!visibleUserId) {
+          // root fix: auth 恢复窗口内 owner 可能暂时不可见；此时保留当前内存快照，
+          // 绝不能把黑匣子 UI 清空成 []，否则用户会误以为内容已经丢失。
+          this.logger.info('黑匣子本地水合延后：owner 未决，保留当前内存快照', {
+            authSettling: this.isAuthSettling(),
+            sessionInitialized: this.auth.sessionInitialized(),
+            currentUserId: this.auth.currentUserId(),
+            inMemoryEntryCount: blackBoxEntriesMap().size,
+          });
+          resolve(Array.from(blackBoxEntriesMap().values()));
+          return;
+        }
+
+        const visibleEntries = entries.filter(entry => entry.userId === visibleUserId);
 
         // 更新状态
-        setBlackBoxEntries(entries);
+        setBlackBoxEntries(visibleEntries);
 
-        resolve(entries);
+        resolve(visibleEntries);
       };
 
       request.onerror = () => reject(request.error);
@@ -487,13 +502,41 @@ export class BlackBoxSyncService {
     }
 
     try {
-      return localStorage.getItem(AUTH_CONFIG.LOCAL_MODE_CACHE_KEY) === 'true'
-        ? AUTH_CONFIG.LOCAL_MODE_USER_ID
-        : null;
+      if (localStorage.getItem(AUTH_CONFIG.LOCAL_MODE_CACHE_KEY) === 'true') {
+        return AUTH_CONFIG.LOCAL_MODE_USER_ID;
+      }
+
+      if (this.isAuthSettling()) {
+        const persistedSessionUserId = this.auth.peekPersistedSessionIdentity()?.userId ?? null;
+        if (persistedSessionUserId) {
+          return persistedSessionUserId;
+        }
+
+        return this.auth.peekPersistedOwnerHint();
+      }
+
+      return null;
     } catch {
       // eslint-disable-next-line no-restricted-syntax -- localStorage 访问异常时静默返回 null
       return null;
     }
+  }
+
+  private isAuthSettling(): boolean {
+    return !this.auth.sessionInitialized()
+      || this.auth.authState().isCheckingSession
+      || this.auth.runtimeState() === 'pending';
+  }
+
+  private resolveRemoteSessionUserId(): string | null {
+    const currentUserId = this.auth.currentUserId();
+    if (currentUserId) {
+      return currentUserId;
+    }
+
+    return this.isAuthSettling()
+      ? (this.auth.peekPersistedSessionIdentity()?.userId ?? null)
+      : null;
   }
 
   /**
@@ -642,7 +685,8 @@ export class BlackBoxSyncService {
     // 防重保护：single-flight 复用进行中的拉取
     if (this.pullInFlight) {
       this.logger.debug('Pull already in progress, reusing promise');
-      return this.pullInFlight;
+      await this.pullInFlight;
+      return;
     }
 
     if (!this.supabase.isConfigured || !this.network.isOnline() || this.isRemoteUnavailable()) {
@@ -651,13 +695,16 @@ export class BlackBoxSyncService {
       return;
     }
 
-    if (reason === 'resume') {
-      this.lastResumePullAt = Date.now();
-    }
-
     this.pullInFlight = this.doPullChanges()
-      .then(() => {
-        this.lastPullTime = Date.now();
+      .then((didAttemptRemoteRead) => {
+        if (didAttemptRemoteRead) {
+          const now = Date.now();
+          this.lastPullTime = now;
+          if (reason === 'resume') {
+            this.lastResumePullAt = now;
+          }
+        }
+        return didAttemptRemoteRead;
       })
       .catch((err) => {
         // 【监控 2026-02-14】拉取失败记录 Sentry breadcrumb，便于事后排查
@@ -679,17 +726,23 @@ export class BlackBoxSyncService {
   /**
    * 实际执行拉取变更的内部方法
    */
-  private async doPullChanges(): Promise<void> {
+  private async doPullChanges(): Promise<boolean> {
     try {
       if (this.isRemoteUnavailable()) {
         await this.loadFromLocal();
-        return;
+        return false;
+      }
+
+      if (!this.resolveRemoteSessionUserId()) {
+        this.logger.info('BlackBox 会话不可用，跳过远端增量拉取并保留本地快照');
+        await this.loadFromLocal();
+        return false;
       }
 
       const client = await this.supabase.clientAsync();
       if (!client) {
         await this.loadFromLocal();
-        return;
+        return false;
       }
 
       // 获取上次同步时间。首次拉取优先复用本地最大 updatedAt，避免直接从 epoch 慢拉。
@@ -719,7 +772,7 @@ export class BlackBoxSyncService {
             remoteWatermark,
             localCursor: effectiveLastSync
           });
-          return;
+          return true;
         }
       }
 
@@ -758,11 +811,21 @@ export class BlackBoxSyncService {
           if (isBrowserNetworkSuspendedError(finalErr) || isBrowserNetworkSuspendedWindow()) {
             this.logger.debug('BlackBox 浏览器网络挂起，跳过增量拉取', { message: finalErr.message });
             await this.loadFromLocal();
-            return;
+            return true;
           }
+
+          if (this.sessionManager.isSessionExpiredError(finalErr)) {
+            this.logger.warn('BlackBox 会话失效，已保留本地快照并等待重新认证', {
+              code: finalErr.code,
+              message: finalErr.message,
+            });
+            await this.loadFromLocal();
+            return true;
+          }
+
           this.logger.error('Failed to pull changes', finalErr.message);
           await this.loadFromLocal();
-          return;
+          return true;
         }
       }
 
@@ -784,15 +847,17 @@ export class BlackBoxSyncService {
       }
 
       this.logger.info(`Pulled changes from server: ${data?.length ?? 0} entries`);
+      return true;
     } catch (error) {
       // 【鲁棒性 2026-04-16】浏览器网络挂起：debug，不污染错误日志
       if (isBrowserNetworkSuspendedError(error) || isBrowserNetworkSuspendedWindow()) {
         this.logger.debug('BlackBox 浏览器网络挂起，跳过本轮增量拉取');
         await this.loadFromLocal();
-        return;
+        return false;
       }
       this.logger.error('Pull changes error', error instanceof Error ? error.message : String(error));
       await this.loadFromLocal();
+      return false;
     }
   }
 

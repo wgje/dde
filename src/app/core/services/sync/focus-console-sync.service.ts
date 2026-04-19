@@ -1,6 +1,7 @@
 import { Injectable, inject } from '@angular/core';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { SupabaseClientService } from '../../../../services/supabase-client.service';
+import { AuthService } from '../../../../services/auth.service';
 import { LoggerService } from '../../../../services/logger.service';
 import { SessionManagerService } from './session-manager.service';
 import {
@@ -53,6 +54,7 @@ interface RoutineTaskRow {
 })
 export class FocusConsoleSyncService {
   private readonly supabase = inject(SupabaseClientService);
+  private readonly auth = inject(AuthService);
   private readonly logger = inject(LoggerService).category('FocusConsoleSync');
   private readonly sessionManager = inject(SessionManagerService);
 
@@ -95,8 +97,24 @@ export class FocusConsoleSyncService {
    * Supabase client 安全获取：未就绪或未配置时返回 null，
    * 调用方以 SYNC_OFFLINE 错误处理。
    */
+  private resolveRemoteSessionUserId(): string | null {
+    const currentUserId = this.auth.currentUserId();
+    if (currentUserId) {
+      return currentUserId;
+    }
+
+    const authSettling = !this.auth.sessionInitialized()
+      || this.auth.authState().isCheckingSession
+      || this.auth.runtimeState() === 'pending';
+
+    return authSettling
+      ? (this.auth.peekPersistedSessionIdentity()?.userId ?? null)
+      : null;
+  }
+
   private getSupabaseClient(): SupabaseClient | null {
     if (!this.supabase.isConfigured) return null;
+    if (!this.resolveRemoteSessionUserId()) return null;
     try {
       return this.supabase.client();
     } catch {
@@ -180,6 +198,15 @@ export class FocusConsoleSyncService {
       if (isBrowserNetworkSuspendedError(error)) {
         this.logger.debug('loadFocusSession: 浏览器网络挂起窗口内跳过远端读取');
         return this.buildBrowserSuspendedFailure();
+      }
+
+      const enhanced = supabaseErrorToError(error);
+      if (this.sessionManager.isSessionExpiredError(enhanced)) {
+        this.logger.info('loadFocusSession: 会话不可用，保留本地专注会话快照', {
+          code: enhanced.code,
+          message: enhanced.message,
+        });
+        return success(null);
       }
 
       this.logger.warn('loadFocusSession failed', error);

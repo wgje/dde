@@ -10,6 +10,8 @@ import { SessionManagerService } from '../app/core/services/sync/session-manager
 import { SyncCoordinatorService } from './sync-coordinator.service';
 import { APP_LIFECYCLE_CONFIG } from '../config';
 import { FEATURE_FLAGS } from '../config/feature-flags.config';
+import { FocusStartupProbeService } from './focus-startup-probe.service';
+import { FOCUS_CONFIG } from '../config/focus.config';
 
 describe('AppLifecycleOrchestratorService', () => {
   let service: AppLifecycleOrchestratorService;
@@ -21,6 +23,9 @@ describe('AppLifecycleOrchestratorService', () => {
   let mockSimpleSync: {
     recoverAfterResume: ReturnType<typeof vi.fn>;
     suspendRemoteTransport: ReturnType<typeof vi.fn>;
+  };
+  let mockFocusStartupProbe: {
+    recheckGate: ReturnType<typeof vi.fn>;
   };
   let mockSyncCoordinator: {
     hasPendingLocalChanges: ReturnType<typeof vi.fn>;
@@ -65,6 +70,10 @@ describe('AppLifecycleOrchestratorService', () => {
       suspendRemoteTransport: vi.fn().mockResolvedValue(undefined),
     };
 
+    mockFocusStartupProbe = {
+      recheckGate: vi.fn().mockResolvedValue(undefined),
+    };
+
     mockSyncCoordinator = {
       hasPendingLocalChanges: vi.fn().mockReturnValue(false),
       flushPendingPersistToCloud: vi.fn().mockResolvedValue(false),
@@ -89,6 +98,7 @@ describe('AppLifecycleOrchestratorService', () => {
         { provide: NetworkAwarenessService, useValue: mockNetwork },
         { provide: SessionManagerService, useValue: mockSessionManager },
         { provide: SimpleSyncService, useValue: mockSimpleSync },
+        { provide: FocusStartupProbeService, useValue: mockFocusStartupProbe },
         { provide: SyncCoordinatorService, useValue: mockSyncCoordinator },
         { provide: ToastService, useValue: mockToast },
         {
@@ -174,6 +184,7 @@ describe('AppLifecycleOrchestratorService', () => {
       retryProcessing: 'background',
     }));
     expect(mockSyncCoordinator.refreshBlackBoxWatermarkIfNeeded).not.toHaveBeenCalled();
+    expect(mockFocusStartupProbe.recheckGate).not.toHaveBeenCalled();
   });
 
   it('应在恢复时自动补发尚未完成的本地持久化', async () => {
@@ -373,5 +384,29 @@ describe('AppLifecycleOrchestratorService', () => {
       ([, options]) => options?.mode === 'heavy'
     );
     expect(heavyCalls).toHaveLength(1);
+  });
+
+  it('后台闲置超过大门阈值后恢复应重新探测 gate，并在黑匣子刷新后再次复核', async () => {
+    service.initialize();
+
+    setVisibilityState('hidden');
+    document.dispatchEvent(new Event('visibilitychange'));
+
+    vi.setSystemTime(new Date(Date.now() + FOCUS_CONFIG.GATE.IDLE_RECHECK_THRESHOLD + 1));
+
+    setVisibilityState('visible');
+    document.dispatchEvent(new Event('visibilitychange'));
+
+    await vi.runAllTimersAsync();
+
+    expect(mockFocusStartupProbe.recheckGate).toHaveBeenCalledTimes(2);
+    expect(mockFocusStartupProbe.recheckGate).toHaveBeenNthCalledWith(1, {
+      source: 'resume-local',
+      reloadLocal: true,
+    });
+    expect(mockFocusStartupProbe.recheckGate).toHaveBeenNthCalledWith(2, {
+      source: 'resume-remote',
+      reloadLocal: false,
+    });
   });
 });

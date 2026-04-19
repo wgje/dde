@@ -106,6 +106,17 @@ export class BlackBoxService {
       return AUTH_CONFIG.LOCAL_MODE_USER_ID;
     }
 
+    // 认证正在恢复时，允许使用 owner hint 继续命中同一用户的本地黑匣子快照，
+    // 避免 currentUserId 短暂为 null 时误判为匿名态并拒绝本地保存/水合。
+    if (this.isAuthSettling()) {
+      const persistedSessionUserId = this.auth.peekPersistedSessionIdentity()?.userId ?? null;
+      if (persistedSessionUserId) {
+        return persistedSessionUserId;
+      }
+
+      return this.auth.peekPersistedOwnerHint();
+    }
+
     return null;
   }
 
@@ -122,6 +133,12 @@ export class BlackBoxService {
     } catch {
       return false;
     }
+  }
+
+  private isAuthSettling(): boolean {
+    return !this.auth.sessionInitialized()
+      || this.auth.authState().isCheckingSession
+      || this.auth.runtimeState() === 'pending';
   }
   
   /**
