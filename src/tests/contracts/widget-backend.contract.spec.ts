@@ -191,8 +191,10 @@ describe('Widget backend foundation contract', () => {
     expect(summaryFn).toContain('const cloudUpdatedAt = summaryVersionCursor;');
     expect(summaryFn).toContain('const summarySignature = await sha256Hex(JSON.stringify');
     expect(summaryFn).toContain("failed to update instance last_seen_at");
-    expect(summaryFn).toContain(".eq('is_read', false)");
-    expect(summaryFn).toContain(".select('id,project_id,content,created_at,updated_at')");
+    expect(summaryFn).toContain('const todayIsoDate = nowIso.slice(0, 10);');
+    expect(summaryFn).toContain(".lt('date', todayIsoDate)");
+    expect(summaryFn).toContain('.or(`snooze_until.is.null,snooze_until.lte.${todayIsoDate}`)');
+    expect(summaryFn).toContain(".select('id,date,project_id,content,created_at,snooze_until,updated_at')");
     expect(summaryFn).toContain('projectTitle: focusProject?.title ?? null');
     expect(summaryFn).toContain('gatePreview: {');
     expect(summaryFn).toContain('projectTitle: projectId ? projectMap.get(projectId)?.title ?? null : null');

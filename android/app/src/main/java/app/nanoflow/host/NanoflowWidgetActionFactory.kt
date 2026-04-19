@@ -2,17 +2,17 @@ package app.nanoflow.host
 
 import android.content.Context
 import android.content.Intent
+import android.view.View
 import android.widget.RemoteViews
 import android.widget.RemoteViewsService
 import app.nanoflow.host.R
 import kotlinx.coroutines.runBlocking
 
 /**
- * 集合视图 Factory：把当前 widget 的 Focus tabs / Gate pager / Refresh 翻译成一组 item。
+ * 集合视图 Factory：把当前 widget 的中心内容区 / Refresh 翻译成一组 item。
  *
- * 每个 item 都是 [R.layout.nano_widget_action_item]；通过 [setOnClickFillInIntent] 挂载 extras，
- * 由 [NanoflowWidgetReceiver.actionListClickTemplatePendingIntent] 提供的模板 PendingIntent
- * 组合派发到 Receiver 的 [NanoflowWidgetReceiver.ACTION_CLICK_ITEM] 分支。
+ * Refresh item 走 [R.layout.nano_widget_action_item]，中心内容卡片走
+ * [R.layout.nano_widget_content_item]；两者都通过 `fillInIntent` 绑定点击上下文。
  */
 class NanoflowWidgetActionFactory(
   private val context: Context,
@@ -24,6 +24,8 @@ class NanoflowWidgetActionFactory(
     val label: String,
     val selected: Boolean,
     val kind: Kind,
+    val eyebrow: String? = null,
+    val subtitle: String? = null,
     // kind 相关的数据：TAB 用 taskIndex，GATE_NAV 用 gateDelta
     val taskIndex: Int = -1,
     val gateDelta: Int = 0,
@@ -59,11 +61,25 @@ class NanoflowWidgetActionFactory(
 
     if (listKind == LIST_KIND_CONTENT) {
       val views = RemoteViews(context.packageName, R.layout.nano_widget_content_item)
+      if (item.eyebrow.isNullOrBlank()) {
+        views.setViewVisibility(R.id.nano_widget_content_eyebrow, View.GONE)
+      } else {
+        views.setTextViewText(R.id.nano_widget_content_eyebrow, item.eyebrow)
+        views.setViewVisibility(R.id.nano_widget_content_eyebrow, View.VISIBLE)
+      }
       views.setTextViewText(R.id.nano_widget_content_title, item.label)
+      if (item.subtitle.isNullOrBlank()) {
+        views.setViewVisibility(R.id.nano_widget_content_subtitle, View.GONE)
+      } else {
+        views.setTextViewText(R.id.nano_widget_content_subtitle, item.subtitle)
+        views.setViewVisibility(R.id.nano_widget_content_subtitle, View.VISIBLE)
+      }
       if (item.clickable) {
         val fillInIntent = buildFillInIntent(item)
         views.setOnClickFillInIntent(R.id.nano_widget_content_item_root, fillInIntent)
         views.setOnClickFillInIntent(R.id.nano_widget_content_title, fillInIntent)
+        views.setOnClickFillInIntent(R.id.nano_widget_content_eyebrow, fillInIntent)
+        views.setOnClickFillInIntent(R.id.nano_widget_content_subtitle, fillInIntent)
       }
       return views
     }
@@ -104,15 +120,26 @@ class NanoflowWidgetActionFactory(
     val isGateTone = model.tone == WidgetVisualTone.GATE
 
     if (listKind == LIST_KIND_CONTENT) {
-      return listOf(
+      val contentCards = model.contentCards.ifEmpty {
+        listOf(
+          WidgetContentCard(
+            eyebrow = model.modeLabel,
+            title = model.title,
+            subtitle = model.supportingLine,
+          )
+        )
+      }
+      return contentCards.map { card ->
         ActionItem(
-          label = resolveContentTitle(model),
+          label = card.title,
           selected = false,
           kind = ActionItem.Kind.PRIMARY,
+          eyebrow = card.eyebrow,
+          subtitle = card.subtitle,
           clickable = true,
           primaryAction = model.primaryAction,
         )
-      )
+      }
     }
 
     if (listKind == LIST_KIND_REFRESH) {
@@ -240,16 +267,6 @@ class NanoflowWidgetActionFactory(
       else -> base
     }
   }
-
-  private fun resolveContentTitle(model: WidgetRenderModel): String {
-    if (model.tasks.isNotEmpty()) {
-      val index = model.selectedTaskIndex.coerceIn(0, model.tasks.lastIndex)
-      return model.tasks[index].title
-    }
-
-    return model.title
-  }
-
   companion object {
     const val ITEM_TYPE_TAB = "tab"
     const val ITEM_TYPE_REFRESH = "refresh"

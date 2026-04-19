@@ -111,9 +111,11 @@ interface ProjectIdRow {
 
 interface BlackBoxRow {
   id: string;
+  date: string | null;
   project_id: string | null;
   content: string | null;
   created_at: string | null;
+  snooze_until: string | null;
   updated_at: string;
 }
 
@@ -805,6 +807,7 @@ Deno.serve(async (req: Request) => {
   }
 
   const nowIso = new Date().toISOString();
+  const todayIsoDate = nowIso.slice(0, 10);
   const nextDeviceCapabilities = mergeJsonObjects(
     device.capabilities,
     buildWidgetClientCapabilitiesPatch({
@@ -1044,9 +1047,12 @@ Deno.serve(async (req: Request) => {
     .select('id', { count: 'exact', head: true })
     .eq('user_id', device.user_id)
     .is('deleted_at', null)
-    .eq('is_read', false)
     .eq('is_completed', false)
-    .eq('is_archived', false);
+    .eq('is_archived', false)
+    .lt('date', todayIsoDate)
+    // Gate 口径与主 App 对齐：今天之前、未完成、未归档、未删除，且 snooze 已到期即可。
+    // 不能再把 is_read=false 当成前提，否则“已读但仍未处理”的沉积会被 widget 错判成已清空。
+    .or(`snooze_until.is.null,snooze_until.lte.${todayIsoDate}`);
 
   if (blackBoxError) {
     return summaryResponse(responseHeaders, 500, {
@@ -1060,13 +1066,14 @@ Deno.serve(async (req: Request) => {
 
   const { data: blackBoxPreviewRowsData, error: blackBoxWatermarkError } = await client
     .from('black_box_entries')
-    .select('id,project_id,content,created_at,updated_at')
+    .select('id,date,project_id,content,created_at,snooze_until,updated_at')
     .eq('user_id', device.user_id)
     .is('deleted_at', null)
-    .eq('is_read', false)
     .eq('is_completed', false)
     .eq('is_archived', false)
-    .order('updated_at', { ascending: false })
+    .lt('date', todayIsoDate)
+    .or(`snooze_until.is.null,snooze_until.lte.${todayIsoDate}`)
+    .order('created_at', { ascending: true })
     .limit(MAX_BLACK_BOX_PREVIEW_COUNT);
 
   if (blackBoxWatermarkError) {

@@ -643,20 +643,10 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   // ========== 触摸处理 ==========
   
   onUnassignedTouchStart(event: TouchEvent, task: Task): void {
-    if (this.touch.isPointerSessionActive) {
-      return;
-    }
     this.touch.startTouch(event, task);
-  }
-
-  onUnassignedPointerDown(event: PointerEvent, task: Task): void {
-    this.touch.startPointer(event, task);
   }
   
   onUnassignedTouchMove(event: TouchEvent): void {
-    if (this.touch.isPointerSessionActive) {
-      return;
-    }
     const shouldPrevent = this.touch.handleTouchMove(event);
     if (shouldPrevent) {
       event.preventDefault();
@@ -665,16 +655,10 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   }
   
   onUnassignedTouchEnd(event: TouchEvent): void {
-    if (this.touch.isPointerSessionActive) {
-      return;
-    }
     this.finishUnassignedTouchDrop(false, event);
   }
 
   onUnassignedTouchCancel(_event: TouchEvent): void {
-    if (this.touch.isPointerSessionActive) {
-      return;
-    }
     if (this.touch.deferCancelForPointerFallback()) {
       return;
     }
@@ -807,6 +791,11 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
             this.dragDrop.processDrop(task, insertInfo, docPoint, UI_CONFIG.MEDIUM_DELAY);
           },
         );
+        return;
+      }
+
+      if (this.touch.isAwaitingPointerFallback) {
+        this.finishUnassignedTouchDrop(true);
         return;
       }
 

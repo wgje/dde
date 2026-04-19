@@ -591,27 +591,19 @@ class NanoflowWidgetRepository(private val context: Context) {
     val privacyMode = store.isPrivacyModeEnabled()
     val gateEntries = resolveRenderableGateEntries(summary, privacyMode)
     val hasFocusState = summary.focus.active == true && summary.focus.valid
-    val gatePageIndex = resolveGatePageIndex(appWidgetId, gateEntries)
-    val currentGateEntry = gateEntries.getOrNull(gatePageIndex)
     val showCounts = summary.dock.count > 0 || summary.blackBox.pendingCount > 0
-    val showGatePager = !compact
-      && !hasFocusState
-      && gateEntries.size > 1
-      && (!privacyMode || gateEntries.any { !it.content.isNullOrBlank() })
-    val isGateMode = !hasFocusState && (currentGateEntry != null || summary.blackBox.pendingCount > 0)
+    val isGateMode = !hasFocusState && (gateEntries.isNotEmpty() || summary.blackBox.pendingCount > 0)
     val metricsLine = buildMetricsLine(summary)
 
     if (isGateMode) {
+      val gateContentCards = buildGateContentCards(summary, gateEntries, privacyMode)
+      val primaryGateCard = gateContentCards.firstOrNull()
       return WidgetRenderModel(
         modeLabel = context.getString(R.string.nanoflow_widget_gate_label),
         statusBadge = statusBadge,
-        title = if (privacyMode)
-          context.getString(R.string.nanoflow_widget_privacy_gate_title, summary.blackBox.pendingCount)
-        else
-          currentGateEntry?.content?.trim()
-            ?: context.getString(R.string.nanoflow_widget_gate_pending_detail),
-        supportingLine = if (privacyMode || compact) null else currentGateEntry?.let { buildGateSupportingLine(it) },
-        metricsLine = if (showCounts && !showGatePager) metricsLine else null,
+        title = primaryGateCard?.title ?: context.getString(R.string.nanoflow_widget_gate_pending_detail),
+        supportingLine = primaryGateCard?.subtitle,
+        metricsLine = if (showCounts) metricsLine else null,
         statusLine = statusLine,
         primaryActionLabel = context.getString(R.string.nanoflow_widget_open_gate),
         primaryAction = WidgetPrimaryAction.OPEN_FOCUS_TOOLS,
@@ -620,19 +612,16 @@ class NanoflowWidgetRepository(private val context: Context) {
         blackBoxCount = summary.blackBox.pendingCount,
         showStatCards = false,
         isGateMode = true,
-        showGatePager = showGatePager,
-        gatePageIndicator = if (showGatePager) {
-          context.getString(R.string.nanoflow_widget_page_indicator, gatePageIndex + 1, gateEntries.size)
-        } else {
-          null
-        },
-        canPageBackward = showGatePager && gatePageIndex > 0,
-        canPageForward = showGatePager && gatePageIndex < gateEntries.lastIndex,
+        showGatePager = false,
+        gatePageIndicator = null,
+        canPageBackward = false,
+        canPageForward = false,
         compact = compact,
         sizeTier = sizeTier,
         showSetup = false,
         showAuthRequired = false,
         showUntrusted = false,
+        contentCards = gateContentCards,
         syncBadgeLabel = buildCompactSyncBadge(summary, appWidgetId),
       )
     }
@@ -646,6 +635,30 @@ class NanoflowWidgetRepository(private val context: Context) {
     else store.readSelectedTaskIndex(appWidgetId).coerceIn(0, taskCards.lastIndex)
     val selectedCard = taskCards.getOrNull(selectedTaskIndex)
     val syncBadgeLabel = buildCompactSyncBadge(summary, appWidgetId)
+    val contentCards = buildTaskContentCards(taskCards).ifEmpty {
+      listOf(
+        WidgetContentCard(
+          eyebrow = context.getString(
+            if (hasFocusState) R.string.nanoflow_widget_focus_label
+            else R.string.nanoflow_widget_gate_label,
+          ),
+          title = when {
+            selectedCard != null -> selectedCard.title
+            hasFocusState && privacyMode -> context.getString(R.string.nanoflow_widget_privacy_focus_title)
+            hasFocusState && !focusTitle.isNullOrBlank() -> focusTitle
+            hasFocusState && canOpenFocusTask -> context.getString(R.string.nanoflow_widget_focus_ready_title)
+            hasFocusState -> context.getString(R.string.nanoflow_widget_unknown_task)
+            else -> context.getString(R.string.nanoflow_widget_gate_empty_title)
+          },
+          subtitle = when {
+            selectedCard != null && !privacyMode -> selectedCard.projectTitle
+            hasFocusState && (privacyMode || compact) -> null
+            hasFocusState -> buildFocusSupportingLine(summary)
+            else -> context.getString(R.string.nanoflow_widget_gate_empty_detail)
+          },
+        )
+      )
+    }
 
     return WidgetRenderModel(
       modeLabel = context.getString(
@@ -689,6 +702,7 @@ class NanoflowWidgetRepository(private val context: Context) {
       showUntrusted = false,
       tasks = taskCards,
       selectedTaskIndex = selectedTaskIndex,
+      contentCards = contentCards,
       syncBadgeLabel = syncBadgeLabel,
     )
   }
@@ -740,6 +754,65 @@ class NanoflowWidgetRepository(private val context: Context) {
       )
     }
     return cards
+  }
+
+  private fun buildTaskContentCards(taskCards: List<WidgetTaskCard>): List<WidgetContentCard> {
+    return taskCards.mapIndexed { index, card ->
+      WidgetContentCard(
+        eyebrow = if (card.isMain) {
+          context.getString(R.string.nanoflow_widget_content_main_task)
+        } else {
+          context.getString(R.string.nanoflow_widget_content_secondary_task, index)
+        },
+        title = card.title,
+        subtitle = card.projectTitle,
+      )
+    }
+  }
+
+  private fun buildGateContentCards(
+    summary: WidgetSummaryResponse,
+    gateEntries: List<WidgetGatePreview>,
+    privacyMode: Boolean,
+  ): List<WidgetContentCard> {
+    if (gateEntries.isEmpty()) {
+      return listOf(
+        WidgetContentCard(
+          eyebrow = context.getString(R.string.nanoflow_widget_gate_label),
+          title = if (summary.blackBox.pendingCount > 0) {
+            context.getString(R.string.nanoflow_widget_gate_pending_detail)
+          } else {
+            context.getString(R.string.nanoflow_widget_gate_empty_title)
+          },
+          subtitle = if (summary.blackBox.pendingCount > 0) {
+            context.getString(R.string.nanoflow_widget_content_pending_count, summary.blackBox.pendingCount)
+          } else {
+            context.getString(R.string.nanoflow_widget_gate_empty_detail)
+          },
+        )
+      )
+    }
+
+    return gateEntries.mapIndexed { index, preview ->
+      WidgetContentCard(
+        eyebrow = context.getString(
+          R.string.nanoflow_widget_content_gate_position,
+          index + 1,
+          gateEntries.size,
+        ),
+        title = if (privacyMode) {
+          context.getString(R.string.nanoflow_widget_privacy_gate_title, summary.blackBox.pendingCount)
+        } else {
+          preview.content?.trim()?.takeIf { it.isNotBlank() }
+            ?: context.getString(R.string.nanoflow_widget_gate_pending_detail)
+        },
+        subtitle = if (privacyMode) {
+          preview.projectTitle?.takeIf { it.isNotBlank() }
+        } else {
+          buildGateSupportingLine(preview)
+        },
+      )
+    }
   }
 
   /** 紧凑版同步徽章：「刚刚」「N 分前」「较旧」。 */
@@ -811,6 +884,13 @@ class NanoflowWidgetRepository(private val context: Context) {
       showSetup = showSetup,
       showAuthRequired = showAuthRequired,
       showUntrusted = showUntrusted,
+      contentCards = listOf(
+        WidgetContentCard(
+          eyebrow = context.getString(R.string.nanoflow_widget_label),
+          title = title,
+          subtitle = supportingLine ?: statusLine.takeIf { it != title },
+        )
+      ),
     )
   }
 

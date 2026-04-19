@@ -3,10 +3,10 @@ import { LoggerService } from '../../../../services/logger.service';
 import { FlowDragDropService, InsertPositionInfo } from './flow-drag-drop.service';
 import { Task } from '../../../../models';
 import { UnassignedTouchState, createInitialUnassignedTouchState } from '../../../../models/flow-view-state';
-import { UI_CONFIG } from '../../../../config';
+import { TIMEOUT_CONFIG, UI_CONFIG } from '../../../../config';
 import * as go from 'gojs';
 
-const POINTER_FALLBACK_GRACE_MS = 800;
+const POINTER_FALLBACK_GRACE_MS = TIMEOUT_CONFIG.QUICK;
 
 /**
  * 触摸拖放回调
@@ -303,6 +303,10 @@ export class FlowTouchService {
 
   get isPointerSessionActive(): boolean {
     return this.activeInteractionType === 'pointer';
+  }
+
+  get isAwaitingPointerFallback(): boolean {
+    return this.awaitingPointerFallback;
   }
 
   private finishTouch(

@@ -107,8 +107,8 @@ enum class WidgetVisualTone {
 /**
  * 小组件尺寸档位（基于 hostsystem 上报的 min size 推断）。
  * - SMALL  : 约 2x2，仅展示模式 + 标题 + 一行状态 + 主操作
- * - MEDIUM : 约 4x2，展示模式/徽章/标题/辅助/计数/主操作（精简）
- * - LARGE  : 约 4x3+，展示完整内容（含状态卡、刷新按钮、分页）
+ * - MEDIUM : 约 4x2，展示可纵向滑动的中心内容区 + 右下角刷新
+ * - LARGE  : 约 4x3+，展示更高的纵向内容区 + 右下角刷新
  */
 enum class WidgetSizeTier {
   SMALL,
@@ -143,8 +143,16 @@ data class WidgetRenderModel(
   val tasks: List<WidgetTaskCard> = emptyList(),
   /** 当前 widget 实例选中的 tab 下标，范围 [0, tasks.lastIndex]。 */
   val selectedTaskIndex: Int = 0,
+  /** 中间内容区的纵向卡片列表；用户通过上下滑动浏览。 */
+  val contentCards: List<WidgetContentCard> = emptyList(),
   /** 紧凑同步徽章文案（如「刚刚」/「3 分前」）；null 表示不展示。 */
   val syncBadgeLabel: String? = null,
+)
+
+data class WidgetContentCard(
+  val eyebrow: String? = null,
+  val title: String,
+  val subtitle: String? = null,
 )
 
 /**

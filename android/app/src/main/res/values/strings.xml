@@ -51,4 +51,8 @@
     <string name="nanoflow_widget_counts">停泊 %1$d  ·  黑匣子 %2$d</string>
     <string name="nanoflow_widget_privacy_gate_title">%1$d 条待处理沉积</string>
     <string name="nanoflow_widget_privacy_focus_title">专注任务进行中</string>
+    <string name="nanoflow_widget_content_main_task">主任务</string>
+    <string name="nanoflow_widget_content_secondary_task">备选 %1$d</string>
+    <string name="nanoflow_widget_content_gate_position">沉积 %1$d / %2$d</string>
+    <string name="nanoflow_widget_content_pending_count">共 %1$d 条待处理沉积</string>
 </resources>

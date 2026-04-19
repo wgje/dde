@@ -105,7 +105,6 @@ import { writeTaskDragPayload } from '../../../../utils/task-drag-payload';
                   <div 
                     [draggable]="nativeHtmlDragEnabled"
                     (dragstart)="onDragStart($event, task)"
-                    (pointerdown)="onPointerDown($event, task)"
                     (touchstart)="onTouchStart($event, task)"
                     (touchmove)="onTouchMove($event)"
                     (touchend)="onTouchEnd($event)"
@@ -170,9 +169,6 @@ export class MobileTodoDrawerComponent implements OnDestroy {
   private readonly boundGlobalTouchFinish = this.handleGlobalTouchFinish.bind(this);
   private readonly boundGlobalPointerFinish = this.handleGlobalPointerFinish.bind(this);
   readonly nativeHtmlDragEnabled = typeof navigator === 'undefined' ? true : navigator.maxTouchPoints < 1;
-  readonly prefersPointerTouchDrag = typeof navigator !== 'undefined'
-    && navigator.maxTouchPoints > 0
-    && typeof PointerEvent !== 'undefined';
   
   // 输入
   readonly isDropTargetActive = input<boolean>(false);
@@ -189,7 +185,6 @@ export class MobileTodoDrawerComponent implements OnDestroy {
   readonly taskTouchMove = output<{ event: TouchEvent }>();
   readonly taskTouchEnd = output<{ event: TouchEvent }>();
   readonly taskTouchCancel = output<{ event: TouchEvent }>();
-  readonly taskPointerDown = output<{ event: PointerEvent; task: Task }>();
   /** 滑动切换视图事件 */
   readonly swipeToSwitch = output<SwipeDirection>();
   
@@ -350,10 +345,6 @@ export class MobileTodoDrawerComponent implements OnDestroy {
   
   // 触摸事件
   onTouchStart(event: TouchEvent, task: Task): void {
-    if (this.prefersPointerTouchDrag) {
-      return;
-    }
-
     event.stopPropagation();
     this.suppressSwipeForCurrentTouch = true;
     this.beginUnassignedDragSession();
@@ -361,19 +352,11 @@ export class MobileTodoDrawerComponent implements OnDestroy {
   }
   
   onTouchMove(event: TouchEvent): void {
-    if (this.prefersPointerTouchDrag) {
-      return;
-    }
-
     event.stopPropagation();
     this.taskTouchMove.emit({ event });
   }
   
   onTouchEnd(event: TouchEvent): void {
-    if (this.prefersPointerTouchDrag) {
-      return;
-    }
-
     event.stopPropagation();
     this.captureDraggedTaskClickGuard();
     this.taskTouchEnd.emit({ event });
@@ -383,27 +366,12 @@ export class MobileTodoDrawerComponent implements OnDestroy {
   }
 
   onTouchCancel(event: TouchEvent): void {
-    if (this.prefersPointerTouchDrag) {
-      return;
-    }
-
     event.stopPropagation();
     this.captureDraggedTaskClickGuard();
     this.taskTouchCancel.emit({ event });
     queueMicrotask(() => {
       this.suppressSwipeForCurrentTouch = false;
     });
-  }
-
-  onPointerDown(event: PointerEvent, task: Task): void {
-    if (!this.prefersPointerTouchDrag || event.pointerType !== 'touch' || !event.isPrimary) {
-      return;
-    }
-
-    event.stopPropagation();
-    this.suppressSwipeForCurrentTouch = true;
-    this.beginUnassignedDragSession();
-    this.taskPointerDown.emit({ event, task });
   }
 
   onTaskClick(task: Task): void {

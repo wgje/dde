@@ -5,7 +5,7 @@
     android:layout_height="match_parent"
     android:background="@drawable/nano_widget_root_focus"
     android:clipToOutline="true"
-    android:padding="14dp">
+    android:padding="12dp">
 
     <LinearLayout
         android:layout_width="match_parent"
@@ -15,7 +15,7 @@
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:gravity="end|center_vertical"
+            android:gravity="start|center_vertical"
             android:orientation="horizontal">
 
             <!-- 2026-04-19：去掉边框背景，保留圆点 + 文字。drawableStart 由 renderer 运行时选择颜色 -->
@@ -35,27 +35,6 @@
                 android:textColor="#4A7A38"
                 android:textSize="10sp"
                 android:visibility="gone" />
-
-            <TextView
-                android:layout_width="0dp"
-                android:layout_height="1dp"
-                android:layout_weight="1"
-                android:text="" />
-
-            <!-- 2026-04-19：禁用 tab_list 上下滑动（scrollbars/overScroll/edge fading 全关 + 容器高度>=item height 保证 GridView 不触发垂直滚动） -->
-            <GridView
-                android:id="@+id/nano_widget_tab_list"
-                android:layout_width="208dp"
-                android:layout_height="56dp"
-                android:columnWidth="68dp"
-                android:fadingEdge="none"
-                android:horizontalSpacing="2dp"
-                android:numColumns="1"
-                android:overScrollMode="never"
-                android:requiresFadingEdge="none"
-                android:scrollbars="none"
-                android:stretchMode="none"
-                android:verticalSpacing="0dp" />
         </LinearLayout>
 
         <ListView
@@ -63,38 +42,26 @@
             android:layout_width="match_parent"
             android:layout_height="0dp"
             android:layout_weight="1"
+            android:clipToPadding="false"
             android:divider="@android:color/transparent"
-            android:dividerHeight="0dp"
-            android:paddingTop="10dp"
-            android:paddingBottom="10dp"
+            android:dividerHeight="6dp"
+            android:paddingTop="8dp"
+            android:paddingBottom="52dp"
             android:scrollbars="none" />
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:gravity="end|center_vertical"
-            android:orientation="horizontal">
-
-            <TextView
-                android:layout_width="0dp"
-                android:layout_height="1dp"
-                android:layout_weight="1"
-                android:text="" />
-
-            <!-- 2026-04-19：refresh_list 同步禁用滑动视觉反馈 -->
-            <GridView
-                android:id="@+id/nano_widget_refresh_list"
-                android:layout_width="86dp"
-                android:layout_height="56dp"
-                android:columnWidth="86dp"
-                android:fadingEdge="none"
-                android:horizontalSpacing="0dp"
-                android:numColumns="1"
-                android:overScrollMode="never"
-                android:requiresFadingEdge="none"
-                android:scrollbars="none"
-                android:stretchMode="none"
-                android:verticalSpacing="0dp" />
-        </LinearLayout>
     </LinearLayout>
+
+    <GridView
+        android:id="@+id/nano_widget_refresh_list"
+        android:layout_width="76dp"
+        android:layout_height="44dp"
+        android:layout_gravity="bottom|end"
+        android:columnWidth="76dp"
+        android:fadingEdge="none"
+        android:horizontalSpacing="0dp"
+        android:numColumns="1"
+        android:overScrollMode="never"
+        android:requiresFadingEdge="none"
+        android:scrollbars="none"
+        android:stretchMode="none"
+        android:verticalSpacing="0dp" />
 </FrameLayout>
