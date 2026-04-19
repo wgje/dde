@@ -191,6 +191,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   /** 待清理的定时器 */
   private pendingTimers: ReturnType<typeof setTimeout>[] = [];
   /** 移动端待分配拖拽的 document 级兜底监听。 */
+  private readonly boundGlobalTouchMove = this.handleGlobalTouchMove.bind(this);
   private readonly boundGlobalTouchEnd = this.handleGlobalTouchEnd.bind(this);
   private readonly boundGlobalTouchCancel = this.handleGlobalTouchCancel.bind(this);
   private readonly boundGlobalPointerUp = this.handleGlobalPointerUp.bind(this);
@@ -308,10 +309,13 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     this.touch.activate();
     this.scheduleDiagramInit();
     this.bumpDetailLayoutTick();
-    document.addEventListener('touchend', this.boundGlobalTouchEnd, { capture: true, passive: false });
-    document.addEventListener('touchcancel', this.boundGlobalTouchCancel, { capture: true, passive: false });
-    document.addEventListener('pointerup', this.boundGlobalPointerUp, { capture: true });
-    document.addEventListener('pointercancel', this.boundGlobalPointerCancel, { capture: true });
+    this.zone.runOutsideAngular(() => {
+      document.addEventListener('touchmove', this.boundGlobalTouchMove, { capture: true, passive: false });
+      document.addEventListener('touchend', this.boundGlobalTouchEnd, { capture: true, passive: false });
+      document.addEventListener('touchcancel', this.boundGlobalTouchCancel, { capture: true, passive: false });
+      document.addEventListener('pointerup', this.boundGlobalPointerUp, { capture: true });
+      document.addEventListener('pointercancel', this.boundGlobalPointerCancel, { capture: true });
+    });
   }
   
   ngOnDestroy() {
@@ -340,10 +344,13 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
       () => this.touch.uninstallDiagramDragGhostListeners(this.diagram.diagramInstance)
     );
 
-    document.removeEventListener('touchend', this.boundGlobalTouchEnd, { capture: true } as EventListenerOptions);
-    document.removeEventListener('touchcancel', this.boundGlobalTouchCancel, { capture: true } as EventListenerOptions);
-    document.removeEventListener('pointerup', this.boundGlobalPointerUp, { capture: true } as EventListenerOptions);
-    document.removeEventListener('pointercancel', this.boundGlobalPointerCancel, { capture: true } as EventListenerOptions);
+    this.zone.runOutsideAngular(() => {
+      document.removeEventListener('touchmove', this.boundGlobalTouchMove, { capture: true } as EventListenerOptions);
+      document.removeEventListener('touchend', this.boundGlobalTouchEnd, { capture: true } as EventListenerOptions);
+      document.removeEventListener('touchcancel', this.boundGlobalTouchCancel, { capture: true } as EventListenerOptions);
+      document.removeEventListener('pointerup', this.boundGlobalPointerUp, { capture: true } as EventListenerOptions);
+      document.removeEventListener('pointercancel', this.boundGlobalPointerCancel, { capture: true } as EventListenerOptions);
+    });
 
     this.overviewResizeTimer = null;
   }
@@ -677,6 +684,18 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
         this.dragDrop.processDrop(task, insertInfo, docPoint, UI_CONFIG.MEDIUM_DELAY);
       },
     );
+  }
+
+  private handleGlobalTouchMove(event: TouchEvent): void {
+    if (!this.hasPendingUnassignedTouch()) return;
+
+    const shouldPrevent = this.touch.handleTouchMove(event);
+    if (!shouldPrevent) return;
+
+    if (event.cancelable) {
+      event.preventDefault();
+    }
+    event.stopPropagation();
   }
 
   private handleGlobalTouchEnd(event: TouchEvent): void {

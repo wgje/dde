@@ -5,9 +5,10 @@
  * 从 FlowPaletteComponent 中提取移动端专用内容
  */
 
-import { Component, ChangeDetectionStrategy, inject, signal, input, output, effect, OnDestroy } from '@angular/core';
+import { Component, ChangeDetectionStrategy, inject, signal, input, output, effect, OnDestroy, NgZone } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ProjectStateService } from '../../../../services/project-state.service';
+import { SyncCoordinatorService } from '../../../../services/sync-coordinator.service';
 import { Task } from '../../../../models';
 import { 
   SwipeGestureState, 
@@ -25,7 +26,8 @@ import { writeTaskDragPayload } from '../../../../utils/task-drag-payload';
   template: `
     <div class="flex flex-col h-full"
          (touchstart)="onSwipeTouchStart($event)"
-         (touchend)="onSwipeTouchEnd($event)">
+         (touchend)="onSwipeTouchEnd($event)"
+         (touchcancel)="onSwipeTouchCancel()">
       <!-- 标题区域（紧靠把手） -->
       <div class="shrink-0 px-4 pt-2 pb-2">
         <h2 class="text-base font-bold text-stone-700 dark:text-stone-200">待办与分配</h2>
@@ -99,13 +101,13 @@ import { writeTaskDragPayload } from '../../../../utils/task-drag-payload';
                    (drop)="onDrop($event)">
                 @for (task of projectState.unassignedTasks(); track task.id) {
                   <div 
-                    draggable="true" 
+                    [draggable]="nativeHtmlDragEnabled"
                     (dragstart)="onDragStart($event, task)"
                     (touchstart)="onTouchStart($event, task)"
                     (touchmove)="onTouchMove($event)"
                     (touchend)="onTouchEnd($event)"
                     (touchcancel)="onTouchCancel($event)"
-                    (click)="taskClick.emit(task)"
+                    (click)="onTaskClick(task)"
                     class="w-full px-2 py-1.5 bg-white/60 dark:bg-stone-800/80 border border-stone-200/50 dark:border-stone-600/50 rounded-md text-[11px] font-medium hover:border-teal-300 dark:hover:border-teal-600 hover:text-teal-700 dark:hover:text-teal-300 cursor-grab active:cursor-grabbing shadow-sm transition-all active:scale-95 text-stone-600 dark:text-stone-300 select-none flex items-center gap-2"
                     [class.bg-teal-100]="draggingTaskId() === task.id"
                     [class.dark:bg-teal-800]="draggingTaskId() === task.id"
@@ -160,7 +162,11 @@ import { writeTaskDragPayload } from '../../../../utils/task-drag-payload';
 })
 export class MobileTodoDrawerComponent implements OnDestroy {
   readonly projectState = inject(ProjectStateService);
+  private readonly syncCoordinator = inject(SyncCoordinatorService);
+  private readonly zone = inject(NgZone);
   private readonly boundGlobalTouchFinish = this.handleGlobalTouchFinish.bind(this);
+  private readonly boundGlobalPointerFinish = this.handleGlobalPointerFinish.bind(this);
+  readonly nativeHtmlDragEnabled = typeof navigator === 'undefined' ? true : navigator.maxTouchPoints < 1;
   
   // 输入
   readonly isDropTargetActive = input<boolean>(false);
@@ -180,24 +186,74 @@ export class MobileTodoDrawerComponent implements OnDestroy {
   readonly swipeToSwitch = output<SwipeDirection>();
   
   // 内部状态
-  readonly isUnfinishedOpen = signal(true);
-  readonly isUnassignedOpen = signal(true);
+  readonly isUnfinishedOpen = signal(this.projectState.unfinishedItems().length > 0);
+  readonly isUnassignedOpen = signal(this.projectState.unassignedTasks().length > 0);
+  private lastUnfinishedCount: number | null = null;
+  private lastUnassignedCount: number | null = null;
+  private lastDraggedTaskClickGuard: { taskId: string; at: number } | null = null;
+  private pendingUnfinishedAutoCollapseRaf: number | null = null;
+  private pendingUnassignedAutoCollapseRaf: number | null = null;
+  private shouldAutoOpenUnfinishedOnFirstContent = this.projectState.unfinishedItems().length === 0;
+  private shouldAutoOpenUnassignedOnFirstContent = this.projectState.unassignedTasks().length === 0;
 
   constructor() {
-    // 没有待办/待分配任务时自动折叠，减少移动端空白区域
+    // 没有待办/待分配任务时默认折叠；仅在“从有到无”时再次自动收起，避免用户手动展开空状态后被反复打断。
     effect(() => {
-      if (this.projectState.unfinishedItems().length === 0) {
-        this.isUnfinishedOpen.set(false);
+      const isLoadingRemote = this.syncCoordinator.isLoadingRemote();
+      const currentCount = this.projectState.unfinishedItems().length;
+
+      if (isLoadingRemote) {
+        if (this.lastUnfinishedCount === null) {
+          this.lastUnfinishedCount = currentCount;
+        }
+        this.cancelPendingAutoCollapse('unfinished');
+        return;
       }
-    });
-    effect(() => {
-      if (this.projectState.unassignedTasks().length === 0) {
-        this.isUnassignedOpen.set(false);
+
+      if (currentCount === 0 && this.lastUnfinishedCount !== 0) {
+        this.scheduleAutoCollapse('unfinished');
+      } else if (currentCount > 0) {
+        this.cancelPendingAutoCollapse('unfinished');
+        if (this.shouldAutoOpenUnfinishedOnFirstContent) {
+          this.isUnfinishedOpen.set(true);
+          this.shouldAutoOpenUnfinishedOnFirstContent = false;
+        }
       }
+
+      this.lastUnfinishedCount = currentCount;
     });
 
-    document.addEventListener('touchend', this.boundGlobalTouchFinish, { capture: true, passive: false });
-    document.addEventListener('touchcancel', this.boundGlobalTouchFinish, { capture: true, passive: false });
+    effect(() => {
+      const isLoadingRemote = this.syncCoordinator.isLoadingRemote();
+      const currentCount = this.projectState.unassignedTasks().length;
+
+      if (isLoadingRemote) {
+        if (this.lastUnassignedCount === null) {
+          this.lastUnassignedCount = currentCount;
+        }
+        this.cancelPendingAutoCollapse('unassigned');
+        return;
+      }
+
+      if (currentCount === 0 && this.lastUnassignedCount !== 0) {
+        this.scheduleAutoCollapse('unassigned');
+      } else if (currentCount > 0) {
+        this.cancelPendingAutoCollapse('unassigned');
+        if (this.shouldAutoOpenUnassignedOnFirstContent) {
+          this.isUnassignedOpen.set(true);
+          this.shouldAutoOpenUnassignedOnFirstContent = false;
+        }
+      }
+
+      this.lastUnassignedCount = currentCount;
+    });
+
+    this.zone.runOutsideAngular(() => {
+      document.addEventListener('touchend', this.boundGlobalTouchFinish, { capture: true, passive: false });
+      document.addEventListener('touchcancel', this.boundGlobalTouchFinish, { capture: true, passive: false });
+      document.addEventListener('pointerup', this.boundGlobalPointerFinish, { capture: true });
+      document.addEventListener('pointercancel', this.boundGlobalPointerFinish, { capture: true });
+    });
   }
   
   // 滑动手势状态（用于视图切换）
@@ -207,6 +263,11 @@ export class MobileTodoDrawerComponent implements OnDestroy {
   
   // 拖动事件
   onDragStart(event: DragEvent, task: Task): void {
+    if (!this.nativeHtmlDragEnabled) {
+      event.preventDefault();
+      return;
+    }
+
     if (event.dataTransfer) {
       writeTaskDragPayload(event.dataTransfer, {
         v: 1,
@@ -235,15 +296,19 @@ export class MobileTodoDrawerComponent implements OnDestroy {
   
   // 触摸事件
   onTouchStart(event: TouchEvent, task: Task): void {
+    event.stopPropagation();
     this.suppressSwipeForCurrentTouch = true;
     this.taskTouchStart.emit({ event, task });
   }
   
   onTouchMove(event: TouchEvent): void {
+    event.stopPropagation();
     this.taskTouchMove.emit({ event });
   }
   
   onTouchEnd(event: TouchEvent): void {
+    event.stopPropagation();
+    this.captureDraggedTaskClickGuard();
     this.taskTouchEnd.emit({ event });
     queueMicrotask(() => {
       this.suppressSwipeForCurrentTouch = false;
@@ -251,15 +316,37 @@ export class MobileTodoDrawerComponent implements OnDestroy {
   }
 
   onTouchCancel(event: TouchEvent): void {
+    event.stopPropagation();
+    this.captureDraggedTaskClickGuard();
     this.taskTouchCancel.emit({ event });
     queueMicrotask(() => {
       this.suppressSwipeForCurrentTouch = false;
     });
   }
 
+  onTaskClick(task: Task): void {
+    const now = performance.now();
+    if (
+      this.lastDraggedTaskClickGuard?.taskId === task.id
+      && now - this.lastDraggedTaskClickGuard.at < 500
+    ) {
+      this.lastDraggedTaskClickGuard = null;
+      return;
+    }
+
+    this.lastDraggedTaskClickGuard = null;
+    this.taskClick.emit(task);
+  }
+
   ngOnDestroy(): void {
-    document.removeEventListener('touchend', this.boundGlobalTouchFinish, { capture: true } as EventListenerOptions);
-    document.removeEventListener('touchcancel', this.boundGlobalTouchFinish, { capture: true } as EventListenerOptions);
+    this.cancelPendingAutoCollapse('unfinished');
+    this.cancelPendingAutoCollapse('unassigned');
+    this.zone.runOutsideAngular(() => {
+      document.removeEventListener('touchend', this.boundGlobalTouchFinish, { capture: true } as EventListenerOptions);
+      document.removeEventListener('touchcancel', this.boundGlobalTouchFinish, { capture: true } as EventListenerOptions);
+      document.removeEventListener('pointerup', this.boundGlobalPointerFinish, { capture: true } as EventListenerOptions);
+      document.removeEventListener('pointercancel', this.boundGlobalPointerFinish, { capture: true } as EventListenerOptions);
+    });
   }
   
   // ===============================================
@@ -299,12 +386,110 @@ export class MobileTodoDrawerComponent implements OnDestroy {
       this.swipeToSwitch.emit(direction);
     }
     
-    this.swipeState = { startX: 0, startY: 0, startTime: 0, isActive: false };
+    this.resetSwipeState();
   }
 
-  private handleGlobalTouchFinish(): void {
+  onSwipeTouchCancel(): void {
+    this.resetSwipeState();
+  }
+
+  private handleGlobalTouchFinish(event: TouchEvent): void {
+    if (event.type === 'touchend') {
+      this.captureDraggedTaskClickGuard();
+    }
+
     queueMicrotask(() => {
       this.suppressSwipeForCurrentTouch = false;
     });
+
+    if (event.type === 'touchcancel') {
+      this.resetSwipeState();
+    }
+  }
+
+  private handleGlobalPointerFinish(event: PointerEvent): void {
+    if (event.pointerType !== 'touch') {
+      return;
+    }
+
+    if (event.type === 'pointerup') {
+      this.captureDraggedTaskClickGuard();
+    }
+
+    queueMicrotask(() => {
+      this.suppressSwipeForCurrentTouch = false;
+    });
+
+    if (event.type === 'pointercancel') {
+      this.resetSwipeState();
+    }
+  }
+
+  private captureDraggedTaskClickGuard(): void {
+    const draggingTaskId = this.draggingTaskId();
+    if (!draggingTaskId) return;
+    this.lastDraggedTaskClickGuard = { taskId: draggingTaskId, at: performance.now() };
+  }
+
+  private resetSwipeState(): void {
+    this.swipeState = { startX: 0, startY: 0, startTime: 0, isActive: false };
+  }
+
+  private scheduleAutoCollapse(section: 'unfinished' | 'unassigned'): void {
+    this.cancelPendingAutoCollapse(section);
+
+    if (typeof window === 'undefined') {
+      this.applyAutoCollapse(section);
+      return;
+    }
+
+    const rafId = window.requestAnimationFrame(() => {
+      if (section === 'unfinished') {
+        this.pendingUnfinishedAutoCollapseRaf = null;
+        if (this.syncCoordinator.isLoadingRemote() || this.projectState.unfinishedItems().length > 0) {
+          return;
+        }
+      } else {
+        this.pendingUnassignedAutoCollapseRaf = null;
+        if (this.syncCoordinator.isLoadingRemote() || this.projectState.unassignedTasks().length > 0) {
+          return;
+        }
+      }
+
+      this.applyAutoCollapse(section);
+    });
+
+    if (section === 'unfinished') {
+      this.pendingUnfinishedAutoCollapseRaf = rafId;
+      return;
+    }
+
+    this.pendingUnassignedAutoCollapseRaf = rafId;
+  }
+
+  private cancelPendingAutoCollapse(section: 'unfinished' | 'unassigned'): void {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    if (section === 'unfinished' && this.pendingUnfinishedAutoCollapseRaf !== null) {
+      window.cancelAnimationFrame(this.pendingUnfinishedAutoCollapseRaf);
+      this.pendingUnfinishedAutoCollapseRaf = null;
+      return;
+    }
+
+    if (section === 'unassigned' && this.pendingUnassignedAutoCollapseRaf !== null) {
+      window.cancelAnimationFrame(this.pendingUnassignedAutoCollapseRaf);
+      this.pendingUnassignedAutoCollapseRaf = null;
+    }
+  }
+
+  private applyAutoCollapse(section: 'unfinished' | 'unassigned'): void {
+    if (section === 'unfinished') {
+      this.isUnfinishedOpen.set(false);
+      return;
+    }
+
+    this.isUnassignedOpen.set(false);
   }
 }
