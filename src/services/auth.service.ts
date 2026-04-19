@@ -128,6 +128,7 @@ export class AuthService {
   /** 当前用户邮箱 */
   readonly sessionEmail = signal<string | null>(null);
   private pendingStorageBridgeSessionIdentity: PersistedSessionIdentity | null = null;
+  private pendingSessionRestoredNotification = false;
   
   constructor() {
     if (!this.supabase.isConfigured) {
@@ -734,7 +735,8 @@ export class AuthService {
     // 错误消息中包含认证相关关键词
     const msg = (err.message ?? '').toLowerCase();
     if (msg.includes('refresh token') || msg.includes('invalid token') ||
-        msg.includes('token expired') || msg.includes('session expired') ||
+        msg.includes('invalid refresh token') || msg.includes('token expired') ||
+        msg.includes('session expired') || msg.includes('session missing') ||
         msg.includes('invalid claim') || msg.includes('jwt expired')) {
       return true;
     }
@@ -979,13 +981,12 @@ export class AuthService {
 
   /**
    * 登出
-   * 注意：先清理本地状态，再调用 Supabase 登出
-   * 这样可以确保即使 Supabase 调用失败，本地状态也已被清理
+    * 注意：先清理内存态 UI，再尝试 Supabase 远端登出，最后在 finally 中兜底清理本地缓存
+    * 这样可以同时保留 refresh token 远端撤销机会，并确保本地状态最终一定被清理
    */
   async signOut(): Promise<void> {
     // 标记为手动登出，避免触发 sessionExpired 提示
     this.isManualSignOut = true;
-    this.pendingStorageBridgeSessionIdentity = null;
     
     // 先清理本地状态
     this.currentUserId.set(null);
@@ -1004,13 +1005,16 @@ export class AuthService {
     this.sentryLazyLoader.setUser(null);
     
     // 再调用 Supabase 登出
-    if (this.supabase.isConfigured) {
-      try {
+    try {
+      if (this.supabase.isConfigured) {
         await this.supabase.signOut();
-      } catch (e) {
-        // 即使 Supabase 登出失败，本地状态已清理
+      }
+    } catch (e) {
+      if (this.supabase.isConfigured) {
         this.logger.warn('Supabase signOut failed', { error: e });
       }
+    } finally {
+      this.clearCachedSessionArtifacts();
     }
   }
 
@@ -1041,6 +1045,7 @@ export class AuthService {
     this.isManualSignOut = false;
     this.devAutoLoginAttempted = false;
     this.authRuntimeReady = false;
+    this.pendingSessionRestoredNotification = false;
     this.authStateSubscription?.unsubscribe();
     this.authStateSubscription = null;
     this.runtimeAuthReadyPromise = null;
@@ -1194,15 +1199,39 @@ export class AuthService {
     return null;
   }
 
+  private clearCachedSessionArtifacts(): void {
+    this.pendingStorageBridgeSessionIdentity = null;
+
+    try {
+      const storageKey = this.supabase.getStorageKey();
+      if (storageKey) {
+        localStorage.removeItem(storageKey);
+      }
+      saveAuthCache(null);
+    } catch {
+      // localStorage 不可用时静默降级
+    }
+
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    try {
+      delete (window as Window & { __NANOFLOW_SESSION_PREWARM__?: unknown }).__NANOFLOW_SESSION_PREWARM__;
+    } catch {
+      // window 只读异常时静默降级
+    }
+  }
+
   private teardownInvalidatedSession(source: string): { invalidatedUserId: string | null; keepLocalModeUser: boolean } {
     const currentUserId = this.currentUserId();
     const keepLocalModeUser = currentUserId === AUTH_CONFIG.LOCAL_MODE_USER_ID;
     const invalidatedUserId = this.resolveInvalidatedOwnerUserId(currentUserId);
-    this.pendingStorageBridgeSessionIdentity = null;
 
     // 中文注释：先同步广播 teardown，让 WorkspaceShell 立即停写 launch snapshot，
     // 再清空 auth signal，避免旧 owner 项目摘要落进 anonymous bucket。
     if (invalidatedUserId) {
+      this.pendingSessionRestoredNotification = true;
       this.eventBus.publishSessionInvalidated(source, invalidatedUserId);
     }
 
@@ -1220,15 +1249,7 @@ export class AuthService {
       isCheckingSession: false,
     }));
 
-    try {
-      const storageKey = this.supabase.getStorageKey();
-      if (storageKey) {
-        localStorage.removeItem(storageKey);
-      }
-      saveAuthCache(null);
-    } catch {
-      // localStorage 不可用时静默降级
-    }
+    this.clearCachedSessionArtifacts();
 
     this.sentryLazyLoader.setUser(null);
 
@@ -1336,11 +1357,16 @@ export class AuthService {
     this.sessionEmail.set(email);
     this.sentryLazyLoader.setUser({ id: userId, email: email ?? undefined });
 
+    const shouldPublishSessionRestored = options?.publishSessionRestored
+      && (this.sessionExpired() || this.pendingSessionRestoredNotification);
+
     if (this.sessionExpired()) {
       this.sessionExpired.set(false);
-      if (options?.publishSessionRestored) {
-        this.notifySyncServiceSessionRestored(userId, options.source ?? 'AuthService');
-      }
+    }
+
+    if (shouldPublishSessionRestored) {
+      this.pendingSessionRestoredNotification = false;
+      this.notifySyncServiceSessionRestored(userId, options?.source ?? 'AuthService');
     }
 
     this.authState.update(s => ({

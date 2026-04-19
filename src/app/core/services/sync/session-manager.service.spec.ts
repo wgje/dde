@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { TestBed } from '@angular/core/testing';
+import { Subject } from 'rxjs';
 import { SessionManagerService } from './session-manager.service';
 import { SupabaseClientService } from '../../../../services/supabase-client.service';
 import { LoggerService } from '../../../../services/logger.service';
@@ -12,6 +13,8 @@ import { resetBrowserNetworkSuspensionTrackingForTests } from '../../../../utils
 describe('SessionManagerService', () => {
   let service: SessionManagerService;
   let sessionExpired = false;
+  let sessionRestored$: Subject<{ type: 'session-restored'; userId: string; source: string }>;
+  let sessionInvalidated$: Subject<{ type: 'session-invalidated'; userId: string | null; source: string }>;
 
   const mockAuth = {
     getSession: vi.fn(),
@@ -27,6 +30,8 @@ describe('SessionManagerService', () => {
 
   beforeEach(() => {
     sessionExpired = false;
+    sessionRestored$ = new Subject();
+    sessionInvalidated$ = new Subject();
     setVisibilityState('visible');
     mockAuth.getSession.mockReset();
     mockAuth.refreshSession.mockReset();
@@ -63,9 +68,8 @@ describe('SessionManagerService', () => {
         {
           provide: EventBusService,
           useValue: {
-            onSessionRestored$: {
-              pipe: vi.fn().mockReturnValue({ subscribe: vi.fn() }),
-            },
+            onSessionRestored$: sessionRestored$.asObservable(),
+            onSessionInvalidated$: sessionInvalidated$.asObservable(),
           },
         },
         {
@@ -92,6 +96,8 @@ describe('SessionManagerService', () => {
   afterEach(() => {
     resetBrowserNetworkSuspensionTrackingForTests();
     setVisibilityState('visible');
+    sessionRestored$.complete();
+    sessionInvalidated$.complete();
     TestBed.resetTestingModule();
   });
 
@@ -142,6 +148,64 @@ describe('SessionManagerService', () => {
     expect(result).toEqual({ ok: false, refreshed: false, deferred: false, reason: 'refresh-failed' });
     expect(syncState.setSessionExpired).toHaveBeenCalledWith(true);
     expect(toast.warning).toHaveBeenCalled();
+  });
+
+  it('should treat auth session missing as no-session and short-circuit later resume checks', async () => {
+    const syncState = TestBed.inject(SyncStateService) as unknown as {
+      setSessionExpired: ReturnType<typeof vi.fn>;
+    };
+
+    mockAuth.getSession.mockResolvedValue({
+      data: { session: null },
+    });
+    mockAuth.refreshSession.mockResolvedValue({
+      data: { session: null },
+      error: { message: 'Auth session missing!' },
+    });
+
+    const first = await service.validateOrRefreshOnResume('resume:test');
+
+    expect(first).toEqual({ ok: false, refreshed: false, deferred: false, reason: 'no-session' });
+    expect(syncState.setSessionExpired).toHaveBeenCalledWith(true);
+    expect(mockAuth.refreshSession).toHaveBeenCalledTimes(1);
+
+    mockAuth.getSession.mockClear();
+    mockAuth.refreshSession.mockClear();
+
+    const second = await service.validateOrRefreshOnResume('resume:test');
+
+    expect(second).toEqual({ ok: false, refreshed: false, deferred: false, reason: 'no-session' });
+    expect(mockAuth.getSession).not.toHaveBeenCalled();
+    expect(mockAuth.refreshSession).not.toHaveBeenCalled();
+  });
+
+  it('should clear no-session short-circuit after session restored event', async () => {
+    mockAuth.getSession.mockResolvedValue({
+      data: { session: null },
+    });
+    mockAuth.refreshSession.mockResolvedValue({
+      data: { session: null },
+      error: { message: 'Auth session missing!' },
+    });
+
+    await service.validateOrRefreshOnResume('resume:test');
+
+    sessionRestored$.next({
+      type: 'session-restored',
+      userId: 'user-restored',
+      source: 'AuthService',
+    });
+
+    mockAuth.getSession.mockReset();
+    mockAuth.refreshSession.mockReset();
+    mockAuth.getSession.mockResolvedValue({
+      data: { session: { user: { id: 'user-restored' } } },
+    });
+
+    const result = await service.validateOrRefreshOnResume('resume:test');
+
+    expect(result).toEqual({ ok: true, refreshed: false, deferred: false });
+    expect(mockAuth.getSession).toHaveBeenCalledTimes(1);
   });
 
   it('should return deferred when supabase client is not ready on resume', async () => {

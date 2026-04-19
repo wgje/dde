@@ -394,6 +394,18 @@ describe('AuthService', () => {
     it('后台 refresh 判定会话失效时也应先 teardown 再清 auth signal', () => {
       service.currentUserId.set('user-1');
       service.sessionEmail.set('test@example.com');
+      localStorage.setItem('sb-test-auth-token', createPersistedSessionPayload('user-1', 'test@example.com'));
+      (window as Window & { __NANOFLOW_SESSION_PREWARM__?: unknown }).__NANOFLOW_SESSION_PREWARM__ = {
+        status: 'refreshed',
+        session: {
+          access_token: 'access-token',
+          refresh_token: 'refresh-token',
+          expires_in: 3600,
+          expires_at: Math.floor(Date.now() / 1000) + 3600,
+          token_type: 'bearer',
+          user: { id: 'user-1', email: 'test@example.com' },
+        },
+      };
       let userIdDuringInvalidation: string | null | undefined;
       mockEventBus.publishSessionInvalidated.mockImplementation(() => {
         userIdDuringInvalidation = service.currentUserId();
@@ -407,6 +419,28 @@ describe('AuthService', () => {
       expect(userIdDuringInvalidation).toBe('user-1');
       expect(service.currentUserId()).toBeNull();
       expect(service.sessionEmail()).toBeNull();
+      expect(localStorage.getItem('sb-test-auth-token')).toBeNull();
+      expect((window as Window & { __NANOFLOW_SESSION_PREWARM__?: unknown }).__NANOFLOW_SESSION_PREWARM__).toBeUndefined();
+    });
+
+    it('background invalidation 后同标签页重新登录应补发 session restored', async () => {
+      await ensureRuntimeAuthReady();
+
+      authStateCallback!('SIGNED_IN', {
+        user: { id: 'user-1', email: 'test@example.com' }
+      });
+
+      (service as unknown as {
+        handleBackgroundSessionInvalid: () => void;
+      }).handleBackgroundSessionInvalid();
+
+      mockEventBus.publishSessionRestored.mockClear();
+
+      authStateCallback!('SIGNED_IN', {
+        user: { id: 'user-1', email: 'test@example.com' }
+      });
+
+      expect(mockEventBus.publishSessionRestored).toHaveBeenCalledWith('user-1', 'AuthService');
     });
 
     it('local-user 收到 SIGNED_OUT 时不应误判为云端会话过期', async () => {
@@ -436,6 +470,26 @@ describe('AuthService', () => {
       
       // 不应该设置过期标记
       expect(service.sessionExpired()).toBe(false);
+    });
+
+    it('主动登出时应同步清理本地 Supabase 凭证与启动预热缓存', async () => {
+      localStorage.setItem('sb-test-auth-token', createPersistedSessionPayload('user-1', 'test@example.com'));
+      (window as Window & { __NANOFLOW_SESSION_PREWARM__?: unknown }).__NANOFLOW_SESSION_PREWARM__ = {
+        status: 'refreshed',
+        session: {
+          access_token: 'access-token',
+          refresh_token: 'refresh-token',
+          expires_in: 3600,
+          expires_at: Math.floor(Date.now() / 1000) + 3600,
+          token_type: 'bearer',
+          user: { id: 'user-1', email: 'test@example.com' },
+        },
+      };
+
+      await service.signOut();
+
+      expect(localStorage.getItem('sb-test-auth-token')).toBeNull();
+      expect((window as Window & { __NANOFLOW_SESSION_PREWARM__?: unknown }).__NANOFLOW_SESSION_PREWARM__).toBeUndefined();
     });
   });
   

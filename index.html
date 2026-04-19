@@ -322,6 +322,10 @@
         var raw = localStorage.getItem(AUTH_KEY);
         if (!raw) return;
         var authData = JSON.parse(raw);
+        function clearPersistedAuthSession() {
+          try { localStorage.removeItem(AUTH_KEY); } catch (_e) {}
+          try { localStorage.removeItem('nanoflow.auth-cache'); } catch (_e2) {}
+        }
         var refreshToken = null;
         if (authData && authData.refresh_token) {
           refreshToken = authData.refresh_token;
@@ -349,14 +353,30 @@
           headers: { 'apikey': SUPABASE_ANON_KEY, 'Content-Type': 'application/json' },
           body: JSON.stringify({ refresh_token: refreshToken })
         }).then(function(resp) {
-          if (!resp.ok) {
+          if (resp.ok) {
+            return resp.json();
+          }
+
+          return resp.json().catch(function() {
+            return null;
+          }).then(function(errorData) {
             window.__NANOFLOW_SESSION_PREWARM__.status = 'failed';
+            if (resp.status === 400 || resp.status === 401) {
+              clearPersistedAuthSession();
+              if (window.__NANOFLOW_PUSH_STARTUP_TRACE__) {
+                window.__NANOFLOW_PUSH_STARTUP_TRACE__('auth.prewarm_invalidated', {
+                  status: resp.status,
+                  error: errorData && (errorData.message || errorData.error || errorData.error_description)
+                });
+              }
+              return null;
+            }
+
             if (window.__NANOFLOW_PUSH_STARTUP_TRACE__) {
               window.__NANOFLOW_PUSH_STARTUP_TRACE__('auth.prewarm_failed', { status: resp.status });
             }
-            return;
-          }
-          return resp.json();
+            return null;
+          });
         }).then(function(data) {
           if (!data || !data.access_token) return;
           var newSession = {

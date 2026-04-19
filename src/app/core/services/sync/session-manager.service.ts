@@ -80,12 +80,24 @@ export class SessionManagerService {
   private readonly syncState = inject(SyncStateService);
   private readonly destroyRef = inject(DestroyRef);
   private lastValidationSnapshot: SessionValidationSnapshot | null = null;
+  private terminalSessionInvalidation: {
+    at: number;
+    source: string;
+    userId: string | null;
+  } | null = null;
 
   constructor() {
     // 订阅会话恢复事件
     this.eventBus.onSessionRestored$.pipe(
       takeUntilDestroyed(this.destroyRef)
     ).subscribe(() => this.resetSessionExpired());
+
+    const sessionInvalidated$ = this.eventBus.onSessionInvalidated$;
+    if (sessionInvalidated$) {
+      sessionInvalidated$.pipe(
+        takeUntilDestroyed(this.destroyRef)
+      ).subscribe((event) => this.markTerminalSessionInvalidation(event.source, event.userId));
+    }
   }
 
   /**
@@ -206,6 +218,28 @@ export class SessionManagerService {
     }
 
     return { ...this.lastValidationSnapshot };
+  }
+
+  private markTerminalSessionInvalidation(source: string, userId: string | null): void {
+    const previousSource = this.terminalSessionInvalidation?.source ?? null;
+    this.terminalSessionInvalidation = {
+      at: Date.now(),
+      source,
+      userId,
+    };
+    this.lastValidationSnapshot = null;
+
+    if (!this.syncState.isSessionExpired()) {
+      this.syncState.setSessionExpired(true);
+    }
+
+    if (previousSource !== source) {
+      this.logger.info('会话已明确失效，后续刷新将短路', { source, userId });
+    }
+  }
+
+  private clearTerminalSessionInvalidation(): void {
+    this.terminalSessionInvalidation = null;
   }
 
   /**
@@ -354,6 +388,16 @@ export class SessionManagerService {
       return await this.sessionRefreshPromise;
     }
 
+    if (this.terminalSessionInvalidation) {
+      this.logger.debug('会话已明确失效，跳过刷新尝试', {
+        context,
+        invalidatedAt: this.terminalSessionInvalidation.at,
+        invalidatedSource: this.terminalSessionInvalidation.source,
+        invalidatedUserId: this.terminalSessionInvalidation.userId,
+      });
+      return { refreshed: false, reason: 'no-session' };
+    }
+
     // 【鲁棒性 2】快速断路：5s 内有失败过，则短路拒绝，避免刷屏
     const timeSinceLastFailure = Date.now() - this.lastRefreshFailureTime;
     // 【鲁棒性 7】自适应断路倍数：连续失败越多，冷却时间越长
@@ -424,6 +468,7 @@ export class SessionManagerService {
 
         if (this.isAuthenticationRefreshFailure(error)) {
           this.logger.warn('会话刷新失败：刷新令牌已失效', { context, error: error.message });
+          this.markTerminalSessionInvalidation(context, this.lastValidationSnapshot?.userId ?? null);
           // 【鲁棒性 2】真失败时启动冷却期
           this.lastRefreshFailureTime = Date.now();
           return { refreshed: false, reason: 'no-session' };
@@ -436,6 +481,7 @@ export class SessionManagerService {
       }
       
       if (data.session) {
+        this.clearTerminalSessionInvalidation();
         this.markValidationSnapshot(true, data.session.user.id);
         this.logger.info('会话刷新成功', { 
           context, 
@@ -460,6 +506,7 @@ export class SessionManagerService {
         return { refreshed: true, session: data.session };
       } else {
         this.logger.warn('刷新返回空 session', { context });
+        this.markTerminalSessionInvalidation(context, this.lastValidationSnapshot?.userId ?? null);
         // 【鲁棒性 2】空 session 也算失败
         this.lastRefreshFailureTime = Date.now();
         // 【鲁棒性 7】记录连续失败
@@ -477,6 +524,7 @@ export class SessionManagerService {
 
       if (this.isAuthenticationRefreshFailure(e)) {
         this.logger.warn('会话刷新异常：刷新令牌已失效', { context, error: e });
+        this.markTerminalSessionInvalidation(context, this.lastValidationSnapshot?.userId ?? null);
         // 【鲁棒性 2】异常也启动冷却
         this.lastRefreshFailureTime = Date.now();
         // 【鲁棒性 7】记录连续失败
@@ -583,8 +631,10 @@ export class SessionManagerService {
     const message = (authError.message ?? '').toLowerCase();
     return message.includes('refresh token') ||
       message.includes('invalid token') ||
+      message.includes('invalid refresh token') ||
       message.includes('token expired') ||
       message.includes('session expired') ||
+      message.includes('session missing') ||
       message.includes('invalid claim') ||
       message.includes('jwt expired') ||
       message.includes('session_not_found');
@@ -618,6 +668,8 @@ export class SessionManagerService {
    * 重置会话过期状态
    */
   resetSessionExpired(): void {
+    this.clearTerminalSessionInvalidation();
+
     if (!this.syncState.isSessionExpired()) {
       return;
     }
@@ -681,6 +733,16 @@ export class SessionManagerService {
     deferred: boolean;
     reason?: 'client-unready' | 'no-session' | 'refresh-failed';
   }> {
+    if (this.terminalSessionInvalidation) {
+      this.logger.info('Resume 会话校验短路：当前会话已明确失效', {
+        context,
+        invalidatedAt: this.terminalSessionInvalidation.at,
+        invalidatedSource: this.terminalSessionInvalidation.source,
+        invalidatedUserId: this.terminalSessionInvalidation.userId,
+      });
+      return { ok: false, refreshed: false, deferred: false, reason: 'no-session' };
+    }
+
     if (isBrowserNetworkSuspendedWindow()) {
       this.logger.info('Resume 会话校验延后：浏览器网络挂起窗口未结束', { context });
       return { ok: false, refreshed: false, deferred: true, reason: 'client-unready' };
