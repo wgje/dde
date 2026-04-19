@@ -96,6 +96,170 @@ describe('WorkspaceShellComponent Windows widget bridge', () => {
 });
 
 describe('WorkspaceShellComponent Android widget bootstrap', () => {
+  it('应接受 Android 浏览器中的 widget bootstrap fallback', () => {
+    const originalReferrer = Object.getOwnPropertyDescriptor(document, 'referrer');
+    const originalMatchMedia = window.matchMedia;
+
+    vi.stubGlobal('navigator', {
+      userAgent: 'Mozilla/5.0 (Linux; Android 14; 24018RPACC) AppleWebKit/537.36 Chrome/123.0.0.0 Mobile Safari/537.36',
+    });
+    Object.defineProperty(document, 'referrer', {
+      configurable: true,
+      get: () => '',
+    });
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn(() => ({
+        matches: false,
+        media: '',
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    });
+
+    try {
+      const context = {
+        pendingAndroidWidgetBootstrap: signal<unknown>(null),
+      } as unknown as WorkspaceShellComponent;
+
+      const result = (WorkspaceShellComponent.prototype as unknown as {
+        isTrustedAndroidWidgetBootstrapSurface: (
+          this: WorkspaceShellComponent,
+          bootstrapRequest: {
+            callbackUri: string;
+            installationId: string;
+            deviceId: string;
+            deviceSecret: string;
+            instanceId: string;
+            hostInstanceId: string;
+            sizeBucket: string;
+            bootstrapNonce: string;
+            pendingPushToken: string | null;
+            clientVersion: string | null;
+          },
+          routeUrl: string | null,
+        ) => boolean;
+      }).isTrustedAndroidWidgetBootstrapSurface.call(
+        context,
+        {
+          callbackUri: 'nanoflow-widget://bootstrap',
+          clientVersion: 'android-widget/0.1.1',
+          installationId: '11111111-1111-4111-8111-111111111111',
+          deviceId: '22222222-2222-4222-8222-222222222222',
+          deviceSecret: 'super-secret-device-key',
+          instanceId: '33333333-3333-4333-8333-333333333333',
+          hostInstanceId: '42',
+          sizeBucket: '4x2',
+          bootstrapNonce: '44444444-4444-4444-8444-444444444444',
+          pendingPushToken: null,
+        },
+        '/projects?entry=twa&intent=open-workspace&widgetBootstrap=1'
+        + '&widgetBootstrapReturnUri=nanoflow-widget%3A%2F%2Fbootstrap'
+        + '&widgetInstallationId=11111111-1111-4111-8111-111111111111'
+        + '&widgetDeviceId=22222222-2222-4222-8222-222222222222'
+        + '&widgetDeviceSecret=super-secret-device-key'
+        + '&widgetClientVersion=android-widget%2F0.1.1'
+        + '&widgetInstanceId=33333333-3333-4333-8333-333333333333'
+        + '&widgetHostInstanceId=42'
+        + '&widgetSizeBucket=4x2'
+        + '&widgetBootstrapNonce=44444444-4444-4444-8444-444444444444',
+      );
+
+      expect(result).toBe(true);
+    } finally {
+      if (originalReferrer) {
+        Object.defineProperty(document, 'referrer', originalReferrer);
+      }
+      Object.defineProperty(window, 'matchMedia', {
+        configurable: true,
+        value: originalMatchMedia,
+      });
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('应继续拒绝桌面浏览器中的非 TWA bootstrap 请求', () => {
+    const originalReferrer = Object.getOwnPropertyDescriptor(document, 'referrer');
+    const originalMatchMedia = window.matchMedia;
+
+    vi.stubGlobal('navigator', {
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/123.0.0.0 Safari/537.36',
+    });
+    Object.defineProperty(document, 'referrer', {
+      configurable: true,
+      get: () => '',
+    });
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn(() => ({
+        matches: false,
+        media: '',
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    });
+
+    try {
+      const context = {
+        pendingAndroidWidgetBootstrap: signal<unknown>(null),
+      } as unknown as WorkspaceShellComponent;
+
+      const result = (WorkspaceShellComponent.prototype as unknown as {
+        isTrustedAndroidWidgetBootstrapSurface: (
+          this: WorkspaceShellComponent,
+          bootstrapRequest: {
+            callbackUri: string;
+            installationId: string;
+            deviceId: string;
+            deviceSecret: string;
+            instanceId: string;
+            hostInstanceId: string;
+            sizeBucket: string;
+            bootstrapNonce: string;
+            pendingPushToken: string | null;
+            clientVersion: string | null;
+          },
+          routeUrl: string | null,
+        ) => boolean;
+      }).isTrustedAndroidWidgetBootstrapSurface.call(
+        context,
+        {
+          callbackUri: 'nanoflow-widget://bootstrap',
+          clientVersion: 'android-widget/0.1.1',
+          installationId: '11111111-1111-4111-8111-111111111111',
+          deviceId: '22222222-2222-4222-8222-222222222222',
+          deviceSecret: 'super-secret-device-key',
+          instanceId: '33333333-3333-4333-8333-333333333333',
+          hostInstanceId: '42',
+          sizeBucket: '4x2',
+          bootstrapNonce: '44444444-4444-4444-8444-444444444444',
+          pendingPushToken: null,
+        },
+        '/projects?entry=twa&intent=open-workspace&widgetBootstrap=1'
+        + '&widgetBootstrapReturnUri=nanoflow-widget%3A%2F%2Fbootstrap'
+        + '&widgetInstallationId=11111111-1111-4111-8111-111111111111'
+        + '&widgetDeviceId=22222222-2222-4222-8222-222222222222'
+        + '&widgetDeviceSecret=super-secret-device-key'
+        + '&widgetClientVersion=android-widget%2F0.1.1'
+        + '&widgetInstanceId=33333333-3333-4333-8333-333333333333'
+        + '&widgetHostInstanceId=42'
+        + '&widgetSizeBucket=4x2'
+        + '&widgetBootstrapNonce=44444444-4444-4444-8444-444444444444',
+      );
+
+      expect(result).toBe(false);
+    } finally {
+      if (originalReferrer) {
+        Object.defineProperty(document, 'referrer', originalReferrer);
+      }
+      Object.defineProperty(window, 'matchMedia', {
+        configurable: true,
+        value: originalMatchMedia,
+      });
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('应捕获有效的 Android bootstrap 路由并清掉敏感 query', () => {
     const pendingAndroidWidgetBootstrap = signal<unknown>(null);
     const deferredStartupEntryIntent = signal<unknown>(null);
@@ -166,7 +330,7 @@ describe('WorkspaceShellComponent Android widget bootstrap', () => {
     expect(consumeStartupEntryIntent).toHaveBeenCalledTimes(1);
   });
 
-  it('应忽略非 TWA 环境中的 Android bootstrap 请求', () => {
+  it('应在不可信环境中忽略 Android bootstrap 请求', () => {
     const deferredStartupEntryIntent = signal<unknown>(null);
     const consumeStartupEntryIntent = vi.fn();
     const persistPendingAndroidWidgetBootstrapToStorage = vi.fn();
@@ -205,7 +369,7 @@ describe('WorkspaceShellComponent Android widget bootstrap', () => {
       intent: 'open-workspace',
       rawIntent: 'open-workspace',
     });
-    expect(warn).toHaveBeenCalledWith('忽略非 TWA 环境中的 Android widget bootstrap 请求');
+    expect(warn).toHaveBeenCalledWith('忽略不可信环境中的 Android widget bootstrap 请求');
     expect(consumeStartupEntryIntent).toHaveBeenCalledTimes(1);
   });
 

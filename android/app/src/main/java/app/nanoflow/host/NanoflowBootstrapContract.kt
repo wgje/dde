@@ -39,6 +39,7 @@ data class WidgetBootstrapPayload(
 
 object NanoflowBootstrapContract {
   private const val DEFAULT_HASH_ROUTE = "/projects"
+  private const val PARAM_TOP_LEVEL_CACHE_BUST = "ts"
   const val CALLBACK_SCHEME = "nanoflow-widget"
   const val CALLBACK_HOST = "bootstrap"
   const val PARAM_WIDGET_BOOTSTRAP = "widgetBootstrap"
@@ -88,7 +89,11 @@ object NanoflowBootstrapContract {
       "$key=${Uri.encode(value)}"
     }
 
-    return Uri.parse("${BuildConfig.NANOFLOW_WEB_ORIGIN}/#${resolveHashRoutePath(routeUrl)}?$query")
+    return Uri.parse(BuildConfig.NANOFLOW_WEB_ORIGIN)
+      .buildUpon()
+      .appendQueryParameter(PARAM_TOP_LEVEL_CACHE_BUST, System.currentTimeMillis().toString())
+      .encodedFragment("${resolveHashRoutePath(routeUrl)}?$query")
+      .build()
   }
 
   private fun resolveHashRoutePath(routeUrl: String?): String {

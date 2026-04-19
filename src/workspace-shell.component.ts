@@ -1381,6 +1381,14 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
       return true;
     }
 
+    if (
+      runtimePlatform.isAndroid
+      && resolveStartupEntryIntent(routeUrl)?.entry === 'twa'
+      && hasAndroidWidgetBootstrapFlag(routeUrl)
+    ) {
+      return true;
+    }
+
     const pendingBootstrap = this.pendingAndroidWidgetBootstrap();
     if (!pendingBootstrap) {
       return false;
@@ -1501,7 +1509,7 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
         const startupEntryIntent = resolveStartupEntryIntent(routeUrl);
         this.deferredStartupEntryIntent.set(startupEntryIntent);
         this.persistDeferredStartupEntryIntentToStorage(startupEntryIntent);
-        this.logger.warn('忽略非 TWA 环境中的 Android widget bootstrap 请求');
+        this.logger.warn('忽略不可信环境中的 Android widget bootstrap 请求');
         this.consumeStartupEntryIntent();
         return true;
       }
