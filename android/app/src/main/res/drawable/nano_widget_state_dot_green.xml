@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 2026-04-19：左上状态徽章小绿点（Focus / 健康态） -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="oval">
+    <solid android:color="#4A9A2E" />
+    <size
+        android:width="10dp"
+        android:height="10dp" />
+</shape>

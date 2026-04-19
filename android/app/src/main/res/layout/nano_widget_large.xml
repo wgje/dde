@@ -16,15 +16,19 @@
             android:layout_height="wrap_content"
             android:gravity="end|center_vertical"
             android:orientation="horizontal">
+            <!-- 2026-04-19：去掉 chip_surface 边框，改为圆点 + 文字；drawableStart 由 renderer 根据 tone 动态换色 -->
             <TextView
                 android:id="@+id/nano_widget_sync_badge"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:background="@drawable/nano_widget_chip_surface"
-                android:paddingStart="10dp"
-                android:paddingEnd="10dp"
-                android:paddingTop="6dp"
-                android:paddingBottom="6dp"
+                android:background="@null"
+                android:drawableStart="@drawable/nano_widget_state_dot_green"
+                android:drawablePadding="6dp"
+                android:gravity="center_vertical"
+                android:paddingStart="2dp"
+                android:paddingEnd="2dp"
+                android:paddingTop="2dp"
+                android:paddingBottom="2dp"
                 android:text=""
                 android:textColor="#4A7A38"
                 android:textSize="11sp"
@@ -38,7 +42,7 @@
             <GridView
                 android:id="@+id/nano_widget_tab_list"
                 android:layout_width="82dp"
-                android:layout_height="48dp"
+                android:layout_height="60dp"
                 android:columnWidth="82dp"
                 android:fadingEdge="none"
                 android:horizontalSpacing="4dp"
@@ -109,7 +113,7 @@
             <GridView
                 android:id="@+id/nano_widget_refresh_list"
                 android:layout_width="82dp"
-                android:layout_height="48dp"
+                android:layout_height="60dp"
                 android:columnWidth="82dp"
                 android:fadingEdge="none"
                 android:horizontalSpacing="0dp"

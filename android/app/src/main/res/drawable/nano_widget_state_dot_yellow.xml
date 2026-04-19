@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 2026-04-19：左上状态徽章小黄点（Gate / 待处理态） -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="oval">
+    <solid android:color="#E6B800" />
+    <size
+        android:width="10dp"
+        android:height="10dp" />
+</shape>

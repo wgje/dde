@@ -212,6 +212,18 @@ object NanoflowWidgetRenderer {
       return
     }
     views.setTextViewText(R.id.nano_widget_sync_badge, label)
+    // 2026-04-19：根据当前 tone 动态切换左侧状态圆点颜色（绿=Focus、黄=Gate、红=Setup/Auth/Untrusted）。
+    // 仅在 API 23+ 上动态切换；低版本继续用 XML 默认的绿点占位。
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+      val dotRes = when (model.tone) {
+        WidgetVisualTone.FOCUS -> R.drawable.nano_widget_state_dot_green
+        WidgetVisualTone.GATE -> R.drawable.nano_widget_state_dot_yellow
+        WidgetVisualTone.SETUP,
+        WidgetVisualTone.AUTH,
+        WidgetVisualTone.UNTRUSTED -> R.drawable.nano_widget_state_dot_red
+      }
+      views.setTextViewCompoundDrawablesRelative(R.id.nano_widget_sync_badge, dotRes, 0, 0, 0)
+    }
     views.setViewVisibility(R.id.nano_widget_sync_badge, View.VISIBLE)
   }
 

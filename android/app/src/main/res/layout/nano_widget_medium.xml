@@ -18,10 +18,15 @@
             android:gravity="end|center_vertical"
             android:orientation="horizontal">
 
+            <!-- 2026-04-19：去掉边框背景，保留圆点 + 文字。drawableStart 由 renderer 运行时选择颜色 -->
             <TextView
                 android:id="@+id/nano_widget_sync_badge"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
+                android:background="@null"
+                android:drawableStart="@drawable/nano_widget_state_dot_green"
+                android:drawablePadding="6dp"
+                android:gravity="center_vertical"
                 android:paddingStart="0dp"
                 android:paddingEnd="0dp"
                 android:paddingTop="2dp"
@@ -37,11 +42,11 @@
                 android:layout_weight="1"
                 android:text="" />
 
-            <!-- 2026-04-19：禁用 tab_list 上下滑动视觉反馈（scrollbars/overScroll/edge fading 全关） -->
+            <!-- 2026-04-19：禁用 tab_list 上下滑动（scrollbars/overScroll/edge fading 全关 + 容器高度>=item height 保证 GridView 不触发垂直滚动） -->
             <GridView
                 android:id="@+id/nano_widget_tab_list"
                 android:layout_width="208dp"
-                android:layout_height="42dp"
+                android:layout_height="56dp"
                 android:columnWidth="68dp"
                 android:fadingEdge="none"
                 android:horizontalSpacing="2dp"
@@ -80,7 +85,7 @@
             <GridView
                 android:id="@+id/nano_widget_refresh_list"
                 android:layout_width="86dp"
-                android:layout_height="44dp"
+                android:layout_height="56dp"
                 android:columnWidth="86dp"
                 android:fadingEdge="none"
                 android:horizontalSpacing="0dp"
