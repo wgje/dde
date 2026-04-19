@@ -222,7 +222,7 @@ object NanoflowWidgetRenderer {
         WidgetVisualTone.AUTH,
         WidgetVisualTone.UNTRUSTED -> R.drawable.nano_widget_state_dot_red
       }
-      views.setTextViewCompoundDrawablesRelative(R.id.nano_widget_sync_badge, dotRes, 0, 0, 0)
+      views.setTextViewCompoundDrawablesRelative(R.id.nano_widget_sync_badge, 0, 0, dotRes, 0)
     }
     views.setViewVisibility(R.id.nano_widget_sync_badge, View.VISIBLE)
   }
