@@ -8,7 +8,7 @@
       之间露出白帧。
     -->
     <style name="Theme.NanoFlow.Twa" parent="@android:style/Theme.DeviceDefault.Light.NoActionBar">
-        <item name="android:windowBackground">@color/nanoflow_twa_launch_background</item>
+        <item name="android:windowBackground">@drawable/nanoflow_twa_post_splash</item>
         <item name="android:colorBackground">@color/nanoflow_twa_launch_background</item>
         <item name="android:statusBarColor">@color/nanoflow_twa_launch_background</item>
         <item name="android:navigationBarColor">@color/nanoflow_twa_launch_background</item>

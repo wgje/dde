@@ -37,13 +37,18 @@
                 android:layout_weight="1"
                 android:text="" />
 
+            <!-- 2026-04-19：禁用 tab_list 上下滑动视觉反馈（scrollbars/overScroll/edge fading 全关） -->
             <GridView
                 android:id="@+id/nano_widget_tab_list"
                 android:layout_width="208dp"
                 android:layout_height="42dp"
                 android:columnWidth="68dp"
+                android:fadingEdge="none"
                 android:horizontalSpacing="2dp"
                 android:numColumns="1"
+                android:overScrollMode="never"
+                android:requiresFadingEdge="none"
+                android:scrollbars="none"
                 android:stretchMode="none"
                 android:verticalSpacing="0dp" />
         </LinearLayout>

@@ -34,15 +34,20 @@
                 android:layout_height="1dp"
                 android:layout_weight="1"
                 android:text="" />
+            <!-- 2026-04-19：禁用 tab_list 上下滑动视觉反馈（scrollbars/overScroll/edge fading 全关） -->
             <GridView
                 android:id="@+id/nano_widget_tab_list"
                 android:layout_width="82dp"
                 android:layout_height="48dp"
-                android:horizontalSpacing="4dp"
-                android:verticalSpacing="0dp"
-                android:numColumns="1"
                 android:columnWidth="82dp"
-                android:stretchMode="none" />
+                android:fadingEdge="none"
+                android:horizontalSpacing="4dp"
+                android:numColumns="1"
+                android:overScrollMode="never"
+                android:requiresFadingEdge="none"
+                android:scrollbars="none"
+                android:stretchMode="none"
+                android:verticalSpacing="0dp" />
         </LinearLayout>
 
         <!-- 中央：标题 + 副标题 -->
