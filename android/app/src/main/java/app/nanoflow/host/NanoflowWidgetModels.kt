@@ -139,4 +139,21 @@ data class WidgetRenderModel(
   val showSetup: Boolean,
   val showAuthRequired: Boolean,
   val showUntrusted: Boolean,
+  /** 主任务 + 副任务 的聚合列表（主任务始终排在首位）。空列表表示无任务。 */
+  val tasks: List<WidgetTaskCard> = emptyList(),
+  /** 当前 widget 实例选中的 tab 下标，范围 [0, tasks.lastIndex]。 */
+  val selectedTaskIndex: Int = 0,
+  /** 紧凑同步徽章文案（如「刚刚」/「3 分前」）；null 表示不展示。 */
+  val syncBadgeLabel: String? = null,
+)
+
+/**
+ * 单条停泊任务在小组件 UI 中的展示形态。
+ * 主任务对应 focus.* 字段，副任务对应 dock.items。
+ */
+data class WidgetTaskCard(
+  val taskId: String?,
+  val title: String,
+  val projectTitle: String?,
+  val isMain: Boolean,
 )

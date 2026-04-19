@@ -633,11 +633,19 @@ class NanoflowWidgetRepository(private val context: Context) {
         showSetup = false,
         showAuthRequired = false,
         showUntrusted = false,
+        syncBadgeLabel = buildCompactSyncBadge(summary, appWidgetId),
       )
     }
 
     val focusTitle = summary.focus.title?.takeIf { summary.focus.valid }
     val canOpenFocusTask = hasFocusState && summary.focus.valid
+
+    // 构建主任务 + 副任务卡片列表，主任务始终置顶；privacy 模式下隐藏标题细节。
+    val taskCards = buildTaskCards(summary, hasFocusState, privacyMode, focusTitle, canOpenFocusTask)
+    val selectedTaskIndex = if (taskCards.isEmpty()) 0
+    else store.readSelectedTaskIndex(appWidgetId).coerceIn(0, taskCards.lastIndex)
+    val selectedCard = taskCards.getOrNull(selectedTaskIndex)
+    val syncBadgeLabel = buildCompactSyncBadge(summary, appWidgetId)
 
     return WidgetRenderModel(
       modeLabel = context.getString(
@@ -646,15 +654,19 @@ class NanoflowWidgetRepository(private val context: Context) {
       ),
       statusBadge = statusBadge,
       title = when {
+        selectedCard != null -> selectedCard.title
         hasFocusState && privacyMode -> context.getString(R.string.nanoflow_widget_privacy_focus_title)
         hasFocusState && !focusTitle.isNullOrBlank() -> focusTitle
         hasFocusState && canOpenFocusTask -> context.getString(R.string.nanoflow_widget_focus_ready_title)
         hasFocusState -> context.getString(R.string.nanoflow_widget_unknown_task)
         else -> context.getString(R.string.nanoflow_widget_gate_empty_title)
       },
-      supportingLine = if (hasFocusState) {
-        if (privacyMode || compact) null else buildFocusSupportingLine(summary)
-      } else context.getString(R.string.nanoflow_widget_gate_empty_detail),
+      supportingLine = when {
+        selectedCard != null && !privacyMode -> selectedCard.projectTitle
+        hasFocusState && (privacyMode || compact) -> null
+        hasFocusState -> buildFocusSupportingLine(summary)
+        else -> context.getString(R.string.nanoflow_widget_gate_empty_detail)
+      },
       metricsLine = if (showCounts) metricsLine else null,
       statusLine = statusLine,
       primaryActionLabel = context.getString(
@@ -665,7 +677,7 @@ class NanoflowWidgetRepository(private val context: Context) {
       dockCount = summary.dock.count,
       blackBoxCount = summary.blackBox.pendingCount,
       showStatCards = false,
-      isGateMode = false,
+      isGateMode = !hasFocusState,
       showGatePager = false,
       gatePageIndicator = null,
       canPageBackward = false,
@@ -675,7 +687,79 @@ class NanoflowWidgetRepository(private val context: Context) {
       showSetup = false,
       showAuthRequired = false,
       showUntrusted = false,
+      tasks = taskCards,
+      selectedTaskIndex = selectedTaskIndex,
+      syncBadgeLabel = syncBadgeLabel,
     )
+  }
+
+  /**
+   * 聚合主任务（来自 focus.*）与副任务（来自 dock.items），主任务始终在索引 0。
+   * 隐私模式下标题用占位符避免信息泄露。
+   */
+  private fun buildTaskCards(
+    summary: WidgetSummaryResponse,
+    hasFocusState: Boolean,
+    privacyMode: Boolean,
+    focusTitle: String?,
+    canOpenFocusTask: Boolean,
+  ): List<WidgetTaskCard> {
+    if (!hasFocusState) return emptyList()
+    val cards = mutableListOf<WidgetTaskCard>()
+    val mainTitle = when {
+      privacyMode -> context.getString(R.string.nanoflow_widget_privacy_focus_title)
+      !focusTitle.isNullOrBlank() -> focusTitle
+      canOpenFocusTask -> context.getString(R.string.nanoflow_widget_focus_ready_title)
+      else -> context.getString(R.string.nanoflow_widget_unknown_task)
+    }
+    cards.add(
+      WidgetTaskCard(
+        taskId = summary.focus.taskId,
+        title = mainTitle,
+        projectTitle = if (privacyMode) null else summary.focus.projectTitle,
+        isMain = true,
+      )
+    )
+    val mainTaskId = summary.focus.taskId
+    summary.dock.items.forEach { item ->
+      // 之前用 `if (!item.valid) return@forEach` 强过滤会导致后端因任务行未在 taskMap 命中
+      // （RLS/子查询时序）返回 valid=false 的有效 dock 任务被全部隐藏，用户实际上有 6 个备选
+      // 任务却只看到「主」一个 chip。这里改为：只要 taskId 非空且有标题就纳入展示，valid=false
+      // 仅作为后端可能存在数据漂移的弱信号，不应阻断 UI。
+      val itemTaskId = item.taskId
+      if (itemTaskId.isNullOrBlank()) return@forEach
+      if (mainTaskId != null && itemTaskId == mainTaskId) return@forEach
+      cards.add(
+        WidgetTaskCard(
+          taskId = itemTaskId,
+          title = if (privacyMode) context.getString(R.string.nanoflow_widget_privacy_focus_title)
+          else item.title?.takeIf { it.isNotBlank() } ?: context.getString(R.string.nanoflow_widget_unknown_task),
+          projectTitle = if (privacyMode) null else item.projectTitle,
+          isMain = false,
+        )
+      )
+    }
+    return cards
+  }
+
+  /** 紧凑版同步徽章：「刚刚」「N 分前」「较旧」。 */
+  private suspend fun buildCompactSyncBadge(summary: WidgetSummaryResponse, appWidgetId: Int): String? {
+    // 优先使用本地 wall-clock fetch 时间：这样即便服务端数据未变（cloudUpdatedAt 不变），
+    // 用户点了刷新仍然能看到时间归零为「刚刚」，符合"刷新生效"的直觉。
+    val localFetchedAtMs = runCatching { store.readSummaryUpdatedAt(appWidgetId) }.getOrNull()
+    val instant = if (localFetchedAtMs != null && localFetchedAtMs > 0L) {
+      Instant.ofEpochMilli(localFetchedAtMs)
+    } else {
+      val cloudUpdatedAt = summary.cloudUpdatedAt?.takeIf { it.isNotBlank() } ?: return null
+      runCatching { Instant.parse(cloudUpdatedAt) }.getOrNull() ?: return null
+    }
+    val minutes = Duration.between(instant, Instant.now()).toMinutes().coerceAtLeast(0)
+    return when {
+      minutes <= 1 -> "刚刚"
+      minutes < 60 -> "${minutes} 分前"
+      minutes < 1440 -> "${minutes / 60} 小时前"
+      else -> "较旧"
+    }
   }
 
   private suspend fun resolveSizeBucket(appWidgetId: Int): String {

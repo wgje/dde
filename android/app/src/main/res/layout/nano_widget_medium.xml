@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/nano_widget_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/nano_widget_root_focus"
+    android:clipToOutline="true"
+    android:padding="14dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="end|center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
+                android:id="@+id/nano_widget_sync_badge"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:paddingStart="0dp"
+                android:paddingEnd="0dp"
+                android:paddingTop="2dp"
+                android:paddingBottom="2dp"
+                android:text=""
+                android:textColor="#4A7A38"
+                android:textSize="10sp"
+                android:visibility="gone" />
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="1dp"
+                android:layout_weight="1"
+                android:text="" />
+
+            <GridView
+                android:id="@+id/nano_widget_tab_list"
+                android:layout_width="208dp"
+                android:layout_height="42dp"
+                android:columnWidth="68dp"
+                android:horizontalSpacing="2dp"
+                android:numColumns="1"
+                android:stretchMode="none"
+                android:verticalSpacing="0dp" />
+        </LinearLayout>
+
+        <ListView
+            android:id="@+id/nano_widget_content_list"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:divider="@android:color/transparent"
+            android:dividerHeight="0dp"
+            android:paddingTop="10dp"
+            android:paddingBottom="10dp"
+            android:scrollbars="none" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="end|center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="1dp"
+                android:layout_weight="1"
+                android:text="" />
+
+            <GridView
+                android:id="@+id/nano_widget_refresh_list"
+                android:layout_width="86dp"
+                android:layout_height="44dp"
+                android:columnWidth="86dp"
+                android:horizontalSpacing="0dp"
+                android:numColumns="1"
+                android:stretchMode="none"
+                android:verticalSpacing="0dp" />
+        </LinearLayout>
+    </LinearLayout>
+</FrameLayout>

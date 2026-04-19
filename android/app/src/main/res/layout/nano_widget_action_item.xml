@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  单个 action chip 条目：tab / refresh / gate_prev / gate_next / gate_label 共用。
+  Factory 运行时填充 text / 背景 / 文字颜色，并挂载 fillInIntent 决定点击行为。
+-->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+  android:id="@+id/nano_widget_action_item_root"
+  android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+  android:paddingStart="2dp"
+  android:paddingEnd="2dp"
+    android:paddingTop="2dp"
+    android:paddingBottom="2dp">
+
+    <TextView
+        android:id="@+id/nano_widget_action_chip"
+    android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="@drawable/nano_widget_chip_surface"
+        android:gravity="center"
+        android:singleLine="true"
+        android:ellipsize="end"
+        android:maxLines="1"
+      android:minHeight="36dp"
+      android:paddingStart="8dp"
+      android:paddingEnd="8dp"
+    android:paddingTop="8dp"
+    android:paddingBottom="8dp"
+        android:text=""
+        android:textColor="#4A7A38"
+      android:textSize="11sp" />
+</FrameLayout>

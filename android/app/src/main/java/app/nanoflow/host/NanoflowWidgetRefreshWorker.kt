@@ -1,7 +1,6 @@
 package app.nanoflow.host
 
 import android.content.Context
-import androidx.glance.appwidget.updateAll
 import androidx.work.CoroutineWorker
 import androidx.work.Data
 import androidx.work.ExistingWorkPolicy
@@ -32,7 +31,8 @@ class NanoflowWidgetRefreshWorker(
       )
       Result.retry()
     }.also {
-      NanoflowGlanceWidget().updateAll(applicationContext)
+      // 通知所有已安装 widget 重新渲染（原生 RemoteViews 路径）。
+      NanoflowWidgetReceiver.refreshAllWidgets(applicationContext)
     }
   }
 

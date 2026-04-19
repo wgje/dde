@@ -34,7 +34,7 @@ val supabaseUrl = propertyOrEnv(
 val androidVersionName = propertyOrEnv(
   name = "nanoflow.android.versionName",
   envName = "ANDROID_WIDGET_VERSION_NAME",
-  defaultValue = "0.1.0",
+  defaultValue = "0.1.1",
 )
 
 val widgetClientVersion = propertyOrEnv(
@@ -53,7 +53,7 @@ android {
     applicationId = applicationIdValue
     minSdk = 28
     targetSdk = 35
-    versionCode = 1
+    versionCode = 2
     versionName = androidVersionName
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     manifestPlaceholders["nanoflowDefaultUrl"] = "$webOrigin/#/projects?entry=twa&intent=open-workspace"
