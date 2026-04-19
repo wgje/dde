@@ -8,6 +8,7 @@
     <div slot="top" class="h-full">
       <app-mobile-todo-drawer
         [isDropTargetActive]="dragDrop.isDropTargetActive()"
+        [draggingTaskId]="touch.draggingId()"
         (centerOnNode)="onMobileDrawerCenterOnNode($event)"
         (createUnassigned)="createUnassigned()"
         (taskClick)="onUnassignedTaskClick($event)"
@@ -16,6 +17,7 @@
         (taskTouchStart)="onUnassignedTouchStart($event.event, $event.task)"
         (taskTouchMove)="onUnassignedTouchMove($event.event)"
         (taskTouchEnd)="onUnassignedTouchEnd($event.event)"
+        (taskTouchCancel)="onUnassignedTouchCancel($event.event)"
         (swipeToSwitch)="onDrawerSwipeToSwitch($event)">
       </app-mobile-todo-drawer>
     </div>

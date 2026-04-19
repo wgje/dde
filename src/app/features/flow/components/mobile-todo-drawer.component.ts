@@ -5,7 +5,7 @@
  * 从 FlowPaletteComponent 中提取移动端专用内容
  */
 
-import { Component, ChangeDetectionStrategy, inject, signal, input, output, OnDestroy, effect } from '@angular/core';
+import { Component, ChangeDetectionStrategy, inject, signal, input, output, effect, OnDestroy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { Task } from '../../../../models';
@@ -104,11 +104,12 @@ import { writeTaskDragPayload } from '../../../../utils/task-drag-payload';
                     (touchstart)="onTouchStart($event, task)"
                     (touchmove)="onTouchMove($event)"
                     (touchend)="onTouchEnd($event)"
+                    (touchcancel)="onTouchCancel($event)"
                     (click)="taskClick.emit(task)"
                     class="w-full px-2 py-1.5 bg-white/60 dark:bg-stone-800/80 border border-stone-200/50 dark:border-stone-600/50 rounded-md text-[11px] font-medium hover:border-teal-300 dark:hover:border-teal-600 hover:text-teal-700 dark:hover:text-teal-300 cursor-grab active:cursor-grabbing shadow-sm transition-all active:scale-95 text-stone-600 dark:text-stone-300 select-none flex items-center gap-2"
-                    [class.bg-teal-100]="draggingId() === task.id"
-                    [class.dark:bg-teal-800]="draggingId() === task.id"
-                    [class.border-teal-400]="draggingId() === task.id">
+                    [class.bg-teal-100]="draggingTaskId() === task.id"
+                    [class.dark:bg-teal-800]="draggingTaskId() === task.id"
+                    [class.border-teal-400]="draggingTaskId() === task.id">
                     <span class="w-1 h-1 rounded-full bg-teal-300 dark:bg-teal-600 shrink-0"></span>
                     <span class="truncate">{{ task.title }}</span>
                   </div>
@@ -159,9 +160,11 @@ import { writeTaskDragPayload } from '../../../../utils/task-drag-payload';
 })
 export class MobileTodoDrawerComponent implements OnDestroy {
   readonly projectState = inject(ProjectStateService);
+  private readonly boundGlobalTouchFinish = this.handleGlobalTouchFinish.bind(this);
   
   // 输入
   readonly isDropTargetActive = input<boolean>(false);
+  readonly draggingTaskId = input<string | null>(null);
   
   // 输出事件
   readonly centerOnNode = output<string>();
@@ -172,13 +175,13 @@ export class MobileTodoDrawerComponent implements OnDestroy {
   readonly taskTouchStart = output<{ event: TouchEvent; task: Task }>();
   readonly taskTouchMove = output<{ event: TouchEvent }>();
   readonly taskTouchEnd = output<{ event: TouchEvent }>();
+  readonly taskTouchCancel = output<{ event: TouchEvent }>();
   /** 滑动切换视图事件 */
   readonly swipeToSwitch = output<SwipeDirection>();
   
   // 内部状态
   readonly isUnfinishedOpen = signal(true);
   readonly isUnassignedOpen = signal(true);
-  readonly draggingId = signal<string | null>(null);
 
   constructor() {
     // 没有待办/待分配任务时自动折叠，减少移动端空白区域
@@ -192,31 +195,15 @@ export class MobileTodoDrawerComponent implements OnDestroy {
         this.isUnassignedOpen.set(false);
       }
     });
+
+    document.addEventListener('touchend', this.boundGlobalTouchFinish, { capture: true, passive: false });
+    document.addEventListener('touchcancel', this.boundGlobalTouchFinish, { capture: true, passive: false });
   }
-  
-  // 触摸拖动状态
-  private touchState = {
-    task: null as Task | null,
-    startX: 0,
-    startY: 0,
-    isDragging: false,
-    longPressTimer: null as ReturnType<typeof setTimeout> | null,
-    ghost: null as HTMLElement | null
-  };
   
   // 滑动手势状态（用于视图切换）
   private swipeState: SwipeGestureState = { startX: 0, startY: 0, startTime: 0, isActive: false };
-  
-  ngOnDestroy(): void {
-    // 清理长按定时器
-    if (this.touchState.longPressTimer) {
-      clearTimeout(this.touchState.longPressTimer);
-    }
-    // 清理幽灵元素
-    if (this.touchState.ghost) {
-      this.touchState.ghost.remove();
-    }
-  }
+  /** 同一次触摸若起点来自可拖拽卡片，则整次手势都禁止触发抽屉 swipe 切换。 */
+  private suppressSwipeForCurrentTouch = false;
   
   // 拖动事件
   onDragStart(event: DragEvent, task: Task): void {
@@ -248,88 +235,31 @@ export class MobileTodoDrawerComponent implements OnDestroy {
   
   // 触摸事件
   onTouchStart(event: TouchEvent, task: Task): void {
-    if (event.touches.length !== 1) return;
-    
-    const touch = event.touches[0];
-    this.touchState = {
-      task,
-      startX: touch.clientX,
-      startY: touch.clientY,
-      isDragging: false,
-      longPressTimer: null,
-      ghost: null
-    };
-    
-    // 长按 250ms 后开始拖拽
-    this.touchState.longPressTimer = setTimeout(() => {
-      this.touchState.isDragging = true;
-      this.draggingId.set(task.id);
-      this.createGhost(task, touch.clientX, touch.clientY);
-      if (navigator.vibrate) navigator.vibrate(50);
-    }, 250);
-    
+    this.suppressSwipeForCurrentTouch = true;
     this.taskTouchStart.emit({ event, task });
   }
   
   onTouchMove(event: TouchEvent): void {
-    if (!this.touchState.task || event.touches.length !== 1) return;
-    
-    const touch = event.touches[0];
-    const deltaX = Math.abs(touch.clientX - this.touchState.startX);
-    const deltaY = Math.abs(touch.clientY - this.touchState.startY);
-    
-    // 如果移动超过阈值但还没开始拖拽，取消长按
-    if (!this.touchState.isDragging && (deltaX > 15 || deltaY > 15)) {
-      if (this.touchState.longPressTimer) {
-        clearTimeout(this.touchState.longPressTimer);
-        this.touchState.longPressTimer = null;
-      }
-      return;
-    }
-    
-    if (this.touchState.isDragging) {
-      // 检查事件是否可取消（避免滚动进行中的 Intervention 警告）
-      if (event.cancelable) {
-        event.preventDefault();
-      }
-      event.stopPropagation();
-      
-      // 更新幽灵元素位置
-      if (this.touchState.ghost) {
-        this.touchState.ghost.style.left = `${touch.clientX - 40}px`;
-        this.touchState.ghost.style.top = `${touch.clientY - 20}px`;
-      }
-    }
-    
     this.taskTouchMove.emit({ event });
   }
   
   onTouchEnd(event: TouchEvent): void {
-    if (this.touchState.longPressTimer) {
-      clearTimeout(this.touchState.longPressTimer);
-    }
-    
-    // 移除幽灵元素
-    if (this.touchState.ghost) {
-      this.touchState.ghost.remove();
-    }
-    
-    this.draggingId.set(null);
     this.taskTouchEnd.emit({ event });
-    
-    this.touchState = {
-      task: null, startX: 0, startY: 0, isDragging: false, longPressTimer: null, ghost: null
-    };
+    queueMicrotask(() => {
+      this.suppressSwipeForCurrentTouch = false;
+    });
   }
-  
-  private createGhost(task: Task, x: number, y: number): void {
-    const ghost = document.createElement('div');
-    ghost.className = 'fixed z-[9999] px-3 py-2 bg-teal-500/90 text-white rounded-lg shadow-xl text-xs font-medium pointer-events-none whitespace-nowrap';
-    ghost.textContent = task.title || '未命名';
-    ghost.style.left = `${x - 40}px`;
-    ghost.style.top = `${y - 20}px`;
-    document.body.appendChild(ghost);
-    this.touchState.ghost = ghost;
+
+  onTouchCancel(event: TouchEvent): void {
+    this.taskTouchCancel.emit({ event });
+    queueMicrotask(() => {
+      this.suppressSwipeForCurrentTouch = false;
+    });
+  }
+
+  ngOnDestroy(): void {
+    document.removeEventListener('touchend', this.boundGlobalTouchFinish, { capture: true } as EventListenerOptions);
+    document.removeEventListener('touchcancel', this.boundGlobalTouchFinish, { capture: true } as EventListenerOptions);
   }
   
   // ===============================================
@@ -342,7 +272,7 @@ export class MobileTodoDrawerComponent implements OnDestroy {
    */
   onSwipeTouchStart(event: TouchEvent): void {
     // 如果正在拖拽任务，不处理滑动
-    if (this.touchState.isDragging) return;
+    if (this.draggingTaskId() || this.suppressSwipeForCurrentTouch) return;
     if (event.touches.length !== 1) return;
     
     this.swipeState = startSwipeTracking(event.touches[0]);
@@ -354,7 +284,7 @@ export class MobileTodoDrawerComponent implements OnDestroy {
    */
   onSwipeTouchEnd(event: TouchEvent): void {
     // 如果正在拖拽任务，不处理滑动
-    if (this.touchState.isDragging || !this.swipeState.isActive) return;
+    if (this.draggingTaskId() || this.suppressSwipeForCurrentTouch || !this.swipeState.isActive) return;
     
     const touch = event.changedTouches[0];
     const direction = detectHorizontalSwipe(
@@ -370,5 +300,11 @@ export class MobileTodoDrawerComponent implements OnDestroy {
     }
     
     this.swipeState = { startX: 0, startY: 0, startTime: 0, isActive: false };
+  }
+
+  private handleGlobalTouchFinish(): void {
+    queueMicrotask(() => {
+      this.suppressSwipeForCurrentTouch = false;
+    });
   }
 }

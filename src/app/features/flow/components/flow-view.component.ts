@@ -11,7 +11,7 @@ import { FlowLogicExportService } from '../services/flow-logic-export.service';
 import { FlowZoomService } from '../services/flow-zoom.service';
 import { FlowSelectionService } from '../services/flow-selection.service';
 import { FlowLayoutService } from '../services/flow-layout.service';
-import { FlowDragDropService } from '../services/flow-drag-drop.service';
+import { FlowDragDropService, InsertPositionInfo } from '../services/flow-drag-drop.service';
 import { FlowTouchService } from '../services/flow-touch.service';
 import { FlowLinkService } from '../services/flow-link.service';
 import { FlowTaskOperationsService } from '../services/flow-task-operations.service';
@@ -190,6 +190,11 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   
   /** 待清理的定时器 */
   private pendingTimers: ReturnType<typeof setTimeout>[] = [];
+  /** 移动端待分配拖拽的 document 级兜底监听。 */
+  private readonly boundGlobalTouchEnd = this.handleGlobalTouchEnd.bind(this);
+  private readonly boundGlobalTouchCancel = this.handleGlobalTouchCancel.bind(this);
+  private readonly boundGlobalPointerUp = this.handleGlobalPointerUp.bind(this);
+  private readonly boundGlobalPointerCancel = this.handleGlobalPointerCancel.bind(this);
   
   /** Overview 刷新定时器（防抖） */
   private overviewResizeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -300,8 +305,13 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   // ========== 生命周期 ==========
   
   ngAfterViewInit() {
+    this.touch.activate();
     this.scheduleDiagramInit();
     this.bumpDetailLayoutTick();
+    document.addEventListener('touchend', this.boundGlobalTouchEnd, { capture: true, passive: false });
+    document.addEventListener('touchcancel', this.boundGlobalTouchCancel, { capture: true, passive: false });
+    document.addEventListener('pointerup', this.boundGlobalPointerUp, { capture: true });
+    document.addEventListener('pointercancel', this.boundGlobalPointerCancel, { capture: true });
   }
   
   ngOnDestroy() {
@@ -329,6 +339,11 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
       resources,
       () => this.touch.uninstallDiagramDragGhostListeners(this.diagram.diagramInstance)
     );
+
+    document.removeEventListener('touchend', this.boundGlobalTouchEnd, { capture: true } as EventListenerOptions);
+    document.removeEventListener('touchcancel', this.boundGlobalTouchCancel, { capture: true } as EventListenerOptions);
+    document.removeEventListener('pointerup', this.boundGlobalPointerUp, { capture: true } as EventListenerOptions);
+    document.removeEventListener('pointercancel', this.boundGlobalPointerCancel, { capture: true } as EventListenerOptions);
 
     this.overviewResizeTimer = null;
   }
@@ -625,15 +640,79 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   }
   
   onUnassignedTouchEnd(event: TouchEvent): void {
-    this.touch.endTouch(
-      event,
-      this.diagramDiv()?.nativeElement,
-      this.diagram.diagramInstance,
+    this.finishUnassignedTouchDrop(false, event);
+  }
+
+  onUnassignedTouchCancel(_event: TouchEvent): void {
+    this.cancelUnassignedTouchDrop();
+  }
+
+  private finishUnassignedTouchDrop(useLastKnownPosition: boolean, event?: TouchEvent): void {
+    const diagramElement = this.diagramDiv()?.nativeElement ?? null;
+    const diagramInstance = this.diagram.diagramInstance;
+    const onDrop = (task: Task, insertInfo: InsertPositionInfo, docPoint: go.Point) => {
+      this.dragDrop.processDrop(task, insertInfo, docPoint, UI_CONFIG.MEDIUM_DELAY);
+    };
+
+    if (useLastKnownPosition) {
+      this.touch.endTouchFromLastPosition(diagramElement, diagramInstance, onDrop);
+      return;
+    }
+
+    if (!event) return;
+    this.touch.endTouch(event, diagramElement, diagramInstance, onDrop);
+  }
+
+  private hasPendingUnassignedTouch(): boolean {
+    return this.touch.hasActiveTouchSession || !!this.touch.draggingId();
+  }
+
+  private cancelUnassignedTouchDrop(): void {
+    const diagramElement = this.diagramDiv()?.nativeElement ?? null;
+    const diagramInstance = this.diagram.diagramInstance;
+    this.touch.cancelTouch(
+      diagramElement,
+      diagramInstance,
       (task, insertInfo, docPoint) => {
-        // 使用统一的拖放处理，移动端使用 UI_CONFIG.MEDIUM_DELAY
         this.dragDrop.processDrop(task, insertInfo, docPoint, UI_CONFIG.MEDIUM_DELAY);
-      }
+      },
     );
+  }
+
+  private handleGlobalTouchEnd(event: TouchEvent): void {
+    if (!this.hasPendingUnassignedTouch()) return;
+    this.zone.run(() => this.finishUnassignedTouchDrop(false, event));
+  }
+
+  private handleGlobalTouchCancel(_event: TouchEvent): void {
+    if (!this.hasPendingUnassignedTouch()) return;
+    this.zone.run(() => this.cancelUnassignedTouchDrop());
+  }
+
+  private handleGlobalPointerUp(event: PointerEvent): void {
+    if (event.pointerType !== 'touch') return;
+    if (!event.isPrimary) return;
+    if (!this.hasPendingUnassignedTouch()) return;
+    this.zone.run(() => {
+      const diagramElement = this.diagramDiv()?.nativeElement ?? null;
+      const diagramInstance = this.diagram.diagramInstance;
+      this.touch.endTouchAtPosition(
+        diagramElement,
+        diagramInstance,
+        (task, insertInfo, docPoint) => {
+          this.dragDrop.processDrop(task, insertInfo, docPoint, UI_CONFIG.MEDIUM_DELAY);
+        },
+        event.clientX,
+        event.clientY,
+      );
+    });
+  }
+
+  private handleGlobalPointerCancel(event: PointerEvent): void {
+    if (event.pointerType !== 'touch') return;
+    if (!event.isPrimary) return;
+    if (!this.hasPendingUnassignedTouch()) return;
+    this.zone.run(() => this.cancelUnassignedTouchDrop());
   }
   
   // ========== 待分配任务点击 ==========

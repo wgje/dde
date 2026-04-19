@@ -42,6 +42,11 @@ export class FlowTouchService {
   
   /** 触摸状态 */
   private touchState: UnassignedTouchState = createInitialUnassignedTouchState();
+  /** 最近一次有效触点位置，用于 touchcancel / 丢失 touchend 兜底。 */
+  private lastTouchClientX = 0;
+  private lastTouchClientY = 0;
+  /** 当前被追踪的触点 ID，避免多指场景下用错 changedTouches。 */
+  private activeTouchId: number | null = null;
 
   // ========== 流程图节点拖拽幽灵（移动端） ==========
 
@@ -69,9 +74,13 @@ export class FlowTouchService {
    * @param task 被触摸的任务
    */
   startTouch(event: TouchEvent, task: Task): void {
-    if (event.touches.length !== 1) return;
+    if (event.touches.length !== 1 || this.isDestroyed) return;
+
+    this.cleanup();
     
     const touch = event.touches[0];
+    this.recordTouchActivity(touch);
+    this.activeTouchId = touch.identifier ?? null;
     this.touchState = {
       task,
       startX: touch.clientX,
@@ -80,11 +89,7 @@ export class FlowTouchService {
       longPressTimer: null,
       ghost: null
     };
-    
-    // 【P3-19 修复】先清除可能残留的定时器
-    if (this.touchState.longPressTimer) {
-      clearTimeout(this.touchState.longPressTimer);
-    }
+
     // 长按 250ms 后开始拖拽
     this.touchState.longPressTimer = setTimeout(() => {
       if (this.isDestroyed) return;
@@ -101,9 +106,11 @@ export class FlowTouchService {
    * @returns 是否应该阻止默认行为
    */
   handleTouchMove(event: TouchEvent): boolean {
-    if (!this.touchState.task || event.touches.length !== 1) return false;
+    if (!this.touchState.task || event.touches.length < 1) return false;
     
-    const touch = event.touches[0];
+    const touch = this.findTrackedTouch(event.touches);
+    if (!touch) return false;
+    this.recordTouchActivity(touch);
     const deltaX = Math.abs(touch.clientX - this.touchState.startX);
     const deltaY = Math.abs(touch.clientY - this.touchState.startY);
     
@@ -141,26 +148,89 @@ export class FlowTouchService {
     diagram: go.Diagram | null,
     callback: TouchDropCallback
   ): void {
+    if (event.type === 'touchcancel') {
+      this.cancelTouch(diagramDiv, diagram, callback);
+      return;
+    }
+
+    const touch = this.findTrackedTouch(event.changedTouches);
+    if (!touch && this.activeTouchId !== null) {
+      return;
+    }
+    this.finishTouch(
+      diagramDiv,
+      diagram,
+      callback,
+      touch?.clientX,
+      touch?.clientY,
+    );
+  }
+
+  /** 使用显式坐标完成拖拽收口（pointerup 兜底）。 */
+  endTouchAtPosition(
+    diagramDiv: HTMLElement | null,
+    diagram: go.Diagram | null,
+    callback: TouchDropCallback,
+    clientX: number,
+    clientY: number,
+  ): void {
+    this.finishTouch(diagramDiv, diagram, callback, clientX, clientY);
+  }
+
+  /** 使用最后一次已知坐标完成拖拽收口。 */
+  endTouchFromLastPosition(
+    diagramDiv: HTMLElement | null,
+    diagram: go.Diagram | null,
+    callback: TouchDropCallback,
+  ): void {
+    this.finishTouch(diagramDiv, diagram, callback, this.lastTouchClientX, this.lastTouchClientY);
+  }
+
+  /** cancel 只在刚刚发生过有效拖动时恢复 drop，否则只做清理。 */
+  cancelTouch(
+    diagramDiv: HTMLElement | null,
+    diagram: go.Diagram | null,
+    callback: TouchDropCallback,
+  ): void {
+    void diagramDiv;
+    void diagram;
+    void callback;
+    this.cleanup();
+  }
+
+  get hasActiveTouchSession(): boolean {
+    return !!this.touchState.task;
+  }
+
+  get isTouchDragging(): boolean {
+    return this.touchState.isDragging;
+  }
+
+  private finishTouch(
+    diagramDiv: HTMLElement | null,
+    diagram: go.Diagram | null,
+    callback: TouchDropCallback,
+    clientX?: number,
+    clientY?: number,
+  ): void {
     if (this.touchState.longPressTimer) {
       clearTimeout(this.touchState.longPressTimer);
     }
     
     const { task, isDragging } = this.touchState;
-    
-    // 移除幽灵元素
-    this.removeGhostElement();
+    const resolvedClientX = clientX ?? this.lastTouchClientX;
+    const resolvedClientY = clientY ?? this.lastTouchClientY;
     
     if (task && isDragging && diagram && diagramDiv) {
-      const touch = event.changedTouches[0];
       const diagramRect = diagramDiv.getBoundingClientRect();
       
       // 检查是否在流程图区域内
-      if (touch.clientX >= diagramRect.left && touch.clientX <= diagramRect.right &&
-          touch.clientY >= diagramRect.top && touch.clientY <= diagramRect.bottom) {
+      if (resolvedClientX >= diagramRect.left && resolvedClientX <= diagramRect.right &&
+          resolvedClientY >= diagramRect.top && resolvedClientY <= diagramRect.bottom) {
         
         // 转换为流程图坐标
-        const x = touch.clientX - diagramRect.left;
-        const y = touch.clientY - diagramRect.top;
+        const x = resolvedClientX - diagramRect.left;
+        const y = resolvedClientY - diagramRect.top;
         const pt = new go.Point(x, y);
         const loc = diagram.transformViewToDoc(pt);
         
@@ -186,6 +256,9 @@ export class FlowTouchService {
     this.removeGhostElement();
     this.draggingId.set(null);
     this.touchState = createInitialUnassignedTouchState();
+    this.lastTouchClientX = 0;
+    this.lastTouchClientY = 0;
+    this.activeTouchId = null;
   }
   
   /**
@@ -414,6 +487,25 @@ export class FlowTouchService {
     ghost.style.top = `${y - 20}px`;
     document.body.appendChild(ghost);
     this.touchState.ghost = ghost;
+  }
+
+  private findTrackedTouch(touches: ArrayLike<Touch> | null | undefined): Touch | null {
+    if (!touches || touches.length === 0) return null;
+    if (this.activeTouchId === null) {
+      return touches[0] ?? null;
+    }
+    for (let index = 0; index < touches.length; index += 1) {
+      const touch = touches[index];
+      if (touch?.identifier === this.activeTouchId) {
+        return touch;
+      }
+    }
+    return null;
+  }
+
+  private recordTouchActivity(touch: Touch): void {
+    this.lastTouchClientX = touch.clientX;
+    this.lastTouchClientY = touch.clientY;
   }
   
   /**
