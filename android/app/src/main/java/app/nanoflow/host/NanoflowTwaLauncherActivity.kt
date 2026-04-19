@@ -17,7 +17,20 @@ class NanoflowTwaLauncherActivity : LauncherActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     // 让原生启动窗口和 Web 初始 loader 使用同一套启动面，避免 TWA provider 接管前露出白底窗口。
     installSplashScreen()
-    super.onCreate(savedInstanceState)
+    // 2026-04-19 白屏闪退修复：强制向 ABH LauncherActivity 基类传入 null 作为 savedInstanceState。
+    // ABH 基类 onCreate 存在以下致命分支：
+    //   if (savedInstanceState != null
+    //       && savedInstanceState.getBoolean("android.support.customtabs.trusted.BROWSER_WAS_LAUNCHED_KEY")) {
+    //       finish();
+    //       return;
+    //   }
+    // 我们的 LauncherActivity 是纯 trampoline（不承载任何需要恢复的 UI 状态），但系统会为
+    // Activity 的 task snapshot 自动 onSaveInstanceState；上一次成功 launch 过 Chrome TWA 后
+    // mBrowserWasLaunched=true 被写入 state。即使 force-stop 杀进程，ATMS 的 recents task
+    // snapshot 仍保留 state Bundle，下次 LAUNCHER intent 进来时系统会把这个 state 喂回来，
+    // ABH 基类立刻 finish() → 用户观感 = 点图标白屏闪退、无法进入项目。
+    // 传 null 绕过这条恢复路径；LauncherActivity 自己不关心任何恢复的 UI 状态，无副作用。
+    super.onCreate(null)
     launchFromCurrentIntent()
   }
 

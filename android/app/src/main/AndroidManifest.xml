@@ -29,7 +29,6 @@
             android:name="app.nanoflow.host.NanoflowTwaLauncherActivity"
             android:exported="true"
             android:launchMode="singleTask"
-            android:clearTaskOnLaunch="true"
             android:theme="@style/Theme.NanoFlow.Twa.Launcher">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
