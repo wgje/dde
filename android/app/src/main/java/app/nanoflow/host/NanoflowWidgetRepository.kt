@@ -721,10 +721,24 @@ class NanoflowWidgetRepository(private val context: Context) {
       )
     )
     val mainTaskId = summary.focus.taskId
-    // 2026-04-19：用户反馈副任务 tab 影响视觉美观；仅保留主任务 chip，
-    // 副任务入口由 App 内 dock 承担，widget 层面不再渲染。
-    @Suppress("UNUSED_VARIABLE")
-    val _suppressSecondary = mainTaskId
+    summary.dock.items.forEach { item ->
+      // 之前用 `if (!item.valid) return@forEach` 强过滤会导致后端因任务行未在 taskMap 命中
+      // （RLS/子查询时序）返回 valid=false 的有效 dock 任务被全部隐藏，用户实际上有 6 个备选
+      // 任务却只看到「主」一个 chip。这里改为：只要 taskId 非空且有标题就纳入展示，valid=false
+      // 仅作为后端可能存在数据漂移的弱信号，不应阻断 UI。
+      val itemTaskId = item.taskId
+      if (itemTaskId.isNullOrBlank()) return@forEach
+      if (mainTaskId != null && itemTaskId == mainTaskId) return@forEach
+      cards.add(
+        WidgetTaskCard(
+          taskId = itemTaskId,
+          title = if (privacyMode) context.getString(R.string.nanoflow_widget_privacy_focus_title)
+          else item.title?.takeIf { it.isNotBlank() } ?: context.getString(R.string.nanoflow_widget_unknown_task),
+          projectTitle = if (privacyMode) null else item.projectTitle,
+          isMain = false,
+        )
+      )
+    }
     return cards
   }
 
