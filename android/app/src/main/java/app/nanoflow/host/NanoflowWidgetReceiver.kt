@@ -191,8 +191,14 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
     runBlocking {
       NanoflowWidgetStore(context).persistSelectedTaskIndex(appWidgetId, targetIndex)
       val appWidgetManager = AppWidgetManager.getInstance(context)
-      notifyTabListDataChanged(appWidgetManager, appWidgetId)
-      notifyContentListDataChanged(appWidgetManager, appWidgetId)
+      renderAndApply(
+        context,
+        appWidgetManager,
+        NanoflowWidgetRepository(context),
+        appWidgetId,
+        partialUpdate = true,
+      )
+      notifyActionListsDataChanged(appWidgetManager, appWidgetId)
     }
   }
 
@@ -201,12 +207,10 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
       "widget_click_refresh",
       mapOf("appWidgetId" to appWidgetId),
     )
-    // 只刷新 refresh 集合本身，让用户立刻看到“刷新中”而不触发整卡 RemoteViews reapply。
-    // 真正的数据渲染仍交给 worker 完成后的 partial update，以避免点击瞬间整卡抖动。
-    runBlocking {
-      NanoflowWidgetStore(context).persistRefreshPending(appWidgetId, true)
-      notifyRefreshListDataChanged(AppWidgetManager.getInstance(context), appWidgetId)
-    }
+    // 不在点击瞬间执行 partiallyUpdateAppWidget：MIUI / HyperOS launcher 收到任何 RemoteViews
+    // apply 都会对 AppWidgetHostView 触发 folme 缩放动画，造成「整卡抖动」感。chip 自带的
+    // ripple drawable 已经提供了局部点击反馈；worker 完成 fetch 后会做一次完整 update，由
+    // buildCompactSyncBadge 基于本地 wall-clock 时间把 sync_badge 重置为「刚刚」。
     NanoflowWidgetRefreshWorker.enqueue(context, reason = "widget-click-refresh")
   }
 
@@ -222,8 +226,14 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
         mapOf("appWidgetId" to appWidgetId, "pageIndex" to pageIndex),
       )
       val appWidgetManager = AppWidgetManager.getInstance(context)
-      notifyTabListDataChanged(appWidgetManager, appWidgetId)
-      notifyContentListDataChanged(appWidgetManager, appWidgetId)
+      renderAndApply(
+        context,
+        appWidgetManager,
+        repository,
+        appWidgetId,
+        partialUpdate = true,
+      )
+      notifyActionListsDataChanged(appWidgetManager, appWidgetId)
     }
   }
 
@@ -290,7 +300,7 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
       )
     }
 
-    /** 集合视图数据源 adapter intent。data Uri 携带 appWidgetId+listKind，防止不同实例/列表共享 factory。 */
+    /** 集合视图数据源 adapter intent。data Uri 携带 appWidgetId + listKind，防止不同实例/列表共享 factory。 */
     fun actionListAdapterIntent(context: Context, appWidgetId: Int, listKind: String): Intent {
       return Intent(context, NanoflowWidgetActionService::class.java).apply {
         putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, appWidgetId)
@@ -365,39 +375,25 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
       if (ids.isEmpty()) return
       runBlocking {
         val repository = NanoflowWidgetRepository(context)
-        val store = NanoflowWidgetStore(context)
         ids.forEach { widgetId ->
-          store.persistRefreshPending(widgetId, false)
           val model = repository.buildRenderModel(widgetId)
           val views = NanoflowWidgetRenderer.render(context, widgetId, model)
           // 关键减抖点：worker 完成 fetch 后只走 partiallyUpdateAppWidget（=RemoteViews.reapply），
           // 这条路径不会让 AppWidgetHostView 重新 inflate / 重新 bind，从而避开 MIUI / HyperOS
           // launcher 在 LauncherAppWidgetHostView.updateAppWidget 里挂载的 folme 缩放动画。
+          // 同时不调用 notifyAppWidgetViewDataChanged：refresh 不改变 chip 集合（仅文本/选中态变化），
+          // 跳过 adapter rebind 也能消除一次额外的 host view 更新事件。
           appWidgetManager.partiallyUpdateAppWidget(widgetId, views)
-          notifyTabListDataChanged(appWidgetManager, widgetId)
-          notifyContentListDataChanged(appWidgetManager, widgetId)
-          notifyRefreshListDataChanged(appWidgetManager, widgetId)
+          notifyActionListsDataChanged(appWidgetManager, widgetId)
         }
       }
     }
 
-    /** 同时刷新 widget 内两个集合视图（tabs + refresh）的数据。 */
+    /** 同时刷新 widget 内三个集合视图（tabs + content + refresh）的数据。 */
     fun notifyActionListsDataChanged(appWidgetManager: AppWidgetManager, appWidgetId: Int) {
-      notifyTabListDataChanged(appWidgetManager, appWidgetId)
-      notifyContentListDataChanged(appWidgetManager, appWidgetId)
-      notifyRefreshListDataChanged(appWidgetManager, appWidgetId)
-    }
-
-    fun notifyTabListDataChanged(appWidgetManager: AppWidgetManager, appWidgetId: Int) {
       appWidgetManager.notifyAppWidgetViewDataChanged(appWidgetId, R.id.nano_widget_tab_list)
-    }
-
-    fun notifyRefreshListDataChanged(appWidgetManager: AppWidgetManager, appWidgetId: Int) {
-      appWidgetManager.notifyAppWidgetViewDataChanged(appWidgetId, R.id.nano_widget_refresh_list)
-    }
-
-    fun notifyContentListDataChanged(appWidgetManager: AppWidgetManager, appWidgetId: Int) {
       appWidgetManager.notifyAppWidgetViewDataChanged(appWidgetId, R.id.nano_widget_content_list)
+      appWidgetManager.notifyAppWidgetViewDataChanged(appWidgetId, R.id.nano_widget_refresh_list)
     }
   }
 }

@@ -20,10 +20,11 @@
                 android:id="@+id/nano_widget_sync_badge"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:paddingStart="0dp"
-                android:paddingEnd="0dp"
-                android:paddingTop="2dp"
-                android:paddingBottom="2dp"
+                android:background="@drawable/nano_widget_chip_surface"
+                android:paddingStart="10dp"
+                android:paddingEnd="10dp"
+                android:paddingTop="6dp"
+                android:paddingBottom="6dp"
                 android:text=""
                 android:textColor="#4A7A38"
                 android:textSize="11sp"
@@ -35,7 +36,7 @@
                 android:text="" />
             <GridView
                 android:id="@+id/nano_widget_tab_list"
-                android:layout_width="254dp"
+                android:layout_width="82dp"
                 android:layout_height="48dp"
                 android:horizontalSpacing="4dp"
                 android:verticalSpacing="0dp"
@@ -44,16 +45,39 @@
                 android:stretchMode="none" />
         </LinearLayout>
 
-        <ListView
-            android:id="@+id/nano_widget_content_list"
+        <!-- 中央：标题 + 副标题 -->
+        <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="0dp"
             android:layout_weight="1"
-            android:divider="@android:color/transparent"
-            android:dividerHeight="0dp"
+            android:orientation="vertical"
+            android:gravity="center_vertical"
             android:paddingTop="12dp"
-            android:paddingBottom="12dp"
-            android:scrollbars="none" />
+            android:paddingBottom="12dp">
+            <TextView
+                android:id="@+id/nano_widget_title"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:maxLines="3"
+                android:text=""
+                android:textColor="#1F2A17"
+                android:textSize="22sp"
+                android:textStyle="bold" />
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="4dp" />
+            <TextView
+                android:id="@+id/nano_widget_subtitle"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:maxLines="2"
+                android:text=""
+                android:textColor="#5E7050"
+                android:textSize="13sp"
+                android:visibility="gone" />
+        </LinearLayout>
 
         <!-- 底行：左 metrics | spacer | 右 refresh_list -->
         <LinearLayout

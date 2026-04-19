@@ -4,7 +4,6 @@
   Factory 运行时填充 text / 背景 / 文字颜色，并挂载 fillInIntent 决定点击行为。
 -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
-  android:id="@+id/nano_widget_action_item_root"
   android:layout_width="match_parent"
     android:layout_height="wrap_content"
   android:paddingStart="2dp"

@@ -68,10 +68,14 @@ object NanoflowWidgetRenderer {
     return views
   }
 
-  // --- 大尺寸布局：Focus / Gate / 状态页 ---
+  // --- 中大尺寸布局：Focus / Gate / 状态页 ---
   private fun renderMedium(context: Context, appWidgetId: Int, model: WidgetRenderModel): RemoteViews {
     val views = RemoteViews(context.packageName, R.layout.nano_widget_medium)
     views.setInt(R.id.nano_widget_root, "setBackgroundResource", rootBackgroundFor(model))
+    views.setOnClickPendingIntent(
+      R.id.nano_widget_root,
+      NanoflowWidgetReceiver.primaryActionPendingIntent(context, appWidgetId, model.primaryAction),
+    )
 
     renderSyncBadge(views, model)
     renderContentList(context, views, appWidgetId)
@@ -84,8 +88,15 @@ object NanoflowWidgetRenderer {
     val views = RemoteViews(context.packageName, R.layout.nano_widget_large)
     views.setInt(R.id.nano_widget_root, "setBackgroundResource", rootBackgroundFor(model))
 
+    // 根容器点击 = 打开 App / Focus Tools。集合视图 item 的点击区域会拦截自身事件，
+    // 空白处仍回落到 root。
+    views.setOnClickPendingIntent(
+      R.id.nano_widget_root,
+      NanoflowWidgetReceiver.primaryActionPendingIntent(context, appWidgetId, model.primaryAction),
+    )
+
     renderSyncBadge(views, model)
-    renderContentList(context, views, appWidgetId)
+    renderMiddleTitle(views, model)
     renderActionList(context, views, appWidgetId, model)
 
     return views
@@ -198,12 +209,28 @@ object NanoflowWidgetRenderer {
       views.setViewVisibility(R.id.nano_widget_sync_badge, View.GONE)
       return
     }
-    views.setTextViewText(R.id.nano_widget_sync_badge, "● $label")
-    views.setTextColor(
-      R.id.nano_widget_sync_badge,
-      if (label == "刚刚") 0xFF5B8F35.toInt() else 0xFFC18B1B.toInt(),
-    )
+    views.setTextViewText(R.id.nano_widget_sync_badge, label)
     views.setViewVisibility(R.id.nano_widget_sync_badge, View.VISIBLE)
   }
 
+  // --- 标题 + 副标题 ---
+  private fun renderMiddleTitle(views: RemoteViews, model: WidgetRenderModel) {
+    val (title, subtitle) = resolveTitleAndSubtitle(model)
+    views.setTextViewText(R.id.nano_widget_title, title)
+    if (subtitle.isNullOrBlank()) {
+      views.setViewVisibility(R.id.nano_widget_subtitle, View.GONE)
+    } else {
+      views.setTextViewText(R.id.nano_widget_subtitle, subtitle)
+      views.setViewVisibility(R.id.nano_widget_subtitle, View.VISIBLE)
+    }
+  }
+
+  private fun resolveTitleAndSubtitle(model: WidgetRenderModel): Pair<String, String?> {
+    if (model.tasks.isNotEmpty()) {
+      val idx = model.selectedTaskIndex.coerceIn(0, model.tasks.lastIndex)
+      val card = model.tasks[idx]
+      return card.title to null
+    }
+    return model.title to model.supportingLine
+  }
 }

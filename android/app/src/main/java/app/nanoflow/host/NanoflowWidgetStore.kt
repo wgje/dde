@@ -23,9 +23,6 @@ class NanoflowWidgetStore(private val context: Context) {
     ignoreUnknownKeys = true
     explicitNulls = false
   }
-  private val uiStatePreferences: SharedPreferences by lazy {
-    context.applicationContext.getSharedPreferences("nanoflow_widget_ui_state", Context.MODE_PRIVATE)
-  }
 
   private val installationIdKey = stringPreferencesKey("binding.installationId")
   private val legacyDeviceIdKey = stringPreferencesKey("binding.deviceId")
@@ -197,31 +194,13 @@ class NanoflowWidgetStore(private val context: Context) {
 
   /** 当前 widget 实例选中的任务 tab 下标（主任务=0，副任务 1..N）。 */
   suspend fun persistSelectedTaskIndex(appWidgetId: Int, taskIndex: Int) {
-    uiStatePreferences.edit()
-      .putInt(selectedTaskIndexPreferenceName(appWidgetId), taskIndex.coerceAtLeast(0))
-      .apply()
+    context.widgetDataStore.edit { prefs ->
+      prefs[selectedTaskIndexKey(appWidgetId)] = taskIndex.coerceAtLeast(0)
+    }
   }
 
   suspend fun readSelectedTaskIndex(appWidgetId: Int): Int {
-    return uiStatePreferences.getInt(selectedTaskIndexPreferenceName(appWidgetId), 0)
-  }
-
-  /**
-   * refresh 按钮的本地即时反馈态。
-   * true 表示用户刚点击过 refresh，先让 chip 立刻切到“刷新中”，等待 worker 完成后再复位。
-   */
-  suspend fun persistRefreshPending(appWidgetId: Int, pending: Boolean) {
-    uiStatePreferences.edit().apply {
-      if (pending) {
-        putBoolean(refreshPendingPreferenceName(appWidgetId), true)
-      } else {
-        remove(refreshPendingPreferenceName(appWidgetId))
-      }
-    }.apply()
-  }
-
-  suspend fun isRefreshPending(appWidgetId: Int): Boolean {
-    return uiStatePreferences.getBoolean(refreshPendingPreferenceName(appWidgetId), false)
+    return context.widgetDataStore.data.first()[selectedTaskIndexKey(appWidgetId)] ?: 0
   }
 
   suspend fun persistGateSelectedEntryId(appWidgetId: Int, entryId: String?) {
@@ -264,15 +243,12 @@ class NanoflowWidgetStore(private val context: Context) {
   }
 
   suspend fun clearWidgetState(appWidgetId: Int) {
-    uiStatePreferences.edit()
-      .remove(selectedTaskIndexPreferenceName(appWidgetId))
-      .remove(refreshPendingPreferenceName(appWidgetId))
-      .apply()
     context.widgetDataStore.edit { prefs ->
       prefs.remove(instanceIdKey(appWidgetId))
       prefs.remove(sizeBucketKey(appWidgetId))
       prefs.remove(gatePageIndexKey(appWidgetId))
       prefs.remove(gateSelectedEntryIdKey(appWidgetId))
+      prefs.remove(selectedTaskIndexKey(appWidgetId))
       prefs.remove(summaryJsonKey(appWidgetId))
       prefs.remove(summaryCacheFormatVersionKey(appWidgetId))
       prefs.remove(summaryUpdatedAtKey(appWidgetId))
@@ -294,7 +270,6 @@ class NanoflowWidgetStore(private val context: Context) {
 
   suspend fun clearAllWidgetState(clearPendingPushToken: Boolean = false) {
     clearBindingState(clearPendingPushToken = clearPendingPushToken)
-    uiStatePreferences.edit().clear().apply()
     context.widgetDataStore.edit { prefs ->
       val keysToRemove = prefs.asMap().keys.filter { key ->
         val name = key.name
@@ -407,12 +382,8 @@ class NanoflowWidgetStore(private val context: Context) {
     return intPreferencesKey("instance.$appWidgetId.gatePageIndex")
   }
 
-  private fun selectedTaskIndexPreferenceName(appWidgetId: Int): String {
-    return "instance.$appWidgetId.selectedTaskIndex"
-  }
-
-  private fun refreshPendingPreferenceName(appWidgetId: Int): String {
-    return "instance.$appWidgetId.refreshPending"
+  private fun selectedTaskIndexKey(appWidgetId: Int): Preferences.Key<Int> {
+    return intPreferencesKey("instance.$appWidgetId.selectedTaskIndex")
   }
 
   private fun gateSelectedEntryIdKey(appWidgetId: Int): Preferences.Key<String> {

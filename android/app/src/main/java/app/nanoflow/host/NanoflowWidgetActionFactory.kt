@@ -32,7 +32,7 @@ class NanoflowWidgetActionFactory(
     val primaryAction: WidgetPrimaryAction? = null,
   ) {
     enum class Kind { TAB, OVERFLOW, REFRESH, GATE_PREV, GATE_NEXT, GATE_LABEL, PRIMARY }
-    enum class ChipTone { ACCENT, SURFACE, ACCENT_GATE, SURFACE_GATE, TAB_SURFACE, TAB_SURFACE_GATE }
+    enum class ChipTone { ACCENT, SURFACE, ACCENT_GATE, SURFACE_GATE }
   }
 
   private var items: List<ActionItem> = emptyList()
@@ -56,6 +56,7 @@ class NanoflowWidgetActionFactory(
   override fun getViewAt(position: Int): RemoteViews {
     if (position < 0 || position >= items.size) return emptyItemView()
     val item = items[position]
+
     if (listKind == LIST_KIND_CONTENT) {
       val views = RemoteViews(context.packageName, R.layout.nano_widget_content_item)
       views.setTextViewText(R.id.nano_widget_content_title, item.label)
@@ -71,14 +72,9 @@ class NanoflowWidgetActionFactory(
     views.setTextViewText(R.id.nano_widget_action_chip, item.label)
     applyChipStyle(views, item.styleTone)
     if (item.clickable) {
-      val fillInIntent = buildFillInIntent(item)
-      views.setOnClickFillInIntent(
-        R.id.nano_widget_action_item_root,
-        fillInIntent,
-      )
       views.setOnClickFillInIntent(
         R.id.nano_widget_action_chip,
-        fillInIntent,
+        buildFillInIntent(item),
       )
     }
     return views
@@ -100,12 +96,11 @@ class NanoflowWidgetActionFactory(
   private fun refreshItems() {
     items = runBlocking {
       val model = NanoflowWidgetRepository(context).buildRenderModel(appWidgetId)
-      val refreshPending = NanoflowWidgetStore(context).isRefreshPending(appWidgetId)
-      computeItems(model, refreshPending)
+      computeItems(model)
     }
   }
 
-  private fun computeItems(model: WidgetRenderModel, refreshPending: Boolean): List<ActionItem> {
+  private fun computeItems(model: WidgetRenderModel): List<ActionItem> {
     val isGateTone = model.tone == WidgetVisualTone.GATE
 
     if (listKind == LIST_KIND_CONTENT) {
@@ -124,18 +119,10 @@ class NanoflowWidgetActionFactory(
       // 独立 refresh 列表：只包含一个 refresh chip。
       return listOf(
         ActionItem(
-          label = context.getString(
-            if (refreshPending) R.string.nanoflow_widget_refreshing
-            else R.string.nanoflow_widget_refresh,
-          ),
+          label = context.getString(R.string.nanoflow_widget_refresh),
           selected = false,
           kind = ActionItem.Kind.REFRESH,
-          styleTone = when {
-            refreshPending && isGateTone -> ActionItem.ChipTone.ACCENT_GATE
-            refreshPending -> ActionItem.ChipTone.ACCENT
-            isGateTone -> ActionItem.ChipTone.SURFACE_GATE
-            else -> ActionItem.ChipTone.SURFACE
-          },
+          styleTone = if (isGateTone) ActionItem.ChipTone.SURFACE_GATE else ActionItem.ChipTone.SURFACE,
         )
       )
     }
@@ -165,7 +152,7 @@ class NanoflowWidgetActionFactory(
             selected = isSelected,
             kind = ActionItem.Kind.TAB,
             taskIndex = globalIdx,
-            styleTone = if (isSelected) ActionItem.ChipTone.ACCENT else ActionItem.ChipTone.TAB_SURFACE,
+            styleTone = if (isSelected) ActionItem.ChipTone.ACCENT else ActionItem.ChipTone.SURFACE,
           )
         }
       }
@@ -184,7 +171,7 @@ class NanoflowWidgetActionFactory(
           selected = false,
           kind = ActionItem.Kind.GATE_LABEL,
           clickable = false,
-          styleTone = ActionItem.ChipTone.TAB_SURFACE_GATE,
+          styleTone = ActionItem.ChipTone.SURFACE_GATE,
         )
         if (model.canPageForward) {
           result += ActionItem(
@@ -217,7 +204,7 @@ class NanoflowWidgetActionFactory(
     if (item.taskIndex >= 0) fill.putExtra(NanoflowWidgetReceiver.EXTRA_TASK_INDEX, item.taskIndex)
     if (item.gateDelta != 0) fill.putExtra(NanoflowWidgetReceiver.EXTRA_GATE_DELTA, item.gateDelta)
     item.primaryAction?.let {
-      fill.putExtra(NanoflowWidgetReceiver.EXTRA_PRIMARY_ACTION, it.name)
+      fill.putExtra(EXTRA_PRIMARY_ACTION, it.name)
     }
     return fill
   }
@@ -228,8 +215,6 @@ class NanoflowWidgetActionFactory(
       ActionItem.ChipTone.SURFACE -> R.drawable.nano_widget_chip_surface to 0xFF4A7A38.toInt()
       ActionItem.ChipTone.ACCENT_GATE -> R.drawable.nano_widget_chip_accent_gate to 0xFFFFFFFF.toInt()
       ActionItem.ChipTone.SURFACE_GATE -> R.drawable.nano_widget_chip_surface_gate to 0xFF3E5270.toInt()
-      ActionItem.ChipTone.TAB_SURFACE -> R.drawable.nano_widget_chip_tab_surface to 0xFF4A7A38.toInt()
-      ActionItem.ChipTone.TAB_SURFACE_GATE -> R.drawable.nano_widget_chip_tab_surface_gate to 0xFF3E5270.toInt()
     }
     views.setInt(R.id.nano_widget_action_chip, "setBackgroundResource", bg)
     views.setTextColor(R.id.nano_widget_action_chip, fg)
@@ -237,7 +222,7 @@ class NanoflowWidgetActionFactory(
 
   private fun resolveMaxVisibleTabs(model: WidgetRenderModel): Int {
     return when (model.sizeTier) {
-      WidgetSizeTier.LARGE -> 3
+      WidgetSizeTier.LARGE -> 4
       WidgetSizeTier.MEDIUM,
       WidgetSizeTier.SMALL -> 3
     }
@@ -249,7 +234,13 @@ class NanoflowWidgetActionFactory(
     hasHiddenBefore: Boolean,
     hasHiddenAfter: Boolean,
   ): String {
-    return if (card.isMain) "主任务" else "副任务$index"
+    val base = if (card.isMain) "主任务" else "副任务$index"
+    return when {
+      hasHiddenBefore && hasHiddenAfter -> "‹ $base ›"
+      hasHiddenBefore -> "‹ $base"
+      hasHiddenAfter -> "$base ›"
+      else -> base
+    }
   }
 
   private fun resolveContentTitle(model: WidgetRenderModel): String {
@@ -267,10 +258,11 @@ class NanoflowWidgetActionFactory(
     const val ITEM_TYPE_GATE = "gate"
     const val ITEM_TYPE_PRIMARY = "primary"
     const val ITEM_TYPE_NONE = "none"
+    const val EXTRA_PRIMARY_ACTION = "extra.PRIMARY_ACTION"
 
-    /** 集合视图分流：tabs 列表（顶部右侧） vs refresh 单 chip（右下角）。 */
+    /** 集合视图分流：tabs / content / refresh。 */
     const val LIST_KIND_TABS = "tabs"
-    const val LIST_KIND_REFRESH = "refresh"
     const val LIST_KIND_CONTENT = "content"
+    const val LIST_KIND_REFRESH = "refresh"
   }
 }
