@@ -106,6 +106,77 @@ describe('FlowTouchService', () => {
     expect(droppedPoint.y).toBe(190);
   });
 
+  it('应通过 pointer 会话完成移动端待分配 drop', () => {
+    vi.useFakeTimers();
+    const task = createTask();
+    const insertInfo = { parentId: 'parent-1' };
+    mockDragDropService.findInsertPosition.mockReturnValue(insertInfo);
+
+    const source = document.createElement('button');
+    const setPointerCapture = vi.fn();
+    const releasePointerCapture = vi.fn();
+    const hasPointerCapture = vi.fn(() => true);
+    Object.assign(source, { setPointerCapture, releasePointerCapture, hasPointerCapture });
+
+    const diagramDiv = document.createElement('div');
+    vi.spyOn(diagramDiv, 'getBoundingClientRect').mockReturnValue({
+      left: 40,
+      top: 80,
+      right: 440,
+      bottom: 480,
+      width: 400,
+      height: 400,
+      x: 40,
+      y: 80,
+      toJSON: () => ({}),
+    } as DOMRect);
+
+    const diagram = {
+      transformViewToDoc: vi.fn((point: go.Point) => point),
+    } as unknown as go.Diagram;
+
+    const callback = vi.fn();
+
+    service.startPointer({
+      pointerId: 9,
+      pointerType: 'touch',
+      isPrimary: true,
+      clientX: 90,
+      clientY: 120,
+      currentTarget: source,
+    } as unknown as PointerEvent, task);
+
+    expect(service.hasActiveTouchSession).toBe(true);
+    expect(service.isPointerSessionActive).toBe(true);
+
+    vi.advanceTimersByTime(1000);
+    service.handlePointerMove({
+      pointerId: 9,
+      pointerType: 'touch',
+      isPrimary: true,
+      clientX: 250,
+      clientY: 320,
+    } as unknown as PointerEvent);
+
+    service.endPointer({
+      pointerId: 9,
+      pointerType: 'touch',
+      isPrimary: true,
+      clientX: 250,
+      clientY: 320,
+    } as unknown as PointerEvent, diagramDiv, diagram, callback);
+
+    expect(setPointerCapture).toHaveBeenCalledWith(9);
+    expect(callback).toHaveBeenCalledOnce();
+    expect(releasePointerCapture).toHaveBeenCalledWith(9);
+
+    const [droppedTask, droppedInsertInfo, droppedPoint] = callback.mock.calls[0] as [Task, typeof insertInfo, go.Point];
+    expect(droppedTask.id).toBe(task.id);
+    expect(droppedInsertInfo).toEqual(insertInfo);
+    expect(droppedPoint.x).toBe(210);
+    expect(droppedPoint.y).toBe(240);
+  });
+
   it('touchcancel 不应提交 drop，但应清理触摸会话', () => {
     vi.useFakeTimers();
     const task = createTask();
@@ -137,6 +208,28 @@ describe('FlowTouchService', () => {
 
     expect(callback).not.toHaveBeenCalled();
     expect(service.hasActiveTouchSession).toBe(false);
+  });
+
+  it('pointercancel 不应提交 drop，但应清理 pointer 会话', () => {
+    vi.useFakeTimers();
+    const task = createTask();
+    const callback = vi.fn();
+
+    service.startPointer({
+      pointerId: 11,
+      pointerType: 'touch',
+      isPrimary: true,
+      clientX: 120,
+      clientY: 140,
+      currentTarget: document.createElement('div'),
+    } as unknown as PointerEvent, task);
+    vi.advanceTimersByTime(1000);
+
+    service.cancelPointer(null, null, callback);
+
+    expect(callback).not.toHaveBeenCalled();
+    expect(service.hasActiveTouchSession).toBe(false);
+    expect(service.isPointerSessionActive).toBe(false);
   });
 
   it('dispose 后重新 activate 应恢复待分配触摸拖拽', () => {

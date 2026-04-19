@@ -36,11 +36,14 @@ export class FlowTouchService {
   private readonly logger = this.loggerService.category('FlowTouch');
   private readonly zone = inject(NgZone);
   private readonly dragDropService = inject(FlowDragDropService);
+  private activeInteractionType: 'touch' | 'pointer' | null = null;
   
   // ========== 状态 ==========
   
   /** 当前正在拖动的待分配任务ID */
   readonly draggingId = signal<string | null>(null);
+  /** 待分配移动端拖拽会话是否存在（含长按前预备态）。 */
+  readonly hasActiveSession = signal(false);
   
   /** 触摸状态 */
   private touchState: UnassignedTouchState = createInitialUnassignedTouchState();
@@ -49,6 +52,10 @@ export class FlowTouchService {
   private lastTouchClientY = 0;
   /** 当前被追踪的触点 ID，避免多指场景下用错 changedTouches。 */
   private activeTouchId: number | null = null;
+  /** Pointer 驱动拖拽时追踪的主指针 ID。 */
+  private activePointerId: number | null = null;
+  /** Pointer 驱动拖拽时的 capture 源元素，结束时释放。 */
+  private pointerCaptureElement: HTMLElement | null = null;
   /** touchcancel 后等待 pointerup/pointercancel 兜底的短暂窗口。 */
   private pendingPointerFallbackCleanup: ReturnType<typeof setTimeout> | null = null;
   /** 进入 pointer fallback 后，由 pointermove 继续维持拖拽会话。 */
@@ -83,27 +90,36 @@ export class FlowTouchService {
     if (event.touches.length !== 1 || this.isDestroyed) return;
 
     this.cleanup();
-    
-    const touch = event.touches[0];
-    this.recordTouchActivity(touch);
-    this.activeTouchId = touch.identifier ?? null;
-    this.touchState = {
-      task,
-      startX: touch.clientX,
-      startY: touch.clientY,
-      isDragging: false,
-      longPressTimer: null,
-      ghost: null
-    };
 
-    // 长按 250ms 后开始拖拽
-    this.touchState.longPressTimer = setTimeout(() => {
-      if (this.isDestroyed) return;
-      this.touchState.isDragging = true;
-      this.draggingId.set(task.id);
-      this.createGhostElement(task, touch.clientX, touch.clientY);
-      if (navigator.vibrate) navigator.vibrate(50);
-    }, UI_CONFIG.MOBILE_LONG_PRESS_DELAY);
+    const touch = event.touches[0];
+    this.beginInteraction(task, touch.clientX, touch.clientY, 'touch');
+    this.activeTouchId = touch.identifier ?? null;
+  }
+
+  /**
+   * Pointer 驱动的移动端待分配拖拽入口。
+   * 解决手指移出源卡片后 touch 流丢失、source DOM 被提前卸载的问题。
+   */
+  startPointer(event: PointerEvent, task: Task): boolean {
+    if (event.pointerType !== 'touch' || !event.isPrimary || this.isDestroyed) {
+      return false;
+    }
+
+    this.cleanup();
+    this.beginInteraction(task, event.clientX, event.clientY, 'pointer');
+    this.activePointerId = event.pointerId;
+
+    const sourceElement = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
+    if (sourceElement) {
+      try {
+        sourceElement.setPointerCapture(event.pointerId);
+        this.pointerCaptureElement = sourceElement;
+      } catch {
+        this.pointerCaptureElement = null;
+      }
+    }
+
+    return true;
   }
   
   /**
@@ -112,33 +128,23 @@ export class FlowTouchService {
    * @returns 是否应该阻止默认行为
    */
   handleTouchMove(event: TouchEvent): boolean {
+    if (this.activeInteractionType !== 'touch') return false;
     if (!this.touchState.task || event.touches.length < 1) return false;
     
     const touch = this.findTrackedTouch(event.touches);
     if (!touch) return false;
-    this.recordTouchActivity(touch);
-    const deltaX = Math.abs(touch.clientX - this.touchState.startX);
-    const deltaY = Math.abs(touch.clientY - this.touchState.startY);
-    
-    // 如果移动超过阈值但还没开始拖拽，取消长按
-    if (!this.touchState.isDragging && (deltaX > 15 || deltaY > 15)) {
-      if (this.touchState.longPressTimer) {
-        clearTimeout(this.touchState.longPressTimer);
-        this.touchState.longPressTimer = null;
-      }
-      return false; // 不阻止事件，让页面正常滚动
-    }
-    
-    if (this.touchState.isDragging) {
-      // 更新幽灵元素位置
-      if (this.touchState.ghost) {
-        this.touchState.ghost.style.left = `${touch.clientX - 40}px`;
-        this.touchState.ghost.style.top = `${touch.clientY - 20}px`;
-      }
-      return true; // 阻止默认行为
-    }
-    
-    return false;
+    return this.handleTrackedMove(touch.clientX, touch.clientY);
+  }
+
+  /**
+   * Pointer 驱动会话的全局 move 处理。
+   */
+  handlePointerMove(event: PointerEvent): boolean {
+    if (!this.isPointerSessionActive) return false;
+    if (event.pointerType !== 'touch' || !event.isPrimary) return false;
+    if (this.activePointerId !== null && event.pointerId !== this.activePointerId) return false;
+
+    return this.handleTrackedMove(event.clientX, event.clientY);
   }
   
   /**
@@ -154,6 +160,10 @@ export class FlowTouchService {
     diagram: go.Diagram | null,
     callback: TouchDropCallback
   ): void {
+    if (this.activeInteractionType !== 'touch') {
+      return;
+    }
+
     if (event.type === 'touchcancel') {
       this.cancelTouch(diagramDiv, diagram, callback);
       return;
@@ -183,6 +193,26 @@ export class FlowTouchService {
     this.finishTouch(diagramDiv, diagram, callback, clientX, clientY);
   }
 
+  /** Pointer 驱动会话在全局 pointerup 时完成 drop。 */
+  endPointer(
+    event: PointerEvent,
+    diagramDiv: HTMLElement | null,
+    diagram: go.Diagram | null,
+    callback: TouchDropCallback,
+  ): void {
+    if (!this.isPointerSessionActive) {
+      return;
+    }
+    if (event.pointerType !== 'touch' || !event.isPrimary) {
+      return;
+    }
+    if (this.activePointerId !== null && event.pointerId !== this.activePointerId) {
+      return;
+    }
+
+    this.finishTouch(diagramDiv, diagram, callback, event.clientX, event.clientY);
+  }
+
   /** 使用最后一次已知坐标完成拖拽收口。 */
   endTouchFromLastPosition(
     diagramDiv: HTMLElement | null,
@@ -204,11 +234,31 @@ export class FlowTouchService {
     this.cleanup();
   }
 
+  /** Pointer 驱动会话的取消分支。 */
+  cancelPointer(
+    diagramDiv: HTMLElement | null,
+    diagram: go.Diagram | null,
+    callback: TouchDropCallback,
+  ): void {
+    void diagramDiv;
+    void diagram;
+    void callback;
+
+    if (!this.isPointerSessionActive) {
+      return;
+    }
+
+    this.cleanup();
+  }
+
   /**
    * 某些移动端浏览器在手指拖出源区域时会先发 touchcancel，再补 pointerup。
    * 拖拽中遇到该场景时先保留会话，等待 pointer 兜底完成真正 drop。
    */
   deferCancelForPointerFallback(): boolean {
+    if (this.activeInteractionType !== 'touch') {
+      return false;
+    }
     if (!this.touchState.task || !this.touchState.isDragging) {
       return false;
     }
@@ -224,6 +274,9 @@ export class FlowTouchService {
    * 只在 fallback 窗口中生效，避免和正常 touchmove 双重驱动。
    */
   handlePointerFallbackMove(clientX: number, clientY: number): boolean {
+    if (this.activeInteractionType !== 'touch') {
+      return false;
+    }
     if (!this.awaitingPointerFallback || !this.touchState.task || !this.touchState.isDragging) {
       return false;
     }
@@ -241,11 +294,15 @@ export class FlowTouchService {
   }
 
   get hasActiveTouchSession(): boolean {
-    return !!this.touchState.task;
+    return this.hasActiveSession();
   }
 
   get isTouchDragging(): boolean {
     return this.touchState.isDragging;
+  }
+
+  get isPointerSessionActive(): boolean {
+    return this.activeInteractionType === 'pointer';
   }
 
   private finishTouch(
@@ -292,6 +349,9 @@ export class FlowTouchService {
    * 清理状态
    */
   cleanup(): void {
+    const pointerCaptureElement = this.pointerCaptureElement;
+    const activePointerId = this.activePointerId;
+
     if (this.touchState.longPressTimer) {
       clearTimeout(this.touchState.longPressTimer);
     }
@@ -300,12 +360,26 @@ export class FlowTouchService {
       this.pendingPointerFallbackCleanup = null;
     }
     this.removeGhostElement();
+    this.hasActiveSession.set(false);
     this.draggingId.set(null);
     this.awaitingPointerFallback = false;
+    this.activeInteractionType = null;
     this.touchState = createInitialUnassignedTouchState();
     this.lastTouchClientX = 0;
     this.lastTouchClientY = 0;
     this.activeTouchId = null;
+    this.activePointerId = null;
+    this.pointerCaptureElement = null;
+
+    if (pointerCaptureElement && activePointerId !== null) {
+      try {
+        if (pointerCaptureElement.hasPointerCapture(activePointerId)) {
+          pointerCaptureElement.releasePointerCapture(activePointerId);
+        }
+      } catch {
+        // capture 在元素已卸载或浏览器不支持时安全忽略
+      }
+    }
   }
   
   /**
@@ -536,6 +610,60 @@ export class FlowTouchService {
     this.touchState.ghost = ghost;
   }
 
+  private beginInteraction(
+    task: Task,
+    clientX: number,
+    clientY: number,
+    interactionType: 'touch' | 'pointer',
+  ): void {
+    this.activeInteractionType = interactionType;
+    this.hasActiveSession.set(true);
+    this.recordPointerLikeActivity(clientX, clientY);
+    this.touchState = {
+      task,
+      startX: clientX,
+      startY: clientY,
+      isDragging: false,
+      longPressTimer: null,
+      ghost: null,
+    };
+
+    this.touchState.longPressTimer = setTimeout(() => {
+      if (this.isDestroyed || !this.touchState.task || this.touchState.task.id !== task.id) return;
+
+      this.touchState.isDragging = true;
+      this.draggingId.set(task.id);
+      this.createGhostElement(task, this.lastTouchClientX || clientX, this.lastTouchClientY || clientY);
+      navigator.vibrate?.(50);
+    }, UI_CONFIG.MOBILE_LONG_PRESS_DELAY);
+  }
+
+  private handleTrackedMove(clientX: number, clientY: number): boolean {
+    if (!this.touchState.task) return false;
+
+    this.recordPointerLikeActivity(clientX, clientY);
+    const deltaX = Math.abs(clientX - this.touchState.startX);
+    const deltaY = Math.abs(clientY - this.touchState.startY);
+
+    if (!this.touchState.isDragging && (deltaX > 15 || deltaY > 15)) {
+      if (this.touchState.longPressTimer) {
+        clearTimeout(this.touchState.longPressTimer);
+        this.touchState.longPressTimer = null;
+      }
+      return false;
+    }
+
+    if (!this.touchState.isDragging) {
+      return false;
+    }
+
+    if (this.touchState.ghost) {
+      this.touchState.ghost.style.left = `${clientX - 40}px`;
+      this.touchState.ghost.style.top = `${clientY - 20}px`;
+    }
+    return true;
+  }
+
   private findTrackedTouch(touches: ArrayLike<Touch> | null | undefined): Touch | null {
     if (!touches || touches.length === 0) return null;
     if (this.activeTouchId === null) {
@@ -551,8 +679,12 @@ export class FlowTouchService {
   }
 
   private recordTouchActivity(touch: Touch): void {
-    this.lastTouchClientX = touch.clientX;
-    this.lastTouchClientY = touch.clientY;
+    this.recordPointerLikeActivity(touch.clientX, touch.clientY);
+  }
+
+  private recordPointerLikeActivity(clientX: number, clientY: number): void {
+    this.lastTouchClientX = clientX;
+    this.lastTouchClientY = clientY;
   }
 
   private armPointerFallbackCleanup(): void {

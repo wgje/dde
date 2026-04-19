@@ -9,11 +9,13 @@
       <app-mobile-todo-drawer
         [isDropTargetActive]="dragDrop.isDropTargetActive()"
         [draggingTaskId]="touch.draggingId()"
+        [hasActiveDragSession]="hasPendingUnassignedTouchDrag()"
         (centerOnNode)="onMobileDrawerCenterOnNode($event)"
         (createUnassigned)="createUnassigned()"
         (taskClick)="onUnassignedTaskClick($event)"
         (taskDragStart)="onDragStart($event.event, $event.task)"
         (taskDrop)="onUnassignedDrop($event.event)"
+        (taskPointerDown)="onUnassignedPointerDown($event.event, $event.task)"
         (taskTouchStart)="onUnassignedTouchStart($event.event, $event.task)"
         (taskTouchMove)="onUnassignedTouchMove($event.event)"
         (taskTouchEnd)="onUnassignedTouchEnd($event.event)"

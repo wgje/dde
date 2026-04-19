@@ -178,6 +178,11 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     if (!id) return null;
     return this.projectState.getTask(id) || null;
   });
+
+  /** 移动端待分配拖拽会话是否仍处于活动状态。 */
+  readonly hasPendingUnassignedTouchDrag = computed(() =>
+    this.touch.hasActiveTouchSession || !!this.touch.draggingId()
+  );
   
   // ========== 私有状态 ==========
   private isDestroyed = false;
@@ -314,7 +319,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
       document.addEventListener('touchmove', this.boundGlobalTouchMove, { capture: true, passive: false });
       document.addEventListener('touchend', this.boundGlobalTouchEnd, { capture: true, passive: false });
       document.addEventListener('touchcancel', this.boundGlobalTouchCancel, { capture: true, passive: false });
-      document.addEventListener('pointermove', this.boundGlobalPointerMove, { capture: true, passive: true });
+      document.addEventListener('pointermove', this.boundGlobalPointerMove, { capture: true, passive: false });
       document.addEventListener('pointerup', this.boundGlobalPointerUp, { capture: true });
       document.addEventListener('pointercancel', this.boundGlobalPointerCancel, { capture: true });
     });
@@ -638,10 +643,20 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   // ========== 触摸处理 ==========
   
   onUnassignedTouchStart(event: TouchEvent, task: Task): void {
+    if (this.touch.isPointerSessionActive) {
+      return;
+    }
     this.touch.startTouch(event, task);
+  }
+
+  onUnassignedPointerDown(event: PointerEvent, task: Task): void {
+    this.touch.startPointer(event, task);
   }
   
   onUnassignedTouchMove(event: TouchEvent): void {
+    if (this.touch.isPointerSessionActive) {
+      return;
+    }
     const shouldPrevent = this.touch.handleTouchMove(event);
     if (shouldPrevent) {
       event.preventDefault();
@@ -650,10 +665,16 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   }
   
   onUnassignedTouchEnd(event: TouchEvent): void {
+    if (this.touch.isPointerSessionActive) {
+      return;
+    }
     this.finishUnassignedTouchDrop(false, event);
   }
 
   onUnassignedTouchCancel(_event: TouchEvent): void {
+    if (this.touch.isPointerSessionActive) {
+      return;
+    }
     if (this.touch.deferCancelForPointerFallback()) {
       return;
     }
@@ -677,7 +698,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   }
 
   private hasPendingUnassignedTouch(): boolean {
-    return this.touch.hasActiveTouchSession || !!this.touch.draggingId();
+    return this.hasPendingUnassignedTouchDrag();
   }
 
   private cancelUnassignedTouchDrop(): void {
@@ -693,6 +714,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   }
 
   private handleGlobalTouchMove(event: TouchEvent): void {
+    if (this.touch.isPointerSessionActive) return;
     if (!this.hasPendingUnassignedTouch()) return;
 
     const shouldPrevent = this.touch.handleTouchMove(event);
@@ -705,6 +727,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   }
 
   private handleGlobalTouchEnd(event: TouchEvent): void {
+    if (this.touch.isPointerSessionActive) return;
     if (!this.hasPendingUnassignedTouch()) return;
     this.zone.run(() => this.finishUnassignedTouchDrop(false, event));
   }
@@ -714,6 +737,15 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     if (!event.isPrimary) return;
     if (!this.hasPendingUnassignedTouch()) return;
 
+    const shouldPrevent = this.touch.handlePointerMove(event);
+    if (shouldPrevent) {
+      if (event.cancelable) {
+        event.preventDefault();
+      }
+      event.stopPropagation();
+      return;
+    }
+
     const shouldKeepDragging = this.touch.handlePointerFallbackMove(event.clientX, event.clientY);
     if (!shouldKeepDragging) return;
 
@@ -721,6 +753,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   }
 
   private handleGlobalTouchCancel(_event: TouchEvent): void {
+    if (this.touch.isPointerSessionActive) return;
     if (!this.hasPendingUnassignedTouch()) return;
     this.zone.run(() => {
       if (this.touch.deferCancelForPointerFallback()) {
@@ -735,6 +768,18 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     if (!event.isPrimary) return;
     if (!this.hasPendingUnassignedTouch()) return;
     this.zone.run(() => {
+      if (this.touch.isPointerSessionActive) {
+        this.touch.endPointer(
+          event,
+          this.diagramDiv()?.nativeElement ?? null,
+          this.diagram.diagramInstance,
+          (task, insertInfo, docPoint) => {
+            this.dragDrop.processDrop(task, insertInfo, docPoint, UI_CONFIG.MEDIUM_DELAY);
+          },
+        );
+        return;
+      }
+
       const diagramElement = this.diagramDiv()?.nativeElement ?? null;
       const diagramInstance = this.diagram.diagramInstance;
       this.touch.endTouchAtPosition(
@@ -753,7 +798,20 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     if (event.pointerType !== 'touch') return;
     if (!event.isPrimary) return;
     if (!this.hasPendingUnassignedTouch()) return;
-    this.zone.run(() => this.cancelUnassignedTouchDrop());
+    this.zone.run(() => {
+      if (this.touch.isPointerSessionActive) {
+        this.touch.cancelPointer(
+          this.diagramDiv()?.nativeElement ?? null,
+          this.diagram.diagramInstance,
+          (task, insertInfo, docPoint) => {
+            this.dragDrop.processDrop(task, insertInfo, docPoint, UI_CONFIG.MEDIUM_DELAY);
+          },
+        );
+        return;
+      }
+
+      this.cancelUnassignedTouchDrop();
+    });
   }
   
   // ========== 待分配任务点击 ==========

@@ -5,7 +5,7 @@
  * 从 FlowPaletteComponent 中提取移动端专用内容
  */
 
-import { Component, ChangeDetectionStrategy, inject, signal, input, output, effect, OnDestroy, NgZone } from '@angular/core';
+import { Component, ChangeDetectionStrategy, computed, inject, signal, input, output, effect, OnDestroy, NgZone } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { SyncCoordinatorService } from '../../../../services/sync-coordinator.service';
@@ -34,7 +34,9 @@ import { writeTaskDragPayload } from '../../../../utils/task-drag-payload';
       </div>
       
       <!-- 滚动内容区域 -->
-      <div class="flex-1 overflow-y-auto overflow-x-hidden px-3 pb-8 flex flex-col gap-3 custom-scrollbar">
+       <div class="flex-1 overflow-x-hidden px-3 pb-8 flex flex-col gap-3 custom-scrollbar"
+         [class.overflow-y-auto]="!draggingTaskId()"
+         [class.overflow-y-hidden]="!!draggingTaskId()">
         
         <!-- 1. 待办事项 (To-Do) -->
         <div class="flex-none transition-all duration-300 overflow-hidden rounded-xl bg-orange-50/60 dark:bg-stone-800/60 border border-orange-100/50 dark:border-stone-700/50 backdrop-blur-md">
@@ -99,10 +101,11 @@ import { writeTaskDragPayload } from '../../../../utils/task-drag-payload';
                    id="unassignedPalette"
                    (dragover)="onDragOver($event)"
                    (drop)="onDrop($event)">
-                @for (task of projectState.unassignedTasks(); track task.id) {
+                @for (task of displayedUnassignedTasks(); track task.id) {
                   <div 
                     [draggable]="nativeHtmlDragEnabled"
                     (dragstart)="onDragStart($event, task)"
+                    (pointerdown)="onPointerDown($event, task)"
                     (touchstart)="onTouchStart($event, task)"
                     (touchmove)="onTouchMove($event)"
                     (touchend)="onTouchEnd($event)"
@@ -167,10 +170,14 @@ export class MobileTodoDrawerComponent implements OnDestroy {
   private readonly boundGlobalTouchFinish = this.handleGlobalTouchFinish.bind(this);
   private readonly boundGlobalPointerFinish = this.handleGlobalPointerFinish.bind(this);
   readonly nativeHtmlDragEnabled = typeof navigator === 'undefined' ? true : navigator.maxTouchPoints < 1;
+  readonly prefersPointerTouchDrag = typeof navigator !== 'undefined'
+    && navigator.maxTouchPoints > 0
+    && typeof PointerEvent !== 'undefined';
   
   // 输入
   readonly isDropTargetActive = input<boolean>(false);
   readonly draggingTaskId = input<string | null>(null);
+  readonly hasActiveDragSession = input<boolean>(false);
   
   // 输出事件
   readonly centerOnNode = output<string>();
@@ -182,6 +189,7 @@ export class MobileTodoDrawerComponent implements OnDestroy {
   readonly taskTouchMove = output<{ event: TouchEvent }>();
   readonly taskTouchEnd = output<{ event: TouchEvent }>();
   readonly taskTouchCancel = output<{ event: TouchEvent }>();
+  readonly taskPointerDown = output<{ event: PointerEvent; task: Task }>();
   /** 滑动切换视图事件 */
   readonly swipeToSwitch = output<SwipeDirection>();
   
@@ -197,6 +205,9 @@ export class MobileTodoDrawerComponent implements OnDestroy {
   private shouldAutoOpenUnassignedOnFirstContent = this.projectState.unassignedTasks().length === 0;
   private preserveUnfinishedOpenAfterLoading = false;
   private preserveUnassignedOpenAfterLoading = false;
+  private awaitingParentDragActivation = false;
+  private readonly unassignedDragSnapshot = signal<readonly Task[] | null>(null);
+  readonly displayedUnassignedTasks = computed(() => this.unassignedDragSnapshot() ?? this.projectState.unassignedTasks());
 
   constructor() {
     // 没有待办/待分配任务时默认折叠；仅在“从有到无”时再次自动收起，避免用户手动展开空状态后被反复打断。
@@ -236,6 +247,11 @@ export class MobileTodoDrawerComponent implements OnDestroy {
       const isLoadingRemote = this.syncCoordinator.isLoadingRemote();
       const currentCount = this.projectState.unassignedTasks().length;
 
+      if (this.unassignedDragSnapshot()) {
+        this.cancelPendingAutoCollapse('unassigned');
+        return;
+      }
+
       if (isLoadingRemote) {
         if (this.lastUnassignedCount === null) {
           this.lastUnassignedCount = currentCount;
@@ -262,6 +278,28 @@ export class MobileTodoDrawerComponent implements OnDestroy {
       }
 
       this.lastUnassignedCount = currentCount;
+    });
+
+    effect(() => {
+      const snapshot = this.unassignedDragSnapshot();
+      if (!snapshot) {
+        return;
+      }
+
+      if (this.hasActiveDragSession()) {
+        this.awaitingParentDragActivation = false;
+        return;
+      }
+
+      if (this.awaitingParentDragActivation) {
+        return;
+      }
+
+      queueMicrotask(() => {
+        if (!this.hasActiveDragSession() && !this.draggingTaskId()) {
+          this.unassignedDragSnapshot.set(null);
+        }
+      });
     });
 
     this.zone.runOutsideAngular(() => {
@@ -312,17 +350,30 @@ export class MobileTodoDrawerComponent implements OnDestroy {
   
   // 触摸事件
   onTouchStart(event: TouchEvent, task: Task): void {
+    if (this.prefersPointerTouchDrag) {
+      return;
+    }
+
     event.stopPropagation();
     this.suppressSwipeForCurrentTouch = true;
+    this.beginUnassignedDragSession();
     this.taskTouchStart.emit({ event, task });
   }
   
   onTouchMove(event: TouchEvent): void {
+    if (this.prefersPointerTouchDrag) {
+      return;
+    }
+
     event.stopPropagation();
     this.taskTouchMove.emit({ event });
   }
   
   onTouchEnd(event: TouchEvent): void {
+    if (this.prefersPointerTouchDrag) {
+      return;
+    }
+
     event.stopPropagation();
     this.captureDraggedTaskClickGuard();
     this.taskTouchEnd.emit({ event });
@@ -332,12 +383,27 @@ export class MobileTodoDrawerComponent implements OnDestroy {
   }
 
   onTouchCancel(event: TouchEvent): void {
+    if (this.prefersPointerTouchDrag) {
+      return;
+    }
+
     event.stopPropagation();
     this.captureDraggedTaskClickGuard();
     this.taskTouchCancel.emit({ event });
     queueMicrotask(() => {
       this.suppressSwipeForCurrentTouch = false;
     });
+  }
+
+  onPointerDown(event: PointerEvent, task: Task): void {
+    if (!this.prefersPointerTouchDrag || event.pointerType !== 'touch' || !event.isPrimary) {
+      return;
+    }
+
+    event.stopPropagation();
+    this.suppressSwipeForCurrentTouch = true;
+    this.beginUnassignedDragSession();
+    this.taskPointerDown.emit({ event, task });
   }
 
   onTaskClick(task: Task): void {
@@ -458,6 +524,7 @@ export class MobileTodoDrawerComponent implements OnDestroy {
 
     queueMicrotask(() => {
       this.suppressSwipeForCurrentTouch = false;
+      this.finalizeUnassignedDragSession();
     });
 
     if (event.type === 'touchcancel') {
@@ -476,6 +543,7 @@ export class MobileTodoDrawerComponent implements OnDestroy {
 
     queueMicrotask(() => {
       this.suppressSwipeForCurrentTouch = false;
+      this.finalizeUnassignedDragSession();
     });
 
     if (event.type === 'pointercancel') {
@@ -491,6 +559,23 @@ export class MobileTodoDrawerComponent implements OnDestroy {
 
   private resetSwipeState(): void {
     this.swipeState = { startX: 0, startY: 0, startTime: 0, isActive: false };
+  }
+
+  private beginUnassignedDragSession(): void {
+    this.awaitingParentDragActivation = true;
+    if (!this.unassignedDragSnapshot()) {
+      this.unassignedDragSnapshot.set(this.projectState.unassignedTasks().slice());
+    }
+    this.cancelPendingAutoCollapse('unassigned');
+    this.isUnassignedOpen.set(true);
+  }
+
+  private finalizeUnassignedDragSession(): void {
+    if (this.hasActiveDragSession() || this.draggingTaskId()) {
+      return;
+    }
+    this.awaitingParentDragActivation = false;
+    this.unassignedDragSnapshot.set(null);
   }
 
   private scheduleAutoCollapse(section: 'unfinished' | 'unassigned'): void {
