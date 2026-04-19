@@ -50,11 +50,13 @@ export function extractAndroidHostPackage(referrer: string | null | undefined): 
 export function resolveRuntimePlatformSnapshot(input: RuntimePlatformInput): RuntimePlatformSnapshot {
   const userAgent = typeof input.userAgent === 'string' ? input.userAgent : '';
   const displayModes = normalizeDisplayModes(input.displayModes);
-  const isAndroid = /Android/i.test(userAgent);
   const isIos = /iPhone|iPad|iPod/i.test(userAgent);
   const isStandalone = input.navigatorStandalone === true
     || displayModes.some(mode => STANDALONE_DISPLAY_MODES.has(mode));
   const androidHostPackage = extractAndroidHostPackage(input.referrer);
+  // 2026-04-19: Chrome 147+ 在 TWA/CCT 内默认返回桌面 UA (User-Agent Reduction)，不再包含 "Android"。
+  // 使用 android-app:// referrer 作为补充 Android 判定信号，避免 widget bootstrap 信任门误判。
+  const isAndroid = /Android/i.test(userAgent) || androidHostPackage !== null;
   const isTwa = isAndroid && isStandalone && androidHostPackage !== null;
 
   return {

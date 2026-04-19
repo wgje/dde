@@ -1381,9 +1381,13 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
       return true;
     }
 
+    // 2026-04-19: 放宽 Android 浏览器 fallback 的判定。widget 点击冷启动时 URL 会携带 entry=widget；
+    // 当 Chrome 以 Custom Tab 接管（isTwa=false）时，原仅接受 entry=twa 的判定会把合法 widget
+    // bootstrap 请求误判为不可信，导致 widget 永远停留在 binding-missing 状态。
+    const entryKind = resolveStartupEntryIntent(routeUrl)?.entry;
     if (
       runtimePlatform.isAndroid
-      && resolveStartupEntryIntent(routeUrl)?.entry === 'twa'
+      && (entryKind === 'twa' || entryKind === 'widget')
       && hasAndroidWidgetBootstrapFlag(routeUrl)
     ) {
       return true;
