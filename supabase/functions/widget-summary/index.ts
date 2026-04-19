@@ -973,7 +973,9 @@ Deno.serve(async (req: Request) => {
     const task = slot.taskId ? taskMap.get(slot.taskId) : null;
     const projectId = task?.project_id ?? slot.sourceProjectId ?? null;
     const project = projectId ? projectMap.get(projectId) ?? null : null;
-    const validTask = slot.taskId ? Boolean(task) : true;
+    // 2026-04-19 inline 任务兼容：见上方 focusValid 同款说明，允许 inlineTitle 回退
+    const hasInlineFallback = typeof slot.inlineTitle === 'string' && slot.inlineTitle.trim().length > 0;
+    const validTask = slot.taskId ? (Boolean(task) || hasInlineFallback) : true;
     const validProject = projectId ? Boolean(project) : true;
     const valid = validTask && validProject;
 
@@ -1132,10 +1134,24 @@ Deno.serve(async (req: Request) => {
     createdAt: null,
     valid: false,
   };
+  // 2026-04-19 inline 任务兼容：dock 里的 inline/dock-created 任务（sourceBlockType=text、
+  // sourceProjectId=null、有 inlineTitle）的 taskId 是客户端生成的 UUID，不会在 tasks 表里命中。
+  // 过去这种情况被当作 soft-delete 导致 focus.active=false，widget 错误降级到 gate/dock 视图。
+  // 这里允许 inlineTitle 作为 fallback 把它当作有效的 focus target。
+  const focusHasInlineFallback = hasRenderableFocusTarget
+    && typeof primarySlot?.inlineTitle === 'string'
+    && primarySlot.inlineTitle.trim().length > 0;
+  const focusTaskMissing = Boolean(primarySlot?.taskId) && !focusTask;
+  const focusTaskIsInline = focusTaskMissing && focusHasInlineFallback;
   const focusValid = hasRenderableFocusTarget
-    ? ((primarySlot.taskId ? Boolean(focusTask) : true) && (focusProjectId ? Boolean(focusProject) : true))
+    ? (
+        (primarySlot.taskId ? (Boolean(focusTask) || focusTaskIsInline) : true)
+        && (focusProjectId ? Boolean(focusProject) : true)
+      )
     : false;
-  const hasSoftDeleteTarget = dockItems.some(item => !item.valid) || (primarySlot?.taskId && !focusTask) || (focusProjectId && !focusProject);
+  const hasSoftDeleteTarget = dockItems.some(item => !item.valid)
+    || (focusTaskMissing && !focusTaskIsInline)
+    || (focusProjectId && !focusProject);
   const entryUrl = buildEntryUrlFromContext({
     forceWorkspaceFallback: hasSoftDeleteTarget,
     focusValid,
