@@ -64,6 +64,7 @@ function createSupabaseMock() {
   const del = vi.fn(() => ({ eq: eqFn }));
   const insert = vi.fn().mockResolvedValue({ error: null });
   const rpc = vi.fn().mockResolvedValue({ data: 1, error: null });
+  const selectAfterMutation = vi.fn().mockResolvedValue({ data: [{ id: 'matched' }], error: null });
 
   const inFn = vi.fn().mockResolvedValue({ error: null });
   const isFn = vi.fn().mockResolvedValue({ data: [], error: null });
@@ -72,6 +73,7 @@ function createSupabaseMock() {
     p.in = inFn;
     p.eq = eqFn;
     p.is = isFn;
+    p.select = selectAfterMutation;
     return p;
   });
   const update = vi.fn(() => ({ eq: eqFn }));
@@ -93,7 +95,7 @@ function createSupabaseMock() {
     client: () => ({ from, rpc }),
   } as unknown as SupabaseClientService;
 
-  return { mockSupabaseClientService, from, upsert, update, del, insert, rpc, inFn, eqFn };
+  return { mockSupabaseClientService, from, upsert, update, del, insert, rpc, inFn, eqFn, selectAfterMutation };
 }
 
 describe('TaskRepositoryBatchService', () => {
@@ -340,6 +342,53 @@ describe('TaskRepositoryBatchService', () => {
 
       expect(result.success).toBe(true);
       expect(result.stats).toBeDefined();
+    });
+
+    it('should soft delete connections by id instead of endpoint pair', async () => {
+      const conn = createConnection({ id: 'conn-delete', source: 'a', target: 'b' });
+
+      const result = await service.syncConnectionsIncremental('proj-1', [], [], [conn]);
+
+      expect(result.success).toBe(true);
+      expect(supabaseMock.update).toHaveBeenCalledWith(expect.objectContaining({ deleted_at: expect.any(String) }));
+      const updateChain = supabaseMock.update.mock.results[0]?.value;
+      expect(updateChain.eq).toHaveBeenCalledWith('project_id', 'proj-1');
+      expect(updateChain.eq).toHaveBeenCalledWith('id', 'conn-delete');
+      expect(supabaseMock.selectAfterMutation).toHaveBeenCalledWith('id');
+    });
+
+    it('should upsert create and update batches by id', async () => {
+      const created = createConnection({ id: 'conn-new', source: 'a', target: 'b' });
+      const updated = createConnection({ id: 'conn-existing', source: 'a', target: 'b', description: 'changed' });
+
+      const result = await service.syncConnectionsIncremental('proj-1', [created], [updated], []);
+
+      expect(result.success).toBe(true);
+      expect(supabaseMock.upsert).toHaveBeenNthCalledWith(
+        1,
+        [expect.objectContaining({ id: 'conn-new', project_id: 'proj-1', source_id: 'a', target_id: 'b' })],
+        { onConflict: 'id' }
+      );
+      expect(supabaseMock.upsert).toHaveBeenNthCalledWith(
+        2,
+        [expect.objectContaining({ id: 'conn-existing', project_id: 'proj-1', source_id: 'a', target_id: 'b' })],
+        { onConflict: 'id' }
+      );
+    });
+
+    it('should treat missing remote rows as idempotent delete success', async () => {
+      supabaseMock.selectAfterMutation.mockResolvedValue({ data: [], error: null });
+
+      const result = await service.syncConnectionsIncremental(
+        'proj-1',
+        [],
+        [],
+        [createConnection({ id: 'missing-conn', source: 'a', target: 'b' })]
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.stats?.deleted).toBe(0);
+      expect(mockLoggerCategory.warn).toHaveBeenCalled();
     });
   });
 });

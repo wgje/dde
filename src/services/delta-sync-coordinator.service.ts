@@ -11,7 +11,7 @@
 
 import { Injectable, inject } from '@angular/core';
 import { SimpleSyncService, TombstoneService } from '../core-bridge';
-import { ConflictResolutionService } from './conflict-resolution.service';
+import { ConflictDetectionService } from './conflict-detection.service';
 import { ProjectStateService } from './project-state.service';
 import { LoggerService } from './logger.service';
 import { Project, Task, Connection } from '../models';
@@ -23,7 +23,7 @@ import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 export class DeltaSyncCoordinatorService {
   private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly syncService = inject(SimpleSyncService);
-  private readonly conflictService = inject(ConflictResolutionService);
+  private readonly conflictDetection = inject(ConflictDetectionService);
   private readonly projectState = inject(ProjectStateService);
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('DeltaSyncCoordinator');
@@ -189,35 +189,7 @@ export class DeltaSyncCoordinatorService {
     deltaConnections: Connection[],
     _projectId: string
   ): Connection[] {
-    const connMap = new Map(existingConnections.map(c => [c.id, c]));
-    
-    for (const deltaConn of deltaConnections) {
-      const existing = connMap.get(deltaConn.id);
-      const existingTime = existing?.updatedAt ? new Date(existing.updatedAt).getTime() : 0;
-      const deltaTime = deltaConn.updatedAt ? new Date(deltaConn.updatedAt).getTime() : 0;
-
-      // NaN 保护
-      if (Number.isNaN(deltaTime) || Number.isNaN(existingTime)) {
-        this.logger.warn('Delta Sync: 连接时间戳无效，跳过合并', {
-          connectionId: deltaConn.id,
-          deltaUpdatedAt: deltaConn.updatedAt,
-          existingUpdatedAt: existing?.updatedAt
-        });
-        continue;
-      }
-
-      if (existing && deltaTime < existingTime) {
-        continue;
-      }
-
-      if (deltaConn.deletedAt) {
-        connMap.delete(deltaConn.id);
-      } else {
-        connMap.set(deltaConn.id, deltaConn);
-      }
-    }
-    
-    return Array.from(connMap.values());
+    return this.conflictDetection.mergeConnections(existingConnections, deltaConnections);
   }
 
   /**

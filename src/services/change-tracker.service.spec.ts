@@ -119,21 +119,35 @@ describe('ChangeTrackerService', () => {
     });
 
     it('应该追踪连接删除', () => {
-      service.trackConnectionDelete('project-1', 'task-1', 'task-2');
+      service.trackConnectionDelete('project-1', mockConnection);
 
       const changes = service.getProjectChanges('project-1');
       expect(changes.connectionsToDelete).toHaveLength(1);
-      expect(changes.connectionsToDelete[0]).toEqual({ source: 'task-1', target: 'task-2' });
+      expect(changes.connectionsToDelete[0]).toEqual({ id: 'conn-1', source: 'task-1', target: 'task-2' });
     });
 
     it('创建后删除应该抵消', () => {
       service.trackConnectionCreate('project-1', mockConnection);
-      service.trackConnectionDelete('project-1', 'task-1', 'task-2');
+      service.trackConnectionDelete('project-1', mockConnection);
 
       const changes = service.getProjectChanges('project-1');
       expect(changes.connectionsToCreate).toHaveLength(0);
       expect(changes.connectionsToDelete).toHaveLength(0);
       expect(changes.hasChanges).toBe(false);
+    });
+
+    it('同端点但不同 id 的连接不应在待同步队列中互相覆盖', () => {
+      service.trackConnectionCreate('project-1', mockConnection);
+      service.trackConnectionCreate('project-1', {
+        ...mockConnection,
+        id: 'conn-2',
+        description: 'Another connection with same endpoints'
+      });
+
+      const changes = service.getProjectChanges('project-1');
+
+      expect(changes.connectionsToCreate).toHaveLength(2);
+      expect(changes.connectionsToCreate.map(connection => connection.id)).toEqual(['conn-1', 'conn-2']);
     });
   });
 

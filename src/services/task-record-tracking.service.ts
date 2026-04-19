@@ -42,6 +42,18 @@ export class TaskRecordTrackingService {
   /** 上次更新类型（由 adapter 在调用 core 方法前设置） */
   lastUpdateType: 'content' | 'structure' | 'position' = 'structure';
 
+  private getConnectionTrackingKey(connection: Pick<Connection, 'id' | 'source' | 'target'>): string | null {
+    if (!connection.id) {
+      this.logger.error('连接缺少 id，已跳过变更追踪', {
+        source: connection.source,
+        target: connection.target,
+      });
+      return null;
+    }
+
+    return connection.id;
+  }
+
   // ========== Toast 辅助 ==========
 
   /** 显示带撤销按钮的 Toast（移动端带按钮，桌面端纯文字提示） */
@@ -180,7 +192,13 @@ export class TaskRecordTrackingService {
       const beforeSnapshot = this.undoService.createProjectSnapshot(project);
       const currentVersion = project.version ?? 0;
       const beforeTaskMap = new Map(project.tasks.map(t => [t.id, t]));
-      const beforeConnectionMap = new Map(project.connections.map(c => [`${c.source}|${c.target}`, c]));
+      const beforeConnectionMap = new Map<string, Connection>();
+      for (const connection of project.connections) {
+        const key = this.getConnectionTrackingKey(connection);
+        if (key) {
+          beforeConnectionMap.set(key, connection);
+        }
+      }
 
       let afterProject: Project | null = null;
       this.projectState.updateProjects(projects => projects.map(p => {
@@ -234,7 +252,13 @@ export class TaskRecordTrackingService {
       const beforeSnapshot = this.undoService.createProjectSnapshot(project);
       const currentVersion = project.version ?? 0;
       const beforeTaskMap = new Map(project.tasks.map(t => [t.id, t]));
-      const beforeConnectionMap = new Map(project.connections.map(c => [`${c.source}|${c.target}`, c]));
+      const beforeConnectionMap = new Map<string, Connection>();
+      for (const connection of project.connections) {
+        const key = this.getConnectionTrackingKey(connection);
+        if (key) {
+          beforeConnectionMap.set(key, connection);
+        }
+      }
 
       let afterProject: Project | null = null;
       this.projectState.updateProjects(projects => projects.map(p => {
@@ -329,26 +353,30 @@ export class TaskRecordTrackingService {
 
     const afterConnectionMap = new Map<string, Connection>();
     for (const conn of afterProject.connections) {
-      const key = `${conn.source}|${conn.target}`;
+      const key = this.getConnectionTrackingKey(conn);
+      if (!key) {
+        continue;
+      }
       afterConnectionMap.set(key, conn);
       const beforeConn = beforeConnectionMap.get(key);
 
       if (!beforeConn) {
         this.changeTracker.trackConnectionCreate(projectId, conn);
       } else {
+        const sourceChanged = beforeConn.source !== conn.source;
+        const targetChanged = beforeConn.target !== conn.target;
         const titleChanged = beforeConn.title !== conn.title;
         const deletedAtChanged = beforeConn.deletedAt !== conn.deletedAt;
         const descriptionChanged = beforeConn.description !== conn.description;
-        if (titleChanged || deletedAtChanged || descriptionChanged) {
+        if (sourceChanged || targetChanged || titleChanged || deletedAtChanged || descriptionChanged) {
           this.changeTracker.trackConnectionUpdate(projectId, conn);
         }
       }
     }
 
-    for (const [key, _] of beforeConnectionMap) {
+    for (const [key, beforeConn] of beforeConnectionMap) {
       if (!afterConnectionMap.has(key)) {
-        const [source, target] = key.split('|');
-        this.changeTracker.trackConnectionDelete(projectId, source, target);
+        this.changeTracker.trackConnectionDelete(projectId, beforeConn);
       }
     }
   }

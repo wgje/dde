@@ -5,6 +5,7 @@ import { Task, Connection } from '../models';
 import { supabaseErrorToError } from '../utils/supabase-error';
 import { FIELD_SELECT_CONFIG } from '../config/sync.config';
 import { BATCH_RETRY_BASE_MS } from '../config/timeout.config';
+import type { ConnectionDeleteSummary } from './change-tracker.types';
 import type { TaskRow, ConnectionRow } from './task-repository.types';
 
 /**
@@ -420,7 +421,7 @@ export class TaskRepositoryBatchService {
     projectId: string,
     connectionsToCreate: Connection[],
     connectionsToUpdate: Connection[],
-    connectionsToDelete: { source: string; target: string }[]
+    connectionsToDelete: ConnectionDeleteSummary[]
   ): Promise<{ success: boolean; error?: string; stats?: { created: number; updated: number; deleted: number } }> {
     if (!this.supabase.isConfigured) return { success: true };
     
@@ -438,22 +439,30 @@ export class TaskRepositoryBatchService {
         for (const conn of batch) {
           let success = false;
           for (let retry = 0; retry <= MAX_RETRIES && !success; retry++) {
-            const { error } = await this.supabase.client()
+            const { data, error } = await this.supabase.client()
               .from('connections')
               .update({ deleted_at: deletedAt })
               .eq('project_id', projectId)
-              .eq('source_id', conn.source)
-              .eq('target_id', conn.target);
+              .eq('id', conn.id)
+              .select('id');
             
             if (error) {
               if (retry < MAX_RETRIES) {
                 await new Promise(r => setTimeout(r, BATCH_RETRY_BASE_MS * (retry + 1)));
               } else {
-                errors.push(`删除连接失败 ${conn.source}->${conn.target}: ${error.message}`);
+                errors.push(`删除连接失败 ${conn.id} (${conn.source}->${conn.target}): ${error.message}`);
               }
+            } else if (!data || data.length === 0) {
+              this.logger.warn('连接删除未命中远端记录，按幂等成功处理', {
+                projectId,
+                connectionId: conn.id,
+                source: conn.source,
+                target: conn.target,
+              });
+              success = true;
             } else {
               success = true;
-              stats.deleted++;
+              stats.deleted += data.length;
             }
           }
         }
@@ -465,6 +474,7 @@ export class TaskRepositoryBatchService {
       for (let i = 0; i < connectionsToCreate.length; i += BATCH_SIZE) {
         const batch = connectionsToCreate.slice(i, i + BATCH_SIZE);
         const rows = batch.map(conn => ({
+          id: conn.id,
           project_id: projectId,
           source_id: conn.source,
           target_id: conn.target,
@@ -477,7 +487,7 @@ export class TaskRepositoryBatchService {
         for (let retry = 0; retry <= MAX_RETRIES && !success; retry++) {
           const { error } = await this.supabase.client()
             .from('connections')
-            .upsert(rows, { onConflict: 'project_id,source_id,target_id' });
+            .upsert(rows, { onConflict: 'id' });
           
           if (error) {
             if (retry < MAX_RETRIES) {
@@ -498,6 +508,7 @@ export class TaskRepositoryBatchService {
       for (let i = 0; i < connectionsToUpdate.length; i += BATCH_SIZE) {
         const batch = connectionsToUpdate.slice(i, i + BATCH_SIZE);
         const rows = batch.map(conn => ({
+          id: conn.id,
           project_id: projectId,
           source_id: conn.source,
           target_id: conn.target,
@@ -510,7 +521,7 @@ export class TaskRepositoryBatchService {
         for (let retry = 0; retry <= MAX_RETRIES && !success; retry++) {
           const { error } = await this.supabase.client()
             .from('connections')
-            .upsert(rows, { onConflict: 'project_id,source_id,target_id' });
+            .upsert(rows, { onConflict: 'id' });
           
           if (error) {
             if (retry < MAX_RETRIES) {

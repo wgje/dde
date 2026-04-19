@@ -368,6 +368,93 @@ describe('TaskRecordTrackingService', () => {
         expect.objectContaining({ title: '新标题', description: '旧描述' })
       );
     });
+
+    it('should track active connection update by id even when deleted history shares the same endpoints', () => {
+      const activeConnection = createConnection({
+        id: 'conn-active',
+        title: '活跃标题',
+        description: '活跃描述',
+      });
+      const deletedHistory = createConnection({
+        id: 'conn-deleted',
+        title: '历史标题',
+        description: '历史描述',
+        deletedAt: '2026-04-19T00:00:00.000Z',
+        updatedAt: '2026-04-19T00:00:00.000Z',
+      });
+      const project = createProject({
+        connections: [activeConnection, deletedHistory],
+      });
+      mockProjectState.activeProject.mockReturnValue(project);
+      mockProjectState.updateProjects.mockImplementation((fn: (projects: Project[]) => Project[]) => {
+        fn([project]);
+      });
+
+      service.recordAndUpdateDebounced((p) => ({
+        ...p,
+        connections: p.connections.map(conn => (
+          conn.id === 'conn-active'
+            ? { ...conn, title: '已更新标题' }
+            : conn
+        )),
+      }));
+
+      expect(mockChangeTracker.trackConnectionUpdate).toHaveBeenCalledWith(
+        'proj-1',
+        expect.objectContaining({
+          id: 'conn-active',
+          title: '已更新标题',
+          description: '活跃描述',
+        })
+      );
+    });
+
+    it('should ignore malformed connections without ids instead of throwing', () => {
+      const project = createProject({
+        connections: [createConnection({ id: '' as unknown as string })],
+      });
+      mockProjectState.activeProject.mockReturnValue(project);
+      mockProjectState.updateProjects.mockImplementation((fn: (projects: Project[]) => Project[]) => {
+        fn([project]);
+      });
+
+      expect(() => {
+        service.recordAndUpdateDebounced((p) => ({
+          ...p,
+          name: 'Updated project name',
+        }));
+      }).not.toThrow();
+
+      expect(mockLoggerCategory.error).toHaveBeenCalled();
+    });
+
+    it('should track connection update when endpoints change but id stays the same', () => {
+      const project = createProject({
+        connections: [createConnection({ id: 'conn-relink', source: 'task-1', target: 'task-2' })],
+      });
+      mockProjectState.activeProject.mockReturnValue(project);
+      mockProjectState.updateProjects.mockImplementation((fn: (projects: Project[]) => Project[]) => {
+        fn([project]);
+      });
+
+      service.recordAndUpdateDebounced((p) => ({
+        ...p,
+        connections: p.connections.map(conn => (
+          conn.id === 'conn-relink'
+            ? { ...conn, target: 'task-3' }
+            : conn
+        )),
+      }));
+
+      expect(mockChangeTracker.trackConnectionUpdate).toHaveBeenCalledWith(
+        'proj-1',
+        expect.objectContaining({
+          id: 'conn-relink',
+          source: 'task-1',
+          target: 'task-3',
+        })
+      );
+    });
   });
 
   // ==================== triggerServerSideDelete ====================

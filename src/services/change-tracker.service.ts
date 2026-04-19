@@ -6,6 +6,7 @@ import { LoggerService } from './logger.service';
 import {
   EntityType,
   ChangeRecord,
+  ConnectionDeleteSummary,
   ProjectChangeSummary,
   FieldLockData
 } from './change-tracker.types';
@@ -15,6 +16,7 @@ export type {
   ChangeType,
   EntityType,
   ChangeRecord,
+  ConnectionDeleteSummary,
   ProjectChangeSummary,
   FieldLockData
 } from './change-tracker.types';
@@ -128,7 +130,8 @@ export class ChangeTrackerService {
   }
   /** 标记连接创建 */
   trackConnectionCreate(projectId: string, connection: Connection): void {
-    const connectionId = this.makeConnectionId(connection.source, connection.target);
+    const connectionId = this.tryGetConnectionId(connection, 'create');
+    if (!connectionId) return;
     const key = this.makeKey(projectId, 'connection', connectionId);
     
     const existing = this.pendingChanges.get(key);
@@ -158,7 +161,8 @@ export class ChangeTrackerService {
   }
   /** 标记连接更新 */
   trackConnectionUpdate(projectId: string, connection: Connection): void {
-    const connectionId = this.makeConnectionId(connection.source, connection.target);
+    const connectionId = this.tryGetConnectionId(connection, 'update');
+    if (!connectionId) return;
     const key = this.makeKey(projectId, 'connection', connectionId);
     
     const existing = this.pendingChanges.get(key);
@@ -185,8 +189,9 @@ export class ChangeTrackerService {
     this.logger.debug('追踪连接更新', { projectId, source: connection.source, target: connection.target });
   }
   /** 标记连接删除 */
-  trackConnectionDelete(projectId: string, source: string, target: string): void {
-    const connectionId = this.makeConnectionId(source, target);
+  trackConnectionDelete(projectId: string, connection: Pick<Connection, 'id' | 'source' | 'target'>): void {
+    const connectionId = this.tryGetConnectionId(connection, 'delete');
+    if (!connectionId) return;
     const key = this.makeKey(projectId, 'connection', connectionId);
     
     const existing = this.pendingChanges.get(key);
@@ -201,12 +206,21 @@ export class ChangeTrackerService {
         changeType: 'delete',
         projectId,
         timestamp: Date.now(),
-        data: { source, target } as unknown as Connection
+        data: {
+          id: connection.id,
+          source: connection.source,
+          target: connection.target,
+        } as Connection
       });
     }
     
     this.updateCounters();
-    this.logger.debug('追踪连接删除', { projectId, source, target });
+    this.logger.debug('追踪连接删除', {
+      projectId,
+      connectionId,
+      source: connection.source,
+      target: connection.target,
+    });
   }
   /** 获取项目的变更摘要 */
   getProjectChanges(projectId: string): ProjectChangeSummary {
@@ -215,11 +229,12 @@ export class ChangeTrackerService {
     const taskIdsToDelete: string[] = [];
     const connectionsToCreate: Connection[] = [];
     const connectionsToUpdate: Connection[] = [];
-    const connectionsToDelete: { source: string; target: string }[] = [];
+    const connectionsToDelete: ConnectionDeleteSummary[] = [];
+    const invalidConnectionDeleteKeys: string[] = [];
     // 【流量优化 2026-01-12】收集每个任务的变更字段
     const taskUpdateFieldsById: Record<string, string[] | undefined> = {};
     
-    this.pendingChanges.forEach((record) => {
+    this.pendingChanges.forEach((record, recordKey) => {
       if (record.projectId === projectId) {
         if (record.entityType === 'task') {
           switch (record.changeType) {
@@ -246,14 +261,33 @@ export class ChangeTrackerService {
               if (record.data) connectionsToUpdate.push(record.data as Connection);
               break;
             case 'delete': {
-              const conn = record.data as { source: string; target: string };
-              if (conn) connectionsToDelete.push({ source: conn.source, target: conn.target });
+              const conn = record.data as Partial<Connection> | undefined;
+              if (conn?.id && conn.source && conn.target) {
+                connectionsToDelete.push({
+                  id: conn.id,
+                  source: conn.source,
+                  target: conn.target,
+                });
+              } else {
+                invalidConnectionDeleteKeys.push(recordKey);
+                this.logger.error('连接删除记录缺少显式 id，已丢弃非法待同步项', {
+                  projectId,
+                  entityId: record.entityId,
+                });
+              }
               break;
             }
           }
         }
       }
     });
+
+    if (invalidConnectionDeleteKeys.length > 0) {
+      for (const invalidKey of invalidConnectionDeleteKeys) {
+        this.pendingChanges.delete(invalidKey);
+      }
+      this.updateCounters();
+    }
     
     const totalChanges = 
       tasksToCreate.length + tasksToUpdate.length + taskIdsToDelete.length +
@@ -274,13 +308,7 @@ export class ChangeTrackerService {
   }
   /** 检查项目是否有待同步的变更 */
   hasProjectChanges(projectId: string): boolean {
-    let hasChanges = false;
-    this.pendingChanges.forEach(record => {
-      if (record.projectId === projectId) {
-        hasChanges = true;
-      }
-    });
-    return hasChanges;
+    return this.getProjectChanges(projectId).hasChanges;
   }
   /** 清除项目的所有变更记录 */
   clearProjectChanges(projectId: string): number {
@@ -786,14 +814,21 @@ export class ChangeTrackerService {
   private makeKey(projectId: string, entityType: EntityType, entityId: string): string {
     return `${projectId}:${entityType}:${entityId}`;
   }
-  
-  private makeConnectionId(source: string, target: string): string {
-    return `${source}|${target}`;
-  }
-  
-  private parseConnectionId(connectionId: string): { source: string; target: string } {
-    const [source, target] = connectionId.split('|');
-    return { source, target };
+
+  private tryGetConnectionId(
+    connection: Pick<Connection, 'id' | 'source' | 'target'>,
+    changeType: 'create' | 'update' | 'delete',
+  ): string | null {
+    if (!connection.id) {
+      this.logger.error('连接缺少 id，已拒绝追踪变更', {
+        changeType,
+        source: connection.source,
+        target: connection.target,
+      });
+      return null;
+    }
+
+    return connection.id;
   }
   
   private mergeFields(existing?: string[], added?: string[]): string[] | undefined {

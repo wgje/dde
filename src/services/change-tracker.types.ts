@@ -35,6 +35,12 @@ export interface ChangeRecord {
   data?: Task | Connection;
 }
 
+export interface ConnectionDeleteSummary {
+  id: string;
+  source: string;
+  target: string;
+}
+
 /**
  * 项目变更摘要
  */
@@ -50,8 +56,8 @@ export interface ProjectChangeSummary {
   connectionsToCreate: Connection[];
   /** 需要更新的连接 */
   connectionsToUpdate: Connection[];
-  /** 需要删除的连接（source, target 对） */
-  connectionsToDelete: { source: string; target: string }[];
+  /** 需要删除的连接（带显式 id，避免同端点多记录误删） */
+  connectionsToDelete: ConnectionDeleteSummary[];
   /** 是否有任何变更 */
   hasChanges: boolean;
   /** 总变更数量 */
