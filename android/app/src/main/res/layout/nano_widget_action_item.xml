@@ -8,8 +8,8 @@
     android:layout_height="wrap_content"
   android:paddingStart="2dp"
   android:paddingEnd="2dp"
-    android:paddingTop="2dp"
-    android:paddingBottom="2dp">
+    android:paddingTop="1dp"
+    android:paddingBottom="1dp">
 
     <TextView
         android:id="@+id/nano_widget_action_chip"
@@ -20,11 +20,11 @@
         android:singleLine="true"
         android:ellipsize="end"
         android:maxLines="1"
-      android:minHeight="36dp"
+      android:minHeight="28dp"
       android:paddingStart="8dp"
       android:paddingEnd="8dp"
-    android:paddingTop="8dp"
-    android:paddingBottom="8dp"
+    android:paddingTop="4dp"
+    android:paddingBottom="4dp"
         android:text=""
         android:textColor="#4A7A38"
       android:textSize="11sp" />
