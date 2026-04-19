@@ -283,20 +283,47 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
     const val EXTRA_PRIMARY_ACTION = "extra.PRIMARY_ACTION"
 
     // --- PendingIntent builders ---
+    /**
+     * 整卡主点击：直接挂载 `PendingIntent.getActivity()` 指向 [NanoflowTwaLauncherActivity]。
+     *
+     * 历史实现走 `PendingIntent.getBroadcast()` 中转到 [NanoflowWidgetReceiver]，再由
+     * receiver 调用 `context.startActivity(...)`。但从 Android 14 / targetSdk 34+ 开始，
+     * BroadcastReceiver 的运行上下文属于 `RECEIVER` 进程状态，receiver 内发起的
+     * `startActivity` 不继承 PendingIntent sender（com.miui.home）的 BAL 授权，
+     * 会被系统以 `BAL_BLOCK / result code=102` 拒绝，导致 widget 点击后 LauncherActivity
+     * 永远启动不起来，widget bootstrap 永远跑不到 `widget-register`，于是 widget 永远
+     * 停留在 `binding-missing` 状态（即用户反馈的「无法进行绑定」）。
+     *
+     * 改为 `getActivity()` 后，PendingIntent 的目标直接就是 Activity，launcher 侧
+     * （sender）作为前台应用本就持有 BAL 授权，Android 会按 sender 的授权放行启动，
+     * 绕过 receiver 中转，根治 BAL 阻断问题。
+     */
     fun primaryActionPendingIntent(
       context: Context,
       appWidgetId: Int,
       action: WidgetPrimaryAction,
     ): PendingIntent {
-      val intentAction = when (action) {
+      val launchIntent = when (action) {
+        WidgetPrimaryAction.OPEN_WORKSPACE -> NanoFlowLaunchIntent.OPEN_WORKSPACE
+        WidgetPrimaryAction.OPEN_FOCUS_TOOLS -> NanoFlowLaunchIntent.OPEN_FOCUS_TOOLS
+      }
+      val activityIntent = NanoflowTwaLauncherActivity.intentForWidget(
+        context = context,
+        appWidgetId = appWidgetId,
+        launchIntent = launchIntent,
+      )
+      // 保留 `widget.CLICK_OPEN_APP` 语义作为 requestCode 维度，避免跨动作共享同一
+      // PendingIntent 实例；widgetId + action 组合生成稳定的唯一 requestCode。
+      val requestKey = when (action) {
         WidgetPrimaryAction.OPEN_WORKSPACE -> ACTION_CLICK_OPEN_APP
         WidgetPrimaryAction.OPEN_FOCUS_TOOLS -> ACTION_CLICK_OPEN_FOCUS_TOOLS
       }
-      return broadcastPendingIntent(
-        context = context,
-        intentAction = intentAction,
-        requestCode = requestCodeFor(appWidgetId, intentAction),
-        extras = mapOf<String, Any>(EXTRA_APP_WIDGET_ID to appWidgetId),
+      val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+      return PendingIntent.getActivity(
+        context,
+        requestCodeFor(appWidgetId, requestKey),
+        activityIntent,
+        flags,
       )
     }
 
@@ -311,8 +338,15 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
     }
 
     /**
-     * 集合视图 item 点击模板 PendingIntent。
-     * 构造时 Intent 的 extras 只包含基础字段，item 侧通过 fillInIntent 补齐具体 EXTRA_ITEM_TYPE 等。
+     * 集合视图 item 点击模板 PendingIntent（广播路径）。
+     *
+     * 仅用于 tabs / refresh / gate 这类「改本地状态、不启动 activity」的列表 —— 这些
+     * 交互只在 receiver 内完成 store 更新和 partial update，不触发 BAL。
+     *
+     * **禁止** 在 content 列表（主点击打开 App）上复用此模板：content 列表每 item 的
+     * 点击都需要启动 LauncherActivity，走 receiver 中转会触发 Android 14+ 的
+     * BAL_BLOCK。请改用 [contentListClickTemplatePendingIntent]。
+     *
      * 注意：模板必须使用 `FLAG_MUTABLE` 以允许 fillIn 合并 extras。
      */
     fun actionListClickTemplatePendingIntent(context: Context, appWidgetId: Int): PendingIntent {
@@ -324,6 +358,47 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
       return PendingIntent.getBroadcast(
         context,
         requestCodeFor(appWidgetId, ACTION_CLICK_ITEM),
+        template,
+        flags,
+      )
+    }
+
+    /**
+     * Content 列表点击模板：直接 `getActivity()` 指向 [NanoflowTwaLauncherActivity]。
+     *
+     * Content 列表目前只含一个 PRIMARY item（整卡主点击的镜像），点击后必须启动
+     * LauncherActivity 以触发 widget bootstrap。若继续沿用广播模板 + receiver
+     * 中转，会被 Android 14+ BAL 拦截（`callingUidProcState=RECEIVER` 下
+     * `startActivity` 不继承 launcher sender 的 BAL 授权）。
+     *
+     * 这里 template 直接就是 activity 意图，sender（com.miui.home 等前台 launcher）
+     * 的 BAL 授权会自然流转到 activity 启动，绕过 receiver 完全消除 BAL 阻断。
+     */
+    fun contentListClickTemplatePendingIntent(
+      context: Context,
+      appWidgetId: Int,
+      action: WidgetPrimaryAction,
+    ): PendingIntent {
+      val launchIntent = when (action) {
+        WidgetPrimaryAction.OPEN_WORKSPACE -> NanoFlowLaunchIntent.OPEN_WORKSPACE
+        WidgetPrimaryAction.OPEN_FOCUS_TOOLS -> NanoFlowLaunchIntent.OPEN_FOCUS_TOOLS
+      }
+      val template = NanoflowTwaLauncherActivity.intentForWidget(
+        context = context,
+        appWidgetId = appWidgetId,
+        launchIntent = launchIntent,
+      )
+      // 模板必须 MUTABLE，fillInIntent 才能合并每个 item 的 extras。
+      val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
+      // requestCode 维度包含 action，避免 OPEN_WORKSPACE / OPEN_FOCUS_TOOLS 共享同一
+      // PendingIntent 实例（系统会按 (requestCode, filterEquals) 去重）。
+      val requestKey = "content_template|" + when (action) {
+        WidgetPrimaryAction.OPEN_WORKSPACE -> "workspace"
+        WidgetPrimaryAction.OPEN_FOCUS_TOOLS -> "focus_tools"
+      }
+      return PendingIntent.getActivity(
+        context,
+        requestCodeFor(appWidgetId, requestKey),
         template,
         flags,
       )

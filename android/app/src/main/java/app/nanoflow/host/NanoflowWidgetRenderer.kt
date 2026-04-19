@@ -78,7 +78,7 @@ object NanoflowWidgetRenderer {
     )
 
     renderSyncBadge(views, model)
-    renderContentList(context, views, appWidgetId)
+    renderContentList(context, views, appWidgetId, model)
     renderActionList(context, views, appWidgetId, model)
 
     return views
@@ -102,16 +102,18 @@ object NanoflowWidgetRenderer {
     return views
   }
 
-  private fun renderContentList(context: Context, views: RemoteViews, appWidgetId: Int) {
+  private fun renderContentList(context: Context, views: RemoteViews, appWidgetId: Int, model: WidgetRenderModel) {
     val contentAdapter = NanoflowWidgetReceiver.actionListAdapterIntent(
       context,
       appWidgetId,
       NanoflowWidgetActionFactory.LIST_KIND_CONTENT,
     )
     views.setRemoteAdapter(R.id.nano_widget_content_list, contentAdapter)
+    // 内容列表点击必须启动 LauncherActivity，使用 activity-target 模板直通
+    // （不走 receiver 广播中转），避免 Android 14+ BAL_BLOCK 拦截。
     views.setPendingIntentTemplate(
       R.id.nano_widget_content_list,
-      NanoflowWidgetReceiver.actionListClickTemplatePendingIntent(context, appWidgetId),
+      NanoflowWidgetReceiver.contentListClickTemplatePendingIntent(context, appWidgetId, model.primaryAction),
     )
   }
 
