@@ -8,7 +8,7 @@ import { TaskRepositoryService } from './task-repository.service';
 import { TaskRepositoryBatchService } from './task-repository-batch.service';
 import { SupabaseClientService } from './supabase-client.service';
 import { LoggerService } from './logger.service';
-import type { Task } from '../models';
+import type { Task, Connection } from '../models';
 
 const mockLoggerCategory = {
   info: vi.fn(),
@@ -43,6 +43,15 @@ function createTask(overrides: Partial<Task> = {}): Task {
     tags: [],
     priority: undefined,
     dueDate: null,
+    ...overrides,
+  };
+}
+
+function createConnection(overrides: Partial<Connection> = {}): Connection {
+  return {
+    id: 'connection-1',
+    source: 'task-1',
+    target: 'task-2',
     ...overrides,
   };
 }
@@ -99,6 +108,7 @@ describe('TaskRepositoryBatchService.saveTasksIncremental tombstone-wins', () =>
     supabaseMock = createSupabaseMock();
     const injector = Injector.create({
       providers: [
+        TaskRepositoryService,
         { provide: LoggerService, useValue: mockLoggerService },
         { provide: SupabaseClientService, useValue: supabaseMock.mockSupabaseClientService },
       ],
@@ -279,6 +289,39 @@ describe('TaskRepositoryService.loadTasks promotion on deleted parent', () => {
     expect(loaded[0].rank).toBe(25000);
     expect(loaded[0].x).toBe(11);
     expect(loaded[0].y).toBe(22);
+  });
+});
+
+describe('TaskRepositoryService.saveConnection', () => {
+  it('should persist both title and description fields', async () => {
+    const supabaseMock = createSupabaseMock();
+    const injector = Injector.create({
+      providers: [
+        TaskRepositoryService,
+        { provide: LoggerService, useValue: mockLoggerService },
+        { provide: SupabaseClientService, useValue: supabaseMock.mockSupabaseClientService },
+      ],
+    });
+    const service = runInInjectionContext(injector, () => injector.get(TaskRepositoryService));
+
+    const result = await service.saveConnection('project-1', createConnection({
+      title: '关联标题',
+      description: '关联描述',
+    }));
+
+    expect(result).toEqual({ success: true });
+    expect(supabaseMock.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'connection-1',
+        project_id: 'project-1',
+        source_id: 'task-1',
+        target_id: 'task-2',
+        title: '关联标题',
+        description: '关联描述',
+        deleted_at: null,
+      }),
+      { onConflict: 'id' }
+    );
   });
 });
 

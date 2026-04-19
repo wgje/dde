@@ -2,7 +2,8 @@ import { Injectable, inject } from '@angular/core';
 import { LoggerService } from './logger.service';
 import { ChangeTrackerService } from './change-tracker.service';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
-import { Task, Project } from '../models';
+import { Task, Project, Connection } from '../models';
+import { mergeByLwwWithTombstone } from '../utils/lww-merge';
 
 /**
  * 冲突检测服务
@@ -24,6 +25,48 @@ export class ConflictDetectionService {
   private readonly changeTracker = inject(ChangeTrackerService);
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('ConflictDetection');
+
+  private getConnectionMergeKey(connection: Connection): string {
+    return connection.id || `${connection.source}->${connection.target}`;
+  }
+
+  private getConnectionFreshnessTimestamp(connection: Pick<Connection, 'updatedAt' | 'deletedAt'>): number {
+    const updatedAt = connection.updatedAt ? Date.parse(connection.updatedAt) : 0;
+    const deletedAt = connection.deletedAt ? Date.parse(connection.deletedAt) : 0;
+    const safeUpdatedAt = Number.isFinite(updatedAt) ? updatedAt : 0;
+    const safeDeletedAt = Number.isFinite(deletedAt) ? deletedAt : 0;
+    return Math.max(safeUpdatedAt, safeDeletedAt);
+  }
+
+  private mergeEqualFreshnessConnections(local: Connection, remote: Connection): Connection {
+    const pickPreferredText = (localValue?: string, remoteValue?: string, preferLonger = false): string | undefined => {
+      if (localValue && remoteValue) {
+        if (localValue === remoteValue) {
+          return localValue;
+        }
+
+        if (preferLonger) {
+          return remoteValue.length > localValue.length ? remoteValue : localValue;
+        }
+
+        return localValue;
+      }
+
+      return localValue ?? remoteValue;
+    };
+
+    return {
+      ...remote,
+      ...local,
+      id: local.id || remote.id,
+      source: local.source || remote.source,
+      target: local.target || remote.target,
+      title: pickPreferredText(local.title, remote.title),
+      description: pickPreferredText(local.description, remote.description, true),
+      deletedAt: local.deletedAt ?? remote.deletedAt,
+      updatedAt: local.updatedAt ?? remote.updatedAt,
+    };
+  }
 
   // ========== 短 ID 生成 ==========
 
@@ -451,54 +494,35 @@ export class ConflictDetectionService {
     local: Project['connections'],
     remote: Project['connections']
   ): Project['connections'] {
-    // 【修复】使用 id 作为唯一键，而非 source→target
-    const connMap = new Map<string, typeof local[0]>();
+    const localMap = new Map(local.map(connection => [this.getConnectionMergeKey(connection), connection]));
+    const remoteMap = new Map(remote.map(connection => [this.getConnectionMergeKey(connection), connection]));
+    const mergedConnections: Connection[] = [];
 
-    // 先添加本地连接
-    for (const conn of local) {
-      // 使用 id 作为唯一键（如果没有 id，降级到 source→target）
-      const key = conn.id || `${conn.source}->${conn.target}`;
-      connMap.set(key, conn);
-    }
+    for (const key of new Set([...localMap.keys(), ...remoteMap.keys()])) {
+      const localConnection = localMap.get(key);
+      const remoteConnection = remoteMap.get(key);
 
-    // 合并远程连接
-    for (const conn of remote) {
-      const key = conn.id || `${conn.source}->${conn.target}`;
-      const existing = connMap.get(key);
+      if (!localConnection || !remoteConnection) {
+        mergedConnections.push(localConnection ?? remoteConnection!);
+        continue;
+      }
 
-      if (!existing) {
-        // 远程新增的连接（或本地没有）
-        connMap.set(key, conn);
-      } else {
-        // 两边都有同一连接，处理软删除状态
-        // 策略：删除优先 (Tombstone Wins)
+      const localFreshness = this.getConnectionFreshnessTimestamp(localConnection);
+      const remoteFreshness = this.getConnectionFreshnessTimestamp(remoteConnection);
+      const bothAlive = !localConnection.deletedAt && !remoteConnection.deletedAt;
 
-        if (existing.deletedAt && conn.deletedAt) {
-          // 两边都删除了，使用更早的删除时间（保留删除状态）
-          const existingTime = new Date(existing.deletedAt).getTime();
-          const remoteTime = new Date(conn.deletedAt).getTime();
-          connMap.set(key, existingTime < remoteTime ? existing : conn);
-        } else if (existing.deletedAt) {
-          // 本地删除了，远程没删除 —— 保持删除状态
-          // 这确保本地删除可以同步到其他设备
-          // 不做任何操作，保持 existing（已删除）
-        } else if (conn.deletedAt) {
-          // 远程删除了，本地没删除 —— 采用远程删除状态
-          connMap.set(key, conn);
-        } else {
-          // 两边都未删除，合并描述
-          if (conn.description !== existing.description) {
-            // 使用较长的描述，或远程描述（如果本地为空）
-            const mergedDesc = !existing.description ? conn.description
-              : !conn.description ? existing.description
-              : (conn.description.length > existing.description.length ? conn.description : existing.description);
-            connMap.set(key, { ...existing, description: mergedDesc });
-          }
-        }
+      if (bothAlive && localFreshness === remoteFreshness) {
+        mergedConnections.push(this.mergeEqualFreshnessConnections(localConnection, remoteConnection));
+        continue;
+      }
+
+      const [mergedConnection] = mergeByLwwWithTombstone([localConnection], [remoteConnection]);
+      if (mergedConnection) {
+        mergedConnections.push(mergedConnection);
       }
     }
 
-    return Array.from(connMap.values());
+    return mergedConnections;
   }
 
   // ========== 标签合并 ==========

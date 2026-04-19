@@ -29,6 +29,20 @@ export class DeltaSyncCoordinatorService {
   private readonly logger = this.loggerService.category('DeltaSyncCoordinator');
   private readonly tombstoneService = inject(TombstoneService);
 
+  private getConnectionDiffKey(connection: Connection): string {
+    return connection.id || `${connection.source}->${connection.target}`;
+  }
+
+  private buildConnectionDiffSignature(connection: Connection): string {
+    return JSON.stringify([
+      connection.source,
+      connection.target,
+      connection.title ?? '',
+      connection.description ?? '',
+      connection.deletedAt ?? '',
+    ]);
+  }
+
   /**
    * Delta Sync 增量同步
    * 
@@ -239,6 +253,27 @@ export class DeltaSyncCoordinatorService {
       }
     });
     if (hasDifference) return true;
+
+    const project1Connections = project1.connections ?? [];
+    const project2Connections = project2.connections ?? [];
+    const project1ConnectionMap = new Map(
+      project1Connections.map(connection => [
+        this.getConnectionDiffKey(connection),
+        this.buildConnectionDiffSignature(connection)
+      ])
+    );
+
+    for (const connection of project2Connections) {
+      const key = this.getConnectionDiffKey(connection);
+      if (project1ConnectionMap.get(key) !== this.buildConnectionDiffSignature(connection)) {
+        return true;
+      }
+      project1ConnectionMap.delete(key);
+    }
+
+    if (project1ConnectionMap.size > 0) {
+      return true;
+    }
     
     return false;
   }

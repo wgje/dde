@@ -326,32 +326,56 @@ describe('SubtreeOperationsService', () => {
   });
 
   describe('updateParentChildConnections', () => {
-    it('移除旧连接并添加新连接', () => {
+    it('将旧父与新父重合的活跃 shadow connection 软删除，不再新增父子 connection', () => {
+      const connections: Connection[] = [
+        { id: 'c1', source: 'oldParent', target: 'task1' },
+        { id: 'c2', source: 'newParent', target: 'task1' },
+        { id: 'c3', source: 'x', target: 'y' },
+      ];
+      const result = service.updateParentChildConnections('task1', 'oldParent', 'newParent', connections);
+
+      expect(result).toEqual([
+        expect.objectContaining({
+          id: 'c1',
+          source: 'oldParent',
+          target: 'task1',
+          deletedAt: expect.any(String),
+          updatedAt: expect.any(String),
+        }),
+        expect.objectContaining({
+          id: 'c2',
+          source: 'newParent',
+          target: 'task1',
+          deletedAt: expect.any(String),
+          updatedAt: expect.any(String),
+        }),
+        { id: 'c3', source: 'x', target: 'y' },
+      ]);
+    });
+
+    it('新父节点为 null 时只软删除旧父的 shadow connection', () => {
       const connections: Connection[] = [
         { id: 'c1', source: 'oldParent', target: 'task1' },
         { id: 'c2', source: 'x', target: 'y' },
       ];
-      const result = service.updateParentChildConnections('task1', 'oldParent', 'newParent', connections);
-
-      expect(result.length).toBe(2); // c2 + new
-      expect(result.some(c => c.source === 'oldParent' && c.target === 'task1')).toBe(false);
-      expect(result.some(c => c.source === 'newParent' && c.target === 'task1')).toBe(true);
-    });
-
-    it('新父节点为 null 时只移除旧连接', () => {
-      const connections: Connection[] = [
-        { id: 'c1', source: 'oldParent', target: 'task1' },
-      ];
       const result = service.updateParentChildConnections('task1', 'oldParent', null, connections);
-      expect(result.length).toBe(0);
+
+      expect(result[0]).toEqual(expect.objectContaining({
+        id: 'c1',
+        deletedAt: expect.any(String),
+        updatedAt: expect.any(String),
+      }));
+      expect(result[1]).toEqual({ id: 'c2', source: 'x', target: 'y' });
     });
 
-    it('不重复添加已存在的连接', () => {
+    it('已软删除或无关的连接保持不变', () => {
       const connections: Connection[] = [
-        { id: 'c1', source: 'parent', target: 'task1' },
+        { id: 'c1', source: 'oldParent', target: 'task1', deletedAt: '2026-04-18T00:00:00.000Z', updatedAt: '2026-04-18T00:00:00.000Z' },
+        { id: 'c2', source: 'parent', target: 'other-task' },
       ];
       const result = service.updateParentChildConnections('task1', null, 'parent', connections);
-      expect(result.length).toBe(1);
+
+      expect(result).toEqual(connections);
     });
   });
 });

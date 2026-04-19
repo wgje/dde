@@ -404,7 +404,14 @@ export class SubtreeOperationsService {
   }
 
   /**
-   * 更新连接：移除旧的父子连接，添加新的父子连接
+   * 清理与父子关系重合的非法 shadow connection。
+   *
+   * 说明：`project.connections` 只应该保存跨树关联，父子边必须完全由 `parentId` 派生。
+   * 历史错误路径会把父子关系错误写入 connections，初始阶段虽然因 pair 与 parentId 重合而被流程图过滤，
+   * 但后续再次改父时会重新暴露成“不可删除且会回流”的伪关联线。
+   *
+   * 因此这里不再为新父节点写入任何 connection，只对旧父/新父与当前 taskId 重合的活跃 connection 做软删除，
+   * 让同步层能够把 tombstone 正确推送到远端，避免脏数据复活。
    */
   updateParentChildConnections(
     taskId: string,
@@ -412,29 +419,30 @@ export class SubtreeOperationsService {
     newParentId: string | null,
     connections: Connection[]
   ): Connection[] {
-    let result = [...connections];
+    const shadowParentIds = new Set(
+      [oldParentId, newParentId].filter((parentId): parentId is string => !!parentId)
+    );
 
-    // 移除旧的父子连接（如果存在）
-    if (oldParentId) {
-      result = result.filter(c =>
-        !(c.source === oldParentId && c.target === taskId)
-      );
+    if (shadowParentIds.size === 0) {
+      return connections;
     }
 
-    // 添加新的父子连接（如果新父节点存在）
-    if (newParentId) {
-      const existingConn = result.find(c =>
-        c.source === newParentId && c.target === taskId
-      );
-      if (!existingConn) {
-        result.push({
-          id: crypto.randomUUID(),
-          source: newParentId,
-          target: taskId
-        });
+    const now = new Date().toISOString();
+    return connections.map(connection => {
+      const isActiveShadowConnection =
+        !connection.deletedAt &&
+        connection.target === taskId &&
+        shadowParentIds.has(connection.source);
+
+      if (!isActiveShadowConnection) {
+        return connection;
       }
-    }
 
-    return result;
+      return {
+        ...connection,
+        deletedAt: now,
+        updatedAt: now,
+      };
+    });
   }
 }

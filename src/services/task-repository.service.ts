@@ -459,6 +459,7 @@ export class TaskRepositoryService {
         project_id: projectId,
         source_id: connection.source,
         target_id: connection.target,
+        title: connection.title ?? null,
         description: connection.description ?? null,
         deleted_at: connection.deletedAt ?? null
       }, { onConflict: 'id' });

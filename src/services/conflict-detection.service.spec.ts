@@ -323,6 +323,72 @@ describe('ConflictDetectionService', () => {
 
       expect(result[0].description).toBe('longer description');
     });
+
+    it('should prefer newer connection content instead of stale longer description', () => {
+      const local: Connection[] = [
+        {
+          id: 'c1',
+          source: 'a',
+          target: 'b',
+          title: 'Old title',
+          description: 'This is the stale but much longer description',
+          updatedAt: '2026-04-18T07:00:00.000Z',
+        },
+      ];
+      const remote: Connection[] = [
+        {
+          id: 'c1',
+          source: 'a',
+          target: 'b',
+          title: 'New title',
+          description: 'Fresh',
+          updatedAt: '2026-04-18T08:00:00.000Z',
+        },
+      ];
+
+      const result = service.mergeConnections(local, remote);
+
+      expect(result).toEqual([
+        expect.objectContaining({
+          id: 'c1',
+          title: 'New title',
+          description: 'Fresh',
+          updatedAt: '2026-04-18T08:00:00.000Z',
+        }),
+      ]);
+    });
+
+    it('should keep local content when timestamps tie and remote fields are blank', () => {
+      const local: Connection[] = [
+        {
+          id: 'c1',
+          source: 'a',
+          target: 'b',
+          title: 'Local title',
+          description: 'Local description',
+          updatedAt: '2026-04-18T08:00:00.000Z',
+        },
+      ];
+      const remote: Connection[] = [
+        {
+          id: 'c1',
+          source: 'a',
+          target: 'b',
+          updatedAt: '2026-04-18T08:00:00.000Z',
+        },
+      ];
+
+      const result = service.mergeConnections(local, remote);
+
+      expect(result).toEqual([
+        expect.objectContaining({
+          id: 'c1',
+          title: 'Local title',
+          description: 'Local description',
+          updatedAt: '2026-04-18T08:00:00.000Z',
+        }),
+      ]);
+    });
   });
 
   // ==================== 标签合并 ====================
