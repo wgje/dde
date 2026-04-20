@@ -17,6 +17,7 @@ describe('TextViewTaskOpsService', () => {
   let service: TextViewTaskOpsService;
   let hostElement: HTMLElement;
   let outerScrollContainer: HTMLElement;
+  let stageScrollContainer: HTMLElement;
   let stageTaskList: HTMLElement;
   const mockTaskOpsAdapter = {
     addTask: vi.fn(),
@@ -63,13 +64,20 @@ describe('TextViewTaskOpsService', () => {
     hostElement = document.createElement('div');
     hostElement.innerHTML = `
       <div class="text-view-scroll-container"></div>
+      <div data-stage-scroll-container></div>
       <div data-stage-task-list="1"></div>
     `;
 
     outerScrollContainer = hostElement.querySelector('.text-view-scroll-container') as HTMLElement;
+    stageScrollContainer = hostElement.querySelector('[data-stage-scroll-container]') as HTMLElement;
     stageTaskList = hostElement.querySelector('[data-stage-task-list="1"]') as HTMLElement;
 
     Object.defineProperty(stageTaskList, 'scrollTop', {
+      configurable: true,
+      writable: true,
+      value: 0,
+    });
+    Object.defineProperty(stageScrollContainer, 'scrollTop', {
       configurable: true,
       writable: true,
       value: 0,
@@ -83,8 +91,17 @@ describe('TextViewTaskOpsService', () => {
       configurable: true,
       value: 960,
     });
+    Object.defineProperty(stageScrollContainer, 'clientHeight', {
+      configurable: true,
+      value: 320,
+    });
+    Object.defineProperty(stageScrollContainer, 'scrollHeight', {
+      configurable: true,
+      value: 720,
+    });
 
     mockRect(stageTaskList, 100, 180);
+    mockRect(stageScrollContainer, 80, 320);
 
     TestBed.configureTestingModule({
       providers: [
@@ -147,7 +164,7 @@ describe('TextViewTaskOpsService', () => {
     expect(service.resolveAutoScrollContainer(1)).toBe(stageTaskList);
   });
 
-  it('should fall back to the outer text view container when the stage list cannot scroll', () => {
+  it('should fall back to the stage list container when the task list cannot scroll', () => {
     Object.defineProperty(stageTaskList, 'clientHeight', {
       configurable: true,
       value: 180,
@@ -157,11 +174,73 @@ describe('TextViewTaskOpsService', () => {
       value: 180,
     });
 
+    expect(service.resolveAutoScrollContainer(1)).toBe(stageScrollContainer);
+    expect(service.resolveAutoScrollContainer(null)).toBe(stageScrollContainer);
+  });
+
+  it('should fall back to the outer text view container when neither task list nor stage list can scroll', () => {
+    Object.defineProperty(stageTaskList, 'clientHeight', {
+      configurable: true,
+      value: 180,
+    });
+    Object.defineProperty(stageTaskList, 'scrollHeight', {
+      configurable: true,
+      value: 180,
+    });
+    Object.defineProperty(stageScrollContainer, 'clientHeight', {
+      configurable: true,
+      value: 320,
+    });
+    Object.defineProperty(stageScrollContainer, 'scrollHeight', {
+      configurable: true,
+      value: 320,
+    });
+
     expect(service.resolveAutoScrollContainer(1)).toBe(outerScrollContainer);
     expect(service.resolveAutoScrollContainer(null)).toBe(outerScrollContainer);
   });
 
-  it('should fall back to the outer text view container when the stage list is already at the bottom edge', () => {
+  it('should keep the outer text view container when pointer is outside the stage list edge zones', () => {
+    Object.defineProperty(stageTaskList, 'clientHeight', {
+      configurable: true,
+      value: 180,
+    });
+    Object.defineProperty(stageTaskList, 'scrollHeight', {
+      configurable: true,
+      value: 180,
+    });
+
+    expect(service.resolveAutoScrollContainer(null, 250)).toBe(outerScrollContainer);
+  });
+
+  it('should use the stage list when pointer enters its edge zone without an active stage task list', () => {
+    Object.defineProperty(stageTaskList, 'clientHeight', {
+      configurable: true,
+      value: 180,
+    });
+    Object.defineProperty(stageTaskList, 'scrollHeight', {
+      configurable: true,
+      value: 180,
+    });
+
+    expect(service.resolveAutoScrollContainer(null, 360)).toBe(stageScrollContainer);
+  });
+
+  it('should fall back to the outer text view when the null-stage pointer is in the stage edge zone but the stage list is exhausted', () => {
+    Object.defineProperty(stageTaskList, 'clientHeight', {
+      configurable: true,
+      value: 180,
+    });
+    Object.defineProperty(stageTaskList, 'scrollHeight', {
+      configurable: true,
+      value: 180,
+    });
+    stageScrollContainer.scrollTop = 400;
+
+    expect(service.resolveAutoScrollContainer(null, 360)).toBe(outerScrollContainer);
+  });
+
+  it('should fall back to the stage list when the task list is already at the bottom edge', () => {
     Object.defineProperty(stageTaskList, 'clientHeight', {
       configurable: true,
       value: 180,
@@ -172,7 +251,7 @@ describe('TextViewTaskOpsService', () => {
     });
     stageTaskList.scrollTop = 360;
 
-    expect(service.resolveAutoScrollContainer(1, 270)).toBe(outerScrollContainer);
+    expect(service.resolveAutoScrollContainer(1, 270)).toBe(stageScrollContainer);
   });
 
   it('should keep the stage list as the auto-scroll container while it can still scroll downward', () => {
@@ -189,7 +268,7 @@ describe('TextViewTaskOpsService', () => {
     expect(service.resolveAutoScrollContainer(1, 270)).toBe(stageTaskList);
   });
 
-  it('should fall back to the outer text view container when the stage list is already at the top edge', () => {
+  it('should fall back to the stage list when the task list is already at the top edge', () => {
     Object.defineProperty(stageTaskList, 'clientHeight', {
       configurable: true,
       value: 180,
@@ -199,8 +278,32 @@ describe('TextViewTaskOpsService', () => {
       value: 540,
     });
     stageTaskList.scrollTop = 0;
+    stageScrollContainer.scrollTop = 120;
 
-    expect(service.resolveAutoScrollContainer(1, 110)).toBe(outerScrollContainer);
+    expect(service.resolveAutoScrollContainer(1, 110)).toBe(stageScrollContainer);
+  });
+
+  it('should fall back to the outer text view container when task list and stage list are both already at the bottom edge', () => {
+    Object.defineProperty(stageTaskList, 'clientHeight', {
+      configurable: true,
+      value: 180,
+    });
+    Object.defineProperty(stageTaskList, 'scrollHeight', {
+      configurable: true,
+      value: 540,
+    });
+    Object.defineProperty(stageScrollContainer, 'clientHeight', {
+      configurable: true,
+      value: 320,
+    });
+    Object.defineProperty(stageScrollContainer, 'scrollHeight', {
+      configurable: true,
+      value: 720,
+    });
+    stageTaskList.scrollTop = 360;
+    stageScrollContainer.scrollTop = 400;
+
+    expect(service.resolveAutoScrollContainer(1, 270)).toBe(outerScrollContainer);
   });
 
   it('should block create actions while hint-only startup placeholder is read-only', () => {

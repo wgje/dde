@@ -36,6 +36,7 @@ const DRAG_MAX_DISTANCE = 130;
         (pointermove)="onPointerMove($event)"
         (pointerup)="onPointerUp($event)"
         (pointercancel)="onPointerCancel()"
+        (animationstart)="onAnimationStart($event)"
         (animationend)="onAnimationEnd($event)">
 
         <header class="card-header">
@@ -313,6 +314,14 @@ export class GateCardComponent {
 
   onPointerCancel(): void {
     this.resetDragState();
+  }
+
+  /** 转发 animationstart 给 Service，用于切换到阶段二（等待 animationend）超时 */
+  onAnimationStart(event: AnimationEvent): void {
+    if (event.target !== event.currentTarget) return;
+    const anim = this.cardAnimation();
+    if (anim === 'idle') return;
+    this.gateService.notifyAnimationStarted(anim);
   }
 
   /** 转发动画结束事件给 Service */

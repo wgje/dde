@@ -157,6 +157,10 @@ export class TextViewTaskOpsService {
     return this.elementRef.nativeElement.querySelector('.text-view-scroll-container');
   }
 
+  getStageScrollContainer(): HTMLElement | null {
+    return this.elementRef.nativeElement.querySelector('[data-stage-scroll-container]');
+  }
+
   getStageTaskListContainer(stageNumber: number | null | undefined): HTMLElement | null {
     if (stageNumber === null || stageNumber === undefined) {
       return null;
@@ -166,9 +170,27 @@ export class TextViewTaskOpsService {
 
   resolveAutoScrollContainer(stageNumber: number | null | undefined, clientY?: number): HTMLElement | null {
     const scrollContainer = this.getScrollContainer();
+    const stageScrollContainer = this.getStageScrollContainer();
     const stageTaskList = this.getStageTaskListContainer(stageNumber);
     if (!this.canAutoScroll(stageTaskList)) {
-      return scrollContainer;
+      if (!this.canAutoScroll(stageScrollContainer)) {
+        return scrollContainer;
+      }
+
+      if (clientY === undefined) {
+        return stageScrollContainer;
+      }
+
+      const direction = this.getAutoScrollDirection(stageScrollContainer, clientY);
+      if (direction === 0) {
+        return stageNumber === null || stageNumber === undefined
+          ? scrollContainer
+          : stageScrollContainer;
+      }
+
+      return this.canScrollInDirection(stageScrollContainer, direction)
+        ? stageScrollContainer
+        : scrollContainer;
     }
 
     if (clientY === undefined) {
@@ -177,12 +199,27 @@ export class TextViewTaskOpsService {
 
     const direction = this.getAutoScrollDirection(stageTaskList, clientY);
     if (direction < 0) {
-      return stageTaskList.scrollTop > 0 ? stageTaskList : scrollContainer;
+      if (stageTaskList.scrollTop > 0) {
+        return stageTaskList;
+      }
+
+      if (this.canScrollInDirection(stageScrollContainer, direction)) {
+        return stageScrollContainer;
+      }
+
+      return scrollContainer;
     }
 
     if (direction > 0) {
-      const maxScrollTop = Math.max(0, stageTaskList.scrollHeight - stageTaskList.clientHeight);
-      return stageTaskList.scrollTop < maxScrollTop ? stageTaskList : scrollContainer;
+      if (this.canScrollInDirection(stageTaskList, direction)) {
+        return stageTaskList;
+      }
+
+      if (this.canScrollInDirection(stageScrollContainer, direction)) {
+        return stageScrollContainer;
+      }
+
+      return scrollContainer;
     }
 
     return stageTaskList;
@@ -190,6 +227,23 @@ export class TextViewTaskOpsService {
 
   private canAutoScroll(container: HTMLElement | null): container is HTMLElement {
     return !!container && container.clientHeight > 0 && container.scrollHeight > container.clientHeight;
+  }
+
+  private canScrollInDirection(container: HTMLElement | null, direction: -1 | 0 | 1): container is HTMLElement {
+    if (!this.canAutoScroll(container)) {
+      return false;
+    }
+
+    if (direction < 0) {
+      return container.scrollTop > 0;
+    }
+
+    if (direction > 0) {
+      const maxScrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
+      return container.scrollTop < maxScrollTop;
+    }
+
+    return true;
   }
 
   private getAutoScrollDirection(container: HTMLElement, clientY: number): -1 | 0 | 1 {

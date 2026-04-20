@@ -168,7 +168,7 @@ export const projectExistsGuard: CanActivateFn = async (route: ActivatedRouteSna
   
   // 快速检查项目是否存在于本地
   let project = projectState.getProject(projectId);
-  const startupProjectCatalogStage = userSession.startupProjectCatalogStage();
+  const canAuthoritativelyRejectProjectRoute = userSession.canAuthoritativelyRejectProjectRoute();
   
   if (project) {
     // 项目存在于本地缓存，立即放行
@@ -177,7 +177,7 @@ export const projectExistsGuard: CanActivateFn = async (route: ActivatedRouteSna
 
   // 启动阶段的项目目录尚未 authoritative 时，不要过早认定深链接不存在。
   // 组件层会在目录真正 resolved 后再决定是否回退到 /projects。
-  if (startupProjectCatalogStage !== 'resolved') {
+  if (!canAuthoritativelyRejectProjectRoute) {
     return true;
   }
   

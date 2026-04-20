@@ -380,7 +380,7 @@ export class TextViewComponent implements OnInit, OnDestroy {
       const collapseStage = this.dragDropService.handleStageDragLeave(stageNumber);
       if (collapseStage !== null) this.stagesRef?.collapseStage(collapseStage);
       this.ops.collapseSourceStageIfNeeded(null);
-      this.dragDropService.updateAutoScrollContainer(this.ops.getScrollContainer(), event.clientY);
+      this.dragDropService.updateAutoScrollContainer(this.ops.resolveAutoScrollContainer(null, event.clientY), event.clientY);
     }
   }
   

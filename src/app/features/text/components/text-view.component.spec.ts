@@ -30,4 +30,12 @@ describe('text-view.component.ts', () => {
     expect(source).toContain('this.cleanupTouchGestureState();');
     expect(source).toContain('if (!this.dragDropService.draggingTaskId() && !this.dragDropService.touchDragTask) return;');
   });
+
+  it('应在 stage dragleave 时继续走 null-stage 自动滚动解析，而不是直接跳最外层', () => {
+    const sourcePath = join(process.cwd(), 'src/app/features/text/components/text-view.component.ts');
+    const source = readFileSync(sourcePath, 'utf8');
+
+    expect(source).toContain('this.dragDropService.updateAutoScrollContainer(this.ops.resolveAutoScrollContainer(null, event.clientY), event.clientY);');
+    expect(source).not.toContain('this.dragDropService.updateAutoScrollContainer(this.ops.getScrollContainer(), event.clientY);');
+  });
 });

@@ -83,7 +83,7 @@ export class UserSessionService {
   private prehydratedSnapshotApplied = false;
   private prehydratedSnapshotOwnerId: string | null = null;
   private sessionRequestGeneration = 0;
-  private lastProjectListMetadataSyncSucceeded = false;
+  private readonly lastProjectListMetadataSyncSucceededState = signal(false);
   private readonly startupProjectCatalogStageState = signal<StartupProjectCatalogStage>('unresolved');
   private readonly trustedPrehydratedSnapshotState = signal(false);
   /** 已从云端完整加载过内容的项目 ID 集合，防止重复加载 */
@@ -93,6 +93,15 @@ export class UserSessionService {
 
   readonly startupProjectCatalogStage = this.startupProjectCatalogStageState.asReadonly();
   readonly trustedPrehydratedSnapshotVisible = this.trustedPrehydratedSnapshotState.asReadonly();
+
+  canAuthoritativelyRejectProjectRoute(): boolean {
+    const currentUserId = this.currentUserId();
+    if (!currentUserId || currentUserId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+      return this.startupProjectCatalogStage() === 'resolved';
+    }
+
+    return this.lastProjectListMetadataSyncSucceededState();
+  }
 
   isHintOnlyStartupPlaceholderVisible(): boolean {
     return this.startupPlaceholderState?.isHintOnlyActive() ?? false;
@@ -785,6 +794,10 @@ export class UserSessionService {
       isUserChange,
       forceLoad,
     });
+
+    if (isUserChange || forceLoad) {
+      this.lastProjectListMetadataSyncSucceededState.set(false);
+    }
     
     // 清理旧用户的附件监控和回调，防止内存泄漏
     if (isUserChange || forceLoad) {
@@ -1735,7 +1748,7 @@ export class UserSessionService {
 
     if (skipProjectSyncSlowPath && this.hasLocalOnlyProjectsAwaitingPromotion()) {
       try {
-        const accessibleProjectIds = await this.syncProjectListMetadata(userId);
+        const accessibleProjectIds = await this.syncProjectListMetadata(userId, sessionGuard);
         if (this.shouldAbortStaleSession(sessionGuard, 'startBackgroundSync:fastpath-metadata-promotion')) {
           return;
         }
@@ -1775,7 +1788,7 @@ export class UserSessionService {
     } else if (accessPreflightConfirmed && activeProjectId && !this.isLocalOnlyProject(activeProjectId) && SYNC_CONFIG.DELTA_SYNC_ENABLED) {
       // access preflight 已确认项目可访问，并行执行列表同步和 delta sync
       const [metadataResult, deltaResult] = await Promise.allSettled([
-        this.syncProjectListMetadata(userId),
+        this.syncProjectListMetadata(userId, sessionGuard),
         this.syncCoordinator.performDeltaSync(activeProjectId),
       ]);
       if (this.shouldAbortStaleSession(sessionGuard, 'startBackgroundSync:parallel-metadata-delta')) {
@@ -1784,7 +1797,7 @@ export class UserSessionService {
 
       if (metadataResult.status === 'fulfilled') {
         const accessibleProjectIds = metadataResult.value;
-        if (pendingProjectManifestWatermark && this.lastProjectListMetadataSyncSucceeded) {
+        if (pendingProjectManifestWatermark && this.lastProjectListMetadataSyncSucceededState()) {
           this.syncCoordinator.commitProjectManifestWatermark(pendingProjectManifestWatermark, userId);
           pendingProjectManifestWatermark = null;
         }
@@ -1809,8 +1822,8 @@ export class UserSessionService {
       // 降级路径：串行执行
       let accessibleProjectIds = new Set<string>();
       try {
-        accessibleProjectIds = await this.syncProjectListMetadata(userId);
-        if (pendingProjectManifestWatermark && this.lastProjectListMetadataSyncSucceeded) {
+        accessibleProjectIds = await this.syncProjectListMetadata(userId, sessionGuard);
+        if (pendingProjectManifestWatermark && this.lastProjectListMetadataSyncSucceededState()) {
           this.syncCoordinator.commitProjectManifestWatermark(pendingProjectManifestWatermark, userId);
           pendingProjectManifestWatermark = null;
         }
@@ -1987,12 +2000,18 @@ export class UserSessionService {
   }
   
   /** 同步项目列表元数据（不加载完整数据） */
-  private async syncProjectListMetadata(userId: string): Promise<Set<string>> {
-    this.lastProjectListMetadataSyncSucceeded = false;
+  private async syncProjectListMetadata(
+    userId: string,
+    sessionGuard?: SessionGuardContext,
+  ): Promise<Set<string>> {
+    this.lastProjectListMetadataSyncSucceededState.set(false);
     const localProjects = this.projectState.projects();
     const fallbackIds = new Set(localProjects.map(p => p.id));
 
     const client = await this.supabase.clientAsync();
+    if (this.shouldAbortStaleSession(sessionGuard, 'syncProjectListMetadata:after-client')) {
+      return fallbackIds;
+    }
     if (!client) return fallbackIds;
     
     const { data, error } = await client
@@ -2001,13 +2020,17 @@ export class UserSessionService {
       .eq('owner_id', userId)
       .is('deleted_at', null)
       .order('updated_at', { ascending: false });
+
+    if (this.shouldAbortStaleSession(sessionGuard, 'syncProjectListMetadata:after-query')) {
+      return fallbackIds;
+    }
     
     if (error) {
       this.logger.warn('获取项目列表失败', { message: error.message });
       return fallbackIds;
     }
 
-    this.lastProjectListMetadataSyncSucceeded = true;
+    this.lastProjectListMetadataSyncSucceededState.set(true);
 
     const accessibleProjectIds = new Set<string>((data || []).map(row => String(row.id)));
     

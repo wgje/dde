@@ -37,7 +37,8 @@ export class TextViewDragDropService {
   private autoScrollState: AutoScrollState = {
     animationId: null,
     scrollContainer: null,
-    lastClientY: 0
+    lastClientY: 0,
+    stickyScrollAmount: null,
   };
   
   /** 拖拽来源阶段 */
@@ -645,12 +646,14 @@ export class TextViewDragDropService {
     document.removeEventListener('dragover', this.boundHandleDragAutoScroll);
     this.autoScrollState.scrollContainer = container;
     this.autoScrollState.lastClientY = clientY;
+    this.autoScrollState.stickyScrollAmount = null;
     document.addEventListener('dragover', this.boundHandleDragAutoScroll);
     this.ensureAutoScrollLoop();
   }
 
   updateAutoScrollContainer(container: HTMLElement | null, clientY?: number) {
     this.autoScrollState.scrollContainer = container;
+    this.autoScrollState.stickyScrollAmount = null;
     if (clientY !== undefined) {
       this.autoScrollState.lastClientY = clientY;
     }
@@ -660,6 +663,7 @@ export class TextViewDragDropService {
   performTouchAutoScroll(container: HTMLElement, clientY: number) {
     this.autoScrollState.scrollContainer = container;
     this.autoScrollState.lastClientY = clientY;
+    this.autoScrollState.stickyScrollAmount = null;
     this.ensureAutoScrollLoop();
   }
 
@@ -718,25 +722,74 @@ export class TextViewDragDropService {
   }
   
   private performAutoScrollStep() {
-    const container = this.autoScrollState.scrollContainer;
+    const clientY = this.autoScrollState.lastClientY;
+    const initialContainer = this.autoScrollState.scrollContainer;
+    let container = initialContainer;
     if (!container) return;
+
+    const scrollAmount = this.autoScrollState.stickyScrollAmount ?? this.getAutoScrollAmount(container, clientY);
+    if (scrollAmount === 0) {
+      this.autoScrollState.stickyScrollAmount = null;
+      return;
+    }
+
+    while (container) {
+      if (this.applyAutoScrollAmount(container, scrollAmount)) {
+        this.autoScrollState.scrollContainer = container;
+        this.autoScrollState.stickyScrollAmount = container !== initialContainer || this.autoScrollState.stickyScrollAmount !== null
+          ? scrollAmount
+          : null;
+        return;
+      }
+
+      container = this.getNextAutoScrollContainer(container);
+    }
+
+    this.autoScrollState.stickyScrollAmount = null;
+  }
+
+  private getAutoScrollAmount(container: HTMLElement, clientY: number): number {
     const rect = container.getBoundingClientRect();
     const edgeSize = 100;
     const maxScrollSpeed = 18;
-    const clientY = this.autoScrollState.lastClientY;
-    let scrollAmount = 0;
+
     if (clientY < rect.top + edgeSize && clientY > rect.top - 20) {
       const distance = rect.top + edgeSize - clientY;
       const ratio = Math.min(1, Math.max(0, distance / edgeSize));
-      scrollAmount = -maxScrollSpeed * ratio * ratio;
-    } else if (clientY > rect.bottom - edgeSize && clientY < rect.bottom + 20) {
+      return -maxScrollSpeed * ratio * ratio;
+    }
+
+    if (clientY > rect.bottom - edgeSize && clientY < rect.bottom + 20) {
       const distance = clientY - (rect.bottom - edgeSize);
       const ratio = Math.min(1, Math.max(0, distance / edgeSize));
-      scrollAmount = maxScrollSpeed * ratio * ratio;
+      return maxScrollSpeed * ratio * ratio;
     }
-    if (scrollAmount !== 0) {
-      container.scrollTop += scrollAmount;
+
+    return 0;
+  }
+
+  private applyAutoScrollAmount(container: HTMLElement, scrollAmount: number): boolean {
+    const previousScrollTop = container.scrollTop;
+    container.scrollTop += scrollAmount;
+    return container.scrollTop !== previousScrollTop;
+  }
+
+  private getNextAutoScrollContainer(container: HTMLElement): HTMLElement | null {
+    if (container.hasAttribute('data-stage-task-list')) {
+      const stageScrollContainer = container.closest('[data-stage-scroll-container]');
+      if (stageScrollContainer instanceof HTMLElement && stageScrollContainer !== container) {
+        return stageScrollContainer;
+      }
     }
+
+    if (container.hasAttribute('data-stage-scroll-container')) {
+      const outerScrollContainer = container.closest('.text-view-scroll-container');
+      if (outerScrollContainer instanceof HTMLElement && outerScrollContainer !== container) {
+        return outerScrollContainer;
+      }
+    }
+
+    return null;
   }
   
   private stopAutoScroll() {
@@ -754,6 +807,7 @@ export class TextViewDragDropService {
       cancelAnimationFrame(this.autoScrollState.animationId);
       this.autoScrollState.animationId = null;
     }
+    this.autoScrollState.stickyScrollAmount = null;
     if (clearContainer) {
       this.autoScrollState.scrollContainer = null;
     }

@@ -167,8 +167,10 @@ describe('WorkspaceModalCoordinatorService', () => {
 
   it('should close login modal ref when it exists', async () => {
     await service.openLoginModal();
+    service.loginReturnUrl = '/dashboard';
     service.closeLoginModal();
     expect(mockModalCloseRef.close).toHaveBeenCalledOnce();
+    expect(service.loginReturnUrl).toBeNull();
   });
 
   it('should be no-op when no login modal ref', () => {

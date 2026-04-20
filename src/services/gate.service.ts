@@ -40,8 +40,23 @@ const GATE_LAST_CHECK_DATE_KEY = 'focus_gate_last_check_date';
 /** LocalStorage 键：当日跳过次数重置日期 */
 const GATE_SNOOZE_RESET_DATE_KEY = 'focus_gate_snooze_reset_date';
 
-/** 动画超时时间（毫秒）- 防止动画卡死导致按钮永久禁用 */
-const ANIMATION_TIMEOUT_MS = 1200;
+/**
+ * 动画两阶段超时保护
+ * 
+ * 【2026-04-20 根因修复】
+ * 单一 1200ms wall-clock 超时无法区分两种失败模式：
+ *  1) animationstart 迟迟不触发（元素未渲染 / 主线程阻塞 / CD 延迟）
+ *  2) animationstart 已触发但 animationend 丢失（浏览器 tab 后台节流等）
+ * 
+ * 并且当 visibilitychange 等处理器占用主线程 200+ms 时，实际 CSS 动画（620-660ms）
+ * 开始时已消耗掉大半预算，导致 fallback 误触发 "forcing idle" 警告。
+ * 
+ * 正确做法：以真实 DOM `animationstart` 事件为计时锚点。
+ */
+/** 阶段一：从信号设置到 animationstart 的最长允许时间（覆盖主线程阻塞/CD 延迟） */
+const ANIMATION_START_GRACE_MS = 800;
+/** 阶段二：animationstart 到 animationend 的最长允许时间（覆盖浏览器节流/丢事件） */
+const ANIMATION_DURATION_MAX_MS = 1500;
 const GATE_REVIEW_SYNC_INTERVAL_MS = Math.max(30_000, SYNC_CONFIG.BLACKBOX_PULL_FRESHNESS_WINDOW);
 
 export type GateMotionState =
@@ -92,6 +107,13 @@ export class GateService {
 
   /** 动画超时定时器 - 用于防止动画卡死 */
   private animationTimeoutId: ReturnType<typeof setTimeout> | null = null;
+
+  /** 当前等待 animationstart 的状态（两阶段超时的锚点） */
+  private pendingAnimationState: GateMotionState | null = null;
+  /** 当前阶段一/二共用的超时回调 */
+  private pendingAnimationTimeout: (() => void) | null = null;
+  /** 当前是否已进入阶段二（animationstart 已触发） */
+  private animationStarted = false;
 
   /** 当前动作动画（用于防止 timeout + animationend 双触发） */
   private actionInFlight: 'heave_read' | 'heavy_drop' | null = null;
@@ -204,21 +226,33 @@ export class GateService {
       gateCurrentIndex.set(safeIndex);
     }
 
-    const handledPrefix = currentItems.slice(0, safeIndex);
-    const handledIds = new Set(handledPrefix.map(item => item.id));
-    const nextUnprocessed = latestPending.filter(item => !handledIds.has(item.id));
-    const nextItems = [...handledPrefix, ...nextUnprocessed];
+    // 【修复 2026-04-20】保留 safeIndex+1 的前缀（包含“当前正在展示/动画中的条目”）。
+    // 之前的实现只保留 slice(0, safeIndex)，当用户在当前条目触发 markAsCompleted 时，
+    // pendingBlackBoxEntries 计算信号会同步剔除该条目，effect 立即重算队列，
+    // 把当前位置的条目从 gatePendingItems 中移除；随后 finalizeActionTransition
+    // 仍然执行 currentIndex + 1，导致跳过一条未审查的条目，并使总数提前归零、
+    // 表现为“只滑一次大门就直接进入项目”。
+    // 这里显式锁定 handled + current（正在飞出的条目），让增量合并只影响尾部未审查项。
+    const inFlightCount = this.actionInFlight ? 1 : 0;
+    const preserveCount = Math.min(safeIndex + inFlightCount, currentItems.length);
+    const preservedPrefix = currentItems.slice(0, preserveCount);
+    const preservedIds = new Set(preservedPrefix.map(item => item.id));
+    const nextUnprocessed = latestPending.filter(item => !preservedIds.has(item.id));
+    const nextItems = [...preservedPrefix, ...nextUnprocessed];
 
     if (!this.isSameQueue(currentItems, nextItems)) {
       gatePendingItems.set(nextItems);
       this.logger.debug('Gate', `Gate queue refreshed from ${source}`, {
         before: currentItems.length,
         after: nextItems.length,
-        handled: safeIndex
+        handled: safeIndex,
+        inFlight: inFlightCount
       });
     }
 
-    if (safeIndex >= nextItems.length) {
+    // 仅当队列彻底空（没有保留项也没有未处理项）时才判定完成，
+    // 避免在动画进行中因同步信号剔除导致的误判。
+    if (nextItems.length === 0 && !this.actionInFlight) {
       this.completeGateSession('queue-empty');
     }
   }
@@ -274,7 +308,14 @@ export class GateService {
   }
 
   /**
-   * 设置动画状态并启动超时保护
+   * 设置动画状态并启动两阶段超时保护
+   * 
+   * 阶段一：signal set → 等待 animationstart 在 ANIMATION_START_GRACE_MS 内触发。
+   *         若超时，视为动画未实际启动（元素未渲染 / reduced motion CSS 介入等），
+   *         直接切回 idle 并执行回调。
+   * 阶段二：animationstart 触发后（由 GateCard 通过 onAnimationStart 通知），
+   *         等待 animationend 在 ANIMATION_DURATION_MAX_MS 内触发。
+   *         若超时，视为浏览器节流/丢事件，兜底切 idle。
    */
   private setCardAnimationWithTimeout(
     state: GateMotionState,
@@ -291,24 +332,78 @@ export class GateService {
 
     this.cardAnimation.set(state);
 
-    if (state !== 'idle') {
-      this.animationTimeoutId = setTimeout(() => {
-        this.ngZone.run(() => {
-          if (this.cardAnimation() !== state) return;
-
-          this.logger.warn('Gate', `Animation timeout (${ANIMATION_TIMEOUT_MS}ms), forcing idle from '${state}'`);
-          this.cardAnimation.set('idle');
-          onTimeout?.();
-        });
-      }, ANIMATION_TIMEOUT_MS);
+    if (state === 'idle') {
+      return;
     }
+
+    this.pendingAnimationState = state;
+    this.pendingAnimationTimeout = onTimeout ?? null;
+    this.animationStarted = false;
+
+    // 阶段一：等待 animationstart
+    this.animationTimeoutId = setTimeout(() => {
+      this.ngZone.run(() => {
+        if (this.cardAnimation() !== state) return;
+        if (this.animationStarted) return;
+
+        this.logger.warn(
+          'Gate',
+          `Animation did not start within ${ANIMATION_START_GRACE_MS}ms, forcing idle from '${state}'`
+        );
+        this.cardAnimation.set('idle');
+        const cb = this.pendingAnimationTimeout;
+        this.resetPendingAnimation();
+        cb?.();
+      });
+    }, ANIMATION_START_GRACE_MS);
+  }
+
+  /**
+   * GateCard 组件在真实 DOM animationstart 触发时调用。
+   * 将超时计时从阶段一切换到阶段二（animationend 兜底）。
+   */
+  notifyAnimationStarted(state: GateMotionState): void {
+    if (this.pendingAnimationState !== state) return;
+    if (this.cardAnimation() !== state) return;
+    if (this.animationStarted) return;
+
+    this.animationStarted = true;
+    this.clearAnimationTimeoutOnly();
+
+    // 阶段二：等待 animationend 真正触发
+    this.animationTimeoutId = setTimeout(() => {
+      this.ngZone.run(() => {
+        if (this.cardAnimation() !== state) return;
+
+        this.logger.warn(
+          'Gate',
+          `Animation duration exceeded ${ANIMATION_DURATION_MAX_MS}ms, forcing idle from '${state}'`
+        );
+        this.cardAnimation.set('idle');
+        const cb = this.pendingAnimationTimeout;
+        this.resetPendingAnimation();
+        cb?.();
+      });
+    }, ANIMATION_DURATION_MAX_MS);
+  }
+
+  private resetPendingAnimation(): void {
+    this.pendingAnimationState = null;
+    this.pendingAnimationTimeout = null;
+    this.animationStarted = false;
+  }
+
+  /** 仅清理 setTimeout，不重置 pending 状态（用于阶段切换） */
+  private clearAnimationTimeoutOnly(): void {
+    if (!this.animationTimeoutId) return;
+    clearTimeout(this.animationTimeoutId);
+    this.animationTimeoutId = null;
   }
 
   /** 清除动画超时定时器 */
   private clearAnimationTimeout(): void {
-    if (!this.animationTimeoutId) return;
-    clearTimeout(this.animationTimeoutId);
-    this.animationTimeoutId = null;
+    this.clearAnimationTimeoutOnly();
+    this.resetPendingAnimation();
   }
 
   private toVoidResult(result: Result<BlackBoxEntry, OperationError>): Result<void, OperationError> {

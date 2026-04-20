@@ -88,7 +88,7 @@ import { LoggerService } from '../../../../../services/logger.service';
           <span class="recording-dot w-3 h-3 rounded-full bg-white"></span>
           <span>录音中...</span>
           <span class="text-white/70 text-xs font-mono ml-1">
-            {{ formatDuration(recordingDuration()) }}
+            {{ formatDuration(voiceService.recordingDurationSec()) }}
           </span>
           @if (isOutOfZone()) {
             <span class="text-white/50 text-[10px] ml-1">松开取消</span>
@@ -168,13 +168,9 @@ export class BlackBoxRecorderComponent implements OnDestroy {
   transcription = signal('');
   /** 用户可编辑的文本 */
   editableText = '';
-  /** 录音时长（秒） */
-  recordingDuration = signal(0);
   /** 鼠标/手指是否已超出录音区域 */
   isOutOfZone = signal(false);
-  
-  private durationTimer: ReturnType<typeof setInterval> | null = null;
-  private recordingStartTime = 0;
+
   /** 全局事件清理函数集合 */
   private globalCleanups: (() => void)[] = [];
   
@@ -183,7 +179,6 @@ export class BlackBoxRecorderComponent implements OnDestroy {
   transcribed = output<string>();
 
   ngOnDestroy(): void {
-    this.clearDurationTimer();
     this.removeGlobalListeners();
   }
 
@@ -369,21 +364,16 @@ export class BlackBoxRecorderComponent implements OnDestroy {
   // ===============================================
 
   /**
-   * 开始录音 + 启动计时器
+   * 开始录音
+   * 【根因修复 2026-04-20】时长状态已上提至 SpeechToTextService.recordingDurationSec，
+   * 本组件不再维护本地 setInterval，避免多实例（侧栏 + 移动抽屉）因各自 timer 未启动
+   * 导致「录音中... 0:00」卡死。
    */
   private startRecording(): void {
     this.transcription.set('');
     this.editableText = '';
-    this.recordingDuration.set(0);
     this.isOutOfZone.set(false);
-    this.recordingStartTime = Date.now();
-    
-    // 使用 Date.now() 差值计算，避免 setInterval 漂移
-    this.durationTimer = setInterval(() => {
-      const elapsed = Math.round((Date.now() - this.recordingStartTime) / 1000);
-      this.recordingDuration.set(elapsed);
-    }, 500); // 每 500ms 更新一次，提高精度
-    
+
     this.voiceService.startRecording();
   }
 
@@ -411,9 +401,8 @@ export class BlackBoxRecorderComponent implements OnDestroy {
    * 松开时根据是否在区域内决定保存或取消
    */
   private stopOrCancel(): void {
-    this.clearDurationTimer();
     this.removeGlobalListeners();
-    
+
     if (!this.voiceService.isRecording()) return;
     
     if (this.isOutOfZone()) {
@@ -431,7 +420,6 @@ export class BlackBoxRecorderComponent implements OnDestroy {
    * 停止录音并进行转写
    */
   private async doStopAndTranscribe(): Promise<void> {
-    this.clearDurationTimer();
     this.removeGlobalListeners();
     
     try {
@@ -453,16 +441,6 @@ export class BlackBoxRecorderComponent implements OnDestroy {
   private clearTranscription(): void {
     this.transcription.set('');
     this.editableText = '';
-  }
-
-  /**
-   * 清除计时器
-   */
-  private clearDurationTimer(): void {
-    if (this.durationTimer) {
-      clearInterval(this.durationTimer);
-      this.durationTimer = null;
-    }
   }
 
   /**

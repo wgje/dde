@@ -42,6 +42,31 @@ describe('TextViewDragDropService', () => {
     clientY,
   } as Touch);
 
+  const mockRect = (element: HTMLElement, top: number, height: number) => {
+    vi.spyOn(element, 'getBoundingClientRect').mockReturnValue({
+      x: 0,
+      y: top,
+      top,
+      left: 0,
+      bottom: top + height,
+      right: 0,
+      width: 320,
+      height,
+      toJSON: () => ({}),
+    } as DOMRect);
+  };
+
+  const mockScrollable = (element: HTMLElement, initialScrollTop: number, maxScrollTop: number) => {
+    let currentScrollTop = initialScrollTop;
+    Object.defineProperty(element, 'scrollTop', {
+      configurable: true,
+      get: () => currentScrollTop,
+      set: (value: number) => {
+        currentScrollTop = Math.min(maxScrollTop, Math.max(0, value));
+      },
+    });
+  };
+
   beforeEach(() => {
     vi.useFakeTimers();
     vi.clearAllMocks();
@@ -127,5 +152,85 @@ describe('TextViewDragDropService', () => {
 
     service.switchToStage(3, { autoExpanded: true });
     expect(service.endTouchDrag().autoExpandedStages).toEqual([3]);
+  });
+
+  it('should hand off auto-scroll from the task list to the stage list while the pointer stays at the edge', () => {
+    const outer = document.createElement('div');
+    outer.className = 'text-view-scroll-container';
+    const stageList = document.createElement('div');
+    stageList.setAttribute('data-stage-scroll-container', '');
+    const taskList = document.createElement('div');
+    taskList.setAttribute('data-stage-task-list', '1');
+    stageList.appendChild(taskList);
+    outer.appendChild(stageList);
+    document.body.appendChild(outer);
+
+    mockScrollable(stageList, 0, 400);
+    mockScrollable(taskList, 360, 360);
+    mockScrollable(outer, 0, 480);
+
+    mockRect(taskList, 100, 180);
+    mockRect(stageList, 80, 320);
+    mockRect(outer, 0, 480);
+
+    const autoScrollState = (service as unknown as {
+      autoScrollState: { scrollContainer: HTMLElement | null; lastClientY: number; stickyScrollAmount: number | null };
+      performAutoScrollStep: () => void;
+    }).autoScrollState;
+    autoScrollState.scrollContainer = taskList;
+    autoScrollState.lastClientY = 270;
+
+    (service as unknown as { performAutoScrollStep: () => void }).performAutoScrollStep();
+
+    const firstStageScrollTop = stageList.scrollTop;
+
+    (service as unknown as { performAutoScrollStep: () => void }).performAutoScrollStep();
+
+    expect(firstStageScrollTop).toBeGreaterThan(0);
+    expect(stageList.scrollTop).toBeGreaterThan(firstStageScrollTop);
+    expect(autoScrollState.scrollContainer).toBe(stageList);
+    expect(autoScrollState.stickyScrollAmount).toBeGreaterThan(0);
+
+    outer.remove();
+  });
+
+  it('should hand off auto-scroll to the outer text view when both task list and stage list are exhausted', () => {
+    const outer = document.createElement('div');
+    outer.className = 'text-view-scroll-container';
+    const stageList = document.createElement('div');
+    stageList.setAttribute('data-stage-scroll-container', '');
+    const taskList = document.createElement('div');
+    taskList.setAttribute('data-stage-task-list', '1');
+    stageList.appendChild(taskList);
+    outer.appendChild(stageList);
+    document.body.appendChild(outer);
+
+    mockScrollable(stageList, 400, 400);
+    mockScrollable(taskList, 360, 360);
+    mockScrollable(outer, 0, 480);
+
+    mockRect(taskList, 100, 180);
+    mockRect(stageList, 80, 320);
+    mockRect(outer, 0, 480);
+
+    const autoScrollState = (service as unknown as {
+      autoScrollState: { scrollContainer: HTMLElement | null; lastClientY: number; stickyScrollAmount: number | null };
+      performAutoScrollStep: () => void;
+    }).autoScrollState;
+    autoScrollState.scrollContainer = taskList;
+    autoScrollState.lastClientY = 270;
+
+    (service as unknown as { performAutoScrollStep: () => void }).performAutoScrollStep();
+
+    const firstOuterScrollTop = outer.scrollTop;
+
+    (service as unknown as { performAutoScrollStep: () => void }).performAutoScrollStep();
+
+    expect(firstOuterScrollTop).toBeGreaterThan(0);
+    expect(outer.scrollTop).toBeGreaterThan(firstOuterScrollTop);
+    expect(autoScrollState.scrollContainer).toBe(outer);
+    expect(autoScrollState.stickyScrollAmount).toBeGreaterThan(0);
+
+    outer.remove();
   });
 });

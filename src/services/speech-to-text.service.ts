@@ -25,7 +25,8 @@ import {
   isRecording, 
   isTranscribing, 
   offlinePendingCount,
-  remainingQuota 
+  remainingQuota,
+  recordingDurationSec
 } from '../state/focus-stores';
 import { OfflineAudioCacheEntry } from '../models/focus';
 
@@ -59,6 +60,13 @@ export class SpeechToTextService {
   readonly isTranscribing = isTranscribing;
   readonly offlinePendingCount = offlinePendingCount;
   readonly remainingQuota = remainingQuota;
+  /**
+   * 【根因修复 2026-04-20】录音时长秒数（由服务单一来源驱动，取代组件内各自维护的 timer）。
+   */
+  readonly recordingDurationSec = recordingDurationSec;
+
+  /** 录音时长 ticker，仅由服务自身管理。 */
+  private durationTicker: ReturnType<typeof setInterval> | null = null;
   
   private readonly config = FOCUS_CONFIG.SPEECH_TO_TEXT;
   private readonly IDB_NAME = FOCUS_CONFIG.SYNC.IDB_NAME;
@@ -329,6 +337,7 @@ export class SpeechToTextService {
       // 每秒收集一次数据，避免丢失
       this.mediaRecorder.start(1000);
       isRecording.set(true);
+      this.startDurationTicker();
       
       this.logger.debug('SpeechToText', `Recording started with mimeType: ${mimeType}`);
       
@@ -364,6 +373,7 @@ export class SpeechToTextService {
       this.mediaRecorder.stop();
       this.mediaRecorder.stream.getTracks().forEach(track => track.stop());
       isRecording.set(false);
+      this.stopDurationTicker();
       this.recordingOwnerUserId = null;
     }
   }
@@ -387,6 +397,7 @@ export class SpeechToTextService {
     this.mediaRecorder = null;
     isRecording.set(false);
     isTranscribing.set(false);
+    this.stopDurationTicker();
     this.logger.debug('SpeechToText', 'Recording cancelled, all data discarded');
   }
   
@@ -403,6 +414,7 @@ export class SpeechToTextService {
       this.mediaRecorder.onstop = async () => {
         isRecording.set(false);
         isTranscribing.set(true);
+        this.stopDurationTicker();
         const expectedOwnerUserId = this.recordingOwnerUserId;
 
         const mimeType = this.mediaRecorder?.mimeType || 'audio/webm';
@@ -1026,6 +1038,32 @@ export class SpeechToTextService {
   getRecordingDuration(): number {
     if (!this.isRecording()) return 0;
     return Math.round((Date.now() - this.recordingStartTime) / 1000);
+  }
+
+  /**
+   * 启动录音时长 ticker：每 500ms 刷新一次 `recordingDurationSec` 信号。
+   * 所有 BlackBoxRecorderComponent 实例共享该信号，避免多实例 timer 错位。
+   */
+  private startDurationTicker(): void {
+    this.stopDurationTicker();
+    recordingDurationSec.set(0);
+    this.durationTicker = setInterval(() => {
+      const start = this.recordingStartTime;
+      if (!start) return;
+      const elapsed = Math.round((Date.now() - start) / 1000);
+      recordingDurationSec.set(elapsed);
+    }, 500);
+  }
+
+  /**
+   * 停止录音时长 ticker 并将时长信号归零（交由转写/保存阶段使用）。
+   */
+  private stopDurationTicker(): void {
+    if (this.durationTicker) {
+      clearInterval(this.durationTicker);
+      this.durationTicker = null;
+    }
+    recordingDurationSec.set(0);
   }
 }
 

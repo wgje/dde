@@ -11,6 +11,11 @@ import * as go from 'gojs';
   providedIn: 'root'
 })
 export class FlowOverviewService {
+  private static readonly OVERVIEW_IDLE_UPDATE_DELAY_MS = 150;
+  private static readonly OVERVIEW_DRAG_UPDATE_DELAY_MS = 0;
+  private static readonly VIEWPORT_BINDINGS_DRAG_THROTTLE_MS = 16;
+  private static readonly VIEWPORT_BINDINGS_IDLE_THROTTLE_MS = 96;
+
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('FlowOverview');
   private readonly zone = inject(NgZone);
@@ -34,6 +39,8 @@ export class FlowOverviewService {
   private isApplyingOverviewViewportUpdate: boolean = false;
   private overviewUpdateQueuedWhileApplying: boolean = false;
   private overviewScheduleUpdate: ((source: 'viewport' | 'document') => void) | null = null;
+  private overviewScheduledUpdateRafId: number | null = null;
+  private pendingOverviewUpdateSource: 'viewport' | 'document' | null = null;
   // 缓存与节流
   private overviewBoundsCache: string = '';
   private overviewInteractionLastApplyAt = 0;
@@ -45,6 +52,8 @@ export class FlowOverviewService {
   // 视口轮询
   private overviewViewportPollRafId: number | null = null;
   private overviewViewportPollLastKey: string = '';
+  private overviewResizeRefreshRafId: number | null = null;
+  private overviewInteractionRefreshRafId: number | null = null;
   // ResizeObserver
   private overviewResizeObserver: ResizeObserver | null = null;
   // Pointer 事件清理
@@ -227,12 +236,32 @@ export class FlowOverviewService {
       cancelAnimationFrame(this.overviewViewportPollRafId);
       this.overviewViewportPollRafId = null;
     }
+    if (this.overviewResizeRefreshRafId !== null) {
+      cancelAnimationFrame(this.overviewResizeRefreshRafId);
+      this.overviewResizeRefreshRafId = null;
+    }
+    if (this.overviewInteractionRefreshRafId !== null) {
+      cancelAnimationFrame(this.overviewInteractionRefreshRafId);
+      this.overviewInteractionRefreshRafId = null;
+    }
+    if (this.overviewScheduledUpdateRafId !== null) {
+      cancelAnimationFrame(this.overviewScheduledUpdateRafId);
+      this.overviewScheduledUpdateRafId = null;
+    }
     
     // 清理节流定时器
     if (this.throttledUpdateBindingsTimer) {
       clearTimeout(this.throttledUpdateBindingsTimer);
       this.throttledUpdateBindingsTimer = null;
     }
+    this.isOverviewInteracting = false;
+    this.isOverviewBoxDragging = false;
+    this.overviewBoxViewportBounds = null;
+    this.isApplyingOverviewViewportUpdate = false;
+    this.overviewUpdateQueuedWhileApplying = false;
+    this.overviewInteractionLastApplyAt = 0;
+    this.throttledUpdateBindingsPending = false;
+    this.pendingOverviewUpdateSource = null;
     
     // 销毁 Overview
     if (this.overview) {
@@ -265,10 +294,19 @@ export class FlowOverviewService {
       return null;
     }
   }
+
+  private setOverviewUpdateDelay(delayMs: number): void {
+    if (!this.overview) return;
+    this.overview.updateDelay = delayMs;
+  }
   
   private setupOverviewResizeObserver(container: HTMLDivElement): void {
     this.overviewResizeObserver = new ResizeObserver(() => {
-      window.requestAnimationFrame(() => {
+      if (this.overviewResizeRefreshRafId !== null) {
+        cancelAnimationFrame(this.overviewResizeRefreshRafId);
+      }
+      this.overviewResizeRefreshRafId = window.requestAnimationFrame(() => {
+        this.overviewResizeRefreshRafId = null;
         if (this.isDestroyed || !this.overview) return;
         this.refreshOverview();
       });
@@ -375,22 +413,54 @@ export class FlowOverviewService {
       return extended;
     };
 
+    let lastBindingsUpdateMode: 'immediate' | 'deferred' | null = null;
+
     // 节流绑定更新
-    const scheduleViewportBindingsUpdate = (): void => {
-      if (this.throttledUpdateBindingsPending) return;
-      this.throttledUpdateBindingsPending = true;
-      
-      if (this.throttledUpdateBindingsTimer) {
-        clearTimeout(this.throttledUpdateBindingsTimer);
+    const scheduleViewportBindingsUpdate = (mode: 'immediate' | 'deferred'): void => {
+      if (!this.overview) return;
+
+      if (mode === 'immediate') {
+        if (this.throttledUpdateBindingsPending && lastBindingsUpdateMode === 'immediate') {
+          return;
+        }
+
+        if (this.throttledUpdateBindingsTimer) {
+          clearTimeout(this.throttledUpdateBindingsTimer);
+          this.throttledUpdateBindingsTimer = null;
+        }
+
+        this.throttledUpdateBindingsPending = true;
+        lastBindingsUpdateMode = 'immediate';
+        this.overview.updateAllTargetBindings();
+        this.overview.requestUpdate();
+        this.throttledUpdateBindingsTimer = setTimeout(() => {
+          this.throttledUpdateBindingsPending = false;
+          this.throttledUpdateBindingsTimer = null;
+          lastBindingsUpdateMode = null;
+        }, FlowOverviewService.VIEWPORT_BINDINGS_DRAG_THROTTLE_MS);
+        return;
       }
-      
+
+      if (this.throttledUpdateBindingsPending) {
+        return;
+      }
+
+      this.throttledUpdateBindingsPending = true;
+      lastBindingsUpdateMode = 'deferred';
       this.throttledUpdateBindingsTimer = setTimeout(() => {
+        if (!this.overview) {
+          this.throttledUpdateBindingsPending = false;
+          this.throttledUpdateBindingsTimer = null;
+          lastBindingsUpdateMode = null;
+          return;
+        }
+
+        this.overview.updateAllTargetBindings();
+        this.overview.requestUpdate();
         this.throttledUpdateBindingsPending = false;
         this.throttledUpdateBindingsTimer = null;
-        if (this.overview && !this.isDestroyed) {
-          this.overview.updateAllTargetBindings();
-        }
-      }, 100);
+        lastBindingsUpdateMode = null;
+      }, FlowOverviewService.VIEWPORT_BINDINGS_IDLE_THROTTLE_MS);
     };
 
     // 核心更新逻辑
@@ -404,14 +474,15 @@ export class FlowOverviewService {
       
       try {
         if (!this.diagram || !this.overview) return;
-        
-        // 节点数量变化时重新计算 baseScale
-        const currentNodeDataCount = ((this.diagram.model as go.Model & { nodeDataArray?: go.ObjectData[] })?.nodeDataArray?.length ?? 0);
-        if (currentNodeDataCount !== lastNodeDataCount) {
-          baseScale = calculateBaseScale();
-          lastNodeDataCount = currentNodeDataCount;
-        }
 
+        // 【2026-04-20 精准回归修复】Sprint 5 清理（commit 6cbb7c6）只误删了
+        // 对 overviewBoxViewportBounds 的赋值写入，导致 fakeViewportBounds 永远为 null，
+        // usingFakeViewportBounds=false，拖动时只能拿到实时 diagram.viewportBounds，
+        // 时序上滞后一帧且没能驱动原有 lerp + setOverviewFixedBounds 的缩放逻辑。
+        // 修复：在 beginManualBoxDrag / applyManualBoxDrag 中按「box.actualBounds.center
+        // + diagram.viewportBounds 尺寸」写入 overviewBoxViewportBounds。其它逻辑不动，
+        // 原有 smartLerp (18%/45%) + setOverviewFixedBounds 就能像回归前那样平滑工作，
+        // task blocks 保持可见、随 box 拖动相对位移，不会跳到亚像素尺寸。
         const fakeViewportBounds = this.overviewBoxViewportBounds;
         const usingFakeViewportBounds = !!(this.isOverviewBoxDragging && fakeViewportBounds && fakeViewportBounds.isReal());
         const viewportBounds: go.Rect = usingFakeViewportBounds
@@ -420,8 +491,10 @@ export class FlowOverviewService {
         if (!viewportBounds.isReal()) {
           return;
         }
-      
+
         const nodeBounds = getNodesBounds();
+        const containerW = this.overviewContainer?.clientWidth ?? 0;
+        const containerH = this.overviewContainer?.clientHeight ?? 0;
         const docBounds = this.diagram.documentBounds;
         let totalBounds: go.Rect;
         if (!docBounds.isReal() || (docBounds.width === 0 && docBounds.height === 0)) {
@@ -432,6 +505,13 @@ export class FlowOverviewService {
           const maxX = Math.max(docBounds.x + docBounds.width, viewportBounds.x + viewportBounds.width);
           const maxY = Math.max(docBounds.y + docBounds.height, viewportBounds.y + viewportBounds.height);
           totalBounds = new go.Rect(minX, minY, maxX - minX, maxY - minY);
+        }
+
+        // 节点数量变化时重新计算 baseScale（非拖拽路径才需要）
+        const currentNodeDataCount = ((this.diagram.model as go.Model & { nodeDataArray?: go.ObjectData[] })?.nodeDataArray?.length ?? 0);
+        if (currentNodeDataCount !== lastNodeDataCount) {
+          baseScale = calculateBaseScale();
+          lastNodeDataCount = currentNodeDataCount;
         }
       
         const isViewportOutside = 
@@ -523,7 +603,9 @@ export class FlowOverviewService {
             this.overview.requestUpdate();
           } else {
             this.overview.requestUpdate();
-            scheduleViewportBindingsUpdate();
+            if (!usingFakeViewportBounds) {
+              scheduleViewportBindingsUpdate(this.isOverviewBoxDragging ? 'immediate' : 'deferred');
+            }
           }
         }
       } finally {
@@ -531,7 +613,7 @@ export class FlowOverviewService {
         
         if (this.overviewUpdateQueuedWhileApplying) {
           this.overviewUpdateQueuedWhileApplying = false;
-          requestAnimationFrame(() => applyOverviewUpdate('viewport'));
+          this.overviewScheduleUpdate?.('viewport');
         }
       }
     };
@@ -546,8 +628,21 @@ export class FlowOverviewService {
         if (now - this.overviewInteractionLastApplyAt < 32) return;
         this.overviewInteractionLastApplyAt = now;
       }
-      
-      requestAnimationFrame(() => applyOverviewUpdate(source));
+
+      if (source === 'document' || this.pendingOverviewUpdateSource !== 'document') {
+        this.pendingOverviewUpdateSource = source;
+      }
+
+      if (this.overviewScheduledUpdateRafId !== null) {
+        return;
+      }
+
+      this.overviewScheduledUpdateRafId = requestAnimationFrame(() => {
+        this.overviewScheduledUpdateRafId = null;
+        const nextSource = this.pendingOverviewUpdateSource ?? source;
+        this.pendingOverviewUpdateSource = null;
+        applyOverviewUpdate(nextSource);
+      });
     };
 
     // 绑定 DiagramListener
@@ -581,6 +676,8 @@ export class FlowOverviewService {
     let hasPointerCapture = false;
     let isDraggingBox = false;
     let isManualBoxDrag = false;
+    let isMouseDraggingBox = false;
+    let isResettingOverviewInteraction = false;
     let manualBoxDragOffset: { dx: number; dy: number } | null = null;
     let manualDragViewportSize: { w: number; h: number } | null = null;
 
@@ -598,6 +695,43 @@ export class FlowOverviewService {
       try { (ev as Event & { preventDefault?: () => void }).preventDefault?.(); } catch { /* noop */ }
     };
 
+    /**
+     * 【2026-04-20 回归修复】推导拖拽期间的"假 viewportBounds"。
+     *
+     * 起因：Sprint 5 死代码清理（commit 6cbb7c6）误删了
+     * `_updateOverviewBoxViewportBounds`。该辅助函数原本负责在拖拽概览框时，
+     * 基于 overview.box.actualBounds.center（白框当前视觉中心）推导一个
+     * viewportBounds 矩形，供 applyOverviewUpdate() 中 fakeViewportBounds
+     * 路径使用。
+     *
+     * 缺了它会导致：
+     *   - `this.overviewBoxViewportBounds` 永远 null
+     *   - `usingFakeViewportBounds` 永远 false
+     *   - `applyOverviewUpdate` 依赖 `this.diagram.viewportBounds`
+     *   - 部分浏览器（Chrome/Safari 某些版本）直接写 diagram.position 不会
+     *     逐帧触发 ViewportBoundsChanged，小地图 scale/fixedBounds 没法跟手
+     *   - 用户视觉：拖动概览框时小地图里的任务块"卡住不动"或在松手后才突变
+     *
+     * 现恢复该辅助函数，并在 applyManualBoxDrag 同步调用，让 fakeViewportBounds
+     * 每帧都反映白框最新位置。
+     */
+    const updateOverviewBoxViewportBounds = (centerOverride?: go.Point, fallbackDocPt?: go.Point): void => {
+      if (!this.diagram || !this.overview) return;
+      const vb = this.diagram.viewportBounds;
+      if (!vb.isReal()) return;
+
+      const boxBounds = this.overview.box?.actualBounds;
+      const center = centerOverride ?? (boxBounds?.isReal() ? boxBounds.center : fallbackDocPt);
+      if (!center) return;
+
+      this.overviewBoxViewportBounds = new go.Rect(
+        center.x - vb.width / 2,
+        center.y - vb.height / 2,
+        vb.width,
+        vb.height
+      );
+    };
+
     const beginManualBoxDrag = (pt: go.Point): void => {
       if (!this.diagram || !this.overview) return;
       const vb = this.diagram.viewportBounds;
@@ -609,8 +743,12 @@ export class FlowOverviewService {
       manualDragViewportSize = { w: vb.width, h: vb.height };
 
       try { this.diagram.skipsUndoManager = true; } catch { /* noop */ }
+      this.setOverviewUpdateDelay(FlowOverviewService.OVERVIEW_DRAG_UPDATE_DELAY_MS);
 
       isManualBoxDrag = true;
+      // 【2026-04-20 回归修复】起始帧先写入一次，确保 isOverviewBoxDragging 生效
+      // 的那一拍 applyOverviewUpdate 已经能读到有效的 fakeViewportBounds。
+      updateOverviewBoxViewportBounds(boxCenter, pt);
     };
 
     const applyManualBoxDrag = (pt: go.Point): void => {
@@ -618,6 +756,7 @@ export class FlowOverviewService {
 
       const centerX = pt.x - manualBoxDragOffset.dx;
       const centerY = pt.y - manualBoxDragOffset.dy;
+      const boxCenter = new go.Point(centerX, centerY);
       const desiredPos = new go.Point(
         centerX - manualDragViewportSize.w / 2,
         centerY - manualDragViewportSize.h / 2
@@ -627,6 +766,11 @@ export class FlowOverviewService {
         this.diagram.position = desiredPos;
         this.diagram.requestUpdate();
       }
+
+      // 【2026-04-20 回归修复】同步推导 fakeViewportBounds，确保 applyOverviewUpdate
+      // 在部分浏览器 ViewportBoundsChanged 被合并/延迟的情况下仍能跟手刷新 scale
+      // 与 fixedBounds，让小地图里的任务块随预览框位置实时重新排布。
+      updateOverviewBoxViewportBounds(boxCenter, pt);
 
       if (this.overview) {
         this.overview.updateAllTargetBindings();
@@ -639,6 +783,7 @@ export class FlowOverviewService {
       isManualBoxDrag = false;
       manualBoxDragOffset = null;
       manualDragViewportSize = null;
+      this.setOverviewUpdateDelay(FlowOverviewService.OVERVIEW_IDLE_UPDATE_DELAY_MS);
       if (this.diagram) {
         try { this.diagram.skipsUndoManager = false; } catch { /* noop */ }
       }
@@ -654,7 +799,18 @@ export class FlowOverviewService {
       if (boxBounds?.isReal() && boxBounds.containsPoint(pt)) {
         isDraggingBox = true;
         this.isOverviewBoxDragging = true;
+
         stopEventForManualDrag(ev);
+
+        try {
+          container.setPointerCapture(ev.pointerId);
+          capturedPointerId = ev.pointerId;
+          hasPointerCapture = true;
+        } catch (e) {
+          capturedPointerId = ev.pointerId;
+          this.logger.debug('Overview box setPointerCapture 不可用:', e);
+        }
+
         beginManualBoxDrag(pt);
         this.overviewBoundsCache = '';
         this.overviewScheduleUpdate?.('viewport');
@@ -687,30 +843,53 @@ export class FlowOverviewService {
       }
       this.overviewScheduleUpdate?.('viewport');
     };
-    
-    const onPointerUpLike = (): void => {
-      if (hasPointerCapture && capturedPointerId !== null) {
-        try { container.releasePointerCapture(capturedPointerId); } catch { /* noop */ }
+
+    const resetOverviewInteractionState = (): void => {
+      if (isResettingOverviewInteraction) {
+        return;
       }
+
+      isResettingOverviewInteraction = true;
+      const pointerIdToRelease = hasPointerCapture ? capturedPointerId : null;
+
       capturedPointerId = null;
       hasPointerCapture = false;
+      isDraggingBox = false;
+      isMouseDraggingBox = false;
+      this.isOverviewBoxDragging = false;
+      this.isOverviewInteracting = false;
+      this.overviewInteractionLastApplyAt = 0;
+      this.overviewBoxViewportBounds = null;
+
+      if (this.throttledUpdateBindingsTimer) {
+        clearTimeout(this.throttledUpdateBindingsTimer);
+        this.throttledUpdateBindingsTimer = null;
+      }
+      this.throttledUpdateBindingsPending = false;
+
+      endManualBoxDrag();
+
+      if (pointerIdToRelease !== null) {
+        try { container.releasePointerCapture(pointerIdToRelease); } catch { /* noop */ }
+      }
+
+      isResettingOverviewInteraction = false;
+    };
+    
+    const onPointerUpLike = (): void => {
+      const wasDraggingBox = isDraggingBox;
+      const wasInteracting = this.isOverviewInteracting;
+      resetOverviewInteractionState();
       
-      if (isDraggingBox) {
-        isDraggingBox = false;
-        this.isOverviewBoxDragging = false;
-        endManualBoxDrag();
-        this.overviewBoxViewportBounds = null;
-        
-        if (this.throttledUpdateBindingsTimer) {
-          clearTimeout(this.throttledUpdateBindingsTimer);
-          this.throttledUpdateBindingsTimer = null;
-        }
-        this.throttledUpdateBindingsPending = false;
-        
+      if (wasDraggingBox) {
         this.overviewBoundsCache = '';
         this.overviewScheduleUpdate?.('viewport');
 
-        requestAnimationFrame(() => {
+        if (this.overviewInteractionRefreshRafId !== null) {
+          cancelAnimationFrame(this.overviewInteractionRefreshRafId);
+        }
+        this.overviewInteractionRefreshRafId = requestAnimationFrame(() => {
+          this.overviewInteractionRefreshRafId = null;
           if (this.isDestroyed || !this.overview) return;
           this.overview.updateAllTargetBindings();
           this.overview.requestUpdate();
@@ -718,14 +897,16 @@ export class FlowOverviewService {
         return;
       }
       
-      if (!this.isOverviewInteracting) return;
-      this.isOverviewInteracting = false;
-      this.overviewInteractionLastApplyAt = 0;
+      if (!wasInteracting) return;
 
       this.overviewBoundsCache = '';
       this.overviewScheduleUpdate?.('viewport');
 
-      requestAnimationFrame(() => {
+      if (this.overviewInteractionRefreshRafId !== null) {
+        cancelAnimationFrame(this.overviewInteractionRefreshRafId);
+      }
+      this.overviewInteractionRefreshRafId = requestAnimationFrame(() => {
+        this.overviewInteractionRefreshRafId = null;
         if (this.isDestroyed || !this.diagram || !this.overview) return;
         this.overview.requestUpdate();
         this.diagram.requestUpdate();
@@ -734,6 +915,7 @@ export class FlowOverviewService {
 
     const onWindowPointerMove = (ev: PointerEvent): void => {
       if (!isDraggingBox) return;
+      if (hasPointerCapture) return;
       if (capturedPointerId !== null && ev.pointerId !== capturedPointerId) return;
       if (isManualBoxDrag) {
         stopEventForManualDrag(ev);
@@ -745,7 +927,6 @@ export class FlowOverviewService {
       this.overviewScheduleUpdate?.('viewport');
     };
 
-    let isMouseDraggingBox = false;
     const onMouseDown = (ev: MouseEvent): void => {
       if (!this.overview) return;
       const pt = getOverviewDocPointFromClient(ev.clientX, ev.clientY);
@@ -770,10 +951,7 @@ export class FlowOverviewService {
     };
     const onMouseUp = (): void => {
       if (!isMouseDraggingBox) return;
-      isMouseDraggingBox = false;
-      this.isOverviewBoxDragging = false;
-      this.overviewBoxViewportBounds = null;
-      endManualBoxDrag();
+      resetOverviewInteractionState();
       this.overviewBoundsCache = '';
       this.overviewScheduleUpdate?.('viewport');
     };
@@ -801,6 +979,8 @@ export class FlowOverviewService {
 
     this.overviewPointerCleanup = () => {
       container.style.touchAction = prevTouchAction;
+
+      resetOverviewInteractionState();
       
       container.removeEventListener('pointerdown', onPointerDown, { capture: true } as EventListenerOptions);
       container.removeEventListener('pointermove', onPointerMove, { capture: true } as EventListenerOptions);

@@ -86,6 +86,8 @@ function setup(options?: {
 
   const userSessionMock = {
     currentUserId: userId,
+    canAuthoritativelyRejectProjectRoute: vi.fn(() => true),
+    startupProjectCatalogStage: vi.fn(() => 'resolved' as const),
     setCurrentUser: vi.fn().mockImplementation(async (nextUserId: string | null) => {
       userId.set(nextUserId);
     }),
@@ -108,6 +110,7 @@ function setup(options?: {
   };
 
   const routerMock = {
+    url: '/',
     navigateByUrl: vi.fn().mockResolvedValue(true),
   };
 
@@ -397,6 +400,35 @@ describe('isLoginData type guard (tested indirectly via handleLogin)', () => {
     await service.handleLogin();
 
     expect(routerMock.navigateByUrl).not.toHaveBeenCalled();
+  });
+
+  it('登录后若返回路径指向当前账号不可访问的旧项目，应回退到项目列表', async () => {
+    const { service, authMock, modalMock, routerMock, projects } = setup();
+    authMock.signIn.mockResolvedValue({ ok: true, value: { userId: 'user-1' } });
+    modalMock.getData.mockReturnValue({ returnUrl: '/projects/proj-stale/text' });
+    projects.set([{ id: 'proj-actual', syncSource: 'synced' }]);
+
+    service.authEmail.set('test@example.com');
+    service.authPassword.set('password123');
+
+    await service.handleLogin();
+
+    expect(routerMock.navigateByUrl).toHaveBeenCalledWith('/projects');
+  });
+
+  it('登录后若项目目录尚未 authoritative，应保留显式 returnUrl 等待后续校验', async () => {
+    const { service, authMock, modalMock, routerMock, userSessionMock } = setup();
+    authMock.signIn.mockResolvedValue({ ok: true, value: { userId: 'user-1' } });
+    modalMock.getData.mockReturnValue({ returnUrl: '/projects/proj-stale/text' });
+    userSessionMock.canAuthoritativelyRejectProjectRoute.mockReturnValue(false);
+    userSessionMock.startupProjectCatalogStage.mockReturnValue('partial');
+
+    service.authEmail.set('test@example.com');
+    service.authPassword.set('password123');
+
+    await service.handleLogin();
+
+    expect(routerMock.navigateByUrl).toHaveBeenCalledWith('/projects/proj-stale/text');
   });
 
   it('should preserve the auth service login error message', async () => {

@@ -110,7 +110,8 @@ import { TextStageCardComponent } from './text-stage-card.component';
         </div>
         
         <!-- 阶段列表 -->
-        <div class="w-full flex-1 min-h-0 min-w-0 overflow-auto flex flex-col gap-3"
+           <div class="w-full flex-1 min-h-0 min-w-0 overflow-auto flex flex-col gap-3"
+             data-stage-scroll-container
              [ngClass]="{'px-1': !isMobile, 'gap-2': isMobile}">
           @for (stage of visibleStages(); track stage.stageNumber) {
             <app-text-stage-card

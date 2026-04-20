@@ -11,6 +11,7 @@ import { UndoService } from '../../../services/undo.service';
 import { WidgetBindingService } from '../../../services/widget-binding.service';
 import { enableLocalMode, disableLocalMode } from '../../../services/guards';
 import { getErrorMessage, isFailure, humanizeErrorMessage, type OperationError } from '../../../utils/result';
+import { resolveRouteIntent } from '../../../utils/route-intent';
 import { AUTH_CONFIG } from '../../../config/auth.config';
 import { FEATURE_FLAGS } from '../../../config/feature-flags.config';
 import type { AttachmentService } from '../../../services/attachment.service';
@@ -160,6 +161,45 @@ export class AppAuthCoordinatorService {
   private getAuthFailureMessage(error: OperationError): string {
     const message = error.message?.trim();
     return message || getErrorMessage(error);
+  }
+
+  resolveSafePostAuthNavigationUrl(returnUrl?: string | null): string | null {
+    const normalizedReturnUrl = typeof returnUrl === 'string'
+      ? returnUrl.trim()
+      : '';
+    const explicitReturnUrl = normalizedReturnUrl && normalizedReturnUrl !== '/'
+      ? normalizedReturnUrl
+      : null;
+
+    if (!explicitReturnUrl) {
+      return explicitReturnUrl;
+    }
+
+    const routeIntent = resolveRouteIntent(explicitReturnUrl, this.projectState.activeProjectId());
+    if (routeIntent.kind === 'projects' || !routeIntent.projectId) {
+      return explicitReturnUrl;
+    }
+
+    const startupProjectCatalogStage = this.userSession.startupProjectCatalogStage();
+    if (!this.userSession.canAuthoritativelyRejectProjectRoute()) {
+      return explicitReturnUrl;
+    }
+
+    const projectExists = this.projectState.projects().some(
+      (project) => project.id === routeIntent.projectId,
+    );
+    if (projectExists) {
+      return explicitReturnUrl;
+    }
+
+    this.logger.info('[Login] 登录后目标路由不可安全恢复，已回退到项目列表', {
+      candidateUrl: explicitReturnUrl,
+      projectId: routeIntent.projectId,
+      startupProjectCatalogStage,
+      canAuthoritativelyRejectProjectRoute: true,
+      hasMatchingProject: projectExists,
+    });
+    return '/projects';
   }
 
   private async bootstrapSession(): Promise<void> {
@@ -318,7 +358,10 @@ export class AppAuthCoordinatorService {
 
   // ========== 登录/注册/重置 ==========
 
-  async handleLogin(event?: Event, opts?: { closeSettings?: boolean }): Promise<void> {
+  async handleLogin(
+    event?: Event,
+    opts?: { closeSettings?: boolean; skipPostAuthNavigation?: boolean },
+  ): Promise<void> {
     event?.preventDefault();
     if (!this.auth.isConfigured) {
       this.authError.set('Supabase keys missing. Set NG_APP_SUPABASE_URL/NG_APP_SUPABASE_ANON_KEY.');
@@ -368,8 +411,11 @@ export class AppAuthCoordinatorService {
       if (opts?.closeSettings) {
         this.modal.closeByType('settings');
       }
-      if (returnUrl && returnUrl !== '/') {
-        void this.router.navigateByUrl(returnUrl);
+      const postAuthTargetUrl = opts?.skipPostAuthNavigation
+        ? null
+        : this.resolveSafePostAuthNavigationUrl(returnUrl);
+      if (postAuthTargetUrl) {
+        void this.router.navigateByUrl(postAuthTargetUrl);
       }
       setTimeout(() => {
         void this.checkMigrationAfterLogin(userId, migrationGeneration).catch(error => {
@@ -663,7 +709,7 @@ export class AppAuthCoordinatorService {
   async handleLoginFromModal(data: { email: string; password: string }): Promise<void> {
     this.authEmail.set(data.email);
     this.authPassword.set(data.password);
-    await this.handleLogin();
+    await this.handleLogin(undefined, { skipPostAuthNavigation: true });
   }
 
   async handleSignupFromModal(data: { email: string; password: string; confirmPassword: string }): Promise<void> {
@@ -685,10 +731,6 @@ export class AppAuthCoordinatorService {
     this.modal.closeByType('login', { success: true, userId: AUTH_CONFIG.LOCAL_MODE_USER_ID });
     void this.userSession.loadProjects();
     this.toast.info('本地模式', '数据仅保存在本地，不会同步到云端');
-    const rawLoginData = this.modal.getData('login');
-    const loginData = this.isLoginData(rawLoginData) ? rawLoginData : undefined;
-    const returnUrl = loginData?.returnUrl || '/projects';
-    void this.router.navigateByUrl(returnUrl);
   }
 
   // ========== 迁移检查 ==========

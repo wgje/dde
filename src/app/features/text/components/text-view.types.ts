@@ -46,6 +46,7 @@ export interface AutoScrollState {
   animationId: number | null;
   scrollContainer: HTMLElement | null;
   lastClientY: number;
+  stickyScrollAmount: number | null;
 }
 
 /** 放置目标信息 */

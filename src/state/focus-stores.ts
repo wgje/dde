@@ -299,6 +299,15 @@ export const focusPreferences = signal<FocusPreferences>(DEFAULT_FOCUS_PREFERENC
 export const isRecording = signal<boolean>(false);
 
 /**
+ * 当前录音已持续的秒数。
+ * 【根因修复 2026-04-20】BlackBoxRecorderComponent 可能有多个实例（侧边栏 + mobile-black-box-drawer），
+ * 过去在组件内各自维护 setInterval 与 recordingDuration 信号，当用户在实例 A 按下开始录音时，
+ * 实例 B 的 isRecording 同步变 true 并渲染「录音中...」，但实例 B 的本地 timer 从未启动，导致
+ * 计时器卡在 0:00。将时长提升为服务层单例信号，所有渲染实例消费同一数据源。
+ */
+export const recordingDurationSec = signal<number>(0);
+
+/**
  * 是否正在转写
  */
 export const isTranscribing = signal<boolean>(false);
@@ -428,6 +437,7 @@ export function resetFocusState(options: { cleanupTodayDateInterval?: boolean } 
   isRecording.set(false);
   isTranscribing.set(false);
   transcriptionError.set(null);
+  recordingDurationSec.set(0);
   offlinePendingCount.set(0);
   remainingQuota.set(50);
   showBlackBoxPanel.set(false);

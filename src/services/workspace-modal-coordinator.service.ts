@@ -177,7 +177,10 @@ export class WorkspaceModalCoordinatorService {
           resetPasswordSent: this.authCoord.resetPasswordSent()
         },
         outputs: {
-          close: () => { this._loginModalRef = null; },
+          close: () => {
+            this._loginModalRef = null;
+            this._loginReturnUrl = null;
+          },
           login: (data: unknown) => this._callbacks.handleLoginFromModal?.(data as { email: string; password: string }),
           signup: (data: unknown) => this._callbacks.handleSignupFromModal?.(data as { email: string; password: string; confirmPassword: string }),
           resetPassword: (email: unknown) => this._callbacks.handleResetPasswordFromModal?.(email as string),
@@ -198,6 +201,7 @@ export class WorkspaceModalCoordinatorService {
       this._loginModalRef.close();
       this._loginModalRef = null;
     }
+    this._loginReturnUrl = null;
   }
 
   navigateAfterLogin(): void {

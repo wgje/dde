@@ -63,8 +63,9 @@ describe('TextStagesComponent', () => {
     const section = host.querySelector('section');
     expect(section?.classList.contains('overflow-hidden')).toBe(true);
 
-    const stageList = host.querySelector('div.overflow-auto');
+    const stageList = host.querySelector('[data-stage-scroll-container]');
     expect(stageList).not.toBeNull();
+    expect(stageList?.classList.contains('overflow-auto')).toBe(true);
   });
 
   it('should declare the forwarded linked-task payload as taskId plus event', () => {

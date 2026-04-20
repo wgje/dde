@@ -18,6 +18,7 @@ describe('projectExistsGuard', () => {
   };
   let userSessionMock: {
     loadProjects: ReturnType<typeof vi.fn>;
+    canAuthoritativelyRejectProjectRoute: ReturnType<typeof vi.fn>;
     startupProjectCatalogStage: ReturnType<typeof vi.fn>;
   };
   let routerMock: {
@@ -40,6 +41,7 @@ describe('projectExistsGuard', () => {
 
     userSessionMock = {
       loadProjects: vi.fn().mockResolvedValue(undefined),
+      canAuthoritativelyRejectProjectRoute: vi.fn().mockReturnValue(true),
       startupProjectCatalogStage: vi.fn().mockReturnValue('resolved'),
     };
 
@@ -66,6 +68,7 @@ describe('projectExistsGuard', () => {
   it('partial 启动目录下不应提前把合法 deep-link 重定向到 /projects', async () => {
     projectStateMock.projects.mockReturnValue([{ id: 'project-1' }]);
     projectStateMock.getProject.mockReturnValue(null);
+    userSessionMock.canAuthoritativelyRejectProjectRoute.mockReturnValue(false);
     userSessionMock.startupProjectCatalogStage.mockReturnValue('partial');
     syncCoordinatorMock.isLoadingRemote.mockReturnValue(false);
 
@@ -84,6 +87,7 @@ describe('projectExistsGuard', () => {
   it('resolved 目录下目标项目缺失时应回退到 /projects', async () => {
     projectStateMock.projects.mockReturnValue([{ id: 'project-1' }]);
     projectStateMock.getProject.mockReturnValue(null);
+    userSessionMock.canAuthoritativelyRejectProjectRoute.mockReturnValue(true);
     userSessionMock.startupProjectCatalogStage.mockReturnValue('resolved');
     syncCoordinatorMock.isLoadingRemote.mockReturnValue(false);
 

@@ -109,7 +109,7 @@ import { readTaskDragPayload, writeTaskDragPayload } from '../../../../utils/tas
       [style.width]="isOpen() ? sidebarWidth() + 'px' : '0px'"
       [class.w-0]="!isOpen()"
       [class.opacity-0]="!isOpen()"
-      [class.transition-none]="isResizing()">>
+      [class.transition-none]="isResizing()">
 
       <!-- 侧边栏内容 -->
       <div class="flex-1 flex flex-col w-full h-full min-w-0 min-h-0">
@@ -391,7 +391,7 @@ export class FlowPaletteComponent implements OnDestroy {
   /** 侧边栏宽度限制：最小 280px，最大 600px */
   private readonly MIN_WIDTH = 280;
   private readonly MAX_WIDTH = 600;
-  private readonly DEFAULT_WIDTH = 360;
+  private readonly DEFAULT_WIDTH = 320;
 
   /** 可调整的侧边栏宽度 */
   readonly sidebarWidth = signal(this.DEFAULT_WIDTH);
@@ -399,7 +399,7 @@ export class FlowPaletteComponent implements OnDestroy {
   readonly isResizing = signal(false);
 
   /** 保留兼容（暂不移除），实际使用 sidebarWidth() */
-  readonly expandedWidth = '360px';
+  readonly expandedWidth = '320px';
 
   readonly livingTasks = computed(() => this.projectState.tasks().filter(task => !task.deletedAt));
   readonly totalTaskCount = computed(() => this.livingTasks().length);

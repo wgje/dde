@@ -423,12 +423,23 @@ export class MobileTodoDrawerComponent implements OnDestroy {
   }
   
   onTouchEnd(event: TouchEvent, task: Task): void {
-    const shouldEmitTap = this.shouldEmitTouchTap(task, event.changedTouches[0] ?? null);
+    const changedTouch = event.changedTouches[0] ?? null;
+    const shouldEmitTap = this.shouldEmitTouchTap(task, changedTouch);
+    // 在 chip 上直接检测横向滑动：
+    // 原先依赖事件冒泡到外层 slot 的 onSwipeTouchEnd，但 chip 设置 touch-action:none
+    // 且 onTouchStart 调用了 preventDefault，部分 Android 浏览器会把此条 touch 标记为
+    // "已被处理"，导致 bubble 到 slot 时 swipeState 已经不一致（或根本未被 startTracking）。
+    // 直接基于 unassignedTouchSession 在 chip 层本地判断，避免这一路径依赖。
+    const swipeDirection = this.shouldEmitTouchSwipe(changedTouch);
     this.captureDraggedTaskClickGuard();
     this.taskTouchEnd.emit({ event });
     this.unassignedTouchSession = null;
     queueMicrotask(() => {
       this.suppressSwipeForCurrentTouch = false;
+      if (swipeDirection) {
+        this.swipeToSwitch.emit(swipeDirection);
+        return;
+      }
       if (shouldEmitTap && !this.draggingTaskId()) {
         this.lastSyntheticTouchTapGuard = { taskId: task.id, at: performance.now() };
         this.taskClick.emit(task);
@@ -584,9 +595,12 @@ export class MobileTodoDrawerComponent implements OnDestroy {
       this.finalizeUnassignedDragSession();
     });
 
-    if (event.type === 'touchcancel') {
-      this.resetSwipeState();
-    }
+    // 注意：不再在 touchcancel 时同步清零 swipeState。
+    // 原因：slot 的 onSwipeTouchStart 在 touchstart 上初始化 swipeState；
+    // 若我们在 document 级捕获阶段遇到无关 touchcancel（例如 touch-action:none
+    // 与某些 Android 浏览器的交互）就强行清空，会把用户真正的横向滑动手势撕掉，
+    // 表现就是"顶层抽屉左右滑动切换视图丢失"。swipeState 本身会在下一次 touchstart
+    // 被 startSwipeTracking() 覆盖，或在 onSwipeTouchEnd 成功消费后 reset，无需额外兜底。
   }
 
   private handleGlobalPointerFinish(event: PointerEvent): void {
@@ -604,9 +618,7 @@ export class MobileTodoDrawerComponent implements OnDestroy {
       this.finalizeUnassignedDragSession();
     });
 
-    if (event.type === 'pointercancel') {
-      this.resetSwipeState();
-    }
+    // 同上：pointercancel 不再同步清空 swipeState，避免误杀仍在进行中的滑动手势。
   }
 
   private captureDraggedTaskClickGuard(): void {
@@ -669,6 +681,40 @@ export class MobileTodoDrawerComponent implements OnDestroy {
     const endY = touch?.clientY ?? session.startY;
     return Math.abs(endX - session.startX) < TOUCH_TAP_SLOP_PX
       && Math.abs(endY - session.startY) < TOUCH_TAP_SLOP_PX;
+  }
+
+  /**
+   * 在 chip 本地识别横向滑动切换视图手势，使 swipe 不再依赖事件冒泡到 slot。
+   * 条件：未触发长按拖拽、未发生垂直滚动、水平位移 ≥ 50px 且为主导方向（≥ 垂直分量 × 1.5）、
+   * 手势总时长 < 500ms。与 `src/utils/gesture.ts` 的 DEFAULT_SWIPE_CONFIG 对齐。
+   */
+  private shouldEmitTouchSwipe(touch: Touch | null): SwipeDirection | null {
+    const session = this.unassignedTouchSession;
+    if (!session || session.scrolled || this.draggingTaskId() || this.suppressSwipeForCurrentTouch) {
+      return null;
+    }
+    if (!touch) {
+      return null;
+    }
+
+    const duration = performance.now() - session.startedAt;
+    if (duration > 500) {
+      return null;
+    }
+
+    const deltaX = touch.clientX - session.startX;
+    const deltaY = touch.clientY - session.startY;
+    const absDeltaX = Math.abs(deltaX);
+    const absDeltaY = Math.abs(deltaY);
+
+    if (absDeltaX < 50) {
+      return null;
+    }
+    if (absDeltaX < absDeltaY * 1.5) {
+      return null;
+    }
+
+    return deltaX > 0 ? 'right' : 'left';
   }
 
   private finalizeUnassignedDragSession(): void {
