@@ -10,7 +10,6 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:orientation="vertical">
-        <!-- 顶行：仅保留同步状态，顶部右侧不再放任务切换条。 -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -33,6 +32,23 @@
                 android:textColor="#4A7A38"
                 android:textSize="11sp"
                 android:visibility="gone" />
+
+            <!-- 动态 tab 栏：通过 RemoteViewsFactory (LIST_KIND_TABS) 渲染主任务/副任务 chip -->
+            <GridView
+                android:id="@+id/nano_widget_tab_list"
+                android:layout_width="0dp"
+                android:layout_weight="1"
+                android:layout_height="36dp"
+                android:columnWidth="64dp"
+                android:numColumns="3"
+                android:stretchMode="columnWidth"
+                android:gravity="center_vertical"
+                android:horizontalSpacing="2dp"
+                android:verticalSpacing="0dp"
+                android:scrollbars="none"
+                android:fadingEdge="none"
+                android:overScrollMode="never"
+                android:requiresFadingEdge="none" />
         </LinearLayout>
 
         <ListView

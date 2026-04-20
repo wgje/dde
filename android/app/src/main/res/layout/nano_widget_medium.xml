@@ -35,6 +35,23 @@
                 android:textColor="#4A7A38"
                 android:textSize="10sp"
                 android:visibility="gone" />
+
+            <!-- 动态 tab 栏：通过 RemoteViewsFactory (LIST_KIND_TABS) 渲染主任务/副任务 chip -->
+            <GridView
+                android:id="@+id/nano_widget_tab_list"
+                android:layout_width="0dp"
+                android:layout_weight="1"
+                android:layout_height="36dp"
+                android:columnWidth="64dp"
+                android:numColumns="3"
+                android:stretchMode="columnWidth"
+                android:gravity="center_vertical"
+                android:horizontalSpacing="2dp"
+                android:verticalSpacing="0dp"
+                android:scrollbars="none"
+                android:fadingEdge="none"
+                android:overScrollMode="never"
+                android:requiresFadingEdge="none" />
         </LinearLayout>
 
         <ListView

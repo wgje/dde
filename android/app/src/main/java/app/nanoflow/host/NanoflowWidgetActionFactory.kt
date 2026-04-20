@@ -34,7 +34,7 @@ class NanoflowWidgetActionFactory(
     val primaryAction: WidgetPrimaryAction? = null,
   ) {
     enum class Kind { TAB, OVERFLOW, REFRESH, GATE_PREV, GATE_NEXT, GATE_LABEL, PRIMARY }
-    enum class ChipTone { ACCENT, SURFACE, ACCENT_GATE, SURFACE_GATE }
+    enum class ChipTone { ACCENT, SURFACE, ACCENT_GATE, SURFACE_GATE, TAB_SURFACE, TAB_SURFACE_GATE }
   }
 
   private var items: List<ActionItem> = emptyList()
@@ -174,12 +174,18 @@ class NanoflowWidgetActionFactory(
           val isSelected = globalIdx == selectedIdx
           val hasHiddenBefore = startIdx > 0 && globalIdx == startIdx
           val hasHiddenAfter = endExclusive < totalCount && globalIdx == endExclusive - 1
+          // Gate 模式使用冷灰调 chip，Focus 模式使用绿调 chip；未选中 tab 用专属无边框样式
+          val tone = if (isSelected) {
+            if (isGateTone) ActionItem.ChipTone.ACCENT_GATE else ActionItem.ChipTone.ACCENT
+          } else {
+            if (isGateTone) ActionItem.ChipTone.TAB_SURFACE_GATE else ActionItem.ChipTone.TAB_SURFACE
+          }
           result += ActionItem(
             label = tabLabelFor(card, globalIdx, hasHiddenBefore, hasHiddenAfter),
             selected = isSelected,
             kind = ActionItem.Kind.TAB,
             taskIndex = globalIdx,
-            styleTone = if (isSelected) ActionItem.ChipTone.ACCENT else ActionItem.ChipTone.SURFACE,
+            styleTone = tone,
           )
         }
       }
@@ -242,6 +248,8 @@ class NanoflowWidgetActionFactory(
       ActionItem.ChipTone.SURFACE -> R.drawable.nano_widget_chip_surface to 0xFF4A7A38.toInt()
       ActionItem.ChipTone.ACCENT_GATE -> R.drawable.nano_widget_chip_accent_gate to 0xFFFFFFFF.toInt()
       ActionItem.ChipTone.SURFACE_GATE -> R.drawable.nano_widget_chip_surface_gate to 0xFF3E5270.toInt()
+      ActionItem.ChipTone.TAB_SURFACE -> R.drawable.nano_widget_chip_tab_surface to 0xFF4A7A38.toInt()
+      ActionItem.ChipTone.TAB_SURFACE_GATE -> R.drawable.nano_widget_chip_tab_surface_gate to 0xFF3E5270.toInt()
     }
     views.setInt(R.id.nano_widget_action_chip, "setBackgroundResource", bg)
     views.setTextColor(R.id.nano_widget_action_chip, fg)

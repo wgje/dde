@@ -57,6 +57,7 @@ object NanoflowWidgetRenderer {
     )
 
     renderSyncBadge(views, model)
+    renderTabList(context, views, appWidgetId)
     renderContentList(context, views, appWidgetId, model)
     renderRefreshList(context, views, appWidgetId)
 
@@ -75,10 +76,23 @@ object NanoflowWidgetRenderer {
     )
 
     renderSyncBadge(views, model)
+    renderTabList(context, views, appWidgetId)
     renderContentList(context, views, appWidgetId, model)
     renderRefreshList(context, views, appWidgetId)
 
     return views
+  }
+
+  /** 顶部 tab 栏：通过 GridView + RemoteViewsFactory 动态渲染主任务/副任务 chip。 */
+  private fun renderTabList(context: Context, views: RemoteViews, appWidgetId: Int) {
+    val tabAdapter = NanoflowWidgetReceiver.actionListAdapterIntent(
+      context, appWidgetId, NanoflowWidgetActionFactory.LIST_KIND_TABS,
+    )
+    views.setRemoteAdapter(R.id.nano_widget_tab_list, tabAdapter)
+    views.setPendingIntentTemplate(
+      R.id.nano_widget_tab_list,
+      NanoflowWidgetReceiver.actionListClickTemplatePendingIntent(context, appWidgetId),
+    )
   }
 
   private fun renderContentList(context: Context, views: RemoteViews, appWidgetId: Int, model: WidgetRenderModel) {

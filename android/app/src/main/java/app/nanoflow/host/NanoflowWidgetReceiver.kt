@@ -464,8 +464,9 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
       }
     }
 
-    /** 同时刷新 widget 内两个集合视图（content + refresh）的数据。 */
+    /** 同时刷新 widget 内三个集合视图（tabs + content + refresh）的数据。 */
     fun notifyActionListsDataChanged(appWidgetManager: AppWidgetManager, appWidgetId: Int) {
+      appWidgetManager.notifyAppWidgetViewDataChanged(appWidgetId, R.id.nano_widget_tab_list)
       appWidgetManager.notifyAppWidgetViewDataChanged(appWidgetId, R.id.nano_widget_content_list)
       appWidgetManager.notifyAppWidgetViewDataChanged(appWidgetId, R.id.nano_widget_refresh_list)
     }
