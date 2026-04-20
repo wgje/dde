@@ -5,11 +5,12 @@
  * 从 FlowPaletteComponent 中提取移动端专用内容
  */
 
-import { Component, ChangeDetectionStrategy, computed, inject, signal, input, output, effect, OnDestroy, NgZone } from '@angular/core';
+import { Component, ChangeDetectionStrategy, computed, inject, signal, input, output, effect, OnDestroy, NgZone, viewChild, ElementRef } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { SyncCoordinatorService } from '../../../../services/sync-coordinator.service';
 import { Task } from '../../../../models';
+import { UI_CONFIG } from '../../../../config/ui.config';
 import { 
   SwipeGestureState, 
   SwipeDirection, 
@@ -17,6 +18,9 @@ import {
   detectHorizontalSwipe 
 } from '../../../../utils/gesture';
 import { writeTaskDragPayload } from '../../../../utils/task-drag-payload';
+
+const TOUCH_TAP_SLOP_PX = 10;
+const TOUCH_SCROLL_ACTIVATION_PX = 15;
 
 @Component({
   selector: 'app-mobile-todo-drawer',
@@ -34,7 +38,7 @@ import { writeTaskDragPayload } from '../../../../utils/task-drag-payload';
       </div>
       
       <!-- 滚动内容区域 -->
-       <div class="flex-1 overflow-x-hidden px-3 pb-8 flex flex-col gap-3 custom-scrollbar"
+       <div #scrollContainer class="flex-1 overflow-x-hidden px-3 pb-8 flex flex-col gap-3 custom-scrollbar"
          [class.overflow-y-auto]="!draggingTaskId()"
          [class.overflow-y-hidden]="!!draggingTaskId()">
         
@@ -107,10 +111,11 @@ import { writeTaskDragPayload } from '../../../../utils/task-drag-payload';
                     (dragstart)="onDragStart($event, task)"
                     (touchstart)="onTouchStart($event, task)"
                     (touchmove)="onTouchMove($event)"
-                    (touchend)="onTouchEnd($event)"
+                    (touchend)="onTouchEnd($event, task)"
                     (touchcancel)="onTouchCancel($event)"
+                    (contextmenu)="onContextMenu($event)"
                     (click)="onTaskClick(task)"
-                    class="w-full px-2 py-1.5 bg-white/60 dark:bg-stone-800/80 border border-stone-200/50 dark:border-stone-600/50 rounded-md text-[11px] font-medium hover:border-teal-300 dark:hover:border-teal-600 hover:text-teal-700 dark:hover:text-teal-300 cursor-grab active:cursor-grabbing shadow-sm transition-all active:scale-95 text-stone-600 dark:text-stone-300 select-none flex items-center gap-2"
+                    class="unassigned-chip w-full px-2 py-1.5 bg-white/60 dark:bg-stone-800/80 border border-stone-200/50 dark:border-stone-600/50 rounded-md text-[11px] font-medium hover:border-teal-300 dark:hover:border-teal-600 hover:text-teal-700 dark:hover:text-teal-300 cursor-grab active:cursor-grabbing shadow-sm transition-all active:scale-95 text-stone-600 dark:text-stone-300 select-none flex items-center gap-2"
                     [class.bg-teal-100]="draggingTaskId() === task.id"
                     [class.dark:bg-teal-800]="draggingTaskId() === task.id"
                     [class.border-teal-400]="draggingTaskId() === task.id">
@@ -145,6 +150,22 @@ import { writeTaskDragPayload } from '../../../../utils/task-drag-payload';
       display: block;
       height: 100%;
     }
+
+    /*
+     * 移动端待分配块必须独占 touch 手势：
+     * - touch-action: none 阻止 Android Chrome 的 scroll/pan/长按 callout 仲裁，
+     *   避免长按 250ms 刚触发拖拽就被系统发来的 touchcancel 撕掉。
+     * - -webkit-touch-callout/-webkit-user-drag 关闭 iOS Safari 的 link preview、
+     *   原生选择菜单与系统拖拽，防止长按后立即弹出选择/预览使 chip 从手指下消失。
+     * - overscroll-behavior 避免拖动过程中被抽屉的滚动惯性接管。
+     */
+    .unassigned-chip {
+      touch-action: none;
+      -webkit-touch-callout: none;
+      -webkit-user-drag: none;
+      -webkit-tap-highlight-color: transparent;
+      overscroll-behavior: contain;
+    }
     
     .animate-slide-down {
       animation: slide-down 0.2s ease-out;
@@ -166,6 +187,7 @@ export class MobileTodoDrawerComponent implements OnDestroy {
   readonly projectState = inject(ProjectStateService);
   private readonly syncCoordinator = inject(SyncCoordinatorService);
   private readonly zone = inject(NgZone);
+  private readonly scrollContainer = viewChild<ElementRef<HTMLElement>>('scrollContainer');
   private readonly boundGlobalTouchFinish = this.handleGlobalTouchFinish.bind(this);
   private readonly boundGlobalPointerFinish = this.handleGlobalPointerFinish.bind(this);
   readonly nativeHtmlDragEnabled = typeof navigator === 'undefined' ? true : navigator.maxTouchPoints < 1;
@@ -194,6 +216,7 @@ export class MobileTodoDrawerComponent implements OnDestroy {
   private lastUnfinishedCount: number | null = null;
   private lastUnassignedCount: number | null = null;
   private lastDraggedTaskClickGuard: { taskId: string; at: number } | null = null;
+  private lastSyntheticTouchTapGuard: { taskId: string; at: number } | null = null;
   private pendingUnfinishedAutoCollapseRaf: number | null = null;
   private pendingUnassignedAutoCollapseRaf: number | null = null;
   private shouldAutoOpenUnfinishedOnFirstContent = this.projectState.unfinishedItems().length === 0;
@@ -201,6 +224,14 @@ export class MobileTodoDrawerComponent implements OnDestroy {
   private preserveUnfinishedOpenAfterLoading = false;
   private preserveUnassignedOpenAfterLoading = false;
   private awaitingParentDragActivation = false;
+  private unassignedTouchSession: {
+    task: Task;
+    startX: number;
+    startY: number;
+    startedAt: number;
+    scrollTop: number;
+    scrolled: boolean;
+  } | null = null;
   private readonly unassignedDragSnapshot = signal<readonly Task[] | null>(null);
   readonly displayedUnassignedTasks = computed(() => this.unassignedDragSnapshot() ?? this.projectState.unassignedTasks());
 
@@ -297,6 +328,24 @@ export class MobileTodoDrawerComponent implements OnDestroy {
       });
     });
 
+    // 长按真正进入拖拽时（draggingTaskId 由 FlowTouchService 在 250ms 长按 timer 中置位），
+    // 才锁定 swipe 抑制位与未分配快照：
+    // - swipe 抑制位防止拖拽收口时 slot 的 onSwipeTouchEnd 误判为视图切换；
+    // - 快照防止 chip 在拖拽期间因 stage 变更从 unassignedTasks() 中消失。
+    // 反之，未触发长按的纯横向滑动不会进入这里，slot 的 swipe 检测可以正常工作。
+    effect(() => {
+      if (!this.draggingTaskId()) {
+        return;
+      }
+      this.suppressSwipeForCurrentTouch = true;
+      this.awaitingParentDragActivation = true;
+      if (!this.unassignedDragSnapshot()) {
+        this.unassignedDragSnapshot.set(this.projectState.unassignedTasks().slice());
+      }
+      this.cancelPendingAutoCollapse('unassigned');
+      this.isUnassignedOpen.set(true);
+    });
+
     this.zone.runOutsideAngular(() => {
       document.addEventListener('touchend', this.boundGlobalTouchFinish, { capture: true, passive: false });
       document.addEventListener('touchcancel', this.boundGlobalTouchFinish, { capture: true, passive: false });
@@ -344,31 +393,53 @@ export class MobileTodoDrawerComponent implements OnDestroy {
   }
   
   // 触摸事件
+  // 注意：chip 的 touch 事件不再 stopPropagation，让 slot 的 swipe 监听有机会同步追踪。
+  // 是否切断 swipe 由 `suppressSwipeForCurrentTouch` 决定，且只在长按确认进入拖拽后才置位
+  // （见构造函数里 draggingTaskId 的 effect），从而保留「在 chip 区域横向滑动切换视图」的能力。
   onTouchStart(event: TouchEvent, task: Task): void {
-    event.stopPropagation();
-    this.suppressSwipeForCurrentTouch = true;
-    this.beginUnassignedDragSession();
+    const touch = event.touches[0];
+    this.unassignedTouchSession = {
+      task,
+      startX: touch?.clientX ?? 0,
+      startY: touch?.clientY ?? 0,
+      startedAt: performance.now(),
+      scrollTop: this.scrollContainer()?.nativeElement.scrollTop ?? 0,
+      scrolled: false,
+    };
+
+    // 阻止 Android 原生长按（文本选择/callout/链接预览）在 250ms 长按拖拽触发
+    // 前后撕裂 touch 流。touch-action:none 已在 CSS 侧关闭系统手势仲裁，这里再
+    // 显式阻止默认行为作为二道保险，确保整条 touch 流归 Angular 所有。
+    if (event.cancelable) {
+      event.preventDefault();
+    }
+    this.openUnassignedForInteraction();
     this.taskTouchStart.emit({ event, task });
   }
   
   onTouchMove(event: TouchEvent): void {
-    event.stopPropagation();
+    this.updateUnassignedTouchSession(event);
     this.taskTouchMove.emit({ event });
   }
   
-  onTouchEnd(event: TouchEvent): void {
-    event.stopPropagation();
+  onTouchEnd(event: TouchEvent, task: Task): void {
+    const shouldEmitTap = this.shouldEmitTouchTap(task, event.changedTouches[0] ?? null);
     this.captureDraggedTaskClickGuard();
     this.taskTouchEnd.emit({ event });
+    this.unassignedTouchSession = null;
     queueMicrotask(() => {
       this.suppressSwipeForCurrentTouch = false;
+      if (shouldEmitTap && !this.draggingTaskId()) {
+        this.lastSyntheticTouchTapGuard = { taskId: task.id, at: performance.now() };
+        this.taskClick.emit(task);
+      }
     });
   }
 
   onTouchCancel(event: TouchEvent): void {
-    event.stopPropagation();
     this.captureDraggedTaskClickGuard();
     this.taskTouchCancel.emit({ event });
+    this.unassignedTouchSession = null;
     queueMicrotask(() => {
       this.suppressSwipeForCurrentTouch = false;
     });
@@ -384,8 +455,25 @@ export class MobileTodoDrawerComponent implements OnDestroy {
       return;
     }
 
+    if (
+      this.lastSyntheticTouchTapGuard?.taskId === task.id
+      && now - this.lastSyntheticTouchTapGuard.at < 500
+    ) {
+      this.lastSyntheticTouchTapGuard = null;
+      return;
+    }
+
     this.lastDraggedTaskClickGuard = null;
+    this.lastSyntheticTouchTapGuard = null;
     this.taskClick.emit(task);
+  }
+
+  /**
+   * 阻止 chip 的 contextmenu：长按 250ms 触发拖拽后若仍收到 contextmenu，
+   * 系统会弹出选择/保存菜单并中断 touch 流。显式 preventDefault 切断该路径。
+   */
+  onContextMenu(event: Event): void {
+    event.preventDefault();
   }
 
   toggleUnfinishedOpen(): void {
@@ -492,6 +580,7 @@ export class MobileTodoDrawerComponent implements OnDestroy {
 
     queueMicrotask(() => {
       this.suppressSwipeForCurrentTouch = false;
+      this.unassignedTouchSession = null;
       this.finalizeUnassignedDragSession();
     });
 
@@ -511,6 +600,7 @@ export class MobileTodoDrawerComponent implements OnDestroy {
 
     queueMicrotask(() => {
       this.suppressSwipeForCurrentTouch = false;
+      this.unassignedTouchSession = null;
       this.finalizeUnassignedDragSession();
     });
 
@@ -529,13 +619,56 @@ export class MobileTodoDrawerComponent implements OnDestroy {
     this.swipeState = { startX: 0, startY: 0, startTime: 0, isActive: false };
   }
 
-  private beginUnassignedDragSession(): void {
-    this.awaitingParentDragActivation = true;
-    if (!this.unassignedDragSnapshot()) {
-      this.unassignedDragSnapshot.set(this.projectState.unassignedTasks().slice());
-    }
+  /**
+   * 单纯展开"待分配"区域，作为 chip touchstart 的轻量副作用。
+   * 不立即拍快照、不抢占 swipe，确保用户在 chip 上做横向滑动时，slot 的
+   * onSwipeTouchEnd 仍能识别为视图切换手势；只有真正进入长按拖拽（draggingTaskId
+   * 变成 truthy）后，构造函数中的 effect 才会把快照与 swipe 抑制位一并锁住。
+   */
+  private openUnassignedForInteraction(): void {
     this.cancelPendingAutoCollapse('unassigned');
     this.isUnassignedOpen.set(true);
+  }
+
+  private updateUnassignedTouchSession(event: TouchEvent): void {
+    const session = this.unassignedTouchSession;
+    const touch = event.touches[0];
+    if (!session || !touch || this.draggingTaskId()) {
+      return;
+    }
+
+    const deltaX = touch.clientX - session.startX;
+    const deltaY = touch.clientY - session.startY;
+    const absDeltaX = Math.abs(deltaX);
+    const absDeltaY = Math.abs(deltaY);
+
+    if (absDeltaY < TOUCH_SCROLL_ACTIVATION_PX || absDeltaY <= absDeltaX) {
+      return;
+    }
+
+    const scrollHost = this.scrollContainer()?.nativeElement;
+    if (!scrollHost) {
+      return;
+    }
+
+    session.scrolled = true;
+    scrollHost.scrollTop = session.scrollTop - deltaY;
+  }
+
+  private shouldEmitTouchTap(task: Task, touch: Touch | null): boolean {
+    const session = this.unassignedTouchSession;
+    if (!session || session.task.id !== task.id || session.scrolled || this.draggingTaskId()) {
+      return false;
+    }
+
+    if (performance.now() - session.startedAt >= UI_CONFIG.MOBILE_LONG_PRESS_DELAY) {
+      return false;
+    }
+
+    const endX = touch?.clientX ?? session.startX;
+    const endY = touch?.clientY ?? session.startY;
+    return Math.abs(endX - session.startX) < TOUCH_TAP_SLOP_PX
+      && Math.abs(endY - session.startY) < TOUCH_TAP_SLOP_PX;
   }
 
   private finalizeUnassignedDragSession(): void {

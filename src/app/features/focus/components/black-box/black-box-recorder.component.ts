@@ -229,6 +229,9 @@ export class BlackBoxRecorderComponent implements OnDestroy {
    */
   onZoneMouseDown(event: MouseEvent): void {
     event.preventDefault();
+    // 阻止冒泡到父层（如手机抽屉 mobile-black-box-drawer、专注面板）的 swipe
+    // 手势检测，避免按住录音后释放时被误判为“左右滑动切换视图”。
+    event.stopPropagation();
     // 【修复 P3-05】增加 isRecording 检查，防止双击创建双重 MediaRecorder
     if (this.voiceService.isTranscribing() || this.transcription() || this.voiceService.isRecording()) return;
     
@@ -256,6 +259,11 @@ export class BlackBoxRecorderComponent implements OnDestroy {
    */
   onZoneTouchStart(event: TouchEvent): void {
     event.preventDefault();
+    // 阻止冒泡到父层抽屉的左右滑动检测器：按住录音期间手指如果有任何水平
+    // 位移，释放时 mobile-black-box-drawer.onSwipeTouchEnd 会误认为一次滑动手势并发出
+    // swipeToSwitch，造成「录音与手势冲突」。这里提前截断传播，使父层根本不会启动
+    // swipeState，从根源上隔离这两种手势。
+    event.stopPropagation();
     // 【修复 P3-05】增加 isRecording 检查，防止双击创建双重 MediaRecorder
     if (this.voiceService.isTranscribing() || this.transcription() || this.voiceService.isRecording()) return;
     
