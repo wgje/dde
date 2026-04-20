@@ -10,7 +10,7 @@ export type Json =
   | { [key: string]: Json | undefined }
   | Json[];
 
-export type WidgetPlatform = 'windows-pwa' | 'windows-widget' | 'android-widget';
+export type WidgetPlatform = 'android-widget';
 export type WidgetRateLimitScope = 'device' | 'user' | 'ip';
 
 export interface WidgetCapabilities {
@@ -226,9 +226,15 @@ function normalizeCapabilityRule(value: unknown, index: number): WidgetCapabilit
     return null;
   }
 
+  const platformsProvided = Array.isArray(value.platforms) && value.platforms.length > 0;
+  const platforms = normalizePlatformList(value.platforms);
+  if (platformsProvided && platforms.length === 0) {
+    return null;
+  }
+
   return {
     id: normalizeOptionalText(value.id, 128) ?? `rule-${index + 1}`,
-    platforms: normalizePlatformList(value.platforms),
+    platforms,
     clientVersions: normalizeStringList(value.clientVersions, 256),
     clientVersionPrefixes: normalizeStringList(value.clientVersionPrefixes, 128),
     bucketMin,
@@ -664,7 +670,7 @@ export function redactId(value: string | null | undefined): string {
 }
 
 export function normalizeWidgetPlatform(value: unknown): WidgetPlatform | null {
-  return value === 'windows-pwa' || value === 'windows-widget' || value === 'android-widget'
+  return value === 'android-widget'
     ? value
     : null;
 }

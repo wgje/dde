@@ -62,39 +62,6 @@ describe('WorkspaceShellComponent 数据保护提醒', () => {
   });
 });
 
-describe('WorkspaceShellComponent Windows widget bridge', () => {
-  it('应在收到 runtime 实例状态变更消息时推进同步 tick', () => {
-    const addEventListener = vi.fn();
-    vi.stubGlobal('navigator', {
-      serviceWorker: {
-        addEventListener,
-      },
-    });
-
-    try {
-      const update = vi.fn();
-      const context = {
-        pendingWindowsWidgetBindingTick: { update },
-      } as unknown as WorkspaceShellComponent;
-
-      (WorkspaceShellComponent.prototype as unknown as {
-        setupWidgetRuntimeMessageListener: (this: WorkspaceShellComponent) => void;
-      }).setupWidgetRuntimeMessageListener.call(context);
-
-      expect(addEventListener).toHaveBeenCalledWith('message', expect.any(Function));
-      const handler = addEventListener.mock.calls[0]?.[1] as ((event: MessageEvent<{ type?: string }>) => void) | undefined;
-      expect(handler).toBeTypeOf('function');
-
-      handler?.({ data: { type: 'IGNORED' } } as MessageEvent<{ type?: string }>);
-      handler?.({ data: { type: 'WIDGET_INSTANCE_STATE_CHANGED' } } as MessageEvent<{ type?: string }>);
-
-      expect(update).toHaveBeenCalledTimes(1);
-    } finally {
-      vi.unstubAllGlobals();
-    }
-  });
-});
-
 describe('WorkspaceShellComponent Android widget bootstrap', () => {
   it('应接受 Android 浏览器中的 widget bootstrap fallback', () => {
     const originalReferrer = Object.getOwnPropertyDescriptor(document, 'referrer');
@@ -2037,6 +2004,7 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
         setActiveProjectId,
       },
       userSession: {
+        canAuthoritativelyRejectProjectRoute: () => true,
         startupProjectCatalogStage: () => 'resolved',
       },
       startupLaunchSnapshot: {
@@ -2124,6 +2092,7 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
         setActiveProjectId,
       },
       userSession: {
+        canAuthoritativelyRejectProjectRoute: () => true,
         startupProjectCatalogStage: () => 'resolved',
       },
       startupLaunchSnapshot: null,
@@ -2157,6 +2126,7 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
         setActiveProjectId,
       },
       userSession: {
+        canAuthoritativelyRejectProjectRoute: () => false,
         startupProjectCatalogStage: () => 'partial',
       },
       startupLaunchSnapshot: null,
@@ -2189,6 +2159,39 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
         setActiveProjectId: vi.fn(),
       },
       userSession: {
+        canAuthoritativelyRejectProjectRoute: () => true,
+        startupProjectCatalogStage: () => 'resolved',
+      },
+      startupLaunchSnapshot: null,
+      router: { navigate },
+      resolveStartupProjectFallbackId: vi.fn(),
+    } as unknown as WorkspaceShellComponent;
+
+    (WorkspaceShellComponent.prototype as unknown as {
+      syncStateFromRoute: (this: WorkspaceShellComponent) => void;
+    }).syncStateFromRoute.call(context);
+
+    expect(navigate).toHaveBeenCalledWith(['/projects']);
+  });
+
+  it('syncStateFromRoute 应在目录转为 authoritative 后清理已被提前写入的陈旧 projectId', () => {
+    const navigate = vi.fn();
+    const context = {
+      getCurrentStartupEntryIntent: () => null,
+      route: {
+        snapshot: { params: {} },
+        firstChild: {
+          snapshot: { params: { projectId: 'project-9' } },
+          firstChild: null,
+        },
+      },
+      projectState: {
+        activeProjectId: () => 'project-9',
+        projects: () => [{ id: 'project-1' }],
+        setActiveProjectId: vi.fn(),
+      },
+      userSession: {
+        canAuthoritativelyRejectProjectRoute: () => true,
         startupProjectCatalogStage: () => 'resolved',
       },
       startupLaunchSnapshot: null,

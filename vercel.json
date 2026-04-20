@@ -65,7 +65,7 @@
       ]
     },
     {
-      "source": "/widgets/:path*",
+      "source": "/widgets/templates/(.*)",
       "headers": [
         { "key": "Cache-Control", "value": "no-cache" }
       ]

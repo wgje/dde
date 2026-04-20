@@ -875,10 +875,8 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
   private readonly pendingAndroidWidgetBootstrap = signal<AndroidWidgetBootstrapRequest | null>(null);
   readonly pendingAndroidWidgetManualCallback = signal<AndroidWidgetBootstrapCallbackResult | null>(null);
   private readonly deferredStartupEntryIntent = signal<StartupEntryIntent | null>(null);
-  private readonly pendingWindowsWidgetBindingTick = signal(0);
   private androidWidgetBootstrapCaptureKey: string | null = null;
   private androidWidgetBootstrapInFlight = false;
-  private windowsWidgetBindingInFlight = false;
   private readonly launchSnapshotWriteBlocked = signal(false);
 
   constructor() {
@@ -935,7 +933,6 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
     // 解除 handoff 对 auth + 数据加载的串行阻塞依赖。
     this.userSession.prehydrateFromSnapshot();
     this.restorePendingAndroidWidgetBootstrapFromStorage();
-    this.setupWidgetRuntimeMessageListener();
     
     // effect() 必须在注入上下文中调用（构造函数），否则抛 NG0203
     this.setupSignalEffects();
@@ -1130,7 +1127,6 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
     this.setupRouteProjectSelectionEffect();
     this.setupAndroidWidgetBootstrapCaptureEffect();
     this.setupAndroidWidgetBootstrapProcessingEffect();
-    this.setupWindowsWidgetBindingEffect();
     this.setupStartupEntryIntentEffect();
     this.setupHandoffEffect();
     this.setupWorkspaceReadyEffect();
@@ -1142,18 +1138,6 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
     this.setupSyncPulseEffect();
     this.setupSessionRestoredHandler();
     this.setupSessionInvalidatedHandler();
-  }
-
-  private setupWidgetRuntimeMessageListener(): void {
-    if (typeof navigator === 'undefined' || !navigator.serviceWorker) {
-      return;
-    }
-
-    navigator.serviceWorker.addEventListener('message', (event: MessageEvent<{ type?: string }>) => {
-      if (event.data?.type === 'WIDGET_INSTANCE_STATE_CHANGED') {
-        this.pendingWindowsWidgetBindingTick.update(value => value + 1);
-      }
-    });
   }
 
   /** 模态框请求信号监听（可恢复错误 / 登录 / 迁移） */
@@ -1403,21 +1387,6 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
     return expectedCaptureKey === nextCaptureKey;
   }
 
-  private setupWindowsWidgetBindingEffect(): void {
-    effect(() => {
-      this.pendingWindowsWidgetBindingTick();
-      const currentUserId = this.currentUserId();
-      const sessionInitialized = this.authService.sessionInitialized();
-
-      if (!currentUserId || !sessionInitialized || this.windowsWidgetBindingInFlight) {
-        return;
-      }
-
-      this.windowsWidgetBindingInFlight = true;
-      void this.syncWindowsWidgetBindings();
-    });
-  }
-
   private getCurrentStartupEntryIntent(): StartupEntryIntent | null {
     const routeUrl = typeof this.routeUrl === 'function' ? this.routeUrl() : null;
     return resolveStartupEntryIntent(typeof routeUrl === 'string' ? routeUrl : null);
@@ -1596,18 +1565,6 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
 
   dismissAndroidWidgetManualCallback(): void {
     this.pendingAndroidWidgetManualCallback.set(null);
-  }
-
-  private async syncWindowsWidgetBindings(): Promise<void> {
-    const result = await this.widgetBinding.syncWindowsPwaBindings();
-    this.windowsWidgetBindingInFlight = false;
-
-    if (!result.ok) {
-      this.logger.warn('Windows Widget 绑定同步失败', {
-        code: result.error.code,
-        message: result.error.message,
-      });
-    }
   }
 
   private restorePendingAndroidWidgetBootstrapFromStorage(): void {
@@ -2445,7 +2402,7 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
     const params = currentRoute.snapshot.params;
     const projectId = params['projectId'];
     const projects = this.projectState.projects();
-    const startupProjectCatalogStage = this.userSession.startupProjectCatalogStage();
+    const canAuthoritativelyRejectProjectRoute = this.userSession.canAuthoritativelyRejectProjectRoute();
 
     if (!projectId) {
       if (this.projectState.activeProjectId() || projects.length === 0) {
@@ -2458,20 +2415,22 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
       }
       return;
     }
-    
-    if (projectId && projectId !== this.projectState.activeProjectId()) {
-      // 检查项目是否存在
-      const projectExists = projects.some(p => p.id === projectId);
-      if (projectExists) {
+
+    const projectExists = projects.some(p => p.id === projectId);
+    if (projectExists) {
+      if (projectId !== this.projectState.activeProjectId()) {
         this.projectState.setActiveProjectId(projectId);
-      } else if (startupProjectCatalogStage !== 'resolved') {
-        // 预填充阶段只有最近项目摘要，不能据此判定 deep-link 项目不存在。
-        return;
-      } else {
-        // 项目不存在，重定向到默认路由
-        void this.router.navigate(['/projects']);
       }
+      return;
     }
+
+    if (!canAuthoritativelyRejectProjectRoute) {
+      // 预填充阶段只有最近项目摘要，不能据此判定 deep-link 项目不存在。
+      return;
+    }
+
+    // 项目不存在，重定向到默认路由
+    void this.router.navigate(['/projects']);
     
     // taskId 的定位由 ProjectShellComponent 处理
   }
@@ -2766,6 +2725,16 @@ async signOut() {
   updateFilter(e: Event) {
       this.uiState.filterMode.set((e.target as HTMLSelectElement).value);
   }
+
+  private completeAuthModalSuccess(fallbackUrl: string | null = null): void {
+    const postAuthTargetUrl = this.authCoord.resolveSafePostAuthNavigationUrl(
+      this.modalCoord.loginReturnUrl,
+    ) ?? fallbackUrl;
+    this.modalCoord.closeLoginModal();
+    if (postAuthTargetUrl) {
+      void this.router.navigateByUrl(postAuthTargetUrl);
+    }
+  }
   
   // 适配 LoginModalComponent 事件 — 委托到 authCoord
   async handleLoginFromModal(data: { email: string; password: string }) {
@@ -2776,8 +2745,7 @@ async signOut() {
 
     if (!this.authCoord.authError()) {
       // 登录成功：关闭模态框并导航
-      this.modalCoord.closeLoginModal();
-      this.modalCoord.navigateAfterLogin();
+      this.completeAuthModalSuccess();
     } else {
       // 登录失败：回显错误并恢复按钮
       this.modalCoord.loginModalRef?.componentRef.setInput('isLoading', false);
@@ -2792,7 +2760,7 @@ async signOut() {
 
     if (!this.authCoord.authError() && this.currentUserId()) {
       // 注册成功（无需确认）：关闭模态框
-      this.modalCoord.closeLoginModal();
+      this.completeAuthModalSuccess();
     } else {
       // 注册失败或需要邮件确认：回显状态
       this.modalCoord.loginModalRef?.componentRef.setInput('isLoading', false);
@@ -2811,7 +2779,7 @@ async signOut() {
   }
   handleLocalModeFromModal() {
     this.authCoord.handleLocalModeFromModal();
-    this.modalCoord.closeLoginModal();
+    this.completeAuthModalSuccess('/projects');
   }
 
   handleMigrationComplete() {

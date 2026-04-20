@@ -32,6 +32,7 @@ describe('Widget backend foundation contract', () => {
 
   it('migration and init script must define widget backend tables, rate limits, and kill switch config', () => {
     const migration = readText('supabase/migrations/20260412143000_widget_backend_foundation.sql');
+    const androidOnlyRetirementMigration = readText('supabase/migrations/20260420154000_widget_platform_android_only.sql');
     const capabilityRulesBackfillMigration = readText('supabase/migrations/20260416163000_widget_capabilities_rules_backfill.sql');
     const notifyTriggerMigration = readText('supabase/migrations/20260413102000_widget_notify_webhook_hmac.sql');
     const notifyReplayFixMigration = readText('supabase/migrations/20260413113000_widget_notify_hmac_replay_fix.sql');
@@ -80,6 +81,12 @@ describe('Widget backend foundation contract', () => {
     expect(tokenHashAndNotifyScopeMigration).toContain('widget_notify_task_change');
     expect(tokenHashAndNotifyScopeMigration).toContain('widget_notify_project_change');
     expect(notifyLimitsBackfillMigration).toContain('ON CONFLICT (key) DO UPDATE');
+    expect(androidOnlyRetirementMigration).toContain('widget_devices_legacy_retired');
+    expect(androidOnlyRetirementMigration).toContain('widget_instances_legacy_retired');
+    expect(androidOnlyRetirementMigration).toContain('desktop-widget-retired');
+    expect(androidOnlyRetirementMigration).toContain('DELETE FROM public.widget_devices');
+    expect(androidOnlyRetirementMigration).toContain('DELETE FROM public.widget_instances');
+    expect(androidOnlyRetirementMigration).toContain("CHECK (platform IN ('android-widget'))");
     expect(migration).toContain("'rules', jsonb_build_array()");
     expect(initSql).toContain("'rules', jsonb_build_array()");
     expect(capabilityRulesBackfillMigration).toContain("'widget_capabilities'");
@@ -130,8 +137,6 @@ describe('Widget backend foundation contract', () => {
     const summaryFn = readText('supabase/functions/widget-summary/index.ts');
     const notifyFn = readText('supabase/functions/widget-notify/index.ts');
     const shared = readText('supabase/functions/_shared/widget-common.ts');
-    const runtime = readText('public/widgets/widget-runtime.js');
-    const runtimeTemplate = readText('public/widgets/templates/focus-summary.json');
     const bindingService = readText('src/services/widget-binding.service.ts');
 
     expectTypeScriptToParse('supabase/functions/_shared/widget-common.ts');
@@ -272,32 +277,11 @@ describe('Widget backend foundation contract', () => {
     expect(shared).toContain('rolloutBucket');
     expect(registerFn).toContain("'uninstall-instance'");
     expect(registerFn).toContain('INSTANCE_UNINSTALL_FAILED');
-    expect(runtime).toContain("platform: 'windows-pwa'");
-    expect(runtime).toContain('/widgets/templates/focus-data.json');
-    expect(runtime).toContain("self.addEventListener('fetch'");
-    expect(runtime).toContain('hostInstanceId: hostInstanceId');
-    expect(runtime).toContain('requestBody.clientVersion = clientVersion;');
-    expect(runtime).toContain("var WIDGET_INSTANCE_STATE_KEY = 'widget-instance-state';");
-    expect(runtime).toContain('resolveBoundWidgetInstanceId');
-    expect(runtime).toContain("reason: 'instance-binding-required'");
-    expect(runtime).toContain('var blackBox = (summary && summary.blackBox) || {};');
-    expect(runtime).toContain('focus.title ||');
-    expect(runtime).toContain('blackBox.pendingCount');
-    expect(runtime).toContain('buildWidgetStatusLine');
-    expect(runtime).toContain('summary && summary.sourceState');
-    expect(runtime).toContain('summary && summary.trustState');
-    expect(runtimeTemplate).toContain('${statusLine}');
-    expect(bindingService).toContain('syncWindowsPwaBindings');
-    expect(bindingService).toContain('navigator.locks?.request');
-    expect(bindingService).toContain('uninstallWidgetInstance');
-    expect(bindingService).toContain("clientSurface: 'windows-pwa'");
-    expect(bindingService).toContain("const WIDGET_INSTANCE_STATE_KEY = 'widget-instance-state';");
-
-    const forgetWidgetInstanceBlock = runtime.slice(
-      runtime.indexOf('function forgetWidgetInstance(widget) {'),
-      runtime.indexOf('function resolveBoundWidgetInstanceId'),
-    );
-    expect(forgetWidgetInstanceBlock).not.toContain('writeToDb(WIDGET_CONFIG_KEY');
+    expect(shared).toContain("export type WidgetPlatform = 'android-widget';");
+    expect(bindingService).not.toContain('syncWindowsPwaBindings');
+    expect(bindingService).not.toContain('navigator.locks?.request');
+    expect(bindingService).not.toContain('uninstallWidgetInstance');
+    expect(bindingService).not.toContain('writeWidgetTokenToDb');
   });
 });
 

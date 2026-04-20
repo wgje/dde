@@ -60,4 +60,81 @@ describe('startup launch contract', () => {
       }),
     ]);
   });
+
+  it('manifest should no longer expose desktop widget definitions', () => {
+    const manifestPath = path.join(process.cwd(), 'public', 'manifest.webmanifest');
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+
+    expect(manifest.widgets).toBeUndefined();
+  });
+
+  it('main bootstrap should keep the legacy-compatible composed service worker entry', () => {
+    const mainPath = path.join(process.cwd(), 'main.ts');
+    const mainSource = fs.readFileSync(mainPath, 'utf8');
+
+    expect(mainSource).toContain("provideServiceWorker('sw-composed.js'");
+  });
+
+  it('legacy sw-composed compatibility entry should keep the retirement shim but not the old desktop runtime', () => {
+    const composedSwPath = path.join(process.cwd(), 'public', 'sw-composed.js');
+    const composedSwSource = fs.readFileSync(composedSwPath, 'utf8');
+
+    expect(composedSwSource).toContain("importScripts('./ngsw-worker.js');");
+    expect(composedSwSource).toContain('桌面端小组件已停用');
+    expect(composedSwSource).toContain('nanoflow-focus-summary');
+    expect(composedSwSource).not.toContain('widget-runtime');
+    expect(composedSwSource).not.toContain('widget-summary');
+  });
+
+  it('build scripts should no longer invoke desktop widget manifest preparation', () => {
+    const packageJsonPath = path.join(process.cwd(), 'package.json');
+    const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8')) as {
+      scripts?: Record<string, string>;
+    };
+
+    const buildScripts = Object.entries(packageJson.scripts ?? {})
+      .filter(([name]) => name.startsWith('build'))
+      .map(([, command]) => command);
+
+    expect(buildScripts.some((command) => command.includes('prepare-manifest-widgets'))).toBe(false);
+  });
+
+  it('should keep static tombstone assets for retired desktop widget hosts', () => {
+    const templatePath = path.join(process.cwd(), 'public', 'widgets', 'templates', 'focus-summary.json');
+    const dataPath = path.join(process.cwd(), 'public', 'widgets', 'templates', 'focus-data.json');
+
+    const template = JSON.parse(fs.readFileSync(templatePath, 'utf8')) as { body?: Array<{ text?: string }> };
+    const data = JSON.parse(fs.readFileSync(dataPath, 'utf8')) as { message?: string; detail?: string };
+
+    expect(Array.isArray(template.body)).toBe(true);
+    expect(data.message).toContain('桌面端小组件已停用');
+    expect(data.detail).toContain('Android 手机端小组件');
+  });
+
+  it('deployment configs should keep the retirement compatibility assets uncached', () => {
+    const vercelConfig = fs.readFileSync(path.join(process.cwd(), 'vercel.json'), 'utf8');
+    const netlifyConfig = fs.readFileSync(path.join(process.cwd(), 'netlify.toml'), 'utf8');
+
+    expect(vercelConfig).toContain('"source": "/ngsw-worker.js"');
+    expect(vercelConfig).toContain('"source": "/sw-composed.js"');
+    expect(vercelConfig).toContain('"source": "/widgets/templates/(.*)"');
+    expect(vercelConfig).toContain('"value": "no-cache"');
+
+    expect(netlifyConfig).toContain('for = "/ngsw-worker.js"');
+    expect(netlifyConfig).toContain('for = "/sw-composed.js"');
+    expect(netlifyConfig).toContain('for = "/widgets/templates/*"');
+    expect(netlifyConfig).toContain('Cache-Control = "no-cache"');
+  });
+
+  it('sw-composed tombstone payload should stay aligned with the static retirement assets', () => {
+    const composedSwSource = fs.readFileSync(path.join(process.cwd(), 'public', 'sw-composed.js'), 'utf8');
+    const templateSource = fs.readFileSync(path.join(process.cwd(), 'public', 'widgets', 'templates', 'focus-summary.json'), 'utf8').trim();
+    const dataSource = fs.readFileSync(path.join(process.cwd(), 'public', 'widgets', 'templates', 'focus-data.json'), 'utf8').trim();
+
+    const templateMatch = composedSwSource.match(/const TEMPLATE = `([\s\S]*?)`;/);
+    const dataMatch = composedSwSource.match(/const DATA = `([\s\S]*?)`;/);
+
+    expect(templateMatch?.[1]?.trim()).toBe(templateSource);
+    expect(dataMatch?.[1]?.trim()).toBe(dataSource);
+  });
 });

@@ -50,16 +50,21 @@
     Content-Type = "application/javascript"
     Cache-Control = "public, max-age=31536000, immutable"
 
-# 组合 Service Worker: 禁止缓存（与 ngsw-worker.js 一致）
+# Service Worker 入口必须禁用缓存，避免旧安装客户端卡在过期脚本。
+[[headers]]
+  for = "/ngsw-worker.js"
+  [headers.values]
+    Content-Type = "application/javascript"
+    Cache-Control = "no-cache"
+
 [[headers]]
   for = "/sw-composed.js"
   [headers.values]
     Content-Type = "application/javascript"
     Cache-Control = "no-cache"
 
-# Widget 运行时与模板: 禁止缓存，确保更新即时生效
 [[headers]]
-  for = "/widgets/*"
+  for = "/widgets/templates/*"
   [headers.values]
     Cache-Control = "no-cache"
 

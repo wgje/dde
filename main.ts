@@ -388,8 +388,7 @@ async function startApplication() {
             paramsInheritanceStrategy: 'always'
           })
         ),
-        // Service Worker: 组合 SW (NGSW + Widget Runtime)
-        // sw-composed.js importScripts ngsw-worker.js + widgets/widget-runtime.js
+        // Service Worker: 继续通过组合入口承接标准 NGSW，并保留旧桌面 widget 的退役兼容层。
         provideServiceWorker('sw-composed.js', {
           enabled: !isDevMode(),
           registrationStrategy: createPostHandoffSwRegistrationStrategy({

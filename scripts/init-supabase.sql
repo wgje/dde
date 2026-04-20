@@ -4394,7 +4394,7 @@ COMMENT ON FUNCTION public.batch_get_tombstones IS
 CREATE TABLE IF NOT EXISTS public.widget_devices (
   id UUID PRIMARY KEY,
   user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
-  platform TEXT NOT NULL CHECK (platform IN ('windows-pwa', 'windows-widget', 'android-widget')),
+  platform TEXT NOT NULL CHECK (platform IN ('android-widget')),
   installation_id TEXT NOT NULL,
   push_token TEXT NULL,
   push_token_updated_at TIMESTAMPTZ NULL,
@@ -4438,7 +4438,7 @@ CREATE TABLE IF NOT EXISTS public.widget_instances (
   id UUID PRIMARY KEY,
   device_id UUID NOT NULL REFERENCES public.widget_devices(id) ON DELETE CASCADE,
   user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
-  platform TEXT NOT NULL CHECK (platform IN ('windows-pwa', 'windows-widget', 'android-widget')),
+  platform TEXT NOT NULL CHECK (platform IN ('android-widget')),
   host_instance_id TEXT NOT NULL,
   size_bucket TEXT NOT NULL,
   config_scope TEXT NOT NULL DEFAULT 'global-summary' CHECK (config_scope IN ('global-summary')),

@@ -98,27 +98,5 @@
       "type": "image/png",
       "purpose": "maskable any"
     }
-  ],
-  "widgets": [
-    {
-      "name": "NanoFlow 专注摘要",
-      "short_name": "NanoFlow",
-      "description": "当前专注任务、停泊坞与黑匣子的只读概览",
-      "tag": "nanoflow-focus-summary",
-      "ms_ac_template": "widgets/templates/focus-summary.json",
-      "data": "widgets/templates/focus-data.json",
-      "type": "application/json",
-      "multiple": false,
-      "icons": [
-        {
-          "src": "icons/icon-96x96.png",
-          "sizes": "96x96",
-          "type": "image/png"
-        }
-      ],
-      "screenshots": [],
-      "auth": false,
-      "update": 900
-    }
   ]
 }
