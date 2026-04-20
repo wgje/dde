@@ -334,6 +334,39 @@ export class ChangeTrackerService {
     this.pendingChanges.delete(key);
     this.updateCounters();
   }
+  /**
+   * 【根因修复 2026-04-20】按时间戳安全地清除单项变更记录。
+   *
+   * batch-sync 在任务/连接上行成功后会调用这里清掉已确认的脏记录，
+   * 以避免"全或无"策略导致成功项继续被重推。
+   * 为保护并发编辑：只有当记录不晚于 `notNewerThan`（通常是批次启动时间）时才清理，
+   * 否则说明用户在同步期间又改了本地，必须保留以便下一轮再推。
+   *
+   * @returns true 表示记录已清（或本来就不存在），false 表示存在更新的本地编辑已保留。
+   */
+  clearTaskChangeIfFresh(projectId: string, taskId: string, notNewerThan: number): boolean {
+    const key = this.makeKey(projectId, 'task', taskId);
+    const record = this.pendingChanges.get(key);
+    if (!record) return true;
+    if (record.timestamp > notNewerThan) {
+      return false;
+    }
+    this.pendingChanges.delete(key);
+    this.updateCounters();
+    return true;
+  }
+  /** 清除特定连接的变更记录（保护并发编辑语义与 clearTaskChangeIfFresh 一致）。 */
+  clearConnectionChangeIfFresh(projectId: string, connectionId: string, notNewerThan: number): boolean {
+    const key = this.makeKey(projectId, 'connection', connectionId);
+    const record = this.pendingChanges.get(key);
+    if (!record) return true;
+    if (record.timestamp > notNewerThan) {
+      return false;
+    }
+    this.pendingChanges.delete(key);
+    this.updateCounters();
+    return true;
+  }
   /** 清除所有变更记录 */
   clearAllChanges(): void {
     this.pendingChanges.clear();

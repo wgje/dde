@@ -682,7 +682,12 @@ export class SupabaseClientService {
         if (cached.response) {
           return cached.response.clone();
         }
-        return await cached.promise;
+        // 【根因修复】cached.response 未就绪时，多个并发 awaiter 会拿到同一个原始
+        // Response 实例；一旦下游（如 Supabase JS）消费 body，其他 awaiter 再读就会
+        // 抛 "Failed to execute 'text' on 'Response': body stream already read"。
+        // 必须 clone 后再返回，保证每个 awaiter 独占 body 流。
+        const sharedResponse = await cached.promise;
+        return sharedResponse.clone();
       }
 
       // 清理过期缓存
@@ -709,7 +714,9 @@ export class SupabaseClientService {
         createdAt: Date.now()
       });
 
-      const dedupResponse = await fetchPromise;
+      // 【根因修复】首个调用方也必须 clone：若并发 awaiter 同时存在，双方拿到的都是
+      // 同一个原始 Response；这里 clone 后再交给 handle401Retry 与下游消费。
+      const dedupResponse = (await fetchPromise).clone();
       return await this.handle401Retry(url, options, dedupResponse);
     }
 

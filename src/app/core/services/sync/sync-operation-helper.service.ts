@@ -392,7 +392,31 @@ export class SyncOperationHelperService {
   }
   
   /**
+   * 【2026-04-20 根因修复】确定性服务端错误类型集合
+   * 
+   * 这些错误表示远端（CDN 边缘 / Supabase 网关 / 上游）已明确报告失败，
+   * 短时间内连续重试不会成功，反而会：
+   *  - 放大浏览器 CORS 红色告警（5xx 响应缺 CORS 头）
+   *  - 延长用户感知的失败时间（1s + 2s + 4s 退避共 7s）
+   *  - 占用客户端/网络资源
+   * 
+   * 正确做法：inline 立即失败，交给 RetryQueue 在更长退避窗口后重试，
+   * 此时边缘层已有足够时间恢复。
+   */
+  private readonly DEFINITIVE_SERVER_ERROR_TYPES = new Set([
+    'GatewayError',            // 502 Bad Gateway
+    'ServiceUnavailableError', // 503 Service Unavailable
+    'NetworkTimeoutError',     // 504 Gateway Timeout
+    'UnknownServerError',      // 5xx 非 JSON 响应（Supabase SDK 回退类型）
+    'HtmlResponseError',       // CDN 返回 HTML 替代 JSON
+  ]);
+  
+  /**
    * 带指数退避的重试
+   * 
+   * 【2026-04-20 增强】
+   *  - 确定性服务端错误（502/503/504）直接放弃 inline 重试，交由 RetryQueue 在退避窗口后重试
+   *  - 每次重试前检查 Circuit Breaker 状态，已打开则立即放弃
    */
   async retryWithBackoff<T>(
     operation: () => Promise<T>,
@@ -412,13 +436,31 @@ export class SyncOperationHelperService {
           throw enhanced;
         }
         
-        if (attempt < maxRetries) {
-          const delayMs = baseDelay * Math.pow(2, attempt);
-          this.logger.debug(`操作失败，${delayMs}ms 后重试 (${attempt + 1}/${maxRetries})`);
-          await this.delay(delayMs);
-        } else {
+        if (attempt >= maxRetries) {
           throw enhanced;
         }
+
+        // 确定性服务端错误：放弃 inline 重试，交给 RetryQueue
+        if (this.DEFINITIVE_SERVER_ERROR_TYPES.has(enhanced.errorType)) {
+          this.logger.debug(
+            `边缘/网关故障 (${enhanced.errorType})，放弃 inline 重试，交由 RetryQueue`,
+            { attempt: attempt + 1, maxRetries }
+          );
+          throw enhanced;
+        }
+
+        // Circuit Breaker 已打开：立即放弃，避免在熔断窗口内继续打请求
+        if (!this.retryQueue.checkCircuitBreaker()) {
+          this.logger.debug('Circuit Breaker 已打开，放弃 inline 重试', {
+            attempt: attempt + 1,
+            errorType: enhanced.errorType,
+          });
+          throw enhanced;
+        }
+
+        const delayMs = baseDelay * Math.pow(2, attempt);
+        this.logger.debug(`操作失败，${delayMs}ms 后重试 (${attempt + 1}/${maxRetries})`);
+        await this.delay(delayMs);
       }
     }
     

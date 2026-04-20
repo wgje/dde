@@ -597,6 +597,9 @@ export class BatchSyncService {
     this.syncState.setSyncing(true);
     
     // 【P2-16 修复】在推送前创建数据快照，防止推送期间 store 被用户编辑导致数据不一致
+    // 【根因修复 2026-04-20】capture 快照创建时间作为 changeTracker 清理的时间水位：
+    // 只清理不晚于 batchStartedAt 的脏记录，保留期间用户产生的新编辑。
+    const batchStartedAt = Date.now();
     const projectSnapshot: Project = {
       ...project,
       tasks: project.tasks.map(t => ({ ...t })),
@@ -672,7 +675,35 @@ export class BatchSyncService {
         return true;
       });
 
+      // 中文注释：批内挂起快速失败工具 —— tab 后台恢复或网络中断时一次性把剩余项整批入重试队列，
+      // 避免 24/14 次逐项 RPC 都走 handlePushTaskError/BrowserNetworkSuspendedError 分支。
+      const deferRemainingConnectionsOnSuspension = (
+        connections: Connection[],
+        startIndex: number,
+        context: string
+      ): boolean => {
+        if (!isBrowserNetworkSuspendedWindow()) return false;
+        const remaining = connections.slice(startIndex);
+        if (remaining.length === 0) return true;
+        this.logger.info('浏览器网络挂起，连接批同步中断并整批入重试队列', {
+          projectId: projectSnapshot.id,
+          context,
+          remaining: remaining.length,
+          resumeDelayMs: getRemainingBrowserNetworkResumeDelayMs(),
+        });
+        for (const conn of remaining) {
+          failedConnectionIds.push(conn.id);
+          if (this.callbacks!.addToRetryQueue('connection', 'upsert', conn, projectSnapshot.id, userId)) {
+            retryEnqueued.push(`connection:${conn.id}`);
+          }
+        }
+        return true;
+      };
+
       for (let i = 0; i < deletedConnections.length; i++) {
+        if (deferRemainingConnectionsOnSuspension(deletedConnections, i, 'deletedConnections')) {
+          break;
+        }
         if (i > 0) await this.delay(200);
 
         try {
@@ -691,12 +722,19 @@ export class BatchSyncService {
             if (connectionResult.retryEnqueued) {
               retryEnqueued.push(`connection:${connection.id}`);
             }
+          } else {
+            // 【根因修复 2026-04-20】软删除连接上行成功即清脏记录，避免重推死循环。
+            this.changeTracker.clearConnectionChangeIfFresh(projectSnapshot.id, connection.id, batchStartedAt);
           }
         } catch (e) {
           if (isPermanentFailureError(e)) {
             failedConnectionIds.push(deletedConnections[i].id);
             this.logger.warn('跳过永久失败的已删除连接', { connectionId: deletedConnections[i].id });
             continue;
+          }
+          if (isBrowserNetworkSuspendedError(e)) {
+            deferRemainingConnectionsOnSuspension(deletedConnections, i, 'deletedConnections.error');
+            break;
           }
           throw e;
         }
@@ -706,8 +744,31 @@ export class BatchSyncService {
       const sortedTasks = this.callbacks.topologicalSortTasks(tasksToSync);
       const taskUpdateFieldsById = changes.taskUpdateFieldsById;
       const successfulTaskIds = new Set<string>();
-      
+
+      // 中文注释：任务批内挂起快速失败 —— 与 deletedConnections 相同思路。
+      const deferRemainingTasksOnSuspension = (startIndex: number, context: string): boolean => {
+        if (!isBrowserNetworkSuspendedWindow()) return false;
+        const remaining = sortedTasks.slice(startIndex);
+        if (remaining.length === 0) return true;
+        this.logger.info('浏览器网络挂起，任务批同步中断并整批入重试队列', {
+          projectId: projectSnapshot.id,
+          context,
+          remaining: remaining.length,
+          resumeDelayMs: getRemainingBrowserNetworkResumeDelayMs(),
+        });
+        for (const t of remaining) {
+          failedTaskIds.push(t.id);
+          if (this.callbacks!.addToRetryQueue('task', 'upsert', t, projectSnapshot.id, userId)) {
+            retryEnqueued.push(`task:${t.id}`);
+          }
+        }
+        return true;
+      };
+
       for (let i = 0; i < sortedTasks.length; i++) {
+        if (deferRemainingTasksOnSuspension(i, 'sortedTasks')) {
+          break;
+        }
         if (i > 0) await this.delay(200);
         
         try {
@@ -755,6 +816,11 @@ export class BatchSyncService {
           
           if (taskResult.success) {
             successfulTaskIds.add(task.id);
+            // 【根因修复 2026-04-20】上行成功即清单项脏记录，解除"全或无"清理策略导致的
+            // 无限重推循环：过去只在 batch 整体成功时才 clearProjectChanges，只要一项失败就
+            // 永久保留所有成功项的 pending 记录，下一轮又整批重推（API 200 但 UI 待同步数永
+            // 远不降）。使用 batchStartedAt 水位保护并发编辑：同步期间用户产生的新 edit 保留。
+            this.changeTracker.clearTaskChangeIfFresh(projectSnapshot.id, task.id, batchStartedAt);
           } else {
             failedTaskIds.push(task.id);
             if (taskResult.retryEnqueued) {
@@ -766,6 +832,10 @@ export class BatchSyncService {
             failedTaskIds.push(sortedTasks[i].id);
             this.logger.warn('跳过永久失败的任务', { taskId: sortedTasks[i].id });
             continue;
+          }
+          if (isBrowserNetworkSuspendedError(e)) {
+            deferRemainingTasksOnSuspension(i, 'sortedTasks.error');
+            break;
           }
           throw e;
         }
@@ -812,6 +882,8 @@ export class BatchSyncService {
               source: connection.source,
               target: connection.target,
             });
+            // 【根因修复 2026-04-20】引用任务已在云端 purge，连接无需再推，直接清脏记录收口。
+            this.changeTracker.clearConnectionChangeIfFresh(projectSnapshot.id, connection.id, batchStartedAt);
             continue;
           }
 
@@ -843,6 +915,8 @@ export class BatchSyncService {
             source: blocked.source,
             target: blocked.target,
           });
+          // 【根因修复 2026-04-20】引用任务已 purge，连接无需再推，清脏记录收口避免无限重推。
+          this.changeTracker.clearConnectionChangeIfFresh(projectSnapshot.id, blocked.id, batchStartedAt);
           continue;
         }
 
@@ -861,6 +935,9 @@ export class BatchSyncService {
       }
       
       for (let i = 0; i < connectionsToSync.length; i++) {
+        if (deferRemainingConnectionsOnSuspension(connectionsToSync, i, 'connectionsToSync')) {
+          break;
+        }
         if (i > 0) await this.delay(200);
         
         try {
@@ -873,6 +950,9 @@ export class BatchSyncService {
             if (connectionResult.retryEnqueued) {
               retryEnqueued.push(`connection:${connection.id}`);
             }
+          } else {
+            // 【根因修复 2026-04-20】连接上行成功即清脏记录，解除"全或无"清理策略。
+            this.changeTracker.clearConnectionChangeIfFresh(projectSnapshot.id, connection.id, batchStartedAt);
           }
         } catch (e) {
           if (isPermanentFailureError(e)) {
@@ -880,6 +960,10 @@ export class BatchSyncService {
             failedConnectionIds.push(connectionId);
             this.logger.warn('跳过永久失败的连接', { connectionId });
             continue;
+          }
+          if (isBrowserNetworkSuspendedError(e)) {
+            deferRemainingConnectionsOnSuspension(connectionsToSync, i, 'connectionsToSync.error');
+            break;
           }
           throw e;
         }
@@ -895,6 +979,13 @@ export class BatchSyncService {
       if (!success) {
         await confirmAccumulatedRetryMarkers();
       }
+
+      // 中文注释：purge 失败会把 taskIdsToDelete 全部记录一次，而这些任务若仍在 projectSnapshot.tasks
+      // 中（deletedAt 置位但 tombstone 未落地），可能又在 upsert 循环被记第二次，需要在对外返回前去重，
+      // 防止"24 项任务失败"类聚合计数虚高、误导用户与重试队列观测。
+      const dedupedFailedTaskIds = Array.from(new Set(failedTaskIds));
+      const dedupedFailedConnectionIds = Array.from(new Set(failedConnectionIds));
+      const dedupedRetryEnqueued = Array.from(new Set(retryEnqueued));
       
       this.syncState.setSyncing(false);
       if (success) {
@@ -911,9 +1002,9 @@ export class BatchSyncService {
         success,
         newVersion: project.version,
         projectPushed,
-        failedTaskIds,
-        failedConnectionIds,
-        retryEnqueued,
+        failedTaskIds: dedupedFailedTaskIds,
+        failedConnectionIds: dedupedFailedConnectionIds,
+        retryEnqueued: dedupedRetryEnqueued,
         failureReason: success ? undefined : 'project batch sync delegated remaining work to retry queue'
       };
     } catch (e) {
@@ -931,9 +1022,9 @@ export class BatchSyncService {
       return {
         success: false,
         projectPushed,
-        failedTaskIds,
-        failedConnectionIds,
-        retryEnqueued,
+        failedTaskIds: Array.from(new Set(failedTaskIds)),
+        failedConnectionIds: Array.from(new Set(failedConnectionIds)),
+        retryEnqueued: Array.from(new Set(retryEnqueued)),
         failureReason: e instanceof Error ? e.message : 'project batch sync failed unexpectedly'
       };
     }

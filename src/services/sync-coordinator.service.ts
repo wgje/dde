@@ -1909,18 +1909,40 @@ export class SyncCoordinatorService {
         return { remoteConfirmed: false, projectId: project.id };
       }
       if (!result.success) {
-        const failedTasks = result.failedTaskIds?.length ?? 0;
-        const failedConnections = result.failedConnectionIds?.length ?? 0;
+        const failedTaskIds = result.failedTaskIds ?? [];
+        const failedConnectionIds = result.failedConnectionIds ?? [];
+        const failedTasks = failedTaskIds.length;
+        const failedConnections = failedConnectionIds.length;
         if (failedTasks > 0 || failedConnections > 0) {
-          this.logger.warn('远端未完全确认，同步保持待处理状态', {
-            projectId: project.id,
-            failedTasks,
-            failedConnections
-          });
-          this.toastService.warning(
-            '同步未完成',
-            `任务失败 ${failedTasks} 项，连接失败 ${failedConnections} 项，已保留待同步标记`
-          );
+          // 中文注释：BatchSyncService 已经把每个失败项入重试队列并设置了 syncState.syncError，
+          // 若所有失败都已入队则属于"正常重试"闭环，不再复弹 toast；仅当存在未入队的真正风险项
+          // 时才升级为 WARN + toast，避免浏览器恢复/会话刷新等临时状态造成用户侧重复告警。
+          const retryMarkers = new Set(result.retryEnqueued ?? []);
+          const uncoveredTasks = failedTaskIds.filter(id => !retryMarkers.has(`task:${id}`));
+          const uncoveredConnections = failedConnectionIds.filter(id => !retryMarkers.has(`connection:${id}`));
+          const hasDataAtRisk = uncoveredTasks.length > 0 || uncoveredConnections.length > 0;
+
+          if (hasDataAtRisk) {
+            this.logger.warn('远端未完全确认，存在未入重试队列的风险项', {
+              projectId: project.id,
+              failedTasks,
+              failedConnections,
+              uncoveredTaskCount: uncoveredTasks.length,
+              uncoveredConnectionCount: uncoveredConnections.length,
+              failureReason: result.failureReason,
+            });
+            this.toastService.warning(
+              '同步未完成',
+              `任务失败 ${failedTasks} 项，连接失败 ${failedConnections} 项，已保留待同步标记`
+            );
+          } else {
+            this.logger.info('远端未完全确认，所有失败项已入重试队列，等待自动重试', {
+              projectId: project.id,
+              failedTasks,
+              failedConnections,
+              failureReason: result.failureReason,
+            });
+          }
         }
       }
       return { remoteConfirmed: false, projectId: project.id };
