@@ -508,19 +508,9 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     this.diagram.exportToSvg();
   }
 
-  /** 导出 Mermaid 逻辑骨架（供 AI 审查整体结构） */
-  exportLogicMermaid(): void {
-    this.logicExport.exportMermaid();
-  }
-
-  /** 导出 YAML 数据流（供 AI 审查字段、不变式） */
-  exportLogicYaml(): void {
-    this.logicExport.exportYaml();
-  }
-
-  /** 导出逻辑审查包（Mermaid + YAML + 不变式，合并 Markdown） */
-  exportLogicPack(): void {
-    this.logicExport.exportLogicPack();
+  /** 导出 AI 战略审查 Markdown（主任务中心 + 洞察师 prompt） */
+  exportStrategicReview(): void {
+    this.logicExport.exportStrategicReview();
   }
   
   /** 保存到云端的结果 Promise，供 toolbar 回调使用 */

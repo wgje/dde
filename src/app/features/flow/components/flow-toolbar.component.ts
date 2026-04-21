@@ -150,18 +150,17 @@ import { TIMEOUT_CONFIG } from '../../../../config';
               </button>
             }
             
-            <!-- 逻辑网导出快捷按钮：无需展开二级菜单即可一键导出审查包（Mermaid+YAML+不变式） -->
+            <!-- 项目脉络导出快捷按钮：一键导出当前流程图的 Markdown 大纲（可粘给 AI 审阅、存档、分享） -->
             <button
-              (click)="onExportLogicPack()"
+              (click)="onExportStrategicReview()"
               class="theme-toolbar-btn backdrop-blur rounded-lg shadow-sm border"
               [class.p-2]="!uiState.isMobile()"
               [class.p-1.5]="uiState.isMobile()"
-              title="逻辑网导出：一键下载 Mermaid + YAML + 不变式审查包（Markdown）">
+              title="导出项目脉络 Markdown（主任务中心 · 用于审阅 / 存档 / 粘给 AI 分析）">
                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"
                      [class.h-5]="!uiState.isMobile()" [class.w-5]="!uiState.isMobile()"
                      [class.h-4]="uiState.isMobile()" [class.w-4]="uiState.isMobile()">
-                  <!-- 节点+连线图标：代表「逻辑网」 -->
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 8a2 2 0 100-4 2 2 0 000 4zm14 0a2 2 0 100-4 2 2 0 000 4zM12 20a2 2 0 100-4 2 2 0 000 4zM6.8 7.3l4.4 7.4M17.2 7.3l-4.4 7.4" />
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h-6m6 4h-6m2-8h-2" />
                 </svg>
             </button>
 
@@ -210,52 +209,19 @@ import { TIMEOUT_CONFIG } from '../../../../config';
                   </button>
                   <div class="border-t my-1" style="border-color: var(--theme-border);"></div>
                   <!--
-                    逻辑网导出：
-                      - 主按钮：一键下载审查包（Mermaid + YAML + 不变式）
-                      - 右侧三角：展开后可单独下载 Mermaid / YAML / 审查包
+                    一键导出项目脉络：把当前流程图整理成 Markdown 大纲，
+                    以主任务为核心，保留标题、内容摘要、层级与关联语义。
+                    用途：自我审阅、存档、分享给同事、粘给 AI 做战略分析等。
                   -->
-                  <div class="flex items-stretch">
-                    <button
-                      (click)="onExportLogicPack()"
-                      class="flex-1 px-3 py-2 text-left text-sm theme-text-secondary theme-hover flex items-center gap-2"
-                      title="一键导出 Mermaid + YAML + 不变式审查包（Markdown）">
-                      <svg class="w-4 h-4 theme-text-muted" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
-                      </svg>
-                      逻辑网导出
-                    </button>
-                    <button
-                      type="button"
-                      (click)="toggleLogicSubmenu($event)"
-                      [attr.aria-expanded]="isLogicSubmenuOpen()"
-                      class="px-2 theme-text-secondary theme-hover border-l"
-                      style="border-color: var(--theme-border);"
-                      title="展开分别下载 Mermaid / YAML">
-                      <svg class="w-3 h-3 transition-transform" [class.rotate-180]="isLogicSubmenuOpen()" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-                      </svg>
-                    </button>
-                  </div>
-                  @if (isLogicSubmenuOpen()) {
-                    <button
-                      (click)="onExportMermaid()"
-                      class="w-full px-3 py-2 pl-8 text-left text-sm theme-text-secondary theme-hover flex items-center gap-2"
-                      title="仅 Mermaid：整体骨架审查">
-                      <svg class="w-4 h-4 theme-text-muted" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h8m-8 6h16" />
-                      </svg>
-                      仅 Mermaid
-                    </button>
-                    <button
-                      (click)="onExportYaml()"
-                      class="w-full px-3 py-2 pl-8 text-left text-sm theme-text-secondary theme-hover flex items-center gap-2"
-                      title="仅 YAML：数据流与不变式">
-                      <svg class="w-4 h-4 theme-text-muted" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 10h10M4 14h16M4 18h6" />
-                      </svg>
-                      仅 YAML
-                    </button>
-                  }
+                  <button
+                    (click)="onExportStrategicReview()"
+                    class="w-full px-3 py-2 text-left text-sm theme-text-secondary theme-hover flex items-center gap-2"
+                    title="导出项目脉络 Markdown（主任务中心 · 用于审阅 / 存档 / 粘给 AI 分析）">
+                    <svg class="w-4 h-4 theme-text-muted" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h-6m6 4h-6m2-8h-2" />
+                    </svg>
+                    导出项目脉络
+                  </button>
                   @if (userSession.currentUserId()) {
                     <div class="border-t my-1" style="border-color: var(--theme-border);"></div>
                     <button 
@@ -338,12 +304,8 @@ export class FlowToolbarComponent {
   readonly goBackToText = output<void>();
   readonly exportPng = output<void>();
   readonly exportSvg = output<void>();
-  /** 导出 Mermaid 逻辑骨架（.mmd） */
-  readonly exportMermaid = output<void>();
-  /** 导出 YAML 数据流（.yaml） */
-  readonly exportYaml = output<void>();
-  /** 导出逻辑审查包（Mermaid + YAML + 不变式，合并为 Markdown） */
-  readonly exportLogicPack = output<void>();
+  /** 导出 AI 战略审查 Markdown（主任务中心 + 洞察师 prompt） */
+  readonly exportStrategicReview = output<void>();
   readonly saveToCloud = output<void>();
   /** 父组件提供的 saveToCloud 回调，返回 Promise 以便 toolbar 获取结果并复位状态 */
   readonly saveToCloudCallback = input<(() => Promise<{ ok: boolean; message?: string }>) | null>(null);
@@ -353,8 +315,6 @@ export class FlowToolbarComponent {
   // 导出菜单状态
   isExportMenuOpen = false;
   isUploading = false;
-  /** 逻辑网导出子菜单展开状态（默认折叠，主按钮一键下载审查包） */
-  readonly isLogicSubmenuOpen = signal(false);
   
   /** 工具栏折叠状态 */
   readonly isCollapsed = signal(false);
@@ -404,16 +364,6 @@ export class FlowToolbarComponent {
   
   toggleExportMenu() {
     this.isExportMenuOpen = !this.isExportMenuOpen;
-    if (!this.isExportMenuOpen) {
-      // 关闭主菜单时回收子菜单，避免下次打开留有上次展开状态
-      this.isLogicSubmenuOpen.set(false);
-    }
-  }
-
-  /** 展开/折叠逻辑网子菜单；阻止冒泡避免触发主菜单关闭 */
-  toggleLogicSubmenu(event: Event): void {
-    event.stopPropagation();
-    this.isLogicSubmenuOpen.update(v => !v);
   }
   
   onExportPng() {
@@ -426,22 +376,9 @@ export class FlowToolbarComponent {
     this.exportSvg.emit();
   }
 
-  onExportMermaid() {
+  onExportStrategicReview() {
     this.isExportMenuOpen = false;
-    this.isLogicSubmenuOpen.set(false);
-    this.exportMermaid.emit();
-  }
-
-  onExportYaml() {
-    this.isExportMenuOpen = false;
-    this.isLogicSubmenuOpen.set(false);
-    this.exportYaml.emit();
-  }
-
-  onExportLogicPack() {
-    this.isExportMenuOpen = false;
-    this.isLogicSubmenuOpen.set(false);
-    this.exportLogicPack.emit();
+    this.exportStrategicReview.emit();
   }
   
   /** 超时保护定时器 ID */
