@@ -2005,6 +2005,7 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
       },
       userSession: {
         canAuthoritativelyRejectProjectRoute: () => true,
+        isProjectAuthoritativelyAccessible: () => true,
         startupProjectCatalogStage: () => 'resolved',
       },
       startupLaunchSnapshot: {
@@ -2093,6 +2094,7 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
       },
       userSession: {
         canAuthoritativelyRejectProjectRoute: () => true,
+        isProjectAuthoritativelyAccessible: () => true,
         startupProjectCatalogStage: () => 'resolved',
       },
       startupLaunchSnapshot: null,
@@ -2127,6 +2129,7 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
       },
       userSession: {
         canAuthoritativelyRejectProjectRoute: () => false,
+        isProjectAuthoritativelyAccessible: () => false,
         startupProjectCatalogStage: () => 'partial',
       },
       startupLaunchSnapshot: null,
@@ -2160,6 +2163,7 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
       },
       userSession: {
         canAuthoritativelyRejectProjectRoute: () => true,
+        isProjectAuthoritativelyAccessible: () => false,
         startupProjectCatalogStage: () => 'resolved',
       },
       startupLaunchSnapshot: null,
@@ -2192,6 +2196,7 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
       },
       userSession: {
         canAuthoritativelyRejectProjectRoute: () => true,
+        isProjectAuthoritativelyAccessible: () => false,
         startupProjectCatalogStage: () => 'resolved',
       },
       startupLaunchSnapshot: null,
@@ -2203,6 +2208,41 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
       syncStateFromRoute: (this: WorkspaceShellComponent) => void;
     }).syncStateFromRoute.call(context);
 
+    expect(navigate).toHaveBeenCalledWith(['/projects']);
+  });
+
+  it('syncStateFromRoute 不应把本地保留的幽灵项目当成 authoritative 可访问项目', () => {
+    const setActiveProjectId = vi.fn();
+    const navigate = vi.fn();
+    const context = {
+      getCurrentStartupEntryIntent: () => null,
+      route: {
+        snapshot: { params: {} },
+        firstChild: {
+          snapshot: { params: { projectId: 'project-9' } },
+          firstChild: null,
+        },
+      },
+      projectState: {
+        activeProjectId: () => null,
+        projects: () => [{ id: 'project-9' }],
+        setActiveProjectId,
+      },
+      userSession: {
+        canAuthoritativelyRejectProjectRoute: () => true,
+        isProjectAuthoritativelyAccessible: () => false,
+        startupProjectCatalogStage: () => 'resolved',
+      },
+      startupLaunchSnapshot: null,
+      router: { navigate },
+      resolveStartupProjectFallbackId: vi.fn(),
+    } as unknown as WorkspaceShellComponent;
+
+    (WorkspaceShellComponent.prototype as unknown as {
+      syncStateFromRoute: (this: WorkspaceShellComponent) => void;
+    }).syncStateFromRoute.call(context);
+
+    expect(setActiveProjectId).not.toHaveBeenCalled();
     expect(navigate).toHaveBeenCalledWith(['/projects']);
   });
 

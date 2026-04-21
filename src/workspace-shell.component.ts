@@ -2417,14 +2417,16 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
     }
 
     const projectExists = projects.some(p => p.id === projectId);
-    if (projectExists) {
+    const isAuthoritativelyAccessible = !canAuthoritativelyRejectProjectRoute
+      || this.userSession.isProjectAuthoritativelyAccessible(projectId);
+    if (projectExists && isAuthoritativelyAccessible) {
       if (projectId !== this.projectState.activeProjectId()) {
         this.projectState.setActiveProjectId(projectId);
       }
       return;
     }
 
-    if (!canAuthoritativelyRejectProjectRoute) {
+    if (!canAuthoritativelyRejectProjectRoute || isAuthoritativelyAccessible) {
       // 预填充阶段只有最近项目摘要，不能据此判定 deep-link 项目不存在。
       return;
     }

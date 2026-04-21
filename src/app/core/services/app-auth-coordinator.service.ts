@@ -185,10 +185,7 @@ export class AppAuthCoordinatorService {
       return explicitReturnUrl;
     }
 
-    const projectExists = this.projectState.projects().some(
-      (project) => project.id === routeIntent.projectId,
-    );
-    if (projectExists) {
+    if (this.userSession.isProjectAuthoritativelyAccessible(routeIntent.projectId)) {
       return explicitReturnUrl;
     }
 
@@ -197,7 +194,9 @@ export class AppAuthCoordinatorService {
       projectId: routeIntent.projectId,
       startupProjectCatalogStage,
       canAuthoritativelyRejectProjectRoute: true,
-      hasMatchingProject: projectExists,
+      hasMatchingProject: this.projectState.projects().some(
+        (project) => project.id === routeIntent.projectId,
+      ),
     });
     return '/projects';
   }

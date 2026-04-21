@@ -87,6 +87,7 @@ function setup(options?: {
   const userSessionMock = {
     currentUserId: userId,
     canAuthoritativelyRejectProjectRoute: vi.fn(() => true),
+    isProjectAuthoritativelyAccessible: vi.fn((projectId: string) => projects().some(project => project.id === projectId)),
     startupProjectCatalogStage: vi.fn(() => 'resolved' as const),
     setCurrentUser: vi.fn().mockImplementation(async (nextUserId: string | null) => {
       userId.set(nextUserId);
@@ -429,6 +430,21 @@ describe('isLoginData type guard (tested indirectly via handleLogin)', () => {
     await service.handleLogin();
 
     expect(routerMock.navigateByUrl).toHaveBeenCalledWith('/projects/proj-stale/text');
+  });
+
+  it('登录后若本地仍保留不可访问的幽灵项目，也应回退到项目列表', async () => {
+    const { service, authMock, modalMock, routerMock, projects, userSessionMock } = setup();
+    authMock.signIn.mockResolvedValue({ ok: true, value: { userId: 'user-1' } });
+    modalMock.getData.mockReturnValue({ returnUrl: '/projects/proj-stale/text' });
+    projects.set([{ id: 'proj-stale', syncSource: 'synced' }]);
+    userSessionMock.isProjectAuthoritativelyAccessible.mockReturnValue(false);
+
+    service.authEmail.set('test@example.com');
+    service.authPassword.set('password123');
+
+    await service.handleLogin();
+
+    expect(routerMock.navigateByUrl).toHaveBeenCalledWith('/projects');
   });
 
   it('should preserve the auth service login error message', async () => {

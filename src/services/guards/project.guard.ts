@@ -169,8 +169,10 @@ export const projectExistsGuard: CanActivateFn = async (route: ActivatedRouteSna
   // 快速检查项目是否存在于本地
   let project = projectState.getProject(projectId);
   const canAuthoritativelyRejectProjectRoute = userSession.canAuthoritativelyRejectProjectRoute();
+  const isAuthoritativelyAccessible = !canAuthoritativelyRejectProjectRoute
+    || userSession.isProjectAuthoritativelyAccessible(projectId);
   
-  if (project) {
+  if (project && isAuthoritativelyAccessible) {
     // 项目存在于本地缓存，立即放行
     return true;
   }
@@ -199,8 +201,11 @@ export const projectExistsGuard: CanActivateFn = async (route: ActivatedRouteSna
     if (waitResult.loaded) {
       // 重新检查项目是否存在
       project = projectState.getProject(projectId);
+      const canRejectAfterWait = userSession.canAuthoritativelyRejectProjectRoute();
+      const isAccessibleAfterWait = !canRejectAfterWait
+        || userSession.isProjectAuthoritativelyAccessible(projectId);
       
-      if (project) {
+      if (project && isAccessibleAfterWait) {
         return true;
       }
     }

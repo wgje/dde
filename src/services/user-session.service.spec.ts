@@ -2079,6 +2079,48 @@ describe('UserSessionService', () => {
       expect(setProjectsCall?.some((project: Project) => project.id === 'proj-local-only')).toBe(true);
     });
 
+    it('metadata sync 后保留的 local-only 项目仍应被视为可访问', async () => {
+      const remoteProject = createProject({ id: 'proj-a', name: 'A', syncSource: 'synced' });
+      const localOnlyProject = createProject({
+        id: 'proj-local-only',
+        name: 'Guest Draft',
+        syncSource: 'local-only',
+      });
+      userIdSignal.set('user-1');
+      saveGuestDraftProjects([localOnlyProject]);
+      (mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue([
+        remoteProject,
+        localOnlyProject,
+      ]);
+      (mockProjectState['getProject'] as ReturnType<typeof vi.fn>).mockImplementation(
+        (id: string) => [remoteProject, localOnlyProject].find((project) => project.id === id)
+      );
+      (mockProjectState['activeProjectId'] as ReturnType<typeof vi.fn>).mockReturnValue(null);
+      (mockSyncCoordinator['hasPendingChangesForProject'] as ReturnType<typeof vi.fn>).mockReturnValue(false);
+
+      setupSupabaseQuery([
+        {
+          id: 'proj-a', title: 'A', description: '',
+          created_date: remoteProject.createdDate, updated_at: remoteProject.updatedAt, version: 1,
+        },
+      ]);
+
+      await (
+        service as unknown as {
+          syncProjectListMetadata: (userId: string) => Promise<Set<string>>;
+        }
+      ).syncProjectListMetadata('user-1');
+
+      expect(service.isProjectAuthoritativelyAccessible('proj-local-only')).toBe(true);
+    });
+
+    it('匿名或 local-user 模式下缺失项目不应被视为可访问', () => {
+      userIdSignal.set(AUTH_CONFIG.LOCAL_MODE_USER_ID);
+      (mockProjectState['getProject'] as ReturnType<typeof vi.fn>).mockReturnValue(undefined);
+
+      expect(service.isProjectAuthoritativelyAccessible('proj-missing')).toBe(false);
+    });
+
     it('expired guest draft 标记不应阻止 local-only 影子项目被裁剪', async () => {
       const remoteProject = createProject({ id: 'proj-a', name: 'A', syncSource: 'synced' });
       const shadowProject = createProject({

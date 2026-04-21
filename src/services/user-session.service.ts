@@ -84,6 +84,7 @@ export class UserSessionService {
   private prehydratedSnapshotOwnerId: string | null = null;
   private sessionRequestGeneration = 0;
   private readonly lastProjectListMetadataSyncSucceededState = signal(false);
+  private readonly authoritativelyAccessibleProjectIdsState = signal<ReadonlySet<string>>(new Set());
   private readonly startupProjectCatalogStageState = signal<StartupProjectCatalogStage>('unresolved');
   private readonly trustedPrehydratedSnapshotState = signal(false);
   /** 已从云端完整加载过内容的项目 ID 集合，防止重复加载 */
@@ -101,6 +102,32 @@ export class UserSessionService {
     }
 
     return this.lastProjectListMetadataSyncSucceededState();
+  }
+
+  isProjectAuthoritativelyAccessible(projectId: string): boolean {
+    const normalizedProjectId = typeof projectId === 'string' ? projectId.trim() : '';
+    if (!normalizedProjectId) {
+      return false;
+    }
+
+    const localProject = this.projectState.getProject(normalizedProjectId);
+
+    const currentUserId = this.currentUserId();
+    if (!currentUserId || currentUserId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+      return localProject != null;
+    }
+
+    if (this.authoritativelyAccessibleProjectIdsState().has(normalizedProjectId)) {
+      return true;
+    }
+
+    if (!localProject) {
+      return false;
+    }
+
+    const guestDraftProjectIds = this.getPersistedGuestDraftProjectIds();
+    return this.isProtectedLocalOnlyProject(localProject, guestDraftProjectIds)
+      || this.hasRealLocalChanges(normalizedProjectId);
   }
 
   isHintOnlyStartupPlaceholderVisible(): boolean {
@@ -797,6 +824,7 @@ export class UserSessionService {
 
     if (isUserChange || forceLoad) {
       this.lastProjectListMetadataSyncSucceededState.set(false);
+      this.authoritativelyAccessibleProjectIdsState.set(new Set());
     }
     
     // 清理旧用户的附件监控和回调，防止内存泄漏
@@ -2030,9 +2058,9 @@ export class UserSessionService {
       return fallbackIds;
     }
 
-    this.lastProjectListMetadataSyncSucceededState.set(true);
-
     const accessibleProjectIds = new Set<string>((data || []).map(row => String(row.id)));
+    this.authoritativelyAccessibleProjectIdsState.set(new Set(accessibleProjectIds));
+    this.lastProjectListMetadataSyncSucceededState.set(true);
     
     // 更新本地项目列表的元数据（不覆盖 tasks/connections）
     let updatedProjects = [...localProjects];

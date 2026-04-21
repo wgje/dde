@@ -19,6 +19,7 @@ describe('projectExistsGuard', () => {
   let userSessionMock: {
     loadProjects: ReturnType<typeof vi.fn>;
     canAuthoritativelyRejectProjectRoute: ReturnType<typeof vi.fn>;
+    isProjectAuthoritativelyAccessible: ReturnType<typeof vi.fn>;
     startupProjectCatalogStage: ReturnType<typeof vi.fn>;
   };
   let routerMock: {
@@ -42,6 +43,7 @@ describe('projectExistsGuard', () => {
     userSessionMock = {
       loadProjects: vi.fn().mockResolvedValue(undefined),
       canAuthoritativelyRejectProjectRoute: vi.fn().mockReturnValue(true),
+      isProjectAuthoritativelyAccessible: vi.fn().mockReturnValue(true),
       startupProjectCatalogStage: vi.fn().mockReturnValue('resolved'),
     };
 
@@ -104,5 +106,50 @@ describe('projectExistsGuard', () => {
       '请求的项目可能已被删除或您没有访问权限',
     );
     expect(routerMock.navigate).toHaveBeenCalledWith(['/projects']);
+  });
+
+  it('本地仍保留项目壳但 authoritative 目录已判定不可访问时，应拒绝 deep-link', async () => {
+    projectStateMock.projects.mockReturnValue([{ id: 'project-9' }]);
+    projectStateMock.getProject.mockReturnValue({ id: 'project-9' });
+    userSessionMock.canAuthoritativelyRejectProjectRoute.mockReturnValue(true);
+    userSessionMock.isProjectAuthoritativelyAccessible.mockReturnValue(false);
+
+    const route = {
+      params: { projectId: 'project-9' },
+    } as unknown as ActivatedRouteSnapshot;
+    const state = { url: '/projects/project-9' } as RouterStateSnapshot;
+
+    const result = await TestBed.runInInjectionContext(() => projectExistsGuard(route, state));
+
+    expect(result).toBe(false);
+    expect(routerMock.navigate).toHaveBeenCalledWith(['/projects']);
+    expect(toastMock.error).toHaveBeenCalledWith(
+      '项目不存在',
+      '请求的项目可能已被删除或您没有访问权限',
+    );
+  });
+
+  it('远端加载后的二次检查若 authoritative 判定不可访问，仍应拒绝 deep-link', async () => {
+    projectStateMock.projects.mockReturnValue([{ id: 'project-1' }]);
+    projectStateMock.getProject
+      .mockReturnValueOnce(null)
+      .mockReturnValueOnce({ id: 'project-9' });
+    syncCoordinatorMock.isLoadingRemote.mockReturnValue(true);
+    userSessionMock.canAuthoritativelyRejectProjectRoute.mockReturnValue(true);
+    userSessionMock.isProjectAuthoritativelyAccessible.mockReturnValue(false);
+
+    const route = {
+      params: { projectId: 'project-9' },
+    } as unknown as ActivatedRouteSnapshot;
+    const state = { url: '/projects/project-9' } as RouterStateSnapshot;
+
+    const result = await TestBed.runInInjectionContext(() => projectExistsGuard(route, state));
+
+    expect(result).toBe(false);
+    expect(routerMock.navigate).toHaveBeenCalledWith(['/projects']);
+    expect(toastMock.error).toHaveBeenCalledWith(
+      '项目不存在',
+      '请求的项目可能已被删除或您没有访问权限',
+    );
   });
 });
