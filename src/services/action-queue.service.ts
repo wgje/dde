@@ -106,6 +106,18 @@ export class ActionQueueService {
   /** 冻结状态下尝试持久化的最小间隔 */
   private readonly FROZEN_PERSIST_RETRY_COOLDOWN = 30_000;
   private lastFrozenPersistAttemptAt = 0;
+
+  /** RetryQueue 可识别的实体类型集合，用于跨队列去重判定 */
+  private static readonly RETRYABLE_ENTITY_TYPES: ReadonlySet<string> = new Set<string>([
+    'task',
+    'project',
+    'connection',
+    'blackbox',
+  ]);
+
+  private isRetryableEntityType(entityType: string): boolean {
+    return ActionQueueService.RETRYABLE_ENTITY_TYPES.has(entityType);
+  }
   
   constructor() {
     // 初始化 storage 上下文引用
@@ -202,7 +214,7 @@ export class ActionQueueService {
       return '';
     }
 
-    if (removeRetrySourceOnSuccess && (action.entityType === 'task' || action.entityType === 'project')) {
+    if (removeRetrySourceOnSuccess && this.isRetryableEntityType(action.entityType)) {
       this.retryQueue.removeByEntity(action.entityType as RetryableEntityType, action.entityId);
     }
 
@@ -399,7 +411,9 @@ export class ActionQueueService {
 
     // 跨队列去重：新操作入队后，移除 RetryQueue 中同一实体的旧重试条目
     // 因为新操作的数据更新，旧的重试一旦成功反而会用过时数据覆盖
-    if (dedupeRetry && (action.entityType === 'task' || action.entityType === 'project')) {
+    // 【2026-04-21 漏洞 A 修复】原实现仅覆盖 task/project，扩展至 connection/blackbox，
+    // 避免连接/黑匣子在重试队列中堆积陈旧副本，导致"86 待同步"虚高。
+    if (dedupeRetry && this.isRetryableEntityType(action.entityType)) {
       this.retryQueue.removeByEntity(action.entityType as RetryableEntityType, action.entityId);
     }
     

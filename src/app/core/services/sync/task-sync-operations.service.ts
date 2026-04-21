@@ -464,7 +464,7 @@ export class TaskSyncOperationsService {
     );
     
     this.retryQueueService.recordCircuitSuccess();
-    this.syncStateService.setLastSyncTime(nowISO());
+    this.syncStateService.advanceLastSyncTimeIfIdle(nowISO());
     return true;
   }
   

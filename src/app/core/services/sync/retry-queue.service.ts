@@ -301,13 +301,15 @@ export class RetryQueueService {
       return false;
     }
 
-    return current !== item
-      || current.createdAt !== item.createdAt
+    // 【2026-04-21 漏洞 C 修复】原实现包含 `current !== item` 与 `current.data !== item.data`
+    // 等对象引用比较；当 loadFromStorage / persistNow 重建队列数组（或对 data 做浅复制）时，
+    // 即便内容未变也会因引用不同被误判为"处理期间已刷新"，导致成功项被保留、计数不降。
+    // 改为仅比对 addInternal 真正会重写的"刷新信号"：createdAt（刷新时会重置为 Date.now()）
+    // 加上 operation/projectId/sourceUserId 标量字段，彻底规避引用比较的假阳性。
+    return current.createdAt !== item.createdAt
       || current.operation !== item.operation
-      || current.data !== item.data
       || current.projectId !== item.projectId
-      || current.sourceUserId !== item.sourceUserId
-      || current.taskIdsToDelete !== item.taskIdsToDelete;
+      || current.sourceUserId !== item.sourceUserId;
   }
 
   private removeItemsFromAllViews(itemIds: Set<string>): void {

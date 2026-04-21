@@ -40,6 +40,10 @@ export type TaskChangeCallback = (payload: { eventType: string; taskId: string; 
   providedIn: 'root'
 })
 export class RealtimePollingService {
+  private static readonly REALTIME_CIRCUIT_STORAGE_KEY = 'nanoflow.realtime-transport-circuit';
+  private static readonly REALTIME_CIRCUIT_TTL_MS = 30 * 60 * 1000;
+  private static readonly REALTIME_FALLBACK_TOAST_COOLDOWN_MS = 10 * 60 * 1000;
+
   private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly supabase = inject(SupabaseClientService);
   private readonly loggerService = inject(LoggerService);
@@ -62,6 +66,11 @@ export class RealtimePollingService {
   private transportSuspended = false;
   private realtimeBackoffProjectId: string | null = null;
   private realtimeBackoffUntil = 0;
+  private realtimeCircuitUntil = 0;
+  private realtimeCircuitOwnerUserId: string | null = null;
+  private realtimeCircuitFailures = 0;
+  private realtimeCircuitLastError: string | null = null;
+  private lastRealtimeFallbackToastAt = 0;
   
   /** Realtime 更新是否暂停 */
   private realtimePaused = false;
@@ -91,6 +100,8 @@ export class RealtimePollingService {
   private runtimeInitialized = false;
 
   constructor() {
+    this.loadRealtimeCircuitState();
+
     effect(() => {
       const enableRealtime = this.mobileSyncStrategy.currentStrategy().enableRealtime;
       if (this.isRealtimeEnabled() !== enableRealtime) {
@@ -197,6 +208,125 @@ export class RealtimePollingService {
     this.realtimeBackoffUntil = 0;
   }
 
+  private loadRealtimeCircuitState(): void {
+    if (typeof window === 'undefined' || typeof window.sessionStorage === 'undefined') {
+      return;
+    }
+
+    try {
+      const stored = window.sessionStorage.getItem(RealtimePollingService.REALTIME_CIRCUIT_STORAGE_KEY);
+      if (!stored) {
+        return;
+      }
+
+      const parsed = JSON.parse(stored) as {
+        until?: number;
+        ownerUserId?: string | null;
+        failures?: number;
+        lastError?: string | null;
+        lastToastAt?: number;
+      };
+
+      if (typeof parsed.until !== 'number' || parsed.until <= Date.now()) {
+        window.sessionStorage.removeItem(RealtimePollingService.REALTIME_CIRCUIT_STORAGE_KEY);
+        return;
+      }
+
+      this.realtimeCircuitUntil = parsed.until;
+      this.realtimeCircuitOwnerUserId = typeof parsed.ownerUserId === 'string' ? parsed.ownerUserId : null;
+      this.realtimeCircuitFailures = typeof parsed.failures === 'number' ? parsed.failures : 0;
+      this.realtimeCircuitLastError = typeof parsed.lastError === 'string' ? parsed.lastError : null;
+      this.lastRealtimeFallbackToastAt = typeof parsed.lastToastAt === 'number' ? parsed.lastToastAt : 0;
+    } catch {
+      // eslint-disable-next-line no-restricted-syntax -- 存储损坏时静默回退到默认状态即可
+    }
+  }
+
+  private saveRealtimeCircuitState(): void {
+    if (typeof window === 'undefined' || typeof window.sessionStorage === 'undefined') {
+      return;
+    }
+
+    try {
+      window.sessionStorage.setItem(RealtimePollingService.REALTIME_CIRCUIT_STORAGE_KEY, JSON.stringify({
+        until: this.realtimeCircuitUntil,
+        ownerUserId: this.realtimeCircuitOwnerUserId,
+        failures: this.realtimeCircuitFailures,
+        lastError: this.realtimeCircuitLastError,
+        lastToastAt: this.lastRealtimeFallbackToastAt,
+      }));
+    } catch {
+      // eslint-disable-next-line no-restricted-syntax -- sessionStorage 不可写时保持内存态熔断即可
+    }
+  }
+
+  private clearRealtimeCircuitState(): void {
+    this.realtimeCircuitUntil = 0;
+    this.realtimeCircuitOwnerUserId = null;
+    this.realtimeCircuitFailures = 0;
+    this.realtimeCircuitLastError = null;
+    this.lastRealtimeFallbackToastAt = 0;
+
+    if (typeof window === 'undefined' || typeof window.sessionStorage === 'undefined') {
+      return;
+    }
+
+    try {
+      window.sessionStorage.removeItem(RealtimePollingService.REALTIME_CIRCUIT_STORAGE_KEY);
+    } catch {
+      // eslint-disable-next-line no-restricted-syntax -- 清理失败不影响后续轮询回退
+    }
+  }
+
+  private getRemainingRealtimeCircuitMs(): number {
+    const remainingMs = this.realtimeCircuitUntil - Date.now();
+    if (remainingMs > 0) {
+      return remainingMs;
+    }
+
+    if (this.realtimeCircuitUntil !== 0 || this.realtimeCircuitFailures !== 0 || this.realtimeCircuitLastError !== null) {
+      this.clearRealtimeCircuitState();
+    }
+
+    return 0;
+  }
+
+  private ensureRealtimeCircuitUserScope(userId: string): void {
+    if (!this.realtimeCircuitOwnerUserId || this.realtimeCircuitOwnerUserId === userId) {
+      return;
+    }
+
+    this.clearRealtimeCircuitState();
+  }
+
+  private armRealtimeCircuit(userId: string, errorMessage: string | undefined, consecutiveErrors: number): number {
+    const now = Date.now();
+    this.realtimeCircuitUntil = Math.max(
+      this.realtimeCircuitUntil,
+      now + RealtimePollingService.REALTIME_CIRCUIT_TTL_MS
+    );
+    this.realtimeCircuitOwnerUserId = userId;
+    this.realtimeCircuitFailures = Math.max(this.realtimeCircuitFailures, consecutiveErrors);
+    this.realtimeCircuitLastError = errorMessage ?? null;
+    this.saveRealtimeCircuitState();
+    return this.realtimeCircuitUntil - now;
+  }
+
+  private hasRealtimeTransportSupport(): boolean {
+    return typeof WebSocket !== 'undefined';
+  }
+
+  private notifyRealtimeFallback(): void {
+    const now = Date.now();
+    if (now - this.lastRealtimeFallbackToastAt < RealtimePollingService.REALTIME_FALLBACK_TOAST_COOLDOWN_MS) {
+      return;
+    }
+
+    this.lastRealtimeFallbackToastAt = now;
+    this.saveRealtimeCircuitState();
+    this.toast.info('实时同步暂不可用', '已切换到定时同步模式');
+  }
+
   private async teardownActiveTransport(preserveContext = false): Promise<void> {
     if (!preserveContext) {
       this.currentProjectId = null;
@@ -250,6 +380,26 @@ export class RealtimePollingService {
     }
 
     if (this.isRealtimeEnabled()) {
+      this.ensureRealtimeCircuitUserScope(userId);
+
+      if (!this.hasRealtimeTransportSupport()) {
+        this.logger.info('当前环境不支持 WebSocket，继续使用轮询', { projectId });
+        this.startPolling(projectId, userId, transportGeneration);
+        return;
+      }
+
+      const realtimeCircuitMs = this.getRemainingRealtimeCircuitMs();
+      if (realtimeCircuitMs > 0) {
+        this.logger.info('Realtime 熔断窗口内继续使用轮询', {
+          projectId,
+          remainingMs: realtimeCircuitMs,
+          failures: this.realtimeCircuitFailures,
+          lastError: this.realtimeCircuitLastError,
+        });
+        this.startPolling(projectId, userId, transportGeneration);
+        return;
+      }
+
       const realtimeBackoffMs = this.getRemainingRealtimeBackoffMs(projectId);
       if (realtimeBackoffMs > 0) {
         this.logger.info('Realtime 冷却期内继续使用轮询', {
@@ -265,6 +415,33 @@ export class RealtimePollingService {
     }
 
     this.startPolling(projectId, userId, transportGeneration);
+  }
+
+  private async maybeReenterRealtimeFromPolling(
+    projectId: string,
+    userId: string | null,
+    transportGeneration: number,
+  ): Promise<boolean> {
+    if (!userId || !this.isRealtimeEnabled()) {
+      return false;
+    }
+
+    if (!this.isTransportContextCurrent(transportGeneration, projectId, userId) || !this.canActivateRemoteTransport()) {
+      return false;
+    }
+
+    if (this.realtimeChannel) {
+      return false;
+    }
+
+    if (this.getRemainingRealtimeCircuitMs() > 0 || this.getRemainingRealtimeBackoffMs(projectId) > 0) {
+      return false;
+    }
+
+    this.logger.info('Realtime 冷却窗口已结束，停止轮询并尝试恢复订阅', { projectId });
+    this.stopPolling();
+    await this.activateProjectTransport(projectId, userId, transportGeneration);
+    return this.realtimeChannel !== null;
   }
 
   /**
@@ -410,6 +587,9 @@ export class RealtimePollingService {
     const poll = async () => {
       if (!this.isTransportContextCurrent(transportGeneration, projectId, userId)) return;
       if (!this.syncState.syncState().isOnline || this.realtimePaused) return;
+      if (await this.maybeReenterRealtimeFromPolling(projectId, userId, transportGeneration)) {
+        return;
+      }
       // 互斥锁：如果上一次 poll 回调尚未完成，跳过本次
       if (this.isPolling) {
         this.logger.debug('轮询跳过：上一次 poll 仍在执行');
@@ -443,12 +623,15 @@ export class RealtimePollingService {
           return;
         }
         await poll();
+        if (this.realtimeChannel !== null) {
+          return;
+        }
         scheduleNextPoll();
       }, getPollingInterval());
     };
     
     void poll().then(() => {
-      if (this.isTransportContextCurrent(transportGeneration, projectId, userId)) {
+      if (this.isTransportContextCurrent(transportGeneration, projectId, userId) && this.realtimeChannel === null) {
         scheduleNextPoll();
       }
     });
@@ -618,6 +801,7 @@ export class RealtimePollingService {
           consecutiveErrors++;
           
           if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+            const realtimeCircuitMs = this.armRealtimeCircuit(userId, err?.message, consecutiveErrors);
             this.sentryLazyLoader.captureMessage('Realtime 订阅错误', {
               level: 'warning',
               extra: {
@@ -625,9 +809,14 @@ export class RealtimePollingService {
                 error: err?.message,
                 consecutiveErrors,
                 degradedToPolling: true,
+                realtimeCircuitMs,
               }
             });
-            this.logger.warn('Realtime 连续失败，降级到轮询', { consecutiveErrors });
+            this.logger.warn('Realtime 连续失败，降级到轮询', {
+              consecutiveErrors,
+              realtimeCircuitMs,
+              error: err?.message,
+            });
             this.fallbackToPolling(projectId, userId, transportGeneration);
             return;
           }
@@ -641,6 +830,7 @@ export class RealtimePollingService {
         } else if (status === 'SUBSCRIBED') {
           consecutiveErrors = 0;
           this.clearRealtimeBackoff(projectId);
+          this.clearRealtimeCircuitState();
         }
         
         if (status === 'SUBSCRIBED' && previousStatus && previousStatus !== 'SUBSCRIBED') {
@@ -693,7 +883,7 @@ export class RealtimePollingService {
     }
 
     this.startPolling(projectId, userId, transportGeneration);
-    this.toast.info('实时同步暂不可用', '已切换到定时同步模式');
+    this.notifyRealtimeFallback();
   }
 
   /**
@@ -724,6 +914,50 @@ export class RealtimePollingService {
 
     this.transportSuspended = false;
     const transportGeneration = this.beginTransportGeneration();
+    await this.activateProjectTransport(projectId, userId, transportGeneration);
+  }
+
+  async resetRealtimeCircuit(reason: string): Promise<void> {
+    const hadCircuitState = this.realtimeCircuitUntil > 0
+      || this.realtimeCircuitFailures > 0
+      || this.realtimeCircuitLastError !== null;
+    const hadBackoffState = this.realtimeBackoffUntil > Date.now();
+    const shouldReconnect = hadCircuitState
+      || hadBackoffState
+      || this.transportSuspended
+      || this.realtimeChannel === null;
+
+    this.logger.info('重置 Realtime 熔断状态', {
+      reason,
+      currentProjectId: this.currentProjectId,
+      currentUserId: this.currentUserId,
+      shouldReconnect,
+    });
+
+    this.clearRealtimeCircuitState();
+    this.clearRealtimeBackoff();
+
+    const projectId = this.currentProjectId;
+    const userId = this.currentUserId;
+    if (!projectId || !userId) {
+      return;
+    }
+
+    if (!this.isRealtimeEnabled() || !this.canActivateRemoteTransport()) {
+      return;
+    }
+
+    if (!shouldReconnect) {
+      return;
+    }
+
+    const transportGeneration = this.beginTransportGeneration();
+    await this.teardownActiveTransport(true);
+
+    if (!this.isTransportGenerationCurrent(transportGeneration)) {
+      return;
+    }
+
     await this.activateProjectTransport(projectId, userId, transportGeneration);
   }
 

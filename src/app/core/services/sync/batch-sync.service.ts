@@ -989,7 +989,7 @@ export class BatchSyncService {
       
       this.syncState.setSyncing(false);
       if (success) {
-        this.syncState.setLastSyncTime(nowISO());
+        this.syncState.advanceLastSyncTimeIfIdle(nowISO());
         this.syncState.setSyncError(null);
       } else {
         this.syncState.setSyncError('部分同步失败，已进入重试队列');

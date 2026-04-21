@@ -16,6 +16,7 @@ import { SyncStateService } from './sync-state.service';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 import { resetBrowserNetworkSuspensionTrackingForTests } from '../../../../utils/browser-network-suspension';
 
+const REALTIME_CIRCUIT_STORAGE_KEY = 'nanoflow.realtime-transport-circuit';
 const strategySignal = signal({ enableRealtime: true } as { enableRealtime: boolean });
 
 const mockChannel = {
@@ -99,6 +100,7 @@ describe('RealtimePollingService', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     destroyCallbacks.length = 0;
+    sessionStorage.clear();
     strategySignal.set({ enableRealtime: true });
     setVisibilityState('visible');
 
@@ -254,6 +256,12 @@ describe('RealtimePollingService', () => {
       })
     );
     expect(fallbackSpy).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(sessionStorage.getItem(REALTIME_CIRCUIT_STORAGE_KEY) ?? '{}')).toEqual(
+      expect.objectContaining({
+        failures: 3,
+        lastError: 'third failure',
+      })
+    );
   });
 
   it('SUBSCRIBED 应重置连续失败计数', async () => {
@@ -336,5 +344,162 @@ describe('RealtimePollingService', () => {
 
     expect(mockClient.channel).toHaveBeenCalledTimes(1);
     expect(startPollingSpy).toHaveBeenCalled();
+  });
+
+  it('会在熔断窗口内直接跳过 Realtime 尝试', async () => {
+    sessionStorage.setItem(REALTIME_CIRCUIT_STORAGE_KEY, JSON.stringify({
+      until: Date.now() + 60_000,
+      ownerUserId: 'user-111',
+      failures: 3,
+      lastError: 'websocket blocked',
+      lastToastAt: 0,
+    }));
+
+    service = runInInjectionContext(injector, () => new RealtimePollingService());
+    const startPollingSpy = vi.spyOn(
+      service as unknown as { startPolling: (projectId: string, userId: string | null, transportGeneration: number) => void },
+      'startPolling'
+    );
+
+    await service.subscribeToProject('project-9', 'user-111');
+
+    expect(mockClient.channel).not.toHaveBeenCalled();
+    expect(startPollingSpy).toHaveBeenCalled();
+  });
+
+  it('不同 userId 订阅时应清理旧会话的 Realtime 熔断状态', async () => {
+    sessionStorage.setItem(REALTIME_CIRCUIT_STORAGE_KEY, JSON.stringify({
+      until: Date.now() + 60_000,
+      ownerUserId: 'user-old',
+      failures: 3,
+      lastError: 'stale token',
+      lastToastAt: 0,
+    }));
+
+    service = runInInjectionContext(injector, () => new RealtimePollingService());
+
+    await service.subscribeToProject('project-11', 'user-new');
+
+    expect(mockClient.channel).toHaveBeenCalledTimes(1);
+    expect(sessionStorage.getItem(REALTIME_CIRCUIT_STORAGE_KEY)).toBeNull();
+  });
+
+  it('SUBSCRIBED 后应清理会话级 Realtime 熔断状态', async () => {
+    await service.subscribeToProject('project-10', 'user-222');
+    const statusCallback = mockChannel.subscribe.mock.calls.at(-1)?.[0] as
+      | ((status: string, err?: { message?: string }) => void)
+      | undefined;
+
+    sessionStorage.setItem(REALTIME_CIRCUIT_STORAGE_KEY, JSON.stringify({
+      until: Date.now() + 60_000,
+      ownerUserId: 'user-222',
+      failures: 3,
+      lastError: 'websocket blocked',
+      lastToastAt: 0,
+    }));
+
+    (service as unknown as { loadRealtimeCircuitState: () => void }).loadRealtimeCircuitState();
+    statusCallback?.('SUBSCRIBED');
+
+    expect(sessionStorage.getItem(REALTIME_CIRCUIT_STORAGE_KEY)).toBeNull();
+  });
+
+  it('轮询模式在熔断窗口结束后应主动尝试恢复 Realtime', async () => {
+    (service as unknown as {
+      currentProjectId: string | null;
+      currentUserId: string | null;
+      transportGeneration: number;
+      realtimeCircuitUntil: number;
+      realtimeCircuitOwnerUserId: string | null;
+      realtimeCircuitFailures: number;
+      realtimeCircuitLastError: string | null;
+      realtimeChannel: unknown;
+      maybeReenterRealtimeFromPolling: (projectId: string, userId: string | null, transportGeneration: number) => Promise<boolean>;
+    }).currentProjectId = 'project-12';
+    (service as unknown as {
+      currentProjectId: string | null;
+      currentUserId: string | null;
+      transportGeneration: number;
+      realtimeCircuitUntil: number;
+      realtimeCircuitOwnerUserId: string | null;
+      realtimeCircuitFailures: number;
+      realtimeCircuitLastError: string | null;
+      realtimeChannel: unknown;
+      maybeReenterRealtimeFromPolling: (projectId: string, userId: string | null, transportGeneration: number) => Promise<boolean>;
+    }).currentUserId = 'user-333';
+    (service as unknown as {
+      currentProjectId: string | null;
+      currentUserId: string | null;
+      transportGeneration: number;
+      realtimeCircuitUntil: number;
+      realtimeCircuitOwnerUserId: string | null;
+      realtimeCircuitFailures: number;
+      realtimeCircuitLastError: string | null;
+      realtimeChannel: unknown;
+      maybeReenterRealtimeFromPolling: (projectId: string, userId: string | null, transportGeneration: number) => Promise<boolean>;
+    }).transportGeneration = 1;
+    (service as unknown as {
+      currentProjectId: string | null;
+      currentUserId: string | null;
+      transportGeneration: number;
+      realtimeCircuitUntil: number;
+      realtimeCircuitOwnerUserId: string | null;
+      realtimeCircuitFailures: number;
+      realtimeCircuitLastError: string | null;
+      realtimeChannel: unknown;
+      maybeReenterRealtimeFromPolling: (projectId: string, userId: string | null, transportGeneration: number) => Promise<boolean>;
+    }).realtimeCircuitUntil = Date.now() - 1;
+    (service as unknown as {
+      currentProjectId: string | null;
+      currentUserId: string | null;
+      transportGeneration: number;
+      realtimeCircuitUntil: number;
+      realtimeCircuitOwnerUserId: string | null;
+      realtimeCircuitFailures: number;
+      realtimeCircuitLastError: string | null;
+      realtimeChannel: unknown;
+      maybeReenterRealtimeFromPolling: (projectId: string, userId: string | null, transportGeneration: number) => Promise<boolean>;
+    }).realtimeCircuitOwnerUserId = 'user-333';
+    (service as unknown as {
+      currentProjectId: string | null;
+      currentUserId: string | null;
+      transportGeneration: number;
+      realtimeCircuitUntil: number;
+      realtimeCircuitOwnerUserId: string | null;
+      realtimeCircuitFailures: number;
+      realtimeCircuitLastError: string | null;
+      realtimeChannel: unknown;
+      maybeReenterRealtimeFromPolling: (projectId: string, userId: string | null, transportGeneration: number) => Promise<boolean>;
+    }).realtimeCircuitFailures = 3;
+    (service as unknown as {
+      currentProjectId: string | null;
+      currentUserId: string | null;
+      transportGeneration: number;
+      realtimeCircuitUntil: number;
+      realtimeCircuitOwnerUserId: string | null;
+      realtimeCircuitFailures: number;
+      realtimeCircuitLastError: string | null;
+      realtimeChannel: unknown;
+      maybeReenterRealtimeFromPolling: (projectId: string, userId: string | null, transportGeneration: number) => Promise<boolean>;
+    }).realtimeCircuitLastError = 'websocket blocked';
+
+    const activateSpy = vi.spyOn(
+      service as unknown as {
+        activateProjectTransport: (projectId: string, userId: string | null, transportGeneration: number) => Promise<void>;
+        realtimeChannel: unknown;
+      },
+      'activateProjectTransport',
+    ).mockImplementation(async () => {
+      (service as unknown as { realtimeChannel: unknown }).realtimeChannel = mockChannel;
+    });
+
+    const reentered = await (
+      service as unknown as {
+        maybeReenterRealtimeFromPolling: (projectId: string, userId: string | null, transportGeneration: number) => Promise<boolean>;
+      }
+    ).maybeReenterRealtimeFromPolling('project-12', 'user-333', 1);
+
+    expect(reentered).toBe(true);
+    expect(activateSpy).toHaveBeenCalledWith('project-12', 'user-333', 1);
   });
 });

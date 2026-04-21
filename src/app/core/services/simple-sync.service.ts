@@ -273,8 +273,25 @@ export class SimpleSyncService {
     // 订阅会话恢复事件
     this.eventBus.onSessionRestored$.pipe(
       takeUntilDestroyed(this.destroyRef)
-    ).subscribe(() => this.resetSessionExpired());
-    
+    ).subscribe(() => {
+      this.resetSessionExpired();
+      void this.realtimePollingService.resetRealtimeCircuit('session-restored');
+    });
+
+    // 【2026-04-21 根因修复】注册 lastSyncTime 空闲门禁：
+    // 仅当 ActionQueue 与 RetryQueue 均为空时才允许推进"最后同步时间"，
+    // 否则单条成功会错误刷出"刚刚"，与仍残留的 86 待同步形成 UI 矛盾。
+    this.syncStateService.registerIdleChecker(() => {
+      if (this.retryQueueService.length > 0) {
+        return false;
+      }
+      const actionQueue = this.getActionQueue();
+      if (actionQueue && actionQueue.queueSize() > 0) {
+        return false;
+      }
+      return true;
+    });
+
     // 初始化 BatchSyncService 回调
     this.batchSyncService.setCallbacks({
       pushProject: (p, f, sourceUserId, taskIdsToDelete) => this.pushProjectWithResult(p, f, sourceUserId, taskIdsToDelete),
@@ -356,8 +373,14 @@ export class SimpleSyncService {
       isSessionExpired: () => this.syncState().sessionExpired,
       // 离线模式下返回 false，避免 RetryQueue 尝试处理未配置的 Supabase
       isOnline: () => this.state().isOnline && !this.supabase.isOfflineMode(),
-      onProcessingStateChange: (processing, pendingCount) =>
-        this.state.update(s => ({ ...s, isSyncing: processing, pendingCount }))
+      onProcessingStateChange: (processing, pendingCount) => {
+        this.state.update(s => ({ ...s, isSyncing: processing, pendingCount }));
+        // 【2026-04-21 根因修复】RetryQueue 切片收尾且队列见底时，触发一次条件推进，
+        // 让 UI "最后同步时间" 在所有队列真正排空后由门禁自动刷新为 "刚刚"。
+        if (!processing && pendingCount === 0) {
+          this.syncStateService.advanceLastSyncTimeIfIdle(nowISO());
+        }
+      }
     });
 
     // 将黑匣子同步集成到主同步体系的 RetryQueue

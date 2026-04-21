@@ -134,7 +134,37 @@ export class SyncStateService {
   setLastSyncTime(lastSyncTime: string | null): void {
     this.update({ lastSyncTime });
   }
-  
+
+  /**
+   * 空闲检测器：返回 true 表示 ActionQueue/RetryQueue 均已排空，可推进 lastSyncTime。
+   * 由 SimpleSyncService 在初始化时注册，避免 SyncStateService 反向依赖队列实例。
+   */
+  private idleChecker: (() => boolean) | null = null;
+
+  /**
+   * 注册空闲检测器。重复调用会覆盖旧实例（切账号场景）。
+   */
+  registerIdleChecker(checker: () => boolean): void {
+    this.idleChecker = checker;
+  }
+
+  /**
+   * 条件推进 lastSyncTime：仅当检测器返回 true（或未注册）时更新。
+   * 返回 true 表示已写入，false 表示被门禁拦截。
+   *
+   * 【根因修复 2026-04-21】修复移动端侧边栏"最后同步 刚刚 + 86 待同步"矛盾：
+   * 原实现 doTaskPush / batch-sync 每次单项成功即无条件推进时间戳，
+   * 但此时 RetryQueue 中可能仍有大量失败残留（连接/黑匣子）。
+   * 改为门禁模式后，"刚刚"语义回归真实（全部队列空才算一次完整同步）。
+   */
+  advanceLastSyncTimeIfIdle(lastSyncTime: string): boolean {
+    if (this.idleChecker && !this.idleChecker()) {
+      return false;
+    }
+    this.update({ lastSyncTime });
+    return true;
+  }
+
   /**
    * 设置待处理数量
    */
