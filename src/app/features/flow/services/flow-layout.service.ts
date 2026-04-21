@@ -59,9 +59,17 @@ interface ResolvedAutoLayoutOptions {
   layerSpacing: number;
   columnSpacing: number;
   familyGapRows: number;
+  siblingGapRows: number;
   crossTreeLabelGapRows: number;
+  relatedSiblingGapRows: number;
   denseFamilyGapRows: number;
+  multiParentSiblingGapRows: number;
   maxExtraGapRows: number;
+  maxSiblingGapRows: number;
+  stageDensityGapFactor: number;
+  stageLinkGapFactor: number;
+  stageCrossTreeGapFactor: number;
+  maxStageExtraFactor: number;
 }
 
 interface FamilyLayoutBlock {
@@ -74,6 +82,29 @@ interface FamilyLayoutBlock {
   maxStageDensity: number;
   leafCount: number;
 }
+
+interface NodeRelationHints {
+  relationTargetsByNode: Map<string, RelationTargetHint[]>;
+}
+
+interface SubtreeLayoutMetrics {
+  leafCount: number;
+  relationCount: number;
+  relationCenter: number | null;
+  multiParentLoad: number;
+}
+
+interface LocalRowRange {
+  min: number;
+  max: number;
+}
+
+interface RelationTargetHint {
+  targetKey: string;
+  score: number;
+}
+
+const MIN_RELATION_STAGE_SCORE_MULTIPLIER = 100_000;
 
 function isAssignedLayoutNode(node: AutoLayoutNodeData): node is AutoLayoutNodeData & { stage: number } {
   return node.stage != null && node.stage > 0;
@@ -88,12 +119,69 @@ function compareRootNodes(a: AutoLayoutNodeData, b: AutoLayoutNodeData): number 
     || compareLayoutNodes(a, b);
 }
 
+function computeRelationStageScoreMultiplier(nodes: Iterable<AutoLayoutNodeData>): number {
+  let minRank = 0;
+  let maxRank = 0;
+
+  for (const node of nodes) {
+    const rank = node.rank ?? 0;
+    if (rank < minRank) {
+      minRank = rank;
+    }
+    if (rank > maxRank) {
+      maxRank = rank;
+    }
+  }
+
+  return Math.max(MIN_RELATION_STAGE_SCORE_MULTIPLIER, (maxRank - minRank) + 1);
+}
+
+function buildCrossTreeRelationHints(
+  nodeMap: Map<string, AutoLayoutNodeData>,
+  links: readonly AutoLayoutLinkData[],
+  fallbackExternalStage: number,
+): NodeRelationHints {
+  const relationTargetsByNode = new Map<string, RelationTargetHint[]>();
+  const relationStageScoreMultiplier = computeRelationStageScoreMultiplier(nodeMap.values());
+
+  const addRelationHint = (sourceKey: string, target: AutoLayoutNodeData): void => {
+    const targetStage = isAssignedLayoutNode(target)
+      ? target.stage
+      : fallbackExternalStage;
+    const targets = relationTargetsByNode.get(sourceKey) ?? [];
+    targets.push({
+      targetKey: target.key,
+      score: targetStage * relationStageScoreMultiplier + (target.rank ?? 0),
+    });
+    relationTargetsByNode.set(sourceKey, targets);
+  };
+
+  for (const link of links) {
+    if (!link.isCrossTree) {
+      continue;
+    }
+
+    const fromNode = nodeMap.get(link.from);
+    const toNode = nodeMap.get(link.to);
+    if (!fromNode || !toNode) {
+      continue;
+    }
+
+    addRelationHint(fromNode.key, toNode);
+    addRelationHint(toNode.key, fromNode);
+  }
+  return {
+    relationTargetsByNode,
+  };
+}
+
 function buildParentAndChildrenMaps(
   assignedNodeMap: Map<string, AutoLayoutNodeData>,
   links: readonly AutoLayoutLinkData[],
 ): {
   parentMap: Map<string, string>;
   childrenMap: Map<string, AutoLayoutNodeData[]>;
+  parentCandidateCountMap: Map<string, number>;
 } {
   // 【鲁棒性 2026-04-16】多父场景下先收集所有候选父，再按"阶段差最小 + rank 最大"
   // 择优，而非原先的"先到先得"，避免链路顺序扰动布局。单父场景行为保持不变。
@@ -114,12 +202,15 @@ function buildParentAndChildrenMaps(
 
   const parentMap = new Map<string, string>();
   const childrenMap = new Map<string, AutoLayoutNodeData[]>();
+  const parentCandidateCountMap = new Map<string, number>();
 
   for (const [childKey, parents] of candidateParents) {
     const child = assignedNodeMap.get(childKey);
     if (!child || !isAssignedLayoutNode(child) || parents.length === 0) {
       continue;
     }
+
+    parentCandidateCountMap.set(childKey, parents.length);
 
     let bestParent: AutoLayoutNodeData = parents[0];
     let bestStageDiff = isAssignedLayoutNode(bestParent)
@@ -151,15 +242,293 @@ function buildParentAndChildrenMaps(
     siblings.sort(compareLayoutNodes);
   }
 
-  return { parentMap, childrenMap };
+  return { parentMap, childrenMap, parentCandidateCountMap };
+}
+
+function buildSubtreeLayoutMetrics(
+  root: AutoLayoutNodeData,
+  childrenMap: Map<string, AutoLayoutNodeData[]>,
+  allowedNodeKeys: ReadonlySet<string>,
+  relationHints: NodeRelationHints,
+  parentCandidateCountMap: Map<string, number>,
+): Map<string, SubtreeLayoutMetrics> {
+  const metrics = new Map<string, SubtreeLayoutMetrics>();
+  const stack: Array<{ node: AutoLayoutNodeData; visited: boolean }> = [{
+    node: root,
+    visited: false,
+  }];
+
+  while (stack.length > 0) {
+    const frame = stack.pop()!;
+    const children = (childrenMap.get(frame.node.key) ?? []).filter(child => allowedNodeKeys.has(child.key));
+
+    if (!frame.visited) {
+      stack.push({ node: frame.node, visited: true });
+      for (let index = children.length - 1; index >= 0; index -= 1) {
+        stack.push({ node: children[index], visited: false });
+      }
+      continue;
+    }
+
+    const directRelationTargets = (relationHints.relationTargetsByNode.get(frame.node.key) ?? [])
+      .filter(target => !allowedNodeKeys.has(target.targetKey));
+    const directRelationCount = directRelationTargets.length;
+    const directRelationCenter = directRelationCount > 0
+      ? directRelationTargets.reduce((sum, target) => sum + target.score, 0) / directRelationCount
+      : null;
+    let leafCount = children.length === 0 ? 1 : 0;
+    let relationCount = directRelationCount;
+    let relationWeightedCenterSum = directRelationCount > 0 && directRelationCenter != null
+      ? directRelationCenter * directRelationCount
+      : 0;
+    let multiParentLoad = Math.max(0, (parentCandidateCountMap.get(frame.node.key) ?? 1) - 1);
+
+    for (const child of children) {
+      const childMetrics = metrics.get(child.key);
+      if (!childMetrics) {
+        continue;
+      }
+
+      leafCount += childMetrics.leafCount;
+      relationCount += childMetrics.relationCount;
+      if (childMetrics.relationCenter != null && childMetrics.relationCount > 0) {
+        relationWeightedCenterSum += childMetrics.relationCenter * childMetrics.relationCount;
+      }
+      multiParentLoad += childMetrics.multiParentLoad;
+    }
+
+    metrics.set(frame.node.key, {
+      leafCount: Math.max(leafCount, 1),
+      relationCount,
+      relationCenter: relationCount > 0 ? relationWeightedCenterSum / relationCount : null,
+      multiParentLoad,
+    });
+  }
+
+  return metrics;
+}
+
+function optimizeSiblingOrder(
+  root: AutoLayoutNodeData,
+  childrenMap: Map<string, AutoLayoutNodeData[]>,
+  allowedNodeKeys: ReadonlySet<string>,
+  subtreeMetrics: Map<string, SubtreeLayoutMetrics>,
+): void {
+  const stack: AutoLayoutNodeData[] = [root];
+
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    const children = (childrenMap.get(current.key) ?? []).filter(child => allowedNodeKeys.has(child.key));
+    let orderedChildren = children;
+
+    if (children.length > 1) {
+      const hasSignal = children.some(child => {
+        const metrics = subtreeMetrics.get(child.key);
+        return (metrics?.relationCount ?? 0) > 0 || (metrics?.multiParentLoad ?? 0) > 0;
+      });
+
+      if (hasSignal) {
+        orderedChildren = children.slice().sort((left, right) => {
+          const leftMetrics = subtreeMetrics.get(left.key);
+          const rightMetrics = subtreeMetrics.get(right.key);
+          const leftCenter = leftMetrics?.relationCenter;
+          const rightCenter = rightMetrics?.relationCenter;
+          const bothHaveRelationCenter = leftCenter != null && rightCenter != null;
+
+          if (bothHaveRelationCenter && Math.abs(leftCenter - rightCenter) > 1) {
+            return leftCenter - rightCenter;
+          }
+
+          return compareLayoutNodes(left, right);
+        });
+        childrenMap.set(current.key, orderedChildren);
+      }
+    }
+
+    for (let index = orderedChildren.length - 1; index >= 0; index -= 1) {
+      stack.push(orderedChildren[index]);
+    }
+  }
+}
+
+function computeSiblingGapRows(
+  leftMetrics: SubtreeLayoutMetrics | undefined,
+  rightMetrics: SubtreeLayoutMetrics | undefined,
+  resolvedOptions: ResolvedAutoLayoutOptions,
+): number {
+  const maxLeafCount = Math.max(leftMetrics?.leafCount ?? 1, rightMetrics?.leafCount ?? 1);
+  const leafPressure = Math.min(0.10, Math.max(0, maxLeafCount - 1) * 0.02);
+  const relationLoad = (leftMetrics?.relationCount ?? 0) + (rightMetrics?.relationCount ?? 0);
+  const relationPressure = relationLoad > 0
+    ? Math.min(0.10, Math.sqrt(relationLoad) * resolvedOptions.relatedSiblingGapRows)
+    : 0;
+  const multiParentPressure = Math.min(
+    0.08,
+    ((leftMetrics?.multiParentLoad ?? 0) + (rightMetrics?.multiParentLoad ?? 0))
+      * resolvedOptions.multiParentSiblingGapRows,
+  );
+
+  return Math.min(
+    resolvedOptions.maxSiblingGapRows,
+    resolvedOptions.siblingGapRows + leafPressure + relationPressure + multiParentPressure,
+  );
+}
+
+function shiftLocalRowsAfterThreshold(
+  rowMap: Map<string, number>,
+  subtreeRangeMap: Map<string, LocalRowRange>,
+  threshold: number,
+  delta: number,
+): void {
+  if (delta <= 0) {
+    return;
+  }
+
+  rowMap.forEach((row, key) => {
+    if (row > threshold) {
+      rowMap.set(key, row + delta);
+    }
+  });
+
+  subtreeRangeMap.forEach((range, key) => {
+    if (range.min > threshold) {
+      subtreeRangeMap.set(key, {
+        min: range.min + delta,
+        max: range.max + delta,
+      });
+    }
+  });
+}
+
+function buildAdaptiveStageXMap(
+  assignedNodes: readonly AutoLayoutNodeData[],
+  links: readonly AutoLayoutLinkData[],
+  stageNums: readonly number[],
+  stageIndexMap: Map<number, number>,
+  resolvedOptions: ResolvedAutoLayoutOptions,
+): Map<number, number> {
+  const stageNodeCounts = new Array(stageNums.length).fill(0);
+  const stageBoundaryLinkCounts = new Array(Math.max(0, stageNums.length - 1)).fill(0);
+  const stageBoundaryCrossTreeCounts = new Array(Math.max(0, stageNums.length - 1)).fill(0);
+  const assignedNodeMap = new Map(assignedNodes.map(node => [node.key, node]));
+
+  assignedNodes.forEach(node => {
+    const stageIndex = stageIndexMap.get(node.stage!);
+    if (stageIndex !== undefined) {
+      stageNodeCounts[stageIndex] += 1;
+    }
+  });
+
+  links.forEach(link => {
+    const fromNode = assignedNodeMap.get(link.from);
+    const toNode = assignedNodeMap.get(link.to);
+    if (!fromNode || !toNode || !isAssignedLayoutNode(fromNode) || !isAssignedLayoutNode(toNode)) {
+      return;
+    }
+
+    const fromStageIndex = stageIndexMap.get(fromNode.stage);
+    const toStageIndex = stageIndexMap.get(toNode.stage);
+    if (fromStageIndex === undefined || toStageIndex === undefined || fromStageIndex === toStageIndex) {
+      return;
+    }
+
+    const startIndex = Math.min(fromStageIndex, toStageIndex);
+    const endIndex = Math.max(fromStageIndex, toStageIndex);
+    for (let boundaryIndex = startIndex; boundaryIndex < endIndex; boundaryIndex += 1) {
+      if (link.isCrossTree) {
+        stageBoundaryCrossTreeCounts[boundaryIndex] += 1;
+      } else {
+        stageBoundaryLinkCounts[boundaryIndex] += 1;
+      }
+    }
+  });
+
+  const stageXMap = new Map<number, number>();
+  let currentX = 0;
+
+  stageNums.forEach((stage, stageIndex) => {
+    stageXMap.set(stage, currentX);
+    if (stageIndex === stageNums.length - 1) {
+      return;
+    }
+
+    const densityPressure = Math.max(
+      0,
+      Math.max(stageNodeCounts[stageIndex], stageNodeCounts[stageIndex + 1]) - 3,
+    ) * resolvedOptions.stageDensityGapFactor;
+    const linkPressure = Math.max(0, stageBoundaryLinkCounts[stageIndex] - 2)
+      * resolvedOptions.stageLinkGapFactor;
+    const crossTreePressure = stageBoundaryCrossTreeCounts[stageIndex]
+      * resolvedOptions.stageCrossTreeGapFactor;
+    const extraSpacingFactor = Math.min(
+      resolvedOptions.maxStageExtraFactor,
+      densityPressure + linkPressure + crossTreePressure,
+    );
+
+    currentX += resolvedOptions.layerSpacing * (1 + extraSpacingFactor);
+  });
+
+  return stageXMap;
+}
+
+function computeUnassignedColumnX(
+  nodeMap: Map<string, AutoLayoutNodeData>,
+  nodes: readonly AutoLayoutNodeData[],
+  links: readonly AutoLayoutLinkData[],
+  stageNums: readonly number[],
+  stageXMap: Map<number, number>,
+  resolvedOptions: ResolvedAutoLayoutOptions,
+): number {
+  if (stageNums.length === 0) {
+    return 0;
+  }
+
+  const lastAssignedStage = stageNums[stageNums.length - 1];
+  const lastAssignedStageX = stageXMap.get(lastAssignedStage) ?? 0;
+  const unassignedCount = nodes.filter(node => !isAssignedLayoutNode(node)).length;
+  let boundaryLinkCount = 0;
+  let boundaryCrossTreeCount = 0;
+
+  links.forEach(link => {
+    const fromNode = nodeMap.get(link.from);
+    const toNode = nodeMap.get(link.to);
+    if (!fromNode || !toNode) {
+      return;
+    }
+
+    const fromAssigned = isAssignedLayoutNode(fromNode);
+    const toAssigned = isAssignedLayoutNode(toNode);
+    if (fromAssigned === toAssigned) {
+      return;
+    }
+
+    if (link.isCrossTree) {
+      boundaryCrossTreeCount += 1;
+    } else {
+      boundaryLinkCount += 1;
+    }
+  });
+
+  const densityPressure = Math.max(0, unassignedCount - 2) * resolvedOptions.stageDensityGapFactor;
+  const linkPressure = Math.max(0, boundaryLinkCount - 1) * resolvedOptions.stageLinkGapFactor;
+  const crossTreePressure = boundaryCrossTreeCount * resolvedOptions.stageCrossTreeGapFactor;
+  const extraSpacingFactor = Math.min(
+    resolvedOptions.maxStageExtraFactor,
+    densityPressure + linkPressure + crossTreePressure,
+  );
+
+  return lastAssignedStageX + resolvedOptions.layerSpacing * (1 + extraSpacingFactor);
 }
 
 function buildFamilyLocalRows(
   root: AutoLayoutNodeData,
   childrenMap: Map<string, AutoLayoutNodeData[]>,
   allowedNodeKeys: ReadonlySet<string>,
+  subtreeMetrics: Map<string, SubtreeLayoutMetrics>,
+  resolvedOptions: ResolvedAutoLayoutOptions,
 ): { rowMap: Map<string, number>; leafCount: number } {
   const rowMap = new Map<string, number>();
+  const subtreeRangeMap = new Map<string, LocalRowRange>();
   const active = new Set<string>();
   const stack: Array<{ node: AutoLayoutNodeData; nextChildIndex: number }> = [
     { node: root, nextChildIndex: 0 },
@@ -177,6 +546,7 @@ function buildFamilyLocalRows(
     if (children.length === 0) {
       if (!rowMap.has(currentKey)) {
         rowMap.set(currentKey, nextLeafRow);
+        subtreeRangeMap.set(currentKey, { min: nextLeafRow, max: nextLeafRow });
         nextLeafRow += 1;
       }
       active.delete(currentKey);
@@ -196,6 +566,28 @@ function buildFamilyLocalRows(
       continue;
     }
 
+    // 中文注释：为复杂兄弟子树插入额外留白，让跨树关联和多父节点不要挤在同一条视觉带里。
+    for (let childIndex = 0; childIndex < children.length - 1; childIndex += 1) {
+      const leftChild = children[childIndex];
+      const rightChild = children[childIndex + 1];
+      const leftRange = subtreeRangeMap.get(leftChild.key);
+      if (!leftRange) {
+        continue;
+      }
+
+      const siblingGapRows = computeSiblingGapRows(
+        subtreeMetrics.get(leftChild.key),
+        subtreeMetrics.get(rightChild.key),
+        resolvedOptions,
+      );
+      if (siblingGapRows <= 0) {
+        continue;
+      }
+
+      shiftLocalRowsAfterThreshold(rowMap, subtreeRangeMap, leftRange.max, siblingGapRows);
+      nextLeafRow += siblingGapRows;
+    }
+
     const childRows = children
       .map(child => rowMap.get(child.key))
       .filter((row): row is number => row !== undefined);
@@ -207,6 +599,14 @@ function buildFamilyLocalRows(
       const averageRow = childRows.reduce((sum, row) => sum + row, 0) / childRows.length;
       rowMap.set(currentKey, averageRow);
     }
+
+    const firstChildRange = subtreeRangeMap.get(children[0].key);
+    const lastChildRange = subtreeRangeMap.get(children[children.length - 1].key);
+    const currentRow = rowMap.get(currentKey) ?? nextLeafRow;
+    subtreeRangeMap.set(currentKey, {
+      min: firstChildRange?.min ?? currentRow,
+      max: lastChildRange?.max ?? currentRow,
+    });
 
     active.delete(currentKey);
     stack.pop();
@@ -222,6 +622,9 @@ function buildFamilyBlocks(
   assignedNodes: readonly AutoLayoutNodeData[],
   parentMap: Map<string, string>,
   childrenMap: Map<string, AutoLayoutNodeData[]>,
+  relationHints: NodeRelationHints,
+  parentCandidateCountMap: Map<string, number>,
+  resolvedOptions: ResolvedAutoLayoutOptions,
 ): FamilyLayoutBlock[] {
   const naturalRoots = assignedNodes
     .filter(node => {
@@ -256,7 +659,21 @@ function buildFamilyBlocks(
     }
 
     const familyNodeKeys = new Set(familyNodes.map(node => node.key));
-    const { rowMap: localRowMap, leafCount } = buildFamilyLocalRows(root, childrenMap, familyNodeKeys);
+    const subtreeMetrics = buildSubtreeLayoutMetrics(
+      root,
+      childrenMap,
+      familyNodeKeys,
+      relationHints,
+      parentCandidateCountMap,
+    );
+    optimizeSiblingOrder(root, childrenMap, familyNodeKeys, subtreeMetrics);
+    const { rowMap: localRowMap, leafCount } = buildFamilyLocalRows(
+      root,
+      childrenMap,
+      familyNodeKeys,
+      subtreeMetrics,
+      resolvedOptions,
+    );
     const localRows = familyNodes
       .map(node => localRowMap.get(node.key))
       .filter((row): row is number => row !== undefined);
@@ -402,18 +819,46 @@ export function computeFamilyBlockAutoLayout(
     layerSpacing: options.layerSpacing ?? LAYOUT_CONFIG.STAGE_SPACING,
     columnSpacing: options.columnSpacing ?? LAYOUT_CONFIG.ROW_SPACING,
     familyGapRows: LAYOUT_CONFIG.AUTO_LAYOUT_FAMILY_GAP_ROWS,
+    siblingGapRows: LAYOUT_CONFIG.AUTO_LAYOUT_SIBLING_GAP_ROWS,
     crossTreeLabelGapRows: LAYOUT_CONFIG.AUTO_LAYOUT_CROSS_TREE_LABEL_GAP_ROWS,
+    relatedSiblingGapRows: LAYOUT_CONFIG.AUTO_LAYOUT_RELATED_SIBLING_GAP_ROWS,
     denseFamilyGapRows: LAYOUT_CONFIG.AUTO_LAYOUT_DENSE_FAMILY_GAP_ROWS,
+    multiParentSiblingGapRows: LAYOUT_CONFIG.AUTO_LAYOUT_MULTI_PARENT_SIBLING_GAP_ROWS,
     maxExtraGapRows: LAYOUT_CONFIG.AUTO_LAYOUT_MAX_EXTRA_GAP_ROWS,
+    maxSiblingGapRows: LAYOUT_CONFIG.AUTO_LAYOUT_MAX_SIBLING_GAP_ROWS,
+    stageDensityGapFactor: LAYOUT_CONFIG.AUTO_LAYOUT_STAGE_DENSITY_GAP_FACTOR,
+    stageLinkGapFactor: LAYOUT_CONFIG.AUTO_LAYOUT_STAGE_LINK_GAP_FACTOR,
+    stageCrossTreeGapFactor: LAYOUT_CONFIG.AUTO_LAYOUT_STAGE_CROSS_TREE_GAP_FACTOR,
+    maxStageExtraFactor: LAYOUT_CONFIG.AUTO_LAYOUT_MAX_STAGE_EXTRA_FACTOR,
   };
 
   const assignedNodes = nodes.filter(isAssignedLayoutNode);
   const unassignedNodes = nodes.filter(node => !isAssignedLayoutNode(node));
+  const allNodeMap = new Map(nodes.map(node => [node.key, node]));
   const assignedNodeMap = new Map(assignedNodes.map(node => [node.key, node]));
-  const { parentMap, childrenMap } = buildParentAndChildrenMaps(assignedNodeMap, links);
   const stageNums = Array.from(new Set(assignedNodes.map(node => node.stage!))).sort((a, b) => a - b);
+  const relationHints = buildCrossTreeRelationHints(
+    allNodeMap,
+    links,
+    stageNums.length > 0 ? stageNums[stageNums.length - 1] + 1 : 1,
+  );
+  const { parentMap, childrenMap, parentCandidateCountMap } = buildParentAndChildrenMaps(assignedNodeMap, links);
   const stageIndexMap = new Map(stageNums.map((stage, index) => [stage, index]));
-  const naturalFamilyBlocks = buildFamilyBlocks(assignedNodes, parentMap, childrenMap);
+  const stageXMap = buildAdaptiveStageXMap(
+    assignedNodes,
+    links,
+    stageNums,
+    stageIndexMap,
+    resolvedOptions,
+  );
+  const naturalFamilyBlocks = buildFamilyBlocks(
+    assignedNodes,
+    parentMap,
+    childrenMap,
+    relationHints,
+    parentCandidateCountMap,
+    resolvedOptions,
+  );
   // 【商用级优化】按跨树连接亲和度重排家族，使关联家族尽量相邻，
   // 减少跨树连线视觉跨距、提升可读性
   const familyBlocks = optimizeFamilyOrder(naturalFamilyBlocks, links);
@@ -456,15 +901,15 @@ export function computeFamilyBlockAutoLayout(
         return;
       }
 
-      const stageIndex = stageIndexMap.get(node.stage);
       const localRow = block.localRowMap.get(node.key);
-      if (stageIndex === undefined || localRow === undefined) {
+      const stageX = stageXMap.get(node.stage);
+      if (stageX === undefined || localRow === undefined) {
         return;
       }
 
       positionMap.set(node.key, {
         key: node.key,
-        x: stageIndex * resolvedOptions.layerSpacing,
+        x: stageX,
         y: (offsetRow + localRow) * resolvedOptions.columnSpacing,
       });
     });
@@ -501,7 +946,7 @@ export function computeFamilyBlockAutoLayout(
   });
 
   const unassignedX = stageNums.length > 0
-    ? stageNums.length * resolvedOptions.layerSpacing
+    ? computeUnassignedColumnX(allNodeMap, nodes, links, stageNums, stageXMap, resolvedOptions)
     : 0;
 
   unassignedNodes

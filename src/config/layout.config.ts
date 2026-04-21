@@ -13,12 +13,28 @@ export const LAYOUT_CONFIG = {
   ROW_SPACING: 140,
   /** 自动布局中家族之间的基础额外留白（按行高倍数） */
   AUTO_LAYOUT_FAMILY_GAP_ROWS: 0.12,
+  /** 兄弟子树之间的基础额外留白（按行高倍数） */
+  AUTO_LAYOUT_SIBLING_GAP_ROWS: 0.04,
   /** 跨树链接块对家族间距施加的额外压力（按行高倍数） */
   AUTO_LAYOUT_CROSS_TREE_LABEL_GAP_ROWS: 0.24,
+  /** 兄弟子树存在外部联系时附加的留白系数（按行高倍数） */
+  AUTO_LAYOUT_RELATED_SIBLING_GAP_ROWS: 0.06,
   /** 高密度家族相邻时额外增加的留白系数（按行高倍数） */
   AUTO_LAYOUT_DENSE_FAMILY_GAP_ROWS: 0.04,
+  /** 多父/多来源子树相邻时的额外留白系数（按行高倍数） */
+  AUTO_LAYOUT_MULTI_PARENT_SIBLING_GAP_ROWS: 0.05,
   /** 家族间额外间距硬上限（按行高倍数），防止大型复杂场景下间距失控 */
   AUTO_LAYOUT_MAX_EXTRA_GAP_ROWS: 0.35,
+  /** 兄弟子树间额外留白硬上限（按行高倍数） */
+  AUTO_LAYOUT_MAX_SIBLING_GAP_ROWS: 0.22,
+  /** 高密度阶段边界的额外横向留白系数（相对 stage spacing） */
+  AUTO_LAYOUT_STAGE_DENSITY_GAP_FACTOR: 0.03,
+  /** 父子扇出较多时的额外横向留白系数（相对 stage spacing） */
+  AUTO_LAYOUT_STAGE_LINK_GAP_FACTOR: 0.035,
+  /** 跨树连接穿过阶段边界时的额外横向留白系数（相对 stage spacing） */
+  AUTO_LAYOUT_STAGE_CROSS_TREE_GAP_FACTOR: 0.025,
+  /** 阶段边界额外横向留白硬上限（相对 stage spacing） */
+  AUTO_LAYOUT_MAX_STAGE_EXTRA_FACTOR: 0.18,
   /** 根任务基础 rank 值 */
   RANK_ROOT_BASE: 10000,
   /** rank 步进值 */

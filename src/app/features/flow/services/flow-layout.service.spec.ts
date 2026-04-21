@@ -60,6 +60,24 @@ describe('computeFamilyBlockAutoLayout', () => {
     expect(positionMap.get('child-1a')?.x).toBe(LAYOUT_CONFIG.STAGE_SPACING);
   });
 
+  it('widens dense parent-child stage boundaries to give branching links more breathing room', () => {
+    const positions = computeFamilyBlockAutoLayout(
+      [
+        createLayoutNode({ key: 'root-1', stage: 1, rank: 100 }),
+        ...Array.from({ length: 5 }, (_, index) =>
+          createLayoutNode({ key: `child-${index}`, stage: 2, rank: 110 + index }),
+        ),
+      ],
+      Array.from({ length: 5 }, (_, index) =>
+        createLayoutLink({ from: 'root-1', to: `child-${index}` }),
+      ),
+    );
+
+    const positionMap = toPositionMap(positions);
+    expect(positionMap.get('child-0')?.x ?? 0).toBeGreaterThan(LAYOUT_CONFIG.STAGE_SPACING);
+    expect(positionMap.get('child-0')?.x).toBe(positionMap.get('child-4')?.x);
+  });
+
   it('reserves a dedicated block for a dense subtree before the next root family', () => {
     const positions = computeFamilyBlockAutoLayout(
       [
@@ -135,6 +153,55 @@ describe('computeFamilyBlockAutoLayout', () => {
       .toBeLessThan(positionMap.get('floating-2')?.y ?? -1);
   });
 
+  it('pushes the unassigned column farther right when staged nodes keep relation-heavy links to it', () => {
+    const nodes = [
+      createLayoutNode({ key: 'root-1', stage: 1, rank: 100 }),
+      createLayoutNode({ key: 'child-1', stage: 2, rank: 110 }),
+      createLayoutNode({ key: 'floating-1', stage: null, rank: 210 }),
+      createLayoutNode({ key: 'floating-2', stage: null, rank: 220 }),
+    ];
+    const baseLinks = [createLayoutLink({ from: 'root-1', to: 'child-1' })];
+
+    const compactPositions = computeFamilyBlockAutoLayout(nodes, baseLinks);
+    const relationHeavyPositions = computeFamilyBlockAutoLayout(nodes, [
+      ...baseLinks,
+      createLayoutLink({ from: 'child-1', to: 'floating-1', isCrossTree: true }),
+      createLayoutLink({ from: 'child-1', to: 'floating-2', isCrossTree: true }),
+    ]);
+
+    const compactMap = toPositionMap(compactPositions);
+    const relationHeavyMap = toPositionMap(relationHeavyPositions);
+    expect(relationHeavyMap.get('floating-1')?.x ?? 0)
+      .toBeGreaterThan(compactMap.get('floating-1')?.x ?? Number.MAX_SAFE_INTEGER);
+    expect(relationHeavyMap.get('floating-1')?.x).toBe(relationHeavyMap.get('floating-2')?.x);
+  });
+
+  it('reorders sibling subtrees toward their unassigned relation neighborhoods', () => {
+    const positions = computeFamilyBlockAutoLayout(
+      [
+        createLayoutNode({ key: 'root-main', stage: 1, rank: 100 }),
+        createLayoutNode({ key: 'child-a', stage: 2, rank: 110 }),
+        createLayoutNode({ key: 'grand-a', stage: 3, rank: 120 }),
+        createLayoutNode({ key: 'child-b', stage: 2, rank: 210 }),
+        createLayoutNode({ key: 'grand-b', stage: 3, rank: 220 }),
+        createLayoutNode({ key: 'floating-early', stage: null, rank: 50 }),
+        createLayoutNode({ key: 'floating-late', stage: null, rank: 400 }),
+      ],
+      [
+        createLayoutLink({ from: 'root-main', to: 'child-a' }),
+        createLayoutLink({ from: 'child-a', to: 'grand-a' }),
+        createLayoutLink({ from: 'root-main', to: 'child-b' }),
+        createLayoutLink({ from: 'child-b', to: 'grand-b' }),
+        createLayoutLink({ from: 'grand-a', to: 'floating-late', isCrossTree: true }),
+        createLayoutLink({ from: 'grand-b', to: 'floating-early', isCrossTree: true }),
+      ],
+    );
+
+    const positionMap = toPositionMap(positions);
+    expect(positionMap.get('child-b')?.y ?? Number.MAX_SAFE_INTEGER)
+      .toBeLessThan(positionMap.get('child-a')?.y ?? -1);
+  });
+
   it('ignores cross-tree links when grouping families', () => {
     const positions = computeFamilyBlockAutoLayout(
       [
@@ -151,6 +218,223 @@ describe('computeFamilyBlockAutoLayout', () => {
     const positionMap = toPositionMap(positions);
     expect(positionMap.get('root-2')?.y ?? -1).toBeGreaterThan(positionMap.get('root-1')?.y ?? Number.MAX_SAFE_INTEGER);
     expect(positionMap.get('child-2')?.y).toBe(positionMap.get('root-2')?.y);
+  });
+
+  it('reorders sibling subtrees toward their external relation neighborhoods', () => {
+    const positions = computeFamilyBlockAutoLayout(
+      [
+        createLayoutNode({ key: 'target-early', stage: 1, rank: 50 }),
+        createLayoutNode({ key: 'root-main', stage: 1, rank: 100 }),
+        createLayoutNode({ key: 'child-a', stage: 2, rank: 110 }),
+        createLayoutNode({ key: 'grand-a', stage: 3, rank: 120 }),
+        createLayoutNode({ key: 'child-b', stage: 2, rank: 210 }),
+        createLayoutNode({ key: 'grand-b', stage: 3, rank: 220 }),
+        createLayoutNode({ key: 'target-late', stage: 4, rank: 400 }),
+      ],
+      [
+        createLayoutLink({ from: 'root-main', to: 'child-a' }),
+        createLayoutLink({ from: 'child-a', to: 'grand-a' }),
+        createLayoutLink({ from: 'root-main', to: 'child-b' }),
+        createLayoutLink({ from: 'child-b', to: 'grand-b' }),
+        createLayoutLink({ from: 'grand-a', to: 'target-late', isCrossTree: true }),
+        createLayoutLink({ from: 'grand-b', to: 'target-early', isCrossTree: true }),
+      ],
+    );
+
+    const positionMap = toPositionMap(positions);
+    expect(positionMap.get('child-b')?.y ?? Number.MAX_SAFE_INTEGER)
+      .toBeLessThan(positionMap.get('child-a')?.y ?? -1);
+  });
+
+  it('keeps stage-major neighborhood ordering even when rank spans are production-sized', () => {
+    const positions = computeFamilyBlockAutoLayout(
+      [
+        createLayoutNode({ key: 'target-stage1-late', stage: 1, rank: 250_000 }),
+        createLayoutNode({ key: 'root-main', stage: 1, rank: 100 }),
+        createLayoutNode({ key: 'child-a', stage: 2, rank: 110 }),
+        createLayoutNode({ key: 'grand-a', stage: 3, rank: 120 }),
+        createLayoutNode({ key: 'child-b', stage: 2, rank: 210 }),
+        createLayoutNode({ key: 'grand-b', stage: 3, rank: 220 }),
+        createLayoutNode({ key: 'target-stage2-early', stage: 2, rank: 10_000 }),
+      ],
+      [
+        createLayoutLink({ from: 'root-main', to: 'child-a' }),
+        createLayoutLink({ from: 'child-a', to: 'grand-a' }),
+        createLayoutLink({ from: 'root-main', to: 'child-b' }),
+        createLayoutLink({ from: 'child-b', to: 'grand-b' }),
+        createLayoutLink({ from: 'grand-a', to: 'target-stage2-early', isCrossTree: true }),
+        createLayoutLink({ from: 'grand-b', to: 'target-stage1-late', isCrossTree: true }),
+      ],
+    );
+
+    const positionMap = toPositionMap(positions);
+    expect(positionMap.get('child-b')?.y ?? Number.MAX_SAFE_INTEGER)
+      .toBeLessThan(positionMap.get('child-a')?.y ?? -1);
+  });
+
+  it('keeps natural sibling order when only one subtree has an external relation neighborhood', () => {
+    const positions = computeFamilyBlockAutoLayout(
+      [
+        createLayoutNode({ key: 'root-main', stage: 1, rank: 100 }),
+        createLayoutNode({ key: 'child-a', stage: 2, rank: 110 }),
+        createLayoutNode({ key: 'grand-a', stage: 3, rank: 120 }),
+        createLayoutNode({ key: 'child-b', stage: 2, rank: 210 }),
+        createLayoutNode({ key: 'grand-b', stage: 3, rank: 220 }),
+        createLayoutNode({ key: 'target-late', stage: 4, rank: 400 }),
+      ],
+      [
+        createLayoutLink({ from: 'root-main', to: 'child-a' }),
+        createLayoutLink({ from: 'child-a', to: 'grand-a' }),
+        createLayoutLink({ from: 'root-main', to: 'child-b' }),
+        createLayoutLink({ from: 'child-b', to: 'grand-b' }),
+        createLayoutLink({ from: 'grand-b', to: 'target-late', isCrossTree: true }),
+      ],
+    );
+
+    const positionMap = toPositionMap(positions);
+    expect(positionMap.get('child-a')?.y ?? Number.MAX_SAFE_INTEGER)
+      .toBeLessThan(positionMap.get('child-b')?.y ?? -1);
+  });
+
+  it('keeps natural sibling order when siblings point to the same external neighborhood', () => {
+    const positions = computeFamilyBlockAutoLayout(
+      [
+        createLayoutNode({ key: 'root-main', stage: 1, rank: 100 }),
+        createLayoutNode({ key: 'child-a', stage: 2, rank: 110 }),
+        createLayoutNode({ key: 'grand-a', stage: 3, rank: 120 }),
+        createLayoutNode({ key: 'child-b', stage: 2, rank: 210 }),
+        createLayoutNode({ key: 'grand-b', stage: 3, rank: 220 }),
+        createLayoutNode({ key: 'target-shared', stage: 4, rank: 400 }),
+      ],
+      [
+        createLayoutLink({ from: 'root-main', to: 'child-a' }),
+        createLayoutLink({ from: 'child-a', to: 'grand-a' }),
+        createLayoutLink({ from: 'root-main', to: 'child-b' }),
+        createLayoutLink({ from: 'child-b', to: 'grand-b' }),
+        createLayoutLink({ from: 'grand-a', to: 'target-shared', isCrossTree: true }),
+        createLayoutLink({ from: 'grand-b', to: 'target-shared', isCrossTree: true }),
+        createLayoutLink({ from: 'child-b', to: 'target-shared', isCrossTree: true }),
+      ],
+    );
+
+    const positionMap = toPositionMap(positions);
+    expect(positionMap.get('child-a')?.y ?? Number.MAX_SAFE_INTEGER)
+      .toBeLessThan(positionMap.get('child-b')?.y ?? -1);
+  });
+
+  it('ignores same-family cross-tree links when reordering sibling subtrees', () => {
+    const positions = computeFamilyBlockAutoLayout(
+      [
+        createLayoutNode({ key: 'root-main', stage: 1, rank: 100 }),
+        createLayoutNode({ key: 'child-a', stage: 2, rank: 110 }),
+        createLayoutNode({ key: 'grand-a', stage: 3, rank: 120 }),
+        createLayoutNode({ key: 'child-b', stage: 2, rank: 210 }),
+        createLayoutNode({ key: 'grand-b', stage: 3, rank: 220 }),
+      ],
+      [
+        createLayoutLink({ from: 'root-main', to: 'child-a' }),
+        createLayoutLink({ from: 'child-a', to: 'grand-a' }),
+        createLayoutLink({ from: 'root-main', to: 'child-b' }),
+        createLayoutLink({ from: 'child-b', to: 'grand-b' }),
+        createLayoutLink({ from: 'grand-a', to: 'grand-b', isCrossTree: true }),
+      ],
+    );
+
+    const positionMap = toPositionMap(positions);
+    expect(positionMap.get('child-a')?.y ?? Number.MAX_SAFE_INTEGER)
+      .toBeLessThan(positionMap.get('child-b')?.y ?? -1);
+  });
+
+  it('adds extra sibling spacing when adjacent subtrees both carry relation load', () => {
+    const nodes = [
+      createLayoutNode({ key: 'root-main', stage: 1, rank: 100 }),
+      createLayoutNode({ key: 'child-left', stage: 2, rank: 110 }),
+      createLayoutNode({ key: 'grand-left', stage: 3, rank: 120 }),
+      createLayoutNode({ key: 'child-right', stage: 2, rank: 210 }),
+      createLayoutNode({ key: 'grand-right', stage: 3, rank: 220 }),
+      createLayoutNode({ key: 'target-left', stage: 4, rank: 320 }),
+      createLayoutNode({ key: 'target-right', stage: 4, rank: 360 }),
+    ];
+    const baseLinks = [
+      createLayoutLink({ from: 'root-main', to: 'child-left' }),
+      createLayoutLink({ from: 'child-left', to: 'grand-left' }),
+      createLayoutLink({ from: 'root-main', to: 'child-right' }),
+      createLayoutLink({ from: 'child-right', to: 'grand-right' }),
+    ];
+
+    const compactPositions = computeFamilyBlockAutoLayout(nodes, baseLinks);
+    const relationHeavyPositions = computeFamilyBlockAutoLayout(nodes, [
+      ...baseLinks,
+      createLayoutLink({ from: 'grand-left', to: 'target-left', isCrossTree: true }),
+      createLayoutLink({ from: 'grand-right', to: 'target-right', isCrossTree: true }),
+    ]);
+
+    const compactMap = toPositionMap(compactPositions);
+    const relationHeavyMap = toPositionMap(relationHeavyPositions);
+    const compactGap = (compactMap.get('child-right')?.y ?? 0) - (compactMap.get('child-left')?.y ?? 0);
+    const relationHeavyGap = (relationHeavyMap.get('child-right')?.y ?? 0)
+      - (relationHeavyMap.get('child-left')?.y ?? 0);
+
+    expect(relationHeavyGap).toBeGreaterThan(compactGap);
+  });
+
+  it('still widens sibling spacing when only one subtree carries heavy relation load', () => {
+    const nodes = [
+      createLayoutNode({ key: 'root-main', stage: 1, rank: 100 }),
+      createLayoutNode({ key: 'child-left', stage: 2, rank: 110 }),
+      createLayoutNode({ key: 'grand-left', stage: 3, rank: 120 }),
+      createLayoutNode({ key: 'child-right', stage: 2, rank: 210 }),
+      createLayoutNode({ key: 'grand-right', stage: 3, rank: 220 }),
+      createLayoutNode({ key: 'target-left', stage: 4, rank: 320 }),
+    ];
+    const baseLinks = [
+      createLayoutLink({ from: 'root-main', to: 'child-left' }),
+      createLayoutLink({ from: 'child-left', to: 'grand-left' }),
+      createLayoutLink({ from: 'root-main', to: 'child-right' }),
+      createLayoutLink({ from: 'child-right', to: 'grand-right' }),
+    ];
+
+    const compactPositions = computeFamilyBlockAutoLayout(nodes, baseLinks);
+    const relationHeavyPositions = computeFamilyBlockAutoLayout(nodes, [
+      ...baseLinks,
+      createLayoutLink({ from: 'grand-left', to: 'target-left', isCrossTree: true }),
+    ]);
+
+    const compactMap = toPositionMap(compactPositions);
+    const relationHeavyMap = toPositionMap(relationHeavyPositions);
+    const compactGap = (compactMap.get('child-right')?.y ?? 0) - (compactMap.get('child-left')?.y ?? 0);
+    const relationHeavyGap = (relationHeavyMap.get('child-right')?.y ?? 0)
+      - (relationHeavyMap.get('child-left')?.y ?? 0);
+
+    expect(relationHeavyGap).toBeGreaterThan(compactGap);
+  });
+
+  it('adds extra sibling spacing when a subtree has multiple parent candidates', () => {
+    const nodes = [
+      createLayoutNode({ key: 'root-main', stage: 1, rank: 100 }),
+      createLayoutNode({ key: 'child-left', stage: 2, rank: 110 }),
+      createLayoutNode({ key: 'child-right', stage: 2, rank: 210 }),
+      createLayoutNode({ key: 'shared-grandchild', stage: 3, rank: 320 }),
+    ];
+    const baseLinks = [
+      createLayoutLink({ from: 'root-main', to: 'child-left' }),
+      createLayoutLink({ from: 'root-main', to: 'child-right' }),
+      createLayoutLink({ from: 'child-right', to: 'shared-grandchild' }),
+    ];
+
+    const compactPositions = computeFamilyBlockAutoLayout(nodes, baseLinks);
+    const multiParentPositions = computeFamilyBlockAutoLayout(nodes, [
+      ...baseLinks,
+      createLayoutLink({ from: 'child-left', to: 'shared-grandchild' }),
+    ]);
+
+    const compactMap = toPositionMap(compactPositions);
+    const multiParentMap = toPositionMap(multiParentPositions);
+    const compactGap = (compactMap.get('child-right')?.y ?? 0) - (compactMap.get('child-left')?.y ?? 0);
+    const multiParentGap = (multiParentMap.get('child-right')?.y ?? 0)
+      - (multiParentMap.get('child-left')?.y ?? 0);
+
+    expect(multiParentGap).toBeGreaterThan(compactGap);
   });
 
   it('keeps a single-chain tree compact instead of reserving a tall empty block', () => {
