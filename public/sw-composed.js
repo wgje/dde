@@ -23,19 +23,19 @@ importScripts('./ngsw-worker.js');
 	  "body": [
 	    {
 	      "type": "TextBlock",
-	      "text": "${title}",
+	      "text": "\${title}",
 	      "weight": "Bolder",
 	      "size": "Medium"
 	    },
 	    {
 	      "type": "TextBlock",
-	      "text": "${message}",
+	      "text": "\${message}",
 	      "wrap": true,
 	      "spacing": "Medium"
 	    },
 	    {
 	      "type": "TextBlock",
-	      "text": "${detail}",
+	      "text": "\${detail}",
 	      "wrap": true,
 	      "size": "Small",
 	      "isSubtle": true,

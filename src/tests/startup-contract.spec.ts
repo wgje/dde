@@ -2,6 +2,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
+const normalizeTemplateLiteralSource = (value: string | undefined): string | undefined =>
+  value?.trim().replace(/\\\$\{/g, '${');
+
 describe('startup launch contract', () => {
   it('ngsw-config app-core resources should explicitly cache polyfills entry chunks', () => {
     const ngswConfigPath = path.join(process.cwd(), 'ngsw-config.json');
@@ -134,7 +137,7 @@ describe('startup launch contract', () => {
     const templateMatch = composedSwSource.match(/const TEMPLATE = `([\s\S]*?)`;/);
     const dataMatch = composedSwSource.match(/const DATA = `([\s\S]*?)`;/);
 
-    expect(templateMatch?.[1]?.trim()).toBe(templateSource);
+    expect(normalizeTemplateLiteralSource(templateMatch?.[1])).toBe(templateSource);
     expect(dataMatch?.[1]?.trim()).toBe(dataSource);
   });
 });
