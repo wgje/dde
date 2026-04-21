@@ -110,6 +110,7 @@ export class FocusStartupProbeService {
       this.gateService.checkGate();
       // 通过 GateService 抽象访问 gate 状态，不直接访问 store
       this.pendingGateWorkSignal.set(this.gateService.state() === 'reviewing');
+
       this.logger.debug('Focus 大门探针完成', {
         source: options.source,
         reloadLocal: options.reloadLocal,

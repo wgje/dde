@@ -37,6 +37,7 @@ import { NetworkAwarenessService } from './network-awareness.service';
 import { LoggerService } from './logger.service';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { AuthService } from './auth.service';
+import { ClockSyncService } from './clock-sync.service';
 import { SessionManagerService } from '../app/core/services/sync/session-manager.service';
 import { AUTH_CONFIG } from '../config/auth.config';
 
@@ -66,6 +67,7 @@ export class BlackBoxSyncService {
   private supabase = inject(SupabaseClientService);
   private network = inject(NetworkAwarenessService);
   private auth = inject(AuthService);
+  private readonly clockSync = inject(ClockSyncService);
   private readonly sessionManager = inject(SessionManagerService);
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('BlackBoxSync');
@@ -84,6 +86,8 @@ export class BlackBoxSyncService {
 
   // 防重保护：single-flight + freshness window
   private pullInFlight: Promise<boolean> | null = null;
+  private activePullOptions: PullChangesOptions | null = null;
+  private queuedForcedGateReviewPullPromise: Promise<void> | null = null;
   /** 上次成功拉取的时间戳（毫秒），用于 freshness window 判断 */
   private lastPullTime = 0;
   private lastResumePullAt = 0;
@@ -476,7 +480,7 @@ export class BlackBoxSyncService {
       return false;
     }
 
-    return candidate.updatedAt > baseline.updatedAt;
+    return this.clockSync.isLocalNewer(candidate.updatedAt, baseline.updatedAt);
   }
 
   private async resolveLatestLocalEntry(id: string): Promise<BlackBoxEntry | null> {
@@ -655,8 +659,8 @@ export class BlackBoxSyncService {
         return true;
       }
 
-      // 使用 upsert 确保幂等性
-      const { error } = await client
+      // 让数据库触发器生成权威 updated_at，避免客户端时钟偏差把跨设备完成状态盖回去。
+      const { data: savedRow, error } = await client
         .from('black_box_entries')
         .upsert({
           id: entry.id,
@@ -666,7 +670,6 @@ export class BlackBoxSyncService {
           focus_meta: (entry.focusMeta ?? null) as unknown as Json | null,
           date: entry.date,
           created_at: entry.createdAt,
-          updated_at: entry.updatedAt,
           is_read: entry.isRead,
           is_completed: entry.isCompleted,
           is_archived: entry.isArchived,
@@ -675,12 +678,21 @@ export class BlackBoxSyncService {
           deleted_at: entry.deletedAt
         }, {
           onConflict: 'id'
-        });
+        })
+        .select('id, updated_at')
+        .single();
 
       if (error) {
         const enhanced = supabaseErrorToError(error);
         this.logger.error('Failed to push entry to server', enhanced.message);
         return false;
+      }
+
+      const serverUpdatedAt = typeof savedRow?.updated_at === 'string'
+        ? savedRow.updated_at
+        : entry.updatedAt;
+      if (serverUpdatedAt) {
+        this.clockSync.recordServerTimestamp(serverUpdatedAt, entry.id);
       }
 
       const latestLocalAfterPush = await this.resolveLatestLocalEntry(entry.id);
@@ -691,16 +703,13 @@ export class BlackBoxSyncService {
           latestLocalUpdatedAt: latestLocalAfterPush?.updatedAt,
         });
       } else {
-        // 更新本地同步状态为已同步
-        const synced: BlackBoxEntry = { ...entry, syncStatus: 'synced' };
+        const synced: BlackBoxEntry = {
+          ...entry,
+          updatedAt: serverUpdatedAt,
+          syncStatus: 'synced',
+        };
         await this.saveToLocal(synced);
         updateBlackBoxEntry(synced);
-      }
-
-      // 【修复 P1-02】推送成功后更新 lastSyncTime，避免重复拉取
-      if (entry.updatedAt && (!this.lastSyncTime || entry.updatedAt > this.lastSyncTime)) {
-        this.lastSyncTime = entry.updatedAt;
-        await this.saveLastSyncTime();
       }
 
       this.logger.debug(`Entry synced to server: ${entry.id}`);
@@ -717,6 +726,26 @@ export class BlackBoxSyncService {
   async pullChanges(options?: PullChangesOptions): Promise<void> {
     const reason = options?.reason ?? 'manual';
     const force = options?.force ?? false;
+    let preferRemoteForSyncedLocalDuringPull = false;
+
+    if (reason === 'gate-review') {
+      const clockResult = this.clockSync.lastSyncResult();
+      const shouldRefreshClock = !clockResult || !clockResult.reliable || this.clockSync.needsResync();
+      let effectiveClockResult = clockResult;
+
+      const syncClock = shouldRefreshClock
+        ? this.clockSync.checkClockDrift.bind(this.clockSync)
+        : this.clockSync.ensureSynced.bind(this.clockSync);
+
+      effectiveClockResult = await syncClock().catch((error: unknown) => {
+        this.logger.debug('Gate review 时钟预同步失败，降级继续拉取', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return effectiveClockResult ?? null;
+      });
+
+      preferRemoteForSyncedLocalDuringPull = !effectiveClockResult?.reliable;
+    }
 
     if (
       FEATURE_FLAGS.BLACKBOX_PULL_COOLDOWN_V1 &&
@@ -761,6 +790,13 @@ export class BlackBoxSyncService {
 
     // 防重保护：single-flight 复用进行中的拉取
     if (this.pullInFlight) {
+      const inFlightReason = this.activePullOptions?.reason ?? 'manual';
+      const inFlightForce = this.activePullOptions?.force ?? false;
+      if ((reason === 'gate-review' || force) && (inFlightReason !== 'gate-review' || !inFlightForce)) {
+        await this.queueForcedGateReviewPull();
+        return;
+      }
+
       this.logger.debug('Pull already in progress, reusing promise');
       await this.pullInFlight;
       return;
@@ -772,7 +808,8 @@ export class BlackBoxSyncService {
       return;
     }
 
-    this.pullInFlight = this.doPullChanges()
+    this.activePullOptions = { reason, force };
+    this.pullInFlight = this.doPullChanges(preferRemoteForSyncedLocalDuringPull)
       .then((didAttemptRemoteRead) => {
         if (didAttemptRemoteRead) {
           const now = Date.now();
@@ -795,15 +832,34 @@ export class BlackBoxSyncService {
       })
       .finally(() => {
         this.pullInFlight = null;
+        this.activePullOptions = null;
       });
 
     await this.pullInFlight;
   }
 
+  private queueForcedGateReviewPull(): Promise<void> {
+    if (this.queuedForcedGateReviewPullPromise) {
+      return this.queuedForcedGateReviewPullPromise;
+    }
+
+    const currentPull = this.pullInFlight;
+    this.queuedForcedGateReviewPullPromise = (async () => {
+      if (currentPull) {
+        await currentPull;
+      }
+      await this.pullChanges({ reason: 'gate-review', force: true });
+    })().finally(() => {
+      this.queuedForcedGateReviewPullPromise = null;
+    });
+
+    return this.queuedForcedGateReviewPullPromise;
+  }
+
   /**
    * 实际执行拉取变更的内部方法
    */
-  private async doPullChanges(): Promise<boolean> {
+  private async doPullChanges(preferRemoteForSyncedLocalDuringPull: boolean): Promise<boolean> {
     try {
       if (this.isRemoteUnavailable()) {
         await this.loadFromLocal();
@@ -822,26 +878,35 @@ export class BlackBoxSyncService {
         return false;
       }
 
-      // 获取上次同步时间。首次拉取优先复用本地最大 updatedAt，避免直接从 epoch 慢拉。
-      let lastSync = this.lastSyncTime;
-      if (!lastSync) {
-        lastSync = await this.deriveLocalSyncCursor();
-        if (lastSync) {
-          this.lastSyncTime = lastSync;
-          await this.saveLastSyncTime();
-        }
-      }
-      const effectiveLastSync = lastSync || '1970-01-01T00:00:00Z';
+      // 首次拉取只信任已持久化的服务端游标；不要从本地 updatedAt 反推，避免快时钟把增量窗口推到未来。
+      let effectiveLastSync = this.lastSyncTime || '1970-01-01T00:00:00Z';
+      let repairingFutureCursor = false;
 
       if (FEATURE_FLAGS.BLACKBOX_WATERMARK_PROBE_V1) {
         const remoteWatermark = await this.getRemoteBlackBoxWatermark(client);
         const remoteMs = remoteWatermark ? new Date(remoteWatermark).getTime() : NaN;
         const localMs = new Date(effectiveLastSync).getTime();
+
         if (
           remoteWatermark &&
           Number.isFinite(remoteMs) &&
           Number.isFinite(localMs) &&
-          remoteMs <= localMs
+          localMs > remoteMs
+        ) {
+          this.logger.warn('检测到未来黑匣子游标，回退到安全全量拉取', {
+            localCursor: effectiveLastSync,
+            remoteWatermark,
+          });
+          effectiveLastSync = '1970-01-01T00:00:00Z';
+          repairingFutureCursor = true;
+        }
+
+        if (
+          remoteWatermark &&
+          Number.isFinite(remoteMs) &&
+          Number.isFinite(localMs) &&
+          remoteMs <= localMs &&
+          effectiveLastSync !== '1970-01-01T00:00:00Z'
         ) {
           this.lastSyncTime = remoteWatermark;
           await this.saveLastSyncTime();
@@ -914,7 +979,7 @@ export class BlackBoxSyncService {
       // helper) to reduce transaction commit overhead by ~10x.
       for (const row of data ?? []) {
         const entry = this.mapRowToEntry(row);
-        await this.mergeWithLocal(entry);
+        await this.mergeWithLocal(entry, preferRemoteForSyncedLocalDuringPull, repairingFutureCursor);
       }
 
       // 更新同步时间并持久化
@@ -966,43 +1031,23 @@ export class BlackBoxSyncService {
     }
   }
 
-  private async deriveLocalSyncCursor(): Promise<string | null> {
-    try {
-      const localEntries = await this.loadFromLocal();
-      let maxUpdatedAtMs = 0;
-
-      for (const entry of localEntries) {
-        const ts = entry.updatedAt ? new Date(entry.updatedAt).getTime() : 0;
-        if (Number.isFinite(ts)) {
-          maxUpdatedAtMs = Math.max(maxUpdatedAtMs, ts);
-        }
-      }
-
-      if (maxUpdatedAtMs > 0) {
-        const cursor = new Date(maxUpdatedAtMs).toISOString();
-        this.logger.debug(`首次拉取采用本地游标: ${cursor}`);
-        return cursor;
-      }
-    } catch (error) {
-      this.logger.debug('推导本地同步游标失败，降级为 epoch', {
-        error: error instanceof Error ? error.message : String(error)
-      });
-    }
-
-    return null;
-  }
-
   /**
    * 合并远程数据到本地（LWW 冲突解决）
    */
-  private async mergeWithLocal(remote: BlackBoxEntry): Promise<void> {
+  private async mergeWithLocal(
+    remote: BlackBoxEntry,
+    preferRemoteForSyncedLocalDuringPull: boolean,
+    repairingFutureCursor: boolean,
+  ): Promise<void> {
     const local = blackBoxEntriesMap().get(remote.id);
+    const localWinsByLww = Boolean(local)
+      && Boolean(local?.updatedAt)
+      && Boolean(remote.updatedAt)
+      && this.clockSync.isLocalNewer(local!.updatedAt, remote.updatedAt);
+    const preferRemoteForSyncedLocal = (preferRemoteForSyncedLocalDuringPull || repairingFutureCursor)
+      && local?.syncStatus !== 'pending';
 
-    // LWW: 远程更新时间更新则使用远程
-    // 【修复 P1-05】等时用 id 字典序作为 tiebreaker，保证确定性
-    const shouldUseRemote = !local ||
-      remote.updatedAt > local.updatedAt ||
-      (remote.updatedAt === local.updatedAt && remote.id > local.id);
+    const shouldUseRemote = !local || preferRemoteForSyncedLocal || !localWinsByLww;
 
     if (shouldUseRemote) {
       // 【修复 P1-04】已删除条目从本地状态中移除，避免 UI 残留
@@ -1013,7 +1058,15 @@ export class BlackBoxSyncService {
         await this.saveToLocal(remote);
         updateBlackBoxEntry(remote);
       }
+      return;
     }
+
+    this.logger.debug('保留更晚的本地黑匣子快照，跳过远端覆盖', {
+      entryId: remote.id,
+      syncStatus: local?.syncStatus ?? 'unknown',
+      localUpdatedAt: local?.updatedAt,
+      remoteUpdatedAt: remote.updatedAt,
+    });
   }
 
   /**

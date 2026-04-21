@@ -122,6 +122,7 @@ export class GateService {
   /** 【修复 L-21/M-08】matchMedia 监听器引用，用于销毁时移除 */
   private reducedMotionMediaQuery: MediaQueryList | null = null;
   private reducedMotionHandler: ((e: MediaQueryListEvent) => void) | null = null;
+  private reviewVisibilityHandler: (() => void) | null = null;
 
   /**
    * 检测用户是否启用了减少动画（prefers-reduced-motion）
@@ -150,10 +151,23 @@ export class GateService {
         this.reducedMotionMediaQuery = null;
         this.reducedMotionHandler = null;
       }
+      if (typeof document !== 'undefined' && this.reviewVisibilityHandler) {
+        document.removeEventListener('visibilitychange', this.reviewVisibilityHandler);
+        this.reviewVisibilityHandler = null;
+      }
     });
   }
 
   private setupLivePendingEntrySync(): void {
+    if (typeof document !== 'undefined' && !this.reviewVisibilityHandler) {
+      this.reviewVisibilityHandler = () => {
+        if (document.visibilityState === 'visible' && gateState() === 'reviewing') {
+          this.refreshReviewingQueueFromRemote(true);
+        }
+      };
+      document.addEventListener('visibilitychange', this.reviewVisibilityHandler);
+    }
+
     effect(() => {
       const state = gateState();
       const pending = pendingBlackBoxEntries();
@@ -172,38 +186,48 @@ export class GateService {
     if (typeof window === 'undefined') return;
     if (this.reviewSyncTimerId) return;
 
+    this.refreshReviewingQueueFromRemote(true);
+
     this.reviewSyncTimerId = setInterval(() => {
       if (gateState() !== 'reviewing') {
         this.stopReviewingRemoteSync();
         return;
       }
 
-      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
-        return;
-      }
-
-      if (this.reviewSyncInFlight) {
-        return;
-      }
-
-      this.reviewSyncInFlight = true;
-
-      this.blackBoxService.loadFromServer('gate-review')
-        .then(() => {
-          this.ngZone.run(() => {
-            if (gateState() !== 'reviewing') return;
-            this.syncReviewingQueueWithPending(pendingBlackBoxEntries(), 'remote');
-          });
-        })
-        .catch((error: unknown) => {
-          this.logger.debug('Gate', 'Remote pull while gate reviewing failed', {
-            error: error instanceof Error ? error.message : String(error)
-          });
-        })
-        .finally(() => {
-          this.reviewSyncInFlight = false;
-        });
+      this.refreshReviewingQueueFromRemote(true);
     }, GATE_REVIEW_SYNC_INTERVAL_MS);
+  }
+
+  private refreshReviewingQueueFromRemote(force = false): void {
+    if (gateState() !== 'reviewing') {
+      return;
+    }
+
+    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+      return;
+    }
+
+    if (this.reviewSyncInFlight) {
+      return;
+    }
+
+    this.reviewSyncInFlight = true;
+
+    this.blackBoxService.loadFromServer({ reason: 'gate-review', force })
+      .then(() => {
+        this.ngZone.run(() => {
+          if (gateState() !== 'reviewing') return;
+          this.syncReviewingQueueWithPending(pendingBlackBoxEntries(), 'remote');
+        });
+      })
+      .catch((error: unknown) => {
+        this.logger.debug('Gate', 'Remote pull while gate reviewing failed', {
+          error: error instanceof Error ? error.message : String(error)
+        });
+      })
+      .finally(() => {
+        this.reviewSyncInFlight = false;
+      });
   }
 
   private stopReviewingRemoteSync(): void {

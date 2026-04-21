@@ -280,8 +280,12 @@ export class BlackBoxService {
   /**
    * 从服务器加载条目
    */
-  async loadFromServer(reason: PullChangesOptions['reason'] = 'manual'): Promise<void> {
-    await this.syncService.pullChanges({ reason });
+  async loadFromServer(options: PullChangesOptions | PullChangesOptions['reason'] = 'manual'): Promise<void> {
+    await this.syncService.pullChanges(
+      typeof options === 'string'
+        ? { reason: options }
+        : options,
+    );
   }
 
   /**

@@ -20,7 +20,7 @@ import { GateService } from '../../../services/gate.service';
 import { BlackBoxSyncService } from '../../../services/black-box-sync.service';
 import { 
   gateState, 
-  focusPreferences 
+  focusPreferences,
 } from '../../../state/focus-stores';
 import { LoggerService } from '../../../services/logger.service';
 import { FOCUS_CONFIG } from '../../../config/focus.config';
@@ -171,7 +171,10 @@ export class FocusModeComponent implements OnInit, OnDestroy {
     const version = ++this.gateCheckVersion;
     try {
       await this.blackBoxSyncService.loadFromLocal();
-      if (version === this.gateCheckVersion) this.checkGateOnStartup();
+
+      if (version === this.gateCheckVersion) {
+        this.checkGateOnStartup();
+      }
     } catch (error) {
       this.logger.warn('FocusMode', '本地黑匣子加载失败，降级继续 gate 检查',
         error instanceof Error ? error.message : String(error));
