@@ -304,6 +304,31 @@ describe('SupabaseClientService', () => {
       unsubscribe();
     });
 
+    it('幂等请求被浏览器以 Failed to fetch 拒绝时，应按网关瞬时故障路径重试', async () => {
+      vi.useFakeTimers();
+      const mutable = service as unknown as {
+        canInitialize: boolean;
+        supabaseUrl: string;
+        supabaseAnonKey: string;
+        buildClientOptions: () => { global: { fetch: (url: RequestInfo | URL, options?: RequestInit) => Promise<Response> } };
+      };
+      mutable.canInitialize = true;
+      mutable.supabaseUrl = 'https://example.supabase.co';
+      mutable.supabaseAnonKey = 'anon-key';
+      fetchSpy
+        .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+        .mockResolvedValueOnce(new Response('[]', { status: 200 }));
+
+      const responsePromise = mutable.buildClientOptions().global.fetch('https://example.supabase.co/rest/v1/projects');
+
+      await vi.runAllTimersAsync();
+      const response = await responsePromise;
+
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+      expect(response.status).toBe(200);
+      expect(service.isOfflineMode()).toBe(false);
+    });
+
     it('client 初始化后应接管 Auth 自动刷新，并在可见状态下启动', async () => {
       const mutable = service as unknown as {
         canInitialize: boolean;

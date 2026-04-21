@@ -8,6 +8,7 @@ import { AuthService } from '../../../../services/auth.service';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { AUTH_CONFIG } from '../../../../config/auth.config';
 import { Connection, Project, Task } from '../../../../models';
+import type { BlackBoxEntry } from '../../../../models/focus';
 import {
   createBrowserNetworkSuspendedError,
   resetBrowserNetworkSuspensionTrackingForTests,
@@ -61,6 +62,25 @@ function createConnection(label: string, sourceLabel = `${label}-source`, target
     id: stableUUID(`connection-${label}`),
     source: stableUUID(sourceLabel),
     target: stableUUID(targetLabel),
+  };
+}
+
+function createBlackBoxEntry(label: string, overrides: Partial<BlackBoxEntry> = {}): BlackBoxEntry {
+  const now = new Date().toISOString();
+  return {
+    id: stableUUID(`blackbox-${label}`),
+    projectId: null,
+    userId: 'test-user',
+    content: `BlackBox ${label}`,
+    date: '2026-04-21',
+    createdAt: now,
+    updatedAt: now,
+    isRead: false,
+    isCompleted: false,
+    isArchived: false,
+    deletedAt: null,
+    snoozeCount: 0,
+    ...overrides,
   };
 }
 
@@ -344,6 +364,41 @@ describe('RetryQueueService', () => {
     expect(handler.deleteTask).toHaveBeenCalledWith(stableUUID('task-delete-captured-owner'), 'project-1', 'owner-a');
   });
 
+  it('处理中的旧 blackbox 快照成功后，不应删除同 id 的更新快照', async () => {
+    const entryId = stableUUID('blackbox-refresh-during-processing');
+    const olderEntry = createBlackBoxEntry('refresh-old', {
+      id: entryId,
+      updatedAt: '2026-04-21T00:00:00.000Z',
+      isCompleted: false,
+    });
+    const newerEntry = createBlackBoxEntry('refresh-new', {
+      id: entryId,
+      updatedAt: '2026-04-21T00:00:05.000Z',
+      isCompleted: true,
+    });
+
+    service.add('blackbox', 'upsert', olderEntry, undefined, 'test-user');
+    online = true;
+    (handler.pushBlackBoxEntry as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => {
+      service.add('blackbox', 'upsert', newerEntry, undefined, 'test-user');
+      return true;
+    });
+
+    const result = await service.processQueueSlice({ maxItems: 1, maxDurationMs: 1000 });
+
+    expect(result.processed).toBe(1);
+    expect(handler.pushBlackBoxEntry).toHaveBeenCalledWith(olderEntry);
+    expect(service.getItems()).toEqual([
+      expect.objectContaining({
+        type: 'blackbox',
+        data: expect.objectContaining({
+          id: entryId,
+          updatedAt: newerEntry.updatedAt,
+          isCompleted: true,
+        }),
+      }),
+    ]);
+  });
   it('切账号后清空当前视图并保存，不应覆盖其它账号的持久化重试项', async () => {
     loadFromStorageSpy.mockRestore();
     initDbSpy.mockResolvedValue(null);

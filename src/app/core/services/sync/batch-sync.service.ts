@@ -597,9 +597,9 @@ export class BatchSyncService {
     this.syncState.setSyncing(true);
     
     // 【P2-16 修复】在推送前创建数据快照，防止推送期间 store 被用户编辑导致数据不一致
-    // 【根因修复 2026-04-20】capture 快照创建时间作为 changeTracker 清理的时间水位：
-    // 只清理不晚于 batchStartedAt 的脏记录，保留期间用户产生的新编辑。
-    const batchStartedAt = Date.now();
+    // 【根因修复 2026-04-21】用 ChangeTracker 单调 revision 做清理水位：
+    // 只清理不晚于 batchChangeRevision 的脏记录，保留期间用户产生的新编辑，避免同一毫秒碰撞。
+    const batchChangeRevision = this.changeTracker.getCurrentChangeRevision();
     const projectSnapshot: Project = {
       ...project,
       tasks: project.tasks.map(t => ({ ...t })),
@@ -724,7 +724,7 @@ export class BatchSyncService {
             }
           } else {
             // 【根因修复 2026-04-20】软删除连接上行成功即清脏记录，避免重推死循环。
-            this.changeTracker.clearConnectionChangeIfFresh(projectSnapshot.id, connection.id, batchStartedAt);
+            this.changeTracker.clearConnectionChangeIfFresh(projectSnapshot.id, connection.id, batchChangeRevision);
           }
         } catch (e) {
           if (isPermanentFailureError(e)) {
@@ -820,7 +820,7 @@ export class BatchSyncService {
             // 无限重推循环：过去只在 batch 整体成功时才 clearProjectChanges，只要一项失败就
             // 永久保留所有成功项的 pending 记录，下一轮又整批重推（API 200 但 UI 待同步数永
             // 远不降）。使用 batchStartedAt 水位保护并发编辑：同步期间用户产生的新 edit 保留。
-            this.changeTracker.clearTaskChangeIfFresh(projectSnapshot.id, task.id, batchStartedAt);
+            this.changeTracker.clearTaskChangeIfFresh(projectSnapshot.id, task.id, batchChangeRevision);
           } else {
             failedTaskIds.push(task.id);
             if (taskResult.retryEnqueued) {
@@ -883,7 +883,7 @@ export class BatchSyncService {
               target: connection.target,
             });
             // 【根因修复 2026-04-20】引用任务已在云端 purge，连接无需再推，直接清脏记录收口。
-            this.changeTracker.clearConnectionChangeIfFresh(projectSnapshot.id, connection.id, batchStartedAt);
+            this.changeTracker.clearConnectionChangeIfFresh(projectSnapshot.id, connection.id, batchChangeRevision);
             continue;
           }
 
@@ -916,7 +916,7 @@ export class BatchSyncService {
             target: blocked.target,
           });
           // 【根因修复 2026-04-20】引用任务已 purge，连接无需再推，清脏记录收口避免无限重推。
-          this.changeTracker.clearConnectionChangeIfFresh(projectSnapshot.id, blocked.id, batchStartedAt);
+          this.changeTracker.clearConnectionChangeIfFresh(projectSnapshot.id, blocked.id, batchChangeRevision);
           continue;
         }
 
@@ -952,7 +952,7 @@ export class BatchSyncService {
             }
           } else {
             // 【根因修复 2026-04-20】连接上行成功即清脏记录，解除"全或无"清理策略。
-            this.changeTracker.clearConnectionChangeIfFresh(projectSnapshot.id, connection.id, batchStartedAt);
+            this.changeTracker.clearConnectionChangeIfFresh(projectSnapshot.id, connection.id, batchChangeRevision);
           }
         } catch (e) {
           if (isPermanentFailureError(e)) {

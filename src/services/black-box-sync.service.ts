@@ -436,6 +436,64 @@ export class BlackBoxSyncService {
     });
   }
 
+  private async loadEntryFromLocal(id: string): Promise<BlackBoxEntry | null> {
+    try {
+      if (!this.db) {
+        await this.initIndexedDB();
+      }
+    } catch {
+      return null;
+    }
+
+    if (!this.db) {
+      return null;
+    }
+
+    return new Promise((resolve) => {
+      const tx = this.db!.transaction(this.STORE_NAME, 'readonly');
+      const store = tx.objectStore(this.STORE_NAME);
+      const request = store.get(id);
+
+      request.onsuccess = () => {
+        const result = request.result as IDBBlackBoxEntry | undefined;
+        if (!result) {
+          resolve(null);
+          return;
+        }
+
+        const { _localVersion, ...entry } = result;
+        resolve(entry);
+      };
+      request.onerror = () => resolve(null);
+    });
+  }
+
+  private isEntryNewer(
+    candidate: Pick<BlackBoxEntry, 'updatedAt'> | null | undefined,
+    baseline: Pick<BlackBoxEntry, 'updatedAt'> | null | undefined,
+  ): boolean {
+    if (!candidate?.updatedAt || !baseline?.updatedAt) {
+      return false;
+    }
+
+    return candidate.updatedAt > baseline.updatedAt;
+  }
+
+  private async resolveLatestLocalEntry(id: string): Promise<BlackBoxEntry | null> {
+    const inMemory = blackBoxEntriesMap().get(id) ?? null;
+    const persisted = await this.loadEntryFromLocal(id);
+
+    if (!persisted) {
+      return inMemory;
+    }
+
+    if (!inMemory || this.isEntryNewer(persisted, inMemory)) {
+      return persisted;
+    }
+
+    return inMemory;
+  }
+
   /**
    * 从本地 IndexedDB 加载
    */
@@ -587,6 +645,16 @@ export class BlackBoxSyncService {
         return true;
       }
 
+      const latestLocalBeforePush = await this.resolveLatestLocalEntry(entry.id);
+      if (this.isEntryNewer(latestLocalBeforePush, entry)) {
+        this.logger.debug('跳过过期黑匣子推送：本地已有更新快照', {
+          entryId: entry.id,
+          queuedUpdatedAt: entry.updatedAt,
+          latestLocalUpdatedAt: latestLocalBeforePush?.updatedAt,
+        });
+        return true;
+      }
+
       // 使用 upsert 确保幂等性
       const { error } = await client
         .from('black_box_entries')
@@ -615,10 +683,19 @@ export class BlackBoxSyncService {
         return false;
       }
 
-      // 更新本地同步状态为已同步
-      const synced: BlackBoxEntry = { ...entry, syncStatus: 'synced' };
-      await this.saveToLocal(synced);
-      updateBlackBoxEntry(synced);
+      const latestLocalAfterPush = await this.resolveLatestLocalEntry(entry.id);
+      if (this.isEntryNewer(latestLocalAfterPush, entry)) {
+        this.logger.debug('黑匣子推送完成时检测到更晚的本地快照，跳过旧状态回写', {
+          entryId: entry.id,
+          pushedUpdatedAt: entry.updatedAt,
+          latestLocalUpdatedAt: latestLocalAfterPush?.updatedAt,
+        });
+      } else {
+        // 更新本地同步状态为已同步
+        const synced: BlackBoxEntry = { ...entry, syncStatus: 'synced' };
+        await this.saveToLocal(synced);
+        updateBlackBoxEntry(synced);
+      }
 
       // 【修复 P1-02】推送成功后更新 lastSyncTime，避免重复拉取
       if (entry.updatedAt && (!this.lastSyncTime || entry.updatedAt > this.lastSyncTime)) {

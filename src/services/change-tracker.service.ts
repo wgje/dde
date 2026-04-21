@@ -30,6 +30,8 @@ export class ChangeTrackerService {
   
   /** 待同步的变更记录，Key: `${projectId}:${entityType}:${entityId}` */
   private pendingChanges = new Map<string, ChangeRecord>();
+  /** 单调递增修订号：区分同一毫秒内的多次本地编辑 */
+  private changeRevision = 0;
   /** 字段级操作锁，防止用户操作期间被远程更新覆盖。Key: `${projectId}:${taskId}:${field}` */
   private fieldLocks = new Map<string, number | FieldLockData>();
   /** 字段锁超时（30s）- 弱网环境兑底 */
@@ -51,7 +53,7 @@ export class ChangeTrackerService {
         entityType: 'task',
         changeType: 'update',
         projectId,
-        timestamp: Date.now(),
+        ...this.createChangeStamp(),
         data: task
       });
     } else {
@@ -60,7 +62,7 @@ export class ChangeTrackerService {
         entityType: 'task',
         changeType: 'create',
         projectId,
-        timestamp: Date.now(),
+        ...this.createChangeStamp(),
         data: task
       });
     }
@@ -78,7 +80,7 @@ export class ChangeTrackerService {
     if (existing?.changeType === 'create') {
       this.pendingChanges.set(key, {
         ...existing,
-        timestamp: Date.now(),
+        ...this.createChangeStamp(),
         data: task,
         changedFields: this.mergeFields(existing.changedFields, changedFields)
       });
@@ -91,7 +93,7 @@ export class ChangeTrackerService {
         entityType: 'task',
         changeType: 'update',
         projectId,
-        timestamp: Date.now(),
+        ...this.createChangeStamp(),
         changedFields: mergedFields,
         data: task
       });
@@ -115,7 +117,7 @@ export class ChangeTrackerService {
         entityType: 'task',
         changeType: 'delete',
         projectId,
-        timestamp: Date.now()
+        ...this.createChangeStamp()
       });
     }
     
@@ -142,7 +144,7 @@ export class ChangeTrackerService {
         entityType: 'connection',
         changeType: 'update',
         projectId,
-        timestamp: Date.now(),
+        ...this.createChangeStamp(),
         data: connection
       });
     } else {
@@ -151,7 +153,7 @@ export class ChangeTrackerService {
         entityType: 'connection',
         changeType: 'create',
         projectId,
-        timestamp: Date.now(),
+        ...this.createChangeStamp(),
         data: connection
       });
     }
@@ -171,7 +173,7 @@ export class ChangeTrackerService {
       // 创建后更新，保持 create
       this.pendingChanges.set(key, {
         ...existing,
-        timestamp: Date.now(),
+        ...this.createChangeStamp(),
         data: connection
       });
     } else {
@@ -180,7 +182,7 @@ export class ChangeTrackerService {
         entityType: 'connection',
         changeType: 'update',
         projectId,
-        timestamp: Date.now(),
+        ...this.createChangeStamp(),
         data: connection
       });
     }
@@ -205,7 +207,7 @@ export class ChangeTrackerService {
         entityType: 'connection',
         changeType: 'delete',
         projectId,
-        timestamp: Date.now(),
+        ...this.createChangeStamp(),
         data: {
           id: connection.id,
           source: connection.source,
@@ -344,11 +346,11 @@ export class ChangeTrackerService {
    *
    * @returns true 表示记录已清（或本来就不存在），false 表示存在更新的本地编辑已保留。
    */
-  clearTaskChangeIfFresh(projectId: string, taskId: string, notNewerThan: number): boolean {
+  clearTaskChangeIfFresh(projectId: string, taskId: string, notNewerThanRevision: number): boolean {
     const key = this.makeKey(projectId, 'task', taskId);
     const record = this.pendingChanges.get(key);
     if (!record) return true;
-    if (record.timestamp > notNewerThan) {
+    if (this.getRecordRevision(record) > notNewerThanRevision) {
       return false;
     }
     this.pendingChanges.delete(key);
@@ -356,11 +358,11 @@ export class ChangeTrackerService {
     return true;
   }
   /** 清除特定连接的变更记录（保护并发编辑语义与 clearTaskChangeIfFresh 一致）。 */
-  clearConnectionChangeIfFresh(projectId: string, connectionId: string, notNewerThan: number): boolean {
+  clearConnectionChangeIfFresh(projectId: string, connectionId: string, notNewerThanRevision: number): boolean {
     const key = this.makeKey(projectId, 'connection', connectionId);
     const record = this.pendingChanges.get(key);
     if (!record) return true;
-    if (record.timestamp > notNewerThan) {
+    if (this.getRecordRevision(record) > notNewerThanRevision) {
       return false;
     }
     this.pendingChanges.delete(key);
@@ -384,6 +386,10 @@ export class ChangeTrackerService {
   /** 导出所有待同步变更 */
   exportPendingChanges(): ChangeRecord[] {
     return Array.from(this.pendingChanges.values());
+  }
+
+  getCurrentChangeRevision(): number {
+    return this.changeRevision;
   }
 
   /**
@@ -459,7 +465,12 @@ export class ChangeTrackerService {
   importPendingChanges(changes: ChangeRecord[]): void {
     for (const record of changes) {
       const key = this.makeKey(record.projectId, record.entityType, record.entityId);
-      this.pendingChanges.set(key, record);
+      const normalizedRecord: ChangeRecord = {
+        ...record,
+        revision: this.getRecordRevision(record),
+      };
+      this.changeRevision = Math.max(this.changeRevision, normalizedRecord.revision ?? 0);
+      this.pendingChanges.set(key, normalizedRecord);
     }
     this.updateCounters();
     this.logger.info('导入变更记录', { count: changes.length });
@@ -840,6 +851,24 @@ export class ChangeTrackerService {
 
   private makeFieldLockKey(projectId: string, taskId: string, field: string): string {
     return `${projectId}:${taskId}:${field}`;
+  }
+
+  private createChangeStamp(): Pick<ChangeRecord, 'timestamp' | 'revision'> {
+    return {
+      timestamp: Date.now(),
+      revision: this.nextChangeRevision(),
+    };
+  }
+
+  private nextChangeRevision(): number {
+    this.changeRevision += 1;
+    return this.changeRevision;
+  }
+
+  private getRecordRevision(record: ChangeRecord): number {
+    return typeof record.revision === 'number' && Number.isFinite(record.revision)
+      ? record.revision
+      : record.timestamp;
   }
   
   // ========== 其他辅助方法 ==========

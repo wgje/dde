@@ -204,6 +204,23 @@ describe('ChangeTrackerService', () => {
       service.clearProjectChanges('project-1');
       expect(service.pendingChangeCount()).toBe(0);
     });
+
+    it('应该在相同毫秒内保留 batch 水位之后的新编辑', () => {
+      const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1_000);
+      const task = createMockTask();
+
+      try {
+        service.trackTaskUpdate('project-1', task, ['title']);
+        const batchRevision = service.getCurrentChangeRevision();
+
+        service.trackTaskUpdate('project-1', { ...task, title: 'Updated after snapshot' }, ['title']);
+
+        expect(service.clearTaskChangeIfFresh('project-1', task.id, batchRevision)).toBe(false);
+        expect(service.getProjectChanges('project-1').tasksToUpdate[0]?.title).toBe('Updated after snapshot');
+      } finally {
+        nowSpy.mockRestore();
+      }
+    });
   });
 
   describe('数据完整性验证', () => {

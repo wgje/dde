@@ -298,14 +298,33 @@ export class ConnectionSyncOperationsService {
     projectId: string,
     connection: Connection,
   ): Promise<EndpointConnectionMatch | null> {
-    const { data, error } = await client
-      .from('connections')
-      .select('id,deleted_at,updated_at,title,description')
-      .eq('project_id', projectId)
-      .eq('source_id', connection.source)
-      .eq('target_id', connection.target);
+    // 【根因修复 2026-04-20】canonical-match 查询是 upsert 前的「软优化」：
+    //   命中 → 复用远端已存在的 id，避免创建重复行；
+    //   未命中 → 走普通 upsert，DB 层的复合唯一约束
+    //   `connections_project_id_source_id_target_id` 会在真的重复时抛 23505，
+    //   由上层 (line 712+) 捕获并 rebind。
+    // 因此当 Supabase edge 瞬时 5xx 导致 fetch 抛出（常见为 502 + 缺失 CORS 头，
+    // 浏览器升级为 "CORS blocked" 错误）时，我们不应让异常上抛毁掉整次 upsert；
+    // 应该降级为「未找到匹配」让 upsert 携 ON CONFLICT 兜底，真有冲突走 23505 分支。
+    // 这样即使在 Supabase 边缘抖动期间，同步也能自愈而不在 UI 弹 "部分同步失败"。
+    let data: EndpointConnectionMatch[] | null = null;
+    try {
+      const response = await client
+        .from('connections')
+        .select('id,deleted_at,updated_at,title,description')
+        .eq('project_id', projectId)
+        .eq('source_id', connection.source)
+        .eq('target_id', connection.target);
 
-    if (error || !Array.isArray(data) || data.length === 0) {
+      if (response.error) {
+        return null;
+      }
+      data = response.data as EndpointConnectionMatch[] | null;
+    } catch {
+       return null; // eslint-disable-line no-restricted-syntax -- 网络/CORS 抛错降级为「未匹配」，交由 upsert ON CONFLICT 兜底
+    }
+
+    if (!Array.isArray(data) || data.length === 0) {
       return null;
     }
 

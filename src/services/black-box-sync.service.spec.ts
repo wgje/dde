@@ -6,8 +6,25 @@ import { NetworkAwarenessService } from './network-awareness.service';
 import { LoggerService } from './logger.service';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { AuthService } from './auth.service';
-import { setBlackBoxEntries } from '../state/focus-stores';
+import { blackBoxEntriesMap, setBlackBoxEntries } from '../state/focus-stores';
+import type { BlackBoxEntry } from '../models/focus';
 
+function createEntry(overrides: Partial<BlackBoxEntry> & Pick<BlackBoxEntry, 'id'>): BlackBoxEntry {
+  return {
+    id: overrides.id,
+    projectId: null,
+    userId: 'user-1',
+    content: 'entry',
+    date: '2026-03-04',
+    createdAt: '2026-03-04T00:00:00.000Z',
+    updatedAt: '2026-03-04T00:00:00.000Z',
+    isRead: false,
+    isCompleted: false,
+    isArchived: false,
+    deletedAt: null,
+    ...overrides,
+  };
+}
 describe('BlackBoxSyncService', () => {
   let service: BlackBoxSyncService;
   let initDbSpy: ReturnType<typeof vi.spyOn>;
@@ -84,7 +101,7 @@ describe('BlackBoxSyncService', () => {
     const doPullSpy = vi.spyOn(
       service as unknown as { doPullChanges: () => Promise<void> },
       'doPullChanges'
-    ).mockResolvedValue(undefined);
+    ).mockResolvedValue(true);
 
     await service.pullChanges({ reason: 'resume' });
     await service.pullChanges({ reason: 'resume' });
@@ -96,7 +113,7 @@ describe('BlackBoxSyncService', () => {
     const doPullSpy = vi.spyOn(
       service as unknown as { doPullChanges: () => Promise<void> },
       'doPullChanges'
-    ).mockResolvedValue(undefined);
+    ).mockResolvedValue(true);
 
     await service.pullChanges({ reason: 'resume' });
     await service.pullChanges({ reason: 'resume', force: true });
@@ -109,8 +126,8 @@ describe('BlackBoxSyncService', () => {
     const doPullSpy = vi.spyOn(
       service as unknown as { doPullChanges: () => Promise<void> },
       'doPullChanges'
-    ).mockReturnValue(new Promise<void>(resolve => {
-      resolvePull = resolve;
+    ).mockReturnValue(new Promise<boolean>(resolve => {
+      resolvePull = () => resolve(true);
     }));
 
     const p1 = service.pullChanges({ reason: 'resume', force: true });
@@ -131,7 +148,7 @@ describe('BlackBoxSyncService', () => {
     const doPullSpy = vi.spyOn(
       service as unknown as { doPullChanges: () => Promise<void> },
       'doPullChanges'
-    ).mockResolvedValue(undefined);
+    ).mockResolvedValue(true);
     const loadLocalSpy = vi.spyOn(
       service as unknown as { loadFromLocal: () => Promise<unknown[]> },
       'loadFromLocal'
@@ -147,7 +164,7 @@ describe('BlackBoxSyncService', () => {
     const doPullSpy = vi.spyOn(
       service as unknown as { doPullChanges: () => Promise<void> },
       'doPullChanges'
-    ).mockResolvedValue(undefined);
+    ).mockResolvedValue(true);
 
     // 首次拉取成功
     await service.pullChanges({ reason: 'manual', force: true });
@@ -173,7 +190,7 @@ describe('BlackBoxSyncService', () => {
     const doPullSpy = vi.spyOn(
       service as unknown as { doPullChanges: () => Promise<void> },
       'doPullChanges'
-    ).mockResolvedValue(undefined);
+    ).mockResolvedValue(true);
 
     await service.pullChanges({ reason: 'panel-open', force: true });
     mockSentry.captureMessage.mockClear();
@@ -184,6 +201,63 @@ describe('BlackBoxSyncService', () => {
     expect(mockSentry.captureMessage).not.toHaveBeenCalled();
   });
 
+  it('should skip stale push payloads when a newer local snapshot already exists', async () => {
+    const entryId = crypto.randomUUID();
+    const olderEntry = createEntry({
+      id: entryId,
+      updatedAt: '2026-03-04T00:00:00.000Z',
+      isCompleted: false,
+    });
+    const newerEntry = createEntry({
+      id: entryId,
+      updatedAt: '2026-03-04T00:00:05.000Z',
+      isCompleted: true,
+    });
+    const from = vi.fn();
+    const supabase = TestBed.inject(SupabaseClientService) as unknown as {
+      clientAsync: ReturnType<typeof vi.fn>;
+    };
+
+    setBlackBoxEntries([newerEntry]);
+    supabase.clientAsync.mockResolvedValue({ from });
+
+    await expect(service.pushToServer(olderEntry)).resolves.toBe(true);
+    expect(from).not.toHaveBeenCalled();
+  });
+
+  it('should not overwrite a newer local snapshot that arrives while an older push is in flight', async () => {
+    const entryId = crypto.randomUUID();
+    const olderEntry = createEntry({
+      id: entryId,
+      updatedAt: '2026-03-04T00:00:00.000Z',
+      isCompleted: false,
+    });
+    const newerEntry = createEntry({
+      id: entryId,
+      updatedAt: '2026-03-04T00:00:05.000Z',
+      isCompleted: true,
+    });
+    const from = vi.fn(() => ({
+      upsert: vi.fn().mockImplementation(async () => {
+        setBlackBoxEntries([newerEntry]);
+        return { error: null };
+      }),
+    }));
+    const supabase = TestBed.inject(SupabaseClientService) as unknown as {
+      clientAsync: ReturnType<typeof vi.fn>;
+    };
+    const saveToLocalSpy = vi.spyOn(service, 'saveToLocal').mockResolvedValue(undefined);
+
+    setBlackBoxEntries([olderEntry]);
+    supabase.clientAsync.mockResolvedValue({ from });
+
+    await expect(service.pushToServer(olderEntry)).resolves.toBe(true);
+    expect(saveToLocalSpy).not.toHaveBeenCalled();
+    expect(blackBoxEntriesMap().get(entryId)).toEqual(expect.objectContaining({
+      updatedAt: newerEntry.updatedAt,
+      isCompleted: true,
+    }));
+  });
   it('should map focus_meta from database row into focusMeta', () => {
     const mapRowToEntry = (service as unknown as {
       mapRowToEntry: (row: Record<string, unknown>) => { focusMeta?: unknown };

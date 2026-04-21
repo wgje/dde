@@ -54,6 +54,15 @@ export class SupabaseClientService {
   private readonly fetch401RetryCount = new Map<string, number>();
   private readonly MAX_FETCH_401_RETRIES = 1; // 最多重试一次（总共 2 次请求）
 
+  // 【根因修复 2026-04-20】Supabase 网关瞬时 5xx（502/503/504）静默重试。
+  // 背景：用户控制台频繁出现 "Access-Control-Allow-Origin ... blocked by CORS"，
+  // 实为 Supabase edge 返回 502 时未携带 CORS 头，被浏览器错报为 CORS 错误。
+  // 这类 5xx 几乎都是上游 PostgREST 瞬时波动，重试一次即可恢复。
+  // 仅对幂等方法（GET/HEAD）启用，写操作由上层 RetryQueue 负责。
+  private readonly MAX_FETCH_GATEWAY_RETRIES = 2; // 最多额外重试 2 次（总共 3 次请求）
+  private readonly FETCH_GATEWAY_RETRY_BASE_MS = 300; // 指数退避基数：300ms → 600ms
+  private readonly FETCH_GATEWAY_RETRY_JITTER_MS = 150; // 抖动上限，避免雷鸣群效应
+
   // 【鲁棒性 5】token 续签指标收集
   private readonly proactiveRefreshMetrics = {
     totalAttempts: 0,
@@ -696,7 +705,9 @@ export class SupabaseClientService {
       // 缓存本次请求的 promise，后续请求会 await 它而不是重新发送
       const fetchPromise = (async () => {
         try {
-          const response = await this.fetchWithTimeout(url, options);
+          // 【根因修复 2026-04-20】幂等请求启用网关 5xx 静默重试，吸收 Supabase edge
+          // 瞬时 502/503/504（浏览器常误报为 CORS 错误），避免上抛到 UI。
+          const response = await this.fetchWithGatewayRetry(url, options);
           const cacheEntry = this.requestDeduplicationCache.get(signature);
           if (cacheEntry) {
             cacheEntry.response = response.clone();
@@ -866,6 +877,101 @@ export class SupabaseClientService {
         this.requestDeduplicationCache.delete(key);
       }
     }
+  }
+
+  /**
+   * 【根因修复 2026-04-20】幂等请求的网关 5xx 瞬时错误静默重试。
+   *
+   * 问题链条：
+   *  1. Supabase edge 偶发返回 502/503/504（上游 PostgREST 扩缩容 / 连接池抖动）。
+   *  2. 这些 5xx 响应经常缺失 `Access-Control-Allow-Origin`，被浏览器升级为
+   *     刺眼的 CORS 错误刷屏。
+   *  3. 单次失败直接上抛会破坏本地同步流水（batch-sync / canonical-match 等）。
+   *
+   * 策略：仅对 GET/HEAD（调用方已通过 isIdempotentRequest 判定）重试 5xx；指数
+   * 退避 + 少量抖动；遇到挂起 / 离线立即放弃；其他 HTTP 状态直接返回；抛错保留
+   * 原有语义交由上层处理。
+   *
+   * 为什么不把此逻辑合入 fetchWithTimeout？
+   *  - 写请求不允许自动重试（会造成重复提交），而 fetchWithTimeout 被读写共用。
+   *  - handle401Retry 需要看到未重试的首个响应；把重试放在更外层会与它叠加。
+   *    目前 401 与 5xx 互斥（401 不会被 5xx 判定捕获），层级清晰。
+   */
+  private async fetchWithGatewayRetry(url: RequestInfo | URL, options: RequestInit): Promise<Response> {
+    let attempt = 0;
+    while (true) {
+      try {
+        const response = await this.fetchWithTimeout(url, options);
+        const isGatewayError = response.status === 502 || response.status === 503 || response.status === 504;
+        if (!isGatewayError || attempt >= this.MAX_FETCH_GATEWAY_RETRIES) {
+          return response;
+        }
+
+        // 离线 / 网络挂起时放弃重试，保持原响应
+        if (isBrowserNetworkSuspendedWindow()) {
+          return response;
+        }
+        if (typeof navigator !== 'undefined' && !navigator.onLine) {
+          return response;
+        }
+
+        // 释放本次响应流（虽然未读 body，某些浏览器仍可能占用底层连接槽位）
+        try {
+          await response.body?.cancel();
+        } catch {
+           // 忽略 cancel 异常，继续重试 // eslint-disable-line no-restricted-syntax
+        }
+
+        attempt++;
+        const backoff = this.FETCH_GATEWAY_RETRY_BASE_MS * Math.pow(2, attempt - 1);
+        const jitter = Math.floor(Math.random() * this.FETCH_GATEWAY_RETRY_JITTER_MS);
+        this.logger.debug('Supabase 网关 5xx 瞬时错误，延迟后重试', {
+          url: this.redactSupabaseUrl(url),
+          status: response.status,
+          attempt,
+          delayMs: backoff + jitter,
+        });
+        await new Promise(resolve => setTimeout(resolve, backoff + jitter));
+      } catch (error: unknown) {
+        if (!this.shouldRetryGatewayFetchRejection(error) || attempt >= this.MAX_FETCH_GATEWAY_RETRIES) {
+          throw error;
+        }
+
+        attempt++;
+        const backoff = this.FETCH_GATEWAY_RETRY_BASE_MS * Math.pow(2, attempt - 1);
+        const jitter = Math.floor(Math.random() * this.FETCH_GATEWAY_RETRY_JITTER_MS);
+        this.logger.debug('Supabase 请求被浏览器按网络错误拒绝，按网关瞬时故障路径重试', {
+          url: this.redactSupabaseUrl(url),
+          attempt,
+          delayMs: backoff + jitter,
+          message: error instanceof Error ? error.message : String(error),
+        });
+        await new Promise(resolve => setTimeout(resolve, backoff + jitter));
+      }
+    }
+  }
+
+  private shouldRetryGatewayFetchRejection(error: unknown): boolean {
+    if (isBrowserNetworkSuspendedError(error) || isBrowserNetworkSuspendedWindow()) {
+      return false;
+    }
+
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      return false;
+    }
+
+    if (error instanceof DOMException) {
+      return error.name === 'NetworkError';
+    }
+
+    if (error instanceof TypeError) {
+      const message = error.message.toLowerCase();
+      return message.includes('failed to fetch')
+        || message.includes('networkerror')
+        || message.includes('load failed');
+    }
+
+    return false;
   }
 
   /**

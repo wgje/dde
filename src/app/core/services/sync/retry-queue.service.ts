@@ -291,6 +291,25 @@ export class RetryQueueService {
     return Array.from(merged.values());
   }
 
+  private findPersistedItemByQueueId(queueItemId: string): RetryQueueItem | undefined {
+    return this.getPersistedItems().find(item => item.id === queueItemId);
+  }
+
+  private wasItemRefreshedDuringProcessing(item: RetryQueueItem): boolean {
+    const current = this.findPersistedItemByQueueId(item.id);
+    if (!current) {
+      return false;
+    }
+
+    return current !== item
+      || current.createdAt !== item.createdAt
+      || current.operation !== item.operation
+      || current.data !== item.data
+      || current.projectId !== item.projectId
+      || current.sourceUserId !== item.sourceUserId
+      || current.taskIdsToDelete !== item.taskIdsToDelete;
+  }
+
   private removeItemsFromAllViews(itemIds: Set<string>): void {
     if (itemIds.size === 0) {
       return;
@@ -1440,6 +1459,16 @@ export class RetryQueueService {
 
         if (success) {
           if (item.type === 'project') {
+            if (this.wasItemRefreshedDuringProcessing(item)) {
+              this.logger.debug('重试项处理期间已刷新，保留最新快照等待下一轮回放', {
+                type: item.type,
+                queueItemId: item.id,
+                dataId: item.data.id,
+              });
+              this.recordCircuitSuccess();
+              continue;
+            }
+
             const previousVisibleQueue = [...this.queue];
             const previousHiddenQueue = [...this.hiddenQueueItems];
             this.removeItemsFromAllViews(new Set([item.id]));
@@ -1458,6 +1487,16 @@ export class RetryQueueService {
             }
 
             successCount++;
+            this.recordCircuitSuccess();
+            continue;
+          }
+
+          if (this.wasItemRefreshedDuringProcessing(item)) {
+            this.logger.debug('重试项处理期间已刷新，保留最新快照等待下一轮回放', {
+              type: item.type,
+              queueItemId: item.id,
+              dataId: item.data.id,
+            });
             this.recordCircuitSuccess();
             continue;
           }

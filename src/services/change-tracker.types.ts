@@ -29,6 +29,8 @@ export interface ChangeRecord {
   projectId: string;
   /** 变更时间戳 */
   timestamp: number;
+  /** 单调递增修订号，用于区分同一毫秒内的先后编辑 */
+  revision?: number;
   /** 变更的字段（仅 update 类型有意义） */
   changedFields?: string[];
   /** 实体数据（用于 create/update） */
