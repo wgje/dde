@@ -3,6 +3,7 @@ import { Project, Connection } from '../models';
 import { LoggerService } from './logger.service';
 import { ProjectStateService } from './project-state.service';
 import { TaskRecordTrackingService } from './task-record-tracking.service';
+import { isParentChildDuplicateConnection } from '../utils/parent-child-connection-integrity';
 
 /**
  * 任务连接服务 - 负责跨树连接的管理
@@ -158,10 +159,19 @@ export class TaskConnectionService {
       return false;
     }
 
-    const sourceTask = this.projectState.getTask(sourceId);
-    const targetTask = this.projectState.getTask(targetId);
+    const sourceTask = project.tasks.find(task => task.id === sourceId);
+    const targetTask = project.tasks.find(task => task.id === targetId);
 
-    return !!sourceTask && !sourceTask.deletedAt && !!targetTask && !targetTask.deletedAt;
+    if (!sourceTask || !!sourceTask.deletedAt || !targetTask || !!targetTask.deletedAt) {
+      return false;
+    }
+
+    if (isParentChildDuplicateConnection(project.tasks, sourceId, targetId)) {
+      this.logger.warn('拦截与 parentId 重复的非法跨树连接', { sourceId, targetId });
+      return false;
+    }
+
+    return true;
   }
 
   /**

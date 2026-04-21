@@ -146,6 +146,19 @@ describe('TaskConnectionService', () => {
     expect(activeProject.connections).toHaveLength(0);
   });
 
+  it('addCrossTreeConnection 不应创建与 parentId 重复的非法连接', () => {
+    activeProject = createProject();
+    activeProject.tasks = activeProject.tasks.map(task => (
+      task.id === 'task-2'
+        ? { ...task, parentId: 'task-1' }
+        : task
+    ));
+
+    service.addCrossTreeConnection('task-1', 'task-2');
+
+    expect(activeProject.connections).toHaveLength(0);
+  });
+
   it('addCrossTreeConnection 遇到同端点 active+deleted 混排时不应误恢复 deleted 记录', () => {
     activeProject = createProject([
       {
@@ -593,6 +606,33 @@ describe('TaskConnectionService', () => {
         id: 'conn-old',
         source: 'task-1',
         target: 'task-2',
+        updatedAt: '2026-04-10T00:00:00.000Z',
+      }),
+    ]);
+  });
+
+  it('relinkCrossTreeConnection 不应重连到与 parentId 重复的非法端点对', () => {
+    activeProject = createProject([
+      {
+        id: 'conn-old',
+        source: 'task-3',
+        target: 'task-4',
+        updatedAt: '2026-04-10T00:00:00.000Z',
+      },
+    ]);
+    activeProject.tasks = activeProject.tasks.map(task => (
+      task.id === 'task-2'
+        ? { ...task, parentId: 'task-1' }
+        : task
+    ));
+
+    service.relinkCrossTreeConnection('task-3', 'task-4', 'task-1', 'task-2');
+
+    expect(activeProject.connections).toEqual([
+      expect.objectContaining({
+        id: 'conn-old',
+        source: 'task-3',
+        target: 'task-4',
         updatedAt: '2026-04-10T00:00:00.000Z',
       }),
     ]);

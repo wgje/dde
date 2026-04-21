@@ -372,9 +372,23 @@ describe('ImportService', () => {
       expect(importedProject.id).toBe('proj-1');
       expect(importedProject.tasks[0].id).toBe('task-1');
       expect(importedProject.tasks[1].parentId).toBe('task-1');
-      expect(importedProject.connections[0].id).toBe('conn-1');
-      expect(importedProject.connections[0].source).toBe('task-1');
-      expect(importedProject.connections[0].target).toBe('task-2');
+      expect(importedProject.connections).toHaveLength(0);
+    });
+
+    it('导入时应过滤与 parentId 重复的非法连接', async () => {
+      const data = createValidExportData();
+      const onProjectImported = vi.fn().mockResolvedValue(undefined);
+
+      await service.executeImport(
+        data,
+        [],
+        { conflictStrategy: 'skip' },
+        onProjectImported
+      );
+
+      const importedProject = onProjectImported.mock.calls[0][0] as Project;
+      expect(importedProject.tasks[1].parentId).toBe('task-1');
+      expect(importedProject.connections).toHaveLength(0);
     });
     
     it('使用 skip 策略时应跳过已存在的项目', async () => {
@@ -431,6 +445,72 @@ describe('ImportService', () => {
       const mergedProject = onProjectImported.mock.calls[0][0] as Project;
       expect(mergedProject.tasks.length).toBeGreaterThan(existingProject.tasks.length);
     });
+
+    it('使用 merge 策略时应将现有 shadow connection 软删而不是直接丢弃', async () => {
+      const data = createValidExportData();
+      const existingProject: Project = {
+        id: 'proj-1',
+        name: '现有项目',
+        description: '',
+        createdDate: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        tasks: [
+          {
+            id: 'task-1',
+            title: '任务1',
+            content: '',
+            stage: 0,
+            parentId: null,
+            order: 0,
+            rank: 10000,
+            status: 'active',
+            x: 100,
+            y: 100,
+            displayId: '1',
+            createdDate: new Date().toISOString(),
+          } as Task,
+          {
+            id: 'task-2',
+            title: '任务2',
+            content: '',
+            stage: 0,
+            parentId: 'task-1',
+            order: 0,
+            rank: 10000,
+            status: 'active',
+            x: 200,
+            y: 200,
+            displayId: '1,a',
+            createdDate: new Date().toISOString(),
+          } as Task,
+        ],
+        connections: [
+          {
+            id: 'conn-shadow',
+            source: 'task-1',
+            target: 'task-2',
+          } as Connection,
+        ],
+      };
+      const onProjectImported = vi.fn().mockResolvedValue(undefined);
+
+      const result = await service.executeImport(
+        data,
+        [existingProject],
+        { conflictStrategy: 'merge' },
+        onProjectImported
+      );
+
+      const mergedProject = onProjectImported.mock.calls[0][0] as Project;
+      expect(result.details[0].connectionCount).toBe(0);
+      expect(mergedProject.connections).toEqual([
+        expect.objectContaining({
+          id: 'conn-shadow',
+          deletedAt: expect.any(String),
+          updatedAt: expect.any(String),
+        }),
+      ]);
+    });
     
     it('使用 rename 策略时应创建新项目', async () => {
       const data = createValidExportData();
@@ -452,7 +532,7 @@ describe('ImportService', () => {
       expect(importedProject.id).not.toBe(existingProject.id);
       expect(importedProject.name).toContain('(导入)');
       expect(importedProject.tasks[0].id).not.toBe('task-1');
-      expect(importedProject.connections[0].id).not.toBe('conn-1');
+      expect(importedProject.connections).toHaveLength(0);
     });
     
     it('generateNewIds 选项应生成全新的 ID', async () => {

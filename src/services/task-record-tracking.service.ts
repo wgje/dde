@@ -20,6 +20,7 @@ import { UiStateService } from './ui-state.service';
 import { LoggerService } from './logger.service';
 import { POLLING_CHECK_DELAY } from '../config/timeout.config';
 import { Project, Task, Connection } from '../models';
+import { softDeleteParentChildDuplicateConnections } from '../utils/parent-child-connection-integrity';
 
 @Injectable({
   providedIn: 'root'
@@ -52,6 +53,42 @@ export class TaskRecordTrackingService {
     }
 
     return connection.id;
+  }
+
+  private normalizeProjectConnections(project: Project): Project {
+    if (project.connections.length === 0) {
+      return project;
+    }
+
+    const now = new Date().toISOString();
+    const normalizedConnections = softDeleteParentChildDuplicateConnections(project.tasks, project.connections, now);
+
+    if (normalizedConnections === project.connections) {
+      return project;
+    }
+
+    const affectedConnectionIds: string[] = [];
+    for (let index = 0; index < project.connections.length; index += 1) {
+      const beforeConnection = project.connections[index];
+      const afterConnection = normalizedConnections[index];
+      if (!beforeConnection || !afterConnection) {
+        continue;
+      }
+
+      if (!beforeConnection.deletedAt && !!afterConnection.deletedAt) {
+        affectedConnectionIds.push(afterConnection.id);
+      }
+    }
+
+    this.logger.warn('检测到与 parentId 重复的 shadow connection，已自动软删', {
+      projectId: project.id,
+      affectedConnectionIds,
+    });
+
+    return {
+      ...project,
+      connections: normalizedConnections,
+    };
   }
 
   // ========== Toast 辅助 ==========
@@ -153,11 +190,11 @@ export class TaskRecordTrackingService {
   ): void {
     this.projectState.updateProjects(projects => projects.map(p => {
       if (p.id === projectId) {
-        return this.layoutService.rebalance({
+        return this.layoutService.rebalance(this.normalizeProjectConnections({
           ...p,
           tasks: snapshot.tasks ?? p.tasks,
           connections: snapshot.connections ?? p.connections
-        });
+        }));
       }
       return p;
     }));
@@ -203,7 +240,7 @@ export class TaskRecordTrackingService {
       let afterProject: Project | null = null;
       this.projectState.updateProjects(projects => projects.map(p => {
         if (p.id === targetProjectId) {
-          afterProject = mutator(p);
+          afterProject = this.normalizeProjectConnections(mutator(p));
           return afterProject;
         }
         return p;
@@ -263,7 +300,7 @@ export class TaskRecordTrackingService {
       let afterProject: Project | null = null;
       this.projectState.updateProjects(projects => projects.map(p => {
         if (p.id === targetProjectId) {
-          afterProject = mutator(p);
+          afterProject = this.normalizeProjectConnections(mutator(p));
           return afterProject;
         }
         return p;

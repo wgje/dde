@@ -123,7 +123,7 @@ describe('TaskCreationService', () => {
       expect(lastMutator).not.toBeNull();
     });
 
-    it('创建子任务时自动创建 Connection', () => {
+    it('创建子任务时不再写入与 parentId 重复的 shadow connection', () => {
       const result = service.addTask({
         title: 'Child Task',
         content: '',
@@ -133,11 +133,9 @@ describe('TaskCreationService', () => {
 
       expect(result.ok).toBe(true);
       expect(lastMutator).not.toBeNull();
-      // The mutator should add a connection and call rebalance
       const updated = lastMutator!(project);
       expect(mockLayoutService['rebalance']).toHaveBeenCalled();
-      expect(updated.connections.length).toBe(2); // original + new
-      expect(updated.connections.some(c => c.target !== 'child-1')).toBe(true);
+      expect(updated.connections).toEqual(project.connections);
     });
 
     it('title 和 content 均为空时默认标题为"新任务"', () => {

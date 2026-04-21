@@ -20,6 +20,8 @@ import { LayoutService } from './layout.service';
 import { Project, Task, Connection, AttachmentType } from '../models';
 // 【P2-44 修复】导入 sanitizeProject 用于导入数据消毒
 import { sanitizeProject } from '../utils/validation';
+import { filterParentChildDuplicateConnections } from '../utils/parent-child-connection-integrity';
+import { softDeleteParentChildDuplicateConnections } from '../utils/parent-child-connection-integrity';
 import { 
   ExportData, 
   ExportMetadata, 
@@ -522,12 +524,22 @@ export class ImportService {
       const newConnections = (exportProject.connections ?? [])
         .filter(c => !existingConnIds.has(c.id))
         .map(c => this.convertToConnection(c));
+      const importedConnections = filterParentChildDuplicateConnections( 
+        [...existingProject.tasks, ...newTasks],
+        newConnections,
+      );
+      const mergedTasks = [...existingProject.tasks, ...newTasks];
+      const mergedConnections = softDeleteParentChildDuplicateConnections(
+        mergedTasks,
+        [...existingProject.connections, ...importedConnections],
+        new Date().toISOString(),
+      );
       
       // 创建合并后的项目
       const mergedProject: Project = {
         ...existingProject,
-        tasks: [...existingProject.tasks, ...newTasks],
-        connections: [...existingProject.connections, ...newConnections],
+        tasks: mergedTasks,
+        connections: mergedConnections,
         updatedAt: new Date().toISOString(),
       };
       
@@ -541,7 +553,7 @@ export class ImportService {
         success: true,
         action: 'merged',
         taskCount: newTasks.length,
-        connectionCount: newConnections.length,
+        connectionCount: importedConnections.length,
       };
     } catch (error) {
       return {
@@ -578,16 +590,22 @@ export class ImportService {
       }
     }
     
+    const rawTasks = (exportProject.tasks ?? []).map(t => 
+      this.convertToTask(t, generateNewIds ? idMap : undefined)
+    );
+    const rawConnections = filterParentChildDuplicateConnections(
+      rawTasks,
+      (exportProject.connections ?? []).map(c => 
+        this.convertToConnection(c, generateNewIds ? idMap : undefined)
+      ),
+    );
+
     const rawProject: Project = {
       id: projectId,
       name: exportProject.name,
       description: exportProject.description ?? '',
-      tasks: (exportProject.tasks ?? []).map(t => 
-        this.convertToTask(t, generateNewIds ? idMap : undefined)
-      ),
-      connections: (exportProject.connections ?? []).map(c => 
-        this.convertToConnection(c, generateNewIds ? idMap : undefined)
-      ),
+      tasks: rawTasks,
+      connections: rawConnections,
       createdDate: exportProject.createdAt ?? new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       viewState: exportProject.viewState,

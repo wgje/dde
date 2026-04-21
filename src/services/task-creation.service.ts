@@ -140,7 +140,7 @@ export class TaskCreationService {
       this.recordAndUpdate(p => this.layoutService.rebalance({
         ...p,
         tasks: [...p.tasks, newTask],
-        connections: parentId ? [...p.connections, { id: crypto.randomUUID(), source: parentId, target: newTask.id }] : [...p.connections]
+        connections: [...p.connections]
       }));
     }
 

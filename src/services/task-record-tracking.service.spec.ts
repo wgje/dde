@@ -326,6 +326,34 @@ describe('TaskRecordTrackingService', () => {
       service.recordAndUpdate((p) => p);
       expect(service.lastUpdateType).toBe('structure');
     });
+
+    it('should soft-delete shadow connections that duplicate parentId edges', () => {
+      const project = createProject({
+        tasks: [
+          createTask({ id: 'task-1', parentId: null }),
+          createTask({ id: 'task-2', parentId: 'task-1' }),
+        ],
+        connections: [createConnection({ id: 'conn-shadow', source: 'task-1', target: 'task-2' })],
+      });
+
+      mockProjectState.activeProject.mockReturnValue(project);
+      mockProjectState.updateProjects.mockImplementation((fn: (projects: Project[]) => Project[]) => {
+        const [updatedProject] = fn([project]);
+        project.tasks = updatedProject.tasks;
+        project.connections = updatedProject.connections;
+        return [updatedProject];
+      });
+
+      service.recordAndUpdate((currentProject) => ({ ...currentProject }));
+
+      expect(project.connections[0]).toEqual(
+        expect.objectContaining({
+          id: 'conn-shadow',
+          deletedAt: expect.any(String),
+          updatedAt: expect.any(String),
+        })
+      );
+    });
   });
 
   // ==================== recordAndUpdateDebounced ====================
@@ -344,6 +372,34 @@ describe('TaskRecordTrackingService', () => {
     it('should set lastUpdateType to content', () => {
       service.recordAndUpdateDebounced((p) => p);
       expect(service.lastUpdateType).toBe('content');
+    });
+
+    it('should soft-delete shadow connections during debounced updates', () => {
+      const project = createProject({
+        tasks: [
+          createTask({ id: 'task-1', parentId: null }),
+          createTask({ id: 'task-2', parentId: 'task-1' }),
+        ],
+        connections: [createConnection({ id: 'conn-shadow', source: 'task-1', target: 'task-2' })],
+      });
+
+      mockProjectState.activeProject.mockReturnValue(project);
+      mockProjectState.updateProjects.mockImplementation((fn: (projects: Project[]) => Project[]) => {
+        const [updatedProject] = fn([project]);
+        project.tasks = updatedProject.tasks;
+        project.connections = updatedProject.connections;
+        return [updatedProject];
+      });
+
+      service.recordAndUpdateDebounced((currentProject) => ({ ...currentProject }));
+
+      expect(project.connections[0]).toEqual(
+        expect.objectContaining({
+          id: 'conn-shadow',
+          deletedAt: expect.any(String),
+          updatedAt: expect.any(String),
+        })
+      );
     });
 
     it('should track connection update when only title changes', () => {
