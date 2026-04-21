@@ -16,6 +16,7 @@ import { LoggerService } from './logger.service';
 import { ConflictStorageService } from './conflict-storage.service';
 import { ToastService } from './toast.service';
 import { AUTH_CONFIG } from '../config/auth.config';
+import { PermanentFailureError } from '../utils/permanent-failure-error';
 
 type QueuedAction = Omit<Partial<QueuedActionModel>, 'payload'> & { payload: unknown };
 type RegisteredProcessor = (action: QueuedActionModel) => Promise<boolean>;
@@ -28,6 +29,8 @@ const mockLoggerService = { category: vi.fn(() => mockLoggerCategory) };
 const mockActionQueueService = {
   registerProcessor: vi.fn(),
   setQueueProcessCallbacks: vi.fn(),
+  markActionSyncedRemotely: vi.fn(),
+  markActionResolvedWithoutRemote: vi.fn(),
   moveToDeadLetter: vi.fn(),
   discardActions: vi.fn(),
   settleProjectDeleteSuccessForOwner: vi.fn().mockResolvedValue(1),
@@ -45,6 +48,8 @@ const mockRetryQueueService = {
 const mockSyncService = {
   pauseRealtimeUpdates: vi.fn(),
   resumeRealtimeUpdates: vi.fn(),
+  hasPendingRetryRecovery: vi.fn(() => false),
+  markSyncRecoveredIfIdle: vi.fn(),
   saveProjectSmart: vi.fn().mockResolvedValue({ success: true, newVersion: 2 }),
   loadFullProjectOptimized: vi.fn().mockResolvedValue(null),
   deleteProjectFromCloud: vi.fn().mockResolvedValue({ ok: true, value: undefined }),
@@ -92,6 +97,9 @@ describe('ActionQueueProcessorsService', () => {
     mockSyncService.saveFocusSession.mockResolvedValue({ ok: true });
     mockSyncService.upsertRoutineTask.mockResolvedValue({ ok: true });
     mockSyncService.incrementRoutineCompletion.mockResolvedValue({ ok: true });
+    mockSyncService.hasPendingRetryRecovery.mockReset();
+    mockSyncService.hasPendingRetryRecovery.mockReturnValue(false);
+    mockSyncService.markSyncRecoveredIfIdle.mockReset();
     mockConflictStorageService.saveConflict.mockResolvedValue(true);
     mockActionQueueService.getCurrentQueueViewGeneration.mockReturnValue(1);
     mockActionQueueService.isQueueViewCurrent.mockReturnValue(true);
@@ -132,6 +140,64 @@ describe('ActionQueueProcessorsService', () => {
 
   it('should set queue sync callbacks', () => {
     expect(mockActionQueueService.setQueueProcessCallbacks).toHaveBeenCalledOnce();
+  });
+
+  it('should mark sync recovered only when queue settles with pure remote success', () => {
+    const settledCallback = mockActionQueueService.setQueueProcessCallbacks.mock.calls[0]?.[2] as
+      | ((summary: { processed: number; failed: number; movedToDeadLetter: number; remaining: number; remoteSuccessCount: number; resolvedNoOpCount: number }) => void)
+      | undefined;
+
+    expect(settledCallback).toBeTypeOf('function');
+
+    settledCallback?.({
+      processed: 2,
+      failed: 0,
+      movedToDeadLetter: 0,
+      remaining: 0,
+      remoteSuccessCount: 2,
+      resolvedNoOpCount: 0,
+    });
+
+    expect(mockSyncService.markSyncRecoveredIfIdle).toHaveBeenCalledOnce();
+  });
+
+  it('should not mark sync recovered when queue settlement includes local-only completion', () => {
+    const settledCallback = mockActionQueueService.setQueueProcessCallbacks.mock.calls[0]?.[2] as
+      | ((summary: { processed: number; failed: number; movedToDeadLetter: number; remaining: number; remoteSuccessCount: number; resolvedNoOpCount: number }) => void)
+      | undefined;
+
+    expect(settledCallback).toBeTypeOf('function');
+
+    settledCallback?.({
+      processed: 2,
+      failed: 0,
+      movedToDeadLetter: 0,
+      remaining: 0,
+      remoteSuccessCount: 1,
+      resolvedNoOpCount: 0,
+    });
+
+    expect(mockSyncService.markSyncRecoveredIfIdle).not.toHaveBeenCalled();
+  });
+
+  it('should mark sync recovered when ActionQueue only settles a tombstone no-op after RetryQueue already recovered', () => {
+    mockSyncService.hasPendingRetryRecovery.mockReturnValueOnce(true);
+    const settledCallback = mockActionQueueService.setQueueProcessCallbacks.mock.calls[0]?.[2] as
+      | ((summary: { processed: number; failed: number; movedToDeadLetter: number; remaining: number; remoteSuccessCount: number; resolvedNoOpCount: number }) => void)
+      | undefined;
+
+    expect(settledCallback).toBeTypeOf('function');
+
+    settledCallback?.({
+      processed: 1,
+      failed: 0,
+      movedToDeadLetter: 0,
+      remaining: 0,
+      remoteSuccessCount: 0,
+      resolvedNoOpCount: 1,
+    });
+
+    expect(mockSyncService.markSyncRecoveredIfIdle).toHaveBeenCalledOnce();
   });
 
   it('focus-session:update should preserve browser-suspension details for the queue layer', async () => {
@@ -872,7 +938,7 @@ describe('ActionQueueProcessorsService', () => {
 
     const result = await handler({ payload: { task, projectId: 'p-1', sourceUserId: 'test-user' } });
 
-    expect(mockSyncService.pushTask).toHaveBeenCalledWith(task, 'p-1', false, false, 'test-user');
+    expect(mockSyncService.pushTask).toHaveBeenCalledWith(task, 'p-1', false, false, 'test-user', true);
     expect(result).toBe(true);
   });
 
@@ -882,8 +948,31 @@ describe('ActionQueueProcessorsService', () => {
 
     const result = await handler({ payload: { task, projectId: 'p-2', sourceUserId: 'test-user' } } as QueuedAction);
 
-    expect(mockSyncService.pushTask).toHaveBeenCalledWith(task, 'p-2', false, false, 'test-user');
+    expect(mockSyncService.pushTask).toHaveBeenCalledWith(task, 'p-2', false, false, 'test-user', true);
     expect(result).toBe(true);
+  });
+
+  it('task:update should discard stale upserts when remote tombstone already exists', async () => {
+    mockSyncService.pushTask.mockRejectedValueOnce(
+      new PermanentFailureError(
+        'Task tombstone prevented remote upsert',
+        undefined,
+        { operation: 'pushTaskTombstone', taskId: 'task-tombstoned', projectId: 'project-1' },
+      ),
+    );
+    const handler = getProcessor('task:update');
+
+    const result = await handler({
+      payload: {
+        task: { id: 'task-tombstoned' },
+        projectId: 'project-1',
+        sourceUserId: 'test-user',
+      },
+    } as QueuedAction);
+
+    expect(result).toBe(true);
+    expect(mockActionQueueService.markActionSyncedRemotely).not.toHaveBeenCalled();
+    expect(mockActionQueueService.markActionResolvedWithoutRemote).toHaveBeenCalledOnce();
   });
 
   it('task:delete should call deleteTask with sourceUserId', async () => {

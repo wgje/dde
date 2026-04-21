@@ -22,6 +22,7 @@ import { ConflictStorageService } from './conflict-storage.service';
 import { ToastService } from './toast.service';
 import { Project } from '../models';
 import { AUTH_CONFIG } from '../config/auth.config';
+import { isPermanentFailureError } from '../utils/permanent-failure-error';
 import {
   FocusSessionPayload,
   PreferencePayload,
@@ -170,6 +171,16 @@ export class ActionQueueProcessorsService {
     }
 
     this.logger.error(`${actionType} 异常`, { error, ...context });
+  }
+
+  private markRemoteActionSuccess(actionId: string): true {
+    this.actionQueue.markActionSyncedRemotely(actionId);
+    return true;
+  }
+
+  private isTaskTombstoneNoOp(error: unknown): boolean {
+    return isPermanentFailureError(error)
+      && error.context?.['operation'] === 'pushTaskTombstone';
   }
 
   private hasConflictingOwnerHints(
@@ -323,7 +334,20 @@ export class ActionQueueProcessorsService {
   private setupQueueSyncCoordination(): void {
     this.actionQueue.setQueueProcessCallbacks(
       () => this.syncService.pauseRealtimeUpdates(),
-      () => this.syncService.resumeRealtimeUpdates()
+      () => this.syncService.resumeRealtimeUpdates(),
+      ({ processed, failed, movedToDeadLetter, remaining, remoteSuccessCount, resolvedNoOpCount }) => {
+        const resolvedCount = remoteSuccessCount + resolvedNoOpCount;
+        if (
+          resolvedCount > 0 &&
+          processed === resolvedCount &&
+          failed === 0 &&
+          movedToDeadLetter === 0 &&
+          remaining === 0 &&
+          (remoteSuccessCount > 0 || this.syncService.hasPendingRetryRecovery())
+        ) {
+          this.syncService.markSyncRecoveredIfIdle();
+        }
+      }
     );
   }
 
@@ -356,7 +380,7 @@ export class ActionQueueProcessorsService {
           ));
         }
         if (result.success) {
-          return true;
+          return this.markRemoteActionSuccess(action.id);
         }
         if (result.conflict) {
           this.logger.warn('project:update 冲突', { projectId: payload.project.id });
@@ -412,7 +436,7 @@ export class ActionQueueProcessorsService {
         const result = await this.syncService.deleteProjectFromCloud(payload.projectId, sourceUserId);
         if (result.ok) {
           await this.discardProjectDependentMutations(sourceUserId, payload.projectId, action.id);
-          return true;
+          return this.markRemoteActionSuccess(action.id);
         }
 
         throw this.buildOperationError(result.error);
@@ -450,7 +474,7 @@ export class ActionQueueProcessorsService {
           ));
         }
         if (result.success) {
-          return true;
+          return this.markRemoteActionSuccess(action.id);
         }
         if (result.conflict) {
           this.logger.warn('project:create 冲突', { projectId: payload.project.id });
@@ -709,8 +733,24 @@ export class ActionQueueProcessorsService {
         return true;
       }
       try {
-        return await this.syncService.pushTask(payload.task, payload.projectId, false, false, payload.sourceUserId);
+        const success = await this.syncService.pushTask(
+          payload.task,
+          payload.projectId,
+          false,
+          false,
+          payload.sourceUserId,
+          true,
+        );
+        if (success) {
+          this.actionQueue.markActionSyncedRemotely(action.id);
+        }
+        return success;
       } catch (error) {
+        if (this.isTaskTombstoneNoOp(error)) {
+          this.actionQueue.markActionResolvedWithoutRemote(action.id);
+          this.logger.info('task:create 命中远端 tombstone，丢弃过期 upsert', { taskId: payload.task.id });
+          return true;
+        }
         this.logger.error('task:create 异常', { error, taskId: payload.task.id });
         return false;
       }
@@ -725,8 +765,24 @@ export class ActionQueueProcessorsService {
         return true;
       }
       try {
-        return await this.syncService.pushTask(payload.task, payload.projectId, false, false, payload.sourceUserId);
+        const success = await this.syncService.pushTask(
+          payload.task,
+          payload.projectId,
+          false,
+          false,
+          payload.sourceUserId,
+          true,
+        );
+        if (success) {
+          this.actionQueue.markActionSyncedRemotely(action.id);
+        }
+        return success;
       } catch (error) {
+        if (this.isTaskTombstoneNoOp(error)) {
+          this.actionQueue.markActionResolvedWithoutRemote(action.id);
+          this.logger.info('task:update 命中远端 tombstone，丢弃过期 upsert', { taskId: payload.task.id });
+          return true;
+        }
         this.logger.error('task:update 异常', { error, taskId: payload.task.id });
         return false;
       }
@@ -741,7 +797,11 @@ export class ActionQueueProcessorsService {
         return true;
       }
       try {
-        return await this.syncService.deleteTask(payload.taskId, payload.projectId, payload.sourceUserId);
+        const success = await this.syncService.deleteTask(payload.taskId, payload.projectId, payload.sourceUserId);
+        if (success) {
+          this.actionQueue.markActionSyncedRemotely(action.id);
+        }
+        return success;
       } catch (error) {
         this.logger.error('task:delete 异常', { error, taskId: payload.taskId });
         return false;
@@ -866,7 +926,11 @@ export class ActionQueueProcessorsService {
         return false;
       }
       try {
-        return await this.syncService.saveUserPreferences(sourceUserId, payload.preferences);
+        const success = await this.syncService.saveUserPreferences(sourceUserId, payload.preferences);
+        if (success) {
+          this.actionQueue.markActionSyncedRemotely(action.id);
+        }
+        return success;
       } catch (error) {
         this.logger.error('preference:update 异常', { error });
         return false;
@@ -915,7 +979,7 @@ export class ActionQueueProcessorsService {
         if (!result.ok) {
           throw this.buildOperationError(result.error);
         }
-        return true;
+        return this.markRemoteActionSuccess(action.id);
       } catch (error) {
         this.logProcessorFailure('focus-session:create', error);
         throw error;
@@ -948,7 +1012,7 @@ export class ActionQueueProcessorsService {
         if (!result.ok) {
           throw this.buildOperationError(result.error);
         }
-        return true;
+        return this.markRemoteActionSuccess(action.id);
       } catch (error) {
         this.logProcessorFailure('focus-session:update', error);
         throw error;
@@ -977,7 +1041,7 @@ export class ActionQueueProcessorsService {
         if (!result.ok) {
           throw this.buildOperationError(result.error);
         }
-        return true;
+        return this.markRemoteActionSuccess(action.id);
       } catch (error) {
         this.logger.error('routine-task:create 异常', { error });
         throw error;
@@ -1006,7 +1070,7 @@ export class ActionQueueProcessorsService {
         if (!result.ok) {
           throw this.buildOperationError(result.error);
         }
-        return true;
+        return this.markRemoteActionSuccess(action.id);
       } catch (error) {
         this.logger.error('routine-task:update 异常', { error });
         throw error;
@@ -1039,7 +1103,7 @@ export class ActionQueueProcessorsService {
         if (!result.ok) {
           throw this.buildOperationError(result.error);
         }
-        return true;
+        return this.markRemoteActionSuccess(action.id);
       } catch (error) {
         this.logger.error('routine-completion:create 异常', { error });
         throw error;
@@ -1072,7 +1136,7 @@ export class ActionQueueProcessorsService {
         if (!result.ok) {
           throw this.buildOperationError(result.error);
         }
-        return true;
+        return this.markRemoteActionSuccess(action.id);
       } catch (error) {
         this.logger.error('routine-completion:update 异常', { error });
         throw error;

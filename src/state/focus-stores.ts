@@ -355,6 +355,20 @@ export function updateBlackBoxEntry(entry: BlackBoxEntry): void {
   blackBoxEntriesByDate.update(dateMap => {
     const newDateMap = new Map(dateMap);
     const existingSet = newDateMap.get(entry.date);
+
+    if (entry.deletedAt) {
+      if (existingSet) {
+        const nextSet = new Set(existingSet);
+        nextSet.delete(entry.id);
+        if (nextSet.size === 0) {
+          newDateMap.delete(entry.date);
+        } else {
+          newDateMap.set(entry.date, nextSet);
+        }
+      }
+      return newDateMap;
+    }
+
     const dateSet = existingSet ? new Set(existingSet) : new Set<string>();
     dateSet.add(entry.id);
     newDateMap.set(entry.date, dateSet);
@@ -371,6 +385,9 @@ export function setBlackBoxEntries(entries: BlackBoxEntry[]): void {
   
   for (const entry of entries) {
     entriesMap.set(entry.id, entry);
+    if (entry.deletedAt) {
+      continue;
+    }
     
     const dateSet = dateMap.get(entry.date) || new Set();
     dateSet.add(entry.id);

@@ -173,6 +173,8 @@ export class RetryQueueService {
   private isProcessingQueue = false;
   /** 当前可见队列视图代次；切账号清空时递增以作废旧处理锁 */
   private queueViewGeneration = 0;
+  /** 最近一次 onProcessingStateChange(false) 是否由成功回放见底触发 */
+  private lastDrainCompletedBySuccess = false;
   /** 队列内存态代次；本地新增/删除/切账号后用于作废晚到的存储加载结果 */
   private queueStateGeneration = 0;
   private lastProcessTime = 0;
@@ -295,21 +297,36 @@ export class RetryQueueService {
     return this.getPersistedItems().find(item => item.id === queueItemId);
   }
 
+  private buildRefreshFingerprint(item: RetryQueueItem): string {
+    const dataWithTimestamps = item.data as { updatedAt?: unknown; deletedAt?: unknown };
+    const updatedAt = typeof dataWithTimestamps.updatedAt === 'string' ? dataWithTimestamps.updatedAt : '';
+    const deletedAt = typeof dataWithTimestamps.deletedAt === 'string' ? dataWithTimestamps.deletedAt : '';
+    const taskDeleteSignature = Array.isArray(item.taskIdsToDelete)
+      ? [...item.taskIdsToDelete].sort().join(',')
+      : '';
+
+    return [
+      String(item.createdAt),
+      item.operation,
+      item.projectId ?? '',
+      item.sourceUserId ?? '',
+      updatedAt,
+      deletedAt,
+      taskDeleteSignature,
+    ].join('|');
+  }
+
   private wasItemRefreshedDuringProcessing(item: RetryQueueItem): boolean {
     const current = this.findPersistedItemByQueueId(item.id);
     if (!current) {
       return false;
     }
 
-    // 【2026-04-21 漏洞 C 修复】原实现包含 `current !== item` 与 `current.data !== item.data`
-    // 等对象引用比较；当 loadFromStorage / persistNow 重建队列数组（或对 data 做浅复制）时，
-    // 即便内容未变也会因引用不同被误判为"处理期间已刷新"，导致成功项被保留、计数不降。
-    // 改为仅比对 addInternal 真正会重写的"刷新信号"：createdAt（刷新时会重置为 Date.now()）
-    // 加上 operation/projectId/sourceUserId 标量字段，彻底规避引用比较的假阳性。
-    return current.createdAt !== item.createdAt
-      || current.operation !== item.operation
-      || current.projectId !== item.projectId
-      || current.sourceUserId !== item.sourceUserId;
+    // 【2026-04-21 漏洞 C 修复】避免对象引用比较造成的假阳性，同时补上同毫秒刷新场景：
+    // addInternal 会重写 createdAt，但极快的覆盖更新可能与旧项落在同一毫秒。
+    // 因此改用仅含标量字段的刷新指纹，并额外纳入 updatedAt/deletedAt/taskIdsToDelete，
+    // 既避免 loadFromStorage 浅复制误判，又能识别真实的新快照覆盖旧 in-flight 项。
+    return this.buildRefreshFingerprint(current) !== this.buildRefreshFingerprint(item);
   }
 
   private removeItemsFromAllViews(itemIds: Set<string>): void {
@@ -453,6 +470,7 @@ export class RetryQueueService {
     this.refreshLegacyReviewCount();
     this.clearPressureMode();
     if (this.operationHandler) {
+      this.lastDrainCompletedBySuccess = false;
       try {
         this.operationHandler.onProcessingStateChange(false, 0);
       } catch (error) {
@@ -800,6 +818,7 @@ export class RetryQueueService {
         if (duration > 120_000) {
           this.logger.warn('processQueue 卡死，强制重置', { percentUsed, duration });
           this.isProcessingQueue = false;
+          this.lastDrainCompletedBySuccess = false;
           try {
             this.operationHandler.onProcessingStateChange(false, this.queue.length);
           } catch (error) {
@@ -1033,6 +1052,7 @@ export class RetryQueueService {
     // 原因：loadFromStorage 在构造函数中异步执行，可能在 handler 设置前完成，
     // 导致 SyncState.pendingCount 与 RetryQueue.length 不一致，UI 在同步中/待同步间闪烁
     if (this.queue.length > 0) {
+      this.lastDrainCompletedBySuccess = false;
       try {
         handler.onProcessingStateChange(false, this.queue.length);
         this.logger.debug('setOperationHandler: 同步队列长度到 SyncState', { queueLength: this.queue.length });
@@ -1040,6 +1060,20 @@ export class RetryQueueService {
         this.logger.warn('setOperationHandler: 同步队列长度失败', error);
       }
     }
+  }
+
+  consumeSuccessfulDrainFlag(): boolean {
+    const drainedBySuccess = this.lastDrainCompletedBySuccess;
+    this.lastDrainCompletedBySuccess = false;
+    return drainedBySuccess;
+  }
+
+  hasSuccessfulDrainFlag(): boolean {
+    return this.lastDrainCompletedBySuccess;
+  }
+
+  clearSuccessfulDrainFlag(): void {
+    this.lastDrainCompletedBySuccess = false;
   }
 
   private getLegacyReviewStorageKey(ownerUserId = this.authService.currentUserId() ?? AUTH_CONFIG.LOCAL_MODE_USER_ID): string {
@@ -1320,10 +1354,15 @@ export class RetryQueueService {
     // 【2026-03-20 优化】延迟设置 isSyncing 状态
     // 只有当实际发起网络请求时才设置 isSyncing = true，避免空转检查导致 UI 频繁闪烁
     let hasNotifiedSyncStart = false;
+    let successfulReplayCount = 0;
+    let hadTerminalRemoval = false;
+    let stoppedByBudget = false;
+    let drainCompletedBySuccessfulReplay = false;
     
     const notifySyncStartOnce = () => {
       if (!hasNotifiedSyncStart && this.operationHandler) {
         hasNotifiedSyncStart = true;
+        this.lastDrainCompletedBySuccess = false;
         try {
           this.operationHandler.onProcessingStateChange(true, this.queue.length);
         } catch (error) {
@@ -1352,14 +1391,13 @@ export class RetryQueueService {
         this.queue = this.queue.filter(item => !expiredIds.has(item.id));
         this.touchQueueState();
         this.saveToStorage();
+        hadTerminalRemoval = true;
         this.logger.info('清理过期队列项', { expiredCount: expiredIds.size });
       }
 
-      let successCount = 0;
       const processedIds = new Set<string>();
       let exceededCount = 0;
       let processedCount = 0;
-      let stoppedByBudget = false;
 
       for (const item of validItems) {
         if (processedCount >= maxItems || (Date.now() - sliceStartedAt >= maxDurationMs && processedCount > 0)) {
@@ -1375,12 +1413,14 @@ export class RetryQueueService {
 
         if ((item.type === 'task' || item.type === 'connection') && !item.projectId) {
           processedIds.add(item.id);
+          hadTerminalRemoval = true;
           continue;
         }
 
         if (item.data?.id && !isValidUUID(item.data.id)) {
           this.logger.warn('队列中发现非法 ID，自动移除', { type: item.type, id: item.data.id });
           processedIds.add(item.id);
+          hadTerminalRemoval = true;
           continue;
         }
 
@@ -1388,6 +1428,7 @@ export class RetryQueueService {
         if (item.sourceUserId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
           this.quarantineLegacyRetryItem(item, 'legacy local-user 重试项禁止自动上云');
           processedIds.add(item.id);
+          hadTerminalRemoval = true;
           continue;
         }
         if (item.sourceUserId && currentUserId && item.sourceUserId !== currentUserId) {
@@ -1396,11 +1437,13 @@ export class RetryQueueService {
             `跨账号重试项来源 ${item.sourceUserId} 与当前账号 ${currentUserId} 不匹配`
           );
           processedIds.add(item.id);
+          hadTerminalRemoval = true;
           continue;
         }
         if (!item.sourceUserId) {
           this.quarantineLegacyRetryItem(item, 'legacy 重试项缺少来源元数据，无法安全判断归属');
           processedIds.add(item.id);
+          hadTerminalRemoval = true;
           continue;
         }
 
@@ -1427,6 +1470,7 @@ export class RetryQueueService {
           if (isPermanentFailureError(e)) {
             this.logger.warn('永久失败，从队列移除', { type: item.type, id: item.data.id, error: (e as Error).message });
             processedIds.add(item.id);
+            hadTerminalRemoval = true;
             continue;
           }
           if (isBrowserNetworkSuspendedError(e) || isBrowserNetworkSuspendedWindow()) {
@@ -1488,7 +1532,7 @@ export class RetryQueueService {
               break;
             }
 
-            successCount++;
+            successfulReplayCount++;
             this.recordCircuitSuccess();
             continue;
           }
@@ -1503,7 +1547,7 @@ export class RetryQueueService {
             continue;
           }
 
-          successCount++;
+          successfulReplayCount++;
           processedIds.add(item.id);
           this.recordCircuitSuccess();
           continue;
@@ -1514,6 +1558,7 @@ export class RetryQueueService {
         if (item.retryCount >= this.MAX_RETRIES) {
           processedIds.add(item.id);
           exceededCount++;
+          hadTerminalRemoval = true;
         }
       }
 
@@ -1531,7 +1576,7 @@ export class RetryQueueService {
       if (processedCount > 0) {
         this.logger.info('processQueueSlice 完成', {
           processedCount,
-          successCount,
+          successCount: successfulReplayCount,
           expiredCount: expiredIds.size,
           remainingCount: this.queue.length,
           maxItems: Number.isFinite(maxItems) ? maxItems : null,
@@ -1540,6 +1585,12 @@ export class RetryQueueService {
           stoppedByBudget
         });
       }
+
+      drainCompletedBySuccessfulReplay =
+        this.queue.length === 0 &&
+        successfulReplayCount > 0 &&
+        !hadTerminalRemoval &&
+        !stoppedByBudget;
 
       this.saveToStorage();
       this.checkCapacityWarning();
@@ -1573,6 +1624,7 @@ export class RetryQueueService {
       // 【2026-03-20 优化】只有在实际通知了同步开始时才通知同步结束
       // 避免未发起任何网络请求的空转也触发状态切换
       if (hasNotifiedSyncStart && processGeneration === this.queueViewGeneration) {
+        this.lastDrainCompletedBySuccess = drainCompletedBySuccessfulReplay;
         try {
           this.operationHandler.onProcessingStateChange(false, this.queue.length);
         } catch (error) {
@@ -1725,6 +1777,7 @@ export class RetryQueueService {
    */
   private syncPendingCountToState(): void {
     if (this.queue.length > 0 && this.operationHandler) {
+      this.lastDrainCompletedBySuccess = false;
       try {
         this.operationHandler.onProcessingStateChange(false, this.queue.length);
         this.logger.debug('loadFromStorage: 同步队列长度到 SyncState', { queueLength: this.queue.length });

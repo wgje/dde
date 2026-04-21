@@ -93,6 +93,12 @@ export class ActionQueueService {
   /** 队列处理生命周期回调 */
   private onQueueProcessStart: (() => void) | null = null;
   private onQueueProcessEnd: (() => void) | null = null;
+  private onQueueProcessSettled: ((summary: { processed: number; failed: number; movedToDeadLetter: number; remaining: number; remoteSuccessCount: number; resolvedNoOpCount: number }) => void) | null = null;
+  /** 当前处理轮次中真正完成远端写入的 action，按 process token 隔离 */
+  private remotelySyncedActionIdsByToken = new Map<number, Set<string>>();
+  /** 当前处理轮次中被权威 no-op 收口的 action，按 process token 隔离 */
+  private locallyResolvedActionIdsByToken = new Map<number, Set<string>>();
+  private actionProcessTokenById = new Map<string, number>();
   /** 当前可见队列/死信视图的代次；切账号或强制清空时递增，使旧处理循环失效 */
   private queueViewGeneration = 0;
   /** 记录每次视图失效的 stale 处理策略，供旧循环返回后决定如何收口 */
@@ -491,9 +497,42 @@ export class ActionQueueService {
   /**
    * 设置队列处理生命周期回调
    */
-  setQueueProcessCallbacks(onStart: () => void, onEnd: () => void) {
+  setQueueProcessCallbacks(
+    onStart: () => void,
+    onEnd: () => void,
+    onSettled?: (summary: { processed: number; failed: number; movedToDeadLetter: number; remaining: number; remoteSuccessCount: number; resolvedNoOpCount: number }) => void
+  ) {
     this.onQueueProcessStart = onStart;
     this.onQueueProcessEnd = onEnd;
+    this.onQueueProcessSettled = onSettled ?? null;
+  }
+
+  markActionSyncedRemotely(actionId: string): void {
+    const processToken = this.actionProcessTokenById.get(actionId);
+    if (processToken === undefined) {
+      return;
+    }
+
+    let actionIds = this.remotelySyncedActionIdsByToken.get(processToken);
+    if (!actionIds) {
+      actionIds = new Set<string>();
+      this.remotelySyncedActionIdsByToken.set(processToken, actionIds);
+    }
+    actionIds.add(actionId);
+  }
+
+  markActionResolvedWithoutRemote(actionId: string): void {
+    const processToken = this.actionProcessTokenById.get(actionId);
+    if (processToken === undefined) {
+      return;
+    }
+
+    let actionIds = this.locallyResolvedActionIdsByToken.get(processToken);
+    if (!actionIds) {
+      actionIds = new Set<string>();
+      this.locallyResolvedActionIdsByToken.set(processToken, actionIds);
+    }
+    actionIds.add(actionId);
   }
 
   private getCurrentOwnerUserId(): string {
@@ -726,6 +765,8 @@ export class ActionQueueService {
     
     this.isProcessing.set(true);
     const processLifecycleToken = this.beginQueueProcessLifecycle();
+    this.remotelySyncedActionIdsByToken.set(processLifecycleToken, new Set<string>());
+    this.locallyResolvedActionIdsByToken.set(processLifecycleToken, new Set<string>());
     
     let processed = 0;
     let failed = 0;
@@ -795,6 +836,7 @@ export class ActionQueueService {
         }
         
         try {
+          this.actionProcessTokenById.set(action.id, processLifecycleToken);
           const success = await processor(action);
 
           if (this.isStaleProcess(processGeneration)) {
@@ -861,13 +903,27 @@ export class ActionQueueService {
             }
           }
           failed++;
+        } finally {
+          this.actionProcessTokenById.delete(action.id);
         }
       }
     } finally {
+      const remoteSuccessCount = this.remotelySyncedActionIdsByToken.get(processLifecycleToken)?.size ?? 0;
+      const resolvedNoOpCount = this.locallyResolvedActionIdsByToken.get(processLifecycleToken)?.size ?? 0;
       this.endQueueProcessLifecycle(processLifecycleToken);
       if (!this.isStaleProcess(processGeneration)) {
         this.isProcessing.set(false);
+        this.onQueueProcessSettled?.({
+          processed,
+          failed,
+          movedToDeadLetter,
+          remaining: this.pendingActions().length,
+          remoteSuccessCount,
+          resolvedNoOpCount,
+        });
       }
+      this.remotelySyncedActionIdsByToken.delete(processLifecycleToken);
+      this.locallyResolvedActionIdsByToken.delete(processLifecycleToken);
       
       this.sentryLazyLoader.addBreadcrumb({
         category: 'sync',
@@ -1043,5 +1099,6 @@ export class ActionQueueService {
     this.processors.clear();
     this.onQueueProcessStart = null;
     this.onQueueProcessEnd = null;
+    this.onQueueProcessSettled = null;
   }
 }

@@ -13,7 +13,6 @@ import {
   blackBoxEntriesGroupedByDate,
   unreadBlackBoxCount,
   updateBlackBoxEntry,
-  deleteBlackBoxEntry as _deleteFromStore,
   getTodayDate
 } from '../state/focus-stores';
 import { BlackBoxSyncService, type PullChangesOptions } from './black-box-sync.service';
@@ -153,7 +152,8 @@ export class BlackBoxService {
     const updated: BlackBoxEntry = {
       ...entry,
       ...updates,
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
+      syncStatus: 'pending',
     };
     
     // 本地优先更新
@@ -206,11 +206,11 @@ export class BlackBoxService {
     const deleted: BlackBoxEntry = {
       ...entry,
       deletedAt: now,
-      updatedAt: now
+      updatedAt: now,
+      syncStatus: 'pending',
     };
-    
-    // 使用 deleteBlackBoxEntry 确保同时清理日期索引
-    _deleteFromStore(id);
+
+    updateBlackBoxEntry(deleted);
     
     // 同步删除操作到服务器
     this.syncService.scheduleSync(deleted);

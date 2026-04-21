@@ -53,6 +53,7 @@ describe('TaskSyncOperationsService', () => {
   };
   const mockSyncState = {
     isSessionExpired: vi.fn(() => false),
+    advanceLastSyncTimeIfIdle: vi.fn(() => true),
     setPendingCount: vi.fn(),
     setSyncError: vi.fn(),
     setLastSyncTime: vi.fn(),
@@ -536,6 +537,45 @@ describe('TaskSyncOperationsService', () => {
       };
 
       await expect(service.pushTask(task, 'project-1', false, true, 'user-1')).rejects.toBeInstanceOf(PermanentFailureError);
+      expect(mockRetryQueue.add).not.toHaveBeenCalled();
+      expect(upsertPayload).toBeNull();
+    });
+
+    it('前台 task upsert 在要求 tombstone 终止时应抛永久失败，供 ActionQueue 丢弃过期项', async () => {
+      mockClient.from.mockImplementationOnce((table: string) => {
+        if (table === 'task_tombstones') {
+          return {
+            select: vi.fn(() => ({
+              eq: vi.fn(() => ({
+                maybeSingle: vi.fn(async () => ({
+                  data: { task_id: 'task-foreground-tombstoned' },
+                  error: null,
+                })),
+              })),
+            })),
+          };
+        }
+
+        throw new Error(`Unexpected table: ${table}`);
+      });
+
+      const task: Task = {
+        id: 'task-foreground-tombstoned',
+        title: '任务',
+        content: '内容',
+        stage: 0,
+        parentId: null,
+        order: 0,
+        rank: 10000,
+        status: 'active',
+        x: 0,
+        y: 0,
+        displayId: 'T-6',
+        createdDate: new Date().toISOString(),
+        deletedAt: null,
+      };
+
+      await expect(service.pushTask(task, 'project-1', false, false, 'user-1', true)).rejects.toBeInstanceOf(PermanentFailureError);
       expect(mockRetryQueue.add).not.toHaveBeenCalled();
       expect(upsertPayload).toBeNull();
     });

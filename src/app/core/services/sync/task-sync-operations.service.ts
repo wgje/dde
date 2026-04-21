@@ -31,7 +31,7 @@ import {
   EnhancedError,
   classifySupabaseClientFailure
 } from '../../../../utils/supabase-error';
-import { PermanentFailureError } from '../../../../utils/permanent-failure-error';
+import { isPermanentFailureError, PermanentFailureError } from '../../../../utils/permanent-failure-error';
 import { REQUEST_THROTTLE_CONFIG, FIELD_SELECT_CONFIG, FLOATING_TREE_CONFIG } from '../../../../config';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
@@ -252,6 +252,7 @@ export class TaskSyncOperationsService {
     skipTombstoneCheck = false,
     fromRetryQueue = false,
     sourceUserId?: string,
+    treatTombstoneAsPermanent = false,
   ): Promise<boolean> {
     // 会话过期检查
     if (this.syncStateService.isSessionExpired()) {
@@ -318,12 +319,23 @@ export class TaskSyncOperationsService {
         return false;
       }
       
-      return await this.doTaskPush(client, task, projectId, skipTombstoneCheck);
+      return await this.doTaskPush(
+        client,
+        task,
+        projectId,
+        skipTombstoneCheck,
+        fromRetryQueue,
+        treatTombstoneAsPermanent,
+      );
     };
     
     try {
       return await executeTaskPush();
     } catch (e) {
+      if (isPermanentFailureError(e)) {
+        throw e;
+      }
+
       const enhanced = supabaseErrorToError(e);
       
       // 检测到认证错误时先尝试刷新 session
@@ -397,8 +409,12 @@ export class TaskSyncOperationsService {
     client: SupabaseClient, 
     task: Task, 
     projectId: string, 
-    skipTombstoneCheck: boolean
+    skipTombstoneCheck: boolean,
+    fromRetryQueue: boolean,
+    treatTombstoneAsPermanent: boolean,
   ): Promise<boolean> {
+    let blockedByTombstone = false;
+
     await this.throttle.execute(
       `push-task:${task.id}`,
       async () => {
@@ -419,6 +435,7 @@ export class TaskSyncOperationsService {
               taskId: task.id, 
               projectId 
             });
+            blockedByTombstone = true;
             return;
           }
         }
@@ -462,6 +479,17 @@ export class TaskSyncOperationsService {
       },
       { priority: 'normal', retries: 0, timeout: REQUEST_THROTTLE_CONFIG.INDIVIDUAL_OPERATION_TIMEOUT }
     );
+
+    if (blockedByTombstone) {
+      if (fromRetryQueue || treatTombstoneAsPermanent) {
+        throw new PermanentFailureError(
+          'Task tombstone prevented remote upsert',
+          new Error('Task tombstone prevented remote upsert'),
+          { operation: 'pushTaskTombstone', taskId: task.id, projectId }
+        );
+      }
+      return false;
+    }
     
     this.retryQueueService.recordCircuitSuccess();
     this.syncStateService.advanceLastSyncTimeIfIdle(nowISO());

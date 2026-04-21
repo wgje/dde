@@ -148,6 +148,10 @@ export class SyncStateService {
     this.idleChecker = checker;
   }
 
+  private isSyncStateIdle(): boolean {
+    return !this.idleChecker || this.idleChecker();
+  }
+
   /**
    * 条件推进 lastSyncTime：仅当检测器返回 true（或未注册）时更新。
    * 返回 true 表示已写入，false 表示被门禁拦截。
@@ -158,10 +162,23 @@ export class SyncStateService {
    * 改为门禁模式后，"刚刚"语义回归真实（全部队列空才算一次完整同步）。
    */
   advanceLastSyncTimeIfIdle(lastSyncTime: string): boolean {
-    if (this.idleChecker && !this.idleChecker()) {
+    if (!this.isSyncStateIdle()) {
       return false;
     }
     this.update({ lastSyncTime });
+    return true;
+  }
+
+  /**
+   * 仅当 ActionQueue/RetryQueue 都排空时，同时推进 lastSyncTime 并清空 syncError。
+   * 用于真实恢复路径（例如 RetryQueue 回放成功后的最终收口），避免旧错误文案在
+   * 远端已经 200 成功后继续停留在 UI 上。
+   */
+  markSyncRecoveredIfIdle(lastSyncTime: string): boolean {
+    if (!this.isSyncStateIdle()) {
+      return false;
+    }
+    this.update({ lastSyncTime, syncError: null });
     return true;
   }
 

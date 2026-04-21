@@ -6,6 +6,8 @@ import { NetworkAwarenessService } from './network-awareness.service';
 import { LoggerService } from './logger.service';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { AuthService } from './auth.service';
+import { ClockSyncService } from './clock-sync.service';
+import { SessionManagerService } from '../app/core/services/sync/session-manager.service';
 import { blackBoxEntriesMap, setBlackBoxEntries } from '../state/focus-stores';
 import type { BlackBoxEntry } from '../models/focus';
 
@@ -79,6 +81,28 @@ describe('BlackBoxSyncService', () => {
           useValue: {
             currentUserId: vi.fn(() => 'user-1'),
             isConfigured: true,
+            sessionInitialized: vi.fn(() => true),
+            authState: vi.fn(() => ({ isCheckingSession: false })),
+            runtimeState: vi.fn(() => 'ready'),
+            peekPersistedSessionIdentity: vi.fn(() => ({ userId: 'user-1' })),
+          },
+        },
+        {
+          provide: ClockSyncService,
+          useValue: {
+            isLocalNewer: vi.fn((left: string, right: string) => new Date(left).getTime() > new Date(right).getTime()),
+            recordServerTimestamp: vi.fn(),
+            lastSyncResult: vi.fn(() => ({ reliable: true })),
+            needsResync: vi.fn(() => false),
+            checkClockDrift: vi.fn().mockResolvedValue({ reliable: true }),
+            ensureSynced: vi.fn().mockResolvedValue({ reliable: true }),
+          },
+        },
+        {
+          provide: SessionManagerService,
+          useValue: {
+            isSessionExpiredError: vi.fn(() => false),
+            tryRefreshSessionWithSession: vi.fn().mockResolvedValue({ refreshed: false }),
           },
         },
         {
@@ -238,10 +262,17 @@ describe('BlackBoxSyncService', () => {
       isCompleted: true,
     });
     const from = vi.fn(() => ({
-      upsert: vi.fn().mockImplementation(async () => {
-        setBlackBoxEntries([newerEntry]);
-        return { error: null };
-      }),
+      upsert: vi.fn(() => ({
+        select: vi.fn(() => ({
+          single: vi.fn(async () => {
+            setBlackBoxEntries([newerEntry]);
+            return {
+              data: { updated_at: olderEntry.updatedAt },
+              error: null,
+            };
+          }),
+        })),
+      })),
     }));
     const supabase = TestBed.inject(SupabaseClientService) as unknown as {
       clientAsync: ReturnType<typeof vi.fn>;
@@ -301,6 +332,233 @@ describe('BlackBoxSyncService', () => {
       cognitiveLoad: 'low',
       dockEntryId: 'dock-entry-1',
     });
+  });
+
+  it('should reconcile pending local entries against server rows even when delta pull returns empty', async () => {
+    const entryId = crypto.randomUUID();
+    const pendingEntry = createEntry({
+      id: entryId,
+      updatedAt: '2026-03-04T00:00:00.000Z',
+      isRead: true,
+      syncStatus: 'pending',
+    });
+    const remoteRow = {
+      id: entryId,
+      project_id: null,
+      user_id: 'user-1',
+      content: 'entry',
+      focus_meta: null,
+      date: '2026-03-04',
+      created_at: '2026-03-04T00:00:00.000Z',
+      updated_at: '2026-03-04T00:00:00.000Z',
+      is_read: true,
+      is_completed: false,
+      is_archived: false,
+      snooze_until: null,
+      snooze_count: 0,
+      deleted_at: null,
+    };
+    const inQuery = vi.fn().mockResolvedValue({ data: [remoteRow], error: null });
+    const orderQuery = vi.fn().mockResolvedValue({ data: [], error: null });
+    const gtQuery = vi.fn(() => ({ order: orderQuery }));
+    const selectQuery = vi.fn(() => ({
+      gt: gtQuery,
+      in: inQuery,
+    }));
+    const from = vi.fn(() => ({ select: selectQuery }));
+    const rpc = vi.fn().mockResolvedValue({ data: '2026-03-05T00:00:00.000Z', error: null });
+    const supabase = TestBed.inject(SupabaseClientService) as unknown as {
+      clientAsync: ReturnType<typeof vi.fn>;
+    };
+    vi.spyOn(service, 'saveToLocal').mockResolvedValue(undefined);
+    (service as unknown as { lastSyncTime: string | null }).lastSyncTime = '2026-03-05T00:00:00.000Z';
+    supabase.clientAsync.mockResolvedValue({ from, rpc });
+    setBlackBoxEntries([pendingEntry]);
+
+    await service.pullChanges({ reason: 'panel-open', force: true });
+
+    expect(inQuery).toHaveBeenCalledWith('id', [entryId]);
+    expect(blackBoxEntriesMap().get(entryId)?.syncStatus).toBe('synced');
+  });
+
+  it('should clear pending when server already reflects the same newer-local mutation', async () => {
+    const entryId = crypto.randomUUID();
+    const pendingEntry = createEntry({
+      id: entryId,
+      updatedAt: '2026-03-05T00:00:00.000Z',
+      isRead: true,
+      syncStatus: 'pending',
+    });
+    const remoteRow = {
+      id: entryId,
+      project_id: null,
+      user_id: 'user-1',
+      content: 'entry',
+      focus_meta: null,
+      date: '2026-03-04',
+      created_at: '2026-03-04T00:00:00.000Z',
+      updated_at: '2026-03-04T00:00:00.000Z',
+      is_read: true,
+      is_completed: false,
+      is_archived: false,
+      snooze_until: null,
+      snooze_count: 0,
+      deleted_at: null,
+    };
+    const inQuery = vi.fn().mockResolvedValue({ data: [remoteRow], error: null });
+    const orderQuery = vi.fn().mockResolvedValue({ data: [], error: null });
+    const gtQuery = vi.fn(() => ({ order: orderQuery }));
+    const selectQuery = vi.fn(() => ({
+      gt: gtQuery,
+      in: inQuery,
+    }));
+    const from = vi.fn(() => ({ select: selectQuery }));
+    const rpc = vi.fn().mockResolvedValue({ data: '2026-03-05T00:00:00.000Z', error: null });
+    const supabase = TestBed.inject(SupabaseClientService) as unknown as {
+      clientAsync: ReturnType<typeof vi.fn>;
+    };
+    vi.spyOn(service, 'saveToLocal').mockResolvedValue(undefined);
+    (service as unknown as { lastSyncTime: string | null }).lastSyncTime = '2026-03-05T00:00:00.000Z';
+    supabase.clientAsync.mockResolvedValue({ from, rpc });
+    setBlackBoxEntries([pendingEntry]);
+
+    await service.pullChanges({ reason: 'panel-open', force: true });
+
+    expect(inQuery).toHaveBeenCalledWith('id', [entryId]);
+    expect(blackBoxEntriesMap().get(entryId)).toEqual(
+      expect.objectContaining({
+        id: entryId,
+        syncStatus: 'synced',
+        updatedAt: remoteRow.updated_at,
+      })
+    );
+  });
+
+  it('should reconcile pending entries with equivalent focusMeta even when json key order differs', async () => {
+    const entryId = crypto.randomUUID();
+    const pendingEntry = createEntry({
+      id: entryId,
+      updatedAt: '2026-03-05T00:00:00.000Z',
+      syncStatus: 'pending',
+      focusMeta: {
+        source: 'focus-console-inline',
+        sessionId: 'session-1',
+        title: 'Inline task',
+        detail: 'inline detail',
+        lane: 'backup',
+        expectedMinutes: 20,
+        waitMinutes: 10,
+        cognitiveLoad: 'low',
+        dockEntryId: 'dock-entry-1',
+      },
+    });
+    const remoteRow = {
+      id: entryId,
+      project_id: null,
+      user_id: 'user-1',
+      content: 'entry',
+      focus_meta: {
+        dockEntryId: 'dock-entry-1',
+        cognitiveLoad: 'low',
+        waitMinutes: 10,
+        expectedMinutes: 20,
+        lane: 'backup',
+        detail: 'inline detail',
+        title: 'Inline task',
+        sessionId: 'session-1',
+        source: 'focus-console-inline',
+      },
+      date: '2026-03-04',
+      created_at: '2026-03-04T00:00:00.000Z',
+      updated_at: '2026-03-04T00:00:00.000Z',
+      is_read: false,
+      is_completed: false,
+      is_archived: false,
+      snooze_until: null,
+      snooze_count: 0,
+      deleted_at: null,
+    };
+    const inQuery = vi.fn().mockResolvedValue({ data: [remoteRow], error: null });
+    const orderQuery = vi.fn().mockResolvedValue({ data: [], error: null });
+    const gtQuery = vi.fn(() => ({ order: orderQuery }));
+    const selectQuery = vi.fn(() => ({
+      gt: gtQuery,
+      in: inQuery,
+    }));
+    const from = vi.fn(() => ({ select: selectQuery }));
+    const rpc = vi.fn().mockResolvedValue({ data: '2026-03-05T00:00:00.000Z', error: null });
+    const supabase = TestBed.inject(SupabaseClientService) as unknown as {
+      clientAsync: ReturnType<typeof vi.fn>;
+    };
+    vi.spyOn(service, 'saveToLocal').mockResolvedValue(undefined);
+    (service as unknown as { lastSyncTime: string | null }).lastSyncTime = '2026-03-05T00:00:00.000Z';
+    supabase.clientAsync.mockResolvedValue({ from, rpc });
+    setBlackBoxEntries([pendingEntry]);
+
+    await service.pullChanges({ reason: 'panel-open', force: true });
+
+    expect(blackBoxEntriesMap().get(entryId)).toEqual(
+      expect.objectContaining({
+        id: entryId,
+        syncStatus: 'synced',
+        focusMeta: expect.objectContaining({
+          sessionId: 'session-1',
+          dockEntryId: 'dock-entry-1',
+        }),
+      })
+    );
+  });
+
+  it('should reconcile pending deleted tombstones against server tombstones', async () => {
+    const entryId = crypto.randomUUID();
+    const pendingEntry = createEntry({
+      id: entryId,
+      updatedAt: '2026-03-05T00:00:00.000Z',
+      syncStatus: 'pending',
+      deletedAt: '2026-03-05T00:00:00.000Z',
+    });
+    const remoteRow = {
+      id: entryId,
+      project_id: null,
+      user_id: 'user-1',
+      content: 'entry',
+      focus_meta: null,
+      date: '2026-03-04',
+      created_at: '2026-03-04T00:00:00.000Z',
+      updated_at: '2026-03-04T00:00:00.000Z',
+      is_read: false,
+      is_completed: false,
+      is_archived: false,
+      snooze_until: null,
+      snooze_count: 0,
+      deleted_at: '2026-03-05T00:00:00.000Z',
+    };
+    const inQuery = vi.fn().mockResolvedValue({ data: [remoteRow], error: null });
+    const orderQuery = vi.fn().mockResolvedValue({ data: [], error: null });
+    const gtQuery = vi.fn(() => ({ order: orderQuery }));
+    const selectQuery = vi.fn(() => ({
+      gt: gtQuery,
+      in: inQuery,
+    }));
+    const from = vi.fn(() => ({ select: selectQuery }));
+    const rpc = vi.fn().mockResolvedValue({ data: '2026-03-05T00:00:00.000Z', error: null });
+    const supabase = TestBed.inject(SupabaseClientService) as unknown as {
+      clientAsync: ReturnType<typeof vi.fn>;
+    };
+    vi.spyOn(service, 'saveToLocal').mockResolvedValue(undefined);
+    (service as unknown as { lastSyncTime: string | null }).lastSyncTime = '2026-03-05T00:00:00.000Z';
+    supabase.clientAsync.mockResolvedValue({ from, rpc });
+    setBlackBoxEntries([pendingEntry]);
+
+    await service.pullChanges({ reason: 'panel-open', force: true });
+
+    expect(blackBoxEntriesMap().get(entryId)).toEqual(
+      expect.objectContaining({
+        id: entryId,
+        syncStatus: 'synced',
+        deletedAt: remoteRow.deleted_at,
+      })
+    );
   });
 
   it('loadFromLocal 应只恢复当前用户的黑匣子条目', async () => {

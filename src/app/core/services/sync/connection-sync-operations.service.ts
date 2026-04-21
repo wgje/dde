@@ -791,6 +791,8 @@ export class ConnectionSyncOperationsService {
           typeof persistedConnection?.updated_at === 'string' ? persistedConnection.updated_at : null,
         );
       }
+
+      this.retryQueueService.recordCircuitSuccess();
       
       return true;
     } catch (e) {

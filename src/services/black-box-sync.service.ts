@@ -30,7 +30,6 @@ import {
   blackBoxEntriesMap,
   setBlackBoxEntries,
   updateBlackBoxEntry,
-  deleteBlackBoxEntry
 } from '../state/focus-stores';
 import { SupabaseClientService } from './supabase-client.service';
 import { NetworkAwarenessService } from './network-awareness.service';
@@ -498,6 +497,101 @@ export class BlackBoxSyncService {
     return inMemory;
   }
 
+  private getPendingEntriesForRemoteReconciliation(): BlackBoxEntry[] {
+    const remoteSessionUserId = this.resolveRemoteSessionUserId();
+    if (!remoteSessionUserId) {
+      return [];
+    }
+
+    return Array.from(blackBoxEntriesMap().values()).filter(entry => {
+      return entry.syncStatus === 'pending'
+        && entry.userId === remoteSessionUserId
+        && isValidUUID(entry.id);
+    });
+  }
+
+  private hasEquivalentEntryState(local: BlackBoxEntry, remote: BlackBoxEntry): boolean {
+    const localFocusMeta = local.focusMeta ?? null;
+    const remoteFocusMeta = remote.focusMeta ?? null;
+    const focusMetaMatches = !localFocusMeta || !remoteFocusMeta
+      ? localFocusMeta === remoteFocusMeta
+      : localFocusMeta.source === remoteFocusMeta.source
+        && localFocusMeta.sessionId === remoteFocusMeta.sessionId
+        && localFocusMeta.title === remoteFocusMeta.title
+        && (localFocusMeta.detail ?? null) === (remoteFocusMeta.detail ?? null)
+        && localFocusMeta.lane === remoteFocusMeta.lane
+        && (localFocusMeta.expectedMinutes ?? null) === (remoteFocusMeta.expectedMinutes ?? null)
+        && (localFocusMeta.waitMinutes ?? null) === (remoteFocusMeta.waitMinutes ?? null)
+        && localFocusMeta.cognitiveLoad === remoteFocusMeta.cognitiveLoad
+        && localFocusMeta.dockEntryId === remoteFocusMeta.dockEntryId;
+
+    return local.id === remote.id
+      && local.projectId === remote.projectId
+      && local.userId === remote.userId
+      && local.content === remote.content
+      && local.date === remote.date
+      && local.createdAt === remote.createdAt
+      && local.isRead === remote.isRead
+      && local.isCompleted === remote.isCompleted
+      && local.isArchived === remote.isArchived
+      && (local.snoozeUntil ?? null) === (remote.snoozeUntil ?? null)
+      && (local.snoozeCount ?? 0) === (remote.snoozeCount ?? 0)
+      && local.deletedAt === remote.deletedAt
+        && focusMetaMatches;
+  }
+
+  private async reconcilePendingEntriesWithServer(
+    client: Awaited<ReturnType<SupabaseClientService['clientAsync']>>,
+    preferRemoteForSyncedLocalDuringPull: boolean,
+    repairingFutureCursor: boolean,
+  ): Promise<void> {
+    if (!client) {
+      return;
+    }
+
+    const pendingEntries = this.getPendingEntriesForRemoteReconciliation();
+    if (pendingEntries.length === 0) {
+      return;
+    }
+
+    const pendingIds = pendingEntries.map(entry => entry.id);
+    const batchSize = 50;
+
+    this.logger.debug('黑匣子存在 pending 本地条目，开始按 ID 对账远端权威状态', {
+      pendingCount: pendingIds.length,
+    });
+
+    for (let offset = 0; offset < pendingIds.length; offset += batchSize) {
+      const batchIds = pendingIds.slice(offset, offset + batchSize);
+      const { data, error } = await client
+        .from('black_box_entries')
+        .select('*')
+        .in('id', batchIds);
+
+      if (error) {
+        const enhanced = supabaseErrorToError(error);
+        this.logger.warn('黑匣子 pending 对账失败，保留本地 pending 状态', {
+          message: enhanced.message,
+          batchSize: batchIds.length,
+        });
+        return;
+      }
+
+      for (const row of data ?? []) {
+        const remoteEntry = this.mapRowToEntry(row);
+
+        const localEntry = blackBoxEntriesMap().get(remoteEntry.id);
+        if (localEntry?.syncStatus === 'pending' && this.hasEquivalentEntryState(localEntry, remoteEntry)) {
+          await this.saveToLocal(remoteEntry);
+          updateBlackBoxEntry(remoteEntry);
+          continue;
+        }
+
+        await this.mergeWithLocal(remoteEntry, preferRemoteForSyncedLocalDuringPull, repairingFutureCursor);
+      }
+    }
+  }
+
   /**
    * 从本地 IndexedDB 加载
    */
@@ -881,6 +975,7 @@ export class BlackBoxSyncService {
       // 首次拉取只信任已持久化的服务端游标；不要从本地 updatedAt 反推，避免快时钟把增量窗口推到未来。
       let effectiveLastSync = this.lastSyncTime || '1970-01-01T00:00:00Z';
       let repairingFutureCursor = false;
+      const pendingEntriesNeedRemoteReconciliation = this.getPendingEntriesForRemoteReconciliation().length > 0;
 
       if (FEATURE_FLAGS.BLACKBOX_WATERMARK_PROBE_V1) {
         const remoteWatermark = await this.getRemoteBlackBoxWatermark(client);
@@ -906,7 +1001,8 @@ export class BlackBoxSyncService {
           Number.isFinite(remoteMs) &&
           Number.isFinite(localMs) &&
           remoteMs <= localMs &&
-          effectiveLastSync !== '1970-01-01T00:00:00Z'
+          effectiveLastSync !== '1970-01-01T00:00:00Z' &&
+          !pendingEntriesNeedRemoteReconciliation
         ) {
           this.lastSyncTime = remoteWatermark;
           await this.saveLastSyncTime();
@@ -982,6 +1078,12 @@ export class BlackBoxSyncService {
         await this.mergeWithLocal(entry, preferRemoteForSyncedLocalDuringPull, repairingFutureCursor);
       }
 
+      await this.reconcilePendingEntriesWithServer(
+        client,
+        preferRemoteForSyncedLocalDuringPull,
+        repairingFutureCursor,
+      );
+
       // 更新同步时间并持久化
       if (data && data.length > 0) {
         this.lastSyncTime = data[data.length - 1].updated_at;
@@ -1050,14 +1152,8 @@ export class BlackBoxSyncService {
     const shouldUseRemote = !local || preferRemoteForSyncedLocal || !localWinsByLww;
 
     if (shouldUseRemote) {
-      // 【修复 P1-04】已删除条目从本地状态中移除，避免 UI 残留
-      if (remote.deletedAt) {
-        await this.saveToLocal(remote);
-        deleteBlackBoxEntry(remote.id);
-      } else {
-        await this.saveToLocal(remote);
-        updateBlackBoxEntry(remote);
-      }
+      await this.saveToLocal(remote);
+      updateBlackBoxEntry(remote);
       return;
     }
 

@@ -3460,7 +3460,7 @@ describe('SimpleSyncService', () => {
       await callbacks.pushTaskPosition(task.id, 10, 20, 'project-1', task, 'owner-a');
       await callbacks.pushConnection(connection, 'project-1', true, false, false, 'owner-a');
 
-      expect(taskSyncOps.pushTask).toHaveBeenCalledWith(task, 'project-1', true, false, 'owner-a');
+      expect(taskSyncOps.pushTask).toHaveBeenCalledWith(task, 'project-1', true, false, 'owner-a', false);
       expect(taskSyncOps.pushTaskPosition).toHaveBeenCalledWith(task.id, 10, 20, 'project-1', task, 'owner-a');
       expect(connectionSyncOps.pushConnection).toHaveBeenCalledWith(connection, 'project-1', true, false, false, 'owner-a');
     });
@@ -3474,7 +3474,7 @@ describe('SimpleSyncService', () => {
 
       await retryHandlers.pushTask(task, 'project-1', 'owner-a');
 
-      expect(taskSyncOps.pushTask).toHaveBeenCalledWith(task, 'project-1', false, true, 'owner-a');
+      expect(taskSyncOps.pushTask).toHaveBeenCalledWith(task, 'project-1', false, true, 'owner-a', false);
     });
 
     it('RetryQueue 转交 project 时仅在 ActionQueue 真正接受后才视为成功', async () => {

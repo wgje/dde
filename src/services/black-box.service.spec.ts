@@ -25,6 +25,11 @@ describe('BlackBoxService', () => {
   let mockAuthService: {
     currentUserId: ReturnType<typeof vi.fn>;
     isConfigured: boolean;
+    sessionInitialized: ReturnType<typeof vi.fn>;
+    authState: ReturnType<typeof vi.fn>;
+    runtimeState: ReturnType<typeof vi.fn>;
+    peekPersistedSessionIdentity: ReturnType<typeof vi.fn>;
+    peekPersistedOwnerHint: ReturnType<typeof vi.fn>;
   };
   let mockProjectStateService: {
     activeProjectId: ReturnType<typeof signal>;
@@ -43,7 +48,12 @@ describe('BlackBoxService', () => {
 
     mockAuthService = {
       currentUserId: vi.fn().mockReturnValue('test-user'),
-      isConfigured: true
+      isConfigured: true,
+      sessionInitialized: vi.fn().mockReturnValue(true),
+      authState: vi.fn().mockReturnValue({ isCheckingSession: false }),
+      runtimeState: vi.fn().mockReturnValue('ready'),
+      peekPersistedSessionIdentity: vi.fn().mockReturnValue(null),
+      peekPersistedOwnerHint: vi.fn().mockReturnValue(null),
     };
 
     mockProjectStateService = {
@@ -174,6 +184,32 @@ describe('BlackBoxService', () => {
 
       expect(result.ok).toBe(false);
     });
+
+    it('已同步条目更新后应重新标记为 pending', () => {
+      setBlackBoxEntries([
+        {
+          id: 'entry-synced',
+          projectId: null,
+          userId: 'test-user',
+          content: '原始内容',
+          date: '2026-04-21',
+          createdAt: '2026-04-21T00:00:00.000Z',
+          updatedAt: '2026-04-21T00:00:00.000Z',
+          isRead: false,
+          isCompleted: false,
+          isArchived: false,
+          deletedAt: null,
+          syncStatus: 'synced',
+        },
+      ]);
+
+      const result = service.update('entry-synced', { content: '更新内容' });
+
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.value.syncStatus).toBe('pending');
+      }
+    });
   });
 
   describe('markAsRead', () => {
@@ -218,6 +254,37 @@ describe('BlackBoxService', () => {
       const result = service.delete('non-existent-id');
 
       expect(result.ok).toBe(false);
+    });
+
+    it('删除已同步条目时应立即写入 pending tombstone 到本地状态', () => {
+      setBlackBoxEntries([
+        {
+          id: 'entry-delete',
+          projectId: null,
+          userId: 'test-user',
+          content: '待删除',
+          date: '2026-04-21',
+          createdAt: '2026-04-21T00:00:00.000Z',
+          updatedAt: '2026-04-21T00:00:00.000Z',
+          isRead: false,
+          isCompleted: false,
+          isArchived: false,
+          deletedAt: null,
+          syncStatus: 'synced',
+        },
+      ]);
+
+      const result = service.delete('entry-delete');
+
+      expect(result.ok).toBe(true);
+      expect(service.getEntry('entry-delete')).toEqual(
+        expect.objectContaining({
+          id: 'entry-delete',
+          deletedAt: expect.any(String),
+          updatedAt: expect.any(String),
+          syncStatus: 'pending',
+        })
+      );
     });
   });
 

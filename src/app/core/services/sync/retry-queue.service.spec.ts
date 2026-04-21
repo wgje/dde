@@ -399,6 +399,20 @@ describe('RetryQueueService', () => {
       }),
     ]);
   });
+
+  it('仅项目回放成功见底时也应记录 successful drain flag', async () => {
+    const project = createProject('successful-drain-project');
+
+    service.add('project', 'upsert', project, undefined, 'test-user');
+    online = true;
+
+    const result = await service.processQueueSlice({ maxItems: 1, maxDurationMs: 1000 });
+
+    expect(result.completed).toBe(true);
+    expect(handler.pushProject).toHaveBeenCalledWith(project, 'test-user', undefined);
+    expect(service.consumeSuccessfulDrainFlag()).toBe(true);
+  });
+
   it('切账号后清空当前视图并保存，不应覆盖其它账号的持久化重试项', async () => {
     loadFromStorageSpy.mockRestore();
     initDbSpy.mockResolvedValue(null);

@@ -375,10 +375,10 @@ export class SimpleSyncService {
       isOnline: () => this.state().isOnline && !this.supabase.isOfflineMode(),
       onProcessingStateChange: (processing, pendingCount) => {
         this.state.update(s => ({ ...s, isSyncing: processing, pendingCount }));
-        // 【2026-04-21 根因修复】RetryQueue 切片收尾且队列见底时，触发一次条件推进，
-        // 让 UI "最后同步时间" 在所有队列真正排空后由门禁自动刷新为 "刚刚"。
-        if (!processing && pendingCount === 0) {
-          this.syncStateService.advanceLastSyncTimeIfIdle(nowISO());
+        // 【2026-04-21 根因修复】只有成功回放后真正见底，才允许收口清理旧错误文案；
+        // 永久失败移除、切账号清空视图等都不应误判为“同步已恢复”。
+        if (!processing && pendingCount === 0 && this.retryQueueService.hasSuccessfulDrainFlag()) {
+          this.markSyncRecoveredIfIdle(nowISO());
         }
       }
     });
@@ -983,8 +983,16 @@ export class SimpleSyncService {
     skipTombstoneCheck = false,
     fromRetryQueue = false,
     sourceUserId?: string,
+    treatTombstoneAsPermanent = false,
   ): Promise<boolean> {
-    return this.taskSyncOps.pushTask(task, projectId, skipTombstoneCheck, fromRetryQueue, sourceUserId);
+    return this.taskSyncOps.pushTask(
+      task,
+      projectId,
+      skipTombstoneCheck,
+      fromRetryQueue,
+      sourceUserId,
+      treatTombstoneAsPermanent,
+    );
   }
   
   async pushTaskPosition(
@@ -1654,6 +1662,18 @@ export class SimpleSyncService {
   
   getLastSyncTime(projectId: string): string | null {
     return this.lastSyncTimeByProject.get(projectId) || null;
+  }
+
+  markSyncRecoveredIfIdle(timestamp = nowISO()): boolean {
+    const recovered = this.syncStateService.markSyncRecoveredIfIdle(timestamp);
+    if (recovered) {
+      this.retryQueueService.clearSuccessfulDrainFlag();
+    }
+    return recovered;
+  }
+
+  hasPendingRetryRecovery(): boolean {
+    return this.retryQueueService.hasSuccessfulDrainFlag();
   }
   
   clearLastSyncTime(projectId: string): void {
