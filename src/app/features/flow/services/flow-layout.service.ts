@@ -69,7 +69,10 @@ interface ResolvedAutoLayoutOptions {
   stageDensityGapFactor: number;
   stageLinkGapFactor: number;
   stageCrossTreeGapFactor: number;
+  stageMultiParentGapFactor: number;
   maxStageExtraFactor: number;
+  twoOptMaxPasses: number;
+  twoOptImprovementEpsilon: number;
 }
 
 interface FamilyLayoutBlock {
@@ -406,10 +409,15 @@ function buildAdaptiveStageXMap(
   stageNums: readonly number[],
   stageIndexMap: Map<number, number>,
   resolvedOptions: ResolvedAutoLayoutOptions,
+  parentCandidateCountMap: ReadonlyMap<string, number>,
 ): Map<number, number> {
   const stageNodeCounts = new Array(stageNums.length).fill(0);
   const stageBoundaryLinkCounts = new Array(Math.max(0, stageNums.length - 1)).fill(0);
   const stageBoundaryCrossTreeCounts = new Array(Math.max(0, stageNums.length - 1)).fill(0);
+  // 【关系网优化 2026-04-21】跟踪穿越每个阶段边界的"多父扇入"计数：
+  //   某子节点在 parentCandidateCountMap 中 >= 2 时，视其为合流节点，
+  //   本条 parent->child 链接按多父扇入计入对应边界压力。
+  const stageBoundaryMultiParentCounts = new Array(Math.max(0, stageNums.length - 1)).fill(0);
   const assignedNodeMap = new Map(assignedNodes.map(node => [node.key, node]));
 
   assignedNodes.forEach(node => {
@@ -434,11 +442,18 @@ function buildAdaptiveStageXMap(
 
     const startIndex = Math.min(fromStageIndex, toStageIndex);
     const endIndex = Math.max(fromStageIndex, toStageIndex);
+    // 只有父子方向（非跨树）的链接，且目标端有 >=2 个候选父时，才算合流。
+    // 跨树链接已经单独计入 stageBoundaryCrossTreeCounts，避免重复加压。
+    const toCandidateCount = parentCandidateCountMap.get(toNode.key) ?? 0;
+    const isMultiParentMerge = !link.isCrossTree && toCandidateCount >= 2;
     for (let boundaryIndex = startIndex; boundaryIndex < endIndex; boundaryIndex += 1) {
       if (link.isCrossTree) {
         stageBoundaryCrossTreeCounts[boundaryIndex] += 1;
       } else {
         stageBoundaryLinkCounts[boundaryIndex] += 1;
+      }
+      if (isMultiParentMerge) {
+        stageBoundaryMultiParentCounts[boundaryIndex] += 1;
       }
     }
   });
@@ -460,9 +475,12 @@ function buildAdaptiveStageXMap(
       * resolvedOptions.stageLinkGapFactor;
     const crossTreePressure = stageBoundaryCrossTreeCounts[stageIndex]
       * resolvedOptions.stageCrossTreeGapFactor;
+    // 多父扇入压力：合流次数 >= 2 才认为有视觉挤压（单条合流天然有呼吸感）。
+    const multiParentPressure = Math.max(0, stageBoundaryMultiParentCounts[stageIndex] - 1)
+      * resolvedOptions.stageMultiParentGapFactor;
     const extraSpacingFactor = Math.min(
       resolvedOptions.maxStageExtraFactor,
-      densityPressure + linkPressure + crossTreePressure,
+      densityPressure + linkPressure + crossTreePressure + multiParentPressure,
     );
 
     currentX += resolvedOptions.layerSpacing * (1 + extraSpacingFactor);
@@ -721,17 +739,25 @@ function buildFamilyBlocks(
  * *当前家族* 跨树连接最强的未访问家族接续；无跨树亲和度时回退到原始
  * 家族顺序，保证无跨树场景下行为与旧版完全一致。
  *
+ * 【关系网优化 2026-04-21】贪心只能保证局部最优，当 3 个以上家族互相
+ * 关联时容易卡在次优排列。追加一轮 2-opt（segment-reverse）迭代，以
+ * "加权跨距总和 = Σ affinity(a,b) * |pos(a) - pos(b)|" 为目标函数全局
+ * 细化；pass 次数和最小改进量都受配置上限约束，保证大项目下布局时间可控。
+ *
  * 输入不变性：
  * - 不修改家族内部节点顺序与本地行号
  * - 家族数 ≤ 2 或无跨树连接时直接返回原顺序的浅拷贝
+ * - 2-opt 保留首家族为锚点（索引 0 不参与反转），维持与原 rank 顺序的最近亲
  *
  * @param familyBlocks 原始家族块（按根 rank 升序）
  * @param links 全部连线（含 cross-tree 标记）
+ * @param resolvedOptions 配置（含 2-opt pass 上限与改进阈值）
  * @returns 重排后的家族块数组（新数组，不修改入参）
  */
 function optimizeFamilyOrder(
   familyBlocks: readonly FamilyLayoutBlock[],
   links: readonly AutoLayoutLinkData[],
+  resolvedOptions: ResolvedAutoLayoutOptions,
 ): FamilyLayoutBlock[] {
   if (familyBlocks.length <= 2) {
     return familyBlocks.slice();
@@ -802,7 +828,85 @@ function optimizeFamilyOrder(
     order.push(bestIndex);
   }
 
-  return order.map(index => familyBlocks[index]);
+  // 【关系网优化 2026-04-21】2-opt segment reverse：在贪心基础上以
+  // "加权跨距总和" 为目标全局细化。
+  //  - 成本函数 cost(order) = Σ_{(a,b) ∈ affinity} w_ab * |pos(a) - pos(b)|
+  //  - pos(x) 为家族 x 在排列中的索引（0 为首家族锚点）
+  //  - 每次 pass 扫描所有 (i, j)，i ≥ 1 保留锚点；若 reverse [i..j] 能减少
+  //    cost 至少 epsilon，则接受并继续。
+  //  - pass 次数受 twoOptMaxPasses 限制，防止退化链路 O(n⁴) 卡顿。
+  const refined = refineOrderWithTwoOpt(order, affinity, resolvedOptions);
+
+  return refined.map(index => familyBlocks[index]);
+}
+
+/**
+ * 基于加权跨距总和对家族排列做 2-opt segment-reverse 细化。
+ * 返回新数组，保留锚点（索引 0）。无改进时返回与输入等价的新数组。
+ */
+function refineOrderWithTwoOpt(
+  initialOrder: readonly number[],
+  affinity: ReadonlyMap<string, number>,
+  resolvedOptions: ResolvedAutoLayoutOptions,
+): number[] {
+  if (initialOrder.length < 4 || affinity.size === 0) {
+    return initialOrder.slice();
+  }
+
+  const parsePairKey = (key: string): readonly [number, number] => {
+    const dashIndex = key.indexOf('-');
+    return [Number(key.slice(0, dashIndex)), Number(key.slice(dashIndex + 1))] as const;
+  };
+
+  const affinityPairs = Array.from(affinity, ([key, weight]) => {
+    const [a, b] = parsePairKey(key);
+    return { a, b, weight };
+  });
+
+  const computeCost = (order: readonly number[]): number => {
+    const positions = new Map<number, number>();
+    order.forEach((familyIndex, position) => positions.set(familyIndex, position));
+    let total = 0;
+    for (const pair of affinityPairs) {
+      const posA = positions.get(pair.a);
+      const posB = positions.get(pair.b);
+      if (posA === undefined || posB === undefined) {
+        continue;
+      }
+      total += pair.weight * Math.abs(posA - posB);
+    }
+    return total;
+  };
+
+  let best = initialOrder.slice();
+  let bestCost = computeCost(best);
+  const maxPasses = Math.max(1, Math.trunc(resolvedOptions.twoOptMaxPasses));
+  const epsilon = Math.max(0, resolvedOptions.twoOptImprovementEpsilon);
+
+  for (let pass = 0; pass < maxPasses; pass += 1) {
+    let improvedInPass = false;
+
+    // i 从 1 开始：锚点（原始第一家族）不参与反转，维持与 rank 顺序的最近亲和度。
+    for (let i = 1; i < best.length - 1; i += 1) {
+      for (let j = i + 1; j < best.length; j += 1) {
+        const candidate = best.slice(0, i)
+          .concat(best.slice(i, j + 1).reverse())
+          .concat(best.slice(j + 1));
+        const candidateCost = computeCost(candidate);
+        if (candidateCost + epsilon < bestCost) {
+          best = candidate;
+          bestCost = candidateCost;
+          improvedInPass = true;
+        }
+      }
+    }
+
+    if (!improvedInPass) {
+      break;
+    }
+  }
+
+  return best;
 }
 
 /**
@@ -829,7 +933,10 @@ export function computeFamilyBlockAutoLayout(
     stageDensityGapFactor: LAYOUT_CONFIG.AUTO_LAYOUT_STAGE_DENSITY_GAP_FACTOR,
     stageLinkGapFactor: LAYOUT_CONFIG.AUTO_LAYOUT_STAGE_LINK_GAP_FACTOR,
     stageCrossTreeGapFactor: LAYOUT_CONFIG.AUTO_LAYOUT_STAGE_CROSS_TREE_GAP_FACTOR,
+    stageMultiParentGapFactor: LAYOUT_CONFIG.AUTO_LAYOUT_STAGE_MULTI_PARENT_GAP_FACTOR,
     maxStageExtraFactor: LAYOUT_CONFIG.AUTO_LAYOUT_MAX_STAGE_EXTRA_FACTOR,
+    twoOptMaxPasses: LAYOUT_CONFIG.AUTO_LAYOUT_TWO_OPT_MAX_PASSES,
+    twoOptImprovementEpsilon: LAYOUT_CONFIG.AUTO_LAYOUT_TWO_OPT_IMPROVEMENT_EPSILON,
   };
 
   const assignedNodes = nodes.filter(isAssignedLayoutNode);
@@ -850,6 +957,7 @@ export function computeFamilyBlockAutoLayout(
     stageNums,
     stageIndexMap,
     resolvedOptions,
+    parentCandidateCountMap,
   );
   const naturalFamilyBlocks = buildFamilyBlocks(
     assignedNodes,
@@ -861,7 +969,7 @@ export function computeFamilyBlockAutoLayout(
   );
   // 【商用级优化】按跨树连接亲和度重排家族，使关联家族尽量相邻，
   // 减少跨树连线视觉跨距、提升可读性
-  const familyBlocks = optimizeFamilyOrder(naturalFamilyBlocks, links);
+  const familyBlocks = optimizeFamilyOrder(naturalFamilyBlocks, links, resolvedOptions);
 
   const positionMap = new Map<string, NodePosition>();
   const familyIndexMap = new Map<string, number>();

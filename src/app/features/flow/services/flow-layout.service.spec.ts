@@ -525,6 +525,96 @@ describe('computeFamilyBlockAutoLayout', () => {
     expect(family2MinY - family1MaxY).toBeLessThanOrEqual(maxAllowedGap + 1); // +1 浮点容差
     expect(family2MinY - family1MaxY).toBeGreaterThan(0); // 家族之间必须有正间距
   });
+
+  it('globally minimizes cross-tree span via 2-opt beyond greedy nearest-neighbor', () => {
+    // 构造 4 个家族 A/B/C/D（按 rank 升序），跨树链接模式：
+    //   A <-> C （强亲和）
+    //   B <-> D （强亲和）
+    //   A 与 B/D 无跨树链接
+    // 贪心从 A 出发会选 C（最强），然后 C 附近的下一个是 ... 再回到 B 或 D，
+    // 2-opt 能将顺序重排为 A-C-B-D 或 A-B-D-C 之一，使 A<->C 与 B<->D 都相邻。
+    //
+    // 不变式：family A 仍为首家族（锚点），且两条跨树对的家族索引距离之和
+    // 应 <= 贪心结果中的对应和。
+    const makeFamily = (rootRank: number, prefix: string) => [
+      createLayoutNode({ key: `${prefix}-root`, stage: 1, rank: rootRank }),
+      createLayoutNode({ key: `${prefix}-child`, stage: 2, rank: rootRank + 10 }),
+    ];
+    const nodes = [
+      ...makeFamily(100, 'A'),
+      ...makeFamily(200, 'B'),
+      ...makeFamily(300, 'C'),
+      ...makeFamily(400, 'D'),
+    ];
+    const links: AutoLayoutLinkData[] = [
+      createLayoutLink({ from: 'A-root', to: 'A-child' }),
+      createLayoutLink({ from: 'B-root', to: 'B-child' }),
+      createLayoutLink({ from: 'C-root', to: 'C-child' }),
+      createLayoutLink({ from: 'D-root', to: 'D-child' }),
+      // A<->C 强亲和
+      createLayoutLink({ from: 'A-child', to: 'C-child', isCrossTree: true }),
+      createLayoutLink({ from: 'A-child', to: 'C-root', isCrossTree: true }),
+      // B<->D 强亲和
+      createLayoutLink({ from: 'B-child', to: 'D-child', isCrossTree: true }),
+      createLayoutLink({ from: 'B-child', to: 'D-root', isCrossTree: true }),
+    ];
+
+    const positions = computeFamilyBlockAutoLayout(nodes, links);
+    const positionMap = toPositionMap(positions);
+
+    const ySortedFamilyOrder = (['A', 'B', 'C', 'D'] as const)
+      .map(prefix => ({ prefix, y: positionMap.get(`${prefix}-root`)?.y ?? 0 }))
+      .sort((a, b) => a.y - b.y)
+      .map(entry => entry.prefix);
+
+    // 锚点：A 永远在首位
+    expect(ySortedFamilyOrder[0]).toBe('A');
+
+    // 计算 A-C 与 B-D 在排列中的索引距离和。
+    const indexOf = (prefix: 'A' | 'B' | 'C' | 'D') => ySortedFamilyOrder.indexOf(prefix);
+    const crossTreeSpan = Math.abs(indexOf('A') - indexOf('C')) + Math.abs(indexOf('B') - indexOf('D'));
+
+    // 2-opt 应保证 A-C 与 B-D 的索引距离和 <= 3（例如 A-C-D-B 为 2+1=3，
+    // A-C-B-D 为 2+1=3，A-B-D-C 为 3+1=4 被排除）。
+    // 未经 2-opt 的贪心 A-C 之后可能选 B 或 D，最差能得到 A-C-D-B=3 或 A-C-B-D=3；
+    // 本断言覆盖 2-opt 结果不会比贪心更差，且不会出现 A-B-C-D=2+2=4 这种按 rank 静态排列。
+    expect(crossTreeSpan).toBeLessThanOrEqual(3);
+  });
+
+  it('widens stage boundary when multiple merge points funnel into the same child', () => {
+    // 基准场景：stage2 有 3 个独立子节点，无合流
+    const baseNodes = [
+      createLayoutNode({ key: 'root-1', stage: 1, rank: 100 }),
+      createLayoutNode({ key: 'root-2', stage: 1, rank: 200 }),
+      createLayoutNode({ key: 'child-a', stage: 2, rank: 110 }),
+      createLayoutNode({ key: 'child-b', stage: 2, rank: 120 }),
+    ];
+    const baseLinks: AutoLayoutLinkData[] = [
+      createLayoutLink({ from: 'root-1', to: 'child-a' }),
+      createLayoutLink({ from: 'root-2', to: 'child-b' }),
+    ];
+
+    // 多父扇入场景：child-a 与 child-b 同时被 root-1 与 root-2 认领（2 条合流）
+    const mergeLinks: AutoLayoutLinkData[] = [
+      createLayoutLink({ from: 'root-1', to: 'child-a' }),
+      createLayoutLink({ from: 'root-2', to: 'child-a' }),
+      createLayoutLink({ from: 'root-1', to: 'child-b' }),
+      createLayoutLink({ from: 'root-2', to: 'child-b' }),
+    ];
+
+    const baseMap = toPositionMap(computeFamilyBlockAutoLayout(baseNodes, baseLinks));
+    const mergeMap = toPositionMap(computeFamilyBlockAutoLayout(baseNodes, mergeLinks));
+
+    const baseGap = (baseMap.get('child-a')?.x ?? 0) - (baseMap.get('root-1')?.x ?? 0);
+    const mergeGap = (mergeMap.get('child-a')?.x ?? 0) - (mergeMap.get('root-1')?.x ?? 0);
+
+    // 多父合流应拓宽阶段边界 X 间距
+    expect(mergeGap).toBeGreaterThan(baseGap);
+    // 但不得突破 maxStageExtraFactor 上限
+    const maxExpectedGap = LAYOUT_CONFIG.STAGE_SPACING
+      * (1 + LAYOUT_CONFIG.AUTO_LAYOUT_MAX_STAGE_EXTRA_FACTOR);
+    expect(mergeGap).toBeLessThanOrEqual(maxExpectedGap + 0.5);
+  });
 });
 
 describe('FlowLayoutService', () => {

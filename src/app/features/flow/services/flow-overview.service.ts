@@ -599,8 +599,14 @@ export class FlowOverviewService {
         
         if (this.overview) {
           if (source === 'document') {
-            this.overview.updateAllTargetBindings();
             this.overview.requestUpdate();
+            if (usingFakeViewportBounds) {
+              this.overview.updateAllTargetBindings();
+            } else {
+              // 普通数据刷新阶段仅做轻量 requestUpdate，把全量绑定刷新合并到延后窗口，
+              // 避免 remote refresh -> Flow 重算 -> overview bindings 同帧叠加成主线程长任务。
+              scheduleViewportBindingsUpdate('deferred');
+            }
           } else {
             this.overview.requestUpdate();
             if (!usingFakeViewportBounds) {

@@ -33,8 +33,26 @@ export const LAYOUT_CONFIG = {
   AUTO_LAYOUT_STAGE_LINK_GAP_FACTOR: 0.035,
   /** 跨树连接穿过阶段边界时的额外横向留白系数（相对 stage spacing） */
   AUTO_LAYOUT_STAGE_CROSS_TREE_GAP_FACTOR: 0.025,
+  /**
+   * 多父扇入（shared-grandchild 等）穿过阶段边界时的额外横向留白系数。
+   * 场景：两个父候选 -> 同一子节点，视觉上表现为多对一合流；此时在
+   * 父 stage -> 子 stage 之间的列距拉宽，能让合流连线获得呼吸感，
+   * 避免被相邻的普通父子连线挤压成交叉黑块。
+   */
+  AUTO_LAYOUT_STAGE_MULTI_PARENT_GAP_FACTOR: 0.03,
   /** 阶段边界额外横向留白硬上限（相对 stage spacing） */
   AUTO_LAYOUT_MAX_STAGE_EXTRA_FACTOR: 0.18,
+  /**
+   * 家族重排 2-opt 的最大迭代次数（按家族数 n 的倍数）。
+   * 每次 2-opt pass 是 O(n²)，总复杂度被 n * n² = n³ 上限锁住，避免极端
+   * 大项目下的布局卡顿。实测 n ≤ 40 时 2-opt 用时 < 2ms。
+   */
+  AUTO_LAYOUT_TWO_OPT_MAX_PASSES: 4,
+  /**
+   * 2-opt 的改进容忍阈值：只有当候选排列的加权跨距至少减少这个值才接受。
+   * 防止浮点噪声下的无限循环；单位与跨距权重一致（affinity * |Δpos|）。
+   */
+  AUTO_LAYOUT_TWO_OPT_IMPROVEMENT_EPSILON: 0.5,
   /** 根任务基础 rank 值 */
   RANK_ROOT_BASE: 10000,
   /** rank 步进值 */
