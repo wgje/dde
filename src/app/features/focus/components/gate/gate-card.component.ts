@@ -50,9 +50,8 @@ const DRAG_MAX_DISTANCE = 130;
           @if (currentEntry(); as entry) {
             <p class="card-text">{{ entry.content }}</p>
             <div class="entry-meta">
-              <span>{{ entry.createdAt | date:'HH:mm' }}</span>
-              <span class="meta-sep">·</span>
-              <span>{{ gestureHint() }}</span>
+              <span class="entry-created-at">{{ entry.createdAt | date:'yyyy年M月d日 HH:mm' }}</span>
+              <span class="entry-gesture-hint">{{ gestureHint() }}</span>
             </div>
           }
         </div>
@@ -158,8 +157,10 @@ const DRAG_MAX_DISTANCE = 130;
 
     .entry-meta {
       display: inline-flex;
+      flex-direction: column;
       align-items: center;
-      gap: 0.5rem;
+      gap: 0.35rem;
+      max-width: min(100%, 28rem);
       padding: 0.4rem 0.85rem;
       border-radius: 9999px;
       border: 1px solid rgba(255, 255, 255, 0.06);
@@ -169,10 +170,16 @@ const DRAG_MAX_DISTANCE = 130;
       color: rgba(255, 255, 255, 0.5);
       font-size: 0.75rem;
       letter-spacing: 0.04em;
+      text-align: center;
     }
 
-    .meta-sep {
-      opacity: 0.4;
+    .entry-created-at {
+      color: rgba(255, 255, 255, 0.72);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .entry-gesture-hint {
+      color: rgba(255, 255, 255, 0.5);
     }
 
     .dark-card.entering {

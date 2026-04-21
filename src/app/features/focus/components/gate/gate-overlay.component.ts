@@ -23,7 +23,6 @@ import { GateService } from '../../../../../services/gate.service';
 import { StrataService } from '../../../../../services/strata.service';
 import { GateCardComponent } from './gate-card.component';
 import { GateActionsComponent } from './gate-actions.component';
-import { todayDate } from '../../../../../state/focus-stores';
 
 @Component({
   selector: 'app-gate-overlay',
@@ -43,10 +42,6 @@ import { todayDate } from '../../../../../state/focus-stores';
 
         <header class="gate-header">
           <h2 id="gate-title">沉积之门</h2>
-          <div class="gate-date" aria-label="今日日期">
-            <span class="gate-date-main">{{ todayLabel() }}</span>
-            <span class="gate-date-sub">{{ weekdayLabel() }}</span>
-          </div>
           <p id="gate-description">上推已读，下拉落地。把昨日重量变成今日地基。</p>
 
           @if (progress().total > 0) {
@@ -154,32 +149,6 @@ import { todayDate } from '../../../../../state/focus-stores';
       line-height: 1.6;
       letter-spacing: 0.06em;
       font-weight: 300;
-    }
-
-    .gate-date {
-      margin: 0.85rem auto 0;
-      display: inline-flex;
-      align-items: baseline;
-      gap: 0.75rem;
-      padding: 0.35rem 0.95rem;
-      border-radius: 9999px;
-      border: 1px solid rgba(255, 255, 255, 0.08);
-      background: rgba(255, 255, 255, 0.04);
-      color: rgba(255, 255, 255, 0.82);
-      font-variant-numeric: tabular-nums;
-    }
-
-    .gate-date-main {
-      font-size: 0.95rem;
-      font-weight: 400;
-      letter-spacing: 0.08em;
-    }
-
-    .gate-date-sub {
-      font-size: 0.75rem;
-      letter-spacing: 0.12em;
-      color: rgba(255, 255, 255, 0.55);
-      text-transform: uppercase;
     }
 
     .rubble-track {
@@ -366,24 +335,6 @@ export class GateOverlayComponent implements OnDestroy {
   readonly strataLayers = computed(() => this.strataService.layers());
   readonly progress = this.gateService.progress;
   readonly shakePulse = signal(false);
-
-  /** 今日日期标签（年月日），依赖 todayDate 信号跨天自动刷新 */
-  readonly todayLabel = computed(() => {
-    const iso = todayDate();
-    const parts = iso.split('-');
-    if (parts.length !== 3) return iso;
-    const [y, m, d] = parts;
-    return `${y}年${Number(m)}月${Number(d)}日`;
-  });
-
-  /** 星期几标签，与 todayDate 保持同源 */
-  readonly weekdayLabel = computed(() => {
-    const iso = todayDate();
-    const date = new Date(`${iso}T00:00:00`);
-    if (Number.isNaN(date.getTime())) return '';
-    const weekdays = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
-    return weekdays[date.getDay()] ?? '';
-  });
 
   readonly rubbleChips = computed(() => {
     const progress = this.progress();
