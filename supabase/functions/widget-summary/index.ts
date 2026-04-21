@@ -5,6 +5,7 @@ import {
   consumeWidgetRateLimit,
   createServiceRoleClient,
   evaluateWidgetCapabilities,
+  extractWidgetPushSupport,
   extractWidgetClientVersion,
   getClientIp,
   getCorsHeaders,
@@ -29,6 +30,7 @@ interface WidgetDeviceRow {
   user_id: string;
   secret_hash: string;
   token_hash: string | null;
+  push_token: string | null;
   capabilities: Record<string, unknown> | null;
   binding_generation: number;
   revoked_at: string | null;
@@ -38,6 +40,7 @@ interface WidgetDeviceRow {
 interface WidgetSummaryRequest {
   clientSchemaVersion?: number;
   clientVersion?: string;
+  supportsPush?: boolean;
   lastKnownSummaryVersion?: string;
   instanceId?: string;
   hostInstanceId?: string;
@@ -125,7 +128,7 @@ interface WidgetInstanceRow {
   uninstalled_at: string | null;
 }
 
-const WIDGET_DEVICE_SELECT = 'id,installation_id,user_id,secret_hash,token_hash,capabilities,binding_generation,revoked_at,expires_at';
+const WIDGET_DEVICE_SELECT = 'id,installation_id,user_id,secret_hash,token_hash,push_token,capabilities,binding_generation,revoked_at,expires_at';
 
 type WidgetFreshnessState = 'fresh' | 'aging' | 'stale';
 type WidgetTrustState = 'verified' | 'provisional' | 'untrusted' | 'auth-required';
@@ -408,6 +411,7 @@ async function readSummaryRequest(req: Request): Promise<WidgetSummaryRequest> {
       ? Math.trunc(parsed.clientSchemaVersion)
       : undefined,
     clientVersion: normalizeOptionalText(parsed.clientVersion, 256) ?? undefined,
+    supportsPush: typeof parsed.supportsPush === 'boolean' ? parsed.supportsPush : undefined,
     lastKnownSummaryVersion: typeof parsed.lastKnownSummaryVersion === 'string' && parsed.lastKnownSummaryVersion.trim().length > 0
       ? parsed.lastKnownSummaryVersion.trim()
       : undefined,
@@ -697,6 +701,8 @@ Deno.serve(async (req: Request) => {
     });
   }
 
+  const pushTokenMissing = typeof device.push_token !== 'string' || device.push_token.trim().length === 0;
+
   if (parsedToken && device.token_hash) {
     return summaryResponse(responseHeaders, 401, {
       error: 'Widget token is invalid',
@@ -813,6 +819,7 @@ Deno.serve(async (req: Request) => {
     buildWidgetClientCapabilitiesPatch({
       platform: body.platform,
       clientVersion: body.clientVersion,
+      supportsPush: body.supportsPush,
       observedAt: nowIso,
     }),
   );
@@ -822,6 +829,10 @@ Deno.serve(async (req: Request) => {
     deviceId: device.id,
     clientVersion: body.clientVersion ?? extractWidgetClientVersion(nextDeviceCapabilities),
   });
+  const clientSupportsPush = body.supportsPush
+    ?? extractWidgetPushSupport(nextDeviceCapabilities)
+    ?? false;
+  const shouldRepairPushToken = capabilityDecision.pushAllowed && clientSupportsPush && pushTokenMissing;
   const publicCapabilities = toPublicWidgetCapabilities(capabilityDecision);
   if (!capabilityDecision.widgetEnabled || !capabilityDecision.refreshAllowed) {
     const { error: disabledTouchError } = await client
@@ -1171,6 +1182,10 @@ Deno.serve(async (req: Request) => {
     ? ['soft-delete-target']
     : [];
 
+  if (shouldRepairPushToken) {
+    degradedReasons.push('push-token-missing');
+  }
+
   const consistencyState = dockCountFromTasks === taskBackedDockCount ? 'aligned' : 'drifted';
   if (consistencyState === 'drifted') {
     degradedReasons.push('dock-count-drift');
@@ -1271,6 +1286,7 @@ Deno.serve(async (req: Request) => {
     },
     warnings: [
       'cloud-state-only',
+      ...(shouldRepairPushToken ? ['open-app-to-restore-push'] : []),
       ...(latestSession ? [] : ['no-focus-session']),
       ...(body.lastKnownSummaryVersion && body.lastKnownSummaryVersion === summaryVersion ? ['client-already-current'] : []),
       ...(summaryVersionRegressed ? ['summary-version-regressed'] : []),

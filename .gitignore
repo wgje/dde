@@ -24,6 +24,12 @@ src/environments/environment.development.ts
 # Supabase local config
 .supabase/
 
+# Firebase / FCM (SENSITIVE - contains project identifiers)
+# google-services.json is technically public (shipped in APK) but we keep it
+# out of the repo to avoid leaking project IDs of per-environment Firebase
+# projects. Place your file at android/app/google-services.json locally.
+android/app/google-services.json
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

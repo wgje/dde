@@ -89,6 +89,7 @@ data class StoredWidgetBinding(
 data class PendingBootstrapState(
   val nonce: String,
   val issuedAtMs: Long,
+  val requestedPushToken: String?,
 )
 
 enum class WidgetPrimaryAction {

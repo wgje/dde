@@ -5,6 +5,16 @@ plugins {
   kotlin("plugin.compose")
 }
 
+// 2026-04-21 FCM 接入：仅当 `android/app/google-services.json` 存在时才 apply google-services
+// 插件 —— 该插件会把 JSON 中的 project_id/api_key/app_id/sender_id 生成到 values/values.xml，
+// 供 FirebaseApp.initializeApp() 默认读取。缺 json 时跳过不破坏现有构建（自动降级为非 FCM
+// 路径：USER_PRESENT / WorkManager 15min 周期仍生效）。
+val googleServicesJson = file("google-services.json")
+val hasGoogleServices = googleServicesJson.exists()
+if (hasGoogleServices) {
+  apply(plugin = "com.google.gms.google-services")
+}
+
 fun quoted(value: String): String = "\"${value.replace("\\", "\\\\").replace("\"", "\\\"")}\""
 
 fun propertyOrEnv(name: String, envName: String, defaultValue: String): String {
@@ -65,6 +75,7 @@ android {
     buildConfigField("String", "NANOFLOW_TWA_DEFAULT_PATH", quoted("/#/projects?entry=twa&intent=open-workspace"))
     buildConfigField("String", "NANOFLOW_TWA_FOCUS_PATH", quoted("/#/projects?entry=twa&intent=open-focus-tools"))
     buildConfigField("String", "NANOFLOW_TWA_BLACKBOX_PATH", quoted("/#/projects?entry=twa&intent=open-blackbox-recorder"))
+    buildConfigField("Boolean", "NANOFLOW_FCM_ENABLED", hasGoogleServices.toString())
     resValue("string", "nanoflow_default_url", quoted("$webOrigin/#/projects?entry=twa&intent=open-workspace"))
     resValue("string", "asset_statements", quoted(assetStatements))
   }
@@ -111,5 +122,8 @@ dependencies {
   implementation("com.google.androidbrowserhelper:androidbrowserhelper:2.5.0")
   implementation("com.google.firebase:firebase-messaging-ktx:24.1.0")
   implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+  // 2026-04-21 FCM 接入：kotlinx-coroutines-play-services 提供 Task.await() 扩展，
+  // 让 FirebaseMessaging.getInstance().token 可在 suspend 函数里直接 await。
+  implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.9.0")
   implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
 }

@@ -111,11 +111,56 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
   override fun onReceive(context: Context, intent: Intent) {
     super.onReceive(context, intent)
     when (intent.action) {
-      ACTION_CLICK_OPEN_APP -> handleClickOpenApp(context, intent)
-      ACTION_CLICK_OPEN_FOCUS_TOOLS -> handleClickOpenFocusTools(context, intent)
-      ACTION_CLICK_ITEM -> handleClickItem(context, intent)
+      ACTION_CLICK_OPEN_APP -> {
+        resetReactiveRefreshGate(context, "click-open-app")
+        handleClickOpenApp(context, intent)
+      }
+      ACTION_CLICK_OPEN_FOCUS_TOOLS -> {
+        resetReactiveRefreshGate(context, "click-open-focus-tools")
+        handleClickOpenFocusTools(context, intent)
+      }
+      ACTION_CLICK_ITEM -> {
+        resetReactiveRefreshGate(context, "click-item")
+        handleClickItem(context, intent)
+      }
       ACTION_FORCE_REFRESH -> NanoflowWidgetRefreshWorker.enqueue(context, reason = "force-refresh-broadcast")
+      // 【根因修复 2026-04-21】在 FCM 未就绪的环境下，widget 只靠 15-min 周期 WorkManager +
+      // 手动 force-refresh + add/resize 回调更新；用户在桌面端切换专注模式后，手机端最长需
+      // 等 15 min 才看到同步。USER_PRESENT（解锁）是 manifest receiver 仍稳定可用的
+      // 「用户准备看 widget」信号，因此绑 2 min 节流闸；Click 系列 action 会重置闸，让
+      // 「点 widget → 切专注 → 回桌面」走 0 延迟刷新。
+      Intent.ACTION_USER_PRESENT -> maybeEnqueueReactiveRefresh(
+        context,
+        reason = "user-present",
+        minIntervalMs = USER_PRESENT_REFRESH_MIN_INTERVAL_MS,
+        gateKey = USER_PRESENT_REFRESH_GATE_LAST_AT_KEY,
+      )
     }
+  }
+
+  private fun maybeEnqueueReactiveRefresh(
+    context: Context,
+    reason: String,
+    minIntervalMs: Long,
+    gateKey: String,
+  ) {
+    if (!hasInstalledWidgets(context)) {
+      // 未安装 widget 时无需刷新，直接返回；不动 gate 时间戳。
+      return
+    }
+    val prefs = context.applicationContext.getSharedPreferences(REFRESH_GATE_PREFS, Context.MODE_PRIVATE)
+    val nowMs = System.currentTimeMillis()
+    val lastAutoRefreshMs = prefs.getLong(gateKey, 0L)
+    val elapsedMs = nowMs - lastAutoRefreshMs
+    if (lastAutoRefreshMs > 0L && elapsedMs < minIntervalMs) {
+      NanoflowWidgetTelemetry.info(
+        "widget_reactive_refresh_throttled",
+        mapOf("reason" to reason, "elapsedMs" to elapsedMs, "minIntervalMs" to minIntervalMs),
+      )
+      return
+    }
+    prefs.edit().putLong(gateKey, nowMs).apply()
+    NanoflowWidgetRefreshWorker.enqueue(context, reason = reason)
   }
 
   // --- Click handlers ---
@@ -274,6 +319,31 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
 
     /** 外部 adb / FCM 触发的强制刷新广播。 */
     const val ACTION_FORCE_REFRESH = "app.nanoflow.twa.widget.ACTION_FORCE_REFRESH"
+
+    /**
+    * 【2026-04-21】反应性刷新节流阀。FCM 未就绪场景下，USER_PRESENT（解锁）
+    * 是 manifest receiver 可靠可用的廉价触发点；但用户一天解锁很多次，不节流会导致
+    * 不必要的网络/电量开销。
+    * - USER_PRESENT 走 2 分钟闸：解锁意味着用户确实在看手机，值得较积极刷新。
+     * - Click 系列 action 会把闸门时间戳清零（resetAutoRefreshGate），让「点 widget 进应用 →
+     *   切换专注 → 回桌面」闭环走 0 延迟刷新。
+     */
+    private const val REFRESH_GATE_PREFS = "nanoflow_widget_refresh_gate"
+    private const val USER_PRESENT_REFRESH_GATE_LAST_AT_KEY = "userPresentLastAutoRefreshAtMs"
+    private const val USER_PRESENT_REFRESH_MIN_INTERVAL_MS: Long = 2 * 60 * 1000
+
+    /**
+     * 【2026-04-21】用户点击 widget 的任意 action 时，重置自动刷新闸门时间戳。
+     * 目的：覆盖「点 widget 进应用 → 切换专注模式 → 回桌面」闭环 —— 此时 USER_PRESENT
+     * 不会因为「刚才点击时刚刷过」而被 2 min 闸门挡住。
+     */
+    fun resetReactiveRefreshGate(context: Context, reason: String) {
+      val prefs = context.applicationContext.getSharedPreferences(REFRESH_GATE_PREFS, Context.MODE_PRIVATE)
+      prefs.edit()
+        .putLong(USER_PRESENT_REFRESH_GATE_LAST_AT_KEY, 0L)
+        .apply()
+      NanoflowWidgetTelemetry.info("widget_reactive_gate_reset", mapOf("reason" to reason))
+    }
 
     const val EXTRA_APP_WIDGET_ID = "extra.APP_WIDGET_ID"
     const val EXTRA_ITEM_TYPE = "extra.ITEM_TYPE"

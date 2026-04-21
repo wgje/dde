@@ -4,7 +4,9 @@ import android.appwidget.AppWidgetManager
 import android.content.ComponentName
 import android.content.Context
 import android.net.Uri
+import com.google.firebase.messaging.FirebaseMessaging
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import java.io.BufferedReader
@@ -19,6 +21,8 @@ import java.time.format.DateTimeFormatter
 class NanoflowWidgetRepository(private val context: Context) {
   private val clockFormatter = DateTimeFormatter.ofPattern("HH:mm")
   private val bootstrapTtlMs = 15 * 60 * 1000L
+  private val registeredPushTokenRepairIntervalMs = 24 * 60 * 60 * 1000L
+  private val pushTokenRepairDegradedReason = "push-token-missing"
   private val bootstrapRequiredCodes = setOf(
     "WIDGET_BOOTSTRAP_REQUIRED",
     "INSTANCE_CONTEXT_REQUIRED",
@@ -92,9 +96,11 @@ class NanoflowWidgetRepository(private val context: Context) {
     val identity = store.ensureDeviceIdentity()
     val instanceId = store.ensureInstanceId(appWidgetId)
     val existingPendingBootstrap = store.readPendingBootstrap(appWidgetId)
+    val pendingPushToken = store.readPendingPushToken()
     val bootstrapNonce = if (
       existingPendingBootstrap != null
       && System.currentTimeMillis() - existingPendingBootstrap.issuedAtMs <= bootstrapTtlMs
+      && existingPendingBootstrap.requestedPushToken == pendingPushToken
     ) {
       NanoflowWidgetTelemetry.info(
         "widget_bootstrap_nonce_reused",
@@ -105,10 +111,9 @@ class NanoflowWidgetRepository(private val context: Context) {
       )
       existingPendingBootstrap.nonce
     } else {
-      store.issueBootstrapNonce(appWidgetId)
+      store.issueBootstrapNonce(appWidgetId, pendingPushToken)
     }
     val sizeBucket = store.readSizeBucket(appWidgetId) ?: resolveSizeBucket(appWidgetId)
-    val pendingPushToken = store.readPendingPushToken()
     if (existingPendingBootstrap == null || bootstrapNonce != existingPendingBootstrap.nonce) {
       NanoflowWidgetTelemetry.info(
         "widget_bootstrap_nonce_issued",
@@ -257,7 +262,7 @@ class NanoflowWidgetRepository(private val context: Context) {
       return false
     }
 
-    store.applyBootstrapPayload(payload)
+    store.applyBootstrapPayload(payload, pendingBootstrap.requestedPushToken)
     store.clearPendingBootstrap(hostWidgetId)
     NanoflowWidgetTelemetry.info(
       "widget_bootstrap_callback_accepted",
@@ -272,8 +277,82 @@ class NanoflowWidgetRepository(private val context: Context) {
   }
 
   suspend fun rememberPushToken(pushToken: String) {
-    if (pushToken.isBlank()) return
-    store.persistPendingPushToken(pushToken)
+    val normalizedPushToken = pushToken.trim()
+    if (normalizedPushToken.isBlank()) return
+    if (store.readPendingPushToken()?.trim() == normalizedPushToken) {
+      return
+    }
+    val registeredPushToken = store.readRegisteredPushToken()?.trim()
+    val registeredPushTokenAckAtMs = store.readRegisteredPushTokenAckAtMs()
+    val isRecentlyAcknowledged = registeredPushToken == normalizedPushToken
+      && registeredPushTokenAckAtMs != null
+      && System.currentTimeMillis() - registeredPushTokenAckAtMs < registeredPushTokenRepairIntervalMs
+    if (isRecentlyAcknowledged) {
+      return
+    }
+
+    store.persistPendingPushToken(normalizedPushToken)
+  }
+
+  private suspend fun repairMissingPushTokenState(
+    appWidgetId: Int,
+    summary: WidgetSummaryResponse,
+  ) {
+    if (!summary.degradedReasons.contains(pushTokenRepairDegradedReason)) {
+      return
+    }
+
+    store.clearRegisteredPushTokenState()
+    if (!BuildConfig.NANOFLOW_FCM_ENABLED) {
+      NanoflowWidgetTelemetry.warn(
+        "widget_push_token_repair_skipped",
+        mapOf(
+          "appWidgetId" to appWidgetId,
+          "reason" to "fcm-disabled",
+        ),
+      )
+      return
+    }
+
+    if (!store.readPendingPushToken().isNullOrBlank()) {
+      NanoflowWidgetTelemetry.info(
+        "widget_push_token_repair_already_pending",
+        mapOf("appWidgetId" to appWidgetId),
+      )
+      return
+    }
+
+    try {
+      val token = FirebaseMessaging.getInstance().token.await()
+      if (token.isNullOrBlank()) {
+        NanoflowWidgetTelemetry.warn(
+          "widget_push_token_repair_skipped",
+          mapOf(
+            "appWidgetId" to appWidgetId,
+            "reason" to "empty-token",
+          ),
+        )
+        return
+      }
+
+      rememberPushToken(token)
+      NanoflowWidgetTelemetry.info(
+        "widget_push_token_repair_queued",
+        mapOf(
+          "appWidgetId" to appWidgetId,
+          "tokenLength" to token.length,
+        ),
+      )
+    } catch (error: Throwable) {
+      NanoflowWidgetTelemetry.warn(
+        "widget_push_token_repair_failed",
+        mapOf(
+          "appWidgetId" to appWidgetId,
+          "errorClass" to (error::class.simpleName ?: "unknown"),
+        ),
+        error,
+      )
+    }
   }
 
   suspend fun refreshInstalledWidgets() {
@@ -440,6 +519,8 @@ class NanoflowWidgetRepository(private val context: Context) {
     } else if (normalizedSummary.code !in transientContextPreservingCodes) {
       store.clearRateLimitBackoff()
     }
+
+    repairMissingPushTokenState(appWidgetId, normalizedSummary)
 
     store.saveSummary(appWidgetId, normalizedSummary)
 
@@ -1129,6 +1210,9 @@ class NanoflowWidgetRepository(private val context: Context) {
     }
 
     val summary = store.readSummary(appWidgetId) ?: return true
+    if (summary.degradedReasons.contains(pushTokenRepairDegradedReason)) {
+      return true
+    }
     if (summary.code in bootstrapRequiredCodes) {
       return true
     }
@@ -1175,6 +1259,9 @@ class NanoflowWidgetRepository(private val context: Context) {
       append("\"platform\":\"")
       append(BuildConfig.NANOFLOW_WIDGET_PLATFORM)
       append("\",")
+      append("\"supportsPush\":")
+      append(if (BuildConfig.NANOFLOW_FCM_ENABLED) "true" else "false")
+      append(',')
       if (escapedClientVersion.isNotBlank()) {
         append("\"clientVersion\":\"")
         append(escapedClientVersion)

@@ -33,6 +33,7 @@ class NanoflowWidgetStore(private val context: Context) {
   private val legacyPendingPushTokenKey = stringPreferencesKey("binding.pendingPushToken")
   private val pendingBootstrapNoncePrefix = "instance.bootstrapNonce."
   private val pendingBootstrapIssuedAtPrefix = "instance.bootstrapIssuedAt."
+  private val pendingBootstrapPushTokenPrefix = "instance.bootstrapPushToken."
   private val privacyModeKey = booleanPreferencesKey("settings.privacyMode")
 
   private val securePreferences: SharedPreferences by lazy {
@@ -92,21 +93,35 @@ class NanoflowWidgetStore(private val context: Context) {
     )
   }
 
-  suspend fun applyBootstrapPayload(payload: WidgetBootstrapPayload) {
+  suspend fun applyBootstrapPayload(payload: WidgetBootstrapPayload, acceptedPushToken: String?) {
     val normalizedSupabaseUrl = payload.supabaseUrl
       ?.trim()
       ?.trimEnd('/')
       ?.takeIf { it.isNotBlank() }
+    val currentPendingPushToken = securePreferences.getString("binding.pendingPushToken", null)
+      ?.trim()
+      ?.takeIf { it.isNotBlank() }
+    val normalizedAcceptedPushToken = acceptedPushToken
+      ?.trim()
+      ?.takeIf { it.isNotBlank() }
 
-    securePreferences.edit()
+    val editor = securePreferences.edit()
       .putString("binding.installationId", payload.installationId)
       .putString("binding.deviceId", payload.deviceId)
       .putString("binding.widgetToken", payload.widgetToken)
       .putInt("binding.bindingGeneration", payload.bindingGeneration)
       .putString("binding.expiresAt", payload.expiresAt)
       .putString("binding.supabaseUrl", normalizedSupabaseUrl)
-      .remove("binding.pendingPushToken")
-      .apply()
+
+    if (!normalizedAcceptedPushToken.isNullOrBlank()) {
+      editor.putString("binding.registeredPushToken", normalizedAcceptedPushToken)
+      editor.putLong("binding.registeredPushTokenAckAtMs", System.currentTimeMillis())
+      if (currentPendingPushToken == normalizedAcceptedPushToken) {
+        editor.remove("binding.pendingPushToken")
+      }
+    }
+
+    editor.apply()
 
     val hostWidgetId = payload.hostInstanceId.toIntOrNull()
     if (hostWidgetId != null && !payload.instanceId.isNullOrBlank()) {
@@ -121,13 +136,22 @@ class NanoflowWidgetStore(private val context: Context) {
       ?.takeIf { it.isNotBlank() }
   }
 
-  suspend fun issueBootstrapNonce(appWidgetId: Int): String {
+  suspend fun issueBootstrapNonce(appWidgetId: Int, requestedPushToken: String?): String {
     val nonce = UUID.randomUUID().toString()
     val issuedAtMs = System.currentTimeMillis()
+    val normalizedRequestedPushToken = requestedPushToken
+      ?.trim()
+      ?.takeIf { it.isNotBlank() }
 
     context.widgetDataStore.edit { prefs ->
       prefs[stringPreferencesKey(pendingBootstrapNonceKey(appWidgetId))] = nonce
       prefs[longPreferencesKey(pendingBootstrapIssuedAtKey(appWidgetId))] = issuedAtMs
+      val requestedPushTokenKey = stringPreferencesKey(pendingBootstrapPushTokenKey(appWidgetId))
+      if (normalizedRequestedPushToken == null) {
+        prefs.remove(requestedPushTokenKey)
+      } else {
+        prefs[requestedPushTokenKey] = normalizedRequestedPushToken
+      }
     }
 
     return nonce
@@ -137,13 +161,15 @@ class NanoflowWidgetStore(private val context: Context) {
     val snapshot = context.widgetDataStore.data.first()
     val nonce = snapshot[stringPreferencesKey(pendingBootstrapNonceKey(appWidgetId))] ?: return null
     val issuedAtMs = snapshot[longPreferencesKey(pendingBootstrapIssuedAtKey(appWidgetId))] ?: return null
-    return PendingBootstrapState(nonce = nonce, issuedAtMs = issuedAtMs)
+    val requestedPushToken = snapshot[stringPreferencesKey(pendingBootstrapPushTokenKey(appWidgetId))]
+    return PendingBootstrapState(nonce = nonce, issuedAtMs = issuedAtMs, requestedPushToken = requestedPushToken)
   }
 
   suspend fun clearPendingBootstrap(appWidgetId: Int) {
     context.widgetDataStore.edit { prefs ->
       prefs.remove(stringPreferencesKey(pendingBootstrapNonceKey(appWidgetId)))
       prefs.remove(longPreferencesKey(pendingBootstrapIssuedAtKey(appWidgetId)))
+      prefs.remove(stringPreferencesKey(pendingBootstrapPushTokenKey(appWidgetId)))
     }
   }
 
@@ -223,9 +249,27 @@ class NanoflowWidgetStore(private val context: Context) {
     return securePreferences.getString("binding.pendingPushToken", null)
   }
 
+  suspend fun readRegisteredPushToken(): String? {
+    migrateLegacySecureFields(context.widgetDataStore.data.first())
+    return securePreferences.getString("binding.registeredPushToken", null)
+  }
+
+  suspend fun readRegisteredPushTokenAckAtMs(): Long? {
+    migrateLegacySecureFields(context.widgetDataStore.data.first())
+    return securePreferences.getLong("binding.registeredPushTokenAckAtMs", 0L)
+      .takeIf { it > 0L }
+  }
+
   suspend fun persistPendingPushToken(pushToken: String) {
     securePreferences.edit()
       .putString("binding.pendingPushToken", pushToken)
+      .apply()
+  }
+
+  suspend fun clearRegisteredPushTokenState() {
+    securePreferences.edit()
+      .remove("binding.registeredPushToken")
+      .remove("binding.registeredPushTokenAckAtMs")
       .apply()
   }
 
@@ -234,6 +278,8 @@ class NanoflowWidgetStore(private val context: Context) {
       .remove("binding.widgetToken")
       .remove("binding.bindingGeneration")
       .remove("binding.expiresAt")
+      .remove("binding.registeredPushToken")
+      .remove("binding.registeredPushTokenAckAtMs")
 
     if (clearPendingPushToken) {
       editor.remove("binding.pendingPushToken")
@@ -254,6 +300,7 @@ class NanoflowWidgetStore(private val context: Context) {
       prefs.remove(summaryUpdatedAtKey(appWidgetId))
       prefs.remove(stringPreferencesKey(pendingBootstrapNonceKey(appWidgetId)))
       prefs.remove(longPreferencesKey(pendingBootstrapIssuedAtKey(appWidgetId)))
+      prefs.remove(stringPreferencesKey(pendingBootstrapPushTokenKey(appWidgetId)))
     }
   }
 
@@ -265,6 +312,7 @@ class NanoflowWidgetStore(private val context: Context) {
       prefs.remove(summaryUpdatedAtKey(appWidgetId))
       prefs.remove(stringPreferencesKey(pendingBootstrapNonceKey(appWidgetId)))
       prefs.remove(longPreferencesKey(pendingBootstrapIssuedAtKey(appWidgetId)))
+      prefs.remove(stringPreferencesKey(pendingBootstrapPushTokenKey(appWidgetId)))
     }
   }
 
@@ -277,6 +325,7 @@ class NanoflowWidgetStore(private val context: Context) {
           || name.startsWith("summary.")
           || name.startsWith(pendingBootstrapNoncePrefix)
           || name.startsWith(pendingBootstrapIssuedAtPrefix)
+          || name.startsWith(pendingBootstrapPushTokenPrefix)
       }
       keysToRemove.forEach { prefs.remove(it) }
     }
@@ -445,6 +494,10 @@ class NanoflowWidgetStore(private val context: Context) {
 
   private fun pendingBootstrapIssuedAtKey(appWidgetId: Int): String {
     return "$pendingBootstrapIssuedAtPrefix$appWidgetId"
+  }
+
+  private fun pendingBootstrapPushTokenKey(appWidgetId: Int): String {
+    return "$pendingBootstrapPushTokenPrefix$appWidgetId"
   }
 
   private suspend fun migrateLegacySecureFields(snapshot: Preferences) {

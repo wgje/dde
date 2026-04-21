@@ -48,6 +48,7 @@ export interface WidgetCapabilityContext {
   installationId?: string | null;
   deviceId?: string | null;
   clientVersion?: string | null;
+  supportsPush?: boolean | null;
 }
 
 export interface WidgetCapabilityDecision extends WidgetCapabilities {
@@ -425,17 +426,34 @@ export function extractWidgetClientSurface(value: unknown): string | null {
   return normalizeOptionalText(clientContext?.clientSurface, 128);
 }
 
+export function extractWidgetPushSupport(value: unknown): boolean | null {
+  if (!isPlainObject(value)) {
+    return null;
+  }
+
+  if (typeof value.supportsPush === 'boolean') {
+    return value.supportsPush;
+  }
+
+  const clientContext = isPlainObject(value.clientContext) ? value.clientContext : null;
+  return typeof clientContext?.supportsPush === 'boolean'
+    ? clientContext.supportsPush
+    : null;
+}
+
 export function buildWidgetClientCapabilitiesPatch(input: {
   platform: WidgetPlatform;
   clientVersion?: string | null;
   clientSurface?: string | null;
+  supportsPush?: boolean | null;
   observedAt?: string | null;
 }): Json {
   const clientVersion = normalizeOptionalText(input.clientVersion, 256);
   const clientSurface = normalizeOptionalText(input.clientSurface, 128);
+  const supportsPush = typeof input.supportsPush === 'boolean' ? input.supportsPush : null;
   const observedAt = normalizeOptionalText(input.observedAt, 128);
 
-  if (!clientVersion && !clientSurface) {
+  if (!clientVersion && !clientSurface && supportsPush === null) {
     return {};
   }
 
@@ -444,6 +462,7 @@ export function buildWidgetClientCapabilitiesPatch(input: {
       platform: input.platform,
       clientVersion,
       clientSurface,
+      supportsPush,
       observedAt,
     },
   };

@@ -88,6 +88,9 @@ const ALLOWED_TABLES = new Set<AllowedWidgetNotifyTable>([
 ]);
 
 const NOTIFY_WINDOW_SECONDS = 10;
+// 关键状态变更（专注会话、项目软删 / 归档）对小组件语义至关重要，即使处于 10s 节流窗口
+// 内也必须放行，避免「结束专注后立即开启新专注」这类场景被前一条 black_box_entries
+// 事件把 last_notified_at 压到窗口里，从而吞掉 focus_sessions 的 INSERT / UPDATE。
 const MAX_WEBHOOK_AGE_MS = 5 * 60 * 1000;
 const STALE_PROCESSING_RECLAIM_MS = 60 * 1000;
 const PUSH_PROVIDER_ENV_KEYS = ['FCM_PROJECT_ID', 'FCM_CLIENT_EMAIL', 'FCM_PRIVATE_KEY'] as const;
@@ -419,6 +422,41 @@ function isWithinNotifyWindow(lastNotifiedAt: string | null | undefined, nowMs: 
   return nowMs - parsed < NOTIFY_WINDOW_SECONDS * 1000;
 }
 
+function normalizeScalarDeltaValue(value: unknown): string | number | boolean | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  }
+
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return value;
+  }
+
+  return null;
+}
+
+function didScalarFieldChange(payload: DatabaseWebhookPayload, field: string): boolean {
+  return normalizeScalarDeltaValue(payload.record?.[field])
+    !== normalizeScalarDeltaValue(payload.old_record?.[field]);
+}
+
+function shouldBypassNotifyWindow(payload: DatabaseWebhookPayload): boolean {
+  if (payload.table === 'focus_sessions') {
+    return payload.type === 'INSERT'
+      || (payload.type === 'UPDATE' && didScalarFieldChange(payload, 'ended_at'));
+  }
+
+  if (payload.table === 'projects') {
+    return payload.type === 'UPDATE' && didScalarFieldChange(payload, 'deleted_at');
+  }
+
+  return false;
+}
+
 async function upsertNotifyThrottle(
   client: ReturnType<typeof createServiceRoleClient>,
   userId: string,
@@ -625,7 +663,8 @@ Deno.serve(async (req) => {
 
     const throttleRow = await loadNotifyThrottle(client, userId);
     const nowMs = Date.now();
-    if (isWithinNotifyWindow(throttleRow?.last_notified_at, nowMs)) {
+    const throttleBypass = shouldBypassNotifyWindow(payload);
+    if (!throttleBypass && isWithinNotifyWindow(throttleRow?.last_notified_at, nowMs)) {
       await finishNotifyEvent(client, webhookId, 'throttled', userId, summaryCursor);
       logWidgetEvent('widget_push_dirty_dropped', {
         userId,
@@ -724,12 +763,18 @@ Deno.serve(async (req) => {
     const serviceAccount = loadFcmServiceAccount();
     if (!serviceAccount) {
       // 理论上不会到达此分支：上方 hasConfiguredPushProvider 已校验；防御性回退到 dry-run。
+      // 注入后若仍触发，多为 isolate 冷启动缓存了旧环境变量，需要重部署。
+      const envDiag = {
+        hasProjectId: Boolean(Deno.env.get('FCM_PROJECT_ID')?.trim()),
+        hasClientEmail: Boolean(Deno.env.get('FCM_CLIENT_EMAIL')?.trim()),
+        hasPrivateKey: Boolean(Deno.env.get('FCM_PRIVATE_KEY')?.trim()),
+      };
       await finishNotifyEvent(client, webhookId, 'accepted-dry-run', userId, summaryCursor);
       logWidgetEvent('widget_push_dirty_sent', {
         userId,
         webhookId,
         eligibleDeviceCount: eligibleDevices.length,
-        extra: { deliveryMode: 'dry-run', reason: 'service-account-missing' },
+        extra: { deliveryMode: 'dry-run', reason: 'service-account-missing', ...envDiag },
       });
       return jsonResponse({
         status: 'accepted',

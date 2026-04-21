@@ -124,6 +124,15 @@
             <intent-filter>
                 <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
             </intent-filter>
+                        <!--
+                            2026-04-21 小组件实时性修复：FCM 未就绪时，USER_PRESENT 是 manifest receiver
+                            仍稳定可用的「用户即将看 widget」信号。这里走 2 min 节流（解锁=明确要看）；
+                            Click 系列 action 会重置节流闸，让「点 widget 进应用 → 切专注模式 → 回桌面」
+                            闭环走 0 延迟刷新。
+                        -->
+            <intent-filter>
+                <action android:name="android.intent.action.USER_PRESENT" />
+            </intent-filter>
 
             <meta-data
                 android:name="android.appwidget.provider"

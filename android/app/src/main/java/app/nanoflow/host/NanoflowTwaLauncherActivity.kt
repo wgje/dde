@@ -104,8 +104,24 @@ class NanoflowTwaLauncherActivity : LauncherActivity() {
       return
     }
 
+    resetReactiveRefreshGateIfNeeded()
     logLaunchStarted()
     launchTwa()
+  }
+
+  private fun resetReactiveRefreshGateIfNeeded() {
+    val request = resolveLaunchRequest()
+    if (request.entrySource != NanoFlowEntrySource.WIDGET) {
+      return
+    }
+    if (request.appWidgetId == AppWidgetManager.INVALID_APPWIDGET_ID) {
+      return
+    }
+
+    NanoflowWidgetReceiver.resetReactiveRefreshGate(
+      context = applicationContext,
+      reason = "widget-activity-launch",
+    )
   }
 
   private fun resetLaunchCache() {
