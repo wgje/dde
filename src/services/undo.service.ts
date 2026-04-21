@@ -18,6 +18,7 @@ interface PersistedUndoData {
   timestamp: string;
   projectId: string;
   undoStack: UndoAction[];
+  undoLimitNotificationLocked?: boolean;
 }
 
 /** 撤销操作结果：UndoAction | null | 'version-mismatch' | version-mismatch-forceable */
@@ -66,9 +67,8 @@ export class UndoService {
   private _truncatedCount = signal(0);
   readonly truncatedCount = this._truncatedCount.asReadonly();
   
-  /** 上次截断提示时间（防止频繁提示） */
-  private lastTruncationNotifyTime = 0;
-  private readonly TRUNCATION_NOTIFY_COOLDOWN = 5 * 60 * 1000; // 从30秒增加到5分钟
+  /** 当前这轮达到上限后的提示是否已经展示过 */
+  private hasNotifiedUndoLimit = false;
   
   /** 是否正在执行撤销/重做操作（防止循环记录） */
   private isUndoRedoing = false;
@@ -98,7 +98,10 @@ export class UndoService {
   /** 按上限裁剪撤销栈并触发截断提示 */
   private limitUndoStack(stack: UndoAction[], notify: boolean = true): UndoAction[] {
     const maxSize = this.getMaxHistorySize();
-    if (stack.length <= maxSize) return stack;
+    if (stack.length <= maxSize) {
+      this.rearmTruncationNotification(stack.length, maxSize);
+      return stack;
+    }
     const truncatedCount = stack.length - maxSize;
     if (notify) {
       this.notifyTruncation(truncatedCount);
@@ -386,6 +389,7 @@ export class UndoService {
     // 这里不阻止撤销，只记录可能的警告供日志使用
     
     this.undoStack.update(s => s.slice(0, -1));
+    this.rearmTruncationNotification(this.undoStack().length, this.getMaxHistorySize());
     this.redoStack.update(s => this.limitRedoStack([...s, action]));
     
     this.isUndoRedoing = false;
@@ -409,6 +413,7 @@ export class UndoService {
     this.isUndoRedoing = true;
     
     this.undoStack.update(s => s.slice(0, -1));
+    this.rearmTruncationNotification(this.undoStack().length, this.getMaxHistorySize());
     this.redoStack.update(s => this.limitRedoStack([...s, action]));
     
     this.isUndoRedoing = false;
@@ -474,6 +479,7 @@ export class UndoService {
         return action.projectVersion >= currentVersion - 1;
       })
     );
+    this.rearmTruncationNotification(this.undoStack().length, this.getMaxHistorySize());
     
     // 同时清理重做栈中的过时记录
     this.redoStack.update(stack => 
@@ -483,6 +489,8 @@ export class UndoService {
         return action.projectVersion >= currentVersion - 1;
       })
     );
+
+    this.schedulePersist();
     
     return before - this.undoStack().length;
   }
@@ -515,6 +523,7 @@ export class UndoService {
         return !involvesDeletedTask;
       })
     );
+    this.rearmTruncationNotification(this.undoStack().length, this.getMaxHistorySize());
     
     // 同时清理重做栈
     this.redoStack.update(stack => 
@@ -531,6 +540,8 @@ export class UndoService {
         return !involvesDeletedTask;
       })
     );
+
+    this.schedulePersist();
     
     const clearedUndo = beforeUndo - this.undoStack().length;
     const clearedRedo = beforeRedo - this.redoStack().length;
@@ -555,6 +566,9 @@ export class UndoService {
       this.undoStack.set([]);
       this.redoStack.set([]);
     }
+
+    this.rearmTruncationNotification(this.undoStack().length, this.getMaxHistorySize());
+    this.schedulePersist();
   }
   
   /**
@@ -613,6 +627,7 @@ export class UndoService {
     this.pendingAction = null;
     this.lastActionTime = 0;
     this.isUndoRedoing = false;
+    this.hasNotifiedUndoLimit = false;
     this.replaySequence = 0;
     this._appliedReplay.set(null);
   }
@@ -642,6 +657,7 @@ export class UndoService {
     // 重置状态
     this.lastActionTime = 0;
     this.isUndoRedoing = false;
+    this.hasNotifiedUndoLimit = false;
     this._truncatedCount.set(0);
     this.replaySequence = 0;
     this._appliedReplay.set(null);
@@ -667,15 +683,12 @@ export class UndoService {
     if (this.uiState.isMobile()) {
       return;
     }
-    
-    const now = Date.now();
-    
-    // 检查冷却时间
-    if (now - this.lastTruncationNotifyTime < this.TRUNCATION_NOTIFY_COOLDOWN) {
+
+    if (this.hasNotifiedUndoLimit) {
       return;
     }
-    
-    this.lastTruncationNotifyTime = now;
+
+    this.hasNotifiedUndoLimit = true;
     
     // 显示提示
     this.toast.info(
@@ -683,6 +696,12 @@ export class UndoService {
       `最早的 ${count} 条记录已被移除`,
       4000
     );
+  }
+
+  private rearmTruncationNotification(undoCount: number, maxSize: number): void {
+    if (undoCount < maxSize) {
+      this.hasNotifiedUndoLimit = false;
+    }
   }
 
   private getTaskFieldChanges(
@@ -724,6 +743,7 @@ export class UndoService {
     if (this.currentProjectId === projectId) return;
     
     this.currentProjectId = projectId;
+    this.hasNotifiedUndoLimit = false;
     // 进入新项目时统一按设备上限裁剪历史，避免桌面端保留超过 20 步的旧记录
     this.undoStack.update(stack => this.limitUndoStack(stack, false));
     this.redoStack.update(stack => this.limitRedoStack(stack));
@@ -768,7 +788,8 @@ export class UndoService {
         version: 1,
         timestamp: new Date().toISOString(),
         projectId: this.currentProjectId,
-        undoStack: itemsToPersist.map(item => this.serializeUndoAction(item))
+        undoStack: itemsToPersist.map(item => this.serializeUndoAction(item)),
+        undoLimitNotificationLocked: this.hasNotifiedUndoLimit,
       };
       
       sessionStorage.setItem(
@@ -820,6 +841,7 @@ export class UndoService {
       
       if (restoredActions.length > 0) {
         this.undoStack.set(this.limitUndoStack(restoredActions, false));
+        this.hasNotifiedUndoLimit = data.undoLimitNotificationLocked === true;
         // 不恢复重做栈，因为刷新后重做无意义
       }
     } catch (e) {
