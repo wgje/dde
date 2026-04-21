@@ -358,6 +358,10 @@ export class MobileTodoDrawerComponent implements OnDestroy {
   private swipeState: SwipeGestureState = { startX: 0, startY: 0, startTime: 0, isActive: false };
   /** 同一次触摸若起点来自可拖拽卡片，则整次手势都禁止触发抽屉 swipe 切换。 */
   private suppressSwipeForCurrentTouch = false;
+  /** 当前这次触摸的切页手势是否已经被本地或全局兜底消费。 */
+  private swipeHandledForCurrentTouch = false;
+  /** document 级 touchend/pointerup 兜底切页定时器。 */
+  private pendingGlobalSwipeFallbackTimer: ReturnType<typeof setTimeout> | null = null;
   
   // 拖动事件
   onDragStart(event: DragEvent, task: Task): void {
@@ -406,6 +410,8 @@ export class MobileTodoDrawerComponent implements OnDestroy {
       scrollTop: this.scrollContainer()?.nativeElement.scrollTop ?? 0,
       scrolled: false,
     };
+    this.clearPendingGlobalSwipeFallback();
+    this.swipeHandledForCurrentTouch = false;
 
     // 阻止 Android 原生长按（文本选择/callout/链接预览）在 250ms 长按拖拽触发
     // 前后撕裂 touch 流。touch-action:none 已在 CSS 侧关闭系统手势仲裁，这里再
@@ -436,8 +442,8 @@ export class MobileTodoDrawerComponent implements OnDestroy {
     this.unassignedTouchSession = null;
     queueMicrotask(() => {
       this.suppressSwipeForCurrentTouch = false;
-      if (swipeDirection) {
-        this.swipeToSwitch.emit(swipeDirection);
+      if (swipeDirection && !this.swipeHandledForCurrentTouch) {
+        this.emitSwipeToSwitch(swipeDirection);
         return;
       }
       if (shouldEmitTap && !this.draggingTaskId()) {
@@ -532,6 +538,7 @@ export class MobileTodoDrawerComponent implements OnDestroy {
   ngOnDestroy(): void {
     this.cancelPendingAutoCollapse('unfinished');
     this.cancelPendingAutoCollapse('unassigned');
+    this.clearPendingGlobalSwipeFallback();
     this.zone.runOutsideAngular(() => {
       document.removeEventListener('touchend', this.boundGlobalTouchFinish, { capture: true } as EventListenerOptions);
       document.removeEventListener('touchcancel', this.boundGlobalTouchFinish, { capture: true } as EventListenerOptions);
@@ -552,7 +559,9 @@ export class MobileTodoDrawerComponent implements OnDestroy {
     // 如果正在拖拽任务，不处理滑动
     if (this.draggingTaskId() || this.suppressSwipeForCurrentTouch) return;
     if (event.touches.length !== 1) return;
-    
+
+    this.clearPendingGlobalSwipeFallback();
+    this.swipeHandledForCurrentTouch = false;
     this.swipeState = startSwipeTracking(event.touches[0]);
   }
   
@@ -574,9 +583,10 @@ export class MobileTodoDrawerComponent implements OnDestroy {
     if (direction) {
       // 阻止事件冒泡，避免 app.component 误判为侧边栏切换手势
       event.stopPropagation();
-      this.swipeToSwitch.emit(direction);
+      this.emitSwipeToSwitch(direction);
+      return;
     }
-    
+
     this.resetSwipeState();
   }
 
@@ -587,6 +597,10 @@ export class MobileTodoDrawerComponent implements OnDestroy {
   private handleGlobalTouchFinish(event: TouchEvent): void {
     if (event.type === 'touchend') {
       this.captureDraggedTaskClickGuard();
+      const touch = event.changedTouches[0] ?? null;
+      this.scheduleGlobalSwipeFallback(touch?.clientX ?? null, touch?.clientY ?? null, {
+        suppressed: this.draggingTaskId() || this.suppressSwipeForCurrentTouch,
+      });
     }
 
     queueMicrotask(() => {
@@ -595,12 +609,9 @@ export class MobileTodoDrawerComponent implements OnDestroy {
       this.finalizeUnassignedDragSession();
     });
 
-    // 注意：不再在 touchcancel 时同步清零 swipeState。
-    // 原因：slot 的 onSwipeTouchStart 在 touchstart 上初始化 swipeState；
-    // 若我们在 document 级捕获阶段遇到无关 touchcancel（例如 touch-action:none
-    // 与某些 Android 浏览器的交互）就强行清空，会把用户真正的横向滑动手势撕掉，
-    // 表现就是"顶层抽屉左右滑动切换视图丢失"。swipeState 本身会在下一次 touchstart
-    // 被 startSwipeTracking() 覆盖，或在 onSwipeTouchEnd 成功消费后 reset，无需额外兜底。
+    // 中文注释：document 级 touchend 只做兜底收口，不再在 capture 阶段直接清空 swipeState。
+    // 这样本地 chip/slot 处理器仍有机会优先消费；若手指已经滑出抽屉导致本地 touchend 丢失，
+    // scheduleGlobalSwipeFallback 会在本轮事件结束后补一次统一判定，避免顶部抽屉左右滑动切页失效。
   }
 
   private handleGlobalPointerFinish(event: PointerEvent): void {
@@ -610,6 +621,9 @@ export class MobileTodoDrawerComponent implements OnDestroy {
 
     if (event.type === 'pointerup') {
       this.captureDraggedTaskClickGuard();
+      this.scheduleGlobalSwipeFallback(event.clientX, event.clientY, {
+        suppressed: this.draggingTaskId() || this.suppressSwipeForCurrentTouch,
+      });
     }
 
     queueMicrotask(() => {
@@ -629,6 +643,48 @@ export class MobileTodoDrawerComponent implements OnDestroy {
 
   private resetSwipeState(): void {
     this.swipeState = { startX: 0, startY: 0, startTime: 0, isActive: false };
+  }
+
+  private emitSwipeToSwitch(direction: SwipeDirection): void {
+    this.clearPendingGlobalSwipeFallback();
+    this.swipeHandledForCurrentTouch = true;
+    this.resetSwipeState();
+    this.swipeToSwitch.emit(direction);
+  }
+
+  private scheduleGlobalSwipeFallback(
+    clientX: number | null,
+    clientY: number | null,
+    options: { suppressed: boolean },
+  ): void {
+    if (clientX == null || clientY == null || options.suppressed || this.swipeHandledForCurrentTouch || !this.swipeState.isActive) {
+      return;
+    }
+
+    this.clearPendingGlobalSwipeFallback();
+    this.pendingGlobalSwipeFallbackTimer = setTimeout(() => {
+      this.pendingGlobalSwipeFallbackTimer = null;
+      if (this.swipeHandledForCurrentTouch || !this.swipeState.isActive) {
+        return;
+      }
+
+      const direction = detectHorizontalSwipe(this.swipeState, clientX, clientY);
+      if (!direction) {
+        this.resetSwipeState();
+        return;
+      }
+
+      this.emitSwipeToSwitch(direction);
+    }, 0);
+  }
+
+  private clearPendingGlobalSwipeFallback(): void {
+    if (!this.pendingGlobalSwipeFallbackTimer) {
+      return;
+    }
+
+    clearTimeout(this.pendingGlobalSwipeFallbackTimer);
+    this.pendingGlobalSwipeFallbackTimer = null;
   }
 
   /**

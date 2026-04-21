@@ -19,7 +19,6 @@
  */
 
 import type { Project, Task, Connection } from '../models';
-import type { TaskParkingMeta } from '../models/parking';
 
 // ============================================================
 // 常量
@@ -144,6 +143,7 @@ export function exportProjectLogic(
     crossTreeConnections,
     options,
   );
+  const exportDerived = computeDerived(filteredTasks, filteredConnections, maxDepth);
 
   // 6) 检查不变式
   const invariants = checkInvariants({
@@ -196,7 +196,7 @@ export function exportProjectLogic(
           project,
           tasks: filteredTasks,
           connections: filteredConnections,
-          derived,
+          derived: exportDerived,
           invariants,
           ctx,
         })
@@ -210,9 +210,9 @@ export function exportProjectLogic(
     stats: {
       totalTasks: filteredTasks.length,
       totalConnections: filteredConnections.length,
-      roots: derived.roots.length,
-      floatingRoots: derived.floatingRoots.length,
-      maxTreeDepth: derived.maxTreeDepth,
+      roots: exportDerived.roots.length,
+      floatingRoots: exportDerived.floatingRoots.length,
+      maxTreeDepth: exportDerived.maxTreeDepth,
     },
   };
 }
@@ -565,9 +565,9 @@ function buildMermaid(
 
   const lines: string[] = [];
   lines.push('flowchart TD');
-  lines.push('  %% NanoFlow 逻辑网导出');
-  lines.push('  %% 形状: [[..]]=待分配  ((..))=已分配  {{..}}=已完成  /..\\=停泊中');
-  lines.push('  %% 边:   ==> 父子   -. "label" .-> 跨树关联');
+  lines.push('  %% NanoFlow 逻辑网骨架');
+  lines.push('  %% 节点: [[..]]=待分配  ((..))=已分配  {{..}}=已完成  /..\\=停泊中');
+  lines.push('  %% 边:   ==>  父子    -. "标签" .->  跨树关联');
   lines.push('');
 
   for (const key of sortedStageKeys) {
@@ -580,22 +580,31 @@ function buildMermaid(
     lines.push('  end');
   }
 
-  lines.push('');
   // 父子边
+  const parentEdges: string[] = [];
   for (const t of tasks) {
     if (t.parentId) {
-      lines.push(`  ${mermaidNodeId(t.parentId)} ==> ${mermaidNodeId(t.id)}`);
+      parentEdges.push(`  ${mermaidNodeId(t.parentId)} ==> ${mermaidNodeId(t.id)}`);
     }
+  }
+  if (parentEdges.length > 0) {
+    lines.push('');
+    lines.push('  %% ---- 父子关系 ----');
+    lines.push(...parentEdges);
   }
 
   // 跨树边
-  for (const c of connections) {
-    const rawLabel = c.title || '';
-    const label = mermaidEscape(truncate(rawLabel, MERMAID_LABEL_MAX));
-    if (label) {
-      lines.push(`  ${mermaidNodeId(c.source)} -. "${label}" .-> ${mermaidNodeId(c.target)}`);
-    } else {
-      lines.push(`  ${mermaidNodeId(c.source)} -.-> ${mermaidNodeId(c.target)}`);
+  if (connections.length > 0) {
+    lines.push('');
+    lines.push('  %% ---- 跨树关联 ----');
+    for (const c of connections) {
+      const rawLabel = c.title || '';
+      const label = mermaidEscape(truncate(rawLabel, MERMAID_LABEL_MAX));
+      if (label) {
+        lines.push(`  ${mermaidNodeId(c.source)} -. "${label}" .-> ${mermaidNodeId(c.target)}`);
+      } else {
+        lines.push(`  ${mermaidNodeId(c.source)} -.-> ${mermaidNodeId(c.target)}`);
+      }
     }
   }
 
@@ -604,10 +613,11 @@ function buildMermaid(
 
 function renderMermaidNode(t: Task, ctx: SerializeContext): string {
   const id = mermaidNodeId(t.id);
-  const shortId = t.id.slice(0, 8);
   const title = ctx.redactPII ? redact(t.title) : t.title;
+  // 仅 displayId + title：displayId 已承担身份识别作用，UUID 放到 YAML 里
+  const displayId = t.displayId || '?';
   const inner = mermaidEscape(
-    `${shortId}·${t.displayId || '-'}·${truncate(title || '(无标题)', MERMAID_LABEL_MAX)}`,
+    `${displayId} · ${truncate(title || '(无标题)', MERMAID_LABEL_MAX)}`,
   );
 
   const isFloating = t.stage === null;
@@ -643,80 +653,60 @@ function buildYaml(input: YamlInput): string {
   const { project, tasks, connections, derived, invariants, ctx } = input;
   const w = new YamlWriter();
 
-  w.line('schema_version: 1');
+  // ---- 项目元数据（只保留关系审查必要项） ----
   w.key('project');
   w.indent(() => {
     w.kv('id', project.id);
     w.kv('name', ctx.redactPII ? redact(project.name) : project.name);
-    w.kv('version', project.version ?? 0);
     w.kv('exported_at', new Date().toISOString());
-    w.kv('total_tasks', tasks.length);
-    w.kv('total_connections', connections.length);
     w.kv('mode', ctx.mode);
     w.kv('redacted', ctx.redactPII);
   });
 
-  // 不变式约束描述（供 AI 参考，静态文本）
-  w.key('invariants_specification');
+  // ---- 规模聚合（原 derived 的 roots/floating/depth 合并到这里） ----
+  w.key('counts');
   w.indent(() => {
-    w.listItem(() => w.scalar('connections[].kind 仅允许 cross_tree'));
-    w.listItem(() => w.scalar('connections[].from/to 必须存在于 tasks[] 且 status != archived'));
-    w.listItem(() => w.scalar('parentId 非空时: child.stage == parent.stage + 1 或 (parent.stage == null && child.stage == null)'));
-    w.listItem(() => w.scalar('stage == null 的任务不能作为 stage != null 任务的 parent'));
-    w.listItem(() => w.scalar('parkingMeta != null 时要求 status == active'));
-    w.listItem(() => w.scalar('connection(from,to) 不能与 (parentId,child) 对重复'));
-    w.listItem(() => w.scalar('connection.source !== connection.target（禁止自环）'));
-    w.listItem(() => w.scalar(`任务树深度必须 <= ${LOGIC_EXPORT_MAX_DEPTH}`));
+    w.kv('tasks', tasks.length);
+    w.kv('connections', connections.length);
+    w.kv('roots', derived.roots.length);
+    w.kv('floating_roots', derived.floatingRoots.length);
+    w.kv('max_tree_depth', derived.maxTreeDepth);
   });
 
-  // tasks
+  // 建立 id -> task 映射，供关系字段附标题用
+  const taskById = new Map(tasks.map(t => [t.id, t] as const));
+
+  // ---- 任务清单（精简：只保留身份 + 关系 + 偏离常态的状态） ----
+  // 客观属性（rank / priority / dueDate / tags / updatedAt）
+  // 与主观规划（expected_minutes / cognitive_load / wait_minutes）一律不输出。
   w.key('tasks');
   w.indent(() => {
     for (const t of tasks) {
-      w.listItem(() => renderTask(w, t, ctx));
+      w.listItem(() => renderTask(w, t, taskById, ctx));
     }
   });
 
-  // connections
-  w.key('connections');
+  // ---- 跨树关联（每条附双端 displayId + title，避免 AI 回查） ----
+  w.key('cross_links');
   if (connections.length === 0) {
     w.inlineEmptyList();
   } else {
     w.indent(() => {
       for (const c of connections) {
-        w.listItem(() => renderConnection(w, c, ctx));
+        w.listItem(() => renderConnection(w, c, taskById, ctx));
       }
     });
   }
 
-  // derived
-  w.key('derived');
-  w.indent(() => {
-    w.kvList('roots', derived.roots);
-    w.kvList('floating_roots', derived.floatingRoots);
-    w.kv('max_tree_depth', derived.maxTreeDepth);
-    w.key('cycles');
-    if (derived.cycles.length === 0) {
-      w.inlineEmptyList();
-    } else {
-      w.indent(() => {
-        for (const c of derived.cycles) {
-          w.listItem(() => w.scalar(c.join(' -> ')));
-        }
-      });
-    }
-  });
-
-  // invariant_checks
-  w.key('invariant_checks');
-  if (invariants.length === 0) {
-    w.inlineEmptyList();
-  } else {
+  // ---- 违反的不变式（未违反不输出整块，降低噪声） ----
+  if (invariants.length > 0) {
+    w.key('invariants_violated');
     w.indent(() => {
       for (const v of invariants) {
         w.listItem(() => {
           w.kv('code', v.code);
           w.kv('severity', v.severity);
+          w.kv('count', v.offenders.length);
           w.kv('message', v.message);
           w.kvList('offenders', v.offenders);
         });
@@ -724,67 +714,81 @@ function buildYaml(input: YamlInput): string {
     });
   }
 
-  return w.toString();
-}
-
-function renderTask(w: YamlWriter, t: Task, ctx: SerializeContext): void {
-  w.kv('id', t.id);
-  w.kv('displayId', t.displayId || '');
-  w.kv('title', ctx.redactPII ? redact(t.title || '') : t.title || '');
-  w.kvNullable('stage', t.stage);
-  w.kvNullable('parentId', t.parentId);
-  w.kv('rank', t.rank);
-  w.kv('status', t.status);
-  w.kvNullable('priority', t.priority ?? null);
-  w.kvNullable('dueDate', t.dueDate ?? null);
-  w.kvList('tags', t.tags ?? []);
-  w.kvNullable('updatedAt', t.updatedAt ?? null);
-
-  if (ctx.includePlanning) {
-    w.key('planning');
+  // ---- 环（仅有环时输出） ----
+  if (derived.cycles.length > 0) {
+    w.key('cycles');
     w.indent(() => {
-      w.kvNullable('expected_minutes', t.expected_minutes ?? null);
-      w.kvNullable('cognitive_load', t.cognitive_load ?? null);
-      w.kvNullable('wait_minutes', t.wait_minutes ?? null);
+      for (const c of derived.cycles) {
+        w.listItem(() => w.scalar(c.join(' -> ')));
+      }
     });
   }
 
-  if (ctx.includeParking) {
-    if (t.parkingMeta) {
-      renderParking(w, t.parkingMeta);
+  // ---- 审查规范（静态规则，放末尾给 AI 对照） ----
+  w.key('rules');
+  w.indent(() => {
+    w.listItem(() => w.scalar('parentId 非空：child.stage == parent.stage + 1，或两者同为 null'));
+    w.listItem(() => w.scalar('stage == null 的任务不能作为已分配任务的父节点'));
+    w.listItem(() => w.scalar('connection.from ≠ connection.to（禁止自环）'));
+    w.listItem(() => w.scalar('connection (from,to) 不能与 (parentId,child) 对重复'));
+    w.listItem(() => w.scalar(`任务树深度 <= ${LOGIC_EXPORT_MAX_DEPTH}`));
+    w.listItem(() => w.scalar('archived / 软删除 / 端点缺失的连接已在导出前剔除'));
+  });
+
+  return w.toString();
+}
+
+function renderTask(
+  w: YamlWriter,
+  t: Task,
+  taskById: ReadonlyMap<string, Task>,
+  ctx: SerializeContext,
+): void {
+  w.kv('id', t.id);
+  w.kv('displayId', t.displayId || '?');
+  w.kv('title', ctx.redactPII ? redact(t.title || '') : t.title || '');
+  w.kvNullable('stage', t.stage);
+
+  // parent 用父的 displayId 呈现（更易阅读）；若父丢失则回退为父 id
+  if (t.parentId) {
+    const parent = taskById.get(t.parentId);
+    if (parent) {
+      w.kv('parent', parent.displayId || parent.id);
     } else {
-      w.kv('parking', null);
+      w.kv('parent_id_missing', t.parentId);
     }
+  }
+
+  // status 仅在偏离常规的 active 时输出（completed/parked 等）
+  if (t.status && t.status !== 'active') {
+    w.kv('status', t.status);
+  }
+
+  // parked 仅在 parkingMeta 非空时以布尔形式出现，不展开主观字段
+  if (ctx.includeParking && t.parkingMeta) {
+    w.kv('parked', true);
   }
 }
 
-function renderParking(w: YamlWriter, p: TaskParkingMeta): void {
-  w.key('parking');
-  w.indent(() => {
-    // 使用宽松读取，字段形状以项目当前 TaskParkingMeta 为准
-    const meta = p as unknown as Record<string, unknown>;
-    const pickScalar = (k: string): string | number | boolean | null => {
-      const v = meta[k];
-      if (v === null || v === undefined) return null;
-      if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') return v;
-      return null;
-    };
-    w.kvNullable('state', pickScalar('state'));
-    w.kvNullable('parkedAt', pickScalar('parkedAt'));
-    w.kvNullable('lastVisitedAt', pickScalar('lastVisitedAt'));
-    const pinned = meta['pinned'];
-    w.kv('pinned', typeof pinned === 'boolean' ? pinned : false);
-  });
-}
-
-function renderConnection(w: YamlWriter, c: Connection, ctx: SerializeContext): void {
-  w.kv('id', c.id);
-  w.kv('from', c.source);
-  w.kv('to', c.target);
-  w.kv('kind', 'cross_tree');
-  w.kv('title', ctx.redactPII ? redact(c.title ?? '') : c.title ?? '');
-  w.kvBlock('description', ctx.redactPII ? redact(c.description ?? '') : c.description ?? '');
-  w.kvNullable('updatedAt', c.updatedAt ?? null);
+function renderConnection(
+  w: YamlWriter,
+  c: Connection,
+  taskById: ReadonlyMap<string, Task>,
+  ctx: SerializeContext,
+): void {
+  const src = taskById.get(c.source);
+  const tgt = taskById.get(c.target);
+  const rawLabel = c.title ?? '';
+  const label = ctx.redactPII ? redact(rawLabel) : rawLabel;
+  w.kv('label', label);
+  w.kv('from_displayId', src?.displayId || src?.id || c.source);
+  if (src) {
+    w.kv('from_title', ctx.redactPII ? redact(src.title || '') : src.title || '');
+  }
+  w.kv('to_displayId', tgt?.displayId || tgt?.id || c.target);
+  if (tgt) {
+    w.kv('to_title', ctx.redactPII ? redact(tgt.title || '') : tgt.title || '');
+  }
 }
 
 // ============================================================
@@ -814,8 +818,10 @@ class YamlWriter {
 
   line(text: string): void {
     if (this.pendingListItem) {
-      // 首行追加在 "- " 后
-      this.buf.push(this.prefix() + '- ' + text);
+      // 首行：用“上一级”前缀 + "- "，让 "-" 之后的字段与后续子字段的列对齐
+      //   e.g.  depth=2 时：首行前缀 "  "（1 级）+ "- "，后续子字段前缀 "    "（2 级）
+      const outerPrefix = '  '.repeat(Math.max(0, this.depth - 1));
+      this.buf.push(outerPrefix + '- ' + text);
       this.pendingListItem = false;
     } else {
       this.buf.push(this.prefix() + text);
@@ -921,12 +927,16 @@ function mermaidNodeId(taskId: string): string {
 
 function mermaidEscape(value: string): string {
   // 转义 Mermaid label 中会破坏语法的字符
+  // 注意：`<` / `>` / `#` 在双引号包裹下本是安全的，但启用 htmlLabels 时
+  // `<>` 会被当 HTML 解析；这里统一转为 HTML 实体以保留字面含义。
   return value
     .replace(/\\/g, '\\\\')
     .replace(/"/g, '\\"')
     .replace(/`/g, '\\`')
     .replace(/[\r\n]+/g, ' ')
-    .replace(/[#|<>]/g, ' ');
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\|/g, '／');
 }
 
 function truncate(value: string, max: number): string {
