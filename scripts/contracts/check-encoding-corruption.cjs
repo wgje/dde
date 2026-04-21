@@ -164,6 +164,9 @@ function countCrlfSequences(content) {
 
 function validateFile(relativePath) {
   const absolutePath = path.join(projectRoot, relativePath);
+  if (!fs.existsSync(absolutePath)) {
+    return { scannable: false, issues: [] };
+  }
   const raw = fs.readFileSync(absolutePath);
 
   if (isLikelyBinary(relativePath, raw)) {
