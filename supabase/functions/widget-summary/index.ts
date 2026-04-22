@@ -317,7 +317,10 @@ function toLegacyFocusStateFromDockSnapshot(snapshot: DockSnapshotLike): FocusSe
     : entries.filter(entry => entry.lane === 'backup').map(mapDockEntryToFocusSlot);
 
   return {
-    isActive: snapshot.focusMode === true || typeof session.focusSessionId === 'string',
+    // 权威判定：只信任 focusMode 布尔值。
+    // session.focusSessionId 在 exitFocusMode() 中不会被清除（作为历史轨迹保留），
+    // 若以此作为 fallback 会导致"关闭专注后 widget 仍显示 focus active"。
+    isActive: snapshot.focusMode === true,
     commandCenterTasks,
     comboSelectTasks,
     backupTasks,

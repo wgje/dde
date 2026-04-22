@@ -72,6 +72,12 @@ export class DockCloudSyncService implements OnDestroy {
   private circuitBreakerResetTimer = new TimerHandle();
   /** 免费层优化：按 owner 记录上次入队的快照指纹，避免跨账号相互去重 */
   private readonly lastEnqueuedSnapshotFingerprints = new Map<string, string>();
+  /**
+   * 按 owner 记录上次已调度推送时的 focusMode 布尔值。
+   * 用于检测「专注模式切换」这类语义关键的状态转换——
+   * 该类转换不走 3s 防抖，直接 0 延迟 flush，确保小组件 / 多设备能瞬时响应。
+   */
+  private readonly lastScheduledFocusMode = new Map<string, boolean>();
 
   private callbacks: CloudSyncEngineCallbacks | null = null;
 
@@ -125,7 +131,17 @@ export class DockCloudSyncService implements OnDestroy {
       cb.scheduleLocalPersist(frozenSnapshot, userId);
       this.enqueueFocusSessionSync(userId, frozenSnapshot);
     };
-    this.cloudPushTimer.schedule(runPush, CLOUD_PUSH_DEBOUNCE_MS);
+
+    // 专注模式切换 fast-path：focusMode 翻转是语义关键状态转换
+    // （widget/多设备需要瞬时感知），跳过 3s 防抖直接 0ms 调度。
+    // 其它类型改动（entry 增删、标题编辑等）仍走防抖，避免高频写入冲击 FCM 配额。
+    const nextFocusMode = frozenSnapshot.focusMode === true;
+    const prevFocusMode = this.lastScheduledFocusMode.get(userId);
+    const isFocusModeTransition = prevFocusMode !== undefined && prevFocusMode !== nextFocusMode;
+    this.lastScheduledFocusMode.set(userId, nextFocusMode);
+
+    const delayMs = isFocusModeTransition ? 0 : CLOUD_PUSH_DEBOUNCE_MS;
+    this.cloudPushTimer.schedule(runPush, delayMs);
   }
 
   // ─── Cloud Pull ───────────────────────────────
