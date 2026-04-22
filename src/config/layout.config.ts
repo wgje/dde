@@ -15,18 +15,26 @@ export const LAYOUT_CONFIG = {
   AUTO_LAYOUT_FAMILY_GAP_ROWS: 0.12,
   /** 兄弟子树之间的基础额外留白（按行高倍数） */
   AUTO_LAYOUT_SIBLING_GAP_ROWS: 0.04,
-  /** 跨树链接块对家族间距施加的额外压力（按行高倍数） */
-  AUTO_LAYOUT_CROSS_TREE_LABEL_GAP_ROWS: 0.24,
-  /** 兄弟子树存在外部联系时附加的留白系数（按行高倍数） */
-  AUTO_LAYOUT_RELATED_SIBLING_GAP_ROWS: 0.06,
+  /** 跨树链接块对家族间距施加的额外压力（按行高倍数）
+   * 【2026-04-22】从 0.24 提升到 0.40：关联块（跨树连线中点标签）以往
+   * 因为压力上限过低而在视觉上重叠，抬高基础压力并配合 stage-pair 拥挤度
+   * 放大，是解决"排序后关联块重叠严重"的第一环。 */
+  AUTO_LAYOUT_CROSS_TREE_LABEL_GAP_ROWS: 0.40,
+  /** 兄弟子树存在外部联系时附加的留白系数（按行高倍数）
+   * 【2026-04-22】从 0.06 提升到 0.12：让含有多条跨树链接的兄弟子树获得
+   * 更明显的纵向呼吸空间，避免它们的关联块堆叠在同一 Y 带。 */
+  AUTO_LAYOUT_RELATED_SIBLING_GAP_ROWS: 0.12,
   /** 高密度家族相邻时额外增加的留白系数（按行高倍数） */
   AUTO_LAYOUT_DENSE_FAMILY_GAP_ROWS: 0.04,
   /** 多父/多来源子树相邻时的额外留白系数（按行高倍数） */
   AUTO_LAYOUT_MULTI_PARENT_SIBLING_GAP_ROWS: 0.05,
-  /** 家族间额外间距硬上限（按行高倍数），防止大型复杂场景下间距失控 */
-  AUTO_LAYOUT_MAX_EXTRA_GAP_ROWS: 0.35,
-  /** 兄弟子树间额外留白硬上限（按行高倍数） */
-  AUTO_LAYOUT_MAX_SIBLING_GAP_ROWS: 0.22,
+  /** 家族间额外间距硬上限（按行高倍数），防止大型复杂场景下间距失控
+   * 【2026-04-22】从 0.35 提升到 0.80：配合关联块拥挤度加权，允许压力
+   * 上升到真正能分离标签的程度；实测 10+ 跨树链接家族组合下仍在一屏内。 */
+  AUTO_LAYOUT_MAX_EXTRA_GAP_ROWS: 0.80,
+  /** 兄弟子树间额外留白硬上限（按行高倍数）
+   * 【2026-04-22】从 0.22 提升到 0.45：兄弟关系载荷大时允许更明显的分离。 */
+  AUTO_LAYOUT_MAX_SIBLING_GAP_ROWS: 0.45,
   /** 高密度阶段边界的额外横向留白系数（相对 stage spacing） */
   AUTO_LAYOUT_STAGE_DENSITY_GAP_FACTOR: 0.03,
   /** 父子扇出较多时的额外横向留白系数（相对 stage spacing） */
