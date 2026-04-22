@@ -289,6 +289,65 @@ describe('BlackBoxSyncService', () => {
       isCompleted: true,
     }));
   });
+
+  it('should not overwrite a newer local pending snapshot when preflight sees a newer server row', async () => {
+    const entryId = crypto.randomUUID();
+    const olderEntry = createEntry({
+      id: entryId,
+      updatedAt: '2026-03-04T00:00:00.000Z',
+      isCompleted: false,
+    });
+    const newerLocalEntry = createEntry({
+      id: entryId,
+      updatedAt: '2026-03-04T00:00:05.000Z',
+      isCompleted: true,
+      syncStatus: 'pending',
+    });
+    const serverRow = {
+      id: entryId,
+      project_id: null,
+      user_id: 'user-1',
+      content: 'entry',
+      focus_meta: null,
+      date: '2026-03-04',
+      created_at: '2026-03-04T00:00:00.000Z',
+      updated_at: '2026-03-04T00:00:03.000Z',
+      is_read: false,
+      is_completed: false,
+      is_archived: false,
+      snooze_until: null,
+      snooze_count: 0,
+      deleted_at: null,
+    };
+    const maybeSingle = vi.fn(async () => {
+      setBlackBoxEntries([newerLocalEntry]);
+      return { data: serverRow, error: null };
+    });
+    const select = vi.fn(() => ({
+      eq: vi.fn(() => ({ maybeSingle })),
+    }));
+    const upsert = vi.fn();
+    const from = vi.fn(() => ({ select, upsert }));
+    const supabase = TestBed.inject(SupabaseClientService) as unknown as {
+      clientAsync: ReturnType<typeof vi.fn>;
+    };
+    const saveToLocalSpy = vi.spyOn(service, 'saveToLocal').mockResolvedValue(undefined);
+
+    setBlackBoxEntries([olderEntry]);
+    supabase.clientAsync.mockResolvedValue({ from });
+
+    await expect(service.pushToServer(olderEntry)).resolves.toBe(true);
+
+    expect(upsert).not.toHaveBeenCalled();
+    expect(saveToLocalSpy).not.toHaveBeenCalledWith(expect.objectContaining({
+      updatedAt: serverRow.updated_at,
+    }));
+    expect(blackBoxEntriesMap().get(entryId)).toEqual(expect.objectContaining({
+      updatedAt: newerLocalEntry.updatedAt,
+      isCompleted: true,
+      syncStatus: 'pending',
+    }));
+  });
   it('should map focus_meta from database row into focusMeta', () => {
     const mapRowToEntry = (service as unknown as {
       mapRowToEntry: (row: Record<string, unknown>) => { focusMeta?: unknown };

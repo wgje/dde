@@ -194,7 +194,7 @@ export class SimpleSyncService {
   private async getSupabaseClient(): Promise<SupabaseClient | null> {
     if (!this.supabase.isConfigured) {
       const failure = classifySupabaseClientFailure(false);
-      this.syncState.update(s => ({ ...s, syncError: failure.message }));
+      this.syncStateService.setSyncError(failure.message);
       this.logger.warn('无法获取 Supabase 客户端', failure);
       return null;
     }
@@ -207,7 +207,7 @@ export class SimpleSyncService {
       return await this.supabase.clientAsync();
     } catch (error) {
       const failure = classifySupabaseClientFailure(true, error);
-      this.syncState.update(s => ({ ...s, syncError: failure.message }));
+      this.syncStateService.setSyncError(failure.message);
       this.logger.warn('无法获取 Supabase 客户端', {
         category: failure.category,
         message: failure.message
@@ -290,6 +290,12 @@ export class SimpleSyncService {
         return false;
       }
       return true;
+    });
+
+    this.syncStateService.registerSyncErrorListener((syncError) => {
+      if (syncError) {
+        this.retryQueueService.clearSuccessfulDrainFlag?.();
+      }
     });
 
     // 初始化 BatchSyncService 回调
@@ -1416,7 +1422,7 @@ export class SimpleSyncService {
     if (enqueued) {
       this.state.update(s => ({ ...s, pendingCount: this.retryQueueService.length }));
     } else {
-      this.state.update(s => ({ ...s, syncError: '同步队列已满，暂未写入重试队列' }));
+      this.syncStateService.setSyncError('同步队列已满，暂未写入重试队列');
     }
 
     return enqueued;
@@ -1444,7 +1450,7 @@ export class SimpleSyncService {
     if (enqueued) {
       this.state.update(s => ({ ...s, pendingCount: this.retryQueueService.length }));
     } else {
-      this.state.update(s => ({ ...s, syncError: '同步队列已满，暂未写入重试队列' }));
+      this.syncStateService.setSyncError('同步队列已满，暂未写入重试队列');
     }
 
     return enqueued;

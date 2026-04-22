@@ -26,6 +26,7 @@ import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader
 import { isPermanentFailureError } from '../../../../utils/permanent-failure-error';
 import { isValidUUID } from '../../../../utils/validation';
 import {
+  getRemainingBrowserNetworkResumeDelayMs,
   isBrowserNetworkSuspendedError,
   isBrowserNetworkSuspendedWindow,
 } from '../../../../utils/browser-network-suspension';
@@ -89,6 +90,12 @@ export interface RetryOperationHandler {
 export interface RetryQueueSliceOptions {
   maxItems?: number;
   maxDurationMs?: number;
+  /**
+   * 【根因修复 2026-04-22】用户手动触发（例如点 "立即同步"）的回放必须穿透
+   * isBrowserNetworkSuspendedWindow() 的 1500ms grace：用户已经明确在前台交互，
+   * 无需再用 tab 隐藏/刚恢复的风险规避去屏蔽这次尝试。
+   */
+  allowWhileSuspended?: boolean;
 }
 
 export interface RetryQueueSliceResult {
@@ -576,6 +583,7 @@ export class RetryQueueService {
         sourceUserId: existing.sourceUserId ?? targetOwnerUserId,
         taskIdsToDelete: taskIdsToDelete ?? existing.taskIdsToDelete,
       };
+      this.lastDrainCompletedBySuccess = false;
       this.touchQueueState();
       this.logger.debug('更新队列中的现有项', { 
         type, 
@@ -635,6 +643,7 @@ export class RetryQueueService {
     };
     
     targetQueue.push(item);
+    this.lastDrainCompletedBySuccess = false;
     this.touchQueueState();
     if (persistMode === 'debounced') {
       this.saveToStorage();
@@ -1278,10 +1287,20 @@ export class RetryQueueService {
   /**
    * 处理重试队列（兼容入口）
    * 无参数时按历史语义尽量处理当前可处理项；有 maxItems 时限制处理条数。
+   * manualTrigger=true 标记用户主动触发（如 "立即同步"），会等待浏览器恢复保护期
+   * 真正结束后再进入正常切片，避免把下层网络门禁整体放开。
    */
-  async processQueue(maxItems?: number): Promise<void> {
+  async processQueue(maxItems?: number, manualTrigger = false): Promise<void> {
+    while (manualTrigger && isBrowserNetworkSuspendedWindow()) {
+      const delayMs = Math.max(0, getRemainingBrowserNetworkResumeDelayMs());
+      if (delayMs <= 0) {
+        break;
+      }
+      await new Promise<void>(resolve => setTimeout(resolve, delayMs));
+    }
+
     await this.processQueueSlice({
-      maxItems: typeof maxItems === 'number' && maxItems > 0 ? maxItems : undefined
+      maxItems: typeof maxItems === 'number' && maxItems > 0 ? maxItems : undefined,
     });
   }
 
@@ -1308,7 +1327,7 @@ export class RetryQueueService {
       };
     }
 
-    if (isBrowserNetworkSuspendedWindow()) {
+    if (isBrowserNetworkSuspendedWindow() && !options.allowWhileSuspended) {
       this.logger.debug('浏览器网络挂起窗口内暂停重试切片', {
         remainingCount: this.queue.length,
       });

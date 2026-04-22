@@ -106,6 +106,7 @@ describe('SyncStatusComponent', () => {
         {
           provide: RetryQueueService,
           useValue: {
+            processQueue: vi.fn().mockResolvedValue(undefined),
             getCapacityPercent: vi.fn().mockReturnValue(0),
             legacyReviewCount,
           },
@@ -148,5 +149,19 @@ describe('SyncStatusComponent', () => {
 
     expect(fixture.componentInstance.detailedStatus()).toBe('2 个旧版离线同步项待确认');
     expect(fixture.componentInstance.hasIssues()).toBe(true);
+  });
+
+  it('retryAll 应先重放 RetryQueue，再处理 ActionQueue', async () => {
+    const retryQueue = TestBed.inject(RetryQueueService) as unknown as {
+      processQueue: ReturnType<typeof vi.fn>;
+    };
+
+    await fixture.componentInstance.retryAll();
+
+    expect(actionQueueMock.processQueue).toHaveBeenCalledOnce();
+    expect(retryQueue.processQueue).toHaveBeenCalledWith(undefined, true);
+    expect(retryQueue.processQueue.mock.invocationCallOrder[0]).toBeLessThan(
+      actionQueueMock.processQueue.mock.invocationCallOrder[0],
+    );
   });
 });

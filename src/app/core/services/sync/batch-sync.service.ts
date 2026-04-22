@@ -992,7 +992,29 @@ export class BatchSyncService {
         this.syncState.advanceLastSyncTimeIfIdle(nowISO());
         this.syncState.setSyncError(null);
       } else {
-        this.syncState.setSyncError('部分同步失败，已进入重试队列');
+        // 【根因修复 2026-04-22】失败分支此前无条件写 syncError，即使所有失败项都已入
+        // RetryQueue（后续回放会推 markSyncRecoveredIfIdle 收口），红错条也会停留到下一
+        // 次成功 batch 为止。重新评估失败归宿：
+        //  - 所有失败（包括 project 自身）都进了 RetryQueue → 视为"已自愈"交接，不写
+        //    syncError（保留 pendingCount 提示足矣）；RetryQueue 回放成功后会自动清错。
+        //  - 存在未入队失败（RetryQueue 已满/存储冻结/project 重试入队失败）→ 才写红错。
+        const retryEnqueuedSet = new Set(dedupedRetryEnqueued);
+        const allTasksHandedOff = dedupedFailedTaskIds.every(
+          id => retryEnqueuedSet.has(`task:${id}`)
+        );
+        const allConnectionsHandedOff = dedupedFailedConnectionIds.every(
+          id => retryEnqueuedSet.has(`connection:${id}`)
+        );
+        const projectHandedOff = projectPushed || retryEnqueuedSet.has(`project:${project.id}`);
+        const fullyHandedOffToRetryQueue =
+          projectHandedOff && allTasksHandedOff && allConnectionsHandedOff;
+
+        if (fullyHandedOffToRetryQueue) {
+          // 全部失败已交接给 RetryQueue：清理可能残留的旧错误文案，交由 RetryQueue 回放收口。
+          this.syncState.setSyncError(null);
+        } else {
+          this.syncState.setSyncError('部分同步失败，已进入重试队列');
+        }
       }
       
       // 更新熔断器已知任务数

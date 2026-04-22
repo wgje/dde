@@ -11,6 +11,7 @@ import { Connection, Project, Task } from '../../../../models';
 import type { BlackBoxEntry } from '../../../../models/focus';
 import {
   createBrowserNetworkSuspendedError,
+  isBrowserNetworkSuspendedWindow,
   resetBrowserNetworkSuspensionTrackingForTests,
 } from '../../../../utils/browser-network-suspension';
 
@@ -411,6 +412,20 @@ describe('RetryQueueService', () => {
     expect(result.completed).toBe(true);
     expect(handler.pushProject).toHaveBeenCalledWith(project, 'test-user', undefined);
     expect(service.consumeSuccessfulDrainFlag()).toBe(true);
+  });
+
+  it('新重试项入队时应清除旧的 successful drain flag', async () => {
+    const project = createProject('successful-drain-reset');
+
+    service.add('project', 'upsert', project, undefined, 'test-user');
+    online = true;
+
+    await service.processQueueSlice({ maxItems: 1, maxDurationMs: 1000 });
+    expect(service.hasSuccessfulDrainFlag()).toBe(true);
+
+    service.add('task', 'upsert', createTask('reset-flag'), 'p-1', 'test-user');
+
+    expect(service.hasSuccessfulDrainFlag()).toBe(false);
   });
 
   it('切账号后清空当前视图并保存，不应覆盖其它账号的持久化重试项', async () => {
@@ -1101,5 +1116,35 @@ describe('RetryQueueService', () => {
         retryCount: 0,
       }),
     ]);
+  });
+
+  it('manual processQueue 应等待恢复保护期结束后再重放', async () => {
+    vi.useFakeTimers();
+    try {
+      const task = createTask('manual-suspended-wait');
+      service.add('task', 'upsert', task, 'p-1');
+      online = true;
+
+      expect(isBrowserNetworkSuspendedWindow()).toBe(false);
+      setVisibilityState('hidden');
+      document.dispatchEvent(new Event('visibilitychange'));
+      setVisibilityState('visible');
+      document.dispatchEvent(new Event('visibilitychange'));
+      expect(isBrowserNetworkSuspendedWindow()).toBe(true);
+
+      const processPromise = service.processQueue(undefined, true);
+      expect(handler.pushTask).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1499);
+      expect(handler.pushTask).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1);
+      await processPromise;
+
+      expect(handler.pushTask).toHaveBeenCalledOnce();
+      expect(service.getItems()).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -336,15 +336,17 @@ export class ActionQueueProcessorsService {
       () => this.syncService.pauseRealtimeUpdates(),
       () => this.syncService.resumeRealtimeUpdates(),
       ({ processed, failed, movedToDeadLetter, remaining, remoteSuccessCount, resolvedNoOpCount }) => {
+        // 【根因修复 2026-04-22】这里需要同时兼容两类恢复来源：
+        //   1) ActionQueue 自己产生了真实远端成功；
+        //   2) RetryQueue 已先成功见底，但 ActionQueue 此轮只是在收口 local-only / legacy / tombstone
+        //      之类的本地完成项。后一类不能要求 processed === resolvedCount，否则 stale syncError
+        //      会在“两个队列都空了”的情况下继续卡住。
         const resolvedCount = remoteSuccessCount + resolvedNoOpCount;
-        if (
-          resolvedCount > 0 &&
-          processed === resolvedCount &&
-          failed === 0 &&
-          movedToDeadLetter === 0 &&
-          remaining === 0 &&
-          (remoteSuccessCount > 0 || this.syncService.hasPendingRetryRecovery())
-        ) {
+        const cleanSettle = failed === 0 && movedToDeadLetter === 0 && remaining === 0;
+        const hasPendingRetryRecovery = this.syncService.hasPendingRetryRecovery();
+        const actionQueueRecovered = remoteSuccessCount > 0 && processed === resolvedCount;
+
+        if (cleanSettle && (hasPendingRetryRecovery || actionQueueRecovered)) {
           this.syncService.markSyncRecoveredIfIdle();
         }
       }

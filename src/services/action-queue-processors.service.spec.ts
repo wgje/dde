@@ -200,6 +200,45 @@ describe('ActionQueueProcessorsService', () => {
     expect(mockSyncService.markSyncRecoveredIfIdle).toHaveBeenCalledOnce();
   });
 
+  it('should mark sync recovered when RetryQueue already recovered and ActionQueue only drains local-only completions', () => {
+    mockSyncService.hasPendingRetryRecovery.mockReturnValueOnce(true);
+    const settledCallback = mockActionQueueService.setQueueProcessCallbacks.mock.calls[0]?.[2] as
+      | ((summary: { processed: number; failed: number; movedToDeadLetter: number; remaining: number; remoteSuccessCount: number; resolvedNoOpCount: number }) => void)
+      | undefined;
+
+    expect(settledCallback).toBeTypeOf('function');
+
+    settledCallback?.({
+      processed: 2,
+      failed: 0,
+      movedToDeadLetter: 0,
+      remaining: 0,
+      remoteSuccessCount: 0,
+      resolvedNoOpCount: 0,
+    });
+
+    expect(mockSyncService.markSyncRecoveredIfIdle).toHaveBeenCalledOnce();
+  });
+
+  it('should not mark sync recovered for pure authoritative no-op without retry recovery signal', () => {
+    const settledCallback = mockActionQueueService.setQueueProcessCallbacks.mock.calls[0]?.[2] as
+      | ((summary: { processed: number; failed: number; movedToDeadLetter: number; remaining: number; remoteSuccessCount: number; resolvedNoOpCount: number }) => void)
+      | undefined;
+
+    expect(settledCallback).toBeTypeOf('function');
+
+    settledCallback?.({
+      processed: 1,
+      failed: 0,
+      movedToDeadLetter: 0,
+      remaining: 0,
+      remoteSuccessCount: 0,
+      resolvedNoOpCount: 1,
+    });
+
+    expect(mockSyncService.markSyncRecoveredIfIdle).not.toHaveBeenCalled();
+  });
+
   it('focus-session:update should preserve browser-suspension details for the queue layer', async () => {
     mockSyncService.saveFocusSession.mockResolvedValueOnce({
       ok: false,

@@ -2,6 +2,7 @@ import { Component, inject, Output, EventEmitter, computed, signal, OnInit, Chan
 import { CommonModule } from '@angular/common';
 import { ActionQueueService } from '../../../services/action-queue.service';
 import { SimpleSyncService } from '../../core/services/simple-sync.service';
+import { RetryQueueService } from '../../core/services/sync/retry-queue.service';
 import { AuthService } from '../../../services/auth.service';
 import { ConflictStorageService, ConflictRecord } from '../../../services/conflict-storage.service';
 import { ProjectOperationService } from '../../../services/project-operation.service';
@@ -377,6 +378,7 @@ interface ConflictItem {
 export class DashboardModalComponent implements OnInit {
   private actionQueue = inject(ActionQueueService);
   private syncService = inject(SimpleSyncService);
+  private retryQueue = inject(RetryQueueService);
   private authService = inject(AuthService);
   private conflictStorage = inject(ConflictStorageService);
   private projectOps = inject(ProjectOperationService);
@@ -440,6 +442,7 @@ export class DashboardModalComponent implements OnInit {
     if (this.isRetrying() || this.isProcessing()) return;
     this.isRetrying.set(true);
     try {
+      await this.retryQueue.processQueue(undefined, true);
       await this.actionQueue.processQueue();
       this.toastService.success('同步完成', '所有待处理操作已成功同步');
     } catch {

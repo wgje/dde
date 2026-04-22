@@ -753,6 +753,62 @@ export class BlackBoxSyncService {
         return true;
       }
 
+      // 【2026-04-22 根因修复】服务端状态预检：防止陈旧本地 pending 快照反向压盖远端
+      // 权威状态。典型场景：Device B（移动端 / PWA / 久未刷新的标签页）IDB 中仍保留着
+      // 早期未完成的 pending 快照，Device A 已在服务端将其标记为 is_completed=true；
+      // 若直接 upsert，服务端触发器会盖上新的 updated_at，使陈旧状态反向传播到所有设备，
+      // 表现为"已完成的任务过一会儿又出现在大门里"。
+      // 修复策略：若服务端现存状态的 updated_at 晚于本地 pending 的 updatedAt，认为本地
+      // 已过时；将服务端权威状态写回本地并清除 pending 标记，放弃这次推送。
+      try {
+        const { data: serverRow, error: preflightError } = await client
+          .from('black_box_entries')
+          .select('id, project_id, user_id, content, focus_meta, date, created_at, updated_at, is_read, is_completed, is_archived, snooze_until, snooze_count, deleted_at')
+          .eq('id', entry.id)
+          .maybeSingle();
+
+        if (!preflightError && serverRow) {
+          const serverEntry = this.mapRowToEntry(serverRow as Record<string, unknown>);
+          if (this.clockSync.isLocalNewer(serverEntry.updatedAt, entry.updatedAt)) {
+            this.logger.warn('黑匣子 pending 推送预检：服务端已有更晚权威状态，以远端为准并跳过覆盖', {
+              entryId: entry.id,
+              localPendingUpdatedAt: entry.updatedAt,
+              serverUpdatedAt: serverEntry.updatedAt,
+              localIsCompleted: entry.isCompleted,
+              serverIsCompleted: serverEntry.isCompleted,
+              localIsArchived: entry.isArchived,
+              serverIsArchived: serverEntry.isArchived,
+            });
+            const latestLocalBeforeApply = await this.resolveLatestLocalEntry(entry.id);
+            if (this.isEntryNewer(latestLocalBeforeApply, serverEntry)) {
+              this.logger.debug('黑匣子预检命中更晚本地快照，跳过服务端权威状态回写', {
+                entryId: entry.id,
+                latestLocalUpdatedAt: latestLocalBeforeApply?.updatedAt,
+                serverUpdatedAt: serverEntry.updatedAt,
+              });
+              return true;
+            }
+            this.clockSync.recordServerTimestamp(serverEntry.updatedAt, entry.id);
+            // 服务端权威状态覆盖本地，清除 pending；LWW 最终收敛到远端最新值
+            await this.saveToLocal(serverEntry);
+            updateBlackBoxEntry(serverEntry);
+            return true; // 告知 RetryQueue 此条已处理完毕，不必重试
+          }
+        } else if (preflightError) {
+          // 预检失败不阻塞推送（保持向后兼容），仅记录，便于后续排查
+          this.logger.debug('黑匣子推送预检 SELECT 失败，按原路径继续 upsert', {
+            entryId: entry.id,
+            message: supabaseErrorToError(preflightError).message,
+          });
+        }
+      } catch (preflightException) {
+        // 预检异常不应阻塞推送，降级到原 upsert 路径
+        this.logger.debug('黑匣子推送预检异常，按原路径继续', {
+          entryId: entry.id,
+          error: preflightException instanceof Error ? preflightException.message : String(preflightException),
+        });
+      }
+
       // 让数据库触发器生成权威 updated_at，避免客户端时钟偏差把跨设备完成状态盖回去。
       const { data: savedRow, error } = await client
         .from('black_box_entries')
