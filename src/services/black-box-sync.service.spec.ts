@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { TestBed } from '@angular/core/testing';
+import { signal } from '@angular/core';
 import { BlackBoxSyncService } from './black-box-sync.service';
 import { SupabaseClientService } from './supabase-client.service';
 import { NetworkAwarenessService } from './network-awareness.service';
@@ -32,6 +33,12 @@ describe('BlackBoxSyncService', () => {
   let initDbSpy: ReturnType<typeof vi.spyOn>;
   let setupNetworkSpy: ReturnType<typeof vi.spyOn>;
   let mockSentry: { addBreadcrumb: ReturnType<typeof vi.fn>; captureMessage: ReturnType<typeof vi.fn> };
+  let authSignals: {
+    sessionInitialized: ReturnType<typeof signal<boolean>>;
+    runtimeState: ReturnType<typeof signal<'idle' | 'pending' | 'ready' | 'failed'>>;
+    authState: ReturnType<typeof signal<{ isCheckingSession: boolean; isLoading: boolean; userId: string | null; email: string | null; error: string | null }>>;
+    currentUserId: ReturnType<typeof signal<string | null>>;
+  };
 
   beforeEach(() => {
     initDbSpy = vi.spyOn(
@@ -46,6 +53,19 @@ describe('BlackBoxSyncService', () => {
     mockSentry = {
       addBreadcrumb: vi.fn(),
       captureMessage: vi.fn(),
+    };
+
+    authSignals = {
+      sessionInitialized: signal(true),
+      runtimeState: signal<'idle' | 'pending' | 'ready' | 'failed'>('ready'),
+      authState: signal({
+        isCheckingSession: false,
+        isLoading: false,
+        userId: 'user-1',
+        email: null,
+        error: null,
+      }),
+      currentUserId: signal<string | null>('user-1'),
     };
 
     TestBed.configureTestingModule({
@@ -79,11 +99,11 @@ describe('BlackBoxSyncService', () => {
         {
           provide: AuthService,
           useValue: {
-            currentUserId: vi.fn(() => 'user-1'),
+            currentUserId: authSignals.currentUserId,
             isConfigured: true,
-            sessionInitialized: vi.fn(() => true),
-            authState: vi.fn(() => ({ isCheckingSession: false })),
-            runtimeState: vi.fn(() => 'ready'),
+            sessionInitialized: authSignals.sessionInitialized,
+            authState: authSignals.authState,
+            runtimeState: authSignals.runtimeState,
             peekPersistedSessionIdentity: vi.fn(() => ({ userId: 'user-1' })),
           },
         },
@@ -616,6 +636,148 @@ describe('BlackBoxSyncService', () => {
         id: entryId,
         syncStatus: 'synced',
         deletedAt: remoteRow.deleted_at,
+      })
+    );
+  });
+
+  it('should skip startup retry recovery when server already has a newer authoritative row', async () => {
+    const entryId = crypto.randomUUID();
+    const pendingEntry = createEntry({
+      id: entryId,
+      updatedAt: '2026-03-04T00:00:00.000Z',
+      isCompleted: false,
+      syncStatus: 'pending',
+    });
+    const remoteRow = {
+      id: entryId,
+      project_id: null,
+      user_id: 'user-1',
+      content: 'entry',
+      focus_meta: null,
+      date: '2026-03-04',
+      created_at: '2026-03-04T00:00:00.000Z',
+      updated_at: '2026-03-04T00:00:05.000Z',
+      is_read: false,
+      is_completed: true,
+      is_archived: false,
+      snooze_until: null,
+      snooze_count: 0,
+      deleted_at: null,
+    };
+    const enqueue = vi.fn();
+    const inQuery = vi.fn().mockResolvedValue({ data: [remoteRow], error: null });
+    const selectQuery = vi.fn(() => ({ in: inQuery }));
+    const from = vi.fn(() => ({ select: selectQuery }));
+    const supabase = TestBed.inject(SupabaseClientService) as unknown as {
+      clientAsync: ReturnType<typeof vi.fn>;
+    };
+    vi.spyOn(service, 'loadFromLocal').mockResolvedValue([pendingEntry]);
+    vi.spyOn(service, 'saveToLocal').mockResolvedValue(undefined);
+    supabase.clientAsync.mockResolvedValue({ from });
+    setBlackBoxEntries([pendingEntry]);
+    (service as unknown as { retryQueueHandler: ((entry: BlackBoxEntry) => void) | null }).retryQueueHandler = enqueue;
+
+    await (service as unknown as { recoverPendingEntries: () => Promise<void> }).recoverPendingEntries();
+
+    expect(inQuery).toHaveBeenCalledWith('id', [entryId]);
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(blackBoxEntriesMap().get(entryId)).toEqual(
+      expect.objectContaining({
+        id: entryId,
+        isCompleted: true,
+        syncStatus: 'synced',
+        updatedAt: remoteRow.updated_at,
+      })
+    );
+  });
+
+  it('should keep startup pending recovery local-only when network is offline', async () => {
+    const entryId = crypto.randomUUID();
+    const pendingEntry = createEntry({
+      id: entryId,
+      syncStatus: 'pending',
+    });
+    const enqueue = vi.fn();
+    const supabase = TestBed.inject(SupabaseClientService) as unknown as {
+      clientAsync: ReturnType<typeof vi.fn>;
+    };
+    const network = TestBed.inject(NetworkAwarenessService) as unknown as {
+      isOnline: ReturnType<typeof vi.fn>;
+    };
+    vi.spyOn(service, 'loadFromLocal').mockResolvedValue([pendingEntry]);
+    setBlackBoxEntries([pendingEntry]);
+    network.isOnline.mockReturnValue(false);
+    (service as unknown as { retryQueueHandler: ((entry: BlackBoxEntry) => void) | null }).retryQueueHandler = enqueue;
+
+    await (service as unknown as { recoverPendingEntries: () => Promise<void> }).recoverPendingEntries();
+
+    expect(supabase.clientAsync).not.toHaveBeenCalled();
+    expect(enqueue).toHaveBeenCalledTimes(1);
+    expect(enqueue).toHaveBeenCalledWith(pendingEntry);
+  });
+
+  it('should rerun pending recovery after auth settles and suppress stale startup pending rows', async () => {
+    const entryId = crypto.randomUUID();
+    const pendingEntry = createEntry({
+      id: entryId,
+      updatedAt: '2026-03-04T00:00:00.000Z',
+      isCompleted: false,
+      syncStatus: 'pending',
+    });
+    const remoteRow = {
+      id: entryId,
+      project_id: null,
+      user_id: 'user-1',
+      content: 'entry',
+      focus_meta: null,
+      date: '2026-03-04',
+      created_at: '2026-03-04T00:00:00.000Z',
+      updated_at: '2026-03-04T00:00:05.000Z',
+      is_read: false,
+      is_completed: true,
+      is_archived: false,
+      snooze_until: null,
+      snooze_count: 0,
+      deleted_at: null,
+    };
+    const enqueue = vi.fn();
+    const inQuery = vi.fn().mockResolvedValue({ data: [remoteRow], error: null });
+    const selectQuery = vi.fn(() => ({ in: inQuery }));
+    const from = vi.fn(() => ({ select: selectQuery }));
+    const supabase = TestBed.inject(SupabaseClientService) as unknown as {
+      clientAsync: ReturnType<typeof vi.fn>;
+    };
+    vi.spyOn(service, 'loadFromLocal').mockResolvedValue([pendingEntry]);
+    vi.spyOn(service, 'saveToLocal').mockResolvedValue(undefined);
+    supabase.clientAsync.mockResolvedValue({ from });
+    setBlackBoxEntries([pendingEntry]);
+
+    authSignals.sessionInitialized.set(false);
+    authSignals.runtimeState.set('pending');
+    authSignals.currentUserId.set(null);
+
+    service.setRetryQueueHandler(enqueue);
+    await Promise.resolve();
+
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(supabase.clientAsync).not.toHaveBeenCalled();
+
+    authSignals.currentUserId.set('user-1');
+    authSignals.authState.update(state => ({ ...state, userId: 'user-1', isCheckingSession: false }));
+    authSignals.sessionInitialized.set(true);
+    authSignals.runtimeState.set('ready');
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(inQuery).toHaveBeenCalledWith('id', [entryId]);
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(blackBoxEntriesMap().get(entryId)).toEqual(
+      expect.objectContaining({
+        id: entryId,
+        isCompleted: true,
+        syncStatus: 'synced',
+        updatedAt: remoteRow.updated_at,
       })
     );
   });

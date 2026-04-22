@@ -12,7 +12,7 @@
  * - 启动时扫描 IndexedDB 中 syncStatus=pending 的条目，恢复未完成的同步
  */
 
-import { Injectable, inject, DestroyRef } from '@angular/core';
+import { Injectable, inject, DestroyRef, effect } from '@angular/core';
 import type { Json } from '../types/supabase';
 import { BlackBoxEntry } from '../models/focus';
 import { FOCUS_CONFIG } from '../config/focus.config';
@@ -82,6 +82,7 @@ export class BlackBoxSyncService {
   /** 防抖定时器（合并短时间内的多次写入） */
   private pushDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingPushEntries: Map<string, BlackBoxEntry> = new Map();
+  private shouldRecoverAfterAuthSettles = false;
 
   // 防重保护：single-flight + freshness window
   private pullInFlight: Promise<boolean> | null = null;
@@ -117,6 +118,26 @@ export class BlackBoxSyncService {
 
     // 监听网络状态变化
     this.setupNetworkListener();
+
+    effect(() => {
+      const authSettling = this.isAuthSettling();
+      const currentUserId = this.auth.currentUserId();
+
+      if (authSettling) {
+        this.shouldRecoverAfterAuthSettles = true;
+        return;
+      }
+
+      if (!this.retryQueueHandler || !this.shouldRecoverAfterAuthSettles || !currentUserId) {
+        return;
+      }
+
+      this.shouldRecoverAfterAuthSettles = false;
+      this.logger.debug('Auth settled, replay pending black box recovery');
+      queueMicrotask(() => {
+        void this.recoverPendingEntries();
+      });
+    });
   }
   private readonly SYNC_METADATA_STORE = FOCUS_CONFIG.IDB_STORES.SYNC_METADATA;
   private readonly LAST_SYNC_TIME_KEY = 'black_box_last_sync_time';
@@ -141,6 +162,12 @@ export class BlackBoxSyncService {
   private async recoverPendingEntries(): Promise<void> {
     if (!this.retryQueueHandler) return;
 
+    if (this.supabase.isConfigured && this.network.isOnline() && this.isAuthSettling()) {
+      this.shouldRecoverAfterAuthSettles = true;
+      this.logger.debug('Auth still settling, defer black box pending recovery');
+      return;
+    }
+
     try {
       const entries = await this.loadFromLocal();
 
@@ -157,14 +184,10 @@ export class BlackBoxSyncService {
         }
       }
 
-      // 第二步：恢复合法 pending 条目到 RetryQueue
-      const validPending = entries.filter(
-        e =>
-          e.syncStatus === 'pending' &&
-          e.id &&
-          isValidUUID(e.id) &&
-          (e.projectId == null || isValidUUID(e.projectId))
-      );
+      // 第二步：先对账远端权威状态，再只恢复真正仍待补推的 pending 条目。
+      // 否则 stale tab / 旧设备遗留的本地 pending 会在启动瞬间整批灌入 RetryQueue，
+      // 既抬高“待同步”数字，也会在缺少并发保护时把旧状态重新推回云端。
+      const validPending = await this.resolvePendingEntriesForRecovery(entries);
 
       if (validPending.length > 0) {
         this.logger.info(`Recovering ${validPending.length} pending entries to RetryQueue`);
@@ -174,6 +197,49 @@ export class BlackBoxSyncService {
       }
     } catch (e) {
       this.logger.error('Failed to recover pending entries', e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  private getValidPendingEntries(entries: BlackBoxEntry[]): BlackBoxEntry[] {
+    return entries.filter(
+      entry =>
+        entry.syncStatus === 'pending' &&
+        entry.id &&
+        isValidUUID(entry.id) &&
+        (entry.projectId == null || isValidUUID(entry.projectId))
+    );
+  }
+
+  private async resolvePendingEntriesForRecovery(entries: BlackBoxEntry[]): Promise<BlackBoxEntry[]> {
+    const validPending = this.getValidPendingEntries(entries);
+    if (validPending.length === 0) {
+      return validPending;
+    }
+
+    if (
+      !this.supabase.isConfigured
+      || this.isRemoteUnavailable()
+      || !this.network.isOnline()
+      || this.isAuthSettling()
+      || !this.resolveRemoteSessionUserId()
+    ) {
+      return validPending;
+    }
+
+    try {
+      const client = await this.supabase.clientAsync();
+      if (!client) {
+        return validPending;
+      }
+
+      await this.reconcilePendingEntriesWithServer(client, false, false);
+      return this.getValidPendingEntries(this.getPendingEntriesForRemoteReconciliation());
+    } catch (error) {
+      this.logger.debug('启动前置黑匣子 pending 对账失败，降级为原始恢复路径', {
+        error: error instanceof Error ? error.message : String(error),
+        pendingCount: validPending.length,
+      });
+      return validPending;
     }
   }
 

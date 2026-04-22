@@ -35,6 +35,11 @@ interface OperationError {
   details?: Record<string, unknown>;
 }
 
+type DeferredGateMutation =
+  | { kind: 'mark-read'; entryId: string }
+  | { kind: 'mark-completed'; entryId: string }
+  | { kind: 'snooze'; entryId: string; snoozeUntil: string };
+
 /** LocalStorage 键：上次大门检查日期 */
 const GATE_LAST_CHECK_DATE_KEY = 'focus_gate_last_check_date';
 /** LocalStorage 键：当日跳过次数重置日期 */
@@ -117,6 +122,11 @@ export class GateService {
 
   /** 当前动作动画（用于防止 timeout + animationend 双触发） */
   private actionInFlight: 'heave_read' | 'heavy_drop' | null = null;
+  /**
+   * Gate 动画期延迟提交的黑匣子 mutation。
+   * 这样点击完成时不会在同一帧把全局黑匣子面板、pending 计数和同步卡片一起抖起来。
+   */
+  private deferredMutation: DeferredGateMutation | null = null;
   private reviewSyncTimerId: ReturnType<typeof setInterval> | null = null;
   private reviewSyncInFlight = false;
   /** 【修复 L-21/M-08】matchMedia 监听器引用，用于销毁时移除 */
@@ -291,10 +301,12 @@ export class GateService {
   }
 
   private completeGateSession(reason: 'all-processed' | 'queue-empty'): void {
+    this.flushDeferredMutation();
     gateState.set('completed');
     this.showCompletionMessage.set(true);
     this.cardAnimation.set('idle');
     this.actionInFlight = null;
+    this.deferredMutation = null;
     this.clearAnimationTimeout();
     this.stopReviewingRemoteSync();
 
@@ -322,6 +334,23 @@ export class GateService {
 
       if (e.matches && this.cardAnimation() !== 'idle') {
         this.logger.info('Gate', 'Reduced motion enabled, forcing idle state');
+        const currentAnimation = this.cardAnimation();
+
+        if (currentAnimation === 'heave_read') {
+          this.onHeaveReadComplete();
+          return;
+        }
+
+        if (currentAnimation === 'heavy_drop') {
+          this.onHeavyDropComplete();
+          return;
+        }
+
+        if (currentAnimation === 'settling') {
+          this.onSettlingComplete();
+          return;
+        }
+
         this.cardAnimation.set('idle');
         this.actionInFlight = null;
         this.clearAnimationTimeout();
@@ -430,10 +459,6 @@ export class GateService {
     this.resetPendingAnimation();
   }
 
-  private toVoidResult(result: Result<BlackBoxEntry, OperationError>): Result<void, OperationError> {
-    return result.ok ? success(undefined) : { ok: false, error: result.error };
-  }
-
   /**
    * 检查是否需要显示大门
    * 在应用启动时调用
@@ -449,6 +474,7 @@ export class GateService {
     this.devForceActive.set(false);
     this.showCompletionMessage.set(false);
     this.actionInFlight = null;
+    this.deferredMutation = null;
 
     const preferences = focusPreferences();
 
@@ -477,34 +503,34 @@ export class GateService {
 
   /** 标记当前条目为已读 */
   markAsRead(): Result<void, OperationError> {
+    if (this.isActionLocked()) {
+      return failure(ErrorCodes.OPERATION_FAILED, '动画处理中，请稍后');
+    }
+
     const current = this.getCurrentEntry();
     if (!current) {
       return failure(ErrorCodes.FOCUS_ENTRY_NOT_FOUND, '当前没有待处理条目');
     }
 
-    const result = this.blackBoxService.markAsRead(current.id);
-    if (result.ok) {
-      this.startActionTransition('heave_read');
-    }
-
-    // 【修复 P2-01】传播内部操作结果，而非恒返 success
-    return this.toVoidResult(result);
+    this.deferredMutation = { kind: 'mark-read', entryId: current.id };
+    this.startActionTransition('heave_read');
+    return success(undefined);
   }
 
   /** 标记当前条目为完成 */
   markAsCompleted(): Result<void, OperationError> {
+    if (this.isActionLocked()) {
+      return failure(ErrorCodes.OPERATION_FAILED, '动画处理中，请稍后');
+    }
+
     const current = this.getCurrentEntry();
     if (!current) {
       return failure(ErrorCodes.FOCUS_ENTRY_NOT_FOUND, '当前没有待处理条目');
     }
 
-    const result = this.blackBoxService.markAsCompleted(current.id);
-    if (result.ok) {
-      this.startActionTransition('heavy_drop');
-    }
-
-    // 【修复 P2-01】传播内部操作结果
-    return this.toVoidResult(result);
+    this.deferredMutation = { kind: 'mark-completed', entryId: current.id };
+    this.startActionTransition('heavy_drop');
+    return success(undefined);
   }
 
   /**
@@ -512,6 +538,10 @@ export class GateService {
    * 兼容保留：UI 已隐藏此动作
    */
   snooze(): Result<void, OperationError> {
+    if (this.isActionLocked()) {
+      return failure(ErrorCodes.OPERATION_FAILED, '动画处理中，请稍后');
+    }
+
     if (!canSnooze()) {
       return failure(
         ErrorCodes.FOCUS_SNOOZE_LIMIT_EXCEEDED,
@@ -525,16 +555,13 @@ export class GateService {
     }
 
     const tomorrow = getTomorrowDate();
-    const result = this.blackBoxService.snooze(current.id, tomorrow);
+    this.deferredMutation = { kind: 'snooze', entryId: current.id, snoozeUntil: tomorrow };
+    gateSnoozeCount.update(c => c + 1);
 
-    if (result.ok) {
-      gateSnoozeCount.update(c => c + 1);
+    // 兼容路径：在新门体里统一使用 heave_read 过渡
+    this.startActionTransition('heave_read');
 
-      // 兼容路径：在新门体里统一使用 heave_read 过渡
-      this.startActionTransition('heave_read');
-    }
-
-    return this.toVoidResult(result);
+    return success(undefined);
   }
 
   /**
@@ -593,9 +620,10 @@ export class GateService {
 
   /** 新条目沉降动画完成回调 */
   onSettlingComplete(): void {
-    if (this.cardAnimation() !== 'settling') return;
+    if (this.cardAnimation() !== 'settling' && !this.prefersReducedMotion) return;
     this.clearAnimationTimeout();
     this.cardAnimation.set('idle');
+    this.flushDeferredMutation();
   }
 
   /**
@@ -639,6 +667,7 @@ export class GateService {
    */
   forceBypass(): void {
     this.devForceActive.set(false);
+    this.deferredMutation = null;
     this.stopReviewingRemoteSync();
     gateState.set('bypassed');
     localStorage.setItem(GATE_LAST_CHECK_DATE_KEY, getTodayDate());
@@ -650,6 +679,7 @@ export class GateService {
     this.devForceActive.set(false);
     this.showCompletionMessage.set(false);
     this.actionInFlight = null;
+    this.deferredMutation = null;
     this.stopReviewingRemoteSync();
     this.clearAnimationTimeout();
     this.cardAnimation.set('idle');
@@ -764,10 +794,46 @@ export class GateService {
     gateState.set('reviewing');
     this.showCompletionMessage.set(false);
     this.actionInFlight = null;
+    this.deferredMutation = null;
 
     this.setCardAnimationWithTimeout('entering', () => this.onEnteringComplete());
 
     this.logger.info('Gate', '[DEV] Gate force shown with mock entries');
+  }
+
+  /** 动画/延迟提交进行中时锁定新动作，避免覆盖 deferred mutation */
+  private isActionLocked(): boolean {
+    return this.cardAnimation() !== 'idle'
+      || this.actionInFlight !== null
+      || this.deferredMutation !== null;
+  }
+
+  /** 在动画安全点提交延迟的黑匣子 mutation */
+  private flushDeferredMutation(): void {
+    const mutation = this.deferredMutation;
+    if (!mutation) {
+      return;
+    }
+
+    this.deferredMutation = null;
+
+    let result: Result<BlackBoxEntry, OperationError>;
+
+    if (mutation.kind === 'mark-read') {
+      result = this.blackBoxService.markAsRead(mutation.entryId);
+    } else if (mutation.kind === 'mark-completed') {
+      result = this.blackBoxService.markAsCompleted(mutation.entryId);
+    } else {
+      result = this.blackBoxService.snooze(mutation.entryId, mutation.snoozeUntil);
+    }
+
+    if (!result.ok) {
+      this.logger.warn('Gate', 'Deferred gate mutation failed', {
+        kind: mutation.kind,
+        entryId: mutation.entryId,
+        message: result.error.message,
+      });
+    }
   }
 
   /** 获取昨天日期 */

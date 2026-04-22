@@ -16,7 +16,6 @@ import {
   effect,
   inject,
   output,
-  signal,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { GateService } from '../../../../../services/gate.service';
@@ -32,7 +31,6 @@ import { GateActionsComponent } from './gate-actions.component';
     @if (gateService.isActive()) {
       <div
         class="gate-overlay"
-        [class.shake-y]="shakePulse()"
         data-testid="gate-overlay"
         role="dialog"
         aria-modal="true"
@@ -283,18 +281,6 @@ import { GateActionsComponent } from './gate-actions.component';
       }
     }
 
-    .shake-y {
-      animation: gate-shake-y var(--pk-micro-pulse) var(--pk-ease-enter);
-    }
-
-    @keyframes gate-shake-y {
-      0% { transform: translateY(0); }
-      20% { transform: translateY(-7px); }
-      42% { transform: translateY(4px); }
-      68% { transform: translateY(-2px); }
-      100% { transform: translateY(0); }
-    }
-
     @media (max-width: 640px) {
       .gate-overlay {
         justify-content: flex-start;
@@ -313,7 +299,6 @@ import { GateActionsComponent } from './gate-actions.component';
 
     @media (prefers-reduced-motion: reduce) {
       .gate-overlay,
-      .shake-y,
       .completion-card,
       .rubble-chip {
         animation: none !important;
@@ -334,7 +319,6 @@ export class GateOverlayComponent implements OnDestroy {
   /** 地层预览 */
   readonly strataLayers = computed(() => this.strataService.layers());
   readonly progress = this.gateService.progress;
-  readonly shakePulse = signal(false);
 
   readonly rubbleChips = computed(() => {
     const progress = this.progress();
@@ -357,12 +341,6 @@ export class GateOverlayComponent implements OnDestroy {
 
         document.body.style.overflow = '';
         this.closed.emit();
-      });
-
-      effect(() => {
-        const tick = this.gateService.impactTick();
-        if (!this.gateService.isActive() || tick <= 0) return;
-        this.triggerShake();
       });
     } catch {
       // 防御：SSR 或异常注入上下文
@@ -407,19 +385,5 @@ export class GateOverlayComponent implements OnDestroy {
 
   ngOnDestroy(): void {
     document.body.style.overflow = '';
-  }
-
-  private triggerShake(): void {
-    this.shakePulse.set(false);
-
-    if (typeof requestAnimationFrame === 'function') {
-      requestAnimationFrame(() => this.shakePulse.set(true));
-    } else {
-      this.shakePulse.set(true);
-    }
-
-    setTimeout(() => {
-      this.shakePulse.set(false);
-    }, 220);
   }
 }
