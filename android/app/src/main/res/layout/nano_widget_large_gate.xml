@@ -1,0 +1,233 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  蓝图风大门模式大尺寸 (2×4 倒下长方体) 小组件。
+  结构：
+    - 根 FrameLayout：更深阶的钴蓝底 + 白色细描边
+    - 背景细线技术网格
+    - 上层垂直栈：
+        头部：🚪 大门 (3)  ……  未完成任务 🔒
+        横向虚线
+        ListView: 中央大任务卡（1 条，由 Factory 填充）
+        横向虚线
+        GridView (2 列): 已读 / 完成 按钮
+    - 右下角 refresh GridView 兼容 MIUI（但 gate 模式下通常不可见，保留 ID）
+
+  禁止左右滑动手势：GridView 列数固定，ListView 只纵向。
+-->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/nano_widget_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/nano_widget_root_gate"
+    android:clipToOutline="true"
+    android:padding="14dp">
+
+    <!-- ==== 背景技术网格：纵线 ==== -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="horizontal">
+        <ImageView android:layout_width="0dp" android:layout_height="match_parent" android:layout_weight="1" />
+        <ImageView android:layout_width="1dp" android:layout_height="match_parent" android:background="#12FFFFFF" />
+        <ImageView android:layout_width="0dp" android:layout_height="match_parent" android:layout_weight="1" />
+        <ImageView android:layout_width="1dp" android:layout_height="match_parent" android:background="#10FFFFFF" />
+        <ImageView android:layout_width="0dp" android:layout_height="match_parent" android:layout_weight="1" />
+        <ImageView android:layout_width="1dp" android:layout_height="match_parent" android:background="#12FFFFFF" />
+        <ImageView android:layout_width="0dp" android:layout_height="match_parent" android:layout_weight="1" />
+        <ImageView android:layout_width="1dp" android:layout_height="match_parent" android:background="#10FFFFFF" />
+        <ImageView android:layout_width="0dp" android:layout_height="match_parent" android:layout_weight="1" />
+    </LinearLayout>
+
+    <!-- ==== 背景技术网格：横线 ==== -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical">
+        <ImageView android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" />
+        <ImageView android:layout_width="match_parent" android:layout_height="1dp" android:background="#10FFFFFF" />
+        <ImageView android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" />
+        <ImageView android:layout_width="match_parent" android:layout_height="1dp" android:background="#12FFFFFF" />
+        <ImageView android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" />
+        <ImageView android:layout_width="match_parent" android:layout_height="1dp" android:background="#10FFFFFF" />
+        <ImageView android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical">
+
+        <!-- 头部：🚪 大门 (N)  ……  未完成任务 🔒 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <ImageView
+                android:layout_width="20dp"
+                android:layout_height="20dp"
+                android:importantForAccessibility="no"
+                android:src="@drawable/nano_widget_icon_door" />
+
+            <TextView
+                android:layout_width="8dp"
+                android:layout_height="1dp" />
+
+            <TextView
+                android:id="@+id/nano_widget_mode_label"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:maxLines="1"
+                android:text="@string/nanoflow_widget_gate_label"
+                android:textColor="#F6FBFF"
+                android:textSize="14sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="6dp"
+                android:layout_height="1dp" />
+
+            <!-- (N) 计数圆环徽章：细白色圆环轮廓（与海报一致的蓝图 token） -->
+            <FrameLayout
+                android:id="@+id/nano_widget_gate_count_ring"
+                android:layout_width="24dp"
+                android:layout_height="24dp"
+                android:background="@drawable/nano_widget_count_ring"
+                android:visibility="gone">
+                <TextView
+                    android:id="@+id/nano_widget_gate_count_text"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:gravity="center"
+                    android:includeFontPadding="false"
+                    android:text=""
+                    android:textColor="#F6FBFF"
+                    android:textSize="12sp"
+                    android:textStyle="bold" />
+            </FrameLayout>
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_weight="1"
+                android:layout_height="1dp" />
+
+            <TextView
+                android:id="@+id/nano_widget_sync_badge"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:maxLines="1"
+                android:paddingStart="10dp"
+                android:paddingEnd="4dp"
+                android:text=""
+                android:textColor="#9FB8DE"
+                android:textSize="10sp" />
+
+            <TextView
+                android:id="@+id/nano_widget_header_action_label"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:maxLines="1"
+                android:text="未完成任务"
+                android:textColor="#F6FBFF"
+                android:textSize="11sp" />
+
+            <TextView
+                android:layout_width="6dp"
+                android:layout_height="1dp" />
+
+            <ImageView
+                android:id="@+id/nano_widget_header_action_icon"
+                android:layout_width="16dp"
+                android:layout_height="16dp"
+                android:importantForAccessibility="no"
+                android:src="@drawable/nano_widget_icon_lock" />
+        </LinearLayout>
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="8dp" />
+
+        <ImageView
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:importantForAccessibility="no"
+            android:scaleType="fitXY"
+            android:src="@drawable/nano_widget_divider_dashed_h" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="6dp" />
+
+        <!-- 中央大卡片：1 条 item，listKind=content 或 gate_card -->
+        <ListView
+            android:id="@+id/nano_widget_content_list"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:clipToPadding="false"
+            android:divider="@android:color/transparent"
+            android:dividerHeight="0dp"
+            android:paddingTop="0dp"
+            android:paddingBottom="0dp"
+            android:scrollbars="none" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="6dp" />
+
+        <ImageView
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:importantForAccessibility="no"
+            android:scaleType="fitXY"
+            android:src="@drawable/nano_widget_divider_dashed_h" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="6dp" />
+
+        <!-- 已读 / 完成 双按钮：GridView numColumns=2（按钮更高、虚线描边，与 focus 的实线 slot 形成对比） -->
+        <GridView
+            android:id="@+id/nano_widget_gate_actions_list"
+            android:layout_width="match_parent"
+            android:layout_height="58dp"
+            android:columnWidth="140dp"
+            android:fadingEdge="none"
+            android:horizontalSpacing="10dp"
+            android:numColumns="2"
+            android:overScrollMode="never"
+            android:requiresFadingEdge="none"
+            android:scrollbars="none"
+            android:stretchMode="columnWidth"
+            android:verticalSpacing="0dp" />
+
+        <!-- 兼容：保留 tab_list ID（此 layout 中不可见） -->
+        <GridView
+            android:id="@+id/nano_widget_tab_list"
+            android:layout_width="0dp"
+            android:layout_height="0dp"
+            android:numColumns="1"
+            android:visibility="gone" />
+
+        <!-- 兼容：保留 footer_label / footer_icon 空位 -->
+        <TextView
+            android:id="@+id/nano_widget_footer_label"
+            android:layout_width="0dp"
+            android:layout_height="0dp"
+            android:text=""
+            android:visibility="gone" />
+    </LinearLayout>
+
+    <!-- refresh GridView：gate 模式下保留 ID，但通常不可见 -->
+    <GridView
+        android:id="@+id/nano_widget_refresh_list"
+        android:layout_width="1dp"
+        android:layout_height="1dp"
+        android:layout_gravity="bottom|end"
+        android:numColumns="1"
+        android:visibility="invisible" />
+</FrameLayout>

@@ -88,6 +88,8 @@ class NanoflowTwaLauncherActivity : LauncherActivity() {
           appWidgetId = request.appWidgetId,
           preferredEntrySource = request.entrySource,
           launchIntent = request.launchIntent,
+          requestedTaskIndex = request.taskIndex,
+          gateEntryId = request.gateEntryId,
         )
       }
     }
@@ -96,6 +98,7 @@ class NanoflowTwaLauncherActivity : LauncherActivity() {
       request.entrySource,
       request.launchIntent,
       bridgeContext = null,
+      gateEntryId = request.gateEntryId,
     )
   }
 
@@ -188,9 +191,11 @@ class NanoflowTwaLauncherActivity : LauncherActivity() {
       launchIntent = intent?.getStringExtra(EXTRA_LAUNCH_INTENT)
         ?.let { value -> NanoFlowLaunchIntent.entries.find { it.name == value } }
         ?: NanoFlowLaunchIntent.OPEN_WORKSPACE,
+      taskIndex = intent?.getIntExtra(NanoflowWidgetReceiver.EXTRA_TASK_INDEX, -1) ?: -1,
       entrySource = intent?.getStringExtra(EXTRA_ENTRY_SOURCE)
         ?.let { value -> NanoFlowEntrySource.entries.find { it.name == value } }
         ?: NanoFlowEntrySource.TWA,
+      gateEntryId = intent?.getStringExtra(EXTRA_GATE_ENTRY_ID),
     ).also { request ->
       cachedLaunchRequest = request
     }
@@ -208,7 +213,9 @@ class NanoflowTwaLauncherActivity : LauncherActivity() {
   private data class LaunchRequest(
     val appWidgetId: Int,
     val launchIntent: NanoFlowLaunchIntent,
+    val taskIndex: Int,
     val entrySource: NanoFlowEntrySource,
+    val gateEntryId: String? = null,
   )
 
   companion object {
@@ -217,17 +224,22 @@ class NanoflowTwaLauncherActivity : LauncherActivity() {
     private const val EXTRA_APP_WIDGET_ID = "extra.APP_WIDGET_ID"
     private const val EXTRA_LAUNCH_INTENT = "extra.LAUNCH_INTENT"
     private const val EXTRA_ENTRY_SOURCE = "extra.ENTRY_SOURCE"
+    private const val EXTRA_GATE_ENTRY_ID = "extra.GATE_ENTRY_ID"
 
     fun intentForWidget(
       context: Context,
       appWidgetId: Int,
       launchIntent: NanoFlowLaunchIntent,
+      gateEntryId: String? = null,
     ): Intent {
       return Intent(context, NanoflowTwaLauncherActivity::class.java).apply {
         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
         putExtra(EXTRA_APP_WIDGET_ID, appWidgetId)
         putExtra(EXTRA_LAUNCH_INTENT, launchIntent.name)
         putExtra(EXTRA_ENTRY_SOURCE, NanoFlowEntrySource.WIDGET.name)
+        if (!gateEntryId.isNullOrBlank()) {
+          putExtra(EXTRA_GATE_ENTRY_ID, gateEntryId)
+        }
       }
     }
   }

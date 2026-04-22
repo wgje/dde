@@ -1393,6 +1393,15 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
   }
 
   private applyStartupEntryIntent(startupEntryIntent: StartupEntryIntent): void {
+    // 蓝图 UI 小组件的 1-tap 标记：大门按钮直接对指定条目执行 markAsRead / markAsCompleted。
+    if (
+      startupEntryIntent.intent === 'mark-gate-read'
+      || startupEntryIntent.intent === 'mark-gate-complete'
+    ) {
+      this.applyWidgetGateMutation(startupEntryIntent);
+      return;
+    }
+
     if (
       startupEntryIntent.intent !== 'open-focus-tools'
       && startupEntryIntent.intent !== 'open-blackbox-recorder'
@@ -1405,6 +1414,36 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
 
     if (startupEntryIntent.intent === 'open-blackbox-recorder' && this.focusPrefs.isBlackBoxEnabled()) {
       void this.loadBlackBoxRecorderComponent();
+    }
+  }
+
+  /** 小组件大门按钮 → 应用侧直接调用 BlackBoxService 对指定条目执行标记。 */
+  private applyWidgetGateMutation(startupEntryIntent: StartupEntryIntent): void {
+    const entryId = startupEntryIntent.widgetGateEntryId;
+    if (!entryId) {
+      // 没有条目 ID 时回退为打开 Focus Tools，保证 widget 侧用户仍可进入应用处理。
+      this.isSidebarOpen.set(true);
+      this.preloadSidebarTools('intent');
+      return;
+    }
+
+    const result = startupEntryIntent.intent === 'mark-gate-read'
+      ? this.blackBoxService.markAsRead(entryId)
+      : this.blackBoxService.markAsCompleted(entryId);
+
+    if (!result.ok) {
+      // 条目不存在或已处理：静默回退，不打断 workspace 启动流程。
+      this.logger.warn('Widget gate mutation failed', {
+        intent: startupEntryIntent.intent,
+        entryId,
+        code: result.error.code,
+        message: result.error.message,
+      });
+    } else {
+      this.logger.info('Widget gate mutation applied', {
+        intent: startupEntryIntent.intent,
+        entryId,
+      });
     }
   }
 

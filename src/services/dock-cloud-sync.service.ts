@@ -23,6 +23,7 @@ import {
   type SnapshotNormalizeContext,
 } from './dock-snapshot-persistence.service';
 import { LoggerService } from './logger.service';
+import { SupabaseClientService } from './supabase-client.service';
 import { withTimeout } from '../utils/timeout';
 import { TimerHandle } from '../utils/timer-handle';
 import { supabaseErrorToError } from '../utils/supabase-error';
@@ -61,6 +62,7 @@ export class DockCloudSyncService implements OnDestroy {
   private readonly syncService = inject(SimpleSyncService);
   private readonly actionQueue = inject(ActionQueueService);
   private readonly snapshotPersistence = inject(DockSnapshotPersistenceService);
+  private readonly supabase = inject(SupabaseClientService);
   private readonly logger = inject(LoggerService).category('DockCloudSync');
 
   private readonly cloudPushTimer = new TimerHandle();
@@ -142,6 +144,62 @@ export class DockCloudSyncService implements OnDestroy {
 
     const delayMs = isFocusModeTransition ? 0 : CLOUD_PUSH_DEBOUNCE_MS;
     this.cloudPushTimer.schedule(runPush, delayMs);
+
+    // 2026-04-22 颠覆性压缩 (plan D)：focusMode 翻转瞬间并行直调 widget-notify 绕过
+    // 「ActionQueue → DB upsert → pg_net 轮询 → widget-notify」的 3-8s 链路。
+    // 直调路径用用户 JWT 认证，edge function 在同一张 widget_notify_events 表上做幂等，
+    // 若 pg_net 后续仍送达则会被去重 kind='duplicate' 静默丢弃，不会导致双推。
+    if (isFocusModeTransition) {
+      void this.sendDirectFocusNotify(userId, frozenSnapshot, nextFocusMode);
+    }
+  }
+
+  /**
+   * 直接调用 widget-notify Edge Function，不等 DB trigger + pg_net。
+   * 失败无副作用——DB 仍会通过 ActionQueue 正常写入并触发 fallback 通知路径。
+   */
+  private async sendDirectFocusNotify(
+    userId: string,
+    snapshot: DockSnapshot,
+    focusActive: boolean,
+  ): Promise<void> {
+    try {
+      const client = await this.supabase.clientAsync();
+      if (!client) {
+        return;
+      }
+      // 幂等键 = focus session id + 状态 hash，让同一次翻转在 trigger fallback 到达时命中去重。
+      const focusSessionId = snapshot.focusSessionState?.sessionId
+        ?? snapshot.session?.mainTaskId
+        ?? crypto.randomUUID();
+      const webhookId = `pwa-direct-${focusSessionId}-${focusActive ? 'on' : 'off'}-${Math.floor(Date.now() / 1000)}`;
+      const updatedAt = snapshot.savedAt ?? new Date().toISOString();
+
+      const { error } = await client.functions.invoke('widget-notify', {
+        body: {
+          directNotify: true,
+          webhookId,
+          focusActive,
+          focusSessionId,
+          updatedAt,
+        },
+      });
+      if (error) {
+        // 401/409 在直调路径是可接受的（jwt 过期或重复事件），不升级为错误——
+        // DB trigger fallback 仍会在几秒内把事件送达 widget。
+        this.logger.debug('direct widget-notify skipped', {
+          userId,
+          focusActive,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    } catch (error) {
+      this.logger.debug('direct widget-notify threw', {
+        userId,
+        focusActive,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   // ─── Cloud Pull ───────────────────────────────

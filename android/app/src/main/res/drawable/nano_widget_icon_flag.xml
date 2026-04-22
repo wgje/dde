@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 蓝图线稿：旗帜（副任务）图标 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="28dp"
+    android:height="28dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:strokeColor="#F6FBFF"
+        android:strokeWidth="1.5"
+        android:fillColor="#00000000"
+        android:pathData="M6,3 L6,22" />
+    <path
+        android:strokeColor="#F6FBFF"
+        android:strokeWidth="1.5"
+        android:fillColor="#00000000"
+        android:pathData="M6,4 L19,4 L16,9 L19,14 L6,14" />
+</vector>

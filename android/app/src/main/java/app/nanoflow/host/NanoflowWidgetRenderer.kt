@@ -19,9 +19,10 @@ import app.nanoflow.host.R
 object NanoflowWidgetRenderer {
 
   fun render(context: Context, appWidgetId: Int, model: WidgetRenderModel): RemoteViews {
+    // 2026-04-22 蓝图 UI：LARGE / MEDIUM 共用 large layout（focus 或 gate 二选一），
+    // 仅 SMALL 继续使用 compact 单行样式。这保证 2×4 倒下长方体与海报 1:1 还原。
     return when (model.sizeTier) {
-      WidgetSizeTier.LARGE -> renderLarge(context, appWidgetId, model)
-      WidgetSizeTier.MEDIUM -> renderMedium(context, appWidgetId, model)
+      WidgetSizeTier.LARGE, WidgetSizeTier.MEDIUM -> renderLarge(context, appWidgetId, model)
       else -> renderCompact(context, appWidgetId, model)
     }
   }
@@ -47,38 +48,41 @@ object NanoflowWidgetRenderer {
     return views
   }
 
-  // --- 中大尺寸布局：Focus / Gate / 状态页 ---
+  // --- 中大尺寸布局：Focus / Gate / 状态页（已不再单独走 medium 分支） ---
+  @Suppress("unused")
   private fun renderMedium(context: Context, appWidgetId: Int, model: WidgetRenderModel): RemoteViews {
-    val views = RemoteViews(context.packageName, R.layout.nano_widget_medium)
-    views.setInt(R.id.nano_widget_root, "setBackgroundResource", rootBackgroundFor(model))
-    views.setOnClickPendingIntent(
-      R.id.nano_widget_root,
-      NanoflowWidgetReceiver.primaryActionPendingIntent(context, appWidgetId, model.primaryAction),
-    )
-
-    renderSyncBadge(views, model)
-    renderTabList(context, views, appWidgetId)
-    renderContentList(context, views, appWidgetId, model)
-    renderRefreshList(context, views, appWidgetId)
-
-    return views
+    // 保留函数签名以兼容旧路径；当前所有 MEDIUM/LARGE 都走 renderLarge。
+    return renderLarge(context, appWidgetId, model)
   }
 
   private fun renderLarge(context: Context, appWidgetId: Int, model: WidgetRenderModel): RemoteViews {
-    val views = RemoteViews(context.packageName, R.layout.nano_widget_large)
-    views.setInt(R.id.nano_widget_root, "setBackgroundResource", rootBackgroundFor(model))
+    val useGateLayout = model.isGateMode || model.showSetup || model.showAuthRequired || model.showUntrusted
+    val layoutRes = if (useGateLayout) R.layout.nano_widget_large_gate else R.layout.nano_widget_large
+    val views = RemoteViews(context.packageName, layoutRes)
 
-    // 根容器点击 = 打开 App / Focus Tools。集合视图 item 的点击区域会拦截自身事件，
-    // 空白处仍回落到 root。
+    // Root 点击 = 打开 App / Focus Tools（空白区 / 整卡回退）
     views.setOnClickPendingIntent(
       R.id.nano_widget_root,
       NanoflowWidgetReceiver.primaryActionPendingIntent(context, appWidgetId, model.primaryAction),
     )
 
     renderSyncBadge(views, model)
-    renderTabList(context, views, appWidgetId)
-    renderContentList(context, views, appWidgetId, model)
-    renderRefreshList(context, views, appWidgetId)
+    renderModeHeader(views, model)
+
+    if (useGateLayout) {
+      renderGateCountRing(views, model)
+      renderContentList(context, views, appWidgetId, model)
+      if (model.isGateMode) {
+        views.setViewVisibility(R.id.nano_widget_gate_actions_list, View.VISIBLE)
+        renderGateActionsList(context, views, appWidgetId)
+      } else {
+        views.setViewVisibility(R.id.nano_widget_gate_actions_list, View.GONE)
+      }
+    } else {
+      renderTabList(context, views, appWidgetId)
+      renderRefreshList(context, views, appWidgetId)
+      renderFocusFooter(context, views, model)
+    }
 
     return views
   }
@@ -134,35 +138,70 @@ object NanoflowWidgetRenderer {
 
   private fun accentColorFor(model: WidgetRenderModel): Int {
     return when (model.tone) {
-      WidgetVisualTone.FOCUS -> 0xFF4A7A38.toInt()
-      WidgetVisualTone.GATE -> 0xFF3E5270.toInt()
+      WidgetVisualTone.FOCUS,
+      WidgetVisualTone.GATE -> 0xFFEAF3FF.toInt()
       WidgetVisualTone.SETUP,
       WidgetVisualTone.AUTH,
-      WidgetVisualTone.UNTRUSTED -> 0xFF8A6D1C.toInt()
+      WidgetVisualTone.UNTRUSTED -> 0xFFFFE4D6.toInt()
     }
   }
 
-  // --- 同步徽章 ---
+  // --- 同步徽章（蓝图风：纯文字，不再带彩色圆点） ---
   private fun renderSyncBadge(views: RemoteViews, model: WidgetRenderModel) {
-    val label = model.syncBadgeLabel ?: model.statusBadge
-    if (label.isNullOrBlank()) {
+    val statusLabel = model.syncBadgeLabel ?: model.statusBadge
+    if (statusLabel.isNullOrBlank()) {
       views.setViewVisibility(R.id.nano_widget_sync_badge, View.GONE)
+    } else {
+      views.setTextViewText(R.id.nano_widget_sync_badge, statusLabel)
+      views.setViewVisibility(R.id.nano_widget_sync_badge, View.VISIBLE)
+    }
+    // 2026-04-22 蓝图 UI：不再绘制 sync 状态彩色圆点。mode_label 已由 header 图标表达模式；
+    // 多余的色点与「白色技术线稿」蓝图语言冲突，统一清除右侧 compoundDrawable。
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+      views.setTextViewCompoundDrawablesRelative(R.id.nano_widget_sync_badge, 0, 0, 0, 0)
+    }
+  }
+
+  // --- 模式头部：mode_label 文字永远显示（布局已带图标），此处只保证文字最新 ---
+  private fun renderModeHeader(views: RemoteViews, model: WidgetRenderModel) {
+    views.setTextViewText(R.id.nano_widget_mode_label, model.modeLabel)
+  }
+
+  // --- 大门计数徽章：(N) 圆环，仅 gate 模式可见 ---
+  private fun renderGateCountRing(views: RemoteViews, model: WidgetRenderModel) {
+    val count = model.blackBoxCount
+    if (count <= 0) {
+      views.setViewVisibility(R.id.nano_widget_gate_count_ring, View.GONE)
       return
     }
-    views.setTextViewText(R.id.nano_widget_sync_badge, label)
-    // 2026-04-19：根据当前 tone 动态切换左侧状态圆点颜色（绿=Focus、黄=Gate、红=Setup/Auth/Untrusted）。
-    // 仅在 API 23+ 上动态切换；低版本继续用 XML 默认的绿点占位。
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-      val dotRes = when (model.tone) {
-        WidgetVisualTone.FOCUS -> R.drawable.nano_widget_state_dot_green
-        WidgetVisualTone.GATE -> R.drawable.nano_widget_state_dot_yellow
-        WidgetVisualTone.SETUP,
-        WidgetVisualTone.AUTH,
-        WidgetVisualTone.UNTRUSTED -> R.drawable.nano_widget_state_dot_red
-      }
-      views.setTextViewCompoundDrawablesRelative(R.id.nano_widget_sync_badge, 0, 0, dotRes, 0)
-    }
-    views.setViewVisibility(R.id.nano_widget_sync_badge, View.VISIBLE)
+    views.setTextViewText(R.id.nano_widget_gate_count_text, count.toString())
+    views.setViewVisibility(R.id.nano_widget_gate_count_ring, View.VISIBLE)
+  }
+
+  // --- 大门双按钮 GridView：已读 / 完成 ---
+  private fun renderGateActionsList(context: Context, views: RemoteViews, appWidgetId: Int) {
+    val adapter = NanoflowWidgetReceiver.actionListAdapterIntent(
+      context,
+      appWidgetId,
+      NanoflowWidgetActionFactory.LIST_KIND_GATE_ACTIONS,
+    )
+    views.setRemoteAdapter(R.id.nano_widget_gate_actions_list, adapter)
+    views.setPendingIntentTemplate(
+      R.id.nano_widget_gate_actions_list,
+      NanoflowWidgetReceiver.actionListClickTemplatePendingIntent(context, appWidgetId),
+    )
+  }
+
+  // --- 专注模式底栏：「备选区：N 个任务  ›」 ---
+  private fun renderFocusFooter(context: Context, views: RemoteViews, model: WidgetRenderModel) {
+    val visibleSecondarySlots = (model.tasks.size - 1).coerceAtLeast(0)
+    val overflow = (model.dockCount - visibleSecondarySlots).coerceAtLeast(0)
+    // 即使 overflow=0 也保留文案，改写为 0 个任务，保证海报对齐的底栏视觉
+    views.setTextViewText(
+      R.id.nano_widget_footer_label,
+      context.getString(R.string.nanoflow_widget_focus_backup_zone, overflow),
+    )
+    views.setViewVisibility(R.id.nano_widget_footer_label, View.VISIBLE)
   }
 
   // --- 标题 + 副标题 ---

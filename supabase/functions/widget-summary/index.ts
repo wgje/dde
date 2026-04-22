@@ -117,6 +117,7 @@ interface BlackBoxRow {
   date: string | null;
   project_id: string | null;
   content: string | null;
+  is_read: boolean | null;
   created_at: string | null;
   snooze_until: string | null;
   updated_at: string;
@@ -885,16 +886,20 @@ Deno.serve(async (req: Request) => {
     });
   }
 
-  const { data: sessionData, error: sessionError } = await client
-    .from('focus_sessions')
-    .select('id,updated_at,session_state')
-    .eq('user_id', device.user_id)
-    .order('updated_at', { ascending: false })
-    .limit(1)
-    .maybeSingle();
+  // 2026-04-22 颠覆性压缩：Wave 1（focus_sessions/projects/black_box count/preview + dock count/watermark）
+  // 合并到单个 PL/pgSQL RPC（widget_summary_wave1），把 4-5 个 PostgREST HTTP roundtrip
+  // 压成 1 个。观测的 4-5s widget-summary 延迟中 1.5-2s 花在 PostgREST 请求排队 + JSON 解析上。
+  const wave1RpcResult = await client.rpc('widget_summary_wave1', {
+    p_user_id: device.user_id,
+    p_today: todayIsoDate,
+    p_preview_limit: MAX_BLACK_BOX_PREVIEW_COUNT,
+  });
 
-  if (sessionError) {
-    console.error('[WidgetSummary] load focus session failed', { userId: redactId(device.user_id), message: sessionError.message });
+  if (wave1RpcResult.error) {
+    console.error('[WidgetSummary] widget_summary_wave1 rpc failed', {
+      userId: redactId(device.user_id),
+      message: wave1RpcResult.error.message,
+    });
     return summaryResponse(responseHeaders, 500, {
       error: 'Failed to load widget summary',
       code: 'SUMMARY_LOAD_FAILED',
@@ -904,31 +909,27 @@ Deno.serve(async (req: Request) => {
     });
   }
 
-  const latestSession = sessionData as FocusSessionRow | null;
+  interface Wave1Payload {
+    focusSession: FocusSessionRow | null;
+    accessibleProjectIds: string[];
+    pendingBlackBoxCount: number;
+    blackBoxPreview: BlackBoxRow[];
+    dockCount: number;
+    dockWatermark: string | null;
+  }
+  const wave1 = (wave1RpcResult.data ?? {}) as Partial<Wave1Payload>;
+  const latestSession: FocusSessionRow | null = wave1.focusSession ?? null;
+  const accessibleProjectIds: string[] = Array.isArray(wave1.accessibleProjectIds) ? wave1.accessibleProjectIds : [];
+  const pendingBlackBoxCount: number = typeof wave1.pendingBlackBoxCount === 'number' ? wave1.pendingBlackBoxCount : 0;
+  const blackBoxPreviewRows: BlackBoxRow[] = Array.isArray(wave1.blackBoxPreview) ? wave1.blackBoxPreview : [];
+  const dockCountFromTasks: number = typeof wave1.dockCount === 'number' ? wave1.dockCount : 0;
+  const dockTasksWatermark = normalizeIsoTimestamp(wave1.dockWatermark ?? null);
   const state = toFocusSessionState(latestSession?.session_state ?? null);
   const dockSlots = [
     ...(state.comboSelectTasks ?? []),
     ...(state.backupTasks ?? []),
   ];
   const primarySlot = pickPrimaryFocusSlot(state);
-
-  const { data: accessibleProjectsData, error: accessibleProjectsError } = await client
-    .from('projects')
-    .select('id')
-    .eq('owner_id', device.user_id)
-    .is('deleted_at', null);
-
-  if (accessibleProjectsError) {
-    return summaryResponse(responseHeaders, 500, {
-      error: 'Failed to resolve accessible projects',
-      code: 'ACCESS_SCOPE_LOOKUP_FAILED',
-      degradedReasons: ['access-scope-lookup-failed'],
-      capabilities: publicCapabilities,
-      warnings: ['open-app-to-finish-setup'],
-    });
-  }
-
-  const accessibleProjectIds = (accessibleProjectsData ?? []).map(row => (row as ProjectIdRow).id);
   const taskIds = uniqueIds([
     primarySlot?.taskId ?? null,
     ...dockSlots.map(slot => slot.taskId),
@@ -938,52 +939,58 @@ Deno.serve(async (req: Request) => {
     ...dockSlots.map(slot => slot.sourceProjectId),
   ]);
 
-  const taskMap = new Map<string, TaskRow>();
-  if (taskIds.length > 0 && accessibleProjectIds.length > 0) {
-    const { data, error } = await client
-      .from('tasks')
-      .select('id,title,project_id,updated_at')
-      .in('id', taskIds)
-      .in('project_id', accessibleProjectIds)
-      .is('deleted_at', null);
+  // Wave 2：tasks 校验 / projects 校验 这 2 个查询依赖 wave1 解出的 taskIds/projectIds，
+  // dockCount/dockWatermark 已在 wave1 RPC 内一次性算出，这里无需再查。
+  const needsTaskLookup = taskIds.length > 0 && accessibleProjectIds.length > 0;
+  const needsProjectLookup = projectIds.length > 0 && accessibleProjectIds.length > 0;
+  const [
+    taskLookupResult,
+    projectLookupResult,
+  ] = await Promise.all([
+    needsTaskLookup
+      ? client
+          .from('tasks')
+          .select('id,title,project_id,updated_at')
+          .in('id', taskIds)
+          .in('project_id', accessibleProjectIds)
+          .is('deleted_at', null)
+      : Promise.resolve({ data: [], error: null } as const),
+    needsProjectLookup
+      ? client
+          .from('projects')
+          .select('id,title,updated_at')
+          .in('id', projectIds)
+          .eq('owner_id', device.user_id)
+          .is('deleted_at', null)
+      : Promise.resolve({ data: [], error: null } as const),
+  ]);
 
-    if (error) {
-      return summaryResponse(responseHeaders, 500, {
-        error: 'Failed to validate task references',
-        code: 'TASK_LOOKUP_FAILED',
-        degradedReasons: ['task-lookup-failed'],
-        capabilities: publicCapabilities,
-        warnings: ['open-app-to-finish-setup'],
-      });
-    }
-
-    for (const row of (data ?? []) as TaskRow[]) {
-      taskMap.set(row.id, row);
-    }
+  if (taskLookupResult.error) {
+    return summaryResponse(responseHeaders, 500, {
+      error: 'Failed to validate task references',
+      code: 'TASK_LOOKUP_FAILED',
+      degradedReasons: ['task-lookup-failed'],
+      capabilities: publicCapabilities,
+      warnings: ['open-app-to-finish-setup'],
+    });
+  }
+  if (projectLookupResult.error) {
+    return summaryResponse(responseHeaders, 500, {
+      error: 'Failed to validate project references',
+      code: 'PROJECT_LOOKUP_FAILED',
+      degradedReasons: ['project-lookup-failed'],
+      capabilities: publicCapabilities,
+      warnings: ['open-app-to-finish-setup'],
+    });
   }
 
+  const taskMap = new Map<string, TaskRow>();
+  for (const row of (taskLookupResult.data ?? []) as TaskRow[]) {
+    taskMap.set(row.id, row);
+  }
   const projectMap = new Map<string, ProjectRow>();
-  if (projectIds.length > 0 && accessibleProjectIds.length > 0) {
-    const { data, error } = await client
-      .from('projects')
-      .select('id,title,updated_at')
-      .in('id', projectIds)
-      .eq('owner_id', device.user_id)
-      .is('deleted_at', null);
-
-    if (error) {
-      return summaryResponse(responseHeaders, 500, {
-        error: 'Failed to validate project references',
-        code: 'PROJECT_LOOKUP_FAILED',
-        degradedReasons: ['project-lookup-failed'],
-        capabilities: publicCapabilities,
-        warnings: ['open-app-to-finish-setup'],
-      });
-    }
-
-    for (const row of (data ?? []) as ProjectRow[]) {
-      projectMap.set(row.id, row);
-    }
+  for (const row of (projectLookupResult.data ?? []) as ProjectRow[]) {
+    projectMap.set(row.id, row);
   }
 
   const dockItems = dockSlots.map(slot => {
@@ -1011,100 +1018,10 @@ Deno.serve(async (req: Request) => {
   const dockCount = dockItems.length;
   const taskBackedDockCount = dockItems.filter(item => item.taskId !== null).length;
 
-  let dockCountFromTasks = 0;
-  let dockTasksWatermark: string | null = null;
-  if (accessibleProjectIds.length > 0) {
-    const { count, error: dockCountError } = await client
-      .from('tasks')
-      .select('id', { count: 'exact', head: true })
-      .in('project_id', accessibleProjectIds)
-      .is('deleted_at', null)
-      .contains('parking_meta', { state: 'parked' });
-
-    if (dockCountError) {
-      return summaryResponse(responseHeaders, 500, {
-        error: 'Failed to cross-check dock count',
-        code: 'DOCK_COUNT_LOOKUP_FAILED',
-        degradedReasons: ['dock-count-lookup-failed'],
-        capabilities: publicCapabilities,
-        warnings: ['open-app-to-finish-setup'],
-      });
-    }
-
-    dockCountFromTasks = count ?? 0;
-
-    const { data: dockWatermarkRow, error: dockWatermarkError } = await client
-      .from('tasks')
-      .select('updated_at')
-      .in('project_id', accessibleProjectIds)
-      .is('deleted_at', null)
-      .contains('parking_meta', { state: 'parked' })
-      .order('updated_at', { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    if (dockWatermarkError) {
-      return summaryResponse(responseHeaders, 500, {
-        error: 'Failed to load dock watermark',
-        code: 'DOCK_WATERMARK_LOOKUP_FAILED',
-        degradedReasons: ['dock-watermark-lookup-failed'],
-        capabilities: publicCapabilities,
-        warnings: ['open-app-to-finish-setup'],
-      });
-    }
-
-    dockTasksWatermark = normalizeIsoTimestamp((dockWatermarkRow as { updated_at?: string | null } | null)?.updated_at ?? null);
-  }
-
-  const { count: pendingBlackBoxCount, error: blackBoxError } = await client
-    .from('black_box_entries')
-    .select('id', { count: 'exact', head: true })
-    .eq('user_id', device.user_id)
-    .is('deleted_at', null)
-    .eq('is_completed', false)
-    .eq('is_archived', false)
-    .lt('date', todayIsoDate)
-    // Gate 口径与主 App 对齐：今天之前、未完成、未归档、未删除，且 snooze 已到期即可。
-    // 不能再把 is_read=false 当成前提，否则“已读但仍未处理”的沉积会被 widget 错判成已清空。
-    .or(`snooze_until.is.null,snooze_until.lte.${todayIsoDate}`);
-
-  if (blackBoxError) {
-    return summaryResponse(responseHeaders, 500, {
-      error: 'Failed to load black box summary',
-      code: 'BLACK_BOX_LOOKUP_FAILED',
-      degradedReasons: ['black-box-lookup-failed'],
-      capabilities: publicCapabilities,
-      warnings: ['open-app-to-finish-setup'],
-    });
-  }
-
-  const { data: blackBoxPreviewRowsData, error: blackBoxWatermarkError } = await client
-    .from('black_box_entries')
-    .select('id,date,project_id,content,created_at,snooze_until,updated_at')
-    .eq('user_id', device.user_id)
-    .is('deleted_at', null)
-    .eq('is_completed', false)
-    .eq('is_archived', false)
-    .lt('date', todayIsoDate)
-    .or(`snooze_until.is.null,snooze_until.lte.${todayIsoDate}`)
-    .order('created_at', { ascending: true })
-    .limit(MAX_BLACK_BOX_PREVIEW_COUNT);
-
-  if (blackBoxWatermarkError) {
-    return summaryResponse(responseHeaders, 500, {
-      error: 'Failed to load black box watermark',
-      code: 'BLACK_BOX_WATERMARK_FAILED',
-      degradedReasons: ['black-box-watermark-failed'],
-      capabilities: publicCapabilities,
-      warnings: ['open-app-to-finish-setup'],
-    });
-  }
-
   const focusTask = primarySlot?.taskId ? taskMap.get(primarySlot.taskId) ?? null : null;
   const focusProjectId = focusTask?.project_id ?? primarySlot?.sourceProjectId ?? null;
   const focusProject = focusProjectId ? projectMap.get(focusProjectId) ?? null : null;
   const hasRenderableFocusTarget = isRenderableFocusSlot(primarySlot);
-  const blackBoxPreviewRows = (blackBoxPreviewRowsData ?? []) as BlackBoxRow[];
   const missingBlackBoxProjectIds = [...new Set(
     blackBoxPreviewRows
       .map(row => row.project_id)
@@ -1143,7 +1060,9 @@ Deno.serve(async (req: Request) => {
       projectId,
       projectTitle: projectId ? projectMap.get(projectId)?.title ?? null : null,
       content,
+      isRead: row.is_read === true,
       createdAt: normalizeIsoTimestamp(row.created_at ?? null),
+      updatedAt: normalizeIsoTimestamp(row.updated_at ?? null),
       valid: content !== null,
     };
   });
@@ -1152,7 +1071,9 @@ Deno.serve(async (req: Request) => {
     projectId: null,
     projectTitle: null,
     content: null,
+    isRead: false,
     createdAt: null,
+    updatedAt: null,
     valid: false,
   };
   // 2026-04-19 inline 任务兼容：dock 里的 inline/dock-created 任务（sourceBlockType=text、

@@ -134,6 +134,17 @@
                 <action android:name="android.intent.action.USER_PRESENT" />
             </intent-filter>
 
+            <!--
+                2026-04-22 根因修复：APK 升级（含 widget layout 结构变化）后，launcher 只会调用
+                RemoteViews.reapply（经由 partiallyUpdateAppWidget），不会重新 inflate hostView。
+                因此旧 view 树里不存在的新增 View ID（如 nano_widget_footer_label）永远不可见。
+                监听 MY_PACKAGE_REPLACED 在升级瞬间对所有 widgetId 走非 partial 的 updateAppWidget，
+                强制 hostView 用最新 layout 重新 inflate，破冰一次即可。
+            -->
+            <intent-filter>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+
             <meta-data
                 android:name="android.appwidget.provider"
                 android:resource="@xml/nanoflow_focus_widget_info" />

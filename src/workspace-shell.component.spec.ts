@@ -433,6 +433,7 @@ describe('WorkspaceShellComponent Android widget bootstrap', () => {
         entry: 'twa',
         intent: 'open-focus-tools',
         rawIntent: 'open-focus-tools',
+        widgetGateEntryId: null,
       });
     } finally {
       window.sessionStorage.removeItem('nanoflow.android-widget-bootstrap');
@@ -2047,13 +2048,15 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
     (WorkspaceShellComponent.prototype as unknown as {
       applyStartupEntryIntent: (this: WorkspaceShellComponent, startupEntryIntent: {
         entry: 'shortcut' | 'widget' | 'twa';
-        intent: 'open-focus-tools' | 'open-blackbox-recorder' | 'open-workspace' | null;
+        intent: 'open-focus-tools' | 'open-blackbox-recorder' | 'open-workspace' | 'mark-gate-read' | 'mark-gate-complete' | null;
         rawIntent: string | null;
+        widgetGateEntryId: string | null;
       }) => void;
     }).applyStartupEntryIntent.call(context, {
       entry: 'shortcut',
       intent: 'open-blackbox-recorder',
       rawIntent: 'open-blackbox-recorder',
+      widgetGateEntryId: null,
     });
 
     expect(setSidebarOpen).toHaveBeenCalledWith(true);

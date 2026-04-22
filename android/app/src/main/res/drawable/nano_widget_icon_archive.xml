@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 蓝图线稿：备选区（档案盒）图标 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="18dp"
+    android:height="18dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:strokeColor="#F6FBFF"
+        android:strokeWidth="1.4"
+        android:fillColor="#00000000"
+        android:pathData="M3,7 L21,7 L21,10 L3,10 Z" />
+    <path
+        android:strokeColor="#F6FBFF"
+        android:strokeWidth="1.4"
+        android:fillColor="#00000000"
+        android:pathData="M5,10 L5,20 L19,20 L19,10" />
+    <path
+        android:strokeColor="#F6FBFF"
+        android:strokeWidth="1.4"
+        android:fillColor="#00000000"
+        android:pathData="M10,14 L14,14" />
+</vector>

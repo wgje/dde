@@ -22,7 +22,9 @@ data class WidgetGatePreview(
   val projectId: String? = null,
   val projectTitle: String? = null,
   val content: String? = null,
+  val isRead: Boolean = false,
   val createdAt: String? = null,
+  val updatedAt: String? = null,
   val valid: Boolean = false,
 )
 
@@ -140,6 +142,8 @@ data class WidgetRenderModel(
   val showSetup: Boolean,
   val showAuthRequired: Boolean,
   val showUntrusted: Boolean,
+  /** 当前渲染到大门主卡上的条目 ID；null 表示当前没有可直接执行已读/完成的具体条目。 */
+  val displayedGateEntryId: String? = null,
   /** 主任务 + 副任务 的聚合列表（主任务始终排在首位）。空列表表示无任务。 */
   val tasks: List<WidgetTaskCard> = emptyList(),
   /** 当前 widget 实例选中的 tab 下标，范围 [0, tasks.lastIndex]。 */
@@ -154,6 +158,11 @@ data class WidgetContentCard(
   val eyebrow: String? = null,
   val title: String,
   val subtitle: String? = null,
+  val metaStart: String? = null,
+  val metaEnd: String? = null,
+  val interactionHint: String? = null,
+  /** 标记此卡片为大门空状态（E 图）——Factory 应切换为 🚪 图标并隐藏 创建/已读 元信息。 */
+  val isGateEmptyState: Boolean = false,
 )
 
 /**
@@ -164,5 +173,6 @@ data class WidgetTaskCard(
   val taskId: String?,
   val title: String,
   val projectTitle: String?,
+  val estimatedMinutes: Int? = null,
   val isMain: Boolean,
 )

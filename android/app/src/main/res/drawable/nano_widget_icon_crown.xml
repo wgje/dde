@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 蓝图线稿：皇冠（主任务）图标 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="28dp"
+    android:height="28dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:strokeColor="#F6FBFF"
+        android:strokeWidth="1.5"
+        android:fillColor="#00000000"
+        android:pathData="M3,9 L7,15 L12,6 L17,15 L21,9 L19,19 L5,19 Z" />
+    <path
+        android:strokeColor="#F6FBFF"
+        android:strokeWidth="1.5"
+        android:fillColor="#00000000"
+        android:pathData="M6,22 L18,22" />
+    <path
+        android:fillColor="#F6FBFF"
+        android:pathData="M3,9 A1.2,1.2 0 1,1 2.99,9 Z" />
+    <path
+        android:fillColor="#F6FBFF"
+        android:pathData="M12,6 A1.2,1.2 0 1,1 11.99,6 Z" />
+    <path
+        android:fillColor="#F6FBFF"
+        android:pathData="M21,9 A1.2,1.2 0 1,1 20.99,9 Z" />
+</vector>

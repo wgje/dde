@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 蓝图线稿：横向虚线分隔（用 VectorDrawable 显式绘制短线段，保证 RemoteViews 下稳定渲染） -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="200dp"
+    android:height="1dp"
+    android:viewportWidth="200"
+    android:viewportHeight="1">
+    <path
+        android:strokeColor="#88FFFFFF"
+        android:strokeWidth="1"
+        android:fillColor="#00000000"
+        android:pathData="M0,0.5 L4,0.5 M8,0.5 L12,0.5 M16,0.5 L20,0.5 M24,0.5 L28,0.5 M32,0.5 L36,0.5 M40,0.5 L44,0.5 M48,0.5 L52,0.5 M56,0.5 L60,0.5 M64,0.5 L68,0.5 M72,0.5 L76,0.5 M80,0.5 L84,0.5 M88,0.5 L92,0.5 M96,0.5 L100,0.5 M104,0.5 L108,0.5 M112,0.5 L116,0.5 M120,0.5 L124,0.5 M128,0.5 L132,0.5 M136,0.5 L140,0.5 M144,0.5 L148,0.5 M152,0.5 L156,0.5 M160,0.5 L164,0.5 M168,0.5 L172,0.5 M176,0.5 L180,0.5 M184,0.5 L188,0.5 M192,0.5 L196,0.5" />
+</vector>

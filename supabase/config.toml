@@ -17,6 +17,9 @@ verify_jwt = false
 [functions.widget-notify]
 verify_jwt = false
 
+[functions.widget-black-box-action]
+verify_jwt = false
+
 # 详细说明：
 # - 默认情况下，Supabase Edge Functions 会在网关层验证 JWT
 # - 如果 JWT 无效，请求会返回 401，不会到达你的函数代码

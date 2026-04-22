@@ -20,6 +20,7 @@ import java.time.format.DateTimeFormatter
 
 class NanoflowWidgetRepository(private val context: Context) {
   private val clockFormatter = DateTimeFormatter.ofPattern("HH:mm")
+  private val shortDateFormatter = DateTimeFormatter.ofPattern("MM-dd")
   private val bootstrapTtlMs = 15 * 60 * 1000L
   private val registeredPushTokenRepairIntervalMs = 24 * 60 * 60 * 1000L
   private val pushTokenRepairDegradedReason = "push-token-missing"
@@ -56,6 +57,8 @@ class NanoflowWidgetRepository(private val context: Context) {
     appWidgetId: Int,
     preferredEntrySource: NanoFlowEntrySource,
     launchIntent: NanoFlowLaunchIntent,
+    requestedTaskIndex: Int = -1,
+    gateEntryId: String? = null,
   ): Uri {
     val bridgeContext = if (shouldBootstrap(appWidgetId)) {
       buildBridgeContext(appWidgetId)
@@ -63,7 +66,9 @@ class NanoflowWidgetRepository(private val context: Context) {
       null
     }
     val entrySource = if (bridgeContext != null) NanoFlowEntrySource.TWA else preferredEntrySource
-    val contextualEntryUrl = store.readSummary(appWidgetId)?.entryUrl
+    val summary = store.readSummary(appWidgetId)
+    val contextualEntryUrl = resolveSelectedTaskEntryUrl(summary, requestedTaskIndex)
+      ?: summary?.entryUrl
     val contextualLaunchUri = resolveSummaryLaunchUri(contextualEntryUrl)
 
     if (bridgeContext == null && launchIntent == NanoFlowLaunchIntent.OPEN_WORKSPACE && contextualLaunchUri != null) {
@@ -89,6 +94,7 @@ class NanoflowWidgetRepository(private val context: Context) {
       launchIntent = launchIntent,
       bridgeContext = bridgeContext,
       routeUrl = contextualEntryUrl.takeIf { contextualLaunchUri != null },
+      gateEntryId = gateEntryId,
     )
   }
 
@@ -363,6 +369,154 @@ class NanoflowWidgetRepository(private val context: Context) {
     for (appWidgetId in appWidgetIds) {
       refreshSummary(appWidgetId)
     }
+  }
+
+  /**
+   * 2026-04-22 颠覆性压缩：根据 FCM data payload 携带的 focusActiveHint 对每个已安装的
+   * appWidget 的缓存 summary 做乐观内联。返回被改动过的 appWidgetId 列表，以便上层立即触发渲染
+   * （而无需等 widget-summary 边缘函数回环，节省 ~5s）。
+   *
+   * 设计口径：
+   * - 只修改 focus.active + focus.valid 两个字段，其它 focus slot 元数据（title / projectId 等）
+   *   保持原值——因为 hint 只能告诉你「是否专注」，而不能告诉你「专注的是哪个任务」。
+   * - valid 的计算依赖于原来 title/taskId 是否存在；这里保守地复用旧 valid。
+   * - 若缓存中 focus.active 已经等于 hint，跳过以免写无用缓存引发 UI 闪烁。
+   * - 后续的 refreshSummary 仍会覆盖此乐观值，服务端答案永远是最终权威。
+   */
+  suspend fun applyFocusActiveHint(hintActive: Boolean): List<Int> {
+    val appWidgetManager = AppWidgetManager.getInstance(context)
+    val componentName = ComponentName(context, NanoflowWidgetReceiver::class.java)
+    val appWidgetIds = appWidgetManager.getAppWidgetIds(componentName)
+    val changed = mutableListOf<Int>()
+    val desiredValid = hintActive
+    for (appWidgetId in appWidgetIds) {
+      val cached = store.readSummary(appWidgetId) ?: continue
+      if (cached.focus.active == hintActive && cached.focus.valid == desiredValid) {
+        continue
+      }
+      // hint 口径下 valid 直接跟随 hint：
+      // - hint=true 时即便旧缓存没有可用 focus slot，也要先切到专注模式骨架；
+      // - hint=false 时立即撤回到 Gate 视图。
+      val patched = cached.copy(
+        focus = cached.focus.copy(
+          active = hintActive,
+          valid = desiredValid,
+        ),
+      )
+      store.saveSummary(appWidgetId, patched)
+      changed += appWidgetId
+    }
+    if (changed.isNotEmpty()) {
+      NanoflowWidgetTelemetry.info(
+        "widget_focus_hint_applied",
+        mapOf(
+          "hintActive" to hintActive,
+          "appWidgetIds" to changed.joinToString(","),
+        ),
+      )
+    }
+    return changed
+  }
+
+  /**
+   * 大门 1-tap 已读 / 完成：直接调用 widget-black-box-action 边缘函数把 black_box_entries
+   * 对应行的 is_read / is_completed 置为 true，而不启动 TWA。
+   *
+   * 返回值 == true 表示服务端成功 PATCH；失败时由调用方决定是否回退到深链路径。
+   *
+   * 设计口径：
+   * - 乐观缓存：服务端成功后，本地 summary 缓存中从 previews 列表里删除该 entry，
+   *   pendingCount 递减，以便 UI 立即反馈（避免等下一轮 widget-summary 回环）。
+   * - 不触发 refreshSummary：让调用方决定（避免一次点击触发两轮 HTTP 放大服务端压力）。
+   */
+  suspend fun markBlackBoxEntry(appWidgetId: Int, entryId: String, action: BlackBoxEntryAction): Boolean {
+    val binding = store.readBinding()
+    if (binding == null) {
+      NanoflowWidgetTelemetry.warn(
+        "widget_black_box_action_failure",
+        mapOf(
+          "appWidgetId" to appWidgetId,
+          "reason" to "binding-missing",
+          "action" to action.wireValue,
+        ),
+      )
+      return false
+    }
+
+    val escapedEntryId = entryId.replace("\\", "\\\\").replace("\"", "\\\"")
+    val requestBody = "{\"entryId\":\"$escapedEntryId\",\"action\":\"${action.wireValue}\"}"
+
+    val response = runCatching {
+      postJson(
+        url = "${resolveWidgetSupabaseUrl()}/functions/v1/widget-black-box-action",
+        bearerToken = binding.widgetToken,
+        body = requestBody,
+      )
+    }.getOrElse { error ->
+      NanoflowWidgetTelemetry.warn(
+        "widget_black_box_action_failure",
+        mapOf(
+          "appWidgetId" to appWidgetId,
+          "entryId" to NanoflowWidgetTelemetry.redactId(entryId),
+          "action" to action.wireValue,
+          "reason" to "transport-failed",
+        ),
+        error,
+      )
+      return false
+    }
+
+    if (response.statusCode !in 200..299) {
+      NanoflowWidgetTelemetry.warn(
+        "widget_black_box_action_failure",
+        mapOf(
+          "appWidgetId" to appWidgetId,
+          "entryId" to NanoflowWidgetTelemetry.redactId(entryId),
+          "action" to action.wireValue,
+          "reason" to "http-${response.statusCode}",
+        ),
+      )
+      return false
+    }
+
+    // 乐观缓存更新：从 previews / gatePreview 中移除该 entry，pendingCount 递减。
+    val cached = store.readSummary(appWidgetId)
+    if (cached != null) {
+      val previews = cached.blackBox.previews
+      val indexOfTarget = previews.indexOfFirst { it.entryId == entryId }
+      if (indexOfTarget >= 0) {
+        val newPreviews = previews.toMutableList().also { it.removeAt(indexOfTarget) }
+        val newGatePreview = if (cached.blackBox.gatePreview.entryId == entryId) {
+          newPreviews.firstOrNull() ?: WidgetGatePreview()
+        } else {
+          cached.blackBox.gatePreview
+        }
+        val newPending = (cached.blackBox.pendingCount - 1).coerceAtLeast(0)
+        val patched = cached.copy(
+          blackBox = cached.blackBox.copy(
+            pendingCount = newPending,
+            previews = newPreviews,
+            gatePreview = newGatePreview,
+          ),
+        )
+        store.saveSummary(appWidgetId, patched)
+        // 选中 entryId 若是刚被删除的条目，切换到新的 previews 顶部（如无则清空）。
+        val selected = store.readGateSelectedEntryId(appWidgetId)
+        if (selected == entryId) {
+          store.persistGateSelectedEntryId(appWidgetId, newPreviews.firstOrNull()?.entryId)
+        }
+      }
+    }
+
+    NanoflowWidgetTelemetry.info(
+      "widget_black_box_action_success",
+      mapOf(
+        "appWidgetId" to appWidgetId,
+        "entryId" to NanoflowWidgetTelemetry.redactId(entryId),
+        "action" to action.wireValue,
+      ),
+    )
+    return true
   }
 
   suspend fun refreshSummary(appWidgetId: Int): WidgetSummaryResponse {
@@ -671,14 +825,28 @@ class NanoflowWidgetRepository(private val context: Context) {
     val statusBadge = buildStatusBadge(summary)
     val privacyMode = store.isPrivacyModeEnabled()
     val gateEntries = resolveRenderableGateEntries(summary, privacyMode)
+    val renderableDockCount = countRenderableDockCandidates(summary)
     val hasFocusState = summary.focus.active == true && summary.focus.valid
     val showCounts = summary.dock.count > 0 || summary.blackBox.pendingCount > 0
-    val isGateMode = !hasFocusState && (gateEntries.isNotEmpty() || summary.blackBox.pendingCount > 0)
+    // 2026-04-22 大门逻辑完善：
+    //   * 非空大门 = `!focus && (gateEntries 非空 或 pendingCount>0)` → 整卡点击不进入项目（OPEN_FOCUS_TOOLS），
+    //     仅 已读/完成 双按钮通过深链直通 mark-gate-read/complete 改写黑匣子状态。
+    //   * 空大门（全部已读/完成清空后）= `!focus && gateEntries.isEmpty() && pendingCount==0` →
+    //     渲染空状态大卡（🚪 + 暂无未完成任务 + 点击进入项目），整卡点击走 OPEN_WORKSPACE。
+    //   * 专注模式所有任务完成时，服务端需将 focus.active=false（此处依赖后端信号）；
+    //     当 focus 不再 active 且无黑匣子时走空大门路径，视觉上自动切换到大门视图。
+    val isGateEmpty = !hasFocusState && gateEntries.isEmpty() && summary.blackBox.pendingCount == 0
+    val isGateMode = !hasFocusState && (gateEntries.isNotEmpty() || summary.blackBox.pendingCount > 0 || isGateEmpty)
     val metricsLine = buildMetricsLine(summary)
 
     if (isGateMode) {
-      val gateContentCards = buildGateContentCards(summary, gateEntries, privacyMode)
+      val gateContentCards = if (isGateEmpty) buildGateEmptyContentCards()
+        else buildGateContentCards(summary, gateEntries, privacyMode)
       val primaryGateCard = gateContentCards.firstOrNull()
+      val displayedGateEntryId = gateEntries.firstOrNull()?.entryId?.takeIf { it.isNotBlank() }
+      // 空大门点击 = 进入项目（OPEN_WORKSPACE）；非空大门点击 = 打开 Focus Tools，阻止误入项目。
+      val rootPrimaryAction = if (isGateEmpty) WidgetPrimaryAction.OPEN_WORKSPACE
+        else WidgetPrimaryAction.OPEN_FOCUS_TOOLS
       return WidgetRenderModel(
         modeLabel = context.getString(R.string.nanoflow_widget_gate_label),
         statusBadge = statusBadge,
@@ -686,10 +854,12 @@ class NanoflowWidgetRepository(private val context: Context) {
         supportingLine = primaryGateCard?.subtitle,
         metricsLine = if (showCounts) metricsLine else null,
         statusLine = statusLine,
-        primaryActionLabel = context.getString(R.string.nanoflow_widget_open_gate),
-        primaryAction = WidgetPrimaryAction.OPEN_FOCUS_TOOLS,
+        primaryActionLabel = context.getString(
+          if (isGateEmpty) R.string.nanoflow_widget_open_app else R.string.nanoflow_widget_open_gate,
+        ),
+        primaryAction = rootPrimaryAction,
         tone = WidgetVisualTone.GATE,
-        dockCount = summary.dock.count,
+        dockCount = renderableDockCount,
         blackBoxCount = summary.blackBox.pendingCount,
         showStatCards = false,
         isGateMode = true,
@@ -702,6 +872,7 @@ class NanoflowWidgetRepository(private val context: Context) {
         showSetup = false,
         showAuthRequired = false,
         showUntrusted = false,
+        displayedGateEntryId = displayedGateEntryId,
         contentCards = gateContentCards,
         syncBadgeLabel = buildCompactSyncBadge(summary, appWidgetId),
       )
@@ -768,7 +939,7 @@ class NanoflowWidgetRepository(private val context: Context) {
       ),
       primaryAction = WidgetPrimaryAction.OPEN_WORKSPACE,
       tone = WidgetVisualTone.FOCUS,
-      dockCount = summary.dock.count,
+      dockCount = renderableDockCount,
       blackBoxCount = summary.blackBox.pendingCount,
       showStatCards = false,
       isGateMode = !hasFocusState,
@@ -790,6 +961,7 @@ class NanoflowWidgetRepository(private val context: Context) {
 
   /**
    * 聚合主任务（来自 focus.*）与副任务（来自 dock.items），主任务始终在索引 0。
+   * C 位严格限制为 4 个插槽：1 个主任务 + 最多 3 个副任务，其余只进入备选区计数。
    * 隐私模式下标题用占位符避免信息泄露。
    */
   private fun buildTaskCards(
@@ -812,29 +984,46 @@ class NanoflowWidgetRepository(private val context: Context) {
         taskId = summary.focus.taskId,
         title = mainTitle,
         projectTitle = if (privacyMode) null else summary.focus.projectTitle,
+        estimatedMinutes = summary.focus.remainingMinutes,
         isMain = true,
       )
     )
     val mainTaskId = summary.focus.taskId
-    summary.dock.items.forEach { item ->
+    var secondaryCount = 0
+    for (item in summary.dock.items) {
+      if (secondaryCount >= 3) break
       // 之前用 `if (!item.valid) return@forEach` 强过滤会导致后端因任务行未在 taskMap 命中
       // （RLS/子查询时序）返回 valid=false 的有效 dock 任务被全部隐藏，用户实际上有 6 个备选
       // 任务却只看到「主」一个 chip。这里改为：只要 taskId 非空且有标题就纳入展示，valid=false
       // 仅作为后端可能存在数据漂移的弱信号，不应阻断 UI。
       val itemTaskId = item.taskId
-      if (itemTaskId.isNullOrBlank()) return@forEach
-      if (mainTaskId != null && itemTaskId == mainTaskId) return@forEach
+      if (itemTaskId.isNullOrBlank()) continue
+      if (mainTaskId != null && itemTaskId == mainTaskId) continue
       cards.add(
         WidgetTaskCard(
           taskId = itemTaskId,
           title = if (privacyMode) context.getString(R.string.nanoflow_widget_privacy_focus_title)
           else item.title?.takeIf { it.isNotBlank() } ?: context.getString(R.string.nanoflow_widget_unknown_task),
           projectTitle = if (privacyMode) null else item.projectTitle,
+          estimatedMinutes = item.estimatedMinutes,
           isMain = false,
         )
       )
+      secondaryCount += 1
     }
     return cards
+  }
+
+  private fun countRenderableDockCandidates(summary: WidgetSummaryResponse): Int {
+    val mainTaskId = summary.focus.taskId
+    var count = 0
+    summary.dock.items.forEach { item ->
+      val itemTaskId = item.taskId
+      if (itemTaskId.isNullOrBlank()) return@forEach
+      if (mainTaskId != null && itemTaskId == mainTaskId) return@forEach
+      count += 1
+    }
+    return count
   }
 
   private fun buildTaskContentCards(taskCards: List<WidgetTaskCard>): List<WidgetContentCard> {
@@ -847,6 +1036,14 @@ class NanoflowWidgetRepository(private val context: Context) {
         },
         title = card.title,
         subtitle = card.projectTitle,
+        metaStart = context.getString(R.string.nanoflow_widget_focus_slot_position, index + 1),
+        metaEnd = card.estimatedMinutes?.let {
+          context.getString(R.string.nanoflow_widget_minutes_short, it)
+        } ?: context.getString(
+          if (card.isMain) R.string.nanoflow_widget_focus_slot_main
+          else R.string.nanoflow_widget_focus_slot_secondary,
+        ),
+        interactionHint = context.getString(R.string.nanoflow_widget_focus_switch_hint),
       )
     }
   }
@@ -856,24 +1053,17 @@ class NanoflowWidgetRepository(private val context: Context) {
     gateEntries: List<WidgetGatePreview>,
     privacyMode: Boolean,
   ): List<WidgetContentCard> {
-    if (gateEntries.isEmpty()) {
+    // privacy 隐藏了明细但仍有 pendingCount > 0：回退到聚合卡片（仍视为非空大门）。
+    if (gateEntries.isEmpty() && summary.blackBox.pendingCount > 0) {
       return listOf(
         WidgetContentCard(
           eyebrow = context.getString(R.string.nanoflow_widget_gate_label),
-          title = if (summary.blackBox.pendingCount > 0) {
-            context.getString(R.string.nanoflow_widget_gate_pending_detail)
-          } else {
-            context.getString(R.string.nanoflow_widget_gate_empty_title)
-          },
-          subtitle = if (summary.blackBox.pendingCount > 0) {
-            context.getString(R.string.nanoflow_widget_content_pending_count, summary.blackBox.pendingCount)
-          } else {
-            context.getString(R.string.nanoflow_widget_gate_empty_detail)
-          },
+          title = context.getString(R.string.nanoflow_widget_gate_pending_detail),
+          subtitle = context.getString(R.string.nanoflow_widget_content_pending_count, summary.blackBox.pendingCount),
+          interactionHint = context.getString(R.string.nanoflow_widget_gate_entry_hint),
         )
       )
     }
-
     return gateEntries.mapIndexed { index, preview ->
       WidgetContentCard(
         eyebrow = context.getString(
@@ -887,13 +1077,31 @@ class NanoflowWidgetRepository(private val context: Context) {
           preview.content?.trim()?.takeIf { it.isNotBlank() }
             ?: context.getString(R.string.nanoflow_widget_gate_pending_detail)
         },
-        subtitle = if (privacyMode) {
-          preview.projectTitle?.takeIf { it.isNotBlank() }
-        } else {
-          buildGateSupportingLine(preview)
-        },
+        subtitle = preview.projectTitle?.takeIf { it.isNotBlank() },
+        metaStart = buildCreatedDateLabel(preview.createdAt),
+        metaEnd = buildGateReviewStateLabel(preview),
+        interactionHint = context.getString(
+          if (preview.isRead) R.string.nanoflow_widget_gate_repeat_hint
+          else R.string.nanoflow_widget_gate_entry_hint,
+        ),
       )
     }
+  }
+
+  /**
+   * 空大门状态卡片（E 图）：🚪 + 暂无未完成任务 + 点击进入项目。
+   * Factory 在渲染时会检查 `isGateEmptyState` 以切换图标为 nano_widget_icon_door 并隐藏创建/已读元信息。
+   */
+  private fun buildGateEmptyContentCards(): List<WidgetContentCard> {
+    return listOf(
+      WidgetContentCard(
+        eyebrow = context.getString(R.string.nanoflow_widget_gate_label),
+        title = context.getString(R.string.nanoflow_widget_gate_empty_title),
+        subtitle = context.getString(R.string.nanoflow_widget_gate_empty_detail),
+        interactionHint = context.getString(R.string.nanoflow_widget_gate_empty_hint),
+        isGateEmptyState = true,
+      )
+    )
   }
 
   /** 紧凑版同步徽章：「刚刚」「N 分前」「较旧」。 */
@@ -1040,6 +1248,33 @@ class NanoflowWidgetRepository(private val context: Context) {
     return parts.takeIf { it.isNotEmpty() }?.joinToString("  ·  ")
   }
 
+  private fun buildCreatedDateLabel(value: String?): String? {
+    val instant = runCatching { Instant.parse(value) }.getOrNull() ?: return null
+    val label = shortDateFormatter.format(instant.atZone(ZoneId.systemDefault()))
+    return context.getString(R.string.nanoflow_widget_gate_created, label)
+  }
+
+  private fun buildRelativeAgeLabel(value: String?): String? {
+    val instant = runCatching { Instant.parse(value) }.getOrNull() ?: return null
+    val minutes = Duration.between(instant, Instant.now()).toMinutes().coerceAtLeast(0)
+    return when {
+      minutes <= 1 -> context.getString(R.string.nanoflow_widget_recently)
+      minutes < 60 -> context.getString(R.string.nanoflow_widget_relative_minutes, minutes)
+      minutes < 1440 -> context.getString(R.string.nanoflow_widget_relative_hours, minutes / 60)
+      else -> context.getString(R.string.nanoflow_widget_relative_days, minutes / 1440)
+    }
+  }
+
+  private fun buildGateReviewStateLabel(preview: WidgetGatePreview): String {
+    if (!preview.isRead) {
+      return context.getString(R.string.nanoflow_widget_gate_review_pending)
+    }
+    val relative = buildRelativeAgeLabel(preview.updatedAt)
+      ?: buildRelativeAgeLabel(preview.createdAt)
+      ?: context.getString(R.string.nanoflow_widget_recently)
+    return context.getString(R.string.nanoflow_widget_gate_review_read, relative)
+  }
+
   private fun buildGateSupportingLine(preview: WidgetGatePreview): String {
     val parts = mutableListOf<String>()
 
@@ -1047,7 +1282,8 @@ class NanoflowWidgetRepository(private val context: Context) {
       ?.takeIf { it.isNotBlank() }
       ?.let(parts::add)
 
-    buildPreviewTimeLabel(preview.createdAt)?.let(parts::add)
+    buildCreatedDateLabel(preview.createdAt)?.let(parts::add)
+    buildGateReviewStateLabel(preview).let(parts::add)
 
     return parts.takeIf { it.isNotEmpty() }?.joinToString("  ·  ")
       ?: context.getString(R.string.nanoflow_widget_gate_pending_detail)
@@ -1333,6 +1569,58 @@ class NanoflowWidgetRepository(private val context: Context) {
     if (stream == null) return ""
 
     return BufferedReader(InputStreamReader(stream)).use { it.readText() }
+  }
+
+  private fun resolveSelectedTaskEntryUrl(
+    summary: WidgetSummaryResponse?,
+    requestedTaskIndex: Int,
+  ): String? {
+    if (summary == null || requestedTaskIndex < 0) {
+      return null
+    }
+
+    val routeCandidates = mutableListOf<String>()
+    val focusProjectId = summary.focus.projectId?.takeIf { it.isNotBlank() }
+    val focusTaskId = summary.focus.taskId?.takeIf { it.isNotBlank() }
+    if (summary.focus.valid) {
+      routeCandidates += when {
+        focusProjectId != null && focusTaskId != null -> buildTaskEntryUrl(focusProjectId, focusTaskId)
+        focusProjectId != null -> buildProjectEntryUrl(focusProjectId)
+        else -> buildWorkspaceEntryUrl()
+      }
+    }
+
+    val mainTaskId = summary.focus.taskId
+    var secondaryCount = 0
+    for (item in summary.dock.items) {
+      if (secondaryCount >= 3) break
+      val itemTaskId = item.taskId?.takeIf { it.isNotBlank() } ?: continue
+      if (mainTaskId != null && itemTaskId == mainTaskId) continue
+      val projectId = item.projectId?.takeIf { it.isNotBlank() }
+      routeCandidates += if (projectId != null) {
+        buildTaskEntryUrl(projectId, itemTaskId)
+      } else {
+        buildWorkspaceEntryUrl()
+      }
+      secondaryCount += 1
+    }
+
+    return routeCandidates.getOrNull(requestedTaskIndex)
+  }
+
+  private fun buildTaskEntryUrl(projectId: String, taskId: String): String {
+    val encodedProjectId = Uri.encode(projectId)
+    val encodedTaskId = Uri.encode(taskId)
+    return "./#/projects/$encodedProjectId/task/$encodedTaskId?entry=widget&intent=open-workspace"
+  }
+
+  private fun buildProjectEntryUrl(projectId: String): String {
+    val encodedProjectId = Uri.encode(projectId)
+    return "./#/projects/$encodedProjectId?entry=widget&intent=open-workspace"
+  }
+
+  private fun buildWorkspaceEntryUrl(): String {
+    return "./#/projects?entry=widget&intent=open-workspace"
   }
 
   private data class HttpResponse(
