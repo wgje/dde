@@ -427,7 +427,53 @@ export class RemoteChangeHandlerService {
 
             const remoteTask = remoteProject.tasks.find(t => t.id === taskId);
             if (!remoteTask) {
-              this.logger.warn('远程项目中未找到任务', { taskId, totalTasks: remoteProject.tasks.length });
+              // 【根因修复 2026-04-23】
+              // 远程 INSERT/UPDATE 事件抵达后，任务在拉取完整项目前已被删除/迁移。
+              // 此前仅 warn 不收敛，会导致本地保留"幽灵任务"直到下次全量刷新。
+              //
+              // 三类情形分别处理：
+              // 1) 任务已进入 tombstone（硬删除）：权威 DELETE，立即清理本地。
+              // 2) 本地存在新近的待同步变更（如刚创建未推送）：保留本地，避免把
+              //    本地领先的写入误删，仅以 debug 级别记录竞态。
+              // 3) 其他情况（任务在远端项目中已不复存在）：按 DELETE 收敛本地状态。
+              const tombstoneIds = await this.syncCoordinator.getTombstoneIds(targetProjectId);
+              const isTombstoned = tombstoneIds.has(taskId);
+              const pendingLocal = this.changeTracker.getPendingChange(
+                targetProjectId,
+                'task',
+                taskId,
+                SYNC_CONFIG.DIRTY_PROTECTION_WINDOW_MS
+              );
+
+              if (!isTombstoned && pendingLocal && pendingLocal.changeType !== 'delete') {
+                this.logger.debug('远程项目中暂未见任务，但本地存在待同步变更，保留本地状态', {
+                  taskId,
+                  projectId: targetProjectId,
+                  pendingType: pendingLocal.changeType,
+                  totalTasks: remoteProject.tasks.length
+                });
+                return;
+              }
+
+              this.logger.info('远程任务已不在项目中，按删除收敛本地状态', {
+                taskId,
+                projectId: targetProjectId,
+                reason: isTombstoned ? 'tombstoned' : 'missing',
+                totalTasks: remoteProject.tasks.length
+              });
+
+              this.undoService.clearTaskHistory(taskId, targetProjectId);
+              this.projectState.updateProjects(projects =>
+                projects.map(p => {
+                  if (p.id !== targetProjectId) return p;
+                  if (!p.tasks.some(t => t.id === taskId)) return p;
+                  const updatedProject = {
+                    ...p,
+                    tasks: p.tasks.filter(t => t.id !== taskId)
+                  };
+                  return this.syncCoordinator.validateAndRebalance(updatedProject);
+                })
+              );
               return;
             }
             

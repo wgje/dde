@@ -320,6 +320,7 @@ export class TaskMoveService {
       }
 
       const oldStage = target.stage;
+      const oldParentId = target.parentId;
       target.stage = newStage;
       
       // parentId 验证与清理逻辑
@@ -357,7 +358,14 @@ export class TaskMoveService {
       }
       target.rank = placed.rank;
 
-      return this.layoutService.rebalance({ ...p, tasks });
+      const connections = this.subtreeOps.updateParentChildConnections(
+        taskId,
+        oldParentId,
+        target.parentId,
+        p.connections,
+      );
+
+      return this.layoutService.rebalance({ ...p, tasks, connections });
     });
     
     return operationResult;

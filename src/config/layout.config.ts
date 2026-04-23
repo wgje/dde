@@ -61,6 +61,28 @@ export const LAYOUT_CONFIG = {
    * 防止浮点噪声下的无限循环；单位与跨距权重一致（affinity * |Δpos|）。
    */
   AUTO_LAYOUT_TWO_OPT_IMPROVEMENT_EPSILON: 0.5,
+  /**
+   * 【补丁 A 2026-04-23】是否启用 GoJS AvoidsLinksRouter（vendored）。
+   * 作用：对 isOrthogonal 的 link 自动分离重叠的并行段，降低线条"挤成一坨"的视觉混乱。
+   * 重要：router 仅对 `link.isOrthogonal === true` 的连线生效（源码 isRoutable 校验）。
+   *   当前 cross-tree link template 使用 Bezier + routing:Normal，本开关默认关闭；
+   *   要真正生效需配合把 cross-tree link routing 切到 go.Link.Orthogonal。
+   * 默认 false：装入基础设施但不改变现有视觉，方便未来灰度。
+   */
+  AUTO_LAYOUT_ENABLE_AVOIDS_LINKS_ROUTER: false,
+  /**
+   * 【补丁 A 2026-04-23】AvoidsLinksRouter 的 linkSpacing（像素）。
+   * 并行段之间的目标间距，若 avoidsNodes=true 则是最大允许距离。
+   * GoJS 默认 4；对于本项目 140px ROW_SPACING、11px label 场景，6-8px 较合适。
+   */
+  AUTO_LAYOUT_ROUTER_LINK_SPACING_PX: 6,
+  /**
+   * 【补丁 B 2026-04-23】是否在兄弟排序阶段启用局部 2-opt 交换优化。
+   * 在 barycenter sweep 之后对每对相邻兄弟子树做一次 swap 评估：
+   * 只要交换后 |pos - relationCenter| 之和严格更小就接受，
+   * 不引入 rank 倒置，保持业务顺序。pass 复杂度 O(k²)，k 为同父兄弟数。
+   */
+  AUTO_LAYOUT_ENABLE_SIBLING_TWO_OPT: true,
   /** 根任务基础 rank 值 */
   RANK_ROOT_BASE: 10000,
   /** rank 步进值 */

@@ -23,6 +23,11 @@ import {
   type WidgetPlatform,
   withPrivateNoStoreHeaders,
 } from '../_shared/widget-common.ts';
+import {
+  buildSummaryVersion,
+  buildSummaryVersionCursor,
+  isSummaryVersionRegressed,
+} from './summary-version.ts';
 
 interface WidgetDeviceRow {
   id: string;
@@ -458,6 +463,7 @@ function buildSummaryEnvelope(overrides: Record<string, unknown> = {}) {
     },
     blackBox: {
       pendingCount: 0,
+      unreadCount: 0,
       previews: [],
       gatePreview: {
         entryId: null,
@@ -494,35 +500,6 @@ function summaryResponse(
     }
   }
   return jsonResponse(buildSummaryEnvelope(overrides), responseHeaders, status);
-}
-
-function buildSummaryVersion(cursorAt: string | null, signature: string): string {
-  return `${cursorAt ?? 'none'}|${signature.slice(0, 24)}`;
-}
-
-function extractSummaryVersionTimestamp(version: string | null | undefined): number | null {
-  if (!version) return null;
-
-  const separatorIndex = version.indexOf('|');
-  const timestampPart = separatorIndex >= 0 ? version.slice(0, separatorIndex) : version;
-  if (timestampPart === 'none') return null;
-
-  const parsed = Date.parse(timestampPart);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-function isSummaryVersionRegressed(lastKnownVersion: string | undefined, currentVersion: string): boolean {
-  const lastKnownTimestamp = extractSummaryVersionTimestamp(lastKnownVersion);
-  if (lastKnownTimestamp === null) {
-    return false;
-  }
-
-  const currentTimestamp = extractSummaryVersionTimestamp(currentVersion);
-  if (currentTimestamp === null) {
-    return true;
-  }
-
-  return currentTimestamp < lastKnownTimestamp;
 }
 
 Deno.serve(async (req: Request) => {
@@ -913,7 +890,9 @@ Deno.serve(async (req: Request) => {
     focusSession: FocusSessionRow | null;
     accessibleProjectIds: string[];
     pendingBlackBoxCount: number;
+    unreadBlackBoxCount: number;
     blackBoxPreview: BlackBoxRow[];
+    blackBoxWatermark: string | null;
     dockCount: number;
     dockWatermark: string | null;
   }
@@ -921,7 +900,9 @@ Deno.serve(async (req: Request) => {
   const latestSession: FocusSessionRow | null = wave1.focusSession ?? null;
   const accessibleProjectIds: string[] = Array.isArray(wave1.accessibleProjectIds) ? wave1.accessibleProjectIds : [];
   const pendingBlackBoxCount: number = typeof wave1.pendingBlackBoxCount === 'number' ? wave1.pendingBlackBoxCount : 0;
+  const unreadBlackBoxCount: number = typeof wave1.unreadBlackBoxCount === 'number' ? wave1.unreadBlackBoxCount : pendingBlackBoxCount;
   const blackBoxPreviewRows: BlackBoxRow[] = Array.isArray(wave1.blackBoxPreview) ? wave1.blackBoxPreview : [];
+  const blackBoxWatermark = normalizeIsoTimestamp(wave1.blackBoxWatermark ?? null);
   const dockCountFromTasks: number = typeof wave1.dockCount === 'number' ? wave1.dockCount : 0;
   const dockTasksWatermark = normalizeIsoTimestamp(wave1.dockWatermark ?? null);
   const state = toFocusSessionState(latestSession?.session_state ?? null);
@@ -1115,15 +1096,15 @@ Deno.serve(async (req: Request) => {
     degradedReasons.push('dock-count-drift');
   }
 
-  const summaryVersionCursor = maxIsoTimestamp([
-    latestSession?.updated_at ?? null,
+  const summaryVersionCursor = buildSummaryVersionCursor({
+    latestSessionUpdatedAt: latestSession?.updated_at ?? null,
     dockTasksWatermark,
-    ...blackBoxPreviewRows.map(row => row.updated_at ?? null),
-    focusTask?.updated_at ?? null,
-    focusProject?.updated_at ?? null,
-    ...dockItems.map(item => item.taskUpdatedAt),
-    ...dockItems.map(item => item.projectUpdatedAt),
-  ]);
+    blackBoxWatermark,
+    focusTaskUpdatedAt: focusTask?.updated_at ?? null,
+    focusProjectUpdatedAt: focusProject?.updated_at ?? null,
+    dockTaskUpdatedAts: dockItems.map(item => item.taskUpdatedAt),
+    dockProjectUpdatedAts: dockItems.map(item => item.projectUpdatedAt),
+  });
 
   const cloudUpdatedAt = summaryVersionCursor;
   const ageMinutes = cloudUpdatedAt
@@ -1159,6 +1140,7 @@ Deno.serve(async (req: Request) => {
     },
     blackBox: {
       pendingCount: pendingBlackBoxCount ?? 0,
+      unreadCount: unreadBlackBoxCount ?? 0,
       previews: blackBoxPreviews,
       gatePreview,
     },
@@ -1205,6 +1187,7 @@ Deno.serve(async (req: Request) => {
     },
     blackBox: {
       pendingCount: pendingBlackBoxCount ?? 0,
+      unreadCount: unreadBlackBoxCount ?? 0,
       previews: blackBoxPreviews,
       gatePreview,
     },

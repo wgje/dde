@@ -18,6 +18,11 @@ import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
+data class WidgetBlackBoxOptimisticSnapshot(
+  val summary: WidgetSummaryResponse,
+  val selectedEntryId: String?,
+)
+
 class NanoflowWidgetRepository(private val context: Context) {
   private val clockFormatter = DateTimeFormatter.ofPattern("HH:mm")
   private val shortDateFormatter = DateTimeFormatter.ofPattern("MM-dd")
@@ -422,13 +427,88 @@ class NanoflowWidgetRepository(private val context: Context) {
    * 大门 1-tap 已读 / 完成：直接调用 widget-black-box-action 边缘函数把 black_box_entries
    * 对应行的 is_read / is_completed 置为 true，而不启动 TWA。
    *
-   * 返回值 == true 表示服务端成功 PATCH；失败时由调用方决定是否回退到深链路径。
+   * 返回值 == true 表示服务端成功 PATCH；本地乐观缓存由调用方在提交前处理。
    *
    * 设计口径：
-   * - 乐观缓存：服务端成功后，本地 summary 缓存中从 previews 列表里删除该 entry，
-   *   pendingCount 递减，以便 UI 立即反馈（避免等下一轮 widget-summary 回环）。
+   * - 本方法只负责远端提交；调用方负责在提交前先做本地乐观补丁并立即重绘。
    * - 不触发 refreshSummary：让调用方决定（避免一次点击触发两轮 HTTP 放大服务端压力）。
    */
+  suspend fun applyOptimisticBlackBoxAction(
+    appWidgetId: Int,
+    entryId: String,
+    action: BlackBoxEntryAction,
+  ): WidgetBlackBoxOptimisticSnapshot? {
+    val cached = store.readSummary(appWidgetId) ?: return null
+    val targetPreview = cached.blackBox.previews.firstOrNull { it.entryId == entryId }
+      ?: cached.blackBox.gatePreview.takeIf { it.entryId == entryId && it.valid }
+      ?: return null
+    val previousSelectedEntryId = store.readGateSelectedEntryId(appWidgetId)
+    val nowIso = Instant.now().toString()
+    val unreadDelta = if (!targetPreview.isRead) 1 else 0
+    val pendingDelta = if (action == BlackBoxEntryAction.COMPLETE) 1 else 0
+    val newPendingCount = (cached.blackBox.pendingCount - pendingDelta).coerceAtLeast(0)
+    val updatedPreview = if (action == BlackBoxEntryAction.READ) {
+      targetPreview.copy(
+        isRead = true,
+        updatedAt = nowIso,
+      )
+    } else {
+      null
+    }
+    val newPreviews = if (action == BlackBoxEntryAction.READ && updatedPreview != null) {
+      cached.blackBox.previews.map { preview ->
+        if (preview.entryId == entryId) updatedPreview else preview
+      }
+    } else {
+      cached.blackBox.previews.filterNot { it.entryId == entryId }
+    }
+    val nextPreview = newPreviews.firstOrNull { it.entryId != entryId }
+    val newGatePreview = if (cached.blackBox.gatePreview.entryId == entryId) {
+      nextPreview ?: updatedPreview ?: WidgetGatePreview()
+    } else {
+      cached.blackBox.gatePreview
+    }
+    val newUnreadCount = (resolveBlackBoxDisplayCount(cached) - unreadDelta)
+      .coerceAtLeast(0)
+      .coerceAtMost(newPendingCount)
+    val patched = cached.copy(
+      blackBox = cached.blackBox.copy(
+        pendingCount = newPendingCount,
+        unreadCount = newUnreadCount,
+        previews = newPreviews,
+        gatePreview = newGatePreview,
+      ),
+    )
+    store.saveSummary(appWidgetId, patched)
+    if (previousSelectedEntryId == entryId || previousSelectedEntryId.isNullOrBlank() || cached.blackBox.gatePreview.entryId == entryId) {
+      store.persistGateSelectedEntryId(appWidgetId, nextPreview?.entryId ?: updatedPreview?.entryId)
+    }
+
+    NanoflowWidgetTelemetry.info(
+      "widget_black_box_action_optimistic_applied",
+      mapOf(
+        "appWidgetId" to appWidgetId,
+        "entryId" to NanoflowWidgetTelemetry.redactId(entryId),
+        "action" to action.wireValue,
+        "pendingCount" to patched.blackBox.pendingCount,
+        "unreadCount" to resolveBlackBoxDisplayCount(patched),
+      ),
+    )
+
+    return WidgetBlackBoxOptimisticSnapshot(
+      summary = cached,
+      selectedEntryId = previousSelectedEntryId,
+    )
+  }
+
+  suspend fun rollbackOptimisticBlackBoxAction(
+    appWidgetId: Int,
+    snapshot: WidgetBlackBoxOptimisticSnapshot,
+  ) {
+    store.saveSummary(appWidgetId, snapshot.summary)
+    store.persistGateSelectedEntryId(appWidgetId, snapshot.selectedEntryId)
+  }
+
   suspend fun markBlackBoxEntry(appWidgetId: Int, entryId: String, action: BlackBoxEntryAction): Boolean {
     val binding = store.readBinding()
     if (binding == null) {
@@ -477,35 +557,6 @@ class NanoflowWidgetRepository(private val context: Context) {
         ),
       )
       return false
-    }
-
-    // 乐观缓存更新：从 previews / gatePreview 中移除该 entry，pendingCount 递减。
-    val cached = store.readSummary(appWidgetId)
-    if (cached != null) {
-      val previews = cached.blackBox.previews
-      val indexOfTarget = previews.indexOfFirst { it.entryId == entryId }
-      if (indexOfTarget >= 0) {
-        val newPreviews = previews.toMutableList().also { it.removeAt(indexOfTarget) }
-        val newGatePreview = if (cached.blackBox.gatePreview.entryId == entryId) {
-          newPreviews.firstOrNull() ?: WidgetGatePreview()
-        } else {
-          cached.blackBox.gatePreview
-        }
-        val newPending = (cached.blackBox.pendingCount - 1).coerceAtLeast(0)
-        val patched = cached.copy(
-          blackBox = cached.blackBox.copy(
-            pendingCount = newPending,
-            previews = newPreviews,
-            gatePreview = newGatePreview,
-          ),
-        )
-        store.saveSummary(appWidgetId, patched)
-        // 选中 entryId 若是刚被删除的条目，切换到新的 previews 顶部（如无则清空）。
-        val selected = store.readGateSelectedEntryId(appWidgetId)
-        if (selected == entryId) {
-          store.persistGateSelectedEntryId(appWidgetId, newPreviews.firstOrNull()?.entryId)
-        }
-      }
     }
 
     NanoflowWidgetTelemetry.info(
@@ -827,7 +878,8 @@ class NanoflowWidgetRepository(private val context: Context) {
     val gateEntries = resolveRenderableGateEntries(summary, privacyMode)
     val renderableDockCount = countRenderableDockCandidates(summary)
     val hasFocusState = summary.focus.active == true && summary.focus.valid
-    val showCounts = summary.dock.count > 0 || summary.blackBox.pendingCount > 0
+    val blackBoxDisplayCount = resolveBlackBoxDisplayCount(summary)
+    val showCounts = summary.dock.count > 0 || blackBoxDisplayCount > 0
     // 2026-04-22 大门逻辑完善：
     //   * 非空大门 = `!focus && (gateEntries 非空 或 pendingCount>0)` → 整卡点击不进入项目（OPEN_FOCUS_TOOLS），
     //     仅 已读/完成 双按钮通过深链直通 mark-gate-read/complete 改写黑匣子状态。
@@ -860,7 +912,7 @@ class NanoflowWidgetRepository(private val context: Context) {
         primaryAction = rootPrimaryAction,
         tone = WidgetVisualTone.GATE,
         dockCount = renderableDockCount,
-        blackBoxCount = summary.blackBox.pendingCount,
+        blackBoxCount = blackBoxDisplayCount,
         showStatCards = false,
         isGateMode = true,
         showGatePager = false,
@@ -1053,13 +1105,14 @@ class NanoflowWidgetRepository(private val context: Context) {
     gateEntries: List<WidgetGatePreview>,
     privacyMode: Boolean,
   ): List<WidgetContentCard> {
+    val blackBoxDisplayCount = resolveBlackBoxDisplayCount(summary)
     // privacy 隐藏了明细但仍有 pendingCount > 0：回退到聚合卡片（仍视为非空大门）。
     if (gateEntries.isEmpty() && summary.blackBox.pendingCount > 0) {
       return listOf(
         WidgetContentCard(
           eyebrow = context.getString(R.string.nanoflow_widget_gate_label),
           title = context.getString(R.string.nanoflow_widget_gate_pending_detail),
-          subtitle = context.getString(R.string.nanoflow_widget_content_pending_count, summary.blackBox.pendingCount),
+          subtitle = context.getString(R.string.nanoflow_widget_content_pending_count, blackBoxDisplayCount),
           interactionHint = context.getString(R.string.nanoflow_widget_gate_entry_hint),
         )
       )
@@ -1072,7 +1125,7 @@ class NanoflowWidgetRepository(private val context: Context) {
           gateEntries.size,
         ),
         title = if (privacyMode) {
-          context.getString(R.string.nanoflow_widget_privacy_gate_title, summary.blackBox.pendingCount)
+          context.getString(R.string.nanoflow_widget_privacy_gate_title, blackBoxDisplayCount)
         } else {
           preview.content?.trim()?.takeIf { it.isNotBlank() }
             ?: context.getString(R.string.nanoflow_widget_gate_pending_detail)
@@ -1293,8 +1346,19 @@ class NanoflowWidgetRepository(private val context: Context) {
     return context.getString(
       R.string.nanoflow_widget_counts,
       summary.dock.count,
-      summary.blackBox.pendingCount,
+      resolveBlackBoxDisplayCount(summary),
     )
+  }
+
+  private fun resolveBlackBoxDisplayCount(summary: WidgetSummaryResponse): Int {
+    val pendingCount = summary.blackBox.pendingCount.coerceAtLeast(0)
+    val explicitUnreadCount = summary.blackBox.unreadCount
+    if (explicitUnreadCount != null) {
+      return explicitUnreadCount.coerceIn(0, pendingCount)
+    }
+
+    val previewUnreadCount = summary.blackBox.previews.count { !it.isRead }
+    return previewUnreadCount.coerceAtMost(pendingCount)
   }
 
   private fun resolveRenderableGateEntries(

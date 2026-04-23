@@ -988,8 +988,12 @@ export class SyncCoordinatorService {
    * @param taskIds 要删除的任务 ID 列表
    * @returns 实际删除的任务数量，-1 表示被服务端拒绝
    */
-  async softDeleteTasksBatch(projectId: string, taskIds: string[]): Promise<number> {
-    return this.core.softDeleteTasksBatch(projectId, taskIds);
+  async softDeleteTasksBatch(
+    projectId: string,
+    taskIds: string[],
+    tombstoneTimestamps?: Record<string, string | number | null | undefined>,
+  ): Promise<number> {
+    return this.core.softDeleteTasksBatch(projectId, taskIds, tombstoneTimestamps);
   }
   
   /**

@@ -252,6 +252,14 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
     val pendingResult = goAsync()
     val appContext = context.applicationContext
     silentActionScope.launch {
+      val repository = NanoflowWidgetRepository(appContext)
+
+      suspend fun renderCurrentWidget() {
+        val appWidgetManager = AppWidgetManager.getInstance(appContext)
+        renderAndApply(appContext, appWidgetManager, repository, appWidgetId)
+        notifyActionListsDataChanged(appWidgetManager, appWidgetId)
+      }
+
       // 读取当前目标 entryId。优先使用 fill-in intent 里由渲染路径直接附带的 displayedGateEntryId，
       // 这样点击目标与屏幕上可见的大门卡严格一致；仅在旧实例/旧缓存没带该字段时才回退到缓存推断。
       val store = NanoflowWidgetStore(appContext)
@@ -293,16 +301,67 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
         ),
       )
 
+      val optimisticSnapshot = if (entryId.isNullOrBlank()) {
+        null
+      } else {
+        runCatching {
+          repository.applyOptimisticBlackBoxAction(appWidgetId, entryId, entryAction)
+        }.onFailure { error ->
+          NanoflowWidgetTelemetry.warn(
+            "widget_click_gate_action_optimistic_failed",
+            mapOf(
+              "appWidgetId" to appWidgetId,
+              "gateAction" to entryAction.wireValue,
+              "entryId" to NanoflowWidgetTelemetry.redactId(entryId),
+            ),
+            error,
+          )
+        }.getOrNull()
+      }
+
+      if (optimisticSnapshot != null) {
+        runCatching {
+          renderCurrentWidget()
+        }.onFailure { error ->
+          NanoflowWidgetTelemetry.warn(
+            "widget_click_gate_action_local_render_failed",
+            mapOf(
+              "appWidgetId" to appWidgetId,
+              "gateAction" to entryAction.wireValue,
+              "phase" to "optimistic",
+            ),
+            error,
+          )
+        }
+      }
+
       val success = if (entryId.isNullOrBlank()) {
         false
       } else {
         runCatching {
-          NanoflowWidgetRepository(appContext).markBlackBoxEntry(appWidgetId, entryId, entryAction)
+          repository.markBlackBoxEntry(appWidgetId, entryId, entryAction)
         }.getOrElse { false }
       }
 
       if (success) {
-        // 成功：立即触发一次刷新让 UI 反映最新 summary；同时用 Toast 给出轻量反馈。
+        if (optimisticSnapshot == null) {
+          // 无法做乐观补丁时，同步拉一轮权威 summary 再重绘，避免只重绘旧缓存。
+          runCatching {
+            repository.refreshSummary(appWidgetId)
+            renderCurrentWidget()
+          }.onFailure { error ->
+            NanoflowWidgetTelemetry.warn(
+              "widget_click_gate_action_local_render_failed",
+              mapOf(
+                "appWidgetId" to appWidgetId,
+                "gateAction" to entryAction.wireValue,
+                "phase" to "post-success",
+              ),
+              error,
+            )
+          }
+        }
+
         withContext(Dispatchers.Main) {
           val message = when (entryAction) {
             BlackBoxEntryAction.READ -> "已标记为已读"
@@ -336,6 +395,22 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
             "entryId" to NanoflowWidgetTelemetry.redactId(entryId),
           ),
         )
+        if (optimisticSnapshot != null) {
+          runCatching {
+            repository.rollbackOptimisticBlackBoxAction(appWidgetId, optimisticSnapshot)
+            renderCurrentWidget()
+          }.onFailure { error ->
+            NanoflowWidgetTelemetry.warn(
+              "widget_click_gate_action_rollback_failed",
+              mapOf(
+                "appWidgetId" to appWidgetId,
+                "gateAction" to entryAction.wireValue,
+                "entryId" to NanoflowWidgetTelemetry.redactId(entryId),
+              ),
+              error,
+            )
+          }
+        }
         withContext(Dispatchers.Main) {
           Toast.makeText(appContext, "网络繁忙，请稍后重试", Toast.LENGTH_SHORT).show()
         }
@@ -705,6 +780,7 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
     fun notifyActionListsDataChanged(appWidgetManager: AppWidgetManager, appWidgetId: Int) {
       appWidgetManager.notifyAppWidgetViewDataChanged(appWidgetId, R.id.nano_widget_tab_list)
       appWidgetManager.notifyAppWidgetViewDataChanged(appWidgetId, R.id.nano_widget_content_list)
+      appWidgetManager.notifyAppWidgetViewDataChanged(appWidgetId, R.id.nano_widget_gate_actions_list)
       appWidgetManager.notifyAppWidgetViewDataChanged(appWidgetId, R.id.nano_widget_refresh_list)
     }
   }

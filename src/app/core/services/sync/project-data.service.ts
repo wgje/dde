@@ -1051,34 +1051,49 @@ export class ProjectDataService {
     
     if (tasksResult.error) throw supabaseErrorToError(tasksResult.error);
     
-    // 构建 tombstone ID 集合
-    const tombstoneIds = new Set<string>();
+    // 构建远端 tombstone 水位
+    const remoteTombstoneTimestamps = new Map<string, number>();
     
     if (!tombstonesResult.error) {
       for (const t of (tombstonesResult.data || [])) {
-        tombstoneIds.add(t.task_id);
+        if (!t.deleted_at) {
+          continue;
+        }
+        const deletedAt = new Date(t.deleted_at).getTime();
+        if (!Number.isNaN(deletedAt)) {
+          remoteTombstoneTimestamps.set(t.task_id, deletedAt);
+        }
       }
     }
-    
-    // 合并本地 tombstones
-    const localTombstones = this.tombstoneService.getLocalTombstones(projectId);
-    for (const id of Array.from(localTombstones)) {
-      tombstoneIds.add(id);
-    }
-    
+
     // 转换任务并标记 tombstone
     const allTasks = (tasksResult.data as TaskRow[] || []).map(row => this.rowToTask(row));
     
     return allTasks.map(task => {
-      if (tombstoneIds.has(task.id)) {
-        return { ...task, deletedAt: task.deletedAt || new Date().toISOString() };
+      const remoteDeletedAt = remoteTombstoneTimestamps.get(task.id);
+      if (this.tombstoneService.shouldMaterializeTaskDeletion(task.updatedAt, remoteDeletedAt)) {
+        return { ...task, deletedAt: task.deletedAt || new Date(remoteDeletedAt!).toISOString() };
       }
+
+      const localDeletedAt = this.tombstoneService.getLocalTombstoneTimestamp(projectId, task.id);
+      if (this.tombstoneService.shouldMaterializeTaskDeletion(task.updatedAt, localDeletedAt)) {
+        return { ...task, deletedAt: task.deletedAt || new Date(localDeletedAt!).toISOString() };
+      }
+
+      if (localDeletedAt !== undefined) {
+        this.tombstoneService.clearLocalTombstones(projectId, [task.id]);
+      }
+
       return task;
     });
   }
   
-  addLocalTombstones(projectId: string, taskIds: string[]): void {
-    this.tombstoneService.addLocalTombstones(projectId, taskIds);
+  addLocalTombstones(
+    projectId: string,
+    taskIds: string[],
+    timestampsByTaskId?: Record<string, string | number | null | undefined>,
+  ): void {
+    this.tombstoneService.addLocalTombstones(projectId, taskIds, timestampsByTaskId);
   }
   
   /**

@@ -50,6 +50,7 @@ data class WidgetDockSummary(
 data class WidgetBlackBoxSummary(
   @SerialName("pendingCount")
   val pendingCount: Int = 0,
+  val unreadCount: Int? = null,
   @JsonNames("previews", "entries", "items")
   val previews: List<WidgetGatePreview> = emptyList(),
   val gatePreview: WidgetGatePreview = WidgetGatePreview(),

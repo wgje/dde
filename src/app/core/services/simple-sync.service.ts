@@ -1020,8 +1020,12 @@ export class SimpleSyncService {
     return this.taskSyncOps.deleteTask(taskId, projectId, sourceUserId, fromRetryQueue);
   }
   
-  async softDeleteTasksBatch(projectId: string, taskIds: string[]): Promise<number> {
-    return this.taskSyncOps.softDeleteTasksBatch(projectId, taskIds);
+  async softDeleteTasksBatch(
+    projectId: string,
+    taskIds: string[],
+    tombstoneTimestamps?: Record<string, string | number | null | undefined>,
+  ): Promise<number> {
+    return this.taskSyncOps.softDeleteTasksBatch(projectId, taskIds, tombstoneTimestamps);
   }
   
   async purgeTasksFromCloud(projectId: string, taskIds: string[], sourceUserId?: string): Promise<boolean> {
@@ -1040,8 +1044,12 @@ export class SimpleSyncService {
     return this.taskSyncOps.getLocalTombstones(projectId);
   }
   
-  addLocalTombstones(projectId: string, taskIds: string[]): void {
-    this.taskSyncOps.addLocalTombstones(projectId, taskIds);
+  addLocalTombstones(
+    projectId: string,
+    taskIds: string[],
+    timestampsByTaskId?: Record<string, string | number | null | undefined>,
+  ): void {
+    this.taskSyncOps.addLocalTombstones(projectId, taskIds, timestampsByTaskId);
   }
   
   private topologicalSortTasks(tasks: Task[]): Task[] {

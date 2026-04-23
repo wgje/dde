@@ -385,6 +385,67 @@ describe('TaskMoveService', () => {
       expect(mockSubtreeOps.cascadeUpdateChildrenStage).toHaveBeenCalled();
     });
 
+    it('改父节点时会清理旧父与新父重合的 shadow connection', () => {
+      const oldParent = createTask({ id: 'old-parent', stage: 1, rank: 1000 });
+      const newParent = createTask({ id: 'new-parent', stage: 1, rank: 2000 });
+      const child = createTask({ id: 'child', stage: 2, parentId: 'old-parent', rank: 1500 });
+      const shadowOld: Connection = { id: 'shadow-old', source: 'old-parent', target: 'child' };
+      const shadowNew: Connection = { id: 'shadow-new', source: 'new-parent', target: 'child' };
+      const unrelated: Connection = { id: 'other', source: 'x', target: 'y' };
+      const originalConnections = [shadowOld, shadowNew, unrelated];
+
+      mockSubtreeOps.updateParentChildConnections.mockImplementation(
+        (taskId: string, oldParentId: string | null, newParentId: string | null, connections: Connection[]) => {
+          expect(taskId).toBe('child');
+          expect(oldParentId).toBe('old-parent');
+          expect(newParentId).toBe('new-parent');
+
+          return connections.map(connection => (
+            connection.target === 'child' && (connection.source === 'old-parent' || connection.source === 'new-parent')
+              ? {
+                  ...connection,
+                  deletedAt: '2026-04-22T00:00:00.000Z',
+                  updatedAt: '2026-04-22T00:00:00.000Z',
+                }
+              : connection
+          ));
+        }
+      );
+
+      activeProject = createProject({
+        tasks: [oldParent, newParent, child],
+        connections: originalConnections,
+      });
+
+      const result = service.moveTaskToStage({
+        taskId: 'child',
+        newStage: 2,
+        newParentId: 'new-parent',
+      });
+
+      expect(result.ok).toBe(true);
+      expect(mockSubtreeOps.updateParentChildConnections).toHaveBeenCalledWith(
+        'child',
+        'old-parent',
+        'new-parent',
+        originalConnections,
+      );
+      expect(activeProject!.connections).toEqual([
+        expect.objectContaining({
+          id: 'shadow-old',
+          deletedAt: '2026-04-22T00:00:00.000Z',
+          updatedAt: '2026-04-22T00:00:00.000Z',
+        }),
+        expect.objectContaining({
+          id: 'shadow-new',
+          deletedAt: '2026-04-22T00:00:00.000Z',
+          updatedAt: '2026-04-22T00:00:00.000Z',
+        }),
+        unrelated,
+      ]);
+      expect(activeProject!.tasks.find(task => task.id === 'child')?.parentId).toBe('new-parent');
+    });
+
     it('阶段正在重新排序时返回 LAYOUT_RANK_CONFLICT', () => {
       const task = createTask({ id: 't1', stage: 1 });
       activeProject = createProject({ tasks: [task] });

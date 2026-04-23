@@ -13,6 +13,7 @@ import { Injectable, inject } from '@angular/core';
 import { SimpleSyncService, TombstoneService } from '../core-bridge';
 import { ConflictDetectionService } from './conflict-detection.service';
 import { ProjectStateService } from './project-state.service';
+import { ChangeTrackerService } from './change-tracker.service';
 import { LoggerService } from './logger.service';
 import { Project, Task, Connection } from '../models';
 import { SYNC_CONFIG } from '../config';
@@ -25,6 +26,7 @@ export class DeltaSyncCoordinatorService {
   private readonly syncService = inject(SimpleSyncService);
   private readonly conflictDetection = inject(ConflictDetectionService);
   private readonly projectState = inject(ProjectStateService);
+  private readonly changeTracker = inject(ChangeTrackerService);
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('DeltaSyncCoordinator');
   private readonly tombstoneService = inject(TombstoneService);
@@ -41,6 +43,82 @@ export class DeltaSyncCoordinatorService {
       connection.description ?? '',
       connection.deletedAt ?? '',
     ]);
+  }
+
+  private parseTimestamp(value: string | undefined | null): number {
+    if (!value) {
+      return 0;
+    }
+    const parsed = new Date(value).getTime();
+    return Number.isNaN(parsed) ? Number.NaN : parsed;
+  }
+
+  private mergeProtectedDeltaTask(localTask: Task, remoteTask: Task, projectId: string): Task {
+    const pending = this.changeTracker.getPendingChange(
+      projectId,
+      'task',
+      localTask.id,
+      SYNC_CONFIG.DIRTY_PROTECTION_WINDOW_MS,
+    );
+    const protectedFields = new Set(pending?.changedFields ?? []);
+    const lockedFields = this.changeTracker.getLockedFields(localTask.id, projectId);
+    for (const field of lockedFields) {
+      protectedFields.add(field);
+    }
+
+    const mergedTask: Record<string, unknown> = { ...remoteTask };
+
+    const localTime = this.parseTimestamp(localTask.updatedAt);
+    const remoteTime = this.parseTimestamp(remoteTask.updatedAt);
+    if (!Number.isNaN(localTime) && !Number.isNaN(remoteTime) && localTime >= remoteTime) {
+      for (const field of ['status', 'stage', 'parentId', 'rank', 'order', 'title', 'content', 'deletedAt']) {
+        protectedFields.add(field);
+      }
+    }
+
+    const contentLost = Boolean(
+      localTask.content && (remoteTask.content === undefined || remoteTask.content === null),
+    );
+    const titleLost = Boolean(
+      localTask.title && (remoteTask.title === undefined || remoteTask.title === null),
+    );
+
+    if (contentLost || titleLost) {
+      this.logger.warn('Delta Sync: 检测到远程字段缺失，保留本地内容', {
+        taskId: remoteTask.id,
+        contentLost,
+        titleLost,
+        localContentLength: localTask.content?.length ?? 0,
+      });
+      this.sentryLazyLoader.captureMessage('Delta Sync: Content protection triggered', {
+        level: 'warning',
+        tags: { operation: 'performDeltaSync', taskId: remoteTask.id },
+        extra: { localContentLength: localTask.content?.length ?? 0, projectId, contentLost, titleLost },
+      });
+      if (contentLost) {
+        mergedTask.content = localTask.content;
+      }
+      if (titleLost) {
+        mergedTask.title = localTask.title;
+      }
+    }
+
+    for (const field of protectedFields) {
+      mergedTask[field] = localTask[field as keyof Task];
+    }
+
+    if (localTask.deletedAt && !remoteTask.deletedAt) {
+      const localDeleteTime = this.parseTimestamp(localTask.deletedAt);
+      if (!Number.isNaN(localDeleteTime) && localDeleteTime > remoteTime) {
+        return localTask;
+      }
+    }
+
+    if (remoteTask.deletedAt) {
+      mergedTask.deletedAt = remoteTask.deletedAt;
+    }
+
+    return mergedTask as Task;
   }
 
   /**
@@ -126,8 +204,8 @@ export class DeltaSyncCoordinatorService {
     
     for (const deltaTask of deltaTasks) {
       const existing = taskMap.get(deltaTask.id);
-      const deltaTime = deltaTask.updatedAt ? new Date(deltaTask.updatedAt).getTime() : 0;
-      const existingTime = existing?.updatedAt ? new Date(existing.updatedAt).getTime() : 0;
+      const deltaTime = this.parseTimestamp(deltaTask.updatedAt);
+      const existingTime = this.parseTimestamp(existing?.updatedAt);
 
       // NaN 保护：malformed ISO 字符串会导致 getTime() 返回 NaN
       if (Number.isNaN(deltaTime) || Number.isNaN(existingTime)) {
@@ -139,42 +217,24 @@ export class DeltaSyncCoordinatorService {
         continue;
       }
 
-      if (!existing || deltaTime > existingTime) {
-        if (deltaTask.deletedAt) {
-          taskMap.delete(deltaTask.id);
-        } else {
-          // 【P0-09 修复】检查本地 tombstone，防止已删除任务通过 Delta Sync 复活
-          const localTombstones = this.tombstoneService.getLocalTombstones(projectId);
-          if (localTombstones.has(deltaTask.id)) {
-            this.logger.info('Delta Sync: 跳过 tombstone 任务', { taskId: deltaTask.id });
-            continue;
-          }
-          // 保护 content 和 title 字段
-          let mergedTask = deltaTask;
-          // 【P3-23 增强】同时保护 content 和 title，区分“字段丢失”与“用户主动清空”
-          const contentLost = existing && existing.content && (deltaTask.content === undefined || deltaTask.content === null);
-          const titleLost = existing && existing.title && (deltaTask.title === undefined || deltaTask.title === null);
-          if (contentLost || titleLost) {
-            this.logger.warn('Delta Sync: 检测到远程字段缺失，保留本地内容', {
-              taskId: deltaTask.id,
-              contentLost,
-              titleLost,
-              localContentLength: existing!.content?.length ?? 0
-            });
-            mergedTask = {
-              ...deltaTask,
-              ...(contentLost ? { content: existing!.content } : {}),
-              ...(titleLost ? { title: existing!.title } : {}),
-            };
+      if (!deltaTask.deletedAt && this.tombstoneService.shouldRejectTaskUpsert(projectId, deltaTask.id, deltaTask.updatedAt)) {
+        this.logger.info('Delta Sync: 跳过 tombstone 任务', {
+          taskId: deltaTask.id,
+          candidateUpdatedAt: deltaTask.updatedAt ?? null,
+        });
+        continue;
+      }
 
-            this.sentryLazyLoader.captureMessage('Delta Sync: Content protection triggered', {
-              level: 'warning',
-              tags: { operation: 'performDeltaSync', taskId: deltaTask.id },
-              extra: { localContentLength: existing!.content?.length ?? 0, projectId, contentLost, titleLost }
-            });
-          }
-          taskMap.set(deltaTask.id, mergedTask);
+      if (!existing) {
+        if (!deltaTask.deletedAt) {
+          taskMap.set(deltaTask.id, deltaTask);
         }
+        continue;
+      }
+
+      if (deltaTime > existingTime) {
+        const mergedTask = this.mergeProtectedDeltaTask(existing, deltaTask, projectId);
+        taskMap.set(deltaTask.id, mergedTask);
       }
     }
     

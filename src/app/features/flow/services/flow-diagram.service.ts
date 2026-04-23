@@ -15,10 +15,11 @@ import { flowTemplateEventHandlers } from './flow-template-events';
 import { getFlowStyles, FlowTheme } from '../../../../config/flow-styles';
 import { Task } from '../../../../models';
 import { environment } from '../../../../environments/environment';
-import { UI_CONFIG } from '../../../../config';
+import { UI_CONFIG, LAYOUT_CONFIG } from '../../../../config';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { readTaskDragPayload } from '../../../../utils/task-drag-payload';
 import * as go from 'gojs';
+import { AvoidsLinksRouter } from '../vendor/AvoidsLinksRouter';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 /**
  * FlowDiagramService - GoJS 图表核心服务（精简版）
@@ -246,6 +247,20 @@ export class FlowDiagramService {
         linkCategoryProperty: 'category'
       });
       
+      // 【补丁 A 2026-04-23】按配置装配 AvoidsLinksRouter（vendored 自 GoJS 官方扩展）。
+      // 仅在 LAYOUT_CONFIG.AUTO_LAYOUT_ENABLE_AVOIDS_LINKS_ROUTER 打开时生效，
+      // 且 router 内部会过滤 `!link.isOrthogonal` 的连线（默认 Bezier/Normal cross-tree 连线不受影响）。
+      // 打开此开关需配合把 cross-tree link template 的 routing 切到 go.Link.Orthogonal。
+      if (LAYOUT_CONFIG.AUTO_LAYOUT_ENABLE_AVOIDS_LINKS_ROUTER) {
+        this.diagram.routers.add(new AvoidsLinksRouter({
+          linkSpacing: LAYOUT_CONFIG.AUTO_LAYOUT_ROUTER_LINK_SPACING_PX,
+          avoidsNodes: true,
+        }));
+        this.logger.info('AvoidsLinksRouter 已装配', {
+          linkSpacing: LAYOUT_CONFIG.AUTO_LAYOUT_ROUTER_LINK_SPACING_PX,
+        });
+      }
+
       // 【关键】拦截 GoJS 默认删除行为，强制单向数据流 (Store -> Signal -> Diagram)
       // 这可以防止“脑裂”——GoJS 认为节点删了，但 Store 还没反应过来
       this.setupDeleteKeyInterception();

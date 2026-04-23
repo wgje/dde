@@ -20,6 +20,7 @@ import { LayoutService } from './layout.service';
 import { ProjectStateService } from './project-state.service';
 import { TaskRecordTrackingService } from './task-record-tracking.service';
 import { ParkingService } from './parking.service';
+import { TombstoneService } from '../core-bridge';
 import { Project, Task, Connection } from '../models';
 import { TRASH_CONFIG } from '../config';
 
@@ -63,6 +64,7 @@ export class TaskTrashService {
   private readonly projectState = inject(ProjectStateService);
   private readonly recorder = inject(TaskRecordTrackingService);
   private readonly parkingService = inject(ParkingService);
+  private readonly tombstoneService = inject(TombstoneService);
 
   private getActiveProject(): Project | null {
     return this.projectState.activeProject();
@@ -125,7 +127,8 @@ export class TaskTrashService {
         if (keepChildren && childrenToPromote.some(c => c.id === t.id)) {
           return {
             ...t,
-            parentId: task.parentId
+            parentId: task.parentId,
+            updatedAt: now,
           };
         }
         
@@ -133,6 +136,7 @@ export class TaskTrashService {
           return {
             ...t,
             deletedAt: now,
+            updatedAt: now,
             deletedMeta: {
               parentId: t.parentId,
               stage: t.stage,
@@ -154,6 +158,7 @@ export class TaskTrashService {
           return {
             ...t,
             deletedAt: now,
+            updatedAt: now,
             deletedMeta: {
               parentId: t.parentId,
               stage: t.stage,
@@ -253,6 +258,7 @@ export class TaskTrashService {
     }
     
     const restoredConnectionIds: string[] = [];
+    const now = new Date().toISOString();
     
     this.recordAndUpdate(p => {
       const restoredDraftById = new Map<string, Task>();
@@ -268,6 +274,7 @@ export class TaskTrashService {
           ? {
               ...rest,
               deletedAt: null,
+              updatedAt: now,
               parentId: meta.parentId,
               stage: meta.stage,
               order: meta.order,
@@ -276,7 +283,7 @@ export class TaskTrashService {
               y: meta.y,
               parkingMeta: meta.parkingMeta ?? rest.parkingMeta ?? null,
             }
-          : { ...rest, deletedAt: null };
+          : { ...rest, deletedAt: null, updatedAt: now };
 
         // 🔴 数据库约束：确保 title 和 content 不能同时为空
         if ((!restoredTask.title || restoredTask.title.trim() === '')
@@ -309,7 +316,7 @@ export class TaskTrashService {
 
       const restoredTasks = p.tasks.map(t => {
         if (!idsToRestore.has(t.id)) return t;
-        return restoredDraftById.get(t.id) ?? { ...t, deletedAt: null };
+        return restoredDraftById.get(t.id) ?? { ...t, deletedAt: null, updatedAt: now };
       });
       
       const existingConnKeys = new Set(
@@ -329,6 +336,9 @@ export class TaskTrashService {
     });
     
     this.logger.info(`恢复任务: ${taskId}, 共恢复 ${idsToRestore.size} 个任务, ${restoredConnectionIds.length} 条连接`);
+
+    const projectId = activeP.id;
+    this.tombstoneService.clearLocalTombstones(projectId, [...idsToRestore]);
     
     return {
       restoredTaskIds: idsToRestore,

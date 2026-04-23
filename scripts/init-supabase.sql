@@ -4357,7 +4357,11 @@ BEGIN
   SELECT json_build_object(
     'task_tombstones',
     COALESCE(
-      (SELECT json_agg(json_build_object('project_id', tt.project_id, 'task_id', tt.task_id))
+      (SELECT json_agg(json_build_object(
+        'project_id', tt.project_id,
+        'task_id', tt.task_id,
+        'deleted_at', tt.deleted_at
+      ))
        FROM public.task_tombstones tt
        INNER JOIN public.projects p ON p.id = tt.project_id
        WHERE tt.project_id = ANY(p_project_ids)
@@ -4384,6 +4388,127 @@ GRANT EXECUTE ON FUNCTION public.batch_get_tombstones(UUID[]) TO authenticated;
 
 COMMENT ON FUNCTION public.batch_get_tombstones IS
   '批量获取多项目 tombstone：1 次 RPC 替代 N 次查询，降低免费 tier API 消耗';
+
+CREATE OR REPLACE FUNCTION public.widget_summary_wave1(
+  p_user_id UUID,
+  p_today DATE,
+  p_preview_limit INT DEFAULT 6
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = public, pg_catalog
+AS $$
+DECLARE
+  v_session_json JSONB := NULL;
+  v_accessible_project_ids UUID[] := ARRAY[]::UUID[];
+  v_pending_count INT := 0;
+  v_unread_count INT := 0;
+  v_preview JSONB := '[]'::JSONB;
+  v_black_box_watermark TIMESTAMPTZ;
+  v_dock_count INT := 0;
+  v_dock_watermark TIMESTAMPTZ;
+BEGIN
+  SELECT jsonb_build_object(
+    'id', id,
+    'updated_at', updated_at,
+    'session_state', session_state
+  )
+    INTO v_session_json
+    FROM public.focus_sessions
+    WHERE user_id = p_user_id
+    ORDER BY updated_at DESC
+    LIMIT 1;
+
+  SELECT COALESCE(array_agg(id), ARRAY[]::UUID[])
+    INTO v_accessible_project_ids
+    FROM public.projects
+    WHERE owner_id = p_user_id
+      AND deleted_at IS NULL;
+
+  SELECT count(*)::INT
+    INTO v_pending_count
+    FROM public.black_box_entries
+    WHERE user_id = p_user_id
+      AND deleted_at IS NULL
+      AND is_completed = FALSE
+      AND is_archived = FALSE
+      AND date < p_today
+      AND (snooze_until IS NULL OR snooze_until <= p_today);
+
+  SELECT count(*)::INT
+    INTO v_unread_count
+    FROM public.black_box_entries
+    WHERE user_id = p_user_id
+      AND deleted_at IS NULL
+      AND is_read = FALSE
+      AND is_completed = FALSE
+      AND is_archived = FALSE
+      AND date < p_today
+      AND (snooze_until IS NULL OR snooze_until <= p_today);
+
+  SELECT max(updated_at)
+    INTO v_black_box_watermark
+    FROM public.black_box_entries
+    WHERE user_id = p_user_id
+      AND deleted_at IS NULL
+      AND is_archived = FALSE
+      AND date < p_today;
+
+  SELECT COALESCE(jsonb_agg(
+      jsonb_build_object(
+        'id', bb.id,
+        'date', bb.date,
+        'project_id', bb.project_id,
+        'content', bb.content,
+        'is_read', bb.is_read,
+        'created_at', bb.created_at,
+        'snooze_until', bb.snooze_until,
+        'updated_at', bb.updated_at
+      ) ORDER BY bb.created_at ASC
+    ), '[]'::JSONB)
+    INTO v_preview
+    FROM (
+      SELECT id, date, project_id, content, is_read, created_at, snooze_until, updated_at
+        FROM public.black_box_entries
+        WHERE user_id = p_user_id
+          AND deleted_at IS NULL
+          AND is_completed = FALSE
+          AND is_archived = FALSE
+          AND date < p_today
+          AND (snooze_until IS NULL OR snooze_until <= p_today)
+        ORDER BY created_at ASC
+        LIMIT greatest(p_preview_limit, 0)
+    ) bb;
+
+  IF array_length(v_accessible_project_ids, 1) IS NOT NULL THEN
+    SELECT count(*)::INT, max(updated_at)
+      INTO v_dock_count, v_dock_watermark
+      FROM public.tasks
+      WHERE project_id = ANY(v_accessible_project_ids)
+        AND deleted_at IS NULL
+        AND parking_meta @> '{"state":"parked"}'::jsonb;
+  END IF;
+
+  RETURN jsonb_build_object(
+    'focusSession', v_session_json,
+    'accessibleProjectIds', to_jsonb(v_accessible_project_ids),
+    'pendingBlackBoxCount', v_pending_count,
+    'unreadBlackBoxCount', v_unread_count,
+    'blackBoxPreview', v_preview,
+    'blackBoxWatermark', v_black_box_watermark,
+    'dockCount', v_dock_count,
+    'dockWatermark', v_dock_watermark
+  );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.widget_summary_wave1(UUID, DATE, INT) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.widget_summary_wave1(UUID, DATE, INT) TO service_role;
+
+COMMENT ON FUNCTION public.widget_summary_wave1(UUID, DATE, INT) IS
+  'Widget summary 第一波聚合：focus_sessions + projects + black_box unread/pending count/preview/watermark + dock count/watermark 合并到单次 RPC，把 4-5 个 PostgREST roundtrip 压缩到 1 个。';
 
 -- ============================================================
 -- [MIGRATION] 20260412143000_widget_backend_foundation.sql

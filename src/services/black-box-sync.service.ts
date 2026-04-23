@@ -825,7 +825,19 @@ export class BlackBoxSyncService {
       // 若直接 upsert，服务端触发器会盖上新的 updated_at，使陈旧状态反向传播到所有设备，
       // 表现为"已完成的任务过一会儿又出现在大门里"。
       // 修复策略：若服务端现存状态的 updated_at 晚于本地 pending 的 updatedAt，认为本地
-      // 已过时；将服务端权威状态写回本地并清除 pending 标记，放弃这次推送。
+      // 已过时；将服务端权威状态写回本地并清除 pending 标记,放弃这次推送。
+      //
+      // 【2026-04-23 根因修复·加强版】仅按 updated_at LWW 判定仍不足以守住语义：若本地
+      // pending 的 updatedAt 恰好晚于服务端（典型成因：Device B 时钟偏快、或该条目在
+      // 本地被再次触碰 bump 了 updatedAt），即便服务端早已是 is_read=true / is_completed=true
+      // / 已软删除的权威状态，原 preflight 也会放行本轮 upsert，把这些单调位压回 false /
+      // 复活，继而被触发器盖上新的 NOW() 反向污染全站。
+      // 新策略：对 is_read / is_completed / deletedAt 施加"只进不退"的单调合并。
+      //   * 若本地与服务端对这些单调位的并集等于服务端现状 → 本地没有真正新增意图，直接
+      //     采用服务端权威状态并清 pending；
+      //   * 否则把服务端单调真值 OR 进本地 entry（保留本地 content / snoozeUntil /
+      //     isArchived 等非单调编辑），以合并后的 entry 继续后续 upsert，绝不让已经被
+      //     完成/已读/软删除的条目悄悄回潮。
       try {
         const { data: serverRow, error: preflightError } = await client
           .from('black_box_entries')
@@ -835,30 +847,69 @@ export class BlackBoxSyncService {
 
         if (!preflightError && serverRow) {
           const serverEntry = this.mapRowToEntry(serverRow as Record<string, unknown>);
-          if (this.clockSync.isLocalNewer(serverEntry.updatedAt, entry.updatedAt)) {
-            this.logger.warn('黑匣子 pending 推送预检：服务端已有更晚权威状态，以远端为准并跳过覆盖', {
-              entryId: entry.id,
-              localPendingUpdatedAt: entry.updatedAt,
-              serverUpdatedAt: serverEntry.updatedAt,
-              localIsCompleted: entry.isCompleted,
-              serverIsCompleted: serverEntry.isCompleted,
-              localIsArchived: entry.isArchived,
-              serverIsArchived: serverEntry.isArchived,
-            });
-            const latestLocalBeforeApply = await this.resolveLatestLocalEntry(entry.id);
-            if (this.isEntryNewer(latestLocalBeforeApply, serverEntry)) {
-              this.logger.debug('黑匣子预检命中更晚本地快照，跳过服务端权威状态回写', {
+          const serverIsNewer = this.clockSync.isLocalNewer(serverEntry.updatedAt, entry.updatedAt);
+          const wouldRegressRead = serverEntry.isRead && !entry.isRead;
+          const wouldRegressCompleted = serverEntry.isCompleted && !entry.isCompleted;
+          const wouldResurrectDeleted = Boolean(serverEntry.deletedAt) && !entry.deletedAt;
+          const hasMonotonicRegression =
+            wouldRegressRead || wouldRegressCompleted || wouldResurrectDeleted;
+
+          if (serverIsNewer || hasMonotonicRegression) {
+            // 服务端更晚 → 直接采用服务端；否则在本地 entry 上合并服务端单调真值。
+            const mergedEntry: BlackBoxEntry = serverIsNewer
+              ? serverEntry
+              : {
+                  ...entry,
+                  isRead: entry.isRead || serverEntry.isRead,
+                  isCompleted: entry.isCompleted || serverEntry.isCompleted,
+                  deletedAt: entry.deletedAt ?? serverEntry.deletedAt,
+                };
+
+            if (this.hasEquivalentEntryState(mergedEntry, serverEntry)) {
+              this.logger.warn('黑匣子 pending 推送预检：跳过对服务端权威状态的回退覆盖', {
                 entryId: entry.id,
-                latestLocalUpdatedAt: latestLocalBeforeApply?.updatedAt,
+                reason: serverIsNewer ? 'server-newer-lww' : 'monotonic-regression',
+                localPendingUpdatedAt: entry.updatedAt,
                 serverUpdatedAt: serverEntry.updatedAt,
+                localIsRead: entry.isRead,
+                serverIsRead: serverEntry.isRead,
+                localIsCompleted: entry.isCompleted,
+                serverIsCompleted: serverEntry.isCompleted,
+                localDeletedAt: entry.deletedAt,
+                serverDeletedAt: serverEntry.deletedAt,
               });
-              return true;
+              const latestLocalBeforeApply = await this.resolveLatestLocalEntry(entry.id);
+              if (this.isEntryNewer(latestLocalBeforeApply, serverEntry)) {
+                this.logger.debug('黑匣子预检命中更晚本地快照，跳过服务端权威状态回写', {
+                  entryId: entry.id,
+                  latestLocalUpdatedAt: latestLocalBeforeApply?.updatedAt,
+                  serverUpdatedAt: serverEntry.updatedAt,
+                });
+                return true;
+              }
+              this.clockSync.recordServerTimestamp(serverEntry.updatedAt, entry.id);
+              // 服务端权威状态覆盖本地，清除 pending；LWW 最终收敛到远端最新值
+              await this.saveToLocal(serverEntry);
+              updateBlackBoxEntry(serverEntry);
+              return true; // 告知 RetryQueue 此条已处理完毕，不必重试
             }
-            this.clockSync.recordServerTimestamp(serverEntry.updatedAt, entry.id);
-            // 服务端权威状态覆盖本地，清除 pending；LWW 最终收敛到远端最新值
-            await this.saveToLocal(serverEntry);
-            updateBlackBoxEntry(serverEntry);
-            return true; // 告知 RetryQueue 此条已处理完毕，不必重试
+
+            if (hasMonotonicRegression && !serverIsNewer) {
+              // 本地仍有服务端未见的新编辑，把服务端 monotonic 真值合并进来再推送。
+              this.logger.warn('黑匣子 pending 推送预检：合并远端单调真值后继续推送本地独有变更', {
+                entryId: entry.id,
+                localPendingUpdatedAt: entry.updatedAt,
+                serverUpdatedAt: serverEntry.updatedAt,
+                mergedIsRead: mergedEntry.isRead,
+                mergedIsCompleted: mergedEntry.isCompleted,
+                mergedDeletedAt: mergedEntry.deletedAt,
+              });
+              entry = mergedEntry;
+              const pendingMerged: BlackBoxEntry = { ...mergedEntry, syncStatus: 'pending' };
+              await this.saveToLocal(pendingMerged);
+              updateBlackBoxEntry(pendingMerged);
+              // fall through to upsert with merged entry
+            }
           }
         } else if (preflightError) {
           // 预检失败不阻塞推送（保持向后兼容），仅记录，便于后续排查
@@ -1277,6 +1328,39 @@ export class BlackBoxSyncService {
       await this.saveToLocal(remote);
       updateBlackBoxEntry(remote);
       return;
+    }
+
+    // 【2026-04-23 根因修复·加强版】即便本地 pending 在 LWW 上赢过远端，也要把远端的单调
+    // 真值(is_read / is_completed / deletedAt)立刻合并进本地 pending，避免 UI 继续把一个
+    // 服务端早已完成/已读/已删的条目展示在大门里，同时保留本地仍未推送的 content /
+    // snoozeUntil / isArchived 等编辑。pushToServer 的 preflight 还会再守一道门，这里只是
+    // 提前让 UI 收敛。
+    if (local && local.syncStatus === 'pending') {
+      const wouldRegressRead = remote.isRead && !local.isRead;
+      const wouldRegressCompleted = remote.isCompleted && !local.isCompleted;
+      const wouldResurrectDeleted = Boolean(remote.deletedAt) && !local.deletedAt;
+
+      if (wouldRegressRead || wouldRegressCompleted || wouldResurrectDeleted) {
+        const merged: BlackBoxEntry = {
+          ...local,
+          isRead: local.isRead || remote.isRead,
+          isCompleted: local.isCompleted || remote.isCompleted,
+          deletedAt: local.deletedAt ?? remote.deletedAt,
+          // 保持 pending 状态，后续 push 会带着合并后的真值再次与服务端对齐
+          syncStatus: 'pending',
+        };
+        this.logger.warn('黑匣子 pull 合并：本地 pending 胜出 LWW，但合并远端单调真值以免大门继续展示已完成条目', {
+          entryId: remote.id,
+          localUpdatedAt: local.updatedAt,
+          remoteUpdatedAt: remote.updatedAt,
+          mergedIsRead: merged.isRead,
+          mergedIsCompleted: merged.isCompleted,
+          mergedDeletedAt: merged.deletedAt,
+        });
+        await this.saveToLocal(merged);
+        updateBlackBoxEntry(merged);
+        return;
+      }
     }
 
     this.logger.debug('保留更晚的本地黑匣子快照，跳过远端覆盖', {

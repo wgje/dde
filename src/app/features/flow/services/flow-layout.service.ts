@@ -39,11 +39,21 @@ export interface LayoutOptions {
 
 /**
  * 自动布局输入节点
+ *
+ * 【补丁 B 2026-04-23】为后续拆分 rank 语义预留字段：
+ *  - `rank`        兼顾现有行为（tie-break）
+ *  - `preferredOrder` 同 stage 内希望的软约束顺序，未传时 fallback 到 rank
+ *  - `priority`    仅用于最后的稳定 tie-break，未传时视为 0
+ * 目前 compareLayoutNodes 仍仅使用 rank，这些字段预留给后续交叉最小化 / 约束系统使用。
  */
 export interface AutoLayoutNodeData {
   key: string;
   stage: number | null;
   rank?: number;
+  /** 软约束：同 stage 内的偏好顺序，未传时 fallback 到 rank。 */
+  preferredOrder?: number;
+  /** 可选优先级，用于多目标 tie-break。 */
+  priority?: number;
 }
 
 /**
@@ -368,6 +378,16 @@ function optimizeSiblingOrder(
 
           return compareLayoutNodes(left, right);
         });
+
+        // 【补丁 B 2026-04-23】兼容式局部 2-opt：在 barycenter sort 之后再跑一
+        // 轮相邻交换。稳定排序在 signal-less 兄弟夹在中间时可能产生满足适发比较器
+        // 但全局非最优的排列。这里只接受“严格降交叉”的交换：两个兄弟子树都拥有
+        // relationCenter 且 leftCenter > rightCenter + 1 时互换，不会破坏 rank 顺序
+        // 下的业务语义（signal-less 兄弟从不参与交换）。
+        if (LAYOUT_CONFIG.AUTO_LAYOUT_ENABLE_SIBLING_TWO_OPT && orderedChildren.length >= 2) {
+          orderedChildren = refineSiblingOrderWithTwoOpt(orderedChildren, subtreeMetrics);
+        }
+
         childrenMap.set(current.key, orderedChildren);
       }
     }
@@ -376,6 +396,60 @@ function optimizeSiblingOrder(
       stack.push(orderedChildren[index]);
     }
   }
+}
+
+/**
+ * 【补丁 B 2026-04-23】兄弟层 2-opt adjacent swap。
+ *
+ * 设计原则（电球不破业务顺序）：
+ *  1. 仅当两个相邻兄弟都拥有 relationCenter 且 relationCount > 0 时才考虑交换
+ *  2. 只有当 leftCenter > rightCenter + 1 （严格倒序）时才互换
+ *  3. signal-less 兄弟（relationCount === 0 或无 center）永不参与交换，
+ *     保证业务 rank 顺序不被破坏
+ *  4. 可证 non-worsening（每次交换严格减少 pairwise crossing cost），
+ *     以固定通过次数 + 严格改进两道门阱保证收敛
+ *
+ * 实用值：稳定排序在比较器非全序时（signal 和 signal-less 混杂）可能
+ * 遗留的局部倒序，本函数可以在不打破 rank 顺序的前提下修正。
+ */
+function refineSiblingOrderWithTwoOpt(
+  siblings: readonly AutoLayoutNodeData[],
+  subtreeMetrics: Map<string, SubtreeLayoutMetrics>,
+): AutoLayoutNodeData[] {
+  const best = siblings.slice();
+  const maxPasses = Math.max(1, best.length);
+  let changed = true;
+  let pass = 0;
+
+  while (changed && pass < maxPasses) {
+    changed = false;
+    for (let i = 0; i < best.length - 1; i += 1) {
+      const left = best[i];
+      const right = best[i + 1];
+      const leftMetrics = subtreeMetrics.get(left.key);
+      const rightMetrics = subtreeMetrics.get(right.key);
+
+      const leftCenter = leftMetrics?.relationCenter;
+      const rightCenter = rightMetrics?.relationCenter;
+      const leftCount = leftMetrics?.relationCount ?? 0;
+      const rightCount = rightMetrics?.relationCount ?? 0;
+
+      if (
+        leftCenter != null &&
+        rightCenter != null &&
+        leftCount > 0 &&
+        rightCount > 0 &&
+        leftCenter > rightCenter + 1
+      ) {
+        best[i] = right;
+        best[i + 1] = left;
+        changed = true;
+      }
+    }
+    pass += 1;
+  }
+
+  return best;
 }
 
 function computeSiblingGapRows(
