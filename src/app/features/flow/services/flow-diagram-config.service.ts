@@ -2,6 +2,7 @@ import { Injectable, inject, computed } from '@angular/core';
 import { ThemeService } from '../../../../services/theme.service';
 import { getFlowStyles, FlowStyleConfig, FlowTheme } from '../../../../config/flow-styles';
 import { GOJS_CONFIG, SUPERSCRIPT_DIGITS } from '../../../../config';
+import { LAYOUT_CONFIG } from '../../../../config/layout.config';
 import { Task, Project } from '../../../../models';
 import { LineageColorService } from '../../../../services/lineage-color.service';
 import * as go from 'gojs';
@@ -58,6 +59,17 @@ export interface GoJSLinkData {
    * 'crossTree' = 跨树链接模板（含 label panel + tooltip）
    */
   category?: string;
+  /**
+   * 【关联块错开 2026-04-23】同一 stage-pair 内跨树链接的 label 沿线长方
+   * 向的错开位置（范围 0.10-0.90）。默认 0.5（中点），同 stage-pair 多链接
+   * 时自动分散避免关联块堆叠。
+   */
+  labelSegmentFraction?: number;
+  /**
+   * 【关联块错开 2026-04-23】label 的垂直连线方向偏移（像素）。
+   * 用于短连线 + 多 label 场景的补充错开；与 segmentFraction 双重保证可读。
+   */
+  labelSegmentOffsetY?: number;
 }
 
 /**
@@ -214,6 +226,19 @@ export class FlowDiagramConfigService {
     // 添加跨树连接（过滤掉已软删除的连接）
     // 【P2-30 修复】使用 Set 实现 O(1) 查找，避免 O(n*m)
     const taskIdSet = new Set(tasksToShow.map(t => t.id));
+    // 【关联块错开 2026-04-23】按任务 id -> stage 建索引，用于后续按
+    // (fromStage, toStage) 分组计算 label 错开位置。
+    const taskStageMap = new Map<string, number | null>(
+      tasksToShow.map(t => [t.id, t.stage]),
+    );
+    // 【补丁 G 2026-04-23 14:55】按 stage -> 节点数索引，用于 label 二次避让
+    // 判定"节点密集区"。stage=null 的任务不参与边界密度计算。
+    const stageNodeCount = new Map<number, number>();
+    for (const t of tasksToShow) {
+      if (t.stage === null) continue;
+      stageNodeCount.set(t.stage, (stageNodeCount.get(t.stage) ?? 0) + 1);
+    }
+    const crossTreeLinksToStagger: GoJSLinkData[] = [];
     for (const conn of project.connections) {
       // 跳过已软删除的连接
       if (conn.deletedAt) continue;
@@ -221,7 +246,7 @@ export class FlowDiagramConfigService {
       const pairKey = `${conn.source}->${conn.target}`;
       if (!parentChildPairs.has(pairKey)) {
         if (taskIdSet.has(conn.source) && taskIdSet.has(conn.target)) {
-          linkDataArray.push({
+          const linkData: GoJSLinkData = {
             key: `cross-${conn.source}-${conn.target}`,
             from: conn.source,
             to: conn.target,
@@ -229,11 +254,19 @@ export class FlowDiagramConfigService {
             // 【2026-02-25 性能优化】跨树链接使用独立模板，含 label panel + tooltip
             category: 'crossTree',
             title: conn.title || '',
-            description: conn.description || ''
-          });
+            description: conn.description || '',
+          };
+          linkDataArray.push(linkData);
+          crossTreeLinksToStagger.push(linkData);
         }
       }
     }
+
+    // 【关联块错开 2026-04-23】同 stage-pair 的多条跨树链接 label
+    // 原先都钉在 segmentFraction=0.5，视觉上关联块完全重叠在同一条中线
+    // 附近。此处按 (minStage, maxStage) 分组，给组内每条链接赋予不同的
+    // 沿线位置 + 垂直偏移，空间层面把关联块分散开。
+    this.assignCrossTreeLabelStagger(crossTreeLinksToStagger, taskStageMap, stageNodeCount);
 
     // ========== 血缘追溯预处理 ==========
     // 在数据加载进 GoJS Model 之前，为每个节点和连线注入始祖信息和家族颜色
@@ -258,6 +291,168 @@ export class FlowDiagramConfigService {
       }),
       linkDataArray: enhancedData.linkDataArray,
     };
+  }
+
+  /**
+   * 【关联块错开 2026-04-23 / 补丁 F 碰撞检测 14:50】
+   *
+   * 问题：早期 v1 按 (minStage, maxStage) 的方向无关 pair 分组，会漏掉
+   * "不同 pair 但在同一 stage 边界上 label X 相同"的碰撞（例如 0→3 和
+   * 1→2 两条链接都穿越 stage1 和 stage2 之间的边界，label 可能都落在
+   * 同一 X 附近）。
+   *
+   * 新算法：按"链接实际穿越的 stage 边界"做贪心分配。
+   *   1. 每条跨树链接 [minStage, maxStage] 穿越边界 b ∈ [minStage, maxStage)。
+   *   2. 按 span 升序（窄范围优先，选择余地少），为每条链接挑选"当前最空
+   *      的边界"作为 label 锚点；填入该边界桶，slot = 桶内序号。
+   *   3. segmentFraction 基于锚点边界相对链接 from->to 方向的位置计算，
+   *      同一边界桶内按 slot 做微抖动 (±STEP*0.5)；桶内再按 slot 做垂直
+   *      偏移 (PIXEL_STEP/档) 双重错开。
+   *   4. span=0（同 stage 跨树连线）单独分组，保留中点 + 垂直偏移。
+   *
+   * 复杂度 O(L * S)：L=跨树链接数，S=stage 数。典型项目 L<100、S<10。
+   */
+  private assignCrossTreeLabelStagger(
+    crossTreeLinks: GoJSLinkData[],
+    taskStageMap: Map<string, number | null>,
+    stageNodeCount: Map<number, number>,
+  ): void {
+    if (crossTreeLinks.length < 2) return;
+
+    const FRACTION_STEP = LAYOUT_CONFIG.AUTO_LAYOUT_CROSS_TREE_LABEL_FRACTION_STEP;
+    const FRACTION_MIN = 0.08;
+    const FRACTION_MAX = 0.92;
+    const PIXEL_STEP = LAYOUT_CONFIG.AUTO_LAYOUT_CROSS_TREE_LABEL_OFFSET_PX;
+    const DENSE_THRESHOLD = LAYOUT_CONFIG.AUTO_LAYOUT_CROSS_TREE_LABEL_DENSE_STAGE_THRESHOLD;
+    const DENSE_BOOST = LAYOUT_CONFIG.AUTO_LAYOUT_CROSS_TREE_LABEL_DENSE_STAGE_VERTICAL_BOOST;
+
+    interface LinkSpan {
+      readonly link: GoJSLinkData;
+      readonly fromStage: number;
+      readonly toStage: number;
+      readonly minStage: number;
+      readonly maxStage: number;
+    }
+
+    const crossSpans: LinkSpan[] = [];
+    const zeroSpans: LinkSpan[] = [];
+    for (const link of crossTreeLinks) {
+      const a = taskStageMap.get(link.from);
+      const b = taskStageMap.get(link.to);
+      if (a === undefined || a === null || b === undefined || b === null) continue;
+      const span: LinkSpan = {
+        link,
+        fromStage: a,
+        toStage: b,
+        minStage: Math.min(a, b),
+        maxStage: Math.max(a, b),
+      };
+      if (span.maxStage === span.minStage) {
+        zeroSpans.push(span);
+      } else {
+        crossSpans.push(span);
+      }
+    }
+
+    // === span>0 链接：边界贪心分配 ===
+    // 窄跨度优先（选择余地少）；同跨度按 key 稳定排序。
+    crossSpans.sort((x, y) => {
+      const ds = (x.maxStage - x.minStage) - (y.maxStage - y.minStage);
+      if (ds !== 0) return ds;
+      return x.link.key.localeCompare(y.link.key);
+    });
+
+    // boundary b = stage b 与 stage b+1 之间的列间隙
+    const boundaryBuckets = new Map<number, LinkSpan[]>();
+    const linkAssignments = new Map<string, { boundary: number; slot: number }>();
+    for (const span of crossSpans) {
+      let bestBoundary = span.minStage;
+      let bestSize = Infinity;
+      // 选跨度内最空的边界；并列时选最小编号（稳定）
+      for (let b = span.minStage; b < span.maxStage; b += 1) {
+        const size = boundaryBuckets.get(b)?.length ?? 0;
+        if (size < bestSize) {
+          bestSize = size;
+          bestBoundary = b;
+        }
+      }
+      let bucket = boundaryBuckets.get(bestBoundary);
+      if (!bucket) {
+        bucket = [];
+        boundaryBuckets.set(bestBoundary, bucket);
+      }
+      const slot = bucket.length;
+      bucket.push(span);
+      linkAssignments.set(span.link.key, { boundary: bestBoundary, slot });
+    }
+
+    // 计算每条 span>0 链接的 fraction + offset
+    for (const span of crossSpans) {
+      const assignment = linkAssignments.get(span.link.key);
+      if (!assignment) continue;
+      const bucket = boundaryBuckets.get(assignment.boundary);
+      if (!bucket) continue;
+      const n = bucket.length;
+      const { boundary, slot } = assignment;
+      const rangeSpan = span.maxStage - span.minStage;
+      // 锚点边界在链接 minStage->maxStage 方向上的分数位置
+      const baseFractionFromMin = (boundary - span.minStage + 0.5) / rangeSpan;
+      // 桶内微抖动：同一边界内多条 label 沿 fraction 再细分一点
+      const jitter = n > 1
+        ? (slot - (n - 1) / 2) * (FRACTION_STEP * 0.5) / rangeSpan
+        : 0;
+      // 链接 from 可能是 min 也可能是 max；segmentFraction 永远相对 from->to
+      const fractionFromSource = span.fromStage === span.minStage
+        ? baseFractionFromMin + jitter
+        : 1 - baseFractionFromMin - jitter;
+      span.link.labelSegmentFraction = Math.min(
+        FRACTION_MAX,
+        Math.max(FRACTION_MIN, fractionFromSource),
+      );
+      // 【补丁 G 2026-04-23 14:55】node-label 重叠二次避让：
+      // 若边界两侧都是节点密集区（min(countL, countR) >= DENSE_THRESHOLD），
+      // 且该边界桶内已有 2+ label，把垂直偏移放大 DENSE_BOOST 倍，让 label
+      // 从节点行中间挤出到节点之间的空隙中。
+      let pixelStep = PIXEL_STEP;
+      if (n >= 2) {
+        const countL = stageNodeCount.get(boundary) ?? 0;
+        const countR = stageNodeCount.get(boundary + 1) ?? 0;
+        if (Math.min(countL, countR) >= DENSE_THRESHOLD) {
+          pixelStep = PIXEL_STEP * DENSE_BOOST;
+        }
+      }
+      span.link.labelSegmentOffsetY = n > 1
+        ? (slot - (n - 1) / 2) * pixelStep
+        : 0;
+    }
+
+    // === span=0 链接：同 stage 跨树，按 stage 分桶仅做垂直错开 ===
+    if (zeroSpans.length > 1) {
+      const sameStageBuckets = new Map<number, LinkSpan[]>();
+      for (const span of zeroSpans) {
+        let bucket = sameStageBuckets.get(span.minStage);
+        if (!bucket) {
+          bucket = [];
+          sameStageBuckets.set(span.minStage, bucket);
+        }
+        bucket.push(span);
+      }
+      for (const bucket of sameStageBuckets.values()) {
+        if (bucket.length < 2) continue;
+        bucket.sort((x, y) => x.link.key.localeCompare(y.link.key));
+        const n = bucket.length;
+        const mid = (n - 1) / 2;
+        // span=0 同 stage 密集判定：该 stage 自身节点数 >= DENSE_THRESHOLD
+        const stageForBucket = bucket[0].minStage;
+        const isDense = (stageNodeCount.get(stageForBucket) ?? 0) >= DENSE_THRESHOLD;
+        const pixelStep = isDense ? PIXEL_STEP * DENSE_BOOST : PIXEL_STEP;
+        for (let i = 0; i < n; i++) {
+          // 中点 + 垂直错开（fraction 保持 0.5）
+          bucket[i].link.labelSegmentFraction = 0.5;
+          bucket[i].link.labelSegmentOffsetY = (i - mid) * pixelStep;
+        }
+      }
+    }
   }
 
   /**

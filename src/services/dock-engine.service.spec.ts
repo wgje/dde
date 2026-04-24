@@ -1932,6 +1932,8 @@ describe('DockEngineService', () => {
     expect(service.focusingEntry()?.taskId).toBe('B');
     expect(service.entries().find(entry => entry.taskId === 'A')?.isMain).toBe(true);
     expect(service.entries().find(entry => entry.taskId === 'B')?.isMain).toBe(false);
+    expect(service.exportSnapshot().session.mainTaskId).toBe('A');
+    expect(service.exportSnapshot().focusSessionState?.commandCenterTasks.map(slot => slot.taskId)).toEqual(['A']);
   });
 
   it('switchToTask should move the selected visible card to the front and preserve the remaining order', () => {
@@ -2292,6 +2294,66 @@ describe('DockEngineService', () => {
     const ordered = service.orderedDockEntries().map(entry => entry.taskId);
     expect(ordered).toEqual(['A', 'C', 'B']);
     expect(service.entries().every(entry => entry.manualOrder !== undefined)).toBe(true);
+  });
+
+  it('restoreSnapshot should hydrate remote C-slot order into project and exported session state', () => {
+    seedTask('A');
+    seedTask('B');
+    seedTask('C');
+    seedTask('D');
+
+    const makeEntry = (taskId: string, dockedOrder: number, overrides: Partial<DockSnapshot['entries'][number]> = {}) => ({
+      taskId,
+      title: taskId,
+      sourceProjectId: 'project-1',
+      status: 'stalled' as const,
+      load: 'low' as const,
+      expectedMinutes: 10,
+      waitMinutes: null,
+      waitStartedAt: null,
+      lane: 'combo-select' as const,
+      zoneSource: 'manual' as const,
+      isMain: false,
+      dockedOrder,
+      detail: '',
+      sourceKind: 'project-task' as const,
+      systemSelected: false,
+      recommendedScore: null,
+      ...overrides,
+    });
+
+    service.restoreSnapshot({
+      version: 7,
+      entries: [
+        makeEntry('A', 0, { isMain: true, status: 'focusing' }),
+        makeEntry('B', 1),
+        makeEntry('C', 2),
+        makeEntry('D', 3),
+      ],
+      focusMode: true,
+      isDockExpanded: true,
+      muteWaitTone: false,
+      session: {
+        firstDragIntervened: true,
+        focusBlurOn: true,
+        focusScrimOn: true,
+        mainTaskId: 'A',
+        comboSelectIds: ['D', 'B', 'C'],
+        backupIds: [],
+      },
+      firstDragDone: true,
+      dailySlots: [],
+      suspendChainRootTaskId: null,
+      suspendRecommendationLocked: false,
+      pendingDecision: null,
+      dailyResetDate: '2026-04-24',
+      savedAt: '2026-04-24T08:00:00.000Z',
+    });
+
+    expect(service.consoleVisibleEntries().map(entry => entry.taskId)).toEqual(['A', 'D', 'B', 'C']);
+    expect(service.entries().map(entry => entry.taskId)).toEqual(['A', 'D', 'B', 'C']);
+    expect(service.exportSnapshot().session.comboSelectIds).toEqual(['D', 'B', 'C']);
+    expect(service.exportSnapshot().focusSessionState?.comboSelectTasks.map(slot => slot.taskId)).toEqual(['D', 'B', 'C']);
   });
 
   it('dock capacity should warn at soft limit and reject at hard limit', () => {

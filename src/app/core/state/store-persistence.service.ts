@@ -526,16 +526,16 @@ export class StorePersistenceService {
       // 恢复到 Store
       this.projectStore.setProject(project);
       
-      // 【关键修复】过滤已删除的任务，防止从 IndexedDB 恢复时复活已删除任务
-      // 只恢复 deletedAt 为空的任务
-      const activeTasks = tasks.filter(t => !t.deletedAt);
-      const filteredCount = tasks.length - activeTasks.length;
-      if (filteredCount > 0) {
-        this.logger.debug('已过滤已删除任务', { projectId, filteredCount });
+      // 软删除任务仍属于回收站保留窗口；永久删除依赖 tombstone/服务端清理收敛，
+      // 不能在本地恢复阶段提前把它们丢弃。
+      const restoredTasks = tasks;
+      const deletedTaskCount = restoredTasks.filter(t => t.deletedAt).length;
+      if (deletedTaskCount > 0) {
+        this.logger.debug('本地恢复保留回收站任务', { projectId, deletedTaskCount });
       }
       
       // 【P1-05 修复】过滤软删除的连接以及引用已删除任务的孤立连接
-      const activeTaskIds = new Set(activeTasks.map(t => t.id));
+      const activeTaskIds = new Set(restoredTasks.filter(t => !t.deletedAt).map(t => t.id));
       const activeConnections = connections.filter(c =>
         !c.deletedAt && activeTaskIds.has(c.source) && activeTaskIds.has(c.target)
       );
@@ -544,7 +544,7 @@ export class StorePersistenceService {
         this.logger.debug('已过滤已删除连接', { projectId, filteredConnCount });
       }
       
-      this.taskStore.setTasks(activeTasks.map(t => {
+      this.taskStore.setTasks(restoredTasks.map(t => {
         const { projectId: _, ...task } = t;
         return task as Task;
       }), projectId);
@@ -555,8 +555,8 @@ export class StorePersistenceService {
       
       this.logger.info('项目数据已从本地恢复', { 
         projectId, 
-        tasksCount: activeTasks.length, 
-        connectionsCount: connections.length 
+        tasksCount: restoredTasks.length,
+        connectionsCount: connections.length
       });
       
       return true;

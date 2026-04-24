@@ -51,6 +51,7 @@ describe('UserPreferencesSyncService', () => {
         auto_resolve_conflicts: true,
         local_backup_enabled: false,
         local_backup_interval_ms: 3600000,
+        last_backup_proof_at: '2026-04-23T10:00:00.000Z',
         focus_preferences: {
           gateEnabled: true,
           strataEnabled: true,
@@ -71,6 +72,7 @@ describe('UserPreferencesSyncService', () => {
     expect(select).toHaveBeenCalled();
     expect((select.mock.calls[0] as unknown[])[0]).not.toContain('dock_snapshot');
     expect(prefs?.dockSnapshot).toBeUndefined();
+    expect(prefs?.lastBackupProofAt).toBe('2026-04-23T10:00:00.000Z');
     expect(prefs?.focusPreferences?.routineResetHourLocal).toBe(5);
     expect(prefs?.focusPreferences?.restReminderHighLoadMinutes).toBe(120);
     expect(prefs?.focusPreferences?.restReminderLowLoadMinutes).toBe(20);
@@ -79,6 +81,7 @@ describe('UserPreferencesSyncService', () => {
   it('saveUserPreferences should not persist dock_snapshot runtime field', async () => {
     const service = TestBed.inject(UserPreferencesSyncService);
     const ok = await service.saveUserPreferences('user-1', {
+      lastBackupProofAt: '2026-04-23T11:00:00.000Z',
       dockSnapshot: {
         version: 5,
         entries: [],
@@ -105,6 +108,7 @@ describe('UserPreferencesSyncService', () => {
     expect(ok).toBe(true);
     const [payload] = upsert.mock.calls[0];
     expect(payload.user_id).toBe('user-1');
+    expect(payload.last_backup_proof_at).toBe('2026-04-23T11:00:00.000Z');
     expect(payload.dock_snapshot).toBeUndefined();
   });
 });

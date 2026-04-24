@@ -13,7 +13,8 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.39.0';
  *   问题，这里把需要的 5 个最小辅助函数全部内联，保持单文件可部署。
  * - 验证通过后以 service-role client 直接 PATCH `black_box_entries` 行的
  *   `is_read` 或 `is_completed` 字段；BEFORE UPDATE 触发器会盖章权威 `updated_at`，
- *   LWW 同步把变更广播到其它端（网页 / TWA）。
+ *   LWW 同步把变更广播到其它端（网页 / TWA）。`read` 会依赖 updated_at 启动
+ *   widget-summary 的短时冷却窗口。
  * - 响应只返回 `{ ok: true, entryId, action }`，由小组件侧做乐观缓存 + 下一次
  *   widget-summary 回环校正。失败时返回 `{ ok: false, code, error }`，小组件侧
  *   可选择回退到深链方案。
@@ -304,20 +305,12 @@ async function handleRequest(req: Request): Promise<Response> {
     return errorResponse(responseHeaders, 401, 'TOKEN_EXPIRED', 'Widget token has expired');
   }
 
-  // 2026-04-22 语义强化：
-  //   * `read`  → 设 `is_read=true` 并把 `snooze_until` 推到「明天」。
-  //     schema 里 snooze_until 是 `date` 粒度；widget_summary_wave1 的过滤是
-  //     `date < p_today AND (snooze_until IS NULL OR snooze_until <= p_today)`。
-  //     令 snooze_until = 明天（UTC），今天 p_today=今天，
-  //     `明天 <= 今天` = false → 当天隐藏；次日 p_today 前进，条目重新浮出，
-  //     对齐用户需求「过一段时间大门会再次出现 / 间歇式反复」。
-  //   * `complete` → 设 `is_completed=true`。Web 端 strata-view（项目历史回顾）
-  //     会拉取 is_completed=true 条目，RPC gate 口径会过滤掉它，对齐需求
-  //     「选择了完成则黑匣子对应条目会被放置于'项目历史回顾'板块」。
-  const nowMs = Date.now();
-  const tomorrowIsoDate = new Date(nowMs + 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  // 2026-04-24 与 widget 大门语义对齐：
+  //   * `read`     → 设 `is_read=true` 并由 updated_at 启动 30 分钟冷却；
+  //                  期间 widget 大门当前队列清空/前进，冷却后间歇式再现。
+  //   * `complete` → 设 `is_completed=true`，条目从大门队列移除，并进入项目历史回顾。
   const patch: Record<string, unknown> = action === 'read'
-    ? { is_read: true, snooze_until: tomorrowIsoDate }
+    ? { is_read: true }
     : { is_completed: true };
 
   const update = await client

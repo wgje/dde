@@ -649,7 +649,9 @@ export class DockSnapshotPersistenceService {
       mainTaskId:
         typeof source?.mainTaskId === 'string' && source.mainTaskId
           ? source.mainTaskId
-          : fallbacks.mainTaskId,
+          : source && Object.prototype.hasOwnProperty.call(source, 'mainTaskId')
+            ? null
+            : fallbacks.mainTaskId,
       comboSelectIds: idLists.comboSelectIds,
       backupIds: idLists.backupIds,
       ...fields,

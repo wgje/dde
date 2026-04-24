@@ -115,9 +115,8 @@
 -- ============================================================
 
 -- ============================================
--- 0. 辅助函数
+-- 13.1 软删除清理定时任务（pg_cron，可选）
 -- ============================================
-
 -- 自动更新 updated_at 时间戳
 CREATE OR REPLACE FUNCTION update_updated_at_column()
 RETURNS TRIGGER AS $$
@@ -386,6 +385,7 @@ CREATE TABLE IF NOT EXISTS public.user_preferences (
   auto_resolve_conflicts BOOLEAN DEFAULT true,
   local_backup_enabled BOOLEAN DEFAULT false,
   local_backup_interval_ms INTEGER DEFAULT 3600000,
+  last_backup_proof_at TIMESTAMP WITH TIME ZONE DEFAULT NULL,
   focus_preferences JSONB DEFAULT '{"gateEnabled":true,"strataEnabled":true,"blackBoxEnabled":true,"maxSnoozePerDay":3}'::jsonb,
   -- 【2026-02-25 新增】停泊坞快照（跨设备同步）
   dock_snapshot JSONB DEFAULT NULL,
@@ -394,10 +394,31 @@ CREATE TABLE IF NOT EXISTS public.user_preferences (
   UNIQUE(user_id)
 );
 
+CREATE OR REPLACE FUNCTION public.user_preferences_keep_latest_backup_proof()
+RETURNS TRIGGER AS $$
+BEGIN
+  IF TG_OP = 'UPDATE'
+     AND OLD.last_backup_proof_at IS NOT NULL
+     AND (
+       NEW.last_backup_proof_at IS NULL
+       OR NEW.last_backup_proof_at < OLD.last_backup_proof_at
+     ) THEN
+    NEW.last_backup_proof_at := OLD.last_backup_proof_at;
+  END IF;
+
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
 DROP TRIGGER IF EXISTS update_user_preferences_updated_at ON public.user_preferences;
 CREATE TRIGGER update_user_preferences_updated_at
   BEFORE UPDATE ON public.user_preferences
   FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS keep_latest_backup_proof_on_user_preferences ON public.user_preferences;
+CREATE TRIGGER keep_latest_backup_proof_on_user_preferences
+  BEFORE UPDATE ON public.user_preferences
+  FOR EACH ROW EXECUTE FUNCTION public.user_preferences_keep_latest_backup_proof();
 
 ALTER TABLE public.user_preferences ENABLE ROW LEVEL SECURITY;
 -- 注：idx_user_preferences_user_id 已删除（user_id 已有 UNIQUE 约束）
@@ -1070,9 +1091,59 @@ LANGUAGE plpgsql SECURITY DEFINER
 SET search_path TO 'pg_catalog', 'public' AS $$
 DECLARE deleted_count INTEGER;
 BEGIN
-  WITH deleted AS (
-    DELETE FROM public.tasks WHERE deleted_at IS NOT NULL AND deleted_at < NOW() - INTERVAL '30 days' RETURNING id
-  ) SELECT COUNT(*) INTO deleted_count FROM deleted;
+  WITH expired_tasks AS (
+    SELECT t.id AS task_id, t.project_id
+    FROM public.tasks t
+    WHERE t.deleted_at IS NOT NULL
+      AND t.deleted_at < NOW() - INTERVAL '30 days'
+  ),
+  task_tombstone_rows AS (
+    INSERT INTO public.task_tombstones (task_id, project_id, deleted_at, deleted_by)
+    SELECT et.task_id, et.project_id, NOW(), NULL
+    FROM expired_tasks et
+    ON CONFLICT (task_id)
+    DO UPDATE SET
+      project_id = EXCLUDED.project_id,
+      deleted_at = EXCLUDED.deleted_at,
+      deleted_by = EXCLUDED.deleted_by
+    RETURNING task_id, project_id
+  ),
+  expired_connections AS (
+    SELECT DISTINCT c.id AS connection_id, c.project_id
+    FROM public.connections c
+    JOIN task_tombstone_rows tt ON tt.project_id = c.project_id
+    WHERE c.source_id = tt.task_id OR c.target_id = tt.task_id
+  ),
+  connection_tombstone_rows AS (
+    INSERT INTO public.connection_tombstones (connection_id, project_id, deleted_at, deleted_by)
+    SELECT ec.connection_id, ec.project_id, NOW(), NULL
+    FROM expired_connections ec
+    ON CONFLICT (connection_id)
+    DO UPDATE SET
+      project_id = EXCLUDED.project_id,
+      deleted_at = EXCLUDED.deleted_at,
+      deleted_by = EXCLUDED.deleted_by
+    RETURNING connection_id
+  ),
+  deleted_connections AS (
+    DELETE FROM public.connections c
+    USING connection_tombstone_rows ct
+    WHERE c.id = ct.connection_id
+    RETURNING c.id
+  ),
+  deleted_tasks AS (
+    DELETE FROM public.tasks t
+    USING task_tombstone_rows tt
+    WHERE t.id = tt.task_id
+    RETURNING t.id
+  )
+  SELECT COUNT(*) INTO deleted_count FROM deleted_tasks;
+
+  IF deleted_count > 0 THEN
+    INSERT INTO public.cleanup_logs (type, details)
+    VALUES ('deleted_tasks_cleanup', jsonb_build_object('deleted_count', deleted_count, 'cleanup_time', NOW(), 'mode', 'tombstone_then_delete'));
+  END IF;
+
   RETURN deleted_count;
 END; $$;
 
@@ -1096,13 +1167,34 @@ LANGUAGE plpgsql SECURITY DEFINER
 SET search_path TO 'pg_catalog', 'public' AS $$
 DECLARE deleted_count INTEGER;
 BEGIN
-  WITH deleted AS (
-    DELETE FROM public.connections WHERE deleted_at IS NOT NULL AND deleted_at < NOW() - INTERVAL '30 days' RETURNING id
-  ) SELECT COUNT(*) INTO deleted_count FROM deleted;
+  WITH expired_connections AS (
+    SELECT c.id AS connection_id, c.project_id
+    FROM public.connections c
+    WHERE c.deleted_at IS NOT NULL
+      AND c.deleted_at < NOW() - INTERVAL '30 days'
+  ),
+  connection_tombstone_rows AS (
+    INSERT INTO public.connection_tombstones (connection_id, project_id, deleted_at, deleted_by)
+    SELECT ec.connection_id, ec.project_id, NOW(), NULL
+    FROM expired_connections ec
+    ON CONFLICT (connection_id)
+    DO UPDATE SET
+      project_id = EXCLUDED.project_id,
+      deleted_at = EXCLUDED.deleted_at,
+      deleted_by = EXCLUDED.deleted_by
+    RETURNING connection_id
+  ),
+  deleted AS (
+    DELETE FROM public.connections c
+    USING connection_tombstone_rows ct
+    WHERE c.id = ct.connection_id
+    RETURNING c.id
+  )
+  SELECT COUNT(*) INTO deleted_count FROM deleted;
   
   IF deleted_count > 0 THEN
     INSERT INTO public.cleanup_logs (type, details)
-    VALUES ('deleted_connections_cleanup', jsonb_build_object('deleted_count', deleted_count, 'cleanup_time', NOW()));
+    VALUES ('deleted_connections_cleanup', jsonb_build_object('deleted_count', deleted_count, 'cleanup_time', NOW(), 'mode', 'tombstone_then_delete'));
   END IF;
   
   RETURN deleted_count;
@@ -1613,7 +1705,8 @@ USING (bucket_id = 'attachments' AND (storage.foldername(name))[1] = auth.uid():
 -- 1. 为 user_preferences 表添加缺失的列
 ALTER TABLE user_preferences
   ADD COLUMN IF NOT EXISTS layout_direction varchar(10) DEFAULT 'ltr',
-  ADD COLUMN IF NOT EXISTS floating_window_pref varchar(10) DEFAULT 'auto';
+  ADD COLUMN IF NOT EXISTS floating_window_pref varchar(10) DEFAULT 'auto',
+  ADD COLUMN IF NOT EXISTS last_backup_proof_at timestamptz DEFAULT NULL;
 
 -- 添加约束检查
 DO $$
@@ -4407,6 +4500,7 @@ DECLARE
   v_unread_count INT := 0;
   v_preview JSONB := '[]'::JSONB;
   v_black_box_watermark TIMESTAMPTZ;
+  v_gate_read_cooldown_cutoff TIMESTAMPTZ := now() - interval '30 minutes';
   v_dock_count INT := 0;
   v_dock_watermark TIMESTAMPTZ;
 BEGIN
@@ -4435,7 +4529,8 @@ BEGIN
       AND is_completed = FALSE
       AND is_archived = FALSE
       AND date < p_today
-      AND (snooze_until IS NULL OR snooze_until <= p_today);
+      AND (snooze_until IS NULL OR snooze_until <= p_today)
+      AND (is_read = FALSE OR updated_at <= v_gate_read_cooldown_cutoff);
 
   SELECT count(*)::INT
     INTO v_unread_count
@@ -4478,6 +4573,7 @@ BEGIN
           AND is_archived = FALSE
           AND date < p_today
           AND (snooze_until IS NULL OR snooze_until <= p_today)
+          AND (is_read = FALSE OR updated_at <= v_gate_read_cooldown_cutoff)
         ORDER BY created_at ASC
         LIMIT greatest(p_preview_limit, 0)
     ) bb;

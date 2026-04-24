@@ -447,25 +447,30 @@ interface TaskAttachmentMetadata {
                   </select>
                 </div>
 
-                <div class="grid grid-cols-[1fr,64px,auto] gap-2 items-center">
+                <!-- 【2026-04-23 响应式】窄屏（<640px）改为两行堆叠：
+                     第 1 行：名称 input 占满宽度；第 2 行：次数 input + 添加按钮并排。
+                     宽屏恢复原来的三列 grid。通过 sm:contents 让中间 div 桌面端解构成直接 grid 子项。 -->
+                <div class="flex flex-col gap-2 sm:grid sm:grid-cols-[1fr_64px_auto] sm:items-center">
                   <input
                     type="text"
                     [(ngModel)]="newRoutineTitle"
                     placeholder="新增日常任务，例如：喝水"
-                    class="rounded-lg border border-slate-200 dark:border-stone-600 bg-slate-50 dark:bg-stone-700 px-3 py-2 text-xs text-slate-700 dark:text-stone-200 outline-none" />
-                  <input
-                    type="number"
-                    min="1"
-                    max="24"
-                    [(ngModel)]="newRoutineMaxCount"
-                    class="rounded-lg border border-slate-200 dark:border-stone-600 bg-slate-50 dark:bg-stone-700 px-2 py-2 text-xs text-slate-700 dark:text-stone-200 outline-none"
-                    placeholder="次数" />
-                  <button
-                    type="button"
-                    class="rounded-lg bg-indigo-600 px-3 py-2 text-[11px] font-semibold text-white hover:bg-indigo-500"
-                    (click)="addRoutineSlot()">
-                    添加
-                  </button>
+                    class="w-full min-w-0 rounded-lg border border-slate-200 dark:border-stone-600 bg-slate-50 dark:bg-stone-700 px-3 py-2 text-xs text-slate-700 dark:text-stone-200 outline-none" />
+                  <div class="flex gap-2 sm:contents">
+                    <input
+                      type="number"
+                      min="1"
+                      max="24"
+                      [(ngModel)]="newRoutineMaxCount"
+                      class="w-16 flex-shrink-0 rounded-lg border border-slate-200 dark:border-stone-600 bg-slate-50 dark:bg-stone-700 px-2 py-2 text-xs text-slate-700 dark:text-stone-200 outline-none"
+                      placeholder="次数" />
+                    <button
+                      type="button"
+                      class="flex-1 sm:flex-initial rounded-lg bg-indigo-600 px-3 py-2 text-[11px] font-semibold text-white hover:bg-indigo-500"
+                      (click)="addRoutineSlot()">
+                      添加
+                    </button>
+                  </div>
                 </div>
               </div>
 

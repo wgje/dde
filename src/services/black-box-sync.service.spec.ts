@@ -28,6 +28,13 @@ function createEntry(overrides: Partial<BlackBoxEntry> & Pick<BlackBoxEntry, 'id
     ...overrides,
   };
 }
+
+async function flushMicrotasks(turns = 6): Promise<void> {
+  for (let i = 0; i < turns; i += 1) {
+    await Promise.resolve();
+  }
+}
+
 describe('BlackBoxSyncService', () => {
   let service: BlackBoxSyncService;
   let initDbSpy: ReturnType<typeof vi.spyOn>;
@@ -228,6 +235,43 @@ describe('BlackBoxSyncService', () => {
         }),
       })
     );
+  });
+
+  it('should bypass freshness window when pending entries need authoritative reconcile', async () => {
+    const doPullSpy = vi.spyOn(
+      service as unknown as { doPullChanges: () => Promise<void> },
+      'doPullChanges'
+    ).mockResolvedValue(true);
+    const pendingEntry = createEntry({
+      id: crypto.randomUUID(),
+      syncStatus: 'pending',
+    });
+
+    setBlackBoxEntries([pendingEntry]);
+    (service as unknown as { lastPullTime: number }).lastPullTime = Date.now();
+
+    await service.pullChanges({ reason: 'panel-open' });
+
+    expect(doPullSpy).toHaveBeenCalledTimes(1);
+    expect(mockSentry.captureMessage).not.toHaveBeenCalled();
+  });
+
+  it('should bypass resume cooldown when pending entries need authoritative reconcile', async () => {
+    const doPullSpy = vi.spyOn(
+      service as unknown as { doPullChanges: () => Promise<void> },
+      'doPullChanges'
+    ).mockResolvedValue(true);
+    const pendingEntry = createEntry({
+      id: crypto.randomUUID(),
+      syncStatus: 'pending',
+    });
+
+    setBlackBoxEntries([pendingEntry]);
+    (service as unknown as { lastResumePullAt: number }).lastResumePullAt = Date.now();
+
+    await service.pullChanges({ reason: 'resume' });
+
+    expect(doPullSpy).toHaveBeenCalledTimes(1);
   });
 
   it('should not report passive view refresh duplicates to Sentry', async () => {
@@ -757,7 +801,7 @@ describe('BlackBoxSyncService', () => {
     authSignals.currentUserId.set(null);
 
     service.setRetryQueueHandler(enqueue);
-    await Promise.resolve();
+    await flushMicrotasks();
 
     expect(enqueue).not.toHaveBeenCalled();
     expect(supabase.clientAsync).not.toHaveBeenCalled();
@@ -767,8 +811,7 @@ describe('BlackBoxSyncService', () => {
     authSignals.sessionInitialized.set(true);
     authSignals.runtimeState.set('ready');
 
-    await Promise.resolve();
-    await Promise.resolve();
+    await flushMicrotasks();
 
     expect(inQuery).toHaveBeenCalledWith('id', [entryId]);
     expect(enqueue).not.toHaveBeenCalled();

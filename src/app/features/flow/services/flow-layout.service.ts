@@ -595,7 +595,17 @@ function buildAdaptiveStageXMap(
       densityPressure + linkPressure + crossTreePressure + multiParentPressure,
     );
 
-    currentX += resolvedOptions.layerSpacing * (1 + extraSpacingFactor);
+    // 【补丁 D 2026-04-23】按跨树 label 密度的绝对像素加宽：
+    // 当某 stage 边界横跨 N 条跨树链接（N>=2），关联块会沿该 gap 错开
+    // 排布（补丁 C），若 gap 本身太窄，错开后 label 会溢出到节点上方。
+    // 按 sqrt(N-1) 放大避免 O(N) 爆炸；2 条 → ~1 * step、5 条 → 2 * step。
+    const crossTreeCount = stageBoundaryCrossTreeCounts[stageIndex];
+    const labelDensityExtraPx = crossTreeCount >= 2
+      ? LAYOUT_CONFIG.AUTO_LAYOUT_CROSS_TREE_LABEL_DENSITY_WIDEN_PX
+        * Math.sqrt(crossTreeCount - 1)
+      : 0;
+
+    currentX += resolvedOptions.layerSpacing * (1 + extraSpacingFactor) + labelDensityExtraPx;
   });
 
   return stageXMap;

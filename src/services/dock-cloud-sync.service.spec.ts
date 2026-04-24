@@ -324,6 +324,35 @@ describe('DockCloudSyncService', () => {
         }),
       );
     });
+
+    it('should enqueue again when C-slot order changes without count changes', () => {
+      const baseSession = makeSnapshot().session;
+      service.init(makeCallbacks());
+
+      service.scheduleCloudPush('user-1', makeSnapshot({
+        focusMode: true,
+        session: {
+          ...baseSession,
+          mainTaskId: 'A',
+          comboSelectIds: ['B', 'C', 'D'],
+          backupIds: [],
+        },
+      }));
+      vi.advanceTimersByTime(3000);
+
+      service.scheduleCloudPush('user-1', makeSnapshot({
+        focusMode: true,
+        session: {
+          ...baseSession,
+          mainTaskId: 'A',
+          comboSelectIds: ['D', 'B', 'C'],
+          backupIds: [],
+        },
+      }));
+      vi.advanceTimersByTime(3000);
+
+      expect(mockActionQueue.enqueueForOwner).toHaveBeenCalledTimes(2);
+    });
   });
 
   // ─── scheduleCloudPull ──────────────────────

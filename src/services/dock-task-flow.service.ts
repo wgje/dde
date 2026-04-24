@@ -494,7 +494,19 @@ export class DockTaskFlowService {
     if (!pending) return;
     this.ctx.pendingDecision.set(null);
     this.ctx.highlightedIds.set(new Set());
-    this.ctx.entries.update(prev => this.completionFlow.clearSystemSelectionOnEntries(prev));
+    this.ctx.entries.update(prev => {
+      const cleared = this.completionFlow.clearSystemSelectionOnEntries(prev);
+      const rootStillActive = cleared.some(
+        entry => entry.taskId === pending.rootTaskId && entry.status !== 'completed',
+      );
+      if (!rootStillActive) {
+        return this.completionFlow.enforceSingleMainInvariant(cleared);
+      }
+      return cleared.map(entry => {
+        const nextIsMain = entry.taskId === pending.rootTaskId && entry.status !== 'completed';
+        return entry.isMain === nextIsMain ? entry : { ...entry, isMain: nextIsMain };
+      });
+    });
     this.ctx.lastRuleDecision.set(
       createRuleDecision({
         type: 'completion_followup',

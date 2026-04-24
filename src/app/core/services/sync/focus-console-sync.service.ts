@@ -31,6 +31,25 @@ function isDockSnapshotLike(value: unknown): value is DockSnapshot {
   return typeof v === 'number' && v >= 2 && v <= 7;
 }
 
+function toEpochMs(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value !== 'string' || !value) return null;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function snapshotSavedAtMs(snapshot: unknown): number | null {
+  if (!snapshot || typeof snapshot !== 'object') return null;
+  return toEpochMs((snapshot as Record<string, unknown>)['savedAt']);
+}
+
+function maxKnownTimestampMs(values: unknown[]): number | null {
+  const parsed = values
+    .map(toEpochMs)
+    .filter((value): value is number => value !== null);
+  return parsed.length > 0 ? Math.max(...parsed) : null;
+}
+
 interface FocusSessionRow {
   id: string;
   user_id: string;
@@ -239,16 +258,23 @@ export class FocusConsoleSyncService {
       };
 
       // C-4 fix: 写入前检查远端版本，避免过期重试覆盖更新数据
-      const { data: existing } = await client
+      const { data: existing, error: existingError } = await client
         .from('focus_sessions')
-        .select('session_state')
+        .select('updated_at,session_state')
         .eq('id', record.id)
         .maybeSingle();
+      if (existingError) throw supabaseErrorToError(existingError);
       if (existing?.session_state) {
-        const remoteSavedAt = (existing.session_state as Record<string, unknown>)?.savedAt;
-        const localSavedAt = (record.snapshot as unknown as Record<string, unknown>)?.savedAt;
-        if (typeof remoteSavedAt === 'number' && typeof localSavedAt === 'number' && remoteSavedAt > localSavedAt) {
-          this.logger.info('saveFocusSession skipped: remote is newer', { remoteSavedAt, localSavedAt });
+        const remoteMs = maxKnownTimestampMs([
+          (existing as { updated_at?: unknown }).updated_at,
+          snapshotSavedAtMs(existing.session_state),
+        ]);
+        const localMs = maxKnownTimestampMs([
+          record.updatedAt,
+          snapshotSavedAtMs(record.snapshot),
+        ]);
+        if (remoteMs !== null && localMs !== null && remoteMs > localMs) {
+          this.logger.info('saveFocusSession skipped: remote is newer', { remoteMs, localMs });
           return success(undefined);
         }
       }

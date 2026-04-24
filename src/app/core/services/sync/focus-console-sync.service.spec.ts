@@ -2,7 +2,9 @@ import { TestBed } from '@angular/core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { FocusConsoleSyncService } from './focus-console-sync.service';
 import { SupabaseClientService } from '../../../../services/supabase-client.service';
+import { AuthService } from '../../../../services/auth.service';
 import { LoggerService } from '../../../../services/logger.service';
+import { SessionManagerService } from './session-manager.service';
 import {
   createBrowserNetworkSuspendedError,
   ensureBrowserNetworkSuspensionTracking,
@@ -19,6 +21,19 @@ describe('FocusConsoleSyncService', () => {
   const mockSupabaseClientService = {
     isConfigured: true,
     client: vi.fn(() => mockClient),
+  };
+
+  const mockAuthService = {
+    currentUserId: vi.fn(() => 'user-1'),
+    sessionInitialized: vi.fn(() => true),
+    authState: vi.fn(() => ({ isCheckingSession: false })),
+    runtimeState: vi.fn(() => 'ready'),
+    peekPersistedSessionIdentity: vi.fn(() => ({ userId: 'user-1' })),
+  };
+
+  const mockSessionManager = {
+    isSessionExpiredError: vi.fn(() => false),
+    tryRefreshSessionWithSession: vi.fn().mockResolvedValue({ refreshed: false }),
   };
 
   const mockLogger = {
@@ -42,6 +57,14 @@ describe('FocusConsoleSyncService', () => {
     mockClient.from.mockReset();
     mockClient.rpc.mockReset();
     mockSupabaseClientService.client.mockClear();
+    mockSupabaseClientService.isConfigured = true;
+    mockAuthService.currentUserId.mockClear();
+    mockAuthService.sessionInitialized.mockClear();
+    mockAuthService.authState.mockClear();
+    mockAuthService.runtimeState.mockClear();
+    mockAuthService.peekPersistedSessionIdentity.mockClear();
+    mockSessionManager.isSessionExpiredError.mockClear();
+    mockSessionManager.tryRefreshSessionWithSession.mockClear();
     resetBrowserNetworkSuspensionTrackingForTests();
     ensureBrowserNetworkSuspensionTracking();
     setVisibilityState('visible');
@@ -50,6 +73,8 @@ describe('FocusConsoleSyncService', () => {
       providers: [
         FocusConsoleSyncService,
         { provide: SupabaseClientService, useValue: mockSupabaseClientService },
+        { provide: AuthService, useValue: mockAuthService },
+        { provide: SessionManagerService, useValue: mockSessionManager },
         { provide: LoggerService, useValue: mockLogger },
       ],
     });
@@ -136,6 +161,59 @@ describe('FocusConsoleSyncService', () => {
     });
 
     expect(result.ok).toBe(false);
+  });
+
+  it('saveFocusSession should not overwrite a newer remote snapshot with stale local order', async () => {
+    const maybeSingle = vi.fn().mockResolvedValue({
+      data: {
+        updated_at: '2026-03-03T01:10:00.000Z',
+        session_state: {
+          version: 7,
+          savedAt: '2026-03-03T01:10:00.000Z',
+        },
+      },
+      error: null,
+    });
+    const eq = vi.fn(() => ({ maybeSingle }));
+    const select = vi.fn(() => ({ eq }));
+    const upsert = vi.fn().mockResolvedValue({ error: null });
+    mockClient.from
+      .mockReturnValueOnce({ select })
+      .mockReturnValueOnce({ upsert });
+
+    const result = await service.saveFocusSession({
+      id: 'session-1',
+      userId: 'user-1',
+      startedAt: '2026-03-03T00:00:00.000Z',
+      endedAt: null,
+      updatedAt: '2026-03-03T01:00:00.000Z',
+      snapshot: {
+        version: 7,
+        entries: [],
+        focusMode: true,
+        isDockExpanded: true,
+        muteWaitTone: false,
+        session: {
+          firstDragIntervened: true,
+          focusBlurOn: true,
+          focusScrimOn: true,
+          mainTaskId: 'A',
+          comboSelectIds: ['B', 'C', 'D'],
+          backupIds: [],
+        },
+        dailySlots: [],
+        suspendChainRootTaskId: null,
+        suspendRecommendationLocked: false,
+        pendingDecision: null,
+        lastRuleDecision: null,
+        dailyResetDate: '2026-03-03',
+        savedAt: '2026-03-03T01:00:00.000Z',
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(select).toHaveBeenCalledWith('updated_at,session_state');
+    expect(upsert).not.toHaveBeenCalled();
   });
 
   it('saveFocusSession should defer remote write during browser suspension window', async () => {

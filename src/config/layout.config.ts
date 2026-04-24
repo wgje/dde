@@ -65,17 +65,15 @@ export const LAYOUT_CONFIG = {
    * 【补丁 A 2026-04-23】是否启用 GoJS AvoidsLinksRouter（vendored）。
    * 作用：对 isOrthogonal 的 link 自动分离重叠的并行段，降低线条"挤成一坨"的视觉混乱。
    * 重要：router 仅对 `link.isOrthogonal === true` 的连线生效（源码 isRoutable 校验）。
-   *   当前 cross-tree link template 使用 Bezier + routing:Normal，本开关默认关闭；
-   *   要真正生效需配合把 cross-tree link routing 切到 go.Link.Orthogonal。
-   * 默认 false：装入基础设施但不改变现有视觉，方便未来灰度。
+   * 【2026-04-23 补丁 E】cross-tree link 已切为 go.Link.Orthogonal，本开关默认 true。
    */
-  AUTO_LAYOUT_ENABLE_AVOIDS_LINKS_ROUTER: false,
+  AUTO_LAYOUT_ENABLE_AVOIDS_LINKS_ROUTER: true,
   /**
    * 【补丁 A 2026-04-23】AvoidsLinksRouter 的 linkSpacing（像素）。
    * 并行段之间的目标间距，若 avoidsNodes=true 则是最大允许距离。
    * GoJS 默认 4；对于本项目 140px ROW_SPACING、11px label 场景，6-8px 较合适。
    */
-  AUTO_LAYOUT_ROUTER_LINK_SPACING_PX: 6,
+  AUTO_LAYOUT_ROUTER_LINK_SPACING_PX: 8,
   /**
    * 【补丁 B 2026-04-23】是否在兄弟排序阶段启用局部 2-opt 交换优化。
    * 在 barycenter sweep 之后对每对相邻兄弟子树做一次 swap 评估：
@@ -83,6 +81,44 @@ export const LAYOUT_CONFIG = {
    * 不引入 rank 倒置，保持业务顺序。pass 复杂度 O(k²)，k 为同父兄弟数。
    */
   AUTO_LAYOUT_ENABLE_SIBLING_TWO_OPT: true,
+  /**
+   * 【补丁 C 2026-04-23 / v2 调参 14:50】关联块（cross-tree link label）沿线错开步长。
+   * 同一 stage-pair 内每条链接占 segmentFraction 一档。默认 0.22，多条链接时
+   * clamp 到 [0.08, 0.92]；补丁 F 边界分配算法内还会按此值做桶内微抖动。
+   */
+  AUTO_LAYOUT_CROSS_TREE_LABEL_FRACTION_STEP: 0.22,
+  /**
+   * 【补丁 C 2026-04-23 / v2 调参 14:50】关联块垂直方向额外错开（像素/档）。
+   * 解决短连线上多 label 时 fraction 距离不够的场景；与 fraction 双重保证可读。
+   */
+  AUTO_LAYOUT_CROSS_TREE_LABEL_OFFSET_PX: 22,
+  /**
+   * 【补丁 D 2026-04-23 / v2 调参 14:50】按关联块密度动态扩展 stage 列间距的
+   * 绝对像素基数。每增加一条同边界的 cross-tree link，按 sqrt(N-1) 放大加宽。
+   * 默认 48（原 40）；0 表示关闭。
+   */
+  AUTO_LAYOUT_CROSS_TREE_LABEL_DENSITY_WIDEN_PX: 48,
+  /**
+   * 【补丁 G 2026-04-23 14:55 / v2 14:56】node-label 重叠二次避让触发阈值。
+   * v2 下调：4 → 3，让中等密度也能触发放大。
+   */
+  AUTO_LAYOUT_CROSS_TREE_LABEL_DENSE_STAGE_THRESHOLD: 3,
+  /**
+   * 【补丁 G 2026-04-23 14:55 / v2 14:56】密集区的垂直偏移放大倍数。
+   * v2 上调：1.6 → 1.9。22px * 1.9 ≈ 42px/档，越过典型节点高度。
+   */
+  AUTO_LAYOUT_CROSS_TREE_LABEL_DENSE_STAGE_VERTICAL_BOOST: 1.9,
+  /**
+   * 【补丁 H 2026-04-23 14:57】关联块文本最大显示字符数。
+   * 超出则显示 "…"。关联块过宽会占用 stage 列宽，加剧拥挤。
+   * 桌面 / 移动端可同用此值；tooltip 和点击编辑仍展示完整内容。
+   */
+  AUTO_LAYOUT_CROSS_TREE_LABEL_TEXT_MAX_CHARS: 12,
+  /**
+   * 【补丁 H 2026-04-23 14:57】关联块渲染最大宽度（像素）。
+   * OverflowEllipsis 裁剪；实际宽度不会超过此值。
+   */
+  AUTO_LAYOUT_CROSS_TREE_LABEL_MAX_WIDTH_PX: 88,
   /** 根任务基础 rank 值 */
   RANK_ROOT_BASE: 10000,
   /** rank 步进值 */

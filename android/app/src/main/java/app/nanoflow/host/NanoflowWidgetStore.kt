@@ -244,6 +244,21 @@ class NanoflowWidgetStore(private val context: Context) {
     return context.widgetDataStore.data.first()[gateSelectedEntryIdKey(appWidgetId)]
   }
 
+  /**
+   * 【2026-04-24 根因修复】记录上次已应用到 launcher hostView 的 layout 签名（由
+   * [NanoflowWidgetRenderer.resolveLayoutSignature] 计算）。receiver / worker 在下次刷新前
+   * 对比当前 vs 上次签名：不同则必须走 full `updateAppWidget`，而不是 partial。
+   */
+  suspend fun persistLastAppliedLayoutSignature(appWidgetId: Int, signature: String) {
+    context.widgetDataStore.edit { prefs ->
+      prefs[lastAppliedLayoutSignatureKey(appWidgetId)] = signature
+    }
+  }
+
+  suspend fun readLastAppliedLayoutSignature(appWidgetId: Int): String? {
+    return context.widgetDataStore.data.first()[lastAppliedLayoutSignatureKey(appWidgetId)]
+  }
+
   suspend fun readPendingPushToken(): String? {
     migrateLegacySecureFields(context.widgetDataStore.data.first())
     return securePreferences.getString("binding.pendingPushToken", null)
@@ -301,6 +316,7 @@ class NanoflowWidgetStore(private val context: Context) {
       prefs.remove(stringPreferencesKey(pendingBootstrapNonceKey(appWidgetId)))
       prefs.remove(longPreferencesKey(pendingBootstrapIssuedAtKey(appWidgetId)))
       prefs.remove(stringPreferencesKey(pendingBootstrapPushTokenKey(appWidgetId)))
+      prefs.remove(lastAppliedLayoutSignatureKey(appWidgetId))
     }
   }
 
@@ -437,6 +453,10 @@ class NanoflowWidgetStore(private val context: Context) {
 
   private fun gateSelectedEntryIdKey(appWidgetId: Int): Preferences.Key<String> {
     return stringPreferencesKey("instance.$appWidgetId.gateSelectedEntryId")
+  }
+
+  private fun lastAppliedLayoutSignatureKey(appWidgetId: Int): Preferences.Key<String> {
+    return stringPreferencesKey("instance.$appWidgetId.lastAppliedLayoutSignature")
   }
 
   private fun summaryJsonKey(appWidgetId: Int): Preferences.Key<String> {

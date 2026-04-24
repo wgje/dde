@@ -478,8 +478,15 @@ export class DockCloudSyncService implements OnDestroy {
     return JSON.stringify({
       fm: snapshot.focusMode,
       mt: snapshot.session?.mainTaskId ?? null,
-      cs: snapshot.session?.comboSelectIds?.length ?? 0,
-      ec: snapshot.entries?.length ?? 0,
+      cs: snapshot.session?.comboSelectIds ?? [],
+      bs: snapshot.session?.backupIds ?? [],
+      entries: snapshot.entries?.map(entry => ({
+        id: entry.taskId,
+        lane: entry.lane,
+        status: entry.status,
+        main: entry.isMain === true,
+        order: entry.manualOrder ?? entry.dockedOrder,
+      })) ?? [],
       ver: snapshot.version ?? 0,
       fs: snapshot.focusSessionState?.sessionId ?? null,
     });

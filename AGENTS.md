@@ -11,10 +11,11 @@
 
 ## 2. 指令层级（仓库内）
 
-- `AGENTS.md`：Agent 执行手册与验收门禁。
-- `.github/copilot-instructions.md`：全局默认编码规则。
+- `AGENTS.md`：Agent 执行手册、Hard Rules 权威来源与验收门禁。
+- `.github/copilot-instructions.md`：全局默认编码规则与 quick reference。
+- `.github/CUSTOMIZATION_MAP.md`：聊天定制文件索引；维护 instructions / skills / agents 前先读。
 - `.github/instructions/*.instructions.md`：按文件类型补充。
-- 冲突处理：以本文件与 `.github/copilot-instructions.md` 的 Hard Rules 为准。
+- 冲突处理：Hard Rules 以本文件 §5 为准；其余定制文件优先链接已有说明，不并行复制完整规则。
 
 ## 3. 技术栈基线
 

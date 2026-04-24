@@ -50,7 +50,7 @@ export class UserPreferencesSyncService {
     try {
       const { data, error } = await client
         .from('user_preferences')
-        .select('theme,layout_direction,floating_window_pref,color_mode,auto_resolve_conflicts,local_backup_enabled,local_backup_interval_ms,focus_preferences')
+        .select('theme,layout_direction,floating_window_pref,color_mode,auto_resolve_conflicts,local_backup_enabled,local_backup_interval_ms,last_backup_proof_at,focus_preferences')
         .eq('user_id', userId)
         .maybeSingle();
       
@@ -83,6 +83,7 @@ export class UserPreferencesSyncService {
         autoResolveConflicts: data.auto_resolve_conflicts ?? true,
         localBackupEnabled: data.local_backup_enabled ?? false,
         localBackupIntervalMs: data.local_backup_interval_ms ?? 3600000,
+        lastBackupProofAt: data.last_backup_proof_at ?? undefined,
         focusPreferences,
       };
     } catch (e) {
@@ -115,6 +116,7 @@ export class UserPreferencesSyncService {
       if (preferences.autoResolveConflicts !== undefined) payload['auto_resolve_conflicts'] = preferences.autoResolveConflicts;
       if (preferences.localBackupEnabled !== undefined) payload['local_backup_enabled'] = preferences.localBackupEnabled;
       if (preferences.localBackupIntervalMs !== undefined) payload['local_backup_interval_ms'] = preferences.localBackupIntervalMs;
+      if (preferences.lastBackupProofAt !== undefined) payload['last_backup_proof_at'] = preferences.lastBackupProofAt;
       if (preferences.focusPreferences !== undefined) payload['focus_preferences'] = preferences.focusPreferences;
       
       const { error } = await client

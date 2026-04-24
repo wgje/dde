@@ -51,6 +51,15 @@ class NanoflowTwaLauncherActivity : LauncherActivity() {
     // ABH 基类立刻 finish() → 用户观感 = 点图标白屏闪退、无法进入项目。
     // 传 null 绕过这条恢复路径；LauncherActivity 自己不关心任何恢复的 UI 状态，无副作用。
     super.onCreate(null)
+    // 【2026-04-23 根因修复】MIUI / HyperOS 重装 APK 会把 autostart op 清零 →
+    // widget 点击永远被 GreezeManager 冻结。这里每个 versionCode 仅引导一次。
+    // 非 Xiaomi 设备走 no-op，不影响正常启动时延。
+    val autostartGuideLaunched = runCatching { MiuiAutostartGuide.maybePromptOnLaunch(this) }
+      .getOrDefault(false)
+    if (autostartGuideLaunched) {
+      finish()
+      return
+    }
     launchFromCurrentIntent()
   }
 

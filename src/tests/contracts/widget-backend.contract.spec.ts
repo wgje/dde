@@ -28,6 +28,8 @@ describe('Widget backend foundation contract', () => {
     expect(config).toMatch(/\[functions\.widget-register\][\s\S]*?verify_jwt = false/);
     expect(config).toMatch(/\[functions\.widget-summary\][\s\S]*?verify_jwt = false/);
     expect(config).toMatch(/\[functions\.widget-notify\][\s\S]*?verify_jwt = false/);
+    expect(config).toMatch(/\[functions\.widget-black-box-action\][\s\S]*?verify_jwt = false/);
+    expect(config).toMatch(/\[functions\.widget-focus-action\][\s\S]*?verify_jwt = false/);
   });
 
   it('migration and init script must define widget backend tables, rate limits, and kill switch config', () => {
@@ -39,6 +41,7 @@ describe('Widget backend foundation contract', () => {
     const notifySecretNormalizationMigration = readText('supabase/migrations/20260413120000_widget_notify_secret_normalization.sql');
     const notifyLimitsBackfillMigration = readText('supabase/migrations/20260413121000_widget_notify_limits_backfill.sql');
     const tokenHashAndNotifyScopeMigration = readText('supabase/migrations/20260418032000_widget_token_hash_and_notify_scope.sql');
+    const gateReadCooldownMigration = readText('supabase/migrations/20260424143000_widget_gate_read_cooldown.sql');
     const initSql = readText('scripts/init-supabase.sql');
 
     for (const sql of [migration, initSql]) {
@@ -103,6 +106,11 @@ describe('Widget backend foundation contract', () => {
     expect(initSql).toContain('widget_notify_black_box_change');
     expect(initSql).toContain('widget_notify_task_change');
     expect(initSql).toContain('widget_notify_project_change');
+    for (const sql of [initSql, gateReadCooldownMigration]) {
+      const normalized = sql.toLowerCase();
+      expect(normalized).toContain('v_gate_read_cooldown_cutoff');
+      expect(normalized).toContain('is_read = false or updated_at <= v_gate_read_cooldown_cutoff');
+    }
   });
 
   it('database type files must include widget tables and rate limit RPC', () => {
@@ -136,6 +144,8 @@ describe('Widget backend foundation contract', () => {
     const registerFn = readText('supabase/functions/widget-register/index.ts');
     const summaryFn = readText('supabase/functions/widget-summary/index.ts');
     const notifyFn = readText('supabase/functions/widget-notify/index.ts');
+    const focusActionFn = readText('supabase/functions/widget-focus-action/index.ts');
+    const focusReorderHelper = readText('supabase/functions/widget-focus-action/focus-reorder.ts');
     const shared = readText('supabase/functions/_shared/widget-common.ts');
     const bindingService = readText('src/services/widget-binding.service.ts');
 
@@ -143,6 +153,8 @@ describe('Widget backend foundation contract', () => {
     expectTypeScriptToParse('supabase/functions/widget-register/index.ts');
     expectTypeScriptToParse('supabase/functions/widget-summary/index.ts');
     expectTypeScriptToParse('supabase/functions/widget-notify/index.ts');
+    expectTypeScriptToParse('supabase/functions/widget-focus-action/index.ts');
+    expectTypeScriptToParse('supabase/functions/widget-focus-action/focus-reorder.ts');
 
     expect(registerFn).toContain("const action: WidgetRegisterAction = body.action ?? 'register'");
     expect(registerFn).toContain('const auth = await verifyJwtUser(req);');
@@ -182,7 +194,8 @@ describe('Widget backend foundation contract', () => {
     expect(summaryFn).toContain('buildSummaryEnvelope');
     expect(summaryFn).toContain('dockSnapshot.focusSessionState');
     expect(summaryFn).toContain('mainTaskId');
-    expect(summaryFn).toContain('entries.filter(entry => entry.lane === \'combo-select\')');
+    expect(summaryFn).toContain("explicitMainEntry?.taskId ?? sessionMainTaskId");
+    expect(summaryFn).toContain("entry.taskId !== mainTaskId && entry.isMain !== true && entry.lane === 'combo-select'");
     expect(summaryFn).toContain('const preAuthIpScopeKey = await sha256Hex');
     expect(summaryFn).toContain('widget-summary-ip:');
     expect(summaryFn).toContain('widget-summary-device:');
@@ -191,15 +204,17 @@ describe('Widget backend foundation contract', () => {
     expect(summaryFn).toContain(".from('widget_instances')");
     expect(summaryFn).toContain(".eq('host_instance_id', body.hostInstanceId)");
     expect(summaryFn).toContain(".eq('owner_id', device.user_id)");
-    expect(summaryFn).toContain(".contains('parking_meta', { state: 'parked' })");
-    expect(summaryFn).toContain("code: 'DOCK_WATERMARK_LOOKUP_FAILED'");
+    expect(summaryFn).toContain("client.rpc('widget_summary_wave1'");
+    expect(summaryFn).toContain('p_today: todayIsoDate');
+    expect(summaryFn).toContain('MAX_BLACK_BOX_PREVIEW_COUNT');
+    expect(summaryFn).toContain('pendingBlackBoxCount');
+    expect(summaryFn).toContain('unreadBlackBoxCount');
+    expect(summaryFn).toContain('dockCountFromTasks');
+    expect(summaryFn).toContain('dockTasksWatermark');
     expect(summaryFn).toContain('const cloudUpdatedAt = summaryVersionCursor;');
     expect(summaryFn).toContain('const summarySignature = await sha256Hex(JSON.stringify');
     expect(summaryFn).toContain("failed to update instance last_seen_at");
     expect(summaryFn).toContain('const todayIsoDate = nowIso.slice(0, 10);');
-    expect(summaryFn).toContain(".lt('date', todayIsoDate)");
-    expect(summaryFn).toContain('.or(`snooze_until.is.null,snooze_until.lte.${todayIsoDate}`)');
-    expect(summaryFn).toContain(".select('id,date,project_id,content,created_at,snooze_until,updated_at')");
     expect(summaryFn).toContain('projectTitle: focusProject?.title ?? null');
     expect(summaryFn).toContain('gatePreview: {');
     expect(summaryFn).toContain('projectTitle: projectId ? projectMap.get(projectId)?.title ?? null : null');
@@ -261,6 +276,22 @@ describe('Widget backend foundation contract', () => {
     expect(notifyFn.indexOf('const devices = await loadActiveAndroidDevices(client, userId, nowIso);')).toBeLessThan(
       notifyFn.indexOf('if (!hasConfiguredPushProvider()) {'),
     );
+    expect(focusActionFn).toContain("body.action !== 'promote-secondary'");
+    expect(focusActionFn).toContain('if (!isUuidLike(body.taskId))');
+    expect(focusActionFn).toContain('const token = getBearerToken(req);');
+    expect(focusActionFn).toContain('Missing widget bearer token');
+    expect(focusActionFn).toContain(".from('widget_devices')");
+    expect(focusActionFn).toContain(".eq('token_hash', tokenHash)");
+    expect(focusActionFn).toContain('parseWidgetToken(rawToken)');
+    expect(focusActionFn).toContain(".from('focus_sessions')");
+    expect(focusActionFn).toContain(".is('ended_at', null)");
+    expect(focusActionFn).toContain(".eq('updated_at', session.updated_at)");
+    expect(focusActionFn).toContain("'ACTIVE_FOCUS_SESSION_NOT_FOUND'");
+    expect(focusActionFn).toContain('promoteSecondaryTaskToC2(session.session_state, body.taskId, nowIso)');
+    expect(focusActionFn).toContain('withPrivateNoStoreHeaders(corsHeaders)');
+    expect(focusReorderHelper).toContain('export function promoteSecondaryTaskToC2');
+    expect(focusReorderHelper).toContain('const COMBO_VISIBLE_LIMIT = 3');
+    expect(focusReorderHelper).toContain("code: 'MAIN_TASK_FIXED'");
     expect(shared).toContain("'Cache-Control': 'private, no-store, max-age=0'");
     expect(shared).toContain("'Vary': 'Origin, Authorization'");
     expect(shared).toContain("const cfIp = req.headers.get('cf-connecting-ip');");
@@ -284,7 +315,3 @@ describe('Widget backend foundation contract', () => {
     expect(bindingService).not.toContain('writeWidgetTokenToDb');
   });
 });
-
-
-
-

@@ -222,8 +222,9 @@ export class GateService {
     }
 
     this.reviewSyncInFlight = true;
+    const expectedUserId = this.blackBoxService.getExpectedSyncUserId() ?? undefined;
 
-    this.blackBoxService.loadFromServer({ reason: 'gate-review', force })
+    this.blackBoxService.loadFromServer({ reason: 'gate-review', force, expectedUserId })
       .then(() => {
         this.ngZone.run(() => {
           if (gateState() !== 'reviewing') return;

@@ -95,6 +95,8 @@ export class FlowDiagramService {
   // ========== 事件处理器引用（用于销毁时清理） ==========
   /** ViewportBoundsChanged 监听器引用，防止泄漏 */
   private viewportBoundsHandler: ((e: go.DiagramEvent) => void) | null = null;
+  /** rAF 合并 ViewportBoundsChanged 的调度句柄（避免 panning 时每帧都跑视图持久化） */
+  private viewportBoundsRafId: number | null = null;
 
   // ========== 字体加载重绘 ==========
   /** 字体加载完成事件的回调引用，用于销毁时清理 */
@@ -837,6 +839,10 @@ export class FlowDiagramService {
         this.diagram.removeDiagramListener('ViewportBoundsChanged', this.viewportBoundsHandler);
         this.viewportBoundsHandler = null;
       }
+      if (this.viewportBoundsRafId !== null) {
+        cancelAnimationFrame(this.viewportBoundsRafId);
+        this.viewportBoundsRafId = null;
+      }
       // 顺序：先移除监听器 → clear 清除数据 → div = null 断开 DOM
       this.diagram.clear();
       this.diagram.div = null;
@@ -1070,11 +1076,19 @@ export class FlowDiagramService {
   }
 
   private handleViewportBoundsChanged(): void {
-    this.captureStableViewState();
-    if (!this.canPersistViewState()) {
-      return;
-    }
-    this.dataService.saveViewState();
+    // 【2026-04-24 性能优化】panning 期间此事件按 ~60Hz 触发，
+    // 原实现每帧都 captureStableViewState + saveViewState(内部 clear/set setTimeout)
+    // 会放大 Angular Zone setTimeout 的 patch 开销，造成 30+ 节点拖拽时的"拖尾"。
+    // 使用 rAF 合并同帧内多次触发，只在真正有新帧时落地。
+    if (this.viewportBoundsRafId !== null) return;
+    this.viewportBoundsRafId = requestAnimationFrame(() => {
+      this.viewportBoundsRafId = null;
+      this.captureStableViewState();
+      if (!this.canPersistViewState()) {
+        return;
+      }
+      this.dataService.saveViewState();
+    });
   }
 
   private handleDiagramContainerResize(width: number, height: number, forceRecovery: boolean = false): void {

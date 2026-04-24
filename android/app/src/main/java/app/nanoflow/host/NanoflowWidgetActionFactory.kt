@@ -35,6 +35,7 @@ class NanoflowWidgetActionFactory(
     val clickable: Boolean = true,
     val styleTone: ChipTone = ChipTone.SURFACE,
     val primaryAction: WidgetPrimaryAction? = null,
+    val taskId: String? = null,
     // 蓝图 UI 新增字段
     val isPrimarySlot: Boolean = false,
     val isPlaceholderSlot: Boolean = false,
@@ -80,6 +81,7 @@ class NanoflowWidgetActionFactory(
           // 空大门（E 图）：🚪 图标 + 「点击进入项目」提示 + 隐藏 创建/已读 meta 行
           views.setImageViewResource(R.id.nano_widget_gate_card_icon, R.drawable.nano_widget_icon_door)
           views.setViewVisibility(R.id.nano_widget_gate_card_meta_row, View.GONE)
+          views.setViewVisibility(R.id.nano_widget_gate_card_chevron, View.VISIBLE)
           val subtitleText = item.subtitle?.takeIf { it.isNotBlank() } ?: ""
           if (subtitleText.isBlank()) {
             views.setViewVisibility(R.id.nano_widget_gate_card_subtitle, View.GONE)
@@ -91,6 +93,7 @@ class NanoflowWidgetActionFactory(
           views.setImageViewResource(R.id.nano_widget_gate_card_icon, R.drawable.nano_widget_icon_document)
           views.setViewVisibility(R.id.nano_widget_gate_card_meta_row, View.VISIBLE)
           views.setViewVisibility(R.id.nano_widget_gate_card_subtitle, View.GONE)
+          views.setViewVisibility(R.id.nano_widget_gate_card_chevron, View.GONE)
           val createdLabel = item.gateCreatedLabel
           if (createdLabel.isNullOrBlank()) {
             views.setTextViewText(R.id.nano_widget_gate_card_created, "")
@@ -364,6 +367,7 @@ class NanoflowWidgetActionFactory(
         selected = false,
         kind = ActionItem.Kind.TAB,
         taskIndex = slotIdx,
+        taskId = taskOrNull?.taskId,
         clickable = hasTask,
         isPrimarySlot = isPrimary,
         isPlaceholderSlot = !hasTask,
@@ -389,6 +393,9 @@ class NanoflowWidgetActionFactory(
     }
     fill.putExtra(NanoflowWidgetReceiver.EXTRA_ITEM_TYPE, itemType)
     if (item.taskIndex >= 0) fill.putExtra(NanoflowWidgetReceiver.EXTRA_TASK_INDEX, item.taskIndex)
+    item.taskId?.let {
+      fill.putExtra(NanoflowWidgetReceiver.EXTRA_TASK_ID, it)
+    }
     if (item.gateDelta != 0) fill.putExtra(NanoflowWidgetReceiver.EXTRA_GATE_DELTA, item.gateDelta)
     item.gateAction?.let {
       fill.putExtra(EXTRA_GATE_ACTION, it)

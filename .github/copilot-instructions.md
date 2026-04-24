@@ -7,8 +7,9 @@
 
 - 本文件是全局默认指令。
 - `AGENTS.md` 提供 Coding Agent 的执行流程与验收门禁。
+- `.github/CUSTOMIZATION_MAP.md` 是聊天定制文件入口；维护 instructions / skills / agents 时先读它。
 - `.github/instructions/*.instructions.md` 仅作为文件类型补充。
-- 若出现冲突，以本文件和 `AGENTS.md` 的硬规则为准。
+- 若出现冲突，Hard Rules 以 `AGENTS.md §5` 为准；本文件只保留 quick reference。
 
 ## 项目核心理念（不可丢失）
 
@@ -20,7 +21,7 @@
 
 ## Hard Rules（权威定义）
 
-> **单事实源**：Hard Rules 的权威定义在 [AGENTS.md §5](../AGENTS.md#5-hard-rules不可违反) 中维护。
+> **单事实源**：Hard Rules 的权威定义在 [AGENTS.md](../AGENTS.md) 的 §5 中维护。
 > 本节提供快速清单，如有冲突以 `AGENTS.md` 为准。
 
 **清单**：

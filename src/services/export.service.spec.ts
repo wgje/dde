@@ -26,8 +26,8 @@ describe('ExportService', () => {
     info: ReturnType<typeof vi.fn>;
   };
   let mockPreference: {
-    set: ReturnType<typeof vi.fn>;
-    get: ReturnType<typeof vi.fn>;
+    lastBackupProofAt: ReturnType<typeof vi.fn>;
+    recordBackupProof: ReturnType<typeof vi.fn>;
   };
   
   beforeEach(() => {
@@ -42,8 +42,8 @@ describe('ExportService', () => {
     };
     
     mockPreference = {
-      set: vi.fn().mockResolvedValue(undefined),
-      get: vi.fn().mockReturnValue(null),
+      lastBackupProofAt: vi.fn(() => null),
+      recordBackupProof: vi.fn().mockResolvedValue(true),
     };
     
     const loggerMethods = {
@@ -441,6 +441,15 @@ describe('ExportService', () => {
 
       expect(service.lastLocalBackupTime()).toBe(new Date(recentBackupTime).toISOString());
       expect(service.needsExportReminder()).toBe(false);
+    });
+
+    it('云端已有较新的备份 proof 时不应提醒', () => {
+      mockPreference.lastBackupProofAt.mockReturnValue('2026-04-23T10:00:00.000Z');
+
+      const restoredService = createService();
+
+      expect(restoredService.lastSuccessfulBackupTime()).toBe('2026-04-23T10:00:00.000Z');
+      expect(restoredService.needsExportReminder()).toBe(false);
     });
   });
 });

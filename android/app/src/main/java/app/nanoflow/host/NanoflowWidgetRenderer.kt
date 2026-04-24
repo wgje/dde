@@ -27,6 +27,32 @@ object NanoflowWidgetRenderer {
     }
   }
 
+  /**
+   * 【2026-04-24 根因修复】Layout 签名：用于 receiver / worker 判断是否必须走 full
+   * `updateAppWidget` 而非 `partiallyUpdateAppWidget`。
+   *
+   * partiallyUpdateAppWidget（= RemoteViews.reapply）**无法切换 layoutRes**：
+   * 当 widget 当前 hostView 是 `nano_widget_large`（focus 布局，右下角保留 78×42 的
+   * refresh_list + pendingIntentTemplate），新 model 切到 `nano_widget_large_gate`
+   * 时若仍用 partial，launcher 只会把新 RemoteViews 的「已有操作」叠加到旧 hostView：
+   * gate_actions_list 的 VISIBLE / adapter 生效，但旧 refresh_list 的尺寸 + 旧模板
+   * 点击意图 **不会被清除**。用户点击底部区域会被 refresh_list 吃掉，触发
+   * `widget_click_refresh` 而非预期的 `widget_click_gate_action`，表现为「已读 / 已完成
+   * 按键被刷新按钮冲掉」+「专注模式 UI 闪一下被错误 UI 覆盖」。
+   *
+   * 解决：layout 签名变化时强制 full update，让 launcher 用新 @xml/layout 重新 inflate
+   * hostView，彻底清掉旧结构。
+   */
+  fun resolveLayoutSignature(model: WidgetRenderModel): String {
+    val tierTag = when (model.sizeTier) {
+      WidgetSizeTier.LARGE, WidgetSizeTier.MEDIUM -> "large"
+      else -> "compact"
+    }
+    if (tierTag == "compact") return "compact"
+    val useGateLayout = model.isGateMode || model.showSetup || model.showAuthRequired || model.showUntrusted
+    return if (useGateLayout) "large-gate" else "large-focus"
+  }
+
   // --- 紧凑布局：SMALL / MEDIUM 共用，单一 click -> 打开 App ---
   private fun renderCompact(context: Context, appWidgetId: Int, model: WidgetRenderModel): RemoteViews {
     val views = RemoteViews(context.packageName, R.layout.nano_widget_compact)
@@ -80,7 +106,8 @@ object NanoflowWidgetRenderer {
       }
     } else {
       renderTabList(context, views, appWidgetId)
-      renderRefreshList(context, views, appWidgetId)
+      // 2026-04-24：移除右下角 refresh GridView。focus 模式不再渲染 refresh 接收器，
+      // 用户操作通过 root 点击与 tab slot 完成。layoutRes 不再含 R.id.nano_widget_refresh_list。
       renderFocusFooter(context, views, model)
     }
 

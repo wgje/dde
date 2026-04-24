@@ -226,30 +226,21 @@ export class FlowDiagramDataService {
 
     try {
       const lastUpdateType = this.taskOps.getLastUpdateType();
-
       const model = this.diagram.model as go.GraphLinksModel;
-      const currentNodeMap = new Map<string, go.ObjectData>();
-      (model.nodeDataArray || []).forEach((n: go.ObjectData) => {
-        if (n.key) currentNodeMap.set(n.key as string, n);
-      });
-
       const activeTasks = tasks.filter(t => !t.deletedAt);
-      const hasStructuralChange = this.detectStructuralChange(currentNodeMap, activeTasks);
-
-      if (lastUpdateType === 'position' && !forceRefresh && !hasStructuralChange) {
-        return;
-      }
-
-      // 【2026-02-25 性能优化】快速指纹检查——跳过无变化的全量重建
-      // 对比任务的关键属性指纹和连接签名，若无变化则完全跳过 buildDiagramData + merge 操作
       const searchQuery = this.uiState.searchQuery();
+
+      // 【2026-04-24 性能优化】先做最便宜的指纹短路，避免 30+ 任务场景下
+      // 每次 signal emission 都执行 O(n) 的 currentNodeMap 构建 + detectStructuralChange。
+      // 指纹已覆盖 title/updatedAt/parentId/stage/status/parkingMeta，再叠加连接与
+      // docks/search 指纹，足以判断“任何影响图表显示的字段是否变化”。
       if (!forceRefresh) {
         const taskFingerprint = this.computeTaskFingerprint(activeTasks);
         const dockFingerprint = this.computeDockFingerprint();
         const activeConns = project.connections?.filter(c => !c.deletedAt) ?? [];
         const connSig = this.computeConnectionSignature(activeConns);
-        
-        if (taskFingerprint === this.lastTaskFingerprint 
+
+        if (taskFingerprint === this.lastTaskFingerprint
             && connSig === this.lastConnectionSignatureForData
             && searchQuery === this.lastSearchQuery
             && dockFingerprint === this.lastDockFingerprint) {
@@ -257,12 +248,19 @@ export class FlowDiagramDataService {
         }
       }
 
-      const existingNodeMap = new Map<string, go.ObjectData>();
-      (this.diagram.model as go.GraphLinksModel).nodeDataArray.forEach((n: go.ObjectData) => {
-        if (n.key) {
-          existingNodeMap.set(n.key as string, n);
-        }
+      // 仅在可能需要重建时才构建 node 映射，并复用为 existingNodeMap（避免两次 O(n) 扫描）
+      const currentNodeMap = new Map<string, go.ObjectData>();
+      (model.nodeDataArray || []).forEach((n: go.ObjectData) => {
+        if (n.key) currentNodeMap.set(n.key as string, n);
       });
+
+      const hasStructuralChange = this.detectStructuralChange(currentNodeMap, activeTasks);
+
+      if (lastUpdateType === 'position' && !forceRefresh && !hasStructuralChange) {
+        return;
+      }
+
+      const existingNodeMap = currentNodeMap;
 
       const diagramData = this.configService.buildDiagramData(
         activeTasks,

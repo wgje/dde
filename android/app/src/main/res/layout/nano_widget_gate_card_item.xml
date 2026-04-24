@@ -117,6 +117,7 @@
     </LinearLayout>
 
     <ImageView
+        android:id="@+id/nano_widget_gate_card_chevron"
         android:layout_width="14dp"
         android:layout_height="14dp"
         android:layout_gravity="center_vertical"

@@ -5,13 +5,13 @@
  * 遵循 Offline-first：本地写入 → UI 更新 → 后台推送
  */
 
-import { Injectable, inject } from '@angular/core';
+import { Injectable, inject, computed } from '@angular/core';
 import { BlackBoxEntry } from '../models/focus';
 import { Result, success, failure, ErrorCodes, OperationError } from '../utils/result';
 import {
   blackBoxEntriesMap,
   blackBoxEntriesGroupedByDate,
-  unreadBlackBoxCount,
+  pendingBlackBoxEntries,
   updateBlackBoxEntry,
   getTodayDate
 } from '../state/focus-stores';
@@ -38,7 +38,7 @@ export class BlackBoxService {
   /**
    * 未读条目数量（暴露给组件）
    */
-  readonly pendingCount = unreadBlackBoxCount;
+  readonly pendingCount = computed(() => pendingBlackBoxEntries().length);
   
   /**
    * 获取所有条目 Map
@@ -90,6 +90,12 @@ export class BlackBoxService {
   /**
    * 解析当前有效用户 ID
    * 优先登录用户；本地模式下回退到 LOCAL_MODE_USER_ID
+   *
+   * 【2026-04-23 根因修复】与 BlackBoxSyncService.resolveVisibleUserId 保持一致的优先级：
+   * Supabase 已配置时，auth settling 窗口内优先使用 persistedSession / ownerHint 这些
+   * 权威的远端身份线索；只有在完全没有云端身份痕迹时才认可 LOCAL_MODE_CACHE_KEY。
+   * 否则云端用户重启 app 时，残留的 LOCAL_MODE_CACHE_KEY='true' 会在 currentUserId
+   * 就绪前把新建条目打成 'local-user'，之后永远无法 upsert 到云端对应账号。
    */
   private resolveEffectiveUserId(): string | null {
     const currentUserId = this.auth.currentUserId();
@@ -101,19 +107,23 @@ export class BlackBoxService {
       return AUTH_CONFIG.LOCAL_MODE_USER_ID;
     }
 
-    if (this.isLocalModeEnabled()) {
-      return AUTH_CONFIG.LOCAL_MODE_USER_ID;
-    }
-
-    // 认证正在恢复时，允许使用 owner hint 继续命中同一用户的本地黑匣子快照，
-    // 避免 currentUserId 短暂为 null 时误判为匿名态并拒绝本地保存/水合。
+    // Supabase 已配置：先看认证恢复窗口内的远端身份线索，避免 LOCAL_MODE_CACHE_KEY
+    // 残留把新建条目误标为 local-user。
     if (this.isAuthSettling()) {
       const persistedSessionUserId = this.auth.peekPersistedSessionIdentity()?.userId ?? null;
       if (persistedSessionUserId) {
         return persistedSessionUserId;
       }
 
-      return this.auth.peekPersistedOwnerHint();
+      const ownerHint = this.auth.peekPersistedOwnerHint();
+      if (ownerHint) {
+        return ownerHint;
+      }
+    }
+
+    // 没有任何远端身份线索时，才认可 LOCAL_MODE_CACHE_KEY 作为真正的本地模式标记。
+    if (this.isLocalModeEnabled()) {
+      return AUTH_CONFIG.LOCAL_MODE_USER_ID;
     }
 
     return null;
@@ -294,6 +304,10 @@ export class BlackBoxService {
   async refreshForView(): Promise<void> {
     await this.ensureLocalEntriesLoaded();
     await this.loadFromServer('panel-open');
+  }
+
+  getExpectedSyncUserId(): string | null {
+    return this.resolveEffectiveUserId();
   }
 
   /**

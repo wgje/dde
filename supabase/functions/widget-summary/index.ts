@@ -77,6 +77,8 @@ interface DockEntryLike {
   isMain?: boolean;
   lane?: string;
   sourceKind?: string;
+  dockedOrder?: number;
+  manualOrder?: number | null;
 }
 
 interface DockSessionSnapshotLike {
@@ -281,6 +283,12 @@ function toDockEntryList(value: unknown): DockEntryLike[] {
       isMain: item.isMain === true,
       lane: typeof item.lane === 'string' ? item.lane : undefined,
       sourceKind: typeof item.sourceKind === 'string' ? item.sourceKind : undefined,
+      dockedOrder: typeof item.dockedOrder === 'number' && Number.isFinite(item.dockedOrder)
+        ? item.dockedOrder
+        : undefined,
+      manualOrder: typeof item.manualOrder === 'number' && Number.isFinite(item.manualOrder)
+        ? item.manualOrder
+        : null,
     }));
 }
 
@@ -306,21 +314,39 @@ function toLegacyFocusStateFromDockSnapshot(snapshot: DockSnapshotLike): FocusSe
     }
   }
 
-  const mainTaskId = typeof session.mainTaskId === 'string' ? session.mainTaskId : null;
+  const explicitMainEntry = entries.find(entry => entry.isMain === true && entry.status !== 'completed') ?? null;
+  const sessionMainTaskId = typeof session.mainTaskId === 'string' ? session.mainTaskId : null;
+  const mainTaskId = explicitMainEntry?.taskId ?? sessionMainTaskId;
   const comboSelectIds = toStringArray(session.comboSelectIds);
   const backupIds = toStringArray(session.backupIds);
 
-  const commandCenterTasks = mainTaskId && entryMap.has(mainTaskId)
-    ? [mapDockEntryToFocusSlot(entryMap.get(mainTaskId)!)]
-    : entries.filter(entry => entry.isMain === true).slice(0, 1).map(mapDockEntryToFocusSlot);
+  const commandCenterTasks = explicitMainEntry
+    ? [mapDockEntryToFocusSlot(explicitMainEntry)]
+    : (
+        mainTaskId && entryMap.has(mainTaskId)
+          ? [mapDockEntryToFocusSlot(entryMap.get(mainTaskId)!)]
+          : entries.filter(entry => entry.isMain === true).slice(0, 1).map(mapDockEntryToFocusSlot)
+      );
 
   const comboSelectTasks = comboSelectIds.length > 0
-    ? comboSelectIds.map(taskId => entryMap.get(taskId)).filter((entry): entry is DockEntryLike => Boolean(entry)).map(mapDockEntryToFocusSlot)
-    : entries.filter(entry => entry.lane === 'combo-select').map(mapDockEntryToFocusSlot);
+    ? comboSelectIds
+        .filter(taskId => taskId !== mainTaskId)
+        .map(taskId => entryMap.get(taskId))
+        .filter((entry): entry is DockEntryLike => !!entry && entry.isMain !== true)
+        .map(mapDockEntryToFocusSlot)
+    : entries
+        .filter(entry => entry.taskId !== mainTaskId && entry.isMain !== true && entry.lane === 'combo-select')
+        .map(mapDockEntryToFocusSlot);
 
   const backupTasks = backupIds.length > 0
-    ? backupIds.map(taskId => entryMap.get(taskId)).filter((entry): entry is DockEntryLike => Boolean(entry)).map(mapDockEntryToFocusSlot)
-    : entries.filter(entry => entry.lane === 'backup').map(mapDockEntryToFocusSlot);
+    ? backupIds
+        .filter(taskId => taskId !== mainTaskId)
+        .map(taskId => entryMap.get(taskId))
+        .filter((entry): entry is DockEntryLike => !!entry && entry.isMain !== true)
+        .map(mapDockEntryToFocusSlot)
+    : entries
+        .filter(entry => entry.taskId !== mainTaskId && entry.isMain !== true && entry.lane === 'backup')
+        .map(mapDockEntryToFocusSlot);
 
   return {
     // 权威判定：只信任 focusMode 布尔值。
@@ -1259,7 +1285,3 @@ Deno.serve(async (req: Request) => {
 
   return jsonResponse(summary, responseHeaders, 200);
 });
-
-
-
-

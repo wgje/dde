@@ -1455,13 +1455,18 @@ export class ProjectDataService {
   }
 
   private normalizeOfflineSnapshotProject(project: Project): Project {
-    const activeTasks = (project.tasks || []).filter(task => !task.deletedAt);
-    const activeTaskIds = new Set(activeTasks.map(task => task.id));
+    const allTasks = project.tasks || [];
+    const activeTaskIds = new Set(
+      allTasks
+        .filter(task => !task.deletedAt)
+        .map(task => task.id)
+    );
 
     return {
       ...project,
-      tasks: activeTasks,
-      // 保留活跃任务之间的已删连接，确保重启/离线恢复后仍能继续传播删除意图。
+      // 软删除任务仍属于回收站保留窗口，离线快照恢复不能把它们误当作已永久销毁。
+      tasks: allTasks,
+      // 主视图只恢复活跃任务之间的连接，避免 deleted task 在图上重新挂回可见边。
       connections: (project.connections || []).filter(connection =>
         activeTaskIds.has(connection.source) && activeTaskIds.has(connection.target)
       ),

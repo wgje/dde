@@ -98,6 +98,7 @@ data class PendingBootstrapState(
 enum class WidgetPrimaryAction {
   OPEN_WORKSPACE,
   OPEN_FOCUS_TOOLS,
+  BLOCK_GATE_ACTIONS,
 }
 
 enum class WidgetVisualTone {

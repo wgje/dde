@@ -40,6 +40,8 @@ describe('ConnectionSyncOperationsService', () => {
   const mockRetryQueue = {
     checkCircuitBreaker: vi.fn(() => true),
     add: vi.fn(() => true),
+    recordCircuitSuccess: vi.fn(),
+    recordCircuitFailure: vi.fn(),
     length: 0,
   };
 
@@ -60,10 +62,35 @@ describe('ConnectionSyncOperationsService', () => {
   let legacyConnectionTombstoneResult: { data: { deleted_at: string; source_id: string | null; target_id: string | null } | null; error: unknown | null };
   let taskExistenceResult: { data: Array<{ id: string }>; error: unknown | null };
   let endpointDedupResponses: Array<{ data: Array<{ id: string; deleted_at: string | null; updated_at?: string | null; title?: string | null; description?: string | null }>; error: unknown | null }>;
-  let persistedUpdatedAtResult: { data: { updated_at: string } | null; error: unknown | null };
-  let connectionUpsertResult: { error: unknown | null };
+  let connectionReadbackQueryCount: number;
+  let connectionUpsertResult: { data: { updated_at: string } | null; error: unknown | null };
   const mockConnectionsUpsert = vi.fn();
   let mockProjects: Array<{ id: string; connections: Connection[]; tasks: unknown[] }>;
+
+  function buildUpsertQuery(
+    rawResult: unknown,
+  ): { select: ReturnType<typeof vi.fn> } {
+    if (
+      rawResult
+      && typeof rawResult === 'object'
+      && 'select' in rawResult
+      && typeof (rawResult as { select?: unknown }).select === 'function'
+    ) {
+      return rawResult as { select: ReturnType<typeof vi.fn> };
+    }
+
+    return {
+      select: vi.fn(() => ({
+        single: vi.fn(async () => {
+          const resolved = await Promise.resolve(rawResult);
+          return (resolved ?? { data: null, error: null }) as {
+            data: { updated_at: string } | null;
+            error: unknown | null;
+          };
+        }),
+      })),
+    };
+  }
 
   const mockProjectState = {
     updateProjects: vi.fn((updater: (projects: Array<{ id: string; connections: Connection[]; tasks: unknown[] }>) => Array<{ id: string; connections: Connection[]; tasks: unknown[] }>) => {
@@ -143,9 +170,10 @@ describe('ConnectionSyncOperationsService', () => {
         return {
           select: vi.fn((columns: string) => {
             if (columns === 'updated_at') {
+              connectionReadbackQueryCount += 1;
               return {
                 eq: vi.fn(() => ({
-                  maybeSingle: vi.fn(async () => persistedUpdatedAtResult),
+                  maybeSingle: vi.fn(async () => ({ data: null, error: null })),
                 })),
               };
             }
@@ -164,7 +192,7 @@ describe('ConnectionSyncOperationsService', () => {
               })),
             };
           }),
-          upsert: mockConnectionsUpsert,
+          upsert: (...args: unknown[]) => buildUpsertQuery(mockConnectionsUpsert(...args)),
         };
       }
 
@@ -184,12 +212,16 @@ describe('ConnectionSyncOperationsService', () => {
       error: null,
     };
     endpointDedupResponses = [{ data: [], error: null }];
-    persistedUpdatedAtResult = {
+    connectionReadbackQueryCount = 0;
+    connectionUpsertResult = {
       data: { updated_at: '2026-04-11T00:01:00.000Z' },
       error: null,
     };
-    connectionUpsertResult = { error: null };
-    mockConnectionsUpsert.mockImplementation(async () => connectionUpsertResult);
+    mockConnectionsUpsert.mockImplementation(() => ({
+      select: vi.fn(() => ({
+        single: vi.fn(async () => connectionUpsertResult),
+      })),
+    }));
     mockProjects = [{ id: 'project-1', connections: [], tasks: [] }];
 
     TestBed.configureTestingModule({
@@ -303,7 +335,45 @@ describe('ConnectionSyncOperationsService', () => {
 
     expect(result).toBe(false);
     expect(mockRetryQueue.add).toHaveBeenCalledWith('connection', 'upsert', connection, 'project-1', 'user-1');
+    expect(mockRetryQueue.recordCircuitFailure).toHaveBeenCalledWith('ServiceUnavailableError');
     expect(mockConnectionsUpsert).not.toHaveBeenCalled();
+  });
+
+  it('任务存在性查询遇到 retryable 错误时应记录熔断失败并进入重试', async () => {
+    const connection: Connection = {
+      id: 'connection-task-validation-query-error',
+      source: 'task-a',
+      target: 'task-b',
+    };
+    taskExistenceResult = {
+      data: [],
+      error: { code: '504', message: 'Gateway timeout' },
+    };
+
+    const result = await service.pushConnection(connection, 'project-1', false, false, false, 'user-1');
+
+    expect(result).toBe(false);
+    expect(mockRetryQueue.recordCircuitFailure).toHaveBeenCalledWith('NetworkTimeoutError');
+    expect(mockRetryQueue.add).toHaveBeenCalledWith('connection', 'upsert', connection, 'project-1', 'user-1');
+    expect(mockConnectionsUpsert).not.toHaveBeenCalled();
+  });
+
+  it('连接 upsert 命中 504 时应记录熔断失败并进入重试队列', async () => {
+    const connection: Connection = {
+      id: 'connection-upsert-gateway-timeout',
+      source: 'task-a',
+      target: 'task-b',
+    };
+    connectionUpsertResult = {
+      data: null,
+      error: { code: '504', message: 'Gateway timeout' },
+    };
+
+    const result = await service.pushConnection(connection, 'project-1', false, false, false, 'user-1');
+
+    expect(result).toBe(false);
+    expect(mockRetryQueue.recordCircuitFailure).toHaveBeenCalledWith('NetworkTimeoutError');
+    expect(mockRetryQueue.add).toHaveBeenCalledWith('connection', 'upsert', connection, 'project-1', 'user-1');
   });
 
   it('刷新后任务存在性查询仍为 RLS 违规时应抛永久失败供重试队列收口', async () => {
@@ -374,7 +444,7 @@ describe('ConnectionSyncOperationsService', () => {
     expect(mockSyncState.setSessionExpired).not.toHaveBeenCalled();
   });
 
-  it('成功同步后应使用服务端 updated_at 归一本地连接时间戳', async () => {
+  it('成功同步后应直接使用 upsert 返回的 updated_at 归一本地连接时间戳，不再额外回读', async () => {
     const connection: Connection = {
       id: 'connection-normalize-updated-at',
       source: 'task-a',
@@ -386,7 +456,7 @@ describe('ConnectionSyncOperationsService', () => {
       tasks: [],
       connections: [{ ...connection }],
     }];
-    persistedUpdatedAtResult = {
+    connectionUpsertResult = {
       data: { updated_at: '2026-04-11T00:01:00.000Z' },
       error: null,
     };
@@ -395,6 +465,7 @@ describe('ConnectionSyncOperationsService', () => {
 
     expect(result).toBe(true);
     expect(mockProjects[0].connections[0].updatedAt).toBe('2026-04-11T00:01:00.000Z');
+    expect(connectionReadbackQueryCount).toBe(0);
     expect(mockProjectState.updateProjects).toHaveBeenCalled();
   });
 
@@ -765,6 +836,44 @@ describe('ConnectionSyncOperationsService', () => {
         id: 'connection-canonical-only',
         title: 'canonical title',
         description: 'canonical description',
+      }),
+      expect.any(Object)
+    );
+  });
+
+  it('stale replay 在本地 canonical row 缺失且本地内容更新更晚时不应被远端旧空内容覆盖', async () => {
+    const connection: Connection = {
+      id: 'connection-stale-replay-local-newer-content',
+      source: 'task-a',
+      target: 'task-b',
+      title: 'fresh title',
+      description: 'fresh description',
+      updatedAt: '2026-04-11T00:03:00.000Z',
+    };
+    endpointDedupResponses = [{
+      data: [{
+        id: 'connection-canonical-older-empty',
+        deleted_at: null,
+        updated_at: '2026-04-11T00:00:00.000Z',
+        title: null,
+        description: null,
+      }],
+      error: null,
+    }];
+    mockProjects = [{
+      id: 'project-1',
+      tasks: [],
+      connections: [],
+    }];
+
+    const result = await service.pushConnection(connection, 'project-1', false, false, false, 'user-1');
+
+    expect(result).toBe(true);
+    expect(mockConnectionsUpsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'connection-canonical-older-empty',
+        title: 'fresh title',
+        description: 'fresh description',
       }),
       expect.any(Object)
     );

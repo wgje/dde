@@ -31,6 +31,20 @@ import { DockEngineLifecycleService } from './dock-engine-lifecycle.service';
 import { LoggerService } from './logger.service';
 import { UiStateService } from './ui-state.service';
 
+function entryOrder(entry: DockEntry): number {
+  return Number.isFinite(entry.manualOrder) ? Number(entry.manualOrder) : entry.dockedOrder;
+}
+
+function sortEntriesByDockOrder(entries: DockEntry[]): DockEntry[] {
+  return [...entries].sort((a, b) => {
+    if (a.status === 'completed' && b.status !== 'completed') return 1;
+    if (b.status === 'completed' && a.status !== 'completed') return -1;
+    const orderDelta = entryOrder(a) - entryOrder(b);
+    if (orderDelta !== 0) return orderDelta;
+    return a.taskId.localeCompare(b.taskId);
+  });
+}
+
 // ---------------------------------------------------------------------------
 //  Context interface — engine 在 constructor 中调用 init() 注入信号引用
 // ---------------------------------------------------------------------------
@@ -199,7 +213,7 @@ export class DockSnapshotManagerService {
    */
   buildFocusSessionState(): FocusSessionState {
     const context = this.ensureFocusSessionContext();
-    const activeEntries = this.ctx.entries().filter(e => e.status !== 'completed');
+    const activeEntries = sortEntriesByDockOrder(this.ctx.entries().filter(e => e.status !== 'completed'));
 
     const commandTasks = activeEntries
       .filter(e => e.isMain)
@@ -277,10 +291,10 @@ export class DockSnapshotManagerService {
   }
 
   buildSessionState(entries: DockEntry[] = this.ctx.entries()): DockSessionState {
-    const activeEntries = entries.filter(entry => entry.status !== 'completed');
+    const activeEntries = sortEntriesByDockOrder(entries.filter(entry => entry.status !== 'completed'));
     const mainCandidate =
-      activeEntries.find(entry => entry.status === 'focusing') ??
       activeEntries.find(entry => entry.isMain) ??
+      activeEntries.find(entry => entry.status === 'focusing') ??
       null;
     return {
       firstDragIntervened: this.ctx.firstDragIntervened(),
@@ -304,34 +318,46 @@ export class DockSnapshotManagerService {
   }
 
   applySessionToEntries(entries: DockEntry[], session: DockSessionState): DockEntry[] {
-    const comboSet = new Set(session.comboSelectIds);
-    const backupSet = new Set(session.backupIds);
+    const secondaryOrderStart = session.mainTaskId ? 1 : 0;
+    const comboOrder = new Map(session.comboSelectIds.map((taskId, index) => [taskId, secondaryOrderStart + index] as const));
+    const backupOrder = new Map(session.backupIds.map((taskId, index) => [taskId, secondaryOrderStart + comboOrder.size + index] as const));
+    const comboSet = new Set(comboOrder.keys());
+    const backupSet = new Set(backupOrder.keys());
     const hasLaneHints = comboSet.size > 0 || backupSet.size > 0;
 
     // M-9 fix: 提取 lane 分配逻辑为辅助函数，消除 6 层嵌套三元
     const assignLane = (entry: DockEntry, markMain: boolean): DockEntry => {
       if (entry.status === 'completed') return entry;
-      if (markMain && entry.taskId === session.mainTaskId) return { ...entry, isMain: true };
-      if (entry.isMain) return entry;
+      if (entry.taskId === session.mainTaskId && (markMain || entry.isMain)) {
+        return { ...entry, isMain: true, dockedOrder: 0, manualOrder: 0 };
+      }
       if (!hasLaneHints) return entry;
-      if (comboSet.has(entry.taskId)) return { ...entry, lane: 'combo-select' };
-      if (backupSet.has(entry.taskId)) return { ...entry, lane: 'backup' };
+      const comboIndex = comboOrder.get(entry.taskId);
+      if (comboIndex !== undefined) {
+        return { ...entry, lane: 'combo-select', isMain: false, dockedOrder: comboIndex, manualOrder: comboIndex };
+      }
+      const backupIndex = backupOrder.get(entry.taskId);
+      if (backupIndex !== undefined) {
+        return { ...entry, lane: 'backup', isMain: false, dockedOrder: backupIndex, manualOrder: backupIndex };
+      }
+      if (entry.isMain) return entry;
       return entry;
     };
 
     if (!session.mainTaskId) {
       const hydrated = entries.map(e => assignLane(e, false));
-      return this.completionFlow.enforceSingleMainInvariant(hydrated, null);
+      const fallbackMainTaskId = session.comboSelectIds[0] ?? session.backupIds[0] ?? null;
+      return sortEntriesByDockOrder(this.completionFlow.enforceSingleMainInvariant(hydrated, fallbackMainTaskId));
     }
 
     const hasMain = entries.some(entry => entry.isMain && entry.status !== 'completed');
     if (hasMain || !entries.some(entry => entry.taskId === session.mainTaskId)) {
       const hydrated = entries.map(e => assignLane(e, false));
-      return this.completionFlow.enforceSingleMainInvariant(hydrated, session.mainTaskId);
+      return sortEntriesByDockOrder(this.completionFlow.enforceSingleMainInvariant(hydrated, session.mainTaskId));
     }
 
     const hydrated = entries.map(e => assignLane(e, true));
-    return this.completionFlow.enforceSingleMainInvariant(hydrated, session.mainTaskId);
+    return sortEntriesByDockOrder(this.completionFlow.enforceSingleMainInvariant(hydrated, session.mainTaskId));
   }
 
   /** 从规范化快照恢复所有信号状态 */
