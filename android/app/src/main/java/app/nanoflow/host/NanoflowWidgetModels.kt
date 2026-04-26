@@ -13,6 +13,7 @@ data class WidgetFocusSummary(
   val projectTitle: String? = null,
   val title: String? = null,
   val remainingMinutes: Int? = null,
+  val isMaster: Boolean = false,
   val valid: Boolean = false,
 )
 
@@ -35,6 +36,7 @@ data class WidgetDockItem(
   val title: String? = null,
   val projectTitle: String? = null,
   val estimatedMinutes: Int? = null,
+  val isMaster: Boolean = false,
   val valid: Boolean = false,
 )
 
@@ -74,6 +76,29 @@ data class WidgetSummaryResponse(
   val code: String? = null,
   val error: String? = null,
   val retryAfterSeconds: Int? = null,
+)
+
+@Serializable
+data class WidgetSummaryRequestPayload(
+  val clientSchemaVersion: Int,
+  val platform: String,
+  val supportsPush: Boolean,
+  val clientVersion: String? = null,
+  val lastKnownSummaryVersion: String? = null,
+  val instanceId: String,
+  val hostInstanceId: String,
+)
+
+@Serializable
+data class WidgetFocusPromoteRequestPayload(
+  val action: String,
+  val taskId: String,
+)
+
+@Serializable
+data class WidgetBlackBoxActionRequestPayload(
+  val entryId: String,
+  val action: String,
 )
 
 data class WidgetDeviceIdentity(
@@ -146,9 +171,9 @@ data class WidgetRenderModel(
   val showUntrusted: Boolean,
   /** 当前渲染到大门主卡上的条目 ID；null 表示当前没有可直接执行已读/完成的具体条目。 */
   val displayedGateEntryId: String? = null,
-  /** 主任务 + 副任务 的聚合列表（主任务始终排在首位）。空列表表示无任务。 */
+  /** C 位 1-4 的可见任务映射；主/副属性由 isMain 独立表达，不随位置前置而改变。 */
   val tasks: List<WidgetTaskCard> = emptyList(),
-  /** 当前 widget 实例选中的 tab 下标，范围 [0, tasks.lastIndex]。 */
+  /** 当前前台 C 位下标；专注模式下始终锚定 0，仅为兼容旧渲染接口保留。 */
   val selectedTaskIndex: Int = 0,
   /** 中间内容区的纵向卡片列表；用户通过上下滑动浏览。 */
   val contentCards: List<WidgetContentCard> = emptyList(),
@@ -169,7 +194,7 @@ data class WidgetContentCard(
 
 /**
  * 单条停泊任务在小组件 UI 中的展示形态。
- * 主任务对应 focus.* 字段，副任务对应 dock.items。
+ * 第一张卡对应当前 C 位 #1；它可以是副任务，主任务用 isMain 保持王冠语义。
  */
 data class WidgetTaskCard(
   val taskId: String?,
@@ -177,4 +202,5 @@ data class WidgetTaskCard(
   val projectTitle: String?,
   val estimatedMinutes: Int? = null,
   val isMain: Boolean,
+  val valid: Boolean = true,
 )

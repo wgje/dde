@@ -37,7 +37,7 @@ class NanoflowWidgetActionFactory(
     val primaryAction: WidgetPrimaryAction? = null,
     val taskId: String? = null,
     // 蓝图 UI 新增字段
-    val isPrimarySlot: Boolean = false,
+    val isMasterTask: Boolean = false,
     val isPlaceholderSlot: Boolean = false,
     val gateAction: String? = null,
     val gateEntryId: String? = null,
@@ -177,15 +177,15 @@ class NanoflowWidgetActionFactory(
     if (listKind == LIST_KIND_TABS) {
       // 蓝图 C 位插槽：中央图标 + 左上编号徽章 + 底部标签 + 主/副两档描边
       val views = RemoteViews(context.packageName, R.layout.nano_widget_tab_item)
-      val isPrimary = item.isPrimarySlot
-      val slotBg = if (isPrimary) R.drawable.nano_widget_slot_primary else R.drawable.nano_widget_slot_secondary
-      val badgeBg = if (isPrimary) R.drawable.nano_widget_badge_primary else R.drawable.nano_widget_badge_secondary
-      val iconRes = if (isPrimary) R.drawable.nano_widget_icon_crown else R.drawable.nano_widget_icon_flag
+      val isMasterTask = item.isMasterTask
+      val slotBg = if (isMasterTask) R.drawable.nano_widget_slot_primary else R.drawable.nano_widget_slot_secondary
+      val badgeBg = if (isMasterTask) R.drawable.nano_widget_badge_primary else R.drawable.nano_widget_badge_secondary
+      val iconRes = if (isMasterTask) R.drawable.nano_widget_icon_crown else R.drawable.nano_widget_icon_flag
       views.setInt(R.id.nano_widget_tab_slot, "setBackgroundResource", slotBg)
       views.setInt(R.id.nano_widget_tab_badge, "setBackgroundResource", badgeBg)
       views.setTextViewText(R.id.nano_widget_tab_badge_text, (item.taskIndex + 1).coerceAtLeast(1).toString())
-      // 主任务徽章 pennant 的数字放在顶部矩形里；副任务是圆徽章，数字居中。
-      if (isPrimary) {
+      // 王冠任务用顶部 pennant；旗帜任务保持圆徽章，点击换位后视觉语义不变。
+      if (isMasterTask) {
         views.setInt(R.id.nano_widget_tab_badge_text, "setGravity", android.view.Gravity.TOP or android.view.Gravity.CENTER_HORIZONTAL)
         views.setViewPadding(R.id.nano_widget_tab_badge_text, 0, dpToPx(3), 0, 0)
       } else {
@@ -368,8 +368,8 @@ class NanoflowWidgetActionFactory(
         kind = ActionItem.Kind.TAB,
         taskIndex = slotIdx,
         taskId = taskOrNull?.taskId,
-        clickable = hasTask,
-        isPrimarySlot = isPrimary,
+        clickable = hasTask && !taskOrNull?.taskId.isNullOrBlank(),
+        isMasterTask = taskOrNull?.isMain == true,
         isPlaceholderSlot = !hasTask,
       )
     }

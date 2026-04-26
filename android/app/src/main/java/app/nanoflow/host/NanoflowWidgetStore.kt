@@ -218,7 +218,7 @@ class NanoflowWidgetStore(private val context: Context) {
     return context.widgetDataStore.data.first()[gatePageIndexKey(appWidgetId)] ?: 0
   }
 
-  /** 当前 widget 实例选中的任务 tab 下标（主任务=0，副任务 1..N）。 */
+  /** 历史兼容字段：旧版 widget 的本地 tab 下标缓存。当前实现固定以前台 C 位为 0。 */
   suspend fun persistSelectedTaskIndex(appWidgetId: Int, taskIndex: Int) {
     context.widgetDataStore.edit { prefs ->
       prefs[selectedTaskIndexKey(appWidgetId)] = taskIndex.coerceAtLeast(0)

@@ -8,6 +8,7 @@ import com.google.firebase.messaging.FirebaseMessaging
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.BufferedReader
 import java.io.InputStreamReader
@@ -530,8 +531,8 @@ class NanoflowWidgetRepository(private val context: Context) {
   }
 
   /**
-   * Focus C 位副任务点击：本地先把目标副任务挪到 #2（主任务仍保持 #1），让桌面小组件
-   * 立即反馈；随后 widget-focus-action 会改写云端 focus_sessions 快照作为权威状态。
+   * Focus C 位点击：本地先把目标槽位提到 #1，同时保留主/副任务属性，
+   * 让桌面小组件立即反馈；随后 widget-focus-action 会改写云端快照作为权威状态。
    */
   suspend fun applyOptimisticFocusPromotion(
     appWidgetId: Int,
@@ -542,13 +543,36 @@ class NanoflowWidgetRepository(private val context: Context) {
     if (cached.focus.taskId == taskId) return null
 
     val target = cached.dock.items.firstOrNull { it.taskId == taskId } ?: return null
-    val reorderedItems = listOf(target) + cached.dock.items.filterNot { it.taskId == taskId }
+    val currentFocusAsDockItem = WidgetDockItem(
+      taskId = cached.focus.taskId,
+      projectId = cached.focus.projectId,
+      title = cached.focus.title,
+      projectTitle = cached.focus.projectTitle,
+      estimatedMinutes = cached.focus.remainingMinutes,
+      isMaster = cached.focus.isMaster,
+      valid = cached.focus.valid,
+    )
+    val reorderedItems = buildList {
+      if (!currentFocusAsDockItem.taskId.isNullOrBlank() || !currentFocusAsDockItem.title.isNullOrBlank()) {
+        add(currentFocusAsDockItem)
+      }
+      addAll(cached.dock.items.filterNot { it.taskId == taskId })
+    }
     val previousSelectedTaskIndex = store.readSelectedTaskIndex(appWidgetId)
     val patched = cached.copy(
+      focus = cached.focus.copy(
+        taskId = target.taskId,
+        projectId = target.projectId,
+        projectTitle = target.projectTitle,
+        title = target.title,
+        remainingMinutes = target.estimatedMinutes,
+        isMaster = target.isMaster,
+        valid = target.valid,
+      ),
       dock = cached.dock.copy(items = reorderedItems),
     )
     store.saveSummary(appWidgetId, patched)
-    store.persistSelectedTaskIndex(appWidgetId, 1)
+    store.persistSelectedTaskIndex(appWidgetId, 0)
 
     NanoflowWidgetTelemetry.info(
       "widget_focus_promote_optimistic_applied",
@@ -587,8 +611,12 @@ class NanoflowWidgetRepository(private val context: Context) {
       return false
     }
 
-    val escapedTaskId = taskId.replace("\\", "\\\\").replace("\"", "\\\"")
-    val requestBody = "{\"action\":\"promote-secondary\",\"taskId\":\"$escapedTaskId\"}"
+    val requestBody = json.encodeToString(
+      WidgetFocusPromoteRequestPayload(
+        action = "promote-secondary",
+        taskId = taskId,
+      ),
+    )
 
     val response = runCatching {
       postJson(
@@ -646,8 +674,12 @@ class NanoflowWidgetRepository(private val context: Context) {
       return false
     }
 
-    val escapedEntryId = entryId.replace("\\", "\\\\").replace("\"", "\\\"")
-    val requestBody = "{\"entryId\":\"$escapedEntryId\",\"action\":\"${action.wireValue}\"}"
+    val requestBody = json.encodeToString(
+      WidgetBlackBoxActionRequestPayload(
+        entryId = entryId,
+        action = action.wireValue,
+      ),
+    )
 
     val response = runCatching {
       postJson(
@@ -999,10 +1031,13 @@ class NanoflowWidgetRepository(private val context: Context) {
     val statusBadge = buildStatusBadge(summary)
     val privacyMode = store.isPrivacyModeEnabled()
     val gateEntries = resolveRenderableGateEntries(summary, privacyMode)
-    val renderableDockCount = countRenderableDockCandidates(summary)
     val hasFocusState = summary.focus.active == true && summary.focus.valid
     val gateQueueCount = resolveGateQueueCount(summary)
     val showCounts = summary.dock.count > 0 || gateQueueCount > 0
+    val showIdleDockSelectionState = !hasFocusState
+      && summary.dock.count > 0
+      && gateEntries.isEmpty()
+      && summary.blackBox.pendingCount == 0
     // 2026-04-22 大门逻辑完善：
     //   * 非空大门 = `!focus && (gateEntries 非空 或 pendingCount>0)` → 整卡点击不进入项目（OPEN_FOCUS_TOOLS），
     //     仅 已读/完成 双按钮通过深链直通 mark-gate-read/complete 改写黑匣子状态。
@@ -1010,8 +1045,13 @@ class NanoflowWidgetRepository(private val context: Context) {
     //     渲染空状态大卡（🚪 + 暂无未完成任务 + 点击进入项目），整卡点击走 OPEN_WORKSPACE。
     //   * 专注模式所有任务完成时，服务端需将 focus.active=false（此处依赖后端信号）；
     //     当 focus 不再 active 且无黑匣子时走空大门路径，视觉上自动切换到大门视图。
-    val isGateEmpty = !hasFocusState && gateEntries.isEmpty() && summary.blackBox.pendingCount == 0
-    val isGateMode = !hasFocusState && (gateEntries.isNotEmpty() || summary.blackBox.pendingCount > 0 || isGateEmpty)
+    val isGateEmpty = !hasFocusState
+      && !showIdleDockSelectionState
+      && gateEntries.isEmpty()
+      && summary.blackBox.pendingCount == 0
+    val isGateMode = !hasFocusState
+      && !showIdleDockSelectionState
+      && (gateEntries.isNotEmpty() || summary.blackBox.pendingCount > 0 || isGateEmpty)
     val metricsLine = buildMetricsLine(summary)
 
     if (isGateMode) {
@@ -1044,7 +1084,7 @@ class NanoflowWidgetRepository(private val context: Context) {
         ),
         primaryAction = rootPrimaryAction,
         tone = WidgetVisualTone.GATE,
-        dockCount = renderableDockCount,
+        dockCount = summary.dock.count,
         blackBoxCount = gateQueueCount,
         showStatCards = false,
         isGateMode = true,
@@ -1066,17 +1106,17 @@ class NanoflowWidgetRepository(private val context: Context) {
     val focusTitle = summary.focus.title?.takeIf { summary.focus.valid }
     val canOpenFocusTask = hasFocusState && summary.focus.valid
 
-    // 构建主任务 + 副任务卡片列表，主任务始终置顶；privacy 模式下隐藏标题细节。
+    // 构建 C 位 1-4 卡片列表；主/副属性独立于前后顺序，privacy 模式下隐藏标题细节。
     val taskCards = buildTaskCards(summary, hasFocusState, privacyMode, focusTitle, canOpenFocusTask)
-    val selectedTaskIndex = if (taskCards.isEmpty()) 0
-    else store.readSelectedTaskIndex(appWidgetId).coerceIn(0, taskCards.lastIndex)
-    val selectedCard = taskCards.getOrNull(selectedTaskIndex)
+    // 专注模式的小组件永远以 C 位 #1 作为当前任务，不再保留独立的本地 tab 选中态。
+    val selectedTaskIndex = 0
+    val selectedCard = taskCards.firstOrNull()
     val syncBadgeLabel = buildCompactSyncBadge(summary, appWidgetId)
     val contentCards = buildTaskContentCards(taskCards).ifEmpty {
       listOf(
         WidgetContentCard(
           eyebrow = context.getString(
-            if (hasFocusState) R.string.nanoflow_widget_focus_label
+            if (hasFocusState || showIdleDockSelectionState) R.string.nanoflow_widget_focus_label
             else R.string.nanoflow_widget_gate_label,
           ),
           title = when {
@@ -1085,12 +1125,14 @@ class NanoflowWidgetRepository(private val context: Context) {
             hasFocusState && !focusTitle.isNullOrBlank() -> focusTitle
             hasFocusState && canOpenFocusTask -> context.getString(R.string.nanoflow_widget_focus_ready_title)
             hasFocusState -> context.getString(R.string.nanoflow_widget_unknown_task)
+            showIdleDockSelectionState -> context.getString(R.string.nanoflow_widget_focus_idle_title)
             else -> context.getString(R.string.nanoflow_widget_gate_empty_title)
           },
           subtitle = when {
             selectedCard != null && !privacyMode -> selectedCard.projectTitle
             hasFocusState && (privacyMode || compact) -> null
             hasFocusState -> buildFocusSupportingLine(summary)
+            showIdleDockSelectionState -> context.getString(R.string.nanoflow_widget_focus_idle_detail)
             else -> context.getString(R.string.nanoflow_widget_gate_empty_detail)
           },
         )
@@ -1099,7 +1141,7 @@ class NanoflowWidgetRepository(private val context: Context) {
 
     return WidgetRenderModel(
       modeLabel = context.getString(
-        if (hasFocusState) R.string.nanoflow_widget_focus_label
+        if (hasFocusState || showIdleDockSelectionState) R.string.nanoflow_widget_focus_label
         else R.string.nanoflow_widget_gate_label,
       ),
       statusBadge = statusBadge,
@@ -1109,12 +1151,14 @@ class NanoflowWidgetRepository(private val context: Context) {
         hasFocusState && !focusTitle.isNullOrBlank() -> focusTitle
         hasFocusState && canOpenFocusTask -> context.getString(R.string.nanoflow_widget_focus_ready_title)
         hasFocusState -> context.getString(R.string.nanoflow_widget_unknown_task)
+        showIdleDockSelectionState -> context.getString(R.string.nanoflow_widget_focus_idle_title)
         else -> context.getString(R.string.nanoflow_widget_gate_empty_title)
       },
       supportingLine = when {
         selectedCard != null && !privacyMode -> selectedCard.projectTitle
         hasFocusState && (privacyMode || compact) -> null
         hasFocusState -> buildFocusSupportingLine(summary)
+        showIdleDockSelectionState -> context.getString(R.string.nanoflow_widget_focus_idle_detail)
         else -> context.getString(R.string.nanoflow_widget_gate_empty_detail)
       },
       metricsLine = if (showCounts) metricsLine else null,
@@ -1124,10 +1168,10 @@ class NanoflowWidgetRepository(private val context: Context) {
       ),
       primaryAction = WidgetPrimaryAction.OPEN_WORKSPACE,
       tone = WidgetVisualTone.FOCUS,
-      dockCount = renderableDockCount,
+      dockCount = summary.dock.count,
       blackBoxCount = summary.blackBox.pendingCount,
       showStatCards = false,
-      isGateMode = !hasFocusState,
+      isGateMode = false,
       showGatePager = false,
       gatePageIndicator = null,
       canPageBackward = false,
@@ -1145,8 +1189,8 @@ class NanoflowWidgetRepository(private val context: Context) {
   }
 
   /**
-   * 聚合主任务（来自 focus.*）与副任务（来自 dock.items），主任务始终在索引 0。
-   * C 位严格限制为 4 个插槽：1 个主任务 + 最多 3 个副任务，其余只进入备选区计数。
+    * 聚合当前 C 位的 1-4 号槽位：focus.* 是当前前台，dock.items 是其后的可见槽位。
+    * 任务属性（主/副）独立于前后顺序，因此第一槽不一定是主任务。
    * 隐私模式下标题用占位符避免信息泄露。
    */
   private fun buildTaskCards(
@@ -1170,20 +1214,17 @@ class NanoflowWidgetRepository(private val context: Context) {
         title = mainTitle,
         projectTitle = if (privacyMode) null else summary.focus.projectTitle,
         estimatedMinutes = summary.focus.remainingMinutes,
-        isMain = true,
+        isMain = summary.focus.isMaster,
+        valid = summary.focus.valid,
       )
     )
-    val mainTaskId = summary.focus.taskId
-    var secondaryCount = 0
-    for (item in summary.dock.items) {
-      if (secondaryCount >= 3) break
+    for (item in summary.dock.items.take(3)) {
       // 之前用 `if (!item.valid) return@forEach` 强过滤会导致后端因任务行未在 taskMap 命中
       // （RLS/子查询时序）返回 valid=false 的有效 dock 任务被全部隐藏，用户实际上有 6 个备选
       // 任务却只看到「主」一个 chip。这里改为：只要 taskId 非空且有标题就纳入展示，valid=false
       // 仅作为后端可能存在数据漂移的弱信号，不应阻断 UI。
       val itemTaskId = item.taskId
-      if (itemTaskId.isNullOrBlank()) continue
-      if (mainTaskId != null && itemTaskId == mainTaskId) continue
+      if (itemTaskId.isNullOrBlank() && item.title.isNullOrBlank()) continue
       cards.add(
         WidgetTaskCard(
           taskId = itemTaskId,
@@ -1191,43 +1232,27 @@ class NanoflowWidgetRepository(private val context: Context) {
           else item.title?.takeIf { it.isNotBlank() } ?: context.getString(R.string.nanoflow_widget_unknown_task),
           projectTitle = if (privacyMode) null else item.projectTitle,
           estimatedMinutes = item.estimatedMinutes,
-          isMain = false,
+          isMain = item.isMaster,
+          valid = item.valid,
         )
       )
-      secondaryCount += 1
     }
     return cards
-  }
-
-  private fun countRenderableDockCandidates(summary: WidgetSummaryResponse): Int {
-    val mainTaskId = summary.focus.taskId
-    var count = 0
-    summary.dock.items.forEach { item ->
-      val itemTaskId = item.taskId
-      if (itemTaskId.isNullOrBlank()) return@forEach
-      if (mainTaskId != null && itemTaskId == mainTaskId) return@forEach
-      count += 1
-    }
-    return count
   }
 
   private fun buildTaskContentCards(taskCards: List<WidgetTaskCard>): List<WidgetContentCard> {
     return taskCards.mapIndexed { index, card ->
       WidgetContentCard(
-        eyebrow = if (card.isMain) {
-          context.getString(R.string.nanoflow_widget_content_main_task)
-        } else {
-          context.getString(R.string.nanoflow_widget_content_secondary_task, index)
-        },
+        eyebrow = context.getString(R.string.nanoflow_widget_focus_slot_position, index + 1),
         title = card.title,
         subtitle = card.projectTitle,
-        metaStart = context.getString(R.string.nanoflow_widget_focus_slot_position, index + 1),
-        metaEnd = card.estimatedMinutes?.let {
-          context.getString(R.string.nanoflow_widget_minutes_short, it)
-        } ?: context.getString(
+        metaStart = context.getString(
           if (card.isMain) R.string.nanoflow_widget_focus_slot_main
           else R.string.nanoflow_widget_focus_slot_secondary,
         ),
+        metaEnd = card.estimatedMinutes?.let {
+          context.getString(R.string.nanoflow_widget_minutes_short, it)
+        },
         interactionHint = context.getString(R.string.nanoflow_widget_focus_switch_hint),
       )
     }
@@ -1677,45 +1702,18 @@ class NanoflowWidgetRepository(private val context: Context) {
   }
 
   private fun buildSummaryRequestBody(lastKnownVersion: String?, instanceId: String, hostInstanceId: String): String {
-    val escapedClientVersion = BuildConfig.NANOFLOW_WIDGET_CLIENT_VERSION
-      .replace("\\", "\\\\")
-      .replace("\"", "\\\"")
-    val escapedVersion = lastKnownVersion
-      ?.replace("\\", "\\\\")
-      ?.replace("\"", "\\\"")
-    val escapedInstanceId = instanceId
-      .replace("\\", "\\\\")
-      .replace("\"", "\\\"")
-    val escapedHostInstanceId = hostInstanceId
-      .replace("\\", "\\\\")
-      .replace("\"", "\\\"")
-
-    return buildString {
-      append('{')
-      append("\"clientSchemaVersion\":1,")
-      append("\"platform\":\"")
-      append(BuildConfig.NANOFLOW_WIDGET_PLATFORM)
-      append("\",")
-      append("\"supportsPush\":")
-      append(if (BuildConfig.NANOFLOW_FCM_ENABLED) "true" else "false")
-      append(',')
-      if (escapedClientVersion.isNotBlank()) {
-        append("\"clientVersion\":\"")
-        append(escapedClientVersion)
-        append("\",")
-      }
-      if (!escapedVersion.isNullOrBlank()) {
-        append("\"lastKnownSummaryVersion\":\"")
-        append(escapedVersion)
-        append("\",")
-      }
-      append("\"instanceId\":\"")
-      append(escapedInstanceId)
-      append("\",")
-      append("\"hostInstanceId\":\"")
-      append(escapedHostInstanceId)
-      append("\"}")
-    }
+    val clientVersion = BuildConfig.NANOFLOW_WIDGET_CLIENT_VERSION.takeIf { it.isNotBlank() }
+    return json.encodeToString(
+      WidgetSummaryRequestPayload(
+        clientSchemaVersion = 1,
+        platform = BuildConfig.NANOFLOW_WIDGET_PLATFORM,
+        supportsPush = BuildConfig.NANOFLOW_FCM_ENABLED,
+        clientVersion = clientVersion,
+        lastKnownSummaryVersion = lastKnownVersion?.takeIf { it.isNotBlank() },
+        instanceId = instanceId,
+        hostInstanceId = hostInstanceId,
+      ),
+    )
   }
 
   private fun buildTransportFallback(

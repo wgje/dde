@@ -193,8 +193,12 @@ describe('Widget backend foundation contract', () => {
     expect(summaryFn).toContain("code: 'SCHEMA_MISMATCH'");
     expect(summaryFn).toContain('buildSummaryEnvelope');
     expect(summaryFn).toContain('dockSnapshot.focusSessionState');
+    expect(summaryFn).toContain('function isCommandCenterEntry');
+    expect(summaryFn).toContain('const entryDerivedState = toLegacyFocusStateFromDockSnapshot(dockSnapshot)');
+    expect(summaryFn).toContain('const commandCenterOrderIds = (state.commandCenterOrderIds?.length ?? 0) > 0');
     expect(summaryFn).toContain('mainTaskId');
     expect(summaryFn).toContain("explicitMainEntry?.taskId ?? sessionMainTaskId");
+    expect(summaryFn).toContain('.filter(isCommandCenterEntry)');
     expect(summaryFn).toContain("entry.taskId !== mainTaskId && entry.isMain !== true && entry.lane === 'combo-select'");
     expect(summaryFn).toContain('const preAuthIpScopeKey = await sha256Hex');
     expect(summaryFn).toContain('widget-summary-ip:');
@@ -291,7 +295,7 @@ describe('Widget backend foundation contract', () => {
     expect(focusActionFn).toContain('withPrivateNoStoreHeaders(corsHeaders)');
     expect(focusReorderHelper).toContain('export function promoteSecondaryTaskToC2');
     expect(focusReorderHelper).toContain('const COMBO_VISIBLE_LIMIT = 3');
-    expect(focusReorderHelper).toContain("code: 'MAIN_TASK_FIXED'");
+    expect(focusReorderHelper).toContain("code: 'ALREADY_FRONT'");
     expect(shared).toContain("'Cache-Control': 'private, no-store, max-age=0'");
     expect(shared).toContain("'Vary': 'Origin, Authorization'");
     expect(shared).toContain("const cfIp = req.headers.get('cf-connecting-ip');");

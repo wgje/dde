@@ -34,6 +34,7 @@ export interface FocusSessionStateLike {
   sessionStartedAt?: number;
   isActive?: boolean;
   isFocusOverlayOn?: boolean;
+  commandCenterOrderIds?: string[];
   commandCenterTasks?: FocusTaskSlotLike[];
   comboSelectTasks?: FocusTaskSlotLike[];
   backupTasks?: FocusTaskSlotLike[];
@@ -73,6 +74,7 @@ export type PromoteSecondaryResult =
     };
 
 const COMBO_VISIBLE_LIMIT = 3;
+const CONSOLE_VISIBLE_LIMIT = 4;
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -131,6 +133,36 @@ function activeEntries(snapshot: DockSnapshotLike): DockEntryLike[] {
   return Array.isArray(snapshot.entries)
     ? snapshot.entries.filter(entry => !isCompletedEntry(entry))
     : [];
+}
+
+function isConsoleVisibleCandidate(entry: DockEntryLike): boolean {
+  return entry.isMain === true
+    || entry.status === 'focusing'
+    || entry.lane === 'combo-select';
+}
+
+function resolveVisibleOrder(snapshot: DockSnapshotLike, active: DockEntryLike[]): string[] {
+  const fromState = isPlainObject(snapshot.focusSessionState)
+    ? stringArray(snapshot.focusSessionState.commandCenterOrderIds)
+    : [];
+  const activeIds = new Set(uniqueIds(active.map(entry => taskIdOfEntry(entry))));
+  if (fromState.length > 0) {
+    return fromState.filter(taskId => activeIds.has(taskId)).slice(0, CONSOLE_VISIBLE_LIMIT);
+  }
+
+  return active
+    .filter(isConsoleVisibleCandidate)
+    .slice()
+    .sort((left, right) => {
+      if (left.status === 'focusing' && right.status !== 'focusing') return -1;
+      if (right.status === 'focusing' && left.status !== 'focusing') return 1;
+      const orderDelta = entryOrder(left) - entryOrder(right);
+      if (orderDelta !== 0) return orderDelta;
+      return (taskIdOfEntry(left) ?? '').localeCompare(taskIdOfEntry(right) ?? '');
+    })
+    .map(entry => taskIdOfEntry(entry))
+    .filter((taskId): taskId is string => taskId !== null)
+    .slice(0, CONSOLE_VISIBLE_LIMIT);
 }
 
 function resolveMainTaskId(snapshot: DockSnapshotLike, active: DockEntryLike[]): string | null {
@@ -229,26 +261,49 @@ export function promoteSecondaryTaskToC2(
 
   const active = activeEntries(dockSnapshot);
   const mainTaskId = resolveMainTaskId(dockSnapshot, active);
-  if (mainTaskId === targetTaskId) {
-    return { ok: false, code: 'MAIN_TASK_FIXED', error: 'main task cannot be reordered by widget' };
+  const visibleOrder = resolveVisibleOrder(dockSnapshot, active);
+  const targetEntry = active.find(entry => taskIdOfEntry(entry) === targetTaskId) ?? null;
+  const targetAlreadyVisible = visibleOrder.includes(targetTaskId);
+  const currentFrontTaskId = visibleOrder[0] ?? null;
+  if (currentFrontTaskId === targetTaskId) {
+    return { ok: false, code: 'ALREADY_FRONT', error: 'task is already at the front of the command center' };
+  }
+
+  // 允许把备选区任务直接提入 C 位 #1。只要任务仍处于活跃停泊状态，就应参与换位。
+  if (!targetEntry) {
+    return { ok: false, code: 'SECONDARY_TASK_NOT_FOUND', error: 'task is not in the active dock' };
   }
 
   const activeSecondary = active.filter(entry => {
     const taskId = taskIdOfEntry(entry);
     return taskId !== null && taskId !== mainTaskId && entry.isMain !== true;
   });
-  if (!activeSecondary.some(entry => taskIdOfEntry(entry) === targetTaskId)) {
-    return { ok: false, code: 'SECONDARY_TASK_NOT_FOUND', error: 'secondary task is not in the active focus session' };
-  }
 
   const previousOrder = resolveSecondaryOrder(dockSnapshot, activeSecondary);
-  const nextSecondaryIds = uniqueIds([
+  let nextVisibleOrder = uniqueIds([
     targetTaskId,
-    ...previousOrder.filter(taskId => taskId !== targetTaskId),
+    ...visibleOrder.filter(taskId => taskId !== targetTaskId),
   ]);
-  const comboSelectIds = nextSecondaryIds.slice(0, COMBO_VISIBLE_LIMIT);
-  const backupIds = nextSecondaryIds.slice(COMBO_VISIBLE_LIMIT);
-  const secondaryOrder = new Map(nextSecondaryIds.map((taskId, index) => [taskId, index]));
+  // 主任务归属不随前台换位改变；若主任务当前仍在可见 C 位中，则隐藏备选提位时要保住它。
+  if (
+    !targetAlreadyVisible
+    && mainTaskId
+    && visibleOrder.includes(mainTaskId)
+    && nextVisibleOrder.length > CONSOLE_VISIBLE_LIMIT
+    && !nextVisibleOrder.slice(0, CONSOLE_VISIBLE_LIMIT).includes(mainTaskId)
+  ) {
+    const evictedVisibleTaskId = [...visibleOrder].reverse().find(taskId => taskId !== mainTaskId) ?? null;
+    nextVisibleOrder = uniqueIds([
+      targetTaskId,
+      ...visibleOrder.filter(taskId => taskId !== targetTaskId && taskId !== evictedVisibleTaskId),
+    ]);
+  }
+  nextVisibleOrder = nextVisibleOrder.slice(0, CONSOLE_VISIBLE_LIMIT);
+  const visibleSecondaryIds = nextVisibleOrder.filter(taskId => taskId !== mainTaskId);
+  const comboSelectIds = visibleSecondaryIds.slice(0, COMBO_VISIBLE_LIMIT);
+  const backupIds = uniqueIds(previousOrder.filter(taskId => !comboSelectIds.includes(taskId)));
+  const backupOrder = new Map(backupIds.map((taskId, index) => [taskId, index]));
+  const visibleOrderIndex = new Map(nextVisibleOrder.map((taskId, index) => [taskId, index]));
 
   const nextEntries = Array.isArray(dockSnapshot.entries)
     ? dockSnapshot.entries.map(entry => {
@@ -256,25 +311,32 @@ export function promoteSecondaryTaskToC2(
         if (!taskId || isCompletedEntry(entry)) {
           return entry;
         }
-        if (taskId === mainTaskId) {
+        if (visibleOrderIndex.has(taskId)) {
+          const visibleIndex = visibleOrderIndex.get(taskId)!;
           return {
             ...entry,
             lane: 'combo-select',
-            isMain: true,
-            dockedOrder: 0,
-            manualOrder: 0,
+            isMain: taskId === mainTaskId,
+            dockedOrder: visibleIndex,
+            manualOrder: visibleIndex,
+            status: taskId === targetTaskId
+              ? 'focusing'
+              : entry.status === 'focusing'
+                ? 'stalled'
+                : entry.status,
           };
         }
-        if (!secondaryOrder.has(taskId)) {
+        if (!backupOrder.has(taskId)) {
           return entry.isMain === true ? { ...entry, isMain: false } : entry;
         }
-        const index = secondaryOrder.get(taskId)!;
+        const index = backupOrder.get(taskId)!;
         return {
           ...entry,
-          lane: index < COMBO_VISIBLE_LIMIT ? 'combo-select' : 'backup',
+          lane: 'backup',
           isMain: false,
-          dockedOrder: index + 1,
-          manualOrder: index + 1,
+          dockedOrder: nextVisibleOrder.length + index,
+          manualOrder: nextVisibleOrder.length + index,
+          status: entry.status === 'focusing' ? 'stalled' : entry.status,
         };
       })
     : [];
@@ -287,12 +349,9 @@ export function promoteSecondaryTaskToC2(
   }
 
   const slotByTaskId = collectExistingSlots(existingFocusState);
-  const commandCenterTasks = active
-    .filter(entry => {
-      const taskId = taskIdOfEntry(entry);
-      return taskId !== null && (entry.isMain === true || taskId === mainTaskId);
-    })
-    .map((entry, index) => buildSlot(taskIdOfEntry(entry)!, 'command', index, true, slotByTaskId, entryByTaskId));
+  const commandCenterTasks = mainTaskId
+    ? [buildSlot(mainTaskId, 'command', 0, true, slotByTaskId, entryByTaskId)]
+    : [];
   const comboSelectTasks = comboSelectIds.map((taskId, index) =>
     buildSlot(taskId, 'combo-select', index, false, slotByTaskId, entryByTaskId),
   );
@@ -324,6 +383,7 @@ export function promoteSecondaryTaskToC2(
         ...(typeof sessionStartedAt === 'number' ? { sessionStartedAt } : {}),
         isActive: true,
         isFocusOverlayOn: existingFocusState?.isFocusOverlayOn ?? true,
+        commandCenterOrderIds: nextVisibleOrder,
         commandCenterTasks,
         comboSelectTasks,
         backupTasks,

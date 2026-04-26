@@ -20,7 +20,11 @@ import {
   FocusSessionState,
   HighLoadCounter,
 } from '../models/parking-dock';
-import { buildOverflowMeta, toFocusTaskSlot, isAutoPromotableStatus } from './dock-engine.utils';
+import {
+  buildOverflowMeta,
+  isAutoPromotableStatus,
+  toFocusTaskSlot,
+} from './dock-engine.utils';
 import { computeThreeDimensionalRecommendation } from './dock-scheduler.rules';
 import { DockSnapshotPersistenceService, type SnapshotNormalizeContext } from './dock-snapshot-persistence.service';
 import { DockCompletionFlowService } from './dock-completion-flow.service';
@@ -214,6 +218,13 @@ export class DockSnapshotManagerService {
   buildFocusSessionState(): FocusSessionState {
     const context = this.ensureFocusSessionContext();
     const activeEntries = sortEntriesByDockOrder(this.ctx.entries().filter(e => e.status !== 'completed'));
+    const commandCenterCandidates = activeEntries.filter(
+      entry => entry.isMain || entry.lane === 'combo-select' || entry.status === 'focusing',
+    );
+    const commandCenterOrderIds = this.completionFlow
+      .sortConsoleEntriesForDisplay(commandCenterCandidates)
+      .slice(0, 4)
+      .map(entry => entry.taskId);
 
     const commandTasks = activeEntries
       .filter(e => e.isMain)
@@ -231,6 +242,7 @@ export class DockSnapshotManagerService {
       sessionStartedAt: context.startedAt,
       isActive: true,
       isFocusOverlayOn: this.ctx.focusScrimOn(),
+      commandCenterOrderIds,
       commandCenterTasks: commandTasks,
       comboSelectTasks,
       backupTasks,

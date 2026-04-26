@@ -1936,6 +1936,67 @@ describe('DockEngineService', () => {
     expect(service.exportSnapshot().focusSessionState?.commandCenterTasks.map(slot => slot.taskId)).toEqual(['A']);
   });
 
+  it('focusSessionState should keep backup-only tasks out of the widget C slots while showing combo-select pending secondaries', () => {
+    const makeEntry = (
+      taskId: string,
+      dockedOrder: number,
+      overrides: Partial<ReturnType<typeof service.entries>[number]> = {},
+    ) => ({
+      taskId,
+      title: taskId,
+      sourceProjectId: 'project-1',
+      status: 'pending_start' as const,
+      load: 'low' as const,
+      expectedMinutes: 20,
+      waitMinutes: null,
+      waitStartedAt: null,
+      lane: 'backup' as const,
+      zoneSource: 'manual' as const,
+      isMain: false,
+      dockedOrder,
+      detail: '',
+      sourceKind: 'project-task' as const,
+      systemSelected: false,
+      recommendedScore: null,
+      ...overrides,
+    });
+
+    service.restoreSnapshot({
+      version: 7,
+      entries: [
+        makeEntry('A', 0, { isMain: true, status: 'focusing', lane: 'combo-select' }),
+        makeEntry('B', 1),
+        makeEntry('C', 2, { lane: 'combo-select' }),
+        makeEntry('D', 3),
+      ],
+      focusMode: true,
+      isDockExpanded: true,
+      muteWaitTone: false,
+      session: {
+        firstDragIntervened: true,
+        focusBlurOn: true,
+        focusScrimOn: true,
+        mainTaskId: 'A',
+        comboSelectIds: ['C'],
+        backupIds: ['B', 'D'],
+      },
+      firstDragDone: true,
+      dailySlots: [],
+      suspendChainRootTaskId: null,
+      suspendRecommendationLocked: false,
+      pendingDecision: null,
+      dailyResetDate: '2026-04-25',
+      savedAt: '2026-04-25T08:00:00.000Z',
+    });
+
+    const focusState = service.exportSnapshot().focusSessionState;
+
+    expect(service.consoleVisibleEntries().map(entry => entry.taskId)).toEqual(['A', 'C']);
+    expect(focusState?.commandCenterOrderIds).toEqual(['A', 'C']);
+    expect(focusState?.comboSelectTasks.map(slot => slot.taskId)).toEqual(['C']);
+    expect(focusState?.backupTasks.map(slot => slot.taskId)).toEqual(['B', 'D']);
+  });
+
   it('switchToTask should move the selected visible card to the front and preserve the remaining order', () => {
     seedTask('A');
     seedTask('B');
@@ -2045,6 +2106,10 @@ describe('DockEngineService', () => {
     expect(service.consoleVisibleEntries().map(entry => entry.taskId)).toEqual(['B', 'A', 'C', 'D']);
     expect(service.entries().find(entry => entry.taskId === 'A')?.isMain).toBe(true);
     expect(service.entries().find(entry => entry.taskId === 'A')?.status).toBe('stalled');
+    expect(service.exportSnapshot().session.mainTaskId).toBe('A');
+    expect(service.exportSnapshot().focusSessionState?.commandCenterOrderIds).toEqual(['B', 'A', 'C', 'D']);
+    expect(service.exportSnapshot().focusSessionState?.commandCenterTasks.map(slot => slot.taskId)).toEqual(['A']);
+    expect(service.exportSnapshot().focusSessionState?.comboSelectTasks.map(slot => slot.taskId)).toEqual(['B', 'C', 'D']);
   });
 
   it('switching back to the main task should mark interrupted secondary task as stalled', () => {
@@ -2060,6 +2125,134 @@ describe('DockEngineService', () => {
 
     expect(service.entries().find(entry => entry.taskId === 'B')?.status).toBe('stalled');
     expect(service.focusingEntry()?.taskId).toBe('A');
+  });
+
+  it('should export command center order from the front four active dock tasks even when secondary slots are still pending', () => {
+    seedTask('A');
+    seedTask('B');
+    seedTask('C');
+    seedTask('D');
+    seedTask('E');
+
+    service.restoreSnapshot({
+      version: 7,
+      entries: [
+        {
+          taskId: 'A',
+          title: 'A',
+          sourceProjectId: 'project-1',
+          status: 'focusing',
+          load: 'low',
+          expectedMinutes: 20,
+          waitMinutes: null,
+          waitStartedAt: null,
+          lane: 'combo-select',
+          zoneSource: 'manual',
+          isMain: true,
+          dockedOrder: 0,
+          detail: '',
+          sourceKind: 'project-task',
+          systemSelected: false,
+          recommendedScore: null,
+        },
+        {
+          taskId: 'B',
+          title: 'B',
+          sourceProjectId: 'project-1',
+          status: 'pending_start',
+          load: 'low',
+          expectedMinutes: 15,
+          waitMinutes: null,
+          waitStartedAt: null,
+          lane: 'combo-select',
+          zoneSource: 'manual',
+          isMain: false,
+          dockedOrder: 1,
+          detail: '',
+          sourceKind: 'project-task',
+          systemSelected: false,
+          recommendedScore: null,
+        },
+        {
+          taskId: 'C',
+          title: 'C',
+          sourceProjectId: 'project-1',
+          status: 'pending_start',
+          load: 'low',
+          expectedMinutes: 10,
+          waitMinutes: null,
+          waitStartedAt: null,
+          lane: 'combo-select',
+          zoneSource: 'manual',
+          isMain: false,
+          dockedOrder: 2,
+          detail: '',
+          sourceKind: 'project-task',
+          systemSelected: false,
+          recommendedScore: null,
+        },
+        {
+          taskId: 'D',
+          title: 'D',
+          sourceProjectId: 'project-1',
+          status: 'pending_start',
+          load: 'low',
+          expectedMinutes: 5,
+          waitMinutes: null,
+          waitStartedAt: null,
+          lane: 'combo-select',
+          zoneSource: 'manual',
+          isMain: false,
+          dockedOrder: 3,
+          detail: '',
+          sourceKind: 'project-task',
+          systemSelected: false,
+          recommendedScore: null,
+        },
+        {
+          taskId: 'E',
+          title: 'E',
+          sourceProjectId: 'project-1',
+          status: 'pending_start',
+          load: 'low',
+          expectedMinutes: 8,
+          waitMinutes: null,
+          waitStartedAt: null,
+          lane: 'backup',
+          zoneSource: 'manual',
+          isMain: false,
+          dockedOrder: 4,
+          detail: '',
+          sourceKind: 'project-task',
+          systemSelected: false,
+          recommendedScore: null,
+        },
+      ],
+      focusMode: true,
+      isDockExpanded: true,
+      muteWaitTone: false,
+      session: {
+        firstDragIntervened: true,
+        focusBlurOn: true,
+        focusScrimOn: true,
+        mainTaskId: 'A',
+        comboSelectIds: ['B', 'C', 'D'],
+        backupIds: ['E'],
+      },
+      firstDragDone: true,
+      dailySlots: [],
+      suspendChainRootTaskId: null,
+      suspendRecommendationLocked: false,
+      pendingDecision: null,
+      dailyResetDate: '2026-03-12',
+      savedAt: new Date().toISOString(),
+    });
+
+    const focusState = service.exportSnapshot().focusSessionState;
+
+    expect(focusState?.commandCenterOrderIds).toEqual(['A', 'B', 'C', 'D']);
+    expect(focusState?.comboSelectTasks.map(slot => slot.taskId)).toEqual(['B', 'C', 'D']);
+    expect(focusState?.backupTasks.map(slot => slot.taskId)).toEqual(['E']);
   });
 
   it('insertToConsoleFromRadar should move a backup task to the front and evict the last non-main visible card', () => {

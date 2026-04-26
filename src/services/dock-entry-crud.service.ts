@@ -292,6 +292,7 @@ export class DockEntryCrudService {
         if (entry.taskId === taskId) {
           return {
             ...entry,
+            lane: 'combo-select',
             status: 'focusing',
             waitMinutes: null,
             waitStartedAt: null,

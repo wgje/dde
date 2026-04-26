@@ -468,15 +468,6 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
       ),
     )
 
-    if (targetIndex == 0) {
-      Toast.makeText(
-        context.applicationContext,
-        context.getString(R.string.nanoflow_widget_focus_main_fixed_toast),
-        Toast.LENGTH_SHORT,
-      ).show()
-      return
-    }
-
     if (taskId.isNullOrBlank()) {
       Toast.makeText(
         context.applicationContext,
@@ -491,6 +482,7 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
     val appContext = context.applicationContext
     silentActionScope.launch {
       val repository = NanoflowWidgetRepository(appContext)
+      val store = NanoflowWidgetStore(appContext)
 
       suspend fun renderCurrentWidget() {
         val appWidgetManager = AppWidgetManager.getInstance(appContext)
@@ -499,6 +491,27 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
       }
 
       try {
+        val currentFrontTaskId = runCatching {
+          store.readSummary(appWidgetId)?.focus?.taskId?.takeIf { it.isNotBlank() }
+        }.getOrNull()
+        if (currentFrontTaskId == taskId) {
+          NanoflowWidgetTelemetry.info(
+            "widget_focus_promote_noop_already_front",
+            mapOf(
+              "appWidgetId" to appWidgetId,
+              "taskId" to NanoflowWidgetTelemetry.redactId(taskId),
+            ),
+          )
+          withContext(Dispatchers.Main) {
+            Toast.makeText(
+              appContext,
+              appContext.getString(R.string.nanoflow_widget_focus_main_fixed_toast),
+              Toast.LENGTH_SHORT,
+            ).show()
+          }
+          return@launch
+        }
+
         val optimisticSnapshot = runCatching {
           repository.applyOptimisticFocusPromotion(appWidgetId, taskId)
         }.onFailure { error ->
