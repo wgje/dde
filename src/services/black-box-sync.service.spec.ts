@@ -130,6 +130,12 @@ describe('BlackBoxSyncService', () => {
           useValue: {
             isSessionExpiredError: vi.fn(() => false),
             tryRefreshSessionWithSession: vi.fn().mockResolvedValue({ refreshed: false }),
+            validateOrRefreshOnResume: vi.fn().mockResolvedValue({
+              ok: true,
+              refreshed: false,
+              deferred: false,
+            }),
+            getRecentValidationSnapshot: vi.fn(() => null),
           },
         },
         {
@@ -184,6 +190,8 @@ describe('BlackBoxSyncService', () => {
     const p1 = service.pullChanges({ reason: 'resume', force: true });
     const p2 = service.pullChanges({ reason: 'resume', force: true });
 
+  await flushMicrotasks();
+
     expect(doPullSpy).toHaveBeenCalledTimes(1);
 
     resolvePull!();
@@ -209,6 +217,72 @@ describe('BlackBoxSyncService', () => {
 
     expect(doPullSpy).not.toHaveBeenCalled();
     expect(loadLocalSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('should defer resume pull until session validation is ready', async () => {
+    const sessionManager = TestBed.inject(SessionManagerService) as unknown as {
+      validateOrRefreshOnResume: ReturnType<typeof vi.fn>;
+    };
+    const doPullSpy = vi.spyOn(
+      service as unknown as { doPullChanges: () => Promise<void> },
+      'doPullChanges'
+    ).mockResolvedValue(true);
+
+    sessionManager.validateOrRefreshOnResume.mockResolvedValueOnce({
+      ok: false,
+      refreshed: false,
+      deferred: true,
+      reason: 'client-unready',
+    });
+
+    await service.pullChanges({ reason: 'resume', force: true });
+
+    expect(sessionManager.validateOrRefreshOnResume).toHaveBeenCalledWith('blackbox:resume');
+    expect(doPullSpy).not.toHaveBeenCalled();
+  });
+
+  it('should defer gate-review pull until session validation is ready', async () => {
+    const sessionManager = TestBed.inject(SessionManagerService) as unknown as {
+      validateOrRefreshOnResume: ReturnType<typeof vi.fn>;
+    };
+    const doPullSpy = vi.spyOn(
+      service as unknown as { doPullChanges: () => Promise<void> },
+      'doPullChanges'
+    ).mockResolvedValue(true);
+
+    sessionManager.validateOrRefreshOnResume.mockResolvedValueOnce({
+      ok: false,
+      refreshed: false,
+      deferred: true,
+      reason: 'client-unready',
+    });
+
+    await service.pullChanges({ reason: 'gate-review', force: true });
+
+    expect(sessionManager.validateOrRefreshOnResume).toHaveBeenCalledWith('blackbox:gate-review');
+    expect(doPullSpy).not.toHaveBeenCalled();
+  });
+
+  it('should reuse a recent valid session snapshot before resume pull', async () => {
+    const sessionManager = TestBed.inject(SessionManagerService) as unknown as {
+      getRecentValidationSnapshot: ReturnType<typeof vi.fn>;
+      validateOrRefreshOnResume: ReturnType<typeof vi.fn>;
+    };
+    const doPullSpy = vi.spyOn(
+      service as unknown as { doPullChanges: () => Promise<void> },
+      'doPullChanges'
+    ).mockResolvedValue(true);
+
+    sessionManager.getRecentValidationSnapshot.mockReturnValueOnce({
+      valid: true,
+      userId: 'user-1',
+      at: Date.now(),
+    });
+
+    await service.pullChanges({ reason: 'resume', force: true });
+
+    expect(sessionManager.validateOrRefreshOnResume).not.toHaveBeenCalled();
+    expect(doPullSpy).toHaveBeenCalledTimes(1);
   });
 
   it('should block duplicate pull by freshness window and report to Sentry', async () => {
@@ -811,9 +885,10 @@ describe('BlackBoxSyncService', () => {
     authSignals.sessionInitialized.set(true);
     authSignals.runtimeState.set('ready');
 
-    await flushMicrotasks();
+    await vi.waitFor(() => {
+      expect(inQuery).toHaveBeenCalledWith('id', [entryId]);
+    });
 
-    expect(inQuery).toHaveBeenCalledWith('id', [entryId]);
     expect(enqueue).not.toHaveBeenCalled();
     expect(blackBoxEntriesMap().get(entryId)).toEqual(
       expect.objectContaining({

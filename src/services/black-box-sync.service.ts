@@ -1280,6 +1280,30 @@ export class BlackBoxSyncService {
       return;
     }
 
+    if (reason === 'resume' || reason === 'gate-review') {
+      const sessionSnapshot = FEATURE_FLAGS.RESUME_SESSION_SNAPSHOT_V1
+        ? this.sessionManager.getRecentValidationSnapshot(10_000)
+        : null;
+      if (!sessionSnapshot?.valid) {
+        const session = await this.sessionManager.validateOrRefreshOnResume(`blackbox:${reason}`);
+        if (session.deferred) {
+          this.logger.info('黑匣子远端拉取延后：等待会话稳定后重试', {
+            reason,
+            deferredReason: session.reason ?? 'client-unready',
+          });
+          return;
+        }
+
+        if (!session.ok) {
+          this.logger.info('黑匣子远端拉取跳过：当前会话不可用', {
+            reason,
+            failureReason: session.reason,
+          });
+          return;
+        }
+      }
+    }
+
     if (reason === 'gate-review') {
       const clockResult = this.clockSync.lastSyncResult();
       const shouldRefreshClock = !clockResult || !clockResult.reliable || this.clockSync.needsResync();

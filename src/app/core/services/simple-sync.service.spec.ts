@@ -368,6 +368,11 @@ describe('SimpleSyncService', () => {
       tryRefreshSession: vi.fn().mockResolvedValue(false),
       handleAuthErrorWithRefresh: vi.fn().mockResolvedValue(false),
       resetSessionExpired: vi.fn(),
+      validateOrRefreshOnResume: vi.fn().mockResolvedValue({
+        ok: true,
+        refreshed: false,
+        deferred: false,
+      }),
       validateSession: vi.fn().mockResolvedValue({ valid: true, userId: 'test-user' }),
       getRecentValidationSnapshot: vi.fn().mockReturnValue(null)
     };
@@ -4106,6 +4111,66 @@ describe('SimpleSyncService', () => {
       vi.useRealTimers();
     });
 
+    it('连接恢复在 session 延后时不应抢先探测远端，并应在延后后重试', async () => {
+      vi.useFakeTimers();
+      const runtimeService = service as unknown as {
+        startRuntime: () => void;
+        restoreRemoteConnectivity: (reason: string) => Promise<void>;
+      };
+      runtimeService.startRuntime();
+      mockSupabase.probeReachability.mockResolvedValue(true);
+      mockSessionManager.validateOrRefreshOnResume
+        .mockResolvedValueOnce({
+          ok: false,
+          refreshed: false,
+          deferred: true,
+          reason: 'client-unready',
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          refreshed: false,
+          deferred: false,
+        });
+
+      const restorePromise = runtimeService.restoreRemoteConnectivity('online-event');
+      await Promise.resolve();
+
+      expect(mockSessionManager.validateOrRefreshOnResume).toHaveBeenCalledWith('connectivity:online-event');
+      expect(mockSupabase.probeReachability).not.toHaveBeenCalled();
+
+      await restorePromise;
+      await vi.advanceTimersByTimeAsync(99);
+
+      expect(mockSupabase.probeReachability).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(mockSessionManager.validateOrRefreshOnResume).toHaveBeenCalledWith('connectivity:scheduled:online-event:session-deferred');
+      expect(mockSupabase.probeReachability).toHaveBeenCalledTimes(1);
+      expect(mockRealtimePolling.resumeTransport).toHaveBeenCalledTimes(1);
+      vi.useRealTimers();
+    });
+
+    it('连接恢复命中最近有效 session 快照时应跳过二次校验并继续恢复', async () => {
+      const runtimeService = service as unknown as {
+        startRuntime: () => void;
+        restoreRemoteConnectivity: (reason: string) => Promise<void>;
+      };
+      runtimeService.startRuntime();
+      mockSupabase.probeReachability.mockResolvedValue(true);
+      mockSessionManager.getRecentValidationSnapshot.mockReturnValueOnce({
+        valid: true,
+        userId: 'test-user',
+        at: Date.now(),
+      });
+
+      await runtimeService.restoreRemoteConnectivity('online-event');
+
+      expect(mockSessionManager.validateOrRefreshOnResume).not.toHaveBeenCalled();
+      expect(mockSupabase.probeReachability).toHaveBeenCalledTimes(1);
+      expect(mockRealtimePolling.resumeTransport).toHaveBeenCalledTimes(1);
+    });
+
     it('停止 runtime 后应丢弃进行中的连接恢复副作用', async () => {
       let resolveProbe: ((reachable: boolean) => void) | null = null;
       mockSupabase.probeReachability.mockImplementation(() => new Promise<boolean>((resolve) => {
@@ -4119,6 +4184,9 @@ describe('SimpleSyncService', () => {
       runtimeService.startRuntime();
 
       const restorePromise = runtimeService.restoreRemoteConnectivity('online-event');
+      await vi.waitFor(() => {
+        expect(resolveProbe).toBeTypeOf('function');
+      });
       runtimeService.stopRuntime();
       resolveProbe!(true);
       await restorePromise;

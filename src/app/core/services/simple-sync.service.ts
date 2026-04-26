@@ -517,6 +517,39 @@ export class SimpleSyncService {
     return true;
   }
 
+  private async ensureConnectivityRecoverySessionReady(reason: string): Promise<boolean> {
+    const sessionSnapshot = FEATURE_FLAGS.RESUME_SESSION_SNAPSHOT_V1
+      ? this.sessionManager.getRecentValidationSnapshot(10_000)
+      : null;
+
+    if (sessionSnapshot?.valid) {
+      return true;
+    }
+
+    const session = await this.sessionManager.validateOrRefreshOnResume(`connectivity:${reason}`);
+
+    if (session.deferred) {
+      const delayMs = Math.max(100, getRemainingBrowserNetworkResumeDelayMs() + 50);
+      this.scheduleConnectivityRecovery(`${reason}:session-deferred`, delayMs);
+      this.logger.info('连接恢复等待会话稳定后重试', {
+        reason,
+        delayMs,
+        deferredReason: session.reason ?? 'client-unready',
+      });
+      return false;
+    }
+
+    if (!session.ok) {
+      this.logger.info('连接恢复因会话不可用而跳过', {
+        reason,
+        failureReason: session.reason,
+      });
+      return false;
+    }
+
+    return true;
+  }
+
   private scheduleConnectivityRecovery(reason: string, delayMs: number = SYNC_CONFIG.DEBOUNCE_DELAY): void {
     if (!this.runtimeStarted || this.connectivityRecoveryTimer) {
       return;
@@ -560,6 +593,15 @@ export class SimpleSyncService {
   }
 
   private async restoreRemoteConnectivityInternal(reason: string, recoveryEpoch: number): Promise<void> {
+    const sessionReady = await this.ensureConnectivityRecoverySessionReady(reason);
+    if (!this.runtimeStarted || recoveryEpoch !== this.connectivityRecoveryEpoch) {
+      return;
+    }
+
+    if (!sessionReady) {
+      return;
+    }
+
     const reachable = await this.probeRemoteReachability(reason, SYNC_CONFIG.CONNECTIVITY_PROBE_TIMEOUT, true);
     if (!this.runtimeStarted || recoveryEpoch !== this.connectivityRecoveryEpoch) {
       return;
