@@ -5,6 +5,7 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.json.JsonNames
 
+@OptIn(ExperimentalSerializationApi::class)
 @Serializable
 data class WidgetFocusSummary(
   val active: Boolean = false,
@@ -13,7 +14,8 @@ data class WidgetFocusSummary(
   val projectTitle: String? = null,
   val title: String? = null,
   val remainingMinutes: Int? = null,
-  val isMaster: Boolean = false,
+  @JsonNames("isMain")
+  val isMaster: Boolean? = null,
   val valid: Boolean = false,
 )
 
@@ -29,6 +31,7 @@ data class WidgetGatePreview(
   val valid: Boolean = false,
 )
 
+@OptIn(ExperimentalSerializationApi::class)
 @Serializable
 data class WidgetDockItem(
   val taskId: String? = null,
@@ -36,7 +39,8 @@ data class WidgetDockItem(
   val title: String? = null,
   val projectTitle: String? = null,
   val estimatedMinutes: Int? = null,
-  val isMaster: Boolean = false,
+  @JsonNames("isMain")
+  val isMaster: Boolean? = null,
   val valid: Boolean = false,
 )
 

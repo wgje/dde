@@ -63,6 +63,7 @@ android/**/build/
 __azurite_db_table__.json
 AzuriteConfig
 trace.json.gz
+nanoflow_widget.preferences_pb
 tmp/
 playwright-report/
 

@@ -21,6 +21,72 @@ function expectTypeScriptToParse(relativePath: string): void {
   expect(diagnostics, `${relativePath} should be syntactically valid TypeScript`).toHaveLength(0);
 }
 
+function extractFunctionSource(sourceText: string, functionName: string): string {
+  const signature = `function ${functionName}(`;
+  const start = sourceText.indexOf(signature);
+  expect(start, `Function ${functionName} should exist`).toBeGreaterThanOrEqual(0);
+
+  const bodyStart = sourceText.indexOf('{', start);
+  expect(bodyStart, `Function ${functionName} should have a body`).toBeGreaterThanOrEqual(0);
+
+  let depth = 0;
+  for (let index = bodyStart; index < sourceText.length; index += 1) {
+    const char = sourceText[index];
+    if (char === '{') depth += 1;
+    if (char === '}') {
+      depth -= 1;
+      if (depth === 0) {
+        return sourceText.slice(start, index + 1);
+      }
+    }
+  }
+
+  throw new Error(`Failed to extract function ${functionName}`);
+}
+
+function loadWidgetSummaryFocusHelpers(): {
+  toFocusSessionState: (value: unknown) => unknown;
+  pickPrimaryFocusSlot: (value: unknown) => { taskId?: string | null } | null;
+} {
+  const sourceText = readText('supabase/functions/widget-summary/index.ts');
+  const functionNames = [
+    'isPlainObject',
+    'toSlotList',
+    'isMasterSlot',
+    'toStringArray',
+    'toDockEntryList',
+    'mapDockEntryToFocusSlot',
+    'applyMainTaskHint',
+    'isCommandCenterEntry',
+    'toLegacyFocusStateFromDockSnapshot',
+    'toFocusSessionState',
+    'resolveCommandCenterSlots',
+    'pickPrimaryFocusSlot',
+    'isRenderableFocusSlot',
+  ];
+  const snippet = functionNames
+    .map(name => extractFunctionSource(sourceText, name))
+    .join('\n\n');
+  const transpiled = ts.transpileModule(
+    `${snippet}\nmodule.exports = { toFocusSessionState, pickPrimaryFocusSlot };`,
+    {
+      compilerOptions: {
+        module: ts.ModuleKind.CommonJS,
+        target: ts.ScriptTarget.ES2022,
+      },
+    },
+  ).outputText;
+
+  const module = { exports: {} as Record<string, unknown> };
+  const evaluator = new Function('module', 'exports', transpiled);
+  evaluator(module, module.exports);
+
+  return module.exports as {
+    toFocusSessionState: (value: unknown) => unknown;
+    pickPrimaryFocusSlot: (value: unknown) => { taskId?: string | null } | null;
+  };
+}
+
 describe('Widget backend foundation contract', () => {
   it('supabase config must keep widget auth split on function-level verification', () => {
     const config = readText('supabase/config.toml');
@@ -195,6 +261,10 @@ describe('Widget backend foundation contract', () => {
     expect(summaryFn).toContain('dockSnapshot.focusSessionState');
     expect(summaryFn).toContain('function isCommandCenterEntry');
     expect(summaryFn).toContain('const entryDerivedState = toLegacyFocusStateFromDockSnapshot(dockSnapshot)');
+    expect(summaryFn).toContain('function isMasterSlot(slot: FocusTaskSlotLike | null | undefined): boolean');
+    expect(summaryFn).toContain('function applyMainTaskHint(slots: FocusTaskSlotLike[], mainTaskId: string | null): FocusTaskSlotLike[]');
+    expect(summaryFn).toContain('item.isMaster === true || item.isMain === true');
+    expect(summaryFn).toContain('const commandCenterTasksWithMain = !hasMainSlot && derivedMainSlot');
     expect(summaryFn).toContain('const commandCenterOrderIds = (state.commandCenterOrderIds?.length ?? 0) > 0');
     expect(summaryFn).toContain('mainTaskId');
     expect(summaryFn).toContain("explicitMainEntry?.taskId ?? sessionMainTaskId");
@@ -317,5 +387,123 @@ describe('Widget backend foundation contract', () => {
     expect(bindingService).not.toContain('navigator.locks?.request');
     expect(bindingService).not.toContain('uninstallWidgetInstance');
     expect(bindingService).not.toContain('writeWidgetTokenToDb');
+  });
+
+  it('widget summary focus repair should keep the hinted main slot ahead of stale commandCenterOrderIds', () => {
+    const { toFocusSessionState, pickPrimaryFocusSlot } = loadWidgetSummaryFocusHelpers();
+
+    const state = toFocusSessionState({
+      version: 7,
+      focusMode: true,
+      entries: [
+        {
+          taskId: 'main-task',
+          title: 'Main',
+          sourceProjectId: 'project-1',
+          expectedMinutes: 25,
+          status: 'focusing',
+          isMain: true,
+          lane: 'combo-select',
+          sourceKind: 'project-task',
+          dockedOrder: 0,
+          manualOrder: 0,
+        },
+        {
+          taskId: 'secondary-task',
+          title: 'Secondary',
+          sourceProjectId: 'project-1',
+          expectedMinutes: 10,
+          status: 'pending_start',
+          isMain: false,
+          lane: 'combo-select',
+          sourceKind: 'project-task',
+          dockedOrder: 1,
+          manualOrder: 1,
+        },
+      ],
+      session: {
+        mainTaskId: 'main-task',
+        comboSelectIds: ['secondary-task'],
+        backupIds: [],
+      },
+      focusSessionState: {
+        commandCenterOrderIds: ['secondary-task'],
+        commandCenterTasks: [
+          {
+            taskId: 'secondary-task',
+            inlineTitle: 'Secondary',
+            sourceProjectId: 'project-1',
+            estimatedMinutes: 10,
+            focusStatus: 'pending_start',
+            isMaster: false,
+            isMain: false,
+          },
+        ],
+        comboSelectTasks: [],
+        backupTasks: [],
+      },
+    });
+
+    const primarySlot = pickPrimaryFocusSlot(state);
+    expect(primarySlot?.taskId).toBe('main-task');
+  });
+
+  it('widget summary should preserve a valid later-main commandCenterOrderIds sequence', () => {
+    const { toFocusSessionState, pickPrimaryFocusSlot } = loadWidgetSummaryFocusHelpers();
+
+    const state = toFocusSessionState({
+      version: 7,
+      focusMode: true,
+      entries: [
+        {
+          taskId: 'main-task',
+          title: 'Main',
+          sourceProjectId: 'project-1',
+          expectedMinutes: 25,
+          status: 'pending_start',
+          isMain: true,
+          lane: 'combo-select',
+          sourceKind: 'project-task',
+          dockedOrder: 0,
+          manualOrder: 0,
+        },
+        {
+          taskId: 'secondary-task',
+          title: 'Secondary',
+          sourceProjectId: 'project-1',
+          expectedMinutes: 10,
+          status: 'focusing',
+          isMain: false,
+          lane: 'combo-select',
+          sourceKind: 'project-task',
+          dockedOrder: 1,
+          manualOrder: 1,
+        },
+      ],
+      session: {
+        mainTaskId: 'main-task',
+        comboSelectIds: ['secondary-task'],
+        backupIds: [],
+      },
+      focusSessionState: {
+        commandCenterOrderIds: ['secondary-task', 'main-task'],
+        commandCenterTasks: [
+          {
+            taskId: 'secondary-task',
+            inlineTitle: 'Secondary',
+            sourceProjectId: 'project-1',
+            estimatedMinutes: 10,
+            focusStatus: 'focusing',
+            isMaster: false,
+            isMain: false,
+          },
+        ],
+        comboSelectTasks: [],
+        backupTasks: [],
+      },
+    });
+
+    const primarySlot = pickPrimaryFocusSlot(state);
+    expect(primarySlot?.taskId).toBe('secondary-task');
   });
 });

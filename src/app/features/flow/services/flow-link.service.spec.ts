@@ -226,6 +226,29 @@ describe('FlowLinkService', () => {
     expect(secondOpen?.y).toBe(firstOpen?.y);
   });
 
+  it('同一跨树关联复用会话时也应接收最新标题和描述，避免显示回流旧内容', () => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 });
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 844 });
+
+    service.openConnectionEditor('source-task', 'target-task', '旧描述', 200, 300, '旧标题', {
+      isCrossTree: true,
+      mode: 'preview',
+    } as any);
+
+    service.openConnectionEditor('source-task', 'target-task', '新描述', 200, 300, '新标题', {
+      isCrossTree: true,
+      mode: 'preview',
+    } as any);
+
+    expect(service.connectionEditorData()).toMatchObject({
+      sourceId: 'source-task',
+      targetId: 'target-task',
+      title: '新标题',
+      description: '新描述',
+      mode: 'edit',
+    });
+  });
+
   it('移动端打开关联块后应短暂忽略背景关闭，避免同一次点击把预览立即关掉', () => {
     service.openConnectionEditor('source-task', 'target-task', '跨树描述', 200, 300, '依赖', {
       isCrossTree: true,

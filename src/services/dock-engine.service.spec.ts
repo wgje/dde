@@ -2410,11 +2410,10 @@ describe('DockEngineService', () => {
     service.dockTask('D', 'backup', { zoneSource: 'manual' });
     service.dockTask('E', 'backup', { zoneSource: 'manual' });
     service.toggleFocusMode();
-    service.switchToTask('A');
-    service.switchToTask('B');
+    service.setMainTask('B');
     service.suspendTask('A', 30);
-    service.switchToTask('C');
-    service.switchToTask('D');
+    service.setMainTask('C');
+    service.setMainTask('D');
 
     expect(service.consoleVisibleEntries().map(entry => entry.taskId)).toEqual(['D', 'C', 'B', 'A']);
     expect(service.entries().find(entry => entry.taskId === 'A')?.isMain).toBe(true);
@@ -2438,7 +2437,7 @@ describe('DockEngineService', () => {
     service.dockTask('C', 'combo-select', { zoneSource: 'manual' });
     service.toggleFocusMode();
     service.switchToTask('A');
-    service.switchToTask('B');
+    service.setMainTask('B');
     service.switchToTask('A');
 
     expect(service.entries().find(entry => entry.taskId === 'B')?.status).toBe('stalled');
@@ -2448,6 +2447,106 @@ describe('DockEngineService', () => {
     expect(service.focusingEntry()?.taskId).toBe('B');
     expect(service.entries().find(entry => entry.taskId === 'B')?.isMain).toBe(true);
   });
+
+  it('main completion should let the current front secondary inherit main ownership before other stalled tasks', () => {
+    seedTask('A');
+    seedTask('B');
+    seedTask('C');
+    service.dockTask('A');
+    service.dockTask('B', 'backup', { zoneSource: 'manual' });
+    service.dockTask('C', 'combo-select', { zoneSource: 'manual' });
+    service.toggleFocusMode();
+    service.switchToTask('A');
+    service.switchToTask('C');
+    service.switchToTask('B');
+
+    expect(service.focusingEntry()?.taskId).toBe('B');
+    expect(service.entries().find(entry => entry.taskId === 'C')?.status).toBe('stalled');
+    expect(service.entries().find(entry => entry.taskId === 'A')?.isMain).toBe(true);
+
+    service.completeTask('A');
+
+    expect(service.focusingEntry()?.taskId).toBe('B');
+    expect(service.entries().find(entry => entry.taskId === 'B')?.isMain).toBe(true);
+    expect(service.entries().find(entry => entry.taskId === 'C')?.isMain).toBe(false);
+    expect(service.exportSnapshot().session.mainTaskId).toBe('B');
+    expect(service.exportSnapshot().focusSessionState?.commandCenterOrderIds?.[0]).toBe('B');
+    expect(service.exportSnapshot().focusSessionState?.commandCenterTasks.map(slot => slot.taskId)).toEqual(['B']);
+  });
+
+  it('main completion should promote the highest visible C-slot secondary when no task is focused', () => {
+    const makeEntry = (taskId: string, overrides: Partial<DockSnapshot['entries'][number]> = {}) => ({
+      taskId,
+      title: taskId,
+      sourceProjectId: 'project-1',
+      status: 'pending_start' as const,
+      load: 'low' as const,
+      expectedMinutes: 10,
+      waitMinutes: null,
+      waitStartedAt: null,
+      lane: 'combo-select' as const,
+      zoneSource: 'manual' as const,
+      isMain: false,
+      dockedOrder: 0,
+      detail: '',
+      sourceKind: 'project-task' as const,
+      systemSelected: false,
+      recommendedScore: null,
+      ...overrides,
+    });
+
+    service.restoreSnapshot({
+      version: 7,
+      entries: [
+        makeEntry('A', { isMain: true, status: 'focusing', lane: 'combo-select', dockedOrder: 0, manualOrder: 0 }),
+        makeEntry('B', { status: 'pending_start', lane: 'combo-select', dockedOrder: 1, manualOrder: 1 }),
+        makeEntry('C', { status: 'pending_start', lane: 'combo-select', dockedOrder: 2, manualOrder: 2 }),
+        makeEntry('D', { status: 'pending_start', lane: 'backup', dockedOrder: 3, manualOrder: 3 }),
+      ],
+      focusMode: true,
+      isDockExpanded: true,
+      muteWaitTone: false,
+      session: {
+        firstDragIntervened: true,
+        focusBlurOn: true,
+        focusScrimOn: true,
+        mainTaskId: 'A',
+        comboSelectIds: ['B', 'C'],
+        backupIds: ['D'],
+      },
+      focusSessionState: {
+        schemaVersion: 2,
+        sessionId: 'session-1',
+        sessionStartedAt: 1710000000000,
+        isActive: true,
+        isFocusOverlayOn: true,
+        commandCenterOrderIds: ['A', 'B', 'C'],
+        commandCenterTasks: [],
+        comboSelectTasks: [],
+        backupTasks: [],
+        hasFirstBatchSelected: true,
+        routineSlotsShownToday: [],
+        highLoadCounter: { count: 0, windowStartAt: 0 },
+        burnoutTriggeredAt: null,
+      },
+      firstDragDone: true,
+      dailySlots: [],
+      suspendChainRootTaskId: null,
+      suspendRecommendationLocked: false,
+      pendingDecision: null,
+      dailyResetDate: '2026-04-25',
+      savedAt: '2026-04-25T08:00:00.000Z',
+    });
+
+    service.completeTask('A');
+
+    expect(service.focusingEntry()?.taskId).toBe('B');
+    expect(service.entries().find(entry => entry.taskId === 'B')?.isMain).toBe(true);
+    expect(service.entries().find(entry => entry.taskId === 'C')?.isMain).toBe(false);
+    expect(service.entries().find(entry => entry.taskId === 'D')?.isMain).toBe(false);
+    expect(service.exportSnapshot().session.mainTaskId).toBe('B');
+  });
+
   it('clearDockForExit should clear entries but keep exit chrome alive until final cleanup', () => {
     seedTask('A');
     service.dockTask('A');

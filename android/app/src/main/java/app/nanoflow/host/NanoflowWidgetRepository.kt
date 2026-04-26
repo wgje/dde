@@ -566,6 +566,7 @@ class NanoflowWidgetRepository(private val context: Context) {
         projectTitle = target.projectTitle,
         title = target.title,
         remainingMinutes = target.estimatedMinutes,
+        // 保留 null 语义：legacy summary 若没有显式主任务标记，后续仍可回退到“首槽为主”。
         isMaster = target.isMaster,
         valid = target.valid,
       ),
@@ -1202,6 +1203,8 @@ class NanoflowWidgetRepository(private val context: Context) {
   ): List<WidgetTaskCard> {
     if (!hasFocusState) return emptyList()
     val cards = mutableListOf<WidgetTaskCard>()
+    val hasExplicitMaster = summary.focus.isMaster == true || summary.dock.items.any { it.isMaster == true }
+    val focusIsMain = summary.focus.isMaster ?: !hasExplicitMaster
     val mainTitle = when {
       privacyMode -> context.getString(R.string.nanoflow_widget_privacy_focus_title)
       !focusTitle.isNullOrBlank() -> focusTitle
@@ -1214,7 +1217,7 @@ class NanoflowWidgetRepository(private val context: Context) {
         title = mainTitle,
         projectTitle = if (privacyMode) null else summary.focus.projectTitle,
         estimatedMinutes = summary.focus.remainingMinutes,
-        isMain = summary.focus.isMaster,
+        isMain = focusIsMain,
         valid = summary.focus.valid,
       )
     )
@@ -1232,7 +1235,7 @@ class NanoflowWidgetRepository(private val context: Context) {
           else item.title?.takeIf { it.isNotBlank() } ?: context.getString(R.string.nanoflow_widget_unknown_task),
           projectTitle = if (privacyMode) null else item.projectTitle,
           estimatedMinutes = item.estimatedMinutes,
-          isMain = item.isMaster,
+          isMain = item.isMaster == true,
           valid = item.valid,
         )
       )

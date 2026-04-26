@@ -352,6 +352,19 @@ export class DockCompletionFlowService {
   /** 兜底路径：清除待决策，自动推进下一候选 */
   private resolveFallbackPromotion(rootTaskId: string | null, rootRemainingSeconds: number | null): void {
     this.ctx.pendingDecision.set(null);
+    const commandCenterSuccessor = this.findCommandCenterSuccessor();
+    if (commandCenterSuccessor) {
+      this.promoteCandidate(commandCenterSuccessor.taskId);
+      this.setLastDecision({
+        type: 'completion_followup',
+        reason: '主任务完成后由当前 C 位最高序副任务继承主任务属性',
+        rootTaskId: rootTaskId ?? undefined,
+        recommendedTaskIds: [commandCenterSuccessor.taskId],
+        remainingMinutes: rootRemainingSeconds !== null ? rootRemainingSeconds / 60 : undefined,
+      });
+      return;
+    }
+
     this.promoteNext();
     const focused = this.ctx.focusingEntry();
     if (focused) {
@@ -363,6 +376,21 @@ export class DockCompletionFlowService {
         remainingMinutes: rootRemainingSeconds !== null ? rootRemainingSeconds / 60 : undefined,
       });
     }
+  }
+
+  /** 主任务完成时只允许已经进入 C 位的副任务接班；未点选的备选任务继续留在备选区。 */
+  private findCommandCenterSuccessor(): DockEntry | null {
+    const focusedSuccessor = this.ctx.focusingEntry();
+    if (focusedSuccessor && focusedSuccessor.status !== 'completed' && !focusedSuccessor.isMain) {
+      return focusedSuccessor;
+    }
+
+    const commandCenterCandidates = this.ctx.entries().filter(entry =>
+      entry.status !== 'completed'
+      && !entry.isMain
+      && (entry.lane === 'combo-select' || entry.status === 'focusing'),
+    );
+    return this.sortConsoleEntriesForDisplay(commandCenterCandidates)[0] ?? null;
   }
 
   /** GAP-A: 碎片过渡倒计时，不以绝对任务饱和为目标，保留推荐同时给用户休息选择 */

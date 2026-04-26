@@ -59,6 +59,7 @@ interface FocusTaskSlotLike {
   estimatedMinutes: number | null;
   focusStatus?: string;
   isMaster?: boolean;
+  isMain?: boolean;
 }
 
 interface FocusSessionStateLike {
@@ -259,8 +260,13 @@ function toSlotList(value: unknown): FocusTaskSlotLike[] {
         ? item.estimatedMinutes
         : null,
       focusStatus: typeof item.focusStatus === 'string' ? item.focusStatus : undefined,
-      isMaster: item.isMaster === true,
+      isMaster: item.isMaster === true || item.isMain === true,
+      isMain: item.isMain === true,
     }));
+}
+
+function isMasterSlot(slot: FocusTaskSlotLike | null | undefined): boolean {
+  return slot?.isMaster === true || slot?.isMain === true;
 }
 
 function toStringArray(value: unknown): string[] {
@@ -293,15 +299,30 @@ function toDockEntryList(value: unknown): DockEntryLike[] {
     }));
 }
 
-function mapDockEntryToFocusSlot(entry: DockEntryLike): FocusTaskSlotLike {
+function mapDockEntryToFocusSlot(entry: DockEntryLike, forceMaster = false): FocusTaskSlotLike {
+  const isMaster = forceMaster || entry.isMain === true;
   return {
     taskId: entry.taskId ?? null,
     sourceProjectId: entry.sourceProjectId ?? null,
     inlineTitle: entry.sourceKind === 'dock-created' ? entry.title ?? null : entry.title ?? null,
     estimatedMinutes: entry.expectedMinutes ?? null,
     focusStatus: entry.status,
-    isMaster: entry.isMain === true,
+    isMaster,
+    isMain: isMaster,
   };
+}
+
+function applyMainTaskHint(slots: FocusTaskSlotLike[], mainTaskId: string | null): FocusTaskSlotLike[] {
+  if (!mainTaskId) return slots;
+  return slots.map(slot => {
+    if (slot.taskId === mainTaskId) {
+      return { ...slot, isMaster: true, isMain: true };
+    }
+    if (isMasterSlot(slot)) {
+      return { ...slot, isMaster: false, isMain: false };
+    }
+    return slot;
+  });
 }
 
 function isCommandCenterEntry(entry: DockEntryLike): boolean {
@@ -328,10 +349,10 @@ function toLegacyFocusStateFromDockSnapshot(snapshot: DockSnapshotLike): FocusSe
   const backupIds = toStringArray(session.backupIds);
 
   const commandCenterTasks = explicitMainEntry
-    ? [mapDockEntryToFocusSlot(explicitMainEntry)]
+    ? [mapDockEntryToFocusSlot(explicitMainEntry, true)]
     : (
         mainTaskId && entryMap.has(mainTaskId)
-          ? [mapDockEntryToFocusSlot(entryMap.get(mainTaskId)!)]
+          ? [mapDockEntryToFocusSlot(entryMap.get(mainTaskId)!, true)]
           : entries.filter(entry => entry.isMain === true).slice(0, 1).map(mapDockEntryToFocusSlot)
       );
 
@@ -392,22 +413,34 @@ function toFocusSessionState(value: unknown): FocusSessionStateLike {
       ? state.commandCenterOrderIds
       : entryDerivedState.commandCenterOrderIds;
 
+    const commandCenterTasks =
+      (state.commandCenterTasks?.length ?? 0) > 0
+        ? state.commandCenterTasks
+        : entryDerivedState.commandCenterTasks;
+    const comboSelectTasks =
+      (state.comboSelectTasks?.length ?? 0) > 0
+        ? state.comboSelectTasks
+        : entryDerivedState.comboSelectTasks;
+    const backupTasks =
+      (state.backupTasks?.length ?? 0) > 0
+        ? state.backupTasks
+        : entryDerivedState.backupTasks;
+    const derivedMainSlot = entryDerivedState.commandCenterTasks?.find(isMasterSlot) ?? null;
+    const hintedMainTaskId = derivedMainSlot?.taskId ?? null;
+    const hasMainSlot = hintedMainTaskId
+      ? [...commandCenterTasks, ...comboSelectTasks, ...backupTasks].some(slot => slot.taskId === hintedMainTaskId)
+      : true;
+    const commandCenterTasksWithMain = !hasMainSlot && derivedMainSlot
+      ? [derivedMainSlot, ...commandCenterTasks]
+      : commandCenterTasks;
+
     return {
       ...state,
       isActive: dockSnapshot.focusMode === true || state.isActive === true,
       commandCenterOrderIds,
-      commandCenterTasks:
-        (state.commandCenterTasks?.length ?? 0) > 0
-          ? state.commandCenterTasks
-          : entryDerivedState.commandCenterTasks,
-      comboSelectTasks:
-        (state.comboSelectTasks?.length ?? 0) > 0
-          ? state.comboSelectTasks
-          : entryDerivedState.comboSelectTasks,
-      backupTasks:
-        (state.backupTasks?.length ?? 0) > 0
-          ? state.backupTasks
-          : entryDerivedState.backupTasks,
+      commandCenterTasks: applyMainTaskHint(commandCenterTasksWithMain, hintedMainTaskId),
+      comboSelectTasks: applyMainTaskHint(comboSelectTasks, hintedMainTaskId),
+      backupTasks: applyMainTaskHint(backupTasks, hintedMainTaskId),
     };
   }
 
@@ -450,7 +483,7 @@ function resolveCommandCenterSlots(state: FocusSessionStateLike): FocusTaskSlotL
   const masterSlot = [
     ...commandCenter,
     ...comboSelect,
-  ].find(slot => slot.isMaster === true) ?? null;
+  ].find(isMasterSlot) ?? null;
 
   if (focusingSlot) {
     fallbackOrdered.push(focusingSlot);
@@ -469,7 +502,21 @@ function resolveCommandCenterSlots(state: FocusSessionStateLike): FocusTaskSlotL
     }
   }
   if (orderedFromState.length > 0) {
-    return orderedFromState.slice(0, 4);
+    const masterTaskId = masterSlot?.taskId ?? null;
+    if (!masterTaskId || orderedFromState.some(slot => slot.taskId === masterTaskId)) {
+      return orderedFromState.slice(0, 4);
+    }
+
+    const orderedWithPriority = [...fallbackOrdered];
+    const seenSlotKeys = new Set(orderedWithPriority.map(slot => `${slot.taskId ?? ''}::${slot.inlineTitle ?? ''}`));
+    for (const slot of orderedFromState) {
+      const slotKey = `${slot.taskId ?? ''}::${slot.inlineTitle ?? ''}`;
+      if (!seenSlotKeys.has(slotKey)) {
+        orderedWithPriority.push(slot);
+        seenSlotKeys.add(slotKey);
+      }
+    }
+    return orderedWithPriority.slice(0, 4);
   }
   return fallbackOrdered.slice(0, 4);
 }
@@ -1114,7 +1161,7 @@ Deno.serve(async (req: Request) => {
       title: task?.title ?? slot.inlineTitle ?? '未命名任务',
       projectTitle: project?.title ?? null,
       estimatedMinutes: slot.estimatedMinutes,
-      isMaster: slot.isMaster === true,
+      isMaster: isMasterSlot(slot),
       valid,
       taskUpdatedAt: task?.updated_at ?? null,
       projectUpdatedAt: project?.updated_at ?? null,
@@ -1252,7 +1299,7 @@ Deno.serve(async (req: Request) => {
       projectTitle: focusProject?.title ?? null,
       title: focusTask?.title ?? primarySlot?.inlineTitle ?? null,
       remainingMinutes: primarySlot?.estimatedMinutes ?? null,
-      isMaster: primarySlot?.isMaster === true,
+      isMaster: isMasterSlot(primarySlot),
       valid: focusValid,
     },
     dock: {
@@ -1308,7 +1355,7 @@ Deno.serve(async (req: Request) => {
       projectTitle: focusProject?.title ?? null,
       title: focusTask?.title ?? primarySlot?.inlineTitle ?? null,
       remainingMinutes: primarySlot?.estimatedMinutes ?? null,
-      isMaster: primarySlot?.isMaster === true,
+      isMaster: isMasterSlot(primarySlot),
       valid: focusValid,
     },
     dock: {

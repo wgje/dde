@@ -66,8 +66,8 @@ export interface GoJSLinkData {
    */
   labelSegmentFraction?: number;
   /**
-   * 【关联块错开 2026-04-23】label 的垂直连线方向偏移（像素）。
-   * 用于短连线 + 多 label 场景的补充错开；与 segmentFraction 双重保证可读。
+    * 【关联块错开 2026-04-23】保留给旧快照/兼容路径的 label 偏移字段。
+    * 新布局默认保持关联块嵌在线内，此值通常为 0。
    */
   labelSegmentOffsetY?: number;
 }
@@ -305,10 +305,9 @@ export class FlowDiagramConfigService {
    *   1. 每条跨树链接 [minStage, maxStage] 穿越边界 b ∈ [minStage, maxStage)。
    *   2. 按 span 升序（窄范围优先，选择余地少），为每条链接挑选"当前最空
    *      的边界"作为 label 锚点；填入该边界桶，slot = 桶内序号。
-   *   3. segmentFraction 基于锚点边界相对链接 from->to 方向的位置计算，
-   *      同一边界桶内按 slot 做微抖动 (±STEP*0.5)；桶内再按 slot 做垂直
-   *      偏移 (PIXEL_STEP/档) 双重错开。
-   *   4. span=0（同 stage 跨树连线）单独分组，保留中点 + 垂直偏移。
+  *   3. segmentFraction 基于锚点边界相对链接 from->to 方向的位置计算，
+  *      同一边界桶内按 slot 做微抖动，全部沿线分散，不再把关联块抬离连线。
+  *   4. span=0（同 stage 跨树连线）单独分组，也只在连线内部做前后分散。
    *
    * 复杂度 O(L * S)：L=跨树链接数，S=stage 数。典型项目 L<100、S<10。
    */
@@ -322,8 +321,8 @@ export class FlowDiagramConfigService {
     const FRACTION_STEP = LAYOUT_CONFIG.AUTO_LAYOUT_CROSS_TREE_LABEL_FRACTION_STEP;
     const FRACTION_MIN = 0.08;
     const FRACTION_MAX = 0.92;
-    const PIXEL_STEP = LAYOUT_CONFIG.AUTO_LAYOUT_CROSS_TREE_LABEL_OFFSET_PX;
     const DENSE_THRESHOLD = LAYOUT_CONFIG.AUTO_LAYOUT_CROSS_TREE_LABEL_DENSE_STAGE_THRESHOLD;
+    // 复用历史密集区增强倍数常量；当前用于放大沿线分散步长，而不是垂直抬离。
     const DENSE_BOOST = LAYOUT_CONFIG.AUTO_LAYOUT_CROSS_TREE_LABEL_DENSE_STAGE_VERTICAL_BOOST;
 
     interface LinkSpan {
@@ -397,33 +396,24 @@ export class FlowDiagramConfigService {
       const rangeSpan = span.maxStage - span.minStage;
       // 锚点边界在链接 minStage->maxStage 方向上的分数位置
       const baseFractionFromMin = (boundary - span.minStage + 0.5) / rangeSpan;
-      // 桶内微抖动：同一边界内多条 label 沿 fraction 再细分一点
-      const jitter = n > 1
-        ? (slot - (n - 1) / 2) * (FRACTION_STEP * 0.5) / rangeSpan
-        : 0;
-      // 链接 from 可能是 min 也可能是 max；segmentFraction 永远相对 from->to
-      const fractionFromSource = span.fromStage === span.minStage
-        ? baseFractionFromMin + jitter
-        : 1 - baseFractionFromMin - jitter;
-      span.link.labelSegmentFraction = Math.min(
+      const baseFractionFromSource = span.fromStage === span.minStage
+        ? baseFractionFromMin
+        : 1 - baseFractionFromMin;
+      // 桶内微抖动：同一边界内多条 label 继续沿 fraction 分散，并按当前
+      // 链接可用的 fraction 空间自动收缩步长，避免高密度下撞到 clamp 后
+      // 再次重叠。
+      const countL = stageNodeCount.get(boundary) ?? 0;
+      const countR = stageNodeCount.get(boundary + 1) ?? 0;
+      const denseBoost = Math.min(countL, countR) >= DENSE_THRESHOLD ? DENSE_BOOST : 1;
+      span.link.labelSegmentFraction = this.computeEmbeddedLabelFraction(
+        baseFractionFromSource,
+        slot,
+        n,
+        (FRACTION_STEP * 0.5 * denseBoost) / rangeSpan,
+        FRACTION_MIN,
         FRACTION_MAX,
-        Math.max(FRACTION_MIN, fractionFromSource),
       );
-      // 【补丁 G 2026-04-23 14:55】node-label 重叠二次避让：
-      // 若边界两侧都是节点密集区（min(countL, countR) >= DENSE_THRESHOLD），
-      // 且该边界桶内已有 2+ label，把垂直偏移放大 DENSE_BOOST 倍，让 label
-      // 从节点行中间挤出到节点之间的空隙中。
-      let pixelStep = PIXEL_STEP;
-      if (n >= 2) {
-        const countL = stageNodeCount.get(boundary) ?? 0;
-        const countR = stageNodeCount.get(boundary + 1) ?? 0;
-        if (Math.min(countL, countR) >= DENSE_THRESHOLD) {
-          pixelStep = PIXEL_STEP * DENSE_BOOST;
-        }
-      }
-      span.link.labelSegmentOffsetY = n > 1
-        ? (slot - (n - 1) / 2) * pixelStep
-        : 0;
+      span.link.labelSegmentOffsetY = 0;
     }
 
     // === span=0 链接：同 stage 跨树，按 stage 分桶仅做垂直错开 ===
@@ -441,18 +431,55 @@ export class FlowDiagramConfigService {
         if (bucket.length < 2) continue;
         bucket.sort((x, y) => x.link.key.localeCompare(y.link.key));
         const n = bucket.length;
-        const mid = (n - 1) / 2;
         // span=0 同 stage 密集判定：该 stage 自身节点数 >= DENSE_THRESHOLD
         const stageForBucket = bucket[0].minStage;
         const isDense = (stageNodeCount.get(stageForBucket) ?? 0) >= DENSE_THRESHOLD;
-        const pixelStep = isDense ? PIXEL_STEP * DENSE_BOOST : PIXEL_STEP;
+        const fractionStep = FRACTION_STEP * (isDense ? DENSE_BOOST : 1);
         for (let i = 0; i < n; i++) {
-          // 中点 + 垂直错开（fraction 保持 0.5）
-          bucket[i].link.labelSegmentFraction = 0.5;
-          bucket[i].link.labelSegmentOffsetY = (i - mid) * pixelStep;
+          bucket[i].link.labelSegmentFraction = this.computeEmbeddedLabelFraction(
+            0.5,
+            i,
+            n,
+            fractionStep,
+            FRACTION_MIN,
+            FRACTION_MAX,
+          );
+          bucket[i].link.labelSegmentOffsetY = 0;
         }
       }
     }
+  }
+
+  private computeEmbeddedLabelFraction(
+    baseFraction: number,
+    slot: number,
+    bucketSize: number,
+    preferredStep: number,
+    minFraction: number,
+    maxFraction: number,
+  ): number {
+    const clampedBase = Math.min(maxFraction, Math.max(minFraction, baseFraction));
+    if (bucketSize <= 1) {
+      return clampedBase;
+    }
+
+    const normalizedPreferredStep = Math.max(0, preferredStep);
+    const mid = (bucketSize - 1) / 2;
+    const preferredHalfSpan = normalizedPreferredStep * mid;
+    const minCenter = minFraction + preferredHalfSpan;
+    const maxCenter = maxFraction - preferredHalfSpan;
+
+    const centeredBase = minCenter <= maxCenter
+      ? Math.min(maxCenter, Math.max(minCenter, baseFraction))
+      : (minFraction + maxFraction) / 2;
+    const safeStep = minCenter <= maxCenter
+      ? normalizedPreferredStep
+      : (maxFraction - minFraction) / Math.max(bucketSize - 1, 1);
+
+    return Math.min(
+      maxFraction,
+      Math.max(minFraction, centeredBase + (slot - mid) * safeStep),
+    );
   }
 
   /**
