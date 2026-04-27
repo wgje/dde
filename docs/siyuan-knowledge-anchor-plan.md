@@ -295,7 +295,7 @@ type ExternalSourceLink = {
   hpath?: string; // 人类可读路径
   role?: ExternalSourceRole;
   sortOrder: number; // 多锚点排序；MVP 默认 0
-  deletedAt?: string | null; // 软删除，参与同步
+  deletedAt?: string | null; // 软删除，ISO 8601 timestamptz 字符串，参与同步
   createdAt: string;
   updatedAt: string;
 };
@@ -316,7 +316,7 @@ type LocalSiyuanPreviewCache = {
     | 'kernel-unreachable'
     | 'token-invalid'
     | 'block-not-found'
-    | 'render-blocked'
+    | 'render-blocked' // 内容被安全渲染链路拦截
     | 'unknown';
 };
 ```
@@ -382,12 +382,12 @@ UNIQUE 约束建议：
 ```sql
 -- MVP：同任务同块只能有一个活跃锚点
 CREATE UNIQUE INDEX external_source_links_unique_active_target
-ON external_source_links (user_id, task_id, source_type, target_id)
+ON external_source_links USING btree (user_id, task_id, source_type, target_id)
 WHERE deleted_at IS NULL;
 
 -- 多 role：同任务同块允许按 role 区分
 CREATE UNIQUE INDEX external_source_links_unique_active_target_role
-ON external_source_links (user_id, task_id, source_type, target_id, COALESCE(role, 'context'))
+ON external_source_links USING btree (user_id, task_id, source_type, target_id, COALESCE(role, 'context'))
 WHERE deleted_at IS NULL;
 ```
 
@@ -406,8 +406,9 @@ siyuan-local-config:{userId}
 清理策略：
 
 1. 删除锚点时软删除云端指针，并删除当前设备的 `siyuan-preview-cache:{linkId}`。
-2. 用户点击“清除本机缓存”时只清理 preview cache，不删除锚点。
-3. 用户点击“忘记本机思源配置”时删除 token / baseUrl / runtimeMode，不影响已绑定锚点。
+2. 每条 `siyuan-preview-cache:{linkId}` 记录必须保存 `fetchedAt` 与可选 `sourceUpdatedAt`，用于判断缓存时效。
+3. 用户点击“清除本机缓存”时只清理 preview cache，不删除锚点。
+4. 用户点击“忘记本机思源配置”时删除 token / baseUrl / runtimeMode，不影响已绑定锚点。
 
 ### 6.5 同步规则
 
@@ -639,7 +640,7 @@ siyuan://blocks/20260426123456-abc1234?focus=1
 
 1. 接受 `siyuan://blocks/{id}` 与裸 block ID。
 2. 自动补齐标准深链为 `siyuan://blocks/{id}?focus=1`。
-3. 去除首尾空白，拒绝包含路径穿越、换行或非预期协议的输入；允许的完整协议前缀仅为 `siyuan://`，明确拒绝 `javascript:`、`data:`、`file:`、`http:`、`https:`。
+3. 去除首尾空白，拒绝包含路径穿越、换行或非预期协议的输入；采用白名单策略，允许的完整协议前缀仅为 `siyuan://`，裸 ID 只能匹配思源块 ID 格式；其他协议一律拒绝，包括 `javascript:`、`data:`、`file:`、`http:`、`https:`、`vbscript:`、`about:`。
 4. 解析失败时不创建锚点，并提示用户粘贴思源块链接。
 
 ---
@@ -836,7 +837,7 @@ siyuan.autoRefresh = on-hover | manual
 1. 当前阶段的降级路径已经可用。
 2. 没有把 token、正文缓存或原始 API 响应同步到 Supabase。
 3. Focus / Dock / 移动端不存在阻塞性回归。
-4. 相关测试已覆盖错误处理、离线同步、provider fallback、安全校验等关键分支；核心分支覆盖率不低于 80%，且“建议测试覆盖”表中每一层至少有 1 个直接覆盖用例。
+4. 相关测试已覆盖错误处理、离线同步、provider fallback、安全校验等关键分支；新增服务层方法、provider 选择、错误码映射、同步 payload 序列化这些核心分支覆盖率不低于 80%，且“建议测试覆盖”表中每一层至少有 1 个直接覆盖用例。
 
 ---
 
@@ -874,7 +875,7 @@ siyuan.autoRefresh = on-hover | manual
 | 层级 | 覆盖点 |
 |------|------|
 | 单元测试 | 链接解析、block ID 校验、provider 选择、错误码映射 |
-| 服务测试 | 本地先写、离线新增后恢复同步、软删除、缓存清理、同步 payload 不含正文 |
+| 服务测试 | 本地先写、离线新增后恢复同步、软删除、缓存清理、断言 Supabase 同步 payload 不含 `content` / `markdown` / `kramdown` / `plainText` |
 | 组件测试 | 任务卡锚点展示、Popover / Sheet 状态、Focus compact 模式 |
 | E2E | 粘贴链接绑定、点击深链、扩展不可用降级、离线绑定后恢复同步、移动端 Sheet |
 
