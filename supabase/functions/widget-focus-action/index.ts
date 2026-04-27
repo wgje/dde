@@ -246,7 +246,7 @@ async function handleRequest(req: Request): Promise<Response> {
 
   const nowIso = new Date().toISOString();
   const actionResult = action === 'promote-secondary'
-    ? promoteSecondaryTaskToC2(session.session_state, body.taskId!, nowIso)
+    ? promoteSecondaryTaskToC2(session.session_state, body.taskId, nowIso)
     : action === 'complete-front'
       ? completeFrontTask(session.session_state, body.taskId, nowIso)
       : suspendFrontTask(session.session_state, body.taskId, Math.floor(body.waitMinutes!), nowIso);
