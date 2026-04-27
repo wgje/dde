@@ -1,8 +1,8 @@
 # NanoFlow × SiYuan Knowledge Anchor 策划案
 
-> **版本**：v1.0  
-> **日期**：2026-04-26  
-> **状态**：Draft for implementation  
+> **版本**：v1.1  
+> **日期**：2026-04-27  
+> **状态**：Implementation-ready draft  
 > **定位**：思源笔记是知识源头（Source of Truth），NanoFlow 是执行工作台（Execution Workspace）  
 > **核心决策**：NanoFlow 只保存思源块指针与少量元数据，不嵌入思源 UI，不在 MVP 同步正文到云端，不在 MVP 做双向写回。
 
@@ -38,6 +38,28 @@
 | 本地开发 / 本地桌面壳（未来） | 实时预览 | 支持 | 次路径 |
 | 公网 HTTPS PWA / 移动端 / 无扩展桌面 | 缓存预览或无预览 | 支持 | 降级路径 |
 
+### 0.2 成功指标
+
+MVP 是否成立，不以“能否完整复制思源体验”为标准，而以任务执行链路是否更顺滑为标准：
+
+| 指标 | 目标 |
+|------|------|
+| 绑定成功率 | 粘贴合法 `siyuan://blocks/{id}` 后可稳定创建锚点 |
+| 降级可用性 | 无扩展、无 token、思源不可达时任务卡仍可操作 |
+| 首次交互成本 | 任务卡上最多一次点击即可打开思源原块 |
+| 数据边界 | Supabase 只保存指针与轻量元数据，不保存 token 与正文缓存 |
+| Focus 干扰 | Focus 中不自动展开正文，不提供块内漫游入口 |
+
+### 0.3 实施优先级
+
+优先级按“先建立稳定指针，再补预览，再增强集成”排序：
+
+1. **P0 指针闭环**：解析链接、保存锚点、展示锚点、深链回跳。
+2. **P1 本地缓存与状态 UI**：让预览能力即使在无实时连接时也能解释清楚。
+3. **P2 桌面扩展 Relay**：解决 HTTPS PWA 访问本地思源的 Mixed Content 障碍。
+4. **P3 多端体验收敛**：移动端 Bottom Sheet、Focus / Dock 降噪、多锚点。
+5. **P4 可选增强**：本地 bridge、桌面壳、显式 opt-in 写回。
+
 ---
 
 ## 1. 背景与目标
@@ -68,6 +90,17 @@ NanoFlow：拆解、推进、切换、执行、专注、停泊
 3. 将完整思源正文默认同步到 Supabase。
 4. 从 NanoFlow 直接编辑、删除思源块。
 5. 默认向思源写回 NanoFlow 状态。
+6. 把思源块作为 NanoFlow 任务树节点参与拖拽、排序或同步冲突处理。
+7. 在移动端假设可以访问本机思源内核。
+
+### 1.3 目标用户与核心场景
+
+| 用户场景 | 主要诉求 | MVP 行为 |
+|------|------|------|
+| 桌面执行任务 | 任务旁边快速查看需求、背景、规格 | Hover 查看摘要，必要时打开思源 |
+| 移动端临时确认 | 不适合长时间预览，但要能跳回资料 | 点击锚点打开 Sheet，保留深链 |
+| Focus 专注推进 | 只需要知道当前任务来自哪里 | 展示一行来源与摘要，不展开多跳 |
+| Dock 暂存任务 | 未来回来时恢复上下文 | 保存锚点指针与本机缓存状态 |
 
 ---
 
@@ -156,6 +189,20 @@ Knowledge Anchor 的作用是降低“切出任务上下文”的摩擦，而不
 1. 思源 token 只能保存在当前设备，不进入 Supabase。
 2. 思源最小支持版本建议为 `>= 3.6.2`，推荐使用最新版。
 3. 首版只允许访问块预览所需接口，不暴露通用 SQL、文件或 snippet 执行能力。
+4. 扩展 Relay 必须验证消息来源，只接受 NanoFlow 可信 origin。
+5. 扩展 Relay 不转发任意 URL，只接受结构化 blockId 请求。
+6. 任何预览内容进入 DOM 前必须走 NanoFlow 现有 Markdown / XSS 防护链路。
+
+### 4.4 NanoFlow Hard Rules 约束
+
+该功能必须继承 NanoFlow 现有架构底线：
+
+1. `ExternalSourceLink.id` 使用客户端 `crypto.randomUUID()` 生成。
+2. 锚点元数据走 Offline-first：本地先写、UI 即时更新、后台同步、失败进入 RetryQueue。
+3. 冲突策略沿用 LWW，以 `updatedAt` 为准。
+4. 状态管理使用 Angular Signals，不引入 NgRx 或新的全局 RxJS Store。
+5. 服务层直接依赖具体子服务或现有 Store，禁止新增门面 Store 聚合类。
+6. 移动端仍默认 Text 视图，不因锚点预览强制加载 Flow / GoJS。
 
 ---
 
@@ -241,6 +288,8 @@ type ExternalSourceLink = {
   label?: string;                // 显示名
   hpath?: string;                // 人类可读路径
   role?: ExternalSourceRole;
+  sortOrder: number;             // 多锚点排序；MVP 默认 0
+  deletedAt?: string | null;      // 软删除，参与同步
   createdAt: string;
   updatedAt: string;
 };
@@ -277,7 +326,9 @@ type LocalSiyuanPreviewCache = {
 6. `label`
 7. `hpath`
 8. `role`
-9. `createdAt` / `updatedAt`
+9. `sortOrder`
+10. `deletedAt`
+11. `createdAt` / `updatedAt`
 
 **默认仅保存在本机**：
 
@@ -289,6 +340,58 @@ type LocalSiyuanPreviewCache = {
 6. 最后错误状态
 
 这样既维持多设备间的锚点一致，又不把知识正文和凭证带上云端。
+
+### 6.3 Supabase 表建议
+
+建议新增独立表承载外部来源链接，避免污染 `tasks.content`：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `id` | `uuid` / `text` | 客户端生成 ID |
+| `user_id` | `uuid` | RLS 隔离字段 |
+| `task_id` | `uuid` / `text` | 关联任务 |
+| `source_type` | `text` | 首版固定为 `siyuan-block` |
+| `target_id` | `text` | 思源 block ID |
+| `uri` | `text` | 深链 URI |
+| `label` | `text nullable` | 显示名 |
+| `hpath` | `text nullable` | 人类可读路径 |
+| `role` | `text nullable` | 锚点角色 |
+| `sort_order` | `integer` | 多锚点排序 |
+| `deleted_at` | `timestamptz nullable` | 软删除 |
+| `created_at` | `timestamptz` | 创建时间 |
+| `updated_at` | `timestamptz` | LWW 与增量同步字段 |
+
+约束建议：
+
+1. `source_type` 首版只允许 `siyuan-block`。
+2. `target_id` 必须匹配思源块 ID 格式。
+3. `(user_id, task_id, source_type, target_id, deleted_at IS NULL)` 防止同任务重复绑定同一活跃块。
+4. RLS 策略必须按 `user_id = auth.uid()` 隔离。
+
+### 6.4 本地 IndexedDB 建议
+
+本地缓存建议拆成两类 key，便于单独清理：
+
+```text
+external-source-links:{userId}
+siyuan-preview-cache:{linkId}
+siyuan-local-config:{userId}
+```
+
+清理策略：
+
+1. 删除锚点时软删除云端指针，并删除当前设备的 `siyuan-preview-cache:{linkId}`。
+2. 用户点击“清除本机缓存”时只清理 preview cache，不删除锚点。
+3. 用户点击“忘记本机思源配置”时删除 token / baseUrl / runtimeMode，不影响已绑定锚点。
+
+### 6.5 同步规则
+
+| 操作 | 本地行为 | 云端行为 | 冲突规则 |
+|------|------|------|------|
+| 新增锚点 | 立即写入本地 Store 与 IndexedDB | 进入 3s 防抖同步 | ID 客户端生成，无需映射 |
+| 更新 label / role / sortOrder | 立即更新 UI | 更新 `updated_at` | LWW |
+| 解除关联 | 设置 `deletedAt`，UI 隐藏 | 同步软删除 | LWW，删除视为一次更新 |
+| 刷新预览 | 更新本地缓存 | 不同步正文 | 不参与云端冲突 |
 
 ---
 
@@ -318,6 +421,24 @@ src/app/shared/components/knowledge-anchor/
   knowledge-anchor-popover.component.ts
   knowledge-anchor-sheet.component.ts
 ```
+
+职责边界：
+
+| 模块 | 职责 | 不负责 |
+|------|------|------|
+| `external-source-link.store.ts` | Signals 状态、索引、派生选择器 | 访问思源 API |
+| `external-source-link.service.ts` | 新增、更新、解除关联、同步协调 | 渲染预览正文 |
+| `external-source-cache.service.ts` | 本地预览缓存读写与清理 | 保存 token |
+| `siyuan-preview.service.ts` | 选择 provider、刷新预览、统一错误码 | 直接持久化云端指针 |
+| `knowledge-anchor.component.ts` | 展示锚点入口与操作分发 | 解析思源协议细节 |
+
+### 7.1.1 与现有能力的集成点
+
+1. **任务卡**：读取当前任务的 `ExternalSourceLink[]`，MVP 仅展示第一个活跃锚点。
+2. **Focus**：复用同一组件的 compact 模式，禁止自动展开完整预览。
+3. **Parking Dock**：显示锚点摘要，帮助恢复上下文。
+4. **同步服务**：将 `ExternalSourceLink` 纳入增量同步实体，但不把 preview cache 纳入云端同步。
+5. **设置页**：管理本机连接配置、扩展状态、缓存清理。
 
 ### 7.2 Provider 抽象
 
@@ -352,6 +473,19 @@ else if trusted local runtime allows direct preview:
 else:
   use cache-only provider
 ```
+
+### 7.4 错误码与用户文案
+
+| 错误码 | 技术含义 | 用户文案 |
+|------|------|------|
+| `not-configured` | 当前设备未配置思源连接 | 当前设备未配置思源，仅可打开原块 |
+| `runtime-not-supported` | 当前运行时不支持实时访问 | 当前环境不支持实时预览 |
+| `extension-unavailable` | 未检测到扩展 Relay | 安装 NanoFlow 扩展后可实时预览 |
+| `kernel-unreachable` | 思源内核不可达 | 未连接到思源，请确认思源已启动 |
+| `token-invalid` | token 无效或权限不足 | 思源授权失效，请重新配置 |
+| `block-not-found` | block ID 不存在或被删除 | 原块可能已删除或移动 |
+| `render-blocked` | 内容被安全策略拦截 | 预览内容包含不支持或不安全内容 |
+| `unknown` | 未分类错误 | 预览失败，可稍后重试 |
 
 ---
 
@@ -409,6 +543,14 @@ type SiyuanExtensionResponse = {
 };
 ```
 
+扩展安全要求：
+
+1. `externally_connectable` 只允许 NanoFlow 正式域名、本地开发域名和明确配置的预览域名。
+2. 扩展只暴露 `get-preview` / `test-connection` 等受限消息，不提供通用代理。
+3. 扩展持有 token 时使用浏览器扩展 storage，并避免在 console、错误上报、消息响应中泄露。
+4. 响应体只返回预览所需字段，不返回完整 API 原始响应。
+5. 请求必须设置超时，并支持前端取消。
+
 ### 8.3 后续增强：本地 bridge / 桌面壳
 
 当以下条件成立时，再推进本地 bridge：
@@ -432,6 +574,13 @@ MVP 只允许访问：
 3. `/api/filetree/getHPathByID`
 4. `/api/attr/getBlockAttrs`
 
+调用限制：
+
+1. 每次预览默认只取当前块与一层子块。
+2. 子块数量建议设置上限，超过后显示“更多内容请打开思源”。
+3. API 调用必须带超时与取消信号。
+4. 不在前端持久化原始 API 响应，只保存裁剪后的预览缓存。
+
 ### 9.2 MVP 禁止的接口
 
 MVP 不开放：
@@ -440,6 +589,8 @@ MVP 不开放：
 2. `/api/snippet/*`
 3. `/api/file/*`
 4. 任意写接口（除未来可选的 `setBlockAttrs`）
+5. 任意资源文件代理或附件下载。
+6. 通过 Kramdown 间接加载远程脚本、iframe 或未消毒 HTML。
 
 ### 9.3 链接接入方式
 
@@ -458,6 +609,13 @@ siyuan://blocks/20260426123456-abc1234
 siyuan://blocks/20260426123456-abc1234?focus=1
 20260426123456-abc1234
 ```
+
+解析规则：
+
+1. 接受 `siyuan://blocks/{id}` 与裸 block ID。
+2. 自动补齐标准深链为 `siyuan://blocks/{id}?focus=1`。
+3. 去除首尾空白，拒绝包含路径穿越、换行或非预期协议的输入。
+4. 解析失败时不创建锚点，并提示用户粘贴思源块链接。
 
 ---
 
@@ -545,6 +703,13 @@ siyuan.autoRefresh = on-hover | manual
 4. 清除本机缓存。
 5. 关闭实时预览，仅保留深链。
 
+本地配置 UX 要求：
+
+1. token 输入框默认隐藏内容，并提供“清除本机授权”。
+2. 测试连接只返回成功 / 失败与错误类型，不显示 token。
+3. 如果用户关闭实时预览，所有 provider 强制进入 cache-only / deep-link 模式。
+4. 配置项变更不触发云端同步。
+
 ---
 
 ## 13. 实施路线图
@@ -566,6 +731,7 @@ siyuan.autoRefresh = on-hover | manual
 1. 粘贴思源块链接后可正确解析 block ID。
 2. 任务卡显示锚点。
 3. 点击可拉起 `siyuan://blocks/{id}?focus=1`。
+4. 离线状态下新增锚点后 UI 立即生效，恢复网络后可同步。
 
 ### Phase 1：预览模型与缓存框架
 
@@ -584,6 +750,7 @@ siyuan.autoRefresh = on-hover | manual
 1. 有缓存时可立即展示。
 2. 无缓存时能显示正确状态，不阻塞任务操作。
 3. Focus / Dock 中为缩减版预览。
+4. 清除本机缓存不会删除云端锚点。
 
 ### Phase 2：桌面浏览器扩展 Relay
 
@@ -601,6 +768,7 @@ siyuan.autoRefresh = on-hover | manual
 1. HTTPS NanoFlow 页面可通过扩展读取思源块预览。
 2. 未安装扩展时自动降级，不报致命错误。
 3. token 不进入 NanoFlow 应用存储。
+4. 扩展拒绝非 NanoFlow 可信 origin 的消息。
 
 ### Phase 3：移动端 / Focus / Dock 完整适配
 
@@ -618,6 +786,7 @@ siyuan.autoRefresh = on-hover | manual
 1. 手机端无需 hover 也能完成查看与跳转。
 2. Focus 模式不被知识预览抢走注意力。
 3. Dock 任务可快速查看来源上下文。
+4. 多锚点在 UI 上可排序、可标注 role，并保持 MVP 单锚点兼容。
 
 ### Phase 4：安全增强与可选写回
 
@@ -635,6 +804,15 @@ siyuan.autoRefresh = on-hover | manual
 2. 所有写回都可关闭并可回滚。
 3. 没有 bridge 的环境依然可工作。
 
+### Phase Gate
+
+每个阶段进入下一阶段前，必须满足：
+
+1. 当前阶段的降级路径已经可用。
+2. 没有把 token、正文缓存或原始 API 响应同步到 Supabase。
+3. Focus / Dock / 移动端不存在阻塞性回归。
+4. 相关单元测试、服务测试或组件测试已覆盖核心分支。
+
 ---
 
 ## 14. 验证方式
@@ -645,6 +823,8 @@ siyuan.autoRefresh = on-hover | manual
 2. 桌面端可以悬浮查看预览，移动端可以点击查看预览。
 3. 点击“打开思源”可回到原块。
 4. 思源不可达时，任务工作流仍可继续。
+5. 解除关联后当前任务不再显示该锚点，刷新后状态保持一致。
+6. 多设备登录时可看到同一锚点指针，但不会同步另一台设备的 token 与正文缓存。
 
 ### 14.2 架构验收
 
@@ -652,12 +832,26 @@ siyuan.autoRefresh = on-hover | manual
 2. 预览缓存默认不进入 Supabase。
 3. 外部来源层不直接耦合任务 Markdown 内容。
 4. Provider 抽象可以区分 extension/direct/cache-only 三种模式。
+5. 锚点新增、更新、删除走本地先写与 LWW 同步路径。
+6. 不新增门面 Store，不破坏现有 Task / Project / Connection Store 边界。
 
 ### 14.3 安全验收
 
 1. 首版不暴露通用 SQL 或文件接口。
 2. 不允许从 NanoFlow 页面直接访问本地 HTTP 思源内核作为公网主路径。
 3. 只在安全运行时中启用实时预览。
+4. 扩展 Relay 只接受可信 origin 和 allowlist 消息类型。
+5. Kramdown / Markdown 预览经过安全渲染与 XSS 防护。
+6. 错误日志不包含 token、原始正文或本机路径敏感信息。
+
+### 14.4 建议测试覆盖
+
+| 层级 | 覆盖点 |
+|------|------|
+| 单元测试 | 链接解析、block ID 校验、provider 选择、错误码映射 |
+| 服务测试 | 本地先写、软删除、缓存清理、同步 payload 不含正文 |
+| 组件测试 | 任务卡锚点展示、Popover / Sheet 状态、Focus compact 模式 |
+| E2E | 粘贴链接绑定、点击深链、扩展不可用降级、移动端 Sheet |
 
 ---
 
@@ -671,6 +865,20 @@ siyuan.autoRefresh = on-hover | manual
 | Focus 场景被知识预览打断 | 影响专注 | Focus 中收缩预览能力 |
 | 误把正文同步进云端 | 产品语义漂移 | 本机缓存与云端指针分层 |
 | 以后支持多来源时模型耦合 | 扩展困难 | 从首版就采用 ExternalSourceLink 抽象 |
+| 扩展被滥用为本地 API 代理 | 本机数据泄露 | origin allowlist + API allowlist + 结构化请求 |
+| 移动端无法访问思源 | 预览不可用 | 预期内降级为深链与缓存 |
+| 锚点目标被删除 | 用户困惑 | 显示失效状态，保留解除关联入口 |
+| 本地缓存过期 | 用户看到旧内容 | 展示 `fetchedAt` / 陈旧提示，提供手动刷新 |
+
+### 15.1 决策记录
+
+| 决策 | 结论 | 原因 |
+|------|------|------|
+| 是否嵌入思源 UI | 不嵌入 | iframe / 原生 UI 会破坏执行工作台定位与安全边界 |
+| 是否同步正文 | MVP 不同步 | 避免知识库镜像化与隐私风险 |
+| 是否直接请求 `127.0.0.1` | 公网 HTTPS 不直接请求 | Mixed Content 物理限制 |
+| 是否优先做 bridge | 不优先 | 证书信任和跨平台排障成本高 |
+| 是否支持写回 | 后置且 opt-in | read-only 稳定前避免污染思源 |
 
 ---
 
@@ -711,6 +919,24 @@ siyuan.autoRefresh = on-hover | manual
 3. 在 NanoFlow 内编辑思源块。
 4. iframe 嵌入思源 UI。
 5. 默认写回思源属性。
+
+### 17.1 MVP 用户故事
+
+1. 作为执行者，我可以把思源块链接贴到任务上，以便之后从任务快速回到资料源。
+2. 作为桌面用户，我可以在不离开 NanoFlow 的情况下查看一段摘要，以便确认上下文。
+3. 作为移动端用户，我可以点击锚点打开底部预览或跳回思源，以便临时确认资料。
+4. 作为隐私敏感用户，我可以确信 token 与正文缓存不会被同步到云端。
+5. 作为专注模式用户，我不会被知识预览引导到无关阅读流。
+
+### 17.2 暂缓问题
+
+以下问题不阻塞 MVP，但需要在 Phase 2 后重新评估：
+
+1. 是否允许用户选择把摘要快照同步到云端。
+2. 是否需要支持思源文档级链接而不只是块级链接。
+3. 是否提供从思源块属性反向标记 NanoFlow 任务状态。
+4. 是否将 Extension Relay 独立发布，还是随 NanoFlow 桌面壳提供。
+5. 是否需要针对团队空间设计共享锚点权限模型。
 
 ---
 
