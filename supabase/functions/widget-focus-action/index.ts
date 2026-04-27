@@ -253,6 +253,42 @@ async function handleRequest(req: Request): Promise<Response> {
     return errorResponse(responseHeaders, actionErrorStatus(actionResult.code), actionResult.code, actionResult.error);
   }
 
+  const completedTaskId = readOptionalStringField(actionResult, 'completedTaskId');
+  const suspendedTaskId = readOptionalStringField(actionResult, 'suspendedTaskId');
+
+  // 一致性策略：先把 task 列字段（status/wait_minutes）落库，再写 focus_sessions 快照。
+  // 若 task patch 失败则直接返回错误并跳过 focus_sessions 更新，避免出现
+  // 「focus_sessions 标记已完成但 tasks.status 仍为进行中」的状态分裂。
+  // 反之若 focus_sessions 更新失败，task 字段已写入：客户端下次读取 widget summary
+  // 仍可看到 task.status=completed / wait_minutes=N，dock 据此自然收敛，
+  // 比 snapshot 已变更但 task 未变更的不一致更易于客户端处理。
+  try {
+    if (completedTaskId) {
+      await maybePatchOwnedTask(client, device.user_id, completedTaskId, {
+        status: 'completed',
+        wait_minutes: null,
+        updated_at: nowIso,
+      });
+    } else if (suspendedTaskId) {
+      await maybePatchOwnedTask(client, device.user_id, suspendedTaskId, {
+        wait_minutes: Math.floor(body.waitMinutes!),
+        updated_at: nowIso,
+      });
+    }
+  } catch (error) {
+    console.error('[widget-focus-action] task patch failed', {
+      action,
+      taskId: redactId(completedTaskId ?? suspendedTaskId ?? body.taskId ?? null),
+      message: error instanceof Error ? error.message : String(error),
+    });
+    return errorResponse(
+      responseHeaders,
+      500,
+      'TASK_PATCH_FAILED',
+      'Failed to persist task changes; focus session snapshot was not updated',
+    );
+  }
+
   const update = await client
     .from('focus_sessions')
     .update({
@@ -272,35 +308,6 @@ async function handleRequest(req: Request): Promise<Response> {
   }
   if (!update.data) {
     return errorResponse(responseHeaders, 409, 'FOCUS_SESSION_CHANGED', 'Focus session changed before update');
-  }
-
-  const completedTaskId = readOptionalStringField(actionResult, 'completedTaskId');
-  const suspendedTaskId = readOptionalStringField(actionResult, 'suspendedTaskId');
-
-  try {
-    if (completedTaskId) {
-      await maybePatchOwnedTask(client, device.user_id, completedTaskId, {
-        status: 'completed',
-        wait_minutes: null,
-        updated_at: nowIso,
-      });
-    } else if (suspendedTaskId) {
-      await maybePatchOwnedTask(client, device.user_id, suspendedTaskId, {
-        wait_minutes: Math.floor(body.waitMinutes!),
-        updated_at: nowIso,
-      });
-    }
-  } catch (error) {
-    console.warn('[widget-focus-action] task patch skipped', {
-      action,
-      taskId: redactId(
-        completedTaskId
-        ?? suspendedTaskId
-        ?? body.taskId
-        ?? null,
-      ),
-      message: error instanceof Error ? error.message : String(error),
-    });
   }
 
   console.log('[widget-focus-action]', JSON.stringify({
