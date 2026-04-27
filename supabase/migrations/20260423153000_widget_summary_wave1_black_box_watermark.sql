@@ -10,7 +10,7 @@ returns jsonb
 language plpgsql
 stable
 security definer
-set search_path = public, pg_catalog
+set search_path = pg_catalog, public
 as $$
 declare
   v_session_json jsonb := null;
