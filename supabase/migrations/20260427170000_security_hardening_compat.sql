@@ -23,4 +23,12 @@ ALTER FUNCTION public.widget_summary_fetch(uuid, date, int) SET search_path TO p
 REVOKE ALL ON FUNCTION public.widget_summary_fetch(uuid, date, int) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.widget_summary_fetch(uuid, date, int) TO service_role;
 
+ALTER FUNCTION public.cleanup_old_deleted_tasks() SET search_path TO '';
+REVOKE ALL ON FUNCTION public.cleanup_old_deleted_tasks() FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.cleanup_old_deleted_tasks() TO service_role;
+
+ALTER FUNCTION public.cleanup_old_deleted_connections() SET search_path TO '';
+REVOKE ALL ON FUNCTION public.cleanup_old_deleted_connections() FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.cleanup_old_deleted_connections() TO service_role;
+
 COMMIT;
