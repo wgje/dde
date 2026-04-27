@@ -41,12 +41,15 @@ class NanoflowWidgetActionFactory(
     val isPlaceholderSlot: Boolean = false,
     val gateAction: String? = null,
     val gateEntryId: String? = null,
+    val focusAction: String? = null,
+    val waitMinutes: Int? = null,
     val gateCreatedLabel: String? = null,
     val gateReadAtLabel: String? = null,
+    val isWaitExpired: Boolean = false,
     /** 大门空状态（E 图）：Factory 渲染 GATE_CARD 时切换图标为 🚪 并隐藏 meta 行。 */
     val isGateEmptyState: Boolean = false,
   ) {
-    enum class Kind { TAB, OVERFLOW, REFRESH, GATE_PREV, GATE_NEXT, GATE_LABEL, PRIMARY, GATE_ACTION, GATE_CARD }
+    enum class Kind { TAB, OVERFLOW, REFRESH, GATE_PREV, GATE_NEXT, GATE_LABEL, PRIMARY, GATE_ACTION, GATE_CARD, FOCUS_ACTION }
     enum class ChipTone { ACCENT, SURFACE, ACCENT_GATE, SURFACE_GATE, TAB_SURFACE, TAB_SURFACE_GATE }
   }
 
@@ -176,12 +179,34 @@ class NanoflowWidgetActionFactory(
       return views
     }
 
+    if (listKind == LIST_KIND_FOCUS_ACTIONS) {
+      val views = RemoteViews(context.packageName, R.layout.nano_widget_gate_action_item)
+      views.setTextViewText(R.id.nano_widget_gate_action_label, item.label)
+      val iconRes = when (item.focusAction) {
+        FOCUS_ACTION_COMPLETE -> R.drawable.nano_widget_icon_check
+        FOCUS_ACTION_WAIT,
+        FOCUS_ACTION_WAIT_PRESET -> R.drawable.nano_widget_icon_clock
+        else -> R.drawable.nano_widget_icon_clock
+      }
+      views.setImageViewResource(R.id.nano_widget_gate_action_icon, iconRes)
+      if (item.clickable) {
+        val fillInIntent = buildFillInIntent(item)
+        views.setOnClickFillInIntent(R.id.nano_widget_gate_action_root, fillInIntent)
+        views.setOnClickFillInIntent(R.id.nano_widget_gate_action_slot, fillInIntent)
+      }
+      return views
+    }
+
     if (listKind == LIST_KIND_TABS) {
       // 蓝图 C 位插槽：中央图标 + 左上编号徽章 + 底部标签 + 主/副两档描边
       val views = RemoteViews(context.packageName, R.layout.nano_widget_tab_item)
       val isMasterTask = item.isMasterTask
       val slotBg = if (isMasterTask) R.drawable.nano_widget_slot_primary else R.drawable.nano_widget_slot_secondary
-      val badgeBg = if (isMasterTask) R.drawable.nano_widget_badge_primary else R.drawable.nano_widget_badge_secondary
+      val badgeBg = when {
+        item.isWaitExpired -> R.drawable.nano_widget_badge_alert
+        isMasterTask -> R.drawable.nano_widget_badge_primary
+        else -> R.drawable.nano_widget_badge_secondary
+      }
       val iconRes = if (isMasterTask) R.drawable.nano_widget_icon_crown else R.drawable.nano_widget_icon_flag
       views.setInt(R.id.nano_widget_tab_slot, "setBackgroundResource", slotBg)
       views.setInt(R.id.nano_widget_tab_badge, "setBackgroundResource", badgeBg)
@@ -231,6 +256,7 @@ class NanoflowWidgetActionFactory(
         LIST_KIND_CONTENT -> R.layout.nano_widget_content_item
         LIST_KIND_TABS -> R.layout.nano_widget_tab_item
         LIST_KIND_GATE_ACTIONS -> R.layout.nano_widget_gate_action_item
+        LIST_KIND_FOCUS_ACTIONS -> R.layout.nano_widget_gate_action_item
         else -> R.layout.nano_widget_action_item
       },
     )
@@ -344,6 +370,71 @@ class NanoflowWidgetActionFactory(
       )
     }
 
+    if (listKind == LIST_KIND_FOCUS_ACTIONS) {
+      if (model.isGateMode || model.tasks.firstOrNull()?.taskId.isNullOrBlank()) {
+        return emptyList()
+      }
+      val frontTaskId = model.tasks.first().taskId
+      if (model.focusWaitMenuOpen) {
+        return listOf(
+          ActionItem(
+            label = context.getString(R.string.nanoflow_widget_focus_wait_5m),
+            selected = false,
+            kind = ActionItem.Kind.FOCUS_ACTION,
+            focusAction = FOCUS_ACTION_WAIT_PRESET,
+            waitMinutes = 5,
+            taskId = frontTaskId,
+            clickable = true,
+          ),
+          ActionItem(
+            label = context.getString(R.string.nanoflow_widget_focus_wait_15m),
+            selected = false,
+            kind = ActionItem.Kind.FOCUS_ACTION,
+            focusAction = FOCUS_ACTION_WAIT_PRESET,
+            waitMinutes = 15,
+            taskId = frontTaskId,
+            clickable = true,
+          ),
+          ActionItem(
+            label = context.getString(R.string.nanoflow_widget_focus_wait_30m),
+            selected = false,
+            kind = ActionItem.Kind.FOCUS_ACTION,
+            focusAction = FOCUS_ACTION_WAIT_PRESET,
+            waitMinutes = 30,
+            taskId = frontTaskId,
+            clickable = true,
+          ),
+          ActionItem(
+            label = context.getString(R.string.nanoflow_widget_focus_wait_1h),
+            selected = false,
+            kind = ActionItem.Kind.FOCUS_ACTION,
+            focusAction = FOCUS_ACTION_WAIT_PRESET,
+            waitMinutes = 60,
+            taskId = frontTaskId,
+            clickable = true,
+          ),
+        )
+      }
+      return listOf(
+        ActionItem(
+          label = context.getString(R.string.nanoflow_widget_focus_action_complete),
+          selected = false,
+          kind = ActionItem.Kind.FOCUS_ACTION,
+          focusAction = FOCUS_ACTION_COMPLETE,
+          taskId = frontTaskId,
+          clickable = true,
+        ),
+        ActionItem(
+          label = context.getString(R.string.nanoflow_widget_focus_action_wait),
+          selected = false,
+          kind = ActionItem.Kind.FOCUS_ACTION,
+          focusAction = FOCUS_ACTION_WAIT,
+          taskId = frontTaskId,
+          clickable = true,
+        ),
+      )
+    }
+
     // LIST_KIND_TABS：蓝图 UI 恒定 4 插槽（主 + 3 副），不足时补占位。
     val result = mutableListOf<ActionItem>()
     // gate 模式下不展示 4 插槽——layout 已隐藏 tab_list，此处返回空避免无谓渲染。
@@ -373,6 +464,7 @@ class NanoflowWidgetActionFactory(
         clickable = hasTask && !taskOrNull?.taskId.isNullOrBlank(),
         isMasterTask = taskOrNull?.isMain == true,
         isPlaceholderSlot = !hasTask,
+        isWaitExpired = taskOrNull?.waitExpired == true,
       )
     }
 
@@ -392,6 +484,7 @@ class NanoflowWidgetActionFactory(
       ActionItem.Kind.GATE_NEXT -> ITEM_TYPE_GATE
       ActionItem.Kind.GATE_LABEL -> ITEM_TYPE_NONE
       ActionItem.Kind.GATE_ACTION -> ITEM_TYPE_GATE_ACTION
+      ActionItem.Kind.FOCUS_ACTION -> ITEM_TYPE_FOCUS_ACTION
     }
     fill.putExtra(NanoflowWidgetReceiver.EXTRA_ITEM_TYPE, itemType)
     if (item.taskIndex >= 0) fill.putExtra(NanoflowWidgetReceiver.EXTRA_TASK_INDEX, item.taskIndex)
@@ -404,6 +497,12 @@ class NanoflowWidgetActionFactory(
     }
     item.gateEntryId?.let {
       fill.putExtra(NanoflowWidgetReceiver.EXTRA_GATE_ENTRY_ID, it)
+    }
+    item.focusAction?.let {
+      fill.putExtra(EXTRA_FOCUS_ACTION, it)
+    }
+    item.waitMinutes?.let {
+      fill.putExtra(EXTRA_WAIT_MINUTES, it)
     }
     item.primaryAction?.let {
       fill.putExtra(EXTRA_PRIMARY_ACTION, it.name)
@@ -435,16 +534,23 @@ class NanoflowWidgetActionFactory(
     const val ITEM_TYPE_GATE = "gate"
     const val ITEM_TYPE_PRIMARY = "primary"
     const val ITEM_TYPE_GATE_ACTION = "gate_action"
+    const val ITEM_TYPE_FOCUS_ACTION = "focus_action"
     const val ITEM_TYPE_NONE = "none"
     const val EXTRA_PRIMARY_ACTION = "extra.PRIMARY_ACTION"
     const val EXTRA_GATE_ACTION = "extra.GATE_ACTION"
+    const val EXTRA_FOCUS_ACTION = "extra.FOCUS_ACTION"
+    const val EXTRA_WAIT_MINUTES = "extra.WAIT_MINUTES"
     const val GATE_ACTION_READ = "read"
     const val GATE_ACTION_COMPLETE = "complete"
+    const val FOCUS_ACTION_COMPLETE = "complete"
+    const val FOCUS_ACTION_WAIT = "wait"
+    const val FOCUS_ACTION_WAIT_PRESET = "wait-preset"
 
-    /** 集合视图分流：tabs / content / refresh / gate_actions。 */
+    /** 集合视图分流：tabs / content / refresh / gate_actions / focus_actions。 */
     const val LIST_KIND_TABS = "tabs"
     const val LIST_KIND_CONTENT = "content"
     const val LIST_KIND_REFRESH = "refresh"
     const val LIST_KIND_GATE_ACTIONS = "gate_actions"
+    const val LIST_KIND_FOCUS_ACTIONS = "focus_actions"
   }
 }

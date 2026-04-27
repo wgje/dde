@@ -49,4 +49,4 @@ BEGIN
 END;
 $$;
 
-COMMIT;
+COMMIT;;

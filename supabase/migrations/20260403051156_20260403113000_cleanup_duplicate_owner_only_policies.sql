@@ -50,4 +50,4 @@ BEGIN
   ) THEN
     DROP POLICY IF EXISTS "Project members can view attachments" ON storage.objects;
   END IF;
-END $$;
+END $$;;

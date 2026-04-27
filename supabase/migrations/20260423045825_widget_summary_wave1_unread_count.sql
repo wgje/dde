@@ -1,6 +1,5 @@
--- Widget Gate read alignment:
--- - Desktop Gate keeps read-but-unfinished entries pending until completion.
--- - Android widget must use the same queue semantics so mobile and desktop show the same Gate content.
+-- Align widget gate count with the in-app gate: counts represent unread items,
+-- while previews still carry the broader uncompleted review queue.
 
 create or replace function public.widget_summary_wave1(
   p_user_id uuid,
@@ -116,7 +115,9 @@ begin
   );
 end;
 $$;
+
 revoke all on function public.widget_summary_wave1(uuid, date, int) from public, anon, authenticated;
 grant execute on function public.widget_summary_wave1(uuid, date, int) to service_role;
+
 comment on function public.widget_summary_wave1(uuid, date, int) is
-  'Widget summary 第一波聚合：focus_sessions + projects + black_box unread/pending count/preview/watermark + dock count/watermark 合并到单次 RPC；read-but-unfinished entries remain in Gate to match desktop.';
+  'Widget summary 第一波聚合：focus_sessions + projects + black_box unread/pending count/preview/watermark + dock count/watermark 合并到单次 RPC，把 4-5 个 PostgREST roundtrip 压缩到 1 个。';;

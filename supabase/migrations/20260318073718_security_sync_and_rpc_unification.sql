@@ -1,11 +1,4 @@
--- ============================================================================
 -- SQL 收敛与安全加固（f4078fa 之后全量同步补丁）
--- 实际已在远端执行版本：20260318073718
--- 目标：
---   1) 统一 batch_upsert_tasks 到单一签名，避免重载歧义与未覆盖授权
---   2) 移除异常消息中的敏感标识泄露
---   3) 将 authenticated 从 ALL 权限收敛到业务所需最小 DML 权限
--- ============================================================================
 
 DO $$ BEGIN
   DROP FUNCTION IF EXISTS public.batch_upsert_tasks(uuid, jsonb);
@@ -166,6 +159,7 @@ END $$;
 
 DO $$ BEGIN
   REVOKE ALL ON TABLE public.purge_rate_limits FROM authenticated;
+  GRANT SELECT, INSERT, UPDATE ON TABLE public.purge_rate_limits TO authenticated;
 EXCEPTION WHEN undefined_table THEN NULL;
 END $$;
 
@@ -176,4 +170,4 @@ EXCEPTION WHEN undefined_table THEN NULL;
 END $$;
 
 COMMENT ON SCHEMA public IS
-  'security sync (2026-03-18): batch_upsert_tasks signature unified, error redaction, authenticated least-privilege grants';
+  'security sync (2026-03-18): batch_upsert_tasks signature unified, error redaction, authenticated least-privilege grants';;

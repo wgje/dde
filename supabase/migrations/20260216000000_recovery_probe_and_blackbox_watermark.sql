@@ -64,7 +64,6 @@ BEGIN
   SELECT p_project_id, TRUE, v_watermark;
 END;
 $$;
-
 CREATE OR REPLACE FUNCTION public.get_black_box_sync_watermark()
 RETURNS TIMESTAMPTZ
 LANGUAGE plpgsql
@@ -88,37 +87,27 @@ BEGIN
   RETURN v_watermark;
 END;
 $$;
-
 -- 安全授权
 REVOKE ALL ON FUNCTION public.get_accessible_project_probe(UUID) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.get_black_box_sync_watermark() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.get_accessible_project_probe(UUID) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.get_black_box_sync_watermark() TO authenticated;
-
 -- 索引补强（幂等）
 CREATE INDEX IF NOT EXISTS idx_black_box_entries_user_updated_desc
   ON public.black_box_entries (user_id, updated_at DESC);
-
 CREATE INDEX IF NOT EXISTS idx_project_members_user_project
   ON public.project_members (user_id, project_id);
-
 CREATE INDEX IF NOT EXISTS idx_projects_id_owner_updated_desc
   ON public.projects (id, owner_id, updated_at DESC);
-
 CREATE INDEX IF NOT EXISTS idx_tasks_project_updated_desc
   ON public.tasks (project_id, updated_at DESC);
-
 CREATE INDEX IF NOT EXISTS idx_connections_project_updated_desc
   ON public.connections (project_id, updated_at DESC);
-
 CREATE INDEX IF NOT EXISTS idx_task_tombstones_project_deleted_desc
   ON public.task_tombstones (project_id, deleted_at DESC);
-
 CREATE INDEX IF NOT EXISTS idx_connection_tombstones_project_deleted_desc
   ON public.connection_tombstones (project_id, deleted_at DESC);
-
 COMMENT ON FUNCTION public.get_accessible_project_probe IS
   '返回当前项目可访问性与项目域聚合水位（project/tasks/connections/tombstones）- Resume V5 2026-02-16';
-
 COMMENT ON FUNCTION public.get_black_box_sync_watermark IS
   '返回当前用户黑匣子域聚合同步水位（MAX(updated_at)）- Resume V5 2026-02-16';

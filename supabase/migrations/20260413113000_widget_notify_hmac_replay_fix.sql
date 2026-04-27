@@ -58,5 +58,4 @@ EXCEPTION WHEN OTHERS THEN
   RETURN NULL;
 END;
 $$;
-
 REVOKE ALL ON FUNCTION public.invoke_widget_notify_webhook() FROM PUBLIC, anon, authenticated;

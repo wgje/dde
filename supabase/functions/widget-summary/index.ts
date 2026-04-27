@@ -57,6 +57,9 @@ interface FocusTaskSlotLike {
   sourceProjectId: string | null;
   inlineTitle: string | null;
   estimatedMinutes: number | null;
+  waitMinutes?: number | null;
+  waitStartedAt?: string | null;
+  waitEndAt?: string | null;
   focusStatus?: string;
   isMaster?: boolean;
   isMain?: boolean;
@@ -75,6 +78,9 @@ interface DockEntryLike {
   title?: string | null;
   sourceProjectId?: string | null;
   expectedMinutes?: number | null;
+  waitMinutes?: number | null;
+  waitStartedAt?: string | null;
+  waitEndAt?: string | null;
   status?: string;
   isMain?: boolean;
   lane?: string;
@@ -259,6 +265,11 @@ function toSlotList(value: unknown): FocusTaskSlotLike[] {
       estimatedMinutes: typeof item.estimatedMinutes === 'number' && Number.isFinite(item.estimatedMinutes)
         ? item.estimatedMinutes
         : null,
+      waitMinutes: typeof item.waitMinutes === 'number' && Number.isFinite(item.waitMinutes)
+        ? item.waitMinutes
+        : null,
+      waitStartedAt: typeof item.waitStartedAt === 'string' ? normalizeIsoTimestamp(item.waitStartedAt) : null,
+      waitEndAt: typeof item.waitEndAt === 'string' ? normalizeIsoTimestamp(item.waitEndAt) : null,
       focusStatus: typeof item.focusStatus === 'string' ? item.focusStatus : undefined,
       isMaster: item.isMaster === true || item.isMain === true,
       isMain: item.isMain === true,
@@ -286,6 +297,11 @@ function toDockEntryList(value: unknown): DockEntryLike[] {
       expectedMinutes: typeof item.expectedMinutes === 'number' && Number.isFinite(item.expectedMinutes)
         ? item.expectedMinutes
         : null,
+      waitMinutes: typeof item.waitMinutes === 'number' && Number.isFinite(item.waitMinutes)
+        ? item.waitMinutes
+        : null,
+      waitStartedAt: typeof item.waitStartedAt === 'string' ? normalizeIsoTimestamp(item.waitStartedAt) : null,
+      waitEndAt: typeof item.waitEndAt === 'string' ? normalizeIsoTimestamp(item.waitEndAt) : null,
       status: typeof item.status === 'string' ? item.status : undefined,
       isMain: item.isMain === true,
       lane: typeof item.lane === 'string' ? item.lane : undefined,
@@ -306,6 +322,13 @@ function mapDockEntryToFocusSlot(entry: DockEntryLike, forceMaster = false): Foc
     sourceProjectId: entry.sourceProjectId ?? null,
     inlineTitle: entry.sourceKind === 'dock-created' ? entry.title ?? null : entry.title ?? null,
     estimatedMinutes: entry.expectedMinutes ?? null,
+    waitMinutes: entry.waitMinutes ?? null,
+    waitStartedAt: entry.waitStartedAt ?? null,
+    waitEndAt: entry.waitEndAt ?? (
+      entry.waitStartedAt && entry.waitMinutes
+        ? new Date(new Date(entry.waitStartedAt).getTime() + entry.waitMinutes * 60_000).toISOString()
+        : null
+    ),
     focusStatus: entry.status,
     isMaster,
     isMain: isMaster,
@@ -536,6 +559,22 @@ function isRenderableFocusSlot(slot: FocusTaskSlotLike | null | undefined): slot
 
   return typeof slot.taskId === 'string' && slot.taskId.length > 0
     || typeof slot.inlineTitle === 'string' && slot.inlineTitle.trim().length > 0;
+}
+
+function resolveWaitEndAt(slot: FocusTaskSlotLike): string | null {
+  const explicit = normalizeIsoTimestamp(slot.waitEndAt ?? null);
+  if (explicit) return explicit;
+  const startedAt = normalizeIsoTimestamp(slot.waitStartedAt ?? null);
+  if (!startedAt || typeof slot.waitMinutes !== 'number' || !Number.isFinite(slot.waitMinutes) || slot.waitMinutes <= 0) {
+    return null;
+  }
+  return new Date(new Date(startedAt).getTime() + Math.floor(slot.waitMinutes) * 60_000).toISOString();
+}
+
+function isWaitExpiredSlot(slot: FocusTaskSlotLike, nowMs = Date.now()): boolean {
+  if (slot.focusStatus === 'wait-ended' || slot.focusStatus === 'wait_finished') return true;
+  const waitEndAt = resolveWaitEndAt(slot);
+  return waitEndAt !== null && new Date(waitEndAt).getTime() <= nowMs;
 }
 
 function uniqueIds(values: Array<string | null | undefined>): string[] {
@@ -1184,6 +1223,7 @@ Deno.serve(async (req: Request) => {
     const hasInlineFallback = typeof slot.inlineTitle === 'string' && slot.inlineTitle.trim().length > 0;
     const validTask = slot.taskId ? (Boolean(task) || hasInlineFallback) : true;
     const validProject = projectId ? Boolean(project) : true;
+    const waitEndAt = resolveWaitEndAt(slot);
 
     return {
       position,
@@ -1192,6 +1232,11 @@ Deno.serve(async (req: Request) => {
       title: task?.title ?? slot.inlineTitle ?? '未命名任务',
       projectTitle: project?.title ?? null,
       estimatedMinutes: slot.estimatedMinutes,
+      waitMinutes: slot.waitMinutes ?? null,
+      waitStartedAt: normalizeIsoTimestamp(slot.waitStartedAt ?? null),
+      waitEndAt,
+      waitExpired: isWaitExpiredSlot(slot),
+      focusStatus: slot.focusStatus ?? null,
       isMain: isMasterSlot(slot),
       isFocused: position === 1 || slot.focusStatus === 'focusing',
       valid: validTask && validProject,

@@ -100,7 +100,7 @@ describe('SQL 安全加固契约', () => {
   it('项目读取与附件读取策略必须保持 owner-only', () => {
     const initSql = readSql('scripts/init-supabase.sql');
     const remoteCommitSql = readSql('supabase/migrations/20260126074130_remote_commit.sql');
-    const ownerOnlyRepairSql = readSql('supabase/migrations/20260401100000_owner_only_batch_upsert_tasks.sql');
+    const ownerOnlyRepairSql = readSql('supabase/migrations/20260403050835_20260401100000_owner_only_batch_upsert_tasks.sql');
 
     const initProjectsPolicySection = getSection(
       initSql,
@@ -163,7 +163,7 @@ describe('SQL 安全加固契约', () => {
   it('project_members 过渡策略也必须收敛到 owner-only', () => {
     const initSql = readSql('scripts/init-supabase.sql');
     const remoteCommitSql = readSql('supabase/migrations/20260126074130_remote_commit.sql');
-    const ownerOnlyRepairSql = readSql('supabase/migrations/20260401100000_owner_only_batch_upsert_tasks.sql');
+    const ownerOnlyRepairSql = readSql('supabase/migrations/20260403050835_20260401100000_owner_only_batch_upsert_tasks.sql');
 
     const initEarlyProjectMembersSection = getSection(
       initSql,
@@ -201,7 +201,7 @@ describe('SQL 安全加固契约', () => {
     const remoteCommitSql = readSql('supabase/migrations/20260126074130_remote_commit.sql');
     const consolidatedSql = readSql('supabase/migrations/20260315200000_consolidated_focus_console_and_security.sql');
     const syncUnificationSql = readSql('supabase/migrations/20260318073718_security_sync_and_rpc_unification.sql');
-    const ownerOnlyRepairSql = readSql('supabase/migrations/20260401100000_owner_only_batch_upsert_tasks.sql');
+    const ownerOnlyRepairSql = readSql('supabase/migrations/20260403050835_20260401100000_owner_only_batch_upsert_tasks.sql');
 
     const initSection = getSection(
       initSql,
@@ -299,7 +299,7 @@ describe('SQL 安全加固契约', () => {
   it('黑匣子与 connection tombstone 访问口必须保持 owner-only', () => {
     const initSql = readSql('scripts/init-supabase.sql');
     const remoteCommitSql = readSql('supabase/migrations/20260126074130_remote_commit.sql');
-    const ownerOnlyRepairSql = readSql('supabase/migrations/20260401100000_owner_only_batch_upsert_tasks.sql');
+    const ownerOnlyRepairSql = readSql('supabase/migrations/20260403050835_20260401100000_owner_only_batch_upsert_tasks.sql');
 
     const initConnectionPolicySection = getSection(
       initSql,
@@ -394,7 +394,7 @@ describe('SQL 安全加固契约', () => {
   it('旧 purge_tasks 入口不应继续向 authenticated 暴露', () => {
     const initSql = readSql('scripts/init-supabase.sql');
     const migrationSql = readSql('supabase/migrations/20260126074130_remote_commit.sql');
-    const ownerOnlyRepairSql = readSql('supabase/migrations/20260401100000_owner_only_batch_upsert_tasks.sql');
+    const ownerOnlyRepairSql = readSql('supabase/migrations/20260403050835_20260401100000_owner_only_batch_upsert_tasks.sql');
 
     expect(initSql).toContain('REVOKE EXECUTE ON FUNCTION public.purge_tasks(uuid[]) FROM authenticated;');
     expect(migrationSql).toContain('REVOKE ALL ON FUNCTION "public"."purge_tasks"("p_task_ids" "uuid"[]) FROM "authenticated";');
@@ -402,7 +402,7 @@ describe('SQL 安全加固契约', () => {
   });
 
   it('前向修复迁移必须覆盖附件 RPC 与 legacy purge 权限最终态', () => {
-    const sql = readSql('supabase/migrations/20260401100000_owner_only_batch_upsert_tasks.sql');
+    const sql = readSql('supabase/migrations/20260403050835_20260401100000_owner_only_batch_upsert_tasks.sql');
     const appendSection = getSection(
       sql,
       'CREATE OR REPLACE FUNCTION public.append_task_attachment(',
@@ -428,7 +428,7 @@ describe('SQL 安全加固契约', () => {
   });
 
   it('重复策略清理迁移必须移除与 optimized policy 重叠的 owner-only 策略', () => {
-    const sql = readSql('supabase/migrations/20260403113000_cleanup_duplicate_owner_only_policies.sql');
+    const sql = readSql('supabase/migrations/20260403051156_20260403113000_cleanup_duplicate_owner_only_policies.sql');
 
     expect(sql).toContain("policyname = 'black_box_select_optimized'");
     expect(sql).toContain('DROP POLICY IF EXISTS "black_box_select_policy" ON public.black_box_entries;');

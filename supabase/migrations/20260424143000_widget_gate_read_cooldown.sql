@@ -121,9 +121,7 @@ begin
   );
 end;
 $$;
-
 revoke all on function public.widget_summary_wave1(uuid, date, int) from public, anon, authenticated;
 grant execute on function public.widget_summary_wave1(uuid, date, int) to service_role;
-
 comment on function public.widget_summary_wave1(uuid, date, int) is
   'Widget summary 第一波聚合：focus_sessions + projects + black_box 当前可见队列/read cooldown/preview/watermark + dock count/watermark 合并到单次 RPC。';

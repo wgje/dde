@@ -5,14 +5,12 @@
 -- ===== SEC-H3: app_config 只允许读取 =====
 REVOKE INSERT, UPDATE, DELETE ON TABLE public.app_config FROM authenticated;
 GRANT SELECT ON TABLE public.app_config TO authenticated;
-
 -- ===== SEC-H4: circuit_breaker_logs 只允许 SELECT + INSERT =====
 REVOKE UPDATE, DELETE ON TABLE public.circuit_breaker_logs FROM authenticated;
 GRANT SELECT, INSERT ON TABLE public.circuit_breaker_logs TO authenticated;
-
--- ===== SEC-H4: purge_rate_limits 仅允许 SECURITY DEFINER RPC 内部访问 =====
-REVOKE ALL ON TABLE public.purge_rate_limits FROM authenticated;
-
+-- ===== SEC-H4: purge_rate_limits 只允许 SELECT + INSERT + UPDATE =====
+REVOKE DELETE ON TABLE public.purge_rate_limits FROM authenticated;
+GRANT SELECT, INSERT, UPDATE ON TABLE public.purge_rate_limits TO authenticated;
 -- ===== SEC-M3: 修复 batch_upsert_tasks 异常消息泄露 user_id =====
 -- 替换消息内容，移除 user_id 和 project_id 参数
 CREATE OR REPLACE FUNCTION public.batch_upsert_tasks(

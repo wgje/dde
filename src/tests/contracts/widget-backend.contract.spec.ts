@@ -101,14 +101,14 @@ describe('Widget backend foundation contract', () => {
   });
 
   it('migration and init script must define widget backend tables, rate limits, and kill switch config', () => {
-    const migration = readText('supabase/migrations/20260412143000_widget_backend_foundation.sql');
-    const androidOnlyRetirementMigration = readText('supabase/migrations/20260420154000_widget_platform_android_only.sql');
-    const capabilityRulesBackfillMigration = readText('supabase/migrations/20260416163000_widget_capabilities_rules_backfill.sql');
-    const notifyTriggerMigration = readText('supabase/migrations/20260413102000_widget_notify_webhook_hmac.sql');
+    const migration = readText('supabase/migrations/20260413020054_widget_backend_foundation.sql');
+    const androidOnlyRetirementMigration = readText('supabase/migrations/20260427163000_reconcile_remote_migration_drift.sql');
+    const capabilityRulesBackfillMigration = readText('supabase/migrations/20260427163000_reconcile_remote_migration_drift.sql');
+    const notifyTriggerMigration = readText('supabase/migrations/20260413020931_widget_notify_webhook_hmac.sql');
     const notifyReplayFixMigration = readText('supabase/migrations/20260413113000_widget_notify_hmac_replay_fix.sql');
     const notifySecretNormalizationMigration = readText('supabase/migrations/20260413120000_widget_notify_secret_normalization.sql');
     const notifyLimitsBackfillMigration = readText('supabase/migrations/20260413121000_widget_notify_limits_backfill.sql');
-    const tokenHashAndNotifyScopeMigration = readText('supabase/migrations/20260418032000_widget_token_hash_and_notify_scope.sql');
+    const tokenHashAndNotifyScopeMigration = readText('supabase/migrations/20260427163000_reconcile_remote_migration_drift.sql');
     const gateReadAlignmentMigration = readText('supabase/migrations/20260426110000_widget_gate_read_alignment.sql');
     const initSql = readText('scripts/init-supabase.sql');
 
@@ -354,7 +354,7 @@ describe('Widget backend foundation contract', () => {
     expect(notifyFn.indexOf('const devices = await loadActiveAndroidDevices(client, userId, nowIso);')).toBeLessThan(
       notifyFn.indexOf('if (!hasConfiguredPushProvider()) {'),
     );
-    expect(focusActionFn).toContain("body.action !== 'promote-secondary'");
+    expect(focusActionFn).toContain("action !== 'promote-secondary'");
     expect(focusActionFn).toContain('if (!isUuidLike(body.taskId))');
     expect(focusActionFn).toContain('const token = getBearerToken(req);');
     expect(focusActionFn).toContain('Missing widget bearer token');

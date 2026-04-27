@@ -284,4 +284,4 @@ VALUES (
   ),
   'Widget backend rate limits and freshness thresholds'
 )
-ON CONFLICT (key) DO NOTHING;
+ON CONFLICT (key) DO NOTHING;;

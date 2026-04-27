@@ -5,6 +5,8 @@ export interface FocusTaskSlotLike {
   inlineTitle?: string | null;
   estimatedMinutes?: number | null;
   waitMinutes?: number | null;
+  waitStartedAt?: string | null;
+  waitEndAt?: string | null;
   cognitiveLoad?: string | null;
   focusStatus?: string;
   zone?: string;
@@ -19,6 +21,8 @@ export interface DockEntryLike {
   sourceProjectId?: string | null;
   expectedMinutes?: number | null;
   waitMinutes?: number | null;
+  waitStartedAt?: string | null;
+  waitEndAt?: string | null;
   load?: string | null;
   status?: string;
   lane?: string;
@@ -59,6 +63,12 @@ export interface DockSnapshotLike {
   [key: string]: unknown;
 }
 
+type FocusActionError = {
+  ok: false;
+  code: string;
+  error: string;
+};
+
 export type PromoteSecondaryResult =
   | {
       ok: true;
@@ -67,11 +77,20 @@ export type PromoteSecondaryResult =
       comboSelectIds: string[];
       backupIds: string[];
     }
+  | FocusActionError;
+
+export type FrontTaskActionResult =
   | {
-      ok: false;
-      code: string;
-      error: string;
-    };
+      ok: true;
+      snapshot: DockSnapshotLike;
+      completedTaskId?: string;
+      suspendedTaskId?: string;
+      waitEndAt?: string;
+      mainTaskId: string | null;
+      comboSelectIds: string[];
+      backupIds: string[];
+    }
+  | FocusActionError;
 
 const COMBO_VISIBLE_LIMIT = 3;
 const CONSOLE_VISIBLE_LIMIT = 4;
@@ -101,6 +120,12 @@ function normalizeNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
+function normalizeIsoText(value: unknown): string | null {
+  if (typeof value !== 'string' || value.trim().length === 0) return null;
+  const time = new Date(value).getTime();
+  return Number.isNaN(time) ? null : value;
+}
+
 function entryOrder(entry: DockEntryLike): number {
   return normalizeNumber(entry.manualOrder) ?? normalizeNumber(entry.dockedOrder) ?? Number.MAX_SAFE_INTEGER;
 }
@@ -117,6 +142,22 @@ function sortEntriesByOrder(entries: DockEntryLike[]): DockEntryLike[] {
 
 function taskIdOfEntry(entry: DockEntryLike | undefined): string | null {
   return isNonEmptyText(entry?.taskId) ? entry.taskId : null;
+}
+
+function mapDockStatusToFocusStatus(status: string | undefined): string | undefined {
+  switch (status) {
+    case 'focusing': return 'focusing';
+    case 'suspended_waiting': return 'suspend-waiting';
+    case 'wait_finished': return 'wait-ended';
+    case 'stalled': return 'stalled';
+    case 'completed': return 'completed';
+    case 'pending_start': return 'pending';
+    default: return status;
+  }
+}
+
+function addMinutesIso(baseIso: string, minutes: number): string {
+  return new Date(new Date(baseIso).getTime() + minutes * 60_000).toISOString();
 }
 
 function slotTaskIds(slots: FocusTaskSlotLike[] | undefined): string[] {
@@ -233,12 +274,340 @@ function buildSlot(
     sourceProjectId: base.sourceProjectId ?? entry?.sourceProjectId ?? null,
     inlineTitle: base.inlineTitle ?? entry?.title ?? null,
     estimatedMinutes: base.estimatedMinutes ?? entry?.expectedMinutes ?? null,
-    waitMinutes: base.waitMinutes ?? entry?.waitMinutes ?? null,
+    waitMinutes: normalizeNumber(entry?.waitMinutes) ?? normalizeNumber(base.waitMinutes),
+    waitStartedAt: normalizeIsoText(entry?.waitStartedAt) ?? normalizeIsoText(base.waitStartedAt),
+    waitEndAt: normalizeIsoText(entry?.waitEndAt) ?? normalizeIsoText(base.waitEndAt),
     cognitiveLoad: base.cognitiveLoad ?? entry?.load ?? null,
-    focusStatus: typeof base.focusStatus === 'string' ? base.focusStatus : entry?.status,
+    focusStatus: mapDockStatusToFocusStatus(entry?.status) ?? base.focusStatus,
     zone,
     zoneIndex,
     isMaster,
+  };
+}
+
+function inactiveError(): FocusActionError {
+  return { ok: false, code: 'FOCUS_INACTIVE', error: 'focus session is not active' };
+}
+
+function normalizeFrontActionInput(snapshot: unknown): {
+  ok: true;
+  dockSnapshot: DockSnapshotLike;
+  existingFocusState: FocusSessionStateLike | null;
+  active: DockEntryLike[];
+  visibleOrder: string[];
+  mainTaskId: string | null;
+} | FocusActionError {
+  if (!isPlainObject(snapshot)) {
+    return { ok: false, code: 'INVALID_SESSION_STATE', error: 'focus session snapshot must be an object' };
+  }
+
+  const dockSnapshot = snapshot as DockSnapshotLike;
+  const existingFocusState = isPlainObject(dockSnapshot.focusSessionState)
+    ? dockSnapshot.focusSessionState
+    : null;
+  if (dockSnapshot.focusMode !== true && existingFocusState?.isActive !== true) {
+    return inactiveError();
+  }
+
+  const active = activeEntries(dockSnapshot);
+  const visibleOrder = resolveVisibleOrder(dockSnapshot, active);
+  const mainTaskId = resolveMainTaskId(dockSnapshot, active);
+  return { ok: true, dockSnapshot, existingFocusState, active, visibleOrder, mainTaskId };
+}
+
+function buildFocusActionSnapshot(
+  dockSnapshot: DockSnapshotLike,
+  existingFocusState: FocusSessionStateLike | null,
+  nextEntries: DockEntryLike[],
+  nextVisibleOrder: string[],
+  mainTaskId: string | null,
+  savedAtIso: string,
+): {
+  snapshot: DockSnapshotLike;
+  comboSelectIds: string[];
+  backupIds: string[];
+  mainTaskId: string | null;
+} {
+  const active = nextEntries.filter(entry => !isCompletedEntry(entry));
+  if (active.length === 0) {
+    return {
+      snapshot: {
+        ...dockSnapshot,
+        entries: sortEntriesByOrder(nextEntries),
+        focusMode: false,
+        session: {
+          ...(dockSnapshot.session ?? {}),
+          mainTaskId: null,
+          comboSelectIds: [],
+          backupIds: [],
+        },
+        focusSessionState: null,
+        savedAt: savedAtIso,
+      },
+      comboSelectIds: [],
+      backupIds: [],
+      mainTaskId: null,
+    };
+  }
+
+  const activeTaskIds = new Set(uniqueIds(active.map(entry => taskIdOfEntry(entry))));
+  const normalizedVisibleOrder = uniqueIds(nextVisibleOrder)
+    .filter(taskId => activeTaskIds.has(taskId))
+    .slice(0, CONSOLE_VISIBLE_LIMIT);
+  const activeSecondary = active.filter(entry => {
+    const taskId = taskIdOfEntry(entry);
+    return taskId !== null && taskId !== mainTaskId && entry.isMain !== true;
+  });
+  const previousSecondaryOrder = resolveSecondaryOrder(dockSnapshot, activeSecondary);
+  const visibleSecondaryIds = normalizedVisibleOrder.filter(taskId => taskId !== mainTaskId);
+  const comboSelectIds = visibleSecondaryIds.slice(0, COMBO_VISIBLE_LIMIT);
+  const backupIds = uniqueIds(previousSecondaryOrder)
+    .filter(taskId => taskId !== mainTaskId && !comboSelectIds.includes(taskId));
+  const visibleOrderIndex = new Map(normalizedVisibleOrder.map((taskId, index) => [taskId, index]));
+  const backupOrder = new Map(backupIds.map((taskId, index) => [taskId, index]));
+
+  const normalizedEntries = nextEntries.map(entry => {
+    const taskId = taskIdOfEntry(entry);
+    if (!taskId || isCompletedEntry(entry)) {
+      return entry;
+    }
+    if (visibleOrderIndex.has(taskId)) {
+      const visibleIndex = visibleOrderIndex.get(taskId)!;
+      return {
+        ...entry,
+        lane: 'combo-select',
+        isMain: taskId === mainTaskId,
+        dockedOrder: visibleIndex,
+        manualOrder: visibleIndex,
+      };
+    }
+    if (backupOrder.has(taskId)) {
+      const index = backupOrder.get(taskId)!;
+      return {
+        ...entry,
+        lane: 'backup',
+        isMain: false,
+        dockedOrder: normalizedVisibleOrder.length + index,
+        manualOrder: normalizedVisibleOrder.length + index,
+        status: entry.status === 'focusing' ? 'stalled' : entry.status,
+      };
+    }
+    return entry.isMain === true ? { ...entry, isMain: false } : entry;
+  });
+  const orderedEntries = sortEntriesByOrder(normalizedEntries);
+
+  const entryByTaskId = new Map<string, DockEntryLike>();
+  for (const entry of orderedEntries) {
+    const taskId = taskIdOfEntry(entry);
+    if (taskId) entryByTaskId.set(taskId, entry);
+  }
+
+  const slotByTaskId = collectExistingSlots(existingFocusState);
+  const commandCenterTasks = mainTaskId
+    ? [buildSlot(mainTaskId, 'command', 0, true, slotByTaskId, entryByTaskId)]
+    : [];
+  const comboSelectTasks = comboSelectIds.map((taskId, index) =>
+    buildSlot(taskId, 'combo-select', index, false, slotByTaskId, entryByTaskId),
+  );
+  const backupTasks = backupIds.map((taskId, index) =>
+    buildSlot(taskId, 'backup', index, false, slotByTaskId, entryByTaskId),
+  );
+  const sessionId = existingFocusState?.sessionId ?? dockSnapshot.session?.focusSessionId;
+  const sessionStartedAt = existingFocusState?.sessionStartedAt ?? dockSnapshot.session?.focusSessionStartedAt;
+
+  return {
+    snapshot: {
+      ...dockSnapshot,
+      entries: orderedEntries,
+      focusMode: true,
+      session: {
+        ...(dockSnapshot.session ?? {}),
+        mainTaskId,
+        comboSelectIds,
+        backupIds,
+        ...(sessionId ? { focusSessionId: sessionId } : {}),
+        ...(typeof sessionStartedAt === 'number' ? { focusSessionStartedAt: sessionStartedAt } : {}),
+      },
+      focusSessionState: {
+        ...(existingFocusState ?? {}),
+        schemaVersion: 2,
+        ...(sessionId ? { sessionId } : {}),
+        ...(typeof sessionStartedAt === 'number' ? { sessionStartedAt } : {}),
+        isActive: true,
+        isFocusOverlayOn: existingFocusState?.isFocusOverlayOn ?? true,
+        commandCenterOrderIds: normalizedVisibleOrder,
+        commandCenterTasks,
+        comboSelectTasks,
+        backupTasks,
+      },
+      savedAt: savedAtIso,
+    },
+    comboSelectIds,
+    backupIds,
+    mainTaskId,
+  };
+}
+
+export function completeFrontTask(
+  snapshot: unknown,
+  expectedTaskId: string | null | undefined,
+  savedAtIso: string,
+): FrontTaskActionResult {
+  const input = normalizeFrontActionInput(snapshot);
+  if (!input.ok) return input;
+
+  const currentFrontTaskId = input.visibleOrder[0] ?? null;
+  if (!currentFrontTaskId) {
+    return { ok: false, code: 'FOCUS_TARGET_NOT_FOUND', error: 'no front task in the command center' };
+  }
+  if (expectedTaskId && expectedTaskId !== currentFrontTaskId) {
+    return { ok: false, code: 'FOCUS_TARGET_CHANGED', error: 'front task changed before action was applied' };
+  }
+
+  const targetEntry = input.active.find(entry => taskIdOfEntry(entry) === currentFrontTaskId) ?? null;
+  if (!targetEntry) {
+    return { ok: false, code: 'FOCUS_TARGET_NOT_FOUND', error: 'front task is not in the active dock' };
+  }
+
+  const targetWasMain = targetEntry.isMain === true || currentFrontTaskId === input.mainTaskId;
+  const nextVisibleOrder = input.visibleOrder.filter(taskId => taskId !== currentFrontTaskId);
+  const nextMainTaskId = targetWasMain
+    ? (nextVisibleOrder[0] ?? null)
+    : input.mainTaskId;
+
+  const nextEntries = Array.isArray(input.dockSnapshot.entries)
+    ? input.dockSnapshot.entries.map(entry => {
+        const taskId = taskIdOfEntry(entry);
+        if (taskId === currentFrontTaskId) {
+          return {
+            ...entry,
+            status: 'completed',
+            isMain: false,
+            waitMinutes: null,
+            waitStartedAt: null,
+            waitEndAt: null,
+          };
+        }
+        if (!taskId || isCompletedEntry(entry)) return entry;
+        if (taskId === nextVisibleOrder[0]) {
+          return {
+            ...entry,
+            status: 'focusing',
+            isMain: taskId === nextMainTaskId,
+            waitMinutes: null,
+            waitStartedAt: null,
+            waitEndAt: null,
+          };
+        }
+        return {
+          ...entry,
+          isMain: taskId === nextMainTaskId,
+          status: entry.status === 'focusing' ? 'stalled' : entry.status,
+        };
+      })
+    : [];
+
+  const rebuilt = buildFocusActionSnapshot(
+    input.dockSnapshot,
+    input.existingFocusState,
+    nextEntries,
+    nextVisibleOrder,
+    nextMainTaskId,
+    savedAtIso,
+  );
+
+  return {
+    ok: true,
+    snapshot: rebuilt.snapshot,
+    completedTaskId: currentFrontTaskId,
+    mainTaskId: rebuilt.mainTaskId,
+    comboSelectIds: rebuilt.comboSelectIds,
+    backupIds: rebuilt.backupIds,
+  };
+}
+
+export function suspendFrontTask(
+  snapshot: unknown,
+  expectedTaskId: string | null | undefined,
+  waitMinutes: number,
+  savedAtIso: string,
+): FrontTaskActionResult {
+  const normalizedWaitMinutes = Math.floor(waitMinutes);
+  if (!Number.isFinite(normalizedWaitMinutes) || normalizedWaitMinutes <= 0) {
+    return { ok: false, code: 'INVALID_WAIT_MINUTES', error: 'waitMinutes must be a positive integer' };
+  }
+
+  const input = normalizeFrontActionInput(snapshot);
+  if (!input.ok) return input;
+
+  const currentFrontTaskId = input.visibleOrder[0] ?? null;
+  if (!currentFrontTaskId) {
+    return { ok: false, code: 'FOCUS_TARGET_NOT_FOUND', error: 'no front task in the command center' };
+  }
+  if (expectedTaskId && expectedTaskId !== currentFrontTaskId) {
+    return { ok: false, code: 'FOCUS_TARGET_CHANGED', error: 'front task changed before action was applied' };
+  }
+
+  const targetEntry = input.active.find(entry => taskIdOfEntry(entry) === currentFrontTaskId) ?? null;
+  if (!targetEntry) {
+    return { ok: false, code: 'FOCUS_TARGET_NOT_FOUND', error: 'front task is not in the active dock' };
+  }
+
+  const waitEndAt = addMinutesIso(savedAtIso, normalizedWaitMinutes);
+  const nextVisibleOrder = uniqueIds([
+    ...input.visibleOrder.filter(taskId => taskId !== currentFrontTaskId),
+    currentFrontTaskId,
+  ]).slice(0, CONSOLE_VISIBLE_LIMIT);
+  const nextFocusTaskId = nextVisibleOrder.find(taskId => taskId !== currentFrontTaskId) ?? null;
+
+  const nextEntries = Array.isArray(input.dockSnapshot.entries)
+    ? input.dockSnapshot.entries.map(entry => {
+        const taskId = taskIdOfEntry(entry);
+        if (taskId === currentFrontTaskId) {
+          return {
+            ...entry,
+            status: 'suspended_waiting',
+            waitMinutes: normalizedWaitMinutes,
+            waitStartedAt: savedAtIso,
+            waitEndAt,
+            isMain: entry.isMain === true,
+            systemSelected: false,
+          };
+        }
+        if (!taskId || isCompletedEntry(entry)) return entry;
+        if (taskId === nextFocusTaskId) {
+          return {
+            ...entry,
+            status: 'focusing',
+            waitMinutes: null,
+            waitStartedAt: null,
+            waitEndAt: null,
+          };
+        }
+        return {
+          ...entry,
+          status: entry.status === 'focusing' ? 'stalled' : entry.status,
+        };
+      })
+    : [];
+
+  const rebuilt = buildFocusActionSnapshot(
+    input.dockSnapshot,
+    input.existingFocusState,
+    nextEntries,
+    nextVisibleOrder,
+    input.mainTaskId,
+    savedAtIso,
+  );
+
+  return {
+    ok: true,
+    snapshot: rebuilt.snapshot,
+    suspendedTaskId: currentFrontTaskId,
+    waitEndAt,
+    mainTaskId: rebuilt.mainTaskId,
+    comboSelectIds: rebuilt.comboSelectIds,
+    backupIds: rebuilt.backupIds,
   };
 }
 

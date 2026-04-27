@@ -115,9 +115,7 @@ begin
   );
 end;
 $$;
-
 revoke all on function public.widget_summary_wave1(uuid, date, int) from public, anon, authenticated;
 grant execute on function public.widget_summary_wave1(uuid, date, int) to service_role;
-
 comment on function public.widget_summary_wave1(uuid, date, int) is
   'Widget summary 第一波聚合：focus_sessions + projects + black_box unread/pending count/preview/watermark + dock count/watermark 合并到单次 RPC，把 4-5 个 PostgREST roundtrip 压缩到 1 个。';

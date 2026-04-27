@@ -104,7 +104,9 @@ describe('RetryQueueService', () => {
   let handler: RetryOperationHandler;
   let online = false;
   const authServiceMock = {
-    currentUserId: vi.fn((): string | null => 'test-user')
+    currentUserId: vi.fn((): string | null => 'test-user'),
+    peekPersistedOwnerHint: vi.fn((): string | null => null),
+    peekPersistedSessionIdentity: vi.fn((): { userId: string; email: string | null } | null => null),
   };
   const projectStateMock = {
     getProject: vi.fn((): Record<string, string> | undefined => undefined),
@@ -200,6 +202,8 @@ describe('RetryQueueService', () => {
 
     online = false;
     authServiceMock.currentUserId.mockReturnValue('test-user');
+    authServiceMock.peekPersistedOwnerHint.mockReturnValue(null);
+    authServiceMock.peekPersistedSessionIdentity.mockReturnValue(null);
     projectStateMock.getProject.mockReturnValue(undefined);
     handler = {
       pushTask: vi.fn().mockResolvedValue(true),
@@ -591,10 +595,10 @@ describe('RetryQueueService', () => {
     expect((service as unknown as { hiddenQueueItems: RetryQueueItem[] }).hiddenQueueItems).toEqual([]);
   });
 
-  it('加载阶段应立即隔离缺少来源元数据的 legacy 重试项', async () => {
+  it('云端账号加载阶段应立即隔离缺少来源元数据的 legacy 重试项', async () => {
     loadFromStorageSpy.mockRestore();
     initDbSpy.mockResolvedValue(null);
-    authServiceMock.currentUserId.mockReturnValue(AUTH_CONFIG.LOCAL_MODE_USER_ID);
+    authServiceMock.currentUserId.mockReturnValue('test-user');
     saveToStorageSpy.mockImplementation(() => {
       (service as unknown as { saveToLocalStorage: () => void }).saveToLocalStorage();
       return undefined as unknown as Promise<void>;
@@ -626,6 +630,125 @@ describe('RetryQueueService', () => {
     expect(localStorage.getItem('nanoflow.retry-queue.legacy-review.__legacy_unknown__')).toContain('t-legacy-load');
     const persisted = JSON.parse(localStorage.getItem('nanoflow.retry-queue') ?? '{}') as { items?: RetryQueueItem[] };
     expect(persisted.items ?? []).toHaveLength(0);
+  });
+
+  it('本地模式加载缺少来源元数据的 legacy 重试残留应静默清理且不弹待确认提示', async () => {
+    loadFromStorageSpy.mockRestore();
+    initDbSpy.mockResolvedValue(null);
+    authServiceMock.currentUserId.mockReturnValue(AUTH_CONFIG.LOCAL_MODE_USER_ID);
+    saveToStorageSpy.mockImplementation(() => {
+      (service as unknown as { saveToLocalStorage: () => void }).saveToLocalStorage();
+      return undefined as unknown as Promise<void>;
+    });
+
+    const legacyTask = createTask('t-legacy-local-load');
+    localStorage.setItem('nanoflow.retry-queue', JSON.stringify({
+      version: 1,
+      items: [
+        {
+          id: crypto.randomUUID(),
+          type: 'task',
+          operation: 'upsert',
+          data: legacyTask,
+          projectId: 'p-local',
+          retryCount: 0,
+          createdAt: Date.now(),
+        },
+      ],
+      savedAt: Date.now(),
+    }));
+
+    service.reloadFromStorageForCurrentOwner();
+
+    await vi.waitFor(() => {
+      expect(service.getItems()).toEqual([]);
+    });
+
+    expect(localStorage.getItem('nanoflow.retry-queue.legacy-review.__legacy_unknown__')).toBeNull();
+    const persisted = JSON.parse(localStorage.getItem('nanoflow.retry-queue') ?? '{}') as { items?: RetryQueueItem[] };
+    expect(persisted.items ?? []).toHaveLength(0);
+    expect(toastMock.warning).not.toHaveBeenCalledWith(
+      '检测到待确认的离线同步数据',
+      expect.any(String),
+    );
+  });
+
+  it('匿名启动且无持久 owner hint 时 legacy 重试残留应静默清理', async () => {
+    loadFromStorageSpy.mockRestore();
+    initDbSpy.mockResolvedValue(null);
+    authServiceMock.currentUserId.mockReturnValue(null);
+    authServiceMock.peekPersistedOwnerHint.mockReturnValue(null);
+    saveToStorageSpy.mockImplementation(() => {
+      (service as unknown as { saveToLocalStorage: () => void }).saveToLocalStorage();
+      return undefined as unknown as Promise<void>;
+    });
+
+    localStorage.setItem('nanoflow.retry-queue', JSON.stringify({
+      version: 1,
+      items: [
+        {
+          id: crypto.randomUUID(),
+          type: 'task',
+          operation: 'upsert',
+          data: createTask('t-anonymous-legacy-load'),
+          projectId: 'p-anonymous',
+          retryCount: 0,
+          createdAt: Date.now(),
+        },
+      ],
+      savedAt: Date.now(),
+    }));
+
+    service.reloadFromStorageForCurrentOwner();
+
+    await vi.waitFor(() => {
+      expect(service.getItems()).toEqual([]);
+    });
+
+    expect(localStorage.getItem('nanoflow.retry-queue.legacy-review.__legacy_unknown__')).toBeNull();
+    expect(toastMock.warning).not.toHaveBeenCalledWith(
+      '检测到待确认的离线同步数据',
+      expect.any(String),
+    );
+  });
+
+  it('匿名启动但存在持久云端 owner hint 时应保留 legacy 隔离保护', async () => {
+    loadFromStorageSpy.mockRestore();
+    initDbSpy.mockResolvedValue(null);
+    authServiceMock.currentUserId.mockReturnValue(null);
+    authServiceMock.peekPersistedOwnerHint.mockReturnValue('persisted-cloud-user');
+    saveToStorageSpy.mockImplementation(() => {
+      (service as unknown as { saveToLocalStorage: () => void }).saveToLocalStorage();
+      return undefined as unknown as Promise<void>;
+    });
+
+    localStorage.setItem('nanoflow.retry-queue', JSON.stringify({
+      version: 1,
+      items: [
+        {
+          id: crypto.randomUUID(),
+          type: 'task',
+          operation: 'upsert',
+          data: createTask('t-persisted-hint-legacy-load'),
+          projectId: 'p-cloud',
+          retryCount: 0,
+          createdAt: Date.now(),
+        },
+      ],
+      savedAt: Date.now(),
+    }));
+
+    service.reloadFromStorageForCurrentOwner();
+
+    await vi.waitFor(() => {
+      expect(service.getItems()).toEqual([]);
+    });
+
+    expect(localStorage.getItem('nanoflow.retry-queue.legacy-review.__legacy_unknown__')).toContain('t-persisted-hint-legacy-load');
+    expect(toastMock.warning).toHaveBeenCalledWith(
+      '检测到待确认的离线同步数据',
+      expect.any(String),
+    );
   });
 
   it('认证态下无法确认归属的 legacy 重试项应隔离保留而不是静默丢弃', async () => {
@@ -702,6 +825,36 @@ describe('RetryQueueService', () => {
     expect(handler.pushTask).not.toHaveBeenCalled();
     expect(service.length).toBe(0);
     expect(localStorage.getItem('nanoflow.retry-queue.legacy-review.__legacy_unknown__')).toContain('legacy local-user');
+  });
+
+  it('本地模式下 local-user 重试残留应静默清理且不弹待确认提示', async () => {
+    authServiceMock.currentUserId.mockReturnValue(AUTH_CONFIG.LOCAL_MODE_USER_ID);
+    const task = createTask('t-local-mode-leftover');
+    (service as unknown as {
+      queue: Array<Record<string, unknown>>;
+    }).queue = [
+      {
+        id: crypto.randomUUID(),
+        type: 'task',
+        operation: 'upsert',
+        data: task,
+        projectId: 'p-1',
+        retryCount: 0,
+        createdAt: Date.now(),
+        sourceUserId: AUTH_CONFIG.LOCAL_MODE_USER_ID,
+      },
+    ];
+    online = true;
+
+    await service.processQueue();
+
+    expect(handler.pushTask).not.toHaveBeenCalled();
+    expect(service.length).toBe(0);
+    expect(localStorage.getItem('nanoflow.retry-queue.legacy-review.__legacy_unknown__')).toBeNull();
+    expect(toastMock.warning).not.toHaveBeenCalledWith(
+      '检测到待确认的离线同步数据',
+      expect.any(String),
+    );
   });
 
   it('跨账号重试项应隔离保留而不是在当前账号下重放', async () => {

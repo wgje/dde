@@ -64,7 +64,6 @@ BEGIN
   RETURN v_watermark;
 END;
 $$;
-
 CREATE OR REPLACE FUNCTION public.list_project_heads_since(
   p_since TIMESTAMPTZ DEFAULT NULL
 )
@@ -166,34 +165,25 @@ BEGIN
   ORDER BY pc.updated_at ASC;
 END;
 $$;
-
 -- 安全加固：移除 PUBLIC 执行权限，仅授权 authenticated
 REVOKE ALL ON FUNCTION public.get_user_projects_watermark() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.list_project_heads_since(TIMESTAMPTZ) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.get_user_projects_watermark() TO authenticated;
 GRANT EXECUTE ON FUNCTION public.list_project_heads_since(TIMESTAMPTZ) TO authenticated;
-
 -- 索引补强（幂等）
 CREATE INDEX IF NOT EXISTS idx_project_members_user_project
   ON public.project_members (user_id, project_id);
-
 CREATE INDEX IF NOT EXISTS idx_projects_owner_updated_desc
   ON public.projects (owner_id, updated_at DESC);
-
 CREATE INDEX IF NOT EXISTS idx_tasks_project_updated_desc
   ON public.tasks (project_id, updated_at DESC);
-
 CREATE INDEX IF NOT EXISTS idx_connections_project_updated_desc
   ON public.connections (project_id, updated_at DESC);
-
 CREATE INDEX IF NOT EXISTS idx_task_tombstones_project_deleted_desc
   ON public.task_tombstones (project_id, deleted_at DESC);
-
 CREATE INDEX IF NOT EXISTS idx_connection_tombstones_project_deleted_desc
   ON public.connection_tombstones (project_id, deleted_at DESC);
-
 COMMENT ON FUNCTION public.get_user_projects_watermark IS
   '返回当前用户可访问项目域聚合最大时间戳（优化版聚合路径）- Manifest Watermark Performance Hardening 2026-02-18';
-
 COMMENT ON FUNCTION public.list_project_heads_since(TIMESTAMPTZ) IS
   '返回当前用户在给定水位后变更的项目头信息（聚合 JOIN 优化版）- Manifest Watermark Performance Hardening 2026-02-18';

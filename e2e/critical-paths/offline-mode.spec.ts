@@ -3,7 +3,7 @@
  *
  * 从 critical-paths.spec.ts 拆分
  */
-import { test, expect } from '@playwright/test';
+import { test, expect, Page } from '@playwright/test';
 import { testHelpers, createdTestData } from './helpers';
 
 interface CapturedExportState {
@@ -11,7 +11,7 @@ interface CapturedExportState {
   content: string | null;
 }
 
-async function stubFilePickerExport(page: Parameters<typeof test['beforeEach']>[0]['page']): Promise<void> {
+async function stubFilePickerExport(page: Page): Promise<void> {
   await page.evaluate(() => {
     const capture = {
       suggestedName: null as string | null,
@@ -41,7 +41,7 @@ async function stubFilePickerExport(page: Parameters<typeof test['beforeEach']>[
   });
 }
 
-async function readCapturedExport(page: Parameters<typeof test['beforeEach']>[0]['page']): Promise<CapturedExportState> {
+async function readCapturedExport(page: Page): Promise<CapturedExportState> {
   return page.evaluate(() => {
     return (window as Window & { __copilotExportCapture?: CapturedExportState }).__copilotExportCapture ?? {
       suggestedName: null,

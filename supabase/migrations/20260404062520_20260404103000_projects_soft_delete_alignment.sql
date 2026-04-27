@@ -1036,4 +1036,4 @@ BEGIN
   RETURN QUERY
   SELECT p_project_id, v_active_accessible, v_active_watermark, v_projects_watermark, v_blackbox_watermark, now();
 END;
-$$;
+$$;;

@@ -1,6 +1,3 @@
--- 备份元数据扩展到 v2 payload
--- 为全量/增量灾备增加 payload 版本与覆盖统计，支持表级验证与恢复预览。
-
 alter table public.backup_metadata
   add column if not exists payload_version text,
   add column if not exists table_counts jsonb not null default '{}'::jsonb,
@@ -40,4 +37,4 @@ set
   end;
 
 alter table public.backup_metadata
-  alter column payload_version set default '2.0.0';
+  alter column payload_version set default '2.0.0';;

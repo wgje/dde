@@ -215,6 +215,32 @@ export class RetryQueueService {
     return this.authService.currentUserId() ?? AUTH_CONFIG.LOCAL_MODE_USER_ID;
   }
 
+  private isCloudBackedUserId(userId: string | null | undefined): userId is string {
+    return typeof userId === 'string' && userId.length > 0 && userId !== AUTH_CONFIG.LOCAL_MODE_USER_ID;
+  }
+
+  private getPersistedOwnerHint(): string | null {
+    const auth = this.authService as Partial<Pick<AuthService, 'peekPersistedOwnerHint' | 'peekPersistedSessionIdentity'>>;
+    const hintedUserId = auth.peekPersistedOwnerHint?.();
+    if (typeof hintedUserId === 'string' && hintedUserId.length > 0) {
+      return hintedUserId;
+    }
+
+    const sessionIdentity = auth.peekPersistedSessionIdentity?.();
+    return typeof sessionIdentity?.userId === 'string' && sessionIdentity.userId.length > 0
+      ? sessionIdentity.userId
+      : null;
+  }
+
+  private shouldSilentlyDropUnownedLegacyRetryItem(): boolean {
+    const currentUserId = this.authService.currentUserId();
+    if (this.isCloudBackedUserId(currentUserId)) {
+      return false;
+    }
+
+    return !this.isCloudBackedUserId(this.getPersistedOwnerHint());
+  }
+
   private resolveItemOwnerUserId(item: RetryQueueItem): string {
     return item.sourceUserId ?? AUTH_CONFIG.LOCAL_MODE_USER_ID;
   }
@@ -274,22 +300,30 @@ export class RetryQueueService {
 
   private sanitizeLoadedItems(items: RetryQueueItem[]): {
     safeItems: RetryQueueItem[];
-    quarantinedCount: number;
+    removedCount: number;
   } {
     const safeItems: RetryQueueItem[] = [];
-    let quarantinedCount = 0;
+    let removedCount = 0;
 
     for (const item of items) {
       if (!item.sourceUserId) {
-        this.quarantineLegacyRetryItem(item, 'legacy 重试项缺少来源元数据，加载时已隔离');
-        quarantinedCount++;
+        if (this.shouldSilentlyDropUnownedLegacyRetryItem()) {
+          this.logger.info('本地/匿名模式下清理缺少来源元数据的 legacy 重试残留，跳过待确认提示', {
+            itemId: item.id,
+            type: item.type,
+            operation: item.operation,
+          });
+        } else {
+          this.quarantineLegacyRetryItem(item, 'legacy 重试项缺少来源元数据，加载时已隔离');
+        }
+        removedCount++;
         continue;
       }
 
       safeItems.push(item);
     }
 
-    return { safeItems, quarantinedCount };
+    return { safeItems, removedCount };
   }
 
   private getPersistedItems(): RetryQueueItem[] {
@@ -1445,6 +1479,17 @@ export class RetryQueueService {
 
         const currentUserId = this.authService.currentUserId();
         if (item.sourceUserId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+          if (this.shouldSilentlyDropUnownedLegacyRetryItem()) {
+            this.logger.info('本地模式下清理 local-user 重试残留，跳过云端隔离提示', {
+              itemId: item.id,
+              type: item.type,
+              operation: item.operation,
+            });
+            processedIds.add(item.id);
+            hadTerminalRemoval = true;
+            continue;
+          }
+
           this.quarantineLegacyRetryItem(item, 'legacy local-user 重试项禁止自动上云');
           processedIds.add(item.id);
           hadTerminalRemoval = true;
@@ -1460,7 +1505,15 @@ export class RetryQueueService {
           continue;
         }
         if (!item.sourceUserId) {
-          this.quarantineLegacyRetryItem(item, 'legacy 重试项缺少来源元数据，无法安全判断归属');
+          if (this.shouldSilentlyDropUnownedLegacyRetryItem()) {
+            this.logger.info('本地/匿名模式下清理缺少来源元数据的 legacy 重试残留，跳过待确认提示', {
+              itemId: item.id,
+              type: item.type,
+              operation: item.operation,
+            });
+          } else {
+            this.quarantineLegacyRetryItem(item, 'legacy 重试项缺少来源元数据，无法安全判断归属');
+          }
           processedIds.add(item.id);
           hadTerminalRemoval = true;
           continue;
@@ -1743,7 +1796,7 @@ export class RetryQueueService {
       }
 
       if (items.length > 0) {
-        const { safeItems, quarantinedCount } = this.sanitizeLoadedItems(items);
+        const { safeItems, removedCount } = this.sanitizeLoadedItems(items);
 
         if (!this.isStorageLoadTokenCurrent(loadToken)) {
           this.logStaleStorageLoad(loadToken, 'loadFromStorage:idb-sanitized');
@@ -1755,10 +1808,10 @@ export class RetryQueueService {
           count: items.length,
           visibleCount: this.queue.length,
           hiddenCount: this.hiddenQueueItems.length,
-          quarantinedCount,
+          removedCount,
           ownerUserId: this.getCurrentOwnerUserId(),
         });
-        if (quarantinedCount > 0) {
+        if (removedCount > 0) {
           this.saveToStorage();
         }
         this.checkCapacityWarning();
@@ -1775,7 +1828,7 @@ export class RetryQueueService {
       return;
     }
 
-    const { safeItems, quarantinedCount } = this.sanitizeLoadedItems(localStorageItems);
+    const { safeItems, removedCount } = this.sanitizeLoadedItems(localStorageItems);
 
     if (!this.isStorageLoadTokenCurrent(loadToken)) {
       this.logStaleStorageLoad(loadToken, 'loadFromStorage:localStorage-sanitized');
@@ -1783,7 +1836,7 @@ export class RetryQueueService {
     }
 
     this.applyLoadedItems(safeItems);
-    if (quarantinedCount > 0) {
+    if (removedCount > 0) {
       this.saveToStorage();
     }
     this.checkCapacityWarning();

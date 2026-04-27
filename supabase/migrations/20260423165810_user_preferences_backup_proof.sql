@@ -1,5 +1,3 @@
--- 为跨设备备份提醒补齐共享 proof-of-life，并防止离线旧写回退较新时间戳。
-
 ALTER TABLE public.user_preferences
   ADD COLUMN IF NOT EXISTS last_backup_proof_at TIMESTAMP WITH TIME ZONE DEFAULT NULL;
 
@@ -22,4 +20,4 @@ $$ LANGUAGE plpgsql;
 DROP TRIGGER IF EXISTS keep_latest_backup_proof_on_user_preferences ON public.user_preferences;
 CREATE TRIGGER keep_latest_backup_proof_on_user_preferences
   BEFORE UPDATE ON public.user_preferences
-  FOR EACH ROW EXECUTE FUNCTION public.user_preferences_keep_latest_backup_proof();
+  FOR EACH ROW EXECUTE FUNCTION public.user_preferences_keep_latest_backup_proof();;

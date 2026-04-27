@@ -71,4 +71,4 @@ DROP TRIGGER IF EXISTS widget_notify_black_box_change ON public.black_box_entrie
 CREATE TRIGGER widget_notify_black_box_change
   AFTER INSERT OR UPDATE OR DELETE ON public.black_box_entries
   FOR EACH ROW
-  EXECUTE FUNCTION public.invoke_widget_notify_webhook();
+  EXECUTE FUNCTION public.invoke_widget_notify_webhook();;

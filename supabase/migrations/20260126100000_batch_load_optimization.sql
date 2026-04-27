@@ -75,7 +75,6 @@ BEGIN
   RETURN v_result;
 END;
 $$;
-
 -- 2. 批量加载用户所有项目元数据（用于项目列表和增量同步）
 CREATE OR REPLACE FUNCTION public.get_user_projects_meta(
   p_since_timestamp TIMESTAMPTZ DEFAULT '1970-01-01'::TIMESTAMPTZ
@@ -107,11 +106,9 @@ BEGIN
   RETURN v_result;
 END;
 $$;
-
 -- 3. 授权 authenticated 角色调用
 GRANT EXECUTE ON FUNCTION public.get_full_project_data(UUID) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.get_user_projects_meta(TIMESTAMPTZ) TO authenticated;
-
 -- 4. 添加注释
 COMMENT ON FUNCTION public.get_full_project_data IS 
   '批量加载单个项目的完整数据（任务、连接、墓碑）- 性能优化 2026-01-26';

@@ -480,6 +480,8 @@ export class GateService {
     const preferences = focusPreferences();
 
     if (!preferences.gateEnabled) {
+      gatePendingItems.set([]);
+      gateCurrentIndex.set(0);
       gateState.set('disabled');
       this.logger.debug('Gate', 'Gate disabled by user preference');
       return;
@@ -498,6 +500,8 @@ export class GateService {
       return;
     }
 
+    gatePendingItems.set([]);
+    gateCurrentIndex.set(0);
     gateState.set('bypassed');
     this.logger.debug('Gate', 'No pending items, gate bypassed');
   }

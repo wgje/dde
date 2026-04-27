@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- Legacy workspace shell still coordinates startup/auth/sync lifecycles until the remaining shell extraction is completed. */
 import { Component, ChangeDetectionStrategy, inject, signal, HostListener, computed, OnInit, OnDestroy, DestroyRef, effect, Type, NgZone, Injector, AfterViewInit, untracked } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ActivatedRoute, Router, NavigationEnd, RouterOutlet } from '@angular/router';
@@ -111,6 +112,7 @@ const DATA_PROTECTION_REMINDER_TITLE = '数据备份提醒';
 const DATA_PROTECTION_REMINDER_MESSAGE = '已超过 7 天未完成数据备份，建议前往设置执行导出或本地备份。';
 const ANDROID_WIDGET_BOOTSTRAP_STORAGE_KEY = 'nanoflow.android-widget-bootstrap';
 const ANDROID_WIDGET_STARTUP_INTENT_STORAGE_KEY = 'nanoflow.android-widget-startup-intent';
+const SIDEBAR_SEARCH_FOCUS_DELAY_MS = 50;
 
 /**
  * 应用根组件
@@ -1007,55 +1009,12 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
    * 解决：在 capture 阶段优先处理快捷键，并在 bubble 阶段用 defaultPrevented 去重。
    */
   private readonly keyboardShortcutCaptureListener = (event: KeyboardEvent) => {
-    // 避免重复触发（例如 HMR 或其他监听器已处理）
-    if (event.defaultPrevented) return;
-
-    // 防御：某些特殊键盘事件可能没有 key 属性
-    if (!event.key) return;
+    if (this.shouldIgnoreKeyboardShortcut(event)) return;
 
     const key = event.key.toLowerCase();
-
-    // Ctrl+Z / Cmd+Z: 撤销
-    if ((event.ctrlKey || event.metaKey) && key === 'z' && !event.shiftKey) {
-      event.preventDefault();
-      this.taskOpsAdapter.performUndo();
-      return;
-    }
-
-    // Ctrl+Shift+Z / Cmd+Shift+Z: 重做
-    if ((event.ctrlKey || event.metaKey) && key === 'z' && event.shiftKey) {
-      event.preventDefault();
-      this.taskOpsAdapter.performRedo();
-      return;
-    }
-
-    // Ctrl+Y / Cmd+Y: 重做（Windows 风格）
-    if ((event.ctrlKey || event.metaKey) && key === 'y') {
-      event.preventDefault();
-      this.taskOpsAdapter.performRedo();
-      return;
-    }
-
-    // Ctrl+F / Cmd+F: 聚焦全局搜索框（覆盖浏览器默认查找）
-    if ((event.ctrlKey || event.metaKey) && key === 'f' && !event.shiftKey) {
-      event.preventDefault();
-      // 确保侧边栏打开
-      this.isSidebarOpen.set(true);
-      // 延迟聚焦，等待侧边栏展开动画
-      setTimeout(() => {
-        const searchInput = document.querySelector<HTMLInputElement>('aside input[aria-label="搜索项目或任务"]');
-        searchInput?.focus();
-        searchInput?.select();
-      }, 50);
-      return;
-    }
-
-    // Ctrl+B / Cmd+B: 切换黑匣子面板
-    if ((event.ctrlKey || event.metaKey) && key === 'b' && !event.shiftKey) {
-      event.preventDefault();
-      showBlackBoxPanel.update(v => !v);
-      return;
-    }
+    if (this.handleUndoRedoShortcut(event, key)) return;
+    if (this.handleSearchShortcut(event, key)) return;
+    this.handleBlackBoxShortcut(event, key);
   };
 
   private readonly focusMountIntentListener = () => {
@@ -1136,6 +1095,51 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
 
   ngAfterViewInit(): void {
     this.signalWorkspaceHandoffReady();
+  }
+
+  private shouldIgnoreKeyboardShortcut(event: KeyboardEvent): boolean {
+    return event.defaultPrevented || !event.key || (!event.ctrlKey && !event.metaKey);
+  }
+
+  private handleUndoRedoShortcut(event: KeyboardEvent, key: string): boolean {
+    if (key === 'z' && !event.shiftKey) {
+      event.preventDefault();
+      this.taskOpsAdapter.performUndo();
+      return true;
+    }
+
+    if ((key === 'z' && event.shiftKey) || key === 'y') {
+      event.preventDefault();
+      this.taskOpsAdapter.performRedo();
+      return true;
+    }
+
+    return false;
+  }
+
+  private handleSearchShortcut(event: KeyboardEvent, key: string): boolean {
+    if (event.shiftKey || key !== 'f') return false;
+
+    event.preventDefault();
+    this.focusGlobalSearchInput();
+    return true;
+  }
+
+  private focusGlobalSearchInput(): void {
+    this.isSidebarOpen.set(true);
+    setTimeout(() => {
+      const searchInput = document.querySelector<HTMLInputElement>('aside input[aria-label="搜索项目或任务"]');
+      searchInput?.focus();
+      searchInput?.select();
+    }, SIDEBAR_SEARCH_FOCUS_DELAY_MS);
+  }
+
+  private handleBlackBoxShortcut(event: KeyboardEvent, key: string): boolean {
+    if (event.shiftKey || key !== 'b') return false;
+
+    event.preventDefault();
+    showBlackBoxPanel.update(v => !v);
+    return true;
   }
 
   showInstallPrompt(): boolean {

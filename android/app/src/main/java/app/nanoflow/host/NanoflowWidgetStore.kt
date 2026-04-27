@@ -229,6 +229,16 @@ class NanoflowWidgetStore(private val context: Context) {
     return context.widgetDataStore.data.first()[selectedTaskIndexKey(appWidgetId)] ?: 0
   }
 
+  suspend fun persistFocusWaitMenuOpen(appWidgetId: Int, open: Boolean) {
+    context.widgetDataStore.edit { prefs ->
+      prefs[focusWaitMenuOpenKey(appWidgetId)] = open
+    }
+  }
+
+  suspend fun readFocusWaitMenuOpen(appWidgetId: Int): Boolean {
+    return context.widgetDataStore.data.first()[focusWaitMenuOpenKey(appWidgetId)] ?: false
+  }
+
   suspend fun persistGateSelectedEntryId(appWidgetId: Int, entryId: String?) {
     context.widgetDataStore.edit { prefs ->
       val key = gateSelectedEntryIdKey(appWidgetId)
@@ -310,6 +320,7 @@ class NanoflowWidgetStore(private val context: Context) {
       prefs.remove(gatePageIndexKey(appWidgetId))
       prefs.remove(gateSelectedEntryIdKey(appWidgetId))
       prefs.remove(selectedTaskIndexKey(appWidgetId))
+      prefs.remove(focusWaitMenuOpenKey(appWidgetId))
       prefs.remove(summaryJsonKey(appWidgetId))
       prefs.remove(summaryCacheFormatVersionKey(appWidgetId))
       prefs.remove(summaryUpdatedAtKey(appWidgetId))
@@ -449,6 +460,10 @@ class NanoflowWidgetStore(private val context: Context) {
 
   private fun selectedTaskIndexKey(appWidgetId: Int): Preferences.Key<Int> {
     return intPreferencesKey("instance.$appWidgetId.selectedTaskIndex")
+  }
+
+  private fun focusWaitMenuOpenKey(appWidgetId: Int): Preferences.Key<Boolean> {
+    return booleanPreferencesKey("instance.$appWidgetId.focusWaitMenuOpen")
   }
 
   private fun gateSelectedEntryIdKey(appWidgetId: Int): Preferences.Key<String> {

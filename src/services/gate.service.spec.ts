@@ -14,6 +14,7 @@ import {
   gateSnoozeCount,
   focusPreferences,
   setBlackBoxEntries,
+  updateBlackBoxEntry,
   resetGateState,
 } from '../state/focus-stores';
 import { BlackBoxEntry } from '../models/focus';
@@ -25,6 +26,7 @@ describe('GateService', () => {
     markAsCompleted: ReturnType<typeof vi.fn>;
     snooze: ReturnType<typeof vi.fn>;
     loadFromServer: ReturnType<typeof vi.fn>;
+    getExpectedSyncUserId: ReturnType<typeof vi.fn>;
   };
 
   let mockLoggerService: {
@@ -75,6 +77,7 @@ describe('GateService', () => {
       markAsCompleted: vi.fn().mockReturnValue({ ok: true, value: {} }),
       snooze: vi.fn().mockReturnValue({ ok: true, value: {} }),
       loadFromServer: vi.fn().mockResolvedValue(undefined),
+      getExpectedSyncUserId: vi.fn().mockReturnValue('test-user'),
     };
 
     mockLoggerService = {
@@ -153,6 +156,39 @@ describe('GateService', () => {
       service.checkGate();
 
       expect(gateState()).toBe('disabled');
+    });
+
+    it('已读处理完成后，后续 gate 复核不应重新弹出同一条内容', () => {
+      const entry = createMockEntry({
+        id: 'read-once',
+        date: getDateOffset(-1),
+        isRead: false,
+        isCompleted: false,
+      });
+      mockBlackBoxService.markAsRead.mockImplementationOnce((id: string) => {
+        const updated = {
+          ...entry,
+          id,
+          isRead: true,
+          updatedAt: new Date().toISOString(),
+          syncStatus: 'pending' as const,
+        };
+        updateBlackBoxEntry(updated);
+        return { ok: true, value: updated };
+      });
+      setBlackBoxEntries([entry]);
+
+      service.checkGate();
+      service.onEnteringComplete();
+      service.markAsRead();
+      service.onHeaveReadComplete();
+
+      expect(gateState()).toBe('completed');
+
+      service.checkGate();
+
+      expect(gateState()).toBe('bypassed');
+      expect(gatePendingItems()).toEqual([]);
     });
   });
 

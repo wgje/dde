@@ -39,6 +39,9 @@ data class WidgetDockItem(
   val title: String? = null,
   val projectTitle: String? = null,
   val estimatedMinutes: Int? = null,
+  val waitMinutes: Int? = null,
+  val waitEndAt: String? = null,
+  val waitExpired: Boolean = false,
   @JsonNames("isMain")
   val isMaster: Boolean? = null,
   val valid: Boolean = false,
@@ -59,6 +62,11 @@ data class WidgetCommandCenterSlot(
   val title: String? = null,
   val projectTitle: String? = null,
   val estimatedMinutes: Int? = null,
+  val waitMinutes: Int? = null,
+  val waitStartedAt: String? = null,
+  val waitEndAt: String? = null,
+  val waitExpired: Boolean = false,
+  val focusStatus: String? = null,
   val isMain: Boolean = false,
   val isFocused: Boolean = false,
   val valid: Boolean = false,
@@ -118,7 +126,8 @@ data class WidgetSummaryRequestPayload(
 @Serializable
 data class WidgetFocusPromoteRequestPayload(
   val action: String,
-  val taskId: String,
+  val taskId: String? = null,
+  val waitMinutes: Int? = null,
 )
 
 @Serializable
@@ -205,6 +214,8 @@ data class WidgetRenderModel(
   val contentCards: List<WidgetContentCard> = emptyList(),
   /** 紧凑同步徽章文案（如「刚刚」/「3 分前」）；null 表示不展示。 */
   val syncBadgeLabel: String? = null,
+  /** 专注模式底部等待预设是否展开。 */
+  val focusWaitMenuOpen: Boolean = false,
 )
 
 data class WidgetContentCard(
@@ -227,6 +238,9 @@ data class WidgetTaskCard(
   val title: String,
   val projectTitle: String?,
   val estimatedMinutes: Int? = null,
+  val waitMinutes: Int? = null,
+  val waitEndAt: String? = null,
+  val waitExpired: Boolean = false,
   val isMain: Boolean,
   val valid: Boolean = true,
 )

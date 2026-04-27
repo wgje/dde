@@ -246,8 +246,165 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
       NanoflowWidgetActionFactory.ITEM_TYPE_REFRESH -> handleRefresh(context, appWidgetId)
       NanoflowWidgetActionFactory.ITEM_TYPE_GATE -> handleGateNav(context, appWidgetId, intent)
       NanoflowWidgetActionFactory.ITEM_TYPE_GATE_ACTION -> handleGateAction(context, appWidgetId, intent)
+      NanoflowWidgetActionFactory.ITEM_TYPE_FOCUS_ACTION -> handleFocusAction(context, appWidgetId, intent)
       NanoflowWidgetActionFactory.ITEM_TYPE_PRIMARY -> handlePrimaryContentClick(context, appWidgetId, intent)
       else -> Unit
+    }
+  }
+
+  private fun handleFocusAction(context: Context, appWidgetId: Int, intent: Intent) {
+    val focusAction = intent.getStringExtra(NanoflowWidgetActionFactory.EXTRA_FOCUS_ACTION)
+    val taskId = intent.getStringExtra(EXTRA_TASK_ID)?.takeIf { it.isNotBlank() }
+    val waitMinutes = intent.getIntExtra(NanoflowWidgetActionFactory.EXTRA_WAIT_MINUTES, 0)
+
+    if (focusAction == NanoflowWidgetActionFactory.FOCUS_ACTION_WAIT) {
+      runBlocking {
+        val appContext = context.applicationContext
+        val store = NanoflowWidgetStore(appContext)
+        store.persistFocusWaitMenuOpen(appWidgetId, true)
+        val repository = NanoflowWidgetRepository(appContext)
+        val appWidgetManager = AppWidgetManager.getInstance(appContext)
+        renderAndApply(appContext, appWidgetManager, repository, appWidgetId, partialUpdate = true)
+        notifyActionListsDataChanged(appWidgetManager, appWidgetId)
+      }
+      Toast.makeText(
+        context.applicationContext,
+        context.getString(R.string.nanoflow_widget_focus_wait_menu_toast),
+        Toast.LENGTH_SHORT,
+      ).show()
+      return
+    }
+
+    if (taskId.isNullOrBlank()) {
+      Toast.makeText(
+        context.applicationContext,
+        context.getString(R.string.nanoflow_widget_focus_promote_failed_toast),
+        Toast.LENGTH_SHORT,
+      ).show()
+      NanoflowWidgetRefreshWorker.enqueue(context, reason = "focus-action-missing-task")
+      return
+    }
+
+    val pendingResult = goAsync()
+    val appContext = context.applicationContext
+    silentActionScope.launch {
+      val repository = NanoflowWidgetRepository(appContext)
+
+      suspend fun renderCurrentWidget() {
+        val appWidgetManager = AppWidgetManager.getInstance(appContext)
+        renderAndApply(appContext, appWidgetManager, repository, appWidgetId)
+        notifyActionListsDataChanged(appWidgetManager, appWidgetId)
+      }
+
+      try {
+        when (focusAction) {
+          NanoflowWidgetActionFactory.FOCUS_ACTION_COMPLETE -> {
+            val optimisticSnapshot = runCatching {
+              repository.applyOptimisticFocusCompletion(appWidgetId, taskId)
+            }.getOrNull()
+            if (optimisticSnapshot != null) {
+              runCatching { renderCurrentWidget() }
+            }
+
+            val success = runCatching {
+              repository.completeFrontFocusTask(appWidgetId, taskId)
+            }.getOrElse { false }
+
+            if (success) {
+              if (optimisticSnapshot == null) {
+                runCatching {
+                  repository.refreshSummary(appWidgetId)
+                  renderCurrentWidget()
+                }
+              }
+              withContext(Dispatchers.Main) {
+                Toast.makeText(
+                  appContext,
+                  appContext.getString(R.string.nanoflow_widget_focus_complete_toast),
+                  Toast.LENGTH_SHORT,
+                ).show()
+              }
+              NanoflowWidgetRefreshWorker.enqueue(appContext, reason = "focus-complete-front")
+            } else {
+              if (optimisticSnapshot != null) {
+                runCatching {
+                  repository.rollbackOptimisticFocusPromotion(appWidgetId, optimisticSnapshot)
+                  renderCurrentWidget()
+                }
+              }
+              withContext(Dispatchers.Main) {
+                Toast.makeText(
+                  appContext,
+                  appContext.getString(R.string.nanoflow_widget_focus_promote_failed_toast),
+                  Toast.LENGTH_SHORT,
+                ).show()
+              }
+              NanoflowWidgetRefreshWorker.enqueue(appContext, reason = "focus-complete-front-retry")
+            }
+          }
+          NanoflowWidgetActionFactory.FOCUS_ACTION_WAIT_PRESET -> {
+            val normalizedWait = waitMinutes.coerceAtLeast(1)
+            val optimisticSnapshot = runCatching {
+              repository.applyOptimisticFocusWait(appWidgetId, taskId, normalizedWait)
+            }.getOrNull()
+            if (optimisticSnapshot != null) {
+              runCatching { renderCurrentWidget() }
+            }
+
+            val success = runCatching {
+              repository.suspendFrontFocusTask(appWidgetId, taskId, normalizedWait)
+            }.getOrElse { false }
+
+            if (success) {
+              if (optimisticSnapshot == null) {
+                runCatching {
+                  repository.refreshSummary(appWidgetId)
+                  renderCurrentWidget()
+                }
+              }
+              withContext(Dispatchers.Main) {
+                Toast.makeText(
+                  appContext,
+                  appContext.getString(R.string.nanoflow_widget_focus_wait_toast),
+                  Toast.LENGTH_SHORT,
+                ).show()
+              }
+              NanoflowWidgetRefreshWorker.enqueue(appContext, reason = "focus-wait-front")
+              NanoflowWidgetRefreshWorker.scheduleFocusWaitReminder(
+                appContext,
+                appWidgetId,
+                normalizedWait,
+              )
+            } else {
+              if (optimisticSnapshot != null) {
+                runCatching {
+                  repository.rollbackOptimisticFocusPromotion(appWidgetId, optimisticSnapshot)
+                  renderCurrentWidget()
+                }
+              }
+              withContext(Dispatchers.Main) {
+                Toast.makeText(
+                  appContext,
+                  appContext.getString(R.string.nanoflow_widget_focus_promote_failed_toast),
+                  Toast.LENGTH_SHORT,
+                ).show()
+              }
+              NanoflowWidgetRefreshWorker.enqueue(appContext, reason = "focus-wait-front-retry")
+            }
+          }
+          else -> {
+            withContext(Dispatchers.Main) {
+              Toast.makeText(
+                appContext,
+                appContext.getString(R.string.nanoflow_widget_focus_promote_failed_toast),
+                Toast.LENGTH_SHORT,
+              ).show()
+            }
+          }
+        }
+      } finally {
+        pendingResult.finish()
+      }
     }
   }
 

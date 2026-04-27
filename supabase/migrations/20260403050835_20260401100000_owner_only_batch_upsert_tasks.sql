@@ -420,4 +420,4 @@ COMMENT ON FUNCTION public.append_task_attachment(uuid, jsonb) IS
   'Owner-only attachment append repair after personal backend slim-down.';
 
 COMMENT ON FUNCTION public.remove_task_attachment(uuid, text) IS
-  'Owner-only attachment remove repair after personal backend slim-down.';
+  'Owner-only attachment remove repair after personal backend slim-down.';;

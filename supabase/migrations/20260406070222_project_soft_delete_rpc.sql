@@ -1,12 +1,3 @@
--- ============================================================================
--- Fix project soft delete RLS trap.
--- Root cause: owner update policy requires projects.deleted_at IS NULL, so
--- PATCH projects.deleted_at = now() fails with 42501 when the updated row no
--- longer satisfies the policy visibility predicate.
--- Solution: expose an owner-scoped SECURITY DEFINER RPC that performs the soft
--- delete idempotently while preserving the stricter select/update policies.
--- ============================================================================
-
 CREATE OR REPLACE FUNCTION public.soft_delete_project(p_project_id uuid)
 RETURNS boolean
 LANGUAGE plpgsql
@@ -35,7 +26,8 @@ BEGIN
   END IF;
 
   IF v_owner_id IS DISTINCT FROM v_user_id THEN
-    RETURN true;
+    RAISE EXCEPTION 'Permission denied to delete project %', p_project_id
+      USING ERRCODE = '42501';
   END IF;
 
   IF v_deleted_at IS NOT NULL THEN
@@ -52,4 +44,4 @@ END;
 $$;
 
 REVOKE ALL ON FUNCTION public.soft_delete_project(uuid) FROM PUBLIC, anon;
-GRANT EXECUTE ON FUNCTION public.soft_delete_project(uuid) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.soft_delete_project(uuid) TO authenticated;;

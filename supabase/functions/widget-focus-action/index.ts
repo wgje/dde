@@ -11,7 +11,11 @@ import {
   sha256Hex,
   withPrivateNoStoreHeaders,
 } from '../_shared/widget-common.ts';
-import { promoteSecondaryTaskToC2 } from './focus-reorder.ts';
+import {
+  completeFrontTask,
+  promoteSecondaryTaskToC2,
+  suspendFrontTask,
+} from './focus-reorder.ts';
 
 interface WidgetDeviceRow {
   id: string;
@@ -35,12 +39,14 @@ interface FocusSessionRow {
 interface RequestBody {
   action?: string;
   taskId?: string;
+  waitMinutes?: number;
 }
 
 type SupabaseAdminClient = ReturnType<typeof createServiceRoleClient>;
 
 const WIDGET_DEVICE_SELECT = 'id,user_id,secret_hash,token_hash,binding_generation,revoked_at,expires_at';
 const FOCUS_SESSION_SELECT = 'id,user_id,started_at,ended_at,session_state,updated_at';
+const FRONT_ACTIONS = new Set(['complete-front', 'wait-front']);
 
 function errorResponse(
   headers: Record<string, string>,
@@ -106,6 +112,61 @@ async function loadLatestActiveFocusSession(
   return result.data as FocusSessionRow | null;
 }
 
+async function maybePatchOwnedTask(
+  client: SupabaseAdminClient,
+  userId: string,
+  taskId: string | null | undefined,
+  patch: Record<string, unknown>,
+): Promise<void> {
+  if (!taskId) return;
+
+  const taskResult = await client
+    .from('tasks')
+    .select('id,project_id')
+    .eq('id', taskId)
+    .maybeSingle();
+  if (taskResult.error) {
+    throw new Error(`load task failed: ${taskResult.error.message}`);
+  }
+  const taskRow = taskResult.data as { id: string; project_id: string } | null;
+  if (!taskRow) return;
+
+  const projectResult = await client
+    .from('projects')
+    .select('id')
+    .eq('id', taskRow.project_id)
+    .eq('owner_id', userId)
+    .maybeSingle();
+  if (projectResult.error) {
+    throw new Error(`load task owner project failed: ${projectResult.error.message}`);
+  }
+  if (!projectResult.data) return;
+
+  const update = await client
+    .from('tasks')
+    .update(patch)
+    .eq('id', taskId)
+    .eq('project_id', taskRow.project_id);
+  if (update.error) {
+    throw new Error(`patch task failed: ${update.error.message}`);
+  }
+}
+
+function readOptionalStringField(source: unknown, key: string): string | null {
+  if (typeof source !== 'object' || source === null || Array.isArray(source)) {
+    return null;
+  }
+
+  const value = (source as Record<string, unknown>)[key];
+  return typeof value === 'string' ? value : null;
+}
+
+function actionErrorStatus(code: string): number {
+  if (code === 'SECONDARY_TASK_NOT_FOUND' || code === 'FOCUS_TARGET_NOT_FOUND') return 404;
+  if (code === 'INVALID_WAIT_MINUTES' || code === 'INVALID_SESSION_STATE') return 400;
+  return 409;
+}
+
 async function handleRequest(req: Request): Promise<Response> {
   const corsHeaders = getCorsHeaders(req.headers.get('Origin'), 'POST, OPTIONS');
   const responseHeaders = withPrivateNoStoreHeaders(corsHeaders);
@@ -130,11 +191,26 @@ async function handleRequest(req: Request): Promise<Response> {
     return errorResponse(responseHeaders, 400, 'INVALID_BODY', 'Request body must be valid JSON');
   }
 
-  if (body.action !== 'promote-secondary') {
-    return errorResponse(responseHeaders, 400, 'INVALID_ACTION', "action must be 'promote-secondary'");
+  const action = body.action;
+  if (action !== 'promote-secondary' && !FRONT_ACTIONS.has(action ?? '')) {
+    return errorResponse(
+      responseHeaders,
+      400,
+      'INVALID_ACTION',
+      "action must be 'promote-secondary', 'complete-front', or 'wait-front'",
+    );
   }
-  if (!isUuidLike(body.taskId)) {
+  if (action === 'promote-secondary' && !isUuidLike(body.taskId)) {
     return errorResponse(responseHeaders, 400, 'INVALID_TASK_ID', 'taskId must be a UUID');
+  }
+  if (FRONT_ACTIONS.has(action ?? '') && body.taskId !== undefined && !isUuidLike(body.taskId)) {
+    return errorResponse(responseHeaders, 400, 'INVALID_TASK_ID', 'taskId must be a UUID');
+  }
+  if (
+    action === 'wait-front'
+    && (typeof body.waitMinutes !== 'number' || !Number.isFinite(body.waitMinutes) || body.waitMinutes <= 0)
+  ) {
+    return errorResponse(responseHeaders, 400, 'INVALID_WAIT_MINUTES', 'waitMinutes must be a positive number');
   }
 
   const client = createServiceRoleClient();
@@ -168,16 +244,19 @@ async function handleRequest(req: Request): Promise<Response> {
   }
 
   const nowIso = new Date().toISOString();
-  const reorder = promoteSecondaryTaskToC2(session.session_state, body.taskId, nowIso);
-  if (!reorder.ok) {
-    const status = reorder.code === 'SECONDARY_TASK_NOT_FOUND' ? 404 : 409;
-    return errorResponse(responseHeaders, status, reorder.code, reorder.error);
+  const actionResult = action === 'promote-secondary'
+    ? promoteSecondaryTaskToC2(session.session_state, body.taskId!, nowIso)
+    : action === 'complete-front'
+      ? completeFrontTask(session.session_state, body.taskId, nowIso)
+      : suspendFrontTask(session.session_state, body.taskId, Math.floor(body.waitMinutes!), nowIso);
+  if (!actionResult.ok) {
+    return errorResponse(responseHeaders, actionErrorStatus(actionResult.code), actionResult.code, actionResult.error);
   }
 
   const update = await client
     .from('focus_sessions')
     .update({
-      session_state: reorder.snapshot,
+      session_state: actionResult.snapshot,
       updated_at: nowIso,
     })
     .eq('id', session.id)
@@ -195,26 +274,64 @@ async function handleRequest(req: Request): Promise<Response> {
     return errorResponse(responseHeaders, 409, 'FOCUS_SESSION_CHANGED', 'Focus session changed before update');
   }
 
+  const completedTaskId = readOptionalStringField(actionResult, 'completedTaskId');
+  const suspendedTaskId = readOptionalStringField(actionResult, 'suspendedTaskId');
+
+  try {
+    if (completedTaskId) {
+      await maybePatchOwnedTask(client, device.user_id, completedTaskId, {
+        status: 'completed',
+        wait_minutes: null,
+        updated_at: nowIso,
+      });
+    } else if (suspendedTaskId) {
+      await maybePatchOwnedTask(client, device.user_id, suspendedTaskId, {
+        wait_minutes: Math.floor(body.waitMinutes!),
+        updated_at: nowIso,
+      });
+    }
+  } catch (error) {
+    console.warn('[widget-focus-action] task patch skipped', {
+      action,
+      taskId: redactId(
+        completedTaskId
+        ?? suspendedTaskId
+        ?? body.taskId
+        ?? null,
+      ),
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+
   console.log('[widget-focus-action]', JSON.stringify({
-    event: 'widget_focus_promote_secondary_success',
+    event: `widget_focus_${action}_success`,
     deviceId: redactId(device.id),
     userId: redactId(device.user_id),
     sessionId: redactId(session.id),
     taskId: redactId(body.taskId),
-    mainTaskId: redactId(reorder.mainTaskId),
-    comboCount: reorder.comboSelectIds.length,
-    backupCount: reorder.backupIds.length,
+    completedTaskId: redactId(completedTaskId),
+    suspendedTaskId: redactId(suspendedTaskId),
+    mainTaskId: redactId(actionResult.mainTaskId),
+    comboCount: actionResult.comboSelectIds.length,
+    backupCount: actionResult.backupIds.length,
     updatedAt: update.data.updated_at,
   }));
+
+  const responseTaskId =
+    completedTaskId
+    ?? suspendedTaskId
+    ?? body.taskId
+    ?? null;
 
   return jsonResponse(
     {
       ok: true,
-      action: body.action,
-      taskId: body.taskId,
-      mainTaskId: reorder.mainTaskId,
-      comboSelectIds: reorder.comboSelectIds,
-      backupIds: reorder.backupIds,
+      action,
+      taskId: responseTaskId,
+      mainTaskId: actionResult.mainTaskId,
+      comboSelectIds: actionResult.comboSelectIds,
+      backupIds: actionResult.backupIds,
+      ...('waitEndAt' in actionResult && actionResult.waitEndAt ? { waitEndAt: actionResult.waitEndAt } : {}),
       updatedAt: update.data.updated_at,
     },
     responseHeaders,

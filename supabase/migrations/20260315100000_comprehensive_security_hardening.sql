@@ -2,5 +2,4 @@
 -- 该迁移内容已被整合到：
 --   20260315200000_consolidated_focus_console_and_security.sql
 --   20260315210000_full_optimization_audit_fixes.sql
--- 保留本文件仅为保持历史迁移序号与已执行记录一致。
-
+-- 保留本文件仅为保持历史迁移序号与已执行记录一致。;

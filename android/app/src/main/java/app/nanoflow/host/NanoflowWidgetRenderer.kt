@@ -109,6 +109,7 @@ object NanoflowWidgetRenderer {
       // 2026-04-24：移除右下角 refresh GridView。focus 模式不再渲染 refresh 接收器，
       // 用户操作通过 root 点击与 tab slot 完成。layoutRes 不再含 R.id.nano_widget_refresh_list。
       renderFocusFooter(context, views, model)
+      renderFocusActionsList(context, views, appWidgetId, model)
     }
 
     return views
@@ -217,6 +218,30 @@ object NanoflowWidgetRenderer {
       R.id.nano_widget_gate_actions_list,
       NanoflowWidgetReceiver.actionListClickTemplatePendingIntent(context, appWidgetId),
     )
+  }
+
+  // --- 专注模式底部双按钮 / 等待预设 ---
+  private fun renderFocusActionsList(
+    context: Context,
+    views: RemoteViews,
+    appWidgetId: Int,
+    model: WidgetRenderModel,
+  ) {
+    if (model.tasks.firstOrNull()?.taskId.isNullOrBlank()) {
+      views.setViewVisibility(R.id.nano_widget_focus_actions_list, View.GONE)
+      return
+    }
+    val adapter = NanoflowWidgetReceiver.actionListAdapterIntent(
+      context,
+      appWidgetId,
+      NanoflowWidgetActionFactory.LIST_KIND_FOCUS_ACTIONS,
+    )
+    views.setRemoteAdapter(R.id.nano_widget_focus_actions_list, adapter)
+    views.setPendingIntentTemplate(
+      R.id.nano_widget_focus_actions_list,
+      NanoflowWidgetReceiver.actionListClickTemplatePendingIntent(context, appWidgetId),
+    )
+    views.setViewVisibility(R.id.nano_widget_focus_actions_list, View.VISIBLE)
   }
 
   // --- 专注模式底栏：「备选区：N 个任务  ›」 ---

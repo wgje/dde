@@ -27,6 +27,7 @@ data class WidgetBlackBoxOptimisticSnapshot(
 data class WidgetFocusOptimisticSnapshot(
   val summary: WidgetSummaryResponse,
   val selectedTaskIndex: Int,
+  val focusWaitMenuOpen: Boolean = false,
 )
 
 private data class VisibleCommandCenterTask(
@@ -36,6 +37,9 @@ private data class VisibleCommandCenterTask(
   val title: String?,
   val projectTitle: String?,
   val estimatedMinutes: Int?,
+  val waitMinutes: Int?,
+  val waitEndAt: String?,
+  val waitExpired: Boolean,
   val isMain: Boolean,
   val valid: Boolean,
 )
@@ -603,12 +607,95 @@ class NanoflowWidgetRepository(private val context: Context) {
     }
   }
 
+  suspend fun applyOptimisticFocusCompletion(
+    appWidgetId: Int,
+    taskId: String,
+  ): WidgetFocusOptimisticSnapshot? {
+    val cached = store.readSummary(appWidgetId) ?: return null
+    if (cached.focus.active != true || !cached.focus.valid) return null
+    val visibleTasks = resolveVisibleCommandCenterTasks(cached)
+    val target = visibleTasks.firstOrNull() ?: return null
+    if (target.taskId != taskId || !target.valid) return null
+
+    val remainingTasks = visibleTasks.drop(1).mapIndexed { index, task ->
+      if (target.isMain && visibleTasks.drop(1).none { it.isMain } && index == 0) {
+        task.copy(isMain = true)
+      } else {
+        task
+      }
+    }
+    val previousSelectedTaskIndex = store.readSelectedTaskIndex(appWidgetId)
+    val previousWaitMenuOpen = store.readFocusWaitMenuOpen(appWidgetId)
+    val patched = patchSummaryWithVisibleCommandTasks(cached, remainingTasks)
+    store.saveSummary(appWidgetId, patched)
+    store.persistSelectedTaskIndex(appWidgetId, 0)
+    store.persistFocusWaitMenuOpen(appWidgetId, false)
+
+    NanoflowWidgetTelemetry.info(
+      "widget_focus_complete_optimistic_applied",
+      mapOf(
+        "appWidgetId" to appWidgetId,
+        "taskId" to NanoflowWidgetTelemetry.redactId(taskId),
+        "remainingVisibleCount" to remainingTasks.size,
+      ),
+    )
+
+    return WidgetFocusOptimisticSnapshot(
+      summary = cached,
+      selectedTaskIndex = previousSelectedTaskIndex,
+      focusWaitMenuOpen = previousWaitMenuOpen,
+    )
+  }
+
+  suspend fun applyOptimisticFocusWait(
+    appWidgetId: Int,
+    taskId: String,
+    waitMinutes: Int,
+  ): WidgetFocusOptimisticSnapshot? {
+    val cached = store.readSummary(appWidgetId) ?: return null
+    if (cached.focus.active != true || !cached.focus.valid) return null
+    val visibleTasks = resolveVisibleCommandCenterTasks(cached)
+    val target = visibleTasks.firstOrNull() ?: return null
+    if (target.taskId != taskId || !target.valid) return null
+
+    val normalizedWait = waitMinutes.coerceAtLeast(1)
+    val waitEndAt = Instant.now().plus(Duration.ofMinutes(normalizedWait.toLong())).toString()
+    val suspended = target.copy(
+      waitMinutes = normalizedWait,
+      waitEndAt = waitEndAt,
+      waitExpired = false,
+    )
+    val reorderedTasks = visibleTasks.drop(1) + suspended
+    val previousSelectedTaskIndex = store.readSelectedTaskIndex(appWidgetId)
+    val previousWaitMenuOpen = store.readFocusWaitMenuOpen(appWidgetId)
+    val patched = patchSummaryWithVisibleCommandTasks(cached, reorderedTasks)
+    store.saveSummary(appWidgetId, patched)
+    store.persistSelectedTaskIndex(appWidgetId, 0)
+    store.persistFocusWaitMenuOpen(appWidgetId, false)
+
+    NanoflowWidgetTelemetry.info(
+      "widget_focus_wait_optimistic_applied",
+      mapOf(
+        "appWidgetId" to appWidgetId,
+        "taskId" to NanoflowWidgetTelemetry.redactId(taskId),
+        "waitMinutes" to normalizedWait,
+      ),
+    )
+
+    return WidgetFocusOptimisticSnapshot(
+      summary = cached,
+      selectedTaskIndex = previousSelectedTaskIndex,
+      focusWaitMenuOpen = previousWaitMenuOpen,
+    )
+  }
+
   suspend fun rollbackOptimisticFocusPromotion(
     appWidgetId: Int,
     snapshot: WidgetFocusOptimisticSnapshot,
   ) {
     store.saveSummary(appWidgetId, snapshot.summary)
     store.persistSelectedTaskIndex(appWidgetId, snapshot.selectedTaskIndex)
+    store.persistFocusWaitMenuOpen(appWidgetId, snapshot.focusWaitMenuOpen)
   }
 
   suspend fun promoteFocusSecondaryTask(appWidgetId: Int, taskId: String): Boolean {
@@ -685,6 +772,97 @@ class NanoflowWidgetRepository(private val context: Context) {
       mapOf(
         "appWidgetId" to appWidgetId,
         "taskId" to NanoflowWidgetTelemetry.redactId(taskId),
+      ),
+    )
+    return true
+  }
+
+  suspend fun completeFrontFocusTask(appWidgetId: Int, taskId: String): Boolean {
+    return invokeFocusAction(
+      appWidgetId = appWidgetId,
+      action = "complete-front",
+      taskId = taskId,
+      waitMinutes = null,
+      telemetryName = "widget_focus_complete",
+    )
+  }
+
+  suspend fun suspendFrontFocusTask(appWidgetId: Int, taskId: String, waitMinutes: Int): Boolean {
+    return invokeFocusAction(
+      appWidgetId = appWidgetId,
+      action = "wait-front",
+      taskId = taskId,
+      waitMinutes = waitMinutes.coerceAtLeast(1),
+      telemetryName = "widget_focus_wait",
+    )
+  }
+
+  private suspend fun invokeFocusAction(
+    appWidgetId: Int,
+    action: String,
+    taskId: String,
+    waitMinutes: Int?,
+    telemetryName: String,
+  ): Boolean {
+    val binding = store.readBinding()
+    if (binding == null) {
+      NanoflowWidgetTelemetry.warn(
+        "${telemetryName}_failure",
+        mapOf(
+          "appWidgetId" to appWidgetId,
+          "reason" to "binding-missing",
+          "taskId" to NanoflowWidgetTelemetry.redactId(taskId),
+        ),
+      )
+      return false
+    }
+
+    val requestBody = json.encodeToString(
+      WidgetFocusPromoteRequestPayload(
+        action = action,
+        taskId = taskId,
+        waitMinutes = waitMinutes,
+      ),
+    )
+
+    val response = runCatching {
+      postJson(
+        url = "${resolveWidgetSupabaseUrl()}/functions/v1/widget-focus-action",
+        bearerToken = binding.widgetToken,
+        body = requestBody,
+      )
+    }.getOrElse { error ->
+      NanoflowWidgetTelemetry.warn(
+        "${telemetryName}_failure",
+        mapOf(
+          "appWidgetId" to appWidgetId,
+          "taskId" to NanoflowWidgetTelemetry.redactId(taskId),
+          "reason" to "transport-failed",
+        ),
+        error,
+      )
+      return false
+    }
+
+    if (response.statusCode !in 200..299) {
+      NanoflowWidgetTelemetry.warn(
+        "${telemetryName}_failure",
+        mapOf(
+          "appWidgetId" to appWidgetId,
+          "taskId" to NanoflowWidgetTelemetry.redactId(taskId),
+          "reason" to "remote-rejected",
+          "statusCode" to response.statusCode,
+        ),
+      )
+      return false
+    }
+
+    NanoflowWidgetTelemetry.info(
+      "${telemetryName}_success",
+      mapOf(
+        "appWidgetId" to appWidgetId,
+        "taskId" to NanoflowWidgetTelemetry.redactId(taskId),
+        "waitMinutes" to waitMinutes,
       ),
     )
     return true
@@ -1215,6 +1393,7 @@ class NanoflowWidgetRepository(private val context: Context) {
       selectedTaskIndex = selectedTaskIndex,
       contentCards = contentCards,
       syncBadgeLabel = syncBadgeLabel,
+      focusWaitMenuOpen = store.readFocusWaitMenuOpen(appWidgetId),
     )
   }
 
@@ -1252,6 +1431,9 @@ class NanoflowWidgetRepository(private val context: Context) {
         },
         projectTitle = if (privacyMode) null else task.projectTitle,
         estimatedMinutes = task.estimatedMinutes,
+        waitMinutes = task.waitMinutes,
+        waitEndAt = task.waitEndAt,
+        waitExpired = task.waitExpired || isIsoAtOrBeforeNow(task.waitEndAt),
         isMain = task.isMain,
         valid = task.valid,
       )
@@ -1492,6 +1674,11 @@ class NanoflowWidgetRepository(private val context: Context) {
       minutes < 1440 -> context.getString(R.string.nanoflow_widget_relative_hours, minutes / 60)
       else -> context.getString(R.string.nanoflow_widget_relative_days, minutes / 1440)
     }
+  }
+
+  private fun isIsoAtOrBeforeNow(value: String?): Boolean {
+    val instant = runCatching { Instant.parse(value) }.getOrNull() ?: return false
+    return !instant.isAfter(Instant.now())
   }
 
   private fun buildGateReviewStateLabel(preview: WidgetGatePreview): String {
@@ -1825,6 +2012,9 @@ class NanoflowWidgetRepository(private val context: Context) {
           title = slot.title,
           projectTitle = slot.projectTitle,
           estimatedMinutes = slot.estimatedMinutes,
+          waitMinutes = slot.waitMinutes,
+          waitEndAt = slot.waitEndAt,
+          waitExpired = slot.waitExpired || isIsoAtOrBeforeNow(slot.waitEndAt),
           isMain = slot.isMain,
           valid = slot.valid,
         )
@@ -1845,6 +2035,9 @@ class NanoflowWidgetRepository(private val context: Context) {
         title = summary.focus.title,
         projectTitle = summary.focus.projectTitle,
         estimatedMinutes = summary.focus.remainingMinutes,
+        waitMinutes = null,
+        waitEndAt = null,
+        waitExpired = false,
         isMain = focusIsMain,
         valid = summary.focus.valid,
       )
@@ -1859,6 +2052,9 @@ class NanoflowWidgetRepository(private val context: Context) {
         title = item.title,
         projectTitle = item.projectTitle,
         estimatedMinutes = item.estimatedMinutes,
+        waitMinutes = null,
+        waitEndAt = null,
+        waitExpired = false,
         isMain = item.isMaster == true,
         valid = item.valid,
       )
@@ -1878,13 +2074,22 @@ class NanoflowWidgetRepository(private val context: Context) {
         title = task.title,
         projectTitle = task.projectTitle,
         estimatedMinutes = task.estimatedMinutes,
+        waitMinutes = task.waitMinutes,
+        waitEndAt = task.waitEndAt,
+        waitExpired = task.waitExpired,
         isMaster = task.isMain,
         valid = task.valid,
       )
     }
-    val mainTaskId = reorderedTasks.firstOrNull { it.isMain }?.taskId
-      ?: summary.commandCenter.mainTaskId
-      ?: focusedTask?.taskId
+    val mainTaskId = if (reorderedTasks.isEmpty()) {
+      null
+    } else {
+      reorderedTasks.firstOrNull { it.isMain }?.taskId
+        ?: summary.commandCenter.mainTaskId?.takeIf { existingMain ->
+          reorderedTasks.any { task -> task.taskId == existingMain }
+        }
+        ?: focusedTask?.taskId
+    }
     val backupCount = maxOf(
       summary.commandCenter.backupCount.coerceAtLeast(0),
       (summary.dock.count - dockItems.size).coerceAtLeast(0),
@@ -1892,6 +2097,7 @@ class NanoflowWidgetRepository(private val context: Context) {
 
     return summary.copy(
       focus = summary.focus.copy(
+        active = reorderedTasks.isNotEmpty(),
         taskId = focusedTask?.taskId,
         projectId = focusedTask?.projectId,
         projectTitle = focusedTask?.projectTitle,
@@ -1907,12 +2113,16 @@ class NanoflowWidgetRepository(private val context: Context) {
             position = index + 1,
             taskId = task.taskId,
             projectId = task.projectId,
-            title = task.title,
-            projectTitle = task.projectTitle,
-            estimatedMinutes = task.estimatedMinutes,
-            isMain = task.isMain,
-            isFocused = index == 0,
-            valid = task.valid,
+        title = task.title,
+        projectTitle = task.projectTitle,
+        estimatedMinutes = task.estimatedMinutes,
+        waitMinutes = task.waitMinutes,
+        waitEndAt = task.waitEndAt,
+        waitExpired = task.waitExpired,
+        focusStatus = if (index == 0) "focusing" else null,
+        isMain = task.isMain,
+        isFocused = index == 0,
+        valid = task.valid,
           )
         },
         mainTaskId = mainTaskId,

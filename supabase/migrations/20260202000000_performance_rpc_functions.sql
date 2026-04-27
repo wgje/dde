@@ -73,7 +73,6 @@ BEGIN
   RETURN v_result;
 END;
 $$;
-
 -- 2. 批量加载所有项目（用于后台同步）
 CREATE OR REPLACE FUNCTION public.get_all_projects_data(
   p_since_timestamp TIMESTAMPTZ DEFAULT '1970-01-01'::TIMESTAMPTZ
@@ -104,7 +103,6 @@ BEGIN
   RETURN v_result;
 END;
 $$;
-
 -- 3. 批量加载项目列表及其摘要
 CREATE OR REPLACE FUNCTION public.get_projects_list(
   p_limit INT DEFAULT 50,
@@ -153,22 +151,17 @@ BEGIN
   RETURN v_result;
 END;
 $$;
-
 -- 4. 授权 authenticated 角色调用
 GRANT EXECUTE ON FUNCTION public.get_full_project_data(UUID) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.get_all_projects_data(TIMESTAMPTZ) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.get_projects_list(INT, INT) TO authenticated;
-
 -- 5. 添加索引以支持 RPC 查询（如果尚未存在）
 CREATE INDEX IF NOT EXISTS idx_projects_owner_updated 
   ON public.projects(owner_id, updated_at DESC);
-
 CREATE INDEX IF NOT EXISTS idx_tasks_project_order 
   ON public.tasks(project_id, stage, "order");
-
 CREATE INDEX IF NOT EXISTS idx_connections_project 
   ON public.connections(project_id);
-
 -- 6. 添加注释
 COMMENT ON FUNCTION public.get_full_project_data IS 
   '批量加载单个项目的完整数据（任务、连接、墓碑）- 性能优化 2026-02-02';

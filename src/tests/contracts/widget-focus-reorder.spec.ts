@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  completeFrontTask,
+  suspendFrontTask,
   promoteSecondaryTaskToC2,
   type DockEntryLike,
   type DockSnapshotLike,
@@ -75,6 +77,69 @@ function expectOk(result: ReturnType<typeof promoteSecondaryTaskToC2>) {
 }
 
 describe('widget focus reorder helper', () => {
+  it('completes the front C slot and transfers main ownership to the next visible C task', () => {
+    const result = completeFrontTask(baseSnapshot(), 'main', SAVED_AT);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.error);
+
+    expect(result.completedTaskId).toBe('main');
+    expect(result.mainTaskId).toBe('a');
+    expect(result.snapshot.session?.mainTaskId).toBe('a');
+    expect(result.snapshot.focusSessionState?.commandCenterOrderIds).toEqual(['a', 'b', 'c']);
+    expect(result.snapshot.focusSessionState?.commandCenterTasks?.map(slot => slot.taskId)).toEqual(['a']);
+    expect(result.snapshot.focusSessionState?.comboSelectTasks?.map(slot => slot.taskId)).toEqual(['b', 'c']);
+
+    const entries = result.snapshot.entries ?? [];
+    expect(entries.find(item => item.taskId === 'main')).toMatchObject({
+      status: 'completed',
+      isMain: false,
+    });
+    expect(entries.find(item => item.taskId === 'a')).toMatchObject({
+      status: 'focusing',
+      isMain: true,
+      dockedOrder: 0,
+      manualOrder: 0,
+    });
+  });
+
+  it('suspends the front C slot to the visible tail with wait metadata for widget reminders', () => {
+    const result = suspendFrontTask(baseSnapshot(), 'main', 15, SAVED_AT);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.error);
+
+    expect(result.suspendedTaskId).toBe('main');
+    expect(result.waitEndAt).toBe('2026-04-24T08:45:00.000Z');
+    expect(result.mainTaskId).toBe('main');
+    expect(result.snapshot.session?.mainTaskId).toBe('main');
+    expect(result.snapshot.focusSessionState?.commandCenterOrderIds).toEqual(['a', 'b', 'c', 'main']);
+
+    const entries = result.snapshot.entries ?? [];
+    expect(entries.map(item => item.taskId)).toEqual(['a', 'b', 'c', 'main', 'd', 'done']);
+    expect(entries.find(item => item.taskId === 'a')).toMatchObject({
+      status: 'focusing',
+      dockedOrder: 0,
+      manualOrder: 0,
+    });
+    expect(entries.find(item => item.taskId === 'main')).toMatchObject({
+      status: 'suspended_waiting',
+      waitMinutes: 15,
+      waitStartedAt: SAVED_AT,
+      waitEndAt: '2026-04-24T08:45:00.000Z',
+      isMain: true,
+      dockedOrder: 3,
+      manualOrder: 3,
+    });
+    expect(result.snapshot.focusSessionState?.commandCenterTasks?.[0]).toMatchObject({
+      taskId: 'main',
+      waitMinutes: 15,
+      waitStartedAt: SAVED_AT,
+      waitEndAt: '2026-04-24T08:45:00.000Z',
+      focusStatus: 'suspend-waiting',
+    });
+  });
+
   it('moves a selected backup task to slot #1 while keeping master ownership unchanged', () => {
     const result = expectOk(promoteSecondaryTaskToC2(baseSnapshot(), 'd', SAVED_AT));
 

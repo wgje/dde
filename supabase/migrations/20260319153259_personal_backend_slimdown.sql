@@ -28,18 +28,12 @@ VALUES
     'backup.schedule.cleanup',
     to_jsonb('10 20 * * *'::text),
     'Backup cleanup cron (UTC). Asia/Shanghai: daily 04:10.'
-  ),
-  (
-    'backup.user_id',
-    'null'::jsonb,
-    'Optional owner UUID for scheduled single-user backups.'
   )
 ON CONFLICT (key) DO UPDATE SET
   value = EXCLUDED.value,
   description = EXCLUDED.description,
   updated_at = now();
 
--- Collaboration is removed in personal mode.
 CREATE OR REPLACE FUNCTION public.user_accessible_project_ids()
 RETURNS SETOF uuid
 LANGUAGE sql
@@ -77,7 +71,6 @@ CREATE POLICY "owner update" ON public.projects
 FOR UPDATE
 USING ((SELECT auth.uid() AS uid) = owner_id);
 
--- Secret helpers for cron-triggered Edge Function execution.
 CREATE OR REPLACE FUNCTION public.get_vault_secret(p_name text)
 RETURNS text
 LANGUAGE sql
@@ -107,7 +100,6 @@ AS $$
 DECLARE
   v_base_url text;
   v_service_role_key text;
-  v_backup_user_id text;
   v_request_id bigint;
 BEGIN
   IF p_slug NOT IN ('backup-full', 'backup-incremental', 'backup-cleanup') THEN
@@ -119,16 +111,6 @@ BEGIN
 
   IF v_base_url IS NULL OR v_service_role_key IS NULL THEN
     RAISE EXCEPTION 'Missing Vault secret(s) backup_supabase_url / backup_service_role_key';
-  END IF;
-
-  IF p_slug IN ('backup-full', 'backup-incremental') THEN
-    SELECT value #>> '{}' INTO v_backup_user_id
-    FROM public.app_config
-    WHERE key = 'backup.user_id';
-
-    IF coalesce(trim(v_backup_user_id), '') <> '' THEN
-      p_body := coalesce(p_body, '{}'::jsonb) || jsonb_build_object('userId', v_backup_user_id);
-    END IF;
   END IF;
 
   SELECT net.http_post(
@@ -267,6 +249,9 @@ BEGIN
 END;
 $$;
 
+REVOKE ALL ON FUNCTION public.cleanup_cron_job_run_details(interval) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.cleanup_cron_job_run_details(interval) TO service_role;
+
 CREATE OR REPLACE FUNCTION public.cleanup_personal_retention_artifacts()
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -336,10 +321,7 @@ REVOKE ALL ON FUNCTION public.cleanup_personal_retention_artifacts() FROM anon;
 REVOKE ALL ON FUNCTION public.cleanup_personal_retention_artifacts() FROM authenticated;
 GRANT EXECUTE ON FUNCTION public.cleanup_personal_retention_artifacts() TO service_role;
 
--- Remove failed cron history before re-scheduling the lean backup jobs.
 DELETE FROM cron.job_run_details;
-
--- Replace the old broken schedules with the new helper-backed ones.
 SELECT public.apply_backup_schedules();
 
 DO $$
@@ -367,10 +349,7 @@ BEGIN
   );
 END $$;
 
--- Remove collaboration/security tables after policy and function rewrites.
-DROP TABLE IF EXISTS public.project_members CASCADE;
-DROP TABLE IF EXISTS public.attachment_scans CASCADE;
-DROP TABLE IF EXISTS public.quarantined_files CASCADE;
+-- 运行时代码仍依赖这些表；在对应服务/函数完全下线前保留 schema，避免 fresh bootstrap 后失配。
 
 ALTER TABLE public.user_preferences
-DROP COLUMN IF EXISTS dock_snapshot;
+DROP COLUMN IF EXISTS dock_snapshot;;

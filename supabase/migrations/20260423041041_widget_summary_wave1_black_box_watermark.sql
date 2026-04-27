@@ -1,6 +1,5 @@
--- Widget Gate read alignment:
--- - Desktop Gate keeps read-but-unfinished entries pending until completion.
--- - Android widget must use the same queue semantics so mobile and desktop show the same Gate content.
+-- Keep widget summary versions monotonic when a gate action updates an old
+-- black-box row and that row immediately drops out of the visible preview.
 
 create or replace function public.widget_summary_wave1(
   p_user_id uuid,
@@ -17,7 +16,6 @@ declare
   v_session_json jsonb := null;
   v_accessible_project_ids uuid[] := array[]::uuid[];
   v_pending_count int := 0;
-  v_unread_count int := 0;
   v_preview jsonb := '[]'::jsonb;
   v_black_box_watermark timestamptz;
   v_dock_count int := 0;
@@ -45,17 +43,6 @@ begin
     from public.black_box_entries
     where user_id = p_user_id
       and deleted_at is null
-      and is_completed = false
-      and is_archived = false
-      and date < p_today
-      and (snooze_until is null or snooze_until <= p_today);
-
-  select count(*)::int
-    into v_unread_count
-    from public.black_box_entries
-    where user_id = p_user_id
-      and deleted_at is null
-      and is_read = false
       and is_completed = false
       and is_archived = false
       and date < p_today
@@ -108,7 +95,6 @@ begin
     'focusSession', v_session_json,
     'accessibleProjectIds', to_jsonb(v_accessible_project_ids),
     'pendingBlackBoxCount', v_pending_count,
-    'unreadBlackBoxCount', v_unread_count,
     'blackBoxPreview', v_preview,
     'blackBoxWatermark', v_black_box_watermark,
     'dockCount', v_dock_count,
@@ -116,7 +102,9 @@ begin
   );
 end;
 $$;
+
 revoke all on function public.widget_summary_wave1(uuid, date, int) from public, anon, authenticated;
 grant execute on function public.widget_summary_wave1(uuid, date, int) to service_role;
+
 comment on function public.widget_summary_wave1(uuid, date, int) is
-  'Widget summary 第一波聚合：focus_sessions + projects + black_box unread/pending count/preview/watermark + dock count/watermark 合并到单次 RPC；read-but-unfinished entries remain in Gate to match desktop.';
+  'Widget summary 第一波聚合：focus_sessions + projects + black_box count/preview/watermark + dock count/watermark 合并到单次 RPC，把 4-5 个 PostgREST roundtrip 压缩到 1 个。';;

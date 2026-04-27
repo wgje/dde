@@ -276,4 +276,4 @@ END;
 $$;
 
 COMMENT ON FUNCTION public.purge_tasks_v3(uuid, uuid[]) IS
-  'Project-scoped purge with attachment path collection and connection tombstone refresh.';
+  'Project-scoped purge with attachment path collection and connection tombstone refresh.';;

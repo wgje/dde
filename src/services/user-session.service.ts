@@ -616,6 +616,51 @@ export class UserSessionService {
     return true;
   }
 
+  private redactUserId(userId: string | null): string | null {
+    return userId ? userId.substring(0, 8) : null;
+  }
+
+  private formatUnknownError(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
+  }
+
+  private async isSupabaseSessionCurrentForUser(userId: string, stage: string): Promise<boolean> {
+    if (!userId || userId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+      return true;
+    }
+
+    try {
+      const { data, error } = await this.supabase.getSession();
+      if (error) {
+        this.logger.warn('Supabase session 未就绪，跳过本轮权威项目访问判定', {
+          stage,
+          expectedUserId: this.redactUserId(userId),
+          error: error.message,
+        });
+        return false;
+      }
+
+      const sessionUserId = data.session?.user?.id ?? null;
+      if (sessionUserId !== userId) {
+        this.logger.warn('Supabase session 与当前用户不一致，跳过本轮权威项目访问判定', {
+          stage,
+          expectedUserId: this.redactUserId(userId),
+          sessionUserId: this.redactUserId(sessionUserId),
+        });
+        return false;
+      }
+
+      return true;
+    } catch (error: unknown) {
+      this.logger.warn('读取 Supabase session 失败，跳过本轮权威项目访问判定', {
+        stage,
+        expectedUserId: this.redactUserId(userId),
+        error: this.formatUnknownError(error),
+      });
+      return false;
+    }
+  }
+
   getCurrentSessionGeneration(): number {
     return this.sessionRequestGeneration;
   }
@@ -1669,6 +1714,10 @@ export class UserSessionService {
       return;
     }
 
+    if (!(await this.isSupabaseSessionCurrentForUser(userId, 'startBackgroundSync:start'))) {
+      return;
+    }
+
     this.logger.debug('开始后台同步');
 
     let activeProjectId = this.projectState.activeProjectId();
@@ -2041,6 +2090,13 @@ export class UserSessionService {
       return fallbackIds;
     }
     if (!client) return fallbackIds;
+
+    if (!(await this.isSupabaseSessionCurrentForUser(userId, 'syncProjectListMetadata:session'))) {
+      return fallbackIds;
+    }
+    if (this.shouldAbortStaleSession(sessionGuard, 'syncProjectListMetadata:after-session')) {
+      return fallbackIds;
+    }
     
     const { data, error } = await client
       .from('projects')
@@ -2159,6 +2215,10 @@ export class UserSessionService {
     // 避免因瞬时网络/认证问题误删活跃项目
     if (this.supabase.isOfflineMode()) {
       this.logger.warn('Supabase 连接中断，跳过 activeProject 不可访问裁剪', { projectId });
+      return projectId;
+    }
+
+    if (!(await this.isSupabaseSessionCurrentForUser(userId, 'reconcileInaccessibleActiveProject'))) {
       return projectId;
     }
 
