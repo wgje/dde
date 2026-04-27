@@ -6,6 +6,6 @@ BEGIN
 END $$;
 
 GRANT EXECUTE ON FUNCTION public.get_full_project_data(uuid) TO authenticated;
-GRANT EXECUTE ON FUNCTION public.get_full_project_data(uuid) TO anon;
+REVOKE ALL ON FUNCTION public.get_full_project_data(uuid) FROM anon;
 
 NOTIFY pgrst, 'reload schema';;

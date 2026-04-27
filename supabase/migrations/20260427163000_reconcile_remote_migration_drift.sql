@@ -17,6 +17,11 @@ ALTER TABLE public.widget_devices_legacy_retired
 CREATE UNIQUE INDEX IF NOT EXISTS idx_widget_devices_legacy_retired_id
   ON public.widget_devices_legacy_retired (id);
 
+ALTER TABLE public.widget_devices_legacy_retired ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.widget_devices_legacy_retired FORCE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE public.widget_devices_legacy_retired FROM PUBLIC, anon, authenticated;
+GRANT SELECT ON TABLE public.widget_devices_legacy_retired TO service_role;
+
 CREATE TABLE IF NOT EXISTS public.widget_instances_legacy_retired
 AS TABLE public.widget_instances WITH NO DATA;
 
@@ -28,6 +33,11 @@ ALTER TABLE public.widget_instances_legacy_retired
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_widget_instances_legacy_retired_id
   ON public.widget_instances_legacy_retired (id);
+
+ALTER TABLE public.widget_instances_legacy_retired ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.widget_instances_legacy_retired FORCE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE public.widget_instances_legacy_retired FROM PUBLIC, anon, authenticated;
+GRANT SELECT ON TABLE public.widget_instances_legacy_retired TO service_role;
 
 INSERT INTO public.widget_instances_legacy_retired
 SELECT wi.*, now(), 'desktop-widget-retired'
