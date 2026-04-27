@@ -310,6 +310,7 @@ type LocalSiyuanPreviewCache = {
     | 'kernel-unreachable'
     | 'token-invalid'
     | 'block-not-found'
+    | 'render-blocked'
     | 'unknown';
 };
 ```
@@ -370,7 +371,7 @@ type LocalSiyuanPreviewCache = {
 
 ### 6.4 本地 IndexedDB 建议
 
-本地缓存建议拆成两类 key，便于单独清理：
+本地缓存建议拆成三类 key，便于单独清理：
 
 ```text
 external-source-links:{userId}
