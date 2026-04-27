@@ -280,16 +280,16 @@ type ExternalSourceRole =
   | 'next-action';
 
 type ExternalSourceLink = {
-  id: string;                    // crypto.randomUUID()
+  id: string; // crypto.randomUUID()
   taskId: string;
   sourceType: 'siyuan-block';
-  targetId: string;              // 思源 block id
-  uri: string;                   // siyuan://blocks/{id}?focus=1
-  label?: string;                // 显示名
-  hpath?: string;                // 人类可读路径
+  targetId: string; // 思源 block id
+  uri: string; // siyuan://blocks/{id}?focus=1
+  label?: string; // 显示名
+  hpath?: string; // 人类可读路径
   role?: ExternalSourceRole;
-  sortOrder: number;             // 多锚点排序；MVP 默认 0
-  deletedAt?: string | null;      // 软删除，参与同步
+  sortOrder: number; // 多锚点排序；MVP 默认 0
+  deletedAt?: string | null; // 软删除，参与同步
   createdAt: string;
   updatedAt: string;
 };
@@ -858,6 +858,18 @@ siyuan.autoRefresh = on-hover | manual
 
 ## 15. 风险与缓解
 
+### 15.1 决策记录
+
+| 决策 | 结论 | 原因 |
+|------|------|------|
+| 是否嵌入思源 UI | 不嵌入 | iframe / 原生 UI 会破坏执行工作台定位与安全边界 |
+| 是否同步正文 | MVP 不同步 | 避免知识库镜像化与隐私风险 |
+| 是否直接请求 `127.0.0.1` | 公网 HTTPS 不直接请求 | Mixed Content 物理限制 |
+| 是否优先做 bridge | 不优先 | 证书信任和跨平台排障成本高 |
+| 是否支持写回 | 后置且 opt-in | read-only 稳定前避免污染思源 |
+
+### 15.2 风险与缓解清单
+
 | 风险 | 影响 | 缓解 |
 |------|------|------|
 | 用户未安装扩展 | 无法实时预览 | 保留 cache-only 降级路径 |
@@ -870,16 +882,6 @@ siyuan.autoRefresh = on-hover | manual
 | 移动端无法访问思源 | 预览不可用 | 预期内降级为深链与缓存 |
 | 锚点目标被删除 | 用户困惑 | 显示失效状态，保留解除关联入口 |
 | 本地缓存过期 | 用户看到旧内容 | 展示 `fetchedAt` / 陈旧提示，提供手动刷新 |
-
-### 15.1 决策记录
-
-| 决策 | 结论 | 原因 |
-|------|------|------|
-| 是否嵌入思源 UI | 不嵌入 | iframe / 原生 UI 会破坏执行工作台定位与安全边界 |
-| 是否同步正文 | MVP 不同步 | 避免知识库镜像化与隐私风险 |
-| 是否直接请求 `127.0.0.1` | 公网 HTTPS 不直接请求 | Mixed Content 物理限制 |
-| 是否优先做 bridge | 不优先 | 证书信任和跨平台排障成本高 |
-| 是否支持写回 | 后置且 opt-in | read-only 稳定前避免污染思源 |
 
 ---
 
