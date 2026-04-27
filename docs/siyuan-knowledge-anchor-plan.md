@@ -2,7 +2,7 @@
 
 > **版本**：v1.1  
 > **日期**：2026-04-27  
-> **状态**：Implementation-ready draft  
+> **状态**：Implementation-ready  
 > **定位**：思源笔记是知识源头（Source of Truth），NanoFlow 是执行工作台（Execution Workspace）  
 > **核心决策**：NanoFlow 只保存思源块指针与少量元数据，不嵌入思源 UI，不在 MVP 同步正文到云端，不在 MVP 做双向写回。
 
@@ -315,6 +315,8 @@ type LocalSiyuanPreviewCache = {
 };
 ```
 
+`sortOrder` 采用升序排序；MVP 单锚点固定为 `0`，多锚点启用后由同一任务内的活跃锚点维护稳定顺序。`render-blocked` 表示预览内容被安全渲染链路拦截，用户仍可通过深链打开思源原块。
+
 ### 6.2 同步与本地存储边界
 
 **默认同步到 Supabase**：
@@ -366,7 +368,7 @@ type LocalSiyuanPreviewCache = {
 
 1. `source_type` 首版只允许 `siyuan-block`。
 2. `target_id` 必须匹配思源块 ID 格式。
-3. `(user_id, task_id, source_type, target_id, deleted_at IS NULL)` 防止同任务重复绑定同一活跃块。
+3. MVP 可用 `(user_id, task_id, source_type, target_id, deleted_at IS NULL)` 防止同任务重复绑定同一活跃块；多 role 场景启用后，约束应扩展为 `(user_id, task_id, source_type, target_id, COALESCE(role, 'context'), deleted_at IS NULL)`，允许同一块以不同 role 出现。
 4. RLS 策略必须按 `user_id = auth.uid()` 隔离。
 
 ### 6.4 本地 IndexedDB 建议
@@ -578,7 +580,7 @@ MVP 只允许访问：
 调用限制：
 
 1. 每次预览默认只取当前块与一层子块。
-2. 子块数量建议设置上限，超过后显示“更多内容请打开思源”。
+2. 子块数量建议上限为 10 个，超过后显示“更多内容请打开思源”。
 3. API 调用必须带超时与取消信号。
 4. 不在前端持久化原始 API 响应，只保存裁剪后的预览缓存。
 
@@ -812,7 +814,7 @@ siyuan.autoRefresh = on-hover | manual
 1. 当前阶段的降级路径已经可用。
 2. 没有把 token、正文缓存或原始 API 响应同步到 Supabase。
 3. Focus / Dock / 移动端不存在阻塞性回归。
-4. 相关单元测试、服务测试或组件测试已覆盖核心分支。
+4. 相关测试已覆盖错误处理、离线同步、provider fallback、安全校验等关键分支；具体参考 14.4。
 
 ---
 
@@ -850,9 +852,9 @@ siyuan.autoRefresh = on-hover | manual
 | 层级 | 覆盖点 |
 |------|------|
 | 单元测试 | 链接解析、block ID 校验、provider 选择、错误码映射 |
-| 服务测试 | 本地先写、软删除、缓存清理、同步 payload 不含正文 |
+| 服务测试 | 本地先写、离线新增后恢复同步、软删除、缓存清理、同步 payload 不含正文 |
 | 组件测试 | 任务卡锚点展示、Popover / Sheet 状态、Focus compact 模式 |
-| E2E | 粘贴链接绑定、点击深链、扩展不可用降级、移动端 Sheet |
+| E2E | 粘贴链接绑定、点击深链、扩展不可用降级、离线绑定后恢复同步、移动端 Sheet |
 
 ---
 
