@@ -1,6 +1,28 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ProjectShellComponent } from './project-shell.component';
 
+type ProjectShellDeepLinkContext = {
+  isDestroyed: boolean;
+  projectState: {
+    tasks: () => unknown[];
+    getTask: () => unknown;
+  };
+  syncCoordinator: {
+    isLoadingRemote: () => boolean;
+  };
+  toast: {
+    warning: ReturnType<typeof vi.fn>;
+    info: ReturnType<typeof vi.fn>;
+  };
+  navigateToProjectList: ReturnType<typeof vi.fn>;
+  activateFlowIntent: ReturnType<typeof vi.fn>;
+  setActiveView: ReturnType<typeof vi.fn>;
+  taskOpsAdapter: {
+    addFloatingTask: ReturnType<typeof vi.fn>;
+  };
+  deepLinkRetryTimer: ReturnType<typeof setTimeout> | null;
+};
+
 describe('ProjectShellComponent startup entry fallback', () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -17,7 +39,7 @@ describe('ProjectShellComponent startup entry fallback', () => {
     const navigateToProjectList = vi.fn();
     const activateFlowIntent = vi.fn();
     const setActiveView = vi.fn();
-    const context = {
+    const context: ProjectShellDeepLinkContext = {
       isDestroyed: false,
       projectState: {
         tasks: () => [],
@@ -37,7 +59,7 @@ describe('ProjectShellComponent startup entry fallback', () => {
         addFloatingTask: vi.fn(),
       },
       deepLinkRetryTimer: null,
-    } as unknown as ProjectShellComponent;
+    };
 
     const result = (ProjectShellComponent.prototype as unknown as {
       handleTaskDeepLink: (
@@ -45,7 +67,7 @@ describe('ProjectShellComponent startup entry fallback', () => {
         taskId: string,
         options?: { degradeToWorkspaceOnMissing?: boolean }
       ) => 'flow' | 'workspace' | 'pending';
-    }).handleTaskDeepLink.call(context, 'task-missing', { degradeToWorkspaceOnMissing: true });
+    }).handleTaskDeepLink.call(context as unknown as ProjectShellComponent, 'task-missing', { degradeToWorkspaceOnMissing: true });
 
     expect(result).toBe('workspace');
     expect(warning).toHaveBeenCalledWith('任务不存在', '请求的任务已失效，已返回工作区');
@@ -61,7 +83,7 @@ describe('ProjectShellComponent startup entry fallback', () => {
     const navigateToProjectList = vi.fn();
     const activateFlowIntent = vi.fn();
     const setActiveView = vi.fn();
-    const context = {
+    const context: ProjectShellDeepLinkContext = {
       isDestroyed: false,
       projectState: {
         tasks: () => [],
@@ -81,7 +103,7 @@ describe('ProjectShellComponent startup entry fallback', () => {
         addFloatingTask: vi.fn(),
       },
       deepLinkRetryTimer: null,
-    } as unknown as ProjectShellComponent;
+    };
 
     const result = (ProjectShellComponent.prototype as unknown as {
       handleTaskDeepLink: (
@@ -89,7 +111,7 @@ describe('ProjectShellComponent startup entry fallback', () => {
         taskId: string,
         options?: { degradeToWorkspaceOnMissing?: boolean }
       ) => 'flow' | 'workspace' | 'pending';
-    }).handleTaskDeepLink.call(context, 'task-loading', { degradeToWorkspaceOnMissing: true });
+    }).handleTaskDeepLink.call(context as unknown as ProjectShellComponent, 'task-loading', { degradeToWorkspaceOnMissing: true });
 
     expect(result).toBe('pending');
     expect(context.deepLinkRetryTimer).not.toBeNull();

@@ -6,36 +6,38 @@
   fillInIntent 挂在 root FrameLayout。
 -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/nano_widget_gate_action_root"
     android:layout_width="match_parent"
-    android:layout_height="wrap_content"
-    android:paddingStart="4dp"
-    android:paddingEnd="4dp"
-    android:paddingTop="0dp"
-    android:paddingBottom="0dp">
+    android:layout_height="30dp"
+    android:paddingStart="2dp"
+    android:paddingEnd="2dp"
+    android:paddingTop="3dp"
+    android:paddingBottom="3dp">
 
     <LinearLayout
         android:id="@+id/nano_widget_gate_action_slot"
-        android:layout_width="match_parent"
+        android:layout_width="112dp"
         android:layout_height="wrap_content"
+        android:layout_gravity="center"
         android:background="@drawable/nano_widget_gate_button"
         android:gravity="center"
-        android:minHeight="52dp"
+        android:minHeight="24dp"
         android:orientation="horizontal"
-        android:paddingStart="12dp"
-        android:paddingEnd="12dp"
-        android:paddingTop="10dp"
-        android:paddingBottom="10dp">
+        android:paddingStart="7dp"
+        android:paddingEnd="7dp"
+        android:paddingTop="2dp"
+        android:paddingBottom="2dp">
 
         <ImageView
             android:id="@+id/nano_widget_gate_action_icon"
-            android:layout_width="20dp"
-            android:layout_height="20dp"
+            android:layout_width="12dp"
+            android:layout_height="12dp"
             android:layout_gravity="center_vertical"
             android:importantForAccessibility="no"
             android:src="@drawable/nano_widget_icon_eye" />
 
         <TextView
-            android:layout_width="10dp"
+            android:layout_width="4dp"
             android:layout_height="1dp" />
 
         <TextView
@@ -46,7 +48,7 @@
             android:maxLines="1"
             android:text=""
             android:textColor="#F6FBFF"
-            android:textSize="15sp"
+            android:textSize="10sp"
             android:textStyle="bold" />
 
         <!-- 兼容：保留 chip id 避免旧调用点 NPE -->

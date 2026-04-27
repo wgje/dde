@@ -353,11 +353,14 @@ export class TextTaskCardComponent {
   }
 
   private readTask(): Task | null {
+    let task: Task | null = null;
     try {
-      return this.task();
+      task = this.task();
     } catch {
-      return null;
+      task = null;
     }
+
+    return task;
   }
 
   private isClickInsideEditor(target: EventTarget | null): boolean {

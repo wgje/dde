@@ -88,7 +88,7 @@ function setup(options?: {
     currentUserId: userId,
     canAuthoritativelyRejectProjectRoute: vi.fn(() => true),
     isProjectAuthoritativelyAccessible: vi.fn((projectId: string) => projects().some(project => project.id === projectId)),
-    startupProjectCatalogStage: vi.fn(() => 'resolved' as const),
+    startupProjectCatalogStage: vi.fn<() => 'partial' | 'resolved'>(() => 'resolved'),
     setCurrentUser: vi.fn().mockImplementation(async (nextUserId: string | null) => {
       userId.set(nextUserId);
     }),

@@ -51,6 +51,27 @@ data class WidgetDockSummary(
   val items: List<WidgetDockItem> = emptyList(),
 )
 
+@Serializable
+data class WidgetCommandCenterSlot(
+  val position: Int = 0,
+  val taskId: String? = null,
+  val projectId: String? = null,
+  val title: String? = null,
+  val projectTitle: String? = null,
+  val estimatedMinutes: Int? = null,
+  val isMain: Boolean = false,
+  val isFocused: Boolean = false,
+  val valid: Boolean = false,
+)
+
+@Serializable
+data class WidgetCommandCenterSummary(
+  val slots: List<WidgetCommandCenterSlot> = emptyList(),
+  val mainTaskId: String? = null,
+  val focusedTaskId: String? = null,
+  val backupCount: Int = 0,
+)
+
 @OptIn(ExperimentalSerializationApi::class)
 @Serializable
 data class WidgetBlackBoxSummary(
@@ -76,6 +97,7 @@ data class WidgetSummaryResponse(
   val entryUrl: String = "",
   val focus: WidgetFocusSummary = WidgetFocusSummary(),
   val dock: WidgetDockSummary = WidgetDockSummary(),
+  val commandCenter: WidgetCommandCenterSummary = WidgetCommandCenterSummary(),
   val blackBox: WidgetBlackBoxSummary = WidgetBlackBoxSummary(),
   val code: String? = null,
   val error: String? = null,

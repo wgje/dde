@@ -140,16 +140,17 @@ export class DockCloudSyncService implements OnDestroy {
     const nextFocusMode = frozenSnapshot.focusMode === true;
     const prevFocusMode = this.lastScheduledFocusMode.get(userId);
     const isFocusModeTransition = prevFocusMode !== undefined && prevFocusMode !== nextFocusMode;
+    const shouldFastTrackWidgetSync = isFocusModeTransition;
     this.lastScheduledFocusMode.set(userId, nextFocusMode);
 
-    const delayMs = isFocusModeTransition ? 0 : CLOUD_PUSH_DEBOUNCE_MS;
+    const delayMs = shouldFastTrackWidgetSync ? 0 : CLOUD_PUSH_DEBOUNCE_MS;
     this.cloudPushTimer.schedule(runPush, delayMs);
 
     // 2026-04-22 颠覆性压缩 (plan D)：focusMode 翻转瞬间并行直调 widget-notify 绕过
     // 「ActionQueue → DB upsert → pg_net 轮询 → widget-notify」的 3-8s 链路。
     // 直调路径用用户 JWT 认证，edge function 在同一张 widget_notify_events 表上做幂等，
     // 若 pg_net 后续仍送达则会被去重 kind='duplicate' 静默丢弃，不会导致双推。
-    if (isFocusModeTransition) {
+    if (shouldFastTrackWidgetSync) {
       void this.sendDirectFocusNotify(userId, frozenSnapshot, nextFocusMode);
     }
   }
@@ -169,7 +170,8 @@ export class DockCloudSyncService implements OnDestroy {
         return;
       }
       // 幂等键 = focus session id + 状态 hash，让同一次翻转在 trigger fallback 到达时命中去重。
-      const focusSessionId = snapshot.focusSessionState?.sessionId
+      const focusSessionId = snapshot.session?.focusSessionId
+        ?? snapshot.focusSessionState?.sessionId
         ?? snapshot.session?.mainTaskId
         ?? crypto.randomUUID();
       const webhookId = `pwa-direct-${focusSessionId}-${focusActive ? 'on' : 'off'}-${Math.floor(Date.now() / 1000)}`;

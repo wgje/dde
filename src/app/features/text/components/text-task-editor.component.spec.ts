@@ -8,6 +8,7 @@ import { ChangeTrackerService } from '../../../../services/change-tracker.servic
 import { UiStateService } from '../../../../services/ui-state.service';
 import { ProjectStateService, TaskConnectionInfo } from '../../../../services/project-state.service';
 import { UndoService } from '../../../../services/undo.service';
+import type { UndoAppliedReplay } from '../../../../services/undo.service';
 import { AttachmentService } from '../../../../services/attachment.service';
 import { ToastService } from '../../../../services/toast.service';
 import type { Task } from '../../../../models';
@@ -53,7 +54,7 @@ describe('TextTaskEditorComponent', () => {
   };
 
   const mockUndoService = {
-    appliedReplay: signal(null),
+    appliedReplay: signal<UndoAppliedReplay | null>(null),
   };
 
   const mockToast = {

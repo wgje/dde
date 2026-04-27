@@ -117,6 +117,7 @@ class NanoflowTwaLauncherActivity : LauncherActivity() {
     }
 
     resetReactiveRefreshGateIfNeeded()
+    scheduleWidgetRefreshBurstIfNeeded()
     logLaunchStarted()
     launchTwa()
   }
@@ -133,6 +134,22 @@ class NanoflowTwaLauncherActivity : LauncherActivity() {
     NanoflowWidgetReceiver.resetReactiveRefreshGate(
       context = applicationContext,
       reason = "widget-activity-launch",
+    )
+  }
+
+  private fun scheduleWidgetRefreshBurstIfNeeded() {
+    if (!NanoflowWidgetReceiver.hasInstalledWidgets(applicationContext)) {
+      return
+    }
+
+    val request = resolveLaunchRequest()
+    val reason = when (request.entrySource) {
+      NanoFlowEntrySource.WIDGET -> "twa-session-from-widget"
+      NanoFlowEntrySource.TWA -> "twa-session-from-launcher"
+    }
+    NanoflowWidgetRefreshWorker.scheduleTwaSessionRefreshBurst(
+      context = applicationContext,
+      reason = reason,
     )
   }
 
@@ -239,6 +256,7 @@ class NanoflowTwaLauncherActivity : LauncherActivity() {
       context: Context,
       appWidgetId: Int,
       launchIntent: NanoFlowLaunchIntent,
+      taskIndex: Int = -1,
       gateEntryId: String? = null,
     ): Intent {
       return Intent(context, NanoflowTwaLauncherActivity::class.java).apply {
@@ -246,6 +264,9 @@ class NanoflowTwaLauncherActivity : LauncherActivity() {
         putExtra(EXTRA_APP_WIDGET_ID, appWidgetId)
         putExtra(EXTRA_LAUNCH_INTENT, launchIntent.name)
         putExtra(EXTRA_ENTRY_SOURCE, NanoFlowEntrySource.WIDGET.name)
+        if (taskIndex >= 0) {
+          putExtra(NanoflowWidgetReceiver.EXTRA_TASK_INDEX, taskIndex)
+        }
         if (!gateEntryId.isNullOrBlank()) {
           putExtra(EXTRA_GATE_ENTRY_ID, gateEntryId)
         }

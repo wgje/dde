@@ -74,6 +74,11 @@ class NanoflowWidgetRefreshWorker(
   companion object {
     private const val UNIQUE_WORK_NAME = "nanoflow-widget-refresh"
     private const val UNIQUE_PERIODIC_WORK_NAME = "nanoflow-widget-refresh-periodic"
+    private const val TWA_SESSION_BURST_WORK_PREFIX = "nanoflow-widget-twa-session-burst"
+    private const val TWA_SESSION_BURST_PREFS = "nanoflow-widget-twa-session-burst"
+    private const val TWA_SESSION_BURST_LAST_AT_KEY = "last_scheduled_at"
+    private const val TWA_SESSION_BURST_MIN_INTERVAL_MS = 30_000L
+    private val TWA_SESSION_BURST_DELAYS_SECONDS = longArrayOf(8, 20, 45, 90, 180, 300)
 
     fun enqueue(context: Context, reason: String) {
       NanoflowWidgetTelemetry.info("widget_refresh_enqueued", mapOf("reason" to reason))
@@ -85,6 +90,55 @@ class NanoflowWidgetRefreshWorker(
         UNIQUE_WORK_NAME,
         ExistingWorkPolicy.REPLACE,
         request,
+      )
+    }
+
+    fun scheduleTwaSessionRefreshBurst(context: Context, reason: String) {
+      if (!NanoflowWidgetReceiver.hasInstalledWidgets(context)) {
+        return
+      }
+
+      val prefs = context.applicationContext.getSharedPreferences(TWA_SESSION_BURST_PREFS, Context.MODE_PRIVATE)
+      val nowMs = System.currentTimeMillis()
+      val lastScheduledAt = prefs.getLong(TWA_SESSION_BURST_LAST_AT_KEY, 0L)
+      val elapsedMs = nowMs - lastScheduledAt
+      if (lastScheduledAt > 0L && elapsedMs < TWA_SESSION_BURST_MIN_INTERVAL_MS) {
+        NanoflowWidgetTelemetry.info(
+          "widget_twa_session_refresh_burst_throttled",
+          mapOf(
+            "reason" to reason,
+            "elapsedMs" to elapsedMs,
+            "minIntervalMs" to TWA_SESSION_BURST_MIN_INTERVAL_MS,
+          ),
+        )
+        return
+      }
+      prefs.edit().putLong(TWA_SESSION_BURST_LAST_AT_KEY, nowMs).apply()
+
+      val workManager = WorkManager.getInstance(context)
+      TWA_SESSION_BURST_DELAYS_SECONDS.forEachIndexed { index, delaySeconds ->
+        val request = OneTimeWorkRequestBuilder<NanoflowWidgetRefreshWorker>()
+          .setInitialDelay(delaySeconds, TimeUnit.SECONDS)
+          .setInputData(
+            Data.Builder()
+              .putString("reason", "$reason-${delaySeconds}s")
+              .build(),
+          )
+          .build()
+
+        workManager.enqueueUniqueWork(
+          "$TWA_SESSION_BURST_WORK_PREFIX-$index",
+          ExistingWorkPolicy.REPLACE,
+          request,
+        )
+      }
+
+      NanoflowWidgetTelemetry.info(
+        "widget_twa_session_refresh_burst_scheduled",
+        mapOf(
+          "reason" to reason,
+          "delaysSeconds" to TWA_SESSION_BURST_DELAYS_SECONDS.joinToString(","),
+        ),
       )
     }
 

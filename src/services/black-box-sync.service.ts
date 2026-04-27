@@ -39,7 +39,7 @@ import { LoggerService } from './logger.service';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { AuthService } from './auth.service';
 import { ClockSyncService } from './clock-sync.service';
-import { SessionManagerService } from '../app/core/services/sync/session-manager.service';
+import { SessionManagerService } from '../core-bridge';
 import { AUTH_CONFIG } from '../config/auth.config';
 
 /**
@@ -67,6 +67,10 @@ export interface PullChangesOptions {
   providedIn: 'root'
 })
 export class BlackBoxSyncService {
+  private static readonly REALTIME_CIRCUIT_STORAGE_KEY = 'nanoflow.realtime-transport-circuit';
+  private static readonly REALTIME_CIRCUIT_TTL_MS = 30 * 60 * 1000;
+  private static readonly REALTIME_MAX_CONSECUTIVE_ERRORS = 3;
+
   private supabase = inject(SupabaseClientService);
   private network = inject(NetworkAwarenessService);
   private auth = inject(AuthService);
@@ -108,6 +112,8 @@ export class BlackBoxSyncService {
   private realtimeSubscribedUserId: string | null = null;
   private realtimeDesiredUserId: string | null = null;
   private realtimeSubscriptionGeneration = 0;
+  private realtimeConsecutiveErrors = 0;
+  private realtimeCircuitRetryTimer: ReturnType<typeof setTimeout> | null = null;
 
   private isRemoteUnavailable(): boolean {
     const maybeSignal = (this.supabase as unknown as { isOfflineMode?: (() => boolean) | boolean }).isOfflineMode;
@@ -119,6 +125,101 @@ export class BlackBoxSyncService {
       }
     }
     return Boolean(maybeSignal);
+  }
+
+  private getRealtimeCircuitSnapshot(userId: string): {
+    remainingMs: number;
+    failures: number;
+    lastError: string | null;
+  } {
+    if (typeof window === 'undefined' || typeof window.sessionStorage === 'undefined') {
+      return { remainingMs: 0, failures: 0, lastError: null };
+    }
+
+    try {
+      const stored = window.sessionStorage.getItem(BlackBoxSyncService.REALTIME_CIRCUIT_STORAGE_KEY);
+      if (!stored) {
+        return { remainingMs: 0, failures: 0, lastError: null };
+      }
+
+      const parsed = JSON.parse(stored) as {
+        until?: number;
+        ownerUserId?: string | null;
+        failures?: number;
+        lastError?: string | null;
+      };
+
+      if (typeof parsed.until !== 'number' || parsed.until <= Date.now()) {
+        window.sessionStorage.removeItem(BlackBoxSyncService.REALTIME_CIRCUIT_STORAGE_KEY);
+        return { remainingMs: 0, failures: 0, lastError: null };
+      }
+
+      if (typeof parsed.ownerUserId === 'string' && parsed.ownerUserId !== userId) {
+        return { remainingMs: 0, failures: 0, lastError: null };
+      }
+
+      return {
+        remainingMs: Math.max(0, parsed.until - Date.now()),
+        failures: typeof parsed.failures === 'number' ? parsed.failures : 0,
+        lastError: typeof parsed.lastError === 'string' ? parsed.lastError : null,
+      };
+    } catch {
+      return { remainingMs: 0, failures: 0, lastError: null };
+    }
+  }
+
+  private armRealtimeCircuit(userId: string, errorMessage: string | undefined, consecutiveErrors: number): number {
+    const now = Date.now();
+    const current = this.getRealtimeCircuitSnapshot(userId);
+    const until = now + Math.max(current.remainingMs, BlackBoxSyncService.REALTIME_CIRCUIT_TTL_MS);
+
+    if (typeof window !== 'undefined' && typeof window.sessionStorage !== 'undefined') {
+      try {
+        window.sessionStorage.setItem(BlackBoxSyncService.REALTIME_CIRCUIT_STORAGE_KEY, JSON.stringify({
+          until,
+          ownerUserId: userId,
+          failures: Math.max(current.failures, consecutiveErrors),
+          lastError: errorMessage ?? current.lastError,
+          lastToastAt: 0,
+        }));
+      } catch {
+        // eslint-disable-next-line no-restricted-syntax -- sessionStorage 不可写时保留内存态退化即可
+      }
+    }
+
+    return until - now;
+  }
+
+  private clearRealtimeCircuitRetryTimer(): void {
+    if (this.realtimeCircuitRetryTimer === null) {
+      return;
+    }
+
+    clearTimeout(this.realtimeCircuitRetryTimer);
+    this.realtimeCircuitRetryTimer = null;
+  }
+
+  private scheduleRealtimeCircuitRetry(
+    userId: string,
+    delayMs: number,
+    generation: number,
+  ): void {
+    this.clearRealtimeCircuitRetryTimer();
+    this.realtimeCircuitRetryTimer = setTimeout(() => {
+      this.realtimeCircuitRetryTimer = null;
+      if (this.realtimeDesiredUserId !== userId) {
+        return;
+      }
+
+      if (generation != this.realtimeSubscriptionGeneration) {
+        return;
+      }
+
+      const retryGeneration = ++this.realtimeSubscriptionGeneration;
+      queueMicrotask(() => {
+        void this.syncRealtimeSubscription(userId, retryGeneration);
+      });
+    }, Math.max(0, delayMs));
   }
 
   constructor() {
@@ -540,6 +641,8 @@ export class BlackBoxSyncService {
   }
 
   private async syncRealtimeSubscription(userId: string | null, generation: number): Promise<void> {
+    this.clearRealtimeCircuitRetryTimer();
+
     if (generation !== this.realtimeSubscriptionGeneration) {
       return;
     }
@@ -554,8 +657,20 @@ export class BlackBoxSyncService {
     }
 
     await this.teardownRealtimeSubscription();
+    this.realtimeConsecutiveErrors = 0;
 
     if (generation !== this.realtimeSubscriptionGeneration) {
+      return;
+    }
+
+    const realtimeCircuit = this.getRealtimeCircuitSnapshot(userId);
+    if (realtimeCircuit.remainingMs > 0) {
+      this.scheduleRealtimeCircuitRetry(userId, realtimeCircuit.remainingMs, generation);
+      this.logger.info('黑匣子 Realtime 熔断窗口内跳过订阅，继续使用 gate-review 定时拉取兜底', {
+        remainingMs: realtimeCircuit.remainingMs,
+        failures: realtimeCircuit.failures,
+        lastError: realtimeCircuit.lastError,
+      });
       return;
     }
 
@@ -606,19 +721,54 @@ export class BlackBoxSyncService {
         return;
       }
 
+      if (this.realtimeChannel !== channel) {
+        return;
+      }
+
       if (status === 'SUBSCRIBED') {
+        this.realtimeConsecutiveErrors = 0;
         this.logger.info('黑匣子 Realtime 订阅已启用', {
           channel: channelName,
         });
         return;
       }
 
-      if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
-        this.logger.warn('黑匣子 Realtime 订阅异常，保留 gate-review 强制拉取兜底', {
+      if ((status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') && isBrowserNetworkSuspendedWindow()) {
+        this.logger.debug('浏览器网络挂起期间忽略黑匣子 Realtime 通道中断', {
           channel: channelName,
           status,
           error: error?.message,
         });
+        return;
+      }
+
+      if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+        this.realtimeConsecutiveErrors += 1;
+
+        if (this.realtimeConsecutiveErrors < BlackBoxSyncService.REALTIME_MAX_CONSECUTIVE_ERRORS) {
+          this.logger.debug('黑匣子 Realtime 通道瞬时错误，等待连续失败阈值', {
+            channel: channelName,
+            status,
+            consecutiveErrors: this.realtimeConsecutiveErrors,
+            error: error?.message,
+          });
+          return;
+        }
+
+        const realtimeCircuitMs = this.armRealtimeCircuit(
+          userId,
+          error?.message,
+          this.realtimeConsecutiveErrors,
+        );
+        this.logger.warn('黑匣子 Realtime 连续失败，熔断当前会话 websocket 并保留 gate-review 定时拉取兜底', {
+          channel: channelName,
+          status,
+          consecutiveErrors: this.realtimeConsecutiveErrors,
+          realtimeCircuitMs,
+          error: error?.message,
+        });
+        this.scheduleRealtimeCircuitRetry(userId, realtimeCircuitMs, this.realtimeSubscriptionGeneration);
+        void this.teardownRealtimeSubscription();
       }
     });
 
@@ -630,6 +780,7 @@ export class BlackBoxSyncService {
     const channel = this.realtimeChannel;
     this.realtimeChannel = null;
     this.realtimeSubscribedUserId = null;
+    this.realtimeConsecutiveErrors = 0;
 
     if (!channel) {
       return;
@@ -697,11 +848,16 @@ export class BlackBoxSyncService {
   }
 
   private async loadEntryFromLocal(id: string): Promise<BlackBoxEntry | null> {
+    let initFailed = false;
     try {
       if (!this.db) {
         await this.initIndexedDB();
       }
     } catch {
+      initFailed = true;
+    }
+
+    if (initFailed) {
       return null;
     }
 

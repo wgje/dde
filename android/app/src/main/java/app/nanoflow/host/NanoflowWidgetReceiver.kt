@@ -186,6 +186,7 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
   // --- Click handlers ---
   private fun handleClickOpenApp(context: Context, intent: Intent) {
     val appWidgetId = intent.getIntExtra(EXTRA_APP_WIDGET_ID, AppWidgetManager.INVALID_APPWIDGET_ID)
+    val taskIndex = intent.getIntExtra(EXTRA_TASK_INDEX, -1)
     NanoflowWidgetTelemetry.info(
       "widget_click_open_app",
       mapOf(
@@ -198,12 +199,14 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
         context = context,
         appWidgetId = appWidgetId,
         launchIntent = NanoFlowLaunchIntent.OPEN_WORKSPACE,
+        taskIndex = taskIndex,
       ),
     )
   }
 
   private fun handleClickOpenFocusTools(context: Context, intent: Intent) {
     val appWidgetId = intent.getIntExtra(EXTRA_APP_WIDGET_ID, AppWidgetManager.INVALID_APPWIDGET_ID)
+    val taskIndex = intent.getIntExtra(EXTRA_TASK_INDEX, -1)
     NanoflowWidgetTelemetry.info(
       "widget_click_open_focus_tools",
       mapOf(
@@ -216,6 +219,7 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
         context = context,
         appWidgetId = appWidgetId,
         launchIntent = NanoFlowLaunchIntent.OPEN_FOCUS_TOOLS,
+        taskIndex = taskIndex,
       ),
     )
   }
@@ -509,6 +513,25 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
               Toast.LENGTH_SHORT,
             ).show()
           }
+          return@launch
+        }
+
+        val canPromote = runCatching {
+          repository.isVisibleCommandCenterTaskPromotable(appWidgetId, taskId)
+        }.getOrDefault(false)
+        if (!canPromote) {
+          NanoflowWidgetTelemetry.info(
+            "widget_focus_promote_fallback_open_app",
+            mapOf(
+              "appWidgetId" to appWidgetId,
+              "taskId" to NanoflowWidgetTelemetry.redactId(taskId),
+              "taskIndex" to targetIndex,
+            ),
+          )
+          handleClickOpenApp(
+            context,
+            Intent(intent).putExtra(EXTRA_APP_WIDGET_ID, appWidgetId),
+          )
           return@launch
         }
 

@@ -169,7 +169,9 @@ class NanoflowWidgetActionFactory(
       }
       views.setImageViewResource(R.id.nano_widget_gate_action_icon, iconRes)
       if (item.clickable) {
-        views.setOnClickFillInIntent(R.id.nano_widget_gate_action_slot, buildFillInIntent(item))
+        val fillInIntent = buildFillInIntent(item)
+        views.setOnClickFillInIntent(R.id.nano_widget_gate_action_root, fillInIntent)
+        views.setOnClickFillInIntent(R.id.nano_widget_gate_action_slot, fillInIntent)
       }
       return views
     }

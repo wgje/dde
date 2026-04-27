@@ -48,7 +48,6 @@ import {
 } from '../utils/dock-focus-phase';
 import {
   getWaitRemainingSeconds,
-  isConsoleBackgroundStatus,
   isWaitingLike,
   sortDockEntriesForDisplay,
   toStatusMachineEntry,
@@ -463,6 +462,7 @@ export class DockEngineService {
       fragmentDefenseLevel: this.fragmentDefenseLevel,
       lastConsoleDemotedTaskId: this.lastConsoleDemotedTaskId,
       consoleVisibleOrderHint: this.consoleVisibleOrderHint,
+      consoleVisibleEntries: this.consoleVisibleEntries,
       focusingEntry: this.focusingEntry,
       focusMode: this.focusMode,
       suspendChainRootTaskId: this.suspendChainRootTaskId,
@@ -838,4 +838,3 @@ export class DockEngineService {
     this.snapshotManager.computeRecommendationForSuspended(suspendedTaskId, waitMinutes);
   }
 }
-

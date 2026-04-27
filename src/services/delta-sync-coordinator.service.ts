@@ -118,7 +118,7 @@ export class DeltaSyncCoordinatorService {
       mergedTask.deletedAt = remoteTask.deletedAt;
     }
 
-    return mergedTask as Task;
+    return mergedTask as unknown as Task;
   }
 
   /**

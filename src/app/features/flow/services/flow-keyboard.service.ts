@@ -27,7 +27,9 @@ export class FlowKeyboardService {
     if (!this.diagram.isInitialized) return 'not-handled';
     if (!event.altKey) return 'not-handled';
 
-    const key = event.key.toLowerCase();
+    const key = typeof event.key === 'string' ? event.key.toLowerCase() : '';
+    if (!key) return 'not-handled';
+
     const diagramInstance = this.diagram.diagramInstance;
     if (!diagramInstance) return 'not-handled';
 

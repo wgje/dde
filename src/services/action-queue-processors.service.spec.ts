@@ -20,6 +20,12 @@ import { PermanentFailureError } from '../utils/permanent-failure-error';
 
 type QueuedAction = Omit<Partial<QueuedActionModel>, 'payload'> & { payload: unknown };
 type RegisteredProcessor = (action: QueuedActionModel) => Promise<boolean>;
+type MockRetryQueueProjectItem = {
+  type: 'project';
+  data: { id: string; syncSource?: string; name?: string };
+  sourceUserId: string;
+  taskIdsToDelete: string[];
+};
 
 // ── Mock factories ───────────────────────────────────────────
 
@@ -42,7 +48,7 @@ const mockActionQueueService = {
 const mockRetryQueueService = {
   removeByProjectId: vi.fn(),
   getItems: vi.fn(() => []),
-  findItemForOwner: vi.fn(() => undefined),
+  findItemForOwner: vi.fn<(...args: unknown[]) => MockRetryQueueProjectItem | undefined>(() => undefined),
 };
 
 const mockSyncService = {

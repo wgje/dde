@@ -20,8 +20,10 @@ import { LayoutService } from './layout.service';
 import { Project, Task, Connection, AttachmentType } from '../models';
 // 【P2-44 修复】导入 sanitizeProject 用于导入数据消毒
 import { sanitizeProject } from '../utils/validation';
-import { filterParentChildDuplicateConnections } from '../utils/parent-child-connection-integrity';
-import { softDeleteParentChildDuplicateConnections } from '../utils/parent-child-connection-integrity';
+import {
+  filterParentChildDuplicateConnections,
+  softDeleteParentChildDuplicateConnections,
+} from '../utils/parent-child-connection-integrity';
 import { 
   ExportData, 
   ExportMetadata, 

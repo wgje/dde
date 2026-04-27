@@ -60,6 +60,7 @@ export interface DockCompletionContext {
   fragmentDefenseLevel: WritableSignal<FragmentDefenseLevel>;
   lastConsoleDemotedTaskId: WritableSignal<string | null>;
   consoleVisibleOrderHint: Signal<string[]>;
+  consoleVisibleEntries: Signal<DockEntry[]>;
   focusingEntry: Signal<DockEntry | null>;
   focusMode: Signal<boolean>;
   suspendChainRootTaskId: Signal<string | null>;
@@ -365,17 +366,33 @@ export class DockCompletionFlowService {
       return;
     }
 
-    this.promoteNext();
-    const focused = this.ctx.focusingEntry();
-    if (focused) {
+    const floatingCandidates = this.findFloatingBackupCandidates(rootTaskId);
+    if (floatingCandidates.length > 0) {
+      const recommendedTaskIds = floatingCandidates.map(entry => entry.taskId);
+      this.setPendingDecision(
+        rootTaskId ?? recommendedTaskIds[0],
+        rootRemainingSeconds !== null ? rootRemainingSeconds / 60 : 0,
+        [{ type: 'homologous-advancement', taskIds: recommendedTaskIds }],
+        'C 位任务已完成，悬浮备选任务等待用户选择主任务',
+      );
+      this.ctx.highlightedIds.set(new Set(recommendedTaskIds));
       this.setLastDecision({
         type: 'completion_followup',
-        reason: '任务完成后按规则推进下一候选',
+        reason: 'C 位已清空，悬浮三个备选任务等待用户选择其一为主任务',
         rootTaskId: rootTaskId ?? undefined,
-        recommendedTaskIds: [focused.taskId],
+        recommendedTaskIds,
         remainingMinutes: rootRemainingSeconds !== null ? rootRemainingSeconds / 60 : undefined,
       });
+      return;
     }
+
+    this.setLastDecision({
+      type: 'completion_followup',
+      reason: '停泊坞任务已全部完成，专注模式可切换到大门',
+      rootTaskId: rootTaskId ?? undefined,
+      recommendedTaskIds: [],
+      remainingMinutes: rootRemainingSeconds !== null ? rootRemainingSeconds / 60 : undefined,
+    });
   }
 
   /** 主任务完成时只允许已经进入 C 位的副任务接班；未点选的备选任务继续留在备选区。 */
@@ -385,12 +402,27 @@ export class DockCompletionFlowService {
       return focusedSuccessor;
     }
 
-    const commandCenterCandidates = this.ctx.entries().filter(entry =>
+    const commandCenterCandidates = this.ctx.consoleVisibleEntries().filter(entry =>
       entry.status !== 'completed'
       && !entry.isMain
       && (entry.lane === 'combo-select' || entry.status === 'focusing'),
     );
     return this.sortConsoleEntriesForDisplay(commandCenterCandidates)[0] ?? null;
+  }
+
+  /** C 位全空后，最多悬浮三个备选任务，让用户显式选择下一任主任务。 */
+  private findFloatingBackupCandidates(rootTaskId: string | null): DockEntry[] {
+    const excluded = new Set([rootTaskId].filter((id): id is string => typeof id === 'string' && id.length > 0));
+    return this.ctx.entries()
+      .filter(entry =>
+        entry.status !== 'completed'
+        && !entry.isMain
+        && entry.lane === 'backup'
+        && isAutoPromotableStatus(entry.status)
+        && !excluded.has(entry.taskId),
+      )
+      .sort((a, b) => entryOrder(a) - entryOrder(b))
+      .slice(0, DockCompletionFlowService.RECOMMENDATION_CANDIDATE_LIMIT);
   }
 
   /** GAP-A: 碎片过渡倒计时，不以绝对任务饱和为目标，保留推荐同时给用户休息选择 */

@@ -5,6 +5,7 @@ import { Task, Connection, Attachment } from '../models';
 import { sanitizeTask } from '../utils/validation';
 import { supabaseErrorToError } from '../utils/supabase-error';
 import { FIELD_SELECT_CONFIG } from '../config/sync.config';
+import type { Database } from '../types/supabase';
 import { 
   TaskRow, 
   ConnectionRow, 
@@ -273,9 +274,11 @@ export class TaskRepositoryService {
   ): Promise<{ success: boolean; error?: string }> {
     if (!this.supabase.isConfigured) return { success: true };
 
+    const updatePayload = { [field]: value } as unknown as Database['public']['Tables']['tasks']['Update'];
+
     const { error } = await this.supabase.client()
       .from('tasks')
-      .update({ [field]: value })
+      .update(updatePayload)
       .eq('id', taskId);
 
     if (error) {

@@ -63,6 +63,21 @@ describe('WorkspaceShellComponent 数据保护提醒', () => {
 });
 
 describe('WorkspaceShellComponent Android widget bootstrap', () => {
+  type AndroidWidgetBootstrapContext = {
+    widgetBinding: {
+      completeAndroidBootstrap: ReturnType<typeof vi.fn>;
+    };
+    pendingAndroidWidgetBootstrap: { set: ReturnType<typeof vi.fn> };
+    pendingAndroidWidgetManualCallback?: { set: ReturnType<typeof vi.fn> };
+    deferredStartupEntryIntent: { set: ReturnType<typeof vi.fn> };
+    navigateToAndroidWidgetCallback?: unknown;
+    persistPendingAndroidWidgetBootstrapToStorage: ReturnType<typeof vi.fn>;
+    persistDeferredStartupEntryIntentToStorage: ReturnType<typeof vi.fn>;
+    logger: { warn: ReturnType<typeof vi.fn> };
+    toast: { warning: ReturnType<typeof vi.fn> };
+    androidWidgetBootstrapInFlight: boolean;
+  };
+
   it('应接受 Android 浏览器中的 widget bootstrap fallback', () => {
     const originalReferrer = Object.getOwnPropertyDescriptor(document, 'referrer');
     const originalMatchMedia = window.matchMedia;
@@ -448,7 +463,7 @@ describe('WorkspaceShellComponent Android widget bootstrap', () => {
     const warning = vi.fn();
     const persistPendingAndroidWidgetBootstrapToStorage = vi.fn();
     const persistDeferredStartupEntryIntentToStorage = vi.fn();
-    const context = {
+    const context: AndroidWidgetBootstrapContext = {
       widgetBinding: {
         completeAndroidBootstrap: vi.fn().mockResolvedValue({
           ok: false,
@@ -465,7 +480,7 @@ describe('WorkspaceShellComponent Android widget bootstrap', () => {
       logger: { warn },
       toast: { warning },
       androidWidgetBootstrapInFlight: true,
-    } as unknown as WorkspaceShellComponent & { androidWidgetBootstrapInFlight: boolean };
+    };
 
     await (WorkspaceShellComponent.prototype as unknown as {
       completeAndroidWidgetBootstrap: (this: WorkspaceShellComponent, bootstrapRequest: {
@@ -479,7 +494,7 @@ describe('WorkspaceShellComponent Android widget bootstrap', () => {
         bootstrapNonce: string;
         pendingPushToken: string | null;
       }) => Promise<void>;
-    }).completeAndroidWidgetBootstrap.call(context, {
+    }).completeAndroidWidgetBootstrap.call(context as unknown as WorkspaceShellComponent, {
       callbackUri: 'nanoflow-widget://bootstrap',
       clientVersion: null,
       installationId: '11111111-1111-4111-8111-111111111111',
@@ -510,8 +525,10 @@ describe('WorkspaceShellComponent Android widget bootstrap', () => {
     const assign = vi.fn();
     const replace = vi.fn();
 
-    delete (window as Window & { location?: Location }).location;
-    window.location = { ...originalLocation, assign, replace } as Location;
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: { ...originalLocation, assign, replace } as Location,
+    });
 
     try {
       const setPending = vi.fn();
@@ -519,7 +536,7 @@ describe('WorkspaceShellComponent Android widget bootstrap', () => {
       const setPendingManualCallback = vi.fn();
       const persistPendingAndroidWidgetBootstrapToStorage = vi.fn();
       const persistDeferredStartupEntryIntentToStorage = vi.fn();
-      const context = {
+      const context: AndroidWidgetBootstrapContext = {
         widgetBinding: {
           completeAndroidBootstrap: vi.fn().mockResolvedValue({
             ok: true,
@@ -538,7 +555,7 @@ describe('WorkspaceShellComponent Android widget bootstrap', () => {
         logger: { warn: vi.fn() },
         toast: { warning: vi.fn() },
         androidWidgetBootstrapInFlight: true,
-      } as unknown as WorkspaceShellComponent & { androidWidgetBootstrapInFlight: boolean };
+      };
 
       await (WorkspaceShellComponent.prototype as unknown as {
         completeAndroidWidgetBootstrap: (this: WorkspaceShellComponent, bootstrapRequest: {
@@ -552,7 +569,7 @@ describe('WorkspaceShellComponent Android widget bootstrap', () => {
           bootstrapNonce: string;
           pendingPushToken: string | null;
         }) => Promise<void>;
-      }).completeAndroidWidgetBootstrap.call(context, {
+      }).completeAndroidWidgetBootstrap.call(context as unknown as WorkspaceShellComponent, {
         callbackUri: 'nanoflow-widget://bootstrap',
         clientVersion: null,
         installationId: '11111111-1111-4111-8111-111111111111',
@@ -574,8 +591,10 @@ describe('WorkspaceShellComponent Android widget bootstrap', () => {
       expect(assign).toHaveBeenCalledWith('nanoflow-widget://bootstrap#widgetToken=android-token');
       expect(replace).not.toHaveBeenCalled();
     } finally {
-      delete (window as Window & { location?: Location }).location;
-      window.location = originalLocation;
+      Object.defineProperty(window, 'location', {
+        configurable: true,
+        value: originalLocation,
+      });
     }
   });
 
@@ -592,13 +611,15 @@ describe('WorkspaceShellComponent Android widget bootstrap', () => {
       configurable: true,
       get: () => 'visible',
     });
-    delete (window as Window & { location?: Location }).location;
-    window.location = {
-      ...originalLocation,
-      href: 'https://dde-eight.vercel.app/#/projects',
-      assign,
-      replace,
-    } as Location;
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: {
+        ...originalLocation,
+        href: 'https://dde-eight.vercel.app/#/projects',
+        assign,
+        replace,
+      } as Location,
+    });
 
     try {
       const setPending = vi.fn();
@@ -607,7 +628,7 @@ describe('WorkspaceShellComponent Android widget bootstrap', () => {
       const persistPendingAndroidWidgetBootstrapToStorage = vi.fn();
       const persistDeferredStartupEntryIntentToStorage = vi.fn();
       const warn = vi.fn();
-      const context = {
+      const context: AndroidWidgetBootstrapContext = {
         widgetBinding: {
           completeAndroidBootstrap: vi.fn().mockResolvedValue({
             ok: true,
@@ -626,7 +647,7 @@ describe('WorkspaceShellComponent Android widget bootstrap', () => {
         logger: { warn },
         toast: { warning: vi.fn() },
         androidWidgetBootstrapInFlight: true,
-      } as unknown as WorkspaceShellComponent & { androidWidgetBootstrapInFlight: boolean };
+      };
 
       await (WorkspaceShellComponent.prototype as unknown as {
         completeAndroidWidgetBootstrap: (this: WorkspaceShellComponent, bootstrapRequest: {
@@ -640,7 +661,7 @@ describe('WorkspaceShellComponent Android widget bootstrap', () => {
           bootstrapNonce: string;
           pendingPushToken: string | null;
         }) => Promise<void>;
-      }).completeAndroidWidgetBootstrap.call(context, {
+      }).completeAndroidWidgetBootstrap.call(context as unknown as WorkspaceShellComponent, {
         callbackUri: 'nanoflow-widget://bootstrap',
         clientVersion: null,
         installationId: '11111111-1111-4111-8111-111111111111',
@@ -669,8 +690,10 @@ describe('WorkspaceShellComponent Android widget bootstrap', () => {
       if (originalVisibilityState) {
         Object.defineProperty(document, 'visibilityState', originalVisibilityState);
       }
-      delete (window as Window & { location?: Location }).location;
-      window.location = originalLocation;
+      Object.defineProperty(window, 'location', {
+        configurable: true,
+        value: originalLocation,
+      });
       vi.unstubAllGlobals();
     }
   });

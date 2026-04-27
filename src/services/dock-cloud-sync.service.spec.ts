@@ -5,6 +5,7 @@ import { SimpleSyncService } from '../core-bridge';
 import { ActionQueueService } from './action-queue.service';
 import { DockSnapshotPersistenceService } from './dock-snapshot-persistence.service';
 import { LoggerService } from './logger.service';
+import { SupabaseClientService } from './supabase-client.service';
 import type { DockSnapshot } from '../models/parking-dock';
 import { AUTH_CONFIG } from '../config/auth.config';
 import {
@@ -39,6 +40,15 @@ const mockActionQueue = {
 const mockSnapshotPersistence = {
   normalizeSnapshot: vi.fn(),
   isSnapshotNewer: vi.fn(),
+};
+
+const mockFunctionsInvoke = vi.fn().mockResolvedValue({ data: null, error: null });
+const mockSupabaseClient = {
+  clientAsync: vi.fn().mockResolvedValue({
+    functions: {
+      invoke: mockFunctionsInvoke,
+    },
+  }),
 };
 
 function setVisibilityState(state: DocumentVisibilityState): void {
@@ -113,6 +123,10 @@ describe('DockCloudSyncService', () => {
     mockSnapshotPersistence.normalizeSnapshot.mockClear();
     mockSnapshotPersistence.isSnapshotNewer.mockClear();
     mockLoggerCategory.warn.mockClear();
+    mockLoggerCategory.debug.mockClear();
+    mockSupabaseClient.clientAsync.mockClear();
+    mockFunctionsInvoke.mockClear();
+    mockFunctionsInvoke.mockResolvedValue({ data: null, error: null });
 
     TestBed.configureTestingModule({
       providers: [
@@ -121,6 +135,7 @@ describe('DockCloudSyncService', () => {
         { provide: ActionQueueService, useValue: mockActionQueue },
         { provide: DockSnapshotPersistenceService, useValue: mockSnapshotPersistence },
         { provide: LoggerService, useValue: mockLogger },
+        { provide: SupabaseClientService, useValue: mockSupabaseClient },
       ],
     });
 
@@ -288,6 +303,70 @@ describe('DockCloudSyncService', () => {
 
       expect(callbacks.exportSnapshot).toHaveBeenCalled();
       expect(mockActionQueue.enqueueForOwner).toHaveBeenCalledTimes(1);
+    });
+
+    it('首次观测到专注已开启时不应绕过防抖或直推 widget', async () => {
+      const baseSession = makeSnapshot().session;
+      service.init(makeCallbacks());
+
+      service.scheduleCloudPush('user-1', makeSnapshot({
+        focusMode: true,
+        session: {
+          ...baseSession,
+          focusSessionId: 'focus-session-1',
+          focusSessionStartedAt: Date.now(),
+          mainTaskId: 'task-main',
+        },
+      }));
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(mockFunctionsInvoke).not.toHaveBeenCalled();
+
+      vi.advanceTimersByTime(2999);
+
+      expect(mockActionQueue.enqueueForOwner).not.toHaveBeenCalled();
+
+      vi.advanceTimersByTime(1);
+
+      expect(mockActionQueue.enqueueForOwner).toHaveBeenCalledTimes(1);
+    });
+
+    it('已知专注态从 false 翻到 true 时应立即写云并直推 widget', async () => {
+      const baseSession = makeSnapshot().session;
+      service.init(makeCallbacks());
+
+      service.scheduleCloudPush('user-1', makeSnapshot({ focusMode: false }));
+      vi.advanceTimersByTime(3000);
+
+      service.scheduleCloudPush('user-1', makeSnapshot({
+        focusMode: true,
+        session: {
+          ...baseSession,
+          focusSessionId: 'focus-session-1',
+          focusSessionStartedAt: Date.now(),
+          mainTaskId: 'task-main',
+        },
+      }));
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(mockFunctionsInvoke).toHaveBeenCalledWith(
+        'widget-notify',
+        expect.objectContaining({
+          body: expect.objectContaining({
+            directNotify: true,
+            focusActive: true,
+            focusSessionId: 'focus-session-1',
+          }),
+        }),
+      );
+
+      vi.advanceTimersByTime(0);
+
+      expect(mockActionQueue.enqueueForOwner).toHaveBeenCalledTimes(2);
     });
 
     it('should freeze snapshot at schedule time instead of reading the latest snapshot on timer fire', () => {

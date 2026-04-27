@@ -15,7 +15,7 @@ export function normalizeWidgetLimitNumber(
   return coerced > 0 ? coerced : fallback;
 }
 
-export function normalizeWidgetWebhookSecret(rawValue: string | null): string | null {
+export function normalizeWidgetWebhookSecret(rawValue: string | null | undefined): string | null {
   if (!rawValue) return null;
   const trimmed = rawValue.trim();
   return trimmed.replace(/^v1,whsec_/, '') || null;

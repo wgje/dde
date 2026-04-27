@@ -42,7 +42,7 @@ const createTouchStartEvent = (clientX: number, clientY: number): TouchEvent => 
   cancelable: true,
   preventDefault: vi.fn(),
   stopPropagation: vi.fn(),
-} as TouchEvent);
+} as unknown as TouchEvent);
 
 const createTouchEndEvent = (clientX: number, clientY: number): TouchEvent => ({
   type: 'touchend',
@@ -51,7 +51,7 @@ const createTouchEndEvent = (clientX: number, clientY: number): TouchEvent => ({
   cancelable: true,
   preventDefault: vi.fn(),
   stopPropagation: vi.fn(),
-} as TouchEvent);
+} as unknown as TouchEvent);
 
 const mockChangeDetectionScheduler: ChangeDetectionScheduler = {
   notify: vi.fn(),

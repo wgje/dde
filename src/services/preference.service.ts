@@ -212,13 +212,16 @@ export class PreferenceService {
   }
 
   private loadBackupProofFromStorage(userId: string | null): string | null {
+    let storedValue: string | null = null;
     try {
       const key = getUserPreferenceKey(userId, 'lastBackupProofAt');
-      return this.normalizeBackupProofTimestamp(localStorage.getItem(key), key);
+      storedValue = this.normalizeBackupProofTimestamp(localStorage.getItem(key), key);
     } catch (e) {
       this.logger.warn('loadBackupProofFromStorage: localStorage 访问失败，忽略', e);
-      return null;
+      storedValue = null;
     }
+
+    return storedValue;
   }
 
   private saveBackupProofToStorage(userId: string | null, value: string | null): void {

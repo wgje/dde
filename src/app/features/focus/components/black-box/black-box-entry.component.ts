@@ -133,7 +133,9 @@ export class BlackBoxEntryComponent {
    */
   @HostListener('keydown', ['$event'])
   handleKeydown(event: KeyboardEvent): void {
-    const key = event.key.toLowerCase();
+    const key = typeof event.key === 'string' ? event.key.toLowerCase() : '';
+    if (!key) return;
+
 
     // 【修复 2026-02-19】排除修饰键组合，避免 Ctrl+C/Cmd+C 误触发标记完成
     if (event.ctrlKey || event.metaKey || event.altKey) return;

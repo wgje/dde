@@ -20,7 +20,10 @@
     android:layout_height="match_parent"
     android:background="@drawable/nano_widget_root_gate"
     android:clipToOutline="true"
-    android:padding="14dp">
+    android:paddingStart="9dp"
+    android:paddingTop="9dp"
+    android:paddingEnd="9dp"
+    android:paddingBottom="4dp">
 
     <!-- ==== 背景技术网格：纵线 ==== -->
     <LinearLayout
@@ -65,13 +68,13 @@
             android:orientation="horizontal">
 
             <ImageView
-                android:layout_width="20dp"
-                android:layout_height="20dp"
+                android:layout_width="13dp"
+                android:layout_height="13dp"
                 android:importantForAccessibility="no"
                 android:src="@drawable/nano_widget_icon_door" />
 
             <TextView
-                android:layout_width="8dp"
+                android:layout_width="5dp"
                 android:layout_height="1dp" />
 
             <TextView
@@ -82,18 +85,18 @@
                 android:maxLines="1"
                 android:text="@string/nanoflow_widget_gate_label"
                 android:textColor="#F6FBFF"
-                android:textSize="14sp"
+                android:textSize="10sp"
                 android:textStyle="bold" />
 
             <TextView
-                android:layout_width="6dp"
+                android:layout_width="4dp"
                 android:layout_height="1dp" />
 
             <!-- (N) 计数圆环徽章：细白色圆环轮廓（与海报一致的蓝图 token） -->
             <FrameLayout
                 android:id="@+id/nano_widget_gate_count_ring"
-                android:layout_width="24dp"
-                android:layout_height="24dp"
+                android:layout_width="17dp"
+                android:layout_height="17dp"
                 android:background="@drawable/nano_widget_count_ring"
                 android:visibility="gone">
                 <TextView
@@ -104,7 +107,7 @@
                     android:includeFontPadding="false"
                     android:text=""
                     android:textColor="#F6FBFF"
-                    android:textSize="12sp"
+                    android:textSize="8sp"
                     android:textStyle="bold" />
             </FrameLayout>
 
@@ -119,11 +122,11 @@
                 android:layout_height="wrap_content"
                 android:ellipsize="end"
                 android:maxLines="1"
-                android:paddingStart="10dp"
-                android:paddingEnd="4dp"
+                android:paddingStart="5dp"
+                android:paddingEnd="3dp"
                 android:text=""
                 android:textColor="#9FB8DE"
-                android:textSize="10sp" />
+                android:textSize="8sp" />
 
             <TextView
                 android:id="@+id/nano_widget_header_action_label"
@@ -131,25 +134,25 @@
                 android:layout_height="wrap_content"
                 android:ellipsize="end"
                 android:maxLines="1"
-                android:text="未完成任务"
+                android:text="待处理"
                 android:textColor="#F6FBFF"
-                android:textSize="11sp" />
+                android:textSize="8sp" />
 
             <TextView
-                android:layout_width="6dp"
+                android:layout_width="4dp"
                 android:layout_height="1dp" />
 
             <ImageView
                 android:id="@+id/nano_widget_header_action_icon"
-                android:layout_width="16dp"
-                android:layout_height="16dp"
+                android:layout_width="11dp"
+                android:layout_height="11dp"
                 android:importantForAccessibility="no"
                 android:src="@drawable/nano_widget_icon_lock" />
         </LinearLayout>
 
         <TextView
             android:layout_width="match_parent"
-            android:layout_height="8dp" />
+            android:layout_height="2dp" />
 
         <ImageView
             android:layout_width="match_parent"
@@ -160,24 +163,25 @@
 
         <TextView
             android:layout_width="match_parent"
-            android:layout_height="6dp" />
+            android:layout_height="2dp" />
 
-        <!-- 中央大卡片：1 条 item，listKind=content 或 gate_card -->
-        <ListView
+        <!-- 中央大卡片：单条展示，避免 ListView 在小组件内产生纵向滑动 -->
+        <AdapterViewFlipper
             android:id="@+id/nano_widget_content_list"
             android:layout_width="match_parent"
             android:layout_height="0dp"
             android:layout_weight="1"
-            android:clipToPadding="false"
-            android:divider="@android:color/transparent"
-            android:dividerHeight="0dp"
-            android:paddingTop="0dp"
-            android:paddingBottom="0dp"
-            android:scrollbars="none" />
+            android:animateFirstView="false"
+            android:autoStart="false"
+            android:clipChildren="true"
+            android:clipToPadding="true"
+            android:flipInterval="86400000"
+            android:inAnimation="@null"
+            android:outAnimation="@null" />
 
         <TextView
             android:layout_width="match_parent"
-            android:layout_height="6dp" />
+            android:layout_height="2dp" />
 
         <ImageView
             android:layout_width="match_parent"
@@ -188,16 +192,16 @@
 
         <TextView
             android:layout_width="match_parent"
-            android:layout_height="6dp" />
+            android:layout_height="0dp" />
 
-        <!-- 已读 / 完成 双按钮：GridView numColumns=2（按钮更高、虚线描边，与 focus 的实线 slot 形成对比） -->
+        <!-- 已读 / 完成双按钮：保持易点按，同时为主体内容让出纵向空间 -->
         <GridView
             android:id="@+id/nano_widget_gate_actions_list"
             android:layout_width="match_parent"
-            android:layout_height="58dp"
-            android:columnWidth="140dp"
+            android:layout_height="30dp"
+            android:columnWidth="120dp"
             android:fadingEdge="none"
-            android:horizontalSpacing="10dp"
+            android:horizontalSpacing="6dp"
             android:numColumns="2"
             android:overScrollMode="never"
             android:requiresFadingEdge="none"

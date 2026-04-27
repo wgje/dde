@@ -75,6 +75,7 @@ function createProject(overrides: Partial<Project> = {}): Project {
   return {
     id: 'project-1',
     name: 'Project',
+    description: '',
     tasks: [],
     connections: [],
     createdDate: '2026-04-18T00:00:00.000Z',

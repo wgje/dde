@@ -481,7 +481,7 @@ interface InvariantInput {
 }
 
 function checkInvariants(input: InvariantInput): InvariantCheckResult[] {
-  const { tasks, crossTreeConnections, orphanConnections, duplicateParentChildConnections, cycles, maxDepth, actualMaxDepth, depthExceeded } = input;
+  const { tasks, crossTreeConnections, orphanConnections, duplicateParentChildConnections, cycles, maxDepth, depthExceeded } = input;
   const taskMap = new Map(tasks.map(t => [t.id, t] as const));
   const results: InvariantCheckResult[] = [];
 
@@ -864,13 +864,15 @@ function renderTask(
     }
   }
 
-  if (ctx.includeParking && t.parkingMeta) {
+  const parkingMeta = t.parkingMeta;
+
+  if (ctx.includeParking && parkingMeta) {
     w.key('parking_meta');
     w.indent(() => {
-      w.kv('state', t.parkingMeta.state);
-      w.kvNullable('parked_at', t.parkingMeta.parkedAt);
-      w.kvNullable('last_visited_at', t.parkingMeta.lastVisitedAt);
-      if (t.parkingMeta.pinned) {
+      w.kv('state', parkingMeta.state);
+      w.kvNullable('parked_at', parkingMeta.parkedAt);
+      w.kvNullable('last_visited_at', parkingMeta.lastVisitedAt);
+      if (parkingMeta.pinned) {
         w.kv('pinned', true);
       }
     });

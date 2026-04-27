@@ -29,6 +29,17 @@ data class WidgetFocusOptimisticSnapshot(
   val selectedTaskIndex: Int,
 )
 
+private data class VisibleCommandCenterTask(
+  val position: Int,
+  val taskId: String?,
+  val projectId: String?,
+  val title: String?,
+  val projectTitle: String?,
+  val estimatedMinutes: Int?,
+  val isMain: Boolean,
+  val valid: Boolean,
+)
+
 class NanoflowWidgetRepository(private val context: Context) {
   private val clockFormatter = DateTimeFormatter.ofPattern("HH:mm")
   private val shortDateFormatter = DateTimeFormatter.ofPattern("MM-dd")
@@ -456,21 +467,22 @@ class NanoflowWidgetRepository(private val context: Context) {
       resolveGatePageIndex(appWidgetId, gateEntries)
     }
     val previousSelectedEntryId = store.readGateSelectedEntryId(appWidgetId)
+    val nowIso = Instant.now().toString()
     val unreadDelta = if (!targetPreview.isRead) 1 else 0
-    val pendingDelta = 1
-    val newPendingCount = (cached.blackBox.pendingCount - pendingDelta).coerceAtLeast(0)
-    // 已读并不是完成，但在 widget 大门里要进入短时冷却：当前可见队列先移除，
-    // 后端 summary 会在冷却期结束后按 updated_at 让它间歇式再现。
-    val newPreviews = cached.blackBox.previews.filterNot { it.entryId == entryId }
-    val nextSelectedEntryId = when (action) {
-      BlackBoxEntryAction.READ -> {
-        val remainingGateEntries = gateEntries.filterNot { it.entryId == entryId }
-        if (remainingGateEntries.isEmpty()) {
-          null
-        } else {
-          remainingGateEntries[selectedGateIndex % remainingGateEntries.size].entryId
-        }
+    val newPendingCount = when (action) {
+      BlackBoxEntryAction.READ -> cached.blackBox.pendingCount.coerceAtLeast(0)
+      BlackBoxEntryAction.COMPLETE -> (cached.blackBox.pendingCount - 1).coerceAtLeast(0)
+    }
+    val newPreviews = when (action) {
+      BlackBoxEntryAction.READ -> cached.blackBox.previews.map { preview ->
+        if (preview.entryId == entryId) preview.copy(isRead = true, updatedAt = nowIso) else preview
       }
+      BlackBoxEntryAction.COMPLETE -> cached.blackBox.previews.filterNot { it.entryId == entryId }
+    }
+    val nextSelectedEntryId = when (action) {
+      BlackBoxEntryAction.READ -> previousSelectedEntryId?.takeIf { it.isNotBlank() }
+        ?: cached.blackBox.gatePreview.entryId?.takeIf { it.isNotBlank() && cached.blackBox.gatePreview.valid }
+        ?: entryId
       BlackBoxEntryAction.COMPLETE -> {
         val remainingGateEntries = gateEntries.filterNot { it.entryId == entryId }
         if (remainingGateEntries.isEmpty()) {
@@ -484,10 +496,25 @@ class NanoflowWidgetRepository(private val context: Context) {
       nextSelectedEntryId.isNullOrBlank() -> null
       else -> newPreviews.firstOrNull { it.entryId == nextSelectedEntryId }
     }
-    val newGatePreview = if (cached.blackBox.gatePreview.entryId == entryId || previousSelectedEntryId == entryId) {
-      nextPreview ?: WidgetGatePreview()
-    } else {
-      cached.blackBox.gatePreview
+    val newGatePreview = when (action) {
+      BlackBoxEntryAction.READ -> when {
+        cached.blackBox.gatePreview.entryId == entryId -> cached.blackBox.gatePreview.copy(
+          isRead = true,
+          updatedAt = nowIso,
+        )
+        previousSelectedEntryId == entryId -> nextPreview ?: targetPreview.copy(
+          isRead = true,
+          updatedAt = nowIso,
+        )
+        else -> cached.blackBox.gatePreview
+      }
+      BlackBoxEntryAction.COMPLETE -> {
+        if (cached.blackBox.gatePreview.entryId == entryId || previousSelectedEntryId == entryId) {
+          nextPreview ?: WidgetGatePreview()
+        } else {
+          cached.blackBox.gatePreview
+        }
+      }
     }
     val newUnreadCount = (resolveBlackBoxUnreadCount(cached) - unreadDelta)
       .coerceAtLeast(0)
@@ -540,38 +567,17 @@ class NanoflowWidgetRepository(private val context: Context) {
   ): WidgetFocusOptimisticSnapshot? {
     val cached = store.readSummary(appWidgetId) ?: return null
     if (cached.focus.active != true || !cached.focus.valid) return null
-    if (cached.focus.taskId == taskId) return null
+    val visibleTasks = resolveVisibleCommandCenterTasks(cached)
+    if (visibleTasks.firstOrNull()?.taskId == taskId) return null
 
-    val target = cached.dock.items.firstOrNull { it.taskId == taskId } ?: return null
-    val currentFocusAsDockItem = WidgetDockItem(
-      taskId = cached.focus.taskId,
-      projectId = cached.focus.projectId,
-      title = cached.focus.title,
-      projectTitle = cached.focus.projectTitle,
-      estimatedMinutes = cached.focus.remainingMinutes,
-      isMaster = cached.focus.isMaster,
-      valid = cached.focus.valid,
-    )
-    val reorderedItems = buildList {
-      if (!currentFocusAsDockItem.taskId.isNullOrBlank() || !currentFocusAsDockItem.title.isNullOrBlank()) {
-        add(currentFocusAsDockItem)
-      }
-      addAll(cached.dock.items.filterNot { it.taskId == taskId })
+    val target = visibleTasks.firstOrNull { it.taskId == taskId } ?: return null
+    if (!target.valid) return null
+    val reorderedTasks = buildList {
+      add(target)
+      addAll(visibleTasks.filterNot { it.taskId == taskId })
     }
     val previousSelectedTaskIndex = store.readSelectedTaskIndex(appWidgetId)
-    val patched = cached.copy(
-      focus = cached.focus.copy(
-        taskId = target.taskId,
-        projectId = target.projectId,
-        projectTitle = target.projectTitle,
-        title = target.title,
-        remainingMinutes = target.estimatedMinutes,
-        // 保留 null 语义：legacy summary 若没有显式主任务标记，后续仍可回退到“首槽为主”。
-        isMaster = target.isMaster,
-        valid = target.valid,
-      ),
-      dock = cached.dock.copy(items = reorderedItems),
-    )
+    val patched = patchSummaryWithVisibleCommandTasks(cached, reorderedTasks)
     store.saveSummary(appWidgetId, patched)
     store.persistSelectedTaskIndex(appWidgetId, 0)
 
@@ -580,7 +586,7 @@ class NanoflowWidgetRepository(private val context: Context) {
       mapOf(
         "appWidgetId" to appWidgetId,
         "taskId" to NanoflowWidgetTelemetry.redactId(taskId),
-        "dockItemCount" to reorderedItems.size,
+        "dockItemCount" to reorderedTasks.drop(1).size,
       ),
     )
 
@@ -588,6 +594,13 @@ class NanoflowWidgetRepository(private val context: Context) {
       summary = cached,
       selectedTaskIndex = previousSelectedTaskIndex,
     )
+  }
+
+  suspend fun isVisibleCommandCenterTaskPromotable(appWidgetId: Int, taskId: String): Boolean {
+    val cached = store.readSummary(appWidgetId) ?: return false
+    return resolveVisibleCommandCenterTasks(cached).any { visibleTask ->
+      visibleTask.taskId == taskId && visibleTask.valid
+    }
   }
 
   suspend fun rollbackOptimisticFocusPromotion(
@@ -599,6 +612,22 @@ class NanoflowWidgetRepository(private val context: Context) {
   }
 
   suspend fun promoteFocusSecondaryTask(appWidgetId: Int, taskId: String): Boolean {
+    val cached = store.readSummary(appWidgetId)
+    val target = cached?.let { summary ->
+      resolveVisibleCommandCenterTasks(summary).firstOrNull { visibleTask -> visibleTask.taskId == taskId }
+    }
+    if (target == null || !target.valid) {
+      NanoflowWidgetTelemetry.warn(
+        "widget_focus_promote_failure",
+        mapOf(
+          "appWidgetId" to appWidgetId,
+          "taskId" to NanoflowWidgetTelemetry.redactId(taskId),
+          "reason" to "task-not-promotable",
+        ),
+      )
+      return false
+    }
+
     val binding = store.readBinding()
     if (binding == null) {
       NanoflowWidgetTelemetry.warn(
@@ -1039,10 +1068,10 @@ class NanoflowWidgetRepository(private val context: Context) {
       && summary.dock.count > 0
       && gateEntries.isEmpty()
       && summary.blackBox.pendingCount == 0
-    // 2026-04-22 大门逻辑完善：
+    // 2026-04-26 大门逻辑完善：
     //   * 非空大门 = `!focus && (gateEntries 非空 或 pendingCount>0)` → 整卡点击不进入项目（OPEN_FOCUS_TOOLS），
     //     仅 已读/完成 双按钮通过深链直通 mark-gate-read/complete 改写黑匣子状态。
-    //   * 空大门（全部已读/完成清空后）= `!focus && gateEntries.isEmpty() && pendingCount==0` →
+    //   * 空大门（全部完成清空后）= `!focus && gateEntries.isEmpty() && pendingCount==0` →
     //     渲染空状态大卡（🚪 + 暂无未完成任务 + 点击进入项目），整卡点击走 OPEN_WORKSPACE。
     //   * 专注模式所有任务完成时，服务端需将 focus.active=false（此处依赖后端信号）；
     //     当 focus 不再 active 且无黑匣子时走空大门路径，视觉上自动切换到大门视图。
@@ -1190,7 +1219,8 @@ class NanoflowWidgetRepository(private val context: Context) {
   }
 
   /**
-    * 聚合当前 C 位的 1-4 号槽位：focus.* 是当前前台，dock.items 是其后的可见槽位。
+    * 聚合当前 C 位的 1-4 号槽位。
+    * 优先使用服务端显式下发的 commandCenter.slots，避免再从 focus+dock 现场推导主/副属性。
     * 任务属性（主/副）独立于前后顺序，因此第一槽不一定是主任务。
    * 隐私模式下标题用占位符避免信息泄露。
    */
@@ -1202,45 +1232,30 @@ class NanoflowWidgetRepository(private val context: Context) {
     canOpenFocusTask: Boolean,
   ): List<WidgetTaskCard> {
     if (!hasFocusState) return emptyList()
-    val cards = mutableListOf<WidgetTaskCard>()
-    val hasExplicitMaster = summary.focus.isMaster == true || summary.dock.items.any { it.isMaster == true }
-    val focusIsMain = summary.focus.isMaster ?: !hasExplicitMaster
-    val mainTitle = when {
+    val resolvedFocusTitle = when {
       privacyMode -> context.getString(R.string.nanoflow_widget_privacy_focus_title)
       !focusTitle.isNullOrBlank() -> focusTitle
       canOpenFocusTask -> context.getString(R.string.nanoflow_widget_focus_ready_title)
       else -> context.getString(R.string.nanoflow_widget_unknown_task)
     }
-    cards.add(
+
+    return resolveVisibleCommandCenterTasks(summary).mapIndexedNotNull { index, task ->
+      if (task.taskId.isNullOrBlank() && task.title.isNullOrBlank()) {
+        return@mapIndexedNotNull null
+      }
       WidgetTaskCard(
-        taskId = summary.focus.taskId,
-        title = mainTitle,
-        projectTitle = if (privacyMode) null else summary.focus.projectTitle,
-        estimatedMinutes = summary.focus.remainingMinutes,
-        isMain = focusIsMain,
-        valid = summary.focus.valid,
-      )
-    )
-    for (item in summary.dock.items.take(3)) {
-      // 之前用 `if (!item.valid) return@forEach` 强过滤会导致后端因任务行未在 taskMap 命中
-      // （RLS/子查询时序）返回 valid=false 的有效 dock 任务被全部隐藏，用户实际上有 6 个备选
-      // 任务却只看到「主」一个 chip。这里改为：只要 taskId 非空且有标题就纳入展示，valid=false
-      // 仅作为后端可能存在数据漂移的弱信号，不应阻断 UI。
-      val itemTaskId = item.taskId
-      if (itemTaskId.isNullOrBlank() && item.title.isNullOrBlank()) continue
-      cards.add(
-        WidgetTaskCard(
-          taskId = itemTaskId,
-          title = if (privacyMode) context.getString(R.string.nanoflow_widget_privacy_focus_title)
-          else item.title?.takeIf { it.isNotBlank() } ?: context.getString(R.string.nanoflow_widget_unknown_task),
-          projectTitle = if (privacyMode) null else item.projectTitle,
-          estimatedMinutes = item.estimatedMinutes,
-          isMain = item.isMaster == true,
-          valid = item.valid,
-        )
+        taskId = task.taskId,
+        title = when {
+          privacyMode -> context.getString(R.string.nanoflow_widget_privacy_focus_title)
+          index == 0 -> resolvedFocusTitle
+          else -> task.title?.takeIf { it.isNotBlank() } ?: context.getString(R.string.nanoflow_widget_unknown_task)
+        },
+        projectTitle = if (privacyMode) null else task.projectTitle,
+        estimatedMinutes = task.estimatedMinutes,
+        isMain = task.isMain,
+        valid = task.valid,
       )
     }
-    return cards
   }
 
   private fun buildTaskContentCards(taskCards: List<WidgetTaskCard>): List<WidgetContentCard> {
@@ -1781,33 +1796,130 @@ class NanoflowWidgetRepository(private val context: Context) {
       return null
     }
 
-    val routeCandidates = mutableListOf<String>()
-    val focusProjectId = summary.focus.projectId?.takeIf { it.isNotBlank() }
-    val focusTaskId = summary.focus.taskId?.takeIf { it.isNotBlank() }
-    if (summary.focus.valid) {
-      routeCandidates += when {
-        focusProjectId != null && focusTaskId != null -> buildTaskEntryUrl(focusProjectId, focusTaskId)
-        focusProjectId != null -> buildProjectEntryUrl(focusProjectId)
-        else -> buildWorkspaceEntryUrl()
-      }
+    val targetTask = resolveVisibleCommandCenterTasks(summary).getOrNull(requestedTaskIndex)
+      ?: return null
+    if (!targetTask.valid) {
+      return buildWorkspaceEntryUrl()
     }
 
-    val mainTaskId = summary.focus.taskId
-    var secondaryCount = 0
-    for (item in summary.dock.items) {
-      if (secondaryCount >= 3) break
-      val itemTaskId = item.taskId?.takeIf { it.isNotBlank() } ?: continue
-      if (mainTaskId != null && itemTaskId == mainTaskId) continue
-      val projectId = item.projectId?.takeIf { it.isNotBlank() }
-      routeCandidates += if (projectId != null) {
-        buildTaskEntryUrl(projectId, itemTaskId)
-      } else {
-        buildWorkspaceEntryUrl()
+    val taskId = targetTask.taskId?.takeIf { it.isNotBlank() }
+    val projectId = targetTask.projectId?.takeIf { it.isNotBlank() }
+    return when {
+      projectId != null && taskId != null -> buildTaskEntryUrl(projectId, taskId)
+      projectId != null -> buildProjectEntryUrl(projectId)
+      else -> buildWorkspaceEntryUrl()
+    }
+  }
+
+  private fun resolveVisibleCommandCenterTasks(summary: WidgetSummaryResponse): List<VisibleCommandCenterTask> {
+    val commandSlots = summary.commandCenter.slots
+      .asSequence()
+      .filter { !it.taskId.isNullOrBlank() || !it.title.isNullOrBlank() }
+      .sortedBy { slot -> if (slot.position > 0) slot.position else Int.MAX_VALUE }
+      .take(4)
+      .map { slot ->
+        VisibleCommandCenterTask(
+          position = if (slot.position > 0) slot.position else 1,
+          taskId = slot.taskId,
+          projectId = slot.projectId,
+          title = slot.title,
+          projectTitle = slot.projectTitle,
+          estimatedMinutes = slot.estimatedMinutes,
+          isMain = slot.isMain,
+          valid = slot.valid,
+        )
       }
-      secondaryCount += 1
+      .toList()
+    if (commandSlots.isNotEmpty()) {
+      return commandSlots
     }
 
-    return routeCandidates.getOrNull(requestedTaskIndex)
+    val legacyTasks = mutableListOf<VisibleCommandCenterTask>()
+    val hasExplicitMain = summary.focus.isMaster == true || summary.dock.items.any { it.isMaster == true }
+    val focusIsMain = summary.focus.isMaster ?: !hasExplicitMain
+    if (!summary.focus.taskId.isNullOrBlank() || !summary.focus.title.isNullOrBlank()) {
+      legacyTasks += VisibleCommandCenterTask(
+        position = 1,
+        taskId = summary.focus.taskId,
+        projectId = summary.focus.projectId,
+        title = summary.focus.title,
+        projectTitle = summary.focus.projectTitle,
+        estimatedMinutes = summary.focus.remainingMinutes,
+        isMain = focusIsMain,
+        valid = summary.focus.valid,
+      )
+    }
+    for ((index, item) in summary.dock.items.withIndex()) {
+      if (legacyTasks.size >= 4) break
+      if (item.taskId.isNullOrBlank() && item.title.isNullOrBlank()) continue
+      legacyTasks += VisibleCommandCenterTask(
+        position = index + 2,
+        taskId = item.taskId,
+        projectId = item.projectId,
+        title = item.title,
+        projectTitle = item.projectTitle,
+        estimatedMinutes = item.estimatedMinutes,
+        isMain = item.isMaster == true,
+        valid = item.valid,
+      )
+    }
+    return legacyTasks
+  }
+
+  private fun patchSummaryWithVisibleCommandTasks(
+    summary: WidgetSummaryResponse,
+    reorderedTasks: List<VisibleCommandCenterTask>,
+  ): WidgetSummaryResponse {
+    val focusedTask = reorderedTasks.firstOrNull()
+    val dockItems = reorderedTasks.drop(1).map { task ->
+      WidgetDockItem(
+        taskId = task.taskId,
+        projectId = task.projectId,
+        title = task.title,
+        projectTitle = task.projectTitle,
+        estimatedMinutes = task.estimatedMinutes,
+        isMaster = task.isMain,
+        valid = task.valid,
+      )
+    }
+    val mainTaskId = reorderedTasks.firstOrNull { it.isMain }?.taskId
+      ?: summary.commandCenter.mainTaskId
+      ?: focusedTask?.taskId
+    val backupCount = maxOf(
+      summary.commandCenter.backupCount.coerceAtLeast(0),
+      (summary.dock.count - dockItems.size).coerceAtLeast(0),
+    )
+
+    return summary.copy(
+      focus = summary.focus.copy(
+        taskId = focusedTask?.taskId,
+        projectId = focusedTask?.projectId,
+        projectTitle = focusedTask?.projectTitle,
+        title = focusedTask?.title,
+        remainingMinutes = focusedTask?.estimatedMinutes,
+        isMaster = focusedTask?.isMain,
+        valid = focusedTask?.valid ?: false,
+      ),
+      dock = summary.dock.copy(items = dockItems),
+      commandCenter = summary.commandCenter.copy(
+        slots = reorderedTasks.mapIndexed { index, task ->
+          WidgetCommandCenterSlot(
+            position = index + 1,
+            taskId = task.taskId,
+            projectId = task.projectId,
+            title = task.title,
+            projectTitle = task.projectTitle,
+            estimatedMinutes = task.estimatedMinutes,
+            isMain = task.isMain,
+            isFocused = index == 0,
+            valid = task.valid,
+          )
+        },
+        mainTaskId = mainTaskId,
+        focusedTaskId = focusedTask?.taskId,
+        backupCount = backupCount,
+      ),
+    )
   }
 
   private fun buildTaskEntryUrl(projectId: String, taskId: String): String {

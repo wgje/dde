@@ -19,6 +19,7 @@ import { ModalLoaderService } from '../app/core/services/modal-loader.service';
 import { ProjectStateService } from './project-state.service';
 import { ProjectOperationService } from './project-operation.service';
 import { AppAuthCoordinatorService } from '../app/core/services/app-auth-coordinator.service';
+import { type ConflictResolutionPlan } from './conflict-resolution.types';
 /* eslint-enable no-restricted-imports */
 import type { StorageEscapeData } from '../app/shared/modals';
 import { ThemeType, Project } from '../models';
@@ -419,6 +420,22 @@ export class WorkspaceModalCoordinatorService {
 
   async resolveConflictMerge(): Promise<void> {
     return this.resolveConflictWith('merge');
+  }
+
+  async applyConflictResolutionPlan(plan: ConflictResolutionPlan): Promise<void> {
+    if (this._isResolvingConflict) return;
+    this._isResolvingConflict = true;
+    try {
+      const data = this._pendingConflict;
+      if (data) {
+        await this.projectOps.resolveConflictWithPlan(data.projectId, plan);
+      }
+      this._conflictModalRef?.close({ choice: 'merge' });
+      this._pendingConflict = null;
+      this._conflictModalRef = null;
+    } finally {
+      this._isResolvingConflict = false;
+    }
   }
 
   cancelConflictResolution(): void {

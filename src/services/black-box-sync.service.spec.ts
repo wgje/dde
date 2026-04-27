@@ -14,7 +14,6 @@ import type { BlackBoxEntry } from '../models/focus';
 
 function createEntry(overrides: Partial<BlackBoxEntry> & Pick<BlackBoxEntry, 'id'>): BlackBoxEntry {
   return {
-    id: overrides.id,
     projectId: null,
     userId: 'user-1',
     content: 'entry',
@@ -156,7 +155,7 @@ describe('BlackBoxSyncService', () => {
 
   it('should apply resume pull cooldown by default', async () => {
     const doPullSpy = vi.spyOn(
-      service as unknown as { doPullChanges: () => Promise<void> },
+      service as unknown as { doPullChanges: () => Promise<boolean> },
       'doPullChanges'
     ).mockResolvedValue(true);
 
@@ -168,7 +167,7 @@ describe('BlackBoxSyncService', () => {
 
   it('should bypass cooldown when force=true', async () => {
     const doPullSpy = vi.spyOn(
-      service as unknown as { doPullChanges: () => Promise<void> },
+      service as unknown as { doPullChanges: () => Promise<boolean> },
       'doPullChanges'
     ).mockResolvedValue(true);
 
@@ -181,7 +180,7 @@ describe('BlackBoxSyncService', () => {
   it('should reuse in-flight pull promise (single-flight)', async () => {
     let resolvePull: (() => void) | null = null;
     const doPullSpy = vi.spyOn(
-      service as unknown as { doPullChanges: () => Promise<void> },
+      service as unknown as { doPullChanges: () => Promise<boolean> },
       'doPullChanges'
     ).mockReturnValue(new Promise<boolean>(resolve => {
       resolvePull = () => resolve(true);
@@ -190,7 +189,7 @@ describe('BlackBoxSyncService', () => {
     const p1 = service.pullChanges({ reason: 'resume', force: true });
     const p2 = service.pullChanges({ reason: 'resume', force: true });
 
-  await flushMicrotasks();
+    await flushMicrotasks();
 
     expect(doPullSpy).toHaveBeenCalledTimes(1);
 
@@ -205,7 +204,7 @@ describe('BlackBoxSyncService', () => {
     supabase.isOfflineMode.mockReturnValue(true);
 
     const doPullSpy = vi.spyOn(
-      service as unknown as { doPullChanges: () => Promise<void> },
+      service as unknown as { doPullChanges: () => Promise<boolean> },
       'doPullChanges'
     ).mockResolvedValue(true);
     const loadLocalSpy = vi.spyOn(
@@ -224,7 +223,7 @@ describe('BlackBoxSyncService', () => {
       validateOrRefreshOnResume: ReturnType<typeof vi.fn>;
     };
     const doPullSpy = vi.spyOn(
-      service as unknown as { doPullChanges: () => Promise<void> },
+      service as unknown as { doPullChanges: () => Promise<boolean> },
       'doPullChanges'
     ).mockResolvedValue(true);
 
@@ -246,7 +245,7 @@ describe('BlackBoxSyncService', () => {
       validateOrRefreshOnResume: ReturnType<typeof vi.fn>;
     };
     const doPullSpy = vi.spyOn(
-      service as unknown as { doPullChanges: () => Promise<void> },
+      service as unknown as { doPullChanges: () => Promise<boolean> },
       'doPullChanges'
     ).mockResolvedValue(true);
 
@@ -269,7 +268,7 @@ describe('BlackBoxSyncService', () => {
       validateOrRefreshOnResume: ReturnType<typeof vi.fn>;
     };
     const doPullSpy = vi.spyOn(
-      service as unknown as { doPullChanges: () => Promise<void> },
+      service as unknown as { doPullChanges: () => Promise<boolean> },
       'doPullChanges'
     ).mockResolvedValue(true);
 
@@ -287,7 +286,7 @@ describe('BlackBoxSyncService', () => {
 
   it('should block duplicate pull by freshness window and report to Sentry', async () => {
     const doPullSpy = vi.spyOn(
-      service as unknown as { doPullChanges: () => Promise<void> },
+      service as unknown as { doPullChanges: () => Promise<boolean> },
       'doPullChanges'
     ).mockResolvedValue(true);
 
@@ -313,7 +312,7 @@ describe('BlackBoxSyncService', () => {
 
   it('should bypass freshness window when pending entries need authoritative reconcile', async () => {
     const doPullSpy = vi.spyOn(
-      service as unknown as { doPullChanges: () => Promise<void> },
+      service as unknown as { doPullChanges: () => Promise<boolean> },
       'doPullChanges'
     ).mockResolvedValue(true);
     const pendingEntry = createEntry({
@@ -332,7 +331,7 @@ describe('BlackBoxSyncService', () => {
 
   it('should bypass resume cooldown when pending entries need authoritative reconcile', async () => {
     const doPullSpy = vi.spyOn(
-      service as unknown as { doPullChanges: () => Promise<void> },
+      service as unknown as { doPullChanges: () => Promise<boolean> },
       'doPullChanges'
     ).mockResolvedValue(true);
     const pendingEntry = createEntry({
@@ -350,7 +349,7 @@ describe('BlackBoxSyncService', () => {
 
   it('should not report passive view refresh duplicates to Sentry', async () => {
     const doPullSpy = vi.spyOn(
-      service as unknown as { doPullChanges: () => Promise<void> },
+      service as unknown as { doPullChanges: () => Promise<boolean> },
       'doPullChanges'
     ).mockResolvedValue(true);
 
@@ -361,6 +360,73 @@ describe('BlackBoxSyncService', () => {
 
     expect(doPullSpy).toHaveBeenCalledTimes(1);
     expect(mockSentry.captureMessage).not.toHaveBeenCalled();
+  });
+
+  it('should resubscribe after realtime circuit window elapses when desired user is unchanged', async () => {
+    vi.useFakeTimers();
+    try {
+      const syncRealtimeSpy = vi.spyOn(
+        service as unknown as {
+          syncRealtimeSubscription: (userId: string | null, generation: number) => Promise<void>;
+        },
+        'syncRealtimeSubscription'
+      ).mockResolvedValue(undefined);
+
+      (service as unknown as {
+        realtimeDesiredUserId: string | null;
+        realtimeSubscriptionGeneration: number;
+      }).realtimeDesiredUserId = 'user-1';
+      (service as unknown as {
+        realtimeDesiredUserId: string | null;
+        realtimeSubscriptionGeneration: number;
+      }).realtimeSubscriptionGeneration = 7;
+
+      (service as unknown as {
+        scheduleRealtimeCircuitRetry: (userId: string, delayMs: number, generation: number) => void;
+      }).scheduleRealtimeCircuitRetry('user-1', 1_000, 7);
+
+      vi.advanceTimersByTime(1_000);
+      await flushMicrotasks();
+
+      expect(syncRealtimeSpy).toHaveBeenCalledWith('user-1', 8);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('should not resubscribe after realtime circuit window when desired user changed', async () => {
+    vi.useFakeTimers();
+    try {
+      const syncRealtimeSpy = vi.spyOn(
+        service as unknown as {
+          syncRealtimeSubscription: (userId: string | null, generation: number) => Promise<void>;
+        },
+        'syncRealtimeSubscription'
+      ).mockResolvedValue(undefined);
+
+      (service as unknown as {
+        realtimeDesiredUserId: string | null;
+        realtimeSubscriptionGeneration: number;
+      }).realtimeDesiredUserId = 'user-1';
+      (service as unknown as {
+        realtimeDesiredUserId: string | null;
+        realtimeSubscriptionGeneration: number;
+      }).realtimeSubscriptionGeneration = 3;
+
+      (service as unknown as {
+        scheduleRealtimeCircuitRetry: (userId: string, delayMs: number, generation: number) => void;
+      }).scheduleRealtimeCircuitRetry('user-1', 1_000, 3);
+      (service as unknown as {
+        realtimeDesiredUserId: string | null;
+      }).realtimeDesiredUserId = 'user-2';
+
+      vi.advanceTimersByTime(1_000);
+      await flushMicrotasks();
+
+      expect(syncRealtimeSpy).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('should skip stale push payloads when a newer local snapshot already exists', async () => {

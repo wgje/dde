@@ -265,12 +265,20 @@ export class DockTaskFlowService {
 
     this.syncTaskCompletion(taskId);
     this.completionFlow.resolveAfterCompletion(taskId);
-    if (wasMaster) {
+    if (wasMaster && !this.ctx.pendingDecision()) {
       this.promotionService.promoteFocusedTaskToMaster();
     }
-    this.ctx.entries.update(prev => this.completionFlow.enforceSingleMainInvariant(prev));
+    if (!this.ctx.pendingDecision()) {
+      this.ctx.entries.update(prev => this.completionFlow.enforceSingleMainInvariant(prev));
+    }
+    if (!this.ctx.entries().some(item => item.status !== 'completed')) {
+      this.ctx.focusMode.set(false);
+      this.exitFocusMode();
+    }
     this.ctx.rebalanceAutoZones();
-    this.lifecycle.refreshSuspendRecommendationLock();
+    if (!this.ctx.pendingDecision()) {
+      this.lifecycle.refreshSuspendRecommendationLock();
+    }
     this.ctx.waitEndNotifiedIds.delete(taskId);
   }
 

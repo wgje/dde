@@ -379,7 +379,9 @@ export class ParkingDockComponent implements OnDestroy {
 
   /** Alt+Shift 快捷键分发 */
   private handleShortcutKey(event: KeyboardEvent): void {
-    const key = event.key.toLowerCase();
+    const key = typeof event.key === 'string' ? event.key.toLowerCase() : '';
+    if (!key) return;
+
     if (event.altKey && event.shiftKey) {
       if (key === 'l') { event.preventDefault(); this.onFocusSessionToggle(); return; }
       if (key === 'f') { if (!this.engine.focusMode()) return; event.preventDefault(); this.onScrimToggle(); return; }

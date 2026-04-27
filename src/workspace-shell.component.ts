@@ -13,7 +13,10 @@ import { ActionQueueService } from './services/action-queue.service';
 import { LoggerService } from './services/logger.service';
 import { GlobalErrorHandler } from './services/global-error-handler.service';
 import { ModalService, type DeleteProjectData, type LoginData } from './services/modal.service';
-import { WorkspaceModalCoordinatorService } from './services/workspace-modal-coordinator.service';
+import {
+  WorkspaceModalCoordinatorService,
+  type ModalCallbacks,
+} from './services/workspace-modal-coordinator.service';
 import { SyncCoordinatorService } from './services/sync-coordinator.service';
 import { SupabaseClientService } from './services/supabase-client.service';
 import { SimpleSyncService } from './app/core/services/simple-sync.service';
@@ -581,18 +584,86 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
     return this.startupTier.isTierReady('p2') || hasSyncIssue;
   });
   
-  /** 模态框加载中状态（委托到 modalCoord） */
-  readonly modalLoading = this.modalCoord.modalLoading;
+  /** 模态框加载中状态。Modal 协调器动态加载前由壳层先承接按钮反馈。 */
+  readonly modalLoading = signal<Record<string, boolean>>({});
 
   /** 检查指定类型的模态框是否正在加载 */
   isModalLoading(type: string): boolean {
-    return this.modalCoord.isModalLoading(type);
+    return this.modalLoading()[type] ?? this.modalCoordRef?.isModalLoading(type) ?? this.modalCoord.isModalLoading(type);
   }
 
-  /** 存储失败逃生数据（委托到 modalCoord） */
-  get storageEscapeData() { return this.modalCoord.storageEscapeData; }
-  get showStorageEscapeModal() { return this.modalCoord.showStorageEscapeModal; }
-  
+  private setModalLoading(type: string, loading: boolean): void {
+    this.modalLoading.update(state => {
+      const next = { ...state };
+      if (loading) {
+        next[type] = true;
+      } else {
+        delete next[type];
+      }
+      return next;
+    });
+  }
+
+  private async getModalCoord(): Promise<WorkspaceModalCoordinatorService> {
+    if (this.modalCoordRef) {
+      return this.modalCoordRef;
+    }
+
+    if (!this.modalCoordPromise) {
+      this.modalCoordPromise = import('./services/workspace-modal-coordinator.service')
+        .then((module) => {
+          const modalCoord = this.injector.get(module.WorkspaceModalCoordinatorService);
+          if (!this.destroyed) {
+            modalCoord.initCallbacks(this.createModalCallbacks());
+          }
+          this.modalCoordRef = modalCoord;
+          return modalCoord;
+        })
+        .finally(() => {
+          this.modalCoordPromise = null;
+        });
+    }
+
+    return this.modalCoordPromise;
+  }
+
+  private createModalCallbacks(): ModalCallbacks {
+    return {
+      signOut: () => this.signOut(),
+      updateTheme: (theme: ThemeType) => this.updateTheme(theme),
+      handleImportComplete: (project: Project) => void this.handleImportComplete(project),
+      handleLoginFromModal: (data) => void this.handleLoginFromModal(data),
+      handleSignupFromModal: (data) => void this.handleSignupFromModal(data),
+      handleResetPasswordFromModal: (email) => void this.handleResetPasswordFromModal(email),
+      handleLocalModeFromModal: () => this.handleLocalModeFromModal(),
+      confirmCreateProject: (name, desc) => void this.confirmCreateProject(name, desc),
+      handleMigrationComplete: () => this.handleMigrationComplete(),
+      closeMigrationModal: () => this.closeMigrationModal(),
+    };
+  }
+
+  private async runModalAction(
+    loadingType: string | null,
+    action: (modalCoord: WorkspaceModalCoordinatorService) => Promise<void> | void,
+  ): Promise<void> {
+    if (loadingType && this.isModalLoading(loadingType)) {
+      return;
+    }
+
+    if (loadingType) {
+      this.setModalLoading(loadingType, true);
+    }
+
+    try {
+      const modalCoord = await this.getModalCoord();
+      await action(modalCoord);
+    } finally {
+      if (loadingType) {
+        this.setModalLoading(loadingType, false);
+      }
+    }
+  }
+
   // 手机端滑动切换状态
   private touchStartX = 0;
   private touchStartY = 0;
@@ -877,6 +948,9 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
   private readonly deferredStartupEntryIntent = signal<StartupEntryIntent | null>(null);
   private androidWidgetBootstrapCaptureKey: string | null = null;
   private androidWidgetBootstrapInFlight = false;
+  private destroyed = false;
+  private modalCoordRef: WorkspaceModalCoordinatorService | null = null;
+  private modalCoordPromise: Promise<WorkspaceModalCoordinatorService> | null = null;
   private readonly launchSnapshotWriteBlocked = signal(false);
 
   constructor() {
@@ -892,21 +966,7 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
     this.setupSidebarToggleListener();
     this.setupStorageFailureHandler();
     this.setupBeforeUnloadHandler();
-
-    // Wire modal coordinator callbacks so the service can call back into
-    // component-level methods without creating a circular dependency.
-    this.modalCoord.initCallbacks({
-      signOut: () => this.signOut(),
-      updateTheme: (theme: ThemeType) => this.updateTheme(theme),
-      handleImportComplete: (project: Project) => void this.handleImportComplete(project),
-      handleLoginFromModal: (data) => void this.handleLoginFromModal(data),
-      handleSignupFromModal: (data) => void this.handleSignupFromModal(data),
-      handleResetPasswordFromModal: (email) => void this.handleResetPasswordFromModal(email),
-      handleLocalModeFromModal: () => this.handleLocalModeFromModal(),
-      confirmCreateProject: (name, desc) => void this.confirmCreateProject(name, desc),
-      handleMigrationComplete: () => this.handleMigrationComplete(),
-      closeMigrationModal: () => this.closeMigrationModal(),
-    });
+    this.modalCoord.initCallbacks(this.createModalCallbacks());
 
     // ── Service Initialization Order ──────────────────────────────────────
     // The six startup services are initialized in a strict sequence to

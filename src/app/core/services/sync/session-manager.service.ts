@@ -19,6 +19,7 @@ import { SyncStateService } from './sync-state.service';
 import { PermanentFailureError } from '../../../../utils/permanent-failure-error';
 import { EnhancedError, supabaseErrorToError } from '../../../../utils/supabase-error';
 import type { Session, SupabaseClient } from '@supabase/supabase-js';
+import type { Database } from '../../../../types/supabase';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 import {
   isBrowserNetworkSuspendedError,

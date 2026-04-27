@@ -40,22 +40,22 @@ export class FlowLogicExportService {
   ): Result<StrategicReviewResult, OperationError> {
     const project = this.projectState.activeProject();
     if (!project) {
-      const err = failure<StrategicReviewResult, OperationError>(
-        ErrorCodes.DATA_NOT_FOUND,
-        '当前没有活动项目',
-      );
-      this.toast.error('导出失败', err.error.message);
-      return err;
+      const error: OperationError = {
+        code: ErrorCodes.DATA_NOT_FOUND,
+        message: '当前没有活动项目',
+      };
+      this.toast.error('导出失败', error.message);
+      return { ok: false, error };
     }
     try {
       const result = buildStrategicReviewMarkdown(project, options ?? {});
       if (!result.markdown) {
-        const err = failure<StrategicReviewResult, OperationError>(
-          ErrorCodes.OPERATION_FAILED,
-          '项目脉络内容为空',
-        );
-        this.toast.error('导出失败', err.error.message);
-        return err;
+        const error: OperationError = {
+          code: ErrorCodes.OPERATION_FAILED,
+          message: '项目脉络内容为空',
+        };
+        this.toast.error('导出失败', error.message);
+        return { ok: false, error };
       }
       this.downloadText(
         result.markdown,
@@ -75,13 +75,13 @@ export class FlowLogicExportService {
       return success(result);
     } catch (error) {
       this.logger.error('生成项目脉络失败', error);
-      const err = failure<StrategicReviewResult, OperationError>(
-        ErrorCodes.OPERATION_FAILED,
-        '生成项目脉络失败',
-        { cause: (error as Error)?.message },
-      );
-      this.toast.error('导出失败', err.error.message);
-      return err;
+      const operationError: OperationError = {
+        code: ErrorCodes.OPERATION_FAILED,
+        message: '生成项目脉络失败',
+        details: { cause: (error as Error)?.message },
+      };
+      this.toast.error('导出失败', operationError.message);
+      return { ok: false, error: operationError };
     }
   }
 

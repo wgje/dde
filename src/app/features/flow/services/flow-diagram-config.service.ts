@@ -15,6 +15,7 @@ export interface GoJSNodeData {
   title: string;
   displayId: string;
   stage: number | null;
+  rank?: number;
   loc: string;
   color: string;
   borderColor: string;

@@ -106,7 +106,7 @@ export class ProjectDataService {
   private readonly logger = this.loggerService.category('ProjectData');
   private readonly throttle = inject(RequestThrottleService);
   private readonly syncState = inject(SyncStateService);
-  private readonly sessionManager = inject(SessionManagerService);
+  private readonly sessionManager = inject(SessionManagerService, { optional: true });
   private readonly tombstoneService = inject(TombstoneService);
   
   /** 是否正在从远程加载 */
@@ -195,11 +195,19 @@ export class ProjectDataService {
       ? persistedSessionUserId
       : null;
   }
+
+  private isSessionExpiredError(error: ReturnType<typeof supabaseErrorToError>): boolean {
+    return this.sessionManager?.isSessionExpiredError(error) ?? false;
+  }
+
+  private async tryRefreshSessionWithSession(context: string): Promise<{ refreshed: boolean }> {
+    return this.sessionManager?.tryRefreshSessionWithSession(context) ?? { refreshed: false };
+  }
   
   /**
    * 获取 Supabase 客户端
    */
-  private async getSupabaseClient(): Promise<SupabaseClient | null> {
+  private async getSupabaseClient(expectedUserId?: string): Promise<SupabaseClient | null> {
     if (!this.supabase.isConfigured) {
       const failure = classifySupabaseClientFailure(false);
       if (!this.hasLoggedSupabaseMissingConfig) {
@@ -217,7 +225,10 @@ export class ProjectDataService {
       this.logger.debug('连接中断模式下跳过 ProjectData 远端读取');
       return null;
     }
-    if (!this.resolveRemoteSessionUserId()) {
+    const hasExpectedRemoteUser = typeof expectedUserId === 'string'
+      && expectedUserId.length > 0
+      && expectedUserId !== AUTH_CONFIG.LOCAL_MODE_USER_ID;
+    if (!this.resolveRemoteSessionUserId() && !hasExpectedRemoteUser) {
       this.logger.debug('会话不可用，跳过 ProjectData 远端读取');
       return null;
     }
@@ -255,11 +266,11 @@ export class ProjectDataService {
       return await fn();
     } catch (error) {
       const enhanced = supabaseErrorToError(error);
-      if (!this.sessionManager.isSessionExpiredError(enhanced)) {
+      if (!this.isSessionExpiredError(enhanced)) {
         throw error;
       }
 
-      const refreshResult = await this.sessionManager.tryRefreshSessionWithSession(context);
+      const refreshResult = await this.tryRefreshSessionWithSession(context);
       if (!refreshResult.refreshed) {
         throw error;
       }
@@ -297,8 +308,8 @@ export class ProjectDataService {
       // syncState.sessionExpired 短路。
       if (error) {
         const enhanced = supabaseErrorToError(error);
-        if (this.sessionManager.isSessionExpiredError(enhanced)) {
-          const refreshResult = await this.sessionManager.tryRefreshSessionWithSession('loadFullProjectOptimized');
+        if (this.isSessionExpiredError(enhanced)) {
+          const refreshResult = await this.tryRefreshSessionWithSession('loadFullProjectOptimized');
           if (refreshResult.refreshed) {
             this.logger.info('loadFullProjectOptimized 会话已刷新，重试 RPC', { projectId });
             const retry = await client.rpc('get_full_project_data', {
@@ -544,7 +555,7 @@ export class ProjectDataService {
       return [];
     }
 
-    const client = await this.getSupabaseClient();
+    const client = await this.getSupabaseClient(userId);
     if (!client) return null;
 
     const timeout = Math.max(TIMEOUT_CONFIG.QUICK, options.timeout ?? TIMEOUT_CONFIG.QUICK);

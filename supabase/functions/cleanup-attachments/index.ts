@@ -3,7 +3,7 @@
 // 建议通过 Supabase Cron Job 每天调用一次
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.93.2";
 
 // 配置常量 - 与前端附件清理策略保持一致
 const RETENTION_DAYS = 30; // 软删除附件保留天数

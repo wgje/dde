@@ -1892,6 +1892,8 @@ describe('DockEngineService', () => {
     service.dockTask('B');
     service.toggleFocusMode();
     service.switchToTask('A');
+    service.setMainTask('B');
+    service.switchToTask('A');
 
     service.completeTask('A');
 
@@ -2545,6 +2547,43 @@ describe('DockEngineService', () => {
     expect(service.entries().find(entry => entry.taskId === 'C')?.isMain).toBe(false);
     expect(service.entries().find(entry => entry.taskId === 'D')?.isMain).toBe(false);
     expect(service.exportSnapshot().session.mainTaskId).toBe('B');
+  });
+
+  it('main completion should float backup candidates instead of auto-promoting when C slots are empty', () => {
+    seedTask('A');
+    seedTask('B');
+    seedTask('C');
+    seedTask('D');
+    service.dockTask('A');
+    service.dockTask('B', 'backup', { zoneSource: 'manual' });
+    service.dockTask('C', 'backup', { zoneSource: 'manual' });
+    service.dockTask('D', 'backup', { zoneSource: 'manual' });
+    service.toggleFocusMode();
+
+    service.completeTask('A');
+
+    expect(service.focusingEntry()).toBeNull();
+    expect(service.entries().filter(entry => entry.isMain)).toHaveLength(0);
+    expect(service.pendingDecisionEntries().map(entry => entry.taskId)).toEqual(['B', 'C', 'D']);
+    expect(service.highlightedIds()).toEqual(new Set(['B', 'C', 'D']));
+
+    service.choosePendingDecisionCandidate('C');
+
+    expect(service.focusingEntry()?.taskId).toBe('C');
+    expect(service.entries().find(entry => entry.taskId === 'C')?.isMain).toBe(true);
+    expect(service.exportSnapshot().session.mainTaskId).toBe('C');
+  });
+
+  it('completeTask should leave focus mode when the final dock task is completed', () => {
+    seedTask('A');
+    service.dockTask('A');
+    service.toggleFocusMode();
+
+    service.completeTask('A');
+
+    expect(service.focusMode()).toBe(false);
+    expect(service.exportSnapshot().focusMode).toBe(false);
+    expect(service.exportSnapshot().focusSessionState).toBeNull();
   });
 
   it('clearDockForExit should clear entries but keep exit chrome alive until final cleanup', () => {

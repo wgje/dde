@@ -40,6 +40,10 @@ interface StoreMeta {
   version: number;
   lastSyncTime: string;
   activeProjectId: string | null;
+  lastAuthenticatedUser?: {
+    userId: string;
+    email: string | null;
+  } | null;
 }
 
 @Injectable({
@@ -597,6 +601,42 @@ export class StorePersistenceService {
       this.logger.error('加载元数据失败', err);
       // eslint-disable-next-line no-restricted-syntax -- 返回 null 语义正确：元数据加载失败使用默认值
       return null;
+    }
+  }
+
+  async getMetadata(): Promise<StoreMeta | null> {
+    return this.loadMeta();
+  }
+
+  async setMetadata(metadata: Partial<StoreMeta>): Promise<void> {
+    if (this.isRestoring) return;
+
+    try {
+      const db = await this.initDatabase();
+      const existingMeta = await this.getFromStore<StoreMeta>(db, DB_CONFIG.stores.meta, 'meta');
+      const nextMeta: StoreMeta = {
+        key: 'meta',
+        version: existingMeta?.version ?? STORAGE_VERSION,
+        lastSyncTime: metadata.lastSyncTime ?? existingMeta?.lastSyncTime ?? new Date().toISOString(),
+        activeProjectId: Object.prototype.hasOwnProperty.call(metadata, 'activeProjectId')
+          ? (metadata.activeProjectId ?? null)
+          : (existingMeta?.activeProjectId ?? null),
+        lastAuthenticatedUser: Object.prototype.hasOwnProperty.call(metadata, 'lastAuthenticatedUser')
+          ? (metadata.lastAuthenticatedUser ?? null)
+          : (existingMeta?.lastAuthenticatedUser ?? null),
+      };
+
+      const transaction = db.transaction(DB_CONFIG.stores.meta, 'readwrite');
+      const store = transaction.objectStore(DB_CONFIG.stores.meta);
+      store.put(nextMeta);
+
+      await new Promise<void>((resolve, reject) => {
+        transaction.oncomplete = () => resolve();
+        transaction.onerror = () => reject(transaction.error);
+      });
+    } catch (err) {
+      this.logger.error('保存元数据失败', err);
+      throw err;
     }
   }
   

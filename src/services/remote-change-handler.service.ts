@@ -421,7 +421,24 @@ export class RemoteChangeHandlerService {
             }
             
             if (!remoteProject) {
-              this.logger.warn('无法加载远程项目', { projectId: targetProjectId });
+              const loadAccessibleProbe = this.syncCoordinator.core.getAccessibleProjectProbe?.bind(this.syncCoordinator.core);
+              const accessibleProbe = loadAccessibleProbe
+                ? await loadAccessibleProbe(targetProjectId).catch(() => null)
+                : null;
+
+              if (accessibleProbe && !accessibleProbe.accessible) {
+                this.logger.info('远程任务更新命中已不可访问项目，跳过本次项目拉取', {
+                  projectId: targetProjectId,
+                  taskId,
+                });
+                return;
+              }
+
+              this.logger.debug('远程项目暂不可用，跳过本次任务级更新', {
+                projectId: targetProjectId,
+                taskId,
+                probeAccessible: accessibleProbe?.accessible ?? null,
+              });
               return;
             }
 

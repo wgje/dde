@@ -391,15 +391,15 @@ export class TextViewComponent implements OnInit, OnDestroy {
     if (this.dragDropService.isTouchDragging) return;
 
     const payload = event.dataTransfer ? readTaskDragPayload(event.dataTransfer) : null;
-    const fallbackTask = (() => {
-      const jsonData = event.dataTransfer?.getData('application/json');
-      if (!jsonData) return null;
+    const jsonData = event.dataTransfer?.getData('application/json');
+    let fallbackTask: Task | null = null;
+    if (jsonData) {
       try {
-        return JSON.parse(jsonData) as Task;
+        fallbackTask = JSON.parse(jsonData) as Task;
       } catch {
-        return null;
+        fallbackTask = null;
       }
-    })();
+    }
     const taskId = payload?.taskId ?? fallbackTask?.id ?? null;
     if (taskId) {
       const task = this.projectState.getTask(taskId);

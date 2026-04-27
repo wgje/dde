@@ -586,7 +586,7 @@ Deno.serve(async (req) => {
   const client = createServiceRoleClient();
   const limits = await loadWidgetLimits(client);
   const rawBody = await req.text();
-  const webhookSecret = normalizeWidgetWebhookSecret(Deno.env.get('WIDGET_NOTIFY_WEBHOOK_SECRET'));
+  const webhookSecret = normalizeWidgetWebhookSecret(Deno.env.get('WIDGET_NOTIFY_WEBHOOK_SECRET') ?? null);
   if (!webhookSecret) {
     return jsonResponse({ error: 'Webhook secret is not configured', code: 'WEBHOOK_SECRET_MISSING' }, responseHeaders, 503);
   }
@@ -950,6 +950,7 @@ Deno.serve(async (req) => {
       }
       return acc;
     }, {});
+    const failureByReasonJson = JSON.stringify(failureByReason);
 
     const anySuccess = successCount > 0;
     const finalStatus: WidgetNotifyStatus = anySuccess ? 'accepted-fanout' : 'fanout-failed';
@@ -966,7 +967,7 @@ Deno.serve(async (req) => {
           failureCount: eligibleDevices.length - successCount,
           invalidatedTokenCount: invalidDeviceIds.length,
           suppressedDeviceCount: suppressedDecisions.length,
-          failureByReason,
+          failureByReasonJson,
         },
       });
       return jsonResponse({
@@ -986,7 +987,7 @@ Deno.serve(async (req) => {
       reason: 'push-provider-unavailable',
       extra: {
         deliveryMode: 'fcm-v1',
-        failureByReason,
+        failureByReasonJson,
         eligibleDeviceCount: eligibleDevices.length,
         suppressedDeviceCount: suppressedDecisions.length,
       },

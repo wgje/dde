@@ -353,7 +353,7 @@ function toLegacyFocusStateFromDockSnapshot(snapshot: DockSnapshotLike): FocusSe
     : (
         mainTaskId && entryMap.has(mainTaskId)
           ? [mapDockEntryToFocusSlot(entryMap.get(mainTaskId)!, true)]
-          : entries.filter(entry => entry.isMain === true).slice(0, 1).map(mapDockEntryToFocusSlot)
+          : entries.filter(entry => entry.isMain === true).slice(0, 1).map(entry => mapDockEntryToFocusSlot(entry))
       );
 
   const comboSelectTasks = comboSelectIds.length > 0
@@ -361,20 +361,20 @@ function toLegacyFocusStateFromDockSnapshot(snapshot: DockSnapshotLike): FocusSe
         .filter(taskId => taskId !== mainTaskId)
         .map(taskId => entryMap.get(taskId))
         .filter((entry): entry is DockEntryLike => !!entry && entry.isMain !== true)
-        .map(mapDockEntryToFocusSlot)
+      .map(entry => mapDockEntryToFocusSlot(entry))
     : entries
         .filter(entry => entry.taskId !== mainTaskId && entry.isMain !== true && entry.lane === 'combo-select')
-        .map(mapDockEntryToFocusSlot);
+      .map(entry => mapDockEntryToFocusSlot(entry));
 
   const backupTasks = backupIds.length > 0
     ? backupIds
         .filter(taskId => taskId !== mainTaskId)
         .map(taskId => entryMap.get(taskId))
         .filter((entry): entry is DockEntryLike => !!entry && entry.isMain !== true)
-        .map(mapDockEntryToFocusSlot)
+      .map(entry => mapDockEntryToFocusSlot(entry))
     : entries
         .filter(entry => entry.taskId !== mainTaskId && entry.isMain !== true && entry.lane === 'backup')
-        .map(mapDockEntryToFocusSlot);
+      .map(entry => mapDockEntryToFocusSlot(entry));
 
   return {
     // 权威判定：只信任 focusMode 布尔值。
@@ -413,18 +413,18 @@ function toFocusSessionState(value: unknown): FocusSessionStateLike {
       ? state.commandCenterOrderIds
       : entryDerivedState.commandCenterOrderIds;
 
-    const commandCenterTasks =
+    const commandCenterTasks: FocusTaskSlotLike[] =
       (state.commandCenterTasks?.length ?? 0) > 0
-        ? state.commandCenterTasks
-        : entryDerivedState.commandCenterTasks;
-    const comboSelectTasks =
+        ? (state.commandCenterTasks ?? [])
+        : (entryDerivedState.commandCenterTasks ?? []);
+    const comboSelectTasks: FocusTaskSlotLike[] =
       (state.comboSelectTasks?.length ?? 0) > 0
-        ? state.comboSelectTasks
-        : entryDerivedState.comboSelectTasks;
-    const backupTasks =
+        ? (state.comboSelectTasks ?? [])
+        : (entryDerivedState.comboSelectTasks ?? []);
+    const backupTasks: FocusTaskSlotLike[] =
       (state.backupTasks?.length ?? 0) > 0
-        ? state.backupTasks
-        : entryDerivedState.backupTasks;
+        ? (state.backupTasks ?? [])
+        : (entryDerivedState.backupTasks ?? []);
     const derivedMainSlot = entryDerivedState.commandCenterTasks?.find(isMasterSlot) ?? null;
     const hintedMainTaskId = derivedMainSlot?.taskId ?? null;
     const hasMainSlot = hintedMainTaskId
@@ -503,7 +503,10 @@ function resolveCommandCenterSlots(state: FocusSessionStateLike): FocusTaskSlotL
   }
   if (orderedFromState.length > 0) {
     const masterTaskId = masterSlot?.taskId ?? null;
-    if (!masterTaskId || orderedFromState.some(slot => slot.taskId === masterTaskId)) {
+    const focusingTaskId = focusingSlot?.taskId ?? null;
+    const hasMasterSlot = !masterTaskId || orderedFromState.some(slot => slot.taskId === masterTaskId);
+    const hasFocusingSlot = !focusingTaskId || orderedFromState.some(slot => slot.taskId === focusingTaskId);
+    if (hasMasterSlot && hasFocusingSlot) {
       return orderedFromState.slice(0, 4);
     }
 
@@ -619,6 +622,12 @@ function buildSummaryEnvelope(overrides: Record<string, unknown> = {}) {
       count: 0,
       countFromTasks: 0,
       items: [],
+    },
+    commandCenter: {
+      slots: [],
+      mainTaskId: null,
+      focusedTaskId: null,
+      backupCount: 0,
     },
     blackBox: {
       pendingCount: 0,
@@ -955,13 +964,13 @@ Deno.serve(async (req: Request) => {
   const nowIso = new Date().toISOString();
   const todayIsoDate = nowIso.slice(0, 10);
   const nextDeviceCapabilities = mergeJsonObjects(
-    device.capabilities,
+    device.capabilities as Parameters<typeof mergeJsonObjects>[0],
     buildWidgetClientCapabilitiesPatch({
       platform: body.platform,
       clientVersion: body.clientVersion,
       supportsPush: body.supportsPush,
       observedAt: nowIso,
-    }),
+    }) as Parameters<typeof mergeJsonObjects>[1],
   );
   const capabilityDecision = evaluateWidgetCapabilities(capabilities, {
     platform: body.platform,
@@ -1168,11 +1177,34 @@ Deno.serve(async (req: Request) => {
     };
   };
 
+  const toCommandCenterItem = (slot: FocusTaskSlotLike, position: number) => {
+    const task = slot.taskId ? taskMap.get(slot.taskId) : null;
+    const projectId = task?.project_id ?? slot.sourceProjectId ?? null;
+    const project = projectId ? projectMap.get(projectId) ?? null : null;
+    const hasInlineFallback = typeof slot.inlineTitle === 'string' && slot.inlineTitle.trim().length > 0;
+    const validTask = slot.taskId ? (Boolean(task) || hasInlineFallback) : true;
+    const validProject = projectId ? Boolean(project) : true;
+
+    return {
+      position,
+      taskId: slot.taskId,
+      projectId,
+      title: task?.title ?? slot.inlineTitle ?? '未命名任务',
+      projectTitle: project?.title ?? null,
+      estimatedMinutes: slot.estimatedMinutes,
+      isMain: isMasterSlot(slot),
+      isFocused: position === 1 || slot.focusStatus === 'focusing',
+      valid: validTask && validProject,
+    };
+  };
+
   const dockItems = visibleDockSlots.map(toDockItem);
   const allDockItems = allDockSlots.map(toDockItem);
+  const commandCenterItems = commandCenterSlots.map((slot, index) => toCommandCenterItem(slot, index + 1));
 
   const dockCount = allDockItems.length;
   const taskBackedDockCount = allDockItems.filter(item => item.taskId !== null).length;
+  const backupCount = Math.max(dockCount - visibleDockSlots.length, 0);
 
   const focusTask = primarySlot?.taskId ? taskMap.get(primarySlot.taskId) ?? null : null;
   const focusProjectId = focusTask?.project_id ?? primarySlot?.sourceProjectId ?? null;
@@ -1249,7 +1281,7 @@ Deno.serve(async (req: Request) => {
     : false;
   const hasSoftDeleteTarget = dockItems.some(item => !item.valid)
     || (focusTaskMissing && !focusTaskIsInline)
-    || (focusProjectId && !focusProject);
+    || Boolean(focusProjectId && !focusProject);
   const entryUrl = buildEntryUrlFromContext({
     forceWorkspaceFallback: hasSoftDeleteTarget,
     focusValid,
@@ -1315,6 +1347,12 @@ Deno.serve(async (req: Request) => {
         valid: item.valid,
       })),
     },
+    commandCenter: {
+      slots: commandCenterItems,
+      mainTaskId: commandCenterItems.find(item => item.isMain)?.taskId ?? null,
+      focusedTaskId: commandCenterItems[0]?.taskId ?? null,
+      backupCount,
+    },
     blackBox: {
       pendingCount: pendingBlackBoxCount ?? 0,
       unreadCount: unreadBlackBoxCount ?? 0,
@@ -1362,6 +1400,12 @@ Deno.serve(async (req: Request) => {
       count: dockCount,
       countFromTasks: dockCountFromTasks,
       items: dockItems.map(({ taskUpdatedAt: _taskUpdatedAt, projectUpdatedAt: _projectUpdatedAt, ...item }) => item),
+    },
+    commandCenter: {
+      slots: commandCenterItems,
+      mainTaskId: commandCenterItems.find(item => item.isMain)?.taskId ?? null,
+      focusedTaskId: commandCenterItems[0]?.taskId ?? null,
+      backupCount,
     },
     blackBox: {
       pendingCount: pendingBlackBoxCount ?? 0,

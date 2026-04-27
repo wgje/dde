@@ -1,6 +1,6 @@
 import 'jsr:@supabase/functions-js/edge-runtime.d.ts';
 
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.39.0';
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.93.2';
 
 /**
  * widget-black-box-action
@@ -13,8 +13,8 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.39.0';
  *   问题，这里把需要的 5 个最小辅助函数全部内联，保持单文件可部署。
  * - 验证通过后以 service-role client 直接 PATCH `black_box_entries` 行的
  *   `is_read` 或 `is_completed` 字段；BEFORE UPDATE 触发器会盖章权威 `updated_at`，
- *   LWW 同步把变更广播到其它端（网页 / TWA）。`read` 会依赖 updated_at 启动
- *   widget-summary 的短时冷却窗口。
+ *   LWW 同步把变更广播到其它端（网页 / TWA）。`read` 只标记已回顾，
+ *   未完成条目仍留在 widget-summary 的 Gate 队列中，与桌面端保持一致。
  * - 响应只返回 `{ ok: true, entryId, action }`，由小组件侧做乐观缓存 + 下一次
  *   widget-summary 回环校正。失败时返回 `{ ok: false, code, error }`，小组件侧
  *   可选择回退到深链方案。
@@ -305,9 +305,8 @@ async function handleRequest(req: Request): Promise<Response> {
     return errorResponse(responseHeaders, 401, 'TOKEN_EXPIRED', 'Widget token has expired');
   }
 
-  // 2026-04-24 与 widget 大门语义对齐：
-  //   * `read`     → 设 `is_read=true` 并由 updated_at 启动 30 分钟冷却；
-  //                  期间 widget 大门当前队列清空/前进，冷却后间歇式再现。
+  // 2026-04-26 与桌面大门语义对齐：
+  //   * `read`     → 设 `is_read=true`，只更新回顾状态，未完成条目继续留在大门队列。
   //   * `complete` → 设 `is_completed=true`，条目从大门队列移除，并进入项目历史回顾。
   const patch: Record<string, unknown> = action === 'read'
     ? { is_read: true }

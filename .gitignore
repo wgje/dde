@@ -69,6 +69,7 @@ playwright-report/
 
 # AI session transcripts (local working files, never commit)
 ai_conversations/
+.codex/
 .copilot-tracking/
 .feedback_images/
 supabase/.temp/

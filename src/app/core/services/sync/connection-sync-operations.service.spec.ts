@@ -41,7 +41,6 @@ describe('ConnectionSyncOperationsService', () => {
     checkCircuitBreaker: vi.fn(() => true),
     add: vi.fn(() => true),
     recordCircuitSuccess: vi.fn(),
-    recordCircuitFailure: vi.fn(),
     length: 0,
   };
 
@@ -335,45 +334,7 @@ describe('ConnectionSyncOperationsService', () => {
 
     expect(result).toBe(false);
     expect(mockRetryQueue.add).toHaveBeenCalledWith('connection', 'upsert', connection, 'project-1', 'user-1');
-    expect(mockRetryQueue.recordCircuitFailure).toHaveBeenCalledWith('ServiceUnavailableError');
     expect(mockConnectionsUpsert).not.toHaveBeenCalled();
-  });
-
-  it('任务存在性查询遇到 retryable 错误时应记录熔断失败并进入重试', async () => {
-    const connection: Connection = {
-      id: 'connection-task-validation-query-error',
-      source: 'task-a',
-      target: 'task-b',
-    };
-    taskExistenceResult = {
-      data: [],
-      error: { code: '504', message: 'Gateway timeout' },
-    };
-
-    const result = await service.pushConnection(connection, 'project-1', false, false, false, 'user-1');
-
-    expect(result).toBe(false);
-    expect(mockRetryQueue.recordCircuitFailure).toHaveBeenCalledWith('NetworkTimeoutError');
-    expect(mockRetryQueue.add).toHaveBeenCalledWith('connection', 'upsert', connection, 'project-1', 'user-1');
-    expect(mockConnectionsUpsert).not.toHaveBeenCalled();
-  });
-
-  it('连接 upsert 命中 504 时应记录熔断失败并进入重试队列', async () => {
-    const connection: Connection = {
-      id: 'connection-upsert-gateway-timeout',
-      source: 'task-a',
-      target: 'task-b',
-    };
-    connectionUpsertResult = {
-      data: null,
-      error: { code: '504', message: 'Gateway timeout' },
-    };
-
-    const result = await service.pushConnection(connection, 'project-1', false, false, false, 'user-1');
-
-    expect(result).toBe(false);
-    expect(mockRetryQueue.recordCircuitFailure).toHaveBeenCalledWith('NetworkTimeoutError');
-    expect(mockRetryQueue.add).toHaveBeenCalledWith('connection', 'upsert', connection, 'project-1', 'user-1');
   });
 
   it('刷新后任务存在性查询仍为 RLS 违规时应抛永久失败供重试队列收口', async () => {

@@ -52,6 +52,17 @@ import { PermanentFailureError } from '../../../utils/permanent-failure-error';
 // 使用交集类型让 mock 对象既保留 Mock 方法又可直接调用
 type MockFn = ReturnType<typeof vi.fn> & ((...args: any[]) => any);
 
+const expectDeferredCallback = <TArgs extends unknown[], TResult = void>(
+  callback: ((...args: TArgs) => TResult) | null | undefined,
+  label: string
+): ((...args: TArgs) => TResult) => {
+  if (!callback) {
+    throw new Error(`${label} should be assigned before invocation`);
+  }
+
+  return callback;
+};
+
 // 使用 SentryLazyLoaderService mock（来自 test-setup.mocks.ts）
 // 注意：现在服务使用 this.sentryLazyLoader 而非直接的 Sentry
 // 测试应验证 mockSentryLazyLoaderService 的调用
@@ -2476,7 +2487,7 @@ describe('SimpleSyncService', () => {
 
       expect(mockBatchSync.saveProjectToCloud).toHaveBeenCalledTimes(1);
 
-      resolveSave?.({ success: true, newVersion: 2 });
+      expectDeferredCallback(resolveSave, 'resolveSave')({ success: true, newVersion: 2 });
 
       const [firstResult, secondResult] = await Promise.all([firstPromise, secondPromise]);
       expect(firstResult).toEqual({ success: true, newVersion: 2 });
@@ -2518,14 +2529,14 @@ describe('SimpleSyncService', () => {
 
       expect(mockBatchSync.saveProjectToCloud).toHaveBeenCalledTimes(1);
 
-      resolveFirstSave?.({ success: true, newVersion: 1 });
+      expectDeferredCallback(resolveFirstSave, 'resolveFirstSave')({ success: true, newVersion: 1 });
 
       await vi.waitFor(() => {
         expect(mockBatchSync.saveProjectToCloud).toHaveBeenCalledTimes(2);
       });
       expect(mockBatchSync.saveProjectToCloud).toHaveBeenNthCalledWith(2, latestProject, 'test-user-id', undefined);
 
-      resolveSecondSave?.({ success: true, newVersion: 2 });
+      expectDeferredCallback(resolveSecondSave, 'resolveSecondSave')({ success: true, newVersion: 2 });
 
       const [firstResult, secondResult, latestResult] = await Promise.all([
         firstPromise,
@@ -2569,14 +2580,14 @@ describe('SimpleSyncService', () => {
       const queuedPromise = service.saveProjectToCloud(queuedProject, 'test-user-id');
       const replayedActivePromise = service.saveProjectToCloud({ ...firstProject }, 'test-user-id');
 
-      resolveFirstSave?.({ success: true, newVersion: 1 });
+      expectDeferredCallback(resolveFirstSave, 'resolveFirstSave')({ success: true, newVersion: 1 });
 
       await vi.waitFor(() => {
         expect(mockBatchSync.saveProjectToCloud).toHaveBeenCalledTimes(2);
       });
       expect(mockBatchSync.saveProjectToCloud).toHaveBeenNthCalledWith(2, queuedProject, 'test-user-id', undefined);
 
-      resolveSecondSave?.({ success: true, newVersion: 2 });
+      expectDeferredCallback(resolveSecondSave, 'resolveSecondSave')({ success: true, newVersion: 2 });
 
       const [firstResult, queuedResult, replayedActiveResult] = await Promise.all([
         firstPromise,
@@ -2625,14 +2636,14 @@ describe('SimpleSyncService', () => {
       const newerPromise = service.saveProjectToCloud(newerProject, 'test-user-id');
       const olderLatePromise = service.saveProjectToCloud(olderLateProject, 'test-user-id');
 
-      resolveFirstSave?.({ success: true, newVersion: 1 });
+      expectDeferredCallback(resolveFirstSave, 'resolveFirstSave')({ success: true, newVersion: 1 });
 
       await vi.waitFor(() => {
         expect(mockBatchSync.saveProjectToCloud).toHaveBeenCalledTimes(2);
       });
       expect(mockBatchSync.saveProjectToCloud).toHaveBeenNthCalledWith(2, newerProject, 'test-user-id', undefined);
 
-      resolveSecondSave?.({ success: true, newVersion: 2 });
+      expectDeferredCallback(resolveSecondSave, 'resolveSecondSave')({ success: true, newVersion: 2 });
 
       const [firstResult, newerResult, olderLateResult] = await Promise.all([
         firstPromise,
@@ -2681,14 +2692,14 @@ describe('SimpleSyncService', () => {
       const newerPromise = service.saveProjectToCloud(newerNestedProject, 'test-user-id');
       const olderPromise = service.saveProjectToCloud(olderNestedProject, 'test-user-id');
 
-      resolveFirstSave?.({ success: true, newVersion: 1 });
+      expectDeferredCallback(resolveFirstSave, 'resolveFirstSave')({ success: true, newVersion: 1 });
 
       await vi.waitFor(() => {
         expect(mockBatchSync.saveProjectToCloud).toHaveBeenCalledTimes(2);
       });
       expect(mockBatchSync.saveProjectToCloud).toHaveBeenNthCalledWith(2, newerNestedProject, 'test-user-id', undefined);
 
-      resolveSecondSave?.({ success: true, newVersion: 2 });
+      expectDeferredCallback(resolveSecondSave, 'resolveSecondSave')({ success: true, newVersion: 2 });
 
       const [firstResult, newerResult, olderResult] = await Promise.all([
         firstPromise,
@@ -2731,14 +2742,14 @@ describe('SimpleSyncService', () => {
 
       expect(mockBatchSync.saveProjectToCloud).toHaveBeenCalledTimes(1);
 
-      resolveFirstSave?.({ success: true, newVersion: 1 });
+      expectDeferredCallback(resolveFirstSave, 'resolveFirstSave')({ success: true, newVersion: 1 });
 
       await vi.waitFor(() => {
         expect(mockBatchSync.saveProjectToCloud).toHaveBeenCalledTimes(2);
       });
       expect(mockBatchSync.saveProjectToCloud).toHaveBeenNthCalledWith(2, renamedProject, 'test-user-id', undefined);
 
-      resolveSecondSave?.({ success: true, newVersion: 2 });
+      expectDeferredCallback(resolveSecondSave, 'resolveSecondSave')({ success: true, newVersion: 2 });
 
       const [firstResult, renamedResult] = await Promise.all([firstPromise, renamedPromise]);
       expect(firstResult).toEqual({ success: true, newVersion: 1 });
@@ -2784,14 +2795,14 @@ describe('SimpleSyncService', () => {
       const queuedPromise = service.saveProjectToCloud(queuedProject, 'test-user-id');
       const latestPromise = service.saveProjectToCloud(latestEqualFreshnessProject, 'test-user-id');
 
-      resolveFirstSave?.({ success: true, newVersion: 1 });
+      expectDeferredCallback(resolveFirstSave, 'resolveFirstSave')({ success: true, newVersion: 1 });
 
       await vi.waitFor(() => {
         expect(mockBatchSync.saveProjectToCloud).toHaveBeenCalledTimes(2);
       });
       expect(mockBatchSync.saveProjectToCloud).toHaveBeenNthCalledWith(2, latestEqualFreshnessProject, 'test-user-id', undefined);
 
-      resolveSecondSave?.({ success: true, newVersion: 2 });
+      expectDeferredCallback(resolveSecondSave, 'resolveSecondSave')({ success: true, newVersion: 2 });
 
       const [firstResult, queuedResult, latestResult] = await Promise.all([
         firstPromise,
@@ -2820,7 +2831,7 @@ describe('SimpleSyncService', () => {
       const firstPromise = service.saveProjectSmart(project, 'test-user-id');
       const secondPromise = service.saveProjectSmart({ ...project }, 'test-user-id');
 
-      resolveSave?.({ success: true, newVersion: 11 });
+      expectDeferredCallback(resolveSave, 'resolveSave')({ success: true, newVersion: 11 });
 
       const [firstResult, secondResult] = await Promise.all([firstPromise, secondPromise]);
       expect(firstResult.newVersion).toBe(11);
@@ -2868,7 +2879,7 @@ describe('SimpleSyncService', () => {
       const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id');
       const queuedPromise = service.saveProjectToCloud(queuedProject, 'test-user-id');
 
-      resolveFirstSave?.(failedResult);
+      expectDeferredCallback(resolveFirstSave, 'resolveFirstSave')(failedResult);
 
       const [firstResult, queuedResult] = await Promise.all([firstPromise, queuedPromise]);
 
@@ -2934,7 +2945,7 @@ describe('SimpleSyncService', () => {
       const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id');
       const queuedPromise = service.saveProjectToCloud(queuedProject, 'test-user-id');
 
-      resolveFirstSave?.(failedResult);
+      expectDeferredCallback(resolveFirstSave, 'resolveFirstSave')(failedResult);
 
       const [firstResult, queuedResult] = await Promise.all([firstPromise, queuedPromise]);
 
@@ -2993,7 +3004,7 @@ describe('SimpleSyncService', () => {
       const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id', ['task-delete-original']);
       const queuedPromise = service.saveProjectToCloud(queuedProject, 'test-user-id', ['task-delete-explicit']);
 
-      resolveFirstSave?.(failedResult);
+      expectDeferredCallback(resolveFirstSave, 'resolveFirstSave')(failedResult);
 
       const [firstResult, queuedResult] = await Promise.all([firstPromise, queuedPromise]);
 
@@ -3063,7 +3074,7 @@ describe('SimpleSyncService', () => {
       const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id');
       const queuedPromise = service.saveProjectToCloud(queuedProject, 'test-user-id');
 
-      resolveFirstSave?.(failedResult);
+      expectDeferredCallback(resolveFirstSave, 'resolveFirstSave')(failedResult);
 
       const [firstResult, queuedResult] = await Promise.all([firstPromise, queuedPromise]);
 
@@ -3115,7 +3126,7 @@ describe('SimpleSyncService', () => {
       const secondPromise = service.saveProjectToCloud(secondProject, 'test-user-id', ['task-delete-b']);
       const thirdPromise = service.saveProjectToCloud(thirdProject, 'test-user-id', ['task-delete-c']);
 
-      resolveFirstSave?.(failedResult);
+      expectDeferredCallback(resolveFirstSave, 'resolveFirstSave')(failedResult);
 
       const [firstResult, secondResult, thirdResult] = await Promise.all([firstPromise, secondPromise, thirdPromise]);
 
@@ -3175,7 +3186,7 @@ describe('SimpleSyncService', () => {
       const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id');
       const queuedPromise = service.saveProjectToCloud(queuedProject, 'test-user-id');
 
-      resolveFirstSave?.(failedResult);
+      expectDeferredCallback(resolveFirstSave, 'resolveFirstSave')(failedResult);
 
       const [firstResult, queuedResult] = await Promise.all([firstPromise, queuedPromise]);
 
@@ -3222,14 +3233,14 @@ describe('SimpleSyncService', () => {
       const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id');
       const queuedPromise = service.saveProjectToCloud(queuedProject, 'test-user-id');
 
-      resolveFirstSave?.(partialFailureResult);
+      expectDeferredCallback(resolveFirstSave, 'resolveFirstSave')(partialFailureResult);
 
       await vi.waitFor(() => {
         expect(mockBatchSync.saveProjectToCloud).toHaveBeenCalledTimes(2);
       });
       expect(mockBatchSync.saveProjectToCloud).toHaveBeenNthCalledWith(2, queuedProject, 'test-user-id', undefined);
 
-      resolveSecondSave?.({ success: true, newVersion: 2 });
+      expectDeferredCallback(resolveSecondSave, 'resolveSecondSave')({ success: true, newVersion: 2 });
 
       const [firstResult, queuedResult] = await Promise.all([firstPromise, queuedPromise]);
 
@@ -3264,7 +3275,7 @@ describe('SimpleSyncService', () => {
       const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id');
       const queuedPromise = service.saveProjectToCloud(queuedProject, 'test-user-id');
 
-      resolveFirstSave?.(conflictResult);
+      expectDeferredCallback(resolveFirstSave, 'resolveFirstSave')(conflictResult);
 
       const [firstResult, queuedResult] = await Promise.all([firstPromise, queuedPromise]);
 
@@ -3295,7 +3306,7 @@ describe('SimpleSyncService', () => {
       const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id');
       const queuedPromise = service.saveProjectToCloud(queuedProject, 'test-user-id');
 
-      rejectFirstSave?.(expectedError);
+      expectDeferredCallback(rejectFirstSave, 'rejectFirstSave')(expectedError);
 
       await expect(firstPromise).rejects.toThrow('network suspended');
       await expect(queuedPromise).rejects.toThrow('network suspended');

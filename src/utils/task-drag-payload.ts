@@ -90,11 +90,14 @@ function safeGetData(dataTransfer: DataTransfer, mime: string): string {
 
 function tryParseJson(raw: string): unknown {
   if (!raw) return null;
+  let parsed: unknown = null;
   try {
-    return JSON.parse(raw);
+    parsed = JSON.parse(raw);
   } catch {
-    return null;
+    parsed = null;
   }
+
+  return parsed;
 }
 
 export function writeTaskDragPayload(dataTransfer: DataTransfer, payload: TaskDragPayloadV1): void {

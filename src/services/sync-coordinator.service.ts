@@ -37,7 +37,7 @@ import { TabSyncService } from './tab-sync.service';
 import { PersistSchedulerService } from './persist-scheduler.service';
 // 借鉴思源笔记的同步增强服务
 import { SyncModeService, SyncDirection } from './sync-mode.service';
-import { Project } from '../models';
+import { Project, Task, Connection } from '../models';
 import { AUTH_CONFIG } from '../config/auth.config';
 import { SYNC_CONFIG } from '../config/sync.config';
 import { STARTUP_PERF_CONFIG } from '../config/startup-performance.config';

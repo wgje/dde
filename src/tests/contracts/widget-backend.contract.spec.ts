@@ -16,7 +16,9 @@ function readText(relativePath: string): string {
 function expectTypeScriptToParse(relativePath: string): void {
   const content = readText(relativePath);
   const source = ts.createSourceFile(relativePath, content, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TS);
-  const diagnostics = source.parseDiagnostics.filter(diagnostic => diagnostic.category === ts.DiagnosticCategory.Error);
+  const diagnostics = (
+    (source as ts.SourceFile & { parseDiagnostics?: readonly ts.Diagnostic[] }).parseDiagnostics ?? []
+  ).filter((diagnostic: ts.Diagnostic) => diagnostic.category === ts.DiagnosticCategory.Error);
 
   expect(diagnostics, `${relativePath} should be syntactically valid TypeScript`).toHaveLength(0);
 }
@@ -107,7 +109,7 @@ describe('Widget backend foundation contract', () => {
     const notifySecretNormalizationMigration = readText('supabase/migrations/20260413120000_widget_notify_secret_normalization.sql');
     const notifyLimitsBackfillMigration = readText('supabase/migrations/20260413121000_widget_notify_limits_backfill.sql');
     const tokenHashAndNotifyScopeMigration = readText('supabase/migrations/20260418032000_widget_token_hash_and_notify_scope.sql');
-    const gateReadCooldownMigration = readText('supabase/migrations/20260424143000_widget_gate_read_cooldown.sql');
+    const gateReadAlignmentMigration = readText('supabase/migrations/20260426110000_widget_gate_read_alignment.sql');
     const initSql = readText('scripts/init-supabase.sql');
 
     for (const sql of [migration, initSql]) {
@@ -172,10 +174,12 @@ describe('Widget backend foundation contract', () => {
     expect(initSql).toContain('widget_notify_black_box_change');
     expect(initSql).toContain('widget_notify_task_change');
     expect(initSql).toContain('widget_notify_project_change');
-    for (const sql of [initSql, gateReadCooldownMigration]) {
+    for (const sql of [initSql, gateReadAlignmentMigration]) {
       const normalized = sql.toLowerCase();
-      expect(normalized).toContain('v_gate_read_cooldown_cutoff');
-      expect(normalized).toContain('is_read = false or updated_at <= v_gate_read_cooldown_cutoff');
+      expect(normalized).not.toContain('v_gate_read_cooldown_cutoff');
+      expect(normalized).not.toContain('is_read = false or updated_at <=');
+      expect(normalized).toContain('unreadblackboxcount');
+      expect(normalized).toContain('is_completed = false');
     }
   });
 
@@ -298,7 +302,7 @@ describe('Widget backend foundation contract', () => {
     expect(summaryFn).toContain('const capabilityDecision = evaluateWidgetCapabilities(capabilities');
     expect(summaryFn).toContain('buildWidgetClientCapabilitiesPatch({');
     expect(notifyFn).toContain("import { Webhook } from 'https://esm.sh/standardwebhooks@1.0.0';");
-    expect(notifyFn).toContain("const webhookSecret = normalizeWidgetWebhookSecret(Deno.env.get('WIDGET_NOTIFY_WEBHOOK_SECRET'));\n");
+    expect(notifyFn).toContain("const webhookSecret = normalizeWidgetWebhookSecret(Deno.env.get('WIDGET_NOTIFY_WEBHOOK_SECRET')");
     expect(notifyFn).toContain("consumeWidgetRateLimit(");
     expect(notifyFn).toContain("beginNotifyEvent");
     expect(notifyFn).toContain("widget_notify_events");
@@ -319,7 +323,7 @@ describe('Widget backend foundation contract', () => {
     expect(notifyFn).toContain("await finishNotifyEvent(client, webhookId, 'provider-unavailable', userId, summaryCursor);");
     expect(notifyFn).toContain('if (usesStandardWebhookHeaders) {');
     expect(notifyFn).toContain('limits.notifyIpPerMinute === 0');
-    expect(notifyFn).toContain("normalizeWidgetWebhookSecret(Deno.env.get('WIDGET_NOTIFY_WEBHOOK_SECRET'))");
+    expect(notifyFn).toContain("normalizeWidgetWebhookSecret(Deno.env.get('WIDGET_NOTIFY_WEBHOOK_SECRET')");
     expect(notifyFn).toContain(".from('widget_instances')");
     expect(notifyFn).toContain(".is('uninstalled_at', null)");
     expect(notifyFn).toContain("reason: 'push-provider-unavailable'");
