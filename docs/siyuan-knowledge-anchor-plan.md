@@ -204,6 +204,12 @@ Knowledge Anchor 的作用是降低“切出任务上下文”的摩擦，而不
 5. 服务层直接依赖具体子服务或现有 Store，禁止新增门面 Store 聚合类。
 6. 移动端仍默认 Text 视图，不因锚点预览强制加载 Flow / GoJS。
 
+### 4.5 建议配置常量
+
+| 常量 | 值 | 用途 |
+|------|------|------|
+| `SIYUAN_CONFIG.MAX_PREVIEW_CHILDREN` | `10` | 单次预览最多展示的子块数量 |
+
 ---
 
 ## 5. 用户体验设计
@@ -384,6 +390,8 @@ CREATE UNIQUE INDEX external_source_links_unique_active_target_role
 ON external_source_links (user_id, task_id, source_type, target_id, COALESCE(role, 'context'))
 WHERE deleted_at IS NULL;
 ```
+
+从 MVP 迁移到多 role 时，应先回填空 `role` 为默认 `context`，再在同一迁移中删除 MVP 唯一索引并创建多 role 唯一索引；迁移前需要检查是否存在同任务同块的历史重复数据。
 
 ### 6.4 本地 IndexedDB 建议
 
@@ -631,7 +639,7 @@ siyuan://blocks/20260426123456-abc1234?focus=1
 
 1. 接受 `siyuan://blocks/{id}` 与裸 block ID。
 2. 自动补齐标准深链为 `siyuan://blocks/{id}?focus=1`。
-3. 去除首尾空白，拒绝包含路径穿越、换行或非预期协议的输入；允许协议仅为 `siyuan:`，明确拒绝 `javascript:`、`data:`、`file:`、`http:`、`https:`。
+3. 去除首尾空白，拒绝包含路径穿越、换行或非预期协议的输入；允许的完整协议前缀仅为 `siyuan://`，明确拒绝 `javascript:`、`data:`、`file:`、`http:`、`https:`。
 4. 解析失败时不创建锚点，并提示用户粘贴思源块链接。
 
 ---
@@ -828,7 +836,7 @@ siyuan.autoRefresh = on-hover | manual
 1. 当前阶段的降级路径已经可用。
 2. 没有把 token、正文缓存或原始 API 响应同步到 Supabase。
 3. Focus / Dock / 移动端不存在阻塞性回归。
-4. 相关测试已覆盖错误处理、离线同步、provider fallback、安全校验等关键分支；核心分支覆盖率不低于 80%，且 14.4 每一层至少有 1 个直接覆盖用例。
+4. 相关测试已覆盖错误处理、离线同步、provider fallback、安全校验等关键分支；核心分支覆盖率不低于 80%，且“建议测试覆盖”表中每一层至少有 1 个直接覆盖用例。
 
 ---
 
