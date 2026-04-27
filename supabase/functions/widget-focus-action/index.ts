@@ -200,10 +200,11 @@ async function handleRequest(req: Request): Promise<Response> {
       "action must be 'promote-secondary', 'complete-front', or 'wait-front'",
     );
   }
-  if (action === 'promote-secondary' && !isUuidLike(body.taskId)) {
-    return errorResponse(responseHeaders, 400, 'INVALID_TASK_ID', 'taskId must be a UUID');
-  }
-  if (FRONT_ACTIONS.has(action ?? '') && body.taskId !== undefined && !isUuidLike(body.taskId)) {
+  if (action === 'promote-secondary') {
+    if (!isUuidLike(body.taskId)) {
+      return errorResponse(responseHeaders, 400, 'INVALID_TASK_ID', 'taskId must be a UUID');
+    }
+  } else if (body.taskId !== undefined && !isUuidLike(body.taskId)) {
     return errorResponse(responseHeaders, 400, 'INVALID_TASK_ID', 'taskId must be a UUID');
   }
   if (
