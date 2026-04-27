@@ -350,9 +350,9 @@ type LocalSiyuanPreviewCache = {
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `id` | `uuid` / `text` | 客户端生成 ID |
+| `id` | `text` | 客户端 `crypto.randomUUID()` 字符串 |
 | `user_id` | `uuid` | RLS 隔离字段 |
-| `task_id` | `uuid` / `text` | 关联任务 |
+| `task_id` | `text` | 关联任务，沿用客户端生成字符串 ID |
 | `source_type` | `text` | 首版固定为 `siyuan-block` |
 | `target_id` | `text` | 思源 block ID |
 | `uri` | `text` | 深链 URI |
@@ -368,8 +368,22 @@ type LocalSiyuanPreviewCache = {
 
 1. `source_type` 首版只允许 `siyuan-block`。
 2. `target_id` 必须匹配思源块 ID 格式。
-3. MVP 可用 `(user_id, task_id, source_type, target_id, deleted_at IS NULL)` 防止同任务重复绑定同一活跃块；多 role 场景启用后，约束应扩展为 `(user_id, task_id, source_type, target_id, COALESCE(role, 'context'), deleted_at IS NULL)`，允许同一块以不同 role 出现。
+3. MVP 使用 UNIQUE 约束防止同任务重复绑定同一活跃块；多 role 场景启用后，允许同一块以不同 role 出现。
 4. RLS 策略必须按 `user_id = auth.uid()` 隔离。
+
+UNIQUE 约束建议：
+
+```sql
+-- MVP：同任务同块只能有一个活跃锚点
+CREATE UNIQUE INDEX external_source_links_unique_active_target
+ON external_source_links (user_id, task_id, source_type, target_id)
+WHERE deleted_at IS NULL;
+
+-- 多 role：同任务同块允许按 role 区分
+CREATE UNIQUE INDEX external_source_links_unique_active_target_role
+ON external_source_links (user_id, task_id, source_type, target_id, COALESCE(role, 'context'))
+WHERE deleted_at IS NULL;
+```
 
 ### 6.4 本地 IndexedDB 建议
 
@@ -580,7 +594,7 @@ MVP 只允许访问：
 调用限制：
 
 1. 每次预览默认只取当前块与一层子块。
-2. 子块数量建议上限为 10 个，超过后显示“更多内容请打开思源”。
+2. 子块数量通过 `SIYUAN_CONFIG.MAX_PREVIEW_CHILDREN = 10` 控制，超过后显示“更多内容请打开思源”。
 3. API 调用必须带超时与取消信号。
 4. 不在前端持久化原始 API 响应，只保存裁剪后的预览缓存。
 
@@ -617,7 +631,7 @@ siyuan://blocks/20260426123456-abc1234?focus=1
 
 1. 接受 `siyuan://blocks/{id}` 与裸 block ID。
 2. 自动补齐标准深链为 `siyuan://blocks/{id}?focus=1`。
-3. 去除首尾空白，拒绝包含路径穿越、换行或非预期协议的输入。
+3. 去除首尾空白，拒绝包含路径穿越、换行或非预期协议的输入；允许协议仅为 `siyuan:`，明确拒绝 `javascript:`、`data:`、`file:`、`http:`、`https:`。
 4. 解析失败时不创建锚点，并提示用户粘贴思源块链接。
 
 ---
@@ -814,7 +828,7 @@ siyuan.autoRefresh = on-hover | manual
 1. 当前阶段的降级路径已经可用。
 2. 没有把 token、正文缓存或原始 API 响应同步到 Supabase。
 3. Focus / Dock / 移动端不存在阻塞性回归。
-4. 相关测试已覆盖错误处理、离线同步、provider fallback、安全校验等关键分支；具体参考 14.4。
+4. 相关测试已覆盖错误处理、离线同步、provider fallback、安全校验等关键分支；核心分支覆盖率不低于 80%，且 14.4 每一层至少有 1 个直接覆盖用例。
 
 ---
 
