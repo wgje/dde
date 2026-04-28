@@ -1,7 +1,7 @@
 # NanoFlow × SiYuan Knowledge Anchor 策划案
 
-> **版本**：v1.0  
-> **日期**：2026-04-26  
+> **版本**：v1.1  
+> **日期**：2026-04-28  
 > **状态**：Draft for implementation  
 > **定位**：思源笔记是知识源头（Source of Truth），NanoFlow 是执行工作台（Execution Workspace）  
 > **核心决策**：NanoFlow 只保存思源块指针与少量元数据，不嵌入思源 UI，不在 MVP 同步正文到云端，不在 MVP 做双向写回。
@@ -336,6 +336,28 @@ interface SiyuanPreviewProvider {
 }
 ```
 
+Provider 对外只返回 NanoFlow 需要的预览 DTO，不向组件暴露思源原始 API 响应：
+
+```ts
+type SiyuanBlockPreview = {
+  blockId: string;
+  hpath?: string;
+  plainText?: string;
+  kramdown?: string;
+  sourceUpdatedAt?: string;
+  attrs?: Record<string, string>;
+  childBlocks?: Array<{ id: string; type: string; subType?: string; content?: string }>;
+};
+```
+
+实现约束：
+
+1. `blockId` 必须先通过格式校验后再进入 provider。
+2. provider 内部统一把思源 `{ code, msg, data }` 响应转换为 NanoFlow Result / error code。
+3. `AbortSignal` 必须贯穿扩展消息和 direct fetch，避免 hover 频繁切换造成悬挂请求。
+4. 组件不得知道 token、baseUrl、HTTP header 或扩展内部端口。
+5. direct provider 仅允许在 `localhost` 开发环境或未来可信桌面壳中启用。
+
 实现优先级：
 
 1. `SiyuanExtensionProvider`：桌面浏览器主路径。
@@ -389,6 +411,7 @@ http://127.0.0.1:38465/nanoflow-siyuan/preview
 ```ts
 type SiyuanExtensionRequest = {
   type: 'nanoflow.siyuan.get-preview';
+  requestId: string;
   payload: {
     blockId: string;
     includeChildren?: boolean;
@@ -396,17 +419,37 @@ type SiyuanExtensionRequest = {
 };
 
 type SiyuanExtensionResponse = {
+  type: 'nanoflow.siyuan.preview-result';
+  requestId: string;
   ok: boolean;
   data?: {
+    blockId: string;
     hpath?: string;
     plainText?: string;
     kramdown?: string;
     sourceUpdatedAt?: string;
+    attrs?: Record<string, string>;
     childBlocks?: Array<{ id: string; content: string; type: string }>;
   };
   errorCode?: string;
   errorMessage?: string;
 };
+```
+
+扩展 Relay 的最小职责：
+
+1. 在扩展本地存储中保存 `baseUrl` 与 token；NanoFlow 页面只持有扩展可用状态。
+2. 对来自 NanoFlow 页面的消息做来源校验，只接受受信任的 NanoFlow origin。
+3. 只实现 allowlist 中的只读接口，不提供任意 URL 代理。
+4. 为每次请求设置超时和 `requestId`，超时后返回 `kernel-unreachable` 或 `unknown`。
+5. 对返回的 `kramdown` 只做最小必要转换，不在扩展内注入 HTML。
+
+扩展内部访问思源内核时统一使用：
+
+```text
+POST http://127.0.0.1:6806/api/{module}/{method}
+Authorization: Token {local-token}
+Content-Type: application/json
 ```
 
 ### 8.3 后续增强：本地 bridge / 桌面壳
@@ -423,14 +466,205 @@ type SiyuanExtensionResponse = {
 
 ## 9. 思源 API 使用边界
 
+本节根据 Context7 查询到的 SiYuan API 文档补齐接口契约。思源本地内核默认监听：
+
+```text
+http://127.0.0.1:6806
+```
+
+通用约定：
+
+1. API token 在思源 `设置 - 关于` 中获取。
+2. 请求头使用 `Authorization: Token {token}`。
+3. 请求体为 JSON，`Content-Type: application/json`。
+4. API 响应统一为 `{ code: number, msg: string, data: unknown }`，`code === 0` 表示成功。
+5. MVP 中 token 只能由扩展或可信本地运行时持有，NanoFlow 云端与 Supabase 不保存 token。
+
 ### 9.1 MVP 允许的接口
 
 MVP 只允许访问：
 
-1. `/api/block/getBlockKramdown`
-2. `/api/block/getChildBlocks`
-3. `/api/filetree/getHPathByID`
-4. `/api/attr/getBlockAttrs`
+| 接口 | 用途 | 请求体 | MVP 用法 |
+|------|------|------|------|
+| `/api/system/version` | 连接测试与版本检查 | 无 | 设置页“测试连接” |
+| `/api/block/getBlockKramdown` | 读取块 Kramdown | `{ "id": blockId }` | 生成摘要与受限预览 |
+| `/api/block/getChildBlocks` | 读取直接子块结构 | `{ "id": blockId }` | 展示子块列表骨架 |
+| `/api/filetree/getHPathByID` | 读取人类可读路径 | `{ "id": blockId }` | 展示来源路径 |
+| `/api/attr/getBlockAttrs` | 读取块属性 | `{ "id": blockId }` | 获取 `updated` 等元数据或用户自定义标记 |
+
+#### 9.1.1 连接测试：`/api/system/version`
+
+用于判断思源内核是否可达、token 是否有效、版本是否满足最低要求。
+
+```http
+POST /api/system/version
+Authorization: Token {token}
+Content-Type: application/json
+```
+
+成功响应：
+
+```json
+{
+  "code": 0,
+  "msg": "",
+  "data": "3.6.1"
+}
+```
+
+处理规则：
+
+1. `code !== 0` 或 HTTP 非 2xx：显示连接失败。
+2. 版本低于最低支持版本：允许保存配置，但预览能力标记为 unsupported。
+3. 该接口只用于本机配置校验，不进入任务同步流程。
+
+#### 9.1.2 块正文：`/api/block/getBlockKramdown`
+
+```http
+POST /api/block/getBlockKramdown
+Authorization: Token {token}
+Content-Type: application/json
+```
+
+请求体：
+
+```json
+{
+  "id": "20260426123456-abc1234"
+}
+```
+
+成功响应：
+
+```json
+{
+  "code": 0,
+  "msg": "",
+  "data": {
+    "id": "20260426123456-abc1234",
+    "kramdown": "这里是思源块的 Kramdown 内容"
+  }
+}
+```
+
+MVP 处理规则：
+
+1. `kramdown` 只进入本机缓存，不同步到 Supabase。
+2. 预览默认从 `kramdown` 提取 `plainText` / `excerpt`，不直接注入 HTML。
+3. 块属性尾标记、块引用、资源链接必须走安全转换链路。
+4. 返回的 `data.id` 必须与请求 `blockId` 一致，否则视为异常响应。
+
+#### 9.1.3 子块结构：`/api/block/getChildBlocks`
+
+```http
+POST /api/block/getChildBlocks
+Authorization: Token {token}
+Content-Type: application/json
+```
+
+请求体：
+
+```json
+{
+  "id": "20260426123456-abc1234"
+}
+```
+
+成功响应：
+
+```json
+{
+  "code": 0,
+  "msg": "",
+  "data": [
+    {
+      "id": "20260426123500-child1",
+      "type": "h",
+      "subType": "h1"
+    },
+    {
+      "id": "20260426123600-child2",
+      "type": "l",
+      "subType": "u"
+    }
+  ]
+}
+```
+
+MVP 处理规则：
+
+1. 只读取直接子块，不递归展开整棵树。
+2. 子块正文如需展示，必须对单个子块再按需调用 `getBlockKramdown`，并限制数量。
+3. 默认最多展示前 `5` 个子块摘要，避免 hover 时触发大量请求。
+4. 子块列表仅用于预览，不作为任务依赖关系或 NanoFlow 树结构。
+
+#### 9.1.4 人类可读路径：`/api/filetree/getHPathByID`
+
+```http
+POST /api/filetree/getHPathByID
+Authorization: Token {token}
+Content-Type: application/json
+```
+
+请求体：
+
+```json
+{
+  "id": "20260426123456-abc1234"
+}
+```
+
+成功响应：
+
+```json
+{
+  "code": 0,
+  "msg": "",
+  "data": "/项目资料/产品设计/悬浮窗联动方案"
+}
+```
+
+MVP 处理规则：
+
+1. `data` 作为 `ExternalSourceLink.hpath` 候选值。
+2. 路径可同步到 Supabase，因为它是轻量定位元数据，不包含正文。
+3. 如果路径读取失败，仍允许创建锚点，只显示 block ID 或用户手填 label。
+
+#### 9.1.5 块属性：`/api/attr/getBlockAttrs`
+
+```http
+POST /api/attr/getBlockAttrs
+Authorization: Token {token}
+Content-Type: application/json
+```
+
+请求体：
+
+```json
+{
+  "id": "20260426123456-abc1234"
+}
+```
+
+成功响应形态：
+
+```json
+{
+  "code": 0,
+  "msg": "",
+  "data": {
+    "id": "20260426123456-abc1234",
+    "updated": "20260428094500",
+    "custom-nanoflow-role": "spec"
+  }
+}
+```
+
+MVP 处理规则：
+
+1. 属性只作为预览元数据读取，不在 MVP 写回。
+2. `custom-*` 属性可以作为未来 opt-in 写回的兼容点，但首版不主动设置。
+3. 如果存在可用更新时间字段，可映射到 `sourceUpdatedAt` 用于缓存陈旧提示。
 
 ### 9.2 MVP 禁止的接口
 
@@ -458,6 +692,52 @@ siyuan://blocks/20260426123456-abc1234
 siyuan://blocks/20260426123456-abc1234?focus=1
 20260426123456-abc1234
 ```
+
+解析规则：
+
+1. block ID 格式按 `YYYYMMDDHHmmss-xxxxxxx` 校验，即 `^\d{14}-[a-z0-9]{7}$`。
+2. `siyuan://blocks/{id}` 只提取 path 中的 `{id}`，忽略未知 query 参数。
+3. 保存时统一生成规范 URI：`siyuan://blocks/{id}?focus=1`。
+4. 原始输入不得直接回显为 HTML；错误提示只展示经过转义的文本。
+5. 粘贴普通文本但无法解析 block ID 时，不自动创建锚点。
+
+### 9.4 预览取数编排
+
+单次预览刷新建议按以下顺序执行：
+
+```text
+1. getHPathByID(blockId)
+2. getBlockAttrs(blockId)
+3. getBlockKramdown(blockId)
+4. getChildBlocks(blockId)        // includeChildren=true 时才执行
+5. 可选：对前 N 个子块按需 getBlockKramdown(childId)
+```
+
+编排约束：
+
+1. `getHPathByID` 和 `getBlockAttrs` 失败不应阻断 `getBlockKramdown`。
+2. `getBlockKramdown` 失败时预览刷新整体失败，并保留旧缓存。
+3. 子块请求失败只降级为“不展示子块摘要”。
+4. hover 自动刷新必须有并发去重：同一 `blockId` 同一时刻只允许一个刷新请求。
+5. 请求超时使用 NanoFlow 既有 `TIMEOUT_CONFIG.QUICK` 或扩展侧同等配置，不新增裸超时魔数。
+
+### 9.5 错误码映射
+
+| 场景 | NanoFlow errorCode | 用户提示 |
+|------|------|------|
+| 未配置 token / baseUrl | `not-configured` | 当前设备未配置思源连接 |
+| 当前运行时不能访问实时预览 | `runtime-not-supported` | 当前环境仅支持缓存预览或打开思源 |
+| 浏览器扩展不可用 | `extension-unavailable` | 未检测到 NanoFlow 思源扩展 |
+| 思源内核不可达或请求超时 | `kernel-unreachable` | 无法连接本机思源内核 |
+| token 无效或被拒绝 | `token-invalid` | 思源授权失败，请重新配置 token |
+| 块不存在或无权限读取 | `block-not-found` | 未找到该思源块 |
+| API 响应结构不符合预期 | `unknown` | 预览失败，可稍后重试 |
+
+错误处理要求：
+
+1. 所有错误都必须可降级，不阻塞任务编辑、Focus 或 Dock。
+2. 日志不得输出 token、完整正文或未脱敏的 API 响应体。
+3. UI 上优先展示可操作建议，例如“打开思源”“重新配置”“仅使用缓存”。
 
 ---
 
@@ -645,6 +925,8 @@ siyuan.autoRefresh = on-hover | manual
 2. 桌面端可以悬浮查看预览，移动端可以点击查看预览。
 3. 点击“打开思源”可回到原块。
 4. 思源不可达时，任务工作流仍可继续。
+5. 粘贴非法文本、错误 URI、非思源 block ID 时不会创建锚点。
+6. 预览刷新失败时保留旧缓存并显示可恢复状态。
 
 ### 14.2 架构验收
 
@@ -658,6 +940,20 @@ siyuan.autoRefresh = on-hover | manual
 1. 首版不暴露通用 SQL 或文件接口。
 2. 不允许从 NanoFlow 页面直接访问本地 HTTP 思源内核作为公网主路径。
 3. 只在安全运行时中启用实时预览。
+4. token 只存在扩展或可信本地运行时，不进入 Supabase、IndexedDB 预览缓存或日志。
+5. 扩展 Relay 只接受受信任 NanoFlow origin，并只代理 allowlist 接口。
+6. Kramdown 转换后的展示内容必须经过 NanoFlow 现有 XSS 防护链路。
+
+### 14.4 API 合约验收
+
+使用本机思源内核和测试块验证：
+
+1. `/api/system/version` 可返回版本字符串，并能识别 token 错误。
+2. `/api/filetree/getHPathByID` 返回可读路径；失败时 UI 可退回 label / block ID。
+3. `/api/block/getBlockKramdown` 返回的 `data.id` 与请求 block ID 一致。
+4. `/api/block/getChildBlocks` 只展示有限数量子块，不递归拉取整棵树。
+5. `/api/attr/getBlockAttrs` 失败不影响正文预览。
+6. 所有 `code !== 0` 的响应都能映射为稳定的 NanoFlow errorCode。
 
 ---
 
@@ -671,6 +967,9 @@ siyuan.autoRefresh = on-hover | manual
 | Focus 场景被知识预览打断 | 影响专注 | Focus 中收缩预览能力 |
 | 误把正文同步进云端 | 产品语义漂移 | 本机缓存与云端指针分层 |
 | 以后支持多来源时模型耦合 | 扩展困难 | 从首版就采用 ExternalSourceLink 抽象 |
+| 扩展被滥用为任意本地 API 代理 | 安全风险 | origin 校验 + allowlist + 禁止任意 URL |
+| 子块过多导致 hover 卡顿 | 体验下降 | 限制子块数量 + 请求去重 + 超时取消 |
+| 思源 API 响应结构变化 | 预览失败 | provider 层运行时校验 + errorCode 降级 |
 
 ---
 
