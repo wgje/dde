@@ -71,6 +71,10 @@
     <string name="nanoflow_widget_focus_wait_15m">15 分钟</string>
     <string name="nanoflow_widget_focus_wait_30m">30 分钟</string>
     <string name="nanoflow_widget_focus_wait_1h">1 小时</string>
+    <string name="nanoflow_widget_focus_wait_5m_short">5分</string>
+    <string name="nanoflow_widget_focus_wait_15m_short">15分</string>
+    <string name="nanoflow_widget_focus_wait_30m_short">30分</string>
+    <string name="nanoflow_widget_focus_wait_1h_short">1时</string>
     <string name="nanoflow_widget_focus_switch_hint">点击上方插槽切换 / 查看</string>
     <string name="nanoflow_widget_focus_backup_zone">备选区：%1$d 个任务</string>
     <string name="nanoflow_widget_minutes_short">%1$d 分</string>
@@ -86,6 +90,7 @@
     <string name="nanoflow_widget_focus_promote_failed_toast">网络繁忙，请稍后重试</string>
     <string name="nanoflow_widget_focus_complete_toast">已完成当前 C 位</string>
     <string name="nanoflow_widget_focus_wait_toast">已移到 C 位队尾</string>
+    <string name="nanoflow_widget_focus_wait_menu_label">选择等待</string>
     <string name="nanoflow_widget_focus_wait_menu_toast">选择等待时间</string>
     <string name="nanoflow_widget_recently">刚刚</string>
     <string name="nanoflow_widget_relative_minutes">%1$d 分钟前</string>

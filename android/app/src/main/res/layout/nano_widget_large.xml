@@ -21,7 +21,10 @@
     android:layout_height="match_parent"
     android:background="@drawable/nano_widget_root_focus"
     android:clipToOutline="true"
-    android:padding="14dp">
+    android:paddingStart="16dp"
+    android:paddingEnd="16dp"
+    android:paddingTop="14dp"
+    android:paddingBottom="14dp">
 
     <!-- ==== 背景技术网格：5 条纵线 ==== -->
     <LinearLayout
@@ -62,7 +65,7 @@
         <!-- 头部：左侧 🎯 + 专注模式；右侧 C 位停泊坞 + icon -->
         <LinearLayout
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
+            android:layout_height="22dp"
             android:gravity="center_vertical"
             android:orientation="horizontal">
 
@@ -84,7 +87,7 @@
                 android:maxLines="1"
                 android:text="@string/nanoflow_widget_focus_label"
                 android:textColor="#F6FBFF"
-                android:textSize="14sp"
+                android:textSize="16sp"
                 android:textStyle="bold" />
 
             <TextView
@@ -113,7 +116,7 @@
                 android:maxLines="1"
                 android:text="C位停泊坞"
                 android:textColor="#F6FBFF"
-                android:textSize="11sp" />
+                android:textSize="12sp" />
 
             <TextView
                 android:layout_width="6dp"
@@ -130,7 +133,7 @@
         <!-- 间距 -->
         <TextView
             android:layout_width="match_parent"
-            android:layout_height="8dp" />
+            android:layout_height="7dp" />
 
         <!-- 横向虚线分隔 -->
         <ImageView
@@ -144,16 +147,15 @@
             android:layout_width="match_parent"
             android:layout_height="6dp" />
 
-        <!-- 4 插槽：主任务 + 副1/2/3 -->
+        <!-- 4 插槽：主任务 + 副1/2/3。列宽允许宿主按实际 4x2 宽度伸缩，避免窄桌面裁切第 4 张卡。 -->
         <GridView
             android:id="@+id/nano_widget_tab_list"
             android:layout_width="match_parent"
-            android:layout_height="0dp"
-            android:layout_weight="1"
-            android:columnWidth="64dp"
+            android:layout_height="76dp"
+            android:columnWidth="60dp"
             android:fadingEdge="none"
-            android:gravity="center_vertical"
-            android:horizontalSpacing="4dp"
+            android:gravity="center"
+            android:horizontalSpacing="10dp"
             android:numColumns="4"
             android:overScrollMode="never"
             android:requiresFadingEdge="none"
@@ -163,7 +165,7 @@
 
         <TextView
             android:layout_width="match_parent"
-            android:layout_height="6dp" />
+            android:layout_height="7dp" />
 
         <!-- 横向虚线分隔 -->
         <ImageView
@@ -175,7 +177,7 @@
 
         <TextView
             android:layout_width="match_parent"
-            android:layout_height="6dp" />
+            android:layout_height="7dp" />
 
         <!-- 底栏：📁 备选区：N 个任务 ……  ›（已移除右下角刷新，底栏占满宽度） -->
         <LinearLayout
@@ -203,13 +205,27 @@
                 android:maxLines="1"
                 android:text=""
                 android:textColor="#F6FBFF"
-                android:textSize="12sp" />
+                android:textSize="13sp" />
 
             <GridView
                 android:id="@+id/nano_widget_focus_actions_list"
+                android:layout_width="164dp"
+                android:layout_height="34dp"
+                android:columnWidth="72dp"
+                android:fadingEdge="none"
+                android:horizontalSpacing="12dp"
+                android:numColumns="2"
+                android:overScrollMode="never"
+                android:requiresFadingEdge="none"
+                android:scrollbars="none"
+                android:stretchMode="columnWidth"
+                android:verticalSpacing="0dp" />
+
+            <GridView
+                android:id="@+id/nano_widget_focus_wait_presets_list"
                 android:layout_width="196dp"
-                android:layout_height="42dp"
-                android:columnWidth="48dp"
+                android:layout_height="34dp"
+                android:columnWidth="46dp"
                 android:fadingEdge="none"
                 android:horizontalSpacing="4dp"
                 android:numColumns="4"
@@ -217,7 +233,8 @@
                 android:requiresFadingEdge="none"
                 android:scrollbars="none"
                 android:stretchMode="columnWidth"
-                android:verticalSpacing="0dp" />
+                android:verticalSpacing="0dp"
+                android:visibility="gone" />
 
             <ImageView
                 android:layout_width="14dp"

@@ -116,6 +116,7 @@ export class DockEngineService {
   // v3.0 碎片阶段防御等级（§7.8 四级防御体系）
   readonly fragmentDefenseLevel = signal<FragmentDefenseLevel>(1);
   readonly schedulerPhase = signal<DockSchedulerPhase>('active');
+  private readonly snapshotSavedAt = signal(new Date().toISOString());
   // v3.0 三维推荐阵列缓存
   readonly lastRecommendationGroups = signal<import('../models/parking-dock').RecommendationGroup[]>([]);
   readonly lastExitAction = signal<DockExitAction | null>(null);
@@ -404,6 +405,7 @@ export class DockEngineService {
       buildNormalizeContext: () => this.snapshotManager.buildNormalizeContext(),
       getNonCriticalHoldDelay: () => this.lifecycle.getNonCriticalHoldDelay(),
       scheduleLocalPersist: (snapshot, userId) => this.scheduleLocalPersist(snapshot, userId),
+      setSnapshotSavedAt: (savedAt) => this.snapshotSavedAt.set(savedAt),
     });
     this.lifecycle.startTickTimer();
     this.lifecycle.restoreInitialSnapshot();
@@ -446,6 +448,7 @@ export class DockEngineService {
       fragmentDefenseLevel: this.fragmentDefenseLevel,
       lastConsoleDemotedTaskId: this.lastConsoleDemotedTaskId,
       consoleVisibleOrderHint: this.consoleVisibleOrderHint,
+      snapshotSavedAt: this.snapshotSavedAt,
       waitEndNotifiedIds: this.waitEndNotifiedIds,
       getDockExpandedPreference: () => this.getDockExpandedPreference(),
       persistDockExpandedPreference: (expanded: boolean) => this.persistDockExpandedPreference(expanded),
@@ -836,5 +839,10 @@ export class DockEngineService {
 
   computeRecommendationForSuspended(suspendedTaskId: string, waitMinutes: number): void {
     this.snapshotManager.computeRecommendationForSuspended(suspendedTaskId, waitMinutes);
+  }
+
+  refreshFocusSessionFromCloud(userId: string | null = this.currentSnapshotUserId): void {
+    if (!userId) return;
+    this.cloudSync.scheduleCloudPull(userId, true);
   }
 }

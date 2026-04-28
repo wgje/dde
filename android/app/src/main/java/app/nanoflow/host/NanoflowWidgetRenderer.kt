@@ -110,6 +110,7 @@ object NanoflowWidgetRenderer {
       // 用户操作通过 root 点击与 tab slot 完成。layoutRes 不再含 R.id.nano_widget_refresh_list。
       renderFocusFooter(context, views, model)
       renderFocusActionsList(context, views, appWidgetId, model)
+      renderFocusWaitPresetList(context, views, appWidgetId, model)
     }
 
     return views
@@ -229,6 +230,7 @@ object NanoflowWidgetRenderer {
   ) {
     if (model.tasks.firstOrNull()?.taskId.isNullOrBlank()) {
       views.setViewVisibility(R.id.nano_widget_focus_actions_list, View.GONE)
+      views.setViewVisibility(R.id.nano_widget_focus_wait_presets_list, View.GONE)
       return
     }
     val adapter = NanoflowWidgetReceiver.actionListAdapterIntent(
@@ -241,7 +243,36 @@ object NanoflowWidgetRenderer {
       R.id.nano_widget_focus_actions_list,
       NanoflowWidgetReceiver.actionListClickTemplatePendingIntent(context, appWidgetId),
     )
-    views.setViewVisibility(R.id.nano_widget_focus_actions_list, View.VISIBLE)
+    views.setViewVisibility(
+      R.id.nano_widget_focus_actions_list,
+      if (model.focusWaitMenuOpen) View.GONE else View.VISIBLE,
+    )
+  }
+
+  private fun renderFocusWaitPresetList(
+    context: Context,
+    views: RemoteViews,
+    appWidgetId: Int,
+    model: WidgetRenderModel,
+  ) {
+    if (model.tasks.firstOrNull()?.taskId.isNullOrBlank()) {
+      views.setViewVisibility(R.id.nano_widget_focus_wait_presets_list, View.GONE)
+      return
+    }
+    val adapter = NanoflowWidgetReceiver.actionListAdapterIntent(
+      context,
+      appWidgetId,
+      NanoflowWidgetActionFactory.LIST_KIND_FOCUS_WAIT_PRESETS,
+    )
+    views.setRemoteAdapter(R.id.nano_widget_focus_wait_presets_list, adapter)
+    views.setPendingIntentTemplate(
+      R.id.nano_widget_focus_wait_presets_list,
+      NanoflowWidgetReceiver.actionListClickTemplatePendingIntent(context, appWidgetId),
+    )
+    views.setViewVisibility(
+      R.id.nano_widget_focus_wait_presets_list,
+      if (model.focusWaitMenuOpen) View.VISIBLE else View.GONE,
+    )
   }
 
   // --- 专注模式底栏：「备选区：N 个任务  ›」 ---
@@ -251,7 +282,11 @@ object NanoflowWidgetRenderer {
     // 即使 overflow=0 也保留文案，改写为 0 个任务，保证海报对齐的底栏视觉
     views.setTextViewText(
       R.id.nano_widget_footer_label,
-      context.getString(R.string.nanoflow_widget_focus_backup_zone, overflow),
+      if (model.focusWaitMenuOpen) {
+        context.getString(R.string.nanoflow_widget_focus_wait_menu_label)
+      } else {
+        context.getString(R.string.nanoflow_widget_focus_backup_zone, overflow)
+      },
     )
     views.setViewVisibility(R.id.nano_widget_footer_label, View.VISIBLE)
   }

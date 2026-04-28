@@ -75,6 +75,7 @@ describe('WorkspaceShellComponent Android widget bootstrap', () => {
     persistDeferredStartupEntryIntentToStorage: ReturnType<typeof vi.fn>;
     logger: { warn: ReturnType<typeof vi.fn> };
     toast: { warning: ReturnType<typeof vi.fn> };
+    beforeUnloadManager?: { suppressNextConfirmation: ReturnType<typeof vi.fn> };
     androidWidgetBootstrapInFlight: boolean;
   };
 
@@ -291,6 +292,7 @@ describe('WorkspaceShellComponent Android widget bootstrap', () => {
       entry: 'twa',
       intent: 'open-workspace',
       rawIntent: 'open-workspace',
+      widgetGateEntryId: null,
     });
     expect(persistPendingAndroidWidgetBootstrapToStorage).toHaveBeenCalledWith({
       callbackUri: 'nanoflow-widget://bootstrap',
@@ -308,6 +310,7 @@ describe('WorkspaceShellComponent Android widget bootstrap', () => {
       entry: 'twa',
       intent: 'open-workspace',
       rawIntent: 'open-workspace',
+      widgetGateEntryId: null,
     });
     expect(consumeStartupEntryIntent).toHaveBeenCalledTimes(1);
   });
@@ -350,6 +353,7 @@ describe('WorkspaceShellComponent Android widget bootstrap', () => {
       entry: 'twa',
       intent: 'open-workspace',
       rawIntent: 'open-workspace',
+      widgetGateEntryId: null,
     });
     expect(warn).toHaveBeenCalledWith('忽略不可信环境中的 Android widget bootstrap 请求');
     expect(consumeStartupEntryIntent).toHaveBeenCalledTimes(1);
@@ -385,12 +389,14 @@ describe('WorkspaceShellComponent Android widget bootstrap', () => {
       entry: 'twa',
       intent: 'open-workspace',
       rawIntent: 'open-workspace',
+      widgetGateEntryId: null,
     });
     expect(persistPendingAndroidWidgetBootstrapToStorage).toHaveBeenCalledWith(null);
     expect(persistDeferredStartupEntryIntentToStorage).toHaveBeenCalledWith({
       entry: 'twa',
       intent: 'open-workspace',
       rawIntent: 'open-workspace',
+      widgetGateEntryId: null,
     });
     expect(warn).toHaveBeenCalledWith('忽略损坏的 Android widget bootstrap 参数');
     expect(consumeStartupEntryIntent).toHaveBeenCalledTimes(1);
@@ -695,6 +701,70 @@ describe('WorkspaceShellComponent Android widget bootstrap', () => {
         value: originalLocation,
       });
       vi.unstubAllGlobals();
+    }
+  });
+
+  it('显式 callback 回跳前应跳过一次 beforeunload 确认', () => {
+    const originalLocation = window.location;
+    const assign = vi.fn();
+    const suppressNextConfirmation = vi.fn();
+
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: { ...originalLocation, assign } as Location,
+    });
+
+    try {
+      const context = {
+        pendingAndroidWidgetManualCallback: vi.fn(() => ({
+          callbackUrl: 'nanoflow-widget://bootstrap#widgetToken=android-token',
+          callbackIntentUrl: 'intent://bootstrap?widgetToken=android-token#Intent;scheme=nanoflow-widget;end',
+        })),
+        beforeUnloadManager: { suppressNextConfirmation },
+        logger: { warn: vi.fn() },
+      } as unknown as WorkspaceShellComponent;
+
+      WorkspaceShellComponent.prototype.continueAndroidWidgetManualCallback.call(context);
+
+      expect(suppressNextConfirmation).toHaveBeenCalledTimes(1);
+      expect(assign).toHaveBeenCalledWith('nanoflow-widget://bootstrap#widgetToken=android-token');
+    } finally {
+      Object.defineProperty(window, 'location', {
+        configurable: true,
+        value: originalLocation,
+      });
+    }
+  });
+
+  it('intent fallback 回跳前应跳过一次 beforeunload 确认', () => {
+    const originalLocation = window.location;
+    const replace = vi.fn();
+    const suppressNextConfirmation = vi.fn();
+
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: { ...originalLocation, replace } as Location,
+    });
+
+    try {
+      const context = {
+        pendingAndroidWidgetManualCallback: vi.fn(() => ({
+          callbackUrl: 'nanoflow-widget://bootstrap#widgetToken=android-token',
+          callbackIntentUrl: 'intent://bootstrap?widgetToken=android-token#Intent;scheme=nanoflow-widget;end',
+        })),
+        beforeUnloadManager: { suppressNextConfirmation },
+        logger: { warn: vi.fn() },
+      } as unknown as WorkspaceShellComponent;
+
+      WorkspaceShellComponent.prototype.useAndroidWidgetIntentFallback.call(context);
+
+      expect(suppressNextConfirmation).toHaveBeenCalledTimes(1);
+      expect(replace).toHaveBeenCalledWith('intent://bootstrap?widgetToken=android-token#Intent;scheme=nanoflow-widget;end');
+    } finally {
+      Object.defineProperty(window, 'location', {
+        configurable: true,
+        value: originalLocation,
+      });
     }
   });
 });
@@ -2063,6 +2133,7 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
       isSidebarOpen: { set: setSidebarOpen },
       preloadSidebarTools,
       loadBlackBoxRecorderComponent,
+      primeWidgetWorkspaceGateSync: vi.fn(),
       focusPrefs: {
         isBlackBoxEnabled: () => true,
       },
@@ -2085,6 +2156,40 @@ describe('WorkspaceShellComponent 输入事件处理', () => {
     expect(setSidebarOpen).toHaveBeenCalledWith(true);
     expect(preloadSidebarTools).toHaveBeenCalledWith('intent');
     expect(loadBlackBoxRecorderComponent).toHaveBeenCalledTimes(1);
+  });
+
+  it('widget open-workspace 应同时强制拉取 Focus C 位快照，避免小组件顺序被本地旧状态回调', () => {
+    const primeWidgetWorkspaceGateSync = vi.fn();
+    const refreshFocusSessionFromCloud = vi.fn();
+    const context = {
+      routeUrl: () => '/projects/project-1?entry=widget&intent=open-workspace',
+      currentUserId: () => 'user-1',
+      focusStartupProbe: {
+        primeWidgetWorkspaceGateSync,
+      },
+      bootStage: {
+        isApplicationReady: () => false,
+      },
+      dockEngine: {
+        refreshFocusSessionFromCloud,
+      },
+      primedWidgetWorkspaceGateSyncKey: null,
+    } as unknown as WorkspaceShellComponent;
+
+    (WorkspaceShellComponent.prototype as unknown as {
+      primeWidgetWorkspaceGateSync: (this: WorkspaceShellComponent, startupEntryIntent: {
+        entry: 'shortcut' | 'widget' | 'twa';
+        intent: 'open-workspace' | null;
+        rawIntent: string | null;
+      }) => void;
+    }).primeWidgetWorkspaceGateSync.call(context, {
+      entry: 'widget',
+      intent: 'open-workspace',
+      rawIntent: 'open-workspace',
+    });
+
+    expect(primeWidgetWorkspaceGateSync).toHaveBeenCalledTimes(1);
+    expect(refreshFocusSessionFromCloud).toHaveBeenCalledWith('user-1');
   });
 
   it('consumeStartupEntryIntent 应在执行后保留当前深链接并清理一次性 startup query', () => {

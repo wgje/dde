@@ -17,6 +17,16 @@ import java.util.UUID
 
 private val Context.widgetDataStore by preferencesDataStore(name = "nanoflow_widget")
 
+data class PendingFocusActiveHint(
+  val active: Boolean,
+  val issuedAtMs: Long,
+)
+
+data class PendingFocusMutation(
+  val action: String,
+  val issuedAtMs: Long,
+)
+
 class NanoflowWidgetStore(private val context: Context) {
   private val summaryCacheFormatVersion = 1
   private val json = Json {
@@ -239,6 +249,48 @@ class NanoflowWidgetStore(private val context: Context) {
     return context.widgetDataStore.data.first()[focusWaitMenuOpenKey(appWidgetId)] ?: false
   }
 
+  suspend fun persistPendingFocusActiveHint(appWidgetId: Int, active: Boolean) {
+    context.widgetDataStore.edit { prefs ->
+      prefs[pendingFocusActiveHintKey(appWidgetId)] = active
+      prefs[pendingFocusActiveHintIssuedAtKey(appWidgetId)] = System.currentTimeMillis()
+    }
+  }
+
+  suspend fun readPendingFocusActiveHint(appWidgetId: Int): PendingFocusActiveHint? {
+    val snapshot = context.widgetDataStore.data.first()
+    val active = snapshot[pendingFocusActiveHintKey(appWidgetId)] ?: return null
+    val issuedAtMs = snapshot[pendingFocusActiveHintIssuedAtKey(appWidgetId)] ?: return null
+    return PendingFocusActiveHint(active = active, issuedAtMs = issuedAtMs)
+  }
+
+  suspend fun clearPendingFocusActiveHint(appWidgetId: Int) {
+    context.widgetDataStore.edit { prefs ->
+      prefs.remove(pendingFocusActiveHintKey(appWidgetId))
+      prefs.remove(pendingFocusActiveHintIssuedAtKey(appWidgetId))
+    }
+  }
+
+  suspend fun persistPendingFocusMutation(appWidgetId: Int, action: String) {
+    context.widgetDataStore.edit { prefs ->
+      prefs[pendingFocusMutationActionKey(appWidgetId)] = action
+      prefs[pendingFocusMutationIssuedAtKey(appWidgetId)] = System.currentTimeMillis()
+    }
+  }
+
+  suspend fun readPendingFocusMutation(appWidgetId: Int): PendingFocusMutation? {
+    val snapshot = context.widgetDataStore.data.first()
+    val action = snapshot[pendingFocusMutationActionKey(appWidgetId)] ?: return null
+    val issuedAtMs = snapshot[pendingFocusMutationIssuedAtKey(appWidgetId)] ?: return null
+    return PendingFocusMutation(action = action, issuedAtMs = issuedAtMs)
+  }
+
+  suspend fun clearPendingFocusMutation(appWidgetId: Int) {
+    context.widgetDataStore.edit { prefs ->
+      prefs.remove(pendingFocusMutationActionKey(appWidgetId))
+      prefs.remove(pendingFocusMutationIssuedAtKey(appWidgetId))
+    }
+  }
+
   suspend fun persistGateSelectedEntryId(appWidgetId: Int, entryId: String?) {
     context.widgetDataStore.edit { prefs ->
       val key = gateSelectedEntryIdKey(appWidgetId)
@@ -321,6 +373,10 @@ class NanoflowWidgetStore(private val context: Context) {
       prefs.remove(gateSelectedEntryIdKey(appWidgetId))
       prefs.remove(selectedTaskIndexKey(appWidgetId))
       prefs.remove(focusWaitMenuOpenKey(appWidgetId))
+      prefs.remove(pendingFocusActiveHintKey(appWidgetId))
+      prefs.remove(pendingFocusActiveHintIssuedAtKey(appWidgetId))
+      prefs.remove(pendingFocusMutationActionKey(appWidgetId))
+      prefs.remove(pendingFocusMutationIssuedAtKey(appWidgetId))
       prefs.remove(summaryJsonKey(appWidgetId))
       prefs.remove(summaryCacheFormatVersionKey(appWidgetId))
       prefs.remove(summaryUpdatedAtKey(appWidgetId))
@@ -337,6 +393,10 @@ class NanoflowWidgetStore(private val context: Context) {
       prefs.remove(summaryJsonKey(appWidgetId))
       prefs.remove(summaryCacheFormatVersionKey(appWidgetId))
       prefs.remove(summaryUpdatedAtKey(appWidgetId))
+      prefs.remove(pendingFocusActiveHintKey(appWidgetId))
+      prefs.remove(pendingFocusActiveHintIssuedAtKey(appWidgetId))
+      prefs.remove(pendingFocusMutationActionKey(appWidgetId))
+      prefs.remove(pendingFocusMutationIssuedAtKey(appWidgetId))
       prefs.remove(stringPreferencesKey(pendingBootstrapNonceKey(appWidgetId)))
       prefs.remove(longPreferencesKey(pendingBootstrapIssuedAtKey(appWidgetId)))
       prefs.remove(stringPreferencesKey(pendingBootstrapPushTokenKey(appWidgetId)))
@@ -464,6 +524,22 @@ class NanoflowWidgetStore(private val context: Context) {
 
   private fun focusWaitMenuOpenKey(appWidgetId: Int): Preferences.Key<Boolean> {
     return booleanPreferencesKey("instance.$appWidgetId.focusWaitMenuOpen")
+  }
+
+  private fun pendingFocusActiveHintKey(appWidgetId: Int): Preferences.Key<Boolean> {
+    return booleanPreferencesKey("instance.$appWidgetId.pendingFocusActiveHint")
+  }
+
+  private fun pendingFocusActiveHintIssuedAtKey(appWidgetId: Int): Preferences.Key<Long> {
+    return longPreferencesKey("instance.$appWidgetId.pendingFocusActiveHintIssuedAtMs")
+  }
+
+  private fun pendingFocusMutationActionKey(appWidgetId: Int): Preferences.Key<String> {
+    return stringPreferencesKey("instance.$appWidgetId.pendingFocusMutationAction")
+  }
+
+  private fun pendingFocusMutationIssuedAtKey(appWidgetId: Int): Preferences.Key<Long> {
+    return longPreferencesKey("instance.$appWidgetId.pendingFocusMutationIssuedAtMs")
   }
 
   private fun gateSelectedEntryIdKey(appWidgetId: Int): Preferences.Key<String> {

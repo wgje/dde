@@ -1499,6 +1499,7 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
 
     this.primedWidgetWorkspaceGateSyncKey = primeKey;
     this.focusStartupProbe.primeWidgetWorkspaceGateSync();
+    this.dockEngine.refreshFocusSessionFromCloud(this.currentUserId());
     if (this.bootStage.isApplicationReady() && this.focusProbeInitializedForUser === this.currentUserId()) {
       void this.focusStartupProbe.recheckGate({
         source: 'widget-open-workspace',
@@ -1679,6 +1680,7 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
     }
 
     this.logger.warn('Android widget callback 使用显式确认回跳');
+    this.beforeUnloadManager.suppressNextConfirmation();
     window.location.assign(callback.callbackUrl);
   }
 
@@ -1689,6 +1691,7 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
     }
 
     this.logger.warn('Android widget callback 使用显式 intent fallback');
+    this.beforeUnloadManager.suppressNextConfirmation();
     window.location.replace(callback.callbackIntentUrl);
   }
 

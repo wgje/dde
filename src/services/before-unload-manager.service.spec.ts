@@ -54,6 +54,7 @@ describe('BeforeUnloadManagerService', () => {
   afterEach(() => {
     // 始终清理，避免 window 事件监听器跨测试泄漏
     try {
+      (service as unknown as { cleanup?: () => void }).cleanup?.();
       destroy();
     } catch {
       /* ignore */
@@ -160,6 +161,32 @@ describe('BeforeUnloadManagerService', () => {
     });
   });
 
+  describe('suppressNextConfirmation', () => {
+    it('仅跳过下一次 beforeunload 确认且仍执行保存回调', () => {
+      const cb = vi.fn(() => true);
+      service.register('confirming-save', cb);
+      service.initialize();
+
+      const firstEvent = new Event('beforeunload', { cancelable: true }) as BeforeUnloadEvent;
+      Object.defineProperty(firstEvent, 'returnValue', { configurable: true, writable: true, value: undefined });
+
+      service.suppressNextConfirmation();
+      window.dispatchEvent(firstEvent);
+
+      expect(cb).toHaveBeenCalledTimes(1);
+      expect(firstEvent.defaultPrevented).toBe(false);
+      expect(firstEvent.returnValue).toBeUndefined();
+
+      const secondEvent = new Event('beforeunload', { cancelable: true }) as BeforeUnloadEvent;
+      Object.defineProperty(secondEvent, 'returnValue', { configurable: true, writable: true, value: undefined });
+      window.dispatchEvent(secondEvent);
+
+      expect(cb).toHaveBeenCalledTimes(2);
+      expect(secondEvent.defaultPrevented).toBe(true);
+      expect(secondEvent.returnValue).toBe('您有未保存的内容，确定要离开吗？');
+    });
+  });
+
   describe('回调异常隔离', () => {
     it('单个回调抛错不阻止其他回调执行', () => {
       const later = vi.fn();
@@ -224,6 +251,16 @@ describe('BeforeUnloadManagerService', () => {
       expect(() => destroy()).not.toThrow();
       // 二次销毁幂等
       expect(() => destroy()).not.toThrow();
+    });
+
+    it('清理 pagehide 监听时应使用与注册一致的 capture 选项', () => {
+      const removeSpy = vi.spyOn(window, 'removeEventListener');
+      service.initialize();
+
+      (service as unknown as { cleanup: () => void }).cleanup();
+
+      expect(removeSpy).toHaveBeenCalledWith('pagehide', expect.any(Function), { capture: true });
+      removeSpy.mockRestore();
     });
   });
 });

@@ -59,6 +59,9 @@ describe('android host contract', () => {
     expect(repository).toContain('widget_bootstrap_callback_rejected');
     expect(repository).not.toContain('widget-register');
     expect(bootstrapActivity).toContain('consumeBootstrapUri');
+    expect(bootstrapActivity).toContain('returnToWidgetHostSurface');
+    expect(bootstrapActivity).toContain('Intent.ACTION_MAIN');
+    expect(bootstrapActivity).toContain('Intent.CATEGORY_HOME');
     expect(bindingService).toContain("platform: 'android-widget'");
     expect(bindingService).toContain('persistRuntimeBinding: false');
     expect(bindingService).toContain('callbackIntentUrl');
@@ -120,5 +123,103 @@ describe('android host contract', () => {
     expect(shell).toContain('this.focusStartupProbe.primeWidgetWorkspaceGateSync()');
     expect(probe).toContain('primeWidgetWorkspaceGateSync()');
     expect(probe).toContain("source: remoteFirst ? 'widget-open-workspace' : options.source");
+  });
+
+  it('keeps recent focus push hints from being overwritten by stale summary refreshes', () => {
+    const store = readText('android/app/src/main/java/app/nanoflow/host/NanoflowWidgetStore.kt');
+    const repository = readText('android/app/src/main/java/app/nanoflow/host/NanoflowWidgetRepository.kt');
+
+    expect(store).toContain('persistPendingFocusActiveHint');
+    expect(store).toContain('readPendingFocusActiveHint');
+    expect(store).toContain('clearPendingFocusActiveHint');
+    expect(repository).toContain('FOCUS_HINT_GRACE_MS');
+    expect(repository).toContain('reconcileRecentFocusHint');
+    expect(repository).toContain('cloud-pending-local-hint');
+    expect(repository).toContain('store.persistPendingFocusActiveHint(appWidgetId, hintActive)');
+    expect(repository).toContain('reconcileRecentFocusHint(appWidgetId, normalizedSummary, cachedSummary)');
+  });
+
+  it('keeps optimistic focus wait order from being overwritten by stale summary refreshes', () => {
+    const store = readText('android/app/src/main/java/app/nanoflow/host/NanoflowWidgetStore.kt');
+    const repository = readText('android/app/src/main/java/app/nanoflow/host/NanoflowWidgetRepository.kt');
+
+    expect(store).toContain('persistPendingFocusMutation');
+    expect(store).toContain('readPendingFocusMutation');
+    expect(store).toContain('clearPendingFocusMutation');
+    expect(repository).toContain('FOCUS_MUTATION_GRACE_MS');
+    expect(repository).toContain('reconcilePendingFocusMutation');
+    expect(repository).toContain('cloud-pending-local-focus-mutation');
+    expect(repository).toContain('store.persistPendingFocusMutation(appWidgetId, FOCUS_MUTATION_WAIT)');
+    expect(repository).toContain('reconcilePendingFocusMutation(appWidgetId, normalizedSummary, cachedSummary)');
+  });
+
+  it('keeps focus widget complete/wait actions local-first and refreshable', () => {
+    const layout = readText('android/app/src/main/res/layout/nano_widget_large.xml');
+    const factory = readText('android/app/src/main/java/app/nanoflow/host/NanoflowWidgetActionFactory.kt');
+    const receiver = readText('android/app/src/main/java/app/nanoflow/host/NanoflowWidgetReceiver.kt');
+    const renderer = readText('android/app/src/main/java/app/nanoflow/host/NanoflowWidgetRenderer.kt');
+    const strings = readText('android/app/src/main/res/values/strings.xml');
+    const repository = readText('android/app/src/main/java/app/nanoflow/host/NanoflowWidgetRepository.kt');
+    const worker = readText('android/app/src/main/java/app/nanoflow/host/NanoflowWidgetRefreshWorker.kt');
+
+    expect(layout).toContain('nano_widget_focus_actions_list');
+    expect(layout).toContain('nano_widget_focus_wait_presets_list');
+    expect(factory).toContain('LIST_KIND_FOCUS_ACTIONS');
+    expect(factory).toContain('LIST_KIND_FOCUS_WAIT_PRESETS');
+    expect(factory).toContain('FOCUS_ACTION_COMPLETE');
+    expect(factory).toContain('FOCUS_ACTION_WAIT');
+    expect(factory).toContain('FOCUS_ACTION_WAIT_PRESET');
+    expect(renderer).toContain('renderFocusWaitPresetList');
+    expect(renderer).toContain('nanoflow_widget_focus_wait_menu_label');
+    expect(strings).toContain('name="nanoflow_widget_focus_wait_menu_label"');
+    expect(receiver).toContain('R.id.nano_widget_focus_actions_list');
+    expect(receiver).toContain('R.id.nano_widget_focus_wait_presets_list');
+    expect(receiver).toContain('completeFrontFocusTask');
+    expect(receiver).toContain('suspendFrontFocusTask');
+    expect(repository).toContain('applyOptimisticFocusCompletion');
+    expect(repository).toContain('applyOptimisticFocusWait');
+    expect(worker).toContain('scheduleFocusWaitReminder');
+  });
+
+  it('keeps the optimistic wait preset state when remote wait submission is delayed or rejected', () => {
+    const receiver = readText('android/app/src/main/java/app/nanoflow/host/NanoflowWidgetReceiver.kt');
+    const branchStart = receiver.indexOf('NanoflowWidgetActionFactory.FOCUS_ACTION_WAIT_PRESET ->');
+    const branchEnd = receiver.indexOf('else -> {', branchStart);
+    const waitPresetBranch = receiver.slice(branchStart, branchEnd);
+
+    expect(waitPresetBranch).toContain('repository.applyOptimisticFocusWait');
+    expect(waitPresetBranch).toContain('repository.suspendFrontFocusTask');
+    expect(waitPresetBranch).toContain('focus-wait-front-retry');
+    expect(waitPresetBranch).toContain('scheduleFocusWaitReminder');
+    expect(waitPresetBranch).not.toContain('rollbackOptimisticFocusPromotion');
+  });
+
+  it('matches the focus widget blueprint proportions for the 360 by 180 reference', () => {
+    const widgetInfo = readText('android/app/src/main/res/xml/nanoflow_focus_widget_info.xml');
+    const focusLayout = readText('android/app/src/main/res/layout/nano_widget_large.xml');
+    const tabItem = readText('android/app/src/main/res/layout/nano_widget_tab_item.xml');
+    const focusActionItem = readText('android/app/src/main/res/layout/nano_widget_focus_action_item.xml');
+    const rootFocus = readText('android/app/src/main/res/drawable/nano_widget_root_focus.xml');
+
+    expect(widgetInfo).toContain('android:minWidth="360dp"');
+    expect(widgetInfo).toContain('android:minHeight="180dp"');
+    expect(focusLayout).toContain('android:paddingStart="16dp"');
+    expect(focusLayout).toContain('android:paddingTop="14dp"');
+    expect(focusLayout).toContain('android:columnWidth="60dp"');
+    expect(focusLayout).toContain('android:horizontalSpacing="10dp"');
+    expect(focusLayout).toContain('android:layout_height="76dp"');
+    expect(focusLayout).toContain('android:stretchMode="columnWidth"');
+    expect(focusLayout).toContain('android:layout_width="164dp"');
+    expect(focusLayout).toContain('android:columnWidth="72dp"');
+    expect(focusLayout).toContain('android:numColumns="2"');
+    expect(tabItem).toContain('android:layout_width="match_parent"');
+    expect(tabItem).toContain('android:layout_height="72dp"');
+    expect(tabItem).toContain('android:maxLines="1"');
+    expect(tabItem).toContain('android:textSize="10sp"');
+    expect(focusActionItem).toContain('android:layout_height="34dp"');
+    expect(focusActionItem).toContain('android:minHeight="28dp"');
+    expect(focusActionItem).toContain('android:textSize="12sp"');
+    expect(rootFocus).toContain('@drawable/nano_widget_blueprint_grid');
+    expect(rootFocus).toContain('android:radius="28dp"');
   });
 });
