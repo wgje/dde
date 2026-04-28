@@ -108,7 +108,6 @@ describe('FileTypeValidatorService', () => {
 
   afterEach(() => {
     vi.clearAllMocks();
-    vi.unstubAllGlobals();
   });
 
   // ==========================================================================

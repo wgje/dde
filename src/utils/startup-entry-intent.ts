@@ -2,7 +2,12 @@ import type { LaunchRouteIntent } from '../models/launch-shell';
 import { resolveRouteIntent } from './route-intent';
 
 export type StartupEntrySource = 'shortcut' | 'widget' | 'twa';
-export type StartupEntryIntentKind = 'open-workspace' | 'open-focus-tools' | 'open-blackbox-recorder';
+export type StartupEntryIntentKind =
+  | 'open-workspace'
+  | 'open-focus-tools'
+  | 'open-blackbox-recorder'
+  | 'mark-gate-read'
+  | 'mark-gate-complete';
 
 const UUID_LIKE_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ANDROID_WIDGET_BOOTSTRAP_CALLBACK_SCHEME = 'nanoflow-widget:';
@@ -12,6 +17,8 @@ export interface StartupEntryIntent {
   entry: StartupEntrySource;
   intent: StartupEntryIntentKind | null;
   rawIntent: string | null;
+  /** 小组件大门按钮透传的 BlackBoxEntry ID（mark-gate-read / mark-gate-complete 专用）。 */
+  widgetGateEntryId: string | null;
 }
 
 export interface AndroidWidgetBootstrapRequest {
@@ -86,7 +93,9 @@ function isStartupEntrySource(value: string | null): value is StartupEntrySource
 function isStartupEntryIntentKind(value: string | null): value is StartupEntryIntentKind {
   return value === 'open-workspace'
     || value === 'open-focus-tools'
-    || value === 'open-blackbox-recorder';
+    || value === 'open-blackbox-recorder'
+    || value === 'mark-gate-read'
+    || value === 'mark-gate-complete';
 }
 
 function isUuidLike(value: string | null): value is string {
@@ -129,10 +138,12 @@ export function resolveStartupEntryIntent(routeUrl: string | null): StartupEntry
   }
 
   const rawIntent = params.get('intent');
+  const rawGateEntryId = params.get('widgetGateEntryId');
   return {
     entry: rawEntry,
     intent: isStartupEntryIntentKind(rawIntent) ? rawIntent : null,
     rawIntent,
+    widgetGateEntryId: isUuidLike(rawGateEntryId) ? rawGateEntryId : null,
   };
 }
 
@@ -156,10 +167,13 @@ export function normalizeStartupEntryIntent(value: unknown): StartupEntryIntent 
     ? record.intent
     : null;
 
+  const rawGateEntryId = typeof record.widgetGateEntryId === 'string' ? record.widgetGateEntryId : null;
+
   return {
     entry: rawEntry,
     intent,
     rawIntent,
+    widgetGateEntryId: isUuidLike(rawGateEntryId) ? rawGateEntryId : null,
   };
 }
 

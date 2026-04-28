@@ -892,4 +892,68 @@ describe('FlowConnectionEditorComponent', () => {
     expect(component.isEditMode()).toBe(false);
     expect(closeSpy).not.toHaveBeenCalled();
   });
+
+  it('标题和描述重组后即使包含分隔符也应再次保存，不应被旧 payload key 误判去重', () => {
+    const saveSpy = vi.spyOn(component.save, 'emit');
+
+    const dataSignal = signal<any>({
+      sourceId: 'source-task',
+      targetId: 'target-task',
+      title: '',
+      description: '',
+      x: 160,
+      y: 240,
+      isCrossTree: true,
+      mode: 'edit',
+    });
+
+    (component as any).position = signal({ x: 160, y: 240 });
+    (component as any).connectionTasks = signal({
+      source: createTask({ id: 'source-task', displayId: 'A' }),
+      target: createTask({ id: 'target-task', displayId: 'B' }),
+    });
+    (component as any).data = dataSignal;
+
+    fixture.detectChanges();
+    vi.advanceTimersByTime(60);
+    fixture.detectChanges();
+
+    const titleInput = fixture.nativeElement.querySelector('input') as HTMLInputElement;
+    const textarea = fixture.nativeElement.querySelector('textarea') as HTMLTextAreaElement;
+
+    titleInput.value = 'Alpha|Beta';
+    textarea.value = 'Gamma';
+    component.onTitleChange('Alpha|Beta');
+    component.onDescriptionChange('Gamma');
+
+    vi.advanceTimersByTime(600);
+
+    expect(saveSpy).toHaveBeenCalledWith({
+      sourceId: 'source-task',
+      targetId: 'target-task',
+      title: 'Alpha|Beta',
+      description: 'Gamma',
+    });
+
+    saveSpy.mockClear();
+
+    titleInput.value = 'Alpha';
+    textarea.value = 'Beta|Gamma';
+    component.onTitleChange('Alpha');
+    component.onDescriptionChange('Beta|Gamma');
+
+    outsideEl = document.createElement('button');
+    document.body.appendChild(outsideEl);
+
+    component.onDocumentTouchStart(createPreviewTouchEvent(outsideEl));
+    vi.advanceTimersByTime(120);
+
+    expect(saveSpy).toHaveBeenCalledTimes(1);
+    expect(saveSpy).toHaveBeenCalledWith({
+      sourceId: 'source-task',
+      targetId: 'target-task',
+      title: 'Alpha',
+      description: 'Beta|Gamma',
+    });
+  });
 });

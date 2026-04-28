@@ -17,7 +17,7 @@ import { ToastService } from './toast.service';
 import { FocusAttentionService } from './focus-attention.service';
 import { FocusHudWindowService } from './focus-hud-window.service';
 import { Task } from '../models';
-import { DockSnapshot } from '../models/parking-dock';
+import { DockSnapshot, FocusTaskSlot } from '../models/parking-dock';
 import { PARKING_CONFIG } from '../config/parking.config';
 import { DEFAULT_FOCUS_PREFERENCES } from '../models/focus';
 
@@ -1892,6 +1892,8 @@ describe('DockEngineService', () => {
     service.dockTask('B');
     service.toggleFocusMode();
     service.switchToTask('A');
+    service.setMainTask('B');
+    service.switchToTask('A');
 
     service.completeTask('A');
 
@@ -1932,6 +1934,69 @@ describe('DockEngineService', () => {
     expect(service.focusingEntry()?.taskId).toBe('B');
     expect(service.entries().find(entry => entry.taskId === 'A')?.isMain).toBe(true);
     expect(service.entries().find(entry => entry.taskId === 'B')?.isMain).toBe(false);
+    expect(service.exportSnapshot().session.mainTaskId).toBe('A');
+    expect(service.exportSnapshot().focusSessionState?.commandCenterTasks.map(slot => slot.taskId)).toEqual(['A']);
+  });
+
+  it('focusSessionState should keep backup-only tasks out of the widget C slots while showing combo-select pending secondaries', () => {
+    const makeEntry = (
+      taskId: string,
+      dockedOrder: number,
+      overrides: Partial<ReturnType<typeof service.entries>[number]> = {},
+    ) => ({
+      taskId,
+      title: taskId,
+      sourceProjectId: 'project-1',
+      status: 'pending_start' as const,
+      load: 'low' as const,
+      expectedMinutes: 20,
+      waitMinutes: null,
+      waitStartedAt: null,
+      lane: 'backup' as const,
+      zoneSource: 'manual' as const,
+      isMain: false,
+      dockedOrder,
+      detail: '',
+      sourceKind: 'project-task' as const,
+      systemSelected: false,
+      recommendedScore: null,
+      ...overrides,
+    });
+
+    service.restoreSnapshot({
+      version: 7,
+      entries: [
+        makeEntry('A', 0, { isMain: true, status: 'focusing', lane: 'combo-select' }),
+        makeEntry('B', 1),
+        makeEntry('C', 2, { lane: 'combo-select' }),
+        makeEntry('D', 3),
+      ],
+      focusMode: true,
+      isDockExpanded: true,
+      muteWaitTone: false,
+      session: {
+        firstDragIntervened: true,
+        focusBlurOn: true,
+        focusScrimOn: true,
+        mainTaskId: 'A',
+        comboSelectIds: ['C'],
+        backupIds: ['B', 'D'],
+      },
+      firstDragDone: true,
+      dailySlots: [],
+      suspendChainRootTaskId: null,
+      suspendRecommendationLocked: false,
+      pendingDecision: null,
+      dailyResetDate: '2026-04-25',
+      savedAt: '2026-04-25T08:00:00.000Z',
+    });
+
+    const focusState = service.exportSnapshot().focusSessionState;
+
+    expect(service.consoleVisibleEntries().map(entry => entry.taskId)).toEqual(['A', 'C']);
+    expect(focusState?.commandCenterOrderIds).toEqual(['A', 'C']);
+    expect(focusState?.comboSelectTasks.map(slot => slot.taskId)).toEqual(['C']);
+    expect(focusState?.backupTasks.map(slot => slot.taskId)).toEqual(['B', 'D']);
   });
 
   it('switchToTask should move the selected visible card to the front and preserve the remaining order', () => {
@@ -2043,6 +2108,10 @@ describe('DockEngineService', () => {
     expect(service.consoleVisibleEntries().map(entry => entry.taskId)).toEqual(['B', 'A', 'C', 'D']);
     expect(service.entries().find(entry => entry.taskId === 'A')?.isMain).toBe(true);
     expect(service.entries().find(entry => entry.taskId === 'A')?.status).toBe('stalled');
+    expect(service.exportSnapshot().session.mainTaskId).toBe('A');
+    expect(service.exportSnapshot().focusSessionState?.commandCenterOrderIds).toEqual(['B', 'A', 'C', 'D']);
+    expect(service.exportSnapshot().focusSessionState?.commandCenterTasks.map(slot => slot.taskId)).toEqual(['A']);
+    expect(service.exportSnapshot().focusSessionState?.comboSelectTasks.map(slot => slot.taskId)).toEqual(['B', 'C', 'D']);
   });
 
   it('switching back to the main task should mark interrupted secondary task as stalled', () => {
@@ -2058,6 +2127,134 @@ describe('DockEngineService', () => {
 
     expect(service.entries().find(entry => entry.taskId === 'B')?.status).toBe('stalled');
     expect(service.focusingEntry()?.taskId).toBe('A');
+  });
+
+  it('should export command center order from the front four active dock tasks even when secondary slots are still pending', () => {
+    seedTask('A');
+    seedTask('B');
+    seedTask('C');
+    seedTask('D');
+    seedTask('E');
+
+    service.restoreSnapshot({
+      version: 7,
+      entries: [
+        {
+          taskId: 'A',
+          title: 'A',
+          sourceProjectId: 'project-1',
+          status: 'focusing',
+          load: 'low',
+          expectedMinutes: 20,
+          waitMinutes: null,
+          waitStartedAt: null,
+          lane: 'combo-select',
+          zoneSource: 'manual',
+          isMain: true,
+          dockedOrder: 0,
+          detail: '',
+          sourceKind: 'project-task',
+          systemSelected: false,
+          recommendedScore: null,
+        },
+        {
+          taskId: 'B',
+          title: 'B',
+          sourceProjectId: 'project-1',
+          status: 'pending_start',
+          load: 'low',
+          expectedMinutes: 15,
+          waitMinutes: null,
+          waitStartedAt: null,
+          lane: 'combo-select',
+          zoneSource: 'manual',
+          isMain: false,
+          dockedOrder: 1,
+          detail: '',
+          sourceKind: 'project-task',
+          systemSelected: false,
+          recommendedScore: null,
+        },
+        {
+          taskId: 'C',
+          title: 'C',
+          sourceProjectId: 'project-1',
+          status: 'pending_start',
+          load: 'low',
+          expectedMinutes: 10,
+          waitMinutes: null,
+          waitStartedAt: null,
+          lane: 'combo-select',
+          zoneSource: 'manual',
+          isMain: false,
+          dockedOrder: 2,
+          detail: '',
+          sourceKind: 'project-task',
+          systemSelected: false,
+          recommendedScore: null,
+        },
+        {
+          taskId: 'D',
+          title: 'D',
+          sourceProjectId: 'project-1',
+          status: 'pending_start',
+          load: 'low',
+          expectedMinutes: 5,
+          waitMinutes: null,
+          waitStartedAt: null,
+          lane: 'combo-select',
+          zoneSource: 'manual',
+          isMain: false,
+          dockedOrder: 3,
+          detail: '',
+          sourceKind: 'project-task',
+          systemSelected: false,
+          recommendedScore: null,
+        },
+        {
+          taskId: 'E',
+          title: 'E',
+          sourceProjectId: 'project-1',
+          status: 'pending_start',
+          load: 'low',
+          expectedMinutes: 8,
+          waitMinutes: null,
+          waitStartedAt: null,
+          lane: 'backup',
+          zoneSource: 'manual',
+          isMain: false,
+          dockedOrder: 4,
+          detail: '',
+          sourceKind: 'project-task',
+          systemSelected: false,
+          recommendedScore: null,
+        },
+      ],
+      focusMode: true,
+      isDockExpanded: true,
+      muteWaitTone: false,
+      session: {
+        firstDragIntervened: true,
+        focusBlurOn: true,
+        focusScrimOn: true,
+        mainTaskId: 'A',
+        comboSelectIds: ['B', 'C', 'D'],
+        backupIds: ['E'],
+      },
+      firstDragDone: true,
+      dailySlots: [],
+      suspendChainRootTaskId: null,
+      suspendRecommendationLocked: false,
+      pendingDecision: null,
+      dailyResetDate: '2026-03-12',
+      savedAt: new Date().toISOString(),
+    });
+
+    const focusState = service.exportSnapshot().focusSessionState;
+
+    expect(focusState?.commandCenterOrderIds).toEqual(['A', 'B', 'C', 'D']);
+    expect(focusState?.comboSelectTasks.map(slot => slot.taskId)).toEqual(['B', 'C', 'D']);
+    expect(focusState?.backupTasks.map(slot => slot.taskId)).toEqual(['E']);
   });
 
   it('insertToConsoleFromRadar should move a backup task to the front and evict the last non-main visible card', () => {
@@ -2215,11 +2412,10 @@ describe('DockEngineService', () => {
     service.dockTask('D', 'backup', { zoneSource: 'manual' });
     service.dockTask('E', 'backup', { zoneSource: 'manual' });
     service.toggleFocusMode();
-    service.switchToTask('A');
-    service.switchToTask('B');
+    service.setMainTask('B');
     service.suspendTask('A', 30);
-    service.switchToTask('C');
-    service.switchToTask('D');
+    service.setMainTask('C');
+    service.setMainTask('D');
 
     expect(service.consoleVisibleEntries().map(entry => entry.taskId)).toEqual(['D', 'C', 'B', 'A']);
     expect(service.entries().find(entry => entry.taskId === 'A')?.isMain).toBe(true);
@@ -2243,7 +2439,7 @@ describe('DockEngineService', () => {
     service.dockTask('C', 'combo-select', { zoneSource: 'manual' });
     service.toggleFocusMode();
     service.switchToTask('A');
-    service.switchToTask('B');
+    service.setMainTask('B');
     service.switchToTask('A');
 
     expect(service.entries().find(entry => entry.taskId === 'B')?.status).toBe('stalled');
@@ -2253,6 +2449,143 @@ describe('DockEngineService', () => {
     expect(service.focusingEntry()?.taskId).toBe('B');
     expect(service.entries().find(entry => entry.taskId === 'B')?.isMain).toBe(true);
   });
+
+  it('main completion should let the current front secondary inherit main ownership before other stalled tasks', () => {
+    seedTask('A');
+    seedTask('B');
+    seedTask('C');
+    service.dockTask('A');
+    service.dockTask('B', 'backup', { zoneSource: 'manual' });
+    service.dockTask('C', 'combo-select', { zoneSource: 'manual' });
+    service.toggleFocusMode();
+    service.switchToTask('A');
+    service.switchToTask('C');
+    service.switchToTask('B');
+
+    expect(service.focusingEntry()?.taskId).toBe('B');
+    expect(service.entries().find(entry => entry.taskId === 'C')?.status).toBe('stalled');
+    expect(service.entries().find(entry => entry.taskId === 'A')?.isMain).toBe(true);
+
+    service.completeTask('A');
+
+    expect(service.focusingEntry()?.taskId).toBe('B');
+    expect(service.entries().find(entry => entry.taskId === 'B')?.isMain).toBe(true);
+    expect(service.entries().find(entry => entry.taskId === 'C')?.isMain).toBe(false);
+    expect(service.exportSnapshot().session.mainTaskId).toBe('B');
+    expect(service.exportSnapshot().focusSessionState?.commandCenterOrderIds?.[0]).toBe('B');
+    expect(service.exportSnapshot().focusSessionState?.commandCenterTasks.map(slot => slot.taskId)).toEqual(['B']);
+  });
+
+  it('main completion should promote the highest visible C-slot secondary when no task is focused', () => {
+    const makeEntry = (taskId: string, overrides: Partial<DockSnapshot['entries'][number]> = {}) => ({
+      taskId,
+      title: taskId,
+      sourceProjectId: 'project-1',
+      status: 'pending_start' as const,
+      load: 'low' as const,
+      expectedMinutes: 10,
+      waitMinutes: null,
+      waitStartedAt: null,
+      lane: 'combo-select' as const,
+      zoneSource: 'manual' as const,
+      isMain: false,
+      dockedOrder: 0,
+      detail: '',
+      sourceKind: 'project-task' as const,
+      systemSelected: false,
+      recommendedScore: null,
+      ...overrides,
+    });
+
+    service.restoreSnapshot({
+      version: 7,
+      entries: [
+        makeEntry('A', { isMain: true, status: 'focusing', lane: 'combo-select', dockedOrder: 0, manualOrder: 0 }),
+        makeEntry('B', { status: 'pending_start', lane: 'combo-select', dockedOrder: 1, manualOrder: 1 }),
+        makeEntry('C', { status: 'pending_start', lane: 'combo-select', dockedOrder: 2, manualOrder: 2 }),
+        makeEntry('D', { status: 'pending_start', lane: 'backup', dockedOrder: 3, manualOrder: 3 }),
+      ],
+      focusMode: true,
+      isDockExpanded: true,
+      muteWaitTone: false,
+      session: {
+        firstDragIntervened: true,
+        focusBlurOn: true,
+        focusScrimOn: true,
+        mainTaskId: 'A',
+        comboSelectIds: ['B', 'C'],
+        backupIds: ['D'],
+      },
+      focusSessionState: {
+        schemaVersion: 2,
+        sessionId: 'session-1',
+        sessionStartedAt: 1710000000000,
+        isActive: true,
+        isFocusOverlayOn: true,
+        commandCenterOrderIds: ['A', 'B', 'C'],
+        commandCenterTasks: [],
+        comboSelectTasks: [],
+        backupTasks: [],
+        hasFirstBatchSelected: true,
+        routineSlotsShownToday: [],
+        highLoadCounter: { count: 0, windowStartAt: 0 },
+        burnoutTriggeredAt: null,
+      },
+      firstDragDone: true,
+      dailySlots: [],
+      suspendChainRootTaskId: null,
+      suspendRecommendationLocked: false,
+      pendingDecision: null,
+      dailyResetDate: '2026-04-25',
+      savedAt: '2026-04-25T08:00:00.000Z',
+    });
+
+    service.completeTask('A');
+
+    expect(service.focusingEntry()?.taskId).toBe('B');
+    expect(service.entries().find(entry => entry.taskId === 'B')?.isMain).toBe(true);
+    expect(service.entries().find(entry => entry.taskId === 'C')?.isMain).toBe(false);
+    expect(service.entries().find(entry => entry.taskId === 'D')?.isMain).toBe(false);
+    expect(service.exportSnapshot().session.mainTaskId).toBe('B');
+  });
+
+  it('main completion should float backup candidates instead of auto-promoting when C slots are empty', () => {
+    seedTask('A');
+    seedTask('B');
+    seedTask('C');
+    seedTask('D');
+    service.dockTask('A');
+    service.dockTask('B', 'backup', { zoneSource: 'manual' });
+    service.dockTask('C', 'backup', { zoneSource: 'manual' });
+    service.dockTask('D', 'backup', { zoneSource: 'manual' });
+    service.toggleFocusMode();
+
+    service.completeTask('A');
+
+    expect(service.focusingEntry()).toBeNull();
+    expect(service.entries().filter(entry => entry.isMain)).toHaveLength(0);
+    expect(service.pendingDecisionEntries().map(entry => entry.taskId)).toEqual(['B', 'C', 'D']);
+    expect(service.highlightedIds()).toEqual(new Set(['B', 'C', 'D']));
+
+    service.choosePendingDecisionCandidate('C');
+
+    expect(service.focusingEntry()?.taskId).toBe('C');
+    expect(service.entries().find(entry => entry.taskId === 'C')?.isMain).toBe(true);
+    expect(service.exportSnapshot().session.mainTaskId).toBe('C');
+  });
+
+  it('completeTask should leave focus mode when the final dock task is completed', () => {
+    seedTask('A');
+    service.dockTask('A');
+    service.toggleFocusMode();
+
+    service.completeTask('A');
+
+    expect(service.focusMode()).toBe(false);
+    expect(service.exportSnapshot().focusMode).toBe(false);
+    expect(service.exportSnapshot().focusSessionState).toBeNull();
+  });
+
   it('clearDockForExit should clear entries but keep exit chrome alive until final cleanup', () => {
     seedTask('A');
     service.dockTask('A');
@@ -2292,6 +2625,174 @@ describe('DockEngineService', () => {
     const ordered = service.orderedDockEntries().map(entry => entry.taskId);
     expect(ordered).toEqual(['A', 'C', 'B']);
     expect(service.entries().every(entry => entry.manualOrder !== undefined)).toBe(true);
+  });
+
+  it('restoreSnapshot should hydrate remote C-slot order into project and exported session state', () => {
+    seedTask('A');
+    seedTask('B');
+    seedTask('C');
+    seedTask('D');
+
+    const makeEntry = (taskId: string, dockedOrder: number, overrides: Partial<DockSnapshot['entries'][number]> = {}) => ({
+      taskId,
+      title: taskId,
+      sourceProjectId: 'project-1',
+      status: 'stalled' as const,
+      load: 'low' as const,
+      expectedMinutes: 10,
+      waitMinutes: null,
+      waitStartedAt: null,
+      lane: 'combo-select' as const,
+      zoneSource: 'manual' as const,
+      isMain: false,
+      dockedOrder,
+      detail: '',
+      sourceKind: 'project-task' as const,
+      systemSelected: false,
+      recommendedScore: null,
+      ...overrides,
+    });
+
+    service.restoreSnapshot({
+      version: 7,
+      entries: [
+        makeEntry('A', 0, { isMain: true, status: 'focusing' }),
+        makeEntry('B', 1),
+        makeEntry('C', 2),
+        makeEntry('D', 3),
+      ],
+      focusMode: true,
+      isDockExpanded: true,
+      muteWaitTone: false,
+      session: {
+        firstDragIntervened: true,
+        focusBlurOn: true,
+        focusScrimOn: true,
+        mainTaskId: 'A',
+        comboSelectIds: ['D', 'B', 'C'],
+        backupIds: [],
+      },
+      firstDragDone: true,
+      dailySlots: [],
+      suspendChainRootTaskId: null,
+      suspendRecommendationLocked: false,
+      pendingDecision: null,
+      dailyResetDate: '2026-04-24',
+      savedAt: '2026-04-24T08:00:00.000Z',
+    });
+
+    expect(service.consoleVisibleEntries().map(entry => entry.taskId)).toEqual(['A', 'D', 'B', 'C']);
+    expect(service.entries().map(entry => entry.taskId)).toEqual(['A', 'D', 'B', 'C']);
+    expect(service.exportSnapshot().session.comboSelectIds).toEqual(['D', 'B', 'C']);
+    expect(service.exportSnapshot().focusSessionState?.comboSelectTasks.map(slot => slot.taskId)).toEqual(['D', 'B', 'C']);
+  });
+
+  it('restoreSnapshot should keep widget-promoted secondary C-slot ahead of the master task', () => {
+    seedTask('main');
+    seedTask('a');
+    seedTask('b');
+    seedTask('c');
+
+    const makeFocusSlot = (
+      taskId: string,
+      zone: FocusTaskSlot['zone'],
+      zoneIndex: number,
+      isMaster: boolean,
+      focusStatus: FocusTaskSlot['focusStatus'],
+    ): FocusTaskSlot => ({
+      slotId: taskId,
+      taskId,
+      estimatedMinutes: 10,
+      waitMinutes: null,
+      cognitiveLoad: 'low',
+      focusStatus,
+      zone,
+      zoneIndex,
+      isMaster,
+      waitStartedAt: null,
+      waitEndAt: null,
+      sourceProjectId: 'project-1',
+      sourceBlockType: null,
+      draggedInAt: 1710000000000,
+      isFirstBatch: false,
+      inlineTitle: taskId,
+      inlineDetail: null,
+    });
+
+    const makeEntry = (taskId: string, dockedOrder: number, overrides: Partial<DockSnapshot['entries'][number]> = {}) => ({
+      taskId,
+      title: taskId,
+      sourceProjectId: 'project-1',
+      status: 'stalled' as const,
+      load: 'low' as const,
+      expectedMinutes: 10,
+      waitMinutes: null,
+      waitStartedAt: null,
+      lane: 'combo-select' as const,
+      zoneSource: 'manual' as const,
+      isMain: false,
+      dockedOrder,
+      manualOrder: dockedOrder,
+      detail: '',
+      sourceKind: 'project-task' as const,
+      systemSelected: false,
+      recommendedScore: null,
+      ...overrides,
+    });
+
+    service.restoreSnapshot({
+      version: 7,
+      entries: [
+        makeEntry('main', 1, { isMain: true }),
+        makeEntry('a', 0, { status: 'focusing' }),
+        makeEntry('b', 2),
+        makeEntry('c', 3),
+      ],
+      focusMode: true,
+      isDockExpanded: true,
+      muteWaitTone: false,
+      session: {
+        firstDragIntervened: true,
+        focusBlurOn: true,
+        focusScrimOn: true,
+        mainTaskId: 'main',
+        comboSelectIds: ['a', 'b', 'c'],
+        backupIds: [],
+      },
+      focusSessionState: {
+        schemaVersion: 2,
+        sessionId: 'session-1',
+        sessionStartedAt: 1710000000000,
+        isActive: true,
+        isFocusOverlayOn: true,
+        commandCenterOrderIds: ['a', 'main', 'b', 'c'],
+        commandCenterTasks: [
+          makeFocusSlot('main', 'command', 0, true, 'pending'),
+        ],
+        comboSelectTasks: [
+          makeFocusSlot('a', 'combo-select', 0, false, 'focusing'),
+          makeFocusSlot('b', 'combo-select', 1, false, 'pending'),
+          makeFocusSlot('c', 'combo-select', 2, false, 'pending'),
+        ],
+        backupTasks: [],
+        hasFirstBatchSelected: true,
+        routineSlotsShownToday: [],
+        highLoadCounter: { count: 0, windowStartAt: 0 },
+        burnoutTriggeredAt: null,
+      },
+      firstDragDone: true,
+      dailySlots: [],
+      suspendChainRootTaskId: null,
+      suspendRecommendationLocked: false,
+      pendingDecision: null,
+      dailyResetDate: '2026-04-26',
+      savedAt: '2026-04-26T08:00:00.000Z',
+    });
+
+    expect(service.entries().map(entry => entry.taskId)).toEqual(['a', 'main', 'b', 'c']);
+    expect(service.entries().map(entry => entry.manualOrder)).toEqual([0, 1, 2, 3]);
+    expect(service.consoleVisibleEntries().map(entry => entry.taskId)).toEqual(['a', 'main', 'b', 'c']);
+    expect(service.exportSnapshot().focusSessionState?.commandCenterOrderIds).toEqual(['a', 'main', 'b', 'c']);
   });
 
   it('dock capacity should warn at soft limit and reject at hard limit', () => {

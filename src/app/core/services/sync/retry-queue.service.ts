@@ -26,6 +26,7 @@ import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader
 import { isPermanentFailureError } from '../../../../utils/permanent-failure-error';
 import { isValidUUID } from '../../../../utils/validation';
 import {
+  getRemainingBrowserNetworkResumeDelayMs,
   isBrowserNetworkSuspendedError,
   isBrowserNetworkSuspendedWindow,
 } from '../../../../utils/browser-network-suspension';
@@ -89,6 +90,12 @@ export interface RetryOperationHandler {
 export interface RetryQueueSliceOptions {
   maxItems?: number;
   maxDurationMs?: number;
+  /**
+   * 【根因修复 2026-04-22】用户手动触发（例如点 "立即同步"）的回放必须穿透
+   * isBrowserNetworkSuspendedWindow() 的 1500ms grace：用户已经明确在前台交互，
+   * 无需再用 tab 隐藏/刚恢复的风险规避去屏蔽这次尝试。
+   */
+  allowWhileSuspended?: boolean;
 }
 
 export interface RetryQueueSliceResult {
@@ -208,6 +215,32 @@ export class RetryQueueService {
     return this.authService.currentUserId() ?? AUTH_CONFIG.LOCAL_MODE_USER_ID;
   }
 
+  private isCloudBackedUserId(userId: string | null | undefined): userId is string {
+    return typeof userId === 'string' && userId.length > 0 && userId !== AUTH_CONFIG.LOCAL_MODE_USER_ID;
+  }
+
+  private getPersistedOwnerHint(): string | null {
+    const auth = this.authService as Partial<Pick<AuthService, 'peekPersistedOwnerHint' | 'peekPersistedSessionIdentity'>>;
+    const hintedUserId = auth.peekPersistedOwnerHint?.();
+    if (typeof hintedUserId === 'string' && hintedUserId.length > 0) {
+      return hintedUserId;
+    }
+
+    const sessionIdentity = auth.peekPersistedSessionIdentity?.();
+    return typeof sessionIdentity?.userId === 'string' && sessionIdentity.userId.length > 0
+      ? sessionIdentity.userId
+      : null;
+  }
+
+  private shouldSilentlyDropUnownedLegacyRetryItem(): boolean {
+    const currentUserId = this.authService.currentUserId();
+    if (this.isCloudBackedUserId(currentUserId)) {
+      return false;
+    }
+
+    return !this.isCloudBackedUserId(this.getPersistedOwnerHint());
+  }
+
   private resolveItemOwnerUserId(item: RetryQueueItem): string {
     return item.sourceUserId ?? AUTH_CONFIG.LOCAL_MODE_USER_ID;
   }
@@ -267,22 +300,30 @@ export class RetryQueueService {
 
   private sanitizeLoadedItems(items: RetryQueueItem[]): {
     safeItems: RetryQueueItem[];
-    quarantinedCount: number;
+    removedCount: number;
   } {
     const safeItems: RetryQueueItem[] = [];
-    let quarantinedCount = 0;
+    let removedCount = 0;
 
     for (const item of items) {
       if (!item.sourceUserId) {
-        this.quarantineLegacyRetryItem(item, 'legacy 重试项缺少来源元数据，加载时已隔离');
-        quarantinedCount++;
+        if (this.shouldSilentlyDropUnownedLegacyRetryItem()) {
+          this.logger.info('本地/匿名模式下清理缺少来源元数据的 legacy 重试残留，跳过待确认提示', {
+            itemId: item.id,
+            type: item.type,
+            operation: item.operation,
+          });
+        } else {
+          this.quarantineLegacyRetryItem(item, 'legacy 重试项缺少来源元数据，加载时已隔离');
+        }
+        removedCount++;
         continue;
       }
 
       safeItems.push(item);
     }
 
-    return { safeItems, quarantinedCount };
+    return { safeItems, removedCount };
   }
 
   private getPersistedItems(): RetryQueueItem[] {
@@ -576,6 +617,7 @@ export class RetryQueueService {
         sourceUserId: existing.sourceUserId ?? targetOwnerUserId,
         taskIdsToDelete: taskIdsToDelete ?? existing.taskIdsToDelete,
       };
+      this.lastDrainCompletedBySuccess = false;
       this.touchQueueState();
       this.logger.debug('更新队列中的现有项', { 
         type, 
@@ -635,6 +677,7 @@ export class RetryQueueService {
     };
     
     targetQueue.push(item);
+    this.lastDrainCompletedBySuccess = false;
     this.touchQueueState();
     if (persistMode === 'debounced') {
       this.saveToStorage();
@@ -1278,10 +1321,20 @@ export class RetryQueueService {
   /**
    * 处理重试队列（兼容入口）
    * 无参数时按历史语义尽量处理当前可处理项；有 maxItems 时限制处理条数。
+   * manualTrigger=true 标记用户主动触发（如 "立即同步"），会等待浏览器恢复保护期
+   * 真正结束后再进入正常切片，避免把下层网络门禁整体放开。
    */
-  async processQueue(maxItems?: number): Promise<void> {
+  async processQueue(maxItems?: number, manualTrigger = false): Promise<void> {
+    while (manualTrigger && isBrowserNetworkSuspendedWindow()) {
+      const delayMs = Math.max(0, getRemainingBrowserNetworkResumeDelayMs());
+      if (delayMs <= 0) {
+        break;
+      }
+      await new Promise<void>(resolve => setTimeout(resolve, delayMs));
+    }
+
     await this.processQueueSlice({
-      maxItems: typeof maxItems === 'number' && maxItems > 0 ? maxItems : undefined
+      maxItems: typeof maxItems === 'number' && maxItems > 0 ? maxItems : undefined,
     });
   }
 
@@ -1308,7 +1361,7 @@ export class RetryQueueService {
       };
     }
 
-    if (isBrowserNetworkSuspendedWindow()) {
+    if (isBrowserNetworkSuspendedWindow() && !options.allowWhileSuspended) {
       this.logger.debug('浏览器网络挂起窗口内暂停重试切片', {
         remainingCount: this.queue.length,
       });
@@ -1426,6 +1479,17 @@ export class RetryQueueService {
 
         const currentUserId = this.authService.currentUserId();
         if (item.sourceUserId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+          if (this.shouldSilentlyDropUnownedLegacyRetryItem()) {
+            this.logger.info('本地模式下清理 local-user 重试残留，跳过云端隔离提示', {
+              itemId: item.id,
+              type: item.type,
+              operation: item.operation,
+            });
+            processedIds.add(item.id);
+            hadTerminalRemoval = true;
+            continue;
+          }
+
           this.quarantineLegacyRetryItem(item, 'legacy local-user 重试项禁止自动上云');
           processedIds.add(item.id);
           hadTerminalRemoval = true;
@@ -1441,7 +1505,15 @@ export class RetryQueueService {
           continue;
         }
         if (!item.sourceUserId) {
-          this.quarantineLegacyRetryItem(item, 'legacy 重试项缺少来源元数据，无法安全判断归属');
+          if (this.shouldSilentlyDropUnownedLegacyRetryItem()) {
+            this.logger.info('本地/匿名模式下清理缺少来源元数据的 legacy 重试残留，跳过待确认提示', {
+              itemId: item.id,
+              type: item.type,
+              operation: item.operation,
+            });
+          } else {
+            this.quarantineLegacyRetryItem(item, 'legacy 重试项缺少来源元数据，无法安全判断归属');
+          }
           processedIds.add(item.id);
           hadTerminalRemoval = true;
           continue;
@@ -1724,7 +1796,7 @@ export class RetryQueueService {
       }
 
       if (items.length > 0) {
-        const { safeItems, quarantinedCount } = this.sanitizeLoadedItems(items);
+        const { safeItems, removedCount } = this.sanitizeLoadedItems(items);
 
         if (!this.isStorageLoadTokenCurrent(loadToken)) {
           this.logStaleStorageLoad(loadToken, 'loadFromStorage:idb-sanitized');
@@ -1736,10 +1808,10 @@ export class RetryQueueService {
           count: items.length,
           visibleCount: this.queue.length,
           hiddenCount: this.hiddenQueueItems.length,
-          quarantinedCount,
+          removedCount,
           ownerUserId: this.getCurrentOwnerUserId(),
         });
-        if (quarantinedCount > 0) {
+        if (removedCount > 0) {
           this.saveToStorage();
         }
         this.checkCapacityWarning();
@@ -1756,7 +1828,7 @@ export class RetryQueueService {
       return;
     }
 
-    const { safeItems, quarantinedCount } = this.sanitizeLoadedItems(localStorageItems);
+    const { safeItems, removedCount } = this.sanitizeLoadedItems(localStorageItems);
 
     if (!this.isStorageLoadTokenCurrent(loadToken)) {
       this.logStaleStorageLoad(loadToken, 'loadFromStorage:localStorage-sanitized');
@@ -1764,7 +1836,7 @@ export class RetryQueueService {
     }
 
     this.applyLoadedItems(safeItems);
-    if (quarantinedCount > 0) {
+    if (removedCount > 0) {
       this.saveToStorage();
     }
     this.checkCapacityWarning();

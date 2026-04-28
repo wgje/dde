@@ -21,6 +21,7 @@ import {
   DockSourceSection,
   DockTaskStatus,
   DockZoneSource,
+  FocusSessionState,
   HighLoadCounter,
   RecommendationGroupType,
   fromLegacySessionState,
@@ -333,6 +334,7 @@ export class DockSnapshotPersistenceService {
       : [];
     const session = this.mergeSessionWithLegacy(source, entries, ctx);
     const focusMode = source.focusMode === undefined ? session.focusBlurOn : Boolean(source.focusMode);
+    const focusSessionState = this.normalizeFocusSessionState(source.focusSessionState, session);
 
     return {
       version: CURRENT_DOCK_SNAPSHOT_VERSION,
@@ -355,6 +357,7 @@ export class DockSnapshotPersistenceService {
           ? source.dailyResetDate
           : ctx.todayDateKey,
       savedAt: typeof source.savedAt === 'string' && source.savedAt ? source.savedAt : new Date().toISOString(),
+      focusSessionState: focusMode ? focusSessionState : null,
     };
   }
 
@@ -405,16 +408,7 @@ export class DockSnapshotPersistenceService {
     const legacyFirstDragDone = Boolean(source.firstDragDone);
     const fallbackFocusMode = Boolean(source.focusMode);
     const normalizedSession = this.normalizeSessionState(source.session, entries, fallbackFocusMode, legacyFirstDragDone, ctx);
-    const legacyFocusState =
-      source.focusSessionState && typeof source.focusSessionState === 'object'
-        ? fromLegacySessionState(source.focusSessionState as LegacyFocusSessionState, {
-            sessionId: normalizedSession.focusSessionId ?? crypto.randomUUID(),
-            sessionStartedAt: normalizedSession.focusSessionStartedAt ?? Date.now(),
-            isFocusOverlayOn: normalizedSession.focusScrimOn,
-            highLoadCounter: normalizedSession.highLoadCounter ?? { count: 0, windowStartAt: 0 },
-            burnoutTriggeredAt: normalizedSession.burnoutTriggeredAt ?? null,
-          })
-        : null;
+    const legacyFocusState = this.normalizeFocusSessionState(source.focusSessionState, normalizedSession);
     return {
       ...normalizedSession,
       focusScrimOn: legacyFocusState?.isFocusOverlayOn ?? normalizedSession.focusScrimOn,
@@ -428,6 +422,17 @@ export class DockSnapshotPersistenceService {
         normalizedSession.focusSessionStartedAt ??
         legacyFocusState?.sessionStartedAt,
     };
+  }
+
+  private normalizeFocusSessionState(raw: unknown, session: DockSessionState): FocusSessionState | null {
+    if (!raw || typeof raw !== 'object') return null;
+    return fromLegacySessionState(raw as LegacyFocusSessionState | FocusSessionState, {
+      sessionId: session.focusSessionId ?? crypto.randomUUID(),
+      sessionStartedAt: session.focusSessionStartedAt ?? Date.now(),
+      isFocusOverlayOn: session.focusScrimOn,
+      highLoadCounter: session.highLoadCounter ?? { count: 0, windowStartAt: 0 },
+      burnoutTriggeredAt: session.burnoutTriggeredAt ?? null,
+    });
   }
 
   normalizeEntry(raw: unknown, ctx: SnapshotNormalizeContext): DockEntry | null {
@@ -649,7 +654,9 @@ export class DockSnapshotPersistenceService {
       mainTaskId:
         typeof source?.mainTaskId === 'string' && source.mainTaskId
           ? source.mainTaskId
-          : fallbacks.mainTaskId,
+          : source && Object.prototype.hasOwnProperty.call(source, 'mainTaskId')
+            ? null
+            : fallbacks.mainTaskId,
       comboSelectIds: idLists.comboSelectIds,
       backupIds: idLists.backupIds,
       ...fields,

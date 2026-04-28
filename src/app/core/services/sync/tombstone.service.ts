@@ -23,11 +23,13 @@ interface TombstoneCache {
   ids: Set<string>;
   /** 缓存时间戳 */
   timestamp: number;
+  /** 任务 tombstone 的真实删除时间水位 */
+  taskDeletedAt?: Map<string, number>;
 }
 
 /** batch_get_tombstones RPC 返回结构 */
 interface BatchTombstoneResult {
-  task_tombstones: { project_id: string; task_id: string }[];
+  task_tombstones: { project_id: string; task_id: string; deleted_at?: string | null }[];
   connection_tombstones: { project_id: string; connection_id: string }[];
 }
 
@@ -64,6 +66,15 @@ export class TombstoneService {
     this.loadLocalTombstones();
     // 【P1-19 修复】启动时加载连接 tombstone
     this.loadConnectionTombstones();
+  }
+
+  private parseTombstoneTimestamp(value?: string | null): number | undefined {
+    if (!value) {
+      return undefined;
+    }
+
+    const parsed = new Date(value).getTime();
+    return Number.isNaN(parsed) ? undefined : parsed;
   }
   
   // ==================== 本地 Tombstone 管理 ====================
@@ -142,14 +153,24 @@ export class TombstoneService {
    * @param projectId 项目 ID
    * @param taskIds 任务 ID 列表
    */
-  addLocalTombstones(projectId: string, taskIds: string[]): void {
+  addLocalTombstones(
+    projectId: string,
+    taskIds: string[],
+    timestampsByTaskId?: Record<string, string | number | null | undefined>,
+  ): void {
     if (!this.localTombstones.has(projectId)) {
       this.localTombstones.set(projectId, new Map());
     }
     const set = this.localTombstones.get(projectId)!;
     const now = Date.now();
     for (const id of taskIds) {
-      set.set(id, now);
+      const rawTimestamp = timestampsByTaskId?.[id];
+      const parsedTimestamp = typeof rawTimestamp === 'number'
+        ? rawTimestamp
+        : typeof rawTimestamp === 'string'
+          ? new Date(rawTimestamp).getTime()
+          : Number.NaN;
+      set.set(id, Number.isNaN(parsedTimestamp) ? now : parsedTimestamp);
     }
     this.saveLocalTombstones();
     // 【P2-20 修复】新增 tombstone 后使缓存失效，确保下次查询拿到最新集合
@@ -169,6 +190,29 @@ export class TombstoneService {
   /**
    * 清除本地 tombstone（当云端 tombstone 同步成功后）
    */
+
+  getLocalTombstoneTimestamp(projectId: string, taskId: string): number | undefined {
+    this.cleanupExpiredLocalTombstones(projectId);
+    return this.localTombstones.get(projectId)?.get(taskId);
+  }
+
+  shouldMaterializeTaskDeletion(taskUpdatedAt: string | undefined | null, tombstoneTimestamp?: number): boolean {
+    if (tombstoneTimestamp === undefined) {
+      return false;
+    }
+
+    if (!taskUpdatedAt) {
+      return true;
+    }
+
+    const taskUpdatedTime = new Date(taskUpdatedAt).getTime();
+    if (Number.isNaN(taskUpdatedTime)) {
+      return true;
+    }
+
+    return taskUpdatedTime <= tombstoneTimestamp;
+  }
+
   clearLocalTombstones(projectId: string, taskIds: string[]): void {
     const set = this.localTombstones.get(projectId);
     if (set) {
@@ -201,7 +245,7 @@ export class TombstoneService {
   async getTombstonesWithCache(
     projectId: string, 
     client: SupabaseClient
-  ): Promise<{ data: { task_id: string }[] | null; error: Error | null }> {
+  ): Promise<{ data: { task_id: string; deleted_at?: string | null }[] | null; error: Error | null }> {
     const now = Date.now();
     const cached = this.tombstoneCache.get(projectId);
     
@@ -213,7 +257,12 @@ export class TombstoneService {
         age: Math.round((now - cached.timestamp) / 1000) + 's'
       });
       return { 
-        data: Array.from(cached.ids).map(id => ({ task_id: id })), 
+        data: Array.from(cached.ids).map(id => ({
+          task_id: id,
+          deleted_at: cached.taskDeletedAt?.has(id)
+            ? new Date(cached.taskDeletedAt.get(id)!).toISOString()
+            : undefined,
+        })), 
         error: null 
       };
     }
@@ -237,10 +286,15 @@ export class TombstoneService {
       // 更新缓存
       if (!result.error && result.data) {
         const ids = new Set<string>();
+        const taskDeletedAt = new Map<string, number>();
         for (const row of result.data) {
           ids.add(row.task_id);
+          const deletedAt = this.parseTombstoneTimestamp(row.deleted_at);
+          if (deletedAt !== undefined) {
+            taskDeletedAt.set(row.task_id, deletedAt);
+          }
         }
-        this.tombstoneCache.set(projectId, { ids, timestamp: now });
+        this.tombstoneCache.set(projectId, { ids, timestamp: now, taskDeletedAt });
         this.logger.debug('更新 Tombstone 缓存', { projectId, count: ids.size });
       }
       
@@ -272,8 +326,8 @@ export class TombstoneService {
   /**
    * 更新 tombstone 缓存
    */
-  updateTombstoneCache(projectId: string, ids: Set<string>): void {
-    this.tombstoneCache.set(projectId, { ids, timestamp: Date.now() });
+  updateTombstoneCache(projectId: string, ids: Set<string>, taskDeletedAt?: Map<string, number>): void {
+    this.tombstoneCache.set(projectId, { ids, timestamp: Date.now(), taskDeletedAt });
   }
   
   /**
@@ -349,11 +403,22 @@ export class TombstoneService {
 
       // 按 project_id 分组
       const taskMap = new Map<string, Set<string>>();
+      const taskDeletedAtMap = new Map<string, Map<string, number>>();
+      const taskProjectsMissingDeletedAt = new Set<string>();
       const connMap = new Map<string, Set<string>>();
 
       for (const row of taskRows) {
         if (!taskMap.has(row.project_id)) taskMap.set(row.project_id, new Set());
         taskMap.get(row.project_id)!.add(row.task_id);
+        const deletedAt = this.parseTombstoneTimestamp(row.deleted_at);
+        if (deletedAt !== undefined) {
+          if (!taskDeletedAtMap.has(row.project_id)) {
+            taskDeletedAtMap.set(row.project_id, new Map());
+          }
+          taskDeletedAtMap.get(row.project_id)!.set(row.task_id, deletedAt);
+        } else {
+          taskProjectsMissingDeletedAt.add(row.project_id);
+        }
       }
       for (const row of connRows) {
         if (!connMap.has(row.project_id)) connMap.set(row.project_id, new Set());
@@ -363,8 +428,18 @@ export class TombstoneService {
       // 写入缓存（包括查询结果为空的项目，避免后续重复查询）
       const ts = Date.now();
       for (const pid of staleIds) {
-        this.tombstoneCache.set(pid, { ids: taskMap.get(pid) ?? new Set(), timestamp: ts });
+        this.tombstoneCache.set(pid, {
+          ids: taskMap.get(pid) ?? new Set(),
+          timestamp: ts,
+          taskDeletedAt: taskDeletedAtMap.get(pid) ?? new Map(),
+        });
         this.connectionTombstoneCache.set(pid, { ids: connMap.get(pid) ?? new Set(), timestamp: ts });
+      }
+
+      if (taskProjectsMissingDeletedAt.size > 0) {
+        this.logger.warn('批量 tombstone 预热结果缺少 deleted_at，恢复判定将回退到兼容模式', {
+          projectCount: taskProjectsMissingDeletedAt.size,
+        });
       }
 
       this.logger.info('批量 tombstone 预热完成', {
@@ -383,9 +458,26 @@ export class TombstoneService {
    * 判断任务 upsert 是否应被 tombstone 拦截（防复活）
    */
   shouldRejectTaskUpsert(projectId: string, taskId: string, candidateUpdatedAt?: string | null): boolean {
-    // 本地 tombstone 始终优先拒绝（用户主动删除，尚未同步到云端）
-    const localIds = this.getLocalTombstones(projectId);
-    if (localIds.has(taskId)) {
+    this.cleanupExpiredLocalTombstones(projectId);
+
+    const localTimestamp = this.localTombstones.get(projectId)?.get(taskId);
+    if (localTimestamp !== undefined) {
+      if (!candidateUpdatedAt) {
+        return true;
+      }
+
+      const candidateTime = new Date(candidateUpdatedAt).getTime();
+      if (!Number.isNaN(candidateTime) && candidateTime > localTimestamp) {
+        this.clearLocalTombstones(projectId, [taskId]);
+        this.logger.info('任务 upsert 的 updatedAt 晚于本地 tombstone，允许恢复', {
+          projectId,
+          taskId,
+          candidateUpdatedAt,
+          localTombstoneTimestamp: localTimestamp,
+        });
+        return false;
+      }
+
       return true;
     }
 
@@ -406,9 +498,23 @@ export class TombstoneService {
     // 云端 tombstone 存在，但候选更新时间已知：
     // 如果候选的 updatedAt 比 tombstone 缓存时间更新，说明可能是合法恢复
     const cacheEntry = this.tombstoneCache.get(projectId);
-    if (cacheEntry && new Date(candidateUpdatedAt).getTime() > cacheEntry.timestamp) {
+    const candidateTime = new Date(candidateUpdatedAt).getTime();
+    const remoteDeletedAt = cacheEntry?.taskDeletedAt?.get(taskId);
+    if (remoteDeletedAt === undefined) {
+      this.logger.info('远端 tombstone 缓存缺少 deleted_at，放行恢复候选以兼容旧 RPC 结构', {
+        projectId,
+        taskId,
+        candidateUpdatedAt,
+      });
+      return false;
+    }
+
+    if (!Number.isNaN(candidateTime) && remoteDeletedAt !== undefined && candidateTime > remoteDeletedAt) {
       this.logger.info('任务 upsert 的 updatedAt 晚于 tombstone 缓存，允许恢复', {
-        projectId, taskId, candidateUpdatedAt, cacheTimestamp: cacheEntry.timestamp
+        projectId,
+        taskId,
+        candidateUpdatedAt,
+        remoteDeletedAt,
       });
       return false;
     }

@@ -47,6 +47,36 @@ describe('startup launch contract', () => {
     expect(manifest.id).toBe('/launch.html');
   });
 
+  it('manifest launch colors should match native TWA and web loader background', () => {
+    const twaLaunchBackground = '#F9F8F6';
+    const manifestPath = path.join(process.cwd(), 'public', 'manifest.webmanifest');
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as {
+      theme_color?: string;
+      background_color?: string;
+    };
+
+    expect(manifest.theme_color).toBe(twaLaunchBackground);
+    expect(manifest.background_color).toBe(twaLaunchBackground);
+
+    const androidColorsPath = path.join(
+      process.cwd(),
+      'android',
+      'app',
+      'src',
+      'main',
+      'res',
+      'values',
+      'colors.xml',
+    );
+    const androidColors = fs.readFileSync(androidColorsPath, 'utf8');
+    expect(androidColors).toContain(
+      `<color name="nanoflow_twa_launch_background">${twaLaunchBackground}</color>`,
+    );
+
+    const indexHtml = fs.readFileSync(path.join(process.cwd(), 'index.html'), 'utf8');
+    expect(indexHtml).toContain(`--loader-bg: ${twaLaunchBackground};`);
+  });
+
   it('manifest should expose the approved static shortcut intents', () => {
     const manifestPath = path.join(process.cwd(), 'public', 'manifest.webmanifest');
     const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));

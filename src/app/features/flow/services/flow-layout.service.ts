@@ -39,11 +39,21 @@ export interface LayoutOptions {
 
 /**
  * 自动布局输入节点
+ *
+ * 【补丁 B 2026-04-23】为后续拆分 rank 语义预留字段：
+ *  - `rank`        兼顾现有行为（tie-break）
+ *  - `preferredOrder` 同 stage 内希望的软约束顺序，未传时 fallback 到 rank
+ *  - `priority`    仅用于最后的稳定 tie-break，未传时视为 0
+ * 目前 compareLayoutNodes 仍仅使用 rank，这些字段预留给后续交叉最小化 / 约束系统使用。
  */
 export interface AutoLayoutNodeData {
   key: string;
   stage: number | null;
   rank?: number;
+  /** 软约束：同 stage 内的偏好顺序，未传时 fallback 到 rank。 */
+  preferredOrder?: number;
+  /** 可选优先级，用于多目标 tie-break。 */
+  priority?: number;
 }
 
 /**
@@ -95,6 +105,13 @@ interface SubtreeLayoutMetrics {
   relationCount: number;
   relationCenter: number | null;
   multiParentLoad: number;
+  /**
+   * 【关系网优化 2026-04-22】子树中跨树链接"阶段对拥挤度"累计：
+   * 对子树内每条跨树链接，把它所在阶段对的总跨树链接数求和得到。
+   * 用于在 computeSiblingGapRows 中识别"关联块会堆叠"的子树对，
+   * 给它们之间加额外纵向留白。
+   */
+  congestedRelationLoad: number;
 }
 
 interface LocalRowRange {
@@ -108,6 +125,17 @@ interface RelationTargetHint {
 }
 
 const MIN_RELATION_STAGE_SCORE_MULTIPLIER = 100_000;
+
+/**
+ * 【关系网优化 2026-04-22】生成 (fromStage, toStage) 无向阶段对键，用于
+ * 统计同一列跨树链接的密度。null/相同 stage 的链接没有阶段列，返回 null。
+ */
+function getStagePairKey(fromStage: number | null, toStage: number | null): string | null {
+  if (fromStage == null || toStage == null || fromStage === toStage) {
+    return null;
+  }
+  return fromStage < toStage ? `${fromStage}->${toStage}` : `${toStage}->${fromStage}`;
+}
 
 function isAssignedLayoutNode(node: AutoLayoutNodeData): node is AutoLayoutNodeData & { stage: number } {
   return node.stage != null && node.stage > 0;
@@ -254,6 +282,9 @@ function buildSubtreeLayoutMetrics(
   allowedNodeKeys: ReadonlySet<string>,
   relationHints: NodeRelationHints,
   parentCandidateCountMap: Map<string, number>,
+  /** 【2026-04-22】节点自身跨树链接承担的阶段对拥挤度（由调用方预先按
+   *  "该节点每条跨树链接所在阶段对的总链接数"求和后传入）。无则视为 0。 */
+  nodeCongestionLoad: ReadonlyMap<string, number>,
 ): Map<string, SubtreeLayoutMetrics> {
   const metrics = new Map<string, SubtreeLayoutMetrics>();
   const stack: Array<{ node: AutoLayoutNodeData; visited: boolean }> = [{
@@ -285,6 +316,7 @@ function buildSubtreeLayoutMetrics(
       ? directRelationCenter * directRelationCount
       : 0;
     let multiParentLoad = Math.max(0, (parentCandidateCountMap.get(frame.node.key) ?? 1) - 1);
+    let congestedRelationLoad = nodeCongestionLoad.get(frame.node.key) ?? 0;
 
     for (const child of children) {
       const childMetrics = metrics.get(child.key);
@@ -298,6 +330,7 @@ function buildSubtreeLayoutMetrics(
         relationWeightedCenterSum += childMetrics.relationCenter * childMetrics.relationCount;
       }
       multiParentLoad += childMetrics.multiParentLoad;
+      congestedRelationLoad += childMetrics.congestedRelationLoad;
     }
 
     metrics.set(frame.node.key, {
@@ -305,6 +338,7 @@ function buildSubtreeLayoutMetrics(
       relationCount,
       relationCenter: relationCount > 0 ? relationWeightedCenterSum / relationCount : null,
       multiParentLoad,
+      congestedRelationLoad,
     });
   }
 
@@ -344,6 +378,16 @@ function optimizeSiblingOrder(
 
           return compareLayoutNodes(left, right);
         });
+
+        // 【补丁 B 2026-04-23】兼容式局部 2-opt：在 barycenter sort 之后再跑一
+        // 轮相邻交换。稳定排序在 signal-less 兄弟夹在中间时可能产生满足适发比较器
+        // 但全局非最优的排列。这里只接受“严格降交叉”的交换：两个兄弟子树都拥有
+        // relationCenter 且 leftCenter > rightCenter + 1 时互换，不会破坏 rank 顺序
+        // 下的业务语义（signal-less 兄弟从不参与交换）。
+        if (LAYOUT_CONFIG.AUTO_LAYOUT_ENABLE_SIBLING_TWO_OPT && orderedChildren.length >= 2) {
+          orderedChildren = refineSiblingOrderWithTwoOpt(orderedChildren, subtreeMetrics);
+        }
+
         childrenMap.set(current.key, orderedChildren);
       }
     }
@@ -354,26 +398,94 @@ function optimizeSiblingOrder(
   }
 }
 
+/**
+ * 【补丁 B 2026-04-23】兄弟层 2-opt adjacent swap。
+ *
+ * 设计原则（电球不破业务顺序）：
+ *  1. 仅当两个相邻兄弟都拥有 relationCenter 且 relationCount > 0 时才考虑交换
+ *  2. 只有当 leftCenter > rightCenter + 1 （严格倒序）时才互换
+ *  3. signal-less 兄弟（relationCount === 0 或无 center）永不参与交换，
+ *     保证业务 rank 顺序不被破坏
+ *  4. 可证 non-worsening（每次交换严格减少 pairwise crossing cost），
+ *     以固定通过次数 + 严格改进两道门阱保证收敛
+ *
+ * 实用值：稳定排序在比较器非全序时（signal 和 signal-less 混杂）可能
+ * 遗留的局部倒序，本函数可以在不打破 rank 顺序的前提下修正。
+ */
+function refineSiblingOrderWithTwoOpt(
+  siblings: readonly AutoLayoutNodeData[],
+  subtreeMetrics: Map<string, SubtreeLayoutMetrics>,
+): AutoLayoutNodeData[] {
+  const best = siblings.slice();
+  const maxPasses = Math.max(1, best.length);
+  let changed = true;
+  let pass = 0;
+
+  while (changed && pass < maxPasses) {
+    changed = false;
+    for (let i = 0; i < best.length - 1; i += 1) {
+      const left = best[i];
+      const right = best[i + 1];
+      const leftMetrics = subtreeMetrics.get(left.key);
+      const rightMetrics = subtreeMetrics.get(right.key);
+
+      const leftCenter = leftMetrics?.relationCenter;
+      const rightCenter = rightMetrics?.relationCenter;
+      const leftCount = leftMetrics?.relationCount ?? 0;
+      const rightCount = rightMetrics?.relationCount ?? 0;
+
+      if (
+        leftCenter != null &&
+        rightCenter != null &&
+        leftCount > 0 &&
+        rightCount > 0 &&
+        leftCenter > rightCenter + 1
+      ) {
+        best[i] = right;
+        best[i + 1] = left;
+        changed = true;
+      }
+    }
+    pass += 1;
+  }
+
+  return best;
+}
+
 function computeSiblingGapRows(
   leftMetrics: SubtreeLayoutMetrics | undefined,
   rightMetrics: SubtreeLayoutMetrics | undefined,
   resolvedOptions: ResolvedAutoLayoutOptions,
 ): number {
+  // 【2026-04-22】关联块重叠修复：把各项压力上限同步抬高，并新增
+  // "阶段对拥挤度"压力项。原上限（leaf=0.10, rel=0.10, mp=0.08）在实际
+  // 项目中几乎立刻饱和，兄弟子树间几乎拿不到差异化空间。
   const maxLeafCount = Math.max(leftMetrics?.leafCount ?? 1, rightMetrics?.leafCount ?? 1);
-  const leafPressure = Math.min(0.10, Math.max(0, maxLeafCount - 1) * 0.02);
+  const leafPressure = Math.min(0.18, Math.max(0, maxLeafCount - 1) * 0.025);
   const relationLoad = (leftMetrics?.relationCount ?? 0) + (rightMetrics?.relationCount ?? 0);
   const relationPressure = relationLoad > 0
-    ? Math.min(0.10, Math.sqrt(relationLoad) * resolvedOptions.relatedSiblingGapRows)
+    ? Math.min(0.22, Math.sqrt(relationLoad) * resolvedOptions.relatedSiblingGapRows)
     : 0;
   const multiParentPressure = Math.min(
-    0.08,
+    0.16,
     ((leftMetrics?.multiParentLoad ?? 0) + (rightMetrics?.multiParentLoad ?? 0))
       * resolvedOptions.multiParentSiblingGapRows,
   );
+  // 关联块拥挤度压力：若两兄弟子树各自的跨树链接都落在已经很拥挤的
+  // 阶段列上，说明它们的关联块会在同一 Y 带附近堆叠，必须额外拉开。
+  const congestionLoad = (leftMetrics?.congestedRelationLoad ?? 0)
+    + (rightMetrics?.congestedRelationLoad ?? 0);
+  const congestionPressure = congestionLoad > 1
+    ? Math.min(0.20, Math.sqrt(congestionLoad - 1) * 0.06)
+    : 0;
 
   return Math.min(
     resolvedOptions.maxSiblingGapRows,
-    resolvedOptions.siblingGapRows + leafPressure + relationPressure + multiParentPressure,
+    resolvedOptions.siblingGapRows
+      + leafPressure
+      + relationPressure
+      + multiParentPressure
+      + congestionPressure,
   );
 }
 
@@ -483,7 +595,17 @@ function buildAdaptiveStageXMap(
       densityPressure + linkPressure + crossTreePressure + multiParentPressure,
     );
 
-    currentX += resolvedOptions.layerSpacing * (1 + extraSpacingFactor);
+    // 【补丁 D 2026-04-23】按跨树 label 密度的绝对像素加宽：
+    // 当某 stage 边界横跨 N 条跨树链接（N>=2），关联块会沿该 gap 错开
+    // 排布（补丁 C），若 gap 本身太窄，错开后 label 会溢出到节点上方。
+    // 按 sqrt(N-1) 放大避免 O(N) 爆炸；2 条 → ~1 * step、5 条 → 2 * step。
+    const crossTreeCount = stageBoundaryCrossTreeCounts[stageIndex];
+    const labelDensityExtraPx = crossTreeCount >= 2
+      ? LAYOUT_CONFIG.AUTO_LAYOUT_CROSS_TREE_LABEL_DENSITY_WIDEN_PX
+        * Math.sqrt(crossTreeCount - 1)
+      : 0;
+
+    currentX += resolvedOptions.layerSpacing * (1 + extraSpacingFactor) + labelDensityExtraPx;
   });
 
   return stageXMap;
@@ -643,6 +765,9 @@ function buildFamilyBlocks(
   relationHints: NodeRelationHints,
   parentCandidateCountMap: Map<string, number>,
   resolvedOptions: ResolvedAutoLayoutOptions,
+  /** 【2026-04-22】每个节点承担的阶段对拥挤度（所有出/入跨树链接所在
+   *  阶段对总链接数之和），用于把关联块堆叠风险从节点一路累积到兄弟子树。 */
+  nodeCongestionLoad: ReadonlyMap<string, number>,
 ): FamilyLayoutBlock[] {
   const naturalRoots = assignedNodes
     .filter(node => {
@@ -683,6 +808,7 @@ function buildFamilyBlocks(
       familyNodeKeys,
       relationHints,
       parentCandidateCountMap,
+      nodeCongestionLoad,
     );
     optimizeSiblingOrder(root, childrenMap, familyNodeKeys, subtreeMetrics);
     const { rowMap: localRowMap, leafCount } = buildFamilyLocalRows(
@@ -959,6 +1085,51 @@ export function computeFamilyBlockAutoLayout(
     resolvedOptions,
     parentCandidateCountMap,
   );
+
+  // 【关系网优化 2026-04-22】"关联块重叠"根因：自动排序从未考虑同一
+  // 阶段列上多条跨树链接中点标签（关联块）会在 Y 轴堆叠。这里先统计每
+  // 个 (fromStage <-> toStage) 阶段对上的跨树链接密度，后面把这个密度用
+  // sqrt 衰减后加权回家族间距与兄弟间距压力，让拥挤列上的关联块获得
+  // 真正能分离的纵向呼吸空间。
+  const stagePairCrossTreeCount = new Map<string, number>();
+  links.forEach(link => {
+    if (!link.isCrossTree) {
+      return;
+    }
+    const fromNode = allNodeMap.get(link.from);
+    const toNode = allNodeMap.get(link.to);
+    if (!fromNode || !toNode) {
+      return;
+    }
+    const pairKey = getStagePairKey(fromNode.stage, toNode.stage);
+    if (!pairKey) {
+      return;
+    }
+    stagePairCrossTreeCount.set(pairKey, (stagePairCrossTreeCount.get(pairKey) ?? 0) + 1);
+  });
+
+  // 每个节点自身承担的"阶段对拥挤度"：它的每条跨树链接所在阶段对的
+  // 总链接数求和。参与兄弟子树纵向留白的主要信号来自这个累计值，让
+  // "关联块会堆叠在同一列"的兄弟子树在自动布局里自然分开。
+  const nodeCongestionLoad = new Map<string, number>();
+  links.forEach(link => {
+    if (!link.isCrossTree) {
+      return;
+    }
+    const fromNode = allNodeMap.get(link.from);
+    const toNode = allNodeMap.get(link.to);
+    if (!fromNode || !toNode) {
+      return;
+    }
+    const pairKey = getStagePairKey(fromNode.stage, toNode.stage);
+    if (!pairKey) {
+      return;
+    }
+    const congestion = stagePairCrossTreeCount.get(pairKey) ?? 1;
+    nodeCongestionLoad.set(link.from, (nodeCongestionLoad.get(link.from) ?? 0) + congestion);
+    nodeCongestionLoad.set(link.to, (nodeCongestionLoad.get(link.to) ?? 0) + congestion);
+  });
+
   const naturalFamilyBlocks = buildFamilyBlocks(
     assignedNodes,
     parentMap,
@@ -966,6 +1137,7 @@ export function computeFamilyBlockAutoLayout(
     relationHints,
     parentCandidateCountMap,
     resolvedOptions,
+    nodeCongestionLoad,
   );
   // 【商用级优化】按跨树连接亲和度重排家族，使关联家族尽量相邻，
   // 减少跨树连线视觉跨距、提升可读性
@@ -976,6 +1148,13 @@ export function computeFamilyBlockAutoLayout(
   familyBlocks.forEach((block, familyIndex) => {
     block.nodes.forEach(node => familyIndexMap.set(node.key, familyIndex));
   });
+
+  // 【关系网优化 2026-04-22】"关联块重叠"根因：自动排序从未考虑同一
+  // 阶段列上多条跨树链接中点标签（关联块）会在 Y 轴堆叠。这里先统计每
+  // 个 (fromStage <-> toStage) 阶段对上的跨树链接密度，后面把这个密度用
+  // sqrt 衰减后加权回家族间距与兄弟间距压力，让拥挤列上的关联块获得
+  // 真正能分离的纵向呼吸空间。
+  // （stagePairCrossTreeCount 已在 buildFamilyBlocks 之前构建。）
 
   const familyGapPressures = new Array(Math.max(0, familyBlocks.length - 1)).fill(0);
   links.forEach(link => {
@@ -992,7 +1171,16 @@ export function computeFamilyBlockAutoLayout(
     const startIndex = Math.min(fromFamilyIndex, toFamilyIndex);
     const endIndex = Math.max(fromFamilyIndex, toFamilyIndex);
     const span = endIndex - startIndex;
-    const pressurePerGap = resolvedOptions.crossTreeLabelGapRows / span;
+
+    // 关联块拥挤度加权：若本链接所在的阶段列上还挤着其他跨树链接，
+    // 放大本链接对家族间距的贡献，让堆叠的标签获得分离空间。
+    const fromNode = allNodeMap.get(link.from);
+    const toNode = allNodeMap.get(link.to);
+    const pairKey = fromNode && toNode ? getStagePairKey(fromNode.stage, toNode.stage) : null;
+    const congestion = pairKey ? (stagePairCrossTreeCount.get(pairKey) ?? 1) : 1;
+    const congestionWeight = Math.sqrt(Math.max(1, congestion));
+
+    const pressurePerGap = (resolvedOptions.crossTreeLabelGapRows * congestionWeight) / span;
 
     for (let gapIndex = startIndex; gapIndex < endIndex; gapIndex += 1) {
       familyGapPressures[gapIndex] += pressurePerGap;
@@ -1033,9 +1221,13 @@ export function computeFamilyBlockAutoLayout(
       (Math.max(block.maxStageDensity, nextBlock.maxStageDensity) - 1) * resolvedOptions.denseFamilyGapRows,
     );
     // 跨树链接压力使用 sqrt 衰减，多条链接边际递减，避免间距暴涨
+    // 【2026-04-22】与上面的 stage-pair 拥挤度加权配合：
+    //  - 拥挤度已经在 pressurePerGap 环节把重要性放大
+    //  - 这里抬高上限到 0.55 行，允许真正起效的分离距离
+    //  - 系数同步从 0.30 -> 0.45，让中等链接数家族也能拿到明显呼吸感
     const rawCrossTree = familyGapPressures[familyIndex] ?? 0;
     const crossTreePressure = rawCrossTree > 0
-      ? Math.min(0.20, Math.sqrt(rawCrossTree) * 0.30)
+      ? Math.min(0.55, Math.sqrt(rawCrossTree) * 0.45)
       : 0;
     const leafPressure = Math.min(
       0.08,

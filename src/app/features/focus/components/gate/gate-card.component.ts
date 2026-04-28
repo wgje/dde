@@ -9,6 +9,7 @@ import {
   Component,
   ChangeDetectionStrategy,
   computed,
+  effect,
   inject,
   signal,
 } from '@angular/core';
@@ -23,7 +24,10 @@ const DRAG_MAX_DISTANCE = 130;
   standalone: true,
   imports: [CommonModule],
   template: `
-    <section class="gate-card-scene" data-testid="gate-card">
+    <section
+      class="gate-card-scene"
+      [class.impact-pulse]="impactPulse()"
+      data-testid="gate-card">
       <div
         class="dark-card"
         [class.entering]="cardAnimation() === 'entering'"
@@ -68,6 +72,12 @@ const DRAG_MAX_DISTANCE = 130;
       position: relative;
       width: 100%;
       min-height: 45vh;
+      transform-origin: center bottom;
+      will-change: transform;
+    }
+
+    .gate-card-scene.impact-pulse {
+      animation: gateImpactPulse 320ms cubic-bezier(0.22, 1, 0.36, 1);
     }
 
     .dark-card {
@@ -250,7 +260,24 @@ const DRAG_MAX_DISTANCE = 130;
       }
     }
 
+    @keyframes gateImpactPulse {
+      0% {
+        transform: translateY(0) scale(1);
+      }
+      28% {
+        transform: translateY(2px) scale(0.997);
+      }
+      62% {
+        transform: translateY(-1px) scale(1.001);
+      }
+      100% {
+        transform: translateY(0) scale(1);
+      }
+    }
+
     @media (prefers-reduced-motion: reduce) {
+      .gate-card-scene,
+      .gate-card-scene.impact-pulse,
       .dark-card,
       .dark-card.dragging,
       .dark-card.entering,
@@ -277,6 +304,7 @@ export class GateCardComponent {
   readonly cardAnimation = this.gateService.cardAnimation;
   readonly dragOffset = signal(0);
   readonly isDragging = signal(false);
+  readonly impactPulse = signal(false);
 
   readonly gestureHint = computed(() => {
     const offset = this.dragOffset();
@@ -284,6 +312,14 @@ export class GateCardComponent {
     if (offset < -DRAG_TRIGGER_THRESHOLD * 0.6) return '松开标记已读';
     return '上推已读 · 下拉完成';
   });
+
+  constructor() {
+    effect(() => {
+      const tick = this.gateService.impactTick();
+      if (tick <= 0) return;
+      this.triggerImpactPulse();
+    });
+  }
 
   onPointerDown(event: PointerEvent): void {
     if (event.button !== 0) return;
@@ -362,5 +398,15 @@ export class GateCardComponent {
     this.pointerStartY = 0;
     this.dragOffset.set(0);
     this.isDragging.set(false);
+  }
+
+  private triggerImpactPulse(): void {
+    this.impactPulse.set(false);
+
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => this.impactPulse.set(true));
+    } else {
+      this.impactPulse.set(true);
+    }
   }
 }

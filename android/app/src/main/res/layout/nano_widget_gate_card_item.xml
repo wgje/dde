@@ -1,0 +1,134 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  大门模式中央任务卡片 item（ListView 内唯一条目）。
+  运行时由 Factory 填充：
+    - nano_widget_gate_card_title:    任务标题
+    - nano_widget_gate_card_created:  创建：MM-DD
+    - nano_widget_gate_card_read_at:  已读：xx 分钟前
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/nano_widget_gate_card_root"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:background="@drawable/nano_widget_gate_card"
+    android:gravity="center_vertical"
+    android:minHeight="104dp"
+    android:orientation="horizontal"
+    android:paddingStart="12dp"
+    android:paddingEnd="12dp"
+    android:paddingTop="10dp"
+    android:paddingBottom="10dp">
+
+    <ImageView
+        android:id="@+id/nano_widget_gate_card_icon"
+        android:layout_width="20dp"
+        android:layout_height="20dp"
+        android:layout_gravity="center_vertical"
+        android:importantForAccessibility="no"
+        android:src="@drawable/nano_widget_icon_document" />
+
+    <TextView
+        android:layout_width="8dp"
+        android:layout_height="1dp" />
+
+    <LinearLayout
+        android:layout_width="0dp"
+        android:layout_weight="1"
+        android:layout_height="wrap_content"
+        android:orientation="vertical">
+
+        <TextView
+            android:id="@+id/nano_widget_gate_card_title"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:ellipsize="end"
+            android:lineSpacingExtra="1dp"
+            android:maxLines="2"
+            android:text=""
+            android:textColor="#F6FBFF"
+            android:textSize="14sp"
+            android:textStyle="bold" />
+
+        <!-- 空状态下代替 meta 行显示「点击进入项目」提示文字；正常态隐藏 -->
+        <TextView
+            android:id="@+id/nano_widget_gate_card_subtitle"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:ellipsize="end"
+            android:maxLines="1"
+            android:text=""
+            android:textColor="#BFD7FF"
+            android:textSize="10sp"
+            android:visibility="gone" />
+
+        <LinearLayout
+            android:id="@+id/nano_widget_gate_card_meta_row"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="7dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <ImageView
+                android:layout_width="11dp"
+                android:layout_height="11dp"
+                android:importantForAccessibility="no"
+                android:src="@drawable/nano_widget_icon_calendar" />
+
+            <TextView
+                android:layout_width="3dp"
+                android:layout_height="1dp" />
+
+            <TextView
+                android:id="@+id/nano_widget_gate_card_created"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:maxLines="1"
+                android:text=""
+                android:textColor="#BFD7FF"
+                android:textSize="9sp" />
+
+            <TextView
+                android:layout_width="5dp"
+                android:layout_height="1dp" />
+
+            <ImageView
+                android:layout_width="11dp"
+                android:layout_height="11dp"
+                android:importantForAccessibility="no"
+                android:src="@drawable/nano_widget_icon_clock" />
+
+            <TextView
+                android:layout_width="3dp"
+                android:layout_height="1dp" />
+
+            <TextView
+                android:id="@+id/nano_widget_gate_card_read_at"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:maxLines="1"
+                android:text=""
+                android:textColor="#BFD7FF"
+                android:textSize="9sp" />
+        </LinearLayout>
+    </LinearLayout>
+
+    <ImageView
+        android:id="@+id/nano_widget_gate_card_chevron"
+        android:layout_width="12dp"
+        android:layout_height="12dp"
+        android:layout_gravity="center_vertical"
+        android:importantForAccessibility="no"
+        android:src="@drawable/nano_widget_icon_chevron" />
+
+    <!-- 兼容旧 content_item 路径的 ID，留作后备（不影响布局） -->
+    <TextView
+        android:id="@+id/nano_widget_action_chip"
+        android:layout_width="1dp"
+        android:layout_height="1dp"
+        android:text=""
+        android:visibility="gone" />
+</LinearLayout>

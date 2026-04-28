@@ -678,20 +678,38 @@ export class TaskSyncOperationsService {
       
       if (tasksResult.error) throw supabaseErrorToError(tasksResult.error);
       
-      const tombstoneIds = new Set<string>();
+      const remoteTombstoneTimestamps = new Map<string, number>();
       if (!tombstonesResult.error && tombstonesResult.data) {
         for (const t of tombstonesResult.data) {
-          tombstoneIds.add(t.task_id);
+          if (!t.deleted_at) {
+            continue;
+          }
+          const deletedAt = new Date(t.deleted_at).getTime();
+          if (!Number.isNaN(deletedAt)) {
+            remoteTombstoneTimestamps.set(t.task_id, deletedAt);
+          }
         }
       }
       
       const allTasks = (tasksResult.data as TaskRow[] || []).map(row => this.projectDataService.rowToTask(row));
       
       return allTasks.map(task => {
-        if (tombstoneIds.has(task.id)) {
+        const remoteDeletedAt = remoteTombstoneTimestamps.get(task.id);
+        if (this.tombstoneService.shouldMaterializeTaskDeletion(task.updatedAt, remoteDeletedAt)) {
           this.logger.debug('pullTasks: 标记 tombstone 任务', { taskId: task.id });
-          return { ...task, deletedAt: task.deletedAt || new Date().toISOString() };
+          return { ...task, deletedAt: task.deletedAt || new Date(remoteDeletedAt!).toISOString() };
         }
+
+        const localDeletedAt = this.tombstoneService.getLocalTombstoneTimestamp(projectId, task.id);
+        if (this.tombstoneService.shouldMaterializeTaskDeletion(task.updatedAt, localDeletedAt)) {
+          this.logger.debug('pullTasks: 标记本地 tombstone 任务', { taskId: task.id });
+          return { ...task, deletedAt: task.deletedAt || new Date(localDeletedAt!).toISOString() };
+        }
+
+        if (localDeletedAt !== undefined) {
+          this.tombstoneService.clearLocalTombstones(projectId, [task.id]);
+        }
+
         return task;
       });
     } catch (e) {
@@ -800,14 +818,18 @@ export class TaskSyncOperationsService {
   }
   
   /** 安全批量软删除任务 */
-  async softDeleteTasksBatch(projectId: string, taskIds: string[]): Promise<number> {
+  async softDeleteTasksBatch(
+    projectId: string,
+    taskIds: string[],
+    tombstoneTimestamps?: Record<string, string | number | null | undefined>,
+  ): Promise<number> {
     if (taskIds.length === 0) return 0;
 
     const client = this.getSupabaseClient();
     if (!client) {
       this.logger.warn('softDeleteTasksBatch: 离线模式，跳过服务端删除', { taskIds });
       // 【NEW-5 修复】离线时添加本地 tombstone，防止下次同步拉取时任务复活
-      this.tombstoneService.addLocalTombstones(projectId, taskIds);
+      this.tombstoneService.addLocalTombstones(projectId, taskIds, tombstoneTimestamps);
       this.settleDeletedTaskDependencies(projectId, taskIds);
       return taskIds.length;
     }
@@ -844,7 +866,7 @@ export class TaskSyncOperationsService {
       }
 
       // 【NEW-5 修复】服务端删除成功后添加本地 tombstone，防止同步窗口期内任务复活
-      this.tombstoneService.addLocalTombstones(projectId, taskIds);
+      this.tombstoneService.addLocalTombstones(projectId, taskIds, tombstoneTimestamps);
       this.settleDeletedTaskDependencies(projectId, taskIds);
 
       this.logger.info('softDeleteTasksBatch: 删除成功', {
@@ -876,14 +898,14 @@ export class TaskSyncOperationsService {
         }
 
         // 【NEW-5 修复】降级路径成功后同样添加本地 tombstone
-        this.tombstoneService.addLocalTombstones(projectId, taskIds);
+        this.tombstoneService.addLocalTombstones(projectId, taskIds, tombstoneTimestamps);
         this.settleDeletedTaskDependencies(projectId, taskIds);
 
         return taskIds.length;
       } catch (fallbackError) {
         this.logger.error('softDeleteTasksBatch: 完全失败', fallbackError);
         // 完全失败时仍添加本地 tombstone 作为最后防线
-        this.tombstoneService.addLocalTombstones(projectId, taskIds);
+        this.tombstoneService.addLocalTombstones(projectId, taskIds, tombstoneTimestamps);
         return -1;
       }
     }
@@ -1087,8 +1109,12 @@ export class TaskSyncOperationsService {
   }
   
   /** 添加本地 tombstones */
-  addLocalTombstones(projectId: string, taskIds: string[]): void {
-    this.tombstoneService.addLocalTombstones(projectId, taskIds);
+  addLocalTombstones(
+    projectId: string,
+    taskIds: string[],
+    timestampsByTaskId?: Record<string, string | number | null | undefined>,
+  ): void {
+    this.tombstoneService.addLocalTombstones(projectId, taskIds, timestampsByTaskId);
     this.logger.debug('添加本地 tombstones', { projectId, count: taskIds.length });
   }
   

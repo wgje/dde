@@ -27,16 +27,17 @@ declare namespace Deno {
 
 // Supabase 模块声明 - 使用 @ts-ignore 让 TypeScript 忽略 URL 模块
 // 这些模块在 Deno 运行时是有效的
-declare module "https://esm.sh/@supabase/supabase-js@2" {
+declare module "https://esm.sh/@supabase/supabase-js@2.93.2" {
   import type { SupabaseClient as SC } from "@supabase/supabase-js";
   export function createClient(url: string, key: string, options?: Record<string, unknown>): SC;
   export type SupabaseClient = SC;
 }
 
-declare module "https://esm.sh/@supabase/supabase-js@2.49.1" {
-  import type { SupabaseClient as SC } from "@supabase/supabase-js";
-  export function createClient(url: string, key: string, options?: Record<string, unknown>): SC;
-  export type SupabaseClient = SC;
+declare module "https://esm.sh/standardwebhooks@1.0.0" {
+  export class Webhook {
+    constructor(secret: string);
+    verify(payload: string, headers: HeadersInit | Record<string, string>): unknown;
+  }
 }
 
 declare module "https://deno.land/std@0.177.0/http/server.ts" {

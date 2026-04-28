@@ -1,11 +1,74 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- MEDIUM (4×2 横向蓝图风) 小组件：专注模式固定四插槽，大门模式保留顶部标题与底部刷新。 -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/nano_widget_root"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@drawable/nano_widget_root_focus"
     android:clipToOutline="true"
-    android:padding="12dp">
+    android:padding="14dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="horizontal">
+
+        <ImageView
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1" />
+
+        <ImageView
+            android:layout_width="1dp"
+            android:layout_height="match_parent"
+            android:background="#12FFFFFF" />
+
+        <ImageView
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1" />
+
+        <ImageView
+            android:layout_width="1dp"
+            android:layout_height="match_parent"
+            android:background="#12FFFFFF" />
+
+        <ImageView
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical">
+
+        <ImageView
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1" />
+
+        <ImageView
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:background="#12FFFFFF" />
+
+        <ImageView
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1" />
+
+        <ImageView
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:background="#12FFFFFF" />
+
+        <ImageView
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1" />
+    </LinearLayout>
 
     <LinearLayout
         android:layout_width="match_parent"
@@ -18,7 +81,6 @@
             android:gravity="start|center_vertical"
             android:orientation="horizontal">
 
-            <!-- 2026-04-19：去掉边框背景，保留圆点 + 文字。drawableStart 由 renderer 运行时选择颜色 -->
             <TextView
                 android:id="@+id/nano_widget_sync_badge"
                 android:layout_width="wrap_content"
@@ -28,25 +90,23 @@
                 android:drawablePadding="6dp"
                 android:gravity="center_vertical"
                 android:paddingStart="0dp"
-                android:paddingEnd="0dp"
+                android:paddingEnd="4dp"
                 android:paddingTop="2dp"
                 android:paddingBottom="2dp"
                 android:text=""
-                android:textColor="#4A7A38"
-                android:textSize="10sp"
-                android:visibility="gone" />
+                android:textColor="#EAF3FF"
+                android:textSize="10sp" />
 
-            <!-- 动态 tab 栏：通过 RemoteViewsFactory (LIST_KIND_TABS) 渲染主任务/副任务 chip -->
             <GridView
                 android:id="@+id/nano_widget_tab_list"
                 android:layout_width="0dp"
                 android:layout_weight="1"
-                android:layout_height="36dp"
-                android:columnWidth="64dp"
-                android:numColumns="3"
+                android:layout_height="50dp"
+                android:columnWidth="54dp"
+                android:numColumns="4"
                 android:stretchMode="columnWidth"
                 android:gravity="center_vertical"
-                android:horizontalSpacing="2dp"
+                android:horizontalSpacing="3dp"
                 android:verticalSpacing="0dp"
                 android:scrollbars="none"
                 android:fadingEdge="none"
@@ -61,18 +121,33 @@
             android:layout_weight="1"
             android:clipToPadding="false"
             android:divider="@android:color/transparent"
-            android:dividerHeight="6dp"
-            android:paddingTop="8dp"
-            android:paddingBottom="52dp"
+            android:dividerHeight="8dp"
+            android:paddingTop="10dp"
+            android:paddingBottom="4dp"
             android:scrollbars="none" />
+
+        <TextView
+            android:id="@+id/nano_widget_footer_label"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:layout_marginBottom="2dp"
+            android:paddingStart="2dp"
+            android:paddingEnd="84dp"
+            android:ellipsize="end"
+            android:maxLines="1"
+            android:text=""
+            android:textColor="#AFC3E7"
+            android:textSize="11sp"
+            android:visibility="gone" />
     </LinearLayout>
 
     <GridView
         android:id="@+id/nano_widget_refresh_list"
-        android:layout_width="76dp"
-        android:layout_height="44dp"
+        android:layout_width="80dp"
+        android:layout_height="42dp"
         android:layout_gravity="bottom|end"
-        android:columnWidth="76dp"
+        android:columnWidth="80dp"
         android:fadingEdge="none"
         android:horizontalSpacing="0dp"
         android:numColumns="1"

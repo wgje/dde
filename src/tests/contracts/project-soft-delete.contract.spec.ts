@@ -126,8 +126,8 @@ describe('项目软删除契约', () => {
   });
 
   it('前向修复 migrations 必须补 deleted_at 列并收口项目删除一致性', () => {
-    const sql = readSql('supabase/migrations/20260404103000_projects_soft_delete_alignment.sql');
-    const softDeleteRpcSql = readSql('supabase/migrations/20260406143000_project_soft_delete_rpc.sql');
+    const sql = readSql('supabase/migrations/20260404062520_20260404103000_projects_soft_delete_alignment.sql');
+    const softDeleteRpcSql = readSql('supabase/migrations/20260406071509_project_soft_delete_rpc_harden_owner_mismatch.sql');
     const softDeleteConsistencySql = readSql('supabase/migrations/20260408050338_project_soft_delete_children_consistency.sql');
     const accessibleProjectIdsSection = getSection(
       sql,

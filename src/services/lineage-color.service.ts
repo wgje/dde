@@ -79,6 +79,24 @@ export class LineageColorService {
   private readonly HEX_LIGHTEN_MIX = 0.2;
   /** HEX 颜色压暗时的混合比例 */
   private readonly HEX_DARKEN_MIX = 0.18;
+
+  // ========== 【2026-04-24 性能优化】血缘计算结果缓存 ==========
+  /**
+   * 30+ 任务场景下，每次 title 修改都会触发 preprocessDiagramData。
+   * 但血缘追溯 + 根节点颜色仅由 (taskId, parentId) 结构决定，与 title 无关。
+   * 因此对 lineageCache / rootColorMap 按“父子结构签名”缓存，减少重复追溯。
+   */
+  private cachedStructureKey = '';
+  private cachedLineage: Map<string, { rootId: string; rootIndex: number }> | null = null;
+  private cachedRootColorMap: Map<string, string> | null = null;
+
+  private computeStructureKey(tasks: Task[]): string {
+    // 按整条 parent-child 记录排序，避免只排序 token 导致不同树结构发生 cache key 碰撞。
+    return tasks
+      .map(task => `${task.id}>${task.parentId || ''}`)
+      .sort()
+      .join(';');
+  }
   
   /**
    * 预处理图表数据，注入血缘信息
@@ -99,72 +117,85 @@ export class LineageColorService {
     linkDataArray: GoJSLinkData[],
     tasks: Task[]
   ): { nodeDataArray: LineageNodeData[]; linkDataArray: LineageLinkData[] } {
-    
-    // 步骤1：构建任务映射和父子关系
-    const taskMap = new Map<string, Task>();
-    tasks.forEach(task => taskMap.set(task.id, task));
-    
-    // 步骤2：追溯每个任务的始祖节点
-    const lineageCache = new Map<string, { rootId: string; rootIndex: number }>();
-    const rootNodes: string[] = []; // 记录始祖节点
-    
-    for (const task of tasks) {
-      this.traceRootAncestor(task.id, taskMap, lineageCache, rootNodes);
+
+    // 【2026-04-24 性能优化】父子结构未变化时直接复用上次缓存的 lineageCache + rootColorMap，
+    // 只对 nodeDataArray / linkDataArray 做一次 map 注入。
+    const structureKey = this.computeStructureKey(tasks);
+    let lineageCache: Map<string, { rootId: string; rootIndex: number }>;
+    let rootColorMap: Map<string, string>;
+
+    if (structureKey === this.cachedStructureKey && this.cachedLineage && this.cachedRootColorMap) {
+      lineageCache = this.cachedLineage;
+      rootColorMap = this.cachedRootColorMap;
+    } else {
+      // 步骤1：构建任务映射和父子关系
+      const taskMap = new Map<string, Task>();
+      tasks.forEach(task => taskMap.set(task.id, task));
+
+      // 步骤2：追溯每个任务的始祖节点
+      lineageCache = new Map<string, { rootId: string; rootIndex: number }>();
+      const rootNodes: string[] = []; // 记录始祖节点
+
+      for (const task of tasks) {
+        this.traceRootAncestor(task.id, taskMap, lineageCache, rootNodes);
+      }
+
+      // 步骤2.5：按 ID 排序始祖节点，确保颜色分配与加载顺序无关
+      rootNodes.sort();
+
+      // 重建排序后的 rootIndex 映射
+      const sortedRootIndexMap = new Map<string, number>();
+      rootNodes.forEach((rootId, index) => {
+        sortedRootIndexMap.set(rootId, index);
+      });
+
+      // 更新 lineageCache 中的 rootIndex 为排序后的值
+      for (const [taskId, lineage] of lineageCache) {
+        const sortedIndex = sortedRootIndexMap.get(lineage.rootId) ?? 0;
+        lineageCache.set(taskId, { rootId: lineage.rootId, rootIndex: sortedIndex });
+      }
+
+      // 步骤3：计算每个始祖节点的家族颜色
+      const totalRoots = rootNodes.length;
+      rootColorMap = new Map<string, string>();
+
+      rootNodes.forEach((rootId, index) => {
+        rootColorMap.set(rootId, this.generateFamilyColor(index, totalRoots));
+      });
+
+      this.cachedStructureKey = structureKey;
+      this.cachedLineage = lineageCache;
+      this.cachedRootColorMap = rootColorMap;
     }
-    
-    // 步骤2.5：按 ID 排序始祖节点，确保颜色分配与加载顺序无关
-    // 这样无论手机端还是电脑端、无论何时打开项目，同一棵树始终获得相同颜色
-    rootNodes.sort();
-    
-    // 重建排序后的 rootIndex 映射
-    const sortedRootIndexMap = new Map<string, number>();
-    rootNodes.forEach((rootId, index) => {
-      sortedRootIndexMap.set(rootId, index);
-    });
-    
-    // 更新 lineageCache 中的 rootIndex 为排序后的值
-    for (const [taskId, lineage] of lineageCache) {
-      const sortedIndex = sortedRootIndexMap.get(lineage.rootId) ?? 0;
-      lineageCache.set(taskId, { rootId: lineage.rootId, rootIndex: sortedIndex });
-    }
-    
-    // 步骤3：计算每个始祖节点的家族颜色
-    const totalRoots = rootNodes.length;
-    const rootColorMap = new Map<string, string>();
-    
-    rootNodes.forEach((rootId, index) => {
-      rootColorMap.set(rootId, this.generateFamilyColor(index, totalRoots));
-    });
-    
+
     // 步骤4：为节点注入血缘信息
     const enhancedNodes: LineageNodeData[] = nodeDataArray.map(node => {
       const lineage = lineageCache.get(node.key);
       const rootId = lineage?.rootId || node.key;
       const rootIndex = lineage?.rootIndex ?? 0;
       const familyColor = rootColorMap.get(rootId) || this.generateFamilyColor(0, 1);
-      
+
       return {
         ...node,
         rootAncestorIndex: rootIndex,
         familyColor
       };
     });
-    
+
     // 步骤5：为连线注入血缘信息（使用源节点的血缘）
     const enhancedLinks: LineageLinkData[] = linkDataArray.map(link => {
-      // 连线继承源节点的家族颜色
       const sourceLineage = lineageCache.get(link.from);
       const rootId = sourceLineage?.rootId || link.from;
       const rootIndex = sourceLineage?.rootIndex ?? 0;
       const familyColor = rootColorMap.get(rootId) || this.generateFamilyColor(0, 1);
-      
+
       return {
         ...link,
         rootAncestorIndex: rootIndex,
         familyColor
       };
     });
-    
+
     return {
       nodeDataArray: enhancedNodes,
       linkDataArray: enhancedLinks

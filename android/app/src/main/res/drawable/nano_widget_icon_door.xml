@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 蓝图线稿：大门 图标 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="20dp"
+    android:height="20dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:strokeColor="#F6FBFF"
+        android:strokeWidth="1.4"
+        android:fillColor="#00000000"
+        android:pathData="M4,21 L4,4 L16,3 L16,21 Z" />
+    <path
+        android:strokeColor="#F6FBFF"
+        android:strokeWidth="1.4"
+        android:fillColor="#00000000"
+        android:pathData="M16,21 L20,21 L20,6 L16,5" />
+    <path
+        android:fillColor="#F6FBFF"
+        android:pathData="M13,12 A0.9,0.9 0 1,1 12.99,12 Z" />
+</vector>

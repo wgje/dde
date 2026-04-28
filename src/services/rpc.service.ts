@@ -13,13 +13,42 @@ import { SupabaseClientService } from './supabase-client.service';
 import { RpcSignature, isValidRpcFunction } from '../types/rpc.types';
 import { supabaseErrorToError } from '../utils/supabase-error';
 import { TIMEOUT_CONFIG } from '../config/timeout.config';
-import { OperationError, ErrorCodes, failure } from '../utils/result';
+import { OperationError, ErrorCodes } from '../utils/result';
 
 @Injectable({
   providedIn: 'root',
 })
 export class RpcService {
   private supabase = inject(SupabaseClientService);
+
+  private createOperationError(
+    code: string,
+    message: string,
+    details?: Record<string, unknown>
+  ): OperationError {
+    return { code, message, details };
+  }
+
+  private toOperationError(error: unknown): OperationError {
+    const enhancedError = supabaseErrorToError(error);
+    const details: Record<string, unknown> = {
+      errorType: enhancedError.errorType,
+      isRetryable: enhancedError.isRetryable,
+    };
+
+    if (enhancedError.details) {
+      details['supabaseDetails'] = enhancedError.details;
+    }
+    if (enhancedError.hint) {
+      details['hint'] = enhancedError.hint;
+    }
+
+    return this.createOperationError(
+      String(enhancedError.code ?? ErrorCodes.UNKNOWN),
+      enhancedError.message || '未知错误',
+      details
+    );
+  }
 
   /**
    * 类型安全的 RPC 调用
@@ -52,16 +81,16 @@ export class RpcService {
     if (!isValidRpcFunction(fnName)) {
       return {
         ok: false,
-        error: failure(
-          ErrorCodes.OPERATION_FAILED,
-          `无效的 RPC 函数名: ${String(fnName)}`
-        ).error,
+        error: this.createOperationError(
+        ErrorCodes.OPERATION_FAILED,
+        `无效的 RPC 函数名: ${String(fnName)}`
+        ),
       };
     }
 
     try {
       // 获取 Supabase 客户端
-      const client = this.supabase.client;
+      const client = this.supabase.client();
 
       // 带超时的 RPC 调用
       const controller = new AbortController();
@@ -73,26 +102,25 @@ export class RpcService {
         clearTimeout(timeoutId);
 
         if (error) {
-          const operationError = supabaseErrorToError(error);
-          return { ok: false, error: operationError };
+          return { ok: false, error: this.toOperationError(error) };
         }
 
-        return { ok: true, value: data as RpcSignature[FnName]['returns'] };
+        return { ok: true, value: data as unknown as RpcSignature[FnName]['returns'] };
       } catch (e) {
         clearTimeout(timeoutId);
         if (e instanceof Error && e.name === 'AbortError') {
           return {
             ok: false,
-            error: failure(ErrorCodes.OPERATION_FAILED, 'RPC 调用超时').error,
+            error: this.createOperationError(ErrorCodes.OPERATION_FAILED, 'RPC 调用超时'),
           };
         }
         throw e;
       }
     } catch (e) {
-      const operationError = e instanceof Error
-        ? supabaseErrorToError(e)
-        : failure(ErrorCodes.UNKNOWN, '未知错误').error;
-      return { ok: false, error: operationError };
+      return {
+        ok: false,
+        error: this.toOperationError(e),
+      };
     }
   }
 

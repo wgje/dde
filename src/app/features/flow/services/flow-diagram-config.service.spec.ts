@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { getFlowStyles } from '../../../../config/flow-styles';
 import { LineageColorService } from '../../../../services/lineage-color.service';
 import { ThemeService } from '../../../../services/theme.service';
-import { Project, Task } from '../../../../models';
+import { Connection, Project, Task } from '../../../../models';
 import { FlowDiagramConfigService } from './flow-diagram-config.service';
 
 function createTask(overrides: Partial<Task> & Pick<Task, 'id' | 'title'>): Task {
@@ -30,7 +30,7 @@ function createTask(overrides: Partial<Task> & Pick<Task, 'id' | 'title'>): Task
   } as Task;
 }
 
-function createProject(tasks: Task[]): Project {
+function createProject(tasks: Task[], connections: Connection[] = []): Project {
   const now = new Date().toISOString();
   return {
     id: 'project-1',
@@ -38,8 +38,18 @@ function createProject(tasks: Task[]): Project {
     description: '',
     createdDate: now,
     tasks,
-    connections: [],
+    connections,
   };
+}
+
+function expectEmbeddedCrossTreeLinks(linkDataArray: go.ObjectData[], expectedCount: number): void {
+  const crossTreeLinks = linkDataArray.filter(link => link.isCrossTree);
+  expect(crossTreeLinks).toHaveLength(expectedCount);
+  expect(crossTreeLinks.every(link => link.labelSegmentOffsetY === 0)).toBe(true);
+
+  const fractions = crossTreeLinks.map(link => link.labelSegmentFraction);
+  expect(new Set(fractions).size).toBe(expectedCount);
+  expect(fractions.every((fraction): fraction is number => typeof fraction === 'number' && fraction > 0 && fraction < 1)).toBe(true);
 }
 
 describe('FlowDiagramConfigService', () => {
@@ -98,5 +108,120 @@ describe('FlowDiagramConfigService', () => {
     expect(searchNode?.displayIdColor).toBe(styles.text.displayIdColor);
     expect(unassignedNode?.isUnassigned).toBe(true);
     expect(unassignedNode?.displayIdColor).toBe(styles.text.displayIdColor);
+  });
+
+  it('keeps cross-tree relation blocks embedded by staggering repeated stage-boundary links along the line', () => {
+    const tasks = [
+      createTask({ id: 'left-a', title: 'Left A', stage: 1, displayId: '1' }),
+      createTask({ id: 'left-b', title: 'Left B', stage: 1, displayId: '2' }),
+      createTask({ id: 'right-a', title: 'Right A', stage: 2, displayId: '3' }),
+      createTask({ id: 'right-b', title: 'Right B', stage: 2, displayId: '4' }),
+    ];
+    const connections: Connection[] = [
+      { id: 'conn-a', source: 'left-a', target: 'right-a', title: 'A->A' },
+      { id: 'conn-b', source: 'left-b', target: 'right-b', title: 'B->B' },
+    ];
+
+    const result = service.buildDiagramData(
+      tasks,
+      createProject(tasks, connections),
+      '',
+      new Map<string, go.ObjectData>(),
+      { dockedTaskIds: new Set<string>(), focusedTaskId: null },
+    );
+
+    expectEmbeddedCrossTreeLinks(result.linkDataArray, 2);
+  });
+
+  it('keeps same-stage cross-tree relation blocks embedded by spreading them along the link instead of lifting them away', () => {
+    const tasks = [
+      createTask({ id: 'same-a', title: 'Same A', stage: 2, displayId: '1' }),
+      createTask({ id: 'same-b', title: 'Same B', stage: 2, displayId: '2' }),
+      createTask({ id: 'same-c', title: 'Same C', stage: 2, displayId: '3' }),
+      createTask({ id: 'same-d', title: 'Same D', stage: 2, displayId: '4' }),
+    ];
+    const connections: Connection[] = [
+      { id: 'same-conn-a', source: 'same-a', target: 'same-c', title: 'A->C' },
+      { id: 'same-conn-b', source: 'same-b', target: 'same-d', title: 'B->D' },
+    ];
+
+    const result = service.buildDiagramData(
+      tasks,
+      createProject(tasks, connections),
+      '',
+      new Map<string, go.ObjectData>(),
+      { dockedTaskIds: new Set<string>(), focusedTaskId: null },
+    );
+
+    expectEmbeddedCrossTreeLinks(result.linkDataArray, 2);
+  });
+
+  it('keeps dense stage-boundary relation blocks unique without lifting them away from the link', () => {
+    const tasks = Array.from({ length: 8 }, (_, index) => [
+      createTask({ id: `left-${index}`, title: `Left ${index}`, stage: 1, displayId: `${index + 1}` }),
+      createTask({ id: `right-${index}`, title: `Right ${index}`, stage: 2, displayId: `${index + 9}` }),
+    ]).flat();
+    const connections: Connection[] = Array.from({ length: 8 }, (_, index) => ({
+      id: `dense-boundary-${index}`,
+      source: `left-${index}`,
+      target: `right-${index}`,
+      title: `Dense ${index}`,
+    }));
+
+    const result = service.buildDiagramData(
+      tasks,
+      createProject(tasks, connections),
+      '',
+      new Map<string, go.ObjectData>(),
+      { dockedTaskIds: new Set<string>(), focusedTaskId: null },
+    );
+
+    expectEmbeddedCrossTreeLinks(result.linkDataArray, 8);
+  });
+
+  it('keeps dense same-stage relation blocks unique without lifting them away from the link', () => {
+    const tasks = Array.from({ length: 6 }, (_, index) => [
+      createTask({ id: `same-source-${index}`, title: `Same Source ${index}`, stage: 2, displayId: `${index + 1}` }),
+      createTask({ id: `same-target-${index}`, title: `Same Target ${index}`, stage: 2, displayId: `${index + 7}` }),
+    ]).flat();
+    const connections: Connection[] = Array.from({ length: 6 }, (_, index) => ({
+      id: `dense-same-${index}`,
+      source: `same-source-${index}`,
+      target: `same-target-${index}`,
+      title: `Same ${index}`,
+    }));
+
+    const result = service.buildDiagramData(
+      tasks,
+      createProject(tasks, connections),
+      '',
+      new Map<string, go.ObjectData>(),
+      { dockedTaskIds: new Set<string>(), focusedTaskId: null },
+    );
+
+    expectEmbeddedCrossTreeLinks(result.linkDataArray, 6);
+  });
+
+  it('keeps long-span edge-boundary relation blocks unique without lifting them away from the link', () => {
+    const tasks = Array.from({ length: 2 }, (_, index) => [
+      createTask({ id: `far-left-${index}`, title: `Far Left ${index}`, stage: 1, displayId: `${index + 1}` }),
+      createTask({ id: `far-right-${index}`, title: `Far Right ${index}`, stage: 11, displayId: `${index + 3}` }),
+    ]).flat();
+    const connections: Connection[] = Array.from({ length: 2 }, (_, index) => ({
+      id: `far-span-${index}`,
+      source: `far-left-${index}`,
+      target: `far-right-${index}`,
+      title: `Far ${index}`,
+    }));
+
+    const result = service.buildDiagramData(
+      tasks,
+      createProject(tasks, connections),
+      '',
+      new Map<string, go.ObjectData>(),
+      { dockedTaskIds: new Set<string>(), focusedTaskId: null },
+    );
+
+    expectEmbeddedCrossTreeLinks(result.linkDataArray, 2);
   });
 });

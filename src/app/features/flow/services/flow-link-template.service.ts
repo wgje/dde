@@ -12,6 +12,7 @@
 
 import { Injectable, inject } from '@angular/core';
 import { GOJS_CONFIG } from '../../../../config';
+import { LAYOUT_CONFIG } from '../../../../config/layout.config';
 import { getFlowStyles, FlowTheme, FlowColorMode } from '../../../../config/flow-styles';
 import { flowTemplateEventHandlers } from './flow-template-events';
 import { FlowDiagramConfigService } from './flow-diagram-config.service';
@@ -237,6 +238,8 @@ export class FlowLinkTemplateService {
     
     // 【2026-02-25 性能优化】跨树链接专用模板——包含 label panel + tooltip
     // 父子链接（占大多数）不再承载隐藏的 label panel，每条节省 ~6 个 GraphObject
+    // 【2026-04-23 回退】按用户要求把跨树连线从 Orthogonal 正交段回退为 Bezier 曲线，
+    // 与历史视觉一致；关联块改由默认 segmentFraction=0.5 居中嵌入曲线中段。
     const crossTreeLinkTemplate = $(go.Link,
       {
         layerName: 'Links',
@@ -651,7 +654,21 @@ export class FlowLinkTemplateService {
     return $(go.Panel, "Auto",
       {
         ...panelConfig,
-        // 桌面端保留标签点击直达编辑；移动端交由 ObjectSingleClicked 统一处理
+        // 默认仍贴在线中段；当布局层为特定 cross-tree link 计算出错开位时，
+        // 由下面的 binding 覆盖默认 segmentFraction / segmentOffset。
+      },
+      new go.Binding(
+        "segmentFraction",
+        "labelSegmentFraction",
+        (fraction: number | undefined) => typeof fraction === 'number' ? fraction : 0.5,
+      ),
+      new go.Binding(
+        "segmentOffset",
+        "labelSegmentOffsetY",
+        (offsetY: number | undefined) => new go.Point(0, typeof offsetY === 'number' ? offsetY : 0),
+      ),
+      // 桌面端保留标签点击直达编辑；移动端交由 ObjectSingleClicked 统一处理
+      {
         ...(isMobile ? {} : {
           click: (e: go.InputEvent, obj: go.GraphObject) => {
             const link = obj?.part as go.Link | undefined;
@@ -704,17 +721,28 @@ export class FlowLinkTemplateService {
         $(go.TextBlock, {
           font: `500 ${isMobile ? '10px' : '8px'} "LXGW WenKai Screen", sans-serif`,
           stroke: "#6d28d9",
-          maxSize: new go.Size(isMobile ? 100 : 120, 14),
+          // 【补丁 H 2026-04-23 14:57】宽度收紧到 LAYOUT_CONFIG，配合字符截断
+          maxSize: new go.Size(
+            isMobile
+              ? Math.min(100, LAYOUT_CONFIG.AUTO_LAYOUT_CROSS_TREE_LABEL_MAX_WIDTH_PX + 12)
+              : LAYOUT_CONFIG.AUTO_LAYOUT_CROSS_TREE_LABEL_MAX_WIDTH_PX,
+            14,
+          ),
           overflow: go.TextBlock.OverflowEllipsis,
           margin: new go.Margin(0, 0, 0, 2),
           cursor: "pointer"
         },
-        // 优先显示 title，若无则显示截断的 description
+        // 【补丁 H 2026-04-23 14:57】关联块显示文本截断：
+        // 过长 title/description 会撑宽 label panel，加剧横向拥挤，
+        // 因此在渲染端强制收窄。完整文本仍保留在数据 / tooltip / 编辑弹窗。
         new go.Binding("text", "", (data: go.ObjectData) => {
           const d = data as { title?: string; description?: string };
-          if (d.title) return d.title.substring(0, 32);
-          if (d.description) return d.description.substring(0, 64);
-          return "...";
+          const maxChars = LAYOUT_CONFIG.AUTO_LAYOUT_CROSS_TREE_LABEL_TEXT_MAX_CHARS;
+          const raw = d.title?.trim() || d.description?.trim() || "";
+          if (!raw) return "...";
+          // 中英混排近似字符宽度一致，用 Array.from 处理 emoji / 代理对
+          const chars = Array.from(raw);
+          return chars.length <= maxChars ? raw : chars.slice(0, maxChars).join("") + "…";
         }))
       )
     );

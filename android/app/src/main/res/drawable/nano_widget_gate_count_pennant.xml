@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  蓝图风大门计数 pennant：书签/旗帜形（与主任务徽章同形，放大到 28×28，容纳两位数字）。
+  与 focus 模式主任务 pennant 视觉语言一致，替代原先的圆环，增强大门的"未完成计数"存在感。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="28dp"
+    android:height="28dp"
+    android:viewportWidth="28"
+    android:viewportHeight="28">
+    <path
+        android:strokeColor="#F6FBFF"
+        android:strokeWidth="1.5"
+        android:fillColor="#00000000"
+        android:strokeLineJoin="miter"
+        android:pathData="M3,1.5 L25,1.5 L25,24 L14,18.5 L3,24 Z" />
+</vector>

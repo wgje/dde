@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  大门模式：已读 / 完成 按钮 item。渲染时由 Factory 设置：
+    - nano_widget_gate_action_icon：图标（eye=已读；check=完成）
+    - nano_widget_gate_action_label：按钮文字
+  fillInIntent 挂在 root FrameLayout。
+-->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/nano_widget_gate_action_root"
+    android:layout_width="match_parent"
+    android:layout_height="30dp"
+    android:paddingStart="2dp"
+    android:paddingEnd="2dp"
+    android:paddingTop="3dp"
+    android:paddingBottom="3dp">
+
+    <LinearLayout
+        android:id="@+id/nano_widget_gate_action_slot"
+        android:layout_width="112dp"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:background="@drawable/nano_widget_gate_button"
+        android:gravity="center"
+        android:minHeight="24dp"
+        android:orientation="horizontal"
+        android:paddingStart="7dp"
+        android:paddingEnd="7dp"
+        android:paddingTop="2dp"
+        android:paddingBottom="2dp">
+
+        <ImageView
+            android:id="@+id/nano_widget_gate_action_icon"
+            android:layout_width="12dp"
+            android:layout_height="12dp"
+            android:layout_gravity="center_vertical"
+            android:importantForAccessibility="no"
+            android:src="@drawable/nano_widget_icon_eye" />
+
+        <TextView
+            android:layout_width="4dp"
+            android:layout_height="1dp" />
+
+        <TextView
+            android:id="@+id/nano_widget_gate_action_label"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:ellipsize="end"
+            android:maxLines="1"
+            android:text=""
+            android:textColor="#F6FBFF"
+            android:textSize="10sp"
+            android:textStyle="bold" />
+
+        <!-- 兼容：保留 chip id 避免旧调用点 NPE -->
+        <TextView
+            android:id="@+id/nano_widget_action_chip"
+            android:layout_width="1dp"
+            android:layout_height="1dp"
+            android:text=""
+            android:visibility="gone" />
+    </LinearLayout>
+</FrameLayout>

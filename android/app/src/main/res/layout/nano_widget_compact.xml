@@ -20,7 +20,7 @@
             android:ellipsize="end"
             android:maxLines="1"
             android:text=""
-            android:textColor="#4A7A38"
+            android:textColor="#BFD7FF"
             android:textSize="11sp" />
 
         <TextView
@@ -34,7 +34,7 @@
             android:ellipsize="end"
             android:maxLines="3"
             android:text=""
-            android:textColor="#1F2A17"
+            android:textColor="#F6FBFF"
             android:textSize="16sp"
             android:textStyle="bold" />
 
@@ -49,7 +49,7 @@
             android:ellipsize="end"
             android:maxLines="2"
             android:text=""
-            android:textColor="#5E7050"
+            android:textColor="#D7E5FF"
             android:textSize="11sp"
             android:visibility="gone" />
     </LinearLayout>

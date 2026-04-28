@@ -82,6 +82,7 @@ function buildContext(initial: {
     fragmentDefenseLevel: signal<FragmentDefenseLevel>(1),
     lastConsoleDemotedTaskId: signal<string | null>(null),
     consoleVisibleOrderHint: signal<string[]>([]),
+    consoleVisibleEntries: signal<DockEntry[]>(initial.entries ?? []),
     focusingEntry: signal<DockEntry | null>(initial.focusingEntry ?? null),
     focusMode: signal(initial.focusMode ?? false),
     suspendChainRootTaskId: signal<string | null>(initial.suspendChainRootTaskId ?? null),

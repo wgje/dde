@@ -133,19 +133,19 @@ describe('FlowDiagramService', () => {
     if (originalRequestAnimationFrame) {
       globalThis.requestAnimationFrame = originalRequestAnimationFrame;
     } else {
-      delete (globalThis as unknown as { requestAnimationFrame?: typeof globalThis.requestAnimationFrame }).requestAnimationFrame;
+      Reflect.deleteProperty(globalThis as unknown as Record<string, unknown>, 'requestAnimationFrame');
     }
 
     if (originalCancelAnimationFrame) {
       globalThis.cancelAnimationFrame = originalCancelAnimationFrame;
     } else {
-      delete (globalThis as unknown as { cancelAnimationFrame?: typeof globalThis.cancelAnimationFrame }).cancelAnimationFrame;
+      Reflect.deleteProperty(globalThis as unknown as Record<string, unknown>, 'cancelAnimationFrame');
     }
 
     if (originalDevicePixelRatioDescriptor) {
       Object.defineProperty(window, 'devicePixelRatio', originalDevicePixelRatioDescriptor);
     } else {
-      delete (window as Window & { devicePixelRatio?: number }).devicePixelRatio;
+      Reflect.deleteProperty(window as unknown as Record<string, unknown>, 'devicePixelRatio');
     }
 
     vi.useRealTimers();

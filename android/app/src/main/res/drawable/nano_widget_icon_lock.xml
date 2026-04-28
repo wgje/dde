@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 蓝图线稿：锁 图标 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="16dp"
+    android:height="16dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:strokeColor="#F6FBFF"
+        android:strokeWidth="1.4"
+        android:fillColor="#00000000"
+        android:pathData="M5,11 L19,11 L19,21 L5,21 Z" />
+    <path
+        android:strokeColor="#F6FBFF"
+        android:strokeWidth="1.4"
+        android:fillColor="#00000000"
+        android:pathData="M8,11 L8,7.5 A4,4 0 0,1 16,7.5 L16,11" />
+</vector>

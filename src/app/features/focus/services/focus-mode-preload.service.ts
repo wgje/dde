@@ -23,7 +23,7 @@ export type FocusModePreloadReason = 'startup' | 'p1' | 'intent';
 
 @Injectable({ providedIn: 'root' })
 export class FocusModePreloadService {
-  private readonly logger = inject(LoggerService);
+  private readonly logger = inject(LoggerService).category('FocusModePreload');
   private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
 
   /** 正在进行或已完成的预热任务；去重防止多次 import 同一 chunk */

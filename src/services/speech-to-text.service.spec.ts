@@ -17,6 +17,17 @@ import { signal } from '@angular/core';
 import { isRecording, isTranscribing } from '../state/focus-stores';
 import { Subject } from 'rxjs';
 
+const expectDeferredCallback = <TArgs extends unknown[], TResult = void>(
+  callback: ((...args: TArgs) => TResult) | null | undefined,
+  label: string
+): ((...args: TArgs) => TResult) => {
+  if (!callback) {
+    throw new Error(`${label} should be assigned before invocation`);
+  }
+
+  return callback;
+};
+
 describe('SpeechToTextService', () => {
   let service: SpeechToTextService;
   let originalMediaDevices: MediaDevices | undefined;
@@ -644,7 +655,7 @@ describe('SpeechToTextService', () => {
 
       expect(replaySpy).toHaveBeenCalledTimes(1);
 
-      resolveReplay?.();
+      expectDeferredCallback(resolveReplay, 'resolveReplay')();
       await Promise.resolve();
     });
   });

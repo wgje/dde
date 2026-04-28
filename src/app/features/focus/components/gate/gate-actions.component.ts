@@ -64,7 +64,7 @@ import { LoggerService } from '../../../../../services/logger.service';
         [disabled]="isProcessing()"
         (mousedown)="onFabMouseDown($event)"
         (touchstart)="onFabTouchStart($event)"
-        aria-label="快速录入：点按打开面板，长按录音"
+        [attr.aria-label]="speechSupported() ? '按住录音，松开自动转写；离开按钮区域取消' : '快速录入文字'"
         data-testid="gate-quick-capture-toggle">
         @if (isFabTranscribing()) {
           <span class="fab-spinner"></span>
@@ -72,7 +72,9 @@ import { LoggerService } from '../../../../../services/logger.service';
           <span class="fab-pulse"></span>
         } @else {
           <span class="fab-icon">
-            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
+            <!-- 【2026-04-23 倒置】默认图标改为麦克风：FAB 直接是录音按钮，去掉
+                 "加号 → 开面板 → 面板内再按麦克风" 的两步流程。 -->
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M19 10a7 7 0 0 1-14 0"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="8" y1="22" x2="16" y2="22"/></svg>
           </span>
         }
       </button>
@@ -89,7 +91,35 @@ import { LoggerService } from '../../../../../services/logger.service';
         </div>
       }
 
-      @if (quickCaptureOpen()) {
+      @if (quickCaptureOpen() && pendingTranscription()) {
+        <!-- 【2026-04-23 倒置】面板只承担"录完后确认编辑"职责：
+             录音由 FAB 长按直接触发，转写完成后自动打开此面板。用户只需编辑 / 保存 / 取消。
+             旧的"手动文本 + 面板内录音"入口已移除。 -->
+        <div class="quick-capture-mask" (click)="cancelPendingTranscription()"></div>
+
+        <section class="quick-capture-panel" data-testid="gate-quick-capture-panel">
+          <header class="panel-header">
+            <h3>确认刚才的录入</h3>
+            <button type="button" class="panel-close" (click)="cancelPendingTranscription()">关闭</button>
+          </header>
+
+          <div class="transcription-editor">
+            <textarea
+              class="transcription-input"
+              rows="4"
+              [(ngModel)]="editableTranscription"
+              placeholder="编辑转写内容..."
+              data-testid="gate-transcription-editor">
+            </textarea>
+            <div class="transcription-actions">
+              <button type="button" class="ghost-btn" (click)="cancelPendingTranscription()" data-testid="gate-transcription-cancel">取消</button>
+              <button type="button" class="solid-btn" [disabled]="!editableTranscription.trim()" (click)="confirmPendingTranscription()" data-testid="gate-transcription-confirm">保存</button>
+            </div>
+          </div>
+        </section>
+      }
+
+      @if (quickCaptureOpen() && !pendingTranscription() && manualQuickCaptureFallback()) {
         <div class="quick-capture-mask" (click)="closeQuickCapture()"></div>
 
         <section class="quick-capture-panel" data-testid="gate-quick-capture-panel">
@@ -98,62 +128,17 @@ import { LoggerService } from '../../../../../services/logger.service';
             <button type="button" class="panel-close" (click)="closeQuickCapture()">关闭</button>
           </header>
 
-          @if (pendingTranscription()) {
-            <div class="transcription-editor">
-              <textarea
-                class="transcription-input"
-                rows="3"
-                [(ngModel)]="editableTranscription"
-                placeholder="编辑转写内容...">
-              </textarea>
-              <div class="transcription-actions">
-                <button type="button" class="ghost-btn" (click)="cancelPendingTranscription()">取消</button>
-                <button type="button" class="solid-btn" (click)="confirmPendingTranscription()">使用</button>
-              </div>
-            </div>
-          }
-
-          <div class="capture-input-row">
-            @if (speechSupported() || isDevMode) {
-              <button
-                #recordBtn
-                type="button"
-                class="record-btn"
-                [class.recording]="isRecording()"
-                [class.out-of-zone]="isOutOfZone()"
-                [disabled]="isTranscribing()"
-                (mousedown)="onRecordMouseDown($event)"
-                (touchstart)="onRecordTouchStart($event)"
-                (keydown.space)="onRecordKeyStart($event)"
-                (keyup.space)="onRecordKeyStop()">
-                @if (isTranscribing()) {
-                  <span class="spinner"></span>
-                } @else if (isRecording()) {
-                  <span class="record-stop"></span>
-                } @else {
-                  <span>🎤</span>
-                }
-              </button>
-            }
-
-            <textarea
-              class="capture-input"
-              rows="3"
-              [ngModel]="quickInputText()"
-              (ngModelChange)="quickInputText.set($event)"
-              [disabled]="isRecording() || isTranscribing()"
-              placeholder="记录一个待处理想法...">
-            </textarea>
-          </div>
+          <textarea
+            class="capture-input"
+            rows="4"
+            [ngModel]="quickInputText()"
+            (ngModelChange)="quickInputText.set($event)"
+            placeholder="记录一个待处理想法..."
+            data-testid="gate-quick-input-editor">
+          </textarea>
 
           <footer class="panel-footer">
-            @if (isRecording()) {
-              <span class="hint">{{ isOutOfZone() ? '松开取消录音' : '录音中，离开按钮区域会取消' }}</span>
-            } @else if (isTranscribing()) {
-              <span class="hint">正在转写语音...</span>
-            } @else {
-              <span class="hint">在门内快速补录，不打断当前结算流程</span>
-            }
+            <span class="hint">当前环境不支持语音录入，先用文字补记</span>
 
             <button
               type="button"
@@ -619,6 +604,7 @@ export class GateActionsComponent implements OnDestroy {
   quickCaptureOpen = signal(false);
 
   quickInputText = signal('');
+  manualQuickCaptureFallback = signal(false);
 
   isRecording = this.speechService.isRecording;
   isTranscribing = this.speechService.isTranscribing;
@@ -663,11 +649,14 @@ export class GateActionsComponent implements OnDestroy {
   }
 
   toggleQuickCapture(): void {
-    this.quickCaptureOpen.update(open => !open);
+    const nextOpen = !this.quickCaptureOpen();
+    this.quickCaptureOpen.set(nextOpen);
+    this.manualQuickCaptureFallback.set(nextOpen && !this.speechService.isSupported());
   }
 
   closeQuickCapture(): void {
     this.quickCaptureOpen.set(false);
+    this.manualQuickCaptureFallback.set(false);
     this.removeGlobalListeners();
     this.isOutOfZone.set(false);
   }
@@ -678,6 +667,11 @@ export class GateActionsComponent implements OnDestroy {
   onFabMouseDown(event: MouseEvent): void {
     event.preventDefault();
     if (this.isFabTranscribing()) return;
+
+    if (!this.speechService.isSupported()) {
+      this.toggleQuickCapture();
+      return;
+    }
 
     this.longPressTriggered = false;
     // 【修复 P4-02】清除上一次定时器，防止快速双击产生两个定时器
@@ -697,10 +691,9 @@ export class GateActionsComponent implements OnDestroy {
       this.clearLongPressTimer();
       if (this.isFabRecording()) {
         this.stopFabRecording();
-      } else if (!this.longPressTriggered) {
-        // 短按 → 切换面板
-        this.toggleQuickCapture();
       }
+      // 【2026-04-23 倒置】短按不再打开面板；面板仅在转写成功后才自动出现。
+      // 若用户误触短按（未达长按阈值），什么也不做，保持桌面清爽。
       this.removeFabListeners();
     };
 
@@ -717,6 +710,11 @@ export class GateActionsComponent implements OnDestroy {
   onFabTouchStart(event: TouchEvent): void {
     event.preventDefault();
     if (this.isFabTranscribing()) return;
+
+    if (!this.speechService.isSupported()) {
+      this.toggleQuickCapture();
+      return;
+    }
 
     this.longPressTriggered = false;
     // 【修复 P4-02】清除上一次定时器，防止快速双击产生两个定时器
@@ -736,9 +734,8 @@ export class GateActionsComponent implements OnDestroy {
       this.clearLongPressTimer();
       if (this.isFabRecording()) {
         this.stopFabRecording();
-      } else if (!this.longPressTriggered) {
-        this.toggleQuickCapture();
       }
+      // 【2026-04-23 倒置】短按不再打开面板（详见 mousedown 分支注释）。
       this.removeFabListeners();
     };
 
@@ -756,24 +753,35 @@ export class GateActionsComponent implements OnDestroy {
   /** 在 FAB 上开始录音 */
   private startFabRecording(): void {
     if (!this.speechService.isSupported()) {
-      // DEV mock
-      const mockTexts = GateActionsComponent.DEV_MOCK_TRANSCRIPTIONS;
-      const mockText = mockTexts[Math.floor(Math.random() * mockTexts.length)];
-      this.isFabRecording.set(false);
-      this.pendingTranscription.set(mockText);
-      this.editableTranscription = mockText;
-      this.quickCaptureOpen.set(true);
+      if (this.isDevMode) {
+        const mockTexts = GateActionsComponent.DEV_MOCK_TRANSCRIPTIONS;
+        const mockText = mockTexts[Math.floor(Math.random() * mockTexts.length)];
+        this.isFabRecording.set(false);
+        this.pendingTranscription.set(mockText);
+        this.editableTranscription = mockText;
+        this.quickCaptureOpen.set(true);
+        return;
+      }
+
+      this.toast.error('当前环境不支持语音录入');
       return;
     }
 
     this.isFabRecording.set(true);
     this.isFabOutOfZone.set(false);
 
-    void this.speechService.startRecording().catch(err => {
-      this.logger.error('GateActions', 'FAB recording failed to start', err);
-      this.toast.error('无法启动录音');
-      this.isFabRecording.set(false);
-    });
+    void this.speechService.startRecording()
+      .then(() => {
+        if (!this.isRecording()) {
+          this.logger.warn('GateActions', 'FAB recording unavailable, fallback to manual quick capture');
+          this.openManualQuickCaptureFallback();
+        }
+      })
+      .catch(err => {
+        this.logger.error('GateActions', 'FAB recording failed to start', err);
+        this.toast.error('无法启动录音');
+        this.openManualQuickCaptureFallback();
+      });
   }
 
   /** 检查指针是否仍在 FAB 按钮区域内 */
@@ -849,6 +857,8 @@ export class GateActionsComponent implements OnDestroy {
     if (result.ok) {
       this.logger.info('GateActions', 'Quick input submitted');
       this.quickInputText.set('');
+      this.quickCaptureOpen.set(false);
+      this.manualQuickCaptureFallback.set(false);
       this.toast.success('已记录');
       return;
     }
@@ -857,19 +867,38 @@ export class GateActionsComponent implements OnDestroy {
     this.toast.error(result.error.message || '记录失败');
   }
 
+  /**
+   * 【2026-04-23 倒置】确认 = 直接把转写结果保存为黑匣子条目，然后关闭面板。
+   * 不再把文本回填到"手动 textarea"（已移除），让用户一步到位，不用再点二次保存。
+   */
   confirmPendingTranscription(): void {
     const text = this.editableTranscription.trim();
-    if (text) {
-      const current = this.quickInputText();
-      this.quickInputText.set(current ? `${current} ${text}` : text);
+    if (!text) {
+      this.cancelPendingTranscription();
+      return;
     }
-    this.pendingTranscription.set('');
-    this.editableTranscription = '';
+
+    const result = this.blackBoxService.create({ content: text });
+    if (result.ok) {
+      this.logger.info('GateActions', 'Transcription saved to black box');
+      this.toast.success('已记录');
+      this.pendingTranscription.set('');
+      this.editableTranscription = '';
+      this.quickCaptureOpen.set(false);
+    } else {
+      this.logger.error('GateActions', 'Failed to save transcription', result.error.message);
+      this.toast.error(result.error.message || '记录失败');
+    }
   }
 
+  /**
+   * 【2026-04-23 倒置】取消 = 丢弃本次录音的转写结果并关闭面板。不保存，不回填。
+   */
   cancelPendingTranscription(): void {
     this.pendingTranscription.set('');
     this.editableTranscription = '';
+    this.quickCaptureOpen.set(false);
+    this.manualQuickCaptureFallback.set(false);
   }
 
   onRecordMouseDown(event: MouseEvent): void {
@@ -935,18 +964,38 @@ export class GateActionsComponent implements OnDestroy {
 
   private doStartRecording(): void {
     if (!this.speechService.isSupported()) {
-      const mockTexts = GateActionsComponent.DEV_MOCK_TRANSCRIPTIONS;
-      const mockText = mockTexts[Math.floor(Math.random() * mockTexts.length)];
-      this.pendingTranscription.set(mockText);
-      this.editableTranscription = mockText;
+      if (this.isDevMode) {
+        const mockTexts = GateActionsComponent.DEV_MOCK_TRANSCRIPTIONS;
+        const mockText = mockTexts[Math.floor(Math.random() * mockTexts.length)];
+        this.pendingTranscription.set(mockText);
+        this.editableTranscription = mockText;
+        return;
+      }
+
+      this.openManualQuickCaptureFallback();
       return;
     }
 
     this.isOutOfZone.set(false);
-    void this.speechService.startRecording().catch(err => {
-      this.logger.error('GateActions', 'Failed to start recording', err);
-      this.toast.error('无法启动录音');
-    });
+    void this.speechService.startRecording()
+      .then(() => {
+        if (!this.isRecording()) {
+          this.logger.warn('GateActions', 'Recording unavailable, fallback to manual quick capture');
+          this.openManualQuickCaptureFallback();
+        }
+      })
+      .catch(err => {
+        this.logger.error('GateActions', 'Failed to start recording', err);
+        this.toast.error('无法启动录音');
+        this.openManualQuickCaptureFallback();
+      });
+  }
+
+  private openManualQuickCaptureFallback(): void {
+    this.isFabRecording.set(false);
+    this.isFabOutOfZone.set(false);
+    this.manualQuickCaptureFallback.set(true);
+    this.quickCaptureOpen.set(true);
   }
 
   private checkInRecordZone(clientX: number, clientY: number): void {

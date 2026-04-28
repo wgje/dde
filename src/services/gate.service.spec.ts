@@ -14,6 +14,7 @@ import {
   gateSnoozeCount,
   focusPreferences,
   setBlackBoxEntries,
+  updateBlackBoxEntry,
   resetGateState,
 } from '../state/focus-stores';
 import { BlackBoxEntry } from '../models/focus';
@@ -25,6 +26,7 @@ describe('GateService', () => {
     markAsCompleted: ReturnType<typeof vi.fn>;
     snooze: ReturnType<typeof vi.fn>;
     loadFromServer: ReturnType<typeof vi.fn>;
+    getExpectedSyncUserId: ReturnType<typeof vi.fn>;
   };
 
   let mockLoggerService: {
@@ -75,6 +77,7 @@ describe('GateService', () => {
       markAsCompleted: vi.fn().mockReturnValue({ ok: true, value: {} }),
       snooze: vi.fn().mockReturnValue({ ok: true, value: {} }),
       loadFromServer: vi.fn().mockResolvedValue(undefined),
+      getExpectedSyncUserId: vi.fn().mockReturnValue('test-user'),
     };
 
     mockLoggerService = {
@@ -154,6 +157,39 @@ describe('GateService', () => {
 
       expect(gateState()).toBe('disabled');
     });
+
+    it('已读处理完成后，后续 gate 复核不应重新弹出同一条内容', () => {
+      const entry = createMockEntry({
+        id: 'read-once',
+        date: getDateOffset(-1),
+        isRead: false,
+        isCompleted: false,
+      });
+      mockBlackBoxService.markAsRead.mockImplementationOnce((id: string) => {
+        const updated = {
+          ...entry,
+          id,
+          isRead: true,
+          updatedAt: new Date().toISOString(),
+          syncStatus: 'pending' as const,
+        };
+        updateBlackBoxEntry(updated);
+        return { ok: true, value: updated };
+      });
+      setBlackBoxEntries([entry]);
+
+      service.checkGate();
+      service.onEnteringComplete();
+      service.markAsRead();
+      service.onHeaveReadComplete();
+
+      expect(gateState()).toBe('completed');
+
+      service.checkGate();
+
+      expect(gateState()).toBe('bypassed');
+      expect(gatePendingItems()).toEqual([]);
+    });
   });
 
   describe('动作状态机', () => {
@@ -166,7 +202,7 @@ describe('GateService', () => {
       const result = service.markAsRead();
 
       expect(result.ok).toBe(true);
-      expect(mockBlackBoxService.markAsRead).toHaveBeenCalledWith(entry.id);
+      expect(mockBlackBoxService.markAsRead).not.toHaveBeenCalled();
       expect(['heave_read', 'idle']).toContain(service.cardAnimation());
     });
 
@@ -179,7 +215,7 @@ describe('GateService', () => {
       const result = service.markAsCompleted();
 
       expect(result.ok).toBe(true);
-      expect(mockBlackBoxService.markAsCompleted).toHaveBeenCalledWith(entry.id);
+      expect(mockBlackBoxService.markAsCompleted).not.toHaveBeenCalled();
       expect(['heavy_drop', 'idle']).toContain(service.cardAnimation());
     });
 
@@ -194,11 +230,12 @@ describe('GateService', () => {
 
       service.onHeavyDropComplete();
 
+      expect(mockBlackBoxService.markAsCompleted).toHaveBeenCalledWith(entry.id);
       expect(service.impactTick()).toBeGreaterThan(before);
       expect(gateState()).toBe('completed');
     });
 
-    it('heave_read 完成后应推进到下一条并进入 settling', () => {
+    it('heave_read 沉降完成后才提交全局黑匣子更新', () => {
       const first = createMockEntry({ date: getDateOffset(-1) });
       const second = createMockEntry({ date: getDateOffset(-2) });
       gatePendingItems.set([first, second]);
@@ -209,7 +246,47 @@ describe('GateService', () => {
       service.onHeaveReadComplete();
 
       expect(gateCurrentIndex()).toBe(1);
+      expect(mockBlackBoxService.markAsRead).not.toHaveBeenCalled();
       expect(['settling', 'idle']).toContain(service.cardAnimation());
+
+      service.onSettlingComplete();
+
+      expect(mockBlackBoxService.markAsRead).toHaveBeenCalledWith(first.id);
+    });
+
+    it('settling 期间不应接受下一次动作，避免覆盖上一个 deferred mutation', () => {
+      const first = createMockEntry({ date: getDateOffset(-1) });
+      const second = createMockEntry({ date: getDateOffset(-2) });
+      gatePendingItems.set([first, second]);
+      gateCurrentIndex.set(0);
+      gateState.set('reviewing');
+
+      service.markAsRead();
+      service.onHeaveReadComplete();
+
+      const result = service.markAsCompleted();
+
+      expect(result.ok).toBe(false);
+      expect(mockBlackBoxService.markAsCompleted).not.toHaveBeenCalled();
+
+      service.onSettlingComplete();
+
+      expect(mockBlackBoxService.markAsRead).toHaveBeenCalledWith(first.id);
+    });
+
+    it('reduced motion 下应立即 flush deferred mutation', () => {
+      const first = createMockEntry({ date: getDateOffset(-1) });
+      const second = createMockEntry({ date: getDateOffset(-2) });
+      gatePendingItems.set([first, second]);
+      gateCurrentIndex.set(0);
+      gateState.set('reviewing');
+      (service as unknown as { prefersReducedMotionSignal: { set(value: boolean): void } }).prefersReducedMotionSignal.set(true);
+
+      const result = service.markAsRead();
+
+      expect(result.ok).toBe(true);
+      expect(gateCurrentIndex()).toBe(1);
+      expect(mockBlackBoxService.markAsRead).toHaveBeenCalledWith(first.id);
     });
   });
 

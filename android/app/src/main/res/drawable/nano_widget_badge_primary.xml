@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  蓝图风主任务徽章：带 V 形尾巴的 pennant/书签（主任务专用）
+  贴合 22×22 正方形 bounds，顶端矩形包住数字「1」，底部 V 尾突出装饰。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="22dp"
+    android:height="22dp"
+    android:viewportWidth="22"
+    android:viewportHeight="22">
+    <path
+        android:strokeColor="#F6FBFF"
+        android:strokeWidth="1.4"
+        android:fillColor="#00000000"
+        android:strokeLineJoin="miter"
+        android:pathData="M2,1.2 L20,1.2 L20,19 L11,15 L2,19 Z" />
+</vector>

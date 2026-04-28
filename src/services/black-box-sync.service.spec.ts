@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { TestBed } from '@angular/core/testing';
+import { signal } from '@angular/core';
 import { BlackBoxSyncService } from './black-box-sync.service';
 import { SupabaseClientService } from './supabase-client.service';
 import { NetworkAwarenessService } from './network-awareness.service';
@@ -13,7 +14,6 @@ import type { BlackBoxEntry } from '../models/focus';
 
 function createEntry(overrides: Partial<BlackBoxEntry> & Pick<BlackBoxEntry, 'id'>): BlackBoxEntry {
   return {
-    id: overrides.id,
     projectId: null,
     userId: 'user-1',
     content: 'entry',
@@ -27,11 +27,24 @@ function createEntry(overrides: Partial<BlackBoxEntry> & Pick<BlackBoxEntry, 'id
     ...overrides,
   };
 }
+
+async function flushMicrotasks(turns = 6): Promise<void> {
+  for (let i = 0; i < turns; i += 1) {
+    await Promise.resolve();
+  }
+}
+
 describe('BlackBoxSyncService', () => {
   let service: BlackBoxSyncService;
   let initDbSpy: ReturnType<typeof vi.spyOn>;
   let setupNetworkSpy: ReturnType<typeof vi.spyOn>;
   let mockSentry: { addBreadcrumb: ReturnType<typeof vi.fn>; captureMessage: ReturnType<typeof vi.fn> };
+  let authSignals: {
+    sessionInitialized: ReturnType<typeof signal<boolean>>;
+    runtimeState: ReturnType<typeof signal<'idle' | 'pending' | 'ready' | 'failed'>>;
+    authState: ReturnType<typeof signal<{ isCheckingSession: boolean; isLoading: boolean; userId: string | null; email: string | null; error: string | null }>>;
+    currentUserId: ReturnType<typeof signal<string | null>>;
+  };
 
   beforeEach(() => {
     initDbSpy = vi.spyOn(
@@ -46,6 +59,19 @@ describe('BlackBoxSyncService', () => {
     mockSentry = {
       addBreadcrumb: vi.fn(),
       captureMessage: vi.fn(),
+    };
+
+    authSignals = {
+      sessionInitialized: signal(true),
+      runtimeState: signal<'idle' | 'pending' | 'ready' | 'failed'>('ready'),
+      authState: signal({
+        isCheckingSession: false,
+        isLoading: false,
+        userId: 'user-1',
+        email: null,
+        error: null,
+      }),
+      currentUserId: signal<string | null>('user-1'),
     };
 
     TestBed.configureTestingModule({
@@ -79,11 +105,11 @@ describe('BlackBoxSyncService', () => {
         {
           provide: AuthService,
           useValue: {
-            currentUserId: vi.fn(() => 'user-1'),
+            currentUserId: authSignals.currentUserId,
             isConfigured: true,
-            sessionInitialized: vi.fn(() => true),
-            authState: vi.fn(() => ({ isCheckingSession: false })),
-            runtimeState: vi.fn(() => 'ready'),
+            sessionInitialized: authSignals.sessionInitialized,
+            authState: authSignals.authState,
+            runtimeState: authSignals.runtimeState,
             peekPersistedSessionIdentity: vi.fn(() => ({ userId: 'user-1' })),
           },
         },
@@ -103,6 +129,12 @@ describe('BlackBoxSyncService', () => {
           useValue: {
             isSessionExpiredError: vi.fn(() => false),
             tryRefreshSessionWithSession: vi.fn().mockResolvedValue({ refreshed: false }),
+            validateOrRefreshOnResume: vi.fn().mockResolvedValue({
+              ok: true,
+              refreshed: false,
+              deferred: false,
+            }),
+            getRecentValidationSnapshot: vi.fn(() => null),
           },
         },
         {
@@ -123,7 +155,7 @@ describe('BlackBoxSyncService', () => {
 
   it('should apply resume pull cooldown by default', async () => {
     const doPullSpy = vi.spyOn(
-      service as unknown as { doPullChanges: () => Promise<void> },
+      service as unknown as { doPullChanges: () => Promise<boolean> },
       'doPullChanges'
     ).mockResolvedValue(true);
 
@@ -135,7 +167,7 @@ describe('BlackBoxSyncService', () => {
 
   it('should bypass cooldown when force=true', async () => {
     const doPullSpy = vi.spyOn(
-      service as unknown as { doPullChanges: () => Promise<void> },
+      service as unknown as { doPullChanges: () => Promise<boolean> },
       'doPullChanges'
     ).mockResolvedValue(true);
 
@@ -148,7 +180,7 @@ describe('BlackBoxSyncService', () => {
   it('should reuse in-flight pull promise (single-flight)', async () => {
     let resolvePull: (() => void) | null = null;
     const doPullSpy = vi.spyOn(
-      service as unknown as { doPullChanges: () => Promise<void> },
+      service as unknown as { doPullChanges: () => Promise<boolean> },
       'doPullChanges'
     ).mockReturnValue(new Promise<boolean>(resolve => {
       resolvePull = () => resolve(true);
@@ -156,6 +188,8 @@ describe('BlackBoxSyncService', () => {
 
     const p1 = service.pullChanges({ reason: 'resume', force: true });
     const p2 = service.pullChanges({ reason: 'resume', force: true });
+
+    await flushMicrotasks();
 
     expect(doPullSpy).toHaveBeenCalledTimes(1);
 
@@ -170,7 +204,7 @@ describe('BlackBoxSyncService', () => {
     supabase.isOfflineMode.mockReturnValue(true);
 
     const doPullSpy = vi.spyOn(
-      service as unknown as { doPullChanges: () => Promise<void> },
+      service as unknown as { doPullChanges: () => Promise<boolean> },
       'doPullChanges'
     ).mockResolvedValue(true);
     const loadLocalSpy = vi.spyOn(
@@ -184,9 +218,75 @@ describe('BlackBoxSyncService', () => {
     expect(loadLocalSpy).toHaveBeenCalledTimes(1);
   });
 
+  it('should defer resume pull until session validation is ready', async () => {
+    const sessionManager = TestBed.inject(SessionManagerService) as unknown as {
+      validateOrRefreshOnResume: ReturnType<typeof vi.fn>;
+    };
+    const doPullSpy = vi.spyOn(
+      service as unknown as { doPullChanges: () => Promise<boolean> },
+      'doPullChanges'
+    ).mockResolvedValue(true);
+
+    sessionManager.validateOrRefreshOnResume.mockResolvedValueOnce({
+      ok: false,
+      refreshed: false,
+      deferred: true,
+      reason: 'client-unready',
+    });
+
+    await service.pullChanges({ reason: 'resume', force: true });
+
+    expect(sessionManager.validateOrRefreshOnResume).toHaveBeenCalledWith('blackbox:resume');
+    expect(doPullSpy).not.toHaveBeenCalled();
+  });
+
+  it('should defer gate-review pull until session validation is ready', async () => {
+    const sessionManager = TestBed.inject(SessionManagerService) as unknown as {
+      validateOrRefreshOnResume: ReturnType<typeof vi.fn>;
+    };
+    const doPullSpy = vi.spyOn(
+      service as unknown as { doPullChanges: () => Promise<boolean> },
+      'doPullChanges'
+    ).mockResolvedValue(true);
+
+    sessionManager.validateOrRefreshOnResume.mockResolvedValueOnce({
+      ok: false,
+      refreshed: false,
+      deferred: true,
+      reason: 'client-unready',
+    });
+
+    await service.pullChanges({ reason: 'gate-review', force: true });
+
+    expect(sessionManager.validateOrRefreshOnResume).toHaveBeenCalledWith('blackbox:gate-review');
+    expect(doPullSpy).not.toHaveBeenCalled();
+  });
+
+  it('should reuse a recent valid session snapshot before resume pull', async () => {
+    const sessionManager = TestBed.inject(SessionManagerService) as unknown as {
+      getRecentValidationSnapshot: ReturnType<typeof vi.fn>;
+      validateOrRefreshOnResume: ReturnType<typeof vi.fn>;
+    };
+    const doPullSpy = vi.spyOn(
+      service as unknown as { doPullChanges: () => Promise<boolean> },
+      'doPullChanges'
+    ).mockResolvedValue(true);
+
+    sessionManager.getRecentValidationSnapshot.mockReturnValueOnce({
+      valid: true,
+      userId: 'user-1',
+      at: Date.now(),
+    });
+
+    await service.pullChanges({ reason: 'resume', force: true });
+
+    expect(sessionManager.validateOrRefreshOnResume).not.toHaveBeenCalled();
+    expect(doPullSpy).toHaveBeenCalledTimes(1);
+  });
+
   it('should block duplicate pull by freshness window and report to Sentry', async () => {
     const doPullSpy = vi.spyOn(
-      service as unknown as { doPullChanges: () => Promise<void> },
+      service as unknown as { doPullChanges: () => Promise<boolean> },
       'doPullChanges'
     ).mockResolvedValue(true);
 
@@ -210,9 +310,46 @@ describe('BlackBoxSyncService', () => {
     );
   });
 
+  it('should bypass freshness window when pending entries need authoritative reconcile', async () => {
+    const doPullSpy = vi.spyOn(
+      service as unknown as { doPullChanges: () => Promise<boolean> },
+      'doPullChanges'
+    ).mockResolvedValue(true);
+    const pendingEntry = createEntry({
+      id: crypto.randomUUID(),
+      syncStatus: 'pending',
+    });
+
+    setBlackBoxEntries([pendingEntry]);
+    (service as unknown as { lastPullTime: number }).lastPullTime = Date.now();
+
+    await service.pullChanges({ reason: 'panel-open' });
+
+    expect(doPullSpy).toHaveBeenCalledTimes(1);
+    expect(mockSentry.captureMessage).not.toHaveBeenCalled();
+  });
+
+  it('should bypass resume cooldown when pending entries need authoritative reconcile', async () => {
+    const doPullSpy = vi.spyOn(
+      service as unknown as { doPullChanges: () => Promise<boolean> },
+      'doPullChanges'
+    ).mockResolvedValue(true);
+    const pendingEntry = createEntry({
+      id: crypto.randomUUID(),
+      syncStatus: 'pending',
+    });
+
+    setBlackBoxEntries([pendingEntry]);
+    (service as unknown as { lastResumePullAt: number }).lastResumePullAt = Date.now();
+
+    await service.pullChanges({ reason: 'resume' });
+
+    expect(doPullSpy).toHaveBeenCalledTimes(1);
+  });
+
   it('should not report passive view refresh duplicates to Sentry', async () => {
     const doPullSpy = vi.spyOn(
-      service as unknown as { doPullChanges: () => Promise<void> },
+      service as unknown as { doPullChanges: () => Promise<boolean> },
       'doPullChanges'
     ).mockResolvedValue(true);
 
@@ -223,6 +360,73 @@ describe('BlackBoxSyncService', () => {
 
     expect(doPullSpy).toHaveBeenCalledTimes(1);
     expect(mockSentry.captureMessage).not.toHaveBeenCalled();
+  });
+
+  it('should resubscribe after realtime circuit window elapses when desired user is unchanged', async () => {
+    vi.useFakeTimers();
+    try {
+      const syncRealtimeSpy = vi.spyOn(
+        service as unknown as {
+          syncRealtimeSubscription: (userId: string | null, generation: number) => Promise<void>;
+        },
+        'syncRealtimeSubscription'
+      ).mockResolvedValue(undefined);
+
+      (service as unknown as {
+        realtimeDesiredUserId: string | null;
+        realtimeSubscriptionGeneration: number;
+      }).realtimeDesiredUserId = 'user-1';
+      (service as unknown as {
+        realtimeDesiredUserId: string | null;
+        realtimeSubscriptionGeneration: number;
+      }).realtimeSubscriptionGeneration = 7;
+
+      (service as unknown as {
+        scheduleRealtimeCircuitRetry: (userId: string, delayMs: number, generation: number) => void;
+      }).scheduleRealtimeCircuitRetry('user-1', 1_000, 7);
+
+      vi.advanceTimersByTime(1_000);
+      await flushMicrotasks();
+
+      expect(syncRealtimeSpy).toHaveBeenCalledWith('user-1', 8);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('should not resubscribe after realtime circuit window when desired user changed', async () => {
+    vi.useFakeTimers();
+    try {
+      const syncRealtimeSpy = vi.spyOn(
+        service as unknown as {
+          syncRealtimeSubscription: (userId: string | null, generation: number) => Promise<void>;
+        },
+        'syncRealtimeSubscription'
+      ).mockResolvedValue(undefined);
+
+      (service as unknown as {
+        realtimeDesiredUserId: string | null;
+        realtimeSubscriptionGeneration: number;
+      }).realtimeDesiredUserId = 'user-1';
+      (service as unknown as {
+        realtimeDesiredUserId: string | null;
+        realtimeSubscriptionGeneration: number;
+      }).realtimeSubscriptionGeneration = 3;
+
+      (service as unknown as {
+        scheduleRealtimeCircuitRetry: (userId: string, delayMs: number, generation: number) => void;
+      }).scheduleRealtimeCircuitRetry('user-1', 1_000, 3);
+      (service as unknown as {
+        realtimeDesiredUserId: string | null;
+      }).realtimeDesiredUserId = 'user-2';
+
+      vi.advanceTimersByTime(1_000);
+      await flushMicrotasks();
+
+      expect(syncRealtimeSpy).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('should skip stale push payloads when a newer local snapshot already exists', async () => {
@@ -287,6 +491,65 @@ describe('BlackBoxSyncService', () => {
     expect(blackBoxEntriesMap().get(entryId)).toEqual(expect.objectContaining({
       updatedAt: newerEntry.updatedAt,
       isCompleted: true,
+    }));
+  });
+
+  it('should not overwrite a newer local pending snapshot when preflight sees a newer server row', async () => {
+    const entryId = crypto.randomUUID();
+    const olderEntry = createEntry({
+      id: entryId,
+      updatedAt: '2026-03-04T00:00:00.000Z',
+      isCompleted: false,
+    });
+    const newerLocalEntry = createEntry({
+      id: entryId,
+      updatedAt: '2026-03-04T00:00:05.000Z',
+      isCompleted: true,
+      syncStatus: 'pending',
+    });
+    const serverRow = {
+      id: entryId,
+      project_id: null,
+      user_id: 'user-1',
+      content: 'entry',
+      focus_meta: null,
+      date: '2026-03-04',
+      created_at: '2026-03-04T00:00:00.000Z',
+      updated_at: '2026-03-04T00:00:03.000Z',
+      is_read: false,
+      is_completed: false,
+      is_archived: false,
+      snooze_until: null,
+      snooze_count: 0,
+      deleted_at: null,
+    };
+    const maybeSingle = vi.fn(async () => {
+      setBlackBoxEntries([newerLocalEntry]);
+      return { data: serverRow, error: null };
+    });
+    const select = vi.fn(() => ({
+      eq: vi.fn(() => ({ maybeSingle })),
+    }));
+    const upsert = vi.fn();
+    const from = vi.fn(() => ({ select, upsert }));
+    const supabase = TestBed.inject(SupabaseClientService) as unknown as {
+      clientAsync: ReturnType<typeof vi.fn>;
+    };
+    const saveToLocalSpy = vi.spyOn(service, 'saveToLocal').mockResolvedValue(undefined);
+
+    setBlackBoxEntries([olderEntry]);
+    supabase.clientAsync.mockResolvedValue({ from });
+
+    await expect(service.pushToServer(olderEntry)).resolves.toBe(true);
+
+    expect(upsert).not.toHaveBeenCalled();
+    expect(saveToLocalSpy).not.toHaveBeenCalledWith(expect.objectContaining({
+      updatedAt: serverRow.updated_at,
+    }));
+    expect(blackBoxEntriesMap().get(entryId)).toEqual(expect.objectContaining({
+      updatedAt: newerLocalEntry.updatedAt,
+      isCompleted: true,
+      syncStatus: 'pending',
     }));
   });
   it('should map focus_meta from database row into focusMeta', () => {
@@ -557,6 +820,148 @@ describe('BlackBoxSyncService', () => {
         id: entryId,
         syncStatus: 'synced',
         deletedAt: remoteRow.deleted_at,
+      })
+    );
+  });
+
+  it('should skip startup retry recovery when server already has a newer authoritative row', async () => {
+    const entryId = crypto.randomUUID();
+    const pendingEntry = createEntry({
+      id: entryId,
+      updatedAt: '2026-03-04T00:00:00.000Z',
+      isCompleted: false,
+      syncStatus: 'pending',
+    });
+    const remoteRow = {
+      id: entryId,
+      project_id: null,
+      user_id: 'user-1',
+      content: 'entry',
+      focus_meta: null,
+      date: '2026-03-04',
+      created_at: '2026-03-04T00:00:00.000Z',
+      updated_at: '2026-03-04T00:00:05.000Z',
+      is_read: false,
+      is_completed: true,
+      is_archived: false,
+      snooze_until: null,
+      snooze_count: 0,
+      deleted_at: null,
+    };
+    const enqueue = vi.fn();
+    const inQuery = vi.fn().mockResolvedValue({ data: [remoteRow], error: null });
+    const selectQuery = vi.fn(() => ({ in: inQuery }));
+    const from = vi.fn(() => ({ select: selectQuery }));
+    const supabase = TestBed.inject(SupabaseClientService) as unknown as {
+      clientAsync: ReturnType<typeof vi.fn>;
+    };
+    vi.spyOn(service, 'loadFromLocal').mockResolvedValue([pendingEntry]);
+    vi.spyOn(service, 'saveToLocal').mockResolvedValue(undefined);
+    supabase.clientAsync.mockResolvedValue({ from });
+    setBlackBoxEntries([pendingEntry]);
+    (service as unknown as { retryQueueHandler: ((entry: BlackBoxEntry) => void) | null }).retryQueueHandler = enqueue;
+
+    await (service as unknown as { recoverPendingEntries: () => Promise<void> }).recoverPendingEntries();
+
+    expect(inQuery).toHaveBeenCalledWith('id', [entryId]);
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(blackBoxEntriesMap().get(entryId)).toEqual(
+      expect.objectContaining({
+        id: entryId,
+        isCompleted: true,
+        syncStatus: 'synced',
+        updatedAt: remoteRow.updated_at,
+      })
+    );
+  });
+
+  it('should keep startup pending recovery local-only when network is offline', async () => {
+    const entryId = crypto.randomUUID();
+    const pendingEntry = createEntry({
+      id: entryId,
+      syncStatus: 'pending',
+    });
+    const enqueue = vi.fn();
+    const supabase = TestBed.inject(SupabaseClientService) as unknown as {
+      clientAsync: ReturnType<typeof vi.fn>;
+    };
+    const network = TestBed.inject(NetworkAwarenessService) as unknown as {
+      isOnline: ReturnType<typeof vi.fn>;
+    };
+    vi.spyOn(service, 'loadFromLocal').mockResolvedValue([pendingEntry]);
+    setBlackBoxEntries([pendingEntry]);
+    network.isOnline.mockReturnValue(false);
+    (service as unknown as { retryQueueHandler: ((entry: BlackBoxEntry) => void) | null }).retryQueueHandler = enqueue;
+
+    await (service as unknown as { recoverPendingEntries: () => Promise<void> }).recoverPendingEntries();
+
+    expect(supabase.clientAsync).not.toHaveBeenCalled();
+    expect(enqueue).toHaveBeenCalledTimes(1);
+    expect(enqueue).toHaveBeenCalledWith(pendingEntry);
+  });
+
+  it('should rerun pending recovery after auth settles and suppress stale startup pending rows', async () => {
+    const entryId = crypto.randomUUID();
+    const pendingEntry = createEntry({
+      id: entryId,
+      updatedAt: '2026-03-04T00:00:00.000Z',
+      isCompleted: false,
+      syncStatus: 'pending',
+    });
+    const remoteRow = {
+      id: entryId,
+      project_id: null,
+      user_id: 'user-1',
+      content: 'entry',
+      focus_meta: null,
+      date: '2026-03-04',
+      created_at: '2026-03-04T00:00:00.000Z',
+      updated_at: '2026-03-04T00:00:05.000Z',
+      is_read: false,
+      is_completed: true,
+      is_archived: false,
+      snooze_until: null,
+      snooze_count: 0,
+      deleted_at: null,
+    };
+    const enqueue = vi.fn();
+    const inQuery = vi.fn().mockResolvedValue({ data: [remoteRow], error: null });
+    const selectQuery = vi.fn(() => ({ in: inQuery }));
+    const from = vi.fn(() => ({ select: selectQuery }));
+    const supabase = TestBed.inject(SupabaseClientService) as unknown as {
+      clientAsync: ReturnType<typeof vi.fn>;
+    };
+    vi.spyOn(service, 'loadFromLocal').mockResolvedValue([pendingEntry]);
+    vi.spyOn(service, 'saveToLocal').mockResolvedValue(undefined);
+    supabase.clientAsync.mockResolvedValue({ from });
+    setBlackBoxEntries([pendingEntry]);
+
+    authSignals.sessionInitialized.set(false);
+    authSignals.runtimeState.set('pending');
+    authSignals.currentUserId.set(null);
+
+    service.setRetryQueueHandler(enqueue);
+    await flushMicrotasks();
+
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(supabase.clientAsync).not.toHaveBeenCalled();
+
+    authSignals.currentUserId.set('user-1');
+    authSignals.authState.update(state => ({ ...state, userId: 'user-1', isCheckingSession: false }));
+    authSignals.sessionInitialized.set(true);
+    authSignals.runtimeState.set('ready');
+
+    await vi.waitFor(() => {
+      expect(inQuery).toHaveBeenCalledWith('id', [entryId]);
+    });
+
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(blackBoxEntriesMap().get(entryId)).toEqual(
+      expect.objectContaining({
+        id: entryId,
+        isCompleted: true,
+        syncStatus: 'synced',
+        updatedAt: remoteRow.updated_at,
       })
     );
   });

@@ -1,5 +1,4 @@
 -- Supabase advisor security follow-up hardening
--- 实际已在远端执行版本：20260318073814
 
 -- 1) backup_encryption_keys: RLS enabled but no policy
 DO $$
@@ -34,4 +33,4 @@ ALTER FUNCTION public.user_has_project_access(uuid) SET search_path = pg_catalog
 ALTER FUNCTION public.user_is_project_owner(uuid) SET search_path = pg_catalog, public;
 ALTER FUNCTION public.user_accessible_project_ids() SET search_path = pg_catalog, public;
 ALTER FUNCTION public.update_backup_metadata_updated_at() SET search_path = pg_catalog, public;
-ALTER FUNCTION public.update_updated_at_column() SET search_path = pg_catalog, public;
+ALTER FUNCTION public.update_updated_at_column() SET search_path = pg_catalog, public;;

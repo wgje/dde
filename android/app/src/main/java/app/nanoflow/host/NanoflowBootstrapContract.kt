@@ -11,6 +11,18 @@ enum class NanoFlowLaunchIntent(val queryValue: String) {
   OPEN_WORKSPACE("open-workspace"),
   OPEN_FOCUS_TOOLS("open-focus-tools"),
   OPEN_BLACKBOX_RECORDER("open-blackbox-recorder"),
+  // 蓝图 UI 的大门模式按钮：1-tap 直接在应用侧执行标记；若应用不识别则降级为打开 Focus Tools。
+  MARK_GATE_READ("mark-gate-read"),
+  MARK_GATE_COMPLETE("mark-gate-complete"),
+}
+
+/**
+ * 大门 1-tap 动作对应的后端 wire 值。与 widget-black-box-action 边缘函数期望的
+ * `action` 字段一一对应；也被 receiver 侧在「深链回退」时用于映射到 MARK_GATE_* 意图。
+ */
+enum class BlackBoxEntryAction(val wireValue: String) {
+  READ("read"),
+  COMPLETE("complete"),
 }
 
 data class WidgetBridgeContext(
@@ -57,17 +69,24 @@ object NanoflowBootstrapContract {
   const val PARAM_SUPABASE_URL = "widgetSupabaseUrl"
   const val PARAM_BINDING_GENERATION = "bindingGeneration"
   const val PARAM_EXPIRES_AT = "expiresAt"
+  // 蓝图 UI 的大门按钮透传：应用侧读取该 query 参数后对对应条目执行 markAsRead / markAsCompleted。
+  const val PARAM_GATE_ENTRY_ID = "widgetGateEntryId"
 
   fun buildLaunchUri(
     entrySource: NanoFlowEntrySource,
     launchIntent: NanoFlowLaunchIntent,
     bridgeContext: WidgetBridgeContext?,
     routeUrl: String? = null,
+    gateEntryId: String? = null,
   ): Uri {
     val params = linkedMapOf(
       "entry" to entrySource.queryValue,
       "intent" to launchIntent.queryValue,
     )
+
+    if (!gateEntryId.isNullOrBlank()) {
+      params[PARAM_GATE_ENTRY_ID] = gateEntryId
+    }
 
     if (bridgeContext != null) {
       params[PARAM_WIDGET_BOOTSTRAP] = "1"

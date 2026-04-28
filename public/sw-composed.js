@@ -17,44 +17,44 @@ importScripts('./ngsw-worker.js');
 	const LEGACY_WIDGET_TAG = 'nanoflow-focus-summary';
 	const WORKSPACE_FRAGMENT = '#/projects?entry=shortcut&intent=open-workspace';
 	const TEMPLATE = `{
-	  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
-	  "type": "AdaptiveCard",
-	  "version": "1.6",
-	  "body": [
-	    {
-	      "type": "TextBlock",
-	      "text": "\${title}",
-	      "weight": "Bolder",
-	      "size": "Medium"
-	    },
-	    {
-	      "type": "TextBlock",
-	      "text": "\${message}",
-	      "wrap": true,
-	      "spacing": "Medium"
-	    },
-	    {
-	      "type": "TextBlock",
-	      "text": "\${detail}",
-	      "wrap": true,
-	      "size": "Small",
-	      "isSubtle": true,
-	      "spacing": "Small"
-	    }
-	  ],
-	  "actions": [
-	    {
-	      "type": "Action.Execute",
-	      "title": "打开 NanoFlow",
-	      "verb": "open-app"
-	    }
-	  ]
-	}`;
+  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+  "type": "AdaptiveCard",
+  "version": "1.6",
+  "body": [
+    {
+      "type": "TextBlock",
+      "text": "\${title}",
+      "weight": "Bolder",
+      "size": "Medium"
+    },
+    {
+      "type": "TextBlock",
+      "text": "\${message}",
+      "wrap": true,
+      "spacing": "Medium"
+    },
+    {
+      "type": "TextBlock",
+      "text": "\${detail}",
+      "wrap": true,
+      "size": "Small",
+      "isSubtle": true,
+      "spacing": "Small"
+    }
+  ],
+  "actions": [
+    {
+      "type": "Action.Execute",
+      "title": "打开 NanoFlow",
+      "verb": "open-app"
+    }
+  ]
+}`;
 	const DATA = `{
-	  "title": "NanoFlow",
-	  "message": "桌面端小组件已停用",
-	  "detail": "当前只保留 Android 手机端小组件。请打开 NanoFlow 继续使用。"
-	}`;
+  "title": "NanoFlow",
+  "message": "桌面端小组件已停用",
+  "detail": "当前只保留 Android 手机端小组件。请打开 NanoFlow 继续使用。"
+}`;
 
 	function hasWidgetHostApi() {
 		return Boolean(self.widgets && typeof self.widgets.getByTag === 'function');

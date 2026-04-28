@@ -258,6 +258,28 @@ export class ConnectionSyncOperationsService {
     };
   }
 
+  private async upsertConnectionReturningUpdatedAt(
+    client: SupabaseClient,
+    connection: Connection,
+    projectId: string,
+  ): Promise<string | null> {
+    const { data, error } = await client
+      .from('connections')
+      .upsert(this.buildConnectionUpsertPayload(connection, projectId), {
+        onConflict: 'id',
+        ignoreDuplicates: false,
+      })
+      .select('updated_at')
+      .single();
+
+    if (error) {
+      throw supabaseErrorToError(error);
+    }
+
+    const updatedAt = (data as { updated_at?: string | null } | null)?.updated_at;
+    return typeof updatedAt === 'string' ? updatedAt : null;
+  }
+
   private pickNewestDeletedEndpointMatch(matches: EndpointConnectionMatch[]): EndpointConnectionMatch | null {
     const deletedMatches = matches.filter(match => !!match.deleted_at);
     if (deletedMatches.length === 0) {
@@ -394,8 +416,19 @@ export class ConnectionSyncOperationsService {
       return;
     }
 
-    this.hydrateConnectionFromCanonicalMatch(connection, canonicalMatch);
-    this.applyCanonicalConnectionPatchToLocalStore(projectId, canonicalMatch.id, canonicalMatch);
+    const localFreshness = this.getConnectionFreshnessTimestamp(
+      connection.updatedAt,
+      connection.deletedAt,
+    );
+    const canonicalFreshness = this.getConnectionFreshnessTimestamp(
+      canonicalMatch.updated_at,
+      canonicalMatch.deleted_at,
+    );
+
+    if (canonicalFreshness >= localFreshness && canonicalFreshness > 0) {
+      this.hydrateConnectionFromCanonicalMatch(connection, canonicalMatch);
+      this.applyCanonicalConnectionPatchToLocalStore(projectId, canonicalMatch.id, canonicalMatch);
+    }
   }
   
   /**
@@ -425,6 +458,26 @@ export class ConnectionSyncOperationsService {
     } else {
       this.syncStateService.setSyncError('同步队列已满，暂未写入重试队列');
     }
+  }
+
+  private recordRetryableConnectionFailure(error?: EnhancedError): void {
+    if (!error?.isRetryable) {
+      return;
+    }
+
+    this.retryQueueService.recordCircuitFailure(error.errorType);
+  }
+
+  private ensureEnhancedError(error: unknown): EnhancedError {
+    if (
+      error instanceof Error
+      && 'isRetryable' in error
+      && 'errorType' in error
+    ) {
+      return error as EnhancedError;
+    }
+
+    return supabaseErrorToError(error);
   }
 
   private preserveConnectionUpsertForBrowserSuspension(
@@ -719,25 +772,25 @@ export class ConnectionSyncOperationsService {
       }
       
       // 执行 upsert
+      let persistedUpdatedAt: string | null = null;
+
       await this.throttle.execute(
         `push-connection:${connection.id}`,
         async () => {
           await this.syncOpHelper.retryWithBackoff(async () => {
-            const { error } = await client
-              .from('connections')
-              .upsert(this.buildConnectionUpsertPayload(connection, projectId), {
-                onConflict: 'id',
-                ignoreDuplicates: false
-              });
+            try {
+              persistedUpdatedAt = await this.upsertConnectionReturningUpdatedAt(client, connection, projectId);
+              return;
+            } catch (upsertError) {
+              const enhancedError = this.ensureEnhancedError(upsertError);
             
-            // 处理复合唯一约束冲突
-            if (error) {
-              const code = error.code || (error as { code?: string }).code;
+              // 处理复合唯一约束冲突
+              const code = enhancedError.code || (enhancedError as { code?: string }).code;
               if (
                 code === '23505'
                 && (
-                  error.message?.includes('connections_project_id_source_id_target_id')
-                  || error.message?.includes('uq_connections_project_source_target_active')
+                  enhancedError.message?.includes('connections_project_id_source_id_target_id')
+                  || enhancedError.message?.includes('uq_connections_project_source_target_active')
                 )
               ) {
                 const racedCanonicalMatch = await this.lookupCanonicalEndpointMatch(client, projectId, connection);
@@ -748,16 +801,7 @@ export class ConnectionSyncOperationsService {
                 }
 
                 this.applyCanonicalConnectionIdentity(projectId, connection, racedCanonicalMatch);
-                const retryResult = await client
-                  .from('connections')
-                  .upsert(this.buildConnectionUpsertPayload(connection, projectId), {
-                    onConflict: 'id',
-                    ignoreDuplicates: false,
-                  });
-
-                if (retryResult.error) {
-                  throw supabaseErrorToError(retryResult.error);
-                }
+                persistedUpdatedAt = await this.upsertConnectionReturningUpdatedAt(client, connection, projectId);
                 this.logger.info('连接已存在（幂等成功）', {
                   connectionId: connection.id,
                   source: connection.source,
@@ -765,30 +809,18 @@ export class ConnectionSyncOperationsService {
                 });
                 return;
               }
-              throw supabaseErrorToError(error);
+              throw enhancedError;
             }
           });
         },
         { priority: 'normal', retries: 0, timeout: REQUEST_THROTTLE_CONFIG.INDIVIDUAL_OPERATION_TIMEOUT }
       );
 
-      const { data: persistedConnection, error: persistedConnectionError } = await client
-        .from('connections')
-        .select('updated_at')
-        .eq('id', connection.id)
-        .maybeSingle();
-
-      if (persistedConnectionError) {
-        this.logger.debug('连接服务端时间戳读取失败，保留本地 updatedAt', {
-          connectionId: connection.id,
-          projectId,
-          error: persistedConnectionError.message,
-        });
-      } else {
+      if (persistedUpdatedAt) {
         this.normalizeLocalConnectionUpdatedAt(
           projectId,
           connection.id,
-          typeof persistedConnection?.updated_at === 'string' ? persistedConnection.updated_at : null,
+          persistedUpdatedAt,
         );
       }
 
@@ -882,6 +914,8 @@ export class ConnectionSyncOperationsService {
         }
       });
 
+      this.recordRetryableConnectionFailure(error);
+
       return {
         valid: false,
         shouldRetry: true,
@@ -967,6 +1001,7 @@ export class ConnectionSyncOperationsService {
         message: queryResult.error.message,
         retriedAfterRefresh,
       });
+      this.recordRetryableConnectionFailure(queryResult.error);
       return { ok: false, shouldRetry: true, error: queryResult.error };
     }
 
@@ -1092,7 +1127,8 @@ export class ConnectionSyncOperationsService {
       throw e;
     }
 
-    const enhanced = supabaseErrorToError(e);
+    const enhanced = this.ensureEnhancedError(e);
+    this.recordRetryableConnectionFailure(enhanced);
 
     if (enhanced.errorType === 'BrowserNetworkSuspendedError') {
       if (fromRetryQueue) {

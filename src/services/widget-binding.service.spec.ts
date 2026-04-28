@@ -125,7 +125,6 @@ describe('WidgetBindingService', () => {
         hostInstanceId: '42',
         sizeBucket: '4x2',
       },
-      persistRuntimeBinding: false,
     });
 
     expect(invoke).toHaveBeenCalledWith('widget-register', {

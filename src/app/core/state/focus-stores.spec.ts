@@ -56,7 +56,7 @@ describe('focus-stores', () => {
       expect(pending[0].id).toBe('yesterday-1');
     });
 
-    it('应该包含已读但未完成的跨天条目', () => {
+    it('应该排除已读但未完成的跨天条目，避免 Gate 复核重复弹出', () => {
       const readEntry = createEntry({
         id: 'read-1',
         date: getYesterdayDate(),
@@ -70,8 +70,7 @@ describe('focus-stores', () => {
 
       const pending = pendingBlackBoxEntries();
       
-      expect(pending.length).toBe(1);
-      expect(pending[0].id).toBe('read-1');
+      expect(pending.length).toBe(0);
     });
 
     it('应该包含被跳过但已到期的条目', () => {

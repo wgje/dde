@@ -132,12 +132,14 @@ describe('dev-server-port', () => {
     });
 
     await new Promise<void>((resolve, reject) => {
-      server.listen(0, '127.0.0.1', (error) => {
-        if (error) {
-          reject(error);
-          return;
-        }
+      const onError = (error: Error) => {
+        server.off('error', onError);
+        reject(error);
+      };
 
+      server.once('error', onError);
+      server.listen(0, '127.0.0.1', () => {
+        server.off('error', onError);
         resolve();
       });
     });

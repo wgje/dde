@@ -15,10 +15,11 @@ import { flowTemplateEventHandlers } from './flow-template-events';
 import { getFlowStyles, FlowTheme } from '../../../../config/flow-styles';
 import { Task } from '../../../../models';
 import { environment } from '../../../../environments/environment';
-import { UI_CONFIG } from '../../../../config';
+import { UI_CONFIG, LAYOUT_CONFIG } from '../../../../config';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { readTaskDragPayload } from '../../../../utils/task-drag-payload';
 import * as go from 'gojs';
+import { AvoidsLinksRouter } from '../vendor/AvoidsLinksRouter';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 /**
  * FlowDiagramService - GoJS 图表核心服务（精简版）
@@ -94,6 +95,8 @@ export class FlowDiagramService {
   // ========== 事件处理器引用（用于销毁时清理） ==========
   /** ViewportBoundsChanged 监听器引用，防止泄漏 */
   private viewportBoundsHandler: ((e: go.DiagramEvent) => void) | null = null;
+  /** rAF 合并 ViewportBoundsChanged 的调度句柄（避免 panning 时每帧都跑视图持久化） */
+  private viewportBoundsRafId: number | null = null;
 
   // ========== 字体加载重绘 ==========
   /** 字体加载完成事件的回调引用，用于销毁时清理 */
@@ -246,6 +249,20 @@ export class FlowDiagramService {
         linkCategoryProperty: 'category'
       });
       
+      // 【补丁 A 2026-04-23】按配置装配 AvoidsLinksRouter（vendored 自 GoJS 官方扩展）。
+      // 仅在 LAYOUT_CONFIG.AUTO_LAYOUT_ENABLE_AVOIDS_LINKS_ROUTER 打开时生效，
+      // 且 router 内部会过滤 `!link.isOrthogonal` 的连线（默认 Bezier/Normal cross-tree 连线不受影响）。
+      // 打开此开关需配合把 cross-tree link template 的 routing 切到 go.Link.Orthogonal。
+      if (LAYOUT_CONFIG.AUTO_LAYOUT_ENABLE_AVOIDS_LINKS_ROUTER) {
+        this.diagram.routers.add(new AvoidsLinksRouter({
+          linkSpacing: LAYOUT_CONFIG.AUTO_LAYOUT_ROUTER_LINK_SPACING_PX,
+          avoidsNodes: true,
+        }));
+        this.logger.info('AvoidsLinksRouter 已装配', {
+          linkSpacing: LAYOUT_CONFIG.AUTO_LAYOUT_ROUTER_LINK_SPACING_PX,
+        });
+      }
+
       // 【关键】拦截 GoJS 默认删除行为，强制单向数据流 (Store -> Signal -> Diagram)
       // 这可以防止“脑裂”——GoJS 认为节点删了，但 Store 还没反应过来
       this.setupDeleteKeyInterception();
@@ -822,6 +839,10 @@ export class FlowDiagramService {
         this.diagram.removeDiagramListener('ViewportBoundsChanged', this.viewportBoundsHandler);
         this.viewportBoundsHandler = null;
       }
+      if (this.viewportBoundsRafId !== null) {
+        cancelAnimationFrame(this.viewportBoundsRafId);
+        this.viewportBoundsRafId = null;
+      }
       // 顺序：先移除监听器 → clear 清除数据 → div = null 断开 DOM
       this.diagram.clear();
       this.diagram.div = null;
@@ -1055,11 +1076,19 @@ export class FlowDiagramService {
   }
 
   private handleViewportBoundsChanged(): void {
-    this.captureStableViewState();
-    if (!this.canPersistViewState()) {
-      return;
-    }
-    this.dataService.saveViewState();
+    // 【2026-04-24 性能优化】panning 期间此事件按 ~60Hz 触发，
+    // 原实现每帧都 captureStableViewState + saveViewState(内部 clear/set setTimeout)
+    // 会放大 Angular Zone setTimeout 的 patch 开销，造成 30+ 节点拖拽时的"拖尾"。
+    // 使用 rAF 合并同帧内多次触发，只在真正有新帧时落地。
+    if (this.viewportBoundsRafId !== null) return;
+    this.viewportBoundsRafId = requestAnimationFrame(() => {
+      this.viewportBoundsRafId = null;
+      this.captureStableViewState();
+      if (!this.canPersistViewState()) {
+        return;
+      }
+      this.dataService.saveViewState();
+    });
   }
 
   private handleDiagramContainerResize(width: number, height: number, forceRecovery: boolean = false): void {

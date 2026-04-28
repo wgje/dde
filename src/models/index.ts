@@ -152,6 +152,10 @@ export interface UserPreferences {
    */
   localBackupIntervalMs?: number;
   /**
+   * 最近一次成功备份 proof-of-life（跨设备同步，单调只增）
+   */
+  lastBackupProofAt?: string;
+  /**
    * 专注模式偏好设置（跨设备同步）   */
   focusPreferences?: import('./focus').FocusPreferences;
   /**

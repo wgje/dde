@@ -101,28 +101,20 @@ BEGIN
     NOW();
 END;
 $$;
-
 REVOKE ALL ON FUNCTION public.get_resume_recovery_probe(UUID) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.get_resume_recovery_probe(UUID) TO authenticated;
-
 -- 索引补强（幂等）
 CREATE INDEX IF NOT EXISTS idx_project_members_user_project
   ON public.project_members (user_id, project_id);
-
 CREATE INDEX IF NOT EXISTS idx_black_box_entries_user_updated_desc
   ON public.black_box_entries (user_id, updated_at DESC);
-
 CREATE INDEX IF NOT EXISTS idx_tasks_project_updated_desc
   ON public.tasks (project_id, updated_at DESC);
-
 CREATE INDEX IF NOT EXISTS idx_connections_project_updated_desc
   ON public.connections (project_id, updated_at DESC);
-
 CREATE INDEX IF NOT EXISTS idx_task_tombstones_project_deleted_desc
   ON public.task_tombstones (project_id, deleted_at DESC);
-
 CREATE INDEX IF NOT EXISTS idx_connection_tombstones_project_deleted_desc
   ON public.connection_tombstones (project_id, deleted_at DESC);
-
 COMMENT ON FUNCTION public.get_resume_recovery_probe IS
   '恢复链路聚合探测：active project 可访问性 + active/project/blackbox 水位 + server_now - Resume V6 2026-02-17';

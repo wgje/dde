@@ -1,3 +1,9 @@
+---
+name: skills-overview
+description: NanoFlow 技能目录索引与维护入口
+version: 1.0.0
+---
+
 # Skills Overview
 
 此目录包含 Copilot 可学习的技能包。每个技能是独立的、可组合的能力单元。
@@ -9,6 +15,8 @@
 ```
 skills/
 ├── skill.md                # 此文件（索引）
+├── agent-customization/    # 聊天定制文件维护技能包 ✨
+│   └── skill.md
 ├── api-design/             # API 设计技能包
 │   └── skill.md
 ├── backend-patterns/       # 后端模式技能包 ✨
@@ -41,6 +49,7 @@ skills/
 | docs | 文档生成和更新 | `/docs`, `@doc-updater` |
 | api-design | API 设计规范 | `/design`, `@architect` |
 | security-review | 安全审查和漏洞检测 | `/security`, `@security-reviewer` |
+| agent-customization | 维护聊天定制文件 | `/init`, `/create-instruction`, `/create-skill`, `/create-agent` |
 
 ### 项目规范技能
 

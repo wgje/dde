@@ -56,24 +56,18 @@ BEGIN
   RETURN v_watermark;
 END;
 $$;
-
 -- 安全加固：SECURITY DEFINER 函数默认对 PUBLIC 可执行，必须先撤销
 REVOKE ALL ON FUNCTION public.get_project_sync_watermark(UUID) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.get_project_sync_watermark(UUID) TO authenticated;
-
 -- 项目恢复路径索引优化（幂等）
 CREATE INDEX IF NOT EXISTS idx_tasks_project_updated_desc
   ON public.tasks (project_id, updated_at DESC);
-
 CREATE INDEX IF NOT EXISTS idx_connections_project_updated_desc
   ON public.connections (project_id, updated_at DESC);
-
 -- 当前表结构使用 deleted_at，等价替代 created_at 水位索引
 CREATE INDEX IF NOT EXISTS idx_task_tombstones_project_deleted_desc
   ON public.task_tombstones (project_id, deleted_at DESC);
-
 CREATE INDEX IF NOT EXISTS idx_connection_tombstones_project_deleted_desc
   ON public.connection_tombstones (project_id, deleted_at DESC);
-
 COMMENT ON FUNCTION public.get_project_sync_watermark IS
   '返回单项目聚合同步水位（project/tasks/connections/tombstones 最大时间戳）- Resume 交互优先优化 2026-02-14';

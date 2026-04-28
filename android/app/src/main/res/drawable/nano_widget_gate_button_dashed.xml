@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  蓝图风大门按钮：圆角矩形 + 白色细虚线描边 + 微透钴蓝底。
+  与分隔线的 dashed 语言一致，把 已读 / 完成 双按钮做成蓝图技术线稿的一部分，
+  与 focus 模式的实线 slot 卡片形成明显差异，避免两模式视觉 UI 重叠。
+-->
+<ripple xmlns:android="http://schemas.android.com/apk/res/android"
+    android:color="#2EF6FBFF">
+    <item android:id="@android:id/mask">
+        <shape android:shape="rectangle">
+            <solid android:color="#FFFFFFFF" />
+            <corners android:radius="14dp" />
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="#0E1E3B66" />
+            <corners android:radius="14dp" />
+            <stroke
+                android:width="1.2dp"
+                android:color="#F6FBFF"
+                android:dashWidth="4dp"
+                android:dashGap="3dp" />
+        </shape>
+    </item>
+</ripple>

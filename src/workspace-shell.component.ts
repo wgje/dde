@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- Legacy workspace shell still coordinates startup/auth/sync lifecycles until the remaining shell extraction is completed. */
 import { Component, ChangeDetectionStrategy, inject, signal, HostListener, computed, OnInit, OnDestroy, DestroyRef, effect, Type, NgZone, Injector, AfterViewInit, untracked } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ActivatedRoute, Router, NavigationEnd, RouterOutlet } from '@angular/router';
@@ -13,7 +14,10 @@ import { ActionQueueService } from './services/action-queue.service';
 import { LoggerService } from './services/logger.service';
 import { GlobalErrorHandler } from './services/global-error-handler.service';
 import { ModalService, type DeleteProjectData, type LoginData } from './services/modal.service';
-import { WorkspaceModalCoordinatorService } from './services/workspace-modal-coordinator.service';
+import {
+  WorkspaceModalCoordinatorService,
+  type ModalCallbacks,
+} from './services/workspace-modal-coordinator.service';
 import { SyncCoordinatorService } from './services/sync-coordinator.service';
 import { SupabaseClientService } from './services/supabase-client.service';
 import { SimpleSyncService } from './app/core/services/simple-sync.service';
@@ -108,6 +112,7 @@ const DATA_PROTECTION_REMINDER_TITLE = '数据备份提醒';
 const DATA_PROTECTION_REMINDER_MESSAGE = '已超过 7 天未完成数据备份，建议前往设置执行导出或本地备份。';
 const ANDROID_WIDGET_BOOTSTRAP_STORAGE_KEY = 'nanoflow.android-widget-bootstrap';
 const ANDROID_WIDGET_STARTUP_INTENT_STORAGE_KEY = 'nanoflow.android-widget-startup-intent';
+const SIDEBAR_SEARCH_FOCUS_DELAY_MS = 50;
 
 /**
  * 应用根组件
@@ -581,18 +586,86 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
     return this.startupTier.isTierReady('p2') || hasSyncIssue;
   });
   
-  /** 模态框加载中状态（委托到 modalCoord） */
-  readonly modalLoading = this.modalCoord.modalLoading;
+  /** 模态框加载中状态。Modal 协调器动态加载前由壳层先承接按钮反馈。 */
+  readonly modalLoading = signal<Record<string, boolean>>({});
 
   /** 检查指定类型的模态框是否正在加载 */
   isModalLoading(type: string): boolean {
-    return this.modalCoord.isModalLoading(type);
+    return this.modalLoading()[type] ?? this.modalCoordRef?.isModalLoading(type) ?? this.modalCoord.isModalLoading(type);
   }
 
-  /** 存储失败逃生数据（委托到 modalCoord） */
-  get storageEscapeData() { return this.modalCoord.storageEscapeData; }
-  get showStorageEscapeModal() { return this.modalCoord.showStorageEscapeModal; }
-  
+  private setModalLoading(type: string, loading: boolean): void {
+    this.modalLoading.update(state => {
+      const next = { ...state };
+      if (loading) {
+        next[type] = true;
+      } else {
+        delete next[type];
+      }
+      return next;
+    });
+  }
+
+  private async getModalCoord(): Promise<WorkspaceModalCoordinatorService> {
+    if (this.modalCoordRef) {
+      return this.modalCoordRef;
+    }
+
+    if (!this.modalCoordPromise) {
+      this.modalCoordPromise = import('./services/workspace-modal-coordinator.service')
+        .then((module) => {
+          const modalCoord = this.injector.get(module.WorkspaceModalCoordinatorService);
+          if (!this.destroyed) {
+            modalCoord.initCallbacks(this.createModalCallbacks());
+          }
+          this.modalCoordRef = modalCoord;
+          return modalCoord;
+        })
+        .finally(() => {
+          this.modalCoordPromise = null;
+        });
+    }
+
+    return this.modalCoordPromise;
+  }
+
+  private createModalCallbacks(): ModalCallbacks {
+    return {
+      signOut: () => this.signOut(),
+      updateTheme: (theme: ThemeType) => this.updateTheme(theme),
+      handleImportComplete: (project: Project) => void this.handleImportComplete(project),
+      handleLoginFromModal: (data) => void this.handleLoginFromModal(data),
+      handleSignupFromModal: (data) => void this.handleSignupFromModal(data),
+      handleResetPasswordFromModal: (email) => void this.handleResetPasswordFromModal(email),
+      handleLocalModeFromModal: () => this.handleLocalModeFromModal(),
+      confirmCreateProject: (name, desc) => void this.confirmCreateProject(name, desc),
+      handleMigrationComplete: () => this.handleMigrationComplete(),
+      closeMigrationModal: () => this.closeMigrationModal(),
+    };
+  }
+
+  private async runModalAction(
+    loadingType: string | null,
+    action: (modalCoord: WorkspaceModalCoordinatorService) => Promise<void> | void,
+  ): Promise<void> {
+    if (loadingType && this.isModalLoading(loadingType)) {
+      return;
+    }
+
+    if (loadingType) {
+      this.setModalLoading(loadingType, true);
+    }
+
+    try {
+      const modalCoord = await this.getModalCoord();
+      await action(modalCoord);
+    } finally {
+      if (loadingType) {
+        this.setModalLoading(loadingType, false);
+      }
+    }
+  }
+
   // 手机端滑动切换状态
   private touchStartX = 0;
   private touchStartY = 0;
@@ -877,6 +950,9 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
   private readonly deferredStartupEntryIntent = signal<StartupEntryIntent | null>(null);
   private androidWidgetBootstrapCaptureKey: string | null = null;
   private androidWidgetBootstrapInFlight = false;
+  private destroyed = false;
+  private modalCoordRef: WorkspaceModalCoordinatorService | null = null;
+  private modalCoordPromise: Promise<WorkspaceModalCoordinatorService> | null = null;
   private readonly launchSnapshotWriteBlocked = signal(false);
 
   constructor() {
@@ -892,21 +968,7 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
     this.setupSidebarToggleListener();
     this.setupStorageFailureHandler();
     this.setupBeforeUnloadHandler();
-
-    // Wire modal coordinator callbacks so the service can call back into
-    // component-level methods without creating a circular dependency.
-    this.modalCoord.initCallbacks({
-      signOut: () => this.signOut(),
-      updateTheme: (theme: ThemeType) => this.updateTheme(theme),
-      handleImportComplete: (project: Project) => void this.handleImportComplete(project),
-      handleLoginFromModal: (data) => void this.handleLoginFromModal(data),
-      handleSignupFromModal: (data) => void this.handleSignupFromModal(data),
-      handleResetPasswordFromModal: (email) => void this.handleResetPasswordFromModal(email),
-      handleLocalModeFromModal: () => this.handleLocalModeFromModal(),
-      confirmCreateProject: (name, desc) => void this.confirmCreateProject(name, desc),
-      handleMigrationComplete: () => this.handleMigrationComplete(),
-      closeMigrationModal: () => this.closeMigrationModal(),
-    });
+    this.modalCoord.initCallbacks(this.createModalCallbacks());
 
     // ── Service Initialization Order ──────────────────────────────────────
     // The six startup services are initialized in a strict sequence to
@@ -947,55 +1009,12 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
    * 解决：在 capture 阶段优先处理快捷键，并在 bubble 阶段用 defaultPrevented 去重。
    */
   private readonly keyboardShortcutCaptureListener = (event: KeyboardEvent) => {
-    // 避免重复触发（例如 HMR 或其他监听器已处理）
-    if (event.defaultPrevented) return;
-
-    // 防御：某些特殊键盘事件可能没有 key 属性
-    if (!event.key) return;
+    if (this.shouldIgnoreKeyboardShortcut(event)) return;
 
     const key = event.key.toLowerCase();
-
-    // Ctrl+Z / Cmd+Z: 撤销
-    if ((event.ctrlKey || event.metaKey) && key === 'z' && !event.shiftKey) {
-      event.preventDefault();
-      this.taskOpsAdapter.performUndo();
-      return;
-    }
-
-    // Ctrl+Shift+Z / Cmd+Shift+Z: 重做
-    if ((event.ctrlKey || event.metaKey) && key === 'z' && event.shiftKey) {
-      event.preventDefault();
-      this.taskOpsAdapter.performRedo();
-      return;
-    }
-
-    // Ctrl+Y / Cmd+Y: 重做（Windows 风格）
-    if ((event.ctrlKey || event.metaKey) && key === 'y') {
-      event.preventDefault();
-      this.taskOpsAdapter.performRedo();
-      return;
-    }
-
-    // Ctrl+F / Cmd+F: 聚焦全局搜索框（覆盖浏览器默认查找）
-    if ((event.ctrlKey || event.metaKey) && key === 'f' && !event.shiftKey) {
-      event.preventDefault();
-      // 确保侧边栏打开
-      this.isSidebarOpen.set(true);
-      // 延迟聚焦，等待侧边栏展开动画
-      setTimeout(() => {
-        const searchInput = document.querySelector<HTMLInputElement>('aside input[aria-label="搜索项目或任务"]');
-        searchInput?.focus();
-        searchInput?.select();
-      }, 50);
-      return;
-    }
-
-    // Ctrl+B / Cmd+B: 切换黑匣子面板
-    if ((event.ctrlKey || event.metaKey) && key === 'b' && !event.shiftKey) {
-      event.preventDefault();
-      showBlackBoxPanel.update(v => !v);
-      return;
-    }
+    if (this.handleUndoRedoShortcut(event, key)) return;
+    if (this.handleSearchShortcut(event, key)) return;
+    this.handleBlackBoxShortcut(event, key);
   };
 
   private readonly focusMountIntentListener = () => {
@@ -1076,6 +1095,51 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
 
   ngAfterViewInit(): void {
     this.signalWorkspaceHandoffReady();
+  }
+
+  private shouldIgnoreKeyboardShortcut(event: KeyboardEvent): boolean {
+    return event.defaultPrevented || !event.key || (!event.ctrlKey && !event.metaKey);
+  }
+
+  private handleUndoRedoShortcut(event: KeyboardEvent, key: string): boolean {
+    if (key === 'z' && !event.shiftKey) {
+      event.preventDefault();
+      this.taskOpsAdapter.performUndo();
+      return true;
+    }
+
+    if ((key === 'z' && event.shiftKey) || key === 'y') {
+      event.preventDefault();
+      this.taskOpsAdapter.performRedo();
+      return true;
+    }
+
+    return false;
+  }
+
+  private handleSearchShortcut(event: KeyboardEvent, key: string): boolean {
+    if (event.shiftKey || key !== 'f') return false;
+
+    event.preventDefault();
+    this.focusGlobalSearchInput();
+    return true;
+  }
+
+  private focusGlobalSearchInput(): void {
+    this.isSidebarOpen.set(true);
+    setTimeout(() => {
+      const searchInput = document.querySelector<HTMLInputElement>('aside input[aria-label="搜索项目或任务"]');
+      searchInput?.focus();
+      searchInput?.select();
+    }, SIDEBAR_SEARCH_FOCUS_DELAY_MS);
+  }
+
+  private handleBlackBoxShortcut(event: KeyboardEvent, key: string): boolean {
+    if (event.shiftKey || key !== 'b') return false;
+
+    event.preventDefault();
+    showBlackBoxPanel.update(v => !v);
+    return true;
   }
 
   showInstallPrompt(): boolean {
@@ -1393,6 +1457,15 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
   }
 
   private applyStartupEntryIntent(startupEntryIntent: StartupEntryIntent): void {
+    // 蓝图 UI 小组件的 1-tap 标记：大门按钮直接对指定条目执行 markAsRead / markAsCompleted。
+    if (
+      startupEntryIntent.intent === 'mark-gate-read'
+      || startupEntryIntent.intent === 'mark-gate-complete'
+    ) {
+      this.applyWidgetGateMutation(startupEntryIntent);
+      return;
+    }
+
     if (
       startupEntryIntent.intent !== 'open-focus-tools'
       && startupEntryIntent.intent !== 'open-blackbox-recorder'
@@ -1405,6 +1478,36 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
 
     if (startupEntryIntent.intent === 'open-blackbox-recorder' && this.focusPrefs.isBlackBoxEnabled()) {
       void this.loadBlackBoxRecorderComponent();
+    }
+  }
+
+  /** 小组件大门按钮 → 应用侧直接调用 BlackBoxService 对指定条目执行标记。 */
+  private applyWidgetGateMutation(startupEntryIntent: StartupEntryIntent): void {
+    const entryId = startupEntryIntent.widgetGateEntryId;
+    if (!entryId) {
+      // 没有条目 ID 时回退为打开 Focus Tools，保证 widget 侧用户仍可进入应用处理。
+      this.isSidebarOpen.set(true);
+      this.preloadSidebarTools('intent');
+      return;
+    }
+
+    const result = startupEntryIntent.intent === 'mark-gate-read'
+      ? this.blackBoxService.markAsRead(entryId)
+      : this.blackBoxService.markAsCompleted(entryId);
+
+    if (!result.ok) {
+      // 条目不存在或已处理：静默回退，不打断 workspace 启动流程。
+      this.logger.warn('Widget gate mutation failed', {
+        intent: startupEntryIntent.intent,
+        entryId,
+        code: result.error.code,
+        message: result.error.message,
+      });
+    } else {
+      this.logger.info('Widget gate mutation applied', {
+        intent: startupEntryIntent.intent,
+        entryId,
+      });
     }
   }
 

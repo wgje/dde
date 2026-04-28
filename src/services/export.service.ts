@@ -239,7 +239,11 @@ export class ExportService {
   readonly lastExportTime = computed(() => this._lastExportTime());
   readonly lastLocalBackupTime = computed(() => this._lastLocalBackupTime());
   readonly lastSuccessfulBackupTime = computed(() =>
-    this.selectLatestTimestamp(this._lastExportTime(), this._lastLocalBackupTime())
+    this.selectLatestTimestamp(
+      this._lastExportTime(),
+      this._lastLocalBackupTime(),
+      this.preference.lastBackupProofAt(),
+    )
   );
   
   /** 是否需要导出提醒 */
@@ -262,7 +266,12 @@ export class ExportService {
    * 记录本地备份成功时间，用于同步更新全局备份提醒状态。
    */
   recordLocalBackupSuccess(timestamp: string): void {
-    this._lastLocalBackupTime.set(this.normalizeTimestamp(timestamp, 'local-backup:runtime'));
+    const normalized = this.normalizeTimestamp(timestamp, 'local-backup:runtime');
+    this._lastLocalBackupTime.set(normalized);
+
+    if (normalized) {
+      void this.preference.recordBackupProof(normalized);
+    }
   }
   
   /**
@@ -774,9 +783,10 @@ export class ExportService {
     
     try {
       localStorage.setItem(LAST_EXPORT_AT_STORAGE_KEY, now);
-      // 仅本地存储，不同步到云端
     } catch (e) {
       this.logger.debug('保存上次导出时间失败', { error: e });
     }
+
+    await this.preference.recordBackupProof(now);
   }
 }

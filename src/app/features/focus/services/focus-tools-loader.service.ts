@@ -23,7 +23,7 @@ import { LoggerService } from '../../../../services/logger.service';
 
 @Injectable({ providedIn: 'root' })
 export class FocusToolsLoaderService {
-  private readonly logger = inject(LoggerService);
+  private readonly logger = inject(LoggerService).category('FocusToolsLoader');
 
   /** FocusSessionTriggerComponent 类型引用；null 表示未加载/加载失败 */
   readonly focusSessionTriggerComponent = signal<Type<unknown> | null>(null);

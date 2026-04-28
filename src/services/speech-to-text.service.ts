@@ -697,7 +697,10 @@ export class SpeechToTextService {
     }
 
     if (sessionError || !session?.access_token || !session.user?.id) {
-      this.logger.error('SpeechToText', 'No access token available after refresh', sessionError?.message);
+      this.logger.error('SpeechToText', 'No access token available after refresh', {
+        hasAccessToken: !!session?.access_token,
+        hasUserId: !!session?.user?.id,
+      });
       this.toast.error('认证失败', '请重新登录后再试');
       throw new Error(ErrorCodes.SYNC_AUTH_EXPIRED);
     }

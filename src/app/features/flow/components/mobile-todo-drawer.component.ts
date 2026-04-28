@@ -599,7 +599,7 @@ export class MobileTodoDrawerComponent implements OnDestroy {
       this.captureDraggedTaskClickGuard();
       const touch = event.changedTouches[0] ?? null;
       this.scheduleGlobalSwipeFallback(touch?.clientX ?? null, touch?.clientY ?? null, {
-        suppressed: this.draggingTaskId() || this.suppressSwipeForCurrentTouch,
+        suppressed: !!this.draggingTaskId() || this.suppressSwipeForCurrentTouch,
       });
     }
 
@@ -622,7 +622,7 @@ export class MobileTodoDrawerComponent implements OnDestroy {
     if (event.type === 'pointerup') {
       this.captureDraggedTaskClickGuard();
       this.scheduleGlobalSwipeFallback(event.clientX, event.clientY, {
-        suppressed: this.draggingTaskId() || this.suppressSwipeForCurrentTouch,
+        suppressed: !!this.draggingTaskId() || this.suppressSwipeForCurrentTouch,
       });
     }
 

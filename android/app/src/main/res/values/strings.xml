@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">NanoFlow Android Host</string>
-    <string name="nanoflow_widget_label">NanoFlow Focus</string>
-    <string name="nanoflow_widget_description">只读显示当前 Focus、停泊坞和 Black Box 摘要</string>
+    <string name="nanoflow_widget_label">NanoFlow</string>
+    <string name="nanoflow_widget_description">显示当前 Focus、停泊坞和 Black Box 摘要，并支持大门/专注快捷操作</string>
     <string name="nanoflow_widget_setup_required">请先打开 NanoFlow 完成初始化</string>
     <string name="nanoflow_widget_setup_title">Widget 尚未连接</string>
     <string name="nanoflow_widget_setup_detail">打开 NanoFlow 后会自动完成绑定并刷新摘要</string>
@@ -22,6 +22,7 @@
     <string name="nanoflow_widget_refresh_disabled_title">摘要刷新已暂停</string>
     <string name="nanoflow_widget_refresh_disabled_detail">当前组件不会自动拉新，请打开 NanoFlow 查看最新状态</string>
     <string name="nanoflow_widget_target_changed">关联目标已变化，请打开 NanoFlow</string>
+    <string name="nanoflow_widget_autostart_guide_toast">检测到 MIUI/HyperOS 重装后已清零自启权限，为让小组件点击即时生效，请在即将打开的设置页中打开 NanoFlow 的自启动开关</string>
     <string name="nanoflow_widget_badge_setup">等待绑定</string>
     <string name="nanoflow_widget_badge_syncing">准备摘要</string>
     <string name="nanoflow_widget_badge_auth">需登录</string>
@@ -33,15 +34,17 @@
     <string name="nanoflow_widget_open_app">打开 NanoFlow</string>
     <string name="nanoflow_widget_open_focus">打开专注工具</string>
     <string name="nanoflow_widget_open_gate">进入大门</string>
-    <string name="nanoflow_widget_open_task">打开主任务</string>
+    <string name="nanoflow_widget_open_task">打开当前任务</string>
     <string name="nanoflow_widget_refresh">刷新</string>
     <string name="nanoflow_widget_previous_entry">上条</string>
     <string name="nanoflow_widget_next_entry">下条</string>
     <string name="nanoflow_widget_page_indicator">%1$d / %2$d</string>
-    <string name="nanoflow_widget_focus_ready_title">主任务待命</string>
+    <string name="nanoflow_widget_focus_ready_title">当前任务待命</string>
+    <string name="nanoflow_widget_focus_idle_title">C位暂时空置</string>
+    <string name="nanoflow_widget_focus_idle_detail">停泊坞里还有任务，打开 NanoFlow 选择主任务</string>
     <string name="nanoflow_widget_unknown_task">无专注任务</string>
-    <string name="nanoflow_widget_gate_label">沉积之门</string>
-    <string name="nanoflow_widget_focus_label">停泊主任务</string>
+    <string name="nanoflow_widget_gate_label">大门</string>
+    <string name="nanoflow_widget_focus_label">专注模式</string>
     <string name="nanoflow_widget_gate_empty_title">今日大门已清空</string>
     <string name="nanoflow_widget_gate_empty_detail">没有待处理黑匣子，可直接进入工作区</string>
     <string name="nanoflow_widget_gate_pending_detail">待处理沉积</string>
@@ -51,8 +54,45 @@
     <string name="nanoflow_widget_counts">停泊 %1$d  ·  黑匣子 %2$d</string>
     <string name="nanoflow_widget_privacy_gate_title">%1$d 条待处理沉积</string>
     <string name="nanoflow_widget_privacy_focus_title">专注任务进行中</string>
-    <string name="nanoflow_widget_content_main_task">主任务</string>
-    <string name="nanoflow_widget_content_secondary_task">备选 %1$d</string>
-    <string name="nanoflow_widget_content_gate_position">沉积 %1$d / %2$d</string>
+    <string name="nanoflow_widget_content_main_task">C位 #1</string>
+    <string name="nanoflow_widget_content_secondary_task">C位 #%1$d</string>
+    <string name="nanoflow_widget_content_gate_position">未完成任务 %1$d / %2$d</string>
     <string name="nanoflow_widget_content_pending_count">共 %1$d 条待处理沉积</string>
+    <string name="nanoflow_widget_focus_slot_position">C位 %1$d / 4</string>
+    <string name="nanoflow_widget_focus_slot_main">主任务</string>
+    <string name="nanoflow_widget_focus_slot_secondary">副任务</string>
+    <string name="nanoflow_widget_focus_slot_secondary_n">副任务%1$d</string>
+    <string name="nanoflow_widget_focus_slot_placeholder">待定</string>
+    <string name="nanoflow_widget_gate_action_read">已读</string>
+    <string name="nanoflow_widget_gate_action_complete">完成</string>
+    <string name="nanoflow_widget_focus_action_complete">完成</string>
+    <string name="nanoflow_widget_focus_action_wait">等待</string>
+    <string name="nanoflow_widget_focus_wait_5m">5 分钟</string>
+    <string name="nanoflow_widget_focus_wait_15m">15 分钟</string>
+    <string name="nanoflow_widget_focus_wait_30m">30 分钟</string>
+    <string name="nanoflow_widget_focus_wait_1h">1 小时</string>
+    <string name="nanoflow_widget_focus_switch_hint">点击上方插槽切换 / 查看</string>
+    <string name="nanoflow_widget_focus_backup_zone">备选区：%1$d 个任务</string>
+    <string name="nanoflow_widget_minutes_short">%1$d 分</string>
+    <string name="nanoflow_widget_gate_created">创建 %1$s</string>
+    <string name="nanoflow_widget_gate_review_pending">待回顾</string>
+    <string name="nanoflow_widget_gate_review_read">已读 %1$s</string>
+    <string name="nanoflow_widget_gate_repeat_hint">已读，完成后移除</string>
+    <string name="nanoflow_widget_gate_entry_hint">请用下方按钮处理</string>
+    <string name="nanoflow_widget_gate_empty_hint">全部清空后再次点按可直达项目</string>
+    <string name="nanoflow_widget_gate_blocked_toast">请先选择已读或完成</string>
+    <string name="nanoflow_widget_focus_main_fixed_toast">该任务已在第 1 位</string>
+    <string name="nanoflow_widget_focus_promoted_toast">已移到第 1 位</string>
+    <string name="nanoflow_widget_focus_promote_failed_toast">网络繁忙，请稍后重试</string>
+    <string name="nanoflow_widget_focus_complete_toast">已完成当前 C 位</string>
+    <string name="nanoflow_widget_focus_wait_toast">已移到 C 位队尾</string>
+    <string name="nanoflow_widget_focus_wait_menu_toast">选择等待时间</string>
+    <string name="nanoflow_widget_recently">刚刚</string>
+    <string name="nanoflow_widget_relative_minutes">%1$d 分钟前</string>
+    <string name="nanoflow_widget_relative_hours">%1$d 小时前</string>
+    <string name="nanoflow_widget_relative_days">%1$d 天前</string>
+    <string name="nanoflow_widget_tab_main">1
+主任务</string>
+    <string name="nanoflow_widget_tab_secondary">%1$d
+副任务%2$d</string>
 </resources>

@@ -1,4 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  蓝图风专注模式大尺寸 (2×4 倒下长方体) 小组件。
+  结构：
+    - 根 FrameLayout：深钴蓝底 + 白色细描边圆角（rounded rect blueprint frame）
+    - 背后叠加多条极细横竖线，形成亚毫米技术网格
+    - 上层垂直栈：
+        头部：🎯 专注模式 …… C位停泊坞 ⬚
+        横向虚线 ━ ━ ━
+        GridView: 4 个 C 位插槽（主 + 3 副）
+        横向虚线 ━ ━ ━
+        底栏：📁 备选区：N 个任务    ›
+    - 右下角独立小 GridView 承接 refresh 点击（MIUI 兼容）
+    - 右上角 sync_badge 文字（非常细小）
+
+  注意：禁止左右滑动手势——所有集合视图均不横向滚动（GridView 固定列数、ListView 仅纵向）。
+-->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/nano_widget_root"
     android:layout_width="match_parent"
@@ -6,76 +22,215 @@
     android:background="@drawable/nano_widget_root_focus"
     android:clipToOutline="true"
     android:padding="14dp">
+
+    <!-- ==== 背景技术网格：5 条纵线 ==== -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="horizontal">
+        <ImageView android:layout_width="0dp" android:layout_height="match_parent" android:layout_weight="1" />
+        <ImageView android:layout_width="1dp" android:layout_height="match_parent" android:background="#12FFFFFF" />
+        <ImageView android:layout_width="0dp" android:layout_height="match_parent" android:layout_weight="1" />
+        <ImageView android:layout_width="1dp" android:layout_height="match_parent" android:background="#10FFFFFF" />
+        <ImageView android:layout_width="0dp" android:layout_height="match_parent" android:layout_weight="1" />
+        <ImageView android:layout_width="1dp" android:layout_height="match_parent" android:background="#12FFFFFF" />
+        <ImageView android:layout_width="0dp" android:layout_height="match_parent" android:layout_weight="1" />
+        <ImageView android:layout_width="1dp" android:layout_height="match_parent" android:background="#10FFFFFF" />
+        <ImageView android:layout_width="0dp" android:layout_height="match_parent" android:layout_weight="1" />
+    </LinearLayout>
+
+    <!-- ==== 背景技术网格：4 条横线 ==== -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:orientation="vertical">
+        <ImageView android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" />
+        <ImageView android:layout_width="match_parent" android:layout_height="1dp" android:background="#10FFFFFF" />
+        <ImageView android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" />
+        <ImageView android:layout_width="match_parent" android:layout_height="1dp" android:background="#12FFFFFF" />
+        <ImageView android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" />
+        <ImageView android:layout_width="match_parent" android:layout_height="1dp" android:background="#10FFFFFF" />
+        <ImageView android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" />
+    </LinearLayout>
+
+    <!-- ==== 主内容栈 ==== -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical">
+
+        <!-- 头部：左侧 🎯 + 专注模式；右侧 C 位停泊坞 + icon -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:gravity="start|center_vertical"
+            android:gravity="center_vertical"
             android:orientation="horizontal">
-            <!-- 2026-04-19：去掉 chip_surface 边框，改为圆点 + 文字；drawableStart 由 renderer 根据 tone 动态换色 -->
+
+            <ImageView
+                android:layout_width="20dp"
+                android:layout_height="20dp"
+                android:importantForAccessibility="no"
+                android:src="@drawable/nano_widget_icon_target" />
+
+            <TextView
+                android:layout_width="8dp"
+                android:layout_height="1dp" />
+
+            <TextView
+                android:id="@+id/nano_widget_mode_label"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:maxLines="1"
+                android:text="@string/nanoflow_widget_focus_label"
+                android:textColor="#F6FBFF"
+                android:textSize="14sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_weight="1"
+                android:layout_height="1dp" />
+
+            <!-- 细小同步状态文字：放在标题右侧，低调但始终可见 -->
             <TextView
                 android:id="@+id/nano_widget_sync_badge"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:background="@null"
-                android:drawableEnd="@drawable/nano_widget_state_dot_green"
-                android:drawablePadding="6dp"
-                android:gravity="center_vertical"
-                android:paddingStart="2dp"
-                android:paddingEnd="2dp"
-                android:paddingTop="2dp"
-                android:paddingBottom="2dp"
+                android:ellipsize="end"
+                android:maxLines="1"
+                android:paddingStart="10dp"
+                android:paddingEnd="4dp"
                 android:text=""
-                android:textColor="#4A7A38"
-                android:textSize="11sp"
-                android:visibility="gone" />
+                android:textColor="#9FB8DE"
+                android:textSize="10sp" />
 
-            <!-- 动态 tab 栏：通过 RemoteViewsFactory (LIST_KIND_TABS) 渲染主任务/副任务 chip -->
-            <GridView
-                android:id="@+id/nano_widget_tab_list"
-                android:layout_width="0dp"
-                android:layout_weight="1"
-                android:layout_height="36dp"
-                android:columnWidth="64dp"
-                android:numColumns="3"
-                android:stretchMode="columnWidth"
-                android:gravity="center_vertical"
-                android:horizontalSpacing="2dp"
-                android:verticalSpacing="0dp"
-                android:scrollbars="none"
-                android:fadingEdge="none"
-                android:overScrollMode="never"
-                android:requiresFadingEdge="none" />
+            <TextView
+                android:id="@+id/nano_widget_header_action_label"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:maxLines="1"
+                android:text="C位停泊坞"
+                android:textColor="#F6FBFF"
+                android:textSize="11sp" />
+
+            <TextView
+                android:layout_width="6dp"
+                android:layout_height="1dp" />
+
+            <ImageView
+                android:id="@+id/nano_widget_header_action_icon"
+                android:layout_width="18dp"
+                android:layout_height="18dp"
+                android:importantForAccessibility="no"
+                android:src="@drawable/nano_widget_icon_dock" />
         </LinearLayout>
 
-        <ListView
-            android:id="@+id/nano_widget_content_list"
+        <!-- 间距 -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="8dp" />
+
+        <!-- 横向虚线分隔 -->
+        <ImageView
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:importantForAccessibility="no"
+            android:scaleType="fitXY"
+            android:src="@drawable/nano_widget_divider_dashed_h" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="6dp" />
+
+        <!-- 4 插槽：主任务 + 副1/2/3 -->
+        <GridView
+            android:id="@+id/nano_widget_tab_list"
             android:layout_width="match_parent"
             android:layout_height="0dp"
             android:layout_weight="1"
-            android:clipToPadding="false"
-            android:divider="@android:color/transparent"
-            android:dividerHeight="8dp"
-            android:paddingTop="10dp"
-            android:paddingBottom="58dp"
-            android:scrollbars="none" />
-    </LinearLayout>
+            android:columnWidth="64dp"
+            android:fadingEdge="none"
+            android:gravity="center_vertical"
+            android:horizontalSpacing="4dp"
+            android:numColumns="4"
+            android:overScrollMode="never"
+            android:requiresFadingEdge="none"
+            android:scrollbars="none"
+            android:stretchMode="columnWidth"
+            android:verticalSpacing="0dp" />
 
-    <GridView
-        android:id="@+id/nano_widget_refresh_list"
-        android:layout_width="78dp"
-        android:layout_height="46dp"
-        android:layout_gravity="bottom|end"
-        android:columnWidth="78dp"
-        android:fadingEdge="none"
-        android:horizontalSpacing="0dp"
-        android:numColumns="1"
-        android:overScrollMode="never"
-        android:requiresFadingEdge="none"
-        android:scrollbars="none"
-        android:stretchMode="none"
-        android:verticalSpacing="0dp" />
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="6dp" />
+
+        <!-- 横向虚线分隔 -->
+        <ImageView
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:importantForAccessibility="no"
+            android:scaleType="fitXY"
+            android:src="@drawable/nano_widget_divider_dashed_h" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="6dp" />
+
+        <!-- 底栏：📁 备选区：N 个任务 ……  ›（已移除右下角刷新，底栏占满宽度） -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <ImageView
+                android:layout_width="18dp"
+                android:layout_height="18dp"
+                android:importantForAccessibility="no"
+                android:src="@drawable/nano_widget_icon_archive" />
+
+            <TextView
+                android:layout_width="6dp"
+                android:layout_height="1dp" />
+
+            <TextView
+                android:id="@+id/nano_widget_footer_label"
+                android:layout_width="0dp"
+                android:layout_weight="1"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:maxLines="1"
+                android:text=""
+                android:textColor="#F6FBFF"
+                android:textSize="12sp" />
+
+            <GridView
+                android:id="@+id/nano_widget_focus_actions_list"
+                android:layout_width="196dp"
+                android:layout_height="42dp"
+                android:columnWidth="48dp"
+                android:fadingEdge="none"
+                android:horizontalSpacing="4dp"
+                android:numColumns="4"
+                android:overScrollMode="never"
+                android:requiresFadingEdge="none"
+                android:scrollbars="none"
+                android:stretchMode="columnWidth"
+                android:verticalSpacing="0dp" />
+
+            <ImageView
+                android:layout_width="14dp"
+                android:layout_height="14dp"
+                android:importantForAccessibility="no"
+                android:src="@drawable/nano_widget_icon_chevron" />
+        </LinearLayout>
+
+        <!-- 内容列表在 Focus 模式下不显示，但保留 ID 以免 Factory/Renderer 崩溃 -->
+        <ListView
+            android:id="@+id/nano_widget_content_list"
+            android:layout_width="0dp"
+            android:layout_height="0dp"
+            android:visibility="gone" />
+    </LinearLayout>
 </FrameLayout>

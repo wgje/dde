@@ -13,6 +13,8 @@ import {
   ChangeDetectionStrategy, 
   inject,
   computed,
+  effect,
+  signal,
   input,
   output
 } from '@angular/core';
@@ -56,14 +58,20 @@ export interface StrataRestoreEvent {
       @if (visibleItems().length > 0) {
         <div class="px-2 pb-1.5">
           @for (item of visibleItems(); track item.id) {
-            <div class="strata-fossil-item flex items-center gap-1 min-w-0 py-[3px]">
+            <div class="strata-fossil-item flex gap-1 min-w-0 py-[3px]"
+                 [class.items-center]="!isExpanded()"
+                 [class.items-start]="isExpanded()">
               <!-- 类型指示符 -->
               <span class="w-1.5 h-1.5 rounded-full shrink-0"
+                    [class.mt-1]="isExpanded()"
                     [class]="item.type === 'black_box' ? 'bg-amber-600/50' : 'bg-stone-400/40'">
               </span>
               <!-- 标题 -->
-              <span class="text-[10px] truncate leading-tight flex-1 min-w-0"
+              <span class="text-[10px] leading-tight flex-1 min-w-0"
                     [class]="colorTier().subTextClass"
+                    [class.truncate]="!isExpanded()"
+                    [class.whitespace-normal]="isExpanded()"
+                    [class.break-words]="isExpanded()"
                     [title]="item.title || '无标题'">
                 {{ item.title || '无标题' }}
               </span>
@@ -80,11 +88,32 @@ export interface StrataRestoreEvent {
               </button>
             </div>
           }
-          @if (layer().items.length > maxVisibleItems()) {
-            <span class="text-[8px] italic block mt-0.5 select-none"
-                  [class]="colorTier().subTextClass">
-              +{{ layer().items.length - maxVisibleItems() }} 更多…
-            </span>
+          @if (isExpanded()) {
+            <div class="mt-1.5 flex items-center justify-between gap-2">
+              <span class="text-[8px] font-mono select-none"
+                    [class]="colorTier().subTextClass">
+                已显示 {{ visibleItems().length }}/{{ layer().items.length }} 项
+              </span>
+              <button
+                type="button"
+                class="strata-overflow-toggle text-[8px] italic px-1.5 py-0.5 rounded border whitespace-nowrap"
+                [class]="colorTier().subTextClass"
+                [attr.aria-expanded]="isExpanded()"
+                [attr.aria-label]="overflowToggleLabel()"
+                (click)="toggleExpanded($event)">
+                收起
+              </button>
+            </div>
+          } @else if (hiddenItemsCount() > 0) {
+            <button
+              type="button"
+              class="strata-overflow-inline-toggle text-[8px] italic block mt-0.5 select-none"
+              [class]="colorTier().subTextClass"
+              [attr.aria-expanded]="false"
+              [attr.aria-label]="overflowToggleLabel()"
+              (click)="toggleExpanded($event)">
+              +{{ hiddenItemsCount() }} 更多…
+            </button>
           }
         </div>
       }
@@ -118,6 +147,29 @@ export interface StrataRestoreEvent {
       min-width: 38px;
       text-align: center;
     }
+
+    .strata-overflow-toggle {
+      background-color: rgba(120, 113, 108, 0.08);
+      border-color: rgba(217, 119, 6, 0.16);
+      transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
+    }
+
+    .strata-overflow-toggle:hover {
+      background-color: rgba(217, 119, 6, 0.12);
+      border-color: rgba(217, 119, 6, 0.3);
+    }
+
+    .strata-overflow-inline-toggle {
+      width: fit-content;
+      transition: color 150ms ease, opacity 150ms ease;
+    }
+
+    .strata-overflow-inline-toggle:hover {
+      opacity: 1;
+      text-decoration: underline;
+      text-decoration-color: rgba(217, 119, 6, 0.35);
+      text-underline-offset: 2px;
+    }
   `],
   changeDetection: ChangeDetectionStrategy.OnPush
 })
@@ -131,24 +183,52 @@ export class StrataLayerComponent {
   readonly restoreItem = output<StrataRestoreEvent>();
 
   private strataService = inject(StrataService);
+  private readonly isExpandedSignal = signal(false);
   
-  /** 最多展示的条目数（近期层多展示，老层少展示） */
-  readonly maxVisibleItems = computed(() => {
+  /** 折叠态下的默认展示数：保留原有层次密度，避免历史面板初始态过高。 */
+  readonly baseVisibleItems = computed(() => {
     const idx = this.index();
     if (idx <= 2) return 8;
     if (idx <= 6) return 5;
     return 3;
+  });
+
+  readonly isExpanded = computed(() => this.isExpandedSignal() && this.hiddenItemsCount() > 0);
+
+  /** 被折叠隐藏的条目数 */
+  readonly hiddenItemsCount = computed(() => {
+    return Math.max(0, this.layer().items.length - this.baseVisibleItems());
   });
   
   /** 日期标签 */
   readonly label = computed(() => this.strataService.getLayerLabel(this.layer().date));
 
   /** 可见条目 */
-  readonly visibleItems = computed(() => this.layer().items.slice(0, this.maxVisibleItems()));
+  readonly visibleItems = computed(() => {
+    if (this.isExpanded()) {
+      return this.layer().items;
+    }
+    return this.layer().items.slice(0, this.baseVisibleItems());
+  });
 
   /** 颜色分级 */
   readonly colorTier = computed<StrataColorTier>(() => {
     return this.strataService.getColorTier(this.index());
+  });
+
+  /** 展开/收起按钮标签 */
+  readonly overflowToggleLabel = computed(() => {
+    if (this.isExpanded()) {
+      return `收起${this.label()}，恢复显示前 ${this.baseVisibleItems()} 项`;
+    }
+    return `展开${this.label()}剩余 ${this.hiddenItemsCount()} 项`;
+  });
+
+  /** 当层内已无溢出项目时，自动清理展开意图，避免刷新后残留在展开态。 */
+  private readonly collapseResolvedOverflow = effect(() => {
+    if (this.hiddenItemsCount() === 0 && this.isExpandedSignal()) {
+      this.isExpandedSignal.set(false);
+    }
   });
 
   /**
@@ -157,5 +237,13 @@ export class StrataLayerComponent {
   onRestore(event: Event, item: StrataItem): void {
     event.stopPropagation();
     this.restoreItem.emit({ id: item.id, type: item.type });
+  }
+
+  /**
+   * 在保持沉积层外观不变的前提下，允许按日展开完整回顾。
+   */
+  toggleExpanded(event: Event): void {
+    event.stopPropagation();
+    this.isExpandedSignal.update(expanded => !expanded);
   }
 }

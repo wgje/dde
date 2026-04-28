@@ -198,6 +198,64 @@ export class BatchSyncService {
     };
   }
 
+  private getBatchChangeRevision(): number {
+    const tracker = this.changeTracker as unknown as {
+      getCurrentChangeRevision?: () => number;
+    };
+
+    if (typeof tracker.getCurrentChangeRevision === 'function') {
+      return tracker.getCurrentChangeRevision();
+    }
+
+    this.logger.warn('ChangeTracker revision API unavailable; falling back to conservative dirty cleanup');
+    return Number.POSITIVE_INFINITY;
+  }
+
+  private clearTaskChangeAfterSuccessfulPush(
+    projectId: string,
+    taskId: string,
+    batchChangeRevision: number,
+  ): void {
+    const tracker = this.changeTracker as unknown as {
+      clearTaskChangeIfFresh?: (projectId: string, taskId: string, notNewerThanRevision: number) => boolean;
+      clearTaskChange?: (projectId: string, taskId: string) => void;
+    };
+
+    if (typeof tracker.clearTaskChangeIfFresh === 'function') {
+      tracker.clearTaskChangeIfFresh(projectId, taskId, batchChangeRevision);
+      return;
+    }
+
+    tracker.clearTaskChange?.(projectId, taskId);
+  }
+
+  private clearConnectionChangeAfterSuccessfulPush(
+    projectId: string,
+    connectionId: string,
+    batchChangeRevision: number,
+  ): void {
+    const tracker = this.changeTracker as unknown as {
+      clearConnectionChangeIfFresh?: (projectId: string, connectionId: string, notNewerThanRevision: number) => boolean;
+    };
+
+    tracker.clearConnectionChangeIfFresh?.(projectId, connectionId, batchChangeRevision);
+  }
+
+  private markBatchSyncSuccess(): void {
+    const syncState = this.syncState as unknown as {
+      advanceLastSyncTimeIfIdle?: (time: string) => void;
+      setLastSyncTime?: (time: string) => void;
+    };
+    const syncTime = nowISO();
+
+    if (typeof syncState.advanceLastSyncTimeIfIdle === 'function') {
+      syncState.advanceLastSyncTimeIfIdle(syncTime);
+      return;
+    }
+
+    syncState.setLastSyncTime?.(syncTime);
+  }
+
   /**
    * 查询远端已存在的任务 ID。
    * 仅用于连接推送前做依赖校验，避免外键约束错误风暴。
@@ -599,7 +657,7 @@ export class BatchSyncService {
     // 【P2-16 修复】在推送前创建数据快照，防止推送期间 store 被用户编辑导致数据不一致
     // 【根因修复 2026-04-21】用 ChangeTracker 单调 revision 做清理水位：
     // 只清理不晚于 batchChangeRevision 的脏记录，保留期间用户产生的新编辑，避免同一毫秒碰撞。
-    const batchChangeRevision = this.changeTracker.getCurrentChangeRevision();
+    const batchChangeRevision = this.getBatchChangeRevision();
     const projectSnapshot: Project = {
       ...project,
       tasks: project.tasks.map(t => ({ ...t })),
@@ -724,7 +782,7 @@ export class BatchSyncService {
             }
           } else {
             // 【根因修复 2026-04-20】软删除连接上行成功即清脏记录，避免重推死循环。
-            this.changeTracker.clearConnectionChangeIfFresh(projectSnapshot.id, connection.id, batchChangeRevision);
+            this.clearConnectionChangeAfterSuccessfulPush(projectSnapshot.id, connection.id, batchChangeRevision);
           }
         } catch (e) {
           if (isPermanentFailureError(e)) {
@@ -820,7 +878,7 @@ export class BatchSyncService {
             // 无限重推循环：过去只在 batch 整体成功时才 clearProjectChanges，只要一项失败就
             // 永久保留所有成功项的 pending 记录，下一轮又整批重推（API 200 但 UI 待同步数永
             // 远不降）。使用 batchStartedAt 水位保护并发编辑：同步期间用户产生的新 edit 保留。
-            this.changeTracker.clearTaskChangeIfFresh(projectSnapshot.id, task.id, batchChangeRevision);
+            this.clearTaskChangeAfterSuccessfulPush(projectSnapshot.id, task.id, batchChangeRevision);
           } else {
             failedTaskIds.push(task.id);
             if (taskResult.retryEnqueued) {
@@ -883,7 +941,7 @@ export class BatchSyncService {
               target: connection.target,
             });
             // 【根因修复 2026-04-20】引用任务已在云端 purge，连接无需再推，直接清脏记录收口。
-            this.changeTracker.clearConnectionChangeIfFresh(projectSnapshot.id, connection.id, batchChangeRevision);
+            this.clearConnectionChangeAfterSuccessfulPush(projectSnapshot.id, connection.id, batchChangeRevision);
             continue;
           }
 
@@ -916,7 +974,7 @@ export class BatchSyncService {
             target: blocked.target,
           });
           // 【根因修复 2026-04-20】引用任务已 purge，连接无需再推，清脏记录收口避免无限重推。
-          this.changeTracker.clearConnectionChangeIfFresh(projectSnapshot.id, blocked.id, batchChangeRevision);
+          this.clearConnectionChangeAfterSuccessfulPush(projectSnapshot.id, blocked.id, batchChangeRevision);
           continue;
         }
 
@@ -952,7 +1010,7 @@ export class BatchSyncService {
             }
           } else {
             // 【根因修复 2026-04-20】连接上行成功即清脏记录，解除"全或无"清理策略。
-            this.changeTracker.clearConnectionChangeIfFresh(projectSnapshot.id, connection.id, batchChangeRevision);
+            this.clearConnectionChangeAfterSuccessfulPush(projectSnapshot.id, connection.id, batchChangeRevision);
           }
         } catch (e) {
           if (isPermanentFailureError(e)) {
@@ -989,10 +1047,32 @@ export class BatchSyncService {
       
       this.syncState.setSyncing(false);
       if (success) {
-        this.syncState.advanceLastSyncTimeIfIdle(nowISO());
+        this.markBatchSyncSuccess();
         this.syncState.setSyncError(null);
       } else {
-        this.syncState.setSyncError('部分同步失败，已进入重试队列');
+        // 【根因修复 2026-04-22】失败分支此前无条件写 syncError，即使所有失败项都已入
+        // RetryQueue（后续回放会推 markSyncRecoveredIfIdle 收口），红错条也会停留到下一
+        // 次成功 batch 为止。重新评估失败归宿：
+        //  - 所有失败（包括 project 自身）都进了 RetryQueue → 视为"已自愈"交接，不写
+        //    syncError（保留 pendingCount 提示足矣）；RetryQueue 回放成功后会自动清错。
+        //  - 存在未入队失败（RetryQueue 已满/存储冻结/project 重试入队失败）→ 才写红错。
+        const retryEnqueuedSet = new Set(dedupedRetryEnqueued);
+        const allTasksHandedOff = dedupedFailedTaskIds.every(
+          id => retryEnqueuedSet.has(`task:${id}`)
+        );
+        const allConnectionsHandedOff = dedupedFailedConnectionIds.every(
+          id => retryEnqueuedSet.has(`connection:${id}`)
+        );
+        const projectHandedOff = projectPushed || retryEnqueuedSet.has(`project:${project.id}`);
+        const fullyHandedOffToRetryQueue =
+          projectHandedOff && allTasksHandedOff && allConnectionsHandedOff;
+
+        if (fullyHandedOffToRetryQueue) {
+          // 全部失败已交接给 RetryQueue：清理可能残留的旧错误文案，交由 RetryQueue 回放收口。
+          this.syncState.setSyncError(null);
+        } else {
+          this.syncState.setSyncError('部分同步失败，已进入重试队列');
+        }
       }
       
       // 更新熔断器已知任务数

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Gate 场景：箭头 chip 使用 accent 填充（深蓝灰色） + 按下水波反馈 -->
+<!-- Gate 选中 chip 与 Focus 共享同一套蓝图高亮语义 -->
 <ripple xmlns:android="http://schemas.android.com/apk/res/android"
-    android:color="#66FFFFFF">
+    android:color="#33FFFFFF">
     <item android:id="@android:id/mask">
         <shape android:shape="rectangle">
             <solid android:color="#FFFFFFFF" />
@@ -10,9 +10,9 @@
     </item>
     <item>
         <shape android:shape="rectangle">
-            <solid android:color="#3E5270" />
-            <corners android:radius="12dp" />
+            <solid android:color="#F4F8FF" />
+            <corners android:radius="14dp" />
+            <stroke android:width="1dp" android:color="#33FFFFFF" />
         </shape>
     </item>
 </ripple>
-

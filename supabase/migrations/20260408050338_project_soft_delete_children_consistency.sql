@@ -151,4 +151,4 @@ BEGIN
       deleted_at = GREATEST(public.connection_tombstones.deleted_at, EXCLUDED.deleted_at),
       deleted_by = COALESCE(public.connection_tombstones.deleted_by, EXCLUDED.deleted_by);
 END;
-$$;
+$$;;

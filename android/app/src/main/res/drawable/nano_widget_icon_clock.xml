@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 蓝图线稿：钟 图标 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="14dp"
+    android:height="14dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:strokeColor="#BFD7FF"
+        android:strokeWidth="1.4"
+        android:fillColor="#00000000"
+        android:pathData="M12,3 A9,9 0 1,1 11.99,3 Z" />
+    <path
+        android:strokeColor="#BFD7FF"
+        android:strokeWidth="1.4"
+        android:fillColor="#00000000"
+        android:pathData="M12,7 L12,12 L16,14" />
+</vector>

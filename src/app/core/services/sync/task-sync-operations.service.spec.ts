@@ -35,12 +35,26 @@ function setVisibilityState(state: DocumentVisibilityState): void {
 describe('TaskSyncOperationsService', () => {
   let service: TaskSyncOperationsService;
   let upsertPayload: Record<string, unknown> | null;
+  const mockProjectDataService = {
+    rowToTask: vi.fn((row: Task) => row),
+  };
   const mockTombstoneService = {
     addLocalTombstones: vi.fn(),
     invalidateCache: vi.fn(),
     deleteAttachmentFilesFromStorage: vi.fn().mockResolvedValue(undefined),
     getTombstonesWithCache: vi.fn().mockResolvedValue({ data: [], error: null }),
     getLocalTombstones: vi.fn(() => new Set<string>()),
+    getLocalTombstoneTimestamp: vi.fn(() => undefined),
+    clearLocalTombstones: vi.fn(),
+    shouldMaterializeTaskDeletion: vi.fn((updatedAt: string | undefined | null, tombstoneTimestamp?: number) => {
+      if (tombstoneTimestamp === undefined) {
+        return false;
+      }
+      if (!updatedAt) {
+        return true;
+      }
+      return new Date(updatedAt).getTime() <= tombstoneTimestamp;
+    }),
   };
   const mockRetryQueue = {
     checkCircuitBreaker: vi.fn(() => true),
@@ -184,7 +198,7 @@ describe('TaskSyncOperationsService', () => {
           provide: TombstoneService,
           useValue: mockTombstoneService,
         },
-        { provide: ProjectDataService, useValue: {} },
+        { provide: ProjectDataService, useValue: mockProjectDataService },
         {
           provide: RetryQueueService,
           useValue: mockRetryQueue,
@@ -391,6 +405,51 @@ describe('TaskSyncOperationsService', () => {
     expect(result).toBe(1);
     expect(mockRetryQueue.removeByEntities).toHaveBeenCalledWith('task', ['task-soft-delete-scoped']);
     expect(mockRetryQueue.removeConnectionsReferencingTasks).toHaveBeenCalledWith('project-1', ['task-soft-delete-scoped']);
+  });
+
+  it('pullTasks 不应把 updatedAt 晚于 tombstone deleted_at 的恢复任务重新标记为删除', async () => {
+    const restoredTask = {
+      id: 'task-restored',
+      title: '任务',
+      content: '内容',
+      stage: 1,
+      parentId: null,
+      order: 0,
+      rank: 10000,
+      status: 'active',
+      x: 0,
+      y: 0,
+      updatedAt: '2026-04-23T01:00:00.000Z',
+      createdDate: '2026-04-23T00:00:00.000Z',
+      deletedAt: null,
+      displayId: 'T-RESTORE',
+      attachments: [],
+      tags: [],
+    } satisfies Task;
+
+    mockClient.from.mockImplementationOnce((table: string) => {
+      if (table === 'tasks') {
+        return {
+          select: vi.fn(() => ({
+            eq: vi.fn(async () => ({
+              data: [restoredTask],
+              error: null,
+            })),
+          })),
+        };
+      }
+
+      throw new Error(`Unexpected table: ${table}`);
+    });
+    mockTombstoneService.getTombstonesWithCache.mockResolvedValueOnce({
+      data: [{ task_id: 'task-restored', deleted_at: '2026-04-23T00:00:00.000Z' }],
+      error: null,
+    });
+
+    const result = await service.pullTasks('project-1');
+
+    expect(result).toHaveLength(1);
+    expect(result[0]?.deletedAt).toBeNull();
   });
 
   it('pushTask 在 tombstone 查询失败时应 fail closed，避免误复活已删任务', async () => {

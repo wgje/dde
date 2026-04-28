@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Gate/Setup/Stale 等状态的背景：冷灰调 -->
+<!-- Gate 根背景：更深一阶的钴蓝底，保留同一套白色技术描边 -->
 <shape xmlns:android="http://schemas.android.com/apk/res/android"
     android:shape="rectangle">
-    <solid android:color="#F5F6F7" />
+    <solid android:color="#082754" />
     <corners android:radius="28dp" />
-    <stroke android:width="1dp" android:color="#DCE0E5" />
+    <stroke android:width="1dp" android:color="#CCFFFFFF" />
 </shape>

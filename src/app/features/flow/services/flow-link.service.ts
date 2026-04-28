@@ -491,6 +491,14 @@ export class FlowLinkService {
       currentEditor.isCrossTree === options.isCrossTree;
 
     if (isSameConnection) {
+      const syncedPreviewData = currentEditor.mode === 'edit'
+        ? currentEditor
+        : {
+            ...currentEditor,
+            title,
+            description,
+          };
+
       if (
         this.uiState.isMobile() &&
         currentEditor.isCrossTree &&
@@ -505,7 +513,7 @@ export class FlowLinkService {
         this.logger.debug('移动端同一跨树关联二次点击，切换到编辑态');
         this.armConnectionEditorBackgroundCloseGuard();
         this.connectionEditorData.set({
-          ...currentEditor,
+          ...syncedPreviewData,
           mode: 'edit',
         });
         return;
@@ -516,11 +524,21 @@ export class FlowLinkService {
         return;
       }
 
-      if (currentEditor.mode !== editorMode) {
-        this.logger.debug('同一关联块切换模式', { from: currentEditor.mode, to: editorMode });
-        this.armConnectionEditorBackgroundCloseGuard();
+      const shouldSyncPreviewContent =
+        currentEditor.mode !== 'edit' &&
+        (currentEditor.title !== title || currentEditor.description !== description);
+
+      if (currentEditor.mode !== editorMode || shouldSyncPreviewContent) {
+        this.logger.debug('同一关联块同步内容/切换模式', {
+          from: currentEditor.mode,
+          to: editorMode,
+          contentChanged: shouldSyncPreviewContent,
+        });
+        if (currentEditor.mode !== editorMode) {
+          this.armConnectionEditorBackgroundCloseGuard();
+        }
         this.connectionEditorData.set({
-          ...currentEditor,
+          ...syncedPreviewData,
           mode: editorMode,
         });
       }

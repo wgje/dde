@@ -20,7 +20,11 @@ import {
   FocusSessionState,
   HighLoadCounter,
 } from '../models/parking-dock';
-import { buildOverflowMeta, toFocusTaskSlot, isAutoPromotableStatus } from './dock-engine.utils';
+import {
+  buildOverflowMeta,
+  isAutoPromotableStatus,
+  toFocusTaskSlot,
+} from './dock-engine.utils';
 import { computeThreeDimensionalRecommendation } from './dock-scheduler.rules';
 import { DockSnapshotPersistenceService, type SnapshotNormalizeContext } from './dock-snapshot-persistence.service';
 import { DockCompletionFlowService } from './dock-completion-flow.service';
@@ -30,6 +34,20 @@ import { DockFragmentRestService } from './dock-fragment-rest.service';
 import { DockEngineLifecycleService } from './dock-engine-lifecycle.service';
 import { LoggerService } from './logger.service';
 import { UiStateService } from './ui-state.service';
+
+function entryOrder(entry: DockEntry): number {
+  return Number.isFinite(entry.manualOrder) ? Number(entry.manualOrder) : entry.dockedOrder;
+}
+
+function sortEntriesByDockOrder(entries: DockEntry[]): DockEntry[] {
+  return [...entries].sort((a, b) => {
+    if (a.status === 'completed' && b.status !== 'completed') return 1;
+    if (b.status === 'completed' && a.status !== 'completed') return -1;
+    const orderDelta = entryOrder(a) - entryOrder(b);
+    if (orderDelta !== 0) return orderDelta;
+    return a.taskId.localeCompare(b.taskId);
+  });
+}
 
 // ---------------------------------------------------------------------------
 //  Context interface — engine 在 constructor 中调用 init() 注入信号引用
@@ -70,6 +88,15 @@ export interface DockSnapshotManagerContext {
   persistDockExpandedPreference: (expanded: boolean) => void;
   clearFirstMainSelectionWindow: () => void;
   rebalanceAutoZones: () => void;
+}
+
+interface SessionEntryHydrationContext {
+  session: DockSessionState;
+  commandOrder: Map<string, number>;
+  fallbackOrder: Map<string, number>;
+  comboSet: Set<string>;
+  backupSet: Set<string>;
+  hasLaneHints: boolean;
 }
 
 @Injectable({
@@ -142,7 +169,11 @@ export class DockSnapshotManagerService {
   restoreSnapshot(snapshot: DockSnapshot): void {
     const normalized = this.snapshotPersistence.normalizeSnapshot(snapshot, this.buildNormalizeContext());
     if (!normalized) return;
-    const hydratedEntries = this.applySessionToEntries(normalized.entries, normalized.session);
+    const hydratedEntries = this.applySessionToEntries(
+      normalized.entries,
+      normalized.session,
+      normalized.focusSessionState?.commandCenterOrderIds,
+    );
     const recoveredEntries = this.snapshotPersistence.recoverLegacyExternalDragDefaultBackup(hydratedEntries);
     const recoveredWithMain = this.completionFlow.enforceSingleMainInvariant(
       recoveredEntries,
@@ -199,7 +230,14 @@ export class DockSnapshotManagerService {
    */
   buildFocusSessionState(): FocusSessionState {
     const context = this.ensureFocusSessionContext();
-    const activeEntries = this.ctx.entries().filter(e => e.status !== 'completed');
+    const activeEntries = sortEntriesByDockOrder(this.ctx.entries().filter(e => e.status !== 'completed'));
+    const commandCenterCandidates = activeEntries.filter(
+      entry => entry.isMain || entry.lane === 'combo-select' || entry.status === 'focusing',
+    );
+    const commandCenterOrderIds = this.completionFlow
+      .sortConsoleEntriesForDisplay(commandCenterCandidates)
+      .slice(0, 4)
+      .map(entry => entry.taskId);
 
     const commandTasks = activeEntries
       .filter(e => e.isMain)
@@ -217,6 +255,7 @@ export class DockSnapshotManagerService {
       sessionStartedAt: context.startedAt,
       isActive: true,
       isFocusOverlayOn: this.ctx.focusScrimOn(),
+      commandCenterOrderIds,
       commandCenterTasks: commandTasks,
       comboSelectTasks,
       backupTasks,
@@ -277,10 +316,10 @@ export class DockSnapshotManagerService {
   }
 
   buildSessionState(entries: DockEntry[] = this.ctx.entries()): DockSessionState {
-    const activeEntries = entries.filter(entry => entry.status !== 'completed');
+    const activeEntries = sortEntriesByDockOrder(entries.filter(entry => entry.status !== 'completed'));
     const mainCandidate =
-      activeEntries.find(entry => entry.status === 'focusing') ??
       activeEntries.find(entry => entry.isMain) ??
+      activeEntries.find(entry => entry.status === 'focusing') ??
       null;
     return {
       firstDragIntervened: this.ctx.firstDragIntervened(),
@@ -303,35 +342,111 @@ export class DockSnapshotManagerService {
     };
   }
 
-  applySessionToEntries(entries: DockEntry[], session: DockSessionState): DockEntry[] {
+  applySessionToEntries(
+    entries: DockEntry[],
+    session: DockSessionState,
+    commandCenterOrderIds: string[] = [],
+  ): DockEntry[] {
+    const activeTaskIds = new Set(entries.filter(entry => entry.status !== 'completed').map(entry => entry.taskId));
+    const commandCenterOrder = this.buildCommandCenterOrder(commandCenterOrderIds, activeTaskIds);
+    const commandOrder = new Map(commandCenterOrder.map((taskId, index) => [taskId, index] as const));
+    const fallbackOrder = this.buildSessionFallbackOrder(session, activeTaskIds, commandOrder);
     const comboSet = new Set(session.comboSelectIds);
     const backupSet = new Set(session.backupIds);
-    const hasLaneHints = comboSet.size > 0 || backupSet.size > 0;
+    const hydrationContext: SessionEntryHydrationContext = {
+      session,
+      commandOrder,
+      fallbackOrder,
+      comboSet,
+      backupSet,
+      hasLaneHints: comboSet.size > 0 || backupSet.size > 0,
+    };
 
     // M-9 fix: 提取 lane 分配逻辑为辅助函数，消除 6 层嵌套三元
     const assignLane = (entry: DockEntry, markMain: boolean): DockEntry => {
-      if (entry.status === 'completed') return entry;
-      if (markMain && entry.taskId === session.mainTaskId) return { ...entry, isMain: true };
-      if (entry.isMain) return entry;
-      if (!hasLaneHints) return entry;
-      if (comboSet.has(entry.taskId)) return { ...entry, lane: 'combo-select' };
-      if (backupSet.has(entry.taskId)) return { ...entry, lane: 'backup' };
-      return entry;
+      return this.applySessionEntryState(entry, markMain, hydrationContext);
     };
 
     if (!session.mainTaskId) {
       const hydrated = entries.map(e => assignLane(e, false));
-      return this.completionFlow.enforceSingleMainInvariant(hydrated, null);
+      const fallbackMainTaskId = session.comboSelectIds[0] ?? session.backupIds[0] ?? null;
+      return sortEntriesByDockOrder(this.completionFlow.enforceSingleMainInvariant(hydrated, fallbackMainTaskId));
     }
 
     const hasMain = entries.some(entry => entry.isMain && entry.status !== 'completed');
     if (hasMain || !entries.some(entry => entry.taskId === session.mainTaskId)) {
       const hydrated = entries.map(e => assignLane(e, false));
-      return this.completionFlow.enforceSingleMainInvariant(hydrated, session.mainTaskId);
+      return sortEntriesByDockOrder(this.completionFlow.enforceSingleMainInvariant(hydrated, session.mainTaskId));
     }
 
     const hydrated = entries.map(e => assignLane(e, true));
-    return this.completionFlow.enforceSingleMainInvariant(hydrated, session.mainTaskId);
+    return sortEntriesByDockOrder(this.completionFlow.enforceSingleMainInvariant(hydrated, session.mainTaskId));
+  }
+
+  private applySessionEntryState(
+    entry: DockEntry,
+    markMain: boolean,
+    context: SessionEntryHydrationContext,
+  ): DockEntry {
+    if (entry.status === 'completed') return entry;
+    if (entry.taskId === context.session.mainTaskId && (markMain || entry.isMain)) {
+      const nextOrder = this.resolveSnapshotEntryOrder(entry, context);
+      return { ...entry, isMain: true, dockedOrder: nextOrder, manualOrder: nextOrder };
+    }
+    if (!context.hasLaneHints) {
+      return context.commandOrder.has(entry.taskId) ? this.withSnapshotEntryOrder(entry, context) : entry;
+    }
+    if (context.comboSet.has(entry.taskId)) {
+      const nextOrder = this.resolveSnapshotEntryOrder(entry, context);
+      return { ...entry, lane: 'combo-select', isMain: false, dockedOrder: nextOrder, manualOrder: nextOrder };
+    }
+    if (context.backupSet.has(entry.taskId)) {
+      const nextOrder = this.resolveSnapshotEntryOrder(entry, context);
+      return { ...entry, lane: 'backup', isMain: false, dockedOrder: nextOrder, manualOrder: nextOrder };
+    }
+    if (entry.isMain) return entry;
+    if (context.commandOrder.has(entry.taskId)) return this.withSnapshotEntryOrder(entry, context);
+    return entry;
+  }
+
+  private resolveSnapshotEntryOrder(entry: DockEntry, context: SessionEntryHydrationContext): number {
+    return context.commandOrder.get(entry.taskId) ?? context.fallbackOrder.get(entry.taskId) ?? entryOrder(entry);
+  }
+
+  private withSnapshotEntryOrder(entry: DockEntry, context: SessionEntryHydrationContext): DockEntry {
+    const nextOrder = this.resolveSnapshotEntryOrder(entry, context);
+    if (entry.dockedOrder === nextOrder && entry.manualOrder === nextOrder) return entry;
+    return { ...entry, dockedOrder: nextOrder, manualOrder: nextOrder };
+  }
+
+  private buildCommandCenterOrder(commandCenterOrderIds: string[], activeTaskIds: Set<string>): string[] {
+    const seen = new Set<string>();
+    const ordered: string[] = [];
+    for (const taskId of commandCenterOrderIds) {
+      if (!activeTaskIds.has(taskId) || seen.has(taskId)) continue;
+      seen.add(taskId);
+      ordered.push(taskId);
+    }
+    return ordered;
+  }
+
+  private buildSessionFallbackOrder(
+    session: DockSessionState,
+    activeTaskIds: Set<string>,
+    commandOrder: Map<string, number>,
+  ): Map<string, number> {
+    const fallbackOrder = new Map<string, number>();
+    const seen = new Set<string>();
+    const enqueue = (taskId: string | null | undefined): void => {
+      if (!taskId || !activeTaskIds.has(taskId) || commandOrder.has(taskId) || seen.has(taskId)) return;
+      seen.add(taskId);
+      fallbackOrder.set(taskId, commandOrder.size + fallbackOrder.size);
+    };
+
+    enqueue(session.mainTaskId);
+    session.comboSelectIds.forEach(enqueue);
+    session.backupIds.forEach(enqueue);
+    return fallbackOrder;
   }
 
   /** 从规范化快照恢复所有信号状态 */

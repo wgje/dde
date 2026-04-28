@@ -194,7 +194,7 @@ export class SimpleSyncService {
   private async getSupabaseClient(): Promise<SupabaseClient | null> {
     if (!this.supabase.isConfigured) {
       const failure = classifySupabaseClientFailure(false);
-      this.syncState.update(s => ({ ...s, syncError: failure.message }));
+      this.syncStateService.setSyncError(failure.message);
       this.logger.warn('无法获取 Supabase 客户端', failure);
       return null;
     }
@@ -207,7 +207,7 @@ export class SimpleSyncService {
       return await this.supabase.clientAsync();
     } catch (error) {
       const failure = classifySupabaseClientFailure(true, error);
-      this.syncState.update(s => ({ ...s, syncError: failure.message }));
+      this.syncStateService.setSyncError(failure.message);
       this.logger.warn('无法获取 Supabase 客户端', {
         category: failure.category,
         message: failure.message
@@ -290,6 +290,12 @@ export class SimpleSyncService {
         return false;
       }
       return true;
+    });
+
+    this.syncStateService.registerSyncErrorListener((syncError) => {
+      if (syncError) {
+        this.retryQueueService.clearSuccessfulDrainFlag?.();
+      }
     });
 
     // 初始化 BatchSyncService 回调
@@ -511,6 +517,39 @@ export class SimpleSyncService {
     return true;
   }
 
+  private async ensureConnectivityRecoverySessionReady(reason: string): Promise<boolean> {
+    const sessionSnapshot = FEATURE_FLAGS.RESUME_SESSION_SNAPSHOT_V1
+      ? this.sessionManager.getRecentValidationSnapshot(10_000)
+      : null;
+
+    if (sessionSnapshot?.valid) {
+      return true;
+    }
+
+    const session = await this.sessionManager.validateOrRefreshOnResume(`connectivity:${reason}`);
+
+    if (session.deferred) {
+      const delayMs = Math.max(100, getRemainingBrowserNetworkResumeDelayMs() + 50);
+      this.scheduleConnectivityRecovery(`${reason}:session-deferred`, delayMs);
+      this.logger.info('连接恢复等待会话稳定后重试', {
+        reason,
+        delayMs,
+        deferredReason: session.reason ?? 'client-unready',
+      });
+      return false;
+    }
+
+    if (!session.ok) {
+      this.logger.info('连接恢复因会话不可用而跳过', {
+        reason,
+        failureReason: session.reason,
+      });
+      return false;
+    }
+
+    return true;
+  }
+
   private scheduleConnectivityRecovery(reason: string, delayMs: number = SYNC_CONFIG.DEBOUNCE_DELAY): void {
     if (!this.runtimeStarted || this.connectivityRecoveryTimer) {
       return;
@@ -554,6 +593,15 @@ export class SimpleSyncService {
   }
 
   private async restoreRemoteConnectivityInternal(reason: string, recoveryEpoch: number): Promise<void> {
+    const sessionReady = await this.ensureConnectivityRecoverySessionReady(reason);
+    if (!this.runtimeStarted || recoveryEpoch !== this.connectivityRecoveryEpoch) {
+      return;
+    }
+
+    if (!sessionReady) {
+      return;
+    }
+
     const reachable = await this.probeRemoteReachability(reason, SYNC_CONFIG.CONNECTIVITY_PROBE_TIMEOUT, true);
     if (!this.runtimeStarted || recoveryEpoch !== this.connectivityRecoveryEpoch) {
       return;
@@ -1014,8 +1062,12 @@ export class SimpleSyncService {
     return this.taskSyncOps.deleteTask(taskId, projectId, sourceUserId, fromRetryQueue);
   }
   
-  async softDeleteTasksBatch(projectId: string, taskIds: string[]): Promise<number> {
-    return this.taskSyncOps.softDeleteTasksBatch(projectId, taskIds);
+  async softDeleteTasksBatch(
+    projectId: string,
+    taskIds: string[],
+    tombstoneTimestamps?: Record<string, string | number | null | undefined>,
+  ): Promise<number> {
+    return this.taskSyncOps.softDeleteTasksBatch(projectId, taskIds, tombstoneTimestamps);
   }
   
   async purgeTasksFromCloud(projectId: string, taskIds: string[], sourceUserId?: string): Promise<boolean> {
@@ -1034,8 +1086,12 @@ export class SimpleSyncService {
     return this.taskSyncOps.getLocalTombstones(projectId);
   }
   
-  addLocalTombstones(projectId: string, taskIds: string[]): void {
-    this.taskSyncOps.addLocalTombstones(projectId, taskIds);
+  addLocalTombstones(
+    projectId: string,
+    taskIds: string[],
+    timestampsByTaskId?: Record<string, string | number | null | undefined>,
+  ): void {
+    this.taskSyncOps.addLocalTombstones(projectId, taskIds, timestampsByTaskId);
   }
   
   private topologicalSortTasks(tasks: Task[]): Task[] {
@@ -1416,7 +1472,7 @@ export class SimpleSyncService {
     if (enqueued) {
       this.state.update(s => ({ ...s, pendingCount: this.retryQueueService.length }));
     } else {
-      this.state.update(s => ({ ...s, syncError: '同步队列已满，暂未写入重试队列' }));
+      this.syncStateService.setSyncError('同步队列已满，暂未写入重试队列');
     }
 
     return enqueued;
@@ -1444,7 +1500,7 @@ export class SimpleSyncService {
     if (enqueued) {
       this.state.update(s => ({ ...s, pendingCount: this.retryQueueService.length }));
     } else {
-      this.state.update(s => ({ ...s, syncError: '同步队列已满，暂未写入重试队列' }));
+      this.syncStateService.setSyncError('同步队列已满，暂未写入重试队列');
     }
 
     return enqueued;

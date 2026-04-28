@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 主任务插槽：高亮细边框，圆角 14dp，轻微透明白底 -->
+<ripple xmlns:android="http://schemas.android.com/apk/res/android"
+    android:color="#22FFFFFF">
+    <item android:id="@android:id/mask">
+        <shape android:shape="rectangle">
+            <solid android:color="#FFFFFFFF" />
+            <corners android:radius="14dp" />
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="#142A4E7A" />
+            <corners android:radius="14dp" />
+            <stroke android:width="1.6dp" android:color="#F6FBFF" />
+        </shape>
+    </item>
+</ripple>

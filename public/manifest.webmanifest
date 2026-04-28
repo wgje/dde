@@ -6,8 +6,8 @@
   "display": "standalone",
   "scope": "./",
   "start_url": "./",
-  "theme_color": "#111827",
-  "background_color": "#111827",
+  "theme_color": "#F9F8F6",
+  "background_color": "#F9F8F6",
   "shortcuts": [
     {
       "name": "打开工作区",

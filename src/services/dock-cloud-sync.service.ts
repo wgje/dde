@@ -23,6 +23,7 @@ import {
   type SnapshotNormalizeContext,
 } from './dock-snapshot-persistence.service';
 import { LoggerService } from './logger.service';
+import { SupabaseClientService } from './supabase-client.service';
 import { withTimeout } from '../utils/timeout';
 import { TimerHandle } from '../utils/timer-handle';
 import { supabaseErrorToError } from '../utils/supabase-error';
@@ -61,6 +62,7 @@ export class DockCloudSyncService implements OnDestroy {
   private readonly syncService = inject(SimpleSyncService);
   private readonly actionQueue = inject(ActionQueueService);
   private readonly snapshotPersistence = inject(DockSnapshotPersistenceService);
+  private readonly supabase = inject(SupabaseClientService);
   private readonly logger = inject(LoggerService).category('DockCloudSync');
 
   private readonly cloudPushTimer = new TimerHandle();
@@ -72,6 +74,12 @@ export class DockCloudSyncService implements OnDestroy {
   private circuitBreakerResetTimer = new TimerHandle();
   /** 免费层优化：按 owner 记录上次入队的快照指纹，避免跨账号相互去重 */
   private readonly lastEnqueuedSnapshotFingerprints = new Map<string, string>();
+  /**
+   * 按 owner 记录上次已调度推送时的 focusMode 布尔值。
+   * 用于检测「专注模式切换」这类语义关键的状态转换——
+   * 该类转换不走 3s 防抖，直接 0 延迟 flush，确保小组件 / 多设备能瞬时响应。
+   */
+  private readonly lastScheduledFocusMode = new Map<string, boolean>();
 
   private callbacks: CloudSyncEngineCallbacks | null = null;
 
@@ -125,7 +133,75 @@ export class DockCloudSyncService implements OnDestroy {
       cb.scheduleLocalPersist(frozenSnapshot, userId);
       this.enqueueFocusSessionSync(userId, frozenSnapshot);
     };
-    this.cloudPushTimer.schedule(runPush, CLOUD_PUSH_DEBOUNCE_MS);
+
+    // 专注模式切换 fast-path：focusMode 翻转是语义关键状态转换
+    // （widget/多设备需要瞬时感知），跳过 3s 防抖直接 0ms 调度。
+    // 其它类型改动（entry 增删、标题编辑等）仍走防抖，避免高频写入冲击 FCM 配额。
+    const nextFocusMode = frozenSnapshot.focusMode === true;
+    const prevFocusMode = this.lastScheduledFocusMode.get(userId);
+    const isFocusModeTransition = prevFocusMode !== undefined && prevFocusMode !== nextFocusMode;
+    const shouldFastTrackWidgetSync = isFocusModeTransition;
+    this.lastScheduledFocusMode.set(userId, nextFocusMode);
+
+    const delayMs = shouldFastTrackWidgetSync ? 0 : CLOUD_PUSH_DEBOUNCE_MS;
+    this.cloudPushTimer.schedule(runPush, delayMs);
+
+    // 2026-04-22 颠覆性压缩 (plan D)：focusMode 翻转瞬间并行直调 widget-notify 绕过
+    // 「ActionQueue → DB upsert → pg_net 轮询 → widget-notify」的 3-8s 链路。
+    // 直调路径用用户 JWT 认证，edge function 在同一张 widget_notify_events 表上做幂等，
+    // 若 pg_net 后续仍送达则会被去重 kind='duplicate' 静默丢弃，不会导致双推。
+    if (shouldFastTrackWidgetSync) {
+      void this.sendDirectFocusNotify(userId, frozenSnapshot, nextFocusMode);
+    }
+  }
+
+  /**
+   * 直接调用 widget-notify Edge Function，不等 DB trigger + pg_net。
+   * 失败无副作用——DB 仍会通过 ActionQueue 正常写入并触发 fallback 通知路径。
+   */
+  private async sendDirectFocusNotify(
+    userId: string,
+    snapshot: DockSnapshot,
+    focusActive: boolean,
+  ): Promise<void> {
+    try {
+      const client = await this.supabase.clientAsync();
+      if (!client) {
+        return;
+      }
+      // 幂等键 = focus session id + 状态 hash，让同一次翻转在 trigger fallback 到达时命中去重。
+      const focusSessionId = snapshot.session?.focusSessionId
+        ?? snapshot.focusSessionState?.sessionId
+        ?? snapshot.session?.mainTaskId
+        ?? crypto.randomUUID();
+      const webhookId = `pwa-direct-${focusSessionId}-${focusActive ? 'on' : 'off'}-${Math.floor(Date.now() / 1000)}`;
+      const updatedAt = snapshot.savedAt ?? new Date().toISOString();
+
+      const { error } = await client.functions.invoke('widget-notify', {
+        body: {
+          directNotify: true,
+          webhookId,
+          focusActive,
+          focusSessionId,
+          updatedAt,
+        },
+      });
+      if (error) {
+        // 401/409 在直调路径是可接受的（jwt 过期或重复事件），不升级为错误——
+        // DB trigger fallback 仍会在几秒内把事件送达 widget。
+        this.logger.debug('direct widget-notify skipped', {
+          userId,
+          focusActive,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    } catch (error) {
+      this.logger.debug('direct widget-notify threw', {
+        userId,
+        focusActive,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   // ─── Cloud Pull ───────────────────────────────
@@ -404,8 +480,15 @@ export class DockCloudSyncService implements OnDestroy {
     return JSON.stringify({
       fm: snapshot.focusMode,
       mt: snapshot.session?.mainTaskId ?? null,
-      cs: snapshot.session?.comboSelectIds?.length ?? 0,
-      ec: snapshot.entries?.length ?? 0,
+      cs: snapshot.session?.comboSelectIds ?? [],
+      bs: snapshot.session?.backupIds ?? [],
+      entries: snapshot.entries?.map(entry => ({
+        id: entry.taskId,
+        lane: entry.lane,
+        status: entry.status,
+        main: entry.isMain === true,
+        order: entry.manualOrder ?? entry.dockedOrder,
+      })) ?? [],
       ver: snapshot.version ?? 0,
       fs: snapshot.focusSessionState?.sessionId ?? null,
     });

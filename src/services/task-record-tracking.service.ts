@@ -468,9 +468,15 @@ export class TaskRecordTrackingService {
         }))
         .map(t => t.id);
 
+      const tombstoneTimestamps = Object.fromEntries(
+        project.tasks
+          .filter(t => justDeletedTaskIds.includes(t.id))
+          .map(t => [t.id, t.deletedAt ?? t.updatedAt ?? new Date().toISOString()])
+      );
+
       if (justDeletedTaskIds.length === 0) return;
 
-      const result = await this.syncCoordinator.softDeleteTasksBatch(projectId, justDeletedTaskIds);
+      const result = await this.syncCoordinator.softDeleteTasksBatch(projectId, justDeletedTaskIds, tombstoneTimestamps);
 
       if (result === -1) {
         this.logger.warn('服务端拒绝批量删除，回滚本地状态', { projectId, taskIds: justDeletedTaskIds });

@@ -81,11 +81,17 @@ export class FocusStartupProbeService {
 
     if (this.probePromise) {
       await this.probePromise;
-      return;
+      if (!options.force) {
+        return;
+      }
+
+      if (this.initializedForUser !== userId) {
+        return;
+      }
     }
 
     const capturedVersion = ++this.probeVersion;
-    this.probePromise = this.runProbe(capturedVersion, options).finally(() => {
+    this.probePromise = this.runProbe(capturedVersion, userId, options).finally(() => {
       this.probePromise = null;
     });
 
@@ -94,8 +100,11 @@ export class FocusStartupProbeService {
 
   private async runProbe(
     version: number,
+    userId: string,
     options: { reloadLocal: boolean; source: FocusProbeSource }
   ): Promise<void> {
+    let hasLocalGateSnapshot = false;
+
     try {
       if (options.reloadLocal) {
         await this.blackBoxSync.loadFromLocal();
@@ -107,24 +116,46 @@ export class FocusStartupProbeService {
         return;
       }
 
-      this.gateService.checkGate();
-      // 通过 GateService 抽象访问 gate 状态，不直接访问 store
-      this.pendingGateWorkSignal.set(this.gateService.state() === 'reviewing');
+      if (options.reloadLocal) {
+        this.applyGateSnapshot(options.source, 'local');
+        hasLocalGateSnapshot = true;
+      }
 
-      this.logger.debug('Focus 大门探针完成', {
-        source: options.source,
-        reloadLocal: options.reloadLocal,
-        pendingGateWork: this.pendingGateWorkSignal(),
+      await this.blackBoxSync.pullChanges({
+        reason: 'gate-review',
+        force: true,
+        expectedUserId: userId,
       });
+
+      if (version !== this.probeVersion) {
+        this.logger.debug('远端 gate 复核结果已过期，忽略本次结果');
+        return;
+      }
+
+      this.applyGateSnapshot(options.source, 'remote');
     } catch (error) {
       this.logger.warn('Focus 大门探针失败', {
         source: options.source,
         reloadLocal: options.reloadLocal,
+        hasLocalGateSnapshot,
         error,
       });
-      this.pendingGateWorkSignal.set(false);
+      if (!hasLocalGateSnapshot) {
+        this.pendingGateWorkSignal.set(false);
+      }
     } finally {
       this.probeDoneSignal.set(true);
     }
+  }
+
+  private applyGateSnapshot(source: FocusProbeSource, phase: 'local' | 'remote'): void {
+    this.gateService.checkGate();
+    this.pendingGateWorkSignal.set(this.gateService.state() === 'reviewing');
+
+    this.logger.debug('Focus 大门探针完成', {
+      source,
+      phase,
+      pendingGateWork: this.pendingGateWorkSignal(),
+    });
   }
 }

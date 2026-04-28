@@ -16,6 +16,7 @@ describe('GateCardComponent', () => {
       content: '门体测试内容',
       createdAt: new Date().toISOString(),
     }),
+    impactTick: signal(0),
     cardAnimation: signal<'idle' | 'entering' | 'heave_read' | 'heavy_drop' | 'settling'>('idle'),
     markAsRead: vi.fn(),
     markAsCompleted: vi.fn(),
@@ -39,6 +40,7 @@ describe('GateCardComponent', () => {
   });
 
   afterEach(() => {
+    vi.unstubAllGlobals();
     fixture.destroy();
     TestBed.resetTestingModule();
   });
@@ -75,6 +77,23 @@ describe('GateCardComponent', () => {
     component.onPointerUp({ pointerId: 1 } as PointerEvent);
 
     expect(mockGateService.markAsCompleted).toHaveBeenCalledOnce();
+  });
+
+  it('impact tick should only pulse the gate card scene', () => {
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      callback(0);
+      return 1;
+    });
+
+    fixture.detectChanges();
+
+    const scene = fixture.nativeElement.querySelector('.gate-card-scene') as HTMLElement;
+    expect(scene.classList.contains('impact-pulse')).toBe(false);
+
+    mockGateService.impactTick.update(value => value + 1);
+    fixture.detectChanges();
+
+    expect(scene.classList.contains('impact-pulse')).toBe(true);
   });
 
   it('drag up should trigger markAsRead', () => {

@@ -51,6 +51,15 @@ class NanoflowTwaLauncherActivity : LauncherActivity() {
     // ABH 基类立刻 finish() → 用户观感 = 点图标白屏闪退、无法进入项目。
     // 传 null 绕过这条恢复路径；LauncherActivity 自己不关心任何恢复的 UI 状态，无副作用。
     super.onCreate(null)
+    // 【2026-04-23 根因修复】MIUI / HyperOS 重装 APK 会把 autostart op 清零 →
+    // widget 点击永远被 GreezeManager 冻结。这里每个 versionCode 仅引导一次。
+    // 非 Xiaomi 设备走 no-op，不影响正常启动时延。
+    val autostartGuideLaunched = runCatching { MiuiAutostartGuide.maybePromptOnLaunch(this) }
+      .getOrDefault(false)
+    if (autostartGuideLaunched) {
+      finish()
+      return
+    }
     launchFromCurrentIntent()
   }
 
@@ -88,6 +97,8 @@ class NanoflowTwaLauncherActivity : LauncherActivity() {
           appWidgetId = request.appWidgetId,
           preferredEntrySource = request.entrySource,
           launchIntent = request.launchIntent,
+          requestedTaskIndex = request.taskIndex,
+          gateEntryId = request.gateEntryId,
         )
       }
     }
@@ -96,6 +107,7 @@ class NanoflowTwaLauncherActivity : LauncherActivity() {
       request.entrySource,
       request.launchIntent,
       bridgeContext = null,
+      gateEntryId = request.gateEntryId,
     )
   }
 
@@ -105,6 +117,7 @@ class NanoflowTwaLauncherActivity : LauncherActivity() {
     }
 
     resetReactiveRefreshGateIfNeeded()
+    scheduleWidgetRefreshBurstIfNeeded()
     logLaunchStarted()
     launchTwa()
   }
@@ -121,6 +134,22 @@ class NanoflowTwaLauncherActivity : LauncherActivity() {
     NanoflowWidgetReceiver.resetReactiveRefreshGate(
       context = applicationContext,
       reason = "widget-activity-launch",
+    )
+  }
+
+  private fun scheduleWidgetRefreshBurstIfNeeded() {
+    if (!NanoflowWidgetReceiver.hasInstalledWidgets(applicationContext)) {
+      return
+    }
+
+    val request = resolveLaunchRequest()
+    val reason = when (request.entrySource) {
+      NanoFlowEntrySource.WIDGET -> "twa-session-from-widget"
+      NanoFlowEntrySource.TWA -> "twa-session-from-launcher"
+    }
+    NanoflowWidgetRefreshWorker.scheduleTwaSessionRefreshBurst(
+      context = applicationContext,
+      reason = reason,
     )
   }
 
@@ -188,9 +217,11 @@ class NanoflowTwaLauncherActivity : LauncherActivity() {
       launchIntent = intent?.getStringExtra(EXTRA_LAUNCH_INTENT)
         ?.let { value -> NanoFlowLaunchIntent.entries.find { it.name == value } }
         ?: NanoFlowLaunchIntent.OPEN_WORKSPACE,
+      taskIndex = intent?.getIntExtra(NanoflowWidgetReceiver.EXTRA_TASK_INDEX, -1) ?: -1,
       entrySource = intent?.getStringExtra(EXTRA_ENTRY_SOURCE)
         ?.let { value -> NanoFlowEntrySource.entries.find { it.name == value } }
         ?: NanoFlowEntrySource.TWA,
+      gateEntryId = intent?.getStringExtra(EXTRA_GATE_ENTRY_ID),
     ).also { request ->
       cachedLaunchRequest = request
     }
@@ -208,7 +239,9 @@ class NanoflowTwaLauncherActivity : LauncherActivity() {
   private data class LaunchRequest(
     val appWidgetId: Int,
     val launchIntent: NanoFlowLaunchIntent,
+    val taskIndex: Int,
     val entrySource: NanoFlowEntrySource,
+    val gateEntryId: String? = null,
   )
 
   companion object {
@@ -217,17 +250,26 @@ class NanoflowTwaLauncherActivity : LauncherActivity() {
     private const val EXTRA_APP_WIDGET_ID = "extra.APP_WIDGET_ID"
     private const val EXTRA_LAUNCH_INTENT = "extra.LAUNCH_INTENT"
     private const val EXTRA_ENTRY_SOURCE = "extra.ENTRY_SOURCE"
+    private const val EXTRA_GATE_ENTRY_ID = "extra.GATE_ENTRY_ID"
 
     fun intentForWidget(
       context: Context,
       appWidgetId: Int,
       launchIntent: NanoFlowLaunchIntent,
+      taskIndex: Int = -1,
+      gateEntryId: String? = null,
     ): Intent {
       return Intent(context, NanoflowTwaLauncherActivity::class.java).apply {
         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
         putExtra(EXTRA_APP_WIDGET_ID, appWidgetId)
         putExtra(EXTRA_LAUNCH_INTENT, launchIntent.name)
         putExtra(EXTRA_ENTRY_SOURCE, NanoFlowEntrySource.WIDGET.name)
+        if (taskIndex >= 0) {
+          putExtra(NanoflowWidgetReceiver.EXTRA_TASK_INDEX, taskIndex)
+        }
+        if (!gateEntryId.isNullOrBlank()) {
+          putExtra(EXTRA_GATE_ENTRY_ID, gateEntryId)
+        }
       }
     }
   }

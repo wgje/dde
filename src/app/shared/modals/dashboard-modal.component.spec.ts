@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { DashboardModalComponent } from './dashboard-modal.component';
 import { ActionQueueService } from '../../../services/action-queue.service';
 import { SimpleSyncService } from '../../core/services/simple-sync.service';
+import { RetryQueueService } from '../../core/services/sync/retry-queue.service';
 import { AuthService } from '../../../services/auth.service';
 import { ConflictStorageService } from '../../../services/conflict-storage.service';
 import { ProjectOperationService } from '../../../services/project-operation.service';
@@ -69,6 +70,10 @@ describe('DashboardModalComponent conflict resolution', () => {
     syncState,
   };
 
+  const retryQueueMock = {
+    processQueue: vi.fn().mockResolvedValue(undefined),
+  };
+
   const authUserId = signal<string | null>('user-1');
   const authServiceMock = {
     currentUserId: authUserId,
@@ -119,6 +124,7 @@ describe('DashboardModalComponent conflict resolution', () => {
       providers: [
         { provide: ActionQueueService, useValue: actionQueueMock },
         { provide: SimpleSyncService, useValue: syncServiceMock },
+        { provide: RetryQueueService, useValue: retryQueueMock },
         { provide: AuthService, useValue: authServiceMock },
         { provide: ConflictStorageService, useValue: conflictStorageMock },
         { provide: ProjectOperationService, useValue: projectOpsMock },
@@ -269,5 +275,16 @@ describe('DashboardModalComponent conflict resolution', () => {
       '建议暂不可直接应用',
       '当前云端快照不是本轮最新结果，请先重新同步或逐项确认后再处理',
     );
+  });
+
+  it('retryAll 应先重放 RetryQueue，再处理 ActionQueue', async () => {
+    await component.retryAll();
+
+    expect(actionQueueMock.processQueue).toHaveBeenCalledOnce();
+    expect(retryQueueMock.processQueue).toHaveBeenCalledWith(undefined, true);
+    expect(retryQueueMock.processQueue.mock.invocationCallOrder[0]).toBeLessThan(
+      actionQueueMock.processQueue.mock.invocationCallOrder[0],
+    );
+    expect(toastMock.success).toHaveBeenCalledOnce();
   });
 });

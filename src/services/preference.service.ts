@@ -52,6 +52,10 @@ export class PreferenceService {
   private _autoResolveConflicts = signal(true);
   readonly autoResolveConflicts = this._autoResolveConflicts.asReadonly();
 
+  /** 最近一次跨设备同步的备份 proof-of-life */
+  private _lastBackupProofAt = signal<string | null>(null);
+  readonly lastBackupProofAt = this._lastBackupProofAt.asReadonly();
+
   /** 最近一次本机写入偏好的时间戳（用于回声保护，避免 Realtime 循环更新） */
   private lastLocalPreferencesWriteAt = 0;
 
@@ -61,6 +65,10 @@ export class PreferenceService {
       const userId = this.authService.currentUserId();
       // 每次用户变化时加载对应用户的偏好
       this._autoResolveConflicts.set(this.loadAutoResolveFromStorage(userId));
+      this._lastBackupProofAt.set(this.loadBackupProofFromStorage(userId));
+      if (userId) {
+        void this.loadBackupProofFromCloud(userId);
+      }
     });
 
     // Realtime：跨端偏好即时同步
@@ -101,6 +109,30 @@ export class PreferenceService {
    */
   async loadUserPreferences(): Promise<void> {
     await this.themeService.loadUserTheme();
+
+    const userId = this.authService.currentUserId();
+    if (userId) {
+      await this.loadBackupProofFromCloud(userId);
+    }
+  }
+
+  /**
+   * 记录最近一次成功备份 proof-of-life，并同步到云端。
+   */
+  async recordBackupProof(timestamp: string): Promise<boolean> {
+    const normalized = this.normalizeBackupProofTimestamp(timestamp, 'recordBackupProof');
+    if (!normalized) {
+      return false;
+    }
+
+    const userId = this.authService.currentUserId();
+    this.cacheBackupProof(userId, normalized);
+
+    if (!userId) {
+      return false;
+    }
+
+    return this.saveUserPreferences(userId, { lastBackupProofAt: normalized });
   }
 
   /**
@@ -115,16 +147,22 @@ export class PreferenceService {
    * 保存用户偏好到云端
    */
   async saveUserPreferences(userId: string, preferences: Partial<UserPreferences>): Promise<boolean> {
+    const normalizedPreferences = this.normalizeUserPreferences(preferences);
+
     try {
+      if (normalizedPreferences.lastBackupProofAt !== undefined) {
+        this.cacheBackupProof(userId, normalizedPreferences.lastBackupProofAt);
+      }
+
       this.lastLocalPreferencesWriteAt = Date.now();
-      const success = await this.syncService.saveUserPreferences(userId, preferences);
+      const success = await this.syncService.saveUserPreferences(userId, normalizedPreferences);
       if (!success) {
         // 离线时加入队列
         await this.actionQueue.enqueueForOwner(userId, {
           type: 'update',
           entityType: 'preference',
           entityId: userId,
-          payload: { preferences, userId, sourceUserId: userId }
+          payload: { preferences: normalizedPreferences, userId, sourceUserId: userId }
         });
       }
       return success;
@@ -135,7 +173,7 @@ export class PreferenceService {
         type: 'update',
         entityType: 'preference',
         entityId: userId,
-        payload: { preferences, userId, sourceUserId: userId }
+        payload: { preferences: normalizedPreferences, userId, sourceUserId: userId }
       });
       return false;
     }
@@ -171,6 +209,111 @@ export class PreferenceService {
     } catch (e) {
       this.logger.warn('saveAutoResolveToStorage: localStorage 存储失败，忽略', e);
     }
+  }
+
+  private loadBackupProofFromStorage(userId: string | null): string | null {
+    let storedValue: string | null = null;
+    try {
+      const key = getUserPreferenceKey(userId, 'lastBackupProofAt');
+      storedValue = this.normalizeBackupProofTimestamp(localStorage.getItem(key), key);
+    } catch (e) {
+      this.logger.warn('loadBackupProofFromStorage: localStorage 访问失败，忽略', e);
+      storedValue = null;
+    }
+
+    return storedValue;
+  }
+
+  private saveBackupProofToStorage(userId: string | null, value: string | null): void {
+    try {
+      const key = getUserPreferenceKey(userId, 'lastBackupProofAt');
+      if (value) {
+        localStorage.setItem(key, value);
+      } else {
+        localStorage.removeItem(key);
+      }
+    } catch (e) {
+      this.logger.warn('saveBackupProofToStorage: localStorage 存储失败，忽略', e);
+    }
+  }
+
+  private async loadBackupProofFromCloud(userId: string): Promise<void> {
+    try {
+      const preferences = await this.syncService.loadUserPreferences(userId);
+      const normalized = this.normalizeBackupProofTimestamp(
+        preferences?.lastBackupProofAt ?? null,
+        'user_preferences.last_backup_proof_at',
+      );
+
+      if (this.authService.currentUserId() !== userId) {
+        return;
+      }
+
+      this.cacheBackupProof(userId, normalized);
+    } catch (e) {
+      this.logger.warn('loadBackupProofFromCloud: 加载云端备份 proof 失败', e);
+    }
+  }
+
+  private cacheBackupProof(userId: string | null, timestamp: string | null): void {
+    const merged = this.selectLatestTimestamp(this._lastBackupProofAt(), timestamp);
+    this._lastBackupProofAt.set(merged);
+    this.saveBackupProofToStorage(userId, merged);
+  }
+
+  private selectLatestTimestamp(...timestamps: Array<string | null>): string | null {
+    let latest: string | null = null;
+    let latestTime = -Infinity;
+
+    for (const timestamp of timestamps) {
+      if (!timestamp) {
+        continue;
+      }
+
+      const currentTime = new Date(timestamp).getTime();
+      if (currentTime > latestTime) {
+        latest = timestamp;
+        latestTime = currentTime;
+      }
+    }
+
+    return latest;
+  }
+
+  private normalizeBackupProofTimestamp(value: string | null, source: string): string | null {
+    if (!value) {
+      return null;
+    }
+
+    const time = new Date(value).getTime();
+    if (Number.isNaN(time)) {
+      this.logger.warn('忽略无效备份 proof 时间戳', { source, value });
+      return null;
+    }
+
+    return new Date(time).toISOString();
+  }
+
+  private normalizeUserPreferences(preferences: Partial<UserPreferences>): Partial<UserPreferences> {
+    if (preferences.lastBackupProofAt === undefined) {
+      return preferences;
+    }
+
+    const normalized = {
+      ...preferences,
+    };
+    const backupProofAt = this.normalizeBackupProofTimestamp(
+      preferences.lastBackupProofAt,
+      'saveUserPreferences',
+    );
+
+    if (backupProofAt) {
+      normalized.lastBackupProofAt = backupProofAt;
+    } else {
+      delete normalized.lastBackupProofAt;
+    }
+
+    return normalized;
   }
   
   // ========== 本地备份设置同步 ==========

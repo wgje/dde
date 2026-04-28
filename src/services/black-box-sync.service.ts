@@ -12,7 +12,8 @@
  * - 启动时扫描 IndexedDB 中 syncStatus=pending 的条目，恢复未完成的同步
  */
 
-import { Injectable, inject, DestroyRef } from '@angular/core';
+import { Injectable, inject, DestroyRef, effect } from '@angular/core';
+import type { RealtimeChannel } from '@supabase/supabase-js';
 import type { Json } from '../types/supabase';
 import { BlackBoxEntry } from '../models/focus';
 import { FOCUS_CONFIG } from '../config/focus.config';
@@ -28,6 +29,7 @@ import {
 } from '../utils/browser-network-suspension';
 import {
   blackBoxEntriesMap,
+  gateState,
   setBlackBoxEntries,
   updateBlackBoxEntry,
 } from '../state/focus-stores';
@@ -37,7 +39,7 @@ import { LoggerService } from './logger.service';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { AuthService } from './auth.service';
 import { ClockSyncService } from './clock-sync.service';
-import { SessionManagerService } from '../app/core/services/sync/session-manager.service';
+import { SessionManagerService } from '../core-bridge';
 import { AUTH_CONFIG } from '../config/auth.config';
 
 /**
@@ -57,12 +59,18 @@ type RetryQueueHandler = (entry: BlackBoxEntry) => void;
 export interface PullChangesOptions {
   reason?: 'startup' | 'resume' | 'manual' | 'panel-open' | 'gate-review';
   force?: boolean;
+  expectedUserId?: string;
+  expectedRealtimeGeneration?: number;
 }
 
 @Injectable({
   providedIn: 'root'
 })
 export class BlackBoxSyncService {
+  private static readonly REALTIME_CIRCUIT_STORAGE_KEY = 'nanoflow.realtime-transport-circuit';
+  private static readonly REALTIME_CIRCUIT_TTL_MS = 30 * 60 * 1000;
+  private static readonly REALTIME_MAX_CONSECUTIVE_ERRORS = 3;
+
   private supabase = inject(SupabaseClientService);
   private network = inject(NetworkAwarenessService);
   private auth = inject(AuthService);
@@ -82,20 +90,30 @@ export class BlackBoxSyncService {
   /** 防抖定时器（合并短时间内的多次写入） */
   private pushDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingPushEntries: Map<string, BlackBoxEntry> = new Map();
+  private shouldRecoverAfterAuthSettles = false;
 
   // 防重保护：single-flight + freshness window
   private pullInFlight: Promise<boolean> | null = null;
   private activePullOptions: PullChangesOptions | null = null;
   private queuedForcedGateReviewPullPromise: Promise<void> | null = null;
+  private queuedForcedGateReviewPullGuard: Pick<PullChangesOptions, 'expectedUserId' | 'expectedRealtimeGeneration'> | null = null;
+  private queuedForcedGateReviewPullVersion = 0;
   /** 上次成功拉取的时间戳（毫秒），用于 freshness window 判断 */
   private lastPullTime = 0;
   private lastResumePullAt = 0;
+  private currentSyncUserId: string | null = null;
 
   private readonly IDB_NAME = FOCUS_CONFIG.SYNC.IDB_NAME;
   private readonly IDB_VERSION = FOCUS_CONFIG.SYNC.IDB_VERSION;
   private readonly STORE_NAME = FOCUS_CONFIG.IDB_STORES.BLACK_BOX_ENTRIES;
   private readonly DEBOUNCE_DELAY = SYNC_CONFIG.DEBOUNCE_DELAY;
   private initIndexedDBPromise: Promise<void> | null = null;
+  private realtimeChannel: RealtimeChannel | null = null;
+  private realtimeSubscribedUserId: string | null = null;
+  private realtimeDesiredUserId: string | null = null;
+  private realtimeSubscriptionGeneration = 0;
+  private realtimeConsecutiveErrors = 0;
+  private realtimeCircuitRetryTimer: ReturnType<typeof setTimeout> | null = null;
 
   private isRemoteUnavailable(): boolean {
     const maybeSignal = (this.supabase as unknown as { isOfflineMode?: (() => boolean) | boolean }).isOfflineMode;
@@ -109,6 +127,101 @@ export class BlackBoxSyncService {
     return Boolean(maybeSignal);
   }
 
+  private getRealtimeCircuitSnapshot(userId: string): {
+    remainingMs: number;
+    failures: number;
+    lastError: string | null;
+  } {
+    if (typeof window === 'undefined' || typeof window.sessionStorage === 'undefined') {
+      return { remainingMs: 0, failures: 0, lastError: null };
+    }
+
+    try {
+      const stored = window.sessionStorage.getItem(BlackBoxSyncService.REALTIME_CIRCUIT_STORAGE_KEY);
+      if (!stored) {
+        return { remainingMs: 0, failures: 0, lastError: null };
+      }
+
+      const parsed = JSON.parse(stored) as {
+        until?: number;
+        ownerUserId?: string | null;
+        failures?: number;
+        lastError?: string | null;
+      };
+
+      if (typeof parsed.until !== 'number' || parsed.until <= Date.now()) {
+        window.sessionStorage.removeItem(BlackBoxSyncService.REALTIME_CIRCUIT_STORAGE_KEY);
+        return { remainingMs: 0, failures: 0, lastError: null };
+      }
+
+      if (typeof parsed.ownerUserId === 'string' && parsed.ownerUserId !== userId) {
+        return { remainingMs: 0, failures: 0, lastError: null };
+      }
+
+      return {
+        remainingMs: Math.max(0, parsed.until - Date.now()),
+        failures: typeof parsed.failures === 'number' ? parsed.failures : 0,
+        lastError: typeof parsed.lastError === 'string' ? parsed.lastError : null,
+      };
+    } catch {
+      return { remainingMs: 0, failures: 0, lastError: null };
+    }
+  }
+
+  private armRealtimeCircuit(userId: string, errorMessage: string | undefined, consecutiveErrors: number): number {
+    const now = Date.now();
+    const current = this.getRealtimeCircuitSnapshot(userId);
+    const until = now + Math.max(current.remainingMs, BlackBoxSyncService.REALTIME_CIRCUIT_TTL_MS);
+
+    if (typeof window !== 'undefined' && typeof window.sessionStorage !== 'undefined') {
+      try {
+        window.sessionStorage.setItem(BlackBoxSyncService.REALTIME_CIRCUIT_STORAGE_KEY, JSON.stringify({
+          until,
+          ownerUserId: userId,
+          failures: Math.max(current.failures, consecutiveErrors),
+          lastError: errorMessage ?? current.lastError,
+          lastToastAt: 0,
+        }));
+      } catch {
+        // eslint-disable-next-line no-restricted-syntax -- sessionStorage 不可写时保留内存态退化即可
+      }
+    }
+
+    return until - now;
+  }
+
+  private clearRealtimeCircuitRetryTimer(): void {
+    if (this.realtimeCircuitRetryTimer === null) {
+      return;
+    }
+
+    clearTimeout(this.realtimeCircuitRetryTimer);
+    this.realtimeCircuitRetryTimer = null;
+  }
+
+  private scheduleRealtimeCircuitRetry(
+    userId: string,
+    delayMs: number,
+    generation: number,
+  ): void {
+    this.clearRealtimeCircuitRetryTimer();
+    this.realtimeCircuitRetryTimer = setTimeout(() => {
+      this.realtimeCircuitRetryTimer = null;
+      if (this.realtimeDesiredUserId !== userId) {
+        return;
+      }
+
+      if (generation != this.realtimeSubscriptionGeneration) {
+        return;
+      }
+
+      const retryGeneration = ++this.realtimeSubscriptionGeneration;
+      queueMicrotask(() => {
+        void this.syncRealtimeSubscription(userId, retryGeneration);
+      });
+    }, Math.max(0, delayMs));
+  }
+
   constructor() {
     // 初始化 IndexedDB
     void this.initIndexedDB().catch(error => {
@@ -117,9 +230,71 @@ export class BlackBoxSyncService {
 
     // 监听网络状态变化
     this.setupNetworkListener();
+
+    effect(() => {
+      const authSettling = this.isAuthSettling();
+      const currentUserId = this.auth.currentUserId();
+
+      if (authSettling) {
+        this.shouldRecoverAfterAuthSettles = true;
+        return;
+      }
+
+      if (!this.retryQueueHandler || !this.shouldRecoverAfterAuthSettles || !currentUserId) {
+        return;
+      }
+
+      this.shouldRecoverAfterAuthSettles = false;
+      this.logger.debug('Auth settled, replay pending black box recovery');
+      void this.recoverPendingEntries();
+    });
+
+    effect(() => {
+      const nextSyncUserId = this.resolveRemoteSessionUserId();
+      if (this.currentSyncUserId === nextSyncUserId) {
+        return;
+      }
+
+      queueMicrotask(() => {
+        void this.syncCursorScope(nextSyncUserId);
+      });
+    });
+
+    effect(() => {
+      const authSettling = this.isAuthSettling();
+      const currentUserId = this.auth.currentUserId();
+      const gateReviewing = gateState() === 'reviewing';
+      const online = this.network.isOnline();
+      const shouldSubscribe = FEATURE_FLAGS.REALTIME_ENABLED
+        && gateReviewing
+        && online
+        && this.supabase.isConfigured
+        && !this.isRemoteUnavailable()
+        && !authSettling
+        && !!currentUserId;
+      const nextRealtimeUserId = shouldSubscribe ? currentUserId : null;
+
+      if (this.realtimeDesiredUserId === nextRealtimeUserId) {
+        return;
+      }
+
+      this.realtimeDesiredUserId = nextRealtimeUserId;
+      const generation = ++this.realtimeSubscriptionGeneration;
+
+      queueMicrotask(() => {
+        void this.syncRealtimeSubscription(
+          nextRealtimeUserId,
+          generation,
+        );
+      });
+    });
   }
   private readonly SYNC_METADATA_STORE = FOCUS_CONFIG.IDB_STORES.SYNC_METADATA;
-  private readonly LAST_SYNC_TIME_KEY = 'black_box_last_sync_time';
+  private readonly LAST_SYNC_TIME_KEY_PREFIX = 'black_box_last_sync_time';
+
+  private getLastSyncTimeKey(userId: string): string {
+    return `${this.LAST_SYNC_TIME_KEY_PREFIX}:${userId}`;
+  }
 
   // ==================== RetryQueue 集成 ====================
 
@@ -131,7 +306,7 @@ export class BlackBoxSyncService {
     this.retryQueueHandler = handler;
 
     // 处理器就绪后，恢复 IndexedDB 中未同步的条目到 RetryQueue
-    this.recoverPendingEntries();
+    void this.recoverPendingEntries();
   }
 
   /**
@@ -140,6 +315,12 @@ export class BlackBoxSyncService {
    */
   private async recoverPendingEntries(): Promise<void> {
     if (!this.retryQueueHandler) return;
+
+    if (this.supabase.isConfigured && this.network.isOnline() && this.isAuthSettling()) {
+      this.shouldRecoverAfterAuthSettles = true;
+      this.logger.debug('Auth still settling, defer black box pending recovery');
+      return;
+    }
 
     try {
       const entries = await this.loadFromLocal();
@@ -157,14 +338,10 @@ export class BlackBoxSyncService {
         }
       }
 
-      // 第二步：恢复合法 pending 条目到 RetryQueue
-      const validPending = entries.filter(
-        e =>
-          e.syncStatus === 'pending' &&
-          e.id &&
-          isValidUUID(e.id) &&
-          (e.projectId == null || isValidUUID(e.projectId))
-      );
+      // 第二步：先对账远端权威状态，再只恢复真正仍待补推的 pending 条目。
+      // 否则 stale tab / 旧设备遗留的本地 pending 会在启动瞬间整批灌入 RetryQueue，
+      // 既抬高“待同步”数字，也会在缺少并发保护时把旧状态重新推回云端。
+      const validPending = await this.resolvePendingEntriesForRecovery(entries);
 
       if (validPending.length > 0) {
         this.logger.info(`Recovering ${validPending.length} pending entries to RetryQueue`);
@@ -174,6 +351,60 @@ export class BlackBoxSyncService {
       }
     } catch (e) {
       this.logger.error('Failed to recover pending entries', e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  private getValidPendingEntries(entries: BlackBoxEntry[]): BlackBoxEntry[] {
+    return entries.filter(
+      entry =>
+        entry.syncStatus === 'pending' &&
+        entry.id &&
+        isValidUUID(entry.id) &&
+        (entry.projectId == null || isValidUUID(entry.projectId))
+    );
+  }
+
+  private async resolvePendingEntriesForRecovery(entries: BlackBoxEntry[]): Promise<BlackBoxEntry[]> {
+    const validPending = this.getValidPendingEntries(entries);
+    if (validPending.length === 0) {
+      return validPending;
+    }
+
+    const expectedUserId = this.resolveRemoteSessionUserId();
+
+    if (
+      !this.supabase.isConfigured
+      || this.isRemoteUnavailable()
+      || !this.network.isOnline()
+      || this.isAuthSettling()
+      || !expectedUserId
+    ) {
+      return validPending;
+    }
+
+    try {
+      const client = await this.supabase.clientAsync();
+      if (!client) {
+        return validPending;
+      }
+
+      await this.reconcilePendingEntriesWithServer(
+        client,
+        false,
+        false,
+        expectedUserId,
+        undefined,
+        validPending,
+      );
+      return this.getValidPendingEntries(
+        validPending.map(entry => blackBoxEntriesMap().get(entry.id) ?? entry),
+      );
+    } catch (error) {
+      this.logger.debug('启动前置黑匣子 pending 对账失败，降级为原始恢复路径', {
+        error: error instanceof Error ? error.message : String(error),
+        pendingCount: validPending.length,
+      });
+      return validPending;
     }
   }
 
@@ -199,7 +430,7 @@ export class BlackBoxSyncService {
           ensureStores: db => this.ensureFocusModeStores(db),
         });
         this.logger.debug('IndexedDB opened for focus mode', { version: this.db.version });
-        await this.loadLastSyncTime();
+        await this.loadLastSyncTime(this.currentSyncUserId);
       } catch (error) {
         // 【H-13】Only null out the cached promise on failure so that a
         // subsequent call retries initialization. On success, keep the
@@ -244,19 +475,31 @@ export class BlackBoxSyncService {
   /**
    * 从 IndexedDB 加载上次同步时间
    */
-  private async loadLastSyncTime(): Promise<void> {
+  private async loadLastSyncTime(userId: string | null = this.currentSyncUserId): Promise<void> {
     if (!this.db) return;
+
+    if (!userId) {
+      this.lastSyncTime = null;
+      return;
+    }
 
     return new Promise((resolve) => {
       try {
         const tx = this.db!.transaction(this.SYNC_METADATA_STORE, 'readonly');
         const store = tx.objectStore(this.SYNC_METADATA_STORE);
-        const request = store.get(this.LAST_SYNC_TIME_KEY);
+        const request = store.get(this.getLastSyncTimeKey(userId));
 
         request.onsuccess = () => {
+          if (this.currentSyncUserId !== userId) {
+            resolve();
+            return;
+          }
+
           if (request.result) {
             this.lastSyncTime = request.result.value;
             this.logger.debug(`Loaded lastSyncTime: ${this.lastSyncTime}`);
+          } else {
+            this.lastSyncTime = null;
           }
           resolve();
         };
@@ -277,13 +520,15 @@ export class BlackBoxSyncService {
    * 保存上次同步时间到 IndexedDB
    */
   private async saveLastSyncTime(): Promise<void> {
-    if (!this.db || !this.lastSyncTime) return;
+    if (!this.db || !this.lastSyncTime || !this.currentSyncUserId) return;
+
+      const currentSyncUserId = this.currentSyncUserId;
 
     return new Promise((resolve) => {
       try {
         const tx = this.db!.transaction(this.SYNC_METADATA_STORE, 'readwrite');
         const store = tx.objectStore(this.SYNC_METADATA_STORE);
-        store.put({ key: this.LAST_SYNC_TIME_KEY, value: this.lastSyncTime });
+          store.put({ key: this.getLastSyncTimeKey(currentSyncUserId), value: this.lastSyncTime });
         tx.oncomplete = () => resolve();
         tx.onerror = () => resolve();
       } catch (e) {
@@ -292,6 +537,14 @@ export class BlackBoxSyncService {
         resolve();
       }
     });
+  }
+
+  private async syncCursorScope(userId: string | null): Promise<void> {
+    this.currentSyncUserId = userId;
+    this.lastSyncTime = null;
+    this.lastPullTime = 0;
+    this.lastResumePullAt = 0;
+    await this.loadLastSyncTime(userId);
   }
 
   /**
@@ -308,6 +561,7 @@ export class BlackBoxSyncService {
     window.addEventListener('online', onOnline);
     this.destroyRef.onDestroy(() => {
       window.removeEventListener('online', onOnline);
+      void this.teardownRealtimeSubscription();
       // 清理防抖定时器
       if (this.pushDebounceTimer) {
         clearTimeout(this.pushDebounceTimer);
@@ -386,6 +640,160 @@ export class BlackBoxSyncService {
     }
   }
 
+  private async syncRealtimeSubscription(userId: string | null, generation: number): Promise<void> {
+    this.clearRealtimeCircuitRetryTimer();
+
+    if (generation !== this.realtimeSubscriptionGeneration) {
+      return;
+    }
+
+    if (!userId) {
+      await this.teardownRealtimeSubscription();
+      return;
+    }
+
+    if (this.realtimeChannel && this.realtimeSubscribedUserId === userId) {
+      return;
+    }
+
+    await this.teardownRealtimeSubscription();
+    this.realtimeConsecutiveErrors = 0;
+
+    if (generation !== this.realtimeSubscriptionGeneration) {
+      return;
+    }
+
+    const realtimeCircuit = this.getRealtimeCircuitSnapshot(userId);
+    if (realtimeCircuit.remainingMs > 0) {
+      this.scheduleRealtimeCircuitRetry(userId, realtimeCircuit.remainingMs, generation);
+      this.logger.info('黑匣子 Realtime 熔断窗口内跳过订阅，继续使用 gate-review 定时拉取兜底', {
+        remainingMs: realtimeCircuit.remainingMs,
+        failures: realtimeCircuit.failures,
+        lastError: realtimeCircuit.lastError,
+      });
+      return;
+    }
+
+    const client = await this.supabase.clientAsync().catch(() => null);
+    if (!client || generation !== this.realtimeSubscriptionGeneration) {
+      return;
+    }
+
+    const channelName = `blackbox:${userId.substring(0, 8)}`;
+    const channel = client.channel(channelName);
+
+    channel.on(
+      'postgres_changes',
+      {
+        event: '*',
+        schema: 'public',
+        table: 'black_box_entries',
+        filter: `user_id=eq.${userId}`,
+      },
+      (payload) => {
+        if (generation !== this.realtimeSubscriptionGeneration || this.realtimeSubscribedUserId !== userId) {
+          return;
+        }
+
+        const row = (payload.new || payload.old) as { user_id?: string } | undefined;
+        if (row?.user_id && row.user_id !== userId) {
+          return;
+        }
+
+        this.logger.debug('收到黑匣子实时变更', {
+          event: payload.eventType,
+        });
+
+        void this.pullChanges({
+          reason: 'gate-review',
+          force: true,
+          expectedUserId: userId,
+          expectedRealtimeGeneration: generation,
+        }).catch((error: unknown) => {
+          this.logger.debug('黑匣子实时变更拉取失败', {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
+      },
+    ).subscribe((status, error) => {
+      if (generation !== this.realtimeSubscriptionGeneration) {
+        client.removeChannel(channel).catch(() => undefined);
+        return;
+      }
+
+      if (this.realtimeChannel !== channel) {
+        return;
+      }
+
+      if (status === 'SUBSCRIBED') {
+        this.realtimeConsecutiveErrors = 0;
+        this.logger.info('黑匣子 Realtime 订阅已启用', {
+          channel: channelName,
+        });
+        return;
+      }
+
+      if ((status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') && isBrowserNetworkSuspendedWindow()) {
+        this.logger.debug('浏览器网络挂起期间忽略黑匣子 Realtime 通道中断', {
+          channel: channelName,
+          status,
+          error: error?.message,
+        });
+        return;
+      }
+
+      if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+        this.realtimeConsecutiveErrors += 1;
+
+        if (this.realtimeConsecutiveErrors < BlackBoxSyncService.REALTIME_MAX_CONSECUTIVE_ERRORS) {
+          this.logger.debug('黑匣子 Realtime 通道瞬时错误，等待连续失败阈值', {
+            channel: channelName,
+            status,
+            consecutiveErrors: this.realtimeConsecutiveErrors,
+            error: error?.message,
+          });
+          return;
+        }
+
+        const realtimeCircuitMs = this.armRealtimeCircuit(
+          userId,
+          error?.message,
+          this.realtimeConsecutiveErrors,
+        );
+        this.logger.warn('黑匣子 Realtime 连续失败，熔断当前会话 websocket 并保留 gate-review 定时拉取兜底', {
+          channel: channelName,
+          status,
+          consecutiveErrors: this.realtimeConsecutiveErrors,
+          realtimeCircuitMs,
+          error: error?.message,
+        });
+        this.scheduleRealtimeCircuitRetry(userId, realtimeCircuitMs, this.realtimeSubscriptionGeneration);
+        void this.teardownRealtimeSubscription();
+      }
+    });
+
+    this.realtimeChannel = channel;
+    this.realtimeSubscribedUserId = userId;
+  }
+
+  private async teardownRealtimeSubscription(): Promise<void> {
+    const channel = this.realtimeChannel;
+    this.realtimeChannel = null;
+    this.realtimeSubscribedUserId = null;
+    this.realtimeConsecutiveErrors = 0;
+
+    if (!channel) {
+      return;
+    }
+
+    const client = await this.supabase.clientAsync().catch(() => null);
+    if (!client) {
+      return;
+    }
+
+    await client.removeChannel(channel).catch(() => undefined);
+  }
+
   /**
    * 保存到本地 IndexedDB
    */
@@ -440,11 +848,16 @@ export class BlackBoxSyncService {
   }
 
   private async loadEntryFromLocal(id: string): Promise<BlackBoxEntry | null> {
+    let initFailed = false;
     try {
       if (!this.db) {
         await this.initIndexedDB();
       }
     } catch {
+      initFailed = true;
+    }
+
+    if (initFailed) {
       return null;
     }
 
@@ -497,13 +910,35 @@ export class BlackBoxSyncService {
     return inMemory;
   }
 
-  private getPendingEntriesForRemoteReconciliation(): BlackBoxEntry[] {
+  private isExpectedRealtimeContextCurrent(
+    expectedUserId?: string,
+    expectedRealtimeGeneration?: number,
+  ): boolean {
+    if (!expectedUserId && expectedRealtimeGeneration == null) {
+      return true;
+    }
+
+    if (
+      expectedRealtimeGeneration != null
+      && expectedRealtimeGeneration !== this.realtimeSubscriptionGeneration
+    ) {
+      return false;
+    }
+
+    if (expectedUserId && this.resolveRemoteSessionUserId() !== expectedUserId) {
+      return false;
+    }
+
+    return true;
+  }
+
+  private getPendingEntriesForRemoteReconciliation(entries?: BlackBoxEntry[]): BlackBoxEntry[] {
     const remoteSessionUserId = this.resolveRemoteSessionUserId();
     if (!remoteSessionUserId) {
       return [];
     }
 
-    return Array.from(blackBoxEntriesMap().values()).filter(entry => {
+    return (entries ?? Array.from(blackBoxEntriesMap().values())).filter(entry => {
       return entry.syncStatus === 'pending'
         && entry.userId === remoteSessionUserId
         && isValidUUID(entry.id);
@@ -544,24 +979,40 @@ export class BlackBoxSyncService {
     client: Awaited<ReturnType<SupabaseClientService['clientAsync']>>,
     preferRemoteForSyncedLocalDuringPull: boolean,
     repairingFutureCursor: boolean,
+    expectedUserId?: string,
+    expectedRealtimeGeneration?: number,
+    sourcePendingEntries?: BlackBoxEntry[],
   ): Promise<void> {
     if (!client) {
       return;
     }
 
-    const pendingEntries = this.getPendingEntriesForRemoteReconciliation();
+    if (!this.isExpectedRealtimeContextCurrent(expectedUserId, expectedRealtimeGeneration)) {
+      this.logger.info('黑匣子 pending 对账在会话切换后取消，避免旧用户数据写回当前会话');
+      return;
+    }
+
+    const pendingEntries = this.getPendingEntriesForRemoteReconciliation(sourcePendingEntries);
     if (pendingEntries.length === 0) {
       return;
     }
 
     const pendingIds = pendingEntries.map(entry => entry.id);
     const batchSize = 50;
+    const sourcePendingEntryMap = sourcePendingEntries
+      ? new Map(sourcePendingEntries.map(entry => [entry.id, entry]))
+      : null;
 
     this.logger.debug('黑匣子存在 pending 本地条目，开始按 ID 对账远端权威状态', {
       pendingCount: pendingIds.length,
     });
 
     for (let offset = 0; offset < pendingIds.length; offset += batchSize) {
+      if (!this.isExpectedRealtimeContextCurrent(expectedUserId, expectedRealtimeGeneration)) {
+        this.logger.info('黑匣子 pending 对账中止：Realtime 订阅上下文已变化');
+        return;
+      }
+
       const batchIds = pendingIds.slice(offset, offset + batchSize);
       const { data, error } = await client
         .from('black_box_entries')
@@ -578,9 +1029,14 @@ export class BlackBoxSyncService {
       }
 
       for (const row of data ?? []) {
+        if (!this.isExpectedRealtimeContextCurrent(expectedUserId, expectedRealtimeGeneration)) {
+          this.logger.info('黑匣子 pending 对账停止写入：Realtime 订阅上下文已变化');
+          return;
+        }
+
         const remoteEntry = this.mapRowToEntry(row);
 
-        const localEntry = blackBoxEntriesMap().get(remoteEntry.id);
+        const localEntry = sourcePendingEntryMap?.get(remoteEntry.id) ?? blackBoxEntriesMap().get(remoteEntry.id);
         if (localEntry?.syncStatus === 'pending' && this.hasEquivalentEntryState(localEntry, remoteEntry)) {
           await this.saveToLocal(remoteEntry);
           updateBlackBoxEntry(remoteEntry);
@@ -633,6 +1089,24 @@ export class BlackBoxSyncService {
 
         const visibleEntries = entries.filter(entry => entry.userId === visibleUserId);
 
+        // 【2026-04-23 根因修复】“手机端内容业务不同步”的关键兼防：
+        // IDB 内实际有条目，但过滤器 visibleUserId 与所有条目 user_id 都不匹配，
+        // 说明 visibleUserId 很可能是残留 LOCAL_MODE_USER_ID 或旧账号的 ownerHint，
+        // 此时硬切会把云端切实拉到的条目从内存 Map 清空，造成 “电脑端有、手机端没有”。
+        // 充当安全网：包含条目时这条分支不覆盖 Map，只警告，语义上等同 visibleUserId=null。
+        if (entries.length > 0 && visibleEntries.length === 0) {
+          this.logger.warn('黑匣子 IDB 现存条目被当前 visibleUserId 全量滤除，保留内存快照以免误清', {
+            visibleUserId,
+            idbEntryCount: entries.length,
+            inMemoryEntryCount: blackBoxEntriesMap().size,
+            firstIdbEntryUserId: entries[0]?.userId,
+            currentUserId: this.auth.currentUserId(),
+            localModeCacheKey: this.readLocalModeCacheKey(),
+          });
+          resolve(Array.from(blackBoxEntriesMap().values()));
+          return;
+        }
+
         // 更新状态
         setBlackBoxEntries(visibleEntries);
 
@@ -657,21 +1131,38 @@ export class BlackBoxSyncService {
       return null;
     }
 
+    // 【2026-04-23 根因修复】auth 恢复窗口内，优先使用持久化的“远端会话身份”提示（UUID），
+    // 避免被 LOCAL_MODE_CACHE_KEY 残留或早期 local 模式的 localStorage 标志度到 ‘local-user’——
+    // 这是“电脑端有、手机端没有”调用 loadFromLocal 时给实际 user_id=UUID 的条目全部滤除的根因。
+    // 原顺序先看 LOCAL_MODE_CACHE_KEY 导致在云账号登录后的从未刷新场景依然返回 ‘local-user’，
+    // 现在改为先看 persistedSession / ownerHint 这些更权威的云端身份来源。
+    if (this.isAuthSettling()) {
+      const persistedSessionUserId = this.auth.peekPersistedSessionIdentity()?.userId ?? null;
+      if (persistedSessionUserId) {
+        return persistedSessionUserId;
+      }
+
+      const ownerHint = this.auth.peekPersistedOwnerHint();
+      if (ownerHint) {
+        return ownerHint;
+      }
+    }
+
+    // 没有任何远端身份线索时，才认可 LOCAL_MODE_CACHE_KEY 作为真正的本地模式标记。
+    if (this.readLocalModeCacheKey() === 'true') {
+      return AUTH_CONFIG.LOCAL_MODE_USER_ID;
+    }
+
+    return null;
+  }
+
+  /**
+   * 读取 LOCAL_MODE_CACHE_KEY，封装 try/catch 以在 storage 禁用时沉默返回 null。
+   * 单独抽出便于 loadFromLocal 警告日志复用和测试驱动。
+   */
+  private readLocalModeCacheKey(): string | null {
     try {
-      if (localStorage.getItem(AUTH_CONFIG.LOCAL_MODE_CACHE_KEY) === 'true') {
-        return AUTH_CONFIG.LOCAL_MODE_USER_ID;
-      }
-
-      if (this.isAuthSettling()) {
-        const persistedSessionUserId = this.auth.peekPersistedSessionIdentity()?.userId ?? null;
-        if (persistedSessionUserId) {
-          return persistedSessionUserId;
-        }
-
-        return this.auth.peekPersistedOwnerHint();
-      }
-
-      return null;
+      return localStorage.getItem(AUTH_CONFIG.LOCAL_MODE_CACHE_KEY);
     } catch {
       // eslint-disable-next-line no-restricted-syntax -- localStorage 访问异常时静默返回 null
       return null;
@@ -753,6 +1244,113 @@ export class BlackBoxSyncService {
         return true;
       }
 
+      // 【2026-04-22 根因修复】服务端状态预检：防止陈旧本地 pending 快照反向压盖远端
+      // 权威状态。典型场景：Device B（移动端 / PWA / 久未刷新的标签页）IDB 中仍保留着
+      // 早期未完成的 pending 快照，Device A 已在服务端将其标记为 is_completed=true；
+      // 若直接 upsert，服务端触发器会盖上新的 updated_at，使陈旧状态反向传播到所有设备，
+      // 表现为"已完成的任务过一会儿又出现在大门里"。
+      // 修复策略：若服务端现存状态的 updated_at 晚于本地 pending 的 updatedAt，认为本地
+      // 已过时；将服务端权威状态写回本地并清除 pending 标记,放弃这次推送。
+      //
+      // 【2026-04-23 根因修复·加强版】仅按 updated_at LWW 判定仍不足以守住语义：若本地
+      // pending 的 updatedAt 恰好晚于服务端（典型成因：Device B 时钟偏快、或该条目在
+      // 本地被再次触碰 bump 了 updatedAt），即便服务端早已是 is_read=true / is_completed=true
+      // / 已软删除的权威状态，原 preflight 也会放行本轮 upsert，把这些单调位压回 false /
+      // 复活，继而被触发器盖上新的 NOW() 反向污染全站。
+      // 新策略：对 is_read / is_completed / deletedAt 施加"只进不退"的单调合并。
+      //   * 若本地与服务端对这些单调位的并集等于服务端现状 → 本地没有真正新增意图，直接
+      //     采用服务端权威状态并清 pending；
+      //   * 否则把服务端单调真值 OR 进本地 entry（保留本地 content / snoozeUntil /
+      //     isArchived 等非单调编辑），以合并后的 entry 继续后续 upsert，绝不让已经被
+      //     完成/已读/软删除的条目悄悄回潮。
+      try {
+        const { data: serverRow, error: preflightError } = await client
+          .from('black_box_entries')
+          .select('id, project_id, user_id, content, focus_meta, date, created_at, updated_at, is_read, is_completed, is_archived, snooze_until, snooze_count, deleted_at')
+          .eq('id', entry.id)
+          .maybeSingle();
+
+        if (!preflightError && serverRow) {
+          const serverEntry = this.mapRowToEntry(serverRow as Record<string, unknown>);
+          const serverIsNewer = this.clockSync.isLocalNewer(serverEntry.updatedAt, entry.updatedAt);
+          const wouldRegressRead = serverEntry.isRead && !entry.isRead;
+          const wouldRegressCompleted = serverEntry.isCompleted && !entry.isCompleted;
+          const wouldResurrectDeleted = Boolean(serverEntry.deletedAt) && !entry.deletedAt;
+          const hasMonotonicRegression =
+            wouldRegressRead || wouldRegressCompleted || wouldResurrectDeleted;
+
+          if (serverIsNewer || hasMonotonicRegression) {
+            // 服务端更晚 → 直接采用服务端；否则在本地 entry 上合并服务端单调真值。
+            const mergedEntry: BlackBoxEntry = serverIsNewer
+              ? serverEntry
+              : {
+                  ...entry,
+                  isRead: entry.isRead || serverEntry.isRead,
+                  isCompleted: entry.isCompleted || serverEntry.isCompleted,
+                  deletedAt: entry.deletedAt ?? serverEntry.deletedAt,
+                };
+
+            if (this.hasEquivalentEntryState(mergedEntry, serverEntry)) {
+              this.logger.warn('黑匣子 pending 推送预检：跳过对服务端权威状态的回退覆盖', {
+                entryId: entry.id,
+                reason: serverIsNewer ? 'server-newer-lww' : 'monotonic-regression',
+                localPendingUpdatedAt: entry.updatedAt,
+                serverUpdatedAt: serverEntry.updatedAt,
+                localIsRead: entry.isRead,
+                serverIsRead: serverEntry.isRead,
+                localIsCompleted: entry.isCompleted,
+                serverIsCompleted: serverEntry.isCompleted,
+                localDeletedAt: entry.deletedAt,
+                serverDeletedAt: serverEntry.deletedAt,
+              });
+              const latestLocalBeforeApply = await this.resolveLatestLocalEntry(entry.id);
+              if (this.isEntryNewer(latestLocalBeforeApply, serverEntry)) {
+                this.logger.debug('黑匣子预检命中更晚本地快照，跳过服务端权威状态回写', {
+                  entryId: entry.id,
+                  latestLocalUpdatedAt: latestLocalBeforeApply?.updatedAt,
+                  serverUpdatedAt: serverEntry.updatedAt,
+                });
+                return true;
+              }
+              this.clockSync.recordServerTimestamp(serverEntry.updatedAt, entry.id);
+              // 服务端权威状态覆盖本地，清除 pending；LWW 最终收敛到远端最新值
+              await this.saveToLocal(serverEntry);
+              updateBlackBoxEntry(serverEntry);
+              return true; // 告知 RetryQueue 此条已处理完毕，不必重试
+            }
+
+            if (hasMonotonicRegression && !serverIsNewer) {
+              // 本地仍有服务端未见的新编辑，把服务端 monotonic 真值合并进来再推送。
+              this.logger.warn('黑匣子 pending 推送预检：合并远端单调真值后继续推送本地独有变更', {
+                entryId: entry.id,
+                localPendingUpdatedAt: entry.updatedAt,
+                serverUpdatedAt: serverEntry.updatedAt,
+                mergedIsRead: mergedEntry.isRead,
+                mergedIsCompleted: mergedEntry.isCompleted,
+                mergedDeletedAt: mergedEntry.deletedAt,
+              });
+              entry = mergedEntry;
+              const pendingMerged: BlackBoxEntry = { ...mergedEntry, syncStatus: 'pending' };
+              await this.saveToLocal(pendingMerged);
+              updateBlackBoxEntry(pendingMerged);
+              // fall through to upsert with merged entry
+            }
+          }
+        } else if (preflightError) {
+          // 预检失败不阻塞推送（保持向后兼容），仅记录，便于后续排查
+          this.logger.debug('黑匣子推送预检 SELECT 失败，按原路径继续 upsert', {
+            entryId: entry.id,
+            message: supabaseErrorToError(preflightError).message,
+          });
+        }
+      } catch (preflightException) {
+        // 预检异常不应阻塞推送，降级到原 upsert 路径
+        this.logger.debug('黑匣子推送预检异常，按原路径继续', {
+          entryId: entry.id,
+          error: preflightException instanceof Error ? preflightException.message : String(preflightException),
+        });
+      }
+
       // 让数据库触发器生成权威 updated_at，避免客户端时钟偏差把跨设备完成状态盖回去。
       const { data: savedRow, error } = await client
         .from('black_box_entries')
@@ -820,7 +1418,47 @@ export class BlackBoxSyncService {
   async pullChanges(options?: PullChangesOptions): Promise<void> {
     const reason = options?.reason ?? 'manual';
     const force = options?.force ?? false;
+    const expectedUserId = options?.expectedUserId ?? this.resolveRemoteSessionUserId() ?? undefined;
+    const expectedRealtimeGeneration = options?.expectedRealtimeGeneration;
     let preferRemoteForSyncedLocalDuringPull = false;
+
+    if (options?.expectedUserId && this.resolveRemoteSessionUserId() !== options.expectedUserId) {
+      this.logger.info('黑匣子拉取在会话切换后跳过，避免旧回调先切回旧用户游标作用域');
+      return;
+    }
+
+    if (this.currentSyncUserId !== (expectedUserId ?? null)) {
+      await this.syncCursorScope(expectedUserId ?? null);
+    }
+
+    if (!this.isExpectedRealtimeContextCurrent(expectedUserId, expectedRealtimeGeneration)) {
+      this.logger.info('黑匣子拉取在 Realtime 订阅切换后跳过，避免旧会话覆盖当前视图');
+      return;
+    }
+
+    if (reason === 'resume' || reason === 'gate-review') {
+      const sessionSnapshot = FEATURE_FLAGS.RESUME_SESSION_SNAPSHOT_V1
+        ? this.sessionManager.getRecentValidationSnapshot(10_000)
+        : null;
+      if (!sessionSnapshot?.valid) {
+        const session = await this.sessionManager.validateOrRefreshOnResume(`blackbox:${reason}`);
+        if (session.deferred) {
+          this.logger.info('黑匣子远端拉取延后：等待会话稳定后重试', {
+            reason,
+            deferredReason: session.reason ?? 'client-unready',
+          });
+          return;
+        }
+
+        if (!session.ok) {
+          this.logger.info('黑匣子远端拉取跳过：当前会话不可用', {
+            reason,
+            failureReason: session.reason,
+          });
+          return;
+        }
+      }
+    }
 
     if (reason === 'gate-review') {
       const clockResult = this.clockSync.lastSyncResult();
@@ -841,10 +1479,13 @@ export class BlackBoxSyncService {
       preferRemoteForSyncedLocalDuringPull = !effectiveClockResult?.reliable;
     }
 
+    const pendingEntriesNeedRemoteReconciliation = this.getPendingEntriesForRemoteReconciliation().length > 0;
+
     if (
       FEATURE_FLAGS.BLACKBOX_PULL_COOLDOWN_V1 &&
       reason === 'resume' &&
       !force &&
+      !pendingEntriesNeedRemoteReconciliation &&
       this.lastResumePullAt > 0 &&
       Date.now() - this.lastResumePullAt < APP_LIFECYCLE_CONFIG.RESUME_PULL_COOLDOWN_MS
     ) {
@@ -854,7 +1495,7 @@ export class BlackBoxSyncService {
 
     // 【性能优化 2026-02-14】freshness window 守卫：窗口内已拉取过则跳过
     const freshnessWindow = SYNC_CONFIG.BLACKBOX_PULL_FRESHNESS_WINDOW;
-    if (!force && this.lastPullTime > 0 && Date.now() - this.lastPullTime < freshnessWindow) {
+    if (!force && !pendingEntriesNeedRemoteReconciliation && this.lastPullTime > 0 && Date.now() - this.lastPullTime < freshnessWindow) {
       const elapsedSec = Math.round((Date.now() - this.lastPullTime) / 1000);
       this.logger.debug(`Freshness window 内跳过拉取 (${elapsedSec}s < ${freshnessWindow / 1000}s)`);
       // 【监控 2026-02-14】记录被阻断的重复拉取，用于 Sentry 告警观测
@@ -886,8 +1527,21 @@ export class BlackBoxSyncService {
     if (this.pullInFlight) {
       const inFlightReason = this.activePullOptions?.reason ?? 'manual';
       const inFlightForce = this.activePullOptions?.force ?? false;
+      const inFlightExpectedUserId = this.activePullOptions?.expectedUserId;
+      const inFlightExpectedRealtimeGeneration = this.activePullOptions?.expectedRealtimeGeneration;
+      const hasGuardMismatch = inFlightExpectedUserId !== expectedUserId
+        || (
+          expectedRealtimeGeneration != null
+          && inFlightExpectedRealtimeGeneration !== expectedRealtimeGeneration
+        );
+
+      if (hasGuardMismatch) {
+        await this.queueForcedGateReviewPull({ expectedUserId, expectedRealtimeGeneration });
+        return;
+      }
+
       if ((reason === 'gate-review' || force) && (inFlightReason !== 'gate-review' || !inFlightForce)) {
-        await this.queueForcedGateReviewPull();
+        await this.queueForcedGateReviewPull({ expectedUserId, expectedRealtimeGeneration });
         return;
       }
 
@@ -902,9 +1556,18 @@ export class BlackBoxSyncService {
       return;
     }
 
-    this.activePullOptions = { reason, force };
-    this.pullInFlight = this.doPullChanges(preferRemoteForSyncedLocalDuringPull)
+    this.activePullOptions = { reason, force, expectedUserId, expectedRealtimeGeneration };
+    this.pullInFlight = this.doPullChanges(
+      preferRemoteForSyncedLocalDuringPull,
+      expectedUserId,
+      expectedRealtimeGeneration,
+    )
       .then((didAttemptRemoteRead) => {
+        if (!this.isExpectedRealtimeContextCurrent(expectedUserId, expectedRealtimeGeneration)) {
+          this.logger.info('黑匣子拉取完成后跳过 freshness 更新：Realtime 订阅上下文已变化');
+          return false;
+        }
+
         if (didAttemptRemoteRead) {
           const now = Date.now();
           this.lastPullTime = now;
@@ -932,7 +1595,19 @@ export class BlackBoxSyncService {
     await this.pullInFlight;
   }
 
-  private queueForcedGateReviewPull(): Promise<void> {
+  private queueForcedGateReviewPull(guard?: Pick<PullChangesOptions, 'expectedUserId' | 'expectedRealtimeGeneration'>): Promise<void> {
+    const previousGuard = this.queuedForcedGateReviewPullGuard;
+    const nextExpectedUserId = guard?.expectedUserId ?? previousGuard?.expectedUserId;
+    const shouldResetGeneration = guard !== undefined
+      && guard.expectedRealtimeGeneration == null;
+    this.queuedForcedGateReviewPullGuard = {
+      expectedUserId: nextExpectedUserId,
+      expectedRealtimeGeneration: shouldResetGeneration
+        ? guard?.expectedRealtimeGeneration
+        : (guard?.expectedRealtimeGeneration ?? previousGuard?.expectedRealtimeGeneration),
+    };
+    this.queuedForcedGateReviewPullVersion += 1;
+
     if (this.queuedForcedGateReviewPullPromise) {
       return this.queuedForcedGateReviewPullPromise;
     }
@@ -940,11 +1615,27 @@ export class BlackBoxSyncService {
     const currentPull = this.pullInFlight;
     this.queuedForcedGateReviewPullPromise = (async () => {
       if (currentPull) {
-        await currentPull;
+        await currentPull.catch((error: unknown) => {
+          this.logger.debug('排队中的 gate-review 强制拉取忽略前序失败并继续执行', {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
       }
-      await this.pullChanges({ reason: 'gate-review', force: true });
+      let processedVersion = 0;
+      while (processedVersion !== this.queuedForcedGateReviewPullVersion) {
+        processedVersion = this.queuedForcedGateReviewPullVersion;
+        const queuedGuard = this.queuedForcedGateReviewPullGuard;
+        await this.pullChanges({
+          reason: 'gate-review',
+          force: true,
+          expectedUserId: queuedGuard?.expectedUserId,
+          expectedRealtimeGeneration: queuedGuard?.expectedRealtimeGeneration,
+        });
+      }
     })().finally(() => {
       this.queuedForcedGateReviewPullPromise = null;
+      this.queuedForcedGateReviewPullGuard = null;
+      this.queuedForcedGateReviewPullVersion = 0;
     });
 
     return this.queuedForcedGateReviewPullPromise;
@@ -953,8 +1644,17 @@ export class BlackBoxSyncService {
   /**
    * 实际执行拉取变更的内部方法
    */
-  private async doPullChanges(preferRemoteForSyncedLocalDuringPull: boolean): Promise<boolean> {
+  private async doPullChanges(
+    preferRemoteForSyncedLocalDuringPull: boolean,
+    expectedUserId?: string,
+    expectedRealtimeGeneration?: number,
+  ): Promise<boolean> {
     try {
+      if (!this.isExpectedRealtimeContextCurrent(expectedUserId, expectedRealtimeGeneration)) {
+        this.logger.info('黑匣子明细拉取在 Realtime 订阅切换后中止');
+        return false;
+      }
+
       if (this.isRemoteUnavailable()) {
         await this.loadFromLocal();
         return false;
@@ -972,6 +1672,11 @@ export class BlackBoxSyncService {
         return false;
       }
 
+      if (!this.isExpectedRealtimeContextCurrent(expectedUserId, expectedRealtimeGeneration)) {
+        this.logger.info('黑匣子拉取在获取客户端后中止：Realtime 订阅上下文已变化');
+        return false;
+      }
+
       // 首次拉取只信任已持久化的服务端游标；不要从本地 updatedAt 反推，避免快时钟把增量窗口推到未来。
       let effectiveLastSync = this.lastSyncTime || '1970-01-01T00:00:00Z';
       let repairingFutureCursor = false;
@@ -979,6 +1684,10 @@ export class BlackBoxSyncService {
 
       if (FEATURE_FLAGS.BLACKBOX_WATERMARK_PROBE_V1) {
         const remoteWatermark = await this.getRemoteBlackBoxWatermark(client);
+        if (!this.isExpectedRealtimeContextCurrent(expectedUserId, expectedRealtimeGeneration)) {
+          this.logger.info('黑匣子 watermark 快路在 RPC 返回后中止：Realtime 订阅上下文已变化');
+          return false;
+        }
         const remoteMs = remoteWatermark ? new Date(remoteWatermark).getTime() : NaN;
         const localMs = new Date(effectiveLastSync).getTime();
 
@@ -1004,6 +1713,10 @@ export class BlackBoxSyncService {
           effectiveLastSync !== '1970-01-01T00:00:00Z' &&
           !pendingEntriesNeedRemoteReconciliation
         ) {
+          if (!this.isExpectedRealtimeContextCurrent(expectedUserId, expectedRealtimeGeneration)) {
+            this.logger.info('黑匣子 watermark 快路在保存游标前中止：Realtime 订阅上下文已变化');
+            return false;
+          }
           this.lastSyncTime = remoteWatermark;
           await this.saveLastSyncTime();
           this.logger.debug('BlackBox watermark 快路命中，跳过明细拉取', {
@@ -1022,6 +1735,11 @@ export class BlackBoxSyncService {
         .select('*')
         .gt('updated_at', effectiveLastSync)
         .order('updated_at', { ascending: true });
+
+      if (!this.isExpectedRealtimeContextCurrent(expectedUserId, expectedRealtimeGeneration)) {
+        this.logger.info('黑匣子拉取在远端返回后中止：Realtime 订阅上下文已变化');
+        return false;
+      }
 
       if (error) {
         const enhanced = supabaseErrorToError(error);
@@ -1074,6 +1792,11 @@ export class BlackBoxSyncService {
       // writes into a single IDB readwrite transaction (or use a bulk-put
       // helper) to reduce transaction commit overhead by ~10x.
       for (const row of data ?? []) {
+        if (!this.isExpectedRealtimeContextCurrent(expectedUserId, expectedRealtimeGeneration)) {
+          this.logger.info('黑匣子明细合并中止：Realtime 订阅上下文已变化');
+          return false;
+        }
+
         const entry = this.mapRowToEntry(row);
         await this.mergeWithLocal(entry, preferRemoteForSyncedLocalDuringPull, repairingFutureCursor);
       }
@@ -1082,10 +1805,17 @@ export class BlackBoxSyncService {
         client,
         preferRemoteForSyncedLocalDuringPull,
         repairingFutureCursor,
+        expectedUserId,
+        expectedRealtimeGeneration,
       );
 
       // 更新同步时间并持久化
       if (data && data.length > 0) {
+        if (!this.isExpectedRealtimeContextCurrent(expectedUserId, expectedRealtimeGeneration)) {
+          this.logger.info('黑匣子拉取在提交游标前中止：Realtime 订阅上下文已变化');
+          return false;
+        }
+
         this.lastSyncTime = data[data.length - 1].updated_at;
         await this.saveLastSyncTime();
       }
@@ -1155,6 +1885,39 @@ export class BlackBoxSyncService {
       await this.saveToLocal(remote);
       updateBlackBoxEntry(remote);
       return;
+    }
+
+    // 【2026-04-23 根因修复·加强版】即便本地 pending 在 LWW 上赢过远端，也要把远端的单调
+    // 真值(is_read / is_completed / deletedAt)立刻合并进本地 pending，避免 UI 继续把一个
+    // 服务端早已完成/已读/已删的条目展示在大门里，同时保留本地仍未推送的 content /
+    // snoozeUntil / isArchived 等编辑。pushToServer 的 preflight 还会再守一道门，这里只是
+    // 提前让 UI 收敛。
+    if (local && local.syncStatus === 'pending') {
+      const wouldRegressRead = remote.isRead && !local.isRead;
+      const wouldRegressCompleted = remote.isCompleted && !local.isCompleted;
+      const wouldResurrectDeleted = Boolean(remote.deletedAt) && !local.deletedAt;
+
+      if (wouldRegressRead || wouldRegressCompleted || wouldResurrectDeleted) {
+        const merged: BlackBoxEntry = {
+          ...local,
+          isRead: local.isRead || remote.isRead,
+          isCompleted: local.isCompleted || remote.isCompleted,
+          deletedAt: local.deletedAt ?? remote.deletedAt,
+          // 保持 pending 状态，后续 push 会带着合并后的真值再次与服务端对齐
+          syncStatus: 'pending',
+        };
+        this.logger.warn('黑匣子 pull 合并：本地 pending 胜出 LWW，但合并远端单调真值以免大门继续展示已完成条目', {
+          entryId: remote.id,
+          localUpdatedAt: local.updatedAt,
+          remoteUpdatedAt: remote.updatedAt,
+          mergedIsRead: merged.isRead,
+          mergedIsCompleted: merged.isCompleted,
+          mergedDeletedAt: merged.deletedAt,
+        });
+        await this.saveToLocal(merged);
+        updateBlackBoxEntry(merged);
+        return;
+      }
     }
 
     this.logger.debug('保留更晚的本地黑匣子快照，跳过远端覆盖', {

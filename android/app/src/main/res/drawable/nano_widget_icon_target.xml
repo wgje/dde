@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 蓝图线稿：靶心 / 专注 图标 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="20dp"
+    android:height="20dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:strokeColor="#F6FBFF"
+        android:strokeWidth="1.4"
+        android:fillColor="#00000000"
+        android:pathData="M12,3 L12,21 M3,12 L21,12" />
+    <path
+        android:strokeColor="#F6FBFF"
+        android:strokeWidth="1.4"
+        android:fillColor="#00000000"
+        android:pathData="M12,4.5 A7.5,7.5 0 1,1 11.99,4.5 Z" />
+    <path
+        android:strokeColor="#F6FBFF"
+        android:strokeWidth="1.4"
+        android:fillColor="#00000000"
+        android:pathData="M12,8 A4,4 0 1,1 11.99,8 Z" />
+    <path
+        android:fillColor="#F6FBFF"
+        android:pathData="M12,10.8 A1.2,1.2 0 1,1 11.99,10.8 Z" />
+</vector>

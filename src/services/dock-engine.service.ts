@@ -48,7 +48,6 @@ import {
 } from '../utils/dock-focus-phase';
 import {
   getWaitRemainingSeconds,
-  isConsoleBackgroundStatus,
   isWaitingLike,
   sortDockEntriesForDisplay,
   toStatusMachineEntry,
@@ -246,7 +245,11 @@ export class DockEngineService {
     this.entries().filter(
       entry =>
         entry.status !== 'completed' &&
-        (entry.isMain || entry.status === 'focusing' || isConsoleBackgroundStatus(entry.status)),
+        (
+          entry.isMain
+          || entry.lane === 'combo-select'
+          || entry.status === 'focusing'
+        ),
     ),
   );
   /**
@@ -269,29 +272,29 @@ export class DockEngineService {
     this.consoleVisibleEntries().filter(entry => isWaitingLike(entry.status)),
   );
   // v3.0 组合选择区域（策划案 §4.2 zone 重命名）
-  // 排除 isMain / focusing / waitingLike，这些已在 consoleEntries（主控台）中展示
-  readonly comboSelectEntries = computed(() =>
-    this.entries().filter(
+  // 排除已经占据 C1-C4 的卡片，避免同一任务同时出现在主控台和组合选择区。
+  readonly comboSelectEntries = computed(() => {
+    const visibleTaskIds = new Set(this.consoleVisibleEntries().map(entry => entry.taskId));
+    return this.entries().filter(
       entry =>
         !entry.isMain &&
         entry.lane === 'combo-select' &&
         entry.status !== 'completed' &&
-        entry.status !== 'focusing' &&
-        !isConsoleBackgroundStatus(entry.status),
-    ),
-  );
+        !visibleTaskIds.has(entry.taskId),
+    );
+  });
   // v3.0 备选区域（策划案 §4.3 zone 重命名）
-  // 排除 isMain / focusing / waitingLike，这些已在 consoleEntries（主控台）中展示
-  readonly backupEntries = computed(() =>
-    this.entries().filter(
+  // 排除已经占据 C1-C4 的卡片，保持备选区只显示真正未进前排的任务。
+  readonly backupEntries = computed(() => {
+    const visibleTaskIds = new Set(this.consoleVisibleEntries().map(entry => entry.taskId));
+    return this.entries().filter(
       entry =>
         !entry.isMain &&
         entry.lane === 'backup' &&
         entry.status !== 'completed' &&
-        entry.status !== 'focusing' &&
-        !isConsoleBackgroundStatus(entry.status),
-    ),
-  );
+        !visibleTaskIds.has(entry.taskId),
+    );
+  });
   // v3.0 倦怠状态（策划案 §7.8 NG-16b）
   readonly isBurnoutActive = computed(() => this.burnoutTriggeredAt() !== null);
   /** 空白等待期：倒计时结束但无可选推荐条目 */
@@ -459,6 +462,7 @@ export class DockEngineService {
       fragmentDefenseLevel: this.fragmentDefenseLevel,
       lastConsoleDemotedTaskId: this.lastConsoleDemotedTaskId,
       consoleVisibleOrderHint: this.consoleVisibleOrderHint,
+      consoleVisibleEntries: this.consoleVisibleEntries,
       focusingEntry: this.focusingEntry,
       focusMode: this.focusMode,
       suspendChainRootTaskId: this.suspendChainRootTaskId,
@@ -834,4 +838,3 @@ export class DockEngineService {
     this.snapshotManager.computeRecommendationForSuspended(suspendedTaskId, waitMinutes);
   }
 }
-

@@ -23,6 +23,11 @@ import {
   type WidgetPlatform,
   withPrivateNoStoreHeaders,
 } from '../_shared/widget-common.ts';
+import {
+  buildSummaryVersion,
+  buildSummaryVersionCursor,
+  isSummaryVersionRegressed,
+} from './summary-version.ts';
 
 interface WidgetDeviceRow {
   id: string;
@@ -52,12 +57,17 @@ interface FocusTaskSlotLike {
   sourceProjectId: string | null;
   inlineTitle: string | null;
   estimatedMinutes: number | null;
+  waitMinutes?: number | null;
+  waitStartedAt?: string | null;
+  waitEndAt?: string | null;
   focusStatus?: string;
   isMaster?: boolean;
+  isMain?: boolean;
 }
 
 interface FocusSessionStateLike {
   isActive?: boolean;
+  commandCenterOrderIds?: string[];
   commandCenterTasks?: FocusTaskSlotLike[];
   comboSelectTasks?: FocusTaskSlotLike[];
   backupTasks?: FocusTaskSlotLike[];
@@ -68,10 +78,15 @@ interface DockEntryLike {
   title?: string | null;
   sourceProjectId?: string | null;
   expectedMinutes?: number | null;
+  waitMinutes?: number | null;
+  waitStartedAt?: string | null;
+  waitEndAt?: string | null;
   status?: string;
   isMain?: boolean;
   lane?: string;
   sourceKind?: string;
+  dockedOrder?: number;
+  manualOrder?: number | null;
 }
 
 interface DockSessionSnapshotLike {
@@ -117,6 +132,7 @@ interface BlackBoxRow {
   date: string | null;
   project_id: string | null;
   content: string | null;
+  is_read: boolean | null;
   created_at: string | null;
   snooze_until: string | null;
   updated_at: string;
@@ -249,9 +265,19 @@ function toSlotList(value: unknown): FocusTaskSlotLike[] {
       estimatedMinutes: typeof item.estimatedMinutes === 'number' && Number.isFinite(item.estimatedMinutes)
         ? item.estimatedMinutes
         : null,
+      waitMinutes: typeof item.waitMinutes === 'number' && Number.isFinite(item.waitMinutes)
+        ? item.waitMinutes
+        : null,
+      waitStartedAt: typeof item.waitStartedAt === 'string' ? normalizeIsoTimestamp(item.waitStartedAt) : null,
+      waitEndAt: typeof item.waitEndAt === 'string' ? normalizeIsoTimestamp(item.waitEndAt) : null,
       focusStatus: typeof item.focusStatus === 'string' ? item.focusStatus : undefined,
-      isMaster: item.isMaster === true,
+      isMaster: item.isMaster === true || item.isMain === true,
+      isMain: item.isMain === true,
     }));
+}
+
+function isMasterSlot(slot: FocusTaskSlotLike | null | undefined): boolean {
+  return slot?.isMaster === true || slot?.isMain === true;
 }
 
 function toStringArray(value: unknown): string[] {
@@ -271,22 +297,61 @@ function toDockEntryList(value: unknown): DockEntryLike[] {
       expectedMinutes: typeof item.expectedMinutes === 'number' && Number.isFinite(item.expectedMinutes)
         ? item.expectedMinutes
         : null,
+      waitMinutes: typeof item.waitMinutes === 'number' && Number.isFinite(item.waitMinutes)
+        ? item.waitMinutes
+        : null,
+      waitStartedAt: typeof item.waitStartedAt === 'string' ? normalizeIsoTimestamp(item.waitStartedAt) : null,
+      waitEndAt: typeof item.waitEndAt === 'string' ? normalizeIsoTimestamp(item.waitEndAt) : null,
       status: typeof item.status === 'string' ? item.status : undefined,
       isMain: item.isMain === true,
       lane: typeof item.lane === 'string' ? item.lane : undefined,
       sourceKind: typeof item.sourceKind === 'string' ? item.sourceKind : undefined,
+      dockedOrder: typeof item.dockedOrder === 'number' && Number.isFinite(item.dockedOrder)
+        ? item.dockedOrder
+        : undefined,
+      manualOrder: typeof item.manualOrder === 'number' && Number.isFinite(item.manualOrder)
+        ? item.manualOrder
+        : null,
     }));
 }
 
-function mapDockEntryToFocusSlot(entry: DockEntryLike): FocusTaskSlotLike {
+function mapDockEntryToFocusSlot(entry: DockEntryLike, forceMaster = false): FocusTaskSlotLike {
+  const isMaster = forceMaster || entry.isMain === true;
   return {
     taskId: entry.taskId ?? null,
     sourceProjectId: entry.sourceProjectId ?? null,
     inlineTitle: entry.sourceKind === 'dock-created' ? entry.title ?? null : entry.title ?? null,
     estimatedMinutes: entry.expectedMinutes ?? null,
+    waitMinutes: entry.waitMinutes ?? null,
+    waitStartedAt: entry.waitStartedAt ?? null,
+    waitEndAt: entry.waitEndAt ?? (
+      entry.waitStartedAt && entry.waitMinutes
+        ? new Date(new Date(entry.waitStartedAt).getTime() + entry.waitMinutes * 60_000).toISOString()
+        : null
+    ),
     focusStatus: entry.status,
-    isMaster: entry.isMain === true,
+    isMaster,
+    isMain: isMaster,
   };
+}
+
+function applyMainTaskHint(slots: FocusTaskSlotLike[], mainTaskId: string | null): FocusTaskSlotLike[] {
+  if (!mainTaskId) return slots;
+  return slots.map(slot => {
+    if (slot.taskId === mainTaskId) {
+      return { ...slot, isMaster: true, isMain: true };
+    }
+    if (isMasterSlot(slot)) {
+      return { ...slot, isMaster: false, isMain: false };
+    }
+    return slot;
+  });
+}
+
+function isCommandCenterEntry(entry: DockEntryLike): boolean {
+  return entry.isMain === true
+    || entry.status === 'focusing'
+    || entry.lane === 'combo-select';
 }
 
 function toLegacyFocusStateFromDockSnapshot(snapshot: DockSnapshotLike): FocusSessionStateLike {
@@ -300,24 +365,58 @@ function toLegacyFocusStateFromDockSnapshot(snapshot: DockSnapshotLike): FocusSe
     }
   }
 
-  const mainTaskId = typeof session.mainTaskId === 'string' ? session.mainTaskId : null;
+  const explicitMainEntry = entries.find(entry => entry.isMain === true && entry.status !== 'completed') ?? null;
+  const sessionMainTaskId = typeof session.mainTaskId === 'string' ? session.mainTaskId : null;
+  const mainTaskId = explicitMainEntry?.taskId ?? sessionMainTaskId;
   const comboSelectIds = toStringArray(session.comboSelectIds);
   const backupIds = toStringArray(session.backupIds);
 
-  const commandCenterTasks = mainTaskId && entryMap.has(mainTaskId)
-    ? [mapDockEntryToFocusSlot(entryMap.get(mainTaskId)!)]
-    : entries.filter(entry => entry.isMain === true).slice(0, 1).map(mapDockEntryToFocusSlot);
+  const commandCenterTasks = explicitMainEntry
+    ? [mapDockEntryToFocusSlot(explicitMainEntry, true)]
+    : (
+        mainTaskId && entryMap.has(mainTaskId)
+          ? [mapDockEntryToFocusSlot(entryMap.get(mainTaskId)!, true)]
+          : entries.filter(entry => entry.isMain === true).slice(0, 1).map(entry => mapDockEntryToFocusSlot(entry))
+      );
 
   const comboSelectTasks = comboSelectIds.length > 0
-    ? comboSelectIds.map(taskId => entryMap.get(taskId)).filter((entry): entry is DockEntryLike => Boolean(entry)).map(mapDockEntryToFocusSlot)
-    : entries.filter(entry => entry.lane === 'combo-select').map(mapDockEntryToFocusSlot);
+    ? comboSelectIds
+        .filter(taskId => taskId !== mainTaskId)
+        .map(taskId => entryMap.get(taskId))
+        .filter((entry): entry is DockEntryLike => !!entry && entry.isMain !== true)
+      .map(entry => mapDockEntryToFocusSlot(entry))
+    : entries
+        .filter(entry => entry.taskId !== mainTaskId && entry.isMain !== true && entry.lane === 'combo-select')
+      .map(entry => mapDockEntryToFocusSlot(entry));
 
   const backupTasks = backupIds.length > 0
-    ? backupIds.map(taskId => entryMap.get(taskId)).filter((entry): entry is DockEntryLike => Boolean(entry)).map(mapDockEntryToFocusSlot)
-    : entries.filter(entry => entry.lane === 'backup').map(mapDockEntryToFocusSlot);
+    ? backupIds
+        .filter(taskId => taskId !== mainTaskId)
+        .map(taskId => entryMap.get(taskId))
+        .filter((entry): entry is DockEntryLike => !!entry && entry.isMain !== true)
+      .map(entry => mapDockEntryToFocusSlot(entry))
+    : entries
+        .filter(entry => entry.taskId !== mainTaskId && entry.isMain !== true && entry.lane === 'backup')
+      .map(entry => mapDockEntryToFocusSlot(entry));
 
   return {
-    isActive: snapshot.focusMode === true || typeof session.focusSessionId === 'string',
+    // 权威判定：只信任 focusMode 布尔值。
+    // session.focusSessionId 在 exitFocusMode() 中不会被清除（作为历史轨迹保留），
+    // 若以此作为 fallback 会导致"关闭专注后 widget 仍显示 focus active"。
+    isActive: snapshot.focusMode === true,
+    commandCenterOrderIds: entries
+      .filter(isCommandCenterEntry)
+      .sort((left, right) => {
+        if (left.status === 'focusing' && right.status !== 'focusing') return -1;
+        if (right.status === 'focusing' && left.status !== 'focusing') return 1;
+        const leftOrder = left.manualOrder ?? left.dockedOrder ?? Number.MAX_SAFE_INTEGER;
+        const rightOrder = right.manualOrder ?? right.dockedOrder ?? Number.MAX_SAFE_INTEGER;
+        if (leftOrder !== rightOrder) return leftOrder - rightOrder;
+        return (left.taskId ?? '').localeCompare(right.taskId ?? '');
+      })
+      .map(entry => entry.taskId)
+      .filter((taskId): taskId is string => typeof taskId === 'string' && taskId.length > 0)
+      .slice(0, 4),
     commandCenterTasks,
     comboSelectTasks,
     backupTasks,
@@ -331,9 +430,40 @@ function toFocusSessionState(value: unknown): FocusSessionStateLike {
 
   const dockSnapshot = value as DockSnapshotLike;
   if (dockSnapshot.focusSessionState && isPlainObject(dockSnapshot.focusSessionState)) {
+    const state = toFocusSessionState(dockSnapshot.focusSessionState);
+    const entryDerivedState = toLegacyFocusStateFromDockSnapshot(dockSnapshot);
+    const commandCenterOrderIds = (state.commandCenterOrderIds?.length ?? 0) > 0
+      ? state.commandCenterOrderIds
+      : entryDerivedState.commandCenterOrderIds;
+
+    const commandCenterTasks: FocusTaskSlotLike[] =
+      (state.commandCenterTasks?.length ?? 0) > 0
+        ? (state.commandCenterTasks ?? [])
+        : (entryDerivedState.commandCenterTasks ?? []);
+    const comboSelectTasks: FocusTaskSlotLike[] =
+      (state.comboSelectTasks?.length ?? 0) > 0
+        ? (state.comboSelectTasks ?? [])
+        : (entryDerivedState.comboSelectTasks ?? []);
+    const backupTasks: FocusTaskSlotLike[] =
+      (state.backupTasks?.length ?? 0) > 0
+        ? (state.backupTasks ?? [])
+        : (entryDerivedState.backupTasks ?? []);
+    const derivedMainSlot = entryDerivedState.commandCenterTasks?.find(isMasterSlot) ?? null;
+    const hintedMainTaskId = derivedMainSlot?.taskId ?? null;
+    const hasMainSlot = hintedMainTaskId
+      ? [...commandCenterTasks, ...comboSelectTasks, ...backupTasks].some(slot => slot.taskId === hintedMainTaskId)
+      : true;
+    const commandCenterTasksWithMain = !hasMainSlot && derivedMainSlot
+      ? [derivedMainSlot, ...commandCenterTasks]
+      : commandCenterTasks;
+
     return {
-      ...toFocusSessionState(dockSnapshot.focusSessionState),
-      isActive: dockSnapshot.focusMode === true || toFocusSessionState(dockSnapshot.focusSessionState).isActive === true,
+      ...state,
+      isActive: dockSnapshot.focusMode === true || state.isActive === true,
+      commandCenterOrderIds,
+      commandCenterTasks: applyMainTaskHint(commandCenterTasksWithMain, hintedMainTaskId),
+      comboSelectTasks: applyMainTaskHint(comboSelectTasks, hintedMainTaskId),
+      backupTasks: applyMainTaskHint(backupTasks, hintedMainTaskId),
     };
   }
 
@@ -343,19 +473,82 @@ function toFocusSessionState(value: unknown): FocusSessionStateLike {
 
   return {
     isActive: value.isActive === true,
+    commandCenterOrderIds: toStringArray(value.commandCenterOrderIds),
     commandCenterTasks: toSlotList(value.commandCenterTasks),
     comboSelectTasks: toSlotList(value.comboSelectTasks),
     backupTasks: toSlotList(value.backupTasks),
   };
 }
 
-function pickPrimaryFocusSlot(state: FocusSessionStateLike): FocusTaskSlotLike | null {
-  const commandCenter = state.commandCenterTasks ?? [];
-  const comboSelect = state.comboSelectTasks ?? [];
+function resolveCommandCenterSlots(state: FocusSessionStateLike): FocusTaskSlotLike[] {
+  const allSlots = [
+    ...(state.commandCenterTasks ?? []),
+    ...(state.comboSelectTasks ?? []),
+    ...(state.backupTasks ?? []),
+  ];
+  const slotByTaskId = new Map<string, FocusTaskSlotLike>();
+  for (const slot of allSlots) {
+    if (typeof slot.taskId === 'string' && slot.taskId.length > 0 && !slotByTaskId.has(slot.taskId)) {
+      slotByTaskId.set(slot.taskId, slot);
+    }
+  }
 
-  return commandCenter.find(isRenderableFocusSlot)
-    ?? comboSelect.find(slot => isRenderableFocusSlot(slot) && (slot.isMaster || slot.focusStatus === 'focusing'))
-    ?? comboSelect.find(isRenderableFocusSlot)
+  const orderedFromState = toStringArray(state.commandCenterOrderIds)
+    .map(taskId => slotByTaskId.get(taskId))
+    .filter((slot): slot is FocusTaskSlotLike => isRenderableFocusSlot(slot));
+  const commandCenter = (state.commandCenterTasks ?? []).filter(isRenderableFocusSlot);
+  const comboSelect = (state.comboSelectTasks ?? []).filter(isRenderableFocusSlot);
+  const fallbackOrdered: FocusTaskSlotLike[] = [];
+  const focusingSlot = [
+    ...commandCenter,
+    ...comboSelect,
+  ].find(slot => slot.focusStatus === 'focusing') ?? null;
+  const masterSlot = [
+    ...commandCenter,
+    ...comboSelect,
+  ].find(isMasterSlot) ?? null;
+
+  if (focusingSlot) {
+    fallbackOrdered.push(focusingSlot);
+  }
+  if (masterSlot && !fallbackOrdered.includes(masterSlot)) {
+    fallbackOrdered.push(masterSlot);
+  }
+  for (const slot of comboSelect) {
+    if (!fallbackOrdered.includes(slot)) {
+      fallbackOrdered.push(slot);
+    }
+  }
+  for (const slot of commandCenter) {
+    if (!fallbackOrdered.includes(slot)) {
+      fallbackOrdered.push(slot);
+    }
+  }
+  if (orderedFromState.length > 0) {
+    const masterTaskId = masterSlot?.taskId ?? null;
+    const focusingTaskId = focusingSlot?.taskId ?? null;
+    const hasMasterSlot = !masterTaskId || orderedFromState.some(slot => slot.taskId === masterTaskId);
+    const hasFocusingSlot = !focusingTaskId || orderedFromState.some(slot => slot.taskId === focusingTaskId);
+    if (hasMasterSlot && hasFocusingSlot) {
+      return orderedFromState.slice(0, 4);
+    }
+
+    const orderedWithPriority = [...fallbackOrdered];
+    const seenSlotKeys = new Set(orderedWithPriority.map(slot => `${slot.taskId ?? ''}::${slot.inlineTitle ?? ''}`));
+    for (const slot of orderedFromState) {
+      const slotKey = `${slot.taskId ?? ''}::${slot.inlineTitle ?? ''}`;
+      if (!seenSlotKeys.has(slotKey)) {
+        orderedWithPriority.push(slot);
+        seenSlotKeys.add(slotKey);
+      }
+    }
+    return orderedWithPriority.slice(0, 4);
+  }
+  return fallbackOrdered.slice(0, 4);
+}
+
+function pickPrimaryFocusSlot(state: FocusSessionStateLike): FocusTaskSlotLike | null {
+  return resolveCommandCenterSlots(state)[0]
     ?? null;
 }
 
@@ -366,6 +559,22 @@ function isRenderableFocusSlot(slot: FocusTaskSlotLike | null | undefined): slot
 
   return typeof slot.taskId === 'string' && slot.taskId.length > 0
     || typeof slot.inlineTitle === 'string' && slot.inlineTitle.trim().length > 0;
+}
+
+function resolveWaitEndAt(slot: FocusTaskSlotLike): string | null {
+  const explicit = normalizeIsoTimestamp(slot.waitEndAt ?? null);
+  if (explicit) return explicit;
+  const startedAt = normalizeIsoTimestamp(slot.waitStartedAt ?? null);
+  if (!startedAt || typeof slot.waitMinutes !== 'number' || !Number.isFinite(slot.waitMinutes) || slot.waitMinutes <= 0) {
+    return null;
+  }
+  return new Date(new Date(startedAt).getTime() + Math.floor(slot.waitMinutes) * 60_000).toISOString();
+}
+
+function isWaitExpiredSlot(slot: FocusTaskSlotLike, nowMs = Date.now()): boolean {
+  if (slot.focusStatus === 'wait-ended' || slot.focusStatus === 'wait_finished') return true;
+  const waitEndAt = resolveWaitEndAt(slot);
+  return waitEndAt !== null && new Date(waitEndAt).getTime() <= nowMs;
 }
 
 function uniqueIds(values: Array<string | null | undefined>): string[] {
@@ -445,6 +654,7 @@ function buildSummaryEnvelope(overrides: Record<string, unknown> = {}) {
       projectTitle: null,
       title: null,
       remainingMinutes: null,
+      isMaster: false,
       valid: false,
     },
     dock: {
@@ -452,8 +662,15 @@ function buildSummaryEnvelope(overrides: Record<string, unknown> = {}) {
       countFromTasks: 0,
       items: [],
     },
+    commandCenter: {
+      slots: [],
+      mainTaskId: null,
+      focusedTaskId: null,
+      backupCount: 0,
+    },
     blackBox: {
       pendingCount: 0,
+      unreadCount: 0,
       previews: [],
       gatePreview: {
         entryId: null,
@@ -490,35 +707,6 @@ function summaryResponse(
     }
   }
   return jsonResponse(buildSummaryEnvelope(overrides), responseHeaders, status);
-}
-
-function buildSummaryVersion(cursorAt: string | null, signature: string): string {
-  return `${cursorAt ?? 'none'}|${signature.slice(0, 24)}`;
-}
-
-function extractSummaryVersionTimestamp(version: string | null | undefined): number | null {
-  if (!version) return null;
-
-  const separatorIndex = version.indexOf('|');
-  const timestampPart = separatorIndex >= 0 ? version.slice(0, separatorIndex) : version;
-  if (timestampPart === 'none') return null;
-
-  const parsed = Date.parse(timestampPart);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-function isSummaryVersionRegressed(lastKnownVersion: string | undefined, currentVersion: string): boolean {
-  const lastKnownTimestamp = extractSummaryVersionTimestamp(lastKnownVersion);
-  if (lastKnownTimestamp === null) {
-    return false;
-  }
-
-  const currentTimestamp = extractSummaryVersionTimestamp(currentVersion);
-  if (currentTimestamp === null) {
-    return true;
-  }
-
-  return currentTimestamp < lastKnownTimestamp;
 }
 
 Deno.serve(async (req: Request) => {
@@ -815,13 +1003,13 @@ Deno.serve(async (req: Request) => {
   const nowIso = new Date().toISOString();
   const todayIsoDate = nowIso.slice(0, 10);
   const nextDeviceCapabilities = mergeJsonObjects(
-    device.capabilities,
+    device.capabilities as Parameters<typeof mergeJsonObjects>[0],
     buildWidgetClientCapabilitiesPatch({
       platform: body.platform,
       clientVersion: body.clientVersion,
       supportsPush: body.supportsPush,
       observedAt: nowIso,
-    }),
+    }) as Parameters<typeof mergeJsonObjects>[1],
   );
   const capabilityDecision = evaluateWidgetCapabilities(capabilities, {
     platform: body.platform,
@@ -882,16 +1070,20 @@ Deno.serve(async (req: Request) => {
     });
   }
 
-  const { data: sessionData, error: sessionError } = await client
-    .from('focus_sessions')
-    .select('id,updated_at,session_state')
-    .eq('user_id', device.user_id)
-    .order('updated_at', { ascending: false })
-    .limit(1)
-    .maybeSingle();
+  // 2026-04-22 颠覆性压缩：Wave 1（focus_sessions/projects/black_box count/preview + dock count/watermark）
+  // 合并到单个 PL/pgSQL RPC（widget_summary_wave1），把 4-5 个 PostgREST HTTP roundtrip
+  // 压成 1 个。观测的 4-5s widget-summary 延迟中 1.5-2s 花在 PostgREST 请求排队 + JSON 解析上。
+  const wave1RpcResult = await client.rpc('widget_summary_wave1', {
+    p_user_id: device.user_id,
+    p_today: todayIsoDate,
+    p_preview_limit: MAX_BLACK_BOX_PREVIEW_COUNT,
+  });
 
-  if (sessionError) {
-    console.error('[WidgetSummary] load focus session failed', { userId: redactId(device.user_id), message: sessionError.message });
+  if (wave1RpcResult.error) {
+    console.error('[WidgetSummary] widget_summary_wave1 rpc failed', {
+      userId: redactId(device.user_id),
+      message: wave1RpcResult.error.message,
+    });
     return summaryResponse(responseHeaders, 500, {
       error: 'Failed to load widget summary',
       code: 'SUMMARY_LOAD_FAILED',
@@ -901,89 +1093,107 @@ Deno.serve(async (req: Request) => {
     });
   }
 
-  const latestSession = sessionData as FocusSessionRow | null;
+  interface Wave1Payload {
+    focusSession: FocusSessionRow | null;
+    accessibleProjectIds: string[];
+    pendingBlackBoxCount: number;
+    unreadBlackBoxCount: number;
+    blackBoxPreview: BlackBoxRow[];
+    blackBoxWatermark: string | null;
+    dockCount: number;
+    dockWatermark: string | null;
+  }
+  const wave1 = (wave1RpcResult.data ?? {}) as Partial<Wave1Payload>;
+  const latestSession: FocusSessionRow | null = wave1.focusSession ?? null;
+  const accessibleProjectIds: string[] = Array.isArray(wave1.accessibleProjectIds) ? wave1.accessibleProjectIds : [];
+  const pendingBlackBoxCount: number = typeof wave1.pendingBlackBoxCount === 'number' ? wave1.pendingBlackBoxCount : 0;
+  const unreadBlackBoxCount: number = typeof wave1.unreadBlackBoxCount === 'number' ? wave1.unreadBlackBoxCount : pendingBlackBoxCount;
+  const blackBoxPreviewRows: BlackBoxRow[] = Array.isArray(wave1.blackBoxPreview) ? wave1.blackBoxPreview : [];
+  const blackBoxWatermark = normalizeIsoTimestamp(wave1.blackBoxWatermark ?? null);
+  const dockCountFromTasks: number = typeof wave1.dockCount === 'number' ? wave1.dockCount : 0;
+  const dockTasksWatermark = normalizeIsoTimestamp(wave1.dockWatermark ?? null);
   const state = toFocusSessionState(latestSession?.session_state ?? null);
-  const dockSlots = [
+  const commandCenterSlots = resolveCommandCenterSlots(state);
+  const primarySlot = commandCenterSlots[0] ?? null;
+  const visibleDockSlots = commandCenterSlots.slice(1);
+  const allDockSlots = [
+    ...visibleDockSlots,
     ...(state.comboSelectTasks ?? []),
     ...(state.backupTasks ?? []),
-  ];
-  const primarySlot = pickPrimaryFocusSlot(state);
+  ].filter((slot, index, slots) => {
+    if (slot.taskId && slot.taskId === primarySlot?.taskId) {
+      return false;
+    }
+    const taskId = slot.taskId;
+    if (typeof taskId !== 'string' || taskId.length === 0) {
+      return true;
+    }
+    return slots.findIndex(candidate => candidate.taskId === taskId) === index;
+  });
+  const taskIds = uniqueIds([
+    primarySlot?.taskId ?? null,
+    ...allDockSlots.map(slot => slot.taskId),
+  ]);
+  const projectIds = uniqueIds([
+    primarySlot?.sourceProjectId ?? null,
+    ...allDockSlots.map(slot => slot.sourceProjectId),
+  ]);
 
-  const { data: accessibleProjectsData, error: accessibleProjectsError } = await client
-    .from('projects')
-    .select('id')
-    .eq('owner_id', device.user_id)
-    .is('deleted_at', null);
+  // Wave 2：tasks 校验 / projects 校验 这 2 个查询依赖 wave1 解出的 taskIds/projectIds，
+  // dockCount/dockWatermark 已在 wave1 RPC 内一次性算出，这里无需再查。
+  const needsTaskLookup = taskIds.length > 0 && accessibleProjectIds.length > 0;
+  const needsProjectLookup = projectIds.length > 0 && accessibleProjectIds.length > 0;
+  const [
+    taskLookupResult,
+    projectLookupResult,
+  ] = await Promise.all([
+    needsTaskLookup
+      ? client
+          .from('tasks')
+          .select('id,title,project_id,updated_at')
+          .in('id', taskIds)
+          .in('project_id', accessibleProjectIds)
+          .is('deleted_at', null)
+      : Promise.resolve({ data: [], error: null } as const),
+    needsProjectLookup
+      ? client
+          .from('projects')
+          .select('id,title,updated_at')
+          .in('id', projectIds)
+          .eq('owner_id', device.user_id)
+          .is('deleted_at', null)
+      : Promise.resolve({ data: [], error: null } as const),
+  ]);
 
-  if (accessibleProjectsError) {
+  if (taskLookupResult.error) {
     return summaryResponse(responseHeaders, 500, {
-      error: 'Failed to resolve accessible projects',
-      code: 'ACCESS_SCOPE_LOOKUP_FAILED',
-      degradedReasons: ['access-scope-lookup-failed'],
+      error: 'Failed to validate task references',
+      code: 'TASK_LOOKUP_FAILED',
+      degradedReasons: ['task-lookup-failed'],
+      capabilities: publicCapabilities,
+      warnings: ['open-app-to-finish-setup'],
+    });
+  }
+  if (projectLookupResult.error) {
+    return summaryResponse(responseHeaders, 500, {
+      error: 'Failed to validate project references',
+      code: 'PROJECT_LOOKUP_FAILED',
+      degradedReasons: ['project-lookup-failed'],
       capabilities: publicCapabilities,
       warnings: ['open-app-to-finish-setup'],
     });
   }
 
-  const accessibleProjectIds = (accessibleProjectsData ?? []).map(row => (row as ProjectIdRow).id);
-  const taskIds = uniqueIds([
-    primarySlot?.taskId ?? null,
-    ...dockSlots.map(slot => slot.taskId),
-  ]);
-  const projectIds = uniqueIds([
-    primarySlot?.sourceProjectId ?? null,
-    ...dockSlots.map(slot => slot.sourceProjectId),
-  ]);
-
   const taskMap = new Map<string, TaskRow>();
-  if (taskIds.length > 0 && accessibleProjectIds.length > 0) {
-    const { data, error } = await client
-      .from('tasks')
-      .select('id,title,project_id,updated_at')
-      .in('id', taskIds)
-      .in('project_id', accessibleProjectIds)
-      .is('deleted_at', null);
-
-    if (error) {
-      return summaryResponse(responseHeaders, 500, {
-        error: 'Failed to validate task references',
-        code: 'TASK_LOOKUP_FAILED',
-        degradedReasons: ['task-lookup-failed'],
-        capabilities: publicCapabilities,
-        warnings: ['open-app-to-finish-setup'],
-      });
-    }
-
-    for (const row of (data ?? []) as TaskRow[]) {
-      taskMap.set(row.id, row);
-    }
+  for (const row of (taskLookupResult.data ?? []) as TaskRow[]) {
+    taskMap.set(row.id, row);
   }
-
   const projectMap = new Map<string, ProjectRow>();
-  if (projectIds.length > 0 && accessibleProjectIds.length > 0) {
-    const { data, error } = await client
-      .from('projects')
-      .select('id,title,updated_at')
-      .in('id', projectIds)
-      .eq('owner_id', device.user_id)
-      .is('deleted_at', null);
-
-    if (error) {
-      return summaryResponse(responseHeaders, 500, {
-        error: 'Failed to validate project references',
-        code: 'PROJECT_LOOKUP_FAILED',
-        degradedReasons: ['project-lookup-failed'],
-        capabilities: publicCapabilities,
-        warnings: ['open-app-to-finish-setup'],
-      });
-    }
-
-    for (const row of (data ?? []) as ProjectRow[]) {
-      projectMap.set(row.id, row);
-    }
+  for (const row of (projectLookupResult.data ?? []) as ProjectRow[]) {
+    projectMap.set(row.id, row);
   }
 
-  const dockItems = dockSlots.map(slot => {
+  const toDockItem = (slot: FocusTaskSlotLike) => {
     const task = slot.taskId ? taskMap.get(slot.taskId) : null;
     const projectId = task?.project_id ?? slot.sourceProjectId ?? null;
     const project = projectId ? projectMap.get(projectId) ?? null : null;
@@ -999,109 +1209,52 @@ Deno.serve(async (req: Request) => {
       title: task?.title ?? slot.inlineTitle ?? '未命名任务',
       projectTitle: project?.title ?? null,
       estimatedMinutes: slot.estimatedMinutes,
+      isMaster: isMasterSlot(slot),
       valid,
       taskUpdatedAt: task?.updated_at ?? null,
       projectUpdatedAt: project?.updated_at ?? null,
     };
-  });
+  };
 
-  const dockCount = dockItems.length;
-  const taskBackedDockCount = dockItems.filter(item => item.taskId !== null).length;
+  const toCommandCenterItem = (slot: FocusTaskSlotLike, position: number) => {
+    const task = slot.taskId ? taskMap.get(slot.taskId) : null;
+    const projectId = task?.project_id ?? slot.sourceProjectId ?? null;
+    const project = projectId ? projectMap.get(projectId) ?? null : null;
+    const hasInlineFallback = typeof slot.inlineTitle === 'string' && slot.inlineTitle.trim().length > 0;
+    const validTask = slot.taskId ? (Boolean(task) || hasInlineFallback) : true;
+    const validProject = projectId ? Boolean(project) : true;
+    const waitEndAt = resolveWaitEndAt(slot);
 
-  let dockCountFromTasks = 0;
-  let dockTasksWatermark: string | null = null;
-  if (accessibleProjectIds.length > 0) {
-    const { count, error: dockCountError } = await client
-      .from('tasks')
-      .select('id', { count: 'exact', head: true })
-      .in('project_id', accessibleProjectIds)
-      .is('deleted_at', null)
-      .contains('parking_meta', { state: 'parked' });
+    return {
+      position,
+      taskId: slot.taskId,
+      projectId,
+      title: task?.title ?? slot.inlineTitle ?? '未命名任务',
+      projectTitle: project?.title ?? null,
+      estimatedMinutes: slot.estimatedMinutes,
+      waitMinutes: slot.waitMinutes ?? null,
+      waitStartedAt: normalizeIsoTimestamp(slot.waitStartedAt ?? null),
+      waitEndAt,
+      waitExpired: isWaitExpiredSlot(slot),
+      focusStatus: slot.focusStatus ?? null,
+      isMain: isMasterSlot(slot),
+      isFocused: position === 1 || slot.focusStatus === 'focusing',
+      valid: validTask && validProject,
+    };
+  };
 
-    if (dockCountError) {
-      return summaryResponse(responseHeaders, 500, {
-        error: 'Failed to cross-check dock count',
-        code: 'DOCK_COUNT_LOOKUP_FAILED',
-        degradedReasons: ['dock-count-lookup-failed'],
-        capabilities: publicCapabilities,
-        warnings: ['open-app-to-finish-setup'],
-      });
-    }
+  const dockItems = visibleDockSlots.map(toDockItem);
+  const allDockItems = allDockSlots.map(toDockItem);
+  const commandCenterItems = commandCenterSlots.map((slot, index) => toCommandCenterItem(slot, index + 1));
 
-    dockCountFromTasks = count ?? 0;
-
-    const { data: dockWatermarkRow, error: dockWatermarkError } = await client
-      .from('tasks')
-      .select('updated_at')
-      .in('project_id', accessibleProjectIds)
-      .is('deleted_at', null)
-      .contains('parking_meta', { state: 'parked' })
-      .order('updated_at', { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    if (dockWatermarkError) {
-      return summaryResponse(responseHeaders, 500, {
-        error: 'Failed to load dock watermark',
-        code: 'DOCK_WATERMARK_LOOKUP_FAILED',
-        degradedReasons: ['dock-watermark-lookup-failed'],
-        capabilities: publicCapabilities,
-        warnings: ['open-app-to-finish-setup'],
-      });
-    }
-
-    dockTasksWatermark = normalizeIsoTimestamp((dockWatermarkRow as { updated_at?: string | null } | null)?.updated_at ?? null);
-  }
-
-  const { count: pendingBlackBoxCount, error: blackBoxError } = await client
-    .from('black_box_entries')
-    .select('id', { count: 'exact', head: true })
-    .eq('user_id', device.user_id)
-    .is('deleted_at', null)
-    .eq('is_completed', false)
-    .eq('is_archived', false)
-    .lt('date', todayIsoDate)
-    // Gate 口径与主 App 对齐：今天之前、未完成、未归档、未删除，且 snooze 已到期即可。
-    // 不能再把 is_read=false 当成前提，否则“已读但仍未处理”的沉积会被 widget 错判成已清空。
-    .or(`snooze_until.is.null,snooze_until.lte.${todayIsoDate}`);
-
-  if (blackBoxError) {
-    return summaryResponse(responseHeaders, 500, {
-      error: 'Failed to load black box summary',
-      code: 'BLACK_BOX_LOOKUP_FAILED',
-      degradedReasons: ['black-box-lookup-failed'],
-      capabilities: publicCapabilities,
-      warnings: ['open-app-to-finish-setup'],
-    });
-  }
-
-  const { data: blackBoxPreviewRowsData, error: blackBoxWatermarkError } = await client
-    .from('black_box_entries')
-    .select('id,date,project_id,content,created_at,snooze_until,updated_at')
-    .eq('user_id', device.user_id)
-    .is('deleted_at', null)
-    .eq('is_completed', false)
-    .eq('is_archived', false)
-    .lt('date', todayIsoDate)
-    .or(`snooze_until.is.null,snooze_until.lte.${todayIsoDate}`)
-    .order('created_at', { ascending: true })
-    .limit(MAX_BLACK_BOX_PREVIEW_COUNT);
-
-  if (blackBoxWatermarkError) {
-    return summaryResponse(responseHeaders, 500, {
-      error: 'Failed to load black box watermark',
-      code: 'BLACK_BOX_WATERMARK_FAILED',
-      degradedReasons: ['black-box-watermark-failed'],
-      capabilities: publicCapabilities,
-      warnings: ['open-app-to-finish-setup'],
-    });
-  }
+  const dockCount = allDockItems.length;
+  const taskBackedDockCount = allDockItems.filter(item => item.taskId !== null).length;
+  const backupCount = Math.max(dockCount - visibleDockSlots.length, 0);
 
   const focusTask = primarySlot?.taskId ? taskMap.get(primarySlot.taskId) ?? null : null;
   const focusProjectId = focusTask?.project_id ?? primarySlot?.sourceProjectId ?? null;
   const focusProject = focusProjectId ? projectMap.get(focusProjectId) ?? null : null;
   const hasRenderableFocusTarget = isRenderableFocusSlot(primarySlot);
-  const blackBoxPreviewRows = (blackBoxPreviewRowsData ?? []) as BlackBoxRow[];
   const missingBlackBoxProjectIds = [...new Set(
     blackBoxPreviewRows
       .map(row => row.project_id)
@@ -1140,7 +1293,9 @@ Deno.serve(async (req: Request) => {
       projectId,
       projectTitle: projectId ? projectMap.get(projectId)?.title ?? null : null,
       content,
+      isRead: row.is_read === true,
       createdAt: normalizeIsoTimestamp(row.created_at ?? null),
+      updatedAt: normalizeIsoTimestamp(row.updated_at ?? null),
       valid: content !== null,
     };
   });
@@ -1149,7 +1304,9 @@ Deno.serve(async (req: Request) => {
     projectId: null,
     projectTitle: null,
     content: null,
+    isRead: false,
     createdAt: null,
+    updatedAt: null,
     valid: false,
   };
   // 2026-04-19 inline 任务兼容：dock 里的 inline/dock-created 任务（sourceBlockType=text、
@@ -1169,7 +1326,7 @@ Deno.serve(async (req: Request) => {
     : false;
   const hasSoftDeleteTarget = dockItems.some(item => !item.valid)
     || (focusTaskMissing && !focusTaskIsInline)
-    || (focusProjectId && !focusProject);
+    || Boolean(focusProjectId && !focusProject);
   const entryUrl = buildEntryUrlFromContext({
     forceWorkspaceFallback: hasSoftDeleteTarget,
     focusValid,
@@ -1191,15 +1348,15 @@ Deno.serve(async (req: Request) => {
     degradedReasons.push('dock-count-drift');
   }
 
-  const summaryVersionCursor = maxIsoTimestamp([
-    latestSession?.updated_at ?? null,
+  const summaryVersionCursor = buildSummaryVersionCursor({
+    latestSessionUpdatedAt: latestSession?.updated_at ?? null,
     dockTasksWatermark,
-    ...blackBoxPreviewRows.map(row => row.updated_at ?? null),
-    focusTask?.updated_at ?? null,
-    focusProject?.updated_at ?? null,
-    ...dockItems.map(item => item.taskUpdatedAt),
-    ...dockItems.map(item => item.projectUpdatedAt),
-  ]);
+    blackBoxWatermark,
+    focusTaskUpdatedAt: focusTask?.updated_at ?? null,
+    focusProjectUpdatedAt: focusProject?.updated_at ?? null,
+    dockTaskUpdatedAts: allDockItems.map(item => item.taskUpdatedAt),
+    dockProjectUpdatedAts: allDockItems.map(item => item.projectUpdatedAt),
+  });
 
   const cloudUpdatedAt = summaryVersionCursor;
   const ageMinutes = cloudUpdatedAt
@@ -1219,6 +1376,7 @@ Deno.serve(async (req: Request) => {
       projectTitle: focusProject?.title ?? null,
       title: focusTask?.title ?? primarySlot?.inlineTitle ?? null,
       remainingMinutes: primarySlot?.estimatedMinutes ?? null,
+      isMaster: isMasterSlot(primarySlot),
       valid: focusValid,
     },
     dock: {
@@ -1230,11 +1388,19 @@ Deno.serve(async (req: Request) => {
         title: item.title,
         projectTitle: item.projectTitle,
         estimatedMinutes: item.estimatedMinutes,
+        isMaster: item.isMaster,
         valid: item.valid,
       })),
     },
+    commandCenter: {
+      slots: commandCenterItems,
+      mainTaskId: commandCenterItems.find(item => item.isMain)?.taskId ?? null,
+      focusedTaskId: commandCenterItems[0]?.taskId ?? null,
+      backupCount,
+    },
     blackBox: {
       pendingCount: pendingBlackBoxCount ?? 0,
+      unreadCount: unreadBlackBoxCount ?? 0,
       previews: blackBoxPreviews,
       gatePreview,
     },
@@ -1272,6 +1438,7 @@ Deno.serve(async (req: Request) => {
       projectTitle: focusProject?.title ?? null,
       title: focusTask?.title ?? primarySlot?.inlineTitle ?? null,
       remainingMinutes: primarySlot?.estimatedMinutes ?? null,
+      isMaster: isMasterSlot(primarySlot),
       valid: focusValid,
     },
     dock: {
@@ -1279,8 +1446,15 @@ Deno.serve(async (req: Request) => {
       countFromTasks: dockCountFromTasks,
       items: dockItems.map(({ taskUpdatedAt: _taskUpdatedAt, projectUpdatedAt: _projectUpdatedAt, ...item }) => item),
     },
+    commandCenter: {
+      slots: commandCenterItems,
+      mainTaskId: commandCenterItems.find(item => item.isMain)?.taskId ?? null,
+      focusedTaskId: commandCenterItems[0]?.taskId ?? null,
+      backupCount,
+    },
     blackBox: {
       pendingCount: pendingBlackBoxCount ?? 0,
+      unreadCount: unreadBlackBoxCount ?? 0,
       previews: blackBoxPreviews,
       gatePreview,
     },
@@ -1352,7 +1526,3 @@ Deno.serve(async (req: Request) => {
 
   return jsonResponse(summary, responseHeaders, 200);
 });
-
-
-
-

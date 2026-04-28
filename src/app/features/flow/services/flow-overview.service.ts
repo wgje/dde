@@ -493,8 +493,6 @@ export class FlowOverviewService {
         }
 
         const nodeBounds = getNodesBounds();
-        const containerW = this.overviewContainer?.clientWidth ?? 0;
-        const containerH = this.overviewContainer?.clientHeight ?? 0;
         const docBounds = this.diagram.documentBounds;
         let totalBounds: go.Rect;
         if (!docBounds.isReal() || (docBounds.width === 0 && docBounds.height === 0)) {

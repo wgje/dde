@@ -118,6 +118,16 @@ export class FlowTemplateService {
   setupNodeTemplate(diagram: go.Diagram): void {
     const $ = go.GraphObject.make;
     const isMobile = this.uiState.isMobile();
+
+    // 【2026-04-24 性能优化】converter 输出值全部 hoist 到 setupNodeTemplate 作用域常量。
+    // GoJS 会在每次 merge/binding 重算时调用 converter，若内部 new go.Size()/拼接字符串，
+    // 30+ 节点场景下会产生大量短命对象；hoist 后 converter 只返回已存在的引用。
+    const titleMaxSizeUnassigned = new go.Size(120, NaN);
+    const titleMaxSizeAssigned = new go.Size(160, NaN);
+    const titleFontUnassigned = "500 11px \"LXGW WenKai Screen\", sans-serif";
+    const titleFontAssigned = "400 12px \"LXGW WenKai Screen\", sans-serif";
+    const assignedWidth = GOJS_CONFIG.ASSIGNED_NODE_WIDTH;
+    const unassignedWidth = GOJS_CONFIG.UNASSIGNED_NODE_WIDTH;
     const portSize = isMobile ? 24 : 10;
     
     const _allowedPortIds = ["T", "B", "L", "R"];
@@ -263,8 +273,8 @@ export class FlowTemplateService {
           toSpot: go.Spot.AllSides,
           cursor: "move"
         },
-        new go.Binding("width", "isUnassigned", (isUnassigned: boolean) => 
-          isUnassigned ? GOJS_CONFIG.UNASSIGNED_NODE_WIDTH : GOJS_CONFIG.ASSIGNED_NODE_WIDTH),
+        new go.Binding("width", "isUnassigned", (isUnassigned: boolean) =>
+          isUnassigned ? unassignedWidth : assignedWidth),
         $(go.Shape, "RoundedRectangle", {
           name: "SHAPE",
           fill: "white",
@@ -279,18 +289,21 @@ export class FlowTemplateService {
         new go.Binding("strokeWidth", "borderWidth")),
         
         $(go.Panel, "Vertical",
+          {
+            pickable: false, // 【2026-04-24 性能优化】文本面板纯装饰，跳过指针命中测试
+          },
           new go.Binding("margin", "isUnassigned", (isUnassigned: boolean) => isUnassigned ? 10 : 16),
           $(go.TextBlock, { font: "bold 9px \"LXGW WenKai Screen\", sans-serif", stroke: "#78716C", alignment: go.Spot.Left },
             new go.Binding("text", "displayId"),
             new go.Binding("stroke", "displayIdColor"),
             new go.Binding("visible", "isUnassigned", (isUnassigned: boolean) => !isUnassigned)),
-          $(go.TextBlock, { margin: new go.Margin(4, 0, 0, 0), font: "400 12px \"LXGW WenKai Screen\", sans-serif", stroke: "#44403C" },
+          $(go.TextBlock, { margin: new go.Margin(4, 0, 0, 0), font: titleFontAssigned, stroke: "#44403C" },
             new go.Binding("text", "title"),
-            new go.Binding("font", "isUnassigned", (isUnassigned: boolean) => 
-              isUnassigned ? "500 11px \"LXGW WenKai Screen\", sans-serif" : "400 12px \"LXGW WenKai Screen\", sans-serif"),
+            new go.Binding("font", "isUnassigned", (isUnassigned: boolean) =>
+              isUnassigned ? titleFontUnassigned : titleFontAssigned),
             new go.Binding("stroke", "titleColor"),
-            new go.Binding("maxSize", "isUnassigned", (isUnassigned: boolean) => 
-              isUnassigned ? new go.Size(120, NaN) : new go.Size(160, NaN)))
+            new go.Binding("maxSize", "isUnassigned", (isUnassigned: boolean) =>
+              isUnassigned ? titleMaxSizeUnassigned : titleMaxSizeAssigned))
         )
       ),
       
@@ -299,6 +312,7 @@ export class FlowTemplateService {
         {
           alignment: new go.Spot(1, 0, -6, 6),
           visible: false,
+          pickable: false, // ㄂026-04-24 性能优化】停泊徐章仅作视觉提示
         },
         new go.Binding("visible", "isDocked"),
         $(go.Shape, "RoundedRectangle", {
@@ -324,6 +338,7 @@ export class FlowTemplateService {
         strokeWidth: 2,
         opacity: 0.9,
         visible: false,
+        pickable: false, // ㄂026-04-24 性能优化】专注高亮圈纯视觉元素
       },
       new go.Binding("visible", "isDockFocused")),
 

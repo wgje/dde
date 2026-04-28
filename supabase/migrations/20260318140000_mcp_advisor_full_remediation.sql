@@ -40,20 +40,16 @@
 CREATE SCHEMA IF NOT EXISTS extensions;
 GRANT USAGE ON SCHEMA extensions TO authenticated, anon;
 GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA extensions TO authenticated, anon;
-
 -- 移除旧的 pg_net（如果存在于 public）
 DROP EXTENSION IF EXISTS pg_net;
-
 -- 在 extensions schema 中创建 pg_net
 CREATE EXTENSION pg_net WITH SCHEMA extensions;
-
 -- ============================================================================
 -- Part 2: 性能优化 - 重复索引删除
 -- ============================================================================
 
 DROP INDEX IF EXISTS idx_connections_project_updated_desc;
 DROP INDEX IF EXISTS idx_tasks_project_updated_desc;
-
 -- ============================================================================
 -- Part 3: 性能优化 - 未使用索引删除
 -- ============================================================================
@@ -63,10 +59,8 @@ DROP INDEX IF EXISTS idx_backup_metadata_status_type_completed;
 DROP INDEX IF EXISTS idx_backup_metadata_user_status;
 DROP INDEX IF EXISTS idx_backup_metadata_expires;
 DROP INDEX IF EXISTS idx_backup_restore_history_backup_user;
-
 -- 连接清理索引（cleanup 逻辑已优化）
 DROP INDEX IF EXISTS idx_connections_deleted_cleanup;
-
 -- ============================================================================
 -- Part 4: 性能优化 - 外键索引补充
 -- ============================================================================
@@ -74,33 +68,24 @@ DROP INDEX IF EXISTS idx_connections_deleted_cleanup;
 -- 优先级 1：user_id 外键（用户查询频繁，DELETE 时需要检查）
 CREATE INDEX IF NOT EXISTS idx_backup_restore_history_user_id 
   ON public.backup_restore_history(user_id);
-
 CREATE INDEX IF NOT EXISTS idx_connection_tombstones_deleted_by 
   ON public.connection_tombstones(deleted_by);
-
 CREATE INDEX IF NOT EXISTS idx_project_members_invited_by 
   ON public.project_members(invited_by);
-
 CREATE INDEX IF NOT EXISTS idx_quarantined_files_quarantined_by 
   ON public.quarantined_files(quarantined_by);
-
 -- 优先级 2：project_id 外键（项目操作频繁）
 CREATE INDEX IF NOT EXISTS idx_black_box_entries_project_id 
   ON public.black_box_entries(project_id);
-
 -- 优先级 3：其他外键（备份/routine 操作不频繁）
 CREATE INDEX IF NOT EXISTS idx_task_tombstones_deleted_by 
   ON public.task_tombstones(deleted_by);
-
 CREATE INDEX IF NOT EXISTS idx_backup_metadata_base_backup_id 
   ON public.backup_metadata(base_backup_id);
-
 CREATE INDEX IF NOT EXISTS idx_backup_restore_history_snapshot_id 
   ON public.backup_restore_history(pre_restore_snapshot_id);
-
 CREATE INDEX IF NOT EXISTS idx_routine_completions_routine_id 
   ON public.routine_completions(routine_id);
-
 -- ============================================================================
 -- ANALYSIS: 导入脚本中发现的设计缺陷
 -- ============================================================================
@@ -180,14 +165,12 @@ ANALYZE public.quarantined_files;
 ANALYZE public.task_tombstones;
 ANALYZE public.black_box_entries;
 ANALYZE public.routine_completions;
-
 -- ============================================================================
 -- Audit Comment
 -- ============================================================================
 
 COMMENT ON SCHEMA public IS
   'MCP advisor full remediation (2026-03-18): pg_net→extensions schema, 2 duplicate index drops, 5 unused index drops, 9 foreign key index additions, complete analysis & recommendations documented';
-
 -- ============================================================================
 -- 完成
--- ============================================================================
+-- ============================================================================;

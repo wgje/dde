@@ -179,22 +179,24 @@ function normalizeLocalPathInput(localPath: string): string {
 }
 
 function parseFileUrlToLocalPath(url: string): string | null {
+  let parsed: URL | null = null;
   try {
-    const parsed = new URL(url);
-    if (parsed.protocol !== 'file:') {
-      return null;
-    }
-
-    const pathname = decodeURIComponent(parsed.pathname);
-    if (parsed.host && parsed.host.toLowerCase() !== 'localhost') {
-      const uncPath = normalizeSlashes(pathname);
-      return `\\\\${parsed.host}${uncPath}`;
-    }
-
-    return normalizeSlashes(pathname.replace(/^\/([a-zA-Z]:)/, '$1'));
+    parsed = new URL(url);
   } catch {
+    parsed = null;
+  }
+
+  if (!parsed || parsed.protocol !== 'file:') {
     return null;
   }
+
+  const pathname = decodeURIComponent(parsed.pathname);
+  if (parsed.host && parsed.host.toLowerCase() !== 'localhost') {
+    const uncPath = normalizeSlashes(pathname);
+    return `\\\\${parsed.host}${uncPath}`;
+  }
+
+  return normalizeSlashes(pathname.replace(/^\/([a-zA-Z]:)/, '$1'));
 }
 
 function parseLocalPathCandidate(url: string): string | null {
@@ -1177,4 +1179,3 @@ export function extractPlainText(content: string, maxLength: number = 100): stri
   
   return text;
 }
-

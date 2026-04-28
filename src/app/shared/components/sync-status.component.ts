@@ -670,13 +670,20 @@ export class SyncStatusComponent {
   
   /**
    * 立即重试所有待处理操作
+   *
+   * 【根因修复 2026-04-22】过去只触发 ActionQueue.processQueue，
+   * 当待同步项实际全部落在 RetryQueue（batch-sync 失败转交）时，
+   * "立即同步" 按钮对 RetryQueue 无效 → 用户看到 "同步中..." 旋转但数字不降。
+  * 这里并行触发 RetryQueue.processQueue；真正的 syncError 收口仍交给
+  * RetryQueue / ActionQueue 自身的恢复信号链路，避免空队列点击把旧错误误清掉。
    */
   async retryAll() {
     // 防止重复点击
     if (this.isRetrying() || this.isProcessing()) return;
-    
+
     this.isRetrying.set(true);
     try {
+      await this.retryQueue.processQueue(undefined, true);
       await this.actionQueue.processQueue();
     } finally {
       this.isRetrying.set(false);

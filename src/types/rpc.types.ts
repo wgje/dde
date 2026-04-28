@@ -5,7 +5,7 @@
  * 【集中定义】维护单一真相源，避免多处 RPC 调用参数类型不一致
  */
 
-import { Task, Connection, Project, BlackBoxEntry, DockSnapshot } from '../models';
+import { Task, Connection, DockSnapshot } from '../models';
 
 /**
  * RPC 函数参数与返回值的完整签名映射

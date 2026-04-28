@@ -139,6 +139,7 @@ describe('UserSessionService', () => {
     client: ReturnType<typeof vi.fn>;
     clientAsync: ReturnType<typeof vi.fn>;
     getClient: ReturnType<typeof vi.fn>;
+    getSession: ReturnType<typeof vi.fn>;
     getStorageKey: ReturnType<typeof vi.fn>;
     signOut: ReturnType<typeof vi.fn>;
   };
@@ -314,6 +315,10 @@ describe('UserSessionService', () => {
       client: vi.fn(() => null),
       clientAsync: vi.fn(() => Promise.resolve(null)),
       getClient: vi.fn(() => null),
+      getSession: vi.fn().mockResolvedValue({
+        data: { session: { user: { id: 'user-1' } } },
+        error: null,
+      }),
       getStorageKey: vi.fn(() => 'sb-test-auth-token'),
       signOut: vi.fn().mockResolvedValue(undefined),
     };
@@ -1463,6 +1468,51 @@ describe('UserSessionService', () => {
   });
 
   describe('startBackgroundSync', () => {
+    it('Supabase auth session 尚未切到当前用户时，不应按不可访问裁剪 activeProject', async () => {
+      userIdSignal.set('user-1');
+      const activeProject = createProject({ id: 'proj-active', name: 'Active', syncSource: 'synced' });
+      (mockProjectState['setProjects'] as (projects: Project[]) => void)([activeProject]);
+      (mockProjectState['setActiveProjectId'] as (projectId: string | null) => void)('proj-active');
+      vi.clearAllMocks();
+
+      mockSupabaseClientService.getSession.mockResolvedValueOnce({
+        data: { session: { user: { id: 'old-user' } } },
+        error: null,
+      });
+      (
+        (mockSyncCoordinator['core'] as Record<string, unknown>)['getResumeRecoveryProbe'] as ReturnType<typeof vi.fn>
+      ).mockResolvedValue({
+        activeProjectId: 'proj-active',
+        activeAccessible: false,
+        activeWatermark: null,
+        projectsWatermark: '2026-02-17T10:02:00.000Z',
+        blackboxWatermark: null,
+        serverNow: '2026-02-17T10:03:01.000Z',
+      });
+      (
+        (mockSyncCoordinator['core'] as Record<string, unknown>)['getAccessibleProjectProbe'] as ReturnType<typeof vi.fn>
+      ).mockResolvedValue({
+        projectId: 'proj-active',
+        accessible: false,
+        watermark: null,
+      });
+
+      await (
+        service as unknown as {
+          startBackgroundSync: (userId: string, previousActive: string | null) => Promise<void>;
+        }
+      ).startBackgroundSync('user-1', null);
+
+      expect(
+        (mockSyncCoordinator['core'] as Record<string, unknown>)['getResumeRecoveryProbe']
+      ).not.toHaveBeenCalled();
+      expect(
+        (mockSyncCoordinator['core'] as Record<string, unknown>)['getAccessibleProjectProbe']
+      ).not.toHaveBeenCalled();
+      expect(mockProjectState['setActiveProjectId']).not.toHaveBeenCalledWith(null);
+      expect(mockToastService['info']).not.toHaveBeenCalledWith('当前项目不可访问，已自动切换');
+    });
+
     it('activeProject 不可访问时应清理并跳过项目同步', async () => {
       const deniedProject = createProject({ id: 'proj-denied', name: 'Denied', syncSource: 'synced' });
       const keepProject = createProject({ id: 'proj-ok', name: 'Keep', syncSource: 'synced' });
@@ -1654,7 +1704,7 @@ describe('UserSessionService', () => {
         }
       ).startBackgroundSync('user-1', null);
 
-      expect(syncProjectListMetadataSpy).toHaveBeenCalledWith('user-1');
+      expect(syncProjectListMetadataSpy).toHaveBeenCalledWith('user-1', undefined);
       expect(mockSyncCoordinator['performDeltaSync']).toHaveBeenCalledWith('proj-legacy-local-only');
       expect(mockSyncCoordinator['loadSingleProjectFromCloud']).not.toHaveBeenCalled();
     });
@@ -1852,6 +1902,29 @@ describe('UserSessionService', () => {
         from: vi.fn().mockReturnValue(query),
       });
     }
+
+    it('Supabase auth session 尚未切到当前用户时，应把空项目清单视为非权威结果', async () => {
+      const localProject = createProject({ id: 'proj-local', name: 'Local', syncSource: 'synced' });
+      userIdSignal.set('user-1');
+      (mockProjectState['setProjects'] as (projects: Project[]) => void)([localProject]);
+      (mockProjectState['setActiveProjectId'] as (projectId: string | null) => void)(null);
+      vi.clearAllMocks();
+      mockSupabaseClientService.getSession.mockResolvedValueOnce({
+        data: { session: { user: { id: 'old-user' } } },
+        error: null,
+      });
+      setupSupabaseQuery([]);
+
+      const accessibleProjectIds = await (
+        service as unknown as {
+          syncProjectListMetadata: (userId: string) => Promise<Set<string>>;
+        }
+      ).syncProjectListMetadata('user-1');
+
+      expect([...accessibleProjectIds]).toEqual(['proj-local']);
+      expect(mockProjectState['setProjectsMetadataOnly']).not.toHaveBeenCalled();
+      expect(service.canAuthoritativelyRejectProjectRoute()).toBe(false);
+    });
 
     it('在项目数达到裁剪阈值时，应清理不可访问且无待同步改动的非活跃项目', async () => {
       const keepProject = createProject({ id: 'proj-ok', name: 'Keep' });

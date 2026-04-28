@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  蓝图风 C 位插槽 item。渲染时由 Factory 动态设置：
+    - nano_widget_tab_slot:       底框（主/副两种描边厚度）
+    - nano_widget_tab_badge:      左上角编号徽章底（ribbon / circle）
+    - nano_widget_tab_badge_text: 徽章内的数字 1~4
+    - nano_widget_tab_icon:       右上角图标（crown=主；flag=副）
+    - nano_widget_tab_label:      任务标题（主任务 / 副任务N）
+  整个 slot 的点击区域放在 FrameLayout 根，带 fillInIntent。
+-->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:paddingStart="3dp"
+    android:paddingEnd="3dp"
+    android:paddingTop="2dp"
+    android:paddingBottom="2dp">
+
+    <FrameLayout
+        android:id="@+id/nano_widget_tab_slot"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="@drawable/nano_widget_slot_secondary"
+        android:minHeight="74dp"
+        android:paddingStart="6dp"
+        android:paddingEnd="6dp"
+        android:paddingTop="5dp"
+        android:paddingBottom="6dp">
+
+        <!-- 左上编号徽章（ribbon / circle） -->
+        <FrameLayout
+            android:id="@+id/nano_widget_tab_badge"
+            android:layout_width="22dp"
+            android:layout_height="22dp"
+            android:layout_gravity="top|start"
+            android:background="@drawable/nano_widget_badge_secondary">
+
+            <TextView
+                android:id="@+id/nano_widget_tab_badge_text"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:gravity="top|center_horizontal"
+                android:includeFontPadding="false"
+                android:paddingTop="3dp"
+                android:text=""
+                android:textColor="#F6FBFF"
+                android:textSize="10sp"
+                android:textStyle="bold" />
+        </FrameLayout>
+
+        <!-- 右上 crown / flag 角标，后续中下部可承接“完成任务 / 等待”。 -->
+        <ImageView
+            android:id="@+id/nano_widget_tab_icon"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_gravity="top|end"
+            android:layout_marginTop="1dp"
+            android:layout_marginEnd="1dp"
+            android:importantForAccessibility="no"
+            android:src="@drawable/nano_widget_icon_flag" />
+
+        <!-- 任务标题区：避开顶部角标，不再贴住卡片底部。 -->
+        <TextView
+            android:id="@+id/nano_widget_tab_label"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top|center_horizontal"
+            android:layout_marginTop="30dp"
+            android:ellipsize="end"
+            android:gravity="center"
+            android:lineSpacingExtra="-1dp"
+            android:maxLines="2"
+            android:paddingBottom="2dp"
+            android:text=""
+            android:textColor="#F6FBFF"
+            android:textSize="10sp" />
+
+        <!-- 兼容旧渲染路径：保留一个不可见的 action_chip（避免旧调用点 NPE） -->
+        <TextView
+            android:id="@+id/nano_widget_action_chip"
+            android:layout_width="1dp"
+            android:layout_height="1dp"
+            android:text=""
+            android:visibility="invisible" />
+    </FrameLayout>
+</FrameLayout>

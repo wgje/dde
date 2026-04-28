@@ -218,7 +218,7 @@ class NanoflowWidgetStore(private val context: Context) {
     return context.widgetDataStore.data.first()[gatePageIndexKey(appWidgetId)] ?: 0
   }
 
-  /** 当前 widget 实例选中的任务 tab 下标（主任务=0，副任务 1..N）。 */
+  /** 历史兼容字段：旧版 widget 的本地 tab 下标缓存。当前实现固定以前台 C 位为 0。 */
   suspend fun persistSelectedTaskIndex(appWidgetId: Int, taskIndex: Int) {
     context.widgetDataStore.edit { prefs ->
       prefs[selectedTaskIndexKey(appWidgetId)] = taskIndex.coerceAtLeast(0)
@@ -227,6 +227,16 @@ class NanoflowWidgetStore(private val context: Context) {
 
   suspend fun readSelectedTaskIndex(appWidgetId: Int): Int {
     return context.widgetDataStore.data.first()[selectedTaskIndexKey(appWidgetId)] ?: 0
+  }
+
+  suspend fun persistFocusWaitMenuOpen(appWidgetId: Int, open: Boolean) {
+    context.widgetDataStore.edit { prefs ->
+      prefs[focusWaitMenuOpenKey(appWidgetId)] = open
+    }
+  }
+
+  suspend fun readFocusWaitMenuOpen(appWidgetId: Int): Boolean {
+    return context.widgetDataStore.data.first()[focusWaitMenuOpenKey(appWidgetId)] ?: false
   }
 
   suspend fun persistGateSelectedEntryId(appWidgetId: Int, entryId: String?) {
@@ -242,6 +252,21 @@ class NanoflowWidgetStore(private val context: Context) {
 
   suspend fun readGateSelectedEntryId(appWidgetId: Int): String? {
     return context.widgetDataStore.data.first()[gateSelectedEntryIdKey(appWidgetId)]
+  }
+
+  /**
+   * 【2026-04-24 根因修复】记录上次已应用到 launcher hostView 的 layout 签名（由
+   * [NanoflowWidgetRenderer.resolveLayoutSignature] 计算）。receiver / worker 在下次刷新前
+   * 对比当前 vs 上次签名：不同则必须走 full `updateAppWidget`，而不是 partial。
+   */
+  suspend fun persistLastAppliedLayoutSignature(appWidgetId: Int, signature: String) {
+    context.widgetDataStore.edit { prefs ->
+      prefs[lastAppliedLayoutSignatureKey(appWidgetId)] = signature
+    }
+  }
+
+  suspend fun readLastAppliedLayoutSignature(appWidgetId: Int): String? {
+    return context.widgetDataStore.data.first()[lastAppliedLayoutSignatureKey(appWidgetId)]
   }
 
   suspend fun readPendingPushToken(): String? {
@@ -295,12 +320,14 @@ class NanoflowWidgetStore(private val context: Context) {
       prefs.remove(gatePageIndexKey(appWidgetId))
       prefs.remove(gateSelectedEntryIdKey(appWidgetId))
       prefs.remove(selectedTaskIndexKey(appWidgetId))
+      prefs.remove(focusWaitMenuOpenKey(appWidgetId))
       prefs.remove(summaryJsonKey(appWidgetId))
       prefs.remove(summaryCacheFormatVersionKey(appWidgetId))
       prefs.remove(summaryUpdatedAtKey(appWidgetId))
       prefs.remove(stringPreferencesKey(pendingBootstrapNonceKey(appWidgetId)))
       prefs.remove(longPreferencesKey(pendingBootstrapIssuedAtKey(appWidgetId)))
       prefs.remove(stringPreferencesKey(pendingBootstrapPushTokenKey(appWidgetId)))
+      prefs.remove(lastAppliedLayoutSignatureKey(appWidgetId))
     }
   }
 
@@ -435,8 +462,16 @@ class NanoflowWidgetStore(private val context: Context) {
     return intPreferencesKey("instance.$appWidgetId.selectedTaskIndex")
   }
 
+  private fun focusWaitMenuOpenKey(appWidgetId: Int): Preferences.Key<Boolean> {
+    return booleanPreferencesKey("instance.$appWidgetId.focusWaitMenuOpen")
+  }
+
   private fun gateSelectedEntryIdKey(appWidgetId: Int): Preferences.Key<String> {
     return stringPreferencesKey("instance.$appWidgetId.gateSelectedEntryId")
+  }
+
+  private fun lastAppliedLayoutSignatureKey(appWidgetId: Int): Preferences.Key<String> {
+    return stringPreferencesKey("instance.$appWidgetId.lastAppliedLayoutSignature")
   }
 
   private fun summaryJsonKey(appWidgetId: Int): Preferences.Key<String> {

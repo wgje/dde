@@ -122,5 +122,16 @@ describe('PreferenceService', () => {
         }),
       );
     });
+
+    it('应规范化并缓存 lastBackupProofAt', async () => {
+      mockSyncService.saveUserPreferences.mockResolvedValueOnce(true);
+
+      await service.saveUserPreferences('user-1', { lastBackupProofAt: '2026-04-23T08:00:00+08:00' });
+
+      expect(service.lastBackupProofAt()).toBe('2026-04-23T00:00:00.000Z');
+      expect(mockSyncService.saveUserPreferences).toHaveBeenCalledWith('user-1', {
+        lastBackupProofAt: '2026-04-23T00:00:00.000Z',
+      });
+    });
   });
 });

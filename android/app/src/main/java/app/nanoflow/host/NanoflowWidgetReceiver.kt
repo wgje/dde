@@ -8,7 +8,13 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.widget.Toast
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 
 /**
  * 原生 AppWidget 接收器。
@@ -119,11 +125,25 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
         resetReactiveRefreshGate(context, "click-open-focus-tools")
         handleClickOpenFocusTools(context, intent)
       }
+      ACTION_CLICK_GATE_BLOCKED -> {
+        resetReactiveRefreshGate(context, "click-gate-blocked")
+        handleGateBlockedClick(context, intent)
+      }
       ACTION_CLICK_ITEM -> {
         resetReactiveRefreshGate(context, "click-item")
         handleClickItem(context, intent)
       }
       ACTION_FORCE_REFRESH -> NanoflowWidgetRefreshWorker.enqueue(context, reason = "force-refresh-broadcast")
+      // 【根因修复 2026-04-22】APK 升级（尤其 widget layout 结构变化）后，launcher 只会对旧
+      // hostView 调 RemoteViews.reapply（经 partiallyUpdateAppWidget）。reapply 无法补齐新增
+      // 的 View ID（如 footer_label），也不会重读 layout 属性（如 numColumns）。因此必须在
+      // 包替换瞬间，对所有 widgetId 走一次非 partial 的 updateAppWidget，让 launcher 重新
+      // inflate hostView。这是结构性 layout 变更能在已安装实例上立即可见的唯一稳定路径。
+      Intent.ACTION_MY_PACKAGE_REPLACED -> {
+        NanoflowWidgetTelemetry.info("widget_package_replaced_reinflate_all")
+        reinflateAllWidgets(context)
+        NanoflowWidgetRefreshWorker.enqueue(context, reason = "package-replaced")
+      }
       // 【根因修复 2026-04-21】在 FCM 未就绪的环境下，widget 只靠 15-min 周期 WorkManager +
       // 手动 force-refresh + add/resize 回调更新；用户在桌面端切换专注模式后，手机端最长需
       // 等 15 min 才看到同步。USER_PRESENT（解锁）是 manifest receiver 仍稳定可用的
@@ -166,6 +186,7 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
   // --- Click handlers ---
   private fun handleClickOpenApp(context: Context, intent: Intent) {
     val appWidgetId = intent.getIntExtra(EXTRA_APP_WIDGET_ID, AppWidgetManager.INVALID_APPWIDGET_ID)
+    val taskIndex = intent.getIntExtra(EXTRA_TASK_INDEX, -1)
     NanoflowWidgetTelemetry.info(
       "widget_click_open_app",
       mapOf(
@@ -178,12 +199,14 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
         context = context,
         appWidgetId = appWidgetId,
         launchIntent = NanoFlowLaunchIntent.OPEN_WORKSPACE,
+        taskIndex = taskIndex,
       ),
     )
   }
 
   private fun handleClickOpenFocusTools(context: Context, intent: Intent) {
     val appWidgetId = intent.getIntExtra(EXTRA_APP_WIDGET_ID, AppWidgetManager.INVALID_APPWIDGET_ID)
+    val taskIndex = intent.getIntExtra(EXTRA_TASK_INDEX, -1)
     NanoflowWidgetTelemetry.info(
       "widget_click_open_focus_tools",
       mapOf(
@@ -196,8 +219,22 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
         context = context,
         appWidgetId = appWidgetId,
         launchIntent = NanoFlowLaunchIntent.OPEN_FOCUS_TOOLS,
+        taskIndex = taskIndex,
       ),
     )
+  }
+
+  private fun handleGateBlockedClick(context: Context, intent: Intent) {
+    val appWidgetId = intent.getIntExtra(EXTRA_APP_WIDGET_ID, AppWidgetManager.INVALID_APPWIDGET_ID)
+    NanoflowWidgetTelemetry.info(
+      "widget_click_gate_blocked",
+      mapOf("appWidgetId" to appWidgetId),
+    )
+    Toast.makeText(
+      context.applicationContext,
+      context.getString(R.string.nanoflow_widget_gate_blocked_toast),
+      Toast.LENGTH_SHORT,
+    ).show()
   }
 
   /** 集合视图 item click：根据 EXTRA_ITEM_TYPE 分派到具体处理函数。 */
@@ -208,13 +245,366 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
       NanoflowWidgetActionFactory.ITEM_TYPE_TAB -> handleSelectTask(context, appWidgetId, intent)
       NanoflowWidgetActionFactory.ITEM_TYPE_REFRESH -> handleRefresh(context, appWidgetId)
       NanoflowWidgetActionFactory.ITEM_TYPE_GATE -> handleGateNav(context, appWidgetId, intent)
+      NanoflowWidgetActionFactory.ITEM_TYPE_GATE_ACTION -> handleGateAction(context, appWidgetId, intent)
+      NanoflowWidgetActionFactory.ITEM_TYPE_FOCUS_ACTION -> handleFocusAction(context, appWidgetId, intent)
       NanoflowWidgetActionFactory.ITEM_TYPE_PRIMARY -> handlePrimaryContentClick(context, appWidgetId, intent)
       else -> Unit
     }
   }
 
+  private fun handleFocusAction(context: Context, appWidgetId: Int, intent: Intent) {
+    val focusAction = intent.getStringExtra(NanoflowWidgetActionFactory.EXTRA_FOCUS_ACTION)
+    val taskId = intent.getStringExtra(EXTRA_TASK_ID)?.takeIf { it.isNotBlank() }
+    val waitMinutes = intent.getIntExtra(NanoflowWidgetActionFactory.EXTRA_WAIT_MINUTES, 0)
+
+    if (focusAction == NanoflowWidgetActionFactory.FOCUS_ACTION_WAIT) {
+      runBlocking {
+        val appContext = context.applicationContext
+        val store = NanoflowWidgetStore(appContext)
+        store.persistFocusWaitMenuOpen(appWidgetId, true)
+        val repository = NanoflowWidgetRepository(appContext)
+        val appWidgetManager = AppWidgetManager.getInstance(appContext)
+        renderAndApply(appContext, appWidgetManager, repository, appWidgetId, partialUpdate = true)
+        notifyActionListsDataChanged(appWidgetManager, appWidgetId)
+      }
+      Toast.makeText(
+        context.applicationContext,
+        context.getString(R.string.nanoflow_widget_focus_wait_menu_toast),
+        Toast.LENGTH_SHORT,
+      ).show()
+      return
+    }
+
+    if (taskId.isNullOrBlank()) {
+      Toast.makeText(
+        context.applicationContext,
+        context.getString(R.string.nanoflow_widget_focus_promote_failed_toast),
+        Toast.LENGTH_SHORT,
+      ).show()
+      NanoflowWidgetRefreshWorker.enqueue(context, reason = "focus-action-missing-task")
+      return
+    }
+
+    val pendingResult = goAsync()
+    val appContext = context.applicationContext
+    silentActionScope.launch {
+      val repository = NanoflowWidgetRepository(appContext)
+
+      suspend fun renderCurrentWidget() {
+        val appWidgetManager = AppWidgetManager.getInstance(appContext)
+        renderAndApply(appContext, appWidgetManager, repository, appWidgetId)
+        notifyActionListsDataChanged(appWidgetManager, appWidgetId)
+      }
+
+      try {
+        when (focusAction) {
+          NanoflowWidgetActionFactory.FOCUS_ACTION_COMPLETE -> {
+            val optimisticSnapshot = runCatching {
+              repository.applyOptimisticFocusCompletion(appWidgetId, taskId)
+            }.getOrNull()
+            if (optimisticSnapshot != null) {
+              runCatching { renderCurrentWidget() }
+            }
+
+            val success = runCatching {
+              repository.completeFrontFocusTask(appWidgetId, taskId)
+            }.getOrElse { false }
+
+            if (success) {
+              if (optimisticSnapshot == null) {
+                runCatching {
+                  repository.refreshSummary(appWidgetId)
+                  renderCurrentWidget()
+                }
+              }
+              withContext(Dispatchers.Main) {
+                Toast.makeText(
+                  appContext,
+                  appContext.getString(R.string.nanoflow_widget_focus_complete_toast),
+                  Toast.LENGTH_SHORT,
+                ).show()
+              }
+              NanoflowWidgetRefreshWorker.enqueue(appContext, reason = "focus-complete-front")
+            } else {
+              if (optimisticSnapshot != null) {
+                runCatching {
+                  repository.rollbackOptimisticFocusPromotion(appWidgetId, optimisticSnapshot)
+                  renderCurrentWidget()
+                }
+              }
+              withContext(Dispatchers.Main) {
+                Toast.makeText(
+                  appContext,
+                  appContext.getString(R.string.nanoflow_widget_focus_promote_failed_toast),
+                  Toast.LENGTH_SHORT,
+                ).show()
+              }
+              NanoflowWidgetRefreshWorker.enqueue(appContext, reason = "focus-complete-front-retry")
+            }
+          }
+          NanoflowWidgetActionFactory.FOCUS_ACTION_WAIT_PRESET -> {
+            val normalizedWait = waitMinutes.coerceAtLeast(1)
+            val optimisticSnapshot = runCatching {
+              repository.applyOptimisticFocusWait(appWidgetId, taskId, normalizedWait)
+            }.getOrNull()
+            if (optimisticSnapshot != null) {
+              runCatching { renderCurrentWidget() }
+            }
+
+            val success = runCatching {
+              repository.suspendFrontFocusTask(appWidgetId, taskId, normalizedWait)
+            }.getOrElse { false }
+
+            if (success) {
+              if (optimisticSnapshot == null) {
+                runCatching {
+                  repository.refreshSummary(appWidgetId)
+                  renderCurrentWidget()
+                }
+              }
+              withContext(Dispatchers.Main) {
+                Toast.makeText(
+                  appContext,
+                  appContext.getString(R.string.nanoflow_widget_focus_wait_toast),
+                  Toast.LENGTH_SHORT,
+                ).show()
+              }
+              NanoflowWidgetRefreshWorker.enqueue(appContext, reason = "focus-wait-front")
+              NanoflowWidgetRefreshWorker.scheduleFocusWaitReminder(
+                appContext,
+                appWidgetId,
+                normalizedWait,
+              )
+            } else {
+              if (optimisticSnapshot != null) {
+                runCatching {
+                  repository.rollbackOptimisticFocusPromotion(appWidgetId, optimisticSnapshot)
+                  renderCurrentWidget()
+                }
+              }
+              withContext(Dispatchers.Main) {
+                Toast.makeText(
+                  appContext,
+                  appContext.getString(R.string.nanoflow_widget_focus_promote_failed_toast),
+                  Toast.LENGTH_SHORT,
+                ).show()
+              }
+              NanoflowWidgetRefreshWorker.enqueue(appContext, reason = "focus-wait-front-retry")
+            }
+          }
+          else -> {
+            withContext(Dispatchers.Main) {
+              Toast.makeText(
+                appContext,
+                appContext.getString(R.string.nanoflow_widget_focus_promote_failed_toast),
+                Toast.LENGTH_SHORT,
+              ).show()
+            }
+          }
+        }
+      } finally {
+        pendingResult.finish()
+      }
+    }
+  }
+
+  private fun handleGateAction(context: Context, appWidgetId: Int, intent: Intent) {
+    // 【2026-04-22】用户需求：点 已读 / 完成 不应跳入项目，直接在小组件里执行逻辑。
+    // 实现：goAsync() + 协程调用 widget-black-box-action 边缘函数，成功后刷新 widget。
+    // 失败回退：启动 TWA 深链，让前端 BlackBoxService 兜底。
+    val gateAction = intent.getStringExtra(NanoflowWidgetActionFactory.EXTRA_GATE_ACTION)
+    val entryAction = when (gateAction) {
+      NanoflowWidgetActionFactory.GATE_ACTION_READ -> BlackBoxEntryAction.READ
+      NanoflowWidgetActionFactory.GATE_ACTION_COMPLETE -> BlackBoxEntryAction.COMPLETE
+      else -> null
+    }
+    if (entryAction == null) {
+      // 未知动作：降级为打开 Focus Tools，维持旧可观察行为。
+      handleClickOpenFocusTools(
+        context,
+        Intent(intent).putExtra(EXTRA_APP_WIDGET_ID, appWidgetId),
+      )
+      return
+    }
+
+    val pendingResult = goAsync()
+    val appContext = context.applicationContext
+    silentActionScope.launch {
+      val repository = NanoflowWidgetRepository(appContext)
+
+      suspend fun renderCurrentWidget() {
+        val appWidgetManager = AppWidgetManager.getInstance(appContext)
+        renderAndApply(appContext, appWidgetManager, repository, appWidgetId)
+        notifyActionListsDataChanged(appWidgetManager, appWidgetId)
+      }
+
+      // 读取当前目标 entryId。优先使用 fill-in intent 里由渲染路径直接附带的 displayedGateEntryId，
+      // 这样点击目标与屏幕上可见的大门卡严格一致；仅在旧实例/旧缓存没带该字段时才回退到缓存推断。
+      val store = NanoflowWidgetStore(appContext)
+      val fillInEntryId = intent.getStringExtra(EXTRA_GATE_ENTRY_ID)?.takeIf { it.isNotBlank() }
+      val cached = runCatching {
+        store.readSummary(appWidgetId)
+      }.getOrNull()
+      val previewEntryId = cached?.blackBox?.gatePreview?.entryId?.takeIf { it.isNotBlank() }
+      val firstPreviewEntryId = cached?.blackBox?.previews
+        ?.firstOrNull { !it.entryId.isNullOrBlank() }
+        ?.entryId
+        ?.takeIf { it.isNotBlank() }
+      val persistedEntryId = runCatching {
+        store.readGateSelectedEntryId(appWidgetId)
+      }.getOrNull()?.takeIf { it.isNotBlank() }
+
+      val entryId = fillInEntryId ?: previewEntryId ?: firstPreviewEntryId ?: persistedEntryId
+      val currentVisibleEntryId = fillInEntryId ?: previewEntryId ?: firstPreviewEntryId
+      if (currentVisibleEntryId != null && currentVisibleEntryId != persistedEntryId) {
+        runCatching {
+          store.persistGateSelectedEntryId(appWidgetId, currentVisibleEntryId)
+        }
+      }
+
+      NanoflowWidgetTelemetry.info(
+        "widget_click_gate_action",
+        mapOf(
+          "appWidgetId" to appWidgetId,
+          "gateAction" to entryAction.wireValue,
+          "hasEntryId" to !entryId.isNullOrBlank(),
+          "entryIdSource" to when {
+            fillInEntryId != null -> "fill-in-intent"
+            previewEntryId != null -> "summary-gate-preview"
+            firstPreviewEntryId != null -> "summary-head"
+            persistedEntryId != null -> "persisted-fallback"
+            else -> "none"
+          },
+          "mode" to "silent",
+        ),
+      )
+
+      val optimisticSnapshot = if (entryId.isNullOrBlank()) {
+        null
+      } else {
+        runCatching {
+          repository.applyOptimisticBlackBoxAction(appWidgetId, entryId, entryAction)
+        }.onFailure { error ->
+          NanoflowWidgetTelemetry.warn(
+            "widget_click_gate_action_optimistic_failed",
+            mapOf(
+              "appWidgetId" to appWidgetId,
+              "gateAction" to entryAction.wireValue,
+              "entryId" to NanoflowWidgetTelemetry.redactId(entryId),
+            ),
+            error,
+          )
+        }.getOrNull()
+      }
+
+      if (optimisticSnapshot != null) {
+        runCatching {
+          renderCurrentWidget()
+        }.onFailure { error ->
+          NanoflowWidgetTelemetry.warn(
+            "widget_click_gate_action_local_render_failed",
+            mapOf(
+              "appWidgetId" to appWidgetId,
+              "gateAction" to entryAction.wireValue,
+              "phase" to "optimistic",
+            ),
+            error,
+          )
+        }
+      }
+
+      val success = if (entryId.isNullOrBlank()) {
+        false
+      } else {
+        runCatching {
+          repository.markBlackBoxEntry(appWidgetId, entryId, entryAction)
+        }.getOrElse { false }
+      }
+
+      if (success) {
+        if (optimisticSnapshot == null) {
+          // 无法做乐观补丁时，同步拉一轮权威 summary 再重绘，避免只重绘旧缓存。
+          runCatching {
+            repository.refreshSummary(appWidgetId)
+            renderCurrentWidget()
+          }.onFailure { error ->
+            NanoflowWidgetTelemetry.warn(
+              "widget_click_gate_action_local_render_failed",
+              mapOf(
+                "appWidgetId" to appWidgetId,
+                "gateAction" to entryAction.wireValue,
+                "phase" to "post-success",
+              ),
+              error,
+            )
+          }
+        }
+
+        withContext(Dispatchers.Main) {
+          val message = when (entryAction) {
+            BlackBoxEntryAction.READ -> "已标记为已读"
+            BlackBoxEntryAction.COMPLETE -> "已标记为完成"
+          }
+          Toast.makeText(appContext, message, Toast.LENGTH_SHORT).show()
+        }
+        NanoflowWidgetRefreshWorker.enqueue(appContext, reason = "gate-action-${entryAction.wireValue}")
+      } else if (entryId.isNullOrBlank()) {
+        // 大门为空或尚未加载到 entryId：不跳转项目（用户需求「不进入项目直接执行逻辑」），
+        // 改为静默 Toast 提示 + 触发一次 summary 刷新。
+        NanoflowWidgetTelemetry.warn(
+          "widget_click_gate_action_skipped_no_entry",
+          mapOf(
+            "appWidgetId" to appWidgetId,
+            "gateAction" to entryAction.wireValue,
+          ),
+        )
+        withContext(Dispatchers.Main) {
+          Toast.makeText(appContext, "大门暂无待处理条目", Toast.LENGTH_SHORT).show()
+        }
+        NanoflowWidgetRefreshWorker.enqueue(appContext, reason = "gate-action-${entryAction.wireValue}-empty")
+      } else {
+        // 服务端 HTTP 失败或鉴权失败：不跳转项目，改为静默 Toast 告知并让下一次 refresh 再试。
+        // 先前的深链回退会把用户带进 TWA 项目路由，违反「不进入项目直接执行逻辑」需求，已移除。
+        NanoflowWidgetTelemetry.warn(
+          "widget_click_gate_action_remote_failure",
+          mapOf(
+            "appWidgetId" to appWidgetId,
+            "gateAction" to entryAction.wireValue,
+            "entryId" to NanoflowWidgetTelemetry.redactId(entryId),
+          ),
+        )
+        if (optimisticSnapshot != null) {
+          runCatching {
+            repository.rollbackOptimisticBlackBoxAction(appWidgetId, optimisticSnapshot)
+            renderCurrentWidget()
+          }.onFailure { error ->
+            NanoflowWidgetTelemetry.warn(
+              "widget_click_gate_action_rollback_failed",
+              mapOf(
+                "appWidgetId" to appWidgetId,
+                "gateAction" to entryAction.wireValue,
+                "entryId" to NanoflowWidgetTelemetry.redactId(entryId),
+              ),
+              error,
+            )
+          }
+        }
+        withContext(Dispatchers.Main) {
+          Toast.makeText(appContext, "网络繁忙，请稍后重试", Toast.LENGTH_SHORT).show()
+        }
+        NanoflowWidgetRefreshWorker.enqueue(appContext, reason = "gate-action-${entryAction.wireValue}-retry")
+      }
+
+      pendingResult.finish()
+    }
+  }
+
   private fun handlePrimaryContentClick(context: Context, appWidgetId: Int, intent: Intent) {
     when (intent.getStringExtra(EXTRA_PRIMARY_ACTION)) {
+      WidgetPrimaryAction.BLOCK_GATE_ACTIONS.name -> handleGateBlockedClick(
+        context,
+        Intent(intent).putExtra(EXTRA_APP_WIDGET_ID, appWidgetId),
+      )
       WidgetPrimaryAction.OPEN_FOCUS_TOOLS.name -> handleClickOpenFocusTools(
         context,
         Intent(intent).putExtra(EXTRA_APP_WIDGET_ID, appWidgetId),
@@ -229,21 +619,165 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
   private fun handleSelectTask(context: Context, appWidgetId: Int, intent: Intent) {
     val targetIndex = intent.getIntExtra(EXTRA_TASK_INDEX, -1)
     if (targetIndex < 0) return
+    val taskId = intent.getStringExtra(EXTRA_TASK_ID)?.takeIf { it.isNotBlank() }
     NanoflowWidgetTelemetry.info(
       "widget_click_select_task_tab",
-      mapOf("appWidgetId" to appWidgetId, "taskIndex" to targetIndex),
+      mapOf(
+        "appWidgetId" to appWidgetId,
+        "taskIndex" to targetIndex,
+        "taskId" to NanoflowWidgetTelemetry.redactId(taskId),
+      ),
     )
-    runBlocking {
-      NanoflowWidgetStore(context).persistSelectedTaskIndex(appWidgetId, targetIndex)
-      val appWidgetManager = AppWidgetManager.getInstance(context)
-      renderAndApply(
-        context,
-        appWidgetManager,
-        NanoflowWidgetRepository(context),
-        appWidgetId,
-        partialUpdate = true,
-      )
-      notifyActionListsDataChanged(appWidgetManager, appWidgetId)
+
+    if (taskId.isNullOrBlank()) {
+      Toast.makeText(
+        context.applicationContext,
+        context.getString(R.string.nanoflow_widget_focus_promote_failed_toast),
+        Toast.LENGTH_SHORT,
+      ).show()
+      NanoflowWidgetRefreshWorker.enqueue(context, reason = "focus-promote-missing-task")
+      return
+    }
+
+    val pendingResult = goAsync()
+    val appContext = context.applicationContext
+    silentActionScope.launch {
+      val repository = NanoflowWidgetRepository(appContext)
+      val store = NanoflowWidgetStore(appContext)
+
+      suspend fun renderCurrentWidget() {
+        val appWidgetManager = AppWidgetManager.getInstance(appContext)
+        renderAndApply(appContext, appWidgetManager, repository, appWidgetId)
+        notifyActionListsDataChanged(appWidgetManager, appWidgetId)
+      }
+
+      try {
+        val currentFrontTaskId = runCatching {
+          store.readSummary(appWidgetId)?.focus?.taskId?.takeIf { it.isNotBlank() }
+        }.getOrNull()
+        if (currentFrontTaskId == taskId) {
+          NanoflowWidgetTelemetry.info(
+            "widget_focus_promote_noop_already_front",
+            mapOf(
+              "appWidgetId" to appWidgetId,
+              "taskId" to NanoflowWidgetTelemetry.redactId(taskId),
+            ),
+          )
+          withContext(Dispatchers.Main) {
+            Toast.makeText(
+              appContext,
+              appContext.getString(R.string.nanoflow_widget_focus_main_fixed_toast),
+              Toast.LENGTH_SHORT,
+            ).show()
+          }
+          return@launch
+        }
+
+        val canPromote = runCatching {
+          repository.isVisibleCommandCenterTaskPromotable(appWidgetId, taskId)
+        }.getOrDefault(false)
+        if (!canPromote) {
+          NanoflowWidgetTelemetry.info(
+            "widget_focus_promote_fallback_open_app",
+            mapOf(
+              "appWidgetId" to appWidgetId,
+              "taskId" to NanoflowWidgetTelemetry.redactId(taskId),
+              "taskIndex" to targetIndex,
+            ),
+          )
+          handleClickOpenApp(
+            context,
+            Intent(intent).putExtra(EXTRA_APP_WIDGET_ID, appWidgetId),
+          )
+          return@launch
+        }
+
+        val optimisticSnapshot = runCatching {
+          repository.applyOptimisticFocusPromotion(appWidgetId, taskId)
+        }.onFailure { error ->
+          NanoflowWidgetTelemetry.warn(
+            "widget_focus_promote_optimistic_failed",
+            mapOf(
+              "appWidgetId" to appWidgetId,
+              "taskId" to NanoflowWidgetTelemetry.redactId(taskId),
+            ),
+            error,
+          )
+        }.getOrNull()
+
+        if (optimisticSnapshot != null) {
+          runCatching {
+            renderCurrentWidget()
+          }.onFailure { error ->
+            NanoflowWidgetTelemetry.warn(
+              "widget_focus_promote_local_render_failed",
+              mapOf(
+                "appWidgetId" to appWidgetId,
+                "taskId" to NanoflowWidgetTelemetry.redactId(taskId),
+                "phase" to "optimistic",
+              ),
+              error,
+            )
+          }
+        }
+
+        val success = runCatching {
+          repository.promoteFocusSecondaryTask(appWidgetId, taskId)
+        }.getOrElse { false }
+
+        if (success) {
+          if (optimisticSnapshot == null) {
+            runCatching {
+              repository.refreshSummary(appWidgetId)
+              renderCurrentWidget()
+            }.onFailure { error ->
+              NanoflowWidgetTelemetry.warn(
+                "widget_focus_promote_local_render_failed",
+                mapOf(
+                  "appWidgetId" to appWidgetId,
+                  "taskId" to NanoflowWidgetTelemetry.redactId(taskId),
+                  "phase" to "post-success",
+                ),
+                error,
+              )
+            }
+          }
+          withContext(Dispatchers.Main) {
+            Toast.makeText(
+              appContext,
+              appContext.getString(R.string.nanoflow_widget_focus_promoted_toast),
+              Toast.LENGTH_SHORT,
+            ).show()
+          }
+          NanoflowWidgetRefreshWorker.enqueue(appContext, reason = "focus-promote-secondary")
+        } else {
+          if (optimisticSnapshot != null) {
+            runCatching {
+              repository.rollbackOptimisticFocusPromotion(appWidgetId, optimisticSnapshot)
+              renderCurrentWidget()
+            }.onFailure { error ->
+              NanoflowWidgetTelemetry.warn(
+                "widget_focus_promote_rollback_failed",
+                mapOf(
+                  "appWidgetId" to appWidgetId,
+                  "taskId" to NanoflowWidgetTelemetry.redactId(taskId),
+                ),
+                error,
+              )
+            }
+          }
+          withContext(Dispatchers.Main) {
+            Toast.makeText(
+              appContext,
+              appContext.getString(R.string.nanoflow_widget_focus_promote_failed_toast),
+              Toast.LENGTH_SHORT,
+            ).show()
+          }
+          NanoflowWidgetRefreshWorker.enqueue(appContext, reason = "focus-promote-secondary-retry")
+        }
+      } finally {
+        pendingResult.finish()
+      }
     }
   }
 
@@ -292,10 +826,30 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
   ) {
     val model = repository.buildRenderModel(appWidgetId)
     val views = NanoflowWidgetRenderer.render(context, appWidgetId, model)
-    if (partialUpdate) {
+    // 【2026-04-24 根因修复】跨 layout 切换（focus ↔ gate）时 partiallyUpdateAppWidget
+    // 无法改 layoutRes，旧结构（如 focus 布局右下角的 refresh_list）会保留 pendingIntent，
+    // 吞掉用户点击。对比签名决定：签名变化必须 full update。
+    val store = NanoflowWidgetStore(context)
+    val newSignature = NanoflowWidgetRenderer.resolveLayoutSignature(model)
+    val lastSignature = store.readLastAppliedLayoutSignature(appWidgetId)
+    val effectivePartial = partialUpdate && lastSignature != null && lastSignature == newSignature
+    if (effectivePartial) {
       appWidgetManager.partiallyUpdateAppWidget(appWidgetId, views)
     } else {
       appWidgetManager.updateAppWidget(appWidgetId, views)
+    }
+    if (lastSignature != newSignature) {
+      store.persistLastAppliedLayoutSignature(appWidgetId, newSignature)
+      if (partialUpdate && lastSignature != null) {
+        NanoflowWidgetTelemetry.info(
+          "widget_layout_signature_changed_full_update",
+          mapOf(
+            "appWidgetId" to appWidgetId,
+            "from" to lastSignature,
+            "to" to newSignature,
+          ),
+        )
+      }
     }
   }
 
@@ -313,12 +867,22 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
     // --- 自定义 click action 常量 ---
     const val ACTION_CLICK_OPEN_APP = "app.nanoflow.twa.widget.CLICK_OPEN_APP"
     const val ACTION_CLICK_OPEN_FOCUS_TOOLS = "app.nanoflow.twa.widget.CLICK_OPEN_FOCUS_TOOLS"
+    const val ACTION_CLICK_GATE_BLOCKED = "app.nanoflow.twa.widget.CLICK_GATE_BLOCKED"
 
     /** 集合视图 item 点击：具体行为由 fillIn 的 EXTRA_ITEM_TYPE 指定。 */
     const val ACTION_CLICK_ITEM = "app.nanoflow.twa.widget.CLICK_ITEM"
 
     /** 外部 adb / FCM 触发的强制刷新广播。 */
     const val ACTION_FORCE_REFRESH = "app.nanoflow.twa.widget.ACTION_FORCE_REFRESH"
+
+    /**
+     * 【2026-04-22】小组件大门 1-tap 已读 / 完成的后台 scope。
+     * - SupervisorJob：一次失败不拖累其它 action。
+     * - Dispatchers.IO：HTTP 请求。
+     * - 进程级单例：BroadcastReceiver 每次被 onReceive 重新创建，scope 不能绑在 receiver 实例上。
+     * - 所有协程都受 goAsync() 的 PendingResult 生命周期保护，必须在 finish() 之前完成。
+     */
+    private val silentActionScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /**
     * 【2026-04-21】反应性刷新节流阀。FCM 未就绪场景下，USER_PRESENT（解锁）
@@ -348,7 +912,9 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
     const val EXTRA_APP_WIDGET_ID = "extra.APP_WIDGET_ID"
     const val EXTRA_ITEM_TYPE = "extra.ITEM_TYPE"
     const val EXTRA_TASK_INDEX = "extra.TASK_INDEX"
+    const val EXTRA_TASK_ID = "extra.TASK_ID"
     const val EXTRA_GATE_DELTA = "extra.GATE_DELTA"
+    const val EXTRA_GATE_ENTRY_ID = "extra.GATE_ENTRY_ID"
     const val EXTRA_LIST_KIND = "extra.LIST_KIND"
     const val EXTRA_PRIMARY_ACTION = "extra.PRIMARY_ACTION"
 
@@ -373,9 +939,18 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
       appWidgetId: Int,
       action: WidgetPrimaryAction,
     ): PendingIntent {
+      if (action == WidgetPrimaryAction.BLOCK_GATE_ACTIONS) {
+        return broadcastPendingIntent(
+          context = context,
+          intentAction = ACTION_CLICK_GATE_BLOCKED,
+          requestCode = requestCodeFor(appWidgetId, ACTION_CLICK_GATE_BLOCKED),
+          extras = mapOf(EXTRA_APP_WIDGET_ID to appWidgetId),
+        )
+      }
       val launchIntent = when (action) {
         WidgetPrimaryAction.OPEN_WORKSPACE -> NanoFlowLaunchIntent.OPEN_WORKSPACE
         WidgetPrimaryAction.OPEN_FOCUS_TOOLS -> NanoFlowLaunchIntent.OPEN_FOCUS_TOOLS
+        WidgetPrimaryAction.BLOCK_GATE_ACTIONS -> NanoFlowLaunchIntent.OPEN_FOCUS_TOOLS
       }
       val activityIntent = NanoflowTwaLauncherActivity.intentForWidget(
         context = context,
@@ -387,6 +962,7 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
       val requestKey = when (action) {
         WidgetPrimaryAction.OPEN_WORKSPACE -> ACTION_CLICK_OPEN_APP
         WidgetPrimaryAction.OPEN_FOCUS_TOOLS -> ACTION_CLICK_OPEN_FOCUS_TOOLS
+        WidgetPrimaryAction.BLOCK_GATE_ACTIONS -> ACTION_CLICK_GATE_BLOCKED
       }
       val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
       return PendingIntent.getActivity(
@@ -449,9 +1025,13 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
       appWidgetId: Int,
       action: WidgetPrimaryAction,
     ): PendingIntent {
+      if (action == WidgetPrimaryAction.BLOCK_GATE_ACTIONS) {
+        return actionListClickTemplatePendingIntent(context, appWidgetId)
+      }
       val launchIntent = when (action) {
         WidgetPrimaryAction.OPEN_WORKSPACE -> NanoFlowLaunchIntent.OPEN_WORKSPACE
         WidgetPrimaryAction.OPEN_FOCUS_TOOLS -> NanoFlowLaunchIntent.OPEN_FOCUS_TOOLS
+        WidgetPrimaryAction.BLOCK_GATE_ACTIONS -> NanoFlowLaunchIntent.OPEN_FOCUS_TOOLS
       }
       val template = NanoflowTwaLauncherActivity.intentForWidget(
         context = context,
@@ -465,6 +1045,7 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
       val requestKey = "content_template|" + when (action) {
         WidgetPrimaryAction.OPEN_WORKSPACE -> "workspace"
         WidgetPrimaryAction.OPEN_FOCUS_TOOLS -> "focus_tools"
+        WidgetPrimaryAction.BLOCK_GATE_ACTIONS -> "gate_blocked"
       }
       return PendingIntent.getActivity(
         context,
@@ -512,6 +1093,35 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
       return appWidgetManager.getAppWidgetIds(componentName).contains(appWidgetId)
     }
 
+    /**
+     * 强制 launcher 重新 inflate 所有 widget 的 hostView。
+     *
+     * 与 refreshAllWidgets 的区别：refreshAllWidgets 走 partiallyUpdateAppWidget（= reapply），
+     * 无法补齐新增的 View ID 或重读 layout 属性；本方法走非 partial 的 updateAppWidget，
+     * 强制 hostView 用最新 @xml/layout 重新 inflate，代价是 MIUI/HyperOS launcher 会播放一次
+     * folme 缩放动画，因此仅在 APK 升级等「layout 结构变化」场景调用，不得用于常规数据刷新。
+     */
+    fun reinflateAllWidgets(context: Context) {
+      val appWidgetManager = AppWidgetManager.getInstance(context)
+      val componentName = ComponentName(context, NanoflowWidgetReceiver::class.java)
+      val ids = appWidgetManager.getAppWidgetIds(componentName)
+      if (ids.isEmpty()) return
+      runBlocking {
+        val repository = NanoflowWidgetRepository(context)
+        val store = NanoflowWidgetStore(context)
+        ids.forEach { widgetId ->
+          val model = repository.buildRenderModel(widgetId)
+          val views = NanoflowWidgetRenderer.render(context, widgetId, model)
+          appWidgetManager.updateAppWidget(widgetId, views)
+          store.persistLastAppliedLayoutSignature(
+            widgetId,
+            NanoflowWidgetRenderer.resolveLayoutSignature(model),
+          )
+          notifyActionListsDataChanged(appWidgetManager, widgetId)
+        }
+      }
+    }
+
     /** 从外部（Worker / FCM / bootstrap）触发所有 widget 重新渲染 + 通知集合数据失效。 */
     fun refreshAllWidgets(context: Context) {
       val appWidgetManager = AppWidgetManager.getInstance(context)
@@ -520,15 +1130,37 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
       if (ids.isEmpty()) return
       runBlocking {
         val repository = NanoflowWidgetRepository(context)
+        val store = NanoflowWidgetStore(context)
         ids.forEach { widgetId ->
           val model = repository.buildRenderModel(widgetId)
           val views = NanoflowWidgetRenderer.render(context, widgetId, model)
-          // 关键减抖点：worker 完成 fetch 后只走 partiallyUpdateAppWidget（=RemoteViews.reapply），
+          // 关键减抖点：worker 完成 fetch 后**默认**走 partiallyUpdateAppWidget（=RemoteViews.reapply），
           // 这条路径不会让 AppWidgetHostView 重新 inflate / 重新 bind，从而避开 MIUI / HyperOS
           // launcher 在 LauncherAppWidgetHostView.updateAppWidget 里挂载的 folme 缩放动画。
-          // 同时不调用 notifyAppWidgetViewDataChanged：refresh 不改变 chip 集合（仅文本/选中态变化），
-          // 跳过 adapter rebind 也能消除一次额外的 host view 更新事件。
-          appWidgetManager.partiallyUpdateAppWidget(widgetId, views)
+          //
+          // 【2026-04-24 根因修复】但 partial 无法切换 layoutRes。跨 focus/gate 边界时旧 layout 的
+          // refresh_list（78×42 右下角 + pendingIntentTemplate）会残留并吞掉本应给 gate_actions 的
+          // 点击，表现为用户点「已读 / 已完成」实际触发 `widget_click_refresh`、专注 UI 被错误 UI 冲掉。
+          // 因此比对 layout 签名：变化时强制升级为 full update。
+          val newSignature = NanoflowWidgetRenderer.resolveLayoutSignature(model)
+          val lastSignature = store.readLastAppliedLayoutSignature(widgetId)
+          if (lastSignature == newSignature) {
+            appWidgetManager.partiallyUpdateAppWidget(widgetId, views)
+          } else {
+            appWidgetManager.updateAppWidget(widgetId, views)
+            store.persistLastAppliedLayoutSignature(widgetId, newSignature)
+            if (lastSignature != null) {
+              NanoflowWidgetTelemetry.info(
+                "widget_layout_signature_changed_full_update",
+                mapOf(
+                  "appWidgetId" to widgetId,
+                  "source" to "refreshAllWidgets",
+                  "from" to lastSignature,
+                  "to" to newSignature,
+                ),
+              )
+            }
+          }
           notifyActionListsDataChanged(appWidgetManager, widgetId)
         }
       }
@@ -538,6 +1170,7 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
     fun notifyActionListsDataChanged(appWidgetManager: AppWidgetManager, appWidgetId: Int) {
       appWidgetManager.notifyAppWidgetViewDataChanged(appWidgetId, R.id.nano_widget_tab_list)
       appWidgetManager.notifyAppWidgetViewDataChanged(appWidgetId, R.id.nano_widget_content_list)
+      appWidgetManager.notifyAppWidgetViewDataChanged(appWidgetId, R.id.nano_widget_gate_actions_list)
       appWidgetManager.notifyAppWidgetViewDataChanged(appWidgetId, R.id.nano_widget_refresh_list)
     }
   }

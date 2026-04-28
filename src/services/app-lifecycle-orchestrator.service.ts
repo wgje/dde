@@ -408,8 +408,10 @@ export class AppLifecycleOrchestratorService {
       this.recordRecoveryStep('sync-recovery-heavy-suppressed', reason);
       if (this.shouldRecheckFocusGate(reason)) {
         this.recordRecoveryStep('blackbox-recovery', reason);
-        await this.syncCoordinator.refreshBlackBoxWatermarkIfNeeded('resume');
-        await this.recheckFocusGateIfNeeded(reason, 'resume-remote');
+        const blackBoxResult = await this.syncCoordinator.refreshBlackBoxWatermarkIfNeeded('resume');
+        await this.recheckFocusGateIfNeeded(reason, 'resume-remote', {
+          allowPendingSkip: blackBoxResult.skipped,
+        });
       }
       return { deferred: false, interactionReadyMs };
     }
@@ -435,7 +437,9 @@ export class AppLifecycleOrchestratorService {
 
     this.recordRecoveryStep('blackbox-recovery', reason);
     const blackBoxResult = await this.syncCoordinator.refreshBlackBoxWatermarkIfNeeded('resume');
-    await this.recheckFocusGateIfNeeded(reason, 'resume-remote');
+    await this.recheckFocusGateIfNeeded(reason, 'resume-remote', {
+      allowPendingSkip: blackBoxResult.skipped,
+    });
 
     this.recordRecoveryStep('ui-correction', reason);
     if (typeof window !== 'undefined') {
@@ -519,7 +523,9 @@ export class AppLifecycleOrchestratorService {
         this.recordRecoveryStep('blackbox-recovery', reason);
         const blackboxRefresh = await this.syncCoordinator.refreshBlackBoxWatermarkIfNeeded('resume');
         fastPathHit = blackboxRefresh.skipped;
-        await this.recheckFocusGateIfNeeded(reason, 'resume-remote');
+        await this.recheckFocusGateIfNeeded(reason, 'resume-remote', {
+          allowPendingSkip: blackboxRefresh.skipped,
+        });
 
         this.recordRecoveryStep('ui-correction', reason);
         if (typeof window !== 'undefined') {
@@ -590,9 +596,15 @@ export class AppLifecycleOrchestratorService {
 
   private async recheckFocusGateIfNeeded(
     reason: AppResumeReason,
-    source: 'resume-local' | 'resume-remote'
+    source: 'resume-local' | 'resume-remote',
+    options: { allowPendingSkip?: boolean } = {}
   ): Promise<void> {
     if (!this.shouldRecheckFocusGate(reason)) {
+      return;
+    }
+
+    if (source === 'resume-remote' && options.allowPendingSkip === true && this.focusStartupProbe.hasPendingGateWork()) {
+      this.logger.debug('Skip resume-remote gate recheck because local resume already found pending gate work');
       return;
     }
 

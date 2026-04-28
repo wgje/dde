@@ -106,7 +106,7 @@ export class ProjectDataService {
   private readonly logger = this.loggerService.category('ProjectData');
   private readonly throttle = inject(RequestThrottleService);
   private readonly syncState = inject(SyncStateService);
-  private readonly sessionManager = inject(SessionManagerService);
+  private readonly sessionManager = inject(SessionManagerService, { optional: true });
   private readonly tombstoneService = inject(TombstoneService);
   
   /** 是否正在从远程加载 */
@@ -195,11 +195,19 @@ export class ProjectDataService {
       ? persistedSessionUserId
       : null;
   }
+
+  private isSessionExpiredError(error: ReturnType<typeof supabaseErrorToError>): boolean {
+    return this.sessionManager?.isSessionExpiredError(error) ?? false;
+  }
+
+  private async tryRefreshSessionWithSession(context: string): Promise<{ refreshed: boolean }> {
+    return this.sessionManager?.tryRefreshSessionWithSession(context) ?? { refreshed: false };
+  }
   
   /**
    * 获取 Supabase 客户端
    */
-  private async getSupabaseClient(): Promise<SupabaseClient | null> {
+  private async getSupabaseClient(expectedUserId?: string): Promise<SupabaseClient | null> {
     if (!this.supabase.isConfigured) {
       const failure = classifySupabaseClientFailure(false);
       if (!this.hasLoggedSupabaseMissingConfig) {
@@ -217,7 +225,10 @@ export class ProjectDataService {
       this.logger.debug('连接中断模式下跳过 ProjectData 远端读取');
       return null;
     }
-    if (!this.resolveRemoteSessionUserId()) {
+    const hasExpectedRemoteUser = typeof expectedUserId === 'string'
+      && expectedUserId.length > 0
+      && expectedUserId !== AUTH_CONFIG.LOCAL_MODE_USER_ID;
+    if (!this.resolveRemoteSessionUserId() && !hasExpectedRemoteUser) {
       this.logger.debug('会话不可用，跳过 ProjectData 远端读取');
       return null;
     }
@@ -255,11 +266,11 @@ export class ProjectDataService {
       return await fn();
     } catch (error) {
       const enhanced = supabaseErrorToError(error);
-      if (!this.sessionManager.isSessionExpiredError(enhanced)) {
+      if (!this.isSessionExpiredError(enhanced)) {
         throw error;
       }
 
-      const refreshResult = await this.sessionManager.tryRefreshSessionWithSession(context);
+      const refreshResult = await this.tryRefreshSessionWithSession(context);
       if (!refreshResult.refreshed) {
         throw error;
       }
@@ -297,8 +308,8 @@ export class ProjectDataService {
       // syncState.sessionExpired 短路。
       if (error) {
         const enhanced = supabaseErrorToError(error);
-        if (this.sessionManager.isSessionExpiredError(enhanced)) {
-          const refreshResult = await this.sessionManager.tryRefreshSessionWithSession('loadFullProjectOptimized');
+        if (this.isSessionExpiredError(enhanced)) {
+          const refreshResult = await this.tryRefreshSessionWithSession('loadFullProjectOptimized');
           if (refreshResult.refreshed) {
             this.logger.info('loadFullProjectOptimized 会话已刷新，重试 RPC', { projectId });
             const retry = await client.rpc('get_full_project_data', {
@@ -544,7 +555,7 @@ export class ProjectDataService {
       return [];
     }
 
-    const client = await this.getSupabaseClient();
+    const client = await this.getSupabaseClient(userId);
     if (!client) return null;
 
     const timeout = Math.max(TIMEOUT_CONFIG.QUICK, options.timeout ?? TIMEOUT_CONFIG.QUICK);
@@ -1051,34 +1062,49 @@ export class ProjectDataService {
     
     if (tasksResult.error) throw supabaseErrorToError(tasksResult.error);
     
-    // 构建 tombstone ID 集合
-    const tombstoneIds = new Set<string>();
+    // 构建远端 tombstone 水位
+    const remoteTombstoneTimestamps = new Map<string, number>();
     
     if (!tombstonesResult.error) {
       for (const t of (tombstonesResult.data || [])) {
-        tombstoneIds.add(t.task_id);
+        if (!t.deleted_at) {
+          continue;
+        }
+        const deletedAt = new Date(t.deleted_at).getTime();
+        if (!Number.isNaN(deletedAt)) {
+          remoteTombstoneTimestamps.set(t.task_id, deletedAt);
+        }
       }
     }
-    
-    // 合并本地 tombstones
-    const localTombstones = this.tombstoneService.getLocalTombstones(projectId);
-    for (const id of Array.from(localTombstones)) {
-      tombstoneIds.add(id);
-    }
-    
+
     // 转换任务并标记 tombstone
     const allTasks = (tasksResult.data as TaskRow[] || []).map(row => this.rowToTask(row));
     
     return allTasks.map(task => {
-      if (tombstoneIds.has(task.id)) {
-        return { ...task, deletedAt: task.deletedAt || new Date().toISOString() };
+      const remoteDeletedAt = remoteTombstoneTimestamps.get(task.id);
+      if (this.tombstoneService.shouldMaterializeTaskDeletion(task.updatedAt, remoteDeletedAt)) {
+        return { ...task, deletedAt: task.deletedAt || new Date(remoteDeletedAt!).toISOString() };
       }
+
+      const localDeletedAt = this.tombstoneService.getLocalTombstoneTimestamp(projectId, task.id);
+      if (this.tombstoneService.shouldMaterializeTaskDeletion(task.updatedAt, localDeletedAt)) {
+        return { ...task, deletedAt: task.deletedAt || new Date(localDeletedAt!).toISOString() };
+      }
+
+      if (localDeletedAt !== undefined) {
+        this.tombstoneService.clearLocalTombstones(projectId, [task.id]);
+      }
+
       return task;
     });
   }
   
-  addLocalTombstones(projectId: string, taskIds: string[]): void {
-    this.tombstoneService.addLocalTombstones(projectId, taskIds);
+  addLocalTombstones(
+    projectId: string,
+    taskIds: string[],
+    timestampsByTaskId?: Record<string, string | number | null | undefined>,
+  ): void {
+    this.tombstoneService.addLocalTombstones(projectId, taskIds, timestampsByTaskId);
   }
   
   /**
@@ -1440,13 +1466,18 @@ export class ProjectDataService {
   }
 
   private normalizeOfflineSnapshotProject(project: Project): Project {
-    const activeTasks = (project.tasks || []).filter(task => !task.deletedAt);
-    const activeTaskIds = new Set(activeTasks.map(task => task.id));
+    const allTasks = project.tasks || [];
+    const activeTaskIds = new Set(
+      allTasks
+        .filter(task => !task.deletedAt)
+        .map(task => task.id)
+    );
 
     return {
       ...project,
-      tasks: activeTasks,
-      // 保留活跃任务之间的已删连接，确保重启/离线恢复后仍能继续传播删除意图。
+      // 软删除任务仍属于回收站保留窗口，离线快照恢复不能把它们误当作已永久销毁。
+      tasks: allTasks,
+      // 主视图只恢复活跃任务之间的连接，避免 deleted task 在图上重新挂回可见边。
       connections: (project.connections || []).filter(connection =>
         activeTaskIds.has(connection.source) && activeTaskIds.has(connection.target)
       ),

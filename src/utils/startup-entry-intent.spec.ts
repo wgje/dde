@@ -17,6 +17,7 @@ describe('resolveStartupEntryIntent', () => {
       entry: 'shortcut',
       intent: 'open-workspace',
       rawIntent: 'open-workspace',
+      widgetGateEntryId: null,
     });
   });
 
@@ -25,6 +26,7 @@ describe('resolveStartupEntryIntent', () => {
       entry: 'twa',
       intent: 'open-workspace',
       rawIntent: 'open-workspace',
+      widgetGateEntryId: null,
     });
   });
 
@@ -33,6 +35,7 @@ describe('resolveStartupEntryIntent', () => {
       entry: 'shortcut',
       intent: null,
       rawIntent: 'not-real',
+      widgetGateEntryId: null,
     });
   });
 

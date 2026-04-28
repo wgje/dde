@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Gate 场景：chip 未选中态带冷灰描边 + 按下水波反馈 -->
+<!-- Gate 未选中 chip：与 Focus 保持统一线稿语言 -->
 <ripple xmlns:android="http://schemas.android.com/apk/res/android"
-    android:color="#663E5270">
+    android:color="#22FFFFFF">
     <item android:id="@android:id/mask">
         <shape android:shape="rectangle">
             <solid android:color="#FFFFFFFF" />
@@ -10,10 +10,9 @@
     </item>
     <item>
         <shape android:shape="rectangle">
-            <solid android:color="#FFFFFF" />
-            <corners android:radius="12dp" />
-            <stroke android:width="1dp" android:color="#DCE0E5" />
+            <solid android:color="#122A4E7A" />
+            <corners android:radius="14dp" />
+            <stroke android:width="1dp" android:color="#73FFFFFF" />
         </shape>
     </item>
 </ripple>
-

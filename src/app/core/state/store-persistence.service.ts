@@ -40,6 +40,10 @@ interface StoreMeta {
   version: number;
   lastSyncTime: string;
   activeProjectId: string | null;
+  lastAuthenticatedUser?: {
+    userId: string;
+    email: string | null;
+  } | null;
 }
 
 @Injectable({
@@ -526,16 +530,16 @@ export class StorePersistenceService {
       // 恢复到 Store
       this.projectStore.setProject(project);
       
-      // 【关键修复】过滤已删除的任务，防止从 IndexedDB 恢复时复活已删除任务
-      // 只恢复 deletedAt 为空的任务
-      const activeTasks = tasks.filter(t => !t.deletedAt);
-      const filteredCount = tasks.length - activeTasks.length;
-      if (filteredCount > 0) {
-        this.logger.debug('已过滤已删除任务', { projectId, filteredCount });
+      // 软删除任务仍属于回收站保留窗口；永久删除依赖 tombstone/服务端清理收敛，
+      // 不能在本地恢复阶段提前把它们丢弃。
+      const restoredTasks = tasks;
+      const deletedTaskCount = restoredTasks.filter(t => t.deletedAt).length;
+      if (deletedTaskCount > 0) {
+        this.logger.debug('本地恢复保留回收站任务', { projectId, deletedTaskCount });
       }
       
       // 【P1-05 修复】过滤软删除的连接以及引用已删除任务的孤立连接
-      const activeTaskIds = new Set(activeTasks.map(t => t.id));
+      const activeTaskIds = new Set(restoredTasks.filter(t => !t.deletedAt).map(t => t.id));
       const activeConnections = connections.filter(c =>
         !c.deletedAt && activeTaskIds.has(c.source) && activeTaskIds.has(c.target)
       );
@@ -544,7 +548,7 @@ export class StorePersistenceService {
         this.logger.debug('已过滤已删除连接', { projectId, filteredConnCount });
       }
       
-      this.taskStore.setTasks(activeTasks.map(t => {
+      this.taskStore.setTasks(restoredTasks.map(t => {
         const { projectId: _, ...task } = t;
         return task as Task;
       }), projectId);
@@ -555,8 +559,8 @@ export class StorePersistenceService {
       
       this.logger.info('项目数据已从本地恢复', { 
         projectId, 
-        tasksCount: activeTasks.length, 
-        connectionsCount: connections.length 
+        tasksCount: restoredTasks.length,
+        connectionsCount: connections.length
       });
       
       return true;
@@ -597,6 +601,42 @@ export class StorePersistenceService {
       this.logger.error('加载元数据失败', err);
       // eslint-disable-next-line no-restricted-syntax -- 返回 null 语义正确：元数据加载失败使用默认值
       return null;
+    }
+  }
+
+  async getMetadata(): Promise<StoreMeta | null> {
+    return this.loadMeta();
+  }
+
+  async setMetadata(metadata: Partial<StoreMeta>): Promise<void> {
+    if (this.isRestoring) return;
+
+    try {
+      const db = await this.initDatabase();
+      const existingMeta = await this.getFromStore<StoreMeta>(db, DB_CONFIG.stores.meta, 'meta');
+      const nextMeta: StoreMeta = {
+        key: 'meta',
+        version: existingMeta?.version ?? STORAGE_VERSION,
+        lastSyncTime: metadata.lastSyncTime ?? existingMeta?.lastSyncTime ?? new Date().toISOString(),
+        activeProjectId: Object.prototype.hasOwnProperty.call(metadata, 'activeProjectId')
+          ? (metadata.activeProjectId ?? null)
+          : (existingMeta?.activeProjectId ?? null),
+        lastAuthenticatedUser: Object.prototype.hasOwnProperty.call(metadata, 'lastAuthenticatedUser')
+          ? (metadata.lastAuthenticatedUser ?? null)
+          : (existingMeta?.lastAuthenticatedUser ?? null),
+      };
+
+      const transaction = db.transaction(DB_CONFIG.stores.meta, 'readwrite');
+      const store = transaction.objectStore(DB_CONFIG.stores.meta);
+      store.put(nextMeta);
+
+      await new Promise<void>((resolve, reject) => {
+        transaction.oncomplete = () => resolve();
+        transaction.onerror = () => reject(transaction.error);
+      });
+    } catch (err) {
+      this.logger.error('保存元数据失败', err);
+      throw err;
     }
   }
   

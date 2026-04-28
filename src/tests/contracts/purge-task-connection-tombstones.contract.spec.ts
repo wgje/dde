@@ -61,7 +61,7 @@ describe('任务 purge 连接 tombstone 契约', () => {
     },
     {
       label: 'forward repair migration',
-      path: 'supabase/migrations/20260403110000_purge_connection_tombstone_hardening.sql',
+      path: 'supabase/migrations/20260403050931_20260403110000_purge_connection_tombstone_hardening.sql',
       purgeV2Start: 'CREATE OR REPLACE FUNCTION public.purge_tasks_v2(',
       purgeV2End: 'COMMENT ON FUNCTION public.purge_tasks_v2(uuid, uuid[]) IS',
       purgeV3Start: 'CREATE OR REPLACE FUNCTION public.purge_tasks_v3(',

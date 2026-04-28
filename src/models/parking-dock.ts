@@ -158,6 +158,7 @@ export interface LegacyFocusSessionState {
   sessionStartedAt?: number;
   isActive?: boolean;
   isFocusOverlayOn?: boolean;
+  commandCenterOrderIds?: string[];
   commandCenterTasks?: FocusTaskSlot[];
   comboSelectTasks?: FocusTaskSlot[];
   backupTasks?: FocusTaskSlot[];
@@ -179,6 +180,8 @@ export interface FocusSessionStateV2 {
   isActive: boolean;
   /** 背景虚化是否开启（与专注独立） */
   isFocusOverlayOn: boolean;
+  /** C 位 1-4 的完整前后顺序，顺序变化不改变 isMaster 语义 */
+  commandCenterOrderIds: string[];
   commandCenterTasks: FocusTaskSlot[];
   /** 组合选择区域任务列表（v3.0 改名，原 radarTasks） */
   comboSelectTasks: FocusTaskSlot[];
@@ -215,6 +218,9 @@ export function fromLegacySessionState(
       source.isFocusOverlayOn === undefined
         ? defaults.isFocusOverlayOn
         : Boolean(source.isFocusOverlayOn),
+    commandCenterOrderIds: Array.isArray(source.commandCenterOrderIds)
+      ? source.commandCenterOrderIds.filter((item): item is string => typeof item === 'string')
+      : [],
     commandCenterTasks: Array.isArray(source.commandCenterTasks) ? source.commandCenterTasks : [],
     comboSelectTasks: Array.isArray(source.comboSelectTasks) ? source.comboSelectTasks : [],
     backupTasks: Array.isArray(source.backupTasks) ? source.backupTasks : [],
@@ -256,6 +262,12 @@ export interface ZoneAssignment {
  * 注意：与 dock-hud-position.ts 中的 HudPosition { x, y } 坐标类型不同
  */
 export type HudPresetPosition = 'top-right' | 'top-left' | 'bottom-right' | 'bottom-left';
+
+export interface FocusHudPreference {
+  position: HudPresetPosition;
+  opacity: number;
+  minimized: boolean;
+}
 
 /**
  * 日常任务定义（策划案 §10.1）
@@ -458,6 +470,12 @@ export interface DailySlotEntry {
   createdAt: string;
 }
 
+export interface ScheduleRecommendation {
+  recommended: string[];
+  reason: string;
+  isFragmentPhase: boolean;
+}
+
 export interface DockPendingDecision {
   rootTaskId: string;
   rootRemainingMinutes: number;
@@ -479,6 +497,15 @@ export interface DockPendingDecisionEntry {
   load: CognitiveLoad;
   expectedMinutes: number | null;
   recommendedScore: number | null;
+}
+
+export interface PendingDecisionViewModel {
+  candidateGroups: Array<{
+    type: RecommendationGroupType;
+    taskIds: string[];
+  }>;
+  reason: string;
+  expiresAt?: string;
 }
 
 export interface DockSessionState {
@@ -535,3 +562,17 @@ export interface DockSnapshot {
 // ---------------------------------------------------------------------------
 //  DockEntry 类型守卫（sourceKind 辨识）
 // ---------------------------------------------------------------------------
+
+/** 就地创建条目：携带 inline 专属字段（M-8: 仅窄化 sourceKind，其他字段保持原始可选性） */
+export function isInlineDockEntry(entry: DockEntry): entry is DockEntry & {
+  sourceKind: 'dock-created';
+} {
+  return entry.sourceKind === 'dock-created';
+}
+
+/** 项目任务条目：来自现有项目任务 */
+export function isProjectDockEntry(entry: DockEntry): entry is DockEntry & {
+  sourceKind: 'project-task';
+} {
+  return entry.sourceKind === 'project-task';
+}

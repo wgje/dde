@@ -20,6 +20,7 @@ import {
   logWidgetEvent,
   redactId,
   sha256Hex,
+  verifyJwtUser,
   withPrivateNoStoreHeaders,
 } from '../_shared/widget-common.ts';
 import {
@@ -247,6 +248,39 @@ function extractSummaryCursor(payload: DatabaseWebhookPayload): string | null {
   }
 
   return null;
+}
+
+/**
+ * 2026-04-22 颠覆性压缩：从 focus_sessions 事件中抽取 focusMode / focusSessionId 提示字段，
+ * 作为轻量 hint 直接塞进 FCM data payload，供小组件在首屏（summary fetch 仍在途中）就把
+ * 专注模式按钮/图标切换到正确的视觉状态——避免额外等待 ~2s 的 summary 回环。
+ *
+ * 只在 focus_sessions 事件且 ended_at 可解析时返回。hint 是「乐观」视图，
+ * 后续 summary fetch 成功后仍以服务端权威答案为准。
+ */
+function extractFocusHint(payload: DatabaseWebhookPayload): { active: string; sessionId: string } | null {
+  if (payload.table !== 'focus_sessions') {
+    return null;
+  }
+  // DELETE 会话语义等同于结束，active = false。
+  if (payload.type === 'DELETE') {
+    const sessionId = asNonEmptyText(payload.old_record?.id, 64) ?? '';
+    return { active: 'false', sessionId };
+  }
+
+  const record = payload.record;
+  if (!isPlainObject(record)) {
+    return null;
+  }
+
+  const endedAt = record['ended_at'];
+  const endedAtIsNullOrEmpty = endedAt === null || endedAt === undefined
+    || (typeof endedAt === 'string' && endedAt.trim().length === 0);
+  // ended_at=null 意味着当前会话仍处于活跃态 → active=true；反之为 false。
+  // 这个口径跟主 App 客户端对 focusMode 的标定一致（dock-engine.service.ts 的 focusMode signal）。
+  const active = endedAtIsNullOrEmpty;
+  const sessionId = asNonEmptyText(record['id'], 64) ?? '';
+  return { active: active ? 'true' : 'false', sessionId };
 }
 
 function hasConfiguredPushProvider(): boolean {
@@ -552,14 +586,27 @@ Deno.serve(async (req) => {
   const client = createServiceRoleClient();
   const limits = await loadWidgetLimits(client);
   const rawBody = await req.text();
-  const webhookSecret = normalizeWidgetWebhookSecret(Deno.env.get('WIDGET_NOTIFY_WEBHOOK_SECRET'));
+  const webhookSecret = normalizeWidgetWebhookSecret(Deno.env.get('WIDGET_NOTIFY_WEBHOOK_SECRET') ?? null);
   if (!webhookSecret) {
     return jsonResponse({ error: 'Webhook secret is not configured', code: 'WEBHOOK_SECRET_MISSING' }, responseHeaders, 503);
   }
 
   let verifiedPayload: unknown;
   let webhookId: string | null = null;
+  // 2026-04-22 颠覆性压缩 (plan D)：新增 JWT 直调路径。PWA 在 focus 翻转瞬间可并行
+  // 调用本函数（带 Authorization: Bearer <user_jwt>）绕过 DB trigger + pg_net 的 ~3s 轮询，
+  // 端到端从「ended_at → FCM 抵达」压缩 2-5s。
+  //
+  // 请求体格式：{ directNotify: true, focusActive: boolean, focusSessionId: string,
+  //              webhookId: string /* 幂等键，由 PWA 生成 uuid */, updatedAt?: string }
+  //
+  // 安全与幂等：verifyJwtUser 确认 token 合法后取 user.id 作为事件主体；webhookId 走与
+  // DB 触发路径同一张 widget_notify_events 唯一约束表，天然去重（若 pg_net 后到达，会被
+  // kind='duplicate' 走掉）。
   const usesStandardWebhookHeaders = hasStandardWebhookHeaders(req);
+  const hasBearer = Boolean(req.headers.get('Authorization'));
+  let directNotifyUserId: string | null = null;
+
   if (usesStandardWebhookHeaders) {
     try {
       const webhook = new Webhook(webhookSecret);
@@ -569,6 +616,51 @@ Deno.serve(async (req) => {
     } catch {
       return jsonResponse({ error: 'Invalid webhook signature', code: 'INVALID_SIGNATURE' }, responseHeaders, 401);
     }
+  } else if (hasBearer) {
+    const authResult = await verifyJwtUser(req);
+    if (!authResult) {
+      return jsonResponse({ error: 'Invalid user session', code: 'INVALID_JWT' }, responseHeaders, 401);
+    }
+    let parsedBody: unknown;
+    try {
+      parsedBody = rawBody.length > 0 ? JSON.parse(rawBody) : null;
+    } catch {
+      return jsonResponse({ error: 'Malformed direct notify body', code: 'INVALID_PAYLOAD' }, responseHeaders, 400);
+    }
+    if (!isPlainObject(parsedBody) || parsedBody['directNotify'] !== true) {
+      return jsonResponse({ error: 'Direct notify flag required', code: 'INVALID_PAYLOAD' }, responseHeaders, 400);
+    }
+
+    const directWebhookId = asNonEmptyText(parsedBody['webhookId'], 256);
+    const focusActiveRaw = parsedBody['focusActive'];
+    const focusSessionId = asNonEmptyText(parsedBody['focusSessionId'], 64);
+    const updatedAt = asNonEmptyText(parsedBody['updatedAt'], 128) ?? new Date().toISOString();
+    if (!directWebhookId || typeof focusActiveRaw !== 'boolean' || !focusSessionId) {
+      return jsonResponse({ error: 'Direct notify payload invalid', code: 'INVALID_PAYLOAD' }, responseHeaders, 400);
+    }
+
+    // 合成一个与 DB trigger 等价的 UPDATE 形 payload。ended_at 的口径：active=true 时视为 null，
+    // active=false 时填入 updatedAt 作为结束时刻——与 focus_sessions 的真实列语义一致，
+    // 下游 extractFocusHint / resolveUserId 均能复用现成逻辑。
+    verifiedPayload = {
+      type: 'UPDATE' as const,
+      table: 'focus_sessions' as const,
+      schema: 'public',
+      record: {
+        id: focusSessionId,
+        user_id: authResult.userId,
+        ended_at: focusActiveRaw ? null : updatedAt,
+        updated_at: updatedAt,
+      },
+      old_record: {
+        id: focusSessionId,
+        user_id: authResult.userId,
+        ended_at: focusActiveRaw ? updatedAt : null,
+        updated_at: updatedAt,
+      },
+    };
+    webhookId = directWebhookId;
+    directNotifyUserId = authResult.userId;
   } else {
     const customWebhook = await verifyCustomWebhook(rawBody, req, webhookSecret);
     if (!customWebhook) {
@@ -588,6 +680,7 @@ Deno.serve(async (req) => {
   }
 
   const summaryCursor = extractSummaryCursor(payload);
+  const focusHint = extractFocusHint(payload);
   const beginResult = await beginNotifyEvent(client, webhookId, payload, summaryCursor);
   if (beginResult.kind === 'retry-later') {
     return jsonResponse({
@@ -603,7 +696,9 @@ Deno.serve(async (req) => {
 
   let userId: string | null = null;
   try {
-    userId = await resolveUserId(client, payload);
+    // directNotify 路径：JWT 已经 authoritative 地给出 user_id，跳过 resolveUserId 的额外 DB 查询，
+    // 节省一跳；非 directNotify 仍走原路径（从 webhook payload 反查）。
+    userId = directNotifyUserId ?? await resolveUserId(client, payload);
     if (!userId) {
       await finishNotifyEvent(client, webhookId, 'skipped-no-user', null, summaryCursor);
       logWidgetEvent('widget_push_dirty_dropped', { webhookId, reason: 'no-user' });
@@ -822,6 +917,11 @@ Deno.serve(async (req) => {
             eventType: payload.type,
             summaryCursor: summaryCursor ?? '',
             action: 'widget-refresh',
+            // 2026-04-22 颠覆性压缩：专注态乐观 hint。当表为 focus_sessions 时，端上可在
+            // summary fetch 完成前先用这两个字段把专注按钮/图标翻过来，感知延迟从 ~8s 压到 <1s。
+            ...(focusHint
+              ? { focusActiveHint: focusHint.active, focusSessionHint: focusHint.sessionId }
+              : {}),
           },
         });
         return { device, result };
@@ -850,6 +950,7 @@ Deno.serve(async (req) => {
       }
       return acc;
     }, {});
+    const failureByReasonJson = JSON.stringify(failureByReason);
 
     const anySuccess = successCount > 0;
     const finalStatus: WidgetNotifyStatus = anySuccess ? 'accepted-fanout' : 'fanout-failed';
@@ -866,7 +967,7 @@ Deno.serve(async (req) => {
           failureCount: eligibleDevices.length - successCount,
           invalidatedTokenCount: invalidDeviceIds.length,
           suppressedDeviceCount: suppressedDecisions.length,
-          failureByReason,
+          failureByReasonJson,
         },
       });
       return jsonResponse({
@@ -886,7 +987,7 @@ Deno.serve(async (req) => {
       reason: 'push-provider-unavailable',
       extra: {
         deliveryMode: 'fcm-v1',
-        failureByReason,
+        failureByReasonJson,
         eligibleDeviceCount: eligibleDevices.length,
         suppressedDeviceCount: suppressedDecisions.length,
       },

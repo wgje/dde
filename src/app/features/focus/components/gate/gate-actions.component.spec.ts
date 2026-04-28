@@ -105,11 +105,39 @@ describe('GateActionsComponent', () => {
     expect(mockGateService.markAsCompleted).toHaveBeenCalledOnce();
   });
 
-  it('should toggle quick capture panel', () => {
+  it('should render manual quick capture panel when speech is unsupported', () => {
     fixture.detectChanges();
 
-    // FAB 通过短按（mousedown + 快速 mouseup）切换面板
     component.toggleQuickCapture();
+    fixture.detectChanges();
+
+    const panel = fixture.nativeElement.querySelector('[data-testid="gate-quick-capture-panel"]');
+    const input = fixture.nativeElement.querySelector('[data-testid="gate-quick-input-editor"]');
+    expect(panel).toBeTruthy();
+    expect(input).toBeTruthy();
+  });
+
+  it('confirmPendingTranscription should keep draft open when save fails', () => {
+    mockBlackBoxService.create.mockReturnValueOnce({
+      ok: false,
+      error: { message: '保存失败' },
+    });
+    component.pendingTranscription.set('原始转写');
+    component.editableTranscription = '原始转写';
+    component.quickCaptureOpen.set(true);
+
+    component.confirmPendingTranscription();
+
+    expect(component.pendingTranscription()).toBe('原始转写');
+    expect(component.editableTranscription).toBe('原始转写');
+    expect(component.quickCaptureOpen()).toBe(true);
+    expect(mockToastService.error).toHaveBeenCalledWith('保存失败');
+  });
+
+  it('should render quick capture panel when pending transcription exists', () => {
+    component.pendingTranscription.set('待确认内容');
+    component.editableTranscription = '待确认内容';
+    component.quickCaptureOpen.set(true);
     fixture.detectChanges();
 
     const panel = fixture.nativeElement.querySelector('[data-testid="gate-quick-capture-panel"]');

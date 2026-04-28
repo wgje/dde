@@ -59,6 +59,7 @@ export interface ConflictData {
   providedIn: 'root'
 })
 export class SyncStateService {
+  private syncErrorListener: ((syncError: string | null) => void) | null = null;
   
   /** 同步状态 Signal */
   readonly syncState = signal<SyncState>({
@@ -209,6 +210,11 @@ export class SyncStateService {
    */
   setSyncError(syncError: string | null): void {
     this.update({ syncError });
+    this.syncErrorListener?.(syncError);
+  }
+
+  registerSyncErrorListener(listener: (syncError: string | null) => void): void {
+    this.syncErrorListener = listener;
   }
   
   /**

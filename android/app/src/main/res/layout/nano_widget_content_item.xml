@@ -3,11 +3,14 @@
     android:id="@+id/nano_widget_content_item_root"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
+    android:background="@drawable/nano_widget_content_panel"
     android:gravity="center_vertical"
-    android:minHeight="92dp"
+    android:minHeight="110dp"
     android:orientation="vertical"
-    android:paddingTop="8dp"
-    android:paddingBottom="8dp">
+    android:paddingStart="12dp"
+    android:paddingTop="12dp"
+    android:paddingEnd="12dp"
+    android:paddingBottom="12dp">
 
     <TextView
         android:id="@+id/nano_widget_content_eyebrow"
@@ -16,13 +19,13 @@
         android:ellipsize="end"
         android:maxLines="1"
         android:text=""
-        android:textColor="#6A7A5E"
-        android:textSize="11sp"
+        android:textColor="#BFD7FF"
+        android:textSize="10sp"
         android:visibility="gone" />
 
     <TextView
         android:layout_width="match_parent"
-        android:layout_height="4dp" />
+        android:layout_height="6dp" />
 
     <TextView
         android:id="@+id/nano_widget_content_title"
@@ -30,10 +33,10 @@
         android:layout_height="wrap_content"
         android:ellipsize="end"
         android:lineSpacingExtra="2dp"
-        android:maxLines="6"
+        android:maxLines="4"
         android:text=""
-        android:textColor="#1F2A17"
-        android:textSize="20sp"
+        android:textColor="#F6FBFF"
+        android:textSize="17sp"
         android:textStyle="bold" />
 
     <TextView
@@ -47,7 +50,50 @@
         android:ellipsize="end"
         android:maxLines="2"
         android:text=""
-        android:textColor="#5E7050"
+        android:textColor="#D7E5FF"
         android:textSize="12sp"
+        android:visibility="gone" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <TextView
+            android:id="@+id/nano_widget_content_meta_start"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:ellipsize="end"
+            android:maxLines="1"
+            android:text=""
+            android:textColor="#AFC3E7"
+            android:textSize="11sp"
+            android:visibility="gone" />
+
+        <TextView
+            android:id="@+id/nano_widget_content_meta_end"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:ellipsize="end"
+            android:maxLines="1"
+            android:text=""
+            android:textColor="#F6FBFF"
+            android:textSize="11sp"
+            android:visibility="gone" />
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/nano_widget_content_hint"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:ellipsize="end"
+        android:maxLines="1"
+        android:text=""
+        android:textColor="#8FAED9"
+        android:textSize="10sp"
         android:visibility="gone" />
 </LinearLayout>

@@ -26,6 +26,7 @@ describe('AppLifecycleOrchestratorService', () => {
   };
   let mockFocusStartupProbe: {
     recheckGate: ReturnType<typeof vi.fn>;
+    hasPendingGateWork: ReturnType<typeof vi.fn>;
   };
   let mockSyncCoordinator: {
     hasPendingLocalChanges: ReturnType<typeof vi.fn>;
@@ -72,6 +73,7 @@ describe('AppLifecycleOrchestratorService', () => {
 
     mockFocusStartupProbe = {
       recheckGate: vi.fn().mockResolvedValue(undefined),
+      hasPendingGateWork: vi.fn().mockReturnValue(false),
     };
 
     mockSyncCoordinator = {
@@ -386,7 +388,56 @@ describe('AppLifecycleOrchestratorService', () => {
     expect(heavyCalls).toHaveLength(1);
   });
 
-  it('后台闲置超过大门阈值后恢复应重新探测 gate，并在黑匣子刷新后再次复核', async () => {
+  it('后台闲置超过大门阈值后恢复若本地已命中 gate，不应在黑匣子刷新后重复复核', async () => {
+    mockFocusStartupProbe.hasPendingGateWork.mockReturnValue(true);
+
+    service.initialize();
+
+    setVisibilityState('hidden');
+    document.dispatchEvent(new Event('visibilitychange'));
+
+    vi.setSystemTime(new Date(Date.now() + FOCUS_CONFIG.GATE.IDLE_RECHECK_THRESHOLD + 1));
+
+    setVisibilityState('visible');
+    document.dispatchEvent(new Event('visibilitychange'));
+
+    await vi.runAllTimersAsync();
+
+    expect(mockFocusStartupProbe.recheckGate).toHaveBeenCalledTimes(1);
+    expect(mockFocusStartupProbe.recheckGate).toHaveBeenCalledWith({
+      source: 'resume-local',
+      reloadLocal: true,
+    });
+  });
+
+  it('后台闲置超过大门阈值后恢复若远端黑匣子刷新拉到新数据，即使本地已命中 gate 也应再次复核', async () => {
+    mockFocusStartupProbe.hasPendingGateWork.mockReturnValue(true);
+    mockSyncCoordinator.refreshBlackBoxWatermarkIfNeeded.mockResolvedValue({ skipped: false });
+
+    service.initialize();
+
+    setVisibilityState('hidden');
+    document.dispatchEvent(new Event('visibilitychange'));
+
+    vi.setSystemTime(new Date(Date.now() + FOCUS_CONFIG.GATE.IDLE_RECHECK_THRESHOLD + 1));
+
+    setVisibilityState('visible');
+    document.dispatchEvent(new Event('visibilitychange'));
+
+    await vi.runAllTimersAsync();
+
+    expect(mockFocusStartupProbe.recheckGate).toHaveBeenCalledTimes(2);
+    expect(mockFocusStartupProbe.recheckGate).toHaveBeenNthCalledWith(1, {
+      source: 'resume-local',
+      reloadLocal: true,
+    });
+    expect(mockFocusStartupProbe.recheckGate).toHaveBeenNthCalledWith(2, {
+      source: 'resume-remote',
+      reloadLocal: false,
+    });
+  });
+
+  it('后台闲置超过大门阈值后恢复若本地未命中 gate，应在黑匣子刷新后再次复核', async () => {
     service.initialize();
 
     setVisibilityState('hidden');

@@ -16,6 +16,7 @@ import { TaskTrashService } from './task-trash.service';
 import { LoggerService } from './logger.service';
 import { LayoutService } from './layout.service';
 import { ParkingService } from './parking.service';
+import { TombstoneService } from '../core-bridge';
 import { Project, Task } from '../models';
 import { ProjectStateService } from './project-state.service';
 import { TaskRecordTrackingService } from './task-record-tracking.service';
@@ -59,6 +60,7 @@ describe('TaskTrashService', () => {
   let service: TaskTrashService;
   let mockLogger: { category: ReturnType<typeof vi.fn> };
   let mockLayoutService: Partial<LayoutService>;
+  let mockTombstoneService: { clearLocalTombstones: ReturnType<typeof vi.fn> };
   let currentProject: Project | null;
   
   beforeEach(() => {
@@ -100,6 +102,10 @@ describe('TaskTrashService', () => {
     const mockParkingService = {
       handleTaskSoftDelete: vi.fn(),
     };
+
+    mockTombstoneService = {
+      clearLocalTombstones: vi.fn(),
+    };
     
     const injector = Injector.create({
       providers: [
@@ -108,6 +114,7 @@ describe('TaskTrashService', () => {
         { provide: ProjectStateService, useValue: mockProjectState },
         { provide: TaskRecordTrackingService, useValue: mockRecorder },
         { provide: ParkingService, useValue: mockParkingService },
+        { provide: TombstoneService, useValue: mockTombstoneService },
       ],
     });
     
@@ -131,17 +138,25 @@ describe('TaskTrashService', () => {
   
   describe('软删除任务', () => {
     it('删除单个任务应设置 deletedAt', () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-04-23T01:20:00.000Z'));
+
       const task = createTask({ id: 'task-1', title: 'Root Task' });
       currentProject = createProject([task]);
-      
-      const result = service.deleteTask('task-1');
-      
-      expect(result.deletedTaskIds.has('task-1')).toBe(true);
-      expect(result.deletedTaskIds.size).toBe(1);
-      
-      const deletedTask = currentProject.tasks.find(t => t.id === 'task-1');
-      expect(deletedTask?.deletedAt).toBeDefined();
-      expect(deletedTask?.stage).toBeNull();
+
+      try {
+        const result = service.deleteTask('task-1');
+
+        expect(result.deletedTaskIds.has('task-1')).toBe(true);
+        expect(result.deletedTaskIds.size).toBe(1);
+
+        const deletedTask = currentProject.tasks.find(t => t.id === 'task-1');
+        expect(deletedTask?.deletedAt).toBeDefined();
+        expect(deletedTask?.updatedAt).toBe('2026-04-23T01:20:00.000Z');
+        expect(deletedTask?.stage).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
     });
     
     it('级联删除应包含所有子任务', () => {
@@ -220,6 +235,9 @@ describe('TaskTrashService', () => {
   
   describe('恢复任务', () => {
     it('恢复任务应清除 deletedAt', () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-04-23T01:30:00.000Z'));
+
       const task = createTask({ 
         id: 'task-1', 
         deletedAt: new Date().toISOString(),
@@ -228,13 +246,19 @@ describe('TaskTrashService', () => {
       // 模拟 deletedMeta
       (task as any).deletedMeta = { parentId: null, stage: 1, order: 0, rank: 10000, x: 100, y: 100 };
       currentProject = createProject([task]);
-      
-      const result = service.restoreTask('task-1');
-      
-      expect(result.restoredTaskIds.has('task-1')).toBe(true);
-      const restoredTask = currentProject.tasks.find(t => t.id === 'task-1');
-      expect(restoredTask?.deletedAt).toBeNull();
-      expect(restoredTask?.stage).toBe(1);
+
+      try {
+        const result = service.restoreTask('task-1');
+
+        expect(result.restoredTaskIds.has('task-1')).toBe(true);
+        const restoredTask = currentProject.tasks.find(t => t.id === 'task-1');
+        expect(restoredTask?.deletedAt).toBeNull();
+        expect(restoredTask?.updatedAt).toBe('2026-04-23T01:30:00.000Z');
+        expect(restoredTask?.stage).toBe(1);
+        expect(mockTombstoneService.clearLocalTombstones).toHaveBeenCalledWith('project-1', ['task-1']);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('恢复 title 和 content 都为空的任务应设置默认 title', () => {

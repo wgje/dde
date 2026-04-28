@@ -218,7 +218,13 @@ export class DockEntryCrudService {
 
   setMainTask(taskId: string): void {
     if (this.ctx.focusMode()) {
-      this.ctx.switchToTask(taskId);
+      const alreadyInCommandCenter = this.ctx.consoleVisibleEntries()
+        .some(entry => entry.taskId === taskId);
+      if (alreadyInCommandCenter) {
+        this.ctx.switchToTask(taskId);
+      } else {
+        this.insertToConsoleFromRadar(taskId);
+      }
       return;
     }
 
@@ -292,6 +298,7 @@ export class DockEntryCrudService {
         if (entry.taskId === taskId) {
           return {
             ...entry,
+            lane: 'combo-select',
             status: 'focusing',
             waitMinutes: null,
             waitStartedAt: null,

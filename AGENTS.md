@@ -11,10 +11,11 @@
 
 ## 2. 指令层级（仓库内）
 
-- `AGENTS.md`：Agent 执行手册与验收门禁。
-- `.github/copilot-instructions.md`：全局默认编码规则。
+- `AGENTS.md`：Agent 执行手册、Hard Rules 权威来源与验收门禁。
+- `.github/copilot-instructions.md`：全局默认编码规则与 quick reference。
+- `.github/CUSTOMIZATION_MAP.md`：聊天定制文件索引；维护 instructions / skills / agents 前先读。
 - `.github/instructions/*.instructions.md`：按文件类型补充。
-- 冲突处理：以本文件与 `.github/copilot-instructions.md` 的 Hard Rules 为准。
+- 冲突处理：Hard Rules 以本文件 §5 为准；其余定制文件优先链接已有说明，不并行复制完整规则。
 
 ## 3. 技术栈基线
 
@@ -150,9 +151,10 @@
 - 对 `tmp/` 等临时目录的文件尤其如此——不要假设上游步骤一定成功。
 
 ### 10.3 task_complete 生命周期
-- 所有会话（无论代码改动、问答、还是调研）完成后，**必须** 调用 `task_complete`。
+- 若当前宿主提供 `task_complete` 工具，所有会话（无论代码改动、问答、还是调研）完成后，**必须** 调用 `task_complete`。
 - 调用前先输出一段简短文字总结（1-3 句），然后立即调用 `task_complete`。
-- VS Code 内部 stop hook 会检测 `task_complete` 是否被调用；未调用将触发 autopilot 重入循环并浪费 premium requests。
+- 若当前宿主未提供 `task_complete`（例如 Codex Desktop / CLI 的工具列表中不存在），不得为了满足本规则反复重试或阻塞结束；正常发送最终回复即可。
+- VS Code 内部 stop hook 可检测 `task_complete` 是否被调用；未调用可能触发 autopilot 重入循环并浪费 premium requests，因此本规则只在工具实际可用时强制执行。
 
 ### 10.4 Subagent 注意事项
 - Subagent 不共享 memory 工具状态，不要在 subagent prompt 中引用 `/memories/` 虚拟路径。
@@ -276,7 +278,7 @@ supabase/migrations/        # 数据库迁移
 | 同步时 `content` 丢失覆盖 | 查询字段必须包含 `content` |
 | Memory 路径误用为文件路径 | `/memories/repo/` 只能通过 `memory` 工具访问，禁止 `read_file` |
 | tmp 文件不存在就读取 | 读取 tmp 产物前用 `list_dir` 或 `file_search` 确认存在 |
-| 未调用 `task_complete` 导致循环 | 任务结束必须调用 `task_complete`，防止 autopilot 无限重入 |
+| 未调用 `task_complete` 导致循环 | 宿主提供 `task_complete` 时任务结束必须调用；工具不可用时禁止反复重试 |
 | Subagent 依赖 tmp 文件交互 | Subagent 结果通过最终消息返回，不依赖文件交互 |
 
 ## 17. 完成定义（Definition of Done）

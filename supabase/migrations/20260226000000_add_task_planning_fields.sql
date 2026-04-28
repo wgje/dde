@@ -3,7 +3,6 @@ alter table public.tasks
   add column if not exists expected_minutes integer,
   add column if not exists cognitive_load text,
   add column if not exists wait_minutes integer;
-
 do $$
 begin
   if not exists (
@@ -18,7 +17,6 @@ begin
   end if;
 end
 $$;
-
 do $$
 begin
   if not exists (
@@ -33,7 +31,6 @@ begin
   end if;
 end
 $$;
-
 do $$
 begin
   if not exists (
@@ -48,4 +45,3 @@ begin
   end if;
 end
 $$;
-
