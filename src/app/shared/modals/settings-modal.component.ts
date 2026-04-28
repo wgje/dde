@@ -931,8 +931,12 @@ export class SettingsModalComponent {
   async updateSiyuanBaseUrl(event: Event): Promise<void> {
     const value = (event.target as HTMLInputElement | null)?.value.trim() || SIYUAN_CONFIG.DEFAULT_BASE_URL;
     if (!isTrustedSiyuanDirectBaseUrl(value, typeof window === 'undefined' ? null : window.location)) {
-      this.siyuanConnectionStatus.set('仅支持本机思源地址 http://127.0.0.1:6806 或 http://localhost:6806');
+      // 拒绝可疑 baseUrl 时一并清空已保存的 token，防止下次 testSiyuanConnection 把 token 发到错误的 host。
+      const config = await this.siyuanCache.loadConfig();
+      await this.siyuanCache.saveConfig({ ...config, baseUrl: SIYUAN_CONFIG.DEFAULT_BASE_URL, token: undefined });
       this.siyuanBaseUrl.set(SIYUAN_CONFIG.DEFAULT_BASE_URL);
+      this.siyuanTokenMask.set('');
+      this.siyuanConnectionStatus.set('仅支持本机思源地址 http://127.0.0.1:6806 或 http://localhost:6806，已重置授权');
       return;
     }
     const config = await this.siyuanCache.loadConfig();

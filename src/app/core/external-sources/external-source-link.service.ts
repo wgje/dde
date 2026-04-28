@@ -67,10 +67,20 @@ export class ExternalSourceLinkService {
   private initialized = false;
   private loadedOwnerId: string | null = null;
   private flushPromise: Promise<void> | null = null;
+  /** 缓存正在进行的 ensureLoaded，防止并发 caller 各自跑一次 pull/merge。 */
+  private loadPromise: Promise<void> | null = null;
 
   async ensureLoaded(): Promise<void> {
     const ownerId = this.currentUserId();
     if (this.initialized && this.loadedOwnerId === ownerId) return;
+    if (this.loadPromise && this.loadedOwnerId === ownerId) return this.loadPromise;
+    this.loadPromise = this.runEnsureLoaded(ownerId).finally(() => {
+      this.loadPromise = null;
+    });
+    return this.loadPromise;
+  }
+
+  private async runEnsureLoaded(ownerId: string): Promise<void> {
     this.initialized = true;
     this.loadedOwnerId = ownerId;
 
@@ -133,7 +143,7 @@ export class ExternalSourceLinkService {
       updatedAt: now,
     };
     await this.persistLocal(link);
-    await this.cache.upsertPendingLink(link);
+    await this.cache.upsertPendingLink(link, { resetRetryCount: true });
     void this.flushPendingLinks();
     this.toast.success("已关联思源块");
     return link;
@@ -150,7 +160,7 @@ export class ExternalSourceLinkService {
     };
     await this.persistLocal(link);
     await this.cache.deletePreviewsForLink(link.id);
-    await this.cache.upsertPendingLink(link);
+    await this.cache.upsertPendingLink(link, { resetRetryCount: true });
     void this.flushPendingLinks();
     this.toast.info("已解除思源关联");
   }
@@ -171,7 +181,7 @@ export class ExternalSourceLinkService {
       updatedAt: new Date().toISOString(),
     });
     await this.persistLocal(link);
-    await this.cache.upsertPendingLink(link);
+    await this.cache.upsertPendingLink(link, { resetRetryCount: true });
     void this.flushPendingLinks();
   }
 
@@ -181,7 +191,7 @@ export class ExternalSourceLinkService {
     for (const rawLink of links) {
       const link = this.normalizeLink(rawLink);
       await this.persistLocal(link);
-      await this.cache.upsertPendingLink(link);
+      await this.cache.upsertPendingLink(link, { resetRetryCount: true });
     }
     void this.flushPendingLinks();
   }
@@ -193,7 +203,10 @@ export class ExternalSourceLinkService {
       this.toast.error("思源链接无效", "已阻止打开非 siyuan:// 块链接");
       return;
     }
-    window.location.href = parsed.uri;
+    // 用新窗口承载 siyuan:// protocol handler，避免替换 SPA 自身的 URL 导致状态被清空。
+    // 浏览器拒绝识别此 protocol 时，新窗口会被立刻关闭，但当前应用保持完整。
+    const opened = window.open(parsed.uri, "_blank", "noopener,noreferrer");
+    if (!opened) this.toast.info("浏览器已拦截弹窗，请在原块上右键打开");
   }
 
   async flushPendingLinks(): Promise<void> {
@@ -205,10 +218,14 @@ export class ExternalSourceLinkService {
   }
 
   private async flushPendingLinksInternal(): Promise<void> {
-    const pending = this.mergeLinks(await this.cache.loadPendingLinks(), []);
-    for (const link of pending) {
-      if (await this.pushLink(link))
-        await this.cache.removePendingLink(link.id);
+    const pending = await this.cache.loadPendingLinks();
+    for (const entry of pending) {
+      const result = await this.pushLink(entry.link);
+      if (result.outcome === "success" || result.outcome === "drop") {
+        await this.cache.removePendingLink(entry.link.id);
+      } else {
+        await this.cache.recordPendingFailure(entry.link.id, result.errorCode);
+      }
     }
   }
 
@@ -245,29 +262,66 @@ export class ExternalSourceLinkService {
     const remoteById = new Map(remoteLinks.map((link) => [link.id, link]));
     for (const local of localLinks) {
       const remote = remoteById.get(local.id);
-      if (!remote || local.updatedAt > remote.updatedAt)
-        await this.cache.upsertPendingLink(local);
+      if (remote && local.updatedAt <= remote.updatedAt) continue;
+      // 已确认在线（pullRemoteLinks 成功），优先直接推送，避免 IndexedDB 写放大；
+      // 推送失败时再走 pending + retry 路径。
+      const result = await this.pushLink(local);
+      if (result.outcome !== "success" && result.outcome !== "drop") {
+        await this.cache.upsertPendingLink(local, { resetRetryCount: true });
+      }
     }
   }
 
-  private async pushLink(link: ExternalSourceLink): Promise<boolean> {
+  private async pushLink(
+    link: ExternalSourceLink,
+  ): Promise<
+    | { outcome: "success" }
+    | { outcome: "drop"; reason: "local-mode" | "no-client" | "duplicate" }
+    | { outcome: "retry"; errorCode: string }
+  > {
     const client = await this.getClient();
     const userId = this.currentUserId();
-    if (!client || userId === AUTH_CONFIG.LOCAL_MODE_USER_ID) return true;
+    if (!client) return { outcome: "drop", reason: "no-client" };
+    if (userId === AUTH_CONFIG.LOCAL_MODE_USER_ID)
+      return { outcome: "drop", reason: "local-mode" };
     try {
       const { error } = await client
         .from("external_source_links")
-        .upsert(this.linkToRow(link, userId) as unknown as never, { onConflict: "id" });
-      if (error) throw error;
-      return true;
+        .upsert(this.linkToRow(link, userId) as unknown as never, {
+          onConflict: "id",
+        });
+      if (error) {
+        const errorCode = (error as { code?: string }).code ?? "unknown";
+        // 23505 = Postgres unique_violation：另一端已绑定同一 (task, target)。
+        // 不再重试，丢弃 pending 项让下一次 ensureLoaded 重新拉远端真相。
+        if (errorCode === "23505") {
+          this.logger.info("思源锚点唯一冲突，丢弃本机 pending", {
+            linkId: this.safeId(link.id),
+          });
+          return { outcome: "drop", reason: "duplicate" };
+        }
+        throw error;
+      }
+      return { outcome: "success" };
     } catch (error) {
+      const errorCode = this.classifyPushError(error);
       this.logger.warn("推送思源锚点失败，已保留本机重试", {
         linkId: this.safeId(link.id),
+        errorCode,
         message: error instanceof Error ? error.message : "unknown",
       });
-      await this.cache.upsertPendingLink(link);
-      return false;
+      return { outcome: "retry", errorCode };
     }
+  }
+
+  private classifyPushError(error: unknown): string {
+    if (error && typeof error === "object") {
+      const code = (error as { code?: unknown }).code;
+      if (typeof code === "string" && code.length > 0) return code;
+      const status = (error as { status?: unknown }).status;
+      if (status === 401 || status === 403) return "auth";
+    }
+    return "unknown";
   }
 
   private async getClient(): Promise<ExternalSourceSupabaseClient | null> {
@@ -299,9 +353,12 @@ export class ExternalSourceLinkService {
     const activeByNaturalKey = new Map<string, ExternalSourceLink>();
     const next = new Map(links.map((link) => [link.id, link]));
     const now = new Date().toISOString();
-    for (const link of links.sort((a, b) =>
-      a.updatedAt.localeCompare(b.updatedAt),
-    )) {
+    // 排序在 updatedAt 持平时按 id 升序，保证多端 collapse 选出同一 winner，避免相互踩。
+    const sorted = links.slice().sort((a, b) => {
+      const cmp = a.updatedAt.localeCompare(b.updatedAt);
+      return cmp !== 0 ? cmp : a.id.localeCompare(b.id);
+    });
+    for (const link of sorted) {
       if (link.deletedAt) continue;
       const key = `${link.taskId}|${link.sourceType}|${link.targetId}`;
       const existing = activeByNaturalKey.get(key);
@@ -309,7 +366,7 @@ export class ExternalSourceLinkService {
         activeByNaturalKey.set(key, link);
         continue;
       }
-      const winner = existing.updatedAt >= link.updatedAt ? existing : link;
+      const winner = this.pickCollapseWinner(existing, link);
       const loser = winner.id === existing.id ? link : existing;
       activeByNaturalKey.set(key, winner);
       next.set(loser.id, {
@@ -319,6 +376,17 @@ export class ExternalSourceLinkService {
       });
     }
     return Array.from(next.values());
+  }
+
+  private pickCollapseWinner(
+    a: ExternalSourceLink,
+    b: ExternalSourceLink,
+  ): ExternalSourceLink {
+    const cmp = a.updatedAt.localeCompare(b.updatedAt);
+    if (cmp > 0) return a;
+    if (cmp < 0) return b;
+    // updatedAt 相同时按 id 升序确定唯一 winner（多端一致）。
+    return a.id.localeCompare(b.id) <= 0 ? a : b;
   }
 
   private normalizeLink(link: ExternalSourceLink): ExternalSourceLink {

@@ -35,6 +35,7 @@ import {
 import type { BackupData } from '../../supabase/functions/_shared/backup-utils';
 import { ExternalSourceLinkService } from '../app/core/external-sources/external-source-link.service';
 import type { ExternalSourceLink } from '../app/core/external-sources/external-source.model';
+import { parseSiyuanBlockLink } from '../app/core/external-sources/siyuan/siyuan-link-parser';
 
 // ============================================
 // 导入配置
@@ -646,12 +647,19 @@ export class ImportService {
 
   private toExternalSourceLink(link: ExportExternalSourceLink, taskId: string): ExternalSourceLink | null {
     if (link.sourceType !== 'siyuan-block' || !link.targetId || !link.uri) return null;
+    // 校验 targetId 与 uri 是否符合思源块 ID 形式，否则丢弃并打 warn。
+    // 不过滤会导致脏数据进 IndexedDB 且在推送到 Supabase 时被 CHECK 约束拒绝，反复重试。
+    const parsed = parseSiyuanBlockLink(link.targetId) ?? parseSiyuanBlockLink(link.uri);
+    if (!parsed) {
+      this.logger.warn('导入跳过非法思源锚点', { taskId, targetId: link.targetId });
+      return null;
+    }
     return {
       id: link.id || crypto.randomUUID(),
       taskId,
       sourceType: 'siyuan-block',
-      targetId: link.targetId,
-      uri: link.uri,
+      targetId: parsed.blockId,
+      uri: parsed.uri,
       label: link.label,
       hpath: link.hpath,
       role: link.role,

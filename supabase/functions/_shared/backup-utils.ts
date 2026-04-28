@@ -211,6 +211,11 @@ export interface BackupLocalState {
   deadLetters?: unknown[];
   taskTombstones?: unknown;
   connectionTombstones?: unknown;
+  /**
+   * 思源知识锚点尚未推送到 Supabase 的本机 pending 项。
+   * 备份时一并打包，跨设备恢复后可继续 flushPendingLinks 完成同步。
+   */
+  externalSourcePendingLinks?: unknown[];
 }
 
 /** 健康校验结果 */

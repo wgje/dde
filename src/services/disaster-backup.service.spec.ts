@@ -13,6 +13,7 @@ import { BlackBoxService } from './black-box.service';
 import { SupabaseClientService } from './supabase-client.service';
 import type { Project } from '../models';
 import { ExternalSourceLinkService } from '../app/core/external-sources/external-source-link.service';
+import { ExternalSourceCacheService } from '../app/core/external-sources/external-source-cache.service';
 
 function createProject(): Project {
   return {
@@ -346,6 +347,7 @@ describe('DisasterBackupService', () => {
         },
         { provide: SupabaseClientService, useValue: { isConfigured: true, client: vi.fn(() => client) } },
         { provide: ExternalSourceLinkService, useValue: { ensureLoaded: vi.fn().mockResolvedValue(undefined), activeLinksForTask: vi.fn(() => []) } },
+        { provide: ExternalSourceCacheService, useValue: { loadPendingLinks: vi.fn().mockResolvedValue([]) } },
       ],
     });
 
@@ -469,6 +471,7 @@ describe('DisasterBackupService', () => {
         { provide: BlackBoxService, useValue: { entriesMap: signal(new Map()) } },
         { provide: SupabaseClientService, useValue: { isConfigured: false, client: vi.fn() } },
         { provide: ExternalSourceLinkService, useValue: { ensureLoaded: vi.fn().mockResolvedValue(undefined), activeLinksForTask: vi.fn(() => []) } },
+        { provide: ExternalSourceCacheService, useValue: { loadPendingLinks: vi.fn().mockResolvedValue([]) } },
       ],
     });
 

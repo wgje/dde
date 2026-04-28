@@ -1,4 +1,4 @@
-import { Injectable, inject } from '@angular/core';
+import { DestroyRef, Injectable, inject } from '@angular/core';
 import { Overlay, OverlayRef, type ConnectedPosition } from '@angular/cdk/overlay';
 import { ComponentPortal } from '@angular/cdk/portal';
 import { SIYUAN_CONFIG } from '../../../../config/siyuan.config';
@@ -14,6 +14,11 @@ export class KnowledgeAnchorPopoverService {
   private originRef?: HTMLElement;
   private openTimer?: ReturnType<typeof setTimeout>;
   private closeTimer?: ReturnType<typeof setTimeout>;
+
+  constructor() {
+    // 单例 service 在 root 注入器销毁时（HMR/SSR teardown）一并 dispose 掉 OverlayRef，避免内存与 DOM 泄漏。
+    inject(DestroyRef).onDestroy(() => this.dispose());
+  }
 
   readonly positions: ConnectedPosition[] = [
     { originX: 'start', originY: 'bottom', overlayX: 'start', overlayY: 'top', offsetY: 8 },

@@ -40,13 +40,16 @@ export class SiyuanPreviewService {
     const cached = await this.cache.getPreview(link.id, link.targetId);
     if (cached && !options?.forceRefresh) {
       const stale = Date.now() - new Date(cached.fetchedAt).getTime() > SIYUAN_CONFIG.CACHE_STALE_MS;
-      void this.refresh(link).catch(error => {
-        this.logger.debug('后台刷新思源预览失败，继续使用本机缓存', {
-          linkId: link.id,
-          blockId: link.targetId,
-          message: error instanceof Error ? error.message : 'unknown',
+      // 只在缓存过期时触发后台刷新，遵守 CACHE_STALE_MS 预算并避免每次悬停都打 API。
+      if (stale) {
+        void this.refresh(link).catch(error => {
+          this.logger.debug('后台刷新思源预览失败，继续使用本机缓存', {
+            linkId: link.id,
+            blockId: link.targetId,
+            message: error instanceof Error ? error.message : 'unknown',
+          });
         });
-      });
+      }
       return { status: 'ready', preview: cached, stale };
     }
     return this.refresh(link, cached ?? undefined);
@@ -94,8 +97,9 @@ export class SiyuanPreviewService {
     const config = await this.cache.loadConfig();
     if (config.runtimeMode === 'cache-only') return null;
     if (config.runtimeMode === 'direct') return await this.directProvider.isAvailable() ? this.directProvider : null;
-    if (await this.extensionProvider.isAvailable()) return this.extensionProvider;
-    return await this.directProvider.isAvailable() ? this.directProvider : null;
+    // 显式选择 extension-relay 的用户可能正是为了避免 token 落到 direct 模式的 fetch 流量里，
+    // 因此扩展不可用时不再静默 fallback；直接告知扩展不可用，让用户在设置里改 runtimeMode。
+    return await this.extensionProvider.isAvailable() ? this.extensionProvider : null;
   }
 
   private isCurrent(link: ExternalSourceLink, controller: AbortController, requestSeq: number, blockId: string): boolean {

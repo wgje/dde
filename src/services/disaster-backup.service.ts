@@ -30,6 +30,7 @@ import {
   type BackupExternalSourceLink,
 } from '../../supabase/functions/_shared/backup-utils';
 import { ExternalSourceLinkService } from '../app/core/external-sources/external-source-link.service';
+import { ExternalSourceCacheService } from '../app/core/external-sources/external-source-cache.service';
 import type { ExternalSourceLink } from '../app/core/external-sources/external-source.model';
 
 const ACTION_QUEUE_BACKUP_DB_NAME = 'nanoflow-queue-backup';
@@ -112,6 +113,7 @@ export class DisasterBackupService {
   private readonly blackBoxService = inject(BlackBoxService);
   private readonly supabase = inject(SupabaseClientService);
   private readonly externalSourceLinks = inject(ExternalSourceLinkService);
+  private readonly externalSourceCache = inject(ExternalSourceCacheService);
 
   async buildLocalPayload(
     projects: Project[],
@@ -427,12 +429,14 @@ export class DisasterBackupService {
       retryQueue,
       actionQueue,
       deadLetters,
+      externalSourcePendingLinks,
     ] = await Promise.all([
       this.readSnapshotFromIndexedDb(ownerUserId),
       this.readParkedTaskCache(visibleProjectIds),
       this.readRetryQueue(ownerUserId),
       this.readActionQueue(ownerUserId),
       this.readDeadLetters(ownerUserId),
+      this.externalSourceCache.loadPendingLinks(),
     ]);
 
     return {
@@ -446,6 +450,7 @@ export class DisasterBackupService {
       deadLetters,
       taskTombstones: this.readTaskTombstones(visibleProjectIds),
       connectionTombstones: this.readConnectionTombstones(visibleProjectIds),
+      externalSourcePendingLinks,
     };
   }
 

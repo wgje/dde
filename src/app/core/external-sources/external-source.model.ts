@@ -68,3 +68,14 @@ export interface SiyuanPreviewResult {
   errorCode?: SiyuanPreviewErrorCode;
   stale?: boolean;
 }
+
+/**
+ * 本机离线推送队列条目。link 与服务器形态保持一致，
+ * retryCount/lastErrorCode 仅用于本机调度，不会上传。
+ */
+export interface PendingExternalSourceLink {
+  link: ExternalSourceLink;
+  retryCount: number;
+  lastTriedAt?: string;
+  lastErrorCode?: string;
+}

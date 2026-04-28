@@ -1,13 +1,17 @@
 import { Injectable, inject } from "@angular/core";
-import { del, get, keys, set } from "idb-keyval";
+import { del, get, keys, set, update } from "idb-keyval";
 import { AuthService } from "../../../services/auth.service";
 import { AUTH_CONFIG } from "../../../config/auth.config";
 import { SIYUAN_CONFIG } from "../../../config/siyuan.config";
 import type {
   ExternalSourceLink,
   LocalSiyuanPreviewCache,
+  PendingExternalSourceLink,
   SiyuanLocalConfig,
 } from "./external-source.model";
+
+/** 重试次数超过此阈值则迁出到死信，避免持续噪声。 */
+const PENDING_MAX_RETRIES = 5;
 
 @Injectable({ providedIn: "root" })
 export class ExternalSourceCacheService {
@@ -37,6 +41,10 @@ export class ExternalSourceCacheService {
     return `external-source-pending:${userId}`;
   }
 
+  private deadLettersKey(userId = this.ownerId()): string {
+    return `external-source-deadletters:${userId}`;
+  }
+
   async loadLinks(): Promise<ExternalSourceLink[]> {
     const value = await get<ExternalSourceLink[]>(this.linksKey());
     return Array.isArray(value) ? value : [];
@@ -46,22 +54,83 @@ export class ExternalSourceCacheService {
     await set(this.linksKey(), links);
   }
 
-  async loadPendingLinks(): Promise<ExternalSourceLink[]> {
-    const value = await get<ExternalSourceLink[]>(this.pendingLinksKey());
-    return Array.isArray(value) ? value : [];
+  async loadPendingLinks(): Promise<PendingExternalSourceLink[]> {
+    const value = await get<PendingExternalSourceLink[]>(this.pendingLinksKey());
+    return Array.isArray(value) ? value.filter((entry) => entry?.link?.id) : [];
   }
 
-  async upsertPendingLink(link: ExternalSourceLink): Promise<void> {
-    const pending = await this.loadPendingLinks();
-    const next = new Map(pending.map((item) => [item.id, item]));
-    next.set(link.id, link);
-    await set(this.pendingLinksKey(), Array.from(next.values()));
+  /**
+   * 原子化 upsert：使用 idb-keyval.update 在同一 IDB readwrite 事务内完成
+   * read-modify-write，避免与 flushPendingLinks 并发时丢写。
+   */
+  async upsertPendingLink(
+    link: ExternalSourceLink,
+    options: { resetRetryCount?: boolean } = {},
+  ): Promise<void> {
+    await update<PendingExternalSourceLink[]>(this.pendingLinksKey(), (current) => {
+      const list = Array.isArray(current) ? current : [];
+      const next = new Map(list.map((entry) => [entry.link.id, entry]));
+      const previous = next.get(link.id);
+      next.set(link.id, {
+        link,
+        retryCount: options.resetRetryCount ? 0 : previous?.retryCount ?? 0,
+        lastTriedAt: previous?.lastTriedAt,
+        lastErrorCode: previous?.lastErrorCode,
+      });
+      return Array.from(next.values());
+    });
   }
 
   async removePendingLink(linkId: string): Promise<void> {
-    const pending = await this.loadPendingLinks();
-    const next = pending.filter((link) => link.id !== linkId);
-    await set(this.pendingLinksKey(), next);
+    await update<PendingExternalSourceLink[]>(this.pendingLinksKey(), (current) => {
+      if (!Array.isArray(current)) return [];
+      return current.filter((entry) => entry.link.id !== linkId);
+    });
+  }
+
+  /**
+   * 标记一次推送失败，递增 retryCount。超过 PENDING_MAX_RETRIES 则迁出到死信表。
+   */
+  async recordPendingFailure(linkId: string, errorCode: string): Promise<void> {
+    let movedToDeadLetter: PendingExternalSourceLink | null = null;
+    await update<PendingExternalSourceLink[]>(this.pendingLinksKey(), (current) => {
+      const list = Array.isArray(current) ? current : [];
+      const next: PendingExternalSourceLink[] = [];
+      for (const entry of list) {
+        if (entry.link.id !== linkId) {
+          next.push(entry);
+          continue;
+        }
+        const updated: PendingExternalSourceLink = {
+          link: entry.link,
+          retryCount: (entry.retryCount ?? 0) + 1,
+          lastTriedAt: new Date().toISOString(),
+          lastErrorCode: errorCode,
+        };
+        if (updated.retryCount > PENDING_MAX_RETRIES) {
+          movedToDeadLetter = updated;
+        } else {
+          next.push(updated);
+        }
+      }
+      return next;
+    });
+    if (movedToDeadLetter) await this.appendDeadLetter(movedToDeadLetter);
+  }
+
+  async loadDeadLetters(): Promise<PendingExternalSourceLink[]> {
+    const value = await get<PendingExternalSourceLink[]>(this.deadLettersKey());
+    return Array.isArray(value) ? value : [];
+  }
+
+  private async appendDeadLetter(entry: PendingExternalSourceLink): Promise<void> {
+    await update<PendingExternalSourceLink[]>(this.deadLettersKey(), (current) => {
+      const list = Array.isArray(current) ? current : [];
+      // 同 id 只保留最后一次失败记录，避免无界增长。
+      const next = new Map(list.map((item) => [item.link.id, item]));
+      next.set(entry.link.id, entry);
+      return Array.from(next.values());
+    });
   }
 
   async getPreview(

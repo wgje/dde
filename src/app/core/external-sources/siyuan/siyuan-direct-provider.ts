@@ -17,7 +17,14 @@ interface HPathData { hPath?: string; }
 interface AttrData { updated?: string; updatedAt?: string; }
 interface ChildBlockData { id?: string; content?: string; markdown?: string; type?: string; }
 
-export function isTrustedSiyuanDirectBaseUrl(baseUrl: string, pageLocation: Location | null = null): boolean {
+/**
+ * 直连模式 baseUrl 校验。
+ *
+ * `pageLocation` 必填：传 `null` 表示显式放弃 page-origin 校验
+ * （仅在没有 DOM 上下文的环境，例如单元测试或 SSR 启动期），
+ * 防止默认值悄无声息地放过 HTTPS 公网页面发起的直连请求。
+ */
+export function isTrustedSiyuanDirectBaseUrl(baseUrl: string, pageLocation: Location | null): boolean {
   try {
     const url = new URL(baseUrl);
     if (url.username || url.password || url.pathname !== '/' || url.search || url.hash) return false;
@@ -31,6 +38,11 @@ export function isTrustedSiyuanDirectBaseUrl(baseUrl: string, pageLocation: Loca
   }
 }
 
+/** 浏览器可用时返回 window.location，否则返回 null。集中托管运行时检测，避免散落在各处。 */
+function currentPageLocation(): Location | null {
+  return typeof location === 'undefined' ? null : location;
+}
+
 @Injectable({ providedIn: 'root' })
 export class SiyuanDirectProvider implements SiyuanPreviewProvider {
   readonly mode = 'direct' as const;
@@ -38,13 +50,13 @@ export class SiyuanDirectProvider implements SiyuanPreviewProvider {
 
   async isAvailable(): Promise<boolean> {
     const config = await this.cache.loadConfig();
-    return config.runtimeMode === 'direct' && isTrustedSiyuanDirectBaseUrl(config.baseUrl, typeof location === 'undefined' ? null : location) && Boolean(config.token);
+    return config.runtimeMode === 'direct' && isTrustedSiyuanDirectBaseUrl(config.baseUrl, currentPageLocation()) && Boolean(config.token);
   }
 
   async getBlockPreview(blockId: string, signal?: AbortSignal): Promise<SiyuanBlockPreview> {
     if (!isValidSiyuanBlockId(blockId)) throw new SiyuanProviderError('block-not-found');
     const config = await this.cache.loadConfig();
-    if (config.runtimeMode !== 'direct' || !isTrustedSiyuanDirectBaseUrl(config.baseUrl, typeof location === 'undefined' ? null : location)) {
+    if (config.runtimeMode !== 'direct' || !isTrustedSiyuanDirectBaseUrl(config.baseUrl, currentPageLocation())) {
       throw new SiyuanProviderError('runtime-not-supported');
     }
     if (!config.token) throw new SiyuanProviderError('not-configured');

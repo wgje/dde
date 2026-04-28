@@ -69,4 +69,39 @@ describe('ExternalSourceCacheService', () => {
     expect(await service.getPreview('link-1', '20260426123456-abc1234')).toBeNull();
     expect((await service.loadConfig()).runtimeMode).toBe('cache-only');
   });
+
+  it('upsertPendingLink preserves retryCount across re-enqueue and resets only when requested', async () => {
+    const service = TestBed.inject(ExternalSourceCacheService);
+    const link = {
+      id: 'link-1', taskId: 'task-1', sourceType: 'siyuan-block' as const,
+      targetId: '20260426123456-abc1234', uri: 'siyuan://blocks/20260426123456-abc1234?focus=1',
+      sortOrder: 0, deletedAt: null,
+      createdAt: '2026-04-28T00:00:00.000Z', updatedAt: '2026-04-28T00:00:00.000Z',
+    };
+    await service.upsertPendingLink(link);
+    await service.recordPendingFailure('link-1', 'unknown');
+    await service.upsertPendingLink({ ...link, label: 'updated' });
+    expect((await service.loadPendingLinks())[0].retryCount).toBe(1);
+
+    await service.upsertPendingLink({ ...link, label: 'reset' }, { resetRetryCount: true });
+    expect((await service.loadPendingLinks())[0].retryCount).toBe(0);
+  });
+
+  it('moves pending link to dead letter after exceeding retry threshold', async () => {
+    const service = TestBed.inject(ExternalSourceCacheService);
+    const link = {
+      id: 'link-2', taskId: 'task-1', sourceType: 'siyuan-block' as const,
+      targetId: '20260426123456-abc1234', uri: 'siyuan://blocks/20260426123456-abc1234?focus=1',
+      sortOrder: 0, deletedAt: null,
+      createdAt: '2026-04-28T00:00:00.000Z', updatedAt: '2026-04-28T00:00:00.000Z',
+    };
+    await service.upsertPendingLink(link);
+    for (let i = 0; i < 6; i++) await service.recordPendingFailure('link-2', '23514');
+
+    expect(await service.loadPendingLinks()).toHaveLength(0);
+    const deadLetters = await service.loadDeadLetters();
+    expect(deadLetters).toHaveLength(1);
+    expect(deadLetters[0].link.id).toBe('link-2');
+    expect(deadLetters[0].lastErrorCode).toBe('23514');
+  });
 });
