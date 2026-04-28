@@ -42,9 +42,11 @@ jobs:
               echo "::error::Failed to configure npm authentication from NPM_TOKEN."
               exit 1
             fi
+          else
+            echo "NPM_TOKEN not configured; continuing without private npm package auth."
           fi
 
-      - name: Restore Playwright browser cache
+      - name: Restore Playwright browser cache (ubuntu-latest)
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
