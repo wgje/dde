@@ -5,6 +5,7 @@
 > **状态**：Implementation-ready  
 > **定位**：思源笔记是知识源头（Source of Truth），NanoFlow 是执行工作台（Execution Workspace）  
 > **核心决策**：NanoFlow 只保存思源块指针与少量元数据，不嵌入思源 UI，不在 MVP 同步正文到云端，不在 MVP 做双向写回。
+> **v1.3 变更提示**：如已有原型使用 `siyuan-preview-cache:{linkId}`，本版改为 `siyuan-preview-cache:{linkId}:{blockId}`，属于本机缓存 key 的破坏性调整；尚未落地实现时直接采用新 key。
 
 ---
 
@@ -618,12 +619,14 @@ idle
 
 1. `hover-intent` 期间只启动延迟计时，不立刻请求思源。
 2. 进入 `opening` 时记录 `{ linkId, blockId, originRef, controller }` 作为活跃请求状态。
-3. `originRef` 只允许保存在 Popover service 的短生命周期私有字段中，不能写入 Signals Store；关闭、切换锚点或组件销毁时必须置空，避免保留已脱离 DOM 的元素。
-4. 浮层内容加载期间先读取本机缓存，再按 provider 能力后台刷新。
-5. 鼠标从锚点进入浮层时取消关闭计时。
-6. 鼠标离开锚点和浮层后进入 `closing-grace`，宽限期结束再关闭。
-7. 新锚点触发时立即 abort 上一个请求，并用新锚点重设 Overlay origin。
-8. 任何响应返回前必须比对当前活跃 `linkId` / `blockId`；不一致则静默丢弃。
+3. `originRef` 只允许保存在 Popover service / component 的普通 class private property 中，不能写入 Signals Store。
+4. 关闭浮层、切换锚点或 `ngOnDestroy()` 时必须把该 private property 显式置为 `null`，避免保留已脱离 DOM 的元素。
+5. DOM 引用进入 Signals Store 会妨碍垃圾回收，也会把非序列化 UI 资源混入响应式业务状态，因此禁止这样做。
+6. 浮层内容加载期间先读取本机缓存，再按 provider 能力后台刷新。
+7. 鼠标从锚点进入浮层时取消关闭计时。
+8. 鼠标离开锚点和浮层后进入 `closing-grace`，宽限期结束再关闭。
+9. 新锚点触发时立即 abort 上一个请求，并用新锚点重设 Overlay origin。
+10. 任何响应返回前必须比对当前活跃 `linkId` / `blockId`；不一致则静默丢弃。
 
 不建议使用 `MatTooltip` 承载该能力。原因是预览浮层需要异步状态、按钮、内部滚动、错误态和安全渲染链路，已经超出普通 tooltip 的语义。
 
@@ -771,8 +774,10 @@ Context7 对思源 API 的查询结果显示，`/api/block/getBlockKramdown`、`
 2. `getChildBlocks` 失败不应导致整个预览失败；可以只显示当前块正文并提示子块不可用。
 3. `getHPathByID` 失败不应阻塞预览；任务卡可退回显示 `label` 或短 block ID。
 4. 任一接口超时后必须通过 `AbortSignal` 取消剩余请求。
-5. 组件或预览服务必须维护当前活跃请求状态，例如 `{ linkId, blockId, controller }`；如果底层通道无法真正取消请求，响应返回时仍必须与该活跃状态比对。
-6. 比对不一致的迟到结果必须丢弃，避免 hover 快速切换造成过期预览覆盖当前锚点。
+5. 组件或预览服务必须维护当前活跃请求状态，例如 `{ linkId, blockId, controller }`。
+6. 活跃请求状态使用普通 class private property，不写入 Signal；每次新 hover 事件以“abort 旧 controller -> 创建新 controller -> 一次性替换 activeRequest”的顺序更新，保证快速鼠标移动时只存在一个权威请求。
+7. 如果底层通道无法真正取消请求，响应返回时仍必须与该活跃状态比对。
+8. 比对不一致的迟到结果必须丢弃，避免 hover 快速切换造成过期预览覆盖当前锚点。
 
 示例：用户先悬浮任务 A 的锚点 `blockId=abc`，随后快速悬浮任务 B 的锚点 `blockId=xyz`。如果 A 的响应在 B 的请求开始后才返回，前端必须因当前活跃 `blockId` 已变为 `xyz` 而丢弃 A 的响应。
 
