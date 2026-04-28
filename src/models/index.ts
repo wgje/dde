@@ -44,6 +44,8 @@ export interface Task {
   y: number;
   createdDate: string;
   updatedAt?: string;
+  /** 完成状态首次落地时间；用于历史沉积层稳定排序，避免被 updatedAt 后续编辑扰动 */
+  completedAt?: string | null;
   displayId: string;
   shortId?: string;
   hasIncompleteTask?: boolean;

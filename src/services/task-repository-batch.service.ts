@@ -671,6 +671,7 @@ export class TaskRepositoryBatchService {
       tags: task.tags ?? [],
       attachments: task.attachments ?? [],
       deleted_at: task.deletedAt ?? null,
+      completed_at: task.completedAt ?? null,
       // 注意：不需要手动设置 updated_at，数据库触发器会自动更新
     };
   }

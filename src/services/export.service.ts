@@ -138,6 +138,7 @@ export interface ExportTask {
   shortId?: string;
   createdAt?: string;
   updatedAt?: string;
+  completedAt?: string | null;
   attachments?: ExportAttachment[];
   /** 标签列表 */
   tags?: string[];
@@ -557,6 +558,7 @@ export class ExportService {
       shortId: task.shortId,
       createdAt: task.createdDate,
       updatedAt: task.updatedAt,
+      completedAt: task.completedAt ?? null,
       tags: task.tags,
       priority: task.priority,
       dueDate: task.dueDate,

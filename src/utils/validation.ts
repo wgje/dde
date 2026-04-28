@@ -417,6 +417,7 @@ export function sanitizeTask(rawTask: unknown): Task {
     y: typeof task.y === 'number' && Number.isFinite(task.y) ? task.y : 0,
     createdDate: typeof task.createdDate === 'string' ? task.createdDate : nowISO(),
     updatedAt: typeof task.updatedAt === 'string' ? task.updatedAt : undefined,
+    completedAt: typeof task.completedAt === 'string' ? task.completedAt : null,
     displayId: String(task.displayId || '?'),
     shortId: typeof task.shortId === 'string' ? task.shortId : undefined,
     hasIncompleteTask: Boolean(task.hasIncompleteTask),

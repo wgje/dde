@@ -654,6 +654,9 @@ export class ImportService {
       shortId: exportTask.shortId,
       createdDate: exportTask.createdAt ?? new Date().toISOString(),
       updatedAt: new Date().toISOString(),
+      completedAt: exportTask.status === 'completed'
+        ? (exportTask.completedAt ?? exportTask.updatedAt ?? exportTask.createdAt ?? new Date().toISOString())
+        : null,
       tags: exportTask.tags,
       priority: exportTask.priority,
       dueDate: exportTask.dueDate,

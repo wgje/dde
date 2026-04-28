@@ -457,6 +457,7 @@ export interface TaskRow {
   deleted_at: string | null;
   created_at: string;
   updated_at: string;
+  completed_at: string | null;
   /** State Overlap 停泊元数据（JSONB），NULL 表示非停泊任务 */
   parking_meta: import('./parking').TaskParkingMeta | null;
 }
@@ -483,6 +484,7 @@ export interface TaskInsert {
   tags?: Json;
   attachments?: Json;
   deleted_at?: string | null;
+  completed_at?: string | null;
   /** State Overlap 停泊元数据 */
   parking_meta?: import('./parking').TaskParkingMeta | null;
 }
@@ -507,6 +509,7 @@ export interface TaskUpdate {
   tags?: Json;
   attachments?: Json;
   deleted_at?: string | null;
+  completed_at?: string | null;
   /** State Overlap 停泊元数据 */
   parking_meta?: import('./parking').TaskParkingMeta | null;
 }

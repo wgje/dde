@@ -86,10 +86,11 @@ export class StrataService {
   refresh(): void {
     const config = FOCUS_CONFIG.STRATA;
     const layers: StrataLayer[] = [];
-    
+    const anchorDate = this.getLatestCompletedLocalDate() ?? this.getLocalDaysAgo(0);
+     
     for (let i = 0; i < config.MAX_DISPLAY_DAYS; i++) {
-      // 使用本地日期保持时区一致性（与 getLocalDate 匹配）
-      const date = this.getLocalDaysAgo(i);
+      // 以最后完成日为沉积剖面的 0 层，避免自然日期推进导致历史层跳动
+      const date = this.getLocalDaysBefore(anchorDate, i);
       const items = this.getItemsForDate(date);
       
       if (items.length > 0) {
@@ -118,26 +119,23 @@ export class StrataService {
   private getItemsForDate(date: string): StrataItem[] {
     const blackBoxItems = this.getBlackBoxItemsForDate(date);
     const taskItems = this.getCompletedTasksForDate(date);
-    return [...blackBoxItems, ...taskItems]
-      .sort((a, b) => 
-        new Date(b.completedAt).getTime() - new Date(a.completedAt).getTime()
-      );
+    return [...blackBoxItems, ...taskItems].sort((a, b) => this.compareItemsByCompletion(a, b));
   }
 
   /**
    * 获取指定日期已完成的任务
-   * 优先使用 updatedAt，回退到 createdDate（确保无 updatedAt 的任务不会丢失）
+    * 优先使用 completedAt，回退到 updatedAt/createdDate 兼容历史任务
    */
   private getCompletedTasksForDate(date: string): StrataItem[] {
     return this.projectState.tasks()
       .filter(t => {
         if (t.status !== 'completed' || t.deletedAt) return false;
-        const timestamp = t.updatedAt || t.createdDate;
+        const timestamp = this.getTaskCompletionTimestamp(t);
         if (!timestamp) return false;
         return this.getLocalDate(timestamp) === date;
       })
       .map(t => {
-        const timestamp = t.updatedAt || t.createdDate;
+        const timestamp = this.getTaskCompletionTimestamp(t) ?? t.createdDate;
         return {
           type: 'task' as const,
           id: t.id,
@@ -164,7 +162,38 @@ export class StrataService {
         title: (e.content || '').slice(0, 100),
         completedAt: e.updatedAt,
         source: e
-      }));
+       }));
+  }
+
+  private getTaskCompletionTimestamp(task: { completedAt?: string | null; updatedAt?: string; createdDate: string }): string | undefined {
+    return task.completedAt || task.updatedAt || task.createdDate;
+  }
+
+  private compareItemsByCompletion(a: StrataItem, b: StrataItem): number {
+    const timeDiff = this.getTimestampMillis(b.completedAt) - this.getTimestampMillis(a.completedAt);
+    if (timeDiff !== 0) return timeDiff;
+    const typeDiff = a.type.localeCompare(b.type);
+    if (typeDiff !== 0) return typeDiff;
+    return a.id.localeCompare(b.id);
+  }
+
+  private getTimestampMillis(timestamp: string): number {
+    const value = new Date(timestamp).getTime();
+    return Number.isNaN(value) ? 0 : value;
+  }
+
+  private getLatestCompletedLocalDate(): string | null {
+    const dates = [
+      ...this.projectState.tasks()
+        .filter(t => t.status === 'completed' && !t.deletedAt)
+        .map(t => this.getTaskCompletionTimestamp(t))
+        .filter((timestamp): timestamp is string => Boolean(timestamp))
+        .map(timestamp => this.getLocalDate(timestamp)),
+      ...Array.from(blackBoxEntriesMap().values())
+        .filter(e => e.isCompleted && !e.deletedAt)
+        .map(e => this.getLocalDate(e.updatedAt)),
+    ];
+    return dates.sort((a, b) => b.localeCompare(a))[0] ?? null;
   }
   
   /**
@@ -191,6 +220,15 @@ export class StrataService {
    */
   private getLocalDaysAgo(days: number): string {
     const d = new Date();
+    d.setDate(d.getDate() - days);
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  }
+
+  private getLocalDaysBefore(anchorDate: string, days: number): string {
+    const d = this.parseLocalDate(anchorDate);
     d.setDate(d.getDate() - days);
     const year = d.getFullYear();
     const month = String(d.getMonth() + 1).padStart(2, '0');
@@ -230,31 +268,31 @@ export class StrataService {
    */
   getLayerLabel(date: string): string {
     const yesterday = this.getLocalDaysAgo(1);
-    
-    // 今日显示具体日期（如 2月18日），昨日保留"昨日"标签
-    const d = new Date(date);
-    const month = d.getMonth() + 1;
-    const day = d.getDate();
+    const anchorDate = this.getLatestCompletedLocalDate();
+     
+    // 最后完成日始终显示具体日期，配合标尺「那日」表达回看锚点
+    if (date === anchorDate) return this.formatDateLabel(date);
     if (date === yesterday) return '昨日';
-    return `${month}月${day}日`;
+    return this.formatDateLabel(date);
   }
 
   /**
    * 计算某个日期距今的天数
    */
   getDaysAgo(date: string): number {
-    const today = new Date(this.getLocalDaysAgo(0));
-    const target = new Date(date);
+    const anchorDate = this.getLatestCompletedLocalDate() ?? this.getLocalDaysAgo(0);
+    const today = this.parseLocalDate(anchorDate);
+    const target = this.parseLocalDate(date);
     return Math.round((today.getTime() - target.getTime()) / (1000 * 60 * 60 * 24));
   }
 
   /**
    * 深度标尺标签（用天数替代示例中的米数）
-   * 0d → 今日, 1d → 1天, 7d → 1周, 14d → 2周, 30d → 1月
+   * 0d → 那日, 1d → 1天, 7d → 1周, 14d → 2周, 30d → 1月
    */
   getDepthLabel(date: string): string {
     const days = this.getDaysAgo(date);
-    if (days === 0) return '今日';
+    if (days === 0) return '那日';
     if (days === 1) return '1天';
     if (days < 7) return `${days}天`;
     if (days === 7) return '1周';
@@ -372,12 +410,23 @@ export class StrataService {
    */
   getLayerOpacity(layer: StrataLayer): number {
     const config = FOCUS_CONFIG.STRATA;
-    const today = this.getLocalDaysAgo(0);
+    const today = this.getLatestCompletedLocalDate() ?? this.getLocalDaysAgo(0);
     const daysDiff = Math.floor(
-      (new Date(today).getTime() - new Date(layer.date).getTime()) / (1000 * 60 * 60 * 24)
+      (this.parseLocalDate(today).getTime() - this.parseLocalDate(layer.date).getTime()) / (1000 * 60 * 60 * 24)
     );
     // 【修复 P4-05】上限 clamp 到 1，防止 daysDiff 为负时超 1
     return Math.min(1, Math.max(config.MIN_OPACITY, 1 - (daysDiff * config.OPACITY_DECAY)));
+  }
+
+  private parseLocalDate(date: string): Date {
+    const [year, month, day] = date.split('-').map(Number);
+    if (!year || !month || !day) return new Date(date);
+    return new Date(year, month - 1, day);
+  }
+
+  private formatDateLabel(date: string): string {
+    const d = this.parseLocalDate(date);
+    return `${d.getMonth() + 1}月${d.getDate()}日`;
   }
   
   /**

@@ -2,7 +2,7 @@
  * Strata 服务单元测试
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import { signal } from '@angular/core';
 import { StrataService } from './strata.service';
@@ -83,6 +83,10 @@ describe('StrataService', () => {
     service = TestBed.inject(StrataService);
   });
 
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   describe('refresh', () => {
     it('应该刷新地质层数据', () => {
       mockProjectStateService.tasks.set([
@@ -93,6 +97,58 @@ describe('StrataService', () => {
 
       const layers = strataLayers();
       expect(layers.length).toBeGreaterThanOrEqual(0);
+    });
+
+    it('应该以完成时间稳定排序，避免 updatedAt 后续变化导致条目跳动', () => {
+      mockProjectStateService.tasks.set([
+        {
+          id: 'older-completion',
+          title: '先完成但后来编辑',
+          status: 'completed',
+          completedAt: '2026-04-20T10:00:00.000Z',
+          updatedAt: '2026-04-28T08:00:00.000Z',
+          createdDate: '2026-04-19T00:00:00.000Z',
+          deletedAt: null,
+        },
+        {
+          id: 'newer-completion',
+          title: '后完成',
+          status: 'completed',
+          completedAt: '2026-04-20T11:00:00.000Z',
+          updatedAt: '2026-04-20T11:00:00.000Z',
+          createdDate: '2026-04-19T00:00:00.000Z',
+          deletedAt: null,
+        },
+      ]);
+
+      service.refresh();
+
+      expect(strataLayers()[0].items.map(item => item.id)).toEqual([
+        'newer-completion',
+        'older-completion',
+      ]);
+    });
+
+    it('应该以最后完成日作为沉积剖面的零层，而不是自然今日', () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-04-28T08:00:00.000Z'));
+      mockProjectStateService.tasks.set([
+        {
+          id: 'last-completed-task',
+          title: '最后完成日任务',
+          status: 'completed',
+          completedAt: '2026-04-20T11:00:00.000Z',
+          updatedAt: '2026-04-28T08:00:00.000Z',
+          createdDate: '2026-04-19T00:00:00.000Z',
+          deletedAt: null,
+        },
+      ]);
+
+      service.refresh();
+
+      expect(strataLayers()[0].date).toBe('2026-04-20');
+      expect(service.getDepthLabel('2026-04-20')).toBe('那日');
+      expect(service.getLayerLabel('2026-04-20')).toBe('4月20日');
     });
   });
 
