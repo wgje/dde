@@ -94,6 +94,11 @@ export class SiyuanExtensionProvider implements SiyuanPreviewProvider {
   private postRequest(blockId: string, signal?: AbortSignal): Promise<ExtensionMessage> {
     const requestId = crypto.randomUUID();
     return new Promise<ExtensionMessage>((resolve, reject) => {
+      // 提前返回：调用方在我们准备 timer/listener 之前就已 abort，避免无谓的事件订阅。
+      if (signal?.aborted) {
+        reject(new DOMException('Aborted', 'AbortError'));
+        return;
+      }
       const cleanup = () => {
         window.clearTimeout(timer);
         window.removeEventListener('message', listener);

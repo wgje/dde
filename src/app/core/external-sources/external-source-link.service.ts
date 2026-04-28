@@ -356,11 +356,10 @@ export class ExternalSourceLinkService {
     const activeByNaturalKey = new Map<string, ExternalSourceLink>();
     const next = new Map(links.map((link) => [link.id, link]));
     const now = new Date().toISOString();
-    // 排序在 updatedAt 持平时按 id 升序，保证多端 collapse 选出同一 winner，避免相互踩。
-    // UUID 是纯 ASCII，使用普通 < / > 比较避免 localeCompare 的 locale 漂移。
+    // updatedAt 是 ISO 8601 字符串，可直接做 lexicographic 比较；id 为 ASCII UUID。
+    // 使用 < / > 避免 localeCompare 的 locale 漂移与多余开销，结果与字典序一致。
     const sorted = links.slice().sort((a, b) => {
-      const cmp = a.updatedAt.localeCompare(b.updatedAt);
-      if (cmp !== 0) return cmp;
+      if (a.updatedAt !== b.updatedAt) return a.updatedAt < b.updatedAt ? -1 : 1;
       return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
     });
     for (const link of sorted) {
@@ -387,9 +386,7 @@ export class ExternalSourceLinkService {
     a: ExternalSourceLink,
     b: ExternalSourceLink,
   ): ExternalSourceLink {
-    const cmp = a.updatedAt.localeCompare(b.updatedAt);
-    if (cmp > 0) return a;
-    if (cmp < 0) return b;
+    if (a.updatedAt !== b.updatedAt) return a.updatedAt > b.updatedAt ? a : b;
     // updatedAt 相同时按 id 升序确定唯一 winner（多端一致），ASCII 比较避免 locale 漂移。
     return a.id <= b.id ? a : b;
   }
