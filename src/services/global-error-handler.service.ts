@@ -196,6 +196,10 @@ export class GlobalErrorHandler implements ErrorHandler {
   /** 致命错误状态（用于防止重复跳转） */
   private hasFatalError = false;
 
+  /** Chunk/JIT 恢复过程状态，避免同一轮异常把控制台刷爆 */
+  private chunkReloadInProgress = false;
+  private persistentChunkLoadErrorReported = false;
+
   /** 错误去重（防止同一错误短时间内重复提示） */
   private recentErrors = new Map<string, number>();
   private readonly ERROR_DEDUP_INTERVAL = TOAST_CONFIG.ERROR_DEDUP_INTERVAL;
@@ -283,6 +287,8 @@ export class GlobalErrorHandler implements ErrorHandler {
    */
   resetFatalState(): void {
     this.hasFatalError = false;
+    this.chunkReloadInProgress = false;
+    this.persistentChunkLoadErrorReported = false;
   }
 
   /**
@@ -390,12 +396,20 @@ export class GlobalErrorHandler implements ErrorHandler {
    * 尝试强制清除缓存后刷新页面，防止 SW 继续返回旧 chunk
    */
   private handleChunkLoadError(errorMessage: string): void {
+    if (this.chunkReloadInProgress) {
+      return;
+    }
+
     const KEY = 'chunk_load_error_reload_timestamp';
     const lastReload = parseInt(sessionStorage.getItem(KEY) || '0', 10);
     const now = Date.now();
 
     // 如果 30 秒内已经尝试过清缓存刷新，不再刷新，避免死循环
     if (now - lastReload < 30000) {
+      if (this.persistentChunkLoadErrorReported) {
+        return;
+      }
+      this.persistentChunkLoadErrorReported = true;
       this.logger.error('Chunk load error persisted after reload', { message: errorMessage });
       // 降级为 FATAL 错误，提示用户
       this.handleFatalError('应用版本过旧或文件丢失，请尝试清除缓存后刷新页面', undefined, new Error(errorMessage));
@@ -403,6 +417,8 @@ export class GlobalErrorHandler implements ErrorHandler {
     }
 
     this.logger.warn('Chunk load error detected, clearing cache and reloading...', { message: errorMessage });
+    this.chunkReloadInProgress = true;
+    this.persistentChunkLoadErrorReported = false;
     sessionStorage.setItem(KEY, now.toString());
 
     // 优先走全局“强制清缓存并刷新”工具，避免继续命中旧 SW/HTTP 缓存
@@ -591,7 +607,6 @@ export class GlobalErrorHandler implements ErrorHandler {
   private handleFatalError(message: string, stack?: string, originalError?: unknown): void {
     // 防止重复处理
     if (this.hasFatalError) {
-      this.logger.warn('Fatal error already handled, ignoring', { message });
       return;
     }
     

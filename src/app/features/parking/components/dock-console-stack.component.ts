@@ -32,7 +32,6 @@ import {
   type ConsoleRenderCard,
 } from '../utils/dock-console-motion';
 import { formatDockMinutes } from '../utils/dock-format';
-import { KnowledgeAnchorComponent } from '../../../shared/components/knowledge-anchor/knowledge-anchor.component';
 
 const consoleMotion = PARKING_CONFIG.MOTION.console;
 
@@ -48,7 +47,7 @@ const consoleMotion = PARKING_CONFIG.MOTION.console;
   selector: 'app-dock-console-stack',
   standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [NgClass, NgStyle, KnowledgeAnchorComponent],
+  imports: [NgClass, NgStyle],
   styles: [`
     :host {
       display: block;
@@ -291,13 +290,6 @@ const consoleMotion = PARKING_CONFIG.MOTION.console;
                   </span>
                 }
               </div>
-
-              <app-knowledge-anchor
-                [taskId]="card.taskId"
-                [compact]="true"
-                [editable]="false"
-                [isMobile]="cardSize().width <= 640">
-              </app-knowledge-anchor>
 
               <div class="flex items-center justify-between pt-4 border-t border-stone-800">
                 <button
