@@ -45,7 +45,7 @@ NanoFlow 适合迁移到 Cloudflare Pages，但审查报告中的部分建议需
 | Chunk 自愈 | `GlobalErrorHandler` 已处理 `ChunkLoadError`、动态 import 失败、JIT/DI version skew | 文档写“保持并验证现有机制”，不重复造一套 |
 | 版本提示 | `workspace-shell.component.ts` 已监听 `SwUpdate.VERSION_READY` 并提示刷新 | 迁移验收要覆盖新版本提示和强制清缓存刷新 |
 | Source Map | 生产配置当前没有开启 source map | 首版迁移默认关闭上传；启用时必须在 Sentry inject 后重建 `ngsw.json` 并删除 `.map` |
-| CORS | 多个 Supabase Edge Function 有 CORS/origin 判断 | 迁移时要全量审查 `supabase/functions/**`，不只改 `transcribe`。`widget-black-box-action` 是独立实现，不等同于 `_shared/widget-common.ts` |
+| CORS | 多个 Supabase Edge Function 有 CORS/origin 判断 | 迁移时要全量审查 `supabase/functions/**`，不只改 `transcribe`。`widget-black-box-action` 是独立实现，不等同于 `_shared/widget-common.ts`；每个函数必须单独审查 CORS、认证和授权逻辑 |
 | Vercel 忽略构建 | `vercel.json` 已配置 `ignoreCommand` 指向 `scripts/vercel-ignore-step.sh` | 文档/非关键文件变更已能跳过 Vercel 构建；若分钟仍耗尽，说明主要消耗来自真实代码构建 |
 | 环境变量注入 | `scripts/set-env.cjs` 在 `npm run config` 阶段写入 `src/environments/*` 和 `index.html` | Direct Upload 时 Cloudflare Dashboard 变量不会自动进入已构建 JS，必须在 GitHub Actions 构建阶段注入 `NG_APP_*` |
 | Node 版本 | 现有 GitHub workflows 使用 Node 22，`netlify.toml` 仍是 Node 20，`package.json` engines 为 `>=18.19.0` | 首版迁移 workflow 固定 Node 22；是否收紧 `package.json` engines 作为独立基线决策 |
@@ -102,6 +102,17 @@ Cloudflare Pages
 - 如果迁移窗口内需要恢复发布，可以临时让 Vercel 使用 GitHub Actions + `vercel deploy --prebuilt`，但这只保留到 Cloudflare production 稳定。
 - 长期目标仍是 Cloudflare Pages Direct Upload + GitHub Actions，降低构建和托管平台耦合。
 - 不建议把 Cloudflare Workers/Pages Functions 当成 Supabase Edge Functions 的替代品。迁移范围限定为前端静态托管和发布链路。
+
+### 3.2 迁移执行常量
+
+为避免 workflow 片段和验收清单散落魔数，本文统一使用以下迁移常量：
+
+| 常量 | 值 | 用途 |
+| --- | --- | --- |
+| `WRANGLER_VERSION` | `3.114.0` | Direct Upload 首版验证版本；升级必须通过独立 PR 和 `wrangler pages dev/deploy` dry-run |
+| `SENTRY_CLI_VERSION` | `2.58.2` | 首版 sourcemap inject/upload pin 版本；不是为了规避已知漏洞，而是避免 `latest` 漂移，后续升级需显式验证 Debug ID 与 `ngsw.json` 流程 |
+| `HSTS_STABILIZATION_WINDOW` | `7 天` | Cloudflare TLS 与所有相关子域稳定观察窗口；首版迁移不启用 HSTS |
+| `ROOT_JS_CACHE_RULE_PATTERN` | `^(main|polyfills|chunk|worker|runtime)-|^(sw-composed|ngsw-worker|safety-worker)\.js$` | 根目录 JS 文件 `_headers` 缓存规则覆盖检查；新增 root JS 入口时必须同步更新 |
 
 ## 4. Cloudflare Pages 方案
 
@@ -548,6 +559,9 @@ jobs:
       SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
       ENABLE_SENTRY_SOURCEMAPS: ${{ vars.ENABLE_SENTRY_SOURCEMAPS || 'false' }}
       CLOUDFLARE_PAGES_PROJECT_NAME: ${{ secrets.CLOUDFLARE_PAGES_PROJECT_NAME }}
+      WRANGLER_VERSION: 3.114.0
+      SENTRY_CLI_VERSION: 2.58.2
+      ROOT_JS_CACHE_RULE_PATTERN: '^(main|polyfills|chunk|worker|runtime)-|^(sw-composed|ngsw-worker|safety-worker)\.js$'
 
     steps:
       - name: Checkout
@@ -599,7 +613,7 @@ jobs:
           if [ -f dist/browser/_redirects ]; then
             echo "_redirects found; preview smoke must verify static assets are not proxied to HTML."
           fi
-          unmatched_js=$(find dist/browser -maxdepth 1 -name '*.js' -printf '%f\n' | grep -Ev '^(main|polyfills|chunk|worker|runtime)-|^(sw-composed|ngsw-worker|safety-worker)\.js$' || true)
+          unmatched_js=$(find dist/browser -maxdepth 1 -name '*.js' -printf '%f\n' | grep -Ev "$ROOT_JS_CACHE_RULE_PATTERN" || true)
           if [ -n "$unmatched_js" ]; then
             echo "Root JS files without _headers cache rule:"
             echo "$unmatched_js"
@@ -610,8 +624,8 @@ jobs:
         if: ${{ env.ENABLE_SENTRY_SOURCEMAPS == 'true' && env.SENTRY_AUTH_TOKEN != '' && env.SENTRY_ORG != '' && env.SENTRY_PROJECT != '' }}
         run: |
           if find dist/browser -name '*.map' -type f | grep -q .; then
-            npx @sentry/cli@2.58.2 sourcemaps inject dist/browser
-            npx @sentry/cli@2.58.2 sourcemaps upload dist/browser \
+            npx @sentry/cli@"$SENTRY_CLI_VERSION" sourcemaps inject dist/browser
+            npx @sentry/cli@"$SENTRY_CLI_VERSION" sourcemaps upload dist/browser \
               --org "$SENTRY_ORG" \
               --project "$SENTRY_PROJECT" \
               --release "$GITHUB_SHA"
@@ -640,7 +654,7 @@ jobs:
           max_attempts: 3
           retry_wait_seconds: 30
           command: |
-            npx wrangler@3.114.0 pages deploy dist/browser \
+            npx wrangler@"$WRANGLER_VERSION" pages deploy dist/browser \
               --project-name="$CLOUDFLARE_PAGES_PROJECT_NAME" \
               --branch=pr-${{ github.event.pull_request.number }}
         env:
@@ -657,7 +671,7 @@ jobs:
           max_attempts: 3
           retry_wait_seconds: 30
           command: |
-            npx wrangler@3.114.0 pages deploy dist/browser \
+            npx wrangler@"$WRANGLER_VERSION" pages deploy dist/browser \
               --project-name="$CLOUDFLARE_PAGES_PROJECT_NAME" \
               --branch=main
         env:
@@ -1336,7 +1350,7 @@ https://unpkg.com/**                         # unpkg
 注意：
 
 - `microphone=(self)` 因为 NanoFlow 有 Focus 模式语音转写。
-- **首版不启用 `Strict-Transport-Security`**。本文统一把 `HSTS_STABILIZATION_WINDOW` 定义为 7 天。HSTS 一旦被浏览器记录，回滚到 HTTP 或错误子域配置会变困难；仅在 Cloudflare TLS 和所有相关子域稳定满 `HSTS_STABILIZATION_WINDOW` 后，作为独立变更启用。
+- **首版不启用 `Strict-Transport-Security`**。`HSTS_STABILIZATION_WINDOW` 见 §3.2。HSTS 一旦被浏览器记录，回滚到 HTTP 或错误子域配置会变困难；仅在 Cloudflare TLS 和所有相关子域稳定满 `HSTS_STABILIZATION_WINDOW` 后，作为独立变更启用。
 - **不开启 `Cross-Origin-Embedder-Policy: require-corp`**：会导致 Supabase Storage 跨域图片、jsdelivr CDN 字体被拒绝。GoJS chunk 通过 same-origin 加载不受影响，但外部资源会断。
 - **`Content-Security-Policy` 暂不开启**：NanoFlow 当前没有运行时 CSP，盲开会触发大面积告警。CSP 收紧应作为**迁移后独立任务**，先 `Content-Security-Policy-Report-Only` 观察一周再切硬模式。
 
@@ -1499,7 +1513,7 @@ CREATE OR REPLACE FUNCTION cleanup_preview_user_data() ...
     command: pages deploy ...
 ```
 
-理由：`wrangler-action@v3` 可能跟随 latest wrangler，未来 wrangler 4.x 一旦有 breaking change，部署会突然失败。锁定到具体版本，升级时显式 PR。首版推荐 Sentry sourcemap 步骤使用 `npx @sentry/cli@2.58.2` 显式 pinning，不改 `package.json`；如果后续需要本地复现 sourcemap 流程，再把 `@sentry/cli` 加入 devDependency 并由 lockfile 固定。
+理由：`wrangler-action@v3` 可能跟随 latest wrangler，未来 wrangler 4.x 一旦有 breaking change，部署会突然失败。锁定到具体版本，升级时显式 PR。首版推荐 Sentry sourcemap 步骤使用 `npx @sentry/cli@"$SENTRY_CLI_VERSION"` 显式 pinning，不改 `package.json`；如果后续需要本地复现 sourcemap 流程，再把 `@sentry/cli` 加入 devDependency 并由 lockfile 固定。
 
 ### 16.13 Direct Upload 失败重试（补 §5.3）
 
@@ -1513,7 +1527,7 @@ Cloudflare Direct Upload 偶发 5xx / 401（token 限流）。workflow 加 retry
     max_attempts: 3
     retry_wait_seconds: 30
     command: |
-      npx wrangler@3.114.0 pages deploy dist/browser \
+      npx wrangler@"$WRANGLER_VERSION" pages deploy dist/browser \
         --project-name=$CLOUDFLARE_PAGES_PROJECT_NAME \
         --branch=main
   env:
