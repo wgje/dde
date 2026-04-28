@@ -38,7 +38,7 @@ jobs:
         run: |
           if [ -n "$NPM_TOKEN" ]; then
             echo "::add-mask::$NPM_TOKEN"
-            if ! npm config set //registry.npmjs.org/:_authToken "$NPM_TOKEN" --userconfig ~/.npmrc >/dev/null 2>&1; then
+            if ! npm config set //registry.npmjs.org/:_authToken "$NPM_TOKEN" >/dev/null 2>&1; then
               echo "::error::Failed to configure npm authentication from NPM_TOKEN."
               exit 1
             fi
@@ -55,7 +55,7 @@ jobs:
       - name: Install dependencies
         run: |
           npm ci --prefer-offline || {
-            echo "::warning::npm ci --prefer-offline failed; retrying npm ci without cache preference."
+            echo "::warning::npm ci --prefer-offline failed; retrying npm ci without cache preference to rule out stale or incomplete cache."
             npm ci
           }
 
