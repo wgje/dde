@@ -28,6 +28,10 @@ function createEntry(overrides: Partial<BlackBoxEntry> & Pick<BlackBoxEntry, 'id
   };
 }
 
+function createLegacyEntryWithUndefinedDeletedAt(entry: BlackBoxEntry): BlackBoxEntry {
+  return { ...entry, deletedAt: undefined };
+}
+
 async function flushMicrotasks(turns = 6): Promise<void> {
   for (let i = 0; i < turns; i += 1) {
     await Promise.resolve();
@@ -768,6 +772,63 @@ describe('BlackBoxSyncService', () => {
           sessionId: 'session-1',
           dockEntryId: 'dock-entry-1',
         }),
+      })
+    );
+  });
+
+  it('should clear stale pending when server row only differs by timestamp/null formatting', async () => {
+    const entryId = crypto.randomUUID();
+    const pendingEntry = createLegacyEntryWithUndefinedDeletedAt(
+      createEntry({
+        id: entryId,
+        createdAt: '2026-04-23T22:46:00.000Z',
+        updatedAt: '2026-04-23T22:46:30.000Z',
+        isRead: true,
+        syncStatus: 'pending',
+      })
+    );
+    const remoteRow = {
+      id: entryId,
+      project_id: null,
+      user_id: 'user-1',
+      content: 'entry',
+      focus_meta: null,
+      date: '2026-03-04',
+      created_at: '2026-04-23T22:46:00+00:00',
+      updated_at: '2026-04-23T22:46:30+00:00',
+      is_read: true,
+      is_completed: false,
+      is_archived: false,
+      snooze_until: null,
+      snooze_count: null,
+      deleted_at: null,
+    };
+    const inQuery = vi.fn().mockResolvedValue({ data: [remoteRow], error: null });
+    const orderQuery = vi.fn().mockResolvedValue({ data: [], error: null });
+    const gtQuery = vi.fn(() => ({ order: orderQuery }));
+    const selectQuery = vi.fn(() => ({
+      gt: gtQuery,
+      in: inQuery,
+    }));
+    const from = vi.fn(() => ({ select: selectQuery }));
+    const rpc = vi.fn().mockResolvedValue({ data: '2026-04-24T00:00:00.000Z', error: null });
+    const supabase = TestBed.inject(SupabaseClientService) as unknown as {
+      clientAsync: ReturnType<typeof vi.fn>;
+    };
+    vi.spyOn(service, 'saveToLocal').mockResolvedValue(undefined);
+    (service as unknown as { lastSyncTime: string | null }).lastSyncTime = '2026-04-24T00:00:00.000Z';
+    supabase.clientAsync.mockResolvedValue({ from, rpc });
+    setBlackBoxEntries([pendingEntry]);
+
+    await service.pullChanges({ reason: 'panel-open', force: true });
+
+    expect(inQuery).toHaveBeenCalledWith('id', [entryId]);
+    expect(blackBoxEntriesMap().get(entryId)).toEqual(
+      expect.objectContaining({
+        id: entryId,
+        syncStatus: 'synced',
+        createdAt: remoteRow.created_at,
+        deletedAt: null,
       })
     );
   });

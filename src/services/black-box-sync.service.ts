@@ -945,6 +945,32 @@ export class BlackBoxSyncService {
     });
   }
 
+  private hasSameInstant(left: string | null | undefined, right: string | null | undefined): boolean {
+    const normalizedLeft = left ?? null;
+    const normalizedRight = right ?? null;
+    if (normalizedLeft === normalizedRight) {
+      return true;
+    }
+
+    if (!normalizedLeft || !normalizedRight) {
+      return false;
+    }
+
+    const leftMs = new Date(normalizedLeft).getTime();
+    const rightMs = new Date(normalizedRight).getTime();
+    const leftValid = Number.isFinite(leftMs);
+    const rightValid = Number.isFinite(rightMs);
+    if (!leftValid || !rightValid) {
+      this.logger.debug('黑匣子时间戳等价比较失败：时间格式无效', {
+        left: normalizedLeft,
+        right: normalizedRight,
+      });
+      return false;
+    }
+
+    return leftMs === rightMs;
+  }
+
   private hasEquivalentEntryState(local: BlackBoxEntry, remote: BlackBoxEntry): boolean {
     const localFocusMeta = local.focusMeta ?? null;
     const remoteFocusMeta = remote.focusMeta ?? null;
@@ -961,18 +987,18 @@ export class BlackBoxSyncService {
         && localFocusMeta.dockEntryId === remoteFocusMeta.dockEntryId;
 
     return local.id === remote.id
-      && local.projectId === remote.projectId
+      && (local.projectId ?? null) === (remote.projectId ?? null)
       && local.userId === remote.userId
       && local.content === remote.content
       && local.date === remote.date
-      && local.createdAt === remote.createdAt
+      && this.hasSameInstant(local.createdAt, remote.createdAt)
       && local.isRead === remote.isRead
       && local.isCompleted === remote.isCompleted
       && local.isArchived === remote.isArchived
       && (local.snoozeUntil ?? null) === (remote.snoozeUntil ?? null)
       && (local.snoozeCount ?? 0) === (remote.snoozeCount ?? 0)
-      && local.deletedAt === remote.deletedAt
-        && focusMetaMatches;
+      && this.hasSameInstant(local.deletedAt, remote.deletedAt)
+      && focusMetaMatches;
   }
 
   private async reconcilePendingEntriesWithServer(
@@ -1972,4 +1998,3 @@ export class BlackBoxSyncService {
     await this.pullChanges({ reason: 'manual', force: true });
   }
 }
-
