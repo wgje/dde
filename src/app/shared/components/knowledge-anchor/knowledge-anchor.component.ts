@@ -1,0 +1,180 @@
+import { ChangeDetectionStrategy, Component, ElementRef, computed, inject, input, signal } from '@angular/core';
+import { CommonModule } from '@angular/common';
+import { FormsModule } from '@angular/forms';
+import { SIYUAN_ERROR_MESSAGES } from '../../../../config/siyuan.config';
+import type { ExternalSourceLink, SiyuanPreviewResult } from '../../../core/external-sources/external-source.model';
+import { ExternalSourceLinkService } from '../../../core/external-sources/external-source-link.service';
+import { SiyuanPreviewService } from '../../../core/external-sources/siyuan/siyuan-preview.service';
+import { shortenSiyuanBlockId } from '../../../core/external-sources/siyuan/siyuan-link-parser';
+import { KnowledgeAnchorPopoverService } from './knowledge-anchor-popover.service';
+
+@Component({
+  selector: 'app-knowledge-anchor',
+  standalone: true,
+  imports: [CommonModule, FormsModule],
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  template: `
+    <div class="knowledge-anchor" [class.knowledge-anchor--compact]="compact()">
+      @if (firstLink(); as link) {
+        <button
+          type="button"
+          data-testid="knowledge-anchor-chip"
+          class="knowledge-anchor-chip"
+          [attr.aria-label]="'思源锚点：' + displayLabel(link)"
+          (mouseenter)="onMouseEnter($event, link)"
+          (mouseleave)="onMouseLeave()"
+          (focus)="onFocus($event, link)"
+          (blur)="onMouseLeave()"
+          (click)="onChipClick($event, link)">
+          <span aria-hidden="true">📎</span>
+          <span class="truncate">思源 {{ displayLabel(link) }}</span>
+        </button>
+      }
+
+      @if (editable()) {
+        <form class="mt-1 flex gap-1" (submit)="bind($event)">
+          <input
+            name="siyuanLink"
+            [(ngModel)]="pendingInput"
+            data-testid="knowledge-anchor-input"
+            class="min-w-0 flex-1 rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-600 outline-none focus:border-indigo-400 dark:border-stone-700 dark:bg-stone-800 dark:text-stone-200"
+            placeholder="粘贴思源块链接" />
+          <button type="submit" class="rounded-md bg-indigo-600 px-2 py-1 text-[10px] font-bold text-white hover:bg-indigo-500">关联</button>
+        </form>
+      }
+
+      @if (sheetOpen() && activeLink(); as link) {
+        <div class="fixed inset-0 z-[60] bg-black/30" (click)="closeSheet()"></div>
+        <section class="fixed inset-x-0 bottom-0 z-[61] max-h-[70vh] rounded-t-2xl border-t border-slate-200 bg-white p-4 shadow-2xl dark:border-stone-700 dark:bg-stone-900" data-testid="knowledge-anchor-sheet">
+          <div class="mx-auto mb-3 h-1 w-10 rounded-full bg-slate-200 dark:bg-stone-700"></div>
+          <div class="flex items-start justify-between gap-3">
+            <div class="min-w-0">
+              <div class="text-sm font-bold text-slate-800 dark:text-stone-100">思源上下文</div>
+              <div class="truncate text-[11px] text-slate-500 dark:text-stone-400">{{ displayLabel(link) }}</div>
+            </div>
+            <button type="button" class="text-xs text-slate-400" (click)="closeSheet()">关闭</button>
+          </div>
+          <div class="mt-3 max-h-[42vh] overflow-y-auto text-xs text-slate-600 dark:text-stone-300">
+            @if (sheetResult().status === 'loading') {
+              <div>正在读取思源块…</div>
+            } @else if (sheetResult().preview; as preview) {
+              <p class="whitespace-pre-wrap">{{ preview.excerpt || preview.plainText || '该块暂无可预览文本' }}</p>
+              @if (preview.childBlocks?.length) {
+                <ul class="mt-2 list-disc pl-4">
+                  @for (child of preview.childBlocks; track child.id) { <li>{{ child.content }}</li> }
+                </ul>
+              }
+              @if (preview.truncated) { <div class="mt-2 text-[10px] text-slate-400">更多内容请打开思源</div> }
+            } @else {
+              <div class="rounded-lg bg-slate-50 p-2 text-slate-500 dark:bg-stone-800 dark:text-stone-400">{{ sheetErrorMessage() }}</div>
+            }
+          </div>
+          <div class="mt-4 grid grid-cols-3 gap-2">
+            <button type="button" class="sheet-action" (click)="open(link)">打开思源</button>
+            <button type="button" class="sheet-action" (click)="refreshSheet(link)">刷新缓存</button>
+            @if (editable()) { <button type="button" class="sheet-action sheet-action-danger" (click)="remove(link)">解除关联</button> }
+          </div>
+        </section>
+      }
+    </div>
+  `,
+  styles: [`
+    .knowledge-anchor-chip { display: inline-flex; max-width: 100%; align-items: center; gap: 0.25rem; border-radius: 999px; border: 1px solid rgba(99,102,241,.18); background: rgba(99,102,241,.06); padding: .18rem .45rem; font-size: 10px; color: rgb(79 70 229); transition: box-shadow .15s ease, border-color .15s ease, background .15s ease; }
+    .knowledge-anchor-chip:hover, .knowledge-anchor-chip:focus-visible { border-color: rgba(99,102,241,.45); background: rgba(99,102,241,.1); box-shadow: 0 4px 14px rgba(79,70,229,.12); outline: none; }
+    :host-context(.dark) .knowledge-anchor-chip { color: rgb(165 180 252); background: rgba(99,102,241,.14); border-color: rgba(129,140,248,.25); }
+    .knowledge-anchor--compact .knowledge-anchor-chip { padding: .12rem .35rem; font-size: 9px; }
+    .sheet-action { border-radius: .6rem; border: 1px solid rgb(226 232 240); padding: .5rem .25rem; font-size: 11px; font-weight: 700; color: rgb(71 85 105); }
+    .sheet-action-danger { color: rgb(225 29 72); }
+  `],
+})
+export class KnowledgeAnchorComponent {
+  private readonly linkService = inject(ExternalSourceLinkService);
+  private readonly previewService = inject(SiyuanPreviewService);
+  private readonly popover = inject(KnowledgeAnchorPopoverService);
+  private readonly host = inject(ElementRef<HTMLElement>);
+
+  readonly taskId = input.required<string>();
+  readonly isMobile = input(false);
+  readonly editable = input(false);
+  readonly compact = input(false);
+  readonly linksVersion = this.linkService.links;
+  readonly links = computed(() => {
+    this.linksVersion();
+    return this.linkService.activeLinksForTask(this.taskId());
+  });
+  readonly firstLink = computed(() => this.links()[0] ?? null);
+  readonly sheetOpen = signal(false);
+  readonly activeLink = signal<ExternalSourceLink | null>(null);
+  readonly sheetResult = signal<SiyuanPreviewResult>({ status: 'loading' });
+  pendingInput = '';
+
+  async bind(event: Event): Promise<void> {
+    event.preventDefault();
+    const input = this.pendingInput.trim();
+    if (!input) return;
+    const link = await this.linkService.bindSiyuanBlock(this.taskId(), input);
+    if (link) this.pendingInput = '';
+  }
+
+  onMouseEnter(event: MouseEvent, link: ExternalSourceLink): void {
+    if (this.isMobile()) return;
+    this.popover.scheduleOpen(link, event.currentTarget as HTMLElement);
+  }
+
+  onFocus(event: FocusEvent, link: ExternalSourceLink): void {
+    if (this.isMobile()) return;
+    this.popover.scheduleOpen(link, event.currentTarget as HTMLElement);
+  }
+
+  onMouseLeave(): void {
+    if (this.isMobile()) return;
+    this.popover.scheduleClose();
+  }
+
+  onChipClick(event: Event, link: ExternalSourceLink): void {
+    event.stopPropagation();
+    if (this.isMobile()) {
+      this.openSheet(link);
+      return;
+    }
+    this.open(link);
+  }
+
+  open(link: ExternalSourceLink): void {
+    this.linkService.openLink(link);
+  }
+
+  async remove(link: ExternalSourceLink): Promise<void> {
+    await this.linkService.removeLink(link.id);
+    this.closeSheet();
+  }
+
+  displayLabel(link: ExternalSourceLink): string {
+    return link.hpath || link.label || shortenSiyuanBlockId(link.targetId);
+  }
+
+  closeSheet(): void {
+    this.sheetOpen.set(false);
+    this.activeLink.set(null);
+    this.previewService.abortActive();
+  }
+
+  async refreshSheet(link: ExternalSourceLink): Promise<void> {
+    this.sheetResult.set({ status: 'loading' });
+    this.sheetResult.set(await this.previewService.preview(link, { forceRefresh: true }));
+  }
+
+  sheetErrorMessage(): string {
+    const code = this.sheetResult().errorCode ?? 'extension-unavailable';
+    return SIYUAN_ERROR_MESSAGES[code] ?? SIYUAN_ERROR_MESSAGES.unknown;
+  }
+
+  private openSheet(link: ExternalSourceLink): void {
+    this.activeLink.set(link);
+    this.sheetOpen.set(true);
+    this.sheetResult.set({ status: 'loading' });
+    void this.previewService.preview(link).then(result => {
+      if (this.activeLink()?.id === link.id) this.sheetResult.set(result);
+    });
+  }
+}
