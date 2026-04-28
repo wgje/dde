@@ -112,7 +112,7 @@ Cloudflare Pages
 | `WRANGLER_VERSION` | `3.114.0` | Direct Upload 首版验证版本；升级必须通过独立 PR 和 `wrangler pages dev/deploy` dry-run |
 | `SENTRY_CLI_VERSION` | `2.58.2` | 首版 sourcemap inject/upload pin 版本；不是为了规避已知漏洞，而是避免 `latest` 漂移，后续升级需显式验证 Debug ID 与 `ngsw.json` 流程 |
 | `HSTS_STABILIZATION_WINDOW` | `7 天` | Cloudflare TLS 与所有相关子域稳定观察窗口；首版迁移不启用 HSTS |
-| `ROOT_JS_CACHE_RULE_PATTERN` | `^(main|polyfills|chunk|worker|runtime)-|^(sw-composed|ngsw-worker|safety-worker)\.js$` | 根目录 JS 文件 `_headers` 缓存规则覆盖检查；新增 root JS 入口时必须同步更新 |
+| `ROOT_JS_CACHE_RULE_PATTERN` | `^(main|polyfills|chunk|worker|runtime)-|^(sw-composed|ngsw-worker|safety-worker)\.js$` | 根目录 JS 文件 `_headers` 缓存规则覆盖检查；`runtime-` 是防御性兜底（`@angular/build:application` 走 esbuild，当前不会产出独立 `runtime-*.js`，仅在未来切回 webpack 或第三方 bundler 时才会出现）；新增 root JS 入口时必须同步更新 |
 
 ## 4. Cloudflare Pages 方案
 
@@ -196,9 +196,6 @@ curl -I https://<preview-or-domain>/ngsw-worker.js
   Referrer-Policy: strict-origin-when-cross-origin
 
 /index.html
-  Cache-Control: no-cache, no-store, must-revalidate
-
-/index.csr.html
   Cache-Control: no-cache, no-store, must-revalidate
 
 /launch.html
@@ -1115,7 +1112,7 @@ NanoFlow 是 Local-First 应用，核心数据先落 IndexedDB。浏览器存储
 - Cloudflare production 首屏可打开。
 - 刷新任意 Angular path route 不返回 404。
 - JS/CSS/SW 请求不会被 SPA fallback 或 `_redirects` 代理成 HTML。
-- `index.html`、`index.csr.html`、`launch.html`、`ngsw.json`、`manifest.webmanifest`、`sw-composed.js`、`ngsw-worker.js` 不是长期强缓存。
+- `index.html`、`index.csr.html`（仅在未来启用 SSR/CSR 混合时存在）、`launch.html`、`ngsw.json`、`manifest.webmanifest`、`sw-composed.js`、`ngsw-worker.js` 不是长期强缓存。
 - `main*.js`、`polyfills*.js`、`chunk*.js`、`worker*.js`、CSS、assets、fonts、icons 使用长期缓存。
 - CI artifact guard 确认 `ngsw-worker.js`、`sw-composed.js`、`manifest.webmanifest`、`.well-known/assetlinks.json` 存在。
 - `assetlinks.json` 包含 `app.nanoflow.twa`。
@@ -1243,18 +1240,18 @@ PR preview 通配（`https://pr-*.nanoflow.pages.dev`）目前不会被 `ALLOWED
 
 ### 16.3 旧 Vercel 域名引用全量清单（补 §5/§9）
 
-策划案多处提"更新 contract tests"但只点名 `transcribe-cors.contract.spec.ts`。实际仓库引用 `dde-eight.vercel.app` / `dde[-\w]*\.vercel\.app` 的位置：
+策划案多处提"更新 contract tests"但只点名 `transcribe-cors.contract.spec.ts`。实际仓库引用 `dde-eight.vercel.app` / `dde[-\w]*\.vercel\.app` 的位置（行号会随 PR 漂移，落地时以下表中的**符号/区域**为准，迁移 PR 必须重新 `rg` 一次定位）：
 
-| 文件 | 性质 | 处理方式 |
-| --- | --- | --- |
-| `src/services/sentry-lazy-loader.service.ts:250` | 运行时 `tracePropagationTargets` 正则 | 阶段 1 改为同时包含新域名与旧域名（迁移窗口期），稳定后移除旧 |
-| `src/tests/contracts/transcribe-cors.contract.spec.ts` | 整套契约围绕 vercel 项目前缀 | 阶段 1 改写，与 transcribe Edge Function 同步 |
-| `src/services/global-error-handler.service.spec.ts:240-290` | 堆栈解析 fixture | 阶段 1 改为新域名 fixture，或保留旧 fixture 验证向后兼容 |
-| `src/workspace-shell.component.spec.ts:624` | 路由 fixture | 同上 |
-| `src/utils/runtime-platform.spec.ts:56` | host package 解析负样例 | 同上 |
-| `scripts/contracts/check-secrets.cjs` 中 `.vercel` 目录排除 | 与 vercel.json 共存 | 删除 vercel.json 时一并审查 |
-| `android/app/build.gradle.kts` | TWA 默认 `webOrigin` | 阶段 1 按最终域名更新默认值，或要求 release 构建显式传 `NANOFLOW_WEB_ORIGIN` |
-| `supabase/functions/transcribe/index.ts` / `virus-scan/index.ts` / `_shared/widget-common.ts` / `widget-black-box-action/index.ts` | Edge Function CORS allow-list | 阶段 1 按 §6.2/§16.2 处理，回滚窗口后移除旧域 |
+| 文件 | 定位（符号/区域） | 性质 | 处理方式 |
+| --- | --- | --- | --- |
+| `src/services/sentry-lazy-loader.service.ts` | `tracePropagationTargets` 数组 | 运行时 trace 传播目标正则 | 阶段 1 改为同时包含新域名与旧域名（迁移窗口期），稳定后移除旧 |
+| `src/tests/contracts/transcribe-cors.contract.spec.ts` | 整个 spec（`ALLOWED_ORIGINS` / `VERCEL_PREVIEW_PREFIX` / `isOriginAllowed` 测试块） | 整套契约围绕 vercel 项目前缀 | 阶段 1 改写，与 transcribe Edge Function 同步 |
+| `src/services/global-error-handler.service.spec.ts` | 包含 `dde-eight.vercel.app` 的堆栈 fixture 测试块 | 堆栈解析 fixture | 阶段 1 改为新域名 fixture，或保留旧 fixture 验证向后兼容 |
+| `src/workspace-shell.component.spec.ts` | 包含 `dde-eight.vercel.app` 的路由 fixture | 路由 fixture | 同上 |
+| `src/utils/runtime-platform.spec.ts` | host package 解析负样例（包含 vercel.app 的 case） | host 解析负样例 | 同上 |
+| `scripts/contracts/check-secrets.cjs` | `.vercel` 目录排除规则 | 与 vercel.json 共存 | 删除 vercel.json 时一并审查 |
+| `android/app/build.gradle.kts` | `webOrigin` `defaultValue` | TWA 默认 `webOrigin` | 阶段 1 按最终域名更新默认值，或要求 release 构建显式传 `NANOFLOW_WEB_ORIGIN` |
+| `supabase/functions/transcribe/index.ts` / `virus-scan/index.ts` / `_shared/widget-common.ts` / `widget-black-box-action/index.ts` | `ALLOWED_ORIGINS` / `getCorsHeaders` / origin 判断分支 | Edge Function CORS allow-list | 阶段 1 按 §6.2/§16.2 处理，回滚窗口后移除旧域 |
 
 切换前先全仓 inventory：
 
@@ -1356,32 +1353,48 @@ https://unpkg.com/**                         # unpkg
 
 ### 16.7 Boot Flag / Feature Flag 注入清单（补 §5.2）
 
-`scripts/set-env.cjs` 把以下 `NG_APP_*` 布尔 Flag 注入 build 产物（截至 2026-04-28）：
+**单事实源**：`scripts/set-env.cjs`。本节给出截至 2026-04-28 的快照，**实际清单与默认值以源码为准**；落地阶段必须以 `grep -E "process\.env\.NG_APP_" scripts/set-env.cjs` 输出为准，避免文档与代码再次分叉。
+
+当前 `set-env.cjs` 注入的 `NG_APP_*` 布尔 Flag 快照：
 
 ```text
-NG_APP_DISABLE_INDEX_DATA_PRELOAD_V1   default true
-NG_APP_FONT_EXTREME_FIRSTPAINT_V1      default true
-NG_APP_FLOW_STATE_AWARE_RESTORE_V2     default true
-NG_APP_EVENT_DRIVEN_SYNC_PULSE_V1      default true
-NG_APP_TAB_SYNC_LOCAL_REFRESH_V1       default true
-NG_APP_STRICT_MODULEPRELOAD_V2         default false
-NG_APP_ROOT_STARTUP_DEP_PRUNE_V1       default true
-NG_APP_TIERED_STARTUP_HYDRATION_V1     default true
-NG_APP_SUPABASE_DEFERRED_SDK_V1        default true
-NG_APP_CONFIG_BARREL_PRUNE_V1          default true
-NG_APP_SIDEBAR_TOOLS_DYNAMIC_LOAD_V1   default true
-NG_APP_RESUME_INTERACTION_FIRST_V1     default true
-NG_APP_RESUME_WATERMARK_RPC_V1         default true
+NG_APP_DISABLE_INDEX_DATA_PRELOAD_V1     default true
+NG_APP_FONT_EXTREME_FIRSTPAINT_V1        default true
+NG_APP_FLOW_STATE_AWARE_RESTORE_V2       default true
+NG_APP_EVENT_DRIVEN_SYNC_PULSE_V1        default true
+NG_APP_TAB_SYNC_LOCAL_REFRESH_V1         default true
+NG_APP_STRICT_MODULEPRELOAD_V2           default false
+NG_APP_ROOT_STARTUP_DEP_PRUNE_V1         default true
+NG_APP_TIERED_STARTUP_HYDRATION_V1       default true
+NG_APP_SUPABASE_DEFERRED_SDK_V1          default true
+NG_APP_CONFIG_BARREL_PRUNE_V1            default true
+NG_APP_SIDEBAR_TOOLS_DYNAMIC_LOAD_V1     default true
+NG_APP_RESUME_INTERACTION_FIRST_V1       default true
+NG_APP_RESUME_WATERMARK_RPC_V1           default true
+NG_APP_RESUME_PULSE_DEDUP_V1             default true
+NG_APP_ROUTE_GUARD_LAZY_IMPORT_V1        default true
+NG_APP_WEB_VITALS_IDLE_BOOT_V2           default true
+NG_APP_FONT_AGGRESSIVE_DEFER_V2          default true
+NG_APP_SYNC_STATUS_DEFERRED_MOUNT_V1     default true
+NG_APP_PWA_PROMPT_DEFER_V2               default true
+NG_APP_RESUME_SESSION_SNAPSHOT_V1        default true
+NG_APP_USER_PROJECTS_WATERMARK_RPC_V1    default true
+NG_APP_RECOVERY_TICKET_DEDUP_V1          default true
+NG_APP_BLACKBOX_WATERMARK_PROBE_V1       default true
+NG_APP_WORKSPACE_SHELL_COMPOSITION_V3    default true
+NG_APP_RESUME_COMPOSITE_PROBE_RPC_V1     default true
+NG_APP_RESUME_METRICS_GATE_V1            default true
 ```
 
 含义：GitHub Actions 环境如果不显式注入这些变量，会落到代码中的默认值——和 Vercel 当前的默认值是否一致**取决于 Vercel Dashboard 是否覆盖过任何 flag**。
 
 阶段 0 必做：
 
-1. 登录 Vercel Dashboard 导出当前生产环境变量全集。
-2. 与 `set-env.cjs` 中默认值逐一对照；若有差异，把差异项写进 GitHub Actions Secrets 或 Variables。
+1. 登录 Vercel Dashboard 导出当前生产环境变量全集（含所有 `NG_APP_*`）。
+2. **以 `scripts/set-env.cjs` 当前实际解析的 flag 列表为准**（用 `grep -E "process\.env\.NG_APP_" scripts/set-env.cjs` 重新生成完整列表，不要照抄本节快照），与默认值逐一对照；若有差异，把差异项写进 GitHub Actions Secrets 或 Variables。
 3. 在 §5.2 GitHub Secrets 表追加这批 `NG_APP_*` 项作为可选 override。
 4. 阶段 2 preview 验收时 `console.log(environment)` 或加一条断言，确认 flag 与生产期望一致。
+5. 阶段 1 增加 contract 防漂移：在 `npm run quality:guard:supabase-ready` 或独立 spec 中校验 `set-env.cjs` 的 flag 列表与本文档快照差异 ≤ 阈值，差异超阈必须在同一 PR 中同步本节快照。
 
 ### 16.8 manifest.webmanifest 与 assetlinks.json 内容审查（补 §10）
 
@@ -1500,20 +1513,23 @@ CREATE OR REPLACE FUNCTION cleanup_preview_user_data() ...
 
 ### 16.12 Wrangler 与依赖版本固定（补 §5.3）
 
-策划案 workflow 用 `cloudflare/wrangler-action@v3`，但没说明 wrangler 本体版本。Direct Upload 行为在 wrangler 3.x 不同子版本间有过破坏性改动（`pages deploy` flag 命名）。Sentry CLI 同理，`npx @sentry/cli` 不应隐式跟随 latest。
+§5.3 workflow 使用 `npx wrangler@"$WRANGLER_VERSION" pages deploy ...` + `nick-fields/retry@v3` 包装。Direct Upload 行为在 wrangler 3.x 不同子版本间有过破坏性改动（`pages deploy` flag 命名）。Sentry CLI 同理，`npx @sentry/cli` 不应隐式跟随 latest。
 
 阶段 1 必做：
 
-```yaml
-- uses: cloudflare/wrangler-action@v3
-  with:
-    apiToken: ...
-    accountId: ...
-    wranglerVersion: '3.114.0'   # 固定到一个已验证的版本
-    command: pages deploy ...
-```
+- **wrangler**：`WRANGLER_VERSION` 环境变量（§3.2 定义）固定到 `3.114.0`，所有 `npx wrangler@...` 调用必须显式引用该变量，不要让 `npx wrangler` 隐式跟随 latest。
+- **Sentry CLI**：`SENTRY_CLI_VERSION` 固定到 `2.58.2`，`npx @sentry/cli@"$SENTRY_CLI_VERSION"` 显式 pinning，不改 `package.json`。
 
-理由：`wrangler-action@v3` 可能跟随 latest wrangler，未来 wrangler 4.x 一旦有 breaking change，部署会突然失败。锁定到具体版本，升级时显式 PR。首版推荐 Sentry sourcemap 步骤使用 `npx @sentry/cli@"$SENTRY_CLI_VERSION"` 显式 pinning，不改 `package.json`；如果后续需要本地复现 sourcemap 流程，再把 `@sentry/cli` 加入 devDependency 并由 lockfile 固定。
+不推荐替换为 `cloudflare/wrangler-action@v3`，理由：
+
+- 该 action 的 `wranglerVersion` 输入也只能 pin wrangler 本体，不会减少 retry/超时控制需求。
+- §5.3 已用 `nick-fields/retry@v3` 包裹 `npx wrangler` 直接调用，对 5xx/401 限流可控。两套机制混用反而复杂。
+- 保持单一 invocation 风格便于本地复现：开发者只需 `WRANGLER_VERSION=3.114.0 npx wrangler@$WRANGLER_VERSION pages deploy dist/browser ...` 即可对齐 CI。
+
+升级路径：
+
+- 升级 wrangler/Sentry CLI 必须通过独立 PR；PR 描述附 `npx wrangler@<new> pages dev dist/browser` 与（如启用 sourcemap）`npx @sentry/cli@<new> sourcemaps inject --dry-run` 的本地验证日志。
+- 如果后续需要本地复现 sourcemap 流程，再把 `@sentry/cli` 加入 devDependency 并由 lockfile 固定。
 
 ### 16.13 Direct Upload 失败重试（补 §5.3）
 
@@ -1535,7 +1551,9 @@ Cloudflare Direct Upload 偶发 5xx / 401（token 限流）。workflow 加 retry
     CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
 ```
 
-或保留 `cloudflare/wrangler-action@v3` 但外层包 `nick-fields/retry`。`Direct Upload` 单次最多 20,000 文件、单文件 25 MiB——是**每次 deployment** 的限制，不是 per-site；NanoFlow 当前产物 1-3k 文件，余量充足，但 Sentry sourcemap 启用后文件数会翻倍，需要确认 `.map` 已删后再上传。
+本节使用 `npx wrangler@"$WRANGLER_VERSION"` + `nick-fields/retry@v3` 包装的方案，与 §5.3 / §16.12 保持一致；不推荐再叠一层 `cloudflare/wrangler-action@v3`（会和 retry 机制重叠且不易本地复现）。
+
+`Direct Upload` 单次最多 20,000 文件、单文件 25 MiB——是**每次 deployment** 的限制，不是 per-site；NanoFlow 当前产物 1-3k 文件，余量充足，但 Sentry sourcemap 启用后文件数会翻倍，需要确认 `.map` 已删后再上传。
 
 ### 16.14 Node 版本统一（补 §5.3）
 
@@ -1616,6 +1634,9 @@ grep -rn "node-version\|NODE_VERSION" .github/workflows netlify.toml package.jso
 
 ```bash
 # 防御性检查：除入口/polyfills/chunk/worker 外，不应有未匹配规则的 .js 出现在根目录
+# 注：runtime-、sw-composed/ngsw-worker/safety-worker 是兜底匹配；
+#     当前 @angular/build:application 走 esbuild 不会产出独立 runtime-*.js，
+#     若未来切回 webpack 或引入第三方 bundler，再确认该模式仍然命中。
 ls dist/browser/*.js | grep -vE '(main|polyfills|chunk|worker|runtime|sw-composed|ngsw-worker|safety-worker)' && exit 1 || true
 ```
 
