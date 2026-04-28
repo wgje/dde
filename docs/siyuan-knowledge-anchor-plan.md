@@ -618,9 +618,9 @@ idle
 状态机要求：
 
 1. `hover-intent` 期间只启动延迟计时，不立刻请求思源。
-2. 进入 `opening` 时记录 `{ linkId, blockId, originRef, controller }` 作为活跃请求状态。
+2. 进入 `opening` 时记录 `{ linkId, blockId, originRef, controller, requestSeq }` 作为活跃请求状态。
 3. `originRef` 只允许保存在 Popover service / component 的普通 class private property 中，不能写入 Signals Store。
-4. 关闭浮层、切换锚点或 `ngOnDestroy()` 时必须把该 private property 显式置为 `null`，避免保留已脱离 DOM 的元素。
+4. 关闭浮层、切换锚点或 `ngOnDestroy()` 时，必须在调用 `OverlayRef.detach()` / `dispose()` 的同一个同步调用栈内把该 private property 显式置为 `null`，避免短暂竞态引用已脱离 DOM 的元素。
 5. DOM 引用进入 Signals Store 会妨碍垃圾回收，也会把非序列化 UI 资源混入响应式业务状态，因此禁止这样做。
 6. 浮层内容加载期间先读取本机缓存，再按 provider 能力后台刷新。
 7. 鼠标从锚点进入浮层时取消关闭计时。
@@ -774,10 +774,11 @@ Context7 对思源 API 的查询结果显示，`/api/block/getBlockKramdown`、`
 2. `getChildBlocks` 失败不应导致整个预览失败；可以只显示当前块正文并提示子块不可用。
 3. `getHPathByID` 失败不应阻塞预览；任务卡可退回显示 `label` 或短 block ID。
 4. 任一接口超时后必须通过 `AbortSignal` 取消剩余请求。
-5. 组件或预览服务必须维护当前活跃请求状态，例如 `{ linkId, blockId, controller }`。
-6. 活跃请求状态使用普通 class private property，不写入 Signal；每次新 hover 事件以“abort 旧 controller -> 创建新 controller -> 一次性替换 activeRequest”的顺序更新，保证快速鼠标移动时只存在一个权威请求。
+5. 组件或预览服务必须维护当前活跃请求状态，例如 `{ linkId, blockId, controller, requestSeq }`。
+6. 活跃请求状态使用普通 class private property，不写入 Signal；每次新 hover 事件以“递增 requestSeq -> abort 旧 controller -> 创建新 controller -> 一次性替换 activeRequest”的顺序更新，保证快速鼠标移动时只存在一个权威请求。
 7. 如果底层通道无法真正取消请求，响应返回时仍必须与该活跃状态比对。
-8. 比对不一致的迟到结果必须丢弃，避免 hover 快速切换造成过期预览覆盖当前锚点。
+8. 响应处理必须同时比对 `linkId`、`blockId`、`controller` 引用或 `requestSeq`；只比对 `blockId` 不足以覆盖 abort 传播与状态替换之间的窄窗口竞态。
+9. 比对不一致的迟到结果必须丢弃，避免 hover 快速切换造成过期预览覆盖当前锚点。
 
 示例：用户先悬浮任务 A 的锚点 `blockId=abc`，随后快速悬浮任务 B 的锚点 `blockId=xyz`。如果 A 的响应在 B 的请求开始后才返回，前端必须因当前活跃 `blockId` 已变为 `xyz` 而丢弃 A 的响应。
 
@@ -950,7 +951,7 @@ siyuan.autoRefresh = on-hover | manual
 验收：
 
 1. 有缓存时可立即展示。
-2. 缓存命中必须同时匹配 `linkId` 与 `blockId`；只匹配其中一个时按 cache miss 处理并重新拉取，不自动删除旧缓存。
+2. 缓存命中必须同时匹配 `linkId` 与 `blockId`；只匹配其中一个时按 cache miss 处理并重新拉取，不自动删除旧缓存，但旧缓存会通过 `CACHE_STALE_MS` 或 `MAX_PREVIEW_CACHE_ENTRIES` 后台清理回收。
 3. 无缓存时能显示正确状态，不阻塞任务操作。
 4. 桌面 hover 到锚点后显示连接到该锚点的浮层，从锚点移动到浮层不闪烁。
 5. Focus / Dock 中为缩减版预览。
