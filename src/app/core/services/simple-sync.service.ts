@@ -380,7 +380,7 @@ export class SimpleSyncService {
       // 离线模式下返回 false，避免 RetryQueue 尝试处理未配置的 Supabase
       isOnline: () => this.state().isOnline && !this.supabase.isOfflineMode(),
       onProcessingStateChange: (processing, pendingCount) => {
-        this.state.update(s => ({ ...s, isSyncing: processing, pendingCount }));
+        this.syncStateService.update({ isSyncing: processing, pendingCount });
         // 【2026-04-21 根因修复】只有成功回放后真正见底，才允许收口清理旧错误文案；
         // 永久失败移除、切账号清空视图等都不应误判为“同步已恢复”。
         if (!processing && pendingCount === 0 && this.retryQueueService.hasSuccessfulDrainFlag()) {
@@ -671,7 +671,7 @@ export class SimpleSyncService {
     const backgroundProbeDelayMs = Math.max(0, options.backgroundProbeDelayMs ?? 150);
     const backgroundDrainMaxRounds = Math.max(1, options.backgroundDrainMaxRounds ?? 5);
     const onlineNow = typeof navigator !== 'undefined' ? navigator.onLine : this.state().isOnline;
-    this.state.update(s => ({ ...s, isOnline: onlineNow }));
+    this.syncStateService.update({ isOnline: onlineNow });
 
     this.cleanupRecoveryTicketState(startedAt);
     let ticketState: { createdAt: number; modes: Set<'light' | 'heavy'>; probeCompleted: boolean } | null = null;
@@ -1470,7 +1470,7 @@ export class SimpleSyncService {
     }
     const enqueued = this.retryQueueService.add(type, operation, data, projectId, sourceUserId, taskIdsToDelete);
     if (enqueued) {
-      this.state.update(s => ({ ...s, pendingCount: this.retryQueueService.length }));
+      this.syncStateService.update({ pendingCount: this.retryQueueService.length });
     } else {
       this.syncStateService.setSyncError('同步队列已满，暂未写入重试队列');
     }
@@ -1498,7 +1498,7 @@ export class SimpleSyncService {
 
     const enqueued = await this.retryQueueService.addDurably(type, operation, data, projectId, sourceUserId, taskIdsToDelete);
     if (enqueued) {
-      this.state.update(s => ({ ...s, pendingCount: this.retryQueueService.length }));
+      this.syncStateService.update({ pendingCount: this.retryQueueService.length });
     } else {
       this.syncStateService.setSyncError('同步队列已满，暂未写入重试队列');
     }
@@ -1509,7 +1509,7 @@ export class SimpleSyncService {
   clearRetryQueue(): void {
     const count = this.retryQueueService.length;
     this.retryQueueService.clear();
-    this.state.update(s => ({ ...s, pendingCount: 0 }));
+    this.syncStateService.update({ pendingCount: 0 });
     this.logger.info(`已清理 ${count} 个重试项`);
     this.toast.info(`已清理 ${count} 个待同步项`);
   }
@@ -1740,15 +1740,15 @@ export class SimpleSyncService {
   
   resolveConflict(projectId: string, resolvedProject: Project, strategy: 'local' | 'remote'): void {
     this.logger.info('解决冲突', { projectId, strategy });
-    this.syncState.update(s => ({ ...s, hasConflict: false, conflictData: null }));
+    this.syncStateService.update({ hasConflict: false, conflictData: null });
   }
   
   setConflict(conflictData: ConflictData): void {
-    this.syncState.update(s => ({ ...s, hasConflict: true, conflictData }));
+    this.syncStateService.update({ hasConflict: true, conflictData });
   }
 
   clearConflict(): void {
-    this.syncState.update(s => ({ ...s, hasConflict: false, conflictData: null }));
+    this.syncStateService.update({ hasConflict: false, conflictData: null });
   }
 
   private buildProjectSaveFlightKey(projectId: string, userId: string): string {
@@ -2419,7 +2419,7 @@ export class SimpleSyncService {
   clearOfflineCache(): void {
     this.projectDataService.clearOfflineSnapshot();
     this.retryQueueService.clear();
-    this.syncState.update(s => ({ ...s, pendingCount: 0 }));
+    this.syncStateService.update({ pendingCount: 0 });
     this.logger.info('离线缓存已清除');
   }
 
@@ -2453,7 +2453,7 @@ export class SimpleSyncService {
     if (!this.syncState().sessionExpired) return;
     
     const previousQueueLength = this.retryQueueService.length;
-    this.syncState.update(s => ({ ...s, sessionExpired: false }));
+    this.syncStateService.update({ sessionExpired: false });
     
     this.logger.info('会话状态已重置', { previousQueueLength });
     

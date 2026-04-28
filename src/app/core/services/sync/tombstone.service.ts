@@ -314,11 +314,12 @@ export class TombstoneService {
   
   /**
    * 获取缓存的 tombstone ID 集合
+   * 返回防御性副本，避免外部修改污染缓存
    */
   getCachedTombstoneIds(projectId: string): Set<string> | null {
     const cached = this.tombstoneCache.get(projectId);
     if (cached && (Date.now() - cached.timestamp) < SYNC_CONFIG.TOMBSTONE_CACHE_TTL) {
-      return cached.ids;
+      return new Set(cached.ids);
     }
     return null;
   }
@@ -332,11 +333,12 @@ export class TombstoneService {
   
   /**
    * 获取连接 tombstone 缓存
+   * 返回防御性副本，避免外部修改污染缓存
    */
   getConnectionTombstoneCache(projectId: string): Set<string> | null {
     const cached = this.connectionTombstoneCache.get(projectId);
     if (cached && (Date.now() - cached.timestamp) < SYNC_CONFIG.TOMBSTONE_CACHE_TTL) {
-      return cached.ids;
+      return new Set(cached.ids);
     }
     return null;
   }
@@ -456,6 +458,14 @@ export class TombstoneService {
 
   /**
    * 判断任务 upsert 是否应被 tombstone 拦截（防复活）
+   *
+   * 设计决策（LWW 兼容）：
+   * - 本地 tombstone：始终拒绝（用户主动删除，尚未同步云端）
+   * - 云端 tombstone 缓存：拒绝，除非候选 updatedAt 明显晚于 tombstone 记录时间
+   *
+   * 注意：tombstoneCache.timestamp 是"缓存填充时刻"，不等于"删除时刻"。
+   * 若要精确 LWW，需在 task_tombstones 表存储 deleted_at 字段。
+   * 当前实现为保守策略：缓存存在即拒绝，减少误复活风险。
    */
   shouldRejectTaskUpsert(projectId: string, taskId: string, candidateUpdatedAt?: string | null): boolean {
     this.cleanupExpiredLocalTombstones(projectId);
@@ -634,7 +644,8 @@ export class TombstoneService {
   }
   
   /**
-   * 失效缓存（invalidateTombstoneCache 的别名）
+   * 失效缓存
+   * @deprecated 请使用 invalidateTombstoneCache(projectId)
    */
   invalidateCache(projectId: string): void {
     this.invalidateTombstoneCache(projectId);
@@ -676,8 +687,9 @@ export class TombstoneService {
     return this.localConnectionTombstones.get('global') || [];
   }
   
-  /** 【P1-19 修复】从 localStorage 加载连接 tombstone */
-  loadConnectionTombstones(): void {
+  /** 【P1-19 修复】从 localStorage 加载连接 tombstone（仅在构造时调用）*/
+  private loadConnectionTombstones(): void {
+    if (typeof localStorage === 'undefined') return;
     try {
       const raw = localStorage.getItem(this.LOCAL_CONNECTION_TOMBSTONES_KEY);
       if (!raw) return;

@@ -150,6 +150,9 @@ export class SyncOperationHelperService {
     return await this.executeWithAuthRetry(client, operation, context, options);
   }
   
+  /** 是否已显示过登录过期提示（防重复 toast）*/
+  private hasShownSessionExpiredToast = false;
+
   /**
    * 带 Auth 重试的操作执行
    */
@@ -206,9 +209,8 @@ export class SyncOperationHelperService {
                 });
                 return { success: false, error: retryEnhanced };
               }
-              // 非 RLS 的认证错误（如 401），标记会话过期
-              this.syncState.setSessionExpired(true);
-              this.toast.warning('登录已过期', '请重新登录以继续同步数据');
+              // 非 RLS 的认证错误（如 401），标记会话过期并避免 Toast 轰炸
+              this.markSessionExpiredOnce();
               return { success: false, error: retryEnhanced };
             }
             
@@ -217,8 +219,7 @@ export class SyncOperationHelperService {
           }
         } else {
           // 刷新失败，标记会话过期
-          this.syncState.setSessionExpired(true);
-          this.toast.warning('登录已过期', '请重新登录以继续同步数据');
+          this.markSessionExpiredOnce();
           return { success: false, error: enhanced };
         }
       }
@@ -250,9 +251,8 @@ export class SyncOperationHelperService {
         }
         
         // 刷新失败
-        this.syncState.setSessionExpired(true);
-        this.toast.warning('登录已过期', '请重新登录以继续同步数据');
-        
+        this.markSessionExpiredOnce();
+
         return { 
           success: false, 
           error: this.createSessionExpiredError() 
@@ -358,7 +358,18 @@ export class SyncOperationHelperService {
     error.isRetryable = true;
     return error;
   }
-  
+
+  /**
+   * 标记会话过期并显示 Toast（同一会话内只显示一次，防止并发操作触发 Toast 轰炸）
+   */
+  private markSessionExpiredOnce(): void {
+    this.syncState.setSessionExpired(true);
+    if (!this.hasShownSessionExpiredToast) {
+      this.hasShownSessionExpiredToast = true;
+      this.toast.warning('登录已过期', '请重新登录以继续同步数据');
+    }
+  }
+
   // ==================== 便捷方法 ====================
   
   /**
@@ -417,22 +428,26 @@ export class SyncOperationHelperService {
    * 【2026-04-20 增强】
    *  - 确定性服务端错误（502/503/504）直接放弃 inline 重试，交由 RetryQueue 在退避窗口后重试
    *  - 每次重试前检查 Circuit Breaker 状态，已打开则立即放弃
+   *
+   * @param operation 待重试的操作
+   * @param maxRetries 最大重试次数（不含首次执行），默认 3，即最多执行 4 次
+   * @param baseDelay 首次重试延迟（ms），后续按指数增长
    */
   async retryWithBackoff<T>(
     operation: () => Promise<T>,
     maxRetries = this.IMMEDIATE_RETRY_MAX,
     baseDelay = this.BASE_DELAY_MS
   ): Promise<T> {
-    let lastError: unknown;
-    
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
         return await operation();
       } catch (error) {
-        lastError = error;
         const enhanced = supabaseErrorToError(error);
-        
-        if (!enhanced.isRetryable) {
+
+        // Auth 错误（例如 401 会话过期）不可通过简单重试恢复，立即抛出。
+        // 注意：token 刷新失败也会出现 AuthError；调用方 executeWithAuthRetry 已在外层
+        // 尝试过一次 refreshSession，此处再重试无意义。
+        if (!enhanced.isRetryable || enhanced.errorType === 'AuthError') {
           throw enhanced;
         }
         
@@ -463,7 +478,9 @@ export class SyncOperationHelperService {
         await this.delay(delayMs);
       }
     }
-    
-    throw lastError;
+
+    // 逻辑上不可达（循环保证至少执行一次并在末次 attempt 抛出），
+    // 但 TypeScript 对无限循环的控制流分析要求明确的返回值。
+    throw new Error(`retryWithBackoff: 不可达代码 (maxRetries=${maxRetries}, baseDelay=${baseDelay}ms)`);
   }
 }

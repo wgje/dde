@@ -96,6 +96,8 @@ export interface RetryQueueSliceOptions {
    * 无需再用 tab 隐藏/刚恢复的风险规避去屏蔽这次尝试。
    */
   allowWhileSuspended?: boolean;
+  /** 内部标记：是否已为超时强制恢复重试，防止无限递归 */
+  _forcedRecovery?: boolean;
 }
 
 export interface RetryQueueSliceResult {
@@ -586,9 +588,13 @@ export class RetryQueueService {
     taskIdsToDelete?: string[],
     persistMode: 'debounced' | 'manual' = 'debounced',
   ): boolean {
-    // 入队前校验实体 ID 格式，拦截脏数据
-    if (data?.id && !isValidUUID(data.id)) {
-      this.logger.warn('RetryQueue.add：拒绝非法 ID 入队', { type, id: data.id });
+    // 入队前校验实体 ID：必须非空且为有效 UUID
+    if (!data?.id) {
+      this.logger.warn('RetryQueue.add：拒绝缺少 ID 的入队请求', { type });
+      return false;
+    }
+    if (!isValidUUID(data.id)) {
+      this.logger.warn('RetryQueue.add：拒绝非法 UUID 格式的 ID', { type, id: data.id });
       return false;
     }
     this.tryRecoverQueueFullPressure();
@@ -1215,11 +1221,17 @@ export class RetryQueueService {
     try {
       const stored = sessionStorage.getItem(this.CIRCUIT_STORAGE_KEY);
       if (stored) {
-        const { state, openedAt, failures } = JSON.parse(stored);
-        if (state === 'open' || state === 'half-open') {
-          this.circuitState = state;
-          this.circuitOpenedAt = openedAt ?? 0;
-          this.consecutiveFailures = failures ?? 0;
+        const { state, openedAt, failures } = JSON.parse(stored) as {
+          state: unknown;
+          openedAt: unknown;
+          failures: unknown;
+        };
+        const validStates = ['open', 'half-open'] as const;
+        if (validStates.includes(state as typeof validStates[number]) &&
+            typeof openedAt === 'number') {
+          this.circuitState = state as 'open' | 'half-open';
+          this.circuitOpenedAt = openedAt;
+          this.consecutiveFailures = typeof failures === 'number' ? failures : 0;
         }
       }
     } catch { /* ignore */ }
@@ -1390,7 +1402,21 @@ export class RetryQueueService {
             completed: true
           };
         }
-        return this.processQueueSlice(options);
+        // 强制释放后仅允许一次同步重试，避免无限递归
+        if (!options._forcedRecovery) {
+          return this.processQueueSlice({ ...options, _forcedRecovery: true });
+        }
+        this.logger.error('processQueueSlice: 强制恢复后仍超时，放弃本次处理', {
+          queueLength: this.queue.length,
+          elapsed: Date.now() - this.lastProcessTime,
+          maxTimeout: this.PROCESS_TIMEOUT
+        });
+        return {
+          processed: 0,
+          remaining: this.queue.length,
+          durationMs: Date.now() - sliceStartedAt,
+          completed: false
+        };
       }
       return {
         processed: 0,
@@ -1860,11 +1886,14 @@ export class RetryQueueService {
   
   /**
    * 从 IndexedDB 加载
+   *
+   * 使用 readonly 事务，避免不必要的排他锁阻塞并发读写。
+   * 若存在脏条目需要清理，单独开启 readwrite 事务处理。
    */
   private async loadFromIdb(db: IDBDatabase): Promise<RetryQueueItem[]> {
     return new Promise((resolve) => {
       try {
-        const transaction = db.transaction(this.DB_CONFIG.storeName, 'readwrite');
+        const transaction = db.transaction(this.DB_CONFIG.storeName, 'readonly');
         const store = transaction.objectStore(this.DB_CONFIG.storeName);
         const request = store.getAll();
         
@@ -1882,9 +1911,9 @@ export class RetryQueueService {
             }
           }
 
-          // 从 IDB 中物理删除脏条目
+          // 从 IDB 中物理删除脏条目（使用独立 readwrite 事务）
           if (dirtyKeys.length > 0) {
-            console.warn('[RetryQueue] 启动清理：从 IDB 删除脏条目', dirtyKeys);
+            this.logger.warn('RetryQueue 启动清理：从 IDB 删除脏条目', { keys: dirtyKeys });
             this.logger.info('RetryQueue 加载：已过滤脏数据', { removed: dirtyKeys.length });
             try {
               const delTx = db.transaction(this.DB_CONFIG.storeName, 'readwrite');
@@ -2095,21 +2124,20 @@ export class RetryQueueService {
   
   /**
    * 压缩队列项（移除不必要的数据以节省空间）
+   *
+   * displayId 是动态计算值，不需要持久化。
+   * 通过解构显式排除，避免 `undefined as unknown as string` 类型谎言。
    */
   private minifyItem(item: RetryQueueItem): RetryQueueItem {
     if (item.type !== 'task') {
       return item;
     }
-    
+
     const task = item.data as Task;
+    const { displayId: _drop, ...taskWithoutDisplayId } = task;
     return {
       ...item,
-      data: {
-        ...task,
-        // 移除可重建的字段（displayId 是动态计算的）
-        // 【P0-05 修复】保留 shortId，它是永久 ID，丢失会导致数据库覆盖为 null
-        displayId: undefined as unknown as string
-      }
+      data: taskWithoutDisplayId as Task
     };
   }
 }

@@ -369,7 +369,7 @@ describe('SimpleSyncService', () => {
         if (service) {
           const currentState = service['syncState']();
           if (!currentState.sessionExpired) {
-            service['syncState'].update((s) => ({ ...s, sessionExpired: true }));
+            service['syncStateService'].update({ sessionExpired: true });
             // 模拟真实行为：首次过期时显示 Toast
             mockToast.warning('登录已过期', '请重新登录以继续同步数据');
           }
@@ -3144,7 +3144,7 @@ describe('SimpleSyncService', () => {
     });
 
     it('saveProjectToCloud 在 sessionExpired 的项目级 handoff 下仍应保留最新折叠快照', async () => {
-      service['syncState'].update((state) => ({ ...state, sessionExpired: true }));
+      service['syncStateService'].update({ sessionExpired: true });
 
       const firstProject = createMockProject({
         id: 'project-session-expired-collapse',
@@ -3691,7 +3691,7 @@ describe('SimpleSyncService', () => {
       mockRetryQueueService.lastWarningPercent = 0;
       
       // 设置离线状态（防止触发 processRetryQueue 清空队列）
-      service['syncState'].update(s => ({ ...s, isOnline: false, sessionExpired: false }));
+      service['syncStateService'].update({ isOnline: false, sessionExpired: false });
 
       // 模拟队列达到 85%（高于阈值但低于 90%，避免触发强制处理）
       mockRetryQueueService.queue = Array.from({ length: 85 }, (_, i) => ({
@@ -3737,7 +3737,7 @@ describe('SimpleSyncService', () => {
       
       // 模拟 isSyncing 卡住的状态（通过 syncState signal 设置）
       // 【修复 2026-02-02】新增 isProcessingQueue 为 false，模拟状态不一致情况
-      service['syncState'].update(s => ({ ...s, isOnline: true, sessionExpired: false, isSyncing: true }));
+      service['syncStateService'].update({ isOnline: true, sessionExpired: false, isSyncing: true });
       mockRetryQueueService.isProcessingQueue = false; // 状态不一致：isSyncing=true 但 isProcessingQueue=false
 
       // 模拟队列达到 90%+ 容量
@@ -3795,7 +3795,7 @@ describe('SimpleSyncService', () => {
     
     it('addToRetryQueue 应在 sessionExpired 时跳过添加', () => {
       // 设置会话过期状态
-      service['syncState'].update(s => ({ ...s, sessionExpired: true }));
+      service['syncStateService'].update({ sessionExpired: true });
       
       const initialQueueLength = mockRetryQueueService.queue.length;
       const task = createMockTask();
@@ -3815,7 +3815,7 @@ describe('SimpleSyncService', () => {
     
     it('addToRetryQueue 应在会话正常时正常添加', () => {
       // 确保会话正常
-      service['syncState'].update(s => ({ ...s, sessionExpired: false }));
+      service['syncStateService'].update({ sessionExpired: false });
       
       const initialQueueLength = mockRetryQueueService.queue.length;
       const task = createMockTask({ id: 'new-task-for-queue' });
@@ -3829,7 +3829,7 @@ describe('SimpleSyncService', () => {
     
     it('resetSessionExpired 应正确重置会话状态', () => {
       // 设置会话过期状态
-      service['syncState'].update(s => ({ ...s, sessionExpired: true }));
+      service['syncStateService'].update({ sessionExpired: true });
       
       // 添加一些队列项
       mockRetryQueueService.queue = [{
@@ -3857,7 +3857,7 @@ describe('SimpleSyncService', () => {
     
     it('resetSessionExpired 应在会话未过期时不做任何操作', () => {
       // 确保会话正常
-      service['syncState'].update(s => ({ ...s, sessionExpired: false }));
+      service['syncStateService'].update({ sessionExpired: false });
       
       // 清空日志 mock
       mockLoggerCategory.info.mockClear();
@@ -3876,7 +3876,7 @@ describe('SimpleSyncService', () => {
       vi.useFakeTimers();
       
       // 设置会话过期状态
-      service['syncState'].update(s => ({ ...s, sessionExpired: true, isOnline: true }));
+      service['syncStateService'].update({ sessionExpired: true, isOnline: true });
       
       // 添加队列项
       mockRetryQueueService.queue = [{

@@ -93,7 +93,7 @@ export class SentryLazyLoaderService {
   /** Sentry 是否已初始化 */
   readonly isInitialized = computed(() => this.sentryModule() !== null);
   
-  /** 是否正在初始化中 */
+  /** 是否正在初始化中（同步设置，防止 requestIdleCallback 窗口期内重复调度）*/
   private isInitializing = false;
   
   /** 待发送事件队列（初始化前捕获的消息/异常） */
@@ -107,9 +107,6 @@ export class SentryLazyLoaderService {
   private pendingFlushTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingFlushListenersBound = false;
   private hasLoggedMissingDsn = false;
-
-  /** 初始化前缓存的用户信息，待 Sentry 就绪后设置 */
-  private pendingUser: { id: string; email?: string } | null = null;
 
   constructor() {
     this.bindPendingFlushResumeListeners();
@@ -173,6 +170,12 @@ export class SentryLazyLoaderService {
   }
 
   /**
+   * 待应用的用户身份（Sentry 初始化前调用 setUser 时缓存）
+   * undefined = 未曾调用过；null = 显式登出；object = 用户信息
+   */
+  private pendingUser: { id: string; email?: string } | null | undefined = undefined;
+
+  /**
    * 触发 Sentry 懒加载初始化
    * 使用 requestIdleCallback 确保不阻塞主线程
    * 
@@ -194,7 +197,11 @@ export class SentryLazyLoaderService {
       return;
     }
 
+    // 同步设置 isInitializing，防止在 requestIdleCallback 调度窗口期（最长 5s）内重复调度
+    this.isInitializing = true;
+
     const initCallback = () => {
+      this.isInitializing = false;
       this.initPromise = this.initSentry();
     };
 
@@ -214,7 +221,7 @@ export class SentryLazyLoaderService {
    * 异步初始化 Sentry
    */
   private async initSentry(): Promise<void> {
-    if (this.isInitializing || this.sentryModule()) {
+    if (this.sentryModule()) {
       return;
     }
     
@@ -258,10 +265,11 @@ export class SentryLazyLoaderService {
           /^The operation was aborted/,  // AbortController 取消
           /^The user aborted a request/, // 用户取消
         ],
-        // 【P3-15 修复】过滤 URL 中的 auth 参数，防止 Supabase PKCE 回调泄露到 Sentry
+        // 【P3-15 修复】过滤 URL 中的 PKCE hash fragment，防止 Supabase 回调 token 泄露到 Sentry
+        // 仅移除 # 及之后内容，保留 query string（含调试信息）
         beforeSend(event) {
           if (event.request?.url) {
-            event.request.url = event.request.url.replace(/[#?].*$/, '');
+            event.request.url = event.request.url.replace(/#.*$/, '');
           }
           return event;
         },
@@ -269,7 +277,7 @@ export class SentryLazyLoaderService {
           if (breadcrumb.category === 'navigation' && breadcrumb.data) {
             for (const key of ['from', 'to']) {
               if (typeof breadcrumb.data[key] === 'string') {
-                breadcrumb.data[key] = (breadcrumb.data[key] as string).replace(/[#?].*$/, '');
+                breadcrumb.data[key] = (breadcrumb.data[key] as string).replace(/#.*$/, '');
               }
             }
           }
@@ -281,12 +289,6 @@ export class SentryLazyLoaderService {
       
       // 发送队列中的待处理事件
       this.flushPendingEvents();
-
-      // 设置初始化前缓存的用户上下文
-      if (this.pendingUser) {
-        Sentry.setUser(this.pendingUser);
-        this.pendingUser = null;
-      }
 
       this.logDiagnostic('[SentryLazyLoader] Sentry 初始化完成');
     } catch (error) {
@@ -427,10 +429,11 @@ export class SentryLazyLoaderService {
 
   /**
    * 发送待处理事件队列
+   * 同时应用初始化前缓存的用户身份信息
    */
   private flushPendingEvents(): void {
     const sentry = this.sentryModule();
-    if (!sentry || this.pendingEvents.length === 0) {
+    if (!sentry) {
       return;
     }
 
@@ -438,7 +441,16 @@ export class SentryLazyLoaderService {
       this.schedulePendingFlush();
       return;
     }
-    
+
+    // 应用初始化前缓存的用户身份（undefined 表示未曾调用过 setUser，跳过）
+    if (this.pendingUser !== undefined) {
+      sentry.setUser(this.pendingUser);
+    }
+
+    if (this.pendingEvents.length === 0) {
+      return;
+    }
+
     this.logDiagnostic(`[SentryLazyLoader] 发送 ${this.pendingEvents.length} 个待处理事件`);
     
     const now = Date.now();
@@ -466,17 +478,16 @@ export class SentryLazyLoaderService {
 
   /**
    * 设置用户信息（登录后调用）
-   * 如果 Sentry 未初始化，会缓存用户信息待初始化后设置
+   *
+   * 若 Sentry 尚未初始化，用户信息会被缓存，
+   * 待初始化完成后在 flushPendingEvents 中一并应用。
    */
   setUser(user: { id: string; email?: string } | null): void {
+    // 始终缓存，确保 Sentry 初始化后可以应用
+    this.pendingUser = user;
     const sentry = this.sentryModule();
     if (sentry) {
       sentry.setUser(user);
-    } else if (user) {
-      // 缓存用户信息，待 Sentry 初始化后设置
-      this.pendingUser = user;
-    } else {
-      this.pendingUser = null;
     }
   }
 

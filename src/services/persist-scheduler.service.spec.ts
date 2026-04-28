@@ -63,7 +63,7 @@ describe('PersistSchedulerService', () => {
       expect(s.hasPending).toBe(false);
       expect(s.lastPersistAt).toBe(0);
       expect(s.hasPendingLocalChanges).toBe(false);
-      expect(s.lastUpdateType).toBe('structure');
+      expect(s.lastUpdateType).toBeNull();
     });
 
     it('hasPendingLocalChanges() 返回 false', () => {
