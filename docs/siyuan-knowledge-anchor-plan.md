@@ -349,7 +349,11 @@ type LocalSiyuanPreviewCache = {
 };
 ```
 
-`sortOrder` 采用升序排序；MVP 单锚点固定为 `0`，多锚点启用后由同一任务内的活跃锚点维护稳定顺序。`LocalSiyuanPreviewCache.linkId` 标识 NanoFlow 锚点关系，`LocalSiyuanPreviewCache.blockId` 标识具体思源块；两者同时存在是为了在同一任务替换锚点、多锚点排序或迟到响应返回时防止跨块误命中。`LocalSiyuanPreviewCache.blockId` 必须等于 `ExternalSourceLink.targetId`。`render-blocked` 表示预览内容被安全渲染链路拦截，用户仍可通过深链打开思源原块。
+`sortOrder` 采用升序排序；MVP 单锚点固定为 `0`，多锚点启用后由同一任务内的活跃锚点维护稳定顺序。
+
+`LocalSiyuanPreviewCache.linkId` 标识 NanoFlow 锚点关系，`LocalSiyuanPreviewCache.blockId` 标识具体思源块。两者同时存在是为了在同一任务替换锚点、多锚点排序或迟到响应返回时防止跨块误命中。`LocalSiyuanPreviewCache.blockId` 必须等于 `ExternalSourceLink.targetId`。
+
+`render-blocked` 表示预览内容被安全渲染链路拦截，用户仍可通过深链打开思源原块。
 
 ### 6.2 同步与本地存储边界
 
@@ -680,6 +684,8 @@ Context7 对思源 API 的查询结果显示，`/api/block/getBlockKramdown`、`
 4. 任一接口超时后必须通过 `AbortSignal` 取消剩余请求。
 5. 组件或预览服务必须维护当前活跃请求状态，例如 `{ linkId, blockId, controller }`；如果底层通道无法真正取消请求，响应返回时仍必须与该活跃状态比对。
 6. 比对不一致的迟到结果必须丢弃，避免 hover 快速切换造成过期预览覆盖当前锚点。
+
+示例：用户先悬浮任务 A 的锚点 `blockId=abc`，随后快速悬浮任务 B 的锚点 `blockId=xyz`。如果 A 的响应在 B 的请求开始后才返回，前端必须因当前活跃 `blockId` 已变为 `xyz` 而丢弃 A 的响应。
 
 ### 9.2 MVP 禁止的接口
 
