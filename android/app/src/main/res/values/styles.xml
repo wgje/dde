@@ -28,4 +28,13 @@
         <item name="windowSplashScreenIconBackgroundColor">@color/nanoflow_twa_launch_background</item>
         <item name="postSplashScreenTheme">@style/Theme.NanoFlow.Twa</item>
     </style>
+
+    <!-- 小组件按钮透明执行页：承接已读/完成动作，不显示可感知 UI。 -->
+    <style name="Theme.NanoFlow.WidgetAction" parent="@android:style/Theme.Translucent.NoTitleBar">
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:backgroundDimEnabled">false</item>
+        <item name="android:windowDisablePreview">true</item>
+        <item name="android:windowAnimationStyle">@null</item>
+    </style>
 </resources>

@@ -409,193 +409,14 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
   }
 
   private fun handleGateAction(context: Context, appWidgetId: Int, intent: Intent) {
-    // 【2026-04-22】用户需求：点 已读 / 完成 不应跳入项目，直接在小组件里执行逻辑。
-    // 实现：goAsync() + 协程调用 widget-black-box-action 边缘函数，成功后刷新 widget。
-    // 失败回退：启动 TWA 深链，让前端 BlackBoxService 兜底。
-    val gateAction = intent.getStringExtra(NanoflowWidgetActionFactory.EXTRA_GATE_ACTION)
-    val entryAction = when (gateAction) {
-      NanoflowWidgetActionFactory.GATE_ACTION_READ -> BlackBoxEntryAction.READ
-      NanoflowWidgetActionFactory.GATE_ACTION_COMPLETE -> BlackBoxEntryAction.COMPLETE
-      else -> null
-    }
-    if (entryAction == null) {
-      // 未知动作：降级为打开 Focus Tools，维持旧可观察行为。
-      handleClickOpenFocusTools(
-        context,
-        Intent(intent).putExtra(EXTRA_APP_WIDGET_ID, appWidgetId),
-      )
-      return
-    }
-
     val pendingResult = goAsync()
     val appContext = context.applicationContext
     silentActionScope.launch {
-      val repository = NanoflowWidgetRepository(appContext)
-
-      suspend fun renderCurrentWidget() {
-        val appWidgetManager = AppWidgetManager.getInstance(appContext)
-        renderAndApply(appContext, appWidgetManager, repository, appWidgetId)
-        notifyActionListsDataChanged(appWidgetManager, appWidgetId)
+      try {
+        NanoflowWidgetGateActionHandler.handle(appContext, appWidgetId, intent)
+      } finally {
+        pendingResult.finish()
       }
-
-      // 读取当前目标 entryId。优先使用 fill-in intent 里由渲染路径直接附带的 displayedGateEntryId，
-      // 这样点击目标与屏幕上可见的大门卡严格一致；仅在旧实例/旧缓存没带该字段时才回退到缓存推断。
-      val store = NanoflowWidgetStore(appContext)
-      val fillInEntryId = intent.getStringExtra(EXTRA_GATE_ENTRY_ID)?.takeIf { it.isNotBlank() }
-      val cached = runCatching {
-        store.readSummary(appWidgetId)
-      }.getOrNull()
-      val previewEntryId = cached?.blackBox?.gatePreview?.entryId?.takeIf { it.isNotBlank() }
-      val firstPreviewEntryId = cached?.blackBox?.previews
-        ?.firstOrNull { !it.entryId.isNullOrBlank() }
-        ?.entryId
-        ?.takeIf { it.isNotBlank() }
-      val persistedEntryId = runCatching {
-        store.readGateSelectedEntryId(appWidgetId)
-      }.getOrNull()?.takeIf { it.isNotBlank() }
-
-      val entryId = fillInEntryId ?: previewEntryId ?: firstPreviewEntryId ?: persistedEntryId
-      val currentVisibleEntryId = fillInEntryId ?: previewEntryId ?: firstPreviewEntryId
-      if (currentVisibleEntryId != null && currentVisibleEntryId != persistedEntryId) {
-        runCatching {
-          store.persistGateSelectedEntryId(appWidgetId, currentVisibleEntryId)
-        }
-      }
-
-      NanoflowWidgetTelemetry.info(
-        "widget_click_gate_action",
-        mapOf(
-          "appWidgetId" to appWidgetId,
-          "gateAction" to entryAction.wireValue,
-          "hasEntryId" to !entryId.isNullOrBlank(),
-          "entryIdSource" to when {
-            fillInEntryId != null -> "fill-in-intent"
-            previewEntryId != null -> "summary-gate-preview"
-            firstPreviewEntryId != null -> "summary-head"
-            persistedEntryId != null -> "persisted-fallback"
-            else -> "none"
-          },
-          "mode" to "silent",
-        ),
-      )
-
-      val optimisticSnapshot = if (entryId.isNullOrBlank()) {
-        null
-      } else {
-        runCatching {
-          repository.applyOptimisticBlackBoxAction(appWidgetId, entryId, entryAction)
-        }.onFailure { error ->
-          NanoflowWidgetTelemetry.warn(
-            "widget_click_gate_action_optimistic_failed",
-            mapOf(
-              "appWidgetId" to appWidgetId,
-              "gateAction" to entryAction.wireValue,
-              "entryId" to NanoflowWidgetTelemetry.redactId(entryId),
-            ),
-            error,
-          )
-        }.getOrNull()
-      }
-
-      if (optimisticSnapshot != null) {
-        runCatching {
-          renderCurrentWidget()
-        }.onFailure { error ->
-          NanoflowWidgetTelemetry.warn(
-            "widget_click_gate_action_local_render_failed",
-            mapOf(
-              "appWidgetId" to appWidgetId,
-              "gateAction" to entryAction.wireValue,
-              "phase" to "optimistic",
-            ),
-            error,
-          )
-        }
-      }
-
-      val success = if (entryId.isNullOrBlank()) {
-        false
-      } else {
-        runCatching {
-          repository.markBlackBoxEntry(appWidgetId, entryId, entryAction)
-        }.getOrElse { false }
-      }
-
-      if (success) {
-        if (optimisticSnapshot == null) {
-          // 无法做乐观补丁时，同步拉一轮权威 summary 再重绘，避免只重绘旧缓存。
-          runCatching {
-            repository.refreshSummary(appWidgetId)
-            renderCurrentWidget()
-          }.onFailure { error ->
-            NanoflowWidgetTelemetry.warn(
-              "widget_click_gate_action_local_render_failed",
-              mapOf(
-                "appWidgetId" to appWidgetId,
-                "gateAction" to entryAction.wireValue,
-                "phase" to "post-success",
-              ),
-              error,
-            )
-          }
-        }
-
-        withContext(Dispatchers.Main) {
-          val message = when (entryAction) {
-            BlackBoxEntryAction.READ -> "已标记为已读"
-            BlackBoxEntryAction.COMPLETE -> "已标记为完成"
-          }
-          Toast.makeText(appContext, message, Toast.LENGTH_SHORT).show()
-        }
-        NanoflowWidgetRefreshWorker.enqueue(appContext, reason = "gate-action-${entryAction.wireValue}")
-      } else if (entryId.isNullOrBlank()) {
-        // 大门为空或尚未加载到 entryId：不跳转项目（用户需求「不进入项目直接执行逻辑」），
-        // 改为静默 Toast 提示 + 触发一次 summary 刷新。
-        NanoflowWidgetTelemetry.warn(
-          "widget_click_gate_action_skipped_no_entry",
-          mapOf(
-            "appWidgetId" to appWidgetId,
-            "gateAction" to entryAction.wireValue,
-          ),
-        )
-        withContext(Dispatchers.Main) {
-          Toast.makeText(appContext, "大门暂无待处理条目", Toast.LENGTH_SHORT).show()
-        }
-        NanoflowWidgetRefreshWorker.enqueue(appContext, reason = "gate-action-${entryAction.wireValue}-empty")
-      } else {
-        // 服务端 HTTP 失败或鉴权失败：不跳转项目，改为静默 Toast 告知并让下一次 refresh 再试。
-        // 先前的深链回退会把用户带进 TWA 项目路由，违反「不进入项目直接执行逻辑」需求，已移除。
-        NanoflowWidgetTelemetry.warn(
-          "widget_click_gate_action_remote_failure",
-          mapOf(
-            "appWidgetId" to appWidgetId,
-            "gateAction" to entryAction.wireValue,
-            "entryId" to NanoflowWidgetTelemetry.redactId(entryId),
-          ),
-        )
-        if (optimisticSnapshot != null) {
-          runCatching {
-            repository.rollbackOptimisticBlackBoxAction(appWidgetId, optimisticSnapshot)
-            renderCurrentWidget()
-          }.onFailure { error ->
-            NanoflowWidgetTelemetry.warn(
-              "widget_click_gate_action_rollback_failed",
-              mapOf(
-                "appWidgetId" to appWidgetId,
-                "gateAction" to entryAction.wireValue,
-                "entryId" to NanoflowWidgetTelemetry.redactId(entryId),
-              ),
-              error,
-            )
-          }
-        }
-        withContext(Dispatchers.Main) {
-          Toast.makeText(appContext, "网络繁忙，请稍后重试", Toast.LENGTH_SHORT).show()
-        }
-        NanoflowWidgetRefreshWorker.enqueue(appContext, reason = "gate-action-${entryAction.wireValue}-retry")
-      }
-
-      pendingResult.finish()
     }
   }
 
@@ -824,33 +645,7 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
     appWidgetId: Int,
     partialUpdate: Boolean = false,
   ) {
-    val model = repository.buildRenderModel(appWidgetId)
-    val views = NanoflowWidgetRenderer.render(context, appWidgetId, model)
-    // 【2026-04-24 根因修复】跨 layout 切换（focus ↔ gate）时 partiallyUpdateAppWidget
-    // 无法改 layoutRes，旧结构（如 focus 布局右下角的 refresh_list）会保留 pendingIntent，
-    // 吞掉用户点击。对比签名决定：签名变化必须 full update。
-    val store = NanoflowWidgetStore(context)
-    val newSignature = NanoflowWidgetRenderer.resolveLayoutSignature(model)
-    val lastSignature = store.readLastAppliedLayoutSignature(appWidgetId)
-    val effectivePartial = partialUpdate && lastSignature != null && lastSignature == newSignature
-    if (effectivePartial) {
-      appWidgetManager.partiallyUpdateAppWidget(appWidgetId, views)
-    } else {
-      appWidgetManager.updateAppWidget(appWidgetId, views)
-    }
-    if (lastSignature != newSignature) {
-      store.persistLastAppliedLayoutSignature(appWidgetId, newSignature)
-      if (partialUpdate && lastSignature != null) {
-        NanoflowWidgetTelemetry.info(
-          "widget_layout_signature_changed_full_update",
-          mapOf(
-            "appWidgetId" to appWidgetId,
-            "from" to lastSignature,
-            "to" to newSignature,
-          ),
-        )
-      }
-    }
+    renderAndApplyWidget(context, appWidgetManager, repository, appWidgetId, partialUpdate)
   }
 
   private fun resolveSizeBucket(options: Bundle): String {
@@ -907,6 +702,42 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
         .putLong(USER_PRESENT_REFRESH_GATE_LAST_AT_KEY, 0L)
         .apply()
       NanoflowWidgetTelemetry.info("widget_reactive_gate_reset", mapOf("reason" to reason))
+    }
+
+    suspend fun renderAndApplyWidget(
+      context: Context,
+      appWidgetManager: AppWidgetManager,
+      repository: NanoflowWidgetRepository,
+      appWidgetId: Int,
+      partialUpdate: Boolean = false,
+    ) {
+      val model = repository.buildRenderModel(appWidgetId)
+      val views = NanoflowWidgetRenderer.render(context, appWidgetId, model)
+      // 【2026-04-24 根因修复】跨 layout 切换（focus ↔ gate）时 partiallyUpdateAppWidget
+      // 无法改 layoutRes，旧结构（如 focus 布局右下角的 refresh_list）会保留 pendingIntent，
+      // 吞掉用户点击。对比签名决定：签名变化必须 full update。
+      val store = NanoflowWidgetStore(context)
+      val newSignature = NanoflowWidgetRenderer.resolveLayoutSignature(model)
+      val lastSignature = store.readLastAppliedLayoutSignature(appWidgetId)
+      val effectivePartial = partialUpdate && lastSignature != null && lastSignature == newSignature
+      if (effectivePartial) {
+        appWidgetManager.partiallyUpdateAppWidget(appWidgetId, views)
+      } else {
+        appWidgetManager.updateAppWidget(appWidgetId, views)
+      }
+      if (lastSignature != newSignature) {
+        store.persistLastAppliedLayoutSignature(appWidgetId, newSignature)
+        if (partialUpdate && lastSignature != null) {
+          NanoflowWidgetTelemetry.info(
+            "widget_layout_signature_changed_full_update",
+            mapOf(
+              "appWidgetId" to appWidgetId,
+              "from" to lastSignature,
+              "to" to newSignature,
+            ),
+          )
+        }
+      }
     }
 
     const val EXTRA_APP_WIDGET_ID = "extra.APP_WIDGET_ID"
@@ -986,8 +817,10 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
     /**
      * 集合视图 item 点击模板 PendingIntent（广播路径）。
      *
-     * 仅用于 tabs / refresh / gate 这类「改本地状态、不启动 activity」的列表 —— 这些
+     * 仅用于 tabs / refresh / focus action 这类 broadcast 可接受的列表 —— 这些
      * 交互只在 receiver 内完成 store 更新和 partial update，不触发 BAL。
+     * Gate 的已读/完成按钮需要避开 ROM 对 broadcast 的后台限制，走
+     * [gateActionClickTemplatePendingIntent]。
      *
      * **禁止** 在 content 列表（主点击打开 App）上复用此模板：content 列表每 item 的
      * 点击都需要启动 LauncherActivity，走 receiver 中转会触发 Android 14+ 的
@@ -1004,6 +837,31 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
       return PendingIntent.getBroadcast(
         context,
         requestCodeFor(appWidgetId, ACTION_CLICK_ITEM),
+        template,
+        flags,
+      )
+    }
+
+    /**
+     * 大门「已读 / 完成」点击模板：直接启动透明 Activity 执行动作。
+     *
+     * MIUI / HyperOS 在自启动权限被系统重置后会静默丢弃 widget broadcast，表现为按钮无响应。
+     * Activity PendingIntent 继承 launcher 的前台用户手势，更接近整卡点击路径，能稳定进入本进程。
+     */
+    fun gateActionClickTemplatePendingIntent(context: Context, appWidgetId: Int): PendingIntent {
+      val template = Intent(context, NanoflowWidgetActionActivity::class.java).apply {
+        action = ACTION_CLICK_ITEM
+        setPackage(context.packageName)
+        addFlags(
+          Intent.FLAG_ACTIVITY_NEW_TASK
+            or Intent.FLAG_ACTIVITY_NO_ANIMATION
+            or Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS,
+        )
+      }
+      val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
+      return PendingIntent.getActivity(
+        context,
+        requestCodeFor(appWidgetId, "gate-action-activity"),
         template,
         flags,
       )

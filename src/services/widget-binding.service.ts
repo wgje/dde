@@ -89,6 +89,7 @@ export class WidgetBindingService {
     pushToken?: string | null;
     clientVersion?: string | null;
     clientSurface?: string | null;
+    persistRuntimeBinding?: boolean;
     instance?: { id: string; hostInstanceId: string; sizeBucket: string };
   }): Promise<Result<WidgetRegisterResult, OperationError>> {
     if (!this.supabase.isConfigured) {
@@ -174,6 +175,7 @@ export class WidgetBindingService {
       pushToken: request.pendingPushToken,
       clientVersion: request.clientVersion,
       clientSurface: request.clientVersion ? 'android-host' : null,
+      persistRuntimeBinding: false,
       instance: {
         id: request.instanceId,
         hostInstanceId: request.hostInstanceId,
@@ -257,4 +259,3 @@ export class WidgetBindingService {
   }
 
 }
-

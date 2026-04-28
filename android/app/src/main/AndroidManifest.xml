@@ -116,6 +116,16 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name="app.nanoflow.host.NanoflowWidgetActionActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:finishOnTaskLaunch="true"
+            android:launchMode="singleTop"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:theme="@style/Theme.NanoFlow.WidgetAction" />
+
         <receiver
             android:name="app.nanoflow.host.NanoflowWidgetReceiver"
             android:enabled="true"

@@ -97,6 +97,47 @@ describe('FocusStartupProbeService', () => {
     expect(service.hasPendingGateWork()).toBe(false);
   });
 
+  it('小组件打开项目时应先拉取远端黑匣子再检查大门，避免旧本地快照复活已读内容', async () => {
+    const loadFromLocal = vi.fn().mockResolvedValue([]);
+    const checkGate = vi.fn(() => gateState.set('bypassed'));
+    const pullChanges = vi.fn().mockResolvedValue(undefined);
+    const userIdSignal = signal<string | null>('user-1');
+
+    const injector = Injector.create({
+      providers: [
+        { provide: FocusStartupProbeService, useClass: FocusStartupProbeService },
+        { provide: AuthService, useValue: { currentUserId: userIdSignal } },
+        { provide: BlackBoxSyncService, useValue: { loadFromLocal, pullChanges } },
+        { provide: GateService, useValue: { checkGate, state: gateState } },
+        {
+          provide: LoggerService,
+          useValue: {
+            category: () => ({
+              debug: vi.fn(),
+              warn: vi.fn(),
+              info: vi.fn(),
+              error: vi.fn(),
+            }),
+          },
+        },
+      ],
+    });
+
+    const service = injector.get(FocusStartupProbeService);
+    service.primeWidgetWorkspaceGateSync();
+    service.initialize();
+    await flushPromises();
+
+    expect(loadFromLocal).not.toHaveBeenCalled();
+    expect(pullChanges).toHaveBeenCalledWith({
+      reason: 'gate-review',
+      force: true,
+      expectedUserId: 'user-1',
+    });
+    expect(checkGate).toHaveBeenCalledTimes(1);
+    expect(service.hasPendingGateWork()).toBe(false);
+  });
+
   it('本地快照未命中时应强制执行 gate-review 远端复核并再次检查大门', async () => {
     const loadFromLocal = vi.fn().mockResolvedValue([]);
     const checkGate = vi

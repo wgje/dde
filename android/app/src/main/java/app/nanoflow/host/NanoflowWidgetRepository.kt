@@ -483,29 +483,31 @@ class NanoflowWidgetRepository(private val context: Context) {
       }
       BlackBoxEntryAction.COMPLETE -> cached.blackBox.previews.filterNot { it.entryId == entryId }
     }
+    val candidateEntries = rotateGateEntriesAfter(gateEntries, selectedGateIndex).map { preview ->
+      if (action == BlackBoxEntryAction.READ && preview.entryId == entryId) {
+        preview.copy(isRead = true, updatedAt = nowIso)
+      } else {
+        preview
+      }
+    }
     val nextSelectedEntryId = when (action) {
-      BlackBoxEntryAction.READ -> previousSelectedEntryId?.takeIf { it.isNotBlank() }
-        ?: cached.blackBox.gatePreview.entryId?.takeIf { it.isNotBlank() && cached.blackBox.gatePreview.valid }
-        ?: entryId
+      BlackBoxEntryAction.READ -> resolveNextGateEntryId(
+        entryId = entryId,
+        candidateEntries = candidateEntries,
+      )
       BlackBoxEntryAction.COMPLETE -> {
-        val remainingGateEntries = gateEntries.filterNot { it.entryId == entryId }
-        if (remainingGateEntries.isEmpty()) {
-          null
-        } else {
-          remainingGateEntries[selectedGateIndex % remainingGateEntries.size].entryId
-        }
+        val remainingGateEntries = candidateEntries.filterNot { it.entryId == entryId }
+        remainingGateEntries.firstOrNull()?.entryId
       }
     }
     val nextPreview = when {
       nextSelectedEntryId.isNullOrBlank() -> null
       else -> newPreviews.firstOrNull { it.entryId == nextSelectedEntryId }
+        ?: candidateEntries.firstOrNull { it.entryId == nextSelectedEntryId }
     }
     val newGatePreview = when (action) {
       BlackBoxEntryAction.READ -> when {
-        cached.blackBox.gatePreview.entryId == entryId -> cached.blackBox.gatePreview.copy(
-          isRead = true,
-          updatedAt = nowIso,
-        )
+        cached.blackBox.gatePreview.entryId == entryId -> nextPreview ?: targetPreview.copy(isRead = true, updatedAt = nowIso)
         previousSelectedEntryId == entryId -> nextPreview ?: targetPreview.copy(
           isRead = true,
           updatedAt = nowIso,
@@ -1245,7 +1247,7 @@ class NanoflowWidgetRepository(private val context: Context) {
     val showIdleDockSelectionState = !hasFocusState
       && summary.dock.count > 0
       && gateEntries.isEmpty()
-      && summary.blackBox.pendingCount == 0
+      && gateQueueCount == 0
     // 2026-04-26 大门逻辑完善：
     //   * 非空大门 = `!focus && (gateEntries 非空 或 pendingCount>0)` → 整卡点击不进入项目（OPEN_FOCUS_TOOLS），
     //     仅 已读/完成 双按钮通过深链直通 mark-gate-read/complete 改写黑匣子状态。
@@ -1256,10 +1258,10 @@ class NanoflowWidgetRepository(private val context: Context) {
     val isGateEmpty = !hasFocusState
       && !showIdleDockSelectionState
       && gateEntries.isEmpty()
-      && summary.blackBox.pendingCount == 0
+      && gateQueueCount == 0
     val isGateMode = !hasFocusState
       && !showIdleDockSelectionState
-      && (gateEntries.isNotEmpty() || summary.blackBox.pendingCount > 0 || isGateEmpty)
+      && (gateEntries.isNotEmpty() || gateQueueCount > 0 || isGateEmpty)
     val metricsLine = buildMetricsLine(summary)
 
     if (isGateMode) {
@@ -1465,7 +1467,7 @@ class NanoflowWidgetRepository(private val context: Context) {
   ): List<WidgetContentCard> {
     val gateQueueCount = resolveGateQueueCount(summary)
     // privacy 隐藏了明细但仍有 pendingCount > 0：回退到聚合卡片（仍视为非空大门）。
-    if (gateEntries.isEmpty() && summary.blackBox.pendingCount > 0) {
+    if (gateEntries.isEmpty() && gateQueueCount > 0) {
       return listOf(
         WidgetContentCard(
           eyebrow = context.getString(R.string.nanoflow_widget_gate_label),
@@ -1714,7 +1716,7 @@ class NanoflowWidgetRepository(private val context: Context) {
   }
 
   private fun resolveGateQueueCount(summary: WidgetSummaryResponse): Int {
-    return summary.blackBox.pendingCount.coerceAtLeast(0)
+    return resolveBlackBoxUnreadCount(summary)
   }
 
   private fun resolveBlackBoxUnreadCount(summary: WidgetSummaryResponse): Int {
@@ -1736,6 +1738,10 @@ class NanoflowWidgetRepository(private val context: Context) {
 
     fun appendIfRenderable(preview: WidgetGatePreview) {
       if (!preview.valid) {
+        return
+      }
+
+      if (preview.isRead) {
         return
       }
 
@@ -1763,6 +1769,24 @@ class NanoflowWidgetRepository(private val context: Context) {
     return left.content == right.content
       && left.createdAt == right.createdAt
       && left.projectId == right.projectId
+  }
+
+  private fun rotateGateEntriesAfter(
+    entries: List<WidgetGatePreview>,
+    selectedGateIndex: Int,
+  ): List<WidgetGatePreview> {
+    if (entries.isEmpty()) return emptyList()
+    val safeIndex = selectedGateIndex.coerceIn(0, entries.lastIndex)
+    return entries.drop(safeIndex + 1) + entries.take(safeIndex + 1)
+  }
+
+  private fun resolveNextGateEntryId(
+    entryId: String,
+    candidateEntries: List<WidgetGatePreview>,
+  ): String? {
+    return candidateEntries.firstOrNull { it.entryId != entryId && !it.isRead }?.entryId
+      ?: candidateEntries.firstOrNull { it.entryId != entryId }?.entryId
+      ?: entryId
   }
 
   private suspend fun resolveGatePageIndex(appWidgetId: Int, entries: List<WidgetGatePreview>): Int {
