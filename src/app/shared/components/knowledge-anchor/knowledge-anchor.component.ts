@@ -1,6 +1,7 @@
-import { ChangeDetectionStrategy, Component, ElementRef, OnDestroy, computed, inject, input, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, ElementRef, HostListener, OnDestroy, computed, inject, input, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
+import { A11yModule } from '@angular/cdk/a11y';
 import { SIYUAN_ERROR_MESSAGES } from '../../../../config/siyuan.config';
 import type { ExternalSourceLink, SiyuanPreviewResult } from '../../../core/external-sources/external-source.model';
 import { ExternalSourceLinkService } from '../../../core/external-sources/external-source-link.service';
@@ -13,7 +14,7 @@ const SHEET_PREVIEW_FALLBACK: SiyuanPreviewResult = { status: 'error', errorCode
 @Component({
   selector: 'app-knowledge-anchor',
   standalone: true,
-  imports: [CommonModule, FormsModule],
+  imports: [CommonModule, FormsModule, A11yModule],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div class="knowledge-anchor" [class.knowledge-anchor--compact]="compact()">
@@ -46,15 +47,22 @@ const SHEET_PREVIEW_FALLBACK: SiyuanPreviewResult = { status: 'error', errorCode
       }
 
       @if (sheetOpen() && activeLink(); as link) {
-        <div class="fixed inset-0 z-[60] bg-black/30" (click)="closeSheet()"></div>
-        <section role="dialog" aria-modal="true" aria-labelledby="knowledge-anchor-sheet-title" class="fixed inset-x-0 bottom-0 z-[61] max-h-[70vh] rounded-t-2xl border-t border-slate-200 bg-white p-4 shadow-2xl dark:border-stone-700 dark:bg-stone-900" data-testid="knowledge-anchor-sheet">
-          <div class="mx-auto mb-3 h-1 w-10 rounded-full bg-slate-200 dark:bg-stone-700"></div>
+        <div class="fixed inset-0 z-[60] bg-black/30" aria-hidden="true" (click)="closeSheet()"></div>
+        <section
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="knowledge-anchor-sheet-title"
+          cdkTrapFocus
+          cdkTrapFocusAutoCapture
+          class="fixed inset-x-0 bottom-0 z-[61] max-h-[70vh] rounded-t-2xl border-t border-slate-200 bg-white p-4 shadow-2xl dark:border-stone-700 dark:bg-stone-900"
+          data-testid="knowledge-anchor-sheet">
+          <div class="mx-auto mb-3 h-1 w-10 rounded-full bg-slate-200 dark:bg-stone-700" aria-hidden="true"></div>
           <div class="flex items-start justify-between gap-3">
             <div class="min-w-0">
               <div id="knowledge-anchor-sheet-title" class="text-sm font-bold text-slate-800 dark:text-stone-100">思源上下文</div>
               <div class="truncate text-[11px] text-slate-500 dark:text-stone-400">{{ displayLabel(link) }}</div>
             </div>
-            <button type="button" class="text-xs text-slate-400" (click)="closeSheet()">关闭</button>
+            <button type="button" class="text-xs text-slate-400" aria-label="关闭思源上下文" (click)="closeSheet()">关闭</button>
           </div>
           <div class="mt-3 max-h-[42vh] overflow-y-auto text-xs text-slate-600 dark:text-stone-300">
             @if (sheetResult().status === 'loading') {
@@ -109,10 +117,24 @@ export class KnowledgeAnchorComponent implements OnDestroy {
   readonly activeLink = signal<ExternalSourceLink | null>(null);
   readonly sheetResult = signal<SiyuanPreviewResult>({ status: 'loading' });
   pendingInput = '';
+  /**
+   * 触发底部 sheet 的元素引用，关闭后将焦点 restore 回原位，符合 dialog/aria-modal 规范。
+   * cdkTrapFocusAutoCapture 也能恢复焦点，但当用户中途切换 chip 时，这个手动引用更稳。
+   */
+  private originChip: HTMLElement | null = null;
 
   ngOnDestroy(): void {
     this.popover.closeForHost(this.host.nativeElement);
     this.previewService.abortActive();
+  }
+
+  /**
+   * sheetOpen 时全局拦截 Esc：dialog 内 cdkTrapFocus 已限制 Tab，但点击 backdrop 后焦点
+   * 可能落到 body，document 级别监听确保 Esc 在任意情况下都能关闭。
+   */
+  @HostListener('document:keydown.escape')
+  onDocumentEscape(): void {
+    if (this.sheetOpen()) this.closeSheet();
   }
 
   async bind(event: Event): Promise<void> {
@@ -141,7 +163,7 @@ export class KnowledgeAnchorComponent implements OnDestroy {
   onChipClick(event: Event, link: ExternalSourceLink): void {
     event.stopPropagation();
     if (this.isMobile()) {
-      this.openSheet(link);
+      this.openSheet(link, event.currentTarget as HTMLElement);
       return;
     }
     this.open(link);
@@ -164,6 +186,10 @@ export class KnowledgeAnchorComponent implements OnDestroy {
     this.sheetOpen.set(false);
     this.activeLink.set(null);
     this.previewService.abortActive();
+    if (this.originChip instanceof HTMLElement && this.originChip.isConnected) {
+      this.originChip.focus();
+    }
+    this.originChip = null;
   }
 
   async refreshSheet(link: ExternalSourceLink): Promise<void> {
@@ -176,7 +202,8 @@ export class KnowledgeAnchorComponent implements OnDestroy {
     return SIYUAN_ERROR_MESSAGES[code] ?? SIYUAN_ERROR_MESSAGES.unknown;
   }
 
-  private openSheet(link: ExternalSourceLink): void {
+  private openSheet(link: ExternalSourceLink, origin?: HTMLElement): void {
+    this.originChip = origin ?? null;
     this.activeLink.set(link);
     this.sheetOpen.set(true);
     this.sheetResult.set({ status: 'loading' });
