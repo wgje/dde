@@ -38,7 +38,10 @@ jobs:
         run: |
           if [ -n "$NPM_TOKEN" ]; then
             echo "::add-mask::$NPM_TOKEN"
-            npm config set //registry.npmjs.org/:_authToken "$NPM_TOKEN" --userconfig ~/.npmrc >/dev/null 2>&1
+            if ! npm config set //registry.npmjs.org/:_authToken "$NPM_TOKEN" --userconfig ~/.npmrc >/dev/null 2>&1; then
+              echo "::error::Failed to configure npm authentication from NPM_TOKEN."
+              exit 1
+            fi
           fi
 
       - name: Restore Playwright browser cache
@@ -52,7 +55,7 @@ jobs:
       - name: Install dependencies
         run: |
           npm ci --prefer-offline || {
-            echo "::warning::npm ci --prefer-offline failed; npm cache may be stale or corrupted. Retrying npm ci without cache preference."
+            echo "::warning::npm ci --prefer-offline failed; retrying npm ci without cache preference."
             npm ci
           }
 
