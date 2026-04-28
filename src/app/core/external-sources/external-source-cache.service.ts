@@ -91,8 +91,14 @@ export class ExternalSourceCacheService {
       key,
       value: await get<LocalSiyuanPreviewCache>(key),
     })));
-    entries.sort((a, b) => (a.value?.fetchedAt ?? '').localeCompare(b.value?.fetchedAt ?? ''));
+    entries.sort((a, b) => this.fetchedAtMs(a.value) - this.fetchedAtMs(b.value));
     const excess = entries.slice(0, entries.length - SIYUAN_CONFIG.MAX_PREVIEW_CACHE_ENTRIES);
     await Promise.all(excess.map(entry => del(entry.key)));
+  }
+
+  private fetchedAtMs(value: LocalSiyuanPreviewCache | undefined): number {
+    if (!value?.fetchedAt) return 0;
+    const time = new Date(value.fetchedAt).getTime();
+    return Number.isFinite(time) ? time : 0;
   }
 }

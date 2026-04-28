@@ -43,7 +43,9 @@ export class KnowledgeAnchorPopoverService {
     this.cancelClose();
     this.previewService.abortActive();
     this.overlayRef?.detach();
-    this.originRef?.focus?.();
+    if (this.originRef instanceof HTMLElement) {
+      this.originRef.focus();
+    }
     this.originRef = undefined;
   }
 

@@ -26,6 +26,8 @@ interface TaskAttachmentMetadata {
   mimeType: string;
 }
 
+const SIYUAN_TOKEN_MASK = '••••••••';
+
 @Component({
   selector: 'app-settings-modal',
   standalone: true,
@@ -904,7 +906,7 @@ export class SettingsModalComponent {
     const config = await this.siyuanCache.loadConfig();
     this.siyuanRuntimeMode.set(config.runtimeMode);
     this.siyuanBaseUrl.set(config.baseUrl || SIYUAN_CONFIG.DEFAULT_BASE_URL);
-    this.siyuanTokenMask.set(config.token ? '••••••••' : '');
+    this.siyuanTokenMask.set(config.token ? SIYUAN_TOKEN_MASK : '');
   }
 
   async updateSiyuanRuntimeMode(event: Event): Promise<void> {
@@ -924,10 +926,10 @@ export class SettingsModalComponent {
 
   async updateSiyuanToken(event: Event): Promise<void> {
     const value = (event.target as HTMLInputElement | null)?.value.trim() ?? '';
-    if (value === '••••••••') return;
+    if (value === SIYUAN_TOKEN_MASK) return;
     const config = await this.siyuanCache.loadConfig();
     await this.siyuanCache.saveConfig({ ...config, token: value || undefined });
-    this.siyuanTokenMask.set(value ? '••••••••' : '');
+    this.siyuanTokenMask.set(value ? SIYUAN_TOKEN_MASK : '');
   }
 
   async clearSiyuanCache(): Promise<void> {

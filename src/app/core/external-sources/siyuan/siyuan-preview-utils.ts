@@ -7,10 +7,15 @@ const MARKDOWN_MARK_PATTERN = /[`*_>#\-\[\]()]/g;
 
 export function kramdownToPlainText(kramdown: string): string {
   return kramdown
+    // 移除思源块属性尾标记。
     .replace(KRAMDOWN_ATTR_PATTERN, '')
+    // 块引用仅保留显示文本或 blockId，避免首版产生块内漫游入口。
     .replace(BLOCK_REF_PATTERN, (_match, blockId: string, label?: string) => label || blockId)
+    // 资源文件首版不代理加载，只保留占位文本。
     .replace(/!\[[^\]]*\]\([^)]*\)/g, '[图片]')
+    // 普通 Markdown 链接保留可读文本，不直接注入 HTML。
     .replace(/\[[^\]]+\]\([^)]*\)/g, text => text.replace(/^\[|\]\([^)]*\)$/g, ''))
+    // 删除剩余 Markdown 标记，输出安全摘要文本。
     .replace(MARKDOWN_MARK_PATTERN, '')
     .replace(/\s+/g, ' ')
     .trim();

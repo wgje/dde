@@ -1,5 +1,6 @@
 import { Injectable, inject } from '@angular/core';
 import { SIYUAN_CONFIG } from '../../../../config/siyuan.config';
+import { LoggerService } from '../../../../services/logger.service';
 import { ExternalSourceCacheService } from '../external-source-cache.service';
 import type { ExternalSourceLink, LocalSiyuanPreviewCache, SiyuanPreviewResult } from '../external-source.model';
 import { SiyuanDirectProvider } from './siyuan-direct-provider';
@@ -18,6 +19,7 @@ export class SiyuanPreviewService {
   private readonly cache = inject(ExternalSourceCacheService);
   private readonly extensionProvider = inject(SiyuanExtensionProvider);
   private readonly directProvider = inject(SiyuanDirectProvider);
+  private readonly logger = inject(LoggerService).category('SiyuanPreview');
   private activeRequest?: ActivePreviewRequest;
   private requestSeq = 0;
 
@@ -25,7 +27,13 @@ export class SiyuanPreviewService {
     const cached = await this.cache.getPreview(link.id, link.targetId);
     if (cached && !options?.forceRefresh) {
       const stale = Date.now() - new Date(cached.fetchedAt).getTime() > SIYUAN_CONFIG.CACHE_STALE_MS;
-      void this.refresh(link).catch(() => undefined);
+      void this.refresh(link).catch(error => {
+        this.logger.debug('后台刷新思源预览失败，继续使用本机缓存', {
+          linkId: link.id,
+          blockId: link.targetId,
+          message: error instanceof Error ? error.message : 'unknown',
+        });
+      });
       return { status: 'ready', preview: cached, stale };
     }
     return this.refresh(link, cached ?? undefined);

@@ -68,8 +68,10 @@ export class SiyuanDirectProvider implements SiyuanPreviewProvider {
       const url = new URL(baseUrl);
       const host = url.hostname;
       const isLocalHost = host === '127.0.0.1' || host === 'localhost' || host === '[::1]';
-      const pageAllowsLocalHttp = typeof location === 'undefined' || location.protocol !== 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1';
-      return isLocalHost && url.protocol === 'http:' && pageAllowsLocalHttp;
+      const isHttpKernel = url.protocol === 'http:';
+      const isHttpsPage = typeof location !== 'undefined' && location.protocol === 'https:';
+      const isLocalPage = typeof location === 'undefined' || location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+      return isLocalHost && isHttpKernel && (!isHttpsPage || isLocalPage);
     } catch {
       return false;
     }

@@ -8,6 +8,8 @@ import { SiyuanPreviewService } from '../../../core/external-sources/siyuan/siyu
 import { shortenSiyuanBlockId } from '../../../core/external-sources/siyuan/siyuan-link-parser';
 import { KnowledgeAnchorPopoverService } from './knowledge-anchor-popover.service';
 
+const SHEET_PREVIEW_FALLBACK: SiyuanPreviewResult = { status: 'error', errorCode: 'unknown' };
+
 @Component({
   selector: 'app-knowledge-anchor',
   standalone: true,
@@ -173,8 +175,12 @@ export class KnowledgeAnchorComponent {
     this.activeLink.set(link);
     this.sheetOpen.set(true);
     this.sheetResult.set({ status: 'loading' });
-    void this.previewService.preview(link).then(result => {
-      if (this.activeLink()?.id === link.id) this.sheetResult.set(result);
-    });
+    void this.previewService.preview(link)
+      .then(result => {
+        if (this.activeLink()?.id === link.id) this.sheetResult.set(result);
+      })
+      .catch(() => {
+        if (this.activeLink()?.id === link.id) this.sheetResult.set(SHEET_PREVIEW_FALLBACK);
+      });
   }
 }

@@ -130,6 +130,10 @@ export class ExternalSourceLinkService {
 
   openLink(link: ExternalSourceLink): void {
     if (typeof window === 'undefined') return;
+    if (!parseSiyuanBlockLink(link.uri)) {
+      this.toast.error('思源链接无效', '已阻止打开非 siyuan:// 块链接');
+      return;
+    }
     window.location.href = link.uri;
   }
 
