@@ -68,12 +68,34 @@ const GIF_BYTES = new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x37, 0x61, 0, 0, 0, 0
 /** 魔数：PDF (%PDF) */
 const PDF_BYTES = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x34, 0, 0, 0, 0, 0, 0, 0, 0]);
 
+class ArrayBufferFileReader {
+  result: ArrayBuffer | null = null;
+  error: DOMException | null = null;
+  onload: ((this: FileReader, ev: ProgressEvent<FileReader>) => unknown) | null = null;
+  onerror: ((this: FileReader, ev: ProgressEvent<FileReader>) => unknown) | null = null;
+
+  readAsArrayBuffer(blob: Blob): void {
+    void blob.arrayBuffer()
+      .then((buffer) => {
+        this.result = buffer;
+        this.onload?.call(this as unknown as FileReader, new ProgressEvent('load') as ProgressEvent<FileReader>);
+      })
+      .catch((error: unknown) => {
+        this.error = error instanceof DOMException
+          ? error
+          : new DOMException(error instanceof Error ? error.message : 'Failed to read file');
+        this.onerror?.call(this as unknown as FileReader, new ProgressEvent('error') as ProgressEvent<FileReader>);
+      });
+  }
+}
+
 describe('FileTypeValidatorService', () => {
   let service: FileTypeValidatorService;
   let injector: Injector;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.stubGlobal('FileReader', ArrayBufferFileReader);
 
     injector = Injector.create({
       providers: [
@@ -86,6 +108,7 @@ describe('FileTypeValidatorService', () => {
 
   afterEach(() => {
     vi.clearAllMocks();
+    vi.unstubAllGlobals();
   });
 
   // ==========================================================================
