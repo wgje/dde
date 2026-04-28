@@ -17,6 +17,11 @@ ALTER TABLE public.widget_devices_legacy_retired
 CREATE UNIQUE INDEX IF NOT EXISTS idx_widget_devices_legacy_retired_id
   ON public.widget_devices_legacy_retired (id);
 
+ALTER TABLE public.widget_devices_legacy_retired ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.widget_devices_legacy_retired FORCE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE public.widget_devices_legacy_retired FROM PUBLIC, anon, authenticated;
+GRANT SELECT ON TABLE public.widget_devices_legacy_retired TO service_role;
+
 CREATE TABLE IF NOT EXISTS public.widget_instances_legacy_retired
 AS TABLE public.widget_instances WITH NO DATA;
 
@@ -28,6 +33,11 @@ ALTER TABLE public.widget_instances_legacy_retired
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_widget_instances_legacy_retired_id
   ON public.widget_instances_legacy_retired (id);
+
+ALTER TABLE public.widget_instances_legacy_retired ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.widget_instances_legacy_retired FORCE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE public.widget_instances_legacy_retired FROM PUBLIC, anon, authenticated;
+GRANT SELECT ON TABLE public.widget_instances_legacy_retired TO service_role;
 
 INSERT INTO public.widget_instances_legacy_retired
 SELECT wi.*, now(), 'desktop-widget-retired'
@@ -168,7 +178,7 @@ CREATE OR REPLACE FUNCTION public.cleanup_old_deleted_tasks()
 RETURNS integer
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path TO 'pg_catalog', 'public'
+SET search_path TO ''
 AS $$
 DECLARE
   deleted_count integer;
@@ -241,7 +251,7 @@ CREATE OR REPLACE FUNCTION public.cleanup_old_deleted_connections()
 RETURNS integer
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path TO 'pg_catalog', 'public'
+SET search_path TO ''
 AS $$
 DECLARE
   deleted_count integer;
@@ -290,7 +300,13 @@ $$;
 COMMENT ON FUNCTION public.cleanup_old_deleted_tasks() IS
   '硬删除超过 30 天的软删除任务前先写 task/connection tombstone，避免离线端把过期回收站数据误当作仍可恢复。';
 
+REVOKE ALL ON FUNCTION public.cleanup_old_deleted_tasks() FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.cleanup_old_deleted_tasks() TO service_role;
+
 COMMENT ON FUNCTION public.cleanup_old_deleted_connections() IS
   '硬删除超过 30 天的软删除连接前先写 connection tombstone，确保客户端能通过水位收敛。';
+
+REVOKE ALL ON FUNCTION public.cleanup_old_deleted_connections() FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.cleanup_old_deleted_connections() TO service_role;
 
 COMMIT;
