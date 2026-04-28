@@ -695,7 +695,7 @@ siyuan://blocks/20260426123456-abc1234?focus=1
 
 解析规则：
 
-1. block ID 格式按 `YYYYMMDDHHmmss-xxxxxxx` 校验，即 `^\d{14}-[a-z0-9]{7}$`；后缀必须正好 7 位，每一位允许小写字母 `a-z` 或数字 `0-9`，例如 `20260426123456-abc1234`。
+1. block ID 格式按 `YYYYMMDDHHmmss-xxxxxxx` 校验，即 `^\d{14}-[a-z0-9]{7}$`；后缀必须正好 7 位，每一位允许小写字母 `a-z` 或数字 `0-9`，显式不接受大写字母，例如 `20260426123456-abc1234`。
 2. `siyuan://blocks/{id}` 只提取 path 中的 `{id}`，忽略未知 query 参数。
 3. 保存时统一生成规范 URI：`siyuan://blocks/{id}?focus=1`。
 4. 原始输入不得直接回显为 HTML；错误提示只展示经过转义的文本。
@@ -817,18 +817,16 @@ siyuan.previewStrategy = excerpt-first
 siyuan.autoRefresh = on-hover | manual
 ```
 
-建议实现时把预览限制集中为命名配置：
+建议实现时把预览数量与摘要长度限制集中为命名配置；超时初始阶段直接使用 `TIMEOUT_CONFIG.QUICK`：
 
 ```ts
 const SIYUAN_PREVIEW_CONFIG = {
   MAX_CHILD_BLOCKS: 5,
   MAX_EXCERPT_CHARS: 500,
-  // 引用既有常量，不硬编码 5000。
-  TIMEOUT_MS: TIMEOUT_CONFIG.QUICK,
 } as const;
 ```
 
-其中 `SIYUAN_PREVIEW_CONFIG.TIMEOUT_MS` 表示在代码中引用 `TIMEOUT_CONFIG.QUICK` 常量本身，不复制数值 `5000`；只有确实需要独立调优时，才改为新的具名毫秒常量并补充原因。
+如后续基准测试证明思源本地内核需要独立超时，再新增 `SIYUAN_PREVIEW_CONFIG.TIMEOUT_MS`，并在代码中引用既有 `TIMEOUT_CONFIG` 或新的具名毫秒常量，不复制裸数值。
 
 建议在设置页增加：
 
