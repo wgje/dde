@@ -212,7 +212,7 @@ Knowledge Anchor 的作用是降低“切出任务上下文”的摩擦，而不
 |------|------|------|
 | `SIYUAN_CONFIG.MAX_PREVIEW_CHILDREN` | `10` | 单次预览最多展示的子块数量 |
 | `SIYUAN_CONFIG.MAX_PREVIEW_CHARS` | `1200` | 任务卡 Popover / Sheet 单次展示的摘要字符上限 |
-| `SIYUAN_CONFIG.PREVIEW_FETCH_TIMEOUT_MS` | `TIMEOUT_CONFIG.QUICK` | 单次块预览请求超时，复用 `src/config/timeout.config.ts` 中的 5000ms 快速操作超时 |
+| `SIYUAN_CONFIG.PREVIEW_FETCH_TIMEOUT_MS` | `TIMEOUT_CONFIG.QUICK` | 单次块预览请求超时，复用 `src/config/timeout.config.ts` 中的快速操作超时；实际毫秒值以常量定义为准 |
 | `SIYUAN_CONFIG.CACHE_STALE_MS` | `86400000` | 本机预览缓存陈旧提示阈值，默认 24 小时 |
 
 ### 4.6 块级精确预览结论
@@ -435,7 +435,7 @@ siyuan-preview-cache:{linkId}:{blockId}
 siyuan-local-config:{userId}
 ```
 
-> **实现注意**：如果旧版已经落地过 `siyuan-preview-cache:{linkId}`，切换到 `siyuan-preview-cache:{linkId}:{blockId}` 属于本机缓存 key 的破坏性调整；实现时必须按本节“缓存迁移说明”处理，不能直接复用旧缓存内容。
+> **实现注意**：如果旧版已经落地过 `siyuan-preview-cache:{linkId}`，切换到 `siyuan-preview-cache:{linkId}:{blockId}` 属于本机缓存 key 的破坏性调整；实现时必须按下方紧邻的“缓存迁移说明”处理，不能直接复用旧缓存内容。
 
 清理策略：
 
@@ -449,6 +449,7 @@ siyuan-local-config:{userId}
 1. 如果该能力首次实现时尚未上线旧版 `siyuan-preview-cache:{linkId}`，直接采用新 key，无需迁移。
 2. 如果已有旧版本机缓存，启动时可以按 `linkId -> ExternalSourceLink.targetId` 补写新 key；无法确认 `blockId` 的旧缓存必须丢弃。
 3. 迁移只发生在当前设备本地，不产生云端同步，不影响锚点指针。
+4. 对只匹配 `linkId` 或只匹配 `blockId` 的旧缓存，运行时按 cache miss 处理；后台清理可按 `CACHE_STALE_MS`、锚点删除事件或用户“清除本机缓存”统一回收，避免频繁替换锚点后本机缓存无界增长。
 
 ### 6.5 同步规则
 
