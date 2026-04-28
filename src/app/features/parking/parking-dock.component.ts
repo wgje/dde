@@ -163,7 +163,7 @@ export class ParkingDockComponent implements OnDestroy {
       ? (this.exitVisualSnapshot()?.statusMachineEntries ?? null)
       : null,
   );
-  readonly dockExpanded = computed(() => this.engine.dockExpanded());
+  readonly dockExpanded = this.engine.dockExpanded;
   readonly semicircleExpanded = computed(() => this.dockExpanded() || this.dragDrop.semicircleHoverExpanded());
   readonly hudSize = signal<{ width: number; height: number }>({
     width: PARKING_CONFIG.HUD_FULL_MAX_WIDTH_PX,
