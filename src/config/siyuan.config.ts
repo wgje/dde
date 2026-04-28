@@ -17,6 +17,8 @@ export const SIYUAN_CONFIG = {
   MAX_LABEL_LENGTH: 256,
   MAX_HPATH_LENGTH: 1024,
   EXTENSION_PING_TIMEOUT_MS: 500,
+  /** 思源锚点本机 pending 队列推送失败超过此次数则迁出到死信表。 */
+  PENDING_MAX_RETRIES: 5,
 } as const;
 
 export const SIYUAN_ERROR_MESSAGES: Record<string, string> = {

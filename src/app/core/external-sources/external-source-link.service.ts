@@ -18,6 +18,9 @@ import {
   shortenSiyuanBlockId,
 } from "./siyuan/siyuan-link-parser";
 
+/** Postgres 唯一约束冲突 errorCode；命名常量便于检索 23505 的所有处理位置。 */
+const POSTGRES_UNIQUE_VIOLATION = "23505";
+
 interface ExternalSourceLinkRow {
   id: string;
   user_id: string;
@@ -294,7 +297,7 @@ export class ExternalSourceLinkService {
         const errorCode = (error as { code?: string }).code ?? "unknown";
         // 23505 = Postgres unique_violation：另一端已绑定同一 (task, target)。
         // 不再重试，丢弃 pending 项让下一次 ensureLoaded 重新拉远端真相。
-        if (errorCode === "23505") {
+        if (errorCode === POSTGRES_UNIQUE_VIOLATION) {
           this.logger.info("思源锚点唯一冲突，丢弃本机 pending", {
             linkId: this.safeId(link.id),
           });
@@ -354,9 +357,11 @@ export class ExternalSourceLinkService {
     const next = new Map(links.map((link) => [link.id, link]));
     const now = new Date().toISOString();
     // 排序在 updatedAt 持平时按 id 升序，保证多端 collapse 选出同一 winner，避免相互踩。
+    // UUID 是纯 ASCII，使用普通 < / > 比较避免 localeCompare 的 locale 漂移。
     const sorted = links.slice().sort((a, b) => {
       const cmp = a.updatedAt.localeCompare(b.updatedAt);
-      return cmp !== 0 ? cmp : a.id.localeCompare(b.id);
+      if (cmp !== 0) return cmp;
+      return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
     });
     for (const link of sorted) {
       if (link.deletedAt) continue;
@@ -385,8 +390,8 @@ export class ExternalSourceLinkService {
     const cmp = a.updatedAt.localeCompare(b.updatedAt);
     if (cmp > 0) return a;
     if (cmp < 0) return b;
-    // updatedAt 相同时按 id 升序确定唯一 winner（多端一致）。
-    return a.id.localeCompare(b.id) <= 0 ? a : b;
+    // updatedAt 相同时按 id 升序确定唯一 winner（多端一致），ASCII 比较避免 locale 漂移。
+    return a.id <= b.id ? a : b;
   }
 
   private normalizeLink(link: ExternalSourceLink): ExternalSourceLink {

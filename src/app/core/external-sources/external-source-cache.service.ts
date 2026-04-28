@@ -10,9 +10,6 @@ import type {
   SiyuanLocalConfig,
 } from "./external-source.model";
 
-/** 重试次数超过此阈值则迁出到死信，避免持续噪声。 */
-const PENDING_MAX_RETRIES = 5;
-
 @Injectable({ providedIn: "root" })
 export class ExternalSourceCacheService {
   private readonly auth = inject(AuthService);
@@ -107,7 +104,7 @@ export class ExternalSourceCacheService {
           lastTriedAt: new Date().toISOString(),
           lastErrorCode: errorCode,
         };
-        if (updated.retryCount > PENDING_MAX_RETRIES) {
+        if (updated.retryCount > SIYUAN_CONFIG.PENDING_MAX_RETRIES) {
           movedToDeadLetter = updated;
         } else {
           next.push(updated);
