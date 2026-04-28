@@ -18,7 +18,7 @@
 2. **NanoFlow 负责执行推进**：任务排序、Focus、Parking Dock、流程推进仍由 NanoFlow 主导。
 3. **指针优先于镜像**：默认只同步块 ID、URI、路径、标签、角色等轻量信息；正文预览默认仅保存在本机。
 4. **只读优先于写回**：第一阶段只做读取预览、打开原块、刷新缓存、解除关联，不做从 NanoFlow 改写思源。
-5. **块级精确预览优先于文档级预览**：任务卡预览必须以 `targetId` 指向的思源块为根，只展示该块及受限的一层子块，不默认展开整篇文档。
+5. **块级精确预览优先于文档级预览**：任务卡预览必须以 `targetId` 指向的思源块为根，只展示该块及受限的一层子块，不默认展开整篇文档，避免把执行上下文扩大成整篇阅读流。
 
 ### 0.1 本案最终裁决
 
@@ -431,7 +431,7 @@ siyuan-preview-cache:{linkId}:{blockId}
 siyuan-local-config:{userId}
 ```
 
-> **实现注意**：如果旧版已经落地过 `siyuan-preview-cache:{linkId}`，切换到 `siyuan-preview-cache:{linkId}:{blockId}` 属于本机缓存 key 的破坏性调整；实现时必须按下方迁移说明处理，不能直接复用旧缓存内容。
+> **实现注意**：如果旧版已经落地过 `siyuan-preview-cache:{linkId}`，切换到 `siyuan-preview-cache:{linkId}:{blockId}` 属于本机缓存 key 的破坏性调整；实现时必须按本节“缓存迁移说明”处理，不能直接复用旧缓存内容。
 
 清理策略：
 
@@ -526,6 +526,7 @@ interface SiyuanPreviewProvider {
 1. 返回的 `blockId` 必须与入参 `blockId` 完全一致；调用方在写入缓存或更新 UI 前必须再次比对，不一致时丢弃响应。
 2. `truncated = true` 表示任一截断发生：正文超过 `MAX_PREVIEW_CHARS`、直接子块超过 `MAX_PREVIEW_CHILDREN`，或 provider 因安全策略裁剪了不适合展示的内容。
 3. 调用方必须为每次悬浮 / Sheet 打开创建独立 `AbortController`，在锚点切换、Popover 关闭、组件销毁或用户手动刷新覆盖旧请求时调用 `abort()`。
+4. 单次不匹配响应通常视为并发请求的迟到结果，只记录 debug 级信息；若同一 provider 连续返回不匹配 `blockId`，应按 provider bug 记录可脱敏诊断事件。
 
 实现优先级：
 
@@ -677,7 +678,7 @@ Context7 对思源 API 的查询结果显示，`/api/block/getBlockKramdown`、`
 2. `getChildBlocks` 失败不应导致整个预览失败；可以只显示当前块正文并提示子块不可用。
 3. `getHPathByID` 失败不应阻塞预览；任务卡可退回显示 `label` 或短 block ID。
 4. 任一接口超时后必须通过 `AbortSignal` 取消剩余请求。
-5. 如果底层通道无法真正取消请求，响应返回时仍必须比对当前 `linkId` / `blockId`。
+5. 组件或预览服务必须维护当前活跃请求状态，例如 `{ linkId, blockId, controller }`；如果底层通道无法真正取消请求，响应返回时仍必须与该活跃状态比对。
 6. 比对不一致的迟到结果必须丢弃，避免 hover 快速切换造成过期预览覆盖当前锚点。
 
 ### 9.2 MVP 禁止的接口
@@ -849,7 +850,7 @@ siyuan.autoRefresh = on-hover | manual
 验收：
 
 1. 有缓存时可立即展示。
-2. 缓存命中必须同时匹配 `linkId` 与 `blockId`。
+2. 缓存命中必须同时匹配 `linkId` 与 `blockId`；只匹配其中一个时按 cache miss 处理并重新拉取，不自动删除旧缓存。
 3. 无缓存时能显示正确状态，不阻塞任务操作。
 4. Focus / Dock 中为缩减版预览。
 5. 清除本机缓存不会删除云端锚点。
@@ -954,7 +955,7 @@ siyuan.autoRefresh = on-hover | manual
 | 层级 | 覆盖点 |
 |------|------|
 | 单元测试 | 链接解析、block ID 校验、provider 选择、错误码映射、Kramdown 摘要裁剪 |
-| 服务测试 | 本地先写、离线新增后恢复同步、软删除、缓存清理、精确块缓存命中、缓存键不匹配时拒绝过期预览、快速切换锚点时丢弃迟到响应、断言 Supabase 同步 payload 不含 `content` / `markdown` / `kramdown` / `plainText` |
+| 服务测试 | 本地先写；离线新增后恢复同步；软删除；缓存清理；精确块缓存命中；缓存键不匹配时拒绝过期预览；快速切换锚点时丢弃迟到响应；断言 Supabase 同步 payload 不含 `content` / `markdown` / `kramdown` / `plainText` |
 | 组件测试 | 任务卡锚点展示、Popover / Sheet 状态、Focus compact 模式、当前块可用但路径或子块失败的降级态 |
 | E2E | 粘贴链接绑定、点击深链、扩展不可用降级、离线绑定后恢复同步、移动端 Sheet |
 
