@@ -402,6 +402,7 @@ export function sanitizeTask(rawTask: unknown): Task {
         : 'active';
   const createdDate = typeof task.createdDate === 'string' ? task.createdDate : nowISO();
   const updatedAt = typeof task.updatedAt === 'string' ? task.updatedAt : undefined;
+  // 兼容 completed_at 字段上线前的本地缓存：首次清洗时固化旧完成任务的历史时间。
   const completedAt = normalizedStatus === 'completed'
     ? (typeof task.completedAt === 'string' ? task.completedAt : updatedAt ?? createdDate)
     : null;

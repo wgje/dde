@@ -163,6 +163,9 @@ export class DockTaskSyncService {
     );
   }
 
+  /**
+   * 完成时间不是 LWW 时钟：已完成任务保留原值，刚完成时写入 now，恢复/归档时清空。
+   */
   private resolveCompletedAt(currentTask: Task, patch: Partial<Task>, now: string): string | null | undefined {
     if (patch.status === 'completed') {
       if (currentTask.status === 'completed') {

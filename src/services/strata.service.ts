@@ -166,6 +166,7 @@ export class StrataService {
   }
 
   private getTaskCompletionTimestamp(task: { completedAt?: string | null; updatedAt?: string; createdDate: string }): string | undefined {
+    // completed_at 上线前的历史任务没有独立完成时间，只能在本地清洗/远端迁移前回退到旧时间戳。
     return task.completedAt || task.updatedAt || task.createdDate;
   }
 
@@ -179,7 +180,11 @@ export class StrataService {
 
   private getTimestampMillis(timestamp: string): number {
     const value = new Date(timestamp).getTime();
-    return Number.isNaN(value) ? 0 : value;
+    if (Number.isNaN(value)) {
+      this.logger.warn('Strata', '完成时间无法解析，使用稳定兜底排序', { timestamp });
+      return 0;
+    }
+    return value;
   }
 
   private getLatestCompletedLocalDate(): string | null {
@@ -420,7 +425,10 @@ export class StrataService {
 
   private parseLocalDate(date: string): Date {
     const [year, month, day] = date.split('-').map(Number);
-    if (!year || !month || !day) return new Date(date);
+    if (!year || !month || !day) {
+      this.logger.warn('Strata', '本地日期格式异常，降级使用 Date 解析', { date });
+      return new Date(date);
+    }
     return new Date(year, month - 1, day);
   }
 
