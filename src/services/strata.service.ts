@@ -87,12 +87,12 @@ export class StrataService {
     const config = FOCUS_CONFIG.STRATA;
     const layers: StrataLayer[] = [];
     const anchorDate = this.getLatestCompletedLocalDate() ?? this.getLocalDaysAgo(0);
-     
+
     for (let i = 0; i < config.MAX_DISPLAY_DAYS; i++) {
       // 以最后完成日为沉积剖面的 0 层，避免自然日期推进导致历史层跳动
       const date = this.getLocalDaysBefore(anchorDate, i);
       const items = this.getItemsForDate(date);
-      
+
       if (items.length > 0) {
         // 计算透明度：越旧越透明
         const opacity = Math.max(
@@ -274,7 +274,7 @@ export class StrataService {
   getLayerLabel(date: string): string {
     const yesterday = this.getLocalDaysAgo(1);
     const anchorDate = this.getLatestCompletedLocalDate();
-     
+
     // 最后完成日始终显示具体日期，配合标尺「那日」表达回看锚点
     if (date === anchorDate) return this.formatDateLabel(date);
     if (date === yesterday) return '昨日';

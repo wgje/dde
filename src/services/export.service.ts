@@ -293,7 +293,7 @@ export class ExportService {
       void this.preference.recordBackupProof(normalized);
     }
   }
-  
+
   /**
    * 导出当前项目
    */
