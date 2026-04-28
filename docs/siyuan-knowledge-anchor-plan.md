@@ -212,7 +212,7 @@ Knowledge Anchor 的作用是降低“切出任务上下文”的摩擦，而不
 |------|------|------|
 | `SIYUAN_CONFIG.MAX_PREVIEW_CHILDREN` | `10` | 单次预览最多展示的子块数量 |
 | `SIYUAN_CONFIG.MAX_PREVIEW_CHARS` | `1200` | 任务卡 Popover / Sheet 单次展示的摘要字符上限 |
-| `SIYUAN_CONFIG.PREVIEW_FETCH_TIMEOUT_MS` | `TIMEOUT_CONFIG.QUICK` | 单次块预览请求超时，复用现有 5000ms 快速操作超时 |
+| `SIYUAN_CONFIG.PREVIEW_FETCH_TIMEOUT_MS` | `TIMEOUT_CONFIG.QUICK` | 单次块预览请求超时，复用 `src/config/timeout.config.ts` 中的 5000ms 快速操作超时 |
 | `SIYUAN_CONFIG.CACHE_STALE_MS` | `86400000` | 本机预览缓存陈旧提示阈值，默认 24 小时 |
 
 ### 4.6 块级精确预览结论
@@ -349,7 +349,7 @@ type LocalSiyuanPreviewCache = {
 };
 ```
 
-`sortOrder` 采用升序排序；MVP 单锚点固定为 `0`，多锚点启用后由同一任务内的活跃锚点维护稳定顺序。`LocalSiyuanPreviewCache.blockId` 必须等于 `ExternalSourceLink.targetId`，用于防止同一任务切换锚点后误用旧缓存。`render-blocked` 表示预览内容被安全渲染链路拦截，用户仍可通过深链打开思源原块。
+`sortOrder` 采用升序排序；MVP 单锚点固定为 `0`，多锚点启用后由同一任务内的活跃锚点维护稳定顺序。`LocalSiyuanPreviewCache.linkId` 标识 NanoFlow 锚点关系，`LocalSiyuanPreviewCache.blockId` 标识具体思源块；两者同时存在是为了在同一任务替换锚点、多锚点排序或迟到响应返回时防止跨块误命中。`LocalSiyuanPreviewCache.blockId` 必须等于 `ExternalSourceLink.targetId`。`render-blocked` 表示预览内容被安全渲染链路拦截，用户仍可通过深链打开思源原块。
 
 ### 6.2 同步与本地存储边界
 
@@ -430,6 +430,8 @@ external-source-links:{userId}
 siyuan-preview-cache:{linkId}:{blockId}
 siyuan-local-config:{userId}
 ```
+
+> **实现注意**：如果旧版已经落地过 `siyuan-preview-cache:{linkId}`，切换到 `siyuan-preview-cache:{linkId}:{blockId}` 属于本机缓存 key 的破坏性调整；实现时必须按下方迁移说明处理，不能直接复用旧缓存内容。
 
 清理策略：
 
@@ -514,7 +516,7 @@ interface SiyuanPreviewProvider {
     kramdown?: string;
     sourceUpdatedAt?: string;
     childBlocks?: Array<{ id: string; content: string; type: string }>;
-    truncated: boolean;
+    truncated: boolean; // 正文、子块或安全裁剪任一发生时为 true
   }>;
 }
 ```
@@ -952,7 +954,7 @@ siyuan.autoRefresh = on-hover | manual
 | 层级 | 覆盖点 |
 |------|------|
 | 单元测试 | 链接解析、block ID 校验、provider 选择、错误码映射、Kramdown 摘要裁剪 |
-| 服务测试 | 本地先写、离线新增后恢复同步、软删除、缓存清理、精确块缓存命中、断言 Supabase 同步 payload 不含 `content` / `markdown` / `kramdown` / `plainText` |
+| 服务测试 | 本地先写、离线新增后恢复同步、软删除、缓存清理、精确块缓存命中、缓存键不匹配时拒绝过期预览、快速切换锚点时丢弃迟到响应、断言 Supabase 同步 payload 不含 `content` / `markdown` / `kramdown` / `plainText` |
 | 组件测试 | 任务卡锚点展示、Popover / Sheet 状态、Focus compact 模式、当前块可用但路径或子块失败的降级态 |
 | E2E | 粘贴链接绑定、点击深链、扩展不可用降级、离线绑定后恢复同步、移动端 Sheet |
 
