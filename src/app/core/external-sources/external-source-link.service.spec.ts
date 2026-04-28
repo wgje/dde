@@ -18,6 +18,8 @@ describe('ExternalSourceLinkService', () => {
   let authUser = signal('00000000-0000-0000-0000-000000000001');
   let shouldFailUpsert = false;
   let upsertError: { code?: string; status?: number; message: string } | null = null;
+  let remoteRows: unknown[] = [];
+  let clientAsyncMock: ReturnType<typeof vi.fn>;
 
   beforeEach(async () => {
     await clear();
@@ -25,8 +27,9 @@ describe('ExternalSourceLinkService', () => {
     authUser = signal('00000000-0000-0000-0000-000000000001');
     shouldFailUpsert = false;
     upsertError = null;
+    remoteRows = [];
     const from = vi.fn((table: string) => ({
-      select: vi.fn(() => ({ eq: vi.fn(async () => ({ data: [], error: null })) })),
+      select: vi.fn(() => ({ eq: vi.fn(async () => ({ data: remoteRows, error: null })) })),
       upsert: vi.fn(async (payload: unknown) => {
         if (upsertError) return { error: upsertError };
         if (shouldFailUpsert) return { error: new Error('offline') };
@@ -34,12 +37,13 @@ describe('ExternalSourceLinkService', () => {
         return { error: null };
       }),
     }));
+    clientAsyncMock = vi.fn(async () => ({ from }));
 
     TestBed.configureTestingModule({
       providers: [
         ExternalSourceLinkService,
         { provide: AuthService, useValue: { currentUserId: authUser } },
-        { provide: SupabaseClientService, useValue: { clientAsync: vi.fn(async () => ({ from })) } },
+        { provide: SupabaseClientService, useValue: { clientAsync: clientAsyncMock } },
         { provide: ToastService, useValue: { success: vi.fn(), info: vi.fn(), error: vi.fn() } },
         { provide: LoggerService, useValue: createLoggerMock() },
       ],
@@ -138,13 +142,99 @@ describe('ExternalSourceLinkService', () => {
 
   it('dedupes concurrent ensureLoaded calls into a single in-flight promise', async () => {
     const service = TestBed.inject(ExternalSourceLinkService);
-    const supabase = TestBed.inject(SupabaseClientService) as unknown as { clientAsync: ReturnType<typeof vi.fn> };
-    const before = supabase.clientAsync.mock.calls.length;
+    const before = clientAsyncMock.mock.calls.length;
 
     await Promise.all([service.ensureLoaded(), service.ensureLoaded(), service.ensureLoaded()]);
-    const after = supabase.clientAsync.mock.calls.length;
+    const after = clientAsyncMock.mock.calls.length;
 
     // 3 个 caller 只触发一次远端 pull（getClient 调用）；不再每次都重新 pullRemoteLinks。
     expect(after - before).toBe(1);
+  });
+
+  it('drops links whose deletedAt is older than the tombstone retention window', async () => {
+    // 本地 IndexedDB 中预置一个 30 天前已删除的 link 和一个活跃 link；
+    // ensureLoaded 后过期墓碑应被 GC，活跃 link 保留。
+    const userId = '00000000-0000-0000-0000-000000000001';
+    const now = Date.now();
+    const ancient = new Date(now - 31 * 24 * 60 * 60 * 1000).toISOString();
+    const fresh = new Date(now).toISOString();
+    const cache = TestBed.inject(ExternalSourceCacheService);
+    void userId; // ownerId 由 auth mock 保证一致
+    await cache.saveLinks([
+      {
+        id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+        taskId: 'task-old',
+        sourceType: 'siyuan-block',
+        targetId: '20250101120000-old0001',
+        uri: 'siyuan://blocks/20250101120000-old0001?focus=1',
+        sortOrder: 0,
+        deletedAt: ancient,
+        createdAt: ancient,
+        updatedAt: ancient,
+      },
+      {
+        id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+        taskId: 'task-new',
+        sourceType: 'siyuan-block',
+        targetId: '20260426123456-new0001',
+        uri: 'siyuan://blocks/20260426123456-new0001?focus=1',
+        sortOrder: 0,
+        deletedAt: null,
+        createdAt: fresh,
+        updatedAt: fresh,
+      },
+    ]);
+
+    const service = TestBed.inject(ExternalSourceLinkService);
+    await service.ensureLoaded();
+
+    const ids = service.links().map((link) => link.id);
+    expect(ids).not.toContain('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa');
+    expect(ids).toContain('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb');
+  });
+
+  it('refreshIfStale skips remote pull within the staleness window and forces it when force=true', async () => {
+    const service = TestBed.inject(ExternalSourceLinkService);
+    await service.ensureLoaded();
+    const baseline = clientAsyncMock.mock.calls.length;
+
+    // staleness 窗口内调用应直接 no-op，不触发新的 getClient。
+    await service.refreshIfStale(false);
+    expect(clientAsyncMock.mock.calls.length).toBe(baseline);
+
+    // force=true 强制一次额外 pull（模拟 online 事件 / 用户手动刷新）。
+    await service.refreshIfStale(true);
+    expect(clientAsyncMock.mock.calls.length).toBeGreaterThan(baseline);
+  });
+
+  it('refreshIfStale picks up new remote rows after force refresh', async () => {
+    const service = TestBed.inject(ExternalSourceLinkService);
+    await service.ensureLoaded();
+    expect(service.activeLinks()).toHaveLength(0);
+
+    const now = new Date().toISOString();
+    remoteRows = [
+      {
+        id: 'cccccccc-cccc-cccc-cccc-cccccccccccc',
+        user_id: '00000000-0000-0000-0000-000000000001',
+        task_id: 'task-remote',
+        source_type: 'siyuan-block',
+        target_id: '20260426999999-rem0001',
+        uri: 'siyuan://blocks/20260426999999-rem0001?focus=1',
+        label: null,
+        hpath: null,
+        role: null,
+        sort_order: 0,
+        deleted_at: null,
+        created_at: now,
+        updated_at: now,
+      },
+    ];
+
+    await service.refreshIfStale(true);
+
+    expect(service.firstActiveLinkForTask('task-remote')?.id).toBe(
+      'cccccccc-cccc-cccc-cccc-cccccccccccc',
+    );
   });
 });

@@ -1,4 +1,4 @@
-import { ChangeDetectionStrategy, Component, ElementRef, HostListener, OnDestroy, computed, inject, input, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, ElementRef, EnvironmentInjector, HostListener, OnDestroy, computed, inject, input, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { A11yModule } from '@angular/cdk/a11y';
@@ -7,9 +7,20 @@ import type { ExternalSourceLink, SiyuanPreviewResult } from '../../../core/exte
 import { ExternalSourceLinkService } from '../../../core/external-sources/external-source-link.service';
 import { SiyuanPreviewService } from '../../../core/external-sources/siyuan/siyuan-preview.service';
 import { shortenSiyuanBlockId } from '../../../core/external-sources/siyuan/siyuan-link-parser';
-import { KnowledgeAnchorPopoverService } from './knowledge-anchor-popover.service';
+import type { KnowledgeAnchorPopoverService } from './knowledge-anchor-popover.service';
 
 const SHEET_PREVIEW_FALLBACK: SiyuanPreviewResult = { status: 'error', errorCode: 'unknown' };
+
+/**
+ * 懒加载 popover service：CDK Overlay + ConnectedPositionStrategy 仅在桌面端 hover/focus 时需要，
+ * 移动端只用底部 sheet（无 overlay）。通过动态 import + EnvironmentInjector.get 把 Overlay 相关
+ * 字节移出初始 bundle。模块 promise 全局缓存，多实例共享同一份下载。
+ */
+let popoverModulePromise: Promise<typeof import('./knowledge-anchor-popover.service')> | null = null;
+function loadPopoverModule(): Promise<typeof import('./knowledge-anchor-popover.service')> {
+  popoverModulePromise ??= import('./knowledge-anchor-popover.service');
+  return popoverModulePromise;
+}
 
 @Component({
   selector: 'app-knowledge-anchor',
@@ -100,7 +111,7 @@ const SHEET_PREVIEW_FALLBACK: SiyuanPreviewResult = { status: 'error', errorCode
 export class KnowledgeAnchorComponent implements OnDestroy {
   private readonly linkService = inject(ExternalSourceLinkService);
   private readonly previewService = inject(SiyuanPreviewService);
-  private readonly popover = inject(KnowledgeAnchorPopoverService);
+  private readonly envInjector = inject(EnvironmentInjector);
   private readonly host = inject(ElementRef<HTMLElement>);
 
   readonly taskId = input.required<string>();
@@ -122,9 +133,15 @@ export class KnowledgeAnchorComponent implements OnDestroy {
    * cdkTrapFocusAutoCapture 也能恢复焦点，但当用户中途切换 chip 时，这个手动引用更稳。
    */
   private originChip: HTMLElement | null = null;
+  /**
+   * 已加载的 popover service 实例缓存。仅在 ngOnDestroy 时触发清理时短路使用，
+   * 不主动 await 以避免 destroy 阻塞。
+   */
+  private popoverInstance: KnowledgeAnchorPopoverService | null = null;
 
   ngOnDestroy(): void {
-    this.popover.closeForHost(this.host.nativeElement);
+    // popover 仅在桌面 hover 路径加载，未加载即未使用，无需清理。
+    this.popoverInstance?.closeForHost(this.host.nativeElement);
     this.previewService.abortActive();
   }
 
@@ -147,17 +164,18 @@ export class KnowledgeAnchorComponent implements OnDestroy {
 
   onMouseEnter(event: MouseEvent, link: ExternalSourceLink): void {
     if (this.isMobile()) return;
-    this.popover.scheduleOpen(link, event.currentTarget as HTMLElement);
+    void this.withPopover((p) => p.scheduleOpen(link, event.currentTarget as HTMLElement));
   }
 
   onFocus(event: FocusEvent, link: ExternalSourceLink): void {
     if (this.isMobile()) return;
-    this.popover.scheduleOpen(link, event.currentTarget as HTMLElement);
+    void this.withPopover((p) => p.scheduleOpen(link, event.currentTarget as HTMLElement));
   }
 
   onMouseLeave(): void {
     if (this.isMobile()) return;
-    this.popover.scheduleClose();
+    // popover 未加载意味着从未打开过，直接忽略 leave；避免无谓地拉起 chunk。
+    this.popoverInstance?.scheduleClose();
   }
 
   onChipClick(event: Event, link: ExternalSourceLink): void {
@@ -214,5 +232,20 @@ export class KnowledgeAnchorComponent implements OnDestroy {
       .catch(() => {
         if (this.activeLink()?.id === link.id) this.sheetResult.set(SHEET_PREVIEW_FALLBACK);
       });
+  }
+
+  /**
+   * 懒解析 popover service：首次 hover/focus 触发 dynamic import，后续复用缓存实例。
+   * 通过 EnvironmentInjector.get 复用 root 注入器（service 仍是 providedIn: 'root' 单例），
+   * 避免 ManualBootstrapping 或 createEnvironmentInjector 的额外开销。
+   */
+  private async withPopover(action: (popover: KnowledgeAnchorPopoverService) => void): Promise<void> {
+    if (this.popoverInstance) {
+      action(this.popoverInstance);
+      return;
+    }
+    const mod = await loadPopoverModule();
+    this.popoverInstance ??= this.envInjector.get(mod.KnowledgeAnchorPopoverService);
+    action(this.popoverInstance);
   }
 }

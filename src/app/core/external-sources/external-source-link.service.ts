@@ -1,4 +1,4 @@
-import { Injectable, computed, inject } from "@angular/core";
+import { DestroyRef, Injectable, computed, inject } from "@angular/core";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { SupabaseClientService } from "../../../services/supabase-client.service";
 import { AuthService } from "../../../services/auth.service";
@@ -72,6 +72,17 @@ export class ExternalSourceLinkService {
   private flushPromise: Promise<void> | null = null;
   /** 缓存正在进行的 ensureLoaded，防止并发 caller 各自跑一次 pull/merge。 */
   private loadPromise: Promise<void> | null = null;
+  /** 上一次成功 pullRemoteLinks 的时间戳（ms）；用于 refreshIfStale 的陈旧判定。 */
+  private lastPullAt = 0;
+  /** 缓存正在进行的 refreshIfStale，避免 visibility/online 事件并发各自 pull 一次。 */
+  private refreshPromise: Promise<void> | null = null;
+  /** 浏览器事件监听器解绑句柄，确保 service 销毁时不泄漏。 */
+  private opportunisticListenersBound = false;
+
+  constructor() {
+    // 单例 service 在 root 注入器销毁时（HMR/SSR teardown）解绑事件监听器，避免内存泄漏。
+    inject(DestroyRef).onDestroy(() => this.unbindOpportunisticListeners());
+  }
 
   async ensureLoaded(): Promise<void> {
     const ownerId = this.currentUserId();
@@ -90,12 +101,66 @@ export class ExternalSourceLinkService {
     const localLinks = await this.cache.loadLinks();
     this.store.replaceAll(this.mergeLinks(localLinks, []));
     const remoteLinks = await this.pullRemoteLinks();
+    this.lastPullAt = Date.now();
     const merged = this.mergeLinks(localLinks, remoteLinks);
     this.store.replaceAll(merged);
     await this.cache.saveLinks(merged);
     await this.pushLocalNewerLinks(merged, remoteLinks);
     void this.flushPendingLinks();
+    this.bindOpportunisticListeners();
   }
+
+  /**
+   * 机会式远端刷新：visibility/online 事件 + 显式 force 触发。
+   * 当 lastPullAt 早于 REMOTE_REFRESH_STALE_MS 时重新 pull-merge；否则跳过以节省请求。
+   * 与 ensureLoaded 共享 owner 切换语义；并发调用复用同一 in-flight promise。
+   */
+  async refreshIfStale(force = false): Promise<void> {
+    if (!this.initialized) return;
+    const ownerId = this.currentUserId();
+    if (this.loadedOwnerId !== ownerId) return; // owner 切换会经 ensureLoaded 处理
+    if (!force && Date.now() - this.lastPullAt < SIYUAN_CONFIG.REMOTE_REFRESH_STALE_MS) return;
+    if (this.refreshPromise) return this.refreshPromise;
+    this.refreshPromise = this.runRefresh().finally(() => {
+      this.refreshPromise = null;
+    });
+    return this.refreshPromise;
+  }
+
+  private async runRefresh(): Promise<void> {
+    const localLinks = await this.cache.loadLinks();
+    const remoteLinks = await this.pullRemoteLinks();
+    this.lastPullAt = Date.now();
+    const merged = this.mergeLinks(localLinks, remoteLinks);
+    this.store.replaceAll(merged);
+    await this.cache.saveLinks(merged);
+    await this.pushLocalNewerLinks(merged, remoteLinks);
+  }
+
+  private bindOpportunisticListeners(): void {
+    if (this.opportunisticListenersBound || typeof window === "undefined") return;
+    this.opportunisticListenersBound = true;
+    // 用箭头函数稳定引用，便于 unbind 时移除同一实例。
+    document.addEventListener("visibilitychange", this.onVisibilityChange);
+    window.addEventListener("online", this.onOnline);
+  }
+
+  private unbindOpportunisticListeners(): void {
+    if (!this.opportunisticListenersBound || typeof window === "undefined") return;
+    document.removeEventListener("visibilitychange", this.onVisibilityChange);
+    window.removeEventListener("online", this.onOnline);
+    this.opportunisticListenersBound = false;
+  }
+
+  private readonly onVisibilityChange = (): void => {
+    if (document.visibilityState === "visible") void this.refreshIfStale();
+  };
+
+  private readonly onOnline = (): void => {
+    // 网络恢复时既要 flush pending，也要拉一次远端真相，强制忽略 staleness。
+    void this.refreshIfStale(true);
+    void this.flushPendingLinks();
+  };
 
   activeLinksForTask(taskId: string): ExternalSourceLink[] {
     void this.ensureLoaded();
@@ -347,7 +412,22 @@ export class ExternalSourceLinkService {
       if (!existing || existing.updatedAt < link.updatedAt)
         byId.set(link.id, link);
     }
-    return this.collapseActiveDuplicates(Array.from(byId.values()));
+    return this.collapseActiveDuplicates(this.dropExpiredTombstones(Array.from(byId.values())));
+  }
+
+  /**
+   * 本机墓碑 GC：丢弃 deletedAt 早于 TOMBSTONE_RETENTION_MS 的软删除记录。
+   * 客户端 UUID 永不复用，此操作无 id 复活风险；服务端硬删除依赖独立的 cron 调度。
+   */
+  private dropExpiredTombstones(links: ExternalSourceLink[]): ExternalSourceLink[] {
+    const cutoff = Date.now() - SIYUAN_CONFIG.TOMBSTONE_RETENTION_MS;
+    return links.filter((link) => {
+      if (!link.deletedAt) return true;
+      const deletedMs = Date.parse(link.deletedAt);
+      // Date.parse 失败时返回 NaN，保守保留以避免误删非法时间戳的记录。
+      if (!Number.isFinite(deletedMs)) return true;
+      return deletedMs >= cutoff;
+    });
   }
 
   private collapseActiveDuplicates(

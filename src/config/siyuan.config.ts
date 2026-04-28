@@ -19,6 +19,20 @@ export const SIYUAN_CONFIG = {
   EXTENSION_PING_TIMEOUT_MS: 500,
   /** 思源锚点本机 pending 队列推送失败超过此次数则迁出到死信表。 */
   PENDING_MAX_RETRIES: 5,
+  /**
+   * 远端 external_source_links 的"机会式刷新"陈旧阈值（毫秒）。
+   * ensureLoaded 完成后再次调用会跳过；超过此阈值（默认 10 分钟，对齐 SYNC_CONFIG.POLLING_INTERVAL）
+   * 或 visibilitychange/online 事件触发时重新 pull-merge。该表写入频率极低，
+   * 不需要 realtime 通道，opportunistic 已足够。
+   */
+  REMOTE_REFRESH_STALE_MS: 600_000,
+  /**
+   * 本机墓碑保留时长（毫秒）。超过此年龄的 deletedAt 软删除链接将在 mergeLinks 时被丢弃，
+   * 释放 IndexedDB 空间且不再参与 LWW 比较。客户端 UUID 永不复用，因此不存在"已 GC 的 id 复活"风险。
+   * 与 SYNC_CONFIG.TOMBSTONE_RETENTION_MS（30 天）对齐。
+   * 注：服务端硬删除需 pg_cron / Edge Function 调度，超出本次范围。
+   */
+  TOMBSTONE_RETENTION_MS: 30 * 24 * 60 * 60 * 1000,
 } as const;
 
 export const SIYUAN_ERROR_MESSAGES: Record<string, string> = {
