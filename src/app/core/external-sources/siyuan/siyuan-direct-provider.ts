@@ -17,7 +17,7 @@ interface HPathData { hPath?: string; }
 interface AttrData { updated?: string; updatedAt?: string; }
 interface ChildBlockData { id?: string; content?: string; markdown?: string; type?: string; }
 
-export function isTrustedSiyuanDirectBaseUrl(baseUrl: string, pageLocation: Location | null = typeof location === 'undefined' ? null : location): boolean {
+export function isTrustedSiyuanDirectBaseUrl(baseUrl: string, pageLocation: Location | null = null): boolean {
   try {
     const url = new URL(baseUrl);
     if (url.username || url.password || url.pathname !== '/' || url.search || url.hash) return false;
@@ -38,13 +38,13 @@ export class SiyuanDirectProvider implements SiyuanPreviewProvider {
 
   async isAvailable(): Promise<boolean> {
     const config = await this.cache.loadConfig();
-    return config.runtimeMode === 'direct' && isTrustedSiyuanDirectBaseUrl(config.baseUrl) && Boolean(config.token);
+    return config.runtimeMode === 'direct' && isTrustedSiyuanDirectBaseUrl(config.baseUrl, typeof location === 'undefined' ? null : location) && Boolean(config.token);
   }
 
   async getBlockPreview(blockId: string, signal?: AbortSignal): Promise<SiyuanBlockPreview> {
     if (!isValidSiyuanBlockId(blockId)) throw new SiyuanProviderError('block-not-found');
     const config = await this.cache.loadConfig();
-    if (config.runtimeMode !== 'direct' || !isTrustedSiyuanDirectBaseUrl(config.baseUrl)) {
+    if (config.runtimeMode !== 'direct' || !isTrustedSiyuanDirectBaseUrl(config.baseUrl, typeof location === 'undefined' ? null : location)) {
       throw new SiyuanProviderError('runtime-not-supported');
     }
     if (!config.token) throw new SiyuanProviderError('not-configured');

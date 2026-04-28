@@ -930,7 +930,7 @@ export class SettingsModalComponent {
 
   async updateSiyuanBaseUrl(event: Event): Promise<void> {
     const value = (event.target as HTMLInputElement | null)?.value.trim() || SIYUAN_CONFIG.DEFAULT_BASE_URL;
-    if (!isTrustedSiyuanDirectBaseUrl(value, null)) {
+    if (!isTrustedSiyuanDirectBaseUrl(value, typeof window === 'undefined' ? null : window.location)) {
       this.siyuanConnectionStatus.set('仅支持本机思源地址 http://127.0.0.1:6806 或 http://localhost:6806');
       this.siyuanBaseUrl.set(SIYUAN_CONFIG.DEFAULT_BASE_URL);
       return;

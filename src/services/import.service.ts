@@ -591,7 +591,7 @@ export class ImportService {
       this.logger.info('导入时重生项目树 ID', { projectId: exportProject.id });
     }
     
-    // 构建 ID 映射（用于更新引用）
+    // 始终构建任务 ID 映射：重生 ID 时用于引用改写，保留 ID 时用于恢复外部锚点指针。
     const idMap = new Map<string, string>();
     for (const task of exportProject.tasks ?? []) {
       idMap.set(task.id, generateNewIds ? crypto.randomUUID() : task.id);

@@ -41,6 +41,7 @@ interface ExternalSourceLinkTableSchema {
         Row: ExternalSourceLinkRow;
         Insert: ExternalSourceLinkRow;
         Update: Partial<ExternalSourceLinkRow>;
+        Relationships: [];
       };
     };
   };
