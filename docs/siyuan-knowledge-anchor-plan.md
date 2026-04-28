@@ -213,8 +213,9 @@ Knowledge Anchor 的作用是降低“切出任务上下文”的摩擦，而不
 |------|------|------|
 | `SIYUAN_CONFIG.MAX_PREVIEW_CHILDREN` | `10` | 单次预览最多展示的子块数量 |
 | `SIYUAN_CONFIG.MAX_PREVIEW_CHARS` | `1200` | 任务卡 Popover / Sheet 单次展示的摘要字符上限 |
-| `SIYUAN_CONFIG.PREVIEW_FETCH_TIMEOUT_MS` | `TIMEOUT_CONFIG.QUICK` | 单次块预览请求超时，复用 `src/config/timeout.config.ts` 中的快速操作超时；实际毫秒值以常量定义为准 |
+| `SIYUAN_CONFIG.PREVIEW_FETCH_TIMEOUT_MS` | `TIMEOUT_CONFIG.QUICK` | 单次块预览请求超时，复用 `src/config/timeout.config.ts` 中的 5000ms 快速操作超时 |
 | `SIYUAN_CONFIG.CACHE_STALE_MS` | `86400000` | 本机预览缓存陈旧提示阈值，默认 24 小时 |
+| `SIYUAN_CONFIG.MAX_PREVIEW_CACHE_ENTRIES` | `200` | 当前用户本机最多保留的思源预览缓存条数 |
 | `SIYUAN_CONFIG.HOVER_OPEN_DELAY_MS` | `300` | 桌面端悬浮意图延迟，避免鼠标扫过即请求 |
 | `SIYUAN_CONFIG.HOVER_CLOSE_GRACE_MS` | `150` | 鼠标从锚点移向浮层时的关闭宽限期 |
 | `SIYUAN_CONFIG.POPOVER_MAX_WIDTH_PX` | `420` | 桌面悬浮预览最大宽度 |
@@ -486,7 +487,7 @@ siyuan-preview-cache:{linkId}:{blockId}
 siyuan-local-config:{userId}
 ```
 
-> **实现注意**：如果旧版已经落地过 `siyuan-preview-cache:{linkId}`，切换到 `siyuan-preview-cache:{linkId}:{blockId}` 属于本机缓存 key 的破坏性调整；实现时必须按下方紧邻的“缓存迁移说明”处理，不能直接复用旧缓存内容。
+> **实现注意**：本功能尚未落地时直接采用 `siyuan-preview-cache:{linkId}:{blockId}`，无需迁移。下方“缓存迁移说明”只适用于已有原型、内测版本或历史分支已经写入 `siyuan-preview-cache:{linkId}` 的情况。
 
 清理策略：
 
@@ -500,7 +501,7 @@ siyuan-local-config:{userId}
 1. 如果该能力首次实现时尚未上线旧版 `siyuan-preview-cache:{linkId}`，直接采用新 key，无需迁移。
 2. 如果已有旧版本机缓存，启动时可以按 `linkId -> ExternalSourceLink.targetId` 补写新 key；无法确认 `blockId` 的旧缓存必须丢弃。
 3. 迁移只发生在当前设备本地，不产生云端同步，不影响锚点指针。
-4. 对只匹配 `linkId` 或只匹配 `blockId` 的旧缓存，运行时按 cache miss 处理；后台清理可按 `CACHE_STALE_MS`、锚点删除事件或用户“清除本机缓存”统一回收，避免频繁替换锚点后本机缓存无界增长。
+4. 对只匹配 `linkId` 或只匹配 `blockId` 的旧缓存，运行时按 cache miss 处理；后台清理可按 `CACHE_STALE_MS`、锚点删除事件、`MAX_PREVIEW_CACHE_ENTRIES` 上限或用户“清除本机缓存”统一回收，避免频繁替换锚点后本机缓存无界增长。
 
 ### 6.5 同步规则
 
@@ -582,7 +583,7 @@ interface SiyuanPreviewProvider {
 1. 返回的 `blockId` 必须与入参 `blockId` 完全一致；调用方在写入缓存或更新 UI 前必须再次比对，不一致时丢弃响应。
 2. `truncated = true` 表示任一截断发生：正文超过 `MAX_PREVIEW_CHARS`、直接子块超过 `MAX_PREVIEW_CHILDREN`，或 provider 因安全策略裁剪了不适合展示的内容。
 3. 调用方必须为每次悬浮 / Sheet 打开创建独立 `AbortController`，在锚点切换、Popover 关闭、组件销毁或用户手动刷新覆盖旧请求时调用 `abort()`。
-4. 单次不匹配响应通常视为并发请求的迟到结果，只记录 debug 级信息；若同一 provider 连续返回不匹配 `blockId`，应按 provider bug 记录可脱敏诊断事件。
+4. 单次不匹配响应通常视为并发请求的迟到结果，对用户静默处理，只记录 debug 级信息；若同一 provider 连续返回不匹配 `blockId`，应按 provider bug 记录可脱敏诊断事件。
 
 实现优先级：
 
@@ -606,7 +607,7 @@ Hover 状态机：
 
 ```text
 idle
-  -> hover-intent(linkId, blockId, origin)
+  -> hover-intent(linkId, blockId, originRef)
   -> opening
   -> loading | ready | error | cache-only
   -> closing-grace
@@ -616,12 +617,13 @@ idle
 状态机要求：
 
 1. `hover-intent` 期间只启动延迟计时，不立刻请求思源。
-2. 进入 `opening` 时记录 `{ linkId, blockId, origin, controller }` 作为活跃请求状态。
-3. 浮层内容加载期间先读取本机缓存，再按 provider 能力后台刷新。
-4. 鼠标从锚点进入浮层时取消关闭计时。
-5. 鼠标离开锚点和浮层后进入 `closing-grace`，宽限期结束再关闭。
-6. 新锚点触发时立即 abort 上一个请求，并用新锚点重设 Overlay origin。
-7. 任何响应返回前必须比对当前活跃 `linkId` / `blockId`；不一致则丢弃。
+2. 进入 `opening` 时记录 `{ linkId, blockId, originRef, controller }` 作为活跃请求状态。
+3. `originRef` 只允许保存在 Popover service 的短生命周期私有字段中，不能写入 Signals Store；关闭、切换锚点或组件销毁时必须置空，避免保留已脱离 DOM 的元素。
+4. 浮层内容加载期间先读取本机缓存，再按 provider 能力后台刷新。
+5. 鼠标从锚点进入浮层时取消关闭计时。
+6. 鼠标离开锚点和浮层后进入 `closing-grace`，宽限期结束再关闭。
+7. 新锚点触发时立即 abort 上一个请求，并用新锚点重设 Overlay origin。
+8. 任何响应返回前必须比对当前活跃 `linkId` / `blockId`；不一致则静默丢弃。
 
 不建议使用 `MatTooltip` 承载该能力。原因是预览浮层需要异步状态、按钮、内部滚动、错误态和安全渲染链路，已经超出普通 tooltip 的语义。
 
@@ -1054,7 +1056,7 @@ siyuan.autoRefresh = on-hover | manual
 |------|------|
 | 单元测试 | 链接解析、block ID 校验、provider 选择、错误码映射、Kramdown 摘要裁剪 |
 | 服务测试 | 本地先写；离线新增后恢复同步；软删除；缓存清理；精确块缓存命中；缓存键不匹配时拒绝过期预览；快速切换锚点时丢弃迟到响应；断言 Supabase 同步 payload 不含 `content` / `markdown` / `kramdown` / `plainText` |
-| 组件测试 | 任务卡锚点展示、Hover Popover 打开/关闭、锚点到浮层的 mouseleave 宽限期、Popover / Sheet 状态、Focus compact 模式、当前块可用但路径或子块失败的降级态 |
+| 组件测试 | 任务卡锚点展示、Hover Popover 打开/关闭、锚点到浮层的 mouseleave 宽限期、OverlayRef attach / detach / dispose 生命周期、快速切换锚点不泄漏 Overlay 实例、Popover / Sheet 状态、Focus compact 模式、当前块可用但路径或子块失败的降级态 |
 | E2E | 粘贴链接绑定、hover 锚点显示对应块预览、快速 hover 多锚点不串内容、点击深链、扩展不可用降级、离线绑定后恢复同步、移动端 Sheet |
 
 ---
