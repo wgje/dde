@@ -70,10 +70,10 @@ interface NetworkInformationLike {
  * - 避免僵尸模式下的 canvas 渲染问题
  * - 简化代码，无需手动 suspend/resume
  * 
- * 【懒加载策略】
- * @defer 需要组件在 imports 中声明才能工作
- * 代码分割依赖于：不使用 ViewChild 直接引用组件
- * 通过 FlowCommandService 实现 Shell 与 FlowView 的解耦通信
+ * 【Flow 加载策略】
+ * 桌面端直接渲染 FlowView，避免流程图 chunk 偶发加载失败。
+ * 移动端仍通过 @defer 按需挂载/销毁 FlowView，保持 GoJS 移动端资源释放策略。
+ * Shell 通过 FlowCommandService 与 FlowView 解耦通信。
  */
 @Component({
   selector: 'app-project-shell',
@@ -333,8 +333,7 @@ interface NetworkInformationLike {
         }
 
         <!-- Flow Column - 移动端条件渲染，桌面端始终显示 -->
-        <!-- 使用 @defer 实现 GoJS 懒加载，减少首屏加载体积 -->
-        <!-- 【性能优化 2026-01-20】使用 viewport 触发器，仅在流程图进入视口时加载，避免干扰 LCP -->
+        <!-- 桌面端直接渲染 FlowView，避免流程图 chunk 偶发加载失败进入错误占位；移动端仍保留 @defer 按需挂载 -->
         @if (!uiState.isMobile() || uiState.activeView() === 'flow') {
            <div class="flex-1 flex flex-col min-w-[300px] min-h-0" 
              style="background-color: var(--theme-bg);"
@@ -354,36 +353,39 @@ interface NetworkInformationLike {
                   </button>
               }
            </div>
-           <!-- @defer 块用于懒加载流程图组件 -->
-           <!-- 【性能优化 2026-02-14】改为用户意图触发，避免桌面首屏自动拉取 GoJS 大 chunk -->
-           <!-- prefetch: 支持弱网场景仅预热 chunk，不主动切换视图 -->
-           @defer (when shouldLoadFlowNow(); prefetch when shouldPrefetchFlowChunk()) {
+
+           @if (!uiState.isMobile()) {
              <app-flow-view class="flex-1 min-h-0 overflow-hidden relative" (goBackToText)="switchToText()"></app-flow-view>
-           } @placeholder {
-             <div class="flex-1 flex items-center justify-center text-stone-400">
-               @if (shouldLoadFlowNow()) {
-                 <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600"></div>
-               } @else {
-                 <button
-                   data-testid="flow-view-tab"
-                   (click)="switchToFlow()"
-                   class="px-3 py-1.5 rounded-lg border border-stone-300/80 dark:border-stone-600/80 text-xs text-stone-600 dark:text-stone-300 hover:bg-stone-100/80 dark:hover:bg-stone-800/80 transition-colors">
-                   进入流程图
+           } @else {
+             <!-- 移动端保留 @defer 懒加载：只在用户切到流程图时才挂载 GoJS，切回文本时销毁 -->
+             @defer (when shouldLoadFlowNow(); prefetch when shouldPrefetchFlowChunk()) {
+               <app-flow-view class="flex-1 min-h-0 overflow-hidden relative" (goBackToText)="switchToText()"></app-flow-view>
+             } @placeholder {
+               <div class="flex-1 flex items-center justify-center text-stone-400">
+                 @if (shouldLoadFlowNow()) {
+                   <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600"></div>
+                 } @else {
+                   <button
+                     data-testid="flow-view-tab"
+                     (click)="switchToFlow()"
+                     class="px-3 py-1.5 rounded-lg border border-stone-300/80 dark:border-stone-600/80 text-xs text-stone-600 dark:text-stone-300 hover:bg-stone-100/80 dark:hover:bg-stone-800/80 transition-colors">
+                     进入流程图
+                   </button>
+                 }
+               </div>
+             } @error {
+               <div class="flex-1 flex flex-col items-center justify-center text-stone-500 p-4 gap-4">
+                 <svg xmlns="http://www.w3.org/2000/svg" class="h-12 w-12 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                 </svg>
+                 <p class="text-sm text-center">流程图加载失败</p>
+                 <button (click)="reloadPage()" class="px-4 py-2 bg-indigo-500 text-white rounded-lg text-sm hover:bg-indigo-600 transition-colors">
+                   刷新页面
                  </button>
-               }
-             </div>
-           } @error {
-             <div class="flex-1 flex flex-col items-center justify-center text-stone-500 p-4 gap-4">
-               <svg xmlns="http://www.w3.org/2000/svg" class="h-12 w-12 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-               </svg>
-               <p class="text-sm text-center">流程图加载失败</p>
-               <button (click)="reloadPage()" class="px-4 py-2 bg-indigo-500 text-white rounded-lg text-sm hover:bg-indigo-600 transition-colors">
-                 刷新页面
-               </button>
-             </div>
+               </div>
+             }
            }
-          </div>
+           </div>
         }
 
         </div>
@@ -464,7 +466,7 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
   private readonly destroyRef = inject(DestroyRef);
   private readonly startupLaunchSnapshot = this.launchSnapshot.read();
   
-  // 使用 FlowCommandService 替代 ViewChild，实现真正的懒加载
+  // 使用 FlowCommandService 替代 ViewChild，保持 Shell 与 FlowView 解耦
   // Shell 通过命令服务发布意图，FlowView 订阅并响应
   private readonly flowCommand = inject(FlowCommandService);
   private readonly flowIntentLazyLoadEnabled = FEATURE_FLAGS.FLOW_INTENT_LAZYLOAD_V1;
@@ -1211,7 +1213,7 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
   
   /**
    * 重试加载流程图视图
-   * FlowViewComponent 通过 @defer 延迟加载，通过命令服务发送重试命令
+   * 移动端 FlowViewComponent 通过 @defer 延迟加载；桌面端直接向已挂载的 FlowView 发送重试命令。
    */
   retryFlowView(): void {
     // 触发流程图重新初始化

@@ -11,7 +11,9 @@ import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader
 import { StartupPlaceholderStateService } from '../../../../services/startup-placeholder-state.service';
 import { AUTH_CONFIG } from '../../../../config/auth.config';
 import { TIMEOUT_CONFIG } from '../../../../config/timeout.config';
+import { FIELD_SELECT_CONFIG } from '../../../../config/sync.config';
 import { resetBrowserNetworkSuspensionTrackingForTests } from '../../../../utils/browser-network-suspension';
+import { resetTaskSchemaCompatibilityForTests } from '../../../../utils/task-schema-compat';
 
 const OFFLINE_SNAPSHOT_DB_NAME = 'nanoflow-offline-snapshots';
 const OFFLINE_SNAPSHOT_STORE_NAME = 'snapshots';
@@ -158,6 +160,7 @@ async function clearAllOfflineSnapshotsIdb(): Promise<void> {
 
 describe('ProjectDataService', () => {
   beforeEach(async () => {
+    resetTaskSchemaCompatibilityForTests();
     localStorage.clear();
     setVisibilityState('visible');
     await clearAllOfflineSnapshotsIdb();
@@ -2066,5 +2069,122 @@ describe('ProjectDataService', () => {
     );
 
     randomSpy.mockRestore();
+  });
+
+  it('pullTasksThrottled 遇到 completed_at 缺列时应降级重试并继续加载项目任务', async () => {
+    const logger = {
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+    };
+    const missingCompletedAtError = {
+      code: '42703',
+      message: 'column tasks.completed_at does not exist',
+      details: null,
+      hint: null,
+    };
+    const taskRow = {
+      id: 'task-legacy-schema',
+      title: '旧 schema 任务',
+      content: '项目必须能继续加载',
+      stage: 1,
+      parent_id: null,
+      order: 0,
+      rank: 10000,
+      status: 'active',
+      x: 0,
+      y: 0,
+      updated_at: '2026-04-28T00:00:00.000Z',
+      deleted_at: null,
+      short_id: null,
+      attachments: [],
+      tags: [],
+      priority: null,
+      due_date: null,
+      expected_minutes: null,
+      cognitive_load: null,
+      wait_minutes: null,
+      created_at: '2026-04-27T00:00:00.000Z',
+      parking_meta: null,
+    };
+    const eq = vi
+      .fn()
+      .mockResolvedValueOnce({ data: null, error: missingCompletedAtError })
+      .mockResolvedValueOnce({ data: [taskRow], error: null });
+    const select = vi.fn(() => ({ eq }));
+    const client = {
+      from: vi.fn(() => ({ select })),
+    };
+    const throttleExecute = vi.fn(async (_key: string, operation: () => Promise<unknown>) => operation());
+
+    const injector = Injector.create({
+      providers: [
+        { provide: ProjectDataService, useClass: ProjectDataService },
+        {
+          provide: SupabaseClientService,
+          useValue: {
+            isConfigured: false,
+            clientAsync: vi.fn(),
+          },
+        },
+        {
+          provide: LoggerService,
+          useValue: {
+            category: () => logger,
+          },
+        },
+        {
+          provide: RequestThrottleService,
+          useValue: {
+            execute: throttleExecute,
+          },
+        },
+        {
+          provide: SyncStateService,
+          useValue: {
+            setSyncError: vi.fn(),
+          },
+        },
+        {
+          provide: TombstoneService,
+          useValue: {
+            getTombstonesWithCache: vi.fn().mockResolvedValue({ data: [], error: null }),
+            shouldMaterializeTaskDeletion: vi.fn().mockReturnValue(false),
+            getLocalTombstoneTimestamp: vi.fn().mockReturnValue(undefined),
+            clearLocalTombstones: vi.fn(),
+          },
+        },
+        {
+          provide: SentryLazyLoaderService,
+          useValue: {
+            addBreadcrumb: vi.fn(),
+            captureException: vi.fn(),
+            captureMessage: vi.fn(),
+          },
+        },
+      ],
+    });
+
+    const service = injector.get(ProjectDataService);
+    const result = await (service as unknown as {
+      pullTasksThrottled: (projectId: string, client: typeof client) => Promise<unknown[]>;
+    }).pullTasksThrottled('project-legacy-schema', client);
+
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({
+      id: 'task-legacy-schema',
+      title: '旧 schema 任务',
+      completedAt: null,
+    });
+    expect(select).toHaveBeenNthCalledWith(1, FIELD_SELECT_CONFIG.TASK_LIST_FIELDS);
+    expect(select).toHaveBeenNthCalledWith(
+      2,
+      expect.not.stringContaining('completed_at')
+    );
+    expect(logger.warn).toHaveBeenCalledWith(
+      'tasks.completed_at 缺失，已降级为旧 schema 任务字段',
+      expect.objectContaining({ projectId: 'project-legacy-schema' })
+    );
   });
 });

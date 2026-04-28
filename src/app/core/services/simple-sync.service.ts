@@ -85,6 +85,10 @@ import {
   isBrowserNetworkSuspendedError,
   isBrowserNetworkSuspendedWindow,
 } from '../../../utils/browser-network-suspension';
+import {
+  getCompatibleTaskSelectFields,
+  markTaskCompletedAtColumnUnavailable,
+} from '../../../utils/task-schema-compat';
 
 /**
  * 冲突数据
@@ -1623,10 +1627,25 @@ export class SimpleSyncService {
       const sinceMs = new Date(lastSyncTime).getTime() - lookbackMs;
       const effectiveSince = new Date(Math.max(0, sinceMs)).toISOString();
 
-      const [tasksResult, connectionsResult] = await Promise.all([
-        client.from('tasks').select(FIELD_SELECT_CONFIG.TASK_LIST_FIELDS).eq('project_id', projectId).gt('updated_at', effectiveSince),
+      const loadDeltaTasks = async () => await client
+        .from('tasks')
+        .select(getCompatibleTaskSelectFields(FIELD_SELECT_CONFIG.TASK_LIST_FIELDS))
+        .eq('project_id', projectId)
+        .gt('updated_at', effectiveSince);
+      const [initialTasksResult, connectionsResult] = await Promise.all([
+        loadDeltaTasks(),
         client.from('connections').select(FIELD_SELECT_CONFIG.CONNECTION_FIELDS).eq('project_id', projectId).gt('updated_at', effectiveSince)
       ]);
+      let tasksResult = initialTasksResult;
+
+      if (tasksResult.error && markTaskCompletedAtColumnUnavailable(tasksResult.error)) {
+        this.logger.warn('tasks.completed_at 缺失，Delta Sync 已降级为旧 schema 任务字段', {
+          projectId,
+          effectiveSince,
+          error: tasksResult.error,
+        });
+        tasksResult = await loadDeltaTasks();
+      }
       
       if (tasksResult.error || connectionsResult.error) {
         throw supabaseErrorToError(tasksResult.error || connectionsResult.error);

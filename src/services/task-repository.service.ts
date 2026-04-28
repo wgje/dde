@@ -4,6 +4,12 @@ import { LoggerService } from './logger.service';
 import { Task, Connection, Attachment } from '../models';
 import { sanitizeTask } from '../utils/validation';
 import { supabaseErrorToError } from '../utils/supabase-error';
+import {
+  getCompatibleTaskSelectFields,
+  getCompatibleTaskWriteRow,
+  markTaskCompletedAtColumnUnavailable,
+  omitTaskCompletedAtColumn,
+} from '../utils/task-schema-compat';
 import { FIELD_SELECT_CONFIG } from '../config/sync.config';
 import type { Database } from '../types/supabase';
 import { 
@@ -41,11 +47,19 @@ export class TaskRepositoryService {
     if (!this.supabase.isConfigured) return [];
 
     // 1. 加载所有任务（【P2-4 修复】使用具体字段替代 select('*')）
-    const { data, error } = await this.supabase.client()
+    const loadTaskRows = async () => await this.supabase.client()
       .from('tasks')
-      .select(FIELD_SELECT_CONFIG.TASK_FULL_FIELDS)
+      .select(getCompatibleTaskSelectFields(FIELD_SELECT_CONFIG.TASK_FULL_FIELDS))
       .eq('project_id', projectId)
       .order('created_at', { ascending: true });
+    let { data, error } = await loadTaskRows();
+    if (error && markTaskCompletedAtColumnUnavailable(error)) {
+      this.logger.warn('tasks.completed_at 缺失，任务仓库全量加载已降级为旧 schema 字段', {
+        projectId,
+        error,
+      });
+      ({ data, error } = await loadTaskRows());
+    }
 
     if (error) {
       this.logger.error('Failed to load tasks', error);
@@ -171,9 +185,19 @@ export class TaskRepositoryService {
       delete rowToUpsert.deleted_at;
     }
 
-    const { error } = await this.supabase.client()
+    const upsertTask = async (payload: Record<string, unknown>) => await this.supabase.client()
       .from('tasks')
-      .upsert(rowToUpsert as never, { onConflict: 'id' });
+      .upsert(payload as never, { onConflict: 'id' });
+
+    let { error } = await upsertTask(getCompatibleTaskWriteRow(rowToUpsert));
+    if (error && markTaskCompletedAtColumnUnavailable(error)) {
+      this.logger.warn('tasks.completed_at 缺失，任务仓库保存已降级为旧 schema 写入', {
+        taskId: task.id,
+        projectId,
+        error,
+      });
+      ({ error } = await upsertTask(omitTaskCompletedAtColumn(rowToUpsert)));
+    }
 
     if (error) {
       this.logger.error('Failed to save task', error);
@@ -556,11 +580,20 @@ export class TaskRepositoryService {
     if (!this.supabase.isConfigured) return [];
 
     // 【P2-4 修复】使用具体字段替代 select('*')
-    const { data, error } = await this.supabase.client()
+    const loadUpdatedTaskRows = async () => await this.supabase.client()
       .from('tasks')
-      .select(FIELD_SELECT_CONFIG.TASK_FULL_FIELDS)
+      .select(getCompatibleTaskSelectFields(FIELD_SELECT_CONFIG.TASK_FULL_FIELDS))
       .eq('project_id', projectId)
       .gt('updated_at', since);
+    let { data, error } = await loadUpdatedTaskRows();
+    if (error && markTaskCompletedAtColumnUnavailable(error)) {
+      this.logger.warn('tasks.completed_at 缺失，任务仓库增量加载已降级为旧 schema 字段', {
+        projectId,
+        since,
+        error,
+      });
+      ({ data, error } = await loadUpdatedTaskRows());
+    }
 
     if (error) {
       this.logger.error('Failed to get updated tasks', error);

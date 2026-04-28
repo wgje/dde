@@ -719,6 +719,7 @@ export const Link = createMockClass('Link', {
 });
 export const LinkingTool = createMockClass('LinkingTool');
 export const RelinkingTool = createMockClass('RelinkingTool');
+export const Router = createMockClass('Router');
 export const Shape = createMockClass('Shape');
 export const TextBlock = createMockClass('TextBlock', {
   OverflowEllipsis: 'OverflowEllipsis',
@@ -764,6 +765,7 @@ const go = {
   Link,
   LinkingTool,
   RelinkingTool,
+  Router,
   Shape,
   TextBlock,
   Panel,

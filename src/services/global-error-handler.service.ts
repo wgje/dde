@@ -365,12 +365,13 @@ export class GlobalErrorHandler implements ErrorHandler {
    * 检测 Angular 运行时 JIT 编译错误（通常由缓存版本偏移触发）
    * 典型关键字：
    * - JIT compilation failed for component class
+   * - JIT compiler unavailable
    * - getCompilerFacade
    * - needs to be compiled using the JIT compiler
    */
   private isAngularJITVersionSkewError(message: string, error: unknown): boolean {
     // 先用 message 快速匹配
-    if (!/JIT compilation failed for component class|getCompilerFacade|needs to be compiled using the JIT compiler/i.test(message)) {
+    if (!/JIT compilation failed for component class|JIT compiler unavailable|getCompilerFacade|needs to be compiled using the JIT compiler/i.test(message)) {
       return false;
     }
 
@@ -381,7 +382,7 @@ export class GlobalErrorHandler implements ErrorHandler {
       return true;
     }
 
-    return /core\.mjs|getCompilerFacade|ɵɵngDeclareComponent|ngDeclareComponent/i.test(stack);
+    return /core\.mjs|getCompilerFacade|ɵɵngDeclareComponent|ngDeclareComponent|chunk-.*\.js/i.test(stack);
   }
 
   /**
