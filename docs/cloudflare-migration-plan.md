@@ -1109,7 +1109,529 @@ curl -fsS "$ORIGIN/.well-known/assetlinks.json" | grep -q "app.nanoflow.twa"
 | Cloudflare Pages Rollback 命令写错 | 回滚慢或失败 | Pages 用 Dashboard/API rollback，不写 `wrangler rollback` |
 | TWA origin 变化 | Android App 无法验证 Web origin | 优先沿用 custom domain；改域名则同步 assetlinks 和 TWA 配置 |
 
-## 16. 官方资料
+## 16. 项目级审查增补项
+
+本节补充策划案 §1-§16 未覆盖、但落地阶段必须处理的项。每条标注归属阶段，避免和已有路线图冲突。
+
+### 16.1 既有部署基础设施清单（补 §2）
+
+仓库当前不止 Vercel 一份托管配置，迁移和清理必须三套同步处理：
+
+| 文件 | 用途 | 迁移动作 |
+| --- | --- | --- |
+| `vercel.json` | Vercel rewrites/headers/`ignoreCommand` | 阶段 4 决策保留作为回滚锚还是删除；删除前确认 startup-contract 已重写 |
+| `netlify.toml` | Netlify build/redirects/headers | 同上；当前 `NODE_VERSION = "20"`，与本计划 GitHub Actions 选用版本必须对齐 |
+| `public/_headers`（新增） | Cloudflare Pages 头规则 | 阶段 1 新增 |
+| `public/_redirects`（可选） | Cloudflare Pages SPA fallback | 仅在默认 fallback 不满足深链刷新时新增 |
+| `src/tests/startup-contract.spec.ts` | 同时校验 `vercel.json` 和 `netlify.toml` 中 `sw-composed.js`、`ngsw-worker.js`、`widgets/templates/(.*)` 的 `no-cache` | 阶段 1 必须随头规则改造同步更新；不更新会让 CI 红 |
+
+执行方式：在阶段 1 增加一条任务"决定保留/删除旧托管配置文件，并同步更新 `startup-contract.spec.ts`"。仅删除 `vercel.json` / `netlify.toml` 而不动 spec 会立即破坏 `npm run test:run:ci`。
+
+### 16.2 Edge Function CORS 边界细化（替换 §6.2 的全量审查描述）
+
+仓库实际有两类实现，迁移成本完全不同：
+
+| Edge Function | CORS 实现 | 迁移路径 |
+| --- | --- | --- |
+| `supabase/functions/transcribe/index.ts` | **硬编码** `ALLOWED_ORIGINS` 数组 + `*.vercel.app` 前缀正则 | 必须改源码，更新 `src/tests/contracts/transcribe-cors.contract.spec.ts`，重新部署 |
+| `supabase/functions/_shared/widget-common.ts` | 读 `Deno.env.get('ALLOWED_ORIGINS')`，缺省回退到内置默认 | **不必发版**：`supabase secrets set ALLOWED_ORIGINS="https://app.nanoflow.app,https://nanoflow.pages.dev,..."`，Edge Function 重启后生效 |
+| `supabase/functions/virus-scan/index.ts` | 同上，env 驱动 | 同上 |
+| `widget-register` / `widget-summary` / `widget-notify` / `widget-focus-action` / `widget-black-box-action` | 复用 `_shared/widget-common.ts` | 同上 |
+
+阶段 0 行动：
+
+```bash
+# 一次性把所有受控域名写入 Supabase secrets
+supabase secrets set ALLOWED_ORIGINS="https://app.nanoflow.app,https://nanoflow.app,https://nanoflow.pages.dev"
+# transcribe 单独走代码改动 + contract test 更新 + 重新 deploy function
+```
+
+PR preview 通配（`https://pr-*.nanoflow.pages.dev`）目前 widget-common 的字符串相等比较不会匹配。要么扩展 widget-common 增加 hostname regex 支持（小改），要么**preview 不走需要 widget Edge Function 的链路**。两条路二选一，必须在阶段 0 决策。
+
+### 16.3 旧 Vercel 域名引用全量清单（补 §5/§9）
+
+策划案多处提"更新 contract tests"但只点名 `transcribe-cors.contract.spec.ts`。实际仓库引用 `dde-eight.vercel.app` / `dde[-\w]*\.vercel\.app` 的位置：
+
+| 文件 | 性质 | 处理方式 |
+| --- | --- | --- |
+| `src/services/sentry-lazy-loader.service.ts:250` | 运行时 `tracePropagationTargets` 正则 | 阶段 1 改为同时包含新域名与旧域名（迁移窗口期），稳定后移除旧 |
+| `src/tests/contracts/transcribe-cors.contract.spec.ts` | 整套契约围绕 vercel 项目前缀 | 阶段 1 改写，与 transcribe Edge Function 同步 |
+| `src/services/global-error-handler.service.spec.ts:240-290` | 堆栈解析 fixture | 阶段 1 改为新域名 fixture，或保留旧 fixture 验证向后兼容 |
+| `src/workspace-shell.component.spec.ts:624` | 路由 fixture | 同上 |
+| `src/utils/runtime-platform.spec.ts:56` | host package 解析负样例 | 同上 |
+| `scripts/contracts/check-secrets.cjs` 中 `.vercel` 目录排除 | 与 vercel.json 共存 | 删除 vercel.json 时一并审查 |
+
+切换前先全仓 inventory：
+
+```bash
+rg "dde-eight\.vercel\.app|dde[-\w]*\.vercel\.app" --hidden -g '!node_modules' -g '!dist'
+```
+
+逐项归类（运行时常量 / 测试 fixture / 文档），再决定替换或保留。
+
+### 16.4 构建产物后处理顺序（补 §5.4）
+
+NanoFlow `npm run build` 在 `ng build` 之后还有四个后处理步骤，迁移到 GitHub Actions 后必须**完整复刻**，否则产物缺件：
+
+```text
+1. node scripts/run-ng.cjs build           # Angular AOT
+2. node scripts/generate-launch-html.cjs   # 生成 launch.html（PWA 启动占位页）
+3. node scripts/inject-modulepreload.cjs   # 向 index.html 注入 modulepreload Link
+4. node scripts/patch-ngsw-html-hashes.cjs # 修正 ngsw.json 中 HTML 文件 hash
+5. node scripts/validate-launch-shared-markers.cjs   # 校验 launch.html 共享标记
+6. node scripts/validate-launch-artifact-closure.cjs # 校验 launch.html 闭包资源
+```
+
+`npm run build:stats` 已经包含完整链路，因此 §5.3 workflow 调用 `build:stats` 是对的。但有两个**容易踩坑**的点：
+
+**陷阱 A：Sentry sourcemap inject 后必须重新跑 step 3-4，不止 step 4。**
+
+策划案 §5.4 只写了 `npx ngsw-config dist/browser ngsw-config.json /` 重建 ngsw。问题是：
+
+- `inject-modulepreload.cjs` 把 hashed chunk 名写进了 `index.html` 的 `<link rel="modulepreload">`。如果 inject 改了 chunk 内容但没改文件名（Debug ID 是 inline 注入），文件名不变，modulepreload Link 无需重写——OK。
+- `patch-ngsw-html-hashes.cjs` 修正的是 `ngsw.json` 中 HTML 内容 hash。`inject-modulepreload` 修改了 `index.html`，`patch-ngsw-html-hashes` 必须**在 sourcemap 流程之外**已经跑过。
+- 如果 sourcemap inject 修改了 `index.html`（Sentry 通常不改 HTML），还需要再次跑 `patch-ngsw-html-hashes.cjs`。
+
+正确顺序：
+
+```text
+1-6. 标准 build:stats 完成
+7.  Sentry sourcemaps inject dist/browser
+8.  Sentry sourcemaps upload
+9.  rm dist/browser/**/*.map
+10. npx ngsw-config dist/browser ngsw-config.json /
+11. node scripts/patch-ngsw-html-hashes.cjs   # 重新对齐 HTML hash
+12. find dist/browser -name '*.map' 必须为空
+```
+
+**陷阱 B：Cloudflare Early Hints 与 modulepreload 冲突。**
+
+§8.3 提到 Cloudflare Pages 自动从 HTML 中的 `preload`/`preconnect`/`modulepreload` 生成 Link header。`scripts/inject-modulepreload.cjs` 的目的就是 modulepreload。两者会**叠加生成 Link header**，结果相同，但要确认：
+
+- Cloudflare Early Hints 不会丢失 modulepreload 中的 `crossorigin` 属性；
+- 不要在 `_headers` 中再手写 hashed chunk preload，让 Early Hints 自动派生即可。
+
+阶段 2 验收增加一条：preview 上 `curl -I /` 检查响应头是否包含 `103 Early Hints` 或 `Link: </main-XXXX.js>; rel=modulepreload`。
+
+### 16.5 Service Worker dataGroups 跨域资源（补 §8）
+
+`ngsw-config.json` 的 `dataGroups` 缓存以下浏览器直连的外部 URL：
+
+```text
+https://*.supabase.co/storage/v1/object/*    # Storage
+https://fonts.googleapis.com/**              # Google Fonts
+https://fonts.gstatic.com/**                 # Google Fonts CSS/woff2
+https://cdn.jsdelivr.net/npm/lxgw-wenkai*/** # LXGW 字体
+https://cdn.jsdelivr.net/**                  # 其他 jsdelivr 资源
+https://unpkg.com/**                         # unpkg
+```
+
+迁移到 Cloudflare Pages**不影响**这些请求（仍由浏览器直连），但有两点需要在 §16.6 的 CSP 中收齐：
+
+- `connect-src` 必须包含 `https://*.supabase.co` 和 Sentry DSN 的 host；
+- `font-src` / `style-src` 必须包含 `https://fonts.gstatic.com`、`https://fonts.googleapis.com`、`https://cdn.jsdelivr.net`；
+- 如果未来想精简 CDN（例如把 LXGW 字体自托管到 Cloudflare），先在 ngsw `dataGroups` 中替换 URL 模式，再做 CSP 收紧。
+
+### 16.6 安全响应头补全（补 §4.4）
+
+策划案 `_headers` 草案只覆盖 `X-Content-Type-Options` / `X-Frame-Options` / `Referrer-Policy`。生产托管还应至少补：
+
+```text
+/*
+  Strict-Transport-Security: max-age=31536000; includeSubDomains
+  Permissions-Policy: camera=(), microphone=(self), geolocation=(), payment=()
+  Cross-Origin-Opener-Policy: same-origin-allow-popups
+  Cross-Origin-Resource-Policy: same-site
+```
+
+注意：
+
+- `microphone=(self)` 因为 NanoFlow 有 Focus 模式语音转写。
+- **不开启 `Cross-Origin-Embedder-Policy: require-corp`**：会导致 Supabase Storage 跨域图片、jsdelivr CDN 字体被拒绝。GoJS chunk 通过 same-origin 加载不受影响，但外部资源会断。
+- **`Content-Security-Policy` 暂不开启**：NanoFlow 当前没有运行时 CSP，盲开会触发大面积告警。CSP 收紧应作为**迁移后独立任务**，先 `Content-Security-Policy-Report-Only` 观察一周再切硬模式。
+- HSTS 一旦启用并被浏览器记录，回滚到 HTTP 不可行；只在确认 Cloudflare TLS 稳定后启用。
+
+### 16.7 Boot Flag / Feature Flag 注入清单（补 §5.2）
+
+`scripts/set-env.cjs` 把以下 `NG_APP_*` 布尔 Flag 注入 build 产物（截至 2026-04-28）：
+
+```text
+NG_APP_DISABLE_INDEX_DATA_PRELOAD_V1   default true
+NG_APP_FONT_EXTREME_FIRSTPAINT_V1      default true
+NG_APP_FLOW_STATE_AWARE_RESTORE_V2     default true
+NG_APP_EVENT_DRIVEN_SYNC_PULSE_V1      default true
+NG_APP_TAB_SYNC_LOCAL_REFRESH_V1       default true
+NG_APP_STRICT_MODULEPRELOAD_V2         default false
+NG_APP_ROOT_STARTUP_DEP_PRUNE_V1       default true
+NG_APP_TIERED_STARTUP_HYDRATION_V1     default true
+NG_APP_SUPABASE_DEFERRED_SDK_V1        default true
+NG_APP_CONFIG_BARREL_PRUNE_V1          default true
+NG_APP_SIDEBAR_TOOLS_DYNAMIC_LOAD_V1   default true
+NG_APP_RESUME_INTERACTION_FIRST_V1     default true
+NG_APP_RESUME_WATERMARK_RPC_V1         default true
+```
+
+含义：GitHub Actions 环境如果不显式注入这些变量，会落到代码中的默认值——和 Vercel 当前的默认值是否一致**取决于 Vercel Dashboard 是否覆盖过任何 flag**。
+
+阶段 0 必做：
+
+1. 登录 Vercel Dashboard 导出当前生产环境变量全集。
+2. 与 `set-env.cjs` 中默认值逐一对照；若有差异，把差异项写进 GitHub Actions Secrets 或 Variables。
+3. 在 §5.2 GitHub Secrets 表追加这批 `NG_APP_*` 项作为可选 override。
+4. 阶段 2 preview 验收时 `console.log(environment)` 或加一条断言，确认 flag 与生产期望一致。
+
+### 16.8 manifest.webmanifest 与 assetlinks.json 内容审查（补 §10）
+
+迁移前必须确认两份产物中没有硬编码旧 origin：
+
+```bash
+cat dist/browser/manifest.webmanifest | jq '{id, scope, start_url, related_applications}'
+cat dist/browser/.well-known/assetlinks.json | jq '.[].target.sha256_cert_fingerprints'
+```
+
+**`manifest.webmanifest`**：
+
+- `scope` 与 `start_url`：必须是相对路径或当前 origin；如果硬编码 `https://dde-eight.vercel.app/...`，PWA 在新域名下会被识别为另一个 app，离线缓存隔离、shortcut 失效。
+- `id`：一旦上线后不要变，否则浏览器把它当新 PWA。`id` 的值如果原本是 `https://dde-eight.vercel.app/`，迁移后无解——只能让用户重新安装。**这是一票否决项**，迁移前必须看清楚。
+
+**`assetlinks.json`**：
+
+- 通过 `scripts/generate-assetlinks.cjs` 生成。Android TWA 同时存在 dev keystore 与 release keystore 时，必须包含**两个 SHA256 fingerprint**，否则 dev 安装包验证失败。
+- 如果使用 Google Play App Signing，还需要 Play Store 控制台分发的 fingerprint。
+
+阶段 1 增加任务：在 CI artifact guard 中校验 `dist/browser/manifest.webmanifest` 不包含 `vercel.app` 字符串。
+
+### 16.9 防止误启用 Pages Functions（补 §4）
+
+Cloudflare Pages 看到 `dist/browser/functions/` 目录或 `dist/browser/_worker.js` 文件会**自动启用** Functions runtime，附带：
+
+- 改变响应头处理（`_headers` 仍生效，但 Functions 优先）；
+- 静态资源吞吐被 Functions 预算（每天 100k 请求 free plan）限制；
+- 增加冷启动与边缘计算开销。
+
+NanoFlow 不需要 Functions。CI artifact guard 增加：
+
+```bash
+test ! -d dist/browser/functions
+test ! -f dist/browser/_worker.js
+```
+
+可选增强：写入 `public/_routes.json` 显式禁用：
+
+```json
+{
+  "version": 1,
+  "include": [],
+  "exclude": ["/*"]
+}
+```
+
+但仅在不写 `functions/` 目录的情况下才需要——如果都没有 functions，`_routes.json` 是冗余的。**不建议加**，留空是更干净的 Direct Upload。
+
+### 16.10 Supabase 配套补充（补 §6）
+
+策划案 §6 已覆盖 Auth Redirect 与 Edge Function CORS。还有三块没写：
+
+**16.10.1 Supabase Storage 跨域**
+
+Storage signed URL 的有效性与 origin 无关，但 bucket CORS allow-list 在 Supabase Dashboard 里。检查路径：
+
+```text
+Supabase Dashboard
+-> Storage
+-> 选择 bucket（attachments / focus-recordings）
+-> Configuration / CORS
+```
+
+加入 `https://app.nanoflow.app`、`https://nanoflow.pages.dev`、PR preview 模式（如果允许 preview 直传 Storage）。
+
+**16.10.2 Supabase Realtime WebSocket**
+
+NanoFlow 当前 `SYNC_CONFIG.REALTIME_ENABLED = false`，但仓库代码已具备 realtime 能力。如果未来开启：
+
+- WebSocket 走 `wss://<project>.supabase.co/realtime/v1/websocket`，与 Cloudflare Pages 无关；
+- 但 CSP `connect-src` 必须包含 `wss://*.supabase.co`；
+- Cloudflare 不要对该域名做 proxying。
+
+**16.10.3 Migration ↔ 前端部署顺序**
+
+如果迁移窗口同时有 Supabase migration 待发布：
+
+```text
+错误顺序：先合并前端到 main，Cloudflare 部署新版本，但 migration 还没跑
+后果：前端期待新 schema，数据库还是旧 schema，新增任务 400/500
+```
+
+正确顺序：
+
+```text
+1. Supabase 应用 migration（向后兼容；新列允许 NULL，新表不删旧表）
+2. 前端 main 合并，Cloudflare 部署
+3. 观察 24 小时无回滚需求后，跑后续 migration（删除旧字段、收紧约束）
+```
+
+回滚同理：前端能 rollback 到旧版本的前提是数据库 schema 仍向后兼容旧前端代码。
+
+阶段 -1 / 阶段 0 增加任务：盘点未发布 migration 是否破坏向后兼容。
+
+### 16.11 PR Preview 数据隔离落地方案（补 §6.1）
+
+策划案 §5.2 / §6.1 多次提"使用 preview Supabase 项目"，但没给出具体方案。三选一：
+
+**方案 A：Supabase Branching（官方功能）。** 适合中等以上预算项目，PR 自动派生 schema 分支与隔离数据。需要 Supabase Pro 计划。个人项目通常不选。
+
+**方案 B：独立 Supabase Preview Project（推荐）。** 创建一个 `nanoflow-preview` 项目，PR preview 走它的 URL/anon key（即策划案中的 `PREVIEW_NG_APP_SUPABASE_URL`）。
+
+- 优点：完全隔离，不影响生产用户。
+- 缺点：需要手动同步 schema。可写一个 `scripts/sync-preview-schema.sh`，在 CI 里 pin 到生产 schema 的某个 commit。
+
+**方案 C：生产 Supabase + 测试用户（不推荐）。** 用一个 `preview-bot@nanoflow.app` 用户登录 PR preview，所有写入都打到该用户的 RLS 隔离区。每次 PR 关闭后用 cron 清理该用户的数据。
+
+```sql
+-- 阶段 1 任务：在 supabase/migrations/ 中加入 preview cleanup function
+-- 仅当采用方案 C 时
+CREATE OR REPLACE FUNCTION cleanup_preview_user_data() ...
+```
+
+**默认推荐方案 B**，并在阶段 0 决策后写进 §5.2 secrets 表。
+
+### 16.12 Wrangler 与依赖版本固定（补 §5.3）
+
+策划案 workflow 用 `cloudflare/wrangler-action@v3`，但没说明 wrangler 本体版本。Direct Upload 行为在 wrangler 3.x 不同子版本间有过破坏性改动（`pages deploy` flag 命名）。
+
+阶段 1 必做：
+
+```yaml
+- uses: cloudflare/wrangler-action@v3
+  with:
+    apiToken: ...
+    accountId: ...
+    wranglerVersion: '3.114.0'   # 固定到一个已验证的版本
+    command: pages deploy ...
+```
+
+理由：`wrangler-action@v3` 可能跟随 latest wrangler，未来 wrangler 4.x 一旦有 breaking change，部署会突然失败。锁定到具体版本，升级时显式 PR。
+
+### 16.13 Direct Upload 失败重试（补 §5.3）
+
+Cloudflare Direct Upload 偶发 5xx / 401（token 限流）。workflow 加 retry：
+
+```yaml
+- name: Deploy production to Cloudflare Pages
+  uses: nick-fields/retry@v3
+  with:
+    timeout_minutes: 8
+    max_attempts: 3
+    retry_wait_seconds: 30
+    command: |
+      npx wrangler@3.114.0 pages deploy dist/browser \
+        --project-name=$CLOUDFLARE_PAGES_PROJECT_NAME \
+        --branch=main
+  env:
+    CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+    CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+```
+
+或保留 `cloudflare/wrangler-action@v3` 但外层包 `nick-fields/retry`。`Direct Upload` 单次最多 20,000 文件、单文件 25 MiB——是**每次 deployment** 的限制，不是 per-site；NanoFlow 当前产物 1-3k 文件，余量充足，但 Sentry sourcemap 启用后文件数会翻倍，需要确认 `.map` 已删后再上传。
+
+### 16.14 Node 版本统一（补 §5.3）
+
+现状不一致：
+
+- `netlify.toml`：`NODE_VERSION = "20"`
+- 策划案 `deploy-cloudflare-pages.yml`：`node-version: 22`
+- `.github/workflows/test-full-suite.yml` 与 `perf-and-resume-gates.yml` 实际使用版本（需确认）
+
+阶段 1 任务：
+
+```bash
+grep -rn "node-version\|NODE_VERSION" .github/workflows netlify.toml package.json
+```
+
+统一到一个版本（建议 `22`，匹配 Angular 19 推荐 LTS），并在 `package.json` 加：
+
+```json
+"engines": {
+  "node": ">=22.0.0 <23.0.0"
+}
+```
+
+避免本地与 CI 不一致。
+
+### 16.15 部署后 Smoke 自动化（补 §14）
+
+策划案 §14 列出了 curl 头检查清单，但没接进 workflow。建议把 Playwright `PLAYWRIGHT_BASE_URL` 注入能力直接复用：
+
+```yaml
+- name: Post-deploy smoke
+  if: github.ref == 'refs/heads/main' && success()
+  env:
+    PLAYWRIGHT_BASE_URL: https://app.nanoflow.app
+  run: |
+    npx playwright test e2e/critical-paths --reporter=line
+```
+
+`playwright.config.ts` 已支持 `PLAYWRIGHT_BASE_URL` 覆盖 dev server，无需新建配置文件。
+
+如果不想跑完整 Playwright，最低限度跑 §14 的 curl 清单作为 shell step。
+
+### 16.16 性能 Guard 接入与 baseline 漂移（补 §5.3）
+
+`npm run perf:guard` 包含 5 项：`build:stats` / `nojit` / `startup` / `font-contract` / `supabase-ready`。策划案 deploy workflow 只跑 `nojit`。
+
+判断：
+
+- `font-contract` 与 `supabase-ready` 是构建产物契约，**不依赖运行环境**，应进入 deploy 链路。
+- `startup` 依赖 Lighthouse / 启动时序基线，CI 环境波动大；放在 `perf-and-resume-gates.yml` nightly 跑即可，不进 deploy 阻塞链路。
+
+调整后 deploy workflow 步骤：
+
+```yaml
+- run: npm run build:stats
+- run: npm run perf:guard:nojit
+- run: npm run quality:guard:font-contract
+- run: npm run quality:guard:supabase-ready
+```
+
+`perf:guard:startup` 与 `perf:guard:no-regression` 保留在 nightly。Cloudflare 边缘 TTFB 与 Vercel 不同，可能让 startup baseline 出现一次性漂移——迁移稳定 7 天后用 `npm run test:baseline:update` 重置基线。
+
+### 16.17 文件命名与缓存模式（补 §4.4）
+
+`angular.json` production 配置 `outputHashing: "all"`、`namedChunks: false`。含义：
+
+- 入口：`main-<hash>.js`、`polyfills-<hash>.js`、`styles-<hash>.css`；
+- 懒加载：`chunk-<hash>.js`；
+- Web Worker：`worker-<hash>.js`。
+
+`_headers` 草案中的 `/main*.js` / `/polyfills*.js` / `/chunk*.js` / `/worker*.js` 都能命中。**风险点**：
+
+- 如果未来在 `angular.json` 把 `outputHashing` 改成 `bundles` 或 `media`，`chunk*.js` 模式可能失效；
+- 如果引入新的入口 bundle（例如 `runtime-*.js`），需要补规则。
+
+阶段 1 加 CI artifact guard：
+
+```bash
+# 防御性检查：除入口/polyfills/chunk/worker 外，不应有未匹配规则的 .js 出现在根目录
+ls dist/browser/*.js | grep -vE '(main|polyfills|chunk|worker|runtime|sw-composed|ngsw-worker|safety-worker)' && exit 1 || true
+```
+
+### 16.18 Sentry 多环境配置（补 §5.5）
+
+策划案 §5.5 谈了 release 对齐，未涉及 environment 与 sample rate。建议：
+
+| 环境 | environment | tracesSampleRate | replaysSessionSampleRate | replaysOnErrorSampleRate |
+| --- | --- | --- | --- | --- |
+| local | `development` | 0 | 0 | 0 |
+| PR preview (`pr-*.pages.dev`) | `preview` | 0.1 | 0 | 1.0 |
+| production (`app.nanoflow.app`) | `production` | 0.05 | 0.01 | 1.0 |
+
+实现路径：
+
+- 在 `set-env.cjs` 增加 `NG_APP_SENTRY_ENVIRONMENT` 注入；
+- workflow 中按 `github.event_name` 选值：
+
+```yaml
+NG_APP_SENTRY_ENVIRONMENT: ${{ github.event_name == 'pull_request' && 'preview' || 'production' }}
+```
+
+- `SentryLazyLoaderService` 中读取该值并传入 `Sentry.init({ environment })`。
+
+首版迁移可暂不实现，把它列入"迁移后第一周内完成"的清单。
+
+### 16.19 Robots / Sitemap / 旧域名收敛（补 §11）
+
+策划案没提 SEO 收敛。现状：NanoFlow 没有官方 robots.txt 或 sitemap.xml（已确认 `public/` 中不存在）。迁移期间：
+
+- **稳定 72 小时后**，在旧 Vercel 部署的 `public/_headers` 注入：
+
+  ```text
+  /*
+    X-Robots-Tag: noindex
+  ```
+
+  防止搜索引擎继续抓取旧域名。
+
+- 不必新增 sitemap/robots 到 Cloudflare 部署，除非有 SEO 需求。
+- 如果用户从旧域名 bookmark 进入，提供一个 redirect 友好提示（保留 Vercel 旧部署的同时，加 `vercel.json` rewrite 指向 `https://app.nanoflow.app`）。但 PWA `id` 一旦绑定到旧 origin，redirect 解决不了 PWA 安装迁移问题。
+
+### 16.20 Vercel 完全失能时的最小可发布路径（补 §4.5）
+
+阶段 -1 假设 Vercel 还能用作过渡。极端情况：Vercel 账户被锁、token 失效、构建额度立刻为 0 且无法升级。此时：
+
+1. **立即在 GitHub 仓库 Settings 关闭 Vercel App 集成**，避免 Vercel 持续尝试构建。
+2. 跳过阶段 -1 / 阶段 0 中的所有 Vercel 相关步骤，直接进入阶段 1。
+3. Cloudflare Direct Upload 项目用 dashboard drag-and-drop 上传一个**本地构建产物**（`npm run build:stats && npm run perf:guard:nojit`），完成首次部署。
+4. 自定义域名直接绑定，先牺牲 24-72 小时回滚窗口；老用户在切换前先用 `npm run start` 本地访问数据。
+5. 阶段 2 / 阶段 3 在 Cloudflare 上原地推进。
+
+阶段 -1 任务追加一条：**确认 Vercel 即使全失能，也有备份的 GitHub Secrets 与 Supabase secrets 可读。** Cloudflare 与 Supabase 凭据不要只存在 Vercel 中。
+
+### 16.21 Rollback 时数据 schema 兼容（补 §9.2）
+
+策划案 §9.2 把 rollback 当成"切回旧 deployment"。但 Local-First + Supabase 同步链路下，rollback 还要考虑：
+
+- 用户在新版本期间已经写入 IndexedDB 的数据，使用了**新前端**才有的字段（如 `parking_meta` 子字段、`expected_minutes`）。
+- 切回旧 Cloudflare deployment 后，旧前端读到这些字段会忽略或 crash。
+- 推送到 Supabase 的写入若使用了新列，旧前端在拉取时也可能出现 type guard 失败。
+
+缓解：
+
+- Supabase migration 必须**纯增量**（只加列，不改语义）。
+- 前端任何新字段必须有 `field ?? defaultValue` 兜底。
+- 前端如果新增 schema validator，必须对未知字段保持宽松（`allowUnknown: true`）。
+
+阶段 0 / 阶段 1 任务：审查近 30 天的前端字段新增 PR，确认旧前端能容忍。
+
+### 16.22 本地预演（新增）
+
+在合并 deploy workflow 之前，在本地完整跑一次 Cloudflare Pages 行为：
+
+```bash
+npm ci
+npm run build:stats
+npm run perf:guard:nojit
+npm run quality:guard:font-contract
+npm run quality:guard:supabase-ready
+npx wrangler pages dev dist/browser --port 8788
+# 浏览器打开 http://localhost:8788
+# 验证 SPA fallback、_headers、PWA install、SW update
+```
+
+`wrangler pages dev` 会模拟 `_headers`、`_redirects`、Functions（如果存在）。这是最便宜的迁移信心来源，应作为阶段 1 的本地 dry-run 步骤。
+
+### 16.23 监控与日志（补 §11）
+
+Cloudflare Pages Free plan 没有持久化的 build 日志或运行时日志。可用的可观测性：
+
+- **GitHub Actions run logs**：deploy workflow 自身的输出，保留 90 天。
+- **Cloudflare Dashboard → Pages → Deployments**：每个部署的 build log（仅 Pages Git build 项目；Direct Upload 项目只有上传记录）。
+- **Cloudflare Web Analytics**：免费，只看流量；不替代 Sentry。
+- **Sentry**：runtime 错误、Session Replay、Performance。**唯一可靠的运行时观测**。
+
+含义：迁移后 Sentry 是 SLO 主要信号源。阶段 4 必做：
+
+- 验证 Sentry 在新域名下能正常上报；
+- `tracePropagationTargets` 已包含新域名；
+- 设置一个简单的 Sentry alert：`event.count > 50 in 1h && environment == production` → 邮件。
+
+### 16.24 增补风险表（合并到 §15）
+
+| 风险 | 影响 | 缓解 |
+| --- | --- | --- |
+| `netlify.toml` 与 `vercel.json` 删除导致 startup-contract 红 | CI 阻塞 | 阶段 1 同步重写 spec，或保留旧配置作为只读契约 |
+| `manifest.webmanifest` 中 `id` 硬编码旧 origin | PWA 安装态无法迁移，全部用户需重装 | 阶段 0 检查 `id`；如已硬编码旧 origin，迁移前先发版改成相对值并稳定 30 天 |
+| `dist/browser/functions/` 误生成 | Cloudflare 自动启用 Functions runtime，影响响应头 | CI artifact guard 校验目录不存在 |
+| Wrangler 版本漂移 | 部署突然失败 | 固定 `wrangler-action.wranglerVersion` |
+| Direct Upload 偶发 5xx | 部署中断 | retry-action 包裹，max 3 次 |
+| Supabase migration 与前端部署顺序错位 | 新前端读旧 schema 报错 | migration 先发布且向后兼容；rollback 前不发破坏性 migration |
+| HSTS 启用后无法回退到 HTTP | 浏览器锁定 HTTPS | 仅在 Cloudflare TLS 稳定 7 天后启用 |
+| `NG_APP_*_V1/V2` Boot Flag 默认值偏离当前生产 | 启动行为意外变化 | 阶段 0 导出 Vercel env 全集对照默认值 |
+| Sentry environment 未区分 preview/production | 告警噪声、采样失真 | 阶段 4 内补 `NG_APP_SENTRY_ENVIRONMENT` 注入 |
+| `_headers` 与 `inject-modulepreload` Link 重复 | Early Hints 体积膨胀 | 不在 `_headers` 写 chunk preload，依赖 Cloudflare 自动派生 |
+
+---
+
+## 17. 官方资料
 
 - Vercel Builds：<https://vercel.com/docs/deployments/builds/>
 - Vercel Managing Builds：<https://vercel.com/docs/builds/managing-builds>
