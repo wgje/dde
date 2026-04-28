@@ -1993,6 +1993,7 @@ export class ProjectDataService {
       y: row.y || 0,
       createdDate: row.created_at || '',
       updatedAt: row.updated_at,
+      completedAt: row.completed_at ?? null,
       displayId: '',
       shortId: row.short_id || undefined,
       deletedAt: row.deleted_at || undefined,

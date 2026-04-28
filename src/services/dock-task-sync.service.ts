@@ -141,11 +141,14 @@ export class DockTaskSyncService {
   ): void {
     const currentTask = this.taskStore.getTask(taskId);
     if (!currentTask) return;
+    const now = new Date().toISOString();
+    const completedAt = this.resolveCompletedAt(currentTask, patch, now);
 
     const updatedTask: Task = {
       ...currentTask,
       ...patch,
-      updatedAt: new Date().toISOString(),
+      completedAt,
+      updatedAt: now,
     };
     this.taskStore.setTask(updatedTask, projectId);
     this.projectState.updateProjects(projects =>
@@ -158,5 +161,21 @@ export class DockTaskSyncService {
           : project,
       ),
     );
+  }
+
+  /**
+   * 完成时间不是 LWW 时钟：已完成任务保留原值，刚完成时写入 now，恢复/归档时清空。
+   */
+  private resolveCompletedAt(currentTask: Task, patch: Partial<Task>, now: string): string | null | undefined {
+    if (patch.status === 'completed') {
+      if (currentTask.status === 'completed') {
+        return patch.completedAt ?? currentTask.completedAt ?? now;
+      }
+      return patch.completedAt ?? now;
+    }
+    if (patch.status && patch.status !== 'completed') {
+      return null;
+    }
+    return patch.completedAt === undefined ? currentTask.completedAt : patch.completedAt;
   }
 }

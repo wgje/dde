@@ -462,6 +462,7 @@ export class TaskSyncOperationsService {
               cognitive_load: task.cognitive_load ?? null,
               wait_minutes: task.wait_minutes ?? null,
               tags: task.tags ?? [],
+              completed_at: task.completedAt ?? null,
               deleted_at: task.deletedAt || null,
               attachments: task.attachments ?? [],
               // State Overlap 停泊元数据（A3.2/A3.6）

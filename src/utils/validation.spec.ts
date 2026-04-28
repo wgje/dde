@@ -472,6 +472,27 @@ describe('validation — sanitizeTask', () => {
     expect(sanitizeTask({ id: 'x', status: 'archived' }).status).toBe('archived');
   });
 
+  it('completed 任务缺少 completedAt 时从更新时间回填稳定完成时间', () => {
+    const task = sanitizeTask({
+      id: 'x',
+      status: 'completed',
+      updatedAt: '2026-04-20T10:00:00.000Z',
+      createdDate: '2026-04-19T10:00:00.000Z',
+    });
+
+    expect(task.completedAt).toBe('2026-04-20T10:00:00.000Z');
+  });
+
+  it('非 completed 任务清空 completedAt', () => {
+    const task = sanitizeTask({
+      id: 'x',
+      status: 'active',
+      completedAt: '2026-04-20T10:00:00.000Z',
+    });
+
+    expect(task.completedAt).toBeNull();
+  });
+
   it('NaN / Infinity 的坐标和 rank 被归零/回退', () => {
     const task = sanitizeTask({
       id: 'x',

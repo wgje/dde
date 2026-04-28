@@ -150,7 +150,13 @@ export class TaskAttributeService {
     const now = new Date().toISOString();
     this.recordAndUpdate(p => ({
       ...p,
-      tasks: p.tasks.map(t => t.id === taskId ? { ...t, status, updatedAt: now } : t)
+      tasks: p.tasks.map(t => {
+        if (t.id !== taskId) return t;
+        const completedAt = status === 'completed'
+          ? (t.status === 'completed' ? (t.completedAt ?? now) : now)
+          : null;
+        return { ...t, status, completedAt, updatedAt: now };
+      })
     }));
     // 停泊联动：任务完成/归档时自动清除 parkingMeta（A3.9）
     this.parkingService.handleTaskStatusChange(taskId, status);

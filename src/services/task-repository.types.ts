@@ -31,6 +31,7 @@ export interface TaskRow {
   deleted_at: string | null;
   created_at: string;
   updated_at: string;
+  completed_at?: string | null;
   parking_meta?: import('../models/parking').TaskParkingMeta | null;
 }
 
@@ -63,4 +64,3 @@ export interface ProjectRow {
   version: number;
   migrated_to_v2: boolean;
 }
-

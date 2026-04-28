@@ -2640,13 +2640,19 @@ export class UserSessionService {
       : (migrated.pendingSync ?? false);
 
     const safeTasks = Array.isArray(migrated.tasks) ? migrated.tasks : [];
-    migrated.tasks = safeTasks.map(t => ({
-      ...t,
-      status: t.status || 'active',
-      rank: t.rank ?? 10000,
-      displayId: t.displayId || '?',
-      hasIncompleteTask: t.hasIncompleteTask ?? false
-    }));
+    migrated.tasks = safeTasks.map(t => {
+      const status = t.status || 'active';
+      return {
+        ...t,
+        status,
+        completedAt: status === 'completed'
+          ? (t.completedAt ?? t.updatedAt ?? t.createdDate ?? migrated.updatedAt)
+          : null,
+        rank: t.rank ?? 10000,
+        displayId: t.displayId || '?',
+        hasIncompleteTask: t.hasIncompleteTask ?? false
+      };
+    });
 
     migrated.connections = Array.isArray(migrated.connections) ? migrated.connections : [];
 

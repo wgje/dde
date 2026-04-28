@@ -588,6 +588,7 @@ export class TaskRepositoryService {
       y: row.y ?? 0,
       createdDate: row.created_at ?? new Date().toISOString(),
       updatedAt: row.updated_at ?? undefined,
+      completedAt: row.completed_at ?? null,
       displayId: '?', // 由前端计算
       shortId: row.short_id ?? undefined,
       hasIncompleteTask: false, // 由前端计算
@@ -626,6 +627,7 @@ export class TaskRepositoryService {
       tags: task.tags ?? [],
       attachments: task.attachments ?? [],
       deleted_at: task.deletedAt ?? null,
+      completed_at: task.completedAt ?? null,
       // State Overlap 停泊元数据
       parking_meta: task.parkingMeta ?? null,
       // 注意：不需要手动设置 updated_at，数据库触发器会自动更新

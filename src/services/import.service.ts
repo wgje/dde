@@ -697,6 +697,10 @@ export class ImportService {
       shortId: exportTask.shortId,
       createdDate: exportTask.createdAt ?? new Date().toISOString(),
       updatedAt: new Date().toISOString(),
+      // 兼容旧导出包：缺少完成时间时使用导出包中最接近完成语义的时间，最后才落到导入时间。
+      completedAt: exportTask.status === 'completed'
+        ? (exportTask.completedAt ?? exportTask.updatedAt ?? exportTask.createdAt ?? new Date().toISOString())
+        : null,
       tags: exportTask.tags,
       priority: exportTask.priority,
       dueDate: exportTask.dueDate,
