@@ -30,8 +30,12 @@ import {
   ExportProject,
   ExportTask,
   ExportConnection,
+  ExportExternalSourceLink,
 } from './export.service';
 import type { BackupData } from '../../supabase/functions/_shared/backup-utils';
+import { ExternalSourceLinkService } from '../app/core/external-sources/external-source-link.service';
+import type { ExternalSourceLink } from '../app/core/external-sources/external-source.model';
+import { parseSiyuanBlockLink } from '../app/core/external-sources/siyuan/siyuan-link-parser';
 
 // ============================================
 // 导入配置
@@ -42,7 +46,7 @@ export const IMPORT_CONFIG = {
   MIN_SUPPORTED_VERSION: '1.0',
   
   /** 支持的最高格式版本 */
-  MAX_SUPPORTED_VERSION: '2.0',
+  MAX_SUPPORTED_VERSION: '2.1',
   
   /** 最大文件大小（字节）- 50MB */
   MAX_FILE_SIZE: 50 * 1024 * 1024,
@@ -184,6 +188,7 @@ export class ImportService {
   private readonly logger = inject(LoggerService).category('Import');
   private readonly toast = inject(ToastService);
   private readonly layoutService = inject(LayoutService);
+  private readonly externalSourceLinks = inject(ExternalSourceLinkService);
   
   // 状态信号
   private readonly _isImporting = signal(false);
@@ -480,12 +485,14 @@ export class ImportService {
     
     try {
       // 转换为 Project 类型
-      const project = this.convertToProject(exportProject, generateNewIds);
+      const conversion = this.convertToProject(exportProject, generateNewIds);
+      const project = conversion.project;
       
       // 调用回调保存项目
       if (onProjectImported) {
         await onProjectImported(project);
       }
+      await this.importExternalSourceLinks(exportProject, conversion.taskIdMap);
       
       return {
         projectId: project.id,
@@ -517,9 +524,9 @@ export class ImportService {
     try {
       // 合并任务（按 ID 去重）
       const existingTaskIds = new Set(existingProject.tasks.map(t => t.id));
-      const newTasks = (exportProject.tasks ?? [])
-        .filter(t => !existingTaskIds.has(t.id))
-        .map(t => this.convertToTask(t));
+      const newExportTasks = (exportProject.tasks ?? [])
+        .filter(t => !existingTaskIds.has(t.id));
+      const newTasks = newExportTasks.map(t => this.convertToTask(t));
       
       // 合并连接（按 ID 去重）
       const existingConnIds = new Set(existingProject.connections.map(c => c.id));
@@ -548,6 +555,7 @@ export class ImportService {
       if (onProjectImported) {
         await onProjectImported(mergedProject);
       }
+      await this.importExternalSourceLinks({ ...exportProject, tasks: newExportTasks }, new Map());
       
       return {
         projectId: mergedProject.id,
@@ -577,19 +585,17 @@ export class ImportService {
    * Hard Rule: ID 必须客户端 UUID。导出文件中的实体 ID 本身就是客户端 UUID，
    * 因此默认保留原始 ID；仅在显式要求或 rename 导入时重生整棵项目树 ID。
    */
-  private convertToProject(exportProject: ExportProject, generateNewIds: boolean = false): Project {
+  private convertToProject(exportProject: ExportProject, generateNewIds: boolean = false): { project: Project; taskIdMap: Map<string, string> } {
     const projectId = generateNewIds ? crypto.randomUUID() : exportProject.id;
     
     if (generateNewIds) {
       this.logger.info('导入时重生项目树 ID', { projectId: exportProject.id });
     }
     
-    // 构建 ID 映射（用于更新引用）
+    // 始终构建任务 ID 映射：重生 ID 时用于引用改写，保留 ID 时用于恢复外部锚点指针。
     const idMap = new Map<string, string>();
-    if (generateNewIds) {
-      for (const task of exportProject.tasks ?? []) {
-        idMap.set(task.id, crypto.randomUUID());
-      }
+    for (const task of exportProject.tasks ?? []) {
+      idMap.set(task.id, generateNewIds ? crypto.randomUUID() : task.id);
     }
     
     const rawTasks = (exportProject.tasks ?? []).map(t => 
@@ -624,7 +630,44 @@ export class ImportService {
     if (issues.length > 0) {
       this.logger.warn('导入项目树结构修复', { projectId, issues });
     }
-    return validated;
+    return { project: validated, taskIdMap: idMap };
+  }
+  
+  private async importExternalSourceLinks(exportProject: ExportProject, taskIdMap: Map<string, string>): Promise<void> {
+    const links: ExternalSourceLink[] = [];
+    for (const task of exportProject.tasks ?? []) {
+      const taskId = taskIdMap.get(task.id) ?? task.id;
+      for (const link of task.externalSourceLinks ?? []) {
+        const normalized = this.toExternalSourceLink(link, taskId);
+        if (normalized) links.push(normalized);
+      }
+    }
+    await this.externalSourceLinks.importPointers(links);
+  }
+
+  private toExternalSourceLink(link: ExportExternalSourceLink, taskId: string): ExternalSourceLink | null {
+    if (link.sourceType !== 'siyuan-block' || !link.targetId || !link.uri) return null;
+    // 校验 targetId 与 uri 是否符合思源块 ID 形式，否则丢弃并打 warn。
+    // 不过滤会导致脏数据进 IndexedDB 且在推送到 Supabase 时被 CHECK 约束拒绝，反复重试。
+    const parsed = parseSiyuanBlockLink(link.targetId) ?? parseSiyuanBlockLink(link.uri);
+    if (!parsed) {
+      this.logger.warn('导入跳过非法思源锚点', { taskId, targetId: link.targetId });
+      return null;
+    }
+    return {
+      id: link.id || crypto.randomUUID(),
+      taskId,
+      sourceType: 'siyuan-block',
+      targetId: parsed.blockId,
+      uri: parsed.uri,
+      label: link.label,
+      hpath: link.hpath,
+      role: link.role,
+      sortOrder: typeof link.sortOrder === 'number' ? link.sortOrder : 0,
+      deletedAt: link.deletedAt ?? null,
+      createdAt: link.createdAt ?? new Date().toISOString(),
+      updatedAt: link.updatedAt ?? new Date().toISOString(),
+    };
   }
   
   /**
@@ -827,7 +870,8 @@ export class ImportService {
           tags: task.tags,
           priority: task.priority as ExportTask['priority'],
           dueDate: task.dueDate,
-        });
+          externalSourceLinks: task.externalSourceLinks,
+        } as ExportTask);
       }
       
       for (const conn of backup.connections ?? []) {

@@ -65,6 +65,20 @@ export interface BackupProject {
   version?: number;
 }
 
+export interface BackupExternalSourceLink {
+  id: string;
+  sourceType: 'siyuan-block';
+  targetId: string;
+  uri: string;
+  label?: string;
+  hpath?: string;
+  role?: 'context' | 'spec' | 'reference' | 'evidence' | 'next-action';
+  sortOrder: number;
+  deletedAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface BackupTask {
   id: string;
   projectId: string;
@@ -89,6 +103,7 @@ export interface BackupTask {
   createdAt?: string;
   updatedAt?: string;
   deletedAt?: string | null;
+  externalSourceLinks?: BackupExternalSourceLink[];
 }
 
 export interface BackupConnection {
@@ -196,6 +211,11 @@ export interface BackupLocalState {
   deadLetters?: unknown[];
   taskTombstones?: unknown;
   connectionTombstones?: unknown;
+  /**
+   * 思源知识锚点尚未推送到 Supabase 的本机 pending 项。
+   * 备份时一并打包，跨设备恢复后可继续 flushPendingLinks 完成同步。
+   */
+  externalSourcePendingLinks?: unknown[];
 }
 
 /** 健康校验结果 */

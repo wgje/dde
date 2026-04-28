@@ -15,6 +15,7 @@ import { LoggerService } from './logger.service';
 import { PreferenceService } from './preference.service';
 import { LOCAL_BACKUP_CONFIG } from '../config/local-backup.config';
 import { Project, Task, Connection } from '../models';
+import { ExternalSourceLinkService } from '../app/core/external-sources/external-source-link.service';
 
 describe('ExportService', () => {
   let service: ExportService;
@@ -61,6 +62,7 @@ describe('ExportService', () => {
         { provide: ToastService, useValue: mockToast },
         { provide: LoggerService, useValue: mockLogger },
         { provide: PreferenceService, useValue: mockPreference },
+        { provide: ExternalSourceLinkService, useValue: { ensureLoaded: vi.fn().mockResolvedValue(undefined), activeLinksForTask: vi.fn(() => []) } },
       ],
     });
     
