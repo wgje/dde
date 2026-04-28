@@ -438,6 +438,12 @@ siyuan-local-config:{userId}
 3. 用户点击“清除本机缓存”时只清理 preview cache，不删除锚点。
 4. 用户点击“忘记本机思源配置”时删除 token / baseUrl / runtimeMode，不影响已绑定锚点。
 
+缓存迁移说明：
+
+1. 如果该能力首次实现时尚未上线旧版 `siyuan-preview-cache:{linkId}`，直接采用新 key，无需迁移。
+2. 如果已有旧版本机缓存，启动时可以按 `linkId -> ExternalSourceLink.targetId` 补写新 key；无法确认 `blockId` 的旧缓存必须丢弃。
+3. 迁移只发生在当前设备本地，不产生云端同步，不影响锚点指针。
+
 ### 6.5 同步规则
 
 | 操作 | 本地行为 | 云端行为 | 冲突规则 |
@@ -512,6 +518,12 @@ interface SiyuanPreviewProvider {
   }>;
 }
 ```
+
+接口约束：
+
+1. 返回的 `blockId` 必须与入参 `blockId` 完全一致；调用方在写入缓存或更新 UI 前必须再次比对，不一致时丢弃响应。
+2. `truncated = true` 表示任一截断发生：正文超过 `MAX_PREVIEW_CHARS`、直接子块超过 `MAX_PREVIEW_CHILDREN`，或 provider 因安全策略裁剪了不适合展示的内容。
+3. 调用方必须为每次悬浮 / Sheet 打开创建独立 `AbortController`，在锚点切换、Popover 关闭、组件销毁或用户手动刷新覆盖旧请求时调用 `abort()`。
 
 实现优先级：
 
@@ -662,7 +674,7 @@ Context7 对思源 API 的查询结果显示，`/api/block/getBlockKramdown`、`
 1. `getBlockKramdown` 返回不存在或权限错误时，优先映射为 `block-not-found` 或 `token-invalid`。
 2. `getChildBlocks` 失败不应导致整个预览失败；可以只显示当前块正文并提示子块不可用。
 3. `getHPathByID` 失败不应阻塞预览；任务卡可退回显示 `label` 或短 block ID。
-4. 任一接口超时后必须取消剩余请求或忽略迟到结果，避免 hover 快速切换造成过期预览覆盖当前锚点。
+4. 任一接口超时后必须通过 `AbortSignal` 取消剩余请求；如果底层通道无法真正取消，也必须在响应返回时比对当前 `linkId` / `blockId`，忽略迟到结果，避免 hover 快速切换造成过期预览覆盖当前锚点。
 
 ### 9.2 MVP 禁止的接口
 
