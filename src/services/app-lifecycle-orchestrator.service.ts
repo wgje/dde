@@ -59,7 +59,8 @@ export class AppLifecycleOrchestratorService {
   private autoReloadScheduled = false;
   private deferredResumeTimer: ReturnType<typeof setTimeout> | null = null;
 
-  private hasPendingVersion = false;
+  private readonly hasPendingVersionSignal = signal(false);
+  readonly pendingVersionUpdate = this.hasPendingVersionSignal.asReadonly();
   private hasShownResumeVersionPrompt = false;
 
   private visibilityHandler: (() => void) | null = null;
@@ -169,12 +170,12 @@ export class AppLifecycleOrchestratorService {
   }
 
   markVersionReady(): void {
-    this.hasPendingVersion = true;
+    this.hasPendingVersionSignal.set(true);
     this.hasShownResumeVersionPrompt = false;
   }
 
   hasPendingVersionUpdate(): boolean {
-    return this.hasPendingVersion;
+    return this.pendingVersionUpdate();
   }
 
   isResuming(): boolean {
@@ -295,7 +296,7 @@ export class AppLifecycleOrchestratorService {
       }
 
       if (
-        this.hasPendingVersion &&
+        this.pendingVersionUpdate() &&
         !this.hasShownResumeVersionPrompt &&
         this.lastBackgroundDurationMs >= APP_LIFECYCLE_CONFIG.NEW_VERSION_PROMPT_THRESHOLD_MS
       ) {

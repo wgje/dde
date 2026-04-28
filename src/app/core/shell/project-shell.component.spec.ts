@@ -1,5 +1,16 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ProjectShellComponent } from './project-shell.component';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { signal } from '@angular/core';
+import type { ProjectShellComponent } from './project-shell.component';
+
+vi.mock('gojs', () => ({
+  Router: class Router {},
+}));
+
+let ProjectShell: typeof ProjectShellComponent;
+
+beforeAll(async () => {
+  ({ ProjectShellComponent: ProjectShell } = await import('./project-shell.component'));
+}, 5000);
 
 type ProjectShellDeepLinkContext = {
   isDestroyed: boolean;
@@ -61,7 +72,7 @@ describe('ProjectShellComponent startup entry fallback', () => {
       deepLinkRetryTimer: null,
     };
 
-    const result = (ProjectShellComponent.prototype as unknown as {
+    const result = (ProjectShell.prototype as unknown as {
       handleTaskDeepLink: (
         this: ProjectShellComponent,
         taskId: string,
@@ -105,7 +116,7 @@ describe('ProjectShellComponent startup entry fallback', () => {
       deepLinkRetryTimer: null,
     };
 
-    const result = (ProjectShellComponent.prototype as unknown as {
+    const result = (ProjectShell.prototype as unknown as {
       handleTaskDeepLink: (
         this: ProjectShellComponent,
         taskId: string,
@@ -120,5 +131,50 @@ describe('ProjectShellComponent startup entry fallback', () => {
     expect(navigateToProjectList).not.toHaveBeenCalled();
     expect(activateFlowIntent).not.toHaveBeenCalled();
     expect(setActiveView).not.toHaveBeenCalled();
+  });
+});
+
+describe('ProjectShellComponent flow lazy-load recovery', () => {
+  it('activateFlowIntent 应在新版本待刷新且 FlowView 未就绪时阻止懒加载', () => {
+    const reloadForPendingVersionBeforeFlow = vi.fn();
+    const context = {
+      flowIntentLazyLoadEnabled: true,
+      flowIntentActivated: signal(false),
+      flowPrefetchOnlyActivated: signal(true),
+      flowCommand: {
+        isViewReady: () => false,
+      },
+      appLifecycle: {
+        hasPendingVersionUpdate: () => true,
+      },
+      reloadForPendingVersionBeforeFlow,
+      logger: {
+        debug: vi.fn(),
+      },
+    };
+
+    const result = (ProjectShell.prototype as unknown as {
+      activateFlowIntent: (this: ProjectShellComponent, source: 'click') => boolean;
+    }).activateFlowIntent.call(context as unknown as ProjectShellComponent, 'click');
+
+    expect(result).toBe(false);
+    expect(context.flowIntentActivated()).toBe(false);
+    expect(reloadForPendingVersionBeforeFlow).toHaveBeenCalledWith('click');
+  });
+
+  it('switchToFlow 应在新版本刷新拦截时不切换到 flow', () => {
+    const context = {
+      cancelFlowStateAwareTimers: vi.fn(),
+      activateFlowIntent: vi.fn().mockReturnValue(false),
+      setActiveView: vi.fn(),
+    };
+
+    (ProjectShell.prototype as unknown as {
+      switchToFlow: (this: ProjectShellComponent) => void;
+    }).switchToFlow.call(context as unknown as ProjectShellComponent);
+
+    expect(context.cancelFlowStateAwareTimers).toHaveBeenCalledTimes(1);
+    expect(context.activateFlowIntent).toHaveBeenCalledWith('click');
+    expect(context.setActiveView).not.toHaveBeenCalled();
   });
 });

@@ -55,15 +55,3 @@ describe('flow-view.component.ts', () => {
     expect(source).toContain("this.logger.warn('目标任务不存在，忽略流程图链接跳转'");
   });
 });
-
-describe('project-shell.component.ts flow lazy-load recovery', () => {
-  it('应在新版本待刷新时阻止 Flow 懒加载并先清缓存刷新', () => {
-    const sourcePath = join(process.cwd(), 'src/app/core/shell/project-shell.component.ts');
-    const source = readFileSync(sourcePath, 'utf8');
-
-    expect(source).toContain('this.appLifecycle.hasPendingVersionUpdate()');
-    expect(source).toContain('reloadForPendingVersionBeforeFlow(source)');
-    expect(source).toContain('reloadViaForceClearCache()');
-    expect(source).toContain('Flow lazy-load blocked by pending app version; reloading before chunk request');
-  });
-});

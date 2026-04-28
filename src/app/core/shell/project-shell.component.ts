@@ -3,6 +3,7 @@ import {
   inject, 
   signal, 
   computed,
+  effect,
   OnInit, 
   OnDestroy,
   HostListener,
@@ -58,6 +59,8 @@ interface NetworkInformationLike {
   downlink?: number;
   rtt?: number;
 }
+
+type FlowIntentSource = 'click' | 'route' | 'deeplink' | 'restore-idle' | 'version-ready';
 
 /**
  * 项目视图外壳组件
@@ -480,7 +483,8 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
     !this.flowIntentLazyLoadEnabled || this.flowIntentActivated()
   );
   readonly shouldPrefetchFlowChunk = computed(() =>
-    this.shouldLoadFlowNow() || this.flowPrefetchOnlyActivated()
+    !this.appLifecycle.pendingVersionUpdate() &&
+    (this.shouldLoadFlowNow() || this.flowPrefetchOnlyActivated())
   );
   // 使用 uiState.activeView 代替本地的 mobileActiveView，使其他组件可以访问当前视图状态
   
@@ -509,6 +513,16 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
   private flowPreloadIdleCallbackId: number | null = null;
   private lastFlowRestoreProjectId: string | null = null;
   private flowVersionReloadRequested = false;
+  private readonly flowPendingVersionEffect = effect(() => {
+    if (!this.flowIntentLazyLoadEnabled || !this.appLifecycle.pendingVersionUpdate()) {
+      return;
+    }
+
+    this.flowPrefetchOnlyActivated.set(false);
+    if (this.flowIntentActivated() && !this.flowCommand.isViewReady()) {
+      this.reloadForPendingVersionBeforeFlow('version-ready');
+    }
+  });
   
   // 【P2-23 修复】从普通方法改为 computed() 避免每次变更检测重复遍历
   currentFilterLabel = computed(() => {
@@ -568,14 +582,14 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
    * Flow 视图意图触发器
    * 默认只在用户有明确意图时加载 GoJS 大块代码
    */
-  activateFlowIntent(source: 'click' | 'route' | 'deeplink' | 'restore-idle'): boolean {
-    if (!this.flowIntentLazyLoadEnabled || this.flowIntentActivated()) {
-      return true;
-    }
-
-    if (this.appLifecycle.hasPendingVersionUpdate()) {
+  activateFlowIntent(source: FlowIntentSource): boolean {
+    if (this.flowIntentLazyLoadEnabled && this.appLifecycle.hasPendingVersionUpdate() && !this.flowCommand.isViewReady()) {
       this.reloadForPendingVersionBeforeFlow(source);
       return false;
+    }
+
+    if (!this.flowIntentLazyLoadEnabled || this.flowIntentActivated()) {
+      return true;
     }
 
     this.flowIntentActivated.set(true);
@@ -584,11 +598,12 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
     return true;
   }
 
-  private reloadForPendingVersionBeforeFlow(source: 'click' | 'route' | 'deeplink' | 'restore-idle'): void {
+  private reloadForPendingVersionBeforeFlow(source: FlowIntentSource): void {
     if (this.flowVersionReloadRequested) {
       return;
     }
 
+    this.flowPrefetchOnlyActivated.set(false);
     this.flowVersionReloadRequested = true;
     this.logger.warn('Flow lazy-load blocked by pending app version; reloading before chunk request', { source });
     this.toast.info('正在刷新新版本', '流程图组件需要最新资源，刷新后会自动恢复');
