@@ -1721,7 +1721,8 @@ export class RetryQueueService {
       }
       // 【2026-03-20 优化】只有在实际通知了同步开始时才通知同步结束
       // 避免未发起任何网络请求的空转也触发状态切换
-      if (processGeneration === this.queueViewGeneration && (hasNotifiedSyncStart || this.queue.length !== initialQueueLength)) {
+      const queueWasModified = this.queue.length !== initialQueueLength;
+      if (processGeneration === this.queueViewGeneration && (hasNotifiedSyncStart || queueWasModified)) {
         this.lastDrainCompletedBySuccess = drainCompletedBySuccessfulReplay;
         try {
           this.operationHandler.onProcessingStateChange(false, this.queue.length);

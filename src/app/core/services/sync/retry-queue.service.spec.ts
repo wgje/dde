@@ -867,6 +867,7 @@ describe('RetryQueueService', () => {
         type: 'task',
         operation: 'upsert',
         data: task,
+        // 缺少 projectId 会进入终止态清理分支，且不会发起网络同步。
         retryCount: 0,
         createdAt: Date.now(),
         sourceUserId: 'test-user',
