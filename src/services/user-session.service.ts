@@ -309,8 +309,8 @@ export class UserSessionService {
       return AUTH_CONFIG.LOCAL_MODE_USER_ID;
     }
 
-    return this.authService.peekPersistedSessionIdentity?.()?.userId
-      ?? this.authService.peekPersistedOwnerHint?.()
+    return this.authService.peekPersistedSessionIdentity()?.userId
+      ?? this.authService.peekPersistedOwnerHint()
       ?? AUTH_CONFIG.LOCAL_MODE_USER_ID;
   }
 
@@ -328,14 +328,14 @@ export class UserSessionService {
       return true;
     }
 
-    if (this.authService.peekPersistedSessionIdentity?.()?.userId === ownerUserId) {
+    if (this.authService.peekPersistedSessionIdentity()?.userId === ownerUserId) {
       return true;
     }
 
     // PWA 数据为设备本地存储，owner hint 表示用户曾在此设备登录过。
     // access token 过期但 refresh token 仍可恢复时，信任本地数据归属，
     // 避免冷启动出现"正在确认会话"只读遮罩阻塞用户操作。
-    return this.authService.peekPersistedOwnerHint?.() === ownerUserId;
+    return this.authService.peekPersistedOwnerHint() === ownerUserId;
   }
 
   private cloneOfflineProjectsForPrehydrate(projects: Project[]): Project[] {
@@ -423,8 +423,8 @@ export class UserSessionService {
       ? snapshot.userId
       : null;
 
-    const persistedSessionUserId = this.authService.peekPersistedSessionIdentity?.()?.userId ?? null;
-    const persistedOwnerHint = this.authService.peekPersistedOwnerHint?.()
+    const persistedSessionUserId = this.authService.peekPersistedSessionIdentity()?.userId ?? null;
+    const persistedOwnerHint = this.authService.peekPersistedOwnerHint()
       ?? persistedSessionUserId
       ?? null;
 
@@ -680,7 +680,7 @@ export class UserSessionService {
     if (!snapshot.ownerUserId) {
       // 旧版快照可能缺少 ownerUserId 字段，尝试通过 persisted hint 推断归属
       if (this.authService.isConfigured && hasSnapshotProjects) {
-        const persistedOwnerHint = this.authService.peekPersistedOwnerHint?.() ?? null;
+        const persistedOwnerHint = this.authService.peekPersistedOwnerHint() ?? null;
         if (persistedOwnerHint && persistedOwnerHint === expectedOwnerUserId) {
           this.logger.debug('缺少 owner 元数据的快照通过 persisted hint 匹配，允许恢复', {
             stage,
@@ -707,7 +707,7 @@ export class UserSessionService {
       // expectedUserId 为 null → 'local-user'，而快照 owner 是真实用户 ID。
       // 通过 persisted owner hint 匹配，避免同一设备用户看到空工作区。
       if (this.authService.isConfigured) {
-        const persistedOwnerHint = this.authService.peekPersistedOwnerHint?.() ?? null;
+        const persistedOwnerHint = this.authService.peekPersistedOwnerHint() ?? null;
         if (persistedOwnerHint && snapshot.ownerUserId === persistedOwnerHint) {
           this.logger.debug('owner 通过 persisted hint 匹配，允许恢复离线快照', {
             stage,

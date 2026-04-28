@@ -220,13 +220,12 @@ export class RetryQueueService {
   }
 
   private getPersistedOwnerHint(): string | null {
-    const auth = this.authService as Partial<Pick<AuthService, 'peekPersistedOwnerHint' | 'peekPersistedSessionIdentity'>>;
-    const hintedUserId = auth.peekPersistedOwnerHint?.();
+    const hintedUserId = this.authService.peekPersistedOwnerHint();
     if (typeof hintedUserId === 'string' && hintedUserId.length > 0) {
       return hintedUserId;
     }
 
-    const sessionIdentity = auth.peekPersistedSessionIdentity?.();
+    const sessionIdentity = this.authService.peekPersistedSessionIdentity();
     return typeof sessionIdentity?.userId === 'string' && sessionIdentity.userId.length > 0
       ? sessionIdentity.userId
       : null;
