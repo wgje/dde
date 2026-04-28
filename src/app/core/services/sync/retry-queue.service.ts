@@ -1361,6 +1361,7 @@ export class RetryQueueService {
     const maxDurationMs = typeof options.maxDurationMs === 'number' && options.maxDurationMs > 0
       ? options.maxDurationMs
       : Number.POSITIVE_INFINITY;
+    const initialQueueLength = this.queue.length;
 
     // 【2026-03-23 修复】网络不可用或熔断器打开时，跳过处理避免无效重试风暴
     if (!this.operationHandler?.isOnline() || !this.checkCircuitBreaker()) {
@@ -1720,7 +1721,7 @@ export class RetryQueueService {
       }
       // 【2026-03-20 优化】只有在实际通知了同步开始时才通知同步结束
       // 避免未发起任何网络请求的空转也触发状态切换
-      if (hasNotifiedSyncStart && processGeneration === this.queueViewGeneration) {
+      if (processGeneration === this.queueViewGeneration && (hasNotifiedSyncStart || this.queue.length !== initialQueueLength)) {
         this.lastDrainCompletedBySuccess = drainCompletedBySuccessfulReplay;
         try {
           this.operationHandler.onProcessingStateChange(false, this.queue.length);
@@ -1873,7 +1874,7 @@ export class RetryQueueService {
    * 解决 loadFromStorage 和 setOperationHandler 时序不确定导致的状态不一致
    */
   private syncPendingCountToState(): void {
-    if (this.queue.length > 0 && this.operationHandler) {
+    if (this.operationHandler) {
       this.lastDrainCompletedBySuccess = false;
       try {
         this.operationHandler.onProcessingStateChange(false, this.queue.length);

@@ -857,6 +857,32 @@ describe('RetryQueueService', () => {
     );
   });
 
+  it('仅清理终止态残留时也应回写 pendingCount，避免 UI 持续显示待同步', async () => {
+    const task = createTask('t-terminal-cleanup-pending-count');
+    (service as unknown as {
+      queue: Array<Record<string, unknown>>;
+    }).queue = [
+      {
+        id: crypto.randomUUID(),
+        type: 'task',
+        operation: 'upsert',
+        data: task,
+        retryCount: 0,
+        createdAt: Date.now(),
+        sourceUserId: 'test-user',
+      },
+    ];
+    online = true;
+    vi.mocked(handler.onProcessingStateChange).mockClear();
+
+    await service.processQueue();
+
+    expect(handler.pushTask).not.toHaveBeenCalled();
+    expect(service.length).toBe(0);
+    expect(handler.onProcessingStateChange).not.toHaveBeenCalledWith(true, expect.any(Number));
+    expect(handler.onProcessingStateChange).toHaveBeenCalledWith(false, 0);
+  });
+
   it('跨账号重试项应隔离保留而不是在当前账号下重放', async () => {
     const task = createTask('t-foreign-user');
     (service as unknown as {
