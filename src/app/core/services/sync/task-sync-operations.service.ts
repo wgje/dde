@@ -39,6 +39,12 @@ import {
   createBrowserNetworkSuspendedError,
   isBrowserNetworkSuspendedWindow,
 } from '../../../../utils/browser-network-suspension';
+import {
+  getCompatibleTaskSelectFields,
+  getCompatibleTaskWriteRow,
+  markTaskCompletedAtColumnUnavailable,
+  omitTaskCompletedAtColumn,
+} from '../../../../utils/task-schema-compat';
 /** Tombstone 查询结果 */
 export interface TombstoneQueryResult {
   ids: Set<string>;
@@ -441,35 +447,46 @@ export class TaskSyncOperationsService {
         }
         
         await this.syncOpHelper.retryWithBackoff(async () => {
-          const { data: upsertedData, error } = await client
+          const row = {
+            id: task.id,
+            project_id: projectId,
+            title: task.title,
+            content: task.content,
+            stage: task.stage,
+            parent_id: task.parentId,
+            order: task.order,
+            rank: task.rank,
+            status: task.status,
+            x: task.x,
+            y: task.y,
+            short_id: task.shortId,
+            priority: task.priority ?? null,
+            due_date: task.dueDate ?? null,
+            expected_minutes: task.expected_minutes ?? null,
+            cognitive_load: task.cognitive_load ?? null,
+            wait_minutes: task.wait_minutes ?? null,
+            tags: task.tags ?? [],
+            completed_at: task.completedAt ?? null,
+            deleted_at: task.deletedAt || null,
+            attachments: task.attachments ?? [],
+            // State Overlap 停泊元数据（A3.2/A3.6）
+            parking_meta: task.parkingMeta ?? null,
+          };
+          const upsertTask = async (payload: typeof row | Omit<typeof row, 'completed_at'>) => await client
             .from('tasks')
-            .upsert({
-              id: task.id,
-              project_id: projectId,
-              title: task.title,
-              content: task.content,
-              stage: task.stage,
-              parent_id: task.parentId,
-              order: task.order,
-              rank: task.rank,
-              status: task.status,
-              x: task.x,
-              y: task.y,
-              short_id: task.shortId,
-              priority: task.priority ?? null,
-              due_date: task.dueDate ?? null,
-              expected_minutes: task.expected_minutes ?? null,
-              cognitive_load: task.cognitive_load ?? null,
-              wait_minutes: task.wait_minutes ?? null,
-              tags: task.tags ?? [],
-              completed_at: task.completedAt ?? null,
-              deleted_at: task.deletedAt || null,
-              attachments: task.attachments ?? [],
-              // State Overlap 停泊元数据（A3.2/A3.6）
-              parking_meta: task.parkingMeta ?? null,
-            })
+            .upsert(payload)
             .select('updated_at')
             .single();
+
+          let { data: upsertedData, error } = await upsertTask(getCompatibleTaskWriteRow(row));
+          if (error && markTaskCompletedAtColumnUnavailable(error)) {
+            this.logger.warn('tasks.completed_at 缺失，任务推送已降级为旧 schema 写入', {
+              taskId: task.id,
+              projectId,
+              error,
+            });
+            ({ data: upsertedData, error } = await upsertTask(omitTaskCompletedAtColumn(row)));
+          }
           
           if (error) throw supabaseErrorToError(error);
           
@@ -665,17 +682,34 @@ export class TaskSyncOperationsService {
     try {
       let tasksQuery = client
         .from('tasks')
-        .select(FIELD_SELECT_CONFIG.TASK_LIST_FIELDS)
+        .select(getCompatibleTaskSelectFields(FIELD_SELECT_CONFIG.TASK_LIST_FIELDS))
         .eq('project_id', projectId);
       
       if (since) {
         tasksQuery = tasksQuery.gt('updated_at', since);
       }
       
-      const [tasksResult, tombstonesResult] = await Promise.all([
+      const [initialTasksResult, tombstonesResult] = await Promise.all([
         tasksQuery,
         this.tombstoneService.getTombstonesWithCache(projectId, client)
       ]);
+      let tasksResult = initialTasksResult;
+
+      if (tasksResult.error && markTaskCompletedAtColumnUnavailable(tasksResult.error)) {
+        this.logger.warn('tasks.completed_at 缺失，任务拉取已降级为旧 schema 字段', {
+          projectId,
+          since,
+          error: tasksResult.error,
+        });
+        let fallbackTasksQuery = client
+          .from('tasks')
+          .select(getCompatibleTaskSelectFields(FIELD_SELECT_CONFIG.TASK_LIST_FIELDS))
+          .eq('project_id', projectId);
+        if (since) {
+          fallbackTasksQuery = fallbackTasksQuery.gt('updated_at', since);
+        }
+        tasksResult = await fallbackTasksQuery;
+      }
       
       if (tasksResult.error) throw supabaseErrorToError(tasksResult.error);
       

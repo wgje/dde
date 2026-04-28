@@ -11,9 +11,11 @@ CREATE POLICY external_source_links_owner_select
   USING (
     user_id = (SELECT auth.uid())
     AND EXISTS (
-      SELECT 1 FROM public.tasks t
+      SELECT 1
+      FROM public.tasks t
+      JOIN public.projects p ON p.id = t.project_id
       WHERE t.id = external_source_links.task_id
-        AND t.user_id = (SELECT auth.uid())
+        AND p.owner_id = (SELECT auth.uid())
     )
   );
 
@@ -25,8 +27,10 @@ CREATE POLICY external_source_links_owner_delete
   USING (
     user_id = (SELECT auth.uid())
     AND EXISTS (
-      SELECT 1 FROM public.tasks t
+      SELECT 1
+      FROM public.tasks t
+      JOIN public.projects p ON p.id = t.project_id
       WHERE t.id = external_source_links.task_id
-        AND t.user_id = (SELECT auth.uid())
+        AND p.owner_id = (SELECT auth.uid())
     )
   );

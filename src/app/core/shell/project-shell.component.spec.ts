@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'fs';
+import { join } from 'path';
 import { ProjectShellComponent } from './project-shell.component';
 
 type ProjectShellDeepLinkContext = {
@@ -120,5 +122,30 @@ describe('ProjectShellComponent startup entry fallback', () => {
     expect(navigateToProjectList).not.toHaveBeenCalled();
     expect(activateFlowIntent).not.toHaveBeenCalled();
     expect(setActiveView).not.toHaveBeenCalled();
+  });
+});
+
+describe('ProjectShellComponent flow view loading contract', () => {
+  it('桌面端应直接渲染 FlowView，只有移动端保留 @defer 懒加载', () => {
+    const source = readFileSync(
+      join(process.cwd(), 'src/app/core/shell/project-shell.component.ts'),
+      'utf-8'
+    );
+
+    const flowColumnStart = source.indexOf('<!-- Flow Column - 移动端条件渲染，桌面端始终显示 -->');
+    expect(flowColumnStart).toBeGreaterThanOrEqual(0);
+
+    const flowColumnEnd = source.indexOf('@defer (on timer(300))', flowColumnStart);
+    expect(flowColumnEnd).toBeGreaterThan(flowColumnStart);
+
+    const flowColumn = source.slice(flowColumnStart, flowColumnEnd);
+    const desktopFlowBranch = flowColumn.match(
+      /@if \(!uiState\.isMobile\(\)\) \{\s*<app-flow-view class="flex-1 min-h-0 overflow-hidden relative" \(goBackToText\)="switchToText\(\)"><\/app-flow-view>\s*\} @else \{/s
+    )?.[0];
+
+    expect(desktopFlowBranch).toBeDefined();
+    expect(desktopFlowBranch).not.toContain('@defer');
+    expect(desktopFlowBranch).not.toContain('流程图加载失败');
+    expect(flowColumn).toContain('@defer (when shouldLoadFlowNow(); prefetch when shouldPrefetchFlowChunk())');
   });
 });

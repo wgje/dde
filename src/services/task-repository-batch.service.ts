@@ -3,6 +3,11 @@ import { SupabaseClientService } from './supabase-client.service';
 import { LoggerService } from './logger.service';
 import { Task, Connection } from '../models';
 import { supabaseErrorToError } from '../utils/supabase-error';
+import {
+  getCompatibleTaskWriteRow,
+  markTaskCompletedAtColumnUnavailable,
+  omitTaskCompletedAtColumn,
+} from '../utils/task-schema-compat';
 import { FIELD_SELECT_CONFIG } from '../config/sync.config';
 import { BATCH_RETRY_BASE_MS } from '../config/timeout.config';
 import type { ConnectionDeleteSummary } from './change-tracker.types';
@@ -53,9 +58,7 @@ export class TaskRepositoryBatchService {
       let success = false;
       
       while (!success && retryCount <= MAX_RETRIES) {
-        const { error } = await this.supabase.client()
-          .from('tasks')
-          .upsert(batch as never, { onConflict: 'id' });
+        const { error } = await this.upsertTaskBatchWithSchemaFallback(batch, projectId);
 
         if (error) {
           retryCount++;
@@ -343,9 +346,7 @@ export class TaskRepositoryBatchService {
         
         for (let retry = 0; retry <= MAX_RETRIES && !success; retry++) {
           // 使用 upsert 以处理重复创建的边缘情况
-          const { error } = await this.supabase.client()
-            .from('tasks')
-            .upsert(batch as never, { onConflict: 'id' });
+          const { error } = await this.upsertTaskBatchWithSchemaFallback(batch, projectId);
           
           if (error) {
             if (retry < MAX_RETRIES) {
@@ -384,9 +385,7 @@ export class TaskRepositoryBatchService {
         let success = false;
         
         for (let retry = 0; retry <= MAX_RETRIES && !success; retry++) {
-          const { error } = await this.supabase.client()
-            .from('tasks')
-            .upsert(batch as never, { onConflict: 'id' });
+          const { error } = await this.upsertTaskBatchWithSchemaFallback(batch, projectId);
           
           if (error) {
             if (retry < MAX_RETRIES) {
@@ -625,6 +624,27 @@ export class TaskRepositoryBatchService {
   }
 
   // ========== 私有辅助方法 ==========
+
+  private async upsertTaskBatchWithSchemaFallback(
+    batch: Record<string, unknown>[],
+    projectId: string
+  ): Promise<{ error: { message: string } | null }> {
+    const upsertBatch = async (rows: Record<string, unknown>[]) => await this.supabase.client()
+      .from('tasks')
+      .upsert(rows as never, { onConflict: 'id' });
+
+    let result = await upsertBatch(batch.map(row => getCompatibleTaskWriteRow(row)));
+    if (result.error && markTaskCompletedAtColumnUnavailable(result.error)) {
+      this.logger.warn('tasks.completed_at 缺失，任务批量写入已降级为旧 schema 写入', {
+        projectId,
+        batchSize: batch.length,
+        error: result.error,
+      });
+      result = await upsertBatch(batch.map(row => omitTaskCompletedAtColumn(row)));
+    }
+
+    return result;
+  }
 
   /**
    * 加载项目的所有连接（syncConnections 内部使用）

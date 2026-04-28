@@ -187,6 +187,30 @@ describe('GlobalErrorHandler', () => {
     }
   });
 
+  it('should detect Angular JIT compiler unavailable error and trigger reload', () => {
+    const reloadSpy = vi.fn();
+    const originalLocation = window.location;
+    // @ts-ignore
+    delete window.location;
+    // @ts-ignore
+    window.location = { reload: reloadSpy };
+
+    try {
+      const error = new Error('JIT compiler unavailable');
+      error.stack = `Error: JIT compiler unavailable
+    at ys (https://dde-eight.vercel.app/chunk-MEQCPUNU.js:7:9763)
+    at https://dde-eight.vercel.app/chunk-IZPRSPQS.js:17:1234`;
+
+      service.handleError(error);
+
+      expect(reloadSpy).toHaveBeenCalled();
+      expect(toastSpy.error).not.toHaveBeenCalled();
+    } finally {
+      // @ts-ignore
+      window.location = originalLocation;
+    }
+  });
+
   it('should NOT treat non-Angular TypeError as DI version skew', () => {
     const reloadSpy = vi.fn();
     const originalLocation = window.location;

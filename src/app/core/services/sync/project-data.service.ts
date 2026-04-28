@@ -36,6 +36,10 @@ import {
   isBrowserNetworkSuspendedError,
   isBrowserNetworkSuspendedWindow,
 } from '../../../../utils/browser-network-suspension';
+import {
+  getCompatibleTaskSelectFields,
+  markTaskCompletedAtColumnUnavailable,
+} from '../../../../utils/task-schema-compat';
 
 interface ParkedTaskCacheRecord {
   taskId: string;
@@ -1047,10 +1051,21 @@ export class ProjectDataService {
     const tasksResult = await this.throttle.execute(
       `tasks-data:${projectId}`,
       async () => {
-        return await client
+        const loadTasks = async () => await client
           .from('tasks')
-          .select(FIELD_SELECT_CONFIG.TASK_LIST_FIELDS)
+          .select(getCompatibleTaskSelectFields(FIELD_SELECT_CONFIG.TASK_LIST_FIELDS))
           .eq('project_id', projectId);
+
+        let result = await loadTasks();
+        if (result.error && markTaskCompletedAtColumnUnavailable(result.error)) {
+          this.logger.warn('tasks.completed_at 缺失，已降级为旧 schema 任务字段', {
+            projectId,
+            error: result.error,
+          });
+          result = await loadTasks();
+        }
+
+        return result;
       },
       { 
         deduplicate: true,
@@ -1813,28 +1828,40 @@ export class ProjectDataService {
       return { entries: [], removedTaskIds: [], nextCursor: since };
     }
 
-    const selectFields = `project_id,${FIELD_SELECT_CONFIG.TASK_LIST_FIELDS}`;
     const updatedRows: ParkedTaskDeltaRow[] = [];
     const entryMap = new Map<string, ParkedTaskEntry>();
     const removedTaskIds = new Set<string>();
 
     try {
       return await this.withAuthRetry('pullParkedTasksDelta', async () => {
-        let parkedQuery = client
-          .from('tasks')
-          .select(selectFields)
-          .not('parking_meta', 'is', null);
+        const loadParkedRows = async () => {
+          const selectFields = getCompatibleTaskSelectFields(`project_id,${FIELD_SELECT_CONFIG.TASK_LIST_FIELDS}`);
+          let parkedQuery = client
+            .from('tasks')
+            .select(selectFields)
+            .not('parking_meta', 'is', null);
 
-        if (since) {
-          parkedQuery = parkedQuery.gt('updated_at', since);
+          if (since) {
+            parkedQuery = parkedQuery.gt('updated_at', since);
+          }
+
+          return await parkedQuery;
+        };
+
+        let parkedResult = await loadParkedRows();
+        if (parkedResult.error && markTaskCompletedAtColumnUnavailable(parkedResult.error)) {
+          this.logger.warn('tasks.completed_at 缺失，停泊任务增量拉取已降级为旧 schema 字段', {
+            since,
+            error: parkedResult.error,
+          });
+          parkedResult = await loadParkedRows();
         }
 
-        const { data: parkedRows, error: parkedError } = await parkedQuery;
-        if (parkedError) {
-          throw supabaseErrorToError(parkedError);
+        if (parkedResult.error) {
+          throw supabaseErrorToError(parkedResult.error);
         }
 
-        for (const rawRow of (parkedRows ?? []) as ParkedTaskDeltaRow[]) {
+        for (const rawRow of (parkedResult.data ?? []) as ParkedTaskDeltaRow[]) {
           const projectId = rawRow.project_id ? String(rawRow.project_id) : '';
           if (!projectId || !rawRow.id) continue;
           const task = this.rowToTask(rawRow);

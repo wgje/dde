@@ -4,7 +4,7 @@
 CREATE TABLE IF NOT EXISTS public.external_source_links (
   id text PRIMARY KEY,
   user_id uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
-  task_id text NOT NULL REFERENCES public.tasks(id) ON DELETE CASCADE,
+  task_id uuid NOT NULL REFERENCES public.tasks(id) ON DELETE CASCADE,
   source_type text NOT NULL DEFAULT 'siyuan-block',
   target_id text NOT NULL,
   uri text NOT NULL,
@@ -53,9 +53,11 @@ CREATE POLICY external_source_links_owner_insert
   WITH CHECK (
     user_id = (SELECT auth.uid())
     AND EXISTS (
-      SELECT 1 FROM public.tasks t
+      SELECT 1
+      FROM public.tasks t
+      JOIN public.projects p ON p.id = t.project_id
       WHERE t.id = external_source_links.task_id
-        AND t.user_id = (SELECT auth.uid())
+        AND p.owner_id = (SELECT auth.uid())
     )
   );
 
@@ -68,9 +70,11 @@ CREATE POLICY external_source_links_owner_update
   WITH CHECK (
     user_id = (SELECT auth.uid())
     AND EXISTS (
-      SELECT 1 FROM public.tasks t
+      SELECT 1
+      FROM public.tasks t
+      JOIN public.projects p ON p.id = t.project_id
       WHERE t.id = external_source_links.task_id
-        AND t.user_id = (SELECT auth.uid())
+        AND p.owner_id = (SELECT auth.uid())
     )
   );
 
