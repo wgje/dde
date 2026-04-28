@@ -626,7 +626,34 @@ idle
 7. 鼠标从锚点进入浮层时取消关闭计时。
 8. 鼠标离开锚点和浮层后进入 `closing-grace`，宽限期结束再关闭。
 9. 新锚点触发时立即 abort 上一个请求，并用新锚点重设 Overlay origin。
-10. 任何响应返回前必须比对当前活跃 `linkId` / `blockId`；不一致则静默丢弃。
+10. 任何响应返回前必须比对当前活跃 `linkId` / `blockId` / `requestSeq`；不一致则静默丢弃。
+
+同步清理与请求切换伪代码：
+
+```ts
+// 伪代码：强调同步顺序，不代表最终实现 API。
+private originRef?: HTMLElement;
+private activeRequest?: {
+  linkId: string;
+  blockId: string;
+  controller: AbortController;
+  requestSeq: number;
+};
+private requestSeq = 0;
+
+closePopover(): void {
+  this.overlayRef?.detach();
+  this.originRef = undefined;
+}
+
+startHover(linkId: string, blockId: string, origin: HTMLElement): void {
+  const requestSeq = ++this.requestSeq;
+  this.activeRequest?.controller.abort();
+  const controller = new AbortController();
+  this.originRef = origin;
+  this.activeRequest = { linkId, blockId, controller, requestSeq };
+}
+```
 
 不建议使用 `MatTooltip` 承载该能力。原因是预览浮层需要异步状态、按钮、内部滚动、错误态和安全渲染链路，已经超出普通 tooltip 的语义。
 
