@@ -173,6 +173,10 @@ export class AppLifecycleOrchestratorService {
     this.hasShownResumeVersionPrompt = false;
   }
 
+  hasPendingVersionUpdate(): boolean {
+    return this.hasPendingVersion;
+  }
+
   isResuming(): boolean {
     return this.isResumingSignal();
   }

@@ -150,6 +150,14 @@ describe('AppLifecycleOrchestratorService', () => {
     await Promise.all([p1, p2]);
   });
 
+  it('should expose pending version state after version ready event', () => {
+    expect(service.hasPendingVersionUpdate()).toBe(false);
+
+    service.markVersionReady();
+
+    expect(service.hasPendingVersionUpdate()).toBe(true);
+  });
+
   it('should run heavy recovery when hidden duration exceeds threshold', async () => {
     service.initialize();
 

@@ -38,6 +38,7 @@ import { STARTUP_PERF_CONFIG } from '../../../config/startup-performance.config'
 import { PARKING_CONFIG } from '../../../config/parking.config';
 import { HandoffCoordinatorService, shouldDegradeMobileStartupRoute } from '../../../services/handoff-coordinator.service';
 import { LaunchSnapshotService } from '../../../services/launch-snapshot.service';
+import { AppLifecycleOrchestratorService } from '../../../services/app-lifecycle-orchestrator.service';
 import { reloadViaForceClearCache } from '../../../utils/force-clear-cache';
 import { resolveStartupEntryIntent } from '../../../utils/startup-entry-intent';
 import {
@@ -459,6 +460,7 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
   private readonly projectCoord = inject(AppProjectCoordinatorService);
   private readonly handoffCoordinator = inject(HandoffCoordinatorService);
   private readonly launchSnapshot = inject(LaunchSnapshotService);
+  private readonly appLifecycle = inject(AppLifecycleOrchestratorService);
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('ProjectShell');
   private readonly destroyRef = inject(DestroyRef);
@@ -506,6 +508,7 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
   private flowRestoreIdleCallbackId: number | null = null;
   private flowPreloadIdleCallbackId: number | null = null;
   private lastFlowRestoreProjectId: string | null = null;
+  private flowVersionReloadRequested = false;
   
   // 【P2-23 修复】从普通方法改为 computed() 避免每次变更检测重复遍历
   currentFilterLabel = computed(() => {
@@ -565,14 +568,31 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
    * Flow 视图意图触发器
    * 默认只在用户有明确意图时加载 GoJS 大块代码
    */
-  activateFlowIntent(source: 'click' | 'route' | 'deeplink' | 'restore-idle'): void {
+  activateFlowIntent(source: 'click' | 'route' | 'deeplink' | 'restore-idle'): boolean {
     if (!this.flowIntentLazyLoadEnabled || this.flowIntentActivated()) {
-      return;
+      return true;
+    }
+
+    if (this.appLifecycle.hasPendingVersionUpdate()) {
+      this.reloadForPendingVersionBeforeFlow(source);
+      return false;
     }
 
     this.flowIntentActivated.set(true);
     this.flowPrefetchOnlyActivated.set(false);
     this.logger.debug('Flow lazy-load intent activated', { source });
+    return true;
+  }
+
+  private reloadForPendingVersionBeforeFlow(source: 'click' | 'route' | 'deeplink' | 'restore-idle'): void {
+    if (this.flowVersionReloadRequested) {
+      return;
+    }
+
+    this.flowVersionReloadRequested = true;
+    this.logger.warn('Flow lazy-load blocked by pending app version; reloading before chunk request', { source });
+    this.toast.info('正在刷新新版本', '流程图组件需要最新资源，刷新后会自动恢复');
+    reloadViaForceClearCache();
   }
   
   /**
@@ -649,7 +669,9 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
 
     if (isFlowRoute || (isTaskDeepLink && taskDeepLinkResult !== 'workspace' && taskDeepLinkResult !== 'flow')) {
       this.cancelFlowStateAwareTimers();
-      this.activateFlowIntent(isTaskDeepLink ? 'deeplink' : 'route');
+      if (!this.activateFlowIntent(isTaskDeepLink ? 'deeplink' : 'route')) {
+        return;
+      }
       this.setActiveView('flow');
       return;
     }
@@ -716,7 +738,7 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
   private scheduleFlowIdleRestore(projectId: string): void {
     const triggerRestore = () => {
       if (this.isDestroyed) return;
-      this.activateFlowIntent('restore-idle');
+      if (!this.activateFlowIntent('restore-idle')) return;
       this.setActiveView('flow');
       this.reportFlowRestoreMode('applied', {
         reason: 'desktop-idle-restore',
@@ -745,6 +767,7 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
   private scheduleWeakNetworkIdlePreload(projectId: string): void {
     const triggerPreload = () => {
       if (this.isDestroyed || this.flowIntentActivated()) return;
+      if (this.appLifecycle.hasPendingVersionUpdate()) return;
       this.flowPrefetchOnlyActivated.set(true);
       this.reportFlowRestoreMode('degraded', {
         reason: 'weak-network-idle-preload',
@@ -898,7 +921,9 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
       if (task) {
         // 任务存在，通过命令服务发送居中请求
         // FlowCommandService 会缓存命令直到 FlowView 就绪
-        this.activateFlowIntent('deeplink');
+        if (!this.activateFlowIntent('deeplink')) {
+          return;
+        }
         this.setActiveView('flow');
 
         // 等待图表渲染后定位
@@ -927,7 +952,9 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
 
       // 超时未找到任务，导航到流程图视图并提示用户
       // 🔥 不再更新 URL - 避免触发路由导航销毁组件
-      this.activateFlowIntent('deeplink');
+      if (!this.activateFlowIntent('deeplink')) {
+        return;
+      }
       this.setActiveView('flow');
 
       if (!isLoading && !task) {
@@ -995,7 +1022,9 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
    */
   switchToFlow() {
     this.cancelFlowStateAwareTimers();
-    this.activateFlowIntent('click');
+    if (!this.activateFlowIntent('click')) {
+      return;
+    }
     this.setActiveView('flow');
   }
   
@@ -1038,7 +1067,9 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
   
   onFocusFlowNode(taskId: string) {
     if (!this.uiState.isMobile()) {
-      this.activateFlowIntent('click');
+      if (!this.activateFlowIntent('click')) {
+        return;
+      }
       // 通过命令服务发送居中请求，无需检查 flowView 实例
       this.flowCommand.centerOnNode(taskId, false);
     }
@@ -1215,7 +1246,9 @@ export class ProjectShellComponent implements OnInit, OnDestroy {
    */
   retryFlowView(): void {
     // 触发流程图重新初始化
-    this.activateFlowIntent('click');
+    if (!this.activateFlowIntent('click')) {
+      return;
+    }
     this.setActiveView('flow');
     // 通过命令服务发送重试命令
     // 命令会被缓存直到 FlowView 就绪
