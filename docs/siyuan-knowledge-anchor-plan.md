@@ -595,7 +595,7 @@ MVP 处理规则：
 
 1. 只读取直接子块，不递归展开整棵树。
 2. 子块正文如需展示，必须对单个子块再按需调用 `getBlockKramdown`，并限制数量。
-3. 默认最多展示前 `5` 个子块摘要，避免 hover 时触发大量请求。
+3. 默认最多展示前 `SIYUAN_PREVIEW_CONFIG.MAX_CHILD_BLOCKS = 5` 个子块摘要，避免 hover 时触发大量请求。
 4. 子块列表仅用于预览，不作为任务依赖关系或 NanoFlow 树结构。
 
 #### 9.1.4 人类可读路径：`/api/filetree/getHPathByID`
@@ -695,7 +695,7 @@ siyuan://blocks/20260426123456-abc1234?focus=1
 
 解析规则：
 
-1. block ID 格式按 `YYYYMMDDHHmmss-xxxxxxx` 校验，即 `^\d{14}-[a-z0-9]{7}$`。
+1. block ID 格式按 `YYYYMMDDHHmmss-xxxxxxx` 校验，即 `^\d{14}-[a-z0-9]{7}$`；后缀按思源常见 ID 形态限定为小写字母与数字。
 2. `siyuan://blocks/{id}` 只提取 path 中的 `{id}`，忽略未知 query 参数。
 3. 保存时统一生成规范 URI：`siyuan://blocks/{id}?focus=1`。
 4. 原始输入不得直接回显为 HTML；错误提示只展示经过转义的文本。
@@ -719,7 +719,7 @@ siyuan://blocks/20260426123456-abc1234?focus=1
 2. `getBlockKramdown` 失败时预览刷新整体失败，并保留旧缓存。
 3. 子块请求失败只降级为“不展示子块摘要”。
 4. hover 自动刷新必须有并发去重：同一 `blockId` 同一时刻只允许一个刷新请求。
-5. 请求超时使用 NanoFlow 既有 `TIMEOUT_CONFIG.QUICK` 或扩展侧同等配置，不新增裸超时魔数。
+5. 请求超时使用 NanoFlow 既有 `TIMEOUT_CONFIG.QUICK`（5000ms）或扩展侧同等配置；后续如需更短本地内核超时，应新增命名配置，不新增裸超时魔数。
 
 ### 9.5 错误码映射
 
@@ -815,6 +815,14 @@ siyuan.baseUrl = http://127.0.0.1:6806
 siyuan.token = local-only secret
 siyuan.previewStrategy = excerpt-first
 siyuan.autoRefresh = on-hover | manual
+```
+
+建议实现时把预览限制集中为命名配置：
+
+```text
+SIYUAN_PREVIEW_CONFIG.MAX_CHILD_BLOCKS = 5
+SIYUAN_PREVIEW_CONFIG.MAX_EXCERPT_CHARS = 500
+SIYUAN_PREVIEW_CONFIG.TIMEOUT_MS = TIMEOUT_CONFIG.QUICK
 ```
 
 建议在设置页增加：
