@@ -29,7 +29,7 @@ function createEntry(overrides: Partial<BlackBoxEntry> & Pick<BlackBoxEntry, 'id
 }
 
 function createLegacyEntryWithUndefinedDeletedAt(entry: BlackBoxEntry): BlackBoxEntry {
-  return Object.assign(entry, { deletedAt: undefined });
+  return { ...entry, deletedAt: undefined };
 }
 
 async function flushMicrotasks(turns = 6): Promise<void> {
@@ -782,7 +782,7 @@ describe('BlackBoxSyncService', () => {
       createEntry({
         id: entryId,
         createdAt: '2026-04-23T22:46:00.000Z',
-        updatedAt: '2026-04-24T00:00:00.000Z',
+        updatedAt: '2026-04-23T22:46:30.000Z',
         isRead: true,
         syncStatus: 'pending',
       })
