@@ -114,6 +114,45 @@ describe('GlobalErrorHandler', () => {
     }
   });
 
+  it('should suppress repeated chunk errors after a recent reload', () => {
+    const reloadSpy = vi.fn();
+    const originalLocation = window.location;
+    // @ts-ignore
+    delete window.location;
+    // @ts-ignore
+    window.location = { reload: reloadSpy };
+
+    const recentTime = Date.now() - 5000;
+    vi.mocked(sessionStorage.getItem).mockReturnValue(recentTime.toString());
+
+    try {
+      const first = new Error('JIT compiler unavailable');
+      first.stack = 'Error: JIT compiler unavailable\n    at ys (https://example.com/chunk-ABC.js:1:1)';
+      const second = new Error('JIT compiler unavailable');
+      second.stack = first.stack;
+
+      service.handleError(first);
+      service.handleError(second);
+
+      const persistedLogs = loggerSpy.error.mock.calls.filter(
+        ([message]: [string]) => message === 'Chunk load error persisted after reload'
+      );
+      const fatalLogs = loggerSpy.error.mock.calls.filter(
+        ([message]: [string]) => message === 'FATAL ERROR'
+      );
+      expect(reloadSpy).not.toHaveBeenCalled();
+      expect(persistedLogs).toHaveLength(1);
+      expect(fatalLogs).toHaveLength(1);
+      expect(loggerSpy.warn).not.toHaveBeenCalledWith(
+        'Fatal error already handled, ignoring',
+        expect.any(Object)
+      );
+    } finally {
+      // @ts-ignore
+      window.location = originalLocation;
+    }
+  });
+
   it('should detect Angular DI version skew error and trigger reload', () => {
     const reloadSpy = vi.fn();
     const originalLocation = window.location;

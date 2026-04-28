@@ -1,5 +1,5 @@
 /**
- * 构建门禁：main 包中不允许出现 @angular/compiler（JIT 运行时代码）
+ * 构建门禁：产物中不允许出现 Angular JIT 运行时代码或未 AOT 的组件装饰器。
  */
 
 const fs = require('fs');
@@ -24,11 +24,22 @@ if (!mainKey) {
   fail('未找到 main-*.js 输出');
 }
 
-const mainInputs = outputs[mainKey].inputs || {};
-const hasCompilerInput = Object.keys(mainInputs).some((key) => key.includes('@angular/compiler'));
+const compilerOutputs = Object.entries(outputs)
+  .filter(([, output]) => Object.keys(output.inputs || {}).some((key) => key.includes('@angular/compiler')))
+  .map(([key]) => key);
 
-if (hasCompilerInput) {
-  fail(`检测到 @angular/compiler 进入 ${mainKey}`);
+if (compilerOutputs.length > 0) {
+  fail(`检测到 @angular/compiler 进入构建产物: ${compilerOutputs.join(', ')}`);
 }
 
-console.log(`[check-main-no-jit] ✅ 通过：${mainKey} 未包含 @angular/compiler`);
+const browserDir = path.join(__dirname, '..', 'dist', 'browser');
+const runtimeDecoratorPattern = /\b[A-Za-z_$][\w$]*\(\{selector:/;
+const decoratorOutputs = fs.readdirSync(browserDir)
+  .filter((file) => file.endsWith('.js'))
+  .filter((file) => runtimeDecoratorPattern.test(fs.readFileSync(path.join(browserDir, file), 'utf8')));
+
+if (decoratorOutputs.length > 0) {
+  fail(`检测到未 AOT 编译的 Angular component decorator: ${decoratorOutputs.join(', ')}`);
+}
+
+console.log(`[check-main-no-jit] ✅ 通过：${mainKey} 及 lazy chunks 未包含 JIT 运行时或未 AOT 组件装饰器`);

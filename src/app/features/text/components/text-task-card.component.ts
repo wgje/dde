@@ -7,7 +7,6 @@ import { ToastService } from '../../../../services/toast.service';
 import { Task } from '../../../../models';
 import { SafeMarkdownPipe } from '../../../shared/pipes/safe-markdown.pipe';
 import { TextTaskEditorComponent } from './text-task-editor.component';
-import { KnowledgeAnchorComponent } from '../../../shared/components/knowledge-anchor/knowledge-anchor.component';
 import { TextViewTaskOpsService } from '../services/text-view-task-ops.service';
 import { handleMarkdownLinkAction } from '../../../../utils/markdown';
 import { clearActiveTextSelection, hasActiveTextSelection, isInteractiveSelectionTarget } from '../../../../utils/text-selection';
@@ -16,7 +15,7 @@ import type { TaskTouchStartPayload } from './text-view.types';
 @Component({
   selector: 'app-text-task-card',
   standalone: true,
-  imports: [CommonModule, DatePipe, TextTaskEditorComponent, KnowledgeAnchorComponent, SafeMarkdownPipe],
+  imports: [CommonModule, DatePipe, TextTaskEditorComponent, SafeMarkdownPipe],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div
@@ -99,13 +98,6 @@ import type { TaskTouchStartPayload } from './text-view.types';
                 No description
               </div>
             }
-            <div class="mt-1">
-              <app-knowledge-anchor
-                [taskId]="task().id"
-                [isMobile]="isMobile()"
-                [compact]="true">
-              </app-knowledge-anchor>
-            </div>
           } @else {
             <app-text-task-editor
               #taskEditor

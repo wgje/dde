@@ -10,7 +10,6 @@ import { ToastService } from '../../../../services/toast.service';
 import { Task, Attachment } from '../../../../models';
 import { SafeMarkdownPipe } from '../../../shared/pipes/safe-markdown.pipe';
 import { TextTaskConnectionsComponent } from './text-task-connections.component';
-import { KnowledgeAnchorComponent } from '../../../shared/components/knowledge-anchor/knowledge-anchor.component';
 import { toggleMarkdownTodo, getTodoIndexFromClick, handleMarkdownLinkAction } from '../../../../utils/markdown';
 import { clearActiveTextSelection, hasActiveTextSelection, isInteractiveSelectionTarget } from '../../../../utils/text-selection';
 
@@ -27,7 +26,7 @@ import { clearActiveTextSelection, hasActiveTextSelection, isInteractiveSelectio
 @Component({
   selector: 'app-text-task-editor',
   standalone: true,
-  imports: [CommonModule, SafeMarkdownPipe, TextTaskConnectionsComponent, KnowledgeAnchorComponent],
+  imports: [CommonModule, SafeMarkdownPipe, TextTaskConnectionsComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div class="animate-collapse-open"
@@ -334,14 +333,6 @@ import { clearActiveTextSelection, hasActiveTextSelection, isInteractiveSelectio
           } -->
         }
       </div>
-
-        <!-- 关联区域 -->
-      <app-knowledge-anchor
-        [taskId]="task().id"
-        [isMobile]="isMobile()"
-        [editable]="!isPreview()"
-        [compact]="isPreview()">
-      </app-knowledge-anchor>
 
       <app-text-task-connections
         [connections]="connections()"
@@ -1040,7 +1031,6 @@ export class TextTaskEditorComponent implements OnDestroy {
     this.focusRequestTimer = null;
   }
 }
-
 
 
 
