@@ -366,6 +366,8 @@ export class ExternalSourceLinkService {
           this.logger.info("思源锚点唯一冲突，丢弃本机 pending", {
             linkId: this.safeId(link.id),
           });
+          // 透明告知用户：另一端已绑定同一锚点，本机这条不会再重试。
+          this.toast.info("思源锚点已在其他设备建立，已合并");
           return { outcome: "drop", reason: "duplicate" };
         }
         throw error;

@@ -14,11 +14,14 @@ const SHEET_PREVIEW_FALLBACK: SiyuanPreviewResult = { status: 'error', errorCode
 /**
  * 懒加载 popover service：CDK Overlay + ConnectedPositionStrategy 仅在桌面端 hover/focus 时需要，
  * 移动端只用底部 sheet（无 overlay）。通过动态 import + EnvironmentInjector.get 把 Overlay 相关
- * 字节移出初始 bundle。模块 promise 全局缓存，多实例共享同一份下载。
+ * 字节移出初始 bundle。模块 promise 全局缓存，多实例共享同一份下载；导入失败时清除缓存以便后续 hover 重试。
  */
 let popoverModulePromise: Promise<typeof import('./knowledge-anchor-popover.service')> | null = null;
 function loadPopoverModule(): Promise<typeof import('./knowledge-anchor-popover.service')> {
-  popoverModulePromise ??= import('./knowledge-anchor-popover.service');
+  popoverModulePromise ??= import('./knowledge-anchor-popover.service').catch((error) => {
+    popoverModulePromise = null;
+    throw error;
+  });
   return popoverModulePromise;
 }
 
