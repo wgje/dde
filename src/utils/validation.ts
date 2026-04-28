@@ -394,6 +394,18 @@ export function sanitizeTask(rawTask: unknown): Task {
   if (typeof task.y !== 'number' || !Number.isFinite(task.y)) fixes.push('y');
   if (plannerFields.adjusted) fixes.push('planner');
 
+  const normalizedStatus =
+    task.status === 'completed'
+      ? 'completed'
+      : task.status === 'archived'
+        ? 'archived'
+        : 'active';
+  const createdDate = typeof task.createdDate === 'string' ? task.createdDate : nowISO();
+  const updatedAt = typeof task.updatedAt === 'string' ? task.updatedAt : undefined;
+  const completedAt = normalizedStatus === 'completed'
+    ? (typeof task.completedAt === 'string' ? task.completedAt : updatedAt ?? createdDate)
+    : null;
+
   const isNgDevMode = Boolean((globalThis as { ngDevMode?: boolean }).ngDevMode);
   if (isNgDevMode && fixes.length > 0) {
     utilLogger.warn(`sanitizeTask: task ${String(task.id || 'unknown')} fixed fields: ${fixes.join(', ')}`);
@@ -407,17 +419,12 @@ export function sanitizeTask(rawTask: unknown): Task {
     parentId: typeof task.parentId === 'string' ? task.parentId : null,
     order: typeof task.order === 'number' && Number.isFinite(task.order) ? task.order : 0,
     rank: typeof task.rank === 'number' && Number.isFinite(task.rank) ? task.rank : 10000,
-    status:
-      task.status === 'completed'
-        ? 'completed'
-        : task.status === 'archived'
-          ? 'archived'
-          : 'active',
+    status: normalizedStatus,
     x: typeof task.x === 'number' && Number.isFinite(task.x) ? task.x : 0,
     y: typeof task.y === 'number' && Number.isFinite(task.y) ? task.y : 0,
-    createdDate: typeof task.createdDate === 'string' ? task.createdDate : nowISO(),
-    updatedAt: typeof task.updatedAt === 'string' ? task.updatedAt : undefined,
-    completedAt: typeof task.completedAt === 'string' ? task.completedAt : null,
+    createdDate,
+    updatedAt,
+    completedAt,
     displayId: String(task.displayId || '?'),
     shortId: typeof task.shortId === 'string' ? task.shortId : undefined,
     hasIncompleteTask: Boolean(task.hasIncompleteTask),

@@ -4,6 +4,19 @@
 ALTER TABLE public.tasks
   ADD COLUMN IF NOT EXISTS completed_at timestamptz;
 
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_trigger
+    WHERE tgrelid = 'public.tasks'::regclass
+      AND tgname = 'set_updated_at'
+      AND NOT tgisinternal
+  ) THEN
+    ALTER TABLE public.tasks DISABLE TRIGGER set_updated_at;
+  END IF;
+END;
+$$;
+
 UPDATE public.tasks
 SET completed_at = COALESCE(completed_at, updated_at, created_at)
 WHERE status = 'completed'
@@ -13,6 +26,19 @@ UPDATE public.tasks
 SET completed_at = NULL
 WHERE status <> 'completed'
   AND completed_at IS NOT NULL;
+
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_trigger
+    WHERE tgrelid = 'public.tasks'::regclass
+      AND tgname = 'set_updated_at'
+      AND NOT tgisinternal
+  ) THEN
+    ALTER TABLE public.tasks ENABLE TRIGGER set_updated_at;
+  END IF;
+END;
+$$;
 
 CREATE INDEX IF NOT EXISTS idx_tasks_project_completed_at
   ON public.tasks (project_id, completed_at DESC)
@@ -25,8 +51,12 @@ SET search_path = public
 AS $$
 BEGIN
   IF NEW.status = 'completed' THEN
-    IF TG_OP = 'INSERT' OR OLD.status IS DISTINCT FROM 'completed' OR NEW.completed_at IS NULL THEN
+    IF TG_OP = 'INSERT' THEN
       NEW.completed_at := COALESCE(NEW.completed_at, now());
+    ELSIF OLD.status IS DISTINCT FROM 'completed' THEN
+      NEW.completed_at := COALESCE(NEW.completed_at, now());
+    ELSE
+      NEW.completed_at := COALESCE(NEW.completed_at, OLD.completed_at, now());
     END IF;
   ELSE
     NEW.completed_at := NULL;
