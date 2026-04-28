@@ -45,7 +45,7 @@ NanoFlow 适合迁移到 Cloudflare Pages，但审查报告中的部分建议需
 | Chunk 自愈 | `GlobalErrorHandler` 已处理 `ChunkLoadError`、动态 import 失败、JIT/DI version skew | 文档写“保持并验证现有机制”，不重复造一套 |
 | 版本提示 | `workspace-shell.component.ts` 已监听 `SwUpdate.VERSION_READY` 并提示刷新 | 迁移验收要覆盖新版本提示和强制清缓存刷新 |
 | Source Map | 生产配置当前没有开启 source map | 首版迁移默认关闭上传；启用时必须在 Sentry inject 后重建 `ngsw.json` 并删除 `.map` |
-| CORS | 多个 Supabase Edge Function 有 CORS/origin 判断 | 迁移时要全量审查 `supabase/functions/**`，不只改 `transcribe`；`widget-black-box-action` 是独立实现，不等同于 `_shared/widget-common.ts` |
+| CORS | 多个 Supabase Edge Function 有 CORS/origin 判断 | 迁移时要全量审查 `supabase/functions/**`，不只改 `transcribe`。`widget-black-box-action` 是独立实现，不等同于 `_shared/widget-common.ts` |
 | Vercel 忽略构建 | `vercel.json` 已配置 `ignoreCommand` 指向 `scripts/vercel-ignore-step.sh` | 文档/非关键文件变更已能跳过 Vercel 构建；若分钟仍耗尽，说明主要消耗来自真实代码构建 |
 | 环境变量注入 | `scripts/set-env.cjs` 在 `npm run config` 阶段写入 `src/environments/*` 和 `index.html` | Direct Upload 时 Cloudflare Dashboard 变量不会自动进入已构建 JS，必须在 GitHub Actions 构建阶段注入 `NG_APP_*` |
 | Node 版本 | 现有 GitHub workflows 使用 Node 22，`netlify.toml` 仍是 Node 20，`package.json` engines 为 `>=18.19.0` | 首版迁移 workflow 固定 Node 22；是否收紧 `package.json` engines 作为独立基线决策 |
@@ -480,7 +480,7 @@ PR preview 不建议直接写入生产 Supabase。优先使用 preview Supabase 
 
 ### 5.3 Workflow 草案
 
-新增 `.github/workflows/deploy-cloudflare-pages.yml`。核心原则：**测试 job 不依赖生产 secret；构建/部署 job 只在 secret 可用且事件安全时运行**。这样 fork PR 不会因为拿不到 repository secrets 而在 `validate-env:prod` 阶段失败。
+新增 `.github/workflows/deploy-cloudflare-pages.yml`。核心原则：**测试 job 不依赖生产 secret；构建/部署 job 只在 secret 可用且事件安全时运行**。这样 fork PR 在 `validate-env:prod` 阶段不会因为拿不到 repository secrets 而失败。
 
 ```yaml
 name: Deploy Cloudflare Pages
@@ -589,7 +589,7 @@ jobs:
           test ! -d dist/browser/functions
           test ! -f dist/browser/_worker.js
           grep -q "app.nanoflow.twa" dist/browser/.well-known/assetlinks.json
-          ! grep -R "vercel.app" dist/browser/manifest.webmanifest
+          ! grep "vercel.app" dist/browser/manifest.webmanifest
           if [ -f public/launch.html ]; then
             test -f dist/browser/launch.html
           fi
@@ -618,7 +618,7 @@ jobs:
             find dist/browser -name '*.map' -type f -delete
 
             # Sentry inject 修改了 JS 内容。必须重建 Angular Service Worker manifest，
-            # 并重新修正 HTML hash，确保 ngsw.json 与最终部署产物完全一致。
+            # 并重新计算 HTML hash，确保 ngsw.json 与最终部署产物完全一致。
             npx ngsw-config dist/browser ngsw-config.json /
             node scripts/patch-ngsw-html-hashes.cjs
           else
@@ -1108,7 +1108,7 @@ NanoFlow 是 Local-First 应用，核心数据先落 IndexedDB。浏览器存储
 - `manifest.webmanifest` 不包含 `vercel.app` 字符串，`id`、`scope`、`start_url` 不硬编码旧 origin。
 - `dist/browser/functions/` 和 `dist/browser/_worker.js` 不存在，避免误启用 Pages Functions。
 - `dist/browser` 中没有公开 `.map` 文件。
-- 如果启用 Sentry sourcemap，`ngsw.json` 必须在 `sourcemaps inject`、`.map` 删除后重建，并重新执行 `node scripts/patch-ngsw-html-hashes.cjs`。
+- 如果启用 Sentry sourcemap，必须先执行 `sourcemaps inject`，再删除 `.map`，随后重建 `ngsw.json` 并重新执行 `node scripts/patch-ngsw-html-hashes.cjs`。
 - `npm run test:run:ci` 通过。
 - `npm run build:stats` 通过。
 - `npm run perf:guard:nojit` 通过。
