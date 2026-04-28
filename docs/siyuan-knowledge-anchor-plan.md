@@ -212,7 +212,7 @@ Knowledge Anchor 的作用是降低“切出任务上下文”的摩擦，而不
 |------|------|------|
 | `SIYUAN_CONFIG.MAX_PREVIEW_CHILDREN` | `10` | 单次预览最多展示的子块数量 |
 | `SIYUAN_CONFIG.MAX_PREVIEW_CHARS` | `1200` | 任务卡 Popover / Sheet 单次展示的摘要字符上限 |
-| `SIYUAN_CONFIG.PREVIEW_FETCH_TIMEOUT_MS` | `5000` | 单次块预览请求超时，避免悬浮预览卡住 UI |
+| `SIYUAN_CONFIG.PREVIEW_FETCH_TIMEOUT_MS` | `TIMEOUT_CONFIG.QUICK` | 单次块预览请求超时，复用现有 5000ms 快速操作超时 |
 | `SIYUAN_CONFIG.CACHE_STALE_MS` | `86400000` | 本机预览缓存陈旧提示阈值，默认 24 小时 |
 
 ### 4.6 块级精确预览结论
@@ -328,7 +328,7 @@ type ExternalSourceLink = {
 
 type LocalSiyuanPreviewCache = {
   linkId: string;
-  blockId: string; // 与 ExternalSourceLink.targetId 一致，保证缓存命中具体块
+  blockId: string;
   hpath?: string;
   plainText?: string;
   kramdown?: string;
@@ -674,7 +674,9 @@ Context7 对思源 API 的查询结果显示，`/api/block/getBlockKramdown`、`
 1. `getBlockKramdown` 返回不存在或权限错误时，优先映射为 `block-not-found` 或 `token-invalid`。
 2. `getChildBlocks` 失败不应导致整个预览失败；可以只显示当前块正文并提示子块不可用。
 3. `getHPathByID` 失败不应阻塞预览；任务卡可退回显示 `label` 或短 block ID。
-4. 任一接口超时后必须通过 `AbortSignal` 取消剩余请求；如果底层通道无法真正取消，也必须在响应返回时比对当前 `linkId` / `blockId`，忽略迟到结果，避免 hover 快速切换造成过期预览覆盖当前锚点。
+4. 任一接口超时后必须通过 `AbortSignal` 取消剩余请求。
+5. 如果底层通道无法真正取消请求，响应返回时仍必须比对当前 `linkId` / `blockId`。
+6. 比对不一致的迟到结果必须丢弃，避免 hover 快速切换造成过期预览覆盖当前锚点。
 
 ### 9.2 MVP 禁止的接口
 
