@@ -632,7 +632,7 @@ export class ImportService {
     }
     return { project: validated, taskIdMap: idMap };
   }
-  
+
   private async importExternalSourceLinks(exportProject: ExportProject, taskIdMap: Map<string, string>): Promise<void> {
     const links: ExternalSourceLink[] = [];
     for (const task of exportProject.tasks ?? []) {
