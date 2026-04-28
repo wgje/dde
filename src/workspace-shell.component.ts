@@ -945,6 +945,7 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
   private workspaceHandoffSignaled = false;
   private workspaceReadyCommitted = false;
   private handledStartupEntryIntentKey: string | null = null;
+  private primedWidgetWorkspaceGateSyncKey: string | null = null;
   private readonly pendingAndroidWidgetBootstrap = signal<AndroidWidgetBootstrapRequest | null>(null);
   readonly pendingAndroidWidgetManualCallback = signal<AndroidWidgetBootstrapCallbackResult | null>(null);
   private readonly deferredStartupEntryIntent = signal<StartupEntryIntent | null>(null);
@@ -1376,8 +1377,11 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
       const startupEntryIntent = this.getCurrentStartupEntryIntent() ?? this.deferredStartupEntryIntent();
       if (!startupEntryIntent) {
         this.handledStartupEntryIntentKey = null;
+        this.primedWidgetWorkspaceGateSyncKey = null;
         return;
       }
+
+      this.primeWidgetWorkspaceGateSync(startupEntryIntent);
 
       if (!this.bootStage.isApplicationReady()) {
         return;
@@ -1457,6 +1461,8 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
   }
 
   private applyStartupEntryIntent(startupEntryIntent: StartupEntryIntent): void {
+    this.primeWidgetWorkspaceGateSync(startupEntryIntent);
+
     // 蓝图 UI 小组件的 1-tap 标记：大门按钮直接对指定条目执行 markAsRead / markAsCompleted。
     if (
       startupEntryIntent.intent === 'mark-gate-read'
@@ -1478,6 +1484,26 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
 
     if (startupEntryIntent.intent === 'open-blackbox-recorder' && this.focusPrefs.isBlackBoxEnabled()) {
       void this.loadBlackBoxRecorderComponent();
+    }
+  }
+
+  private primeWidgetWorkspaceGateSync(startupEntryIntent: StartupEntryIntent): void {
+    if (startupEntryIntent.entry !== 'widget' || startupEntryIntent.intent !== 'open-workspace') {
+      return;
+    }
+
+    const primeKey = `${startupEntryIntent.entry}:${startupEntryIntent.rawIntent ?? ''}:${this.routeUrl()}`;
+    if (this.primedWidgetWorkspaceGateSyncKey === primeKey) {
+      return;
+    }
+
+    this.primedWidgetWorkspaceGateSyncKey = primeKey;
+    this.focusStartupProbe.primeWidgetWorkspaceGateSync();
+    if (this.bootStage.isApplicationReady() && this.focusProbeInitializedForUser === this.currentUserId()) {
+      void this.focusStartupProbe.recheckGate({
+        source: 'widget-open-workspace',
+        reloadLocal: false,
+      });
     }
   }
 

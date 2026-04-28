@@ -74,4 +74,51 @@ describe('android host contract', () => {
     expect(messagingService).toContain('widget_dirty');
     expect(messagingService).toContain('widget-refresh');
   });
+
+  it('routes widget gate read and complete actions through an activity-backed PendingIntent', () => {
+    const manifest = readText('android/app/src/main/AndroidManifest.xml');
+    const receiver = readText('android/app/src/main/java/app/nanoflow/host/NanoflowWidgetReceiver.kt');
+    const renderer = readText('android/app/src/main/java/app/nanoflow/host/NanoflowWidgetRenderer.kt');
+
+    expect(manifest).toContain('NanoflowWidgetActionActivity');
+    expect(receiver).toContain('Intent(context, NanoflowWidgetActionActivity::class.java)');
+    expect(receiver).toContain('fun gateActionClickTemplatePendingIntent');
+    expect(renderer).toContain('NanoflowWidgetReceiver.gateActionClickTemplatePendingIntent');
+  });
+
+  it('advances the displayed gate entry immediately when widget read is tapped', () => {
+    const repository = readText('android/app/src/main/java/app/nanoflow/host/NanoflowWidgetRepository.kt');
+
+    expect(repository).toContain('resolveNextGateEntryId');
+    expect(repository).toContain('candidateEntries.firstOrNull { it.entryId != entryId && !it.isRead }');
+    expect(repository).toContain('BlackBoxEntryAction.READ -> resolveNextGateEntryId(');
+  });
+
+  it('keeps read-but-unfinished entries out of the widget gate queue', () => {
+    const repository = readText('android/app/src/main/java/app/nanoflow/host/NanoflowWidgetRepository.kt');
+
+    expect(repository).toContain('if (preview.isRead) {');
+    expect(repository).toContain('return resolveBlackBoxUnreadCount(summary)');
+    expect(repository).toContain('gateEntries.isEmpty()');
+    expect(repository).toContain('&& gateQueueCount == 0');
+  });
+
+  it('keeps widget gate actions local-first without success toasts or remote blocking', () => {
+    const handler = readText('android/app/src/main/java/app/nanoflow/host/NanoflowWidgetGateActionHandler.kt');
+
+    expect(handler).toContain('remoteActionScope.launch');
+    expect(handler).toContain('submitRemoteAction');
+    expect(handler).toContain('partialUpdate = true');
+    expect(handler).not.toContain('已标记为已读');
+    expect(handler).not.toContain('已标记为完成');
+  });
+
+  it('primes web Gate sync when Android widget opens the workspace', () => {
+    const shell = readText('src/workspace-shell.component.ts');
+    const probe = readText('src/services/focus-startup-probe.service.ts');
+
+    expect(shell).toContain('this.focusStartupProbe.primeWidgetWorkspaceGateSync()');
+    expect(probe).toContain('primeWidgetWorkspaceGateSync()');
+    expect(probe).toContain("source: remoteFirst ? 'widget-open-workspace' : options.source");
+  });
 });

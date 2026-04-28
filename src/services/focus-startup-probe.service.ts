@@ -5,7 +5,7 @@ import { GateService } from './gate.service';
 import { LoggerService } from './logger.service';
 import { FEATURE_FLAGS } from '../config/feature-flags.config';
 
-type FocusProbeSource = 'startup' | 'resume-local' | 'resume-remote' | 'manual';
+type FocusProbeSource = 'startup' | 'resume-local' | 'resume-remote' | 'manual' | 'widget-open-workspace';
 
 @Injectable({ providedIn: 'root' })
 export class FocusStartupProbeService {
@@ -19,6 +19,7 @@ export class FocusStartupProbeService {
 
   private probePromise: Promise<void> | null = null;
   private initializedForUser: string | null = null;
+  private widgetWorkspaceRemoteFirst = false;
   /** 【修复 P1-06】版本号递增，异步完成后对比确保不写入过期用户数据 */
   private probeVersion = 0;
 
@@ -40,6 +41,10 @@ export class FocusStartupProbeService {
       reloadLocal: options.reloadLocal ?? true,
       source: options.source ?? 'manual',
     });
+  }
+
+  primeWidgetWorkspaceGateSync(): void {
+    this.widgetWorkspaceRemoteFirst = true;
   }
 
   private async startProbe(options: {
@@ -90,8 +95,14 @@ export class FocusStartupProbeService {
       }
     }
 
+    const remoteFirst = this.widgetWorkspaceRemoteFirst;
+    this.widgetWorkspaceRemoteFirst = false;
     const capturedVersion = ++this.probeVersion;
-    this.probePromise = this.runProbe(capturedVersion, userId, options).finally(() => {
+    this.probePromise = this.runProbe(capturedVersion, userId, {
+      ...options,
+      reloadLocal: remoteFirst ? false : options.reloadLocal,
+      source: remoteFirst ? 'widget-open-workspace' : options.source,
+    }).finally(() => {
       this.probePromise = null;
     });
 

@@ -216,7 +216,7 @@ object NanoflowWidgetRenderer {
     views.setRemoteAdapter(R.id.nano_widget_gate_actions_list, adapter)
     views.setPendingIntentTemplate(
       R.id.nano_widget_gate_actions_list,
-      NanoflowWidgetReceiver.actionListClickTemplatePendingIntent(context, appWidgetId),
+      NanoflowWidgetReceiver.gateActionClickTemplatePendingIntent(context, appWidgetId),
     )
   }
 

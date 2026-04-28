@@ -75,6 +75,7 @@ class NanoflowWidgetRefreshWorker(
     private const val UNIQUE_WORK_NAME = "nanoflow-widget-refresh"
     private const val UNIQUE_PERIODIC_WORK_NAME = "nanoflow-widget-refresh-periodic"
     private const val TWA_SESSION_BURST_WORK_PREFIX = "nanoflow-widget-twa-session-burst"
+    private const val FOCUS_WAIT_REMINDER_WORK_PREFIX = "nanoflow-widget-focus-wait-reminder"
     private const val TWA_SESSION_BURST_PREFS = "nanoflow-widget-twa-session-burst"
     private const val TWA_SESSION_BURST_LAST_AT_KEY = "last_scheduled_at"
     private const val TWA_SESSION_BURST_MIN_INTERVAL_MS = 30_000L
@@ -138,6 +139,31 @@ class NanoflowWidgetRefreshWorker(
         mapOf(
           "reason" to reason,
           "delaysSeconds" to TWA_SESSION_BURST_DELAYS_SECONDS.joinToString(","),
+        ),
+      )
+    }
+
+    fun scheduleFocusWaitReminder(context: Context, appWidgetId: Int, waitMinutes: Int) {
+      val normalizedWait = waitMinutes.coerceAtLeast(1)
+      val request = OneTimeWorkRequestBuilder<NanoflowWidgetRefreshWorker>()
+        .setInitialDelay(normalizedWait.toLong(), TimeUnit.MINUTES)
+        .setInputData(
+          Data.Builder()
+            .putString("reason", "focus-wait-reminder-${normalizedWait}m")
+            .build(),
+        )
+        .build()
+
+      WorkManager.getInstance(context).enqueueUniqueWork(
+        "$FOCUS_WAIT_REMINDER_WORK_PREFIX-$appWidgetId",
+        ExistingWorkPolicy.REPLACE,
+        request,
+      )
+      NanoflowWidgetTelemetry.info(
+        "widget_focus_wait_reminder_scheduled",
+        mapOf(
+          "appWidgetId" to appWidgetId,
+          "waitMinutes" to normalizedWait,
         ),
       )
     }
