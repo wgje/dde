@@ -377,17 +377,26 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
               )
             } else {
               if (optimisticSnapshot != null) {
-                runCatching {
-                  repository.rollbackOptimisticFocusPromotion(appWidgetId, optimisticSnapshot)
-                  renderCurrentWidget()
+                withContext(Dispatchers.Main) {
+                  Toast.makeText(
+                    appContext,
+                    appContext.getString(R.string.nanoflow_widget_focus_wait_toast),
+                    Toast.LENGTH_SHORT,
+                  ).show()
                 }
-              }
-              withContext(Dispatchers.Main) {
-                Toast.makeText(
+                NanoflowWidgetRefreshWorker.scheduleFocusWaitReminder(
                   appContext,
-                  appContext.getString(R.string.nanoflow_widget_focus_promote_failed_toast),
-                  Toast.LENGTH_SHORT,
-                ).show()
+                  appWidgetId,
+                  normalizedWait,
+                )
+              } else {
+                withContext(Dispatchers.Main) {
+                  Toast.makeText(
+                    appContext,
+                    appContext.getString(R.string.nanoflow_widget_focus_promote_failed_toast),
+                    Toast.LENGTH_SHORT,
+                  ).show()
+                }
               }
               NanoflowWidgetRefreshWorker.enqueue(appContext, reason = "focus-wait-front-retry")
             }
@@ -1024,11 +1033,13 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
       }
     }
 
-    /** 同时刷新 widget 内三个集合视图（tabs + content + refresh）的数据。 */
+    /** 同时刷新 widget 内全部集合视图的数据。 */
     fun notifyActionListsDataChanged(appWidgetManager: AppWidgetManager, appWidgetId: Int) {
       appWidgetManager.notifyAppWidgetViewDataChanged(appWidgetId, R.id.nano_widget_tab_list)
       appWidgetManager.notifyAppWidgetViewDataChanged(appWidgetId, R.id.nano_widget_content_list)
       appWidgetManager.notifyAppWidgetViewDataChanged(appWidgetId, R.id.nano_widget_gate_actions_list)
+      appWidgetManager.notifyAppWidgetViewDataChanged(appWidgetId, R.id.nano_widget_focus_actions_list)
+      appWidgetManager.notifyAppWidgetViewDataChanged(appWidgetId, R.id.nano_widget_focus_wait_presets_list)
       appWidgetManager.notifyAppWidgetViewDataChanged(appWidgetId, R.id.nano_widget_refresh_list)
     }
   }

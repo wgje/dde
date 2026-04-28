@@ -39,6 +39,8 @@ import { TaskStore } from '../core-bridge';
 import { AUTH_CONFIG } from '../config/auth.config';
 import { isLocalModeEnabled } from './guards/auth.guard';
 
+const EMPTY_LOCAL_SNAPSHOT_SAVED_AT = '1970-01-01T00:00:00.000Z';
+
 // ---------------------------------------------------------------------------
 //  Context interface — engine 在 constructor 中调用 init() 注入运行时引用
 // ---------------------------------------------------------------------------
@@ -80,6 +82,7 @@ export interface DockEngineLifecycleContext {
   buildNormalizeContext: () => SnapshotNormalizeContext;
   getNonCriticalHoldDelay: () => number;
   scheduleLocalPersist: (snapshot: DockSnapshot | null, userId: string | null) => void;
+  setSnapshotSavedAt: (savedAt: string) => void;
 }
 
 @Injectable({
@@ -123,6 +126,7 @@ export class DockEngineLifecycleService {
   private snapshotRestoreToken = 0;
   private nonCriticalWorkHoldUntil = 0;
   private visibilityListener: (() => void) | null = null;
+  private lastPersistenceFingerprint: string | null = null;
 
   // ---------------------------------------------------------------------------
   //  Init
@@ -201,7 +205,7 @@ export class DockEngineLifecycleService {
 
     // 状态变更时触发本地持久化和云端推送（通过 persistenceDeps 聚合信号，避免冗余触发）
     effect(() => {
-      this.ctx.persistenceDeps();
+      const persistenceFingerprint = this.buildPersistenceFingerprint(this.ctx.persistenceDeps());
       const confirmedOwnerUserId = this.resolveConfirmedRestoreOwnerUserId();
       if (this.shouldDeferRestoreUntilAuthConfirmed(confirmedOwnerUserId)) {
         this.cancelSnapshotPersistenceWork();
@@ -213,8 +217,14 @@ export class DockEngineLifecycleService {
         return;
       }
 
-      if (this.ctx.restoringSnapshot()) return;
+      if (this.ctx.restoringSnapshot()) {
+        this.lastPersistenceFingerprint = persistenceFingerprint;
+        return;
+      }
+      if (this.lastPersistenceFingerprint === persistenceFingerprint) return;
+      this.lastPersistenceFingerprint = persistenceFingerprint;
 
+      this.ctx.setSnapshotSavedAt(new Date().toISOString());
       const snapshot = this.ctx.exportSnapshot();
       this.ctx.scheduleLocalPersist(snapshot, confirmedOwnerUserId);
       this.cloudSync.scheduleCloudPush(confirmedOwnerUserId, snapshot);
@@ -308,6 +318,14 @@ export class DockEngineLifecycleService {
         this.cloudSync.scheduleCloudPull(userId, false);
       };
       document.addEventListener('visibilitychange', this.visibilityListener);
+    }
+  }
+
+  private buildPersistenceFingerprint(deps: unknown[]): string {
+    try {
+      return JSON.stringify(deps);
+    } catch {
+      return deps.map((item, index) => `${index}:${typeof item}`).join('|');
     }
   }
 
@@ -537,6 +555,7 @@ export class DockEngineLifecycleService {
       return;
     }
     this.ctx.reset();
+    this.ctx.setSnapshotSavedAt(EMPTY_LOCAL_SNAPSHOT_SAVED_AT);
   }
 
   private startSnapshotRestore(

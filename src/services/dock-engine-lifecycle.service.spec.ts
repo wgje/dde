@@ -62,8 +62,11 @@ async function flushEffects(): Promise<void> {
   await Promise.resolve();
 }
 
-function createContext(currentSnapshotUserId: string | null): DockEngineLifecycleContext {
+function createContext(currentSnapshotUserId: string | null): DockEngineLifecycleContext & {
+  __setPersistenceDeps: (deps: unknown[]) => void;
+} {
   let currentUserId = currentSnapshotUserId;
+  const persistenceDeps = signal<unknown[]>([]);
 
   return {
     entries: signal([]),
@@ -79,7 +82,7 @@ function createContext(currentSnapshotUserId: string | null): DockEngineLifecycl
     blankPeriodNotified: signal(false),
     fragmentCountdownNotified: signal(false),
     tick: signal(0),
-    persistenceDeps: () => [],
+    persistenceDeps: () => persistenceDeps(),
     dockedCount: () => 0,
     statusMachineEntries: () => [],
     pendingDecisionEntries: () => [],
@@ -121,6 +124,8 @@ function createContext(currentSnapshotUserId: string | null): DockEngineLifecycl
     }),
     getNonCriticalHoldDelay: () => 0,
     scheduleLocalPersist: vi.fn(),
+    setSnapshotSavedAt: vi.fn(),
+    __setPersistenceDeps: (deps: unknown[]) => persistenceDeps.set(deps),
   };
 }
 
@@ -273,6 +278,34 @@ describe('DockEngineLifecycleService', () => {
         delete (window as unknown as { requestIdleCallback?: (cb: () => void) => number }).requestIdleCallback;
       }
     }
+  });
+
+  it('恢复期水化的 Dock 状态在解锁后不应作为本地新状态回写云端', async () => {
+    const context = createContext('user-a') as DockEngineLifecycleContext & {
+      __setPersistenceDeps: (deps: unknown[]) => void;
+    };
+    service.init(context);
+
+    TestBed.runInInjectionContext(() => {
+      service.registerEffects();
+    });
+    await flushEffects();
+
+    vi.mocked(context.scheduleLocalPersist).mockClear();
+    mockCloudSync.scheduleCloudPush.mockClear();
+
+    context.restoringSnapshot.set(true);
+    context.__setPersistenceDeps(['restored-widget-order']);
+    await flushEffects();
+
+    expect(context.scheduleLocalPersist).not.toHaveBeenCalled();
+    expect(mockCloudSync.scheduleCloudPush).not.toHaveBeenCalled();
+
+    context.restoringSnapshot.set(false);
+    await flushEffects();
+
+    expect(context.scheduleLocalPersist).not.toHaveBeenCalled();
+    expect(mockCloudSync.scheduleCloudPush).not.toHaveBeenCalled();
   });
 
   it('restoreInitialSnapshot 在只有 owner hint 时不应恢复真实 Dock 快照', async () => {

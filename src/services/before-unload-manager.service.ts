@@ -55,6 +55,7 @@ export class BeforeUnloadManagerService {
 
   /** 是否已初始化 */
   private initialized = false;
+  private suppressNextBeforeUnloadConfirmation = false;
 
   constructor() {
     this.destroyRef.onDestroy(() => this.cleanup());
@@ -111,6 +112,15 @@ export class BeforeUnloadManagerService {
     return this.executeCallbacks();
   }
 
+  /**
+   * 跳过下一次 beforeunload 确认弹窗，但仍执行保存回调。
+   * 用于用户已明确点击的系统回跳/深链跳转，避免浏览器二次确认拦截业务回调。
+   */
+  suppressNextConfirmation(): void {
+    this.suppressNextBeforeUnloadConfirmation = true;
+    this.logger.debug('下一次 BeforeUnload 确认弹窗已跳过');
+  }
+
   // ==================== 私有方法 ====================
 
   /**
@@ -122,6 +132,11 @@ export class BeforeUnloadManagerService {
       const needConfirm = this.executeCallbacks();
 
       if (needConfirm && e) {
+        if (this.suppressNextBeforeUnloadConfirmation) {
+          this.suppressNextBeforeUnloadConfirmation = false;
+          return;
+        }
+
         // 显示浏览器确认对话框
         e.preventDefault();
         e.returnValue = '您有未保存的内容，确定要离开吗？';
@@ -175,13 +190,14 @@ export class BeforeUnloadManagerService {
       window.removeEventListener('beforeunload', this.beforeUnloadHandler);
     }
     if (this.pagehideHandler) {
-      window.removeEventListener('pagehide', this.pagehideHandler as EventListener);
+      window.removeEventListener('pagehide', this.pagehideHandler as EventListener, { capture: true });
     }
     if (this.visibilityChangeHandler) {
       document.removeEventListener('visibilitychange', this.visibilityChangeHandler);
     }
 
     this.callbacks = [];
+    this.suppressNextBeforeUnloadConfirmation = false;
     this.initialized = false;
     this.logger.debug('BeforeUnloadManager 已清理');
   }

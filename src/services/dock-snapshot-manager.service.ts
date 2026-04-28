@@ -79,6 +79,7 @@ export interface DockSnapshotManagerContext {
   fragmentDefenseLevel: WritableSignal<FragmentDefenseLevel>;
   lastConsoleDemotedTaskId: WritableSignal<string | null>;
   consoleVisibleOrderHint: WritableSignal<string[]>;
+  snapshotSavedAt: WritableSignal<string>;
   
   // Non-signal state
   waitEndNotifiedIds: Set<string>;
@@ -160,7 +161,7 @@ export class DockSnapshotManagerService {
       pendingDecision: this.ctx.pendingDecision(),
       lastRuleDecision: this.ctx.lastRuleDecision(),
       dailyResetDate: this.ctx.dailyResetDate(),
-      savedAt: new Date().toISOString(),
+      savedAt: this.ctx.snapshotSavedAt(),
       // v3.0 专注模式会话状态（§2.5）
       focusSessionState: this.ctx.focusMode() ? this.buildFocusSessionState() : null,
     };
@@ -205,6 +206,7 @@ export class DockSnapshotManagerService {
     this.ctx.focusTransition.set(null);
     this.ctx.clearFirstMainSelectionWindow();
     this.ctx.focusSessionContext.set(null);
+    this.ctx.snapshotSavedAt.set(new Date().toISOString());
     this.ctx.highlightedIds.set(new Set());
     this.ctx.dailyResetDate.set(this.dailySlotService.todayDateKey());
     // v3.0 重置倦怠检测状态
@@ -467,6 +469,7 @@ export class DockSnapshotManagerService {
     this.ctx.suspendRecommendationLocked.set(normalized.suspendRecommendationLocked);
     this.ctx.pendingDecision.set(normalized.pendingDecision);
     this.ctx.lastRuleDecision.set(normalized.lastRuleDecision ?? null);
+    this.ctx.snapshotSavedAt.set(normalized.savedAt);
     this.ctx.lastExitAction.set(null);
     this.ctx.focusTransition.set(null);
     this.ctx.clearFirstMainSelectionWindow();

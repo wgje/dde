@@ -10,18 +10,17 @@
 -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
-    android:layout_height="wrap_content"
-    android:paddingStart="3dp"
-    android:paddingEnd="3dp"
+    android:layout_height="76dp"
+    android:paddingStart="0dp"
+    android:paddingEnd="0dp"
     android:paddingTop="2dp"
     android:paddingBottom="2dp">
 
     <FrameLayout
         android:id="@+id/nano_widget_tab_slot"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
+        android:layout_height="72dp"
         android:background="@drawable/nano_widget_slot_secondary"
-        android:minHeight="74dp"
         android:paddingStart="6dp"
         android:paddingEnd="6dp"
         android:paddingTop="5dp"
@@ -51,8 +50,8 @@
         <!-- 右上 crown / flag 角标，后续中下部可承接“完成任务 / 等待”。 -->
         <ImageView
             android:id="@+id/nano_widget_tab_icon"
-            android:layout_width="18dp"
-            android:layout_height="18dp"
+            android:layout_width="19dp"
+            android:layout_height="19dp"
             android:layout_gravity="top|end"
             android:layout_marginTop="1dp"
             android:layout_marginEnd="1dp"
@@ -68,8 +67,8 @@
             android:layout_marginTop="30dp"
             android:ellipsize="end"
             android:gravity="center"
-            android:lineSpacingExtra="-1dp"
-            android:maxLines="2"
+            android:includeFontPadding="false"
+            android:maxLines="1"
             android:paddingBottom="2dp"
             android:text=""
             android:textColor="#F6FBFF"

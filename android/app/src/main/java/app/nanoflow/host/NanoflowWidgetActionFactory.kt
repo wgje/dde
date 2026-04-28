@@ -179,20 +179,23 @@ class NanoflowWidgetActionFactory(
       return views
     }
 
-    if (listKind == LIST_KIND_FOCUS_ACTIONS) {
-      val views = RemoteViews(context.packageName, R.layout.nano_widget_gate_action_item)
-      views.setTextViewText(R.id.nano_widget_gate_action_label, item.label)
+    if (listKind == LIST_KIND_FOCUS_ACTIONS || listKind == LIST_KIND_FOCUS_WAIT_PRESETS) {
+      val views = RemoteViews(context.packageName, R.layout.nano_widget_focus_action_item)
+      views.setTextViewText(R.id.nano_widget_focus_action_label, item.label)
       val iconRes = when (item.focusAction) {
         FOCUS_ACTION_COMPLETE -> R.drawable.nano_widget_icon_check
         FOCUS_ACTION_WAIT,
         FOCUS_ACTION_WAIT_PRESET -> R.drawable.nano_widget_icon_clock
         else -> R.drawable.nano_widget_icon_clock
       }
-      views.setImageViewResource(R.id.nano_widget_gate_action_icon, iconRes)
+      views.setImageViewResource(R.id.nano_widget_focus_action_icon, iconRes)
+      val showIcon = item.focusAction != FOCUS_ACTION_WAIT_PRESET
+      views.setViewVisibility(R.id.nano_widget_focus_action_icon, if (showIcon) View.VISIBLE else View.GONE)
+      views.setViewVisibility(R.id.nano_widget_focus_action_gap, if (showIcon) View.VISIBLE else View.GONE)
       if (item.clickable) {
         val fillInIntent = buildFillInIntent(item)
-        views.setOnClickFillInIntent(R.id.nano_widget_gate_action_root, fillInIntent)
-        views.setOnClickFillInIntent(R.id.nano_widget_gate_action_slot, fillInIntent)
+        views.setOnClickFillInIntent(R.id.nano_widget_focus_action_root, fillInIntent)
+        views.setOnClickFillInIntent(R.id.nano_widget_focus_action_slot, fillInIntent)
       }
       return views
     }
@@ -256,7 +259,8 @@ class NanoflowWidgetActionFactory(
         LIST_KIND_CONTENT -> R.layout.nano_widget_content_item
         LIST_KIND_TABS -> R.layout.nano_widget_tab_item
         LIST_KIND_GATE_ACTIONS -> R.layout.nano_widget_gate_action_item
-        LIST_KIND_FOCUS_ACTIONS -> R.layout.nano_widget_gate_action_item
+        LIST_KIND_FOCUS_ACTIONS,
+        LIST_KIND_FOCUS_WAIT_PRESETS -> R.layout.nano_widget_focus_action_item
         else -> R.layout.nano_widget_action_item
       },
     )
@@ -375,46 +379,6 @@ class NanoflowWidgetActionFactory(
         return emptyList()
       }
       val frontTaskId = model.tasks.first().taskId
-      if (model.focusWaitMenuOpen) {
-        return listOf(
-          ActionItem(
-            label = context.getString(R.string.nanoflow_widget_focus_wait_5m),
-            selected = false,
-            kind = ActionItem.Kind.FOCUS_ACTION,
-            focusAction = FOCUS_ACTION_WAIT_PRESET,
-            waitMinutes = 5,
-            taskId = frontTaskId,
-            clickable = true,
-          ),
-          ActionItem(
-            label = context.getString(R.string.nanoflow_widget_focus_wait_15m),
-            selected = false,
-            kind = ActionItem.Kind.FOCUS_ACTION,
-            focusAction = FOCUS_ACTION_WAIT_PRESET,
-            waitMinutes = 15,
-            taskId = frontTaskId,
-            clickable = true,
-          ),
-          ActionItem(
-            label = context.getString(R.string.nanoflow_widget_focus_wait_30m),
-            selected = false,
-            kind = ActionItem.Kind.FOCUS_ACTION,
-            focusAction = FOCUS_ACTION_WAIT_PRESET,
-            waitMinutes = 30,
-            taskId = frontTaskId,
-            clickable = true,
-          ),
-          ActionItem(
-            label = context.getString(R.string.nanoflow_widget_focus_wait_1h),
-            selected = false,
-            kind = ActionItem.Kind.FOCUS_ACTION,
-            focusAction = FOCUS_ACTION_WAIT_PRESET,
-            waitMinutes = 60,
-            taskId = frontTaskId,
-            clickable = true,
-          ),
-        )
-      }
       return listOf(
         ActionItem(
           label = context.getString(R.string.nanoflow_widget_focus_action_complete),
@@ -429,6 +393,51 @@ class NanoflowWidgetActionFactory(
           selected = false,
           kind = ActionItem.Kind.FOCUS_ACTION,
           focusAction = FOCUS_ACTION_WAIT,
+          taskId = frontTaskId,
+          clickable = true,
+        ),
+      )
+    }
+
+    if (listKind == LIST_KIND_FOCUS_WAIT_PRESETS) {
+      if (model.isGateMode || !model.focusWaitMenuOpen || model.tasks.firstOrNull()?.taskId.isNullOrBlank()) {
+        return emptyList()
+      }
+      val frontTaskId = model.tasks.first().taskId
+      return listOf(
+        ActionItem(
+          label = context.getString(R.string.nanoflow_widget_focus_wait_5m_short),
+          selected = false,
+          kind = ActionItem.Kind.FOCUS_ACTION,
+          focusAction = FOCUS_ACTION_WAIT_PRESET,
+          waitMinutes = 5,
+          taskId = frontTaskId,
+          clickable = true,
+        ),
+        ActionItem(
+          label = context.getString(R.string.nanoflow_widget_focus_wait_15m_short),
+          selected = false,
+          kind = ActionItem.Kind.FOCUS_ACTION,
+          focusAction = FOCUS_ACTION_WAIT_PRESET,
+          waitMinutes = 15,
+          taskId = frontTaskId,
+          clickable = true,
+        ),
+        ActionItem(
+          label = context.getString(R.string.nanoflow_widget_focus_wait_30m_short),
+          selected = false,
+          kind = ActionItem.Kind.FOCUS_ACTION,
+          focusAction = FOCUS_ACTION_WAIT_PRESET,
+          waitMinutes = 30,
+          taskId = frontTaskId,
+          clickable = true,
+        ),
+        ActionItem(
+          label = context.getString(R.string.nanoflow_widget_focus_wait_1h_short),
+          selected = false,
+          kind = ActionItem.Kind.FOCUS_ACTION,
+          focusAction = FOCUS_ACTION_WAIT_PRESET,
+          waitMinutes = 60,
           taskId = frontTaskId,
           clickable = true,
         ),
@@ -552,5 +561,6 @@ class NanoflowWidgetActionFactory(
     const val LIST_KIND_REFRESH = "refresh"
     const val LIST_KIND_GATE_ACTIONS = "gate_actions"
     const val LIST_KIND_FOCUS_ACTIONS = "focus_actions"
+    const val LIST_KIND_FOCUS_WAIT_PRESETS = "focus_wait_presets"
   }
 }
