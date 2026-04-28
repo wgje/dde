@@ -823,6 +823,7 @@ siyuan.autoRefresh = on-hover | manual
 const SIYUAN_PREVIEW_CONFIG = {
   MAX_CHILD_BLOCKS: 5,
   MAX_EXCERPT_CHARS: 500,
+  // 引用既有常量，不硬编码 5000。
   TIMEOUT_MS: TIMEOUT_CONFIG.QUICK,
 } as const;
 ```
