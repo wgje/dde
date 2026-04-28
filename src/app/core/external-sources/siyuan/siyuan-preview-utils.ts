@@ -40,9 +40,11 @@ export function normalizePreview(input: Omit<SiyuanBlockPreview, 'excerpt' | 'tr
   const excerpt = buildExcerpt(plainText);
   const childBlocks = input.childBlocks ? normalizeChildBlocks(input.childBlocks) : { children: [], truncated: false };
   return {
-    ...input,
-    plainText,
+    blockId: input.blockId,
+    hpath: input.hpath,
+    plainText: excerpt.excerpt,
     excerpt: excerpt.excerpt,
+    sourceUpdatedAt: input.sourceUpdatedAt,
     childBlocks: childBlocks.children,
     truncated: Boolean(input.truncated || excerpt.truncated || childBlocks.truncated),
   };

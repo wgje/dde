@@ -24,6 +24,7 @@ import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
 import { LayoutService } from './layout.service';
 import { Project, Task, Connection } from '../models';
+import { ExternalSourceLinkService } from '../app/core/external-sources/external-source-link.service';
 
 describe('ImportService', () => {
   let service: ImportService;
@@ -57,6 +58,7 @@ describe('ImportService', () => {
         { provide: LoggerService, useValue: mockLogger },
         { provide: ToastService, useValue: mockToast },
         { provide: LayoutService, useValue: mockLayoutService },
+        { provide: ExternalSourceLinkService, useValue: { importPointers: vi.fn().mockResolvedValue(undefined) } },
       ],
     });
     

@@ -38,15 +38,20 @@ export class KnowledgeAnchorPopoverService {
     this.cancelClose();
   }
 
-  close(): void {
+  close(options: { restoreFocus?: boolean } = {}): void {
     this.cancelOpen();
     this.cancelClose();
     this.previewService.abortActive();
     this.overlayRef?.detach();
-    if (this.originRef instanceof HTMLElement) {
+    if (options.restoreFocus && this.originRef instanceof HTMLElement) {
       this.originRef.focus();
     }
     this.originRef = undefined;
+  }
+
+  closeForHost(host: HTMLElement): void {
+    if (!this.originRef || !host.contains(this.originRef)) return;
+    this.close();
   }
 
   dispose(): void {
@@ -71,7 +76,7 @@ export class KnowledgeAnchorPopoverService {
         panelClass: 'knowledge-anchor-overlay-panel',
       });
       this.overlayRef.keydownEvents().subscribe(event => {
-        if (event.key === 'Escape') this.close();
+        if (event.key === 'Escape') this.close({ restoreFocus: true });
       });
     } else {
       this.overlayRef.updatePositionStrategy(positionStrategy);

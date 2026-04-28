@@ -17,6 +17,20 @@ interface HPathData { hPath?: string; }
 interface AttrData { updated?: string; updatedAt?: string; }
 interface ChildBlockData { id?: string; content?: string; markdown?: string; type?: string; }
 
+export function isTrustedSiyuanDirectBaseUrl(baseUrl: string, pageLocation: Location | null = typeof location === 'undefined' ? null : location): boolean {
+  try {
+    const url = new URL(baseUrl);
+    if (url.username || url.password || url.pathname !== '/' || url.search || url.hash) return false;
+    const originAllowed = (SIYUAN_CONFIG.ALLOWED_DIRECT_BASE_URLS as readonly string[]).includes(url.origin);
+    if (!originAllowed) return false;
+    if (!pageLocation) return true;
+    const isLocalPage = pageLocation.hostname === 'localhost' || pageLocation.hostname === '127.0.0.1';
+    return isLocalPage || pageLocation.protocol === 'file:';
+  } catch {
+    return false;
+  }
+}
+
 @Injectable({ providedIn: 'root' })
 export class SiyuanDirectProvider implements SiyuanPreviewProvider {
   readonly mode = 'direct' as const;
@@ -24,13 +38,13 @@ export class SiyuanDirectProvider implements SiyuanPreviewProvider {
 
   async isAvailable(): Promise<boolean> {
     const config = await this.cache.loadConfig();
-    return config.runtimeMode === 'direct' && this.isTrustedLocalRuntime(config.baseUrl) && Boolean(config.token);
+    return config.runtimeMode === 'direct' && isTrustedSiyuanDirectBaseUrl(config.baseUrl) && Boolean(config.token);
   }
 
   async getBlockPreview(blockId: string, signal?: AbortSignal): Promise<SiyuanBlockPreview> {
     if (!isValidSiyuanBlockId(blockId)) throw new SiyuanProviderError('block-not-found');
     const config = await this.cache.loadConfig();
-    if (config.runtimeMode !== 'direct' || !this.isTrustedLocalRuntime(config.baseUrl)) {
+    if (config.runtimeMode !== 'direct' || !isTrustedSiyuanDirectBaseUrl(config.baseUrl)) {
       throw new SiyuanProviderError('runtime-not-supported');
     }
     if (!config.token) throw new SiyuanProviderError('not-configured');
@@ -46,11 +60,11 @@ export class SiyuanDirectProvider implements SiyuanPreviewProvider {
         this.call<AttrData>(config.baseUrl, config.token, '/api/attr/getBlockAttrs', { id: blockId }, controller.signal).catch(() => undefined),
         this.call<ChildBlockData[]>(config.baseUrl, config.token, '/api/block/getChildBlocks', { id: blockId }, controller.signal).catch(() => []),
       ]);
-      if (!kramdown?.kramdown) throw new SiyuanProviderError('block-not-found');
+      if (!kramdown) throw new SiyuanProviderError('block-not-found');
       return normalizePreview({
         blockId,
         hpath: hpath?.hPath,
-        kramdown: kramdown.kramdown,
+        kramdown: kramdown.kramdown ?? '',
         sourceUpdatedAt: attrs?.updatedAt ?? attrs?.updated,
         childBlocks: this.mapChildren(children ?? []),
       });
@@ -60,20 +74,6 @@ export class SiyuanDirectProvider implements SiyuanPreviewProvider {
     } finally {
       window.clearTimeout(timeout);
       signal?.removeEventListener('abort', abortListener);
-    }
-  }
-
-  private isTrustedLocalRuntime(baseUrl: string): boolean {
-    try {
-      const url = new URL(baseUrl);
-      const host = url.hostname;
-      const isLocalHost = host === '127.0.0.1' || host === 'localhost' || host === '[::1]';
-      const isHttpKernel = url.protocol === 'http:';
-      const isHttpsPage = typeof location !== 'undefined' && location.protocol === 'https:';
-      const isLocalPage = typeof location === 'undefined' || location.hostname === 'localhost' || location.hostname === '127.0.0.1';
-      return isLocalHost && isHttpKernel && (!isHttpsPage || isLocalPage);
-    } catch {
-      return false;
     }
   }
 

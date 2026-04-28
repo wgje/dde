@@ -12,6 +12,7 @@ import { FocusPreferenceService } from './focus-preference.service';
 import { BlackBoxService } from './black-box.service';
 import { SupabaseClientService } from './supabase-client.service';
 import type { Project } from '../models';
+import { ExternalSourceLinkService } from '../app/core/external-sources/external-source-link.service';
 
 function createProject(): Project {
   return {
@@ -344,6 +345,7 @@ describe('DisasterBackupService', () => {
           },
         },
         { provide: SupabaseClientService, useValue: { isConfigured: true, client: vi.fn(() => client) } },
+        { provide: ExternalSourceLinkService, useValue: { ensureLoaded: vi.fn().mockResolvedValue(undefined), activeLinksForTask: vi.fn(() => []) } },
       ],
     });
 
@@ -466,6 +468,7 @@ describe('DisasterBackupService', () => {
         { provide: FocusPreferenceService, useValue: { preferences: signal({}), getPreferences: vi.fn(() => ({})) } },
         { provide: BlackBoxService, useValue: { entriesMap: signal(new Map()) } },
         { provide: SupabaseClientService, useValue: { isConfigured: false, client: vi.fn() } },
+        { provide: ExternalSourceLinkService, useValue: { ensureLoaded: vi.fn().mockResolvedValue(undefined), activeLinksForTask: vi.fn(() => []) } },
       ],
     });
 

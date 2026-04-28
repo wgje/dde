@@ -11,6 +11,12 @@ export const SIYUAN_CONFIG = {
   POPOVER_MAX_WIDTH_PX: 420,
   POPOVER_MAX_HEIGHT_PX: 360,
   DEFAULT_BASE_URL: 'http://127.0.0.1:6806',
+  ALLOWED_DIRECT_BASE_URLS: ['http://127.0.0.1:6806', 'http://localhost:6806'] as readonly string[],
+  MAX_LINK_ID_LENGTH: 64,
+  MAX_URI_LENGTH: 128,
+  MAX_LABEL_LENGTH: 256,
+  MAX_HPATH_LENGTH: 1024,
+  EXTENSION_PING_TIMEOUT_MS: 500,
 } as const;
 
 export const SIYUAN_ERROR_MESSAGES: Record<string, string> = {

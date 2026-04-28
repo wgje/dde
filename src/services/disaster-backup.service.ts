@@ -27,7 +27,10 @@ import {
   type BackupTranscriptionUsage,
   type BackupUserPreferences,
   type BackupCoverage,
+  type BackupExternalSourceLink,
 } from '../../supabase/functions/_shared/backup-utils';
+import { ExternalSourceLinkService } from '../app/core/external-sources/external-source-link.service';
+import type { ExternalSourceLink } from '../app/core/external-sources/external-source.model';
 
 const ACTION_QUEUE_BACKUP_DB_NAME = 'nanoflow-queue-backup';
 const ACTION_QUEUE_BACKUP_STORE_NAME = 'queue-backup';
@@ -108,6 +111,7 @@ export class DisasterBackupService {
   private readonly focusPreferenceService = inject(FocusPreferenceService);
   private readonly blackBoxService = inject(BlackBoxService);
   private readonly supabase = inject(SupabaseClientService);
+  private readonly externalSourceLinks = inject(ExternalSourceLinkService);
 
   async buildLocalPayload(
     projects: Project[],
@@ -116,6 +120,7 @@ export class DisasterBackupService {
     const userId = this.resolveEffectiveUserId();
     const visibleProjectIds = new Set(projects.map((project) => project.id));
 
+    await this.externalSourceLinks.ensureLoaded();
     const payloadBase = this.buildProjectPayload(projects, userId);
     const userPreferences = await this.collectUserPreferences(userId, options);
     const blackBoxEntries = this.collectBlackBoxEntries(userId);
@@ -238,6 +243,29 @@ export class DisasterBackupService {
       createdAt: task.createdDate,
       updatedAt: task.updatedAt,
       deletedAt: task.deletedAt,
+      externalSourceLinks: this.mapExternalSourceLinks(task.id),
+    };
+  }
+
+  private mapExternalSourceLinks(taskId: string): BackupExternalSourceLink[] | undefined {
+    const links = this.externalSourceLinks.activeLinksForTask(taskId);
+    if (links.length === 0) return undefined;
+    return links.map(link => this.mapExternalSourceLink(link));
+  }
+
+  private mapExternalSourceLink(link: ExternalSourceLink): BackupExternalSourceLink {
+    return {
+      id: link.id,
+      sourceType: link.sourceType,
+      targetId: link.targetId,
+      uri: link.uri,
+      label: link.label,
+      hpath: link.hpath,
+      role: link.role,
+      sortOrder: link.sortOrder,
+      deletedAt: link.deletedAt,
+      createdAt: link.createdAt,
+      updatedAt: link.updatedAt,
     };
   }
 

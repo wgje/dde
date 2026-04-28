@@ -15,8 +15,10 @@ import { FocusPreferenceService } from '../../../services/focus-preference.servi
 import { GateService } from '../../../services/gate.service';
 import { ThemeType, ColorMode, Project } from '../../../models';
 import { LOCAL_BACKUP_CONFIG } from '../../../config/local-backup.config';
-import { SIYUAN_CONFIG } from '../../../config/siyuan.config';
+import { SIYUAN_CONFIG, SIYUAN_ERROR_MESSAGES } from '../../../config/siyuan.config';
 import { ExternalSourceCacheService } from '../../core/external-sources/external-source-cache.service';
+import { SiyuanPreviewService } from '../../core/external-sources/siyuan/siyuan-preview.service';
+import { isTrustedSiyuanDirectBaseUrl } from '../../core/external-sources/siyuan/siyuan-direct-provider';
 import type { SiyuanRuntimeMode } from '../../core/external-sources/external-source.model';
 
 interface TaskAttachmentMetadata {
@@ -345,7 +347,10 @@ const SIYUAN_TOKEN_MASK = '••••••••';
                   (change)="updateSiyuanToken($event)"
                   placeholder="留空则仅使用扩展或缓存" />
               </label>
-              <div class="grid grid-cols-2 gap-2">
+              <div class="grid grid-cols-3 gap-2">
+                <button type="button" class="rounded-lg border border-indigo-200 dark:border-indigo-800 px-2 py-1.5 text-[10px] font-bold text-indigo-600 dark:text-indigo-300" (click)="testSiyuanConnection()">
+                  测试连接
+                </button>
                 <button type="button" class="rounded-lg border border-slate-200 dark:border-stone-600 px-2 py-1.5 text-[10px] font-bold text-slate-600 dark:text-stone-300" (click)="clearSiyuanCache()">
                   清除本机缓存
                 </button>
@@ -354,8 +359,11 @@ const SIYUAN_TOKEN_MASK = '••••••••';
                 </button>
               </div>
               <div class="rounded-lg bg-indigo-50 dark:bg-indigo-950/30 px-2 py-2 text-[10px] text-indigo-700 dark:text-indigo-300">
-                HTTPS PWA 默认不直连 127.0.0.1；桌面实时预览优先通过 NanoFlow 扩展 Relay，未安装扩展时自动降级为缓存预览与 siyuan:// 深链。
+                HTTPS PWA 默认不直连 127.0.0.1；桌面实时预览优先通过 NanoFlow 扩展 Relay，未安装扩展时自动降级为缓存预览与 siyuan:// 深链。锚点 ID 会云端同步，路径/标签只用于跨设备显示。
               </div>
+              @if (siyuanConnectionStatus(); as status) {
+                <div class="rounded-lg bg-slate-50 dark:bg-stone-700 px-2 py-2 text-[10px] text-slate-500 dark:text-stone-300">{{ status }}</div>
+              }
             </div>
           </section>
           
@@ -801,6 +809,7 @@ export class SettingsModalComponent {
   readonly focusPreferenceService = inject(FocusPreferenceService);
   readonly gateService = inject(GateService);
   private readonly siyuanCache = inject(ExternalSourceCacheService);
+  private readonly siyuanPreview = inject(SiyuanPreviewService);
   private readonly logger = inject(LoggerService);
   
   /** 是否开发模式（用于显示开发工具） */
@@ -877,8 +886,9 @@ export class SettingsModalComponent {
   /** 是否正在从备份恢复 */
   readonly isRestoringFromBackup = signal(false);
   readonly siyuanRuntimeMode = signal<SiyuanRuntimeMode>('extension-relay');
-  readonly siyuanBaseUrl = signal(SIYUAN_CONFIG.DEFAULT_BASE_URL);
+  readonly siyuanBaseUrl = signal<string>(SIYUAN_CONFIG.DEFAULT_BASE_URL);
   readonly siyuanTokenMask = signal('');
+  readonly siyuanConnectionStatus = signal<string>('');
   readonly defaultSiyuanBaseUrl = SIYUAN_CONFIG.DEFAULT_BASE_URL;
   
   /** 恢复流程状态 */
@@ -915,13 +925,20 @@ export class SettingsModalComponent {
     const config = await this.siyuanCache.loadConfig();
     await this.siyuanCache.saveConfig({ ...config, runtimeMode: value });
     this.siyuanRuntimeMode.set(value);
+    this.siyuanConnectionStatus.set('');
   }
 
   async updateSiyuanBaseUrl(event: Event): Promise<void> {
     const value = (event.target as HTMLInputElement | null)?.value.trim() || SIYUAN_CONFIG.DEFAULT_BASE_URL;
+    if (!isTrustedSiyuanDirectBaseUrl(value, null)) {
+      this.siyuanConnectionStatus.set('仅支持本机思源地址 http://127.0.0.1:6806 或 http://localhost:6806');
+      this.siyuanBaseUrl.set(SIYUAN_CONFIG.DEFAULT_BASE_URL);
+      return;
+    }
     const config = await this.siyuanCache.loadConfig();
     await this.siyuanCache.saveConfig({ ...config, baseUrl: value });
     this.siyuanBaseUrl.set(value);
+    this.siyuanConnectionStatus.set('');
   }
 
   async updateSiyuanToken(event: Event): Promise<void> {
@@ -932,13 +949,26 @@ export class SettingsModalComponent {
     this.siyuanTokenMask.set(value ? SIYUAN_TOKEN_MASK : '');
   }
 
+  async testSiyuanConnection(): Promise<void> {
+    this.siyuanConnectionStatus.set('正在检测思源连接…');
+    const result = await this.siyuanPreview.diagnoseConnection();
+    if (result.ok) {
+      this.siyuanConnectionStatus.set(result.mode === 'cache-only' ? '当前为仅缓存与深链模式' : '思源预览通道可用');
+      return;
+    }
+    const message = SIYUAN_ERROR_MESSAGES[result.errorCode ?? 'unknown'] ?? SIYUAN_ERROR_MESSAGES.unknown;
+    this.siyuanConnectionStatus.set(message);
+  }
+
   async clearSiyuanCache(): Promise<void> {
     await this.siyuanCache.clearPreviewCache();
+    this.siyuanConnectionStatus.set('已清除当前账号的本机思源缓存');
   }
 
   async forgetSiyuanConfig(): Promise<void> {
     await this.siyuanCache.forgetConfig();
     await this.loadSiyuanConfig();
+    this.siyuanConnectionStatus.set('已忘记本机思源授权');
   }
   
   toggleAutoResolve() {

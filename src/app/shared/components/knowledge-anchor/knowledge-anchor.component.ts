@@ -1,4 +1,4 @@
-import { ChangeDetectionStrategy, Component, ElementRef, computed, inject, input, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, ElementRef, OnDestroy, computed, inject, input, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { SIYUAN_ERROR_MESSAGES } from '../../../../config/siyuan.config';
@@ -47,11 +47,11 @@ const SHEET_PREVIEW_FALLBACK: SiyuanPreviewResult = { status: 'error', errorCode
 
       @if (sheetOpen() && activeLink(); as link) {
         <div class="fixed inset-0 z-[60] bg-black/30" (click)="closeSheet()"></div>
-        <section class="fixed inset-x-0 bottom-0 z-[61] max-h-[70vh] rounded-t-2xl border-t border-slate-200 bg-white p-4 shadow-2xl dark:border-stone-700 dark:bg-stone-900" data-testid="knowledge-anchor-sheet">
+        <section role="dialog" aria-modal="true" aria-labelledby="knowledge-anchor-sheet-title" class="fixed inset-x-0 bottom-0 z-[61] max-h-[70vh] rounded-t-2xl border-t border-slate-200 bg-white p-4 shadow-2xl dark:border-stone-700 dark:bg-stone-900" data-testid="knowledge-anchor-sheet">
           <div class="mx-auto mb-3 h-1 w-10 rounded-full bg-slate-200 dark:bg-stone-700"></div>
           <div class="flex items-start justify-between gap-3">
             <div class="min-w-0">
-              <div class="text-sm font-bold text-slate-800 dark:text-stone-100">思源上下文</div>
+              <div id="knowledge-anchor-sheet-title" class="text-sm font-bold text-slate-800 dark:text-stone-100">思源上下文</div>
               <div class="truncate text-[11px] text-slate-500 dark:text-stone-400">{{ displayLabel(link) }}</div>
             </div>
             <button type="button" class="text-xs text-slate-400" (click)="closeSheet()">关闭</button>
@@ -89,7 +89,7 @@ const SHEET_PREVIEW_FALLBACK: SiyuanPreviewResult = { status: 'error', errorCode
     .sheet-action-danger { color: rgb(225 29 72); }
   `],
 })
-export class KnowledgeAnchorComponent {
+export class KnowledgeAnchorComponent implements OnDestroy {
   private readonly linkService = inject(ExternalSourceLinkService);
   private readonly previewService = inject(SiyuanPreviewService);
   private readonly popover = inject(KnowledgeAnchorPopoverService);
@@ -109,6 +109,11 @@ export class KnowledgeAnchorComponent {
   readonly activeLink = signal<ExternalSourceLink | null>(null);
   readonly sheetResult = signal<SiyuanPreviewResult>({ status: 'loading' });
   pendingInput = '';
+
+  ngOnDestroy(): void {
+    this.popover.closeForHost(this.host.nativeElement);
+    this.previewService.abortActive();
+  }
 
   async bind(event: Event): Promise<void> {
     event.preventDefault();

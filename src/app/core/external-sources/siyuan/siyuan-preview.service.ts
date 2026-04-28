@@ -2,7 +2,7 @@ import { Injectable, inject } from '@angular/core';
 import { SIYUAN_CONFIG } from '../../../../config/siyuan.config';
 import { LoggerService } from '../../../../services/logger.service';
 import { ExternalSourceCacheService } from '../external-source-cache.service';
-import type { ExternalSourceLink, LocalSiyuanPreviewCache, SiyuanPreviewResult } from '../external-source.model';
+import type { ExternalSourceLink, LocalSiyuanPreviewCache, SiyuanPreviewErrorCode, SiyuanPreviewResult } from '../external-source.model';
 import { SiyuanDirectProvider } from './siyuan-direct-provider';
 import { SiyuanExtensionProvider } from './siyuan-extension-provider';
 import { SiyuanProviderError, type SiyuanPreviewProvider } from './siyuan-provider.interface';
@@ -22,6 +22,19 @@ export class SiyuanPreviewService {
   private readonly logger = inject(LoggerService).category('SiyuanPreview');
   private activeRequest?: ActivePreviewRequest;
   private requestSeq = 0;
+
+  async diagnoseConnection(): Promise<{ ok: boolean; mode: 'extension-relay' | 'direct' | 'cache-only'; errorCode?: SiyuanPreviewErrorCode }> {
+    const config = await this.cache.loadConfig();
+    if (config.runtimeMode === 'cache-only') return { ok: true, mode: 'cache-only' };
+    if (config.runtimeMode === 'direct') {
+      if (!config.token) return { ok: false, mode: 'direct', errorCode: 'not-configured' };
+      return await this.directProvider.isAvailable()
+        ? { ok: true, mode: 'direct' }
+        : { ok: false, mode: 'direct', errorCode: 'runtime-not-supported' };
+    }
+    if (await this.extensionProvider.isAvailable()) return { ok: true, mode: 'extension-relay' };
+    return { ok: false, mode: 'extension-relay', errorCode: 'extension-unavailable' };
+  }
 
   async preview(link: ExternalSourceLink, options?: { forceRefresh?: boolean }): Promise<SiyuanPreviewResult> {
     const cached = await this.cache.getPreview(link.id, link.targetId);

@@ -65,6 +65,20 @@ export interface BackupProject {
   version?: number;
 }
 
+export interface BackupExternalSourceLink {
+  id: string;
+  sourceType: 'siyuan-block';
+  targetId: string;
+  uri: string;
+  label?: string;
+  hpath?: string;
+  role?: 'context' | 'spec' | 'reference' | 'evidence' | 'next-action';
+  sortOrder: number;
+  deletedAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface BackupTask {
   id: string;
   projectId: string;
@@ -89,6 +103,7 @@ export interface BackupTask {
   createdAt?: string;
   updatedAt?: string;
   deletedAt?: string | null;
+  externalSourceLinks?: BackupExternalSourceLink[];
 }
 
 export interface BackupConnection {

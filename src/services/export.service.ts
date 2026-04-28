@@ -19,6 +19,8 @@ import { ToastService } from './toast.service';
 import { PreferenceService } from './preference.service';
 import { Project, Task, Connection } from '../models';
 import { LOCAL_BACKUP_CONFIG } from '../config/local-backup.config';
+import { ExternalSourceLinkService } from '../app/core/external-sources/external-source-link.service';
+import type { ExternalSourceLink, ExternalSourceRole, ExternalSourceType } from '../app/core/external-sources/external-source.model';
 
 // ============================================
 // 导出配置
@@ -26,7 +28,7 @@ import { LOCAL_BACKUP_CONFIG } from '../config/local-backup.config';
 
 export const EXPORT_CONFIG = {
   /** 导出格式版本 */
-  FORMAT_VERSION: '2.0',
+  FORMAT_VERSION: '2.1',
   
   /** 默认文件名前缀 */
   FILENAME_PREFIX: 'nanoflow-backup',
@@ -96,6 +98,20 @@ export interface ExportData {
   projects: ExportProject[];
 }
 
+export interface ExportExternalSourceLink {
+  id: string;
+  sourceType: ExternalSourceType;
+  targetId: string;
+  uri: string;
+  label?: string;
+  hpath?: string;
+  role?: ExternalSourceRole;
+  sortOrder: number;
+  deletedAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 /**
  * 导出项目结构（清理后的项目）
  */
@@ -154,6 +170,8 @@ export interface ExportTask {
   deletedAt?: string | null;
   /** 停泊元数据（A3.11：导出时清除 contextSnapshot） */
   parkingMeta?: import('../models/parking').TaskParkingMeta | null;
+  /** 外部知识锚点指针（不包含 token / 正文缓存） */
+  externalSourceLinks?: ExportExternalSourceLink[];
 }
 
 /**
@@ -223,6 +241,7 @@ export class ExportService {
   private readonly logger = inject(LoggerService).category('Export');
   private readonly toast = inject(ToastService);
   private readonly preference = inject(PreferenceService);
+  private readonly externalSourceLinks = inject(ExternalSourceLinkService);
   
   // 状态信号
   private readonly _isExporting = signal(false);
@@ -316,6 +335,8 @@ export class ExportService {
       // 阶段 1：准备数据
       this.updateProgress('preparing', 10);
       
+      await this.externalSourceLinks.ensureLoaded();
+
       // 统计任务和附件
       let taskCount = 0;
       let connectionCount = 0;
@@ -570,6 +591,7 @@ export class ExportService {
         ...task.parkingMeta,
         contextSnapshot: null,
       } : null,
+      externalSourceLinks: this.exportExternalSourceLinks(task.id),
     };
     
     // 包含附件元数据
@@ -589,6 +611,28 @@ export class ExportService {
     }
     
     return exportTask;
+  }
+  
+  private exportExternalSourceLinks(taskId: string): ExportExternalSourceLink[] | undefined {
+    const links = this.externalSourceLinks.activeLinksForTask(taskId);
+    if (links.length === 0) return undefined;
+    return links.map(link => this.toExportExternalSourceLink(link));
+  }
+
+  private toExportExternalSourceLink(link: ExternalSourceLink): ExportExternalSourceLink {
+    return {
+      id: link.id,
+      sourceType: link.sourceType,
+      targetId: link.targetId,
+      uri: link.uri,
+      label: link.label,
+      hpath: link.hpath,
+      role: link.role,
+      sortOrder: link.sortOrder,
+      deletedAt: link.deletedAt,
+      createdAt: link.createdAt,
+      updatedAt: link.updatedAt,
+    };
   }
   
   /**

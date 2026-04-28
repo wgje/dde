@@ -2,7 +2,7 @@ import { Injectable } from '@angular/core';
 import { SIYUAN_CONFIG } from '../../../../config/siyuan.config';
 import { isValidSiyuanBlockId } from './siyuan-link-parser';
 import { normalizePreview } from './siyuan-preview-utils';
-import type { SiyuanBlockPreview, SiyuanChildBlockPreview } from '../external-source.model';
+import type { SiyuanBlockPreview, SiyuanChildBlockPreview, SiyuanPreviewErrorCode } from '../external-source.model';
 import { SiyuanProviderError, type SiyuanPreviewProvider } from './siyuan-provider.interface';
 
 interface ExtensionResponsePayload {
@@ -24,6 +24,17 @@ interface ExtensionMessage {
   errorMessage?: unknown;
 }
 
+const ALLOWED_ERROR_CODES: readonly SiyuanPreviewErrorCode[] = [
+  'not-configured',
+  'runtime-not-supported',
+  'extension-unavailable',
+  'kernel-unreachable',
+  'token-invalid',
+  'block-not-found',
+  'render-blocked',
+  'unknown',
+];
+
 @Injectable({ providedIn: 'root' })
 export class SiyuanExtensionProvider implements SiyuanPreviewProvider {
   readonly mode = 'extension-relay' as const;
@@ -39,18 +50,18 @@ export class SiyuanExtensionProvider implements SiyuanPreviewProvider {
 
     const response = await this.postRequest(blockId, signal);
     if (!response.ok) {
-      const code = typeof response.errorCode === 'string' ? response.errorCode : 'unknown';
-      throw new SiyuanProviderError(code === 'extension-unavailable' ? code : 'unknown', String(response.errorMessage ?? code));
+      const code = this.readErrorCode(response.errorCode);
+      throw new SiyuanProviderError(code, this.truncate(String(response.errorMessage ?? code), 240));
     }
 
     const data = response.data;
     if (!data || data.blockId !== blockId) throw new SiyuanProviderError('unknown', 'Extension returned mismatched blockId');
     return normalizePreview({
       blockId,
-      hpath: typeof data.hpath === 'string' ? data.hpath : undefined,
-      plainText: typeof data.plainText === 'string' ? data.plainText : undefined,
-      kramdown: typeof data.kramdown === 'string' ? data.kramdown : undefined,
-      sourceUpdatedAt: typeof data.sourceUpdatedAt === 'string' ? data.sourceUpdatedAt : undefined,
+      hpath: this.readBoundedString(data.hpath, SIYUAN_CONFIG.MAX_HPATH_LENGTH),
+      plainText: this.readBoundedString(data.plainText, SIYUAN_CONFIG.MAX_PREVIEW_CHARS * 2),
+      kramdown: this.readBoundedString(data.kramdown, SIYUAN_CONFIG.MAX_PREVIEW_CHARS * 2),
+      sourceUpdatedAt: this.readBoundedString(data.sourceUpdatedAt, 64),
       childBlocks: this.readChildBlocks(data.childBlocks),
       truncated: data.truncated === true,
     });
@@ -64,9 +75,9 @@ export class SiyuanExtensionProvider implements SiyuanPreviewProvider {
         const timer = window.setTimeout(() => {
           window.removeEventListener('message', listener);
           resolve(false);
-        }, 500);
+        }, SIYUAN_CONFIG.EXTENSION_PING_TIMEOUT_MS);
         const listener = (event: MessageEvent<unknown>) => {
-          if (event.source !== window) return;
+          if (!this.isTrustedWindowMessage(event)) return;
           const message = event.data as ExtensionMessage;
           if (message.type !== 'nanoflow.siyuan.pong' || message.requestId !== requestId) return;
           window.clearTimeout(timer);
@@ -97,7 +108,7 @@ export class SiyuanExtensionProvider implements SiyuanPreviewProvider {
         reject(new SiyuanProviderError('extension-unavailable'));
       }, SIYUAN_CONFIG.PREVIEW_FETCH_TIMEOUT_MS);
       const listener = (event: MessageEvent<unknown>) => {
-        if (event.source !== window) return;
+        if (!this.isTrustedWindowMessage(event)) return;
         const message = event.data as ExtensionMessage;
         if (message.type !== 'nanoflow.siyuan.preview-result' || message.requestId !== requestId) return;
         cleanup();
@@ -113,10 +124,31 @@ export class SiyuanExtensionProvider implements SiyuanPreviewProvider {
     });
   }
 
+  private isTrustedWindowMessage(event: MessageEvent<unknown>): boolean {
+    return event.source === window && event.origin === window.location.origin && typeof event.data === 'object' && event.data !== null;
+  }
+
   private readChildBlocks(value: unknown): SiyuanChildBlockPreview[] | undefined {
     if (!Array.isArray(value)) return undefined;
     return value
+      .slice(0, SIYUAN_CONFIG.MAX_PREVIEW_CHILDREN)
       .filter(item => typeof item?.id === 'string' && typeof item?.content === 'string' && typeof item?.type === 'string')
-      .map(item => ({ id: item.id, content: item.content, type: item.type }));
+      .map(item => ({
+        id: this.truncate(item.id, SIYUAN_CONFIG.MAX_LINK_ID_LENGTH),
+        content: this.truncate(item.content, SIYUAN_CONFIG.MAX_PREVIEW_CHARS),
+        type: this.truncate(item.type, 32),
+      }));
+  }
+
+  private readErrorCode(value: unknown): SiyuanPreviewErrorCode {
+    return ALLOWED_ERROR_CODES.includes(value as SiyuanPreviewErrorCode) ? value as SiyuanPreviewErrorCode : 'unknown';
+  }
+
+  private readBoundedString(value: unknown, maxLength: number): string | undefined {
+    return typeof value === 'string' ? this.truncate(value, maxLength) : undefined;
+  }
+
+  private truncate(value: string, maxLength: number): string {
+    return value.length > maxLength ? value.slice(0, maxLength) : value;
   }
 }

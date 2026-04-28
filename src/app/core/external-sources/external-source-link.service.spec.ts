@@ -14,13 +14,18 @@ function createLoggerMock() {
 
 describe('ExternalSourceLinkService', () => {
   let upsertPayloads: unknown[];
+  let authUser = signal('00000000-0000-0000-0000-000000000001');
+  let shouldFailUpsert = false;
 
   beforeEach(async () => {
     await clear();
     upsertPayloads = [];
+    authUser = signal('00000000-0000-0000-0000-000000000001');
+    shouldFailUpsert = false;
     const from = vi.fn((table: string) => ({
       select: vi.fn(() => ({ eq: vi.fn(async () => ({ data: [], error: null })) })),
       upsert: vi.fn(async (payload: unknown) => {
+        if (shouldFailUpsert) return { error: new Error('offline') };
         upsertPayloads.push({ table, payload });
         return { error: null };
       }),
@@ -29,7 +34,7 @@ describe('ExternalSourceLinkService', () => {
     TestBed.configureTestingModule({
       providers: [
         ExternalSourceLinkService,
-        { provide: AuthService, useValue: { currentUserId: signal('00000000-0000-0000-0000-000000000001') } },
+        { provide: AuthService, useValue: { currentUserId: authUser } },
         { provide: SupabaseClientService, useValue: { clientAsync: vi.fn(async () => ({ from })) } },
         { provide: ToastService, useValue: { success: vi.fn(), info: vi.fn(), error: vi.fn() } },
         { provide: LoggerService, useValue: createLoggerMock() },
@@ -53,7 +58,7 @@ describe('ExternalSourceLinkService', () => {
     const service = TestBed.inject(ExternalSourceLinkService);
 
     await service.bindSiyuanBlock('task-1', '20260426123456-abc1234');
-    await new Promise(resolve => setTimeout(resolve, 0));
+    await service.flushPendingLinks();
 
     expect(upsertPayloads).toHaveLength(1);
     const payload = upsertPayloads[0] as { table: string; payload: Record<string, unknown> };
@@ -63,6 +68,33 @@ describe('ExternalSourceLinkService', () => {
     expect(payload.payload).not.toHaveProperty('markdown');
     expect(payload.payload).not.toHaveProperty('kramdown');
     expect(payload.payload).not.toHaveProperty('plainText');
+  });
+
+
+
+  it('keeps failed pushes in a durable pending queue and flushes later', async () => {
+    const service = TestBed.inject(ExternalSourceLinkService);
+    shouldFailUpsert = true;
+
+    await service.bindSiyuanBlock('task-1', '20260426123456-abc1234');
+    await service.flushPendingLinks();
+    expect(upsertPayloads).toHaveLength(0);
+
+    shouldFailUpsert = false;
+    await service.flushPendingLinks();
+
+    expect(upsertPayloads).toHaveLength(1);
+  });
+
+  it('reloads local links when the current owner changes', async () => {
+    const service = TestBed.inject(ExternalSourceLinkService);
+    const first = await service.bindSiyuanBlock('task-a', '20260426123456-abc1234');
+    expect(service.firstActiveLinkForTask('task-a')?.id).toBe(first?.id);
+
+    authUser.set('00000000-0000-0000-0000-000000000002');
+    await service.ensureLoaded();
+
+    expect(service.firstActiveLinkForTask('task-a')).toBeNull();
   });
 
   it('soft deletes links and hides them from active task anchors', async () => {
