@@ -18,7 +18,7 @@ END;
 $$;
 
 UPDATE public.tasks
-SET completed_at = COALESCE(completed_at, updated_at, created_at)
+SET completed_at = COALESCE(updated_at, created_at)
 WHERE status = 'completed'
   AND completed_at IS NULL;
 
