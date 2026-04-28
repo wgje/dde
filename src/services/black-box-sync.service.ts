@@ -958,7 +958,17 @@ export class BlackBoxSyncService {
 
     const leftMs = new Date(normalizedLeft).getTime();
     const rightMs = new Date(normalizedRight).getTime();
-    return Number.isFinite(leftMs) && Number.isFinite(rightMs) && leftMs === rightMs;
+    const leftValid = Number.isFinite(leftMs);
+    const rightValid = Number.isFinite(rightMs);
+    if (!leftValid || !rightValid) {
+      this.logger.debug('黑匣子时间戳等价比较失败：时间格式无效', {
+        left: normalizedLeft,
+        right: normalizedRight,
+      });
+      return false;
+    }
+
+    return leftMs === rightMs;
   }
 
   private hasEquivalentEntryState(local: BlackBoxEntry, remote: BlackBoxEntry): boolean {

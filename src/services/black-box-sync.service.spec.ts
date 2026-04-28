@@ -28,9 +28,8 @@ function createEntry(overrides: Partial<BlackBoxEntry> & Pick<BlackBoxEntry, 'id
   };
 }
 
-function createLegacyEntryWithoutDeletedAt(entry: BlackBoxEntry): BlackBoxEntry {
-  const { deletedAt: _deletedAt, ...legacyEntry } = entry;
-  return legacyEntry as BlackBoxEntry;
+function createLegacyEntryWithUndefinedDeletedAt(entry: BlackBoxEntry): BlackBoxEntry {
+  return Object.assign(entry, { deletedAt: undefined });
 }
 
 async function flushMicrotasks(turns = 6): Promise<void> {
@@ -779,7 +778,7 @@ describe('BlackBoxSyncService', () => {
 
   it('should clear stale pending when server row only differs by timestamp/null formatting', async () => {
     const entryId = crypto.randomUUID();
-    const pendingEntry = createLegacyEntryWithoutDeletedAt(
+    const pendingEntry = createLegacyEntryWithUndefinedDeletedAt(
       createEntry({
         id: entryId,
         createdAt: '2026-04-23T22:46:00.000Z',
