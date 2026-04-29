@@ -95,6 +95,18 @@ describe('Cloudflare migration artifact contracts', () => {
     }
   });
 
+  it('strict production builds emit stats for the deploy no-JIT guard', () => {
+    const pkg = JSON.parse(read('package.json')) as { scripts: Record<string, string> };
+    const deployWorkflow = read('.github/workflows/deploy-cloudflare-pages.yml');
+
+    expect(deployWorkflow).toContain('run: npm run build:strict');
+    expect(deployWorkflow.indexOf('run: npm run build:strict')).toBeLessThan(
+      deployWorkflow.indexOf('npm run perf:guard:nojit')
+    );
+    expect(pkg.scripts['build:strict']).toContain('node scripts/run-ng.cjs build --stats-json');
+    expect(pkg.scripts['build:strict:clean']).toContain('node scripts/run-ng.cjs build --stats-json');
+  });
+
   it('runs the canonical origin gate before resource hints and cleans stale SW caches once', () => {
     const indexHtml = read('index.html');
     const gateIndex = indexHtml.indexOf('id="canonical-origin-gate"');
