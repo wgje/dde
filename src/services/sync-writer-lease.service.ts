@@ -214,7 +214,7 @@ export class SyncWriterLeaseService {
       await this.sleepWithAbort(500, options.signal);
     }
 
-    throw new DOMException('AbortError', 'AbortError');
+    throw new DOMException('Sync writer lease acquisition aborted', 'AbortError');
   }
 
   private async tryTakeIndexedDbLease(db: IDBDatabase, lockName: string, ttlMs: number): Promise<boolean> {
