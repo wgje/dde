@@ -58,7 +58,7 @@ describe('TaskStore', () => {
       const task = createMockTask('task-1');
       store.setTask(task, 'project-1');
       
-      const updatedTask = { ...task, title: 'Updated Title' };
+      const updatedTask = { ...task, title: 'Updated Title', updatedAt: new Date(Date.now() + 1).toISOString() };
       store.setTask(updatedTask, 'project-1');
       
       expect(store.getTask('task-1')?.title).toBe('Updated Title');

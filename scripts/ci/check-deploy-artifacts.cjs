@@ -20,9 +20,11 @@
  * 12. /fonts/, /icons/, /assets/ 等非 hash 资源在 _headers 中不能 immutable
  * 13. 应用 Web Worker chunk（worker-<hash>.js, 排除 worker-basic.min.js）
  *     必须有精确文件名 immutable 规则
- * 14. dist/browser/manifest.webmanifest 不含 vercel.app
- * 15. dist/browser/version.json 存在且 JSON 合法
- * 16. dist/browser/index.html 存在
+ * 14. dist/browser/manifest.webmanifest 不含 vercel.app，manifest.webmanifest id/scope/start_url 不绑定旧 origin
+ * 15. dist/browser/.well-known/assetlinks.json 与 ANDROID_TWA_PACKAGE_NAME /
+ *     ANDROID_TWA_SHA256_FINGERPRINTS 匹配
+ * 16. dist/browser/version.json 存在且 JSON 合法
+ * 17. dist/browser/index.html 存在
  *
  * 退出码：失败抛出 1。
  */
@@ -32,6 +34,7 @@ const path = require('node:path');
 
 const REPO_ROOT = path.resolve(__dirname, '../..');
 const DIST = path.join(REPO_ROOT, 'dist', 'browser');
+const DEFAULT_TWA_PACKAGE_NAME = 'app.nanoflow.twa';
 
 let failures = [];
 const fail = (msg) => failures.push(msg);
@@ -39,6 +42,18 @@ const ok = (msg) => console.log('  ✓ ' + msg);
 
 function existsFile(p) { return fs.existsSync(p) && fs.statSync(p).isFile(); }
 function existsDir(p) { return fs.existsSync(p) && fs.statSync(p).isDirectory(); }
+function splitEnvList(value) {
+  return String(value || '')
+    .split(/[,\n;]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function isRelativeOrRootUrl(value) {
+  if (typeof value !== 'string' || value.trim() === '') return false;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(value)) return false;
+  return value.startsWith('/') || value.startsWith('./') || value.startsWith('../') || value === '.';
+}
 
 // 1. dist/browser 存在
 if (!existsDir(DIST)) {
@@ -162,17 +177,63 @@ for (const chunk of workerChunks) {
 }
 if (workerChunks.length > 0) ok(`${workerChunks.length} application worker chunk(s) have exact rules`);
 
-// 14. manifest.webmanifest 不含 vercel.app
+// 14. manifest.webmanifest 不含 vercel.app，manifest.webmanifest id/scope/start_url 不绑定旧 origin
 const manifestPath = path.join(DIST, 'manifest.webmanifest');
 if (existsFile(manifestPath)) {
   const mf = fs.readFileSync(manifestPath, 'utf-8');
   if (/vercel\.app/i.test(mf)) fail('dist/browser/manifest.webmanifest contains "vercel.app" — id/scope/start_url must be relative or canonical');
   else ok('manifest.webmanifest contains no vercel.app reference');
+  try {
+    const manifest = JSON.parse(mf);
+    for (const field of ['id', 'scope', 'start_url']) {
+      if (!isRelativeOrRootUrl(manifest[field])) {
+        fail(`manifest.webmanifest ${field} must be relative/root-scoped, got ${JSON.stringify(manifest[field])}`);
+      }
+    }
+    ok('manifest.webmanifest id/scope/start_url are origin-neutral');
+  } catch (e) {
+    fail(`manifest.webmanifest parse failed: ${e.message}`);
+  }
 } else {
   fail('dist/browser/manifest.webmanifest missing');
 }
 
-// 15. version.json 存在且合法
+// 15. TWA assetlinks.json 与 package / fingerprint 集合匹配
+const assetlinksPath = path.join(DIST, '.well-known', 'assetlinks.json');
+if (!existsFile(assetlinksPath)) {
+  fail('dist/browser/.well-known/assetlinks.json missing');
+} else {
+  try {
+    const assetlinks = JSON.parse(fs.readFileSync(assetlinksPath, 'utf-8'));
+    const expectedPackageName = process.env.ANDROID_TWA_PACKAGE_NAME || DEFAULT_TWA_PACKAGE_NAME;
+    const expectedFingerprints = splitEnvList(process.env.ANDROID_TWA_SHA256_FINGERPRINTS);
+    const statements = Array.isArray(assetlinks) ? assetlinks : [];
+    const androidStatement = statements.find((statement) =>
+      statement?.target?.namespace === 'android_app'
+      && statement.target.package_name === expectedPackageName
+    );
+    if (!androidStatement) {
+      fail(`assetlinks.json missing android_app statement for ANDROID_TWA_PACKAGE_NAME=${expectedPackageName}`);
+    } else {
+      const actualFingerprints = Array.isArray(androidStatement.target.sha256_cert_fingerprints)
+        ? androidStatement.target.sha256_cert_fingerprints
+        : [];
+      if (actualFingerprints.length === 0) {
+        fail('assetlinks.json android_app statement has no sha256_cert_fingerprints');
+      }
+      for (const fingerprint of expectedFingerprints) {
+        if (!actualFingerprints.includes(fingerprint)) {
+          fail(`assetlinks.json missing ANDROID_TWA_SHA256_FINGERPRINTS entry: ${fingerprint}`);
+        }
+      }
+      ok(`assetlinks.json package=${expectedPackageName} fingerprints=${actualFingerprints.length}`);
+    }
+  } catch (e) {
+    fail(`assetlinks.json parse failed: ${e.message}`);
+  }
+}
+
+// 16. version.json 存在且合法
 const versionJsonPath = path.join(DIST, 'version.json');
 if (!existsFile(versionJsonPath)) {
   fail('dist/browser/version.json missing — run `node scripts/generate-version-json.cjs`');
@@ -192,7 +253,7 @@ if (!existsFile(versionJsonPath)) {
   }
 }
 
-// 16. index.html 存在
+// 17. index.html 存在
 if (!existsFile(path.join(DIST, 'index.html'))) fail('dist/browser/index.html missing');
 else ok('index.html present');
 

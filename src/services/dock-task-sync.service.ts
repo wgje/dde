@@ -173,7 +173,7 @@ export class DockTaskSyncService {
       }
       return patch.completedAt ?? now;
     }
-    if (patch.status && patch.status !== 'completed') {
+    if (patch.status) {
       return null;
     }
     return patch.completedAt === undefined ? currentTask.completedAt : patch.completedAt;

@@ -255,7 +255,7 @@ export class SentryLazyLoaderService {
           }),
         ],
         // 只允许来自我们域名的请求被追踪（迁移期：同时包含旧 Vercel 与新 Cloudflare）
-        tracePropagationTargets: SentryLazyLoaderService.TRACE_PROPAGATION_TARGETS,
+        tracePropagationTargets: [...SentryLazyLoaderService.TRACE_PROPAGATION_TARGETS],
         // 性能采样率：5% 低采样率收集关键路径数据，不影响首屏性能
         tracesSampleRate: environment.production ? 0.05 : 0,
         // Session Replay：仅在错误发生时录制（100%），日常不录制（0%）

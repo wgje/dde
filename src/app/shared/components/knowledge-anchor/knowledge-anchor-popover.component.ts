@@ -35,28 +35,30 @@ import { shortenSiyuanBlockId } from '../../../core/external-sources/siyuan/siyu
             <div class="h-3 w-4/5 rounded bg-slate-100 dark:bg-stone-800"></div>
             <div class="h-3 w-3/5 rounded bg-slate-100 dark:bg-stone-800"></div>
           </div>
-        } @else if (result().preview; as preview) {
-          @if (result().status === 'cache-only') {
-            <div class="mb-2 rounded-md bg-amber-50 px-2 py-1 text-[10px] text-amber-700 dark:bg-amber-950/30 dark:text-amber-300">
-              {{ errorMessage() }}，已显示本机缓存
+        } @else {
+          @if (result().preview; as preview) {
+            @if (result().status === 'cache-only') {
+              <div class="mb-2 rounded-md bg-amber-50 px-2 py-1 text-[10px] text-amber-700 dark:bg-amber-950/30 dark:text-amber-300">
+                {{ errorMessage() }}，已显示本机缓存
+              </div>
+            }
+            <p class="whitespace-pre-wrap">{{ preview.excerpt || preview.plainText || '该块暂无可预览文本' }}</p>
+            @if (preview.childBlocks?.length) {
+              <ul class="mt-2 list-disc space-y-1 pl-4 text-[11px] text-slate-500 dark:text-stone-400">
+                @for (child of preview.childBlocks; track child.id) {
+                  <li>{{ child.content || child.id }}</li>
+                }
+              </ul>
+            }
+            @if (preview.truncated) {
+              <div class="mt-2 text-[10px] text-slate-400 dark:text-stone-500">更多内容请打开思源</div>
+            }
+            <div class="mt-2 text-[10px] text-slate-400 dark:text-stone-500">缓存时间：{{ preview.fetchedAt | date:'MM/dd HH:mm' }}</div>
+          } @else {
+            <div class="rounded-md bg-slate-50 px-2 py-2 text-[11px] text-slate-500 dark:bg-stone-800 dark:text-stone-400" data-testid="knowledge-anchor-error">
+              {{ errorMessage() }}。任务仍可继续操作，也可直接打开思源原块。
             </div>
           }
-          <p class="whitespace-pre-wrap">{{ preview.excerpt || preview.plainText || '该块暂无可预览文本' }}</p>
-          @if (preview.childBlocks?.length) {
-            <ul class="mt-2 list-disc space-y-1 pl-4 text-[11px] text-slate-500 dark:text-stone-400">
-              @for (child of preview.childBlocks; track child.id) {
-                <li>{{ child.content || child.id }}</li>
-              }
-            </ul>
-          }
-          @if (preview.truncated) {
-            <div class="mt-2 text-[10px] text-slate-400 dark:text-stone-500">更多内容请打开思源</div>
-          }
-          <div class="mt-2 text-[10px] text-slate-400 dark:text-stone-500">缓存时间：{{ preview.fetchedAt | date:'MM/dd HH:mm' }}</div>
-        } @else {
-          <div class="rounded-md bg-slate-50 px-2 py-2 text-[11px] text-slate-500 dark:bg-stone-800 dark:text-stone-400" data-testid="knowledge-anchor-error">
-            {{ errorMessage() }}。任务仍可继续操作，也可直接打开思源原块。
-          </div>
         }
       </div>
     </section>

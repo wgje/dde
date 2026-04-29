@@ -68,6 +68,7 @@ export class BackupService {
       const allProjects = await this.indexedDB.getAllFromStore<Project>(db, DB_CONFIG.stores.projects);
       const allTasks = await this.indexedDB.getAllFromStore<Task>(db, DB_CONFIG.stores.tasks);
       const allConnections = await this.indexedDB.getAllFromStore<Connection>(db, DB_CONFIG.stores.connections);
+      const allSyncCursors = await this.indexedDB.getAllFromStore<Record<string, unknown>>(db, DB_CONFIG.stores.syncCursors);
       const meta = await this.indexedDB.getFromStore<StoreMeta>(db, DB_CONFIG.stores.meta, 'meta');
 
       // 创建备份数据库
@@ -75,7 +76,13 @@ export class BackupService {
 
       // 写入备份
       const tx = backupDb.transaction(
-        [DB_CONFIG.stores.projects, DB_CONFIG.stores.tasks, DB_CONFIG.stores.connections, DB_CONFIG.stores.meta],
+        [
+          DB_CONFIG.stores.projects,
+          DB_CONFIG.stores.tasks,
+          DB_CONFIG.stores.connections,
+          DB_CONFIG.stores.meta,
+          DB_CONFIG.stores.syncCursors,
+        ],
         'readwrite'
       );
 
@@ -83,6 +90,7 @@ export class BackupService {
       const taskStore = tx.objectStore(DB_CONFIG.stores.tasks);
       const connStore = tx.objectStore(DB_CONFIG.stores.connections);
       const metaStore = tx.objectStore(DB_CONFIG.stores.meta);
+      const cursorStore = tx.objectStore(DB_CONFIG.stores.syncCursors);
 
       for (const project of allProjects) {
         projectStore.put(project);
@@ -92,6 +100,9 @@ export class BackupService {
       }
       for (const conn of allConnections) {
         connStore.put(conn);
+      }
+      for (const cursor of allSyncCursors) {
+        cursorStore.put(cursor);
       }
       if (meta) {
         metaStore.put({ ...meta, backupTime: new Date().toISOString() }, 'meta');
@@ -152,6 +163,9 @@ export class BackupService {
         if (!db.objectStoreNames.contains(DB_CONFIG.stores.meta)) {
           db.createObjectStore(DB_CONFIG.stores.meta);
         }
+        if (!db.objectStoreNames.contains(DB_CONFIG.stores.syncCursors)) {
+          db.createObjectStore(DB_CONFIG.stores.syncCursors, { keyPath: 'key' });
+        }
       };
     });
   }
@@ -175,25 +189,36 @@ export class BackupService {
       const allProjects = await this.getAllFromBackupStore<Project>(backupDb, DB_CONFIG.stores.projects);
       const allTasks = await this.getAllFromBackupStore<Task>(backupDb, DB_CONFIG.stores.tasks);
       const allConnections = await this.getAllFromBackupStore<Connection>(backupDb, DB_CONFIG.stores.connections);
+      const allSyncCursors = backupDb.objectStoreNames.contains(DB_CONFIG.stores.syncCursors)
+        ? await this.getAllFromBackupStore<Record<string, unknown>>(backupDb, DB_CONFIG.stores.syncCursors)
+        : [];
       const meta = await this.getFromBackupStore<StoreMeta>(backupDb, DB_CONFIG.stores.meta, 'meta');
 
       backupDb.close();
 
       // 【P3-29 修复】清空 + 恢复放在同一个事务中，保证原子性
       const db = await this.indexedDB.initDatabase();
-      const storeNames = [DB_CONFIG.stores.projects, DB_CONFIG.stores.tasks, DB_CONFIG.stores.connections, DB_CONFIG.stores.meta];
+      const storeNames = [
+        DB_CONFIG.stores.projects,
+        DB_CONFIG.stores.tasks,
+        DB_CONFIG.stores.connections,
+        DB_CONFIG.stores.meta,
+        DB_CONFIG.stores.syncCursors,
+      ];
       const tx = db.transaction(storeNames, 'readwrite');
 
       const projectStore = tx.objectStore(DB_CONFIG.stores.projects);
       const taskStore = tx.objectStore(DB_CONFIG.stores.tasks);
       const connStore = tx.objectStore(DB_CONFIG.stores.connections);
       const metaStore = tx.objectStore(DB_CONFIG.stores.meta);
+      const cursorStore = tx.objectStore(DB_CONFIG.stores.syncCursors);
 
       // 先清空所有 store
       projectStore.clear();
       taskStore.clear();
       connStore.clear();
       metaStore.clear();
+      cursorStore.clear();
 
       // 再写入备份数据（同一事务内，要么全部成功，要么全部回滚）
       for (const project of allProjects) {
@@ -204,6 +229,9 @@ export class BackupService {
       }
       for (const conn of allConnections) {
         connStore.put(conn);
+      }
+      for (const cursor of allSyncCursors) {
+        cursorStore.put(cursor);
       }
       if (meta) {
         metaStore.put(meta, 'meta');

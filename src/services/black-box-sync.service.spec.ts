@@ -29,7 +29,7 @@ function createEntry(overrides: Partial<BlackBoxEntry> & Pick<BlackBoxEntry, 'id
 }
 
 function createLegacyEntryWithUndefinedDeletedAt(entry: BlackBoxEntry): BlackBoxEntry {
-  return { ...entry, deletedAt: undefined };
+  return { ...entry, deletedAt: undefined } as unknown as BlackBoxEntry;
 }
 
 async function flushMicrotasks(turns = 6): Promise<void> {
@@ -626,8 +626,12 @@ describe('BlackBoxSyncService', () => {
       deleted_at: null,
     };
     const inQuery = vi.fn().mockResolvedValue({ data: [remoteRow], error: null });
-    const orderQuery = vi.fn().mockResolvedValue({ data: [], error: null });
-    const gtQuery = vi.fn(() => ({ order: orderQuery }));
+    const orderedResult = {
+      data: [],
+      error: null,
+      order: vi.fn(() => orderedResult),
+    };
+    const gtQuery = vi.fn(() => orderedResult);
     const selectQuery = vi.fn(() => ({
       gt: gtQuery,
       in: inQuery,
@@ -646,6 +650,33 @@ describe('BlackBoxSyncService', () => {
 
     expect(inQuery).toHaveBeenCalledWith('id', [entryId]);
     expect(blackBoxEntriesMap().get(entryId)?.syncStatus).toBe('synced');
+  });
+
+  it('should pull black box deltas with a safety lookback and stable id ordering', async () => {
+    const orderedResult = {
+      data: [],
+      error: null,
+      order: vi.fn(() => orderedResult),
+    };
+    const gtQuery = vi.fn(() => orderedResult);
+    const selectQuery = vi.fn(() => ({
+      gt: gtQuery,
+    }));
+    const from = vi.fn(() => ({ select: selectQuery }));
+    const rpc = vi.fn().mockResolvedValue({ data: null, error: null });
+    const supabase = TestBed.inject(SupabaseClientService) as unknown as {
+      clientAsync: ReturnType<typeof vi.fn>;
+    };
+    vi.spyOn(service, 'saveToLocal').mockResolvedValue(undefined);
+    (service as unknown as { currentSyncUserId: string | null }).currentSyncUserId = 'user-1';
+    (service as unknown as { lastSyncTime: string | null }).lastSyncTime = '2026-03-05T00:00:30.000Z';
+    supabase.clientAsync.mockResolvedValue({ from, rpc });
+
+    await service.pullChanges({ reason: 'panel-open', force: true });
+
+    expect(gtQuery).toHaveBeenCalledWith('updated_at', '2026-03-05T00:00:00.000Z');
+    expect(orderedResult.order).toHaveBeenCalledWith('updated_at', { ascending: true });
+    expect(orderedResult.order).toHaveBeenCalledWith('id', { ascending: true });
   });
 
   it('should clear pending when server already reflects the same newer-local mutation', async () => {
@@ -673,8 +704,12 @@ describe('BlackBoxSyncService', () => {
       deleted_at: null,
     };
     const inQuery = vi.fn().mockResolvedValue({ data: [remoteRow], error: null });
-    const orderQuery = vi.fn().mockResolvedValue({ data: [], error: null });
-    const gtQuery = vi.fn(() => ({ order: orderQuery }));
+    const orderedResult = {
+      data: [],
+      error: null,
+      order: vi.fn(() => orderedResult),
+    };
+    const gtQuery = vi.fn(() => orderedResult);
     const selectQuery = vi.fn(() => ({
       gt: gtQuery,
       in: inQuery,
@@ -746,8 +781,12 @@ describe('BlackBoxSyncService', () => {
       deleted_at: null,
     };
     const inQuery = vi.fn().mockResolvedValue({ data: [remoteRow], error: null });
-    const orderQuery = vi.fn().mockResolvedValue({ data: [], error: null });
-    const gtQuery = vi.fn(() => ({ order: orderQuery }));
+    const orderedResult = {
+      data: [],
+      error: null,
+      order: vi.fn(() => orderedResult),
+    };
+    const gtQuery = vi.fn(() => orderedResult);
     const selectQuery = vi.fn(() => ({
       gt: gtQuery,
       in: inQuery,
@@ -804,8 +843,12 @@ describe('BlackBoxSyncService', () => {
       deleted_at: null,
     };
     const inQuery = vi.fn().mockResolvedValue({ data: [remoteRow], error: null });
-    const orderQuery = vi.fn().mockResolvedValue({ data: [], error: null });
-    const gtQuery = vi.fn(() => ({ order: orderQuery }));
+    const orderedResult = {
+      data: [],
+      error: null,
+      order: vi.fn(() => orderedResult),
+    };
+    const gtQuery = vi.fn(() => orderedResult);
     const selectQuery = vi.fn(() => ({
       gt: gtQuery,
       in: inQuery,
@@ -858,8 +901,12 @@ describe('BlackBoxSyncService', () => {
       deleted_at: '2026-03-05T00:00:00.000Z',
     };
     const inQuery = vi.fn().mockResolvedValue({ data: [remoteRow], error: null });
-    const orderQuery = vi.fn().mockResolvedValue({ data: [], error: null });
-    const gtQuery = vi.fn(() => ({ order: orderQuery }));
+    const orderedResult = {
+      data: [],
+      error: null,
+      order: vi.fn(() => orderedResult),
+    };
+    const gtQuery = vi.fn(() => orderedResult);
     const selectQuery = vi.fn(() => ({
       gt: gtQuery,
       in: inQuery,

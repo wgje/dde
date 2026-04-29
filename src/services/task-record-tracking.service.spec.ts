@@ -526,7 +526,10 @@ describe('TaskRecordTrackingService', () => {
 
       expect(mockSyncCoordinator.softDeleteTasksBatch).toHaveBeenCalledWith(
         'proj-1',
-        ['task-del']
+        ['task-del'],
+        expect.objectContaining({
+          'task-del': deletedTask.deletedAt,
+        })
       );
     });
 

@@ -1041,9 +1041,9 @@ export class SyncCoordinatorService {
 
     const localProject = this.projectState.getProject(projectId);
     const localWatermarkMs = this.computeLocalProjectWatermark(localProject);
+    let remoteWatermark: string | null = null;
 
     if (FEATURE_FLAGS.RESUME_WATERMARK_RPC_V1) {
-      let remoteWatermark: string | null = null;
       const probe = await this.core.getAccessibleProjectProbe(projectId);
       if (probe) {
         if (!probe.accessible) {
@@ -1058,7 +1058,7 @@ export class SyncCoordinatorService {
       if (remoteWatermark) {
         const remoteUpdatedAtMs = new Date(remoteWatermark).getTime();
         if (Number.isFinite(remoteUpdatedAtMs) && remoteUpdatedAtMs <= localWatermarkMs) {
-          this.core.setLastSyncTime(projectId, remoteWatermark);
+          await this.core.commitProjectSyncTimestamp(projectId, remoteWatermark);
           this.sentryLazyLoader.addBreadcrumb({
             category: 'sync',
             message: 'resume.refresh.fast_path_hit',
@@ -1098,7 +1098,19 @@ export class SyncCoordinatorService {
       return projects.map(project => project.id === validatedProject.id ? validatedProject : project);
     });
 
-    this.core.setLastSyncTime(projectId, new Date().toISOString());
+    await this.core.saveOfflineSnapshotAndWait(this.projectState.projects());
+
+    const validatedWatermarkMs = this.computeLocalProjectWatermark(validatedProject);
+    const nextCursor = this.core.buildProjectSyncCursorFromProject(remoteProject);
+    if (nextCursor) {
+      await this.core.commitProjectSyncCursor(projectId, nextCursor);
+    } else {
+      const cursorWatermark = remoteWatermark
+        ?? (validatedWatermarkMs > 0 ? new Date(validatedWatermarkMs).toISOString() : null);
+      if (cursorWatermark) {
+        await this.core.commitProjectSyncTimestamp(projectId, cursorWatermark);
+      }
+    }
     this.sentryLazyLoader.addBreadcrumb({
       category: 'sync',
       message: 'resume.refresh.applied',
@@ -1710,7 +1722,12 @@ export class SyncCoordinatorService {
       return;
     }
 
-    this.core.state?.update?.(state => ({
+    const coreState = this.core.state as unknown as {
+      update?: (
+        updater: (state: Record<string, unknown> & { pendingCount: number }) => Record<string, unknown> & { pendingCount: number },
+      ) => void;
+    };
+    coreState.update?.(state => ({
       ...state,
       pendingCount: this.retryQueue.length,
     }));

@@ -111,7 +111,7 @@ describe('SyncRpcClientService', () => {
     const service = buildService(rpc as never);
     const result = await service.upsertTask({
       operationId: 'op-1',
-      task: { id: 'task-9', projectId: 'p-1', content: 'hi' } as Task,
+      task: { id: 'task-9', projectId: 'p-1', content: 'hi' } as unknown as Task,
       baseUpdatedAt: null,
     });
 
@@ -133,7 +133,7 @@ describe('SyncRpcClientService', () => {
     const service = buildService(rpc as never);
     const result = await service.upsertTask({
       operationId: 'op-1',
-      task: { id: 'task-9', projectId: 'p-1', content: 'hi' } as Task,
+      task: { id: 'task-9', projectId: 'p-1', content: 'hi' } as unknown as Task,
       baseUpdatedAt: '2026-04-28T20:00:00Z',
     });
 
@@ -154,7 +154,7 @@ describe('SyncRpcClientService', () => {
     const service = buildService(rpc as never);
     const result = await service.upsertTask({
       operationId: 'op-1',
-      task: { id: 'task-9', projectId: 'p-1', content: 'hi' } as Task,
+      task: { id: 'task-9', projectId: 'p-1', content: 'hi' } as unknown as Task,
       baseUpdatedAt: null,
     });
 
@@ -216,7 +216,7 @@ describe('SyncRpcClientService', () => {
     await expect(
       service.upsertTask({
         operationId: 'op-1',
-        task: { id: 't', projectId: 'p', content: 'x' } as Task,
+        task: { id: 't', projectId: 'p', content: 'x' } as unknown as Task,
         baseUpdatedAt: null,
       })
     ).rejects.toMatchObject({ message: 'network down' });
@@ -241,7 +241,7 @@ describe('SyncRpcClientService', () => {
     const service = buildService(rpc as never);
     const result = await service.upsertTask({
       operationId: 'op-1',
-      task: { id: 't', projectId: 'p', content: 'x' } as Task,
+      task: { id: 't', projectId: 'p', content: 'x' } as unknown as Task,
       baseUpdatedAt: null,
     });
     expect(result.status).toBe('unauthorized');

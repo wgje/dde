@@ -18,6 +18,7 @@ import { DynamicModalService, type ModalRef } from './dynamic-modal.service';
 import { ModalLoaderService } from '../app/core/services/modal-loader.service';
 import { ProjectStateService } from './project-state.service';
 import { ProjectOperationService } from './project-operation.service';
+import { SyncCoordinatorService } from './sync-coordinator.service';
 import { AppAuthCoordinatorService } from '../app/core/services/app-auth-coordinator.service';
 import { type ConflictResolutionPlan } from './conflict-resolution.types';
 /* eslint-enable no-restricted-imports */
@@ -33,6 +34,7 @@ export class WorkspaceModalCoordinatorService {
   private readonly modalLoader = inject(ModalLoaderService);
   private readonly projectState = inject(ProjectStateService);
   private readonly projectOps = inject(ProjectOperationService);
+  private readonly syncCoordinator = inject(SyncCoordinatorService);
   private readonly authCoord = inject(AppAuthCoordinatorService);
 
   // ── State ───────────────────────────────────────────────────────────
@@ -53,6 +55,8 @@ export class WorkspaceModalCoordinatorService {
   private _pendingConflict: ConflictData | null = null;
   // M-14: 防止并发冲突解决操作
   private _isResolvingConflict = false;
+  /** Dashboard modal ref */
+  private _dashboardModalRef: ModalRef | null = null;
   /** Conflict modal ref */
   private _conflictModalRef: ModalRef | null = null;
 
@@ -142,14 +146,23 @@ export class WorkspaceModalCoordinatorService {
   }
 
   async openDashboard(): Promise<void> {
-    if (this.isModalLoading('dashboard')) return;
+    if (this.isModalLoading('dashboard') || this._dashboardModalRef) return;
     this.setModalLoading('dashboard', true);
     try {
       const component = await this.modalLoader.loadDashboardModal();
-      this.dynamicModal.open(component, {
+      const modalRef = this.dynamicModal.open(component, {
         outputs: {
-          close: () => this.dynamicModal.close(),
+          close: () => {
+            this._dashboardModalRef = null;
+            this.dynamicModal.close();
+          },
           openConflictCenter: () => this.openConflictCenterFromDashboard()
+        }
+      });
+      this._dashboardModalRef = modalRef;
+      void modalRef.result.finally(() => {
+        if (this._dashboardModalRef === modalRef) {
+          this._dashboardModalRef = null;
         }
       });
     } catch {
@@ -399,8 +412,12 @@ export class WorkspaceModalCoordinatorService {
     this._isResolvingConflict = true;
     try {
       const data = this._pendingConflict;
+      let resolved = true;
       if (data) {
-        await this.projectOps.resolveConflict(data.projectId, strategy);
+        resolved = await this.projectOps.resolveConflict(data.projectId, strategy);
+      }
+      if (!resolved) {
+        return;
       }
       this._conflictModalRef?.close({ choice: strategy });
       this._pendingConflict = null;
@@ -427,12 +444,17 @@ export class WorkspaceModalCoordinatorService {
     this._isResolvingConflict = true;
     try {
       const data = this._pendingConflict;
+      let resolved = true;
       if (data) {
-        await this.projectOps.resolveConflictWithPlan(data.projectId, plan);
+        resolved = await this.projectOps.resolveConflictWithPlan(data.projectId, plan);
+      }
+      if (!resolved) {
+        return;
       }
       this._conflictModalRef?.close({ choice: 'merge' });
       this._pendingConflict = null;
       this._conflictModalRef = null;
+      this.toast.success('冲突已解决');
     } finally {
       this._isResolvingConflict = false;
     }
@@ -442,6 +464,7 @@ export class WorkspaceModalCoordinatorService {
     this._conflictModalRef?.close({ choice: 'cancel' });
     this._pendingConflict = null;
     this._conflictModalRef = null;
+    this.syncCoordinator.clearActiveConflict();
     this.toast.info('冲突待解决，下次同步时会再次提示');
   }
 }
