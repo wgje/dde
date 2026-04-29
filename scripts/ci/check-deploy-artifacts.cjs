@@ -25,6 +25,7 @@
  *     ANDROID_TWA_SHA256_FINGERPRINTS 匹配
  * 16. dist/browser/version.json 存在且 JSON 合法
  * 17. dist/browser/index.html 存在
+ * 18. dist/browser/artifact-manifest.json 存在且抽样比对一致（§16.4）
  *
  * 退出码：失败抛出 1。
  */
@@ -256,6 +257,44 @@ if (!existsFile(versionJsonPath)) {
 // 17. index.html 存在
 if (!existsFile(path.join(DIST, 'index.html'))) fail('dist/browser/index.html missing');
 else ok('index.html present');
+
+// 18. artifact-manifest.json 存在且合法（§16.4 / 阶段 1）
+const artifactManifestPath = path.join(DIST, 'artifact-manifest.json');
+if (!existsFile(artifactManifestPath)) {
+  fail('dist/browser/artifact-manifest.json missing — run `node scripts/generate-artifact-manifest.cjs`');
+} else {
+  try {
+    const am = JSON.parse(fs.readFileSync(artifactManifestPath, 'utf-8'));
+    const requiredKeys = ['version', 'generatedAt', 'gitSha', 'totalFiles', 'totalBytes', 'aggregateHash', 'entries'];
+    const missingKeys = requiredKeys.filter((k) => !(k in am));
+    if (missingKeys.length > 0) fail(`artifact-manifest.json missing top-level keys: ${missingKeys.join(', ')}`);
+    else if (!Array.isArray(am.entries) || am.entries.length === 0) fail('artifact-manifest.json entries is empty or not an array');
+    else if (typeof am.aggregateHash !== 'string' || am.aggregateHash.length !== 64) fail('artifact-manifest.json aggregateHash is not a SHA256 hex digest');
+    else {
+      // 抽样校验：随机选 1 条 entry，比对真实文件 size 与 sha256
+      const sample = am.entries[Math.floor(am.entries.length / 2)];
+      const samplePath = path.join(DIST, sample.path);
+      if (!existsFile(samplePath)) {
+        fail(`artifact-manifest.json references missing file: ${sample.path}`);
+      } else {
+        const realBuf = fs.readFileSync(samplePath);
+        const realSha = require('node:crypto').createHash('sha256').update(realBuf).digest('hex');
+        if (realBuf.length !== sample.size || realSha !== sample.sha256) {
+          fail(`artifact-manifest.json drift: ${sample.path} size/sha mismatch (file changed after manifest was generated?)`);
+        } else {
+          ok(`artifact-manifest.json valid (entries=${am.entries.length}, aggregate=${am.aggregateHash.slice(0, 12)}…)`);
+        }
+      }
+    }
+    // 不得包含敏感字段
+    const text = JSON.stringify(am);
+    if (/(SUPABASE_SERVICE_ROLE_KEY|SENTRY_AUTH_TOKEN|CLOUDFLARE_API_TOKEN)/.test(text)) {
+      fail('artifact-manifest.json contains secret-looking field names');
+    }
+  } catch (e) {
+    fail(`artifact-manifest.json parse failed: ${e.message}`);
+  }
+}
 
 // 汇报
 console.log('');
