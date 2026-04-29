@@ -104,6 +104,9 @@ export class WriteGuardService {
       if (raw === 'read-only' || raw === 'export-only') return raw;
       return null;
     } catch {
+      // sessionStorage 不可用（例如 third-party cookie 被禁、隐私模式），
+      // 视为无 runtime override —— 不抛错，调用方会回到 baselineMode。
+      // eslint-disable-next-line no-restricted-syntax
       return null;
     }
   }
