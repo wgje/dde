@@ -32,7 +32,7 @@ val applicationIdValue = propertyOrEnv(
 val webOrigin = propertyOrEnv(
   name = "nanoflow.webOrigin",
   envName = "NANOFLOW_WEB_ORIGIN",
-  defaultValue = "https://dde-eight.vercel.app",
+  defaultValue = "https://nanoflow.pages.dev",
 ).trimEnd('/')
 
 val supabaseUrl = propertyOrEnv(

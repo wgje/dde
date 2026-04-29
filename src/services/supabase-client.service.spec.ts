@@ -49,6 +49,12 @@ function setNavigatorOnLine(online: boolean): void {
   });
 }
 
+async function flushAuthAutoRefresh(service: SupabaseClientService): Promise<void> {
+  const chain = (service as unknown as { authAutoRefreshSyncChain?: Promise<void> }).authAutoRefreshSyncChain;
+  await (chain ?? Promise.resolve());
+  await Promise.resolve();
+}
+
 describe('SupabaseClientService', () => {
   let service: SupabaseClientService;
   let fetchSpy: ReturnType<typeof vi.spyOn>;
@@ -340,7 +346,7 @@ describe('SupabaseClientService', () => {
       mutable.supabaseAnonKey = 'anon-key';
 
       await service.clientAsync();
-      await Promise.resolve();
+      await flushAuthAutoRefresh(service);
 
       expect(authClientMock.auth.startAutoRefresh).toHaveBeenCalledTimes(1);
       expect(authClientMock.auth.stopAutoRefresh).not.toHaveBeenCalled();
@@ -365,14 +371,14 @@ describe('SupabaseClientService', () => {
       authClientMock.auth.startAutoRefresh.mockClear();
       setVisibilityState('hidden');
       document.dispatchEvent(new Event('visibilitychange'));
-      await Promise.resolve();
+      await flushAuthAutoRefresh(service);
 
       expect(authClientMock.auth.stopAutoRefresh).toHaveBeenCalledTimes(1);
 
       authClientMock.auth.stopAutoRefresh.mockClear();
       setVisibilityState('visible');
       document.dispatchEvent(new Event('visibilitychange'));
-      await Promise.resolve();
+      await flushAuthAutoRefresh(service);
 
       expect(authClientMock.auth.stopAutoRefresh).not.toHaveBeenCalled();
       expect(authClientMock.auth.startAutoRefresh).not.toHaveBeenCalled();
@@ -381,7 +387,7 @@ describe('SupabaseClientService', () => {
       expect(authClientMock.auth.startAutoRefresh).not.toHaveBeenCalled();
 
       await vi.advanceTimersByTimeAsync(2);
-      await Promise.resolve();
+      await flushAuthAutoRefresh(service);
 
       expect(authClientMock.auth.startAutoRefresh).toHaveBeenCalledTimes(1);
     });
@@ -398,21 +404,21 @@ describe('SupabaseClientService', () => {
       mutable.supabaseAnonKey = 'anon-key';
 
       await service.clientAsync();
-      await Promise.resolve();
+      await flushAuthAutoRefresh(service);
 
       expect(authClientMock.auth.startAutoRefresh).toHaveBeenCalledTimes(1);
 
       authClientMock.auth.startAutoRefresh.mockClear();
       setNavigatorOnLine(false);
       window.dispatchEvent(new Event('offline'));
-      await Promise.resolve();
+      await flushAuthAutoRefresh(service);
 
       expect(authClientMock.auth.stopAutoRefresh).toHaveBeenCalledTimes(1);
 
       authClientMock.auth.stopAutoRefresh.mockClear();
       setNavigatorOnLine(true);
       window.dispatchEvent(new Event('online'));
-      await Promise.resolve();
+      await flushAuthAutoRefresh(service);
 
       expect(authClientMock.auth.startAutoRefresh).not.toHaveBeenCalled();
 
@@ -420,7 +426,7 @@ describe('SupabaseClientService', () => {
       expect(authClientMock.auth.startAutoRefresh).not.toHaveBeenCalled();
 
       await vi.advanceTimersByTimeAsync(2);
-      await Promise.resolve();
+      await flushAuthAutoRefresh(service);
 
       expect(authClientMock.auth.startAutoRefresh).toHaveBeenCalledTimes(1);
     });

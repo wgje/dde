@@ -1609,7 +1609,7 @@ describe('UserSessionService', () => {
 
       expect(
         (mockSyncCoordinator['core'] as Record<string, unknown>)['setLastSyncTime']
-      ).toHaveBeenCalledWith('proj-1', '2026-02-17T10:00:00.000Z');
+      ).not.toHaveBeenCalled();
       expect(mockSyncCoordinator['refreshProjectManifestIfNeeded']).toHaveBeenCalledWith(
         'session-background-sync',
         { prefetchedRemoteWatermark: '2026-02-17T10:02:00.000Z', deferCommit: true }

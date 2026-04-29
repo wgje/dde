@@ -2168,7 +2168,7 @@ describe('ProjectDataService', () => {
 
     const service = injector.get(ProjectDataService);
     const result = await (service as unknown as {
-      pullTasksThrottled: (projectId: string, client: typeof client) => Promise<unknown[]>;
+      pullTasksThrottled: (projectId: string, client: unknown) => Promise<unknown[]>;
     }).pullTasksThrottled('project-legacy-schema', client);
 
     expect(result).toHaveLength(1);

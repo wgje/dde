@@ -76,6 +76,7 @@ const mockSyncService = {
     }));
   }),
   saveOfflineSnapshot: vi.fn(),
+  saveOfflineSnapshotAndWait: vi.fn().mockResolvedValue(undefined),
   loadOfflineSnapshot: vi.fn().mockReturnValue(null),
   clearOfflineCache: vi.fn(),
   loadProjectListMetadataFromCloud: vi.fn().mockResolvedValue([]),
@@ -98,6 +99,13 @@ const mockSyncService = {
   flushRetryQueueSync: vi.fn(),
   getLastSyncTime: vi.fn().mockReturnValue(null),
   setLastSyncTime: vi.fn(),
+  commitProjectSyncTimestamp: vi.fn().mockResolvedValue(undefined),
+  commitProjectSyncCursor: vi.fn().mockResolvedValue(undefined),
+  buildProjectSyncCursorFromProject: vi.fn().mockImplementation((project: Project) => ({
+    updatedAt: project.updatedAt,
+    entityType: 'project',
+    id: project.id,
+  })),
   getProjectSyncWatermark: vi.fn().mockResolvedValue(null),
   getUserProjectsWatermark: vi.fn().mockResolvedValue(null),
   listProjectHeadsSince: vi.fn().mockResolvedValue([]),
@@ -388,6 +396,18 @@ describe('SyncCoordinatorService', () => {
     mockSyncService.saveProjectSmart.mockReset();
     mockSyncService.saveProjectSmart.mockResolvedValue({ success: true, newVersion: 2 });
     mockSyncService.saveOfflineSnapshot.mockReset();
+    mockSyncService.saveOfflineSnapshotAndWait.mockReset();
+    mockSyncService.saveOfflineSnapshotAndWait.mockResolvedValue(undefined);
+    mockSyncService.commitProjectSyncTimestamp.mockReset();
+    mockSyncService.commitProjectSyncTimestamp.mockResolvedValue(undefined);
+    mockSyncService.commitProjectSyncCursor.mockReset();
+    mockSyncService.commitProjectSyncCursor.mockResolvedValue(undefined);
+    mockSyncService.buildProjectSyncCursorFromProject.mockReset();
+    mockSyncService.buildProjectSyncCursorFromProject.mockImplementation((project: Project) => ({
+      updatedAt: project.updatedAt,
+      entityType: 'project',
+      id: project.id,
+    }));
     mockSyncService.loadOfflineSnapshot.mockReset();
     mockSyncService.loadOfflineSnapshot.mockReturnValue(null);
     mockActionQueueService.getPendingActionsForProject.mockReset();
@@ -1293,7 +1313,7 @@ describe('持久化状态管理', () => {
         skippedReason: 'watermark-not-newer',
         fastPathHit: true
       });
-      expect(mockSyncService.setLastSyncTime).toHaveBeenCalledWith('proj-1', '2026-02-14T07:59:59.000Z');
+      expect(mockSyncService.commitProjectSyncTimestamp).toHaveBeenCalledWith('proj-1', '2026-02-14T07:59:59.000Z');
       expect(mockSyncService.loadFullProjectOptimized).not.toHaveBeenCalled();
     });
 
@@ -1333,7 +1353,7 @@ describe('持久化状态管理', () => {
         skippedReason: 'watermark-not-newer',
         fastPathHit: true
       });
-      expect(mockSyncService.setLastSyncTime).toHaveBeenCalledWith('proj-agg', '2026-02-14T08:10:00.000Z');
+      expect(mockSyncService.commitProjectSyncTimestamp).toHaveBeenCalledWith('proj-agg', '2026-02-14T08:10:00.000Z');
       expect(mockSyncService.loadFullProjectOptimized).not.toHaveBeenCalled();
     });
 
@@ -1362,11 +1382,31 @@ describe('持久化状态管理', () => {
         conflictCount: 0,
       });
 
+      const calls: string[] = [];
+      mockProjectStateService.updateProjects.mockImplementation((updater: (projects: Project[]) => Project[]) => {
+        mockProjectStateService.projects.set(updater(mockProjectStateService.projects()));
+        calls.push('merge');
+      });
+      mockSyncService.saveOfflineSnapshotAndWait.mockImplementation(async () => {
+        calls.push('persist');
+      });
+      mockSyncService.commitProjectSyncCursor.mockImplementation(async () => {
+        calls.push('commit');
+      });
+
       const result = await service.refreshActiveProjectSilent('resume:test');
 
       expect(result.refreshed).toBe(true);
       expect(mockSyncService.loadFullProjectOptimized).toHaveBeenCalledWith('proj-1');
-      expect(mockSyncService.setLastSyncTime).toHaveBeenCalledWith('proj-1', expect.any(String));
+      expect(mockSyncService.saveOfflineSnapshotAndWait).toHaveBeenCalledWith([
+        expect.objectContaining({ id: 'proj-1', updatedAt: '2026-02-14T08:10:00.000Z' })
+      ]);
+      expect(mockSyncService.commitProjectSyncCursor).toHaveBeenCalledWith('proj-1', {
+        updatedAt: '2026-02-14T08:10:00.000Z',
+        entityType: 'project',
+        id: 'proj-1',
+      });
+      expect(calls).toEqual(['merge', 'persist', 'commit']);
       expect(mockProjectStateService.projects()[0]?.updatedAt).toBe('2026-02-14T08:10:00.000Z');
     });
 

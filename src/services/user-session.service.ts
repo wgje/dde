@@ -1761,7 +1761,6 @@ export class UserSessionService {
         if (probe && !probe.accessible) {
           activeProjectId = await this.reconcileInaccessibleActiveProject(activeProjectId, userId);
         } else if (probe?.watermark) {
-          this.syncCoordinator.core.setLastSyncTime(activeProjectId, probe.watermark);
           accessPreflightConfirmed = true;
         } else if (probe?.accessible) {
           accessPreflightConfirmed = true;

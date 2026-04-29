@@ -134,7 +134,7 @@ export class DeltaSyncCoordinatorService {
     this.logger.debug('开始 Delta Sync 增量同步', { projectId });
 
     try {
-      const { tasks, connections } = await this.syncService.checkForDrift(projectId);
+      const { tasks, connections, nextCursor } = await this.syncService.checkForDrift(projectId);
       
       if (tasks.length === 0 && connections.length === 0) {
         this.logger.debug('Delta Sync 无变更', { projectId });
@@ -174,6 +174,11 @@ export class DeltaSyncCoordinatorService {
         }
         return p;
       }));
+
+      if (nextCursor) {
+        await this.syncService.saveOfflineSnapshotAndWait(this.projectState.projects());
+        await this.syncService.commitProjectSyncCursor(projectId, nextCursor);
+      }
 
       this.logger.info('Delta Sync 完成', {
         projectId,

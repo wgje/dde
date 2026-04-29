@@ -1,7 +1,7 @@
 #!/bin/bash
 # 性能分析脚本 - 分析 NanoFlow 项目页面
 
-TARGET_URL="https://dde-eight.vercel.app/#/projects"
+TARGET_URL="${NANOFLOW_PERF_TARGET_URL:-https://nanoflow.pages.dev/#/projects}"
 TRACE_FILE="tmp/performance-trace-$(date +%Y%m%d-%H%M%S).json.gz"
 
 echo "🔍 开始性能分析"
@@ -23,7 +23,7 @@ cat << 'EOF'
 📊 性能分析步骤（在 Copilot 中执行）：
 
 1. 创建新页面并导航：
-   mcp_io_github_chr_new_page({ url: "https://dde-eight.vercel.app/#/projects" })
+   mcp_io_github_chr_new_page({ url: "$TARGET_URL" })
 
 2. 等待页面加载：
    mcp_io_github_chr_wait_for({ text: "项目" })

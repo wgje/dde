@@ -726,7 +726,7 @@ export class TaskSyncOperationsService {
         }
       }
       
-      const allTasks = (tasksResult.data as TaskRow[] || []).map(row => this.projectDataService.rowToTask(row));
+      const allTasks = ((tasksResult.data || []) as unknown as TaskRow[]).map(row => this.projectDataService.rowToTask(row));
       
       return allTasks.map(task => {
         const remoteDeletedAt = remoteTombstoneTimestamps.get(task.id);

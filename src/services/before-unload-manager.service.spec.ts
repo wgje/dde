@@ -110,9 +110,9 @@ describe('BeforeUnloadManagerService', () => {
   describe('优先级', () => {
     it('按优先级升序执行（数字小的先执行）', () => {
       const order: string[] = [];
-      service.register('low', () => order.push('low'), 30);
-      service.register('high', () => order.push('high'), 0);
-      service.register('mid', () => order.push('mid'), 15);
+      service.register('low', () => { order.push('low'); }, 30);
+      service.register('high', () => { order.push('high'); }, 0);
+      service.register('mid', () => { order.push('mid'); }, 15);
 
       service.triggerSave();
       expect(order).toEqual(['high', 'mid', 'low']);
@@ -120,9 +120,9 @@ describe('BeforeUnloadManagerService', () => {
 
     it('默认优先级为 10', () => {
       const order: string[] = [];
-      service.register('default', () => order.push('default'));
-      service.register('first', () => order.push('first'), 0);
-      service.register('last', () => order.push('last'), 20);
+      service.register('default', () => { order.push('default'); });
+      service.register('first', () => { order.push('first'); }, 0);
+      service.register('last', () => { order.push('last'); }, 20);
 
       service.triggerSave();
       expect(order).toEqual(['first', 'default', 'last']);
@@ -155,7 +155,7 @@ describe('BeforeUnloadManagerService', () => {
     });
 
     it('仅严格 true 才触发确认，非布尔真值（对象/字符串）不触发', () => {
-      service.register('a', (() => 'yes') as () => boolean | void);
+      service.register('a', (() => 'yes') as unknown as () => boolean | void);
       service.register('b', (() => 1) as unknown as () => boolean | void);
       expect(service.triggerSave()).toBe(false);
     });

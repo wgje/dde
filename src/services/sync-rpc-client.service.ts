@@ -212,7 +212,7 @@ export class SyncRpcClientService {
     // 仅传递服务端关心的字段，避免泄漏额外内部状态。
     return {
       id: task.id,
-      project_id: task.projectId,
+      project_id: (task as unknown as { projectId?: string }).projectId,
       content: task.content ?? '',
       stage: (task as unknown as { stage?: number }).stage ?? null,
       x: (task as unknown as { x?: number }).x ?? null,

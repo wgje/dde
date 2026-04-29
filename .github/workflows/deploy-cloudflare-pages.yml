@@ -1,10 +1,5 @@
 name: Deploy to Cloudflare Pages
 
-# §5.3 Cloudflare Pages 部署主 workflow
-# - Production：push 到 main → 部署 production 分支（nanoflow.pages.dev）
-# - Preview：pull_request opened/synchronize → 部署 PR preview（pr-<num>.nanoflow.pages.dev）
-# - 同时落地 §5.3 / §16.8 / §16.9 / §16.13 / §16.17 / §16.27 校验
-
 on:
   push:
     branches: [main]
@@ -14,43 +9,40 @@ on:
   workflow_dispatch:
     inputs:
       target:
-        description: 'Deploy target (production | preview)'
+        description: 'Deploy target'
         required: true
         default: 'preview'
         type: choice
         options: [production, preview]
+      deploy:
+        description: 'Actually upload to Cloudflare Pages'
+        required: true
+        default: false
+        type: boolean
 
-# 同一 PR / branch 进入新 commit 时取消旧的 in-progress run
 concurrency:
   group: cf-pages-${{ github.event_name == 'pull_request' && github.head_ref || github.ref }}
   cancel-in-progress: true
 
 permissions:
   contents: read
-  deployments: write
-  pull-requests: write
-  id-token: write
 
 env:
   NODE_VERSION: '22'
-  # Sentry sourcemap 注入：本轮明确禁用（用户决策）
+  WRANGLER_VERSION: '3.114.0'
   ENABLE_SENTRY_SOURCEMAPS: 'false'
-  # Canonical writable origin（用户决策）
-  CANONICAL_PRODUCTION_ORIGIN: 'https://nanoflow.pages.dev'
+  CANONICAL_PRODUCTION_ORIGIN: ${{ vars.CANONICAL_PRODUCTION_ORIGIN || 'https://nanoflow.pages.dev' }}
+  ALLOW_PROD_SUPABASE_FOR_PREVIEW_SMOKE: ${{ vars.ALLOW_PROD_SUPABASE_FOR_PREVIEW_SMOKE || 'false' }}
+  READ_ONLY_PREVIEW: ${{ vars.READ_ONLY_PREVIEW || 'true' }}
 
 jobs:
-  build-and-deploy:
-    name: Build, Validate, Deploy
+  test:
+    name: Test Without Deploy Secrets
     runs-on: ubuntu-latest
-    timeout-minutes: 25
-    env:
-      DEPLOYMENT_TARGET: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') && 'production' || (github.event.inputs.target == 'production' && 'production' || 'preview') }}
-
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0  # generate-version-json 需要 git SHA
 
       - name: Setup Node ${{ env.NODE_VERSION }}
         uses: actions/setup-node@v4
@@ -58,61 +50,102 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
 
-      - name: Verify required Cloudflare secrets
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_PAGES_PROJECT: ${{ secrets.CLOUDFLARE_PAGES_PROJECT }}
-        run: |
-          set -e
-          missing=0
-          for var in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_PAGES_PROJECT; do
-            if [ -z "${!var}" ]; then
-              echo "::error::Missing required secret: $var"
-              missing=1
-            fi
-          done
-          if [ "$missing" = "1" ]; then exit 1; fi
+      - name: Install dependencies
+        run: npm ci --prefer-offline --no-audit
 
-      - name: Resolve Supabase project alias (per-environment)
-        id: supabase
-        env:
-          # production 走主 Supabase（生产数据）
-          PROD_SUPABASE_URL: ${{ secrets.NG_APP_SUPABASE_URL_PROD }}
-          PROD_SUPABASE_ANON_KEY: ${{ secrets.NG_APP_SUPABASE_ANON_KEY_PROD }}
-          # preview 走独立 Supabase 项目（用户决策：避免 Auth 跨域 + RLS 跨环境污染）
-          PREVIEW_SUPABASE_URL: ${{ secrets.NG_APP_SUPABASE_URL_PREVIEW }}
-          PREVIEW_SUPABASE_ANON_KEY: ${{ secrets.NG_APP_SUPABASE_ANON_KEY_PREVIEW }}
-        run: |
-          set -e
-          if [ "$DEPLOYMENT_TARGET" = "production" ]; then
-            if [ -z "$PROD_SUPABASE_URL" ] || [ -z "$PROD_SUPABASE_ANON_KEY" ]; then
-              echo "::error::Production deploy requires NG_APP_SUPABASE_URL_PROD and NG_APP_SUPABASE_ANON_KEY_PROD secrets"
-              exit 1
-            fi
-            echo "alias=production" >> "$GITHUB_OUTPUT"
-            echo "supabase_url=$PROD_SUPABASE_URL" >> "$GITHUB_OUTPUT"
-            echo "::add-mask::$PROD_SUPABASE_ANON_KEY"
-            echo "supabase_anon_key=$PROD_SUPABASE_ANON_KEY" >> "$GITHUB_OUTPUT"
-          else
-            # Preview 必须使用独立项目（fail-fast，杜绝退化到 production 凭据）
-            if [ -z "$PREVIEW_SUPABASE_URL" ] || [ -z "$PREVIEW_SUPABASE_ANON_KEY" ]; then
-              echo "::error::Preview deploy requires NG_APP_SUPABASE_URL_PREVIEW and NG_APP_SUPABASE_ANON_KEY_PREVIEW secrets (separate Supabase project, per migration plan §16.6 / user decision)"
-              exit 1
-            fi
-            echo "alias=preview" >> "$GITHUB_OUTPUT"
-            echo "supabase_url=$PREVIEW_SUPABASE_URL" >> "$GITHUB_OUTPUT"
-            echo "::add-mask::$PREVIEW_SUPABASE_ANON_KEY"
-            echo "supabase_anon_key=$PREVIEW_SUPABASE_ANON_KEY" >> "$GITHUB_OUTPUT"
-          fi
+      - name: Run contracts and local matrix
+        run: npm run test:run
+
+  build-deploy:
+    name: Build, Validate, Deploy
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      deployments: write
+      pull-requests: write
+    if: >-
+      ${{
+        (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+        github.event_name == 'workflow_dispatch' ||
+        (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+      }}
+    env:
+      DEPLOYMENT_TARGET: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') && 'production' || (github.event.inputs.target == 'production' && 'production' || 'preview') }}
+      SHOULD_DEPLOY: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'pull_request' || github.event.inputs.deploy == 'true' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
 
       - name: Install dependencies
         run: npm ci --prefer-offline --no-audit
 
+      - name: Select Supabase build env
+        id: supabase
+        env:
+          PROD_NG_APP_SUPABASE_URL: ${{ secrets.NG_APP_SUPABASE_URL || secrets.NG_APP_SUPABASE_URL_PROD }}
+          PROD_NG_APP_SUPABASE_ANON_KEY: ${{ secrets.NG_APP_SUPABASE_ANON_KEY || secrets.NG_APP_SUPABASE_ANON_KEY_PROD }}
+          PREVIEW_NG_APP_SUPABASE_URL: ${{ secrets.PREVIEW_NG_APP_SUPABASE_URL || secrets.NG_APP_SUPABASE_URL_PREVIEW }}
+          PREVIEW_NG_APP_SUPABASE_ANON_KEY: ${{ secrets.PREVIEW_NG_APP_SUPABASE_ANON_KEY || secrets.NG_APP_SUPABASE_ANON_KEY_PREVIEW }}
+        run: |
+          set -euo pipefail
+          if [ "$DEPLOYMENT_TARGET" = "production" ]; then
+            if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ "${{ github.ref }}" != "refs/heads/main" ]; then
+              echo "::error::Production workflow_dispatch deploy/build must run from main"
+              exit 1
+            fi
+            if [ -z "${PROD_NG_APP_SUPABASE_URL:-}" ] || [ -z "${PROD_NG_APP_SUPABASE_ANON_KEY:-}" ]; then
+              echo "::error::Production build requires NG_APP_SUPABASE_URL and NG_APP_SUPABASE_ANON_KEY secrets"
+              exit 1
+            fi
+            echo "alias=production" >> "$GITHUB_OUTPUT"
+            echo "supabase_url=$PROD_NG_APP_SUPABASE_URL" >> "$GITHUB_OUTPUT"
+            echo "::add-mask::$PROD_NG_APP_SUPABASE_ANON_KEY"
+            echo "supabase_anon_key=$PROD_NG_APP_SUPABASE_ANON_KEY" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ -n "${PREVIEW_NG_APP_SUPABASE_URL:-}" ] && [ -n "${PREVIEW_NG_APP_SUPABASE_ANON_KEY:-}" ]; then
+            echo "alias=preview" >> "$GITHUB_OUTPUT"
+            echo "supabase_url=$PREVIEW_NG_APP_SUPABASE_URL" >> "$GITHUB_OUTPUT"
+            echo "::add-mask::$PREVIEW_NG_APP_SUPABASE_ANON_KEY"
+            echo "supabase_anon_key=$PREVIEW_NG_APP_SUPABASE_ANON_KEY" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$ALLOW_PROD_SUPABASE_FOR_PREVIEW_SMOKE" = "true" ]; then
+            if [ "$READ_ONLY_PREVIEW" != "true" ]; then
+              echo "::error::Production Supabase preview opt-in requires READ_ONLY_PREVIEW=true"
+              exit 1
+            fi
+            if [ -z "${PROD_NG_APP_SUPABASE_URL:-}" ] || [ -z "${PROD_NG_APP_SUPABASE_ANON_KEY:-}" ]; then
+              echo "::error::Preview production opt-in requires production Supabase secrets"
+              exit 1
+            fi
+            echo "alias=production-readonly-preview" >> "$GITHUB_OUTPUT"
+            echo "supabase_url=$PROD_NG_APP_SUPABASE_URL" >> "$GITHUB_OUTPUT"
+            echo "::add-mask::$PROD_NG_APP_SUPABASE_ANON_KEY"
+            echo "supabase_anon_key=$PROD_NG_APP_SUPABASE_ANON_KEY" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "::error::Missing PREVIEW_NG_APP_SUPABASE_URL / PREVIEW_NG_APP_SUPABASE_ANON_KEY. Refusing production fallback for PR preview."
+          exit 1
+
       - name: Validate env flags drift
         run: npm run quality:guard:env-flags
 
-      - name: Build (production / preview)
+      - name: Build
         env:
           NG_APP_SUPABASE_URL: ${{ steps.supabase.outputs.supabase_url }}
           NG_APP_SUPABASE_ANON_KEY: ${{ steps.supabase.outputs.supabase_anon_key }}
@@ -120,10 +153,8 @@ jobs:
           NG_APP_GOJS_LICENSE_KEY: ${{ secrets.NG_APP_GOJS_LICENSE_KEY }}
           NG_APP_SENTRY_ENVIRONMENT: ${{ env.DEPLOYMENT_TARGET }}
           NG_APP_CANONICAL_ORIGIN: ${{ env.DEPLOYMENT_TARGET == 'production' && env.CANONICAL_PRODUCTION_ORIGIN || '' }}
-          # Production：硬重定向到 canonical（防 ghost write / 多 origin 写入）
-          # Preview：read-only，避免 PR preview 写入污染数据
           NG_APP_ORIGIN_GATE_MODE: ${{ env.DEPLOYMENT_TARGET == 'production' && 'redirect' || 'read-only' }}
-          NG_APP_READ_ONLY_PREVIEW: ${{ env.DEPLOYMENT_TARGET == 'preview' && 'true' || 'false' }}
+          NG_APP_READ_ONLY_PREVIEW: ${{ env.DEPLOYMENT_TARGET == 'preview' && env.READ_ONLY_PREVIEW || 'false' }}
           NG_APP_DEPLOYMENT_TARGET: ${{ env.DEPLOYMENT_TARGET }}
           NG_APP_SUPABASE_PROJECT_ALIAS: ${{ steps.supabase.outputs.alias }}
           NG_APP_SENTRY_RELEASE: ${{ github.sha }}
@@ -132,59 +163,55 @@ jobs:
           SENTRY_RELEASE: ${{ github.sha }}
         run: npm run build:strict
 
-      - name: Sanity — Sentry sourcemap inject is disabled (user decision)
+      - name: Assert sourcemaps are not deployed
         run: |
+          set -euo pipefail
           if [ "$ENABLE_SENTRY_SOURCEMAPS" != "false" ]; then
-            echo "::error::ENABLE_SENTRY_SOURCEMAPS must be 'false' in this round (user decision)."
+            echo "::error::ENABLE_SENTRY_SOURCEMAPS must remain false for first Cloudflare migration"
             exit 1
           fi
-          # 二次保险：dist 里不能有 .map
           if find dist/browser -name "*.map" | grep -q .; then
-            echo "::error::Found .map files in dist/browser despite sourcemap inject being disabled"
+            echo "::error::Found .map files in dist/browser"
             find dist/browser -name "*.map"
             exit 1
           fi
 
-      - name: Copy public/_headers into dist (Cloudflare Pages convention)
+      - name: Install Cloudflare headers
         run: |
-          set -e
-          if [ ! -f public/_headers ]; then
-            echo "::error::public/_headers missing"
+          set -euo pipefail
+          cp public/_headers dist/browser/_headers
+          if [ "$DEPLOYMENT_TARGET" = "preview" ]; then
+            cat >> dist/browser/_headers <<'EOF'
+
+/*
+  X-Robots-Tag: noindex, nofollow
+EOF
+          fi
+          if [ -f public/_redirects ]; then
+            echo "::error::public/_redirects is intentionally absent; explicit wildcard fallback would hide missing static assets"
             exit 1
           fi
-          cp public/_headers dist/browser/_headers
-          # 可选：如果项目有 public/_redirects，也一并拷贝（当前未使用）
-          if [ -f public/_redirects ]; then
-            cp public/_redirects dist/browser/_redirects
-          fi
-          echo "✓ _headers copied to dist/browser"
 
-      - name: Validate deploy artifacts (§5.3 / §16.8 / §16.9 / §16.13 / §16.17)
+      - name: Validate deploy artifacts
+        env:
+          ANDROID_TWA_PACKAGE_NAME: ${{ vars.ANDROID_TWA_PACKAGE_NAME || 'app.nanoflow.twa' }}
+          ANDROID_TWA_SHA256_FINGERPRINTS: ${{ vars.ANDROID_TWA_SHA256_FINGERPRINTS || '' }}
         run: npm run quality:guard:deploy-artifacts
 
-      - name: Compute artifact summary
-        id: artifact
+      - name: Artifact summary
         run: |
-          set -e
-          file_count=$(find dist/browser -type f | wc -l)
-          total_size_kb=$(du -sk dist/browser | awk '{print $1}')
-          rule_count=$(grep -cE '^/[^[:space:]]' dist/browser/_headers || echo 0)
-          echo "file_count=$file_count" >> "$GITHUB_OUTPUT"
-          echo "total_size_kb=$total_size_kb" >> "$GITHUB_OUTPUT"
-          echo "header_rule_count=$rule_count" >> "$GITHUB_OUTPUT"
           echo "## Cloudflare Pages artifact summary" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "| Metric | Value |" >> "$GITHUB_STEP_SUMMARY"
           echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
           echo "| target | $DEPLOYMENT_TARGET |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| deploy | $SHOULD_DEPLOY |" >> "$GITHUB_STEP_SUMMARY"
           echo "| supabaseProjectAlias | ${{ steps.supabase.outputs.alias }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| files | $file_count |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| size | ${total_size_kb} KB |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| _headers rules | $rule_count |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| sentry sourcemap inject | disabled |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| origin gate | ${{ env.DEPLOYMENT_TARGET == 'production' && 'redirect' || 'read-only' }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| files | $(find dist/browser -type f | wc -l) |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| size | $(du -sk dist/browser | awk '{print $1}') KB |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| _headers rules | $(grep -cE '^/[^[:space:]]' dist/browser/_headers || echo 0) |" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload artifact for traceability
+      - name: Upload trace artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -198,56 +225,87 @@ jobs:
 
       - name: Deploy to Cloudflare Pages
         id: deploy
-        if: env.DEPLOYMENT_TARGET == 'production' || github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+        if: env.SHOULD_DEPLOY == 'true'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_PAGES_PROJECT_NAME: ${{ secrets.CLOUDFLARE_PAGES_PROJECT_NAME || secrets.CLOUDFLARE_PAGES_PROJECT }}
         run: |
-          set -e
-          PROJECT="${{ secrets.CLOUDFLARE_PAGES_PROJECT }}"
+          set -euo pipefail
+          for var in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_PAGES_PROJECT_NAME; do
+            if [ -z "${!var:-}" ]; then
+              echo "::error::Missing required deploy secret: $var"
+              exit 1
+            fi
+          done
+
           if [ "$DEPLOYMENT_TARGET" = "production" ]; then
+            npx --yes wrangler@3.114.0 pages deployment list \
+              --project-name="$CLOUDFLARE_PAGES_PROJECT_NAME" | head -40 || true
             BRANCH_FLAG="--branch=main"
           else
-            # Preview：使用 PR 号作为 branch，得到稳定子域 pr-<num>.<project>.pages.dev
             PR_NUM="${{ github.event.pull_request.number }}"
             if [ -z "$PR_NUM" ]; then PR_NUM="${GITHUB_RUN_ID}"; fi
             BRANCH_FLAG="--branch=pr-$PR_NUM"
           fi
-          echo "Deploying to Cloudflare Pages project=$PROJECT branch=$BRANCH_FLAG"
-          # 使用 wrangler 官方 action 包装也可，这里直接 npx 保持依赖最小
-          OUTPUT=$(npx --yes wrangler@^3 pages deploy dist/browser \
-            --project-name="$PROJECT" \
-            $BRANCH_FLAG \
-            --commit-hash="${{ github.sha }}" \
-            --commit-message="${{ github.event.head_commit.message || github.event.pull_request.title || 'workflow_dispatch' }}" 2>&1) || { echo "$OUTPUT"; exit 1; }
-          echo "$OUTPUT"
-          DEPLOY_URL=$(echo "$OUTPUT" | grep -oE 'https://[a-zA-Z0-9.-]+\.pages\.dev' | head -n1)
-          echo "deploy_url=$DEPLOY_URL" >> "$GITHUB_OUTPUT"
+
+          deploy_output=""
+          for attempt in 1 2 3; do
+            echo "Deploy attempt $attempt/3"
+            set +e
+            deploy_output="$(npx --yes wrangler@3.114.0 pages deploy dist/browser \
+              --project-name="$CLOUDFLARE_PAGES_PROJECT_NAME" \
+              $BRANCH_FLAG \
+              --commit-hash="${{ github.sha }}" \
+              --commit-message="${{ github.event.head_commit.message || github.event.pull_request.title || 'workflow_dispatch' }}" 2>&1)"
+            status=$?
+            set -e
+            echo "$deploy_output"
+            if [ "$status" = "0" ]; then break; fi
+            if [ "$attempt" = "3" ]; then exit "$status"; fi
+            sleep $((attempt * 10))
+          done
+
+          deploy_url="$(echo "$deploy_output" | grep -oE 'https://[a-zA-Z0-9.-]+\.pages\.dev' | head -n1)"
+          if [ -z "$deploy_url" ] && [ "$DEPLOYMENT_TARGET" = "production" ]; then
+            deploy_url="https://${CLOUDFLARE_PAGES_PROJECT_NAME}.pages.dev"
+          fi
+          echo "deploy_url=$deploy_url" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for edge health
+        if: steps.deploy.outputs.deploy_url != ''
+        run: |
+          set -euo pipefail
+          origin="${{ steps.deploy.outputs.deploy_url }}"
+          for attempt in $(seq 1 30); do
+            root_code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "$origin/" || echo 000)"
+            version_json="$(curl -sS --max-time 10 "$origin/version.json" || true)"
+            if [ "$root_code" = "200" ] && echo "$version_json" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const j=JSON.parse(s); if(!j.gitSha) process.exit(1)})" 2>/dev/null; then
+              echo "Edge health OK at $origin"
+              exit 0
+            fi
+            echo "Waiting for edge health ($attempt/30): /=$root_code version=${version_json:0:80}"
+            sleep 5
+          done
+          echo "::error::Cloudflare Pages deployment did not become healthy"
+          exit 1
 
       - name: Post-deploy header smoke
         if: steps.deploy.outputs.deploy_url != ''
-        run: |
-          # 给 Cloudflare 全球边缘 5s 同步时间
-          sleep 5
-          bash scripts/smoke/cloudflare-header-smoke.sh "${{ steps.deploy.outputs.deploy_url }}"
+        run: bash scripts/smoke/cloudflare-header-smoke.sh "${{ steps.deploy.outputs.deploy_url }}"
 
       - name: Comment preview URL on PR
         if: github.event_name == 'pull_request' && steps.deploy.outputs.deploy_url != ''
         uses: actions/github-script@v7
         with:
           script: |
-            const url = '${{ steps.deploy.outputs.deploy_url }}';
-            const sha = '${{ github.sha }}'.slice(0, 8);
-            const alias = '${{ steps.supabase.outputs.alias }}';
             const body = [
-              '### 🌥 Cloudflare Pages preview',
+              '### Cloudflare Pages preview',
               '',
-              `- URL: ${url}`,
-              `- commit: \`${sha}\``,
-              `- supabaseProjectAlias: \`${alias}\``,
-              `- originGateMode: \`read-only\` (preview 禁止写入)`,
-              '',
-              '> 注意：此 preview 使用独立 Supabase project，与 production 数据隔离。',
+              `- URL: ${{ steps.deploy.outputs.deploy_url }}`,
+              `- commit: \`${'${{ github.sha }}'.slice(0, 8)}\``,
+              `- supabaseProjectAlias: \`${{ steps.supabase.outputs.alias }}\``,
+              '- originGateMode: `read-only`',
             ].join('\n');
             await github.rest.issues.createComment({
               issue_number: context.issue.number,

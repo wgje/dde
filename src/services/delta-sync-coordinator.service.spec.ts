@@ -24,6 +24,8 @@ const mockLoggerService = {
 
 const mockSimpleSyncService = {
   checkForDrift: vi.fn(),
+  saveOfflineSnapshotAndWait: vi.fn(),
+  commitProjectSyncCursor: vi.fn(),
 };
 
 const mockConflictDetectionService = {
@@ -34,6 +36,7 @@ const mockConflictDetectionService = {
 };
 
 const mockProjectStateService = {
+  projects: vi.fn(),
   getProject: vi.fn(),
   updateProjects: vi.fn(),
 };
@@ -89,6 +92,9 @@ describe('DeltaSyncCoordinatorService', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockSimpleSyncService.saveOfflineSnapshotAndWait.mockResolvedValue(undefined);
+    mockSimpleSyncService.commitProjectSyncCursor.mockResolvedValue(undefined);
+    mockProjectStateService.projects.mockReturnValue([]);
 
     const injector = Injector.create({
       providers: [
@@ -148,6 +154,57 @@ describe('DeltaSyncCoordinatorService', () => {
   });
 
   describe('performDeltaSync connection merge', () => {
+    it('should persist merged state before committing the returned cursor candidate', async () => {
+      const currentProject = createProject({
+        updatedAt: '2026-04-19T00:00:00.000Z',
+        tasks: [createTask({ id: 'task-local', updatedAt: '2026-04-19T00:00:00.000Z' })],
+      });
+      const remoteTask = createTask({
+        id: 'task-remote',
+        updatedAt: '2026-04-19T00:01:00.000Z',
+      });
+
+      mockProjectStateService.getProject.mockReturnValue(currentProject);
+      mockProjectStateService.projects.mockReturnValue([currentProject]);
+      mockSimpleSyncService.checkForDrift.mockResolvedValue({
+        tasks: [remoteTask],
+        connections: [],
+        nextCursor: {
+          updatedAt: '2026-04-19T00:01:00.000Z',
+          entityType: 'task',
+          id: 'task-remote',
+        },
+      });
+      const calls: string[] = [];
+      mockProjectStateService.updateProjects.mockImplementation((updater: (projects: Project[]) => Project[]) => {
+        const updated = updater([currentProject]);
+        mockProjectStateService.projects.mockReturnValue(updated);
+        calls.push('merge');
+      });
+      mockSimpleSyncService.saveOfflineSnapshotAndWait.mockImplementation(async () => {
+        calls.push('persist');
+      });
+      mockSimpleSyncService.commitProjectSyncCursor.mockImplementation(() => {
+        calls.push('commit');
+      });
+
+      const result = await service.performDeltaSync('project-1');
+
+      expect(result).toEqual({ taskChanges: 1, connectionChanges: 0 });
+      expect(mockSimpleSyncService.saveOfflineSnapshotAndWait).toHaveBeenCalledWith([
+        expect.objectContaining({
+          id: 'project-1',
+          tasks: expect.arrayContaining([expect.objectContaining({ id: 'task-remote' })]),
+        }),
+      ]);
+      expect(mockSimpleSyncService.commitProjectSyncCursor).toHaveBeenCalledWith('project-1', {
+        updatedAt: '2026-04-19T00:01:00.000Z',
+        entityType: 'task',
+        id: 'task-remote',
+      });
+      expect(calls).toEqual(['merge', 'persist', 'commit']);
+    });
+
     it('should reuse connection LWW merge instead of raw replacement', async () => {
       const currentProject = createProject({
         updatedAt: '2026-04-19T00:00:00.000Z',

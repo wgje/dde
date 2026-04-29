@@ -1,7 +1,4 @@
-name: Cloudflare Pages — Dry Run
-
-# §16.27 Dry-run workflow：不读 deploy secret，仅跑 build + 全部 artifact / contract 校验。
-# 用途：验证 PR 是否能产出可部署 artifact（不实际上线），适合 fork PR、文档 PR。
+name: Cloudflare Pages Dry Run
 
 on:
   pull_request:
@@ -18,19 +15,22 @@ permissions:
 
 env:
   NODE_VERSION: '22'
+  WRANGLER_VERSION: '3.114.0'
   ENABLE_SENTRY_SOURCEMAPS: 'false'
 
 jobs:
   dry-run:
-    name: Build + Validate (no deploy)
+    name: Build, Determinism, Local Pages Smoke
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-node@v4
+      - name: Setup Node ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
@@ -38,13 +38,16 @@ jobs:
       - name: Install dependencies
         run: npm ci --prefer-offline --no-audit
 
-      - name: Validate env flags drift (§16.7 / §16.27)
+      - name: Test contracts
+        run: npm run test:contracts
+
+      - name: Validate env flags drift
         run: npm run quality:guard:env-flags
 
-      - name: Build (preview-shaped, no real Supabase)
+      - name: Deterministic build guard
         env:
           NG_APP_SUPABASE_URL: 'https://dryrun.invalid'
-          NG_APP_SUPABASE_ANON_KEY: 'dryrun-placeholder'
+          NG_APP_SUPABASE_ANON_KEY: 'dryrun-placeholder-with-enough-length-for-build-validation-000000000000000000000000000000000000000000'
           NG_APP_SENTRY_ENVIRONMENT: 'preview'
           NG_APP_CANONICAL_ORIGIN: ''
           NG_APP_ORIGIN_GATE_MODE: 'off'
@@ -54,26 +57,53 @@ jobs:
           NG_APP_SENTRY_RELEASE: ${{ github.sha }}
           DEPLOYMENT_TARGET: 'preview-dryrun'
           SUPABASE_PROJECT_ALIAS: 'preview-dryrun'
-        run: npm run build:stats
+          SENTRY_RELEASE: ${{ github.sha }}
+        run: npm run quality:guard:build-deterministic
 
-      - name: Copy public/_headers into dist
-        run: cp public/_headers dist/browser/_headers
-
-      - name: Validate deploy artifacts
-        run: npm run quality:guard:deploy-artifacts
-
-      - name: Sourcemap inject must be disabled
+      - name: Install Cloudflare headers
         run: |
-          if find dist/browser -name "*.map" | grep -q .; then
-            echo "::error::Found .map files in dist/browser despite sourcemap inject being disabled"
+          set -euo pipefail
+          cp public/_headers dist/browser/_headers
+          if [ -f public/_redirects ]; then
+            echo "::error::public/_redirects must remain absent; default Pages SPA fallback is used instead"
             exit 1
           fi
 
+      - name: Validate deploy artifacts
+        env:
+          ANDROID_TWA_PACKAGE_NAME: ${{ vars.ANDROID_TWA_PACKAGE_NAME || 'app.nanoflow.twa' }}
+          ANDROID_TWA_SHA256_FINGERPRINTS: ${{ vars.ANDROID_TWA_SHA256_FINGERPRINTS || '' }}
+        run: npm run quality:guard:deploy-artifacts
+
+      - name: Ensure no sourcemaps are deployable
+        run: |
+          set -euo pipefail
+          if find dist/browser -name "*.map" | grep -q .; then
+            echo "::error::Found .map files in dist/browser"
+            find dist/browser -name "*.map"
+            exit 1
+          fi
+
+      - name: Run local Cloudflare Pages smoke
+        run: |
+          set -euo pipefail
+          npx --yes wrangler@3.114.0 pages dev dist/browser --port 8788 --ip 127.0.0.1 > /tmp/nanoflow-wrangler-pages.log 2>&1 &
+          pid=$!
+          trap 'kill $pid 2>/dev/null || true; cat /tmp/nanoflow-wrangler-pages.log || true' EXIT
+          for attempt in $(seq 1 30); do
+            if curl -sS -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:8788/ | grep -q '^200$'; then
+              break
+            fi
+            sleep 2
+          done
+          bash scripts/smoke/cloudflare-header-smoke.sh http://127.0.0.1:8788
+
       - name: Summary
         run: |
-          echo "## Dry-run summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "## Cloudflare dry-run summary" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "- files: $(find dist/browser -type f | wc -l)" >> "$GITHUB_STEP_SUMMARY"
           echo "- size: $(du -sk dist/browser | awk '{print $1}') KB" >> "$GITHUB_STEP_SUMMARY"
           echo "- header rules: $(grep -cE '^/[^[:space:]]' dist/browser/_headers || echo 0)" >> "$GITHUB_STEP_SUMMARY"
-          echo "- ENABLE_SENTRY_SOURCEMAPS: false (asserted)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- deterministic guard: passed" >> "$GITHUB_STEP_SUMMARY"
+          echo "- local Pages smoke: passed" >> "$GITHUB_STEP_SUMMARY"

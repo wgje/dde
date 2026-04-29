@@ -1093,7 +1093,7 @@ export class ProjectDataService {
     }
 
     // 转换任务并标记 tombstone
-    const allTasks = (tasksResult.data as TaskRow[] || []).map(row => this.rowToTask(row));
+    const allTasks = ((tasksResult.data || []) as unknown as TaskRow[]).map(row => this.rowToTask(row));
     
     return allTasks.map(task => {
       const remoteDeletedAt = remoteTombstoneTimestamps.get(task.id);
@@ -1834,8 +1834,8 @@ export class ProjectDataService {
 
     try {
       return await this.withAuthRetry('pullParkedTasksDelta', async () => {
+        const selectFields = getCompatibleTaskSelectFields(`project_id,${FIELD_SELECT_CONFIG.TASK_LIST_FIELDS}`);
         const loadParkedRows = async () => {
-          const selectFields = getCompatibleTaskSelectFields(`project_id,${FIELD_SELECT_CONFIG.TASK_LIST_FIELDS}`);
           let parkedQuery = client
             .from('tasks')
             .select(selectFields)

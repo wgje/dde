@@ -50,6 +50,11 @@ interface IDBBlackBoxEntry extends BlackBoxEntry {
   _localVersion?: number;
 }
 
+interface BlackBoxSyncCursor {
+  updatedAt: string;
+  id: string;
+}
+
 /**
  * RetryQueue 回调接口
  * 由 SimpleSyncService 通过 setRetryQueueHandler 注入
@@ -83,6 +88,7 @@ export class BlackBoxSyncService {
 
   private db: IDBDatabase | null = null;
   private lastSyncTime: string | null = null;
+  private lastSyncCursor: BlackBoxSyncCursor | null = null;
 
   /** RetryQueue 集成回调，由 SimpleSyncService 注入 */
   private retryQueueHandler: RetryQueueHandler | null = null;
@@ -296,6 +302,55 @@ export class BlackBoxSyncService {
     return `${this.LAST_SYNC_TIME_KEY_PREFIX}:${userId}`;
   }
 
+  private parseStoredSyncCursor(value: unknown): BlackBoxSyncCursor | null {
+    if (typeof value === 'string' && value) {
+      return { updatedAt: value, id: '' };
+    }
+    if (value && typeof value === 'object') {
+      const record = value as { updatedAt?: unknown; id?: unknown };
+      if (typeof record.updatedAt === 'string' && typeof record.id === 'string') {
+        return { updatedAt: record.updatedAt, id: record.id };
+      }
+    }
+    return null;
+  }
+
+  private compareBlackBoxCursor(left: BlackBoxSyncCursor, right: BlackBoxSyncCursor): number {
+    const leftTime = new Date(left.updatedAt).getTime();
+    const rightTime = new Date(right.updatedAt).getTime();
+    if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) {
+      return leftTime - rightTime;
+    }
+    return left.id.localeCompare(right.id);
+  }
+
+  private commitBlackBoxCursorFromRows(rows: Array<Record<string, unknown>>): void {
+    let nextCursor: BlackBoxSyncCursor | null = null;
+    for (const row of rows) {
+      if (typeof row['updated_at'] !== 'string' || typeof row['id'] !== 'string') {
+        continue;
+      }
+      const candidate = { updatedAt: row['updated_at'], id: row['id'] };
+      if (!nextCursor || this.compareBlackBoxCursor(candidate, nextCursor) > 0) {
+        nextCursor = candidate;
+      }
+    }
+
+    if (!nextCursor) return;
+    if (this.lastSyncCursor && this.compareBlackBoxCursor(nextCursor, this.lastSyncCursor) < 0) {
+      this.sentryLazyLoader.addBreadcrumb({
+        category: 'sync',
+        message: 'blackbox.cursor_commit_ignored_stale',
+        level: 'info',
+        data: { existing: this.lastSyncCursor, candidate: nextCursor },
+      });
+      return;
+    }
+
+    this.lastSyncCursor = nextCursor;
+    this.lastSyncTime = nextCursor.updatedAt;
+  }
+
   // ==================== RetryQueue 集成 ====================
 
   /**
@@ -496,9 +551,11 @@ export class BlackBoxSyncService {
           }
 
           if (request.result) {
-            this.lastSyncTime = request.result.value;
+            this.lastSyncCursor = this.parseStoredSyncCursor(request.result.value);
+            this.lastSyncTime = this.lastSyncCursor?.updatedAt ?? null;
             this.logger.debug(`Loaded lastSyncTime: ${this.lastSyncTime}`);
           } else {
+            this.lastSyncCursor = null;
             this.lastSyncTime = null;
           }
           resolve();
@@ -528,7 +585,8 @@ export class BlackBoxSyncService {
       try {
         const tx = this.db!.transaction(this.SYNC_METADATA_STORE, 'readwrite');
         const store = tx.objectStore(this.SYNC_METADATA_STORE);
-          store.put({ key: this.getLastSyncTimeKey(currentSyncUserId), value: this.lastSyncTime });
+          const cursor = this.lastSyncCursor ?? (this.lastSyncTime ? { updatedAt: this.lastSyncTime, id: '' } : null);
+          store.put({ key: this.getLastSyncTimeKey(currentSyncUserId), value: cursor });
         tx.oncomplete = () => resolve();
         tx.onerror = () => resolve();
       } catch (e) {
@@ -542,6 +600,7 @@ export class BlackBoxSyncService {
   private async syncCursorScope(userId: string | null): Promise<void> {
     this.currentSyncUserId = userId;
     this.lastSyncTime = null;
+    this.lastSyncCursor = null;
     this.lastPullTime = 0;
     this.lastResumePullAt = 0;
     await this.loadLastSyncTime(userId);
@@ -1704,7 +1763,7 @@ export class BlackBoxSyncService {
       }
 
       // 首次拉取只信任已持久化的服务端游标；不要从本地 updatedAt 反推，避免快时钟把增量窗口推到未来。
-      let effectiveLastSync = this.lastSyncTime || '1970-01-01T00:00:00Z';
+      let effectiveLastSync = this.lastSyncCursor?.updatedAt ?? this.lastSyncTime ?? '1970-01-01T00:00:00Z';
       let repairingFutureCursor = false;
       const pendingEntriesNeedRemoteReconciliation = this.getPendingEntriesForRemoteReconciliation().length > 0;
 
@@ -1743,7 +1802,10 @@ export class BlackBoxSyncService {
             this.logger.info('黑匣子 watermark 快路在保存游标前中止：Realtime 订阅上下文已变化');
             return false;
           }
-          this.lastSyncTime = remoteWatermark;
+          if (!this.lastSyncCursor) {
+            this.lastSyncCursor = { updatedAt: remoteWatermark, id: '' };
+            this.lastSyncTime = remoteWatermark;
+          }
           await this.saveLastSyncTime();
           this.logger.debug('BlackBox watermark 快路命中，跳过明细拉取', {
             remoteWatermark,
@@ -1753,6 +1815,11 @@ export class BlackBoxSyncService {
         }
       }
 
+      const effectiveLastSyncMs = new Date(effectiveLastSync).getTime();
+      if (Number.isFinite(effectiveLastSyncMs) && effectiveLastSync !== '1970-01-01T00:00:00Z') {
+        effectiveLastSync = new Date(Math.max(0, effectiveLastSyncMs - SYNC_CONFIG.CURSOR_SAFETY_LOOKBACK_MS)).toISOString();
+      }
+
       this.logger.debug(`Pulling changes since: ${effectiveLastSync}`);
 
       // 增量拉取
@@ -1760,7 +1827,8 @@ export class BlackBoxSyncService {
         .from('black_box_entries')
         .select('*')
         .gt('updated_at', effectiveLastSync)
-        .order('updated_at', { ascending: true });
+        .order('updated_at', { ascending: true })
+        .order('id', { ascending: true });
 
       if (!this.isExpectedRealtimeContextCurrent(expectedUserId, expectedRealtimeGeneration)) {
         this.logger.info('黑匣子拉取在远端返回后中止：Realtime 订阅上下文已变化');
@@ -1781,7 +1849,8 @@ export class BlackBoxSyncService {
               .from('black_box_entries')
               .select('*')
               .gt('updated_at', effectiveLastSync)
-              .order('updated_at', { ascending: true });
+              .order('updated_at', { ascending: true })
+              .order('id', { ascending: true });
             data = retry.data;
             error = retry.error;
           }
@@ -1842,7 +1911,7 @@ export class BlackBoxSyncService {
           return false;
         }
 
-        this.lastSyncTime = data[data.length - 1].updated_at;
+        this.commitBlackBoxCursorFromRows(data as Array<Record<string, unknown>>);
         await this.saveLastSyncTime();
       }
 

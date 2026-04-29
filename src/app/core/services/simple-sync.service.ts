@@ -71,7 +71,7 @@ import {
   failure,
   success,
 } from '../../../utils/result';
-import { SYNC_CONFIG, SYNC_DURABILITY_CONFIG, FIELD_SELECT_CONFIG, CACHE_CONFIG } from '../../../config/sync.config';
+import { SYNC_CONFIG, FIELD_SELECT_CONFIG, CACHE_CONFIG } from '../../../config/sync.config';
 import { APP_LIFECYCLE_CONFIG } from '../../../config/app-lifecycle.config';
 import { FEATURE_FLAGS } from '../../../config/feature-flags.config';
 import type { SupabaseClient } from '@supabase/supabase-js';
@@ -89,6 +89,15 @@ import {
   getCompatibleTaskSelectFields,
   markTaskCompletedAtColumnUnavailable,
 } from '../../../utils/task-schema-compat';
+import {
+  SyncCursorPersistenceService,
+  compareProjectSyncCursor,
+  projectCursorFromLegacyTimestamp,
+  type ProjectSyncCursor,
+  type ProjectSyncCursorEntityType,
+} from '../state/persistence';
+
+export type { ProjectSyncCursor, ProjectSyncCursorEntityType } from '../state/persistence';
 
 /**
  * 冲突数据
@@ -98,6 +107,12 @@ interface ConflictData {
   remote: Project;
   projectId: string;
   pendingTaskDeleteIds?: string[];
+}
+
+export interface ProjectDeltaDrift {
+  tasks: Task[];
+  connections: Connection[];
+  nextCursor: ProjectSyncCursor | null;
 }
 
 type ProjectSaveResult = {
@@ -187,6 +202,7 @@ export class SimpleSyncService {
   private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly retryQueueService = inject(RetryQueueService);
   private readonly blackBoxSync = inject(BlackBoxSyncService);
+  private readonly syncCursorPersistence = inject(SyncCursorPersistenceService);
 
   private getActionQueue(): ActionQueueService | null {
     return this.injector.get(ActionQueueService, null);
@@ -242,6 +258,7 @@ export class SimpleSyncService {
   
   /** 最后一次同步时间 */
   private lastSyncTimeByProject: Map<string, string> = new Map();
+  private readonly syncCursorByProject: Map<string, ProjectSyncCursor> = new Map();
   /**
    * 项目云端持久化单飞 gate。
    * 恢复窗口里 AutoPersist / RetryQueue / ActionQueue 可能同时推同一项目，这里统一串行并折叠为最新快照。
@@ -1610,15 +1627,16 @@ export class SimpleSyncService {
 
   // ==================== Delta Sync ====================
   
-  async checkForDrift(projectId: string): Promise<{ tasks: Task[]; connections: Connection[] }> {
+  async checkForDrift(projectId: string): Promise<ProjectDeltaDrift> {
     const client = await this.getSupabaseClient();
     if (!client || !SYNC_CONFIG.DELTA_SYNC_ENABLED) {
-      return { tasks: [], connections: [] };
+      return { tasks: [], connections: [], nextCursor: null };
     }
     
-    const lastSyncTime = this.lastSyncTimeByProject.get(projectId);
+    const lastCursor = await this.ensureProjectSyncCursorLoaded(projectId);
+    const lastSyncTime = lastCursor?.updatedAt ?? this.lastSyncTimeByProject.get(projectId);
     if (!lastSyncTime) {
-      return { tasks: [], connections: [] };
+      return { tasks: [], connections: [], nextCursor: null };
     }
     
     try {
@@ -1631,10 +1649,17 @@ export class SimpleSyncService {
         .from('tasks')
         .select(getCompatibleTaskSelectFields(FIELD_SELECT_CONFIG.TASK_LIST_FIELDS))
         .eq('project_id', projectId)
-        .gt('updated_at', effectiveSince);
+        .gt('updated_at', effectiveSince)
+        .order('updated_at', { ascending: true })
+        .order('id', { ascending: true });
       const [initialTasksResult, connectionsResult] = await Promise.all([
         loadDeltaTasks(),
-        client.from('connections').select(FIELD_SELECT_CONFIG.CONNECTION_FIELDS).eq('project_id', projectId).gt('updated_at', effectiveSince)
+        client.from('connections')
+          .select(FIELD_SELECT_CONFIG.CONNECTION_FIELDS)
+          .eq('project_id', projectId)
+          .gt('updated_at', effectiveSince)
+          .order('updated_at', { ascending: true })
+          .order('id', { ascending: true })
       ]);
       let tasksResult = initialTasksResult;
 
@@ -1651,30 +1676,30 @@ export class SimpleSyncService {
         throw supabaseErrorToError(tasksResult.error || connectionsResult.error);
       }
       
-      const taskRows = (tasksResult.data || []) as TaskRow[];
-      const connectionRows = (connectionsResult.data || []) as ConnectionRow[];
+      const rawTaskRows = ((tasksResult.data || []) as unknown) as TaskRow[];
+      const rawConnectionRows = ((connectionsResult.data || []) as unknown) as ConnectionRow[];
+      const taskRows = rawTaskRows.filter(row => this.isProjectRowAfterCursor('task', row.id, row.updated_at, lastCursor));
+      const connectionRows = rawConnectionRows.filter(row => this.isProjectRowAfterCursor('connection', row.id, row.updated_at, lastCursor));
       const deltaTasks = this.dedupeTasksByLatest(
         taskRows.map(row => this.projectDataService.rowToTask(row))
       );
       const deltaConnections = this.dedupeConnectionsByLatest(
         connectionRows.map(row => this.projectDataService.rowToConnection(row))
       );
-      const maxUpdatedAt = this.computeMaxUpdatedAt(taskRows, connectionRows);
+      const nextCursor = this.computeProjectSyncCursor(taskRows, connectionRows);
+      const maxUpdatedAt = nextCursor?.updatedAt ?? null;
       
-      if (SYNC_DURABILITY_CONFIG.CURSOR_STRATEGY === 'max-server-updated-at' && maxUpdatedAt) {
-        this.lastSyncTimeByProject.set(projectId, maxUpdatedAt);
-      } else {
-        this.lastSyncTimeByProject.set(projectId, nowISO());
-      }
       this.sentryLazyLoader.setContext('sync_delta', {
         project_id: projectId,
         cursor_lag_ms: maxUpdatedAt ? Math.max(0, Date.now() - new Date(maxUpdatedAt).getTime()) : null,
-        lookback_ms: lookbackMs
+        lookback_ms: lookbackMs,
+        cursor_candidate: nextCursor
       });
       
       return {
         tasks: deltaTasks,
-        connections: deltaConnections
+        connections: deltaConnections,
+        nextCursor
       };
     } catch (e) {
       this.logger.error('Delta Sync 检查失败', e);
@@ -1716,27 +1741,115 @@ export class SimpleSyncService {
     return Array.from(byId.values());
   }
 
-  private computeMaxUpdatedAt(taskRows: TaskRow[], connectionRows: ConnectionRow[]): string | null {
-    let max = 0;
-    for (const row of taskRows) {
-      if (row.updated_at) {
-        max = Math.max(max, new Date(row.updated_at).getTime());
+  private computeProjectSyncCursor(taskRows: TaskRow[], connectionRows: ConnectionRow[]): ProjectSyncCursor | null {
+    let cursor: ProjectSyncCursor | null = null;
+    const consider = (entityType: ProjectSyncCursorEntityType, id: unknown, updatedAt: unknown): void => {
+      if (typeof id !== 'string' || typeof updatedAt !== 'string') return;
+      const candidate: ProjectSyncCursor = { updatedAt, entityType, id };
+      if (!cursor || compareProjectSyncCursor(candidate, cursor) > 0) {
+        cursor = candidate;
       }
+    };
+
+    for (const row of taskRows) {
+      consider('task', row.id, row.updated_at);
     }
     for (const row of connectionRows) {
-      if (row.updated_at) {
-        max = Math.max(max, new Date(row.updated_at).getTime());
-      }
+      consider('connection', row.id, row.updated_at);
     }
-    return max > 0 ? new Date(max).toISOString() : null;
+    return cursor;
+  }
+
+  private isProjectRowAfterCursor(
+    entityType: ProjectSyncCursorEntityType,
+    id: unknown,
+    updatedAt: unknown,
+    cursor: ProjectSyncCursor | null,
+  ): boolean {
+    if (!cursor) return true;
+    if (typeof id !== 'string' || typeof updatedAt !== 'string') return false;
+    return compareProjectSyncCursor({ updatedAt, entityType, id }, cursor) > 0;
+  }
+
+  buildProjectSyncCursorFromProject(project: Project): ProjectSyncCursor | null {
+    let cursor: ProjectSyncCursor | null = null;
+    const consider = (entityType: ProjectSyncCursorEntityType, id: unknown, updatedAt: unknown): void => {
+      if (typeof id !== 'string' || typeof updatedAt !== 'string') return;
+      const candidate: ProjectSyncCursor = { updatedAt, entityType, id };
+      if (!cursor || compareProjectSyncCursor(candidate, cursor) > 0) {
+        cursor = candidate;
+      }
+    };
+
+    consider('project', project.id, project.updatedAt);
+    for (const task of project.tasks ?? []) {
+      consider('task', task.id, task.updatedAt);
+    }
+    for (const connection of project.connections ?? []) {
+      consider('connection', connection.id, connection.updatedAt);
+    }
+    return cursor;
+  }
+
+  private getSyncCursorUserId(): string | null {
+    return this.sessionManager.getRecentValidationSnapshot(60_000)?.userId ?? null;
+  }
+
+  private async ensureProjectSyncCursorLoaded(projectId: string): Promise<ProjectSyncCursor | null> {
+    const cached = this.syncCursorByProject.get(projectId);
+    if (cached) return cached;
+
+    const persisted = await this.syncCursorPersistence.loadProjectCursor(projectId, this.getSyncCursorUserId());
+    if (persisted) {
+      this.syncCursorByProject.set(projectId, persisted);
+      this.lastSyncTimeByProject.set(projectId, persisted.updatedAt);
+      return persisted;
+    }
+
+    const legacy = this.lastSyncTimeByProject.get(projectId);
+    return legacy ? projectCursorFromLegacyTimestamp(legacy) : null;
   }
   
   setLastSyncTime(projectId: string, timestamp: string): void {
     this.lastSyncTimeByProject.set(projectId, timestamp);
+    this.syncCursorByProject.delete(projectId);
   }
   
   getLastSyncTime(projectId: string): string | null {
     return this.lastSyncTimeByProject.get(projectId) || null;
+  }
+
+  getProjectSyncCursor(projectId: string): ProjectSyncCursor | null {
+    return this.syncCursorByProject.get(projectId) ?? null;
+  }
+
+  async commitProjectSyncCursor(projectId: string, cursor: ProjectSyncCursor | null | undefined): Promise<void> {
+    if (!cursor) return;
+    const cursorMs = new Date(cursor.updatedAt).getTime();
+    if (!Number.isFinite(cursorMs)) return;
+
+    const existing = this.syncCursorByProject.get(projectId);
+    if (existing && compareProjectSyncCursor(cursor, existing) < 0) {
+      this.sentryLazyLoader.addBreadcrumb({
+        category: 'sync',
+        message: 'delta.cursor_commit_ignored_stale',
+        level: 'info',
+        data: { projectId, existing, candidate: cursor },
+      });
+      return;
+    }
+
+    const committed = await this.syncCursorPersistence.commitProjectCursor(
+      projectId,
+      this.getSyncCursorUserId(),
+      cursor,
+    );
+    this.syncCursorByProject.set(projectId, committed);
+    this.lastSyncTimeByProject.set(projectId, committed.updatedAt);
+  }
+
+  async commitProjectSyncTimestamp(projectId: string, timestamp: string): Promise<void> {
+    await this.commitProjectSyncCursor(projectId, projectCursorFromLegacyTimestamp(timestamp));
   }
 
   markSyncRecoveredIfIdle(timestamp = nowISO()): boolean {
@@ -1753,6 +1866,8 @@ export class SimpleSyncService {
   
   clearLastSyncTime(projectId: string): void {
     this.lastSyncTimeByProject.delete(projectId);
+    this.syncCursorByProject.delete(projectId);
+    void this.syncCursorPersistence.clearProjectCursor(projectId, this.getSyncCursorUserId());
   }
   
   // ==================== 冲突解决 ====================
