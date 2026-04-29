@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "description": "Initial Cloudflare artifact trend baseline captured from the 2026-04-29 production candidate on codex/cloudflare-cursor-consistency. Update only after a verified main deployment intentionally changes deploy artifact shape.",
+  "gitSha": "b05889949680553f3838a481f5410dfea91b8139",
+  "metrics": {
+    "fileCount": 149,
+    "totalBytes": 5991000,
+    "rootJsCount": 114,
+    "headerRuleCount": 21,
+    "ngswAssetCount": 139,
+    "gojsFlowChunkBytes": 1952661
+  }
+}

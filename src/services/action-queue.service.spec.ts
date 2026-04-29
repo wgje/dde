@@ -25,7 +25,9 @@ import { SentryAlertService } from './sentry-alert.service';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { NetworkAwarenessService } from './network-awareness.service';
 import { RetryQueueService } from '../app/core/services/sync/retry-queue.service';
+import { WriteGuardService } from './write-guard.service';
 import { createMockDestroyRef, mockSentryLazyLoaderService } from '../test-setup.mocks';
+import { resetBrowserNetworkSuspensionTrackingForTests } from '../utils/browser-network-suspension';
 
 // 模拟 LoggerService
 const mockLoggerCategory = {
@@ -66,6 +68,10 @@ const mockRetryQueueService = {
   getItems: vi.fn().mockReturnValue([]),
   add: vi.fn(),
   clear: vi.fn(),
+};
+
+const mockWriteGuardService = {
+  assertWritable: vi.fn(() => true),
 };
 
 function createMockTask(overrides: Partial<Task> = {}): Task {
@@ -239,9 +245,12 @@ describe('ActionQueueService', () => {
   }
 
   beforeEach(() => {
+    resetBrowserNetworkSuspensionTrackingForTests();
+
     // 重置 localStorage
     localStorage.clear();
     vi.clearAllMocks();
+    mockWriteGuardService.assertWritable.mockReturnValue(true);
 
     // 测试默认静默：避免业务错误分支写入 stderr。
     consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -272,6 +281,7 @@ describe('ActionQueueService', () => {
         { provide: SentryLazyLoaderService, useValue: mockSentryLazyLoaderService },
         { provide: NetworkAwarenessService, useValue: mockNetworkAwarenessService },
         { provide: RetryQueueService, useValue: mockRetryQueueService },
+        { provide: WriteGuardService, useValue: mockWriteGuardService },
         { provide: AuthService, useValue: { currentUserId: currentUserIdSignal } },
         { provide: DestroyRef, useValue: destroyRef },
       ],
@@ -286,6 +296,7 @@ describe('ActionQueueService', () => {
     service.reset();
     destroyRefCleanup?.();
     restoreWindowEvents?.();
+    resetBrowserNetworkSuspensionTrackingForTests();
     vi.useRealTimers();
 
     consoleWarnSpy?.mockRestore();

@@ -39,6 +39,7 @@ describe('ParkingNoticeComponent', () => {
     snooze2h: vi.fn(),
     cancelReminder: vi.fn(),
     handleNoticeFadeout: vi.fn(),
+    clearActiveNotice: vi.fn(() => activeReminder.set(null)),
   };
 
   const mockUiState = {

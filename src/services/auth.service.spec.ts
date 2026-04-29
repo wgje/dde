@@ -19,6 +19,7 @@ import { EventBusService } from './event-bus.service';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { mockSentryLazyLoaderService } from '../test-setup.mocks';
 import { AUTH_CONFIG } from '../config/auth.config';
+import { environment } from '../environments/environment';
 import {
   createBrowserNetworkSuspendedError,
   ensureBrowserNetworkSuspensionTracking,
@@ -511,6 +512,43 @@ describe('AuthService', () => {
       expect(service.currentUserId()).toBeNull();
       expect(service.sessionEmail()).toBeNull();
       expect(service.sessionExpired()).toBe(false);
+    });
+  });
+
+  describe('password reset redirect origin', () => {
+    it('生产环境应使用 canonical origin 生成 password reset 回跳地址', async () => {
+      const original = {
+        production: environment.production,
+        canonicalOrigin: environment.canonicalOrigin,
+        deploymentTarget: environment.deploymentTarget,
+      };
+      const resetPasswordForEmail = vi.fn().mockResolvedValue({ error: null });
+      mockSupabaseClient.clientAsync.mockResolvedValue({
+        auth: {
+          onAuthStateChange: vi.fn((callback: (event: string, session: unknown) => void) => {
+            authStateCallback = callback;
+            return { data: { subscription: { unsubscribe: mockUnsubscribe } } };
+          }),
+          getSession: vi.fn().mockResolvedValue({ data: { session: null }, error: null }),
+          resetPasswordForEmail,
+        },
+      });
+
+      environment.production = true;
+      environment.canonicalOrigin = 'https://nanoflow.pages.dev';
+      environment.deploymentTarget = 'production';
+
+      try {
+        await service.resetPassword('user@example.com');
+      } finally {
+        environment.production = original.production;
+        environment.canonicalOrigin = original.canonicalOrigin;
+        environment.deploymentTarget = original.deploymentTarget;
+      }
+
+      expect(resetPasswordForEmail).toHaveBeenCalledWith('user@example.com', {
+        redirectTo: 'https://nanoflow.pages.dev/reset-password',
+      });
     });
   });
 

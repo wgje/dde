@@ -17,6 +17,31 @@ NanoFlow 适合迁移到 Cloudflare Pages，但审查报告中的部分建议需
 - **Sentry 保持不迁移**，但首版迁移默认不上传 Source Map；迁移稳定后再启用 sourcemap 流程。
 - **Vercel 保留 24-72 小时作为 DNS 回滚后备**，稳定后关闭自动部署或断开 Git integration。
 
+### 1.1 当前执行快照（2026-04-29）
+
+本地分支 `codex/cloudflare-cursor-consistency` 当前跟踪 `origin/codex/cloudflare-cursor-consistency`。本轮执行中 GitHub Connector 查询 PR 元数据失败，因此远端 PR 状态以本地 `origin/*` 引用为准，不能视为已经完成线上 PR 检查。
+
+已完成的仓库侧迁移内容：
+
+- Cloudflare Pages deploy workflow 与 dry-run workflow 已落地：test job 不读取部署 secret，deploy step 才读取 `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID`，同仓 PR 才允许 preview deploy，fork PR 只跑无 secret 测试。
+- `public/_headers`、`quality:guard:deploy-artifacts`、`quality:guard:build-deterministic`、`artifact-manifest.json`、`version.json`、`! Link`、无 `_redirects`、无公开 sourcemap、worker safety no-store、TWA assetlinks/fingerprint guard 已进入构建或 CI 门禁。
+- `quality:guard:artifact-trends` 已接入 deploy / dry-run workflow：记录文件数、总大小、根 JS 数、`_headers` 规则数、`ngsw.json` asset 数和 GoJS/Flow chunk size；相对 main baseline 超过 15% warning、超过 30% fail-fast。部署浏览器 smoke 入口 `npm run smoke:cloudflare-playwright` 已补齐，并与 header smoke 一致：Cloudflare Pages 默认 SPA fallback 返回缺失 chunk 的 HTML 200 时，必须同时证明 `GlobalErrorHandler` chunk 自愈合同存在。
+- Canonical Origin Gate 已提前到 `<head>` 早期同步执行，早于 resource hints / modulepreload / Angular bootstrap，并补齐一次性 SW unregister + `ngsw`/NanoFlow cache 清理和 `__NANOFLOW_WRITE_GUARD__` runtime 标记。
+- `ngsw-config.json` 已移除 broad worker glob；生成物 guard 会检查 `worker-basic.min.js` / `safety-worker.js` 不进入 Angular SW assetGroups。
+- Canonical Origin Gate、WriteGuard、migration recovery banner、sync RPC 客户端/数据库 RPC 草案、sync writer lease 原型和 Realtime circuit/fallback 相关单测已经存在；但直接 table upsert 路径、single-writer 接入队列、端到端 Realtime/LWW/游标 smoke 仍不能算阶段 2/3 验收完成。
+- `scripts/validate-env.cjs` 已支持 Supabase `sb_publishable_*` browser build key，并显式拒绝 `sb_secret_*`；本轮用生产 Supabase URL + publishable key 完成 `build:strict` 与 artifact guard，且未把实际 key 写入 tracked diff。
+- `scripts/set-env.cjs` 现在会把 Supabase preconnect / dns-prefetch hint 同步到 `NG_APP_SUPABASE_URL`，避免生产 bundle 使用新 Supabase 项目时仍预连旧项目。
+
+配置后验证（2026-04-29 续跑）：
+
+- Cloudflare 账号 ID / API Token / Pages 项目名已能被本地 `.env.local` 读取；`npx --yes wrangler@3.114.0 pages deployment list --project-name=nanoflow` 成功返回 production 部署，当前生产 deployment 为 `https://a34c65fd.nanoflow.pages.dev`，分支 `main`，source `b058899`。
+- `https://a34c65fd.nanoflow.pages.dev` 与 `https://nanoflow.pages.dev` 的 `/version.json` 均读到 `gitSha=b05889949680553f3838a481f5410dfea91b8139`、`deploymentTarget=production`、同一 `ngswHash=5663bc774c9f...`。
+- 生产环境校验 `npm run validate-env:prod` 通过；本地 `.env.local` 未提供 `NG_APP_GOJS_LICENSE_KEY`，因此本地校验仍提示 GoJS 水印警告，若生产 GitHub Secret 已配置则以 workflow build 环境为准。
+- 部署产物校验 `npm run quality:guard:deploy-artifacts` 通过：`dist/browser` 150 files，无 `.map`、无 Pages Functions 入口、`_headers` 21 rules、`! Link`、worker safety、manifest origin-neutral、assetlinks package/fingerprint 与 artifact manifest 均通过。
+- 线上 smoke：canonical `https://nanoflow.pages.dev` 已通过 `bash scripts/smoke/cloudflare-header-smoke.sh https://nanoflow.pages.dev`（PASS=23 / FAIL=0）、`PLAYWRIGHT_BASE_URL=https://nanoflow.pages.dev npm run smoke:cloudflare-playwright`、`PLAYWRIGHT_BASE_URL=https://nanoflow.pages.dev npm run smoke:cloudflare-e2e`（2 passed / 1 preview-only skipped）。浏览器 smoke 读到 `gitSha=b05889949680553f3838a481f5410dfea91b8139`，Service Worker API 可用且已有 1 个注册；缺失 chunk 当前走 Pages SPA fallback，但本地 chunk 自愈合同通过。
+- 本地网络环境会把 `nanoflow.pages.dev` DNS 解析到代理保留网段 `198.18.0.85`；`scripts/smoke/cloudflare-playwright-smoke.cjs` 与 `playwright.config.ts` 已显式继承 `PLAYWRIGHT_PROXY` / `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` 并尊重 `NO_PROXY`，避免 Playwright APIRequestContext 直连 fake IP 超时。
+- 已配置项不再作为仓库侧阻塞；阶段 2 preview / custom domain 的 Realtime 弱网、多标签 single-writer、Storage SW dataGroups、Supabase Auth/Edge Function、GoJS 大图和阶段 4 稳定观察仍属于端到端迁移验收，不能被 pages.dev production smoke 替代。
+
 迁移动因不是“Vercel 不能托管 Angular”，而是当前项目的计算和风险边界不适合继续绑在 Vercel Git 构建上：
 
 - NanoFlow 是 Angular SPA + PWA + Supabase BaaS，不使用 Vercel 的 SSR、ISR、Route Handlers 或 Serverless 主路径。
@@ -1436,7 +1461,7 @@ OnPush / Signals 桥接门禁：
 
 ### 阶段 -1：Vercel 弊病修复与迁移窗口保底
 
-- [ ] **manifest `id` 一票否决检查**（§16.8 的具体执行）：在 main 分支当前构建产物上跑：
+- [x] **manifest `id` 一票否决检查**（§16.8 的具体执行）：在 main 分支当前构建产物上跑：
 
   ```bash
   npm run build
@@ -1451,10 +1476,10 @@ OnPush / Signals 桥接门禁：
   | 未设置 / 字段缺失 | ✅ 浏览器 fallback 到 `start_url`，行为同上 |
   | 包含 `dde-eight.vercel.app` 或任何旧 origin 绝对 URL | 🚫 一票否决——保留这个值会让新域名下变成"另一个 PWA"，所有用户都要重新安装且本地 IndexedDB 不会自动迁移；阶段 0 内必须先把 `manifest.webmanifest` 模板里的 `id` 改成相对路径，`scope`/`start_url` 同步处理 |
 
-  阶段 0 不通过这一项 → 阻塞迁移；阶段 1 的 CI artifact guard 需断言 `manifest.webmanifest` 不含 `vercel.app` 字符串（已列在阶段 1）。
-- [ ] 确认 `vercel.json` 的 `ignoreCommand` 仍指向 `bash scripts/vercel-ignore-step.sh`。
+  阶段 0 不通过这一项 → 阻塞迁移；阶段 1 的 CI artifact guard 需断言 `manifest.webmanifest` 不含 `vercel.app` 字符串（已列在阶段 1）。（2026-04-29 当前 `public/manifest.webmanifest` 使用相对 `id: "/launch.html"`、`scope: "./"`、`start_url: "./"`，artifact guard 已断言不含 `vercel.app`。）
+- [x] 确认 `vercel.json` 的 `ignoreCommand` 仍指向 `bash scripts/vercel-ignore-step.sh`。
 - [ ] 检查近期触发构建的提交是否主要改了 `src/`、`public/`、`package*.json`、`angular.json`、`ngsw-config.json` 等真实构建路径。
-- [ ] 如果只是文档提交仍触发 Vercel 构建，先修 `scripts/vercel-ignore-step.sh` 的 watched paths。
+- [x] 如果只是文档提交仍触发 Vercel 构建，先修 `scripts/vercel-ignore-step.sh` 的 watched paths。（2026-04-29 `WATCHED_PATHS` 不含 `docs/`，文档-only diff 会 `exit 0` 跳过 Vercel build。）
 - [ ] 如果真实代码构建导致分钟耗尽，但 Cloudflare production 还没完成割接，临时新增一个 GitHub Actions workflow 使用 `vercel pull`、`vercel build`、`vercel deploy --prebuilt`。
 - [ ] 确认 Vercel 即使全失能，也有备份的 GitHub Secrets 与 Supabase secrets 可读；Cloudflare 与 Supabase 凭据不要只存在 Vercel 中。
 - [ ] 临时 Vercel 预构建方案需要 `VERCEL_TOKEN`、`VERCEL_ORG_ID`、`VERCEL_PROJECT_ID`，只用于迁移窗口内的应急发布和回滚后备。
@@ -1463,15 +1488,15 @@ OnPush / Signals 桥接门禁：
 
 ### 阶段 0：准备
 
-- [ ] 创建 Cloudflare Pages 项目，选择 Direct Upload。
-- [ ] 按 §4.6 路径创建 Direct Upload 项目，避免误选 Git integration。
-- [ ] 确认项目名，例如 `nanoflow`，记录 `nanoflow.pages.dev`。
-- [ ] 创建最小权限 `CLOUDFLARE_API_TOKEN`。
-- [ ] 在 GitHub Secrets 写入 Cloudflare、Supabase、GoJS、Sentry、Android TWA fingerprint 变量；PR preview 必须优先使用 `PREVIEW_NG_APP_SUPABASE_URL` / `PREVIEW_NG_APP_SUPABASE_ANON_KEY`，缺失时 fail-fast，不得静默回退生产 Supabase。
+- [x] 创建 Cloudflare Pages 项目，选择 Direct Upload。（2026-04-29 `wrangler pages project list` 可见 `nanoflow`，Git Provider 为 `No`。）
+- [x] 按 §4.6 路径创建 Direct Upload 项目，避免误选 Git integration。（2026-04-29 已确认项目存在且不是 Git integration。）
+- [x] 确认项目名，例如 `nanoflow`，记录 `nanoflow.pages.dev`。（2026-04-29 已按用户提供的 canonical writable origin 记录；线上 API 操作仍等待有效 token。）
+- [x] 创建最小权限 `CLOUDFLARE_API_TOKEN`。（2026-04-29 权限修正后，Wrangler Direct Upload 已成功。建议本次部署完成后轮换该 token。）
+- [ ] 在 GitHub Secrets 写入 Cloudflare、Supabase、GoJS、Sentry、Android TWA fingerprint 变量；PR preview 必须优先使用 `PREVIEW_NG_APP_SUPABASE_URL` / `PREVIEW_NG_APP_SUPABASE_ANON_KEY`，缺失时 fail-fast，不得静默回退生产 Supabase。（阻塞：需要仓库 Settings 权限或有效 GitHub/Cloudflare/Supabase 控制台操作。）
 - [ ] 设置 GitHub Variables：`ENABLE_SENTRY_SOURCEMAPS=false`、`ALLOW_PROD_SUPABASE_FOR_PREVIEW_SMOKE=false`；`CLOUDFLARE_CUSTOM_DOMAIN_ORIGIN` 等 custom domain TLS active 后再填。
 - [ ] 确认 Direct Upload production branch 为 `main`；必要时用 API 设置。
 - [ ] **Workers Static Assets 备选路径评估**：按 §4.1.2 记录是否需要 Workers-only 能力；首版若仍选 Pages，创建一个不部署 production 的 Workers dry-run backlog，包含 `assets.directory=./dist/browser`、`binding=ASSETS`、`not_found_handling=single-page-application` 和 `run_worker_first` 决策。
-- [ ] **Canonical origin 决策**：在 `app.nanoflow.app` / `www.nanoflow.app` / `nanoflow.app` 中只选择一个生产可写 origin，写入 `CANONICAL_PRODUCTION_ORIGIN`；其他 origin 明确 redirect 或 read-only/export-only。
+- [x] **Canonical origin 决策**：在 `app.nanoflow.app` / `www.nanoflow.app` / `nanoflow.app` 中只选择一个生产可写 origin，写入 `CANONICAL_PRODUCTION_ORIGIN`；其他 origin 明确 redirect 或 read-only/export-only。（2026-04-29 首轮 production smoke / writable origin 暂定 `https://nanoflow.pages.dev`；custom domain active 后仍必须执行 `pages.dev` 收敛。）
 - [ ] **同域 DNS 分裂脑门禁**：若沿用同一 custom domain，阶段 3 只能部署同一份 `dist/browser` 到 Vercel 与 Cloudflare；DNS 稳定前不允许合并业务版本、schema 语义或同步协议变更。
 - [ ] 在 Supabase Auth redirect allow-list 加入 custom domain、临时 Pages production smoke origin、preview、本地开发域名，并记录 custom domain smoke 通过后移除 `pages.dev` 的收敛任务。
 - [ ] 审查 Supabase Auth `redirectTo` 生成与 Email Templates：全仓 grep `redirectTo` / `location.origin` / `SITE_URL` / `auth/callback` / `reset-password`，并在 Dashboard 检查模板是否仍固定旧 Site URL。
@@ -1498,33 +1523,33 @@ OnPush / Signals 桥接门禁：
 - [ ] 决定 PR preview 是否允许调用 Edge Functions；若允许，阶段 1 必须改 CORS 代码支持 `pr-*.pages.dev` hostname。
 - [ ] 决定 Storage signed URL 是否继续进入 Angular SW dataGroups；确认 `maxAge` 不超过签名有效期，logout/account switch 清理策略明确。
 - [ ] 决定 Angular SW dataGroups 的跨域 CORS/opaque 策略：Supabase Storage signed URL、jsdelivr 字体、Google Fonts 必须在 SW 控制页面下验证 `response.type`、状态码和缓存行为；私有 Storage 不允许缓存 opaque/401/403 响应。
-- [ ] 决定 Sentry sourcemap inject 策略：首版默认关闭；若开启，必须选择 post-inject rename 或 JS revalidate，不能继续让被 inject JS immutable。
-- [ ] 决定 deterministic build 策略：阶段 1 必须新增 `quality:guard:build-deterministic`，两次 clean build 对比 hashed JS/CSS SHA256、`index.html` modulepreload、`launch.html`（如存在）、`ngsw.json` 和 `/version.json` 中除 `buildTime` 外的稳定字段；不要写 Angular builder 未暴露的 esbuild seed 配置。
+- [x] 决定 Sentry sourcemap inject 策略：首版默认关闭；若开启，必须选择 post-inject rename 或 JS revalidate，不能继续让被 inject JS immutable。
+- [x] 决定 deterministic build 策略：阶段 1 必须新增 `quality:guard:build-deterministic`，两次 clean build 对比 hashed JS/CSS SHA256、`index.html` modulepreload、`launch.html`（如存在）、`ngsw.json` 和 `/version.json` 中除 `buildTime` 外的稳定字段；不要写 Angular builder 未暴露的 esbuild seed 配置。
 - [ ] 从 Vercel Dashboard 导出当前生产环境变量全集，对照 `scripts/set-env.cjs` 的 `NG_APP_*` 默认值。
-- [ ] 新增 `npm run quality:guard:env-flags`：解析 `scripts/set-env.cjs` 中实际读取的 `NG_APP_*`，与 `src/environments/*` shape、deploy workflow env 列表和本文档 §16.7 快照对齐；新增、删除或默认值变化必须在同一 PR 更新四处，不能只改 GitHub Secrets。
+- [x] 新增 `npm run quality:guard:env-flags`：解析 `scripts/set-env.cjs` 中实际读取的 `NG_APP_*`，与 `src/environments/*` shape、deploy workflow env 列表和本文档 §16.7 快照对齐；新增、删除或默认值变化必须在同一 PR 更新四处，不能只改 GitHub Secrets。
 
 ### 阶段 1：仓库改造
 
-- [ ] 新增 `public/_headers`。
-- [ ] 更新 `ngsw-config.json`：移除或收紧 `app-lazy` 中的 `/worker*.js` / `/worker-*.js`，确保生成后的 `dist/browser/ngsw.json` 不把 `worker-basic.min.js` / `safety-worker.js` 纳入应用 assetGroups；CI guard 必须检查生成物。
-- [ ] 先不新增顶层 `404.html`，验证 Cloudflare Pages 默认 SPA fallback。
+- [x] 新增 `public/_headers`。
+- [x] 更新 `ngsw-config.json`：移除或收紧 `app-lazy` 中的 `/worker*.js` / `/worker-*.js`，确保生成后的 `dist/browser/ngsw.json` 不把 `worker-basic.min.js` / `safety-worker.js` 纳入应用 assetGroups；CI guard 必须检查生成物。
+- [x] 先不新增顶层 `404.html`，验证 Cloudflare Pages 默认 SPA fallback。（仓库未新增 `public/404.html`；2026-04-29 `https://nanoflow.pages.dev` 缺失 chunk 返回 HTML 200，按官方 Pages SPA fallback 路径处理，header / Playwright smoke 均要求 `GlobalErrorHandler` chunk 自愈合同兜底。）
 - [ ] 如果默认 fallback 不满足深链刷新，再新增 `public/_redirects`，并在 preview 中验证不会把静态资源代理成 HTML。
-- [ ] 新增 `.github/workflows/deploy-cloudflare-pages.yml`，拆分不依赖 secret 的 `test` job 与只在安全事件运行的 `build-deploy` job。
-- [ ] 新增 `.github/workflows/deploy-cloudflare-pages-dry-run.yml` 或 workflow_dispatch dry-run mode：不执行 Wrangler deploy，不读取 Cloudflare/Sentry token，只跑 build、deterministic guard、artifact guards、header 文件静态校验和 `wrangler pages dev` 本地 smoke。该 dry-run 必须可由维护者在升级 Angular/Wrangler/Node 前单独运行。
-- [ ] 明确 `workflow_dispatch` 行为：默认只 test/build/guards；只有 `deploy=true` 且分支为 `main` 才生产部署。
-- [ ] PR preview deploy 条件限制为同仓库 PR，不使用 `pull_request_target`；fork PR 只跑 test job，不执行 `validate-env:prod`。
-- [ ] workflow 使用显式的 `Select Supabase build env` step：PR preview 若缺少 `PREVIEW_NG_APP_SUPABASE_URL` / `PREVIEW_NG_APP_SUPABASE_ANON_KEY` 且 `ALLOW_PROD_SUPABASE_FOR_PREVIEW_SMOKE` 不是 `true`，必须直接失败。
-- [ ] workflow 敏感 token 下沉到 step：`SENTRY_AUTH_TOKEN` 只给 Sentry upload step，`CLOUDFLARE_API_TOKEN` 只给 deploy step；`npm ci`、test、build 不应读到发布 token。
-- [ ] 固定 `wrangler` 和 Sentry CLI 版本，并为 Direct Upload 增加最多 3 次 retry。
-- [ ] Direct Upload deploy step 后增加等待式 health check：Wrangler/API 返回成功后，循环请求 `/` 与 `/version.json`，直到返回 200 且 `version.json.gitSha` 可读，再进入 header smoke / Playwright smoke。生产部署前先执行 `wrangler pages deployment list`，确认没有明显未完成或异常的上一轮 deployment。
-- [ ] 新增 Canonical Origin Gate：`index.html` 最早期脚本或等价 boot guard 在非 canonical origin 阻断 SW 注册、Supabase 初始化、Realtime 和队列 flush，并进入 redirect/read-only/export-only。
-- [ ] Canonical Origin Gate 必须位于 `index.html` `<head>` 最前面的同步 inline script，早于 modulepreload、Angular bootstrap、SW 注册和 Supabase 初始化；旧 origin、非 canonical origin、`ngswHash` 不匹配或 `forceSwReset` 时，只允许一次受控 SW unregister + app cache/`ngsw:*` cache delete，并用 marker 防止 reload loop。
+- [x] 新增 `.github/workflows/deploy-cloudflare-pages.yml`，拆分不依赖 secret 的 `test` job 与只在安全事件运行的 `build-deploy` job。
+- [x] 新增 `.github/workflows/deploy-cloudflare-pages-dry-run.yml` 或 workflow_dispatch dry-run mode：不执行 Wrangler deploy，不读取 Cloudflare/Sentry token，只跑 build、deterministic guard、artifact guards、header 文件静态校验和 `wrangler pages dev` 本地 smoke。该 dry-run 必须可由维护者在升级 Angular/Wrangler/Node 前单独运行。
+- [x] 明确 `workflow_dispatch` 行为：默认只 test/build/guards；只有 `deploy=true` 且分支为 `main` 才生产部署。
+- [x] PR preview deploy 条件限制为同仓库 PR，不使用 `pull_request_target`；fork PR 只跑 test job，不执行 `validate-env:prod`。
+- [x] workflow 使用显式的 `Select Supabase build env` step：PR preview 若缺少 `PREVIEW_NG_APP_SUPABASE_URL` / `PREVIEW_NG_APP_SUPABASE_ANON_KEY` 且 `ALLOW_PROD_SUPABASE_FOR_PREVIEW_SMOKE` 不是 `true`，必须直接失败。
+- [x] workflow 敏感 token 下沉到 step：`SENTRY_AUTH_TOKEN` 只给 Sentry upload step，`CLOUDFLARE_API_TOKEN` 只给 deploy step；`npm ci`、test、build 不应读到发布 token。
+- [x] 固定 `wrangler` 和 Sentry CLI 版本，并为 Direct Upload 增加最多 3 次 retry。
+- [x] Direct Upload deploy step 后增加等待式 health check：Wrangler/API 返回成功后，循环请求 `/` 与 `/version.json`，直到返回 200 且 `version.json.gitSha` 可读，再进入 header smoke / Playwright smoke。生产部署前先执行 `wrangler pages deployment list`，确认没有明显未完成或异常的上一轮 deployment。
+- [x] 新增 Canonical Origin Gate：`index.html` 最早期脚本或等价 boot guard 在非 canonical origin 阻断 SW 注册、Supabase 初始化、Realtime 和队列 flush，并进入 redirect/read-only/export-only。
+- [ ] Canonical Origin Gate 必须位于 `index.html` `<head>` 最前面的同步 inline script，早于 modulepreload、Angular bootstrap、SW 注册和 Supabase 初始化；旧 origin、非 canonical origin、`ngswHash` 不匹配或 `forceSwReset` 时，只允许一次受控 SW unregister + app cache/`ngsw:*` cache delete，并用 marker 防止 reload loop。（2026-04-29 已完成 early gate、非 canonical/redirect、`forceSwReset=1`、一次性 SW/cache cleanup 与 `__NANOFLOW_WRITE_GUARD__` 标记；`ngswHash` mismatch 的早期自愈仍需单独实现。）
 - [ ] 新增 stale SW 负向测试：先安装旧部署 SW，再部署新版本，刷新时旧 SW 可能先拦截 `index.html`；测试必须证明 gate/GlobalErrorHandler 能触发 unregister + cache delete，并且不会在旧 `ngsw.json` / 旧 `index.html` 下继续 flush 队列。
-- [ ] 生成 `dist/browser/version.json`，内容包含 git SHA、build time、deployment environment、app version、Supabase project alias、Sentry release、ngsw hash；`version.json` 必须 no-store 且不进长期 SW asset cache。
-- [ ] 全量审查 `supabase/functions/**` 的 CORS/origin 判断，不只更新 `transcribe`；单独处理 `widget-black-box-action`。
-- [ ] 根据阶段 0 决策，改 `transcribe`、`virus-scan`、`_shared/widget-common`、`widget-black-box-action` 的 Cloudflare preview CORS 支持，或明确 preview smoke 不覆盖这些链路。
-- [ ] 修正 Auth redirect helper：生产使用 canonical origin，preview/local 使用显式环境 origin；补 password reset / magic link / OAuth 回调测试，并记录 Email Templates 审查结果。
-- [ ] 更新所有相关 contract tests。
+- [x] 生成 `dist/browser/version.json`，内容包含 git SHA、build time、deployment environment、app version、Supabase project alias、Sentry release、ngsw hash；`version.json` 必须 no-store 且不进长期 SW asset cache。
+- [x] 全量审查 `supabase/functions/**` 的 CORS/origin 判断，不只更新 `transcribe`；单独处理 `widget-black-box-action`。（2026-04-29 `rg` inventory 覆盖 `transcribe`、`virus-scan`、`_shared/widget-common`、`widget-black-box-action` 与 widget shared callers。）
+- [x] 根据阶段 0 决策，改 `transcribe`、`virus-scan`、`_shared/widget-common`、`widget-black-box-action` 的 Cloudflare preview CORS 支持，或明确 preview smoke 不覆盖这些链路。（2026-04-29 这些路径均允许 `https://nanoflow.pages.dev` 与 `*.nanoflow.pages.dev`，widget focus/summary/register/notify 通过 `_shared/widget-common` 继承。）
+- [ ] 修正 Auth redirect helper：生产使用 canonical origin，preview/local 使用显式环境 origin；补 password reset / magic link / OAuth 回调测试，并记录 Email Templates 审查结果。（2026-04-29 `AuthService.resetPassword()` 生产环境使用 `environment.canonicalOrigin`，单测覆盖 password reset redirect；Magic Link / OAuth 与 Supabase Dashboard Email Templates 仍需人工审查。）
+- [x] 更新所有相关 contract tests。
 - [ ] 按 §6.4 修正云端写入语义：为任务、连接、Project、BlackBox/Focus 的 LWW push 增加条件写入/RPC 或等价 CAS；远端版本已前进时返回 conflict/remote-newer，不能直接 `upsert` 覆盖。补“旧离线写重放不覆盖远端新写”的单元测试和集成测试。
 - [ ] 按 §6.4 修正 timestamp 归一化：所有成功 push 的同步实体都把服务端返回的 canonical `updated_at` 写回 store、IndexedDB 和队列元数据；补刷新后仍为 canonical timestamp 的测试。
 - [ ] 按 §6.4 修正所有同步游标提交语义：`checkForDrift()`、`refreshActiveProjectSilent()`、resume/probe、BlackBox 同步都不得在调用方完成 merge/持久化前提交 cursor；实现组合 cursor 或强制安全回看窗口；补“merge 失败不推进游标”“本地 `new Date()` 不作为远端 watermark”“同 timestamp 分页不漏拉”的单元测试。
@@ -1533,28 +1558,28 @@ OnPush / Signals 桥接门禁：
 - [ ] 按 §6.5 新增 sync single-writer：Web Locks 可用时用 exclusive lock；不可用时用 IndexedDB lease + BroadcastChannel heartbeat 降级；非 owner 标签禁止 flush 队列和提交 cursor。补双标签恢复联网、owner 崩溃接管、无 Web Locks 降级测试。
 - [ ] 新增或扩展 `e2e/realtime-localfirst-consistency.spec.ts`：覆盖 offline local write、remote write、WebSocket 断线/`TIMED_OUT`、polling fallback、条件写入 remote-newer、canonical timestamp、single-writer、多标签接管、tombstone 不复活；另加 `black_box_entries` 的断线/fallback/cursor-after-persist/pending merge/tombstone 用例。
 - [ ] 如果保持 Realtime 开启，默认启用 Supabase Realtime `worker: true`、`heartbeatCallback` 和必要的 `workerUrl`；同步更新 `_headers`/CSP/worker 缓存门禁。若不能启用 worker，PR 必须写明原因并补后台标签页长时运行 + polling fallback 证据。
-- [ ] 更新 `SentryLazyLoaderService` 的 `tracePropagationTargets`，纳入新 custom domain 和 Pages preview 域。
+- [x] 更新 `SentryLazyLoaderService` 的 `tracePropagationTargets`，纳入新 custom domain 和 Pages preview 域。（2026-04-29 已包含 `*.nanoflow.pages.dev` 与 `*.nanoflow.app` 匹配。）
 - [ ] 全仓 inventory `dde-eight.vercel.app` / `dde[-\w]*.vercel.app`，把运行时常量、TWA 配置、测试 fixture、文档分别归类；结果写入迁移 PR 描述。
-- [ ] 更新或显式覆盖 `android/app/build.gradle.kts` 的 `NANOFLOW_WEB_ORIGIN`，避免 TWA 默认 origin 继续指向旧 Vercel 域。
-- [ ] 决定保留/删除旧 `vercel.json`、`netlify.toml`，并同步更新 `src/tests/startup-contract.spec.ts`。
-- [ ] CI artifact guard 补齐 `ngsw-worker.js`、`sw-composed.js`、`manifest.webmanifest`、`version.json`、`.well-known/assetlinks.json`、TWA package name、TWA fingerprint 集合、`manifest.webmanifest` 不含 `vercel.app`、仓库根目录 `functions/` 不存在、`dist/browser/functions` 不存在、`dist/browser/_worker.js` 不存在、`.map` 最终门禁。
-- [ ] CI deterministic guard 补齐：两次 clean production build 的 hashed JS/CSS、modulepreload、`ngsw.json` 对齐；启用 Sentry inject 时在 inject/post-inject rename/rebuild `ngsw.json` 后再做最终内容 manifest 对齐。
-- [ ] 新增最终 artifact manifest：部署前生成 `dist/browser/artifact-manifest.json`（或 CI artifact，不公开也可），记录每个 hashed JS/CSS/worker、`index.html` modulepreload、`launch.html`、`ngsw.json`、`_headers`、`version.json` 的 SHA256、size、content-type 期望和 cache policy；Sentry inject/post-build 全流程结束后再生成，并用同一 manifest 驱动 Vercel/Cloudflare 一致性比对。
-- [ ] CI cache guard 补齐非 hash 资源检查：`public/fonts/**`、`public/icons/**`、非 hash `assets` 不能命中 `immutable`；只有最终内容 hash 对齐的 `main*.js`、`polyfills*.js`、`chunk*.js`、`styles*.css` 和构建脚本生成的精确 worker chunk 规则允许长期缓存；`_headers` 规则数超过 90 失败，`dist/browser` 文件数超过 18,000 失败。
-- [ ] CI 趋势监控补齐：记录 `dist/browser` 文件数、总大小、根目录 JS 数、`_headers` 规则数、`ngsw.json` asset 数和 GoJS/Flow chunk size；超过上次 main 基线 15% warning，超过 30% fail-fast，避免只在 18,000 文件或 90 规则时才发现增长失控。
-- [ ] 首版 `_headers` 必须在 `/*` 规则下包含 `! Link`，关闭 Pages 从 HTML preload/modulepreload 自动生成的 `Link` header；阶段 2/3 header smoke 必须验证 `/` 与 `/index.html` 没有 `Link: ... rel=modulepreload`。
+- [x] 更新或显式覆盖 `android/app/build.gradle.kts` 的 `NANOFLOW_WEB_ORIGIN`，避免 TWA 默认 origin 继续指向旧 Vercel 域。（2026-04-29 默认值为 `https://nanoflow.pages.dev`，契约测试禁止回到旧 Vercel host。）
+- [x] 决定保留/删除旧 `vercel.json`、`netlify.toml`，并同步更新 `src/tests/startup-contract.spec.ts`。（2026-04-29 决定迁移窗口内保留二者作为回滚/兼容参考；startup contract 继续覆盖 SW 与 retired widget 兼容资产 no-cache。）
+- [x] CI artifact guard 补齐 `ngsw-worker.js`、`sw-composed.js`、`manifest.webmanifest`、`version.json`、`.well-known/assetlinks.json`、TWA package name、TWA fingerprint 集合、`manifest.webmanifest` 不含 `vercel.app`、仓库根目录 `functions/` 不存在、`dist/browser/functions` 不存在、`dist/browser/_worker.js` 不存在、`.map` 最终门禁。
+- [x] CI deterministic guard 补齐：两次 clean production build 的 hashed JS/CSS、modulepreload、`ngsw.json` 对齐；启用 Sentry inject 时在 inject/post-inject rename/rebuild `ngsw.json` 后再做最终内容 manifest 对齐。
+- [x] 新增最终 artifact manifest：部署前生成 `dist/browser/artifact-manifest.json`（或 CI artifact，不公开也可），记录每个 hashed JS/CSS/worker、`index.html` modulepreload、`launch.html`、`ngsw.json`、`_headers`、`version.json` 的 SHA256、size、content-type 期望和 cache policy；Sentry inject/post-build 全流程结束后再生成，并用同一 manifest 驱动 Vercel/Cloudflare 一致性比对。
+- [x] CI cache guard 补齐非 hash 资源检查：`public/fonts/**`、`public/icons/**`、非 hash `assets` 不能命中 `immutable`；只有最终内容 hash 对齐的 `main*.js`、`polyfills*.js`、`chunk*.js`、`styles*.css` 和构建脚本生成的精确 worker chunk 规则允许长期缓存；`_headers` 规则数超过 90 失败，`dist/browser` 文件数超过 18,000 失败。
+- [x] CI 趋势监控补齐：记录 `dist/browser` 文件数、总大小、根目录 JS 数、`_headers` 规则数、`ngsw.json` asset 数和 GoJS/Flow chunk size；超过上次 main 基线 15% warning，超过 30% fail-fast，避免只在 18,000 文件或 90 规则时才发现增长失控。（2026-04-29 已新增 `docs/cloudflare-artifact-baseline.json`、`scripts/ci/check-artifact-trends.cjs` 与 `quality:guard:artifact-trends`，deploy / dry-run workflow 均在部署前执行。）
+- [x] 首版 `_headers` 必须在 `/*` 规则下包含 `! Link`，关闭 Pages 从 HTML preload/modulepreload 自动生成的 `Link` header；阶段 2/3 header smoke 必须验证 `/` 与 `/index.html` 没有 `Link: ... rel=modulepreload`。
 - [ ] 若 origin 变化，新增旧 Vercel export-only/read-only 构建路径或 host-based 运行时保护，并用 e2e 验证旧域不能新增/编辑/同步写入但仍能导出本地数据。
 - [ ] 新增一次性迁移欢迎/恢复状态页：新 canonical origin 首次启动时显示云端恢复、队列同步、旧 origin 导出和 PWA 刷新/重装提示；成功恢复、用户跳过、导出入口点击、恢复失败都写 Sentry breadcrumb。
 - [ ] 如启用 Sentry Source Map，新增 hidden source map 构建配置，并确保 inject 后执行 post-inject rename 或把被 inject JS header 降级为 revalidate，再执行 `npx ngsw-config dist/browser ngsw-config.json /` 和 `node scripts/patch-ngsw-html-hashes.cjs`。
-- [ ] 保留 `npm run perf:guard:nojit`，并加入 `npm run quality:guard:font-contract`、`npm run quality:guard:supabase-ready` 作为部署前门禁。
-- [ ] 将 `npm run quality:guard:build-deterministic` 加入部署前门禁；若执行成本过高，至少在 PR preview / workflow_dispatch 必跑，production deploy 前必须引用同一份已通过 deterministic guard 的 artifact。
+- [x] 保留 `npm run perf:guard:nojit`，并加入 `npm run quality:guard:font-contract`、`npm run quality:guard:supabase-ready` 作为部署前门禁。（2026-04-29 deploy / dry-run workflow 已新增 blocking step。）
+- [x] 将 `npm run quality:guard:build-deterministic` 加入部署前门禁；若执行成本过高，至少在 PR preview / workflow_dispatch 必跑，production deploy 前必须引用同一份已通过 deterministic guard 的 artifact。
 - [ ] 新增 Flow/OnPush smoke：桌面 Flow 首开、节点选择详情刷新、拖拽/连线后 store 刷新、主题切换画布刷新、自动布局期间继续编辑后旧 generation 结果被丢弃、切回 Text 后图实例释放。
 - [ ] 新增 Flow layout cancellation smoke：自动布局进行中连续触发编辑、切换项目、销毁 Flow、重新打开 Flow；旧 `layoutTaskId` / `layoutGeneration` 结果必须被取消或丢弃，并在 Sentry breadcrumb 中记录 `stale_layout_dropped`，不能覆盖新坐标。
 - [ ] 新增 Flow 大图性能采样脚本或 Playwright case，至少覆盖 200 节点基线和 500+ 节点 long task 采样；1000+ 节点默认降级策略必须可验证；10 次打开/销毁后 Diagram/listener/timer 不持续增长。
 - [ ] 本地执行 `npx wrangler pages dev dist/browser --port 8788` dry-run，验证 SPA fallback、`_headers`、PWA install、SW update，并确认 `worker-basic.min.js` 与 `safety-worker.js` 都返回 no-store，且不在生成的 `ngsw.json` 应用 assetGroups 中；禁止静态 `/worker*.js` / `/worker-*.js` immutable 规则，如存在应用 Web Worker chunk，必须由构建脚本生成精确文件名 immutable 规则。
-- [ ] 新增或复用 `scripts/smoke/cloudflare-header-smoke.sh`，用参数化 `ORIGIN` 跑 §14.2 header 契约；不要把 smoke 脚本硬编码到 custom domain。
-- [ ] **Sentry environment 区分**（§16.18 提级到首版迁移，不延后）：在 `scripts/set-env.cjs`、`scripts/ensure-env-files.cjs` 和 `src/environments/*` environment shape 中增加 `NG_APP_SENTRY_ENVIRONMENT` / `sentryEnvironment` 注入，deploy workflow 按 `github.event_name == 'pull_request' ? 'preview' : 'production'` 取值，`SentryLazyLoaderService` 读取该值传入 `Sentry.init({ environment })`。这样阶段 2 preview 的错误事件就不会污染生产 environment dashboard。
-- [ ] Node 22 作为 Cloudflare deploy workflow 基线；是否收紧 `package.json engines` 到 `>=22 <23` 另立决策，不在首版迁移中隐式完成。
+- [x] 新增或复用 `scripts/smoke/cloudflare-header-smoke.sh`，用参数化 `ORIGIN` 跑 §14.2 header 契约；不要把 smoke 脚本硬编码到 custom domain。
+- [x] **Sentry environment 区分**（§16.18 提级到首版迁移，不延后）：在 `scripts/set-env.cjs`、`scripts/ensure-env-files.cjs` 和 `src/environments/*` environment shape 中增加 `NG_APP_SENTRY_ENVIRONMENT` / `sentryEnvironment` 注入，deploy workflow 按 `github.event_name == 'pull_request' ? 'preview' : 'production'` 取值，`SentryLazyLoaderService` 读取该值传入 `Sentry.init({ environment })`。这样阶段 2 preview 的错误事件就不会污染生产 environment dashboard。
+- [x] Node 22 作为 Cloudflare deploy workflow 基线；是否收紧 `package.json engines` 到 `>=22 <23` 另立决策，不在首版迁移中隐式完成。
 
 ### 阶段 2：Preview 验证
 
@@ -1572,7 +1597,7 @@ OnPush / Signals 桥接门禁：
   - `worker-basic.min.js` / `safety-worker.js` 不在 `ngsw.json` 应用 assetGroups 中。
   - `/` 与 `/index.html` 不返回 modulepreload `Link` header；若出现，说明 `! Link` 未生效或 zone 规则注入了 Early Hints 输入。
   - freshness 关键路径（`/`、`/index.html`、`/ngsw.json`、`/sw-composed.js`、`/ngsw-worker.js`、`/version.json`、Auth callback）必须记录 `CF-Cache-Status`、`Age`、`CF-Ray`；不得出现 `CF-Cache-Status: HIT` 且 `Age > 0`。
-- [ ] 负向静态资源测试：请求不存在的 `/chunk-deadbeef.js`、`/styles-deadbeef.css`、`/assets/missing.png`，不能返回 HTML 200；若 Pages 默认 SPA fallback 返回 shell，必须证明 GlobalErrorHandler 能捕获并触发清缓存刷新。
+- [ ] 负向静态资源测试：请求不存在的 `/chunk-deadbeef.js`、`/styles-deadbeef.css`、`/assets/missing.png`，不能返回 HTML 200；若 Pages 默认 SPA fallback 返回 shell，必须证明 GlobalErrorHandler 能捕获并触发清缓存刷新。（2026-04-29 production pages.dev 已验证缺失 chunk 走 HTML 200 fallback，header / Playwright smoke 已证明 chunk 自愈合同；preview、CSS、assets 负向仍需在阶段 2 重跑。）
 - [ ] 验证 `version.json` no-store，且不被 Angular SW 长期缓存。
 - [ ] 在 `pages.dev` 或非 canonical origin 打开生产 bundle，确认 Canonical Origin Gate 阻断 SW/Supabase/队列 flush 并进入 redirect/read-only。
 - [ ] 移动端浏览器打开 preview，验证默认 Text 视图。
@@ -1600,7 +1625,7 @@ OnPush / Signals 桥接门禁：
 - [ ] 使用已通过 deterministic build guard 的 release candidate artifact 部署，不在 Vercel 和 Cloudflare 各自重新 build；若必须重新 build，必须分别产出 artifact manifest 并证明 hashed JS/CSS、modulepreload 和 `ngsw.json` 完全一致。
 - [ ] DNS 割接前执行跨版本混合 smoke：Vercel RC、Cloudflare Pages production、同一 custom domain 切换前后各跑一次 `/version.json`、SW update、Realtime reconnect、RetryQueue/ActionQueue replay；模拟用户在旧部署后台停留 10 分钟后切回新部署。
 - [ ] GitHub Actions 部署 `main` 到 Cloudflare Pages production；如果同域 DNS 割接，确保 Vercel 自动部署已冻结或只服务同一份 RC/export-only 构建。
-- [ ] 确认 production deployment health check 通过后，再在 `https://<project>.pages.dev` production URL 上完成 header smoke 与 Playwright smoke，不依赖 custom domain 已解析。
+- [ ] 确认 production deployment health check 通过后，再在 `https://<project>.pages.dev` production URL 上完成 header smoke 与 Playwright smoke，不依赖 custom domain 已解析。（2026-04-29 当前 `https://nanoflow.pages.dev` 对 HEAD `b05889949680553f3838a481f5410dfea91b8139` 的 header smoke 与 Playwright smoke 均通过；合并 main / production health check 后仍需重跑。）
 - [ ] 绑定 custom domain，等待 TLS active。
 - [ ] 子域名走路径 A；apex/root domain 走路径 B。
 - [ ] custom domain 绑定并确认 TLS active 后，再把 `CLOUDFLARE_CUSTOM_DOMAIN_ORIGIN` 设为最终域名并执行 custom domain smoke test。
@@ -1659,7 +1684,7 @@ OnPush / Signals 桥接门禁：
 - 同一 commit 的 deterministic build guard 通过；部署到 Vercel 回滚后备和 Cloudflare production 的 artifact manifest 一致。若启用 Sentry inject，最终部署内容 hash、文件名、modulepreload 和 `ngsw.json` 在 inject/rename 后仍一致。
 - 最终 artifact manifest 已生成并保存到 CI artifact；它覆盖 hashed JS/CSS/worker、modulepreload、`index.html`、`launch.html`、`ngsw.json`、`_headers`、`version.json`，并且 Sentry upload、Vercel 回滚后备、Cloudflare deploy 都引用同一份 manifest。
 - 刷新任意 Angular path route 不返回 404。
-- JS/CSS/SW 请求不会被 SPA fallback 或 `_redirects` 代理成 HTML。
+- JS/CSS/SW 请求优先不被 `_redirects` 代理成 HTML；若 Cloudflare Pages 默认 SPA fallback 对缺失 chunk 返回 HTML 200，必须有 GlobalErrorHandler chunk 自愈单测和 Playwright 负向场景证明能清缓存恢复，不允许白屏或继续旧队列 flush。
 - `index.html`、`index.csr.html`（仅在未来启用 SSR/CSR 混合时存在）、`launch.html`、`ngsw.json`、`manifest.webmanifest`、`sw-composed.js`、`ngsw-worker.js` 不是长期强缓存。
 - `main*.js`、`polyfills*.js`、`chunk*.js`、`styles*.css` 等 hash 构建产物使用长期缓存；应用 Web Worker chunk 只有在 `_headers` 中存在精确文件名规则时才使用长期缓存；`public/fonts/**`、`public/icons/**`、非 hash `assets` 默认 revalidate；`worker-basic.min.js`、`safety-worker.js`、`ngsw-worker.js`、`sw-composed.js` 必须 no-store，且 `_headers` 不得包含静态 `/worker*.js` / `/worker-*.js` immutable 规则。
 - 首版迁移的 `/` 与 `/index.html` 实际响应头不包含 Cloudflare 自动生成的 modulepreload `Link` header；`_headers` 必须通过 `! Link` 关闭 Early Hints 的自动输入。后续若重新启用，必须单独验证 103、所有 preload chunk 存在、MIME 正确且 `ngsw.json` 对齐。
@@ -2717,7 +2742,7 @@ Deploy workflow 已经承担 secret 选择、构建、artifact guard、Sentry、
 | Cloudflare zone 规则覆盖 Pages 行为 | `_headers` 正确但被 Cache Rules/Transform/Challenge 改写 | 阶段 0 inventory app host 命中规则，禁止 Cache Everything、HTML Edge TTL、改写和全站 Challenge |
 | 关键路径被 Cloudflare edge 缓存 | `index.html` / `ngsw.json` / SW 脚本被 `CF-Cache-Status: HIT` 服务，PWA version skew 全局扩散 | header smoke 记录 `CF-Cache-Status`、`Age`、`CF-Ray`；freshness 关键路径禁止 `HIT + Age>0` |
 | 只检查仓库 `_headers`，未检查线上真实响应 | zone 规则或平台行为覆盖后 CI 仍通过 | deploy 后对 `pages.dev` 与 custom domain 跑真实 `curl -I` header smoke，检查 cache、MIME、Link 和 missing asset |
-| 缺失静态资源被 SPA fallback 吞掉 | `/chunk-deadbeef.js` 返回 HTML 200，旧 HTML 加载新部署时白屏 | smoke 负向请求缺失 JS/CSS/asset；Playwright 证明 ChunkLoadError 能恢复 |
+| 缺失静态资源被 SPA fallback 吞掉 | `/chunk-deadbeef.js` 返回 HTML 200，旧 HTML 加载新部署时白屏 | smoke 负向请求缺失 JS/CSS/asset；若 Pages 默认 SPA fallback 返回 HTML 200，必须验证 GlobalErrorHandler chunk 自愈合同并用 Playwright 证明 ChunkLoadError 能恢复 |
 | 缺少部署版本可观测性 | 无法判断用户命中 Vercel、Cloudflare、旧 SW 还是新部署 | 生成 no-store `/version.json`，Sentry/Cloudflare/GitHub 对齐 git SHA、ngsw hash、environment |
 | `widget-black-box-action` 被误认为复用 `_shared/widget-common.ts` | CORS 漏改，黑匣子 widget action 在新域名失败 | 单独列入 CORS inventory，必要时独立改源码和测试 |
 | GoJS 大图主线程阻塞 | 复杂 Flow 掉帧或页面无响应 | 200/500/1000 节点分级门禁；超阈值默认降级，布局预计算迁往 Worker 或分片调度 |

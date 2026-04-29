@@ -67,10 +67,15 @@ const envDefinitions = {
     },
     {
       name: 'NG_APP_SUPABASE_ANON_KEY',
-      description: 'Supabase 匿名公钥',
+      description: 'Supabase 匿名公钥 / publishable key',
       validate: (value) => {
         if (!value) return '未设置';
         if (value === 'YOUR_SUPABASE_ANON_KEY') return '仍然是占位符值，请设置真实的 Key';
+        if (value.startsWith('sb_secret_')) return '不能使用 Supabase secret key；前端构建只能使用 sb_publishable_* 或旧版 anon JWT';
+        if (value.startsWith('sb_publishable_')) {
+          if (!/^sb_publishable_[A-Za-z0-9_-]{20,}$/.test(value)) return 'Supabase publishable key 格式异常，请检查是否完整复制';
+          return null;
+        }
         if (value.length < 100) return 'Key 长度异常，请检查是否完整复制';
         return null;
       },

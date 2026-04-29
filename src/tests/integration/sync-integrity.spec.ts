@@ -13,6 +13,7 @@ import { RetryQueueService } from '../../app/core/services/sync/retry-queue.serv
 import { createMockDestroyRef, mockSentryLazyLoaderService } from '../../test-setup.mocks';
 import { SYNC_CONFIG, SYNC_DURABILITY_CONFIG } from '../../config';
 import type { Task, Connection } from '../../models';
+import { resetBrowserNetworkSuspensionTrackingForTests } from '../../utils/browser-network-suspension';
 
 const mockLoggerCategory = {
   info: vi.fn(),
@@ -78,8 +79,14 @@ describe('Sync Integrity Invariants (2026-02-07)', () => {
   let destroyRefCleanup: (() => void) | undefined;
 
   beforeEach(() => {
+    resetBrowserNetworkSuspensionTrackingForTests();
     localStorage.clear();
     vi.clearAllMocks();
+    Object.defineProperty(document, 'visibilityState', {
+      value: 'visible',
+      writable: true,
+      configurable: true,
+    });
 
     const { destroyRef, destroy } = createMockDestroyRef();
     destroyRefCleanup = destroy;
@@ -110,6 +117,7 @@ describe('Sync Integrity Invariants (2026-02-07)', () => {
   afterEach(() => {
     actionQueue.reset();
     destroyRefCleanup?.();
+    resetBrowserNetworkSuspensionTrackingForTests();
     vi.useRealTimers();
   });
 

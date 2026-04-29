@@ -26,6 +26,33 @@ function resolvePlaywrightDevServer(): ResolvedDevServerInfo {
   };
 }
 
+function normalizeProxyServer(server: string | undefined): string | undefined {
+  if (!server) {
+    return undefined;
+  }
+
+  return server.replace(/^socks5h:/i, 'socks5:');
+}
+
+function resolvePlaywrightProxy(): { server: string; bypass?: string } | undefined {
+  const server = normalizeProxyServer(
+    process.env['PLAYWRIGHT_PROXY']
+      || process.env['HTTPS_PROXY']
+      || process.env['HTTP_PROXY']
+      || process.env['ALL_PROXY']
+      || process.env['https_proxy']
+      || process.env['http_proxy']
+      || process.env['all_proxy']
+  );
+
+  if (!server) {
+    return undefined;
+  }
+
+  const bypass = process.env['NO_PROXY'] || process.env['no_proxy'];
+  return bypass ? { server, bypass } : { server };
+}
+
 const hasCustomBaseURL = typeof process.env['PLAYWRIGHT_BASE_URL'] === 'string' && process.env['PLAYWRIGHT_BASE_URL'].length > 0;
 const hasCustomWebServerCommand = typeof process.env['PLAYWRIGHT_WEB_SERVER_COMMAND'] === 'string' && process.env['PLAYWRIGHT_WEB_SERVER_COMMAND'].length > 0;
 if (hasCustomWebServerCommand && !hasCustomBaseURL) {
@@ -57,6 +84,7 @@ const resolvedWorkers = Number.isFinite(configuredWorkers) && configuredWorkers 
     ? 1
     : undefined;
 const includePerfSuites = process.env['PLAYWRIGHT_INCLUDE_PERF'] === '1' || process.env['PERF_BUDGET_TEST'] === '1';
+const proxy = resolvePlaywrightProxy();
 
 export default defineConfig({
   testDir: './e2e',
@@ -84,6 +112,7 @@ export default defineConfig({
   use: {
     /* 基础URL */
     baseURL,
+    proxy,
     /* 浏览器语言环境：确保 DOM 文本提取与中文渲染一致 */
     locale: 'zh-CN',
     /* 容器环境下避免 /dev/shm 过小导致 Chromium 页面崩溃 */

@@ -41,10 +41,31 @@ function readPackageVersion() {
   } catch { return '0.0.0'; }
 }
 
-function ngswHash() {
+function stableJson(value) {
+  if (Array.isArray(value)) return value.map(stableJson);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.keys(value)
+        .sort()
+        .map((key) => [key, stableJson(value[key])])
+    );
+  }
+  return value;
+}
+
+function stableNgswHash() {
   const ngswPath = path.join(DIST, 'ngsw.json');
   if (!fs.existsSync(ngswPath)) return null;
-  return crypto.createHash('sha256').update(fs.readFileSync(ngswPath)).digest('hex');
+  try {
+    const ngsw = JSON.parse(fs.readFileSync(ngswPath, 'utf-8'));
+    delete ngsw.timestamp;
+    return crypto
+      .createHash('sha256')
+      .update(JSON.stringify(stableJson(ngsw)))
+      .digest('hex');
+  } catch {
+    return crypto.createHash('sha256').update(fs.readFileSync(ngswPath)).digest('hex');
+  }
 }
 
 const version = {
@@ -55,7 +76,7 @@ const version = {
   deploymentTarget: process.env.NG_APP_DEPLOYMENT_TARGET || process.env.DEPLOYMENT_TARGET || 'local',
   supabaseProjectAlias: process.env.NG_APP_SUPABASE_PROJECT_ALIAS || process.env.SUPABASE_PROJECT_ALIAS || 'local',
   sentryRelease: process.env.NG_APP_SENTRY_RELEASE || process.env.SENTRY_RELEASE || '',
-  ngswHash: ngswHash(),
+  ngswHash: stableNgswHash(),
 };
 
 fs.writeFileSync(OUT, JSON.stringify(version, null, 2) + '\n');

@@ -68,7 +68,7 @@ describe('本地模式性能优化 (2026-01-26)', () => {
       await service.saveProjectToCloud(project, 'real-user-id');
 
       // 断言：应该委托给 BatchSyncService
-      expect(saveProjectToCloudSpy).toHaveBeenCalledWith(project, 'real-user-id');
+      expect(saveProjectToCloudSpy).toHaveBeenCalledWith(project, 'real-user-id', undefined);
     });
   });
 

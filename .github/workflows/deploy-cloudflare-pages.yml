@@ -163,6 +163,13 @@ jobs:
           SENTRY_RELEASE: ${{ github.sha }}
         run: npm run build:strict
 
+      - name: Run deployment quality guards
+        run: |
+          set -euo pipefail
+          npm run perf:guard:nojit
+          npm run quality:guard:font-contract
+          npm run quality:guard:supabase-ready
+
       - name: Assert sourcemaps are not deployed
         run: |
           set -euo pipefail
@@ -192,10 +199,32 @@ EOF
             exit 1
           fi
 
+      - name: Generate artifact manifest
+        run: node scripts/generate-artifact-manifest.cjs
+
+      - name: Prepare artifact trend baseline
+        run: |
+          set -euo pipefail
+          mkdir -p tmp
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE_REF="${{ github.event.pull_request.base.sha }}"
+          elif [ -n "${{ github.event.before }}" ] && [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]; then
+            BASE_REF="${{ github.event.before }}"
+          else
+            BASE_REF="origin/main"
+          fi
+          if ! git show "$BASE_REF:docs/cloudflare-artifact-baseline.json" > tmp/cloudflare-artifact-baseline.json 2>/dev/null; then
+            rm -f tmp/cloudflare-artifact-baseline.json
+            echo "No artifact trend baseline found at $BASE_REF"
+          fi
+
+      - name: Check artifact trends
+        run: npm run quality:guard:artifact-trends -- --baseline=tmp/cloudflare-artifact-baseline.json --allow-missing-baseline
+
       - name: Validate deploy artifacts
         env:
           ANDROID_TWA_PACKAGE_NAME: ${{ vars.ANDROID_TWA_PACKAGE_NAME || 'app.nanoflow.twa' }}
-          ANDROID_TWA_SHA256_FINGERPRINTS: ${{ vars.ANDROID_TWA_SHA256_FINGERPRINTS || '' }}
+          ANDROID_TWA_EXPECTED_SHA256_CERT_FINGERPRINTS: ${{ vars.ANDROID_TWA_EXPECTED_SHA256_CERT_FINGERPRINTS || vars.ANDROID_TWA_SHA256_FINGERPRINTS || '' }}
         run: npm run quality:guard:deploy-artifacts
 
       - name: Artifact summary
@@ -209,7 +238,7 @@ EOF
           echo "| supabaseProjectAlias | ${{ steps.supabase.outputs.alias }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| files | $(find dist/browser -type f | wc -l) |" >> "$GITHUB_STEP_SUMMARY"
           echo "| size | $(du -sk dist/browser | awk '{print $1}') KB |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| _headers rules | $(grep -cE '^/[^[:space:]]' dist/browser/_headers || echo 0) |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| _headers rules | $(grep -cE '^/($|[^[:space:]])' dist/browser/_headers || echo 0) |" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload trace artifact
         if: always()
@@ -218,6 +247,7 @@ EOF
           name: cloudflare-pages-${{ env.DEPLOYMENT_TARGET }}-${{ github.sha }}
           path: |
             dist/browser/version.json
+            dist/browser/artifact-manifest.json
             dist/browser/_headers
             dist/browser/index.html
             dist/browser/ngsw.json
@@ -240,7 +270,7 @@ EOF
           done
 
           if [ "$DEPLOYMENT_TARGET" = "production" ]; then
-            npx --yes wrangler@3.114.0 pages deployment list \
+            npx --yes wrangler@${WRANGLER_VERSION} pages deployment list \
               --project-name="$CLOUDFLARE_PAGES_PROJECT_NAME" | head -40 || true
             BRANCH_FLAG="--branch=main"
           else
@@ -253,7 +283,7 @@ EOF
           for attempt in 1 2 3; do
             echo "Deploy attempt $attempt/3"
             set +e
-            deploy_output="$(npx --yes wrangler@3.114.0 pages deploy dist/browser \
+            deploy_output="$(npx --yes wrangler@${WRANGLER_VERSION} pages deploy dist/browser \
               --project-name="$CLOUDFLARE_PAGES_PROJECT_NAME" \
               $BRANCH_FLAG \
               --commit-hash="${{ github.sha }}" \

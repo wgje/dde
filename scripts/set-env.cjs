@@ -264,6 +264,17 @@ try {
     prewarmUrlPattern.lastIndex = 0;
     indexHtml = indexHtml.replace(prewarmUrlPattern, `var SUPABASE_URL = '${finalUrl}';`);
   }
+
+  const supabaseHintUrl = /^https:\/\/[a-z0-9-]+\.supabase\.co$/i.test(finalUrl)
+    ? finalUrl
+    : null;
+  if (supabaseHintUrl) {
+    const supabasePreconnectPattern = /(<link\s+rel="preconnect"\s+href=")https:\/\/[^"]+\.supabase\.co("[^>]*>)/i;
+    const supabaseDnsPrefetchPattern = /(<link\s+rel="dns-prefetch"\s+href=")https:\/\/[^"]+\.supabase\.co("[^>]*>)/i;
+    indexHtml = indexHtml
+      .replace(supabasePreconnectPattern, `$1${supabaseHintUrl}$2`)
+      .replace(supabaseDnsPrefetchPattern, `$1${supabaseHintUrl}$2`);
+  }
   if (prewarmKeyPattern.test(indexHtml)) {
     prewarmKeyPattern.lastIndex = 0;
     indexHtml = indexHtml.replace(prewarmKeyPattern, `var SUPABASE_ANON_KEY = '${finalKey}';`);

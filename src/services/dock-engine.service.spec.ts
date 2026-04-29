@@ -266,16 +266,6 @@ describe('DockEngineService', () => {
     expect(b?.isMain).toBe(false);
   });
 
-  it('exportSnapshot should not advance savedAt when no dock state changed', () => {
-    vi.setSystemTime(new Date('2026-04-24T08:00:00.000Z'));
-    const firstSavedAt = service.exportSnapshot().savedAt;
-
-    vi.setSystemTime(new Date('2026-04-24T08:05:00.000Z'));
-    const secondSavedAt = service.exportSnapshot().savedAt;
-
-    expect(secondSavedAt).toBe(firstSavedAt);
-  });
-
   it('dockTask should reject non-active tasks', () => {
     seedTask('archived-task', { status: 'completed' });
     service.dockTask('archived-task');

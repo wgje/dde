@@ -178,7 +178,7 @@ CREATE OR REPLACE FUNCTION public.cleanup_old_deleted_tasks()
 RETURNS integer
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path TO ''
+SET search_path TO 'pg_catalog', 'public'
 AS $$
 DECLARE
   deleted_count integer;
@@ -251,7 +251,7 @@ CREATE OR REPLACE FUNCTION public.cleanup_old_deleted_connections()
 RETURNS integer
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path TO ''
+SET search_path TO 'pg_catalog', 'public'
 AS $$
 DECLARE
   deleted_count integer;
@@ -300,11 +300,11 @@ $$;
 COMMENT ON FUNCTION public.cleanup_old_deleted_tasks() IS
   '硬删除超过 30 天的软删除任务前先写 task/connection tombstone，避免离线端把过期回收站数据误当作仍可恢复。';
 
-REVOKE ALL ON FUNCTION public.cleanup_old_deleted_tasks() FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.cleanup_old_deleted_tasks() TO service_role;
-
 COMMENT ON FUNCTION public.cleanup_old_deleted_connections() IS
   '硬删除超过 30 天的软删除连接前先写 connection tombstone，确保客户端能通过水位收敛。';
+
+REVOKE ALL ON FUNCTION public.cleanup_old_deleted_tasks() FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.cleanup_old_deleted_tasks() TO service_role;
 
 REVOKE ALL ON FUNCTION public.cleanup_old_deleted_connections() FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.cleanup_old_deleted_connections() TO service_role;

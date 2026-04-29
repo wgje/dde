@@ -21,6 +21,8 @@ import { ImportService } from '../../services/import.service';
 import { LoggerService } from '../../services/logger.service';
 import { ToastService } from '../../services/toast.service';
 import { PreferenceService } from '../../services/preference.service';
+import { LayoutService } from '../../services/layout.service';
+import { ExternalSourceLinkService } from '../../app/core/external-sources/external-source-link.service';
 import { Project, Task, Connection, Attachment, TaskStatus, AttachmentType } from '../../models';
 
 describe('数据完整性验证', () => {
@@ -47,6 +49,18 @@ describe('数据完整性验证', () => {
   const mockPreference = {
     set: vi.fn().mockResolvedValue(undefined),
     get: vi.fn().mockReturnValue(null),
+    lastBackupProofAt: vi.fn(() => null),
+    recordBackupProof: vi.fn().mockResolvedValue(true),
+  };
+
+  const mockLayoutService = {
+    validateAndFixTree: vi.fn((project: Project) => ({ project, issues: [] })),
+  };
+
+  const mockExternalSourceLinks = {
+    ensureLoaded: vi.fn().mockResolvedValue(undefined),
+    activeLinksForTask: vi.fn(() => []),
+    importPointers: vi.fn().mockResolvedValue(undefined),
   };
   
   beforeEach(() => {
@@ -59,6 +73,8 @@ describe('数据完整性验证', () => {
         { provide: LoggerService, useValue: mockLogger },
         { provide: ToastService, useValue: mockToast },
         { provide: PreferenceService, useValue: mockPreference },
+        { provide: LayoutService, useValue: mockLayoutService },
+        { provide: ExternalSourceLinkService, useValue: mockExternalSourceLinks },
       ],
     });
     
@@ -479,6 +495,7 @@ describe('数据完整性验证', () => {
     
     it('导入后连接数据应保持完整', async () => {
       const originalProject = createCompleteProject();
+      originalProject.tasks.find(t => t.id === 'task-2')!.parentId = null;
       const exportResult = await exportService.exportProject(originalProject);
       const exportData: ExportData = JSON.parse(await exportResult.blob!.text());
       
