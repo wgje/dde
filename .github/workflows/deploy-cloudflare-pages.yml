@@ -190,9 +190,9 @@ jobs:
           if [ "$DEPLOYMENT_TARGET" = "preview" ]; then
             cat >> dist/browser/_headers <<'EOF'
 
-/*
-  X-Robots-Tag: noindex, nofollow
-EOF
+          /*
+            X-Robots-Tag: noindex, nofollow
+          EOF
           fi
           if [ -f public/_redirects ]; then
             echo "::error::public/_redirects is intentionally absent; explicit wildcard fallback would hide missing static assets"
