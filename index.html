@@ -127,6 +127,61 @@
     })();
   </script>
 
+  <!-- ========== Canonical Origin Gate (Cloudflare 迁移 §16.10 / §16.26) ========== -->
+  <!-- 必须是同步阻塞脚本，在任何 SW 注册 / Supabase / 队列初始化之前执行。
+       目的：阻止旧 origin / 多 origin 同时持有 IndexedDB+SW+队列产生 ghost write。
+       策略：
+       - 若当前 origin === canonicalOrigin（生产 = nanoflow.pages.dev），直接放行。
+       - 若 originGateMode='off' 或 canonicalOrigin 为空，跳过（dev/local/preview 默认）。
+       - 若 originGateMode='redirect'，硬重定向到 canonicalOrigin，并尽力卸载旧 SW。
+       - 若 originGateMode='read-only' 或 'export-only'，标记 window.__NANOFLOW_ORIGIN_GATE__ 供应用层判定。
+       注入：通过 NG_APP_CANONICAL_ORIGIN / NG_APP_ORIGIN_GATE_MODE 由 scripts/set-env.cjs 写入。 -->
+  <script id="canonical-origin-gate">
+    (function() {
+      try {
+        var CANONICAL_ORIGIN = '';
+        var ORIGIN_GATE_MODE = 'off';
+        // dev / preview / 未配置：直接放行
+        if (!CANONICAL_ORIGIN) return;
+        if (!ORIGIN_GATE_MODE || ORIGIN_GATE_MODE === 'off') return;
+
+        // 已在 canonical origin
+        if (window.location.origin === CANONICAL_ORIGIN) return;
+
+        // Sentry breadcrumb 兜底（即使 Sentry 还没加载，也写到 sessionStorage 让后续 init 能上报）
+        try {
+          sessionStorage.setItem('nanoflow.originGate.fired', JSON.stringify({
+            from: window.location.origin,
+            to: CANONICAL_ORIGIN,
+            mode: ORIGIN_GATE_MODE,
+            ts: new Date().toISOString()
+          }));
+        } catch (_e) { /* ignore */ }
+
+        if (ORIGIN_GATE_MODE === 'redirect') {
+          // 尽力卸载当前 origin 上的旧 SW，避免 SW 把 redirect 后的 HTML 替换回旧资源
+          if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.getRegistrations().then(function(regs) {
+              regs.forEach(function(r) { try { r.unregister(); } catch (_e) {} });
+            }).catch(function() {});
+          }
+          var target = CANONICAL_ORIGIN + window.location.pathname + window.location.search + window.location.hash;
+          window.location.replace(target);
+          return;
+        }
+
+        // read-only / export-only：暴露给应用层判定，UI 由应用代码处理
+        window.__NANOFLOW_ORIGIN_GATE__ = {
+          mode: ORIGIN_GATE_MODE,
+          canonical: CANONICAL_ORIGIN,
+          current: window.location.origin
+        };
+      } catch (_e) {
+        // gate 失败也不能阻塞首屏；交给后续应用层兜底
+      }
+    })();
+  </script>
+
   <!-- Boot Flags 已移至 <body> 骨架屏之后（P0-3 性能优化 2026-03-25） -->
   <!-- 目的：减少 <head> 阻塞脚本数量，让骨架屏 First Paint 更快 -->
 

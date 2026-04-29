@@ -14,13 +14,20 @@ function buildEnvironmentContent(options) {
     sentryDsn,
     gojsLicenseKey,
     devAutoLogin,
+    sentryEnvironment,
+    canonicalOrigin,
+    originGateMode,
+    readOnlyPreview,
+    deploymentTarget,
+    supabaseProjectAlias,
+    sentryRelease,
   } = options;
 
   const devAutoLoginConfig = devAutoLogin
     ? `{ email: '${escapeString(devAutoLogin.email)}', password: '${escapeString(devAutoLogin.password)}' }`
     : 'null';
 
-  return `// Auto-generated fallback for test/build bootstrap. Safe to regenerate.\n\nexport const environment = {\n  production: ${production ? 'true' : 'false'},\n  supabaseUrl: '${escapeString(supabaseUrl)}',\n  supabaseAnonKey: '${escapeString(supabaseAnonKey)}',\n  SENTRY_DSN: '${escapeString(sentryDsn)}',\n  gojsLicenseKey: '${escapeString(gojsLicenseKey)}',\n  devAutoLogin: ${production ? 'null' : `${devAutoLoginConfig} as { email: string; password: string } | null`}\n};\n`;
+  return `// Auto-generated fallback for test/build bootstrap. Safe to regenerate.\n\nexport const environment = {\n  production: ${production ? 'true' : 'false'},\n  supabaseUrl: '${escapeString(supabaseUrl)}',\n  supabaseAnonKey: '${escapeString(supabaseAnonKey)}',\n  SENTRY_DSN: '${escapeString(sentryDsn)}',\n  gojsLicenseKey: '${escapeString(gojsLicenseKey)}',\n  sentryEnvironment: '${escapeString(sentryEnvironment)}',\n  canonicalOrigin: '${escapeString(canonicalOrigin)}',\n  originGateMode: '${escapeString(originGateMode)}' as 'off' | 'redirect' | 'read-only' | 'export-only',\n  readOnlyPreview: ${readOnlyPreview ? 'true' : 'false'},\n  deploymentTarget: '${escapeString(deploymentTarget)}',\n  supabaseProjectAlias: '${escapeString(supabaseProjectAlias)}',\n  sentryRelease: '${escapeString(sentryRelease)}',\n  devAutoLogin: ${production ? 'null' : `${devAutoLoginConfig} as { email: string; password: string } | null`}\n};\n`;
 }
 
 function writeIfMissing(filePath, content, logs) {
@@ -54,6 +61,14 @@ function ensureEnvFiles() {
   const devAutoLogin = devAutoLoginEmail && devAutoLoginPassword
     ? { email: devAutoLoginEmail, password: devAutoLoginPassword }
     : null;
+  // Cloudflare 迁移注入（§16.7）— 默认值与生产 production fallback 一致
+  const sentryEnvironment = process.env.NG_APP_SENTRY_ENVIRONMENT || localEnv.NG_APP_SENTRY_ENVIRONMENT || '';
+  const canonicalOrigin = process.env.NG_APP_CANONICAL_ORIGIN || localEnv.NG_APP_CANONICAL_ORIGIN || '';
+  const originGateMode = process.env.NG_APP_ORIGIN_GATE_MODE || localEnv.NG_APP_ORIGIN_GATE_MODE || 'off';
+  const readOnlyPreview = ['1', 'true', 'yes', 'on'].includes(String(process.env.NG_APP_READ_ONLY_PREVIEW || localEnv.NG_APP_READ_ONLY_PREVIEW || '').toLowerCase());
+  const deploymentTarget = process.env.NG_APP_DEPLOYMENT_TARGET || localEnv.NG_APP_DEPLOYMENT_TARGET || 'local';
+  const supabaseProjectAlias = process.env.NG_APP_SUPABASE_PROJECT_ALIAS || localEnv.NG_APP_SUPABASE_PROJECT_ALIAS || 'local';
+  const sentryRelease = process.env.NG_APP_SENTRY_RELEASE || localEnv.NG_APP_SENTRY_RELEASE || '';
   const logs = [];
 
   writeIfMissing(
@@ -65,6 +80,13 @@ function ensureEnvFiles() {
       sentryDsn,
       gojsLicenseKey,
       devAutoLogin,
+      sentryEnvironment: sentryEnvironment || 'development',
+      canonicalOrigin,
+      originGateMode,
+      readOnlyPreview,
+      deploymentTarget,
+      supabaseProjectAlias,
+      sentryRelease,
     }),
     logs,
   );
@@ -78,6 +100,13 @@ function ensureEnvFiles() {
       sentryDsn,
       gojsLicenseKey,
       devAutoLogin: null,
+      sentryEnvironment: sentryEnvironment || 'production',
+      canonicalOrigin,
+      originGateMode,
+      readOnlyPreview,
+      deploymentTarget,
+      supabaseProjectAlias,
+      sentryRelease,
     }),
     logs,
   );

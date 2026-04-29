@@ -1,0 +1,79 @@
+name: Cloudflare Pages — Dry Run
+
+# §16.27 Dry-run workflow：不读 deploy secret，仅跑 build + 全部 artifact / contract 校验。
+# 用途：验证 PR 是否能产出可部署 artifact（不实际上线），适合 fork PR、文档 PR。
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+concurrency:
+  group: cf-pages-dryrun-${{ github.event.pull_request.head.ref || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: '22'
+  ENABLE_SENTRY_SOURCEMAPS: 'false'
+
+jobs:
+  dry-run:
+    name: Build + Validate (no deploy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --prefer-offline --no-audit
+
+      - name: Validate env flags drift (§16.7 / §16.27)
+        run: npm run quality:guard:env-flags
+
+      - name: Build (preview-shaped, no real Supabase)
+        env:
+          NG_APP_SUPABASE_URL: 'https://dryrun.invalid'
+          NG_APP_SUPABASE_ANON_KEY: 'dryrun-placeholder'
+          NG_APP_SENTRY_ENVIRONMENT: 'preview'
+          NG_APP_CANONICAL_ORIGIN: ''
+          NG_APP_ORIGIN_GATE_MODE: 'off'
+          NG_APP_READ_ONLY_PREVIEW: 'true'
+          NG_APP_DEPLOYMENT_TARGET: 'preview-dryrun'
+          NG_APP_SUPABASE_PROJECT_ALIAS: 'preview-dryrun'
+          NG_APP_SENTRY_RELEASE: ${{ github.sha }}
+          DEPLOYMENT_TARGET: 'preview-dryrun'
+          SUPABASE_PROJECT_ALIAS: 'preview-dryrun'
+        run: npm run build:stats
+
+      - name: Copy public/_headers into dist
+        run: cp public/_headers dist/browser/_headers
+
+      - name: Validate deploy artifacts
+        run: npm run quality:guard:deploy-artifacts
+
+      - name: Sourcemap inject must be disabled
+        run: |
+          if find dist/browser -name "*.map" | grep -q .; then
+            echo "::error::Found .map files in dist/browser despite sourcemap inject being disabled"
+            exit 1
+          fi
+
+      - name: Summary
+        run: |
+          echo "## Dry-run summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- files: $(find dist/browser -type f | wc -l)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- size: $(du -sk dist/browser | awk '{print $1}') KB" >> "$GITHUB_STEP_SUMMARY"
+          echo "- header rules: $(grep -cE '^/[^[:space:]]' dist/browser/_headers || echo 0)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- ENABLE_SENTRY_SOURCEMAPS: false (asserted)" >> "$GITHUB_STEP_SUMMARY"

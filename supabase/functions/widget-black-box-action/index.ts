@@ -57,6 +57,7 @@ const ALLOWED_ORIGINS: string[] = (() => {
   return [
     'https://dde-eight.vercel.app',
     'https://nanoflow.app',
+    'https://nanoflow.pages.dev',  // Cloudflare canonical writable origin
     'http://localhost:3020',
     'http://localhost:4200',
     'http://localhost:5173',
@@ -94,8 +95,16 @@ function getCorsHeaders(origin: string | null): Record<string, string> {
     } else {
       try {
         const parsed = new URL(origin);
-        isAllowed = parsed.hostname.startsWith(VERCEL_PREVIEW_PREFIX)
-          && parsed.hostname.endsWith('.vercel.app');
+        // Vercel 预览
+        if (parsed.hostname.startsWith(VERCEL_PREVIEW_PREFIX)
+          && parsed.hostname.endsWith('.vercel.app')) {
+          isAllowed = true;
+        }
+        // Cloudflare Pages PR preview：*.nanoflow.pages.dev
+        if (!isAllowed && parsed.protocol === 'https:'
+          && parsed.hostname.endsWith('.nanoflow.pages.dev')) {
+          isAllowed = true;
+        }
       } catch {
         isAllowed = false;
       }

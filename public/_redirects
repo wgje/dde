@@ -1,0 +1,5 @@
+# Cloudflare Pages SPA 兜底：未命中静态资源的路由全部返回 index.html，由 Angular Router 接管
+# 注意：仅匹配 GET 类请求；静态资源（.js/.css/.png/.json/.webmanifest 等）已被精确路径
+# 在 _headers 中处理且物理文件存在，命中此规则前 Cloudflare 会先尝试静态文件命中。
+# §16.13 SPA fallback 不能吞掉静态资源 404 — 由 scripts/smoke 负向测试守护。
+/*    /index.html   200

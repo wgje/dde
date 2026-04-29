@@ -1,0 +1,206 @@
+#!/usr/bin/env node
+/**
+ * scripts/ci/check-deploy-artifacts.cjs
+ *
+ * Cloudflare Pages 部署前 artifact 综合校验 (§5.3 / §16.8 / §16.9 / §16.13 / §16.17)
+ *
+ * 检查项：
+ * 1. dist/browser 必须存在且包含必备文件
+ * 2. dist/browser/_worker.js 不存在（防止误启用 Pages Functions）
+ * 3. dist/browser/functions/ 目录不存在
+ * 4. 仓库根目录 functions/ 目录不存在
+ * 5. dist/browser 中无 .map 文件（sourcemap 默认禁用）
+ * 6. _headers 规则数 ≤ 90
+ * 7. 文件总数 ≤ 18000
+ * 8. 根目录 .js 必须匹配已知模式（main/polyfills/chunk/worker/runtime/
+ *    sw-composed/ngsw-worker/safety-worker/worker-basic.min）
+ * 9. _headers 不允许 /worker*.js 或 /worker-*.js 宽泛 immutable 规则
+ * 10. ngsw-config.json 不允许 /worker*.js 或 /worker-*.js 宽泛 glob
+ * 11. dist/browser/ngsw.json 应用 assetGroups 不应包含 worker-basic.min.js / safety-worker.js
+ * 12. /fonts/, /icons/, /assets/ 等非 hash 资源在 _headers 中不能 immutable
+ * 13. 应用 Web Worker chunk（worker-<hash>.js, 排除 worker-basic.min.js）
+ *     必须有精确文件名 immutable 规则
+ * 14. dist/browser/manifest.webmanifest 不含 vercel.app
+ * 15. dist/browser/version.json 存在且 JSON 合法
+ * 16. dist/browser/index.html 存在
+ *
+ * 退出码：失败抛出 1。
+ */
+
+const fs = require('node:fs');
+const path = require('node:path');
+
+const REPO_ROOT = path.resolve(__dirname, '../..');
+const DIST = path.join(REPO_ROOT, 'dist', 'browser');
+
+let failures = [];
+const fail = (msg) => failures.push(msg);
+const ok = (msg) => console.log('  ✓ ' + msg);
+
+function existsFile(p) { return fs.existsSync(p) && fs.statSync(p).isFile(); }
+function existsDir(p) { return fs.existsSync(p) && fs.statSync(p).isDirectory(); }
+
+// 1. dist/browser 存在
+if (!existsDir(DIST)) {
+  console.error('✗ dist/browser missing — run `npm run build` first');
+  process.exit(1);
+}
+ok('dist/browser exists');
+
+// 2-4. Pages Functions 误启用检查
+const repoFunctions = path.join(REPO_ROOT, 'functions');
+const distFunctions = path.join(DIST, 'functions');
+const distWorker = path.join(DIST, '_worker.js');
+if (existsDir(repoFunctions)) fail('repo root `functions/` exists — would auto-enable Pages Functions');
+else ok('repo root `functions/` absent');
+if (existsDir(distFunctions)) fail('dist/browser/functions/ exists — Pages Functions would be enabled');
+else ok('dist/browser/functions/ absent');
+if (existsFile(distWorker)) fail('dist/browser/_worker.js exists — Pages Functions would be enabled');
+else ok('dist/browser/_worker.js absent');
+
+// 5. .map 文件
+function findFiles(dir, predicate, results = []) {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) findFiles(full, predicate, results);
+    else if (predicate(full, entry)) results.push(full);
+  }
+  return results;
+}
+
+const mapFiles = findFiles(DIST, (p) => p.endsWith('.map'));
+if (mapFiles.length > 0) {
+  fail(`Found ${mapFiles.length} .map files in dist/browser — sourcemap should be disabled or stripped:\n    ${mapFiles.slice(0, 5).map((f) => path.relative(DIST, f)).join('\n    ')}`);
+} else {
+  ok('no .map files in dist/browser');
+}
+
+// 6. _headers 规则数
+const headersPath = path.join(DIST, '_headers');
+let headersText = '';
+if (!existsFile(headersPath)) {
+  fail('dist/browser/_headers missing — public/_headers must be copied at build');
+} else {
+  headersText = fs.readFileSync(headersPath, 'utf-8');
+  const ruleCount = headersText.split('\n').filter((l) => /^\/[^\s]/.test(l)).length;
+  if (ruleCount > 90) fail(`_headers rule count ${ruleCount} > 90 (Cloudflare limit 100, keeping 10 buffer)`);
+  else ok(`_headers rule count = ${ruleCount} (≤ 90)`);
+}
+
+// 7. 总文件数
+const allFiles = findFiles(DIST, () => true);
+if (allFiles.length > 18000) fail(`dist/browser file count ${allFiles.length} > 18000`);
+else ok(`dist/browser file count = ${allFiles.length} (≤ 18000)`);
+
+// 8. 根目录 .js 必须匹配已知模式
+const rootJs = fs.readdirSync(DIST).filter((n) => n.endsWith('.js'));
+const allowedRootJsRe = /^(main|polyfills|chunk|worker|runtime)-|^(sw-composed|ngsw-worker|safety-worker|worker-basic\.min)\.js$/;
+const unmatched = rootJs.filter((n) => !allowedRootJsRe.test(n));
+if (unmatched.length > 0) fail(`Unexpected JS files at dist/browser root: ${unmatched.join(', ')}`);
+else ok(`all root JS (${rootJs.length}) match expected patterns`);
+
+// 9. _headers 不允许宽泛 worker 规则
+if (headersText) {
+  if (/^\/worker\*\.js\b|^\/worker-\*\.js\b/m.test(headersText)) {
+    fail('_headers contains broad /worker*.js or /worker-*.js immutable rule (would catch worker-basic.min.js)');
+  } else {
+    ok('_headers has no broad /worker*.js rule');
+  }
+}
+
+// 10. ngsw-config.json 不允许宽泛 worker glob
+const ngswConfigPath = path.join(REPO_ROOT, 'ngsw-config.json');
+if (existsFile(ngswConfigPath)) {
+  const ngswConfig = fs.readFileSync(ngswConfigPath, 'utf-8');
+  if (/"\/worker\*\.js"|"\/worker-\*\.js"/.test(ngswConfig)) {
+    fail('ngsw-config.json uses broad /worker*.js or /worker-*.js (would cache Angular safety workers)');
+  } else {
+    ok('ngsw-config.json has no broad worker glob');
+  }
+} else {
+  fail('ngsw-config.json missing');
+}
+
+// 11. dist/browser/ngsw.json 应用 assetGroups 不应包含 safety workers
+const ngswJsonPath = path.join(DIST, 'ngsw.json');
+if (existsFile(ngswJsonPath)) {
+  const ngswJson = JSON.parse(fs.readFileSync(ngswJsonPath, 'utf-8'));
+  const assetGroups = Array.isArray(ngswJson.assetGroups) ? ngswJson.assetGroups : [];
+  let safetyInAssets = false;
+  for (const group of assetGroups) {
+    const urls = Array.isArray(group?.urls) ? group.urls : [];
+    if (urls.some((u) => /\/(worker-basic\.min|safety-worker)\.js$/.test(u))) safetyInAssets = true;
+  }
+  if (safetyInAssets) fail('Generated ngsw.json includes worker-basic.min.js or safety-worker.js in assetGroups');
+  else ok('Generated ngsw.json does not list safety workers in assetGroups');
+} else {
+  fail('dist/browser/ngsw.json missing');
+}
+
+// 12. 非 hash 公共资源不应 immutable
+if (headersText) {
+  const lines = headersText.split('\n');
+  let pubRule = null;
+  for (const line of lines) {
+    const m = line.match(/^\/(assets|icons|fonts|widgets)\//);
+    if (m) { pubRule = m[0]; continue; }
+    if (/^\/[^\s]/.test(line)) { pubRule = null; continue; }
+    if (pubRule && /(immutable|max-age=31536000)/i.test(line)) {
+      fail(`Non-hash public path ${pubRule} uses immutable: "${line.trim()}"`);
+      pubRule = null;
+    }
+  }
+  ok('non-hash public paths (fonts/icons/assets/widgets) do not use immutable');
+}
+
+// 13. 应用 Web Worker chunk 必须有精确 immutable 规则
+const workerChunks = rootJs.filter((n) => /^worker-/.test(n) && n !== 'worker-basic.min.js');
+for (const chunk of workerChunks) {
+  if (!new RegExp(`^/${chunk.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'm').test(headersText)) {
+    fail(`Application worker chunk /${chunk} missing exact immutable rule in _headers`);
+  }
+}
+if (workerChunks.length > 0) ok(`${workerChunks.length} application worker chunk(s) have exact rules`);
+
+// 14. manifest.webmanifest 不含 vercel.app
+const manifestPath = path.join(DIST, 'manifest.webmanifest');
+if (existsFile(manifestPath)) {
+  const mf = fs.readFileSync(manifestPath, 'utf-8');
+  if (/vercel\.app/i.test(mf)) fail('dist/browser/manifest.webmanifest contains "vercel.app" — id/scope/start_url must be relative or canonical');
+  else ok('manifest.webmanifest contains no vercel.app reference');
+} else {
+  fail('dist/browser/manifest.webmanifest missing');
+}
+
+// 15. version.json 存在且合法
+const versionJsonPath = path.join(DIST, 'version.json');
+if (!existsFile(versionJsonPath)) {
+  fail('dist/browser/version.json missing — run `node scripts/generate-version-json.cjs`');
+} else {
+  try {
+    const vj = JSON.parse(fs.readFileSync(versionJsonPath, 'utf-8'));
+    const required = ['gitSha', 'buildTime', 'environment', 'appVersion', 'deploymentTarget'];
+    const missing = required.filter((k) => !(k in vj));
+    if (missing.length > 0) fail(`version.json missing fields: ${missing.join(', ')}`);
+    else ok(`version.json valid (gitSha=${String(vj.gitSha).slice(0, 8)}, target=${vj.deploymentTarget})`);
+    // 不得包含敏感字段
+    const forbidden = ['supabaseAnonKey', 'sentryDsn', 'cloudflareAccountId', 'cloudflareApiToken'];
+    const leaks = forbidden.filter((k) => k in vj);
+    if (leaks.length > 0) fail(`version.json leaks secrets: ${leaks.join(', ')}`);
+  } catch (e) {
+    fail(`version.json parse failed: ${e.message}`);
+  }
+}
+
+// 16. index.html 存在
+if (!existsFile(path.join(DIST, 'index.html'))) fail('dist/browser/index.html missing');
+else ok('index.html present');
+
+// 汇报
+console.log('');
+if (failures.length > 0) {
+  console.error('✗ check-deploy-artifacts FAILED:');
+  for (const f of failures) console.error('  • ' + f);
+  process.exit(1);
+}
+console.log(`✓ check-deploy-artifacts PASSED (${allFiles.length} files)`);

@@ -59,6 +59,7 @@ const ALLOWED_ORIGINS: string[] = (() => {
   return [
     'https://dde-eight.vercel.app',
     'https://nanoflow.app',
+    'https://nanoflow.pages.dev',  // Cloudflare canonical writable origin
     'http://localhost:4200',      // 开发环境
     'http://localhost:5173',      // Vite 开发服务器
   ];
@@ -83,7 +84,14 @@ function getCorsHeaders(origin: string | null): Record<string, string> {
       // SEC-M5: 用 URL 解析锚定 hostname，防止 evil-dde-xxx.vercel.app 绕过
       try {
         const url = new URL(origin);
-        isAllowed = url.hostname.startsWith(VERCEL_PREVIEW_PREFIX) && url.hostname.endsWith('.vercel.app');
+        // Vercel 预览
+        if (url.hostname.startsWith(VERCEL_PREVIEW_PREFIX) && url.hostname.endsWith('.vercel.app')) {
+          isAllowed = true;
+        }
+        // Cloudflare Pages PR preview：*.nanoflow.pages.dev
+        if (!isAllowed && url.protocol === 'https:' && url.hostname.endsWith('.nanoflow.pages.dev')) {
+          isAllowed = true;
+        }
       } catch { /* 非法 origin 忽略 */ }
     }
   }
