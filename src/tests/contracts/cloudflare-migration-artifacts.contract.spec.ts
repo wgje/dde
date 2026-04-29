@@ -28,6 +28,8 @@ describe('Cloudflare migration artifact contracts', () => {
     expect(workflow).toContain('needs: test');
     expect(workflow).toContain('wrangler@${WRANGLER_VERSION}');
     expect(workflow).toContain('CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}');
+    expect(workflow).toContain('vars.CLOUDFLARE_PAGES_PROJECT_NAME');
+    expect(workflow).toContain('Inferred Cloudflare Pages project name from CANONICAL_PRODUCTION_ORIGIN');
 
     const beforeDeploy = workflow.split('- name: Deploy to Cloudflare Pages')[0] ?? workflow;
     expect(beforeDeploy).not.toContain('CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}');

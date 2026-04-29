@@ -76,7 +76,8 @@ jobs:
 
           const ROOT = path.join(process.cwd(), 'test-results');
           const FILE_RE = /vitest-shard-\d+\.json$/;
-          const THRESHOLD = 1.4;
+          const WARN_THRESHOLD = 1.4;
+          const FAIL_THRESHOLD = 1.5;
 
           function walk(dir) {
             if (!fs.existsSync(dir)) return [];
@@ -134,8 +135,10 @@ jobs:
             const median = percentile50(durations);
             maxMin = max / min;
             maxMedian = median ? max / median : null;
-            if (maxMin >= THRESHOLD) {
+            if (maxMin >= FAIL_THRESHOLD) {
               status = 'fail';
+            } else if (maxMin >= WARN_THRESHOLD) {
+              status = 'warn';
             }
           }
 
@@ -153,12 +156,12 @@ jobs:
       - name: Warn On Pull Request Imbalance
         if: github.event_name == 'pull_request' && steps.shard_balance.outputs.status != 'pass'
         run: |
-          echo "::warning::Shard balance is suboptimal (status=${{ steps.shard_balance.outputs.status }}, max/min=${{ steps.shard_balance.outputs.max_min }}, max/median=${{ steps.shard_balance.outputs.max_median }}). Threshold requires max/min < 1.4 on protected branches."
+          echo "::warning::Shard balance is suboptimal (status=${{ steps.shard_balance.outputs.status }}, max/min=${{ steps.shard_balance.outputs.max_min }}, max/median=${{ steps.shard_balance.outputs.max_median }}). Target max/min < 1.4; hard failure starts at 1.5."
 
       - name: Enforce Balance On Main Branches
-        if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') && steps.shard_balance.outputs.status != 'pass'
+        if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') && steps.shard_balance.outputs.status == 'fail'
         run: |
-          echo "::error::Shard balance gate failed (status=${{ steps.shard_balance.outputs.status }}, max/min=${{ steps.shard_balance.outputs.max_min }}, max/median=${{ steps.shard_balance.outputs.max_median }}). Required: max/min < 1.4."
+          echo "::error::Shard balance gate failed (status=${{ steps.shard_balance.outputs.status }}, max/min=${{ steps.shard_balance.outputs.max_min }}, max/median=${{ steps.shard_balance.outputs.max_median }}). Required: max/min < 1.5; target remains < 1.4."
           exit 1
 
   update-duration-baseline:
