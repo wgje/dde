@@ -19,6 +19,7 @@ import { TaskConnectionService } from './task-connection.service';
 import { ParkingService } from './parking.service';
 import { ProjectStateService } from './project-state.service';
 import { TaskRecordTrackingService } from './task-record-tracking.service';
+import { TombstoneService } from '../core-bridge';
 import { Project, Task, Connection } from '../models';
 
 const mockLoggerCategory = {
@@ -35,6 +36,10 @@ const mockLoggerService = {
 const mockParkingService = {
   handleTaskSoftDelete: vi.fn(),
   handleTaskStatusChange: vi.fn(),
+};
+
+const mockTombstoneService = {
+  clearLocalTombstones: vi.fn(),
 };
 
 function createTask(overrides: Partial<Task>): Task {
@@ -119,6 +124,7 @@ describe('TaskOperationService (deletedMeta restore)', () => {
         { provide: ToastService, useClass: ToastService },
         { provide: LoggerService, useValue: mockLoggerService },
         { provide: ParkingService, useValue: mockParkingService },
+        { provide: TombstoneService, useValue: mockTombstoneService },
         { provide: TaskTrashService, useClass: TaskTrashService },
         { provide: SubtreeOperationsService, useClass: SubtreeOperationsService },
         { provide: TaskCreationService, useClass: TaskCreationService },
@@ -285,6 +291,7 @@ describe('TaskOperationService (moveTaskToStage parentId validation)', () => {
         { provide: ToastService, useClass: ToastService },
         { provide: LoggerService, useValue: mockLoggerService },
         { provide: ParkingService, useValue: mockParkingService },
+        { provide: TombstoneService, useValue: mockTombstoneService },
         { provide: TaskTrashService, useClass: TaskTrashService },
         { provide: SubtreeOperationsService, useClass: SubtreeOperationsService },
         { provide: TaskCreationService, useClass: TaskCreationService },
@@ -459,6 +466,7 @@ describe('TaskOperationService (database constraint validation)', () => {
         { provide: ToastService, useClass: ToastService },
         { provide: LoggerService, useValue: mockLoggerService },
         { provide: ParkingService, useValue: mockParkingService },
+        { provide: TombstoneService, useValue: mockTombstoneService },
         { provide: TaskTrashService, useClass: TaskTrashService },
         { provide: SubtreeOperationsService, useClass: SubtreeOperationsService },
         { provide: TaskCreationService, useClass: TaskCreationService },

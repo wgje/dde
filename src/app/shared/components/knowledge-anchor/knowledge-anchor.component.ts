@@ -81,16 +81,18 @@ function loadPopoverModule(): Promise<typeof import('./knowledge-anchor-popover.
           <div class="mt-3 max-h-[42vh] overflow-y-auto text-xs text-slate-600 dark:text-stone-300">
             @if (sheetResult().status === 'loading') {
               <div>正在读取思源块…</div>
-            } @else if (sheetResult().preview; as preview) {
-              <p class="whitespace-pre-wrap">{{ preview.excerpt || preview.plainText || '该块暂无可预览文本' }}</p>
-              @if (preview.childBlocks?.length) {
-                <ul class="mt-2 list-disc pl-4">
-                  @for (child of preview.childBlocks; track child.id) { <li>{{ child.content }}</li> }
-                </ul>
-              }
-              @if (preview.truncated) { <div class="mt-2 text-[10px] text-slate-400">更多内容请打开思源</div> }
             } @else {
-              <div class="rounded-lg bg-slate-50 p-2 text-slate-500 dark:bg-stone-800 dark:text-stone-400">{{ sheetErrorMessage() }}</div>
+              @if (sheetResult().preview; as preview) {
+                <p class="whitespace-pre-wrap">{{ preview.excerpt || preview.plainText || '该块暂无可预览文本' }}</p>
+                @if (preview.childBlocks?.length) {
+                  <ul class="mt-2 list-disc pl-4">
+                    @for (child of preview.childBlocks; track child.id) { <li>{{ child.content }}</li> }
+                  </ul>
+                }
+                @if (preview.truncated) { <div class="mt-2 text-[10px] text-slate-400">更多内容请打开思源</div> }
+              } @else {
+                <div class="rounded-lg bg-slate-50 p-2 text-slate-500 dark:bg-stone-800 dark:text-stone-400">{{ sheetErrorMessage() }}</div>
+              }
             }
           </div>
           <div class="mt-4 grid grid-cols-3 gap-2">

@@ -3,7 +3,8 @@
  * scripts/ci/check-build-deterministic.cjs
  *
  * §16.25 Angular 构建确定性门禁。
- * 两次 clean build 比对 hashed JS/CSS、modulepreload、ngsw.json。
+ * 两次 clean build 比对 hashed JS/CSS、modulepreload、ngsw.json 稳定内容、
+ * version.json 稳定字段和 artifact-manifest.json。
  *
  * 用法：
  *   node scripts/ci/check-build-deterministic.cjs
@@ -24,6 +25,62 @@ const B = path.join(TMP, 'build-b');
 
 function sha256(file) {
   return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+}
+
+function readJson(file) {
+  return JSON.parse(fs.readFileSync(file, 'utf-8'));
+}
+
+function stableJson(value) {
+  if (Array.isArray(value)) return value.map(stableJson);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.keys(value)
+        .sort()
+        .map((key) => [key, stableJson(value[key])])
+    );
+  }
+  return value;
+}
+
+function normalizeNgswManifest(ngsw) {
+  const normalized = structuredClone(ngsw);
+  delete normalized.timestamp;
+  return stableJson(normalized);
+}
+
+function stableVersionJson(version) {
+  const normalized = { ...version };
+  delete normalized.buildTime;
+  return stableJson(normalized);
+}
+
+function stableObjectHash(value) {
+  return crypto
+    .createHash('sha256')
+    .update(JSON.stringify(stableJson(value)))
+    .digest('hex');
+}
+
+function normalizeArtifactManifest(manifest, dir) {
+  const normalized = structuredClone(manifest);
+  const files = normalized.files && typeof normalized.files === 'object'
+    ? normalized.files
+    : {};
+
+  if (files['/ngsw.json'] && fs.existsSync(path.join(dir, 'ngsw.json'))) {
+    files['/ngsw.json'].sha256 = stableObjectHash(normalizeNgswManifest(readJson(path.join(dir, 'ngsw.json'))));
+  }
+
+  if (files['/version.json'] && fs.existsSync(path.join(dir, 'version.json'))) {
+    files['/version.json'].sha256 = stableObjectHash(stableVersionJson(readJson(path.join(dir, 'version.json'))));
+  }
+
+  if (normalized.ngswHash && fs.existsSync(path.join(dir, 'ngsw.json'))) {
+    normalized.ngswHash = stableObjectHash(normalizeNgswManifest(readJson(path.join(dir, 'ngsw.json'))));
+  }
+
+  return stableJson(normalized);
 }
 
 function findHashedAssets(dir) {
@@ -95,30 +152,68 @@ if (manA !== manB) {
   console.log('✓ Hashed asset manifest identical (' + manA.split('\n').length + ' files)');
 }
 
-// 比对 ngsw.json
+// 比对 ngsw.json。Angular 会写入构建时 timestamp；迁移门禁比较其余稳定 SW 内容。
 const ngswA = path.join(A, 'ngsw.json');
 const ngswB = path.join(B, 'ngsw.json');
 if (fs.existsSync(ngswA) && fs.existsSync(ngswB)) {
-  if (sha256(ngswA) !== sha256(ngswB)) {
-    console.error('✗ ngsw.json differs between builds');
+  const stableA = JSON.stringify(normalizeNgswManifest(readJson(ngswA)), null, 2);
+  const stableB = JSON.stringify(normalizeNgswManifest(readJson(ngswB)), null, 2);
+  if (stableA !== stableB) {
+    fs.writeFileSync(path.join(TMP, 'deterministic-ngsw.diff'), `--- A ---\n${stableA}\n\n--- B ---\n${stableB}\n`);
+    console.error('✗ ngsw.json stable content differs between builds');
     failed = true;
   } else {
-    console.log('✓ ngsw.json identical');
+    console.log('✓ ngsw.json stable content identical (timestamp ignored)');
   }
 }
 
-// 比对 index.html modulepreload
-const htmlA = fs.readFileSync(path.join(A, 'index.html'), 'utf-8');
-const htmlB = fs.readFileSync(path.join(B, 'index.html'), 'utf-8');
-const mpA = extractModulepreload(htmlA);
-const mpB = extractModulepreload(htmlB);
-if (JSON.stringify(mpA) !== JSON.stringify(mpB)) {
-  console.error('✗ index.html modulepreload list differs');
-  console.error('  A: ' + JSON.stringify(mpA));
-  console.error('  B: ' + JSON.stringify(mpB));
-  failed = true;
-} else {
-  console.log(`✓ modulepreload list identical (${mpA.length} entries)`);
+function compareModulepreload(fileName) {
+  const fileA = path.join(A, fileName);
+  const fileB = path.join(B, fileName);
+  if (!fs.existsSync(fileA) || !fs.existsSync(fileB)) return;
+  const mpA = extractModulepreload(fs.readFileSync(fileA, 'utf-8'));
+  const mpB = extractModulepreload(fs.readFileSync(fileB, 'utf-8'));
+  if (JSON.stringify(mpA) !== JSON.stringify(mpB)) {
+    console.error(`✗ ${fileName} modulepreload list differs`);
+    console.error('  A: ' + JSON.stringify(mpA));
+    console.error('  B: ' + JSON.stringify(mpB));
+    failed = true;
+  } else {
+    console.log(`✓ ${fileName} modulepreload list identical (${mpA.length} entries)`);
+  }
+}
+
+compareModulepreload('index.html');
+// launch.html modulepreload is part of the static deploy artifact contract.
+compareModulepreload('launch.html');
+
+const versionA = path.join(A, 'version.json');
+const versionB = path.join(B, 'version.json');
+if (fs.existsSync(versionA) && fs.existsSync(versionB)) {
+  const stableA = JSON.stringify(stableVersionJson(readJson(versionA)), null, 2);
+  const stableB = JSON.stringify(stableVersionJson(readJson(versionB)), null, 2);
+  if (stableA !== stableB) {
+    console.error('✗ version.json stable fields differ between builds');
+    console.error('  A: ' + stableA);
+    console.error('  B: ' + stableB);
+    failed = true;
+  } else {
+    console.log('✓ version.json stable fields identical (buildTime ignored)');
+  }
+}
+
+const artifactA = path.join(A, 'artifact-manifest.json');
+const artifactB = path.join(B, 'artifact-manifest.json');
+if (fs.existsSync(artifactA) && fs.existsSync(artifactB)) {
+  const stableA = JSON.stringify(normalizeArtifactManifest(readJson(artifactA), A), null, 2);
+  const stableB = JSON.stringify(normalizeArtifactManifest(readJson(artifactB), B), null, 2);
+  if (stableA !== stableB) {
+    fs.writeFileSync(path.join(TMP, 'deterministic-artifact-manifest.diff'), `--- A ---\n${stableA}\n\n--- B ---\n${stableB}\n`);
+    console.error('✗ artifact-manifest.json stable content differs between builds');
+    failed = true;
+  } else {
+    console.log('✓ artifact-manifest.json stable content identical');
+  }
 }
 
 if (failed) {

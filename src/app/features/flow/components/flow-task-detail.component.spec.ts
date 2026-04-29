@@ -544,11 +544,14 @@ describe('FlowTaskDetailComponent - Task Switching Fix', () => {
       component.onPreviewClick(createClickEvent(400));
       expect(component.isEditMode()).toBe(true);
 
-      const removeAllRanges = vi.fn();
+      let selectionActive = true;
+      const removeAllRanges = vi.fn(() => {
+        selectionActive = false;
+      });
       const getSelectionSpy = vi.spyOn(window, 'getSelection').mockReturnValue({
-        toString: () => 'Task',
-        rangeCount: 1,
-        isCollapsed: false,
+        toString: () => selectionActive ? 'Task' : '',
+        rangeCount: selectionActive ? 1 : 0,
+        isCollapsed: !selectionActive,
         removeAllRanges,
       } as unknown as Selection);
 

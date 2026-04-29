@@ -955,7 +955,7 @@ export class AuthService {
 
       // 【P1 修复 2026-02-08】给重置密码加超时保护
       const resetPromise = client.auth.resetPasswordForEmail(email, {
-        redirectTo: `${window.location.origin}/reset-password`
+        redirectTo: `${this.getAuthRedirectOrigin()}/reset-password`
       });
       const timeoutPromise = new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error('请求超时，请检查网络连接后重试')), this.SIGN_IN_TIMEOUT)
@@ -977,6 +977,27 @@ export class AuthService {
     } finally {
       this.authState.update(s => ({ ...s, isLoading: false }));
     }
+  }
+
+  private getAuthRedirectOrigin(): string {
+    const env = environment as unknown as {
+      production?: boolean;
+      canonicalOrigin?: string;
+      deploymentTarget?: string;
+    };
+    const canonicalOrigin = typeof env.canonicalOrigin === 'string'
+      ? env.canonicalOrigin.trim().replace(/\/+$/, '')
+      : '';
+
+    if (
+      canonicalOrigin
+      && /^https?:\/\//i.test(canonicalOrigin)
+      && (env.production === true || env.deploymentTarget === 'production')
+    ) {
+      return canonicalOrigin;
+    }
+
+    return window.location.origin;
   }
 
   /**

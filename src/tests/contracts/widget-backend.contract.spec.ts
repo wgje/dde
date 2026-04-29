@@ -155,6 +155,10 @@ describe('Widget backend foundation contract', () => {
     expect(androidOnlyRetirementMigration).toContain('widget_devices_legacy_retired');
     expect(androidOnlyRetirementMigration).toContain('widget_instances_legacy_retired');
     expect(androidOnlyRetirementMigration).toContain('desktop-widget-retired');
+    expect(androidOnlyRetirementMigration).toContain('ALTER TABLE public.widget_devices_legacy_retired ENABLE ROW LEVEL SECURITY');
+    expect(androidOnlyRetirementMigration).toContain('GRANT SELECT ON TABLE public.widget_devices_legacy_retired TO service_role');
+    expect(androidOnlyRetirementMigration).toContain('ALTER TABLE public.widget_instances_legacy_retired ENABLE ROW LEVEL SECURITY');
+    expect(androidOnlyRetirementMigration).toContain('GRANT SELECT ON TABLE public.widget_instances_legacy_retired TO service_role');
     expect(androidOnlyRetirementMigration).toContain('DELETE FROM public.widget_devices');
     expect(androidOnlyRetirementMigration).toContain('DELETE FROM public.widget_instances');
     expect(androidOnlyRetirementMigration).toContain("CHECK (platform IN ('android-widget'))");
@@ -163,6 +167,10 @@ describe('Widget backend foundation contract', () => {
     expect(capabilityRulesBackfillMigration).toContain("'widget_capabilities'");
     expect(capabilityRulesBackfillMigration).toContain("'rules', jsonb_build_array()");
     expect(capabilityRulesBackfillMigration).toContain("ON CONFLICT (key) DO UPDATE");
+    expect(capabilityRulesBackfillMigration).toContain('REVOKE ALL ON FUNCTION public.cleanup_old_deleted_tasks() FROM PUBLIC, anon, authenticated');
+    expect(capabilityRulesBackfillMigration).toContain('GRANT EXECUTE ON FUNCTION public.cleanup_old_deleted_tasks() TO service_role');
+    expect(capabilityRulesBackfillMigration).toContain('REVOKE ALL ON FUNCTION public.cleanup_old_deleted_connections() FROM PUBLIC, anon, authenticated');
+    expect(capabilityRulesBackfillMigration).toContain('GRANT EXECUTE ON FUNCTION public.cleanup_old_deleted_connections() TO service_role');
     expect(initSql).toContain('CREATE OR REPLACE FUNCTION public.invoke_widget_notify_webhook()');
     expect(initSql).toContain("v_event_id || '.' || v_timestamp || '.' || v_payload::text");
     expect(initSql).toContain("regexp_replace(trim(public.get_vault_secret('widget_notify_webhook_secret')), '^v1,whsec_', '')");

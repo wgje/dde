@@ -9,6 +9,10 @@
   ! Link
 
 # Freshness 关键路径：必须 no-store，禁止边缘/浏览器缓存
+/
+  Cache-Control: no-store, no-cache, must-revalidate
+  Pragma: no-cache
+
 /index.html
   Cache-Control: no-store, no-cache, must-revalidate
   Pragma: no-cache

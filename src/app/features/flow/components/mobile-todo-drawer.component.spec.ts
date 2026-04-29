@@ -65,6 +65,12 @@ const mockEffectScheduler: EffectScheduler = {
   flush: vi.fn(),
   remove: vi.fn(),
 };
+
+const mockNgZone: Pick<NgZone, 'run' | 'runOutsideAngular'> = {
+  run: <T>(fn: (...args: unknown[]) => T) => fn(),
+  runOutsideAngular: <T>(fn: (...args: unknown[]) => T) => fn(),
+};
+
 describe('MobileTodoDrawerComponent', () => {
   let component: MobileTodoDrawerComponent;
 
@@ -89,7 +95,7 @@ describe('MobileTodoDrawerComponent', () => {
         },
         {
           provide: NgZone,
-          useFactory: () => new NgZone({ enableLongStackTrace: false }),
+          useValue: mockNgZone,
         },
         {
           provide: ChangeDetectionScheduler,

@@ -17,12 +17,13 @@ import { openIndexedDBAdaptive } from '../../../../utils/indexeddb-open';
 /** IndexedDB 数据库配置 */
 export const DB_CONFIG = {
   name: 'nanoflow-store-cache',
-  version: 2,
+  version: 3,
   stores: {
     projects: 'projects',
     tasks: 'tasks',
     connections: 'connections',
-    meta: 'meta'
+    meta: 'meta',
+    syncCursors: 'sync_cursors'
   }
 } as const;
 
@@ -127,6 +128,10 @@ export class IndexedDBService {
 
     if (!db.objectStoreNames.contains(DB_CONFIG.stores.meta)) {
       db.createObjectStore(DB_CONFIG.stores.meta, { keyPath: 'key' });
+    }
+
+    if (!db.objectStoreNames.contains(DB_CONFIG.stores.syncCursors)) {
+      db.createObjectStore(DB_CONFIG.stores.syncCursors, { keyPath: 'key' });
     }
   }
 

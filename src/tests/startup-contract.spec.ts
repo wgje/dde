@@ -6,6 +6,29 @@ const normalizeTemplateLiteralSource = (value: string | undefined): string | und
   value?.trim().replace(/\\\$\{/g, '${');
 
 describe('startup launch contract', () => {
+  it('app tsconfig should not inherit root test/build tool entries into Angular production compilation', () => {
+    const tsconfigPath = path.join(process.cwd(), 'tsconfig.app.json');
+    const tsconfig = JSON.parse(fs.readFileSync(tsconfigPath, 'utf8')) as {
+      include?: string[];
+      files?: string[];
+    };
+
+    expect(tsconfig.files).toContain('./main.ts');
+    expect(tsconfig.include).toEqual([]);
+  });
+
+  it('Angular control-flow aliases should stay on primary @if blocks', () => {
+    const files = [
+      'src/app/shared/components/knowledge-anchor/knowledge-anchor.component.ts',
+      'src/app/shared/components/knowledge-anchor/knowledge-anchor-popover.component.ts',
+    ];
+
+    for (const file of files) {
+      const source = fs.readFileSync(path.join(process.cwd(), file), 'utf8');
+      expect(source).not.toMatch(/@else\s+if\s*\([\s\S]*?;\s*as\s+\w+[\s\S]*?\)/);
+    }
+  });
+
   it('ngsw-config app-core resources should explicitly cache polyfills entry chunks', () => {
     const ngswConfigPath = path.join(process.cwd(), 'ngsw-config.json');
     const ngswConfig = JSON.parse(fs.readFileSync(ngswConfigPath, 'utf8'));

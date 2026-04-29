@@ -15,6 +15,8 @@ import { ThemeService } from '../../../services/theme.service';
 import { DockEngineService } from '../../../services/dock-engine.service';
 import { FocusPreferenceService } from '../../../services/focus-preference.service';
 import { GateService } from '../../../services/gate.service';
+import { ExternalSourceCacheService } from '../../core/external-sources/external-source-cache.service';
+import { SiyuanPreviewService } from '../../core/external-sources/siyuan/siyuan-preview.service';
 
 describe('SettingsModalComponent', () => {
   let fixture: ComponentFixture<SettingsModalComponent>;
@@ -59,6 +61,12 @@ describe('SettingsModalComponent', () => {
     warn: vi.fn(),
     info: vi.fn(),
     debug: vi.fn(),
+    category: vi.fn(() => ({
+      error: vi.fn(),
+      warn: vi.fn(),
+      info: vi.fn(),
+      debug: vi.fn(),
+    })),
   };
 
   const mockPreferenceService = {
@@ -144,6 +152,21 @@ describe('SettingsModalComponent', () => {
     devForceShowGate: vi.fn(),
   };
 
+  const mockSiyuanCache = {
+    loadConfig: vi.fn().mockResolvedValue({
+      runtimeMode: 'extension-relay',
+      baseUrl: 'http://127.0.0.1:6806',
+      token: undefined,
+    }),
+    saveConfig: vi.fn().mockResolvedValue(undefined),
+    clearPreviewCache: vi.fn().mockResolvedValue(undefined),
+    forgetConfig: vi.fn().mockResolvedValue(undefined),
+  };
+
+  const mockSiyuanPreview = {
+    diagnoseConnection: vi.fn().mockResolvedValue({ ok: true, mode: 'extension-relay' }),
+  };
+
   beforeEach(async () => {
     vi.clearAllMocks();
     currentUserId.set('user-1');
@@ -185,6 +208,8 @@ describe('SettingsModalComponent', () => {
         { provide: DockEngineService, useValue: mockDockEngine },
         { provide: FocusPreferenceService, useValue: mockFocusPreferenceService },
         { provide: GateService, useValue: mockGateService },
+        { provide: ExternalSourceCacheService, useValue: mockSiyuanCache },
+        { provide: SiyuanPreviewService, useValue: mockSiyuanPreview },
       ],
     }).compileComponents();
 

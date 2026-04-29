@@ -769,7 +769,13 @@ export class StorePersistenceService {
       const db = await this.initDatabase();
       
       const transaction = db.transaction(
-        [DB_CONFIG.stores.projects, DB_CONFIG.stores.tasks, DB_CONFIG.stores.connections, DB_CONFIG.stores.meta],
+        [
+          DB_CONFIG.stores.projects,
+          DB_CONFIG.stores.tasks,
+          DB_CONFIG.stores.connections,
+          DB_CONFIG.stores.meta,
+          DB_CONFIG.stores.syncCursors,
+        ],
         'readwrite'
       );
       
@@ -777,6 +783,7 @@ export class StorePersistenceService {
       transaction.objectStore(DB_CONFIG.stores.tasks).clear();
       transaction.objectStore(DB_CONFIG.stores.connections).clear();
       transaction.objectStore(DB_CONFIG.stores.meta).clear();
+      transaction.objectStore(DB_CONFIG.stores.syncCursors).clear();
       
       await new Promise<void>((resolve, reject) => {
         transaction.oncomplete = () => resolve();

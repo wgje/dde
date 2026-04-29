@@ -84,8 +84,8 @@ export const FOCUS_CONFIG = {
     IDB_PREFIX: 'focus_',
     /** IndexedDB 数据库名称 */
     IDB_NAME: 'focus_mode',
-    /** IndexedDB 版本 - v3: 新增 parked_tasks store（State Overlap） */
-    IDB_VERSION: 3,
+    /** IndexedDB 版本 - v4: sync_metadata 游标升级为 { updatedAt, id } 组合水位 */
+    IDB_VERSION: 4,
   },
   
   // IndexedDB Object Store 名称

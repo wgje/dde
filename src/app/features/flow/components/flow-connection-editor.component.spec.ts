@@ -211,19 +211,31 @@ describe('FlowConnectionEditorComponent', () => {
       removeAllRanges,
     } as unknown as Selection);
 
+    const outsideBlank = document.createElement('div');
+    outsideBlank.tabIndex = -1;
+    document.body.appendChild(outsideBlank);
+    outsideBlank.focus();
+    const activeElementSpy = vi.spyOn(document, 'activeElement', 'get').mockReturnValue(outsideBlank);
+
     try {
-      const outsideBlank = document.createElement('div');
       component.onDocumentClick(createPreviewMouseEvent(outsideBlank));
 
       expect(removeAllRanges).toHaveBeenCalledTimes(1);
       expect(closeSpy).not.toHaveBeenCalled();
 
-      getSelectionSpy.mockRestore();
+      getSelectionSpy.mockReturnValue({
+        toString: () => '',
+        rangeCount: 0,
+        isCollapsed: true,
+        removeAllRanges: vi.fn(),
+      } as unknown as Selection);
       component.onDocumentClick(createPreviewMouseEvent(outsideBlank));
 
       expect(closeSpy).toHaveBeenCalledTimes(1);
     } finally {
+      activeElementSpy.mockRestore();
       getSelectionSpy.mockRestore();
+      outsideBlank.remove();
     }
   });
 

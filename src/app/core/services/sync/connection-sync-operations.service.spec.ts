@@ -40,6 +40,7 @@ describe('ConnectionSyncOperationsService', () => {
   const mockRetryQueue = {
     checkCircuitBreaker: vi.fn(() => true),
     add: vi.fn(() => true),
+    recordCircuitFailure: vi.fn(),
     recordCircuitSuccess: vi.fn(),
     length: 0,
   };

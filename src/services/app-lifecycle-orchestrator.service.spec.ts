@@ -37,6 +37,7 @@ describe('AppLifecycleOrchestratorService', () => {
     info: ReturnType<typeof vi.fn>;
     warning: ReturnType<typeof vi.fn>;
   };
+  let originalRequestIdleCallbackDescriptor: PropertyDescriptor | undefined;
   const originalResumeInteractionFirst = FEATURE_FLAGS.RESUME_INTERACTION_FIRST_V1;
   const originalPulseDedup = FEATURE_FLAGS.RESUME_PULSE_DEDUP_V1;
 
@@ -47,9 +48,27 @@ describe('AppLifecycleOrchestratorService', () => {
     });
   };
 
+  const flushResumeWithoutDrainingLongTimers = async (): Promise<void> => {
+    for (let i = 0; i < 10; i += 1) {
+      await Promise.resolve();
+    }
+  };
+
   beforeEach(() => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-02-14T00:00:00.000Z'));
+    originalRequestIdleCallbackDescriptor = Object.getOwnPropertyDescriptor(window, 'requestIdleCallback');
+    Object.defineProperty(window, 'requestIdleCallback', {
+      configurable: true,
+      writable: true,
+      value: vi.fn((callback: IdleRequestCallback) => {
+        queueMicrotask(() => callback({
+          didTimeout: false,
+          timeRemaining: () => 50,
+        } as IdleDeadline));
+        return 1;
+      }),
+    });
     (FEATURE_FLAGS as unknown as Record<string, boolean>).RESUME_INTERACTION_FIRST_V1 = originalResumeInteractionFirst;
     (FEATURE_FLAGS as unknown as Record<string, boolean>).RESUME_PULSE_DEDUP_V1 = originalPulseDedup;
 
@@ -127,6 +146,12 @@ describe('AppLifecycleOrchestratorService', () => {
   afterEach(() => {
     (FEATURE_FLAGS as unknown as Record<string, boolean>).RESUME_INTERACTION_FIRST_V1 = originalResumeInteractionFirst;
     (FEATURE_FLAGS as unknown as Record<string, boolean>).RESUME_PULSE_DEDUP_V1 = originalPulseDedup;
+    TestBed.resetTestingModule();
+    if (originalRequestIdleCallbackDescriptor) {
+      Object.defineProperty(window, 'requestIdleCallback', originalRequestIdleCallbackDescriptor);
+    } else {
+      delete (window as Window & { requestIdleCallback?: Window['requestIdleCallback'] }).requestIdleCallback;
+    }
     vi.useRealTimers();
   });
 
@@ -163,7 +188,7 @@ describe('AppLifecycleOrchestratorService', () => {
     setVisibilityState('visible');
     document.dispatchEvent(new Event('visibilitychange'));
 
-    await vi.runAllTimersAsync();
+    await flushResumeWithoutDrainingLongTimers();
 
     expect(mockSessionManager.validateOrRefreshOnResume).toHaveBeenCalled();
     expect(mockSimpleSync.recoverAfterResume).toHaveBeenCalledTimes(2);
@@ -234,14 +259,14 @@ describe('AppLifecycleOrchestratorService', () => {
     });
 
     await service.triggerResume('visibility-threshold');
-    await vi.runAllTimersAsync();
+    await flushResumeWithoutDrainingLongTimers();
 
     expect(mockSessionManager.validateOrRefreshOnResume).not.toHaveBeenCalled();
   });
 
   it('应产出恢复指标快照（interaction + background）', async () => {
     await service.triggerResume('visibility-threshold');
-    await vi.runAllTimersAsync();
+    await flushResumeWithoutDrainingLongTimers();
 
     const metrics = service.getLastRecoveryMetrics();
     expect(metrics).toBeTruthy();
@@ -259,7 +284,7 @@ describe('AppLifecycleOrchestratorService', () => {
 
     try {
       await service.triggerResume('visibility-quick');
-      await vi.runAllTimersAsync();
+      await flushResumeWithoutDrainingLongTimers();
 
       const metrics = service.getLastRecoveryMetrics();
       expect(metrics).toBeTruthy();
@@ -275,7 +300,7 @@ describe('AppLifecycleOrchestratorService', () => {
     const pageshow = new Event('pageshow') as PageTransitionEvent;
     Object.defineProperty(pageshow, 'persisted', { value: false });
     window.dispatchEvent(pageshow);
-    await vi.runAllTimersAsync();
+    await flushResumeWithoutDrainingLongTimers();
 
     expect(mockSessionManager.validateOrRefreshOnResume).not.toHaveBeenCalled();
     expect(mockSimpleSync.recoverAfterResume).not.toHaveBeenCalled();
@@ -331,7 +356,7 @@ describe('AppLifecycleOrchestratorService', () => {
 
     setVisibilityState('visible');
     document.dispatchEvent(new Event('visibilitychange'));
-    await vi.runAllTimersAsync();
+    await flushResumeWithoutDrainingLongTimers();
 
     expect(mockSessionManager.validateOrRefreshOnResume).toHaveBeenCalledTimes(2);
     expect(mockSimpleSync.recoverAfterResume).toHaveBeenCalled();
@@ -355,9 +380,9 @@ describe('AppLifecycleOrchestratorService', () => {
     (FEATURE_FLAGS as unknown as Record<string, boolean>).RESUME_PULSE_DEDUP_V1 = true;
 
     await service.triggerResume('visibility-threshold');
-    await vi.runAllTimersAsync();
+    await flushResumeWithoutDrainingLongTimers();
     await service.triggerResume('visibility-threshold');
-    await vi.runAllTimersAsync();
+    await flushResumeWithoutDrainingLongTimers();
 
     const heavyCalls = mockSimpleSync.recoverAfterResume.mock.calls.filter(
       ([, options]) => options?.mode === 'heavy'
@@ -376,11 +401,11 @@ describe('AppLifecycleOrchestratorService', () => {
     vi.setSystemTime(new Date(Date.now() + APP_LIFECYCLE_CONFIG.RESUME_THRESHOLD_MS + 10));
     setVisibilityState('visible');
     document.dispatchEvent(new Event('visibilitychange'));
-    await vi.runAllTimersAsync();
+    await flushResumeWithoutDrainingLongTimers();
 
     window.dispatchEvent(new Event('focus'));
     window.dispatchEvent(new Event('online'));
-    await vi.runAllTimersAsync();
+    await flushResumeWithoutDrainingLongTimers();
 
     const heavyCalls = mockSimpleSync.recoverAfterResume.mock.calls.filter(
       ([, options]) => options?.mode === 'heavy'
@@ -401,7 +426,7 @@ describe('AppLifecycleOrchestratorService', () => {
     setVisibilityState('visible');
     document.dispatchEvent(new Event('visibilitychange'));
 
-    await vi.runAllTimersAsync();
+    await flushResumeWithoutDrainingLongTimers();
 
     expect(mockFocusStartupProbe.recheckGate).toHaveBeenCalledTimes(1);
     expect(mockFocusStartupProbe.recheckGate).toHaveBeenCalledWith({
@@ -424,7 +449,7 @@ describe('AppLifecycleOrchestratorService', () => {
     setVisibilityState('visible');
     document.dispatchEvent(new Event('visibilitychange'));
 
-    await vi.runAllTimersAsync();
+    await flushResumeWithoutDrainingLongTimers();
 
     expect(mockFocusStartupProbe.recheckGate).toHaveBeenCalledTimes(2);
     expect(mockFocusStartupProbe.recheckGate).toHaveBeenNthCalledWith(1, {
@@ -448,7 +473,7 @@ describe('AppLifecycleOrchestratorService', () => {
     setVisibilityState('visible');
     document.dispatchEvent(new Event('visibilitychange'));
 
-    await vi.runAllTimersAsync();
+    await flushResumeWithoutDrainingLongTimers();
 
     expect(mockFocusStartupProbe.recheckGate).toHaveBeenCalledTimes(2);
     expect(mockFocusStartupProbe.recheckGate).toHaveBeenNthCalledWith(1, {

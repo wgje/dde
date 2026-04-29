@@ -400,11 +400,12 @@ export class CircuitBreakerService {
     const dropCount = previousCount - currentCount;
     const dropRatio = dropCount / previousCount;
     
-    // 计算动态阈值（大项目更宽松：阈值随项目规模上浮，上限 0.95）
-    // 注意：Math.min(cap, base + x) 而非 Math.min(base, base+x)（后者始终等于 base）
+    // 计算动态阈值（超大项目更宽松：从 100 个任务以上开始，每 100 个任务上浮 1%，上限 0.95）
+    // 中等项目仍以 80% 作为 L3 硬熔断边界，避免 100 → 15 这类明显丢失被降级为 L2。
+    const dynamicAdjustment = Math.max(0, previousCount - 100) / 100 * config.DYNAMIC_THRESHOLD_FACTOR;
     const dynamicL3Threshold = Math.min(
       0.95,
-      config.L3_HARD_BLOCK_THRESHOLD + (previousCount * config.DYNAMIC_THRESHOLD_FACTOR)
+      config.L3_HARD_BLOCK_THRESHOLD + dynamicAdjustment
     );
     
     // 小项目使用绝对值阈值

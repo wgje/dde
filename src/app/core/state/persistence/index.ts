@@ -9,3 +9,10 @@ export type { IntegrityIssue, IntegrityCheckResult, WriteVerifyResult } from './
 export { IndexedDBService, DB_CONFIG } from './indexeddb.service';
 export { BackupService } from './backup.service';
 export { DeltaSyncPersistenceService } from './delta-sync-persistence.service';
+export {
+  SyncCursorPersistenceService,
+  compareProjectSyncCursor,
+  isProjectSyncCursor,
+  projectCursorFromLegacyTimestamp,
+} from './sync-cursor-persistence.service';
+export type { ProjectSyncCursor, ProjectSyncCursorEntityType } from './sync-cursor-persistence.service';

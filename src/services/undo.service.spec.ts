@@ -640,7 +640,9 @@ describe('UndoService', () => {
 
       service = createServiceInstance();
       service.setCurrentProject(projectId);
-      recordTaskMoveAction(projectId, 12000, 'clear-history-persist-task-next', 12000);
+      for (let i = 0; i < DESKTOP_HISTORY_LIMIT + 1; i++) {
+        recordTaskMoveAction(projectId, 12000 + i, `clear-history-persist-task-next-${i}`, 12000 + i);
+      }
 
       expect(mockToastService.info).toHaveBeenCalledTimes(2);
     });

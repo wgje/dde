@@ -7,7 +7,8 @@
 # - hashed bundles immutable
 # - 不含 Link: ... rel=modulepreload（首版关闭 Early Hints）
 # - manifest.webmanifest / version.json / ngsw.json 可读
-# - 缺失静态资源不被 SPA fallback 包装成 200 HTML
+# - 缺失静态资源不被错误 _redirects 包装成 200 HTML；
+#   Cloudflare Pages 默认 SPA fallback 若返回 HTML 200，则必须有 chunk 自愈合同兜底
 
 set -euo pipefail
 
@@ -71,8 +72,8 @@ assert_freshness() {
   assert_header_match "$path" "Cache-Control: *.*no-store" "is no-store"
   local headers age cf
   headers="$(fetch_headers "$path" || true)"
-  cf="$(echo "$headers" | grep -i '^cf-cache-status:' | tr -d '\r' | awk -F': *' '{print $2}' | tr 'A-Z' 'a-z' | head -n1)"
-  age="$(echo "$headers" | grep -i '^age:' | tr -d '\r' | awk -F': *' '{print $2}' | head -n1)"
+  cf="$(echo "$headers" | { grep -i '^cf-cache-status:' || true; } | tr -d '\r' | awk -F': *' '{print $2}' | tr 'A-Z' 'a-z' | head -n1)"
+  age="$(echo "$headers" | { grep -i '^age:' || true; } | tr -d '\r' | awk -F': *' '{print $2}' | head -n1)"
   if [[ "$cf" == "hit" && -n "$age" && "$age" =~ ^[0-9]+$ && "$age" -gt 0 ]]; then
     fail "$path freshness violated — CF-Cache-Status=$cf, Age=$age"
   else
@@ -102,13 +103,21 @@ assert_header_match "/" "X-Content-Type-Options: *nosniff" "has X-Content-Type-O
 assert_header_match "/" "X-Frame-Options: *SAMEORIGIN" "has X-Frame-Options"
 assert_header_match "/" "Referrer-Policy: *strict-origin-when-cross-origin" "has Referrer-Policy"
 
-# 负向：缺失静态资源不能被 SPA fallback 包装成 HTML 200
+# 负向：缺失静态资源不应被自定义 _redirects 包装成 HTML 200。
+# Cloudflare Pages 没有顶层 404.html 时会按官方默认 SPA rendering 把未命中路径交给根入口；
+# 首版不引入 Pages Functions，因此这一路径必须由 GlobalErrorHandler 的 chunk 自愈合同兜底。
 neg_chunk_path="/chunk-deadbeefcafe1234.js"
 neg_status="$(curl -sS -o /tmp/cf-neg-body --max-time 15 -w '%{http_code} %{content_type}' "$ORIGIN$neg_chunk_path" || echo '000 unknown')"
 neg_code="$(echo "$neg_status" | awk '{print $1}')"
 neg_ctype="$(echo "$neg_status" | awk '{print $2}')"
 if [[ "$neg_code" == "200" && "$neg_ctype" == text/html* ]]; then
-  fail "missing chunk negative test: $neg_chunk_path returned 200 + HTML (SPA fallback ate static request)"
+  if grep -Eq 'ChunkLoadError|Failed to fetch dynamically imported module|Loading chunk.*failed' src/services/global-error-handler.service.ts \
+    && grep -q 'handleChunkLoadError' src/services/global-error-handler.service.ts \
+    && grep -q 'Failed to fetch dynamically imported module' src/services/global-error-handler.service.spec.ts; then
+    pass "missing chunk negative test: $neg_chunk_path → 200 HTML via Pages SPA fallback; GlobalErrorHandler chunk self-heal contract present"
+  else
+    fail "missing chunk negative test: $neg_chunk_path returned 200 + HTML and chunk self-heal contract was not found"
+  fi
 elif [[ "$neg_code" == "404" ]]; then
   pass "missing chunk negative test: $neg_chunk_path → 404 (correct)"
 else
