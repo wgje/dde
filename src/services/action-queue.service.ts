@@ -8,6 +8,7 @@ import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { ActionQueueStorageService, LOCAL_QUEUE_CONFIG, type QueueRetryError } from './action-queue-storage.service';
 import { RetryQueueService, type RetryableEntityType } from '../core-bridge';
 import { AuthService } from './auth.service';
+import { WriteGuardService } from './write-guard.service';
 import { AUTH_CONFIG } from '../config/auth.config';
 import { 
   OperationPriority, 
@@ -51,6 +52,12 @@ export class ActionQueueService {
   private readonly sentryAlert = inject(SentryAlertService);
   private readonly authService = inject(AuthService);
   private readonly destroyRef = inject(DestroyRef);
+  /**
+   * 写入闸门：迁移期 export-only / read-only 部署 gate 云端 flush。
+   * 标记 optional：测试 harness 通常不提供，保持向后兼容。
+   * 缺失时默认为可写（与迁移前行为一致）。
+   */
+  private readonly writeGuard = inject(WriteGuardService, { optional: true });
   readonly storage = inject(ActionQueueStorageService);
   /** 跨队列去重：当新操作入队时移除 RetryQueue 中同一实体的旧重试 */
   private readonly retryQueue = inject(RetryQueueService);
@@ -740,6 +747,12 @@ export class ActionQueueService {
    */
   async processQueue(): Promise<{ processed: number; failed: number; movedToDeadLetter: number }> {
     if (this.isProcessing() || !this.storage.isOnline) {
+      return { processed: 0, failed: 0, movedToDeadLetter: 0 };
+    }
+
+    // 【Cloudflare 迁移 §3 / §16.26】 export-only / read-only 部署禁止 flush 云端写入
+    // 旧 Vercel 割接窗口期、PR Preview 只读环境、Origin Gate 运行时降级都会触发此分支
+    if (this.writeGuard && !this.writeGuard.assertWritable('ActionQueue.processQueue')) {
       return { processed: 0, failed: 0, movedToDeadLetter: 0 };
     }
 
