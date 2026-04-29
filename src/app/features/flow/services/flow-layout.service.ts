@@ -1278,13 +1278,67 @@ export class FlowLayoutService {
   
   /** 位置保存定时器 */
   private positionSaveTimer: ReturnType<typeof setTimeout> | null = null;
-  
+
+  /**
+   * 布局代际（layout generation）
+   *
+   * 计划 §8.4：用户在布局/拖拽期间继续编辑、切换项目或销毁 Flow 时，
+   * 旧 generation 的延迟保存必须丢弃，不能晚到覆盖新坐标。
+   *
+   * 当前布局算法在事务内同步完成（无 Worker / 分片），
+   * 因此 generation 主要保护以下场景：
+   * 1. `scheduleSaveAllPositions` 防抖窗口内 diagram 被销毁 / 替换；
+   * 2. 防抖窗口内调用方主动调用 `requestLayoutGeneration()` 表明
+   *    后续布局需重算（例如切换项目、批量数据变化）。
+   */
+  private layoutGeneration = 0;
+
+  /** 计划上次防抖保存所属的 generation；timer fire 时与当前 generation 对比。 */
+  private pendingSaveGeneration: number | null = null;
+
   /**
    * 设置 Diagram 引用
    * 由 FlowDiagramService 在初始化时调用
+   *
+   * Diagram 更换或置空时递增 generation，丢弃任何 in-flight 的延迟保存，
+   * 保证旧 diagram 的坐标不会晚到写回新 diagram 的 store。
    */
   setDiagram(diagram: go.Diagram | null): void {
+    if (this.diagram !== diagram) {
+      this.layoutGeneration += 1;
+      // 清理任何 in-flight 防抖保存：它们绑定的是旧 diagram。
+      if (this.positionSaveTimer) {
+        clearTimeout(this.positionSaveTimer);
+        this.positionSaveTimer = null;
+      }
+      this.pendingSaveGeneration = null;
+    }
     this.diagram = diagram;
+  }
+
+  /**
+   * 显式递进布局代际。
+   *
+   * 调用方场景：项目切换、数据批量变化、外部触发的布局重算。
+   * 任何在此之前 schedule 的 `scheduleSaveAllPositions` 都将被丢弃。
+   *
+   * 计划 §8.4 「布局任务实现层面要有可观察的取消语义」。
+   */
+  requestLayoutGeneration(): number {
+    this.layoutGeneration += 1;
+    if (this.positionSaveTimer) {
+      clearTimeout(this.positionSaveTimer);
+      this.positionSaveTimer = null;
+    }
+    this.pendingSaveGeneration = null;
+    return this.layoutGeneration;
+  }
+
+  /**
+   * 当前布局代际。供 spec / 调用方诊断。
+   */
+  getLayoutGeneration(): number {
+    return this.layoutGeneration;
   }
   
   /**
@@ -1402,15 +1456,35 @@ export class FlowLayoutService {
   /**
    * 延迟保存所有节点位置（防抖）
    * 用于拖动操作结束后保存
+   *
+   * 计划 §8.4：timer fire 时必须二次校验 diagram 仍存在 + generation 未递进，
+   * 避免布局期间组件销毁、项目切换或外部 `requestLayoutGeneration()`
+   * 调用之后旧坐标仍写回 store 造成 stale_layout_dropped 数据污染。
    */
   scheduleSaveAllPositions(): void {
     if (this.positionSaveTimer) {
       clearTimeout(this.positionSaveTimer);
     }
-    
+
+    const scheduledGeneration = this.layoutGeneration;
+    const scheduledDiagram = this.diagram;
+    this.pendingSaveGeneration = scheduledGeneration;
+
     this.positionSaveTimer = setTimeout(() => {
-      this.saveAllNodePositions();
       this.positionSaveTimer = null;
+      this.pendingSaveGeneration = null;
+
+      // 二次校验：generation 未递进 + diagram 引用仍是同一个。
+      if (scheduledGeneration !== this.layoutGeneration) {
+        this.logger.debug('stale_layout_dropped: 布局代际已递进，丢弃旧坐标保存');
+        return;
+      }
+      if (this.diagram === null || this.diagram !== scheduledDiagram) {
+        this.logger.debug('stale_layout_dropped: diagram 已释放或更换，丢弃旧坐标保存');
+        return;
+      }
+
+      this.saveAllNodePositions();
     }, 300);
   }
   

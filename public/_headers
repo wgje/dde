@@ -1,0 +1,79 @@
+## Cloudflare Pages 响应头规则
+## 详见 docs/cloudflare-migration-plan.md §4.4
+## 注意：行首必须为 / 前缀的 path pattern；缩进规则属性两个空格
+
+/*
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: SAMEORIGIN
+  Referrer-Policy: strict-origin-when-cross-origin
+  ! Link
+
+# Freshness 关键路径：必须 no-store，禁止边缘/浏览器缓存
+/index.html
+  Cache-Control: no-store, no-cache, must-revalidate
+  Pragma: no-cache
+
+/launch.html
+  Cache-Control: no-store, no-cache, must-revalidate
+  Pragma: no-cache
+
+/ngsw.json
+  Cache-Control: no-store, no-cache, must-revalidate
+  Pragma: no-cache
+
+/ngsw-worker.js
+  Cache-Control: no-store, no-cache, must-revalidate
+  Pragma: no-cache
+
+/sw-composed.js
+  Cache-Control: no-store, no-cache, must-revalidate
+  Pragma: no-cache
+
+/safety-worker.js
+  Cache-Control: no-store, no-cache, must-revalidate
+  Pragma: no-cache
+
+/worker-basic.min.js
+  Cache-Control: no-store, no-cache, must-revalidate
+  Pragma: no-cache
+
+/version.json
+  Cache-Control: no-store, no-cache, must-revalidate
+  Pragma: no-cache
+
+/manifest.webmanifest
+  Cache-Control: public, max-age=300, must-revalidate
+
+/.well-known/assetlinks.json
+  Cache-Control: public, max-age=300, must-revalidate
+
+# 入口 hashed bundles：immutable（hash 命名）
+/main*.js
+  Cache-Control: public, max-age=31536000, immutable
+
+/polyfills*.js
+  Cache-Control: public, max-age=31536000, immutable
+
+/chunk*.js
+  Cache-Control: public, max-age=31536000, immutable
+
+/styles*.css
+  Cache-Control: public, max-age=31536000, immutable
+
+# Source maps：构建脚本会删除，但兜底设置 no-store 防止意外公开
+/*.map
+  Cache-Control: no-store, no-cache, must-revalidate
+  X-Robots-Tag: noindex
+
+# 公开静态资源：非 hash 文件名，仅允许 revalidate
+/fonts/*
+  Cache-Control: public, max-age=86400, must-revalidate
+
+/icons/*
+  Cache-Control: public, max-age=86400, must-revalidate
+
+/widgets/*
+  Cache-Control: public, max-age=86400, must-revalidate
+
+/assets/*
+  Cache-Control: public, max-age=86400, must-revalidate

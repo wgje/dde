@@ -84,6 +84,14 @@ type PendingSentryEvent = PendingExceptionEvent | PendingMessageEvent;
  */
 @Injectable({ providedIn: 'root' })
 export class SentryLazyLoaderService {
+  /** 迁移期 Sentry traceTargets：同时覆盖旧 Vercel 与新 Cloudflare canonical / preview。 */
+  private static readonly TRACE_PROPAGATION_TARGETS: ReadonlyArray<string | RegExp> = [
+    'localhost',
+    /^https:\/\/dde[-\w]*\.vercel\.app/,
+    /^https:\/\/(?:[a-z0-9-]+\.)?nanoflow\.pages\.dev/,
+    /^https:\/\/(?:[a-z0-9-]+\.)?nanoflow\.app/,
+  ];
+
   private readonly sentryDsn = environment.SENTRY_DSN?.trim() ?? '';
   private readonly isConfiguredFlag = this.sentryDsn.length > 0;
 
@@ -246,15 +254,15 @@ export class SentryLazyLoaderService {
             blockAllMedia: true,
           }),
         ],
-        // 只允许来自我们域名的请求被追踪
-        tracePropagationTargets: ['localhost', /^https:\/\/dde[-\w]*\.vercel\.app/],
+        // 只允许来自我们域名的请求被追踪（迁移期：同时包含旧 Vercel 与新 Cloudflare）
+        tracePropagationTargets: SentryLazyLoaderService.TRACE_PROPAGATION_TARGETS,
         // 性能采样率：5% 低采样率收集关键路径数据，不影响首屏性能
         tracesSampleRate: environment.production ? 0.05 : 0,
         // Session Replay：仅在错误发生时录制（100%），日常不录制（0%）
         replaysSessionSampleRate: 0,
         replaysOnErrorSampleRate: 1.0,
-        // 环境标识
-        environment: environment.production ? 'production' : 'development',
+        // 环境标识：优先读取显式注入的 sentryEnvironment（preview/production/development）
+        environment: this.resolveSentryEnvironment(),
         // 【P3-09 优化】过滤浏览器噪音错误（使用正则精确匹配避免误吞）
         ignoreErrors: [
           /^ResizeObserver loop/,
@@ -612,6 +620,11 @@ export class SentryLazyLoaderService {
    * 使用入口 chunk URL 的 hash 作为部署指纹，确保每次构建唯一
    */
   private buildRelease(): string {
+    // 优先使用显式注入的 sentryRelease（GitHub Actions 注入 git SHA）
+    const explicitRelease = (environment as { sentryRelease?: string }).sentryRelease;
+    if (explicitRelease) {
+      return `nanoflow@${explicitRelease}`;
+    }
     try {
       const currentScript = document.currentScript as HTMLScriptElement | null;
       const entryUrl = new URL(currentScript?.src ?? window.location.href, window.location.href);
@@ -621,5 +634,18 @@ export class SentryLazyLoaderService {
     } catch {
       return 'nanoflow@unknown';
     }
+  }
+
+  /**
+   * 解析 Sentry environment 标识符。
+   * 优先使用 environment.sentryEnvironment（GitHub Actions 显式注入），否则
+   * 降级到 production/development 推断（保持向后兼容）。
+   */
+  private resolveSentryEnvironment(): string {
+    const explicit = (environment as { sentryEnvironment?: string }).sentryEnvironment;
+    if (explicit && typeof explicit === 'string' && explicit.trim().length > 0) {
+      return explicit.trim();
+    }
+    return environment.production ? 'production' : 'development';
   }
 }

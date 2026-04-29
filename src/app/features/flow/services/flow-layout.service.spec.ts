@@ -1,6 +1,6 @@
 import { Injector } from '@angular/core';
 import * as go from 'gojs';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   AutoLayoutLinkData,
   AutoLayoutNodeData,
@@ -673,5 +673,76 @@ describe('FlowLayoutService', () => {
     expect(persistedPositions.get('child-1')).toMatchObject({ x: LAYOUT_CONFIG.STAGE_SPACING, y: 0 });
     expect(persistedPositions.get('root-2')?.x).toBe(0);
     expect(persistedPositions.get('root-2')?.y ?? -1).toBeGreaterThan(0);
+  });
+
+  describe('layout generation 取消语义（计划 §8.4）', () => {
+    function makeDiagram(nodes: Array<{ key: string; x: number; y: number }>): go.Diagram {
+      const goNodes = nodes.map(n => ({
+        data: { key: n.key },
+        location: { x: n.x, y: n.y, isReal: () => true } as go.Point,
+      })) as unknown as go.Node[];
+      return {
+        nodes: {
+          each: (cb: (node: go.Node) => void) => goNodes.forEach(node => cb(node)),
+        },
+      } as unknown as go.Diagram;
+    }
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('setDiagram 切换 diagram 时丢弃 in-flight 防抖保存', () => {
+      const oldDiagram = makeDiagram([{ key: 'a', x: 1, y: 1 }]);
+      service.setDiagram(oldDiagram);
+      service.scheduleSaveAllPositions();
+
+      // 在 timer fire 之前替换 diagram —— 旧 diagram 的延迟保存必须被丢弃。
+      const newDiagram = makeDiagram([{ key: 'b', x: 2, y: 2 }]);
+      service.setDiagram(newDiagram);
+
+      vi.advanceTimersByTime(500);
+
+      // 既不写旧 diagram 的坐标，也不在 generation 已递进时误写新 diagram。
+      expect(updateTaskPosition).not.toHaveBeenCalled();
+    });
+
+    it('setDiagram(null) 释放 diagram 时丢弃 in-flight 防抖保存', () => {
+      const diagram = makeDiagram([{ key: 'a', x: 1, y: 1 }]);
+      service.setDiagram(diagram);
+      service.scheduleSaveAllPositions();
+
+      service.setDiagram(null);
+      vi.advanceTimersByTime(500);
+
+      expect(updateTaskPosition).not.toHaveBeenCalled();
+    });
+
+    it('requestLayoutGeneration 显式递进代际并丢弃 in-flight 保存', () => {
+      const diagram = makeDiagram([{ key: 'a', x: 1, y: 1 }]);
+      service.setDiagram(diagram);
+      const before = service.getLayoutGeneration();
+
+      service.scheduleSaveAllPositions();
+      const next = service.requestLayoutGeneration();
+
+      expect(next).toBeGreaterThan(before);
+      vi.advanceTimersByTime(500);
+      expect(updateTaskPosition).not.toHaveBeenCalled();
+    });
+
+    it('未递进 generation 且 diagram 仍存在时正常写回坐标', () => {
+      const diagram = makeDiagram([{ key: 'a', x: 5, y: 6 }]);
+      service.setDiagram(diagram);
+      service.scheduleSaveAllPositions();
+
+      vi.advanceTimersByTime(500);
+
+      expect(updateTaskPosition).toHaveBeenCalledWith('a', 5, 6);
+    });
   });
 });

@@ -12,11 +12,12 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.93.2'
 /**
  * 允许的来源白名单
  * 安全修复：限制 CORS 来源，防止任意网站调用 API
- * 只允许项目级前缀的 Vercel 预览域名，而非任意 .vercel.app 子域
+ * 迁移期：同时保留旧 Vercel 项目前缀域名（dde-*）与新 Cloudflare Pages 域名。
  */
 const ALLOWED_ORIGINS = [
   'https://dde-eight.vercel.app',
   'https://nanoflow.app',
+  'https://nanoflow.pages.dev',  // Cloudflare canonical writable origin（§16.10.1）
   'http://localhost:4200',      // 开发环境
   'http://localhost:5173',      // Vite 开发服务器
 ];
@@ -25,15 +26,32 @@ const ALLOWED_ORIGINS = [
 const VERCEL_PREVIEW_PREFIX = 'dde-';
 
 /**
+ * Cloudflare Pages PR preview 子域 hostname 校验
+ * 例如 pr-123.nanoflow.pages.dev / branch-foo.nanoflow.pages.dev
+ * 仅接受任意单层子域 + .nanoflow.pages.dev，禁止 evil.nanoflow.pages.dev.attacker.com 等绕过。
+ */
+function isCloudflarePagesPreview(origin: string): boolean {
+  try {
+    const url = new URL(origin);
+    if (url.protocol !== 'https:') return false;
+    return url.hostname.endsWith('.nanoflow.pages.dev');
+  } catch {
+    return false;
+  }
+}
+
+/**
  * 根据请求来源返回 CORS 头
- * 只有白名单中的来源或项目级前缀的 Vercel 预览域名才会被允许
+ * 只有白名单中的来源、项目级前缀的 Vercel 预览域名或 *.nanoflow.pages.dev 才会被允许
  */
 function getCorsHeaders(origin: string | null): Record<string, string> {
   let isAllowed = false;
   if (origin) {
     isAllowed = ALLOWED_ORIGINS.includes(origin) ||
-      // 只允许项目级前缀的 Vercel 预览域名
-      (origin.endsWith('.vercel.app') && origin.includes(`://${VERCEL_PREVIEW_PREFIX}`));
+      // 只允许项目级前缀的 Vercel 预览域名（迁移期保留）
+      (origin.endsWith('.vercel.app') && origin.includes(`://${VERCEL_PREVIEW_PREFIX}`)) ||
+      // Cloudflare Pages PR preview 子域
+      isCloudflarePagesPreview(origin);
   }
   
   return {

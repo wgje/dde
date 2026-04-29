@@ -19,6 +19,7 @@ import { LoggerService } from '../../../../services/logger.service';
 import { ToastService } from '../../../../services/toast.service';
 import { AuthService } from '../../../../services/auth.service';
 import { ProjectStateService } from '../../../../services/project-state.service';
+import { WriteGuardService } from '../../../../services/write-guard.service';
 import { SYNC_CONFIG, SYNC_DURABILITY_CONFIG, CIRCUIT_BREAKER_CONFIG } from '../../../../config';
 import { AUTH_CONFIG } from '../../../../config/auth.config';
 import { Task, Project, Connection, BlackBoxEntry } from '../../../../models';
@@ -125,6 +126,12 @@ export class RetryQueueService {
   private readonly authService = inject(AuthService);
   private readonly projectState = inject(ProjectStateService);
   private readonly destroyRef = inject(DestroyRef);
+  /**
+   * 写入闸门：迁移期 export-only / read-only 部署 gate 云端 flush。
+   * 标记 optional：测试 harness 通常不提供，保持向后兼容。
+   * 缺失时默认为可写（与迁移前行为一致）。
+   */
+  private readonly writeGuard = inject(WriteGuardService, { optional: true });
   
   /** 重试队列 */
   private queue: RetryQueueItem[] = [];
@@ -1336,6 +1343,11 @@ export class RetryQueueService {
    * 真正结束后再进入正常切片，避免把下层网络门禁整体放开。
    */
   async processQueue(maxItems?: number, manualTrigger = false): Promise<void> {
+    // 【Cloudflare 迁移 §3 / §16.26】 export-only / read-only 部署禁止 flush 云端写入
+    if (this.writeGuard && !this.writeGuard.assertWritable('RetryQueue.processQueue')) {
+      return;
+    }
+
     while (manualTrigger && isBrowserNetworkSuspendedWindow()) {
       const delayMs = Math.max(0, getRemainingBrowserNetworkResumeDelayMs());
       if (delayMs <= 0) {
@@ -1355,6 +1367,19 @@ export class RetryQueueService {
   async processQueueSlice(options: RetryQueueSliceOptions = {}): Promise<RetryQueueSliceResult> {
     const sliceStartedAt = Date.now();
     const processGeneration = this.queueViewGeneration;
+
+    // 【Cloudflare 迁移 §3 / §16.26】 export-only / read-only 部署禁止 flush
+    // processQueueSlice 是 RetryQueue 的下层入口，所有上层路径（手动触发、定时器、
+    // resume probe）最终都汇聚到此；在这里再做一次闸门防御。
+    if (this.writeGuard && !this.writeGuard.assertWritable('RetryQueue.processQueueSlice')) {
+      return {
+        processed: 0,
+        remaining: this.queue.length,
+        durationMs: Date.now() - sliceStartedAt,
+        completed: true,
+      };
+    }
+
     const maxItems = typeof options.maxItems === 'number' && options.maxItems > 0
       ? options.maxItems
       : Number.POSITIVE_INFINITY;

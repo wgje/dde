@@ -138,6 +138,19 @@ const devAutoLoginEmail = process.env.NG_APP_DEV_AUTO_LOGIN_EMAIL || localEnv.NG
 const devAutoLoginPassword = process.env.NG_APP_DEV_AUTO_LOGIN_PASSWORD || localEnv.NG_APP_DEV_AUTO_LOGIN_PASSWORD;
 const hasDevAutoLogin = devAutoLoginEmail && devAutoLoginPassword;
 
+// === Cloudflare 迁移注入：环境/部署/Origin Gate 标识符（§16.7 / §16.18 / §16.24 / §16.26） ===
+// 这些值默认为空字符串/false，保持与 Vercel 当前部署行为兼容；GitHub Actions 通过显式 env 注入。
+const sentryEnvironment = (process.env.NG_APP_SENTRY_ENVIRONMENT || localEnv.NG_APP_SENTRY_ENVIRONMENT || '').trim();
+const canonicalOrigin = (process.env.NG_APP_CANONICAL_ORIGIN || localEnv.NG_APP_CANONICAL_ORIGIN || '').trim();
+const originGateMode = (process.env.NG_APP_ORIGIN_GATE_MODE || localEnv.NG_APP_ORIGIN_GATE_MODE || 'off').trim();
+const readOnlyPreview = parseBooleanEnv(
+  process.env.NG_APP_READ_ONLY_PREVIEW || localEnv.NG_APP_READ_ONLY_PREVIEW,
+  false
+);
+const deploymentTarget = (process.env.NG_APP_DEPLOYMENT_TARGET || localEnv.NG_APP_DEPLOYMENT_TARGET || 'local').trim();
+const supabaseProjectAlias = (process.env.NG_APP_SUPABASE_PROJECT_ALIAS || localEnv.NG_APP_SUPABASE_PROJECT_ALIAS || 'local').trim();
+const sentryRelease = (process.env.NG_APP_SENTRY_RELEASE || localEnv.NG_APP_SENTRY_RELEASE || process.env.GITHUB_SHA || '').trim();
+
 // 如果没有配置 Supabase 环境变量，使用占位符（应用将以离线模式运行）
 const useOfflineMode = !supabaseUrl || !supabaseAnonKey;
 if (useOfflineMode) {
@@ -183,6 +196,14 @@ export const environment = {
   SENTRY_DSN: '${sentryDsn}',
   // GoJS License Key - 生产环境需要配置以移除水印
   gojsLicenseKey: '${gojsLicenseKey}',
+  // === Cloudflare 迁移：部署 / Sentry / Origin Gate 标识符 ===
+  sentryEnvironment: '${sentryEnvironment || 'development'}',
+  canonicalOrigin: '${canonicalOrigin}',
+  originGateMode: '${originGateMode}' as 'off' | 'redirect' | 'read-only' | 'export-only',
+  readOnlyPreview: ${readOnlyPreview ? 'true' : 'false'},
+  deploymentTarget: '${deploymentTarget}',
+  supabaseProjectAlias: '${supabaseProjectAlias}',
+  sentryRelease: '${sentryRelease}',
   // 开发环境自动登录（仅开发环境生效）
   // 设置方式：在 .env.local 中配置 NG_APP_DEV_AUTO_LOGIN_EMAIL 和 NG_APP_DEV_AUTO_LOGIN_PASSWORD
   devAutoLogin: ${devAutoLoginConfig} as { email: string; password: string } | null
@@ -200,6 +221,14 @@ export const environment = {
   SENTRY_DSN: '${sentryDsn}',
   // GoJS License Key - 生产环境需要配置以移除水印
   gojsLicenseKey: '${gojsLicenseKey}',
+  // === Cloudflare 迁移：部署 / Sentry / Origin Gate 标识符 ===
+  sentryEnvironment: '${sentryEnvironment || 'production'}',
+  canonicalOrigin: '${canonicalOrigin}',
+  originGateMode: '${originGateMode}' as 'off' | 'redirect' | 'read-only' | 'export-only',
+  readOnlyPreview: ${readOnlyPreview ? 'true' : 'false'},
+  deploymentTarget: '${deploymentTarget}',
+  supabaseProjectAlias: '${supabaseProjectAlias}',
+  sentryRelease: '${sentryRelease}',
   // 生产环境始终禁用自动登录
   devAutoLogin: null as { email: string; password: string } | null
 };
@@ -501,8 +530,33 @@ try {
     console.warn('⚠️ index.html 中未找到 RESUME_METRICS_GATE_V1 注入位置，跳过注入');
   }
 
+  // === Cloudflare Canonical Origin Gate 占位符注入（§16.10 / §16.26） ===
+  // 占位符格式：'/* CANONICAL_ORIGIN */' 与 '/* ORIGIN_GATE_MODE */'
+  // - dev/local：CANONICAL_ORIGIN 为空字符串，ORIGIN_GATE_MODE='off'，gate 直接跳过
+  // - production：通过 GitHub Actions 注入 'https://nanoflow.pages.dev' + 'redirect'
+  const canonicalOriginPattern = /var CANONICAL_ORIGIN = '[^']*';/g;
+  const originGateModePattern = /var ORIGIN_GATE_MODE = '[^']*';/g;
+  if (canonicalOriginPattern.test(indexHtml)) {
+    canonicalOriginPattern.lastIndex = 0;
+    indexHtml = indexHtml.replace(
+      canonicalOriginPattern,
+      `var CANONICAL_ORIGIN = '${escapeHtmlString(canonicalOrigin)}';`
+    );
+  }
+  if (originGateModePattern.test(indexHtml)) {
+    originGateModePattern.lastIndex = 0;
+    indexHtml = indexHtml.replace(
+      originGateModePattern,
+      `var ORIGIN_GATE_MODE = '${escapeHtmlString(originGateMode || 'off')}';`
+    );
+  }
+
   fs.writeFileSync(indexHtmlPath, indexHtml);
-  console.log(`   - ${indexHtmlPath} (预加载脚本 Supabase + Boot Flags 配置)`);
+  console.log(`   - ${indexHtmlPath} (预加载脚本 Supabase + Boot Flags + Origin Gate 配置)`);
 } catch (e) {
   console.warn('⚠️ 无法更新 index.html 预加载脚本配置:', e.message);
+}
+
+function escapeHtmlString(value) {
+  return String(value).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 }
