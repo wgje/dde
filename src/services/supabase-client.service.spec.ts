@@ -137,8 +137,12 @@ describe('SupabaseClientService', () => {
   describe('deferred client', () => {
     it('buildClientOptions 应启用 Realtime worker 和 heartbeatCallback', () => {
       const mutable = service as unknown as {
+        supabaseUrl: string;
+        supabaseAnonKey: string;
         buildClientOptions: () => { realtime: Record<string, unknown> };
       };
+      mutable.supabaseUrl = 'https://example.supabase.co';
+      mutable.supabaseAnonKey = 'anon-key';
 
       const options = mutable.buildClientOptions();
 
@@ -149,8 +153,12 @@ describe('SupabaseClientService', () => {
 
     it('Realtime heartbeat 异常应写入 Sentry breadcrumb 供生产过滤', () => {
       const mutable = service as unknown as {
+        supabaseUrl: string;
+        supabaseAnonKey: string;
         buildClientOptions: () => { realtime: { heartbeatCallback: (payload: unknown) => void } };
       };
+      mutable.supabaseUrl = 'https://example.supabase.co';
+      mutable.supabaseAnonKey = 'anon-key';
       const options = mutable.buildClientOptions();
 
       options.realtime.heartbeatCallback({ status: 'heartbeat_timeout' });

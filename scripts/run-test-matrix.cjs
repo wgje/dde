@@ -34,7 +34,9 @@ const laneConfig = {
   [LANE_NAMES.nodeMinimal]: {
     config: 'vitest.minimal-node.config.mts',
     defaultIsolate: false,
-    forceIsolateFiles: [],
+    forceIsolateFiles: [
+      'src/app/core/services/app-auth-coordinator.service.spec.ts',
+    ],
   },
   [LANE_NAMES.browserMinimal]: {
     config: 'vitest.minimal.config.mts',
