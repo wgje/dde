@@ -158,10 +158,12 @@ export class BlackBoxService {
     if (!entry) {
       return failure(ErrorCodes.FOCUS_ENTRY_NOT_FOUND, '条目不存在');
     }
+
+    const safeUpdates = this.preserveContentWhenBlankUpdate(entry, updates);
     
     const updated: BlackBoxEntry = {
       ...entry,
-      ...updates,
+      ...safeUpdates,
       updatedAt: new Date().toISOString(),
       syncStatus: 'pending',
     };
@@ -173,6 +175,28 @@ export class BlackBoxService {
     this.syncService.scheduleSync(updated);
     
     return success(updated);
+  }
+
+  private preserveContentWhenBlankUpdate(
+    entry: BlackBoxEntry,
+    updates: Partial<BlackBoxEntry>,
+  ): Partial<BlackBoxEntry> {
+    if (
+      Object.prototype.hasOwnProperty.call(updates, 'content') &&
+      typeof updates.content === 'string' &&
+      updates.content.trim().length === 0 &&
+      entry.content.trim().length > 0
+    ) {
+      this.logger.warn('黑匣子忽略空正文更新，保留已有正文以防止内容丢失', {
+        entryId: entry.id,
+      });
+      return {
+        ...updates,
+        content: entry.content,
+      };
+    }
+
+    return updates;
   }
   
   /**

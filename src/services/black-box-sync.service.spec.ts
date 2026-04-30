@@ -512,6 +512,122 @@ describe('BlackBoxSyncService', () => {
     }));
   });
 
+  it('should hydrate a blank retry payload from the latest local black box content before RPC push', async () => {
+    const entryId = crypto.randomUUID();
+    const queuedEntry = createEntry({
+      id: entryId,
+      content: '',
+      updatedAt: '2026-03-04T00:00:00.000Z',
+      syncStatus: 'pending',
+    });
+    const latestLocalEntry = createEntry({
+      id: entryId,
+      content: 'local full content',
+      updatedAt: queuedEntry.updatedAt,
+      syncStatus: 'pending',
+    });
+    mockSyncRpcClient.isFeatureEnabled.mockReturnValue(true);
+    mockSyncRpcClient.upsertBlackboxEntry.mockResolvedValueOnce({
+      status: 'applied',
+      serverUpdatedAt: '2026-03-04T00:00:01.000Z',
+      raw: {},
+    });
+    const upsert = vi.fn();
+    const from = vi.fn(() => ({
+      select: vi.fn(() => ({
+        eq: vi.fn(() => ({
+          maybeSingle: vi.fn(async () => ({ data: null, error: null })),
+        })),
+      })),
+      upsert,
+    }));
+    const supabase = TestBed.inject(SupabaseClientService) as unknown as {
+      clientAsync: ReturnType<typeof vi.fn>;
+    };
+    const saveToLocalSpy = vi.spyOn(service, 'saveToLocal').mockResolvedValue(undefined);
+    setBlackBoxEntries([latestLocalEntry]);
+    supabase.clientAsync.mockResolvedValue({ from });
+
+    await expect(service.pushToServer(queuedEntry)).resolves.toBe(true);
+
+    expect(mockSyncRpcClient.upsertBlackboxEntry).toHaveBeenCalledWith(expect.objectContaining({
+      entry: expect.objectContaining({
+        id: entryId,
+        content: 'local full content',
+      }),
+    }));
+    expect(upsert).not.toHaveBeenCalled();
+    expect(saveToLocalSpy).toHaveBeenCalledWith(expect.objectContaining({
+      id: entryId,
+      content: 'local full content',
+      syncStatus: 'synced',
+    }));
+  });
+
+  it('should preserve existing server black box content when a blank retry payload is replayed', async () => {
+    const entryId = crypto.randomUUID();
+    const queuedEntry = createEntry({
+      id: entryId,
+      content: '',
+      updatedAt: '2026-03-04T00:00:05.000Z',
+      isCompleted: true,
+      syncStatus: 'pending',
+    });
+    const serverRow = {
+      id: entryId,
+      project_id: null,
+      user_id: 'user-1',
+      content: 'server full content',
+      focus_meta: null,
+      date: '2026-03-04',
+      created_at: '2026-03-04T00:00:00.000Z',
+      updated_at: '2026-03-04T00:00:00.000Z',
+      is_read: false,
+      is_completed: false,
+      is_archived: false,
+      snooze_until: null,
+      snooze_count: 0,
+      deleted_at: null,
+    };
+    mockSyncRpcClient.isFeatureEnabled.mockReturnValue(true);
+    mockSyncRpcClient.upsertBlackboxEntry.mockResolvedValueOnce({
+      status: 'applied',
+      serverUpdatedAt: '2026-03-04T00:00:06.000Z',
+      raw: {},
+    });
+    const maybeSingle = vi.fn(async () => ({ data: serverRow, error: null }));
+    const upsert = vi.fn();
+    const from = vi.fn(() => ({
+      select: vi.fn(() => ({
+        eq: vi.fn(() => ({ maybeSingle })),
+      })),
+      upsert,
+    }));
+    const supabase = TestBed.inject(SupabaseClientService) as unknown as {
+      clientAsync: ReturnType<typeof vi.fn>;
+    };
+    const saveToLocalSpy = vi.spyOn(service, 'saveToLocal').mockResolvedValue(undefined);
+    setBlackBoxEntries([queuedEntry]);
+    supabase.clientAsync.mockResolvedValue({ from });
+
+    await expect(service.pushToServer(queuedEntry)).resolves.toBe(true);
+
+    expect(mockSyncRpcClient.upsertBlackboxEntry).toHaveBeenCalledWith(expect.objectContaining({
+      entry: expect.objectContaining({
+        id: entryId,
+        content: 'server full content',
+        isCompleted: true,
+      }),
+      baseUpdatedAt: serverRow.updated_at,
+    }));
+    expect(upsert).not.toHaveBeenCalled();
+    expect(saveToLocalSpy).toHaveBeenCalledWith(expect.objectContaining({
+      id: entryId,
+      content: 'server full content',
+      syncStatus: 'synced',
+    }));
+  });
+
   it('should keep black box retry intent when sync RPC reports remote-newer', async () => {
     const entry = createEntry({
       id: crypto.randomUUID(),
@@ -741,6 +857,63 @@ describe('BlackBoxSyncService', () => {
 
     expect(inQuery).toHaveBeenCalledWith('id', [entryId]);
     expect(blackBoxEntriesMap().get(entryId)?.syncStatus).toBe('synced');
+  });
+
+  it('should preserve local black box content when pulling a newer blank remote row', async () => {
+    const entryId = crypto.randomUUID();
+    const localEntry = createEntry({
+      id: entryId,
+      content: 'local full content',
+      updatedAt: '2026-03-04T00:00:00.000Z',
+      syncStatus: 'synced',
+    });
+    const remoteRow = {
+      id: entryId,
+      project_id: null,
+      user_id: 'user-1',
+      content: '',
+      focus_meta: null,
+      date: '2026-03-04',
+      created_at: '2026-03-04T00:00:00.000Z',
+      updated_at: '2026-03-04T00:00:05.000Z',
+      is_read: false,
+      is_completed: true,
+      is_archived: false,
+      snooze_until: null,
+      snooze_count: 0,
+      deleted_at: null,
+    };
+    const orderedResult = {
+      data: [remoteRow],
+      error: null,
+      order: vi.fn(() => orderedResult),
+    };
+    const gtQuery = vi.fn(() => orderedResult);
+    const selectQuery = vi.fn(() => ({
+      gt: gtQuery,
+    }));
+    const from = vi.fn(() => ({ select: selectQuery }));
+    const rpc = vi.fn().mockResolvedValue({ data: null, error: null });
+    const supabase = TestBed.inject(SupabaseClientService) as unknown as {
+      clientAsync: ReturnType<typeof vi.fn>;
+    };
+    const saveToLocalSpy = vi.spyOn(service, 'saveToLocal').mockResolvedValue(undefined);
+    setBlackBoxEntries([localEntry]);
+    supabase.clientAsync.mockResolvedValue({ from, rpc });
+
+    await service.pullChanges({ reason: 'panel-open', force: true });
+
+    expect(saveToLocalSpy).toHaveBeenCalledWith(expect.objectContaining({
+      id: entryId,
+      content: 'local full content',
+      isCompleted: true,
+      syncStatus: 'synced',
+    }));
+    expect(blackBoxEntriesMap().get(entryId)).toEqual(expect.objectContaining({
+      content: 'local full content',
+      isCompleted: true,
+      syncStatus: 'synced',
+    }));
   });
 
   it('should pull black box deltas with a safety lookback and stable id ordering', async () => {

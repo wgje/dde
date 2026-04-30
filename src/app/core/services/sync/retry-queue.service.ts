@@ -625,10 +625,11 @@ export class RetryQueueService {
     if (existingIndex !== -1) {
       // 更新已存在的项
       const existing = targetQueue[existingIndex];
+      const safeData = this.preserveBlackBoxContentWhenBlankSnapshot(type, data, existing.data);
       targetQueue[existingIndex] = {
         ...existing,
         operation,
-        data,
+        data: safeData,
         projectId: projectId ?? existing.projectId,
         createdAt: Date.now(),
         sourceUserId: existing.sourceUserId ?? targetOwnerUserId,
@@ -712,6 +713,34 @@ export class RetryQueueService {
       this.triggerEmergencyProcessQueue('high_watermark');
     }
     return true;
+  }
+
+  private preserveBlackBoxContentWhenBlankSnapshot(
+    type: RetryableEntityType,
+    incoming: Task | Project | Connection | BlackBoxEntry | { id: string },
+    existing: Task | Project | Connection | BlackBoxEntry | { id: string },
+  ): Task | Project | Connection | BlackBoxEntry | { id: string } {
+    if (type !== 'blackbox') {
+      return incoming;
+    }
+
+    const incomingEntry = incoming as BlackBoxEntry;
+    const existingEntry = existing as BlackBoxEntry;
+    const incomingBlank = typeof incomingEntry.content !== 'string' || incomingEntry.content.trim().length === 0;
+    const existingHasContent = typeof existingEntry.content === 'string' && existingEntry.content.trim().length > 0;
+
+    if (!incomingBlank || !existingHasContent) {
+      return incoming;
+    }
+
+    this.logger.warn('RetryQueue: 黑匣子空正文快照未覆盖队列中已有正文', {
+      entryId: incomingEntry.id,
+    });
+
+    return {
+      ...incomingEntry,
+      content: existingEntry.content,
+    };
   }
   
   /**

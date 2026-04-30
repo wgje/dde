@@ -342,11 +342,16 @@ export class SyncRpcClientService {
   }
 
   private serializeBlackboxEntry(entry: BlackBoxEntry): Record<string, unknown> {
+    const content = (entry as unknown as { content?: unknown }).content;
+    if (typeof content !== 'string') {
+      throw new Error('BlackBox entry content is missing');
+    }
+
     return {
       id: entry.id,
       project_id: entry.projectId,
       user_id: entry.userId,
-      content: (entry as unknown as { content?: string }).content ?? '',
+      content,
       date: entry.date,
       created_at: (entry as unknown as { createdAt?: string }).createdAt ?? null,
       updated_at: entry.updatedAt,

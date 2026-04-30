@@ -236,6 +236,19 @@ describe('SQL 安全加固契约', () => {
     expectOwnerOnlyBatchUpsert(ownerOnlyRepairSection, 'AND p.owner_id = v_user_id');
   });
 
+  it('black_box_entries 内容保护触发器必须保留已有非空正文而不是抛错中断状态同步', () => {
+    const sql = readSql('supabase/migrations/20260430114000_blackbox_content_loss_guard.sql');
+    const normalized = sql.replace(/\s+/g, ' ');
+
+    expect(sql).toContain('CREATE OR REPLACE FUNCTION public.prevent_black_box_content_loss()');
+    expect(normalized).toContain('BEFORE INSERT OR UPDATE ON public.black_box_entries');
+    expect(normalized).toContain('OLD.content IS NOT NULL');
+    expect(normalized).toContain("btrim(OLD.content) <> ''");
+    expect(normalized).toContain('NEW.content := OLD.content');
+    expect(normalized).toContain('RETURN NEW');
+    expect(sql).not.toContain('refusing to replace non-empty content with empty content');
+  });
+
   it('init script 中的 owner helper 与 purge RPC 必须保持 owner/project-scope 约束', () => {
     const sql = readSql('scripts/init-supabase.sql');
     const ownerHelperSection = getSection(

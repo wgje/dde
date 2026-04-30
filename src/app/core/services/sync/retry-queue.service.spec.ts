@@ -440,6 +440,36 @@ describe('RetryQueueService', () => {
     ]);
   });
 
+  it('更新同一 blackbox 重试项时，空正文不能覆盖已有完整正文', () => {
+    const entryId = stableUUID('blackbox-preserve-content');
+    const fullEntry = createBlackBoxEntry('content-full', {
+      id: entryId,
+      content: '完整黑匣子正文',
+      updatedAt: '2026-04-21T00:00:00.000Z',
+      isCompleted: false,
+    });
+    const blankStatusUpdate = createBlackBoxEntry('content-blank', {
+      id: entryId,
+      content: '',
+      updatedAt: '2026-04-21T00:00:05.000Z',
+      isCompleted: true,
+    });
+
+    service.add('blackbox', 'upsert', fullEntry, undefined, 'test-user');
+    service.add('blackbox', 'upsert', blankStatusUpdate, undefined, 'test-user');
+
+    expect(service.getItems()).toHaveLength(1);
+    expect(service.getItems()[0]).toEqual(expect.objectContaining({
+      type: 'blackbox',
+      data: expect.objectContaining({
+        id: entryId,
+        content: '完整黑匣子正文',
+        updatedAt: blankStatusUpdate.updatedAt,
+        isCompleted: true,
+      }),
+    }));
+  });
+
   it('仅项目回放成功见底时也应记录 successful drain flag', async () => {
     const project = createProject('successful-drain-project');
 

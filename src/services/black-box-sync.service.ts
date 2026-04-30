@@ -912,15 +912,33 @@ export class BlackBoxSyncService {
       const tx = this.db.transaction(this.STORE_NAME, 'readwrite');
       const store = tx.objectStore(this.STORE_NAME);
 
-      const idbEntry: IDBBlackBoxEntry = {
-        ...entry,
-        _localVersion: Date.now()
+      const putEntry = (entryToPersist: BlackBoxEntry) => {
+        const idbEntry: IDBBlackBoxEntry = {
+          ...entryToPersist,
+          _localVersion: Date.now()
+        };
+
+        const request = store.put(idbEntry);
+
+        request.onsuccess = () => resolve();
+        request.onerror = () => reject(request.error);
       };
 
-      const request = store.put(idbEntry);
-
-      request.onsuccess = () => resolve();
-      request.onerror = () => reject(request.error);
+      const existingRequest = store.get(entry.id);
+      existingRequest.onsuccess = () => {
+        const result = existingRequest.result as IDBBlackBoxEntry | undefined;
+        const existing = result
+          ? (({ _localVersion: _localVersion, ...rest }) => rest)(result)
+          : null;
+        putEntry(this.hydrateBlankContentFromSource(entry, existing, 'local-idb'));
+      };
+      existingRequest.onerror = () => {
+        if (this.isBlankOrMissingContent(entry.content)) {
+          reject(existingRequest.error ?? new Error('Unable to read existing BlackBox entry before blank-content write'));
+          return;
+        }
+        putEntry(entry);
+      };
     });
   }
 
@@ -1009,6 +1027,36 @@ export class BlackBoxSyncService {
     }
 
     return inMemory;
+  }
+
+  private hasMeaningfulContent(content: unknown): content is string {
+    return typeof content === 'string' && content.trim().length > 0;
+  }
+
+  private isBlankOrMissingContent(content: unknown): boolean {
+    return typeof content !== 'string' || content.trim().length === 0;
+  }
+
+  private hydrateBlankContentFromSource(
+    entry: BlackBoxEntry,
+    source: BlackBoxEntry | null | undefined,
+    sourceLabel: 'latest-local' | 'server-preflight' | 'local-merge' | 'local-idb',
+  ): BlackBoxEntry {
+    if (!this.isBlankOrMissingContent(entry.content) || !this.hasMeaningfulContent(source?.content)) {
+      return entry;
+    }
+
+    this.logger.warn('黑匣子推送检测到空正文 payload，已从权威快照补回正文以避免覆盖数据库内容', {
+      entryId: entry.id,
+      source: sourceLabel,
+      entryUpdatedAt: entry.updatedAt,
+      sourceUpdatedAt: source?.updatedAt,
+    });
+
+    return {
+      ...entry,
+      content: source.content,
+    };
   }
 
   private isExpectedRealtimeContextCurrent(
@@ -1437,6 +1485,7 @@ export class BlackBoxSyncService {
         });
         return true;
       }
+      entry = this.hydrateBlankContentFromSource(entry, latestLocalBeforePush, 'latest-local');
 
       let syncRpcBaseUpdatedAt: string | null = entry.updatedAt ?? null;
 
@@ -1469,6 +1518,7 @@ export class BlackBoxSyncService {
         if (!preflightError && serverRow) {
           const serverEntry = this.mapRowToEntry(serverRow as Record<string, unknown>);
           syncRpcBaseUpdatedAt = serverEntry.updatedAt;
+          entry = this.hydrateBlankContentFromSource(entry, serverEntry, 'server-preflight');
           const serverIsNewer = this.clockSync.isLocalNewer(serverEntry.updatedAt, entry.updatedAt);
           const wouldRegressRead = serverEntry.isRead && !entry.isRead;
           const wouldRegressCompleted = serverEntry.isCompleted && !entry.isCompleted;
@@ -2095,8 +2145,9 @@ export class BlackBoxSyncService {
     const shouldUseRemote = !local || preferRemoteForSyncedLocal || !localWinsByLww;
 
     if (shouldUseRemote) {
-      await this.saveToLocal(remote);
-      updateBlackBoxEntry(remote);
+      const safeRemote = this.hydrateBlankContentFromSource(remote, local, 'local-merge');
+      await this.saveToLocal(safeRemote);
+      updateBlackBoxEntry(safeRemote);
       return;
     }
 

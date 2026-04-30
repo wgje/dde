@@ -210,6 +210,41 @@ describe('BlackBoxService', () => {
         expect(result.value.syncStatus).toBe('pending');
       }
     });
+
+    it('空 content 更新不能覆盖已有黑匣子正文', () => {
+      setBlackBoxEntries([
+        {
+          id: 'entry-content-guard',
+          projectId: null,
+          userId: 'test-user',
+          content: '保留这段正文',
+          date: '2026-04-21',
+          createdAt: '2026-04-21T00:00:00.000Z',
+          updatedAt: '2026-04-21T00:00:00.000Z',
+          isRead: false,
+          isCompleted: false,
+          isArchived: false,
+          deletedAt: null,
+          syncStatus: 'synced',
+        },
+      ]);
+
+      const result = service.update('entry-content-guard', {
+        content: '',
+        isCompleted: true,
+      });
+
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.value.content).toBe('保留这段正文');
+        expect(result.value.isCompleted).toBe(true);
+      }
+      expect(mockSyncService.scheduleSync).toHaveBeenCalledWith(expect.objectContaining({
+        id: 'entry-content-guard',
+        content: '保留这段正文',
+        isCompleted: true,
+      }));
+    });
   });
 
   describe('markAsRead', () => {

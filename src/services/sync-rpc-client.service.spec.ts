@@ -330,6 +330,35 @@ describe('SyncRpcClientService', () => {
     expect(cap.entry.focus_meta).toEqual({ source: 'focus-console-inline' });
   });
 
+  it('upsertBlackboxEntry: 拒绝缺失 content 的黑匣子 payload，不能序列化为空字符串', async () => {
+    const env = environment as unknown as MutableEnv;
+    env.syncRpcEnabled = true;
+
+    const rpc = vi.fn(async () => ({ data: { status: 'applied', entry_id: 'b-1' }, error: null }));
+    const service = buildService(rpc as never);
+
+    await expect(service.upsertBlackboxEntry({
+      operationId: 'op-blank-content',
+      entry: {
+        id: 'b-1',
+        projectId: null,
+        userId: 'user-1',
+        content: undefined,
+        date: '2026-04-29',
+        createdAt: '2026-04-29T00:00:00Z',
+        updatedAt: '2026-04-29T00:01:00Z',
+        isRead: false,
+        isCompleted: false,
+        isArchived: false,
+        deletedAt: null,
+        focusMeta: null,
+      } as unknown as BlackBoxEntry,
+      baseUpdatedAt: null,
+    })).rejects.toThrow('BlackBox entry content is missing');
+
+    expect(rpc).not.toHaveBeenCalled();
+  });
+
   it('upsertProject: 序列化项目元数据和部署审计字段', async () => {
     const env = environment as unknown as MutableEnv;
     env.syncRpcEnabled = true;
