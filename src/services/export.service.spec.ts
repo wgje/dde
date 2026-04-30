@@ -446,11 +446,12 @@ describe('ExportService', () => {
     });
 
     it('云端已有较新的备份 proof 时不应提醒', () => {
-      mockPreference.lastBackupProofAt.mockReturnValue('2026-04-23T10:00:00.000Z');
+      const recentCloudProofAt = new Date(Date.now() - 60_000).toISOString();
+      mockPreference.lastBackupProofAt.mockReturnValue(recentCloudProofAt);
 
       const restoredService = createService();
 
-      expect(restoredService.lastSuccessfulBackupTime()).toBe('2026-04-23T10:00:00.000Z');
+      expect(restoredService.lastSuccessfulBackupTime()).toBe(recentCloudProofAt);
       expect(restoredService.needsExportReminder()).toBe(false);
     });
   });
