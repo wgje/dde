@@ -5,7 +5,7 @@ import { SyncRpcClientService } from './sync-rpc-client.service';
 import { SupabaseClientService } from './supabase-client.service';
 import { LoggerService } from './logger.service';
 import { environment } from '../environments/environment';
-import type { Task, Connection, BlackBoxEntry } from '../models';
+import type { Task, Connection, BlackBoxEntry, Project } from '../models';
 
 const mockLoggerCategory = {
   info: vi.fn(),
@@ -328,6 +328,139 @@ describe('SyncRpcClientService', () => {
     expect(cap.entry.snooze_until).toBe('2026-04-30');
     expect(cap.entry.snooze_count).toBe(1);
     expect(cap.entry.focus_meta).toEqual({ source: 'focus-console-inline' });
+  });
+
+  it('upsertProject: 序列化项目元数据和部署审计字段', async () => {
+    const env = environment as unknown as MutableEnv;
+    env.syncRpcEnabled = true;
+    env.syncProtocolVersion = 5;
+    env.deploymentEpoch = 13;
+    env.deploymentTarget = 'cloudflare-pages';
+    env.sentryRelease = 'sha-project';
+    env.canonicalOrigin = 'https://nanoflow.pages.dev';
+
+    let captured: unknown = null;
+    const rpc = vi.fn(async (_name, payload) => {
+      captured = payload;
+      return { data: { status: 'applied', project_id: 'project-rpc', updated_at: '2026-04-30T02:00:00.000Z' }, error: null };
+    });
+
+    const service = buildService(rpc as never);
+    const result = await service.upsertProject({
+      operationId: 'op-project',
+      project: {
+        id: 'project-rpc',
+        name: 'RPC Project',
+        description: 'Project metadata',
+        version: 7,
+        deletedAt: null,
+      } as unknown as Project,
+      ownerId: 'user-1',
+      baseUpdatedAt: '2026-04-30T01:00:00.000Z',
+    });
+
+    expect(result.status).toBe('applied');
+    expect(result.entityId).toBe('project-rpc');
+    const cap = captured as { project: Record<string, unknown> };
+    expect(cap).toMatchObject({
+      operation_id: 'op-project',
+      protocol_version: 5,
+      base_updated_at: '2026-04-30T01:00:00.000Z',
+      client_git_sha: 'sha-project',
+      client_origin: 'https://nanoflow.pages.dev',
+      deployment_epoch: 13,
+      deployment_target: 'cloudflare-pages',
+    });
+    expect(cap.project).toMatchObject({
+      id: 'project-rpc',
+      owner_id: 'user-1',
+      title: 'RPC Project',
+      description: 'Project metadata',
+      version: 7,
+      migrated_to_v2: true,
+      deleted_at: null,
+    });
+  });
+
+  it('deleteProject: 发出受 protocol/epoch 保护的删除 RPC', async () => {
+    const env = environment as unknown as MutableEnv;
+    env.syncRpcEnabled = true;
+
+    let rpcName = '';
+    let captured: unknown = null;
+    const rpc = vi.fn(async (name, payload) => {
+      rpcName = name;
+      captured = payload;
+      return { data: { status: 'applied', project_id: 'project-delete', updated_at: '2026-04-30T03:00:00.000Z' }, error: null };
+    });
+
+    const service = buildService(rpc as never);
+    const result = await service.deleteProject({
+      operationId: 'op-delete-project',
+      projectId: 'project-delete',
+      baseUpdatedAt: null,
+    });
+
+    expect(rpcName).toBe('sync_delete_project');
+    expect(result.entityId).toBe('project-delete');
+    expect((captured as Record<string, unknown>)['project_id']).toBe('project-delete');
+  });
+
+  it('deleteTasks: 解析批量删除数量与附件路径', async () => {
+    const env = environment as unknown as MutableEnv;
+    env.syncRpcEnabled = true;
+
+    let rpcName = '';
+    const rpc = vi.fn(async (name) => {
+      rpcName = name;
+      return {
+        data: {
+          status: 'applied',
+          project_id: 'project-1',
+          deleted_count: 2,
+          attachment_paths: ['u/p/t/a.png'],
+          updated_at: '2026-04-30T04:00:00.000Z',
+        },
+        error: null,
+      };
+    });
+
+    const service = buildService(rpc as never);
+    const result = await service.deleteTasks({
+      operationId: 'op-delete-tasks',
+      projectId: 'project-1',
+      taskIds: ['task-1', 'task-2'],
+      baseUpdatedAt: null,
+    });
+
+    expect(rpcName).toBe('sync_delete_tasks');
+    expect(result.status).toBe('applied');
+    expect(result.affectedCount).toBe(2);
+    expect(result.attachmentPaths).toEqual(['u/p/t/a.png']);
+  });
+
+  it('deleted-remote-newer 状态按服务端 tombstone 冲突解析', async () => {
+    const env = environment as unknown as MutableEnv;
+    env.syncRpcEnabled = true;
+
+    const rpc = vi.fn(async () => ({
+      data: {
+        status: 'deleted-remote-newer',
+        remote_updated_at: '2026-04-30T05:00:00.000Z',
+        reason: 'remote_tombstone_newer',
+      },
+      error: null,
+    }));
+
+    const service = buildService(rpc as never);
+    const result = await service.upsertTask({
+      operationId: 'op-tombstone',
+      task: { id: 'task-9', projectId: 'p-1', content: 'hi' } as unknown as Task,
+      baseUpdatedAt: '2026-04-30T04:00:00.000Z',
+    });
+
+    expect(result.status).toBe('deleted-remote-newer');
+    expect(result.remoteUpdatedAt).toBe('2026-04-30T05:00:00.000Z');
   });
 
   it('upsert RPC 网络错误时向上抛（调用方走 RetryQueue 路径）', async () => {

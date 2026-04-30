@@ -66,8 +66,27 @@ DROP INDEX IF EXISTS idx_connections_deleted_cleanup;
 -- ============================================================================
 
 -- 优先级 1：user_id 外键（用户查询频繁，DELETE 时需要检查）
-CREATE INDEX IF NOT EXISTS idx_backup_restore_history_user_id 
-  ON public.backup_restore_history(user_id);
+DO $retired_cloud_backup_fk_indexes$
+BEGIN
+  IF to_regclass('public.backup_metadata') IS NULL
+    OR to_regclass('public.backup_restore_history') IS NULL THEN
+    RAISE NOTICE 'Skipping retired cloud backup FK indexes; backup tables are absent.';
+  ELSE
+    EXECUTE $sql$
+      CREATE INDEX IF NOT EXISTS idx_backup_restore_history_user_id
+        ON public.backup_restore_history(user_id)
+    $sql$;
+    EXECUTE $sql$
+      CREATE INDEX IF NOT EXISTS idx_backup_metadata_base_backup_id
+        ON public.backup_metadata(base_backup_id)
+    $sql$;
+    EXECUTE $sql$
+      CREATE INDEX IF NOT EXISTS idx_backup_restore_history_snapshot_id
+        ON public.backup_restore_history(pre_restore_snapshot_id)
+    $sql$;
+  END IF;
+END
+$retired_cloud_backup_fk_indexes$;
 CREATE INDEX IF NOT EXISTS idx_connection_tombstones_deleted_by 
   ON public.connection_tombstones(deleted_by);
 CREATE INDEX IF NOT EXISTS idx_project_members_invited_by 
@@ -80,10 +99,6 @@ CREATE INDEX IF NOT EXISTS idx_black_box_entries_project_id
 -- 优先级 3：其他外键（备份/routine 操作不频繁）
 CREATE INDEX IF NOT EXISTS idx_task_tombstones_deleted_by 
   ON public.task_tombstones(deleted_by);
-CREATE INDEX IF NOT EXISTS idx_backup_metadata_base_backup_id 
-  ON public.backup_metadata(base_backup_id);
-CREATE INDEX IF NOT EXISTS idx_backup_restore_history_snapshot_id 
-  ON public.backup_restore_history(pre_restore_snapshot_id);
 CREATE INDEX IF NOT EXISTS idx_routine_completions_routine_id 
   ON public.routine_completions(routine_id);
 -- ============================================================================
@@ -157,8 +172,16 @@ CREATE INDEX IF NOT EXISTS idx_routine_completions_routine_id
 -- 更新受影响表的统计信息
 ANALYZE public.connections;
 ANALYZE public.tasks;
-ANALYZE public.backup_metadata;
-ANALYZE public.backup_restore_history;
+DO $retired_cloud_backup_analyze$
+BEGIN
+  IF to_regclass('public.backup_metadata') IS NOT NULL THEN
+    EXECUTE 'ANALYZE public.backup_metadata';
+  END IF;
+  IF to_regclass('public.backup_restore_history') IS NOT NULL THEN
+    EXECUTE 'ANALYZE public.backup_restore_history';
+  END IF;
+END
+$retired_cloud_backup_analyze$;
 ANALYZE public.connection_tombstones;
 ANALYZE public.project_members;
 ANALYZE public.quarantined_files;

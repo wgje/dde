@@ -25,6 +25,7 @@ import { ClockSyncService } from '../../../services/clock-sync.service';
 import { EventBusService } from '../../../services/event-bus.service';
 import { ChangeTrackerService } from '../../../services/change-tracker.service';
 import { SentryLazyLoaderService } from '../../../services/sentry-lazy-loader.service';
+import { SyncRpcClientService } from '../../../services/sync-rpc-client.service';
 import { BlackBoxSyncService } from '../../../services/black-box-sync.service';
 import {
   ensureBrowserNetworkSuspensionTracking,
@@ -48,6 +49,7 @@ import {
 import type { RetryQueueItem } from './sync';
 import { Task, Project, Connection } from '../../../models';
 import { PermanentFailureError } from '../../../utils/permanent-failure-error';
+import { ProjectStore } from '../state/stores';
 
 // vitest 4.x: vi.fn() 类型为 Mock<Procedure | Constructable>，不可直接调用；
 // 使用交集类型让 mock 对象既保留 Mock 方法又可直接调用
@@ -85,6 +87,8 @@ describe('SimpleSyncService', () => {
   let mockSessionManager: any;
   let mockRealtimeEnabledState = false;
   let mockProjectData: any;
+  let mockSyncRpcClient: any;
+  let mockProjectStore: any;
   let mockSyncCursorPersistence: any;
   let mockChangeTracker: any;
   let mockSupabaseOfflineMode = signal(false);
@@ -488,6 +492,27 @@ describe('SimpleSyncService', () => {
       isLoadingRemote: { set: vi.fn() }
     };
 
+    mockSyncRpcClient = {
+      isFeatureEnabled: vi.fn(() => false),
+      isClientRejected: vi.fn(() => false),
+      upsertProject: vi.fn().mockResolvedValue({
+        status: 'applied',
+        entityId: 'project-1',
+        serverUpdatedAt: '2026-04-30T06:00:00.000Z',
+        raw: {},
+      }),
+      deleteProject: vi.fn().mockResolvedValue({
+        status: 'applied',
+        entityId: 'project-1',
+        serverUpdatedAt: '2026-04-30T06:00:00.000Z',
+        raw: {},
+      }),
+    };
+    mockProjectStore = {
+      getProject: vi.fn(() => undefined),
+      setProject: vi.fn(),
+    };
+
     mockSyncCursorPersistence = {
       loadProjectCursor: vi.fn().mockResolvedValue(null),
       commitProjectCursor: vi.fn().mockImplementation(async (_projectId: string, _userId: string | null, cursor: unknown) => cursor),
@@ -638,6 +663,8 @@ describe('SimpleSyncService', () => {
         { provide: UserPreferencesSyncService, useValue: mockUserPrefsSync },
         { provide: FocusConsoleSyncService, useValue: mockFocusConsoleSync },
         { provide: ProjectDataService, useValue: mockProjectData },
+        { provide: SyncRpcClientService, useValue: mockSyncRpcClient },
+        { provide: ProjectStore, useValue: mockProjectStore },
         { provide: SyncCursorPersistenceService, useValue: mockSyncCursorPersistence },
         { provide: ChangeTrackerService, useValue: mockChangeTracker },
         { provide: BatchSyncService, useValue: mockBatchSync },
@@ -914,6 +941,105 @@ describe('SimpleSyncService', () => {
 
       expect(service.getProjectSyncCursor('project-1')).toBeNull();
       expect(service.getLastSyncTime('project-1')).toBeNull();
+    });
+  });
+
+  describe('Project sync RPC guards', () => {
+    beforeEach(() => {
+      mockSupabase.isConfigured = true;
+      mockSupabase.clientAsync.mockResolvedValue(mockClient);
+      mockClient.auth.getSession = vi.fn().mockResolvedValue({
+        data: { session: { user: { id: 'test-user-id' } } },
+      });
+      mockSyncRpcClient.isFeatureEnabled.mockReturnValue(true);
+      mockSyncRpcClient.isClientRejected.mockReturnValue(false);
+      mockSentryLazyLoaderService.captureMessage.mockClear();
+    });
+
+    it('pushProject 在 sync RPC 开启时应使用 sync_upsert_project 而不是 PostgREST upsert', async () => {
+      const project = createMockProject({
+        id: 'project-rpc',
+        updatedAt: '2026-04-30T05:00:00.000Z',
+      });
+
+      const result = await service.pushProject(project);
+
+      expect(result).toBe(true);
+      expect(mockSyncRpcClient.upsertProject).toHaveBeenCalledWith(expect.objectContaining({
+        project,
+        ownerId: 'test-user-id',
+        baseUpdatedAt: '2026-04-30T05:00:00.000Z',
+      }));
+      expect(mockClient.from).not.toHaveBeenCalledWith('projects');
+      expect(project.updatedAt).toBe('2026-04-30T06:00:00.000Z');
+    });
+
+    it('pushProject 直接 upsert 成功后应把服务端 canonical updated_at 写回本地项目', async () => {
+      const serverUpdatedAt = '2026-04-30T06:15:00.000Z';
+      mockSyncRpcClient.isFeatureEnabled.mockReturnValue(false);
+      const projectsQueryMock = {
+        upsert: vi.fn((payload: Record<string, unknown>) => ({
+          select: vi.fn(() => ({
+            single: vi.fn(async () => ({
+              data: { updated_at: serverUpdatedAt },
+              error: null,
+              payload,
+            })),
+          })),
+        })),
+      };
+      mockClient.from = vi.fn().mockImplementation((table: string) => {
+        if (table === 'projects') return projectsQueryMock;
+        return {};
+      });
+      const project = createMockProject({
+        id: 'project-direct-canonical',
+        updatedAt: '2026-04-30T05:00:00.000Z',
+      });
+      mockProjectStore.getProject.mockReturnValueOnce(project);
+
+      const result = await service.pushProject(project);
+
+      expect(result).toBe(true);
+      expect(project.updatedAt).toBe(serverUpdatedAt);
+      expect(mockProjectStore.setProject).toHaveBeenCalledWith(expect.objectContaining({
+        id: 'project-direct-canonical',
+        updatedAt: serverUpdatedAt,
+      }));
+      const payload = projectsQueryMock.upsert.mock.calls[0]?.[0] as Record<string, unknown>;
+      expect(payload['updated_at']).toBeUndefined();
+    });
+
+    it('pushProject 命中 remote-newer 时应保留重试意图并记录 Sentry', async () => {
+      const project = createMockProject({
+        id: 'project-rpc-conflict',
+        updatedAt: '2026-04-30T05:00:00.000Z',
+      });
+      mockSyncRpcClient.upsertProject.mockResolvedValueOnce({
+        status: 'remote-newer',
+        remoteUpdatedAt: '2026-04-30T06:30:00.000Z',
+        reason: 'cas_mismatch',
+        raw: {},
+      });
+
+      const result = await service.pushProject(project, false, 'test-user-id');
+
+      expect(result).toBe(false);
+      expect(mockRetryQueueService.addDurably).toHaveBeenCalledWith(
+        'project',
+        'upsert',
+        project,
+        undefined,
+        'test-user-id',
+        undefined,
+      );
+      expect(mockSentryLazyLoaderService.captureMessage).toHaveBeenCalledWith(
+        'sync_rpc_project_remote_newer',
+        expect.objectContaining({
+          level: 'warning',
+          tags: expect.objectContaining({ entityType: 'project', status: 'remote-newer' }),
+        }),
+      );
     });
   });
   
@@ -4626,6 +4752,32 @@ describe('SimpleSyncService', () => {
       expect(mockClient.rpc).toHaveBeenCalledWith('soft_delete_project', {
         p_project_id: 'project-1',
       });
+    });
+
+    it('deleteProjectFromCloud 在 sync RPC 开启时应调用受 protocol/epoch 保护的 sync_delete_project', async () => {
+      mockSupabase.isConfigured = true;
+      mockSupabase.clientAsync.mockResolvedValue(mockClient);
+      mockClient.auth.getSession = vi.fn().mockResolvedValue({
+        data: { session: { user: { id: 'user-1' } } },
+      });
+      mockSyncRpcClient.isFeatureEnabled.mockReturnValue(true);
+      mockSyncRpcClient.isClientRejected.mockReturnValue(false);
+      mockSyncRpcClient.deleteProject.mockResolvedValueOnce({
+        status: 'applied',
+        entityId: 'project-1',
+        serverUpdatedAt: '2026-04-30T09:00:00.000Z',
+        raw: {},
+      });
+      mockClient.rpc = vi.fn().mockResolvedValue({ data: true, error: null });
+
+      const result = await service.deleteProjectFromCloud('project-1', 'user-1');
+
+      expect(result.ok).toBe(true);
+      expect(mockSyncRpcClient.deleteProject).toHaveBeenCalledWith(expect.objectContaining({
+        projectId: 'project-1',
+        baseUpdatedAt: null,
+      }));
+      expect(mockClient.rpc).not.toHaveBeenCalledWith('soft_delete_project', expect.anything());
     });
 
     it('deleteProjectFromCloud 应将已软删项目视为幂等成功', async () => {

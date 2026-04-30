@@ -87,6 +87,7 @@ export class SyncCursorPersistenceService {
       this.sentryLazyLoader.captureException(error, {
         tags: { operation: 'loadProjectCursor', projectId },
       });
+      // eslint-disable-next-line no-restricted-syntax -- IndexedDB cursor read failure falls back to the in-memory cursor path.
       return null;
     }
   }
@@ -101,24 +102,40 @@ export class SyncCursorPersistenceService {
       throw new Error(`Invalid project sync cursor timestamp: ${cursor.updatedAt}`);
     }
 
-    const existing = await this.loadProjectCursor(projectId, userId);
-    if (existing && compareProjectSyncCursor(cursor, existing) < 0) {
-      this.logger.debug('忽略旧项目同步游标', { projectId, existing, candidate: cursor });
-      return existing;
-    }
-
-    const record: ProjectSyncCursorRecord = {
-      key: this.projectKey(projectId, userId),
-      scope: 'project',
-      userId,
-      projectId,
-      cursor,
-      committedAt: nowISO(),
-    };
-
     const db = await this.indexedDB.initDatabase();
-    await this.indexedDB.putToStore(db, DB_CONFIG.stores.syncCursors, record);
-    return cursor;
+    const key = this.projectKey(projectId, userId);
+
+    return new Promise<ProjectSyncCursor>((resolve, reject) => {
+      const transaction = db.transaction(DB_CONFIG.stores.syncCursors, 'readwrite');
+      const store = transaction.objectStore(DB_CONFIG.stores.syncCursors);
+      let committedCursor: ProjectSyncCursor = cursor;
+
+      transaction.oncomplete = () => resolve(committedCursor);
+      transaction.onerror = () => reject(transaction.error ?? new Error('Failed to commit project sync cursor'));
+      transaction.onabort = () => reject(transaction.error ?? new Error('Project sync cursor commit aborted'));
+
+      const getRequest = store.get(key) as IDBRequest<ProjectSyncCursorRecord | undefined>;
+      getRequest.onsuccess = () => {
+        const existing = getRequest.result?.cursor;
+        if (existing && isProjectSyncCursor(existing) && compareProjectSyncCursor(cursor, existing) < 0) {
+          this.logger.debug('忽略旧项目同步游标', { projectId, existing, candidate: cursor });
+          committedCursor = existing;
+          return;
+        }
+
+        const record: ProjectSyncCursorRecord = {
+          key,
+          scope: 'project',
+          userId,
+          projectId,
+          cursor,
+          committedAt: nowISO(),
+        };
+
+        store.put(record);
+      };
+      getRequest.onerror = () => reject(getRequest.error ?? new Error('Failed to read project sync cursor'));
+    });
   }
 
   async clearProjectCursor(projectId: string, userId: string | null): Promise<void> {

@@ -770,6 +770,70 @@ describe('BlackBoxSyncService', () => {
     expect(orderedResult.order).toHaveBeenCalledWith('id', { ascending: true });
   });
 
+  it('should not advance the black box cursor in memory when cursor persistence fails', async () => {
+    const entryId = crypto.randomUUID();
+    const remoteRow = {
+      id: entryId,
+      project_id: null,
+      user_id: 'user-1',
+      content: 'entry',
+      focus_meta: null,
+      date: '2026-03-04',
+      created_at: '2026-03-04T00:00:00.000Z',
+      updated_at: '2026-03-05T00:00:30.000Z',
+      is_read: false,
+      is_completed: false,
+      is_archived: false,
+      snooze_until: null,
+      snooze_count: 0,
+      deleted_at: null,
+    };
+    const orderedResult = {
+      data: [remoteRow],
+      error: null,
+      order: vi.fn(() => orderedResult),
+    };
+    const gtQuery = vi.fn(() => orderedResult);
+    const selectQuery = vi.fn(() => ({
+      gt: gtQuery,
+    }));
+    const from = vi.fn(() => ({ select: selectQuery }));
+    const rpc = vi.fn().mockResolvedValue({ data: null, error: null });
+    const supabase = TestBed.inject(SupabaseClientService) as unknown as {
+      clientAsync: ReturnType<typeof vi.fn>;
+    };
+    const tx = {
+      objectStore: vi.fn(() => ({
+        get: vi.fn(() => {
+          const request = {
+            result: null,
+            onsuccess: null as ((ev: Event) => void) | null,
+            onerror: null as ((ev: Event) => void) | null,
+          };
+          queueMicrotask(() => request.onsuccess?.(new Event('success')));
+          return request;
+        }),
+        put: vi.fn(() => queueMicrotask(() => tx.onerror?.(new Event('error')))),
+      })),
+      oncomplete: null as ((ev: Event) => void) | null,
+      onerror: null as ((ev: Event) => void) | null,
+      onabort: null as ((ev: Event) => void) | null,
+      error: new Error('cursor write failed'),
+    };
+
+    vi.spyOn(service, 'saveToLocal').mockResolvedValue(undefined);
+    (service as unknown as { currentSyncUserId: string | null }).currentSyncUserId = 'user-1';
+    (service as unknown as { db: unknown }).db = {
+      transaction: vi.fn(() => tx),
+    };
+    supabase.clientAsync.mockResolvedValue({ from, rpc });
+
+    await service.pullChanges({ reason: 'panel-open', force: true });
+
+    expect((service as unknown as { lastSyncCursor: unknown }).lastSyncCursor).toBeNull();
+    expect((service as unknown as { lastSyncTime: unknown }).lastSyncTime).toBeNull();
+  });
+
   it('should clear pending when server already reflects the same newer-local mutation', async () => {
     const entryId = crypto.randomUUID();
     const pendingEntry = createEntry({

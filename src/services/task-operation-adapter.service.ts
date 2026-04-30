@@ -19,6 +19,7 @@ import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
 import { UserSessionService } from './user-session.service';
 import { ConnectionAdapterService } from './connection-adapter.service';
+import { WriteGuardService } from './write-guard.service';
 import { Task, Attachment } from '../models';
 import { ErrorCodes, failure, Result, OperationError } from '../utils/result';
 
@@ -41,6 +42,7 @@ export class TaskOperationAdapterService {
   private optimisticState = inject(OptimisticStateService);
   private toastService = inject(ToastService);
   private userSession = inject(UserSessionService);
+  private writeGuard = inject(WriteGuardService);
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('TaskOpsAdapter');
   private warmupPromise: Promise<void> | null = null;
@@ -97,6 +99,38 @@ export class TaskOperationAdapterService {
     return failure(ErrorCodes.PERMISSION_DENIED, '会话确认中，owner 确认完成前暂时只读');
   }
 
+  private blockExportOnlyMutation(actionLabel: string, options?: { toast?: boolean }): boolean {
+    if (!this.writeGuard.isExportOnly()) {
+      return false;
+    }
+
+    if (options?.toast !== false) {
+      this.toastService.info(
+        '导出模式',
+        `${actionLabel}暂不可用，旧入口仅允许导出，请前往 https://nanoflow.pages.dev 继续编辑`
+      );
+    }
+    return true;
+  }
+
+  private blockExportOnlyMutationResult<T>(actionLabel: string): Result<T, OperationError> | null {
+    if (!this.blockExportOnlyMutation(actionLabel)) {
+      return null;
+    }
+
+    return failure(ErrorCodes.PERMISSION_DENIED, '导出模式下禁止本地写入');
+  }
+
+  private blockLocalMutation(actionLabel: string, options?: { toast?: boolean }): boolean {
+    return this.blockExportOnlyMutation(actionLabel, options)
+      || this.blockHintOnlyMutation(actionLabel, options);
+  }
+
+  private blockLocalMutationResult<T>(actionLabel: string): Result<T, OperationError> | null {
+    return this.blockExportOnlyMutationResult<T>(actionLabel)
+      ?? this.blockHintOnlyMutationResult<T>(actionLabel);
+  }
+
   markEditing(): void {
     this.uiState.markEditing();
     this.syncCoordinator.markLocalChanges(this.recorder.lastUpdateType);
@@ -108,7 +142,7 @@ export class TaskOperationAdapterService {
 
   /** 执行撤销操作 */
   performUndo(): void {
-    if (this.blockHintOnlyMutation('撤销操作')) {
+    if (this.blockLocalMutation('撤销操作')) {
       return;
     }
 
@@ -116,7 +150,7 @@ export class TaskOperationAdapterService {
   }
   /** 执行重做操作 */
   performRedo(): void {
-    if (this.blockHintOnlyMutation('重做操作')) {
+    if (this.blockLocalMutation('重做操作')) {
       return;
     }
 
@@ -126,7 +160,7 @@ export class TaskOperationAdapterService {
   // ========== 任务内容操作 ==========
 
   updateTaskContent(taskId: string, newContent: string): void {
-    if (this.blockHintOnlyMutation('编辑任务')) {
+    if (this.blockLocalMutation('编辑任务')) {
       return;
     }
 
@@ -136,7 +170,7 @@ export class TaskOperationAdapterService {
   }
 
   updateTaskTitle(taskId: string, title: string): void {
-    if (this.blockHintOnlyMutation('编辑任务')) {
+    if (this.blockLocalMutation('编辑任务')) {
       return;
     }
 
@@ -146,7 +180,7 @@ export class TaskOperationAdapterService {
   }
 
   addTodoItem(taskId: string, itemText: string): void {
-    if (this.blockHintOnlyMutation('编辑任务')) {
+    if (this.blockLocalMutation('编辑任务')) {
       return;
     }
 
@@ -159,7 +193,7 @@ export class TaskOperationAdapterService {
   // ========== 任务位置操作 ==========
 
   updateTaskPosition(taskId: string, x: number, y: number): void {
-    if (this.blockHintOnlyMutation('移动任务', { toast: false })) {
+    if (this.blockLocalMutation('移动任务', { toast: false })) {
       return;
     }
 
@@ -168,7 +202,7 @@ export class TaskOperationAdapterService {
   }
 
   beginPositionBatch(): void {
-    if (this.blockHintOnlyMutation('移动任务')) {
+    if (this.blockLocalMutation('移动任务')) {
       return;
     }
 
@@ -177,7 +211,7 @@ export class TaskOperationAdapterService {
   }
 
   endPositionBatch(): void {
-    if (this.isHintOnlyStartupReadOnly()) {
+    if (this.writeGuard.isExportOnly() || this.isHintOnlyStartupReadOnly()) {
       return;
     }
 
@@ -194,7 +228,7 @@ export class TaskOperationAdapterService {
   }
 
   updateTaskPositionWithUndo(taskId: string, x: number, y: number): void {
-    if (this.blockHintOnlyMutation('移动任务')) {
+    if (this.blockLocalMutation('移动任务')) {
       return;
     }
 
@@ -213,7 +247,7 @@ export class TaskOperationAdapterService {
   }
 
   updateTaskPositionWithRankSync(taskId: string, x: number, y: number, options?: { toast?: boolean }): void {
-    if (this.blockHintOnlyMutation('移动任务', options)) {
+    if (this.blockLocalMutation('移动任务', options)) {
       return;
     }
 
@@ -224,7 +258,7 @@ export class TaskOperationAdapterService {
   // ========== 任务状态操作 ==========
 
   updateTaskStatus(taskId: string, status: Task['status']): void {
-    if (this.blockHintOnlyMutation('更新任务状态')) {
+    if (this.blockLocalMutation('更新任务状态')) {
       return;
     }
 
@@ -241,7 +275,7 @@ export class TaskOperationAdapterService {
   // ========== 任务扩展属性 ==========
 
   updateTaskAttachments(taskId: string, attachments: Attachment[]): void {
-    if (this.blockHintOnlyMutation('更新任务附件')) {
+    if (this.blockLocalMutation('更新任务附件')) {
       return;
     }
 
@@ -251,7 +285,7 @@ export class TaskOperationAdapterService {
   }
 
   addTaskAttachment(taskId: string, attachment: Attachment): void {
-    if (this.blockHintOnlyMutation('添加任务附件')) {
+    if (this.blockLocalMutation('添加任务附件')) {
       return;
     }
 
@@ -261,7 +295,7 @@ export class TaskOperationAdapterService {
   }
 
   removeTaskAttachment(taskId: string, attachmentId: string): void {
-    if (this.blockHintOnlyMutation('移除任务附件')) {
+    if (this.blockLocalMutation('移除任务附件')) {
       return;
     }
 
@@ -271,7 +305,7 @@ export class TaskOperationAdapterService {
   }
 
   updateTaskPriority(taskId: string, priority: 'low' | 'medium' | 'high' | 'urgent' | undefined): void {
-    if (this.blockHintOnlyMutation('更新任务优先级')) {
+    if (this.blockLocalMutation('更新任务优先级')) {
       return;
     }
 
@@ -281,7 +315,7 @@ export class TaskOperationAdapterService {
   }
 
   updateTaskDueDate(taskId: string, dueDate: string | null): void {
-    if (this.blockHintOnlyMutation('更新任务截止时间')) {
+    if (this.blockLocalMutation('更新任务截止时间')) {
       return;
     }
 
@@ -291,7 +325,7 @@ export class TaskOperationAdapterService {
   }
 
   updateTaskExpectedMinutes(taskId: string, expectedMinutes: number | null): void {
-    if (this.blockHintOnlyMutation('更新任务预估时长')) {
+    if (this.blockLocalMutation('更新任务预估时长')) {
       return;
     }
 
@@ -301,7 +335,7 @@ export class TaskOperationAdapterService {
   }
 
   updateTaskCognitiveLoad(taskId: string, load: 'high' | 'low' | null): void {
-    if (this.blockHintOnlyMutation('更新任务认知负荷')) {
+    if (this.blockLocalMutation('更新任务认知负荷')) {
       return;
     }
 
@@ -311,7 +345,7 @@ export class TaskOperationAdapterService {
   }
 
   updateTaskWaitMinutes(taskId: string, waitMinutes: number | null): void {
-    if (this.blockHintOnlyMutation('更新任务等待时长')) {
+    if (this.blockLocalMutation('更新任务等待时长')) {
       return;
     }
 
@@ -321,7 +355,7 @@ export class TaskOperationAdapterService {
   }
 
   updateTaskTags(taskId: string, tags: string[]): void {
-    if (this.blockHintOnlyMutation('更新任务标签')) {
+    if (this.blockLocalMutation('更新任务标签')) {
       return;
     }
 
@@ -342,7 +376,7 @@ export class TaskOperationAdapterService {
     parentId: string | null,
     isSibling: boolean
   ): Result<string, OperationError> {
-    const blocked = this.blockHintOnlyMutationResult<string>('创建任务');
+    const blocked = this.blockLocalMutationResult<string>('创建任务');
     if (blocked) return blocked;
 
     this.markEditing();
@@ -361,7 +395,7 @@ export class TaskOperationAdapterService {
 
   /** 添加浮动任务（Flow 视图中双击创建） */
   addFloatingTask(title: string, content: string, x: number, y: number): void {
-    if (this.blockHintOnlyMutation('创建任务')) {
+    if (this.blockLocalMutation('创建任务')) {
       return;
     }
 
@@ -375,7 +409,7 @@ export class TaskOperationAdapterService {
 
   /** 删除任务（带乐观更新） */
   deleteTask(taskId: string): void {
-    if (this.blockHintOnlyMutation('删除任务')) {
+    if (this.blockLocalMutation('删除任务')) {
       return;
     }
 
@@ -391,7 +425,7 @@ export class TaskOperationAdapterService {
 
   /** 永久删除任务（从回收站中删除） */
   permanentlyDeleteTask(taskId: string): void {
-    if (this.blockHintOnlyMutation('删除任务')) {
+    if (this.blockLocalMutation('删除任务')) {
       return;
     }
 
@@ -407,7 +441,7 @@ export class TaskOperationAdapterService {
     if (explicitIds.length === 0) return 0;
     const projectId = this.projectState.activeProjectId();
     if (!projectId) return 0;
-    if (this.blockHintOnlyMutation('删除任务')) {
+    if (this.blockLocalMutation('删除任务')) {
       return 0;
     }
 
@@ -429,7 +463,7 @@ export class TaskOperationAdapterService {
 
   /** 恢复已删除的任务 */
   restoreTask(taskId: string): void {
-    if (this.blockHintOnlyMutation('恢复任务')) {
+    if (this.blockLocalMutation('恢复任务')) {
       return;
     }
 
@@ -440,7 +474,7 @@ export class TaskOperationAdapterService {
 
   /** 清空回收站 */
   emptyTrash(): void {
-    if (this.blockHintOnlyMutation('清空回收站')) {
+    if (this.blockLocalMutation('清空回收站')) {
       return;
     }
 
@@ -460,7 +494,7 @@ export class TaskOperationAdapterService {
     beforeTaskId?: string | null,
     newParentId?: string | null
   ): Result<void, OperationError> {
-    const blocked = this.blockHintOnlyMutationResult<void>('移动任务');
+    const blocked = this.blockLocalMutationResult<void>('移动任务');
     if (blocked) return blocked;
 
     this.markEditing();
@@ -501,7 +535,7 @@ export class TaskOperationAdapterService {
 
   /** 将任务插入到两个任务之间 */
   insertTaskBetween(taskId: string, sourceId: string, targetId: string): Result<void, OperationError> {
-    const blocked = this.blockHintOnlyMutationResult<void>('移动任务');
+    const blocked = this.blockLocalMutationResult<void>('移动任务');
     if (blocked) return blocked;
 
     this.markEditing();
@@ -519,7 +553,7 @@ export class TaskOperationAdapterService {
 
   /** 将整个子任务树迁移到新的父任务下 */
   moveSubtreeToNewParent(taskId: string, newParentId: string | null): Result<void, OperationError> {
-    const blocked = this.blockHintOnlyMutationResult<void>('移动子树');
+    const blocked = this.blockLocalMutationResult<void>('移动子树');
     if (blocked) return blocked;
 
     this.markEditing();
@@ -538,7 +572,7 @@ export class TaskOperationAdapterService {
 
   /** 重排阶段内任务顺序 */
   reorderStage(stage: number, orderedIds: string[]): void {
-    if (this.blockHintOnlyMutation('重排任务')) {
+    if (this.blockLocalMutation('重排任务')) {
       return;
     }
 
@@ -549,7 +583,7 @@ export class TaskOperationAdapterService {
 
   /** 分离任务（移回待分配区） */
   detachTask(taskId: string): void {
-    if (this.blockHintOnlyMutation('移动任务')) {
+    if (this.blockLocalMutation('移动任务')) {
       return;
     }
 
@@ -560,7 +594,7 @@ export class TaskOperationAdapterService {
 
   /** 分离任务及其整个子树（移回待分配区） */
   detachTaskWithSubtree(taskId: string) {
-    const blocked = this.blockHintOnlyMutationResult<void>('移动子树');
+    const blocked = this.blockLocalMutationResult<void>('移动子树');
     if (blocked) return blocked;
 
     this.markEditing();
@@ -578,7 +612,7 @@ export class TaskOperationAdapterService {
     targetUnassignedId: string,
     specificChildId?: string
   ): Result<{ detachedSubtreeRootId: string | null }, OperationError> {
-    const blocked = this.blockHintOnlyMutationResult<{ detachedSubtreeRootId: string | null }>('重新挂载任务');
+    const blocked = this.blockLocalMutationResult<{ detachedSubtreeRootId: string | null }>('重新挂载任务');
     if (blocked) return blocked;
 
     this.markEditing();
@@ -601,7 +635,7 @@ export class TaskOperationAdapterService {
     sourceTaskId: string,
     targetUnassignedId: string
   ): Result<void, OperationError> {
-    const blocked = this.blockHintOnlyMutationResult<void>('重新挂载任务');
+    const blocked = this.blockLocalMutationResult<void>('重新挂载任务');
     if (blocked) return blocked;
 
     this.markEditing();
@@ -630,7 +664,7 @@ export class TaskOperationAdapterService {
 
   /** 删除任务但保留子任务 */
   deleteTaskKeepChildren(taskId: string): void {
-    if (this.blockHintOnlyMutation('删除任务')) {
+    if (this.blockLocalMutation('删除任务')) {
       return;
     }
 

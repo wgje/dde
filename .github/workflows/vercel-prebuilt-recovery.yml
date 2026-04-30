@@ -1,0 +1,133 @@
+name: Vercel Prebuilt Recovery
+
+on:
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: 'Deploy the prebuilt artifact to Vercel production'
+        required: true
+        default: false
+        type: boolean
+      confirm:
+        description: 'Type DEPLOY_VERCEL_PREBUILT to deploy'
+        required: false
+        default: ''
+      mode:
+        description: 'Build mode for the Vercel artifact'
+        required: true
+        default: 'legacy-export-only'
+        type: choice
+        options:
+          - legacy-export-only
+          - recovery-writable
+
+concurrency:
+  group: vercel-prebuilt-recovery-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: '22'
+  CONFIRM_TOKEN: 'DEPLOY_VERCEL_PREBUILT'
+  CANONICAL_PRODUCTION_ORIGIN: ${{ vars.CANONICAL_PRODUCTION_ORIGIN || 'https://nanoflow.pages.dev' }}
+  VERCEL_DEPLOYMENT_TARGET: ${{ inputs.mode == 'legacy-export-only' && 'vercel-legacy' || 'production' }}
+  VERCEL_ORIGIN_GATE_MODE: ${{ inputs.mode == 'legacy-export-only' && 'export-only' || 'redirect' }}
+
+jobs:
+  prebuilt-recovery:
+    name: Build and Optionally Deploy Vercel Prebuilt Artifact
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --prefer-offline --no-audit
+
+      - name: Validate migration env flag contracts
+        run: npm run quality:guard:env-flags
+
+      - name: Build Cloudflare-equivalent production artifact
+        env:
+          NG_APP_SUPABASE_URL: ${{ secrets.NG_APP_SUPABASE_URL }}
+          NG_APP_SUPABASE_ANON_KEY: ${{ secrets.NG_APP_SUPABASE_ANON_KEY }}
+          NG_APP_SENTRY_DSN: ${{ secrets.NG_APP_SENTRY_DSN }}
+          NG_APP_GOJS_LICENSE_KEY: ${{ secrets.NG_APP_GOJS_LICENSE_KEY }}
+          NG_APP_SENTRY_ENVIRONMENT: production
+          NG_APP_CANONICAL_ORIGIN: ${{ env.CANONICAL_PRODUCTION_ORIGIN }}
+          NG_APP_ORIGIN_GATE_MODE: ${{ env.VERCEL_ORIGIN_GATE_MODE }}
+          NG_APP_READ_ONLY_PREVIEW: 'false'
+          NG_APP_DEPLOYMENT_TARGET: ${{ env.VERCEL_DEPLOYMENT_TARGET }}
+          NG_APP_SUPABASE_PROJECT_ALIAS: production
+          NG_APP_SENTRY_RELEASE: ${{ github.sha }}
+          DEPLOYMENT_TARGET: ${{ env.VERCEL_DEPLOYMENT_TARGET }}
+          SUPABASE_PROJECT_ALIAS: production
+          SENTRY_RELEASE: ${{ github.sha }}
+        run: npm run build:strict
+
+      - name: Install Cloudflare headers for artifact parity checks
+        run: |
+          set -euo pipefail
+          cp public/_headers dist/browser/_headers
+          node scripts/generate-artifact-manifest.cjs
+
+      - name: Run deployment quality guards
+        run: |
+          set -euo pipefail
+          npm run perf:guard:nojit
+          npm run quality:guard:font-contract
+          npm run quality:guard:supabase-ready
+          npm run quality:guard:deploy-artifacts
+
+      - name: Validate manual deploy confirmation
+        run: |
+          set -euo pipefail
+          if [ "${{ inputs.deploy }}" != "true" ]; then
+            echo "Dry run only. Re-run with deploy=true and confirm=${CONFIRM_TOKEN} to deploy to Vercel."
+            exit 0
+          fi
+          if [ "${{ inputs.confirm }}" != "${CONFIRM_TOKEN}" ]; then
+            echo "::error::deploy=true requires confirm=${CONFIRM_TOKEN}"
+            exit 1
+          fi
+
+      - name: Pull Vercel production settings
+        if: inputs.deploy == true && inputs.confirm == 'DEPLOY_VERCEL_PREBUILT'
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: |
+          set -euo pipefail
+          for var in VERCEL_TOKEN VERCEL_ORG_ID VERCEL_PROJECT_ID; do
+            if [ -z "${!var:-}" ]; then
+              echo "::error::Missing required Vercel recovery secret: $var"
+              exit 1
+            fi
+          done
+          npx --yes vercel pull --yes --environment=production --token "$VERCEL_TOKEN"
+
+      - name: Build Vercel prebuilt output
+        if: inputs.deploy == true && inputs.confirm == 'DEPLOY_VERCEL_PREBUILT'
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: npx --yes vercel build --prod --token "$VERCEL_TOKEN"
+
+      - name: Deploy Vercel prebuilt output
+        if: inputs.deploy == true && inputs.confirm == 'DEPLOY_VERCEL_PREBUILT'
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: npx --yes vercel deploy --prebuilt --prod --token "$VERCEL_TOKEN"

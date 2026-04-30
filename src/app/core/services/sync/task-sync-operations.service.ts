@@ -23,6 +23,7 @@ import { TombstoneService } from './tombstone.service';
 import { ProjectDataService } from './project-data.service';
 import { RetryQueueService } from './retry-queue.service';
 import { SyncStateService } from './sync-state.service';
+import { TaskStore } from '../../state/stores';
 import { Task } from '../../../../models';
 import { TaskRow } from '../../../../models/supabase-types';
 import { nowISO } from '../../../../utils/date';
@@ -35,8 +36,7 @@ import { isPermanentFailureError, PermanentFailureError } from '../../../../util
 import { REQUEST_THROTTLE_CONFIG, FIELD_SELECT_CONFIG, FLOATING_TREE_CONFIG } from '../../../../config';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
-import { SyncRpcClientService } from '../../../../services/sync-rpc-client.service';
-import type { SyncRpcResult } from '../../../../services/sync-rpc-client.service';
+import { SyncRpcClientService, type SyncRpcResult } from '../../../../services/sync-rpc-client.service';
 import {
   createBrowserNetworkSuspendedError,
   isBrowserNetworkSuspendedWindow,
@@ -72,6 +72,7 @@ export class TaskSyncOperationsService {
   private readonly projectDataService = inject(ProjectDataService);
   private readonly retryQueueService = inject(RetryQueueService);
   private readonly syncStateService = inject(SyncStateService);
+  private readonly taskStore = inject(TaskStore, { optional: true });
   private readonly syncRpcClient = inject(SyncRpcClientService, { optional: true });
   
   /**
@@ -160,6 +161,50 @@ export class TaskSyncOperationsService {
       removedTaskRetryCount: removedTaskIds.length,
       removedConnectionCount: removedConnectionIds.length,
     });
+  }
+
+  private normalizeLocalTaskUpdatedAt(task: Task, projectId: string, serverUpdatedAt?: string | null): void {
+    if (!serverUpdatedAt) {
+      return;
+    }
+
+    const currentTask = this.taskStore?.getTask(task.id);
+    if (currentTask) {
+      this.taskStore?.setTask({ ...currentTask, updatedAt: serverUpdatedAt }, projectId);
+    }
+    task.updatedAt = serverUpdatedAt;
+    this.clockSync.recordServerTimestamp(serverUpdatedAt, task.id);
+  }
+
+  private applyTaskPositionSnapshot(
+    taskId: string,
+    projectId: string | undefined,
+    fallbackTask: Task | undefined,
+    x: number,
+    y: number,
+    serverUpdatedAt?: string | null,
+  ): void {
+    if (projectId) {
+      const currentTask = this.taskStore?.getTask(taskId);
+      if (currentTask) {
+        this.taskStore?.setTask({
+          ...currentTask,
+          x,
+          y,
+          ...(serverUpdatedAt ? { updatedAt: serverUpdatedAt } : {}),
+        }, projectId);
+      }
+    }
+
+    if (!fallbackTask) {
+      return;
+    }
+
+    fallbackTask.x = x;
+    fallbackTask.y = y;
+    if (serverUpdatedAt) {
+      fallbackTask.updatedAt = serverUpdatedAt;
+    }
   }
 
   private markSessionExpiredWithoutThrow(
@@ -518,7 +563,7 @@ export class TaskSyncOperationsService {
           if (error) throw supabaseErrorToError(error);
           
           if (upsertedData?.updated_at) {
-            this.clockSync.recordServerTimestamp(upsertedData.updated_at, task.id);
+            this.normalizeLocalTaskUpdatedAt(task, projectId, upsertedData.updated_at);
           }
           pushed = true;
         });
@@ -563,7 +608,7 @@ export class TaskSyncOperationsService {
   ): boolean {
     if (result.status === 'applied' || result.status === 'idempotent-replay') {
       if (result.serverUpdatedAt) {
-        this.clockSync.recordServerTimestamp(result.serverUpdatedAt, task.id);
+        this.normalizeLocalTaskUpdatedAt(task, projectId, result.serverUpdatedAt);
       }
       this.logger.debug('pushTask: sync RPC 写入成功', {
         taskId: task.id,
@@ -682,7 +727,7 @@ export class TaskSyncOperationsService {
     x: number,
     y: number,
     projectId?: string,
-    _fallbackTask?: Task,
+    fallbackTask?: Task,
     sourceUserId?: string,
   ): Promise<boolean> {
     if (this.syncStateService.isSessionExpired()) {
@@ -731,6 +776,57 @@ export class TaskSyncOperationsService {
         return false;
       }
     }
+
+    if (this.shouldUseSyncRpc()) {
+      if (!projectId || !fallbackTask) {
+        this.logger.warn('pushTaskPosition: sync RPC 开启但缺少任务快照，跳过未受保护的位置直写', {
+          taskId,
+          projectId: projectId ?? null,
+        });
+        return false;
+      }
+
+      try {
+        const taskForRpc = {
+          ...fallbackTask,
+          x,
+          y,
+        };
+        const result = await this.syncRpcClient!.upsertTask({
+          operationId: this.createSyncRpcOperationId(),
+          task: taskForRpc,
+          projectId,
+          baseUpdatedAt: fallbackTask.updatedAt ?? null,
+        });
+
+        const pushed = this.handleTaskSyncRpcResult(
+          result,
+          taskForRpc,
+          projectId,
+          false,
+          sourceUserId,
+        );
+        if (pushed) {
+          this.applyTaskPositionSnapshot(
+            taskId,
+            projectId,
+            fallbackTask,
+            x,
+            y,
+            taskForRpc.updatedAt ?? result.serverUpdatedAt ?? null,
+          );
+        }
+        return pushed;
+      } catch (e) {
+        if (isBrowserNetworkSuspendedWindow()) {
+          this.logger.info('浏览器网络挂起，延后任务位置同步', { taskId, projectId });
+          return false;
+        }
+
+        this.logger.debug('pushTaskPosition sync RPC 异常', { taskId, error: e });
+        return false;
+      }
+    }
     
     try {
       // 【P2-2 修复】不发送客户端 updated_at，让 DB 触发器统一设置，与 pushTask 一致
@@ -759,6 +855,7 @@ export class TaskSyncOperationsService {
 
       // 记录服务端时间戳，保持时钟同步
       this.clockSync.recordServerTimestamp(updatedAt, taskId);
+      this.applyTaskPositionSnapshot(taskId, projectId, fallbackTask, x, y, updatedAt);
       
       this.retryQueueService.recordCircuitSuccess();
       return true;
@@ -969,6 +1066,25 @@ export class TaskSyncOperationsService {
     }
 
     try {
+      if (this.shouldUseSyncRpc()) {
+        const result = await this.syncRpcClient!.deleteTasks({
+          operationId: this.createSyncRpcOperationId(),
+          projectId,
+          taskIds,
+          baseUpdatedAt: null,
+          deleteMode: 'soft',
+        });
+
+        if (result.status === 'applied' || result.status === 'idempotent-replay') {
+          await this.applySuccessfulTaskDeleteRpc(client, result, projectId, taskIds, tombstoneTimestamps);
+          return result.affectedCount ?? taskIds.length;
+        }
+
+        this.handleRejectedTaskDeleteRpc(result, projectId, taskIds, false, undefined, 'softDeleteTasksBatch');
+        this.tombstoneService.addLocalTombstones(projectId, taskIds, tombstoneTimestamps);
+        return -1;
+      }
+
       this.logger.debug('softDeleteTasksBatch: 调用 safe_delete_tasks RPC', {
         projectId,
         taskIds,
@@ -1091,6 +1207,24 @@ export class TaskSyncOperationsService {
         }
       }
 
+      if (this.shouldUseSyncRpc()) {
+        const result = await this.syncRpcClient!.deleteTasks({
+          operationId: this.createSyncRpcOperationId(),
+          projectId,
+          taskIds,
+          baseUpdatedAt: null,
+          deleteMode: 'purge',
+        });
+
+        if (result.status === 'applied' || result.status === 'idempotent-replay') {
+          await this.applySuccessfulTaskDeleteRpc(client, result, projectId, taskIds);
+          return true;
+        }
+
+        this.handleRejectedTaskDeleteRpc(result, projectId, taskIds, fromRetryQueue, sourceUserId, 'purgeTasksFromCloud');
+        return false;
+      }
+
       // 优先使用 purge_tasks_v3
       this.logger.debug('purgeTasksFromCloud: 调用 purge_tasks_v3', { projectId, taskIds });
       const purgeV3Result = await client.rpc('purge_tasks_v3', {
@@ -1178,6 +1312,61 @@ export class TaskSyncOperationsService {
       this.queueTaskDeletesForRetry(taskIds, projectId, fromRetryQueue, sourceUserId);
       return false;
     }
+  }
+
+  private async applySuccessfulTaskDeleteRpc(
+    client: SupabaseClient,
+    result: SyncRpcResult,
+    projectId: string,
+    taskIds: string[],
+    tombstoneTimestamps?: Record<string, string | number | null | undefined>,
+  ): Promise<void> {
+    if (result.attachmentPaths && result.attachmentPaths.length > 0) {
+      await this.tombstoneService.deleteAttachmentFilesFromStorage(client, result.attachmentPaths);
+    }
+
+    this.tombstoneService.addLocalTombstones(projectId, taskIds, tombstoneTimestamps);
+    this.settleDeletedTaskDependencies(projectId, taskIds);
+    this.logger.info('sync_delete_tasks 成功', {
+      projectId,
+      taskCount: taskIds.length,
+      affectedCount: result.affectedCount ?? null,
+      status: result.status,
+    });
+  }
+
+  private handleRejectedTaskDeleteRpc(
+    result: SyncRpcResult,
+    projectId: string,
+    taskIds: string[],
+    fromRetryQueue: boolean,
+    sourceUserId: string | undefined,
+    operation: string,
+  ): void {
+    const isConflict = result.status === 'remote-newer' || result.status === 'deleted-remote-newer';
+    const message = result.status === 'client-version-rejected'
+      ? '当前客户端同步协议已过期，请刷新后重试'
+      : isConflict
+        ? '远端版本更新，删除意图已保留等待拉取合并'
+        : '任务删除被服务端拒绝，已保留本地变更等待重试';
+
+    this.syncStateService.setSyncError(message);
+    this.sentryLazyLoader.captureMessage(
+      isConflict ? 'sync_rpc_task_delete_remote_newer' : 'sync_rpc_task_delete_rejected',
+      {
+        level: 'warning',
+        tags: { operation, entityType: 'task', status: result.status },
+        extra: {
+          projectId,
+          taskIds,
+          remoteUpdatedAt: result.remoteUpdatedAt,
+          reason: result.reason,
+          minProtocolVersion: result.minProtocolVersion,
+        },
+      },
+    );
+
+    this.queueTaskDeletesForRetry(taskIds, projectId, fromRetryQueue, sourceUserId);
   }
   
   // Tombstone 管理

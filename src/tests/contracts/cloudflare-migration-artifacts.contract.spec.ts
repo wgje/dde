@@ -5,6 +5,12 @@ import { describe, expect, it } from 'vitest';
 const root = process.cwd();
 const read = (relativePath: string): string =>
   fs.readFileSync(path.join(root, relativePath), 'utf-8');
+const readAllMigrations = (): string =>
+  fs.readdirSync(path.join(root, 'supabase', 'migrations'))
+    .filter((file) => file.endsWith('.sql'))
+    .sort()
+    .map((file) => read(path.join('supabase', 'migrations', file)))
+    .join('\n');
 
 describe('Cloudflare migration artifact contracts', () => {
   it('does not install an explicit wildcard _redirects rule that turns missing chunks into HTML 200', () => {
@@ -36,6 +42,28 @@ describe('Cloudflare migration artifact contracts', () => {
     expect(beforeDeploy).not.toContain('CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}');
   });
 
+  it('uses NanoFlow-Preview environment only for preview builds and repository secrets otherwise', () => {
+    const workflow = read('.github/workflows/deploy-cloudflare-pages.yml');
+    const previewEnvironmentExpression = "${{ (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.target == 'preview')) && 'NanoFlow-Preview' || '' }}";
+
+    expect(workflow).toContain('environment:');
+    expect(workflow).toContain(`name: ${previewEnvironmentExpression}`);
+    expect(workflow).toContain(`GITHUB_ENVIRONMENT_NAME: ${previewEnvironmentExpression}`);
+    expect(workflow).toContain('NG_APP_SUPABASE_URL: ${{ secrets.NG_APP_SUPABASE_URL }}');
+    expect(workflow).toContain('NG_APP_SUPABASE_ANON_KEY: ${{ secrets.NG_APP_SUPABASE_ANON_KEY }}');
+    expect(workflow).toContain('secret_source="Repository secrets"');
+    expect(workflow).toContain('secret_source="GitHub Environment');
+    expect(workflow).not.toContain('PREVIEW_NG_APP_SUPABASE_URL');
+    expect(workflow).not.toContain('PREVIEW_NG_APP_SUPABASE_ANON_KEY');
+    expect(workflow).not.toContain('NG_APP_SUPABASE_URL_PREVIEW');
+    expect(workflow).not.toContain('NG_APP_SUPABASE_ANON_KEY_PREVIEW');
+    expect(workflow).not.toContain('NG_APP_SUPABASE_URL_PROD');
+    expect(workflow).not.toContain('NG_APP_SUPABASE_ANON_KEY_PROD');
+    expect(workflow).not.toContain('ALLOW_PROD_SUPABASE_FOR_PREVIEW_SMOKE');
+    expect(workflow).not.toContain("'Production'");
+    expect(workflow).not.toContain("'Preview'");
+  });
+
   it('runs deterministic build and local wrangler smoke in the dry-run workflow', () => {
     const workflow = read('.github/workflows/deploy-cloudflare-pages-dry-run.yml');
 
@@ -44,6 +72,25 @@ describe('Cloudflare migration artifact contracts', () => {
     expect(workflow).toContain('scripts/smoke/cloudflare-header-smoke.sh');
     expect(workflow).not.toContain('CLOUDFLARE_API_TOKEN');
     expect(workflow).not.toContain('SENTRY_AUTH_TOKEN');
+  });
+
+  it('keeps the Vercel prebuilt recovery workflow manual and gated', () => {
+    const workflowPath = path.join(root, '.github', 'workflows', 'vercel-prebuilt-recovery.yml');
+    expect(fs.existsSync(workflowPath)).toBe(true);
+
+    const workflow = read('.github/workflows/vercel-prebuilt-recovery.yml');
+    expect(workflow).toContain('workflow_dispatch:');
+    expect(workflow).not.toContain('pull_request');
+    expect(workflow).not.toMatch(/^\s+push:/m);
+    expect(workflow).toContain("CONFIRM_TOKEN: 'DEPLOY_VERCEL_PREBUILT'");
+    expect(workflow).toContain('legacy-export-only');
+    expect(workflow).toContain('vercel-legacy');
+    expect(workflow).toContain('export-only');
+    expect(workflow).toContain('vercel pull --yes --environment=production');
+    expect(workflow).toContain('vercel build --prod');
+    expect(workflow).toContain('vercel deploy --prebuilt --prod');
+    expect(workflow).toContain('npm run quality:guard:deploy-artifacts');
+    expect(workflow).toContain('if [ "${{ inputs.deploy }}" != "true" ]; then');
   });
 
   it('generates a final artifact manifest after headers are installed', () => {
@@ -117,6 +164,9 @@ describe('Cloudflare migration artifact contracts', () => {
     expect(gateIndex).toBeLessThan(indexHtml.indexOf('rel="preconnect"'));
     expect(gateIndex).toBeLessThan(indexHtml.indexOf('Anti-FOUC'));
     expect(indexHtml).toContain('nanoflow.originGate.cleanup');
+    expect(indexHtml).toContain('EXPECTED_NGSW_HASH');
+    expect(indexHtml).toContain('ngswHashMismatch');
+    expect(indexHtml).toContain('/version.json');
     expect(indexHtml).toContain('caches.keys');
     expect(indexHtml).toContain('__NANOFLOW_WRITE_GUARD__');
   });
@@ -241,14 +291,93 @@ describe('Cloudflare migration artifact contracts', () => {
   });
 
   it('sync write protection RPCs carry deployment fences and full entity payloads', () => {
-    const migration = read('supabase/migrations/20260429080000_sync_write_protection_rpcs.sql');
+    const migration = readAllMigrations();
 
     expect(migration).toContain('deployment_epoch BIGINT');
     expect(migration).toContain('deployment_epoch_below_min');
     expect(migration).toContain('deployment_target TEXT');
+    expect(migration).toContain('CREATE OR REPLACE FUNCTION public.sync_upsert_project(payload JSONB)');
+    expect(migration).toContain('CREATE OR REPLACE FUNCTION public.sync_delete_project(payload JSONB)');
+    expect(migration).toContain('CREATE OR REPLACE FUNCTION public.sync_delete_tasks(payload JSONB)');
     expect(migration).toContain('INSERT INTO public.connections AS c (id, project_id, source_id, target_id, title, description, deleted_at, updated_at)');
     expect(migration).toContain('focus_meta');
     expect(migration).toContain('snooze_count');
+  });
+
+  it('task delete sync RPC owns delete_mode validation in its own SQL function body', () => {
+    const migration = read('supabase/migrations/20260430100000_sync_rpc_project_and_delete_coverage.sql');
+    const start = migration.indexOf('CREATE OR REPLACE FUNCTION public.sync_delete_tasks(payload JSONB)');
+    const end = migration.indexOf('GRANT EXECUTE ON FUNCTION public.sync_delete_tasks(JSONB)', start);
+    const body = migration.slice(start, end);
+
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    expect(body).toContain("v_delete_mode TEXT := COALESCE(NULLIF(payload->>'delete_mode', ''), 'purge');");
+    expect(body).toContain("IF v_delete_mode NOT IN ('soft', 'purge') THEN");
+    expect(body).toContain("IF v_delete_mode = 'soft' THEN");
+  });
+
+  it('keeps the pre-baseline optimization migration schema-independent for clean database pushes', () => {
+    const migration = read('supabase/migrations/20260126000000_database_optimization.sql');
+
+    expect(migration).toContain('Compatibility placeholder');
+    expect(migration).not.toMatch(/\b(?:CREATE|DROP|ALTER|ANALYZE)\b[\s\S]*?\bpublic\.(?:connection_tombstones|task_tombstones|quarantined_files|black_box_entries|tasks|connections|projects)\b/i);
+  });
+
+  it('guards retired cloud backup migrations for clean database pushes', () => {
+    const retiredBackupMigrationPaths = [
+      'supabase/migrations/20260315210000_full_optimization_audit_fixes.sql',
+      'supabase/migrations/20260315220000_advisor_driven_full_optimization.sql',
+      'supabase/migrations/20260318140000_mcp_advisor_full_remediation.sql',
+      'supabase/migrations/20260318180000_final_advisor_unindexed_fk_repair.sql',
+      'supabase/migrations/20260318193000_readd_backup_fk_covering_indexes.sql',
+      'supabase/migrations/20260322090113_backup_metadata_payload_v2.sql',
+      'supabase/migrations/20260322143921_remove_cloud_backup_infrastructure.sql',
+    ];
+    const directRetiredBackupStatements =
+      /^\s*(?!EXECUTE\s)(?:ALTER TABLE|CREATE(?:\s+UNIQUE)?\s+INDEX|ANALYZE|DROP\s+TRIGGER|DROP\s+POLICY|COMMENT\s+ON\s+(?:COLUMN|INDEX)|UPDATE|REVOKE|GRANT)\b.*\b(?:public\.)?backup_(?:metadata|restore_history|encryption_keys)\b/im;
+
+    for (const migrationPath of retiredBackupMigrationPaths) {
+      const migration = read(migrationPath);
+      const migrationWithoutDynamicSql = migration.replace(
+        /EXECUTE\s+\$sql\$[\s\S]*?\$sql\$/g,
+        'EXECUTE $sql$...$sql$',
+      );
+
+      expect(migration, migrationPath).toContain("to_regclass('public.backup_metadata')");
+      expect(migrationWithoutDynamicSql, migrationPath).not.toMatch(directRetiredBackupStatements);
+    }
+  });
+
+  it('guards optional pg_cron operations for clean database pushes', () => {
+    const migration = read('supabase/migrations/20260319153259_personal_backend_slimdown.sql');
+
+    expect(migration).toContain("to_regclass('cron.job')");
+    expect(migration).toContain("to_regclass('cron.job_run_details')");
+    expect(migration).not.toMatch(/^\s*DELETE\s+FROM\s+cron\.job_run_details\s*;/im);
+    expect(migration).not.toMatch(/^\s*SELECT\s+public\.apply_backup_schedules\(\)\s*;/im);
+  });
+
+  it('creates access helper functions after the baseline schema before later migrations use them', () => {
+    const advisorHardening = read('supabase/migrations/20260318073814_advisor_security_followup_hardening.sql');
+    const personalBackendSlimdown = read('supabase/migrations/20260319153259_personal_backend_slimdown.sql');
+
+    expect(advisorHardening).toContain('to_regprocedure(procedure_signature)');
+    expect(advisorHardening).toContain("'public.current_user_id()'");
+    expect(advisorHardening).toContain("'public.user_has_project_access(uuid)'");
+    expect(advisorHardening).toContain("'public.user_is_project_owner(uuid)'");
+    expect(advisorHardening).toContain("'public.user_accessible_project_ids()'");
+    expect(advisorHardening).not.toContain('ALTER FUNCTION public.current_user_id() SET search_path');
+    expect(advisorHardening).not.toContain('ALTER FUNCTION public.user_has_project_access(uuid) SET search_path');
+
+    expect(personalBackendSlimdown).toContain('CREATE OR REPLACE FUNCTION public.current_user_id()');
+    expect(personalBackendSlimdown).toContain('CREATE OR REPLACE FUNCTION public.user_is_project_owner(p_project_id uuid)');
+    expect(personalBackendSlimdown.indexOf('CREATE OR REPLACE FUNCTION public.current_user_id()')).toBeLessThan(
+      personalBackendSlimdown.indexOf('CREATE OR REPLACE FUNCTION public.user_accessible_project_ids()'),
+    );
+    expect(personalBackendSlimdown.indexOf('CREATE OR REPLACE FUNCTION public.user_is_project_owner(p_project_id uuid)')).toBeLessThan(
+      personalBackendSlimdown.indexOf('CREATE OR REPLACE FUNCTION public.get_vault_secret(p_name text)'),
+    );
   });
 
   it('Android TWA default origin no longer points at the retired Vercel host', () => {

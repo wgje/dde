@@ -27,10 +27,25 @@ BEGIN
 END $$;
 
 -- 2) Lock down mutable function search_path (advisor 0011)
-ALTER FUNCTION public.update_black_box_updated_at() SET search_path = pg_catalog, public;
-ALTER FUNCTION public.current_user_id() SET search_path = pg_catalog, public;
-ALTER FUNCTION public.user_has_project_access(uuid) SET search_path = pg_catalog, public;
-ALTER FUNCTION public.user_is_project_owner(uuid) SET search_path = pg_catalog, public;
-ALTER FUNCTION public.user_accessible_project_ids() SET search_path = pg_catalog, public;
-ALTER FUNCTION public.update_backup_metadata_updated_at() SET search_path = pg_catalog, public;
-ALTER FUNCTION public.update_updated_at_column() SET search_path = pg_catalog, public;;
+-- Some helper functions are created by later forward migrations in a clean
+-- bootstrap. Guard each ALTER so this migration remains compatible with both
+-- existing remote history and fresh database pushes.
+DO $$
+DECLARE
+  procedure_signature text;
+BEGIN
+  FOREACH procedure_signature IN ARRAY ARRAY[
+    'public.update_black_box_updated_at()',
+    'public.current_user_id()',
+    'public.user_has_project_access(uuid)',
+    'public.user_is_project_owner(uuid)',
+    'public.user_accessible_project_ids()',
+    'public.update_backup_metadata_updated_at()',
+    'public.update_updated_at_column()'
+  ]
+  LOOP
+    IF to_regprocedure(procedure_signature) IS NOT NULL THEN
+      EXECUTE format('ALTER FUNCTION %s SET search_path = pg_catalog, public', procedure_signature);
+    END IF;
+  END LOOP;
+END $$;

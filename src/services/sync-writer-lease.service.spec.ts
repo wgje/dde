@@ -3,6 +3,7 @@ import { Injector, runInInjectionContext } from '@angular/core';
 
 import { SyncWriterLeaseService } from './sync-writer-lease.service';
 import { LoggerService } from './logger.service';
+import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { environment } from '../environments/environment';
 
 const mockLoggerCategory = {
@@ -15,6 +16,9 @@ const mockLoggerCategory = {
 const mockLogger = {
   category: () => mockLoggerCategory,
 } as unknown as LoggerService;
+const mockSentry = {
+  addBreadcrumb: vi.fn(),
+};
 
 interface MutableEnv {
   syncLeaseEnabled?: boolean;
@@ -23,7 +27,10 @@ interface MutableEnv {
 
 function buildService(): SyncWriterLeaseService {
   const injector = Injector.create({
-    providers: [{ provide: LoggerService, useValue: mockLogger }],
+    providers: [
+      { provide: LoggerService, useValue: mockLogger },
+      { provide: SentryLazyLoaderService, useValue: mockSentry },
+    ],
   });
   return runInInjectionContext(injector, () => new SyncWriterLeaseService());
 }
@@ -52,6 +59,7 @@ describe('SyncWriterLeaseService', () => {
     mockLoggerCategory.info.mockReset();
     mockLoggerCategory.warn.mockReset();
     mockLoggerCategory.debug.mockReset();
+    mockSentry.addBreadcrumb.mockReset();
     const env = environment as unknown as MutableEnv;
     originalLeaseEnabled = env.syncLeaseEnabled;
     originalLocksDescriptor = Object.getOwnPropertyDescriptor(navigator, 'locks');
@@ -112,8 +120,18 @@ describe('SyncWriterLeaseService', () => {
 
     expect(lease.mode).toBe('weblocks');
     expect(requestFn).toHaveBeenCalledTimes(1);
+    expect(mockSentry.addBreadcrumb).toHaveBeenCalledWith(expect.objectContaining({
+      category: 'sync.lease',
+      message: 'sync_writer_lease_acquired',
+      data: expect.objectContaining({ mode: 'weblocks' }),
+    }));
     await lease.release();
     expect(service.isHolder()).toBe(false);
+    expect(mockSentry.addBreadcrumb).toHaveBeenCalledWith(expect.objectContaining({
+      category: 'sync.lease',
+      message: 'sync_writer_lease_released',
+      data: expect.objectContaining({ mode: 'weblocks' }),
+    }));
   });
 
   it('feature 开启时禁止重入：同实例必须 release 才能再次 requestLease', async () => {
@@ -158,6 +176,12 @@ describe('SyncWriterLeaseService', () => {
       const lease = await service.requestLease({ userId: 'u', projectId: 'p' });
       expect(lease.mode).toBe('memory-only');
       expect(mockLoggerCategory.warn).toHaveBeenCalled();
+      expect(mockSentry.addBreadcrumb).toHaveBeenCalledWith(expect.objectContaining({
+        category: 'sync.lease',
+        level: 'warning',
+        message: 'sync_writer_lease_fallback',
+        data: expect.objectContaining({ mode: 'memory-only' }),
+      }));
       await lease.release();
     } finally {
       (globalThis as { indexedDB?: unknown }).indexedDB = originalIndexedDb;

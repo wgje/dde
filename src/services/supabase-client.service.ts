@@ -1,6 +1,7 @@
 import { Injectable, inject, signal } from '@angular/core';
 import type { AuthResponse, Session, SupabaseClient } from '@supabase/supabase-js';
 import { LoggerService } from './logger.service';
+import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { environment } from '../environments/environment';
 import type { Database } from '../types/supabase';
 import { FEATURE_FLAGS } from '../config/feature-flags.config';
@@ -51,6 +52,7 @@ function decodeBase64UrlJson(segment: string): Record<string, unknown> | null {
 })
 export class SupabaseClientService {
   private readonly logger = inject(LoggerService).category('SupabaseClient');
+  private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private supabase: SupabaseClient<Database> | null = null;
   private initPromise: Promise<SupabaseClient<Database> | null> | null = null;
 
@@ -1078,6 +1080,7 @@ export class SupabaseClientService {
         heartbeatIntervalMs: 30000,
         timeout: 10000,
         worker: true,
+        workerUrl: '/worker-basic.min.js',
         heartbeatCallback: (payload: RealtimeHeartbeatPayload) => this.handleRealtimeHeartbeat(payload),
       },
     };
@@ -1089,6 +1092,12 @@ export class SupabaseClientService {
       : payload.status ?? payload.event ?? payload.reason ?? 'unknown';
     if (/timeout|disconnect|closed|error/i.test(status)) {
       this.logger.warn('Supabase Realtime heartbeat unhealthy', { status });
+      this.sentryLazyLoader.addBreadcrumb({
+        category: 'realtime',
+        level: 'warning',
+        message: 'supabase_realtime_heartbeat_unhealthy',
+        data: { status },
+      });
       return;
     }
     this.logger.debug('Supabase Realtime heartbeat', { status });

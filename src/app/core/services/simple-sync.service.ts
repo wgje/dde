@@ -76,9 +76,11 @@ import { APP_LIFECYCLE_CONFIG } from '../../../config/app-lifecycle.config';
 import { FEATURE_FLAGS } from '../../../config/feature-flags.config';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { SentryLazyLoaderService } from '../../../services/sentry-lazy-loader.service';
+import { SyncRpcClientService, type SyncRpcResult } from '../../../services/sync-rpc-client.service';
 import { BlackBoxSyncService } from '../../../services/black-box-sync.service';
 import { ChangeTrackerService } from '../../../services/change-tracker.service';
 import { BlackBoxEntry } from '../../../models/focus';
+import { ProjectStore } from '../state/stores';
 import { SyncStateService } from './sync/sync-state.service';
 import {
   getRemainingBrowserNetworkResumeDelayMs,
@@ -203,6 +205,8 @@ export class SimpleSyncService {
   private readonly retryQueueService = inject(RetryQueueService);
   private readonly blackBoxSync = inject(BlackBoxSyncService);
   private readonly syncCursorPersistence = inject(SyncCursorPersistenceService);
+  private readonly syncRpcClient = inject(SyncRpcClientService, { optional: true });
+  private readonly projectStore = inject(ProjectStore, { optional: true });
 
   private getActionQueue(): ActionQueueService | null {
     return this.injector.get(ActionQueueService, null);
@@ -1284,8 +1288,14 @@ export class SimpleSyncService {
         return false;
       }
 
-      await this.doProjectPush(client, project, sourceUserId ?? sessionUserId);
-      return true;
+      return await this.doProjectPush(
+        client,
+        project,
+        sourceUserId ?? sessionUserId,
+        fromRetryQueue,
+        sourceUserId,
+        taskIdsToDelete,
+      );
     };
     
     try {
@@ -1383,6 +1393,78 @@ export class SimpleSyncService {
     }
   }
 
+  private shouldUseSyncRpc(): boolean {
+    return this.syncRpcClient?.isFeatureEnabled() === true && this.syncRpcClient.isClientRejected() === false;
+  }
+
+  private createSyncRpcOperationId(): string {
+    return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  }
+
+  private normalizeLocalProjectUpdatedAt(project: Project, serverUpdatedAt?: string | null): void {
+    if (!serverUpdatedAt) return;
+
+    const currentProject = this.projectStore?.getProject(project.id);
+    if (currentProject && currentProject.updatedAt !== serverUpdatedAt) {
+      this.projectStore?.setProject({
+        ...currentProject,
+        updatedAt: serverUpdatedAt,
+      });
+    }
+
+    project.updatedAt = serverUpdatedAt;
+    this.clockSync.recordServerTimestamp(serverUpdatedAt, project.id);
+  }
+
+  private async handleProjectSyncRpcResult(
+    result: SyncRpcResult,
+    project: Project,
+    fromRetryQueue: boolean,
+    sourceUserId: string | undefined,
+    taskIdsToDelete: string[] | undefined,
+  ): Promise<boolean> {
+    if (result.status === 'applied' || result.status === 'idempotent-replay') {
+      this.normalizeLocalProjectUpdatedAt(project, result.serverUpdatedAt);
+      this.logger.debug('pushProject: sync RPC 写入成功', {
+        projectId: project.id,
+        status: result.status,
+      });
+      return true;
+    }
+
+    if (result.status === 'remote-newer' || result.status === 'deleted-remote-newer') {
+      this.logger.warn('pushProject: sync RPC CAS 拒绝，远端版本更新', {
+        projectId: project.id,
+        status: result.status,
+        remoteUpdatedAt: result.remoteUpdatedAt,
+        reason: result.reason,
+      });
+      this.sentryLazyLoader.captureMessage('sync_rpc_project_remote_newer', {
+        level: 'warning',
+        tags: { operation: 'pushProject', entityType: 'project', status: result.status },
+        extra: { projectId: project.id, remoteUpdatedAt: result.remoteUpdatedAt, reason: result.reason },
+      });
+      if (!fromRetryQueue) {
+        await this.addToRetryQueueDurably('project', 'upsert', project, undefined, sourceUserId, taskIdsToDelete);
+      }
+      return false;
+    }
+
+    const message = result.status === 'client-version-rejected'
+      ? '当前客户端同步协议已过期，请刷新后重试'
+      : '项目同步写入被服务端拒绝，已保留本地变更等待重试';
+    this.syncStateService.setSyncError(message);
+    this.sentryLazyLoader.captureMessage('sync_rpc_project_rejected', {
+      level: 'warning',
+      tags: { operation: 'pushProject', entityType: 'project', status: result.status },
+      extra: { projectId: project.id, reason: result.reason, minProtocolVersion: result.minProtocolVersion },
+    });
+    if (!fromRetryQueue) {
+      await this.addToRetryQueueDurably('project', 'upsert', project, undefined, sourceUserId, taskIdsToDelete);
+    }
+    return false;
+  }
+
   private async confirmRetryQueuePersistence(): Promise<boolean> {
     return this.retryQueueService.persistNow();
   }
@@ -1426,10 +1508,34 @@ export class SimpleSyncService {
   /**
    * 执行项目 upsert 操作（内部方法，由 pushProject 调用）
    */
-  private async doProjectPush(client: SupabaseClient, project: Project, userId: string): Promise<void> {
+  private async doProjectPush(
+    client: SupabaseClient,
+    project: Project,
+    userId: string,
+    fromRetryQueue = false,
+    sourceUserId?: string,
+    taskIdsToDelete?: string[],
+  ): Promise<boolean> {
+    if (this.shouldUseSyncRpc()) {
+      const result = await this.syncRpcClient!.upsertProject({
+        operationId: this.createSyncRpcOperationId(),
+        project,
+        ownerId: userId,
+        baseUpdatedAt: project.updatedAt ?? null,
+      });
+
+      return await this.handleProjectSyncRpcResult(
+        result,
+        project,
+        fromRetryQueue,
+        sourceUserId,
+        taskIdsToDelete,
+      );
+    }
+
     // 【P2-1 修复】不发送客户端 updated_at，让 DB 触发器统一设置，避免时钟偏移影响 LWW 判定
     // 【RLS 修复】显式传 deleted_at: null，确保本地活跃项目能清除远端软删除状态（LWW 语义）
-    const { error } = await client
+    const { data, error } = await client
       .from('projects')
       .upsert({
         id: project.id,
@@ -1439,9 +1545,16 @@ export class SimpleSyncService {
         version: project.version || 1,
         migrated_to_v2: true,
         deleted_at: project.deletedAt ?? null,
-      });
+      })
+      .select('updated_at')
+      .single();
     
     if (error) throw supabaseErrorToError(error);
+    this.normalizeLocalProjectUpdatedAt(
+      project,
+      typeof data?.updated_at === 'string' ? data.updated_at : null,
+    );
+    return true;
   }
   
   async pullProjects(since?: string): Promise<Project[]> {
@@ -2344,6 +2457,58 @@ export class SimpleSyncService {
         projectId,
         expectedUserId: userId,
         sessionUserId,
+      });
+    }
+
+    if (this.shouldUseSyncRpc()) {
+      const result = await this.syncRpcClient!.deleteProject({
+        operationId: this.createSyncRpcOperationId(),
+        projectId,
+        baseUpdatedAt: this.projectStore?.getProject(projectId)?.updatedAt ?? null,
+      });
+
+      if (result.status === 'applied' || result.status === 'idempotent-replay') {
+        if (result.serverUpdatedAt) {
+          this.clockSync.recordServerTimestamp(result.serverUpdatedAt, projectId);
+        }
+        return success(undefined);
+      }
+
+      const isConflict = result.status === 'remote-newer' || result.status === 'deleted-remote-newer';
+      const message = result.status === 'client-version-rejected'
+        ? '当前客户端同步协议已过期，请刷新后重试'
+        : isConflict
+          ? '远端项目版本更新，请先同步后重试删除'
+          : '项目删除被服务端拒绝';
+      this.syncStateService.setSyncError(message);
+      this.sentryLazyLoader.captureMessage(
+        isConflict ? 'sync_rpc_project_delete_remote_newer' : 'sync_rpc_project_delete_rejected',
+        {
+          level: 'warning',
+          tags: { operation: 'deleteProjectFromCloud', entityType: 'project', status: result.status },
+          extra: {
+            projectId,
+            remoteUpdatedAt: result.remoteUpdatedAt,
+            reason: result.reason,
+            minProtocolVersion: result.minProtocolVersion,
+          },
+        },
+      );
+
+      if (result.status === 'unauthorized') {
+        return failure(ErrorCodes.PERMISSION_DENIED, message, {
+          projectId,
+          userId,
+          retryable: false,
+          reason: result.reason,
+        });
+      }
+
+      return failure(isConflict ? ErrorCodes.SYNC_CONFLICT : ErrorCodes.OPERATION_FAILED, message, {
+        projectId,
+        userId,
+        retryable: result.status === 'client-version-rejected',
+        reason: result.reason,
       });
     }
 

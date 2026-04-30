@@ -2,6 +2,7 @@ import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { Injector } from '@angular/core';
 import { SupabaseClientService } from './supabase-client.service';
 import { LoggerService } from './logger.service';
+import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import {
   resetBrowserNetworkSuspensionTrackingForTests,
 } from '../utils/browser-network-suspension';
@@ -24,6 +25,9 @@ vi.mock('@supabase/supabase-js', () => ({
 
 const mockLoggerCategory = {
   info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(),
+};
+const mockSentry = {
+  addBreadcrumb: vi.fn(),
 };
 
 function createJwtLikeToken(payload: Record<string, unknown>): string {
@@ -61,6 +65,7 @@ describe('SupabaseClientService', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockSentry.addBreadcrumb.mockClear();
     vi.useRealTimers();
     authClientMock.auth.getSession.mockResolvedValue({ data: { session: null }, error: null });
     authClientMock.auth.signInWithPassword.mockResolvedValue({ data: {}, error: null });
@@ -74,6 +79,7 @@ describe('SupabaseClientService', () => {
       providers: [
         { provide: SupabaseClientService, useClass: SupabaseClientService },
         { provide: LoggerService, useValue: { category: () => mockLoggerCategory } },
+        { provide: SentryLazyLoaderService, useValue: mockSentry },
       ],
     });
     service = injector.get(SupabaseClientService);
@@ -137,7 +143,24 @@ describe('SupabaseClientService', () => {
       const options = mutable.buildClientOptions();
 
       expect(options.realtime.worker).toBe(true);
+      expect(options.realtime.workerUrl).toBe('/worker-basic.min.js');
       expect(typeof options.realtime.heartbeatCallback).toBe('function');
+    });
+
+    it('Realtime heartbeat 异常应写入 Sentry breadcrumb 供生产过滤', () => {
+      const mutable = service as unknown as {
+        buildClientOptions: () => { realtime: { heartbeatCallback: (payload: unknown) => void } };
+      };
+      const options = mutable.buildClientOptions();
+
+      options.realtime.heartbeatCallback({ status: 'heartbeat_timeout' });
+
+      expect(mockSentry.addBreadcrumb).toHaveBeenCalledWith(expect.objectContaining({
+        category: 'realtime',
+        level: 'warning',
+        message: 'supabase_realtime_heartbeat_unhealthy',
+        data: expect.objectContaining({ status: 'heartbeat_timeout' }),
+      }));
     });
 
     it('clientAsync 并发调用应 single-flight', async () => {

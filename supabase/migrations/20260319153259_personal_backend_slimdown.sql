@@ -34,6 +34,31 @@ ON CONFLICT (key) DO UPDATE SET
   description = EXCLUDED.description,
   updated_at = now();
 
+CREATE OR REPLACE FUNCTION public.current_user_id()
+RETURNS uuid
+LANGUAGE sql
+STABLE
+PARALLEL SAFE
+SET search_path = 'pg_catalog', 'public'
+AS $$
+  SELECT auth.uid()
+$$;
+
+CREATE OR REPLACE FUNCTION public.user_is_project_owner(p_project_id uuid)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+PARALLEL SAFE
+SET search_path = 'pg_catalog', 'public'
+AS $$
+  SELECT EXISTS (
+    SELECT 1
+    FROM public.projects p
+    WHERE p.id = p_project_id
+      AND p.owner_id = public.current_user_id()
+  )
+$$;
+
 CREATE OR REPLACE FUNCTION public.user_accessible_project_ids()
 RETURNS SETOF uuid
 LANGUAGE sql
@@ -143,6 +168,11 @@ DECLARE
   v_cleanup_schedule text;
   v_job record;
 BEGIN
+  IF to_regclass('cron.job') IS NULL THEN
+    RAISE NOTICE 'Skipping backup cron scheduling; pg_cron job table is absent.';
+    RETURN;
+  END IF;
+
   v_full_schedule := public.get_backup_schedule('backup.schedule.full', '10 19 * * *');
   v_incremental_schedule := public.get_backup_schedule('backup.schedule.incremental', '10 1,7,13 * * *');
   v_cleanup_schedule := public.get_backup_schedule('backup.schedule.cleanup', '10 20 * * *');
@@ -238,12 +268,21 @@ AS $$
 DECLARE
   v_deleted_count integer := 0;
 BEGIN
-  WITH deleted AS (
-    DELETE FROM cron.job_run_details
-    WHERE end_time < now() - p_max_age
-    RETURNING 1
-  )
-  SELECT count(*) INTO v_deleted_count FROM deleted;
+  IF to_regclass('cron.job_run_details') IS NULL THEN
+    RAISE NOTICE 'Skipping cron job_run_details cleanup; pg_cron job_run_details table is absent.';
+    RETURN 0;
+  END IF;
+
+  EXECUTE $sql$
+    WITH deleted AS (
+      DELETE FROM cron.job_run_details
+      WHERE end_time < now() - $1
+      RETURNING 1
+    )
+    SELECT count(*)::integer FROM deleted
+  $sql$
+  INTO v_deleted_count
+  USING p_max_age;
 
   RETURN v_deleted_count;
 END;
@@ -321,33 +360,47 @@ REVOKE ALL ON FUNCTION public.cleanup_personal_retention_artifacts() FROM anon;
 REVOKE ALL ON FUNCTION public.cleanup_personal_retention_artifacts() FROM authenticated;
 GRANT EXECUTE ON FUNCTION public.cleanup_personal_retention_artifacts() TO service_role;
 
-DELETE FROM cron.job_run_details;
-SELECT public.apply_backup_schedules();
+DO $optional_pg_cron_job_run_details$
+BEGIN
+  IF to_regclass('cron.job_run_details') IS NULL THEN
+    RAISE NOTICE 'Skipping cron job_run_details truncate; pg_cron job_run_details table is absent.';
+  ELSE
+    EXECUTE 'DELETE FROM cron.job_run_details';
+  END IF;
+END
+$optional_pg_cron_job_run_details$;
 
-DO $$
+DO $optional_pg_cron_schedules$
 DECLARE
   v_job record;
 BEGIN
-  FOR v_job IN
-    SELECT jobid
-    FROM cron.job
-    WHERE jobname IN ('nanoflow-personal-retention', 'nanoflow-cron-log-retention')
-  LOOP
-    PERFORM cron.unschedule(v_job.jobid);
-  END LOOP;
+  IF to_regclass('cron.job') IS NULL THEN
+    RAISE NOTICE 'Skipping personal retention cron scheduling; pg_cron job table is absent.';
+  ELSE
+    PERFORM public.apply_backup_schedules();
 
-  PERFORM cron.schedule(
-    'nanoflow-personal-retention',
-    '40 20 * * *',
-    $cmd$SELECT public.cleanup_personal_retention_artifacts();$cmd$
-  );
+    FOR v_job IN
+      SELECT jobid
+      FROM cron.job
+      WHERE jobname IN ('nanoflow-personal-retention', 'nanoflow-cron-log-retention')
+    LOOP
+      PERFORM cron.unschedule(v_job.jobid);
+    END LOOP;
 
-  PERFORM cron.schedule(
-    'nanoflow-cron-log-retention',
-    '55 20 * * *',
-    $cmd$SELECT public.cleanup_cron_job_run_details(interval '7 days');$cmd$
-  );
-END $$;
+    PERFORM cron.schedule(
+      'nanoflow-personal-retention',
+      '40 20 * * *',
+      $cmd$SELECT public.cleanup_personal_retention_artifacts();$cmd$
+    );
+
+    PERFORM cron.schedule(
+      'nanoflow-cron-log-retention',
+      '55 20 * * *',
+      $cmd$SELECT public.cleanup_cron_job_run_details(interval '7 days');$cmd$
+    );
+  END IF;
+END
+$optional_pg_cron_schedules$;
 
 -- 运行时代码仍依赖这些表；在对应服务/函数完全下线前保留 schema，避免 fresh bootstrap 后失配。
 

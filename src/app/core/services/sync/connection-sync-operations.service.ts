@@ -31,8 +31,7 @@ import { isPermanentFailureError, PermanentFailureError } from '../../../../util
 import { REQUEST_THROTTLE_CONFIG } from '../../../../config';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
-import { SyncRpcClientService } from '../../../../services/sync-rpc-client.service';
-import type { SyncRpcResult } from '../../../../services/sync-rpc-client.service';
+import { SyncRpcClientService, type SyncRpcResult } from '../../../../services/sync-rpc-client.service';
 import { TombstoneService } from './tombstone.service';
 import {
   createBrowserNetworkSuspendedError,
@@ -97,10 +96,13 @@ export class ConnectionSyncOperationsService {
     this.projectState.updateProjects(mutator);
   }
 
-  private normalizeLocalConnectionUpdatedAt(projectId: string, connectionId: string, serverUpdatedAt?: string | null): void {
+  private normalizeLocalConnectionUpdatedAt(projectId: string, connection: Connection, serverUpdatedAt?: string | null): void {
     if (!serverUpdatedAt) {
       return;
     }
+
+    connection.updatedAt = serverUpdatedAt;
+    const connectionId = connection.id;
 
     this.updateProjectsFromCurrentData(projects => projects.map(project => {
       if (project.id !== projectId) {
@@ -848,7 +850,7 @@ export class ConnectionSyncOperationsService {
       if (persistedUpdatedAt) {
         this.normalizeLocalConnectionUpdatedAt(
           projectId,
-          connection.id,
+          connection,
           persistedUpdatedAt,
         );
       }
@@ -888,7 +890,7 @@ export class ConnectionSyncOperationsService {
   ): boolean {
     if (result.status === 'applied' || result.status === 'idempotent-replay') {
       if (result.serverUpdatedAt) {
-        this.normalizeLocalConnectionUpdatedAt(projectId, connection.id, result.serverUpdatedAt);
+        this.normalizeLocalConnectionUpdatedAt(projectId, connection, result.serverUpdatedAt);
       }
       this.logger.debug('pushConnection: sync RPC 写入成功', {
         connectionId: connection.id,
