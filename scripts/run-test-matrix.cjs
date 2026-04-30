@@ -1487,11 +1487,22 @@ async function main() {
 
   const estimateFile = createFileEstimator(timingInputs, durationBaseline, laneByFile);
   const lptState = resolveLptState(options, durationBaseline, timingInputs);
-  const shardFiles = applyShard(effectiveFiles, options.shard, options.strategy, estimateFile);
+  const effectiveLanes = buildBuckets(effectiveFiles, laneByFile);
+  const lanes = {};
+  for (const laneName of ALL_LANES) {
+    lanes[laneName] = applyShard(
+      effectiveLanes[laneName],
+      options.shard,
+      options.strategy,
+      estimateFile
+    );
+  }
+
+  const shardFiles = ALL_LANES
+    .flatMap((laneName) => lanes[laneName])
+    .sort();
   const shardEstimatedWeightMs = shardFiles
     .reduce((sum, file) => sum + Math.max(1, Math.floor(estimateFile(file))), 0);
-
-  const lanes = buildBuckets(shardFiles, laneByFile);
   validatePartition(shardFiles, lanes);
 
   console.log(`[test:run] discovered ${discoveredFiles.length} files`);
