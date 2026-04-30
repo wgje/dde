@@ -35,6 +35,8 @@ import { isPermanentFailureError, PermanentFailureError } from '../../../../util
 import { REQUEST_THROTTLE_CONFIG, FIELD_SELECT_CONFIG, FLOATING_TREE_CONFIG } from '../../../../config';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
+import { SyncRpcClientService } from '../../../../services/sync-rpc-client.service';
+import type { SyncRpcResult } from '../../../../services/sync-rpc-client.service';
 import {
   createBrowserNetworkSuspendedError,
   isBrowserNetworkSuspendedWindow,
@@ -70,6 +72,7 @@ export class TaskSyncOperationsService {
   private readonly projectDataService = inject(ProjectDataService);
   private readonly retryQueueService = inject(RetryQueueService);
   private readonly syncStateService = inject(SyncStateService);
+  private readonly syncRpcClient = inject(SyncRpcClientService, { optional: true });
   
   /**
    * 安全添加到重试队列（含会话和数据有效性检查）
@@ -331,6 +334,7 @@ export class TaskSyncOperationsService {
         projectId,
         skipTombstoneCheck,
         fromRetryQueue,
+        sourceUserId,
         treatTombstoneAsPermanent,
       );
     };
@@ -417,9 +421,12 @@ export class TaskSyncOperationsService {
     projectId: string, 
     skipTombstoneCheck: boolean,
     fromRetryQueue: boolean,
+    sourceUserId: string | undefined,
     treatTombstoneAsPermanent: boolean,
   ): Promise<boolean> {
     let blockedByTombstone = false;
+    let pushed = false;
+    let blockedBySyncRpc = false;
 
     await this.throttle.execute(
       `push-task:${task.id}`,
@@ -447,6 +454,26 @@ export class TaskSyncOperationsService {
         }
         
         await this.syncOpHelper.retryWithBackoff(async () => {
+          if (this.shouldUseSyncRpc()) {
+            const operationId = this.createSyncRpcOperationId();
+            const result = await this.syncRpcClient!.upsertTask({
+              operationId,
+              task,
+              projectId,
+              baseUpdatedAt: task.updatedAt ?? null,
+            });
+
+            pushed = this.handleTaskSyncRpcResult(
+              result,
+              task,
+              projectId,
+              fromRetryQueue,
+              sourceUserId,
+            );
+            blockedBySyncRpc = !pushed;
+            return;
+          }
+
           const row = {
             id: task.id,
             project_id: projectId,
@@ -493,6 +520,7 @@ export class TaskSyncOperationsService {
           if (upsertedData?.updated_at) {
             this.clockSync.recordServerTimestamp(upsertedData.updated_at, task.id);
           }
+          pushed = true;
         });
       },
       { priority: 'normal', retries: 0, timeout: REQUEST_THROTTLE_CONFIG.INDIVIDUAL_OPERATION_TIMEOUT }
@@ -508,10 +536,81 @@ export class TaskSyncOperationsService {
       }
       return false;
     }
+
+    if (blockedBySyncRpc || !pushed) {
+      return false;
+    }
     
     this.retryQueueService.recordCircuitSuccess();
     this.syncStateService.advanceLastSyncTimeIfIdle(nowISO());
     return true;
+  }
+
+  private shouldUseSyncRpc(): boolean {
+    return this.syncRpcClient?.isFeatureEnabled() === true && this.syncRpcClient.isClientRejected() === false;
+  }
+
+  private createSyncRpcOperationId(): string {
+    return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  }
+
+  private handleTaskSyncRpcResult(
+    result: SyncRpcResult,
+    task: Task,
+    projectId: string,
+    fromRetryQueue: boolean,
+    sourceUserId: string | undefined,
+  ): boolean {
+    if (result.status === 'applied' || result.status === 'idempotent-replay') {
+      if (result.serverUpdatedAt) {
+        this.clockSync.recordServerTimestamp(result.serverUpdatedAt, task.id);
+      }
+      this.logger.debug('pushTask: sync RPC 写入成功', {
+        taskId: task.id,
+        projectId,
+        status: result.status,
+      });
+      return true;
+    }
+
+    if (result.status === 'remote-newer') {
+      this.logger.warn('pushTask: sync RPC CAS 拒绝，远端版本更新', {
+        taskId: task.id,
+        projectId,
+        remoteUpdatedAt: result.remoteUpdatedAt,
+        reason: result.reason,
+      });
+      this.sentryLazyLoader.captureMessage('sync_rpc_task_remote_newer', {
+        level: 'warning',
+        tags: { operation: 'pushTask', entityType: 'task', status: result.status },
+        extra: { taskId: task.id, projectId, remoteUpdatedAt: result.remoteUpdatedAt, reason: result.reason },
+      });
+      if (!fromRetryQueue) {
+        this.safeAddToRetryQueue('task', 'upsert', task, projectId, sourceUserId);
+      }
+      return false;
+    }
+
+    const message = result.status === 'client-version-rejected'
+      ? '当前客户端同步协议已过期，请刷新后重试'
+      : '同步写入被服务端拒绝，已保留本地变更等待重试';
+    this.syncStateService.setSyncError(message);
+    this.logger.warn('pushTask: sync RPC 拒绝写入', {
+      taskId: task.id,
+      projectId,
+      status: result.status,
+      reason: result.reason,
+      minProtocolVersion: result.minProtocolVersion,
+    });
+    this.sentryLazyLoader.captureMessage('sync_rpc_task_rejected', {
+      level: 'warning',
+      tags: { operation: 'pushTask', entityType: 'task', status: result.status },
+      extra: { taskId: task.id, projectId, reason: result.reason, minProtocolVersion: result.minProtocolVersion },
+    });
+    if (!fromRetryQueue) {
+      this.safeAddToRetryQueue('task', 'upsert', task, projectId, sourceUserId);
+    }
+    return false;
   }
   
   /** 处理 pushTask 错误 */

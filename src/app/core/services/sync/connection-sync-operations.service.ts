@@ -31,6 +31,8 @@ import { isPermanentFailureError, PermanentFailureError } from '../../../../util
 import { REQUEST_THROTTLE_CONFIG } from '../../../../config';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
+import { SyncRpcClientService } from '../../../../services/sync-rpc-client.service';
+import type { SyncRpcResult } from '../../../../services/sync-rpc-client.service';
 import { TombstoneService } from './tombstone.service';
 import {
   createBrowserNetworkSuspendedError,
@@ -79,6 +81,7 @@ export class ConnectionSyncOperationsService {
   private readonly retryQueueService = inject(RetryQueueService);
   private readonly syncStateService = inject(SyncStateService);
   private readonly tombstoneService = inject(TombstoneService);
+  private readonly syncRpcClient = inject(SyncRpcClientService, { optional: true });
 
   private updateProjectsFromCurrentData(mutator: (projects: Project[]) => Project[]): void {
     const projectState = this.projectState as ProjectStateService & {
@@ -773,13 +776,34 @@ export class ConnectionSyncOperationsService {
       
       // 执行 upsert
       let persistedUpdatedAt: string | null = null;
+      let pushed = false;
+      let blockedBySyncRpc = false;
 
       await this.throttle.execute(
         `push-connection:${connection.id}`,
         async () => {
           await this.syncOpHelper.retryWithBackoff(async () => {
+            if (this.shouldUseSyncRpc()) {
+              const result = await this.syncRpcClient!.upsertConnection({
+                operationId: this.createSyncRpcOperationId(),
+                connection,
+                projectId,
+                baseUpdatedAt: connection.updatedAt ?? null,
+              });
+              pushed = this.handleConnectionSyncRpcResult(
+                result,
+                connection,
+                projectId,
+                fromRetryQueue,
+                sourceUserId,
+              );
+              blockedBySyncRpc = !pushed;
+              return;
+            }
+
             try {
               persistedUpdatedAt = await this.upsertConnectionReturningUpdatedAt(client, connection, projectId);
+              pushed = true;
               return;
             } catch (upsertError) {
               const enhancedError = this.ensureEnhancedError(upsertError);
@@ -802,6 +826,7 @@ export class ConnectionSyncOperationsService {
 
                 this.applyCanonicalConnectionIdentity(projectId, connection, racedCanonicalMatch);
                 persistedUpdatedAt = await this.upsertConnectionReturningUpdatedAt(client, connection, projectId);
+                pushed = true;
                 this.logger.info('连接已存在（幂等成功）', {
                   connectionId: connection.id,
                   source: connection.source,
@@ -815,6 +840,10 @@ export class ConnectionSyncOperationsService {
         },
         { priority: 'normal', retries: 0, timeout: REQUEST_THROTTLE_CONFIG.INDIVIDUAL_OPERATION_TIMEOUT }
       );
+
+      if (blockedBySyncRpc || !pushed) {
+        return false;
+      }
 
       if (persistedUpdatedAt) {
         this.normalizeLocalConnectionUpdatedAt(
@@ -840,6 +869,73 @@ export class ConnectionSyncOperationsService {
 
       return this.handlePushConnectionError(e, connection, projectId, fromRetryQueue, sourceUserId);
     }
+  }
+
+  private shouldUseSyncRpc(): boolean {
+    return this.syncRpcClient?.isFeatureEnabled() === true && this.syncRpcClient.isClientRejected() === false;
+  }
+
+  private createSyncRpcOperationId(): string {
+    return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  }
+
+  private handleConnectionSyncRpcResult(
+    result: SyncRpcResult,
+    connection: Connection,
+    projectId: string,
+    fromRetryQueue: boolean,
+    sourceUserId: string | undefined,
+  ): boolean {
+    if (result.status === 'applied' || result.status === 'idempotent-replay') {
+      if (result.serverUpdatedAt) {
+        this.normalizeLocalConnectionUpdatedAt(projectId, connection.id, result.serverUpdatedAt);
+      }
+      this.logger.debug('pushConnection: sync RPC 写入成功', {
+        connectionId: connection.id,
+        projectId,
+        status: result.status,
+      });
+      return true;
+    }
+
+    if (result.status === 'remote-newer') {
+      this.logger.warn('pushConnection: sync RPC CAS 拒绝，远端版本更新', {
+        connectionId: connection.id,
+        projectId,
+        remoteUpdatedAt: result.remoteUpdatedAt,
+        reason: result.reason,
+      });
+      this.sentryLazyLoader.captureMessage('sync_rpc_connection_remote_newer', {
+        level: 'warning',
+        tags: { operation: 'pushConnection', entityType: 'connection', status: result.status },
+        extra: { connectionId: connection.id, projectId, remoteUpdatedAt: result.remoteUpdatedAt, reason: result.reason },
+      });
+      if (!fromRetryQueue) {
+        this.safeAddToRetryQueue('connection', 'upsert', connection, projectId, sourceUserId);
+      }
+      return false;
+    }
+
+    const message = result.status === 'client-version-rejected'
+      ? '当前客户端同步协议已过期，请刷新后重试'
+      : '同步写入被服务端拒绝，已保留本地变更等待重试';
+    this.syncStateService.setSyncError(message);
+    this.logger.warn('pushConnection: sync RPC 拒绝写入', {
+      connectionId: connection.id,
+      projectId,
+      status: result.status,
+      reason: result.reason,
+      minProtocolVersion: result.minProtocolVersion,
+    });
+    this.sentryLazyLoader.captureMessage('sync_rpc_connection_rejected', {
+      level: 'warning',
+      tags: { operation: 'pushConnection', entityType: 'connection', status: result.status },
+      extra: { connectionId: connection.id, projectId, reason: result.reason, minProtocolVersion: result.minProtocolVersion },
+    });
+    if (!fromRetryQueue) {
+      this.safeAddToRetryQueue('connection', 'upsert', connection, projectId, sourceUserId);
+    }
+    return false;
   }
   
   /**

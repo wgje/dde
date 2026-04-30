@@ -19,6 +19,11 @@ export interface SupabaseConnectivityChange {
 }
 
 type SupabaseConnectivityListener = (change: SupabaseConnectivityChange) => void;
+type RealtimeHeartbeatPayload = string | {
+  status?: string;
+  event?: string;
+  reason?: string;
+};
 
 /**
  * 敏感密钥检测模式
@@ -1072,7 +1077,20 @@ export class SupabaseClientService {
         },
         heartbeatIntervalMs: 30000,
         timeout: 10000,
+        worker: true,
+        heartbeatCallback: (payload: RealtimeHeartbeatPayload) => this.handleRealtimeHeartbeat(payload),
       },
     };
+  }
+
+  private handleRealtimeHeartbeat(payload: RealtimeHeartbeatPayload): void {
+    const status = typeof payload === 'string'
+      ? payload
+      : payload.status ?? payload.event ?? payload.reason ?? 'unknown';
+    if (/timeout|disconnect|closed|error/i.test(status)) {
+      this.logger.warn('Supabase Realtime heartbeat unhealthy', { status });
+      return;
+    }
+    this.logger.debug('Supabase Realtime heartbeat', { status });
   }
 }

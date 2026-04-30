@@ -18,6 +18,7 @@ import { ProjectDataService } from './project-data.service';
 import { RetryQueueService } from './retry-queue.service';
 import { SyncStateService } from './sync-state.service';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
+import { SyncRpcClientService } from '../../../../services/sync-rpc-client.service';
 import { Task } from '../../../../models';
 import { PermanentFailureError } from '../../../../utils/permanent-failure-error';
 import {
@@ -64,6 +65,11 @@ describe('TaskSyncOperationsService', () => {
     recordCircuitFailure: vi.fn(),
     removeByEntities: vi.fn((): string[] => []),
     removeConnectionsReferencingTasks: vi.fn((): string[] => []),
+  };
+  const mockSyncRpcClient = {
+    isFeatureEnabled: vi.fn(() => false),
+    isClientRejected: vi.fn(() => false),
+    upsertTask: vi.fn(async () => ({ status: 'applied', entityId: 'task-1', raw: {} })),
   };
   const mockSyncState = {
     isSessionExpired: vi.fn(() => false),
@@ -144,6 +150,9 @@ describe('TaskSyncOperationsService', () => {
     vi.clearAllMocks();
     resetBrowserNetworkSuspensionTrackingForTests();
     setVisibilityState('visible');
+    mockSyncRpcClient.isFeatureEnabled.mockReturnValue(false);
+    mockSyncRpcClient.isClientRejected.mockReturnValue(false);
+    mockSyncRpcClient.upsertTask.mockResolvedValue({ status: 'applied', entityId: 'task-1', raw: {} });
     mockClient.rpc.mockImplementation(async (fn: string, args: Record<string, unknown>) => {
       if (fn === 'purge_tasks_v3') {
         return {
@@ -203,6 +212,7 @@ describe('TaskSyncOperationsService', () => {
           provide: RetryQueueService,
           useValue: mockRetryQueue,
         },
+        { provide: SyncRpcClientService, useValue: mockSyncRpcClient },
         {
           provide: SyncStateService,
           useValue: mockSyncState,
@@ -323,6 +333,70 @@ describe('TaskSyncOperationsService', () => {
     expect(result).toBe(true);
     expect(upsertPayload).toBeTruthy();
     expect(upsertPayload?.['parking_meta']).toEqual(parkingMeta);
+  });
+
+  it('pushTask 在 sync RPC flag 开启时应走 RPC/CAS 而不是直接 table upsert', async () => {
+    mockSyncRpcClient.isFeatureEnabled.mockReturnValue(true);
+    const task: Task = {
+      id: 'task-rpc',
+      title: '任务',
+      content: '内容',
+      stage: 0,
+      parentId: null,
+      order: 0,
+      rank: 10000,
+      status: 'active',
+      x: 0,
+      y: 0,
+      displayId: 'T-RPC',
+      createdDate: new Date().toISOString(),
+      updatedAt: '2026-04-30T00:00:00.000Z',
+      deletedAt: null,
+    };
+
+    const result = await service.pushTask(task, 'project-1');
+
+    expect(result).toBe(true);
+    expect(mockSyncRpcClient.upsertTask).toHaveBeenCalledWith(expect.objectContaining({
+      operationId: expect.any(String),
+      task,
+      projectId: 'project-1',
+      baseUpdatedAt: '2026-04-30T00:00:00.000Z',
+    }));
+    expect(upsertPayload).toBeNull();
+    expect(mockRetryQueue.recordCircuitSuccess).toHaveBeenCalled();
+  });
+
+  it('pushTask sync RPC 遇到 remote-newer 时应保留本地意图并阻止直接 table upsert', async () => {
+    mockSyncRpcClient.isFeatureEnabled.mockReturnValue(true);
+    mockSyncRpcClient.upsertTask.mockResolvedValueOnce({
+      status: 'remote-newer',
+      remoteUpdatedAt: '2026-04-30T00:01:00.000Z',
+      raw: {},
+    });
+    const task: Task = {
+      id: 'task-rpc-remote-newer',
+      title: '任务',
+      content: '内容',
+      stage: 0,
+      parentId: null,
+      order: 0,
+      rank: 10000,
+      status: 'active',
+      x: 0,
+      y: 0,
+      displayId: 'T-RPC2',
+      createdDate: new Date().toISOString(),
+      updatedAt: '2026-04-30T00:00:00.000Z',
+      deletedAt: null,
+    };
+
+    const result = await service.pushTask(task, 'project-1', false, false, 'user-1');
+
+    expect(result).toBe(false);
+    expect(upsertPayload).toBeNull();
+    expect(mockRetryQueue.add).toHaveBeenCalledWith('task', 'upsert', task, 'project-1', 'user-1');
+    expect(mockRetryQueue.recordCircuitSuccess).not.toHaveBeenCalled();
   });
 
   it('sourceUserId 与当前会话不匹配时应拒绝写云端并按原 owner 入队', async () => {

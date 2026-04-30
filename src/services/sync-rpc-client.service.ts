@@ -16,7 +16,7 @@
  * - 网络错误 —— 调用方走原有 RetryQueue + circuit breaker 路径。
  *
  * Feature flag：`NG_APP_SYNC_RPC_ENABLED` (`environment.syncRpcEnabled`)。默认 false。
- * 本服务**只暴露 API**；调用方在 flag 开启后再切换 push 路径，由独立 PR 完成。
+ * task / connection / blackbox push 路径在 flag 开启后通过本服务写入；默认 false 保持现有 PostgREST 路径。
  */
 
 import { Injectable, inject, computed, signal } from '@angular/core';
@@ -37,6 +37,8 @@ export interface SyncRpcResult {
   reason?: string;
   /** `remote-newer` 时返回服务端当前 updated_at —— 调用方据此触发 pull。 */
   remoteUpdatedAt?: string;
+  /** `applied` / `idempotent-replay` 时服务端写入后的 updated_at（若 RPC 返回）。 */
+  serverUpdatedAt?: string;
   /** `client-version-rejected` 时返回服务端要求的最小 protocol。 */
   minProtocolVersion?: number;
   /** `applied` / `idempotent-replay` 时返回的实体 ID。 */
@@ -52,6 +54,10 @@ export interface SyncProtocolInfo {
 interface SyncRpcEnvironmentSlice {
   syncRpcEnabled?: boolean;
   syncProtocolVersion?: number;
+  deploymentEpoch?: number;
+  deploymentTarget?: string;
+  sentryRelease?: string;
+  canonicalOrigin?: string;
 }
 
 @Injectable({ providedIn: 'root' })
@@ -113,13 +119,14 @@ export class SyncRpcClientService {
   async upsertTask(params: {
     operationId: string;
     task: Task;
+    projectId?: string;
     baseUpdatedAt: string | null;
   }): Promise<SyncRpcResult> {
     return this.invokeRpc('sync_upsert_task', {
       operation_id: params.operationId,
       protocol_version: this.clientProtocolVersion(),
       base_updated_at: params.baseUpdatedAt,
-      task: this.serializeTask(params.task),
+      task: this.serializeTask(params.task, params.projectId),
       ...this.buildAuditFields(),
     });
   }
@@ -128,13 +135,14 @@ export class SyncRpcClientService {
   async upsertConnection(params: {
     operationId: string;
     connection: Connection;
+    projectId?: string;
     baseUpdatedAt: string | null;
   }): Promise<SyncRpcResult> {
     return this.invokeRpc('sync_upsert_connection', {
       operation_id: params.operationId,
       protocol_version: this.clientProtocolVersion(),
       base_updated_at: params.baseUpdatedAt,
-      connection: this.serializeConnection(params.connection),
+      connection: this.serializeConnection(params.connection, params.projectId),
       ...this.buildAuditFields(),
     });
   }
@@ -179,6 +187,7 @@ export class SyncRpcClientService {
     const result: SyncRpcResult = { status, raw };
     if (typeof obj['reason'] === 'string') result.reason = obj['reason'] as string;
     if (typeof obj['remote_updated_at'] === 'string') result.remoteUpdatedAt = obj['remote_updated_at'] as string;
+    if (typeof obj['updated_at'] === 'string') result.serverUpdatedAt = obj['updated_at'] as string;
     if (typeof obj['minProtocolVersion'] === 'number') result.minProtocolVersion = obj['minProtocolVersion'] as number;
     if (typeof obj['task_id'] === 'string') result.entityId = obj['task_id'] as string;
     else if (typeof obj['connection_id'] === 'string') result.entityId = obj['connection_id'] as string;
@@ -208,44 +217,89 @@ export class SyncRpcClientService {
     };
   }
 
-  private serializeTask(task: Task): Record<string, unknown> {
+  private serializeTask(task: Task, projectId?: string): Record<string, unknown> {
     // 仅传递服务端关心的字段，避免泄漏额外内部状态。
+    const taskWithProject = task as Task & { projectId?: string };
     return {
       id: task.id,
-      project_id: (task as unknown as { projectId?: string }).projectId,
+      project_id: projectId ?? taskWithProject.projectId,
+      title: task.title,
       content: task.content ?? '',
-      stage: (task as unknown as { stage?: number }).stage ?? null,
+      stage: task.stage ?? null,
+      parent_id: task.parentId ?? null,
+      parentId: task.parentId ?? null,
+      order: task.order ?? 0,
+      rank: task.rank ?? 10000,
+      status: task.status ?? 'active',
       x: (task as unknown as { x?: number }).x ?? null,
       y: (task as unknown as { y?: number }).y ?? null,
-      deleted_at: (task as unknown as { deletedAt?: string | null }).deletedAt ?? null,
+      short_id: task.shortId ?? null,
+      shortId: task.shortId ?? null,
+      priority: task.priority ?? null,
+      due_date: task.dueDate ?? null,
+      dueDate: task.dueDate ?? null,
+      expected_minutes: task.expected_minutes ?? null,
+      expectedMinutes: task.expected_minutes ?? null,
+      cognitive_load: task.cognitive_load ?? null,
+      cognitiveLoad: task.cognitive_load ?? null,
+      wait_minutes: task.wait_minutes ?? null,
+      waitMinutes: task.wait_minutes ?? null,
+      tags: task.tags ?? [],
+      completed_at: task.completedAt ?? null,
+      completedAt: task.completedAt ?? null,
+      deleted_at: task.deletedAt ?? null,
+      deletedAt: task.deletedAt ?? null,
+      attachments: task.attachments ?? [],
+      parking_meta: task.parkingMeta ?? null,
+      parkingMeta: task.parkingMeta ?? null,
     };
   }
 
-  private serializeConnection(conn: Connection): Record<string, unknown> {
+  private serializeConnection(conn: Connection, projectId?: string): Record<string, unknown> {
+    const aliased = conn as Connection & {
+      projectId?: string;
+      sourceId?: string;
+      targetId?: string;
+      from?: string;
+      to?: string;
+    };
     return {
       id: conn.id,
-      project_id: (conn as unknown as { projectId?: string }).projectId,
-      source_id: (conn as unknown as { sourceId?: string; from?: string }).sourceId
-        ?? (conn as unknown as { from?: string }).from,
-      target_id: (conn as unknown as { targetId?: string; to?: string }).targetId
-        ?? (conn as unknown as { to?: string }).to,
+      project_id: projectId ?? aliased.projectId,
+      source_id: aliased.sourceId ?? conn.source ?? aliased.from,
+      target_id: aliased.targetId ?? conn.target ?? aliased.to,
+      title: conn.title ?? null,
+      description: conn.description ?? null,
+      deleted_at: conn.deletedAt ?? null,
     };
   }
 
   private serializeBlackboxEntry(entry: BlackBoxEntry): Record<string, unknown> {
     return {
       id: entry.id,
+      project_id: entry.projectId,
+      user_id: entry.userId,
       content: (entry as unknown as { content?: string }).content ?? '',
+      date: entry.date,
       created_at: (entry as unknown as { createdAt?: string }).createdAt ?? null,
+      updated_at: entry.updatedAt,
+      is_read: entry.isRead,
+      is_completed: entry.isCompleted,
+      is_archived: entry.isArchived,
+      snooze_until: entry.snoozeUntil ?? null,
+      snooze_count: entry.snoozeCount ?? 0,
       deleted_at: (entry as unknown as { deletedAt?: string }).deletedAt ?? null,
+      focus_meta: entry.focusMeta ?? null,
     };
   }
 
   private buildAuditFields(): Record<string, unknown> {
-    const env = environment as unknown as { sentryRelease?: string; canonicalOrigin?: string };
+    const env = environment as unknown as SyncRpcEnvironmentSlice;
     return {
       client_git_sha: env.sentryRelease ?? null,
       client_origin: env.canonicalOrigin ?? (typeof location !== 'undefined' ? location.origin : null),
+      deployment_epoch: typeof env.deploymentEpoch === 'number' ? env.deploymentEpoch : 0,
+      deployment_target: env.deploymentTarget ?? null,
     };
   }
 

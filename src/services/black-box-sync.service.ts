@@ -39,6 +39,8 @@ import { LoggerService } from './logger.service';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { AuthService } from './auth.service';
 import { ClockSyncService } from './clock-sync.service';
+import { SyncRpcClientService } from './sync-rpc-client.service';
+import type { SyncRpcResult } from './sync-rpc-client.service';
 import { SessionManagerService } from '../core-bridge';
 import { AUTH_CONFIG } from '../config/auth.config';
 
@@ -84,6 +86,7 @@ export class BlackBoxSyncService {
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('BlackBoxSync');
   private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
+  private readonly syncRpcClient = inject(SyncRpcClientService, { optional: true });
   private readonly destroyRef = inject(DestroyRef);
 
   private db: IDBDatabase | null = null;
@@ -1271,6 +1274,73 @@ export class BlackBoxSyncService {
       : null;
   }
 
+  private shouldUseSyncRpc(): boolean {
+    return this.syncRpcClient?.isFeatureEnabled() === true && this.syncRpcClient.isClientRejected() === false;
+  }
+
+  private createSyncRpcOperationId(): string {
+    return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  }
+
+  private async handleBlackBoxSyncRpcResult(
+    result: SyncRpcResult,
+    entry: BlackBoxEntry,
+  ): Promise<boolean> {
+    if (result.status === 'applied' || result.status === 'idempotent-replay') {
+      const serverUpdatedAt = result.serverUpdatedAt ?? entry.updatedAt;
+      if (serverUpdatedAt) {
+        this.clockSync.recordServerTimestamp(serverUpdatedAt, entry.id);
+      }
+
+      const latestLocalAfterPush = await this.resolveLatestLocalEntry(entry.id);
+      if (this.isEntryNewer(latestLocalAfterPush, entry)) {
+        this.logger.debug('黑匣子 RPC 推送完成时检测到更晚的本地快照，跳过旧状态回写', {
+          entryId: entry.id,
+          pushedUpdatedAt: entry.updatedAt,
+          latestLocalUpdatedAt: latestLocalAfterPush?.updatedAt,
+        });
+        return true;
+      }
+
+      const synced: BlackBoxEntry = {
+        ...entry,
+        updatedAt: serverUpdatedAt,
+        syncStatus: 'synced',
+      };
+      await this.saveToLocal(synced);
+      updateBlackBoxEntry(synced);
+      this.logger.debug(`Entry synced to server via RPC: ${entry.id}`);
+      return true;
+    }
+
+    if (result.status === 'remote-newer') {
+      this.logger.warn('黑匣子 RPC CAS 拒绝，远端版本更新', {
+        entryId: entry.id,
+        remoteUpdatedAt: result.remoteUpdatedAt,
+        reason: result.reason,
+      });
+      this.sentryLazyLoader.captureMessage('sync_rpc_blackbox_remote_newer', {
+        level: 'warning',
+        tags: { operation: 'pushBlackBoxEntry', entityType: 'blackbox', status: result.status },
+        extra: { entryId: entry.id, remoteUpdatedAt: result.remoteUpdatedAt, reason: result.reason },
+      });
+      return false;
+    }
+
+    this.logger.warn('黑匣子 RPC 拒绝写入', {
+      entryId: entry.id,
+      status: result.status,
+      reason: result.reason,
+      minProtocolVersion: result.minProtocolVersion,
+    });
+    this.sentryLazyLoader.captureMessage('sync_rpc_blackbox_rejected', {
+      level: 'warning',
+      tags: { operation: 'pushBlackBoxEntry', entityType: 'blackbox', status: result.status },
+      extra: { entryId: entry.id, reason: result.reason, minProtocolVersion: result.minProtocolVersion },
+    });
+    return false;
+  }
+
   /**
    * 推送到服务器
    *
@@ -1329,6 +1399,8 @@ export class BlackBoxSyncService {
         return true;
       }
 
+      let syncRpcBaseUpdatedAt: string | null = entry.updatedAt ?? null;
+
       // 【2026-04-22 根因修复】服务端状态预检：防止陈旧本地 pending 快照反向压盖远端
       // 权威状态。典型场景：Device B（移动端 / PWA / 久未刷新的标签页）IDB 中仍保留着
       // 早期未完成的 pending 快照，Device A 已在服务端将其标记为 is_completed=true；
@@ -1357,6 +1429,7 @@ export class BlackBoxSyncService {
 
         if (!preflightError && serverRow) {
           const serverEntry = this.mapRowToEntry(serverRow as Record<string, unknown>);
+          syncRpcBaseUpdatedAt = serverEntry.updatedAt;
           const serverIsNewer = this.clockSync.isLocalNewer(serverEntry.updatedAt, entry.updatedAt);
           const wouldRegressRead = serverEntry.isRead && !entry.isRead;
           const wouldRegressCompleted = serverEntry.isCompleted && !entry.isCompleted;
@@ -1421,6 +1494,8 @@ export class BlackBoxSyncService {
               // fall through to upsert with merged entry
             }
           }
+        } else if (!preflightError && !serverRow) {
+          syncRpcBaseUpdatedAt = null;
         } else if (preflightError) {
           // 预检失败不阻塞推送（保持向后兼容），仅记录，便于后续排查
           this.logger.debug('黑匣子推送预检 SELECT 失败，按原路径继续 upsert', {
@@ -1434,6 +1509,15 @@ export class BlackBoxSyncService {
           entryId: entry.id,
           error: preflightException instanceof Error ? preflightException.message : String(preflightException),
         });
+      }
+
+      if (this.shouldUseSyncRpc()) {
+        const result = await this.syncRpcClient!.upsertBlackboxEntry({
+          operationId: this.createSyncRpcOperationId(),
+          entry,
+          baseUpdatedAt: syncRpcBaseUpdatedAt,
+        });
+        return await this.handleBlackBoxSyncRpcResult(result, entry);
       }
 
       // 让数据库触发器生成权威 updated_at，避免客户端时钟偏差把跨设备完成状态盖回去。

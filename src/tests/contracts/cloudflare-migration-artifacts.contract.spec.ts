@@ -240,6 +240,17 @@ describe('Cloudflare migration artifact contracts', () => {
     expect(dryRunWorkflow).toContain('ANDROID_TWA_EXPECTED_SHA256_CERT_FINGERPRINTS');
   });
 
+  it('sync write protection RPCs carry deployment fences and full entity payloads', () => {
+    const migration = read('supabase/migrations/20260429080000_sync_write_protection_rpcs.sql');
+
+    expect(migration).toContain('deployment_epoch BIGINT');
+    expect(migration).toContain('deployment_epoch_below_min');
+    expect(migration).toContain('deployment_target TEXT');
+    expect(migration).toContain('INSERT INTO public.connections AS c (id, project_id, source_id, target_id, title, description, deleted_at, updated_at)');
+    expect(migration).toContain('focus_meta');
+    expect(migration).toContain('snooze_count');
+  });
+
   it('Android TWA default origin no longer points at the retired Vercel host', () => {
     const gradle = read('android/app/build.gradle.kts');
 

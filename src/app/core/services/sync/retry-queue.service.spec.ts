@@ -6,6 +6,7 @@ import { ToastService } from '../../../../services/toast.service';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 import { AuthService } from '../../../../services/auth.service';
 import { ProjectStateService } from '../../../../services/project-state.service';
+import { SyncWriterLeaseService } from '../../../../services/sync-writer-lease.service';
 import { AUTH_CONFIG } from '../../../../config/auth.config';
 import { Connection, Project, Task } from '../../../../models';
 import type { BlackBoxEntry } from '../../../../models/focus';
@@ -127,6 +128,16 @@ describe('RetryQueueService', () => {
   let initDbSpy: ReturnType<typeof vi.spyOn>;
   let loadFromStorageSpy: ReturnType<typeof vi.spyOn>;
   let saveToStorageSpy: ReturnType<typeof vi.spyOn>;
+  const releaseLeaseMock = vi.fn(async () => undefined);
+  const syncWriterLeaseMock = {
+    isFeatureEnabled: vi.fn(() => false),
+    requestLease: vi.fn(async () => ({
+      tabId: 'tab-test',
+      lockName: 'nanoflow-sync:test:test-user:__global__',
+      mode: 'memory-only' as const,
+      release: releaseLeaseMock,
+    })),
+  };
 
   beforeEach(() => {
     // 每个测试用例重置 UUID 缓存，保证测试隔离
@@ -179,6 +190,10 @@ describe('RetryQueueService', () => {
           useValue: projectStateMock,
         },
         {
+          provide: SyncWriterLeaseService,
+          useValue: syncWriterLeaseMock,
+        },
+        {
           provide: SentryLazyLoaderService,
           useValue: {
             captureMessage: vi.fn(),
@@ -205,6 +220,9 @@ describe('RetryQueueService', () => {
     authServiceMock.peekPersistedOwnerHint.mockReturnValue(null);
     authServiceMock.peekPersistedSessionIdentity.mockReturnValue(null);
     projectStateMock.getProject.mockReturnValue(undefined);
+    releaseLeaseMock.mockClear();
+    syncWriterLeaseMock.isFeatureEnabled.mockReturnValue(false);
+    syncWriterLeaseMock.requestLease.mockClear();
     handler = {
       pushTask: vi.fn().mockResolvedValue(true),
       deleteTask: vi.fn().mockResolvedValue(true),
@@ -216,6 +234,23 @@ describe('RetryQueueService', () => {
       onProcessingStateChange: vi.fn()
     };
     service.setOperationHandler(handler);
+  });
+
+  it('processQueueSlice 在 sync writer lease 开启时应持有 lease 后再 flush 并最终释放', async () => {
+    online = true;
+    syncWriterLeaseMock.isFeatureEnabled.mockReturnValue(true);
+    const task = createTask('leased-task');
+    service.add('task', 'upsert', task, 'project-lease', 'test-user');
+
+    const result = await service.processQueueSlice({ maxItems: 1, maxDurationMs: 1000 });
+
+    expect(result.processed).toBe(1);
+    expect(syncWriterLeaseMock.requestLease).toHaveBeenCalledWith(expect.objectContaining({
+      userId: 'test-user',
+      projectId: '__global__',
+    }));
+    expect(handler.pushTask).toHaveBeenCalledWith(task, 'project-lease', 'test-user');
+    expect(releaseLeaseMock).toHaveBeenCalledTimes(1);
   });
 
   it('入队时应记录来源用户，避免跨账号重放', () => {

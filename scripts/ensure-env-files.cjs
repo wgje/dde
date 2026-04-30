@@ -6,6 +6,20 @@ function escapeString(value) {
   return String(value).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 }
 
+function parseBooleanEnv(value, fallback) {
+  if (value === undefined || value === null || value === '') return fallback;
+  const normalized = String(value).trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  return fallback;
+}
+
+function parseNumberEnv(value, fallback) {
+  if (value === undefined || value === null || value === '') return fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
 function buildEnvironmentContent(options) {
   const {
     production,
@@ -21,13 +35,17 @@ function buildEnvironmentContent(options) {
     deploymentTarget,
     supabaseProjectAlias,
     sentryRelease,
+    syncRpcEnabled,
+    syncLeaseEnabled,
+    syncProtocolVersion,
+    deploymentEpoch,
   } = options;
 
   const devAutoLoginConfig = devAutoLogin
     ? `{ email: '${escapeString(devAutoLogin.email)}', password: '${escapeString(devAutoLogin.password)}' }`
     : 'null';
 
-  return `// Auto-generated fallback for test/build bootstrap. Safe to regenerate.\n\nexport const environment = {\n  production: ${production ? 'true' : 'false'},\n  supabaseUrl: '${escapeString(supabaseUrl)}',\n  supabaseAnonKey: '${escapeString(supabaseAnonKey)}',\n  SENTRY_DSN: '${escapeString(sentryDsn)}',\n  gojsLicenseKey: '${escapeString(gojsLicenseKey)}',\n  sentryEnvironment: '${escapeString(sentryEnvironment)}',\n  canonicalOrigin: '${escapeString(canonicalOrigin)}',\n  originGateMode: '${escapeString(originGateMode)}' as 'off' | 'redirect' | 'read-only' | 'export-only',\n  readOnlyPreview: ${readOnlyPreview ? 'true' : 'false'},\n  deploymentTarget: '${escapeString(deploymentTarget)}',\n  supabaseProjectAlias: '${escapeString(supabaseProjectAlias)}',\n  sentryRelease: '${escapeString(sentryRelease)}',\n  devAutoLogin: ${production ? 'null' : `${devAutoLoginConfig} as { email: string; password: string } | null`}\n};\n`;
+  return `// Auto-generated fallback for test/build bootstrap. Safe to regenerate.\n\nexport const environment = {\n  production: ${production ? 'true' : 'false'},\n  supabaseUrl: '${escapeString(supabaseUrl)}',\n  supabaseAnonKey: '${escapeString(supabaseAnonKey)}',\n  SENTRY_DSN: '${escapeString(sentryDsn)}',\n  gojsLicenseKey: '${escapeString(gojsLicenseKey)}',\n  sentryEnvironment: '${escapeString(sentryEnvironment)}',\n  canonicalOrigin: '${escapeString(canonicalOrigin)}',\n  originGateMode: '${escapeString(originGateMode)}' as 'off' | 'redirect' | 'read-only' | 'export-only',\n  readOnlyPreview: ${readOnlyPreview ? 'true' : 'false'},\n  deploymentTarget: '${escapeString(deploymentTarget)}',\n  supabaseProjectAlias: '${escapeString(supabaseProjectAlias)}',\n  sentryRelease: '${escapeString(sentryRelease)}',\n  syncRpcEnabled: ${syncRpcEnabled ? 'true' : 'false'},\n  syncLeaseEnabled: ${syncLeaseEnabled ? 'true' : 'false'},\n  syncProtocolVersion: ${syncProtocolVersion},\n  deploymentEpoch: ${deploymentEpoch},\n  devAutoLogin: ${production ? 'null' : `${devAutoLoginConfig} as { email: string; password: string } | null`}\n};\n`;
 }
 
 function writeIfMissing(filePath, content, logs) {
@@ -69,6 +87,10 @@ function ensureEnvFiles() {
   const deploymentTarget = process.env.NG_APP_DEPLOYMENT_TARGET || localEnv.NG_APP_DEPLOYMENT_TARGET || 'local';
   const supabaseProjectAlias = process.env.NG_APP_SUPABASE_PROJECT_ALIAS || localEnv.NG_APP_SUPABASE_PROJECT_ALIAS || 'local';
   const sentryRelease = process.env.NG_APP_SENTRY_RELEASE || localEnv.NG_APP_SENTRY_RELEASE || '';
+  const syncRpcEnabled = parseBooleanEnv(process.env.NG_APP_SYNC_RPC_ENABLED || localEnv.NG_APP_SYNC_RPC_ENABLED, false);
+  const syncLeaseEnabled = parseBooleanEnv(process.env.NG_APP_SYNC_LEASE_ENABLED || localEnv.NG_APP_SYNC_LEASE_ENABLED, false);
+  const syncProtocolVersion = parseNumberEnv(process.env.NG_APP_SYNC_PROTOCOL_VERSION || localEnv.NG_APP_SYNC_PROTOCOL_VERSION, 1);
+  const deploymentEpoch = parseNumberEnv(process.env.NG_APP_DEPLOYMENT_EPOCH || localEnv.NG_APP_DEPLOYMENT_EPOCH, 0);
   const logs = [];
 
   writeIfMissing(
@@ -87,6 +109,10 @@ function ensureEnvFiles() {
       deploymentTarget,
       supabaseProjectAlias,
       sentryRelease,
+      syncRpcEnabled,
+      syncLeaseEnabled,
+      syncProtocolVersion,
+      deploymentEpoch,
     }),
     logs,
   );
@@ -107,6 +133,10 @@ function ensureEnvFiles() {
       deploymentTarget,
       supabaseProjectAlias,
       sentryRelease,
+      syncRpcEnabled,
+      syncLeaseEnabled,
+      syncProtocolVersion,
+      deploymentEpoch,
     }),
     logs,
   );

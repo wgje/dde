@@ -8,6 +8,7 @@ import { LoggerService } from './logger.service';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { AuthService } from './auth.service';
 import { ClockSyncService } from './clock-sync.service';
+import { SyncRpcClientService } from './sync-rpc-client.service';
 import { SessionManagerService } from '../app/core/services/sync/session-manager.service';
 import { blackBoxEntriesMap, setBlackBoxEntries } from '../state/focus-stores';
 import type { BlackBoxEntry } from '../models/focus';
@@ -43,6 +44,11 @@ describe('BlackBoxSyncService', () => {
   let initDbSpy: ReturnType<typeof vi.spyOn>;
   let setupNetworkSpy: ReturnType<typeof vi.spyOn>;
   let mockSentry: { addBreadcrumb: ReturnType<typeof vi.fn>; captureMessage: ReturnType<typeof vi.fn> };
+  let mockSyncRpcClient: {
+    isFeatureEnabled: ReturnType<typeof vi.fn>;
+    isClientRejected: ReturnType<typeof vi.fn>;
+    upsertBlackboxEntry: ReturnType<typeof vi.fn>;
+  };
   let authSignals: {
     sessionInitialized: ReturnType<typeof signal<boolean>>;
     runtimeState: ReturnType<typeof signal<'idle' | 'pending' | 'ready' | 'failed'>>;
@@ -63,6 +69,11 @@ describe('BlackBoxSyncService', () => {
     mockSentry = {
       addBreadcrumb: vi.fn(),
       captureMessage: vi.fn(),
+    };
+    mockSyncRpcClient = {
+      isFeatureEnabled: vi.fn(() => false),
+      isClientRejected: vi.fn(() => false),
+      upsertBlackboxEntry: vi.fn(async () => ({ status: 'applied', serverUpdatedAt: '2026-03-04T00:00:01.000Z', raw: {} })),
     };
 
     authSignals = {
@@ -145,6 +156,7 @@ describe('BlackBoxSyncService', () => {
           provide: SentryLazyLoaderService,
           useValue: mockSentry,
         },
+        { provide: SyncRpcClientService, useValue: mockSyncRpcClient },
       ],
     });
 
@@ -455,6 +467,85 @@ describe('BlackBoxSyncService', () => {
 
     await expect(service.pushToServer(olderEntry)).resolves.toBe(true);
     expect(from).not.toHaveBeenCalled();
+  });
+
+  it('should use sync RPC for black box pushes when the feature flag is enabled', async () => {
+    const entry = createEntry({
+      id: crypto.randomUUID(),
+      updatedAt: '2026-03-04T00:00:00.000Z',
+      syncStatus: 'pending',
+    });
+    mockSyncRpcClient.isFeatureEnabled.mockReturnValue(true);
+    mockSyncRpcClient.upsertBlackboxEntry.mockResolvedValueOnce({
+      status: 'applied',
+      serverUpdatedAt: '2026-03-04T00:00:01.000Z',
+      raw: {},
+    });
+    const upsert = vi.fn();
+    const from = vi.fn(() => ({
+      select: vi.fn(() => ({
+        eq: vi.fn(() => ({
+          maybeSingle: vi.fn(async () => ({ data: null, error: null })),
+        })),
+      })),
+      upsert,
+    }));
+    const supabase = TestBed.inject(SupabaseClientService) as unknown as {
+      clientAsync: ReturnType<typeof vi.fn>;
+    };
+    const saveToLocalSpy = vi.spyOn(service, 'saveToLocal').mockResolvedValue(undefined);
+    setBlackBoxEntries([entry]);
+    supabase.clientAsync.mockResolvedValue({ from });
+
+    await expect(service.pushToServer(entry)).resolves.toBe(true);
+
+    expect(mockSyncRpcClient.upsertBlackboxEntry).toHaveBeenCalledWith(expect.objectContaining({
+      operationId: expect.any(String),
+      entry,
+      baseUpdatedAt: null,
+    }));
+    expect(upsert).not.toHaveBeenCalled();
+    expect(saveToLocalSpy).toHaveBeenCalledWith(expect.objectContaining({
+      id: entry.id,
+      updatedAt: '2026-03-04T00:00:01.000Z',
+      syncStatus: 'synced',
+    }));
+  });
+
+  it('should keep black box retry intent when sync RPC reports remote-newer', async () => {
+    const entry = createEntry({
+      id: crypto.randomUUID(),
+      updatedAt: '2026-03-04T00:00:00.000Z',
+      syncStatus: 'pending',
+    });
+    mockSyncRpcClient.isFeatureEnabled.mockReturnValue(true);
+    mockSyncRpcClient.upsertBlackboxEntry.mockResolvedValueOnce({
+      status: 'remote-newer',
+      remoteUpdatedAt: '2026-03-04T00:00:05.000Z',
+      raw: {},
+    });
+    const upsert = vi.fn();
+    const from = vi.fn(() => ({
+      select: vi.fn(() => ({
+        eq: vi.fn(() => ({
+          maybeSingle: vi.fn(async () => ({ data: null, error: null })),
+        })),
+      })),
+      upsert,
+    }));
+    const supabase = TestBed.inject(SupabaseClientService) as unknown as {
+      clientAsync: ReturnType<typeof vi.fn>;
+    };
+    setBlackBoxEntries([entry]);
+    supabase.clientAsync.mockResolvedValue({ from });
+
+    await expect(service.pushToServer(entry)).resolves.toBe(false);
+
+    expect(upsert).not.toHaveBeenCalled();
+    expect(mockSentry.captureMessage).toHaveBeenCalledWith(
+      'sync_rpc_blackbox_remote_newer',
+      expect.objectContaining({ level: 'warning' }),
+    );
   });
 
   it('should not overwrite a newer local snapshot that arrives while an older push is in flight', async () => {

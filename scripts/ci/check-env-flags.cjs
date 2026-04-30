@@ -25,6 +25,10 @@ const CLOUDFLARE_MIGRATION_FLAGS = [
   'NG_APP_DEPLOYMENT_TARGET',
   'NG_APP_SUPABASE_PROJECT_ALIAS',
   'NG_APP_SENTRY_RELEASE',
+  'NG_APP_SYNC_RPC_ENABLED',
+  'NG_APP_SYNC_LEASE_ENABLED',
+  'NG_APP_SYNC_PROTOCOL_VERSION',
+  'NG_APP_DEPLOYMENT_EPOCH',
 ];
 
 if (!fs.existsSync(SET_ENV)) { console.error('✗ scripts/set-env.cjs missing'); process.exit(1); }

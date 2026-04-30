@@ -129,6 +129,17 @@ describe('SupabaseClientService', () => {
   });
 
   describe('deferred client', () => {
+    it('buildClientOptions 应启用 Realtime worker 和 heartbeatCallback', () => {
+      const mutable = service as unknown as {
+        buildClientOptions: () => { realtime: Record<string, unknown> };
+      };
+
+      const options = mutable.buildClientOptions();
+
+      expect(options.realtime.worker).toBe(true);
+      expect(typeof options.realtime.heartbeatCallback).toBe('function');
+    });
+
     it('clientAsync 并发调用应 single-flight', async () => {
       const mutable = service as unknown as {
         canInitialize: boolean;

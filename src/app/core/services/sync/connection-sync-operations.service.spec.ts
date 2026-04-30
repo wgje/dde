@@ -13,6 +13,7 @@ import { RetryQueueService } from './retry-queue.service';
 import { SyncStateService } from './sync-state.service';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 import { TombstoneService } from './tombstone.service';
+import { SyncRpcClientService } from '../../../../services/sync-rpc-client.service';
 import type { Connection } from '../../../../models';
 import { PermanentFailureError } from '../../../../utils/permanent-failure-error';
 import {
@@ -43,6 +44,11 @@ describe('ConnectionSyncOperationsService', () => {
     recordCircuitFailure: vi.fn(),
     recordCircuitSuccess: vi.fn(),
     length: 0,
+  };
+  const mockSyncRpcClient = {
+    isFeatureEnabled: vi.fn(() => false),
+    isClientRejected: vi.fn(() => false),
+    upsertConnection: vi.fn(async () => ({ status: 'applied', entityId: 'connection-1', raw: {} })),
   };
 
   const mockSessionManager = {
@@ -204,6 +210,9 @@ describe('ConnectionSyncOperationsService', () => {
     vi.clearAllMocks();
     resetBrowserNetworkSuspensionTrackingForTests();
     setVisibilityState('visible');
+    mockSyncRpcClient.isFeatureEnabled.mockReturnValue(false);
+    mockSyncRpcClient.isClientRejected.mockReturnValue(false);
+    mockSyncRpcClient.upsertConnection.mockResolvedValue({ status: 'applied', entityId: 'connection-1', raw: {} });
     connectionTombstoneResult = { data: null, error: null };
     connectionEndpointTombstoneResult = { data: null, error: null };
     legacyConnectionTombstoneResult = { data: null, error: null };
@@ -254,6 +263,7 @@ describe('ConnectionSyncOperationsService', () => {
           useValue: mockSessionManager,
         },
         { provide: RetryQueueService, useValue: mockRetryQueue },
+        { provide: SyncRpcClientService, useValue: mockSyncRpcClient },
         { provide: SyncStateService, useValue: mockSyncState },
         { provide: TombstoneService, useValue: mockTombstoneService },
         {
@@ -283,6 +293,50 @@ describe('ConnectionSyncOperationsService', () => {
 
     expect(result).toBe(false);
     expect(mockRetryQueue.add).toHaveBeenCalledWith('connection', 'upsert', connection, 'project-1', 'user-1');
+  });
+
+  it('pushConnection 在 sync RPC flag 开启时应走 RPC/CAS 而不是直接 table upsert', async () => {
+    mockSyncRpcClient.isFeatureEnabled.mockReturnValue(true);
+    const connection: Connection = {
+      id: 'connection-rpc',
+      source: 'task-a',
+      target: 'task-b',
+      updatedAt: '2026-04-30T00:00:00.000Z',
+    };
+
+    const result = await service.pushConnection(connection, 'project-1', false, false, false, 'user-1');
+
+    expect(result).toBe(true);
+    expect(mockSyncRpcClient.upsertConnection).toHaveBeenCalledWith(expect.objectContaining({
+      operationId: expect.any(String),
+      connection,
+      projectId: 'project-1',
+      baseUpdatedAt: '2026-04-30T00:00:00.000Z',
+    }));
+    expect(mockConnectionsUpsert).not.toHaveBeenCalled();
+    expect(mockRetryQueue.recordCircuitSuccess).toHaveBeenCalled();
+  });
+
+  it('pushConnection sync RPC 遇到 remote-newer 时应保留本地意图并阻止直接 table upsert', async () => {
+    mockSyncRpcClient.isFeatureEnabled.mockReturnValue(true);
+    mockSyncRpcClient.upsertConnection.mockResolvedValueOnce({
+      status: 'remote-newer',
+      remoteUpdatedAt: '2026-04-30T00:01:00.000Z',
+      raw: {},
+    });
+    const connection: Connection = {
+      id: 'connection-rpc-remote-newer',
+      source: 'task-a',
+      target: 'task-b',
+      updatedAt: '2026-04-30T00:00:00.000Z',
+    };
+
+    const result = await service.pushConnection(connection, 'project-1', false, false, false, 'user-1');
+
+    expect(result).toBe(false);
+    expect(mockConnectionsUpsert).not.toHaveBeenCalled();
+    expect(mockRetryQueue.add).toHaveBeenCalledWith('connection', 'upsert', connection, 'project-1', 'user-1');
+    expect(mockRetryQueue.recordCircuitSuccess).not.toHaveBeenCalled();
   });
 
   it('引用已本地删除任务的连接不应继续入队', async () => {

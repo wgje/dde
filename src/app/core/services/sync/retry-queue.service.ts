@@ -20,6 +20,8 @@ import { ToastService } from '../../../../services/toast.service';
 import { AuthService } from '../../../../services/auth.service';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { WriteGuardService } from '../../../../services/write-guard.service';
+import { SyncWriterLeaseService } from '../../../../services/sync-writer-lease.service';
+import type { LeaseHandle } from '../../../../services/sync-writer-lease.service';
 import { SYNC_CONFIG, SYNC_DURABILITY_CONFIG, CIRCUIT_BREAKER_CONFIG } from '../../../../config';
 import { AUTH_CONFIG } from '../../../../config/auth.config';
 import { Task, Project, Connection, BlackBoxEntry } from '../../../../models';
@@ -109,6 +111,8 @@ export interface RetryQueueSliceResult {
 }
 
 const LEGACY_UNKNOWN_OWNER_USER_ID = '__legacy_unknown__';
+const SYNC_WRITER_LEASE_PROJECT_SCOPE = '__global__';
+const SYNC_WRITER_LEASE_WAIT_MS = 5_000;
 
 /**
  * 重试队列服务
@@ -132,6 +136,7 @@ export class RetryQueueService {
    * 缺失时默认为可写（与迁移前行为一致）。
    */
   private readonly writeGuard = inject(WriteGuardService, { optional: true });
+  private readonly syncWriterLease = inject(SyncWriterLeaseService, { optional: true });
   
   /** 重试队列 */
   private queue: RetryQueueItem[] = [];
@@ -1014,6 +1019,36 @@ export class RetryQueueService {
     }
   }
 
+  private isSyncWriterLeaseRequired(): boolean {
+    try {
+      return this.syncWriterLease?.isFeatureEnabled() === true;
+    } catch {
+      return false;
+    }
+  }
+
+  private async acquireSyncWriterLease(): Promise<LeaseHandle | null> {
+    if (!this.syncWriterLease) {
+      return null;
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), SYNC_WRITER_LEASE_WAIT_MS);
+    try {
+      return await this.syncWriterLease.requestLease({
+        userId: this.getCurrentOwnerUserId(),
+        projectId: SYNC_WRITER_LEASE_PROJECT_SCOPE,
+        signal: controller.signal,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn('sync writer lease 获取失败，本轮 RetryQueue flush 已延后', { message });
+      return null;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
   private reportEnqueueRejected(
     type: RetryableEntityType,
     operation: RetryableOperation,
@@ -1452,6 +1487,19 @@ export class RetryQueueService {
       };
     }
 
+    let syncWriterLeaseHandle: LeaseHandle | null = null;
+    if (this.isSyncWriterLeaseRequired()) {
+      syncWriterLeaseHandle = await this.acquireSyncWriterLease();
+      if (!syncWriterLeaseHandle) {
+        return {
+          processed: 0,
+          remaining: this.queue.length,
+          durationMs: Date.now() - sliceStartedAt,
+          completed: false
+        };
+      }
+    }
+
     this.isProcessingQueue = true;
     this.lastProcessTime = Date.now();
     
@@ -1754,6 +1802,11 @@ export class RetryQueueService {
         } catch (error) {
           this.logger.warn('onProcessingStateChange(false) 回调失败', error);
         }
+      }
+      if (syncWriterLeaseHandle) {
+        await syncWriterLeaseHandle.release().catch(error => {
+          this.logger.warn('sync writer lease 释放失败', error);
+        });
       }
     }
   }

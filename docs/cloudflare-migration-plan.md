@@ -28,7 +28,7 @@ NanoFlow 适合迁移到 Cloudflare Pages，但审查报告中的部分建议需
 - `quality:guard:artifact-trends` 已接入 deploy / dry-run workflow：记录文件数、总大小、根 JS 数、`_headers` 规则数、`ngsw.json` asset 数和 GoJS/Flow chunk size；相对 main baseline 超过 15% warning、超过 30% fail-fast。部署浏览器 smoke 入口 `npm run smoke:cloudflare-playwright` 已补齐，并与 header smoke 一致：Cloudflare Pages 默认 SPA fallback 返回缺失 chunk 的 HTML 200 时，必须同时证明 `GlobalErrorHandler` chunk 自愈合同存在。
 - Canonical Origin Gate 已提前到 `<head>` 早期同步执行，早于 resource hints / modulepreload / Angular bootstrap，并补齐一次性 SW unregister + `ngsw`/NanoFlow cache 清理和 `__NANOFLOW_WRITE_GUARD__` runtime 标记。
 - `ngsw-config.json` 已移除 broad worker glob；生成物 guard 会检查 `worker-basic.min.js` / `safety-worker.js` 不进入 Angular SW assetGroups。
-- Canonical Origin Gate、WriteGuard、migration recovery banner、sync RPC 客户端/数据库 RPC 草案、sync writer lease 原型和 Realtime circuit/fallback 相关单测已经存在；但直接 table upsert 路径、single-writer 接入队列、端到端 Realtime/LWW/游标 smoke 仍不能算阶段 2/3 验收完成。
+- Canonical Origin Gate、WriteGuard、migration recovery banner、sync RPC 客户端/数据库 RPC 草案、task/connection/blackbox RPC/CAS flag 接入、sync writer lease 队列接入和 Realtime circuit/fallback 相关单测已经存在；但删除/批量写保护、端到端 Realtime/LWW/游标 smoke 仍不能算阶段 2/3 验收完成。
 - `scripts/validate-env.cjs` 已支持 Supabase `sb_publishable_*` browser build key，并显式拒绝 `sb_secret_*`；本轮用生产 Supabase URL + publishable key 完成 `build:strict` 与 artifact guard，且未把实际 key 写入 tracked diff。
 - `scripts/set-env.cjs` 现在会把 Supabase preconnect / dns-prefetch hint 同步到 `NG_APP_SUPABASE_URL`，避免生产 bundle 使用新 Supabase 项目时仍预连旧项目。
 
@@ -1550,14 +1550,14 @@ OnPush / Signals 桥接门禁：
 - [x] 根据阶段 0 决策，改 `transcribe`、`virus-scan`、`_shared/widget-common`、`widget-black-box-action` 的 Cloudflare preview CORS 支持，或明确 preview smoke 不覆盖这些链路。（2026-04-29 这些路径均允许 `https://nanoflow.pages.dev` 与 `*.nanoflow.pages.dev`，widget focus/summary/register/notify 通过 `_shared/widget-common` 继承。）
 - [ ] 修正 Auth redirect helper：生产使用 canonical origin，preview/local 使用显式环境 origin；补 password reset / magic link / OAuth 回调测试，并记录 Email Templates 审查结果。（2026-04-29 `AuthService.resetPassword()` 生产环境使用 `environment.canonicalOrigin`，单测覆盖 password reset redirect；Magic Link / OAuth 与 Supabase Dashboard Email Templates 仍需人工审查。）
 - [x] 更新所有相关 contract tests。
-- [ ] 按 §6.4 修正云端写入语义：为任务、连接、Project、BlackBox/Focus 的 LWW push 增加条件写入/RPC 或等价 CAS；远端版本已前进时返回 conflict/remote-newer，不能直接 `upsert` 覆盖。补“旧离线写重放不覆盖远端新写”的单元测试和集成测试。
+- [ ] 按 §6.4 修正云端写入语义：任务、连接、BlackBox/Focus 的上行已在 `NG_APP_SYNC_RPC_ENABLED` 下接入 RPC/CAS 并补 remote-newer 单测；Project、删除/批量写和端到端“旧离线写重放不覆盖远端新写”集成测试仍需补齐。
 - [ ] 按 §6.4 修正 timestamp 归一化：所有成功 push 的同步实体都把服务端返回的 canonical `updated_at` 写回 store、IndexedDB 和队列元数据；补刷新后仍为 canonical timestamp 的测试。
 - [ ] 按 §6.4 修正所有同步游标提交语义：`checkForDrift()`、`refreshActiveProjectSilent()`、resume/probe、BlackBox 同步都不得在调用方完成 merge/持久化前提交 cursor；实现组合 cursor 或强制安全回看窗口；补“merge 失败不推进游标”“本地 `new Date()` 不作为远端 watermark”“同 timestamp 分页不漏拉”的单元测试。
 - [ ] 按 §6.4 修正队列契约：新增/补齐 `operation_id`、base version、依赖关系和 tombstone barrier；补 task delete 后旧 connection/attachment/focus recording mutation 不留下孤儿数据的测试。
-- [ ] 按 §6.4 / §16.26 修正 server-side ghost write 防护：mutation RPC 必须记录并幂等校验 `operation_id`，拒绝旧 `syncProtocolVersion` / `deploymentEpoch`，Sentry breadcrumb 带 `origin`、`gitSha`、`deploymentTarget`、`operation_id` 和 reject reason。
-- [ ] 按 §6.5 新增 sync single-writer：Web Locks 可用时用 exclusive lock；不可用时用 IndexedDB lease + BroadcastChannel heartbeat 降级；非 owner 标签禁止 flush 队列和提交 cursor。补双标签恢复联网、owner 崩溃接管、无 Web Locks 降级测试。
+- [ ] 按 §6.4 / §16.26 修正 server-side ghost write 防护：upsert RPC 已记录并幂等校验 `operation_id`，拒绝旧 `syncProtocolVersion` / `deploymentEpoch`，客户端 payload 带 `origin`、`gitSha`、`deploymentTarget`；删除/批量写 RPC 与生产 Sentry breadcrumb 验证仍需补。
+- [ ] 按 §6.5 新增 sync single-writer：RetryQueue/ActionQueue 已在 `NG_APP_SYNC_LEASE_ENABLED` 下持有 sync writer lease 后 flush；双标签恢复联网、owner 崩溃接管、无 Web Locks 降级 e2e 仍需补。
 - [ ] 新增或扩展 `e2e/realtime-localfirst-consistency.spec.ts`：覆盖 offline local write、remote write、WebSocket 断线/`TIMED_OUT`、polling fallback、条件写入 remote-newer、canonical timestamp、single-writer、多标签接管、tombstone 不复活；另加 `black_box_entries` 的断线/fallback/cursor-after-persist/pending merge/tombstone 用例。
-- [ ] 如果保持 Realtime 开启，默认启用 Supabase Realtime `worker: true`、`heartbeatCallback` 和必要的 `workerUrl`；同步更新 `_headers`/CSP/worker 缓存门禁。若不能启用 worker，PR 必须写明原因并补后台标签页长时运行 + polling fallback 证据。
+- [ ] 如果保持 Realtime 开启，默认启用 Supabase Realtime `worker: true`、`heartbeatCallback` 和必要的 `workerUrl`；`worker: true` 与 `heartbeatCallback` 已接入，`workerUrl`、`_headers`/CSP/worker 缓存门禁和后台标签页长时运行 + polling fallback 证据仍需补。
 - [x] 更新 `SentryLazyLoaderService` 的 `tracePropagationTargets`，纳入新 custom domain 和 Pages preview 域。（2026-04-29 已包含 `*.nanoflow.pages.dev` 与 `*.nanoflow.app` 匹配。）
 - [ ] 全仓 inventory `dde-eight.vercel.app` / `dde[-\w]*.vercel.app`，把运行时常量、TWA 配置、测试 fixture、文档分别归类；结果写入迁移 PR 描述。
 - [x] 更新或显式覆盖 `android/app/build.gradle.kts` 的 `NANOFLOW_WEB_ORIGIN`，避免 TWA 默认 origin 继续指向旧 Vercel 域。（2026-04-29 默认值为 `https://nanoflow.pages.dev`，契约测试禁止回到旧 Vercel host。）
@@ -2078,7 +2078,7 @@ Storage dataGroup 是隐私风险，不只是性能缓存：
 
 ### 16.7 Boot Flag / Feature Flag 注入清单（补 §5.2）
 
-**单事实源**：`scripts/set-env.cjs`。本节给出截至 2026-04-28 的快照，**实际清单与默认值以源码为准**；落地阶段必须以 `grep -E "process\.env\.NG_APP_" scripts/set-env.cjs` 输出为准，避免文档与代码再次分叉。
+**单事实源**：`scripts/set-env.cjs`。本节给出截至 2026-04-30 的快照，**实际清单与默认值以源码为准**；落地阶段必须以 `grep -E "process\.env\.NG_APP_" scripts/set-env.cjs` 输出为准，避免文档与代码再次分叉。
 
 当前 `set-env.cjs` 注入的 `NG_APP_*` 布尔 Flag 快照：
 
@@ -2109,6 +2109,8 @@ NG_APP_BLACKBOX_WATERMARK_PROBE_V1       default true
 NG_APP_WORKSPACE_SHELL_COMPOSITION_V3    default true
 NG_APP_RESUME_COMPOSITE_PROBE_RPC_V1     default true
 NG_APP_RESUME_METRICS_GATE_V1            default true
+NG_APP_SYNC_RPC_ENABLED                  default false
+NG_APP_SYNC_LEASE_ENABLED                default false
 ```
 
 当前 Cloudflare 迁移相关非布尔 `NG_APP_*` 注入快照：
@@ -2121,6 +2123,8 @@ NG_APP_READ_ONLY_PREVIEW                 default false
 NG_APP_DEPLOYMENT_TARGET                 default local
 NG_APP_SUPABASE_PROJECT_ALIAS            default local/configured project ref
 NG_APP_SENTRY_RELEASE                    default empty / CI git SHA
+NG_APP_SYNC_PROTOCOL_VERSION             default 1
+NG_APP_DEPLOYMENT_EPOCH                  default 0
 ```
 
 含义：GitHub Actions 环境如果不显式注入这些变量，会落到代码中的默认值——和 Vercel 当前的默认值是否一致**取决于 Vercel Dashboard 是否覆盖过任何 flag**。

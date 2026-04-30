@@ -21,6 +21,8 @@ const mockLogger = {
 interface MutableEnv {
   syncRpcEnabled?: boolean;
   syncProtocolVersion?: number;
+  deploymentEpoch?: number;
+  deploymentTarget?: string;
   sentryRelease?: string;
   canonicalOrigin?: string;
 }
@@ -51,6 +53,8 @@ describe('SyncRpcClientService', () => {
     originalEnv = {
       syncRpcEnabled: env.syncRpcEnabled,
       syncProtocolVersion: env.syncProtocolVersion,
+      deploymentEpoch: env.deploymentEpoch,
+      deploymentTarget: env.deploymentTarget,
       sentryRelease: env.sentryRelease,
       canonicalOrigin: env.canonicalOrigin,
     };
@@ -60,6 +64,8 @@ describe('SyncRpcClientService', () => {
     const env = environment as unknown as MutableEnv;
     env.syncRpcEnabled = originalEnv.syncRpcEnabled;
     env.syncProtocolVersion = originalEnv.syncProtocolVersion;
+    env.deploymentEpoch = originalEnv.deploymentEpoch;
+    env.deploymentTarget = originalEnv.deploymentTarget;
     env.sentryRelease = originalEnv.sentryRelease;
     env.canonicalOrigin = originalEnv.canonicalOrigin;
   });
@@ -104,7 +110,7 @@ describe('SyncRpcClientService', () => {
     env.syncProtocolVersion = 1;
 
     const rpc = vi.fn(async (_name, _payload) => ({
-      data: { status: 'applied', operation_id: 'op-1', task_id: 'task-9' },
+      data: { status: 'applied', operation_id: 'op-1', task_id: 'task-9', updated_at: '2026-04-30T00:00:01.000Z' },
       error: null,
     }));
 
@@ -117,7 +123,89 @@ describe('SyncRpcClientService', () => {
 
     expect(result.status).toBe('applied');
     expect(result.entityId).toBe('task-9');
+    expect(result.serverUpdatedAt).toBe('2026-04-30T00:00:01.000Z');
     expect(rpc).toHaveBeenCalledTimes(1);
+  });
+
+  it('upsertTask: 序列化完整同步字段供 batch_upsert_tasks 使用', async () => {
+    const env = environment as unknown as MutableEnv;
+    env.syncRpcEnabled = true;
+    env.syncProtocolVersion = 4;
+    env.deploymentEpoch = 12;
+    env.deploymentTarget = 'cloudflare-pages';
+    env.sentryRelease = 'git-sha';
+    env.canonicalOrigin = 'https://nanoflow.pages.dev';
+
+    let captured: unknown = null;
+    const rpc = vi.fn(async (_name, payload) => {
+      captured = payload;
+      return { data: { status: 'applied', task_id: 'task-full' }, error: null };
+    });
+
+    const service = buildService(rpc as never);
+    await service.upsertTask({
+      operationId: 'op-full',
+      task: {
+        id: 'task-full',
+        projectId: 'project-1',
+        title: 'Full title',
+        content: 'Full content',
+        stage: 2,
+        parentId: 'parent-1',
+        order: 3,
+        rank: 4000,
+        status: 'completed',
+        x: 10,
+        y: 20,
+        shortId: 'S-1',
+        priority: 'high',
+        dueDate: '2026-05-01',
+        expected_minutes: 25,
+        cognitive_load: 'high',
+        wait_minutes: 5,
+        tags: ['sync'],
+        completedAt: '2026-04-30T01:00:00.000Z',
+        deletedAt: null,
+        attachments: [{ id: 'att-1' }],
+        parkingMeta: { state: 'parked' },
+      } as unknown as Task,
+      baseUpdatedAt: '2026-04-30T00:00:00.000Z',
+    });
+
+    const cap = captured as { task: Record<string, unknown> };
+    expect(cap).toMatchObject({
+      operation_id: 'op-full',
+      protocol_version: 4,
+      base_updated_at: '2026-04-30T00:00:00.000Z',
+      client_git_sha: 'git-sha',
+      client_origin: 'https://nanoflow.pages.dev',
+      deployment_epoch: 12,
+      deployment_target: 'cloudflare-pages',
+    });
+    expect(cap.task).toMatchObject({
+      id: 'task-full',
+      project_id: 'project-1',
+      title: 'Full title',
+      content: 'Full content',
+      stage: 2,
+      parent_id: 'parent-1',
+      order: 3,
+      rank: 4000,
+      status: 'completed',
+      x: 10,
+      y: 20,
+      short_id: 'S-1',
+      priority: 'high',
+      due_date: '2026-05-01',
+      expected_minutes: 25,
+      cognitive_load: 'high',
+      wait_minutes: 5,
+      tags: ['sync'],
+      completed_at: '2026-04-30T01:00:00.000Z',
+      deleted_at: null,
+      attachments: [{ id: 'att-1' }],
+      parking_meta: { state: 'parked' },
+    });
   });
 
   it('upsertTask: remote-newer 状态解析 remoteUpdatedAt', async () => {
@@ -162,7 +250,7 @@ describe('SyncRpcClientService', () => {
     expect(result.minProtocolVersion).toBe(3);
   });
 
-  it('upsertConnection: 序列化 source_id/target_id（兼容 from/to 别名）', async () => {
+  it('upsertConnection: 序列化 source_id/target_id（兼容标准 source/target 与 from/to 别名）', async () => {
     const env = environment as unknown as MutableEnv;
     env.syncRpcEnabled = true;
 
@@ -175,16 +263,27 @@ describe('SyncRpcClientService', () => {
     const service = buildService(rpc as never);
     await service.upsertConnection({
       operationId: 'op-1',
-      connection: { id: 'c-1', from: 't-1', to: 't-2', projectId: 'p-1' } as unknown as Connection,
+      connection: {
+        id: 'c-1',
+        source: 't-1',
+        target: 't-2',
+        title: 'Link',
+        description: 'Link detail',
+        deletedAt: null,
+        projectId: 'p-1',
+      } as unknown as Connection,
       baseUpdatedAt: null,
     });
 
-    const cap = captured as { connection: { source_id: string; target_id: string } };
+    const cap = captured as { connection: Record<string, unknown> };
     expect(cap.connection.source_id).toBe('t-1');
     expect(cap.connection.target_id).toBe('t-2');
+    expect(cap.connection.title).toBe('Link');
+    expect(cap.connection.description).toBe('Link detail');
+    expect(cap.connection.deleted_at).toBeNull();
   });
 
-  it('upsertBlackboxEntry: 序列化 content + created_at', async () => {
+  it('upsertBlackboxEntry: 序列化完整黑匣子同步字段', async () => {
     const env = environment as unknown as MutableEnv;
     env.syncRpcEnabled = true;
 
@@ -197,13 +296,38 @@ describe('SyncRpcClientService', () => {
     const service = buildService(rpc as never);
     await service.upsertBlackboxEntry({
       operationId: 'op-1',
-      entry: { id: 'b-1', content: 'hello', createdAt: '2026-04-29T00:00:00Z' } as unknown as BlackBoxEntry,
+      entry: {
+        id: 'b-1',
+        projectId: 'project-1',
+        userId: 'user-1',
+        content: 'hello',
+        date: '2026-04-29',
+        createdAt: '2026-04-29T00:00:00Z',
+        updatedAt: '2026-04-29T00:01:00Z',
+        isRead: true,
+        isCompleted: false,
+        isArchived: false,
+        snoozeUntil: '2026-04-30',
+        snoozeCount: 1,
+        deletedAt: null,
+        focusMeta: { source: 'focus-console-inline' },
+      } as unknown as BlackBoxEntry,
       baseUpdatedAt: null,
     });
 
-    const cap = captured as { entry: { content: string; created_at: string } };
+    const cap = captured as { entry: Record<string, unknown> };
     expect(cap.entry.content).toBe('hello');
     expect(cap.entry.created_at).toBe('2026-04-29T00:00:00Z');
+    expect(cap.entry.project_id).toBe('project-1');
+    expect(cap.entry.user_id).toBe('user-1');
+    expect(cap.entry.date).toBe('2026-04-29');
+    expect(cap.entry.updated_at).toBe('2026-04-29T00:01:00Z');
+    expect(cap.entry.is_read).toBe(true);
+    expect(cap.entry.is_completed).toBe(false);
+    expect(cap.entry.is_archived).toBe(false);
+    expect(cap.entry.snooze_until).toBe('2026-04-30');
+    expect(cap.entry.snooze_count).toBe(1);
+    expect(cap.entry.focus_meta).toEqual({ source: 'focus-console-inline' });
   });
 
   it('upsert RPC 网络错误时向上抛（调用方走 RetryQueue 路径）', async () => {

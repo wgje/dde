@@ -26,6 +26,7 @@ import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { NetworkAwarenessService } from './network-awareness.service';
 import { RetryQueueService } from '../app/core/services/sync/retry-queue.service';
 import { WriteGuardService } from './write-guard.service';
+import { SyncWriterLeaseService } from './sync-writer-lease.service';
 import { createMockDestroyRef, mockSentryLazyLoaderService } from '../test-setup.mocks';
 import { resetBrowserNetworkSuspensionTrackingForTests } from '../utils/browser-network-suspension';
 
@@ -72,6 +73,17 @@ const mockRetryQueueService = {
 
 const mockWriteGuardService = {
   assertWritable: vi.fn(() => true),
+};
+
+const mockLeaseRelease = vi.fn(async () => undefined);
+const mockSyncWriterLeaseService = {
+  isFeatureEnabled: vi.fn(() => false),
+  requestLease: vi.fn(async () => ({
+    tabId: 'tab-action',
+    lockName: 'nanoflow-sync:test:test-user:__global__',
+    mode: 'memory-only' as const,
+    release: mockLeaseRelease,
+  })),
 };
 
 function createMockTask(overrides: Partial<Task> = {}): Task {
@@ -251,6 +263,9 @@ describe('ActionQueueService', () => {
     localStorage.clear();
     vi.clearAllMocks();
     mockWriteGuardService.assertWritable.mockReturnValue(true);
+    mockSyncWriterLeaseService.isFeatureEnabled.mockReturnValue(false);
+    mockSyncWriterLeaseService.requestLease.mockClear();
+    mockLeaseRelease.mockClear();
 
     // 测试默认静默：避免业务错误分支写入 stderr。
     consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -282,6 +297,7 @@ describe('ActionQueueService', () => {
         { provide: NetworkAwarenessService, useValue: mockNetworkAwarenessService },
         { provide: RetryQueueService, useValue: mockRetryQueueService },
         { provide: WriteGuardService, useValue: mockWriteGuardService },
+        { provide: SyncWriterLeaseService, useValue: mockSyncWriterLeaseService },
         { provide: AuthService, useValue: { currentUserId: currentUserIdSignal } },
         { provide: DestroyRef, useValue: destroyRef },
       ],
@@ -454,6 +470,25 @@ describe('ActionQueueService', () => {
   // ==================== 处理器注册和执行 ====================
   
   describe('处理器注册和执行', () => {
+    it('processQueue 在 sync writer lease 开启时应持有 lease 后再处理并最终释放', async () => {
+      const processor = vi.fn().mockResolvedValue(true);
+      mockSyncWriterLeaseService.isFeatureEnabled.mockReturnValue(true);
+      service.registerProcessor('project:update', processor);
+      setNetworkStatus(false);
+      service.enqueue(createTestProjectAction());
+
+      setNetworkStatus(true);
+      const result = await service.processQueue();
+
+      expect(result.processed).toBe(1);
+      expect(mockSyncWriterLeaseService.requestLease).toHaveBeenCalledWith(expect.objectContaining({
+        userId: 'test-user',
+        projectId: '__global__',
+      }));
+      expect(processor).toHaveBeenCalledTimes(1);
+      expect(mockLeaseRelease).toHaveBeenCalledTimes(1);
+    });
+
     it('应该能够注册处理器并执行', async () => {
       const processor = vi.fn().mockResolvedValue(true);
       service.registerProcessor('project:update', processor);

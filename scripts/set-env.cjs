@@ -25,6 +25,12 @@ const parseBooleanEnv = (value, fallback) => {
   return fallback;
 };
 
+const parseNumberEnv = (value, fallback) => {
+  if (value === undefined || value === null || value === '') return fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+
 // 启动阶段 Boot Flags（用于 index.html 预加载脚本）
 const disableIndexDataPreloadV1 = parseBooleanEnv(
   process.env.NG_APP_DISABLE_INDEX_DATA_PRELOAD_V1 || localEnv.NG_APP_DISABLE_INDEX_DATA_PRELOAD_V1,
@@ -150,6 +156,22 @@ const readOnlyPreview = parseBooleanEnv(
 const deploymentTarget = (process.env.NG_APP_DEPLOYMENT_TARGET || localEnv.NG_APP_DEPLOYMENT_TARGET || 'local').trim();
 const supabaseProjectAlias = (process.env.NG_APP_SUPABASE_PROJECT_ALIAS || localEnv.NG_APP_SUPABASE_PROJECT_ALIAS || 'local').trim();
 const sentryRelease = (process.env.NG_APP_SENTRY_RELEASE || localEnv.NG_APP_SENTRY_RELEASE || process.env.GITHUB_SHA || '').trim();
+const syncRpcEnabled = parseBooleanEnv(
+  process.env.NG_APP_SYNC_RPC_ENABLED || localEnv.NG_APP_SYNC_RPC_ENABLED,
+  false
+);
+const syncLeaseEnabled = parseBooleanEnv(
+  process.env.NG_APP_SYNC_LEASE_ENABLED || localEnv.NG_APP_SYNC_LEASE_ENABLED,
+  false
+);
+const syncProtocolVersion = parseNumberEnv(
+  process.env.NG_APP_SYNC_PROTOCOL_VERSION || localEnv.NG_APP_SYNC_PROTOCOL_VERSION,
+  1
+);
+const deploymentEpoch = parseNumberEnv(
+  process.env.NG_APP_DEPLOYMENT_EPOCH || localEnv.NG_APP_DEPLOYMENT_EPOCH,
+  0
+);
 
 // 如果没有配置 Supabase 环境变量，使用占位符（应用将以离线模式运行）
 const useOfflineMode = !supabaseUrl || !supabaseAnonKey;
@@ -204,6 +226,10 @@ export const environment = {
   deploymentTarget: '${deploymentTarget}',
   supabaseProjectAlias: '${supabaseProjectAlias}',
   sentryRelease: '${sentryRelease}',
+  syncRpcEnabled: ${syncRpcEnabled ? 'true' : 'false'},
+  syncLeaseEnabled: ${syncLeaseEnabled ? 'true' : 'false'},
+  syncProtocolVersion: ${syncProtocolVersion},
+  deploymentEpoch: ${deploymentEpoch},
   // 开发环境自动登录（仅开发环境生效）
   // 设置方式：在 .env.local 中配置 NG_APP_DEV_AUTO_LOGIN_EMAIL 和 NG_APP_DEV_AUTO_LOGIN_PASSWORD
   devAutoLogin: ${devAutoLoginConfig} as { email: string; password: string } | null
@@ -229,6 +255,10 @@ export const environment = {
   deploymentTarget: '${deploymentTarget}',
   supabaseProjectAlias: '${supabaseProjectAlias}',
   sentryRelease: '${sentryRelease}',
+  syncRpcEnabled: ${syncRpcEnabled ? 'true' : 'false'},
+  syncLeaseEnabled: ${syncLeaseEnabled ? 'true' : 'false'},
+  syncProtocolVersion: ${syncProtocolVersion},
+  deploymentEpoch: ${deploymentEpoch},
   // 生产环境始终禁用自动登录
   devAutoLogin: null as { email: string; password: string } | null
 };

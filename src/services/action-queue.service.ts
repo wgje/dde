@@ -9,8 +9,10 @@ import { ActionQueueStorageService, LOCAL_QUEUE_CONFIG, type QueueRetryError } f
 import { RetryQueueService, type RetryableEntityType } from '../core-bridge';
 import { AuthService } from './auth.service';
 import { WriteGuardService } from './write-guard.service';
+import { SyncWriterLeaseService } from './sync-writer-lease.service';
+import type { LeaseHandle } from './sync-writer-lease.service';
 import { AUTH_CONFIG } from '../config/auth.config';
-import { 
+import {
   OperationPriority, 
   ProjectPayload,
   TaskPayload, 
@@ -19,6 +21,9 @@ import {
   EnqueueParams,
   DeadLetterItem
 } from './action-queue.types';
+
+const SYNC_WRITER_LEASE_PROJECT_SCOPE = '__global__';
+const SYNC_WRITER_LEASE_WAIT_MS = 5_000;
 
 // 重新导出类型供外部使用
 export type { 
@@ -58,6 +63,7 @@ export class ActionQueueService {
    * 缺失时默认为可写（与迁移前行为一致）。
    */
   private readonly writeGuard = inject(WriteGuardService, { optional: true });
+  private readonly syncWriterLease = inject(SyncWriterLeaseService, { optional: true });
   readonly storage = inject(ActionQueueStorageService);
   /** 跨队列去重：当新操作入队时移除 RetryQueue 中同一实体的旧重试 */
   private readonly retryQueue = inject(RetryQueueService);
@@ -546,6 +552,36 @@ export class ActionQueueService {
     return this.authService.currentUserId() ?? AUTH_CONFIG.LOCAL_MODE_USER_ID;
   }
 
+  private isSyncWriterLeaseRequired(): boolean {
+    try {
+      return this.syncWriterLease?.isFeatureEnabled() === true;
+    } catch {
+      return false;
+    }
+  }
+
+  private async acquireSyncWriterLease(): Promise<LeaseHandle | null> {
+    if (!this.syncWriterLease) {
+      return null;
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), SYNC_WRITER_LEASE_WAIT_MS);
+    try {
+      return await this.syncWriterLease.requestLease({
+        userId: this.getCurrentOwnerUserId(),
+        projectId: SYNC_WRITER_LEASE_PROJECT_SCOPE,
+        signal: controller.signal,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn('sync writer lease 获取失败，本轮 ActionQueue flush 已延后', { message });
+      return null;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
   private createQueuedAction(action: EnqueueParams): QueuedAction {
     const defaultPriority: OperationPriority = 
       action.entityType === 'project' || action.entityType === 'focus-session' ? 'critical' :
@@ -761,6 +797,14 @@ export class ActionQueueService {
       return { processed: 0, failed: 0, movedToDeadLetter: 0 };
     }
 
+    let syncWriterLeaseHandle: LeaseHandle | null = null;
+    if (this.isSyncWriterLeaseRequired()) {
+      syncWriterLeaseHandle = await this.acquireSyncWriterLease();
+      if (!syncWriterLeaseHandle) {
+        return { processed: 0, failed: 0, movedToDeadLetter: 0 };
+      }
+    }
+
     const processGeneration = this.queueViewGeneration;
     const processOwnerUserId = this.getCurrentOwnerUserId();
     
@@ -944,6 +988,11 @@ export class ActionQueueService {
         level: processed > 0 ? 'info' : (failed > 0 ? 'warning' : 'info'),
         data: { processed, failed, movedToDeadLetter }
       });
+      if (syncWriterLeaseHandle) {
+        await syncWriterLeaseHandle.release().catch(error => {
+          this.logger.warn('sync writer lease 释放失败', error);
+        });
+      }
     }
     
     return { processed, failed, movedToDeadLetter };
