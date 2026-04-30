@@ -26,6 +26,7 @@
 
 import { Injectable, computed, inject, signal } from '@angular/core';
 import { LoggerService } from './logger.service';
+import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { environment } from '../environments/environment';
 
 export type LeaseAcquisitionMode = 'weblocks' | 'idb-lease' | 'memory-only';
@@ -71,6 +72,7 @@ interface SyncLeaseEnvironmentSlice {
 @Injectable({ providedIn: 'root' })
 export class SyncWriterLeaseService {
   private readonly logger = inject(LoggerService).category('SyncLease');
+  private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
 
   private readonly tabId =
     typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
@@ -127,6 +129,10 @@ export class SyncWriterLeaseService {
       } catch (err) {
         if (this.isAbortError(err)) throw err;
         this.logger.warn(`web_locks_failed: ${(err as Error)?.message ?? err}; 降级到 IndexedDB lease`);
+        this.addLeaseBreadcrumb('sync_writer_lease_fallback', 'warning', lockName, 'idb-lease', {
+          from: 'weblocks',
+          reason: (err as Error)?.message ?? String(err),
+        });
         // 一旦失败标记不可用，避免每次都 fallback。
         this.webLocksAvailable.set(false);
       }
@@ -139,6 +145,10 @@ export class SyncWriterLeaseService {
       this.logger.warn(`idb_lease_failed: ${(err as Error)?.message ?? err}; 降级到 memory-only`);
       const noop = this.buildNoopHandle(options, 'memory-only');
       this.holding.set(noop);
+      this.addLeaseBreadcrumb('sync_writer_lease_fallback', 'warning', noop.lockName, 'memory-only', {
+        from: 'idb-lease',
+        reason: (err as Error)?.message ?? String(err),
+      });
       return noop;
     }
   }
@@ -171,9 +181,11 @@ export class SyncWriterLeaseService {
                 fn();
               }
               this.holding.set(null);
+              this.addLeaseBreadcrumb('sync_writer_lease_released', 'info', lockName, 'weblocks');
             },
           };
           this.holding.set(handle);
+          this.addLeaseBreadcrumb('sync_writer_lease_acquired', 'info', lockName, 'weblocks');
           resolve(handle);
         }),
       );
@@ -205,9 +217,11 @@ export class SyncWriterLeaseService {
             clearInterval(heartbeatTimer);
             await this.releaseIndexedDbLease(db, lockName);
             this.holding.set(null);
+            this.addLeaseBreadcrumb('sync_writer_lease_released', 'info', lockName, 'idb-lease');
           },
         };
         this.holding.set(handle);
+        this.addLeaseBreadcrumb('sync_writer_lease_acquired', 'info', lockName, 'idb-lease');
         return handle;
       }
       // 等待一小段再尝试；abort 时立即跳出。
@@ -326,8 +340,29 @@ export class SyncWriterLeaseService {
       mode,
       release: async () => {
         this.holding.set(null);
+        this.addLeaseBreadcrumb('sync_writer_lease_released', 'info', this.buildLockName(options.userId, options.projectId), mode);
       },
     };
+  }
+
+  private addLeaseBreadcrumb(
+    message: string,
+    level: 'info' | 'warning',
+    lockName: string,
+    mode: LeaseAcquisitionMode,
+    extra: Record<string, unknown> = {},
+  ): void {
+    this.sentryLazyLoader.addBreadcrumb({
+      category: 'sync.lease',
+      level,
+      message,
+      data: {
+        lockName,
+        mode,
+        tabId: this.tabId,
+        ...extra,
+      },
+    });
   }
 
   private isAbortError(err: unknown): boolean {

@@ -20,6 +20,7 @@ import { LoggerService } from './logger.service';
 import { ConnectionAdapterService } from './connection-adapter.service';
 import { ToastService } from './toast.service';
 import { UserSessionService } from './user-session.service';
+import { WriteGuardService } from './write-guard.service';
 import { Project, Task } from '../models';
 import { success } from '../utils/result';
 
@@ -82,6 +83,7 @@ const mockProjectStateService = {
 const mockTaskOperationService = {
   moveTaskToStage: vi.fn(),
   updateTaskContent: vi.fn(),
+  addTask: vi.fn(),
   setCallbacks: vi.fn(),
 };
 
@@ -128,6 +130,9 @@ const mockUiStateService = {
 };
 const mockUserSessionService = {
   isHintOnlyStartupPlaceholderVisible: vi.fn(() => false),
+};
+const mockWriteGuardService = {
+  isExportOnly: vi.fn(() => false),
 };
 const mockLayoutService = {};
 const mockEventBusService = {
@@ -177,6 +182,7 @@ describe('TaskOperationAdapterService - moveTaskToStage', () => {
         { provide: ConnectionAdapterService, useValue: mockConnectionAdapterService },
         { provide: ToastService, useValue: mockToastService },
         { provide: UserSessionService, useValue: mockUserSessionService },
+        { provide: WriteGuardService, useValue: mockWriteGuardService },
       ],
     });
 
@@ -190,6 +196,9 @@ describe('TaskOperationAdapterService - moveTaskToStage', () => {
     mockProjectsSignal.set([project]);
     mockActiveProjectIdSignal.set('proj-1');
     mockUserSessionService.isHintOnlyStartupPlaceholderVisible.mockReturnValue(false);
+    mockWriteGuardService.isExportOnly.mockReturnValue(false);
+    mockTaskOperationService.moveTaskToStage.mockReturnValue(success(undefined));
+    mockTaskOperationService.addTask.mockReturnValue(success('new-task-id'));
   });
 
   it('should block moveTaskToStage while hint-only startup placeholder is read-only', () => {
@@ -234,6 +243,28 @@ describe('TaskOperationAdapterService - moveTaskToStage', () => {
     expect(mockRecorderService.performRedo).not.toHaveBeenCalled();
     expect(mockToastService.info).toHaveBeenCalledWith('会话确认中', '撤销操作暂不可用，owner 确认完成前保持只读');
     expect(mockToastService.info).toHaveBeenCalledWith('会话确认中', '重做操作暂不可用，owner 确认完成前保持只读');
+  });
+
+  it('should block local task mutations while origin gate is export-only', () => {
+    mockWriteGuardService.isExportOnly.mockReturnValue(true);
+
+    const moveResult = service.moveTaskToStage('task-1', 2, null, null);
+    const createResult = service.addTask('Blocked task', '', 1, null, false);
+
+    expect(moveResult.ok).toBe(false);
+    expect(createResult.ok).toBe(false);
+    expect(mockTaskOperationService.moveTaskToStage).not.toHaveBeenCalled();
+    expect(mockTaskOperationService.addTask).not.toHaveBeenCalled();
+    expect(mockOptimisticStateService.createTaskSnapshot).not.toHaveBeenCalled();
+    expect(mockSyncCoordinatorService.markLocalChanges).not.toHaveBeenCalled();
+    expect(mockToastService.info).toHaveBeenCalledWith(
+      '导出模式',
+      '移动任务暂不可用，旧入口仅允许导出，请前往 https://nanoflow.pages.dev 继续编辑'
+    );
+    expect(mockToastService.info).toHaveBeenCalledWith(
+      '导出模式',
+      '创建任务暂不可用，旧入口仅允许导出，请前往 https://nanoflow.pages.dev 继续编辑'
+    );
   });
 
   it('should not show toast when task is not actually moved (same stage and parentId)', () => {

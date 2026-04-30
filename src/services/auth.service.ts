@@ -887,7 +887,10 @@ export class AuthService {
       // 【P0 修复 2026-02-08】给注册加超时保护
       const signUpPromise = client.auth.signUp({
         email,
-        password
+        password,
+        options: {
+          emailRedirectTo: `${this.getAuthRedirectOrigin()}/auth/callback`
+        }
       });
       const timeoutPromise = new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error('注册请求超时，请检查网络连接后重试')), this.SIGN_IN_TIMEOUT)

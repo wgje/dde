@@ -32,7 +32,6 @@ env:
   WRANGLER_VERSION: '3.114.0'
   ENABLE_SENTRY_SOURCEMAPS: 'false'
   CANONICAL_PRODUCTION_ORIGIN: ${{ vars.CANONICAL_PRODUCTION_ORIGIN || 'https://nanoflow.pages.dev' }}
-  ALLOW_PROD_SUPABASE_FOR_PREVIEW_SMOKE: ${{ vars.ALLOW_PROD_SUPABASE_FOR_PREVIEW_SMOKE || 'false' }}
   READ_ONLY_PREVIEW: ${{ vars.READ_ONLY_PREVIEW || 'true' }}
 
 jobs:
@@ -65,6 +64,8 @@ jobs:
       contents: read
       deployments: write
       pull-requests: write
+    environment:
+      name: ${{ (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.target == 'preview')) && 'NanoFlow-Preview' || '' }}
     if: >-
       ${{
         (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
@@ -72,7 +73,8 @@ jobs:
         (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
       }}
     env:
-      DEPLOYMENT_TARGET: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') && 'production' || (github.event.inputs.target == 'production' && 'production' || 'preview') }}
+      DEPLOYMENT_TARGET: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') && 'production' || (github.event_name == 'workflow_dispatch' && inputs.target == 'production' && 'production' || 'preview') }}
+      GITHUB_ENVIRONMENT_NAME: ${{ (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.target == 'preview')) && 'NanoFlow-Preview' || '' }}
       SHOULD_DEPLOY: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'pull_request' || github.event.inputs.deploy == 'true' }}
 
     steps:
@@ -93,62 +95,38 @@ jobs:
       - name: Select Supabase build env
         id: supabase
         env:
-          PROD_NG_APP_SUPABASE_URL: ${{ secrets.NG_APP_SUPABASE_URL || secrets.NG_APP_SUPABASE_URL_PROD }}
-          PROD_NG_APP_SUPABASE_ANON_KEY: ${{ secrets.NG_APP_SUPABASE_ANON_KEY || secrets.NG_APP_SUPABASE_ANON_KEY_PROD }}
-          PREVIEW_NG_APP_SUPABASE_URL: ${{ secrets.PREVIEW_NG_APP_SUPABASE_URL || secrets.NG_APP_SUPABASE_URL_PREVIEW }}
-          PREVIEW_NG_APP_SUPABASE_ANON_KEY: ${{ secrets.PREVIEW_NG_APP_SUPABASE_ANON_KEY || secrets.NG_APP_SUPABASE_ANON_KEY_PREVIEW }}
+          NG_APP_SUPABASE_URL: ${{ secrets.NG_APP_SUPABASE_URL }}
+          NG_APP_SUPABASE_ANON_KEY: ${{ secrets.NG_APP_SUPABASE_ANON_KEY }}
         run: |
           set -euo pipefail
+          if [ "$DEPLOYMENT_TARGET" = "production" ] && [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ "${{ github.ref }}" != "refs/heads/main" ]; then
+            echo "::error::Production workflow_dispatch deploy/build must run from main"
+            exit 1
+          fi
+
+          secret_source="Repository secrets"
+          if [ -n "${GITHUB_ENVIRONMENT_NAME:-}" ]; then
+            secret_source="GitHub Environment '$GITHUB_ENVIRONMENT_NAME'"
+          fi
+
+          if [ -z "${NG_APP_SUPABASE_URL:-}" ] || [ -z "${NG_APP_SUPABASE_ANON_KEY:-}" ]; then
+            echo "::error::$secret_source must define NG_APP_SUPABASE_URL and NG_APP_SUPABASE_ANON_KEY"
+            exit 1
+          fi
+
           if [ "$DEPLOYMENT_TARGET" = "production" ]; then
-            if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ "${{ github.ref }}" != "refs/heads/main" ]; then
-              echo "::error::Production workflow_dispatch deploy/build must run from main"
-              exit 1
-            fi
-            if [ -z "${PROD_NG_APP_SUPABASE_URL:-}" ] || [ -z "${PROD_NG_APP_SUPABASE_ANON_KEY:-}" ]; then
-              echo "::error::Production build requires NG_APP_SUPABASE_URL and NG_APP_SUPABASE_ANON_KEY secrets"
-              exit 1
-            fi
             echo "alias=production" >> "$GITHUB_OUTPUT"
-            echo "supabase_url=$PROD_NG_APP_SUPABASE_URL" >> "$GITHUB_OUTPUT"
-            echo "::add-mask::$PROD_NG_APP_SUPABASE_ANON_KEY"
-            echo "supabase_anon_key=$PROD_NG_APP_SUPABASE_ANON_KEY" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          if [ -n "${PREVIEW_NG_APP_SUPABASE_URL:-}" ] && [ -n "${PREVIEW_NG_APP_SUPABASE_ANON_KEY:-}" ]; then
+          else
             echo "alias=preview" >> "$GITHUB_OUTPUT"
-            echo "supabase_url=$PREVIEW_NG_APP_SUPABASE_URL" >> "$GITHUB_OUTPUT"
-            echo "::add-mask::$PREVIEW_NG_APP_SUPABASE_ANON_KEY"
-            echo "supabase_anon_key=$PREVIEW_NG_APP_SUPABASE_ANON_KEY" >> "$GITHUB_OUTPUT"
-            exit 0
           fi
-
-          if [ "$ALLOW_PROD_SUPABASE_FOR_PREVIEW_SMOKE" = "true" ]; then
-            if [ "$READ_ONLY_PREVIEW" != "true" ]; then
-              echo "::error::Production Supabase preview opt-in requires READ_ONLY_PREVIEW=true"
-              exit 1
-            fi
-            if [ -z "${PROD_NG_APP_SUPABASE_URL:-}" ] || [ -z "${PROD_NG_APP_SUPABASE_ANON_KEY:-}" ]; then
-              echo "::error::Preview production opt-in requires production Supabase secrets"
-              exit 1
-            fi
-            echo "alias=production-readonly-preview" >> "$GITHUB_OUTPUT"
-            echo "supabase_url=$PROD_NG_APP_SUPABASE_URL" >> "$GITHUB_OUTPUT"
-            echo "::add-mask::$PROD_NG_APP_SUPABASE_ANON_KEY"
-            echo "supabase_anon_key=$PROD_NG_APP_SUPABASE_ANON_KEY" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          echo "::error::Missing PREVIEW_NG_APP_SUPABASE_URL / PREVIEW_NG_APP_SUPABASE_ANON_KEY. Refusing production fallback for PR preview."
-          exit 1
 
       - name: Validate env flags drift
         run: npm run quality:guard:env-flags
 
       - name: Build
         env:
-          NG_APP_SUPABASE_URL: ${{ steps.supabase.outputs.supabase_url }}
-          NG_APP_SUPABASE_ANON_KEY: ${{ steps.supabase.outputs.supabase_anon_key }}
+          NG_APP_SUPABASE_URL: ${{ secrets.NG_APP_SUPABASE_URL }}
+          NG_APP_SUPABASE_ANON_KEY: ${{ secrets.NG_APP_SUPABASE_ANON_KEY }}
           NG_APP_SENTRY_DSN: ${{ secrets.NG_APP_SENTRY_DSN }}
           NG_APP_GOJS_LICENSE_KEY: ${{ secrets.NG_APP_GOJS_LICENSE_KEY }}
           NG_APP_SENTRY_ENVIRONMENT: ${{ env.DEPLOYMENT_TARGET }}

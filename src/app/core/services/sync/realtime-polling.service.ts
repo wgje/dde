@@ -799,9 +799,36 @@ export class RealtimePollingService {
         
         if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
           consecutiveErrors++;
+          this.sentryLazyLoader.addBreadcrumb({
+            category: 'realtime',
+            level: 'warning',
+            message: 'realtime_channel_error',
+            data: {
+              status,
+              channel: channelName,
+              projectId,
+              userId,
+              error: err?.message,
+              consecutiveErrors,
+            },
+          });
           
           if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
             const realtimeCircuitMs = this.armRealtimeCircuit(userId, err?.message, consecutiveErrors);
+            this.sentryLazyLoader.addBreadcrumb({
+              category: 'realtime',
+              level: 'warning',
+              message: 'realtime_fallback_polling_started',
+              data: {
+                projectId,
+                userId,
+                reason: 'realtime_channel_error',
+                status,
+                error: err?.message,
+                consecutiveErrors,
+                realtimeCircuitMs,
+              },
+            });
             this.sentryLazyLoader.captureMessage('Realtime 订阅错误', {
               level: 'warning',
               extra: {

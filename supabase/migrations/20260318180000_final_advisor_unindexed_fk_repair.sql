@@ -22,20 +22,41 @@ DROP INDEX IF EXISTS idx_backup_restore_history_backup_id;
 -- Advisor 报告的完整列表，满足数据完整性要求
 
 -- 【1】backup_metadata.base_backup_id → backup_metadata(id) ON DELETE SET NULL
-CREATE INDEX IF NOT EXISTS idx_backup_metadata_base_backup_id 
-  ON public.backup_metadata(base_backup_id);
-COMMENT ON INDEX idx_backup_metadata_base_backup_id IS 
-  'FK enforcement index. References: backup_metadata(id) [ON DELETE SET NULL]';
--- 【2】backup_restore_history.pre_restore_snapshot_id → backup_metadata(id) ON DELETE SET NULL  
-CREATE INDEX IF NOT EXISTS idx_backup_restore_history_pre_restore_snapshot_id 
-  ON public.backup_restore_history(pre_restore_snapshot_id);
-COMMENT ON INDEX idx_backup_restore_history_pre_restore_snapshot_id IS 
-  'FK enforcement index. References: backup_metadata(id) [ON DELETE SET NULL]';
--- 【3】backup_restore_history.user_id → auth.users(id) ON DELETE CASCADE
-CREATE INDEX IF NOT EXISTS idx_backup_restore_history_user_id 
-  ON public.backup_restore_history(user_id);
-COMMENT ON INDEX idx_backup_restore_history_user_id IS 
-  'FK enforcement index. References: auth.users(id) [ON DELETE CASCADE]';
+DO $retired_cloud_backup_fk_indexes$
+BEGIN
+  IF to_regclass('public.backup_metadata') IS NULL
+    OR to_regclass('public.backup_restore_history') IS NULL THEN
+    RAISE NOTICE 'Skipping retired cloud backup FK indexes; backup tables are absent.';
+  ELSE
+    EXECUTE $sql$
+      CREATE INDEX IF NOT EXISTS idx_backup_metadata_base_backup_id
+        ON public.backup_metadata(base_backup_id)
+    $sql$;
+    EXECUTE $sql$
+      COMMENT ON INDEX idx_backup_metadata_base_backup_id IS
+        'FK enforcement index. References: backup_metadata(id) [ON DELETE SET NULL]'
+    $sql$;
+    -- 【2】backup_restore_history.pre_restore_snapshot_id → backup_metadata(id) ON DELETE SET NULL
+    EXECUTE $sql$
+      CREATE INDEX IF NOT EXISTS idx_backup_restore_history_pre_restore_snapshot_id
+        ON public.backup_restore_history(pre_restore_snapshot_id)
+    $sql$;
+    EXECUTE $sql$
+      COMMENT ON INDEX idx_backup_restore_history_pre_restore_snapshot_id IS
+        'FK enforcement index. References: backup_metadata(id) [ON DELETE SET NULL]'
+    $sql$;
+    -- 【3】backup_restore_history.user_id → auth.users(id) ON DELETE CASCADE
+    EXECUTE $sql$
+      CREATE INDEX IF NOT EXISTS idx_backup_restore_history_user_id
+        ON public.backup_restore_history(user_id)
+    $sql$;
+    EXECUTE $sql$
+      COMMENT ON INDEX idx_backup_restore_history_user_id IS
+        'FK enforcement index. References: auth.users(id) [ON DELETE CASCADE]'
+    $sql$;
+  END IF;
+END
+$retired_cloud_backup_fk_indexes$;
 -- 【4】black_box_entries.project_id → projects(id) ON DELETE CASCADE
 CREATE INDEX IF NOT EXISTS idx_black_box_entries_project_id 
   ON public.black_box_entries(project_id);

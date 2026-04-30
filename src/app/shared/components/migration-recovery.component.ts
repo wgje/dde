@@ -7,6 +7,7 @@ import {
 } from '@angular/core';
 import { LoggerService } from '../../../services/logger.service';
 import { WriteGuardService } from '../../../services/write-guard.service';
+import { SentryLazyLoaderService } from '../../../services/sentry-lazy-loader.service';
 import { environment } from '../../../environments/environment';
 
 /**
@@ -179,6 +180,7 @@ import { environment } from '../../../environments/environment';
 export class MigrationRecoveryComponent {
   private readonly logger = inject(LoggerService).category('MigrationRecovery');
   private readonly writeGuard = inject(WriteGuardService);
+  private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
 
   private readonly dismissed = signal<boolean>(this.loadSessionDismissed());
 
@@ -234,6 +236,12 @@ export class MigrationRecoveryComponent {
     if (typeof sessionStorage !== 'undefined') {
       try { sessionStorage.setItem(MigrationRecoveryComponent.DISMISS_KEY, '1'); } catch { /* noop */ }
     }
+    this.sentryLazyLoader.addBreadcrumb({
+      category: 'migration',
+      level: 'info',
+      message: 'migration_recovery_dismissed',
+      data: { mode: this.bannerMode() },
+    });
   }
 
   /**
@@ -246,6 +254,12 @@ export class MigrationRecoveryComponent {
       detail: { source: 'migration-recovery-banner' },
     }));
     this.logger.info('migration_recovery_export_requested');
+    this.sentryLazyLoader.addBreadcrumb({
+      category: 'migration',
+      level: 'info',
+      message: 'migration_recovery_export_requested',
+      data: { mode: this.bannerMode() },
+    });
   }
 
   private loadSessionDismissed(): boolean {

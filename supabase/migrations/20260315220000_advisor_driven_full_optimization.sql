@@ -21,7 +21,15 @@
 -- REINDEX CONCURRENTLY 需在事务外执行，此处使用常规 REINDEX
 -- 对 104KB 索引影响可忽略（瞬间完成）
 
-REINDEX INDEX public.idx_tasks_project_load;
+DO $optional_reindex$
+BEGIN
+  IF to_regclass('public.idx_tasks_project_load') IS NOT NULL THEN
+    EXECUTE 'REINDEX INDEX public.idx_tasks_project_load';
+  ELSE
+    RAISE NOTICE 'Skipping optional reindex; idx_tasks_project_load is absent in this schema.';
+  END IF;
+END
+$optional_reindex$;
 -- ============================================================================
 -- §2  备份表索引整合
 -- ============================================================================
@@ -43,20 +51,37 @@ DROP INDEX IF EXISTS public.idx_backup_restore_history_created_at;
 DROP INDEX IF EXISTS public.idx_backup_restore_history_pre_restore_snapshot_id;
 -- 2.2 创建高效复合索引（覆盖所有实际查询模式）
 
--- cleanup + recovery listing: WHERE status = 'completed' ORDER BY backup_completed_at DESC
-CREATE INDEX IF NOT EXISTS idx_backup_metadata_status_type_completed
-  ON public.backup_metadata (status, type, backup_completed_at DESC)
-  WHERE status = 'completed';
--- access control + recovery: WHERE user_id = ? AND status IN (...)
-CREATE INDEX IF NOT EXISTS idx_backup_metadata_user_status
-  ON public.backup_metadata (user_id, status, backup_completed_at DESC);
--- expiration cleanup: WHERE expires_at < now()
-CREATE INDEX IF NOT EXISTS idx_backup_metadata_expires
-  ON public.backup_metadata (expires_at)
-  WHERE expires_at IS NOT NULL;
--- restore operations: WHERE backup_id = ? AND user_id = ?
-CREATE INDEX IF NOT EXISTS idx_backup_restore_history_backup_user
-  ON public.backup_restore_history (backup_id, user_id);
+DO $retired_cloud_backup_indexes$
+BEGIN
+  IF to_regclass('public.backup_metadata') IS NULL
+    OR to_regclass('public.backup_restore_history') IS NULL THEN
+    RAISE NOTICE 'Skipping retired cloud backup index consolidation; backup tables are absent.';
+  ELSE
+    -- cleanup + recovery listing: WHERE status = 'completed' ORDER BY backup_completed_at DESC
+    EXECUTE $sql$
+      CREATE INDEX IF NOT EXISTS idx_backup_metadata_status_type_completed
+        ON public.backup_metadata (status, type, backup_completed_at DESC)
+        WHERE status = 'completed'
+    $sql$;
+    -- access control + recovery: WHERE user_id = ? AND status IN (...)
+    EXECUTE $sql$
+      CREATE INDEX IF NOT EXISTS idx_backup_metadata_user_status
+        ON public.backup_metadata (user_id, status, backup_completed_at DESC)
+    $sql$;
+    -- expiration cleanup: WHERE expires_at < now()
+    EXECUTE $sql$
+      CREATE INDEX IF NOT EXISTS idx_backup_metadata_expires
+        ON public.backup_metadata (expires_at)
+        WHERE expires_at IS NOT NULL
+    $sql$;
+    -- restore operations: WHERE backup_id = ? AND user_id = ?
+    EXECUTE $sql$
+      CREATE INDEX IF NOT EXISTS idx_backup_restore_history_backup_user
+        ON public.backup_restore_history (backup_id, user_id)
+    $sql$;
+  END IF;
+END
+$retired_cloud_backup_indexes$;
 -- ============================================================================
 -- §3  connections UNIQUE 约束优化
 -- ============================================================================
@@ -86,9 +111,19 @@ ANALYZE public.user_preferences;
 -- 无统计信息的表：ANALYZE 建立基线
 ANALYZE public.app_config;
 ANALYZE public.attachment_scans;
-ANALYZE public.backup_encryption_keys;
-ANALYZE public.backup_metadata;
-ANALYZE public.backup_restore_history;
+DO $retired_cloud_backup_analyze$
+BEGIN
+  IF to_regclass('public.backup_encryption_keys') IS NOT NULL THEN
+    EXECUTE 'ANALYZE public.backup_encryption_keys';
+  END IF;
+  IF to_regclass('public.backup_metadata') IS NOT NULL THEN
+    EXECUTE 'ANALYZE public.backup_metadata';
+  END IF;
+  IF to_regclass('public.backup_restore_history') IS NOT NULL THEN
+    EXECUTE 'ANALYZE public.backup_restore_history';
+  END IF;
+END
+$retired_cloud_backup_analyze$;
 ANALYZE public.circuit_breaker_logs;
 ANALYZE public.cleanup_logs;
 ANALYZE public.focus_sessions;

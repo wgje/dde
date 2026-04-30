@@ -297,6 +297,12 @@ describe('ConnectionSyncOperationsService', () => {
 
   it('pushConnection 在 sync RPC flag 开启时应走 RPC/CAS 而不是直接 table upsert', async () => {
     mockSyncRpcClient.isFeatureEnabled.mockReturnValue(true);
+    mockSyncRpcClient.upsertConnection.mockResolvedValueOnce({
+      status: 'applied',
+      entityId: 'connection-rpc',
+      serverUpdatedAt: '2026-04-30T00:02:00.000Z',
+      raw: {},
+    });
     const connection: Connection = {
       id: 'connection-rpc',
       source: 'task-a',
@@ -315,6 +321,7 @@ describe('ConnectionSyncOperationsService', () => {
     }));
     expect(mockConnectionsUpsert).not.toHaveBeenCalled();
     expect(mockRetryQueue.recordCircuitSuccess).toHaveBeenCalled();
+    expect(connection.updatedAt).toBe('2026-04-30T00:02:00.000Z');
   });
 
   it('pushConnection sync RPC 遇到 remote-newer 时应保留本地意图并阻止直接 table upsert', async () => {
@@ -480,6 +487,7 @@ describe('ConnectionSyncOperationsService', () => {
     const result = await service.pushConnection(connection, 'project-1', false, false, false, 'user-1');
 
     expect(result).toBe(true);
+    expect(connection.updatedAt).toBe('2026-04-11T00:01:00.000Z');
     expect(mockProjects[0].connections[0].updatedAt).toBe('2026-04-11T00:01:00.000Z');
     expect(connectionReadbackQueryCount).toBe(0);
     expect(mockProjectState.updateProjects).toHaveBeenCalled();

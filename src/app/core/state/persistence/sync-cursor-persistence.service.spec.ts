@@ -87,4 +87,25 @@ describe('SyncCursorPersistenceService', () => {
 
     await expect(service.loadProjectCursor('project-1', 'user-1')).resolves.toEqual(newer);
   });
+
+  it('keeps the newer cursor when concurrent commits race in separate tabs', async () => {
+    const newer = {
+      updatedAt: '2026-04-29T08:00:00.000Z',
+      entityType: 'connection' as const,
+      id: 'conn-z',
+    };
+    const older = {
+      updatedAt: '2026-04-29T08:00:00.000Z',
+      entityType: 'task' as const,
+      id: 'task-a',
+    };
+
+    await indexedDBService.initDatabase();
+    await Promise.all([
+      service.commitProjectCursor('project-1', 'user-1', newer),
+      service.commitProjectCursor('project-1', 'user-1', older),
+    ]);
+
+    await expect(service.loadProjectCursor('project-1', 'user-1')).resolves.toEqual(newer);
+  });
 });

@@ -16,6 +16,7 @@
       try {
         var CANONICAL_ORIGIN = 'https://nanoflow.pages.dev';
         var ORIGIN_GATE_MODE = 'off';
+        var EXPECTED_NGSW_HASH = '';
         var CLEANUP_PREFIX = 'nanoflow.originGate.cleanup';
 
         function writeGateMarker(mode) {
@@ -81,6 +82,46 @@
           });
         }
 
+        function handleNgswHashMismatch(expectedHash) {
+          if (!expectedHash || typeof expectedHash !== 'string') return false;
+          var hash = expectedHash.trim();
+          if (!hash) return false;
+
+          var key = 'nanoflow.ngswHash';
+          var previous = null;
+          try { previous = localStorage.getItem(key); } catch (_e) { previous = null; }
+
+          if (previous && previous !== hash) {
+            writeGateMarker('export-only');
+            cleanupStaleSwAndCaches('ngswHashMismatch', function() {
+              try { localStorage.setItem(key, hash); } catch (_e) { /* ignore */ }
+              window.location.reload();
+            });
+            return true;
+          }
+
+          try { localStorage.setItem(key, hash); } catch (_e) { /* ignore */ }
+          return false;
+        }
+
+        function scheduleNgswHashProbe() {
+          if (handleNgswHashMismatch(EXPECTED_NGSW_HASH)) return true;
+          if (typeof fetch !== 'function' || window.location.protocol === 'file:') return false;
+
+          fetch('/version.json', {
+            cache: 'no-store',
+            headers: { 'Cache-Control': 'no-store' }
+          })
+            .then(function(resp) { return resp && resp.ok ? resp.json() : null; })
+            .then(function(version) {
+              if (version && typeof version.ngswHash === 'string') {
+                handleNgswHashMismatch(version.ngswHash);
+              }
+            })
+            .catch(function() {});
+          return false;
+        }
+
         var forceSwReset = /(?:^|[?&])forceSwReset=1(?:&|$)/.test(window.location.search);
         if (forceSwReset) {
           writeGateMarker('export-only');
@@ -92,6 +133,8 @@
           });
           return;
         }
+
+        if (scheduleNgswHashProbe()) return;
 
         if (!CANONICAL_ORIGIN) return;
         if (!ORIGIN_GATE_MODE || ORIGIN_GATE_MODE === 'off') return;

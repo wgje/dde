@@ -12,6 +12,7 @@ import { UndoService } from './undo.service';
 import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
 import { ChangeTrackerService } from './change-tracker.service';
+import { WriteGuardService } from './write-guard.service';
 import { RetryQueueService } from '../app/core/services/sync/retry-queue.service';
 import { AUTH_CONFIG } from '../config/auth.config';
 import type { Project } from '../models';
@@ -75,6 +76,10 @@ describe('ProjectOperationService', () => {
     isHintOnlyStartupPlaceholderVisible: vi.fn(() => false),
   };
 
+  const mockWriteGuard = {
+    isExportOnly: vi.fn(() => false),
+  };
+
   const mockActionQueue = {
     enqueue: vi.fn(),
     enqueueForOwner: vi.fn().mockResolvedValue('queued-old-owner'),
@@ -132,6 +137,7 @@ describe('ProjectOperationService', () => {
     mockUserSession.getCurrentSessionGeneration.mockReturnValue(1);
     mockUserSession.isSessionContextCurrent.mockReturnValue(true);
     mockUserSession.isHintOnlyStartupPlaceholderVisible.mockReturnValue(false);
+    mockWriteGuard.isExportOnly.mockReturnValue(false);
     mockSyncCoordinator.core.saveProjectSmart.mockReset();
     mockSyncCoordinator.core.deleteTask.mockReset();
     mockSyncCoordinator.resolveConflict.mockReset();
@@ -166,6 +172,7 @@ describe('ProjectOperationService', () => {
         { provide: ToastService, useValue: mockToast },
         { provide: LoggerService, useValue: mockLoggerService },
         { provide: ChangeTrackerService, useValue: mockChangeTracker },
+        { provide: WriteGuardService, useValue: mockWriteGuard },
       ],
     });
 
@@ -191,6 +198,26 @@ describe('ProjectOperationService', () => {
     expect(mockProjectState.updateProjects).not.toHaveBeenCalled();
     expect(mockOptimisticState.createSnapshot).not.toHaveBeenCalled();
     expect(mockToast.info).toHaveBeenCalledWith('会话确认中', '创建项目暂不可用，owner 确认完成前保持只读');
+  });
+
+  it('export-only 旧入口下应阻止本地项目写入', async () => {
+    mockWriteGuard.isExportOnly.mockReturnValue(true);
+
+    const result = await service.addProject(createProject({ id: 'proj-export-only' }));
+    service.updateProjectMetadata('proj-export-only', { description: 'blocked' });
+
+    expect(result).toEqual({ success: false, error: '导出模式下禁止本地写入' });
+    expect(mockProjectState.updateProjects).not.toHaveBeenCalled();
+    expect(mockOptimisticState.createSnapshot).not.toHaveBeenCalled();
+    expect(mockSyncCoordinator.markLocalChanges).not.toHaveBeenCalled();
+    expect(mockToast.info).toHaveBeenCalledWith(
+      '导出模式',
+      '创建项目暂不可用，旧入口仅允许导出，请前往 https://nanoflow.pages.dev 继续编辑'
+    );
+    expect(mockToast.info).toHaveBeenCalledWith(
+      '导出模式',
+      '保存项目设置暂不可用，旧入口仅允许导出，请前往 https://nanoflow.pages.dev 继续编辑'
+    );
   });
 
   it('认证用户离线创建项目时应保留 synced 标记并进入 create 队列', async () => {

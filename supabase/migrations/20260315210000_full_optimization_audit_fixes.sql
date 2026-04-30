@@ -17,68 +17,89 @@
 -- §1  backup 表安全加固
 -- ============================================================================
 
--- 1.1 FORCE RLS
-ALTER TABLE public.backup_metadata ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.backup_metadata FORCE ROW LEVEL SECURITY;
-ALTER TABLE public.backup_restore_history ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.backup_restore_history FORCE ROW LEVEL SECURITY;
-ALTER TABLE public.backup_encryption_keys ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.backup_encryption_keys FORCE ROW LEVEL SECURITY;
--- 1.2 backup_metadata RLS 策略（user_id 可空，NULL 行仅 service_role 可见）
-DO $$ BEGIN DROP POLICY IF EXISTS "backup_metadata_user_select" ON public.backup_metadata; EXCEPTION WHEN undefined_object THEN NULL; END $$;
-DO $$ BEGIN DROP POLICY IF EXISTS "backup_metadata_user_insert" ON public.backup_metadata; EXCEPTION WHEN undefined_object THEN NULL; END $$;
-DO $$ BEGIN DROP POLICY IF EXISTS "backup_metadata_user_update" ON public.backup_metadata; EXCEPTION WHEN undefined_object THEN NULL; END $$;
-DO $$ BEGIN DROP POLICY IF EXISTS "backup_metadata_user_delete" ON public.backup_metadata; EXCEPTION WHEN undefined_object THEN NULL; END $$;
-DO $$ BEGIN
-  CREATE POLICY "backup_metadata_select" ON public.backup_metadata FOR SELECT
-    TO authenticated USING ((SELECT auth.uid()) = user_id);
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-DO $$ BEGIN
-  CREATE POLICY "backup_metadata_insert" ON public.backup_metadata FOR INSERT
-    TO authenticated WITH CHECK ((SELECT auth.uid()) = user_id);
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-DO $$ BEGIN
-  CREATE POLICY "backup_metadata_update" ON public.backup_metadata FOR UPDATE
-    TO authenticated USING ((SELECT auth.uid()) = user_id);
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-DO $$ BEGIN
-  CREATE POLICY "backup_metadata_delete" ON public.backup_metadata FOR DELETE
-    TO authenticated USING ((SELECT auth.uid()) = user_id);
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
--- 1.3 backup_restore_history RLS 策略
-DO $$ BEGIN DROP POLICY IF EXISTS "backup_restore_history_user_select" ON public.backup_restore_history; EXCEPTION WHEN undefined_object THEN NULL; END $$;
-DO $$ BEGIN DROP POLICY IF EXISTS "backup_restore_history_user_insert" ON public.backup_restore_history; EXCEPTION WHEN undefined_object THEN NULL; END $$;
-DO $$ BEGIN DROP POLICY IF EXISTS "backup_restore_history_user_update" ON public.backup_restore_history; EXCEPTION WHEN undefined_object THEN NULL; END $$;
-DO $$ BEGIN DROP POLICY IF EXISTS "backup_restore_history_user_delete" ON public.backup_restore_history; EXCEPTION WHEN undefined_object THEN NULL; END $$;
-DO $$ BEGIN
-  CREATE POLICY "backup_restore_history_select" ON public.backup_restore_history FOR SELECT
-    TO authenticated USING ((SELECT auth.uid()) = user_id);
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-DO $$ BEGIN
-  CREATE POLICY "backup_restore_history_insert" ON public.backup_restore_history FOR INSERT
-    TO authenticated WITH CHECK ((SELECT auth.uid()) = user_id);
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-DO $$ BEGIN
-  CREATE POLICY "backup_restore_history_update" ON public.backup_restore_history FOR UPDATE
-    TO authenticated USING ((SELECT auth.uid()) = user_id);
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-DO $$ BEGIN
-  CREATE POLICY "backup_restore_history_delete" ON public.backup_restore_history FOR DELETE
-    TO authenticated USING ((SELECT auth.uid()) = user_id);
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
--- 1.4 backup_encryption_keys: 无 user_id，仅 service_role 操作（RLS 阻止 authenticated）
--- 不创建 authenticated 策略 = authenticated 无法访问 = 安全
+DO $retired_cloud_backup_guard$
+BEGIN
+  IF to_regclass('public.backup_metadata') IS NULL
+    OR to_regclass('public.backup_restore_history') IS NULL
+    OR to_regclass('public.backup_encryption_keys') IS NULL THEN
+    RAISE NOTICE 'Skipping retired cloud backup hardening; backup tables are absent in clean schemas.';
+  ELSE
+    -- 1.1 FORCE RLS
+    EXECUTE 'ALTER TABLE public.backup_metadata ENABLE ROW LEVEL SECURITY';
+    EXECUTE 'ALTER TABLE public.backup_metadata FORCE ROW LEVEL SECURITY';
+    EXECUTE 'ALTER TABLE public.backup_restore_history ENABLE ROW LEVEL SECURITY';
+    EXECUTE 'ALTER TABLE public.backup_restore_history FORCE ROW LEVEL SECURITY';
+    EXECUTE 'ALTER TABLE public.backup_encryption_keys ENABLE ROW LEVEL SECURITY';
+    EXECUTE 'ALTER TABLE public.backup_encryption_keys FORCE ROW LEVEL SECURITY';
 
--- 1.5 GRANT 权限
--- backup_metadata / backup_restore_history：authenticated 需要通过 RLS 访问
-GRANT SELECT, INSERT, UPDATE ON TABLE public.backup_metadata TO authenticated;
-GRANT ALL ON TABLE public.backup_metadata TO service_role;
-GRANT SELECT, INSERT, UPDATE ON TABLE public.backup_restore_history TO authenticated;
-GRANT ALL ON TABLE public.backup_restore_history TO service_role;
--- backup_encryption_keys：仅 service_role
-REVOKE ALL ON TABLE public.backup_encryption_keys FROM anon;
-REVOKE ALL ON TABLE public.backup_encryption_keys FROM authenticated;
-GRANT ALL ON TABLE public.backup_encryption_keys TO service_role;
+    -- 1.2 backup_metadata RLS 策略（user_id 可空，NULL 行仅 service_role 可见）
+    EXECUTE 'DROP POLICY IF EXISTS "backup_metadata_user_select" ON public.backup_metadata';
+    EXECUTE 'DROP POLICY IF EXISTS "backup_metadata_user_insert" ON public.backup_metadata';
+    EXECUTE 'DROP POLICY IF EXISTS "backup_metadata_user_update" ON public.backup_metadata';
+    EXECUTE 'DROP POLICY IF EXISTS "backup_metadata_user_delete" ON public.backup_metadata';
+    EXECUTE 'DROP POLICY IF EXISTS "backup_metadata_select" ON public.backup_metadata';
+    EXECUTE 'DROP POLICY IF EXISTS "backup_metadata_insert" ON public.backup_metadata';
+    EXECUTE 'DROP POLICY IF EXISTS "backup_metadata_update" ON public.backup_metadata';
+    EXECUTE 'DROP POLICY IF EXISTS "backup_metadata_delete" ON public.backup_metadata';
+    EXECUTE $sql$
+      CREATE POLICY "backup_metadata_select" ON public.backup_metadata FOR SELECT
+        TO authenticated USING ((SELECT auth.uid()) = user_id)
+    $sql$;
+    EXECUTE $sql$
+      CREATE POLICY "backup_metadata_insert" ON public.backup_metadata FOR INSERT
+        TO authenticated WITH CHECK ((SELECT auth.uid()) = user_id)
+    $sql$;
+    EXECUTE $sql$
+      CREATE POLICY "backup_metadata_update" ON public.backup_metadata FOR UPDATE
+        TO authenticated USING ((SELECT auth.uid()) = user_id)
+    $sql$;
+    EXECUTE $sql$
+      CREATE POLICY "backup_metadata_delete" ON public.backup_metadata FOR DELETE
+        TO authenticated USING ((SELECT auth.uid()) = user_id)
+    $sql$;
+
+    -- 1.3 backup_restore_history RLS 策略
+    EXECUTE 'DROP POLICY IF EXISTS "backup_restore_history_user_select" ON public.backup_restore_history';
+    EXECUTE 'DROP POLICY IF EXISTS "backup_restore_history_user_insert" ON public.backup_restore_history';
+    EXECUTE 'DROP POLICY IF EXISTS "backup_restore_history_user_update" ON public.backup_restore_history';
+    EXECUTE 'DROP POLICY IF EXISTS "backup_restore_history_user_delete" ON public.backup_restore_history';
+    EXECUTE 'DROP POLICY IF EXISTS "backup_restore_history_select" ON public.backup_restore_history';
+    EXECUTE 'DROP POLICY IF EXISTS "backup_restore_history_insert" ON public.backup_restore_history';
+    EXECUTE 'DROP POLICY IF EXISTS "backup_restore_history_update" ON public.backup_restore_history';
+    EXECUTE 'DROP POLICY IF EXISTS "backup_restore_history_delete" ON public.backup_restore_history';
+    EXECUTE $sql$
+      CREATE POLICY "backup_restore_history_select" ON public.backup_restore_history FOR SELECT
+        TO authenticated USING ((SELECT auth.uid()) = user_id)
+    $sql$;
+    EXECUTE $sql$
+      CREATE POLICY "backup_restore_history_insert" ON public.backup_restore_history FOR INSERT
+        TO authenticated WITH CHECK ((SELECT auth.uid()) = user_id)
+    $sql$;
+    EXECUTE $sql$
+      CREATE POLICY "backup_restore_history_update" ON public.backup_restore_history FOR UPDATE
+        TO authenticated USING ((SELECT auth.uid()) = user_id)
+    $sql$;
+    EXECUTE $sql$
+      CREATE POLICY "backup_restore_history_delete" ON public.backup_restore_history FOR DELETE
+        TO authenticated USING ((SELECT auth.uid()) = user_id)
+    $sql$;
+
+    -- 1.4 backup_encryption_keys: 无 user_id，仅 service_role 操作（RLS 阻止 authenticated）
+    -- 不创建 authenticated 策略 = authenticated 无法访问 = 安全
+
+    -- 1.5 GRANT 权限
+    -- backup_metadata / backup_restore_history：authenticated 需要通过 RLS 访问
+    EXECUTE 'GRANT SELECT, INSERT, UPDATE ON TABLE public.backup_metadata TO authenticated';
+    EXECUTE 'GRANT ALL ON TABLE public.backup_metadata TO service_role';
+    EXECUTE 'GRANT SELECT, INSERT, UPDATE ON TABLE public.backup_restore_history TO authenticated';
+    EXECUTE 'GRANT ALL ON TABLE public.backup_restore_history TO service_role';
+    -- backup_encryption_keys：仅 service_role
+    EXECUTE 'REVOKE ALL ON TABLE public.backup_encryption_keys FROM anon';
+    EXECUTE 'REVOKE ALL ON TABLE public.backup_encryption_keys FROM authenticated';
+    EXECUTE 'GRANT ALL ON TABLE public.backup_encryption_keys TO service_role';
+  END IF;
+END
+$retired_cloud_backup_guard$;
 -- Rollback §1:
 -- ALTER TABLE backup_metadata NO FORCE ROW LEVEL SECURITY;
 -- ALTER TABLE backup_restore_history NO FORCE ROW LEVEL SECURITY;
@@ -89,17 +110,26 @@ GRANT ALL ON TABLE public.backup_encryption_keys TO service_role;
 -- §2  backup_restore_history 补充 updated_at
 -- ============================================================================
 
-ALTER TABLE public.backup_restore_history
-  ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
-DO $$ BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_trigger WHERE tgname = 'trg_backup_restore_history_updated_at'
-  ) THEN
-    CREATE TRIGGER trg_backup_restore_history_updated_at
-      BEFORE UPDATE ON public.backup_restore_history
-      FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+DO $retired_cloud_backup_updated_at$
+BEGIN
+  IF to_regclass('public.backup_restore_history') IS NULL THEN
+    RAISE NOTICE 'Skipping retired cloud backup updated_at hardening; backup_restore_history is absent.';
+  ELSE
+    EXECUTE 'ALTER TABLE public.backup_restore_history ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now()';
+
+    IF to_regprocedure('public.update_updated_at_column()') IS NOT NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM pg_trigger WHERE tgname = 'trg_backup_restore_history_updated_at'
+      ) THEN
+      EXECUTE $sql$
+        CREATE TRIGGER trg_backup_restore_history_updated_at
+          BEFORE UPDATE ON public.backup_restore_history
+          FOR EACH ROW EXECUTE FUNCTION update_updated_at_column()
+      $sql$;
+    END IF;
   END IF;
-END $$;
+END
+$retired_cloud_backup_updated_at$;
 -- Rollback §2: ALTER TABLE backup_restore_history DROP COLUMN IF EXISTS updated_at;
 
 -- ============================================================================
@@ -150,9 +180,19 @@ DROP INDEX IF EXISTS public.idx_project_members_invited_by;
 -- §4  补充：anon 收紧（backup 表）
 -- ============================================================================
 
-REVOKE ALL ON TABLE public.backup_metadata FROM anon;
-REVOKE ALL ON TABLE public.backup_restore_history FROM anon;
-REVOKE ALL ON TABLE public.backup_encryption_keys FROM anon;
+DO $retired_cloud_backup_anon$
+BEGIN
+  IF to_regclass('public.backup_metadata') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON TABLE public.backup_metadata FROM anon';
+  END IF;
+  IF to_regclass('public.backup_restore_history') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON TABLE public.backup_restore_history FROM anon';
+  END IF;
+  IF to_regclass('public.backup_encryption_keys') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON TABLE public.backup_encryption_keys FROM anon';
+  END IF;
+END
+$retired_cloud_backup_anon$;
 -- ============================================================================
 -- §5  transcription_usage SELECT 策略一致性确认
 -- ============================================================================

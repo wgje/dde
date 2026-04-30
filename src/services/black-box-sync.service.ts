@@ -39,8 +39,7 @@ import { LoggerService } from './logger.service';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { AuthService } from './auth.service';
 import { ClockSyncService } from './clock-sync.service';
-import { SyncRpcClientService } from './sync-rpc-client.service';
-import type { SyncRpcResult } from './sync-rpc-client.service';
+import { SyncRpcClientService, type SyncRpcResult } from './sync-rpc-client.service';
 import { SessionManagerService } from '../core-bridge';
 import { AUTH_CONFIG } from '../config/auth.config';
 
@@ -192,7 +191,7 @@ export class BlackBoxSyncService {
           lastToastAt: 0,
         }));
       } catch {
-        // eslint-disable-next-line no-restricted-syntax -- sessionStorage 不可写时保留内存态退化即可
+        // sessionStorage 不可写时保留内存态退化即可。
       }
     }
 
@@ -327,7 +326,7 @@ export class BlackBoxSyncService {
     return left.id.localeCompare(right.id);
   }
 
-  private commitBlackBoxCursorFromRows(rows: Array<Record<string, unknown>>): void {
+  private computeBlackBoxCursorFromRows(rows: Array<Record<string, unknown>>): BlackBoxSyncCursor | null {
     let nextCursor: BlackBoxSyncCursor | null = null;
     for (const row of rows) {
       if (typeof row['updated_at'] !== 'string' || typeof row['id'] !== 'string') {
@@ -339,6 +338,15 @@ export class BlackBoxSyncService {
       }
     }
 
+    return nextCursor;
+  }
+
+  private async commitBlackBoxCursorFromRows(rows: Array<Record<string, unknown>>): Promise<void> {
+    const nextCursor = this.computeBlackBoxCursorFromRows(rows);
+    await this.commitBlackBoxCursor(nextCursor);
+  }
+
+  private async commitBlackBoxCursor(nextCursor: BlackBoxSyncCursor | null): Promise<void> {
     if (!nextCursor) return;
     if (this.lastSyncCursor && this.compareBlackBoxCursor(nextCursor, this.lastSyncCursor) < 0) {
       this.sentryLazyLoader.addBreadcrumb({
@@ -350,8 +358,11 @@ export class BlackBoxSyncService {
       return;
     }
 
-    this.lastSyncCursor = nextCursor;
-    this.lastSyncTime = nextCursor.updatedAt;
+    const committed = await this.persistBlackBoxCursorIfNewer(nextCursor);
+    if (!committed) return;
+
+    this.lastSyncCursor = committed;
+    this.lastSyncTime = committed.updatedAt;
   }
 
   // ==================== RetryQueue 集成 ====================
@@ -576,26 +587,54 @@ export class BlackBoxSyncService {
     });
   }
 
-  /**
-   * 保存上次同步时间到 IndexedDB
-   */
-  private async saveLastSyncTime(): Promise<void> {
-    if (!this.db || !this.lastSyncTime || !this.currentSyncUserId) return;
+  private async persistBlackBoxCursorIfNewer(cursor: BlackBoxSyncCursor): Promise<BlackBoxSyncCursor | null> {
+    if (!this.db || !this.currentSyncUserId) return null;
 
-      const currentSyncUserId = this.currentSyncUserId;
+    const cursorMs = new Date(cursor.updatedAt).getTime();
+    if (!Number.isFinite(cursorMs)) return null;
+
+    const currentSyncUserId = this.currentSyncUserId;
+    const key = this.getLastSyncTimeKey(currentSyncUserId);
 
     return new Promise((resolve) => {
       try {
         const tx = this.db!.transaction(this.SYNC_METADATA_STORE, 'readwrite');
         const store = tx.objectStore(this.SYNC_METADATA_STORE);
-          const cursor = this.lastSyncCursor ?? (this.lastSyncTime ? { updatedAt: this.lastSyncTime, id: '' } : null);
-          store.put({ key: this.getLastSyncTimeKey(currentSyncUserId), value: cursor });
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => resolve();
+        let committedCursor: BlackBoxSyncCursor = cursor;
+
+        tx.oncomplete = () => resolve(committedCursor);
+        tx.onerror = () => {
+          this.logger.debug('保存黑匣子同步游标失败', { userId: currentSyncUserId, error: tx.error });
+          resolve(null);
+        };
+        tx.onabort = () => {
+          this.logger.debug('保存黑匣子同步游标中止', { userId: currentSyncUserId, error: tx.error });
+          resolve(null);
+        };
+
+        const request = store.get(key);
+        request.onsuccess = () => {
+          const existing = this.parseStoredSyncCursor(request.result?.value);
+          if (existing && this.compareBlackBoxCursor(cursor, existing) < 0) {
+            this.sentryLazyLoader.addBreadcrumb({
+              category: 'sync',
+              message: 'blackbox.cursor_persist_ignored_stale',
+              level: 'info',
+              data: { existing, candidate: cursor },
+            });
+            committedCursor = existing;
+            return;
+          }
+
+          store.put({ key, value: cursor });
+        };
+        request.onerror = () => {
+          this.logger.debug('读取黑匣子同步游标失败', { userId: currentSyncUserId, error: request.error });
+          resolve(null);
+        };
       } catch (e) {
-        // 降级处理：保存失败时静默继续
-        this.logger.debug('保存同步时间失败', { error: e });
-        resolve();
+        this.logger.debug('保存黑匣子同步游标失败', { error: e });
+        resolve(null);
       }
     });
   }
@@ -1886,11 +1925,7 @@ export class BlackBoxSyncService {
             this.logger.info('黑匣子 watermark 快路在保存游标前中止：Realtime 订阅上下文已变化');
             return false;
           }
-          if (!this.lastSyncCursor) {
-            this.lastSyncCursor = { updatedAt: remoteWatermark, id: '' };
-            this.lastSyncTime = remoteWatermark;
-          }
-          await this.saveLastSyncTime();
+          await this.commitBlackBoxCursor(this.lastSyncCursor ?? { updatedAt: remoteWatermark, id: '' });
           this.logger.debug('BlackBox watermark 快路命中，跳过明细拉取', {
             remoteWatermark,
             localCursor: effectiveLastSync
@@ -1995,8 +2030,7 @@ export class BlackBoxSyncService {
           return false;
         }
 
-        this.commitBlackBoxCursorFromRows(data as Array<Record<string, unknown>>);
-        await this.saveLastSyncTime();
+        await this.commitBlackBoxCursorFromRows(data as Array<Record<string, unknown>>);
       }
 
       this.logger.info(`Pulled changes from server: ${data?.length ?? 0} entries`);

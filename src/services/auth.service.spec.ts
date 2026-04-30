@@ -550,6 +550,48 @@ describe('AuthService', () => {
         redirectTo: 'https://nanoflow.pages.dev/reset-password',
       });
     });
+
+    it('生产环境注册确认邮件应使用 canonical origin 生成 emailRedirectTo', async () => {
+      const original = {
+        production: environment.production,
+        canonicalOrigin: environment.canonicalOrigin,
+        deploymentTarget: environment.deploymentTarget,
+      };
+      const signUp = vi.fn().mockResolvedValue({
+        data: { user: { id: 'new-user', email: 'user@example.com' }, session: null },
+        error: null,
+      });
+      mockSupabaseClient.clientAsync.mockResolvedValue({
+        auth: {
+          onAuthStateChange: vi.fn((callback: (event: string, session: unknown) => void) => {
+            authStateCallback = callback;
+            return { data: { subscription: { unsubscribe: mockUnsubscribe } } };
+          }),
+          getSession: vi.fn().mockResolvedValue({ data: { session: null }, error: null }),
+          signUp,
+        },
+      });
+
+      environment.production = true;
+      environment.canonicalOrigin = 'https://nanoflow.pages.dev';
+      environment.deploymentTarget = 'production';
+
+      try {
+        await service.signUp('user@example.com', 'password-123');
+      } finally {
+        environment.production = original.production;
+        environment.canonicalOrigin = original.canonicalOrigin;
+        environment.deploymentTarget = original.deploymentTarget;
+      }
+
+      expect(signUp).toHaveBeenCalledWith({
+        email: 'user@example.com',
+        password: 'password-123',
+        options: {
+          emailRedirectTo: 'https://nanoflow.pages.dev/auth/callback',
+        },
+      });
+    });
   });
 
   describe('checkSession 异常容错', () => {

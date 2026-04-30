@@ -8,6 +8,8 @@
  * - `sync_upsert_task(payload)` —— task 写入；
  * - `sync_upsert_connection(payload)` —— connection 写入；
  * - `sync_upsert_blackbox_entry(payload)` —— blackbox 写入。
+ * - `sync_upsert_project(payload)` / `sync_delete_project(payload)` —— project 写入/删除；
+ * - `sync_delete_tasks(payload)` —— task 批量软删或 purge。
  *
  * 返回 `status`：`applied` / `idempotent-replay` / `remote-newer` /
  * `client-version-rejected` / `unauthorized`。调用方按 status 走不同重试策略：
@@ -23,12 +25,13 @@ import { Injectable, inject, computed, signal } from '@angular/core';
 import { LoggerService } from './logger.service';
 import { SupabaseClientService } from './supabase-client.service';
 import { environment } from '../environments/environment';
-import type { Task, Connection, BlackBoxEntry } from '../models';
+import type { Task, Connection, BlackBoxEntry, Project } from '../models';
 
 export type SyncRpcStatus =
   | 'applied'
   | 'idempotent-replay'
   | 'remote-newer'
+  | 'deleted-remote-newer'
   | 'client-version-rejected'
   | 'unauthorized';
 
@@ -43,6 +46,10 @@ export interface SyncRpcResult {
   minProtocolVersion?: number;
   /** `applied` / `idempotent-replay` 时返回的实体 ID。 */
   entityId?: string;
+  /** delete/batch RPC 返回的影响行数。 */
+  affectedCount?: number;
+  /** 任务 purge 时服务端返回、客户端后续异步清理的附件路径。 */
+  attachmentPaths?: string[];
   raw: unknown;
 }
 
@@ -162,6 +169,56 @@ export class SyncRpcClientService {
     });
   }
 
+  /** 客户端 project upsert RPC 包装。 */
+  async upsertProject(params: {
+    operationId: string;
+    project: Project;
+    ownerId: string;
+    baseUpdatedAt: string | null;
+  }): Promise<SyncRpcResult> {
+    return this.invokeRpc('sync_upsert_project', {
+      operation_id: params.operationId,
+      protocol_version: this.clientProtocolVersion(),
+      base_updated_at: params.baseUpdatedAt,
+      project: this.serializeProject(params.project, params.ownerId),
+      ...this.buildAuditFields(),
+    });
+  }
+
+  /** 客户端 project delete RPC 包装。 */
+  async deleteProject(params: {
+    operationId: string;
+    projectId: string;
+    baseUpdatedAt: string | null;
+  }): Promise<SyncRpcResult> {
+    return this.invokeRpc('sync_delete_project', {
+      operation_id: params.operationId,
+      protocol_version: this.clientProtocolVersion(),
+      base_updated_at: params.baseUpdatedAt,
+      project_id: params.projectId,
+      ...this.buildAuditFields(),
+    });
+  }
+
+  /** 客户端 task batch delete / purge RPC 包装。 */
+  async deleteTasks(params: {
+    operationId: string;
+    projectId: string;
+    taskIds: string[];
+    baseUpdatedAt: string | null;
+    deleteMode?: 'soft' | 'purge';
+  }): Promise<SyncRpcResult> {
+    return this.invokeRpc('sync_delete_tasks', {
+      operation_id: params.operationId,
+      protocol_version: this.clientProtocolVersion(),
+      base_updated_at: params.baseUpdatedAt,
+      project_id: params.projectId,
+      task_ids: params.taskIds,
+      delete_mode: params.deleteMode ?? 'purge',
+      ...this.buildAuditFields(),
+    });
+  }
+
   // ---------------- internals ----------------
 
   private async invokeRpc(name: string, payload: Record<string, unknown>): Promise<SyncRpcResult> {
@@ -192,12 +249,22 @@ export class SyncRpcClientService {
     if (typeof obj['task_id'] === 'string') result.entityId = obj['task_id'] as string;
     else if (typeof obj['connection_id'] === 'string') result.entityId = obj['connection_id'] as string;
     else if (typeof obj['entry_id'] === 'string') result.entityId = obj['entry_id'] as string;
+    else if (typeof obj['project_id'] === 'string') result.entityId = obj['project_id'] as string;
+    if (typeof obj['deleted_count'] === 'number') result.affectedCount = obj['deleted_count'] as number;
+    if (Array.isArray(obj['attachment_paths'])) {
+      result.attachmentPaths = obj['attachment_paths'].filter((value): value is string => typeof value === 'string');
+    }
     return result;
   }
 
   private parseStatus(raw: unknown): SyncRpcStatus {
     const known: SyncRpcStatus[] = [
-      'applied', 'idempotent-replay', 'remote-newer', 'client-version-rejected', 'unauthorized',
+      'applied',
+      'idempotent-replay',
+      'remote-newer',
+      'deleted-remote-newer',
+      'client-version-rejected',
+      'unauthorized',
     ];
     if (typeof raw === 'string' && (known as string[]).includes(raw)) {
       return raw as SyncRpcStatus;
@@ -290,6 +357,18 @@ export class SyncRpcClientService {
       snooze_count: entry.snoozeCount ?? 0,
       deleted_at: (entry as unknown as { deletedAt?: string }).deletedAt ?? null,
       focus_meta: entry.focusMeta ?? null,
+    };
+  }
+
+  private serializeProject(project: Project, ownerId: string): Record<string, unknown> {
+    return {
+      id: project.id,
+      owner_id: ownerId,
+      title: project.name,
+      description: project.description ?? null,
+      version: project.version ?? 1,
+      migrated_to_v2: true,
+      deleted_at: project.deletedAt ?? null,
     };
   }
 

@@ -23,6 +23,7 @@ import { UndoService } from './undo.service';
 import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
 import { ChangeTrackerService } from './change-tracker.service';
+import { WriteGuardService } from './write-guard.service';
 // eslint-disable-next-line no-restricted-imports -- RetryQueueService 尚未迁移到 src/services/，暂保持此引用
 import { RetryQueueService } from '../app/core/services/sync/retry-queue.service';
 import { Project } from '../models';
@@ -49,6 +50,7 @@ export class ProjectOperationService {
   private readonly toastService = inject(ToastService);
   private readonly changeTracker = inject(ChangeTrackerService);
   private readonly retryQueue = inject(RetryQueueService);
+  private readonly writeGuard = inject(WriteGuardService);
 
   private isHintOnlyStartupReadOnly(): boolean {
     return this.userSession.isHintOnlyStartupPlaceholderVisible?.() ?? false;
@@ -62,6 +64,23 @@ export class ProjectOperationService {
     const message = '会话确认中，owner 确认完成前暂时只读';
     this.toastService.info('会话确认中', `${actionLabel}暂不可用，owner 确认完成前保持只读`);
     return { success: false, error: message };
+  }
+
+  private blockExportOnlyProjectMutation(actionLabel: string): { success: false; error: string } | null {
+    if (!this.writeGuard.isExportOnly()) {
+      return null;
+    }
+
+    this.toastService.info(
+      '导出模式',
+      `${actionLabel}暂不可用，旧入口仅允许导出，请前往 https://nanoflow.pages.dev 继续编辑`
+    );
+    return { success: false, error: '导出模式下禁止本地写入' };
+  }
+
+  private blockProjectMutation(actionLabel: string): { success: false; error: string } | null {
+    return this.blockExportOnlyProjectMutation(actionLabel)
+      ?? this.blockHintOnlyProjectMutation(actionLabel);
   }
 
   private captureProjectSessionContext(ownerUserId: string | null): {
@@ -165,7 +184,7 @@ export class ProjectOperationService {
    * 3. 失败时回滚或加入离线队列
    */
   async addProject(project: Project): Promise<{ success: boolean; error?: string }> {
-    const blocked = this.blockHintOnlyProjectMutation('创建项目');
+    const blocked = this.blockProjectMutation('创建项目');
     if (blocked) return blocked;
 
     const balanced = this.layoutService.rebalance(project);
@@ -240,7 +259,7 @@ export class ProjectOperationService {
    * 删除项目
    */
   async deleteProject(projectId: string): Promise<{ success: boolean; error?: string }> {
-    const blocked = this.blockHintOnlyProjectMutation('删除项目');
+    const blocked = this.blockProjectMutation('删除项目');
     if (blocked) return blocked;
 
     const userId = this.userSession.currentUserId();
@@ -315,7 +334,7 @@ export class ProjectOperationService {
    * 更新项目元数据（描述、创建日期）
    */
   updateProjectMetadata(projectId: string, metadata: { description?: string; createdDate?: string }): void {
-    if (this.blockHintOnlyProjectMutation('保存项目设置')) return;
+    if (this.blockProjectMutation('保存项目设置')) return;
 
     this.projectState.updateProjects(projects => projects.map(p => p.id === projectId ? {
       ...p,
@@ -333,7 +352,7 @@ export class ProjectOperationService {
    * 重命名项目
    */
   renameProject(projectId: string, newName: string): boolean {
-    if (this.blockHintOnlyProjectMutation('重命名项目')) {
+    if (this.blockProjectMutation('重命名项目')) {
       return false;
     }
 
@@ -346,7 +365,7 @@ export class ProjectOperationService {
   }
 
   async upsertImportedProject(project: Project): Promise<{ success: boolean; error?: string }> {
-    const blocked = this.blockHintOnlyProjectMutation('导入项目');
+    const blocked = this.blockProjectMutation('导入项目');
     if (blocked) return blocked;
 
     const snapshot = this.optimisticState.createSnapshot('project-import', '导入项目');
@@ -459,7 +478,7 @@ export class ProjectOperationService {
    * 更新项目的流程图缩略图 URL
    */
   updateProjectFlowchartUrl(projectId: string, flowchartUrl: string, thumbnailUrl?: string): void {
-    if (this.blockHintOnlyProjectMutation('更新流程图')) return;
+    if (this.blockProjectMutation('更新流程图')) return;
 
     this.projectState.updateProjects(projects => projects.map(p => {
       if (p.id === projectId) {

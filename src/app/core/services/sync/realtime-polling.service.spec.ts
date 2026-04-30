@@ -63,6 +63,7 @@ const mockSyncStateService = {
 
 const mockSentryLazyLoaderService = {
   captureMessage: vi.fn(),
+  addBreadcrumb: vi.fn(),
 };
 
 const mockChangeDetectionScheduler: ChangeDetectionScheduler = {
@@ -262,6 +263,38 @@ describe('RealtimePollingService', () => {
         lastError: 'third failure',
       })
     );
+  });
+
+  it('Realtime 通道错误与轮询降级应写入迁移指标 breadcrumb', async () => {
+    await service.subscribeToProject('project-metric', 'user-metric');
+    const statusCallback = mockChannel.subscribe.mock.calls.at(-1)?.[0] as
+      | ((status: string, err?: { message?: string }) => void)
+      | undefined;
+
+    statusCallback?.('CHANNEL_ERROR', { message: 'first failure' });
+    statusCallback?.('TIMED_OUT', { message: 'second failure' });
+    statusCallback?.('CHANNEL_ERROR', { message: 'third failure' });
+
+    expect(mockSentryLazyLoaderService.addBreadcrumb).toHaveBeenCalledWith(expect.objectContaining({
+      category: 'realtime',
+      level: 'warning',
+      message: 'realtime_channel_error',
+      data: expect.objectContaining({
+        status: 'CHANNEL_ERROR',
+        projectId: 'project-metric',
+        consecutiveErrors: 1,
+      }),
+    }));
+    expect(mockSentryLazyLoaderService.addBreadcrumb).toHaveBeenCalledWith(expect.objectContaining({
+      category: 'realtime',
+      level: 'warning',
+      message: 'realtime_fallback_polling_started',
+      data: expect.objectContaining({
+        projectId: 'project-metric',
+        reason: 'realtime_channel_error',
+        consecutiveErrors: 3,
+      }),
+    }));
   });
 
   it('SUBSCRIBED 应重置连续失败计数', async () => {

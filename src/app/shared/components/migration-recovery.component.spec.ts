@@ -4,6 +4,7 @@ import { TestBed } from '@angular/core/testing';
 import { MigrationRecoveryComponent } from './migration-recovery.component';
 import { WriteGuardService } from '../../../services/write-guard.service';
 import { LoggerService } from '../../../services/logger.service';
+import { SentryLazyLoaderService } from '../../../services/sentry-lazy-loader.service';
 import { environment } from '../../../environments/environment';
 
 const mockLoggerCategory = {
@@ -13,6 +14,9 @@ const mockLoggerCategory = {
   error: vi.fn(),
 };
 const mockLogger = { category: () => mockLoggerCategory } as unknown as LoggerService;
+const mockSentry = {
+  addBreadcrumb: vi.fn(),
+};
 
 interface MutableEnv {
   readOnlyPreview: boolean;
@@ -35,6 +39,7 @@ function configure(mode: 'writable' | 'read-only' | 'export-only'): void {
     providers: [
       WriteGuardService,
       { provide: LoggerService, useValue: mockLogger },
+      { provide: SentryLazyLoaderService, useValue: mockSentry },
     ],
   });
 }
@@ -44,6 +49,7 @@ describe('MigrationRecoveryComponent', () => {
 
   beforeEach(() => {
     mockLoggerCategory.info.mockReset();
+    mockSentry.addBreadcrumb.mockReset();
     if (typeof sessionStorage !== 'undefined') {
       try {
         sessionStorage.removeItem('nanoflow.migration-recovery-dismissed');
@@ -144,8 +150,25 @@ describe('MigrationRecoveryComponent', () => {
       const detail = (dispatched[0] as CustomEvent).detail;
       expect(detail.source).toBe('migration-recovery-banner');
       expect(mockLoggerCategory.info).toHaveBeenCalledWith('migration_recovery_export_requested');
+      expect(mockSentry.addBreadcrumb).toHaveBeenCalledWith(expect.objectContaining({
+        category: 'migration',
+        message: 'migration_recovery_export_requested',
+      }));
     } finally {
       window.removeEventListener('nanoflow:request-data-export', handler);
     }
+  });
+
+  it('dismissForSession 应记录迁移提示跳过 breadcrumb', () => {
+    configure('read-only');
+    const fixture = TestBed.createComponent(MigrationRecoveryComponent);
+    fixture.detectChanges();
+
+    fixture.componentInstance.dismissForSession();
+
+    expect(mockSentry.addBreadcrumb).toHaveBeenCalledWith(expect.objectContaining({
+      category: 'migration',
+      message: 'migration_recovery_dismissed',
+    }));
   });
 });
