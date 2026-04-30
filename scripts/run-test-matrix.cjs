@@ -61,6 +61,7 @@ const DEFAULT_QUARANTINE = 'scripts/test-quarantine.json';
 const DEFAULT_STRATEGY_LOCAL = 'mod';
 const DEFAULT_STRATEGY_CI = 'weighted';
 const DEFAULT_FILE_ESTIMATE_MS = 1000;
+const FORCED_ISOLATE_FILE_OVERHEAD_MS = 3000;
 const DEFAULT_BASELINE_MAX_AGE_HOURS = 24;
 const DEFAULT_MIN_FILE_ESTIMATES = 20;
 const DEFAULT_TIMING_OUT_DIR = 'test-results';
@@ -1131,28 +1132,36 @@ function collectTimingObservations(inputPaths) {
 }
 
 function createFileEstimator(timingInputs, durationBaseline, laneByFile) {
+  const withForcedIsolateOverhead = (file, lane, estimateMs) => {
+    const forcedIsolateFiles = lane ? laneConfig[lane]?.forceIsolateFiles ?? [] : [];
+    return forcedIsolateFiles.includes(file)
+      ? estimateMs + FORCED_ISOLATE_FILE_OVERHEAD_MS
+      : estimateMs;
+  };
+
   return (file) => {
+    const lane = laneByFile.get(file);
+
     if (timingInputs.fileEstimates.has(file)) {
-      return timingInputs.fileEstimates.get(file);
+      return withForcedIsolateOverhead(file, lane, timingInputs.fileEstimates.get(file));
     }
 
     if (durationBaseline.fileEstimates.has(file)) {
-      return durationBaseline.fileEstimates.get(file);
+      return withForcedIsolateOverhead(file, lane, durationBaseline.fileEstimates.get(file));
     }
 
-    const lane = laneByFile.get(file);
     if (lane) {
       if (durationBaseline.laneAverages.has(lane)) {
-        return durationBaseline.laneAverages.get(lane);
+        return withForcedIsolateOverhead(file, lane, durationBaseline.laneAverages.get(lane));
       }
 
       const laneKey = `${lane}/shared`;
       if (durationBaseline.laneEstimates.has(laneKey)) {
-        return durationBaseline.laneEstimates.get(laneKey);
+        return withForcedIsolateOverhead(file, lane, durationBaseline.laneEstimates.get(laneKey));
       }
     }
 
-    return DEFAULT_FILE_ESTIMATE_MS;
+    return withForcedIsolateOverhead(file, lane, DEFAULT_FILE_ESTIMATE_MS);
   };
 }
 
