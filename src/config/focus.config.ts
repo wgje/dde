@@ -16,6 +16,8 @@ export const FOCUS_CONFIG = {
     TRANSITION_DURATION: 300,
     /** 每日最大跳过次数 */
     MAX_SNOOZE_PER_DAY: 3,
+    /** 已读但未完成条目的大门缄默期；到期后会再次间歇出现，直到完成 */
+    READ_REAPPEAR_COOLDOWN_MS: 30 * 60 * 1000,
     /** 待机多久后回来重新触发大门检查（毫秒），默认 5 分钟 */
     IDLE_RECHECK_THRESHOLD: 5 * 60 * 1000,
   },

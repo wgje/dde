@@ -89,29 +89,39 @@ describe('android host contract', () => {
     expect(renderer).toContain('NanoflowWidgetReceiver.gateActionClickTemplatePendingIntent');
   });
 
-  it('advances the displayed gate entry immediately when widget read is tapped', () => {
+  it('advances the displayed gate entry immediately when widget read starts cooldown', () => {
     const repository = readText('android/app/src/main/java/app/nanoflow/host/NanoflowWidgetRepository.kt');
 
     expect(repository).toContain('resolveNextGateEntryId');
-    expect(repository).toContain('candidateEntries.firstOrNull { it.entryId != entryId && !it.isRead }');
+    expect(repository).toContain('candidateEntries.firstOrNull { it.entryId != entryId && !isGateReadCoolingDown(it) }');
     expect(repository).toContain('BlackBoxEntryAction.READ -> resolveNextGateEntryId(');
   });
 
-  it('keeps read-but-unfinished entries out of the widget gate queue', () => {
+  it('keeps widget gate read entries quiet only during the cooldown window', () => {
     const repository = readText('android/app/src/main/java/app/nanoflow/host/NanoflowWidgetRepository.kt');
 
-    expect(repository).toContain('if (preview.isRead) {');
-    expect(repository).toContain('return resolveBlackBoxUnreadCount(summary)');
+    expect(repository).toContain('GATE_READ_REAPPEAR_COOLDOWN_MS');
+    expect(repository).toContain('private fun isGateReadCoolingDown(preview: WidgetGatePreview): Boolean');
+    expect(repository).toContain('scheduleGateReadCooldownRefreshFromSummary(appWidgetId, reconciledSummary)');
+    expect(repository).toContain('summary.blackBox.nextReviewAt');
+    expect(repository).toContain('if (isGateReadCoolingDown(preview)) {');
+    expect(repository).toContain('return summary.blackBox.pendingCount.coerceAtLeast(0)');
+    expect(repository).toContain('BlackBoxEntryAction.READ -> (cached.blackBox.pendingCount - 1).coerceAtLeast(0)');
     expect(repository).toContain('gateEntries.isEmpty()');
     expect(repository).toContain('&& gateQueueCount == 0');
   });
 
   it('keeps widget gate actions local-first without success toasts or remote blocking', () => {
     const handler = readText('android/app/src/main/java/app/nanoflow/host/NanoflowWidgetGateActionHandler.kt');
+    const worker = readText('android/app/src/main/java/app/nanoflow/host/NanoflowWidgetRefreshWorker.kt');
 
     expect(handler).toContain('remoteActionScope.launch');
     expect(handler).toContain('submitRemoteAction');
     expect(handler).toContain('partialUpdate = true');
+    expect(handler).toContain('scheduleGateReadCooldownRefresh');
+    expect(worker).toContain('GATE_READ_COOLDOWN_REFRESH_WORK_PREFIX');
+    expect(worker).toContain('GATE_READ_REAPPEAR_COOLDOWN_MS');
+    expect(worker).toContain('setInitialDelay(delayMs.coerceAtLeast(0L), TimeUnit.MILLISECONDS)');
     expect(handler).not.toContain('已标记为已读');
     expect(handler).not.toContain('已标记为完成');
   });
@@ -194,15 +204,17 @@ describe('android host contract', () => {
     expect(waitPresetBranch).not.toContain('rollbackOptimisticFocusPromotion');
   });
 
-  it('matches the focus widget blueprint proportions for the 360 by 180 reference', () => {
+  it('keeps the focus widget advertised as a 4x2 launcher widget', () => {
     const widgetInfo = readText('android/app/src/main/res/xml/nanoflow_focus_widget_info.xml');
     const focusLayout = readText('android/app/src/main/res/layout/nano_widget_large.xml');
     const tabItem = readText('android/app/src/main/res/layout/nano_widget_tab_item.xml');
     const focusActionItem = readText('android/app/src/main/res/layout/nano_widget_focus_action_item.xml');
     const rootFocus = readText('android/app/src/main/res/drawable/nano_widget_root_focus.xml');
 
-    expect(widgetInfo).toContain('android:minWidth="360dp"');
-    expect(widgetInfo).toContain('android:minHeight="180dp"');
+    expect(widgetInfo).toContain('android:minWidth="180dp"');
+    expect(widgetInfo).toContain('android:minHeight="110dp"');
+    expect(widgetInfo).toContain('android:targetCellWidth="4"');
+    expect(widgetInfo).toContain('android:targetCellHeight="2"');
     expect(focusLayout).toContain('android:paddingStart="16dp"');
     expect(focusLayout).toContain('android:paddingTop="14dp"');
     expect(focusLayout).toContain('android:columnWidth="60dp"');
@@ -221,5 +233,28 @@ describe('android host contract', () => {
     expect(focusActionItem).toContain('android:textSize="12sp"');
     expect(rootFocus).toContain('@drawable/nano_widget_blueprint_grid');
     expect(rootFocus).toContain('android:radius="28dp"');
+  });
+
+  it('keeps Android widget bootstrap callbacks and gate RemoteViews launcher-safe', () => {
+    const bindingService = readText('src/services/widget-binding.service.ts');
+    const gateLayout = readText('android/app/src/main/res/layout/nano_widget_large_gate.xml');
+
+    expect(bindingService).toContain('callbackUrl.search = callbackParams.toString()');
+    expect(bindingService).not.toContain('callbackUrl.hash = callbackParams.toString()');
+    expect(gateLayout).toContain('<ListView');
+    expect(gateLayout).not.toContain('<AdapterViewFlipper');
+    expect(gateLayout).toContain('android:id="@+id/nano_widget_content_list"');
+  });
+
+  it('repairs missing widget bearer tokens through bootstrap instead of showing login-required UI', () => {
+    const store = readText('android/app/src/main/java/app/nanoflow/host/NanoflowWidgetStore.kt');
+    const repository = readText('android/app/src/main/java/app/nanoflow/host/NanoflowWidgetRepository.kt');
+
+    expect(store).toContain('securePreferences.getString("binding.widgetToken", null)?.trim()?.takeIf { it.isNotBlank() } ?: return null');
+    expect(store).toContain('.putString("binding.widgetToken", normalizedWidgetToken)');
+    expect(repository).toContain('"WIDGET_TOKEN_REQUIRED",');
+    expect(repository).toContain('val normalizedBearerToken = bearerToken.trim()');
+    expect(repository).toContain('require(normalizedBearerToken.isNotBlank())');
+    expect(repository).toContain('setRequestProperty("Authorization", "Bearer $normalizedBearerToken")');
   });
 });

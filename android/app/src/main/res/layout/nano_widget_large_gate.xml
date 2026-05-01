@@ -165,19 +165,18 @@
             android:layout_width="match_parent"
             android:layout_height="2dp" />
 
-        <!-- 中央大卡片：单条展示，避免 ListView 在小组件内产生纵向滑动 -->
-        <AdapterViewFlipper
+        <!-- 中央大卡片：单条展示；使用 ListView 避开部分 MIUI/HyperOS 对 AdapterViewFlipper 的 RemoteViews 错误页。 -->
+        <ListView
             android:id="@+id/nano_widget_content_list"
             android:layout_width="match_parent"
             android:layout_height="0dp"
             android:layout_weight="1"
-            android:animateFirstView="false"
-            android:autoStart="false"
             android:clipChildren="true"
             android:clipToPadding="true"
-            android:flipInterval="86400000"
-            android:inAnimation="@null"
-            android:outAnimation="@null" />
+            android:fadingEdge="none"
+            android:overScrollMode="never"
+            android:requiresFadingEdge="none"
+            android:scrollbars="none" />
 
         <TextView
             android:layout_width="match_parent"

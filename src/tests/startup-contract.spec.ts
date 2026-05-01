@@ -131,6 +131,16 @@ describe('startup launch contract', () => {
     expect(mainSource).toContain("provideServiceWorker('sw-composed.js'");
   });
 
+  it('main bootstrap should suppress browser-network-suspended unhandled rejection noise', () => {
+    const mainPath = path.join(process.cwd(), 'main.ts');
+    const mainSource = fs.readFileSync(mainPath, 'utf8');
+
+    expect(mainSource).toContain('isBrowserNetworkSuspendedReason(reason)');
+    expect(mainSource).toContain('event.preventDefault();');
+    expect(mainSource).toContain('BrowserNetworkSuspendedError');
+    expect(mainSource).toContain('network IO suspended');
+  });
+
   it('legacy sw-composed compatibility entry should keep the retirement shim but not the old desktop runtime', () => {
     const composedSwPath = path.join(process.cwd(), 'public', 'sw-composed.js');
     const composedSwSource = fs.readFileSync(composedSwPath, 'utf8');

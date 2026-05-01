@@ -46,6 +46,14 @@ const logError = (msg: string, err?: unknown) => {
   console.error(`[NanoFlow +${elapsed}ms] ❌ ${msg}`, err || '');
 };
 
+function isBrowserNetworkSuspendedReason(reason: unknown): boolean {
+  const record = reason as { name?: unknown; message?: unknown } | null | undefined;
+  const name = typeof record?.name === 'string' ? record.name : '';
+  const message = typeof record?.message === 'string' ? record.message : String(reason ?? '');
+  return name === 'BrowserNetworkSuspendedError'
+    || /network[_ ]io suspended|Browser network IO suspended/i.test(message);
+}
+
 // 在浏览器空闲时执行任务，避免阻塞首屏渲染
 const scheduleIdleTask = (task: () => void) => {
   if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
@@ -211,6 +219,10 @@ window.onerror = (message, source, lineno, colno, error) => {
     return true; // 阻止默认处理（避免控制台噪音）
   }
 
+  if (isBrowserNetworkSuspendedReason(error ?? message)) {
+    return true;
+  }
+
   logError(`全局错误: ${message}`, { source, lineno, colno, error });
   return false; // 继续默认处理
 };
@@ -231,6 +243,11 @@ window.addEventListener('unhandledrejection', (event) => {
     /lock:sb-.*-auth-token/i.test(reasonText);
 
   if (isSupabaseAuthLockContention) {
+    event.preventDefault();
+    return;
+  }
+
+  if (isBrowserNetworkSuspendedReason(reason)) {
     event.preventDefault();
     return;
   }

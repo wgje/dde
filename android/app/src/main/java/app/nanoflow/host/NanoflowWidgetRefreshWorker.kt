@@ -76,6 +76,8 @@ class NanoflowWidgetRefreshWorker(
     private const val UNIQUE_PERIODIC_WORK_NAME = "nanoflow-widget-refresh-periodic"
     private const val TWA_SESSION_BURST_WORK_PREFIX = "nanoflow-widget-twa-session-burst"
     private const val FOCUS_WAIT_REMINDER_WORK_PREFIX = "nanoflow-widget-focus-wait-reminder"
+    private const val GATE_READ_COOLDOWN_REFRESH_WORK_PREFIX = "nanoflow-widget-gate-read-cooldown"
+    private const val GATE_READ_REAPPEAR_COOLDOWN_MS = 30 * 60 * 1000L
     private const val TWA_SESSION_BURST_PREFS = "nanoflow-widget-twa-session-burst"
     private const val TWA_SESSION_BURST_LAST_AT_KEY = "last_scheduled_at"
     private const val TWA_SESSION_BURST_MIN_INTERVAL_MS = 30_000L
@@ -164,6 +166,34 @@ class NanoflowWidgetRefreshWorker(
         mapOf(
           "appWidgetId" to appWidgetId,
           "waitMinutes" to normalizedWait,
+        ),
+      )
+    }
+
+    fun scheduleGateReadCooldownRefresh(
+      context: Context,
+      appWidgetId: Int,
+      delayMs: Long = GATE_READ_REAPPEAR_COOLDOWN_MS,
+    ) {
+      val request = OneTimeWorkRequestBuilder<NanoflowWidgetRefreshWorker>()
+        .setInitialDelay(delayMs.coerceAtLeast(0L), TimeUnit.MILLISECONDS)
+        .setInputData(
+          Data.Builder()
+            .putString("reason", "gate-read-cooldown")
+            .build(),
+        )
+        .build()
+
+      WorkManager.getInstance(context).enqueueUniqueWork(
+        "$GATE_READ_COOLDOWN_REFRESH_WORK_PREFIX-$appWidgetId",
+        ExistingWorkPolicy.REPLACE,
+        request,
+      )
+      NanoflowWidgetTelemetry.info(
+        "widget_gate_read_cooldown_refresh_scheduled",
+        mapOf(
+          "appWidgetId" to appWidgetId,
+          "delayMs" to delayMs.coerceAtLeast(0L),
         ),
       )
     }

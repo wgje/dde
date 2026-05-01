@@ -91,10 +91,10 @@ class NanoflowWidgetStore(private val context: Context) {
 
   suspend fun readBinding(): StoredWidgetBinding? {
     migrateLegacySecureFields(context.widgetDataStore.data.first())
-    val widgetToken = securePreferences.getString("binding.widgetToken", null) ?: return null
-    val deviceId = securePreferences.getString("binding.deviceId", null) ?: return null
+    val widgetToken = securePreferences.getString("binding.widgetToken", null)?.trim()?.takeIf { it.isNotBlank() } ?: return null
+    val deviceId = securePreferences.getString("binding.deviceId", null)?.trim()?.takeIf { it.isNotBlank() } ?: return null
     val bindingGeneration = securePreferences.getInt("binding.bindingGeneration", 0).takeIf { it > 0 } ?: return null
-    val expiresAt = securePreferences.getString("binding.expiresAt", null) ?: return null
+    val expiresAt = securePreferences.getString("binding.expiresAt", null)?.trim()?.takeIf { it.isNotBlank() } ?: return null
     return StoredWidgetBinding(
       widgetToken = widgetToken,
       deviceId = deviceId,
@@ -104,6 +104,10 @@ class NanoflowWidgetStore(private val context: Context) {
   }
 
   suspend fun applyBootstrapPayload(payload: WidgetBootstrapPayload, acceptedPushToken: String?) {
+    val normalizedWidgetToken = payload.widgetToken.trim().takeIf { it.isNotBlank() } ?: return
+    val normalizedInstallationId = payload.installationId.trim().takeIf { it.isNotBlank() } ?: return
+    val normalizedDeviceId = payload.deviceId.trim().takeIf { it.isNotBlank() } ?: return
+    val normalizedExpiresAt = payload.expiresAt.trim().takeIf { it.isNotBlank() } ?: return
     val normalizedSupabaseUrl = payload.supabaseUrl
       ?.trim()
       ?.trimEnd('/')
@@ -116,11 +120,11 @@ class NanoflowWidgetStore(private val context: Context) {
       ?.takeIf { it.isNotBlank() }
 
     val editor = securePreferences.edit()
-      .putString("binding.installationId", payload.installationId)
-      .putString("binding.deviceId", payload.deviceId)
-      .putString("binding.widgetToken", payload.widgetToken)
+      .putString("binding.installationId", normalizedInstallationId)
+      .putString("binding.deviceId", normalizedDeviceId)
+      .putString("binding.widgetToken", normalizedWidgetToken)
       .putInt("binding.bindingGeneration", payload.bindingGeneration)
-      .putString("binding.expiresAt", payload.expiresAt)
+      .putString("binding.expiresAt", normalizedExpiresAt)
       .putString("binding.supabaseUrl", normalizedSupabaseUrl)
 
     if (!normalizedAcceptedPushToken.isNullOrBlank()) {

@@ -22,6 +22,7 @@ import {
   canSnooze,
   isGateActive,
   pendingBlackBoxEntries,
+  refreshGateReviewClock,
   focusPreferences,
   resetGateState,
   getTodayDate,
@@ -465,6 +466,8 @@ export class GateService {
    * 在应用启动时调用
    */
   checkGate(): void {
+    refreshGateReviewClock();
+
     // 如果大门已经在审查中，不要重复初始化（避免动画叠加和状态重置）
     if (gateState() === 'reviewing') {
       this.syncReviewingQueueWithPending(pendingBlackBoxEntries(), 'checkGate');

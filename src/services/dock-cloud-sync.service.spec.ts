@@ -8,6 +8,7 @@ import { LoggerService } from './logger.service';
 import { SupabaseClientService } from './supabase-client.service';
 import type { DockSnapshot } from '../models/parking-dock';
 import { AUTH_CONFIG } from '../config/auth.config';
+import { TIMEOUT_CONFIG } from '../config/timeout.config';
 import {
   ensureBrowserNetworkSuspensionTracking,
   resetBrowserNetworkSuspensionTrackingForTests,
@@ -369,6 +370,48 @@ describe('DockCloudSyncService', () => {
       expect(mockActionQueue.enqueueForOwner).toHaveBeenCalledTimes(2);
     });
 
+    it('恢复出已开启专注态后，首次关闭专注也应立即写云并直推 widget', async () => {
+      const baseSession = makeSnapshot().session;
+      service.init(makeCallbacks());
+      service.seedFocusModeBaseline('user-1', makeSnapshot({
+        focusMode: true,
+        session: {
+          ...baseSession,
+          focusSessionId: 'focus-session-restored',
+          focusSessionStartedAt: Date.now(),
+          mainTaskId: 'task-main',
+        },
+      }));
+
+      service.scheduleCloudPush('user-1', makeSnapshot({
+        focusMode: false,
+        session: {
+          ...baseSession,
+          focusSessionId: 'focus-session-restored',
+          focusSessionStartedAt: Date.now(),
+          mainTaskId: null,
+        },
+      }));
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(mockFunctionsInvoke).toHaveBeenCalledWith(
+        'widget-notify',
+        expect.objectContaining({
+          body: expect.objectContaining({
+            directNotify: true,
+            focusActive: false,
+            focusSessionId: 'focus-session-restored',
+          }),
+        }),
+      );
+
+      vi.advanceTimersByTime(0);
+
+      expect(mockActionQueue.enqueueForOwner).toHaveBeenCalledTimes(1);
+    });
+
     it('should freeze snapshot at schedule time instead of reading the latest snapshot on timer fire', () => {
       const baseSession = makeSnapshot().session;
       const snapshotA = makeSnapshot({
@@ -540,6 +583,24 @@ describe('DockCloudSyncService', () => {
       await vi.advanceTimersByTimeAsync(250);
 
       expect(mockSyncService.loadFocusSession).toHaveBeenCalledTimes(2);
+    });
+
+    it('should keep local snapshot and avoid warning noise when focus session pull times out', async () => {
+      service.init(makeCallbacks());
+      mockSyncService.loadFocusSession.mockReturnValueOnce(new Promise(() => undefined));
+
+      service.scheduleCloudPull('user-1', true);
+      await vi.advanceTimersByTimeAsync(250);
+      await vi.advanceTimersByTimeAsync(TIMEOUT_CONFIG.STANDARD);
+
+      expect(mockLoggerCategory.warn).not.toHaveBeenCalledWith(
+        'Failed to pull focus session from cloud',
+        expect.anything(),
+      );
+      expect(mockLoggerCategory.debug).toHaveBeenCalledWith(
+        'pullCloudSnapshot: loadFocusSession timed out, keeping local focus snapshot',
+        expect.anything(),
+      );
     });
   });
 

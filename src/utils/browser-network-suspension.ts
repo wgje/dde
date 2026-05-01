@@ -82,9 +82,14 @@ export function resetBrowserNetworkSuspensionTrackingForTests(): void {
 
 export function isBrowserNetworkSuspendedError(error: unknown): boolean {
   if ((error as { name?: string } | null)?.name === BROWSER_NETWORK_SUSPENDED_ERROR_NAME) {
+    armNetworkResumeGrace();
     return true;
   }
 
   const message = String((error as { message?: string })?.message ?? error ?? '').toLowerCase();
-  return message.includes('network_io_suspended') || message.includes('network io suspended');
+  const suspended = message.includes('network_io_suspended') || message.includes('network io suspended');
+  if (suspended) {
+    armNetworkResumeGrace();
+  }
+  return suspended;
 }

@@ -1680,6 +1680,7 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
     }
 
     this.logger.warn('Android widget callback 使用显式确认回跳');
+    this.pendingAndroidWidgetManualCallback.set(null);
     this.beforeUnloadManager.suppressNextConfirmation();
     window.location.assign(callback.callbackUrl);
   }
@@ -1691,6 +1692,7 @@ export class WorkspaceShellComponent implements OnInit, OnDestroy, AfterViewInit
     }
 
     this.logger.warn('Android widget callback 使用显式 intent fallback');
+    this.pendingAndroidWidgetManualCallback.set(null);
     this.beforeUnloadManager.suppressNextConfirmation();
     window.location.replace(callback.callbackIntentUrl);
   }

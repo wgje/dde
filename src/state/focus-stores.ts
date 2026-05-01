@@ -46,9 +46,11 @@ export function getTodayDate(): string {
  * 每 60 秒检查日期变化（极低开销），避免 computed 因 new Date() 非信号而过期。
  */
 export const todayDate = signal(getTodayDate());
+export const gateReviewClock = signal(Date.now());
 
 /** 【P3-04】todayDate 定时器 ID，用于测试清理和 SSR 兼容 */
 let todayDateIntervalId: ReturnType<typeof setInterval> | null = null;
+let gateReviewClockIntervalId: ReturnType<typeof setInterval> | null = null;
 
 function ensureTodayDateInterval(): void {
   if (typeof window === 'undefined' || todayDateIntervalId !== null) {
@@ -61,8 +63,23 @@ function ensureTodayDateInterval(): void {
   }, 60_000);
 }
 
+function ensureGateReviewClockInterval(): void {
+  if (typeof window === 'undefined' || gateReviewClockIntervalId !== null) {
+    return;
+  }
+
+  gateReviewClockIntervalId = setInterval(() => {
+    refreshGateReviewClock();
+  }, 60_000);
+}
+
+export function refreshGateReviewClock(now = Date.now()): void {
+  gateReviewClock.set(now);
+}
+
 // 浏览器环境下定时刷新日期信号
 ensureTodayDateInterval();
+ensureGateReviewClockInterval();
 
 /**
  * 【P3-04】清理 todayDate 定时器（用于测试 teardown 和 SSR）
@@ -71,6 +88,13 @@ function cleanupTodayDateInterval(): void {
   if (todayDateIntervalId !== null) {
     clearInterval(todayDateIntervalId);
     todayDateIntervalId = null;
+  }
+}
+
+function cleanupGateReviewClockInterval(): void {
+  if (gateReviewClockIntervalId !== null) {
+    clearInterval(gateReviewClockIntervalId);
+    gateReviewClockIntervalId = null;
   }
 }
 
@@ -160,14 +184,16 @@ export const blackBoxEntriesGroupedByDate = computed<BlackBoxDateGroup[]>(() => 
  * 
  * 逻辑（更新后）：
  * - 只显示**今天之前**的条目（排除当天录入）
- * - 已读代表本轮 Gate 已经裁决过，不再进入大门
- * - 未读且未完成的跨天条目会在大门中提醒
+ * - 已读代表本轮 Gate 已经裁决过，先缄默 READ_REAPPEAR_COOLDOWN_MS
+ * - 缄默期到期但未完成的跨天条目会重新间歇出现
  * 
- * 用户需求：只提醒"除了今天以外"且尚未裁决的录入内容
+ * 用户需求：只提醒"除了今天以外"且尚未完成的录入内容；已读只做短时缄默，不等于完成。
  */
 export const pendingBlackBoxEntries = computed(() => {
   const entries = Array.from(blackBoxEntriesMap().values());
   const today = todayDate(); // 使用信号确保跨天自动更新
+  const now = gateReviewClock();
+  const readCooldownCutoff = now - FOCUS_CONFIG.GATE.READ_REAPPEAR_COOLDOWN_MS;
   
   return entries.filter(e => {
     // 已归档或软删除的不显示
@@ -176,8 +202,11 @@ export const pendingBlackBoxEntries = computed(() => {
     // 已完成的不显示
     if (e.isCompleted) return false;
 
-    // 已读代表用户已在 Gate 中做过裁决；继续保留在黑匣子/后续工作流中，但不再弹大门
-    if (e.isRead) return false;
+    // 已读不是完成：只在冷却期内静默，之后继续间歇提醒用户落地或完成。
+    if (e.isRead) {
+      const readAt = Date.parse(e.updatedAt || e.createdAt);
+      if (!Number.isFinite(readAt) || readAt > readCooldownCutoff) return false;
+    }
     
     // 被跳过且未到提醒日期的不显示
     if (e.snoozeUntil && e.snoozeUntil > today) return false;
@@ -463,8 +492,11 @@ export function resetFocusState(options: { cleanupTodayDateInterval?: boolean } 
   showBlackBoxPanel.set(false);
   if (options.cleanupTodayDateInterval) {
     cleanupTodayDateInterval();
+    cleanupGateReviewClockInterval();
   } else {
     ensureTodayDateInterval();
+    ensureGateReviewClockInterval();
   }
   todayDate.set(getTodayDate());
+  refreshGateReviewClock();
 }

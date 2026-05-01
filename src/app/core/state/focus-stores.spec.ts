@@ -4,20 +4,29 @@
  * 测试 focus-stores.ts 中的核心逻辑
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   blackBoxEntriesMap,
   pendingBlackBoxEntries,
   getTodayDate,
   getYesterdayDate,
   getDaysAgoDate,
+  refreshGateReviewClock,
 } from '../../../state/focus-stores';
 import type { BlackBoxEntry } from '../../../models/focus';
+import { FOCUS_CONFIG } from '../../../config/focus.config';
 
 describe('focus-stores', () => {
   beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-05-01T12:00:00.000Z'));
     // 清空状态
     blackBoxEntriesMap.set(new Map());
+    refreshGateReviewClock();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   describe('pendingBlackBoxEntries', () => {
@@ -56,12 +65,13 @@ describe('focus-stores', () => {
       expect(pending[0].id).toBe('yesterday-1');
     });
 
-    it('应该排除已读但未完成的跨天条目，避免 Gate 复核重复弹出', () => {
+    it('应该在已读冷却期内排除已读但未完成的跨天条目', () => {
       const readEntry = createEntry({
         id: 'read-1',
         date: getYesterdayDate(),
         isRead: true,
         isCompleted: false,
+        updatedAt: new Date(Date.now() - FOCUS_CONFIG.GATE.READ_REAPPEAR_COOLDOWN_MS + 1000).toISOString(),
       });
 
       blackBoxEntriesMap.set(new Map([
@@ -71,6 +81,25 @@ describe('focus-stores', () => {
       const pending = pendingBlackBoxEntries();
       
       expect(pending.length).toBe(0);
+    });
+
+    it('应该在已读冷却到期后重新包含未完成的跨天条目', () => {
+      const readEntry = createEntry({
+        id: 'read-reappeared',
+        date: getYesterdayDate(),
+        isRead: true,
+        isCompleted: false,
+        updatedAt: new Date(Date.now() - FOCUS_CONFIG.GATE.READ_REAPPEAR_COOLDOWN_MS - 1000).toISOString(),
+      });
+
+      blackBoxEntriesMap.set(new Map([
+        [readEntry.id, readEntry],
+      ]));
+      refreshGateReviewClock();
+
+      const pending = pendingBlackBoxEntries();
+
+      expect(pending.map(entry => entry.id)).toEqual(['read-reappeared']);
     });
 
     it('应该包含被跳过但已到期的条目', () => {

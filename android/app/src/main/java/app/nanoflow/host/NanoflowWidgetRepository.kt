@@ -34,6 +34,7 @@ private const val FOCUS_HINT_GRACE_MS = 30_000L
 private const val FOCUS_MUTATION_GRACE_MS = 30_000L
 private const val FOCUS_MUTATION_COMPLETE = "complete-front"
 private const val FOCUS_MUTATION_WAIT = "wait-front"
+private const val GATE_READ_REAPPEAR_COOLDOWN_MS = 30 * 60 * 1000L
 
 private data class VisibleCommandCenterTask(
   val position: Int,
@@ -55,7 +56,15 @@ class NanoflowWidgetRepository(private val context: Context) {
   private val bootstrapTtlMs = 15 * 60 * 1000L
   private val registeredPushTokenRepairIntervalMs = 24 * 60 * 60 * 1000L
   private val pushTokenRepairDegradedReason = "push-token-missing"
-  private val bootstrapRequiredCodes = setOf(
+  private val bindingResetCodes = setOf(
+    "WIDGET_TOKEN_REQUIRED",
+    "DEVICE_NOT_FOUND",
+    "DEVICE_REVOKED",
+    "BINDING_MISMATCH",
+    "TOKEN_EXPIRED",
+    "TOKEN_INVALID",
+  )
+  private val bootstrapRequiredCodes = bindingResetCodes + setOf(
     "WIDGET_BOOTSTRAP_REQUIRED",
     "INSTANCE_CONTEXT_REQUIRED",
     "INSTANCE_CONTEXT_INVALID",
@@ -70,13 +79,6 @@ class NanoflowWidgetRepository(private val context: Context) {
     "INSTANCE_CONTEXT_INVALID",
     "INSTANCE_NOT_ACTIVE",
     "INSTANCE_BINDING_MISMATCH",
-  )
-  private val bindingResetCodes = setOf(
-    "DEVICE_NOT_FOUND",
-    "DEVICE_REVOKED",
-    "BINDING_MISMATCH",
-    "TOKEN_EXPIRED",
-    "TOKEN_INVALID",
   )
   private val json = Json {
     ignoreUnknownKeys = true
@@ -453,6 +455,7 @@ class NanoflowWidgetRepository(private val context: Context) {
   /**
    * 大门 1-tap 已读 / 完成：直接调用 widget-black-box-action 边缘函数把 black_box_entries
    * 对应行的 is_read / is_completed 置为 true，而不启动 TWA。
+   * `read` 只启动 30 分钟缄默，不代表完成；冷却到期后未完成条目会再次出现。
    *
    * 返回值 == true 表示服务端成功 PATCH；本地乐观缓存由调用方在提交前处理。
    *
@@ -480,7 +483,7 @@ class NanoflowWidgetRepository(private val context: Context) {
     val nowIso = Instant.now().toString()
     val unreadDelta = if (!targetPreview.isRead) 1 else 0
     val newPendingCount = when (action) {
-      BlackBoxEntryAction.READ -> cached.blackBox.pendingCount.coerceAtLeast(0)
+      BlackBoxEntryAction.READ -> (cached.blackBox.pendingCount - 1).coerceAtLeast(0)
       BlackBoxEntryAction.COMPLETE -> (cached.blackBox.pendingCount - 1).coerceAtLeast(0)
     }
     val newPreviews = when (action) {
@@ -1109,6 +1112,7 @@ class NanoflowWidgetRepository(private val context: Context) {
     repairMissingPushTokenState(appWidgetId, reconciledSummary)
 
     store.saveSummary(appWidgetId, reconciledSummary)
+    scheduleGateReadCooldownRefreshFromSummary(appWidgetId, reconciledSummary)
 
     val summaryTelemetryFields = mapOf(
       "appWidgetId" to appWidgetId,
@@ -1160,6 +1164,17 @@ class NanoflowWidgetRepository(private val context: Context) {
     }
 
     return reconciledSummary
+  }
+
+  private fun scheduleGateReadCooldownRefreshFromSummary(appWidgetId: Int, summary: WidgetSummaryResponse) {
+    if (summary.focus.active == true) {
+      return
+    }
+
+    val nextReviewAt = summary.blackBox.nextReviewAt?.takeIf { it.isNotBlank() } ?: return
+    val reviewInstant = runCatching { Instant.parse(nextReviewAt) }.getOrNull() ?: return
+    val delayMs = Duration.between(Instant.now(), reviewInstant).toMillis().coerceAtLeast(0L)
+    NanoflowWidgetRefreshWorker.scheduleGateReadCooldownRefresh(context, appWidgetId, delayMs)
   }
 
   suspend fun buildRenderModel(appWidgetId: Int): WidgetRenderModel {
@@ -1264,9 +1279,10 @@ class NanoflowWidgetRepository(private val context: Context) {
       && summary.dock.count > 0
       && gateEntries.isEmpty()
       && gateQueueCount == 0
-    // 2026-04-26 大门逻辑完善：
+    // 2026-05-01 大门逻辑完善：
     //   * 非空大门 = `!focus && (gateEntries 非空 或 pendingCount>0)` → 整卡点击不进入项目（OPEN_FOCUS_TOOLS），
     //     仅 已读/完成 双按钮通过深链直通 mark-gate-read/complete 改写黑匣子状态。
+    //   * 已读条目只在 30 分钟 read cooldown 内从 gateEntries 消失；到期后仍未完成则再次显示。
     //   * 空大门（全部完成清空后）= `!focus && gateEntries.isEmpty() && pendingCount==0` →
     //     渲染空状态大卡（🚪 + 暂无未完成任务 + 点击进入项目），整卡点击走 OPEN_WORKSPACE。
     //   * 专注模式所有任务完成时，服务端需将 focus.active=false（此处依赖后端信号）；
@@ -1732,7 +1748,7 @@ class NanoflowWidgetRepository(private val context: Context) {
   }
 
   private fun resolveGateQueueCount(summary: WidgetSummaryResponse): Int {
-    return resolveBlackBoxUnreadCount(summary)
+    return summary.blackBox.pendingCount.coerceAtLeast(0)
   }
 
   private fun resolveBlackBoxUnreadCount(summary: WidgetSummaryResponse): Int {
@@ -1757,7 +1773,7 @@ class NanoflowWidgetRepository(private val context: Context) {
         return
       }
 
-      if (preview.isRead) {
+      if (isGateReadCoolingDown(preview)) {
         return
       }
 
@@ -1773,6 +1789,18 @@ class NanoflowWidgetRepository(private val context: Context) {
     summary.blackBox.previews.forEach(::appendIfRenderable)
     appendIfRenderable(summary.blackBox.gatePreview)
     return entries
+  }
+
+  private fun isGateReadCoolingDown(preview: WidgetGatePreview): Boolean {
+    if (!preview.isRead) {
+      return false
+    }
+
+    val updatedAt = runCatching {
+      Instant.parse(preview.updatedAt?.takeIf { it.isNotBlank() } ?: preview.createdAt ?: "")
+    }.getOrNull() ?: return true
+    val elapsedMs = Duration.between(updatedAt, Instant.now()).toMillis().coerceAtLeast(0)
+    return elapsedMs < GATE_READ_REAPPEAR_COOLDOWN_MS
   }
 
   private fun isSameGatePreview(left: WidgetGatePreview, right: WidgetGatePreview): Boolean {
@@ -1800,9 +1828,7 @@ class NanoflowWidgetRepository(private val context: Context) {
     entryId: String,
     candidateEntries: List<WidgetGatePreview>,
   ): String? {
-    return candidateEntries.firstOrNull { it.entryId != entryId && !it.isRead }?.entryId
-      ?: candidateEntries.firstOrNull { it.entryId != entryId }?.entryId
-      ?: entryId
+    return candidateEntries.firstOrNull { it.entryId != entryId && !isGateReadCoolingDown(it) }?.entryId
   }
 
   private suspend fun resolveGatePageIndex(appWidgetId: Int, entries: List<WidgetGatePreview>): Int {
@@ -2073,6 +2099,9 @@ class NanoflowWidgetRepository(private val context: Context) {
   }
 
   private suspend fun postJson(url: String, bearerToken: String, body: String): HttpResponse {
+    val normalizedBearerToken = bearerToken.trim()
+    require(normalizedBearerToken.isNotBlank()) { "Widget bearer token is required" }
+
     return withContext(Dispatchers.IO) {
       val connection = (URL(url).openConnection() as HttpURLConnection).apply {
         requestMethod = "POST"
@@ -2082,7 +2111,7 @@ class NanoflowWidgetRepository(private val context: Context) {
         useCaches = false
         defaultUseCaches = false
         setRequestProperty("Content-Type", "application/json")
-        setRequestProperty("Authorization", "Bearer $bearerToken")
+        setRequestProperty("Authorization", "Bearer $normalizedBearerToken")
         setRequestProperty("Cache-Control", "no-store")
         setRequestProperty("Pragma", "no-cache")
         setRequestProperty("x-widget-platform", BuildConfig.NANOFLOW_WIDGET_PLATFORM)

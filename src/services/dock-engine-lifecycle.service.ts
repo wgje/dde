@@ -551,11 +551,13 @@ export class DockEngineLifecycleService {
     // C-2 fix: 丢弃过期的异步恢复（用户已切换到其他账户）
     if (userId !== this.ctx.getCurrentSnapshotUserId()) return;
     if (normalized) {
+      this.cloudSync.seedFocusModeBaseline(userId, normalized);
       this.ctx.restoreSnapshot(normalized);
       return;
     }
     this.ctx.reset();
     this.ctx.setSnapshotSavedAt(EMPTY_LOCAL_SNAPSHOT_SAVED_AT);
+    this.cloudSync.seedFocusModeBaseline(userId, this.ctx.exportSnapshot());
   }
 
   private startSnapshotRestore(

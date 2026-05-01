@@ -201,6 +201,9 @@ object NanoflowWidgetGateActionHandler {
           )
         }
       }
+      if (entryAction == BlackBoxEntryAction.READ) {
+        NanoflowWidgetRefreshWorker.scheduleGateReadCooldownRefresh(appContext, appWidgetId)
+      }
       NanoflowWidgetRefreshWorker.enqueue(appContext, reason = "gate-action-${entryAction.wireValue}")
       return
     }

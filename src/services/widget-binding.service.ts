@@ -227,7 +227,8 @@ export class WidgetBindingService {
         widgetBootstrapNonce: request.bootstrapNonce,
       });
       const callbackUrl = new URL(callbackBaseUrl.toString());
-      callbackUrl.hash = callbackParams.toString();
+      callbackUrl.search = callbackParams.toString();
+      callbackUrl.hash = '';
       return {
         callbackUrl: callbackUrl.toString(),
         callbackIntentUrl: this.buildAndroidBootstrapIntentUrl(callbackBaseUrl, callbackParams),

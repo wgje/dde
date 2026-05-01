@@ -110,6 +110,7 @@ describe('Widget backend foundation contract', () => {
     const notifyLimitsBackfillMigration = readText('supabase/migrations/20260413121000_widget_notify_limits_backfill.sql');
     const tokenHashAndNotifyScopeMigration = readText('supabase/migrations/20260427163000_reconcile_remote_migration_drift.sql');
     const gateReadAlignmentMigration = readText('supabase/migrations/20260426110000_widget_gate_read_alignment.sql');
+    const gateReadCooldownRestoreMigration = readText('supabase/migrations/20260501143000_widget_gate_read_cooldown_restore.sql');
     const initSql = readText('scripts/init-supabase.sql');
 
     for (const sql of [migration, initSql]) {
@@ -182,13 +183,19 @@ describe('Widget backend foundation contract', () => {
     expect(initSql).toContain('widget_notify_black_box_change');
     expect(initSql).toContain('widget_notify_task_change');
     expect(initSql).toContain('widget_notify_project_change');
-    for (const sql of [initSql, gateReadAlignmentMigration]) {
+    for (const sql of [initSql, gateReadAlignmentMigration, gateReadCooldownRestoreMigration]) {
       const normalized = sql.toLowerCase();
-      expect(normalized).not.toContain('v_gate_read_cooldown_cutoff');
-      expect(normalized).not.toContain('is_read = false or updated_at <=');
       expect(normalized).toContain('unreadblackboxcount');
       expect(normalized).toContain('is_completed = false');
     }
+    expect(gateReadCooldownRestoreMigration.toLowerCase()).toContain('v_gate_read_cooldown_cutoff');
+    expect(gateReadCooldownRestoreMigration.toLowerCase()).toContain('is_read = false or updated_at <=');
+    expect(gateReadCooldownRestoreMigration).toContain("interval '30 minutes'");
+    expect(gateReadCooldownRestoreMigration).toContain('v_next_gate_review_at');
+    expect(gateReadCooldownRestoreMigration).toContain("min(updated_at + interval '30 minutes')");
+    expect(gateReadCooldownRestoreMigration).toContain("'nextGateReviewAt', v_next_gate_review_at");
+    expect(initSql.toLowerCase()).toContain('v_gate_read_cooldown_cutoff');
+    expect(initSql).toContain("'nextGateReviewAt', v_next_gate_review_at");
   });
 
   it('database type files must include widget tables and rate limit RPC', () => {
@@ -295,6 +302,8 @@ describe('Widget backend foundation contract', () => {
     expect(summaryFn).toContain('MAX_BLACK_BOX_PREVIEW_COUNT');
     expect(summaryFn).toContain('pendingBlackBoxCount');
     expect(summaryFn).toContain('unreadBlackBoxCount');
+    expect(summaryFn).toContain('nextGateReviewAt');
+    expect(summaryFn).toContain('nextReviewAt');
     expect(summaryFn).toContain('dockCountFromTasks');
     expect(summaryFn).toContain('dockTasksWatermark');
     expect(summaryFn).toContain('const cloudUpdatedAt = summaryVersionCursor;');

@@ -37,6 +37,7 @@ import {
 const CLOUD_PUSH_DEBOUNCE_MS = SYNC_CONFIG.DEBOUNCE_DELAY;
 const CLOUD_PULL_DEBOUNCE_MS = PARKING_CONFIG.CLOUD_PULL_DEBOUNCE_MS;
 const CLOUD_PULL_MIN_INTERVAL_MS = PARKING_CONFIG.CLOUD_PULL_MIN_INTERVAL_MS;
+const LOAD_FOCUS_SESSION_TIMEOUT_MESSAGE = 'loadFocusSession 超时';
 
 /**
  * Callbacks provided by DockEngineService for engine state mutations
@@ -100,6 +101,14 @@ export class DockCloudSyncService implements OnDestroy {
       this.logger.warn('init() called again — overwriting previous callbacks');
     }
     this.callbacks = callbacks;
+  }
+
+  seedFocusModeBaseline(userId: string | null, snapshot: DockSnapshot | null): void {
+    if (!userId || userId === AUTH_CONFIG.LOCAL_MODE_USER_ID || !snapshot) {
+      return;
+    }
+
+    this.lastScheduledFocusMode.set(userId, snapshot.focusMode === true);
   }
 
   /** H-3: 异步操作后检查用户是否仍为当前用户，防止跨用户数据污染 */
@@ -266,7 +275,7 @@ export class DockCloudSyncService implements OnDestroy {
 
       const loadResult = await withTimeout(
         this.syncService.loadFocusSession(userId, localSavedAt),
-        { timeout: TIMEOUT_CONFIG.STANDARD, timeoutMessage: 'loadFocusSession 超时' },
+        { timeout: TIMEOUT_CONFIG.STANDARD, timeoutMessage: LOAD_FOCUS_SESSION_TIMEOUT_MESSAGE },
       );
 
       // H-2 fix: 显式检查 Result.ok，区分错误和"无数据"
@@ -318,7 +327,11 @@ export class DockCloudSyncService implements OnDestroy {
       }
 
       const error = supabaseErrorToError(rawError);
-      this.logger.warn('Failed to pull focus session from cloud', error);
+      if (this.isLoadFocusSessionTimeout(rawError)) {
+        this.logger.debug('pullCloudSnapshot: loadFocusSession timed out, keeping local focus snapshot', error);
+      } else {
+        this.logger.warn('Failed to pull focus session from cloud', error);
+      }
 
       // 对不可恢复错误（认证/权限）开启断路器，避免无限重试风暴
       const statusCode = (rawError as { status?: number })?.status;
@@ -342,6 +355,11 @@ export class DockCloudSyncService implements OnDestroy {
         this.scheduleCloudPull(userId, false);
       }, backoffMs);
     }
+  }
+
+  private isLoadFocusSessionTimeout(error: unknown): boolean {
+    const message = String((error as { message?: string })?.message ?? error ?? '');
+    return message.includes(LOAD_FOCUS_SESSION_TIMEOUT_MESSAGE);
   }
 
   // ─── Routine Slot Hydration ───────────────────
@@ -535,6 +553,7 @@ export class DockCloudSyncService implements OnDestroy {
     this.circuitBreakerOpen = false;
     this.cloudPullRetryCount = 0;
     this.lastCloudPullAt = 0;
+    this.lastScheduledFocusMode.clear();
   }
 
   /** 断路器：不可恢复错误时停止重试，30 秒后自动半开 */

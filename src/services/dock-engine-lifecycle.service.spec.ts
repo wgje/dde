@@ -29,6 +29,7 @@ const mockLoggerCategory = {
 
 const mockCloudSync = {
   cancelTimers: vi.fn(),
+  seedFocusModeBaseline: vi.fn(),
   scheduleCloudPull: vi.fn(),
   scheduleCloudPush: vi.fn(),
 };
@@ -147,6 +148,7 @@ describe('DockEngineLifecycleService', () => {
     vi.clearAllMocks();
     localStorage.removeItem(AUTH_CONFIG.LOCAL_MODE_CACHE_KEY);
     mockSnapshotPersistence.restoreLocalSnapshot.mockResolvedValue(null);
+    mockCloudSync.seedFocusModeBaseline.mockClear();
     currentUserId = signal('user-a');
     persistedOwnerHint = signal<string | null>(null);
     persistedSessionUserId = signal<string | null>(null);
@@ -195,6 +197,28 @@ describe('DockEngineLifecycleService', () => {
 
     expect(mockCloudSync.cancelTimers).toHaveBeenCalledTimes(1);
     expect(mockSnapshotPersistence.cancelPendingPersist).toHaveBeenCalledTimes(1);
+  });
+
+  it('restoreLocalSnapshot 应把恢复出的 focusMode 种到云同步基线，保证首次关闭专注可直推 widget', async () => {
+    const context = createContext('user-b');
+    const restoredSnapshot = {
+      ...context.exportSnapshot(),
+      focusMode: true,
+      savedAt: '2026-03-31T10:00:00.000Z',
+      session: {
+        ...context.exportSnapshot().session,
+        focusSessionId: 'restored-focus-session',
+        focusSessionStartedAt: 1774951200000,
+        mainTaskId: 'task-main',
+      },
+    };
+    mockSnapshotPersistence.restoreLocalSnapshot.mockResolvedValueOnce(restoredSnapshot);
+    service.init(context);
+
+    await service.restoreLocalSnapshot('user-b');
+
+    expect(mockCloudSync.seedFocusModeBaseline).toHaveBeenCalledWith('user-b', restoredSnapshot);
+    expect(context.restoreSnapshot).toHaveBeenCalledWith(restoredSnapshot);
   });
 
   it('乱序完成的旧 restore 不应提前解锁 restoringSnapshot 或调度过期 cloud pull', async () => {

@@ -671,6 +671,7 @@ function buildSummaryEnvelope(overrides: Record<string, unknown> = {}) {
     blackBox: {
       pendingCount: 0,
       unreadCount: 0,
+      nextReviewAt: null,
       previews: [],
       gatePreview: {
         entryId: null,
@@ -1098,6 +1099,7 @@ Deno.serve(async (req: Request) => {
     accessibleProjectIds: string[];
     pendingBlackBoxCount: number;
     unreadBlackBoxCount: number;
+    nextGateReviewAt: string | null;
     blackBoxPreview: BlackBoxRow[];
     blackBoxWatermark: string | null;
     dockCount: number;
@@ -1108,6 +1110,7 @@ Deno.serve(async (req: Request) => {
   const accessibleProjectIds: string[] = Array.isArray(wave1.accessibleProjectIds) ? wave1.accessibleProjectIds : [];
   const pendingBlackBoxCount: number = typeof wave1.pendingBlackBoxCount === 'number' ? wave1.pendingBlackBoxCount : 0;
   const unreadBlackBoxCount: number = typeof wave1.unreadBlackBoxCount === 'number' ? wave1.unreadBlackBoxCount : pendingBlackBoxCount;
+  const nextGateReviewAt = normalizeIsoTimestamp(wave1.nextGateReviewAt ?? null);
   const blackBoxPreviewRows: BlackBoxRow[] = Array.isArray(wave1.blackBoxPreview) ? wave1.blackBoxPreview : [];
   const blackBoxWatermark = normalizeIsoTimestamp(wave1.blackBoxWatermark ?? null);
   const dockCountFromTasks: number = typeof wave1.dockCount === 'number' ? wave1.dockCount : 0;
@@ -1401,6 +1404,7 @@ Deno.serve(async (req: Request) => {
     blackBox: {
       pendingCount: pendingBlackBoxCount ?? 0,
       unreadCount: unreadBlackBoxCount ?? 0,
+      nextReviewAt: nextGateReviewAt,
       previews: blackBoxPreviews,
       gatePreview,
     },
@@ -1455,6 +1459,7 @@ Deno.serve(async (req: Request) => {
     blackBox: {
       pendingCount: pendingBlackBoxCount ?? 0,
       unreadCount: unreadBlackBoxCount ?? 0,
+      nextReviewAt: nextGateReviewAt,
       previews: blackBoxPreviews,
       gatePreview,
     },

@@ -18,6 +18,7 @@ import {
   resetGateState,
 } from '../state/focus-stores';
 import { BlackBoxEntry } from '../models/focus';
+import { FOCUS_CONFIG } from '../config/focus.config';
 
 describe('GateService', () => {
   let service: GateService;
@@ -101,6 +102,7 @@ describe('GateService', () => {
   afterEach(() => {
     service.reset();
     vi.clearAllMocks();
+    vi.useRealTimers();
     localStorage.clear();
   });
 
@@ -158,7 +160,9 @@ describe('GateService', () => {
       expect(gateState()).toBe('disabled');
     });
 
-    it('已读处理完成后，后续 gate 复核不应重新弹出同一条内容', () => {
+    it('已读处理完成后，冷却期内后续 gate 复核不应重新弹出同一条内容', () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-05-01T12:00:00.000Z'));
       const entry = createMockEntry({
         id: 'read-once',
         date: getDateOffset(-1),
@@ -189,6 +193,31 @@ describe('GateService', () => {
 
       expect(gateState()).toBe('bypassed');
       expect(gatePendingItems()).toEqual([]);
+      vi.useRealTimers();
+    });
+
+    it('已读冷却到期后，后台恢复复核应让未完成条目重新进入大门', () => {
+      vi.useFakeTimers();
+      const start = new Date('2026-05-01T12:00:00.000Z');
+      vi.setSystemTime(start);
+      const entry = createMockEntry({
+        id: 'read-reappears-after-cooldown',
+        date: getDateOffset(-1),
+        isRead: true,
+        isCompleted: false,
+        updatedAt: start.toISOString(),
+      });
+      setBlackBoxEntries([entry]);
+
+      service.checkGate();
+      expect(gateState()).toBe('bypassed');
+
+      vi.setSystemTime(new Date(start.getTime() + FOCUS_CONFIG.GATE.READ_REAPPEAR_COOLDOWN_MS + 1000));
+      service.checkGate();
+
+      expect(gateState()).toBe('reviewing');
+      expect(gatePendingItems().map(item => item.id)).toEqual(['read-reappears-after-cooldown']);
+      vi.useRealTimers();
     });
   });
 

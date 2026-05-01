@@ -4500,6 +4500,8 @@ DECLARE
   v_unread_count INT := 0;
   v_preview JSONB := '[]'::JSONB;
   v_black_box_watermark TIMESTAMPTZ;
+  v_gate_read_cooldown_cutoff TIMESTAMPTZ := now() - interval '30 minutes';
+  v_next_gate_review_at TIMESTAMPTZ;
   v_dock_count INT := 0;
   v_dock_watermark TIMESTAMPTZ;
 BEGIN
@@ -4528,7 +4530,8 @@ BEGIN
       AND is_completed = FALSE
       AND is_archived = FALSE
       AND date < p_today
-      AND (snooze_until IS NULL OR snooze_until <= p_today);
+      AND (snooze_until IS NULL OR snooze_until <= p_today)
+      AND (is_read = FALSE OR updated_at <= v_gate_read_cooldown_cutoff);
 
   SELECT count(*)::INT
     INTO v_unread_count
@@ -4548,6 +4551,18 @@ BEGIN
       AND deleted_at IS NULL
       AND is_archived = FALSE
       AND date < p_today;
+
+  SELECT min(updated_at + interval '30 minutes')
+    INTO v_next_gate_review_at
+    FROM public.black_box_entries
+    WHERE user_id = p_user_id
+      AND deleted_at IS NULL
+      AND is_read = TRUE
+      AND is_completed = FALSE
+      AND is_archived = FALSE
+      AND date < p_today
+      AND (snooze_until IS NULL OR snooze_until <= p_today)
+      AND updated_at > v_gate_read_cooldown_cutoff;
 
   SELECT COALESCE(jsonb_agg(
       jsonb_build_object(
@@ -4571,6 +4586,7 @@ BEGIN
           AND is_archived = FALSE
           AND date < p_today
           AND (snooze_until IS NULL OR snooze_until <= p_today)
+          AND (is_read = FALSE OR updated_at <= v_gate_read_cooldown_cutoff)
         ORDER BY created_at ASC
         LIMIT greatest(p_preview_limit, 0)
     ) bb;
@@ -4589,6 +4605,7 @@ BEGIN
     'accessibleProjectIds', to_jsonb(v_accessible_project_ids),
     'pendingBlackBoxCount', v_pending_count,
     'unreadBlackBoxCount', v_unread_count,
+    'nextGateReviewAt', v_next_gate_review_at,
     'blackBoxPreview', v_preview,
     'blackBoxWatermark', v_black_box_watermark,
     'dockCount', v_dock_count,
@@ -4601,7 +4618,7 @@ REVOKE ALL ON FUNCTION public.widget_summary_wave1(UUID, DATE, INT) FROM PUBLIC,
 GRANT EXECUTE ON FUNCTION public.widget_summary_wave1(UUID, DATE, INT) TO service_role;
 
 COMMENT ON FUNCTION public.widget_summary_wave1(UUID, DATE, INT) IS
-  'Widget summary 第一波聚合：focus_sessions + projects + black_box unread/pending count/preview/watermark + dock count/watermark 合并到单次 RPC，把 4-5 个 PostgREST roundtrip 压缩到 1 个。';
+  'Widget summary 第一波聚合：focus_sessions + projects + black_box read cooldown pending/unread count/preview/watermark + dock count/watermark 合并到单次 RPC，把 4-5 个 PostgREST roundtrip 压缩到 1 个。';
 
 -- ============================================================
 -- [MIGRATION] 20260412143000_widget_backend_foundation.sql

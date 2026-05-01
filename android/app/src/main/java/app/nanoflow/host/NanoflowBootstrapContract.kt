@@ -19,6 +19,7 @@ enum class NanoFlowLaunchIntent(val queryValue: String) {
 /**
  * 大门 1-tap 动作对应的后端 wire 值。与 widget-black-box-action 边缘函数期望的
  * `action` 字段一一对应；也被 receiver 侧在「深链回退」时用于映射到 MARK_GATE_* 意图。
+ * READ 表示短时缄默，未完成条目会在冷却期后再次进入 Gate。
  */
 enum class BlackBoxEntryAction(val wireValue: String) {
   READ("read"),
