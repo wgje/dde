@@ -8,6 +8,7 @@ import { RequestThrottleService } from '../../../../services/request-throttle.se
 import { SyncStateService } from './sync-state.service';
 import { TombstoneService } from './tombstone.service';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
+import { resetBrowserNetworkSuspensionTrackingForTests } from '../../../../utils/browser-network-suspension';
 
 const OFFLINE_SNAPSHOT_LOCAL_STORAGE_KEY = 'nanoflow.offline-cache-v2';
 
@@ -75,6 +76,7 @@ function createProjectDataService(options: {
 describe('ProjectDataService connection delete regressions', () => {
   beforeEach(() => {
     localStorage.clear();
+    resetBrowserNetworkSuspensionTrackingForTests();
   });
 
   it('loadFullProject fallback 应保留 soft-deleted connections', async () => {
