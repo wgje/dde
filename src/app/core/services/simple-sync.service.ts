@@ -618,6 +618,21 @@ export class SimpleSyncService {
   }
 
   private async restoreRemoteConnectivityInternal(reason: string, recoveryEpoch: number): Promise<void> {
+    let remoteProbeCompleted = false;
+
+    if (this.supabase.isOfflineMode()) {
+      const reachable = await this.probeRemoteReachability(reason, SYNC_CONFIG.CONNECTIVITY_PROBE_TIMEOUT, true);
+      remoteProbeCompleted = true;
+      if (!this.runtimeStarted || recoveryEpoch !== this.connectivityRecoveryEpoch) {
+        return;
+      }
+
+      if (!reachable) {
+        this.scheduleConnectivityRecovery(reason, SYNC_CONFIG.CONNECTIVITY_PROBE_INTERVAL);
+        return;
+      }
+    }
+
     const sessionReady = await this.ensureConnectivityRecoverySessionReady(reason);
     if (!this.runtimeStarted || recoveryEpoch !== this.connectivityRecoveryEpoch) {
       return;
@@ -627,14 +642,16 @@ export class SimpleSyncService {
       return;
     }
 
-    const reachable = await this.probeRemoteReachability(reason, SYNC_CONFIG.CONNECTIVITY_PROBE_TIMEOUT, true);
-    if (!this.runtimeStarted || recoveryEpoch !== this.connectivityRecoveryEpoch) {
-      return;
-    }
+    if (!remoteProbeCompleted) {
+      const reachable = await this.probeRemoteReachability(reason, SYNC_CONFIG.CONNECTIVITY_PROBE_TIMEOUT, true);
+      if (!this.runtimeStarted || recoveryEpoch !== this.connectivityRecoveryEpoch) {
+        return;
+      }
 
-    if (!reachable) {
-      this.scheduleConnectivityRecovery(reason, SYNC_CONFIG.CONNECTIVITY_PROBE_INTERVAL);
-      return;
+      if (!reachable) {
+        this.scheduleConnectivityRecovery(reason, SYNC_CONFIG.CONNECTIVITY_PROBE_INTERVAL);
+        return;
+      }
     }
 
     await this.realtimePollingService.resumeTransport();

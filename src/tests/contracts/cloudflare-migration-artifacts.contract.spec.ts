@@ -182,6 +182,13 @@ describe('Cloudflare migration artifact contracts', () => {
     expect(guard).toContain('suppresses automatic Link/modulepreload headers');
   });
 
+  it('CSP allows Cloudflare Pages analytics beacon injected after deployment', () => {
+    const indexHtml = read('index.html');
+
+    expect(indexHtml).toContain('https://static.cloudflareinsights.com');
+    expect(indexHtml).toContain('https://cloudflareinsights.com');
+  });
+
   it('header smoke accepts Cloudflare default SPA fallback only with chunk self-heal proof', () => {
     const smoke = read('scripts/smoke/cloudflare-header-smoke.sh');
 

@@ -260,6 +260,8 @@ export class SupabaseClientService {
       return;
     }
 
+    void this.syncAuthAutoRefresh(offline ? 'offline' : 'resume-timer');
+
     for (const listener of this.connectivityListeners) {
       try {
         listener({ offline, source });
@@ -485,6 +487,10 @@ export class SupabaseClientService {
       return true;
     }
 
+    if (this.isOfflineMode()) {
+      return true;
+    }
+
     return false;
   }
 
@@ -683,6 +689,10 @@ export class SupabaseClientService {
     // 离线时直接拒绝，避免等待超时产生 AbortError
     if (typeof navigator !== 'undefined' && !navigator.onLine) {
       return Promise.reject(new DOMException('Device is offline', 'NetworkError'));
+    }
+
+    if (this.isOfflineMode()) {
+      return Promise.reject(createBrowserNetworkSuspendedError());
     }
 
     // 【鲁棒性 8】请求去重：5s 内的重复幂等请求复用前一个结果（仅限 GET/HEAD，写操作不去重）

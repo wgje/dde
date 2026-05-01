@@ -352,6 +352,26 @@ describe('SupabaseClientService', () => {
       unsubscribe();
     });
 
+    it('连接中断模式内请求级 fetch 应短路且不打真实 Supabase 网络请求', async () => {
+      const mutable = service as unknown as {
+        canInitialize: boolean;
+        supabaseUrl: string;
+        supabaseAnonKey: string;
+        buildClientOptions: () => { global: { fetch: (url: RequestInfo | URL, options?: RequestInit) => Promise<Response> } };
+      };
+      mutable.canInitialize = true;
+      mutable.supabaseUrl = 'https://example.supabase.co';
+      mutable.supabaseAnonKey = 'anon-key';
+      service.isOfflineMode.set(true);
+
+      await expect(
+        mutable.buildClientOptions().global.fetch('https://example.supabase.co/rest/v1/projects')
+      ).rejects.toMatchObject({ name: 'BrowserNetworkSuspendedError' });
+
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(service.isOfflineMode()).toBe(true);
+    });
+
     it('幂等请求被浏览器以 Failed to fetch 拒绝时，应按网关瞬时故障路径重试', async () => {
       vi.useFakeTimers();
       const mutable = service as unknown as {
@@ -471,6 +491,24 @@ describe('SupabaseClientService', () => {
       await flushAuthAutoRefresh(service);
 
       expect(authClientMock.auth.startAutoRefresh).toHaveBeenCalledTimes(1);
+    });
+
+    it('连接中断模式内初始化客户端不应启动 Auth 自动刷新', async () => {
+      const mutable = service as unknown as {
+        canInitialize: boolean;
+        supabaseUrl: string;
+        supabaseAnonKey: string;
+      };
+      mutable.canInitialize = true;
+      mutable.supabaseUrl = 'https://example.supabase.co';
+      mutable.supabaseAnonKey = 'anon-key';
+      service.isOfflineMode.set(true);
+
+      await service.clientAsync();
+      await flushAuthAutoRefresh(service);
+
+      expect(authClientMock.auth.stopAutoRefresh).toHaveBeenCalledTimes(1);
+      expect(authClientMock.auth.startAutoRefresh).not.toHaveBeenCalled();
     });
   });
 

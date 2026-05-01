@@ -158,11 +158,11 @@
   <!-- 
     CSP 策略说明：
     - default-src 'self': 默认只允许同源资源
-    - script-src: 允许内联脚本（Angular 需要）
-    - style-src: 允许内联样式和 CDN 字体样式
+    - script-src: 允许内联脚本（Angular 需要）和 Cloudflare Pages 注入的 analytics beacon
+    - style-src: 允许内联样式、CDN 字体样式和 Cloudflare 注入资源
     - font-src: 允许 CDN 字体和 data: URI
     - img-src: 允许 data: 和 blob: URI（用于图片处理）
-    - connect-src: 允许 Supabase API 和 Sentry
+    - connect-src: 允许 Supabase API、Sentry、Groq 和 Cloudflare analytics beacon
     - worker-src: 允许 Service Worker
     - manifest-src: 允许 PWA manifest（开发环境支持 Codespaces/远程 URL）
     
@@ -171,11 +171,11 @@
   -->
   <meta http-equiv="Content-Security-Policy" content="
     default-src 'self';
-    script-src 'self' 'unsafe-inline';
-    style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net;
+    script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com;
+    style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://static.cloudflareinsights.com;
     font-src 'self' https://cdn.jsdelivr.net data:;
     img-src 'self' data: blob: https://*.supabase.co;
-    connect-src 'self' https://*.supabase.co wss://*.supabase.co https://*.sentry.io https://api.groq.com;
+    connect-src 'self' https://*.supabase.co wss://*.supabase.co https://*.sentry.io https://api.groq.com https://cloudflareinsights.com https://*.cloudflareinsights.com;
     worker-src 'self' blob:;
     manifest-src 'self' https://github.dev https://*.github.dev https://*.app.github.dev;
     base-uri 'self';

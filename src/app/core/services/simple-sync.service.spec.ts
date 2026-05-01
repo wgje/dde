@@ -4515,6 +4515,32 @@ describe('SimpleSyncService', () => {
       vi.useRealTimers();
     });
 
+    it('远端连接中断模式恢复时应先探测 Supabase 可达性再刷新 session', async () => {
+      const runtimeService = service as unknown as {
+        startRuntime: () => void;
+        restoreRemoteConnectivity: (reason: string) => Promise<void>;
+      };
+      runtimeService.startRuntime();
+      mockSupabaseOfflineMode.set(true);
+      mockSupabase.probeReachability.mockResolvedValueOnce(true);
+      mockSessionManager.validateOrRefreshOnResume.mockResolvedValueOnce({
+        ok: true,
+        refreshed: false,
+        deferred: false,
+      });
+
+      await runtimeService.restoreRemoteConnectivity('supabase-request-offline');
+
+      expect(mockSupabase.probeReachability).toHaveBeenCalledTimes(1);
+      expect(mockSessionManager.validateOrRefreshOnResume).toHaveBeenCalledWith(
+        'connectivity:supabase-request-offline'
+      );
+      expect(mockSupabase.probeReachability.mock.invocationCallOrder[0]).toBeLessThan(
+        mockSessionManager.validateOrRefreshOnResume.mock.invocationCallOrder[0]
+      );
+      expect(mockRealtimePolling.resumeTransport).toHaveBeenCalledTimes(1);
+    });
+
     it('连接恢复命中最近有效 session 快照时应跳过二次校验并继续恢复', async () => {
       const runtimeService = service as unknown as {
         startRuntime: () => void;
