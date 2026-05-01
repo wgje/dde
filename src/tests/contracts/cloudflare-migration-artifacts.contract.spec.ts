@@ -189,6 +189,14 @@ describe('Cloudflare migration artifact contracts', () => {
     expect(indexHtml).toContain('https://cloudflareinsights.com');
   });
 
+  it('shard balance gate fails only when max/min and max/median both show imbalance', () => {
+    const workflow = read('.github/workflows/test-full-suite.yml');
+
+    expect(workflow).toContain('FAIL_MAX_MEDIAN_THRESHOLD');
+    expect(workflow).toContain('maxMin >= FAIL_THRESHOLD && maxMedian !== null && maxMedian >= FAIL_MAX_MEDIAN_THRESHOLD');
+    expect(workflow).toContain('Required: max/min < 1.5 or max/median < 1.4.');
+  });
+
   it('header smoke accepts Cloudflare default SPA fallback only with chunk self-heal proof', () => {
     const smoke = read('scripts/smoke/cloudflare-header-smoke.sh');
 
