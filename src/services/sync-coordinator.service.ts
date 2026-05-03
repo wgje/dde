@@ -1387,6 +1387,7 @@ export class SyncCoordinatorService {
     conflictedFields: string[],
     ownerUserId?: string | null,
     pendingTaskDeleteIds?: string[],
+    conflictedAt?: string,
   ): Promise<void> {
     await this.conflictStorage.saveConflict({
       projectId: localProject.id,
@@ -1394,7 +1395,7 @@ export class SyncCoordinatorService {
       remoteProject,
       ownerUserId: ownerUserId ?? undefined,
       remoteSnapshotFresh: !!remoteProject,
-      conflictedAt: new Date().toISOString(),
+      conflictedAt: conflictedAt ?? new Date().toISOString(),
       localVersion: localProject.version ?? 0,
       remoteVersion: remoteProject?.version ?? 0,
       reason: 'version_mismatch',
@@ -1410,13 +1411,15 @@ export class SyncCoordinatorService {
     ownerUserId?: string | null,
     pendingTaskDeleteIds?: string[],
   ): void {
-    void this.saveConflictSilently(localProject, remoteProject, [], ownerUserId, pendingTaskDeleteIds).catch(error => {
+    const conflictedAt = new Date().toISOString();
+    void this.saveConflictSilently(localProject, remoteProject, [], ownerUserId, pendingTaskDeleteIds, conflictedAt).catch(error => {
       this.logger.warn('保存冲突隔离区记录失败', { error, projectId: localProject.id });
     });
     this.core.setConflict({
       local: localProject,
       remote: remoteProject,
       projectId: localProject.id,
+      conflictedAt,
       pendingTaskDeleteIds,
     });
     this.conflict$.next({

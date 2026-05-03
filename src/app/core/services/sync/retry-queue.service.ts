@@ -771,6 +771,22 @@ export class RetryQueueService {
     return removedCount;
   }
 
+  removeByProjectIdForOwner(projectId: string, sourceUserId?: string): number {
+    const itemIds = new Set(
+      [...this.queue, ...this.hiddenQueueItems]
+        .filter(item => (item.projectId === projectId || (item.type === 'project' && item.data.id === projectId))
+          && item.sourceUserId === sourceUserId)
+        .map(item => item.id)
+    );
+
+    const removedCount = itemIds.size;
+    if (removedCount > 0) {
+      this.removeItemsFromAllViews(itemIds);
+      this.saveToStorage();
+    }
+    return removedCount;
+  }
+
   removeByEntities(type: RetryableEntityType, entityIds: string[]): string[] {
     const targetIds = new Set(entityIds.filter(entityId => typeof entityId === 'string' && entityId.length > 0));
     if (targetIds.size === 0) {
@@ -795,6 +811,42 @@ export class RetryQueueService {
     }
 
     return Array.from(removedEntityIds);
+  }
+
+  removeProjectRetriesForOwner(projectId: string, sourceUserId?: string): number {
+    const itemIds = new Set(
+      [...this.queue, ...this.hiddenQueueItems]
+        .filter(item => item.type === 'project'
+          && item.data.id === projectId
+          && item.sourceUserId === sourceUserId)
+        .map(item => item.id)
+    );
+
+    const removedCount = itemIds.size;
+    if (removedCount > 0) {
+      this.removeItemsFromAllViews(itemIds);
+      this.saveToStorage();
+    }
+
+    return removedCount;
+  }
+
+  hasProjectRetryForOwner(projectId: string, sourceUserId?: string): boolean {
+    return [...this.queue, ...this.hiddenQueueItems].some(item =>
+      item.type === 'project'
+      && item.data.id === projectId
+      && item.sourceUserId === sourceUserId,
+    );
+  }
+
+  getProjectRetryTaskIdsToDeleteForOwner(projectId: string, sourceUserId?: string): string[] | undefined {
+    const retryItem = [...this.queue, ...this.hiddenQueueItems].find(item =>
+      item.type === 'project'
+      && item.data.id === projectId
+      && item.sourceUserId === sourceUserId,
+    );
+
+    return retryItem?.taskIdsToDelete ? [...retryItem.taskIdsToDelete] : undefined;
   }
 
   removeConnectionsReferencingTasks(projectId: string, taskIds: string[]): string[] {
