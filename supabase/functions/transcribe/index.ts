@@ -213,19 +213,35 @@ serve(async (req: Request) => {
       });
     } catch (fetchErr: unknown) {
       clearTimeout(groqTimer);
-      // AbortError 表示超时，返回带 CORS 头的 504 而非让网关吞掉响应
+      // AbortError 表示超时，返回带 CORS 头的受控上游失败，而非让网关吞掉响应
       if (fetchErr instanceof DOMException && fetchErr.name === 'AbortError') {
         console.error('🎤 [Transcribe] Groq API timed out after', GROQ_TIMEOUT_MS, 'ms');
         return new Response(
           JSON.stringify({ ok: false, error: '转写服务响应超时，请缩短录音后重试', code: 'GROQ_TIMEOUT', retryable: true }),
-          { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+          {
+            status: 503,
+            headers: {
+              ...corsHeaders,
+              'Content-Type': 'application/json',
+              'Cache-Control': 'no-store',
+              'Retry-After': '30',
+            },
+          }
         );
       }
       // 网络错误（DNS 失败、连接拒绝等）
       console.error('🎤 [Transcribe] Groq API fetch failed:', fetchErr);
       return new Response(
         JSON.stringify({ ok: false, error: '无法连接转写服务', code: 'GROQ_UNREACHABLE', retryable: true }),
-        { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        {
+          status: 502,
+          headers: {
+            ...corsHeaders,
+            'Content-Type': 'application/json',
+            'Cache-Control': 'no-store',
+            'Retry-After': '30',
+          },
+        }
       );
     } finally {
       clearTimeout(groqTimer);

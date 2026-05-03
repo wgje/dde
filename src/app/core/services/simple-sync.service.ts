@@ -416,7 +416,15 @@ export class SimpleSyncService {
 
     // 将黑匣子同步集成到主同步体系的 RetryQueue
     this.blackBoxSync.setRetryQueueHandler((entry: BlackBoxEntry) => {
-      this.retryQueueService.add('blackbox', 'upsert', entry, entry.projectId ?? undefined, entry.userId);
+      const ownerUserId = entry.userId?.trim();
+      if (!ownerUserId) {
+        this.logger.warn('BlackBox retry enqueue skipped: missing owner userId', {
+          entryId: entry.id,
+        });
+        return;
+      }
+
+      this.retryQueueService.add('blackbox', 'upsert', entry, entry.projectId ?? undefined, ownerUserId);
     });
 
     const detachConnectivityListener = this.supabase.onConnectivityChange((change) => {

@@ -960,17 +960,20 @@ describe('BlackBoxSyncService', () => {
       snooze_count: 0,
       deleted_at: null,
     }));
-    const range = vi.fn((from: number, to: number) => Promise.resolve({
-      data: rows.slice(from, to + 1),
+    let page = 0;
+    const limit = vi.fn(() => Promise.resolve({
+      data: page++ === 0 ? rows.slice(0, 2) : rows.slice(2),
       error: null,
     }));
     const orderedResult = {
-      range,
+      limit,
       order: vi.fn(() => orderedResult),
     };
     const gtQuery = vi.fn(() => orderedResult);
+    const orQuery = vi.fn(() => orderedResult);
     const selectQuery = vi.fn(() => ({
       gt: gtQuery,
+      or: orQuery,
     }));
     const from = vi.fn(() => ({ select: selectQuery }));
     const rpc = vi.fn().mockResolvedValue({ data: null, error: null });
@@ -984,8 +987,10 @@ describe('BlackBoxSyncService', () => {
 
     await service.pullChanges({ reason: 'panel-open', force: true });
 
-    expect(range).toHaveBeenCalledWith(0, 1);
-    expect(range).toHaveBeenCalledWith(2, 3);
+    expect(limit).toHaveBeenCalledWith(2);
+    expect(limit).toHaveBeenCalledTimes(2);
+    expect(gtQuery).toHaveBeenCalledWith('updated_at', '1970-01-01T00:00:00Z');
+    expect(orQuery).toHaveBeenCalledWith(expect.stringContaining(`id.gt.${rows[1].id}`));
     expect(blackBoxEntriesMap().size).toBe(3);
   });
 

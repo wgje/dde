@@ -492,7 +492,7 @@ describe('SpeechToTextService', () => {
       });
     });
 
-    it('应用级转写超时时应作为可重试错误进入离线缓存链路', async () => {
+    it('上游转写超时时应作为可重试错误交给外层缓存链路', async () => {
       mockAuthService.currentUserId.set('cloud-user');
       mockAuthApi.getSession.mockResolvedValueOnce({
         data: {
@@ -511,7 +511,7 @@ describe('SpeechToTextService', () => {
           error: '转写服务响应超时，请稍后重试',
           retryable: true,
         }), {
-          status: 200,
+          status: 503,
           headers: { 'Content-Type': 'application/json' }
         })
       );
@@ -520,7 +520,7 @@ describe('SpeechToTextService', () => {
         (service as unknown as { transcribeBlob: (blob: Blob) => Promise<string> })
           .transcribeBlob(new Blob(['audio'], { type: 'audio/webm' }))
       ).rejects.toThrow('FOCUS_NETWORK_ERROR');
-      expect(mockToastService.warning).toHaveBeenCalledWith('转写稍后重试', expect.any(String));
+      expect(mockToastService.warning).not.toHaveBeenCalled();
     });
 
     it('刷新失败且原因是 no-session 时应抛出 SYNC_AUTH_EXPIRED', async () => {
@@ -638,6 +638,24 @@ describe('SpeechToTextService', () => {
       await vi.advanceTimersByTimeAsync(1500);
 
       expect(replaySpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('受控上游超时时应缓存但不立即重放，避免请求放大', async () => {
+      vi.useFakeTimers();
+      attachRecordedAudio();
+
+      vi.spyOn(service as unknown as { transcribeBlob: (blob: Blob) => Promise<string> }, 'transcribeBlob')
+        .mockRejectedValueOnce(new Error('FOCUS_NETWORK_ERROR'));
+      vi.spyOn(service as unknown as { saveToOfflineCache: (blob: Blob) => Promise<'owned' | 'quarantined'> }, 'saveToOfflineCache')
+        .mockResolvedValueOnce('owned');
+      const replaySpy = vi.spyOn(service as unknown as { processOfflineCacheAndCreateEntries: () => Promise<void> }, 'processOfflineCacheAndCreateEntries')
+        .mockResolvedValueOnce();
+
+      await service.stopAndTranscribe();
+      await vi.advanceTimersByTimeAsync(1500);
+
+      expect(replaySpy).not.toHaveBeenCalled();
+      expect(mockToastService.warning).toHaveBeenCalledWith('转写失败', expect.any(String));
     });
 
     it('无稳定 owner 时缓存应直接进入隔离态', async () => {

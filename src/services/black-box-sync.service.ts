@@ -1994,10 +1994,13 @@ export class BlackBoxSyncService {
 
       const data: Record<string, unknown>[] = [];
       let error: unknown = null;
-      let offset = 0;
+      let pageCursor: BlackBoxSyncCursor = { updatedAt: effectiveLastSync, id: '' };
+      const upperWatermark = FEATURE_FLAGS.BLACKBOX_WATERMARK_PROBE_V1
+        ? await this.getRemoteBlackBoxWatermark(client)
+        : null;
 
       while (true) {
-        const page = await this.fetchBlackBoxDeltaPage(client, effectiveLastSync, offset);
+        const page = await this.fetchBlackBoxDeltaPage(client, pageCursor, upperWatermark);
         error = page.error;
 
         if (
@@ -2007,7 +2010,7 @@ export class BlackBoxSyncService {
           const refreshResult = await this.sessionManager.tryRefreshSessionWithSession('BlackBoxSync.pullChanges');
           if (refreshResult.refreshed) {
             this.logger.info('BlackBox pullChanges 会话已刷新，重试增量拉取');
-            const retry = await this.fetchBlackBoxDeltaPage(client, effectiveLastSync, offset);
+            const retry = await this.fetchBlackBoxDeltaPage(client, pageCursor, upperWatermark);
             error = retry.error;
             page.data = retry.data;
           }
@@ -2026,7 +2029,15 @@ export class BlackBoxSyncService {
         if (pageRows.length < this.BLACKBOX_PULL_PAGE_SIZE) {
           break;
         }
-        offset += pageRows.length;
+        const lastRow = pageRows[pageRows.length - 1];
+        if (typeof lastRow['updated_at'] !== 'string' || typeof lastRow['id'] !== 'string') {
+          this.logger.warn('黑匣子分页游标缺少关键字段，停止本轮拉取以避免跳页', {
+            hasUpdatedAt: typeof lastRow['updated_at'] === 'string',
+            hasId: typeof lastRow['id'] === 'string',
+          });
+          break;
+        }
+        pageCursor = { updatedAt: lastRow['updated_at'], id: lastRow['id'] };
       }
 
       if (!this.isExpectedRealtimeContextCurrent(expectedUserId, expectedRealtimeGeneration)) {
@@ -2108,31 +2119,41 @@ export class BlackBoxSyncService {
 
   private async fetchBlackBoxDeltaPage(
     client: Awaited<ReturnType<SupabaseClientService['clientAsync']>>,
-    effectiveLastSync: string,
-    offset: number,
+    cursor: BlackBoxSyncCursor,
+    upperWatermark: string | null,
   ): Promise<{ data: unknown[] | null; error: unknown }> {
     if (!client) return { data: null, error: null };
 
-    const orderedQuery = client
-      .from('black_box_entries')
-      .select('*')
-      .gt('updated_at', effectiveLastSync)
+    let query = cursor.id
+      ? client
+        .from('black_box_entries')
+        .select('*')
+        .or(`updated_at.gt.${cursor.updatedAt},and(updated_at.eq.${cursor.updatedAt},id.gt.${cursor.id})`)
+      : client
+        .from('black_box_entries')
+        .select('*')
+        .gt('updated_at', cursor.updatedAt);
+
+    const lteQuery = (query as {
+      lte?: (column: string, value: string) => unknown;
+    }).lte;
+    if (upperWatermark && typeof lteQuery === 'function') {
+      query = lteQuery.call(query, 'updated_at', upperWatermark) as typeof query;
+    }
+
+    const orderedQuery = query
       .order('updated_at', { ascending: true })
       .order('id', { ascending: true });
 
-    const rangeQuery = (orderedQuery as {
-      range?: (from: number, to: number) => Promise<{ data: unknown[] | null; error: unknown }>;
-    }).range;
+    const limitQuery = (orderedQuery as {
+      limit?: (count: number) => Promise<{ data: unknown[] | null; error: unknown }>;
+    }).limit;
 
-    if (typeof rangeQuery !== 'function') {
+    if (typeof limitQuery !== 'function') {
       return orderedQuery as unknown as Promise<{ data: unknown[] | null; error: unknown }>;
     }
 
-    return rangeQuery.call(
-      orderedQuery,
-      offset,
-      offset + this.BLACKBOX_PULL_PAGE_SIZE - 1,
-    );
+    return limitQuery.call(orderedQuery, this.BLACKBOX_PULL_PAGE_SIZE);
   }
 
   private async getRemoteBlackBoxWatermark(

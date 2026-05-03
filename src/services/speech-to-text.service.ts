@@ -464,11 +464,13 @@ export class SpeechToTextService {
           this.logger.error('SpeechToText', 'Transcription failed', error instanceof Error ? error.message : String(error));
           
           // 【修复 P5-12】使用 TypeError + 离线状态双重判断，避免依赖浏览器特定 error.message
-      if (this.isRetryableTranscribeError(error)) {
+          if (this.isRetryableTranscribeError(error)) {
             try {
               const cacheState = await this.saveToOfflineCache(audioBlob, expectedOwnerUserId);
               if (cacheState === 'owned') {
-                this.scheduleOfflineCacheReplay('retryable-transcribe-error');
+                if (!this.isControlledUpstreamRetryableError(error)) {
+                  this.scheduleOfflineCacheReplay('retryable-transcribe-error');
+                }
                 this.toast.warning('转写失败', ErrorMessages[ErrorCodes.FOCUS_NETWORK_ERROR]);
               } else {
                 this.toast.warning('录音已隔离', '当前账号未稳定，这条录音不会自动转写');
@@ -566,10 +568,9 @@ export class SpeechToTextService {
         throw new Error(ErrorCodes.SYNC_AUTH_EXPIRED);
       }
       
-      // 处理 Groq 超时（Edge Function 主动返回的 504，带 CORS 头）
+      // 处理 Groq 临时不可用：缓存录音，不立即重放，避免上游故障时放大请求。
       if (errorData.code === 'GROQ_TIMEOUT' || errorData.code === 'GROQ_UNREACHABLE') {
-        this.toast.error('转写超时', errorData.error || '转写服务响应超时，请缩短录音后重试');
-        throw new Error(ErrorCodes.FOCUS_TRANSCRIBE_FAILED);
+        throw new Error(ErrorCodes.FOCUS_NETWORK_ERROR);
       }
       
       // 处理服务配置错误
@@ -592,7 +593,6 @@ export class SpeechToTextService {
 
     if (data.ok === false || data.retryable || data.code) {
       if (data.code === 'GROQ_TIMEOUT' || data.code === 'GROQ_UNREACHABLE' || data.retryable) {
-        this.toast.warning('转写稍后重试', data.error || '转写服务暂时不可用，已保存待重试');
         throw new Error(ErrorCodes.FOCUS_NETWORK_ERROR);
       }
       throw new Error(data.error || data.code || ErrorCodes.FOCUS_TRANSCRIBE_FAILED);
@@ -751,6 +751,12 @@ export class SpeechToTextService {
       || this.isRetryableSessionRecoveryError(error)
       || (error instanceof Error && error.message === ErrorCodes.FOCUS_NETWORK_ERROR)
       || !this.network.isOnline();
+  }
+
+  private isControlledUpstreamRetryableError(error: unknown): boolean {
+    return error instanceof Error
+      && error.message === ErrorCodes.FOCUS_NETWORK_ERROR
+      && this.network.isOnline();
   }
 
   private async invokeTranscribe(functionUrl: string, audioBlob: Blob, accessToken: string): Promise<Response> {
@@ -925,8 +931,10 @@ export class SpeechToTextService {
           } catch (e) {
             this.logger.error('SpeechToText', 'Failed to process offline item', e instanceof Error ? e.message : String(e));
 
-            if ((e instanceof TypeError || this.isRetryableSessionRecoveryError(e)) && this.network.isOnline()) {
-              this.scheduleOfflineCacheReplay('offline-replay-retryable-error');
+            if (this.isRetryableTranscribeError(e) && this.network.isOnline()) {
+              if (!this.isControlledUpstreamRetryableError(e)) {
+                this.scheduleOfflineCacheReplay('offline-replay-retryable-error');
+              }
               break;
             }
           }
