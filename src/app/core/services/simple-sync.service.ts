@@ -400,7 +400,17 @@ export class SimpleSyncService {
       },
       // 重试连接时保留 tombstone + 任务存在性校验，避免陈旧连接重放与 23503 外键错误风暴
       pushConnection: (conn, pid, sourceUserId) => this.pushConnection(conn, pid, false, false, true, sourceUserId),
-      pushBlackBoxEntry: (entry: BlackBoxEntry) => this.blackBoxSync.pushToServer(entry),
+      pushBlackBoxEntry: (entry: BlackBoxEntry, sourceUserId?: string) => {
+        if (!sourceUserId || entry.userId !== sourceUserId) {
+          this.logger.warn('BlackBox retry rejected: entry owner mismatch', {
+            entryId: entry.id,
+            hasSourceUserId: !!sourceUserId,
+            hasEntryUserId: !!entry.userId,
+          });
+          return Promise.resolve(true);
+        }
+        return this.blackBoxSync.pushToServer(entry, sourceUserId);
+      },
       isSessionExpired: () => this.syncState().sessionExpired,
       // 离线模式下返回 false，避免 RetryQueue 尝试处理未配置的 Supabase
       isOnline: () => this.state().isOnline && !this.supabase.isOfflineMode(),

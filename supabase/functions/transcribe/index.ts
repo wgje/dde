@@ -253,15 +253,32 @@ serve(async (req: Request) => {
       
       // 根据 Groq 错误码返回合适的响应
       if (groqResponse.status === 429) {
+        const retryAfter = groqResponse.headers.get('Retry-After') ?? '30';
         return new Response(
-          JSON.stringify({ error: 'Groq API 请求过于频繁，请稍后再试', code: 'GROQ_RATE_LIMITED' }), 
-          { status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+          JSON.stringify({ ok: false, error: 'Groq API 请求过于频繁，请稍后再试', code: 'GROQ_RATE_LIMITED', retryable: true }),
+          {
+            status: 429,
+            headers: {
+              ...corsHeaders,
+              'Content-Type': 'application/json',
+              'Cache-Control': 'no-store',
+              'Retry-After': retryAfter,
+            },
+          }
         )
       }
       
       return new Response(
-        JSON.stringify({ error: '转写服务暂不可用', code: 'SERVICE_UNAVAILABLE' }), 
-        { status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        JSON.stringify({ ok: false, error: '转写服务暂不可用', code: 'SERVICE_UNAVAILABLE', retryable: true }),
+        {
+          status: 502,
+          headers: {
+            ...corsHeaders,
+            'Content-Type': 'application/json',
+            'Cache-Control': 'no-store',
+            'Retry-After': '30',
+          },
+        }
       )
     }
 

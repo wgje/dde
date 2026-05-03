@@ -75,6 +75,9 @@ export class SpeechToTextService {
   private readonly ACCESS_TOKEN_EXPIRY_BUFFER_SECONDS = 60;
   private readonly RETRYABLE_SESSION_RECOVERY_ERROR = 'SESSION_TEMPORARILY_UNAVAILABLE';
   private readonly UNKNOWN_OFFLINE_AUDIO_OWNER = '__legacy_unknown_owner__';
+  private readonly OFFLINE_REPLAY_BATCH_SIZE = 2;
+  private readonly OFFLINE_REPLAY_RETRY_DELAY_MS = 1500;
+  private readonly OFFLINE_REPLAY_CONTINUATION_DELAY_MS = 15_000;
   
   constructor() {
     // 初始化 IndexedDB
@@ -569,7 +572,7 @@ export class SpeechToTextService {
       }
       
       // 处理 Groq 临时不可用：缓存录音，不立即重放，避免上游故障时放大请求。
-      if (errorData.code === 'GROQ_TIMEOUT' || errorData.code === 'GROQ_UNREACHABLE') {
+      if (this.isRetryableTranscribeCode(errorData.code)) {
         throw new Error(ErrorCodes.FOCUS_NETWORK_ERROR);
       }
       
@@ -592,7 +595,7 @@ export class SpeechToTextService {
     }
 
     if (data.ok === false || data.retryable || data.code) {
-      if (data.code === 'GROQ_TIMEOUT' || data.code === 'GROQ_UNREACHABLE' || data.retryable) {
+      if (this.isRetryableTranscribeCode(data.code) || data.retryable) {
         throw new Error(ErrorCodes.FOCUS_NETWORK_ERROR);
       }
       throw new Error(data.error || data.code || ErrorCodes.FOCUS_TRANSCRIBE_FAILED);
@@ -604,7 +607,7 @@ export class SpeechToTextService {
     return data.text ?? '';
   }
 
-  private scheduleOfflineCacheReplay(reason: string): void {
+  private scheduleOfflineCacheReplay(reason: string, delayMs = this.OFFLINE_REPLAY_RETRY_DELAY_MS): void {
     if (!this.network.isOnline()) {
       return;
     }
@@ -617,7 +620,7 @@ export class SpeechToTextService {
     this.recoveryReplayTimeout = setTimeout(() => {
       this.recoveryReplayTimeout = null;
       void this.runOfflineCacheReplay('delayed-retry');
-    }, 1500);
+    }, delayMs);
   }
 
   private runOfflineCacheReplay(reason: string): Promise<void> {
@@ -753,6 +756,13 @@ export class SpeechToTextService {
       || !this.network.isOnline();
   }
 
+  private isRetryableTranscribeCode(code: unknown): boolean {
+    return code === 'GROQ_TIMEOUT'
+      || code === 'GROQ_UNREACHABLE'
+      || code === 'GROQ_RATE_LIMITED'
+      || code === 'SERVICE_UNAVAILABLE';
+  }
+
   private isControlledUpstreamRetryableError(error: unknown): boolean {
     return error instanceof Error
       && error.message === ErrorCodes.FOCUS_NETWORK_ERROR
@@ -872,6 +882,8 @@ export class SpeechToTextService {
       
       request.onsuccess = async () => {
         const items = request.result as OfflineAudioCacheEntry[];
+        let processedOwnedItems = 0;
+        let stoppedByBudget = false;
         
         for (const item of items) {
           if (!this.isReplayOwnerActive(replayOwnerUserId)) {
@@ -895,6 +907,12 @@ export class SpeechToTextService {
             });
             continue;
           }
+
+          if (processedOwnedItems >= this.OFFLINE_REPLAY_BATCH_SIZE) {
+            stoppedByBudget = true;
+            break;
+          }
+          processedOwnedItems += 1;
 
           try {
             isTranscribing.set(true);
@@ -942,6 +960,12 @@ export class SpeechToTextService {
         
         isTranscribing.set(false);
         await this.updateOfflinePendingCount();
+        if (stoppedByBudget && this.network.isOnline()) {
+          this.scheduleOfflineCacheReplay(
+            'bounded-replay-continuation',
+            this.OFFLINE_REPLAY_CONTINUATION_DELAY_MS,
+          );
+        }
         resolve(results);
       };
       

@@ -84,7 +84,7 @@ export interface RetryOperationHandler {
   pushProject(project: Project, sourceUserId?: string, taskIdsToDelete?: string[]): Promise<boolean>;
   pushConnection(connection: Connection, projectId: string, sourceUserId?: string): Promise<boolean>;
   /** 推送黑匣子条目到服务器（专注模式数据同步） */
-  pushBlackBoxEntry?(entry: BlackBoxEntry): Promise<boolean>;
+  pushBlackBoxEntry?(entry: BlackBoxEntry, sourceUserId?: string): Promise<boolean>;
   isSessionExpired(): boolean;
   isOnline(): boolean;
   onProcessingStateChange(processing: boolean, pendingCount: number): void;
@@ -1663,7 +1663,7 @@ export class RetryQueueService {
             success = await this.operationHandler.pushConnection(item.data as Connection, item.projectId!, item.sourceUserId);
           } else if (item.type === 'blackbox') {
             if (this.operationHandler.pushBlackBoxEntry) {
-              success = await this.operationHandler.pushBlackBoxEntry(item.data as BlackBoxEntry);
+              success = await this.operationHandler.pushBlackBoxEntry(item.data as BlackBoxEntry, item.sourceUserId);
             }
           }
         } catch (e) {

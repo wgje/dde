@@ -1077,6 +1077,30 @@ describe('SimpleSyncService', () => {
         }),
       );
     });
+
+    it('黑匣子重试入队应跳过空 owner，避免生成无主重试项', () => {
+      const handler = expectDeferredCallback(
+        mockBlackBoxSync.setRetryQueueHandler.mock.calls[0]?.[0],
+        'blackBox retry handler'
+      );
+
+      handler({
+        id: crypto.randomUUID(),
+        projectId: null,
+        userId: '   ',
+        content: 'entry',
+        date: '2026-03-04',
+        createdAt: '2026-03-04T00:00:00.000Z',
+        updatedAt: '2026-03-04T00:00:00.000Z',
+        isRead: false,
+        isCompleted: false,
+        isArchived: false,
+        deletedAt: null,
+        syncStatus: 'pending' as const,
+      });
+
+      expect(mockRetryQueueService.add).not.toHaveBeenCalled();
+    });
   });
   
   // 【技术债务重构】此测试组应迁移至 task-sync-operations.service.spec.ts
