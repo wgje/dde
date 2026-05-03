@@ -609,6 +609,36 @@ describe('ActionQueueProcessorsService', () => {
     expect(result).toBe(false);
   });
 
+  it('project:update should move terminal project sync failures to dead letter', async () => {
+    mockSyncService.saveProjectSmart.mockResolvedValueOnce({
+      success: false,
+      terminal: true,
+      failureReason: '当前客户端同步协议已过期，请刷新后重试',
+    });
+    const action = {
+      payload: {
+        project: { id: 'p-terminal-failure', syncSource: 'synced' },
+        sourceUserId: 'test-user',
+      },
+    } as QueuedAction;
+    const handler = getProcessor('project:update');
+
+    const result = await handler(action);
+
+    expect(result).toBe(true);
+    expect(mockActionQueueService.moveToDeadLetter).toHaveBeenCalledWith(
+      action,
+      '当前客户端同步协议已过期，请刷新后重试',
+    );
+    expect(mockLoggerCategory.warn).toHaveBeenCalledWith(
+      'project:update 永久失败，已转入死信',
+      expect.objectContaining({
+        projectId: 'p-terminal-failure',
+        failureReason: '当前客户端同步协议已过期，请刷新后重试',
+      }),
+    );
+  });
+
   it('project:update should acknowledge RetryQueue handoff even after queue view becomes stale', async () => {
     const project = { id: 'p-stale-retry-transfer', syncSource: 'synced' };
     mockSyncService.saveProjectSmart.mockResolvedValueOnce({

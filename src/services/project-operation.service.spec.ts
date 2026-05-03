@@ -88,6 +88,7 @@ describe('ProjectOperationService', () => {
   };
 
   const mockRetryQueue = {
+    removeByProjectIdForOwner: vi.fn(),
     removeByProjectId: vi.fn(),
   };
 
@@ -247,6 +248,66 @@ describe('ProjectOperationService', () => {
     }));
   });
 
+  it('认证用户创建项目命中 terminal 同步失败时不应进入 create 队列', async () => {
+    mockUserSession.currentUserId.mockReturnValue('user-1');
+    mockSyncCoordinator.core.saveProjectSmart.mockResolvedValueOnce({
+      success: false,
+      terminal: true,
+      failureReason: '当前客户端同步协议已过期，请刷新后重试',
+    });
+
+    const result = await service.addProject(createProject({ id: 'proj-terminal-create' }));
+
+    expect(result).toEqual({ success: true });
+    const updater = mockProjectState.updateProjects.mock.calls.at(-1)?.[0] as ((projects: Project[]) => Project[]);
+    expect(mockActionQueue.enqueue).not.toHaveBeenCalled();
+    expect(mockActionQueue.enqueueForOwner).not.toHaveBeenCalled();
+    expect(mockActionQueue.discardActions).toHaveBeenCalled();
+    expect(mockRetryQueue.removeByProjectIdForOwner).toHaveBeenCalledWith('proj-terminal-create', 'user-1');
+    expect(mockToast.error).toHaveBeenCalledWith('同步已停止', '当前客户端同步协议已过期，请刷新后重试');
+    expect(mockOptimisticState.commitSnapshot).toHaveBeenCalledWith('snap-1');
+    expect(mockSyncCoordinator.markLocalChanges).not.toHaveBeenCalled();
+    expect(mockSyncCoordinator.schedulePersist).not.toHaveBeenCalled();
+    expect(mockSyncCoordinator.core.saveOfflineSnapshot).toHaveBeenCalled();
+    expect(updater([createProject({ id: 'proj-terminal-create', pendingSync: true, syncSource: 'synced' })])).toEqual([
+      expect.objectContaining({
+        id: 'proj-terminal-create',
+        pendingSync: false,
+        syncSource: 'synced',
+      }),
+    ]);
+  });
+
+  it('导入项目命中 terminal 同步失败时不应进入任何同步队列', async () => {
+    mockUserSession.currentUserId.mockReturnValue('user-1');
+    mockProjectState.getProject.mockReturnValue(createProject({ id: 'proj-import-terminal', name: 'Existing Import', pendingSync: true }));
+    mockSyncCoordinator.core.saveProjectSmart.mockResolvedValueOnce({
+      success: false,
+      terminal: true,
+      failureReason: '当前客户端同步协议已过期，请刷新后重试',
+    });
+
+    const result = await service.upsertImportedProject(createProject({ id: 'proj-import-terminal' }));
+
+    expect(result).toEqual({ success: true });
+    const updater = mockProjectState.updateProjects.mock.calls.at(-1)?.[0] as ((projects: Project[]) => Project[]);
+    expect(mockActionQueue.enqueue).not.toHaveBeenCalled();
+    expect(mockActionQueue.enqueueForOwner).not.toHaveBeenCalled();
+    expect(mockActionQueue.discardActions).toHaveBeenCalled();
+    expect(mockRetryQueue.removeByProjectIdForOwner).toHaveBeenCalledWith('proj-import-terminal', 'user-1');
+    expect(mockToast.error).toHaveBeenCalledWith('同步已停止', '当前客户端同步协议已过期，请刷新后重试');
+    expect(mockSyncCoordinator.core.saveOfflineSnapshot).toHaveBeenCalled();
+    expect(updater([createProject({ id: 'proj-import-terminal', name: 'Newest Local Title', pendingSync: true, syncSource: 'synced' })])).toEqual([
+      expect.objectContaining({
+        id: 'proj-import-terminal',
+        name: 'Newest Local Title',
+        pendingSync: false,
+        syncSource: 'synced',
+      }),
+    ]);
+    expect(updater([])).toEqual([]);
+  });
+
   it('导入项目的旧会话非冲突失败结果应写回原 owner 队列', async () => {
     mockUserSession.currentUserId.mockReturnValue('user-1');
     mockProjectState.getProject.mockReturnValue(undefined);
@@ -270,6 +331,72 @@ describe('ProjectOperationService', () => {
       }),
     }));
     expect(mockActionQueue.enqueue).not.toHaveBeenCalled();
+  });
+
+  it('导入项目的旧会话成功结果在同 owner 下应回写 pendingSync=false 与新版本', async () => {
+    mockUserSession.currentUserId.mockReturnValue('user-1');
+    mockProjectState.getProject.mockReturnValue(createProject({ id: 'proj-import-stale-success', name: 'Imported Success', pendingSync: true, syncSource: 'synced' }));
+    mockSyncCoordinator.core.saveProjectSmart.mockResolvedValueOnce({ success: true, newVersion: 9 });
+    mockUserSession.isSessionContextCurrent.mockReturnValueOnce(false);
+
+    const result = await service.upsertImportedProject(createProject({ id: 'proj-import-stale-success', name: 'Imported Success' }));
+
+    expect(result).toEqual({ success: true });
+    const updater = mockProjectState.updateProjects.mock.calls.at(-1)?.[0] as ((projects: Project[]) => Project[]);
+    expect(mockActionQueue.enqueueForOwner).not.toHaveBeenCalled();
+    expect(mockActionQueue.discardActions).toHaveBeenCalled();
+    expect(mockRetryQueue.removeByProjectIdForOwner).toHaveBeenCalledWith('proj-import-stale-success', 'user-1');
+    expect(updater([createProject({ id: 'proj-import-stale-success', name: 'Imported Success', version: 1, pendingSync: true, syncSource: 'synced' })])).toEqual([
+      expect.objectContaining({
+        id: 'proj-import-stale-success',
+        version: 9,
+        pendingSync: false,
+        syncSource: 'synced',
+      }),
+    ]);
+  });
+
+  it('导入项目的旧会话 terminal 结果在同 owner 下应清理 pendingSync 并清空旧队列', async () => {
+    mockUserSession.currentUserId.mockReturnValue('user-1');
+    mockProjectState.getProject.mockReturnValue(createProject({ id: 'proj-import-stale-terminal', name: 'Imported Terminal', pendingSync: true, syncSource: 'synced' }));
+    mockSyncCoordinator.core.saveProjectSmart.mockResolvedValueOnce({
+      success: false,
+      terminal: true,
+      failureReason: '当前客户端同步协议已过期，请刷新后重试',
+    });
+    mockUserSession.isSessionContextCurrent.mockReturnValueOnce(false);
+
+    const result = await service.upsertImportedProject(createProject({ id: 'proj-import-stale-terminal', name: 'Imported Terminal' }));
+
+    expect(result).toEqual({ success: true });
+    const updater = mockProjectState.updateProjects.mock.calls.at(-1)?.[0] as ((projects: Project[]) => Project[]);
+    expect(mockActionQueue.enqueueForOwner).not.toHaveBeenCalled();
+    expect(mockActionQueue.discardActions).toHaveBeenCalled();
+    expect(mockRetryQueue.removeByProjectIdForOwner).toHaveBeenCalledWith('proj-import-stale-terminal', 'user-1');
+    expect(updater([createProject({ id: 'proj-import-stale-terminal', name: 'Newest Local Import', pendingSync: true, syncSource: 'synced' })])).toEqual([
+      expect.objectContaining({
+        id: 'proj-import-stale-terminal',
+        name: 'Newest Local Import',
+        pendingSync: false,
+      }),
+    ]);
+  });
+
+  it('导入项目的旧会话 terminal 结果在当前项目已继续演化时不应清空新队列', async () => {
+    mockUserSession.currentUserId.mockReturnValue('user-1');
+    mockProjectState.getProject.mockReturnValue(createProject({ id: 'proj-import-stale-terminal-diverged', name: 'Diverged Local Import', pendingSync: true, syncSource: 'synced' }));
+    mockSyncCoordinator.core.saveProjectSmart.mockResolvedValueOnce({
+      success: false,
+      terminal: true,
+      failureReason: '当前客户端同步协议已过期，请刷新后重试',
+    });
+    mockUserSession.isSessionContextCurrent.mockReturnValueOnce(false);
+
+    const result = await service.upsertImportedProject(createProject({ id: 'proj-import-stale-terminal-diverged', name: 'Imported Terminal' }));
+
+    expect(result).toEqual({ success: true });
+    expect(mockActionQueue.discardActions).not.toHaveBeenCalled();
+    expect(mockRetryQueue.removeByProjectIdForOwner).not.toHaveBeenCalledWith('proj-import-stale-terminal-diverged', 'user-1');
   });
 
   it('导入项目的旧会话异常结果应写回原 owner 的 update 队列', async () => {
@@ -319,6 +446,55 @@ describe('ProjectOperationService', () => {
       }),
     }));
     expect(mockActionQueue.enqueue).not.toHaveBeenCalled();
+  });
+
+  it('创建项目的旧会话成功结果在同 owner 下应回写 pendingSync=false 与新版本', async () => {
+    mockUserSession.currentUserId.mockReturnValue('user-1');
+    mockProjectState.getProject.mockReturnValue(createProject({ id: 'proj-stale-create-success', pendingSync: true, syncSource: 'synced' }));
+    mockSyncCoordinator.core.saveProjectSmart.mockResolvedValueOnce({ success: true, newVersion: 7 });
+    mockUserSession.isSessionContextCurrent.mockReturnValueOnce(false);
+
+    const result = await service.addProject(createProject({ id: 'proj-stale-create-success' }));
+
+    expect(result).toEqual({ success: true });
+    const updater = mockProjectState.updateProjects.mock.calls.at(-1)?.[0] as ((projects: Project[]) => Project[]);
+    expect(mockActionQueue.enqueueForOwner).not.toHaveBeenCalled();
+    expect(mockActionQueue.discardActions).toHaveBeenCalled();
+    expect(mockRetryQueue.removeByProjectIdForOwner).toHaveBeenCalledWith('proj-stale-create-success', 'user-1');
+    expect(updater([createProject({ id: 'proj-stale-create-success', version: 1, pendingSync: true, syncSource: 'synced' })])).toEqual([
+      expect.objectContaining({
+        id: 'proj-stale-create-success',
+        version: 7,
+        pendingSync: false,
+        syncSource: 'synced',
+      }),
+    ]);
+  });
+
+  it('创建项目的旧会话 terminal 结果在同 owner 下应清理 pendingSync', async () => {
+    mockUserSession.currentUserId.mockReturnValue('user-1');
+    mockProjectState.getProject.mockReturnValue(createProject({ id: 'proj-stale-create-terminal', pendingSync: true, syncSource: 'synced' }));
+    mockSyncCoordinator.core.saveProjectSmart.mockResolvedValueOnce({
+      success: false,
+      terminal: true,
+      failureReason: '当前客户端同步协议已过期，请刷新后重试',
+    });
+    mockUserSession.isSessionContextCurrent.mockReturnValueOnce(false);
+
+    const result = await service.addProject(createProject({ id: 'proj-stale-create-terminal' }));
+
+    expect(result).toEqual({ success: true });
+    const updater = mockProjectState.updateProjects.mock.calls.at(-1)?.[0] as ((projects: Project[]) => Project[]);
+    expect(mockActionQueue.enqueueForOwner).not.toHaveBeenCalled();
+    expect(mockActionQueue.discardActions).toHaveBeenCalled();
+    expect(mockRetryQueue.removeByProjectIdForOwner).toHaveBeenCalledWith('proj-stale-create-terminal', 'user-1');
+    expect(updater([createProject({ id: 'proj-stale-create-terminal', pendingSync: true, syncSource: 'synced' })])).toEqual([
+      expect.objectContaining({
+        id: 'proj-stale-create-terminal',
+        pendingSync: false,
+        syncSource: 'synced',
+      }),
+    ]);
   });
 
   it('删除项目的旧会话异常结果应写回原 owner 队列而不是当前会话', async () => {
@@ -375,7 +551,7 @@ describe('ProjectOperationService', () => {
 
     expect(result).toEqual({ success: true });
     expect(mockActionQueue.settleProjectDeleteSuccessForOwner).toHaveBeenCalledWith('user-1', 'proj-success-delete');
-    expect(mockRetryQueue.removeByProjectId).toHaveBeenCalledWith('proj-success-delete');
+    expect(mockRetryQueue.removeByProjectIdForOwner).toHaveBeenCalledWith('proj-success-delete', 'user-1');
     expect(mockOptimisticState.commitSnapshot).toHaveBeenCalledWith('snap-1');
   });
 
@@ -391,7 +567,7 @@ describe('ProjectOperationService', () => {
 
     expect(result).toEqual({ success: true });
     expect(mockActionQueue.settleProjectDeleteSuccessForOwner).toHaveBeenCalledWith('user-1', 'proj-stale-success-delete');
-    expect(mockRetryQueue.removeByProjectId).toHaveBeenCalledWith('proj-stale-success-delete');
+    expect(mockRetryQueue.removeByProjectIdForOwner).toHaveBeenCalledWith('proj-stale-success-delete', 'user-1');
     expect(mockOptimisticState.commitSnapshot).toHaveBeenCalledWith('snap-1');
   });
 
@@ -515,7 +691,7 @@ describe('ProjectOperationService', () => {
   });
 
   it('remote 解决冲突前应尝试补拉远端版本', async () => {
-    mockSyncCoordinator.conflictData.mockReturnValueOnce({
+    mockSyncCoordinator.conflictData.mockReturnValue({
       projectId: 'proj-remote',
       local: createProject({ id: 'proj-remote', name: 'Local Only Conflict' }),
       remote: undefined,
@@ -546,6 +722,118 @@ describe('ProjectOperationService', () => {
     expect(mockSyncCoordinator.clearActiveConflict).toHaveBeenCalled();
   });
 
+  it('remote reload 刷新 stored conflict 后仍应清理最新冲突记录', async () => {
+    const localProject = createProject({ id: 'proj-remote-refresh-cleanup', name: 'Local Reload Cleanup' });
+    const refreshedRemote = createProject({ id: 'proj-remote-refresh-cleanup', name: 'Remote Reloaded Cleanup', version: 5 });
+    mockUserSession.currentUserId.mockReturnValue('user-1');
+    mockSyncCoordinator.conflictData.mockReturnValue({
+      projectId: 'proj-remote-refresh-cleanup',
+      local: localProject,
+      remote: undefined,
+      conflictedAt: '2026-03-30T00:00:00.000Z',
+    });
+    mockConflictStorage.getConflict
+      .mockResolvedValueOnce({
+        projectId: 'proj-remote-refresh-cleanup',
+        localProject,
+        conflictedAt: '2026-03-30T00:00:00.000Z',
+        localVersion: 1,
+        remoteVersion: 0,
+      })
+      .mockResolvedValueOnce({
+        projectId: 'proj-remote-refresh-cleanup',
+        localProject,
+        remoteProject: refreshedRemote,
+        remoteSnapshotFresh: true,
+        ownerUserId: 'user-1',
+        conflictedAt: '2026-03-30T00:01:00.000Z',
+        localVersion: 1,
+        remoteVersion: 5,
+      })
+      .mockResolvedValueOnce({
+        projectId: 'proj-remote-refresh-cleanup',
+        localProject,
+        remoteProject: refreshedRemote,
+        remoteSnapshotFresh: true,
+        ownerUserId: 'user-1',
+        conflictedAt: '2026-03-30T00:01:00.000Z',
+        localVersion: 1,
+        remoteVersion: 5,
+      });
+    mockProjectState.getProject.mockReturnValue(localProject);
+    mockSyncCoordinator.loadSingleProjectFromCloud.mockResolvedValueOnce(refreshedRemote);
+    mockSyncCoordinator.resolveConflict.mockResolvedValueOnce({
+      ok: true,
+      value: refreshedRemote,
+    });
+
+    const resolved = await service.resolveConflict('proj-remote-refresh-cleanup', 'remote');
+
+    expect(resolved).toBe(true);
+    expect(mockSyncCoordinator.loadSingleProjectFromCloud).toHaveBeenCalledWith('proj-remote-refresh-cleanup');
+    expect(mockConflictStorage.deleteConflict).toHaveBeenCalledWith('proj-remote-refresh-cleanup', 'user-1');
+  });
+
+  it('cleanup 前若冲突已被更新版本替换，不应删除新的 stored 或 active conflict', async () => {
+    const localProject = createProject({ id: 'proj-remote-refresh-guard', name: 'Local Reload Guard' });
+    const refreshedRemote = createProject({ id: 'proj-remote-refresh-guard', name: 'Remote Reloaded Guard', version: 5 });
+    const newerRemote = createProject({ id: 'proj-remote-refresh-guard', name: 'Remote Newer Guard', version: 6 });
+    mockUserSession.currentUserId.mockReturnValue('user-1');
+    mockSyncCoordinator.conflictData
+      .mockReturnValueOnce({
+        projectId: 'proj-remote-refresh-guard',
+        local: localProject,
+        remote: undefined,
+        conflictedAt: '2026-03-30T00:00:00.000Z',
+      })
+      .mockReturnValue({
+        projectId: 'proj-remote-refresh-guard',
+        local: localProject,
+        remote: newerRemote,
+        conflictedAt: '2026-03-30T00:02:00.000Z',
+      });
+    mockConflictStorage.getConflict
+      .mockResolvedValueOnce({
+        projectId: 'proj-remote-refresh-guard',
+        localProject,
+        conflictedAt: '2026-03-30T00:00:00.000Z',
+        localVersion: 1,
+        remoteVersion: 0,
+      })
+      .mockResolvedValueOnce({
+        projectId: 'proj-remote-refresh-guard',
+        localProject,
+        remoteProject: refreshedRemote,
+        remoteSnapshotFresh: true,
+        ownerUserId: 'user-1',
+        conflictedAt: '2026-03-30T00:01:00.000Z',
+        localVersion: 1,
+        remoteVersion: 5,
+      })
+      .mockResolvedValueOnce({
+        projectId: 'proj-remote-refresh-guard',
+        localProject,
+        remoteProject: newerRemote,
+        remoteSnapshotFresh: true,
+        ownerUserId: 'user-1',
+        conflictedAt: '2026-03-30T00:02:00.000Z',
+        localVersion: 1,
+        remoteVersion: 6,
+      });
+    mockProjectState.getProject.mockReturnValue(localProject);
+    mockSyncCoordinator.loadSingleProjectFromCloud.mockResolvedValueOnce(refreshedRemote);
+    mockSyncCoordinator.resolveConflict.mockResolvedValueOnce({
+      ok: true,
+      value: refreshedRemote,
+    });
+
+    const resolved = await service.resolveConflict('proj-remote-refresh-guard', 'remote');
+
+    expect(resolved).toBe(true);
+    expect(mockConflictStorage.deleteConflict).not.toHaveBeenCalledWith('proj-remote-refresh-guard', 'user-1');
+    expect(mockSyncCoordinator.clearActiveConflict).not.toHaveBeenCalled();
+  });
+
   it('resolveConflictWithPlan 应委托逐任务计划并清理冲突状态', async () => {
     const localProject = createProject({
       id: 'proj-plan',
@@ -559,16 +847,20 @@ describe('ProjectOperationService', () => {
       tasks: [{ id: 'task-delete-1' } as Project['tasks'][number]],
     });
 
-    mockSyncCoordinator.conflictData.mockReturnValueOnce({
+    mockSyncCoordinator.conflictData.mockReturnValue({
       projectId: 'proj-plan',
+      conflictedAt: '2026-03-30T00:00:00.000Z',
       local: localProject,
       remote: remoteProject,
       pendingTaskDeleteIds: ['task-delete-1'],
     });
-    mockConflictStorage.getConflict.mockResolvedValueOnce({
+    mockConflictStorage.getConflict.mockResolvedValue({
       projectId: 'proj-plan',
       localProject,
       remoteProject,
+      conflictedAt: '2026-03-30T00:00:00.000Z',
+      localVersion: localProject.version ?? 0,
+      remoteVersion: remoteProject.version ?? 0,
       pendingTaskDeleteIds: ['task-delete-1'],
     });
     mockProjectState.getProject.mockReturnValue(localProject);
@@ -656,10 +948,89 @@ describe('ProjectOperationService', () => {
       }),
     ]);
     expect(mockActionQueue.discardActions).toHaveBeenCalled();
-    expect(mockRetryQueue.removeByProjectId).toHaveBeenCalledWith('proj-success');
+    expect(mockRetryQueue.removeByProjectIdForOwner).toHaveBeenCalledWith('proj-success', 'user-1');
     expect(mockChangeTracker.clearProjectFieldLocks).toHaveBeenCalledWith('proj-success');
     expect(mockChangeTracker.clearProjectChanges).toHaveBeenCalledWith('proj-success');
     expect(mockSyncCoordinator.core.deleteTask).toHaveBeenCalledWith('task-delete-1', 'proj-success', 'user-1');
+  });
+
+  it('resolveConflict 命中 terminal 同步失败时不应重新进入 ActionQueue', async () => {
+    mockConflictStorage.getConflict.mockResolvedValue({
+      projectId: 'proj-terminal-resolve',
+      localProject: createProject({ id: 'proj-terminal-resolve', name: 'Local Conflict', pendingSync: true }),
+      remoteProject: createProject({ id: 'proj-terminal-resolve', name: 'Remote Conflict', version: 3 }),
+      pendingTaskDeleteIds: ['task-delete-1'],
+    });
+    mockProjectState.getProject
+      .mockReturnValueOnce(createProject({ id: 'proj-terminal-resolve', name: 'Local Conflict', pendingSync: true }))
+      .mockReturnValue(createProject({ id: 'proj-terminal-resolve', name: 'Resolved Terminal', version: 4, pendingSync: true, syncSource: 'synced' }));
+    mockSyncCoordinator.resolveConflict.mockResolvedValueOnce({
+      ok: true,
+      value: createProject({ id: 'proj-terminal-resolve', name: 'Resolved Terminal', version: 4, pendingSync: true }),
+    });
+    mockUserSession.currentUserId.mockReturnValue('user-1');
+    mockSyncCoordinator.core.saveProjectSmart.mockResolvedValueOnce({
+      success: false,
+      terminal: true,
+      failureReason: '当前客户端同步协议已过期，请刷新后重试',
+    });
+
+    const resolved = await service.resolveConflict('proj-terminal-resolve', 'local');
+
+    expect(resolved).toBe(true);
+    const updater = mockProjectState.updateProjects.mock.calls.at(-1)?.[0] as ((projects: Project[]) => Project[]);
+    expect(mockActionQueue.enqueue).not.toHaveBeenCalled();
+    expect(mockToast.warning).toHaveBeenCalledWith('同步已停止', '当前客户端同步协议已过期，请刷新后重试');
+    expect(mockConflictStorage.deleteConflict).toHaveBeenCalledWith('proj-terminal-resolve', 'user-1');
+    expect(mockChangeTracker.clearProjectFieldLocks).toHaveBeenCalledWith('proj-terminal-resolve');
+    expect(mockChangeTracker.clearProjectChanges).toHaveBeenCalledWith('proj-terminal-resolve');
+    expect(updater([createProject({ id: 'proj-terminal-resolve', pendingSync: true, syncSource: 'synced' })])).toEqual([
+      expect.objectContaining({
+        id: 'proj-terminal-resolve',
+        pendingSync: false,
+        syncSource: 'synced',
+      }),
+    ]);
+  });
+
+  it('resolveConflict live session terminal 且当前项目已继续演化时不应清空新变更', async () => {
+    mockConflictStorage.getConflict.mockResolvedValue({
+      projectId: 'proj-terminal-resolve-diverged',
+      localProject: createProject({ id: 'proj-terminal-resolve-diverged', name: 'Local Conflict', pendingSync: true }),
+      remoteProject: createProject({ id: 'proj-terminal-resolve-diverged', name: 'Remote Conflict', version: 3 }),
+    });
+    mockProjectState.getProject
+      .mockReturnValueOnce(createProject({ id: 'proj-terminal-resolve-diverged', name: 'Local Conflict', pendingSync: true }))
+      .mockReturnValue(createProject({ id: 'proj-terminal-resolve-diverged', name: 'Newest Local Conflict', version: 7, pendingSync: true, syncSource: 'synced' }));
+    mockSyncCoordinator.resolveConflict.mockResolvedValueOnce({
+      ok: true,
+      value: createProject({ id: 'proj-terminal-resolve-diverged', name: 'Resolved Conflict', version: 4, pendingSync: true }),
+    });
+    mockUserSession.currentUserId.mockReturnValue('user-1');
+    mockSyncCoordinator.core.saveProjectSmart.mockResolvedValueOnce({
+      success: false,
+      terminal: true,
+      failureReason: '当前客户端同步协议已过期，请刷新后重试',
+    });
+
+    const resolved = await service.resolveConflict('proj-terminal-resolve-diverged', 'local');
+
+    expect(resolved).toBe(true);
+    const updater = mockProjectState.updateProjects.mock.calls.at(-1)?.[0] as ((projects: Project[]) => Project[]);
+    expect(mockActionQueue.discardActions).toHaveBeenCalledTimes(1);
+    expect(mockRetryQueue.removeByProjectIdForOwner).toHaveBeenCalledTimes(1);
+    expect(mockConflictStorage.deleteConflict).toHaveBeenCalledWith('proj-terminal-resolve-diverged', 'user-1');
+    expect(mockChangeTracker.clearProjectFieldLocks).toHaveBeenCalledWith('proj-terminal-resolve-diverged');
+    expect(mockChangeTracker.clearProjectChanges).not.toHaveBeenCalledWith('proj-terminal-resolve-diverged');
+    expect(updater([createProject({ id: 'proj-terminal-resolve-diverged', name: 'Newest Local Conflict', version: 7, pendingSync: true, syncSource: 'synced' })])).toEqual([
+      expect.objectContaining({
+        id: 'proj-terminal-resolve-diverged',
+        name: 'Newest Local Conflict',
+        version: 7,
+        pendingSync: true,
+        syncSource: 'synced',
+      }),
+    ]);
   });
 
   it('后置待删任务回放遇到会话切换时应把剩余删除意图写回原 owner 队列', async () => {
@@ -725,14 +1096,18 @@ describe('ProjectOperationService', () => {
   it('resolveConflict 在 saveProjectSmart 成功后若会话已过期，应先回写 pendingTaskDeleteIds 到原 owner 队列', async () => {
     mockSyncCoordinator.conflictData.mockReturnValueOnce({
       projectId: 'proj-stale-after-save',
+      conflictedAt: '2026-03-30T00:00:00.000Z',
       local: createProject({ id: 'proj-stale-after-save', name: 'Local Conflict' }),
       remote: createProject({ id: 'proj-stale-after-save', name: 'Remote Conflict', version: 3 }),
       pendingTaskDeleteIds: ['task-delete-stale'],
     });
-    mockConflictStorage.getConflict.mockResolvedValueOnce({
+    mockConflictStorage.getConflict.mockResolvedValue({
       projectId: 'proj-stale-after-save',
       localProject: createProject({ id: 'proj-stale-after-save', name: 'Local Conflict' }),
       remoteProject: createProject({ id: 'proj-stale-after-save', name: 'Remote Conflict', version: 3 }),
+      conflictedAt: '2026-03-30T00:00:00.000Z',
+      localVersion: 1,
+      remoteVersion: 3,
       pendingTaskDeleteIds: ['task-delete-stale'],
     });
     mockProjectState.getProject.mockReturnValue(createProject({ id: 'proj-stale-after-save', name: 'Local Conflict' }));
@@ -760,6 +1135,7 @@ describe('ProjectOperationService', () => {
     const resolved = await service.resolveConflict('proj-stale-after-save', 'local');
 
     expect(resolved).toBe(true);
+    const updater = mockProjectState.updateProjects.mock.calls.at(-1)?.[0] as ((projects: Project[]) => Project[]);
     expect(mockActionQueue.enqueueForOwner).toHaveBeenCalledWith('user-1', expect.objectContaining({
       type: 'update',
       entityType: 'project',
@@ -768,7 +1144,122 @@ describe('ProjectOperationService', () => {
         taskIdsToDelete: ['task-delete-stale'],
       }),
     }));
+    expect(mockConflictStorage.deleteConflict).toHaveBeenCalledWith('proj-stale-after-save', 'user-1');
+    expect(mockChangeTracker.clearProjectFieldLocks).toHaveBeenCalledWith('proj-stale-after-save');
+    expect(mockChangeTracker.clearProjectChanges).not.toHaveBeenCalledWith('proj-stale-after-save');
     expect(mockSyncCoordinator.core.deleteTask).not.toHaveBeenCalled();
+    expect(updater([createProject({ id: 'proj-stale-after-save', name: 'Newest Local Conflict', pendingSync: false, syncSource: 'synced' })])).toEqual([
+      expect.objectContaining({
+        id: 'proj-stale-after-save',
+        name: 'Newest Local Conflict',
+        version: 10,
+        pendingSync: true,
+        syncSource: 'synced',
+      }),
+    ]);
+  });
+
+  it('resolveConflict 在 saveProjectSmart terminal 且同 owner stale 时仍应清理冲突记录和锁', async () => {
+    mockSyncCoordinator.conflictData.mockReturnValueOnce({
+      projectId: 'proj-stale-terminal-resolve',
+      conflictedAt: '2026-03-30T00:00:00.000Z',
+      local: createProject({ id: 'proj-stale-terminal-resolve', name: 'Local Conflict', pendingSync: true }),
+      remote: createProject({ id: 'proj-stale-terminal-resolve', name: 'Remote Conflict', version: 3 }),
+    });
+    mockConflictStorage.getConflict.mockResolvedValue({
+      projectId: 'proj-stale-terminal-resolve',
+      localProject: createProject({ id: 'proj-stale-terminal-resolve', name: 'Local Conflict', pendingSync: true }),
+      remoteProject: createProject({ id: 'proj-stale-terminal-resolve', name: 'Remote Conflict', version: 3 }),
+      conflictedAt: '2026-03-30T00:00:00.000Z',
+      localVersion: 1,
+      remoteVersion: 3,
+    });
+    mockProjectState.getProject
+      .mockReturnValueOnce(createProject({ id: 'proj-stale-terminal-resolve', name: 'Local Conflict', pendingSync: true }))
+      .mockReturnValue(createProject({ id: 'proj-stale-terminal-resolve', name: 'Resolved Conflict', version: 4, pendingSync: true, syncSource: 'synced' }));
+    mockSyncCoordinator.resolveConflict.mockResolvedValueOnce({
+      ok: true,
+      value: createProject({ id: 'proj-stale-terminal-resolve', name: 'Resolved Conflict', version: 4, pendingSync: true }),
+    });
+    mockUserSession.currentUserId.mockReturnValue('user-1');
+    mockSyncCoordinator.core.saveProjectSmart.mockResolvedValueOnce({
+      success: false,
+      terminal: true,
+      failureReason: '当前客户端同步协议已过期，请刷新后重试',
+    });
+
+    const isProjectSessionContextCurrent = service as unknown as {
+      isProjectSessionContextCurrent: (
+        context: { ownerUserId: string | null; sessionGeneration: number },
+        stage: string,
+        projectId: string,
+      ) => boolean;
+    };
+    vi.spyOn(isProjectSessionContextCurrent, 'isProjectSessionContextCurrent').mockImplementation(
+      (_context, stage) => stage !== 'resolveConflict:saveProjectSmart',
+    );
+
+    const resolved = await service.resolveConflict('proj-stale-terminal-resolve', 'local');
+
+    expect(resolved).toBe(true);
+    const updater = mockProjectState.updateProjects.mock.calls.at(-1)?.[0] as ((projects: Project[]) => Project[]);
+    expect(mockConflictStorage.deleteConflict).toHaveBeenCalledWith('proj-stale-terminal-resolve', 'user-1');
+    expect(mockChangeTracker.clearProjectFieldLocks).toHaveBeenCalledWith('proj-stale-terminal-resolve');
+    expect(mockChangeTracker.clearProjectChanges).toHaveBeenCalledWith('proj-stale-terminal-resolve');
+    expect(mockActionQueue.enqueue).not.toHaveBeenCalled();
+    expect(updater([createProject({ id: 'proj-stale-terminal-resolve', name: 'Newest Local Conflict', pendingSync: true, syncSource: 'synced' })])).toEqual([
+      expect.objectContaining({
+        id: 'proj-stale-terminal-resolve',
+        name: 'Newest Local Conflict',
+        pendingSync: false,
+        syncSource: 'synced',
+      }),
+    ]);
+  });
+
+  it('resolveConflict 在 delete-conflict gate 才变 stale 且同 owner 时仍应清理冲突记录', async () => {
+    mockSyncCoordinator.conflictData.mockReturnValueOnce({
+      projectId: 'proj-late-stale-cleanup',
+      conflictedAt: '2026-03-30T00:00:00.000Z',
+      local: createProject({ id: 'proj-late-stale-cleanup', name: 'Local Conflict', pendingSync: true }),
+      remote: createProject({ id: 'proj-late-stale-cleanup', name: 'Remote Conflict', version: 3 }),
+    });
+    mockConflictStorage.getConflict.mockResolvedValue({
+      projectId: 'proj-late-stale-cleanup',
+      localProject: createProject({ id: 'proj-late-stale-cleanup', name: 'Local Conflict', pendingSync: true }),
+      remoteProject: createProject({ id: 'proj-late-stale-cleanup', name: 'Remote Conflict', version: 3 }),
+      conflictedAt: '2026-03-30T00:00:00.000Z',
+      localVersion: 1,
+      remoteVersion: 3,
+    });
+    mockProjectState.getProject.mockReturnValue(createProject({ id: 'proj-late-stale-cleanup', name: 'Local Conflict', pendingSync: true }));
+    mockSyncCoordinator.resolveConflict.mockResolvedValueOnce({
+      ok: true,
+      value: createProject({ id: 'proj-late-stale-cleanup', name: 'Resolved Conflict', version: 4, pendingSync: true }),
+    });
+    mockUserSession.currentUserId.mockReturnValue('user-1');
+    mockSyncCoordinator.core.saveProjectSmart.mockResolvedValueOnce({
+      success: true,
+      newVersion: 11,
+    });
+
+    const isProjectSessionContextCurrent = service as unknown as {
+      isProjectSessionContextCurrent: (
+        context: { ownerUserId: string | null; sessionGeneration: number },
+        stage: string,
+        projectId: string,
+      ) => boolean;
+    };
+    vi.spyOn(isProjectSessionContextCurrent, 'isProjectSessionContextCurrent').mockImplementation(
+      (_context, stage) => stage !== 'resolveConflict:delete-conflict',
+    );
+
+    const resolved = await service.resolveConflict('proj-late-stale-cleanup', 'local');
+
+    expect(resolved).toBe(true);
+    expect(mockConflictStorage.deleteConflict).toHaveBeenCalledWith('proj-late-stale-cleanup', 'user-1');
+    expect(mockChangeTracker.clearProjectFieldLocks).toHaveBeenCalledWith('proj-late-stale-cleanup');
+    expect(mockChangeTracker.clearProjectChanges).toHaveBeenCalledWith('proj-late-stale-cleanup');
   });
 
   it('解决冲突后二次冲突且缺少 remoteData 时应降级为 stale 冲突记录', async () => {

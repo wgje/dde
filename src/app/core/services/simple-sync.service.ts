@@ -127,6 +127,7 @@ type ProjectSaveResult = {
   failedConnectionIds?: string[];
   retryEnqueued?: string[];
   failureReason?: string;
+  terminal?: boolean;
 };
 
 interface QueuedProjectSaveRequest {
@@ -1274,12 +1275,13 @@ export class SimpleSyncService {
   ): Promise<{ success: boolean; retryEnqueued: boolean; failureReason?: string }> {
     let retryEnqueued = false;
 
-    const enqueueRetry = async (): Promise<void> => {
+    const enqueueRetry = async (): Promise<boolean> => {
       if (fromRetryQueue) {
-        return;
+        return false;
       }
 
       retryEnqueued = await this.addToRetryQueueDurably('project', 'upsert', project, undefined, sourceUserId, taskIdsToDelete);
+      return retryEnqueued;
     };
 
     if (this.syncState().sessionExpired) {
@@ -1335,6 +1337,7 @@ export class SimpleSyncService {
         project,
         sourceUserId ?? sessionUserId,
         fromRetryQueue,
+        enqueueRetry,
         sourceUserId,
         taskIdsToDelete,
       );
@@ -1349,7 +1352,9 @@ export class SimpleSyncService {
       return {
         success,
         retryEnqueued,
-        failureReason: success ? undefined : 'project push returned false',
+        failureReason: success
+          ? undefined
+          : (retryEnqueued ? 'project sync queued for retry' : 'project push returned false'),
       };
     } catch (e) {
       // 【#95057880 修复】PermanentFailureError 直接向上冒泡，不做二次处理
@@ -1371,7 +1376,9 @@ export class SimpleSyncService {
             return {
               success,
               retryEnqueued,
-              failureReason: success ? undefined : 'project push returned false after session refresh',
+              failureReason: success
+                ? undefined
+                : (retryEnqueued ? 'project sync queued for retry after session refresh' : 'project push returned false after session refresh'),
             };
           } catch (retryError) {
             if (isPermanentFailureError(retryError)) throw retryError;
@@ -1384,11 +1391,12 @@ export class SimpleSyncService {
                   projectId: project.id,
                   errorCode: retryEnhanced.code,
                 });
-                return {
-                  success: false,
-                  retryEnqueued,
-                  failureReason: 'project sync permission denied (RLS policy violation after refresh)',
-                };
+                throw this.createProjectPersistenceTerminalError(
+                  project.id,
+                  '项目同步权限校验失败，请重新登录后重试',
+                  'PermissionError',
+                  'SYNC_PROJECT_PERMISSION_DENIED',
+                );
               }
               await enqueueRetry();
               this.sessionManager.handleSessionExpired('pushProject.retryAfterRefresh', {
@@ -1426,6 +1434,16 @@ export class SimpleSyncService {
       
       if (enhanced.isRetryable) {
         await enqueueRetry();
+      } else {
+        const isPermissionDenied = enhanced.errorType === 'PermissionError';
+        throw this.createProjectPersistenceTerminalError(
+          project.id,
+          isPermissionDenied ? '项目同步权限校验失败，请重新登录后重试' : enhanced.message,
+          isPermissionDenied ? 'PermissionError' : 'BusinessRuleError',
+          isPermissionDenied
+            ? 'SYNC_PROJECT_PERMISSION_DENIED'
+            : (enhanced.code ? String(enhanced.code) : 'SYNC_PROJECT_PERSISTENCE_FAILED'),
+        );
       }
       return {
         success: false,
@@ -1458,10 +1476,83 @@ export class SimpleSyncService {
     this.clockSync.recordServerTimestamp(serverUpdatedAt, project.id);
   }
 
+  private createProjectRpcConflictError(
+    projectId: string,
+    result: SyncRpcResult,
+  ): PermanentFailureError {
+    const originalError = Object.assign(
+      new Error('版本冲突：数据已被修改，请刷新后重试'),
+      {
+        name: 'VersionConflictError',
+        errorType: 'VersionConflictError',
+        code: 'SYNC_RPC_REMOTE_NEWER',
+      },
+    );
+
+    return new PermanentFailureError('Version conflict', originalError, {
+      operation: 'pushProject',
+      projectId,
+      status: result.status,
+      remoteUpdatedAt: result.remoteUpdatedAt,
+      reason: result.reason,
+    });
+  }
+
+  private createProjectRpcTerminalError(
+    projectId: string,
+    result: SyncRpcResult,
+    message: string,
+  ): PermanentFailureError {
+    const isPermissionDenied = result.status === 'unauthorized';
+    const originalError = Object.assign(
+      new Error(message),
+      {
+        name: isPermissionDenied ? 'PermissionError' : 'BusinessRuleError',
+        errorType: isPermissionDenied ? 'PermissionError' : 'BusinessRuleError',
+        code: isPermissionDenied ? 'SYNC_RPC_UNAUTHORIZED' : 'SYNC_RPC_PROTOCOL_REJECTED',
+      },
+    );
+
+    return new PermanentFailureError(
+      isPermissionDenied ? 'Project sync unauthorized' : 'Project sync protocol rejected',
+      originalError,
+      {
+        operation: 'pushProject',
+        projectId,
+        status: result.status,
+        reason: result.reason,
+        minProtocolVersion: result.minProtocolVersion,
+      },
+    );
+  }
+
+  private createProjectPersistenceTerminalError(
+    projectId: string,
+    message: string,
+    errorType: 'PermissionError' | 'BusinessRuleError' = 'BusinessRuleError',
+    code = 'SYNC_PROJECT_PERSISTENCE_FAILED',
+  ): PermanentFailureError {
+    const originalError = Object.assign(
+      new Error(message),
+      {
+        name: errorType,
+        errorType,
+        code,
+      },
+    );
+
+    return new PermanentFailureError('Project sync terminal failure', originalError, {
+      operation: 'pushProject',
+      projectId,
+      code,
+    });
+  }
+
   private async handleProjectSyncRpcResult(
     result: SyncRpcResult,
     project: Project,
     fromRetryQueue: boolean,
+    enqueueRetry: (() => Promise<boolean>) | undefined,
     sourceUserId: string | undefined,
     taskIdsToDelete: string[] | undefined,
   ): Promise<boolean> {
@@ -1486,25 +1577,35 @@ export class SimpleSyncService {
         tags: { operation: 'pushProject', entityType: 'project', status: result.status },
         extra: { projectId: project.id, remoteUpdatedAt: result.remoteUpdatedAt, reason: result.reason },
       });
+      this.toast.warning('版本冲突', '数据已被修改，请刷新后重试');
+      throw this.createProjectRpcConflictError(project.id, result);
+    }
+
+    if (result.status === 'unauthorized' && result.reason === 'supabase_client_unavailable') {
+      this.logger.warn('pushProject: sync RPC client 不可用，回退重试队列', {
+        projectId: project.id,
+        reason: result.reason,
+      });
       if (!fromRetryQueue) {
-        await this.addToRetryQueueDurably('project', 'upsert', project, undefined, sourceUserId, taskIdsToDelete);
+        if (enqueueRetry) {
+          await enqueueRetry();
+        } else {
+          await this.addToRetryQueueDurably('project', 'upsert', project, undefined, sourceUserId, taskIdsToDelete);
+        }
       }
       return false;
     }
 
     const message = result.status === 'client-version-rejected'
       ? '当前客户端同步协议已过期，请刷新后重试'
-      : '项目同步写入被服务端拒绝，已保留本地变更等待重试';
+      : '项目同步权限校验失败，请重新登录后重试';
     this.syncStateService.setSyncError(message);
     this.sentryLazyLoader.captureMessage('sync_rpc_project_rejected', {
       level: 'warning',
       tags: { operation: 'pushProject', entityType: 'project', status: result.status },
       extra: { projectId: project.id, reason: result.reason, minProtocolVersion: result.minProtocolVersion },
     });
-    if (!fromRetryQueue) {
-      await this.addToRetryQueueDurably('project', 'upsert', project, undefined, sourceUserId, taskIdsToDelete);
-    }
-    return false;
+    throw this.createProjectRpcTerminalError(project.id, result, message);
   }
 
   private async confirmRetryQueuePersistence(): Promise<boolean> {
@@ -1516,7 +1617,7 @@ export class SimpleSyncService {
     fromRetryQueue = false,
     sourceUserId?: string,
     taskIdsToDelete?: string[],
-  ): Promise<{ success: boolean; conflict?: boolean; remoteData?: Project; retryEnqueued?: boolean; failureReason?: string }> {
+  ): Promise<{ success: boolean; conflict?: boolean; remoteData?: Project; retryEnqueued?: boolean; failureReason?: string; terminal?: boolean }> {
     try {
       const result = await this.pushProjectWithStatus(project, fromRetryQueue, sourceUserId, taskIdsToDelete);
       return {
@@ -1532,17 +1633,22 @@ export class SimpleSyncService {
       const enhanced = error.originalError
         ? supabaseErrorToError(error.originalError)
         : null;
-      if (enhanced?.errorType !== 'VersionConflictError') {
-        throw error;
+      if (enhanced?.errorType === 'VersionConflictError') {
+        const remoteData = await this.loadFullProjectOptimized(project.id).catch(() => null);
+        return {
+          success: false,
+          conflict: true,
+          remoteData: remoteData ?? undefined,
+          retryEnqueued: false,
+          failureReason: 'project sync version conflict',
+        };
       }
 
-      const remoteData = await this.loadFullProjectOptimized(project.id).catch(() => null);
       return {
         success: false,
-        conflict: true,
-        remoteData: remoteData ?? undefined,
         retryEnqueued: false,
-        failureReason: 'project sync version conflict',
+        failureReason: enhanced?.message ?? error.message,
+        terminal: true,
       };
     }
   }
@@ -1555,6 +1661,7 @@ export class SimpleSyncService {
     project: Project,
     userId: string,
     fromRetryQueue = false,
+    enqueueRetry?: () => Promise<boolean>,
     sourceUserId?: string,
     taskIdsToDelete?: string[],
   ): Promise<boolean> {
@@ -1570,6 +1677,7 @@ export class SimpleSyncService {
         result,
         project,
         fromRetryQueue,
+        enqueueRetry,
         sourceUserId,
         taskIdsToDelete,
       );
@@ -2065,12 +2173,14 @@ export class SimpleSyncService {
     return undefined;
   }
 
-  private getExistingProjectRetryTaskIdsToDelete(projectId: string): string[] | undefined {
-    const retryItem = this.retryQueueService.getItems().find(
-      item => item.type === 'project' && item.data.id === projectId
-    );
+  private getExistingProjectRetryTaskIdsToDelete(projectId: string, sourceUserId?: string): string[] | undefined {
+    const retryQueue = this.retryQueueService as RetryQueueService & {
+      getProjectRetryTaskIdsToDeleteForOwner?: (targetProjectId: string, targetSourceUserId?: string) => string[] | undefined;
+    };
 
-    return retryItem?.taskIdsToDelete ? [...retryItem.taskIdsToDelete] : undefined;
+    return typeof retryQueue.getProjectRetryTaskIdsToDeleteForOwner === 'function'
+      ? retryQueue.getProjectRetryTaskIdsToDeleteForOwner(projectId, sourceUserId)
+      : undefined;
   }
 
   private buildProjectSaveSignature(project: Project, taskIdsToDelete?: string[]): string {
@@ -2102,22 +2212,50 @@ export class SimpleSyncService {
     };
   }
 
-  private hasProjectRetryMarker(projectId: string, retryEnqueued?: string[]): boolean {
+  private hasProjectRetryMarker(projectId: string, sourceUserId?: string, retryEnqueued?: string[]): boolean {
+    const retryQueue = this.retryQueueService as RetryQueueService & {
+      hasProjectRetryForOwner?: (targetProjectId: string, targetSourceUserId?: string) => boolean;
+    };
+
     return retryEnqueued?.includes(`project:${projectId}`) === true
-      || this.hasRetryQueueEntity('project', projectId);
+      || (typeof retryQueue.hasProjectRetryForOwner === 'function'
+        ? retryQueue.hasProjectRetryForOwner(projectId, sourceUserId)
+        : this.hasRetryQueueEntity('project', projectId));
+  }
+
+  private clearProjectRetryMarker(projectId: string, sourceUserId?: string): void {
+    const retryQueue = this.retryQueueService as RetryQueueService & {
+      removeByProjectIdForOwner?: (projectId: string, sourceUserId?: string) => number;
+    };
+    const removedCount = typeof retryQueue.removeByProjectIdForOwner === 'function'
+      ? retryQueue.removeByProjectIdForOwner(projectId, sourceUserId)
+      : 0;
+
+    if (removedCount === 0) {
+      return;
+    }
+
+    this.syncStateService.update({ pendingCount: this.retryQueueService.length });
+    this.logger.debug('项目云端持久化已终止，已清理遗留 project retry marker', {
+      projectId,
+      sourceUserId: sourceUserId ?? null,
+      removedCount,
+    });
   }
 
   private async refreshQueuedProjectRetryPayload(
     queuedRequest: QueuedProjectSaveRequest,
     retryEnqueued?: string[],
   ): Promise<boolean> {
-    if (!this.hasProjectRetryMarker(queuedRequest.project.id, retryEnqueued)) {
+    if (!this.hasProjectRetryMarker(queuedRequest.project.id, queuedRequest.userId, retryEnqueued)) {
       return false;
     }
 
     const latestTaskIdsToDelete = queuedRequest.taskIdsToDelete
-      ?? this.getExistingProjectRetryTaskIdsToDelete(queuedRequest.project.id)
-      ?? this.captureEffectiveTaskIdsToDelete(queuedRequest.project.id);
+      ?? this.getExistingProjectRetryTaskIdsToDelete(queuedRequest.project.id, queuedRequest.userId)
+      ?? (queuedRequest.userId === this.sessionManager.getRecentValidationSnapshot(60_000)?.userId
+        ? this.captureEffectiveTaskIdsToDelete(queuedRequest.project.id)
+        : undefined);
     const refreshed = await this.addToRetryQueueDurably(
       'project',
       'upsert',
@@ -2244,19 +2382,29 @@ export class SimpleSyncService {
     }
 
     if (!result.success) {
+      if (result.conflict || result.terminal) {
+        const separatorIndex = key.indexOf(':');
+        const userId = separatorIndex >= 0 ? key.slice(0, separatorIndex) : undefined;
+        const projectId = separatorIndex >= 0 ? key.slice(separatorIndex + 1) : key;
+        this.clearProjectRetryMarker(projectId, userId);
+      }
+
       const queuedRequest = flight.queuedRequest;
       if (!queuedRequest) {
         this.projectSaveFlights.delete(key);
         return;
       }
 
-      if (result.conflict) {
+      if (result.conflict || result.terminal) {
         flight.queuedRequest = null;
         this.projectSaveFlights.delete(key);
         queuedRequest.resolve(result);
-        this.logger.debug('项目云端持久化冲突，折叠队列等待显式冲突解决', {
+        this.logger.debug(result.terminal
+          ? '项目云端持久化命中终止失败，折叠队列停止自动重放'
+          : '项目云端持久化冲突，折叠队列等待显式冲突解决', {
           projectId: queuedRequest.project.id,
           userId: queuedRequest.userId,
+          failureReason: result.failureReason ?? null,
         });
         return;
       }
@@ -2410,7 +2558,7 @@ export class SimpleSyncService {
     return this.saveProjectToCloudSingleFlight(project, userId, taskIdsToDelete);
   }
 
-  async saveProjectSmart(project: Project, userId: string, taskIdsToDelete?: string[]): Promise<{ success: boolean; conflict?: boolean; remoteData?: Project; newVersion?: number; validationWarnings?: string[]; projectPushed?: boolean; failedTaskIds?: string[]; failedConnectionIds?: string[]; retryEnqueued?: string[]; failureReason?: string }> {
+  async saveProjectSmart(project: Project, userId: string, taskIdsToDelete?: string[]): Promise<{ success: boolean; conflict?: boolean; remoteData?: Project; newVersion?: number; validationWarnings?: string[]; projectPushed?: boolean; failedTaskIds?: string[]; failedConnectionIds?: string[]; retryEnqueued?: string[]; failureReason?: string; terminal?: boolean }> {
     const result = await this.saveProjectToCloud(project, userId, taskIdsToDelete);
     return { ...result, newVersion: result.newVersion ?? project.version };
   }

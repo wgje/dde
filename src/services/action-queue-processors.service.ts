@@ -49,6 +49,7 @@ type ProjectSyncResult = {
   failedConnectionIds?: string[];
   retryEnqueued?: string[];
   failureReason?: string;
+  terminal?: boolean;
 };
 
 @Injectable({
@@ -374,7 +375,7 @@ export class ActionQueueProcessorsService {
           await this.replayDeferredTaskDeletes(persistedProject, payload.taskIdsToDelete, payload.sourceUserId, mutationContext);
         }
         if (!this.isProjectMutationContextCurrent(mutationContext, 'project:update', payload.project.id)) {
-          return result.success || result.conflict === true || failureTransferred;
+          return result.success || result.conflict === true || failureTransferred || result.terminal === true;
         }
         if (result.success && result.newVersion !== undefined) {
           this.projectState.updateProjects(ps => ps.map(p =>
@@ -402,6 +403,14 @@ export class ActionQueueProcessorsService {
             );
           }
           return true; // 冲突由冲突解决流程处理
+        }
+        if (result.terminal) {
+          this.logger.warn('project:update 永久失败，已转入死信', {
+            projectId: payload.project.id,
+            failureReason: result.failureReason,
+          });
+          this.actionQueue.moveToDeadLetter(action, result.failureReason ?? '项目同步失败');
+          return true;
         }
         if (failureTransferred) {
           this.logger.info('project:update 已转交 RetryQueue，当前 ActionQueue 项视为完成', {
@@ -468,7 +477,7 @@ export class ActionQueueProcessorsService {
           await this.replayDeferredTaskDeletes(persistedProject, payload.taskIdsToDelete, payload.sourceUserId, mutationContext);
         }
         if (!this.isProjectMutationContextCurrent(mutationContext, 'project:create', payload.project.id)) {
-          return result.success || result.conflict === true || failureTransferred;
+          return result.success || result.conflict === true || failureTransferred || result.terminal === true;
         }
         if (result.success && result.newVersion !== undefined) {
           this.projectState.updateProjects(ps => ps.map(p =>
@@ -495,6 +504,14 @@ export class ActionQueueProcessorsService {
               payload.taskIdsToDelete,
             );
           }
+          return true;
+        }
+        if (result.terminal) {
+          this.logger.warn('project:create 永久失败，已转入死信', {
+            projectId: payload.project.id,
+            failureReason: result.failureReason,
+          });
+          this.actionQueue.moveToDeadLetter(action, result.failureReason ?? '项目同步失败');
           return true;
         }
         if (failureTransferred) {

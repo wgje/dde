@@ -1798,7 +1798,12 @@ class NanoflowWidgetRepository(private val context: Context) {
 
     val updatedAt = runCatching {
       Instant.parse(preview.updatedAt?.takeIf { it.isNotBlank() } ?: preview.createdAt ?: "")
-    }.getOrNull() ?: return true
+    }.getOrNull()
+    // 【2026-05-03 安全修复】若 updatedAt 和 createdAt 均无法解析（字段缺失或格式异常），
+    // 旧实现 `return true` 会让该条目永久进入 cooling down，从大门视图中消失。
+    // 修正：时间戳不可用时视为「已冷却」以外的兜底，允许条目继续展示，
+    // 避免因服务端数据异常导致大门永远显示为空。
+    if (updatedAt == null) return false
     val elapsedMs = Duration.between(updatedAt, Instant.now()).toMillis().coerceAtLeast(0)
     return elapsedMs < GATE_READ_REAPPEAR_COOLDOWN_MS
   }

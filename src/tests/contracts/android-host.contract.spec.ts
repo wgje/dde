@@ -126,6 +126,25 @@ describe('android host contract', () => {
     expect(handler).not.toContain('已标记为完成');
   });
 
+  it('rebuilds MIUI gate host state when stale empty content would hide pending black box entries', () => {
+    const receiver = readText('android/app/src/main/java/app/nanoflow/host/NanoflowWidgetReceiver.kt');
+    const renderer = readText('android/app/src/main/java/app/nanoflow/host/NanoflowWidgetRenderer.kt');
+
+    expect(receiver).toContain('stateToken: String? = null');
+    expect(receiver).toContain('nanoflow://widget/actions/$appWidgetId/$listKind$identitySuffix');
+    expect(receiver).toContain('!shouldForceFullUpdate(model)');
+    expect(receiver).toContain('private fun shouldForceFullUpdate(model: WidgetRenderModel): Boolean');
+    expect(receiver).toContain('if (model.sizeTier == WidgetSizeTier.SMALL)');
+    expect(receiver).toContain('if (!model.isGateMode)');
+    expect(receiver).toContain('if (model.contentCards.firstOrNull()?.isGateEmptyState == true)');
+    expect(receiver).toContain('return model.displayedGateEntryId?.isNotBlank() == true');
+    expect(renderer).toContain('stateToken = buildContentAdapterStateToken(model)');
+    expect(renderer).toContain('stateToken = buildGateActionsAdapterStateToken(model)');
+    expect(renderer).toContain('private fun buildContentAdapterStateToken(model: WidgetRenderModel): String');
+    expect(renderer).toContain('model.displayedGateEntryId');
+    expect(renderer).toContain('model.blackBoxCount.toString()');
+  });
+
   it('primes web Gate sync when Android widget opens the workspace', () => {
     const shell = readText('src/workspace-shell.component.ts');
     const probe = readText('src/services/focus-startup-probe.service.ts');

@@ -112,6 +112,9 @@ describe('SimpleSyncService', () => {
     addDurably: MockFn;
     persistNow: MockFn;
     hasEntity?: MockFn;
+    removeByEntities?: MockFn;
+    removeProjectRetriesForOwner?: MockFn;
+    removeByProjectIdForOwner?: MockFn;
     getItems: MockFn;
     setOperationHandler: MockFn;
     startLoop: MockFn;
@@ -628,6 +631,43 @@ describe('SimpleSyncService', () => {
       ) {
         return this.queue.some((item) => item.type === type && item.data.id === entityId);
       }),
+      removeByEntities: vi.fn().mockImplementation(function(
+        this: { queue: RetryQueueItem[] },
+        type: RetryQueueItem['type'],
+        entityIds: string[],
+      ) {
+        const targets = new Set(entityIds);
+        const removed = this.queue
+          .filter((item) => item.type === type && targets.has(item.data.id))
+          .map((item) => item.data.id);
+        this.queue = this.queue.filter((item) => !(item.type === type && targets.has(item.data.id)));
+        return [...new Set(removed)];
+      }),
+      removeProjectRetriesForOwner: vi.fn().mockImplementation(function(
+        this: { queue: RetryQueueItem[] },
+        projectId: string,
+        sourceUserId?: string,
+      ) {
+        const originalLength = this.queue.length;
+        this.queue = this.queue.filter((item) => !(
+          item.type === 'project'
+          && item.data.id === projectId
+          && item.sourceUserId === sourceUserId
+        ));
+        return originalLength - this.queue.length;
+      }),
+      removeByProjectIdForOwner: vi.fn().mockImplementation(function(
+        this: { queue: RetryQueueItem[] },
+        projectId: string,
+        sourceUserId?: string,
+      ) {
+        const originalLength = this.queue.length;
+        this.queue = this.queue.filter((item) => !(
+          (item.projectId === projectId || (item.type === 'project' && item.data.id === projectId))
+          && item.sourceUserId === sourceUserId
+        ));
+        return originalLength - this.queue.length;
+      }),
       getItems: vi.fn().mockImplementation(function(this: { queue: RetryQueueItem[] }) {
         return [...this.queue];
       }),
@@ -1046,7 +1086,7 @@ describe('SimpleSyncService', () => {
       expect(payload['updated_at']).toBeUndefined();
     });
 
-    it('pushProject 命中 remote-newer 时应保留重试意图并记录 Sentry', async () => {
+    it('pushProject 命中 remote-newer 时应抛出版本冲突而不是写入 RetryQueue', async () => {
       const project = createMockProject({
         id: 'project-rpc-conflict',
         updatedAt: '2026-04-30T05:00:00.000Z',
@@ -1058,17 +1098,10 @@ describe('SimpleSyncService', () => {
         raw: {},
       });
 
-      const result = await service.pushProject(project, false, 'test-user-id');
+      await expect(service.pushProject(project, false, 'test-user-id')).rejects.toBeInstanceOf(PermanentFailureError);
 
-      expect(result).toBe(false);
-      expect(mockRetryQueueService.addDurably).toHaveBeenCalledWith(
-        'project',
-        'upsert',
-        project,
-        undefined,
-        'test-user-id',
-        undefined,
-      );
+      expect(mockRetryQueueService.addDurably).not.toHaveBeenCalled();
+      expect(mockToast.warning).toHaveBeenCalledWith('版本冲突', '数据已被修改，请刷新后重试');
       expect(mockSentryLazyLoaderService.captureMessage).toHaveBeenCalledWith(
         'sync_rpc_project_remote_newer',
         expect.objectContaining({
@@ -1100,6 +1133,83 @@ describe('SimpleSyncService', () => {
       });
 
       expect(mockRetryQueueService.add).not.toHaveBeenCalled();
+    });
+
+    it('pushProjectWithResult 应将 project RPC 协议拒绝标记为 terminal 结果', async () => {
+      const project = createMockProject({
+        id: 'project-rpc-protocol-rejected',
+        updatedAt: '2026-04-30T05:00:00.000Z',
+      });
+      mockSyncRpcClient.upsertProject.mockResolvedValueOnce({
+        status: 'client-version-rejected',
+        minProtocolVersion: 3,
+        reason: 'protocol_version_below_min',
+        raw: {},
+      });
+
+      const result = await (service as unknown as {
+        pushProjectWithResult: (project: Project, fromRetryQueue?: boolean, sourceUserId?: string, taskIdsToDelete?: string[]) => Promise<{ success: boolean; conflict?: boolean; remoteData?: Project; retryEnqueued?: boolean; failureReason?: string; terminal?: boolean }>;
+      }).pushProjectWithResult(project, false, 'test-user-id');
+
+      expect(result).toEqual({
+        success: false,
+        retryEnqueued: false,
+        failureReason: '当前客户端同步协议已过期，请刷新后重试',
+        terminal: true,
+      });
+      expect(mockRetryQueueService.addDurably).not.toHaveBeenCalled();
+      expect(service.state().syncError).toBe('当前客户端同步协议已过期，请刷新后重试');
+    });
+
+    it('pushProjectWithResult 在 RPC 返回 supabase_client_unavailable 时应继续写入 RetryQueue', async () => {
+      const project = createMockProject({
+        id: 'project-rpc-client-unavailable',
+        updatedAt: '2026-04-30T05:10:00.000Z',
+      });
+      mockRetryQueueService.addDurably.mockResolvedValueOnce(true);
+      mockSyncRpcClient.upsertProject.mockResolvedValueOnce({
+        status: 'unauthorized',
+        reason: 'supabase_client_unavailable',
+        raw: {},
+      });
+
+      const result = await (service as unknown as {
+        pushProjectWithResult: (project: Project, fromRetryQueue?: boolean, sourceUserId?: string, taskIdsToDelete?: string[]) => Promise<{ success: boolean; conflict?: boolean; remoteData?: Project; retryEnqueued?: boolean; failureReason?: string; terminal?: boolean }>;
+      }).pushProjectWithResult(project, false, 'test-user-id');
+
+      expect(result).toEqual(expect.objectContaining({
+        success: false,
+        retryEnqueued: true,
+        failureReason: 'project sync queued for retry',
+      }));
+      expect(result.terminal).toBeUndefined();
+      expect(mockRetryQueueService.addDurably).toHaveBeenCalled();
+      expect(service.state().syncError).toBeNull();
+    });
+
+    it('pushProjectWithResult 应将真实 unauthorized project RPC 结果标记为 terminal', async () => {
+      const project = createMockProject({
+        id: 'project-rpc-unauthorized-terminal',
+        updatedAt: '2026-04-30T05:20:00.000Z',
+      });
+      mockSyncRpcClient.upsertProject.mockResolvedValueOnce({
+        status: 'unauthorized',
+        reason: 'jwt_invalid',
+        raw: {},
+      });
+
+      const result = await (service as unknown as {
+        pushProjectWithResult: (project: Project, fromRetryQueue?: boolean, sourceUserId?: string, taskIdsToDelete?: string[]) => Promise<{ success: boolean; conflict?: boolean; remoteData?: Project; retryEnqueued?: boolean; failureReason?: string; terminal?: boolean }>;
+      }).pushProjectWithResult(project, false, 'test-user-id');
+
+      expect(result).toEqual({
+        success: false,
+        retryEnqueued: false,
+        failureReason: '项目同步权限校验失败，请重新登录后重试',
+        terminal: true,
+      });
+      expect(mockRetryQueueService.addDurably).not.toHaveBeenCalled();
+      expect(service.state().syncError).toBe('项目同步权限校验失败，请重新登录后重试');
     });
   });
   
@@ -1318,6 +1428,51 @@ describe('SimpleSyncService', () => {
 
       expect(result).toBe(false);
       expect(projectsQueryMock.upsert).not.toHaveBeenCalled();
+    });
+
+    it('pushProjectWithResult 在 non-RPC 权限拒绝时应标记为 terminal 结果', async () => {
+      const project = createMockProject({ id: 'project-non-rpc-terminal' });
+      mockSyncRpcClient.isFeatureEnabled.mockReturnValue(false);
+      mockSessionManager.isSessionExpiredError.mockReturnValue(false);
+
+      mockClient.from = vi.fn().mockImplementation((table: string) => {
+        if (table === 'projects') {
+          return {
+            upsert: vi.fn().mockReturnValue({
+              select: vi.fn().mockReturnValue({
+                single: vi.fn().mockResolvedValue({
+                  data: null,
+                  error: { code: '42501', message: 'row-level security policy violation' },
+                }),
+              }),
+            }),
+          };
+        }
+
+        return {
+          upsert: vi.fn().mockResolvedValue({ error: null }),
+          select: vi.fn().mockReturnValue({
+            eq: vi.fn().mockReturnValue({
+              gt: vi.fn().mockResolvedValue({ data: [], error: null }),
+            }),
+          }),
+          delete: vi.fn().mockReturnValue({
+            eq: vi.fn().mockResolvedValue({ error: null }),
+          }),
+        };
+      });
+
+      const result = await (service as unknown as {
+        pushProjectWithResult: (project: Project, fromRetryQueue?: boolean, sourceUserId?: string, taskIdsToDelete?: string[]) => Promise<{ success: boolean; conflict?: boolean; remoteData?: Project; retryEnqueued?: boolean; failureReason?: string; terminal?: boolean }>;
+      }).pushProjectWithResult(project, false, 'test-user-id');
+
+      expect(result).toEqual({
+        success: false,
+        retryEnqueued: false,
+        failureReason: '项目同步权限校验失败，请重新登录后重试',
+        terminal: true,
+      });
+      expect(mockRetryQueueService.addDurably).not.toHaveBeenCalled();
     });
     
     it('pushConnection 应该成功推送', async () => {
@@ -3695,6 +3850,79 @@ describe('SimpleSyncService', () => {
       expect(mockBatchSync.saveProjectToCloud).toHaveBeenCalledTimes(1);
       expect(firstResult).toEqual(conflictResult);
       expect(queuedResult).toEqual(conflictResult);
+    });
+
+    it('saveProjectToCloud 在 terminal 结果后不应继续重放排队中的新快照', async () => {
+      const firstProject = createMockProject({
+        id: 'project-terminal-collapse',
+        updatedAt: '2026-04-11T08:10:00.000Z',
+        tasks: [createMockTask({ id: 'task-1', updatedAt: '2026-04-11T08:10:00.000Z' })],
+        connections: [],
+      });
+      const queuedProject = createMockProject({
+        id: 'project-terminal-collapse',
+        updatedAt: '2026-04-11T08:10:02.000Z',
+        tasks: [createMockTask({ id: 'task-2', updatedAt: '2026-04-11T08:10:02.000Z' })],
+        connections: [],
+      });
+      const terminalResult = {
+        success: false,
+        terminal: true,
+        failureReason: '当前客户端同步协议已过期，请刷新后重试',
+      };
+      let resolveFirstSave: ((value: typeof terminalResult) => void) | null = null;
+      mockBatchSync.saveProjectToCloud = vi.fn().mockImplementationOnce(() => new Promise((resolve) => {
+        resolveFirstSave = resolve;
+      }));
+
+      const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id');
+      const queuedPromise = service.saveProjectToCloud(queuedProject, 'test-user-id');
+
+      expectDeferredCallback(resolveFirstSave, 'resolveFirstSave')(terminalResult);
+
+      const [firstResult, queuedResult] = await Promise.all([firstPromise, queuedPromise]);
+
+      expect(mockBatchSync.saveProjectToCloud).toHaveBeenCalledTimes(1);
+      expect(firstResult).toEqual(terminalResult);
+      expect(queuedResult).toEqual(terminalResult);
+    });
+
+    it('saveProjectToCloud 命中 terminal 结果时应清理遗留 project retry marker', async () => {
+      const project = createMockProject({
+        id: 'project-terminal-clear-retry',
+        updatedAt: '2026-04-11T08:12:00.000Z',
+        tasks: [createMockTask({ id: 'task-1', updatedAt: '2026-04-11T08:12:00.000Z' })],
+        connections: [],
+      });
+      const terminalResult = {
+        success: false,
+        terminal: true,
+        failureReason: '当前客户端同步协议已过期，请刷新后重试',
+      };
+      mockRetryQueueService.add('project', 'upsert', project, undefined, 'test-user-id');
+      mockRetryQueueService.add('project', 'upsert', project, undefined, 'other-user-id');
+      mockRetryQueueService.add('task', 'upsert', createMockTask({ id: 'task-retain' }), project.id, 'test-user-id');
+      mockRetryQueueService.add('task', 'upsert', createMockTask({ id: 'task-other-owner' }), project.id, 'other-user-id');
+      mockBatchSync.saveProjectToCloud = vi.fn().mockResolvedValueOnce(terminalResult);
+
+      const result = await service.saveProjectToCloud(project, 'test-user-id');
+
+      expect(result).toEqual(terminalResult);
+      const remainingOwnerRetries = mockRetryQueueService.getItems().filter((item: RetryQueueItem) =>
+        (item.projectId === project.id || (item.type === 'project' && item.data.id === project.id))
+          && item.sourceUserId === 'other-user-id',
+      );
+      expect(remainingOwnerRetries).toEqual([
+        expect.objectContaining({
+          type: 'project',
+          sourceUserId: 'other-user-id',
+        }),
+        expect.objectContaining({
+          type: 'task',
+          sourceUserId: 'other-user-id',
+        }),
+      ]);
+      expect(mockRetryQueueService.hasEntity?.('task', 'task-retain')).toBe(false);
     });
 
     it('saveProjectToCloud 在前序请求抛错时不应立即重放排队中的新快照', async () => {

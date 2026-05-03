@@ -314,6 +314,47 @@ describe('BatchSyncService owner isolation', () => {
     expect(result.failureReason).toBe('permission denied');
   });
 
+  it('项目元数据失败但已安全转交 RetryQueue 时，应清理红色 syncError 并保留 project retry marker', async () => {
+    const project = createProject({ id: 'project-retry-handoff' });
+    callbacks.pushProject = vi.fn().mockResolvedValue({
+      success: false,
+      retryEnqueued: true,
+      failureReason: 'supabase client unavailable for project sync',
+    });
+    service.setCallbacks(callbacks);
+    mockClient.auth.getSession.mockResolvedValue({
+      data: { session: { user: { id: 'user-a' } } },
+    });
+
+    const result = await service.saveProjectToCloud(project, 'user-a');
+
+    expect(result.success).toBe(false);
+    expect(result.retryEnqueued).toContain('project:project-retry-handoff');
+    expect(mockSyncState.setSyncError).toHaveBeenCalledWith(null);
+    expect(mockSyncState.setSyncError).not.toHaveBeenCalledWith('项目元数据同步失败，已停止批量同步并等待重试');
+  });
+
+  it('项目元数据 terminal failure 时应透传 terminal 标记并保留失败原因', async () => {
+    const project = createProject({ id: 'project-terminal-failure' });
+    callbacks.pushProject = vi.fn().mockResolvedValue({
+      success: false,
+      terminal: true,
+      failureReason: '当前客户端同步协议已过期，请刷新后重试',
+    });
+    service.setCallbacks(callbacks);
+    mockClient.auth.getSession.mockResolvedValue({
+      data: { session: { user: { id: 'user-a' } } },
+    });
+
+    const result = await service.saveProjectToCloud(project, 'user-a');
+
+    expect(result.success).toBe(false);
+    expect(result.terminal).toBe(true);
+    expect(result.retryEnqueued).not.toContain('project:project-terminal-failure');
+    expect(result.failureReason).toBe('当前客户端同步协议已过期，请刷新后重试');
+    expect(mockSyncState.setSyncError).toHaveBeenCalledWith('当前客户端同步协议已过期，请刷新后重试');
+  });
+
   it('saveProjectToCloud 应将 sourceUserId 透传给 task 与 connection 回调', async () => {
     const task: Task = {
       id: 'task-owner-pass-through',

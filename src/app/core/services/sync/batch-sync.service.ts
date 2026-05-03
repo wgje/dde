@@ -47,6 +47,7 @@ export interface BatchSyncResult {
   failedConnectionIds?: string[];
   retryEnqueued?: string[];
   failureReason?: string;
+  terminal?: boolean;
 }
 
 /** 批量同步回调函数类型 */
@@ -56,7 +57,7 @@ export interface BatchSyncCallbacks {
     fromRetryQueue?: boolean,
     sourceUserId?: string,
     taskIdsToDelete?: string[],
-  ) => Promise<{ success: boolean; conflict?: boolean; remoteData?: Project; retryEnqueued?: boolean; failureReason?: string }>;
+  ) => Promise<{ success: boolean; conflict?: boolean; remoteData?: Project; retryEnqueued?: boolean; failureReason?: string; terminal?: boolean }>;
   pushTask: (
     task: Task,
     projectId: string,
@@ -698,15 +699,23 @@ export class BatchSyncService {
           recordRetryMarker(marker);
           durablyConfirmedRetryMarkers.add(marker);
         }
+        const failureReason = projectPushResult.failureReason ?? 'project metadata sync failed';
         this.syncState.setSyncing(false);
-        this.syncState.setSyncError('项目元数据同步失败，已停止批量同步并等待重试');
+        if (projectPushResult.terminal) {
+          this.syncState.setSyncError(failureReason);
+        } else if (projectPushResult.retryEnqueued) {
+          this.syncState.setSyncError(null);
+        } else {
+          this.syncState.setSyncError('项目元数据同步失败，已停止批量同步并等待重试');
+        }
         return {
           success: false,
           projectPushed,
           failedTaskIds,
           failedConnectionIds,
           retryEnqueued,
-          failureReason: projectPushResult.failureReason ?? 'project metadata sync failed',
+          failureReason,
+          terminal: projectPushResult.terminal,
         };
       }
 

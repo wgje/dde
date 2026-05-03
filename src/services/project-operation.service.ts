@@ -143,6 +143,45 @@ export class ProjectOperationService {
     }
   }
 
+  private canSettleStaleProjectLocally(context: { ownerUserId: string | null; sessionGeneration: number }): boolean {
+    return !!context.ownerUserId && context.ownerUserId === this.userSession.currentUserId();
+  }
+
+  private async clearResolvedConflictState(
+    projectId: string,
+    ownerUserId: string | null,
+    activeConflict?: {
+      projectId?: string;
+      conflictedAt?: string;
+      local?: Project;
+      remote?: Project;
+      localProject?: Project;
+      remoteProject?: Project;
+      pendingTaskDeleteIds?: string[];
+    } | null,
+    conflictFingerprint?: {
+      projectId: string;
+      ownerUserId: string | null;
+      conflictedAt?: string;
+      localVersion?: number;
+      remoteVersion?: number;
+      pendingTaskDeleteIds?: string[];
+    },
+  ): Promise<void> {
+    const currentStoredConflict = await this.conflictStorage.getConflict(projectId);
+    const canDeleteStoredConflict = !conflictFingerprint
+      || !currentStoredConflict
+      || this.doesStoredConflictMatchFingerprint(currentStoredConflict, conflictFingerprint);
+
+    if (currentStoredConflict && canDeleteStoredConflict) {
+      await this.conflictStorage.deleteConflict(projectId, ownerUserId);
+    }
+    const currentActiveConflict = this.syncCoordinator.conflictData();
+    if (this.doesActiveConflictMatchSnapshot(currentActiveConflict, activeConflict)) {
+      this.syncCoordinator.clearActiveConflict();
+    }
+  }
+
   private shouldEnqueueProjectDeleteFailure(error: OperationError): boolean {
     if (error.code === ErrorCodes.SYNC_OFFLINE) {
       return true;
@@ -169,6 +208,8 @@ export class ProjectOperationService {
     const ownerUserId = sessionContext.ownerUserId;
     if (ownerUserId) {
       await this.actionQueue.settleProjectDeleteSuccessForOwner(ownerUserId, projectId);
+      this.retryQueue.removeByProjectIdForOwner(projectId, ownerUserId);
+      return;
     }
     this.retryQueue.removeByProjectId(projectId);
   }
@@ -214,14 +255,34 @@ export class ProjectOperationService {
       try {
         const result = await this.syncCoordinator.core.saveProjectSmart(localProject, userId);
         if (!this.isProjectSessionContextCurrent(sessionContext, 'addProject:saveProjectSmart', localProject.id)) {
-          if (!result.success && !result.conflict) {
+          if (result.success && this.canSettleStaleProjectLocally(sessionContext)) {
+            const currentMatchesSaved = this.doesCurrentProjectMatchSnapshot(localProject.id, localProject);
+            if (currentMatchesSaved) {
+              this.discardStaleProjectMutations(localProject.id, sessionContext.ownerUserId);
+            }
+            this.settleCurrentProjectSyncState(localProject.id, {
+              pendingSync: !currentMatchesSaved,
+              version: result.newVersion,
+            });
+          } else if (result.terminal
+            && this.canSettleStaleProjectLocally(sessionContext)
+            && this.doesCurrentProjectMatchSnapshot(localProject.id, localProject)) {
+            this.discardStaleProjectMutations(localProject.id, sessionContext.ownerUserId);
+            this.persistTerminalProjectState(localProject.id);
+          } else if (!result.success && !result.conflict && !result.terminal) {
             await this.settleStaleProjectCrudFailure(sessionContext, createQueueAction, 'addProject:saveProjectSmart');
           }
           this.optimisticState.commitSnapshot(snapshot.id);
           return { success: true };
         }
         
-        if (!result.success && !result.conflict) {
+        if (result.terminal) {
+          this.discardStaleProjectMutations(localProject.id, userId);
+          this.toastService.error('同步已停止', result.failureReason ?? '项目已保存在本地，但不会自动同步到云端');
+          this.optimisticState.commitSnapshot(snapshot.id);
+          this.persistTerminalProjectState(localProject.id);
+          return { success: true };
+        } else if (!result.success && !result.conflict) {
           // 同步失败（离线或网络异常）：保留本地乐观更新，加入离线队列
           // 不回滚——确保离线状态下用户操作不受阻断
           this.actionQueue.enqueue(createQueueAction);
@@ -412,7 +473,21 @@ export class ProjectOperationService {
       const result = await this.syncCoordinator.core.saveProjectSmart(localProject, userId);
 
       if (!this.isProjectSessionContextCurrent(sessionContext, 'upsertImportedProject:saveProjectSmart', localProject.id)) {
-        if (!result.success && !result.conflict) {
+        if (result.success && this.canSettleStaleProjectLocally(sessionContext)) {
+          const currentMatchesSaved = this.doesCurrentProjectMatchSnapshot(localProject.id, localProject);
+          if (currentMatchesSaved) {
+            this.discardStaleProjectMutations(localProject.id, sessionContext.ownerUserId);
+          }
+          this.settleCurrentProjectSyncState(localProject.id, {
+            pendingSync: !currentMatchesSaved,
+            version: result.newVersion,
+          });
+        } else if (result.terminal
+          && this.canSettleStaleProjectLocally(sessionContext)
+          && this.doesCurrentProjectMatchSnapshot(localProject.id, localProject)) {
+            this.discardStaleProjectMutations(localProject.id, sessionContext.ownerUserId);
+          this.persistTerminalProjectState(localProject.id);
+        } else if (!result.success && !result.conflict && !result.terminal) {
           await this.settleStaleProjectCrudFailure(
             sessionContext,
             importQueueAction,
@@ -448,6 +523,14 @@ export class ProjectOperationService {
         this.toastService.warning('导入存在冲突', '检测到云端版本冲突，请检查后重试');
         this.optimisticState.commitSnapshot(snapshot.id);
         return { success: false, error: '导入冲突' };
+      }
+
+      if (result.terminal) {
+        this.discardStaleProjectMutations(localProject.id, userId);
+        this.toastService.error('同步已停止', result.failureReason ?? '导入内容已保存在本地，但不会自动同步到云端');
+        this.optimisticState.commitSnapshot(snapshot.id);
+        this.persistTerminalProjectState(localProject.id);
+        return { success: true };
       }
 
       this.actionQueue.enqueue(importQueueAction);
@@ -581,6 +664,9 @@ export class ProjectOperationService {
         return false;
       }
     }
+
+    const latestStoredConflict = await this.conflictStorage.getConflict(projectId);
+    const conflictFingerprint = this.captureConflictFingerprint(latestStoredConflict, conflictData, sessionContext.ownerUserId);
     
     const result = await options.runResolution(localProject, remoteProject);
     if (!this.isProjectSessionContextCurrent(sessionContext, 'resolveConflict:resolve', projectId)) {
@@ -613,7 +699,7 @@ export class ProjectOperationService {
       this.undoService.clearHistory(projectId);
     }
 
-    this.discardStaleProjectMutations(projectId);
+    this.discardStaleProjectMutations(projectId, sessionContext.ownerUserId);
     
     if (!options.finalizeAsRemote) {
       const userId = sessionContext.ownerUserId;
@@ -625,12 +711,46 @@ export class ProjectOperationService {
             ? { ...resolvedProject, version: syncResult.newVersion }
             : resolvedProject;
           if (!this.isProjectSessionContextCurrent(sessionContext, 'resolveConflict:saveProjectSmart', projectId)) {
+            const hasDeferredDeleteWork = effectivePendingTaskDeleteIds.length > 0;
             if (syncResult.success && !(await this.handoffPendingTaskDeletes(sessionContext, persistedProject, effectivePendingTaskDeleteIds))) {
               return false;
             }
+
+            if (this.canSettleStaleProjectLocally(sessionContext)) {
+              if (syncResult.success) {
+                const currentMatchesResolved = this.doesCurrentProjectMatchSnapshot(projectId, resolvedProject);
+                this.finalizeResolvedProjectCurrentState(projectId, {
+                  pendingSync: hasDeferredDeleteWork || !currentMatchesResolved,
+                  clearProjectChanges: currentMatchesResolved,
+                  version: syncResult.newVersion,
+                });
+                await this.clearResolvedConflictState(projectId, sessionContext.ownerUserId, activeConflict, conflictFingerprint);
+              } else if (syncResult.terminal) {
+                const currentMatchesResolved = this.doesCurrentProjectMatchSnapshot(projectId, resolvedProject);
+                this.finalizeResolvedProjectCurrentState(projectId, {
+                  pendingSync: !currentMatchesResolved,
+                  clearProjectChanges: currentMatchesResolved,
+                });
+                await this.clearResolvedConflictState(projectId, sessionContext.ownerUserId, activeConflict, conflictFingerprint);
+              }
+            }
+
             return true;
           }
-          if (!syncResult.success && !syncResult.conflict) {
+          if (syncResult.terminal) {
+            const currentMatchesResolved = this.doesCurrentProjectMatchSnapshot(projectId, resolvedProject);
+            if (currentMatchesResolved) {
+              this.finalizeResolvedProject(projectId, resolvedProject, {
+                pendingSync: false,
+              });
+            } else {
+              this.finalizeResolvedProjectCurrentState(projectId, {
+                pendingSync: true,
+                clearProjectChanges: false,
+              });
+            }
+            this.toastService.warning('同步已停止', syncResult.failureReason ?? '冲突已在本地解决，但不会自动同步到云端');
+          } else if (!syncResult.success && !syncResult.conflict) {
             this.actionQueue.enqueue({
               type: 'update',
               entityType: 'project',
@@ -695,17 +815,22 @@ export class ProjectOperationService {
     }
 
     if (!this.isProjectSessionContextCurrent(sessionContext, 'resolveConflict:delete-conflict', projectId)) {
+      if (this.canSettleStaleProjectLocally(sessionContext)) {
+        await this.clearResolvedConflictState(projectId, sessionContext.ownerUserId, activeConflict, conflictFingerprint);
+        return true;
+      }
       return false;
     }
 
-    await this.conflictStorage.deleteConflict(projectId, sessionContext.ownerUserId);
     if (!this.isProjectSessionContextCurrent(sessionContext, 'resolveConflict:clear-active-conflict', projectId)) {
+      if (this.canSettleStaleProjectLocally(sessionContext)) {
+        await this.clearResolvedConflictState(projectId, sessionContext.ownerUserId, activeConflict, conflictFingerprint);
+        return true;
+      }
       return false;
     }
 
-    if (activeConflict?.projectId === projectId) {
-      this.syncCoordinator.clearActiveConflict();
-    }
+    await this.clearResolvedConflictState(projectId, sessionContext.ownerUserId, activeConflict, conflictFingerprint);
 
     return true;
   }
@@ -817,6 +942,221 @@ export class ProjectOperationService {
     this.changeTracker.clearProjectChanges(projectId);
   }
 
+  private finalizeResolvedProjectCurrentState(
+    projectId: string,
+    options: { pendingSync: boolean; clearProjectChanges?: boolean; version?: number },
+  ): void {
+    this.projectState.updateProjects(projects => projects.map(current =>
+      current.id === projectId
+        ? {
+            ...current,
+          version: options.version ?? current.version,
+            syncSource: 'synced',
+            pendingSync: options.pendingSync,
+          }
+        : current
+    ));
+    this.syncCoordinator.core.saveOfflineSnapshot(this.projectState.projects());
+    this.changeTracker.clearProjectFieldLocks(projectId);
+    if (options.clearProjectChanges !== false) {
+      this.changeTracker.clearProjectChanges(projectId);
+    }
+  }
+
+  private settleCurrentProjectSyncState(
+    projectId: string,
+    options: { pendingSync: boolean; version?: number },
+  ): void {
+    this.projectState.updateProjects(projects => projects.map(current =>
+      current.id === projectId
+        ? {
+            ...current,
+            version: options.version ?? current.version,
+            syncSource: 'synced',
+            pendingSync: options.pendingSync,
+          }
+        : current
+    ));
+    this.syncCoordinator.core.saveOfflineSnapshot(this.projectState.projects());
+  }
+
+  private doesCurrentProjectMatchSnapshot(projectId: string, snapshot: Project): boolean {
+    const currentProject = this.projectState.getProject(projectId);
+    if (!currentProject) {
+      return false;
+    }
+
+    const normalize = (project: Project): string => JSON.stringify({
+      ...this.syncCoordinator.validateAndRebalance(project),
+      updatedAt: undefined,
+      version: undefined,
+      pendingSync: undefined,
+      syncSource: undefined,
+    });
+
+    return normalize(currentProject) === normalize(snapshot);
+  }
+
+  private captureConflictFingerprint(
+    storedConflict: {
+      projectId: string;
+      ownerUserId?: string;
+      conflictedAt: string;
+      localVersion: number;
+      remoteVersion?: number;
+      pendingTaskDeleteIds?: string[];
+    } | null,
+    activeConflict: {
+      projectId?: string;
+      conflictedAt?: string;
+      local?: Project;
+      remote?: Project;
+      localProject?: Project;
+      remoteProject?: Project;
+      pendingTaskDeleteIds?: string[];
+    } | null,
+    ownerUserId: string | null,
+  ): {
+    projectId: string;
+    ownerUserId: string | null;
+    conflictedAt?: string;
+    localVersion?: number;
+    remoteVersion?: number;
+    pendingTaskDeleteIds?: string[];
+  } {
+    const activeFingerprint = activeConflict?.projectId
+      ? {
+          projectId: activeConflict.projectId,
+          ownerUserId,
+          conflictedAt: activeConflict.conflictedAt,
+          localVersion: activeConflict.local?.version ?? activeConflict.localProject?.version,
+          remoteVersion: activeConflict.remote?.version ?? activeConflict.remoteProject?.version,
+          pendingTaskDeleteIds: [...(activeConflict.pendingTaskDeleteIds ?? [])],
+        }
+      : null;
+
+    const storedFingerprint = storedConflict
+      ? {
+          projectId: storedConflict.projectId,
+          ownerUserId: storedConflict.ownerUserId ?? ownerUserId,
+          conflictedAt: storedConflict.conflictedAt,
+          localVersion: storedConflict.localVersion,
+          remoteVersion: storedConflict.remoteVersion,
+          pendingTaskDeleteIds: [...(storedConflict.pendingTaskDeleteIds ?? [])],
+        }
+      : null;
+
+    if (activeFingerprint && storedFingerprint) {
+      if (!activeFingerprint.conflictedAt) {
+        return storedFingerprint;
+      }
+
+      if (!storedFingerprint.conflictedAt) {
+        return activeFingerprint;
+      }
+
+      return storedFingerprint.conflictedAt >= activeFingerprint.conflictedAt
+        ? storedFingerprint
+        : activeFingerprint;
+    }
+
+    if (storedFingerprint) {
+      return storedFingerprint;
+    }
+
+    if (activeFingerprint) {
+      return activeFingerprint;
+    }
+
+    return {
+      projectId: activeConflict?.projectId ?? '',
+      ownerUserId,
+      conflictedAt: activeConflict?.conflictedAt,
+      localVersion: activeConflict?.local?.version ?? activeConflict?.localProject?.version,
+      remoteVersion: activeConflict?.remote?.version ?? activeConflict?.remoteProject?.version,
+      pendingTaskDeleteIds: [...(activeConflict?.pendingTaskDeleteIds ?? [])],
+    };
+  }
+
+  private doesStoredConflictMatchFingerprint(
+    currentConflict: {
+      projectId: string;
+      ownerUserId?: string;
+      conflictedAt: string;
+      localVersion: number;
+      remoteVersion?: number;
+      pendingTaskDeleteIds?: string[];
+    } | null,
+    fingerprint: {
+      projectId: string;
+      ownerUserId: string | null;
+      conflictedAt?: string;
+      localVersion?: number;
+      remoteVersion?: number;
+      pendingTaskDeleteIds?: string[];
+    },
+  ): boolean {
+    if (!currentConflict || currentConflict.projectId !== fingerprint.projectId) {
+      return false;
+    }
+
+    const currentPendingDeletes = [...(currentConflict.pendingTaskDeleteIds ?? [])].sort();
+    const expectedPendingDeletes = [...(fingerprint.pendingTaskDeleteIds ?? [])].sort();
+
+    return (currentConflict.ownerUserId ?? fingerprint.ownerUserId) === fingerprint.ownerUserId
+      && (fingerprint.conflictedAt === undefined || currentConflict.conflictedAt === fingerprint.conflictedAt)
+      && currentConflict.localVersion === (fingerprint.localVersion ?? currentConflict.localVersion)
+      && (currentConflict.remoteVersion ?? 0) === (fingerprint.remoteVersion ?? 0)
+      && currentPendingDeletes.length === expectedPendingDeletes.length
+      && currentPendingDeletes.every((taskId, index) => taskId === expectedPendingDeletes[index]);
+  }
+
+  private doesActiveConflictMatchSnapshot(
+    currentConflict: {
+      projectId: string;
+      conflictedAt?: string;
+      local?: Project;
+      remote?: Project;
+      localProject?: Project;
+      remoteProject?: Project;
+      pendingTaskDeleteIds?: string[];
+    } | null,
+    expectedConflict?: {
+      projectId?: string;
+      conflictedAt?: string;
+      local?: Project;
+      remote?: Project;
+      localProject?: Project;
+      remoteProject?: Project;
+      pendingTaskDeleteIds?: string[];
+    } | null,
+  ): boolean {
+    if (!currentConflict || !expectedConflict || currentConflict.projectId !== expectedConflict.projectId) {
+      return false;
+    }
+
+    if (currentConflict === expectedConflict) {
+      return true;
+    }
+
+    const currentPendingDeletes = [...(currentConflict.pendingTaskDeleteIds ?? [])].sort();
+    const expectedPendingDeletes = [...(expectedConflict.pendingTaskDeleteIds ?? [])].sort();
+    const currentLocalVersion = currentConflict.local?.version ?? currentConflict.localProject?.version ?? 0;
+    const currentRemoteVersion = currentConflict.remote?.version ?? currentConflict.remoteProject?.version ?? 0;
+    const expectedLocalVersion = expectedConflict.local?.version ?? expectedConflict.localProject?.version ?? 0;
+    const expectedRemoteVersion = expectedConflict.remote?.version ?? expectedConflict.remoteProject?.version ?? 0;
+
+    return (expectedConflict.conflictedAt === undefined || currentConflict.conflictedAt === expectedConflict.conflictedAt)
+      && currentLocalVersion === expectedLocalVersion
+      && currentRemoteVersion === expectedRemoteVersion
+      && currentPendingDeletes.length === expectedPendingDeletes.length
+      && currentPendingDeletes.every((taskId, index) => taskId === expectedPendingDeletes[index]);
+  }
+
+  private persistTerminalProjectState(projectId: string): void {
+    this.finalizeResolvedProjectCurrentState(projectId, { pendingSync: false });
+  }
+
   private applyPendingTaskDeletes(project: Project, pendingTaskDeleteIds: string[]): Project {
     if (pendingTaskDeleteIds.length === 0) {
       return project;
@@ -885,7 +1225,7 @@ export class ProjectOperationService {
     );
   }
 
-  private discardStaleProjectMutations(projectId: string): void {
+  private discardStaleProjectMutations(projectId: string, ownerUserId?: string | null): void {
     this.actionQueue.discardActions(action => {
       if (action.entityType === 'project' && action.entityId === projectId) {
         return true;
@@ -898,6 +1238,11 @@ export class ProjectOperationService {
 
       return false;
     });
+    if (ownerUserId) {
+      this.retryQueue.removeByProjectIdForOwner(projectId, ownerUserId);
+      return;
+    }
+
     this.retryQueue.removeByProjectId(projectId);
   }
 }

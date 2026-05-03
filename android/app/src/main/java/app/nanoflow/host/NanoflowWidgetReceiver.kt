@@ -728,7 +728,11 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
       val store = NanoflowWidgetStore(context)
       val newSignature = NanoflowWidgetRenderer.resolveLayoutSignature(model)
       val lastSignature = store.readLastAppliedLayoutSignature(appWidgetId)
-      val effectivePartial = partialUpdate && lastSignature != null && lastSignature == newSignature
+      val effectivePartial =
+        partialUpdate &&
+          !shouldForceFullUpdate(model) &&
+          lastSignature != null &&
+          lastSignature == newSignature
       if (effectivePartial) {
         appWidgetManager.partiallyUpdateAppWidget(appWidgetId, views)
       } else {
@@ -747,6 +751,21 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
           )
         }
       }
+    }
+
+    private fun shouldForceFullUpdate(model: WidgetRenderModel): Boolean {
+      // MIUI / HyperOS 对 gate_actions_list 的 PendingIntentTemplate 绑定偶发不自愈；
+      // 仅当中大尺寸真的渲染出「已读 / 完成」按钮时，才强制 full update 重新 inflate hostView。
+      if (model.sizeTier == WidgetSizeTier.SMALL) {
+        return false
+      }
+      if (!model.isGateMode) {
+        return false
+      }
+      if (model.contentCards.firstOrNull()?.isGateEmptyState == true) {
+        return false
+      }
+      return model.displayedGateEntryId?.isNotBlank() == true
     }
 
     const val EXTRA_APP_WIDGET_ID = "extra.APP_WIDGET_ID"
@@ -813,13 +832,23 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
       )
     }
 
-    /** 集合视图数据源 adapter intent。data Uri 携带 appWidgetId + listKind，防止不同实例/列表共享 factory。 */
-    fun actionListAdapterIntent(context: Context, appWidgetId: Int, listKind: String): Intent {
+    /**
+     * 集合视图数据源 adapter intent。
+     * data Uri 默认携带 appWidgetId + listKind；必要时追加 stateToken，强制 launcher 丢弃旧 factory。
+     */
+    fun actionListAdapterIntent(
+      context: Context,
+      appWidgetId: Int,
+      listKind: String,
+      stateToken: String? = null,
+    ): Intent {
       return Intent(context, NanoflowWidgetActionService::class.java).apply {
         putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, appWidgetId)
         putExtra(EXTRA_LIST_KIND, listKind)
         // 关键：Uri 必须唯一，否则 RemoteViewsAdapter 会在 widget/list 之间共享 factory 造成状态混乱。
-        data = Uri.parse("nanoflow://widget/actions/$appWidgetId/$listKind")
+        // 对 MIUI / HyperOS，再把当前卡片状态折进 identity，避免 launcher 复用旧 content factory。
+        val identitySuffix = stateToken?.takeIf { it.isNotBlank() }?.let { "?state=$it" } ?: ""
+        data = Uri.parse("nanoflow://widget/actions/$appWidgetId/$listKind$identitySuffix")
       }
     }
 
@@ -1011,12 +1040,12 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
           // 因此比对 layout 签名：变化时强制升级为 full update。
           val newSignature = NanoflowWidgetRenderer.resolveLayoutSignature(model)
           val lastSignature = store.readLastAppliedLayoutSignature(widgetId)
-          if (lastSignature == newSignature) {
+          if (lastSignature == newSignature && !shouldForceFullUpdate(model)) {
             appWidgetManager.partiallyUpdateAppWidget(widgetId, views)
           } else {
             appWidgetManager.updateAppWidget(widgetId, views)
             store.persistLastAppliedLayoutSignature(widgetId, newSignature)
-            if (lastSignature != null) {
+            if (lastSignature != null && lastSignature != newSignature) {
               NanoflowWidgetTelemetry.info(
                 "widget_layout_signature_changed_full_update",
                 mapOf(
