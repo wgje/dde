@@ -596,13 +596,8 @@ export class SpeechToTextService {
       throw new Error('服务响应格式错误');
     }
 
-    if (this.isRetryableTranscribeCode(data.code) || data.retryable === true) {
-      this.controlledUpstreamRetryDelayMs = this.parseRetryAfterMs(response.headers.get('Retry-After'));
-      throw new Error(ErrorCodes.FOCUS_NETWORK_ERROR);
-    }
-
     if (data.ok === false || data.code) {
-      if (this.isRetryableTranscribeCode(data.code)) {
+      if (this.isRetryableTranscribeCode(data.code) || data.retryable === true) {
         this.controlledUpstreamRetryDelayMs = this.parseRetryAfterMs(response.headers.get('Retry-After'));
         throw new Error(ErrorCodes.FOCUS_NETWORK_ERROR);
       }
@@ -778,10 +773,11 @@ export class SpeechToTextService {
   }
 
   private scheduleRetryableTranscribeReplay(error: unknown, reason: string): void {
-    const delayMs = this.isControlledUpstreamRetryableError(error)
-      ? (this.controlledUpstreamRetryDelayMs ?? this.DEFAULT_UPSTREAM_RETRY_DELAY_MS)
-      : this.OFFLINE_REPLAY_RETRY_DELAY_MS;
+    const controlledDelayMs = this.controlledUpstreamRetryDelayMs;
     this.controlledUpstreamRetryDelayMs = null;
+    const delayMs = this.isControlledUpstreamRetryableError(error)
+      ? (controlledDelayMs ?? this.DEFAULT_UPSTREAM_RETRY_DELAY_MS)
+      : this.OFFLINE_REPLAY_RETRY_DELAY_MS;
     this.scheduleOfflineCacheReplay(reason, delayMs);
   }
 

@@ -2157,11 +2157,12 @@ export class BlackBoxSyncService {
       cursor = { updatedAt: '1970-01-01T00:00:00Z', id: '' };
     }
 
-    let query = cursor.id
+    const keysetFilter = this.createSafeBlackBoxKeysetFilter(cursor);
+    let query = keysetFilter
       ? client
         .from('black_box_entries')
         .select('*')
-        .or(`updated_at.gt.${cursor.updatedAt},and(updated_at.eq.${cursor.updatedAt},id.gt.${cursor.id})`)
+        .or(keysetFilter)
       : client
         .from('black_box_entries')
         .select('*')
@@ -2192,6 +2193,11 @@ export class BlackBoxSyncService {
   private isValidBlackBoxCursor(cursor: BlackBoxSyncCursor): boolean {
     const updatedAtMs = Date.parse(cursor.updatedAt);
     return Number.isFinite(updatedAtMs) && (!cursor.id || isValidUUID(cursor.id));
+  }
+
+  private createSafeBlackBoxKeysetFilter(cursor: BlackBoxSyncCursor): string | null {
+    if (!cursor.id || !this.isValidBlackBoxCursor(cursor)) return null;
+    return `updated_at.gt.${cursor.updatedAt},and(updated_at.eq.${cursor.updatedAt},id.gt.${cursor.id})`;
   }
 
   private isBlackBoxCursorRow(row: Record<string, unknown> | undefined): row is Record<string, unknown> & {

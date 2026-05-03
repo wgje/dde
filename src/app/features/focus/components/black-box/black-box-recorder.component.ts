@@ -394,12 +394,14 @@ export class BlackBoxRecorderComponent implements OnDestroy {
     await this.voiceService.startRecording();
 
     if (requestId !== this.startRequestId) {
-      if (!this.isPressActive && this.voiceService.isRecording()) {
-        this.voiceService.cancelRecording();
-        this.isOutOfZone.set(false);
-      }
+      this.cancelRecordingIfPressEnded();
       return;
     }
+
+    this.cancelRecordingIfPressEnded();
+  }
+
+  private cancelRecordingIfPressEnded(): void {
     if (!this.isPressActive && this.voiceService.isRecording()) {
       this.voiceService.cancelRecording();
       this.isOutOfZone.set(false);
