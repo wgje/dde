@@ -115,6 +115,9 @@ export class BlackBoxSyncService {
   private readonly IDB_VERSION = FOCUS_CONFIG.SYNC.IDB_VERSION;
   private readonly STORE_NAME = FOCUS_CONFIG.IDB_STORES.BLACK_BOX_ENTRIES;
   private readonly DEBOUNCE_DELAY = SYNC_CONFIG.DEBOUNCE_DELAY;
+  private readonly BLACKBOX_PULL_PAGE_SIZE = 200;
+  private readonly BLACKBOX_PULL_MAX_PAGES = 10;
+  private readonly BLACKBOX_PULL_MAX_DURATION_MS = 20_000;
   private initIndexedDBPromise: Promise<void> | null = null;
   private realtimeChannel: RealtimeChannel | null = null;
   private realtimeSubscribedUserId: string | null = null;
@@ -1434,7 +1437,7 @@ export class BlackBoxSyncService {
    * 公开方法：由 RetryQueue 处理器回调调用
    * 返回 boolean 表示是否成功（供 RetryQueue 决定是否重试）
    */
-  async pushToServer(entry: BlackBoxEntry): Promise<boolean> {
+  async pushToServer(entry: BlackBoxEntry, sourceUserId?: string): Promise<boolean> {
     if (!this.supabase.isConfigured) {
       this.logger.debug('Supabase 未配置，跳过推送');
       return false;
@@ -1442,6 +1445,26 @@ export class BlackBoxSyncService {
     if (this.isRemoteUnavailable()) {
       this.logger.debug('连接中断模式下跳过黑匣子推送');
       return false;
+    }
+
+    const sessionUserId = this.resolveRemoteSessionUserId();
+    if (!sessionUserId) {
+      this.logger.warn('BlackBox push deferred: session owner unavailable', {
+        entryId: entry.id,
+        hasEntryUserId: !!entry.userId,
+        hasSourceUserId: !!sourceUserId,
+      });
+      return false;
+    }
+
+    if (entry.userId !== sessionUserId || (sourceUserId && sourceUserId !== sessionUserId)) {
+      this.logger.warn('BlackBox push rejected: owner mismatch', {
+        entryId: entry.id,
+        hasSessionUserId: !!sessionUserId,
+        hasEntryUserId: !!entry.userId,
+        hasSourceUserId: !!sourceUserId,
+      });
+      return true;
     }
 
     // 校验所有 UUID 字段，跳过 IndexedDB 中的脏数据（如 "dev-preview"、"dev-test"）
@@ -1967,6 +1990,7 @@ export class BlackBoxSyncService {
           remoteWatermark &&
           Number.isFinite(remoteMs) &&
           Number.isFinite(localMs) &&
+          this.lastSyncCursor?.id &&
           remoteMs <= localMs &&
           effectiveLastSync !== '1970-01-01T00:00:00Z' &&
           !pendingEntriesNeedRemoteReconciliation
@@ -1991,13 +2015,81 @@ export class BlackBoxSyncService {
 
       this.logger.debug(`Pulling changes since: ${effectiveLastSync}`);
 
-      // 增量拉取
-      let { data, error } = await client
-        .from('black_box_entries')
-        .select('*')
-        .gt('updated_at', effectiveLastSync)
-        .order('updated_at', { ascending: true })
-        .order('id', { ascending: true });
+      let pulledRowCount = 0;
+      let error: unknown = null;
+      let pageCursor: BlackBoxSyncCursor = { updatedAt: effectiveLastSync, id: '' };
+      const upperWatermark = FEATURE_FLAGS.BLACKBOX_WATERMARK_PROBE_V1
+        ? await this.getRemoteBlackBoxWatermark(client)
+        : null;
+      const pullStartedAt = Date.now();
+      let pulledPageCount = 0;
+
+      while (true) {
+        if (
+          pulledPageCount >= this.BLACKBOX_PULL_MAX_PAGES
+          || Date.now() - pullStartedAt >= this.BLACKBOX_PULL_MAX_DURATION_MS
+        ) {
+          this.logger.info('黑匣子分页拉取达到本轮预算，已保存当前游标，等待后续拉取继续', {
+            pulledPageCount,
+            pulledRowCount,
+          });
+          break;
+        }
+
+        const page = await this.fetchBlackBoxDeltaPage(client, pageCursor, upperWatermark);
+        error = page.error;
+
+        if (
+          error
+          && this.sessionManager.isSessionExpiredError(supabaseErrorToError(error))
+        ) {
+          const refreshResult = await this.sessionManager.tryRefreshSessionWithSession('BlackBoxSync.pullChanges');
+          if (refreshResult.refreshed) {
+            this.logger.info('BlackBox pullChanges 会话已刷新，重试增量拉取');
+            const retry = await this.fetchBlackBoxDeltaPage(client, pageCursor, upperWatermark);
+            error = retry.error;
+            page.data = retry.data;
+          }
+        }
+
+        if (error) break;
+
+        const pageRows = (page.data ?? []) as Record<string, unknown>[];
+        pulledPageCount += 1;
+        pulledRowCount += pageRows.length;
+
+        if (!this.isExpectedRealtimeContextCurrent(expectedUserId, expectedRealtimeGeneration)) {
+          this.logger.info('黑匣子拉取在分页远端返回后中止：Realtime 订阅上下文已变化');
+          return false;
+        }
+
+        for (const row of pageRows) {
+          if (!this.isExpectedRealtimeContextCurrent(expectedUserId, expectedRealtimeGeneration)) {
+            this.logger.info('黑匣子明细合并中止：Realtime 订阅上下文已变化');
+            return false;
+          }
+
+          const entry = this.mapRowToEntry(row);
+          await this.mergeWithLocal(entry, preferRemoteForSyncedLocalDuringPull, repairingFutureCursor);
+        }
+
+        if (pageRows.length > 0) {
+          await this.commitBlackBoxCursorFromRows(pageRows);
+        }
+
+        if (pageRows.length < this.BLACKBOX_PULL_PAGE_SIZE) {
+          break;
+        }
+        const lastRow = pageRows[pageRows.length - 1];
+        if (!this.isBlackBoxCursorRow(lastRow)) {
+          this.logger.warn('黑匣子分页游标缺少关键字段，停止本轮拉取以避免跳页', {
+            hasUpdatedAt: typeof lastRow?.['updated_at'] === 'string',
+            hasId: typeof lastRow?.['id'] === 'string',
+          });
+          break;
+        }
+        pageCursor = { updatedAt: lastRow['updated_at'], id: lastRow['id'] };
+      }
 
       if (!this.isExpectedRealtimeContextCurrent(expectedUserId, expectedRealtimeGeneration)) {
         this.logger.info('黑匣子拉取在远端返回后中止：Realtime 订阅上下文已变化');
@@ -2005,64 +2097,26 @@ export class BlackBoxSyncService {
       }
 
       if (error) {
-        const enhanced = supabaseErrorToError(error);
-
-        // 【JWT 自愈】检测到 session 过期时主动刷新一次并重试，避免控制台刷屏。
-        // 使用 tryRefreshSessionWithSession（allowWhenExpired: true）绕过 syncState
-        // .sessionExpired 短路，刷新成功后 SessionManager 会自动重置 flag。
-        if (this.sessionManager.isSessionExpiredError(enhanced)) {
-          const refreshResult = await this.sessionManager.tryRefreshSessionWithSession('BlackBoxSync.pullChanges');
-          if (refreshResult.refreshed) {
-            this.logger.info('BlackBox pullChanges 会话已刷新，重试增量拉取');
-            const retry = await client
-              .from('black_box_entries')
-              .select('*')
-              .gt('updated_at', effectiveLastSync)
-              .order('updated_at', { ascending: true })
-              .order('id', { ascending: true });
-            data = retry.data;
-            error = retry.error;
-          }
-        }
-
-        if (error) {
-          const finalErr = supabaseErrorToError(error);
-          // 【鲁棒性 2026-04-16】浏览器网络挂起属瞬时错误，降级为 debug，回退到本地快照但不报 ERROR
-          if (isBrowserNetworkSuspendedError(finalErr) || isBrowserNetworkSuspendedWindow()) {
-            this.logger.debug('BlackBox 浏览器网络挂起，跳过增量拉取', { message: finalErr.message });
-            await this.loadFromLocal();
-            return true;
-          }
-
-          if (this.sessionManager.isSessionExpiredError(finalErr)) {
-            this.logger.warn('BlackBox 会话失效，已保留本地快照并等待重新认证', {
-              code: finalErr.code,
-              message: finalErr.message,
-            });
-            await this.loadFromLocal();
-            return true;
-          }
-
-          this.logger.error('Failed to pull changes', finalErr.message);
+        const finalErr = supabaseErrorToError(error);
+        // 【鲁棒性 2026-04-16】浏览器网络挂起属瞬时错误，降级为 debug，回退到本地快照但不报 ERROR
+        if (isBrowserNetworkSuspendedError(finalErr) || isBrowserNetworkSuspendedWindow()) {
+          this.logger.debug('BlackBox 浏览器网络挂起，跳过增量拉取', { message: finalErr.message });
           await this.loadFromLocal();
           return true;
         }
-      }
 
-      // 合并到本地
-      // 【M-04 Performance】Each entry is written to IDB sequentially via
-      // separate readwrite transactions. For large pull batches (100+ entries)
-      // this creates significant overhead. A future iteration should batch all
-      // writes into a single IDB readwrite transaction (or use a bulk-put
-      // helper) to reduce transaction commit overhead by ~10x.
-      for (const row of data ?? []) {
-        if (!this.isExpectedRealtimeContextCurrent(expectedUserId, expectedRealtimeGeneration)) {
-          this.logger.info('黑匣子明细合并中止：Realtime 订阅上下文已变化');
-          return false;
+        if (this.sessionManager.isSessionExpiredError(finalErr)) {
+          this.logger.warn('BlackBox 会话失效，已保留本地快照并等待重新认证', {
+            code: finalErr.code,
+            message: finalErr.message,
+          });
+          await this.loadFromLocal();
+          return true;
         }
 
-        const entry = this.mapRowToEntry(row);
-        await this.mergeWithLocal(entry, preferRemoteForSyncedLocalDuringPull, repairingFutureCursor);
+        this.logger.error('Failed to pull changes', finalErr.message);
+        await this.loadFromLocal();
+        return true;
       }
 
       await this.reconcilePendingEntriesWithServer(
@@ -2073,17 +2127,7 @@ export class BlackBoxSyncService {
         expectedRealtimeGeneration,
       );
 
-      // 更新同步时间并持久化
-      if (data && data.length > 0) {
-        if (!this.isExpectedRealtimeContextCurrent(expectedUserId, expectedRealtimeGeneration)) {
-          this.logger.info('黑匣子拉取在提交游标前中止：Realtime 订阅上下文已变化');
-          return false;
-        }
-
-        await this.commitBlackBoxCursorFromRows(data as Array<Record<string, unknown>>);
-      }
-
-      this.logger.info(`Pulled changes from server: ${data?.length ?? 0} entries`);
+      this.logger.info(`Pulled changes from server: ${pulledRowCount} entries`);
       return true;
     } catch (error) {
       // 【鲁棒性 2026-04-16】浏览器网络挂起：debug，不污染错误日志
@@ -2096,6 +2140,74 @@ export class BlackBoxSyncService {
       await this.loadFromLocal();
       return false;
     }
+  }
+
+  private async fetchBlackBoxDeltaPage(
+    client: Awaited<ReturnType<SupabaseClientService['clientAsync']>>,
+    cursor: BlackBoxSyncCursor,
+    upperWatermark: string | null,
+  ): Promise<{ data: unknown[] | null; error: unknown }> {
+    if (!client) return { data: null, error: null };
+
+    if (!this.isValidBlackBoxCursor(cursor)) {
+      this.logger.warn('黑匣子分页游标无效，回退到安全全量窗口', {
+        hasUpdatedAt: typeof cursor.updatedAt === 'string',
+        hasId: typeof cursor.id === 'string',
+      });
+      cursor = { updatedAt: '1970-01-01T00:00:00Z', id: '' };
+    }
+
+    const keysetFilter = this.createSafeBlackBoxKeysetFilter(cursor);
+    let query = keysetFilter
+      ? client
+        .from('black_box_entries')
+        .select('*')
+        .or(keysetFilter)
+      : client
+        .from('black_box_entries')
+        .select('*')
+        .gt('updated_at', cursor.updatedAt);
+
+    const lteQuery = (query as {
+      lte?: (column: string, value: string) => unknown;
+    }).lte;
+    if (upperWatermark && typeof lteQuery === 'function') {
+      query = lteQuery.call(query, 'updated_at', upperWatermark) as typeof query;
+    }
+
+    const orderedQuery = query
+      .order('updated_at', { ascending: true })
+      .order('id', { ascending: true });
+
+    const limitQuery = (orderedQuery as {
+      limit?: (count: number) => Promise<{ data: unknown[] | null; error: unknown }>;
+    }).limit;
+
+    if (typeof limitQuery !== 'function') {
+      return orderedQuery as unknown as Promise<{ data: unknown[] | null; error: unknown }>;
+    }
+
+    return limitQuery.call(orderedQuery, this.BLACKBOX_PULL_PAGE_SIZE);
+  }
+
+  private isValidBlackBoxCursor(cursor: BlackBoxSyncCursor): boolean {
+    const updatedAtMs = Date.parse(cursor.updatedAt);
+    return Number.isFinite(updatedAtMs) && (!cursor.id || isValidUUID(cursor.id));
+  }
+
+  private createSafeBlackBoxKeysetFilter(cursor: BlackBoxSyncCursor): string | null {
+    if (!cursor.id || !this.isValidBlackBoxCursor(cursor)) return null;
+    return `updated_at.gt.${cursor.updatedAt},and(updated_at.eq.${cursor.updatedAt},id.gt.${cursor.id})`;
+  }
+
+  private isBlackBoxCursorRow(row: Record<string, unknown> | undefined): row is Record<string, unknown> & {
+    id: string;
+    updated_at: string;
+  } {
+    return typeof row?.['id'] === 'string'
+      && isValidUUID(row['id'])
+      && typeof row['updated_at'] === 'string'
+      && Number.isFinite(Date.parse(row['updated_at']));
   }
 
   private async getRemoteBlackBoxWatermark(

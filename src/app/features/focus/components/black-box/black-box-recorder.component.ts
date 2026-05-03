@@ -173,6 +173,8 @@ export class BlackBoxRecorderComponent implements OnDestroy {
 
   /** 全局事件清理函数集合 */
   private globalCleanups: (() => void)[] = [];
+  private isPressActive = false;
+  private startRequestId = 0;
   
   readonly recordZone = viewChild<ElementRef<HTMLElement>>('recordZone');
   
@@ -180,6 +182,10 @@ export class BlackBoxRecorderComponent implements OnDestroy {
 
   ngOnDestroy(): void {
     this.removeGlobalListeners();
+    this.isPressActive = false;
+    if (this.voiceService.isRecording()) {
+      this.voiceService.cancelRecording();
+    }
   }
 
   // ===============================================
@@ -230,11 +236,15 @@ export class BlackBoxRecorderComponent implements OnDestroy {
     // 【修复 P3-05】增加 isRecording 检查，防止双击创建双重 MediaRecorder
     if (this.voiceService.isTranscribing() || this.transcription() || this.voiceService.isRecording()) return;
     
-    this.startRecording();
+    this.isPressActive = true;
+    void this.startRecording();
     
     // 绑定全局 mousemove 和 mouseup
     const onMouseMove = (e: MouseEvent) => this.checkMouseInZone(e.clientX, e.clientY);
-    const onMouseUp = () => this.stopOrCancel();
+    const onMouseUp = () => {
+      this.isPressActive = false;
+      this.stopOrCancel();
+    };
     
     document.addEventListener('mousemove', onMouseMove);
     document.addEventListener('mouseup', onMouseUp);
@@ -262,7 +272,8 @@ export class BlackBoxRecorderComponent implements OnDestroy {
     // 【修复 P3-05】增加 isRecording 检查，防止双击创建双重 MediaRecorder
     if (this.voiceService.isTranscribing() || this.transcription() || this.voiceService.isRecording()) return;
     
-    this.startRecording();
+    this.isPressActive = true;
+    void this.startRecording();
     
     // 绑定全局 touchmove 和 touchend/touchcancel
     const onTouchMove = (e: TouchEvent) => {
@@ -270,7 +281,10 @@ export class BlackBoxRecorderComponent implements OnDestroy {
         this.checkMouseInZone(e.touches[0].clientX, e.touches[0].clientY);
       }
     };
-    const onTouchEnd = () => this.stopOrCancel();
+    const onTouchEnd = () => {
+      this.isPressActive = false;
+      this.stopOrCancel();
+    };
     
     document.addEventListener('touchmove', onTouchMove, { passive: true });
     document.addEventListener('touchend', onTouchEnd);
@@ -291,10 +305,12 @@ export class BlackBoxRecorderComponent implements OnDestroy {
     event.preventDefault();
     if (this.voiceService.isTranscribing() || this.transcription()) return;
     if ((event as KeyboardEvent).repeat) return;
-    this.startRecording();
+    this.isPressActive = true;
+    void this.startRecording();
   }
 
   onKeyStop(): void {
+    this.isPressActive = false;
     if (!this.voiceService.isRecording()) return;
     this.isOutOfZone.set(false);
     this.doStopAndTranscribe();
@@ -369,12 +385,27 @@ export class BlackBoxRecorderComponent implements OnDestroy {
    * 本组件不再维护本地 setInterval，避免多实例（侧栏 + 移动抽屉）因各自 timer 未启动
    * 导致「录音中... 0:00」卡死。
    */
-  private startRecording(): void {
+  private async startRecording(): Promise<void> {
     this.transcription.set('');
     this.editableText = '';
     this.isOutOfZone.set(false);
 
-    this.voiceService.startRecording();
+    const requestId = ++this.startRequestId;
+    await this.voiceService.startRecording();
+
+    if (requestId !== this.startRequestId) {
+      this.cancelRecordingIfPressEnded();
+      return;
+    }
+
+    this.cancelRecordingIfPressEnded();
+  }
+
+  private cancelRecordingIfPressEnded(): void {
+    if (!this.isPressActive && this.voiceService.isRecording()) {
+      this.voiceService.cancelRecording();
+      this.isOutOfZone.set(false);
+    }
   }
 
   /**
@@ -402,6 +433,7 @@ export class BlackBoxRecorderComponent implements OnDestroy {
    */
   private stopOrCancel(): void {
     this.removeGlobalListeners();
+    this.isPressActive = false;
 
     if (!this.voiceService.isRecording()) return;
     

@@ -427,7 +427,7 @@ describe('RetryQueueService', () => {
     const result = await service.processQueueSlice({ maxItems: 1, maxDurationMs: 1000 });
 
     expect(result.processed).toBe(1);
-    expect(handler.pushBlackBoxEntry).toHaveBeenCalledWith(olderEntry);
+    expect(handler.pushBlackBoxEntry).toHaveBeenCalledWith(olderEntry, 'test-user');
     expect(service.getItems()).toEqual([
       expect.objectContaining({
         type: 'blackbox',
