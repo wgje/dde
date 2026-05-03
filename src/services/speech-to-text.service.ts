@@ -78,6 +78,8 @@ export class SpeechToTextService {
   private readonly OFFLINE_REPLAY_BATCH_SIZE = 2;
   private readonly OFFLINE_REPLAY_RETRY_DELAY_MS = 1500;
   private readonly OFFLINE_REPLAY_CONTINUATION_DELAY_MS = 15_000;
+  private readonly DEFAULT_UPSTREAM_RETRY_DELAY_MS = 30_000;
+  private controlledUpstreamRetryDelayMs: number | null = null;
   
   constructor() {
     // 初始化 IndexedDB
@@ -471,9 +473,7 @@ export class SpeechToTextService {
             try {
               const cacheState = await this.saveToOfflineCache(audioBlob, expectedOwnerUserId);
               if (cacheState === 'owned') {
-                if (!this.isControlledUpstreamRetryableError(error)) {
-                  this.scheduleOfflineCacheReplay('retryable-transcribe-error');
-                }
+                this.scheduleRetryableTranscribeReplay(error, 'retryable-transcribe-error');
                 this.toast.warning('转写失败', ErrorMessages[ErrorCodes.FOCUS_NETWORK_ERROR]);
               } else {
                 this.toast.warning('录音已隔离', '当前账号未稳定，这条录音不会自动转写');
@@ -573,6 +573,7 @@ export class SpeechToTextService {
       
       // 处理 Groq 临时不可用：缓存录音，不立即重放，避免上游故障时放大请求。
       if (this.isRetryableTranscribeCode(errorData.code)) {
+        this.controlledUpstreamRetryDelayMs = this.parseRetryAfterMs(response.headers.get('Retry-After'));
         throw new Error(ErrorCodes.FOCUS_NETWORK_ERROR);
       }
       
@@ -596,6 +597,7 @@ export class SpeechToTextService {
 
     if (data.ok === false || data.retryable || data.code) {
       if (this.isRetryableTranscribeCode(data.code) || data.retryable) {
+        this.controlledUpstreamRetryDelayMs = this.parseRetryAfterMs(response.headers.get('Retry-After'));
         throw new Error(ErrorCodes.FOCUS_NETWORK_ERROR);
       }
       throw new Error(data.error || data.code || ErrorCodes.FOCUS_TRANSCRIBE_FAILED);
@@ -769,6 +771,27 @@ export class SpeechToTextService {
       && this.network.isOnline();
   }
 
+  private scheduleRetryableTranscribeReplay(error: unknown, reason: string): void {
+    const delayMs = this.isControlledUpstreamRetryableError(error)
+      ? (this.controlledUpstreamRetryDelayMs ?? this.DEFAULT_UPSTREAM_RETRY_DELAY_MS)
+      : this.OFFLINE_REPLAY_RETRY_DELAY_MS;
+    this.controlledUpstreamRetryDelayMs = null;
+    this.scheduleOfflineCacheReplay(reason, delayMs);
+  }
+
+  private parseRetryAfterMs(value: string | null): number {
+    if (!value) return this.DEFAULT_UPSTREAM_RETRY_DELAY_MS;
+    const seconds = Number(value);
+    if (Number.isFinite(seconds) && seconds >= 0) {
+      return Math.min(seconds * 1000, this.OFFLINE_REPLAY_CONTINUATION_DELAY_MS);
+    }
+    const timestamp = Date.parse(value);
+    if (Number.isFinite(timestamp)) {
+      return Math.min(Math.max(0, timestamp - Date.now()), this.OFFLINE_REPLAY_CONTINUATION_DELAY_MS);
+    }
+    return this.DEFAULT_UPSTREAM_RETRY_DELAY_MS;
+  }
+
   private async invokeTranscribe(functionUrl: string, audioBlob: Blob, accessToken: string): Promise<Response> {
     const abortCtrl = new AbortController();
     const timeoutId = setTimeout(() => abortCtrl.abort(), FOCUS_CONFIG.BLACK_BOX.TRANSCRIBE_TIMEOUT);
@@ -881,90 +904,90 @@ export class SpeechToTextService {
       const request = store.getAll();
       
       request.onsuccess = async () => {
-        const items = request.result as OfflineAudioCacheEntry[];
-        let processedOwnedItems = 0;
         let stoppedByBudget = false;
-        
-        for (const item of items) {
-          if (!this.isReplayOwnerActive(replayOwnerUserId)) {
-            this.logger.warn('SpeechToText', 'Aborting offline audio replay because session owner changed mid-run', {
-              replayOwnerUserId,
-            });
-            break;
-          }
+        try {
+          const items = request.result as OfflineAudioCacheEntry[];
+          let processedOwnedItems = 0;
 
-          if (item.ownerUserId === this.UNKNOWN_OFFLINE_AUDIO_OWNER) {
-            this.logger.warn('SpeechToText', 'Skipping quarantined legacy offline audio with unknown owner', {
-              itemId: item.id,
-            });
-            continue;
-          }
-
-          if (!item.ownerUserId || item.ownerUserId !== currentUserId) {
-            this.logger.warn('SpeechToText', 'Skipping offline audio owned by a different session', {
-              itemId: item.id,
-              hasOwnerUserId: !!item.ownerUserId,
-            });
-            continue;
-          }
-
-          if (processedOwnedItems >= this.OFFLINE_REPLAY_BATCH_SIZE) {
-            stoppedByBudget = true;
-            break;
-          }
-          processedOwnedItems += 1;
-
-          try {
-            isTranscribing.set(true);
-            const text = await this.transcribeBlob(item.blob);
-
+          for (const item of items) {
             if (!this.isReplayOwnerActive(replayOwnerUserId)) {
-              this.logger.warn('SpeechToText', 'Discarding transcribed offline audio because session owner changed before persistence', {
-                itemId: item.id,
+              this.logger.warn('SpeechToText', 'Aborting offline audio replay because session owner changed mid-run', {
                 replayOwnerUserId,
               });
               break;
             }
 
-            if (text.trim()) {
-              const created = this.blackBoxService.create({
-                content: text,
-                userId: replayOwnerUserId,
+            if (item.ownerUserId === this.UNKNOWN_OFFLINE_AUDIO_OWNER) {
+              this.logger.warn('SpeechToText', 'Skipping quarantined legacy offline audio with unknown owner', {
+                itemId: item.id,
               });
+              continue;
+            }
 
-              if (!created.ok) {
-                this.logger.warn('SpeechToText', 'Failed to persist transcribed offline audio, keeping cache entry for retry', {
+            if (!item.ownerUserId || item.ownerUserId !== currentUserId) {
+              this.logger.warn('SpeechToText', 'Skipping offline audio owned by a different session', {
+                itemId: item.id,
+                hasOwnerUserId: !!item.ownerUserId,
+              });
+              continue;
+            }
+
+            if (processedOwnedItems >= this.OFFLINE_REPLAY_BATCH_SIZE) {
+              stoppedByBudget = true;
+              break;
+            }
+            processedOwnedItems += 1;
+
+            try {
+              isTranscribing.set(true);
+              const text = await this.transcribeBlob(item.blob);
+
+              if (!this.isReplayOwnerActive(replayOwnerUserId)) {
+                this.logger.warn('SpeechToText', 'Discarding transcribed offline audio because session owner changed before persistence', {
                   itemId: item.id,
-                  error: created.error.message,
+                  replayOwnerUserId,
                 });
                 break;
               }
 
-              this.logger.debug('SpeechToText', `Created BlackBox entry from offline audio: "${text.slice(0, 50)}..."`);
-            }
+              if (text.trim()) {
+                const created = this.blackBoxService.create({
+                  content: text,
+                  userId: replayOwnerUserId,
+                });
 
-            await this.deleteFromCache(item.id);
-            results.push({ id: item.id, text });
-            this.logger.debug('SpeechToText', `Processed offline audio: ${item.id}`);
-          } catch (e) {
-            this.logger.error('SpeechToText', 'Failed to process offline item', e instanceof Error ? e.message : String(e));
+                if (!created.ok) {
+                  this.logger.warn('SpeechToText', 'Failed to persist transcribed offline audio, keeping cache entry for retry', {
+                    itemId: item.id,
+                    error: created.error.message,
+                  });
+                  break;
+                }
 
-            if (this.isRetryableTranscribeError(e) && this.network.isOnline()) {
-              if (!this.isControlledUpstreamRetryableError(e)) {
-                this.scheduleOfflineCacheReplay('offline-replay-retryable-error');
+                this.logger.debug('SpeechToText', `Created BlackBox entry from offline audio: "${text.slice(0, 50)}..."`);
               }
-              break;
+
+              await this.deleteFromCache(item.id);
+              results.push({ id: item.id, text });
+              this.logger.debug('SpeechToText', `Processed offline audio: ${item.id}`);
+            } catch (e) {
+              this.logger.error('SpeechToText', 'Failed to process offline item', e instanceof Error ? e.message : String(e));
+
+              if (this.isRetryableTranscribeError(e) && this.network.isOnline()) {
+                this.scheduleRetryableTranscribeReplay(e, 'offline-replay-retryable-error');
+                break;
+              }
             }
           }
+        } catch (error) {
+          reject(error);
+          return;
+        } finally {
+          isTranscribing.set(false);
+          await this.updateOfflinePendingCount().catch(() => undefined);
         }
-        
-        isTranscribing.set(false);
-        await this.updateOfflinePendingCount();
         if (stoppedByBudget && this.network.isOnline()) {
-          this.scheduleOfflineCacheReplay(
-            'bounded-replay-continuation',
-            this.OFFLINE_REPLAY_CONTINUATION_DELAY_MS,
-          );
+          this.scheduleOfflineCacheReplay('bounded-replay-continuation', this.OFFLINE_REPLAY_CONTINUATION_DELAY_MS);
         }
         resolve(results);
       };

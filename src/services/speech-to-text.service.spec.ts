@@ -966,7 +966,7 @@ describe('SpeechToTextService', () => {
 
       const results = await processing;
       expect(results).toEqual([]);
-      expect(scheduleSpy).toHaveBeenCalledWith('offline-replay-retryable-error');
+      expect(scheduleSpy).toHaveBeenCalledWith('offline-replay-retryable-error', 1500);
     });
 
     it('应隔离缺少 ownerUserId 的旧版离线缓存', async () => {

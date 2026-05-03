@@ -1448,7 +1448,16 @@ export class BlackBoxSyncService {
     }
 
     const sessionUserId = this.resolveRemoteSessionUserId();
-    if (!sessionUserId || entry.userId !== sessionUserId || (sourceUserId && sourceUserId !== sessionUserId)) {
+    if (!sessionUserId) {
+      this.logger.warn('BlackBox push deferred: session owner unavailable', {
+        entryId: entry.id,
+        hasEntryUserId: !!entry.userId,
+        hasSourceUserId: !!sourceUserId,
+      });
+      return false;
+    }
+
+    if (entry.userId !== sessionUserId || (sourceUserId && sourceUserId !== sessionUserId)) {
       this.logger.warn('BlackBox push rejected: owner mismatch', {
         entryId: entry.id,
         hasSessionUserId: !!sessionUserId,
@@ -2140,6 +2149,14 @@ export class BlackBoxSyncService {
   ): Promise<{ data: unknown[] | null; error: unknown }> {
     if (!client) return { data: null, error: null };
 
+    if (!this.isValidBlackBoxCursor(cursor)) {
+      this.logger.warn('黑匣子分页游标无效，回退到安全全量窗口', {
+        hasUpdatedAt: typeof cursor.updatedAt === 'string',
+        hasId: typeof cursor.id === 'string',
+      });
+      cursor = { updatedAt: '1970-01-01T00:00:00Z', id: '' };
+    }
+
     let query = cursor.id
       ? client
         .from('black_box_entries')
@@ -2170,6 +2187,11 @@ export class BlackBoxSyncService {
     }
 
     return limitQuery.call(orderedQuery, this.BLACKBOX_PULL_PAGE_SIZE);
+  }
+
+  private isValidBlackBoxCursor(cursor: BlackBoxSyncCursor): boolean {
+    const updatedAtMs = Date.parse(cursor.updatedAt);
+    return Number.isFinite(updatedAtMs) && (!cursor.id || isValidUUID(cursor.id));
   }
 
   private async getRemoteBlackBoxWatermark(
