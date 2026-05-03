@@ -100,7 +100,7 @@ object NanoflowWidgetRenderer {
       renderContentList(context, views, appWidgetId, model)
       if (model.isGateMode) {
         views.setViewVisibility(R.id.nano_widget_gate_actions_list, View.VISIBLE)
-        renderGateActionsList(context, views, appWidgetId)
+        renderGateActionsList(context, views, appWidgetId, model)
       } else {
         views.setViewVisibility(R.id.nano_widget_gate_actions_list, View.GONE)
       }
@@ -133,6 +133,7 @@ object NanoflowWidgetRenderer {
       context,
       appWidgetId,
       NanoflowWidgetActionFactory.LIST_KIND_CONTENT,
+      stateToken = buildContentAdapterStateToken(model),
     )
     views.setRemoteAdapter(R.id.nano_widget_content_list, contentAdapter)
     // 内容列表点击必须启动 LauncherActivity，使用 activity-target 模板直通
@@ -196,6 +197,62 @@ object NanoflowWidgetRenderer {
     views.setTextViewText(R.id.nano_widget_mode_label, model.modeLabel)
   }
 
+  /**
+   * MIUI / HyperOS 会偶发复用旧的 RemoteViewsFactory；把中央卡片状态折进 identity，
+   * 让空大门 <-> 非空大门、条目轮换等切换时强制创建新 factory。
+   *
+   * 【2026-05-03 根因修复补丁】在非空大门模式下额外加入 15 分钟时间桶。
+   * MIUI 的 ApplicationThreadDeferred 会在 app 处于 CEM 状态时暂停主线程，导致
+   * factory 服务的 onBind 回调被挂起，launcher 无法重建 factory，即便内存中的
+   * DataStore 已有有效条目，content_list 仍然展示空白。15 分钟桶保证：在进程解冻后，
+   * 至多 15 分钟内渲染路径就会产生与上一次不同的 URI，触发 launcher 重新绑定 factory
+   * 服务并调用 onCreate()，从 DataStore 拉到最新数据。
+   */
+  private fun buildContentAdapterStateToken(model: WidgetRenderModel): String {
+    val topCard = model.contentCards.firstOrNull()
+    // 非空大门：注入 15 分钟时间桶，确保即使内容不变也会周期性换 factory。
+    val timeBucket = if (model.isGateMode && model.displayedGateEntryId != null) {
+      (System.currentTimeMillis() / (15L * 60L * 1000L)).toString()
+    } else {
+      null
+    }
+    return buildAdapterStateToken(
+      model.tone.name,
+      model.primaryAction.name,
+      model.isGateMode.toString(),
+      model.blackBoxCount.toString(),
+      model.displayedGateEntryId,
+      topCard?.title,
+      topCard?.subtitle,
+      topCard?.metaStart,
+      topCard?.metaEnd,
+      topCard?.isGateEmptyState.toString(),
+      timeBucket,
+    )
+  }
+
+  private fun buildGateActionsAdapterStateToken(model: WidgetRenderModel): String {
+    val topCard = model.contentCards.firstOrNull()
+    // 同 content adapter：非空大门注入 15 分钟时间桶，保证按钮 factory 同步刷新。
+    val timeBucket = if (model.isGateMode && model.displayedGateEntryId != null) {
+      (System.currentTimeMillis() / (15L * 60L * 1000L)).toString()
+    } else {
+      null
+    }
+    return buildAdapterStateToken(
+      model.isGateMode.toString(),
+      model.displayedGateEntryId,
+      topCard?.isGateEmptyState.toString(),
+      model.blackBoxCount.toString(),
+      timeBucket,
+    )
+  }
+
+  private fun buildAdapterStateToken(vararg parts: String?): String {
+    val raw = parts.joinToString("|") { it.orEmpty() }
+    return raw.hashCode().toString()
+  }
+
   // --- 大门计数徽章：(N) 圆环，仅 gate 模式可见 ---
   private fun renderGateCountRing(views: RemoteViews, model: WidgetRenderModel) {
     val count = model.blackBoxCount
@@ -208,11 +265,17 @@ object NanoflowWidgetRenderer {
   }
 
   // --- 大门双按钮 GridView：已读 / 完成 ---
-  private fun renderGateActionsList(context: Context, views: RemoteViews, appWidgetId: Int) {
+  private fun renderGateActionsList(
+    context: Context,
+    views: RemoteViews,
+    appWidgetId: Int,
+    model: WidgetRenderModel,
+  ) {
     val adapter = NanoflowWidgetReceiver.actionListAdapterIntent(
       context,
       appWidgetId,
       NanoflowWidgetActionFactory.LIST_KIND_GATE_ACTIONS,
+      stateToken = buildGateActionsAdapterStateToken(model),
     )
     views.setRemoteAdapter(R.id.nano_widget_gate_actions_list, adapter)
     views.setPendingIntentTemplate(
