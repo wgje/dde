@@ -2081,10 +2081,10 @@ export class BlackBoxSyncService {
           break;
         }
         const lastRow = pageRows[pageRows.length - 1];
-        if (typeof lastRow['updated_at'] !== 'string' || typeof lastRow['id'] !== 'string') {
+        if (!this.isBlackBoxCursorRow(lastRow)) {
           this.logger.warn('黑匣子分页游标缺少关键字段，停止本轮拉取以避免跳页', {
-            hasUpdatedAt: typeof lastRow['updated_at'] === 'string',
-            hasId: typeof lastRow['id'] === 'string',
+            hasUpdatedAt: typeof lastRow?.['updated_at'] === 'string',
+            hasId: typeof lastRow?.['id'] === 'string',
           });
           break;
         }
@@ -2192,6 +2192,16 @@ export class BlackBoxSyncService {
   private isValidBlackBoxCursor(cursor: BlackBoxSyncCursor): boolean {
     const updatedAtMs = Date.parse(cursor.updatedAt);
     return Number.isFinite(updatedAtMs) && (!cursor.id || isValidUUID(cursor.id));
+  }
+
+  private isBlackBoxCursorRow(row: Record<string, unknown> | undefined): row is Record<string, unknown> & {
+    id: string;
+    updated_at: string;
+  } {
+    return typeof row?.['id'] === 'string'
+      && isValidUUID(row['id'])
+      && typeof row['updated_at'] === 'string'
+      && Number.isFinite(Date.parse(row['updated_at']));
   }
 
   private async getRemoteBlackBoxWatermark(

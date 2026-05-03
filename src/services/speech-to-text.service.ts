@@ -296,7 +296,8 @@ export class SpeechToTextService {
    * ⚠️ iOS Safari 兼容性：需要在用户手势内调用
    */
   async startRecording(): Promise<void> {
-    if (this.isRecording() || this.startRecordingPromise) return this.startRecordingPromise ?? undefined;
+    if (this.isRecording()) return;
+    if (this.startRecordingPromise) return this.startRecordingPromise;
 
     this.startRecordingPromise = this.doStartRecording().finally(() => {
       this.startRecordingPromise = null;
@@ -595,8 +596,13 @@ export class SpeechToTextService {
       throw new Error('服务响应格式错误');
     }
 
-    if (data.ok === false || data.retryable || data.code) {
-      if (this.isRetryableTranscribeCode(data.code) || data.retryable) {
+    if (this.isRetryableTranscribeCode(data.code) || data.retryable === true) {
+      this.controlledUpstreamRetryDelayMs = this.parseRetryAfterMs(response.headers.get('Retry-After'));
+      throw new Error(ErrorCodes.FOCUS_NETWORK_ERROR);
+    }
+
+    if (data.ok === false || data.code) {
+      if (this.isRetryableTranscribeCode(data.code)) {
         this.controlledUpstreamRetryDelayMs = this.parseRetryAfterMs(response.headers.get('Retry-After'));
         throw new Error(ErrorCodes.FOCUS_NETWORK_ERROR);
       }
@@ -786,8 +792,8 @@ export class SpeechToTextService {
       return Math.min(seconds * 1000, this.OFFLINE_REPLAY_CONTINUATION_DELAY_MS);
     }
     const timestamp = Date.parse(value);
-    if (Number.isFinite(timestamp)) {
-      return Math.min(Math.max(0, timestamp - Date.now()), this.OFFLINE_REPLAY_CONTINUATION_DELAY_MS);
+    if (Number.isFinite(timestamp) && timestamp > Date.now()) {
+      return Math.min(timestamp - Date.now(), this.OFFLINE_REPLAY_CONTINUATION_DELAY_MS);
     }
     return this.DEFAULT_UPSTREAM_RETRY_DELAY_MS;
   }
