@@ -88,6 +88,11 @@ describe('SimpleSyncService', () => {
   let mockRealtimeEnabledState = false;
   let mockProjectData: any;
   let mockSyncRpcClient: any;
+  let mockBlackBoxSync: {
+    setRetryQueueHandler: ReturnType<typeof vi.fn>;
+    pushToServer: ReturnType<typeof vi.fn>;
+    pullChanges: ReturnType<typeof vi.fn>;
+  };
   let mockProjectStore: any;
   let mockSyncCursorPersistence: any;
   let mockChangeTracker: any;
@@ -540,7 +545,7 @@ describe('SimpleSyncService', () => {
       saveProjectToCloud: vi.fn().mockResolvedValue({ success: true, newVersion: 1 })
     };
 
-    const mockBlackBoxSync = {
+    mockBlackBoxSync = {
       setRetryQueueHandler: vi.fn(),
       pushToServer: vi.fn().mockResolvedValue(true),
       pullChanges: vi.fn().mockResolvedValue(undefined),
@@ -697,6 +702,37 @@ describe('SimpleSyncService', () => {
       expect(service.state().isSyncing).toBe(false);
       expect(service.state().pendingCount).toBe(0);
       expect(service.state().lastSyncTime).toBeNull();
+    });
+
+    it('黑匣子重试入队应保留条目 owner，避免 auth 恢复窗口写入变成无主 legacy 项', () => {
+      const handler = expectDeferredCallback(
+        mockBlackBoxSync.setRetryQueueHandler.mock.calls[0]?.[0],
+        'blackBox retry handler'
+      );
+      const entry = {
+        id: crypto.randomUUID(),
+        projectId: null,
+        userId: 'user-1',
+        content: 'entry',
+        date: '2026-03-04',
+        createdAt: '2026-03-04T00:00:00.000Z',
+        updatedAt: '2026-03-04T00:00:00.000Z',
+        isRead: false,
+        isCompleted: false,
+        isArchived: false,
+        deletedAt: null,
+        syncStatus: 'pending' as const,
+      };
+
+      handler(entry);
+
+      expect(mockRetryQueueService.add).toHaveBeenCalledWith(
+        'blackbox',
+        'upsert',
+        entry,
+        undefined,
+        'user-1',
+      );
     });
     
     it('应该初始化网络状态为在线', () => {

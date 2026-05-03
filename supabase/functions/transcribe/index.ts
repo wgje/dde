@@ -217,15 +217,15 @@ serve(async (req: Request) => {
       if (fetchErr instanceof DOMException && fetchErr.name === 'AbortError') {
         console.error('🎤 [Transcribe] Groq API timed out after', GROQ_TIMEOUT_MS, 'ms');
         return new Response(
-          JSON.stringify({ error: '转写服务响应超时，请缩短录音后重试', code: 'GROQ_TIMEOUT' }),
-          { status: 504, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+          JSON.stringify({ ok: false, error: '转写服务响应超时，请缩短录音后重试', code: 'GROQ_TIMEOUT', retryable: true }),
+          { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
         );
       }
       // 网络错误（DNS 失败、连接拒绝等）
       console.error('🎤 [Transcribe] Groq API fetch failed:', fetchErr);
       return new Response(
-        JSON.stringify({ error: '无法连接转写服务', code: 'GROQ_UNREACHABLE' }),
-        { status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        JSON.stringify({ ok: false, error: '无法连接转写服务', code: 'GROQ_UNREACHABLE', retryable: true }),
+        { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     } finally {
       clearTimeout(groqTimer);

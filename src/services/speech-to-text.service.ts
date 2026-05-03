@@ -54,6 +54,7 @@ export class SpeechToTextService {
   private recoveryReplayTimeout: ReturnType<typeof setTimeout> | null = null;
   private replayOfflineCachePromise: Promise<void> | null = null;
   private ownerSettlementTimeout: ReturnType<typeof setTimeout> | null = null;
+  private startRecordingPromise: Promise<void> | null = null;
   
   // 使用 Signal 管理状态，组件直接读取
   readonly isRecording = isRecording;
@@ -290,31 +291,35 @@ export class SpeechToTextService {
    * ⚠️ iOS Safari 兼容性：需要在用户手势内调用
    */
   async startRecording(): Promise<void> {
-    if (this.isRecording()) {
-      return;
-    }
-    
-    // 预检查设备可用性
+    if (this.isRecording() || this.startRecordingPromise) return this.startRecordingPromise ?? undefined;
+
+    this.startRecordingPromise = this.doStartRecording().finally(() => {
+      this.startRecordingPromise = null;
+    });
+
+    return this.startRecordingPromise;
+  }
+
+  private async doStartRecording(): Promise<void> {
     const isAvailable = await this.checkMicrophoneAvailability();
     if (!isAvailable) {
       const errorMsg = '未找到麦克风设备或不支持录音功能';
       this.logger.warn('SpeechToText', errorMsg);
       this.toast.warning('录音不可用', errorMsg);
-      return; // 优雅返回，不抛出异常
+      return;
     }
-    
+
     try {
       const mimeType = this.getSupportedMimeType();
-      
-      const stream = await navigator.mediaDevices.getUserMedia({ 
+
+      const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: true,
           noiseSuppression: true,
           sampleRate: this.config.SAMPLE_RATE
-        } 
+        }
       });
-      
-      // 【修复 P2-03】MediaRecorder 构造失败时关闭 stream，防止麦克风泄漏
+
       try {
         this.mediaRecorder = new MediaRecorder(stream, {
           mimeType: mimeType || undefined,
@@ -334,20 +339,14 @@ export class SpeechToTextService {
         }
       };
 
-      // 每秒收集一次数据，避免丢失
       this.mediaRecorder.start(1000);
       isRecording.set(true);
       this.startDurationTicker();
-      
+
       this.logger.debug('SpeechToText', `Recording started with mimeType: ${mimeType}`);
-      
-      // 个人使用，不设时长限制（MediaRecorder 自身无硬性时长上限）
-      // 注意：浏览器在极长录音时可能因内存问题自行中断
-      // 每 1000ms ondataavailable 已确保数据分片收集，不会因单次 Blob 过大而丢失
-      
     } catch (err) {
       this.logger.error('SpeechToText', 'Failed to start recording', err instanceof Error ? err.message : String(err));
-      
+
       if (err instanceof DOMException) {
         if (err.name === 'NotAllowedError') {
           this.toast.error('录音失败', ErrorMessages[ErrorCodes.FOCUS_RECORDING_PERMISSION_DENIED]);
@@ -359,9 +358,6 @@ export class SpeechToTextService {
       } else {
         this.toast.error('录音失败', '无法启动录音');
       }
-      
-      // 不抛出异常，避免中断应用流程
-      // throw err;
     }
   }
   
@@ -468,7 +464,7 @@ export class SpeechToTextService {
           this.logger.error('SpeechToText', 'Transcription failed', error instanceof Error ? error.message : String(error));
           
           // 【修复 P5-12】使用 TypeError + 离线状态双重判断，避免依赖浏览器特定 error.message
-          if (error instanceof TypeError || this.isRetryableSessionRecoveryError(error) || !this.network.isOnline()) {
+      if (this.isRetryableTranscribeError(error)) {
             try {
               const cacheState = await this.saveToOfflineCache(audioBlob, expectedOwnerUserId);
               if (cacheState === 'owned') {
@@ -586,12 +582,20 @@ export class SpeechToTextService {
     }
     
     // 【修复 P2-05】安全解析 JSON，防止 Edge Function 返回 HTML 时崩溃
-    let data: { text?: string; duration?: number };
+    let data: { ok?: boolean; text?: string; duration?: number; error?: string; code?: string; retryable?: boolean };
     try {
       data = JSON.parse(responseText);
     } catch {
       this.logger.error('SpeechToText', '响应非 JSON 格式', { responseText: responseText.slice(0, 200) });
       throw new Error('服务响应格式错误');
+    }
+
+    if (data.ok === false || data.retryable || data.code) {
+      if (data.code === 'GROQ_TIMEOUT' || data.code === 'GROQ_UNREACHABLE' || data.retryable) {
+        this.toast.warning('转写稍后重试', data.error || '转写服务暂时不可用，已保存待重试');
+        throw new Error(ErrorCodes.FOCUS_NETWORK_ERROR);
+      }
+      throw new Error(data.error || data.code || ErrorCodes.FOCUS_TRANSCRIBE_FAILED);
     }
     
     // ✅ 成功日志
@@ -740,6 +744,13 @@ export class SpeechToTextService {
 
   private isRetryableSessionRecoveryError(error: unknown): boolean {
     return error instanceof Error && error.message === this.RETRYABLE_SESSION_RECOVERY_ERROR;
+  }
+
+  private isRetryableTranscribeError(error: unknown): boolean {
+    return error instanceof TypeError
+      || this.isRetryableSessionRecoveryError(error)
+      || (error instanceof Error && error.message === ErrorCodes.FOCUS_NETWORK_ERROR)
+      || !this.network.isOnline();
   }
 
   private async invokeTranscribe(functionUrl: string, audioBlob: Blob, accessToken: string): Promise<Response> {
@@ -1069,4 +1080,3 @@ export class SpeechToTextService {
     recordingDurationSec.set(0);
   }
 }
-

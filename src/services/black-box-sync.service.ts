@@ -115,6 +115,7 @@ export class BlackBoxSyncService {
   private readonly IDB_VERSION = FOCUS_CONFIG.SYNC.IDB_VERSION;
   private readonly STORE_NAME = FOCUS_CONFIG.IDB_STORES.BLACK_BOX_ENTRIES;
   private readonly DEBOUNCE_DELAY = SYNC_CONFIG.DEBOUNCE_DELAY;
+  private readonly BLACKBOX_PULL_PAGE_SIZE = 200;
   private initIndexedDBPromise: Promise<void> | null = null;
   private realtimeChannel: RealtimeChannel | null = null;
   private realtimeSubscribedUserId: string | null = null;
@@ -1991,13 +1992,42 @@ export class BlackBoxSyncService {
 
       this.logger.debug(`Pulling changes since: ${effectiveLastSync}`);
 
-      // 增量拉取
-      let { data, error } = await client
-        .from('black_box_entries')
-        .select('*')
-        .gt('updated_at', effectiveLastSync)
-        .order('updated_at', { ascending: true })
-        .order('id', { ascending: true });
+      const data: Record<string, unknown>[] = [];
+      let error: unknown = null;
+      let offset = 0;
+
+      while (true) {
+        const page = await this.fetchBlackBoxDeltaPage(client, effectiveLastSync, offset);
+        error = page.error;
+
+        if (
+          error
+          && this.sessionManager.isSessionExpiredError(supabaseErrorToError(error))
+        ) {
+          const refreshResult = await this.sessionManager.tryRefreshSessionWithSession('BlackBoxSync.pullChanges');
+          if (refreshResult.refreshed) {
+            this.logger.info('BlackBox pullChanges 会话已刷新，重试增量拉取');
+            const retry = await this.fetchBlackBoxDeltaPage(client, effectiveLastSync, offset);
+            error = retry.error;
+            page.data = retry.data;
+          }
+        }
+
+        if (error) break;
+
+        const pageRows = (page.data ?? []) as Record<string, unknown>[];
+        data.push(...pageRows);
+
+        if (!this.isExpectedRealtimeContextCurrent(expectedUserId, expectedRealtimeGeneration)) {
+          this.logger.info('黑匣子拉取在分页远端返回后中止：Realtime 订阅上下文已变化');
+          return false;
+        }
+
+        if (pageRows.length < this.BLACKBOX_PULL_PAGE_SIZE) {
+          break;
+        }
+        offset += pageRows.length;
+      }
 
       if (!this.isExpectedRealtimeContextCurrent(expectedUserId, expectedRealtimeGeneration)) {
         this.logger.info('黑匣子拉取在远端返回后中止：Realtime 订阅上下文已变化');
@@ -2005,48 +2035,26 @@ export class BlackBoxSyncService {
       }
 
       if (error) {
-        const enhanced = supabaseErrorToError(error);
-
-        // 【JWT 自愈】检测到 session 过期时主动刷新一次并重试，避免控制台刷屏。
-        // 使用 tryRefreshSessionWithSession（allowWhenExpired: true）绕过 syncState
-        // .sessionExpired 短路，刷新成功后 SessionManager 会自动重置 flag。
-        if (this.sessionManager.isSessionExpiredError(enhanced)) {
-          const refreshResult = await this.sessionManager.tryRefreshSessionWithSession('BlackBoxSync.pullChanges');
-          if (refreshResult.refreshed) {
-            this.logger.info('BlackBox pullChanges 会话已刷新，重试增量拉取');
-            const retry = await client
-              .from('black_box_entries')
-              .select('*')
-              .gt('updated_at', effectiveLastSync)
-              .order('updated_at', { ascending: true })
-              .order('id', { ascending: true });
-            data = retry.data;
-            error = retry.error;
-          }
-        }
-
-        if (error) {
-          const finalErr = supabaseErrorToError(error);
-          // 【鲁棒性 2026-04-16】浏览器网络挂起属瞬时错误，降级为 debug，回退到本地快照但不报 ERROR
-          if (isBrowserNetworkSuspendedError(finalErr) || isBrowserNetworkSuspendedWindow()) {
-            this.logger.debug('BlackBox 浏览器网络挂起，跳过增量拉取', { message: finalErr.message });
-            await this.loadFromLocal();
-            return true;
-          }
-
-          if (this.sessionManager.isSessionExpiredError(finalErr)) {
-            this.logger.warn('BlackBox 会话失效，已保留本地快照并等待重新认证', {
-              code: finalErr.code,
-              message: finalErr.message,
-            });
-            await this.loadFromLocal();
-            return true;
-          }
-
-          this.logger.error('Failed to pull changes', finalErr.message);
+        const finalErr = supabaseErrorToError(error);
+        // 【鲁棒性 2026-04-16】浏览器网络挂起属瞬时错误，降级为 debug，回退到本地快照但不报 ERROR
+        if (isBrowserNetworkSuspendedError(finalErr) || isBrowserNetworkSuspendedWindow()) {
+          this.logger.debug('BlackBox 浏览器网络挂起，跳过增量拉取', { message: finalErr.message });
           await this.loadFromLocal();
           return true;
         }
+
+        if (this.sessionManager.isSessionExpiredError(finalErr)) {
+          this.logger.warn('BlackBox 会话失效，已保留本地快照并等待重新认证', {
+            code: finalErr.code,
+            message: finalErr.message,
+          });
+          await this.loadFromLocal();
+          return true;
+        }
+
+        this.logger.error('Failed to pull changes', finalErr.message);
+        await this.loadFromLocal();
+        return true;
       }
 
       // 合并到本地
@@ -2055,7 +2063,7 @@ export class BlackBoxSyncService {
       // this creates significant overhead. A future iteration should batch all
       // writes into a single IDB readwrite transaction (or use a bulk-put
       // helper) to reduce transaction commit overhead by ~10x.
-      for (const row of data ?? []) {
+      for (const row of data) {
         if (!this.isExpectedRealtimeContextCurrent(expectedUserId, expectedRealtimeGeneration)) {
           this.logger.info('黑匣子明细合并中止：Realtime 订阅上下文已变化');
           return false;
@@ -2074,16 +2082,16 @@ export class BlackBoxSyncService {
       );
 
       // 更新同步时间并持久化
-      if (data && data.length > 0) {
+      if (data.length > 0) {
         if (!this.isExpectedRealtimeContextCurrent(expectedUserId, expectedRealtimeGeneration)) {
           this.logger.info('黑匣子拉取在提交游标前中止：Realtime 订阅上下文已变化');
           return false;
         }
 
-        await this.commitBlackBoxCursorFromRows(data as Array<Record<string, unknown>>);
+        await this.commitBlackBoxCursorFromRows(data);
       }
 
-      this.logger.info(`Pulled changes from server: ${data?.length ?? 0} entries`);
+      this.logger.info(`Pulled changes from server: ${data.length} entries`);
       return true;
     } catch (error) {
       // 【鲁棒性 2026-04-16】浏览器网络挂起：debug，不污染错误日志
@@ -2096,6 +2104,35 @@ export class BlackBoxSyncService {
       await this.loadFromLocal();
       return false;
     }
+  }
+
+  private async fetchBlackBoxDeltaPage(
+    client: Awaited<ReturnType<SupabaseClientService['clientAsync']>>,
+    effectiveLastSync: string,
+    offset: number,
+  ): Promise<{ data: unknown[] | null; error: unknown }> {
+    if (!client) return { data: null, error: null };
+
+    const orderedQuery = client
+      .from('black_box_entries')
+      .select('*')
+      .gt('updated_at', effectiveLastSync)
+      .order('updated_at', { ascending: true })
+      .order('id', { ascending: true });
+
+    const rangeQuery = (orderedQuery as {
+      range?: (from: number, to: number) => Promise<{ data: unknown[] | null; error: unknown }>;
+    }).range;
+
+    if (typeof rangeQuery !== 'function') {
+      return orderedQuery as unknown as Promise<{ data: unknown[] | null; error: unknown }>;
+    }
+
+    return rangeQuery.call(
+      orderedQuery,
+      offset,
+      offset + this.BLACKBOX_PULL_PAGE_SIZE - 1,
+    );
   }
 
   private async getRemoteBlackBoxWatermark(

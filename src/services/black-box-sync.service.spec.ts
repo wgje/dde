@@ -943,6 +943,52 @@ describe('BlackBoxSyncService', () => {
     expect(orderedResult.order).toHaveBeenCalledWith('id', { ascending: true });
   });
 
+  it('should page black box delta pulls to avoid unbounded Supabase reads', async () => {
+    const rows = [0, 1, 2].map(index => ({
+      id: crypto.randomUUID(),
+      project_id: null,
+      user_id: 'user-1',
+      content: `entry ${index}`,
+      focus_meta: null,
+      date: '2026-03-04',
+      created_at: '2026-03-04T00:00:00.000Z',
+      updated_at: `2026-03-05T00:00:0${index}.000Z`,
+      is_read: false,
+      is_completed: false,
+      is_archived: false,
+      snooze_until: null,
+      snooze_count: 0,
+      deleted_at: null,
+    }));
+    const range = vi.fn((from: number, to: number) => Promise.resolve({
+      data: rows.slice(from, to + 1),
+      error: null,
+    }));
+    const orderedResult = {
+      range,
+      order: vi.fn(() => orderedResult),
+    };
+    const gtQuery = vi.fn(() => orderedResult);
+    const selectQuery = vi.fn(() => ({
+      gt: gtQuery,
+    }));
+    const from = vi.fn(() => ({ select: selectQuery }));
+    const rpc = vi.fn().mockResolvedValue({ data: null, error: null });
+    const supabase = TestBed.inject(SupabaseClientService) as unknown as {
+      clientAsync: ReturnType<typeof vi.fn>;
+    };
+    vi.spyOn(service, 'saveToLocal').mockResolvedValue(undefined);
+    (service as unknown as { currentSyncUserId: string | null }).currentSyncUserId = 'user-1';
+    (service as unknown as { BLACKBOX_PULL_PAGE_SIZE: number }).BLACKBOX_PULL_PAGE_SIZE = 2;
+    supabase.clientAsync.mockResolvedValue({ from, rpc });
+
+    await service.pullChanges({ reason: 'panel-open', force: true });
+
+    expect(range).toHaveBeenCalledWith(0, 1);
+    expect(range).toHaveBeenCalledWith(2, 3);
+    expect(blackBoxEntriesMap().size).toBe(3);
+  });
+
   it('should not advance the black box cursor in memory when cursor persistence fails', async () => {
     const entryId = crypto.randomUUID();
     const remoteRow = {

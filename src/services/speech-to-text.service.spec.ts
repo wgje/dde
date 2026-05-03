@@ -212,6 +212,7 @@ describe('SpeechToTextService', () => {
       vi.useRealTimers();
     }
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
     mockEventBus.onSessionRestored$.complete();
     mockEventBus.onSessionInvalidated$.complete();
     setMediaDevices(originalMediaDevices);
@@ -301,6 +302,46 @@ describe('SpeechToTextService', () => {
 
       // 不应该抛出错误
       await expect(service.startRecording()).resolves.toBeUndefined();
+    });
+
+    it('并发触发开始录音时只创建一个 MediaRecorder', async () => {
+      const getUserMedia = vi.fn().mockResolvedValue({
+        getTracks: () => [] as MediaStreamTrack[],
+      });
+      const enumerateDevices = vi.fn().mockResolvedValue([
+        { kind: 'audioinput', deviceId: 'test1' },
+      ]);
+      const start = vi.fn();
+      const mediaRecorderInstances: unknown[] = [];
+      class MockMediaRecorder {
+        static isTypeSupported = vi.fn(() => true);
+        state = 'recording';
+        mimeType = 'audio/webm';
+        ondataavailable: null = null;
+        onstop: null = null;
+
+        constructor(readonly stream: MediaStream) {
+          mediaRecorderInstances.push(this);
+        }
+
+        start = start;
+        stop = vi.fn();
+      }
+      vi.stubGlobal('MediaRecorder', MockMediaRecorder);
+      setMediaDevices({
+        enumerateDevices,
+        getUserMedia,
+      } as unknown as MediaDevices);
+
+      await Promise.all([
+        service.startRecording(),
+        service.startRecording(),
+      ]);
+
+      expect(getUserMedia).toHaveBeenCalledTimes(1);
+      expect(mediaRecorderInstances).toHaveLength(1);
+      expect(start).toHaveBeenCalledTimes(1);
+      service.cancelRecording();
     });
   });
 
@@ -449,6 +490,37 @@ describe('SpeechToTextService', () => {
           Authorization: 'Bearer refreshed-token'
         })
       });
+    });
+
+    it('应用级转写超时时应作为可重试错误进入离线缓存链路', async () => {
+      mockAuthService.currentUserId.set('cloud-user');
+      mockAuthApi.getSession.mockResolvedValueOnce({
+        data: {
+          session: {
+            access_token: 'valid-token',
+            expires_at: Math.floor(Date.now() / 1000) + 3600,
+            user: { id: 'cloud-user' }
+          }
+        },
+        error: null,
+      });
+      vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+        new Response(JSON.stringify({
+          ok: false,
+          code: 'GROQ_TIMEOUT',
+          error: '转写服务响应超时，请稍后重试',
+          retryable: true,
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        })
+      );
+
+      await expect(
+        (service as unknown as { transcribeBlob: (blob: Blob) => Promise<string> })
+          .transcribeBlob(new Blob(['audio'], { type: 'audio/webm' }))
+      ).rejects.toThrow('FOCUS_NETWORK_ERROR');
+      expect(mockToastService.warning).toHaveBeenCalledWith('转写稍后重试', expect.any(String));
     });
 
     it('刷新失败且原因是 no-session 时应抛出 SYNC_AUTH_EXPIRED', async () => {
