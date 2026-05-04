@@ -279,8 +279,7 @@ describe('SettingsModalComponent', () => {
   });
 
   it('should persist SiYuan runtime mode changes locally', async () => {
-    const siyuanSelect = Array.from(fixture.nativeElement.querySelectorAll('select') as NodeListOf<HTMLSelectElement>)
-      .find(candidate => candidate.textContent?.includes('仅缓存与深链'));
+    const siyuanSelect = fixture.nativeElement.querySelector('[data-testid="siyuan-runtime-mode-select"]') as HTMLSelectElement | null;
     expect(siyuanSelect).toBeTruthy();
 
     siyuanSelect!.value = 'cache-only';

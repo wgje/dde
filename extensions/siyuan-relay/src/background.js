@@ -3,6 +3,7 @@ const PREVIEW_FETCH_TIMEOUT_MS = 5000;
 const MAX_PREVIEW_CHILDREN = 10;
 const MAX_PREVIEW_CHARS = 1200;
 const BLOCK_ID_PATTERN = /^\d{14}-[a-z0-9]{7}$/;
+const SIYUAN_BLOCK_REF_PATTERN = /\(\((\d{14}-[a-z0-9]{7})(?:\s+"([^"]*)")?\)\)/g;
 const ALLOWED_API_PATHS = new Set([
   '/api/system/version',
   '/api/block/getBlockKramdown',
@@ -68,7 +69,7 @@ async function getPreview(message) {
     ]);
 
     if (!kramdown || typeof kramdown !== 'object') throw new RelayError('block-not-found');
-    if (typeof kramdown.id === 'string' && kramdown.id !== blockId) throw new RelayError('unknown');
+    if (typeof kramdown.id === 'string' && kramdown.id !== blockId) throw new RelayError('block-not-found');
     const childBlocks = await buildChildBlocks(config, children, maxChildren);
     const plainText = toPlainText(typeof kramdown.kramdown === 'string' ? kramdown.kramdown : '');
     const truncatedText = plainText.length > maxChars ? `${plainText.slice(0, maxChars).trim()}…` : plainText;
@@ -178,7 +179,7 @@ function readSourceUpdatedAt(value) {
 function toPlainText(kramdown) {
   return String(kramdown)
     .replace(/\{:\s*[^}]+\}/g, '')
-    .replace(/\(\((\d{14}-[a-z0-9]{7})(?:\s+"([^"]*)")?\)\)/g, (_match, blockId, label) => label || blockId)
+    .replace(SIYUAN_BLOCK_REF_PATTERN, (_match, blockId, label) => label || blockId)
     .replace(/!\[[^\]]*\]\([^)]*\)/g, '[图片]')
     .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
     .replace(/[`*_>#\-[\]()]/g, '')
