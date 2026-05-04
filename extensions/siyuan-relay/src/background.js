@@ -178,7 +178,7 @@ function readSourceUpdatedAt(value) {
 function toPlainText(kramdown) {
   return String(kramdown)
     .replace(/\{:\s*[^}]+\}/g, '')
-    .replace(/\(\(([0-9]{14}-[a-z0-9]{7})(?:\s+"([^"]*)")?\)\)/g, (_match, blockId, label) => label || blockId)
+    .replace(/\(\((\d{14}-[a-z0-9]{7})(?:\s+"([^"]*)")?\)\)/g, (_match, blockId, label) => label || blockId)
     .replace(/!\[[^\]]*\]\([^)]*\)/g, '[图片]')
     .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
     .replace(/[`*_>#\-[\]()]/g, '')
