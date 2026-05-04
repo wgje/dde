@@ -12,6 +12,7 @@ import { FlowTaskOperationsService } from '../services/flow-task-operations.serv
 import { toggleMarkdownTodo, getTodoIndexFromClick, handleMarkdownLinkAction } from '../../../../utils/markdown';
 import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
 import { SimpleReminderService } from '../../../../services/simple-reminder.service';
+import { KnowledgeAnchorComponent } from '../../../shared/components/knowledge-anchor/knowledge-anchor.component';
 
 const IGNORE_PREVIEW_CLICK_AFTER_TASK_SWITCH_MS = 180;
 
@@ -20,7 +21,7 @@ const IGNORE_PREVIEW_CLICK_AFTER_TASK_SWITCH_MS = 180;
   selector: 'app-flow-task-detail',
   standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [CommonModule, FormsModule, SafeMarkdownPipe],
+  imports: [CommonModule, FormsModule, SafeMarkdownPipe, KnowledgeAnchorComponent],
   providers: [FlowTaskDetailFormService],
   // Host defaults to pointer-events none; interactive children explicitly opt in.
   host: { style: 'pointer-events: none' },
@@ -194,8 +195,8 @@ const IGNORE_PREVIEW_CLICK_AFTER_TASK_SWITCH_MS = 180;
                       <div class="text-[11px] text-stone-400 dark:text-stone-500 italic">点击编辑内容...</div>
                   }
               </div>
-          } @else {
-              <input data-testid="flow-task-title-input" type="text" 
+           } @else {
+               <input data-testid="flow-task-title-input" type="text" 
                   [ngModel]="localTitle()" 
                   (ngModelChange)="onLocalTitleChange($event)"
                   (focus)="onInputFocus('title')"
@@ -240,10 +241,17 @@ const IGNORE_PREVIEW_CLICK_AFTER_TASK_SWITCH_MS = 180;
                   (ngModelChange)="onWaitMinutesChange(task.id, $event)"
                   class="w-full text-[10px] border border-stone-200 dark:border-stone-600 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-indigo-300 dark:focus:ring-indigo-500 bg-white dark:bg-stone-700"
                   placeholder="等待(min)">
-              </div>
-          }
+               </div>
+           }
 
-          <div class="flex gap-1.5 pt-1">
+           <app-knowledge-anchor
+             [taskId]="task.id"
+             [isMobile]="false"
+             [editable]="isEditMode()"
+             [compact]="!isEditMode()">
+           </app-knowledge-anchor>
+
+           <div class="flex gap-1.5 pt-1">
               <button (click)="addSibling.emit(task)"
                   class="flex-1 px-2 py-1 bg-retro-teal/10 hover:bg-retro-teal text-retro-teal hover:text-white border border-retro-teal/30 text-[10px] font-medium rounded transition-all">
                   +同级
@@ -355,7 +363,6 @@ const IGNORE_PREVIEW_CLICK_AFTER_TASK_SWITCH_MS = 180;
           @if (localContent() || task.content) {
             <div class="text-[11px] text-stone-600 leading-relaxed markdown-preview overflow-hidden max-h-28" [innerHTML]="(localContent() || task.content) | safeMarkdown:'raw'"></div>
           }
-        </div>
       } @else {
         <div class="space-y-1.5">
           <input type="text" 
@@ -420,7 +427,15 @@ const IGNORE_PREVIEW_CLICK_AFTER_TASK_SWITCH_MS = 180;
           </div>
         </div>
       }
-      
+
+      <app-knowledge-anchor
+        class="mt-1 block"
+        [taskId]="task.id"
+        [isMobile]="true"
+        [editable]="isEditMode()"
+        [compact]="!isEditMode()">
+      </app-knowledge-anchor>
+       
       <!-- 操作按钮 -->
       <div
            #mobileActionSection

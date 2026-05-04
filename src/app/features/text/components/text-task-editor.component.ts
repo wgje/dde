@@ -12,6 +12,7 @@ import { SafeMarkdownPipe } from '../../../shared/pipes/safe-markdown.pipe';
 import { TextTaskConnectionsComponent } from './text-task-connections.component';
 import { toggleMarkdownTodo, getTodoIndexFromClick, handleMarkdownLinkAction } from '../../../../utils/markdown';
 import { clearActiveTextSelection, hasActiveTextSelection, isInteractiveSelectionTarget } from '../../../../utils/text-selection';
+import { KnowledgeAnchorComponent } from '../../../shared/components/knowledge-anchor/knowledge-anchor.component';
 
 /**
  * 任务编辑器组件（展开态）
@@ -26,7 +27,7 @@ import { clearActiveTextSelection, hasActiveTextSelection, isInteractiveSelectio
 @Component({
   selector: 'app-text-task-editor',
   standalone: true,
-  imports: [CommonModule, SafeMarkdownPipe, TextTaskConnectionsComponent],
+  imports: [CommonModule, SafeMarkdownPipe, TextTaskConnectionsComponent, KnowledgeAnchorComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div class="animate-collapse-open"
@@ -128,6 +129,13 @@ import { clearActiveTextSelection, hasActiveTextSelection, isInteractiveSelectio
               placeholder="输入 Markdown 内容..."></textarea>
           }
         </div>
+
+        <app-knowledge-anchor
+          [taskId]="task().id"
+          [isMobile]="isMobile()"
+          [editable]="!isPreview()"
+          [compact]="isPreview()">
+        </app-knowledge-anchor>
 
         <!-- 快速待办输入 - 仅在编辑模式下显示 -->
         @if (!isPreview()) {
@@ -1031,7 +1039,6 @@ export class TextTaskEditorComponent implements OnDestroy {
     this.focusRequestTimer = null;
   }
 }
-
 
 
 

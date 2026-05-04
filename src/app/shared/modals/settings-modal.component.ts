@@ -320,6 +320,7 @@ const SIYUAN_TOKEN_MASK = '••••••••';
               <label class="block space-y-1">
                 <span class="text-[10px] font-bold text-slate-500 dark:text-stone-400">连接方式</span>
                 <select
+                  data-testid="siyuan-runtime-mode-select"
                   class="w-full rounded-lg border border-slate-200 dark:border-stone-600 bg-slate-50 dark:bg-stone-700 px-2 py-1.5 text-xs text-slate-700 dark:text-stone-200"
                   [value]="siyuanRuntimeMode()"
                   (change)="updateSiyuanRuntimeMode($event)">

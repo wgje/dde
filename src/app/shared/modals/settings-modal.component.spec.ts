@@ -273,6 +273,42 @@ describe('SettingsModalComponent', () => {
     expect(mockFocusPreferenceService.setRestReminderLowLoadMinutes).toHaveBeenCalledWith(15);
   });
 
+  it('should render SiYuan Knowledge Anchor local-only settings', () => {
+    expect(fixture.nativeElement.textContent).toContain('思源知识锚点');
+    expect(fixture.nativeElement.textContent).toContain('token 与预览缓存仅保存当前设备');
+  });
+
+  it('should persist SiYuan runtime mode changes locally', async () => {
+    const siyuanSelect = fixture.nativeElement.querySelector('[data-testid="siyuan-runtime-mode-select"]') as HTMLSelectElement | null;
+    expect(siyuanSelect).toBeTruthy();
+
+    siyuanSelect!.value = 'cache-only';
+    await component.updateSiyuanRuntimeMode({ target: siyuanSelect } as unknown as Event);
+
+    expect(mockSiyuanCache.saveConfig).toHaveBeenCalledWith(expect.objectContaining({ runtimeMode: 'cache-only' }));
+    expect(component.siyuanRuntimeMode()).toBe('cache-only');
+  });
+
+  it('should clear SiYuan preview cache without forgetting config', async () => {
+    await component.clearSiyuanCache();
+
+    expect(mockSiyuanCache.clearPreviewCache).toHaveBeenCalledTimes(1);
+    expect(mockSiyuanCache.forgetConfig).not.toHaveBeenCalled();
+    expect(component.siyuanConnectionStatus()).toContain('已清除');
+  });
+
+  it('should surface SiYuan connection failures with safe messages', async () => {
+    mockSiyuanPreview.diagnoseConnection.mockResolvedValueOnce({
+      ok: false,
+      mode: 'extension-relay',
+      errorCode: 'extension-unavailable',
+    });
+
+    await component.testSiyuanConnection();
+
+    expect(component.siyuanConnectionStatus()).toContain('安装 NanoFlow 扩展后可实时预览');
+  });
+
   function findButtonByText(text: string): HTMLButtonElement {
     const buttons = Array.from(fixture.nativeElement.querySelectorAll('button')) as HTMLButtonElement[];
     const button = buttons.find(candidate => candidate.textContent?.includes(text));

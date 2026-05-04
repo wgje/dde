@@ -12,7 +12,7 @@ interface SiyuanApiResponse<T> {
   data?: T;
 }
 
-interface KramdownData { kramdown?: string; }
+interface KramdownData { id?: string; kramdown?: string; }
 interface HPathData { hPath?: string; }
 interface AttrData { updated?: string; updatedAt?: string; }
 interface ChildBlockData { id?: string; content?: string; markdown?: string; type?: string; }
@@ -68,14 +68,15 @@ export class SiyuanDirectProvider implements SiyuanPreviewProvider {
     try {
       const [kramdown, hpath, attrs, children] = await Promise.all([
         this.call<KramdownData>(config.baseUrl, config.token, '/api/block/getBlockKramdown', { id: blockId }, controller.signal),
-        this.call<HPathData>(config.baseUrl, config.token, '/api/filetree/getHPathByID', { id: blockId }, controller.signal).catch(() => undefined),
+        this.call<HPathData | string>(config.baseUrl, config.token, '/api/filetree/getHPathByID', { id: blockId }, controller.signal).catch(() => undefined),
         this.call<AttrData>(config.baseUrl, config.token, '/api/attr/getBlockAttrs', { id: blockId }, controller.signal).catch(() => undefined),
         this.call<ChildBlockData[]>(config.baseUrl, config.token, '/api/block/getChildBlocks', { id: blockId }, controller.signal).catch(() => []),
       ]);
       if (!kramdown) throw new SiyuanProviderError('block-not-found');
+      if (kramdown.id && kramdown.id !== blockId) throw new SiyuanProviderError('unknown', 'SiYuan returned mismatched blockId');
       return normalizePreview({
         blockId,
-        hpath: hpath?.hPath,
+        hpath: this.readHPath(hpath),
         kramdown: kramdown.kramdown ?? '',
         sourceUpdatedAt: attrs?.updatedAt ?? attrs?.updated,
         childBlocks: this.mapChildren(children ?? []),
@@ -101,6 +102,11 @@ export class SiyuanDirectProvider implements SiyuanPreviewProvider {
     const json = await response.json() as SiyuanApiResponse<T>;
     if (json.code && json.code !== 0) throw new Error(json.msg ?? `SiYuan code ${json.code}`);
     return json.data;
+  }
+
+  private readHPath(value: HPathData | string | undefined): string | undefined {
+    if (typeof value === 'string') return value;
+    return value?.hPath;
   }
 
   private mapChildren(children: ChildBlockData[]): SiyuanChildBlockPreview[] {
