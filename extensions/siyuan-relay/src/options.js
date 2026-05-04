@@ -23,7 +23,12 @@ async function saveConfig() {
   }
   const current = await chrome.storage.local.get(['token']);
   const token = tokenInput.value === TOKEN_MASK ? current.token : tokenInput.value.trim();
-  await chrome.storage.local.set({ baseUrl, token: token || undefined });
+  await chrome.storage.local.set({ baseUrl });
+  if (token) {
+    await chrome.storage.local.set({ token });
+  } else {
+    await chrome.storage.local.remove(['token']);
+  }
   tokenInput.value = token ? TOKEN_MASK : '';
   status.textContent = '已保存本机配置';
 }
