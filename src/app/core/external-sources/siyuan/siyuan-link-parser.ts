@@ -1,5 +1,5 @@
-const SIYUAN_BLOCK_ID_PATTERN = /^\d{14}-[a-z0-9]{7}$/i;
-const SIYUAN_URI_PATTERN = /^siyuan:\/\/blocks\/([0-9]{14}-[a-z0-9]{7})(?:\?[^\s]*)?$/i;
+const SIYUAN_BLOCK_ID_PATTERN = /^\d{14}-[a-z0-9]{7}$/;
+const SIYUAN_URI_PATTERN = /^siyuan:\/\/blocks\/([0-9]{14}-[a-z0-9]{7})(?:\?[^\s]*)?$/;
 const FORBIDDEN_PROTOCOL_PATTERN = /^(?:javascript|data|file|https?|vbscript|about):/i;
 
 export interface ParsedSiyuanLink {

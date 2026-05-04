@@ -26,5 +26,7 @@ describe('siyuan-link-parser', () => {
   it('validates SiYuan block id format exactly', () => {
     expect(isValidSiyuanBlockId('20260426123456-abc1234')).toBe(true);
     expect(isValidSiyuanBlockId('20260426123456-abc123')).toBe(false);
+    expect(isValidSiyuanBlockId('20260426123456-ABC1234')).toBe(false);
+    expect(parseSiyuanBlockLink('siyuan://blocks/20260426123456-ABC1234')).toBeNull();
   });
 });

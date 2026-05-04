@@ -11,11 +11,12 @@ import { TextViewTaskOpsService } from '../services/text-view-task-ops.service';
 import { handleMarkdownLinkAction } from '../../../../utils/markdown';
 import { clearActiveTextSelection, hasActiveTextSelection, isInteractiveSelectionTarget } from '../../../../utils/text-selection';
 import type { TaskTouchStartPayload } from './text-view.types';
+import { KnowledgeAnchorComponent } from '../../../shared/components/knowledge-anchor/knowledge-anchor.component';
 
 @Component({
   selector: 'app-text-task-card',
   standalone: true,
-  imports: [CommonModule, DatePipe, TextTaskEditorComponent, SafeMarkdownPipe],
+  imports: [CommonModule, DatePipe, TextTaskEditorComponent, SafeMarkdownPipe, KnowledgeAnchorComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div
@@ -98,6 +99,13 @@ import type { TaskTouchStartPayload } from './text-view.types';
                 No description
               </div>
             }
+            <app-knowledge-anchor
+              class="mt-1 block"
+              [taskId]="task().id"
+              [isMobile]="isMobile()"
+              [editable]="false"
+              [compact]="true">
+            </app-knowledge-anchor>
           } @else {
             <app-text-task-editor
               #taskEditor
