@@ -435,7 +435,7 @@ describe('AppLifecycleOrchestratorService', () => {
     });
   });
 
-  it('后台闲置超过大门阈值后恢复若远端黑匣子刷新拉到新数据，即使本地已命中 gate 也应再次复核', async () => {
+  it('后台闲置超过大门阈值后恢复若本地已命中 gate，即使远端黑匣子刷新拉到新数据也不应重复复核', async () => {
     mockFocusStartupProbe.hasPendingGateWork.mockReturnValue(true);
     mockSyncCoordinator.refreshBlackBoxWatermarkIfNeeded.mockResolvedValue({ skipped: false });
 
@@ -451,14 +451,10 @@ describe('AppLifecycleOrchestratorService', () => {
 
     await flushResumeWithoutDrainingLongTimers();
 
-    expect(mockFocusStartupProbe.recheckGate).toHaveBeenCalledTimes(2);
-    expect(mockFocusStartupProbe.recheckGate).toHaveBeenNthCalledWith(1, {
+    expect(mockFocusStartupProbe.recheckGate).toHaveBeenCalledTimes(1);
+    expect(mockFocusStartupProbe.recheckGate).toHaveBeenCalledWith({
       source: 'resume-local',
       reloadLocal: true,
-    });
-    expect(mockFocusStartupProbe.recheckGate).toHaveBeenNthCalledWith(2, {
-      source: 'resume-remote',
-      reloadLocal: false,
     });
   });
 
