@@ -1425,13 +1425,18 @@ export class SimpleSyncService {
             }
 
             const isPermissionDenied = retryEnhanced.errorType === 'PermissionError';
+            const terminalMessage = isPermissionDenied
+              ? '项目同步权限校验失败，请重新登录后重试'
+              : retryEnhanced.message;
+            const terminalErrorType = isPermissionDenied ? 'PermissionError' : 'BusinessRuleError';
+            const terminalCode = isPermissionDenied
+              ? 'SYNC_PROJECT_PERMISSION_DENIED'
+              : (retryEnhanced.code ? String(retryEnhanced.code) : 'SYNC_PROJECT_PERSISTENCE_FAILED');
             throw this.createProjectPersistenceTerminalError(
               project.id,
-              isPermissionDenied ? '项目同步权限校验失败，请重新登录后重试' : retryEnhanced.message,
-              isPermissionDenied ? 'PermissionError' : 'BusinessRuleError',
-              isPermissionDenied
-                ? 'SYNC_PROJECT_PERMISSION_DENIED'
-                : (retryEnhanced.code ? String(retryEnhanced.code) : 'SYNC_PROJECT_PERSISTENCE_FAILED'),
+              terminalMessage,
+              terminalErrorType,
+              terminalCode,
             );
           }
         } else {
