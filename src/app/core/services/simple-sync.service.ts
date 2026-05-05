@@ -1410,11 +1410,29 @@ export class SimpleSyncService {
               };
             }
 
-            return {
-              success: false,
-              retryEnqueued,
-              failureReason: retryEnhanced.message,
-            };
+            if (retryEnhanced.errorType === 'VersionConflictError') {
+              this.toast.warning('版本冲突', '数据已被修改，请刷新后重试');
+              throw new PermanentFailureError('Version conflict', retryEnhanced, { operation: 'pushProject', projectId: project.id });
+            }
+
+            if (retryEnhanced.isRetryable) {
+              await enqueueRetry();
+              return {
+                success: false,
+                retryEnqueued,
+                failureReason: retryEnhanced.message,
+              };
+            }
+
+            const isPermissionDenied = retryEnhanced.errorType === 'PermissionError';
+            throw this.createProjectPersistenceTerminalError(
+              project.id,
+              isPermissionDenied ? '项目同步权限校验失败，请重新登录后重试' : retryEnhanced.message,
+              isPermissionDenied ? 'PermissionError' : 'BusinessRuleError',
+              isPermissionDenied
+                ? 'SYNC_PROJECT_PERMISSION_DENIED'
+                : (retryEnhanced.code ? String(retryEnhanced.code) : 'SYNC_PROJECT_PERSISTENCE_FAILED'),
+            );
           }
         } else {
           await enqueueRetry();

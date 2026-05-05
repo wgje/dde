@@ -1187,6 +1187,42 @@ describe('SimpleSyncService', () => {
       expect(service.state().syncError).toBeNull();
     });
 
+    it('pushProjectWithResult 在会话刷新后遇到可重试网络错误时应写入 RetryQueue', async () => {
+      const project = createMockProject({
+        id: 'project-rpc-refresh-network-retry',
+        updatedAt: '2026-04-30T05:12:00.000Z',
+      });
+      mockClient.auth.getSession = vi.fn()
+        .mockRejectedValueOnce(new Error('JWT expired'))
+        .mockResolvedValueOnce({
+          data: { session: { user: { id: 'test-user-id' } } },
+        });
+      mockSessionManager.isSessionExpiredError.mockImplementation(
+        (error: unknown) => error instanceof Error && error.message === 'JWT expired',
+      );
+      mockSessionManager.handleAuthErrorWithRefresh.mockResolvedValueOnce(true);
+      mockSyncRpcClient.upsertProject.mockRejectedValueOnce(new Error('Failed to fetch'));
+
+      const result = await (service as unknown as {
+        pushProjectWithResult: (project: Project, fromRetryQueue?: boolean, sourceUserId?: string, taskIdsToDelete?: string[]) => Promise<{ success: boolean; conflict?: boolean; remoteData?: Project; retryEnqueued?: boolean; failureReason?: string; terminal?: boolean }>;
+      }).pushProjectWithResult(project, false, 'test-user-id');
+
+      expect(result).toEqual(expect.objectContaining({
+        success: false,
+        retryEnqueued: true,
+      }));
+      expect(result.terminal).toBeUndefined();
+      expect(result.failureReason).toContain('Failed to fetch');
+      expect(mockRetryQueueService.addDurably).toHaveBeenCalledWith(
+        'project',
+        'upsert',
+        project,
+        undefined,
+        'test-user-id',
+        undefined,
+      );
+    });
+
     it('pushProjectWithResult 应将真实 unauthorized project RPC 结果标记为 terminal', async () => {
       const project = createMockProject({
         id: 'project-rpc-unauthorized-terminal',
