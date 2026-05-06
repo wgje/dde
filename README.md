@@ -384,7 +384,7 @@ Android 小组件：
 
 **Markdown 链接说明**：
 - 外部网站：使用标准 Markdown 链接，例如 `[NanoFlow](https://example.com)`，也支持直接粘贴裸网址，例如 `https://example.com/docs`
-- 页内锚点 / 相对路径：如 `[跳转](#section)`、`[说明](./docs/guide)` 会保留站内导航语义，不会被强制新开页
+- 页内锚点 / 相对路径：如 `[跳转](#section)`，或把相对路径写成 Markdown 链接，会保留站内导航语义，不会被强制新开页
 - 项目内任务跳转：使用稳定任务 ID，例如 `[跳到任务](task:550e8400-e29b-41d4-a716-446655440000)`，也支持直接写 `task:550e8400-e29b-41d4-a716-446655440000`
 - Windows 本地路径：支持显式 Markdown 链接如 `[打开文档](C:\Users\me\Docs\Plan.md)`，也支持无空格裸路径如 `C:\Tools\Todo\plan.md`
 - `file:` 本地链接不会把原始 `file:///` 暴露到 DOM，而是走受控链路：普通文档会在点击手势内优先尝试打开并同步复制路径；浏览器拦截时会自动提示
