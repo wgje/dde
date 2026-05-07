@@ -322,6 +322,21 @@ describe('SentryLazyLoaderService telemetry scrubber', () => {
     expect(sanitized).not.toContain('camel-secret');
   });
 
+  it('应脱敏 JSON/冒号形式的认证字段和 Bearer token', () => {
+    const jwt = 'eyJaaaaaaaaaaaa.bbbbbbbbbbbb.cccccccccccc';
+    const sanitized = sentryStatic.sanitizeTelemetryString(
+      `{"access_token":"${jwt}","refresh_token":"refresh-secret","email":"user@example.com"} Authorization: Bearer ${jwt}`
+    );
+
+    expect(sanitized).toContain('"access_token":"[REDACTED]"');
+    expect(sanitized).toContain('"refresh_token":"[REDACTED]"');
+    expect(sanitized).toContain('"email":"[REDACTED]"');
+    expect(sanitized).toContain('Authorization: Bearer [REDACTED]');
+    expect(sanitized).not.toContain(jwt);
+    expect(sanitized).not.toContain('refresh-secret');
+    expect(sanitized).not.toContain('user@example.com');
+  });
+
   it('应从 Sentry user 事件中移除邮箱、用户名和 IP', () => {
     const sanitized = sentryStatic.sanitizeSentryEventUser({
       id: 'user-1',

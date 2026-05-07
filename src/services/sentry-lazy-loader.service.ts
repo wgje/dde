@@ -655,9 +655,23 @@ export class SentryLazyLoaderService {
     let sanitized = value.replace(/https?:\/\/[^\s"'<>]+/g, url =>
       SentryLazyLoaderService.sanitizeUrlForTelemetry(url)
     );
+    const sensitiveName =
+      '(?:access[_-]?token|refresh[_-]?token|id[_-]?token|token[_-]?hash|auth[_-]?token|api[_-]?key|apikey|code|password|passcode|secret|email)';
     sanitized = sanitized.replace(
-      /\b(access[_-]?token|refresh[_-]?token|id[_-]?token|token[_-]?hash|auth[_-]?token|api[_-]?key|apikey|code|password|passcode|secret|email)=([^&\s]+)/gi,
+      new RegExp(`\\b(${sensitiveName})=([^&\\s'",}]+)`, 'gi'),
       '$1=[REDACTED]'
+    );
+    sanitized = sanitized.replace(
+      new RegExp(`(["']?\\b${sensitiveName}["']?\\s*:\\s*["']?)([^"',}\\s]+)(["']?)`, 'gi'),
+      '$1[REDACTED]$3'
+    );
+    sanitized = sanitized.replace(
+      /\b(authorization\s*[:=]\s*)(bearer|token)\s+[^\s"',}]+/gi,
+      '$1$2 [REDACTED]'
+    );
+    sanitized = sanitized.replace(
+      /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g,
+      '[REDACTED_JWT]'
     );
     return sanitized.replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[REDACTED_EMAIL]');
   }
