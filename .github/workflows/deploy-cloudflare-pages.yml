@@ -97,6 +97,7 @@ jobs:
         env:
           NG_APP_SUPABASE_URL: ${{ secrets.NG_APP_SUPABASE_URL }}
           NG_APP_SUPABASE_ANON_KEY: ${{ secrets.NG_APP_SUPABASE_ANON_KEY }}
+          NG_APP_SENTRY_DSN: ${{ secrets.NG_APP_SENTRY_DSN }}
         run: |
           set -euo pipefail
           if [ "$DEPLOYMENT_TARGET" = "production" ] && [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ "${{ github.ref }}" != "refs/heads/main" ]; then
@@ -111,6 +112,11 @@ jobs:
 
           if [ -z "${NG_APP_SUPABASE_URL:-}" ] || [ -z "${NG_APP_SUPABASE_ANON_KEY:-}" ]; then
             echo "::error::$secret_source must define NG_APP_SUPABASE_URL and NG_APP_SUPABASE_ANON_KEY"
+            exit 1
+          fi
+
+          if [ -z "${NG_APP_SENTRY_DSN:-}" ]; then
+            echo "::error::$secret_source must define NG_APP_SENTRY_DSN so Sentry error capture is active on Cloudflare"
             exit 1
           fi
 
