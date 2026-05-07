@@ -13,6 +13,14 @@ type MutableService = {
 /** 绕过 private 访问限制的测试辅助 */
 const mut = (s: SentryLazyLoaderService): MutableService => s as unknown as MutableService;
 
+type SentryLazyLoaderStatic = {
+  sanitizeUrlForTelemetry: (rawUrl: string) => string;
+  redactTelemetryRecord: <T extends Record<string, unknown> | undefined>(record: T) => T;
+};
+
+/** 绕过 private static 访问限制，验证 Sentry 隐私清洗合同 */
+const sentryStatic = SentryLazyLoaderService as unknown as SentryLazyLoaderStatic;
+
 type ScopeMock = {
   setLevel: ReturnType<typeof vi.fn>;
   setTag: ReturnType<typeof vi.fn>;
@@ -245,5 +253,40 @@ describe('SentryLazyLoaderService setUser', () => {
     service.setUser(null);
 
     expect(sentryMock.setUser).toHaveBeenCalledWith(null);
+  });
+});
+
+describe('SentryLazyLoaderService telemetry scrubber', () => {
+  it('应移除 hash 并脱敏认证相关 query 参数', () => {
+    const sanitized = sentryStatic.sanitizeUrlForTelemetry(
+      'https://nanoflow.pages.dev/callback?code=abc123&token=secret&projectId=project-1#access_token=hidden'
+    );
+
+    expect(sanitized).toContain('code=%5BREDACTED%5D');
+    expect(sanitized).toContain('token=%5BREDACTED%5D');
+    expect(sanitized).toContain('projectId=project-1');
+    expect(sanitized).not.toContain('abc123');
+    expect(sanitized).not.toContain('secret');
+    expect(sanitized).not.toContain('hidden');
+  });
+
+  it('应递归脱敏 extra/context 中的敏感字段', () => {
+    const redacted = sentryStatic.redactTelemetryRecord({
+      access_token: 'secret-token',
+      safe: 'kept',
+      nested: {
+        email: 'user@example.com',
+        values: [{ refresh_token: 'refresh-secret', count: 1 }],
+      },
+    });
+
+    expect(redacted).toEqual({
+      access_token: '[REDACTED]',
+      safe: 'kept',
+      nested: {
+        email: '[REDACTED]',
+        values: [{ refresh_token: '[REDACTED]', count: 1 }],
+      },
+    });
   });
 });

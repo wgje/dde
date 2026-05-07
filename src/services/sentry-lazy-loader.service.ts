@@ -92,6 +92,23 @@ export class SentryLazyLoaderService {
     /^https:\/\/(?:[a-z0-9-]+\.)?nanoflow\.app/,
   ];
 
+  private static readonly SENSITIVE_TELEMETRY_KEYS = new Set([
+    'access_token',
+    'refresh_token',
+    'id_token',
+    'token',
+    'code',
+    'password',
+    'passcode',
+    'secret',
+    'apikey',
+    'api_key',
+    'authorization',
+    'email',
+  ]);
+
+  private static readonly REDACTED_VALUE = '[REDACTED]';
+
   private readonly sentryDsn = environment.SENTRY_DSN?.trim() ?? '';
   private readonly isConfiguredFlag = this.sentryDsn.length > 0;
 
@@ -263,6 +280,7 @@ export class SentryLazyLoaderService {
         replaysOnErrorSampleRate: 1.0,
         // 环境标识：优先读取显式注入的 sentryEnvironment（preview/production/development）
         environment: this.resolveSentryEnvironment(),
+        sendDefaultPii: false,
         // 【P3-09 优化】过滤浏览器噪音错误（使用正则精确匹配避免误吞）
         ignoreErrors: [
           /^ResizeObserver loop/,
@@ -273,21 +291,25 @@ export class SentryLazyLoaderService {
           /^The operation was aborted/,  // AbortController 取消
           /^The user aborted a request/, // 用户取消
         ],
-        // 【P3-15 修复】过滤 URL 中的 PKCE hash fragment，防止 Supabase 回调 token 泄露到 Sentry
-        // 仅移除 # 及之后内容，保留 query string（含调试信息）
+        // 【P3-15 修复】过滤 URL 中的 PKCE hash fragment 与敏感 query，防止认证数据泄露到 Sentry
         beforeSend(event) {
           if (event.request?.url) {
-            event.request.url = event.request.url.replace(/#.*$/, '');
+            event.request.url = SentryLazyLoaderService.sanitizeUrlForTelemetry(event.request.url);
           }
+          event.extra = SentryLazyLoaderService.redactTelemetryRecord(event.extra);
+          event.contexts = SentryLazyLoaderService.redactTelemetryRecord(event.contexts) as typeof event.contexts;
           return event;
         },
         beforeBreadcrumb(breadcrumb) {
           if (breadcrumb.category === 'navigation' && breadcrumb.data) {
             for (const key of ['from', 'to']) {
               if (typeof breadcrumb.data[key] === 'string') {
-                breadcrumb.data[key] = (breadcrumb.data[key] as string).replace(/#.*$/, '');
+                breadcrumb.data[key] = SentryLazyLoaderService.sanitizeUrlForTelemetry(breadcrumb.data[key] as string);
               }
             }
+          }
+          if (breadcrumb.data) {
+            breadcrumb.data = SentryLazyLoaderService.redactTelemetryRecord(breadcrumb.data) as typeof breadcrumb.data;
           }
           return breadcrumb;
         },
@@ -601,6 +623,55 @@ export class SentryLazyLoaderService {
 
     // eslint-disable-next-line no-console -- 仅在显式 verbose 时输出诊断信息，避免误判为 warning/error
     console.info(message);
+  }
+
+  private static isSensitiveTelemetryKey(key: string): boolean {
+    return SentryLazyLoaderService.SENSITIVE_TELEMETRY_KEYS.has(key.toLowerCase());
+  }
+
+  private static sanitizeUrlForTelemetry(rawUrl: string): string {
+    try {
+      const base = typeof window !== 'undefined' ? window.location.origin : 'https://nanoflow.local';
+      const url = new URL(rawUrl, base);
+      for (const key of [...url.searchParams.keys()]) {
+        if (SentryLazyLoaderService.isSensitiveTelemetryKey(key)) {
+          url.searchParams.set(key, SentryLazyLoaderService.REDACTED_VALUE);
+        }
+      }
+      url.hash = '';
+      return url.toString();
+    } catch {
+      return rawUrl.replace(/[?#].*$/, '');
+    }
+  }
+
+  private static redactTelemetryRecord<T extends Record<string, unknown> | undefined>(record: T): T {
+    if (!record) {
+      return record;
+    }
+    return SentryLazyLoaderService.redactTelemetryValue(record) as T;
+  }
+
+  private static redactTelemetryValue(value: unknown, depth = 0): unknown {
+    if (depth > 6) {
+      return SentryLazyLoaderService.REDACTED_VALUE;
+    }
+    if (Array.isArray(value)) {
+      return value.map(item => SentryLazyLoaderService.redactTelemetryValue(item, depth + 1));
+    }
+    if (!value || typeof value !== 'object') {
+      return value;
+    }
+
+    const redacted: Record<string, unknown> = {};
+    for (const [key, nestedValue] of Object.entries(value as Record<string, unknown>)) {
+      if (SentryLazyLoaderService.isSensitiveTelemetryKey(key)) {
+        redacted[key] = SentryLazyLoaderService.REDACTED_VALUE;
+        continue;
+      }
+      redacted[key] = SentryLazyLoaderService.redactTelemetryValue(nestedValue, depth + 1);
+    }
+    return redacted;
   }
 
   private isVerboseConsoleEnabled(): boolean {
