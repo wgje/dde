@@ -120,6 +120,11 @@ jobs:
             exit 1
           fi
 
+          node -e "const dsn = process.env.NG_APP_SENTRY_DSN || ''; try { const url = new URL(dsn); const valid = url.protocol === 'https:' && url.username.length > 0 && /(^|\\.)sentry\\.io$/.test(url.hostname) && /^\\/\\d+\\/?$/.test(url.pathname); process.exit(valid ? 0 : 1); } catch { process.exit(1); }" || {
+            echo "::error::$secret_source NG_APP_SENTRY_DSN must be a valid https Sentry browser DSN"
+            exit 1
+          }
+
           if [ "$DEPLOYMENT_TARGET" = "production" ]; then
             echo "alias=production" >> "$GITHUB_OUTPUT"
           else

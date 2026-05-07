@@ -53,6 +53,7 @@ describe('Cloudflare migration artifact contracts', () => {
     expect(workflow).toContain('NG_APP_SUPABASE_ANON_KEY: ${{ secrets.NG_APP_SUPABASE_ANON_KEY }}');
     expect(workflow).toContain('NG_APP_SENTRY_DSN: ${{ secrets.NG_APP_SENTRY_DSN }}');
     expect(workflow).toContain('must define NG_APP_SENTRY_DSN so Sentry error capture is active on Cloudflare');
+    expect(workflow).toContain('NG_APP_SENTRY_DSN must be a valid https Sentry browser DSN');
     expect(workflow).toContain('secret_source="Repository secrets"');
     expect(workflow).toContain('secret_source="GitHub Environment');
     expect(workflow).not.toContain('PREVIEW_NG_APP_SUPABASE_URL');
@@ -193,11 +194,13 @@ describe('Cloudflare migration artifact contracts', () => {
 
   it('CSP allows Sentry regional ingest endpoints used by the production DSN', () => {
     const indexHtml = read('index.html');
+    const csp = indexHtml.match(/http-equiv="Content-Security-Policy" content="([\s\S]*?)"/)?.[1] ?? '';
+    const connectSrc = csp.match(/connect-src\s+([^;]+);/)?.[1] ?? '';
 
-    expect(indexHtml).toContain('https://*.sentry.io');
-    expect(indexHtml).toContain('https://*.ingest.sentry.io');
-    expect(indexHtml).toContain('https://*.ingest.us.sentry.io');
-    expect(indexHtml).toContain('https://*.ingest.de.sentry.io');
+    expect(connectSrc).toContain('https://*.sentry.io');
+    expect(connectSrc).toContain('https://*.ingest.sentry.io');
+    expect(connectSrc).toContain('https://*.ingest.us.sentry.io');
+    expect(connectSrc).toContain('https://*.ingest.de.sentry.io');
     expect(indexHtml).toContain('https://o4508391513718784.ingest.us.sentry.io');
   });
 
