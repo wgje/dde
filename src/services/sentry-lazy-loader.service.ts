@@ -93,6 +93,10 @@ export class SentryLazyLoaderService {
   ];
 
   private static readonly REDACTED_VALUE = '[REDACTED]';
+  /** 限制递归清洗深度，避免异常对象循环/超深结构拖慢错误上报路径。 */
+  private static readonly MAX_TELEMETRY_REDACTION_DEPTH = 6;
+  private static readonly SENSITIVE_TELEMETRY_STRING_KEY_PATTERN =
+    '(?:access[_-]?token|refresh[_-]?token|id[_-]?token|token[_-]?hash|auth[_-]?token|api[_-]?key|apikey|code|password|passcode|secret|email)';
 
   private readonly sentryDsn = environment.SENTRY_DSN?.trim() ?? '';
   private readonly isConfiguredFlag = this.sentryDsn.length > 0;
@@ -637,7 +641,7 @@ export class SentryLazyLoaderService {
 
   private static sanitizeUrlForTelemetry(rawUrl: string): string {
     try {
-      const base = typeof window !== 'undefined' ? window.location.origin : 'https://nanoflow.local';
+      const base = typeof window !== 'undefined' ? window.location.origin : 'https://placeholder.invalid';
       const url = new URL(rawUrl, base);
       for (const key of [...url.searchParams.keys()]) {
         if (SentryLazyLoaderService.isSensitiveTelemetryKey(key)) {
@@ -655,8 +659,7 @@ export class SentryLazyLoaderService {
     let sanitized = value.replace(/https?:\/\/[^\s"'<>]+/g, url =>
       SentryLazyLoaderService.sanitizeUrlForTelemetry(url)
     );
-    const sensitiveName =
-      '(?:access[_-]?token|refresh[_-]?token|id[_-]?token|token[_-]?hash|auth[_-]?token|api[_-]?key|apikey|code|password|passcode|secret|email)';
+    const sensitiveName = SentryLazyLoaderService.SENSITIVE_TELEMETRY_STRING_KEY_PATTERN;
     sanitized = sanitized.replace(
       new RegExp(`\\b(${sensitiveName})=([^&\\s'",}]+)`, 'gi'),
       '$1=[REDACTED]'
@@ -684,7 +687,7 @@ export class SentryLazyLoaderService {
   }
 
   private static redactTelemetryValue(value: unknown, depth = 0): unknown {
-    if (depth > 6) {
+    if (depth > SentryLazyLoaderService.MAX_TELEMETRY_REDACTION_DEPTH) {
       return SentryLazyLoaderService.REDACTED_VALUE;
     }
     if (Array.isArray(value)) {
