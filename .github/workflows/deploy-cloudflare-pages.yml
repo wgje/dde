@@ -120,8 +120,8 @@ jobs:
             exit 1
           fi
 
-          node -e "const dsn = process.env.NG_APP_SENTRY_DSN || ''; const allowedHost = 'o4508391513718784.ingest.us.sentry.io'; try { const url = new URL(dsn); const valid = url.protocol === 'https:' && url.username.length > 0 && url.hostname === allowedHost && /^\\/\\d+\\/?$/.test(url.pathname); process.exit(valid ? 0 : 1); } catch { process.exit(1); }" || {
-            echo "::error::$secret_source NG_APP_SENTRY_DSN must be a valid https Sentry browser DSN for o4508391513718784.ingest.us.sentry.io"
+          node -e "const dsn = process.env.NG_APP_SENTRY_DSN || ''; const allowedHost = 'o4508391513718784.ingest.us.sentry.io'; try { const url = new URL(dsn); const valid = url.protocol === 'https:' && /^[a-f0-9]{32}$/i.test(url.username) && url.password === '' && url.hostname === allowedHost && /^\\/\\d+\\/?$/.test(url.pathname); process.exit(valid ? 0 : 1); } catch { process.exit(1); }" || {
+            echo "::error::$secret_source NG_APP_SENTRY_DSN must be a valid public https Sentry browser DSN without a secret for o4508391513718784.ingest.us.sentry.io"
             exit 1
           }
 

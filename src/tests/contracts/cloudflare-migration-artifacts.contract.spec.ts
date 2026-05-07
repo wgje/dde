@@ -53,8 +53,10 @@ describe('Cloudflare migration artifact contracts', () => {
     expect(workflow).toContain('NG_APP_SUPABASE_ANON_KEY: ${{ secrets.NG_APP_SUPABASE_ANON_KEY }}');
     expect(workflow).toContain('NG_APP_SENTRY_DSN: ${{ secrets.NG_APP_SENTRY_DSN }}');
     expect(workflow).toContain('must define NG_APP_SENTRY_DSN so Sentry error capture is active on Cloudflare');
-    expect(workflow).toContain('NG_APP_SENTRY_DSN must be a valid https Sentry browser DSN for o4508391513718784.ingest.us.sentry.io');
+    expect(workflow).toContain('NG_APP_SENTRY_DSN must be a valid public https Sentry browser DSN without a secret for o4508391513718784.ingest.us.sentry.io');
     expect(workflow).toContain("url.hostname === allowedHost");
+    expect(workflow).toContain("url.password === ''");
+    expect(workflow).toContain('/^[a-f0-9]{32}$/i.test(url.username)');
     expect(workflow).toContain('CF_COMMIT_MESSAGE: ${{ github.event.head_commit.message || github.event.pull_request.title ||');
     expect(workflow).toContain('--commit-message="$safe_commit_message"');
     expect(workflow).not.toContain('--commit-message="${{ github.event.head_commit.message || github.event.pull_request.title');

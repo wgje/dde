@@ -92,21 +92,6 @@ export class SentryLazyLoaderService {
     /^https:\/\/(?:[a-z0-9-]+\.)?nanoflow\.app/,
   ];
 
-  private static readonly SENSITIVE_TELEMETRY_KEYS = new Set([
-    'access_token',
-    'refresh_token',
-    'id_token',
-    'token',
-    'code',
-    'password',
-    'passcode',
-    'secret',
-    'apikey',
-    'api_key',
-    'authorization',
-    'email',
-  ]);
-
   private static readonly REDACTED_VALUE = '[REDACTED]';
 
   private readonly sentryDsn = environment.SENTRY_DSN?.trim() ?? '';
@@ -198,7 +183,7 @@ export class SentryLazyLoaderService {
    * 待应用的用户身份（Sentry 初始化前调用 setUser 时缓存）
    * undefined = 未曾调用过；null = 显式登出；object = 用户信息
    */
-  private pendingUser: { id: string; email?: string } | null | undefined = undefined;
+  private pendingUser: { id: string } | null | undefined = undefined;
 
   /**
    * 触发 Sentry 懒加载初始化
@@ -296,6 +281,7 @@ export class SentryLazyLoaderService {
           if (event.request?.url) {
             event.request.url = SentryLazyLoaderService.sanitizeUrlForTelemetry(event.request.url);
           }
+          event.user = SentryLazyLoaderService.sanitizeSentryEventUser(event.user) as typeof event.user;
           event.extra = SentryLazyLoaderService.redactTelemetryRecord(event.extra);
           event.contexts = SentryLazyLoaderService.redactTelemetryRecord(event.contexts) as typeof event.contexts;
           return event;
@@ -513,11 +499,12 @@ export class SentryLazyLoaderService {
    * 待初始化完成后在 flushPendingEvents 中一并应用。
    */
   setUser(user: { id: string; email?: string } | null): void {
-    // 始终缓存，确保 Sentry 初始化后可以应用
-    this.pendingUser = user;
+    // 始终缓存脱敏后的用户标识，确保 Sentry 初始化后可以应用且不上传邮箱等 PII
+    const sanitizedUser = SentryLazyLoaderService.sanitizeSentryUser(user);
+    this.pendingUser = sanitizedUser;
     const sentry = this.sentryModule();
     if (sentry) {
-      sentry.setUser(user);
+      sentry.setUser(sanitizedUser);
     }
   }
 
@@ -626,7 +613,15 @@ export class SentryLazyLoaderService {
   }
 
   private static isSensitiveTelemetryKey(key: string): boolean {
-    return SentryLazyLoaderService.SENSITIVE_TELEMETRY_KEYS.has(key.toLowerCase());
+    const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, '');
+    return normalized.includes('token')
+      || normalized.includes('secret')
+      || normalized.includes('password')
+      || normalized.includes('passcode')
+      || normalized.includes('apikey')
+      || normalized === 'authorization'
+      || normalized.includes('email')
+      || normalized === 'code';
   }
 
   private static sanitizeUrlForTelemetry(rawUrl: string): string {
@@ -672,6 +667,19 @@ export class SentryLazyLoaderService {
       redacted[key] = SentryLazyLoaderService.redactTelemetryValue(nestedValue, depth + 1);
     }
     return redacted;
+  }
+
+  private static sanitizeSentryUser(user: { id: string; email?: string } | null): { id: string } | null {
+    return user ? { id: user.id } : null;
+  }
+
+  private static sanitizeSentryEventUser(user: unknown): unknown {
+    if (!user || typeof user !== 'object') {
+      return user;
+    }
+    const { email: _email, ip_address: _ipAddress, username: _username, ...safeUser } =
+      user as Record<string, unknown>;
+    return SentryLazyLoaderService.redactTelemetryRecord(safeUser);
   }
 
   private isVerboseConsoleEnabled(): boolean {

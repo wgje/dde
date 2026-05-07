@@ -5,7 +5,7 @@ import { resetBrowserNetworkSuspensionTrackingForTests } from '../utils/browser-
 
 type MutableService = {
   pendingEvents: Array<Record<string, unknown>>;
-  pendingUser: { id: string; email?: string } | null;
+  pendingUser: { id: string } | null;
   sentryModule: { set: (value: unknown) => void };
   flushPendingEvents: () => void;
 };
@@ -16,6 +16,7 @@ const mut = (s: SentryLazyLoaderService): MutableService => s as unknown as Muta
 type SentryLazyLoaderStatic = {
   sanitizeUrlForTelemetry: (rawUrl: string) => string;
   redactTelemetryRecord: <T extends Record<string, unknown> | undefined>(record: T) => T;
+  sanitizeSentryEventUser: (user: unknown) => unknown;
 };
 
 /** 绕过 private static 访问限制，验证 Sentry 隐私清洗合同 */
@@ -225,16 +226,13 @@ describe('SentryLazyLoaderService setUser', () => {
 
     service.setUser({ id: 'user-123', email: 'test@example.com' });
 
-    expect(sentryMock.setUser).toHaveBeenCalledWith({ id: 'user-123', email: 'test@example.com' });
+    expect(sentryMock.setUser).toHaveBeenCalledWith({ id: 'user-123' });
   });
 
   it('Sentry 未初始化时缓存用户信息', () => {
     service.setUser({ id: 'user-456', email: 'cached@example.com' });
 
-    expect(mut(service).pendingUser).toEqual({
-      id: 'user-456',
-      email: 'cached@example.com',
-    });
+    expect(mut(service).pendingUser).toEqual({ id: 'user-456' });
   });
 
   it('setUser(null) 清除缓存的用户信息', () => {
@@ -259,14 +257,19 @@ describe('SentryLazyLoaderService setUser', () => {
 describe('SentryLazyLoaderService telemetry scrubber', () => {
   it('应移除 hash 并脱敏认证相关 query 参数', () => {
     const sanitized = sentryStatic.sanitizeUrlForTelemetry(
-      'https://nanoflow.pages.dev/callback?code=abc123&token=secret&projectId=project-1#access_token=hidden'
+      'https://nanoflow.pages.dev/callback?code=abc123&accessToken=camel&token_hash=secret&apiKey=key&statusCode=200&projectId=project-1#access_token=hidden'
     );
 
     expect(sanitized).toContain('code=%5BREDACTED%5D');
-    expect(sanitized).toContain('token=%5BREDACTED%5D');
+    expect(sanitized).toContain('accessToken=%5BREDACTED%5D');
+    expect(sanitized).toContain('token_hash=%5BREDACTED%5D');
+    expect(sanitized).toContain('apiKey=%5BREDACTED%5D');
+    expect(sanitized).toContain('statusCode=200');
     expect(sanitized).toContain('projectId=project-1');
     expect(sanitized).not.toContain('abc123');
+    expect(sanitized).not.toContain('camel');
     expect(sanitized).not.toContain('secret');
+    expect(sanitized).not.toContain('key');
     expect(sanitized).not.toContain('hidden');
   });
 
@@ -276,7 +279,7 @@ describe('SentryLazyLoaderService telemetry scrubber', () => {
       safe: 'kept',
       nested: {
         email: 'user@example.com',
-        values: [{ refresh_token: 'refresh-secret', count: 1 }],
+        values: [{ refreshToken: 'refresh-secret', apiKey: 'api-secret', statusCode: 200, count: 1 }],
       },
     });
 
@@ -285,8 +288,20 @@ describe('SentryLazyLoaderService telemetry scrubber', () => {
       safe: 'kept',
       nested: {
         email: '[REDACTED]',
-        values: [{ refresh_token: '[REDACTED]', count: 1 }],
+        values: [{ refreshToken: '[REDACTED]', apiKey: '[REDACTED]', statusCode: 200, count: 1 }],
       },
     });
+  });
+
+  it('应从 Sentry user 事件中移除邮箱、用户名和 IP', () => {
+    const sanitized = sentryStatic.sanitizeSentryEventUser({
+      id: 'user-1',
+      email: 'user@example.com',
+      username: 'display-name',
+      ip_address: '127.0.0.1',
+      plan: 'pro',
+    });
+
+    expect(sanitized).toEqual({ id: 'user-1', plan: 'pro' });
   });
 });
