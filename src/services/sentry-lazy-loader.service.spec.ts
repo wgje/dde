@@ -15,6 +15,7 @@ const mut = (s: SentryLazyLoaderService): MutableService => s as unknown as Muta
 
 type SentryLazyLoaderStatic = {
   sanitizeUrlForTelemetry: (rawUrl: string) => string;
+  sanitizeTelemetryString: (value: string) => string;
   redactTelemetryRecord: <T extends Record<string, unknown> | undefined>(record: T) => T;
   sanitizeSentryEventUser: (user: unknown) => unknown;
 };
@@ -279,7 +280,14 @@ describe('SentryLazyLoaderService telemetry scrubber', () => {
       safe: 'kept',
       nested: {
         email: 'user@example.com',
-        values: [{ refreshToken: 'refresh-secret', apiKey: 'api-secret', statusCode: 200, count: 1 }],
+        values: [{
+          refreshToken: 'refresh-secret',
+          apiKey: 'api-secret',
+          statusCode: 200,
+          url: 'https://nanoflow.pages.dev/callback?code=abc123&token_hash=secret',
+          description: 'email=user@example.com access_token=plain-secret',
+          count: 1,
+        }],
       },
     });
 
@@ -288,9 +296,30 @@ describe('SentryLazyLoaderService telemetry scrubber', () => {
       safe: 'kept',
       nested: {
         email: '[REDACTED]',
-        values: [{ refreshToken: '[REDACTED]', apiKey: '[REDACTED]', statusCode: 200, count: 1 }],
+        values: [{
+          refreshToken: '[REDACTED]',
+          apiKey: '[REDACTED]',
+          statusCode: 200,
+          url: 'https://nanoflow.pages.dev/callback?code=[REDACTED]&token_hash=[REDACTED]',
+          description: 'email=[REDACTED] access_token=[REDACTED]',
+          count: 1,
+        }],
       },
     });
+  });
+
+  it('应脱敏普通字符串中的 URL、query token 和邮箱', () => {
+    const sanitized = sentryStatic.sanitizeTelemetryString(
+      'Login failed for user@example.com at https://nanoflow.pages.dev/callback?code=abc123#access_token=hidden accessToken=camel-secret'
+    );
+
+    expect(sanitized).toContain('[REDACTED_EMAIL]');
+    expect(sanitized).toContain('code=[REDACTED]');
+    expect(sanitized).toContain('accessToken=[REDACTED]');
+    expect(sanitized).not.toContain('user@example.com');
+    expect(sanitized).not.toContain('abc123');
+    expect(sanitized).not.toContain('hidden');
+    expect(sanitized).not.toContain('camel-secret');
   });
 
   it('应从 Sentry user 事件中移除邮箱、用户名和 IP', () => {

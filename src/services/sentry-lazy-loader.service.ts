@@ -281,12 +281,23 @@ export class SentryLazyLoaderService {
           if (event.request?.url) {
             event.request.url = SentryLazyLoaderService.sanitizeUrlForTelemetry(event.request.url);
           }
+          if (event.message) {
+            event.message = SentryLazyLoaderService.sanitizeTelemetryString(event.message);
+          }
+          for (const exception of event.exception?.values ?? []) {
+            if (exception.value) {
+              exception.value = SentryLazyLoaderService.sanitizeTelemetryString(exception.value);
+            }
+          }
           event.user = SentryLazyLoaderService.sanitizeSentryEventUser(event.user) as typeof event.user;
           event.extra = SentryLazyLoaderService.redactTelemetryRecord(event.extra);
           event.contexts = SentryLazyLoaderService.redactTelemetryRecord(event.contexts) as typeof event.contexts;
           return event;
         },
         beforeBreadcrumb(breadcrumb) {
+          if (breadcrumb.message) {
+            breadcrumb.message = SentryLazyLoaderService.sanitizeTelemetryString(breadcrumb.message);
+          }
           if (breadcrumb.category === 'navigation' && breadcrumb.data) {
             for (const key of ['from', 'to']) {
               if (typeof breadcrumb.data[key] === 'string') {
@@ -640,6 +651,17 @@ export class SentryLazyLoaderService {
     }
   }
 
+  private static sanitizeTelemetryString(value: string): string {
+    let sanitized = value.replace(/https?:\/\/[^\s"'<>]+/g, url =>
+      SentryLazyLoaderService.sanitizeUrlForTelemetry(url)
+    );
+    sanitized = sanitized.replace(
+      /\b(access[_-]?token|refresh[_-]?token|id[_-]?token|token[_-]?hash|auth[_-]?token|api[_-]?key|apikey|code|password|passcode|secret|email)=([^&\s]+)/gi,
+      '$1=[REDACTED]'
+    );
+    return sanitized.replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[REDACTED_EMAIL]');
+  }
+
   private static redactTelemetryRecord<T extends Record<string, unknown> | undefined>(record: T): T {
     if (!record) {
       return record;
@@ -653,6 +675,9 @@ export class SentryLazyLoaderService {
     }
     if (Array.isArray(value)) {
       return value.map(item => SentryLazyLoaderService.redactTelemetryValue(item, depth + 1));
+    }
+    if (typeof value === 'string') {
+      return SentryLazyLoaderService.sanitizeTelemetryString(value);
     }
     if (!value || typeof value !== 'object') {
       return value;
