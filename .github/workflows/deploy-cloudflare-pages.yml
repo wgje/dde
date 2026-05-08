@@ -97,6 +97,7 @@ jobs:
         env:
           NG_APP_SUPABASE_URL: ${{ secrets.NG_APP_SUPABASE_URL }}
           NG_APP_SUPABASE_ANON_KEY: ${{ secrets.NG_APP_SUPABASE_ANON_KEY }}
+          NG_APP_SENTRY_DSN: ${{ secrets.NG_APP_SENTRY_DSN }}
         run: |
           set -euo pipefail
           if [ "$DEPLOYMENT_TARGET" = "production" ] && [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ "${{ github.ref }}" != "refs/heads/main" ]; then
@@ -113,6 +114,16 @@ jobs:
             echo "::error::$secret_source must define NG_APP_SUPABASE_URL and NG_APP_SUPABASE_ANON_KEY"
             exit 1
           fi
+
+          if [ -z "${NG_APP_SENTRY_DSN:-}" ]; then
+            echo "::error::$secret_source must define NG_APP_SENTRY_DSN so Sentry error capture is active on Cloudflare"
+            exit 1
+          fi
+
+          node -e "const dsn = process.env.NG_APP_SENTRY_DSN || ''; const allowedHost = 'o4508391513718784.ingest.us.sentry.io'; try { const url = new URL(dsn); const valid = url.protocol === 'https:' && /^[a-f0-9]{32}$/i.test(url.username) && url.password === '' && url.hostname === allowedHost && /^\\/\\d+\\/?$/.test(url.pathname); process.exit(valid ? 0 : 1); } catch { process.exit(1); }" || {
+            echo "::error::$secret_source NG_APP_SENTRY_DSN must be a valid public https Sentry browser DSN without a secret for o4508391513718784.ingest.us.sentry.io"
+            exit 1
+          }
 
           if [ "$DEPLOYMENT_TARGET" = "production" ]; then
             echo "alias=production" >> "$GITHUB_OUTPUT"
@@ -238,6 +249,7 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_PAGES_PROJECT_NAME: ${{ secrets.CLOUDFLARE_PAGES_PROJECT_NAME || secrets.CLOUDFLARE_PAGES_PROJECT || vars.CLOUDFLARE_PAGES_PROJECT_NAME || vars.CLOUDFLARE_PAGES_PROJECT }}
+          CF_COMMIT_MESSAGE: ${{ github.event.head_commit.message || github.event.pull_request.title || 'workflow_dispatch' }}
         run: |
           set -euo pipefail
           if [ -z "${CLOUDFLARE_PAGES_PROJECT_NAME:-}" ]; then
@@ -265,14 +277,16 @@ jobs:
           fi
 
           deploy_output=""
+          safe_commit_message="${CF_COMMIT_MESSAGE//$'\r'/ }"
+          safe_commit_message="${safe_commit_message//$'\n'/ }"
           for attempt in 1 2 3; do
             echo "Deploy attempt $attempt/3"
             set +e
             deploy_output="$(npx --yes wrangler@${WRANGLER_VERSION} pages deploy dist/browser \
               --project-name="$CLOUDFLARE_PAGES_PROJECT_NAME" \
               $BRANCH_FLAG \
-              --commit-hash="${{ github.sha }}" \
-              --commit-message="${{ github.event.head_commit.message || github.event.pull_request.title || 'workflow_dispatch' }}" 2>&1)"
+              --commit-hash="$GITHUB_SHA" \
+              --commit-message="$safe_commit_message" 2>&1)"
             status=$?
             set -e
             echo "$deploy_output"

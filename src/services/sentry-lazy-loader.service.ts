@@ -92,6 +92,12 @@ export class SentryLazyLoaderService {
     /^https:\/\/(?:[a-z0-9-]+\.)?nanoflow\.app/,
   ];
 
+  private static readonly REDACTED_VALUE = '[REDACTED]';
+  /** 限制递归清洗深度，避免异常对象循环/超深结构拖慢错误上报路径。 */
+  private static readonly MAX_TELEMETRY_REDACTION_DEPTH = 6;
+  private static readonly SENSITIVE_TELEMETRY_STRING_KEY_PATTERN =
+    '(?:access[_-]?token|refresh[_-]?token|id[_-]?token|token[_-]?hash|auth[_-]?token|api[_-]?key|apikey|code|password|passcode|secret|email)';
+
   private readonly sentryDsn = environment.SENTRY_DSN?.trim() ?? '';
   private readonly isConfiguredFlag = this.sentryDsn.length > 0;
 
@@ -181,7 +187,7 @@ export class SentryLazyLoaderService {
    * 待应用的用户身份（Sentry 初始化前调用 setUser 时缓存）
    * undefined = 未曾调用过；null = 显式登出；object = 用户信息
    */
-  private pendingUser: { id: string; email?: string } | null | undefined = undefined;
+  private pendingUser: { id: string } | null | undefined = undefined;
 
   /**
    * 触发 Sentry 懒加载初始化
@@ -263,6 +269,7 @@ export class SentryLazyLoaderService {
         replaysOnErrorSampleRate: 1.0,
         // 环境标识：优先读取显式注入的 sentryEnvironment（preview/production/development）
         environment: this.resolveSentryEnvironment(),
+        sendDefaultPii: false,
         // 【P3-09 优化】过滤浏览器噪音错误（使用正则精确匹配避免误吞）
         ignoreErrors: [
           /^ResizeObserver loop/,
@@ -273,21 +280,37 @@ export class SentryLazyLoaderService {
           /^The operation was aborted/,  // AbortController 取消
           /^The user aborted a request/, // 用户取消
         ],
-        // 【P3-15 修复】过滤 URL 中的 PKCE hash fragment，防止 Supabase 回调 token 泄露到 Sentry
-        // 仅移除 # 及之后内容，保留 query string（含调试信息）
+        // 【P3-15 修复】过滤 URL 中的 PKCE hash fragment 与敏感 query，防止认证数据泄露到 Sentry
         beforeSend(event) {
           if (event.request?.url) {
-            event.request.url = event.request.url.replace(/#.*$/, '');
+            event.request.url = SentryLazyLoaderService.sanitizeUrlForTelemetry(event.request.url);
           }
+          if (event.message) {
+            event.message = SentryLazyLoaderService.sanitizeTelemetryString(event.message);
+          }
+          for (const exception of event.exception?.values ?? []) {
+            if (exception.value) {
+              exception.value = SentryLazyLoaderService.sanitizeTelemetryString(exception.value);
+            }
+          }
+          event.user = SentryLazyLoaderService.sanitizeSentryEventUser(event.user) as typeof event.user;
+          event.extra = SentryLazyLoaderService.redactTelemetryRecord(event.extra);
+          event.contexts = SentryLazyLoaderService.redactTelemetryRecord(event.contexts) as typeof event.contexts;
           return event;
         },
         beforeBreadcrumb(breadcrumb) {
+          if (breadcrumb.message) {
+            breadcrumb.message = SentryLazyLoaderService.sanitizeTelemetryString(breadcrumb.message);
+          }
           if (breadcrumb.category === 'navigation' && breadcrumb.data) {
             for (const key of ['from', 'to']) {
               if (typeof breadcrumb.data[key] === 'string') {
-                breadcrumb.data[key] = (breadcrumb.data[key] as string).replace(/#.*$/, '');
+                breadcrumb.data[key] = SentryLazyLoaderService.sanitizeUrlForTelemetry(breadcrumb.data[key] as string);
               }
             }
+          }
+          if (breadcrumb.data) {
+            breadcrumb.data = SentryLazyLoaderService.redactTelemetryRecord(breadcrumb.data) as typeof breadcrumb.data;
           }
           return breadcrumb;
         },
@@ -491,11 +514,12 @@ export class SentryLazyLoaderService {
    * 待初始化完成后在 flushPendingEvents 中一并应用。
    */
   setUser(user: { id: string; email?: string } | null): void {
-    // 始终缓存，确保 Sentry 初始化后可以应用
-    this.pendingUser = user;
+    // 始终缓存脱敏后的用户标识，确保 Sentry 初始化后可以应用且不上传邮箱等 PII
+    const sanitizedUser = SentryLazyLoaderService.sanitizeSentryUser(user);
+    this.pendingUser = sanitizedUser;
     const sentry = this.sentryModule();
     if (sentry) {
-      sentry.setUser(user);
+      sentry.setUser(sanitizedUser);
     }
   }
 
@@ -601,6 +625,103 @@ export class SentryLazyLoaderService {
 
     // eslint-disable-next-line no-console -- 仅在显式 verbose 时输出诊断信息，避免误判为 warning/error
     console.info(message);
+  }
+
+  private static isSensitiveTelemetryKey(key: string): boolean {
+    const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, '');
+    return normalized.includes('token')
+      || normalized.includes('secret')
+      || normalized.includes('password')
+      || normalized.includes('passcode')
+      || normalized.includes('apikey')
+      || normalized === 'authorization'
+      || normalized.includes('email')
+      || normalized === 'code';
+  }
+
+  private static sanitizeUrlForTelemetry(rawUrl: string): string {
+    try {
+      const base = typeof window !== 'undefined' ? window.location.origin : 'https://placeholder.invalid';
+      const url = new URL(rawUrl, base);
+      for (const key of [...url.searchParams.keys()]) {
+        if (SentryLazyLoaderService.isSensitiveTelemetryKey(key)) {
+          url.searchParams.set(key, SentryLazyLoaderService.REDACTED_VALUE);
+        }
+      }
+      url.hash = '';
+      return url.toString();
+    } catch {
+      return rawUrl.replace(/[?#].*$/, '');
+    }
+  }
+
+  private static sanitizeTelemetryString(value: string): string {
+    let sanitized = value.replace(/https?:\/\/[^\s"'<>]+/g, url =>
+      SentryLazyLoaderService.sanitizeUrlForTelemetry(url)
+    );
+    const sensitiveName = SentryLazyLoaderService.SENSITIVE_TELEMETRY_STRING_KEY_PATTERN;
+    sanitized = sanitized.replace(
+      new RegExp(`\\b(${sensitiveName})=([^&\\s'",}]+)`, 'gi'),
+      '$1=[REDACTED]'
+    );
+    sanitized = sanitized.replace(
+      new RegExp(`(["']?\\b${sensitiveName}["']?\\s*:\\s*["']?)([^"',}\\s]+)(["']?)`, 'gi'),
+      '$1[REDACTED]$3'
+    );
+    sanitized = sanitized.replace(
+      /\b(authorization\s*[:=]\s*)(bearer|token)\s+[^\s"',}]+/gi,
+      '$1$2 [REDACTED]'
+    );
+    sanitized = sanitized.replace(
+      /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g,
+      '[REDACTED_JWT]'
+    );
+    return sanitized.replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[REDACTED_EMAIL]');
+  }
+
+  private static redactTelemetryRecord<T extends Record<string, unknown> | undefined>(record: T): T {
+    if (!record) {
+      return record;
+    }
+    return SentryLazyLoaderService.redactTelemetryValue(record) as T;
+  }
+
+  private static redactTelemetryValue(value: unknown, depth = 0): unknown {
+    if (depth > SentryLazyLoaderService.MAX_TELEMETRY_REDACTION_DEPTH) {
+      return SentryLazyLoaderService.REDACTED_VALUE;
+    }
+    if (Array.isArray(value)) {
+      return value.map(item => SentryLazyLoaderService.redactTelemetryValue(item, depth + 1));
+    }
+    if (typeof value === 'string') {
+      return SentryLazyLoaderService.sanitizeTelemetryString(value);
+    }
+    if (!value || typeof value !== 'object') {
+      return value;
+    }
+
+    const redacted: Record<string, unknown> = {};
+    for (const [key, nestedValue] of Object.entries(value as Record<string, unknown>)) {
+      if (SentryLazyLoaderService.isSensitiveTelemetryKey(key)) {
+        redacted[key] = SentryLazyLoaderService.REDACTED_VALUE;
+        continue;
+      }
+      redacted[key] = SentryLazyLoaderService.redactTelemetryValue(nestedValue, depth + 1);
+    }
+    return redacted;
+  }
+
+  private static sanitizeSentryUser(user: { id: string; email?: string } | null): { id: string } | null {
+    return user ? { id: user.id } : null;
+  }
+
+  private static sanitizeSentryEventUser(user: unknown): unknown {
+    if (!user || typeof user !== 'object') {
+      return user;
+    }
+    const { email: _email, ip_address: _ipAddress, username: _username, ...safeUser } =
+      user as Record<string, unknown>;
+    return SentryLazyLoaderService.redactTelemetryRecord(safeUser);
   }
 
   private isVerboseConsoleEnabled(): boolean {

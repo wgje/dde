@@ -51,6 +51,15 @@ describe('Cloudflare migration artifact contracts', () => {
     expect(workflow).toContain(`GITHUB_ENVIRONMENT_NAME: ${previewEnvironmentExpression}`);
     expect(workflow).toContain('NG_APP_SUPABASE_URL: ${{ secrets.NG_APP_SUPABASE_URL }}');
     expect(workflow).toContain('NG_APP_SUPABASE_ANON_KEY: ${{ secrets.NG_APP_SUPABASE_ANON_KEY }}');
+    expect(workflow).toContain('NG_APP_SENTRY_DSN: ${{ secrets.NG_APP_SENTRY_DSN }}');
+    expect(workflow).toContain('must define NG_APP_SENTRY_DSN so Sentry error capture is active on Cloudflare');
+    expect(workflow).toContain('NG_APP_SENTRY_DSN must be a valid public https Sentry browser DSN without a secret for o4508391513718784.ingest.us.sentry.io');
+    expect(workflow).toContain("url.hostname === allowedHost");
+    expect(workflow).toContain("url.password === ''");
+    expect(workflow).toContain('/^[a-f0-9]{32}$/i.test(url.username)');
+    expect(workflow).toContain('CF_COMMIT_MESSAGE: ${{ github.event.head_commit.message || github.event.pull_request.title ||');
+    expect(workflow).toContain('--commit-message="$safe_commit_message"');
+    expect(workflow).not.toContain('--commit-message="${{ github.event.head_commit.message || github.event.pull_request.title');
     expect(workflow).toContain('secret_source="Repository secrets"');
     expect(workflow).toContain('secret_source="GitHub Environment');
     expect(workflow).not.toContain('PREVIEW_NG_APP_SUPABASE_URL');
@@ -187,6 +196,18 @@ describe('Cloudflare migration artifact contracts', () => {
 
     expect(indexHtml).toContain('https://static.cloudflareinsights.com');
     expect(indexHtml).toContain('https://cloudflareinsights.com');
+  });
+
+  it('CSP allows Sentry regional ingest endpoints used by the production DSN', () => {
+    const indexHtml = read('index.html');
+    const csp = indexHtml.match(/http-equiv="Content-Security-Policy" content="([\s\S]*?)"/)?.[1] ?? '';
+    const connectSrc = csp.match(/connect-src\s+([^;]+);/)?.[1] ?? '';
+
+    expect(connectSrc).toContain('https://o4508391513718784.ingest.us.sentry.io');
+    expect(connectSrc).not.toContain('https://*.sentry.io');
+    expect(connectSrc).not.toContain('https://*.ingest.sentry.io');
+    expect(connectSrc).not.toContain('https://*.ingest.us.sentry.io');
+    expect(connectSrc).not.toContain('https://*.ingest.de.sentry.io');
   });
 
   it('shard balance gate fails only when max/min and max/median both show imbalance', () => {
