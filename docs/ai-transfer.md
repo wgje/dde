@@ -632,27 +632,18 @@ git reset --hard <checkpoint-hash>
         "@supabase/mcp-server-supabase@0.5.9"
       ],
       "env": {
-        "SUPABASE_URL": "https://${input:project-ref}.supabase.co",
-        "SUPABASE_ACCESS_TOKEN": "${input:SUPABASE_ACCESS_TOKEN}"
-      }
+        "SUPABASE_URL": "${env:SUPABASE_URL}",
+        "SUPABASE_ACCESS_TOKEN": "${env:SUPABASE_ACCESS_TOKEN}"
+      },
+      "envFile": "${workspaceFolder}/.env.local"
     }
-  },
-  "inputs": [
-    {
-      "id": "project-ref",
-      "type": "promptString",
-      "description": "Supabase project reference ID",
-      "password": false
-    },
-    {
-      "id": "SUPABASE_ACCESS_TOKEN",
-      "type": "promptString",
-      "description": "Personal access token",
-      "password": true
-    }
-  ]
+  }
 }
 ```
+
+> Copilot cloud agent 需在 `.github/workflows/copilot-setup-steps.yml` 中声明 `environment: copilot`，
+> 然后把 `NG_APP_SUPABASE_URL` / `SUPABASE_ACCESS_TOKEN`（或受限回退到 `NG_APP_SUPABASE_ANON_KEY`）桥接成
+> `SUPABASE_URL` / `SUPABASE_ACCESS_TOKEN`，这样仓库内的 `mcp.json` 才能直接复用同一套环境变量。
 
 ### 8.2 MCP 选择策略
 
