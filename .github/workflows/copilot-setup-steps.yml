@@ -72,14 +72,14 @@ jobs:
           if [ -n "$supabase_url" ]; then
             echo "SUPABASE_URL=$supabase_url" >> "$GITHUB_ENV"
           else
-            echo "::warning::Neither SUPABASE_URL nor NG_APP_SUPABASE_URL is present in the runtime environment; Supabase MCP will remain unavailable."
+            echo "::warning::Neither SUPABASE_URL nor NG_APP_SUPABASE_URL are present in the runtime environment; MCP bootstrap cannot set SUPABASE_URL."
           fi
 
           if [ -n "$supabase_access_token" ]; then
             echo "::add-mask::$supabase_access_token"
             echo "SUPABASE_ACCESS_TOKEN=$supabase_access_token" >> "$GITHUB_ENV"
           else
-            echo "::warning::SUPABASE_ACCESS_TOKEN is not present in the runtime environment; Supabase MCP will remain unavailable."
+            echo "::warning::SUPABASE_ACCESS_TOKEN is not present in the runtime environment; MCP bootstrap cannot set SUPABASE_ACCESS_TOKEN."
           fi
 
           if [ -n "$supabase_url" ] && [ -n "$supabase_access_token" ]; then
