@@ -79,7 +79,7 @@ jobs:
             echo "::add-mask::$supabase_access_token"
             echo "SUPABASE_ACCESS_TOKEN=$supabase_access_token" >> "$GITHUB_ENV"
           else
-            echo "::warning::SUPABASE_ACCESS_TOKEN is not present in the runtime environment; Supabase MCP will remain unavailable even if NG_APP_SUPABASE_ANON_KEY is set."
+            echo "::warning::SUPABASE_ACCESS_TOKEN is not present in the runtime environment; Supabase MCP will remain unavailable."
           fi
 
           if [ -n "$supabase_url" ] && [ -n "$supabase_access_token" ]; then
