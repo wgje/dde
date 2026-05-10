@@ -15,7 +15,6 @@ on:
 
 jobs:
   copilot-setup-steps:
-    environment: copilot
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -57,40 +56,35 @@ jobs:
 
       - name: Bridge Supabase environment for MCP
         shell: bash
-        env:
-          COPILOT_SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          COPILOT_SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-          COPILOT_NG_APP_SUPABASE_URL: ${{ secrets.NG_APP_SUPABASE_URL }}
-          COPILOT_NG_APP_SUPABASE_ANON_KEY: ${{ secrets.NG_APP_SUPABASE_ANON_KEY }}
         run: |
-          supabase_url="${COPILOT_SUPABASE_URL:-${COPILOT_NG_APP_SUPABASE_URL:-}}"
-          supabase_access_token="${COPILOT_SUPABASE_ACCESS_TOKEN:-}"
+          supabase_url="${SUPABASE_URL:-${NG_APP_SUPABASE_URL:-}}"
+          supabase_access_token="${SUPABASE_ACCESS_TOKEN:-}"
 
-          if [ -z "$supabase_access_token" ] && [ -n "${COPILOT_NG_APP_SUPABASE_ANON_KEY:-}" ]; then
-            supabase_access_token="${COPILOT_NG_APP_SUPABASE_ANON_KEY}"
-            echo "::warning::SUPABASE_ACCESS_TOKEN not configured in the copilot environment; falling back to NG_APP_SUPABASE_ANON_KEY for Supabase MCP. This may be insufficient for privileged MCP operations."
+          if [ -z "$supabase_access_token" ] && [ -n "${NG_APP_SUPABASE_ANON_KEY:-}" ]; then
+            supabase_access_token="${NG_APP_SUPABASE_ANON_KEY}"
+            echo "::warning::SUPABASE_ACCESS_TOKEN not present in the runtime environment; falling back to NG_APP_SUPABASE_ANON_KEY for Supabase MCP. This may be insufficient for privileged MCP operations."
           fi
 
-          if [ -n "${COPILOT_NG_APP_SUPABASE_URL:-}" ]; then
-            echo "NG_APP_SUPABASE_URL=${COPILOT_NG_APP_SUPABASE_URL}" >> "$GITHUB_ENV"
+          if [ -n "${NG_APP_SUPABASE_URL:-}" ]; then
+            echo "NG_APP_SUPABASE_URL=${NG_APP_SUPABASE_URL}" >> "$GITHUB_ENV"
           fi
 
-          if [ -n "${COPILOT_NG_APP_SUPABASE_ANON_KEY:-}" ]; then
-            echo "::add-mask::${COPILOT_NG_APP_SUPABASE_ANON_KEY}"
-            echo "NG_APP_SUPABASE_ANON_KEY=${COPILOT_NG_APP_SUPABASE_ANON_KEY}" >> "$GITHUB_ENV"
+          if [ -n "${NG_APP_SUPABASE_ANON_KEY:-}" ]; then
+            echo "::add-mask::${NG_APP_SUPABASE_ANON_KEY}"
+            echo "NG_APP_SUPABASE_ANON_KEY=${NG_APP_SUPABASE_ANON_KEY}" >> "$GITHUB_ENV"
           fi
 
           if [ -n "$supabase_url" ]; then
             echo "SUPABASE_URL=$supabase_url" >> "$GITHUB_ENV"
           else
-            echo "::warning::Neither SUPABASE_URL nor NG_APP_SUPABASE_URL is configured in the copilot environment; Supabase MCP will remain unavailable."
+            echo "::warning::Neither SUPABASE_URL nor NG_APP_SUPABASE_URL is present in the runtime environment; Supabase MCP will remain unavailable."
           fi
 
           if [ -n "$supabase_access_token" ]; then
             echo "::add-mask::$supabase_access_token"
             echo "SUPABASE_ACCESS_TOKEN=$supabase_access_token" >> "$GITHUB_ENV"
           else
-            echo "::warning::Neither SUPABASE_ACCESS_TOKEN nor NG_APP_SUPABASE_ANON_KEY is configured in the copilot environment; Supabase MCP will remain unavailable."
+            echo "::warning::Neither SUPABASE_ACCESS_TOKEN nor NG_APP_SUPABASE_ANON_KEY is present in the runtime environment; Supabase MCP will remain unavailable."
           fi
 
           if [ -n "$supabase_url" ] && [ -n "$supabase_access_token" ]; then

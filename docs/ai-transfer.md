@@ -641,8 +641,8 @@ git reset --hard <checkpoint-hash>
 }
 ```
 
-> Copilot cloud agent 需在 `.github/workflows/copilot-setup-steps.yml` 中声明 `environment: copilot`，
-> 然后把 `NG_APP_SUPABASE_URL` / `SUPABASE_ACCESS_TOKEN`（或受限回退到 `NG_APP_SUPABASE_ANON_KEY`）桥接成
+> Copilot cloud agent 会在运行时注入已有环境变量；`copilot-setup-steps.yml` 只需把
+> `NG_APP_SUPABASE_URL` / `SUPABASE_ACCESS_TOKEN`（或受限回退到 `NG_APP_SUPABASE_ANON_KEY`）桥接成
 > `SUPABASE_URL` / `SUPABASE_ACCESS_TOKEN`，这样仓库内的 `mcp.json` 才能直接复用同一套环境变量。
 
 ### 8.2 MCP 选择策略
