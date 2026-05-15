@@ -761,12 +761,16 @@ export class AppLifecycleOrchestratorService {
    *
    * 流程：
    * 1. 若可用，先 `swUpdate.activateUpdate()` 让 waiting SW 真正进入 active；
-   * 2. 然后 `reloadViaForceClearCache()` 触发清缓存 + 导航；
-   * 3. 任一步抛错都不会传出（让 toast 容器的 finally 解锁 UI），但 flag 会复位，
-   *    下一次 resume 仍能再次弹出 prompt（避免「点了没反应」+「不再提示」双重糟糕体验）。
+   * 2. 然后 `reloadViaForceClearCache()` 触发清缓存 + 导航。
+   * 3. 任一步抛错都不会传出（让 toast 容器的 finally 解锁 UI）；
+   *    若导航没有真正发生（catch 命中），flag 会复位，下一次 resume 仍能再次弹出
+   *    prompt（避免「点了没反应」+「不再提示」双重糟糕体验）。
+   *
+   * 注：成功路径下 `reloadViaForceClearCache()` 会触发 `location.replace` 导航，
+   * 当前文档被卸载，本函数后续代码与 `finally` 块都不会被执行；因此 flag 复位
+   * 只在异常路径才有意义。
    */
   private async triggerVersionReload(): Promise<void> {
-    let succeeded = false;
     try {
       if (this.swUpdate?.isEnabled) {
         try {
@@ -780,14 +784,11 @@ export class AppLifecycleOrchestratorService {
       }
 
       reloadViaForceClearCache();
-      succeeded = true;
+      // 正常路径下文档已被 location.replace 卸载，此后代码不会执行。
     } catch (err) {
+      // 仅在 reloadViaForceClearCache 同步抛错（极端环境）时复位 flag。
       this.logger.warn('triggerVersionReload failed', err);
-    } finally {
-      if (!succeeded) {
-        // 复位抑制 flag：让用户下一次 resume 仍能看到 prompt（而不是「点了没反应、之后也没提醒」）。
-        this.hasShownResumeVersionPrompt = false;
-      }
+      this.hasShownResumeVersionPrompt = false;
     }
   }
 

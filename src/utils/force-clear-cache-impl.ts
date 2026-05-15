@@ -90,6 +90,9 @@ export function __isForceClearInProgressForTests(): boolean {
 /**
  * 用 `Promise.race` 给单步加超时。超时时 resolve 为 `'timeout'`，
  * 上层据此跳过该步骤继续后续逻辑（不抛错，不阻塞导航）。
+ *
+ * @param stepName 用于日志消息的步骤名（仅用作诊断 breadcrumb 的标识，
+ *                 例如 `'clearApplicationCaches'`/`'unregisterApplicationServiceWorkers'`）。
  */
 async function withTimeout(
   promise: Promise<void>,

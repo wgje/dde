@@ -203,21 +203,18 @@ describe('forceClearCacheImpl', () => {
     expect(calls.logInfo).toHaveBeenCalledWith('force-clear-cache:replace-location');
   });
 
-  it('gate release timer fallback frees the gate after gateReleaseMs even if finally is bypassed', async () => {
-    // Simulate a pathological scenario by forcing the gate manually
-    // and then ensuring auto-release fires.
+  it('releases gate via finally on normal completion (auto-release timer is also cleared)', async () => {
+    // 该用例验证「正常路径」下闸门由 finally 块释放，并不会阻塞下一次调用。
+    // gateReleaseMs 兜底定时器仅是双保险，正常路径无需依赖它。
     __resetForceClearGateForTests();
     const { deps } = buildDeps({ gateReleaseMs: 200 });
 
-    // Make the pipeline hang past gateReleaseMs but ultimately resolve quickly,
-    // so we can observe the auto-release timer firing.
     const promise = forceClearCacheImpl(deps);
     expect(__isForceClearInProgressForTests()).toBe(true);
 
     await vi.advanceTimersByTimeAsync(500);
     await promise;
 
-    // After completion finally has run; gate is false.
     expect(__isForceClearInProgressForTests()).toBe(false);
   });
 

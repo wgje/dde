@@ -80,8 +80,10 @@ describe('ToastContainerComponent.handleAction', () => {
 
     component.handleAction(message);
 
-    // Synchronous Promise.resolve().finally still queues microtask; gate stays pending until next tick.
+    // 同步路径：onClick 调用、pending 立即解除、toast 已 dismiss。
     expect(onClick).toHaveBeenCalledTimes(1);
+    expect(component.isActionPending('msg-1')).toBe(false);
+    expect(mockToast.dismiss).toHaveBeenCalledWith('msg-1');
   });
 
   it('still dismisses when async onClick rejects', async () => {

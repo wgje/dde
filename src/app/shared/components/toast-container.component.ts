@@ -233,19 +233,25 @@ export class ToastContainerComponent {
       this.toast.dismiss(message.id);
     };
 
-    // 5 秒兜底：避免 onClick Promise 永远不 resolve。
-    const fallbackTimer = setTimeout(dismissOnce, ToastContainerComponent.PENDING_FALLBACK_MS);
-
     let result: void | Promise<void>;
     try {
       result = action.onClick();
     } catch {
-      clearTimeout(fallbackTimer);
       dismissOnce();
       return;
     }
 
-    Promise.resolve(result)
+    // 仅对真正异步的 onClick 启用 pending UI + 5 秒兜底。
+    // 同步返回 void 时立刻 dismiss，避免无谓的 setTimeout/clearTimeout 周期。
+    if (!(result && typeof (result as Promise<void>).then === 'function')) {
+      dismissOnce();
+      return;
+    }
+
+    // 5 秒兜底：避免 onClick Promise 永远不 resolve。
+    const fallbackTimer = setTimeout(dismissOnce, ToastContainerComponent.PENDING_FALLBACK_MS);
+
+    (result as Promise<void>)
       .catch(() => {
         // onClick 内部的失败不应阻塞 toast 关闭。具体业务方应在 onClick 内自行
         // 处理失败（例如重新弹 toast / 复位 prompt flag），这里仅保证 UI 解锁。
