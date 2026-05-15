@@ -21,7 +21,7 @@
 2. 选择“加载已解压的扩展”，目录必须选择包含 `manifest.json` 的扩展根目录：
    - 从仓库源码安装：选择 `extensions/siyuan-relay`。
    - 从 GitHub 下载 ZIP 后安装：先完整解压仓库，再选择 `dde-main/extensions/siyuan-relay`（或对应分支名的同级目录）。
-   - 如果你把扩展复制到桌面，请确认 `~/Desktop/siyuan-relay/manifest.json` 和 `~/Desktop/siyuan-relay/src/` 同时存在；不要选择仓库根目录、`src` 子目录，或只从 GitHub 页面单独保存下来的空目录。
+   - 如果你把扩展复制到桌面或其他目录，请确认被选中的 `siyuan-relay` 目录内同时存在 `manifest.json` 和 `src/`（Windows 示例：`C:\Users\你的用户名\Desktop\siyuan-relay\manifest.json`）；不要选择仓库根目录、`src` 子目录，或只从 GitHub 页面单独保存下来的空目录。
 3. 在扩展选项页保存思源本地地址和 token。
 4. 打开 NanoFlow，设置页选择“浏览器扩展 Relay（推荐）”，点击“测试连接”。
 
