@@ -56,6 +56,8 @@ export class AppLifecycleOrchestratorService {
   private hiddenAt: number | null = null;
   private lastBackgroundDurationMs = 0;
   private consecutiveFailures = 0;
+  // 仅用于诊断：会话失败计数永远不会触发 auto-reload（reload 无法修复 no-session 状态）。
+  private consecutiveSessionFailures = 0;
   private autoReloadScheduled = false;
   private deferredResumeTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -230,6 +232,18 @@ export class AppLifecycleOrchestratorService {
     }
   }
 
+  /**
+   * 执行 resume 流程。
+   *
+   * 失败分类（重要）：
+   * 1. `pipelineResult.reason === 'no-session' | 'refresh-failed'` —— 会话状态失败：
+   *    不计入 `consecutiveFailures`，也不会触发 `maybeScheduleAutoReload`。
+   *    原因：reload 不修复 no-session（refresh token 仍在 localStorage；终态失效后重载只会
+   *    再次走同一断路），强刷反而破坏未登录用户的当前 UI 状态。这类失败由 `SessionManager`
+   *    自身的断路 + "登录已过期" toast 处理。
+   * 2. pipeline 抛出运行时异常（catch 分支）—— 真异常：累加 `consecutiveFailures`，
+   *    达到阈值后通过 `maybeScheduleAutoReload` 兜底刷新页面。
+   */
   private async executeResume(reason: AppResumeReason): Promise<void> {
     const startAt = Date.now();
     const runHeavyRecovery = reason !== 'visibility-quick';
@@ -267,19 +281,13 @@ export class AppLifecycleOrchestratorService {
         return;
       }
 
-      // session 校验/刷新失败时不重置失败计数
       if (pipelineResult.reason === 'no-session' || pipelineResult.reason === 'refresh-failed') {
-        this.consecutiveFailures += 1;
-        this.addLifecycleBreadcrumb('lifecycle.resume.fail', reason, {
-          elapsedMs: Date.now() - startAt,
-          sessionFailureReason: pipelineResult.reason,
-          consecutiveFailures: this.consecutiveFailures,
-        });
-        this.maybeScheduleAutoReload(reason, new Error(`Session validation failed: ${pipelineResult.reason}`));
+        this.handleSessionFailure(reason, pipelineResult.reason, startAt);
         return;
       }
 
       this.consecutiveFailures = 0;
+      this.consecutiveSessionFailures = 0;
       this.lastResumeAtSignal.set(Date.now());
       if (typeof pipelineResult.interactionReadyMs === 'number') {
         this.reportRecoveryMetrics({
@@ -313,30 +321,64 @@ export class AppLifecycleOrchestratorService {
         elapsedMs: Date.now() - startAt,
       });
     } catch (error) {
-      this.consecutiveFailures += 1;
-
-      this.addLifecycleBreadcrumb('lifecycle.resume.fail', reason, {
-        elapsedMs: Date.now() - startAt,
-        consecutiveFailures: this.consecutiveFailures,
-      });
-
-      this.sentryLazyLoader.captureException(error, {
-        operation: 'lifecycle.resume',
-        reason,
-        consecutiveFailures: this.consecutiveFailures,
-      });
-
-      this.logger.warn('Resume pipeline failed', {
-        reason,
-        consecutiveFailures: this.consecutiveFailures,
-        error,
-      });
-
-      this.maybeScheduleAutoReload(reason, error);
+      this.handlePipelineException(reason, error, startAt);
     } finally {
       this.currentRecoveryTicketSignal.set(null);
       this.isResumingSignal.set(false);
     }
+  }
+
+  /**
+   * 处理会话校验/刷新失败（no-session / refresh-failed）。
+   *
+   * 重要：不计入 `consecutiveFailures`，不会触发 auto-reload。
+   * 仅维护 `consecutiveSessionFailures` 用于诊断，并写入 breadcrumb。
+   */
+  private handleSessionFailure(
+    reason: AppResumeReason,
+    failureKind: 'no-session' | 'refresh-failed',
+    startAt: number
+  ): void {
+    this.consecutiveSessionFailures += 1;
+    this.addLifecycleBreadcrumb('lifecycle.resume.fail', reason, {
+      elapsedMs: Date.now() - startAt,
+      failureKind,
+      // 保留 sessionFailureReason 以兼容已存在的 Sentry 查询/告警；新代码应优先使用 failureKind。
+      sessionFailureReason: failureKind,
+      consecutiveSessionFailures: this.consecutiveSessionFailures,
+    });
+  }
+
+  /**
+   * 处理 resume pipeline 抛出的运行时异常（真异常）。
+   * 累加 `consecutiveFailures`，达到阈值时通过 `maybeScheduleAutoReload` 兜底刷新。
+   */
+  private handlePipelineException(
+    reason: AppResumeReason,
+    error: unknown,
+    startAt: number
+  ): void {
+    this.consecutiveFailures += 1;
+
+    this.addLifecycleBreadcrumb('lifecycle.resume.fail', reason, {
+      elapsedMs: Date.now() - startAt,
+      failureKind: 'pipeline-exception',
+      consecutiveFailures: this.consecutiveFailures,
+    });
+
+    this.sentryLazyLoader.captureException(error, {
+      operation: 'lifecycle.resume',
+      reason,
+      consecutiveFailures: this.consecutiveFailures,
+    });
+
+    this.logger.warn('Resume pipeline failed', {
+      reason,
+      consecutiveFailures: this.consecutiveFailures,
+      error,
+    });
+
+    this.maybeScheduleAutoReload(reason, error);
   }
 
   private async executeRecoveryPipeline(
@@ -771,6 +813,7 @@ export class AppLifecycleOrchestratorService {
       tags: {
         operation: 'lifecycle.auto-reload',
         reason,
+        failureKind: 'pipeline-exception',
       },
       extra: {
         error: error instanceof Error ? error.message : String(error),
