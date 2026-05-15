@@ -1,4 +1,5 @@
 import { DestroyRef, Injectable, Injector, inject, signal } from '@angular/core';
+import { SwUpdate } from '@angular/service-worker';
 import { APP_LIFECYCLE_CONFIG } from '../config/app-lifecycle.config';
 import { FEATURE_FLAGS } from '../config/feature-flags.config';
 import { LoggerService } from './logger.service';
@@ -39,6 +40,11 @@ export class AppLifecycleOrchestratorService {
   private readonly syncCoordinator = inject(SyncCoordinatorService);
   private readonly injector = inject(Injector);
   private readonly destroyRef = inject(DestroyRef);
+  /**
+   * SwUpdate 在禁用 SW 的本地开发环境下不可用。
+   * 用 `{ optional: true }` 注入，调用前再检查 isEnabled。
+   */
+  private readonly swUpdate = inject(SwUpdate, { optional: true });
 
   private readonly isResumingSignal = signal(false);
   private readonly lastResumeAtSignal = signal<number | null>(null);
@@ -303,6 +309,10 @@ export class AppLifecycleOrchestratorService {
         !this.hasShownResumeVersionPrompt &&
         this.lastBackgroundDurationMs >= APP_LIFECYCLE_CONFIG.NEW_VERSION_PROMPT_THRESHOLD_MS
       ) {
+        // 关键修复（2026-05-15）：
+        // - onClick 异步化，先 activateUpdate() 让 waiting SW 真正切到 active，再清缓存刷新；
+        // - 抑制 flag 在「点击实际开始」之前设置；若点击后两条路径都失败，复位 flag 让
+        //   下一次 resume 仍能弹出，避免用户只剩一个无效 toast。
         this.hasShownResumeVersionPrompt = true;
         this.toast.info(
           '检测到新版本',
@@ -311,7 +321,8 @@ export class AppLifecycleOrchestratorService {
             duration: 0,
             action: {
               label: '立即刷新',
-              onClick: () => reloadViaForceClearCache(),
+              pendingLabel: '正在刷新…',
+              onClick: () => this.triggerVersionReload(),
             },
           }
         );
@@ -751,8 +762,8 @@ export class AppLifecycleOrchestratorService {
   }
 
   private addLifecycleBreadcrumb(
-    message: 'lifecycle.resume.start' | 'lifecycle.resume.reason' | 'lifecycle.resume.success' | 'lifecycle.resume.fail' | 'recovery.step',
-    reason: AppResumeReason,
+    message: 'lifecycle.resume.start' | 'lifecycle.resume.reason' | 'lifecycle.resume.success' | 'lifecycle.resume.fail' | 'recovery.step' | 'lifecycle.version-reload.activate-ok' | 'lifecycle.version-reload.activate-failed',
+    reason: AppResumeReason | 'manual',
     extra?: Record<string, unknown>
   ): void {
     this.sentryLazyLoader.addBreadcrumb({
@@ -785,6 +796,42 @@ export class AppLifecycleOrchestratorService {
     }, delayMs);
 
     return delayMs;
+  }
+
+  /**
+   * 「检测到新版本」toast 的「立即刷新」点击处理。
+   *
+   * 流程：
+   * 1. 若可用，先 `swUpdate.activateUpdate()` 让 waiting SW 真正进入 active；
+   * 2. 然后 `reloadViaForceClearCache()` 触发清缓存 + 导航。
+   * 3. 任一步抛错都不会传出（让 toast 容器的 finally 解锁 UI）；
+   *    若导航没有真正发生（catch 命中），flag 会复位，下一次 resume 仍能再次弹出
+   *    prompt（避免「点了没反应」+「不再提示」双重糟糕体验）。
+   *
+   * 注：成功路径下 `reloadViaForceClearCache()` 会触发 `location.replace` 导航，
+   * 当前文档被卸载，本函数后续代码与 `finally` 块都不会被执行；因此 flag 复位
+   * 只在异常路径才有意义。
+   */
+  private async triggerVersionReload(): Promise<void> {
+    try {
+      if (this.swUpdate?.isEnabled) {
+        try {
+          await this.swUpdate.activateUpdate();
+          this.addLifecycleBreadcrumb('lifecycle.version-reload.activate-ok', 'manual', {});
+        } catch (err) {
+          this.addLifecycleBreadcrumb('lifecycle.version-reload.activate-failed', 'manual', {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+
+      reloadViaForceClearCache();
+      // 正常路径下文档已被 location.replace 卸载，此后代码不会执行。
+    } catch (err) {
+      // 仅在 reloadViaForceClearCache 同步抛错（极端环境）时复位 flag。
+      this.logger.warn('triggerVersionReload failed', err);
+      this.hasShownResumeVersionPrompt = false;
+    }
   }
 
   private maybeScheduleAutoReload(reason: AppResumeReason, error: unknown): void {
