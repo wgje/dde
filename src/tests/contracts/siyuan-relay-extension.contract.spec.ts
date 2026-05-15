@@ -22,8 +22,10 @@ function readManifest(): ExtensionManifest {
 }
 
 function expectRelayFile(relativePath: string | undefined): void {
-  expect(relativePath, 'manifest must reference a concrete file path').toBeTruthy();
-  expect(fs.existsSync(path.join(relayRoot, relativePath as string))).toBe(true);
+  if (!relativePath) {
+    throw new Error('manifest must reference a concrete file path');
+  }
+  expect(fs.existsSync(path.join(relayRoot, relativePath))).toBe(true);
 }
 
 describe('SiYuan relay extension contract', () => {
