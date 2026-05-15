@@ -98,6 +98,10 @@ describe('Sync RPC stale-write protection migration contract (P0 遗留项)', ()
     expect(section).toMatch(
       /migrated_to_v2 = CASE\s+WHEN v_is_stale THEN COALESCE\(v_existing_migrated, TRUE\)/,
     );
+    // 陈旧 payload 不得改 deleted_at（与 0511 trigger 配合提供双层防护）
+    expect(section).toMatch(
+      /deleted_at = CASE\s+WHEN v_is_stale THEN v_existing_deleted\s+ELSE NULLIF\(v_project->>'deleted_at', ''\)::TIMESTAMPTZ\s+END/,
+    );
     // 必须 SELECT FOR UPDATE 抓取 existing 关键字段
     expect(section).toMatch(
       /SELECT owner_id, updated_at, deleted_at, title, description, version, migrated_to_v2[\s\S]*?FROM public\.projects[\s\S]*?FOR UPDATE/,

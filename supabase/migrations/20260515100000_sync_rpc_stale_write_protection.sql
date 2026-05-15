@@ -197,7 +197,7 @@ BEGIN
     INSERT INTO public.sync_operation_log (operation_id, user_id, entity_type, entity_id,
       status, reject_reason, protocol_version, deployment_epoch, deployment_target, client_git_sha, client_origin)
     VALUES (v_op_id, v_user, 'connection', v_conn_id, 'remote-newer',
-      'legacy_endpointless_tombstone', v_protocol, v_client_epoch, v_deployment_target, v_client_origin, v_client_git);
+      'legacy_endpointless_tombstone', v_protocol, v_client_epoch, v_deployment_target, v_client_git, v_client_origin);
     RETURN jsonb_build_object(
       'status', 'remote-newer',
       'remote_updated_at', v_endpoint_tombstone_deleted,
@@ -605,7 +605,12 @@ BEGIN
           WHEN v_is_stale THEN COALESCE(v_existing_migrated, TRUE)
           ELSE COALESCE((v_project->>'migrated_to_v2')::BOOLEAN, TRUE)
         END,
-        deleted_at = NULLIF(v_project->>'deleted_at', '')::TIMESTAMPTZ,
+        -- 陈旧 payload 不得修改 deleted_at（已删项目走 deleted-remote-newer 提前返回；
+        -- 此处主要防止陈旧 payload 错误地把 alive 项目设为 deleted_at != NULL）
+        deleted_at = CASE
+          WHEN v_is_stale THEN v_existing_deleted
+          ELSE NULLIF(v_project->>'deleted_at', '')::TIMESTAMPTZ
+        END,
         updated_at = NOW()
     WHERE p.id = v_project_id
     RETURNING p.updated_at INTO v_written_updated;

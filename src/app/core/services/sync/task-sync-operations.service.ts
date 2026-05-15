@@ -1642,7 +1642,7 @@ export class TaskSyncOperationsService {
     const map: Record<string, string> = {};
     let count = 0;
     for (const id of taskIds) {
-      const task = this.taskStore.getTask(id) as (Task & { updatedAt?: string | null }) | undefined;
+      const task = this.taskStore.getTask(id);
       const updatedAt = task?.updatedAt;
       if (typeof updatedAt === 'string' && updatedAt.length > 0) {
         map[id] = updatedAt;
