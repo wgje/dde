@@ -48,6 +48,9 @@ async function setConfig(message) {
   const rawBaseUrl = typeof payload.baseUrl === 'string' ? payload.baseUrl.trim() : '';
   const baseUrl = rawBaseUrl || DEFAULT_BASE_URL;
   if (!isTrustedBaseUrl(baseUrl)) {
+    // 复用 token-invalid 而非新增错误码：UI 在 saveSiyuanConfigToExtension 中已用同一份白名单校验过 baseUrl，
+    // 走到这里说明页面被绕过（被注入脚本或调试器），此时把请求统一拒绝即可；下游 UI 的提示文案虽然偏向 token，
+    // 但用户最终修复路径仍是"改 baseUrl 或 token 后重新保存"。
     return { type: 'nanoflow.siyuan.set-config-result', requestId, ok: false, errorCode: 'token-invalid' };
   }
   // 空字符串视为"清除授权"，与扩展 Options 页 clearConfig 行为一致。
