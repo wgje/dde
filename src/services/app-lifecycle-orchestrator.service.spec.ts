@@ -13,6 +13,11 @@ import { FEATURE_FLAGS } from '../config/feature-flags.config';
 import { FocusStartupProbeService } from './focus-startup-probe.service';
 import { FOCUS_CONFIG } from '../config/focus.config';
 
+const reloadViaForceClearCacheMock = vi.fn();
+vi.mock('../utils/force-clear-cache', () => ({
+  reloadViaForceClearCache: (fallback?: () => void) => reloadViaForceClearCacheMock(fallback),
+}));
+
 describe('AppLifecycleOrchestratorService', () => {
   let service: AppLifecycleOrchestratorService;
   let mockNetwork: { refresh: ReturnType<typeof vi.fn> };
@@ -37,6 +42,12 @@ describe('AppLifecycleOrchestratorService', () => {
     info: ReturnType<typeof vi.fn>;
     warning: ReturnType<typeof vi.fn>;
   };
+  let mockSentry: {
+    addBreadcrumb: ReturnType<typeof vi.fn>;
+    setMeasurement: ReturnType<typeof vi.fn>;
+    captureException: ReturnType<typeof vi.fn>;
+    captureMessage: ReturnType<typeof vi.fn>;
+  };
   let originalRequestIdleCallbackDescriptor: PropertyDescriptor | undefined;
   const originalResumeInteractionFirst = FEATURE_FLAGS.RESUME_INTERACTION_FIRST_V1;
   const originalPulseDedup = FEATURE_FLAGS.RESUME_PULSE_DEDUP_V1;
@@ -57,6 +68,9 @@ describe('AppLifecycleOrchestratorService', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-02-14T00:00:00.000Z'));
+    if (typeof localStorage !== 'undefined') {
+      localStorage.removeItem('nanoflow.lifecycle.auto-reload');
+    }
     originalRequestIdleCallbackDescriptor = Object.getOwnPropertyDescriptor(window, 'requestIdleCallback');
     Object.defineProperty(window, 'requestIdleCallback', {
       configurable: true,
@@ -106,6 +120,15 @@ describe('AppLifecycleOrchestratorService', () => {
       warning: vi.fn(),
     };
 
+    mockSentry = {
+      addBreadcrumb: vi.fn(),
+      setMeasurement: vi.fn(),
+      captureException: vi.fn(),
+      captureMessage: vi.fn(),
+    };
+
+    reloadViaForceClearCacheMock.mockClear();
+
     const mockLoggerCategory = {
       info: vi.fn(),
       warn: vi.fn(),
@@ -124,12 +147,7 @@ describe('AppLifecycleOrchestratorService', () => {
         { provide: ToastService, useValue: mockToast },
         {
           provide: SentryLazyLoaderService,
-          useValue: {
-            addBreadcrumb: vi.fn(),
-            setMeasurement: vi.fn(),
-            captureException: vi.fn(),
-            captureMessage: vi.fn(),
-          },
+          useValue: mockSentry,
         },
         {
           provide: LoggerService,
@@ -479,6 +497,163 @@ describe('AppLifecycleOrchestratorService', () => {
     expect(mockFocusStartupProbe.recheckGate).toHaveBeenNthCalledWith(2, {
       source: 'resume-remote',
       reloadLocal: false,
+    });
+  });
+
+  describe('auto-reload 仅在 pipeline 真异常时触发', () => {
+    /** 找到带指定 message 的 lifecycle.resume.fail breadcrumb，断言 data.failureKind */
+    const findFailBreadcrumbs = () =>
+      mockSentry.addBreadcrumb.mock.calls
+        .map(([entry]) => entry as { message?: string; data?: Record<string, unknown> })
+        .filter(entry => entry.message === 'lifecycle.resume.fail');
+
+    const expectNoAutoReload = (): void => {
+      expect(reloadViaForceClearCacheMock).not.toHaveBeenCalled();
+      const reloadMessageCalls = mockSentry.captureMessage.mock.calls.filter(
+        ([message]) => message === 'Lifecycle auto reload scheduled'
+      );
+      expect(reloadMessageCalls).toHaveLength(0);
+      expect(mockToast.warning).not.toHaveBeenCalledWith(
+        '恢复失败',
+        expect.anything(),
+        expect.anything()
+      );
+    };
+
+    it('regression: 连续 no-session 不应触发 auto-reload，且 breadcrumb 含 failureKind', async () => {
+      mockSessionManager.validateOrRefreshOnResume.mockResolvedValue({
+        ok: false,
+        refreshed: false,
+        deferred: false,
+        reason: 'no-session',
+      });
+
+      await service.triggerResume('visibility-quick');
+      await service.triggerResume('visibility-quick');
+      await flushResumeWithoutDrainingLongTimers();
+
+      expectNoAutoReload();
+
+      const failCrumbs = findFailBreadcrumbs();
+      expect(failCrumbs.length).toBeGreaterThanOrEqual(2);
+      for (const crumb of failCrumbs) {
+        expect(crumb.data?.['failureKind']).toBe('no-session');
+        expect(crumb.data?.['sessionFailureReason']).toBe('no-session');
+      }
+    });
+
+    it('regression: 连续 refresh-failed 不应触发 auto-reload', async () => {
+      mockSessionManager.validateOrRefreshOnResume.mockResolvedValue({
+        ok: false,
+        refreshed: false,
+        deferred: false,
+        reason: 'refresh-failed',
+      });
+
+      await service.triggerResume('visibility-quick');
+      await service.triggerResume('visibility-quick');
+      await flushResumeWithoutDrainingLongTimers();
+
+      expectNoAutoReload();
+      const failCrumbs = findFailBreadcrumbs();
+      expect(failCrumbs.length).toBeGreaterThanOrEqual(2);
+      for (const crumb of failCrumbs) {
+        expect(crumb.data?.['failureKind']).toBe('refresh-failed');
+      }
+    });
+
+    it('pipeline 真异常达到阈值后应触发 auto-reload，并标记 failureKind=pipeline-exception', async () => {
+      mockSimpleSync.recoverAfterResume.mockRejectedValue(new Error('boom'));
+
+      await service.triggerResume('visibility-quick');
+      await service.triggerResume('visibility-quick');
+      await flushResumeWithoutDrainingLongTimers();
+
+      const reloadMessageCalls = mockSentry.captureMessage.mock.calls.filter(
+        ([message]) => message === 'Lifecycle auto reload scheduled'
+      );
+      expect(reloadMessageCalls).toHaveLength(1);
+      const [, options] = reloadMessageCalls[0] as [string, { tags?: Record<string, unknown> }];
+      expect(options.tags?.['failureKind']).toBe('pipeline-exception');
+
+      expect(mockToast.warning).toHaveBeenCalledWith(
+        '恢复失败',
+        expect.any(String),
+        expect.any(Object)
+      );
+
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(reloadViaForceClearCacheMock).toHaveBeenCalledTimes(1);
+
+      const failCrumbs = findFailBreadcrumbs();
+      expect(failCrumbs.length).toBeGreaterThanOrEqual(2);
+      for (const crumb of failCrumbs) {
+        expect(crumb.data?.['failureKind']).toBe('pipeline-exception');
+      }
+    });
+
+    it('counter-isolation: no-session 不会累加 pipeline 计数，真异常仍按 catch 计数升级', async () => {
+      // 先两次 no-session 失败：consecutiveSessionFailures = 2，consecutiveFailures = 0
+      mockSessionManager.validateOrRefreshOnResume
+        .mockResolvedValueOnce({ ok: false, refreshed: false, deferred: false, reason: 'no-session' })
+        .mockResolvedValueOnce({ ok: false, refreshed: false, deferred: false, reason: 'no-session' });
+
+      await service.triggerResume('visibility-quick');
+      await service.triggerResume('visibility-quick');
+      await flushResumeWithoutDrainingLongTimers();
+
+      expectNoAutoReload();
+
+      // 第三次：一次 pipeline 真异常 → consecutiveFailures = 1，仍未达到阈值 2
+      mockSessionManager.validateOrRefreshOnResume.mockResolvedValueOnce({
+        ok: true,
+        refreshed: false,
+        deferred: false,
+      });
+      mockSimpleSync.recoverAfterResume.mockRejectedValueOnce(new Error('boom-1'));
+
+      await service.triggerResume('visibility-quick');
+      await flushResumeWithoutDrainingLongTimers();
+
+      expect(reloadViaForceClearCacheMock).not.toHaveBeenCalled();
+      const beforeReloadCalls = mockSentry.captureMessage.mock.calls.filter(
+        ([message]) => message === 'Lifecycle auto reload scheduled'
+      );
+      expect(beforeReloadCalls).toHaveLength(0);
+
+      // 第四次：第二次 pipeline 真异常 → consecutiveFailures = 2，触发 reload
+      mockSessionManager.validateOrRefreshOnResume.mockResolvedValueOnce({
+        ok: true,
+        refreshed: false,
+        deferred: false,
+      });
+      mockSimpleSync.recoverAfterResume.mockRejectedValueOnce(new Error('boom-2'));
+
+      await service.triggerResume('visibility-quick');
+      await flushResumeWithoutDrainingLongTimers();
+
+      const afterReloadCalls = mockSentry.captureMessage.mock.calls.filter(
+        ([message]) => message === 'Lifecycle auto reload scheduled'
+      );
+      expect(afterReloadCalls).toHaveLength(1);
+    });
+
+    it('deferred 路径不应累加任何失败计数器', async () => {
+      mockSessionManager.validateOrRefreshOnResume.mockResolvedValue({
+        ok: false,
+        refreshed: false,
+        deferred: true,
+        reason: 'client-unready',
+      });
+
+      await service.triggerResume('visibility-quick');
+      await service.triggerResume('visibility-quick');
+      await flushResumeWithoutDrainingLongTimers();
+
+      expectNoAutoReload();
+
+      // deferred 应记 success breadcrumb（带 deferred: true），不应记 fail
+      expect(findFailBreadcrumbs()).toHaveLength(0);
     });
   });
 });
