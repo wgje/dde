@@ -12,6 +12,7 @@ import { APP_LIFECYCLE_CONFIG } from '../config';
 import { FEATURE_FLAGS } from '../config/feature-flags.config';
 import { FocusStartupProbeService } from './focus-startup-probe.service';
 import { FOCUS_CONFIG } from '../config/focus.config';
+import { SwUpdate } from '@angular/service-worker';
 
 describe('AppLifecycleOrchestratorService', () => {
   let service: AppLifecycleOrchestratorService;
@@ -122,6 +123,9 @@ describe('AppLifecycleOrchestratorService', () => {
         { provide: FocusStartupProbeService, useValue: mockFocusStartupProbe },
         { provide: SyncCoordinatorService, useValue: mockSyncCoordinator },
         { provide: ToastService, useValue: mockToast },
+        // SwUpdate 由 angular/service-worker 提供；测试中默认 disabled，
+        // 行为接近本地开发（即 activateUpdate 不会被调用）。
+        { provide: SwUpdate, useValue: { isEnabled: false, activateUpdate: vi.fn() } },
         {
           provide: SentryLazyLoaderService,
           useValue: {
@@ -480,5 +484,79 @@ describe('AppLifecycleOrchestratorService', () => {
       source: 'resume-remote',
       reloadLocal: false,
     });
+  });
+
+  it('「检测到新版本」prompt: 后台超阈值 + 有 pending version 时应弹 toast', async () => {
+    service.initialize();
+    service.markVersionReady();
+
+    // 模拟后台 > NEW_VERSION_PROMPT_THRESHOLD_MS
+    setVisibilityState('hidden');
+    document.dispatchEvent(new Event('visibilitychange'));
+    vi.setSystemTime(new Date(Date.now() + APP_LIFECYCLE_CONFIG.NEW_VERSION_PROMPT_THRESHOLD_MS + 1));
+    setVisibilityState('visible');
+    document.dispatchEvent(new Event('visibilitychange'));
+
+    await flushResumeWithoutDrainingLongTimers();
+
+    expect(mockToast.info).toHaveBeenCalledWith(
+      '检测到新版本',
+      expect.any(String),
+      expect.objectContaining({
+        action: expect.objectContaining({
+          label: '立即刷新',
+          pendingLabel: '正在刷新…',
+        }),
+      })
+    );
+  });
+
+  it('「检测到新版本」prompt: 点击 onClick 失败后应复位抑制 flag，下一次 resume 仍能弹', async () => {
+    service.initialize();
+    service.markVersionReady();
+
+    // 第一次：触发后台 > 阈值，弹出 toast
+    setVisibilityState('hidden');
+    document.dispatchEvent(new Event('visibilitychange'));
+    vi.setSystemTime(new Date(Date.now() + APP_LIFECYCLE_CONFIG.NEW_VERSION_PROMPT_THRESHOLD_MS + 1));
+    setVisibilityState('visible');
+    document.dispatchEvent(new Event('visibilitychange'));
+    await flushResumeWithoutDrainingLongTimers();
+
+    expect(mockToast.info).toHaveBeenCalledTimes(1);
+    const firstCall = mockToast.info.mock.calls[0];
+    const action = firstCall[2].action;
+
+    // 模拟 onClick 全链路失败：reloadViaForceClearCache 走的 window.location.reload
+    // 在测试环境会同步执行，但我们关注的是「失败后 flag 复位」逻辑。
+    // 通过让 reloadViaForceClearCache 间接抛错来模拟。
+    const originalReload = window.location.reload;
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: {
+        ...window.location,
+        reload: () => { throw new Error('reload blocked'); },
+      },
+    });
+
+    try {
+      await action.onClick();
+    } catch {
+      // triggerVersionReload 内部已 catch；外部不应抛
+    }
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: { ...window.location, reload: originalReload },
+    });
+
+    // 第二次 resume（再次超阈值）：应再次弹 toast，证明 flag 已复位
+    setVisibilityState('hidden');
+    document.dispatchEvent(new Event('visibilitychange'));
+    vi.setSystemTime(new Date(Date.now() + APP_LIFECYCLE_CONFIG.NEW_VERSION_PROMPT_THRESHOLD_MS + 1));
+    setVisibilityState('visible');
+    document.dispatchEvent(new Event('visibilitychange'));
+    await flushResumeWithoutDrainingLongTimers();
+
+    expect(mockToast.info).toHaveBeenCalledTimes(2);
   });
 });
