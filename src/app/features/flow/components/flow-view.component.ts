@@ -27,7 +27,8 @@ import { FlowEventRegistrationService } from '../services/flow-event-registratio
 import { FlowViewCleanupService, CleanupResources } from '../services/flow-view-cleanup.service';
 import { FlowDiagramRetryService } from '../services/flow-diagram-retry.service';
 import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
-import { SimpleSyncService } from '../../../core/services/simple-sync.service';
+import { SyncStateService } from '../../../core/services/sync/sync-state.service';
+import { ProjectSaveFlightCoordinatorService } from '../../../core/services/sync/project-save-flight-coordinator.service';
 import { AuthService } from '../../../../services/auth.service';
 import { Task } from '../../../../models';
 import { UI_CONFIG, TIMEOUT_CONFIG } from '../../../../config';
@@ -119,7 +120,8 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   private readonly eventRegistration = inject(FlowEventRegistrationService);
   private readonly cleanup = inject(FlowViewCleanupService);
   private readonly diagramRetry = inject(FlowDiagramRetryService);
-  private readonly syncService = inject(SimpleSyncService);
+  private readonly syncStateService = inject(SyncStateService);
+  private readonly projectSaveCoordinator = inject(ProjectSaveFlightCoordinatorService);
   private readonly authService = inject(AuthService);
   
   // ========== 组件状态 ==========
@@ -526,7 +528,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     const activeProject = this.projectState.activeProject();
 
     // 离线时直接提示
-    if (!this.syncService.syncState().isOnline) {
+    if (!this.syncStateService.syncState().isOnline) {
       this.toast.info('当前处于离线模式', '数据已安全保存在本地，联网后自动同步');
       return { ok: true, message: '离线模式' };
     }
@@ -542,7 +544,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
 
     try {
       const result = await Promise.race([
-        this.syncService.saveProjectToCloud(activeProject, userId),
+        this.projectSaveCoordinator.save(activeProject, userId),
         new Promise<never>((_resolve, reject) => {
           controller.signal.addEventListener('abort', () => reject(new Error('TIMEOUT')));
         })
