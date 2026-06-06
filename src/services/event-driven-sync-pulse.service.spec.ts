@@ -1,7 +1,7 @@
 import { DestroyRef, Injector, runInInjectionContext, signal } from '@angular/core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventDrivenSyncPulseService } from './event-driven-sync-pulse.service';
-import { SimpleSyncService } from '../app/core/services/simple-sync.service';
+import { SyncResumeCoordinatorService } from '../app/core/services/sync/sync-resume-coordinator.service';
 import { LoggerService } from './logger.service';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { AuthService } from './auth.service';
@@ -79,7 +79,7 @@ describe('EventDrivenSyncPulseService', () => {
     const injector = Injector.create({
       providers: [
         { provide: EventDrivenSyncPulseService, useClass: EventDrivenSyncPulseService },
-        { provide: SimpleSyncService, useValue: { recoverAfterResume } },
+        { provide: SyncResumeCoordinatorService, useValue: { recoverAfterResume } },
         {
           provide: LoggerService,
           useValue: {

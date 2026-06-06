@@ -1,5 +1,5 @@
 import { DestroyRef, Injectable, inject } from '@angular/core';
-import { SimpleSyncService, SessionManagerService } from '../core-bridge';
+import { SyncResumeCoordinatorService, SessionManagerService } from '../core-bridge';
 import { STARTUP_PERF_CONFIG } from '../config/startup-performance.config';
 import { FEATURE_FLAGS } from '../config/feature-flags.config';
 import { APP_LIFECYCLE_CONFIG } from '../config/app-lifecycle.config';
@@ -38,7 +38,7 @@ type SyncPulseSkipReason =
 
 @Injectable({ providedIn: 'root' })
 export class EventDrivenSyncPulseService {
-  private readonly simpleSync = inject(SimpleSyncService);
+  private readonly syncResumeCoordinator = inject(SyncResumeCoordinatorService);
   private readonly logger = inject(LoggerService).category('SyncPulse');
   private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly authService = inject(AuthService);
@@ -255,7 +255,7 @@ export class EventDrivenSyncPulseService {
         : null;
 
       if (FEATURE_FLAGS.RESUME_INTERACTION_FIRST_V1) {
-        await this.simpleSync.recoverAfterResume(`pulse:${reason}`, {
+        await this.syncResumeCoordinator.recoverAfterResume(`pulse:${reason}`, {
           mode: 'light',
           allowRemoteProbe: false,
           sessionValidated: sessionSnapshot?.valid === true,
@@ -263,7 +263,7 @@ export class EventDrivenSyncPulseService {
           recoveryTicketId: recoveryTicket?.id,
         });
       } else {
-        await this.simpleSync.recoverAfterResume(`pulse:${reason}`, {
+        await this.syncResumeCoordinator.recoverAfterResume(`pulse:${reason}`, {
           recoveryTicketId: recoveryTicket?.id,
         });
       }
