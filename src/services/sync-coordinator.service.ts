@@ -17,7 +17,7 @@
  */
 import { Injectable, inject, signal, computed, DestroyRef } from '@angular/core';
 import { Subject } from 'rxjs';
-import { SimpleSyncService, RetryQueueService, SyncStateService, ProjectDataService, ProjectSyncCursorService, type SyncConflictData } from '../core-bridge';
+import { SimpleSyncService, RetryQueueService, SyncStateService, ProjectDataService, ProjectSyncCursorService, RealtimePollingService, TaskSyncOperationsService, type SyncConflictData } from '../core-bridge';
 import { ActionQueueService } from './action-queue.service';
 import { ActionQueueProcessorsService } from './action-queue-processors.service';
 import { DeltaSyncCoordinatorService } from './delta-sync-coordinator.service';
@@ -111,6 +111,9 @@ export class SyncCoordinatorService {
   private readonly projectData = inject(ProjectDataService);
   // Phase 3 门面安乐死：项目同步游标簇直接注入具体 owner
   private readonly projectSyncCursor = inject(ProjectSyncCursorService);
+  // Phase 3 门面安乐死：实时轮询回调 + 任务同步操作簇直接注入具体 owner
+  private readonly realtimePolling = inject(RealtimePollingService);
+  private readonly taskSyncOps = inject(TaskSyncOperationsService);
   
   private actionQueue = inject(ActionQueueService);
   // Sprint 9 技术债务修复：提取的处理器服务
@@ -870,8 +873,8 @@ export class SyncCoordinatorService {
     onRemoteChange: (payload: { eventType?: string; projectId?: string } | undefined) => Promise<void>,
     onTaskChange: (payload: { eventType: string; taskId: string; projectId: string }) => void
   ) {
-    this.core.setRemoteChangeCallback(onRemoteChange);
-    this.core.setTaskChangeCallback(onTaskChange);
+    this.realtimePolling.setOnRemoteChange(onRemoteChange);
+    this.realtimePolling.setTaskChangeCallback(onTaskChange);
   }
 
   /**
@@ -1018,7 +1021,7 @@ export class SyncCoordinatorService {
     taskIds: string[],
     tombstoneTimestamps?: Record<string, string | number | null | undefined>,
   ): Promise<number> {
-    return this.core.softDeleteTasksBatch(projectId, taskIds, tombstoneTimestamps);
+    return this.taskSyncOps.softDeleteTasksBatch(projectId, taskIds, tombstoneTimestamps);
   }
   
   /**
@@ -1546,7 +1549,7 @@ export class SyncCoordinatorService {
    * 获取项目的 tombstone IDs
    */
   async getTombstoneIds(projectId: string): Promise<Set<string>> {
-    return this.core.getTombstoneIds(projectId);
+    return this.taskSyncOps.getTombstoneIds(projectId);
   }
   
   /**

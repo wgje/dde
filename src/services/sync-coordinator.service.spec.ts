@@ -18,6 +18,8 @@ import { SyncCoordinatorService } from './sync-coordinator.service';
 import { SimpleSyncService } from '../app/core/services/simple-sync.service';
 import { ProjectDataService } from '../app/core/services/sync/project-data.service';
 import { ProjectSyncCursorService } from '../app/core/services/sync/project-sync-cursor.service';
+import { RealtimePollingService } from '../app/core/services/sync/realtime-polling.service';
+import { TaskSyncOperationsService } from '../app/core/services/sync/task-sync-operations.service';
 import { ProjectSaveFlightCoordinatorService } from '../app/core/services/sync/project-save-flight-coordinator.service';
 import { SyncStateService } from '../app/core/services/sync/sync-state.service';
 import { RetryQueueService } from '../app/core/services/sync/retry-queue.service';
@@ -133,6 +135,20 @@ const mockSyncStateService = {
   // 既有断言 expect(mockSyncService.setConflict)... 仍命中同一调用记录。
   setConflict: mockSyncService.setConflict,
   clearConflict: mockSyncService.clearConflict,
+};
+
+// RealtimePollingService mock —— setOnRemoteChange 别名复用 mockSyncService.setRemoteChangeCallback 同一 spy
+// （门面方法名 setRemoteChangeCallback → 具体服务名 setOnRemoteChange），既有断言仍命中。
+const mockRealtimePollingService = {
+  setOnRemoteChange: mockSyncService.setRemoteChangeCallback,
+  setTaskChangeCallback: mockSyncService.setTaskChangeCallback,
+};
+
+// TaskSyncOperationsService mock —— getTombstoneIds 复用 mockSyncService 同一 spy；
+// softDeleteTasksBatch 门面 mock 此前未暴露，给独立 spy。
+const mockTaskSyncOpsService = {
+  getTombstoneIds: mockSyncService.getTombstoneIds,
+  softDeleteTasksBatch: vi.fn().mockResolvedValue(0),
 };
 
 const mockActionQueueService = {
@@ -434,6 +450,8 @@ function buildCoordinatorProviders() {
     { provide: ProjectDataService, useValue: mockSyncService },
     // ProjectSyncCursorService 同理复用 mockSyncService（含 commit*/buildProjectSyncCursorFromProject/getLastSyncTime spy）。
     { provide: ProjectSyncCursorService, useValue: mockSyncService },
+    { provide: RealtimePollingService, useValue: mockRealtimePollingService },
+    { provide: TaskSyncOperationsService, useValue: mockTaskSyncOpsService },
   ];
 }
 
