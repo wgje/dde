@@ -19,6 +19,7 @@ import { AuthService } from './auth.service';
 import { LoggerService } from './logger.service';
 import { ChangeTrackerService } from './change-tracker.service';
 import { PermissionDeniedHandlerService } from './permission-denied-handler.service';
+import { ProjectDataService } from '../app/core/services/sync/project-data.service';
 
 type SpyFn = ReturnType<typeof vi.fn>;
 
@@ -73,6 +74,10 @@ describe('RemoteChangeHandlerService', () => {
       providers: [
         RemoteChangeHandlerService,
         { provide: SyncCoordinatorService, useValue: mockSyncCoordinator },
+        { provide: ProjectDataService, useValue: {
+          loadFullProject: mockSyncCoordinator.core.loadSingleProject,
+          getAccessibleProjectProbe: vi.fn(),
+        } },
         { provide: UndoService, useValue: { clearOutdatedHistory: vi.fn() } },
         { provide: UiStateService, useValue: mockUiState },
         { provide: ProjectStateService, useValue: { 

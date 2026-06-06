@@ -13,6 +13,7 @@
  */
 import { Injectable, inject, DestroyRef } from '@angular/core';
 import { SyncCoordinatorService } from './sync-coordinator.service';
+import { ProjectDataService } from '../core-bridge';
 import { UndoService } from './undo.service';
 import { UiStateService } from './ui-state.service';
 import { ProjectStateService } from './project-state.service';
@@ -59,6 +60,7 @@ export class RemoteChangeHandlerService {
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('RemoteChangeHandler');
   private syncCoordinator = inject(SyncCoordinatorService);
+  private projectData = inject(ProjectDataService);
   private undoService = inject(UndoService);
   private uiState = inject(UiStateService);
   private projectState = inject(ProjectStateService);
@@ -226,7 +228,7 @@ export class RemoteChangeHandlerService {
       const userId = this.authService.currentUserId();
       if (!userId) return;
 
-      const remoteProject = await this.syncCoordinator.core.loadSingleProject(projectId, userId);
+      const remoteProject = await this.projectData.loadFullProject(projectId, userId);
       if (!remoteProject) return;
 
       // 【关键修复】处理远程返回的已删除记录
@@ -403,7 +405,7 @@ export class RemoteChangeHandlerService {
         
         this.logger.info('开始加载远程任务更新', { eventType, taskId, projectId: targetProjectId, requestId });
         
-        this.syncCoordinator.core.loadSingleProject(targetProjectId, userId)
+        this.projectData.loadFullProject(targetProjectId, userId)
           .then(async remoteProject => {
             // 检查是否已有更新的请求（当前请求已过时）
             if (requestId !== this.taskUpdateRequestId) {
@@ -421,7 +423,7 @@ export class RemoteChangeHandlerService {
             }
             
             if (!remoteProject) {
-              const loadAccessibleProbe = this.syncCoordinator.core.getAccessibleProjectProbe?.bind(this.syncCoordinator.core);
+              const loadAccessibleProbe = this.projectData.getAccessibleProjectProbe?.bind(this.projectData);
               const accessibleProbe = loadAccessibleProbe
                 ? await loadAccessibleProbe(targetProjectId).catch(() => null)
                 : null;
