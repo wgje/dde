@@ -18,7 +18,7 @@ import {
   ActivatedRouteSnapshot, 
   RouterStateSnapshot 
 } from '@angular/router';
-import { SimpleSyncService } from '../../app/core/services/simple-sync.service';
+import { SyncStateService } from '../../app/core/services/sync/sync-state.service';
 import { LoggerService } from '../logger.service';
 import { BeforeUnloadManagerService } from '../before-unload-manager.service';
 
@@ -74,7 +74,7 @@ function hasCanLeave(component: unknown): component is CanLeave {
   providedIn: 'root'
 })
 export class UnsavedChangesGuard implements CanDeactivate<unknown> {
-  private readonly syncService = inject(SimpleSyncService);
+  private readonly syncService = inject(SyncStateService);
   private readonly logger = inject(LoggerService).category('UnsavedChangesGuard');
   
   /**
@@ -217,7 +217,7 @@ export class UnsavedChangesGuard implements CanDeactivate<unknown> {
   providedIn: 'root'
 })
 export class BeforeUnloadGuardService {
-  private readonly syncService = inject(SimpleSyncService);
+  private readonly syncService = inject(SyncStateService);
   private readonly logger = inject(LoggerService).category('BeforeUnloadGuard');
   private readonly beforeUnloadManager = inject(BeforeUnloadManagerService);
   
@@ -279,7 +279,7 @@ export class BeforeUnloadGuardService {
   providedIn: 'root'
 })
 export class ProjectSwitchGuardService {
-  private readonly syncService = inject(SimpleSyncService);
+  private readonly syncService = inject(SyncStateService);
   private readonly logger = inject(LoggerService).category('ProjectSwitchGuard');
   
   /**

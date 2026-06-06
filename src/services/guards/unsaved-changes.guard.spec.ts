@@ -23,7 +23,7 @@ import {
   ROUTE_LEAVE_PROTECTION_CONFIG,
   CanLeave
 } from './unsaved-changes.guard';
-import { SimpleSyncService } from '../../app/core/services/simple-sync.service';
+import { SyncStateService } from '../../app/core/services/sync/sync-state.service';
 import { LoggerService } from '../logger.service';
 import { BeforeUnloadManagerService } from '../before-unload-manager.service';
 import { ActivatedRouteSnapshot, RouterStateSnapshot } from '@angular/router';
@@ -57,7 +57,7 @@ describe('UnsavedChangesGuard', () => {
     const injector = Injector.create({
       providers: [
         UnsavedChangesGuard,
-        { provide: SimpleSyncService, useValue: mockSyncService },
+        { provide: SyncStateService, useValue: mockSyncService },
         { provide: LoggerService, useValue: mockLogger },
       ],
     });
@@ -291,7 +291,7 @@ describe('BeforeUnloadGuardService', () => {
     const injector = Injector.create({
       providers: [
         BeforeUnloadGuardService,
-        { provide: SimpleSyncService, useValue: mockSyncService },
+        { provide: SyncStateService, useValue: mockSyncService },
         { provide: LoggerService, useValue: mockLogger },
         { provide: BeforeUnloadManagerService, useValue: mockBeforeUnloadManager },
       ],
@@ -390,7 +390,7 @@ describe('ProjectSwitchGuardService', () => {
     const injector = Injector.create({
       providers: [
         ProjectSwitchGuardService,
-        { provide: SimpleSyncService, useValue: mockSyncService },
+        { provide: SyncStateService, useValue: mockSyncService },
         { provide: LoggerService, useValue: mockLogger },
       ],
     });
