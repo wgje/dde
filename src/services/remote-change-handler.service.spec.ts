@@ -9,7 +9,7 @@
  */
 import { TestBed } from '@angular/core/testing';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
-import { RemoteChangeHandlerService, RemoteProjectChangePayload } from './remote-change-handler.service';
+import { RemoteChangeHandlerService, RemoteProjectChangePayload, RemoteTaskChangePayload } from './remote-change-handler.service';
 import { SyncCoordinatorService } from './sync-coordinator.service';
 import { UndoService } from './undo.service';
 import { UiStateService } from './ui-state.service';
@@ -20,13 +20,23 @@ import { LoggerService } from './logger.service';
 import { ChangeTrackerService } from './change-tracker.service';
 import { PermissionDeniedHandlerService } from './permission-denied-handler.service';
 
+type SpyFn = ReturnType<typeof vi.fn>;
+
 describe('RemoteChangeHandlerService', () => {
   let service: RemoteChangeHandlerService;
-  let mockSyncCoordinator: any;
-  let mockUiState: any;
-  let mockLogger: any;
-  let projectChangeCallback: ((payload: any) => Promise<void>) | null = null;
-  let taskChangeCallback: ((payload: any) => void) | null = null;
+  let mockSyncCoordinator: {
+    setupRemoteChangeCallbacks: SpyFn;
+    hasPendingLocalChanges: SpyFn;
+    getLastPersistAt: SpyFn;
+    getTombstoneIds: SpyFn;
+    smartMerge: SpyFn;
+    validateAndRebalance: SpyFn;
+    core: { loadSingleProject: SpyFn };
+  };
+  let mockUiState: { isEditing: boolean };
+  let mockLogger: { debug: SpyFn; info: SpyFn; warn: SpyFn; error: SpyFn };
+  let projectChangeCallback: ((payload: Partial<RemoteProjectChangePayload>) => Promise<void>) | null = null;
+  let taskChangeCallback: ((payload: Partial<RemoteTaskChangePayload>) => void) | null = null;
   
   beforeEach(() => {
     projectChangeCallback = null;

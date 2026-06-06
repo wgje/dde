@@ -39,7 +39,7 @@ function setVisibilityState(state: DocumentVisibilityState): void {
 
 describe('RequestThrottleService', () => {
   let service: RequestThrottleService;
-  let mockLogger: any;
+  let mockLogger: { category: ReturnType<typeof vi.fn> };
   let destroyCallbacks: Array<() => void>;
   let originalVisibilityState: PropertyDescriptor | undefined;
 
