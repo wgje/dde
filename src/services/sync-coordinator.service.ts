@@ -17,7 +17,7 @@
  */
 import { Injectable, inject, signal, computed, DestroyRef } from '@angular/core';
 import { Subject } from 'rxjs';
-import { SimpleSyncService, RetryQueueService, SyncStateService, ProjectDataService, ProjectSyncCursorService, RealtimePollingService, TaskSyncOperationsService, ProjectSaveFlightCoordinatorService, type SyncConflictData } from '../core-bridge';
+import { SimpleSyncService, RetryQueueService, SyncStateService, ProjectDataService, ProjectSyncCursorService, RealtimePollingService, TaskSyncOperationsService, ProjectSaveFlightCoordinatorService, TombstoneService, type SyncConflictData } from '../core-bridge';
 import { ActionQueueService } from './action-queue.service';
 import { ActionQueueProcessorsService } from './action-queue-processors.service';
 import { DeltaSyncCoordinatorService } from './delta-sync-coordinator.service';
@@ -32,6 +32,7 @@ import { ToastService } from './toast.service';
 import { LayoutService } from './layout.service';
 import { LoggerService } from './logger.service';
 import { SentryAlertService } from './sentry-alert.service';
+import { SupabaseClientService } from './supabase-client.service';
 import { TabSyncService } from './tab-sync.service';
 // Sprint 4 技术债务修复：提取的子服务
 import { PersistSchedulerService } from './persist-scheduler.service';
@@ -94,13 +95,20 @@ export class SyncCoordinatorService {
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('SyncCoordinator');
   
-  // ========== 内部同步服务 ==========
-  
-  /** 
-   * 底层同步服务 - 仅供 SyncCoordinator 内部使用
-   * 外部调用方已全部改为直接注入具体子服务（fan-in 削减），不再经由 core 二次暴露门面
+  // ========== 同步门面 composition root（构造锚点） ==========
+
+  /**
+   * 【Phase 3 门面安乐死完成】SimpleSyncService 不再被本服务调用任何方法
+   * （this.core.X() 调用已全部下切到具体子服务：SyncStateService / ProjectDataService /
+   * ProjectSyncCursorService / RealtimePollingService / TaskSyncOperationsService /
+   * ProjectSaveFlightCoordinatorService / TombstoneService）。
+   *
+   * 此字段仅作为「构造锚点」保留：SimpleSyncService 是同步栈的 composition root，
+   * 其构造函数负责 wireCoordinatorCallbacks / setupBatchSyncCallbacks / setupLifecycleListeners
+   * 等关键 wiring。本服务是其当前唯一的生产期 eager 注入方，删除会改变门面的构造时机
+   * （workspace-shell 仅有 lazy getter）。彻底移除需改为 APP_INITIALIZER 显式构造，属独立后续项。
    */
-  private readonly core = inject(SimpleSyncService);
+  private readonly facadeCompositionRoot = inject(SimpleSyncService);
   /**
    * 【2026-05-16 单事实源】pendingCount 等同步状态字段必须通过 SyncStateService 公开 setter 写入。
    * 不允许再通过反射式 `core.state.update(...)` 绕过封装，避免与 RetryQueue.onProcessingStateChange
@@ -116,6 +124,9 @@ export class SyncCoordinatorService {
   private readonly taskSyncOps = inject(TaskSyncOperationsService);
   // Phase 3 门面安乐死：项目智能保存单飞协调器直接注入具体 owner
   private readonly projectSaveCoordinator = inject(ProjectSaveFlightCoordinatorService);
+  // Phase 3 门面安乐死：批量 tombstone 预热的具体 owner（替代 this.core.batchPreloadTombstones）
+  private readonly supabaseClient = inject(SupabaseClientService);
+  private readonly tombstone = inject(TombstoneService);
   
   private actionQueue = inject(ActionQueueService);
   // Sprint 9 技术债务修复：提取的处理器服务
@@ -362,7 +373,7 @@ export class SyncCoordinatorService {
       .filter(rp => localProjectMap.has(rp.id))
       .map(rp => rp.id);
     if (projectIdsNeedingTombstones.length > 0) {
-      await this.core.batchPreloadTombstones(projectIdsNeedingTombstones);
+      await this.preloadTombstoneCache(projectIdsNeedingTombstones);
     }
 
     for (const remoteProject of remoteProjects) {
@@ -1479,12 +1490,19 @@ export class SyncCoordinatorService {
   
   /**
    * 尝试重新加载冲突数据
+   *
+   * 【Phase 3 门面安乐死】原 this.core.tryReloadConflictData 是门面-LOCAL 逻辑
+   * （只读自身 syncState + loadFullProject），已内联到此处直接走具体 owner。
+   * findProject 参数门面侧本就忽略，保留签名兼容既有调用方。
    */
   async tryReloadConflictData(
-    userId: string, 
-    findProject: (id: string) => Project | undefined
-  ) {
-    return this.core.tryReloadConflictData(userId, findProject);
+    userId: string,
+    _findProject: (id: string) => Project | undefined
+  ): Promise<Project | undefined> {
+    const state = this.syncStateService.syncState();
+    if (!state.hasConflict || !state.conflictData) return undefined;
+    const project = await this.projectData.loadFullProject(state.conflictData.projectId, userId);
+    return project ?? undefined;
   }
   
   /**
@@ -1613,7 +1631,31 @@ export class SyncCoordinatorService {
     if (FEATURE_FLAGS.TAB_SYNC_LOCAL_REFRESH_V1) {
       this.tabSync.setOnDataSyncedCallback(() => {});
     }
-    this.core.destroy();
+    // 【Phase 3 门面安乐死】原 this.core.destroy() 的可达拆解：
+    // 实时订阅退订 + 重试队列清空直接走具体 owner。
+    // 门面 destroy 中的 stopRuntime()（移除门面自身 window online/offline 监听器）
+    // 仅在 root 注入器销毁（应用退出）时触发——此时页面即将卸载，监听器移除是 no-op，故安全省略。
+    void this.realtimePolling.unsubscribeFromProject();
+    this.retryQueue.clear();
+  }
+
+  /**
+   * 【Phase 3 门面安乐死】批量预热 tombstone 缓存（替代 this.core.batchPreloadTombstones）。
+   * 复刻门面 getSupabaseClient 的离线/配置守卫：客户端不可用时返回 false 跳过预热（best-effort）。
+   * 注：门面版在客户端失败时还会 setSyncError/setOfflineMode/上报 Sentry，但本预热在 downloadAndMerge
+   * 的云端项目加载之后运行，那些副作用此前已由加载链路设置，故此处不重复。
+   */
+  private async preloadTombstoneCache(projectIds: string[]): Promise<boolean> {
+    if (!this.supabaseClient.isConfigured || this.supabaseClient.isOfflineMode()) {
+      return false;
+    }
+    try {
+      const client = await this.supabaseClient.clientAsync();
+      if (!client) return false;
+      return await this.tombstone.batchPreloadTombstones(projectIds, client);
+    } catch {
+      return false;
+    }
   }
   
   // ========== 私有方法 ==========

@@ -20,6 +20,8 @@ import { ProjectDataService } from '../app/core/services/sync/project-data.servi
 import { ProjectSyncCursorService } from '../app/core/services/sync/project-sync-cursor.service';
 import { RealtimePollingService } from '../app/core/services/sync/realtime-polling.service';
 import { TaskSyncOperationsService } from '../app/core/services/sync/task-sync-operations.service';
+import { TombstoneService } from '../app/core/services/sync/tombstone.service';
+import { SupabaseClientService } from './supabase-client.service';
 import { ProjectSaveFlightCoordinatorService } from '../app/core/services/sync/project-save-flight-coordinator.service';
 import { SyncStateService } from '../app/core/services/sync/sync-state.service';
 import { RetryQueueService } from '../app/core/services/sync/retry-queue.service';
@@ -142,6 +144,7 @@ const mockSyncStateService = {
 const mockRealtimePollingService = {
   setOnRemoteChange: mockSyncService.setRemoteChangeCallback,
   setTaskChangeCallback: mockSyncService.setTaskChangeCallback,
+  unsubscribeFromProject: vi.fn().mockResolvedValue(undefined),
 };
 
 // TaskSyncOperationsService mock —— getTombstoneIds 复用 mockSyncService 同一 spy；
@@ -170,6 +173,7 @@ const mockRetryQueueService = {
   removeByEntities: vi.fn().mockReturnValue([]),
   removeConnectionsReferencingTasks: vi.fn().mockReturnValue([]),
   pressureEvents: 0,
+  clear: vi.fn(),
 };
 
 const mockBlackBoxSyncService = {
@@ -455,6 +459,9 @@ function buildCoordinatorProviders() {
     // ProjectSaveFlightCoordinatorService.save 别名复用 mockSyncService.saveProjectSmart 同一 spy：
     // Phase 3 把 this.core.saveProjectSmart 迁到 this.projectSaveCoordinator.save 后，既有断言仍命中。
     { provide: ProjectSaveFlightCoordinatorService, useValue: { save: mockSyncService.saveProjectSmart } },
+    // Phase 3 batchPreloadTombstones 具体 owner：SupabaseClientService(离线守卫返 false 跳过预热) + TombstoneService。
+    { provide: SupabaseClientService, useValue: { isConfigured: false, isOfflineMode: () => true, clientAsync: vi.fn().mockResolvedValue(null) } },
+    { provide: TombstoneService, useValue: { batchPreloadTombstones: vi.fn().mockResolvedValue(true) } },
   ];
 }
 
@@ -2223,10 +2230,11 @@ describe('持久化状态管理', () => {
   // ==================== 清理 ====================
 
   describe('清理', () => {
-    it('destroy 应该调用 syncService.destroy', () => {
+    it('destroy 应退订实时订阅并清空重试队列（Phase 3：原委托 facade.destroy 已拆解到具体 owner）', () => {
       service.destroy();
-      
-      expect(mockSyncService.destroy).toHaveBeenCalled();
+
+      expect(mockRealtimePollingService.unsubscribeFromProject).toHaveBeenCalled();
+      expect(mockRetryQueueService.clear).toHaveBeenCalled();
     });
   });
 });
@@ -2477,7 +2485,7 @@ describe('SyncCoordinatorService 集成场景', () => {
         remoteData: remoteProject,
       });
       
-      const result = await service['core'].saveProjectSmart(localProject, 'user-123');
+      const result = await mockSyncService.saveProjectSmart(localProject, 'user-123');
       
       expect(result.success).toBe(false);
       expect(result.conflict).toBe(true);
@@ -2639,7 +2647,7 @@ describe('SyncCoordinatorService 集成场景', () => {
       
       mockSyncService.saveProjectSmart.mockResolvedValueOnce({ success: true });
       
-      const result = await service['core'].saveProjectSmart(project, 'user-123');
+      const result = await mockSyncService.saveProjectSmart(project, 'user-123');
       
       expect(result.success).toBe(true);
     });
@@ -2652,7 +2660,7 @@ describe('SyncCoordinatorService 集成场景', () => {
       
       mockSyncService.saveProjectSmart.mockResolvedValueOnce({ success: true });
       
-      const result = await service['core'].saveProjectSmart(project, 'user-123');
+      const result = await mockSyncService.saveProjectSmart(project, 'user-123');
       
       expect(result.success).toBe(true);
     });
