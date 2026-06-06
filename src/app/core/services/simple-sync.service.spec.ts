@@ -50,6 +50,7 @@ import {
 import type { RetryQueueItem } from './sync';
 import { ProjectSaveFlightCoordinatorService } from './sync/project-save-flight-coordinator.service';
 import { SyncResumeCoordinatorService } from './sync/sync-resume-coordinator.service';
+import { ProjectPushService } from './sync/project-push.service';
 import { Task, Project, Connection } from '../../../models';
 import type { BlackBoxEntry } from '../../../models/focus';
 import { PermanentFailureError } from '../../../utils/permanent-failure-error';
@@ -730,6 +731,7 @@ describe('SimpleSyncService', () => {
         { provide: SyncStateService, useClass: SyncStateService },
         { provide: ProjectSaveFlightCoordinatorService, useClass: ProjectSaveFlightCoordinatorService },
         { provide: SyncResumeCoordinatorService, useClass: SyncResumeCoordinatorService },
+        { provide: ProjectPushService, useClass: ProjectPushService },
         { provide: BlackBoxSyncService, useValue: mockBlackBoxSync },
         { provide: ConnectivityRecoveryService, useClass: ConnectivityRecoveryService },
         // Sentry 懒加载服务 mock
@@ -4276,13 +4278,13 @@ describe('SimpleSyncService', () => {
         pushProject: (project: Project, fromRetryQueue?: boolean, sourceUserId?: string, taskIdsToDelete?: string[]) => Promise<{ success: boolean; conflict?: boolean; remoteData?: Project; retryEnqueued?: boolean; failureReason?: string }>;
       };
 
-      vi.spyOn(service as unknown as { pushProjectWithStatus: (...args: unknown[]) => Promise<unknown> }, 'pushProjectWithStatus').mockRejectedValueOnce(
+      vi.spyOn(service['projectPush'] as unknown as { pushProjectWithStatus: (...args: unknown[]) => Promise<unknown> }, 'pushProjectWithStatus').mockRejectedValueOnce(
         new PermanentFailureError(
           'Version conflict',
           Object.assign(new Error('版本冲突：数据已被修改，请刷新后重试'), { errorType: 'VersionConflictError' })
         )
       );
-      vi.spyOn(service, 'loadFullProjectOptimized').mockResolvedValueOnce(remoteProject);
+      mockProjectData.loadFullProjectOptimized.mockResolvedValueOnce(remoteProject);
 
       const result = await callbacks.pushProject(project);
 
@@ -4301,7 +4303,7 @@ describe('SimpleSyncService', () => {
         pushProject: (project: Project, fromRetryQueue?: boolean, sourceUserId?: string, taskIdsToDelete?: string[]) => Promise<{ success: boolean; conflict?: boolean; remoteData?: Project; retryEnqueued?: boolean; failureReason?: string }>;
       };
 
-      const pushProjectSpy = vi.spyOn(service as unknown as { pushProjectWithStatus: (...args: unknown[]) => Promise<unknown> }, 'pushProjectWithStatus').mockResolvedValueOnce({
+      const pushProjectSpy = vi.spyOn(service['projectPush'] as unknown as { pushProjectWithStatus: (...args: unknown[]) => Promise<unknown> }, 'pushProjectWithStatus').mockResolvedValueOnce({
         success: true,
         retryEnqueued: false,
       });
@@ -4318,7 +4320,7 @@ describe('SimpleSyncService', () => {
         pushProject: (project: Project, fromRetryQueue?: boolean, sourceUserId?: string, taskIdsToDelete?: string[]) => Promise<{ success: boolean; conflict?: boolean; remoteData?: Project; retryEnqueued?: boolean; failureReason?: string }>;
       };
 
-      const pushProjectSpy = vi.spyOn(service as unknown as { pushProjectWithStatus: (...args: unknown[]) => Promise<unknown> }, 'pushProjectWithStatus').mockResolvedValueOnce({
+      const pushProjectSpy = vi.spyOn(service['projectPush'] as unknown as { pushProjectWithStatus: (...args: unknown[]) => Promise<unknown> }, 'pushProjectWithStatus').mockResolvedValueOnce({
         success: true,
         retryEnqueued: false,
       });
