@@ -3,7 +3,7 @@ import { PLATFORM_ID } from '@angular/core';
 import { Meta } from '@angular/platform-browser';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ThemeService } from './theme.service';
-import { SimpleSyncService } from '../core-bridge';
+import { UserPreferencesSyncService } from '../core-bridge';
 import { AuthService } from './auth.service';
 import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
@@ -62,7 +62,7 @@ describe('ThemeService', () => {
         ThemeService,
         Meta,
         { provide: PLATFORM_ID, useValue: 'browser' },
-        { provide: SimpleSyncService, useValue: syncService },
+        { provide: UserPreferencesSyncService, useValue: syncService },
         { provide: AuthService, useValue: authService },
         { provide: ToastService, useValue: toastService },
         { provide: LoggerService, useValue: logger },

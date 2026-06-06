@@ -3,7 +3,7 @@ import { isPlatformBrowser } from '@angular/common';
 import { Meta } from '@angular/platform-browser';
 import { ThemeType, ColorMode } from '../models';
 import { CACHE_CONFIG } from '../config';
-import { SimpleSyncService } from '../core-bridge';
+import { UserPreferencesSyncService } from '../core-bridge';
 import { AuthService } from './auth.service';
 import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
@@ -28,7 +28,7 @@ const DEBOUNCE_DELAY = 1000;
   providedIn: 'root'
 })
 export class ThemeService {
-  private syncService = inject(SimpleSyncService);
+  private userPrefsSync = inject(UserPreferencesSyncService);
   private authService = inject(AuthService);
   private toast = inject(ToastService);
   private readonly loggerService = inject(LoggerService);
@@ -124,7 +124,7 @@ export class ThemeService {
     const userId = this.authService.currentUserId();
     if (!userId) return;
     
-    const prefs = await this.syncService.loadUserPreferences(userId);
+    const prefs = await this.userPrefsSync.loadUserPreferences(userId);
     if (prefs?.theme) {
       this.theme.set(prefs.theme);
       this.applyThemeToDOM(prefs.theme);
@@ -258,7 +258,7 @@ export class ThemeService {
       
       this.isSaving.set(true);
       try {
-        await this.syncService.saveUserPreferences(userId, {
+        await this.userPrefsSync.saveUserPreferences(userId, {
           theme: this.theme(),
           colorMode: this.colorMode(),
         });

@@ -7,7 +7,8 @@ import {
 } from '@angular/core';
 import { PreferenceService } from './preference.service';
 import { LoggerService } from './logger.service';
-import { SimpleSyncService } from '../app/core/services/simple-sync.service';
+import { RealtimePollingService } from '../app/core/services/sync/realtime-polling.service';
+import { UserPreferencesSyncService } from '../app/core/services/sync/user-preferences-sync.service';
 import { ActionQueueService } from './action-queue.service';
 import { AuthService } from './auth.service';
 import { ThemeService } from './theme.service';
@@ -55,7 +56,8 @@ describe('PreferenceService', () => {
       providers: [
         { provide: PreferenceService, useClass: PreferenceService },
         { provide: LoggerService, useValue: { category: () => mockLoggerCategory } },
-        { provide: SimpleSyncService, useValue: mockSyncService },
+        { provide: RealtimePollingService, useValue: mockSyncService },
+        { provide: UserPreferencesSyncService, useValue: mockSyncService },
         { provide: ActionQueueService, useValue: mockActionQueue },
         { provide: AuthService, useValue: { currentUserId: vi.fn(() => null) } },
         { provide: ThemeService, useValue: mockThemeService },

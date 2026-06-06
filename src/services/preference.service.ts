@@ -14,7 +14,7 @@
  * 格式：nanoflow.preference.{userId}.{key}
  */
 import { Injectable, inject, signal, effect } from '@angular/core';
-import { SimpleSyncService } from '../core-bridge';
+import { RealtimePollingService, UserPreferencesSyncService } from '../core-bridge';
 import { LoggerService } from './logger.service';
 import { ActionQueueService } from './action-queue.service';
 import { AuthService } from './auth.service';
@@ -36,7 +36,8 @@ function getUserPreferenceKey(userId: string | null, key: string): string {
 })
 export class PreferenceService {
   private readonly logger = inject(LoggerService).category('PreferenceService');
-  private syncService = inject(SimpleSyncService);
+  private realtimePolling = inject(RealtimePollingService);
+  private userPrefsSync = inject(UserPreferencesSyncService);
   private actionQueue = inject(ActionQueueService);
   private authService = inject(AuthService);
   private themeService = inject(ThemeService);
@@ -72,7 +73,7 @@ export class PreferenceService {
     });
 
     // Realtime：跨端偏好即时同步
-    this.syncService.setUserPreferencesChangeCallback((payload) => {
+    this.realtimePolling.setUserPreferencesChangeCallback((payload) => {
       const currentUserId = this.authService.currentUserId();
       if (!currentUserId || payload.userId !== currentUserId) return;
 
@@ -155,7 +156,7 @@ export class PreferenceService {
       }
 
       this.lastLocalPreferencesWriteAt = Date.now();
-      const success = await this.syncService.saveUserPreferences(userId, normalizedPreferences);
+      const success = await this.userPrefsSync.saveUserPreferences(userId, normalizedPreferences);
       if (!success) {
         // 离线时加入队列
         await this.actionQueue.enqueueForOwner(userId, {
@@ -239,7 +240,7 @@ export class PreferenceService {
 
   private async loadBackupProofFromCloud(userId: string): Promise<void> {
     try {
-      const preferences = await this.syncService.loadUserPreferences(userId);
+      const preferences = await this.userPrefsSync.loadUserPreferences(userId);
       const normalized = this.normalizeBackupProofTimestamp(
         preferences?.lastBackupProofAt ?? null,
         'user_preferences.last_backup_proof_at',
@@ -350,7 +351,7 @@ export class PreferenceService {
     if (!userId) return null;
     
     try {
-      const preferences = await this.syncService.loadUserPreferences(userId);
+      const preferences = await this.userPrefsSync.loadUserPreferences(userId);
       if (preferences && typeof preferences.localBackupEnabled === 'boolean') {
         return {
           autoBackupEnabled: preferences.localBackupEnabled,
