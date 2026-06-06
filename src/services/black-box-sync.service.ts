@@ -22,6 +22,16 @@ import { APP_LIFECYCLE_CONFIG } from '../config/app-lifecycle.config';
 import { TIMEOUT_CONFIG } from '../config/timeout.config';
 import { FEATURE_FLAGS } from '../config/feature-flags.config';
 import { isValidUUID } from '../utils/validation';
+import { createSyncOperationId } from '../utils/sync-operation-id';
+import {
+  type BlackBoxSyncCursor,
+  parseStoredSyncCursor as parseStoredSyncCursorPure,
+  compareBlackBoxCursor as compareBlackBoxCursorPure,
+  computeBlackBoxCursorFromRows as computeBlackBoxCursorFromRowsPure,
+  isValidBlackBoxCursor as isValidBlackBoxCursorPure,
+  createSafeBlackBoxKeysetFilter as createSafeBlackBoxKeysetFilterPure,
+  isBlackBoxCursorRow as isBlackBoxCursorRowPure,
+} from './black-box-sync-cursor';
 import { supabaseErrorToError } from '../utils/supabase-error';
 import { openIndexedDBAdaptive } from '../utils/indexeddb-open';
 import {
@@ -51,11 +61,6 @@ import { AUTH_CONFIG } from '../config/auth.config';
 interface IDBBlackBoxEntry extends BlackBoxEntry {
   /** 本地版本号，用于冲突检测 */
   _localVersion?: number;
-}
-
-interface BlackBoxSyncCursor {
-  updatedAt: string;
-  id: string;
 }
 
 type BlackBoxSupabaseClient = NonNullable<Awaited<ReturnType<SupabaseClientService['clientAsync']>>>;
@@ -333,40 +338,15 @@ export class BlackBoxSyncService {
   }
 
   private parseStoredSyncCursor(value: unknown): BlackBoxSyncCursor | null {
-    if (typeof value === 'string' && value) {
-      return { updatedAt: value, id: '' };
-    }
-    if (value && typeof value === 'object') {
-      const record = value as { updatedAt?: unknown; id?: unknown };
-      if (typeof record.updatedAt === 'string' && typeof record.id === 'string') {
-        return { updatedAt: record.updatedAt, id: record.id };
-      }
-    }
-    return null;
+    return parseStoredSyncCursorPure(value);
   }
 
   private compareBlackBoxCursor(left: BlackBoxSyncCursor, right: BlackBoxSyncCursor): number {
-    const leftTime = new Date(left.updatedAt).getTime();
-    const rightTime = new Date(right.updatedAt).getTime();
-    if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) {
-      return leftTime - rightTime;
-    }
-    return left.id.localeCompare(right.id);
+    return compareBlackBoxCursorPure(left, right);
   }
 
   private computeBlackBoxCursorFromRows(rows: Array<Record<string, unknown>>): BlackBoxSyncCursor | null {
-    let nextCursor: BlackBoxSyncCursor | null = null;
-    for (const row of rows) {
-      if (typeof row['updated_at'] !== 'string' || typeof row['id'] !== 'string') {
-        continue;
-      }
-      const candidate = { updatedAt: row['updated_at'], id: row['id'] };
-      if (!nextCursor || this.compareBlackBoxCursor(candidate, nextCursor) > 0) {
-        nextCursor = candidate;
-      }
-    }
-
-    return nextCursor;
+    return computeBlackBoxCursorFromRowsPure(rows);
   }
 
   private async commitBlackBoxCursorFromRows(rows: Array<Record<string, unknown>>): Promise<void> {
@@ -2002,7 +1982,7 @@ export class BlackBoxSyncService {
   }
 
   private createSyncRpcOperationId(): string {
-    return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    return createSyncOperationId();
   }
 
   private async handleBlackBoxSyncRpcResult(
@@ -3110,23 +3090,18 @@ export class BlackBoxSyncService {
   }
 
   private isValidBlackBoxCursor(cursor: BlackBoxSyncCursor): boolean {
-    const updatedAtMs = Date.parse(cursor.updatedAt);
-    return Number.isFinite(updatedAtMs) && (!cursor.id || isValidUUID(cursor.id));
+    return isValidBlackBoxCursorPure(cursor);
   }
 
   private createSafeBlackBoxKeysetFilter(cursor: BlackBoxSyncCursor): string | null {
-    if (!cursor.id || !this.isValidBlackBoxCursor(cursor)) return null;
-    return `updated_at.gt.${cursor.updatedAt},and(updated_at.eq.${cursor.updatedAt},id.gt.${cursor.id})`;
+    return createSafeBlackBoxKeysetFilterPure(cursor);
   }
 
   private isBlackBoxCursorRow(row: Record<string, unknown> | undefined): row is Record<string, unknown> & {
     id: string;
     updated_at: string;
   } {
-    return typeof row?.['id'] === 'string'
-      && isValidUUID(row['id'])
-      && typeof row['updated_at'] === 'string'
-      && Number.isFinite(Date.parse(row['updated_at']));
+    return isBlackBoxCursorRowPure(row);
   }
 
   private async getRemoteBlackBoxWatermark(
