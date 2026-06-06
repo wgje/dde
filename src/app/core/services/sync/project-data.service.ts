@@ -22,6 +22,13 @@ import { TombstoneService } from './tombstone.service';
 import { Task, Project, Connection } from '../../../../models';
 import { TaskRow, ProjectRow, ConnectionRow } from '../../../../models/supabase-types';
 import { supabaseErrorToError, classifySupabaseClientFailure } from '../../../../utils/supabase-error';
+import {
+  isBatchRpcMissingError as isBatchRpcMissingErrorPure,
+  chunkIds as chunkIdsPure,
+  normalizeIds as normalizeIdsPure,
+  getSnapshotByteSize as getSnapshotByteSizePure,
+  normalizeOfflineSnapshotProject as normalizeOfflineSnapshotProjectPure,
+} from './project-data-projection';
 import { openIndexedDBAdaptive } from '../../../../utils/indexeddb-open';
 import { REQUEST_THROTTLE_CONFIG, FIELD_SELECT_CONFIG, CACHE_CONFIG, CIRCUIT_BREAKER_CONFIG } from '../../../../config/sync.config';
 import { AUTH_CONFIG } from '../../../../config/auth.config';
@@ -183,18 +190,7 @@ export class ProjectDataService {
     details?: string;
     hint?: string;
   }): boolean {
-    const normalized = [error.message, error.details, error.hint]
-      .filter((value): value is string => typeof value === 'string' && value.length > 0)
-      .join(' ')
-      .toLowerCase();
-
-    return (
-      error.code === '42883' ||
-      error.code === 'PGRST202' ||
-      normalized.includes('does not exist') ||
-      normalized.includes('could not find the function') ||
-      normalized.includes('schema cache')
-    );
+    return isBatchRpcMissingErrorPure(error);
   }
 
   private getBatchRpcTransientCooldownRemainingMs(): number {
@@ -1598,22 +1594,7 @@ export class ProjectDataService {
   }
 
   private normalizeOfflineSnapshotProject(project: Project): Project {
-    const allTasks = project.tasks || [];
-    const activeTaskIds = new Set(
-      allTasks
-        .filter(task => !task.deletedAt)
-        .map(task => task.id)
-    );
-
-    return {
-      ...project,
-      // 软删除任务仍属于回收站保留窗口，离线快照恢复不能把它们误当作已永久销毁。
-      tasks: allTasks,
-      // 主视图只恢复活跃任务之间的连接，避免 deleted task 在图上重新挂回可见边。
-      connections: (project.connections || []).filter(connection =>
-        activeTaskIds.has(connection.source) && activeTaskIds.has(connection.target)
-      ),
-    };
+    return normalizeOfflineSnapshotProjectPure(project);
   }
 
   private parseSnapshotEnvelope(raw: string): ParsedOfflineSnapshotEnvelope | null {
@@ -1658,11 +1639,7 @@ export class ProjectDataService {
   }
 
   private getSnapshotByteSize(raw: string): number {
-    try {
-      return new TextEncoder().encode(raw).byteLength;
-    } catch {
-      return raw.length;
-    }
+    return getSnapshotByteSizePure(raw);
   }
 
   private getSnapshotSavedAtTimestamp(snapshot: ParsedOfflineSnapshotEnvelope | null): number {
@@ -2098,23 +2075,11 @@ export class ProjectDataService {
   }
 
   private chunkIds(ids: readonly string[], size: number): string[][] {
-    if (ids.length <= size) return [Array.from(ids)];
-    const chunks: string[][] = [];
-    for (let index = 0; index < ids.length; index += size) {
-      chunks.push(ids.slice(index, index + size));
-    }
-    return chunks;
+    return chunkIdsPure(ids, size);
   }
 
   private normalizeIds(ids: readonly string[]): string[] {
-    const normalized = new Set<string>();
-    for (const id of ids) {
-      const value = id.trim();
-      if (value.length > 0) {
-        normalized.add(value);
-      }
-    }
-    return Array.from(normalized);
+    return normalizeIdsPure(ids);
   }
 
   private async openFocusModeDB(): Promise<IDBDatabase> {
@@ -2212,6 +2177,7 @@ export class ProjectDataService {
       wait_minutes: row.wait_minutes ?? null,
       // State Overlap 停泊元数据
       parkingMeta: (row as { parking_meta?: unknown }).parking_meta as import('../../../../models/parking').TaskParkingMeta | undefined ?? undefined,
+      attentionMeta: (row as { attention_meta?: unknown }).attention_meta as import('../../../../models').TaskAttentionMeta | undefined ?? undefined,
     };
 
     if (contentMissingFromSource) {
