@@ -14,6 +14,10 @@ import { LoggerService } from './logger.service';
 import { ChangeTrackerService } from './change-tracker.service';
 import { WriteGuardService } from './write-guard.service';
 import { RetryQueueService } from '../app/core/services/sync/retry-queue.service';
+import { ProjectDataService } from '../app/core/services/sync/project-data.service';
+import { ProjectSaveFlightCoordinatorService } from '../app/core/services/sync/project-save-flight-coordinator.service';
+import { ProjectDeleteCoordinatorService } from '../app/core/services/sync/project-delete-coordinator.service';
+import { TaskSyncOperationsService } from '../app/core/services/sync/task-sync-operations.service';
 import { AUTH_CONFIG } from '../config/auth.config';
 import type { Project } from '../models';
 import type { ConflictData } from '../app/core/services/sync';
@@ -163,6 +167,10 @@ describe('ProjectOperationService', () => {
         { provide: ProjectOperationService, useClass: ProjectOperationService },
         { provide: ProjectStateService, useValue: mockProjectState },
         { provide: SyncCoordinatorService, useValue: mockSyncCoordinator },
+        { provide: ProjectSaveFlightCoordinatorService, useValue: { save: mockSyncCoordinator.core.saveProjectSmart } },
+        { provide: ProjectDeleteCoordinatorService, useValue: { deleteProjectFromCloud: mockSyncCoordinator.core.deleteProjectFromCloud } },
+        { provide: TaskSyncOperationsService, useValue: { deleteTask: mockSyncCoordinator.core.deleteTask } },
+        { provide: ProjectDataService, useValue: { saveOfflineSnapshot: mockSyncCoordinator.core.saveOfflineSnapshot } },
         { provide: UserSessionService, useValue: mockUserSession },
         { provide: ActionQueueService, useValue: mockActionQueue },
         { provide: RetryQueueService, useValue: mockRetryQueue },

@@ -14,6 +14,7 @@
 import { Injectable, inject } from '@angular/core';
 import { ProjectStateService } from './project-state.service';
 import { SyncCoordinatorService } from './sync-coordinator.service';
+import { ProjectDataService, ProjectSaveFlightCoordinatorService, ProjectDeleteCoordinatorService, TaskSyncOperationsService } from '../core-bridge';
 import { UserSessionService } from './user-session.service';
 import { ActionQueueService } from './action-queue.service';
 import { ConflictStorageService } from './conflict-storage.service';
@@ -46,6 +47,10 @@ export class ProjectOperationService {
   
   private readonly projectState = inject(ProjectStateService);
   private readonly syncCoordinator = inject(SyncCoordinatorService);
+  private readonly projectData = inject(ProjectDataService);
+  private readonly projectSaveCoordinator = inject(ProjectSaveFlightCoordinatorService);
+  private readonly projectDelete = inject(ProjectDeleteCoordinatorService);
+  private readonly taskSyncOps = inject(TaskSyncOperationsService);
   private readonly userSession = inject(UserSessionService);
   private readonly actionQueue = inject(ActionQueueService);
   private readonly conflictStorage = inject(ConflictStorageService);
@@ -202,7 +207,7 @@ export class ProjectOperationService {
       this.toastService.error('删除项目失败', error.message);
     }
 
-    this.syncCoordinator.core.saveOfflineSnapshot(this.projectState.projects());
+    this.projectData.saveOfflineSnapshot(this.projectState.projects());
     return { success: false, error: error.message };
   }
 
@@ -258,7 +263,8 @@ export class ProjectOperationService {
     
     if (isCloudBackedUser) {
       try {
-        const result = await this.syncCoordinator.core.saveProjectSmart(localProject, userId);
+        const saved = await this.projectSaveCoordinator.save(localProject, userId);
+        const result = { ...saved, newVersion: saved.newVersion ?? localProject.version };
         if (!this.isProjectSessionContextCurrent(sessionContext, 'addProject:saveProjectSmart', localProject.id)) {
           if (result.success && this.canSettleStaleProjectLocally(sessionContext)) {
             const currentMatchesSaved = this.doesCurrentProjectMatchSnapshot(localProject.id, localProject);
@@ -355,7 +361,7 @@ export class ProjectOperationService {
     
     if (isCloudBackedUser) {
       try {
-        const deleteResult = await this.syncCoordinator.core.deleteProjectFromCloud(projectId, userId);
+        const deleteResult = await this.projectDelete.deleteProjectFromCloud(projectId, userId);
         if (!this.isProjectSessionContextCurrent(sessionContext, 'deleteProject:deleteProjectFromCloud', projectId)) {
           if (!isFailure(deleteResult)) {
             await this.settleProjectDeleteSuccess(sessionContext, projectId);
@@ -396,7 +402,7 @@ export class ProjectOperationService {
       this.optimisticState.commitSnapshot(snapshot.id);
     }
     
-    this.syncCoordinator.core.saveOfflineSnapshot(this.projectState.projects());
+    this.projectData.saveOfflineSnapshot(this.projectState.projects());
     return { success: true };
   }
 
@@ -460,7 +466,7 @@ export class ProjectOperationService {
           : current
       );
     });
-    this.syncCoordinator.core.saveOfflineSnapshot(this.projectState.projects());
+    this.projectData.saveOfflineSnapshot(this.projectState.projects());
 
     if (!isCloudBackedUser || !userId) {
       this.optimisticState.commitSnapshot(snapshot.id);
@@ -479,7 +485,8 @@ export class ProjectOperationService {
     };
 
     try {
-      const result = await this.syncCoordinator.core.saveProjectSmart(localProject, userId);
+      const saved = await this.projectSaveCoordinator.save(localProject, userId);
+      const result = { ...saved, newVersion: saved.newVersion ?? localProject.version };
 
       if (!this.isProjectSessionContextCurrent(sessionContext, 'upsertImportedProject:saveProjectSmart', localProject.id)) {
         if (result.success && this.canSettleStaleProjectLocally(sessionContext)) {
@@ -518,7 +525,7 @@ export class ProjectOperationService {
               }
             : current
         ));
-        this.syncCoordinator.core.saveOfflineSnapshot(this.projectState.projects());
+        this.projectData.saveOfflineSnapshot(this.projectState.projects());
         this.optimisticState.commitSnapshot(snapshot.id);
         return { success: true };
       }
@@ -545,7 +552,7 @@ export class ProjectOperationService {
       this.actionQueue.enqueue(importQueueAction);
       this.toastService.info('已保存到本地', '导入内容将在网络恢复后同步到云端');
       this.optimisticState.commitSnapshot(snapshot.id);
-      this.syncCoordinator.core.saveOfflineSnapshot(this.projectState.projects());
+      this.projectData.saveOfflineSnapshot(this.projectState.projects());
       return { success: true };
     } catch (_error) {
       if (!this.isProjectSessionContextCurrent(sessionContext, 'upsertImportedProject:saveProjectSmart-error', localProject.id)) {
@@ -561,7 +568,7 @@ export class ProjectOperationService {
       this.actionQueue.enqueue(importQueueAction);
       this.toastService.info('已保存到本地', '导入内容将在网络恢复后自动同步');
       this.optimisticState.commitSnapshot(snapshot.id);
-      this.syncCoordinator.core.saveOfflineSnapshot(this.projectState.projects());
+      this.projectData.saveOfflineSnapshot(this.projectState.projects());
       return { success: true };
     }
   }
@@ -713,7 +720,7 @@ export class ProjectOperationService {
         project.id === projectId ? resolvedProject : project
       );
     });
-    this.syncCoordinator.core.saveOfflineSnapshot(this.projectState.projects());
+    this.projectData.saveOfflineSnapshot(this.projectState.projects());
     
     if (this.projectState.activeProjectId() === projectId) {
       this.undoService.clearHistory(projectId);
@@ -743,7 +750,7 @@ export class ProjectOperationService {
         }
 
         try {
-          const syncResult = await this.syncCoordinator.core.saveProjectSmart(resolvedProject, userId);
+          const syncResult = await this.projectSaveCoordinator.save(resolvedProject, userId);
           const persistedProject = syncResult.newVersion !== undefined
             ? { ...resolvedProject, version: syncResult.newVersion }
             : resolvedProject;
@@ -912,7 +919,7 @@ export class ProjectOperationService {
     }
 
     try {
-      const syncResult = await this.syncCoordinator.core.saveProjectSmart(resolvedProject, userId);
+      const syncResult = await this.projectSaveCoordinator.save(resolvedProject, userId);
       const persistedProject = syncResult.newVersion !== undefined
         ? { ...resolvedProject, version: syncResult.newVersion }
         : resolvedProject;
@@ -1128,7 +1135,7 @@ export class ProjectOperationService {
           }
         : current
     ));
-    this.syncCoordinator.core.saveOfflineSnapshot(this.projectState.projects());
+    this.projectData.saveOfflineSnapshot(this.projectState.projects());
     this.changeTracker.clearProjectFieldLocks(projectId);
     this.changeTracker.clearProjectChanges(projectId);
   }
@@ -1147,7 +1154,7 @@ export class ProjectOperationService {
           }
         : current
     ));
-    this.syncCoordinator.core.saveOfflineSnapshot(this.projectState.projects());
+    this.projectData.saveOfflineSnapshot(this.projectState.projects());
     this.changeTracker.clearProjectFieldLocks(projectId);
     if (options.clearProjectChanges !== false) {
       this.changeTracker.clearProjectChanges(projectId);
@@ -1168,7 +1175,7 @@ export class ProjectOperationService {
           }
         : current
     ));
-    this.syncCoordinator.core.saveOfflineSnapshot(this.projectState.projects());
+    this.projectData.saveOfflineSnapshot(this.projectState.projects());
   }
 
   private doesCurrentProjectMatchSnapshot(projectId: string, snapshot: Project): boolean {
@@ -1298,7 +1305,7 @@ export class ProjectOperationService {
       }
 
       const taskId = remainingTaskDeleteIds[0];
-      const deleted = await this.syncCoordinator.core.deleteTask(taskId, project.id, sessionContext.ownerUserId ?? undefined);
+      const deleted = await this.taskSyncOps.deleteTask(taskId, project.id, sessionContext.ownerUserId ?? undefined);
       if (!deleted) {
         this.logger.warn('冲突解决后待删除任务未立即完成，已交由补偿链路接管', {
           projectId: project.id,
