@@ -32,6 +32,7 @@ import {
   createSafeBlackBoxKeysetFilter as createSafeBlackBoxKeysetFilterPure,
   isBlackBoxCursorRow as isBlackBoxCursorRowPure,
 } from './black-box-sync-cursor';
+import { hasEquivalentEntryState as hasEquivalentEntryStatePure } from './black-box-entry-equivalence';
 import { supabaseErrorToError } from '../utils/supabase-error';
 import { openIndexedDBAdaptive } from '../utils/indexeddb-open';
 import {
@@ -1538,77 +1539,8 @@ export class BlackBoxSyncService {
     return leftMs === rightMs;
   }
 
-  /**
-   * 把任意来源的 entry 归一化成等价比较友好的形态：
-   * - focusMeta 的 `null` 与 `undefined` 统一成 `null`，并对内部可空字段递归归一；
-   * - `snoozeUntil` / `snoozeCount` / `projectId` / `deletedAt` 的 `undefined` 统一成默认值；
-   *
-   * 仅用于等价判定，不会回写到 IDB 或 signal store。
-   *
-   * 【2026-05-18 根因修复·阶段 1】黑匣子条目在多个写入路径（BlackBoxService.create / update、
-   * mapRowToEntry、saveToLocal 等）可能出现 focusMeta=undefined vs null、snoozeCount=undefined
-   * vs 0 等"形态漂移"。hasEquivalentEntryState 未归一时，会把"业务字段实际相等、仅同步元数据
-   * 不同"的快照判定为不等价，使 upgradeEquivalentLatestLocalToSynced / mergeWithLocal 进入
-   * "保留 pending + 重新入队"的循环，UI 表现为黑匣子条目长期 ⏳ 待同步。
-   */
-  private normalizeEntryForEquivalence(entry: BlackBoxEntry): BlackBoxEntry {
-    const rawFocusMeta = entry.focusMeta ?? null;
-    const focusMeta = rawFocusMeta
-      ? {
-          source: rawFocusMeta.source,
-          sessionId: rawFocusMeta.sessionId,
-          title: rawFocusMeta.title,
-          detail: rawFocusMeta.detail ?? null,
-          lane: rawFocusMeta.lane,
-          expectedMinutes: rawFocusMeta.expectedMinutes ?? null,
-          waitMinutes: rawFocusMeta.waitMinutes ?? null,
-          cognitiveLoad: rawFocusMeta.cognitiveLoad,
-          dockEntryId: rawFocusMeta.dockEntryId,
-        }
-      : null;
-
-    return {
-      ...entry,
-      projectId: entry.projectId ?? null,
-      completedAt: entry.completedAt ?? null,
-      snoozeUntil: entry.snoozeUntil ?? undefined,
-      snoozeCount: entry.snoozeCount ?? 0,
-      deletedAt: entry.deletedAt ?? null,
-      focusMeta,
-    };
-  }
-
   private hasEquivalentEntryState(local: BlackBoxEntry, remote: BlackBoxEntry): boolean {
-    const normalizedLocal = this.normalizeEntryForEquivalence(local);
-    const normalizedRemote = this.normalizeEntryForEquivalence(remote);
-    const localFocusMeta = normalizedLocal.focusMeta;
-    const remoteFocusMeta = normalizedRemote.focusMeta;
-    const focusMetaMatches = !localFocusMeta || !remoteFocusMeta
-      ? localFocusMeta === remoteFocusMeta
-      : localFocusMeta.source === remoteFocusMeta.source
-        && localFocusMeta.sessionId === remoteFocusMeta.sessionId
-        && localFocusMeta.title === remoteFocusMeta.title
-        && localFocusMeta.detail === remoteFocusMeta.detail
-        && localFocusMeta.lane === remoteFocusMeta.lane
-        && localFocusMeta.expectedMinutes === remoteFocusMeta.expectedMinutes
-        && localFocusMeta.waitMinutes === remoteFocusMeta.waitMinutes
-        && localFocusMeta.cognitiveLoad === remoteFocusMeta.cognitiveLoad
-        && localFocusMeta.dockEntryId === remoteFocusMeta.dockEntryId;
-
-    return normalizedLocal.id === normalizedRemote.id
-      && normalizedLocal.projectId === normalizedRemote.projectId
-      && normalizedLocal.userId === normalizedRemote.userId
-      && normalizedLocal.content === normalizedRemote.content
-      && normalizedLocal.date === normalizedRemote.date
-      && this.hasSameInstant(normalizedLocal.createdAt, normalizedRemote.createdAt)
-      && this.hasSameInstant(normalizedLocal.completedAt, normalizedRemote.completedAt)
-      && normalizedLocal.isRead === normalizedRemote.isRead
-      && normalizedLocal.isCompleted === normalizedRemote.isCompleted
-      && normalizedLocal.isArchived === normalizedRemote.isArchived
-      && (normalizedLocal.snoozeUntil ?? null) === (normalizedRemote.snoozeUntil ?? null)
-      && normalizedLocal.snoozeCount === normalizedRemote.snoozeCount
-      && this.hasSameInstant(normalizedLocal.deletedAt, normalizedRemote.deletedAt)
-      && focusMetaMatches;
+    return hasEquivalentEntryStatePure(local, remote, (left, right) => this.hasSameInstant(left, right));
   }
 
   private async reconcilePendingEntriesWithServer(
