@@ -33,6 +33,13 @@ import {
   isBrowserNetworkSuspendedError,
   isBrowserNetworkSuspendedWindow,
 } from '../../../../utils/browser-network-suspension';
+import {
+  areStringArraysEqual as areStringArraysEqualPure,
+  buildRefreshFingerprint as buildRefreshFingerprintPure,
+  buildBlackBoxRetryDataFingerprint as buildBlackBoxRetryDataFingerprintPure,
+  classifyErrorType as classifyErrorTypePure,
+  minifyItem as minifyItemPure,
+} from './retry-queue-fingerprint';
 /**
  * 可重试的实体类型
  */
@@ -363,22 +370,7 @@ export class RetryQueueService {
   }
 
   private buildRefreshFingerprint(item: RetryQueueItem): string {
-    const dataWithTimestamps = item.data as { updatedAt?: unknown; deletedAt?: unknown };
-    const updatedAt = typeof dataWithTimestamps.updatedAt === 'string' ? dataWithTimestamps.updatedAt : '';
-    const deletedAt = typeof dataWithTimestamps.deletedAt === 'string' ? dataWithTimestamps.deletedAt : '';
-    const taskDeleteSignature = Array.isArray(item.taskIdsToDelete)
-      ? [...item.taskIdsToDelete].sort().join(',')
-      : '';
-
-    return [
-      String(item.createdAt),
-      item.operation,
-      item.projectId ?? '',
-      item.sourceUserId ?? '',
-      updatedAt,
-      deletedAt,
-      taskDeleteSignature,
-    ].join('|');
+    return buildRefreshFingerprintPure(item);
   }
 
   private wasItemRefreshedDuringProcessing(item: RetryQueueItem): boolean {
@@ -788,50 +780,11 @@ export class RetryQueueService {
   }
 
   private areStringArraysEqual(left: string[] | undefined, right: string[] | undefined): boolean {
-    const leftValues = left ?? [];
-    const rightValues = right ?? [];
-    if (leftValues.length !== rightValues.length) {
-      return false;
-    }
-
-    return leftValues.every((value, index) => value === rightValues[index]);
+    return areStringArraysEqualPure(left, right);
   }
 
   private buildBlackBoxRetryDataFingerprint(entry: BlackBoxEntry): string {
-    const focusMeta = entry.focusMeta
-      ? {
-          source: entry.focusMeta.source,
-          sessionId: entry.focusMeta.sessionId,
-          title: entry.focusMeta.title,
-          detail: entry.focusMeta.detail ?? null,
-          lane: entry.focusMeta.lane,
-          expectedMinutes: entry.focusMeta.expectedMinutes ?? null,
-          waitMinutes: entry.focusMeta.waitMinutes ?? null,
-          cognitiveLoad: entry.focusMeta.cognitiveLoad,
-          dockEntryId: entry.focusMeta.dockEntryId,
-        }
-      : null;
-
-    return JSON.stringify({
-      id: entry.id,
-      projectId: entry.projectId ?? null,
-      userId: entry.userId,
-      content: entry.content,
-      date: entry.date,
-      createdAt: entry.createdAt,
-      updatedAt: entry.updatedAt,
-      completedAt: entry.completedAt ?? null,
-      isRead: entry.isRead,
-      isCompleted: entry.isCompleted,
-      isArchived: entry.isArchived,
-      snoozeUntil: entry.snoozeUntil ?? null,
-      snoozeCount: entry.snoozeCount ?? 0,
-      deletedAt: entry.deletedAt ?? null,
-      syncStatus: entry.syncStatus ?? null,
-      localCreatedAt: entry.localCreatedAt ?? null,
-      originalAudioDuration: entry.originalAudioDuration ?? null,
-      focusMeta,
-    });
+    return buildBlackBoxRetryDataFingerprintPure(entry);
   }
 
   private preserveBlackBoxContentWhenBlankSnapshot(
@@ -1670,17 +1623,7 @@ export class RetryQueueService {
    * 从 Error 对象推断错误类型（用于未携带 errorType 的异常）
    */
   private classifyErrorType(error: Error): string {
-    if (isBrowserNetworkSuspendedError(error)) {
-      return 'BrowserNetworkSuspendedError';
-    }
-
-    const msg = (error.message || '').toLowerCase();
-    if (msg.includes('failed to fetch') || msg.includes('network')) return 'NetworkError';
-    if (msg.includes('timeout') || msg.includes('timed out') || msg.includes('超时')) return 'NetworkTimeoutError';
-    if (msg.includes('504')) return 'GatewayError';
-    if (msg.includes('503')) return 'ServiceUnavailableError';
-    if (msg.includes('offline') || msg.includes('no connection')) return 'NetworkError';
-    return 'UnknownError';
+    return classifyErrorTypePure(error);
   }
   
   checkCircuitBreaker(): boolean {
@@ -2612,15 +2555,6 @@ export class RetryQueueService {
    * 通过解构显式排除，避免 `undefined as unknown as string` 类型谎言。
    */
   private minifyItem(item: RetryQueueItem): RetryQueueItem {
-    if (item.type !== 'task') {
-      return item;
-    }
-
-    const task = item.data as Task;
-    const { displayId: _drop, ...taskWithoutDisplayId } = task;
-    return {
-      ...item,
-      data: taskWithoutDisplayId as Task
-    };
+    return minifyItemPure(item);
   }
 }
