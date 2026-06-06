@@ -30,6 +30,12 @@ export { ProjectDataService } from './app/core/services/sync/project-data.servic
 // ProjectSyncCursorService — 被 delta-sync-coordinator 使用（checkForDrift + commitProjectSyncCursor）
 export { ProjectSyncCursorService } from './app/core/services/sync/project-sync-cursor.service';
 
+// TaskSyncOperationsService — 被 conflict-resolution 使用（getTombstoneIdsWithStatus）
+export { TaskSyncOperationsService } from './app/core/services/sync/task-sync-operations.service';
+
+// ProjectSaveFlightCoordinatorService — 被 conflict-resolution 使用（save 单飞项目保存）
+export { ProjectSaveFlightCoordinatorService } from './app/core/services/sync/project-save-flight-coordinator.service';
+
 // TombstoneService — 被 delta-sync-coordinator 使用
 export { TombstoneService } from './app/core/services/sync/tombstone.service';
 

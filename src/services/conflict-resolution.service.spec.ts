@@ -13,7 +13,9 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Injector, runInInjectionContext, signal } from '@angular/core';
 import { ConflictResolutionService } from './conflict-resolution.service';
 import { ConflictDetectionService } from './conflict-detection.service';
-import { SimpleSyncService } from '../app/core/services/simple-sync.service';
+import { SyncStateService } from '../app/core/services/sync/sync-state.service';
+import { TaskSyncOperationsService } from '../app/core/services/sync/task-sync-operations.service';
+import { ProjectSaveFlightCoordinatorService } from '../app/core/services/sync/project-save-flight-coordinator.service';
 import { LayoutService } from './layout.service';
 import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
@@ -35,8 +37,8 @@ const mockSyncService = {
     hasConflict: false,
     conflictData: null,
   }),
-  resolveConflict: vi.fn(),
-  saveProjectToCloud: vi.fn().mockResolvedValue({ success: true }),
+  update: vi.fn(),
+  save: vi.fn().mockResolvedValue({ success: true }),
   getTombstoneIds: vi.fn().mockResolvedValue(new Set<string>()),
   // 【v5.9】添加带状态的 tombstone 查询方法
   getTombstoneIdsWithStatus: vi.fn().mockResolvedValue({
@@ -144,7 +146,10 @@ describe('ConflictResolutionService', () => {
     // First create injector with base dependencies
     const baseInjector = Injector.create({
       providers: [
-        { provide: SimpleSyncService, useValue: mockSyncService },
+        // 单一 mock 同时背书三个具体服务——原 SimpleSyncService 门面把它们转发为一。
+        { provide: SyncStateService, useValue: mockSyncService },
+        { provide: TaskSyncOperationsService, useValue: mockSyncService },
+        { provide: ProjectSaveFlightCoordinatorService, useValue: mockSyncService },
         { provide: LayoutService, useValue: mockLayoutService },
         { provide: ToastService, useValue: mockToastService },
         { provide: LoggerService, useValue: mockLoggerService },
@@ -184,11 +189,7 @@ describe('ConflictResolutionService', () => {
           // LWW: max(local, remote) + 1 = max(5, 7) + 1 = 8
           expect(result.value.version).toBe(8);
         }
-        expect(mockSyncService.resolveConflict).toHaveBeenCalledWith(
-          'proj-1',
-          expect.objectContaining({ version: 8 }),
-          'local'
-        );
+        expect(mockSyncService.update).toHaveBeenCalledWith({ hasConflict: false, conflictData: null });
       });
 
       it('版本为 undefined 时应该使用 1', async () => {
@@ -218,11 +219,7 @@ describe('ConflictResolutionService', () => {
         if (result.ok) {
           expect(result.value.name).toBe('Remote Name');
         }
-        expect(mockSyncService.resolveConflict).toHaveBeenCalledWith(
-          'proj-1',
-          expect.objectContaining({ name: 'Remote Name' }),
-          'remote'
-        );
+        expect(mockSyncService.update).toHaveBeenCalledWith({ hasConflict: false, conflictData: null });
       });
 
       it('远程项目为空时应该返回错误', async () => {
@@ -329,11 +326,7 @@ describe('ConflictResolutionService', () => {
           expect(result.value.tasks.some(task => task.id === 'task-2')).toBe(true);
           expect(result.value.tasks.some(task => task.id === 'task-3')).toBe(true);
         }
-        expect(mockSyncService.resolveConflict).toHaveBeenCalledWith(
-          'proj-1',
-          expect.objectContaining({ version: 4 }),
-          'local',
-        );
+        expect(mockSyncService.update).toHaveBeenCalledWith({ hasConflict: false, conflictData: null });
       });
 
       it('显式选择版本时不应额外创建冲突副本', async () => {
@@ -901,7 +894,7 @@ describe('ConflictResolutionService', () => {
       ];
       const cloudProjects: Project[] = [];
 
-      mockSyncService.saveProjectToCloud.mockResolvedValue({ success: true });
+      mockSyncService.save.mockResolvedValue({ success: true });
 
       const result = await service.mergeOfflineDataOnReconnect(
         cloudProjects,
@@ -910,7 +903,7 @@ describe('ConflictResolutionService', () => {
       );
 
       expect(result.syncedCount).toBe(1);
-      expect(mockSyncService.saveProjectToCloud).toHaveBeenCalledWith(
+      expect(mockSyncService.save).toHaveBeenCalledWith(
         expect.objectContaining({ name: 'Offline Created' }),
         'user-1'
       );
@@ -924,7 +917,7 @@ describe('ConflictResolutionService', () => {
         createTestProject({ id: 'proj-1', version: 5, name: 'Updated Offline' }),
       ];
 
-      mockSyncService.saveProjectToCloud.mockResolvedValue({ success: true });
+      mockSyncService.save.mockResolvedValue({ success: true });
 
       const result = await service.mergeOfflineDataOnReconnect(
         cloudProjects,
@@ -933,7 +926,7 @@ describe('ConflictResolutionService', () => {
       );
 
       expect(result.syncedCount).toBe(1);
-      expect(mockSyncService.saveProjectToCloud).toHaveBeenCalledWith(
+      expect(mockSyncService.save).toHaveBeenCalledWith(
         expect.objectContaining({ version: 6 }), // max(5, 3) + 1
         'user-1'
       );
@@ -947,7 +940,7 @@ describe('ConflictResolutionService', () => {
         createTestProject({ id: 'proj-1', version: 6 }),
       ];
 
-      mockSyncService.saveProjectToCloud.mockResolvedValue({
+      mockSyncService.save.mockResolvedValue({
         success: false,
         conflict: true,
       });
@@ -976,7 +969,7 @@ describe('ConflictResolutionService', () => {
       );
 
       expect(result.syncedCount).toBe(0);
-      expect(mockSyncService.saveProjectToCloud).not.toHaveBeenCalled();
+      expect(mockSyncService.save).not.toHaveBeenCalled();
     });
   });
 

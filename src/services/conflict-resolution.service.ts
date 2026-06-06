@@ -1,5 +1,9 @@
 import { Injectable, inject, computed } from '@angular/core';
-import { SimpleSyncService } from '../core-bridge';
+import {
+  SyncStateService,
+  TaskSyncOperationsService,
+  ProjectSaveFlightCoordinatorService,
+} from '../core-bridge';
 import { LayoutService } from './layout.service';
 import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
@@ -43,7 +47,9 @@ export class ConflictResolutionService {
   private readonly conflictDetection = inject(ConflictDetectionService);
   private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly blackBoxSync = inject(BlackBoxSyncService);
-  private syncService = inject(SimpleSyncService);
+  private readonly syncStateService = inject(SyncStateService);
+  private readonly taskSyncOps = inject(TaskSyncOperationsService);
+  private readonly projectSaveFlight = inject(ProjectSaveFlightCoordinatorService);
   private layoutService = inject(LayoutService);
   private toast = inject(ToastService);
   private readonly loggerService = inject(LoggerService);
@@ -52,10 +58,20 @@ export class ConflictResolutionService {
   // ========== 冲突状态 ==========
   
   /** 是否有冲突 */
-  readonly hasConflict = computed(() => this.syncService.syncState().hasConflict);
+  readonly hasConflict = computed(() => this.syncStateService.syncState().hasConflict);
   
   /** 冲突数据 */
-  readonly conflictData = computed(() => this.syncService.syncState().conflictData);
+  readonly conflictData = computed(() => this.syncStateService.syncState().conflictData);
+
+  /**
+   * 标记冲突已解决：清空冲突态。
+   * 等价于原 SimpleSyncService.resolveConflict——其 resolvedProject 参数从未被使用，
+   * 解决后的项目数据由各方法经返回值交给调用方落盘，故此处仅负责清理冲突标记。
+   */
+  private markConflictResolved(projectId: string, strategy: 'local' | 'remote'): void {
+    this.logger.info('解决冲突', { projectId, strategy });
+    this.syncStateService.update({ hasConflict: false, conflictData: null });
+  }
 
   // ========== 公共方法 ==========
 
@@ -84,7 +100,7 @@ export class ConflictResolutionService {
           ...localProject,
           version: Math.max(localProject.version ?? 0, remoteProject?.version ?? 0) + 1
         };
-        this.syncService.resolveConflict(projectId, resolvedProject, 'local');
+        this.markConflictResolved(projectId, 'local');
         this.toast.success('已使用本地版本', '您的编辑已保留');
         break;
         
@@ -94,7 +110,7 @@ export class ConflictResolutionService {
           return failure(ErrorCodes.DATA_NOT_FOUND, '远程项目数据不存在');
         }
         resolvedProject = this.validateAndRebalance(remoteProject);
-        this.syncService.resolveConflict(projectId, resolvedProject, 'remote');
+        this.markConflictResolved(projectId, 'remote');
         this.toast.success('已使用远程版本', '已同步其他设备的内容');
         break;
         
@@ -105,7 +121,7 @@ export class ConflictResolutionService {
         }
         // 【v5.9 关键修复】获取 tombstoneIds 防止已删除任务在合并时复活
         // 使用带状态的方法，以便在查询失败时保守处理
-        const tombstoneResult = await this.syncService.getTombstoneIdsWithStatus(projectId);
+        const tombstoneResult = await this.taskSyncOps.getTombstoneIdsWithStatus(projectId);
         const mergeResult = this.smartMerge(
           localProject, 
           remoteProject, 
@@ -126,7 +142,7 @@ export class ConflictResolutionService {
           this.toast.warning('合并提示', '无法确认远程删除状态，已保守处理');
         }
         
-        this.syncService.resolveConflict(projectId, resolvedProject, 'local');
+        this.markConflictResolved(projectId, 'local');
         break;
       
       default:
@@ -136,7 +152,7 @@ export class ConflictResolutionService {
           ...localProject,
           version: Math.max(localProject.version ?? 0, remoteProject?.version ?? 0) + 1
         };
-        this.syncService.resolveConflict(projectId, resolvedProject, 'local');
+        this.markConflictResolved(projectId, 'local');
     }
     
     return success(resolvedProject);
@@ -164,7 +180,7 @@ export class ConflictResolutionService {
       return failure(ErrorCodes.DATA_NOT_FOUND, '远程项目数据不存在');
     }
 
-    const tombstoneResult = await this.syncService.getTombstoneIdsWithStatus(projectId);
+    const tombstoneResult = await this.taskSyncOps.getTombstoneIdsWithStatus(projectId);
     const mergeResult = this.mergeWithResolutionPlan(
       localProject,
       remoteProject,
@@ -180,7 +196,7 @@ export class ConflictResolutionService {
     if (tombstoneResult.localCacheOnly && tombstoneResult.ids.size === 0) {
       this.toast.warning('冲突处理提示', '无法确认远程删除状态，已保守处理');
     }
-    this.syncService.resolveConflict(projectId, resolvedProject, 'local');
+    this.markConflictResolved(projectId, 'local');
     return success(resolvedProject);
   }
 
@@ -270,7 +286,7 @@ export class ConflictResolutionService {
       this.logger.info('[KeepBoth] 修复了数据问题', { count: issues.length });
     }
     
-    this.syncService.resolveConflict(projectId, resolvedProject, 'local');
+    this.markConflictResolved(projectId, 'local');
     
     if (copiedCount > 0) {
       this.toast.success('已保留两者', `创建了 ${copiedCount} 个副本任务`);
@@ -636,7 +652,7 @@ export class ConflictResolutionService {
       
       if (!cloudProject) {
         // 离线创建的新项目，需要上传到云端
-        const result = await this.syncService.saveProjectToCloud(cleanedOfflineProject, userId);
+        const result = await this.projectSaveFlight.save(cleanedOfflineProject, userId);
         if (result.success) {
           mergedProjects.push(cleanedOfflineProject);
           syncedCount++;
@@ -656,7 +672,7 @@ export class ConflictResolutionService {
           version: Math.max(offlineVersion, cloudVersion) + 1
         };
         
-        const result = await this.syncService.saveProjectToCloud(projectToSync, userId);
+        const result = await this.projectSaveFlight.save(projectToSync, userId);
         if (result.success) {
           const idx = mergedProjects.findIndex(p => p.id === cleanedOfflineProject.id);
           if (idx !== -1) {
