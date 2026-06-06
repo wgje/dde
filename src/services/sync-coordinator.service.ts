@@ -137,28 +137,28 @@ export class SyncCoordinatorService {
   // ========== 同步状态 ==========
   
   /** 是否正在同步 */
-  readonly isSyncing = computed(() => this.core.syncState().isSyncing);
+  readonly isSyncing = computed(() => this.syncStateService.syncState().isSyncing);
   
   /** 是否在线 */
-  readonly isOnline = computed(() => this.core.syncState().isOnline);
+  readonly isOnline = computed(() => this.syncStateService.syncState().isOnline);
   
   /** 离线模式 */
-  readonly offlineMode = computed(() => this.core.syncState().offlineMode);
+  readonly offlineMode = computed(() => this.syncStateService.syncState().offlineMode);
   
   /** 会话是否过期 */
-  readonly sessionExpired = computed(() => this.core.syncState().sessionExpired);
+  readonly sessionExpired = computed(() => this.syncStateService.syncState().sessionExpired);
   
   /** 同步错误 */
-  readonly syncError = computed(() => this.core.syncState().syncError);
+  readonly syncError = computed(() => this.syncStateService.syncState().syncError);
   
   /** 是否有冲突 */
-  readonly hasConflict = computed(() => this.core.syncState().hasConflict);
+  readonly hasConflict = computed(() => this.syncStateService.syncState().hasConflict);
   
   /** 冲突数据 */
-  readonly conflictData = computed(() => this.core.syncState().conflictData);
+  readonly conflictData = computed(() => this.syncStateService.syncState().conflictData);
   
   /** 是否正在加载远程数据 */
-  readonly isLoadingRemote = this.core.isLoadingRemote;
+  readonly isLoadingRemote = this.syncStateService.isLoadingRemote;
   
   /** 待处理的离线操作数量 */
   readonly pendingActionsCount = this.actionQueue.queueSize;
@@ -844,8 +844,8 @@ export class SyncCoordinatorService {
       return false;
     }
 
-    const browserOnline = typeof navigator === 'undefined' ? this.core.syncState().isOnline : navigator.onLine;
-    if (!this.core.syncState().isOnline && !browserOnline) {
+    const browserOnline = typeof navigator === 'undefined' ? this.syncStateService.syncState().isOnline : navigator.onLine;
+    if (!this.syncStateService.syncState().isOnline && !browserOnline) {
       this.logger.debug('后台刷盘时当前离线，等待重试队列后续补齐', { reason });
       return false;
     }
@@ -2029,7 +2029,7 @@ export class SyncCoordinatorService {
       (this.actionQueue.queueFrozen() ? 1 : 0);
 
     this.sentryAlert.updateSyncContext({
-      lastSyncTimestamp: this.core.syncState().lastSyncTime,
+      lastSyncTimestamp: this.syncStateService.syncState().lastSyncTime,
       pendingActions: this.pendingActionsCount(),
       syncSuccessRate: successRate,
       queuePressureEvents,

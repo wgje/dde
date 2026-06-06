@@ -116,6 +116,19 @@ const mockSyncService = {
   getBlackBoxSyncWatermark: vi.fn().mockResolvedValue(null),
 };
 
+// SyncStateService mock —— 与 mockSyncService 共享同一 syncState/isLoadingRemote 信号，
+// 使 this.syncStateService.syncState() 与测试驱动的 mockSyncService.syncState.set(...) 保持一致。
+// Phase 3 门面安乐死：sync-coordinator 内部状态读取逐簇从 this.core 迁到具体子服务时复用此 mock。
+const mockSyncStateService = {
+  syncState: mockSyncService.syncState,
+  state: mockSyncService.state,
+  isLoadingRemote: mockSyncService.isLoadingRemote,
+  update: vi.fn((partial: Partial<SyncState>) => {
+    mockSyncService.syncState.update(s => ({ ...s, ...partial }));
+  }),
+  setPendingCount: vi.fn(),
+};
+
 const mockActionQueueService = {
   queueSize: signal(0),
   setQueueProcessCallbacks: vi.fn(),
@@ -383,6 +396,35 @@ const mockDestroyRef: Pick<DestroyRef, 'onDestroy'> = {
   onDestroy: (cb: () => void) => { destroyCallbacks.push(cb); return () => {}; },
 };
 
+// 共享 provider 工厂 —— 消除两个 SyncCoordinatorService describe 块此前逐字复制的 20+ provider 数组。
+// SyncStateService 用 mockSyncStateService（带 syncState 信号），为 Phase 3 逐簇下切 this.core 做准备。
+function buildCoordinatorProviders() {
+  return [
+    { provide: SimpleSyncService, useValue: mockSyncService },
+    { provide: ActionQueueService, useValue: mockActionQueueService },
+    { provide: RetryQueueService, useValue: mockRetryQueueService },
+    { provide: ConflictResolutionService, useValue: mockConflictService },
+    { provide: ConflictStorageService, useValue: mockConflictStorageService },
+    { provide: ChangeTrackerService, useValue: mockChangeTrackerService },
+    { provide: ProjectStateService, useValue: mockProjectStateService },
+    { provide: AuthService, useValue: mockAuthService },
+    { provide: ToastService, useValue: mockToastService },
+    { provide: SentryAlertService, useValue: mockSentryAlertService },
+    { provide: LayoutService, useValue: mockLayoutService },
+    { provide: LoggerService, useValue: mockLoggerService },
+    { provide: SyncModeService, useValue: mockSyncModeService },
+    { provide: PersistSchedulerService, useValue: mockPersistSchedulerService },
+    { provide: BlackBoxSyncService, useValue: mockBlackBoxSyncService },
+    { provide: TabSyncService, useValue: mockTabSyncService },
+    { provide: ActionQueueProcessorsService, useValue: mockActionQueueProcessorsService },
+    { provide: DeltaSyncCoordinatorService, useValue: mockDeltaSyncCoordinatorService },
+    { provide: ProjectSyncOperationsService, useValue: mockProjectSyncOperationsService },
+    { provide: DestroyRef, useValue: mockDestroyRef },
+    { provide: SentryLazyLoaderService, useValue: mockSentryLazyLoaderService },
+    { provide: SyncStateService, useValue: mockSyncStateService },
+  ];
+}
+
 describe('SyncCoordinatorService', () => {
   let service: SyncCoordinatorService;
   let injector: Injector;
@@ -444,33 +486,7 @@ describe('SyncCoordinatorService', () => {
     }
 
     injector = Injector.create({
-      providers: [
-        { provide: SimpleSyncService, useValue: mockSyncService },
-        { provide: ActionQueueService, useValue: mockActionQueueService },
-        { provide: RetryQueueService, useValue: mockRetryQueueService },
-        { provide: ConflictResolutionService, useValue: mockConflictService },
-        { provide: ConflictStorageService, useValue: mockConflictStorageService },
-        { provide: ChangeTrackerService, useValue: mockChangeTrackerService },
-        { provide: ProjectStateService, useValue: mockProjectStateService },
-        { provide: AuthService, useValue: mockAuthService },
-        { provide: ToastService, useValue: mockToastService },
-        { provide: SentryAlertService, useValue: mockSentryAlertService },
-        { provide: LayoutService, useValue: mockLayoutService },
-        { provide: LoggerService, useValue: mockLoggerService },
-        { provide: SyncModeService, useValue: mockSyncModeService },
-        { provide: PersistSchedulerService, useValue: mockPersistSchedulerService },
-        { provide: BlackBoxSyncService, useValue: mockBlackBoxSyncService },
-        { provide: TabSyncService, useValue: mockTabSyncService },
-        { provide: ActionQueueProcessorsService, useValue: mockActionQueueProcessorsService },
-        { provide: DeltaSyncCoordinatorService, useValue: mockDeltaSyncCoordinatorService },
-        { provide: ProjectSyncOperationsService, useValue: mockProjectSyncOperationsService },
-        { provide: DestroyRef, useValue: mockDestroyRef },
-        { provide: SentryLazyLoaderService, useValue: mockSentryLazyLoaderService },
-        {
-          provide: SyncStateService,
-          useValue: { setPendingCount: vi.fn() },
-        },
-      ],
+      providers: buildCoordinatorProviders(),
     });
 
     service = runInInjectionContext(injector, () => new SyncCoordinatorService());
@@ -2337,33 +2353,7 @@ describe('SyncCoordinatorService 集成场景', () => {
     bindProjectStateMockImplementations();
 
     injector = Injector.create({
-      providers: [
-        { provide: SimpleSyncService, useValue: mockSyncService },
-        { provide: ActionQueueService, useValue: mockActionQueueService },
-        { provide: RetryQueueService, useValue: mockRetryQueueService },
-        { provide: ConflictResolutionService, useValue: mockConflictService },
-        { provide: ConflictStorageService, useValue: mockConflictStorageService },
-        { provide: ChangeTrackerService, useValue: mockChangeTrackerService },
-        { provide: ProjectStateService, useValue: mockProjectStateService },
-        { provide: AuthService, useValue: mockAuthService },
-        { provide: ToastService, useValue: mockToastService },
-        { provide: SentryAlertService, useValue: mockSentryAlertService },
-        { provide: LayoutService, useValue: mockLayoutService },
-        { provide: LoggerService, useValue: mockLoggerService },
-        { provide: SyncModeService, useValue: mockSyncModeService },
-        { provide: PersistSchedulerService, useValue: mockPersistSchedulerService },
-        { provide: BlackBoxSyncService, useValue: mockBlackBoxSyncService },
-        { provide: TabSyncService, useValue: mockTabSyncService },
-        { provide: ActionQueueProcessorsService, useValue: mockActionQueueProcessorsService },
-        { provide: DeltaSyncCoordinatorService, useValue: mockDeltaSyncCoordinatorService },
-        { provide: ProjectSyncOperationsService, useValue: mockProjectSyncOperationsService },
-        { provide: DestroyRef, useValue: mockDestroyRef },
-        { provide: SentryLazyLoaderService, useValue: mockSentryLazyLoaderService },
-        {
-          provide: SyncStateService,
-          useValue: { setPendingCount: vi.fn() },
-        },
-      ],
+      providers: buildCoordinatorProviders(),
     });
 
     service = runInInjectionContext(injector, () => new SyncCoordinatorService());
