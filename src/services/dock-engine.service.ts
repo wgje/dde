@@ -18,7 +18,7 @@ import {
   HighLoadCounter,
   StatusMachineEntry,
 } from '../models/parking-dock';
-import { SimpleSyncService, TaskStore } from '../core-bridge';
+import { TaskStore } from '../core-bridge';
 import { BlackBoxService } from './black-box.service';
 import { LoggerService } from './logger.service';
 import { ProjectStateService } from './project-state.service';
@@ -61,7 +61,6 @@ export class DockEngineService {
 
   private readonly taskStore = inject(TaskStore);
   private readonly logger = inject(LoggerService).category('DockEngine');
-  private readonly syncService = inject(SimpleSyncService);
   private readonly projectState = inject(ProjectStateService);
   private readonly taskOps = inject(TaskOperationAdapterService);
   private readonly blackBoxService = inject(BlackBoxService);
