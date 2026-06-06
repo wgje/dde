@@ -1,6 +1,6 @@
 import { Component, inject, effect, signal, computed, ChangeDetectionStrategy, DestroyRef } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { SimpleSyncService } from '../../core/services/simple-sync.service';
+import { SyncStateService } from '../../core/services/sync/sync-state.service';
 import { ToastService } from '../../../services/toast.service';
 import { ActionQueueService } from '../../../services/action-queue.service';
 import { UiStateService } from '../../../services/ui-state.service';
@@ -58,7 +58,7 @@ import { isLocalModeEnabled } from '../../../services/guards/auth.guard';
 })
 export class OfflineBannerComponent {
   private static readonly DEMO_BANNER_DISMISS_STORAGE_KEY = 'nanoflow.demo-banner-dismissed';
-  private syncService = inject(SimpleSyncService);
+  private syncStateService = inject(SyncStateService);
   private actionQueue = inject(ActionQueueService);
   private toast = inject(ToastService);
   private uiState = inject(UiStateService);
@@ -81,15 +81,15 @@ export class OfflineBannerComponent {
   /** 离线状态 */
   readonly isOffline = computed(() => 
     !this.networkAwareness.isOnline()
-    || !this.syncService.syncState().isOnline
-    || this.syncService.syncState().offlineMode
+    || !this.syncStateService.syncState().isOnline
+    || this.syncStateService.syncState().offlineMode
   );
 
   /** 存储冻结状态 */
   readonly isStorageFrozen = this.actionQueue.queueFrozen;
 
   /** 待同步编辑数（给用户可见的安心感） */
-  readonly pendingEditCount = computed(() => this.syncService.syncState().pendingCount);
+  readonly pendingEditCount = computed(() => this.syncStateService.syncState().pendingCount);
 
   /** 在线恢复后淡出定时器 */
   private fadeOutTimer: ReturnType<typeof setTimeout> | null = null;
@@ -106,8 +106,8 @@ export class OfflineBannerComponent {
 
     // 使用 effect 监听网络状态变化
     effect(() => {
-      const isOnline = this.networkAwareness.isOnline() && this.syncService.syncState().isOnline;
-      const offlineMode = this.syncService.syncState().offlineMode;
+      const isOnline = this.networkAwareness.isOnline() && this.syncStateService.syncState().isOnline;
+      const offlineMode = this.syncStateService.syncState().offlineMode;
       const queueFrozen = this.actionQueue.queueFrozen();
       
       // 检测网络连接状态变化

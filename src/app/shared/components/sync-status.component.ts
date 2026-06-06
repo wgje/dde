@@ -1,7 +1,7 @@
 import { Component, inject, signal, computed, input, ChangeDetectionStrategy, output, effect, DestroyRef } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ActionQueueService } from '../../../services/action-queue.service';
-import { SimpleSyncService } from '../../core/services/simple-sync.service';
+import { SyncStateService } from '../../core/services/sync/sync-state.service';
 import { SyncCoordinatorService } from '../../../services/sync-coordinator.service';
 import { ProjectStateService } from '../../../services/project-state.service';
 import { AuthService } from '../../../services/auth.service';
@@ -109,7 +109,7 @@ import type { QueuedAction } from '../../../services/action-queue.types';
                  [attr.data-testid-offline]="!isOnline() || offlineMode() ? 'offline-indicator' : null"
                  [attr.data-testid-pending]="pendingCount() > 0 ? 'pending-sync-indicator' : null"
                 [attr.data-testid-busy]="isAnySyncing() || isResyncing() || isRetrying() || isProcessing() ? 'sync-busy-indicator' : null"
-                [attr.data-testid-last-sync]="syncService.syncState().lastSyncTime"
+                [attr.data-testid-last-sync]="syncStateService.syncState().lastSyncTime"
                 [attr.data-testid-success]="statusDotClass() === 'bg-green-500' ? 'sync-success-indicator' : null"
                 [ngClass]="statusDotClass()"
                  [class.animate-pulse]="isSyncing() || pendingCount() > 0">
@@ -470,7 +470,7 @@ export class SyncStatusComponent {
   private static readonly PENDING_CLEAR_MAX_RESETS = 3;
 
   private actionQueue = inject(ActionQueueService);
-  private syncService = inject(SimpleSyncService);
+  private syncStateService = inject(SyncStateService);
   private authService = inject(AuthService);
   private conflictStorage = inject(ConflictStorageService);
   private syncCoordinator = inject(SyncCoordinatorService);
@@ -511,7 +511,7 @@ export class SyncStatusComponent {
   readonly actionQueuePendingCount = computed(() =>
     this.actionQueue.pendingActions().filter(action => this.isUserVisiblePendingAction(action)).length
   );
-  readonly retryQueuePendingCount = computed(() => this.syncService.syncState().pendingCount);
+  readonly retryQueuePendingCount = computed(() => this.syncStateService.syncState().pendingCount);
   /**
    * 是否处于后台重试态。
    *
@@ -622,9 +622,9 @@ export class SyncStatusComponent {
   readonly conflictCount = this.conflictStorage.conflictCount;
   readonly hasUnresolvedConflicts = this.conflictStorage.hasUnresolvedConflicts;
 
-  readonly isOnline = computed(() => this.syncService.syncState().isOnline);
-  readonly isSyncing = computed(() => this.syncService.syncState().isSyncing);
-  readonly syncError = computed(() => this.syncService.syncState().syncError);
+  readonly isOnline = computed(() => this.syncStateService.syncState().isOnline);
+  readonly isSyncing = computed(() => this.syncStateService.syncState().isSyncing);
+  readonly syncError = computed(() => this.syncStateService.syncState().syncError);
   /**
    * 后台同步提示（信息级，非错误）。
    *
@@ -632,7 +632,7 @@ export class SyncStatusComponent {
    * 改走 `backgroundSyncNotice`。状态点不再因 partial-handoff 变红，
    * 详细状态显示"后台同步中..."。
    */
-  readonly backgroundSyncNotice = computed(() => this.syncService.syncState().backgroundSyncNotice);
+  readonly backgroundSyncNotice = computed(() => this.syncStateService.syncState().backgroundSyncNotice);
   /**
    * visibleSyncError 现在直接等于 syncError。
    *
@@ -641,7 +641,7 @@ export class SyncStatusComponent {
    * 本身只承载真错误，无需再过滤。保留 visibleSyncError 别名以保持现有模板/computed 兼容。
    */
   readonly visibleSyncError = computed(() => this.syncError());
-  readonly offlineMode = computed(() => this.syncService.syncState().offlineMode);
+  readonly offlineMode = computed(() => this.syncStateService.syncState().offlineMode);
 
   /** 状态点颜色（互斥优先级：同步中 > 失败 > 警告 > 正常） */
   readonly statusDotClass = computed(() => {
@@ -702,7 +702,7 @@ export class SyncStatusComponent {
    * 【增强】最近成功云同步时间（格式化）
    */
   readonly lastSyncTimeText = computed(() => {
-    const lastSync = this.syncService.syncState().lastSyncTime;
+    const lastSync = this.syncStateService.syncState().lastSyncTime;
     if (!lastSync) return null;
     return this.formatDate(lastSync);
   });

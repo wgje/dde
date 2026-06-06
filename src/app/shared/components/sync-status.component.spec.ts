@@ -3,7 +3,7 @@ import { computed, signal } from '@angular/core';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { SyncStatusComponent } from './sync-status.component';
 import { ActionQueueService } from '../../../services/action-queue.service';
-import { SimpleSyncService } from '../../core/services/simple-sync.service';
+import { SyncStateService } from '../../core/services/sync/sync-state.service';
 import { SyncCoordinatorService } from '../../../services/sync-coordinator.service';
 import { ProjectStateService } from '../../../services/project-state.service';
 import { AuthService } from '../../../services/auth.service';
@@ -95,7 +95,7 @@ describe('SyncStatusComponent', () => {
       imports: [SyncStatusComponent],
       providers: [
         { provide: ActionQueueService, useValue: actionQueueMock },
-        { provide: SimpleSyncService, useValue: { syncState } },
+        { provide: SyncStateService, useValue: { syncState } },
         {
           provide: SyncCoordinatorService,
           useValue: {
