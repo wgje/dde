@@ -16,6 +16,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Injector, runInInjectionContext, DestroyRef, signal } from '@angular/core';
 import { SyncCoordinatorService } from './sync-coordinator.service';
 import { SimpleSyncService } from '../app/core/services/simple-sync.service';
+import { ProjectDataService } from '../app/core/services/sync/project-data.service';
+import { ProjectSaveFlightCoordinatorService } from '../app/core/services/sync/project-save-flight-coordinator.service';
 import { SyncStateService } from '../app/core/services/sync/sync-state.service';
 import { RetryQueueService } from '../app/core/services/sync/retry-queue.service';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
@@ -2239,6 +2241,8 @@ describe('ProjectSyncOperationsService', () => {
       providers: [
         { provide: ProjectSyncOperationsService, useClass: ProjectSyncOperationsService },
         { provide: SimpleSyncService, useValue: mockProjectSyncOpsSyncService },
+        { provide: ProjectDataService, useValue: { loadFullProject: mockProjectSyncOpsSyncService.loadSingleProject } },
+        { provide: ProjectSaveFlightCoordinatorService, useValue: { save: mockProjectSyncOpsSyncService.saveProjectSmart } },
         { provide: ConflictResolutionService, useValue: mockProjectSyncOpsConflictService },
         { provide: ConflictStorageService, useValue: mockProjectSyncOpsConflictStorage },
         { provide: ProjectStateService, useValue: mockProjectSyncOpsProjectState },
@@ -2450,7 +2454,7 @@ describe('SyncCoordinatorService 集成场景', () => {
         remoteData: remoteProject,
       });
       
-      const result = await service.core.saveProjectSmart(localProject, 'user-123');
+      const result = await service['core'].saveProjectSmart(localProject, 'user-123');
       
       expect(result.success).toBe(false);
       expect(result.conflict).toBe(true);
@@ -2612,7 +2616,7 @@ describe('SyncCoordinatorService 集成场景', () => {
       
       mockSyncService.saveProjectSmart.mockResolvedValueOnce({ success: true });
       
-      const result = await service.core.saveProjectSmart(project, 'user-123');
+      const result = await service['core'].saveProjectSmart(project, 'user-123');
       
       expect(result.success).toBe(true);
     });
@@ -2625,7 +2629,7 @@ describe('SyncCoordinatorService 集成场景', () => {
       
       mockSyncService.saveProjectSmart.mockResolvedValueOnce({ success: true });
       
-      const result = await service.core.saveProjectSmart(project, 'user-123');
+      const result = await service['core'].saveProjectSmart(project, 'user-123');
       
       expect(result.success).toBe(true);
     });

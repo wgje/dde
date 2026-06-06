@@ -94,13 +94,13 @@ export class SyncCoordinatorService {
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('SyncCoordinator');
   
-  // ========== 公开子服务（减少代理方法） ==========
+  // ========== 内部同步服务 ==========
   
   /** 
-   * 底层同步服务 - 可直接访问以减少代理方法
-   * 调用方可使用 sync.core.xxx 替代 sync.proxyMethod()
+   * 底层同步服务 - 仅供 SyncCoordinator 内部使用
+   * 外部调用方已全部改为直接注入具体子服务（fan-in 削减），不再经由 core 二次暴露门面
    */
-  readonly core = inject(SimpleSyncService);
+  private readonly core = inject(SimpleSyncService);
   /**
    * 【2026-05-16 单事实源】pendingCount 等同步状态字段必须通过 SyncStateService 公开 setter 写入。
    * 不允许再通过反射式 `core.state.update(...)` 绕过封装，避免与 RetryQueue.onProcessingStateChange
