@@ -31,7 +31,11 @@ import { hasTaskContentMissingFromSource } from '../utils/task-content-guard';
 import { resolveTaskCompletionTimestamp } from '../utils/task-completion-time';
 import { ToastService } from './toast.service';
 import { pushStartupTrace } from '../utils/startup-trace';
-import { isValidUUID } from '../utils/validation';
+import {
+  buildPrehydrateProjects as buildPrehydrateProjectsPure,
+  cloneOfflineProjectsForPrehydrate as cloneOfflineProjectsForPrehydratePure,
+  buildHintScopedPlaceholderProjects as buildHintScopedPlaceholderProjectsPure,
+} from './user-session-snapshot-projection';
 import { resetFocusState } from '../state/focus-stores';
 import type { LaunchSnapshot, LaunchSnapshotProject } from '../models/launch-shell';
 import {
@@ -391,26 +395,11 @@ export class UserSessionService {
   }
 
   private cloneOfflineProjectsForPrehydrate(projects: Project[]): Project[] {
-    return projects.map((project) => ({
-      ...project,
-      tasks: Array.isArray(project.tasks) ? [...project.tasks] : [],
-      connections: Array.isArray(project.connections) ? [...project.connections] : [],
-    }));
+    return cloneOfflineProjectsForPrehydratePure(projects);
   }
 
   private buildHintScopedPlaceholderProjects(projects: Project[]): Project[] {
-    return projects.map((project, index) => ({
-      id: project.id,
-      name: `Project ${index + 1}`,
-      description: '',
-      createdDate: project.createdDate,
-      updatedAt: project.updatedAt,
-      version: project.version,
-      syncSource: project.syncSource,
-      pendingSync: project.pendingSync,
-      tasks: [],
-      connections: [],
-    }));
+    return buildHintScopedPlaceholderProjectsPure(projects);
   }
 
   private prehydrateFromOfflineSnapshot(snapshot: LaunchSnapshot | null): boolean {
@@ -547,38 +536,7 @@ export class UserSessionService {
 
   /** 从快照 projects 构建轻量 Project 对象供 Store 预填充 */
   private buildPrehydrateProjects(snapshotProjects: LaunchSnapshotProject[]): Project[] {
-    // 安全限制：最多预填充 50 个项目，防止恶意 localStorage 注入导致内存/渲染爆炸
-    const MAX_PREHYDRATE_PROJECTS = 50;
-    const MAX_NAME_LENGTH = 200;
-    const now = new Date().toISOString();
-    const results: Project[] = [];
-
-    for (const sp of snapshotProjects.slice(0, MAX_PREHYDRATE_PROJECTS)) {
-      // 安全校验：ID 必须是合法 UUID，防止注入恶意字符串
-      if (!sp.id || typeof sp.id !== 'string' || !isValidUUID(sp.id)) continue;
-
-      results.push({
-        id: sp.id,
-        name: this.sanitizeSnapshotString(sp.name, MAX_NAME_LENGTH) || 'Untitled',
-        description: this.sanitizeSnapshotString(sp.description, MAX_NAME_LENGTH),
-        createdDate: now,
-        updatedAt: sp.updatedAt ?? now,
-        // launch-snapshot 里的 recentTasks 只是秒开摘要，不包含 stage/parentId/content 等
-        // 完整字段；不能 materialize 到 TaskStore，否则会被当成真实待分配任务展示。
-        tasks: [],
-        connections: [],
-      });
-    }
-
-    return results;
-  }
-
-  /** 清理快照字段：截断过长文本，去除可能的 HTML 标签 */
-  private sanitizeSnapshotString(value: unknown, maxLength: number): string {
-    if (typeof value !== 'string') return '';
-    // 去除可能的 HTML 标签（Angular 模板默认转义，但多一层防护）
-    const cleaned = value.replace(/<[^>]*>/g, '');
-    return cleaned.length > maxLength ? cleaned.slice(0, maxLength) : cleaned;
+    return buildPrehydrateProjectsPure(snapshotProjects);
   }
 
   private createSessionGuard(userId: string | null): SessionGuardContext {
