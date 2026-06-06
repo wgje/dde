@@ -1,7 +1,7 @@
 import { TestBed } from '@angular/core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DockCloudSyncService, type CloudSyncEngineCallbacks } from './dock-cloud-sync.service';
-import { SimpleSyncService } from '../core-bridge';
+import { FocusConsoleSyncService } from '../core-bridge';
 import { ActionQueueService } from './action-queue.service';
 import { DockSnapshotPersistenceService } from './dock-snapshot-persistence.service';
 import { LoggerService } from './logger.service';
@@ -148,7 +148,7 @@ describe('DockCloudSyncService', () => {
     TestBed.configureTestingModule({
       providers: [
         DockCloudSyncService,
-        { provide: SimpleSyncService, useValue: mockSyncService },
+        { provide: FocusConsoleSyncService, useValue: mockSyncService },
         { provide: ActionQueueService, useValue: mockActionQueue },
         { provide: DockSnapshotPersistenceService, useValue: mockSnapshotPersistence },
         { provide: LoggerService, useValue: mockLogger },

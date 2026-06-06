@@ -16,7 +16,7 @@ import {
   RoutineCompletionMutation,
   RoutineTask,
 } from '../models/parking-dock';
-import { SimpleSyncService } from '../core-bridge';
+import { FocusConsoleSyncService } from '../core-bridge';
 import { ActionQueueService } from './action-queue.service';
 import {
   DockSnapshotPersistenceService,
@@ -61,7 +61,7 @@ export interface CloudSyncEngineCallbacks {
   providedIn: 'root',
 })
 export class DockCloudSyncService implements OnDestroy {
-  private readonly syncService = inject(SimpleSyncService);
+  private readonly focusConsoleSync = inject(FocusConsoleSyncService);
   private readonly actionQueue = inject(ActionQueueService);
   private readonly snapshotPersistence = inject(DockSnapshotPersistenceService);
   private readonly supabase = inject(SupabaseClientService);
@@ -336,7 +336,7 @@ export class DockCloudSyncService implements OnDestroy {
         : undefined;
 
       const loadResult = await withTimeout(
-        this.syncService.loadFocusSession(userId, localSavedAt),
+        this.focusConsoleSync.loadFocusSession(userId, localSavedAt),
         { timeout: TIMEOUT_CONFIG.STANDARD, timeoutMessage: LOAD_FOCUS_SESSION_TIMEOUT_MESSAGE },
       );
 
@@ -432,7 +432,7 @@ export class DockCloudSyncService implements OnDestroy {
 
     try {
       const listResult = await withTimeout(
-        this.syncService.listRoutineTasks(userId),
+        this.focusConsoleSync.listRoutineTasks(userId),
         { timeout: TIMEOUT_CONFIG.QUICK, timeoutMessage: 'listRoutineTasks 超时' },
       );
       // DATA-C5 fix: async 边界后检查用户是否仍为当前用户，防止跨用户数据污染
