@@ -51,6 +51,7 @@ import type { RetryQueueItem } from './sync';
 import { ProjectSaveFlightCoordinatorService } from './sync/project-save-flight-coordinator.service';
 import { SyncResumeCoordinatorService } from './sync/sync-resume-coordinator.service';
 import { ProjectPushService } from './sync/project-push.service';
+import { ProjectDeleteCoordinatorService } from './sync/project-delete-coordinator.service';
 import { Task, Project, Connection } from '../../../models';
 import type { BlackBoxEntry } from '../../../models/focus';
 import { PermanentFailureError } from '../../../utils/permanent-failure-error';
@@ -732,6 +733,7 @@ describe('SimpleSyncService', () => {
         { provide: ProjectSaveFlightCoordinatorService, useClass: ProjectSaveFlightCoordinatorService },
         { provide: SyncResumeCoordinatorService, useClass: SyncResumeCoordinatorService },
         { provide: ProjectPushService, useClass: ProjectPushService },
+        { provide: ProjectDeleteCoordinatorService, useClass: ProjectDeleteCoordinatorService },
         { provide: BlackBoxSyncService, useValue: mockBlackBoxSync },
         { provide: ConnectivityRecoveryService, useClass: ConnectivityRecoveryService },
         // Sentry 懒加载服务 mock
