@@ -36,11 +36,23 @@ export { TaskSyncOperationsService } from './app/core/services/sync/task-sync-op
 // ProjectSaveFlightCoordinatorService — 被 conflict-resolution 使用（save 单飞项目保存）
 export { ProjectSaveFlightCoordinatorService } from './app/core/services/sync/project-save-flight-coordinator.service';
 
-// RealtimePollingService — 被 app-lifecycle-orchestrator 使用（suspendTransport 挂起远程传输）
+// RealtimePollingService — 被 app-lifecycle-orchestrator, action-queue-processors 使用
 export { RealtimePollingService } from './app/core/services/sync/realtime-polling.service';
 
 // SyncResumeCoordinatorService — 被 app-lifecycle-orchestrator 使用（recoverAfterResume 恢复自愈）
 export { SyncResumeCoordinatorService } from './app/core/services/sync/sync-resume-coordinator.service';
+
+// RetryQueueEnqueueService — 被 action-queue-processors 使用（hasPendingRetryRecovery + markSyncRecoveredIfIdle）
+export { RetryQueueEnqueueService } from './app/core/services/sync/retry-queue-enqueue.service';
+
+// ProjectDeleteCoordinatorService — 被 action-queue-processors 使用（deleteProjectFromCloud）
+export { ProjectDeleteCoordinatorService } from './app/core/services/sync/project-delete-coordinator.service';
+
+// UserPreferencesSyncService — 被 action-queue-processors 使用（saveUserPreferences）
+export { UserPreferencesSyncService } from './app/core/services/sync/user-preferences-sync.service';
+
+// FocusConsoleSyncService — 被 action-queue-processors 使用（saveFocusSession + upsertRoutineTask + incrementRoutineCompletion）
+export { FocusConsoleSyncService } from './app/core/services/sync/focus-console-sync.service';
 
 // TombstoneService — 被 delta-sync-coordinator 使用
 export { TombstoneService } from './app/core/services/sync/tombstone.service';

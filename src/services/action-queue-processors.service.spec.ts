@@ -9,7 +9,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ActionQueueProcessorsService } from './action-queue-processors.service';
 import { ActionQueueService, type ActionQueueProcessorResult } from './action-queue.service';
 import { QueuedAction as QueuedActionModel } from './action-queue.types';
-import { RetryQueueService, SimpleSyncService } from '../core-bridge';
+import { RetryQueueService, TaskSyncOperationsService, RealtimePollingService, RetryQueueEnqueueService, ProjectSaveFlightCoordinatorService, ProjectDeleteCoordinatorService, ProjectDataService, UserPreferencesSyncService, FocusConsoleSyncService } from '../core-bridge';
 import { ProjectStateService } from './project-state.service';
 import { AuthService } from './auth.service';
 import { LoggerService } from './logger.service';
@@ -56,12 +56,15 @@ const mockRetryQueueService = {
   findItemForOwner: vi.fn<(...args: unknown[]) => MockRetryQueueItem | undefined>(() => undefined),
 };
 
+// saveProjectSmart 已重命名为 ProjectSaveFlightCoordinatorService.save；二者共享同一 spy 以维持既有断言
+const saveProjectResultFn = vi.fn().mockResolvedValue({ success: true, newVersion: 2 });
 const mockSyncService = {
   pauseRealtimeUpdates: vi.fn(),
   resumeRealtimeUpdates: vi.fn(),
   hasPendingRetryRecovery: vi.fn(() => false),
   markSyncRecoveredIfIdle: vi.fn(),
-  saveProjectSmart: vi.fn().mockResolvedValue({ success: true, newVersion: 2 }),
+  save: saveProjectResultFn,
+  saveProjectSmart: saveProjectResultFn,
   loadFullProjectOptimized: vi.fn().mockResolvedValue(null),
   deleteProjectFromCloud: vi.fn().mockResolvedValue({ ok: true, value: undefined }),
   pushTask: vi.fn().mockResolvedValue(true),
@@ -124,7 +127,14 @@ describe('ActionQueueProcessorsService', () => {
         { provide: ActionQueueProcessorsService, useClass: ActionQueueProcessorsService },
         { provide: LoggerService, useValue: mockLoggerService },
         { provide: ActionQueueService, useValue: mockActionQueueService },
-        { provide: SimpleSyncService, useValue: mockSyncService },
+        { provide: TaskSyncOperationsService, useValue: mockSyncService },
+        { provide: RealtimePollingService, useValue: mockSyncService },
+        { provide: RetryQueueEnqueueService, useValue: mockSyncService },
+        { provide: ProjectSaveFlightCoordinatorService, useValue: mockSyncService },
+        { provide: ProjectDeleteCoordinatorService, useValue: mockSyncService },
+        { provide: ProjectDataService, useValue: mockSyncService },
+        { provide: UserPreferencesSyncService, useValue: mockSyncService },
+        { provide: FocusConsoleSyncService, useValue: mockSyncService },
         { provide: RetryQueueService, useValue: mockRetryQueueService },
         { provide: ProjectStateService, useValue: mockProjectStateService },
         { provide: AuthService, useValue: mockAuthService },

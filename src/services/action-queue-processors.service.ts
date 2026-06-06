@@ -13,7 +13,7 @@
  * casts are safe within the processor-registration pattern.
  */
 import { Injectable, inject } from '@angular/core';
-import { RetryQueueService, SimpleSyncService } from '../core-bridge';
+import { RetryQueueService, TaskSyncOperationsService, RealtimePollingService, RetryQueueEnqueueService, ProjectSaveFlightCoordinatorService, ProjectDeleteCoordinatorService, ProjectDataService, UserPreferencesSyncService, FocusConsoleSyncService } from '../core-bridge';
 import { ActionQueueService, type ActionQueueProcessorResult } from './action-queue.service';
 import { ProjectStateService } from './project-state.service';
 import { AuthService } from './auth.service';
@@ -72,7 +72,14 @@ export class ActionQueueProcessorsService {
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('ActionQueueProcessors');
   private readonly actionQueue = inject(ActionQueueService);
-  private readonly syncService = inject(SimpleSyncService);
+  private readonly taskSyncOps = inject(TaskSyncOperationsService);
+  private readonly realtimePolling = inject(RealtimePollingService);
+  private readonly retryEnqueue = inject(RetryQueueEnqueueService);
+  private readonly projectSaveCoordinator = inject(ProjectSaveFlightCoordinatorService);
+  private readonly projectDelete = inject(ProjectDeleteCoordinatorService);
+  private readonly projectData = inject(ProjectDataService);
+  private readonly userPrefsSync = inject(UserPreferencesSyncService);
+  private readonly focusConsoleSync = inject(FocusConsoleSyncService);
   private readonly retryQueue = inject(RetryQueueService);
   private readonly projectState = inject(ProjectStateService);
   private readonly authService = inject(AuthService);
@@ -314,7 +321,7 @@ export class ActionQueueProcessorsService {
       }
 
       const taskId = remainingTaskIds[0];
-      const deleted = await this.syncService.deleteTask(taskId, project.id, sourceUserId);
+      const deleted = await this.taskSyncOps.deleteTask(taskId, project.id, sourceUserId);
       if (!deleted) {
         this.logger.warn('project 持久化成功，但后置 task:delete 未立即完成，已交给补偿链路', {
           projectId: project.id,
@@ -434,8 +441,8 @@ export class ActionQueueProcessorsService {
 
   private setupQueueSyncCoordination(): void {
     this.actionQueue.setQueueProcessCallbacks(
-      () => this.syncService.pauseRealtimeUpdates(),
-      () => this.syncService.resumeRealtimeUpdates(),
+      () => this.realtimePolling.pauseRealtimeUpdates(),
+      () => this.realtimePolling.resumeRealtimeUpdates(),
       ({ processed, failed, movedToDeadLetter, remaining, remoteSuccessCount, resolvedNoOpCount }) => {
         // 【根因修复 2026-04-22】这里需要同时兼容两类恢复来源：
         //   1) ActionQueue 自己产生了真实远端成功；
@@ -444,11 +451,11 @@ export class ActionQueueProcessorsService {
         //      会在“两个队列都空了”的情况下继续卡住。
         const resolvedCount = remoteSuccessCount + resolvedNoOpCount;
         const cleanSettle = failed === 0 && movedToDeadLetter === 0 && remaining === 0;
-        const hasPendingRetryRecovery = this.syncService.hasPendingRetryRecovery();
+        const hasPendingRetryRecovery = this.retryEnqueue.hasPendingRetryRecovery();
         const actionQueueRecovered = remoteSuccessCount > 0 && processed === resolvedCount;
 
         if (cleanSettle && (hasPendingRetryRecovery || actionQueueRecovered)) {
-          this.syncService.markSyncRecoveredIfIdle();
+          this.retryEnqueue.markSyncRecoveredIfIdle();
         }
       }
     );
@@ -469,7 +476,7 @@ export class ActionQueueProcessorsService {
         return true;
       }
       try {
-        const result = await this.syncService.saveProjectSmart(payload.project, userId, payload.taskIdsToDelete);
+        const result = await this.projectSaveCoordinator.save(payload.project, userId, payload.taskIdsToDelete);
         const failureTransferred = this.wasProjectFailureTransferredToRetryQueue(result, payload);
         const persistedProject = result.newVersion !== undefined
           ? { ...payload.project, version: result.newVersion }
@@ -587,7 +594,7 @@ export class ActionQueueProcessorsService {
         return false;
       }
       try {
-        const result = await this.syncService.deleteProjectFromCloud(payload.projectId, sourceUserId);
+        const result = await this.projectDelete.deleteProjectFromCloud(payload.projectId, sourceUserId);
         if (result.ok) {
           await this.discardProjectDependentMutations(sourceUserId, payload.projectId, action.id);
           return this.markRemoteActionSuccess(action.id);
@@ -614,7 +621,7 @@ export class ActionQueueProcessorsService {
         return true;
       }
       try {
-        const result = await this.syncService.saveProjectSmart(payload.project, userId, payload.taskIdsToDelete);
+        const result = await this.projectSaveCoordinator.save(payload.project, userId, payload.taskIdsToDelete);
         const failureTransferred = this.wasProjectFailureTransferredToRetryQueue(result, payload);
         const persistedProject = result.newVersion !== undefined
           ? { ...payload.project, version: result.newVersion }
@@ -844,7 +851,7 @@ export class ActionQueueProcessorsService {
     actionType: 'project:create' | 'project:update',
     pendingTaskDeleteIds?: string[],
   ): Promise<boolean> {
-    const remoteProject = await this.syncService.loadFullProjectOptimized(localProject.id).catch(() => null);
+    const remoteProject = await this.projectData.loadFullProjectOptimized(localProject.id).catch(() => null);
     if (this.getProjectMutationStaleness(mutationContext) !== 'current') {
       return true;
     }
@@ -971,7 +978,7 @@ export class ActionQueueProcessorsService {
     payload: TaskPayload,
     actionType: 'task:create' | 'task:update',
   ): Promise<ActionQueueProcessorResult> {
-    const success = await this.syncService.pushTask(
+    const success = await this.taskSyncOps.pushTask(
       payload.task,
       payload.projectId,
       false,
@@ -1023,7 +1030,7 @@ export class ActionQueueProcessorsService {
     }
 
     try {
-      const success = await this.syncService.deleteTask(payload.taskId, payload.projectId, payload.sourceUserId);
+      const success = await this.taskSyncOps.deleteTask(payload.taskId, payload.projectId, payload.sourceUserId);
       if (success) {
         return this.markRemoteActionSuccess(action.id);
       }
@@ -1162,7 +1169,7 @@ export class ActionQueueProcessorsService {
         return false;
       }
       try {
-        const success = await this.syncService.saveUserPreferences(sourceUserId, payload.preferences);
+        const success = await this.userPrefsSync.saveUserPreferences(sourceUserId, payload.preferences);
         if (success) {
           this.actionQueue.markActionSyncedRemotely(action.id);
         }
@@ -1211,7 +1218,7 @@ export class ActionQueueProcessorsService {
         const record: FocusSessionRecord = payload.record.userId
           ? payload.record
           : { ...payload.record, userId: sourceUserId };
-        const result = await this.syncService.saveFocusSession(record);
+        const result = await this.focusConsoleSync.saveFocusSession(record);
         if (!result.ok) {
           throw this.buildOperationError(result.error);
         }
@@ -1244,7 +1251,7 @@ export class ActionQueueProcessorsService {
         const record: FocusSessionRecord = payload.record.userId
           ? payload.record
           : { ...payload.record, userId: sourceUserId };
-        const result = await this.syncService.saveFocusSession(record);
+        const result = await this.focusConsoleSync.saveFocusSession(record);
         if (!result.ok) {
           throw this.buildOperationError(result.error);
         }
@@ -1273,7 +1280,7 @@ export class ActionQueueProcessorsService {
       }
 
       try {
-        const result = await this.syncService.upsertRoutineTask(sourceUserId, payload.routineTask);
+        const result = await this.focusConsoleSync.upsertRoutineTask(sourceUserId, payload.routineTask);
         if (!result.ok) {
           throw this.buildOperationError(result.error);
         }
@@ -1302,7 +1309,7 @@ export class ActionQueueProcessorsService {
       }
 
       try {
-        const result = await this.syncService.upsertRoutineTask(sourceUserId, payload.routineTask);
+        const result = await this.focusConsoleSync.upsertRoutineTask(sourceUserId, payload.routineTask);
         if (!result.ok) {
           throw this.buildOperationError(result.error);
         }
@@ -1335,7 +1342,7 @@ export class ActionQueueProcessorsService {
         const completion: RoutineCompletionMutation = payload.completion.userId
           ? payload.completion
           : { ...payload.completion, userId: sourceUserId };
-        const result = await this.syncService.incrementRoutineCompletion(completion);
+        const result = await this.focusConsoleSync.incrementRoutineCompletion(completion);
         if (!result.ok) {
           throw this.buildOperationError(result.error);
         }
@@ -1368,7 +1375,7 @@ export class ActionQueueProcessorsService {
         const completion: RoutineCompletionMutation = payload.completion.userId
           ? payload.completion
           : { ...payload.completion, userId: sourceUserId };
-        const result = await this.syncService.incrementRoutineCompletion(completion);
+        const result = await this.focusConsoleSync.incrementRoutineCompletion(completion);
         if (!result.ok) {
           throw this.buildOperationError(result.error);
         }
