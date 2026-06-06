@@ -10,7 +10,7 @@
  */
 
 import { Injectable, inject } from '@angular/core';
-import { SimpleSyncService } from '../core-bridge';
+import { ProjectDataService, ProjectSaveFlightCoordinatorService } from '../core-bridge';
 import { ConflictResolutionService } from './conflict-resolution.service';
 import { ConflictStorageService } from './conflict-storage.service';
 import { ProjectStateService } from './project-state.service';
@@ -28,7 +28,8 @@ import { validateProject, sanitizeProject } from '../utils/validation';
   providedIn: 'root'
 })
 export class ProjectSyncOperationsService {
-  private readonly syncService = inject(SimpleSyncService);
+  private readonly projectData = inject(ProjectDataService);
+  private readonly projectSaveCoordinator = inject(ProjectSaveFlightCoordinatorService);
   private readonly conflictService = inject(ConflictResolutionService);
   private readonly conflictStorage = inject(ConflictStorageService);
   private readonly projectState = inject(ProjectStateService);
@@ -67,7 +68,7 @@ export class ProjectSyncOperationsService {
     this.logger.info('开始重新同步项目', { projectId });
     
     try {
-      const remoteProject = await this.syncService.loadSingleProject(projectId, userId);
+      const remoteProject = await this.projectData.loadFullProject(projectId, userId);
       
       if (!remoteProject) {
         return { success: false, message: '云端项目不存在' };
@@ -113,7 +114,7 @@ export class ProjectSyncOperationsService {
         };
       }
       
-      const saveResult = await this.syncService.saveProjectSmart(localProject, userId);
+      const saveResult = await this.projectSaveCoordinator.save(localProject, userId);
       
       if (saveResult.success) {
         this.changeTracker.clearProjectFieldLocks(projectId);
@@ -156,7 +157,7 @@ export class ProjectSyncOperationsService {
       const cloudProject = cloudMap.get(offlineProject.id);
       
       if (!cloudProject) {
-        const result = await this.syncService.saveProjectToCloud(offlineProject, userId);
+        const result = await this.projectSaveCoordinator.save(offlineProject, userId);
         if (result.success) {
           const syncedProject = { ...offlineProject, version: result.newVersion ?? offlineProject.version };
           mergedProjects.push(syncedProject);
@@ -214,7 +215,7 @@ export class ProjectSyncOperationsService {
           cloudVersion
         });
         
-        const result = await this.syncService.saveProjectToCloud(projectWithVersion, userId);
+        const result = await this.projectSaveCoordinator.save(projectWithVersion, userId);
         if (result.success) {
           const syncedProject = { ...projectWithVersion, version: result.newVersion ?? projectWithVersion.version };
           const idx = mergedProjects.findIndex(p => p.id === offlineProject.id);
