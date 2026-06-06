@@ -38,6 +38,14 @@ import { PersistSchedulerService } from './persist-scheduler.service';
 // 借鉴思源笔记的同步增强服务
 import { SyncModeService, SyncDirection } from './sync-mode.service';
 import { Project, Task, Connection } from '../models';
+import {
+  computeLocalProjectWatermark as computeLocalProjectWatermarkPure,
+  resolveScopedWatermarkKey as resolveScopedWatermarkKeyPure,
+  buildConflictSnapshotSignature as buildConflictSnapshotSignaturePure,
+  buildPersistTaskSignature as buildPersistTaskSignaturePure,
+  buildPersistConnectionSignature as buildPersistConnectionSignaturePure,
+  buildPersistDataSignature as buildPersistDataSignaturePure,
+} from './sync-coordinator-signatures';
 import { AUTH_CONFIG } from '../config/auth.config';
 import { SYNC_CONFIG } from '../config/sync.config';
 import { STARTUP_PERF_CONFIG } from '../config/startup-performance.config';
@@ -1293,36 +1301,11 @@ export class SyncCoordinatorService {
   }
 
   private computeLocalProjectWatermark(project: Project | undefined): number {
-    if (!project) return 0;
-
-    let maxUpdatedAtMs = 0;
-    const track = (value?: string | null) => {
-      if (!value) return;
-      const ts = new Date(value).getTime();
-      if (Number.isFinite(ts)) {
-        maxUpdatedAtMs = Math.max(maxUpdatedAtMs, ts);
-      }
-    };
-
-    track(project.updatedAt);
-    for (const task of project.tasks ?? []) {
-      track(task.updatedAt);
-      track(task.deletedAt);
-    }
-    for (const connection of project.connections ?? []) {
-      track(connection.updatedAt);
-      track(connection.deletedAt);
-    }
-
-    return maxUpdatedAtMs;
+    return computeLocalProjectWatermarkPure(project);
   }
 
   private resolveScopedWatermarkKey(prefix: string, userId: string | null | undefined): string | null {
-    const normalizedUserId = userId?.trim();
-    if (!normalizedUserId) {
-      return null;
-    }
-    return `${prefix}.${normalizedUserId}`;
+    return resolveScopedWatermarkKeyPure(prefix, userId);
   }
 
   private readProjectManifestWatermark(userId: string | null): string | null {
@@ -1482,11 +1465,7 @@ export class SyncCoordinatorService {
     remoteProject: Project | undefined,
     pendingTaskDeleteIds?: string[],
   ): string {
-    return JSON.stringify({
-      localProject: localProject ?? null,
-      remoteProject: remoteProject ?? null,
-      pendingTaskDeleteIds: [...(pendingTaskDeleteIds ?? [])].sort(),
-    });
+    return buildConflictSnapshotSignaturePure(localProject, remoteProject, pendingTaskDeleteIds);
   }
   
   /**
@@ -1721,43 +1700,15 @@ export class SyncCoordinatorService {
   }
 
   private buildPersistTaskSignature(task: Task): string {
-    return JSON.stringify([
-      task.id,
-      task.updatedAt ?? '',
-      task.parentId ?? '',
-      task.stage ?? '',
-      task.order,
-      task.rank,
-      task.displayId,
-      task.x,
-      task.y,
-      task.status,
-      task.deletedAt ?? '',
-      task.shortId ?? '',
-    ]);
+    return buildPersistTaskSignaturePure(task);
   }
 
   private buildPersistConnectionSignature(connection: Connection): string {
-    return JSON.stringify([
-      connection.id,
-      connection.source,
-      connection.target,
-      connection.title ?? '',
-      connection.description ?? '',
-      connection.updatedAt ?? '',
-      connection.deletedAt ?? '',
-    ]);
+    return buildPersistConnectionSignaturePure(connection);
   }
 
   private buildPersistDataSignature(project: Project): string {
-    const taskSignature = [...project.tasks]
-      .sort((left, right) => left.id.localeCompare(right.id))
-      .map(task => this.buildPersistTaskSignature(task));
-    const connectionSignature = [...project.connections]
-      .sort((left, right) => left.id.localeCompare(right.id))
-      .map(connection => this.buildPersistConnectionSignature(connection));
-
-    return JSON.stringify({ taskSignature, connectionSignature });
+    return buildPersistDataSignaturePure(project);
   }
 
   private reconcileStaleRetryEntries(
