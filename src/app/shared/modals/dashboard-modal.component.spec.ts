@@ -2,7 +2,7 @@ import { Injector, computed, runInInjectionContext, signal } from '@angular/core
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { DashboardModalComponent } from './dashboard-modal.component';
 import { ActionQueueService } from '../../../services/action-queue.service';
-import { SimpleSyncService } from '../../core/services/simple-sync.service';
+import { SyncStateService } from '../../core/services/sync/sync-state.service';
 import { RetryQueueService } from '../../core/services/sync/retry-queue.service';
 import { AuthService } from '../../../services/auth.service';
 import { ConflictStorageService } from '../../../services/conflict-storage.service';
@@ -125,7 +125,7 @@ describe('DashboardModalComponent conflict resolution', () => {
     const injector = Injector.create({
       providers: [
         { provide: ActionQueueService, useValue: actionQueueMock },
-        { provide: SimpleSyncService, useValue: syncServiceMock },
+        { provide: SyncStateService, useValue: syncServiceMock },
         { provide: RetryQueueService, useValue: retryQueueMock },
         { provide: AuthService, useValue: authServiceMock },
         { provide: ConflictStorageService, useValue: conflictStorageMock },

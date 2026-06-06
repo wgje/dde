@@ -1,7 +1,7 @@
 import { Component, inject, Output, EventEmitter, computed, signal, OnInit, ChangeDetectionStrategy, input } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ActionQueueService } from '../../../services/action-queue.service';
-import { SimpleSyncService } from '../../core/services/simple-sync.service';
+import { SyncStateService } from '../../core/services/sync/sync-state.service';
 import { RetryQueueService } from '../../core/services/sync/retry-queue.service';
 import { AuthService } from '../../../services/auth.service';
 import { ConflictStorageService, ConflictRecord } from '../../../services/conflict-storage.service';
@@ -449,7 +449,7 @@ interface ConflictItem {
 })
 export class DashboardModalComponent implements OnInit {
   private actionQueue = inject(ActionQueueService);
-  private syncService = inject(SimpleSyncService);
+  private syncService = inject(SyncStateService);
   private retryQueue = inject(RetryQueueService);
   private authService = inject(AuthService);
   private conflictStorage = inject(ConflictStorageService);
