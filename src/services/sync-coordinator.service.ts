@@ -1434,7 +1434,7 @@ export class SyncCoordinatorService {
       conflictedAt,
       pendingTaskDeleteIds,
     };
-    this.core.setConflict(conflictData);
+    this.syncStateService.setConflict(conflictData);
     this.conflict$.next({
       localProject,
       remoteProject,
@@ -1524,7 +1524,7 @@ export class SyncCoordinatorService {
   }
 
   clearActiveConflict(): void {
-    this.core.clearConflict();
+    this.syncStateService.clearConflict();
   }
   
   /**
@@ -1735,7 +1735,7 @@ export class SyncCoordinatorService {
       return;
     }
 
-    const coreState = this.core.state as unknown as {
+    const coreState = this.syncStateService.state as unknown as {
       update?: (
         updater: (state: Record<string, unknown> & { pendingCount: number }) => Record<string, unknown> & { pendingCount: number },
       ) => void;

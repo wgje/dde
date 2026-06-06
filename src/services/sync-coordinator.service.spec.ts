@@ -127,6 +127,11 @@ const mockSyncStateService = {
     mockSyncService.syncState.update(s => ({ ...s, ...partial }));
   }),
   setPendingCount: vi.fn(),
+  // setConflict/clearConflict 复用 mockSyncService 的同一 spy（共享 spy）：
+  // Phase 3 把 this.core.setConflict/clearConflict 迁到 this.syncStateService 后，
+  // 既有断言 expect(mockSyncService.setConflict)... 仍命中同一调用记录。
+  setConflict: mockSyncService.setConflict,
+  clearConflict: mockSyncService.clearConflict,
 };
 
 const mockActionQueueService = {
