@@ -20,9 +20,19 @@ import { AuthService } from './auth.service';
 import { QueueBackupService } from './queue-backup.service';
 import { DeadLetterItem, QueuedAction, TaskDeletePayload, TaskPayload } from './action-queue.types';
 import {
-  getRemainingBrowserNetworkResumeDelayMs,
   isBrowserNetworkSuspendedWindow,
 } from '../utils/browser-network-suspension';
+import {
+  normalizeRetryError as normalizeRetryErrorPure,
+  parseRetryErrorMessage as parseRetryErrorMessagePure,
+  formatRetryError as formatRetryErrorPure,
+  isBrowserSuspensionError as isBrowserSuspensionErrorPure,
+  isPartialRetryHandoffError as isPartialRetryHandoffErrorPure,
+  isAuthPendingRetryError as isAuthPendingRetryErrorPure,
+  resolveDeferredRetryDelay as resolveDeferredRetryDelayPure,
+  describeDeferredRetryReason as describeDeferredRetryReasonPure,
+  resolveBrowserSuspensionDelay as resolveBrowserSuspensionDelayPure,
+} from './action-queue-retry-serialization';
 
 /**
  * 操作队列本地配置
@@ -889,100 +899,39 @@ export class ActionQueueStorageService {
   }
 
   private normalizeRetryError(error: string | QueueRetryError): QueueRetryError {
-    if (typeof error === 'string') {
-      return this.parseRetryErrorMessage(error);
-    }
-
-    const message = typeof error.message === 'string' ? error.message : String(error.message ?? '');
-    const parsed = this.parseRetryErrorMessage(message);
-    return {
-      code: typeof error.code === 'string' ? error.code : parsed.code,
-      message: parsed.message,
-      details: error.details && typeof error.details === 'object'
-        ? error.details
-        : undefined,
-    };
+    return normalizeRetryErrorPure(error);
   }
 
   private parseRetryErrorMessage(message: string): QueueRetryError {
-    const parts = message.split('|').map(part => part.trim()).filter(part => part.length > 0);
-    const firstPart = parts[0] ?? '';
-    const looksLikeErrorCode = /^[A-Z0-9_]+$/.test(firstPart);
-
-    if (!looksLikeErrorCode) {
-      return { message };
-    }
-
-    return {
-      code: firstPart,
-      message: parts.slice(1).join(' | ') || message,
-    };
+    return parseRetryErrorMessagePure(message);
   }
 
   private formatRetryError(error: QueueRetryError): string {
-    return [error.code, error.message].filter((part): part is string => typeof part === 'string' && part.length > 0).join(' | ');
+    return formatRetryErrorPure(error);
   }
 
   private isBrowserSuspensionError(error: QueueRetryError): boolean {
-    if (error.details?.['reason'] === 'browser-network-suspended') {
-      return true;
-    }
-
-    const msg = `${error.code ?? ''} ${error.message}`.toLowerCase();
-    return msg.includes('browser-network-suspended')
-      || msg.includes('browsernetworksuspendederror')
-      || msg.includes('network io suspended')
-      || (error.code === 'SYNC_OFFLINE' && error.message.includes('浏览器恢复连接中'))
-      || msg.includes('resuming connection');
+    return isBrowserSuspensionErrorPure(error);
   }
 
   private isPartialRetryHandoffError(error: QueueRetryError): boolean {
-    return error.details?.['reason'] === 'partial-retry-handoff'
-      || error.code === 'SYNC_RETRY_HANDOFF_PENDING';
+    return isPartialRetryHandoffErrorPure(error);
   }
 
   private isAuthPendingRetryError(error: QueueRetryError): boolean {
-    return error.details?.['reason'] === 'auth-pending'
-      || error.code === 'SYNC_AUTH_PENDING';
+    return isAuthPendingRetryErrorPure(error);
   }
 
   private resolveDeferredRetryDelay(error: QueueRetryError): number {
-    if (this.isPartialRetryHandoffError(error)) {
-      const requestedDelay = error.details?.['retryAfterMs'];
-      if (typeof requestedDelay === 'number' && Number.isFinite(requestedDelay)) {
-        return Math.max(0, requestedDelay);
-      }
-
-      return QUEUE_CONFIG.RETRY_BASE_DELAY;
-    }
-
-    // auth 认证过渡期使用固定基础间隔，避免降级到浏览器挂起延迟计算产生 100ms 快速重试噪声
-    if (this.isAuthPendingRetryError(error)) {
-      return QUEUE_CONFIG.RETRY_BASE_DELAY;
-    }
-
-    return this.resolveBrowserSuspensionDelay(error);
+    return resolveDeferredRetryDelayPure(error);
   }
 
   private describeDeferredRetryReason(error: QueueRetryError): 'browser-network-suspended' | 'partial-retry-handoff' | 'auth-pending' {
-    if (this.isPartialRetryHandoffError(error)) {
-      return 'partial-retry-handoff';
-    }
-
-    if (this.isAuthPendingRetryError(error)) {
-      return 'auth-pending';
-    }
-
-    return 'browser-network-suspended';
+    return describeDeferredRetryReasonPure(error);
   }
 
   private resolveBrowserSuspensionDelay(error?: QueueRetryError): number {
-    const requestedDelay = error?.details?.['resumeDelayMs'];
-    if (typeof requestedDelay === 'number' && Number.isFinite(requestedDelay)) {
-      return Math.max(0, requestedDelay);
-    }
-
-    return Math.max(100, getRemainingBrowserNetworkResumeDelayMs() + 50);
+    return resolveBrowserSuspensionDelayPure(error);
   }
 
   getActionDescription(action: QueuedAction): string {
