@@ -17,7 +17,7 @@
  */
 import { Injectable, inject, signal, computed, DestroyRef } from '@angular/core';
 import { Subject } from 'rxjs';
-import { SimpleSyncService, RetryQueueService, SyncStateService, ProjectDataService, ProjectSyncCursorService, RealtimePollingService, TaskSyncOperationsService, type SyncConflictData } from '../core-bridge';
+import { SimpleSyncService, RetryQueueService, SyncStateService, ProjectDataService, ProjectSyncCursorService, RealtimePollingService, TaskSyncOperationsService, ProjectSaveFlightCoordinatorService, type SyncConflictData } from '../core-bridge';
 import { ActionQueueService } from './action-queue.service';
 import { ActionQueueProcessorsService } from './action-queue-processors.service';
 import { DeltaSyncCoordinatorService } from './delta-sync-coordinator.service';
@@ -114,6 +114,8 @@ export class SyncCoordinatorService {
   // Phase 3 门面安乐死：实时轮询回调 + 任务同步操作簇直接注入具体 owner
   private readonly realtimePolling = inject(RealtimePollingService);
   private readonly taskSyncOps = inject(TaskSyncOperationsService);
+  // Phase 3 门面安乐死：项目智能保存单飞协调器直接注入具体 owner
+  private readonly projectSaveCoordinator = inject(ProjectSaveFlightCoordinatorService);
   
   private actionQueue = inject(ActionQueueService);
   // Sprint 9 技术债务修复：提取的处理器服务
@@ -1271,7 +1273,7 @@ export class SyncCoordinatorService {
       : false;
     const remoteWatermark = hasPrefetchedWatermark
       ? (options?.prefetchedRemoteWatermark ?? null)
-      : await this.core.getBlackBoxSyncWatermark();
+      : await this.projectData.getBlackBoxSyncWatermark();
     if (!remoteWatermark) {
       await this.blackBoxSync.pullChanges({ reason: reason.includes('resume') ? 'resume' : 'startup' });
       return { skipped: false };
@@ -1882,7 +1884,7 @@ export class SyncCoordinatorService {
 
     try {
       // 使用智能同步：根据变更量自动选择增量或全量同步
-      const result = await this.core.saveProjectSmart(
+      const result = await this.projectSaveCoordinator.save(
         { ...project, updatedAt: now },
         userId
       );

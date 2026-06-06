@@ -452,6 +452,9 @@ function buildCoordinatorProviders() {
     { provide: ProjectSyncCursorService, useValue: mockSyncService },
     { provide: RealtimePollingService, useValue: mockRealtimePollingService },
     { provide: TaskSyncOperationsService, useValue: mockTaskSyncOpsService },
+    // ProjectSaveFlightCoordinatorService.save 别名复用 mockSyncService.saveProjectSmart 同一 spy：
+    // Phase 3 把 this.core.saveProjectSmart 迁到 this.projectSaveCoordinator.save 后，既有断言仍命中。
+    { provide: ProjectSaveFlightCoordinatorService, useValue: { save: mockSyncService.saveProjectSmart } },
   ];
 }
 
