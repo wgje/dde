@@ -6,7 +6,7 @@ import { LoggerService } from './logger.service';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { ToastService } from './toast.service';
 import { NetworkAwarenessService } from './network-awareness.service';
-import { SimpleSyncService, SessionManagerService } from '../core-bridge';
+import { RealtimePollingService, SyncResumeCoordinatorService, SessionManagerService } from '../core-bridge';
 import { SyncCoordinatorService } from './sync-coordinator.service';
 import { FocusStartupProbeService } from './focus-startup-probe.service';
 import { FOCUS_CONFIG } from '../config/focus.config';
@@ -36,7 +36,8 @@ export class AppLifecycleOrchestratorService {
   private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly toast = inject(ToastService);
   private readonly networkAwareness = inject(NetworkAwarenessService);
-  private readonly simpleSync = inject(SimpleSyncService);
+  private readonly realtimePolling = inject(RealtimePollingService);
+  private readonly syncResumeCoordinator = inject(SyncResumeCoordinatorService);
   private readonly sessionManager = inject(SessionManagerService);
   private readonly syncCoordinator = inject(SyncCoordinatorService);
   private readonly injector = inject(Injector);
@@ -137,7 +138,7 @@ export class AppLifecycleOrchestratorService {
     this.visibilityHandler = () => {
       if (document.visibilityState === 'hidden') {
         this.hiddenAt ??= Date.now();
-        void this.simpleSync.suspendRemoteTransport();
+        void this.realtimePolling.suspendTransport();
         return;
       }
 
@@ -164,7 +165,7 @@ export class AppLifecycleOrchestratorService {
       }
 
       this.hiddenAt = Date.now();
-      void this.simpleSync.suspendRemoteTransport();
+      void this.realtimePolling.suspendTransport();
     };
 
     this.focusHandler = () => {
@@ -474,7 +475,7 @@ export class AppLifecycleOrchestratorService {
     const interactionStartAt = this.monotonicNow();
     if (FEATURE_FLAGS.RESUME_INTERACTION_FIRST_V1) {
       this.recordRecoveryStep('sync-recovery-light', reason);
-      await this.simpleSync.recoverAfterResume(reason, {
+      await this.syncResumeCoordinator.recoverAfterResume(reason, {
         mode: 'light',
         stage: 'full',
         allowRemoteProbe: false,
@@ -521,7 +522,7 @@ export class AppLifecycleOrchestratorService {
     }
 
     this.recordRecoveryStep('sync-recovery', reason);
-    await this.simpleSync.recoverAfterResume(reason, {
+    await this.syncResumeCoordinator.recoverAfterResume(reason, {
       sessionValidated: true,
       retryProcessing: 'background',
       deferBlackBoxPull: true,
@@ -599,7 +600,7 @@ export class AppLifecycleOrchestratorService {
 
       try {
         this.recordRecoveryStep('sync-recovery-heavy-compensation', reason);
-        await this.simpleSync.recoverAfterResume(reason, {
+        await this.syncResumeCoordinator.recoverAfterResume(reason, {
           mode: 'heavy',
           stage: 'compensation',
           allowRemoteProbe: true,

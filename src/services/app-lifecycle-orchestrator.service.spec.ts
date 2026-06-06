@@ -5,7 +5,8 @@ import { LoggerService } from './logger.service';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { ToastService } from './toast.service';
 import { NetworkAwarenessService } from './network-awareness.service';
-import { SimpleSyncService } from '../app/core/services/simple-sync.service';
+import { RealtimePollingService } from '../app/core/services/sync/realtime-polling.service';
+import { SyncResumeCoordinatorService } from '../app/core/services/sync/sync-resume-coordinator.service';
 import { SessionManagerService } from '../app/core/services/sync/session-manager.service';
 import { SyncCoordinatorService } from './sync-coordinator.service';
 import { APP_LIFECYCLE_CONFIG } from '../config';
@@ -28,7 +29,7 @@ describe('AppLifecycleOrchestratorService', () => {
   };
   let mockSimpleSync: {
     recoverAfterResume: ReturnType<typeof vi.fn>;
-    suspendRemoteTransport: ReturnType<typeof vi.fn>;
+    suspendTransport: ReturnType<typeof vi.fn>;
   };
   let mockFocusStartupProbe: {
     recheckGate: ReturnType<typeof vi.fn>;
@@ -120,7 +121,7 @@ describe('AppLifecycleOrchestratorService', () => {
 
     mockSimpleSync = {
       recoverAfterResume: vi.fn().mockResolvedValue(undefined),
-      suspendRemoteTransport: vi.fn().mockResolvedValue(undefined),
+      suspendTransport: vi.fn().mockResolvedValue(undefined),
     };
 
     mockFocusStartupProbe = {
@@ -160,7 +161,8 @@ describe('AppLifecycleOrchestratorService', () => {
         AppLifecycleOrchestratorService,
         { provide: NetworkAwarenessService, useValue: mockNetwork },
         { provide: SessionManagerService, useValue: mockSessionManager },
-        { provide: SimpleSyncService, useValue: mockSimpleSync },
+        { provide: RealtimePollingService, useValue: mockSimpleSync },
+        { provide: SyncResumeCoordinatorService, useValue: mockSimpleSync },
         { provide: FocusStartupProbeService, useValue: mockFocusStartupProbe },
         { provide: SyncCoordinatorService, useValue: mockSyncCoordinator },
         { provide: ToastService, useValue: mockToast },
@@ -226,7 +228,7 @@ describe('AppLifecycleOrchestratorService', () => {
     setVisibilityState('hidden');
     document.dispatchEvent(new Event('visibilitychange'));
 
-    expect(mockSimpleSync.suspendRemoteTransport).toHaveBeenCalledTimes(1);
+    expect(mockSimpleSync.suspendTransport).toHaveBeenCalledTimes(1);
 
     vi.setSystemTime(new Date(Date.now() + APP_LIFECYCLE_CONFIG.RESUME_THRESHOLD_MS + 1));
 
@@ -474,7 +476,7 @@ describe('AppLifecycleOrchestratorService', () => {
     service.initialize();
 
     window.dispatchEvent(new Event('blur'));
-    expect(mockSimpleSync.suspendRemoteTransport).toHaveBeenCalledTimes(1);
+    expect(mockSimpleSync.suspendTransport).toHaveBeenCalledTimes(1);
 
     vi.setSystemTime(new Date(Date.now() + FOCUS_CONFIG.GATE.IDLE_RECHECK_THRESHOLD + 1));
     window.dispatchEvent(new Event('focus'));
