@@ -23,7 +23,22 @@ import { ToastService } from './toast.service';
 import type { QueueRetryError } from './action-queue-storage.service';
 import { Project } from '../models';
 import { AUTH_CONFIG } from '../config/auth.config';
-import { isPermanentFailureError } from '../utils/permanent-failure-error';
+import {
+  type ProjectSyncResult,
+  resolveActionSourceUserId as resolveActionSourceUserIdPure,
+  buildOperationErrorMessage as buildOperationErrorMessagePure,
+  buildOperationError as buildOperationErrorPure,
+  buildPartialRetryHandoffError as buildPartialRetryHandoffErrorPure,
+  buildAuthPendingRetryError as buildAuthPendingRetryErrorPure,
+  buildTaskSyncRetryError as buildTaskSyncRetryErrorPure,
+  buildTaskProcessorRetryError as buildTaskProcessorRetryErrorPure,
+  buildProjectSyncRetryError as buildProjectSyncRetryErrorPure,
+  buildProjectProcessorRetryError as buildProjectProcessorRetryErrorPure,
+  isDeferredQueueError as isDeferredQueueErrorPure,
+  isTaskTombstoneNoOp as isTaskTombstoneNoOpPure,
+  isTaskRemoteConflictNoOp as isTaskRemoteConflictNoOpPure,
+  isStaleTaskUpsertNoOp as isStaleTaskUpsertNoOpPure,
+} from './action-queue-retry-errors';
 import {
   FocusSessionPayload,
   PreferencePayload,
@@ -39,20 +54,6 @@ import {
   FocusSessionRecord,
   RoutineCompletionMutation,
 } from '../models/parking-dock';
-
-type ProjectSyncResult = {
-  success: boolean;
-  conflict?: boolean;
-  remoteData?: Project;
-  newVersion?: number;
-  projectPushed?: boolean;
-  failedTaskIds?: string[];
-  failedConnectionIds?: string[];
-  retryEnqueued?: string[];
-  failureReason?: string;
-  terminal?: boolean;
-  partialRetryHandoff?: boolean;
-};
 
 type ProjectMutationContext = {
   actionType: 'project:create' | 'project:update';
@@ -117,13 +118,7 @@ export class ActionQueueProcessorsService {
   }
 
   private resolveActionSourceUserId(...candidates: Array<string | null | undefined>): string | null {
-    for (const candidate of candidates) {
-      if (typeof candidate === 'string' && candidate.length > 0) {
-        return candidate;
-      }
-    }
-
-    return null;
+    return resolveActionSourceUserIdPure(...candidates);
   }
 
   private buildOperationErrorMessage(error: {
@@ -131,17 +126,7 @@ export class ActionQueueProcessorsService {
     message: string;
     details?: Record<string, unknown>;
   }): string {
-    const parts = [error.code, error.message];
-    const errorType = typeof error.details?.['errorType'] === 'string'
-      ? String(error.details['errorType'])
-      : null;
-    const errorCode = error.details?.['errorCode'];
-
-    if (errorType || errorCode) {
-      parts.push(`[${[errorType, errorCode].filter(Boolean).join(':')}]`);
-    }
-
-    return parts.filter(part => typeof part === 'string' && part.length > 0).join(' | ');
+    return buildOperationErrorMessagePure(error);
   }
 
   private buildOperationError(error: {
@@ -149,13 +134,7 @@ export class ActionQueueProcessorsService {
     message: string;
     details?: Record<string, unknown>;
   }): Error & { code: string; details?: Record<string, unknown> } {
-    const queueError = new Error(this.buildOperationErrorMessage(error)) as Error & {
-      code: string;
-      details?: Record<string, unknown>;
-    };
-    queueError.code = error.code;
-    queueError.details = error.details;
-    return queueError;
+    return buildOperationErrorPure(error);
   }
 
   private buildPartialRetryHandoffError(result: ProjectSyncResult): {
@@ -163,29 +142,11 @@ export class ActionQueueProcessorsService {
     message: string;
     details: Record<string, unknown>;
   } {
-    return {
-      code: 'SYNC_RETRY_HANDOFF_PENDING',
-      message: result.failureReason ?? '项目部分同步结果仍需由 ActionQueue 下一轮回放收口',
-      details: {
-        reason: 'partial-retry-handoff',
-        projectPushed: result.projectPushed ?? null,
-        failedTaskCount: result.failedTaskIds?.length ?? 0,
-        failedConnectionCount: result.failedConnectionIds?.length ?? 0,
-      },
-    };
+    return buildPartialRetryHandoffErrorPure(result);
   }
 
   private buildAuthPendingRetryError(actionType: string, entityId: string): QueueRetryError {
-    return {
-      code: 'SYNC_AUTH_PENDING',
-      message: '认证状态尚未就绪，请稍后重试',
-      details: {
-        reason: 'auth-pending',
-        actionType,
-        entityId,
-        ...(actionType.startsWith('project:') ? { projectId: entityId } : { taskId: entityId }),
-      },
-    };
+    return buildAuthPendingRetryErrorPure(actionType, entityId);
   }
 
   private buildTaskSyncRetryError(
@@ -193,16 +154,7 @@ export class ActionQueueProcessorsService {
     taskId: string,
     projectId: string,
   ): QueueRetryError {
-    return {
-      code: 'SYNC_TASK_WRITE_FAILED',
-      message: `${actionType} 未完成，且未发现 RetryQueue 接管项`,
-      details: {
-        reason: 'task-sync-failed',
-        actionType,
-        taskId,
-        projectId,
-      },
-    };
+    return buildTaskSyncRetryErrorPure(actionType, taskId, projectId);
   }
 
   private buildTaskProcessorRetryError(
@@ -211,28 +163,7 @@ export class ActionQueueProcessorsService {
     taskId: string,
     projectId: string,
   ): QueueRetryError {
-    const maybeError = error && typeof error === 'object'
-      ? error as { code?: unknown; message?: unknown; details?: unknown }
-      : null;
-    const details = maybeError?.details && typeof maybeError.details === 'object'
-      ? maybeError.details as Record<string, unknown>
-      : {};
-
-    return {
-      code: typeof maybeError?.code === 'string' ? maybeError.code : undefined,
-      message: error instanceof Error
-        ? error.message
-        : typeof maybeError?.message === 'string'
-          ? maybeError.message
-          : String(error ?? `${actionType} 未提供失败原因`),
-      details: {
-        ...details,
-        reason: details['reason'] ?? 'task-processor-failed',
-        actionType,
-        taskId,
-        projectId,
-      },
-    };
+    return buildTaskProcessorRetryErrorPure(error, actionType, taskId, projectId);
   }
 
   private buildProjectSyncRetryError(
@@ -240,19 +171,7 @@ export class ActionQueueProcessorsService {
     actionType: 'project:create' | 'project:update',
     projectId: string,
   ): QueueRetryError {
-    return {
-      code: 'SYNC_PROJECT_WRITE_FAILED',
-      message: result.failureReason?.trim() || `${actionType} 未提供失败原因`,
-      details: {
-        reason: 'project-sync-failed',
-        actionType,
-        projectId,
-        projectPushed: result.projectPushed ?? null,
-        failedTaskIds: result.failedTaskIds ?? [],
-        failedConnectionIds: result.failedConnectionIds ?? [],
-        retryEnqueued: result.retryEnqueued ?? [],
-      },
-    };
+    return buildProjectSyncRetryErrorPure(result, actionType, projectId);
   }
 
   private buildProjectProcessorRetryError(
@@ -260,46 +179,11 @@ export class ActionQueueProcessorsService {
     actionType: 'project:create' | 'project:update',
     projectId: string,
   ): QueueRetryError {
-    const maybeError = error && typeof error === 'object'
-      ? error as { code?: unknown; message?: unknown; details?: unknown }
-      : null;
-    const details = maybeError?.details && typeof maybeError.details === 'object'
-      ? maybeError.details as Record<string, unknown>
-      : {};
-
-    return {
-      code: typeof maybeError?.code === 'string' ? maybeError.code : undefined,
-      message: error instanceof Error
-        ? error.message
-        : typeof maybeError?.message === 'string'
-          ? maybeError.message
-          : String(error ?? `${actionType} 未提供失败原因`),
-      details: {
-        ...details,
-        reason: details['reason'] ?? 'project-processor-failed',
-        actionType,
-        projectId,
-      },
-    };
+    return buildProjectProcessorRetryErrorPure(error, actionType, projectId);
   }
 
   private isDeferredQueueError(error: unknown): boolean {
-    const details = (error as { details?: Record<string, unknown> } | null)?.details;
-    if (details?.['reason'] === 'browser-network-suspended') {
-      return true;
-    }
-
-    const code = (error as { code?: unknown } | null)?.code;
-    const message = error instanceof Error
-      ? error.message
-      : String((error as { message?: unknown } | null)?.message ?? error ?? '');
-    const normalized = `${String(code ?? '')} ${message}`.toLowerCase();
-
-    return normalized.includes('browser-network-suspended')
-      || normalized.includes('browsernetworksuspendederror')
-      || normalized.includes('network io suspended')
-      || (String(code ?? '') === 'SYNC_OFFLINE' && message.includes('浏览器恢复连接中'))
-      || normalized.includes('sync_offline') && message.includes('浏览器恢复连接中');
+    return isDeferredQueueErrorPure(error);
   }
 
   private logProcessorFailure(actionType: string, error: unknown, context?: Record<string, unknown>): void {
@@ -317,27 +201,15 @@ export class ActionQueueProcessorsService {
   }
 
   private isTaskTombstoneNoOp(error: unknown): boolean {
-    return isPermanentFailureError(error)
-      && error.context?.['operation'] === 'pushTaskTombstone';
+    return isTaskTombstoneNoOpPure(error);
   }
 
   private isTaskRemoteConflictNoOp(error: unknown): boolean {
-    if (!isPermanentFailureError(error) || error.context?.['operation'] !== 'pushTask') {
-      return false;
-    }
-
-    const originalError = error.originalError as (Error & {
-      code?: unknown;
-      errorType?: unknown;
-    }) | undefined;
-    return originalError?.name === 'VersionConflictError'
-      || originalError?.errorType === 'VersionConflictError'
-      || originalError?.code === 'TASK_REMOTE_NEWER'
-      || originalError?.code === 'TASK_REMOTE_TOMBSTONE_NEWER';
+    return isTaskRemoteConflictNoOpPure(error);
   }
 
   private isStaleTaskUpsertNoOp(error: unknown): boolean {
-    return this.isTaskTombstoneNoOp(error) || this.isTaskRemoteConflictNoOp(error);
+    return isStaleTaskUpsertNoOpPure(error);
   }
 
   private resolveQueueOwnerUserId(sourceUserId?: string | null): string {
