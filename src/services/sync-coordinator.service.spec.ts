@@ -427,6 +427,10 @@ function buildCoordinatorProviders() {
     { provide: DestroyRef, useValue: mockDestroyRef },
     { provide: SentryLazyLoaderService, useValue: mockSentryLazyLoaderService },
     { provide: SyncStateService, useValue: mockSyncStateService },
+    // ProjectDataService 复用 mockSyncService（它已有全部项目数据读写 spy）：
+    // Phase 3 把 this.core 的 ProjectData 簇迁到 this.projectData 后，既有
+    // expect(mockSyncService.saveOfflineSnapshot/...) 断言仍命中同一 spy。
+    { provide: ProjectDataService, useValue: mockSyncService },
   ];
 }
 

@@ -17,7 +17,7 @@
  */
 import { Injectable, inject, signal, computed, DestroyRef } from '@angular/core';
 import { Subject } from 'rxjs';
-import { SimpleSyncService, RetryQueueService, SyncStateService, type SyncConflictData } from '../core-bridge';
+import { SimpleSyncService, RetryQueueService, SyncStateService, ProjectDataService, type SyncConflictData } from '../core-bridge';
 import { ActionQueueService } from './action-queue.service';
 import { ActionQueueProcessorsService } from './action-queue-processors.service';
 import { DeltaSyncCoordinatorService } from './delta-sync-coordinator.service';
@@ -107,6 +107,8 @@ export class SyncCoordinatorService {
    * 在不同 tick 的竞争写入造成漂移。
    */
   private readonly syncStateService = inject(SyncStateService);
+  // Phase 3 门面安乐死：项目数据读写簇直接注入具体 owner（不再经 this.core 门面）
+  private readonly projectData = inject(ProjectDataService);
   
   private actionQueue = inject(ActionQueueService);
   // Sprint 9 技术债务修复：提取的处理器服务
@@ -304,7 +306,7 @@ export class SyncCoordinatorService {
    * 确保本地的软删除状态不会被远程数据覆盖
    */
   private async downloadAndMerge(userId: string): Promise<void> {
-    const remoteProjectMetas = await this.core.loadProjectListMetadataFromCloud(userId, {
+    const remoteProjectMetas = await this.projectData.loadProjectListMetadataFromCloud(userId, {
       timeout: TIMEOUT_CONFIG.STANDARD,
       retries: 1,
       silent: true,
@@ -319,7 +321,7 @@ export class SyncCoordinatorService {
 
     const accessibleProjectIds = new Set(remoteProjectMetas.map(project => project.id));
     const remoteProjects = remoteProjectMetas.length > 0
-      ? await this.core.loadProjectsFromCloud(userId, true)
+      ? await this.projectData.loadProjectsFromCloud(userId)
       : [];
 
     if (remoteProjectMetas.length > 0 && remoteProjects.length === 0) {
@@ -432,7 +434,7 @@ export class SyncCoordinatorService {
       this.projectState.setActiveProjectId(mergedProjects[0]?.id ?? null);
     }
 
-    this.core.saveOfflineSnapshot(mergedProjects);
+    this.projectData.saveOfflineSnapshot(mergedProjects);
   }
 
   /** 初始化同步感知（LWW 简化：空实现） */
@@ -519,7 +521,7 @@ export class SyncCoordinatorService {
         if (hash === this.lastSnapshotHash) return;
 
         this.lastSnapshotHash = hash;
-        this.core.saveOfflineSnapshot(projects);
+        this.projectData.saveOfflineSnapshot(projects);
       },
       doPersist: async () => {
         // 持久化交由 saveSnapshot 逻辑统一处理
@@ -609,7 +611,7 @@ export class SyncCoordinatorService {
         return;
       }
 
-      this.core.saveOfflineSnapshot(projects);
+      this.projectData.saveOfflineSnapshot(projects);
       this.logger.debug('本地快照已提前保存', { projectCount: projects.length });
     }, debounceMs);
   }
@@ -669,7 +671,7 @@ export class SyncCoordinatorService {
     // 【P0 修复】使用 getProjectsWithCurrentData 确保快照包含 TaskStore 最新数据
     const projects = this.projectState.getProjectsWithCurrentData();
     if (projects.length > 0) {
-      this.core.saveOfflineSnapshot(projects);
+      this.projectData.saveOfflineSnapshot(projects);
       this.logger.info('页面卸载前已保存本地缓存', { projectCount: projects.length });
     }
 
@@ -695,7 +697,7 @@ export class SyncCoordinatorService {
     // 【P0 修复】使用 getProjectsWithCurrentData 确保快照包含 TaskStore 最新数据
     const projects = this.projectState.getProjectsWithCurrentData();
     if (projects.length > 0) {
-      this.core.saveOfflineSnapshot(projects, ownerUserId);
+      this.projectData.saveOfflineSnapshot(projects, ownerUserId);
       this.logger.info('切换账号前已保存本地快照', {
         projectCount: projects.length,
         ownerUserId,
@@ -896,7 +898,7 @@ export class SyncCoordinatorService {
       return;
     }
 
-    const snapshot = this.core.loadOfflineSnapshot();
+    const snapshot = this.projectData.loadOfflineSnapshot();
     if (!snapshot || snapshot.length === 0) {
       return;
     }
@@ -951,7 +953,7 @@ export class SyncCoordinatorService {
    * @returns 完整的项目数据
    */
   async loadSingleProjectFromCloud(projectId: string): Promise<Project | null> {
-    return this.core.loadFullProjectOptimized(projectId);
+    return this.projectData.loadFullProjectOptimized(projectId);
   }
   
   /**
@@ -1065,7 +1067,7 @@ export class SyncCoordinatorService {
     let remoteWatermark: string | null = null;
 
     if (FEATURE_FLAGS.RESUME_WATERMARK_RPC_V1) {
-      const probe = await this.core.getAccessibleProjectProbe(projectId);
+      const probe = await this.projectData.getAccessibleProjectProbe(projectId);
       if (probe) {
         if (!probe.accessible) {
           return { refreshed: false, skippedReason: 'remote-project-missing' };
@@ -1073,7 +1075,7 @@ export class SyncCoordinatorService {
         remoteWatermark = probe.watermark;
       } else {
         // probe 不可用时回退到旧水位 RPC
-        remoteWatermark = await this.core.getProjectSyncWatermark(projectId);
+        remoteWatermark = await this.projectData.getProjectSyncWatermark(projectId);
       }
 
       if (remoteWatermark) {
@@ -1119,7 +1121,7 @@ export class SyncCoordinatorService {
       return projects.map(project => project.id === validatedProject.id ? validatedProject : project);
     });
 
-    await this.core.saveOfflineSnapshotAndWait(this.projectState.projects());
+    await this.projectData.saveOfflineSnapshotAndWait(this.projectState.projects());
 
     const validatedWatermarkMs = this.computeLocalProjectWatermark(validatedProject);
     const nextCursor = this.core.buildProjectSyncCursorFromProject(remoteProject);
@@ -1170,7 +1172,7 @@ export class SyncCoordinatorService {
       : false;
     const remoteWatermark = hasPrefetchedWatermark
       ? (options?.prefetchedRemoteWatermark ?? null)
-      : await this.core.getUserProjectsWatermark();
+      : await this.projectData.getUserProjectsWatermark();
     if (!remoteWatermark) {
       return { skipped: false };
     }
@@ -1208,7 +1210,7 @@ export class SyncCoordinatorService {
       return { skipped: false, watermark: remoteWatermark };
     }
 
-    const heads = await this.core.listProjectHeadsSince(localWatermark);
+    const heads = await this.projectData.listProjectHeadsSince(localWatermark);
     if (heads.length > 0) {
       const headsById = new Map(heads.map(head => [head.id, head]));
       this.projectState.updateProjects((projects) => projects.map((project) => {
@@ -1825,7 +1827,7 @@ export class SyncCoordinatorService {
     
     // 始终先保存到本地离线快照（防止任何情况下的数据丢失）
     // 注意：这里使用更新后的项目列表，确保 updatedAt 被保存
-    this.core.saveOfflineSnapshot(updatedProjects);
+    this.projectData.saveOfflineSnapshot(updatedProjects);
     
     if (!project) {
       return { remoteConfirmed: false };
@@ -1867,7 +1869,7 @@ export class SyncCoordinatorService {
             : p
         )
       );
-      this.core.saveOfflineSnapshot(this.projectState.getProjectsWithCurrentData());
+      this.projectData.saveOfflineSnapshot(this.projectState.getProjectsWithCurrentData());
       return { remoteConfirmed: false, projectId: project.id };
     }
 
@@ -1900,7 +1902,7 @@ export class SyncCoordinatorService {
           )
         );
         // 同步成功后，再次保存快照以确保版本号同步
-        this.core.saveOfflineSnapshot(this.projectState.getProjectsWithCurrentData());
+        this.projectData.saveOfflineSnapshot(this.projectState.getProjectsWithCurrentData());
         
         if (shouldClearProjectDirtyState) {
           // 【关键】仅当本轮之后没有新增本地编辑时，才清理项目级 dirty 标记
