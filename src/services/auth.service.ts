@@ -17,6 +17,11 @@ import {
   isBrowserNetworkSuspendedError,
   isBrowserNetworkSuspendedWindow,
 } from '../utils/browser-network-suspension';
+import {
+  resolvePersistedSessionRecord as resolvePersistedSessionRecordPure,
+  resolvePersistedSessionIdentityFromAuthData as resolvePersistedSessionIdentityFromAuthDataPure,
+  isAuthenticationError as isAuthenticationErrorPure,
+} from './auth-session-identity';
 
 export interface AuthState {
   isCheckingSession: boolean;
@@ -332,52 +337,11 @@ export class AuthService {
   }
 
   private resolvePersistedSessionRecord(authData: unknown): Record<string, unknown> | null {
-    if (!authData || typeof authData !== 'object') {
-      return null;
-    }
-
-    const rootRecord = authData as Record<string, unknown>;
-    const currentSession = rootRecord['currentSession'];
-    if (currentSession && typeof currentSession === 'object') {
-      return currentSession as Record<string, unknown>;
-    }
-
-    const session = rootRecord['session'];
-    if (session && typeof session === 'object') {
-      return session as Record<string, unknown>;
-    }
-
-    return rootRecord;
+    return resolvePersistedSessionRecordPure(authData);
   }
 
   private resolvePersistedSessionIdentityFromAuthData(authData: unknown): PersistedSessionIdentity | null {
-    const sessionRecord = this.resolvePersistedSessionRecord(authData);
-    if (!sessionRecord) {
-      return null;
-    }
-
-    const refreshToken = sessionRecord['refresh_token'];
-    const accessToken = sessionRecord['access_token'];
-    if ((typeof refreshToken !== 'string' || !refreshToken)
-      && (typeof accessToken !== 'string' || !accessToken)) {
-      return null;
-    }
-
-    const user = sessionRecord['user'];
-    if (!user || typeof user !== 'object') {
-      return null;
-    }
-
-    const userRecord = user as Record<string, unknown>;
-    const userId = userRecord['id'];
-    if (typeof userId !== 'string' || !userId) {
-      return null;
-    }
-
-    return {
-      userId,
-      email: typeof userRecord['email'] === 'string' ? userRecord['email'] : null,
-    };
+    return resolvePersistedSessionIdentityFromAuthDataPure(authData);
   }
 
   private readPersistedSessionIdentity(shouldLog: boolean): PersistedSessionIdentity | null {
@@ -726,21 +690,7 @@ export class AuthService {
    * 网络错误（暂时离线）：保留本地缓存
    */
   private isAuthenticationError(error: unknown): boolean {
-    if (!error || typeof error !== 'object') return false;
-    const err = error as { status?: number; message?: string; code?: string; name?: string };
-    // HTTP 401/403 明确表示认证失效
-    if (err.status === 401 || err.status === 403) return true;
-    // Supabase SDK 的特定错误码
-    if (err.code === 'session_not_found' || err.code === 'refresh_token_not_found') return true;
-    // 错误消息中包含认证相关关键词
-    const msg = (err.message ?? '').toLowerCase();
-    if (msg.includes('refresh token') || msg.includes('invalid token') ||
-        msg.includes('invalid refresh token') || msg.includes('token expired') ||
-        msg.includes('session expired') || msg.includes('session missing') ||
-        msg.includes('invalid claim') || msg.includes('jwt expired')) {
-      return true;
-    }
-    return false;
+    return isAuthenticationErrorPure(error);
   }
 
   /**
