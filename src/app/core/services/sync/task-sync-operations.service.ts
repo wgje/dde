@@ -42,14 +42,19 @@ import {
   isBrowserNetworkSuspendedError,
   isBrowserNetworkSuspendedWindow,
 } from '../../../../utils/browser-network-suspension';
+import { createSyncOperationId } from '../../../../utils/sync-operation-id';
 import {
   getCompatibleTaskSelectFields,
   getCompatibleTaskWriteRow,
   markTaskCompletedAtColumnUnavailable,
-  omitTaskCompletedAtColumn,
 } from '../../../../utils/task-schema-compat';
-
-const MISSING_TASK_TIMESTAMP_REASON = 'missing_task_timestamp';
+import {
+  MISSING_TASK_TIMESTAMP_REASON,
+  createRemoteNewerConflictError as createRemoteNewerConflictErrorPure,
+  createMissingTaskTimestampConflictError as createMissingTaskTimestampConflictErrorPure,
+  isMissingTaskTimestampRejection as isMissingTaskTimestampRejectionPure,
+  createClockUncertainError as createClockUncertainErrorPure,
+} from './task-sync-conflict-errors';
 
 /** Tombstone 查询结果 */
 export interface TombstoneQueryResult {
@@ -186,16 +191,7 @@ export class TaskSyncOperationsService {
     remoteUpdatedAt: string | null,
     reason: 'remote-newer' | 'remote-tombstone',
   ): EnhancedError {
-    return Object.assign(
-      new Error('版本冲突：数据已被修改，请刷新后重试'),
-      {
-        name: 'VersionConflictError',
-        errorType: 'VersionConflictError',
-        code: reason === 'remote-tombstone' ? 'TASK_REMOTE_TOMBSTONE_NEWER' : 'TASK_REMOTE_NEWER',
-        isRetryable: false,
-        details: `taskId=${taskId}, projectId=${projectId}, remoteUpdatedAt=${remoteUpdatedAt ?? 'unknown'}`,
-      },
-    ) as EnhancedError;
+    return createRemoteNewerConflictErrorPure(taskId, projectId, remoteUpdatedAt, reason);
   }
 
   private createMissingTaskTimestampConflictError(
@@ -203,20 +199,11 @@ export class TaskSyncOperationsService {
     projectId: string,
     remoteUpdatedAt: string | null,
   ): EnhancedError {
-    return Object.assign(
-      new Error('任务缺少本地更新时间，已放弃旧写入并等待远端权威数据覆盖'),
-      {
-        name: 'VersionConflictError',
-        errorType: 'VersionConflictError',
-        code: 'TASK_REMOTE_NEWER',
-        isRetryable: false,
-        details: `taskId=${taskId}, projectId=${projectId}, remoteUpdatedAt=${remoteUpdatedAt ?? 'unknown'}, reason=${MISSING_TASK_TIMESTAMP_REASON}`,
-      },
-    ) as EnhancedError;
+    return createMissingTaskTimestampConflictErrorPure(taskId, projectId, remoteUpdatedAt);
   }
 
   private isMissingTaskTimestampRejection(result: SyncRpcResult): boolean {
-    return result.status === 'remote-newer' && result.reason === MISSING_TASK_TIMESTAMP_REASON;
+    return isMissingTaskTimestampRejectionPure(result);
   }
 
   private throwMissingTaskTimestampPermanentFailure(
@@ -278,16 +265,7 @@ export class TaskSyncOperationsService {
     localUpdatedAt: string | null,
     remoteUpdatedAt: string | null,
   ): EnhancedError {
-    return Object.assign(
-      new Error('无法确认本地时间基线，已延后同步以避免覆盖远端更新'),
-      {
-        name: 'ClockSyncUncertainError',
-        errorType: 'ClockSyncUncertainError',
-        code: 'TASK_CLOCK_SYNC_UNCERTAIN',
-        isRetryable: true,
-        details: `taskId=${taskId}, projectId=${projectId}, localUpdatedAt=${localUpdatedAt ?? 'unknown'}, remoteUpdatedAt=${remoteUpdatedAt ?? 'unknown'}`,
-      },
-    ) as EnhancedError;
+    return createClockUncertainErrorPure(taskId, projectId, localUpdatedAt, remoteUpdatedAt);
   }
 
   private async loadRemoteTaskFreshness(
@@ -740,6 +718,7 @@ export class TaskSyncOperationsService {
             attachments: task.attachments ?? [],
             // State Overlap 停泊元数据（A3.2/A3.6）
             parking_meta: task.parkingMeta ?? null,
+            attention_meta: task.attentionMeta ?? null,
           };
           const writeTask = async (payload: typeof row | Omit<typeof row, 'completed_at'>) => {
             if (remoteTask?.updatedAt) {
@@ -808,7 +787,7 @@ export class TaskSyncOperationsService {
               projectId,
               error,
             });
-            ({ data: upsertedData, error } = await writeTask(omitTaskCompletedAtColumn(row)));
+            ({ data: upsertedData, error } = await writeTask(getCompatibleTaskWriteRow(row)));
           }
           
           if (error) throw supabaseErrorToError(error);
@@ -874,7 +853,7 @@ export class TaskSyncOperationsService {
   }
 
   private createSyncRpcOperationId(): string {
-    return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    return createSyncOperationId();
   }
 
   private handleTaskSyncRpcResult(
@@ -1478,22 +1457,13 @@ export class TaskSyncOperationsService {
       // RPC 失败时降级为逐个软删除
       this.logger.warn('softDeleteTasksBatch: RPC 失败，降级为逐个更新');
       try {
-        const { error } = await client
-          .from('tasks')
-          .update({ deleted_at: new Date().toISOString(), updated_at: new Date().toISOString() })
-          .eq('project_id', projectId)
-          .in('id', taskIds);
-
-        if (error) {
-          this.logger.error('softDeleteTasksBatch: 降级也失败', error);
-          throw supabaseErrorToError(error);
-        }
+        const updatedTaskIds = await this.softDeleteTasksWithBaseGuard(client, projectId, taskIds);
 
         // 【NEW-5 修复】降级路径成功后同样添加本地 tombstone
-        this.tombstoneService.addLocalTombstones(projectId, taskIds, tombstoneTimestamps);
-        this.settleDeletedTaskDependencies(projectId, taskIds);
+        this.tombstoneService.addLocalTombstones(projectId, updatedTaskIds, tombstoneTimestamps);
+        this.settleDeletedTaskDependencies(projectId, updatedTaskIds);
 
-        return taskIds.length;
+        return updatedTaskIds.length;
       } catch (fallbackError) {
         this.logger.error('softDeleteTasksBatch: 完全失败', fallbackError);
         // 完全失败时仍添加本地 tombstone 作为最后防线
@@ -1624,25 +1594,37 @@ export class TaskSyncOperationsService {
         v2Error: purgeV2Result.error,
       });
       
-      const { error } = await client
+      const { data, error } = await client
         .from('tasks')
-        .update({ deleted_at: new Date().toISOString() })
+        .select('id')
         .eq('project_id', projectId)
         .in('id', taskIds);
       
       if (error) {
-        this.logger.error('purgeTasksFromCloud: 软删除也失败', error);
+        this.logger.error('purgeTasksFromCloud: 软删除预检失败', error);
         throw supabaseErrorToError(error);
       }
       
-      this.addLocalTombstones(projectId, taskIds);
-      this.settleDeletedTaskDependencies(projectId, taskIds);
+      const existingTaskIds = new Set((data ?? []).map(row => String((row as { id: string }).id)));
+      const updatedTaskIds = await this.softDeleteTasksWithBaseGuard(
+        client,
+        projectId,
+        taskIds.filter(id => existingTaskIds.has(id)),
+      );
+      const skippedTaskIds = taskIds.filter(id => existingTaskIds.has(id) && !updatedTaskIds.includes(id));
+      if (skippedTaskIds.length > 0) {
+        this.queueTaskDeletesForRetry(skippedTaskIds, projectId, fromRetryQueue, sourceUserId);
+      }
+
+      this.addLocalTombstones(projectId, updatedTaskIds);
+      this.settleDeletedTaskDependencies(projectId, updatedTaskIds);
       this.logger.warn('purgeTasksFromCloud: 已降级为软删除（已添加本地 tombstone 保护）', { 
         projectId, 
-        taskIds 
+        taskIds: updatedTaskIds,
+        skippedTaskIds,
       });
       
-      return true;
+      return skippedTaskIds.length === 0;
     } catch (e) {
       const enhanced = supabaseErrorToError(e);
       if (enhanced.errorType === 'BrowserNetworkSuspendedError') {
@@ -1714,6 +1696,50 @@ export class TaskSyncOperationsService {
       }
     }
     return count > 0 ? map : undefined;
+  }
+
+  private async softDeleteTasksWithBaseGuard(
+    client: SupabaseClient,
+    projectId: string,
+    taskIds: string[],
+  ): Promise<string[]> {
+    const baseUpdatedAtMap = this.buildTaskBaseUpdatedAtMap(taskIds) ?? {};
+    const deletedAt = new Date().toISOString();
+    const updatedTaskIds: string[] = [];
+
+    for (const taskId of taskIds) {
+      const baseUpdatedAt = baseUpdatedAtMap[taskId];
+      if (!baseUpdatedAt) {
+        this.logger.warn('跳过缺少 updatedAt 基线的任务软删降级，避免陈旧删除覆盖远端', {
+          projectId,
+          taskId,
+        });
+        continue;
+      }
+
+      const { data, error } = await client
+        .from('tasks')
+        .update({ deleted_at: deletedAt, updated_at: deletedAt })
+        .eq('project_id', projectId)
+        .eq('id', taskId)
+        .eq('updated_at', baseUpdatedAt)
+        .select('id')
+        .maybeSingle();
+
+      if (error) {
+        this.logger.error('任务软删降级失败', { projectId, taskId, error });
+        throw supabaseErrorToError(error);
+      }
+
+      if (!data) {
+        this.logger.warn('跳过远端已前进的任务软删降级', { projectId, taskId, baseUpdatedAt });
+        continue;
+      }
+
+      updatedTaskIds.push(taskId);
+    }
+
+    return updatedTaskIds;
   }
 
   /**
