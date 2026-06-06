@@ -10,12 +10,14 @@ import { Router } from '@angular/router';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 
+type SpyFn = ReturnType<typeof vi.fn>;
+
 describe('GlobalErrorHandler', () => {
   let service: GlobalErrorHandler;
-  let loggerSpy: any;
-  let toastSpy: any;
-  let routerSpy: any;
-  let sentryLoaderSpy: any;
+  let loggerSpy: { category: SpyFn; debug: SpyFn; warn: SpyFn; error: SpyFn };
+  let toastSpy: { error: SpyFn };
+  let routerSpy: { navigate: SpyFn };
+  let sentryLoaderSpy: { captureException: SpyFn; captureMessage: SpyFn };
   let injector: Injector;
 
   beforeEach(() => {

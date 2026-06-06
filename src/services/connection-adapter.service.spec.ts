@@ -17,10 +17,23 @@ const mockLoggerCategory = {
 
 describe('ConnectionAdapterService', () => {
   let service: ConnectionAdapterService;
-  let taskOps: any;
-  let syncCoordinator: any;
-  let undoService: any;
-  let toastService: any;
+  let taskOps: {
+    addConnection: ReturnType<typeof vi.fn>;
+    removeConnection: ReturnType<typeof vi.fn>;
+    updateConnection: ReturnType<typeof vi.fn>;
+    addCrossTreeConnection: ReturnType<typeof vi.fn>;
+    relinkCrossTreeConnection: ReturnType<typeof vi.fn>;
+    updateConnectionContent: ReturnType<typeof vi.fn>;
+  };
+  let syncCoordinator: { scheduleSync: ReturnType<typeof vi.fn>; core: { scheduleSync: ReturnType<typeof vi.fn> } };
+  let undoService: { push: ReturnType<typeof vi.fn>; pushAction: ReturnType<typeof vi.fn> };
+  let toastService: {
+    show: ReturnType<typeof vi.fn>;
+    info: ReturnType<typeof vi.fn>;
+    success: ReturnType<typeof vi.fn>;
+    error: ReturnType<typeof vi.fn>;
+    warning: ReturnType<typeof vi.fn>;
+  };
   let userSession: { isHintOnlyStartupPlaceholderVisible: ReturnType<typeof vi.fn> };
 
   beforeEach(() => {
