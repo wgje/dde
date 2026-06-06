@@ -27,8 +27,8 @@ import { StartupPlaceholderStateService } from './startup-placeholder-state.serv
 import { FEATURE_FLAGS } from '../config/feature-flags.config';
 import { isFailure } from '../utils/result';
 import { mergeByLww, mergeByLwwWithTombstone } from '../utils/lww-merge';
-import { hasTaskContentMissingFromSource } from '../utils/task-content-guard';
 import { resolveTaskCompletionTimestamp } from '../utils/task-completion-time';
+import { restoreMissingCloudTaskContent } from './user-session-task-content-recovery';
 import { ToastService } from './toast.service';
 import { pushStartupTrace } from '../utils/startup-trace';
 import {
@@ -2656,7 +2656,7 @@ export class UserSessionService {
       return;
     }
 
-    const { tasks: contentSafeCloudTasks, restoredTaskCount } = this.restoreMissingCloudTaskContent(
+    const { tasks: contentSafeCloudTasks, restoredTaskCount } = restoreMissingCloudTaskContent(
       localProject.tasks,
       cloudProject.tasks,
     );
@@ -2703,33 +2703,6 @@ export class UserSessionService {
     }
   }
 
-  private restoreMissingCloudTaskContent(localTasks: Task[], cloudTasks: Task[]): {
-    tasks: Task[];
-    restoredTaskCount: number;
-  } {
-    const localTasksById = new Map(localTasks.map((task) => [task.id, task] as const));
-    let restoredTaskCount = 0;
-
-    const tasks = cloudTasks.map((cloudTask) => {
-      if (!hasTaskContentMissingFromSource(cloudTask)) {
-        return cloudTask;
-      }
-
-      const localTask = localTasksById.get(cloudTask.id);
-      if (!localTask || localTask.content === cloudTask.content) {
-        return cloudTask;
-      }
-
-      restoredTaskCount += 1;
-      return {
-        ...cloudTask,
-        content: localTask.content,
-      };
-    });
-
-    return { tasks, restoredTaskCount };
-  }
-  
   /** LWW 合并任务列表（委托给 `utils/lww-merge`，保持历史私有入口以免外部调用） */
   private mergeTasksWithLWW(localTasks: Task[], cloudTasks: Task[]): Task[] {
     return mergeByLww(localTasks, cloudTasks);
