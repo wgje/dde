@@ -20,13 +20,11 @@ import { ExternalSourceCacheService } from '../../core/external-sources/external
 import { SiyuanPreviewService } from '../../core/external-sources/siyuan/siyuan-preview.service';
 import { isTrustedSiyuanDirectBaseUrl } from '../../core/external-sources/siyuan/siyuan-direct-provider';
 import type { SiyuanRuntimeMode } from '../../core/external-sources/external-source.model';
-
-interface TaskAttachmentMetadata {
-  id: string;
-  name: string;
-  size: number;
-  mimeType: string;
-}
+import {
+  type TaskAttachmentMetadata,
+  buildTaskAttachmentMap as buildTaskAttachmentMapPure,
+  buildTaskProjectIndex as buildTaskProjectIndexPure,
+} from './settings-modal-task-index';
 
 interface SiyuanExtensionStatusView {
   baseUrl?: string;
@@ -1440,36 +1438,11 @@ export class SettingsModalComponent {
   }
 
   private buildTaskAttachmentMap(projects: Project[]): Map<string, TaskAttachmentMetadata[]> {
-    const map = new Map<string, TaskAttachmentMetadata[]>();
-
-    for (const project of projects) {
-      for (const task of project.tasks) {
-        if (!task.attachments || task.attachments.length === 0) continue;
-
-        const attachments: TaskAttachmentMetadata[] = task.attachments.map(att => ({
-          id: att.id,
-          name: att.name,
-          size: att.size ?? 0,
-          mimeType: att.mimeType ?? 'application/octet-stream',
-        }));
-
-        map.set(task.id, attachments);
-      }
-    }
-
-    return map;
+    return buildTaskAttachmentMapPure(projects);
   }
 
   private buildTaskProjectIndex(projects: Project[]): Map<string, string> {
-    const index = new Map<string, string>();
-
-    for (const project of projects) {
-      for (const task of project.tasks) {
-        index.set(task.id, project.id);
-      }
-    }
-
-    return index;
+    return buildTaskProjectIndexPure(projects);
   }
 
   // ============================================
