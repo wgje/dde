@@ -17,6 +17,7 @@ import { Injector, runInInjectionContext, DestroyRef, signal } from '@angular/co
 import { SyncCoordinatorService } from './sync-coordinator.service';
 import { SimpleSyncService } from '../app/core/services/simple-sync.service';
 import { ProjectDataService } from '../app/core/services/sync/project-data.service';
+import { ProjectSyncCursorService } from '../app/core/services/sync/project-sync-cursor.service';
 import { ProjectSaveFlightCoordinatorService } from '../app/core/services/sync/project-save-flight-coordinator.service';
 import { SyncStateService } from '../app/core/services/sync/sync-state.service';
 import { RetryQueueService } from '../app/core/services/sync/retry-queue.service';
@@ -431,6 +432,8 @@ function buildCoordinatorProviders() {
     // Phase 3 把 this.core 的 ProjectData 簇迁到 this.projectData 后，既有
     // expect(mockSyncService.saveOfflineSnapshot/...) 断言仍命中同一 spy。
     { provide: ProjectDataService, useValue: mockSyncService },
+    // ProjectSyncCursorService 同理复用 mockSyncService（含 commit*/buildProjectSyncCursorFromProject/getLastSyncTime spy）。
+    { provide: ProjectSyncCursorService, useValue: mockSyncService },
   ];
 }
 

@@ -17,7 +17,7 @@
  */
 import { Injectable, inject, signal, computed, DestroyRef } from '@angular/core';
 import { Subject } from 'rxjs';
-import { SimpleSyncService, RetryQueueService, SyncStateService, ProjectDataService, type SyncConflictData } from '../core-bridge';
+import { SimpleSyncService, RetryQueueService, SyncStateService, ProjectDataService, ProjectSyncCursorService, type SyncConflictData } from '../core-bridge';
 import { ActionQueueService } from './action-queue.service';
 import { ActionQueueProcessorsService } from './action-queue-processors.service';
 import { DeltaSyncCoordinatorService } from './delta-sync-coordinator.service';
@@ -109,6 +109,8 @@ export class SyncCoordinatorService {
   private readonly syncStateService = inject(SyncStateService);
   // Phase 3 门面安乐死：项目数据读写簇直接注入具体 owner（不再经 this.core 门面）
   private readonly projectData = inject(ProjectDataService);
+  // Phase 3 门面安乐死：项目同步游标簇直接注入具体 owner
+  private readonly projectSyncCursor = inject(ProjectSyncCursorService);
   
   private actionQueue = inject(ActionQueueService);
   // Sprint 9 技术债务修复：提取的处理器服务
@@ -1081,7 +1083,7 @@ export class SyncCoordinatorService {
       if (remoteWatermark) {
         const remoteUpdatedAtMs = new Date(remoteWatermark).getTime();
         if (Number.isFinite(remoteUpdatedAtMs) && remoteUpdatedAtMs <= localWatermarkMs) {
-          await this.core.commitProjectSyncTimestamp(projectId, remoteWatermark);
+          await this.projectSyncCursor.commitProjectSyncTimestamp(projectId, remoteWatermark);
           this.sentryLazyLoader.addBreadcrumb({
             category: 'sync',
             message: 'resume.refresh.fast_path_hit',
@@ -1124,14 +1126,14 @@ export class SyncCoordinatorService {
     await this.projectData.saveOfflineSnapshotAndWait(this.projectState.projects());
 
     const validatedWatermarkMs = this.computeLocalProjectWatermark(validatedProject);
-    const nextCursor = this.core.buildProjectSyncCursorFromProject(remoteProject);
+    const nextCursor = this.projectSyncCursor.buildProjectSyncCursorFromProject(remoteProject);
     if (nextCursor) {
-      await this.core.commitProjectSyncCursor(projectId, nextCursor);
+      await this.projectSyncCursor.commitProjectSyncCursor(projectId, nextCursor);
     } else {
       const cursorWatermark = remoteWatermark
         ?? (validatedWatermarkMs > 0 ? new Date(validatedWatermarkMs).toISOString() : null);
       if (cursorWatermark) {
-        await this.core.commitProjectSyncTimestamp(projectId, cursorWatermark);
+        await this.projectSyncCursor.commitProjectSyncTimestamp(projectId, cursorWatermark);
       }
     }
     this.sentryLazyLoader.addBreadcrumb({
@@ -2024,7 +2026,7 @@ export class SyncCoordinatorService {
     const dirtyAgeMs = outcome.projectId
       ? this.changeTracker.getOldestChangeAgeMs(outcome.projectId)
       : this.changeTracker.getOldestChangeAgeMs();
-    const lastSync = outcome.projectId ? this.core.getLastSyncTime(outcome.projectId) : null;
+    const lastSync = outcome.projectId ? this.projectSyncCursor.getLastSyncTime(outcome.projectId) : null;
     const cursorLagMs = lastSync ? Math.max(0, Date.now() - new Date(lastSync).getTime()) : 0;
     const queuePressureEvents =
       this.retryQueue.pressureEvents +
