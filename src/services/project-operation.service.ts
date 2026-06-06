@@ -27,6 +27,11 @@ import { WriteGuardService } from './write-guard.service';
 // eslint-disable-next-line no-restricted-imports -- RetryQueueService 尚未迁移到 src/services/，暂保持此引用
 import { RetryQueueService } from '../app/core/services/sync/retry-queue.service';
 import { Project } from '../models';
+import {
+  captureConflictFingerprint as captureConflictFingerprintPure,
+  doesStoredConflictMatchFingerprint as doesStoredConflictMatchFingerprintPure,
+  doesActiveConflictMatchSnapshot as doesActiveConflictMatchSnapshotPure,
+} from './project-operation-conflict-fingerprint';
 import { type ConflictResolutionPlan } from './conflict-resolution.types';
 import { ErrorCodes, isFailure, type Result, type OperationError } from '../utils/result';
 import { AUTH_CONFIG } from '../config/auth.config';
@@ -1210,58 +1215,7 @@ export class ProjectOperationService {
     remoteVersion?: number;
     pendingTaskDeleteIds?: string[];
   } {
-    const activeFingerprint = activeConflict?.projectId
-      ? {
-          projectId: activeConflict.projectId,
-          ownerUserId,
-          conflictedAt: activeConflict.conflictedAt,
-          localVersion: activeConflict.local?.version ?? activeConflict.localProject?.version,
-          remoteVersion: activeConflict.remote?.version ?? activeConflict.remoteProject?.version,
-          pendingTaskDeleteIds: [...(activeConflict.pendingTaskDeleteIds ?? [])],
-        }
-      : null;
-
-    const storedFingerprint = storedConflict
-      ? {
-          projectId: storedConflict.projectId,
-          ownerUserId: storedConflict.ownerUserId ?? ownerUserId,
-          conflictedAt: storedConflict.conflictedAt,
-          localVersion: storedConflict.localVersion,
-          remoteVersion: storedConflict.remoteVersion,
-          pendingTaskDeleteIds: [...(storedConflict.pendingTaskDeleteIds ?? [])],
-        }
-      : null;
-
-    if (activeFingerprint && storedFingerprint) {
-      if (!activeFingerprint.conflictedAt) {
-        return storedFingerprint;
-      }
-
-      if (!storedFingerprint.conflictedAt) {
-        return activeFingerprint;
-      }
-
-      return storedFingerprint.conflictedAt >= activeFingerprint.conflictedAt
-        ? storedFingerprint
-        : activeFingerprint;
-    }
-
-    if (storedFingerprint) {
-      return storedFingerprint;
-    }
-
-    if (activeFingerprint) {
-      return activeFingerprint;
-    }
-
-    return {
-      projectId: activeConflict?.projectId ?? '',
-      ownerUserId,
-      conflictedAt: activeConflict?.conflictedAt,
-      localVersion: activeConflict?.local?.version ?? activeConflict?.localProject?.version,
-      remoteVersion: activeConflict?.remote?.version ?? activeConflict?.remoteProject?.version,
-      pendingTaskDeleteIds: [...(activeConflict?.pendingTaskDeleteIds ?? [])],
-    };
+    return captureConflictFingerprintPure(storedConflict, activeConflict, ownerUserId);
   }
 
   private doesStoredConflictMatchFingerprint(
@@ -1282,19 +1236,7 @@ export class ProjectOperationService {
       pendingTaskDeleteIds?: string[];
     },
   ): boolean {
-    if (!currentConflict || currentConflict.projectId !== fingerprint.projectId) {
-      return false;
-    }
-
-    const currentPendingDeletes = [...(currentConflict.pendingTaskDeleteIds ?? [])].sort();
-    const expectedPendingDeletes = [...(fingerprint.pendingTaskDeleteIds ?? [])].sort();
-
-    return (currentConflict.ownerUserId ?? fingerprint.ownerUserId) === fingerprint.ownerUserId
-      && (fingerprint.conflictedAt === undefined || currentConflict.conflictedAt === fingerprint.conflictedAt)
-      && currentConflict.localVersion === (fingerprint.localVersion ?? currentConflict.localVersion)
-      && (currentConflict.remoteVersion ?? 0) === (fingerprint.remoteVersion ?? 0)
-      && currentPendingDeletes.length === expectedPendingDeletes.length
-      && currentPendingDeletes.every((taskId, index) => taskId === expectedPendingDeletes[index]);
+    return doesStoredConflictMatchFingerprintPure(currentConflict, fingerprint);
   }
 
   private doesActiveConflictMatchSnapshot(
@@ -1317,26 +1259,7 @@ export class ProjectOperationService {
       pendingTaskDeleteIds?: string[];
     } | null,
   ): boolean {
-    if (!currentConflict || !expectedConflict || currentConflict.projectId !== expectedConflict.projectId) {
-      return false;
-    }
-
-    if (currentConflict === expectedConflict) {
-      return true;
-    }
-
-    const currentPendingDeletes = [...(currentConflict.pendingTaskDeleteIds ?? [])].sort();
-    const expectedPendingDeletes = [...(expectedConflict.pendingTaskDeleteIds ?? [])].sort();
-    const currentLocalVersion = currentConflict.local?.version ?? currentConflict.localProject?.version ?? 0;
-    const currentRemoteVersion = currentConflict.remote?.version ?? currentConflict.remoteProject?.version ?? 0;
-    const expectedLocalVersion = expectedConflict.local?.version ?? expectedConflict.localProject?.version ?? 0;
-    const expectedRemoteVersion = expectedConflict.remote?.version ?? expectedConflict.remoteProject?.version ?? 0;
-
-    return (expectedConflict.conflictedAt === undefined || currentConflict.conflictedAt === expectedConflict.conflictedAt)
-      && currentLocalVersion === expectedLocalVersion
-      && currentRemoteVersion === expectedRemoteVersion
-      && currentPendingDeletes.length === expectedPendingDeletes.length
-      && currentPendingDeletes.every((taskId, index) => taskId === expectedPendingDeletes[index]);
+    return doesActiveConflictMatchSnapshotPure(currentConflict, expectedConflict);
   }
 
   private persistTerminalProjectState(projectId: string): void {
