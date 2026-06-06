@@ -10,7 +10,7 @@
  */
 
 import { Injectable, inject } from '@angular/core';
-import { SimpleSyncService, TombstoneService } from '../core-bridge';
+import { ProjectSyncCursorService, ProjectDataService, TombstoneService } from '../core-bridge';
 import { ConflictDetectionService } from './conflict-detection.service';
 import { ProjectStateService } from './project-state.service';
 import { ChangeTrackerService } from './change-tracker.service';
@@ -28,7 +28,8 @@ import {
 })
 export class DeltaSyncCoordinatorService {
   private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
-  private readonly syncService = inject(SimpleSyncService);
+  private readonly projectSyncCursor = inject(ProjectSyncCursorService);
+  private readonly projectDataService = inject(ProjectDataService);
   private readonly conflictDetection = inject(ConflictDetectionService);
   private readonly projectState = inject(ProjectStateService);
   private readonly changeTracker = inject(ChangeTrackerService);
@@ -139,7 +140,7 @@ export class DeltaSyncCoordinatorService {
     this.logger.debug('开始 Delta Sync 增量同步', { projectId });
 
     try {
-      const { tasks, connections, nextCursor } = await this.syncService.checkForDrift(projectId);
+      const { tasks, connections, nextCursor } = await this.projectSyncCursor.checkForDrift(projectId);
       
       if (tasks.length === 0 && connections.length === 0) {
         this.logger.debug('Delta Sync 无变更', { projectId });
@@ -181,8 +182,8 @@ export class DeltaSyncCoordinatorService {
       }));
 
       if (nextCursor) {
-        await this.syncService.saveOfflineSnapshotAndWait(this.projectState.projects());
-        await this.syncService.commitProjectSyncCursor(projectId, nextCursor);
+        await this.projectDataService.saveOfflineSnapshotAndWait(this.projectState.projects());
+        await this.projectSyncCursor.commitProjectSyncCursor(projectId, nextCursor);
       }
 
       this.logger.info('Delta Sync 完成', {

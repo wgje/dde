@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Injector, runInInjectionContext } from '@angular/core';
 import { DeltaSyncCoordinatorService } from './delta-sync-coordinator.service';
-import { SimpleSyncService, TombstoneService } from '../core-bridge';
+import { ProjectSyncCursorService, ProjectDataService, TombstoneService } from '../core-bridge';
 import { ConflictDetectionService } from './conflict-detection.service';
 import { ChangeTrackerService } from './change-tracker.service';
 import { ProjectStateService } from './project-state.service';
@@ -100,7 +100,10 @@ describe('DeltaSyncCoordinatorService', () => {
     const injector = Injector.create({
       providers: [
         DeltaSyncCoordinatorService,
-        { provide: SimpleSyncService, useValue: mockSimpleSyncService },
+        // 单一 mock 同时背书 ProjectSyncCursorService(checkForDrift + commitProjectSyncCursor)
+        // 与 ProjectDataService(saveOfflineSnapshotAndWait)——原 SimpleSyncService 门面把两者转发为一。
+        { provide: ProjectSyncCursorService, useValue: mockSimpleSyncService },
+        { provide: ProjectDataService, useValue: mockSimpleSyncService },
         { provide: ConflictDetectionService, useValue: mockConflictDetectionService },
         { provide: ProjectStateService, useValue: mockProjectStateService },
         { provide: ChangeTrackerService, useValue: mockChangeTrackerService },

@@ -24,8 +24,11 @@ export type { RetryableEntityType } from './app/core/services/sync/retry-queue.s
 // SessionManagerService — 被 app-lifecycle-orchestrator, event-driven-sync-pulse 使用
 export { SessionManagerService } from './app/core/services/sync/session-manager.service';
 
-// ProjectDataService — 被 parking 轻量停泊任务加载使用
+// ProjectDataService — 被 parking 轻量停泊任务加载、delta-sync-coordinator 使用
 export { ProjectDataService } from './app/core/services/sync/project-data.service';
+
+// ProjectSyncCursorService — 被 delta-sync-coordinator 使用（checkForDrift + commitProjectSyncCursor）
+export { ProjectSyncCursorService } from './app/core/services/sync/project-sync-cursor.service';
 
 // TombstoneService — 被 delta-sync-coordinator 使用
 export { TombstoneService } from './app/core/services/sync/tombstone.service';
