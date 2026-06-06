@@ -1,5 +1,5 @@
 import { Injectable, inject } from '@angular/core';
-import { SimpleSyncService } from '../core-bridge';
+import { ProjectDataService } from '../core-bridge';
 import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
 import { Project } from '../models';
@@ -26,7 +26,7 @@ import {
 })
 export class MigrationIntegrityService {
   private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
-  private readonly syncService = inject(SimpleSyncService);
+  private readonly projectData = inject(ProjectDataService);
   private readonly toast = inject(ToastService);
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('MigrationIntegrity');
@@ -425,7 +425,7 @@ export class MigrationIntegrityService {
       this.updateMigrationStatus('verifying');
 
       // 重新从远程获取数据
-      const remoteProjects = await this.syncService.loadProjectsFromCloud(userId);
+      const remoteProjects = await this.projectData.loadProjectsFromCloud(userId);
       if (!remoteProjects) {
         return { success: false, missingItems: ['无法验证：远程数据获取失败'] };
       }

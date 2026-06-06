@@ -1,5 +1,5 @@
 import { Injectable, inject, signal } from '@angular/core';
-import { SimpleSyncService } from '../core-bridge';
+import { ProjectSaveFlightCoordinatorService, ProjectDataService, RetryQueueService, SyncStateService } from '../core-bridge';
 import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
 import { Project, Task } from '../models';
@@ -37,7 +37,10 @@ export type {
 export class MigrationService {
   private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly integrity = inject(MigrationIntegrityService);
-  private syncService = inject(SimpleSyncService);
+  private projectSaveCoordinator = inject(ProjectSaveFlightCoordinatorService);
+  private projectData = inject(ProjectDataService);
+  private retryQueue = inject(RetryQueueService);
+  private syncState = inject(SyncStateService);
   private toast = inject(ToastService);
   private loggerService = inject(LoggerService);
   private logger = this.loggerService.category('Migration');
@@ -205,7 +208,11 @@ export class MigrationService {
           // 彻底丢弃本地数据
           this.integrity.updateMigrationStatus('cleaning');
           this.clearLocalGuestData();
-          this.syncService.clearOfflineCache();
+          // 清除离线缓存（原 SimpleSyncService.clearOfflineCache 的本地化组合：清快照+清重试队列+归零 pendingCount，避免依赖门面）
+          this.projectData.clearOfflineSnapshot();
+          this.retryQueue.clear();
+          this.syncState.update({ pendingCount: 0 });
+          this.logger.info('离线缓存已清除');
           this.integrity.updateMigrationStatus('completed');
           result = { success: true, migratedProjects: 0, strategy };
           break;
@@ -273,7 +280,7 @@ export class MigrationService {
     
     for (const project of localProjects) {
       try {
-        const result = await this.syncService.saveProjectToCloud(project, userId);
+          const result = await this.projectSaveCoordinator.save(project, userId);
         if (result.success) {
           migratedCount++;
         } else {
@@ -349,7 +356,7 @@ export class MigrationService {
           const remoteProject = remoteProjects.find(p => p.id === localProject.id);
           if (remoteProject) {
             const merged = this.mergeProjects(localProject, remoteProject);
-            const result = await this.syncService.saveProjectToCloud(merged, userId);
+            const result = await this.projectSaveCoordinator.save(merged, userId);
             if (result.success) {
               migratedCount++;
             } else {
@@ -357,7 +364,7 @@ export class MigrationService {
             }
           }
         } else {
-          const result = await this.syncService.saveProjectToCloud(localProject, userId);
+          const result = await this.projectSaveCoordinator.save(localProject, userId);
           if (result.success) {
             migratedCount++;
           } else {
