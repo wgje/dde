@@ -15,7 +15,12 @@ import { APP_LIFECYCLE_CONFIG } from '../config/app-lifecycle.config';
 
 describe('SyncModeService', () => {
   let service: SyncModeService;
-  let mockLogger: any;
+  let mockLogger: {
+    debug: ReturnType<typeof vi.fn>;
+    info: ReturnType<typeof vi.fn>;
+    warn: ReturnType<typeof vi.fn>;
+    error: ReturnType<typeof vi.fn>;
+  };
   
   const STORAGE_KEY = 'nanoflow.sync-mode-config';
   const setVisibilityState = (state: DocumentVisibilityState): void => {
