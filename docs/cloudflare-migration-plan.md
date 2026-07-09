@@ -25,7 +25,7 @@ NanoFlow 适合迁移到 Cloudflare Pages；仓库侧 Direct Upload 发布链路
 
 - Cloudflare Pages deploy workflow 与 dry-run workflow 已落地：test job 不读取部署 secret，deploy step 才读取 `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID`，同仓 PR 才允许 preview deploy，fork PR 只跑无 secret 测试。
 - `public/_headers`、`quality:guard:deploy-artifacts`、`quality:guard:build-deterministic`、`artifact-manifest.json`、`version.json`、`! Link`、无 `_redirects`、无公开 sourcemap、worker safety no-store、TWA assetlinks/fingerprint guard 已进入构建或 CI 门禁。
-- `quality:guard:artifact-trends` 已接入 deploy / dry-run workflow：记录文件数、总大小、根 JS 数、`_headers` 规则数、`ngsw.json` asset 数和 GoJS/Flow chunk size；相对 main baseline 超过 15% warning、超过 30% fail-fast。部署浏览器 smoke 入口 `npm run smoke:cloudflare-playwright` 已补齐，并与 header smoke 一致：Cloudflare Pages 默认 SPA fallback 返回缺失 chunk 的 HTML 200 时，必须同时证明 `GlobalErrorHandler` chunk 自愈合同存在。
+- `quality:guard:artifact-trends` 已接入 deploy / dry-run workflow：记录文件数、总大小、根 JS 数、`_headers` 规则数、`ngsw.json` asset 数和 GoJS/Flow chunk size；相对 main baseline 超过 15% warning，字节/规则类指标超过 30% fail-fast，数量类指标保持 warning-only，避免把有利于启动预算的小型 lazy chunk 拆分误判为部署阻断。部署浏览器 smoke 入口 `npm run smoke:cloudflare-playwright` 已补齐，并与 header smoke 一致：Cloudflare Pages 默认 SPA fallback 返回缺失 chunk 的 HTML 200 时，必须同时证明 `GlobalErrorHandler` chunk 自愈合同存在。
 - Canonical Origin Gate 已提前到 `<head>` 早期同步执行，早于 resource hints / modulepreload / Angular bootstrap，并补齐一次性 SW unregister + `ngsw`/NanoFlow cache 清理和 `__NANOFLOW_WRITE_GUARD__` runtime 标记。
 - `ngsw-config.json` 已移除 broad worker glob；生成物 guard 会检查 `worker-basic.min.js` / `safety-worker.js` 不进入 Angular SW assetGroups。
 - Canonical Origin Gate、WriteGuard、migration recovery banner、sync RPC 客户端/数据库 RPC 草案、task/connection/blackbox RPC/CAS flag 接入、sync writer lease 队列接入和 Realtime circuit/fallback 相关单测已经存在；但删除/批量写保护、端到端 Realtime/LWW/游标 smoke 仍不能算阶段 2/3 验收完成。
@@ -1612,7 +1612,7 @@ OnPush / Signals 桥接门禁：
 - [x] CI deterministic guard 补齐：两次 clean production build 的 hashed JS/CSS、modulepreload、`ngsw.json` 对齐；启用 Sentry inject 时在 inject/post-inject rename/rebuild `ngsw.json` 后再做最终内容 manifest 对齐。
 - [x] 新增最终 artifact manifest：部署前生成 `dist/browser/artifact-manifest.json`（或 CI artifact，不公开也可），记录每个 hashed JS/CSS/worker、`index.html` modulepreload、`launch.html`、`ngsw.json`、`_headers`、`version.json` 的 SHA256、size、content-type 期望和 cache policy；Sentry inject/post-build 全流程结束后再生成，并用同一 manifest 驱动 Vercel/Cloudflare 一致性比对。
 - [x] CI cache guard 补齐非 hash 资源检查：`public/fonts/**`、`public/icons/**`、非 hash `assets` 不能命中 `immutable`；只有最终内容 hash 对齐的 `main*.js`、`polyfills*.js`、`chunk*.js`、`styles*.css` 和构建脚本生成的精确 worker chunk 规则允许长期缓存；`_headers` 规则数超过 90 失败，`dist/browser` 文件数超过 18,000 失败。
-- [x] CI 趋势监控补齐：记录 `dist/browser` 文件数、总大小、根目录 JS 数、`_headers` 规则数、`ngsw.json` asset 数和 GoJS/Flow chunk size；超过上次 main 基线 15% warning，超过 30% fail-fast，避免只在 18,000 文件或 90 规则时才发现增长失控。（2026-04-29 已新增 `docs/cloudflare-artifact-baseline.json`、`scripts/ci/check-artifact-trends.cjs` 与 `quality:guard:artifact-trends`，deploy / dry-run workflow 均在部署前执行。）
+- [x] CI 趋势监控补齐：记录 `dist/browser` 文件数、总大小、根目录 JS 数、`_headers` 规则数、`ngsw.json` asset 数和 GoJS/Flow chunk size；超过上次 main 基线 15% warning，字节/规则类指标超过 30% fail-fast，数量类指标保持 warning-only，避免只在 18,000 文件或 90 规则时才发现增长失控，同时不阻断改善启动预算的小型 lazy chunk 拆分。（2026-04-29 已新增 `docs/cloudflare-artifact-baseline.json`、`scripts/ci/check-artifact-trends.cjs` 与 `quality:guard:artifact-trends`，deploy / dry-run workflow 均在部署前执行。）
 - [x] 首版 `_headers` 必须在 `/*` 规则下包含 `! Link`，关闭 Pages 从 HTML preload/modulepreload 自动生成的 `Link` header；阶段 2/3 header smoke 必须验证 `/` 与 `/index.html` 没有 `Link: ... rel=modulepreload`。
 - [ ] 若 origin 变化，新增旧 Vercel export-only/read-only 构建路径或 host-based 运行时保护，并用 e2e 验证旧域不能新增/编辑/同步写入但仍能导出本地数据。（2026-04-30 已新增 `legacy-export-only` Vercel prebuilt workflow，且 Task/Project 操作入口在 `export-only` 下阻断本地写入；旧域完整 e2e 与导出流程仍需发布后验证。）
 - [ ] 新增一次性迁移欢迎/恢复状态页：新 canonical origin 首次启动时显示云端恢复、队列同步、旧 origin 导出和 PWA 刷新/重装提示；成功恢复、用户跳过、导出入口点击、恢复失败都写 Sentry breadcrumb。（2026-04-30 迁移恢复 banner 的导出/跳过 breadcrumb 已补；新 canonical 首次云端恢复完整页/端到端恢复状态仍需补。）
@@ -2156,7 +2156,7 @@ NG_APP_WORKSPACE_SHELL_COMPOSITION_V3    default true
 NG_APP_RESUME_COMPOSITE_PROBE_RPC_V1     default true
 NG_APP_RESUME_METRICS_GATE_V1            default true
 NG_APP_SYNC_RPC_ENABLED                  default false
-NG_APP_SYNC_LEASE_ENABLED                default false
+NG_APP_SYNC_LEASE_ENABLED                default true
 ```
 
 当前 Cloudflare 迁移相关非布尔 `NG_APP_*` 注入快照：

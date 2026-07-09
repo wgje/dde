@@ -1,0 +1,168 @@
+{
+  "title": "NanoFlow 使用手册",
+  "status": "canonical",
+  "last_verified": "2026-06-13",
+  "root": "docs/handbook/index.md",
+  "categories": [
+    {
+      "id": "get-started",
+      "title": "开始使用",
+      "landing": "docs/handbook/01-get-started/index.md",
+      "description": "面向第一次使用 NanoFlow 的读者：安装运行、理解本地模式、建立第一个项目，并在需要时开启云同步。",
+      "articles": [
+        {
+          "title": "快速开始",
+          "path": "docs/handbook/01-get-started/01-quickstart.md",
+          "purpose": "用最短路径把 NanoFlow 跑起来，并确认本地使用路径是否正常。"
+        },
+        {
+          "title": "本地离线模式",
+          "path": "docs/handbook/01-get-started/02-local-only-mode.md",
+          "purpose": "说明不配置 Supabase 时哪些能力可用、数据保存在哪里、如何避免误清浏览器数据。"
+        },
+        {
+          "title": "第一个项目演练",
+          "path": "docs/handbook/01-get-started/03-first-project.md",
+          "purpose": "一步一步创建项目、任务树、停泊项、专注队列和恢复演练。"
+        },
+        {
+          "title": "云同步配置",
+          "path": "docs/handbook/01-get-started/04-cloud-sync-setup.md",
+          "purpose": "配置登录、多设备同步、附件、Edge Functions 和相关环境变量。"
+        }
+      ]
+    },
+    {
+      "id": "use-nanoflow",
+      "title": "使用 NanoFlow",
+      "landing": "docs/handbook/02-use-nanoflow/index.md",
+      "description": "面向日常使用：文本视图、流程图、Parking Dock、Focus、Black Box、思源知识锚点和 Android 小组件。",
+      "articles": [
+        {
+          "title": "文本视图",
+          "path": "docs/handbook/02-use-nanoflow/01-text-view.md",
+          "purpose": "详细说明任务树、层级、Markdown 内容、链接、搜索、批量操作和移动端操作。"
+        },
+        {
+          "title": "流程图视图",
+          "path": "docs/handbook/02-use-nanoflow/02-flow-view.md",
+          "purpose": "说明什么时候使用 GoJS 流程图、如何看关系、如何导出，以及手机端为什么按需加载。"
+        },
+        {
+          "title": "Parking Dock 停泊坞",
+          "path": "docs/handbook/02-use-nanoflow/03-parking-dock.md",
+          "purpose": "说明如何暂存任务、添加提醒、恢复任务，以及它和归档、删除、专注模式的区别。"
+        },
+        {
+          "title": "Focus 专注模式",
+          "path": "docs/handbook/02-use-nanoflow/04-focus-mode.md",
+          "purpose": "说明 Gate、Black Box、专注队列、Strata、打盹限制和每日使用节奏。"
+        },
+        {
+          "title": "Black Box 黑匣子",
+          "path": "docs/handbook/02-use-nanoflow/05-black-box.md",
+          "purpose": "说明快速记录、文字捕获、语音转写、离线缓存和 Gate 复盘流程。"
+        },
+        {
+          "title": "思源知识锚点",
+          "path": "docs/handbook/02-use-nanoflow/06-siyuan-knowledge-anchors.md",
+          "purpose": "说明如何把任务连接到思源块，同时保持 NanoFlow 作为执行工作台。"
+        },
+        {
+          "title": "Android 小组件",
+          "path": "docs/handbook/02-use-nanoflow/07-android-widget.md",
+          "purpose": "说明 Android-only 小组件能显示什么、需要哪些云端能力、没有 FCM 时如何退化。"
+        }
+      ]
+    },
+    {
+      "id": "data-sync-safety",
+      "title": "数据、同步与安全",
+      "landing": "docs/handbook/03-data-sync-safety/index.md",
+      "description": "面向正式使用前必须理解的可靠性问题：离线优先、同步冲突、备份恢复、安全隐私。",
+      "articles": [
+        {
+          "title": "离线优先模型",
+          "path": "docs/handbook/03-data-sync-safety/01-offline-first-model.md",
+          "purpose": "解释本地先写、后台同步、RetryQueue、客户端 ID 和用户应当如何判断保存状态。"
+        },
+        {
+          "title": "同步与冲突处理",
+          "path": "docs/handbook/03-data-sync-safety/02-sync-and-conflicts.md",
+          "purpose": "解释多设备同步、LWW、待同步状态、冲突风险和排查顺序。"
+        },
+        {
+          "title": "备份与恢复",
+          "path": "docs/handbook/03-data-sync-safety/03-backup-and-restore.md",
+          "purpose": "说明 JSON 导出、附件 ZIP、桌面自动备份、误删恢复和高风险操作前的保护步骤。"
+        },
+        {
+          "title": "安全与隐私",
+          "path": "docs/handbook/03-data-sync-safety/04-security-and-privacy.md",
+          "purpose": "说明密钥、RLS、私有附件、Markdown 安全、本地数据和第三方服务边界。"
+        }
+      ]
+    },
+    {
+      "id": "deploy-operate",
+      "title": "部署与运维",
+      "landing": "docs/handbook/04-deploy-operate/index.md",
+      "description": "面向自己部署私有实例的人：前端托管、Supabase、Edge Functions、生产排障和回滚。",
+      "articles": [
+        {
+          "title": "私有部署",
+          "path": "docs/handbook/04-deploy-operate/01-private-deployment.md",
+          "purpose": "说明如何选择 Cloudflare Pages、Vercel、Netlify 或 Railway，以及部署后怎样验收。"
+        },
+        {
+          "title": "Supabase 运维",
+          "path": "docs/handbook/04-deploy-operate/02-supabase-operations.md",
+          "purpose": "说明数据库、RLS、Storage、Auth、类型生成和迁移操作。"
+        },
+        {
+          "title": "Edge Functions",
+          "path": "docs/handbook/04-deploy-operate/03-edge-functions.md",
+          "purpose": "说明转写、小组件、病毒扫描和共享函数 helper 的部署与验证。"
+        },
+        {
+          "title": "生产排障",
+          "path": "docs/handbook/04-deploy-operate/04-production-troubleshooting.md",
+          "purpose": "说明部署、同步、上传、Edge Function、启动缓存等常见线上问题的排查顺序。"
+        }
+      ]
+    },
+    {
+      "id": "develop-maintain",
+      "title": "Develop and Maintain",
+      "landing": "docs/handbook/05-develop-maintain/index.md",
+      "description": "Set up a contributor environment, navigate the repository, test changes, and maintain docs.",
+      "articles": [
+        {
+          "title": "Development Environment",
+          "path": "docs/handbook/05-develop-maintain/01-development-environment.md",
+          "purpose": "Install dependencies, run the app, and choose verification commands."
+        },
+        {
+          "title": "Repository Map",
+          "path": "docs/handbook/05-develop-maintain/02-repository-map.md",
+          "purpose": "Find source areas, services, state stores, tests, Supabase code, and docs."
+        },
+        {
+          "title": "Testing and Quality",
+          "path": "docs/handbook/05-develop-maintain/03-testing-and-quality.md",
+          "purpose": "Use unit, service, component, E2E, contract, quality, and performance gates."
+        },
+        {
+          "title": "Documentation Maintenance",
+          "path": "docs/handbook/05-develop-maintain/04-documentation-maintenance.md",
+          "purpose": "Keep human and machine documentation synchronized and validated."
+        },
+        {
+          "title": "Runtime Entry and Activity Audit",
+          "path": "docs/handbook/05-develop-maintain/05-runtime-entry-activity-audit.md",
+          "purpose": "Harden interaction entries, self-running activities, timers, subscriptions, queues, and async business chains."
+        }
+      ]
+    }
+  ]
+}

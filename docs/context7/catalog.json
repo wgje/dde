@@ -1,0 +1,241 @@
+{
+  "$schema": "https://nanoflow.local/schemas/context7-catalog.schema.json",
+  "project": "NanoFlow",
+  "lastVerified": "2026-06-09",
+  "purpose": "Machine-readable catalog for Context7 and AI retrieval.",
+  "canonicalRoot": "docs/context7",
+  "categories": {
+    "root": [
+      "docs/context7/index.md",
+      "docs/context7/README.md"
+    ],
+    "gettingStarted": [
+      "docs/context7/01-getting-started/index.md",
+      "docs/context7/01-getting-started/01-installation.md",
+      "docs/context7/01-getting-started/02-project-structure.md",
+      "docs/context7/01-getting-started/03-core-concepts.md",
+      "docs/context7/01-getting-started/04-verification.md"
+    ],
+    "guidesNextStyle": [
+      "docs/context7/02-guides/index.md",
+      "docs/context7/02-guides/ai-agents.md",
+      "docs/context7/02-guides/sync-workflow.md",
+      "docs/context7/02-guides/focus-parking-workflow.md",
+      "docs/context7/02-guides/supabase-operations.md"
+    ],
+    "apiReference": [
+      "docs/context7/03-api-reference/index.md",
+      "docs/context7/03-api-reference/stores.md",
+      "docs/context7/03-api-reference/sync-services.md",
+      "docs/context7/03-api-reference/models.md",
+      "docs/context7/03-api-reference/edge-functions.md",
+      "docs/context7/03-api-reference/configuration.md"
+    ],
+    "architectureNextStyle": [
+      "docs/context7/04-architecture/index.md",
+      "docs/context7/04-architecture/runtime-architecture.md",
+      "docs/context7/04-architecture/sync-architecture.md",
+      "docs/context7/04-architecture/security-architecture.md",
+      "docs/context7/04-architecture/ui-lifecycle.md"
+    ],
+    "fileConventions": [
+      "docs/context7/05-file-conventions/index.md",
+      "docs/context7/05-file-conventions/angular-files.md",
+      "docs/context7/05-file-conventions/service-files.md",
+      "docs/context7/05-file-conventions/supabase-files.md",
+      "docs/context7/05-file-conventions/documentation-files.md"
+    ],
+    "errors": [
+      "docs/context7/06-errors/index.md",
+      "docs/context7/06-errors/sync-errors.md",
+      "docs/context7/06-errors/auth-security-errors.md",
+      "docs/context7/06-errors/ui-runtime-errors.md"
+    ],
+    "examples": [
+      "docs/context7/07-examples/index.md",
+      "docs/context7/07-examples/add-task-field.md",
+      "docs/context7/07-examples/add-edge-function.md",
+      "docs/context7/07-examples/add-context7-doc-page.md"
+    ],
+    "migrationAndVersioning": [
+      "docs/context7/08-migration/index.md",
+      "docs/context7/08-migration/versioning.md",
+      "docs/context7/08-migration/schema-migrations.md",
+      "docs/context7/08-migration/docs-migrations.md"
+    ],
+    "guides": [
+      "docs/context7/overview.md",
+      "docs/context7/architecture.md",
+      "docs/context7/data-model.md",
+      "docs/context7/sync-offline.md",
+      "docs/context7/feature-workflows.md",
+      "docs/context7/api-edge-functions.md",
+      "docs/context7/development.md",
+      "docs/context7/operations-security.md",
+      "docs/context7/agent-rules.md",
+      "docs/context7/context7-maintenance.md",
+      "docs/context7/source-map.md"
+    ],
+    "reference": [
+      "docs/context7/reference/configuration-reference.md",
+      "docs/context7/reference/service-catalog.md",
+      "docs/context7/reference/model-field-reference.md",
+      "docs/context7/reference/supabase-schema-reference.md"
+    ],
+    "contracts": [
+      "docs/context7/contracts/sync-contract.md",
+      "docs/context7/contracts/security-contract.md",
+      "docs/context7/contracts/ui-lifecycle-contract.md"
+    ],
+    "runbooks": [
+      "docs/context7/runbooks/sync-debugging.md",
+      "docs/context7/runbooks/data-recovery.md",
+      "docs/context7/runbooks/context7-publishing.md"
+    ],
+    "decisions": [
+      "docs/context7/adr/0001-context7-canonical-corpus.md",
+      "docs/context7/adr/0002-offline-first-lww-sync.md"
+    ],
+    "schemas": [
+      "docs/context7/schemas/context7-doc-page.schema.json",
+      "docs/context7/schemas/nanoflow-domain.schema.json"
+    ],
+    "quality": [
+      "docs/context7/quality/documentation-quality-gate.md",
+      "docs/context7/quality/nextjs-parity-checklist.md"
+    ],
+    "governance": [
+      "docs/context7/catalog.json",
+      "docs/context7/glossary.md",
+      "docs/context7/compatibility-matrix.md",
+      "docs/context7/migration-playbook.md",
+      "docs/context7/documentation-contribution.md"
+    ]
+  },
+  "retrievalRoutes": [
+    {
+      "query": "documentation index, docs structure, how to use NanoFlow docs, Context7 root",
+      "primary": "docs/context7/index.md",
+      "secondary": [
+        "docs/context7/README.md",
+        "docs/context7/catalog.json",
+        "docs/context7/quality/nextjs-parity-checklist.md"
+      ]
+    },
+    {
+      "query": "sync, offline, LWW, retry queue, tombstones",
+      "primary": "docs/context7/contracts/sync-contract.md",
+      "secondary": [
+        "docs/context7/sync-offline.md",
+        "docs/context7/runbooks/sync-debugging.md",
+        "docs/context7/reference/configuration-reference.md"
+      ]
+    },
+    {
+      "query": "models, fields, task, project, connection, dock, focus",
+      "primary": "docs/context7/reference/model-field-reference.md",
+      "secondary": [
+        "docs/context7/data-model.md",
+        "docs/context7/schemas/nanoflow-domain.schema.json"
+      ]
+    },
+    {
+      "query": "services, ownership, where to change code",
+      "primary": "docs/context7/reference/service-catalog.md",
+      "secondary": [
+        "docs/context7/source-map.md",
+        "docs/context7/architecture.md"
+      ]
+    },
+    {
+      "query": "security, secrets, RLS, uploads, Edge Functions",
+      "primary": "docs/context7/contracts/security-contract.md",
+      "secondary": [
+        "docs/context7/operations-security.md",
+        "docs/context7/reference/supabase-schema-reference.md"
+      ]
+    },
+    {
+      "query": "mobile, GoJS, Flow, Text view, Focus UI, Parking UI",
+      "primary": "docs/context7/contracts/ui-lifecycle-contract.md",
+      "secondary": [
+        "docs/context7/feature-workflows.md",
+        "docs/context7/source-map.md"
+      ]
+    },
+    {
+    "query": "Context7 publishing, refresh, indexing, private source",
+      "primary": "docs/context7/runbooks/context7-publishing.md",
+      "secondary": [
+        "docs/context7/context7-maintenance.md",
+        "docs/context7/adr/0001-context7-canonical-corpus.md",
+        "docs/context7/quality/documentation-quality-gate.md"
+      ]
+    },
+    {
+      "query": "Context7 live consistency, code changes, docs drift, documentation guard, source changes",
+      "primary": "docs/context7/context7-maintenance.md",
+      "secondary": [
+        "docs/context7/quality/documentation-quality-gate.md",
+        "docs/context7/quality/nextjs-parity-checklist.md",
+        "docs/context7/documentation-contribution.md"
+      ]
+    },
+    {
+      "query": "getting started, installation, project structure, verification",
+      "primary": "docs/context7/01-getting-started/index.md",
+      "secondary": [
+        "docs/context7/01-getting-started/01-installation.md",
+        "docs/context7/01-getting-started/02-project-structure.md",
+        "docs/context7/01-getting-started/04-verification.md"
+      ]
+    },
+    {
+      "query": "API reference, stores, sync services, models, edge functions, configuration",
+      "primary": "docs/context7/03-api-reference/index.md",
+      "secondary": [
+        "docs/context7/03-api-reference/stores.md",
+        "docs/context7/03-api-reference/sync-services.md",
+        "docs/context7/03-api-reference/models.md",
+        "docs/context7/03-api-reference/edge-functions.md",
+        "docs/context7/03-api-reference/configuration.md"
+      ]
+    },
+    {
+      "query": "file conventions, where to place files, angular, services, supabase, docs",
+      "primary": "docs/context7/05-file-conventions/index.md",
+      "secondary": [
+        "docs/context7/05-file-conventions/angular-files.md",
+        "docs/context7/05-file-conventions/service-files.md",
+        "docs/context7/05-file-conventions/supabase-files.md"
+      ]
+    },
+    {
+      "query": "errors, sync errors, auth errors, UI runtime errors",
+      "primary": "docs/context7/06-errors/index.md",
+      "secondary": [
+        "docs/context7/06-errors/sync-errors.md",
+        "docs/context7/06-errors/auth-security-errors.md",
+        "docs/context7/06-errors/ui-runtime-errors.md"
+      ]
+    },
+    {
+      "query": "examples, add task field, add edge function, add docs page",
+      "primary": "docs/context7/07-examples/index.md",
+      "secondary": [
+        "docs/context7/07-examples/add-task-field.md",
+        "docs/context7/07-examples/add-edge-function.md",
+        "docs/context7/07-examples/add-context7-doc-page.md"
+      ]
+    },
+    {
+      "query": "migration, versioning, schema migrations, docs migrations",
+      "primary": "docs/context7/08-migration/index.md",
+      "secondary": [
+        "docs/context7/08-migration/versioning.md",
+        "docs/context7/08-migration/schema-migrations.md",
+        "docs/context7/08-migration/docs-migrations.md"
+      ]
+    }
+  ]
+}
