@@ -1,0 +1,956 @@
+{
+  "schemaVersion": 1,
+  "upstreamCodeGraphVersion": "@colbymchenry/codegraph@1.2.0",
+  "fixedVersionUpgradeProbe": "--codegraph-target @colbymchenry/codegraph@<new-version>",
+  "nativeDelegationContract": {
+    "delegatedGenericCapabilities": [
+      "TypeScript symbol/import/export/call/impact discovery",
+      "auto-sync",
+      "indexing",
+      "generic search ranking",
+      "callers/callees/impact",
+      "native Markdown/JSON formatter section order",
+      "strict native output projection",
+      "context exploration source ordering"
+    ],
+    "nanoFlowOwnedCapabilities": [
+      "project-specific semantics",
+      "output-quality policy",
+      "Codex host reliability",
+      "repository hard-rule anchors"
+    ]
+  },
+  "verificationGates": [
+    "npm run codegraph:overlay:docs:validate",
+    "npm run codegraph:adapter:gate"
+  ],
+  "hotspots": [
+    {
+      "name": "collectTypeScript()",
+      "sourcePath": "scripts/generate-codegraph-nanoflow-overlay.mjs",
+      "status": "temporary-allowed",
+      "delegatedUpstreamOwner": "native CodeGraph",
+      "allowedPurpose": "attach NanoFlow metadata.relation to native-shaped endpoints for Angular, Supabase, test, Android, Context7, and AGENTS hard-rule semantics",
+      "forbiddenScope": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "removalTrigger": "upstream extension point or native projection hook can carry NanoFlow relation metadata and source-evidence policy without rebuilding generic TypeScript graph shape",
+      "verificationGate": [
+        "npm run codegraph:overlay:docs:validate",
+        "npm run codegraph:adapter:gate"
+      ],
+      "capabilityCategory": "overlay graph duplicate hotspot",
+      "language": "typescript",
+      "nativeOwnedCapability": "native CodeGraph owns generic TypeScript/Kotlin symbol, import, export, reference, call, type, decorator, callers/callees, impact, auto-sync, indexing, and generic search ranking behavior",
+      "nanoFlowOwnedCapability": "NanoFlow owns project-specific semantics, metadata.relation attachment, source evidence policy, and repository hard-rule anchors",
+      "allowedRelations": [
+        "metadata.relation"
+      ],
+      "forbiddenGenericBehavior": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "upstreamHookNeeded": "upstream CodeGraph hook for attaching NanoFlow metadata.relation and source evidence policy to native graph endpoints",
+      "removalCandidateWhen": "upstream CodeGraph exposes an extension point or native projection hook for NanoFlow relation metadata without rebuilding generic graph shape",
+      "lastVerifiedGate": "npm run codegraph:overlay:docs:validate",
+      "sourceSymbols": [
+        "collectTypeScript"
+      ],
+      "coveredChildSymbols": [
+        "readImportDeclaration",
+        "readImportEqualsDeclaration",
+        "readExportDeclaration",
+        "readExportDeclarationFromFile",
+        "readExportDeclarationObjectSymbols",
+        "readExportAssignment",
+        "readExportedStatementNames",
+        "readCallableBody",
+        "readCallExpressions",
+        "readCallExpressionName",
+        "readCallableTypeReferences"
+      ]
+    },
+    {
+      "name": "buildNativeGraph()",
+      "sourcePath": "scripts/generate-codegraph-nanoflow-overlay.mjs",
+      "status": "temporary-allowed",
+      "delegatedUpstreamOwner": "native CodeGraph",
+      "allowedPurpose": "attach NanoFlow metadata.relation to native-shaped endpoints while preserving strict native JSON and Markdown projection fields",
+      "forbiddenScope": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "removalTrigger": "upstream extension point or native projection hook can carry NanoFlow relation metadata and source-evidence policy without a parallel native graph projection",
+      "verificationGate": [
+        "npm run codegraph:overlay:docs:validate",
+        "npm run codegraph:adapter:gate"
+      ],
+      "capabilityCategory": "overlay graph duplicate hotspot",
+      "language": "typescript",
+      "nativeOwnedCapability": "native CodeGraph owns generic TypeScript/Kotlin symbol, import, export, reference, call, type, decorator, callers/callees, impact, auto-sync, indexing, and generic search ranking behavior",
+      "nanoFlowOwnedCapability": "NanoFlow owns project-specific semantics, metadata.relation attachment, source evidence policy, and repository hard-rule anchors",
+      "allowedRelations": [
+        "metadata.relation"
+      ],
+      "forbiddenGenericBehavior": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "upstreamHookNeeded": "upstream CodeGraph hook for attaching NanoFlow metadata.relation and source evidence policy to native graph endpoints",
+      "removalCandidateWhen": "upstream CodeGraph exposes an extension point or native projection hook for NanoFlow relation metadata without rebuilding generic graph shape",
+      "lastVerifiedGate": "npm run codegraph:overlay:docs:validate",
+      "sourceSymbols": [
+        "buildNativeGraph"
+      ],
+      "coveredChildSymbols": [
+        "addImportEdges",
+        "addTypeReferenceEdge"
+      ]
+    },
+    {
+      "name": "buildImportAliasIndex()",
+      "sourcePath": "scripts/generate-codegraph-nanoflow-overlay.mjs",
+      "status": "temporary-allowed",
+      "delegatedUpstreamOwner": "native CodeGraph",
+      "allowedPurpose": "attach NanoFlow metadata.relation to native-shaped endpoints that need project-semantic import alias closure",
+      "forbiddenScope": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "removalTrigger": "upstream extension point or native projection hook can carry NanoFlow relation metadata and resolved import aliases",
+      "verificationGate": [
+        "npm run codegraph:overlay:docs:validate",
+        "npm run codegraph:adapter:gate"
+      ],
+      "capabilityCategory": "overlay graph duplicate hotspot",
+      "language": "typescript",
+      "nativeOwnedCapability": "native CodeGraph owns generic TypeScript/Kotlin symbol, import, export, reference, call, type, decorator, callers/callees, impact, auto-sync, indexing, and generic search ranking behavior",
+      "nanoFlowOwnedCapability": "NanoFlow owns project-specific semantics, metadata.relation attachment, source evidence policy, and repository hard-rule anchors",
+      "allowedRelations": [
+        "metadata.relation"
+      ],
+      "forbiddenGenericBehavior": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "upstreamHookNeeded": "upstream CodeGraph hook for attaching NanoFlow metadata.relation and source evidence policy to native graph endpoints",
+      "removalCandidateWhen": "upstream CodeGraph exposes an extension point or native projection hook for NanoFlow relation metadata without rebuilding generic graph shape",
+      "lastVerifiedGate": "npm run codegraph:overlay:docs:validate",
+      "sourceSymbols": [
+        "buildImportAliasIndex"
+      ],
+      "coveredChildSymbols": [
+        "resolveImportedAliasNodeId",
+        "resolveNamespaceImportMemberNodeId",
+        "resolveImportedObjectMemberNodeId"
+      ]
+    },
+    {
+      "name": "buildExportTargetIndex()",
+      "sourcePath": "scripts/generate-codegraph-nanoflow-overlay.mjs",
+      "status": "temporary-allowed",
+      "delegatedUpstreamOwner": "native CodeGraph",
+      "allowedPurpose": "attach NanoFlow metadata.relation to native-shaped endpoints that need project-semantic export and re-export closure",
+      "forbiddenScope": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "removalTrigger": "upstream extension point or native projection hook can carry NanoFlow relation metadata and resolved export targets",
+      "verificationGate": [
+        "npm run codegraph:overlay:docs:validate",
+        "npm run codegraph:adapter:gate"
+      ],
+      "capabilityCategory": "overlay graph duplicate hotspot",
+      "language": "typescript",
+      "nativeOwnedCapability": "native CodeGraph owns generic TypeScript/Kotlin symbol, import, export, reference, call, type, decorator, callers/callees, impact, auto-sync, indexing, and generic search ranking behavior",
+      "nanoFlowOwnedCapability": "NanoFlow owns project-specific semantics, metadata.relation attachment, source evidence policy, and repository hard-rule anchors",
+      "allowedRelations": [
+        "metadata.relation"
+      ],
+      "forbiddenGenericBehavior": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "upstreamHookNeeded": "upstream CodeGraph hook for attaching NanoFlow metadata.relation and source evidence policy to native graph endpoints",
+      "removalCandidateWhen": "upstream CodeGraph exposes an extension point or native projection hook for NanoFlow relation metadata without rebuilding generic graph shape",
+      "lastVerifiedGate": "npm run codegraph:overlay:docs:validate",
+      "sourceSymbols": [
+        "buildExportTargetIndex"
+      ],
+      "coveredChildSymbols": []
+    },
+    {
+      "name": "resolveReferenceNodeId()",
+      "sourcePath": "scripts/generate-codegraph-nanoflow-overlay.mjs",
+      "status": "temporary-allowed",
+      "delegatedUpstreamOwner": "native CodeGraph",
+      "allowedPurpose": "attach NanoFlow metadata.relation to native-shaped endpoints after same-file, import, export, namespace, and CommonJS reference closure",
+      "forbiddenScope": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "removalTrigger": "upstream extension point or native projection hook can carry NanoFlow relation metadata and resolved reference endpoints",
+      "verificationGate": [
+        "npm run codegraph:overlay:docs:validate",
+        "npm run codegraph:adapter:gate"
+      ],
+      "capabilityCategory": "overlay graph duplicate hotspot",
+      "language": "typescript",
+      "nativeOwnedCapability": "native CodeGraph owns generic TypeScript/Kotlin symbol, import, export, reference, call, type, decorator, callers/callees, impact, auto-sync, indexing, and generic search ranking behavior",
+      "nanoFlowOwnedCapability": "NanoFlow owns project-specific semantics, metadata.relation attachment, source evidence policy, and repository hard-rule anchors",
+      "allowedRelations": [
+        "metadata.relation"
+      ],
+      "forbiddenGenericBehavior": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "upstreamHookNeeded": "upstream CodeGraph hook for attaching NanoFlow metadata.relation and source evidence policy to native graph endpoints",
+      "removalCandidateWhen": "upstream CodeGraph exposes an extension point or native projection hook for NanoFlow relation metadata without rebuilding generic graph shape",
+      "lastVerifiedGate": "npm run codegraph:overlay:docs:validate",
+      "sourceSymbols": [
+        "resolveReferenceNodeId"
+      ],
+      "coveredChildSymbols": []
+    },
+    {
+      "name": "addTypeScriptCallableEdges()",
+      "sourcePath": "scripts/generate-codegraph-nanoflow-overlay.mjs",
+      "status": "temporary-allowed",
+      "delegatedUpstreamOwner": "native CodeGraph",
+      "allowedPurpose": "attach NanoFlow metadata.relation to native-shaped endpoints for Supabase select, rpc, storage, table-write, and incremental predicate callable relations",
+      "forbiddenScope": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "removalTrigger": "upstream extension point or native projection hook can carry NanoFlow relation metadata on native call graph endpoints",
+      "verificationGate": [
+        "npm run codegraph:overlay:docs:validate",
+        "npm run codegraph:adapter:gate"
+      ],
+      "capabilityCategory": "overlay graph duplicate hotspot",
+      "language": "typescript",
+      "nativeOwnedCapability": "native CodeGraph owns generic TypeScript/Kotlin symbol, import, export, reference, call, type, decorator, callers/callees, impact, auto-sync, indexing, and generic search ranking behavior",
+      "nanoFlowOwnedCapability": "NanoFlow owns project-specific semantics, metadata.relation attachment, source evidence policy, and repository hard-rule anchors",
+      "allowedRelations": [
+        "metadata.relation"
+      ],
+      "forbiddenGenericBehavior": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "upstreamHookNeeded": "upstream CodeGraph hook for attaching NanoFlow metadata.relation and source evidence policy to native graph endpoints",
+      "removalCandidateWhen": "upstream CodeGraph exposes an extension point or native projection hook for NanoFlow relation metadata without rebuilding generic graph shape",
+      "lastVerifiedGate": "npm run codegraph:overlay:docs:validate",
+      "sourceSymbols": [
+        "addTypeScriptCallableEdges"
+      ],
+      "coveredChildSymbols": [
+        "addTypeScriptNativeCallableEdges",
+        "readCallableSignature",
+        "readCallableReturnTypeName"
+      ]
+    },
+    {
+      "name": "collectAndroid()",
+      "sourcePath": "scripts/generate-codegraph-nanoflow-overlay.mjs",
+      "status": "temporary-allowed",
+      "delegatedUpstreamOwner": "native CodeGraph",
+      "allowedPurpose": "attach NanoFlow metadata.relation to native-shaped Android Manifest, Kotlin, widget, and resource endpoints while aggregating project-specific Android semantics",
+      "forbiddenScope": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "removalTrigger": "upstream extension point or native projection hook can carry NanoFlow Android metadata.relation without a parallel Android collector",
+      "capabilityCategory": "Android/Kotlin duplicate hotspot",
+      "language": "kotlin/xml",
+      "nativeOwnedCapability": "native CodeGraph owns generic Kotlin symbol, import, call, type-reference, decorator, override, callers/callees, impact, auto-sync, indexing, and generic search ranking behavior",
+      "nanoFlowOwnedCapability": "NanoFlow owns Android Manifest, widget provider, resource, host-app project semantics, metadata.relation attachment, and source evidence policy",
+      "allowedRelations": [
+        "android-manifest-component",
+        "android-widget-provider",
+        "android-resource-reference",
+        "android-kotlin-class"
+      ],
+      "forbiddenGenericBehavior": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "upstreamHookNeeded": "upstream CodeGraph hook for attaching NanoFlow Android metadata.relation and Android resource/widget evidence to native Kotlin/XML graph endpoints",
+      "removalCandidateWhen": "upstream CodeGraph exposes Kotlin/XML projection hooks that can carry NanoFlow Android relation metadata without rebuilding generic Kotlin symbol/call/type graph shape",
+      "lastVerifiedGate": "npm run codegraph:overlay:docs:validate",
+      "sourceSymbols": [
+        "collectAndroid"
+      ],
+      "coveredChildSymbols": [
+        "readAndroidKotlinClasses"
+      ],
+      "verificationGate": [
+        "npm run codegraph:overlay:docs:validate",
+        "npm run codegraph:adapter:gate"
+      ]
+    },
+    {
+      "name": "readAndroidKotlinFileSymbols()",
+      "sourcePath": "scripts/generate-codegraph-nanoflow-overlay.mjs",
+      "status": "temporary-allowed",
+      "delegatedUpstreamOwner": "native CodeGraph",
+      "allowedPurpose": "attach NanoFlow metadata.relation to native-shaped Kotlin class, object, enum, constructor, property, method, top-level function, import, annotation, and type endpoints",
+      "forbiddenScope": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "removalTrigger": "upstream extension point or native projection hook for Kotlin can carry NanoFlow Android metadata.relation without local Kotlin symbol extraction",
+      "capabilityCategory": "Android/Kotlin duplicate hotspot",
+      "language": "kotlin/xml",
+      "nativeOwnedCapability": "native CodeGraph owns generic Kotlin symbol, import, call, type-reference, decorator, override, callers/callees, impact, auto-sync, indexing, and generic search ranking behavior",
+      "nanoFlowOwnedCapability": "NanoFlow owns Android Manifest, widget provider, resource, host-app project semantics, metadata.relation attachment, and source evidence policy",
+      "allowedRelations": [
+        "android-kotlin-class",
+        "android-kotlin-function",
+        "android-kotlin-import",
+        "android-kotlin-annotation",
+        "android-kotlin-type-reference"
+      ],
+      "forbiddenGenericBehavior": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "upstreamHookNeeded": "upstream CodeGraph hook for attaching NanoFlow Android metadata.relation and Android resource/widget evidence to native Kotlin/XML graph endpoints",
+      "removalCandidateWhen": "upstream CodeGraph exposes Kotlin/XML projection hooks that can carry NanoFlow Android relation metadata without rebuilding generic Kotlin symbol/call/type graph shape",
+      "lastVerifiedGate": "npm run codegraph:overlay:docs:validate",
+      "sourceSymbols": [
+        "readAndroidKotlinFileSymbols"
+      ],
+      "coveredChildSymbols": [
+        "readAndroidKotlinImportsFromSource",
+        "readAndroidKotlinHeritage",
+        "readAndroidKotlinHeritageTypes",
+        "readAndroidKotlinDeclarationEndLine",
+        "readAndroidKotlinHeritageTypeName",
+        "readAndroidKotlinHeritageType",
+        "readAndroidKotlinCompanionObjectsFromSource",
+        "readAndroidKotlinEnumMembersFromSource",
+        "readAndroidKotlinEnumMemberSegment",
+        "readAndroidKotlinConstructorsFromSource",
+        "readAndroidKotlinPropertiesFromSource",
+        "readAndroidKotlinPrimaryConstructorRanges",
+        "readAndroidKotlinCompanionObjectRanges",
+        "readAndroidKotlinPropertyDeclaration",
+        "readAndroidKotlinLeadingAnnotations",
+        "readAndroidKotlinInlineAnnotations",
+        "readAndroidKotlinAnnotationLine",
+        "readAndroidKotlinTypeReferencesFromTypeText",
+        "readAndroidKotlinMethodsFromSource",
+        "readAndroidKotlinFunctionsFromSource",
+        "readAndroidKotlinCallableTypeReferences",
+        "readAndroidKotlinParameterTypeReferences",
+        "readAndroidKotlinVisibility",
+        "readAndroidKotlinSignatureBounds",
+        "readAndroidKotlinCallableBodyBoundary"
+      ],
+      "verificationGate": [
+        "npm run codegraph:overlay:docs:validate",
+        "npm run codegraph:adapter:gate"
+      ]
+    },
+    {
+      "name": "readAndroidKotlinMethodCalls()",
+      "sourcePath": "scripts/generate-codegraph-nanoflow-overlay.mjs",
+      "status": "temporary-allowed",
+      "delegatedUpstreamOwner": "native CodeGraph",
+      "allowedPurpose": "attach NanoFlow metadata.relation to native-shaped Kotlin call endpoints for Android widget/project semantics",
+      "forbiddenScope": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "removalTrigger": "upstream extension point or native projection hook for Kotlin call can carry NanoFlow Android relation metadata without local Kotlin call parsing",
+      "capabilityCategory": "Android/Kotlin duplicate hotspot",
+      "language": "kotlin/xml",
+      "nativeOwnedCapability": "native CodeGraph owns generic Kotlin symbol, import, call, type-reference, decorator, override, callers/callees, impact, auto-sync, indexing, and generic search ranking behavior",
+      "nanoFlowOwnedCapability": "NanoFlow owns Android Manifest, widget provider, resource, host-app project semantics, metadata.relation attachment, and source evidence policy",
+      "allowedRelations": [
+        "android-kotlin-call"
+      ],
+      "forbiddenGenericBehavior": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "upstreamHookNeeded": "upstream CodeGraph hook for attaching NanoFlow Android metadata.relation and Android resource/widget evidence to native Kotlin/XML graph endpoints",
+      "removalCandidateWhen": "upstream CodeGraph exposes Kotlin/XML projection hooks that can carry NanoFlow Android relation metadata without rebuilding generic Kotlin symbol/call/type graph shape",
+      "lastVerifiedGate": "npm run codegraph:overlay:docs:validate",
+      "sourceSymbols": [
+        "readAndroidKotlinMethodCalls"
+      ],
+      "coveredChildSymbols": [],
+      "verificationGate": [
+        "npm run codegraph:overlay:docs:validate",
+        "npm run codegraph:adapter:gate"
+      ]
+    },
+    {
+      "name": "resolveAndroidKotlinCallTarget()",
+      "sourcePath": "scripts/generate-codegraph-nanoflow-overlay.mjs",
+      "status": "temporary-allowed",
+      "delegatedUpstreamOwner": "native CodeGraph",
+      "allowedPurpose": "attach NanoFlow metadata.relation to resolved native-shaped Kotlin call targets without falling back to unsafe cross-file same-name calls",
+      "forbiddenScope": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "removalTrigger": "upstream extension point or native projection hook for Kotlin call target can expose Kotlin call endpoints that NanoFlow annotates with Android relation metadata",
+      "capabilityCategory": "Android/Kotlin duplicate hotspot",
+      "language": "kotlin/xml",
+      "nativeOwnedCapability": "native CodeGraph owns generic Kotlin symbol, import, call, type-reference, decorator, override, callers/callees, impact, auto-sync, indexing, and generic search ranking behavior",
+      "nanoFlowOwnedCapability": "NanoFlow owns Android Manifest, widget provider, resource, host-app project semantics, metadata.relation attachment, and source evidence policy",
+      "allowedRelations": [
+        "android-kotlin-call"
+      ],
+      "forbiddenGenericBehavior": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "upstreamHookNeeded": "upstream CodeGraph hook for attaching NanoFlow Android metadata.relation and Android resource/widget evidence to native Kotlin/XML graph endpoints",
+      "removalCandidateWhen": "upstream CodeGraph exposes Kotlin/XML projection hooks that can carry NanoFlow Android relation metadata without rebuilding generic Kotlin symbol/call/type graph shape",
+      "lastVerifiedGate": "npm run codegraph:overlay:docs:validate",
+      "sourceSymbols": [
+        "resolveAndroidKotlinCallTarget"
+      ],
+      "coveredChildSymbols": [],
+      "verificationGate": [
+        "npm run codegraph:overlay:docs:validate",
+        "npm run codegraph:adapter:gate"
+      ]
+    },
+    {
+      "name": "resolveAndroidKotlinTypeTarget()",
+      "sourcePath": "scripts/generate-codegraph-nanoflow-overlay.mjs",
+      "status": "temporary-allowed",
+      "delegatedUpstreamOwner": "native CodeGraph",
+      "allowedPurpose": "attach NanoFlow metadata.relation to resolved native-shaped Kotlin type and heritage endpoints while filtering Kotlin standard-library noise",
+      "forbiddenScope": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "removalTrigger": "upstream extension point or native projection hook for Kotlin type-reference can carry NanoFlow Android relation metadata without local Kotlin type resolution",
+      "capabilityCategory": "Android/Kotlin duplicate hotspot",
+      "language": "kotlin/xml",
+      "nativeOwnedCapability": "native CodeGraph owns generic Kotlin symbol, import, call, type-reference, decorator, override, callers/callees, impact, auto-sync, indexing, and generic search ranking behavior",
+      "nanoFlowOwnedCapability": "NanoFlow owns Android Manifest, widget provider, resource, host-app project semantics, metadata.relation attachment, and source evidence policy",
+      "allowedRelations": [
+        "android-kotlin-type-reference",
+        "android-kotlin-override"
+      ],
+      "forbiddenGenericBehavior": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "upstreamHookNeeded": "upstream CodeGraph hook for attaching NanoFlow Android metadata.relation and Android resource/widget evidence to native Kotlin/XML graph endpoints",
+      "removalCandidateWhen": "upstream CodeGraph exposes Kotlin/XML projection hooks that can carry NanoFlow Android relation metadata without rebuilding generic Kotlin symbol/call/type graph shape",
+      "lastVerifiedGate": "npm run codegraph:overlay:docs:validate",
+      "sourceSymbols": [
+        "resolveAndroidKotlinTypeTarget"
+      ],
+      "coveredChildSymbols": [
+        "resolveAndroidKotlinHeritageDeclaration",
+        "resolveAndroidKotlinExternalHeritageTarget"
+      ],
+      "verificationGate": [
+        "npm run codegraph:overlay:docs:validate",
+        "npm run codegraph:adapter:gate"
+      ]
+    },
+    {
+      "name": "addAndroidKotlinTypeReferenceEdges()",
+      "sourcePath": "scripts/generate-codegraph-nanoflow-overlay.mjs",
+      "status": "temporary-allowed",
+      "delegatedUpstreamOwner": "native CodeGraph",
+      "allowedPurpose": "attach NanoFlow metadata.relation to native type_of edges for Kotlin property, parameter, return, and function type evidence",
+      "forbiddenScope": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "removalTrigger": "upstream extension point or native projection hook for Kotlin type_of can carry NanoFlow Android relation metadata on Kotlin type-reference endpoints",
+      "capabilityCategory": "Android/Kotlin duplicate hotspot",
+      "language": "kotlin/xml",
+      "nativeOwnedCapability": "native CodeGraph owns generic Kotlin symbol, import, call, type-reference, decorator, override, callers/callees, impact, auto-sync, indexing, and generic search ranking behavior",
+      "nanoFlowOwnedCapability": "NanoFlow owns Android Manifest, widget provider, resource, host-app project semantics, metadata.relation attachment, and source evidence policy",
+      "allowedRelations": [
+        "android-kotlin-type-reference"
+      ],
+      "forbiddenGenericBehavior": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "upstreamHookNeeded": "upstream CodeGraph hook for attaching NanoFlow Android metadata.relation and Android resource/widget evidence to native Kotlin/XML graph endpoints",
+      "removalCandidateWhen": "upstream CodeGraph exposes Kotlin/XML projection hooks that can carry NanoFlow Android relation metadata without rebuilding generic Kotlin symbol/call/type graph shape",
+      "lastVerifiedGate": "npm run codegraph:overlay:docs:validate",
+      "sourceSymbols": [
+        "addAndroidKotlinTypeReferenceEdges"
+      ],
+      "coveredChildSymbols": [],
+      "verificationGate": [
+        "npm run codegraph:overlay:docs:validate",
+        "npm run codegraph:adapter:gate"
+      ]
+    },
+    {
+      "name": "addAndroidKotlinOverrideEdges()",
+      "sourcePath": "scripts/generate-codegraph-nanoflow-overlay.mjs",
+      "status": "temporary-allowed",
+      "delegatedUpstreamOwner": "native CodeGraph",
+      "allowedPurpose": "attach NanoFlow metadata.relation to native overrides edges for Kotlin override methods and properties",
+      "forbiddenScope": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "removalTrigger": "upstream extension point or native projection hook for Kotlin overrides can carry NanoFlow Android relation metadata on Kotlin override endpoints",
+      "capabilityCategory": "Android/Kotlin duplicate hotspot",
+      "language": "kotlin/xml",
+      "nativeOwnedCapability": "native CodeGraph owns generic Kotlin symbol, import, call, type-reference, decorator, override, callers/callees, impact, auto-sync, indexing, and generic search ranking behavior",
+      "nanoFlowOwnedCapability": "NanoFlow owns Android Manifest, widget provider, resource, host-app project semantics, metadata.relation attachment, and source evidence policy",
+      "allowedRelations": [
+        "android-kotlin-override"
+      ],
+      "forbiddenGenericBehavior": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "upstreamHookNeeded": "upstream CodeGraph hook for attaching NanoFlow Android metadata.relation and Android resource/widget evidence to native Kotlin/XML graph endpoints",
+      "removalCandidateWhen": "upstream CodeGraph exposes Kotlin/XML projection hooks that can carry NanoFlow Android relation metadata without rebuilding generic Kotlin symbol/call/type graph shape",
+      "lastVerifiedGate": "npm run codegraph:overlay:docs:validate",
+      "sourceSymbols": [
+        "addAndroidKotlinOverrideEdges"
+      ],
+      "coveredChildSymbols": [],
+      "verificationGate": [
+        "npm run codegraph:overlay:docs:validate",
+        "npm run codegraph:adapter:gate"
+      ]
+    },
+    {
+      "name": "addAndroidKotlinAnnotationEdges()",
+      "sourcePath": "scripts/generate-codegraph-nanoflow-overlay.mjs",
+      "status": "temporary-allowed",
+      "delegatedUpstreamOwner": "native CodeGraph",
+      "allowedPurpose": "attach NanoFlow metadata.relation to native decorates edges for Kotlin annotations while preserving strict native projection behavior",
+      "forbiddenScope": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "removalTrigger": "upstream extension point or native projection hook for Kotlin decorators can carry NanoFlow Android relation metadata on Kotlin annotation endpoints",
+      "capabilityCategory": "Android/Kotlin duplicate hotspot",
+      "language": "kotlin/xml",
+      "nativeOwnedCapability": "native CodeGraph owns generic Kotlin symbol, import, call, type-reference, decorator, override, callers/callees, impact, auto-sync, indexing, and generic search ranking behavior",
+      "nanoFlowOwnedCapability": "NanoFlow owns Android Manifest, widget provider, resource, host-app project semantics, metadata.relation attachment, and source evidence policy",
+      "allowedRelations": [
+        "android-kotlin-annotation"
+      ],
+      "forbiddenGenericBehavior": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "upstreamHookNeeded": "upstream CodeGraph hook for attaching NanoFlow Android metadata.relation and Android resource/widget evidence to native Kotlin/XML graph endpoints",
+      "removalCandidateWhen": "upstream CodeGraph exposes Kotlin/XML projection hooks that can carry NanoFlow Android relation metadata without rebuilding generic Kotlin symbol/call/type graph shape",
+      "lastVerifiedGate": "npm run codegraph:overlay:docs:validate",
+      "sourceSymbols": [
+        "addAndroidKotlinAnnotationEdges"
+      ],
+      "coveredChildSymbols": [],
+      "verificationGate": [
+        "npm run codegraph:overlay:docs:validate",
+        "npm run codegraph:adapter:gate"
+      ]
+    },
+    {
+      "name": "queryOverlay()",
+      "sourcePath": "scripts/query-codegraph-nanoflow-overlay.mjs",
+      "status": "temporary-allowed",
+      "delegatedUpstreamOwner": "native CodeGraph",
+      "allowedPurpose": "attach NanoFlow metadata.relation filtering and project-semantic routing to native-shaped overlay endpoints",
+      "forbiddenScope": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "removalTrigger": "upstream extension point or native projection hook exposes relation filters so NanoFlow keeps only metadata.relation filtering",
+      "verificationGate": [
+        "npm run codegraph:overlay:docs:validate",
+        "npm run codegraph:adapter:gate"
+      ],
+      "capabilityCategory": "query/formatter duplicate hotspot",
+      "language": "overlay-json-markdown",
+      "nativeOwnedCapability": "native CodeGraph owns generic query parsing, candidate ranking, formatter section order, callers/callees, impact, auto-sync, and indexing behavior",
+      "nanoFlowOwnedCapability": "NanoFlow owns project-specific metadata.relation filtering, semantic boosts, strict native compatibility projection, and source evidence policy",
+      "allowedRelations": [
+        "metadata.relation"
+      ],
+      "forbiddenGenericBehavior": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "upstreamHookNeeded": "upstream CodeGraph hook for relation filters, semantic boosts, and native formatter relation metadata",
+      "removalCandidateWhen": "upstream CodeGraph exposes relation-filtered query and formatter hooks so NanoFlow no longer carries a parallel query/formatter path",
+      "lastVerifiedGate": "npm run codegraph:overlay:docs:validate",
+      "sourceSymbols": [
+        "queryOverlay"
+      ],
+      "coveredChildSymbols": [
+        "buildNanoFlowOverlayCandidates",
+        "compareCandidateRank",
+        "scoreNanoFlowSemanticCandidate",
+        "scoreExplicitCandidateMatch",
+        "scoreFocusedCandidateMatch",
+        "candidateSearchText",
+        "queryTokens",
+        "explicitQueryTerms",
+        "focusedExplicitQueryTerms",
+        "scorePathTermMatch",
+        "candidateHighValueRank"
+      ],
+      "duplicateBoundaryRole": "query-parsing",
+      "outputSurface": [
+        "contextJson",
+        "augmentedMarkdown"
+      ],
+      "extensionFieldPolicy": "nanoflow-augmented"
+    },
+    {
+      "name": "scoreCandidate()",
+      "sourcePath": "scripts/query-codegraph-nanoflow-overlay.mjs",
+      "status": "temporary-allowed",
+      "delegatedUpstreamOwner": "native CodeGraph",
+      "allowedPurpose": "attach NanoFlow metadata.relation boosts and project-semantic source-evidence policy to native-shaped candidates",
+      "forbiddenScope": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "removalTrigger": "upstream extension point or native projection hook exposes project relation boosts without a parallel generic ranking engine",
+      "verificationGate": [
+        "npm run codegraph:overlay:docs:validate",
+        "npm run codegraph:adapter:gate"
+      ],
+      "capabilityCategory": "query/formatter duplicate hotspot",
+      "language": "overlay-json-markdown",
+      "nativeOwnedCapability": "native CodeGraph owns generic query parsing, candidate ranking, formatter section order, callers/callees, impact, auto-sync, and indexing behavior",
+      "nanoFlowOwnedCapability": "NanoFlow owns project-specific metadata.relation filtering, semantic boosts, strict native compatibility projection, and source evidence policy",
+      "allowedRelations": [
+        "metadata.relation"
+      ],
+      "forbiddenGenericBehavior": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "upstreamHookNeeded": "upstream CodeGraph hook for relation filters, semantic boosts, and native formatter relation metadata",
+      "removalCandidateWhen": "upstream CodeGraph exposes relation-filtered query and formatter hooks so NanoFlow no longer carries a parallel query/formatter path",
+      "lastVerifiedGate": "npm run codegraph:overlay:docs:validate",
+      "sourceSymbols": [
+        "scoreCandidate"
+      ],
+      "coveredChildSymbols": [
+        "scoreNanoFlowSemanticCandidate",
+        "scoreExplicitCandidateMatch",
+        "scoreFocusedCandidateMatch",
+        "scoreExplicitQueryTermText",
+        "scorePathTermMatch",
+        "candidateSearchText",
+        "queryTokens"
+      ],
+      "duplicateBoundaryRole": "candidate-ranking",
+      "outputSurface": [
+        "contextJson",
+        "augmentedMarkdown"
+      ],
+      "extensionFieldPolicy": "nanoflow-augmented"
+    },
+    {
+      "name": "selectGraphResults()",
+      "sourcePath": "scripts/query-codegraph-nanoflow-overlay.mjs",
+      "status": "temporary-allowed",
+      "delegatedUpstreamOwner": "native CodeGraph",
+      "allowedPurpose": "attach NanoFlow metadata.relation exact filtering and source-evidence policy to native-shaped query results",
+      "forbiddenScope": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "removalTrigger": "upstream extension point or native projection hook exposes relation-filtered result selection without parallel impact traversal",
+      "verificationGate": [
+        "npm run codegraph:overlay:docs:validate",
+        "npm run codegraph:adapter:gate"
+      ],
+      "capabilityCategory": "query/formatter duplicate hotspot",
+      "language": "overlay-json-markdown",
+      "nativeOwnedCapability": "native CodeGraph owns generic query parsing, candidate ranking, formatter section order, callers/callees, impact, auto-sync, and indexing behavior",
+      "nanoFlowOwnedCapability": "NanoFlow owns project-specific metadata.relation filtering, semantic boosts, strict native compatibility projection, and source evidence policy",
+      "allowedRelations": [
+        "metadata.relation"
+      ],
+      "forbiddenGenericBehavior": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "upstreamHookNeeded": "upstream CodeGraph hook for relation filters, semantic boosts, and native formatter relation metadata",
+      "removalCandidateWhen": "upstream CodeGraph exposes relation-filtered query and formatter hooks so NanoFlow no longer carries a parallel query/formatter path",
+      "lastVerifiedGate": "npm run codegraph:overlay:docs:validate",
+      "sourceSymbols": [
+        "selectGraphResults"
+      ],
+      "coveredChildSymbols": [
+        "seedExplicitPathScopedGraphNodeIds",
+        "selectNanoFlowRelationGraphResults",
+        "sortExactRelationEdgesForSelection",
+        "selectExactRelationResults",
+        "expandExactRelationEdges",
+        "edgeMatchesExactMetadataQuery",
+        "buildGraphIndexes",
+        "selectAngularSemanticApiEdges",
+        "sortAngularSemanticApiEdgesForSelection",
+        "compareExactRelationEdgeDisplayOrder",
+        "selectNodeForCandidateMatch",
+        "exactMetadataQueryFromTerms",
+        "exactMetadataQueriesFromTerms",
+        "edgeMatchesQueryTermsWithEndpoints",
+        "edgeMatchesAnyQueryTermWithEndpoints",
+        "scoreGraphNode",
+        "scoreNodeRelevanceForQuery",
+        "scorePathSegmentCoverage",
+        "queryScoringContext",
+        "lowInformationNodePenalty",
+        "lowInformationFilePenalty",
+        "queryAllowsTestFiles",
+        "isLowInformationTestFilePath",
+        "rankNodesForQuery",
+        "selectEntryPoints",
+        "orderRelatedFilesForQuery",
+        "compareNodeSpecificity",
+        "compareNode",
+        "compareEdge",
+        "compareSyncBodyKeywordEndpointPriority",
+        "compareSyncConfigKeywordEndpointPriority",
+        "selectedContext7RetrievalRouteIds",
+        "exactMetadataQueryFromEdges",
+        "exactMetadataQueriesFromEdges",
+        "compareExactRelationEdgeSourceOrder",
+        "compareNodeSourceOrder",
+        "scorePreferredSourceFileGroupForQuery",
+        "compareGeneratedFileOrder"
+      ],
+      "duplicateBoundaryRole": "result-selection",
+      "outputSurface": [
+        "contextJson",
+        "nativeJson",
+        "nativeMarkdown",
+        "augmentedMarkdown"
+      ],
+      "extensionFieldPolicy": "nanoflow-augmented"
+    },
+    {
+      "name": "formatStrictNativeMarkdown()",
+      "sourcePath": "scripts/query-codegraph-nanoflow-overlay.mjs",
+      "status": "temporary-allowed",
+      "delegatedUpstreamOwner": "native CodeGraph",
+      "allowedPurpose": "attach NanoFlow metadata.relation source evidence to strict native Markdown section order while stripping extension fields",
+      "forbiddenScope": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "removalTrigger": "upstream extension point or native projection hook can carry NanoFlow relation metadata into the native formatter",
+      "verificationGate": [
+        "npm run codegraph:overlay:docs:validate",
+        "npm run codegraph:adapter:gate"
+      ],
+      "capabilityCategory": "query/formatter duplicate hotspot",
+      "language": "overlay-json-markdown",
+      "nativeOwnedCapability": "native CodeGraph owns generic query parsing, candidate ranking, formatter section order, callers/callees, impact, auto-sync, and indexing behavior",
+      "nanoFlowOwnedCapability": "NanoFlow owns project-specific metadata.relation filtering, semantic boosts, strict native compatibility projection, and source evidence policy",
+      "allowedRelations": [
+        "metadata.relation"
+      ],
+      "forbiddenGenericBehavior": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "upstreamHookNeeded": "upstream CodeGraph hook for relation filters, semantic boosts, and native formatter relation metadata",
+      "removalCandidateWhen": "upstream CodeGraph exposes relation-filtered query and formatter hooks so NanoFlow no longer carries a parallel query/formatter path",
+      "lastVerifiedGate": "npm run codegraph:overlay:docs:validate",
+      "sourceSymbols": [
+        "formatStrictNativeMarkdown"
+      ],
+      "coveredChildSymbols": [
+        "buildStrictNativeMarkdownRelationshipGroups",
+        "compareStrictNativeMarkdownEdges",
+        "buildRelationshipGroups",
+        "capRelationshipGroups",
+        "filterRelationshipGroupsForMarkdown",
+        "orderNativeProjectionItems",
+        "scoreNativeProjectionItemForQuery",
+        "compareNativeProjectionRelevance",
+        "formatStrictNativeRelatedSymbol",
+        "compareStrictNativeRelatedNodeOrder",
+        "formatStrictNativeLocation",
+        "formatStrictNativeFilePath",
+        "formatStrictNativeEdgeLocation",
+        "buildNativeCodeBlocks",
+        "pushNativeCodeBlockWithinNativeBudget",
+        "buildExactRelationEdgeCodeBlocks",
+        "compareExactRelationEdgeCodeBlockOrder",
+        "compareNativeCodeBlockNodeOrder",
+        "readNodeCodeBlock",
+        "readEdgeLineCodeBlock",
+        "pushNativeCodeBlock",
+        "formatEdgeSource",
+        "buildBlastRadiusEntries",
+        "buildNotShownEntries",
+        "formatSummary",
+        "suppressedExactRelationEntryPointIds",
+        "strictNativeCodeBlockBudgetReached",
+        "strictNativeEdgeEndpointName",
+        "compareNullableSourceLine",
+        "compareExplicitPathCodeBlockCandidate",
+        "focusedExplicitPathCodeBlockFilePaths",
+        "explicitPathNativeCodeBlockNodes",
+        "exactRelationEndpointCodeBlockNodes",
+        "prioritizeExactRelationCodeBlockEdges",
+        "resolveNativeCodeBlockNode",
+        "shouldSuppressBroadNativeCodeBlock",
+        "suppressedNativeCodeBlockNodeIds",
+        "suppressedExactRelationCodeBlockEndpointIds",
+        "shouldSuppressLocalEvidenceEndpointForOwnerPreferredRelation",
+        "formatInlineFileList",
+        "formatEdgeMetadata",
+        "formatMatchSummary",
+        "markdownRelatedSymbolKey",
+        "buildProvenanceEdgeLineCodeBlocksForQuery",
+        "buildProvenanceEdgeLineCodeBlocks",
+        "compareProvenanceEdgeLineCodeBlockOrder",
+        "buildSourceBlocks",
+        "readSourceBlock",
+        "formatSourceBlockSymbols",
+        "scoreSourceFileGroupForQuery",
+        "formatSourceWindows",
+        "truncateMarkdownOutput",
+        "groupMarkdownRelatedNodesByFile",
+        "toNativeJsonFormatterResponse",
+        "serializeNativeJsonNode",
+        "serializeNativeJsonEdge",
+        "nativeJsonEdgeLine",
+        "nativeJsonEdgeColumn",
+        "serializeNativeJsonCodeBlock"
+      ],
+      "duplicateBoundaryRole": "native-markdown-formatter",
+      "outputSurface": [
+        "nativeMarkdown"
+      ],
+      "extensionFieldPolicy": "strict-native"
+    },
+    {
+      "name": "formatNativeMarkdown()",
+      "sourcePath": "scripts/query-codegraph-nanoflow-overlay.mjs",
+      "status": "temporary-allowed",
+      "delegatedUpstreamOwner": "native CodeGraph",
+      "allowedPurpose": "attach NanoFlow metadata.relation source evidence to augmented Markdown output while keeping strict native Markdown owned by formatStrictNativeMarkdown",
+      "forbiddenScope": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "removalTrigger": "upstream extension point or native projection hook can carry NanoFlow relation metadata into native formatter output without an augmented wrapper entry point",
+      "verificationGate": [
+        "npm run codegraph:overlay:docs:validate",
+        "npm run codegraph:adapter:gate"
+      ],
+      "capabilityCategory": "query/formatter duplicate hotspot",
+      "language": "overlay-json-markdown",
+      "nativeOwnedCapability": "native CodeGraph owns generic query parsing, candidate ranking, formatter section order, callers/callees, impact, auto-sync, and indexing behavior",
+      "nanoFlowOwnedCapability": "NanoFlow owns project-specific metadata.relation filtering, semantic boosts, augmented Markdown projection, coverage summaries, and source evidence policy",
+      "allowedRelations": [
+        "metadata.relation"
+      ],
+      "forbiddenGenericBehavior": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "upstreamHookNeeded": "upstream CodeGraph hook for relation filters, semantic boosts, and native formatter relation metadata",
+      "removalCandidateWhen": "upstream CodeGraph exposes relation-filtered query and formatter hooks so NanoFlow no longer carries a parallel augmented formatter entry point",
+      "lastVerifiedGate": "npm run codegraph:overlay:docs:validate",
+      "sourceSymbols": [
+        "formatNativeMarkdown"
+      ],
+      "coveredChildSymbols": [
+        "formatNanoFlowAugmentedMarkdown"
+      ],
+      "duplicateBoundaryRole": "native-markdown-formatter",
+      "outputSurface": [
+        "augmentedMarkdown"
+      ],
+      "extensionFieldPolicy": "nanoflow-augmented"
+    },
+    {
+      "name": "contextPackSourceRankingQueryFor()",
+      "sourcePath": "scripts/codegraph-nanoflow-mcp-stdio.cjs",
+      "status": "temporary-allowed",
+      "delegatedUpstreamOwner": "native CodeGraph",
+      "allowedPurpose": "attach NanoFlow metadata.relation source-evidence policy, low-value suppression, and sourceSelection diagnostics to native-shaped context packs",
+      "forbiddenScope": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "removalTrigger": "upstream extension point or native projection hook exposes context-pack source ordering hooks for NanoFlow output-quality policy",
+      "verificationGate": [
+        "npm run codegraph:overlay:docs:validate",
+        "npm run codegraph:adapter:gate"
+      ],
+      "capabilityCategory": "context-pack source-ordering duplicate hotspot",
+      "language": "mcp-markdown",
+      "nativeOwnedCapability": "native CodeGraph owns generic context exploration, source ordering, formatter sections, auto-sync, indexing, and generic search ranking behavior",
+      "nanoFlowOwnedCapability": "NanoFlow owns output-quality policy, low-value source suppression, sourceSelection diagnostics, stale-wrapper diagnostics, and Codex host reliability",
+      "allowedRelations": [
+        "metadata.relation",
+        "sourceSelection diagnostics"
+      ],
+      "forbiddenGenericBehavior": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "upstreamHookNeeded": "upstream CodeGraph hook for context-pack source ordering and base-section filtering policy",
+      "removalCandidateWhen": "upstream CodeGraph exposes context-pack source ordering hooks or avoids NanoFlow-specific low-value pollution without wrapper filtering",
+      "lastVerifiedGate": "npm run codegraph:overlay:docs:validate",
+      "sourceSymbols": [
+        "contextPackSourceRankingQueryFor"
+      ],
+      "coveredChildSymbols": [
+        "rankContextPackSourceFiles",
+        "rankContextPackSourceFilesForContextText",
+        "rankContextPackSourceFileEntriesForContextText",
+        "rankContextPackSourceFileEntries",
+        "scoreContextPackSourceFile",
+        "scoreContextPackSourceFileSymbols",
+        "scoreContextPackMatchFiles",
+        "scoreContextPackNodeFiles",
+        "scoreContextPackSourceBlockFiles",
+        "scoreContextPackSourceBlockExplicitTerms",
+        "scoreContextPackSourceBlockQueryTermCoverage",
+        "scoreContextPackSourceEvidenceNode",
+        "contextPackRawQueryTerms",
+        "isExactRelationQueryTerm",
+        "contextPackSourceBlockHasFocusedSymbolEvidence",
+        "contextPackSourceFileLowValuePenalty",
+        "isLowValueContextPackSourcePath",
+        "isCodegraphDedupMaintenanceSourcePath",
+        "scoreContextPackCodeBlockSourceFile",
+        "scoreContextPackCompoundSymbolCoverage",
+        "scoreContextPackMatchKind",
+        "scoreContextPackMatchName",
+        "scoreContextPackNodeKind",
+        "scoreContextPackResourceRelationFile",
+        "contextPackExploreQueryFor",
+        "summarizeContextPackQueryClassification",
+        "classifyCodegraphDedupMaintenanceQuery",
+        "queryMentionsCodegraphDedupMaintenance",
+        "buildContextPackQueryPlan",
+        "expandQueryTokenAliases",
+        "scorePathTermMatch",
+        "scorePathSegmentCoverage",
+        "mergeContextPackFileScore",
+        "contextPackSourceEvidenceNodesForOverlay",
+        "mergeContextPackLineWindows",
+        "mergeContextPackWindowRanges",
+        "contextPackBaseTextContainsLifecycleEvidence",
+        "contextPackBaseTextContainsFocusedNodeEvidence",
+        "contextPackNodeMatchesQueryTerms",
+        "isRenderableContextPackSourcePath",
+        "queryMentionsCodegraphToolingSourcePollution",
+        "queryExplicitlyRequestsContextPackSourcePath",
+        "contextPackSourceChunkContainsLine",
+        "contextPackSourceChunkContainsFocusedLine",
+        "contextPackSourceEntryHasExplicitSymbolEvidence",
+        "contextPackSourceOrderingCanReorderBaseSourceBlocks",
+        "contextPackSourceOrderingBaseReorderReason",
+        "contextPackSourceOrderingHasFocusedOverlayEvidence",
+        "contextPackSourceOrderingHasNanoFlowRelationEvidence",
+        "appendContextPackSourceEvidence",
+        "compareGraphNode",
+        "compareGraphNodeSourceOrder",
+        "contextPackSourceFileRank"
+      ],
+      "duplicateBoundaryRole": "context-pack-source-ordering",
+      "outputSurface": [
+        "nativeMarkdown",
+        "augmentedMarkdown"
+      ],
+      "extensionFieldPolicy": "nanoflow-augmented"
+    },
+    {
+      "name": "sanitizeContextPackBaseMarkdownSections()",
+      "sourcePath": "scripts/codegraph-nanoflow-mcp-stdio.cjs",
+      "status": "temporary-allowed",
+      "delegatedUpstreamOwner": "native CodeGraph",
+      "allowedPurpose": "attach NanoFlow metadata.relation output-quality policy by suppressing avoidable generated, build, cache, test-helper, and tooling pollution in native-shaped context packs",
+      "forbiddenScope": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "removalTrigger": "upstream extension point or native projection hook exposes base-section filtering hooks or no longer emits avoidable pollution for NanoFlow queries",
+      "verificationGate": [
+        "npm run codegraph:overlay:docs:validate",
+        "npm run codegraph:adapter:gate"
+      ],
+      "capabilityCategory": "context-pack source-ordering duplicate hotspot",
+      "language": "mcp-markdown",
+      "nativeOwnedCapability": "native CodeGraph owns generic context exploration, source ordering, formatter sections, auto-sync, indexing, and generic search ranking behavior",
+      "nanoFlowOwnedCapability": "NanoFlow owns output-quality policy, low-value source suppression, sourceSelection diagnostics, stale-wrapper diagnostics, and Codex host reliability",
+      "allowedRelations": [
+        "metadata.relation",
+        "sourceSelection diagnostics"
+      ],
+      "forbiddenGenericBehavior": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "upstreamHookNeeded": "upstream CodeGraph hook for context-pack source ordering and base-section filtering policy",
+      "removalCandidateWhen": "upstream CodeGraph exposes context-pack source ordering hooks or avoids NanoFlow-specific low-value pollution without wrapper filtering",
+      "lastVerifiedGate": "npm run codegraph:overlay:docs:validate",
+      "sourceSymbols": [
+        "sanitizeContextPackBaseMarkdownSections"
+      ],
+      "coveredChildSymbols": [
+        "prioritizeContextPackBaseSourceBlocks",
+        "shouldFilterContextPackBaseSourceBlocks",
+        "filterContextPackBaseSourceBlockEntries",
+        "hasAvoidableLowValueContextPackBaseSourceBlocks",
+        "formatNanoFlowContextPackAsMarkdown",
+        "buildContextPackOverlaySourceBlocks",
+        "injectContextPackOverlaySourceBlocks",
+        "removeContextPackSourceBlockChunks",
+        "splitContextPackSourceBlockChunks",
+        "joinContextPackSourceBlockChunks",
+        "shouldIncludeContextPackOverlaySourceBlock",
+        "prioritizeContextPackOverlaySourceBlockCandidates",
+        "findContextPackSourceBlockChunk",
+        "appendContextPackSourceBlocks",
+        "buildContextPackSourceBlock",
+        "selectContextPackSourceBlockNodes",
+        "mergeContextPackSourceEvidenceNodes",
+        "buildContextPackRelationshipLines",
+        "buildContextPackRelatedSymbolLines",
+        "sortRelationshipEdgesForMarkdown",
+        "filterRelationshipEdgesForMarkdown",
+        "shouldShowContextPackRelationshipEdge",
+        "buildContextPackNodesByName",
+        "groupMarkdownRelatedNodesByFile",
+        "buildRelationshipGroupsFromMatches",
+        "markdownRelatedSymbolKey",
+        "contextPackRelatedNodeLowValuePenalty",
+        "contextPackBaseMetadataLineFilterDecision",
+        "contextPackBaseMetadataPathFilterDecision",
+        "extractContextPackBaseRelationshipSymbols",
+        "splitContextPackRelationshipLineGroups",
+        "findContextPackRelationshipSubsection",
+        "contextPackBaseSourceFilterRelationQueries",
+        "contextPackSourceBlockPriority",
+        "findContextPackSourceSection",
+        "extractContextPackSourceBlockFiles",
+        "extractContextPackSourceBlockFile",
+        "summarizeContextPackSourceOrdering",
+        "summarizeContextPackSourceSelection",
+        "contextPackSourceSelectionFileDetail",
+        "contextPackSourceSelectionFilterReason",
+        "selectContextPackDiagnosticTopRankedOverlayEntry",
+        "contextPackDiagnosticTopRankedOverlaySelectionReason",
+        "summarizeContextPackTopRankedOverlayDecision",
+        "contextPackTopRankedOverlayDecisionEntry",
+        "summarizeContextPackMarkdownText",
+        "formatEdgeMetadata",
+        "formatMatchSummary",
+        "compareRelatedGraphNodeOrder",
+        "relationshipEdgeSourceOrder",
+        "contextPackRelationshipNodeQueryScore",
+        "contextPackRelationshipNodePenalty",
+        "contextPackBaseMetadataTextNoiseReason",
+        "contextPackSourceEntryHasPreferredSymbolEvidence",
+        "contextPackSourceFileLowValuePenalty",
+        "isLowValueContextPackSourcePath",
+        "isCodegraphDedupMaintenanceSourcePath"
+      ],
+      "duplicateBoundaryRole": "context-pack-filter",
+      "outputSurface": [
+        "nativeMarkdown",
+        "augmentedMarkdown"
+      ],
+      "extensionFieldPolicy": "nanoflow-augmented"
+    }
+  ]
+}

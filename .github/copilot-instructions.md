@@ -11,6 +11,15 @@
 - `.github/instructions/*.instructions.md` 仅作为文件类型补充。
 - 若出现冲突，Hard Rules 以 `AGENTS.md §5` 为准；本文件只保留 quick reference。
 
+## 仓库上下文入口（硬门禁摘要）
+
+> 权威流程见 [AGENTS.md](../AGENTS.md) 的 §-1、§0、§0.1。本节只提供 Codex/Copilot 默认行为摘要。
+
+- 任何代码、配置、调试、审查、实现任务，先通过 codegraph MCP 建立仓库事实，禁止先用普通搜索或随意读文件替代。
+- NanoFlow 默认 codegraph MCP 入口是 `nanoflow_context_pack`；它合并原生 `codegraph_explore` 与 NanoFlow overlay，覆盖 Angular 组件元数据、`inject()` 依赖、模板/样式、动态 import、Supabase、测试映射和 AGENTS hard-rule anchors。
+- 精确符号、文件树、调用链、影响分析可用原生 codegraph 工具；涉及 NanoFlow 语义时再补 `nanoflow_overlay_query`。
+- 若 codegraph MCP 失败，下一步必须按 `AGENTS.md §-1` 使用同版本 codegraph CLI fallback，再考虑普通工作区搜索。
+
 ## 项目核心理念（不可丢失）
 
 - 不造轮子：优先复用现有服务、配置、工具链。
