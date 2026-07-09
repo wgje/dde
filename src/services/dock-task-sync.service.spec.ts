@@ -18,6 +18,8 @@ import { TaskOperationAdapterService } from './task-operation-adapter.service';
 import { ProjectStateService } from './project-state.service';
 import { BlackBoxService } from './black-box.service';
 import { LoggerService } from './logger.service';
+import { ActionQueueService } from './action-queue.service';
+import { AuthService } from './auth.service';
 import { Task, Project } from '../models';
 import { DockEntry } from '../models/parking-dock';
 
@@ -92,6 +94,15 @@ const mockTaskOps = {
   updateTaskExpectedMinutes: vi.fn(),
   updateTaskCognitiveLoad: vi.fn(),
   updateTaskWaitMinutes: vi.fn(),
+  updateTaskPlannerFields: vi.fn(),
+};
+
+const mockActionQueue = {
+  enqueueDurablyForOwner: vi.fn(),
+};
+
+const mockAuthService = {
+  currentUserId: vi.fn(),
 };
 
 const projectsSignal = signal<Project[]>([]);
@@ -105,8 +116,10 @@ const mockProjectState = {
 
 const mockBlackBoxService = {
   update: vi.fn(),
+  updateDurably: vi.fn().mockResolvedValue({ ok: true, value: {} }),
   getEntry: vi.fn().mockReturnValue(undefined),
   markAsCompleted: vi.fn().mockReturnValue({ ok: true, value: {} }),
+  markAsCompletedDurably: vi.fn().mockResolvedValue({ ok: true, value: {} }),
 };
 
 // ── Test suite ──
@@ -119,6 +132,13 @@ describe('DockTaskSyncService', () => {
     projectsSignal.set([]);
     activeProjectIdSignal.set(null);
     mockBlackBoxService.getEntry.mockReturnValue(undefined);
+    mockTaskOps.updateTaskContent.mockResolvedValue(true);
+    mockTaskOps.updateTaskExpectedMinutes.mockResolvedValue(true);
+    mockTaskOps.updateTaskCognitiveLoad.mockResolvedValue(true);
+    mockTaskOps.updateTaskWaitMinutes.mockResolvedValue(true);
+    mockTaskOps.updateTaskPlannerFields.mockResolvedValue(true);
+    mockActionQueue.enqueueDurablyForOwner.mockResolvedValue('action-1');
+    mockAuthService.currentUserId.mockReturnValue('user-1');
 
     const injector = Injector.create({
       providers: [
@@ -128,6 +148,8 @@ describe('DockTaskSyncService', () => {
         { provide: ProjectStateService, useValue: mockProjectState },
         { provide: BlackBoxService, useValue: mockBlackBoxService },
         { provide: LoggerService, useValue: mockLoggerService },
+        { provide: ActionQueueService, useValue: mockActionQueue },
+        { provide: AuthService, useValue: mockAuthService },
       ],
     });
 
@@ -139,6 +161,34 @@ describe('DockTaskSyncService', () => {
   // ==================== resolveTaskProjectId ====================
 
   describe('resolveTaskProjectId', () => {
+    it('should not resolve task operation adapter for read-only project lookup during startup', () => {
+      const throwingTaskOpsProvider = vi.fn(() => {
+        throw new Error('TaskOperationAdapterService should not be resolved for read-only dock startup');
+      });
+      const isolatedInjector = Injector.create({
+        providers: [
+          DockTaskSyncService,
+          { provide: TaskStore, useValue: mockTaskStore },
+          { provide: TaskOperationAdapterService, useFactory: throwingTaskOpsProvider },
+          { provide: ProjectStateService, useValue: mockProjectState },
+          { provide: BlackBoxService, useValue: mockBlackBoxService },
+          { provide: LoggerService, useValue: mockLoggerService },
+          { provide: ActionQueueService, useValue: mockActionQueue },
+          { provide: AuthService, useValue: mockAuthService },
+        ],
+      });
+
+      mockTaskStore.getTaskProjectId.mockReturnValue('proj-from-store');
+
+      const isolatedService = runInInjectionContext(
+        isolatedInjector,
+        () => isolatedInjector.get(DockTaskSyncService),
+      );
+
+      expect(isolatedService.resolveTaskProjectId('task-1')).toBe('proj-from-store');
+      expect(throwingTaskOpsProvider).not.toHaveBeenCalled();
+    });
+
     it('should return project ID from task store', () => {
       mockTaskStore.getTaskProjectId.mockReturnValue('proj-from-store');
 
@@ -170,36 +220,94 @@ describe('DockTaskSyncService', () => {
   // ==================== syncTaskPlannerFields ====================
 
   describe('syncTaskPlannerFields', () => {
-    it('should call task operation adapter with correct patch', () => {
+    it('should call task operation adapter with correct patch', async () => {
       const task = createMockTask({ id: 'task-1', expected_minutes: 30 });
       mockTaskStore.getTask.mockReturnValue(task);
       mockTaskStore.getTaskProjectId.mockReturnValue('proj-1');
       activeProjectIdSignal.set('proj-1');
 
-      service.syncTaskPlannerFields('task-1', {
+      await expect(service.syncTaskPlannerFields('task-1', {
         expected_minutes: 60,
         cognitive_load: 'high',
-      });
+      })).resolves.toBe(true);
 
-      expect(mockTaskOps.updateTaskExpectedMinutes).toHaveBeenCalledWith('task-1', 60);
-      expect(mockTaskOps.updateTaskCognitiveLoad).toHaveBeenCalledWith('task-1', 'high');
-      // wait_minutes not in patch, should not be called
+      expect(mockTaskOps.updateTaskPlannerFields).toHaveBeenCalledWith('task-1', {
+        expectedMinutes: 60,
+        cognitiveLoad: 'high',
+      });
+      expect(mockTaskOps.updateTaskExpectedMinutes).not.toHaveBeenCalled();
+      expect(mockTaskOps.updateTaskCognitiveLoad).not.toHaveBeenCalled();
       expect(mockTaskOps.updateTaskWaitMinutes).not.toHaveBeenCalled();
     });
 
-    it('should no-op when taskId has no project', () => {
+    it('should no-op when taskId has no project', async () => {
       const task = createMockTask({ id: 'task-orphan' });
       mockTaskStore.getTask.mockReturnValue(task);
       mockTaskStore.getTaskProjectId.mockReturnValue(null);
       projectsSignal.set([]);
       activeProjectIdSignal.set(null);
 
-      service.syncTaskPlannerFields('task-orphan', { expected_minutes: 10 });
+      await expect(service.syncTaskPlannerFields('task-orphan', { expected_minutes: 10 }))
+        .resolves.toBe(false);
 
       expect(mockTaskOps.updateTaskExpectedMinutes).not.toHaveBeenCalled();
       expect(mockTaskOps.updateTaskCognitiveLoad).not.toHaveBeenCalled();
       expect(mockTaskOps.updateTaskWaitMinutes).not.toHaveBeenCalled();
+      expect(mockTaskOps.updateTaskPlannerFields).not.toHaveBeenCalled();
       expect(mockTaskStore.setTask).not.toHaveBeenCalled();
+    });
+
+    it('should durably enqueue cross-project planner patches before committing local store state', async () => {
+      const task = createMockTask({ id: 'task-1', expected_minutes: 30 });
+      mockTaskStore.getTask.mockReturnValue(task);
+      mockTaskStore.getTaskProjectId.mockReturnValue('proj-other');
+      activeProjectIdSignal.set('proj-active');
+      projectsSignal.set([createMockProject({ id: 'proj-other', tasks: [task] })]);
+
+      await expect(service.syncTaskPlannerFields('task-1', {
+        expected_minutes: 60,
+        cognitive_load: 'high',
+      })).resolves.toBe(true);
+
+      expect(mockActionQueue.enqueueDurablyForOwner).toHaveBeenCalledWith(
+        'user-1',
+        expect.objectContaining({
+          type: 'update',
+          entityType: 'task',
+          entityId: 'task-1',
+          payload: expect.objectContaining({
+            projectId: 'proj-other',
+            sourceUserId: 'user-1',
+            task: expect.objectContaining({
+              id: 'task-1',
+              expected_minutes: 60,
+              cognitive_load: 'high',
+              updatedAt: expect.any(String),
+            }),
+          }),
+        }),
+      );
+      expect(mockTaskStore.setTask).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'task-1', expected_minutes: 60, cognitive_load: 'high' }),
+        'proj-other',
+      );
+      expect(mockProjectState.updateProjects).toHaveBeenCalledWith(expect.any(Function));
+    });
+
+    it('should not commit cross-project planner patches when durable enqueue fails', async () => {
+      const task = createMockTask({ id: 'task-1', expected_minutes: 30 });
+      mockTaskStore.getTask.mockReturnValue(task);
+      mockTaskStore.getTaskProjectId.mockReturnValue('proj-other');
+      activeProjectIdSignal.set('proj-active');
+      projectsSignal.set([createMockProject({ id: 'proj-other', tasks: [task] })]);
+      mockActionQueue.enqueueDurablyForOwner.mockResolvedValueOnce('');
+
+      await expect(service.syncTaskPlannerFields('task-1', { expected_minutes: 60 }))
+        .resolves.toBe(false);
+
+      expect(mockActionQueue.enqueueDurablyForOwner).toHaveBeenCalled();
+      expect(mockTaskStore.setTask).not.toHaveBeenCalled();
+      expect(mockProjectState.updateProjects).not.toHaveBeenCalled();
     });
   });
 
@@ -226,6 +334,124 @@ describe('DockTaskSyncService', () => {
       expect(mockTaskOps.updateTaskContent).toHaveBeenCalledWith('task-1', 'updated detail');
       expect(mockBlackBoxService.update).not.toHaveBeenCalled();
     });
+
+    it('waits for durable task content persistence before resolving active project detail sync', async () => {
+      const task = createMockTask({ id: 'task-1' });
+      mockTaskStore.getTask.mockReturnValue(task);
+      mockTaskStore.getTaskProjectId.mockReturnValue('proj-1');
+      activeProjectIdSignal.set('proj-1');
+
+      let resolveUpdate!: () => void;
+      const updatePromise = new Promise<void>(resolve => {
+        resolveUpdate = resolve;
+      });
+      mockTaskOps.updateTaskContent.mockReturnValue(updatePromise);
+
+      const entry = createMockDockEntry({
+        taskId: 'task-1',
+        sourceKind: 'project-task',
+        sourceProjectId: 'proj-1',
+      });
+
+      const completion = service.syncTaskDetail('task-1', 'updated detail', {
+        entries: [entry],
+        focusSessionContext: null,
+      }) as unknown as Promise<void>;
+
+      await Promise.resolve();
+      expect(completion).toBeTruthy();
+      expect(typeof completion.then).toBe('function');
+      await expect(Promise.race([
+        completion.then(() => 'resolved' as const),
+        Promise.resolve('pending' as const),
+      ])).resolves.toBe('pending');
+
+      resolveUpdate();
+      await completion;
+    });
+
+    it('should durably update source black-box detail for dock-created entries', () => {
+      const entry = createMockDockEntry({
+        taskId: 'inline-task',
+        title: 'Inline title',
+        sourceKind: 'dock-created',
+        sourceBlackBoxEntryId: 'bb-inline',
+        detail: 'old detail',
+      });
+
+      service.syncTaskDetail('inline-task', 'updated detail', {
+        entries: [entry],
+        focusSessionContext: { id: 'session-1', startedAt: Date.now() },
+      });
+
+      expect(mockBlackBoxService.updateDurably).toHaveBeenCalledWith('bb-inline', expect.objectContaining({
+        content: 'updated detail',
+        focusMeta: expect.objectContaining({
+          source: 'focus-console-inline',
+          sessionId: 'session-1',
+          title: 'Inline title',
+          detail: 'updated detail',
+        }),
+      }));
+      expect(mockBlackBoxService.update).not.toHaveBeenCalled();
+    });
+
+    it('should durably enqueue cross-project task detail before committing local store state', async () => {
+      const task = createMockTask({ id: 'task-1', content: 'old' });
+      mockTaskStore.getTask.mockReturnValue(task);
+      mockTaskStore.getTaskProjectId.mockReturnValue('proj-other');
+      activeProjectIdSignal.set('proj-active');
+      projectsSignal.set([createMockProject({ id: 'proj-other', tasks: [task] })]);
+      const entry = createMockDockEntry({
+        taskId: 'task-1',
+        sourceKind: 'project-task',
+        sourceProjectId: 'proj-other',
+      });
+
+      await expect(service.syncTaskDetail('task-1', 'updated detail', {
+        entries: [entry],
+        focusSessionContext: null,
+      })).resolves.toBe(true);
+
+      expect(mockActionQueue.enqueueDurablyForOwner).toHaveBeenCalledWith(
+        'user-1',
+        expect.objectContaining({
+          type: 'update',
+          entityType: 'task',
+          entityId: 'task-1',
+          payload: expect.objectContaining({
+            projectId: 'proj-other',
+            task: expect.objectContaining({ id: 'task-1', content: 'updated detail' }),
+          }),
+        }),
+      );
+      expect(mockTaskStore.setTask).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'task-1', content: 'updated detail' }),
+        'proj-other',
+      );
+    });
+
+    it('should not commit cross-project detail when durable enqueue fails', async () => {
+      const task = createMockTask({ id: 'task-1', content: 'old' });
+      mockTaskStore.getTask.mockReturnValue(task);
+      mockTaskStore.getTaskProjectId.mockReturnValue('proj-other');
+      activeProjectIdSignal.set('proj-active');
+      projectsSignal.set([createMockProject({ id: 'proj-other', tasks: [task] })]);
+      mockActionQueue.enqueueDurablyForOwner.mockResolvedValueOnce('');
+      const entry = createMockDockEntry({
+        taskId: 'task-1',
+        sourceKind: 'project-task',
+        sourceProjectId: 'proj-other',
+      });
+
+      await expect(service.syncTaskDetail('task-1', 'updated detail', {
+        entries: [entry],
+        focusSessionContext: null,
+      })).resolves.toBe(false);
+
+      expect(mockTaskStore.setTask).not.toHaveBeenCalled();
+      expect(mockProjectState.updateProjects).not.toHaveBeenCalled();
+    });
   });
 
   describe('syncInlineCompletion', () => {
@@ -238,7 +464,8 @@ describe('DockTaskSyncService', () => {
 
       service.syncInlineCompletion(entry);
 
-      expect(mockBlackBoxService.markAsCompleted).toHaveBeenCalledWith('bb-inline-task');
+      expect(mockBlackBoxService.markAsCompletedDurably).toHaveBeenCalledWith('bb-inline-task');
+      expect(mockBlackBoxService.markAsCompleted).not.toHaveBeenCalled();
     });
 
     it('should no-op when a dock-created entry has no source black-box entry', () => {
@@ -249,6 +476,7 @@ describe('DockTaskSyncService', () => {
 
       service.syncInlineCompletion(entry);
 
+      expect(mockBlackBoxService.markAsCompletedDurably).not.toHaveBeenCalled();
       expect(mockBlackBoxService.markAsCompleted).not.toHaveBeenCalled();
     });
 
@@ -261,6 +489,7 @@ describe('DockTaskSyncService', () => {
 
       service.syncInlineCompletion(entry);
 
+      expect(mockBlackBoxService.markAsCompletedDurably).not.toHaveBeenCalled();
       expect(mockBlackBoxService.markAsCompleted).not.toHaveBeenCalled();
     });
 
@@ -285,15 +514,16 @@ describe('DockTaskSyncService', () => {
         }),
       ]);
 
-      expect(mockBlackBoxService.markAsCompleted).toHaveBeenCalledTimes(1);
-      expect(mockBlackBoxService.markAsCompleted).toHaveBeenCalledWith('bb-completed-inline');
+      expect(mockBlackBoxService.markAsCompletedDurably).toHaveBeenCalledTimes(1);
+      expect(mockBlackBoxService.markAsCompletedDurably).toHaveBeenCalledWith('bb-completed-inline');
+      expect(mockBlackBoxService.markAsCompleted).not.toHaveBeenCalled();
     });
   });
 
   // ==================== applyCrossProjectTaskPatch ====================
 
   describe('applyCrossProjectTaskPatch', () => {
-    it('should call taskStore.setTask and projectState.updateProjects', () => {
+    it('should call taskStore.setTask and projectState.updateProjects after durable enqueue succeeds', async () => {
       const task = createMockTask({ id: 'task-1', content: 'old' });
       mockTaskStore.getTask.mockReturnValue(task);
 
@@ -303,13 +533,27 @@ describe('DockTaskSyncService', () => {
       });
       projectsSignal.set([project]);
 
-      service.applyCrossProjectTaskPatch('task-1', 'proj-other', { content: 'new' });
+      await expect(service.applyCrossProjectTaskPatch('task-1', 'proj-other', { content: 'new' }))
+        .resolves.toBe(true);
 
       expect(mockTaskStore.setTask).toHaveBeenCalledWith(
         expect.objectContaining({ id: 'task-1', content: 'new' }),
         'proj-other',
       );
       expect(mockProjectState.updateProjects).toHaveBeenCalledWith(expect.any(Function));
+    });
+
+    it('should leave cross-project task state untouched when durable enqueue fails', async () => {
+      const task = createMockTask({ id: 'task-1', content: 'old' });
+      mockTaskStore.getTask.mockReturnValue(task);
+      projectsSignal.set([createMockProject({ id: 'proj-other', tasks: [task] })]);
+      mockActionQueue.enqueueDurablyForOwner.mockResolvedValueOnce('');
+
+      await expect(service.applyCrossProjectTaskPatch('task-1', 'proj-other', { content: 'new' }))
+        .resolves.toBe(false);
+
+      expect(mockTaskStore.setTask).not.toHaveBeenCalled();
+      expect(mockProjectState.updateProjects).not.toHaveBeenCalled();
     });
   });
 });

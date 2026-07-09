@@ -489,7 +489,7 @@ export class KnowledgeAnchorComponent implements OnDestroy {
   }
 
   private cancelLongPress(): void {
-    if (this.longPressTimer) {
+    if (this.longPressTimer !== null) {
       clearTimeout(this.longPressTimer);
       this.longPressTimer = null;
     }

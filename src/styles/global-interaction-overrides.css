@@ -1,0 +1,170 @@
+/* ========== 深色模式通用覆盖 ========== */
+
+/* 深色模式下的 Markdown 预览 */
+[data-color-mode="dark"] .markdown-preview h1 {
+  color: #f3f4f6;
+  border-bottom-color: #374151;
+}
+
+[data-color-mode="dark"] .markdown-preview h2,
+[data-color-mode="dark"] .markdown-preview h3 {
+  color: #e5e7eb;
+}
+
+[data-color-mode="dark"] .markdown-preview h4,
+[data-color-mode="dark"] .markdown-preview h5,
+[data-color-mode="dark"] .markdown-preview h6,
+[data-color-mode="dark"] .markdown-preview p,
+[data-color-mode="dark"] .markdown-preview li {
+  color: #d1d5db;
+}
+
+[data-color-mode="dark"] .markdown-preview strong {
+  color: #f3f4f6;
+}
+
+[data-color-mode="dark"] .markdown-preview code {
+  background-color: #374151;
+  color: #fb923c;
+}
+
+/* ========================================================================
+   文本选择高亮（商用级视觉）
+   ------------------------------------------------------------------------
+   根因：浏览器默认的深蓝色 ::selection（#338FFF 系）会在 NanoFlow 的暖色
+         /靛蓝主题上显得突兀，明显暴露"网页感"。
+   目标：与品牌主色（indigo #4f46e5）保持一致，亮暗两套皆保证 AA 对比度，
+         且使用半透明色保留文字原色层次感，避免纯色遮盖破坏排版质感。
+   覆盖范围：全局 <p>/<span>/<h*>/<li>/<code> 以及 contenteditable。
+   刻意不覆盖：
+     - .flow-canvas-container 等已 user-select:none 的交互层
+     - <input>/<textarea> 沿用系统原生选区以保留 IME 兼容（仅微调 accent）
+   ======================================================================== */
+
+/* 亮色：靛蓝主色 18% 半透明 + 深靛字色，文字在选中后依然高对比 */
+::selection,
+::-moz-selection {
+  background-color: rgba(99, 102, 241, 0.22); /* indigo-500 @ 22% */
+  color: #1e1b4b;                              /* indigo-950，保留文字层次 */
+  text-shadow: none;
+}
+
+/* 深色：提亮到 indigo-400 并拉高不透明度，避免暗背景上"看不见"选区 */
+[data-color-mode="dark"] ::selection,
+[data-color-mode="dark"] ::-moz-selection {
+  background-color: rgba(129, 140, 248, 0.38); /* indigo-400 @ 38% */
+  color: #ede9fe;                               /* violet-100 */
+}
+
+/* 输入框/文本域：半透明在 IME 预输入下会发灰，统一用稍深且不透明度更低
+   的变体，避免压过输入字符 */
+input::selection,
+textarea::selection,
+input::-moz-selection,
+textarea::-moz-selection,
+[contenteditable] ::selection,
+[contenteditable] ::-moz-selection {
+  background-color: rgba(99, 102, 241, 0.28);
+  color: inherit;
+}
+[data-color-mode="dark"] input::selection,
+[data-color-mode="dark"] textarea::selection,
+[data-color-mode="dark"] input::-moz-selection,
+[data-color-mode="dark"] textarea::-moz-selection,
+[data-color-mode="dark"] [contenteditable] ::selection,
+[data-color-mode="dark"] [contenteditable] ::-moz-selection {
+  background-color: rgba(129, 140, 248, 0.42);
+  color: inherit;
+}
+
+/* 代码块：主题色在高亮代码上容易"糊"成一片，换成中性偏暖的琥珀灰，
+   既与品牌协调又不会遮挡语法高亮色 */
+pre ::selection,
+code ::selection,
+.markdown-preview code ::selection,
+.markdown-preview pre ::selection,
+pre ::-moz-selection,
+code ::-moz-selection {
+  background-color: rgba(217, 119, 6, 0.22);
+  color: inherit;
+}
+[data-color-mode="dark"] pre ::selection,
+[data-color-mode="dark"] code ::selection,
+[data-color-mode="dark"] .markdown-preview code ::selection,
+[data-color-mode="dark"] .markdown-preview pre ::selection,
+[data-color-mode="dark"] pre ::-moz-selection,
+[data-color-mode="dark"] code ::-moz-selection {
+  background-color: rgba(251, 191, 36, 0.28);
+  color: inherit;
+}
+
+/* 统一系统级强调色（checkbox/radio/range/progress 等原生控件），
+   让原生控件也吸收品牌主色，消除最后的"网页蓝" */
+:root {
+  accent-color: #4f46e5;
+}
+[data-color-mode="dark"] :root,
+[data-color-mode="dark"] {
+  accent-color: #818cf8;
+}
+
+[data-color-mode="dark"] .markdown-preview pre {
+  background-color: #111827;
+  color: #e5e7eb;
+}
+
+[data-color-mode="dark"] .markdown-preview blockquote {
+  border-left-color: #6b7280;
+  color: #9ca3af;
+}
+
+[data-color-mode="dark"] .markdown-preview a {
+  color: #818cf8;
+}
+
+[data-color-mode="dark"] .markdown-preview a:hover {
+  color: #a5b4fc;
+}
+
+[data-color-mode="dark"] .markdown-preview hr {
+  border-top-color: #4b5563;
+}
+
+/* 深色模式下的模态框背景覆盖 - 使用 CSS 变量 */
+[data-color-mode="dark"] .bg-white {
+  background-color: var(--theme-card-bg) !important;
+}
+
+[data-color-mode="dark"] .bg-slate-50 {
+  background-color: var(--theme-bg) !important;
+}
+
+[data-color-mode="dark"] .border-slate-200 {
+  border-color: var(--theme-border) !important;
+}
+
+[data-color-mode="dark"] .text-slate-800,
+[data-color-mode="dark"] .text-slate-700 {
+  color: var(--theme-text-dark) !important;
+}
+
+[data-color-mode="dark"] .text-slate-600,
+[data-color-mode="dark"] .text-slate-500,
+[data-color-mode="dark"] .text-slate-400 {
+  color: var(--theme-text) !important;
+}
+
+/* 深色模式下的悬停效果 - 使用正确的 CSS 转义语法 */
+[data-color-mode="dark"] .hover\:bg-slate-100:hover {
+  background-color: #374151 !important;
+}
+
+[data-color-mode="dark"] .hover\:bg-slate-50:hover {
+  background-color: #1f2937 !important;
+}
+
+/* 深色模式下的分割线 */
+[data-color-mode="dark"] .divide-slate-100 > :not([hidden]) ~ :not([hidden]),
+[data-color-mode="dark"] .divide-slate-200 > :not([hidden]) ~ :not([hidden]) {
+  border-color: var(--theme-border) !important;
+}

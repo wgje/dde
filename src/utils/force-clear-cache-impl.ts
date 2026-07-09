@@ -112,7 +112,7 @@ async function withTimeout(
       }),
     ]);
   } finally {
-    if (timer) {
+    if (timer !== null) {
       clearTimeout(timer);
     }
   }
@@ -217,22 +217,14 @@ export async function forceClearCacheImpl(
     runSafeSync(() => deps.clearRecoveryStorage(), 'force-clear-cache:clear-recovery-storage-failed', deps.logError);
 
     await runSafeAsync(
-      () => deps.clearApplicationCaches(),
-      'force-clear-cache:clear-caches-failed',
-      'force-clear-cache:clear-caches-timeout',
-      'clearApplicationCaches',
-      stepTimeoutMs,
-      deps.logInfo,
-      deps.logError
+      () => deps.clearApplicationCaches(), 'force-clear-cache:clear-caches-failed',
+      'force-clear-cache:clear-caches-timeout', 'clearApplicationCaches', stepTimeoutMs,
+      deps.logInfo, deps.logError
     );
     await runSafeAsync(
-      () => deps.unregisterApplicationServiceWorkers(),
-      'force-clear-cache:unregister-sw-failed',
-      'force-clear-cache:unregister-sw-timeout',
-      'unregisterApplicationServiceWorkers',
-      stepTimeoutMs,
-      deps.logInfo,
-      deps.logError
+      () => deps.unregisterApplicationServiceWorkers(), 'force-clear-cache:unregister-sw-failed',
+      'force-clear-cache:unregister-sw-timeout', 'unregisterApplicationServiceWorkers', stepTimeoutMs,
+      deps.logInfo, deps.logError
     );
 
     // 清理结束才能移除 force-clear-flag，否则下次启动会再次触发恢复刷新。

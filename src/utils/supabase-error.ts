@@ -11,10 +11,18 @@ import { isBrowserNetworkSuspendedError } from './browser-network-suspension';
  */
 export interface EnhancedError extends Error {
   code?: string | number;
+  status?: string | number;
+  statusText?: string;
   details?: string;
   hint?: string;
   isRetryable: boolean;
   errorType: string;
+  /**
+   * The remote write may have reached the server but the client did not observe
+   * the result. Retry paths must preserve operationId/CAS and reconcile instead
+   * of treating this as a definitely failed write.
+   */
+  remoteOutcome?: 'unknown';
 }
 
 /**
@@ -33,6 +41,23 @@ export interface SupabaseClientFailureInfo {
   retryable: boolean;
 }
 
+interface SupabaseErrorShape {
+  code?: string | number;
+  status?: string | number;
+  statusText?: string;
+  name?: string;
+  message?: string;
+  details?: string;
+  hint?: string;
+  error?: SupabaseErrorShape | null;
+}
+
+interface SupabaseErrorClassification {
+  message?: string;
+  errorType: string;
+  remoteOutcome?: 'unknown';
+}
+
 /**
  * 可重试的错误类型
  */
@@ -45,12 +70,279 @@ const RETRYABLE_ERROR_TYPES = new Set([
   'NetworkError',
   'OfflineError',
   'BrowserNetworkSuspendedError',
+  'AuthRetryableFetchError',
   'RateLimitError',  // 429 速率限制错误应该重试
   'UnknownServerError',  // 504 等服务端错误返回非 JSON 响应时的回退类型
   'HtmlResponseError',  // 【#95057880】CDN/代理返回 HTML 替代 JSON，临时网络/缓存问题
   // 【关键修复】外键约束错误不可重试（意味着引用的数据不存在）
   // 'ForeignKeyError', // 23503 已移除
 ]);
+
+const UNKNOWN_REMOTE_OUTCOME_ERROR_TYPES = new Set([
+  'NetworkTimeoutError',
+  'RequestTimeoutError',
+  'TimeoutError',
+]);
+
+function enhanceNativeError(error: Error): EnhancedError {
+  // 【P2-10 修复】创建新 Error 而非直接修改原始 Error
+  const enhanced = Object.create(error) as EnhancedError;
+  Object.assign(enhanced, { message: error.message, name: error.name, stack: error.stack });
+
+  return enhanced;
+}
+
+function classifyNativeErrorMessage(error: Error): SupabaseErrorClassification | null {
+  if (isBrowserNetworkSuspendedError(error)) {
+    return { message: error.message, errorType: 'BrowserNetworkSuspendedError' };
+  }
+
+  const lowerMsg = error.message.toLowerCase();
+
+  // 【#95057880 修复】识别 HTML 响应错误
+  // 当 CDN/代理返回 HTML 页面（如 index.html）替代 JSON 时，Supabase SDK 解析失败
+  if (lowerMsg.includes('<!doctype') || lowerMsg.includes('<html') || lowerMsg.includes('unexpected token <')) {
+    return { message: error.message, errorType: 'HtmlResponseError' };
+  }
+
+  if (lowerMsg.includes('failed to fetch') || lowerMsg.includes('network error') || lowerMsg.includes('networkerror')) {
+    return { message: error.message, errorType: 'NetworkError' };
+  }
+
+  if (lowerMsg.includes('timeout') || lowerMsg.includes('timed out') || lowerMsg.includes('超时')) {
+    // 【2026-05-16】中文 '超时' 防御层
+    // RequestThrottleService.withTimeout 历史上抛 message 含中文的 Error，现已在源头修复
+    // name='TimeoutError'，此处保留作为其他中文超时错误源的兜底。
+    return { message: error.message, errorType: 'TimeoutError', remoteOutcome: 'unknown' };
+  }
+
+  if (lowerMsg.includes('offline') || lowerMsg.includes('no connection')) {
+    return { message: error.message, errorType: 'OfflineError' };
+  }
+
+  if (lowerMsg.includes('unknown supabase error') || lowerMsg.includes('unknown error')) {
+    // 【关键修复】Supabase 客户端无法解析 504/502/503 等非 JSON 响应时抛出此错误。
+    return { message: error.message, errorType: 'UnknownServerError' };
+  }
+
+  return null;
+}
+
+function enhanceErrorInstance(error: Error): EnhancedError {
+  const enhanced = enhanceNativeError(error);
+  const classification = classifyNativeErrorMessage(error);
+
+  if (classification) {
+    enhanced.errorType = classification.errorType;
+    enhanced.isRetryable = true;
+    applyRemoteOutcomeClassification(enhanced, classification);
+    if (classification.errorType === 'BrowserNetworkSuspendedError' || classification.errorType === 'HtmlResponseError' || classification.errorType === 'UnknownServerError') {
+      enhanced.name = classification.errorType;
+    }
+    return enhanced;
+  }
+
+  if (!enhanced.isRetryable) {
+    enhanced.isRetryable = RETRYABLE_ERROR_TYPES.has(enhanced.name);
+  }
+  if (!enhanced.errorType) {
+    enhanced.errorType = enhanced.name;
+  }
+  applyUnknownRemoteOutcomeFromErrorType(enhanced);
+
+  return enhanced;
+}
+
+function applyRemoteOutcomeClassification(
+  enhanced: EnhancedError,
+  classification: SupabaseErrorClassification,
+): void {
+  if (classification.remoteOutcome) {
+    enhanced.remoteOutcome = classification.remoteOutcome;
+    return;
+  }
+
+  applyUnknownRemoteOutcomeFromErrorType(enhanced);
+}
+
+function applyUnknownRemoteOutcomeFromErrorType(enhanced: EnhancedError): void {
+  if (UNKNOWN_REMOTE_OUTCOME_ERROR_TYPES.has(enhanced.errorType)) {
+    enhanced.remoteOutcome = 'unknown';
+  }
+}
+
+function classifyStatusCode(code: string | number | undefined, message: string | undefined): SupabaseErrorClassification | null {
+  switch (String(code ?? '')) {
+    case '504':
+      return { message: '服务器响应超时 (504 Gateway Timeout)', errorType: 'NetworkTimeoutError', remoteOutcome: 'unknown' };
+    case '503':
+      return { message: '服务暂时不可用 (503 Service Unavailable)', errorType: 'ServiceUnavailableError' };
+    case '502':
+      return { message: '网关错误 (502 Bad Gateway)', errorType: 'GatewayError' };
+    case '408':
+      return { message: '请求超时 (408 Request Timeout)', errorType: 'RequestTimeoutError', remoteOutcome: 'unknown' };
+    case '429':
+      return { message: '请求过于频繁 (429 Too Many Requests)', errorType: 'RateLimitError' };
+    case '401':
+      return { message: '未授权或登录已过期 (401 Unauthorized)', errorType: 'AuthError' };
+    case '403':
+      return { message: '权限不足 (403 Forbidden)', errorType: 'PermissionError' };
+    case '42501':
+      // Postgres RLS 策略违规，可能由过期 token 引起，也可能是真正的权限不足。
+      return { message: '权限不足 (RLS Policy Violation)', errorType: 'PermissionError' };
+    case '23503':
+      return { message: '关联数据尚未同步 (Foreign Key Violation)', errorType: 'ForeignKeyError' };
+    case 'P0001':
+    case 'PGRST':
+      return classifyPostgresBusinessError(message);
+    default:
+      return null;
+  }
+}
+
+function classifyKnownSupabaseErrorName(
+  name: string | undefined,
+  message: string | undefined,
+): SupabaseErrorClassification | null {
+  if (name === 'AuthRetryableFetchError') {
+    return {
+      message: message ?? 'Supabase auth request failed temporarily',
+      errorType: 'AuthRetryableFetchError',
+    };
+  }
+
+  if (name === 'AuthRefreshDiscardedError') {
+    return {
+      message: message ?? 'Supabase auth refresh result was discarded',
+      errorType: 'AuthRefreshDiscardedError',
+    };
+  }
+
+  return null;
+}
+
+function classifyPostgresBusinessError(message: string | undefined): SupabaseErrorClassification {
+  const lowerMsg = typeof message === 'string' ? message.toLowerCase() : '';
+
+  if (lowerMsg.includes('version regression not allowed')) {
+    return { message: '版本冲突：数据已被修改，请刷新后重试', errorType: 'VersionConflictError' };
+  }
+
+  if (
+    lowerMsg.includes('task must have either title or content') ||
+    lowerMsg.includes('invalid stage value') ||
+    lowerMsg.includes('invalid rank value')
+  ) {
+    return { message, errorType: 'ValidationError' };
+  }
+
+  return { message, errorType: 'BusinessRuleError' };
+}
+
+function classifyMessageOnlyError(message: string | undefined): SupabaseErrorClassification | null {
+  if (!message) {
+    return null;
+  }
+
+  const lowerMsg = message.toLowerCase();
+  if (lowerMsg.includes('network_io_suspended') || lowerMsg.includes('network io suspended')) {
+    return { message, errorType: 'BrowserNetworkSuspendedError' };
+  }
+  if (lowerMsg.includes('timeout') || lowerMsg.includes('timed out') || lowerMsg.includes('超时')) {
+    return { message, errorType: 'TimeoutError', remoteOutcome: 'unknown' };
+  }
+  if (lowerMsg.includes('network') || lowerMsg.includes('fetch')) {
+    return { message, errorType: 'NetworkError' };
+  }
+  if (lowerMsg.includes('offline') || lowerMsg.includes('no connection')) {
+    return { message, errorType: 'OfflineError' };
+  }
+  if (lowerMsg.includes('rate limit') || lowerMsg.includes('too many requests')) {
+    return { message, errorType: 'RateLimitError' };
+  }
+  if (lowerMsg.includes('jwt') || lowerMsg.includes('session') || lowerMsg.includes('expired')) {
+    return { message, errorType: 'AuthError' };
+  }
+  if (lowerMsg.includes('unknown supabase error') || lowerMsg.includes('unknown error')) {
+    return {
+      message: '服务器响应异常 (可能是 504/502/503 错误)，请稍后重试',
+      errorType: 'UnknownServerError',
+    };
+  }
+
+  return null;
+}
+
+function normalizeHtmlResponseClassification(message: string | undefined, fallbackType: string): SupabaseErrorClassification {
+  if (
+    typeof message === 'string' &&
+    (message.includes('<!DOCTYPE') || message.includes('<html') || message.includes('<!doctype'))
+  ) {
+    return {
+      message: '收到 HTML 响应（可能是 CDN 缓存或代理错误），请稍后重试',
+      errorType: 'HtmlResponseError',
+    };
+  }
+
+  return { message, errorType: fallbackType };
+}
+
+function normalizeSupabaseErrorShape(error: SupabaseErrorShape): SupabaseErrorShape {
+  if (!error.error || typeof error.error !== 'object') {
+    return error;
+  }
+
+  return {
+    ...error.error,
+    status: error.status,
+    statusText: error.statusText,
+  };
+}
+
+function getClassificationCode(error: SupabaseErrorShape): string | number | undefined {
+  return error.code ?? error.status;
+}
+
+function classifySupabaseObjectError(error: SupabaseErrorShape): SupabaseErrorClassification {
+  const code = getClassificationCode(error);
+  const statusClassification = classifyStatusCode(code, error.message);
+  const nameClassification = statusClassification
+    ? null
+    : classifyKnownSupabaseErrorName(error.name, error.message);
+  const messageClassification = statusClassification ?? nameClassification ?? classifyMessageOnlyError(error.message) ?? {
+    message: error.message,
+    errorType: 'SupabaseError',
+  };
+
+  const htmlClassification = normalizeHtmlResponseClassification(
+    messageClassification.message,
+    messageClassification.errorType,
+  );
+
+  if (!htmlClassification.message) {
+    return {
+      message: '服务器响应异常 (可能是 504/502/503 错误)，请稍后重试',
+      errorType: 'UnknownServerError',
+    };
+  }
+
+  return htmlClassification;
+}
+
+function createEnhancedSupabaseError(error: SupabaseErrorShape, classification: SupabaseErrorClassification): EnhancedError {
+  const err = new Error(classification.message) as EnhancedError;
+  err.name = classification.errorType;
+  err.code = getClassificationCode(error);
+  err.status = error.status;
+  err.statusText = error.statusText;
+  err.details = error.details;
+  err.hint = error.hint;
+  err.isRetryable = RETRYABLE_ERROR_TYPES.has(classification.errorType);
+  err.errorType = classification.errorType;
+  applyRemoteOutcomeClassification(err, classification);
+
+  return err;
+}
 
 /**
  * 将 Supabase 错误对象转换为标准 Error 实例
@@ -68,172 +360,11 @@ const RETRYABLE_ERROR_TYPES = new Set([
  */
 export function supabaseErrorToError(error: unknown): EnhancedError {
   if (error instanceof Error) {
-    // 【P2-10 修复】创建新 Error 而非直接修改原始 Error
-    const enhanced = Object.create(error) as EnhancedError;
-    Object.assign(enhanced, { message: error.message, name: error.name, stack: error.stack });
+    return enhanceErrorInstance(error);
+  }
 
-    if (isBrowserNetworkSuspendedError(error)) {
-      enhanced.errorType = 'BrowserNetworkSuspendedError';
-      enhanced.isRetryable = true;
-      enhanced.name = 'BrowserNetworkSuspendedError';
-      return enhanced;
-    }
-
-    const lowerMsg = enhanced.message.toLowerCase();
-    
-    // 【#95057880 修复】识别 HTML 响应错误
-    // 当 CDN/代理返回 HTML 页面（如 index.html）替代 JSON 时，Supabase SDK 解析失败
-    if (lowerMsg.includes('<!doctype') || lowerMsg.includes('<html') || lowerMsg.includes('unexpected token <')) {
-      enhanced.errorType = 'HtmlResponseError';
-      enhanced.isRetryable = true;
-      enhanced.name = 'HtmlResponseError';
-      return enhanced;
-    }
-    
-    // 识别 Error 实例中的网络错误模式
-    if (lowerMsg.includes('failed to fetch')) {
-      enhanced.errorType = 'NetworkError';
-      enhanced.isRetryable = true;
-    } else if (lowerMsg.includes('network error') || lowerMsg.includes('networkerror')) {
-      enhanced.errorType = 'NetworkError';
-      enhanced.isRetryable = true;
-    } else if (lowerMsg.includes('timeout') || lowerMsg.includes('timed out') || lowerMsg.includes('超时')) {
-      // 【2026-05-16】中文 '超时' 防御层
-      // RequestThrottleService.withTimeout 历史上抛 message 含中文的 Error，
-      // 现已在源头修复 name='TimeoutError'，此处保留作为兜底，覆盖 auth.service /
-      // unsaved-changes.guard / modal-loader 等其他中文超时错误源。
-      enhanced.errorType = 'TimeoutError';
-      enhanced.isRetryable = true;
-    } else if (lowerMsg.includes('offline') || lowerMsg.includes('no connection')) {
-      enhanced.errorType = 'OfflineError';
-      enhanced.isRetryable = true;
-    } else if (lowerMsg.includes('unknown supabase error') || lowerMsg.includes('unknown error')) {
-      // 【关键修复】Supabase 客户端无法解析 504/502/503 等非 JSON 响应时抛出此错误
-      // 这种情况通常是临时的网络/服务问题，应该标记为可重试
-      enhanced.errorType = 'UnknownServerError';
-      enhanced.isRetryable = true;
-      enhanced.name = 'UnknownServerError';
-    } else {
-      // 如果没有识别出具体类型，使用 name 属性
-      if (!enhanced.isRetryable) {
-        enhanced.isRetryable = RETRYABLE_ERROR_TYPES.has(enhanced.name);
-      }
-      if (!enhanced.errorType) {
-        enhanced.errorType = enhanced.name;
-      }
-    }
-    
-    return enhanced;
-  }
-  
-  // 识别网络相关错误
-  const errObj = error as { code?: string | number; status?: string | number; message?: string; details?: string };
-  const code = errObj?.code || errObj?.status;
-  let message = errObj?.message;
-  let errorType = 'SupabaseError';
-  
-  // HTTP 状态码判断（优先级最高，因为最可靠）
-  if (code === 504 || code === '504') {
-    message = '服务器响应超时 (504 Gateway Timeout)';
-    errorType = 'NetworkTimeoutError';
-  } else if (code === 503 || code === '503') {
-    message = '服务暂时不可用 (503 Service Unavailable)';
-    errorType = 'ServiceUnavailableError';
-  } else if (code === 502 || code === '502') {
-    message = '网关错误 (502 Bad Gateway)';
-    errorType = 'GatewayError';
-  } else if (code === 408 || code === '408') {
-    message = '请求超时 (408 Request Timeout)';
-    errorType = 'RequestTimeoutError';
-  } else if (code === 429 || code === '429') {
-    message = '请求过于频繁 (429 Too Many Requests)';
-    errorType = 'RateLimitError';
-  } else if (code === 401 || code === '401') {
-    message = '未授权或登录已过期 (401 Unauthorized)';
-    errorType = 'AuthError';
-  } else if (code === 403 || code === '403') {
-    message = '权限不足 (403 Forbidden)';
-    errorType = 'PermissionError';
-  } else if (code === '42501' || code === 42501) {
-    // Postgres RLS (Row-Level Security) policy violation
-    // 42501 是 RLS 策略违规，可能由过期 token 引起，也可能是真正的权限不足
-    message = '权限不足 (RLS Policy Violation)';
-    errorType = 'PermissionError';
-  } else if (code === '23503' || code === 23503) {
-    // Postgres 外键约束错误
-    message = '关联数据尚未同步 (Foreign Key Violation)';
-    errorType = 'ForeignKeyError';
-  } else if (code === 'P0001' || code === 'PGRST') {
-    // Postgres raise_exception - 需要根据消息内容进一步识别
-    const lowerMsg = (message && typeof message === 'string') ? message.toLowerCase() : '';
-    
-    if (lowerMsg.includes('version regression not allowed')) {
-      // 乐观锁版本冲突
-      message = '版本冲突：数据已被修改，请刷新后重试';
-      errorType = 'VersionConflictError';
-    } else if (lowerMsg.includes('task must have either title or content')) {
-      // 任务数据验证错误
-      errorType = 'ValidationError';
-      // 保持原始消息
-    } else if (lowerMsg.includes('invalid stage value') || 
-               lowerMsg.includes('invalid rank value')) {
-      // 其他数据验证错误
-      errorType = 'ValidationError';
-      // 保持原始消息
-    } else {
-      // 其他 P0001 错误，使用通用业务规则错误类型
-      errorType = 'BusinessRuleError';
-      // 保持原始消息
-    }
-  } else if (message && typeof message === 'string') {
-    // 如果没有状态码，尝试从消息中识别错误类型
-    const lowerMsg = message.toLowerCase();
-    if (lowerMsg.includes('network_io_suspended') || lowerMsg.includes('network io suspended')) {
-      errorType = 'BrowserNetworkSuspendedError';
-    } else if (lowerMsg.includes('timeout') || lowerMsg.includes('timed out') || lowerMsg.includes('超时')) {
-      errorType = 'TimeoutError';
-    } else if (lowerMsg.includes('network') || lowerMsg.includes('fetch')) {
-      errorType = 'NetworkError';
-    } else if (lowerMsg.includes('offline') || lowerMsg.includes('no connection')) {
-      errorType = 'OfflineError';
-    } else if (lowerMsg.includes('rate limit') || lowerMsg.includes('too many requests')) {
-      errorType = 'RateLimitError';
-    } else if (lowerMsg.includes('jwt') || lowerMsg.includes('session') || lowerMsg.includes('expired')) {
-      errorType = 'AuthError';
-    } else if (lowerMsg.includes('unknown supabase error') || lowerMsg.includes('unknown error')) {
-      // 504 Gateway Timeout 等服务端错误可能返回非 JSON 响应体
-      // Supabase 客户端无法解析时会回退到 "Unknown Supabase error"
-      // 这种情况通常是临时的网络/服务问题，应该标记为可重试
-      errorType = 'UnknownServerError';
-      message = '服务器响应异常 (可能是 504/502/503 错误)，请稍后重试';
-    }
-  }
-  
-  // 【#95057880 修复】检测 HTML 响应内容（CDN/代理返回 HTML 页面替代 JSON）
-  if (message && typeof message === 'string' && 
-      (message.includes('<!DOCTYPE') || message.includes('<html') || message.includes('<!doctype'))) {
-    message = '收到 HTML 响应（可能是 CDN 缓存或代理错误），请稍后重试';
-    errorType = 'HtmlResponseError';
-  }
-  
-  // 如果 message 仍然为空，使用默认消息
-  // 注意：空错误对象通常意味着服务端返回了非标准响应（如 504 的 HTML 错误页面）
-  if (!message) {
-    message = '服务器响应异常 (可能是 504/502/503 错误)，请稍后重试';
-    errorType = 'UnknownServerError';
-  }
-  
-  const err = new Error(message) as EnhancedError;
-  err.name = errorType;
-  
-  // 保留原始错误信息
-  err.code = code;
-  err.details = errObj?.details;
-  err.hint = (error as { hint?: string })?.hint;
-  err.isRetryable = RETRYABLE_ERROR_TYPES.has(errorType);
-  err.errorType = errorType;
-  
-  return err;
+  const errObj = normalizeSupabaseErrorShape(error as SupabaseErrorShape);
+  return createEnhancedSupabaseError(errObj, classifySupabaseObjectError(errObj));
 }
 
 /**

@@ -34,7 +34,7 @@ export interface PersistState {
  */
 export interface PersistCallbacks {
   /** 保存快照回调 */
-  saveSnapshot: () => void;
+  saveSnapshot: () => void | Promise<void>;
   /** 执行持久化回调 */
   doPersist: () => Promise<void>;
 }
@@ -69,9 +69,12 @@ export class PersistSchedulerService {
   
   /** 本地自动保存定时器 */
   private localAutosaveTimer: ReturnType<typeof setInterval> | null = null;
+  private localAutosaveInFlight = false;
+  private localAutosavePending = false;
   
   /** 持久化回调 */
   private callbacks: PersistCallbacks | null = null;
+  private destroyed = false;
   
   constructor() {
     this.destroyRef.onDestroy(() => {
@@ -86,6 +89,11 @@ export class PersistSchedulerService {
    * 如发生意外覆盖，此处会记录警告。
    */
   setCallbacks(callbacks: PersistCallbacks): void {
+    if (this.destroyed) {
+      this.logger.warn('PersistScheduler.setCallbacks: 服务已销毁，忽略回调注册');
+      return;
+    }
+
     if (this.callbacks) {
       this.logger.warn('PersistScheduler.setCallbacks: 覆盖已有回调，请检查调用方是否重复注册');
     }
@@ -98,13 +106,15 @@ export class PersistSchedulerService {
    * 保守模式核心机制：定期保存到本地，确保用户数据永不丢失
    */
   startLocalAutosave(): void {
-    if (this.localAutosaveTimer) {
+    if (this.destroyed) return;
+
+    if (this.localAutosaveTimer !== null) {
       this.logger.debug('本地自动保存已运行，跳过重复启动');
       return;
     }
     
     this.localAutosaveTimer = setInterval(() => {
-      this.callbacks?.saveSnapshot();
+      this.runLocalAutosaveTick();
     }, SYNC_CONFIG.LOCAL_AUTOSAVE_INTERVAL);
     
     this.logger.info('本地自动保存已启动', { 
@@ -116,17 +126,65 @@ export class PersistSchedulerService {
    * 停止本地自动保存
    */
   stopLocalAutosave(): void {
-    if (this.localAutosaveTimer) {
+    if (this.localAutosaveTimer !== null) {
       clearInterval(this.localAutosaveTimer);
       this.localAutosaveTimer = null;
+      this.localAutosavePending = false;
       this.logger.info('本地自动保存已停止');
     }
+  }
+
+  private runLocalAutosaveTick(): void {
+    if (this.destroyed) return;
+
+    const callbacks = this.callbacks;
+    if (!callbacks) return;
+
+    if (this.localAutosaveInFlight) {
+      this.localAutosavePending = true;
+      this.logger.debug('本地自动保存仍在进行中，合并本次 tick');
+      return;
+    }
+
+    try {
+      this.localAutosaveInFlight = true;
+      void Promise.resolve(callbacks.saveSnapshot())
+        .catch((error) => {
+          this.logger.error('本地自动保存快照失败', error);
+        })
+        .finally(() => this.finishLocalAutosaveTick());
+    } catch (error) {
+      this.logger.error('本地自动保存快照失败', error);
+      this.finishLocalAutosaveTick();
+    }
+  }
+
+  private finishLocalAutosaveTick(): void {
+    this.localAutosaveInFlight = false;
+    if (this.destroyed) {
+      this.localAutosavePending = false;
+      return;
+    }
+
+    if (this.localAutosaveTimer === null) {
+      this.localAutosavePending = false;
+      return;
+    }
+
+    if (!this.localAutosavePending) {
+      return;
+    }
+
+    this.localAutosavePending = false;
+    this.runLocalAutosaveTick();
   }
   
   /**
    * 标记有本地变更待同步
    */
   markLocalChanges(updateType: 'content' | 'structure' | 'position' = 'structure'): void {
+    if (this.destroyed) return;
+
     this._state.update(s => ({
       ...s,
       hasPendingLocalChanges: true,
@@ -138,6 +196,8 @@ export class PersistSchedulerService {
    * 清除本地变更标记
    */
   clearLocalChanges(): void {
+    if (this.destroyed) return;
+
     this._state.update(s => ({
       ...s,
       hasPendingLocalChanges: false
@@ -178,15 +238,21 @@ export class PersistSchedulerService {
    * 多次调用会合并为一次执行
    */
   schedulePersist(debounceMs: number = SYNC_CONFIG.DEBOUNCE_DELAY): void {
-    if (this.persistTimer) {
+    if (this.destroyed) return;
+
+    if (this.persistTimer !== null) {
       clearTimeout(this.persistTimer);
     }
     
     this._state.update(s => ({ ...s, hasPending: true }));
     
-    this.persistTimer = setTimeout(async () => {
+    const persistTimer = setTimeout(async () => {
+      if (this.destroyed) return;
+      if (this.persistTimer !== persistTimer) return;
+      this.persistTimer = null;
       await this.executePersist();
     }, debounceMs);
+    this.persistTimer = persistTimer;
   }
   
   /**
@@ -196,7 +262,9 @@ export class PersistSchedulerService {
    * 而非直接跳过（避免"已在进行中则不执行"导致的数据丢失）。
    */
   async flushPendingPersist(): Promise<void> {
-    if (this.persistTimer) {
+    if (this.destroyed) return;
+
+    if (this.persistTimer !== null) {
       clearTimeout(this.persistTimer);
       this.persistTimer = null;
     }
@@ -214,6 +282,8 @@ export class PersistSchedulerService {
    * 2. isPersisting 时重新调度而非直接跳过（避免并发写入丢失）
    */
   private async executePersist(): Promise<void> {
+    if (this.destroyed) return;
+
     if (!this.callbacks) {
       this.logger.warn('executePersist 调用但 callbacks 未设置，跳过');
       return;
@@ -235,6 +305,10 @@ export class PersistSchedulerService {
     try {
       await this.callbacks.doPersist();
 
+      if (this.destroyed) {
+        return;
+      }
+
       this._state.update(s => ({
         ...s,
         isPersisting: false,
@@ -248,6 +322,10 @@ export class PersistSchedulerService {
         await this.executePersist();
       }
     } catch (error) {
+      if (this.destroyed) {
+        return;
+      }
+
       this.logger.error('持久化失败', error);
 
       // 失败时保留 hasPending = true，确保下次 schedulePersist() 触发时仍会重试，
@@ -264,14 +342,26 @@ export class PersistSchedulerService {
    * 清理资源
    */
   private cleanup(): void {
-    if (this.persistTimer) {
+    if (this.destroyed) return;
+    this.destroyed = true;
+
+    if (this.persistTimer !== null) {
       clearTimeout(this.persistTimer);
       this.persistTimer = null;
     }
     
-    if (this.localAutosaveTimer) {
+    if (this.localAutosaveTimer !== null) {
       clearInterval(this.localAutosaveTimer);
       this.localAutosaveTimer = null;
     }
+
+    this.callbacks = null;
+    this.localAutosaveInFlight = false;
+    this.localAutosavePending = false;
+    this._state.update(s => ({
+      ...s,
+      isPersisting: false,
+      hasPending: false,
+    }));
   }
 }

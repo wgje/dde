@@ -3,6 +3,8 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { SupabaseClientService } from '../../../../services/supabase-client.service';
 import { AuthService } from '../../../../services/auth.service';
 import { LoggerService } from '../../../../services/logger.service';
+import { SyncRpcClientService, type SyncRpcResult } from '../../../../services/sync-rpc-client.service';
+import { DataSafetyWriteAuditService } from '../../../../services/data-safety-write-audit.service';
 import { SessionManagerService } from './session-manager.service';
 import {
   DockSnapshot,
@@ -10,7 +12,6 @@ import {
   RoutineCompletionMutation,
   RoutineTask,
 } from '../../../../models/parking-dock';
-import { nowISO } from '../../../../utils/date';
 import { supabaseErrorToError } from '../../../../utils/supabase-error';
 import {
   isBrowserNetworkSuspendedError,
@@ -19,36 +20,13 @@ import {
 import {
   type Result,
   type OperationError,
+  type ErrorCode,
   success,
   failure,
   ErrorCodes,
 } from '../../../../utils/result';
-
-/** 最小化运行时校验：DockSnapshot 至少含合法 version */
-function isDockSnapshotLike(value: unknown): value is DockSnapshot {
-  if (!value || typeof value !== 'object') return false;
-  const v = (value as Record<string, unknown>).version;
-  return typeof v === 'number' && v >= 2 && v <= 7;
-}
-
-function toEpochMs(value: unknown): number | null {
-  if (typeof value === 'number' && Number.isFinite(value)) return value;
-  if (typeof value !== 'string' || !value) return null;
-  const ms = Date.parse(value);
-  return Number.isFinite(ms) ? ms : null;
-}
-
-function snapshotSavedAtMs(snapshot: unknown): number | null {
-  if (!snapshot || typeof snapshot !== 'object') return null;
-  return toEpochMs((snapshot as Record<string, unknown>)['savedAt']);
-}
-
-function maxKnownTimestampMs(values: unknown[]): number | null {
-  const parsed = values
-    .map(toEpochMs)
-    .filter((value): value is number => value !== null);
-  return parsed.length > 0 ? Math.max(...parsed) : null;
-}
+import { fetchAllSupabasePages } from '../../../../utils/supabase-pagination';
+import { selectRemoteFocusSnapshot } from './focus-console-load';
 
 interface FocusSessionRow {
   id: string;
@@ -73,9 +51,11 @@ interface RoutineTaskRow {
 })
 export class FocusConsoleSyncService {
   private readonly supabase = inject(SupabaseClientService);
+  private readonly syncRpc = inject(SyncRpcClientService);
   private readonly auth = inject(AuthService);
   private readonly logger = inject(LoggerService).category('FocusConsoleSync');
   private readonly sessionManager = inject(SessionManagerService);
+  private readonly dataSafetyWriteAudit = new DataSafetyWriteAuditService();
 
   /** 短时请求去重：同一 userId 的 inflight loadFocusSession 共享同一 Promise */
   private loadInflight: Map<string, Promise<Result<DockSnapshot | null, OperationError>>> = new Map();
@@ -85,6 +65,45 @@ export class FocusConsoleSyncService {
       retryable: true,
       deferred: true,
       reason: 'browser-network-suspended',
+    });
+  }
+
+  private buildStalePayloadFailure<T>(
+    code: ErrorCode,
+    message: string,
+    result: SyncRpcResult,
+  ): Result<T, OperationError> {
+    return failure(code, message, {
+      retryable: false,
+      reason: 'stale-payload-preserved-remotely',
+      rpcStatus: result.status,
+      rpcReason: result.reason,
+      remoteUpdatedAt: result.remoteUpdatedAt,
+      serverUpdatedAt: result.serverUpdatedAt,
+    });
+  }
+
+  private buildSyncRpcRequiredFailure<T>(
+    code: ErrorCode,
+    message: string,
+    operationId: string | undefined,
+    context: string,
+  ): Result<T, OperationError> {
+    const hasOperationId = typeof operationId === 'string' && operationId.length > 0;
+    const reason = hasOperationId ? 'sync-rpc-unavailable' : 'missing-operation-id';
+    this.logWarn(`${context}: 跳过 legacy 远端直写，保留本地操作等待队列重试`, {
+      operationId,
+      reason,
+      featureEnabled: this.syncRpc.isFeatureEnabled(),
+      clientRejected: this.syncRpc.isClientRejected(),
+    });
+    return failure(code, message, {
+      retryable: true,
+      deferred: true,
+      reason,
+      operationId,
+      featureEnabled: this.syncRpc.isFeatureEnabled(),
+      clientRejected: this.syncRpc.isClientRejected(),
     });
   }
 
@@ -106,8 +125,50 @@ export class FocusConsoleSyncService {
       if (!refreshResult.refreshed) {
         throw error;
       }
-      this.logger.info('会话已刷新，重试远端读请求', { context });
+      this.logInfo('会话已刷新，重试远端读请求', { context });
       return await fn();
+    }
+  }
+
+  private logDebug(message: string): void;
+  private logDebug(message: string, data: unknown): void;
+  private logDebug(message: string, data?: unknown): void {
+    try {
+      if (arguments.length > 1) {
+        this.logger.debug(message, data);
+      } else {
+        this.logger.debug(message);
+      }
+    } catch {
+      // Diagnostic sinks must not affect focus console sync behavior.
+    }
+  }
+
+  private logInfo(message: string): void;
+  private logInfo(message: string, data: unknown): void;
+  private logInfo(message: string, data?: unknown): void {
+    try {
+      if (arguments.length > 1) {
+        this.logger.info(message, data);
+      } else {
+        this.logger.info(message);
+      }
+    } catch {
+      // Diagnostic sinks must not affect focus console sync behavior.
+    }
+  }
+
+  private logWarn(message: string): void;
+  private logWarn(message: string, data: unknown): void;
+  private logWarn(message: string, data?: unknown): void {
+    try {
+      if (arguments.length > 1) {
+        this.logger.warn(message, data);
+      } else {
+        this.logger.warn(message);
+      }
+    } catch {
+      // Diagnostic sinks must not affect focus console sync behavior.
     }
   }
 
@@ -141,6 +202,123 @@ export class FocusConsoleSyncService {
     }
   }
 
+  private shouldUseSyncRpc(operationId?: string): operationId is string {
+    return typeof operationId === 'string'
+      && operationId.length > 0
+      && this.syncRpc.isFeatureEnabled()
+      && !this.syncRpc.isClientRejected();
+  }
+
+  private async saveFocusSessionViaSyncRpc(
+    record: FocusSessionRecord,
+    operationId: string,
+  ): Promise<Result<void, OperationError>> {
+    const localTimestamp = Date.now();
+    const updatedAtBaseline = record.updatedAt || null;
+    const result = await this.syncRpc.upsertFocusSession({
+      operationId,
+      record,
+    });
+    this.recordFocusConsoleRpcWriteAudit({
+      ownerUserId: record.userId,
+      operationId,
+      entityType: 'focus-session',
+      entityId: record.id,
+      result,
+      localTimestamp,
+      updatedAtBaseline,
+    });
+    if (result.stalePayload === true) {
+      return this.buildStalePayloadFailure(
+        ErrorCodes.FOCUS_CONSOLE_SAVE_FAILED,
+        '远端专注会话已更新，本地变更已保留等待处理',
+        result,
+      );
+    }
+
+    if (result.status === 'applied' || result.status === 'idempotent-replay') {
+      return success(undefined);
+    }
+
+    this.logWarn('saveFocusSession RPC 未应用', {
+      operationId,
+      status: result.status,
+      reason: result.reason,
+      stalePayload: result.stalePayload,
+    });
+    return failure(ErrorCodes.FOCUS_CONSOLE_SAVE_FAILED, '保存专注会话失败');
+  }
+
+  private async upsertRoutineTaskViaSyncRpc(
+    userId: string,
+    task: RoutineTask,
+    operationId: string,
+  ): Promise<Result<void, OperationError>> {
+    const localTimestamp = Date.now();
+    const updatedAtBaseline = task.updatedAt ?? null;
+    const result = await this.syncRpc.upsertRoutineTask({
+      operationId,
+      userId,
+      task,
+    });
+    this.recordFocusConsoleRpcWriteAudit({
+      ownerUserId: userId,
+      operationId,
+      entityType: 'routine-task',
+      entityId: task.routineId,
+      result,
+      localTimestamp,
+      updatedAtBaseline,
+    });
+    if (result.stalePayload === true) {
+      return this.buildStalePayloadFailure(
+        ErrorCodes.FOCUS_CONSOLE_ROUTINE_FAILED,
+        '远端日常任务已更新，本地变更已保留等待处理',
+        result,
+      );
+    }
+
+    if (result.status === 'applied' || result.status === 'idempotent-replay') {
+      return success(undefined);
+    }
+
+    this.logWarn('upsertRoutineTask RPC 未应用', {
+      userId,
+      operationId,
+      status: result.status,
+      reason: result.reason,
+      stalePayload: result.stalePayload,
+    });
+    return failure(ErrorCodes.FOCUS_CONSOLE_ROUTINE_FAILED, '更新日常任务失败');
+  }
+
+  private recordFocusConsoleRpcWriteAudit(input: {
+    ownerUserId: string;
+    operationId: string;
+    entityType: 'focus-session' | 'routine-task' | 'routine-completion';
+    entityId: string;
+    result: SyncRpcResult;
+    localTimestamp: number;
+    updatedAtBaseline: string | null;
+  }): void {
+    this.dataSafetyWriteAudit.recordWrite({
+      ownerUserId: input.ownerUserId,
+      operationId: input.operationId,
+      sourceUserId: input.ownerUserId,
+      entityType: input.entityType,
+      entityId: input.entityId,
+      operation: 'upsert',
+      localTimestamp: input.localTimestamp,
+      updatedAtBaseline: input.updatedAtBaseline,
+      beforeVersion: input.updatedAtBaseline,
+      rpcResult: input.result,
+      enteredRetryQueue: false,
+      retryCount: 0,
+      lastSyncTimeBefore: null,
+      lastSyncTimeAfter: null,
+    });
+  }
+
   /**
    * 加载远端专注会话快照。
    * 【HR-2 LWW 修复】当提供 localUpdatedAt 时，仅在远端更新时间严格晚于本地时返回，
@@ -154,7 +332,7 @@ export class FocusConsoleSyncService {
     // 请求去重：如果同一用户已有 inflight 请求则复用
     const existing = this.loadInflight.get(userId);
     if (existing) {
-      this.logger.debug('loadFocusSession: 复用已有 inflight 请求', { userId: userId.substring(0, 8) });
+      this.logDebug('loadFocusSession: 复用已有 inflight 请求', { userId: userId.substring(0, 8) });
       return existing;
     }
 
@@ -172,14 +350,14 @@ export class FocusConsoleSyncService {
     localUpdatedAt?: string,
   ): Promise<Result<DockSnapshot | null, OperationError>> {
     if (isBrowserNetworkSuspendedWindow()) {
-      this.logger.debug('loadFocusSession: 浏览器网络挂起窗口内跳过远端读取');
+      this.logDebug('loadFocusSession: 浏览器网络挂起窗口内跳过远端读取');
       return this.buildBrowserSuspendedFailure();
     }
 
     const client = this.getSupabaseClient();
     if (!client) {
       // 离线时返回 null，让调用方使用本地数据继续工作
-      this.logger.debug('离线模式，跳过远端专注会话加载');
+      this.logDebug('离线模式，跳过远端专注会话加载');
       return success(null);
     }
 
@@ -195,126 +373,83 @@ export class FocusConsoleSyncService {
         if (error) throw supabaseErrorToError(error);
         return row;
       });
-      if (!data) return success(null);
-
-      const row = data as FocusSessionRow;
-
-      // H-LWW fix: 用 epoch ms 比较时间戳，避免 ISO 字符串格式差异
-      // LWW：本地更新时间 > 远端时，跳过远端数据（本地赢）
-      // 注意：等时情况此处保持"远端赢"（与历史语义一致）。
-      if (localUpdatedAt && row.updated_at) {
-        const remoteMs = new Date(row.updated_at).getTime();
-        const localMs = new Date(localUpdatedAt).getTime();
-        if (Number.isFinite(remoteMs) && Number.isFinite(localMs) && remoteMs < localMs) {
-          return success(null);
-        }
-      }
-
-      const state = row.session_state;
-      if (!isDockSnapshotLike(state)) return success(null);
-      return success(state);
+      return success(selectRemoteFocusSnapshot(data as FocusSessionRow | null, localUpdatedAt));
     } catch (error) {
       if (isBrowserNetworkSuspendedError(error)) {
-        this.logger.debug('loadFocusSession: 浏览器网络挂起窗口内跳过远端读取');
+        this.logDebug('loadFocusSession: 浏览器网络挂起窗口内跳过远端读取');
         return this.buildBrowserSuspendedFailure();
       }
 
       const enhanced = supabaseErrorToError(error);
       if (this.sessionManager.isSessionExpiredError(enhanced)) {
-        this.logger.info('loadFocusSession: 会话不可用，保留本地专注会话快照', {
+        this.logInfo('loadFocusSession: 会话不可用，保留本地专注会话快照', {
           code: enhanced.code,
           message: enhanced.message,
         });
         return success(null);
       }
 
-      this.logger.warn('loadFocusSession failed', error);
+      this.logWarn('loadFocusSession failed', error);
       return failure(ErrorCodes.FOCUS_CONSOLE_LOAD_FAILED, '加载专注会话失败');
     }
   }
 
   /**
    * 保存专注会话快照到远端。
-   * 【H-05 说明】当前直接写 Supabase，离线时返回 SYNC_OFFLINE 错误。
-   * 调用方（DockCloudSyncService）负责将失败操作入队到 RetryQueue。
+   * 写入必须走带 operationId 的 Sync RPC；否则返回 deferred failure，
+   * 由已持久化的本地队列恢复同步，避免 legacy REST 直写绕过幂等协议。
    */
-  async saveFocusSession(record: FocusSessionRecord): Promise<Result<void, OperationError>> {
+  async saveFocusSession(
+    record: FocusSessionRecord,
+    operationId?: string,
+  ): Promise<Result<void, OperationError>> {
     if (isBrowserNetworkSuspendedWindow()) {
-      this.logger.debug('saveFocusSession: 浏览器网络挂起窗口内跳过远端写入');
+      this.logDebug('saveFocusSession: 浏览器网络挂起窗口内跳过远端写入');
       return this.buildBrowserSuspendedFailure();
     }
 
-    const client = this.getSupabaseClient();
-    if (!client) return failure(ErrorCodes.SYNC_OFFLINE, '当前离线');
-
     try {
-      const payload: FocusSessionRow = {
-        id: record.id,
-        user_id: record.userId,
-        started_at: record.startedAt || nowISO(),
-        ended_at: record.endedAt,
-        session_state: record.snapshot,
-        updated_at: record.updatedAt || nowISO(),
-      };
-
-      // C-4 fix: 写入前检查远端版本，避免过期重试覆盖更新数据
-      const { data: existing, error: existingError } = await client
-        .from('focus_sessions')
-        .select('updated_at,session_state')
-        .eq('id', record.id)
-        .maybeSingle();
-      if (existingError) throw supabaseErrorToError(existingError);
-      if (existing?.session_state) {
-        const remoteMs = maxKnownTimestampMs([
-          (existing as { updated_at?: unknown }).updated_at,
-          snapshotSavedAtMs(existing.session_state),
-        ]);
-        const localMs = maxKnownTimestampMs([
-          record.updatedAt,
-          snapshotSavedAtMs(record.snapshot),
-        ]);
-        if (remoteMs !== null && localMs !== null && remoteMs > localMs) {
-          this.logger.info('saveFocusSession skipped: remote is newer', { remoteMs, localMs });
-          return success(undefined);
-        }
+      if (this.shouldUseSyncRpc(operationId)) {
+        return await this.saveFocusSessionViaSyncRpc(record, operationId);
       }
 
-      const { error } = await client
-        .from('focus_sessions')
-        .upsert(payload, { onConflict: 'id' });
-      if (error) throw supabaseErrorToError(error);
-      return success(undefined);
+      return this.buildSyncRpcRequiredFailure(
+        ErrorCodes.FOCUS_CONSOLE_SAVE_FAILED,
+        '保存专注会话等待后台同步',
+        operationId,
+        'saveFocusSession',
+      );
     } catch (error) {
       if (isBrowserNetworkSuspendedError(error)) {
-        this.logger.debug('saveFocusSession: 浏览器网络挂起窗口内跳过远端写入');
+        this.logDebug('saveFocusSession: 浏览器网络挂起窗口内跳过远端写入');
         return this.buildBrowserSuspendedFailure();
       }
 
-      this.logger.warn('saveFocusSession failed', error);
+      this.logWarn('saveFocusSession failed', error);
       return failure(ErrorCodes.FOCUS_CONSOLE_SAVE_FAILED, '保存专注会话失败');
     }
   }
 
   async listRoutineTasks(userId: string): Promise<Result<RoutineTask[], OperationError>> {
     if (isBrowserNetworkSuspendedWindow()) {
-      this.logger.debug('listRoutineTasks: 浏览器网络挂起窗口内跳过远端读取');
+      this.logDebug('listRoutineTasks: 浏览器网络挂起窗口内跳过远端读取');
       return this.buildBrowserSuspendedFailure();
     }
 
     const client = this.getSupabaseClient();
     if (!client) {
       // 离线时返回空列表，让调用方使用本地缓存的日常任务
-      this.logger.debug('离线模式，跳过远端日常任务加载');
+      this.logDebug('离线模式，跳过远端日常任务加载');
       return success([]);
     }
 
     try {
       const data = await this.withAuthRetry('listRoutineTasks', async () => {
-        const { data: rows, error } = await client
+        const { data: rows, error } = await fetchAllSupabasePages<RoutineTaskRow>(() => client
           .from('routine_tasks')
           .select('id,user_id,title,max_times_per_day,is_enabled,updated_at')
           .eq('user_id', userId)
-          .order('updated_at', { ascending: false });
+          .order('updated_at', { ascending: false }));
         if (error) throw supabaseErrorToError(error);
         return rows;
       });
@@ -330,50 +465,48 @@ export class FocusConsoleSyncService {
       })));
     } catch (error) {
       if (isBrowserNetworkSuspendedError(error)) {
-        this.logger.debug('listRoutineTasks: 浏览器网络挂起窗口内跳过远端读取');
+        this.logDebug('listRoutineTasks: 浏览器网络挂起窗口内跳过远端读取');
         return this.buildBrowserSuspendedFailure();
       }
 
-      this.logger.warn('listRoutineTasks failed', error);
+      this.logWarn('listRoutineTasks failed', error);
       return failure(ErrorCodes.FOCUS_CONSOLE_ROUTINE_FAILED, '获取日常任务失败');
     }
   }
 
   /**
    * 保存日常任务到远端。
-   * 离线时返回 SYNC_OFFLINE，调用方负责 RetryQueue。
+   * 写入必须走带 operationId 的 Sync RPC；否则返回 deferred failure，
+   * 由已持久化的本地队列恢复同步，避免 legacy REST 直写绕过幂等协议。
    */
-  async upsertRoutineTask(userId: string, task: RoutineTask): Promise<Result<void, OperationError>> {
+  async upsertRoutineTask(
+    userId: string,
+    task: RoutineTask,
+    operationId?: string,
+  ): Promise<Result<void, OperationError>> {
     if (isBrowserNetworkSuspendedWindow()) {
-      this.logger.debug('upsertRoutineTask: 浏览器网络挂起窗口内跳过远端写入');
+      this.logDebug('upsertRoutineTask: 浏览器网络挂起窗口内跳过远端写入');
       return this.buildBrowserSuspendedFailure();
     }
 
-    const client = this.getSupabaseClient();
-    if (!client) return failure(ErrorCodes.SYNC_OFFLINE, '当前离线');
-
     try {
-      const payload: RoutineTaskRow = {
-        id: task.routineId,
-        user_id: userId,
-        title: task.title,
-        max_times_per_day: task.maxTimesPerDay,
-        is_enabled: task.isEnabled,
-        updated_at: nowISO(),
-      };
+      if (this.shouldUseSyncRpc(operationId)) {
+        return await this.upsertRoutineTaskViaSyncRpc(userId, task, operationId);
+      }
 
-      const { error } = await client
-        .from('routine_tasks')
-        .upsert(payload, { onConflict: 'id' });
-      if (error) throw supabaseErrorToError(error);
-      return success(undefined);
+      return this.buildSyncRpcRequiredFailure(
+        ErrorCodes.FOCUS_CONSOLE_ROUTINE_FAILED,
+        '更新日常任务等待后台同步',
+        operationId,
+        'upsertRoutineTask',
+      );
     } catch (error) {
       if (isBrowserNetworkSuspendedError(error)) {
-        this.logger.debug('upsertRoutineTask: 浏览器网络挂起窗口内跳过远端写入');
+        this.logDebug('upsertRoutineTask: 浏览器网络挂起窗口内跳过远端写入');
         return this.buildBrowserSuspendedFailure();
       }
 
-      this.logger.warn('upsertRoutineTask failed', error);
+      this.logWarn('upsertRoutineTask failed', error);
       return failure(ErrorCodes.FOCUS_CONSOLE_ROUTINE_FAILED, '更新日常任务失败');
     }
   }
@@ -384,31 +517,53 @@ export class FocusConsoleSyncService {
    */
   async incrementRoutineCompletion(
     mutation: RoutineCompletionMutation,
+    operationId?: string,
   ): Promise<Result<void, OperationError>> {
     if (isBrowserNetworkSuspendedWindow()) {
-      this.logger.debug('incrementRoutineCompletion: 浏览器网络挂起窗口内跳过远端写入');
+      this.logDebug('incrementRoutineCompletion: 浏览器网络挂起窗口内跳过远端写入');
       return this.buildBrowserSuspendedFailure();
     }
 
-    const client = this.getSupabaseClient();
-    if (!client) return failure(ErrorCodes.SYNC_OFFLINE, '当前离线');
-
-    try {
-      const { error } = await client.rpc('increment_routine_completion', {
-        p_completion_id: mutation.completionId,
-        p_routine_id: mutation.routineId,
-        p_date_key: mutation.dateKey,
-      });
-      if (error) throw supabaseErrorToError(error);
-      return success(undefined);
-    } catch (error) {
-      if (isBrowserNetworkSuspendedError(error)) {
-        this.logger.debug('incrementRoutineCompletion: 浏览器网络挂起窗口内跳过远端写入');
-        return this.buildBrowserSuspendedFailure();
-      }
-
-      this.logger.warn('incrementRoutineCompletion failed', error);
-      return failure(ErrorCodes.FOCUS_CONSOLE_INCREMENT_FAILED, '完成记录更新失败');
+    if (this.shouldUseSyncRpc(operationId)) {
+      return await this.incrementRoutineCompletionViaSyncRpc(mutation, operationId);
     }
+
+    return this.buildSyncRpcRequiredFailure(
+      ErrorCodes.FOCUS_CONSOLE_INCREMENT_FAILED,
+      '完成记录等待后台同步',
+      operationId,
+      'incrementRoutineCompletion',
+    );
+  }
+
+  private async incrementRoutineCompletionViaSyncRpc(
+    mutation: RoutineCompletionMutation,
+    operationId: string,
+  ): Promise<Result<void, OperationError>> {
+    const localTimestamp = Date.now();
+    const result = await this.syncRpc.incrementRoutineCompletion({
+      operationId,
+      mutation,
+    });
+    this.recordFocusConsoleRpcWriteAudit({
+      ownerUserId: mutation.userId,
+      operationId,
+      entityType: 'routine-completion',
+      entityId: mutation.completionId,
+      result,
+      localTimestamp,
+      updatedAtBaseline: null,
+    });
+    if (result.status === 'applied' || result.status === 'idempotent-replay') {
+      return success(undefined);
+    }
+
+    this.logWarn('incrementRoutineCompletion RPC 未应用', {
+      userId: mutation.userId,
+      operationId,
+      status: result.status,
+      reason: result.reason,
+    });
+    return failure(ErrorCodes.FOCUS_CONSOLE_INCREMENT_FAILED, '完成记录更新失败');
   }
 }

@@ -17,14 +17,17 @@ function getSection(sql: string, startMarker: string, endMarker: string): string
 }
 
 function expectOwnerOnlyBatchUpsert(section: string, ownerMarker: string): void {
+  const preservesAttachmentsWithLegacyCoalesce = section.includes("attachments = COALESCE(existing.attachments, '[]'::jsonb)");
+  const preservesAttachmentsWithIntentCase = section.includes('attachments = CASE')
+    && section.includes('WHEN NOT v_has_attachments THEN existing.attachments');
+
   expect(section).toContain(ownerMarker);
   expect(section).not.toContain('FROM public.project_members pm');
   expect(section).toContain('INSERT INTO public.tasks AS existing');
-  expect(section).not.toContain("COALESCE(v_task->'attachments', '[]'::jsonb)");
-  expect(section).toContain("attachments = COALESCE(existing.attachments, '[]'::jsonb)");
   expect(section).toContain('WHERE existing.project_id = p_project_id');
   expect(section).toContain("RAISE EXCEPTION 'Task project mismatch'");
   expect(section).not.toContain('attachments = EXCLUDED.attachments');
+  expect(preservesAttachmentsWithLegacyCoalesce || preservesAttachmentsWithIntentCase).toBe(true);
 }
 
 function expectOwnerOnlyPurge(section: string): void {
@@ -55,7 +58,109 @@ function expectOwnerOnlyProjectMembersPolicy(section: string): void {
   expect(normalized).not.toContain("pm.role = 'admin'");
 }
 
+function expectSecurityDefinerFunctionsSetSearchPath(relativePath: string): void {
+  const sql = readSql(relativePath);
+  const functionPattern = /create\s+(?:or\s+replace\s+)?function\s+([\w."]+)\s*\([^;]*?security\s+definer[\s\S]*?\$\$\s*;/gi;
+  const missing: string[] = [];
+  let match: RegExpExecArray | null;
+
+  while ((match = functionPattern.exec(sql)) !== null) {
+    if (!/set\s+search_path/i.test(match[0])) {
+      missing.push(match[1]);
+    }
+  }
+
+  expect(missing, `${relativePath} SECURITY DEFINER functions missing search_path`).toEqual([]);
+}
+
+function listTopLevelMigrationPaths(): string[] {
+  const migrationDir = path.join(process.cwd(), 'supabase/migrations');
+  return fs.readdirSync(migrationDir)
+    .filter(file => file.endsWith('.sql'))
+    .sort()
+    .map(file => `supabase/migrations/${file}`);
+}
+
 describe('SQL 安全加固契约', () => {
+  it('active read views must expose only SELECT to authenticated users', () => {
+    for (const relativePath of [
+      'scripts/init-supabase.sql',
+      'supabase/migrations/20260315200000_consolidated_focus_console_and_security.sql',
+    ]) {
+      const sql = readSql(relativePath);
+
+      for (const viewName of ['active_tasks', 'active_connections']) {
+        expect(sql).toContain(`REVOKE INSERT, UPDATE, DELETE ON TABLE public.${viewName} FROM authenticated`);
+        expect(sql).toContain(`GRANT SELECT ON TABLE public.${viewName} TO authenticated`);
+        expect(sql).not.toContain(`GRANT ALL ON TABLE public.${viewName} TO authenticated`);
+      }
+    }
+
+    const attentionSql = readSql('supabase/migrations/20260605062000_task_attention_meta.sql');
+    expect(attentionSql).toContain('REVOKE INSERT, UPDATE, DELETE ON TABLE public.active_tasks FROM authenticated');
+    expect(attentionSql).toContain('GRANT SELECT ON TABLE public.active_tasks TO authenticated');
+    expect(attentionSql).not.toContain('GRANT ALL ON TABLE public.active_tasks TO authenticated');
+  });
+
+  it('active_connections 权限加固必须有前向迁移覆盖已部署数据库', () => {
+    const sql = readSql('supabase/migrations/20260609020100_active_connections_view_permissions.sql');
+
+    expect(sql).toContain('REVOKE ALL ON TABLE public.active_connections FROM anon');
+    expect(sql).toContain('REVOKE INSERT, UPDATE, DELETE ON TABLE public.active_connections FROM authenticated');
+    expect(sql).toContain('GRANT SELECT ON TABLE public.active_connections TO authenticated');
+    expect(sql).toContain('GRANT ALL ON TABLE public.active_connections TO service_role');
+    expect(sql).not.toContain('GRANT ALL ON TABLE public.active_connections TO authenticated');
+  });
+
+  it('新增部署脚本和迁移不得再向 authenticated 授予裸 GRANT ALL', () => {
+    const legacyGrantAllBaselines = new Set([
+      'supabase/migrations/20260126074130_remote_commit.sql',
+      'supabase/migrations/20260315200000_consolidated_focus_console_and_security.sql',
+    ]);
+    const grantAllAuthenticatedPattern =
+      /\bGRANT\s+ALL\b[\s\S]*?\bTO\s+[^;]*"?authenticated"?\b/i;
+    const offenders: Array<{ file: string; statement: string }> = [];
+
+    for (const relativePath of ['scripts/init-supabase.sql', ...listTopLevelMigrationPaths()]) {
+      if (legacyGrantAllBaselines.has(relativePath)) continue;
+
+      const statements = readSql(relativePath).split(';');
+      for (const statement of statements) {
+        if (!grantAllAuthenticatedPattern.test(statement)) continue;
+
+        offenders.push({
+          file: relativePath,
+          statement: statement.replace(/\s+/g, ' ').trim(),
+        });
+      }
+    }
+
+    expect(offenders).toEqual([]);
+  });
+
+  it('Supabase migration versions must stay unique', () => {
+    const migrationDir = path.join(process.cwd(), 'supabase/migrations');
+    const files = fs.readdirSync(migrationDir).filter(file => file.endsWith('.sql'));
+    const versions = files.map(file => file.slice(0, 14));
+    const duplicates = versions.filter((version, index) => versions.indexOf(version) !== index);
+
+    expect(new Set(duplicates)).toEqual(new Set());
+  });
+
+  it('当前部署脚本和新增加固迁移的 SECURITY DEFINER 函数必须固定 search_path', () => {
+    for (const relativePath of [
+      'scripts/init-supabase.sql',
+      'supabase/migrations/20260531120000_database_hardening_dr_controls.sql',
+      'supabase/migrations/20260531123000_advisor_followup_rls_and_function_exposure.sql',
+      'supabase/migrations/20260531125000_quarantine_digest_and_audit_origin_hardening.sql',
+      'supabase/migrations/20260606050000_security_sync_followup.sql',
+      'supabase/migrations/20260606051000_sync_upsert_task_stale_result.sql',
+      'supabase/migrations/20260606052000_transcription_quota_and_cleanup_hardening.sql',
+    ]) {
+      expectSecurityDefinerFunctionsSetSearchPath(relativePath);
+    }
+  });
+
   it('init script 中的附件 RPC 必须校验项目访问权限', () => {
     const sql = readSql('scripts/init-supabase.sql');
     const appendSection = getSection(

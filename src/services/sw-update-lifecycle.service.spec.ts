@@ -1,8 +1,12 @@
-import { vi, describe, it, expect } from 'vitest';
+import { vi, describe, it, expect, beforeAll, afterEach, afterAll } from 'vitest';
+import { Subject } from 'rxjs';
 import { APP_LIFECYCLE_CONFIG } from '../config/app-lifecycle.config';
 import { SwUpdateLifecycleService, type SwUpdateCheckReason } from './sw-update-lifecycle.service';
+import type { ToastService } from './toast.service';
 
 type SwUpdateLifecyclePrivate = {
+  initialize: () => void;
+  teardown: () => void;
   setupSwUpdateChecks: () => void;
   teardownSwUpdateChecks: () => void;
   checkForSwUpdate: (reason: SwUpdateCheckReason, force?: boolean) => Promise<void>;
@@ -10,13 +14,26 @@ type SwUpdateLifecyclePrivate = {
   swUpdatePollTimer: ReturnType<typeof setInterval> | null;
   swUpdateCheckInFlight: boolean;
   lastSwUpdateCheckAt: number;
+  versionUpdatesSubscribed: boolean;
   stopped: boolean;
-  swUpdate: { isEnabled: boolean; checkForUpdate: ReturnType<typeof vi.fn> };
+  initialized: boolean;
+  swUpdate: {
+    isEnabled: boolean;
+    checkForUpdate: ReturnType<typeof vi.fn>;
+    versionUpdates: Subject<unknown>;
+    activateUpdate: ReturnType<typeof vi.fn>;
+  };
+  destroyRef: { onDestroy: ReturnType<typeof vi.fn> };
   logger: {
     info: ReturnType<typeof vi.fn>;
     warn: ReturnType<typeof vi.fn>;
     debug: ReturnType<typeof vi.fn>;
   };
+  toast: Pick<ToastService, 'info'>;
+  appLifecycle: { markVersionReady: ReturnType<typeof vi.fn> };
+  handleSwUpdateVisibilityCheck: EventListener;
+  handleSwUpdateFocusCheck: EventListener;
+  handleSwUpdateOnlineCheck: EventListener;
 };
 
 function createSwUpdateCheckContext(checkForUpdate = vi.fn().mockResolvedValue(false)): SwUpdateLifecyclePrivate {
@@ -25,15 +42,30 @@ function createSwUpdateCheckContext(checkForUpdate = vi.fn().mockResolvedValue(f
   context.swUpdatePollTimer = null;
   context.swUpdateCheckInFlight = false;
   context.lastSwUpdateCheckAt = 0;
+  context.versionUpdatesSubscribed = false;
   context.stopped = false;
-  context.swUpdate = { isEnabled: true, checkForUpdate };
+  context.initialized = false;
+  context.swUpdate = {
+    isEnabled: true,
+    checkForUpdate,
+    versionUpdates: new Subject<unknown>(),
+    activateUpdate: vi.fn().mockResolvedValue(true),
+  };
+  context.destroyRef = { onDestroy: vi.fn() };
   context.logger = {
     info: vi.fn(),
     warn: vi.fn(),
     debug: vi.fn(),
   };
+  context.toast = { info: vi.fn() };
+  context.appLifecycle = { markVersionReady: vi.fn() };
+  context.handleSwUpdateVisibilityCheck = vi.fn();
+  context.handleSwUpdateFocusCheck = vi.fn();
+  context.handleSwUpdateOnlineCheck = vi.fn();
   return context;
 }
+
+let originalVisibilityStateDescriptor: PropertyDescriptor | undefined;
 
 function setDocumentVisibilityState(state: DocumentVisibilityState): void {
   Object.defineProperty(document, 'visibilityState', {
@@ -42,7 +74,105 @@ function setDocumentVisibilityState(state: DocumentVisibilityState): void {
   });
 }
 
+function restoreDocumentVisibilityState(): void {
+  if (typeof document === 'undefined') return;
+
+  if (originalVisibilityStateDescriptor) {
+    Object.defineProperty(document, 'visibilityState', originalVisibilityStateDescriptor);
+    return;
+  }
+
+  Reflect.deleteProperty(document, 'visibilityState');
+}
+
 describe('SwUpdateLifecycleService 版本更新检查', () => {
+  beforeAll(() => {
+    originalVisibilityStateDescriptor = Object.getOwnPropertyDescriptor(document, 'visibilityState');
+  });
+
+  afterEach(() => {
+    restoreDocumentVisibilityState();
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  afterAll(() => {
+    restoreDocumentVisibilityState();
+  });
+
+  it('无 document/window 环境时检查注册与销毁应安全退化', async () => {
+    const context = createSwUpdateCheckContext();
+    const originalDocument = globalThis.document;
+    const originalWindow = globalThis.window;
+
+    try {
+      Reflect.deleteProperty(globalThis, 'document');
+      Reflect.deleteProperty(globalThis, 'window');
+
+      expect(() => context.setupSwUpdateChecks()).not.toThrow();
+      await expect(context.checkForSwUpdate('focus')).resolves.toBeUndefined();
+      expect(() => context.teardownSwUpdateChecks()).not.toThrow();
+    } finally {
+      Object.defineProperty(globalThis, 'document', {
+        configurable: true,
+        writable: true,
+        value: originalDocument,
+      });
+      Object.defineProperty(globalThis, 'window', {
+        configurable: true,
+        writable: true,
+        value: originalWindow,
+      });
+    }
+  });
+
+  it('销毁时单个监听器移除失败不应阻断其余 Service Worker 更新监听清理', () => {
+    vi.useFakeTimers();
+    const context = createSwUpdateCheckContext();
+    const visibilityCleanupError = new Error('visibility cleanup failed');
+    const removeDocumentListener = vi
+      .spyOn(document, 'removeEventListener')
+      .mockImplementationOnce(() => {
+        throw visibilityCleanupError;
+      });
+    const removeWindowListener = vi.spyOn(window, 'removeEventListener');
+    context.swUpdateInitialCheckTimer = setTimeout(() => undefined, 1000);
+    context.swUpdatePollTimer = setInterval(() => undefined, 1000);
+
+    expect(() => context.teardownSwUpdateChecks()).not.toThrow();
+
+    expect(context.swUpdateInitialCheckTimer).toBeNull();
+    expect(context.swUpdatePollTimer).toBeNull();
+    expect(removeDocumentListener).toHaveBeenCalledWith(
+      'visibilitychange',
+      expect.any(Function),
+    );
+    expect(removeWindowListener).toHaveBeenCalledWith('focus', expect.any(Function));
+    expect(removeWindowListener).toHaveBeenCalledWith('online', expect.any(Function));
+    expect(context.logger.warn).toHaveBeenCalledWith(
+      'SwUpdate lifecycle resource cleanup failed; continuing remaining cleanup',
+      {
+        resource: 'document.visibilitychange',
+        message: visibilityCleanupError.message,
+      },
+    );
+  });
+
+  it('销毁时应清理数值为 0 的 Service Worker 更新检查定时器句柄', () => {
+    const context = createSwUpdateCheckContext();
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+    const clearIntervalSpy = vi.spyOn(globalThis, 'clearInterval');
+    context.swUpdateInitialCheckTimer = 0 as unknown as ReturnType<typeof setTimeout>;
+    context.swUpdatePollTimer = 0 as unknown as ReturnType<typeof setInterval>;
+
+    context.teardownSwUpdateChecks();
+
+    expect(clearTimeoutSpy).toHaveBeenCalledWith(0);
+    expect(clearIntervalSpy).toHaveBeenCalledWith(0);
+    expect(context.swUpdateInitialCheckTimer).toBeNull();
+    expect(context.swUpdatePollTimer).toBeNull();
+  });
+
   it('应在启动延迟后主动检查 Service Worker 更新', async () => {
     vi.useFakeTimers();
     setDocumentVisibilityState('visible');
@@ -61,8 +191,116 @@ describe('SwUpdateLifecycleService 版本更新检查', () => {
       );
     } finally {
       context.teardownSwUpdateChecks();
-      vi.useRealTimers();
     }
+  });
+
+  it('重复 initialize 不应注册重复的周期检查', async () => {
+    vi.useFakeTimers();
+    setDocumentVisibilityState('visible');
+    const checkForUpdate = vi.fn().mockResolvedValue(false);
+    const context = createSwUpdateCheckContext(checkForUpdate);
+
+    try {
+      context.initialize();
+      context.initialize();
+
+      await vi.advanceTimersByTimeAsync(APP_LIFECYCLE_CONFIG.SW_UPDATE_INITIAL_CHECK_DELAY_MS);
+      expect(checkForUpdate).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(APP_LIFECYCLE_CONFIG.SW_UPDATE_VISIBLE_POLL_INTERVAL_MS);
+      expect(checkForUpdate).toHaveBeenCalledTimes(2);
+    } finally {
+      context.teardown();
+    }
+  });
+
+  it('initialize 期间生命周期监听注册失败时应回滚并允许后续重试', async () => {
+    vi.useFakeTimers();
+    setDocumentVisibilityState('visible');
+    const setupError = new Error('online listener failed');
+    const checkForUpdate = vi.fn().mockResolvedValue(false);
+    const context = createSwUpdateCheckContext(checkForUpdate);
+    const addDocumentListener = vi.spyOn(document, 'addEventListener');
+    const removeDocumentListener = vi.spyOn(document, 'removeEventListener');
+    const removeWindowListener = vi.spyOn(window, 'removeEventListener');
+    const originalWindowAdd = window.addEventListener.bind(window);
+    const addWindowListener = vi
+      .spyOn(window, 'addEventListener')
+      .mockImplementation((...args: Parameters<typeof window.addEventListener>) => {
+        if (args[0] === 'online') {
+          throw setupError;
+        }
+        return originalWindowAdd(...args);
+      });
+
+    try {
+      expect(() => context.initialize()).not.toThrow();
+
+      expect(addDocumentListener).toHaveBeenCalledWith(
+        'visibilitychange',
+        context.handleSwUpdateVisibilityCheck,
+      );
+      expect(addWindowListener).toHaveBeenCalledWith('focus', context.handleSwUpdateFocusCheck);
+      expect(addWindowListener).toHaveBeenCalledWith('online', context.handleSwUpdateOnlineCheck);
+      expect(removeDocumentListener).toHaveBeenCalledWith(
+        'visibilitychange',
+        context.handleSwUpdateVisibilityCheck,
+      );
+      expect(removeWindowListener).toHaveBeenCalledWith('focus', context.handleSwUpdateFocusCheck);
+      expect(context.swUpdateInitialCheckTimer).toBeNull();
+      expect(context.swUpdatePollTimer).toBeNull();
+      expect(context.initialized).toBe(false);
+      expect(context.versionUpdatesSubscribed).toBe(false);
+      expect(context.logger.warn).toHaveBeenCalledWith(
+        'SwUpdate lifecycle setup failed; rolled back partial resources',
+        {
+          resource: 'window.online',
+          message: setupError.message,
+        },
+      );
+
+      addWindowListener.mockRestore();
+      context.initialize();
+      await vi.advanceTimersByTimeAsync(APP_LIFECYCLE_CONFIG.SW_UPDATE_INITIAL_CHECK_DELAY_MS);
+
+      expect(checkForUpdate).toHaveBeenCalledTimes(1);
+    } finally {
+      context.teardown();
+    }
+  });
+
+  it('teardown 后重新 initialize 应恢复版本检查', async () => {
+    vi.useFakeTimers();
+    setDocumentVisibilityState('visible');
+    const checkForUpdate = vi.fn().mockResolvedValue(false);
+    const context = createSwUpdateCheckContext(checkForUpdate);
+
+    try {
+      context.initialize();
+      context.teardown();
+      context.initialize();
+
+      await vi.advanceTimersByTimeAsync(APP_LIFECYCLE_CONFIG.SW_UPDATE_INITIAL_CHECK_DELAY_MS);
+
+      expect(checkForUpdate).toHaveBeenCalledTimes(1);
+    } finally {
+      context.teardown();
+    }
+  });
+
+  it('teardown 后不应再响应 VERSION_READY 更新事件', () => {
+    const context = createSwUpdateCheckContext();
+
+    context.initialize();
+    context.teardown();
+    context.swUpdate.versionUpdates.next({
+      type: 'VERSION_READY',
+      currentVersion: { hash: 'old' },
+      latestVersion: { hash: 'new' },
+    });
+
+    expect(context.appLifecycle.markVersionReady).not.toHaveBeenCalled();
+    expect(context.toast.info).not.toHaveBeenCalled();
   });
 
   it('应对 focus/visibility/online 触发的版本检查做冷却去重', async () => {
@@ -84,7 +322,31 @@ describe('SwUpdateLifecycleService 版本更新检查', () => {
       );
     } finally {
       context.teardownSwUpdateChecks();
-      vi.useRealTimers();
     }
+  });
+
+  it('失败的版本检查不应刷新冷却窗口，应允许 online 立即重试', async () => {
+    vi.useFakeTimers();
+    setDocumentVisibilityState('visible');
+    const checkForUpdate = vi.fn()
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValueOnce(false);
+    const context = createSwUpdateCheckContext(checkForUpdate);
+
+    await context.checkForSwUpdate('periodic');
+    await context.checkForSwUpdate('online');
+
+    expect(checkForUpdate).toHaveBeenCalledTimes(2);
+    expect(context.logger.warn).toHaveBeenCalledWith(
+      'SwUpdate checkForUpdate failed',
+      {
+        reason: 'periodic',
+        message: 'offline',
+      },
+    );
+    expect(context.logger.debug).toHaveBeenCalledWith(
+      'SwUpdate checkForUpdate completed without new version',
+      { reason: 'online' },
+    );
   });
 });

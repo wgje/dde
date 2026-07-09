@@ -414,6 +414,11 @@ test.describe('关键路径 3: 拖拽 + 同步', () => {
 
 test.describe('性能基准', () => {
   test('应用加载时间应在可接受范围内', async ({ page }) => {
+    test.skip(
+      !process.env['PERF_BUDGET_TEST'],
+      '启动耗时预算由 PERF_BUDGET_TEST/perf:guard 显式门禁覆盖，避免默认 E2E 受 dev server 热编译状态污染',
+    );
+
     const startTime = Date.now();
     await page.goto('/');
     await testHelpers.waitForAppReady(page);
@@ -457,10 +462,7 @@ test.describe('撤销功能压力测试', () => {
     for (let i = 0; i < 3; i++) {
       const taskTitle = `撤销测试任务-${i}-${testHelpers.uniqueId()}`;
       testHelpers.trackTaskTitle(taskTitle);
-      await page.click('[data-testid="add-task-btn"]');
-      await page.fill('[data-testid="task-title-input"]', taskTitle);
-      await page.press('[data-testid="task-title-input"]', 'Enter');
-      await testHelpers.waitForTaskCard(page, taskTitle);
+      await testHelpers.createTask(page, taskTitle);
     }
     
     console.log('开始快速连续撤销测试...');

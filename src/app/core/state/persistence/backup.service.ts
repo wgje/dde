@@ -14,18 +14,18 @@ import { LoggerService } from '../../../../services/logger.service';
 import { Project, Task, Connection } from '../../../../models';
 import { IndexedDBService, DB_CONFIG } from './indexeddb.service';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
-/** 存储元数据结构 */
-interface StoreMeta {
-  version: number;
-  lastSyncTime: string;
-  activeProjectId: string | null;
-  backupTime?: string;
-}
+import {
+  BACKUP_DB_PREFIX,
+  backupDatabaseNameForDate,
+  readBackupPayload,
+  restoreBackupPayloadToMainDatabase,
+  writeBackupPayload,
+  type BackupPayload,
+  type BackupStoreMeta,
+} from './backup-transaction.helpers';
 
 /** 备份配置 */
 const BACKUP_CONFIG = {
-  /** 备份数据库名称前缀 */
-  DB_PREFIX: 'nanoflow-db-backup-',
   /** 备份保留天数 */
   RETENTION_DAYS: 7
 } as const;
@@ -52,8 +52,8 @@ export class BackupService {
 
     try {
       await this.indexedDB.initDatabase();
-      const dateStr = new Date().toISOString().split('T')[0].replace(/-/g, '');
-      const backupDbName = `${BACKUP_CONFIG.DB_PREFIX}${dateStr}`;
+      const backupDate = new Date();
+      const backupDbName = backupDatabaseNameForDate(backupDate);
 
       // 检查是否已存在今天的备份
       const databases = await indexedDB.databases?.() || [];
@@ -69,49 +69,20 @@ export class BackupService {
       const allTasks = await this.indexedDB.getAllFromStore<Task>(db, DB_CONFIG.stores.tasks);
       const allConnections = await this.indexedDB.getAllFromStore<Connection>(db, DB_CONFIG.stores.connections);
       const allSyncCursors = await this.indexedDB.getAllFromStore<Record<string, unknown>>(db, DB_CONFIG.stores.syncCursors);
-      const meta = await this.indexedDB.getFromStore<StoreMeta>(db, DB_CONFIG.stores.meta, 'meta');
+      const meta = await this.indexedDB.getFromStore<BackupStoreMeta>(db, DB_CONFIG.stores.meta, 'meta');
 
       // 创建备份数据库
       backupDb = await this.createBackupDatabase(backupDbName);
 
       // 写入备份
-      const tx = backupDb.transaction(
-        [
-          DB_CONFIG.stores.projects,
-          DB_CONFIG.stores.tasks,
-          DB_CONFIG.stores.connections,
-          DB_CONFIG.stores.meta,
-          DB_CONFIG.stores.syncCursors,
-        ],
-        'readwrite'
-      );
-
-      const projectStore = tx.objectStore(DB_CONFIG.stores.projects);
-      const taskStore = tx.objectStore(DB_CONFIG.stores.tasks);
-      const connStore = tx.objectStore(DB_CONFIG.stores.connections);
-      const metaStore = tx.objectStore(DB_CONFIG.stores.meta);
-      const cursorStore = tx.objectStore(DB_CONFIG.stores.syncCursors);
-
-      for (const project of allProjects) {
-        projectStore.put(project);
-      }
-      for (const task of allTasks) {
-        taskStore.put(task);
-      }
-      for (const conn of allConnections) {
-        connStore.put(conn);
-      }
-      for (const cursor of allSyncCursors) {
-        cursorStore.put(cursor);
-      }
-      if (meta) {
-        metaStore.put({ ...meta, backupTime: new Date().toISOString() }, 'meta');
-      }
-
-      await new Promise<void>((resolve, reject) => {
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => reject(tx.error);
-      });
+      const payload: BackupPayload = {
+        projects: allProjects,
+        tasks: allTasks,
+        connections: allConnections,
+        syncCursors: allSyncCursors,
+        meta,
+      };
+      await writeBackupPayload(backupDb, payload, backupDate.toISOString());
 
       this.logger.info('数据库备份创建成功', {
         backupDbName,
@@ -177,76 +148,31 @@ export class BackupService {
    * @returns 是否恢复成功
    */
   async restoreFromBackup(backupDbName: string): Promise<boolean> {
+    let backupDb: IDBDatabase | null = null;
+
     try {
       // 打开备份数据库
-      const backupDb = await new Promise<IDBDatabase>((resolve, reject) => {
+      backupDb = await new Promise<IDBDatabase>((resolve, reject) => {
         const request = indexedDB.open(backupDbName);
         request.onerror = () => reject(request.error);
         request.onsuccess = () => resolve(request.result);
       });
 
       // 读取备份数据
-      const allProjects = await this.getAllFromBackupStore<Project>(backupDb, DB_CONFIG.stores.projects);
-      const allTasks = await this.getAllFromBackupStore<Task>(backupDb, DB_CONFIG.stores.tasks);
-      const allConnections = await this.getAllFromBackupStore<Connection>(backupDb, DB_CONFIG.stores.connections);
-      const allSyncCursors = backupDb.objectStoreNames.contains(DB_CONFIG.stores.syncCursors)
-        ? await this.getAllFromBackupStore<Record<string, unknown>>(backupDb, DB_CONFIG.stores.syncCursors)
-        : [];
-      const meta = await this.getFromBackupStore<StoreMeta>(backupDb, DB_CONFIG.stores.meta, 'meta');
+      const payload = await readBackupPayload(backupDb);
 
       backupDb.close();
+      backupDb = null;
 
       // 【P3-29 修复】清空 + 恢复放在同一个事务中，保证原子性
       const db = await this.indexedDB.initDatabase();
-      const storeNames = [
-        DB_CONFIG.stores.projects,
-        DB_CONFIG.stores.tasks,
-        DB_CONFIG.stores.connections,
-        DB_CONFIG.stores.meta,
-        DB_CONFIG.stores.syncCursors,
-      ];
-      const tx = db.transaction(storeNames, 'readwrite');
-
-      const projectStore = tx.objectStore(DB_CONFIG.stores.projects);
-      const taskStore = tx.objectStore(DB_CONFIG.stores.tasks);
-      const connStore = tx.objectStore(DB_CONFIG.stores.connections);
-      const metaStore = tx.objectStore(DB_CONFIG.stores.meta);
-      const cursorStore = tx.objectStore(DB_CONFIG.stores.syncCursors);
-
-      // 先清空所有 store
-      projectStore.clear();
-      taskStore.clear();
-      connStore.clear();
-      metaStore.clear();
-      cursorStore.clear();
-
-      // 再写入备份数据（同一事务内，要么全部成功，要么全部回滚）
-      for (const project of allProjects) {
-        projectStore.put(project);
-      }
-      for (const task of allTasks) {
-        taskStore.put(task);
-      }
-      for (const conn of allConnections) {
-        connStore.put(conn);
-      }
-      for (const cursor of allSyncCursors) {
-        cursorStore.put(cursor);
-      }
-      if (meta) {
-        metaStore.put(meta, 'meta');
-      }
-
-      await new Promise<void>((resolve, reject) => {
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => reject(tx.error);
-      });
+      await restoreBackupPayloadToMainDatabase(db, payload);
 
       this.logger.info('数据库已从备份恢复', {
         backupDbName,
-        projectCount: allProjects.length,
-        taskCount: allTasks.length,
-        connectionCount: allConnections.length
+        projectCount: payload.projects.length,
+        taskCount: payload.tasks.length,
+        connectionCount: payload.connections.length
       });
 
       return true;
@@ -254,6 +180,8 @@ export class BackupService {
       this.logger.error('从备份恢复失败', err);
       this.sentryLazyLoader.captureException(err, { tags: { operation: 'restoreFromBackup', backupDbName } });
       return false;
+    } finally {
+      backupDb?.close();
     }
   }
 
@@ -264,10 +192,10 @@ export class BackupService {
     try {
       const databases = await indexedDB.databases?.() || [];
       return databases
-        .filter(d => d.name?.startsWith(BACKUP_CONFIG.DB_PREFIX))
+        .filter(d => d.name?.startsWith(BACKUP_DB_PREFIX))
         .map(d => ({
           name: d.name!,
-          date: d.name!.replace(BACKUP_CONFIG.DB_PREFIX, '')
+          date: d.name!.replace(BACKUP_DB_PREFIX, '')
         }))
         .sort((a, b) => b.date.localeCompare(a.date));
     } catch (err) {
@@ -315,27 +243,4 @@ export class BackupService {
     }
   }
 
-  // ========== 辅助方法（用于读取备份数据库） ==========
-
-  private async getAllFromBackupStore<T>(db: IDBDatabase, storeName: string): Promise<T[]> {
-    return new Promise((resolve, reject) => {
-      const transaction = db.transaction(storeName, 'readonly');
-      const store = transaction.objectStore(storeName);
-      const request = store.getAll();
-
-      request.onsuccess = () => resolve(request.result ?? []);
-      request.onerror = () => reject(request.error);
-    });
-  }
-
-  private async getFromBackupStore<T>(db: IDBDatabase, storeName: string, key: IDBValidKey): Promise<T | null> {
-    return new Promise((resolve, reject) => {
-      const transaction = db.transaction(storeName, 'readonly');
-      const store = transaction.objectStore(storeName);
-      const request = store.get(key);
-
-      request.onsuccess = () => resolve(request.result ?? null);
-      request.onerror = () => reject(request.error);
-    });
-  }
 }

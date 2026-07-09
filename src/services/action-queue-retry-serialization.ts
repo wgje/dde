@@ -16,6 +16,13 @@ import { QUEUE_CONFIG } from '../config';
 import { getRemainingBrowserNetworkResumeDelayMs } from '../utils/browser-network-suspension';
 import type { QueueRetryError } from './action-queue-storage.service';
 
+export type DeferredRetryReason =
+  | 'browser-network-suspended'
+  | 'partial-retry-handoff'
+  | 'auth-pending'
+  | 'rate-limit'
+  | 'sync-rpc-unavailable';
+
 export function parseRetryErrorMessage(message: string): QueueRetryError {
   const parts = message.split('|').map(part => part.trim()).filter(part => part.length > 0);
   const firstPart = parts[0] ?? '';
@@ -70,8 +77,44 @@ export function isPartialRetryHandoffError(error: QueueRetryError): boolean {
 }
 
 export function isAuthPendingRetryError(error: QueueRetryError): boolean {
-  return error.details?.['reason'] === 'auth-pending'
-    || error.code === 'SYNC_AUTH_PENDING';
+  if (error.details?.['reason'] === 'auth-pending'
+    || error.code === 'SYNC_AUTH_PENDING'
+    || error.code === 'SYNC_AUTH_EXPIRED') {
+    return true;
+  }
+
+  const msg = `${error.code ?? ''} ${error.message}`.toLowerCase();
+  return msg.includes('sync_auth_expired')
+    || msg.includes('登录已过期')
+    || msg.includes('token expired')
+    || msg.includes('jwt expired')
+    || msg.includes('session expired');
+}
+
+export function isRateLimitRetryError(error: QueueRetryError): boolean {
+  if (error.details?.['reason'] === 'rate-limit') {
+    return true;
+  }
+
+  const status = error.details?.['status'] ?? error.details?.['statusCode'] ?? error.details?.['httpStatus'];
+  if (status === 429 || status === '429') {
+    return true;
+  }
+
+  const msg = `${error.code ?? ''} ${error.message}`.toLowerCase();
+  return msg.includes('429')
+    || msg.includes('too many requests')
+    || msg.includes('rate limit')
+    || msg.includes('rate-limit')
+    || msg.includes('ratelimit')
+    || msg.includes('限流')
+    || msg.includes('请求过多');
+}
+
+export function isSyncRpcCapabilityRetryError(error: QueueRetryError): boolean {
+  return error.details?.['reason'] === 'sync-rpc-unavailable'
+    && error.details?.['deferred'] === true
+    && error.details?.['retryable'] === true;
 }
 
 export function resolveBrowserSuspensionDelay(error?: QueueRetryError): number {
@@ -83,7 +126,46 @@ export function resolveBrowserSuspensionDelay(error?: QueueRetryError): number {
   return Math.max(100, getRemainingBrowserNetworkResumeDelayMs() + 50);
 }
 
+function resolveRateLimitRetryDelay(error: QueueRetryError): number {
+  const retryAfterMs = error.details?.['retryAfterMs'];
+  if (typeof retryAfterMs === 'number' && Number.isFinite(retryAfterMs)) {
+    return Math.max(0, retryAfterMs);
+  }
+
+  const retryAfterSeconds = error.details?.['retryAfterSeconds'];
+  if (typeof retryAfterSeconds === 'number' && Number.isFinite(retryAfterSeconds)) {
+    return Math.max(0, retryAfterSeconds * 1000);
+  }
+
+  const retryAfter = error.details?.['retryAfter'];
+  if (typeof retryAfter === 'number' && Number.isFinite(retryAfter)) {
+    return Math.max(0, retryAfter * 1000);
+  }
+
+  if (typeof retryAfter === 'string') {
+    const retryAfterNumber = Number(retryAfter);
+    if (Number.isFinite(retryAfterNumber)) {
+      return Math.max(0, retryAfterNumber * 1000);
+    }
+
+    const retryAfterDate = Date.parse(retryAfter);
+    if (Number.isFinite(retryAfterDate)) {
+      return Math.max(0, retryAfterDate - Date.now());
+    }
+  }
+
+  return QUEUE_CONFIG.RETRY_BASE_DELAY;
+}
+
 export function resolveDeferredRetryDelay(error: QueueRetryError): number {
+  if (isRateLimitRetryError(error)) {
+    return resolveRateLimitRetryDelay(error);
+  }
+
+  if (isSyncRpcCapabilityRetryError(error)) {
+    return QUEUE_CONFIG.RETRY_BASE_DELAY;
+  }
+
   if (isPartialRetryHandoffError(error)) {
     const requestedDelay = error.details?.['retryAfterMs'];
     if (typeof requestedDelay === 'number' && Number.isFinite(requestedDelay)) {
@@ -103,7 +185,15 @@ export function resolveDeferredRetryDelay(error: QueueRetryError): number {
 
 export function describeDeferredRetryReason(
   error: QueueRetryError,
-): 'browser-network-suspended' | 'partial-retry-handoff' | 'auth-pending' {
+): DeferredRetryReason {
+  if (isRateLimitRetryError(error)) {
+    return 'rate-limit';
+  }
+
+  if (isSyncRpcCapabilityRetryError(error)) {
+    return 'sync-rpc-unavailable';
+  }
+
   if (isPartialRetryHandoffError(error)) {
     return 'partial-retry-handoff';
   }

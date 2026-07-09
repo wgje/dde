@@ -4,7 +4,7 @@
  *
  * 用途：
  * - 作为 pre-commit hook：扫描 git staged 文件（默认行为）
- * - 作为审计工具：传入 --mode=audit 扫描整个工作树
+ * - 作为审计工具：传入 --mode=audit 扫描整个工作树中已跟踪和未忽略的未跟踪文件
  *
  * 输出原则：
  * - 命中时仅输出文件路径 + 行号 + 模式名，**不输出命中内容本身**（避免二次泄漏）
@@ -30,13 +30,17 @@ const path = require('node:path');
  */
 const SECRET_PATTERNS = [
   // 环境变量名被硬编码赋值为字面量
-  { name: 'SUPABASE_SERVICE_ROLE_KEY_LITERAL', pattern: /SUPABASE_SERVICE_ROLE_KEY\s*[=:]\s*['"`](?:eyJ|sb_)/i },
-  { name: 'SUPABASE_ANON_KEY_LITERAL', pattern: /SUPABASE_ANON_KEY\s*[=:]\s*['"`]eyJ/i },
-  { name: 'GROQ_API_KEY_LITERAL', pattern: /GROQ_API_KEY\s*[=:]\s*['"`](?:gsk_|sk-)/i },
+  { name: 'SUPABASE_SERVICE_ROLE_KEY_LITERAL', pattern: /SUPABASE_SERVICE_ROLE_KEY\s*[=:]\s*['"`]?(?:eyJ[A-Za-z0-9_-]{30,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|sb_[A-Za-z0-9_-]{20,})/i },
+  { name: 'SUPABASE_ANON_KEY_LITERAL', pattern: /SUPABASE_ANON_KEY\s*[=:]\s*['"`]?eyJ[A-Za-z0-9_-]{30,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/i },
+  { name: 'SUPABASE_ACCESS_TOKEN_LITERAL', pattern: /SUPABASE_ACCESS_TOKEN\s*[=:]\s*['"`]?sbp_[A-Za-z0-9_-]{20,}/i },
+  { name: 'GROQ_API_KEY_LITERAL', pattern: /GROQ_API_KEY\s*[=:]\s*['"`]?(?:gsk_|sk-)[A-Za-z0-9_-]{20,}/i },
+  { name: 'SENTRY_AUTH_TOKEN_LITERAL', pattern: /SENTRY_AUTH_TOKEN\s*[=:]\s*['"`]?sntrys_[A-Za-z0-9_-]{20,}/i },
   // 通用密钥形状
   { name: 'JWT_LIKE', pattern: /\beyJ[A-Za-z0-9_-]{30,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/ },
   { name: 'STRIPE_LIVE_SECRET', pattern: /\bsk_live_[A-Za-z0-9]{20,}/ },
   { name: 'SUPABASE_SECRET', pattern: /\bsb_secret_[A-Za-z0-9_-]{20,}/ },
+  { name: 'SUPABASE_PAT', pattern: /\bsbp_[A-Za-z0-9_-]{20,}/ },
+  { name: 'SENTRY_AUTH_TOKEN', pattern: /\bsntrys_[A-Za-z0-9_-]{20,}/ },
   { name: 'OPENAI_KEY', pattern: /\bsk-[A-Za-z0-9]{30,}/ },
   { name: 'GITHUB_TOKEN', pattern: /\bgh[ps]_[A-Za-z0-9]{30,}/ },
   { name: 'PRIVATE_KEY_BLOCK', pattern: /-----BEGIN\s+(?:RSA\s+|EC\s+|OPENSSH\s+)?PRIVATE\s+KEY-----/ },
@@ -45,10 +49,6 @@ const SECRET_PATTERNS = [
 
 /** 内容扫描豁免路径（这些文件允许包含 mock 密钥 / 形似 JWT 的测试 fixture） */
 const CONTENT_EXEMPT_PATHS = [
-  /\.spec\.ts$/,
-  /\.test\.ts$/,
-  /^src\/tests\//,
-  /^e2e\//,
   /^scripts\/contracts\/check-secrets\.cjs$/,  // 自身包含正则
 ];
 
@@ -60,10 +60,20 @@ const CONTENT_RULE_EXCEPTIONS = [
   },
 ];
 
+/** 文档/脚本里的占位符示例，不应被当成真实 token。 */
+const PLACEHOLDER_SECRET_VALUES = [
+  /(?:gsk_|sk-)(?:your|new|xxx|example|placeholder)[A-Za-z0-9_-]*/i,
+  /eyJ\.\.\./,
+];
+
 /** 路径黑名单（无论内容如何，这些路径不应入库） */
 const PATH_BLACKLIST = [
   /^ai_conversations\//,
   /^\.supabase\//,
+  /^\.sentryclirc$/,
+  /^sentry\.properties$/,
+  /^\.wrangler\//,
+  /(^|\/)\.dev\.vars(\.[^/]*)?$/,
   /(^|\/)\.env(\.[^/]*)?$/,
   /\.local$/,
   /^public\/\.well-known\/assetlinks\.json$/,
@@ -75,7 +85,7 @@ const SCANNABLE_EXT = new Set([
   '.ts', '.tsx', '.js', '.jsx', '.mts', '.cts', '.mjs', '.cjs',
   '.json', '.yaml', '.yml', '.toml', '.ini', '.env',
   '.md', '.txt', '.sh', '.ps1', '.bat', '.cmd',
-  '.html', '.css', '.scss', '.sql',
+  '.html', '.css', '.scss', '.sql', '.properties', '.vars',
 ]);
 
 /** 扫描跳过的目录（与现有 check-encoding-corruption.cjs 对齐） */
@@ -107,8 +117,9 @@ function getStagedFiles() {
 }
 
 /**
- * audit 模式文件清单：使用 git ls-files 仅获取被跟踪文件
- * 自动跳过 .gitignore 命中的文件（ai_conversations/、.worktrees/、.env、environment.ts 等）
+ * audit 模式文件清单：使用 git ls-files 获取已跟踪文件 + 未忽略的未跟踪文件。
+ * git --exclude-standard 会自动跳过 .gitignore 命中的文件
+ *（ai_conversations/、.worktrees/、.env、environment.ts 等）。
  */
 function getTrackedFiles() {
   try {
@@ -120,6 +131,23 @@ function getTrackedFiles() {
     walkDir(process.cwd(), acc);
     return acc;
   }
+}
+
+function getUntrackedFiles() {
+  try {
+    const out = execFileSync('git', ['ls-files', '--others', '--exclude-standard'], {
+      encoding: 'utf-8',
+      maxBuffer: 64 * 1024 * 1024,
+    });
+    return out.split(/\r?\n/).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function getAuditFiles() {
+  const files = new Set([...getTrackedFiles(), ...getUntrackedFiles()]);
+  return Array.from(files).sort();
 }
 
 function walkDir(dir, acc) {
@@ -173,7 +201,10 @@ function scanFileContent(absPath) {
   const lines = content.split(/\r?\n/);
   for (let i = 0; i < lines.length; i++) {
     for (const { name, pattern } of SECRET_PATTERNS) {
-      if (pattern.test(lines[i])) {
+      for (const matchedValue of findSecretMatches(lines[i], pattern)) {
+        if (isPlaceholderSecretValue(matchedValue)) {
+          continue;
+        }
         hits.push({ line: i + 1, rule: name });
       }
     }
@@ -181,8 +212,20 @@ function scanFileContent(absPath) {
   return hits;
 }
 
+function findSecretMatches(line, pattern) {
+  const flags = pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`;
+  const globalPattern = new RegExp(pattern.source, flags);
+  return Array.from(line.matchAll(globalPattern), match => match[0]);
+}
+
+function isPlaceholderSecretValue(value) {
+  return PLACEHOLDER_SECRET_VALUES.some((pattern) => pattern.test(value));
+}
+
 function isScannable(relPath) {
   const ext = path.extname(relPath).toLowerCase();
+  const base = path.basename(relPath).toLowerCase();
+  if (base === '.env.template' || base === '.env.example') return true;
   if (SCANNABLE_EXT.has(ext)) return true;
   // 无扩展名文件（如 .env）也扫描
   if (!ext && path.basename(relPath).startsWith('.')) return true;
@@ -201,8 +244,8 @@ function main() {
 
   let files;
   if (mode === 'audit') {
-    console.log('[check-secrets] mode=audit — scanning tracked files (git ls-files)');
-    files = getTrackedFiles();
+    console.log('[check-secrets] mode=audit — scanning tracked and untracked files (git ls-files --exclude-standard)');
+    files = getAuditFiles();
   } else {
     files = getStagedFiles();
     if (files.length === 0) {

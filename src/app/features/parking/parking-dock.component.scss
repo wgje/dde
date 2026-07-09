@@ -540,12 +540,6 @@
       scrollbar-width: none;
     }
 
-    /* ══════════════════════════════════════════
-       新建表单下滑
-       ══════════════════════════════════════════ */
-    .new-task-form {
-      animation: slideDown var(--pk-panel-enter) var(--pk-ease-enter);
-    }
     @keyframes slideDown {
       0%   { opacity: 0; transform: translateY(-6px) scale(0.995); }
       50%  { opacity: 0.6; transform: translateY(-1px) scale(0.999); }
@@ -589,7 +583,6 @@
     @media (prefers-reduced-motion: reduce) {
       .dock-bar,
       .dock-card,
-      .new-task-form,
       .fragment-overlay-enter,
       .focus-floating-ui,
       .dock-semicircle,

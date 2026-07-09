@@ -13,6 +13,15 @@ describe('FocusModeComponent', () => {
     await Promise.resolve();
     await Promise.resolve();
   };
+  function createDeferred<T>() {
+    let resolve!: (value: T | PromiseLike<T>) => void;
+    let reject!: (reason?: unknown) => void;
+    const promise = new Promise<T>((promiseResolve, promiseReject) => {
+      resolve = promiseResolve;
+      reject = promiseReject;
+    });
+    return { promise, reject, resolve };
+  }
   const originalFocusStartupThrottledCheck = FEATURE_FLAGS.FOCUS_STARTUP_THROTTLED_CHECK_V1;
 
   const destroyCallbacks: Array<() => void> = [];
@@ -41,6 +50,8 @@ describe('FocusModeComponent', () => {
     resetFocusState();
     (FEATURE_FLAGS as { FOCUS_STARTUP_THROTTLED_CHECK_V1: boolean }).FOCUS_STARTUP_THROTTLED_CHECK_V1 =
       originalFocusStartupThrottledCheck;
+    Reflect.deleteProperty(window, 'requestIdleCallback');
+    Reflect.deleteProperty(window, 'cancelIdleCallback');
   });
 
   function createComponent() {
@@ -109,5 +120,57 @@ describe('FocusModeComponent', () => {
     expect(loadFromLocal).not.toHaveBeenCalled();
     expect(checkGate).not.toHaveBeenCalled();
     expect(pullChanges).not.toHaveBeenCalled();
+  });
+
+  it('legacy 路径下销毁后完成的远端拉取不应再次触发 gate 检查', async () => {
+    (FEATURE_FLAGS as { FOCUS_STARTUP_THROTTLED_CHECK_V1: boolean }).FOCUS_STARTUP_THROTTLED_CHECK_V1 = false;
+    const remotePull = createDeferred<void>();
+    const { component, pullChanges, checkGate } = createComponent();
+    pullChanges.mockReturnValueOnce(remotePull.promise);
+
+    component.ngOnInit();
+    vi.advanceTimersByTime(1200);
+    await flushPromises();
+
+    expect(checkGate).toHaveBeenCalledTimes(1);
+
+    vi.advanceTimersByTime(STARTUP_PERF_CONFIG.FOCUS_REMOTE_STARTUP_DELAY_MS);
+    await flushPromises();
+    component.ngOnDestroy();
+    remotePull.resolve();
+    await flushPromises();
+
+    expect(pullChanges).toHaveBeenCalledWith({ reason: 'startup' });
+    expect(checkGate).toHaveBeenCalledTimes(1);
+  });
+
+  it('legacy idle 启动检查在销毁后不应继续加载本地黑匣子', async () => {
+    (FEATURE_FLAGS as { FOCUS_STARTUP_THROTTLED_CHECK_V1: boolean }).FOCUS_STARTUP_THROTTLED_CHECK_V1 = false;
+    const requestIdleCallback = vi.fn((_callback: IdleRequestCallback) => 42);
+    const cancelIdleCallback = vi.fn();
+    Object.defineProperty(window, 'requestIdleCallback', {
+      configurable: true,
+      value: requestIdleCallback,
+    });
+    Object.defineProperty(window, 'cancelIdleCallback', {
+      configurable: true,
+      value: cancelIdleCallback,
+    });
+    const { component, loadFromLocal, checkGate } = createComponent();
+
+    component.ngOnInit();
+    component.ngOnDestroy();
+    const capturedIdleCallback = requestIdleCallback.mock.calls[0]?.[0];
+    expect(capturedIdleCallback).toBeTypeOf('function');
+    capturedIdleCallback?.({
+      didTimeout: false,
+      timeRemaining: () => 50,
+    });
+    await flushPromises();
+
+    expect(requestIdleCallback).toHaveBeenCalledTimes(1);
+    expect(cancelIdleCallback).toHaveBeenCalledWith(42);
+    expect(loadFromLocal).not.toHaveBeenCalled();
+    expect(checkGate).not.toHaveBeenCalled();
   });
 });

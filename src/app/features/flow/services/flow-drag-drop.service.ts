@@ -1,4 +1,4 @@
-import { Injectable, inject, signal, NgZone, DestroyRef, OnDestroy } from '@angular/core';
+import { Injectable, Injector, inject, signal, NgZone, DestroyRef, OnDestroy } from '@angular/core';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
 import { DockEngineService } from '../../../../services/dock-engine.service';
@@ -6,10 +6,13 @@ import { FlowLayoutService } from './flow-layout.service';
 import { LoggerService } from '../../../../services/logger.service';
 import { ToastService } from '../../../../services/toast.service';
 import { Task } from '../../../../models';
-import { GOJS_CONFIG, UI_CONFIG } from '../../../../config';
+import { GOJS_CONFIG } from '../../../../config';
 import { getErrorMessage } from '../../../../utils/result';
 import { readTaskDragPayload, writeTaskDragPayload } from '../../../../utils/task-drag-payload';
 import * as go from 'gojs';
+import { findNextFlowDropSiblingId, FlowDropOperationGuard } from './flow-drag-drop-operation-guard';
+import { buildFlowDragGhostContent } from './flow-drag-ghost-content';
+import { findNearestParentLinkAtPosition } from './flow-drag-drop-hit-testing.helpers';
 
 /**
  * 插入位置信息
@@ -53,14 +56,18 @@ export interface DropResultCallback {
   providedIn: 'root'
 })
 export class FlowDragDropService implements OnDestroy {
+  private readonly injector = inject(Injector);
   private readonly projectState = inject(ProjectStateService);
-  private readonly taskOps = inject(TaskOperationAdapterService);
   private readonly layoutService = inject(FlowLayoutService);
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('FlowDragDrop');
   private readonly toast = inject(ToastService);
   private readonly zone = inject(NgZone);
   private readonly destroyRef = inject(DestroyRef);
+
+  private get taskOps(): TaskOperationAdapterService {
+    return this.injector.get(TaskOperationAdapterService);
+  }
   
   constructor() {
     // 服务销毁时确保清除残留的全局指针事件监听
@@ -74,6 +81,8 @@ export class FlowDragDropService implements OnDestroy {
   
   /** 当前从流程图拖动的任务ID */
   private draggingFromDiagramId: string | null = null;
+  private destroyed = false;
+  private readonly dropOperationGuard = new FlowDropOperationGuard();
   
   // ========== 公开方法 ==========
   
@@ -135,7 +144,7 @@ export class FlowDragDropService implements OnDestroy {
    * 将任务从流程图解除分配
    * @returns 是否成功处理
    */
-  handleDropToUnassigned(event: DragEvent): boolean {
+  async handleDropToUnassigned(event: DragEvent): Promise<boolean> {
     event.preventDefault();
     this.isDropTargetActive.set(false);
 
@@ -147,7 +156,11 @@ export class FlowDragDropService implements OnDestroy {
         return false;
       }
 
-      this.taskOps.detachTask(task.id);
+      const detached = await this.taskOps.detachTask(task.id);
+      if (this.destroyed) return false;
+      if (!detached) {
+        return false;
+      }
       this.toast.success('已移至待分配', `任务 "${task.title}" 已解除分配`);
       return true;
     }
@@ -245,12 +258,12 @@ export class FlowDragDropService implements OnDestroy {
    * @param targetId 原子节点ID
    * @param loc 拖放位置
    */
-  insertTaskBetweenNodes(
+  async insertTaskBetweenNodes(
     taskId: string,
     sourceId: string,
     targetId: string,
-    loc: go.Point
-  ): boolean {
+    loc: go.Point,
+  ): Promise<boolean> {
     const sourceTask = this.projectState.getTask(sourceId);
     const targetTask = this.projectState.getTask(targetId);
     
@@ -270,18 +283,19 @@ export class FlowDragDropService implements OnDestroy {
     
     this.logger.info('插入任务到连接线', { taskId, sourceId, targetId });
     
-    // 使用 taskOps 的方法完成插入
-    const result = this.taskOps.insertTaskBetween(taskId, sourceId, targetId);
+    const result = await this.taskOps.insertTaskBetweenAtPosition(
+      taskId,
+      sourceId,
+      targetId,
+      loc.x,
+      loc.y,
+    );
+    if (this.destroyed) return false;
     if (!result.ok) {
       this.toast.error('插入失败', getErrorMessage(result.error));
       return false;
     }
-    
-    // 更新拖放位置
-    setTimeout(() => {
-      this.taskOps.updateTaskPosition(taskId, loc.x, loc.y);
-    }, UI_CONFIG.MEDIUM_DELAY);
-    
+
     this.toast.success('任务已插入', '任务已插入到两个节点之间');
     return true;
   }
@@ -294,10 +308,10 @@ export class FlowDragDropService implements OnDestroy {
     loc: go.Point,
     _isUnassigned: boolean,
     _diagram: go.Diagram
-  ): void {
+  ): Promise<boolean> {
     // 场景二：待分配节点在流程图内移动，仅更新位置。
     // 不再支持“拖到连接线上立即插入并任务化”，任务化只在“拉线”确认时发生。
-    this.taskOps.updateTaskPositionWithRankSync(nodeKey, loc.x, loc.y);
+    return this.taskOps.updateTaskPositionWithRankSync(nodeKey, loc.x, loc.y);
   }
   
   // ========== 私有方法 ==========
@@ -309,87 +323,23 @@ export class FlowDragDropService implements OnDestroy {
     loc: go.Point,
     diagram: go.Diagram
   ): { sourceId: string; targetId: string } | null {
-    const linkThreshold = 50;
-    let closestLink = null as go.Link | null;
-    let closestDistance = Infinity;
-    
-    diagram.links.each((link: go.Link) => {
-      // 只处理父子连接线（非跨树连接）
-      const linkData = link.data as go.ObjectData;
-      if (linkData?.isCrossTree) return;
-      
-      // 确保连接线有有效数据
-      if (!linkData?.from || !linkData?.to) return;
-      
-      // 计算点到连接线的距离
-      const distance = this.pointToLinkDistance(loc, link);
-      
-      if (distance < linkThreshold && distance < closestDistance) {
-        closestDistance = distance;
-        closestLink = link;
-      }
+    const hit = findNearestParentLinkAtPosition({
+      loc,
+      diagram,
+      threshold: 50,
     });
-    
-    if (closestLink && closestLink.data) {
-      const data = closestLink.data as go.ObjectData & { from?: string; to?: string };
-      if (!data.from || !data.to) return null;
+    if (hit) {
       this.logger.info('检测到靠近连接线', {
-        from: data.from,
-        to: data.to,
-        distance: closestDistance
+        from: hit.sourceId,
+        to: hit.targetId,
+        distance: hit.distance
       });
       return {
-        sourceId: data.from,
-        targetId: data.to
+        sourceId: hit.sourceId,
+        targetId: hit.targetId
       };
     }
-    
     return null;
-  }
-  
-  /**
-   * 计算点到连接线的最近距离
-   */
-  private pointToLinkDistance(point: go.Point, link: go.Link): number {
-    const fromNode = link.fromNode;
-    const toNode = link.toNode;
-    if (!fromNode || !toNode) return Infinity;
-    
-    const startPoint = fromNode.location;
-    const endPoint = toNode.location;
-    
-    if (!startPoint || !endPoint) return Infinity;
-    
-    return this.pointToSegmentDistance(
-      point.x, point.y,
-      startPoint.x, startPoint.y,
-      endPoint.x, endPoint.y
-    );
-  }
-  
-  /**
-   * 计算点到线段的最短距离
-   */
-  private pointToSegmentDistance(
-    px: number, py: number,
-    x1: number, y1: number,
-    x2: number, y2: number
-  ): number {
-    const dx = x2 - x1;
-    const dy = y2 - y1;
-    const lengthSquared = dx * dx + dy * dy;
-    
-    if (lengthSquared === 0) {
-      return Math.sqrt((px - x1) * (px - x1) + (py - y1) * (py - y1));
-    }
-    
-    let t = ((px - x1) * dx + (py - y1) * dy) / lengthSquared;
-    t = Math.max(0, Math.min(1, t));
-    
-    const projX = x1 + t * dx;
-    const projY = y1 + t * dy;
-    
-    return Math.sqrt((px - projX) * (px - projX) + (py - projY) * (py - projY));
   }
   
   /**
@@ -399,80 +349,137 @@ export class FlowDragDropService implements OnDestroy {
    * @param task 被拖放的任务
    * @param insertInfo 插入位置信息
    * @param docPoint 拖放位置（文档坐标）
-   * @param delayMs 位置更新延迟（桌面端使用 100，移动端使用 UI_CONFIG.MEDIUM_DELAY）
+   * @param _delayMs 保留拖放入口兼容的延迟参数
    */
-  processDrop(
+  async processDrop(
     task: Task,
     insertInfo: InsertPositionInfo,
     docPoint: go.Point,
-    delayMs: number = 100
-  ): void {
-    const tasks = this.projectState.tasks();
-
+    _delayMs: number = 100
+  ): Promise<void> {
     if (this.taskOps.isHintOnlyStartupReadOnly()) {
       this.toast.info('会话确认中', '移动任务暂不可用，owner 确认完成前保持只读');
       return;
     }
-    
-    // 场景：待分配块拖入画布仅更新位置，不立刻任务化
-    if (task.stage === null) {
-      this.taskOps.updateTaskPosition(task.id, docPoint.x, docPoint.y);
-      this.layoutService.setNodePosition(task.id, docPoint.x, docPoint.y);
+
+    const dropClaim = this.dropOperationGuard.claim(task.id, insertInfo, docPoint);
+    if (!dropClaim.claimed) {
+      this.logger.debug('跳过重复拖放事件', { taskId: task.id, dropKey: dropClaim.key });
       return;
     }
 
-    if (insertInfo.insertOnLink) {
-      const { sourceId, targetId } = insertInfo.insertOnLink;
-      this.insertTaskBetweenNodes(task.id, sourceId, targetId, docPoint);
-    } else if (insertInfo.parentId) {
-      const parentTask = this.projectState.getTask(insertInfo.parentId);
-      if (parentTask) {
-        const newStage = (parentTask.stage || 1) + 1;
-        const result = this.taskOps.moveTaskToStage(task.id, newStage, insertInfo.beforeTaskId, insertInfo.parentId);
-        if (!result.ok) {
-          this.toast.error('移动任务失败', getErrorMessage(result.error));
-          return;
-        }
-        setTimeout(() => {
-          this.taskOps.updateTaskPosition(task.id, docPoint.x, docPoint.y);
-        }, delayMs);
-      }
-    } else if (insertInfo.beforeTaskId || insertInfo.afterTaskId) {
-      const refTask = this.projectState.getTask(insertInfo.beforeTaskId || insertInfo.afterTaskId!);
-      if (refTask?.stage) {
-        if (insertInfo.afterTaskId) {
-          const siblings = tasks
-            .filter(t => t.stage === refTask.stage && t.parentId === refTask.parentId)
-            .sort((a, b) => a.rank - b.rank);
-          const afterIndex = siblings.findIndex(t => t.id === refTask.id);
-          const nextSibling = siblings[afterIndex + 1];
-          const result = this.taskOps.moveTaskToStage(task.id, refTask.stage, nextSibling?.id || null, refTask.parentId);
-          if (!result.ok) {
-            this.toast.error('移动任务失败', getErrorMessage(result.error));
-            return;
+    try {
+      // 场景：待分配块拖入画布仅更新位置，不立刻任务化
+      if (task.stage === null) {
+        await this.moveUnassignedTaskToPoint(task, docPoint);
+        this.dropOperationGuard.release(dropClaim.key);
+      } else if (insertInfo.insertOnLink) {
+        const { sourceId, targetId } = insertInfo.insertOnLink;
+        await this.insertTaskBetweenNodes(task.id, sourceId, targetId, docPoint);
+        this.dropOperationGuard.release(dropClaim.key);
+      } else if (insertInfo.parentId) {
+        await this.moveTaskUnderParent(task, insertInfo, docPoint);
+        this.dropOperationGuard.release(dropClaim.key);
+      } else if (insertInfo.beforeTaskId || insertInfo.afterTaskId) {
+        await this.moveTaskBesideSibling(task, insertInfo, docPoint);
+        this.dropOperationGuard.release(dropClaim.key);
+      } else {
+        try {
+          const saved = await this.taskOps.updateTaskPosition(task.id, docPoint.x, docPoint.y);
+          if (!saved) {
+            throw new Error('Task position local persistence failed');
           }
-        } else {
-          const result = this.taskOps.moveTaskToStage(task.id, refTask.stage, insertInfo.beforeTaskId, refTask.parentId);
-          if (!result.ok) {
-            this.toast.error('移动任务失败', getErrorMessage(result.error));
-            return;
-          }
+        } finally {
+          this.dropOperationGuard.release(dropClaim.key);
         }
-        setTimeout(() => {
-          this.taskOps.updateTaskPosition(task.id, docPoint.x, docPoint.y);
-        }, delayMs);
       }
-    } else {
-      this.taskOps.updateTaskPosition(task.id, docPoint.x, docPoint.y);
+    } catch (error) {
+      this.dropOperationGuard.release(dropClaim.key);
+      throw error;
     }
   }
-  
+
+  processDropFromInteraction(
+    task: Task,
+    insertInfo: InsertPositionInfo,
+    docPoint: go.Point,
+    delayMs: number = 100,
+  ): void {
+    void this.processDrop(task, insertInfo, docPoint, delayMs)
+      .catch(error => {
+        this.logger.error('拖放处理失败', error);
+      });
+  }
+
+  private async moveUnassignedTaskToPoint(task: Task, docPoint: go.Point): Promise<void> {
+    const saved = await this.taskOps.updateTaskPosition(task.id, docPoint.x, docPoint.y);
+    if (this.destroyed) return;
+    if (!saved) {
+      throw new Error('Task position local persistence failed');
+    }
+    this.layoutService.setNodePosition(task.id, docPoint.x, docPoint.y);
+  }
+
+  private async moveTaskUnderParent(
+    task: Task,
+    insertInfo: InsertPositionInfo,
+    docPoint: go.Point,
+  ): Promise<boolean> {
+    const parentTask = this.projectState.getTask(insertInfo.parentId!);
+    if (!parentTask) return false;
+
+    const newStage = (parentTask.stage || 1) + 1;
+    const result = await this.taskOps.moveTaskToStageAtPosition(
+      task.id,
+      newStage,
+      insertInfo.beforeTaskId,
+      insertInfo.parentId,
+      docPoint.x,
+      docPoint.y,
+    );
+    if (this.destroyed) return false;
+    if (!result.ok) {
+      this.toast.error('移动任务失败', getErrorMessage(result.error));
+      return false;
+    }
+
+    return true;
+  }
+
+  private async moveTaskBesideSibling(
+    task: Task,
+    insertInfo: InsertPositionInfo,
+    docPoint: go.Point,
+  ): Promise<boolean> {
+    const refTask = this.projectState.getTask(insertInfo.beforeTaskId || insertInfo.afterTaskId!);
+    if (!refTask?.stage) return false;
+
+    const beforeTaskId = insertInfo.afterTaskId
+      ? findNextFlowDropSiblingId(this.projectState.tasks(), refTask)
+      : insertInfo.beforeTaskId;
+    const result = await this.taskOps.moveTaskToStageAtPosition(
+      task.id,
+      refTask.stage,
+      beforeTaskId ?? null,
+      refTask.parentId,
+      docPoint.x,
+      docPoint.y,
+    );
+    if (this.destroyed) return false;
+    if (!result.ok) {
+      this.toast.error('移动任务失败', getErrorMessage(result.error));
+      return false;
+    }
+
+    return true;
+  }
+
   /**
    * 处理待分配区域 drop 的完整逻辑
    * 包含：解除分配、待分配块之间重挂载
    * @returns 是否需要刷新图表
    */
-  handleFullUnassignedDrop(event: DragEvent): boolean {
+  async handleFullUnassignedDrop(event: DragEvent): Promise<boolean> {
     event.preventDefault();
 
     const draggedTask = this.resolveDroppedTask(event.dataTransfer);
@@ -497,7 +504,8 @@ export class FlowDragDropService implements OnDestroy {
 
       if (targetCandidates.length > 0) {
         const targetTask = targetCandidates[0];
-        const result = this.taskOps.moveTaskToStage(draggedTask.id, null, undefined, targetTask.id);
+        const result = await this.taskOps.moveTaskToStage(draggedTask.id, null, undefined, targetTask.id);
+        if (this.destroyed) return false;
         if (!result.ok) {
           this.toast.error('重新挂载失败', getErrorMessage(result.error));
         } else {
@@ -555,20 +563,13 @@ export class FlowDragDropService implements OnDestroy {
   private altDragGhost: HTMLElement | null = null;
   /** 拖拽到停泊坞激活信号（供停泊坞监听悬停状态） */
   readonly isAltDragActive = signal(false);
+  private readonly activeDockDropKeys = new Set<string>();
 
   private boundAltDragMove: ((e: PointerEvent) => void) | null = null;
   private boundAltDragUp: ((e: PointerEvent) => void) | null = null;
 
   /**
-   * 开始 Alt+拖拽：从流程图节点拖到停泊坞（单个任务）
-   * 使用指针跟踪代替 HTML5 DnD（GoJS 内部拖拽与 HTML5 DnD 不兼容）
-   */
-  startAltDragToDock(taskId: string, clientX: number, clientY: number): void {
-    this.startDragToDock([taskId], clientX, clientY);
-  }
-
-  /**
-   * 开始拖拽到停泊坞：支持多选任务
+   * 开始拖拽到停泊坞：支持多选任务（单任务同样走此路径）
    * 当 GoJS 中的节点被拖出画布边界时触发，使用指针跟踪替代 HTML5 DnD
    */
   startDragToDock(taskIds: string[], clientX: number, clientY: number): void {
@@ -590,7 +591,7 @@ export class FlowDragDropService implements OnDestroy {
     const ghost = document.createElement('div');
     ghost.setAttribute('data-alt-drag-ghost', 'true');
     ghost.className = 'fixed z-[9999] px-3 py-2 bg-indigo-500/90 text-white rounded-lg shadow-xl text-xs font-medium pointer-events-none whitespace-nowrap flex items-center gap-1.5';
-    this.buildGhostContent(ghost, validTasks[0].title || '未命名任务', validTasks.length);
+    buildFlowDragGhostContent(ghost, validTasks[0].title || '未命名任务', validTasks.length);
     ghost.style.left = `${clientX + 12}px`;
     ghost.style.top = `${clientY - 16}px`;
     document.body.appendChild(ghost);
@@ -598,7 +599,7 @@ export class FlowDragDropService implements OnDestroy {
 
     // 自动展开停泊坞面板
     if (!this.dockEngine.dockExpanded()) {
-      this.dockEngine.setDockExpanded(true, { persistPreference: false });
+      void this.dockEngine.setDockExpanded(true, { persistPreference: false });
     }
 
     // 绑定全局指针事件
@@ -643,7 +644,7 @@ export class FlowDragDropService implements OnDestroy {
       if (isOverPanel) {
         const count = this.dragToDockTaskIds.length;
         const firstTitle = this.projectState.getTask(this.dragToDockTaskIds[0])?.title || '未命名任务';
-        this.buildGhostContent(this.altDragGhost, firstTitle, count, '松开放入');
+        buildFlowDragGhostContent(this.altDragGhost, firstTitle, count, '松开放入');
       }
     }
   }
@@ -655,47 +656,78 @@ export class FlowDragDropService implements OnDestroy {
       return;
     }
 
-    // 检测释放位置是否在停泊坞区域内（drop-zone 或整个坞栏面板）
-    const dockPanel = document.querySelector('[data-testid="dock-v3-panel"]');
+    if (this.isPointerOverDock(e)) {
+      this.commitAltDragToDock(taskIds);
+    }
+
+    this.endAltDragToDock();
+  }
+
+  private isPointerOverDock(e: PointerEvent): boolean {
     const dropZone = document.querySelector('[data-testid="dock-v3-drop-zone"]');
-    let isOverDock = false;
+    if (this.isPointerInsideElement(e, dropZone)) return true;
 
-    if (dropZone) {
-      const rect = dropZone.getBoundingClientRect();
-      isOverDock = e.clientX >= rect.left && e.clientX <= rect.right &&
-                   e.clientY >= rect.top && e.clientY <= rect.bottom;
-    }
-    if (!isOverDock && dockPanel) {
-      const rect = dockPanel.getBoundingClientRect();
-      isOverDock = e.clientX >= rect.left && e.clientX <= rect.right &&
-                   e.clientY >= rect.top && e.clientY <= rect.bottom;
+    const dockPanel = document.querySelector('[data-testid="dock-v3-panel"]');
+    return this.isPointerInsideElement(e, dockPanel);
+  }
+
+  private isPointerInsideElement(e: PointerEvent, element: Element | null): boolean {
+    if (!element) return false;
+    const rect = element.getBoundingClientRect();
+    return e.clientX >= rect.left && e.clientX <= rect.right &&
+      e.clientY >= rect.top && e.clientY <= rect.bottom;
+  }
+
+  private commitAltDragToDock(taskIds: string[]): void {
+    const dockDropKey = this.createDockDropKey(taskIds);
+    if (this.activeDockDropKeys.has(dockDropKey)) {
+      this.logger.debug('跳过重复拖入停泊坞事件', { taskIds, dockDropKey });
+      this.endAltDragToDock();
+      return;
     }
 
-    if (isOverDock) {
-      this.zone.run(() => {
+    this.activeDockDropKeys.add(dockDropKey);
+    void this.zone.run(async () => {
+      try {
+        // Flow 视图销毁后（@defer teardown / 视图切换）不得再发起停泊坞变更：
+        // pointerup 的 document 监听可能在销毁后仍触发一次提交
+        if (this.destroyed) {
+          return;
+        }
+
         if (this.taskOps.isHintOnlyStartupReadOnly()) {
           this.toast.info('会话确认中', '拖入停泊坞暂不可用，owner 确认完成前保持只读');
           this.endAltDragToDock();
           return;
         }
 
-        let dockedCount = 0;
-        for (const taskId of taskIds) {
+        const dockResults = await Promise.all(taskIds.map(async taskId => {
           const task = this.projectState.getTask(taskId);
-          if (!task) continue;
-          this.dockEngine.dockTaskFromExternalDrag(taskId, 'flow');
-          dockedCount++;
-        }
+          if (!task) return false;
+          try {
+            return await this.dockEngine.dockTaskFromExternalDrag(taskId, 'flow');
+          } catch (error) {
+            this.logger.warn('拖入停泊坞任务失败', { taskId, error });
+            return false;
+          }
+        }));
+        if (this.destroyed) return;
+
+        const dockedCount = dockResults.filter(Boolean).length;
         if (dockedCount > 0) {
           const msg = dockedCount === 1
             ? '任务已从流程图拖入停泊坞'
             : `${dockedCount} 个任务已从流程图拖入停泊坞`;
           this.toast.success('已加入停泊坞', msg);
         }
-      });
-    }
+      } finally {
+        this.activeDockDropKeys.delete(dockDropKey);
+      }
+    });
+  }
 
-    this.endAltDragToDock();
+  private createDockDropKey(taskIds: string[]): string {
+    return taskIds.slice().sort().join('|');
   }
 
   /** 结束拖拽到停泊坞，清理所有状态和 DOM */
@@ -730,34 +762,9 @@ export class FlowDragDropService implements OnDestroy {
     }
   }
 
-  /** 使用 DOM API 安全构建幽灵元素内容（避免 innerHTML / XSS） */
-  private buildGhostContent(container: HTMLElement, title: string, count: number, suffix?: string): void {
-    container.textContent = '';
-
-    const icon = document.createElement('span');
-    icon.className = 'opacity-60';
-    icon.textContent = '⏸';
-    container.appendChild(icon);
-
-    container.appendChild(document.createTextNode(` ${title}`));
-
-    if (count > 1) {
-      const badge = document.createElement('span');
-      badge.className = 'bg-indigo-400/50 px-1.5 py-0.5 rounded-full text-[10px]';
-      badge.textContent = `+${count - 1}`;
-      container.appendChild(document.createTextNode(' '));
-      container.appendChild(badge);
-    }
-
-    if (suffix) {
-      const hint = document.createElement('span');
-      hint.className = 'ml-1 text-indigo-200 text-[10px]';
-      hint.textContent = suffix;
-      container.appendChild(hint);
-    }
-  }
-
   ngOnDestroy(): void {
+    this.destroyed = true;
+    this.activeDockDropKeys.clear();
     this.endAltDragToDock();
   }
 }

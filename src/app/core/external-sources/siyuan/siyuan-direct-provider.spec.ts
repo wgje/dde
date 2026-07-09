@@ -10,6 +10,7 @@ describe('SiyuanDirectProvider', () => {
   let fetchMock: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
+    vi.stubGlobal('location', new URL('http://localhost/') as unknown as Location);
     fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
       const path = new URL(readFetchUrl(input)).pathname;
       const body = readJsonBody(init);

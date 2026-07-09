@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 const migrationPath = 'supabase/migrations/20260531063500_sync_upsert_task_missing_timestamp_guard.sql';
 const hardeningMigrationPath = 'supabase/migrations/20260531120000_database_hardening_dr_controls.sql';
 const quarantineCaptureMigrationPath = 'supabase/migrations/20260531130000_quarantine_missing_timestamp_capture.sql';
+const latestTaskStaleResultMigrationPath = 'supabase/migrations/20260606051000_sync_upsert_task_stale_result.sql';
 
 function readMigration(): string {
   return fs.readFileSync(path.join(process.cwd(), migrationPath), 'utf8');
@@ -16,6 +17,10 @@ function readHardeningMigration(): string {
 
 function readQuarantineCaptureMigration(): string {
   return fs.readFileSync(path.join(process.cwd(), quarantineCaptureMigrationPath), 'utf8');
+}
+
+function readLatestTaskStaleResultMigration(): string {
+  return fs.readFileSync(path.join(process.cwd(), latestTaskStaleResultMigrationPath), 'utf8');
 }
 
 function normalize(sql: string): string {
@@ -74,6 +79,9 @@ describe('sync_upsert_task missing timestamp guard migration', () => {
     expect(sql).toContain("'missing_task_timestamp', payload");
     expect(sql).toContain("'changed_fields', v_changed_fields");
     expect(sql).toContain('payload_digest, result_payload');
+    expect(sql).toContain(
+      "'status', CASE WHEN v_quarantine_id IS NULL THEN 'remote-newer' ELSE 'quarantined' END",
+    );
   });
 
   it('hardening migration wires sync freeze and quarantine modes into sync_upsert_task', () => {
@@ -84,6 +92,7 @@ describe('sync_upsert_task missing timestamp guard migration', () => {
     expect(sql).toContain("'reason', 'sync_read_only'");
     expect(sql).toContain("IF v_sync_mode = 'quarantine' THEN");
     expect(sql).toContain('public.record_sync_write_quarantine(');
+    expect(sql).toContain("'status', 'quarantined'");
     expect(sql).toContain("'decision', 'quarantined'");
   });
 
@@ -99,6 +108,15 @@ describe('sync_upsert_task missing timestamp guard migration', () => {
     expect(sql).toContain('RETURN v_result;');
   });
 
+  it('latest task stale-result migration returns quarantined status when a write is captured for quarantine', () => {
+    const sql = normalize(readLatestTaskStaleResultMigration());
+
+    expect(sql).toContain(
+      "'status', CASE WHEN v_quarantine_id IS NULL THEN 'remote-newer' ELSE 'quarantined' END",
+    );
+    expect(sql).toContain("'status', 'quarantined', 'decision', 'quarantined', 'reason', 'sync_quarantine'");
+  });
+
   it('hardening migration passes source metadata to the task audit trigger through transaction GUCs', () => {
     const sql = normalize(readHardeningMigration());
 
@@ -109,5 +127,15 @@ describe('sync_upsert_task missing timestamp guard migration', () => {
     expect(sql).toContain("set_config('app.payload_digest', v_payload_digest, true)");
     expect(sql).toContain("set_config('app.origin_unverified', v_origin_unverified::TEXT, true)");
     expect(sql).toContain('SELECT a.id INTO v_audit_id');
+  });
+
+  it('latest task stale-result migration reports attention_meta in changed_fields diagnostics', () => {
+    const sql = normalize(readLatestTaskStaleResultMigration());
+
+    expect(sql).toContain('v_existing_attention_meta JSONB');
+    expect(sql).toContain('t.attention_meta');
+    expect(sql).toContain("v_task ? 'attentionMeta'");
+    expect(sql).toContain("v_task ? 'attention_meta'");
+    expect(sql).toContain("jsonb_build_array('attention_meta')");
   });
 });

@@ -1,23 +1,42 @@
-import { Injectable, inject, signal, computed, Injector } from '@angular/core';
+import { DestroyRef, Injectable, inject, signal, computed, Injector } from '@angular/core';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { Router } from '@angular/router';
 import { AuthService } from '../../../services/auth.service';
 import { UserSessionService } from '../../../services/user-session.service';
 import { ProjectStateService } from '../../../services/project-state.service';
-import { ModalService, type LoginData } from '../../../services/modal.service';
+import { ModalService } from '../../../services/modal.service';
 import { ToastService } from '../../../services/toast.service';
 import { LoggerService } from '../../../services/logger.service';
 import { OptimisticStateService } from '../../../services/optimistic-state.service';
 import { UndoService } from '../../../services/undo.service';
 import { WidgetBindingService } from '../../../services/widget-binding.service';
 import { enableLocalMode, disableLocalMode } from '../../../services/guards';
-import { getErrorMessage, isFailure, humanizeErrorMessage, type OperationError } from '../../../utils/result';
-import { resolveRouteIntent } from '../../../utils/route-intent';
+import { humanizeErrorMessage, isFailure } from '../../../utils/result';
 import { AUTH_CONFIG } from '../../../config/auth.config';
 import { FEATURE_FLAGS } from '../../../config/feature-flags.config';
 import type { AttachmentService } from '../../../services/attachment.service';
 import type { MigrationService } from '../../../services/migration.service';
 import type { ProjectDataService } from './sync/project-data.service';
+import { EventBusService, type SessionInvalidatedEvent } from '../../../services/event-bus.service';
+import { SyncStateService } from './sync/sync-state.service';
 import { pushStartupTrace } from '../../../utils/startup-trace';
+import { AppAuthSignOutController } from './app-auth-sign-out.controller';
+import {
+  buildSuccessfulLoginCompletionPlan,
+  type AuthFormStatePatch,
+  createAppAuthLazyServiceSlot,
+  getAuthCredentialPreflightError,
+  getAuthFlowErrorMessage,
+  getAuthFormModePatch,
+  getAuthFailureMessage,
+  isAuthLoadCurrent,
+  isMigrationCheckCurrent,
+  resolveAppAuthLazyService,
+  resolveSafePostAuthNavigationTarget,
+  shouldShowLoginRequired,
+  shouldShowSettingsAuthForm,
+  waitForPromiseOrTimeout,
+} from './app-auth-coordinator.helpers';
 
 /**
  * 应用认证协调器
@@ -35,6 +54,7 @@ export class AppAuthCoordinatorService {
 
   private readonly logger = inject(LoggerService).category('Auth');
   private readonly injector = inject(Injector);
+  private readonly destroyRef = inject(DestroyRef);
   private readonly auth = inject(AuthService);
   private readonly userSession = inject(UserSessionService);
   private readonly projectState = inject(ProjectStateService);
@@ -44,13 +64,26 @@ export class AppAuthCoordinatorService {
   private readonly optimisticState = inject(OptimisticStateService);
   private readonly undoService = inject(UndoService);
   private readonly widgetBinding = inject(WidgetBindingService);
+  private readonly eventBus = inject(EventBusService);
+  private readonly syncState = inject(SyncStateService);
 
-  private attachmentServiceRef: AttachmentService | null = null;
-  private attachmentServicePromise: Promise<AttachmentService | null> | null = null;
-  private migrationServiceRef: MigrationService | null = null;
-  private migrationServicePromise: Promise<MigrationService | null> | null = null;
-  private projectDataServiceRef: ProjectDataService | null = null;
-  private projectDataServicePromise: Promise<ProjectDataService | null> | null = null;
+  private readonly attachmentServiceLazy = createAppAuthLazyServiceSlot<AttachmentService>();
+  private readonly migrationServiceLazy = createAppAuthLazyServiceSlot<MigrationService>();
+  private readonly projectDataServiceLazy = createAppAuthLazyServiceSlot<ProjectDataService>();
+  private readonly signOutController = new AppAuthSignOutController({
+    currentUserId: () => this.auth.currentUserId(),
+    isAuthConfigured: () => this.auth.isConfigured,
+    revokeWidgetBindings: () => this.widgetBinding.revokeAllBindings(),
+    signOutRemoteSession: () => this.auth.signOut(),
+    notifyLocalLogoutServices: () => this.notifyLocalServicesForSignOut(),
+    setCurrentUser: (userId, options) => this.userSession.setCurrentUser(userId, options),
+    clearAllLocalData: userId => this.userSession.clearAllLocalData(userId),
+    resetAuthFormState: () => this.resetAuthFormStateAfterSignOut(),
+    logError: (message, error) => this.logger.error(message, error),
+    logWarn: (message, error) => this.logger.warn(message, error),
+    showError: (title, message) => this.toast.error(title, message),
+    showWarning: (title, message) => this.toast.warning(title, message),
+  });
 
   // ========== 认证状态 Signals ==========
   readonly authEmail = signal('');
@@ -69,18 +102,20 @@ export class AppAuthCoordinatorService {
 
   /** 显示未登录提示界面 */
   readonly showLoginRequired = computed(() => {
-    return this.auth.isConfigured &&
-      this.auth.runtimeState() !== 'pending' &&
-      this.auth.sessionInitialized() &&  // 必须等首次会话检查完成，防止启动竞态误显示
-      !this.userSession.currentUserId() &&
-      !this.modal.isOpen('login') &&
-      !this.isCheckingSession() &&
-      !this.bootstrapFailed();
+    return shouldShowLoginRequired({
+      isConfigured: this.auth.isConfigured,
+      runtimeState: this.auth.runtimeState(),
+      sessionInitialized: this.auth.sessionInitialized(),
+      currentUserId: this.userSession.currentUserId(),
+      isLoginModalOpen: this.modal.isOpen('login'),
+      isCheckingSession: this.isCheckingSession(),
+      bootstrapFailed: this.bootstrapFailed(),
+    });
   });
 
   /** 设置页认证表单是否可见 */
   readonly showSettingsAuthForm = computed(() =>
-    !this.userSession.currentUserId() || this.isReloginMode()
+    shouldShowSettingsAuthForm(this.userSession.currentUserId(), this.isReloginMode())
   );
 
   /** 会话引导任务是否已调度 */
@@ -99,10 +134,36 @@ export class AppAuthCoordinatorService {
   private migrationCheckGeneration = 0;
 
   constructor() {
+    this.registerSessionInvalidationTeardown();
+
     // 回滚开关关闭时，恢复旧策略：启动阶段预热重型依赖。
     if (!FEATURE_FLAGS.ROOT_STARTUP_DEP_PRUNE_V1) {
       void this.getAttachmentServiceLazy();
       void this.getMigrationServiceLazy();
+    }
+  }
+
+  private registerSessionInvalidationTeardown(): void {
+    this.eventBus.onSessionInvalidated$
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe((event) => {
+        void this.handleSessionInvalidated(event);
+      });
+  }
+
+  private async handleSessionInvalidated(event: SessionInvalidatedEvent): Promise<void> {
+    try {
+      await this.userSession.setCurrentUser(null, {
+        skipPersistentReload: true,
+        previousUserIdHint: event.userId,
+        preserveOfflineSnapshot: true,
+      });
+    } catch (error) {
+      this.logger.warn('会话失效 teardown 失败，已保留离线快照等待后续恢复', {
+        source: event.source,
+        userId: event.userId,
+        error,
+      });
     }
   }
 
@@ -136,69 +197,19 @@ export class AppAuthCoordinatorService {
     this.bootstrapSession().catch(_e => {});
   }
 
-  /**
-   * 等待 Promise 完成，超时则返回 timeout，避免启动流程被长期阻塞
-   */
-  private async waitWithTimeout<T>(
-    promise: Promise<T>,
-    timeoutMs: number
-  ): Promise<'completed' | 'timeout'> {
-    let timeoutId: ReturnType<typeof setTimeout> | null = null;
-    try {
-      return await Promise.race([
-        promise.then(() => 'completed' as const),
-        new Promise<'timeout'>(resolve => {
-          timeoutId = setTimeout(() => resolve('timeout'), timeoutMs);
-        })
-      ]);
-    } finally {
-      if (timeoutId) {
-        clearTimeout(timeoutId);
-      }
-    }
-  }
-
-  private getAuthFailureMessage(error: OperationError): string {
-    const message = error.message?.trim();
-    return message || getErrorMessage(error);
-  }
-
   resolveSafePostAuthNavigationUrl(returnUrl?: string | null): string | null {
-    const normalizedReturnUrl = typeof returnUrl === 'string'
-      ? returnUrl.trim()
-      : '';
-    const explicitReturnUrl = normalizedReturnUrl && normalizedReturnUrl !== '/'
-      ? normalizedReturnUrl
-      : null;
-
-    if (!explicitReturnUrl) {
-      return explicitReturnUrl;
-    }
-
-    const routeIntent = resolveRouteIntent(explicitReturnUrl, this.projectState.activeProjectId());
-    if (routeIntent.kind === 'projects' || !routeIntent.projectId) {
-      return explicitReturnUrl;
-    }
-
-    const startupProjectCatalogStage = this.userSession.startupProjectCatalogStage();
-    if (!this.userSession.canAuthoritativelyRejectProjectRoute()) {
-      return explicitReturnUrl;
-    }
-
-    if (this.userSession.isProjectAuthoritativelyAccessible(routeIntent.projectId)) {
-      return explicitReturnUrl;
-    }
-
-    this.logger.info('[Login] 登录后目标路由不可安全恢复，已回退到项目列表', {
-      candidateUrl: explicitReturnUrl,
-      projectId: routeIntent.projectId,
-      startupProjectCatalogStage,
-      canAuthoritativelyRejectProjectRoute: true,
-      hasMatchingProject: this.projectState.projects().some(
-        (project) => project.id === routeIntent.projectId,
-      ),
+    const target = resolveSafePostAuthNavigationTarget({
+      returnUrl,
+      activeProjectId: this.projectState.activeProjectId(),
+      startupProjectCatalogStage: this.userSession.startupProjectCatalogStage(),
+      canAuthoritativelyRejectProjectRoute: this.userSession.canAuthoritativelyRejectProjectRoute(),
+      isProjectAuthoritativelyAccessible: projectId => this.userSession.isProjectAuthoritativelyAccessible(projectId),
+      hasMatchingProject: projectId => this.projectState.projects().some(project => project.id === projectId),
     });
-    return '/projects';
+    if (target.rejected) {
+      this.logger.info('[Login] 登录后目标路由不可安全恢复，已回退到项目列表', target.rejected);
+    }
+    return target.url;
   }
 
   private async bootstrapSession(): Promise<void> {
@@ -210,149 +221,172 @@ export class AppAuthCoordinatorService {
     this.bootstrapInFlight = true;
 
     if (!this.auth.isConfigured) {
-      this.logger.debug('[Bootstrap] Supabase 未配置，启用离线模式');
-      this.isCheckingSession.set(false);
-      try {
-        await this.userSession.setCurrentUser(null);
-      } finally {
-        this.bootstrapInFlight = false;
-      }
+      await this.bootstrapUnconfiguredSession();
       return;
     }
 
+    const { totalStartTime, isSilent } = this.beginConfiguredBootstrapSession();
+    const previousUserIdHint = this.capturePreviousUserIdHint();
+
+    try {
+      const result = await this.checkBootstrapSession();
+      if (result.userId) {
+        await this.bootstrapAuthenticatedSession(result.userId, result.email, previousUserIdHint);
+      } else {
+        await this.bootstrapAnonymousSession();
+      }
+
+      this.recordBootstrapSuccess();
+    } catch (e: unknown) {
+      await this.handleBootstrapFailure(e);
+    } finally {
+      this.finishConfiguredBootstrapSession(totalStartTime, isSilent);
+    }
+  }
+
+  private async bootstrapUnconfiguredSession(): Promise<void> {
+    this.logger.debug('[Bootstrap] Supabase 未配置，启用离线模式');
+    this.isCheckingSession.set(false);
+    try {
+      await this.userSession.setCurrentUser(null);
+    } finally {
+      this.bootstrapInFlight = false;
+    }
+  }
+
+  private beginConfiguredBootstrapSession(): { totalStartTime: number; isSilent: boolean } {
     this.logger.debug('[Bootstrap] ========== 启动会话检查 ==========');
     pushStartupTrace('auth.bootstrap_start', {
       runtimeState: this.auth.runtimeState(),
       sessionInitialized: this.auth.sessionInitialized(),
       currentUserId: this.auth.currentUserId(),
     });
-    const totalStartTime = Date.now();
     const isSilent = this.coldBootSilent;
-    // 【P1 秒开优化 2026-03-31】冷启动时不设置 isCheckingSession = true。
-    // 快照已预填充内容，auth 静默完成即可。用户无需看到"会话检测中"指示器。
-    // 仅在手动重试（retryBootstrap）时显示检测 UI。
     if (!isSilent) {
       this.isCheckingSession.set(true);
     }
     this.bootstrapFailed.set(false);
     this.bootstrapErrorMessage.set(null);
+    return { totalStartTime: Date.now(), isSilent };
+  }
+
+  private async checkBootstrapSession(): Promise<{ userId: string | null; email: string | null }> {
+    this.logger.debug('[Bootstrap] 步骤 1/3: 调用 auth.checkSession()...');
+    const startTime = Date.now();
+    const result = await this.auth.checkSession();
+    const elapsed = Date.now() - startTime;
+    this.logger.debug(`[Bootstrap] 步骤 1/3: checkSession 完成 (耗时 ${elapsed}ms)`, {
+      userId: result.userId,
+      hasEmail: !!result.email
+    });
+    return { userId: result.userId, email: result.email };
+  }
+
+  private async bootstrapAuthenticatedSession(
+    userId: string,
+    email: string | null,
+    previousUserIdHint: string | null,
+  ): Promise<void> {
+    this.sessionEmail.set(email);
+    this.isCheckingSession.set(false);
+    this.logger.debug('[Bootstrap] 步骤 2/3: 用户已登录，开始加载数据...');
+    const loadStartTime = Date.now();
+    const loadGeneration = ++this.authLoadGeneration;
+    const loadPromise = this.userSession.setCurrentUser(userId, {
+      forceLoad: true,
+      previousUserIdHint,
+    });
+    const loadStatus = await waitForPromiseOrTimeout(loadPromise, this.BOOTSTRAP_DATA_LOAD_TIMEOUT_MS);
+
+    if (loadStatus === 'completed') {
+      const loadElapsed = Date.now() - loadStartTime;
+      this.logger.debug(`[Bootstrap] 步骤 2/3: 数据加载完成 (耗时 ${loadElapsed}ms)`);
+    } else {
+      this.continueBootstrapLoadInBackground(userId, loadPromise, loadGeneration, loadStartTime);
+    }
+
+    this.logger.debug('[Bootstrap] 步骤 3/3: 检查项目数据...', {
+      projectCount: this.projectState.projects().length,
+      activeProjectId: this.projectState.activeProjectId()
+    });
+  }
+
+  private continueBootstrapLoadInBackground(
+    userId: string,
+    loadPromise: Promise<unknown>,
+    loadGeneration: number,
+    loadStartTime: number
+  ): void {
+    const loadElapsed = Date.now() - loadStartTime;
+    this.logger.warn(
+      `[Bootstrap] 步骤 2/3: 数据加载超过 ${this.BOOTSTRAP_DATA_LOAD_TIMEOUT_MS}ms，转后台继续`,
+      { elapsed: loadElapsed }
+    );
+    pushStartupTrace('auth.bootstrap_background_continue', { elapsedMs: loadElapsed, userId });
+
+    void loadPromise.then(() => {
+      if (!this.isAuthLoadCurrent(userId, loadGeneration)) {
+        return;
+      }
+      const backgroundElapsed = Date.now() - loadStartTime;
+      this.logger.info(`[Bootstrap] 后台数据加载完成 (耗时 ${backgroundElapsed}ms)`);
+    }).catch((error: unknown) => {
+      if (!this.isAuthLoadCurrent(userId, loadGeneration)) {
+        return;
+      }
+      this.logger.error('[Bootstrap] 后台数据加载失败，保留当前会话状态并停止自动回退', error);
+    });
+  }
+
+  private async bootstrapAnonymousSession(): Promise<void> {
+    this.logger.debug('[Bootstrap] 步骤 2/3: 无现有会话');
+    this.isCheckingSession.set(false);
+    try {
+      await this.userSession.setCurrentUser(null);
+    } catch (loadError) {
+      this.logger.warn('[Bootstrap] 离线数据加载失败', loadError);
+    }
+  }
+
+  private recordBootstrapSuccess(): void {
+    this.logger.debug('[Bootstrap] ========== 启动成功 ==========');
+    pushStartupTrace('auth.bootstrap_success', {
+      projectCount: this.projectState.projects().length,
+      activeProjectId: this.projectState.activeProjectId(),
+    });
+  }
+
+  private async handleBootstrapFailure(e: unknown): Promise<void> {
+    const err = e as Error | undefined;
+    this.logger.error('[Bootstrap] ========== 启动失败 ==========');
+    this.logger.error('[Bootstrap] 错误详情', {
+      message: err?.message, stack: err?.stack, name: err?.name, cause: err?.cause
+    });
+    const errorMsg = humanizeErrorMessage(err?.message ?? String(e));
+    this.logger.error('[Bootstrap] 转换后的用户消息', { errorMsg });
+    this.bootstrapFailed.set(true);
+    this.bootstrapErrorMessage.set(errorMsg);
+    this.authError.set(errorMsg);
+    pushStartupTrace('auth.bootstrap_failure', { message: errorMsg });
 
     try {
-      this.logger.debug('[Bootstrap] 步骤 1/3: 调用 auth.checkSession()...');
-      const startTime = Date.now();
-      const result = await this.auth.checkSession();
-      const elapsed = Date.now() - startTime;
-      this.logger.debug(`[Bootstrap] 步骤 1/3: checkSession 完成 (耗时 ${elapsed}ms)`, {
-        userId: result.userId,
-        hasEmail: !!result.email
-      });
-
-      if (result.userId) {
-        this.sessionEmail.set(result.email);
-        // 【P1 秒开优化 2026-03-31】身份已确认，立即释放 isCheckingSession。
-        // 后续的数据加载（setCurrentUser）不应阻塞 UI 指示器。
-        // 冷启动时 isCheckingSession 本就没有设为 true，此处兜底确保一致。
-        this.isCheckingSession.set(false);
-        this.logger.debug('[Bootstrap] 步骤 2/3: 用户已登录，开始加载数据...');
-        const loadStartTime = Date.now();
-        const loadGeneration = ++this.authLoadGeneration;
-        // 【P0 修复 2026-03-27】冷启动路径必须传 forceLoad: true
-        // 修复竞态：auth guard 快速路径可能已设 currentUserId，导致 isUserChange=false，
-        // 如果快照预填充已让 hasProjects=true，loadUserData 会被跳过 → 数据未加载。
-        const loadPromise = this.userSession.setCurrentUser(result.userId, { forceLoad: true });
-        const loadStatus = await this.waitWithTimeout(
-          loadPromise,
-          this.BOOTSTRAP_DATA_LOAD_TIMEOUT_MS
-        );
-
-        if (loadStatus === 'completed') {
-          const loadElapsed = Date.now() - loadStartTime;
-          this.logger.debug(`[Bootstrap] 步骤 2/3: 数据加载完成 (耗时 ${loadElapsed}ms)`);
-        } else {
-          const loadElapsed = Date.now() - loadStartTime;
-          this.logger.warn(
-            `[Bootstrap] 步骤 2/3: 数据加载超过 ${this.BOOTSTRAP_DATA_LOAD_TIMEOUT_MS}ms，转后台继续`,
-            { elapsed: loadElapsed }
-          );
-          pushStartupTrace('auth.bootstrap_background_continue', {
-            elapsedMs: loadElapsed,
-            userId: result.userId,
-          });
-
-          void loadPromise.then(() => {
-            if (!this.isAuthLoadCurrent(result.userId, loadGeneration)) {
-              return;
-            }
-            const backgroundElapsed = Date.now() - loadStartTime;
-            this.logger.info(`[Bootstrap] 后台数据加载完成 (耗时 ${backgroundElapsed}ms)`);
-          }).catch((error: unknown) => {
-            if (!this.isAuthLoadCurrent(result.userId, loadGeneration)) {
-              return;
-            }
-            this.logger.error('[Bootstrap] 后台数据加载失败，保留当前会话状态并停止自动回退', error);
-          });
-        }
-
-        this.logger.debug('[Bootstrap] 步骤 3/3: 检查项目数据...', {
-          projectCount: this.projectState.projects().length,
-          activeProjectId: this.projectState.activeProjectId()
-        });
-      } else {
-        this.logger.debug('[Bootstrap] 步骤 2/3: 无现有会话');
-        // 【P1 秒开优化 2026-03-31】身份检测完毕（无会话），立即释放 UI 指示器
-        this.isCheckingSession.set(false);
-        // 【P0 修复】无会话时也加载离线缓存，避免用户看到空工作区
-        // 先前行为：跳过数据加载 → 工作区空白
-        // 修复后：加载离线快照，用户至少能看到上次的数据
-        try {
-          await this.userSession.setCurrentUser(null);
-        } catch (loadError) {
-          this.logger.warn('[Bootstrap] 离线数据加载失败', loadError);
-        }
-      }
-
-      this.logger.debug('[Bootstrap] ========== 启动成功 ==========');
-      pushStartupTrace('auth.bootstrap_success', {
-        projectCount: this.projectState.projects().length,
-        activeProjectId: this.projectState.activeProjectId(),
-      });
-    } catch (e: unknown) {
-      const err = e as Error | undefined;
-      this.logger.error('[Bootstrap] ========== 启动失败 ==========');
-      this.logger.error('[Bootstrap] 错误详情', {
-        message: err?.message, stack: err?.stack, name: err?.name, cause: err?.cause
-      });
-      const errorMsg = humanizeErrorMessage(err?.message ?? String(e));
-      this.logger.error('[Bootstrap] 转换后的用户消息', { errorMsg });
-      this.bootstrapFailed.set(true);
-      this.bootstrapErrorMessage.set(errorMsg);
-      this.authError.set(errorMsg);
-      pushStartupTrace('auth.bootstrap_failure', {
-        message: errorMsg,
-      });
-
-      // 【P0 修复】auth 启动失败时加载离线缓存，防止用户数据"消失"
-      // 根因：bootstrapSession 抛出异常（网络故障/Supabase 不可达）后，
-      // 既不调用 setCurrentUser 也不调用 loadFromCacheOrSeed，
-      // 导致 projectState 始终为空，用户看到空白工作区。
-      // 修复：降级到离线模式，加载本地缓存数据。
-      try {
-        await this.userSession.setCurrentUser(null);
-      } catch (fallbackError) {
-        this.logger.warn('[Bootstrap] 降级离线数据加载也失败', fallbackError);
-      }
-    } finally {
-      const totalElapsed = Date.now() - totalStartTime;
-      pushStartupTrace('auth.bootstrap_complete', {
-        elapsedMs: totalElapsed,
-        bootstrapFailed: this.bootstrapFailed(),
-        coldBootSilent: isSilent,
-      });
-      this.logger.debug(`[Bootstrap] 完成 (总耗时 ${totalElapsed}ms, silent=${isSilent})`);
-      this.isCheckingSession.set(false);
-      this.bootstrapInFlight = false;
-      this.coldBootSilent = false;
+      await this.userSession.setCurrentUser(null);
+    } catch (fallbackError) {
+      this.logger.warn('[Bootstrap] 降级离线数据加载也失败', fallbackError);
     }
+  }
+
+  private finishConfiguredBootstrapSession(totalStartTime: number, isSilent: boolean): void {
+    const totalElapsed = Date.now() - totalStartTime;
+    pushStartupTrace('auth.bootstrap_complete', {
+      elapsedMs: totalElapsed,
+      bootstrapFailed: this.bootstrapFailed(),
+      coldBootSilent: isSilent,
+    });
+    this.logger.debug(`[Bootstrap] 完成 (总耗时 ${totalElapsed}ms, silent=${isSilent})`);
+    this.isCheckingSession.set(false);
+    this.bootstrapInFlight = false;
+    this.coldBootSilent = false;
   }
 
   // ========== 登录/注册/重置 ==========
@@ -362,16 +396,19 @@ export class AppAuthCoordinatorService {
     opts?: { closeSettings?: boolean; skipPostAuthNavigation?: boolean },
   ): Promise<void> {
     event?.preventDefault();
-    if (!this.auth.isConfigured) {
-      this.authError.set('Supabase keys missing. Set NG_APP_SUPABASE_URL/NG_APP_SUPABASE_ANON_KEY.');
+    const preflightError = getAuthCredentialPreflightError('login',
+      { isConfigured: this.auth.isConfigured, email: this.authEmail(), password: this.authPassword() });
+    if (preflightError) {
+      this.authError.set(preflightError);
       return;
     }
     this.authError.set(null);
     this.isAuthLoading.set(true);
+    const previousUserIdHint = this.capturePreviousUserIdHint();
     try {
       const result = await this.auth.signIn(this.authEmail(), this.authPassword());
       if (isFailure(result)) {
-        throw new Error(this.getAuthFailureMessage(result.error));
+        throw new Error(getAuthFailureMessage(result.error));
       }
       disableLocalMode();
       this.sessionEmail.set(this.auth.sessionEmail());
@@ -384,46 +421,18 @@ export class AppAuthCoordinatorService {
       }
 
       localStorage.setItem('currentUserId', userId);
-      const loadGeneration = ++this.authLoadGeneration;
-      // 【P0 修复 2026-02-08】使用 waitWithTimeout 防止数据加载卡死
-      // 与 bootstrapSession 对齐，超时后转后台继续，不阻塞 UI
-      const DATA_LOAD_TIMEOUT_MS = 8000;
-      const loadPromise = this.userSession.setCurrentUser(userId, { forceLoad: true });
-      const loadStatus = await this.waitWithTimeout(loadPromise, DATA_LOAD_TIMEOUT_MS);
-      if (loadStatus === 'timeout') {
-        this.logger.warn('[Login] 数据加载超时，转后台继续', { timeoutMs: DATA_LOAD_TIMEOUT_MS });
-        // 超时不阻断登录流程，数据在后台继续加载
-        void loadPromise.catch(e => {
-          if (!this.isAuthLoadCurrent(userId, loadGeneration)) {
-            return;
-          }
-          this.logger.error('[Login] 后台数据加载失败', e);
-        });
-      }
+      await this.loadPostAuthUserDataWithTimeout(userId, '[Login]', previousUserIdHint);
       this.toast.success('登录成功', `欢迎回来`);
       const migrationGeneration = ++this.migrationCheckGeneration;
       this.isReloginMode.set(false);
-      const rawLoginData = this.modal.getData('login');
-      const loginData = this.isLoginData(rawLoginData) ? rawLoginData : undefined;
-      const returnUrl = loginData?.returnUrl;
-      this.modal.closeByType('login', { success: true, userId: userId ?? undefined });
-      if (opts?.closeSettings) {
-        this.modal.closeByType('settings');
-      }
-      const postAuthTargetUrl = opts?.skipPostAuthNavigation
-        ? null
-        : this.resolveSafePostAuthNavigationUrl(returnUrl);
-      if (postAuthTargetUrl) {
-        void this.router.navigateByUrl(postAuthTargetUrl);
-      }
+      this.finishSuccessfulLogin(userId, opts);
       setTimeout(() => {
         void this.checkMigrationAfterLogin(userId, migrationGeneration).catch(error => {
           this.logger.warn('登录后迁移检查失败，已跳过本次迁移提示', error);
         });
       }, 0);
     } catch (e: unknown) {
-      const err = e as Error | undefined;
-      this.authError.set(humanizeErrorMessage(err?.message ?? String(e)));
+      this.authError.set(getAuthFlowErrorMessage(e));
     } finally {
       this.isAuthLoading.set(false);
       this.isCheckingSession.set(false);
@@ -432,25 +441,23 @@ export class AppAuthCoordinatorService {
 
   async handleSignup(event?: Event): Promise<void> {
     event?.preventDefault();
-    if (!this.auth.isConfigured) {
-      this.authError.set('Supabase keys missing.');
-      return;
-    }
-    if (this.authPassword() !== this.authConfirmPassword()) {
-      this.authError.set('两次输入的密码不一致');
-      return;
-    }
-    const minLen = 8;
-    if (this.authPassword().length < minLen) {
-      this.authError.set(`密码长度至少${minLen}位`);
+    const preflightError = getAuthCredentialPreflightError('signup', {
+      isConfigured: this.auth.isConfigured,
+      email: this.authEmail(),
+      password: this.authPassword(),
+      confirmPassword: this.authConfirmPassword(),
+    });
+    if (preflightError) {
+      this.authError.set(preflightError);
       return;
     }
     this.authError.set(null);
     this.isAuthLoading.set(true);
+    const previousUserIdHint = this.capturePreviousUserIdHint();
     try {
       const result = await this.auth.signUp(this.authEmail(), this.authPassword());
       if (isFailure(result)) {
-        throw new Error(this.getAuthFailureMessage(result.error));
+        throw new Error(getAuthFailureMessage(result.error));
       }
       const signedUpUserId = result.value.userId ?? this.auth.currentUserId();
       const signedUpEmail = result.value.email ?? this.auth.sessionEmail();
@@ -459,20 +466,7 @@ export class AppAuthCoordinatorService {
       } else if (signedUpUserId) {
         disableLocalMode();
         this.sessionEmail.set(signedUpEmail);
-        const loadGeneration = ++this.authLoadGeneration;
-        // 【修复】与 handleLogin 对齐，增加超时保护防止数据加载卡死
-        const SIGNUP_DATA_LOAD_TIMEOUT_MS = 8000;
-        const loadPromise = this.userSession.setCurrentUser(signedUpUserId, { forceLoad: true });
-        const loadStatus = await this.waitWithTimeout(loadPromise, SIGNUP_DATA_LOAD_TIMEOUT_MS);
-        if (loadStatus === 'timeout') {
-          this.logger.warn('[Signup] 数据加载超时，转后台继续', { timeoutMs: SIGNUP_DATA_LOAD_TIMEOUT_MS });
-          void loadPromise.catch(e => {
-            if (!this.isAuthLoadCurrent(signedUpUserId, loadGeneration)) {
-              return;
-            }
-            this.logger.error('[Signup] 后台数据加载失败', e);
-          });
-        }
+        await this.loadPostAuthUserDataWithTimeout(signedUpUserId, '[Signup]', previousUserIdHint);
         this.toast.success('注册成功', '欢迎使用');
         this.modal.closeByType('login', { success: true, userId: signedUpUserId });
         this.isSignupMode.set(false);
@@ -481,21 +475,66 @@ export class AppAuthCoordinatorService {
         this.authError.set('注册成功，但会话初始化失败，请重新登录。');
       }
     } catch (e: unknown) {
-      const err = e as Error | undefined;
-      this.authError.set(humanizeErrorMessage(err?.message ?? String(e)));
+      this.authError.set(getAuthFlowErrorMessage(e));
     } finally {
       this.isAuthLoading.set(false);
     }
   }
 
-  async handleResetPassword(event?: Event): Promise<void> {
-    event?.preventDefault();
-    if (!this.auth.isConfigured) {
-      this.authError.set('Supabase keys missing.');
+  private finishSuccessfulLogin(
+    userId: string,
+    opts?: { closeSettings?: boolean; skipPostAuthNavigation?: boolean },
+  ): void {
+    const completionPlan = buildSuccessfulLoginCompletionPlan({
+      rawLoginData: this.modal.getData('login'),
+      options: opts,
+      resolveNavigationUrl: returnUrl => this.resolveSafePostAuthNavigationUrl(returnUrl),
+    });
+    this.modal.closeByType('login', { success: true, userId });
+    if (completionPlan.closeSettings) {
+      this.modal.closeByType('settings');
+    }
+
+    if (completionPlan.navigationUrl) {
+      void this.router.navigateByUrl(completionPlan.navigationUrl);
+    }
+  }
+
+  private capturePreviousUserIdHint(): string | null {
+    return this.userSession.currentUserId() ?? null;
+  }
+
+  private async loadPostAuthUserDataWithTimeout(
+    userId: string,
+    logPrefix: '[Login]' | '[Signup]',
+    previousUserIdHint: string | null,
+  ): Promise<void> {
+    const loadGeneration = ++this.authLoadGeneration;
+    const timeoutMs = 8000;
+    const loadPromise = this.userSession.setCurrentUser(userId, {
+      forceLoad: true,
+      previousUserIdHint,
+    });
+    const loadStatus = await waitForPromiseOrTimeout(loadPromise, timeoutMs);
+    if (loadStatus !== 'timeout') {
       return;
     }
-    if (!this.authEmail()) {
-      this.authError.set('请输入邮箱地址');
+
+    this.logger.warn(`${logPrefix} 数据加载超时，转后台继续`, { timeoutMs });
+    void loadPromise.catch(e => {
+      if (!this.isAuthLoadCurrent(userId, loadGeneration)) {
+        return;
+      }
+      this.logger.error(`${logPrefix} 后台数据加载失败`, e);
+    });
+  }
+
+  async handleResetPassword(event?: Event): Promise<void> {
+    event?.preventDefault();
+    const preflightError = getAuthCredentialPreflightError('reset-password',
+      { isConfigured: this.auth.isConfigured, email: this.authEmail() });
+    if (preflightError) {
+      this.authError.set(preflightError);
       return;
     }
     this.authError.set(null);
@@ -503,12 +542,11 @@ export class AppAuthCoordinatorService {
     try {
       const result = await this.auth.resetPassword(this.authEmail());
       if (isFailure(result)) {
-        throw new Error(this.getAuthFailureMessage(result.error));
+        throw new Error(getAuthFailureMessage(result.error));
       }
       this.resetPasswordSent.set(true);
     } catch (e: unknown) {
-      const err = e as Error | undefined;
-      this.authError.set(humanizeErrorMessage(err?.message ?? String(e)));
+      this.authError.set(getAuthFlowErrorMessage(e));
     } finally {
       this.isAuthLoading.set(false);
     }
@@ -517,34 +555,38 @@ export class AppAuthCoordinatorService {
   // ========== 模式切换 ==========
 
   switchToSignup(): void {
-    this.isSignupMode.set(true);
-    this.isResetPasswordMode.set(false);
-    this.authError.set(null);
-    this.authPassword.set('');
-    this.authConfirmPassword.set('');
+    this.applyAuthFormStatePatch(getAuthFormModePatch('signup'));
   }
 
   switchToLogin(): void {
-    this.isSignupMode.set(false);
-    this.isResetPasswordMode.set(false);
-    this.resetPasswordSent.set(false);
-    this.authError.set(null);
+    this.applyAuthFormStatePatch(getAuthFormModePatch('login'));
   }
 
   switchToResetPassword(): void {
-    this.isResetPasswordMode.set(true);
-    this.isSignupMode.set(false);
-    this.resetPasswordSent.set(false);
-    this.authError.set(null);
+    this.applyAuthFormStatePatch(getAuthFormModePatch('reset-password'));
   }
 
   startRelogin(): void {
-    this.isReloginMode.set(true);
-    this.authPassword.set('');
-    this.authError.set(null);
+    this.applyAuthFormStatePatch({
+      isReloginMode: true,
+      authPassword: '',
+      authError: null,
+    });
     if (this.sessionEmail()) {
       this.authEmail.set(this.sessionEmail()!);
     }
+  }
+
+  private applyAuthFormStatePatch(patch: AuthFormStatePatch): void {
+    if ('sessionEmail' in patch) this.sessionEmail.set(patch.sessionEmail ?? null);
+    if ('authEmail' in patch) this.authEmail.set(patch.authEmail ?? '');
+    if ('authPassword' in patch) this.authPassword.set(patch.authPassword ?? '');
+    if ('authConfirmPassword' in patch) this.authConfirmPassword.set(patch.authConfirmPassword ?? '');
+    if ('authError' in patch) this.authError.set(patch.authError ?? null);
+    if ('isReloginMode' in patch) this.isReloginMode.set(patch.isReloginMode ?? false);
+    if ('isSignupMode' in patch) this.isSignupMode.set(patch.isSignupMode ?? false);
+    if ('isResetPasswordMode' in patch) this.isResetPasswordMode.set(patch.isResetPasswordMode ?? false);
+    if ('resetPasswordSent' in patch) this.resetPasswordSent.set(patch.resetPasswordSent ?? false);
   }
 
   // ========== 登出 ==========
@@ -554,28 +596,11 @@ export class AppAuthCoordinatorService {
    * single-flight：并发请求复用同一个 Promise。
    */
   async getAttachmentServiceLazy(): Promise<AttachmentService | null> {
-    if (this.attachmentServiceRef) {
-      return this.attachmentServiceRef;
-    }
-    if (this.attachmentServicePromise) {
-      return this.attachmentServicePromise;
-    }
-
-    this.attachmentServicePromise = import('../../../services/attachment.service')
-      .then(({ AttachmentService: AttachmentServiceToken }) => {
-        const service = this.injector.get(AttachmentServiceToken);
-        this.attachmentServiceRef = service;
-        return service;
-      })
-      .catch((error: unknown) => {
-        this.logger.warn('AttachmentService 懒加载失败，降级继续', error);
-        return null;
-      })
-      .finally(() => {
-        this.attachmentServicePromise = null;
-      });
-
-    return this.attachmentServicePromise;
+    return resolveAppAuthLazyService(this.attachmentServiceLazy, {
+      loadToken: () => import('../../../services/attachment.service').then(module => module.AttachmentService),
+      resolve: token => this.injector.get(token),
+      warn: error => this.logger.warn('AttachmentService 懒加载失败，降级继续', error),
+    });
   }
 
   /**
@@ -583,28 +608,11 @@ export class AppAuthCoordinatorService {
    * single-flight：并发请求复用同一个 Promise。
    */
   async getMigrationServiceLazy(): Promise<MigrationService | null> {
-    if (this.migrationServiceRef) {
-      return this.migrationServiceRef;
-    }
-    if (this.migrationServicePromise) {
-      return this.migrationServicePromise;
-    }
-
-    this.migrationServicePromise = import('../../../services/migration.service')
-      .then(({ MigrationService: MigrationServiceToken }) => {
-        const service = this.injector.get(MigrationServiceToken);
-        this.migrationServiceRef = service;
-        return service;
-      })
-      .catch((error: unknown) => {
-        this.logger.warn('MigrationService 懒加载失败，降级跳过迁移检查', error);
-        return null;
-      })
-      .finally(() => {
-        this.migrationServicePromise = null;
-      });
-
-    return this.migrationServicePromise;
+    return resolveAppAuthLazyService(this.migrationServiceLazy, {
+      loadToken: () => import('../../../services/migration.service').then(module => module.MigrationService),
+      resolve: token => this.injector.get(token),
+      warn: error => this.logger.warn('MigrationService 懒加载失败，降级跳过迁移检查', error),
+    });
   }
 
   /**
@@ -612,28 +620,11 @@ export class AppAuthCoordinatorService {
    * single-flight：并发请求复用同一个 Promise。
    */
   async getProjectDataServiceLazy(): Promise<ProjectDataService | null> {
-    if (this.projectDataServiceRef) {
-      return this.projectDataServiceRef;
-    }
-    if (this.projectDataServicePromise) {
-      return this.projectDataServicePromise;
-    }
-
-    this.projectDataServicePromise = import('./sync/project-data.service')
-      .then(({ ProjectDataService: ProjectDataServiceToken }) => {
-        const service = this.injector.get(ProjectDataServiceToken);
-        this.projectDataServiceRef = service;
-        return service;
-      })
-      .catch((error: unknown) => {
-        this.logger.warn('ProjectDataService 懒加载失败，降级跳过迁移探测', error);
-        return null;
-      })
-      .finally(() => {
-        this.projectDataServicePromise = null;
-      });
-
-    return this.projectDataServicePromise;
+    return resolveAppAuthLazyService(this.projectDataServiceLazy, {
+      loadToken: () => import('./sync/project-data.service').then(module => module.ProjectDataService),
+      resolve: token => this.injector.get(token),
+      warn: error => this.logger.warn('ProjectDataService 懒加载失败，降级跳过迁移探测', error),
+    });
   }
 
   /**
@@ -643,64 +634,18 @@ export class AppAuthCoordinatorService {
   async signOut(): Promise<boolean> {
     this.authLoadGeneration++;
     this.migrationCheckGeneration++;
-    const currentUserId = this.auth.currentUserId();
-    let localCleanupFailed = false;
+    return this.signOutController.signOut();
+  }
 
-    if (
-      currentUserId
-      && currentUserId !== AUTH_CONFIG.LOCAL_MODE_USER_ID
-      && this.auth.isConfigured
-    ) {
-      const revokeResult = await this.widgetBinding.revokeAllBindings();
-      if (isFailure(revokeResult)) {
-        const message = humanizeErrorMessage(getErrorMessage(revokeResult.error));
-        this.logger.error('Widget 远端吊销失败，中断登出流程', revokeResult.error);
-        this.toast.error('设备吊销失败', `${message}；请在网络恢复后重试，当前不会退出登录`);
-        return false;
-      }
-    }
+  private async notifyLocalServicesForSignOut(): Promise<void> {
+    this.optimisticState.onUserLogout();
+    this.undoService.onUserLogout();
+    const attachmentService = await this.getAttachmentServiceLazy();
+    attachmentService?.onUserLogout();
+  }
 
-    // 【P0 安全修复】在清理本地数据前，先调用各服务的 onUserLogout
-    // 防止跨用户数据泄露：乐观更新快照、撤销历史、附件 URL 缓存
-    try {
-      this.optimisticState.onUserLogout();
-      this.undoService.onUserLogout();
-      const attachmentService = await this.getAttachmentServiceLazy();
-      attachmentService?.onUserLogout();
-    } catch (e) {
-      this.logger.warn('onUserLogout 清理过程中出错，继续登出流程', e);
-    }
-
-    try {
-      await this.userSession.setCurrentUser(null, {
-        skipPersistentReload: true,
-      });
-
-      await this.userSession.clearAllLocalData(currentUserId ?? undefined);
-    } catch (error) {
-      localCleanupFailed = true;
-      this.logger.error('本地数据清理失败，继续完成登出流程', error);
-    }
-
-    if (this.auth.isConfigured) {
-      await this.auth.signOut();
-    }
-    // 清除认证相关 signals
-    this.sessionEmail.set(null);
-    this.authEmail.set('');
-    this.authPassword.set('');
-    this.authConfirmPassword.set('');
-    this.authError.set(null);
-    this.isReloginMode.set(false);
-    this.isSignupMode.set(false);
-    this.isResetPasswordMode.set(false);
-    this.resetPasswordSent.set(false);
-
-    if (localCleanupFailed) {
-      this.toast.warning('本地清理未完成', '已退出登录；若需彻底清理本地缓存，请关闭其他标签页后重试');
-    }
-
-    return true;
+  private resetAuthFormStateAfterSignOut(): void {
+    this.applyAuthFormStatePatch(getAuthFormModePatch('signed-out'));
   }
 
   // ========== 模态框事件处理 ==========
@@ -724,27 +669,39 @@ export class AppAuthCoordinatorService {
   }
 
   /** 处理本地模式选择 */
-  handleLocalModeFromModal(): void {
+  async handleLocalModeFromModal(): Promise<void> {
+    const previousUserIdHint = this.auth.currentUserId();
     enableLocalMode();
-    this.auth.currentUserId.set(AUTH_CONFIG.LOCAL_MODE_USER_ID);
+    await this.userSession.setCurrentUser(AUTH_CONFIG.LOCAL_MODE_USER_ID, {
+      forceLoad: true,
+      previousUserIdHint,
+      preserveOfflineSnapshot: true,
+    });
+    this.auth.sessionExpired.set(false);
+    this.syncState.resetSessionExpired();
     this.modal.closeByType('login', { success: true, userId: AUTH_CONFIG.LOCAL_MODE_USER_ID });
-    void this.userSession.loadProjects();
     this.toast.info('本地模式', '数据仅保存在本地，不会同步到云端');
   }
 
   // ========== 迁移检查 ==========
 
   private isMigrationCheckCurrent(userId: string | null, generation: number): boolean {
-    return Boolean(
-      userId &&
-      userId !== AUTH_CONFIG.LOCAL_MODE_USER_ID &&
-      this.migrationCheckGeneration === generation &&
-      this.userSession.currentUserId() === userId
+    return isMigrationCheckCurrent(
+      generation,
+      this.migrationCheckGeneration,
+      userId,
+      this.userSession.currentUserId(),
+      AUTH_CONFIG.LOCAL_MODE_USER_ID
     );
   }
 
   private isAuthLoadCurrent(userId: string | null, generation: number): boolean {
-    return this.authLoadGeneration === generation && this.userSession.currentUserId() === userId;
+    return isAuthLoadCurrent(
+      generation,
+      this.authLoadGeneration,
+      userId,
+      this.userSession.currentUserId()
+    );
   }
 
   private async checkMigrationAfterLogin(
@@ -800,12 +757,5 @@ export class AppAuthCoordinatorService {
   closeMigrationModal(): void {
     this.modal.closeByType('migration');
     this.toast.info('您可以稍后在设置中处理数据迁移');
-  }
-
-  // ========== 私有工具 ==========
-
-  /** 类型守卫：校验模态数据是否为 LoginData */
-  private isLoginData(data: unknown): data is LoginData {
-    return data != null && typeof data === 'object' && 'returnUrl' in (data as Record<string, unknown>);
   }
 }

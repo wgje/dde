@@ -147,6 +147,48 @@ describe('ExportService', () => {
       expect(data.projects[0].tasks).toHaveLength(1);
       expect(data.projects[0].tasks[0].title).toBe('My Task');
     });
+
+    it('应保留任务僚机数据并清理停泊上下文快照', async () => {
+      const attentionMeta: Task['attentionMeta'] = {
+        items: [{
+          id: 'attention-1',
+          text: '上线前检查权限策略',
+          level: 'warning',
+          done: false,
+          createdAt: '2026-06-08T00:00:00.000Z',
+          updatedAt: '2026-06-08T00:00:00.000Z',
+        }],
+        pinned: true,
+        updatedAt: '2026-06-08T00:00:00.000Z',
+      };
+      const task = createTestTask({
+        id: 'task-1',
+        attentionMeta,
+        parkingMeta: {
+          state: 'parked',
+          parkedAt: '2026-06-08T00:00:00.000Z',
+          lastVisitedAt: null,
+          contextSnapshot: {
+            savedAt: '2026-06-08T00:00:00.000Z',
+            contentHash: 'hash',
+            viewMode: 'text',
+            cursorPosition: null,
+            scrollAnchor: null,
+            structuralAnchor: null,
+            flowViewport: null,
+          },
+          reminder: null,
+          pinned: false,
+        },
+      });
+      const project = createTestProject({ tasks: [task] });
+
+      const result = await service.exportProject(project);
+      const data = JSON.parse(await result.blob!.text());
+
+      expect(data.projects[0].tasks[0].attentionMeta).toEqual(attentionMeta);
+      expect(data.projects[0].tasks[0].parkingMeta.contextSnapshot).toBeNull();
+    });
     
     it('应包含连接数据', async () => {
       const task1 = createTestTask({ id: 'task-1' });
@@ -367,6 +409,46 @@ describe('ExportService', () => {
       
       expect(downloaded).toBe(true);
       expect(mockToast.success).toHaveBeenCalled();
+    });
+
+    it('支持 File System Access API 时应写入用户选择的文件', async () => {
+      const project = createTestProject();
+      const result = await service.exportProject(project);
+      const write = vi.fn().mockResolvedValue(undefined);
+      const close = vi.fn().mockResolvedValue(undefined);
+      const createWritable = vi.fn().mockResolvedValue({ write, close });
+      const showSaveFilePicker = vi.fn().mockResolvedValue({
+        name: 'backup.json',
+        createWritable,
+      });
+      const originalPicker = (window as Window & {
+        showSaveFilePicker?: typeof showSaveFilePicker;
+      }).showSaveFilePicker;
+      (window as Window & {
+        showSaveFilePicker?: typeof showSaveFilePicker;
+      }).showSaveFilePicker = showSaveFilePicker;
+
+      try {
+        const downloaded = await service.downloadExportWithFilePicker(result);
+
+        expect(downloaded).toBe(true);
+        expect(showSaveFilePicker).toHaveBeenCalledWith(expect.objectContaining({
+          suggestedName: result.filename,
+        }));
+        expect(write).toHaveBeenCalledWith(result.blob);
+        expect(close).toHaveBeenCalled();
+        expect(mockToast.success).toHaveBeenCalledWith('数据已导出到：backup.json');
+      } finally {
+        if (originalPicker) {
+          (window as Window & {
+            showSaveFilePicker?: typeof showSaveFilePicker;
+          }).showSaveFilePicker = originalPicker;
+        } else {
+          delete (window as Window & {
+            showSaveFilePicker?: typeof showSaveFilePicker;
+          }).showSaveFilePicker;
+        }
+      }
     });
   });
   

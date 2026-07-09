@@ -121,63 +121,66 @@ function scoreDockCandidate(
   context: DockSchedulerContext,
 ): DockCandidateScore {
   const waitFitMode = context.waitFitMode ?? 'strict';
-  const lowLoadWithWait = candidate.load === 'low' && (candidate.waitMinutes ?? 0) > 0 ? 1 : 0;
-  const lowLoad = candidate.load === 'low' ? 1 : 0;
-  const comboSelectLane = candidate.lane === 'combo-select' ? 1 : 0;
-  const relationStrength = resolveRelationStrength(candidate);
-  const waitWindowFitScore = computeWaitWindowFitScore(candidate.expectedMinutes, remainingMinutes, waitFitMode);
-  const loadTransitionBonus = computeLoadTransitionBonus(candidate.load, context.rootLoad ?? null);
-  const projectSwitchPenalty = computeProjectSwitchPenalty(
-    candidate.sourceProjectId ?? null,
-    context.rootProjectId ?? null,
-  );
-  const timeMatchBucket = computeTimeMatchBucket(candidate.expectedMinutes, remainingMinutes, waitFitMode);
-  const manualOrderWeight = Number.isFinite(candidate.manualOrder)
-    ? -Math.max(0, Number(candidate.manualOrder))
-    : Number.MIN_SAFE_INTEGER;
-  const orderWeight = -candidate.dockedOrder;
-
-  let score = 0;
-  // lowLoadWithWait 累计：低负荷 + 等待双重奖励（设计意图是低负荷等待任务获得额外优先级）
-  if (lowLoadWithWait) {
-    score += PARKING_CONFIG.SCHEDULE_LOW_LOAD_WEIGHT + PARKING_CONFIG.SCHEDULE_WAIT_CHILD_WEIGHT;
-  }
-  score += lowLoad ? PARKING_CONFIG.SCHEDULE_LOW_LOAD_WEIGHT : PARKING_CONFIG.SCHEDULE_HIGH_LOAD_WEIGHT;
-  score += comboSelectLane ? PARKING_CONFIG.SCHEDULE_STRONG_ZONE_WEIGHT : PARKING_CONFIG.SCHEDULE_WEAK_ZONE_WEIGHT;
-  score += relationStrength;
-  score += waitWindowFitScore;
-  score += loadTransitionBonus;
-  score += projectSwitchPenalty;
-
-  if (timeMatchBucket >= 4) {
-    score += PARKING_CONFIG.SCHEDULE_TIME_TIGHT_MATCH_WEIGHT;
-  } else if (timeMatchBucket === 3) {
-    score += PARKING_CONFIG.SCHEDULE_TIME_NORMAL_MATCH_WEIGHT;
-  } else if (timeMatchBucket === 2) {
-    score += PARKING_CONFIG.SCHEDULE_TIME_SMALL_OVERRUN_WEIGHT;
-  } else if (timeMatchBucket === 1) {
-    score += PARKING_CONFIG.SCHEDULE_WAIT_CHILD_WEIGHT;
-  } else {
-    score += PARKING_CONFIG.SCHEDULE_TIME_MISMATCH_PENALTY;
-  }
+  const priority = buildCandidatePriority(candidate, remainingMinutes, context, waitFitMode);
 
   return {
     taskId: candidate.taskId,
     expectedMinutes: candidate.expectedMinutes,
-    score,
-    priority: {
-      lowLoadWithWait,
-      lowLoad,
-      comboSelectLane,
-      relationStrength,
-      waitWindowFitScore,
-      loadTransitionBonus,
-      projectSwitchPenalty,
-      timeMatchBucket,
-      manualOrderWeight,
-      orderWeight,
-    },
+    score: computeCandidateScore(priority),
+    priority,
   };
+}
+
+function buildCandidatePriority(
+  candidate: DockSchedulerCandidate,
+  remainingMinutes: number,
+  context: DockSchedulerContext,
+  waitFitMode: DockWaitFitMode,
+): DockCandidateScore['priority'] {
+  const lowLoadWithWait = candidate.load === 'low' && (candidate.waitMinutes ?? 0) > 0 ? 1 : 0;
+  const lowLoad = candidate.load === 'low' ? 1 : 0;
+  const comboSelectLane = candidate.lane === 'combo-select' ? 1 : 0;
+
+  return {
+    lowLoadWithWait,
+    lowLoad,
+    comboSelectLane,
+    relationStrength: resolveRelationStrength(candidate),
+    waitWindowFitScore: computeWaitWindowFitScore(candidate.expectedMinutes, remainingMinutes, waitFitMode),
+    loadTransitionBonus: computeLoadTransitionBonus(candidate.load, context.rootLoad ?? null),
+    projectSwitchPenalty: computeProjectSwitchPenalty(
+      candidate.sourceProjectId ?? null,
+      context.rootProjectId ?? null,
+    ),
+    timeMatchBucket: computeTimeMatchBucket(candidate.expectedMinutes, remainingMinutes, waitFitMode),
+    manualOrderWeight: Number.isFinite(candidate.manualOrder)
+      ? -Math.max(0, Number(candidate.manualOrder))
+      : Number.MIN_SAFE_INTEGER,
+    orderWeight: -candidate.dockedOrder,
+  };
+}
+
+function computeCandidateScore(priority: DockCandidateScore['priority']): number {
+  let score = 0;
+  // lowLoadWithWait 累计：低负荷 + 等待双重奖励（设计意图是低负荷等待任务获得额外优先级）
+  if (priority.lowLoadWithWait) {
+    score += PARKING_CONFIG.SCHEDULE_LOW_LOAD_WEIGHT + PARKING_CONFIG.SCHEDULE_WAIT_CHILD_WEIGHT;
+  }
+  score += priority.lowLoad ? PARKING_CONFIG.SCHEDULE_LOW_LOAD_WEIGHT : PARKING_CONFIG.SCHEDULE_HIGH_LOAD_WEIGHT;
+  score += priority.comboSelectLane ? PARKING_CONFIG.SCHEDULE_STRONG_ZONE_WEIGHT : PARKING_CONFIG.SCHEDULE_WEAK_ZONE_WEIGHT;
+  score += priority.relationStrength;
+  score += priority.waitWindowFitScore;
+  score += priority.loadTransitionBonus;
+  score += priority.projectSwitchPenalty;
+  return score + scoreTimeMatchBucket(priority.timeMatchBucket);
+}
+
+function scoreTimeMatchBucket(timeMatchBucket: number): number {
+  if (timeMatchBucket >= 4) return PARKING_CONFIG.SCHEDULE_TIME_TIGHT_MATCH_WEIGHT;
+  if (timeMatchBucket === 3) return PARKING_CONFIG.SCHEDULE_TIME_NORMAL_MATCH_WEIGHT;
+  if (timeMatchBucket === 2) return PARKING_CONFIG.SCHEDULE_TIME_SMALL_OVERRUN_WEIGHT;
+  if (timeMatchBucket === 1) return PARKING_CONFIG.SCHEDULE_WAIT_CHILD_WEIGHT;
+  return PARKING_CONFIG.SCHEDULE_TIME_MISMATCH_PENALTY;
 }
 
 function computeTimeMatchBucket(
@@ -326,6 +329,71 @@ function computeProjectSwitchPenalty(candidateProjectId: string | null, rootProj
   return PARKING_CONFIG.SCHEDULE_PROJECT_SWITCH_PENALTY;
 }
 
+interface RecommendationWindowRules {
+  readonly safeRemainingWaitMin: number;
+  readonly allowEstimatedWindow: (task: FocusTaskSlot) => boolean;
+  readonly allowExecWindow: (task: FocusTaskSlot) => boolean;
+  readonly compareByWindowFit: (a: FocusTaskSlot, b: FocusTaskSlot) => number;
+}
+
+function buildRecommendationWindowRules(
+  remainingWaitMin: number,
+  waitFitMode: DockWaitFitMode,
+): RecommendationWindowRules {
+  const safeRemainingWaitMin = Math.max(0, remainingWaitMin);
+  const preferLongTask = safeRemainingWaitMin >= PARKING_CONFIG.RECOMMENDATION_OVERSIZED_THRESHOLD_MINUTES;
+  const relaxedUpperBoundMinutes = Math.max(safeRemainingWaitMin, 1)
+    * PARKING_CONFIG.RECOMMENDATION_RELAXED_UPPER_BOUND_MULTIPLIER;
+
+  return {
+    safeRemainingWaitMin,
+    allowEstimatedWindow: (task: FocusTaskSlot) =>
+      isWithinEstimatedWindow(task, waitFitMode, safeRemainingWaitMin, relaxedUpperBoundMinutes),
+    allowExecWindow: (task: FocusTaskSlot) =>
+      isWithinExecWindow(task, waitFitMode, safeRemainingWaitMin, relaxedUpperBoundMinutes),
+    compareByWindowFit: (a: FocusTaskSlot, b: FocusTaskSlot) =>
+      compareByRecommendationWindow(a, b, safeRemainingWaitMin, preferLongTask),
+  };
+}
+
+function isWithinEstimatedWindow(
+  task: FocusTaskSlot,
+  waitFitMode: DockWaitFitMode,
+  safeRemainingWaitMin: number,
+  relaxedUpperBoundMinutes: number,
+): boolean {
+  if (waitFitMode === 'ignore-wait') return true;
+  if (waitFitMode === 'relaxed') {
+    return task.estimatedMinutes == null || task.estimatedMinutes <= relaxedUpperBoundMinutes;
+  }
+  return (task.estimatedMinutes ?? Number.POSITIVE_INFINITY) <= safeRemainingWaitMin;
+}
+
+function isWithinExecWindow(
+  task: FocusTaskSlot,
+  waitFitMode: DockWaitFitMode,
+  safeRemainingWaitMin: number,
+  relaxedUpperBoundMinutes: number,
+): boolean {
+  if (waitFitMode === 'ignore-wait') return true;
+  if (waitFitMode === 'relaxed') return effectiveExecMin(task) <= relaxedUpperBoundMinutes;
+  return effectiveExecMin(task) <= safeRemainingWaitMin;
+}
+
+function compareByRecommendationWindow(
+  a: FocusTaskSlot,
+  b: FocusTaskSlot,
+  safeRemainingWaitMin: number,
+  preferLongTask: boolean,
+): number {
+  const aExecMinutes = effectiveExecMin(a);
+  const bExecMinutes = effectiveExecMin(b);
+  const aDiff = Math.abs(aExecMinutes - safeRemainingWaitMin);
+  const bDiff = Math.abs(bExecMinutes - safeRemainingWaitMin);
+  if (aDiff !== bDiff) return aDiff - bDiff;
+  return preferLongTask ? bExecMinutes - aExecMinutes : aExecMinutes - bExecMinutes;
+}
+
 // 三维推荐：同源推进 / 认知降低 / 异步并发
 export function computeThreeDimensionalRecommendation(
   mainTask: FocusTaskSlot,
@@ -333,35 +401,17 @@ export function computeThreeDimensionalRecommendation(
   remainingWaitMin: number,
   waitFitMode: DockWaitFitMode = 'strict',
 ): RecommendationGroup[] {
-  const safeRemainingWaitMin = Math.max(0, remainingWaitMin);
+  const windowRules = buildRecommendationWindowRules(remainingWaitMin, waitFitMode);
   const assigned = new Set<string>();
-  const preferLongTask = safeRemainingWaitMin >= PARKING_CONFIG.RECOMMENDATION_OVERSIZED_THRESHOLD_MINUTES;
-  const relaxedUpperBoundMinutes = Math.max(safeRemainingWaitMin, 1) * PARKING_CONFIG.RECOMMENDATION_RELAXED_UPPER_BOUND_MULTIPLIER;
-  const compareByWindowFit = (a: FocusTaskSlot, b: FocusTaskSlot): number => {
-    const aDiff = Math.abs(effectiveExecMin(a) - safeRemainingWaitMin);
-    const bDiff = Math.abs(effectiveExecMin(b) - safeRemainingWaitMin);
-    if (aDiff !== bDiff) return aDiff - bDiff;
-    return preferLongTask ? effectiveExecMin(b) - effectiveExecMin(a) : effectiveExecMin(a) - effectiveExecMin(b);
-  };
-  const allowEstimatedWindow = (task: FocusTaskSlot): boolean =>
-    waitFitMode === 'ignore-wait'
-      || (waitFitMode === 'relaxed'
-        ? (task.estimatedMinutes == null || task.estimatedMinutes <= relaxedUpperBoundMinutes)
-        : (task.estimatedMinutes ?? Number.POSITIVE_INFINITY) <= safeRemainingWaitMin);
-  const allowExecWindow = (task: FocusTaskSlot): boolean =>
-    waitFitMode === 'ignore-wait'
-      || (waitFitMode === 'relaxed'
-        ? effectiveExecMin(task) <= relaxedUpperBoundMinutes
-        : effectiveExecMin(task) <= safeRemainingWaitMin);
 
   const homologousAdvancement = buildHomologousGroup(
-    mainTask, pendingTasks, assigned, allowEstimatedWindow, compareByWindowFit,
+    mainTask, pendingTasks, assigned, windowRules.allowEstimatedWindow, windowRules.compareByWindowFit,
   );
   const cognitiveDowngrade = buildCognitiveDowngradeGroup(
-    mainTask, pendingTasks, assigned, allowEstimatedWindow, compareByWindowFit,
+    mainTask, pendingTasks, assigned, windowRules.allowEstimatedWindow, windowRules.compareByWindowFit,
   );
   const asynchronousBoot = buildAsynchronousBootGroup(
-    pendingTasks, assigned, allowExecWindow, compareByWindowFit,
+    pendingTasks, assigned, windowRules.allowExecWindow, windowRules.compareByWindowFit,
   );
 
   const allEmpty =
@@ -372,7 +422,7 @@ export function computeThreeDimensionalRecommendation(
   if (allEmpty && pendingTasks.length > 0) {
     if (
       waitFitMode === 'strict'
-      && safeRemainingWaitMin >= PARKING_CONFIG.RECOMMENDATION_OVERSIZED_THRESHOLD_MINUTES
+      && windowRules.safeRemainingWaitMin >= PARKING_CONFIG.RECOMMENDATION_OVERSIZED_THRESHOLD_MINUTES
     ) {
       return computeOversizedFallback(mainTask, pendingTasks);
     }

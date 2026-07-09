@@ -1,11 +1,11 @@
 /**
  * FlowViewCleanupService - 流程图视图清理服务
- * 
+ *
  * 从 FlowViewComponent 拆分出来，专注于：
  * - 定时器清理
  * - rAF 清理
  * - 服务销毁协调
- * 
+ *
  * 职责单一：统一管理组件的异步资源清理
  */
 
@@ -18,6 +18,7 @@ import { FlowLinkService } from './flow-link.service';
 import { FlowDragDropService } from './flow-drag-drop.service';
 import { FlowTaskOperationsService } from './flow-task-operations.service';
 import { FlowCommandService } from './flow-command.service';
+import { FlowPaletteResizeService } from './flow-palette-resize.service';
 import { flowTemplateEventHandlers } from './flow-template-events';
 
 /**
@@ -47,6 +48,7 @@ export class FlowViewCleanupService {
   private readonly dragDrop = inject(FlowDragDropService);
   private readonly taskOps = inject(FlowTaskOperationsService);
   private readonly flowCommand = inject(FlowCommandService);
+  private readonly paletteResize = inject(FlowPaletteResizeService);
 
   /**
    * 执行完整清理
@@ -58,69 +60,88 @@ export class FlowViewCleanupService {
     uninstallMobileListeners: () => void
   ): void {
     // 标记 View 已销毁
-    this.flowCommand.markViewDestroyed();
+    this.runCleanupStep(() => this.flowCommand.markViewDestroyed());
 
     // 优先卸载 GoJS 监听 + 清理幽灵，避免残留 DOM/引用
-    uninstallMobileListeners();
-    this.touch.endDiagramNodeDragGhost();
+    this.runCleanupStep(uninstallMobileListeners);
+    this.runCleanupStep(() => this.touch.endDiagramNodeDragGhost());
 
     // 清理所有定时器
-    this.clearTimers(resources);
+    this.runCleanupStep(() => this.clearTimers(resources));
 
     // 清理所有 rAF
-    this.clearAnimationFrames(resources);
+    this.runCleanupStep(() => this.clearAnimationFrames(resources));
 
     // 清理 idle callbacks
-    this.clearIdleCallbacks(resources);
+    this.runCleanupStep(() => this.clearIdleCallbacks(resources));
 
     // 清理服务
-    this.disposeServices();
+    this.runCleanupStep(() => this.disposeServices());
 
     // 清理 Delete 键事件处理器
-    flowTemplateEventHandlers.onDeleteKeyPressed = undefined;
+    this.runCleanupStep(() => {
+      flowTemplateEventHandlers.onDeleteKeyPressed = undefined;
+    });
   }
 
   /**
    * 清理所有待处理的定时器
    */
   private clearTimers(resources: CleanupResources): void {
-    resources.pendingTimers.forEach(clearTimeout);
+    const pendingTimers = [...resources.pendingTimers];
     resources.pendingTimers.length = 0;
+    pendingTimers.forEach(timer => {
+      this.runCleanupStep(() => clearTimeout(timer));
+    });
 
     if (resources.overviewResizeTimer !== null) {
-      clearTimeout(resources.overviewResizeTimer);
+      const overviewResizeTimer = resources.overviewResizeTimer;
       resources.overviewResizeTimer = null;
+      this.runCleanupStep(() => clearTimeout(overviewResizeTimer));
     }
   }
 
   private clearAnimationFrames(resources: CleanupResources): void {
     // rAF 已迁移到各服务
-    this.diagramEffects.cancelPendingRaf();
-    this.mobileDrawer.cancelPendingDrawerRaf();
+    this.runCleanupStep(() => this.diagramEffects.cancelPendingRaf());
+    this.runCleanupStep(() => this.mobileDrawer.cancelPendingDrawerRaf());
 
-    resources.pendingRetryRafIds.forEach(id => cancelAnimationFrame(id));
+    const pendingRetryRafIds = [...resources.pendingRetryRafIds];
     resources.pendingRetryRafIds.length = 0;
+    pendingRetryRafIds.forEach(id => {
+      this.runCleanupStep(() => cancelAnimationFrame(id));
+    });
   }
 
   private clearIdleCallbacks(resources: CleanupResources): void {
     if (typeof cancelIdleCallback !== 'undefined') {
       if (resources.idleInitHandle !== null) {
-        cancelIdleCallback(resources.idleInitHandle);
+        const idleInitHandle = resources.idleInitHandle;
         resources.idleInitHandle = null;
+        this.runCleanupStep(() => cancelIdleCallback(idleInitHandle));
       }
     }
     // Overview idle 已迁移到 FlowDiagramService
-    this.diagram.cancelIdleOverviewInit();
+    this.runCleanupStep(() => this.diagram.cancelIdleOverviewInit());
   }
 
   /**
    * 销毁相关服务
    */
   private disposeServices(): void {
-    this.diagram.dispose();
-    this.touch.dispose();
-    this.link.dispose();
-    this.dragDrop.dispose();
-    this.taskOps.dispose();
+    this.runCleanupStep(() => this.diagram.dispose());
+    this.runCleanupStep(() => this.touch.dispose());
+    this.runCleanupStep(() => this.link.dispose());
+    this.runCleanupStep(() => this.dragDrop.dispose());
+    this.runCleanupStep(() => this.taskOps.dispose());
+    this.runCleanupStep(() => this.paletteResize.cancelActiveResize());
+  }
+
+  private runCleanupStep(cleanup: () => void): void {
+    try {
+      cleanup();
+    } catch {
+      // Cleanup is best-effort; later resource releases must still run.
+    }
   }
 }

@@ -2,6 +2,8 @@
 module.exports = {
   content: [
     "./src/**/*.{html,ts,tsx}",
+    "!./src/**/*.spec.ts",
+    "!./src/tests/**/*",
     "./index.html"
   ],
   // 使用 selector 策略，基于 data-color-mode 属性切换深色模式

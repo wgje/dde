@@ -196,6 +196,67 @@ describe('TaskRepositoryBatchService.saveTasksIncremental delete behavior', () =
 });
 
 describe('TaskRepositoryService.loadTasks promotion on deleted parent', () => {
+  it('preserves explicit null parking metadata from remote rows', async () => {
+    const taskRow = {
+      id: 'task-cleared-parking',
+      project_id: 'project-1',
+      parent_id: null,
+      title: 'Cleared parking',
+      content: '',
+      stage: 1,
+      order: 1,
+      rank: 10000,
+      status: 'active',
+      x: 0,
+      y: 0,
+      short_id: null,
+      priority: null,
+      due_date: null,
+      expected_minutes: null,
+      cognitive_load: null,
+      wait_minutes: null,
+      tags: [],
+      attachments: [],
+      deleted_at: null,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      completed_at: null,
+      parking_meta: null,
+      attention_meta: null,
+    };
+
+    const tasksQuery = {
+      select: vi.fn(() => tasksQuery),
+      eq: vi.fn(() => tasksQuery),
+      order: vi.fn(() => tasksQuery),
+      range: vi.fn().mockResolvedValue({ data: [taskRow], error: null }),
+    } as any;
+    const tombstonesQuery = {
+      select: vi.fn(() => tombstonesQuery),
+      eq: vi.fn(() => tombstonesQuery),
+      order: vi.fn(() => tombstonesQuery),
+      range: vi.fn().mockResolvedValue({ data: [], error: null }),
+    } as any;
+    const from = vi.fn((table: string) => {
+      if (table === 'tasks') return tasksQuery;
+      if (table === 'task_tombstones') return tombstonesQuery;
+      return {} as any;
+    });
+    const injector = Injector.create({
+      providers: [
+        { provide: SupabaseClientService, useValue: { isConfigured: true, client: () => ({ from }) } },
+        { provide: LoggerService, useValue: mockLoggerService },
+      ],
+    });
+
+    const service = runInInjectionContext(injector, () => new TaskRepositoryService());
+    const loaded = await service.loadTasks('project-1');
+
+    expect(loaded).toHaveLength(1);
+    expect(loaded[0].parkingMeta).toBeNull();
+    expect(loaded[0].attentionMeta).toBeNull();
+  });
+
   it('promotes child to replace deleted parent stage/order/rank/position', async () => {
     const consoleLogSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     const tasksData = [
@@ -248,12 +309,15 @@ describe('TaskRepositoryService.loadTasks promotion on deleted parent', () => {
     const tasksQuery = {
       select: vi.fn(() => tasksQuery),
       eq: vi.fn(() => tasksQuery),
-      order: vi.fn().mockResolvedValue({ data: tasksData, error: null }),
+      order: vi.fn(() => tasksQuery),
+      range: vi.fn().mockResolvedValue({ data: tasksData, error: null }),
     } as any;
 
     const tombstonesQuery = {
       select: vi.fn(() => tombstonesQuery),
-      eq: vi.fn().mockResolvedValue({ data: tombstonesData, error: null }),
+      eq: vi.fn(() => tombstonesQuery),
+      order: vi.fn(() => tombstonesQuery),
+      range: vi.fn().mockResolvedValue({ data: tombstonesData, error: null }),
     } as any;
 
     const from = vi.fn((table: string) => {
@@ -292,6 +356,93 @@ describe('TaskRepositoryService.loadTasks promotion on deleted parent', () => {
   });
 });
 
+describe('TaskRepositoryService paged reads', () => {
+  it('loadTasks fetches all Supabase REST pages before mapping and filtering', async () => {
+    const rows = Array.from({ length: 1001 }, (_, index) => taskRow(index));
+    const ranges: Array<[number, number]> = [];
+    const from = vi.fn((table: string) => {
+      if (table === 'tasks') return createPagedQuery(rows, ranges);
+      if (table === 'task_tombstones') {
+        return createPagedQuery([], []);
+      }
+      return {} as any;
+    });
+    const service = createTaskRepositoryWithFrom(from);
+
+    const loaded = await service.loadTasks('project-1');
+
+    expect(loaded).toHaveLength(1001);
+    expect(loaded[0].id).toBe('task-0000');
+    expect(loaded[1000].id).toBe('task-1000');
+    expect(ranges).toEqual([
+      [0, 999],
+      [1000, 1999],
+    ]);
+  });
+
+  it('loadConnections fetches all Supabase REST pages', async () => {
+    const rows = Array.from({ length: 1001 }, (_, index) => connectionRow(index));
+    const ranges: Array<[number, number]> = [];
+    const from = vi.fn((table: string) => {
+      if (table === 'connections') return createPagedQuery(rows, ranges);
+      return {} as any;
+    });
+    const service = createTaskRepositoryWithFrom(from);
+
+    const loaded = await service.loadConnections('project-1');
+
+    expect(loaded).toHaveLength(1001);
+    expect(loaded[0].id).toBe('connection-0000');
+    expect(loaded[1000].id).toBe('connection-1000');
+    expect(ranges).toEqual([
+      [0, 999],
+      [1000, 1999],
+    ]);
+  });
+
+  it('loadTasks fetches all task tombstone pages before filtering', async () => {
+    const rows = [taskRow(0), taskRow(1000)];
+    const taskRanges: Array<[number, number]> = [];
+    const tombstoneRows = Array.from({ length: 1001 }, (_, index) => ({
+      task_id: index === 1000 ? 'task-1000' : `deleted-${index.toString().padStart(4, '0')}`,
+    }));
+    const tombstoneRanges: Array<[number, number]> = [];
+    const from = vi.fn((table: string) => {
+      if (table === 'tasks') return createPagedQuery(rows, taskRanges);
+      if (table === 'task_tombstones') return createPagedQuery(tombstoneRows, tombstoneRanges);
+      return {} as any;
+    });
+    const service = createTaskRepositoryWithFrom(from);
+
+    const loaded = await service.loadTasks('project-1');
+
+    expect(loaded.map(task => task.id)).toEqual(['task-0000']);
+    expect(tombstoneRanges).toEqual([
+      [0, 999],
+      [1000, 1999],
+    ]);
+  });
+
+  it('getUpdatedTasks fetches all Supabase REST pages', async () => {
+    const rows = Array.from({ length: 1001 }, (_, index) => taskRow(index));
+    const ranges: Array<[number, number]> = [];
+    const from = vi.fn((table: string) => {
+      if (table === 'tasks') return createPagedQuery(rows, ranges);
+      return {} as any;
+    });
+    const service = createTaskRepositoryWithFrom(from);
+
+    const loaded = await service.getUpdatedTasks('project-1', '2026-06-09T00:00:00.000Z');
+
+    expect(loaded).toHaveLength(1001);
+    expect(loaded[1000].id).toBe('task-1000');
+    expect(ranges).toEqual([
+      [0, 999],
+      [1000, 1999],
+    ]);
+  });
+});
+
 describe('TaskRepositoryService.saveConnection', () => {
   it('should persist both title and description fields', async () => {
     const supabaseMock = createSupabaseMock();
@@ -324,6 +475,123 @@ describe('TaskRepositoryService.saveConnection', () => {
     );
   });
 });
+
+describe('TaskRepositoryService.removeAttachment', () => {
+  it('uses updated_at optimistic lock in read-modify-write fallback', async () => {
+    const attachment = { id: 'attachment-1', name: 'a.txt', type: 'text/plain', size: 1, url: 'u' };
+    const fetchedUpdatedAt = '2026-06-09T00:00:00.000Z';
+
+    const maybeSingle = vi.fn().mockResolvedValue({
+      data: {
+        attachments: [attachment],
+        updated_at: fetchedUpdatedAt,
+      },
+      error: null,
+    });
+    const fetchEq = vi.fn(() => ({ maybeSingle }));
+    const select = vi.fn(() => ({ eq: fetchEq }));
+
+    const updateEq = vi.fn(() => updateQuery);
+    const updateQuery = {
+      eq: updateEq,
+      then: (resolve: (value: { error: null }) => unknown) => Promise.resolve({ error: null }).then(resolve),
+    };
+    const update = vi.fn(() => updateQuery);
+
+    const from = vi.fn((table: string) => {
+      if (table === 'tasks') {
+        return { select, update } as any;
+      }
+      return {} as any;
+    });
+    const rpc = vi.fn().mockResolvedValue({ data: null, error: { message: 'rpc missing' } });
+
+    const injector = Injector.create({
+      providers: [
+        { provide: SupabaseClientService, useValue: { isConfigured: true, client: () => ({ from, rpc }) } },
+        { provide: LoggerService, useValue: mockLoggerService },
+      ],
+    });
+
+    const service = runInInjectionContext(injector, () => new TaskRepositoryService());
+    const result = await service.removeAttachment('task-1', 'attachment-1');
+
+    expect(result).toEqual({ success: true });
+    expect(select).toHaveBeenCalledWith('attachments, updated_at');
+    expect(updateEq).toHaveBeenCalledWith('id', 'task-1');
+    expect(updateEq).toHaveBeenCalledWith('updated_at', fetchedUpdatedAt);
+  });
+});
+
+function createTaskRepositoryWithFrom(from: ReturnType<typeof vi.fn>): TaskRepositoryService {
+  const injector = Injector.create({
+    providers: [
+      { provide: SupabaseClientService, useValue: { isConfigured: true, client: () => ({ from }) } },
+      { provide: LoggerService, useValue: mockLoggerService },
+    ],
+  });
+  return runInInjectionContext(injector, () => new TaskRepositoryService());
+}
+
+function createPagedQuery<Row>(rows: Row[], ranges: Array<[number, number]>) {
+  const query = {
+    select: vi.fn(() => query),
+    eq: vi.fn(() => query),
+    gt: vi.fn(() => query),
+    is: vi.fn(() => query),
+    order: vi.fn(() => query),
+    range: vi.fn(async (from: number, to: number) => {
+      ranges.push([from, to]);
+      return { data: rows.slice(from, to + 1), error: null };
+    }),
+  };
+  return query;
+}
+
+function taskRow(index: number) {
+  const id = `task-${index.toString().padStart(4, '0')}`;
+  return {
+    id,
+    project_id: 'project-1',
+    parent_id: null,
+    title: `Task ${index}`,
+    content: `Content ${index}`,
+    stage: 1,
+    order: index,
+    rank: 10000 + index,
+    status: 'active',
+    x: 0,
+    y: 0,
+    short_id: null,
+    priority: null,
+    due_date: null,
+    expected_minutes: null,
+    cognitive_load: null,
+    wait_minutes: null,
+    tags: [],
+    attachments: [],
+    deleted_at: null,
+    created_at: '2026-06-09T00:00:00.000Z',
+    updated_at: new Date(Date.UTC(2026, 5, 9, 0, 1, index)).toISOString(),
+    completed_at: null,
+    parking_meta: null,
+    attention_meta: null,
+  };
+}
+
+function connectionRow(index: number) {
+  const id = `connection-${index.toString().padStart(4, '0')}`;
+  return {
+    id,
+    project_id: 'project-1',
+    source_id: 'task-0000',
+    target_id: `task-${index.toString().padStart(4, '0')}`,
+    title: '',
+    description: '',
+    deleted_at: null,
+    updated_at: new Date(Date.UTC(2026, 5, 9, 0, 2, index)).toISOString(),
+  };
+}
 
 describe('TaskRepositoryService.deleteTask', () => {
   it('prefers purge_tasks_v2 and no longer calls legacy purge_tasks', async () => {

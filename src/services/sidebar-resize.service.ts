@@ -36,7 +36,7 @@ export class SidebarResizeService {
   private startWidth = 0;
   private startRatio = 0;
   private mainContentWidth = 0;
-  private resizeRafId = 0;
+  private resizeRafId: number | null = null;
 
   /** 是否正在拖拽任一分栏（供模板绑定）。 */
   isResizingAny(): boolean {
@@ -45,36 +45,34 @@ export class SidebarResizeService {
 
   startSidebar(e: MouseEvent): void {
     e.preventDefault();
-    this.isResizingSidebar = true;
+    this.beginResizeGesture('sidebar');
     this.uiState.isResizing.set(true);
     this.startX = e.clientX;
     this.startWidth = this.uiState.sidebarWidth();
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
+    this.applyBodyResizeStyle();
   }
 
   startContent(e: MouseEvent): void {
     e.preventDefault();
-    this.isResizingContent = true;
+    this.beginResizeGesture('content');
+    this.uiState.isResizing.set(true);
     this.startX = e.clientX;
     this.startRatio = this.uiState.textColumnRatio();
 
-    // Get current main content width
-    const mainEl = document.querySelector('main');
+    const mainEl = typeof document !== 'undefined' ? document.querySelector('main') : null;
     this.mainContentWidth = mainEl ? mainEl.clientWidth : MAIN_CONTENT_FALLBACK_WIDTH_PX;
 
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
+    this.applyBodyResizeStyle();
   }
 
   onMouseMove(e: MouseEvent): void {
     if (!this.isResizingSidebar && !this.isResizingContent) return;
     e.preventDefault();
     // 使用 rAF 节流，避免每个 mousemove 都触发布局计算
-    if (this.resizeRafId) return;
+    if (this.resizeRafId !== null) return;
     const clientX = e.clientX;
-    this.resizeRafId = requestAnimationFrame(() => {
-      this.resizeRafId = 0;
+    const applyResize = () => {
+      this.resizeRafId = null;
       if (this.isResizingSidebar) {
         const delta = clientX - this.startX;
         const newWidth = Math.max(SIDEBAR_MIN_WIDTH_PX, Math.min(SIDEBAR_MAX_WIDTH_PX, this.startWidth + delta));
@@ -85,20 +83,59 @@ export class SidebarResizeService {
         const newRatio = Math.max(CONTENT_RATIO_MIN_PCT, Math.min(CONTENT_RATIO_MAX_PCT, this.startRatio + deltaPercent));
         this.uiState.textColumnRatio.set(newRatio);
       }
-    });
+    };
+
+    if (typeof requestAnimationFrame === 'function') {
+      this.resizeRafId = requestAnimationFrame(applyResize);
+      return;
+    }
+
+    applyResize();
   }
 
   onMouseUp(): void {
-    if (this.isResizingSidebar || this.isResizingContent) {
-      if (this.resizeRafId) {
+    this.finishResize();
+  }
+
+  teardown(): void {
+    this.finishResize();
+  }
+
+  private finishResize(): void {
+    if (!this.isResizingSidebar && !this.isResizingContent && this.resizeRafId === null) return;
+
+    if (this.resizeRafId !== null) {
+      if (typeof cancelAnimationFrame === 'function') {
         cancelAnimationFrame(this.resizeRafId);
-        this.resizeRafId = 0;
       }
-      this.isResizingSidebar = false;
-      this.isResizingContent = false;
-      this.uiState.isResizing.set(false);
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
+      this.resizeRafId = null;
     }
+    this.isResizingSidebar = false;
+    this.isResizingContent = false;
+    this.uiState.isResizing.set(false);
+    if (typeof document === 'undefined') return;
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+  }
+
+  private applyBodyResizeStyle(): void {
+    if (typeof document === 'undefined') return;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  }
+
+  private beginResizeGesture(target: 'sidebar' | 'content'): void {
+    this.cancelPendingResizeFrame();
+    this.isResizingSidebar = target === 'sidebar';
+    this.isResizingContent = target === 'content';
+  }
+
+  private cancelPendingResizeFrame(): void {
+    if (this.resizeRafId === null) return;
+
+    if (typeof cancelAnimationFrame === 'function') {
+      cancelAnimationFrame(this.resizeRafId);
+    }
+    this.resizeRafId = null;
   }
 }

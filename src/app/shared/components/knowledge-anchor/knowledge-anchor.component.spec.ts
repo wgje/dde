@@ -152,6 +152,29 @@ describe('KnowledgeAnchorComponent', () => {
     }
   });
 
+  it('clears mobile long press timer when the timer handle is 0', () => {
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout')
+      .mockReturnValue(0 as unknown as ReturnType<typeof setTimeout>);
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout').mockImplementation(() => undefined);
+    const chip = fixture.nativeElement.querySelector('[data-testid="knowledge-anchor-chip"]') as HTMLButtonElement;
+
+    try {
+      fixture.componentInstance.onPointerDown({
+        pointerType: 'touch',
+        clientX: 10,
+        clientY: 10,
+        currentTarget: chip,
+      } as unknown as PointerEvent, link);
+      fixture.componentInstance.onPointerEnd();
+
+      expect(setTimeoutSpy).toHaveBeenCalledOnce();
+      expect(clearTimeoutSpy).toHaveBeenCalledWith(0);
+    } finally {
+      setTimeoutSpy.mockRestore();
+      clearTimeoutSpy.mockRestore();
+    }
+  });
+
   it('shows task-block edit and delete actions when the anchor is editable', async () => {
     editableInput.set(true);
     fixture.detectChanges();

@@ -22,10 +22,18 @@ import { FOCUS_CONFIG } from '../config/focus.config';
 
 describe('GateService', () => {
   let service: GateService;
+  type GateServicePrivate = {
+    reviewSyncTimerId: ReturnType<typeof setInterval> | null;
+    ensureReviewingRemoteSync: () => void;
+    stopReviewingRemoteSync: () => void;
+  };
   let mockBlackBoxService: {
     markAsRead: ReturnType<typeof vi.fn>;
+    markAsReadDurably: ReturnType<typeof vi.fn>;
     markAsCompleted: ReturnType<typeof vi.fn>;
+    markAsCompletedDurably: ReturnType<typeof vi.fn>;
     snooze: ReturnType<typeof vi.fn>;
+    snoozeDurably: ReturnType<typeof vi.fn>;
     loadFromServer: ReturnType<typeof vi.fn>;
     getExpectedSyncUserId: ReturnType<typeof vi.fn>;
   };
@@ -59,6 +67,12 @@ describe('GateService', () => {
     ...overrides,
   });
 
+  const flushGateAction = async (): Promise<void> => {
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+  };
+
   beforeEach(() => {
     resetGateState();
     setBlackBoxEntries([]);
@@ -75,8 +89,11 @@ describe('GateService', () => {
 
     mockBlackBoxService = {
       markAsRead: vi.fn().mockReturnValue({ ok: true, value: {} }),
+      markAsReadDurably: vi.fn().mockResolvedValue({ ok: true, value: {} }),
       markAsCompleted: vi.fn().mockReturnValue({ ok: true, value: {} }),
+      markAsCompletedDurably: vi.fn().mockResolvedValue({ ok: true, value: {} }),
       snooze: vi.fn().mockReturnValue({ ok: true, value: {} }),
+      snoozeDurably: vi.fn().mockResolvedValue({ ok: true, value: {} }),
       loadFromServer: vi.fn().mockResolvedValue(undefined),
       getExpectedSyncUserId: vi.fn().mockReturnValue('test-user'),
     };
@@ -160,7 +177,7 @@ describe('GateService', () => {
       expect(gateState()).toBe('disabled');
     });
 
-    it('已读处理完成后，冷却期内后续 gate 复核不应重新弹出同一条内容', () => {
+    it('已读处理完成后，冷却期内后续 gate 复核不应重新弹出同一条内容', async () => {
       vi.useFakeTimers();
       vi.setSystemTime(new Date('2026-05-01T12:00:00.000Z'));
       const entry = createMockEntry({
@@ -169,7 +186,7 @@ describe('GateService', () => {
         isRead: false,
         isCompleted: false,
       });
-      mockBlackBoxService.markAsRead.mockImplementationOnce((id: string) => {
+      mockBlackBoxService.markAsReadDurably.mockImplementationOnce(async (id: string) => {
         const updated = {
           ...entry,
           id,
@@ -186,6 +203,7 @@ describe('GateService', () => {
       service.onEnteringComplete();
       service.markAsRead();
       service.onHeaveReadComplete();
+      await flushGateAction();
 
       expect(gateState()).toBe('completed');
 
@@ -223,7 +241,7 @@ describe('GateService', () => {
       vi.useRealTimers();
     });
 
-    it('今日大门完成后，后台恢复触发的 remote 阶段 checkGate 不应再次激活大门', () => {
+    it('今日大门完成后，后台恢复触发的 remote 阶段 checkGate 不应再次激活大门', async () => {
       // 复现：FocusStartupProbe.runProbe 里 applyGateSnapshot('local') 已弹出大门，
       // 用户审完进入 'completed'；接着 pullChanges 完成后再次 applyGateSnapshot('remote')
       // 调用 checkGate()，若此时仍有 pending（例如远端带回新条目或本地变更未同步），
@@ -234,7 +252,7 @@ describe('GateService', () => {
         id: 'first-pass',
         date: getDateOffset(-1),
       });
-      mockBlackBoxService.markAsCompleted.mockImplementationOnce((id: string) => {
+      mockBlackBoxService.markAsCompletedDurably.mockImplementationOnce(async (id: string) => {
         const updated = {
           ...entry,
           id,
@@ -253,6 +271,7 @@ describe('GateService', () => {
       service.onEnteringComplete();
       service.markAsCompleted();
       service.onHeavyDropComplete();
+      await flushGateAction();
       expect(gateState()).toBe('completed');
 
       // 第二阶段：模拟 pullChanges 带回一条尚未本地处理的旧 pending（黑匣子端）
@@ -325,6 +344,7 @@ describe('GateService', () => {
       const result = service.markAsRead();
 
       expect(result.ok).toBe(true);
+      expect(mockBlackBoxService.markAsReadDurably).not.toHaveBeenCalled();
       expect(mockBlackBoxService.markAsRead).not.toHaveBeenCalled();
       expect(['heave_read', 'idle']).toContain(service.cardAnimation());
     });
@@ -338,11 +358,12 @@ describe('GateService', () => {
       const result = service.markAsCompleted();
 
       expect(result.ok).toBe(true);
+      expect(mockBlackBoxService.markAsCompletedDurably).not.toHaveBeenCalled();
       expect(mockBlackBoxService.markAsCompleted).not.toHaveBeenCalled();
       expect(['heavy_drop', 'idle']).toContain(service.cardAnimation());
     });
 
-    it('heavy_drop 完成后应触发 impactTick 并结束 gate', () => {
+    it('heavy_drop 完成后应触发 impactTick 并结束 gate', async () => {
       const entry = createMockEntry({ date: getDateOffset(-1) });
       gatePendingItems.set([entry]);
       gateCurrentIndex.set(0);
@@ -352,13 +373,40 @@ describe('GateService', () => {
       const before = service.impactTick();
 
       service.onHeavyDropComplete();
+      await flushGateAction();
 
-      expect(mockBlackBoxService.markAsCompleted).toHaveBeenCalledWith(entry.id);
+      expect(mockBlackBoxService.markAsCompletedDurably).toHaveBeenCalledWith(entry.id);
+      expect(mockBlackBoxService.markAsCompleted).not.toHaveBeenCalled();
       expect(service.impactTick()).toBeGreaterThan(before);
       expect(gateState()).toBe('completed');
     });
 
-    it('heave_read 沉降完成后才提交全局黑匣子更新', () => {
+    it('last-card completion should stay reviewable when durable persistence fails', async () => {
+      const entry = createMockEntry({ id: 'durable-fail-last-card', date: getDateOffset(-1) });
+      mockBlackBoxService.markAsCompletedDurably.mockResolvedValueOnce({
+        ok: false,
+        error: {
+          code: 'OPERATION_FAILED',
+          message: '黑匣子本地持久化失败',
+        },
+      });
+      gatePendingItems.set([entry]);
+      gateCurrentIndex.set(0);
+      gateState.set('reviewing');
+
+      service.markAsCompleted();
+      service.onHeavyDropComplete();
+      await flushGateAction();
+
+      expect(mockBlackBoxService.markAsCompletedDurably).toHaveBeenCalledWith(entry.id);
+      expect(gateState()).toBe('reviewing');
+      expect(gatePendingItems().map(item => item.id)).toEqual([entry.id]);
+      expect(gateCurrentIndex()).toBe(0);
+      expect(localStorage.getItem('focus_gate_last_check_date')).toBeNull();
+      expect(service.cardAnimation()).toBe('idle');
+    });
+
+    it('heave_read 本地持久化成功后才进入下一张卡片', async () => {
       const first = createMockEntry({ date: getDateOffset(-1) });
       const second = createMockEntry({ date: getDateOffset(-2) });
       gatePendingItems.set([first, second]);
@@ -367,14 +415,17 @@ describe('GateService', () => {
 
       service.markAsRead();
       service.onHeaveReadComplete();
+      await flushGateAction();
 
       expect(gateCurrentIndex()).toBe(1);
+      expect(mockBlackBoxService.markAsReadDurably).toHaveBeenCalledWith(first.id);
       expect(mockBlackBoxService.markAsRead).not.toHaveBeenCalled();
       expect(['settling', 'idle']).toContain(service.cardAnimation());
 
       service.onSettlingComplete();
 
-      expect(mockBlackBoxService.markAsRead).toHaveBeenCalledWith(first.id);
+      expect(mockBlackBoxService.markAsReadDurably).toHaveBeenCalledTimes(1);
+      expect(mockBlackBoxService.markAsRead).not.toHaveBeenCalled();
     });
 
     it('未触发动作时 pending 短暂变空不应让大门自动消失', () => {
@@ -393,6 +444,8 @@ describe('GateService', () => {
 
       expect(gateState()).toBe('reviewing');
       expect(gatePendingItems().map(item => item.id)).toEqual(['mobile-gate-current-entry']);
+      expect(mockBlackBoxService.markAsReadDurably).not.toHaveBeenCalled();
+      expect(mockBlackBoxService.markAsCompletedDurably).not.toHaveBeenCalled();
       expect(mockBlackBoxService.markAsRead).not.toHaveBeenCalled();
       expect(mockBlackBoxService.markAsCompleted).not.toHaveBeenCalled();
     });
@@ -427,11 +480,13 @@ describe('GateService', () => {
 
       expect(gateState()).toBe('completed');
       expect(gatePendingItems()).toEqual([]);
+      expect(mockBlackBoxService.markAsReadDurably).not.toHaveBeenCalled();
+      expect(mockBlackBoxService.markAsCompletedDurably).not.toHaveBeenCalled();
       expect(mockBlackBoxService.markAsRead).not.toHaveBeenCalled();
       expect(mockBlackBoxService.markAsCompleted).not.toHaveBeenCalled();
     });
 
-    it('首次远端空队列后处理当前卡片不应漏掉后续卡片', () => {
+    it('首次远端空队列后处理当前卡片不应漏掉后续卡片', async () => {
       const entry = createMockEntry({
         id: 'remote-empty-action-current',
         date: getDateOffset(-1),
@@ -451,6 +506,7 @@ describe('GateService', () => {
 
       service.markAsRead();
       service.onHeaveReadComplete();
+      await flushGateAction();
 
       expect(gateState()).toBe('reviewing');
       expect(gateCurrentIndex()).toBe(1);
@@ -485,7 +541,7 @@ describe('GateService', () => {
       expect(gatePendingItems()).toEqual([]);
     });
 
-    it('动作进行中远端空队列不应裁掉后续卡片', () => {
+    it('动作进行中远端空队列不应裁掉后续卡片', async () => {
       const first = createMockEntry({
         id: 'remote-empty-inflight-first',
         date: getDateOffset(-1),
@@ -504,6 +560,7 @@ describe('GateService', () => {
         syncReviewingQueueWithPending: (pending: BlackBoxEntry[], source: 'checkGate' | 'signal' | 'remote') => void;
       }).syncReviewingQueueWithPending([], 'remote');
       service.onHeaveReadComplete();
+      await flushGateAction();
 
       expect(gateState()).toBe('reviewing');
       expect(gateCurrentIndex()).toBe(1);
@@ -513,7 +570,7 @@ describe('GateService', () => {
       ]);
     });
 
-    it('settling 延迟提交期间远端空队列不应裁掉后续卡片', () => {
+    it('settling 期间远端空队列不应裁掉后续卡片', async () => {
       const first = createMockEntry({
         id: 'remote-empty-settling-first',
         date: getDateOffset(-1),
@@ -528,6 +585,7 @@ describe('GateService', () => {
       service.onEnteringComplete();
       service.markAsRead();
       service.onHeaveReadComplete();
+      await flushGateAction();
 
       (service as unknown as {
         syncReviewingQueueWithPending: (pending: BlackBoxEntry[], source: 'checkGate' | 'signal' | 'remote') => void;
@@ -584,14 +642,16 @@ describe('GateService', () => {
       const result = service.markAsCompleted();
 
       expect(result.ok).toBe(false);
+      expect(mockBlackBoxService.markAsCompletedDurably).not.toHaveBeenCalled();
       expect(mockBlackBoxService.markAsCompleted).not.toHaveBeenCalled();
 
       service.onSettlingComplete();
 
-      expect(mockBlackBoxService.markAsRead).toHaveBeenCalledWith(first.id);
+      expect(mockBlackBoxService.markAsReadDurably).toHaveBeenCalledWith(first.id);
+      expect(mockBlackBoxService.markAsRead).not.toHaveBeenCalled();
     });
 
-    it('reduced motion 下应立即 flush deferred mutation', () => {
+    it('reduced motion 下应立即 flush deferred mutation', async () => {
       const first = createMockEntry({ date: getDateOffset(-1) });
       const second = createMockEntry({ date: getDateOffset(-2) });
       gatePendingItems.set([first, second]);
@@ -600,10 +660,12 @@ describe('GateService', () => {
       (service as unknown as { prefersReducedMotionSignal: { set(value: boolean): void } }).prefersReducedMotionSignal.set(true);
 
       const result = service.markAsRead();
+      await flushGateAction();
 
       expect(result.ok).toBe(true);
       expect(gateCurrentIndex()).toBe(1);
-      expect(mockBlackBoxService.markAsRead).toHaveBeenCalledWith(first.id);
+      expect(mockBlackBoxService.markAsReadDurably).toHaveBeenCalledWith(first.id);
+      expect(mockBlackBoxService.markAsRead).not.toHaveBeenCalled();
     });
   });
 
@@ -622,6 +684,29 @@ describe('GateService', () => {
   });
 
   describe('reset / bypass', () => {
+    it('已有数值为 0 的复查同步句柄时不应重复启动远端复核', () => {
+      const privateService = service as unknown as GateServicePrivate;
+      privateService.reviewSyncTimerId = 0 as unknown as ReturnType<typeof setInterval>;
+      gateState.set('reviewing');
+      const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
+
+      privateService.ensureReviewingRemoteSync();
+
+      expect(setIntervalSpy).not.toHaveBeenCalled();
+      expect(privateService.reviewSyncTimerId).toBe(0);
+    });
+
+    it('停止远端复核时应清理数值为 0 的复查同步句柄', () => {
+      const privateService = service as unknown as GateServicePrivate;
+      privateService.reviewSyncTimerId = 0 as unknown as ReturnType<typeof setInterval>;
+      const clearIntervalSpy = vi.spyOn(globalThis, 'clearInterval');
+
+      privateService.stopReviewingRemoteSync();
+
+      expect(clearIntervalSpy).toHaveBeenCalledWith(0);
+      expect(privateService.reviewSyncTimerId).toBeNull();
+    });
+
     it('forceBypass 应设为 bypassed', () => {
       gateState.set('reviewing');
       service.forceBypass();

@@ -12,7 +12,7 @@
  * - buildTaskSyncRetryError / buildTaskProcessorRetryError：任务同步 / 处理器失败重试错误
  * - buildProjectSyncRetryError / buildProjectProcessorRetryError：项目同步 / 处理器失败重试错误
  * - isDeferredQueueError：识别「浏览器网络挂起」等应延后而非失败的错误
- * - isTaskTombstoneNoOp / isTaskRemoteConflictNoOp / isStaleTaskUpsertNoOp：可静默跳过的任务终态
+ * - isTaskTombstoneNoOp / isTaskRemoteConflictNoOp / isStaleTaskUpsertNoOp：可静默跳过的任务 tombstone 终态
  *
  * 为什么抽离：AGENTS.md §12 单文件 ≤ 800 行硬线；ActionQueueProcessorsService 长期越界，
  * 这些纯错误塑形/分类工具自洽且零依赖服务态，适合先行下切。
@@ -236,10 +236,7 @@ export function isTaskRemoteConflictNoOp(error: unknown): boolean {
     code?: unknown;
     errorType?: unknown;
   }) | undefined;
-  return originalError?.name === 'VersionConflictError'
-    || originalError?.errorType === 'VersionConflictError'
-    || originalError?.code === 'TASK_REMOTE_NEWER'
-    || originalError?.code === 'TASK_REMOTE_TOMBSTONE_NEWER';
+  return originalError?.code === 'TASK_REMOTE_TOMBSTONE_NEWER';
 }
 
 export function isStaleTaskUpsertNoOp(error: unknown): boolean {

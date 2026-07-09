@@ -1,6 +1,6 @@
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { Injector } from '@angular/core';
-import { LoggerService, LogLevel } from './logger.service';
+import { LoggerService, LogLevel, sanitizeLogData } from './logger.service';
 import { environment } from '../environments/environment';
 
 describe('LoggerService', () => {
@@ -134,6 +134,43 @@ describe('LoggerService', () => {
 
     it('可附带数据', () => {
       expect(() => service.info('cat', 'msg', { extra: 123 })).not.toThrow();
+    });
+  });
+});
+
+describe('sanitizeLogData', () => {
+  it('redacts sensitive object fields and JWT-like values', () => {
+    const jwt = `eyJ${'x'.repeat(60)}`;
+
+    expect(sanitizeLogData({
+      access_token: 'secret-token',
+      nested: { apiKey: 'secret-key', visible: 'ok' },
+      bearer: jwt,
+    })).toEqual({
+      access_token: '[REDACTED]',
+      nested: { apiKey: '[REDACTED]', visible: 'ok' },
+      bearer: '[JWT_REDACTED]',
+    });
+  });
+
+  it('preserves Error metadata while redacting custom sensitive fields and cause', () => {
+    const error = new Error('boom') as Error & { token?: string; cause?: unknown };
+    error.token = 'secret';
+    error.cause = { authorization: 'Bearer secret', message: 'inner' };
+
+    expect(sanitizeLogData(error)).toMatchObject({
+      name: 'Error',
+      message: 'boom',
+      token: '[REDACTED]',
+      cause: { authorization: '[REDACTED]', message: 'inner' },
+    });
+  });
+
+  it('stops recursive sanitization at the configured max depth', () => {
+    const deep = { a: { b: { c: { d: { e: { f: { g: 'too deep' } } } } } } };
+
+    expect(sanitizeLogData(deep)).toEqual({
+      a: { b: { c: { d: { e: { f: '[MAX_DEPTH]' } } } } },
     });
   });
 });

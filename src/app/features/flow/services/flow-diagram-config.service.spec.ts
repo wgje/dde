@@ -32,6 +32,13 @@ function createTask(overrides: Partial<Task> & Pick<Task, 'id' | 'title'>): Task
     displayId: overrides.displayId ?? '1',
     attachments: overrides.attachments ?? [],
     tags: overrides.tags ?? [],
+    priority: overrides.priority,
+    dueDate: overrides.dueDate ?? null,
+    expected_minutes: overrides.expected_minutes ?? null,
+    wait_minutes: overrides.wait_minutes ?? null,
+    cognitive_load: overrides.cognitive_load ?? null,
+    parkingMeta: overrides.parkingMeta ?? null,
+    attentionMeta: overrides.attentionMeta ?? null,
   } as Task;
 }
 
@@ -197,6 +204,178 @@ describe('FlowDiagramConfigService', () => {
 
     expect(result.nodeDataArray.find(node => node.key === root.id)?.displayId).toBe('1');
     expect(result.nodeDataArray.find(node => node.key === child.id)?.displayId).toBe('1,a');
+  });
+
+  it('adds derived sidecar summaries to node data without adding annotation links', () => {
+    const source = createTask({
+      id: 'sidecar-source',
+      title: 'Sidecar Source',
+      content: '- [ ] 确认接口字段',
+      priority: 'high',
+      wait_minutes: 20,
+      cognitive_load: 'high',
+      tags: ['需联调'],
+      displayId: '1',
+    });
+    const target = createTask({ id: 'sidecar-target', title: 'Sidecar Target', stage: 2, displayId: '2' });
+    const child = createTask({
+      id: 'sidecar-child',
+      title: 'Sidecar Child',
+      stage: 2,
+      parentId: source.id,
+      displayId: '1,a',
+    });
+    activeLinksByTask.set(source.id, [
+      createSiyuanLink({
+        id: 'sidecar-link',
+        taskId: source.id,
+        targetId: '20260605112233-sidecar',
+        createdAt: '2026-06-05T00:00:00.000Z',
+      }),
+    ]);
+    const connections: Connection[] = [
+      { id: 'sidecar-cross', source: source.id, target: target.id, title: '跨树关联' },
+    ];
+
+    const result = service.buildDiagramData(
+      [source, target, child],
+      createProject([source, target, child], connections),
+      '',
+      new Map<string, go.ObjectData>(),
+      { dockedTaskIds: new Set<string>([source.id]), focusedTaskId: null },
+    );
+
+    const sourceNode = result.nodeDataArray.find(node => node.key === source.id);
+    expect(sourceNode?.sidecarBadgeText).toBe('风险1 · 等待20m · 高负荷 · 资料1');
+    expect(sourceNode?.sidecarExpanded).toBe(false);
+    expect(sourceNode?.sidecarTopVisible).toBe(false);
+    expect(sourceNode?.sidecarRightVisible).toBe(false);
+    expect(sourceNode?.sidecarBottomVisible).toBe(false);
+    expect(sourceNode?.sidecarLeftVisible).toBe(false);
+    expect(sourceNode?.sidecarBadgeItems?.map(item => item.label)).toEqual([
+      '风险1',
+      '等待20m',
+      '高负荷',
+      '资料1',
+      '需联调',
+    ]);
+    expect(sourceNode?.sidecarTopBadgeItems?.map(item => item.label)).toEqual(['高负荷']);
+    expect(sourceNode?.sidecarRightBadgeItems?.map(item => item.label)).toEqual(['风险1', '等待20m']);
+    expect(sourceNode?.sidecarBottomBadgeItems?.map(item => item.label)).toEqual(['需联调']);
+    expect(sourceNode?.sidecarLeftBadgeItems?.map(item => item.label)).toEqual(['资料1']);
+    expect(sourceNode?.sidecarTooltipText).not.toContain('关联：1 个');
+    expect(sourceNode?.sidecarTooltipText).toContain('资料：1 个');
+    expect(result.linkDataArray).toHaveLength(2);
+  });
+
+  it('marks remembered sidecar tasks as expanded in node data', () => {
+    const task = createTask({ id: 'expanded-sidecar-task', title: 'Expanded Sidecar', priority: 'high', displayId: '1' });
+
+    const result = service.buildDiagramData(
+      [task],
+      createProject([task]),
+      '',
+      new Map<string, go.ObjectData>(),
+      { dockedTaskIds: new Set<string>(), focusedTaskId: null },
+      { relationDisplayMode: 'all', focusedTaskId: null },
+      new Set<string>([task.id]),
+    );
+
+    expect(result.nodeDataArray[0]?.sidecarExpanded).toBe(true);
+    expect(result.nodeDataArray[0]?.sidecarRightVisible).toBe(true);
+  });
+
+  it('can hide cross-tree relation links without adding relation sidecar badges', () => {
+    const source = createTask({ id: 'noise-source', title: 'Noise Source', stage: 1, displayId: '1' });
+    const target = createTask({ id: 'noise-target', title: 'Noise Target', stage: 2, displayId: '2' });
+    const child = createTask({ id: 'noise-child', title: 'Noise Child', stage: 2, parentId: source.id, displayId: '1,a' });
+    const connections: Connection[] = [
+      { id: 'noise-cross', source: source.id, target: target.id, title: '跨树关联' },
+    ];
+
+    const result = service.buildDiagramData(
+      [source, target, child],
+      createProject([source, target, child], connections),
+      '',
+      new Map<string, go.ObjectData>(),
+      { dockedTaskIds: new Set<string>(), focusedTaskId: null },
+      { relationDisplayMode: 'hidden', focusedTaskId: null },
+    );
+
+    expect(result.linkDataArray).toEqual([
+      expect.objectContaining({ key: `${source.id}-${child.id}`, isCrossTree: false }),
+    ]);
+    expect(result.nodeDataArray.find(node => node.key === source.id)?.sidecarHasSignals).toBe(false);
+    expect(result.nodeDataArray.find(node => node.key === target.id)?.sidecarHasSignals).toBe(false);
+  });
+
+  it('distributes all manual attention badges around the node with per-chip hover text', () => {
+    const task = createTask({
+      id: 'manual-attention-heavy',
+      title: 'Manual Attention Heavy',
+      displayId: '1',
+      attentionMeta: {
+        items: Array.from({ length: 5 }, (_, index) => ({
+          id: `attention-${index + 1}`,
+          text: `注意事项 ${index + 1}`,
+          level: 'info' as const,
+          done: false,
+          createdAt: '2026-06-06T00:00:00.000Z',
+          updatedAt: '2026-06-06T00:00:00.000Z',
+        })),
+        updatedAt: '2026-06-06T00:00:00.000Z',
+      },
+    });
+
+    const result = service.buildDiagramData(
+      [task],
+      createProject([task]),
+      '',
+      new Map<string, go.ObjectData>(),
+      { dockedTaskIds: new Set<string>(), focusedTaskId: null },
+    );
+
+    const node = result.nodeDataArray[0];
+    expect(node?.sidecarBadgeItems?.map(item => item.label)).toEqual(['注意1', '注意2', '注意3', '注意4', '注意5']);
+    expect(node?.sidecarBadgeItems?.map(item => item.cue)).toEqual(['1', '2', '3', '4', '5']);
+    expect(node?.sidecarBadgeItems?.map(item => item.tooltipText)).toEqual([
+      '注意事项 1',
+      '注意事项 2',
+      '注意事项 3',
+      '注意事项 4',
+      '注意事项 5',
+    ]);
+    expect(node?.sidecarTopBadgeItems?.map(item => item.label)).toEqual(['注意3']);
+    expect(node?.sidecarRightBadgeItems?.map(item => item.label)).toEqual(['注意1', '注意2']);
+    expect(node?.sidecarBottomBadgeItems?.map(item => item.label)).toEqual(['注意5']);
+    expect(node?.sidecarLeftBadgeItems?.map(item => item.label)).toEqual(['注意4']);
+  });
+
+  it('can focus cross-tree relation links around the selected task', () => {
+    const selected = createTask({ id: 'selected-task', title: 'Selected', stage: 1, displayId: '1' });
+    const related = createTask({ id: 'related-task', title: 'Related', stage: 2, displayId: '2' });
+    const unrelatedA = createTask({ id: 'unrelated-a', title: 'Unrelated A', stage: 2, displayId: '3' });
+    const unrelatedB = createTask({ id: 'unrelated-b', title: 'Unrelated B', stage: 3, displayId: '4' });
+    const tasks = [selected, related, unrelatedA, unrelatedB];
+    const connections: Connection[] = [
+      { id: 'selected-cross', source: selected.id, target: related.id, title: '相关' },
+      { id: 'unrelated-cross', source: unrelatedA.id, target: unrelatedB.id, title: '不相关' },
+    ];
+
+    const result = service.buildDiagramData(
+      tasks,
+      createProject(tasks, connections),
+      '',
+      new Map<string, go.ObjectData>(),
+      { dockedTaskIds: new Set<string>(), focusedTaskId: null },
+      { relationDisplayMode: 'focused', focusedTaskId: selected.id },
+    );
+
+    const crossTreeLinks = result.linkDataArray.filter(link => link.isCrossTree);
+    expect(crossTreeLinks).toEqual([
+      expect.objectContaining({ key: `cross-${selected.id}-${related.id}` }),
+    ]);
+    expect(result.nodeDataArray.find(node => node.key === unrelatedA.id)?.sidecarHasSignals).toBe(false);
   });
 
   it('keeps cross-tree relation blocks embedded by staggering repeated stage-boundary links along the line', () => {

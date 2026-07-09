@@ -20,6 +20,9 @@ import { ActionQueueService } from './action-queue.service';
 import { AuthService } from './auth.service';
 import { ThemeService } from './theme.service';
 import { ThemeType, UserPreferences } from '../models';
+import { AUTH_CONFIG } from '../config/auth.config';
+import { PendingPreferenceOutboxService } from './pending-preference-outbox.service';
+import { createSyncOperationId } from '../utils/sync-operation-id';
 
 /** 本地存储键前缀 */
 const PREFERENCE_KEY_PREFIX = 'nanoflow.preference';
@@ -41,6 +44,7 @@ export class PreferenceService {
   private actionQueue = inject(ActionQueueService);
   private authService = inject(AuthService);
   private themeService = inject(ThemeService);
+  private pendingPreferenceOutbox = inject(PendingPreferenceOutboxService);
 
   /** 当前主题 */
   readonly theme = this.themeService.theme;
@@ -67,7 +71,7 @@ export class PreferenceService {
       // 每次用户变化时加载对应用户的偏好
       this._autoResolveConflicts.set(this.loadAutoResolveFromStorage(userId));
       this._lastBackupProofAt.set(this.loadBackupProofFromStorage(userId));
-      if (userId) {
+      if (userId && !this.isLocalModeUserId(userId)) {
         void this.loadBackupProofFromCloud(userId);
       }
     });
@@ -92,8 +96,8 @@ export class PreferenceService {
    * 设置主题
    * 同时更新本地存储和云端
    */
-  async setTheme(theme: ThemeType): Promise<void> {
-    await this.themeService.setTheme(theme);
+  async setTheme(theme: ThemeType): Promise<boolean> {
+    return await this.themeService.setTheme(theme);
   }
   
   /**
@@ -112,7 +116,8 @@ export class PreferenceService {
     await this.themeService.loadUserTheme();
 
     const userId = this.authService.currentUserId();
-    if (userId) {
+    if (userId && !this.isLocalModeUserId(userId)) {
+      await this.flushPendingPreferenceUpdate(userId);
       await this.loadBackupProofFromCloud(userId);
     }
   }
@@ -129,7 +134,7 @@ export class PreferenceService {
     const userId = this.authService.currentUserId();
     this.cacheBackupProof(userId, normalized);
 
-    if (!userId) {
+    if (!userId || this.isLocalModeUserId(userId)) {
       return false;
     }
 
@@ -150,33 +155,112 @@ export class PreferenceService {
   async saveUserPreferences(userId: string, preferences: Partial<UserPreferences>): Promise<boolean> {
     const normalizedPreferences = this.normalizeUserPreferences(preferences);
 
-    try {
-      if (normalizedPreferences.lastBackupProofAt !== undefined) {
-        this.cacheBackupProof(userId, normalizedPreferences.lastBackupProofAt);
-      }
+    if (normalizedPreferences.lastBackupProofAt !== undefined) {
+      this.cacheBackupProof(userId, normalizedPreferences.lastBackupProofAt);
+    }
 
-      this.lastLocalPreferencesWriteAt = Date.now();
-      const success = await this.userPrefsSync.saveUserPreferences(userId, normalizedPreferences);
-      if (!success) {
-        // 离线时加入队列
-        await this.actionQueue.enqueueForOwner(userId, {
-          type: 'update',
-          entityType: 'preference',
-          entityId: userId,
-          payload: { preferences: normalizedPreferences, userId, sourceUserId: userId }
-        });
-      }
-      return success;
-    } catch (error) {
-      this.logger.error('保存用户偏好失败', error);
-      this.lastLocalPreferencesWriteAt = Date.now();
-      await this.actionQueue.enqueueForOwner(userId, {
+    if (this.isLocalModeUserId(userId)) {
+      return false;
+    }
+
+    this.lastLocalPreferencesWriteAt = Date.now();
+    return await this.enqueuePreferenceUpdateForOwner(userId, normalizedPreferences);
+  }
+
+  private async enqueuePreferenceUpdateForOwner(
+    userId: string,
+    preferences: Partial<UserPreferences>,
+  ): Promise<boolean> {
+    const operationId = createSyncOperationId();
+    const pending = await this.readPendingPreferenceForMerge(userId);
+    const preferencesToQueue = pending
+      ? { ...pending.preferences, ...preferences }
+      : preferences;
+
+    try {
+      const actionId = await this.actionQueue.enqueueDurablyForOwner(userId, {
+        operationId,
         type: 'update',
         entityType: 'preference',
         entityId: userId,
-        payload: { preferences: normalizedPreferences, userId, sourceUserId: userId }
+        payload: { preferences: preferencesToQueue, userId, sourceUserId: userId },
+      });
+      if (actionId) {
+        if (pending) {
+          await this.removeMergedPendingPreference(userId, preferencesToQueue, operationId);
+        }
+        return true;
+      }
+    } catch (error) {
+      this.logger.error('用户偏好写入离线队列异常', { userId, error });
+      await this.pendingPreferenceOutbox.savePendingPreference({
+        userId,
+        preferences: preferencesToQueue,
+        operationId,
       });
       return false;
+    }
+
+    this.logger.error('用户偏好写入离线队列失败', { userId });
+    await this.pendingPreferenceOutbox.savePendingPreference({
+      userId,
+      preferences: preferencesToQueue,
+      operationId,
+    });
+    return false;
+  }
+
+  private async readPendingPreferenceForMerge(userId: string) {
+    try {
+      return await this.pendingPreferenceOutbox.readPendingPreference(userId);
+    } catch (error) {
+      this.logger.warn('pending 用户偏好读取失败，本次仅写入当前变更', { userId, error });
+      // eslint-disable-next-line no-restricted-syntax -- pending 读取失败时跳过合并，当前变更仍会写入 ActionQueue
+      return null;
+    }
+  }
+
+  private async removeMergedPendingPreference(
+    userId: string,
+    preferences: Partial<UserPreferences>,
+    operationId: string,
+  ): Promise<void> {
+    try {
+      await this.pendingPreferenceOutbox.removePendingPreference(userId);
+    } catch (error) {
+      this.logger.warn('pending 用户偏好已并入 ActionQueue，但清理恢复记录失败，将保留幂等副本', { userId, error });
+      await this.pendingPreferenceOutbox.savePendingPreference({
+        userId,
+        preferences,
+        operationId,
+      });
+    }
+  }
+
+  private async flushPendingPreferenceUpdate(userId: string): Promise<void> {
+    const pending = await this.pendingPreferenceOutbox.readPendingPreference(userId);
+    if (!pending) {
+      return;
+    }
+
+    try {
+      const actionId = await this.actionQueue.enqueueDurablyForOwner(userId, {
+        operationId: pending.operationId,
+        type: 'update',
+        entityType: 'preference',
+        entityId: userId,
+        payload: {
+          preferences: pending.preferences,
+          userId,
+          sourceUserId: userId,
+        },
+      });
+
+      if (actionId) {
+        await this.pendingPreferenceOutbox.removePendingPreference(userId);
+      }
+    } catch (error) {
+      this.logger.warn('pending 用户偏好恢复入队失败，保留本地恢复记录', { userId, error });
     }
   }
   
@@ -238,7 +322,15 @@ export class PreferenceService {
     }
   }
 
+  private isLocalModeUserId(userId: string | null): boolean {
+    return userId === AUTH_CONFIG.LOCAL_MODE_USER_ID;
+  }
+
   private async loadBackupProofFromCloud(userId: string): Promise<void> {
+    if (this.isLocalModeUserId(userId)) {
+      return;
+    }
+
     try {
       const preferences = await this.userPrefsSync.loadUserPreferences(userId);
       const normalized = this.normalizeBackupProofTimestamp(
@@ -328,7 +420,7 @@ export class PreferenceService {
     autoBackupIntervalMs: number;
   }): Promise<boolean> {
     const userId = this.authService.currentUserId();
-    if (!userId) {
+    if (!userId || this.isLocalModeUserId(userId)) {
       // 未登录不同步到云端
       return false;
     }
@@ -348,7 +440,7 @@ export class PreferenceService {
     autoBackupIntervalMs: number;
   } | null> {
     const userId = this.authService.currentUserId();
-    if (!userId) return null;
+    if (!userId || this.isLocalModeUserId(userId)) return null;
     
     try {
       const preferences = await this.userPrefsSync.loadUserPreferences(userId);

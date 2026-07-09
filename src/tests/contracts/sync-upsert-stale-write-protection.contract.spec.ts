@@ -15,6 +15,8 @@ import { describe, expect, it } from 'vitest';
 
 const migrationPath = 'supabase/migrations/20260515100000_sync_rpc_stale_write_protection.sql';
 const blackBoxCompletedAtMigrationPath = 'supabase/migrations/20260603120000_black_box_completed_at.sql';
+const syncDeleteTasksBaseMapForwardMigrationPath =
+  'supabase/migrations/20260613010000_sync_delete_tasks_base_map_forward.sql';
 
 function readMigration(filePath = migrationPath): string {
   return fs.readFileSync(path.join(process.cwd(), filePath), 'utf8');
@@ -67,9 +69,11 @@ describe('Sync RPC stale-write protection migration contract (P0 遗留项)', ()
     );
   });
 
-  it('R2 sync_upsert_blackbox_entry: 陈旧时保留所有状态机字段', () => {
+  it('R2 sync_upsert_blackbox_entry: 陈旧时保留内容、日期和所有状态机字段', () => {
     const section = normalize(getFunctionSection(readMigration(), 'sync_upsert_blackbox_entry'));
     for (const guarded of [
+      'content = CASE WHEN v_is_stale THEN v_existing_content ELSE EXCLUDED.content END',
+      'date = CASE WHEN v_is_stale THEN v_existing_date ELSE EXCLUDED.date END',
       'project_id = CASE WHEN v_is_stale THEN v_existing_project ELSE EXCLUDED.project_id END',
       'is_read = CASE WHEN v_is_stale THEN v_existing_is_read ELSE EXCLUDED.is_read END',
       'is_completed = CASE WHEN v_is_stale THEN v_existing_is_completed ELSE EXCLUDED.is_completed END',
@@ -81,8 +85,9 @@ describe('Sync RPC stale-write protection migration contract (P0 遗留项)', ()
     ]) {
       expect(section, `blackbox 缺少 ${guarded}`).toContain(guarded);
     }
-    // content 仍走 EXCLUDED（由 prevent_black_box_content_loss 触发器单独保护）
-    expect(section).toContain('content = EXCLUDED.content');
+    expect(section).toMatch(
+      /SELECT\s+TRUE,\s+b\.user_id,\s+b\.updated_at,\s+b\.project_id,\s+b\.content,\s+b\.date,[\s\S]*?FROM public\.black_box_entries b[\s\S]*?FOR UPDATE/,
+    );
   });
 
   it('R3 sync_upsert_project: 陈旧时保留 existing 的 title / description / version / migrated_to_v2', () => {
@@ -120,13 +125,31 @@ describe('Sync RPC stale-write protection migration contract (P0 遗留项)', ()
       /SELECT t\.updated_at[\s\S]*?FROM public\.tasks t[\s\S]*?WHERE t\.id = v_task_id[\s\S]*?AND t\.project_id = v_project_id[\s\S]*?FOR UPDATE/,
     );
     // 陈旧时进入 skipped 数组，否则进入 kept 数组
+    expect(section).toContain("v_missing_base_map BOOLEAN := v_base_map IS NULL OR jsonb_typeof(v_base_map) <> 'object'");
+    expect(section).toContain("IF v_missing_base_map THEN");
+    expect(section).toContain('v_base_ts IS NULL');
     expect(section).toContain('v_existing_updated > v_base_ts + v_skew_grace');
     expect(section).toContain('v_skipped := array_append(v_skipped, v_task_id)');
     expect(section).toContain('v_kept := array_append(v_kept, v_task_id)');
     // 结果中携带 skipped_ids 供客户端重排队
     expect(section).toContain("'skipped_ids', COALESCE(to_jsonb(v_skipped), '[]'::JSONB)");
-    // payload 不带 base_updated_at_map 时退化为现有行为（兼容性保障）
-    expect(section).toContain("IF v_base_map IS NOT NULL AND jsonb_typeof(v_base_map) = 'object' THEN");
+    // payload 不带 base_updated_at_map 时必须跳过，避免无基线删除覆盖远端更新
+    expect(section).not.toContain("IF v_base_map IS NOT NULL AND jsonb_typeof(v_base_map) = 'object' THEN");
+  });
+
+  it('R4 forward migration: 已部署库也会获得缺失 base map 时跳过删除的 sync_delete_tasks', () => {
+    const sql = readMigration(syncDeleteTasksBaseMapForwardMigrationPath);
+    const section = normalize(getFunctionSection(sql, 'sync_delete_tasks'));
+
+    expect(section).toContain("v_base_map JSONB := payload->'base_updated_at_map'");
+    expect(section).toContain("v_missing_base_map BOOLEAN := v_base_map IS NULL OR jsonb_typeof(v_base_map) <> 'object'");
+    expect(section).toContain("IF v_missing_base_map THEN");
+    expect(section).toContain('v_skipped := array_append(v_skipped, v_task_id)');
+    expect(section).toContain('v_base_ts IS NULL');
+    expect(section).toContain('v_existing_updated > v_base_ts + v_skew_grace');
+    expect(section).toContain("'skipped_ids', COALESCE(to_jsonb(v_skipped), '[]'::JSONB)");
+    expect(sql).toContain('REVOKE ALL ON FUNCTION public.sync_delete_tasks(JSONB) FROM PUBLIC, anon');
+    expect(sql).toContain('GRANT EXECUTE ON FUNCTION public.sync_delete_tasks(JSONB) TO authenticated');
   });
 
   it('R1 二级护栏: connections 表挂 trg_prevent_connection_resurrection（复用 0511 函数）', () => {
@@ -183,6 +206,12 @@ describe('BlackBox completed_at migration contract', () => {
     expect(section).toContain("NULLIF(v_entry->>'completedAt','')::TIMESTAMPTZ");
     expect(section).toContain(
       'completed_at = CASE WHEN v_is_stale THEN v_existing_completed_at ELSE EXCLUDED.completed_at END',
+    );
+    expect(section).toContain(
+      'content = CASE WHEN v_is_stale THEN v_existing_content ELSE EXCLUDED.content END',
+    );
+    expect(section).toContain(
+      'date = CASE WHEN v_is_stale THEN v_existing_date ELSE EXCLUDED.date END',
     );
   });
 });

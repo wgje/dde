@@ -5,11 +5,16 @@ const { buildDevServerUrl, resolveDevServerBinding } = require('./dev-server-por
 
 const args = process.argv.slice(2);
 const nodeMajor = Number(process.versions.node.split('.')[0]);
+const generatedIndexHtmlPath = path.join(__dirname, '..', '.tmp', 'index.generated.html');
 
 function hasOption(argsToInspect, optionNames) {
   return argsToInspect.some((arg) => {
     return optionNames.some((optionName) => arg === optionName || arg.startsWith(`${optionName}=`));
   });
+}
+
+function isAngularBuildOrServeCommand(argsToInspect) {
+  return argsToInspect.some((arg) => arg === 'build' || arg === 'serve');
 }
 
 function isServeCommand(argsToInspect) {
@@ -46,6 +51,28 @@ async function prepareNgArgs(argsToInspect) {
   }
 
   return resolvedArgs;
+}
+
+function ensureGeneratedIndexForAngularCommand(argsToInspect) {
+  if (!isAngularBuildOrServeCommand(argsToInspect)) {
+    return;
+  }
+
+  const setEnvPath = path.join(__dirname, 'set-env.cjs');
+  const result = require('node:child_process').spawnSync(process.execPath, [setEnvPath], {
+    cwd: path.join(__dirname, '..'),
+    stdio: 'inherit',
+    env: process.env,
+  });
+
+  if (result.status !== 0) {
+    process.exit(result.status ?? 1);
+  }
+
+  if (!fs.existsSync(generatedIndexHtmlPath)) {
+    console.error(`[run-ng] 生成 index 失败：${generatedIndexHtmlPath} 不存在。`);
+    process.exit(1);
+  }
 }
 
 function resolveDependencyPath(...segments) {
@@ -90,18 +117,29 @@ function buildChildEnv() {
   return childEnv;
 }
 
+function quoteCmdArg(value) {
+  const text = String(value);
+  if (text.length === 0) return '""';
+  if (!/[\s"%&()<>^|]/.test(text)) return text;
+  return `"${text.replace(/(["^&()<>|])/g, '^$1').replace(/%/g, '^%')}"`;
+}
+
 function runWithSignalForwarding(nodeBin, scriptArgs) {
   const childEnv = buildChildEnv();
   const startedAt = Date.now();
   const isBuildCommand = scriptArgs.some((arg) => arg === 'build');
   const heartbeatIntervalMs = Number(process.env.RUN_NG_HEARTBEAT_INTERVAL_MS || 8000);
 
-  // Windows 下 .cmd/.bat 文件必须通过 shell 执行，否则 Node 24 会抛出 EINVAL
-  const needsShell = process.platform === 'win32' && /\.(cmd|bat)$/i.test(nodeBin);
-  const child = spawn(nodeBin, scriptArgs, {
+  // Windows 下 .cmd/.bat 文件不能直接 spawn；显式调用 cmd.exe，避免 shell:true + args 的 DEP0190。
+  const command = process.platform === 'win32' && /\.(cmd|bat)$/i.test(nodeBin)
+    ? 'cmd.exe'
+    : nodeBin;
+  const commandArgs = command === 'cmd.exe'
+    ? ['/d', '/c', [nodeBin, ...scriptArgs].map(quoteCmdArg).join(' ')]
+    : scriptArgs;
+  const child = spawn(command, commandArgs, {
     stdio: 'inherit',
     env: childEnv,
-    ...(needsShell ? { shell: true } : {}),
   });
 
   let heartbeatTimer = null;
@@ -163,6 +201,7 @@ function runWithSignalForwarding(nodeBin, scriptArgs) {
  */
 async function main() {
   const resolvedArgs = await prepareNgArgs(args);
+  ensureGeneratedIndexForAngularCommand(resolvedArgs);
 
   if (Number.isFinite(nodeMajor) && nodeMajor >= 24) {
     // Node 24+ 与 Angular CLI 19.x 不兼容，强制使用 Node 22

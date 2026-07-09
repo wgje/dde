@@ -1,5 +1,6 @@
 import { Injectable } from '@angular/core';
 import { SIYUAN_CONFIG } from '../../../../config/siyuan.config';
+import { createSyncOperationId } from '../../../../utils/sync-operation-id';
 import { isValidSiyuanBlockId } from './siyuan-link-parser';
 import { normalizePreview } from './siyuan-preview-utils';
 import type { SiyuanBlockPreview, SiyuanChildBlockPreview, SiyuanPreviewErrorCode } from '../external-source.model';
@@ -174,7 +175,7 @@ export class SiyuanExtensionProvider implements SiyuanPreviewProvider {
 
   private async pingExtension(): Promise<boolean> {
     try {
-      const requestId = crypto.randomUUID();
+      const requestId = createSyncOperationId();
       return await new Promise<boolean>(resolve => {
         const timer = window.setTimeout(() => {
           window.removeEventListener('message', listener);
@@ -197,8 +198,17 @@ export class SiyuanExtensionProvider implements SiyuanPreviewProvider {
             resolve(false);
           }
         };
+        const cleanup = () => {
+          window.clearTimeout(timer);
+          window.removeEventListener('message', listener);
+        };
         window.addEventListener('message', listener);
-        window.postMessage({ type: 'nanoflow.siyuan.ping', requestId }, window.location.origin);
+        try {
+          window.postMessage({ type: 'nanoflow.siyuan.ping', requestId }, window.location.origin);
+        } catch (error) {
+          cleanup();
+          throw error;
+        }
       });
     } catch {
       return false;
@@ -229,7 +239,7 @@ export class SiyuanExtensionProvider implements SiyuanPreviewProvider {
     signal?: AbortSignal;
   }): Promise<ExtensionMessage> {
     const { requestType, responseType, payload, signal } = args;
-    const requestId = crypto.randomUUID();
+    const requestId = createSyncOperationId();
     return new Promise<ExtensionMessage>((resolve, reject) => {
       // 提前返回：调用方在我们准备 timer/listener 之前就已 abort，避免无谓的事件订阅。
       if (signal?.aborted) {
@@ -260,7 +270,12 @@ export class SiyuanExtensionProvider implements SiyuanPreviewProvider {
       window.addEventListener('message', listener);
       const request: Record<string, unknown> = { type: requestType, requestId };
       if (payload) request.payload = payload;
-      window.postMessage(request, window.location.origin);
+      try {
+        window.postMessage(request, window.location.origin);
+      } catch (error) {
+        cleanup();
+        reject(error);
+      }
     });
   }
 

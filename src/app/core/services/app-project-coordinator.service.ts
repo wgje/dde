@@ -45,20 +45,22 @@ export class AppProjectCoordinatorService {
   readonly renameProjectName = signal('');
   readonly isDeleting = signal(false);
   private originalProjectName = '';
+  private renameProjectInFlight: Promise<void> | null = null;
+  private readonly projectDetailsSaveFlights = new Map<string, Promise<void>>();
 
   // ========== 项目选择 ==========
 
   selectProject(id: string, _sidebarOpen: { set: (v: boolean) => void }): void {
     if (this.expandedProjectId() === id) {
       if (this.isEditingDescription()) {
-        this.saveProjectDetails(id);
+        void this.saveProjectDetails(id);
       }
       this.expandedProjectId.set(null);
       this.isEditingDescription.set(false);
       return;
     }
     if (this.expandedProjectId() && this.isEditingDescription()) {
-      this.saveProjectDetails(this.expandedProjectId()!);
+      void this.saveProjectDetails(this.expandedProjectId()!);
     }
     // 通过 UserSessionService 切换项目，触发空壳项目按需加载
     this.userSession.switchActiveProject(id);
@@ -74,7 +76,7 @@ export class AppProjectCoordinatorService {
   onProjectCardClick(event: MouseEvent, projectId: string): void {
     event.stopPropagation();
     if (this.isEditingDescription()) {
-      this.saveProjectDetails(projectId);
+      void this.saveProjectDetails(projectId);
     }
   }
 
@@ -87,7 +89,7 @@ export class AppProjectCoordinatorService {
     const isProjectCard = target.closest('[data-testid="project-intro-card"]');
     if (!isProjectItem && !isProjectCard) {
       if (this.isEditingDescription()) {
-        this.saveProjectDetails(expandedId);
+        void this.saveProjectDetails(expandedId);
       }
       this.expandedProjectId.set(null);
       this.isEditingDescription.set(false);
@@ -123,14 +125,26 @@ export class AppProjectCoordinatorService {
     this.originalProjectName = normalizedName;
   }
 
-  executeRenameProject(): void {
-    const projectId = this.renamingProjectId();
-    const rawName = this.renameProjectName();
-    const newName = (typeof rawName === 'string' ? rawName : '').trim();
-    if (projectId && newName && newName !== this.originalProjectName && this.projectOps.renameProject(projectId, newName)) {
-      this.toast.success('项目重命名成功');
+  async executeRenameProject(): Promise<void> {
+    if (this.renameProjectInFlight) {
+      return this.renameProjectInFlight;
     }
-    this.cancelRenameProject();
+
+    const renameProjectInFlight = (async () => {
+      const projectId = this.renamingProjectId();
+      const rawName = this.renameProjectName();
+      const newName = (typeof rawName === 'string' ? rawName : '').trim();
+      if (projectId && newName && newName !== this.originalProjectName && await this.projectOps.renameProject(projectId, newName)) {
+        this.toast.success('项目重命名成功');
+      }
+      this.cancelRenameProject();
+    })().finally(() => {
+        if (this.renameProjectInFlight === renameProjectInFlight) {
+          this.renameProjectInFlight = null;
+        }
+      });
+    this.renameProjectInFlight = renameProjectInFlight;
+    return renameProjectInFlight;
   }
 
   cancelRenameProject(): void {
@@ -141,7 +155,7 @@ export class AppProjectCoordinatorService {
   onRenameKeydown(event: KeyboardEvent): void {
     if (event.key === 'Enter') {
       event.preventDefault();
-      this.executeRenameProject();
+      void this.executeRenameProject();
     } else if (event.key === 'Escape') {
       event.preventDefault();
       this.cancelRenameProject();
@@ -160,11 +174,34 @@ export class AppProjectCoordinatorService {
     this.projectDrafts.update(drafts => ({ ...drafts, [projectId]: next }));
   }
 
-  saveProjectDetails(projectId: string): void {
+  async saveProjectDetails(projectId: string): Promise<void> {
     const draft = this.projectDraft(projectId);
     if (!draft) return;
-    this.projectOps.updateProjectMetadata(projectId, { description: draft.description });
-    this.isEditingDescription.set(false);
+
+    const description = draft.description;
+    const existingFlight = this.projectDetailsSaveFlights.get(projectId) ?? Promise.resolve();
+    const saveFlight = existingFlight
+      .catch(() => undefined)
+      .then(() => this.runProjectDetailsSave(projectId, description))
+      .finally(() => {
+        if (this.projectDetailsSaveFlights.get(projectId) === saveFlight) {
+          this.projectDetailsSaveFlights.delete(projectId);
+        }
+      });
+    this.projectDetailsSaveFlights.set(projectId, saveFlight);
+    return saveFlight;
+  }
+
+  private async runProjectDetailsSave(projectId: string, description: string): Promise<void> {
+    const result = await this.projectOps.updateProjectMetadata(projectId, { description });
+    if (!result.success) {
+      this.isEditingDescription.set(true);
+      return;
+    }
+
+    if (this.projectDraft(projectId)?.description === description) {
+      this.isEditingDescription.set(false);
+    }
   }
 
   private ensureProjectDraft(projectId: string) {

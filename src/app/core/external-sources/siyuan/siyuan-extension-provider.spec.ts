@@ -113,6 +113,60 @@ describe('siyuan-extension-provider', () => {
     expect(Object.prototype.hasOwnProperty.call(payload, 'token')).toBe(false);
   });
 
+  it('postRelayRequest uses Web Crypto fallback when crypto.randomUUID is unavailable', async () => {
+    const originalCrypto = globalThis.crypto;
+    Object.defineProperty(globalThis, 'crypto', {
+      configurable: true,
+      value: {
+        getRandomValues: (array: Uint8Array) => {
+          array.fill(1);
+          return array;
+        },
+      },
+    });
+
+    try {
+      const provider = new SiyuanExtensionProvider();
+      const privateProvider = provider as unknown as ProviderPrivateApi;
+      vi.spyOn(privateProvider, 'isTrustedWindowMessage').mockReturnValue(true);
+      const postMessageSpy = vi.spyOn(window, 'postMessage').mockImplementation((message: unknown) => {
+        if (typeof message !== 'object' || message === null) return;
+        const payload = message as { type?: string; requestId?: string };
+        if (payload.type !== 'nanoflow.siyuan.get-config-status') return;
+        queueMicrotask(() => {
+          window.dispatchEvent(new MessageEvent('message', {
+            origin: window.location.origin,
+            data: {
+              type: 'nanoflow.siyuan.config-status-result',
+              requestId: payload.requestId,
+              ok: true,
+              data: { baseUrl: 'http://127.0.0.1:6806', hasToken: false },
+            },
+          }));
+        });
+      });
+
+      const response = await privateProvider.postRelayRequest({
+        requestType: 'nanoflow.siyuan.get-config-status',
+        responseType: 'nanoflow.siyuan.config-status-result',
+      });
+
+      expect(postMessageSpy).toHaveBeenCalledWith(
+        {
+          type: 'nanoflow.siyuan.get-config-status',
+          requestId: '01010101-0101-4101-8101-010101010101',
+        },
+        window.location.origin,
+      );
+      expect(response).toEqual(expect.objectContaining({ ok: true }));
+    } finally {
+      Object.defineProperty(globalThis, 'crypto', {
+        configurable: true,
+        value: originalCrypto,
+      });
+    }
+  });
+
   it('getConfigStatus returns null when the extension does not respond (legacy version)', async () => {
     const provider = new SiyuanExtensionProvider();
     const privateProvider = provider as unknown as ProviderPrivateApi;
@@ -210,5 +264,55 @@ describe('siyuan-extension-provider', () => {
     expect(preview.title).toBe('细菌能量来源');
     expect(preview.hpath).toBe('/生物/微生物/细菌能量来源');
     expect(preview.excerpt).toBe('摘要');
+  });
+
+  it('cleans up ping listener and timeout when postMessage throws', async () => {
+    vi.useFakeTimers();
+    const provider = new SiyuanExtensionProvider();
+    const privateProvider = provider as unknown as ProviderPrivateApi;
+    const addEventListenerSpy = vi.spyOn(window, 'addEventListener');
+    const removeEventListenerSpy = vi.spyOn(window, 'removeEventListener');
+    const clearTimeoutSpy = vi.spyOn(window, 'clearTimeout');
+    vi.spyOn(window, 'postMessage').mockImplementation(() => {
+      throw new Error('postMessage failed');
+    });
+
+    try {
+      const result = await privateProvider.pingExtension();
+
+      expect(result).toBe(false);
+      expect(addEventListenerSpy).toHaveBeenCalledWith('message', expect.any(Function));
+      expect(removeEventListenerSpy).toHaveBeenCalledWith('message', expect.any(Function));
+      expect(clearTimeoutSpy).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('cleans up relay listener, timeout and abort listener when postMessage throws', async () => {
+    vi.useFakeTimers();
+    const provider = new SiyuanExtensionProvider();
+    const privateProvider = provider as unknown as ProviderPrivateApi;
+    const abortController = new AbortController();
+    const removeAbortListenerSpy = vi.spyOn(abortController.signal, 'removeEventListener');
+    const removeWindowListenerSpy = vi.spyOn(window, 'removeEventListener');
+    const clearTimeoutSpy = vi.spyOn(window, 'clearTimeout');
+    vi.spyOn(window, 'postMessage').mockImplementation(() => {
+      throw new Error('postMessage failed');
+    });
+
+    try {
+      await expect(privateProvider.postRelayRequest({
+        requestType: 'nanoflow.siyuan.get-config-status',
+        responseType: 'nanoflow.siyuan.config-status-result',
+        signal: abortController.signal,
+      })).rejects.toThrow('postMessage failed');
+
+      expect(removeWindowListenerSpy).toHaveBeenCalledWith('message', expect.any(Function));
+      expect(removeAbortListenerSpy).toHaveBeenCalledWith('abort', expect.any(Function));
+      expect(clearTimeoutSpy).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

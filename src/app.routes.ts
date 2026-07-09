@@ -77,9 +77,14 @@ export const unsavedChangesGuardLazy: CanDeactivateFn<unknown> = async (
   nextState
 ) => {
   const injector = inject(Injector);
-  const module = await loadUnsavedChangesGuardModule();
-  const guard = injector.get(module.UnsavedChangesGuard);
-  return guard.canDeactivate(component, currentRoute, currentState, nextState);
+  try {
+    const module = await loadUnsavedChangesGuardModule();
+    const guard = injector.get(module.UnsavedChangesGuard);
+    return guard.canDeactivate(component, currentRoute, currentState, nextState);
+  } catch {
+    // 懒加载失败时放行，避免 guard chunk/SW 缓存异常阻断导航。
+    return true;
+  }
 };
 
 /**

@@ -25,10 +25,25 @@ import {
   refreshGateReviewClock,
   focusPreferences,
   resetGateState,
-  getTodayDate,
   getTomorrowDate,
   updateBlackBoxEntry
 } from '../state/focus-stores';
+import {
+  buildNextReviewingQueue,
+  type GateReviewQueueRefreshSource,
+  isSameGateQueue,
+  type RemoteEmptyQueueState,
+  resolveRemoteEmptyQueueState,
+} from './gate-review-queue.helpers';
+import { GateAnimationController, type GateMotionState } from './gate-animation.controller';
+import { GateDeferredMutationController } from './gate-deferred-mutation.controller';
+import { createDevGateMockEntries } from './gate-dev-mock.helpers';
+import {
+  clearGateHandledToday,
+  isGateHandledToday,
+  persistGateHandledToday,
+  resetDailyGateSnoozeCount,
+} from './gate-storage.helpers';
 
 interface OperationError {
   code: string;
@@ -36,45 +51,11 @@ interface OperationError {
   details?: Record<string, unknown>;
 }
 
-type DeferredGateMutation =
-  | { kind: 'mark-read'; entryId: string }
-  | { kind: 'mark-completed'; entryId: string }
-  | { kind: 'snooze'; entryId: string; snoozeUntil: string };
-
 interface CheckGateOptions {
   ignoreHandledToday?: boolean;
 }
 
-/** LocalStorage 键：上次大门检查日期 */
-const GATE_LAST_CHECK_DATE_KEY = 'focus_gate_last_check_date';
-/** LocalStorage 键：当日跳过次数重置日期 */
-const GATE_SNOOZE_RESET_DATE_KEY = 'focus_gate_snooze_reset_date';
-
-/**
- * 动画两阶段超时保护
- * 
- * 【2026-04-20 根因修复】
- * 单一 1200ms wall-clock 超时无法区分两种失败模式：
- *  1) animationstart 迟迟不触发（元素未渲染 / 主线程阻塞 / CD 延迟）
- *  2) animationstart 已触发但 animationend 丢失（浏览器 tab 后台节流等）
- * 
- * 并且当 visibilitychange 等处理器占用主线程 200+ms 时，实际 CSS 动画（620-660ms）
- * 开始时已消耗掉大半预算，导致 fallback 误触发 "forcing idle" 警告。
- * 
- * 正确做法：以真实 DOM `animationstart` 事件为计时锚点。
- */
-/** 阶段一：从信号设置到 animationstart 的最长允许时间（覆盖主线程阻塞/CD 延迟） */
-const ANIMATION_START_GRACE_MS = 800;
-/** 阶段二：animationstart 到 animationend 的最长允许时间（覆盖浏览器节流/丢事件） */
-const ANIMATION_DURATION_MAX_MS = 1500;
 const GATE_REVIEW_SYNC_INTERVAL_MS = Math.max(30_000, SYNC_CONFIG.BLACKBOX_PULL_FRESHNESS_WINDOW);
-
-export type GateMotionState =
-  | 'idle'
-  | 'entering'
-  | 'heave_read'
-  | 'heavy_drop'
-  | 'settling';
 
 @Injectable({
   providedIn: 'root'
@@ -115,23 +96,22 @@ export class GateService {
    */
   readonly isActive = isGateActive;
 
-  /** 动画超时定时器 - 用于防止动画卡死 */
-  private animationTimeoutId: ReturnType<typeof setTimeout> | null = null;
-
-  /** 当前等待 animationstart 的状态（两阶段超时的锚点） */
-  private pendingAnimationState: GateMotionState | null = null;
-  /** 当前阶段一/二共用的超时回调 */
-  private pendingAnimationTimeout: (() => void) | null = null;
-  /** 当前是否已进入阶段二（animationstart 已触发） */
-  private animationStarted = false;
+  /** 动画两阶段超时保护 - 用于防止动画卡死 */
+  private readonly animationController = new GateAnimationController({
+    getAnimation: () => this.cardAnimation(),
+    setAnimation: state => this.cardAnimation.set(state),
+    prefersReducedMotion: () => this.prefersReducedMotion,
+    run: callback => this.ngZone.run(callback),
+    debug: message => this.logger.debug('Gate', message),
+    warn: message => this.logger.warn('Gate', message),
+  });
+  private readonly deferredMutationController = new GateDeferredMutationController({
+    blackBoxService: this.blackBoxService,
+    logger: this.logger,
+  });
 
   /** 当前动作动画（用于防止 timeout + animationend 双触发） */
   private actionInFlight: 'heave_read' | 'heavy_drop' | null = null;
-  /**
-   * Gate 动画期延迟提交的黑匣子 mutation。
-   * 这样点击完成时不会在同一帧把全局黑匣子面板、pending 计数和同步卡片一起抖起来。
-   */
-  private deferredMutation: DeferredGateMutation | null = null;
   private reviewSyncTimerId: ReturnType<typeof setInterval> | null = null;
   private reviewSyncInFlight = false;
   private remoteEmptyQueueConfirmations = 0;
@@ -200,7 +180,7 @@ export class GateService {
 
   private ensureReviewingRemoteSync(): void {
     if (typeof window === 'undefined') return;
-    if (this.reviewSyncTimerId) return;
+    if (this.reviewSyncTimerId !== null) return;
 
     this.refreshReviewingQueueFromRemote(true);
 
@@ -248,7 +228,7 @@ export class GateService {
   }
 
   private stopReviewingRemoteSync(): void {
-    if (this.reviewSyncTimerId) {
+    if (this.reviewSyncTimerId !== null) {
       clearInterval(this.reviewSyncTimerId);
       this.reviewSyncTimerId = null;
     }
@@ -257,81 +237,33 @@ export class GateService {
 
   private syncReviewingQueueWithPending(
     latestPending: BlackBoxEntry[],
-    source: 'checkGate' | 'signal' | 'remote'
+    source: GateReviewQueueRefreshSource
   ): void {
     const currentItems = gatePendingItems();
-    const currentIndex = gateCurrentIndex();
-    const safeIndex = Math.min(Math.max(currentIndex, 0), currentItems.length);
+    const safeIndex = this.normalizeGateCurrentIndex(currentItems.length);
 
-    if (safeIndex !== currentIndex) {
-      gateCurrentIndex.set(safeIndex);
-    }
+    const remoteEmptyState = resolveRemoteEmptyQueueState({
+      latestPendingLength: latestPending.length,
+      source,
+      safeIndex,
+      currentLength: currentItems.length,
+      hasLocalAction: !!this.actionInFlight || this.deferredMutationController.hasPending,
+      remoteEmptyQueueConfirmations: this.remoteEmptyQueueConfirmations,
+    });
+    const nextItems = buildNextReviewingQueue({
+      currentItems,
+      latestPending,
+      safeIndex,
+      remoteEmptyState,
+      hasActionInFlight: this.actionInFlight !== null,
+    });
 
-    // 【修复 2026-04-20】保留 handled + current 的前缀（包含“当前正在展示/动画中的条目”）。
-    // 之前的实现只保留 slice(0, safeIndex)，当用户在当前条目触发 markAsCompleted 时，
-    // pendingBlackBoxEntries 计算信号会同步剔除该条目，effect 立即重算队列，
-    // 把当前位置的条目从 gatePendingItems 中移除；随后 finalizeActionTransition
-    // 仍然执行 currentIndex + 1，导致跳过一条未审查的条目，并使总数提前归零、
-    // 表现为“只滑一次大门就直接进入项目”。
-    // 2026-05-19 补充：仅在“非 authoritative 的瞬时清空”里锁定 current。
-    // 手机端恢复/远端拉取过程中，signal 可能短暂归零；若此时丢掉 current，大门会在
-    // 用户未点击已读/完成的情况下 completeGateSession('queue-empty')。但 authoritative
-    // remote 刷新若确认当前条目已被别处完成/删除，则不应继续保留 ghost 卡片。
-    const remoteEmptyNeedsConfirmation =
-      source === 'remote'
-      && latestPending.length === 0
-      && safeIndex < currentItems.length;
-    const remoteEmptyBlockedByLocalAction = remoteEmptyNeedsConfirmation
-      && (!!this.actionInFlight || !!this.deferredMutation);
-    const firstRemoteEmptyProbe = remoteEmptyNeedsConfirmation
-      && !remoteEmptyBlockedByLocalAction
-      && this.remoteEmptyQueueConfirmations === 0;
-    const confirmedRemoteEmpty = remoteEmptyNeedsConfirmation
-      && !remoteEmptyBlockedByLocalAction
-      && this.remoteEmptyQueueConfirmations > 0;
-    const preserveCurrentDuringTransientEmpty =
-      latestPending.length === 0
-      && safeIndex < currentItems.length
-      && (
-        source !== 'remote'
-        || firstRemoteEmptyProbe
-      );
-    const currentReviewItemCount = safeIndex < currentItems.length
-      && (this.actionInFlight !== null || preserveCurrentDuringTransientEmpty)
-      ? 1
-      : 0;
-    const preserveFullQueue = firstRemoteEmptyProbe || remoteEmptyBlockedByLocalAction;
-    const preserveCount = preserveFullQueue
-      ? currentItems.length
-      : confirmedRemoteEmpty
-        ? 0
-      : Math.min(safeIndex + currentReviewItemCount, currentItems.length);
-    const preservedPrefix = currentItems.slice(0, preserveCount);
-    const preservedIds = new Set(preservedPrefix.map(item => item.id));
-    const nextUnprocessed = latestPending.filter(item => !preservedIds.has(item.id));
-    const nextItems = [...preservedPrefix, ...nextUnprocessed];
-
-    if (!this.isSameQueue(currentItems, nextItems)) {
+    if (!isSameGateQueue(currentItems, nextItems)) {
       gatePendingItems.set(nextItems);
-      this.logger.debug('Gate', `Gate queue refreshed from ${source}`, {
-        before: currentItems.length,
-        after: nextItems.length,
-        handled: safeIndex,
-        currentPreserved: currentReviewItemCount === 1,
-        preserveCurrentDuringTransientEmpty,
-        firstRemoteEmptyProbe,
-        confirmedRemoteEmpty,
-        remoteEmptyBlockedByLocalAction,
-        remoteEmptyConfirmations: this.remoteEmptyQueueConfirmations,
-        inFlight: this.actionInFlight !== null
-      });
+      this.logQueueRefresh(source, currentItems.length, nextItems.length, safeIndex, remoteEmptyState);
     }
 
-    if (latestPending.length > 0) {
-      this.remoteEmptyQueueConfirmations = 0;
-    } else if (firstRemoteEmptyProbe) {
-      this.remoteEmptyQueueConfirmations += 1;
-    }
+    this.updateRemoteEmptyConfirmations(latestPending, remoteEmptyState);
 
     // 仅当队列彻底空（没有保留项也没有未处理项）时才判定完成，
     // 避免在动画进行中因同步信号剔除导致的误判。
@@ -344,28 +276,58 @@ export class GateService {
     if (
       nextItems.length === 0
       && !this.actionInFlight
-      && !this.deferredMutation
+      && !this.deferredMutationController.hasPending
     ) {
       this.completeGateSession('queue-empty');
     }
   }
 
-  private isSameQueue(a: BlackBoxEntry[], b: BlackBoxEntry[]): boolean {
-    if (a.length !== b.length) return false;
-    for (let i = 0; i < a.length; i++) {
-      if (a[i].id !== b[i].id) return false;
-      if (a[i].updatedAt !== b[i].updatedAt) return false;
+  private normalizeGateCurrentIndex(currentLength: number): number {
+    const currentIndex = gateCurrentIndex();
+    const safeIndex = Math.min(Math.max(currentIndex, 0), currentLength);
+    if (safeIndex !== currentIndex) gateCurrentIndex.set(safeIndex);
+    return safeIndex;
+  }
+
+  private logQueueRefresh(
+    source: GateReviewQueueRefreshSource,
+    before: number,
+    after: number,
+    safeIndex: number,
+    remoteEmptyState: RemoteEmptyQueueState,
+  ): void {
+    this.logger.debug('Gate', `Gate queue refreshed from ${source}`, {
+      before,
+      after,
+      handled: safeIndex,
+      currentPreserved: safeIndex < before
+        && (this.actionInFlight !== null || remoteEmptyState.preserveCurrentDuringTransientEmpty),
+      preserveCurrentDuringTransientEmpty: remoteEmptyState.preserveCurrentDuringTransientEmpty,
+      firstRemoteEmptyProbe: remoteEmptyState.firstRemoteEmptyProbe,
+      confirmedRemoteEmpty: remoteEmptyState.confirmedRemoteEmpty,
+      remoteEmptyBlockedByLocalAction: remoteEmptyState.remoteEmptyBlockedByLocalAction,
+      remoteEmptyConfirmations: this.remoteEmptyQueueConfirmations,
+      inFlight: this.actionInFlight !== null
+    });
+  }
+
+  private updateRemoteEmptyConfirmations(
+    latestPending: BlackBoxEntry[],
+    remoteEmptyState: RemoteEmptyQueueState,
+  ): void {
+    if (latestPending.length > 0) {
+      this.remoteEmptyQueueConfirmations = 0;
+    } else if (remoteEmptyState.firstRemoteEmptyProbe) {
+      this.remoteEmptyQueueConfirmations += 1;
     }
-    return true;
   }
 
   private completeGateSession(reason: 'all-processed' | 'queue-empty'): void {
-    this.flushDeferredMutation();
     gateState.set('completed');
     this.showCompletionMessage.set(true);
     this.cardAnimation.set('idle');
     this.actionInFlight = null;
-    this.deferredMutation = null;
+    this.deferredMutationController.clear();
     this.remoteEmptyQueueConfirmations = 0;
     this.clearAnimationTimeout();
     this.stopReviewingRemoteSync();
@@ -439,47 +401,7 @@ export class GateService {
     state: GateMotionState,
     onTimeout?: () => void
   ): void {
-    this.clearAnimationTimeout();
-
-    if (state !== 'idle' && this.prefersReducedMotion) {
-      this.cardAnimation.set('idle');
-      this.logger.debug('Gate', `Reduced motion: skipping animation state '${state}'`);
-      onTimeout?.();
-      return;
-    }
-
-    this.cardAnimation.set(state);
-
-    if (state === 'idle') {
-      return;
-    }
-
-    this.pendingAnimationState = state;
-    this.pendingAnimationTimeout = onTimeout ?? null;
-    this.animationStarted = false;
-
-    // 阶段一：等待 animationstart
-    this.animationTimeoutId = setTimeout(() => {
-      this.ngZone.run(() => {
-        if (this.cardAnimation() !== state) return;
-        if (this.animationStarted) return;
-
-        this.logger.warn(
-          'Gate',
-          `Animation did not start within ${ANIMATION_START_GRACE_MS}ms, forcing idle from '${state}'`
-        );
-        // 【修复 2026-04-21】先调用 cb 再置 idle：onSettlingComplete 等回调依赖
-        // cardAnimation() === state 的守卫来判定是否兜底执行 flushDeferredMutation。
-        // 旧顺序（先 set idle 再 cb）会让回调早返回，导致延迟提交的 mark-read /
-        // mark-completed 被静默丢弃，表现为大门项被消费但实际仍 pending。
-        const cb = this.pendingAnimationTimeout;
-        this.resetPendingAnimation();
-        cb?.();
-        if (this.cardAnimation() === state) {
-          this.cardAnimation.set('idle');
-        }
-      });
-    }, ANIMATION_START_GRACE_MS);
+    this.animationController.setWithTimeout(state, onTimeout);
   }
 
   /**
@@ -487,50 +409,12 @@ export class GateService {
    * 将超时计时从阶段一切换到阶段二（animationend 兜底）。
    */
   notifyAnimationStarted(state: GateMotionState): void {
-    if (this.pendingAnimationState !== state) return;
-    if (this.cardAnimation() !== state) return;
-    if (this.animationStarted) return;
-
-    this.animationStarted = true;
-    this.clearAnimationTimeoutOnly();
-
-    // 阶段二：等待 animationend 真正触发
-    this.animationTimeoutId = setTimeout(() => {
-      this.ngZone.run(() => {
-        if (this.cardAnimation() !== state) return;
-
-        this.logger.warn(
-          'Gate',
-          `Animation duration exceeded ${ANIMATION_DURATION_MAX_MS}ms, forcing idle from '${state}'`
-        );
-        // 【修复 2026-04-21】先调用 cb 再置 idle，原因同阶段一兜底注释。
-        const cb = this.pendingAnimationTimeout;
-        this.resetPendingAnimation();
-        cb?.();
-        if (this.cardAnimation() === state) {
-          this.cardAnimation.set('idle');
-        }
-      });
-    }, ANIMATION_DURATION_MAX_MS);
-  }
-
-  private resetPendingAnimation(): void {
-    this.pendingAnimationState = null;
-    this.pendingAnimationTimeout = null;
-    this.animationStarted = false;
-  }
-
-  /** 仅清理 setTimeout，不重置 pending 状态（用于阶段切换） */
-  private clearAnimationTimeoutOnly(): void {
-    if (!this.animationTimeoutId) return;
-    clearTimeout(this.animationTimeoutId);
-    this.animationTimeoutId = null;
+    this.animationController.notifyStarted(state);
   }
 
   /** 清除动画超时定时器 */
   private clearAnimationTimeout(): void {
-    this.clearAnimationTimeoutOnly();
-    this.resetPendingAnimation();
+    this.animationController.clear();
   }
 
   /**
@@ -566,7 +450,9 @@ export class GateService {
     this.devForceActive.set(false);
     this.showCompletionMessage.set(false);
     this.actionInFlight = null;
-    this.deferredMutation = null;
+    // 上一会话在确认动画窗口内被杀时，已读/完成/打盹决策仍在持久暂存里：
+    // 先补写再继续（无暂存时等价于原来的 clear()），不得无条件清掉未提交决策
+    void this.deferredMutationController.restorePersistedMutation();
     this.remoteEmptyQueueConfirmations = 0;
 
     const preferences = focusPreferences();
@@ -610,7 +496,7 @@ export class GateService {
       return failure(ErrorCodes.FOCUS_ENTRY_NOT_FOUND, '当前没有待处理条目');
     }
 
-    this.deferredMutation = { kind: 'mark-read', entryId: current.id };
+    this.deferredMutationController.setMarkRead(current.id);
     this.startActionTransition('heave_read');
     return success(undefined);
   }
@@ -626,7 +512,7 @@ export class GateService {
       return failure(ErrorCodes.FOCUS_ENTRY_NOT_FOUND, '当前没有待处理条目');
     }
 
-    this.deferredMutation = { kind: 'mark-completed', entryId: current.id };
+    this.deferredMutationController.setMarkCompleted(current.id);
     this.startActionTransition('heavy_drop');
     return success(undefined);
   }
@@ -653,7 +539,7 @@ export class GateService {
     }
 
     const tomorrow = getTomorrowDate();
-    this.deferredMutation = { kind: 'snooze', entryId: current.id, snoozeUntil: tomorrow };
+    this.deferredMutationController.setSnooze(current.id, tomorrow);
     gateSnoozeCount.update(c => c + 1);
 
     // 兼容路径：在新门体里统一使用 heave_read 过渡
@@ -684,6 +570,16 @@ export class GateService {
       this.impactTick.update(v => v + 1);
     }
 
+    void this.flushDeferredMutationAndAdvance(state);
+  }
+
+  private async flushDeferredMutationAndAdvance(state: 'heave_read' | 'heavy_drop'): Promise<void> {
+    const result = await this.deferredMutationController.flush();
+    if (!result.ok) {
+      this.handleDeferredMutationFailure(state, result.error);
+      return;
+    }
+
     const nextIndex = gateCurrentIndex() + 1;
     const total = gatePendingItems().length;
 
@@ -694,6 +590,21 @@ export class GateService {
 
     gateCurrentIndex.set(nextIndex);
     this.setCardAnimationWithTimeout('settling', () => this.onSettlingComplete());
+  }
+
+  private handleDeferredMutationFailure(
+    state: 'heave_read' | 'heavy_drop',
+    error: OperationError,
+  ): void {
+    this.logger.warn('Gate', 'Deferred gate mutation persistence failed; keeping current card reviewable', {
+      state,
+      message: error.message,
+      details: error.details,
+    });
+    this.deferredMutationController.clear();
+    this.cardAnimation.set('idle');
+    this.actionInFlight = null;
+    this.remoteEmptyQueueConfirmations = 0;
   }
 
   /** 入场动画完成回调 */
@@ -722,7 +633,6 @@ export class GateService {
     if (this.cardAnimation() !== 'settling' && !this.prefersReducedMotion) return;
     this.clearAnimationTimeout();
     this.cardAnimation.set('idle');
-    this.flushDeferredMutation();
   }
 
   /**
@@ -750,14 +660,7 @@ export class GateService {
 
   /** 重置每日跳过次数 */
   private resetDailySnoozeCount(): void {
-    const today = getTodayDate();
-    const lastResetDate = localStorage.getItem(GATE_SNOOZE_RESET_DATE_KEY);
-
-    if (lastResetDate !== today) {
-      gateSnoozeCount.set(0);
-      localStorage.setItem(GATE_SNOOZE_RESET_DATE_KEY, today);
-      this.logger.debug('Gate', 'Daily snooze count reset');
-    }
+    resetDailyGateSnoozeCount(this.logger);
   }
 
   /**
@@ -765,32 +668,12 @@ export class GateService {
    * 用于阻止后台恢复链路里 local→remote 两次 checkGate 造成的二次弹门
    */
   private isGateHandledToday(): boolean {
-    if (typeof localStorage === 'undefined') return false;
-    try {
-      return localStorage.getItem(GATE_LAST_CHECK_DATE_KEY) === getTodayDate();
-    } catch (error) {
-      this.logger.debug(
-        'Gate',
-        'Read GATE_LAST_CHECK_DATE_KEY failed, fall through to normal check',
-        error instanceof Error ? error.message : String(error)
-      );
-      return false;
-    }
+    return isGateHandledToday(this.logger);
   }
 
   /** 标记今日大门已处理 */
   private persistGateHandledToday(): void {
-    if (typeof localStorage === 'undefined') return;
-    try {
-      localStorage.setItem(GATE_LAST_CHECK_DATE_KEY, getTodayDate());
-    } catch (error) {
-      // 隐私模式 / 配额耗尽时仅影响下一次 checkGate 的短路兜底，不会引起数据错误。
-      this.logger.debug(
-        'Gate',
-        'Persist GATE_LAST_CHECK_DATE_KEY failed, dedup will fall back to in-memory state',
-        error instanceof Error ? error.message : String(error)
-      );
-    }
+    persistGateHandledToday(this.logger);
   }
 
   /**
@@ -799,7 +682,7 @@ export class GateService {
    */
   forceBypass(): void {
     this.devForceActive.set(false);
-    this.deferredMutation = null;
+    this.deferredMutationController.clear();
     this.remoteEmptyQueueConfirmations = 0;
     this.stopReviewingRemoteSync();
     gateState.set('bypassed');
@@ -812,13 +695,13 @@ export class GateService {
     this.devForceActive.set(false);
     this.showCompletionMessage.set(false);
     this.actionInFlight = null;
-    this.deferredMutation = null;
+    this.deferredMutationController.clear();
     this.remoteEmptyQueueConfirmations = 0;
     this.stopReviewingRemoteSync();
     this.clearAnimationTimeout();
     this.cardAnimation.set('idle');
     resetGateState();
-    localStorage.removeItem(GATE_LAST_CHECK_DATE_KEY);
+    clearGateHandledToday();
     this.logger.debug('Gate', 'Gate state reset');
   }
 
@@ -853,127 +736,44 @@ export class GateService {
    * 创建模拟的待处理条目并激活大门
    */
   devForceShowGate(): void {
-    this.devForceActive.set(true);
-    this.stopReviewingRemoteSync();
-    localStorage.removeItem(GATE_LAST_CHECK_DATE_KEY);
-
-    if (!focusPreferences().gateEnabled) {
-      focusPreferences.update(p => ({ ...p, gateEnabled: true }));
-      this.logger.info('Gate', '[DEV] Auto-enabled gateEnabled for testing');
-    }
-
-    const mockProjectId = crypto.randomUUID();
-    const mockUserId = crypto.randomUUID();
-    const mockEntries = [
-      {
-        id: crypto.randomUUID(),
-        projectId: mockProjectId,
-        userId: mockUserId,
-        content: '这是一条测试遗留条目 - 先做A模块，然后连B数据库，不对，那个接口有问题，要先弄C...',
-        date: this.getYesterdayDate(),
-        createdAt: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
-        updatedAt: new Date().toISOString(),
-        isRead: false,
-        isCompleted: false,
-        isArchived: false,
-        deletedAt: null,
-        syncStatus: 'synced' as const,
-        localCreatedAt: new Date().toISOString(),
-        snoozeCount: 0,
-        snoozeUntil: undefined
-      },
-      {
-        id: crypto.randomUUID(),
-        projectId: mockProjectId,
-        userId: mockUserId,
-        content: '第二条测试条目 - 需要修复支付接口的bug，客户反馈订单状态没有正确更新',
-        date: this.getYesterdayDate(),
-        createdAt: new Date(Date.now() - 23 * 60 * 60 * 1000).toISOString(),
-        updatedAt: new Date().toISOString(),
-        isRead: false,
-        isCompleted: false,
-        isArchived: false,
-        deletedAt: null,
-        syncStatus: 'synced' as const,
-        localCreatedAt: new Date().toISOString(),
-        snoozeCount: 1,
-        snoozeUntil: undefined
-      },
-      {
-        id: crypto.randomUUID(),
-        projectId: mockProjectId,
-        userId: mockUserId,
-        content: '第三条 - 优化首页加载速度，现在太慢了',
-        date: this.getYesterdayDate(),
-        createdAt: new Date(Date.now() - 22 * 60 * 60 * 1000).toISOString(),
-        updatedAt: new Date().toISOString(),
-        isRead: false,
-        isCompleted: false,
-        isArchived: false,
-        deletedAt: null,
-        syncStatus: 'synced' as const,
-        localCreatedAt: new Date().toISOString(),
-        snoozeCount: 0,
-        snoozeUntil: undefined
-      }
-    ];
+    this.prepareDevGate();
+    const mockEntries = createDevGateMockEntries();
 
     for (const entry of mockEntries) {
       updateBlackBoxEntry(entry);
     }
 
+    this.activateDevGate(mockEntries);
+    this.logger.info('Gate', '[DEV] Gate force shown with mock entries');
+  }
+
+  private prepareDevGate(): void {
+    this.devForceActive.set(true);
+    this.stopReviewingRemoteSync();
+    clearGateHandledToday();
+
+    if (!focusPreferences().gateEnabled) {
+      focusPreferences.update(p => ({ ...p, gateEnabled: true }));
+      this.logger.info('Gate', '[DEV] Auto-enabled gateEnabled for testing');
+    }
+  }
+
+  private activateDevGate(mockEntries: BlackBoxEntry[]): void {
     gatePendingItems.set(mockEntries);
     gateCurrentIndex.set(0);
     gateSnoozeCount.set(0);
     gateState.set('reviewing');
     this.showCompletionMessage.set(false);
     this.actionInFlight = null;
-    this.deferredMutation = null;
+    this.deferredMutationController.clear();
 
     this.setCardAnimationWithTimeout('entering', () => this.onEnteringComplete());
-
-    this.logger.info('Gate', '[DEV] Gate force shown with mock entries');
   }
 
   /** 动画/延迟提交进行中时锁定新动作，避免覆盖 deferred mutation */
   private isActionLocked(): boolean {
     return this.cardAnimation() !== 'idle'
       || this.actionInFlight !== null
-      || this.deferredMutation !== null;
-  }
-
-  /** 在动画安全点提交延迟的黑匣子 mutation */
-  private flushDeferredMutation(): void {
-    const mutation = this.deferredMutation;
-    if (!mutation) {
-      return;
-    }
-
-    this.deferredMutation = null;
-
-    let result: Result<BlackBoxEntry, OperationError>;
-
-    if (mutation.kind === 'mark-read') {
-      result = this.blackBoxService.markAsRead(mutation.entryId);
-    } else if (mutation.kind === 'mark-completed') {
-      result = this.blackBoxService.markAsCompleted(mutation.entryId);
-    } else {
-      result = this.blackBoxService.snooze(mutation.entryId, mutation.snoozeUntil);
-    }
-
-    if (!result.ok) {
-      this.logger.warn('Gate', 'Deferred gate mutation failed', {
-        kind: mutation.kind,
-        entryId: mutation.entryId,
-        message: result.error.message,
-      });
-    }
-  }
-
-  /** 获取昨天日期 */
-  private getYesterdayDate(): string {
-    const yesterday = new Date();
-    yesterday.setDate(yesterday.getDate() - 1);
-    return yesterday.toISOString().split('T')[0];
+      || this.deferredMutationController.hasPending;
   }
 }

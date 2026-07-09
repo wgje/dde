@@ -58,7 +58,7 @@ echo ""
 echo "6️⃣ MCP 配置"
 if [ -f ".vscode/mcp.json" ]; then
     echo "   ✅ .vscode/mcp.json 存在"
-    cat .vscode/mcp.json | jq '.servers."io.github.ChromeDevTools/chrome-devtools-mcp"'
+    cat .vscode/mcp.json | jq '.servers."ChromeDevTools/chrome-devtools-mcp"'
 else
     echo "   ❌ .vscode/mcp.json 不存在"
 fi

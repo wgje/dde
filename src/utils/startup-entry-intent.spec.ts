@@ -9,6 +9,8 @@ import {
 } from './startup-entry-intent';
 
 describe('resolveStartupEntryIntent', () => {
+  const gateEntryId = '55555555-5555-4555-8555-555555555555';
+
   it('should return null when no explicit startup entry is present', () => {
     expect(resolveStartupEntryIntent('/projects')).toBeNull();
   });
@@ -50,12 +52,30 @@ describe('resolveStartupEntryIntent', () => {
     });
   });
 
+  it('should keep widget gate entry ids scoped to gate mutation intents', () => {
+    expect(resolveStartupEntryIntent(`/projects?entry=widget&intent=mark-gate-read&widgetGateEntryId=${gateEntryId}`)).toEqual({
+      entry: 'widget',
+      intent: 'mark-gate-read',
+      rawIntent: 'mark-gate-read',
+      widgetGateEntryId: gateEntryId,
+    });
+
+    expect(resolveStartupEntryIntent(`/projects?entry=widget&intent=open-workspace&widgetGateEntryId=${gateEntryId}`)).toEqual({
+      entry: 'widget',
+      intent: 'open-workspace',
+      rawIntent: 'open-workspace',
+      widgetGateEntryId: null,
+    });
+  });
+
   it('should ignore unknown entry sources', () => {
     expect(resolveStartupEntryIntent('/projects?entry=share&intent=open-workspace')).toBeNull();
   });
 });
 
 describe('normalizeStartupEntryIntent', () => {
+  const gateEntryId = '55555555-5555-4555-8555-555555555555';
+
   it('should restore Android widget bootstrap source from persisted startup intent', () => {
     expect(normalizeStartupEntryIntent({
       entry: 'twa',
@@ -68,6 +88,47 @@ describe('normalizeStartupEntryIntent', () => {
       intent: 'open-workspace',
       rawIntent: 'open-workspace',
       androidWidgetBootstrap: true,
+      widgetGateEntryId: null,
+    });
+  });
+
+  it('should only restore Android widget bootstrap source for twa startup intents', () => {
+    expect(normalizeStartupEntryIntent({
+      entry: 'shortcut',
+      intent: 'open-workspace',
+      rawIntent: 'open-workspace',
+      androidWidgetBootstrap: true,
+      widgetGateEntryId: null,
+    })).toEqual({
+      entry: 'shortcut',
+      intent: 'open-workspace',
+      rawIntent: 'open-workspace',
+      widgetGateEntryId: null,
+    });
+  });
+
+  it('should keep persisted widget gate entry ids scoped to gate mutation intents', () => {
+    expect(normalizeStartupEntryIntent({
+      entry: 'widget',
+      intent: 'mark-gate-complete',
+      rawIntent: 'mark-gate-complete',
+      widgetGateEntryId: gateEntryId,
+    })).toEqual({
+      entry: 'widget',
+      intent: 'mark-gate-complete',
+      rawIntent: 'mark-gate-complete',
+      widgetGateEntryId: gateEntryId,
+    });
+
+    expect(normalizeStartupEntryIntent({
+      entry: 'widget',
+      intent: 'open-workspace',
+      rawIntent: 'open-workspace',
+      widgetGateEntryId: gateEntryId,
+    })).toEqual({
+      entry: 'widget',
+      intent: 'open-workspace',
+      rawIntent: 'open-workspace',
       widgetGateEntryId: null,
     });
   });

@@ -400,13 +400,29 @@ export class ErrorBoundaryComponent implements OnInit, OnDestroy {
     if (this.onRetry) {
       this.clearError();
       try {
-        this.onRetry();
+        const retryResult = this.onRetry();
+        if (this.isPromiseLike(retryResult)) {
+          retryResult.catch(error => {
+            this.setError(this.normalizeRetryError(error));
+          });
+        }
       } catch (e) {
-        this.setError(e as Error);
+        this.setError(this.normalizeRetryError(e));
       }
     } else {
       this.clearError();
     }
+  }
+
+  private isPromiseLike(value: unknown): value is PromiseLike<unknown> & { catch: (onRejected: (reason: unknown) => void) => unknown } {
+    return typeof value === 'object'
+      && value !== null
+      && 'catch' in value
+      && typeof (value as { catch?: unknown }).catch === 'function';
+  }
+
+  private normalizeRetryError(error: unknown): Error {
+    return error instanceof Error ? error : new Error(String(error));
   }
   
   /**

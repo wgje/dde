@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "entries": [
+    {
+      "path": "supabase/migrations/20260411084529_connection_endpoint_tombstone_hardening.sql",
+      "category": "explicit-transaction",
+      "reason": "This migration owns BEGIN/COMMIT, so it cannot be nested inside the generated rollback dry-run wrapper.",
+      "rollbackStrategy": "Run on a disposable Supabase branch after exporting a data-safety package; restore from the export if validation fails.",
+      "requiresDataSafetyExport": true
+    },
+    {
+      "path": "supabase/migrations/20260427163000_reconcile_remote_migration_drift.sql",
+      "category": "explicit-transaction",
+      "reason": "This migration owns BEGIN/COMMIT while reconciling remote drift, so it must be dry-run in an isolated database.",
+      "rollbackStrategy": "Run on a cloned database after exporting a data-safety package; discard the clone or restore from export on failure.",
+      "requiresDataSafetyExport": true
+    },
+    {
+      "path": "supabase/migrations/20260427170000_security_hardening_compat.sql",
+      "category": "explicit-transaction",
+      "reason": "This migration owns BEGIN/COMMIT, so it cannot be wrapped by the generic rollback dry-run transaction.",
+      "rollbackStrategy": "Run on a disposable Supabase branch after exporting a data-safety package; restore from export if validation fails.",
+      "requiresDataSafetyExport": true
+    },
+    {
+      "path": "supabase/migrations/20260427171000_tasks_parking_meta_hot_index.sql",
+      "category": "out-of-transaction",
+      "reason": "CREATE INDEX CONCURRENTLY cannot run inside a transaction block.",
+      "rollbackStrategy": "Run on a disposable Supabase branch after exporting a data-safety package; drop the created index or restore from export if validation fails.",
+      "requiresDataSafetyExport": true
+    }
+  ]
+}

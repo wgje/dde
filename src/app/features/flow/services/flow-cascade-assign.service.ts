@@ -1,9 +1,11 @@
-import { Injectable, inject, signal } from '@angular/core';
+import { Injectable, Injector, inject, signal } from '@angular/core';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
 import { ToastService } from '../../../../services/toast.service';
 import { Task } from '../../../../models';
 import { CascadeAssignDialogData } from '../components/flow-cascade-assign-dialog.component';
+import { FLOATING_TREE_CONFIG } from '../../../../config/layout.config';
+import { extractErrorMessage, getErrorMessage } from '../../../../utils/result';
 
 /**
  * 级联分配服务
@@ -11,12 +13,18 @@ import { CascadeAssignDialogData } from '../components/flow-cascade-assign-dialo
  */
 @Injectable({ providedIn: 'root' })
 export class FlowCascadeAssignService {
+  private readonly injector = inject(Injector);
   private readonly projectState = inject(ProjectStateService);
-  private readonly taskOpsAdapter = inject(TaskOperationAdapterService);
   private readonly toast = inject(ToastService);
+
+  private get taskOpsAdapter(): TaskOperationAdapterService {
+    return this.injector.get(TaskOperationAdapterService);
+  }
 
   /** 级联分配确认对话框状态 */
   readonly dialogData = signal<CascadeAssignDialogData | null>(null);
+  /** 确认在途标记：await 期间对话框仍可点击，双击不得重复派发同一子树的持久化迁移 */
+  private isConfirming = false;
 
   /**
    * 显示级联分配确认对话框
@@ -53,20 +61,39 @@ export class FlowCascadeAssignService {
    * 确认级联分配
    * @returns 是否成功执行
    */
-  confirm(): boolean {
+  async confirm(): Promise<boolean> {
+    if (this.isConfirming) {
+      return false;
+    }
+
     const dialog = this.dialogData();
     if (!dialog) return false;
 
-    this.taskOpsAdapter.moveTaskToStage(
-      dialog.taskId,
-      dialog.targetStage,
-      undefined,
-      dialog.targetParentId
-    );
+    this.isConfirming = true;
+    try {
+      try {
+        const result = await this.taskOpsAdapter.moveTaskToStage(
+          dialog.taskId,
+          dialog.targetStage,
+          undefined,
+          dialog.targetParentId
+        );
 
-    this.dialogData.set(null);
-    this.toast.success('分配成功', `已将 ${dialog.subtreeCount} 个任务分配到阶段 ${dialog.targetStage}`);
-    return true;
+        if (!result.ok) {
+          this.toast.error('分配失败', getErrorMessage(result.error));
+          return false;
+        }
+      } catch (error) {
+        this.toast.error('分配失败', extractErrorMessage(error));
+        return false;
+      }
+
+      this.dialogData.set(null);
+      this.toast.success('分配成功', `已将 ${dialog.subtreeCount} 个任务分配到阶段 ${dialog.targetStage}`);
+      return true;
+    } finally {
+      this.isConfirming = false;
+    }
   }
 
   /**
@@ -80,16 +107,22 @@ export class FlowCascadeAssignService {
    * 计算子树任务数量（迭代算法，符合项目规范）
    */
   private countSubtree(taskId: string, tasks: Task[]): number {
+    const childrenByParent = this.buildChildrenByParent(tasks);
     const visited = new Set<string>();
-    const stack = [taskId];
+    const stack: Array<{ id: string; depth: number }> = [{ id: taskId, depth: 0 }];
 
     while (stack.length > 0) {
-      const id = stack.pop()!;
+      const { id, depth } = stack.pop()!;
       if (visited.has(id)) continue;
       visited.add(id);
 
-      tasks.filter(t => t.parentId === id && !t.deletedAt)
-        .forEach(child => stack.push(child.id));
+      if (depth >= FLOATING_TREE_CONFIG.MAX_SUBTREE_DEPTH) continue;
+
+      for (const child of childrenByParent.get(id) ?? []) {
+        if (!visited.has(child.id)) {
+          stack.push({ id: child.id, depth: depth + 1 });
+        }
+      }
     }
 
     return visited.size;
@@ -99,17 +132,37 @@ export class FlowCascadeAssignService {
    * 计算子树深度（迭代算法，符合项目规范）
    */
   private getSubtreeDepth(taskId: string, tasks: Task[]): number {
+    const childrenByParent = this.buildChildrenByParent(tasks);
+    const visited = new Set<string>();
     let maxDepth = 0;
     const stack: { id: string; depth: number }[] = [{ id: taskId, depth: 0 }];
 
     while (stack.length > 0) {
       const { id, depth } = stack.pop()!;
-      maxDepth = Math.max(maxDepth, depth);
+      if (visited.has(id)) continue;
+      visited.add(id);
 
-      tasks.filter(t => t.parentId === id && !t.deletedAt)
-        .forEach(child => stack.push({ id: child.id, depth: depth + 1 }));
+      maxDepth = Math.max(maxDepth, depth);
+      if (depth >= FLOATING_TREE_CONFIG.MAX_SUBTREE_DEPTH) continue;
+
+      for (const child of childrenByParent.get(id) ?? []) {
+        if (!visited.has(child.id)) {
+          stack.push({ id: child.id, depth: depth + 1 });
+        }
+      }
     }
 
     return maxDepth;
+  }
+
+  private buildChildrenByParent(tasks: Task[]): Map<string, Task[]> {
+    const childrenByParent = new Map<string, Task[]>();
+    for (const task of tasks) {
+      if (!task.parentId || task.deletedAt) continue;
+      const children = childrenByParent.get(task.parentId) ?? [];
+      children.push(task);
+      childrenByParent.set(task.parentId, children);
+    }
+    return childrenByParent;
   }
 }

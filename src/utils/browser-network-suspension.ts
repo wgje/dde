@@ -14,31 +14,70 @@ function armNetworkResumeGrace(graceMs = NETWORK_VISIBLE_RESUME_GRACE_MS): void 
   networkBlockedUntil = Math.max(networkBlockedUntil, Date.now() + graceMs);
 }
 
+function runListenerCleanupBestEffort(cleanup: () => void): void {
+  try {
+    cleanup();
+  } catch {
+    // Listener cleanup must not mask the primary lifecycle operation.
+  }
+}
+
 export function ensureBrowserNetworkSuspensionTracking(): void {
   if (trackingInitialized || typeof window === 'undefined' || typeof document === 'undefined') {
     return;
   }
 
-  visibilityChangeHandler = () => {
+  const currentDocument = document;
+  const currentWindow = window;
+  const registeredCleanups: Array<() => void> = [];
+
+  const nextVisibilityChangeHandler = () => {
     if (document.visibilityState === 'visible') {
       armNetworkResumeGrace();
     }
   };
 
-  pageShowHandler = (event: PageTransitionEvent) => {
+  const nextPageShowHandler = (event: PageTransitionEvent) => {
     if (event.persisted) {
       armNetworkResumeGrace(NETWORK_ONLINE_RESUME_GRACE_MS);
     }
   };
 
-  onlineHandler = () => {
+  const nextOnlineHandler = () => {
     armNetworkResumeGrace(NETWORK_ONLINE_RESUME_GRACE_MS);
   };
 
-  document.addEventListener('visibilitychange', visibilityChangeHandler);
-  window.addEventListener('pageshow', pageShowHandler as EventListener);
-  window.addEventListener('online', onlineHandler);
-  trackingInitialized = true;
+  visibilityChangeHandler = nextVisibilityChangeHandler;
+  pageShowHandler = nextPageShowHandler;
+  onlineHandler = nextOnlineHandler;
+
+  try {
+    currentDocument.addEventListener('visibilitychange', nextVisibilityChangeHandler);
+    registeredCleanups.push(() => {
+      currentDocument.removeEventListener('visibilitychange', nextVisibilityChangeHandler);
+    });
+
+    currentWindow.addEventListener('pageshow', nextPageShowHandler as EventListener);
+    registeredCleanups.push(() => {
+      currentWindow.removeEventListener('pageshow', nextPageShowHandler as EventListener);
+    });
+
+    currentWindow.addEventListener('online', nextOnlineHandler);
+    registeredCleanups.push(() => {
+      currentWindow.removeEventListener('online', nextOnlineHandler);
+    });
+    trackingInitialized = true;
+  } catch (error) {
+    for (const cleanup of registeredCleanups.reverse()) {
+      runListenerCleanupBestEffort(cleanup);
+    }
+
+    visibilityChangeHandler = null;
+    pageShowHandler = null;
+    onlineHandler = null;
+    trackingInitialized = false;
+    throw error;
+  }
 }
 
 export function isBrowserNetworkSuspendedWindow(): boolean {
@@ -64,15 +103,24 @@ export function createBrowserNetworkSuspendedError(): Error {
 
 export function resetBrowserNetworkSuspensionTrackingForTests(): void {
   if (typeof document !== 'undefined' && visibilityChangeHandler) {
-    document.removeEventListener('visibilitychange', visibilityChangeHandler);
+    const handler = visibilityChangeHandler;
+    runListenerCleanupBestEffort(() => {
+      document.removeEventListener('visibilitychange', handler);
+    });
   }
 
   if (typeof window !== 'undefined' && pageShowHandler) {
-    window.removeEventListener('pageshow', pageShowHandler as EventListener);
+    const handler = pageShowHandler;
+    runListenerCleanupBestEffort(() => {
+      window.removeEventListener('pageshow', handler as EventListener);
+    });
   }
 
   if (typeof window !== 'undefined' && onlineHandler) {
-    window.removeEventListener('online', onlineHandler);
+    const handler = onlineHandler;
+    runListenerCleanupBestEffort(() => {
+      window.removeEventListener('online', handler);
+    });
   }
 
   visibilityChangeHandler = null;

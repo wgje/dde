@@ -8,173 +8,59 @@
  * 4. recordAndUpdate（含竞态保护和变更追踪）
  * 5. recordAndUpdateDebounced（内容更新场景）
  * 6. setupSyncResultHandler（同步结果回调）
- * 7. triggerServerSideDelete（服务端删除保护）
+ * 7. triggerServerSideDelete（服务端删除保护，见 task-record-tracking.service.delete.spec.ts）
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { Injector, runInInjectionContext } from '@angular/core';
-import { TaskRecordTrackingService } from './task-record-tracking.service';
-import { ProjectStateService } from './project-state.service';
-import { UndoService } from './undo.service';
-import { SyncCoordinatorService } from './sync-coordinator.service';
-import { ChangeTrackerService } from './change-tracker.service';
-import { LayoutService } from './layout.service';
-import { OptimisticStateService } from './optimistic-state.service';
-import { ToastService } from './toast.service';
-import { UiStateService } from './ui-state.service';
-import { LoggerService } from './logger.service';
-import type { Connection, Project, Task } from '../models';
+import type { Project } from '../models';
+import {
+  createConnection,
+  createProject,
+  createTask,
+  createTaskRecordTrackingSpecHarness,
+  type TaskRecordTrackingSpecHarness,
+} from './task-record-tracking.service.spec-helpers';
+import { registerTaskRecordTrackingDurableSpecs } from './task-record-tracking-durable.spec-helpers';
 
-const mockLoggerCategory = {
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
-  debug: vi.fn(),
-};
-
-const mockLoggerService = {
-  category: vi.fn(() => mockLoggerCategory),
-};
-
-const mockToastService = {
-  success: vi.fn(),
-  error: vi.fn(),
-  warning: vi.fn(),
-  info: vi.fn(),
-};
-
-function createTask(overrides: Partial<Task> = {}): Task {
-  return {
-    id: 'task-1',
-    title: 'Title',
-    content: '',
-    stage: 1,
-    parentId: null,
-    order: 0,
-    rank: 10000,
-    status: 'active',
-    x: 0,
-    y: 0,
-    createdDate: new Date().toISOString(),
-    displayId: '1',
-    ...overrides,
-  };
-}
-
-function createProject(overrides: Partial<Project> = {}): Project {
-  return {
-    id: 'proj-1',
-    name: 'Test Project',
-    description: '',
-    createdDate: new Date().toISOString(),
-    tasks: [createTask()],
-    connections: [],
-    version: 1,
-    ...overrides,
-  };
-}
-
-function createConnection(overrides: Partial<Connection> = {}): Connection {
-  return {
-    id: 'conn-1',
-    source: 'task-1',
-    target: 'task-2',
-    title: '旧标题',
-    description: '旧描述',
-    ...overrides,
-  };
+function createDeferred<T = unknown>(): {
+  promise: Promise<T>;
+  resolve: (value: T | PromiseLike<T>) => void;
+} {
+  let resolve: ((value: T | PromiseLike<T>) => void) | null = null;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve: resolve! };
 }
 
 describe('TaskRecordTrackingService', () => {
-  let service: TaskRecordTrackingService;
-  let mockProjectState: Record<string, any>;
-  let mockUndoService: Record<string, any>;
-  let mockSyncCoordinator: Record<string, any>;
-  let mockChangeTracker: Record<string, any>;
-  let mockLayoutService: Record<string, any>;
-  let mockOptimisticState: Record<string, any>;
-  let mockUiState: Record<string, any>;
-  let consoleWarnSpy: ReturnType<typeof vi.spyOn> | undefined;
-  let consoleErrorSpy: ReturnType<typeof vi.spyOn> | undefined;
+  let harness: TaskRecordTrackingSpecHarness;
+  let service: TaskRecordTrackingSpecHarness['service'];
+  let mockProjectState: TaskRecordTrackingSpecHarness['mockProjectState'];
+  let mockUndoService: TaskRecordTrackingSpecHarness['mockUndoService'];
+  let mockSyncCoordinator: TaskRecordTrackingSpecHarness['mockSyncCoordinator'];
+  let mockChangeTracker: TaskRecordTrackingSpecHarness['mockChangeTracker'];
+  let mockOptimisticState: TaskRecordTrackingSpecHarness['mockOptimisticState'];
+  let mockUiState: TaskRecordTrackingSpecHarness['mockUiState'];
+  let mockActionQueue: TaskRecordTrackingSpecHarness['mockActionQueue'];
+  let mockLoggerCategory: TaskRecordTrackingSpecHarness['mockLoggerCategory'];
+  let mockToastService: TaskRecordTrackingSpecHarness['mockToastService'];
 
   beforeEach(() => {
-    vi.clearAllMocks();
-    consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-
-    mockProjectState = {
-      activeProject: vi.fn().mockReturnValue(createProject()),
-      updateProjects: vi.fn((fn: (projects: Project[]) => Project[]) => {
-        fn([createProject()]);
-      }),
-      getTask: vi.fn().mockReturnValue(null),
-    };
-
-    mockUndoService = {
-      undo: vi.fn(),
-      redo: vi.fn(),
-      createProjectSnapshot: vi.fn((p: Project) => ({ tasks: p.tasks, connections: p.connections })),
-      recordAction: vi.fn(),
-      recordActionDebounced: vi.fn(),
-      notifyReplayApplied: vi.fn(),
-      forceUndo: vi.fn(),
-      clearOutdatedHistory: vi.fn(),
-      isProcessing: false,
-    };
-
-    mockSyncCoordinator = {
-      markLocalChanges: vi.fn(),
-      schedulePersist: vi.fn(),
-      syncError: vi.fn().mockReturnValue(null),
-      hasPendingLocalChanges: vi.fn().mockReturnValue(false),
-      softDeleteTasksBatch: vi.fn().mockResolvedValue(1),
-    };
-
-    mockChangeTracker = {
-      trackTaskCreate: vi.fn(),
-      trackTaskUpdate: vi.fn(),
-      trackTaskDelete: vi.fn(),
-      trackConnectionCreate: vi.fn(),
-      trackConnectionUpdate: vi.fn(),
-      trackConnectionDelete: vi.fn(),
-    };
-
-    mockLayoutService = {
-      rebalance: vi.fn((p: Project) => p),
-    };
-
-    mockOptimisticState = {
-      hasSnapshot: vi.fn().mockReturnValue(false),
-      commitSnapshot: vi.fn(),
-      rollbackSnapshot: vi.fn(),
-      restoreTasksFromSnapshot: vi.fn().mockReturnValue(true),
-      snapshots: new Map(),
-    };
-
-    mockUiState = {
-      isMobile: vi.fn().mockReturnValue(false),
-    };
-
-    const injector = Injector.create({
-      providers: [
-        TaskRecordTrackingService,
-        { provide: ProjectStateService, useValue: mockProjectState },
-        { provide: UndoService, useValue: mockUndoService },
-        { provide: SyncCoordinatorService, useValue: mockSyncCoordinator },
-        { provide: ChangeTrackerService, useValue: mockChangeTracker },
-        { provide: LayoutService, useValue: mockLayoutService },
-        { provide: OptimisticStateService, useValue: mockOptimisticState },
-        { provide: ToastService, useValue: mockToastService },
-        { provide: UiStateService, useValue: mockUiState },
-        { provide: LoggerService, useValue: mockLoggerService },
-      ],
-    });
-
-    service = runInInjectionContext(injector, () => injector.get(TaskRecordTrackingService));
+    harness = createTaskRecordTrackingSpecHarness();
+    service = harness.service;
+    mockProjectState = harness.mockProjectState;
+    mockUndoService = harness.mockUndoService;
+    mockSyncCoordinator = harness.mockSyncCoordinator;
+    mockChangeTracker = harness.mockChangeTracker;
+    mockOptimisticState = harness.mockOptimisticState;
+    mockUiState = harness.mockUiState;
+    mockActionQueue = harness.mockActionQueue;
+    mockLoggerCategory = harness.mockLoggerCategory;
+    mockToastService = harness.mockToastService;
   });
 
   afterEach(() => {
-    consoleWarnSpy?.mockRestore();
-    consoleErrorSpy?.mockRestore();
+    harness.restoreConsole();
   });
 
   // ==================== showUndoToast ====================
@@ -211,99 +97,240 @@ describe('TaskRecordTrackingService', () => {
   // ==================== performUndo ====================
 
   describe('performUndo', () => {
-    it('should log warning when there is nothing to undo', () => {
-      mockUndoService.undo.mockReturnValue(null);
+    it('should log warning when there is nothing to undo', async () => {
+      mockUndoService.prepareUndo.mockReturnValue(null);
 
-      service.performUndo();
+      await expect(service.performUndo()).resolves.toBe(false);
 
       expect(mockLoggerCategory.warn).toHaveBeenCalled();
     });
 
-    it('should show warning toast on version-mismatch', () => {
-      mockUndoService.undo.mockReturnValue('version-mismatch');
+    it('should show warning toast on version-mismatch', async () => {
+      mockUndoService.prepareUndo.mockReturnValue('version-mismatch');
 
-      service.performUndo();
+      await expect(service.performUndo()).resolves.toBe(false);
 
       expect(mockToastService.warning).toHaveBeenCalledWith('撤销失败', expect.any(String));
     });
 
-    it('should apply snapshot on successful undo', () => {
+    it('should apply snapshot on successful undo', async () => {
       const snapshot = { tasks: [createTask()], connections: [] };
-      mockUndoService.undo.mockReturnValue({
+      const action = {
         type: 'task-update',
         projectId: 'proj-1',
         data: { before: snapshot, after: {} },
-      });
+      };
+      mockUndoService.prepareUndo.mockReturnValue(action);
 
-      service.performUndo();
+      await expect(service.performUndo()).resolves.toBe(true);
 
       expect(mockProjectState.updateProjects).toHaveBeenCalled();
       expect(mockSyncCoordinator.markLocalChanges).toHaveBeenCalledWith('structure');
       expect(mockSyncCoordinator.schedulePersist).toHaveBeenCalled();
+      expect(mockUndoService.commitPreparedUndo).toHaveBeenCalledWith(action);
       expect(mockUndoService.notifyReplayApplied).toHaveBeenCalledWith('undo', 'proj-1', snapshot, {});
     });
 
-    it('should handle version-mismatch-forceable result', () => {
-      mockUndoService.undo.mockReturnValue({
+    it('should durably enqueue undo replay before exposing the snapshot to local UI', async () => {
+      const queueWrite = createDeferred<string>();
+      const beforeTask = createTask({
+        id: 'task-undo-durable',
+        title: 'Before undo',
+        updatedAt: '2026-06-13T00:00:00.000Z',
+      });
+      const currentTask = createTask({
+        id: 'task-undo-durable',
+        title: 'Current',
+        updatedAt: '2026-06-13T01:00:00.000Z',
+      });
+      const currentProject = createProject({ tasks: [currentTask] });
+      const undoSnapshot = { tasks: [beforeTask], connections: [] };
+      mockProjectState.activeProject.mockReturnValue(currentProject);
+      mockProjectState.updateProjects.mockImplementation((fn: (projects: Project[]) => Project[]) =>
+        fn([currentProject]));
+      mockActionQueue.enqueueDurably.mockReturnValueOnce(queueWrite.promise);
+      mockUndoService.prepareUndo.mockReturnValue({
+        type: 'task-update',
+        projectId: 'proj-1',
+        data: { before: undoSnapshot, after: { tasks: [currentTask], connections: [] } },
+      });
+
+      const resultPromise = service.performUndo();
+
+      expect(mockActionQueue.enqueueDurably).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'update',
+        entityType: 'task',
+        entityId: 'task-undo-durable',
+      }));
+      expect(mockProjectState.updateProjects).not.toHaveBeenCalled();
+      expect(mockUndoService.notifyReplayApplied).not.toHaveBeenCalled();
+
+      queueWrite.resolve('queued-undo-replay');
+      await expect(resultPromise).resolves.toBe(true);
+
+      expect(mockProjectState.updateProjects).toHaveBeenCalledOnce();
+      const updater = mockProjectState.updateProjects.mock.calls[0][0] as (projects: Project[]) => Project[];
+      expect(updater([currentProject])[0].tasks[0]).toEqual(expect.objectContaining({
+        id: 'task-undo-durable',
+        title: 'Before undo',
+      }));
+      expect(mockUndoService.recordAction).not.toHaveBeenCalled();
+      expect(mockUndoService.recordActionDebounced).not.toHaveBeenCalled();
+      expect(mockUndoService.commitPreparedUndo).toHaveBeenCalledWith(expect.objectContaining({
+        projectId: 'proj-1',
+      }));
+      expect(mockUndoService.notifyReplayApplied).toHaveBeenCalledWith(
+        'undo',
+        'proj-1',
+        undoSnapshot,
+        { tasks: [currentTask], connections: [] },
+      );
+    });
+
+    it('should leave local UI unchanged when durable undo replay enqueue fails', async () => {
+      const beforeTask = createTask({
+        id: 'task-undo-fails',
+        title: 'Before undo',
+        updatedAt: '2026-06-13T00:00:00.000Z',
+      });
+      const currentTask = createTask({
+        id: 'task-undo-fails',
+        title: 'Current',
+        updatedAt: '2026-06-13T01:00:00.000Z',
+      });
+      const currentProject = createProject({ tasks: [currentTask] });
+      mockProjectState.activeProject.mockReturnValue(currentProject);
+      mockActionQueue.enqueueDurably.mockResolvedValueOnce('');
+      mockUndoService.prepareUndo.mockReturnValue({
+        type: 'task-update',
+        projectId: 'proj-1',
+        data: { before: { tasks: [beforeTask], connections: [] }, after: { tasks: [currentTask], connections: [] } },
+      });
+
+      await expect(service.performUndo()).resolves.toBe(false);
+
+      expect(mockActionQueue.enqueueDurably).toHaveBeenCalledOnce();
+      expect(mockProjectState.updateProjects).not.toHaveBeenCalled();
+      expect(mockUndoService.commitPreparedUndo).not.toHaveBeenCalled();
+      expect(mockUndoService.notifyReplayApplied).not.toHaveBeenCalled();
+    });
+
+    it('should handle version-mismatch-forceable result', async () => {
+      const snapshot = { tasks: [], connections: [] };
+      const action = {
+        type: 'task-update',
+        projectId: 'proj-1',
+        data: { before: snapshot, after: {} },
+      };
+      mockUndoService.prepareUndo.mockReturnValue({
         type: 'version-mismatch-forceable',
+        action,
         versionDiff: 2,
       });
-      const snapshot = { tasks: [], connections: [] };
-      mockUndoService.forceUndo.mockReturnValue({
-        projectId: 'proj-1',
-        data: { before: snapshot },
-      });
 
-      service.performUndo();
+      await expect(service.performUndo()).resolves.toBe(true);
 
       expect(mockToastService.warning).toHaveBeenCalledWith('撤销注意', expect.any(String));
-      expect(mockUndoService.forceUndo).toHaveBeenCalled();
+      expect(mockUndoService.forceUndo).not.toHaveBeenCalled();
+      expect(mockUndoService.commitPreparedUndo).toHaveBeenCalledWith(action);
     });
   });
 
   // ==================== performRedo ====================
 
   describe('performRedo', () => {
-    it('should do nothing when there is nothing to redo', () => {
-      mockUndoService.redo.mockReturnValue(null);
+    it('should do nothing when there is nothing to redo', async () => {
+      mockUndoService.prepareRedo.mockReturnValue(null);
 
-      service.performRedo();
+      await expect(service.performRedo()).resolves.toBe(false);
 
       expect(mockLoggerCategory.debug).toHaveBeenCalled();
       expect(mockProjectState.updateProjects).not.toHaveBeenCalled();
     });
 
-    it('should show warning on version-mismatch', () => {
-      mockUndoService.redo.mockReturnValue('version-mismatch');
+    it('should show warning on version-mismatch', async () => {
+      mockUndoService.prepareRedo.mockReturnValue('version-mismatch');
 
-      service.performRedo();
+      await expect(service.performRedo()).resolves.toBe(false);
 
       expect(mockToastService.warning).toHaveBeenCalledWith('重做失败', expect.any(String));
     });
 
-    it('should apply after-snapshot on successful redo', () => {
+    it('should apply after-snapshot on successful redo', async () => {
       const snapshot = { tasks: [createTask()], connections: [] };
-      mockUndoService.redo.mockReturnValue({
+      const action = {
         type: 'task-update',
         projectId: 'proj-1',
         data: { before: {}, after: snapshot },
-      });
+      };
+      mockUndoService.prepareRedo.mockReturnValue(action);
 
-      service.performRedo();
+      await expect(service.performRedo()).resolves.toBe(true);
 
       expect(mockProjectState.updateProjects).toHaveBeenCalled();
       expect(mockSyncCoordinator.markLocalChanges).toHaveBeenCalledWith('structure');
+      expect(mockUndoService.commitPreparedRedo).toHaveBeenCalledWith(action);
       expect(mockUndoService.notifyReplayApplied).toHaveBeenCalledWith('redo', 'proj-1', snapshot, {});
+    });
+
+    it('should durably enqueue redo replay before exposing the snapshot to local UI', async () => {
+      const queueWrite = createDeferred<string>();
+      const beforeTask = createTask({
+        id: 'task-redo-durable',
+        title: 'Before redo',
+        updatedAt: '2026-06-13T00:00:00.000Z',
+      });
+      const afterTask = createTask({
+        id: 'task-redo-durable',
+        title: 'After redo',
+        updatedAt: '2026-06-13T01:00:00.000Z',
+      });
+      const currentProject = createProject({ tasks: [beforeTask] });
+      const afterSnapshot = { tasks: [afterTask], connections: [] };
+      mockProjectState.activeProject.mockReturnValue(currentProject);
+      mockProjectState.updateProjects.mockImplementation((fn: (projects: Project[]) => Project[]) =>
+        fn([currentProject]));
+      mockActionQueue.enqueueDurably.mockReturnValueOnce(queueWrite.promise);
+      mockUndoService.prepareRedo.mockReturnValue({
+        type: 'task-update',
+        projectId: 'proj-1',
+        data: { before: { tasks: [beforeTask], connections: [] }, after: afterSnapshot },
+      });
+
+      const resultPromise = service.performRedo();
+
+      expect(mockActionQueue.enqueueDurably).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'update',
+        entityType: 'task',
+        entityId: 'task-redo-durable',
+      }));
+      expect(mockProjectState.updateProjects).not.toHaveBeenCalled();
+
+      queueWrite.resolve('queued-redo-replay');
+      await expect(resultPromise).resolves.toBe(true);
+
+      expect(mockProjectState.updateProjects).toHaveBeenCalledOnce();
+      expect(mockUndoService.recordAction).not.toHaveBeenCalled();
+      expect(mockUndoService.recordActionDebounced).not.toHaveBeenCalled();
+      expect(mockUndoService.commitPreparedRedo).toHaveBeenCalledWith(expect.objectContaining({
+        projectId: 'proj-1',
+      }));
+      expect(mockUndoService.notifyReplayApplied).toHaveBeenCalledWith(
+        'redo',
+        'proj-1',
+        afterSnapshot,
+        { tasks: [beforeTask], connections: [] },
+      );
     });
   });
 
   // ==================== recordAndUpdate ====================
 
   describe('recordAndUpdate', () => {
-    it('should apply mutator and record undo action', () => {
+    it('should apply mutator and record undo action', async () => {
       const mutator = vi.fn((p: Project) => ({ ...p, name: 'Updated' }));
 
-      service.recordAndUpdate(mutator);
+      await expect(service.recordAndUpdate(mutator)).resolves.toBe(true);
 
       expect(mockProjectState.updateProjects).toHaveBeenCalled();
       expect(mockUndoService.recordAction).toHaveBeenCalledWith(
@@ -314,11 +341,113 @@ describe('TaskRecordTrackingService', () => {
       expect(mockSyncCoordinator.schedulePersist).toHaveBeenCalled();
     });
 
-    it('should skip when no active project', () => {
+    it('should durably enqueue structure mutations before exposing them through the default API', async () => {
+      const queueWrite = createDeferred<string>();
+      const project = createProject({
+        tasks: [
+          createTask({
+            id: 'task-default-durable',
+            title: 'Before',
+            updatedAt: '2026-06-15T00:00:00.000Z',
+          }),
+        ],
+      });
+      mockProjectState.activeProject.mockReturnValue(project);
+      mockProjectState.updateProjects.mockImplementation((fn: (projects: Project[]) => Project[]) =>
+        fn([project]));
+      mockActionQueue.enqueueDurably.mockReturnValueOnce(queueWrite.promise);
+
+      const resultPromise = service.recordAndUpdate((currentProject) => ({
+        ...currentProject,
+        tasks: currentProject.tasks.map(task =>
+          task.id === 'task-default-durable'
+            ? { ...task, title: 'After', updatedAt: '2026-06-15T01:00:00.000Z' }
+            : task,
+        ),
+      }));
+
+      expect(mockActionQueue.enqueueDurably).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'update',
+        entityType: 'task',
+        entityId: 'task-default-durable',
+      }));
+      expect(mockProjectState.updateProjects).not.toHaveBeenCalled();
+      expect(mockUndoService.recordAction).not.toHaveBeenCalled();
+      expect(mockChangeTracker.trackTaskUpdate).not.toHaveBeenCalled();
+
+      queueWrite.resolve('queued-default-action');
+      await expect(resultPromise).resolves.toBe(true);
+
+      expect(mockProjectState.updateProjects).toHaveBeenCalledOnce();
+      expect(mockUndoService.recordAction).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'task-update', projectId: 'proj-1' }),
+        expect.any(Number),
+      );
+      expect(mockChangeTracker.trackTaskUpdate).toHaveBeenCalledWith(
+        'proj-1',
+        expect.objectContaining({ id: 'task-default-durable', title: 'After' }),
+        expect.arrayContaining(['title']),
+      );
+    });
+
+    it('should serialize rapid default updates instead of dropping the second mutation', async () => {
+      const firstQueueWrite = createDeferred<string>();
+      const project = createProject({
+        tasks: [
+          createTask({
+            id: 'task-default-serial',
+            title: 'Initial',
+            updatedAt: '2026-06-15T00:00:00.000Z',
+          }),
+        ],
+      });
+      const committedProjects: Project[] = [project];
+      mockProjectState.activeProject.mockImplementation(() => committedProjects[0]);
+      mockProjectState.updateProjects.mockImplementation((fn: (projects: Project[]) => Project[]) => {
+        const nextProjects = fn(committedProjects);
+        committedProjects.splice(0, committedProjects.length, ...nextProjects);
+        return nextProjects;
+      });
+      mockActionQueue.enqueueDurably
+        .mockReturnValueOnce(firstQueueWrite.promise)
+        .mockResolvedValueOnce('queued-second-action');
+
+      const firstResult = service.recordAndUpdate((currentProject) => ({
+        ...currentProject,
+        tasks: currentProject.tasks.map(task =>
+          task.id === 'task-default-serial'
+            ? { ...task, title: 'First', updatedAt: '2026-06-15T01:00:00.000Z' }
+            : task,
+        ),
+      }));
+      const secondResult = service.recordAndUpdate((currentProject) => ({
+        ...currentProject,
+        tasks: currentProject.tasks.map(task =>
+          task.id === 'task-default-serial'
+            ? { ...task, title: 'Second', updatedAt: '2026-06-15T02:00:00.000Z' }
+            : task,
+        ),
+      }));
+
+      expect(mockActionQueue.enqueueDurably).toHaveBeenCalledTimes(1);
+      expect(mockProjectState.updateProjects).not.toHaveBeenCalled();
+
+      firstQueueWrite.resolve('queued-first-action');
+      await expect(firstResult).resolves.toBe(true);
+      await expect(secondResult).resolves.toBe(true);
+
+      expect(mockActionQueue.enqueueDurably).toHaveBeenCalledTimes(2);
+      expect(committedProjects[0].tasks[0]).toEqual(expect.objectContaining({
+        id: 'task-default-serial',
+        title: 'Second',
+      }));
+    });
+
+    it('should skip when no active project', async () => {
       mockProjectState.activeProject.mockReturnValue(null);
       const mutator = vi.fn();
 
-      service.recordAndUpdate(mutator);
+      await expect(service.recordAndUpdate(mutator)).resolves.toBe(false);
 
       expect(mutator).not.toHaveBeenCalled();
     });
@@ -328,7 +457,172 @@ describe('TaskRecordTrackingService', () => {
       expect(service.lastUpdateType).toBe('structure');
     });
 
-    it('should soft-delete shadow connections that duplicate parentId edges', () => {
+    it('should enqueue durable outbox entry when creating a task', async () => {
+      const project = createProject({ tasks: [] });
+      mockProjectState.activeProject.mockReturnValue(project);
+      mockProjectState.updateProjects.mockImplementation((fn: (projects: Project[]) => Project[]) => {
+        fn([project]);
+      });
+
+      await expect(service.recordAndUpdate((currentProject) => ({
+        ...currentProject,
+        tasks: [
+          createTask({
+            id: 'task-created',
+            title: 'Created task',
+            updatedAt: '2026-06-13T01:00:00.000Z',
+          }),
+        ],
+      }))).resolves.toBe(true);
+
+      expect(mockChangeTracker.trackTaskCreate).toHaveBeenCalledWith(
+        'proj-1',
+        expect.objectContaining({ id: 'task-created' }),
+      );
+      expect(mockActionQueue.enqueueDurably).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'create',
+        entityType: 'task',
+        entityId: 'task-created',
+        payload: expect.objectContaining({
+          projectId: 'proj-1',
+          sourceUserId: 'test-user',
+          task: expect.objectContaining({ id: 'task-created', title: 'Created task' }),
+        }),
+      }));
+    });
+
+    it('should leave the local task mutation uncommitted when durable outbox write fails', async () => {
+      mockActionQueue.enqueueDurably.mockResolvedValueOnce('');
+      const beforeTask = createTask({
+        id: 'task-before',
+        title: 'Before',
+        updatedAt: '2026-06-13T00:00:00.000Z',
+      });
+      const project = createProject({ tasks: [beforeTask] });
+      const updateFns: Array<(projects: Project[]) => Project[]> = [];
+      mockProjectState.activeProject.mockReturnValue(project);
+      mockProjectState.updateProjects.mockImplementation((fn: (projects: Project[]) => Project[]) => {
+        updateFns.push(fn);
+        return fn([project]);
+      });
+
+      await expect(service.recordAndUpdate((currentProject) => ({
+        ...currentProject,
+        tasks: [
+          ...currentProject.tasks,
+          createTask({
+            id: 'task-durable-failed',
+            title: 'Will rollback',
+            updatedAt: '2026-06-13T01:00:00.000Z',
+          }),
+        ],
+      }))).resolves.toBe(false);
+
+      expect(mockActionQueue.enqueueDurably).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'create',
+        entityType: 'task',
+        entityId: 'task-durable-failed',
+      }));
+      expect(updateFns).toEqual([]);
+      expect(mockToastService.error).toHaveBeenCalledWith(
+        '本地保存失败',
+        expect.stringContaining('离线同步队列未能写入'),
+      );
+    });
+
+    it('should persist local-only snapshots before exposing task mutations to UI', async () => {
+      const localOnlyTask = createTask({
+        id: 'task-local-only',
+        title: 'Before local save',
+        updatedAt: '2026-06-13T00:00:00.000Z',
+      });
+      const project = createProject({
+        syncSource: 'local-only',
+        tasks: [localOnlyTask],
+      });
+      const committedProjects: Project[] = [];
+      mockProjectState.activeProject.mockReturnValue(project);
+      mockProjectState.getProjectsWithCurrentData.mockReturnValue([project]);
+      mockProjectState.updateProjects.mockImplementation((fn: (projects: Project[]) => Project[]) => {
+        const nextProjects = fn([project]);
+        committedProjects.push(...nextProjects);
+        return nextProjects;
+      });
+
+      await expect(service.recordAndUpdate((currentProject) => ({
+        ...currentProject,
+        tasks: currentProject.tasks.map(task => task.id === 'task-local-only'
+          ? {
+              ...task,
+              title: 'After local save',
+              updatedAt: '2026-06-13T01:00:00.000Z',
+            }
+          : task),
+      }))).resolves.toBe(true);
+
+      expect(mockActionQueue.enqueueDurably).not.toHaveBeenCalled();
+      expect(mockSyncCoordinator.saveOfflineSnapshotAndWait).toHaveBeenCalledBefore(
+        mockProjectState.updateProjects,
+      );
+      expect(mockSyncCoordinator.saveOfflineSnapshotAndWait).toHaveBeenCalledWith(
+        [expect.objectContaining({
+          id: 'proj-1',
+          tasks: [expect.objectContaining({
+            id: 'task-local-only',
+            title: 'After local save',
+          })],
+        })],
+        'test-user',
+      );
+      expect(committedProjects[0]).toEqual(expect.objectContaining({
+        id: 'proj-1',
+        tasks: [expect.objectContaining({
+          id: 'task-local-only',
+          title: 'After local save',
+        })],
+      }));
+      expect(mockSyncCoordinator.markLocalChanges).toHaveBeenCalledWith('structure');
+      expect(mockSyncCoordinator.schedulePersist).toHaveBeenCalled();
+    });
+
+    it('should track deleted tasks with the pre-delete snapshot for delete CAS', async () => {
+      const taskBeforeDelete = createTask({
+        id: 'task-delete-cas',
+        updatedAt: '2026-05-14T09:30:00.000Z',
+      });
+      const project = createProject({ tasks: [taskBeforeDelete] });
+      mockProjectState.activeProject.mockReturnValue(project);
+      mockProjectState.updateProjects.mockImplementation((fn: (projects: Project[]) => Project[]) => {
+        fn([project]);
+      });
+
+      await expect(service.recordAndUpdate((currentProject) => ({
+        ...currentProject,
+        tasks: [],
+      }))).resolves.toBe(true);
+
+      expect(mockChangeTracker.trackTaskDelete).toHaveBeenCalledWith(
+        'proj-1',
+        'task-delete-cas',
+        expect.objectContaining({
+          id: 'task-delete-cas',
+          updatedAt: '2026-05-14T09:30:00.000Z',
+        }),
+      );
+      expect(mockActionQueue.enqueueDurably).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'delete',
+        entityType: 'task',
+        entityId: 'task-delete-cas',
+        payload: expect.objectContaining({
+          taskId: 'task-delete-cas',
+          projectId: 'proj-1',
+          sourceUserId: 'test-user',
+          baseUpdatedAt: '2026-05-14T09:30:00.000Z',
+        }),
+      }));
+    });
+
+    it('should soft-delete shadow connections that duplicate parentId edges', async () => {
       const project = createProject({
         tasks: [
           createTask({ id: 'task-1', parentId: null }),
@@ -345,7 +639,7 @@ describe('TaskRecordTrackingService', () => {
         return [updatedProject];
       });
 
-      service.recordAndUpdate((currentProject) => ({ ...currentProject }));
+      await expect(service.recordAndUpdate((currentProject) => ({ ...currentProject }))).resolves.toBe(true);
 
       expect(project.connections[0]).toEqual(
         expect.objectContaining({
@@ -357,209 +651,40 @@ describe('TaskRecordTrackingService', () => {
     });
   });
 
-  // ==================== recordAndUpdateDebounced ====================
+  registerTaskRecordTrackingDurableSpecs({
+    service: () => service,
+    mockProjectState: () => mockProjectState,
+    mockUndoService: () => mockUndoService,
+    mockSyncCoordinator: () => mockSyncCoordinator,
+    mockChangeTracker: () => mockChangeTracker,
+    mockActionQueue: () => mockActionQueue,
+    mockAuthService: () => harness.mockAuthService,
+    mockLoggerCategory: () => mockLoggerCategory,
+    mockToastService: () => mockToastService,
+  });
 
-  describe('recordAndUpdateDebounced', () => {
-    it('should apply mutator with debounced undo recording', () => {
-      const mutator = vi.fn((p: Project) => ({ ...p, name: 'Updated' }));
+  // ==================== setupSyncResultHandler ====================
 
-      service.recordAndUpdateDebounced(mutator);
+  describe('setupSyncResultHandler', () => {
+    it('should keep local snapshot instead of rolling back on transient sync error', () => {
+      vi.useFakeTimers();
+      const createdAt = Date.now();
+      mockOptimisticState.hasSnapshot.mockReturnValue(true);
+      mockOptimisticState.snapshots.set('snap-transient', { createdAt });
+      mockSyncCoordinator.syncError.mockReturnValue('Failed to fetch');
+      mockSyncCoordinator.hasPendingLocalChanges.mockReturnValue(true);
 
-      expect(mockProjectState.updateProjects).toHaveBeenCalled();
-      expect(mockUndoService.recordActionDebounced).toHaveBeenCalled();
-      expect(mockSyncCoordinator.markLocalChanges).toHaveBeenCalledWith('content');
-    });
+      try {
+        service.setupSyncResultHandler('snap-transient');
 
-    it('should set lastUpdateType to content', () => {
-      service.recordAndUpdateDebounced((p) => p);
-      expect(service.lastUpdateType).toBe('content');
-    });
+        vi.runOnlyPendingTimers();
 
-    it('should soft-delete shadow connections during debounced updates', () => {
-      const project = createProject({
-        tasks: [
-          createTask({ id: 'task-1', parentId: null }),
-          createTask({ id: 'task-2', parentId: 'task-1' }),
-        ],
-        connections: [createConnection({ id: 'conn-shadow', source: 'task-1', target: 'task-2' })],
-      });
-
-      mockProjectState.activeProject.mockReturnValue(project);
-      mockProjectState.updateProjects.mockImplementation((fn: (projects: Project[]) => Project[]) => {
-        const [updatedProject] = fn([project]);
-        project.tasks = updatedProject.tasks;
-        project.connections = updatedProject.connections;
-        return [updatedProject];
-      });
-
-      service.recordAndUpdateDebounced((currentProject) => ({ ...currentProject }));
-
-      expect(project.connections[0]).toEqual(
-        expect.objectContaining({
-          id: 'conn-shadow',
-          deletedAt: expect.any(String),
-          updatedAt: expect.any(String),
-        })
-      );
-    });
-
-    it('should track connection update when only title changes', () => {
-      const project = createProject({
-        connections: [createConnection()],
-      });
-      mockProjectState.activeProject.mockReturnValue(project);
-      mockProjectState.updateProjects.mockImplementation((fn: (projects: Project[]) => Project[]) => {
-        fn([project]);
-      });
-
-      service.recordAndUpdateDebounced((p) => ({
-        ...p,
-        connections: p.connections.map(conn => ({
-          ...conn,
-          title: '新标题',
-        })),
-      }));
-
-      expect(mockChangeTracker.trackConnectionUpdate).toHaveBeenCalledWith(
-        'proj-1',
-        expect.objectContaining({ title: '新标题', description: '旧描述' })
-      );
-    });
-
-    it('should track active connection update by id even when deleted history shares the same endpoints', () => {
-      const activeConnection = createConnection({
-        id: 'conn-active',
-        title: '活跃标题',
-        description: '活跃描述',
-      });
-      const deletedHistory = createConnection({
-        id: 'conn-deleted',
-        title: '历史标题',
-        description: '历史描述',
-        deletedAt: '2026-04-19T00:00:00.000Z',
-        updatedAt: '2026-04-19T00:00:00.000Z',
-      });
-      const project = createProject({
-        connections: [activeConnection, deletedHistory],
-      });
-      mockProjectState.activeProject.mockReturnValue(project);
-      mockProjectState.updateProjects.mockImplementation((fn: (projects: Project[]) => Project[]) => {
-        fn([project]);
-      });
-
-      service.recordAndUpdateDebounced((p) => ({
-        ...p,
-        connections: p.connections.map(conn => (
-          conn.id === 'conn-active'
-            ? { ...conn, title: '已更新标题' }
-            : conn
-        )),
-      }));
-
-      expect(mockChangeTracker.trackConnectionUpdate).toHaveBeenCalledWith(
-        'proj-1',
-        expect.objectContaining({
-          id: 'conn-active',
-          title: '已更新标题',
-          description: '活跃描述',
-        })
-      );
-    });
-
-    it('should ignore malformed connections without ids instead of throwing', () => {
-      const project = createProject({
-        connections: [createConnection({ id: '' as unknown as string })],
-      });
-      mockProjectState.activeProject.mockReturnValue(project);
-      mockProjectState.updateProjects.mockImplementation((fn: (projects: Project[]) => Project[]) => {
-        fn([project]);
-      });
-
-      expect(() => {
-        service.recordAndUpdateDebounced((p) => ({
-          ...p,
-          name: 'Updated project name',
-        }));
-      }).not.toThrow();
-
-      expect(mockLoggerCategory.error).toHaveBeenCalled();
-    });
-
-    it('should track connection update when endpoints change but id stays the same', () => {
-      const project = createProject({
-        connections: [createConnection({ id: 'conn-relink', source: 'task-1', target: 'task-2' })],
-      });
-      mockProjectState.activeProject.mockReturnValue(project);
-      mockProjectState.updateProjects.mockImplementation((fn: (projects: Project[]) => Project[]) => {
-        fn([project]);
-      });
-
-      service.recordAndUpdateDebounced((p) => ({
-        ...p,
-        connections: p.connections.map(conn => (
-          conn.id === 'conn-relink'
-            ? { ...conn, target: 'task-3' }
-            : conn
-        )),
-      }));
-
-      expect(mockChangeTracker.trackConnectionUpdate).toHaveBeenCalledWith(
-        'proj-1',
-        expect.objectContaining({
-          id: 'conn-relink',
-          source: 'task-1',
-          target: 'task-3',
-        })
-      );
+        expect(mockOptimisticState.rollbackSnapshot).not.toHaveBeenCalled();
+        expect(mockOptimisticState.commitSnapshot).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 
-  // ==================== triggerServerSideDelete ====================
-
-  describe('triggerServerSideDelete', () => {
-    it('should call softDeleteTasksBatch for deleted tasks', async () => {
-      const deletedTask = createTask({ id: 'task-del', deletedAt: new Date().toISOString() });
-      mockProjectState.activeProject.mockReturnValue(
-        createProject({ tasks: [deletedTask] })
-      );
-
-      await service.triggerServerSideDelete('proj-1', ['task-del'], 'snap-1');
-
-      expect(mockSyncCoordinator.softDeleteTasksBatch).toHaveBeenCalledWith(
-        'proj-1',
-        ['task-del'],
-        expect.objectContaining({
-          'task-del': deletedTask.deletedAt,
-        })
-      );
-    });
-
-    it('should rollback when server rejects batch delete', async () => {
-      const deletedTask = createTask({ id: 'task-del', deletedAt: new Date().toISOString() });
-      mockProjectState.activeProject.mockReturnValue(
-        createProject({ tasks: [deletedTask] })
-      );
-      mockSyncCoordinator.softDeleteTasksBatch.mockResolvedValue(-1);
-
-      await service.triggerServerSideDelete('proj-1', ['task-del'], 'snap-1');
-
-      // 【根因修复 2026-05-15】不再调用 rollbackSnapshot 整库回滚，
-      // 改为 restoreTasksFromSnapshot 只回滚被拒任务，保留其它回收站项。
-      expect(mockOptimisticState.rollbackSnapshot).not.toHaveBeenCalled();
-      expect(mockOptimisticState.restoreTasksFromSnapshot).toHaveBeenCalledWith(
-        'snap-1',
-        ['task-del'],
-        expect.objectContaining({ showToast: false }),
-      );
-      expect(mockToastService.warning).toHaveBeenCalled();
-    });
-
-    it('should do nothing when no active project', async () => {
-      mockProjectState.activeProject.mockReturnValue(null);
-
-      await service.triggerServerSideDelete('proj-1', ['task-1'], 'snap-1');
-
-      expect(mockSyncCoordinator.softDeleteTasksBatch).not.toHaveBeenCalled();
-    });
-  });
 });

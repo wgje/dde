@@ -30,6 +30,21 @@ describe('project-save-keys', () => {
     expect(buildProjectSaveSignature(project, ['t1'])).not.toBe(buildProjectSaveSignature(project, ['t1', 't2']));
   });
 
+  it('buildProjectSaveSignature 不同 task 删除 CAS base map 产生不同签名', () => {
+    const project = makeProject({ updatedAt: '2026-01-01T00:00:00.000Z' });
+    const buildSignature = buildProjectSaveSignature as (
+      targetProject: Project,
+      taskIdsToDelete?: string[],
+      taskDeleteBaseUpdatedAtMap?: Record<string, string | null | undefined>,
+    ) => string;
+
+    expect(
+      buildSignature(project, ['t1'], { t1: '2026-06-09T01:00:00.000Z' }),
+    ).not.toBe(
+      buildSignature(project, ['t1'], { t1: '2026-06-09T02:00:00.000Z' }),
+    );
+  });
+
   it('buildProjectSaveSignature 省略待删除参数视为空列表', () => {
     const project = makeProject({ updatedAt: '2026-01-01T00:00:00.000Z' });
     expect(buildProjectSaveSignature(project)).toBe(buildProjectSaveSignature(project, []));

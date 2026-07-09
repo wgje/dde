@@ -104,13 +104,13 @@ export class KnowledgeAnchorPopoverService {
   }
 
   private cancelOpen(): void {
-    if (!this.openTimer) return;
+    if (this.openTimer === undefined) return;
     clearTimeout(this.openTimer);
     this.openTimer = undefined;
   }
 
   private cancelClose(): void {
-    if (!this.closeTimer) return;
+    if (this.closeTimer === undefined) return;
     clearTimeout(this.closeTimer);
     this.closeTimer = undefined;
   }

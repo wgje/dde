@@ -70,6 +70,17 @@ export interface SessionInvalidatedEvent {
   readonly userId: string | null;
 }
 
+/**
+ * 用户主动登出事件。
+ * 与 session-invalidated 的区别：登出不是过期，订阅方不得设置 sessionExpired
+ * 或弹"登录已过期"提示，只应清理复用旧会话身份的缓存（如会话校验快照）。
+ */
+export interface SessionSignedOutEvent {
+  readonly type: 'session-signed-out';
+  readonly source: string;
+  readonly userId: string | null;
+}
+
 /** 所有事件类型联合 */
 export type AppEvent = 
   | UndoRequestEvent 
@@ -79,7 +90,8 @@ export type AppEvent =
   | ForceSyncRequestEvent
   | TaskUpdateEvent
   | SessionRestoredEvent
-  | SessionInvalidatedEvent;
+  | SessionInvalidatedEvent
+  | SessionSignedOutEvent;
 
 // ============================================
 // EventBusService
@@ -96,6 +108,7 @@ export class EventBusService {
   private readonly _taskUpdate$ = new Subject<TaskUpdateEvent>();
   private readonly _sessionRestored$ = new Subject<SessionRestoredEvent>();
   private readonly _sessionInvalidated$ = new Subject<SessionInvalidatedEvent>();
+  private readonly _sessionSignedOut$ = new Subject<SessionSignedOutEvent>();
   
   // 通用事件通道（用于扩展）
   private readonly _events$ = new Subject<AppEvent>();
@@ -128,6 +141,9 @@ export class EventBusService {
   
   /** 会话失效事件流（后台刷新推翻 FastPath 乐观身份） */
   readonly onSessionInvalidated$: Observable<SessionInvalidatedEvent> = this._sessionInvalidated$.asObservable();
+  
+  /** 用户主动登出事件流（非过期；订阅方只做旧会话缓存清理） */
+  readonly onSessionSignedOut$: Observable<SessionSignedOutEvent> = this._sessionSignedOut$.asObservable();
   
   /** 所有事件流（调试/日志用） */
   readonly allEvents$: Observable<AppEvent> = this._events$.asObservable();
@@ -230,6 +246,18 @@ export class EventBusService {
   publishSessionInvalidated(source: string, userId: string | null): void {
     const event: SessionInvalidatedEvent = { type: 'session-invalidated', source, userId };
     this._sessionInvalidated$.next(event);
+    this._events$.next(event);
+    this._lastEvent.set(event);
+  }
+
+  /**
+   * 发布用户主动登出事件（非过期）。
+   * 用于让 SessionManager 等订阅方丢弃复用旧会话身份的缓存（校验快照），
+   * 避免登出后 10s 内的 resume 快路仍按旧 userId 放行恢复链路。
+   */
+  publishSessionSignedOut(source: string, userId: string | null): void {
+    const event: SessionSignedOutEvent = { type: 'session-signed-out', source, userId };
+    this._sessionSignedOut$.next(event);
     this._events$.next(event);
     this._lastEvent.set(event);
   }

@@ -9,8 +9,8 @@ import {
   MigrationStatus,
   MigrationStatusRecord,
   IntegrityCheckResult,
-  IntegrityIssue,
 } from './migration.types';
+import { validateMigrationProjectIntegrity } from './migration-integrity-validation.helpers';
 
 /**
  * 迁移数据完整性与快照服务
@@ -262,149 +262,27 @@ export class MigrationIntegrityService {
    * 在迁移前验证数据一致性，防止部分数据丢失
    */
   validateDataIntegrity(projects: Project[]): IntegrityCheckResult {
-    const issues: IntegrityIssue[] = [];
-    let taskCount = 0;
-    let connectionCount = 0;
-    const allTaskIds = new Set<string>();
-    const allProjectIds = new Set<string>();
-
-    for (const project of projects) {
-      // 检查项目 ID
-      if (!project.id) {
-        issues.push({
-          type: 'missing-id',
-          entityType: 'project',
-          message: `项目缺少 ID: ${project.name || '未命名'}`,
-          severity: 'error'
-        });
-        continue;
-      }
-
-      // 检查项目 ID 重复
-      if (allProjectIds.has(project.id)) {
-        issues.push({
-          type: 'duplicate-id',
-          entityType: 'project',
-          entityId: project.id,
-          message: `项目 ID 重复: ${project.id}`,
-          severity: 'error'
-        });
-      }
-      allProjectIds.add(project.id);
-
-      // 收集任务 ID
-      const projectTaskIds = new Set<string>();
-      for (const task of project.tasks || []) {
-        taskCount++;
-
-        if (!task.id) {
-          issues.push({
-            type: 'missing-id',
-            entityType: 'task',
-            message: `任务缺少 ID: ${task.title || '未命名'} (项目: ${project.name})`,
-            severity: 'error'
-          });
-          continue;
-        }
-
-        // 检查任务 ID 在项目内重复
-        if (projectTaskIds.has(task.id)) {
-          issues.push({
-            type: 'duplicate-id',
-            entityType: 'task',
-            entityId: task.id,
-            message: `任务 ID 在项目内重复: ${task.id}`,
-            severity: 'error'
-          });
-        }
-        projectTaskIds.add(task.id);
-        allTaskIds.add(task.id);
-
-        // 检查必要字段
-        if (typeof task.stage !== 'number' && task.stage !== null) {
-          issues.push({
-            type: 'invalid-field',
-            entityType: 'task',
-            entityId: task.id,
-            message: `任务 stage 字段类型无效: ${typeof task.stage}`,
-            severity: 'warning'
-          });
-        }
-      }
-
-      // 二次遍历检查孤儿任务
-      for (const task of project.tasks || []) {
-        if (task.parentId && !projectTaskIds.has(task.parentId)) {
-          issues.push({
-            type: 'orphan-task',
-            entityType: 'task',
-            entityId: task.id,
-            message: `任务 "${task.title || task.id}" 的父任务不存在: ${task.parentId}`,
-            severity: 'warning'
-          });
-        }
-      }
-
-      // 检查连接
-      for (const conn of project.connections || []) {
-        connectionCount++;
-
-        if (!conn.id) {
-          issues.push({
-            type: 'missing-id',
-            entityType: 'connection',
-            message: `连接缺少 ID: ${conn.source} -> ${conn.target}`,
-            severity: 'warning'
-          });
-        }
-
-        // 检查断开的连接
-        if (!projectTaskIds.has(conn.source)) {
-          issues.push({
-            type: 'broken-connection',
-            entityType: 'connection',
-            entityId: conn.id,
-            message: `连接源任务不存在: ${conn.source}`,
-            severity: 'warning'
-          });
-        }
-        if (!projectTaskIds.has(conn.target)) {
-          issues.push({
-            type: 'broken-connection',
-            entityType: 'connection',
-            entityId: conn.id,
-            message: `连接目标任务不存在: ${conn.target}`,
-            severity: 'warning'
-          });
-        }
-      }
-    }
+    const result = validateMigrationProjectIntegrity(projects);
 
     // 记录检查结果
-    const hasErrors = issues.some(i => i.severity === 'error');
-    if (issues.length > 0) {
+    const hasErrors = !result.valid;
+    if (result.issues.length > 0) {
       this.logger.warn('数据完整性检查发现问题', {
-        issueCount: issues.length,
-        errorCount: issues.filter(i => i.severity === 'error').length,
-        warningCount: issues.filter(i => i.severity === 'warning').length
+        issueCount: result.issues.length,
+        errorCount: result.issues.filter(i => i.severity === 'error').length,
+        warningCount: result.issues.filter(i => i.severity === 'warning').length
       });
 
       if (hasErrors) {
         this.sentryLazyLoader.captureMessage('数据完整性检查发现严重问题', {
           level: 'error',
           tags: { operation: 'validateDataIntegrity' },
-          extra: { issues: issues.filter(i => i.severity === 'error') }
+          extra: { issues: result.issues.filter(i => i.severity === 'error') }
         });
       }
     }
 
-    return {
-      valid: !hasErrors,
-      issues,
-      projectCount: projects.length,
-      taskCount,
-      connectionCount
-    };
+    return result;
   }
 
   // ============================================================

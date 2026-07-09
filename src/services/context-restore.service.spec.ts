@@ -180,6 +180,10 @@ describe('ContextRestoreService', () => {
 
     it('Flow 视图时 viewMode 应为 flow', async () => {
       mockUiState.activeView.set('flow');
+      vi.spyOn(
+        service as unknown as { captureFlowViewport: () => Promise<null> },
+        'captureFlowViewport'
+      ).mockResolvedValue(null);
       const task = createTask({
         id: 'flow-snap',
         parkingMeta: {

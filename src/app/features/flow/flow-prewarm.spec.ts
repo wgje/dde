@@ -14,10 +14,6 @@ vi.mock('gojs', async importOriginal => {
   return {
     ...actual,
     Diagram: DiagramWithSpy,
-    default: {
-      ...actual.default,
-      Diagram: DiagramWithSpy,
-    },
   };
 });
 
@@ -54,14 +50,14 @@ describe('prewarmFlowFeature', () => {
       .map(element => element.outerHTML);
     const appendedBodyElements: string[] = [];
     const appendChildSpy = vi.spyOn(document.body, 'appendChild')
-      .mockImplementation(function appendChild(node) {
+      .mockImplementation(function appendChild(this: HTMLElement, node: Node) {
         if (node instanceof Element) {
           appendedBodyElements.push(node.outerHTML);
         }
         return Node.prototype.appendChild.call(this, node);
       });
     const insertBeforeSpy = vi.spyOn(document.body, 'insertBefore')
-      .mockImplementation(function insertBefore(node, child) {
+      .mockImplementation(function insertBefore(this: HTMLElement, node: Node, child: Node | null) {
         if (node instanceof Element) {
           appendedBodyElements.push(node.outerHTML);
         }

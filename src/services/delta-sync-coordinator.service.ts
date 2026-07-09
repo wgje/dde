@@ -59,7 +59,7 @@ export class DeltaSyncCoordinatorService {
     return Number.isNaN(parsed) ? Number.NaN : parsed;
   }
 
-  private mergeProtectedDeltaTask(localTask: Task, remoteTask: Task, projectId: string): Task {
+  private getProtectedDeltaTaskFields(localTask: Task, remoteTask: Task, projectId: string): Set<string> {
     const pending = this.changeTracker.getPendingChange(
       projectId,
       'task',
@@ -72,8 +72,6 @@ export class DeltaSyncCoordinatorService {
       protectedFields.add(field);
     }
 
-    const mergedTask: Record<string, unknown> = { ...remoteTask };
-
     const localTime = this.parseTimestamp(localTask.updatedAt);
     const remoteTime = this.parseTimestamp(remoteTask.updatedAt);
     if (!Number.isNaN(localTime) && !Number.isNaN(remoteTime) && localTime >= remoteTime) {
@@ -82,32 +80,15 @@ export class DeltaSyncCoordinatorService {
       }
     }
 
-    const contentLost = Boolean(
-      localTask.content && (remoteTask.content === undefined || remoteTask.content === null),
-    );
-    const titleLost = Boolean(
-      localTask.title && (remoteTask.title === undefined || remoteTask.title === null),
-    );
+    return protectedFields;
+  }
 
-    if (contentLost || titleLost) {
-      this.logger.warn('Delta Sync: 检测到远程字段缺失，保留本地内容', {
-        taskId: remoteTask.id,
-        contentLost,
-        titleLost,
-        localContentLength: localTask.content?.length ?? 0,
-      });
-      this.sentryLazyLoader.captureMessage('Delta Sync: Content protection triggered', {
-        level: 'warning',
-        tags: { operation: 'performDeltaSync', taskId: remoteTask.id },
-        extra: { localContentLength: localTask.content?.length ?? 0, projectId, contentLost, titleLost },
-      });
-      if (contentLost) {
-        mergedTask.content = localTask.content;
-      }
-      if (titleLost) {
-        mergedTask.title = localTask.title;
-      }
-    }
+  private mergeProtectedDeltaTask(localTask: Task, remoteTask: Task, projectId: string): Task {
+    const protectedFields = this.getProtectedDeltaTaskFields(localTask, remoteTask, projectId);
+    const mergedTask: Record<string, unknown> = { ...remoteTask };
+    const remoteTime = this.parseTimestamp(remoteTask.updatedAt);
+
+    this.preserveMissingRemoteTaskContent(localTask, remoteTask, projectId, mergedTask);
 
     for (const field of protectedFields) {
       mergedTask[field] = localTask[field as keyof Task];
@@ -125,6 +106,42 @@ export class DeltaSyncCoordinatorService {
     }
 
     return mergedTask as unknown as Task;
+  }
+
+  private preserveMissingRemoteTaskContent(
+    localTask: Task,
+    remoteTask: Task,
+    projectId: string,
+    mergedTask: Record<string, unknown>,
+  ): void {
+    const contentLost = Boolean(
+      localTask.content && (remoteTask.content === undefined || remoteTask.content === null),
+    );
+    const titleLost = Boolean(
+      localTask.title && (remoteTask.title === undefined || remoteTask.title === null),
+    );
+
+    if (!contentLost && !titleLost) {
+      return;
+    }
+
+    this.logger.warn('Delta Sync: 检测到远程字段缺失，保留本地内容', {
+      taskId: remoteTask.id,
+      contentLost,
+      titleLost,
+      localContentLength: localTask.content?.length ?? 0,
+    });
+    this.sentryLazyLoader.captureMessage('Delta Sync: Content protection triggered', {
+      level: 'warning',
+      tags: { operation: 'performDeltaSync', taskId: remoteTask.id },
+      extra: { localContentLength: localTask.content?.length ?? 0, projectId, contentLost, titleLost },
+    });
+    if (contentLost) {
+      mergedTask.content = localTask.content;
+    }
+    if (titleLost) {
+      mergedTask.title = localTask.title;
+    }
   }
 
   /**
@@ -163,27 +180,10 @@ export class DeltaSyncCoordinatorService {
         projectId
       );
 
-      // 更新 ProjectStateService
-      const projectUpdatedAt = this.pickLatestTimestamp(
-        currentProject.updatedAt,
-        tasks.map(t => t.updatedAt).filter((v): v is string => !!v),
-        connections.map(c => c.updatedAt).filter((v): v is string => !!v)
-      );
-      this.projectState.updateProjects(ps => ps.map(p => {
-        if (p.id === projectId) {
-          return {
-            ...p,
-            tasks: mergedTasks,
-            connections: mergedConnections,
-            updatedAt: projectUpdatedAt
-          };
-        }
-        return p;
-      }));
+      this.applyDeltaProjectState(projectId, currentProject, mergedTasks, mergedConnections, tasks, connections);
 
       if (nextCursor) {
-        await this.projectDataService.saveOfflineSnapshotAndWait(this.projectState.projects());
-        await this.projectSyncCursor.commitProjectSyncCursor(projectId, nextCursor);
+        await this.persistDeltaCursor(projectId, nextCursor);
       }
 
       this.logger.info('Delta Sync 完成', {
@@ -206,6 +206,40 @@ export class DeltaSyncCoordinatorService {
       });
       return { taskChanges: 0, connectionChanges: 0 };
     }
+  }
+
+  private applyDeltaProjectState(
+    projectId: string,
+    currentProject: Project,
+    mergedTasks: Task[],
+    mergedConnections: Connection[],
+    tasks: Task[],
+    connections: Connection[],
+  ): void {
+    const projectUpdatedAt = this.pickLatestTimestamp(
+      currentProject.updatedAt,
+      tasks.map(t => t.updatedAt).filter((v): v is string => !!v),
+      connections.map(c => c.updatedAt).filter((v): v is string => !!v)
+    );
+    this.projectState.updateProjects(ps => ps.map(p => {
+      if (p.id === projectId) {
+        return {
+          ...p,
+          tasks: mergedTasks,
+          connections: mergedConnections,
+          updatedAt: projectUpdatedAt
+        };
+      }
+      return p;
+    }));
+  }
+
+  private async persistDeltaCursor(
+    projectId: string,
+    nextCursor: NonNullable<Awaited<ReturnType<ProjectSyncCursorService['checkForDrift']>>['nextCursor']>,
+  ): Promise<void> {
+    await this.projectDataService.saveOfflineSnapshotAndWait(this.projectState.projects());
+    await this.projectSyncCursor.commitProjectSyncCursor(projectId, nextCursor);
   }
 
   /**

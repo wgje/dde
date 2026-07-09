@@ -85,19 +85,21 @@ export class StorageQuotaService implements OnDestroy {
 
   /** 定期检查定时器 */
   private checkTimer: ReturnType<typeof setInterval> | null = null;
+  private checkQuotaPromise: Promise<StorageUsageReport> | null = null;
 
   /** 上次警告 Toast 时间（冷却控制） */
   private lastWarningTime = 0;
 
   /** 是否已初始化 */
   private initialized = false;
+  private destroyed = false;
 
   /**
    * 初始化配额监控
    * 应在应用启动时调用
    */
   async initialize(): Promise<void> {
-    if (this.initialized) return;
+    if (this.initialized || this.destroyed) return;
     this.initialized = true;
 
     this.logger.info('存储配额监控服务初始化');
@@ -105,6 +107,7 @@ export class StorageQuotaService implements OnDestroy {
     // 启动时立即检查一次
     if (STORAGE_QUOTA_CONFIG.CHECK_ON_STARTUP) {
       await this.checkQuota();
+      if (this.destroyed) return;
     }
 
     // 启动定期检查
@@ -114,7 +117,10 @@ export class StorageQuotaService implements OnDestroy {
   }
 
   ngOnDestroy(): void {
-    if (this.checkTimer) {
+    if (this.destroyed) return;
+    this.destroyed = true;
+
+    if (this.checkTimer !== null) {
       clearInterval(this.checkTimer);
       this.checkTimer = null;
     }
@@ -124,9 +130,29 @@ export class StorageQuotaService implements OnDestroy {
    * 执行一次配额检查
    */
   async checkQuota(): Promise<StorageUsageReport> {
+    if (this.destroyed) {
+      return this.createFallbackReport();
+    }
+
+    if (this.checkQuotaPromise) {
+      return this.checkQuotaPromise;
+    }
+
+    this.checkQuotaPromise = this.performQuotaCheck()
+      .finally(() => {
+        this.checkQuotaPromise = null;
+      });
+
+    return this.checkQuotaPromise;
+  }
+
+  private async performQuotaCheck(): Promise<StorageUsageReport> {
     try {
       const localStorageUsed = this.measureLocalStorageUsage();
       const { used: indexedDBUsed, quota: indexedDBQuota } = await this.measureIndexedDBUsage();
+      if (this.destroyed) {
+        return this.createFallbackReport();
+      }
 
       const localStorageLevel = this.getLevel(
         localStorageUsed,
@@ -162,15 +188,11 @@ export class StorageQuotaService implements OnDestroy {
       return report;
     } catch (error) {
       this.logger.error('配额检查失败', error);
+      if (this.destroyed) {
+        return this.createFallbackReport();
+      }
       // 不抛出，返回空报告
-      const fallback: StorageUsageReport = {
-        localStorageUsed: 0,
-        localStorageLevel: 'normal',
-        indexedDBUsed: 0,
-        indexedDBLevel: 'normal',
-        indexedDBQuota: 0,
-        checkedAt: new Date().toISOString(),
-      };
+      const fallback = this.createFallbackReport();
       this._report.set(fallback);
       return fallback;
     }
@@ -230,10 +252,18 @@ export class StorageQuotaService implements OnDestroy {
    * 清理指定的可清理项目
    */
   cleanItems(items: CleanableItem[]): { cleaned: number; freedBytes: number } {
+    if (this.destroyed) {
+      return { cleaned: 0, freedBytes: 0 };
+    }
+
     let cleaned = 0;
     let freedBytes = 0;
 
     for (const item of items) {
+      if (this.destroyed) {
+        break;
+      }
+
       try {
         if (item.type === 'localStorage') {
           localStorage.removeItem(item.key);
@@ -249,7 +279,9 @@ export class StorageQuotaService implements OnDestroy {
     if (cleaned > 0) {
       this.logger.info(`已清理 ${cleaned} 项，释放约 ${(freedBytes / 1024).toFixed(1)}KB`);
       // 重新检查配额
-      void this.checkQuota();
+      if (!this.destroyed) {
+        void this.checkQuota();
+      }
     }
 
     return { cleaned, freedBytes };
@@ -260,6 +292,10 @@ export class StorageQuotaService implements OnDestroy {
    * 在配额接近溢出时自动执行
    */
   emergencyCleanup(): { cleaned: number; freedBytes: number } {
+    if (this.destroyed) {
+      return { cleaned: 0, freedBytes: 0 };
+    }
+
     this.logger.warn('执行紧急存储清理');
 
     const items = this.getCleanableItems().filter(item => item.safe);
@@ -332,6 +368,10 @@ export class StorageQuotaService implements OnDestroy {
    * 根据配额级别执行响应操作
    */
   private handleQuotaLevel(report: StorageUsageReport): void {
+    if (this.destroyed) {
+      return;
+    }
+
     const now = Date.now();
     const cooldownElapsed = now - this.lastWarningTime > STORAGE_QUOTA_CONFIG.WARNING_COOLDOWN;
 
@@ -366,5 +406,16 @@ export class StorageQuotaService implements OnDestroy {
         );
       }
     }
+  }
+
+  private createFallbackReport(): StorageUsageReport {
+    return {
+      localStorageUsed: 0,
+      localStorageLevel: 'normal',
+      indexedDBUsed: 0,
+      indexedDBLevel: 'normal',
+      indexedDBQuota: 0,
+      checkedAt: new Date().toISOString(),
+    };
   }
 }

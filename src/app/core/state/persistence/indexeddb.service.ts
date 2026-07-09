@@ -149,6 +149,18 @@ export class IndexedDBService {
     const transaction = db.transaction(storeName, 'readonly');
     return !transaction.objectStore(storeName).indexNames.contains(indexName);
   }
+
+  private settleWriteTransaction(
+    transaction: IDBTransaction,
+    resolve: () => void,
+    reject: (reason?: unknown) => void,
+    fallbackMessage: string
+  ): void {
+    const rejectTransaction = () => reject(transaction.error ?? new Error(fallbackMessage));
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = rejectTransaction;
+    transaction.onabort = rejectTransaction;
+  }
   
   /**
    * 获取数据库实例
@@ -254,10 +266,15 @@ export class IndexedDBService {
     return new Promise((resolve, reject) => {
       const transaction = db.transaction(storeName, 'readwrite');
       const store = transaction.objectStore(storeName);
-      store.put(data);
+      const request = store.put(data);
       
-      transaction.oncomplete = () => resolve();
-      transaction.onerror = () => reject(transaction.error);
+      this.settleWriteTransaction(
+        transaction,
+        resolve,
+        reject,
+        `IndexedDB transaction failed while putting into ${storeName}`
+      );
+      request.onerror = () => reject(request.error);
     });
   }
   
@@ -274,7 +291,12 @@ export class IndexedDBService {
       const store = transaction.objectStore(storeName);
       const request = store.delete(key);
       
-      request.onsuccess = () => resolve();
+      this.settleWriteTransaction(
+        transaction,
+        resolve,
+        reject,
+        `IndexedDB transaction failed while deleting from ${storeName}`
+      );
       request.onerror = () => reject(request.error);
     });
   }
@@ -294,8 +316,12 @@ export class IndexedDBService {
       for (const key of keys) {
         store.delete(key);
       }
-      transaction.oncomplete = () => resolve();
-      transaction.onerror = () => reject(transaction.error);
+      this.settleWriteTransaction(
+        transaction,
+        resolve,
+        reject,
+        `IndexedDB transaction failed while batch deleting from ${storeName}`
+      );
     });
   }
   
@@ -308,7 +334,12 @@ export class IndexedDBService {
       const store = transaction.objectStore(storeName);
       const request = store.clear();
       
-      request.onsuccess = () => resolve();
+      this.settleWriteTransaction(
+        transaction,
+        resolve,
+        reject,
+        `IndexedDB transaction failed while clearing ${storeName}`
+      );
       request.onerror = () => reject(request.error);
     });
   }

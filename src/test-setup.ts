@@ -4,7 +4,7 @@ import 'zone.js/testing';
 import './test-setup.mocks';
 import { mockSentryLazyLoaderService } from './test-setup.mocks';
 import { TestBed } from '@angular/core/testing';
-import { afterEach } from 'vitest';
+import { afterEach, vi } from 'vitest';
 import {
   BrowserDynamicTestingModule,
   platformBrowserDynamicTesting,
@@ -60,6 +60,9 @@ const ensureAnimationFramePolyfill = () => {
 ensureAnimationFramePolyfill();
 
 afterEach(() => {
+  vi.useRealTimers();
+  ensureAnimationFramePolyfill();
+
   if (g[testBedResetSkipKey] === true) {
     return;
   }

@@ -15,9 +15,11 @@
  * stopPropagation，导致 `HostListener('document:keydown')` 偶发收不到 Ctrl/Cmd+Z，
  * 表现为「撤回失效」。解决：capture 阶段优先处理，bubble 阶段用 defaultPrevented 去重。
  */
-import { Injectable, inject } from '@angular/core';
+import { Injectable, Injector, inject } from '@angular/core';
 import { TaskOperationAdapterService } from './task-operation-adapter.service';
 import { UiStateService } from './ui-state.service';
+import { DynamicModalService } from './dynamic-modal.service';
+import { ModalService } from './modal.service';
 import { showBlackBoxPanel } from '../state/focus-stores';
 
 /** 侧栏搜索框聚焦前的等待时长（毫秒）—— 等待侧栏展开动画落定 */
@@ -25,9 +27,16 @@ const SIDEBAR_SEARCH_FOCUS_DELAY_MS = 50;
 
 @Injectable({ providedIn: 'root' })
 export class KeyboardShortcutService {
-  private readonly taskOpsAdapter = inject(TaskOperationAdapterService);
+  private readonly injector = inject(Injector);
   private readonly uiState = inject(UiStateService);
+  private readonly dynamicModal = inject(DynamicModalService);
+  private readonly modal = inject(ModalService);
   private started = false;
+  private searchFocusTimer: ReturnType<typeof setTimeout> | null = null;
+
+  private get taskOpsAdapter(): TaskOperationAdapterService {
+    return this.injector.get(TaskOperationAdapterService);
+  }
 
   private readonly captureListener = (event: KeyboardEvent) => {
     if (this.shouldIgnore(event)) return;
@@ -41,34 +50,71 @@ export class KeyboardShortcutService {
   /** 注册 capture 阶段的全局快捷键监听。 */
   initialize(): void {
     if (this.started) return;
-    this.started = true;
+    if (typeof document === 'undefined') return;
     document.addEventListener('keydown', this.captureListener, { capture: true });
+    this.started = true;
   }
 
   /** 注销监听。 */
   teardown(): void {
-    document.removeEventListener('keydown', this.captureListener, { capture: true } as AddEventListenerOptions);
+    if (this.searchFocusTimer !== null) {
+      clearTimeout(this.searchFocusTimer);
+      this.searchFocusTimer = null;
+    }
+
+    if (typeof document !== 'undefined') {
+      document.removeEventListener('keydown', this.captureListener, { capture: true } as AddEventListenerOptions);
+    }
     this.started = false;
   }
 
   private shouldIgnore(event: KeyboardEvent): boolean {
-    return event.defaultPrevented || !event.key || (!event.ctrlKey && !event.metaKey);
+    return event.defaultPrevented
+      || !event.key
+      || (!event.ctrlKey && !event.metaKey)
+      || this.dynamicModal.hasOpenModal()
+      || this.modal.hasOpenModal()
+      || this.isEditableTarget(event.target);
+  }
+
+  private isEditableTarget(target: EventTarget | null): boolean {
+    if (!(target instanceof Element)) {
+      return false;
+    }
+
+    if (target.closest('input, textarea, select')) {
+      return true;
+    }
+
+    const editableHost = target.closest('[contenteditable]');
+    return editableHost !== null
+      && editableHost.getAttribute('contenteditable')?.toLowerCase() !== 'false';
   }
 
   private handleUndoRedo(event: KeyboardEvent, key: string): boolean {
     if (key === 'z' && !event.shiftKey) {
       event.preventDefault();
-      this.taskOpsAdapter.performUndo();
+      this.runUndoRedoCommand(() => this.taskOpsAdapter.performUndo());
       return true;
     }
 
     if ((key === 'z' && event.shiftKey) || key === 'y') {
       event.preventDefault();
-      this.taskOpsAdapter.performRedo();
+      this.runUndoRedoCommand(() => this.taskOpsAdapter.performRedo());
       return true;
     }
 
     return false;
+  }
+
+  private runUndoRedoCommand(command: () => Promise<unknown>): void {
+    try {
+      void Promise.resolve(command()).catch(error => {
+        console.warn('Keyboard shortcut undo/redo failed', error);
+      });
+    } catch (error) {
+      console.warn('Keyboard shortcut undo/redo failed', error);
+    }
   }
 
   private handleSearch(event: KeyboardEvent, key: string): boolean {
@@ -81,7 +127,12 @@ export class KeyboardShortcutService {
 
   private focusGlobalSearchInput(): void {
     this.uiState.sidebarOpen.set(true);
-    setTimeout(() => {
+    if (this.searchFocusTimer !== null) {
+      clearTimeout(this.searchFocusTimer);
+    }
+    this.searchFocusTimer = setTimeout(() => {
+      this.searchFocusTimer = null;
+      if (typeof document === 'undefined') return;
       const searchInput = document.querySelector<HTMLInputElement>('aside input[aria-label="搜索项目或任务"]');
       searchInput?.focus();
       searchInput?.select();

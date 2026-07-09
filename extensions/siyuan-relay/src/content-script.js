@@ -3,6 +3,12 @@ const BUILTIN_ALLOWED_ORIGINS = new Set([
   'https://www.nanoflow.app',
   'https://nanoflow.pages.dev',
   'https://dde-eight.vercel.app',
+  'http://localhost:4200',
+  'http://localhost:5173',
+  'http://localhost:3020',
+  'http://127.0.0.1:4200',
+  'http://127.0.0.1:5173',
+  'http://127.0.0.1:3020',
 ]);
 
 const ALLOWED_MESSAGE_TYPES = new Set([
@@ -17,8 +23,7 @@ function isAllowedOrigin(origin) {
   try {
     const url = new URL(origin);
     if (BUILTIN_ALLOWED_ORIGINS.has(url.origin)) return true;
-    // 本地开发允许任意 localhost/127.0.0.1 端口（Vite/Angular/preview 端口可能变化）。
-    return url.protocol === 'http:' && (url.hostname === 'localhost' || url.hostname === '127.0.0.1');
+    return false;
   } catch {
     return false;
   }

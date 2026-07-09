@@ -2,6 +2,19 @@ import { inject, Injectable, signal } from '@angular/core';
 import { Task } from '../../../../models';
 import { LoggerService } from '../../../../services/logger.service';
 import { TouchDragState, DragExpandState, AutoScrollState, DropTargetInfo, TouchDragGestureMode } from '../components/text-view.types';
+import {
+  applyAutoScrollAmount,
+  applyDragGhostFeedback,
+  calculateDragGhostPosition,
+  createDragGhostElement,
+  createInitialTouchDragState,
+  createTouchMoveMetrics,
+  getAutoScrollAmount,
+  getNestedAutoScrollAmount,
+  getNextAutoScrollContainer,
+  removeDragGhostElement,
+  type TouchMoveMetrics,
+} from './text-view-drag-drop.helpers';
 
 interface TouchDragStartOptions {
   gestureMode?: TouchDragGestureMode;
@@ -23,6 +36,7 @@ export class TextViewDragDropService {
   
   /** 是否正在进行 DOM 更新（折叠/展开阶段），此时忽略 pointerup/pointercancel */
   private isUpdatingDOM = false;
+  private domUpdateTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** 鼠标拖拽展开状态 */
   private dragExpandState: DragExpandState = {
@@ -31,7 +45,7 @@ export class TextViewDragDropService {
   };
   
   /** 触摸拖拽状态 */
-  private touchState: TouchDragState = this.createInitialTouchState();
+  private touchState: TouchDragState = createInitialTouchDragState();
   
   /** 自动滚动状态 */
   private autoScrollState: AutoScrollState = {
@@ -44,9 +58,6 @@ export class TextViewDragDropService {
   /** 拖拽来源阶段 */
   private dragSourceStage: number | null = null;
 
-  /** 来源阶段是否已经因为拖拽而折叠 */
-  private sourceStageCollapsed = false;
-
   /** 因拖拽自动折叠的阶段（用于拖拽结束后恢复） */
   private autoCollapsedSourceStage: number | null = null;
 
@@ -56,25 +67,14 @@ export class TextViewDragDropService {
   /** 拖拽激活时间戳 - 用于防止 pointerup 过早触发 */
   private dragActivationTime: number | null = null;
 
-  private createInitialTouchState(): TouchDragState {
-    return {
-      task: null,
-      isDragging: false,
-      targetStage: null,
-      targetBeforeId: null,
-      targetUnassignedId: null,  // 待分配块间拖放的目标任务ID
-      startX: 0,
-      startY: 0,
-      currentX: 0,
-      currentY: 0,
-      gestureMode: 'default',
-      longPressTimer: null,
-      dragGhost: null,
-      previousHoverStage: null,
-      expandedDuringDrag: new Set<number>(),
-      originalStage: null  // 任务原始所在的阶段，拖拽期间不折叠
-    };
-  }
+  /**
+   * 鼠标拖拽丢失看门狗：拖拽源节点在拖拽中被移除（远端同步删移/项目切换重渲染）时
+   * Chrome 不会派发 dragend，document dragover 监听与 rAF 自动滚动会一直滞留。
+   * 以 dragover 心跳（活跃拖拽在窗口内每 ~350ms 持续触发）静默 + 源节点缺失双条件自愈，
+   * 避免把「拖出窗口」（源节点仍在）误判为拖拽丢失
+   */
+  private mouseDragWatchdogTimer: ReturnType<typeof setTimeout> | null = null;
+  private static readonly MOUSE_DRAG_WATCHDOG_MS = 1500;
 
   /** 开始鼠标拖拽 */
   startDrag(task: Task) {
@@ -85,7 +85,7 @@ export class TextViewDragDropService {
   /** 结束拖拽（鼠标和触摸通用），返回拖拽期间临时展开但尚未折叠的阶段 */
   endDrag(): number[] {
     const pendingCollapseStages = Array.from(this.dragExpandState.expandedDuringDrag);
-    
+
     this.draggingTaskId.set(null);
     this.dragOverStage.set(null);
     this.dropTargetInfo.set(null);
@@ -98,7 +98,6 @@ export class TextViewDragDropService {
     this.stopAutoScroll();
 
     this.dragSourceStage = null;
-    this.sourceStageCollapsed = false;
 
     return pendingCollapseStages;
   }
@@ -262,7 +261,7 @@ export class TextViewDragDropService {
   }
   
   private clearMoveTimeout() {
-    if (this.moveTimeoutId) {
+    if (this.moveTimeoutId !== null) {
       clearTimeout(this.moveTimeoutId);
       this.moveTimeoutId = null;
     }
@@ -280,85 +279,80 @@ export class TextViewDragDropService {
     this.touchState.currentY = touch.clientY;
     
     // 如果还没开始拖拽，检查移动距离是否超过阈值
-    if (!this.touchState.isDragging) {
-      const deltaX = Math.abs(touch.clientX - this.touchState.startX);
-      const deltaY = Math.abs(touch.clientY - this.touchState.startY);
-      const gestureMode = this.touchState.gestureMode;
-      const moveThreshold = gestureMode === 'handle'
-        ? this.HANDLE_MOVE_THRESHOLD
-        : this.DEFAULT_MOVE_THRESHOLD;
-      
-      // 判断移动方向：如果主要是垂直移动，认为是滚动意图
-      // 显式拖拽抓手不参与滚动意图识别，任何方向都按拖拽处理。
-      const isVerticalScroll = gestureMode === 'handle'
-        ? false
-        : deltaY > deltaX * this.DEFAULT_VERTICAL_SCROLL_RATIO;
-      const totalDistance = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
-      
-      this.logger.debug('Move check:', {
-        deltaX: deltaX.toFixed(1),
-        deltaY: deltaY.toFixed(1),
-        totalDistance: totalDistance.toFixed(1),
-        isVerticalScroll,
-        threshold: moveThreshold,
-        gestureMode,
-      });
-      
-      if (totalDistance > moveThreshold) {
-        if (isVerticalScroll) {
-          // 主要是垂直滚动，取消拖拽准备，允许正常滚动
-          this.cancelLongPress();
-          this.resetTouchState();
-          return false;
-        } else {
-          // 水平移动或斜向移动，激活拖拽
-          this.cancelLongPress();
-          this.activateDrag();
-          // 🔧 关键修复：激活后立即返回 true，确保调用方处理 Ghost 更新
-          // 不要继续执行下面的逻辑，因为 activateDrag 已经创建了 Ghost
-        }
-      } else {
-        // 移动距离不够，继续等待长按
-        return false;
-      }
+    if (!this.touchState.isDragging && !this.handlePendingTouchMove(touch)) {
+      return false;
     }
     
     // 重置超时检测器 - 有活动说明还在正常拖拽
     this.startMoveTimeoutDetector();
     
     if (this.touchState.isDragging) {
-      // 更新幽灵元素位置
-      if (this.touchState.dragGhost) {
-        // 🔧 简化位置计算：Ghost 在手指垂直下方
-        const viewportWidth = window.innerWidth;
-        const viewportHeight = window.innerHeight;
-        const ghostWidth = 200;
-        const ghostHeight = 50;
-        
-        let newLeft = touch.clientX - ghostWidth / 2;
-        let newTop = touch.clientY; // 手指位置（垂直下方 0px）
-        
-        // 边界检查
-        if (newLeft < 5) newLeft = 5;
-        if (newLeft + ghostWidth > viewportWidth - 5) newLeft = viewportWidth - ghostWidth - 5;
-        if (newTop < 5) newTop = 5;
-        if (newTop + ghostHeight > viewportHeight - 5) newTop = viewportHeight - ghostHeight - 5;
-        
-        this.touchState.dragGhost.style.left = `${newLeft}px`;
-        this.touchState.dragGhost.style.top = `${newTop}px`;
-      } else {
-        // 如果幽灵元素不存在，重新创建它
-        this.logger.warn('Ghost missing during move, recreating at', {
-          x: touch.clientX,
-          y: touch.clientY
-        });
-        this.createDragGhost(this.touchState.task, touch.clientX, touch.clientY);
-      }
-      
+      this.updateDragGhostForTouch(touch);
       return true;
     }
     
     return false;
+  }
+
+  private handlePendingTouchMove(touch: Touch): boolean {
+    const metrics = this.createTouchMoveMetrics(touch);
+    this.logger.debug('Move check:', {
+      deltaX: metrics.deltaX.toFixed(1),
+      deltaY: metrics.deltaY.toFixed(1),
+      totalDistance: metrics.totalDistance.toFixed(1),
+      isVerticalScroll: metrics.isVerticalScroll,
+      threshold: metrics.threshold,
+      gestureMode: metrics.gestureMode,
+    });
+
+    if (metrics.totalDistance <= metrics.threshold) {
+      return false;
+    }
+
+    if (metrics.isVerticalScroll) {
+      this.cancelLongPress();
+      this.resetTouchState();
+      return false;
+    }
+
+    this.cancelLongPress();
+    this.activateDrag();
+    return true;
+  }
+
+  private createTouchMoveMetrics(touch: Touch): TouchMoveMetrics {
+    return createTouchMoveMetrics({
+      touch,
+      startX: this.touchState.startX,
+      startY: this.touchState.startY,
+      gestureMode: this.touchState.gestureMode,
+      defaultMoveThreshold: this.DEFAULT_MOVE_THRESHOLD,
+      handleMoveThreshold: this.HANDLE_MOVE_THRESHOLD,
+      defaultVerticalScrollRatio: this.DEFAULT_VERTICAL_SCROLL_RATIO,
+    });
+  }
+
+  private updateDragGhostForTouch(touch: Touch): void {
+    if (!this.touchState.dragGhost) {
+      this.logger.warn('Ghost missing during move, recreating at', {
+        x: touch.clientX,
+        y: touch.clientY
+      });
+      this.createDragGhost(this.touchState.task!, touch.clientX, touch.clientY);
+      return;
+    }
+
+    const position = calculateDragGhostPosition({
+      x: touch.clientX,
+      y: touch.clientY,
+      width: 200,
+      height: 50,
+      margin: 5,
+      viewportWidth: window.innerWidth,
+      viewportHeight: window.innerHeight,
+    });
+    this.touchState.dragGhost.style.left = `${position.x}px`;
+    this.touchState.dragGhost.style.top = `${position.y}px`;
   }
   
   /** 更新触摸目标阶段
@@ -507,95 +501,52 @@ export class TextViewDragDropService {
   
   /** 开始 DOM 更新（在折叠/展开阶段前调用） */
   beginDOMUpdate(): void {
+    this.clearDOMUpdateTimer();
     this.isUpdatingDOM = true;
     // 100ms 后自动恢复，防止卡住
     // 需要足够时间让 Angular 完成变更检测并让浏览器完成 DOM 更新
-    setTimeout(() => {
+    const domUpdateTimer = setTimeout(() => {
+      if (this.domUpdateTimer !== domUpdateTimer) return;
+      this.domUpdateTimer = null;
       this.isUpdatingDOM = false;
     }, 100);
+    this.domUpdateTimer = domUpdateTimer;
   }
   
   /** 结束 DOM 更新 */
   endDOMUpdate(): void {
+    this.clearDOMUpdateTimer();
     this.isUpdatingDOM = false;
+  }
+
+  private clearDOMUpdateTimer(): void {
+    if (this.domUpdateTimer !== null) {
+      clearTimeout(this.domUpdateTimer);
+      this.domUpdateTimer = null;
+    }
   }
 
   private createDragGhost(task: Task, x: number, y: number) {
     this.removeDragGhost();
-    
-    const ghostId = 'touch-drag-ghost-' + Date.now();
-    
-    // 计算位置：在手指正下方
-    const viewportWidth = window.innerWidth;
-    const viewportHeight = window.innerHeight;
-    const ghostWidth = Math.min(200, viewportWidth - 20);
-    const ghostHeight = 48;
-    
-    const ghostX = Math.max(10, Math.min(x - ghostWidth / 2, viewportWidth - ghostWidth - 10));
-    const ghostY = Math.max(10, Math.min(y, viewportHeight - ghostHeight - 10)); // 手指位置（垂直下方 0px）
-    
-    // 创建 Ghost 元素
-    const ghost = document.createElement('div');
-    ghost.id = ghostId;
-    ghost.setAttribute('data-drag-ghost', 'true');
-    ghost.className = 'nf-drag-ghost';
-    ghost.innerText = task.title || '未命名任务';
-    
-    // 使用项目 Retro 风格设计
-    // 颜色参考：flow-styles.ts 中的 DEFAULT_FLOW_STYLES
-    ghost.style.cssText = `
-      position: fixed !important;
-      z-index: 2147483647 !important;
-      left: ${ghostX}px !important;
-      top: ${ghostY}px !important;
-      width: ${ghostWidth}px !important;
-      min-height: ${ghostHeight}px !important;
-      background-color: #FFFFFF !important;
-      color: #44403C !important;
-      border: 2px solid #4A8C8C !important;
-      border-radius: 10px !important;
-      font-family: "LXGW WenKai Screen", sans-serif !important;
-      font-size: 14px !important;
-      font-weight: 500 !important;
-      display: flex !important;
-      align-items: center !important;
-      justify-content: center !important;
-      pointer-events: none !important;
-      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15), 0 2px 8px rgba(74, 140, 140, 0.2) !important;
-      text-align: center !important;
-      padding: 10px 16px !important;
-      box-sizing: border-box !important;
-      visibility: visible !important;
-      transform: none !important;
-      overflow: hidden !important;
-      text-overflow: ellipsis !important;
-      white-space: nowrap !important;
-      opacity: 0.3 !important;
-    `;
-    
-    // 添加到 body
-    document.body.appendChild(ghost);
-    this.touchState.dragGhost = ghost;
-    
-    this.logger.debug('🎯 Ghost created:', {
-      taskId: task?.id?.slice(-4) ?? 'unknown',
-      ghostId,
-      position: { x: ghostX, y: ghostY }
+
+    const ghost = createDragGhostElement({
+      taskId: task.id,
+      title: task.title,
+      x,
+      y,
+      viewportWidth: window.innerWidth,
+      viewportHeight: window.innerHeight,
+      timestamp: Date.now(),
+      logger: this.logger,
     });
+    this.touchState.dragGhost = ghost;
   }
-  
+
   /** 更新幽灵元素的视觉反馈（根据是否在有效目标上） */
   updateGhostVisualFeedback(isOverValidTarget: boolean) {
-    if (this.touchState.dragGhost) {
-      if (isOverValidTarget) {
-        // 在有效目标上：青绿色边框（retro.teal）
-        this.touchState.dragGhost.style.borderColor = '#4A8C8C';
-        this.touchState.dragGhost.style.boxShadow = '0 8px 24px rgba(0, 0, 0, 0.2), 0 2px 8px rgba(74, 140, 140, 0.4)';
-      } else {
-        // 不在有效区域时：橙色边框（retro.rust）
-        this.touchState.dragGhost.style.borderColor = '#C15B3E';
-        this.touchState.dragGhost.style.boxShadow = '0 8px 24px rgba(0, 0, 0, 0.2), 0 2px 8px rgba(193, 91, 62, 0.3)';
-      }
+    const ghost = this.touchState.dragGhost;
+    if (ghost) {
+      applyDragGhostFeedback(ghost, isOverValidTarget);
     }
   }
   
@@ -605,39 +556,12 @@ export class TextViewDragDropService {
       stack: new Error().stack?.split('\n')?.slice(1, 5)?.join(' <- ')
     });
     
-    // 清理当前引用的幽灵元素
-    if (this.touchState.dragGhost) {
-      try {
-        const ghost = this.touchState.dragGhost;
-        ghost.style.display = 'none';
-        ghost.style.opacity = '0';
-        ghost.remove();
-      } catch (e) {
-        this.logger.warn('Failed to remove drag ghost', { error: e });
-      }
-      this.touchState.dragGhost = null;
-    }
-    
-    // 🔧 修复：防御性清理时，跳过刚刚创建的 Ghost
-    // 使用 setTimeout 而不是 requestAnimationFrame，给新 Ghost 更多时间被设置
-    setTimeout(() => {
-      const ghosts = document.querySelectorAll('[data-drag-ghost="true"]');
-      // 只清理不是当前活动 Ghost 的元素
-      const activeGhostId = this.touchState.dragGhost?.id;
-      ghosts.forEach(ghost => {
-        // 跳过当前活动的 Ghost
-        if (ghost.id === activeGhostId) {
-          return;
-        }
-        try {
-          this.logger.debug('🧹 Cleaning orphaned ghost:', ghost.id);
-          (ghost as HTMLElement).style.display = 'none';
-          (ghost as HTMLElement).style.opacity = '0';
-          ghost.remove();
-        } catch (e) {
-          this.logger.warn('Failed to remove orphaned ghost element', { error: e });
-        }
-      });
+    const ghost = this.touchState.dragGhost;
+    this.touchState.dragGhost = null;
+    removeDragGhostElement({
+      ghost,
+      getActiveGhostId: () => this.touchState.dragGhost?.id,
+      logger: this.logger,
     });
   }
 
@@ -648,6 +572,7 @@ export class TextViewDragDropService {
     this.autoScrollState.lastClientY = clientY;
     this.autoScrollState.stickyScrollAmount = null;
     document.addEventListener('dragover', this.boundHandleDragAutoScroll);
+    this.armMouseDragWatchdog();
     this.ensureAutoScrollLoop();
   }
 
@@ -670,22 +595,7 @@ export class TextViewDragDropService {
   /** 执行嵌套容器自动滚动（例如阶段内的任务列表） */
   performNestedAutoScroll(nestedContainer: HTMLElement, clientY: number): boolean {
     const rect = nestedContainer.getBoundingClientRect();
-    const edgeSize = 80; // 边缘检测区域（更大以便触发）
-    const maxScrollSpeed = 12;
-    let scrollAmount = 0;
-
-    // 检查是否在容器的上边缘
-    if (clientY >= rect.top && clientY < rect.top + edgeSize) {
-      const distance = edgeSize - (clientY - rect.top);
-      const ratio = Math.min(1, Math.max(0, distance / edgeSize));
-      scrollAmount = -maxScrollSpeed * ratio * ratio;
-    }
-    // 检查是否在容器的下边缘
-    else if (clientY > rect.bottom - edgeSize && clientY <= rect.bottom) {
-      const distance = edgeSize - (rect.bottom - clientY);
-      const ratio = Math.min(1, Math.max(0, distance / edgeSize));
-      scrollAmount = maxScrollSpeed * ratio * ratio;
-    }
+    const scrollAmount = getNestedAutoScrollAmount(clientY, rect);
 
     if (scrollAmount !== 0) {
       nestedContainer.scrollTop += scrollAmount;
@@ -697,6 +607,53 @@ export class TextViewDragDropService {
   
   private handleDragAutoScroll(e: DragEvent) {
     this.autoScrollState.lastClientY = e.clientY;
+    // dragover 心跳：拖拽仍存活，重置丢失看门狗
+    this.armMouseDragWatchdog();
+  }
+
+  private armMouseDragWatchdog(): void {
+    this.clearMouseDragWatchdog();
+    this.mouseDragWatchdogTimer = setTimeout(() => {
+      this.mouseDragWatchdogTimer = null;
+      this.checkMouseDragStillAlive();
+    }, TextViewDragDropService.MOUSE_DRAG_WATCHDOG_MS);
+  }
+
+  private clearMouseDragWatchdog(): void {
+    if (this.mouseDragWatchdogTimer !== null) {
+      clearTimeout(this.mouseDragWatchdogTimer);
+      this.mouseDragWatchdogTimer = null;
+    }
+  }
+
+  private checkMouseDragStillAlive(): void {
+    const draggingTaskId = this.draggingTaskId();
+    if (!draggingTaskId || this.touchState.isDragging) {
+      return;
+    }
+
+    // 源节点仍在 DOM：dragover 静默大概率只是拖出了浏览器窗口（跨窗口拖拽），
+    // dragend 之后仍会送达源节点，继续等待而不是误清理
+    if (this.isDragSourceElementPresent(draggingTaskId)) {
+      this.armMouseDragWatchdog();
+      return;
+    }
+
+    this.logger.warn('[MouseDrag] 拖拽源节点已被移除且 dragover 静默，dragend 可能已丢失，触发自愈清理', {
+      draggingTaskId,
+    });
+    document.dispatchEvent(new CustomEvent('mouseDragLost'));
+  }
+
+  private isDragSourceElementPresent(taskId: string): boolean {
+    if (typeof document === 'undefined') {
+      return true;
+    }
+
+    const escapedId = typeof CSS !== 'undefined' && typeof CSS.escape === 'function'
+      ? CSS.escape(taskId)
+      : taskId;
+    return document.querySelector(`[data-task-id="${escapedId}"], [data-unassigned-task="${escapedId}"]`) !== null;
   }
   
   private ensureAutoScrollLoop() {
@@ -749,51 +706,20 @@ export class TextViewDragDropService {
   }
 
   private getAutoScrollAmount(container: HTMLElement, clientY: number): number {
-    const rect = container.getBoundingClientRect();
-    const edgeSize = 100;
-    const maxScrollSpeed = 18;
-
-    if (clientY < rect.top + edgeSize && clientY > rect.top - 20) {
-      const distance = rect.top + edgeSize - clientY;
-      const ratio = Math.min(1, Math.max(0, distance / edgeSize));
-      return -maxScrollSpeed * ratio * ratio;
-    }
-
-    if (clientY > rect.bottom - edgeSize && clientY < rect.bottom + 20) {
-      const distance = clientY - (rect.bottom - edgeSize);
-      const ratio = Math.min(1, Math.max(0, distance / edgeSize));
-      return maxScrollSpeed * ratio * ratio;
-    }
-
-    return 0;
+    return getAutoScrollAmount(clientY, container.getBoundingClientRect());
   }
 
   private applyAutoScrollAmount(container: HTMLElement, scrollAmount: number): boolean {
-    const previousScrollTop = container.scrollTop;
-    container.scrollTop += scrollAmount;
-    return container.scrollTop !== previousScrollTop;
+    return applyAutoScrollAmount(container, scrollAmount);
   }
 
   private getNextAutoScrollContainer(container: HTMLElement): HTMLElement | null {
-    if (container.hasAttribute('data-stage-task-list')) {
-      const stageScrollContainer = container.closest('[data-stage-scroll-container]');
-      if (stageScrollContainer instanceof HTMLElement && stageScrollContainer !== container) {
-        return stageScrollContainer;
-      }
-    }
-
-    if (container.hasAttribute('data-stage-scroll-container')) {
-      const outerScrollContainer = container.closest('.text-view-scroll-container');
-      if (outerScrollContainer instanceof HTMLElement && outerScrollContainer !== container) {
-        return outerScrollContainer;
-      }
-    }
-
-    return null;
+    return getNextAutoScrollContainer(container);
   }
   
   private stopAutoScroll() {
     document.removeEventListener('dragover', this.boundHandleDragAutoScroll);
+    this.clearMouseDragWatchdog();
     this.stopAutoScrollLoop(true);
   }
   
@@ -814,7 +740,7 @@ export class TextViewDragDropService {
   }
 
   private cancelLongPress() {
-    if (this.touchState.longPressTimer) {
+    if (this.touchState.longPressTimer !== null) {
       clearTimeout(this.touchState.longPressTimer);
       this.touchState.longPressTimer = null;
     }
@@ -833,9 +759,7 @@ export class TextViewDragDropService {
     if (currentStageNumber === this.dragSourceStage) {
       return null;
     }
-    // 🔧 修复：不再使用 sourceStageCollapsed 标志，每次都检查是否需要折叠
-    // 这样可以处理"在目标阶段内移动时，来源阶段还没折叠"的情况
-    // 组件层会检查实际展开状态，避免重复折叠
+    // 每次都检查是否需要折叠。组件层会检查实际展开状态，避免重复折叠。
     return this.dragSourceStage;
   }
 
@@ -860,6 +784,7 @@ export class TextViewDragDropService {
       hadGhost: !!this.touchState.dragGhost,
       stack: new Error().stack?.split('\n')?.slice(1, 4)?.join('\n')
     });
+    this.clearMoveTimeout();
     this.cancelLongPress();
     // 在重置前先确保幽灵元素被清理
     if (this.touchState.dragGhost) {
@@ -867,16 +792,16 @@ export class TextViewDragDropService {
       this.removeDragGhost();
     }
     this.onDragStartCallback = null;
-    this.touchState = this.createInitialTouchState();
+    this.touchState = createInitialTouchDragState();
   }
 
   private setDragSourceStage(stageNumber: number | null) {
     this.dragSourceStage = stageNumber;
-    this.sourceStageCollapsed = false;
   }
   
   /** 清理所有资源（组件销毁时调用） */
   cleanup() {
+    this.endDOMUpdate();
     this.resetTouchState();
     this.removeDragGhost();
     this.stopAutoScroll();

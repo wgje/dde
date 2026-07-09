@@ -15,7 +15,7 @@ import { Injectable, inject } from '@angular/core';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { LoggerService } from '../../../../services/logger.service';
 import { ToastService } from '../../../../services/toast.service';
-import { ErrorCodes, failure, success, type Result, type OperationError } from '../../../../utils/result';
+import { ErrorCodes, success, type Result, type OperationError } from '../../../../utils/result';
 import {
   buildStrategicReviewMarkdown,
   type StrategicReviewOptions,

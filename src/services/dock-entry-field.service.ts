@@ -23,6 +23,7 @@ export interface DockEntryFieldContext {
   entries: WritableSignal<DockEntry[]>;
   focusSessionContext: () => { id: string; startedAt: number } | null;
   rebalanceAutoZones: () => void;
+  persistDockSnapshotNow: (entries: DockEntry[]) => Promise<boolean>;
 }
 
 @Injectable({
@@ -34,6 +35,7 @@ export class DockEntryFieldService {
   private readonly logger = inject(LoggerService);
 
   private _ctx: DockEntryFieldContext | null = null;
+  private readonly taskFieldOperationChains = new Map<string, Promise<void>>();
 
   /**
    * 获取上下文——必须在 DockEngineService 构造期间调用 init() 注入。
@@ -61,93 +63,147 @@ export class DockEntryFieldService {
     this._ctx = ctx;
   }
 
-  toggleLoad(taskId: string, direction: 'up' | 'down'): void {
-    const nextLoad: CognitiveLoad = direction === 'up' ? 'high' : 'low';
-    // M-2 fix: 将存在性检查与状态更新合并为原子操作，
-    // 消除 check-then-act 窗口内被其他 microtask 移除条目的竞态。
-    let matched = false;
-    this.ctx.entries.update(prev =>
-      prev.map(entry => {
+  async toggleLoad(taskId: string, direction: 'up' | 'down'): Promise<boolean> {
+    return this.runTaskFieldOperation(taskId, async () => {
+      const nextLoad: CognitiveLoad = direction === 'up' ? 'high' : 'low';
+      const currentEntry = this.ctx.entries().find(entry => entry.taskId === taskId) ?? null;
+      if (!currentEntry) return false;
+      if (currentEntry.load === nextLoad) return true;
+
+      const saved = await this.taskSync.syncTaskPlannerFields(taskId, { cognitive_load: nextLoad });
+      if (!saved) return false;
+
+      this.ctx.entries.update(prev =>
+        prev.map(entry => {
+          if (entry.taskId !== taskId) return entry;
+          return { ...entry, load: nextLoad };
+        }),
+      );
+      return true;
+    });
+  }
+
+  async setExpectedTime(taskId: string, minutes: number | null): Promise<boolean> {
+    return this.runTaskFieldOperation(taskId, async () => {
+      const currentEntry = this.ctx.entries().find(entry => entry.taskId === taskId) ?? null;
+      if (!currentEntry) return false;
+      const plannerFields = sanitizePlannerFields({
+        expectedMinutes: minutes,
+        waitMinutes: currentEntry.waitMinutes,
+        cognitiveLoad: currentEntry.load,
+      });
+
+      const saved = await this.taskSync.syncTaskPlannerFields(taskId, {
+        expected_minutes: plannerFields.expectedMinutes,
+        wait_minutes: plannerFields.waitMinutes,
+      });
+      if (!saved) return false;
+
+      this.ctx.entries.update(prev =>
+        prev.map(entry =>
+          entry.taskId === taskId
+            ? {
+                ...entry,
+                expectedMinutes: plannerFields.expectedMinutes,
+                waitMinutes: plannerFields.waitMinutes,
+              }
+            : entry,
+        ),
+      );
+      if (plannerFields.adjusted) {
+        this.toast.info('已校正等待/预计时长', `等待时长不能超过预计时长，已同步调整为 ${plannerFields.expectedMinutes ?? 0} 分钟`);
+      }
+      return true;
+    });
+  }
+
+  async setWaitTime(taskId: string, minutes: number | null): Promise<boolean> {
+    return this.runTaskFieldOperation(taskId, async () => {
+      const currentEntry = this.ctx.entries().find(entry => entry.taskId === taskId) ?? null;
+      if (!currentEntry) return false;
+      const plannerFields = sanitizePlannerFields({
+        expectedMinutes: currentEntry.expectedMinutes,
+        waitMinutes: minutes,
+        cognitiveLoad: currentEntry.load,
+      });
+
+      const saved = await this.taskSync.syncTaskPlannerFields(taskId, {
+        expected_minutes: plannerFields.expectedMinutes,
+        wait_minutes: plannerFields.waitMinutes,
+      });
+      if (!saved) return false;
+
+      this.ctx.entries.update(prev =>
+        prev.map(entry =>
+          entry.taskId === taskId
+            ? {
+                ...entry,
+                expectedMinutes: plannerFields.expectedMinutes,
+                waitMinutes: plannerFields.waitMinutes,
+              }
+            : entry,
+        ),
+      );
+      if (plannerFields.adjusted) {
+        this.toast.info('已校正等待/预计时长', `等待时长不能超过预计时长，已同步调整为 ${plannerFields.expectedMinutes ?? 0} 分钟`);
+      }
+      return true;
+    });
+  }
+
+  async setDetail(taskId: string, detail: string): Promise<boolean> {
+    return this.runTaskFieldOperation(taskId, async () => {
+      const currentEntry = this.ctx.entries().find(entry => entry.taskId === taskId) ?? null;
+      if (!currentEntry) return false;
+      const saved = await this.taskSync.syncTaskDetail(taskId, detail, {
+        entries: this.ctx.entries(),
+        focusSessionContext: this.ctx.focusSessionContext(),
+      });
+      if (!saved) return false;
+
+      this.ctx.entries.update(prev =>
+        prev.map(entry => (entry.taskId === taskId ? { ...entry, detail } : entry)),
+      );
+      return true;
+    });
+  }
+
+  async setLane(taskId: string, lane: DockLane, zoneSource: DockZoneSource = 'manual'): Promise<boolean> {
+    return this.runTaskFieldOperation(taskId, async () => {
+      const current = this.ctx.entries();
+      let changed = false;
+      const next = current.map(entry => {
         if (entry.taskId !== taskId) return entry;
-        matched = true;
-        return entry.load === nextLoad ? entry : { ...entry, load: nextLoad };
-      }),
-    );
-    if (matched) {
-      this.taskSync.syncTaskPlannerFields(taskId, { cognitive_load: nextLoad });
-    }
-  }
+        if (entry.lane === lane && entry.zoneSource === zoneSource) return entry;
+        changed = true;
+        return { ...entry, lane, zoneSource };
+      });
+      if (!changed) return false;
 
-  setExpectedTime(taskId: string, minutes: number | null): void {
-    const currentEntry = this.ctx.entries().find(entry => entry.taskId === taskId) ?? null;
-    const plannerFields = sanitizePlannerFields({
-      expectedMinutes: minutes,
-      waitMinutes: currentEntry?.waitMinutes ?? null,
-      cognitiveLoad: currentEntry?.load ?? null,
-    });
-    this.ctx.entries.update(prev =>
-      prev.map(entry =>
-        entry.taskId === taskId
-          ? {
-              ...entry,
-              expectedMinutes: plannerFields.expectedMinutes,
-              waitMinutes: plannerFields.waitMinutes,
-            }
-          : entry,
-      ),
-    );
-    if (plannerFields.adjusted) {
-      this.toast.info('已校正等待/预计时长', `等待时长不能超过预计时长，已同步调整为 ${plannerFields.expectedMinutes ?? 0} 分钟`);
-    }
-    this.taskSync.syncTaskPlannerFields(taskId, {
-      expected_minutes: plannerFields.expectedMinutes,
-      wait_minutes: plannerFields.waitMinutes,
+      const persisted = await this.ctx.persistDockSnapshotNow(next);
+      if (!persisted) return false;
+
+      this.ctx.entries.set(next);
+      if (zoneSource === 'auto') {
+        this.ctx.rebalanceAutoZones();
+      }
+      return true;
     });
   }
 
-  setWaitTime(taskId: string, minutes: number | null): void {
-    const currentEntry = this.ctx.entries().find(entry => entry.taskId === taskId) ?? null;
-    const plannerFields = sanitizePlannerFields({
-      expectedMinutes: currentEntry?.expectedMinutes ?? null,
-      waitMinutes: minutes,
-      cognitiveLoad: currentEntry?.load ?? null,
-    });
-    this.ctx.entries.update(prev =>
-      prev.map(entry =>
-        entry.taskId === taskId
-          ? {
-              ...entry,
-              expectedMinutes: plannerFields.expectedMinutes,
-              waitMinutes: plannerFields.waitMinutes,
-            }
-          : entry,
-      ),
+  private runTaskFieldOperation<T>(taskId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.taskFieldOperationChains.get(taskId);
+    const run = previous ? previous.then(operation) : operation();
+    const settled = run.then(
+      () => undefined,
+      () => undefined,
     );
-    if (plannerFields.adjusted) {
-      this.toast.info('已校正等待/预计时长', `等待时长不能超过预计时长，已同步调整为 ${plannerFields.expectedMinutes ?? 0} 分钟`);
-    }
-    this.taskSync.syncTaskPlannerFields(taskId, {
-      expected_minutes: plannerFields.expectedMinutes,
-      wait_minutes: plannerFields.waitMinutes,
+    this.taskFieldOperationChains.set(taskId, settled);
+    void settled.finally(() => {
+      if (this.taskFieldOperationChains.get(taskId) === settled) {
+        this.taskFieldOperationChains.delete(taskId);
+      }
     });
-  }
-
-  setDetail(taskId: string, detail: string): void {
-    this.ctx.entries.update(prev =>
-      prev.map(entry => (entry.taskId === taskId ? { ...entry, detail } : entry)),
-    );
-    this.taskSync.syncTaskDetail(taskId, detail, {
-      entries: this.ctx.entries(),
-      focusSessionContext: this.ctx.focusSessionContext(),
-    });
-  }
-
-  setLane(taskId: string, lane: DockLane, zoneSource: DockZoneSource = 'manual'): void {
-    this.ctx.entries.update(prev =>
-      prev.map(entry => (entry.taskId === taskId ? { ...entry, lane, zoneSource } : entry)),
-    );
-    if (zoneSource === 'auto') {
-      this.ctx.rebalanceAutoZones();
-    }
+    return run;
   }
 }

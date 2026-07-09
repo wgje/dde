@@ -25,7 +25,34 @@ export interface Attachment {
   size?: number;
   createdAt: string;
   signedAt?: string;
+  scanMetadata?: import('../config/virus-scan.config').AttachmentScanMetadata;
   deletedAt?: string;
+}
+
+export type TaskAttentionLevel = 'info' | 'warning' | 'blocker';
+
+export interface TaskAttentionItem {
+  id: string;
+  text: string;
+  level: TaskAttentionLevel;
+  done: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TaskAttentionMeta {
+  items: TaskAttentionItem[];
+  pinned?: boolean;
+  updatedAt?: string;
+}
+
+export interface TaskAttentionDraftItem {
+  id?: string;
+  text: string;
+  level?: TaskAttentionLevel;
+  done?: boolean;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 /**
@@ -76,6 +103,9 @@ export interface Task {
 
   // Dock/parking metadata for active task overlays.
   parkingMeta?: import('./parking').TaskParkingMeta | null;
+
+  // Task sidecar attention metadata (editable node-level notes, not topology).
+  attentionMeta?: TaskAttentionMeta | null;
 }
 
 /**

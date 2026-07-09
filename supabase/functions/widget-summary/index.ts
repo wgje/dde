@@ -1,5 +1,3 @@
-import 'jsr:@supabase/functions-js/edge-runtime.d.ts';
-
 import {
   buildWidgetClientCapabilitiesPatch,
   consumeWidgetRateLimit,
@@ -10,6 +8,8 @@ import {
   getClientIp,
   getCorsHeaders,
   getBearerToken,
+  hasServiceRoleConfig,
+  isWidgetRequestBodyTooLargeError,
   jsonResponse,
   loadWidgetCapabilities,
   loadWidgetLimits,
@@ -17,7 +17,9 @@ import {
   mergeJsonObjects,
   normalizeWidgetPlatform,
   parseWidgetToken,
+  readWidgetRequestText,
   redactId,
+  serviceNotConfiguredPayload,
   sha256Hex,
   toPublicWidgetCapabilities,
   type WidgetPlatform,
@@ -667,7 +669,7 @@ function maxIsoTimestamp(values: Array<string | null | undefined>): string | nul
 }
 
 async function readSummaryRequest(req: Request): Promise<WidgetSummaryRequest> {
-  const text = await req.text();
+  const text = await readWidgetRequestText(req);
   if (text.trim().length === 0) {
     return {};
   }
@@ -793,7 +795,16 @@ Deno.serve(async (req: Request) => {
   let body: WidgetSummaryRequest;
   try {
     body = await readSummaryRequest(req);
-  } catch {
+  } catch (error) {
+    if (isWidgetRequestBodyTooLargeError(error)) {
+      return summaryResponse(responseHeaders, 413, {
+        error: 'Request body too large',
+        code: 'REQUEST_BODY_TOO_LARGE',
+        degradedReasons: ['request-body-too-large'],
+        warnings: ['open-app-to-finish-setup'],
+      });
+    }
+
     return summaryResponse(responseHeaders, 400, {
       error: 'Invalid JSON body',
       code: 'INVALID_JSON',
@@ -838,6 +849,14 @@ Deno.serve(async (req: Request) => {
       error: 'instanceId must be a UUID',
       code: 'INSTANCE_CONTEXT_INVALID',
       degradedReasons: ['instance-context-invalid'],
+      warnings: ['open-app-to-finish-setup'],
+    });
+  }
+
+  if (!hasServiceRoleConfig()) {
+    return summaryResponse(responseHeaders, 503, {
+      ...serviceNotConfiguredPayload(),
+      degradedReasons: ['service-not-configured'],
       warnings: ['open-app-to-finish-setup'],
     });
   }

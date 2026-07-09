@@ -33,6 +33,7 @@ describe('GateActionsComponent', () => {
 
   const mockBlackBoxService = {
     create: vi.fn().mockReturnValue({ ok: true, value: {} }),
+    createDurably: vi.fn().mockResolvedValue({ ok: true, value: {} }),
   };
 
   const mockSpeechService = {
@@ -53,6 +54,9 @@ describe('GateActionsComponent', () => {
 
   beforeEach(async () => {
     cardAnimation.set('idle');
+    mockSpeechService.isRecording.set(false);
+    mockSpeechService.isTranscribing.set(false);
+    mockSpeechService.isSupported.mockReturnValue(false);
     vi.clearAllMocks();
 
     await TestBed.configureTestingModule({
@@ -117,8 +121,8 @@ describe('GateActionsComponent', () => {
     expect(input).toBeTruthy();
   });
 
-  it('confirmPendingTranscription should keep draft open when save fails', () => {
-    mockBlackBoxService.create.mockReturnValueOnce({
+  it('confirmPendingTranscription should keep draft open when durable save fails', async () => {
+    mockBlackBoxService.createDurably.mockResolvedValueOnce({
       ok: false,
       error: { message: '保存失败' },
     });
@@ -126,12 +130,13 @@ describe('GateActionsComponent', () => {
     component.editableTranscription = '原始转写';
     component.quickCaptureOpen.set(true);
 
-    component.confirmPendingTranscription();
+    await component.confirmPendingTranscription();
 
     expect(component.pendingTranscription()).toBe('原始转写');
     expect(component.editableTranscription).toBe('原始转写');
     expect(component.quickCaptureOpen()).toBe(true);
     expect(mockToastService.error).toHaveBeenCalledWith('保存失败');
+    expect(mockBlackBoxService.create).not.toHaveBeenCalled();
   });
 
   it('should render quick capture panel when pending transcription exists', () => {
@@ -144,12 +149,118 @@ describe('GateActionsComponent', () => {
     expect(panel).toBeTruthy();
   });
 
-  it('submitQuickInput should create black box entry', async () => {
+  it('submitQuickInput should durably create black box entry', async () => {
     component.quickInputText.set('补记录测试');
 
     await component.submitQuickInput();
 
-    expect(mockBlackBoxService.create).toHaveBeenCalledWith({ content: '补记录测试' });
+    expect(mockBlackBoxService.createDurably).toHaveBeenCalledWith({ content: '补记录测试' });
+    expect(mockBlackBoxService.create).not.toHaveBeenCalled();
     expect(mockToastService.success).toHaveBeenCalled();
+  });
+
+  it('touchcancel should cancel FAB recording without transcribing', async () => {
+    vi.useFakeTimers();
+    mockSpeechService.isSupported.mockReturnValue(true);
+    mockSpeechService.startRecording.mockImplementationOnce(async () => {
+      mockSpeechService.isRecording.set(true);
+    });
+
+    try {
+      component.onFabTouchStart(new Event('touchstart') as TouchEvent);
+      await vi.advanceTimersByTimeAsync(350);
+
+      document.dispatchEvent(new Event('touchcancel'));
+      await Promise.resolve();
+
+      expect(mockSpeechService.cancelRecording).toHaveBeenCalledOnce();
+      expect(mockSpeechService.stopAndTranscribe).not.toHaveBeenCalled();
+      expect(component.quickCaptureOpen()).toBe(false);
+      expect(component.pendingTranscription()).toBe('');
+      expect(component.isFabRecording()).toBe(false);
+      expect(component.isFabTranscribing()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('destroy should ignore late FAB recording fallback after long press starts', async () => {
+    vi.useFakeTimers();
+    mockSpeechService.isSupported.mockReturnValue(true);
+    let resolveStartRecording: (() => void) | null = null;
+    mockSpeechService.startRecording.mockReturnValueOnce(
+      new Promise<void>(resolve => {
+        resolveStartRecording = resolve;
+      }),
+    );
+
+    try {
+      component.onFabMouseDown(new MouseEvent('mousedown', { cancelable: true }));
+      await vi.advanceTimersByTimeAsync(350);
+
+      component.ngOnDestroy();
+      expect(resolveStartRecording).toBeTypeOf('function');
+      resolveStartRecording!();
+      await Promise.resolve();
+
+      expect(component.quickCaptureOpen()).toBe(false);
+      expect(component.manualQuickCaptureFallback()).toBe(false);
+      expect(component.isFabRecording()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('destroy should ignore late FAB transcription results after recording stops', async () => {
+    vi.useFakeTimers();
+    mockSpeechService.isSupported.mockReturnValue(true);
+    mockSpeechService.startRecording.mockImplementationOnce(async () => {
+      mockSpeechService.isRecording.set(true);
+    });
+    let resolveTranscription: ((text: string) => void) | null = null;
+    mockSpeechService.stopAndTranscribe.mockReturnValueOnce(
+      new Promise<string>(resolve => {
+        resolveTranscription = resolve;
+      }),
+    );
+
+    try {
+      component.onFabMouseDown(new MouseEvent('mousedown', { cancelable: true }));
+      await vi.advanceTimersByTimeAsync(350);
+      await Promise.resolve();
+
+      document.dispatchEvent(new MouseEvent('mouseup'));
+      expect(resolveTranscription).toBeTypeOf('function');
+
+      component.ngOnDestroy();
+      resolveTranscription!('late transcription');
+      await Promise.resolve();
+
+      expect(component.pendingTranscription()).toBe('');
+      expect(component.editableTranscription).toBe('');
+      expect(component.quickCaptureOpen()).toBe(false);
+      expect(component.isFabTranscribing()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('continues destroy cleanup when one global listener cleanup throws', () => {
+    const internals = component as unknown as { globalCleanups: (() => void)[] };
+    const secondCleanup = vi.fn<() => void>();
+    internals.globalCleanups = [
+      () => {
+        throw new Error('cleanup failed');
+      },
+      secondCleanup,
+    ];
+
+    try {
+      expect(() => component.ngOnDestroy()).not.toThrow();
+      expect(secondCleanup).toHaveBeenCalledOnce();
+      expect(internals.globalCleanups).toEqual([]);
+    } finally {
+      internals.globalCleanups = [];
+    }
   });
 });

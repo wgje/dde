@@ -1,10 +1,3 @@
-/**
- * TaskOperationAdapterService 单元测试 (Vitest + Injector 隔离模式)
- * 
- * 测试覆盖：
- * 1. moveTaskToStage - Toast 显示逻辑
- * 2. 边缘情况 - 项目切换竞态条件
- */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Injector, runInInjectionContext, signal } from '@angular/core';
 import { TaskOperationAdapterService } from './task-operation-adapter.service';
@@ -21,10 +14,16 @@ import { ConnectionAdapterService } from './connection-adapter.service';
 import { ToastService } from './toast.service';
 import { UserSessionService } from './user-session.service';
 import { WriteGuardService } from './write-guard.service';
+import { ActionQueueService } from './action-queue.service';
+import { AuthService } from './auth.service';
 import { Project, Task } from '../models';
 import { success } from '../utils/result';
-
-// ========== 辅助函数 ==========
+import { registerTaskOperationAdapterCoreMutationsSpecs } from './task-operation-adapter-core-mutations.spec-helpers';
+import { registerTaskOperationAdapterDurableMutationsSpecs } from './task-operation-adapter-durable-mutations.spec-helpers';
+import { registerTaskOperationAdapterGuardSpecs } from './task-operation-adapter-guard.spec-helpers';
+import { registerTaskOperationAdapterLifecycleSpecs } from './task-operation-adapter-lifecycle.spec-helpers';
+import { registerTaskOperationAdapterPlannerSpecs } from './task-operation-adapter-planner.spec-helpers';
+import { registerTaskOperationAdapterProjectAttachmentSpecs } from './task-operation-adapter-project-attachment.spec-helpers';
 
 const createTask = (overrides: Partial<Task> = {}): Task => ({
   id: crypto.randomUUID(),
@@ -72,6 +71,7 @@ const mockProjectStateService = {
     const project = mockProjectStateService.activeProject();
     return project?.tasks.find(t => t.id === taskId);
   },
+  getProjectsWithCurrentData: vi.fn(() => mockProjectsSignal()),
   setProjects: vi.fn((projects: Project[]) => {
     mockProjectsSignal.set(projects);
   }),
@@ -82,8 +82,83 @@ const mockProjectStateService = {
 
 const mockTaskOperationService = {
   moveTaskToStage: vi.fn(),
+  moveTaskToStageDurably: vi.fn(),
+  moveTaskToStageAtPosition: vi.fn(),
+  moveTaskToStageAtPositionDurably: vi.fn(),
+  updateTaskDraft: vi.fn(),
   updateTaskContent: vi.fn(),
+  updateTaskPosition: vi.fn(),
+  updateTaskPositionWithRankSync: vi.fn(),
+  updateTaskStatus: vi.fn(),
+  updateTaskAttachments: vi.fn(),
+  addTaskAttachment: vi.fn(),
+  removeTaskAttachment: vi.fn(),
+  updateTaskPriority: vi.fn(),
+  updateTaskDueDate: vi.fn(),
+  updateTaskExpectedMinutes: vi.fn(),
+  updateTaskCognitiveLoad: vi.fn(),
+  updateTaskWaitMinutes: vi.fn(),
+  updateTaskPlannerFields: vi.fn(),
+  updateTaskTags: vi.fn(),
+  addTaskTag: vi.fn(),
+  removeTaskTag: vi.fn(),
+  addTodoItem: vi.fn(),
+  updateTaskAttentionItems: vi.fn(),
+  updateTaskDraftDurably: vi.fn().mockResolvedValue(true),
+  updateTaskContentDurably: vi.fn().mockResolvedValue(true),
+  updateTaskTitleDurably: vi.fn().mockResolvedValue(true),
+  updateTaskParkingMetaBatchDurably: vi.fn().mockResolvedValue(true),
+  updateTaskPositionDurably: vi.fn().mockResolvedValue(true),
+  updateTaskPositionWithRankSyncDurably: vi.fn().mockResolvedValue(true),
+  updateTaskStatusDurably: vi.fn().mockResolvedValue(true),
+  updateTaskAttachmentsDurably: vi.fn().mockResolvedValue(true),
+  addTaskAttachmentDurably: vi.fn().mockResolvedValue(true),
+  removeTaskAttachmentDurably: vi.fn().mockResolvedValue(true),
+  updateTaskPriorityDurably: vi.fn().mockResolvedValue(true),
+  updateTaskDueDateDurably: vi.fn().mockResolvedValue(true),
+  updateTaskExpectedMinutesDurably: vi.fn().mockResolvedValue(true),
+  updateTaskCognitiveLoadDurably: vi.fn().mockResolvedValue(true),
+  updateTaskWaitMinutesDurably: vi.fn().mockResolvedValue(true),
+  updateTaskPlannerFieldsDurably: vi.fn().mockResolvedValue(true),
+  updateTaskTagsDurably: vi.fn().mockResolvedValue(true),
+  addTaskTagDurably: vi.fn().mockResolvedValue(true),
+  removeTaskTagDurably: vi.fn().mockResolvedValue(true),
+  addTodoItemDurably: vi.fn().mockResolvedValue(true),
+  updateTaskAttentionItemsDurably: vi.fn().mockResolvedValue(true),
+  addTaskDurably: vi.fn().mockResolvedValue(success('new-task-id')),
   addTask: vi.fn(),
+  addFloatingTaskDurably: vi.fn().mockResolvedValue(true),
+  addFloatingTask: vi.fn(),
+  repairMissingStageOneDurably: vi.fn().mockResolvedValue(true),
+  repairMissingStageOne: vi.fn(),
+  insertTaskBetweenDurably: vi.fn().mockResolvedValue(success(undefined)),
+  insertTaskBetween: vi.fn(),
+  insertTaskBetweenAtPositionDurably: vi.fn().mockResolvedValue(success(undefined)),
+  insertTaskBetweenAtPosition: vi.fn(),
+  reorderStageDurably: vi.fn().mockResolvedValue(true),
+  reorderStage: vi.fn(),
+  detachTaskDurably: vi.fn().mockResolvedValue(true),
+  detachTask: vi.fn(),
+  detachTaskWithSubtreeDurably: vi.fn().mockResolvedValue(success(undefined)),
+  detachTaskWithSubtree: vi.fn(),
+  moveSubtreeToNewParentDurably: vi.fn().mockResolvedValue(success(undefined)),
+  moveSubtreeToNewParent: vi.fn(),
+  replaceChildSubtreeWithUnassignedDurably: vi.fn().mockResolvedValue(success({ detachedSubtreeRootId: null })),
+  replaceChildSubtreeWithUnassigned: vi.fn(),
+  assignUnassignedToTaskDurably: vi.fn().mockResolvedValue(success(undefined)),
+  assignUnassignedToTask: vi.fn(),
+  deleteTaskDurably: vi.fn().mockResolvedValue({ saved: true, deletedTaskIds: new Set(['task-1']), deletedConnectionIds: [] }),
+  deleteTask: vi.fn(),
+  deleteTaskKeepChildrenDurably: vi.fn().mockResolvedValue({ saved: true, deletedTaskIds: new Set(['task-1']), deletedConnectionIds: [] }),
+  deleteTaskKeepChildren: vi.fn(),
+  deleteTasksBatchDurably: vi.fn().mockResolvedValue({ saved: true, deletedTaskIds: new Set(['task-1', 'task-2']), deletedConnectionIds: [] }),
+  deleteTasksBatch: vi.fn(),
+  permanentlyDeleteTaskDurably: vi.fn().mockResolvedValue({ saved: true, deletedTaskIds: new Set(['task-1']), deletedConnectionIds: [] }),
+  permanentlyDeleteTask: vi.fn(),
+  restoreTaskDurably: vi.fn().mockResolvedValue({ saved: true, restoredTaskIds: new Set(['task-1']), restoredConnectionIds: [] }),
+  restoreTask: vi.fn(),
+  emptyTrashDurably: vi.fn().mockResolvedValue({ saved: true, deletedTaskIds: new Set(['task-1']), deletedConnectionIds: [] }),
+  emptyTrash: vi.fn(),
   setCallbacks: vi.fn(),
 };
 
@@ -118,10 +193,15 @@ const mockLoggerService = {
 
 const mockSyncCoordinatorService = {
   markLocalChanges: vi.fn(),
+  schedulePersist: vi.fn(),
+  saveOfflineSnapshotAndWait: vi.fn().mockResolvedValue(undefined),
   hasPendingLocalChanges: vi.fn(() => false),
 };
 
-const mockChangeTrackerService = {};
+const mockChangeTrackerService = {
+  trackTaskUpdate: vi.fn(),
+  lockTaskField: vi.fn(),
+};
 const mockUndoService = { clearHistory: vi.fn() };
 const mockUiStateService = { 
   isEditing: false, 
@@ -147,12 +227,21 @@ const mockConnectionAdapterService = {
   updateConnectionContent: vi.fn(),
 };
 
+const mockActionQueueService = {
+  enqueueDurably: vi.fn().mockResolvedValue('queued-action-1'),
+};
+
+const mockAuthService = {
+  currentUserId: vi.fn(() => 'user-1'),
+};
+
 const mockRecorderService = {
   lastUpdateType: 'structure' as 'content' | 'structure' | 'position',
   showUndoToast: vi.fn(),
   performUndo: vi.fn(),
   performRedo: vi.fn(),
   recordAndUpdate: vi.fn(),
+  recordAndUpdateDurably: vi.fn().mockResolvedValue(true),
   recordAndUpdateDebounced: vi.fn(),
   setupSyncResultHandler: vi.fn(),
   triggerServerSideDelete: vi.fn(),
@@ -183,6 +272,8 @@ describe('TaskOperationAdapterService - moveTaskToStage', () => {
         { provide: ToastService, useValue: mockToastService },
         { provide: UserSessionService, useValue: mockUserSessionService },
         { provide: WriteGuardService, useValue: mockWriteGuardService },
+        { provide: ActionQueueService, useValue: mockActionQueueService },
+        { provide: AuthService, useValue: mockAuthService },
       ],
     });
 
@@ -198,91 +289,109 @@ describe('TaskOperationAdapterService - moveTaskToStage', () => {
     mockUserSessionService.isHintOnlyStartupPlaceholderVisible.mockReturnValue(false);
     mockWriteGuardService.isExportOnly.mockReturnValue(false);
     mockTaskOperationService.moveTaskToStage.mockReturnValue(success(undefined));
+    mockTaskOperationService.moveTaskToStageDurably.mockResolvedValue(success(undefined));
+    mockTaskOperationService.moveTaskToStageAtPosition.mockReturnValue(success(undefined));
+    mockTaskOperationService.moveTaskToStageAtPositionDurably.mockResolvedValue(success(undefined));
+    mockTaskOperationService.updateTaskPositionWithRankSyncDurably.mockResolvedValue(true);
+    mockTaskOperationService.insertTaskBetweenDurably.mockResolvedValue(success(undefined));
+    mockTaskOperationService.insertTaskBetweenAtPositionDurably.mockResolvedValue(success(undefined));
+    mockTaskOperationService.reorderStageDurably.mockResolvedValue(true);
+    mockTaskOperationService.detachTaskDurably.mockResolvedValue(true);
+    mockTaskOperationService.detachTaskWithSubtreeDurably.mockResolvedValue(success(undefined));
+    mockTaskOperationService.moveSubtreeToNewParentDurably.mockResolvedValue(success(undefined));
+    mockTaskOperationService.replaceChildSubtreeWithUnassignedDurably.mockResolvedValue(success({ detachedSubtreeRootId: null }));
+    mockTaskOperationService.assignUnassignedToTaskDurably.mockResolvedValue(success(undefined));
     mockTaskOperationService.addTask.mockReturnValue(success('new-task-id'));
+    mockTaskOperationService.addTaskDurably.mockResolvedValue(success('new-task-id'));
+    mockTaskOperationService.addFloatingTaskDurably.mockResolvedValue(true);
+    mockTaskOperationService.repairMissingStageOneDurably.mockResolvedValue(true);
+    mockTaskOperationService.deleteTaskDurably.mockResolvedValue({ saved: true, deletedTaskIds: new Set(['task-1']), deletedConnectionIds: [] });
+    mockTaskOperationService.deleteTaskKeepChildrenDurably.mockResolvedValue({ saved: true, deletedTaskIds: new Set(['task-1']), deletedConnectionIds: [] });
+    mockTaskOperationService.deleteTasksBatchDurably.mockResolvedValue({ saved: true, deletedTaskIds: new Set(['task-1', 'task-2']), deletedConnectionIds: [] });
+    mockTaskOperationService.permanentlyDeleteTaskDurably.mockResolvedValue({ saved: true, deletedTaskIds: new Set(['task-1']), deletedConnectionIds: [] });
+    mockTaskOperationService.restoreTaskDurably.mockResolvedValue({ saved: true, restoredTaskIds: new Set(['task-1']), restoredConnectionIds: [] });
+    mockTaskOperationService.emptyTrashDurably.mockResolvedValue({ saved: true, deletedTaskIds: new Set(['task-1']), deletedConnectionIds: [] });
+    mockTaskOperationService.updateTaskContentDurably.mockResolvedValue(true);
+    mockTaskOperationService.updateTaskDraftDurably.mockResolvedValue(true);
+    mockTaskOperationService.updateTaskTitleDurably.mockResolvedValue(true);
+    mockTaskOperationService.updateTaskParkingMetaBatchDurably.mockResolvedValue(true);
+    mockTaskOperationService.updateTaskPositionDurably.mockResolvedValue(true);
+    mockTaskOperationService.updateTaskStatusDurably.mockResolvedValue(true);
+    mockTaskOperationService.updateTaskAttachmentsDurably.mockResolvedValue(true);
+    mockTaskOperationService.addTaskAttachmentDurably.mockResolvedValue(true);
+    mockTaskOperationService.removeTaskAttachmentDurably.mockResolvedValue(true);
+    mockTaskOperationService.updateTaskPriorityDurably.mockResolvedValue(true);
+    mockTaskOperationService.updateTaskDueDateDurably.mockResolvedValue(true);
+    mockTaskOperationService.updateTaskExpectedMinutesDurably.mockResolvedValue(true);
+    mockTaskOperationService.updateTaskCognitiveLoadDurably.mockResolvedValue(true);
+    mockTaskOperationService.updateTaskWaitMinutesDurably.mockResolvedValue(true);
+    mockTaskOperationService.updateTaskPlannerFieldsDurably.mockResolvedValue(true);
+    mockTaskOperationService.updateTaskTagsDurably.mockResolvedValue(true);
+    mockTaskOperationService.addTaskTagDurably.mockResolvedValue(true);
+    mockTaskOperationService.removeTaskTagDurably.mockResolvedValue(true);
+    mockTaskOperationService.addTodoItemDurably.mockResolvedValue(true);
+    mockTaskOperationService.updateTaskAttentionItemsDurably.mockResolvedValue(true);
+    mockRecorderService.recordAndUpdateDurably.mockResolvedValue(true);
+    mockActionQueueService.enqueueDurably.mockResolvedValue('queued-action-1');
+    mockAuthService.currentUserId.mockReturnValue('user-1');
   });
 
-  it('should block moveTaskToStage while hint-only startup placeholder is read-only', () => {
-    mockUserSessionService.isHintOnlyStartupPlaceholderVisible.mockReturnValue(true);
-
-    const result = service.moveTaskToStage('task-1', 2, null, null);
-
-    expect(result.ok).toBe(false);
-    expect(mockTaskOperationService.moveTaskToStage).not.toHaveBeenCalled();
-    expect(mockOptimisticStateService.createTaskSnapshot).not.toHaveBeenCalled();
-    expect(mockToastService.info).toHaveBeenCalledWith('会话确认中', '移动任务暂不可用，owner 确认完成前保持只读');
+  registerTaskOperationAdapterGuardSpecs({
+    service: () => service,
+    mockUserSessionService: () => mockUserSessionService,
+    mockWriteGuardService: () => mockWriteGuardService,
+    mockTaskOperationService: () => mockTaskOperationService,
+    mockOptimisticStateService: () => mockOptimisticStateService,
+    mockToastService: () => mockToastService,
+    mockUiStateService: () => mockUiStateService,
+    mockRecorderService: () => mockRecorderService,
+    mockSyncCoordinatorService: () => mockSyncCoordinatorService,
   });
 
-  it('should block content updates while hint-only startup placeholder is read-only', () => {
-    mockUserSessionService.isHintOnlyStartupPlaceholderVisible.mockReturnValue(true);
-
-    service.updateTaskContent('task-1', 'new content');
-
-    expect(mockUiStateService.markEditing).not.toHaveBeenCalled();
-    expect(mockTaskOperationService.updateTaskContent).not.toHaveBeenCalled();
-    expect(mockToastService.info).toHaveBeenCalledWith('会话确认中', '编辑任务暂不可用，owner 确认完成前保持只读');
+  registerTaskOperationAdapterCoreMutationsSpecs({
+    service: () => service,
+    mockTaskOperationService: () => mockTaskOperationService,
+    mockUiStateService: () => mockUiStateService,
+    mockRecorderService: () => mockRecorderService,
+    mockOptimisticStateService: () => mockOptimisticStateService,
+    mockLoggerCategory: () => mockLoggerCategory,
+    mockChangeTrackerService: () => mockChangeTrackerService,
+    mockSyncCoordinatorService: () => mockSyncCoordinatorService,
   });
 
-  it('should block position updates while hint-only startup placeholder is read-only', () => {
-    mockUserSessionService.isHintOnlyStartupPlaceholderVisible.mockReturnValue(true);
-
-    service.beginPositionBatch();
-    service.updateTaskPositionWithUndo('task-1', 100, 200);
-
-    expect(mockUiStateService.markEditing).not.toHaveBeenCalled();
-    expect(mockRecorderService.recordAndUpdate).not.toHaveBeenCalled();
-    expect(mockToastService.info).toHaveBeenCalledWith('会话确认中', '移动任务暂不可用，owner 确认完成前保持只读');
+  registerTaskOperationAdapterDurableMutationsSpecs({
+    service: () => service,
+    mockTaskOperationService: () => mockTaskOperationService,
+    mockUiStateService: () => mockUiStateService,
+    mockRecorderService: () => mockRecorderService,
+    mockOptimisticStateService: () => mockOptimisticStateService,
+    mockLoggerCategory: () => mockLoggerCategory,
+    mockSyncCoordinatorService: () => mockSyncCoordinatorService,
   });
 
-  it('should block undo and redo while hint-only startup placeholder is read-only', () => {
-    mockUserSessionService.isHintOnlyStartupPlaceholderVisible.mockReturnValue(true);
-
-    service.performUndo();
-    service.performRedo();
-
-    expect(mockRecorderService.performUndo).not.toHaveBeenCalled();
-    expect(mockRecorderService.performRedo).not.toHaveBeenCalled();
-    expect(mockToastService.info).toHaveBeenCalledWith('会话确认中', '撤销操作暂不可用，owner 确认完成前保持只读');
-    expect(mockToastService.info).toHaveBeenCalledWith('会话确认中', '重做操作暂不可用，owner 确认完成前保持只读');
-  });
-
-  it('should block local task mutations while origin gate is export-only', () => {
-    mockWriteGuardService.isExportOnly.mockReturnValue(true);
-
-    const moveResult = service.moveTaskToStage('task-1', 2, null, null);
-    const createResult = service.addTask('Blocked task', '', 1, null, false);
-
-    expect(moveResult.ok).toBe(false);
-    expect(createResult.ok).toBe(false);
-    expect(mockTaskOperationService.moveTaskToStage).not.toHaveBeenCalled();
-    expect(mockTaskOperationService.addTask).not.toHaveBeenCalled();
-    expect(mockOptimisticStateService.createTaskSnapshot).not.toHaveBeenCalled();
-    expect(mockSyncCoordinatorService.markLocalChanges).not.toHaveBeenCalled();
-    expect(mockToastService.info).toHaveBeenCalledWith(
-      '导出模式',
-      '移动任务暂不可用，旧入口仅允许导出，请前往 https://nanoflow.pages.dev 继续编辑'
-    );
-    expect(mockToastService.info).toHaveBeenCalledWith(
-      '导出模式',
-      '创建任务暂不可用，旧入口仅允许导出，请前往 https://nanoflow.pages.dev 继续编辑'
-    );
-  });
-
-  it('should not show toast when task is not actually moved (same stage and parentId)', () => {
+  it('should not show toast when task is not actually moved (same stage and parentId)', async () => {
     // 模拟移动前后任务状态没有变化
-    mockTaskOperationService.moveTaskToStage.mockReturnValue(success(undefined));
+    mockTaskOperationService.moveTaskToStageDurably.mockResolvedValue(success(undefined));
     
     // 调用移动（到相同的 stage，parentId 也相同）
-    const result = service.moveTaskToStage('task-1', 1, null, null);
+    const result = await service.moveTaskToStage('task-1', 1, null, null);
     
     // 验证
     expect(result.ok).toBe(true);
+    expect(mockTaskOperationService.moveTaskToStageDurably).toHaveBeenCalledWith({
+      taskId: 'task-1',
+      newStage: 1,
+      beforeTaskId: null,
+      newParentId: null,
+    });
+    expect(mockTaskOperationService.moveTaskToStage).not.toHaveBeenCalled();
     expect(mockRecorderService.showUndoToast).not.toHaveBeenCalled();
     expect(mockOptimisticStateService.discardSnapshot).toHaveBeenCalledWith('snapshot-1');
   });
 
-  it('should show toast when task stage changes', () => {
+  it('should show toast when task stage changes', async () => {
     // 模拟 stage 改变
-    mockTaskOperationService.moveTaskToStage.mockImplementation(() => {
+    mockTaskOperationService.moveTaskToStageDurably.mockImplementation(async () => {
       // 修改任务的 stage
       const updatedProject = { ...project };
       updatedProject.tasks = project.tasks.map(t =>
@@ -292,16 +401,50 @@ describe('TaskOperationAdapterService - moveTaskToStage', () => {
       return success(undefined);
     });
     
-    const result = service.moveTaskToStage('task-1', 2, null, null);
+    const result = await service.moveTaskToStage('task-1', 2, null, null);
     
     expect(result.ok).toBe(true);
+    expect(mockTaskOperationService.moveTaskToStageDurably).toHaveBeenCalledWith({
+      taskId: 'task-1',
+      newStage: 2,
+      beforeTaskId: null,
+      newParentId: null,
+    });
+    expect(mockTaskOperationService.moveTaskToStage).not.toHaveBeenCalled();
     expect(mockRecorderService.showUndoToast).toHaveBeenCalledWith('已移动到阶段 2');
     expect(mockOptimisticStateService.discardSnapshot).not.toHaveBeenCalled();
   });
 
-  it('should show toast when task parentId changes', () => {
+  it('should use one durable core call when moving task and position together', async () => {
+    mockTaskOperationService.moveTaskToStageAtPositionDurably.mockImplementation(async () => {
+      const updatedProject = { ...project };
+      updatedProject.tasks = project.tasks.map(t =>
+        t.id === 'task-1' ? { ...t, stage: 2, parentId: 'task-2', rank: 1500, x: 80, y: 160 } : t
+      );
+      mockProjectsSignal.set([updatedProject]);
+      return success(undefined);
+    });
+
+    const result = await service.moveTaskToStageAtPosition('task-1', 2, 'next-1', 'task-2', 80, 160);
+
+    expect(result.ok).toBe(true);
+    expect(mockTaskOperationService.moveTaskToStageAtPositionDurably).toHaveBeenCalledWith({
+      taskId: 'task-1',
+      newStage: 2,
+      beforeTaskId: 'next-1',
+      newParentId: 'task-2',
+      x: 80,
+      y: 160,
+    });
+    expect(mockTaskOperationService.moveTaskToStageDurably).not.toHaveBeenCalled();
+    expect(mockTaskOperationService.moveTaskToStage).not.toHaveBeenCalled();
+    expect(mockRecorderService.showUndoToast).toHaveBeenCalledWith('已移动到阶段 2');
+    expect(mockRecorderService.setupSyncResultHandler).toHaveBeenCalledWith('snapshot-1');
+  });
+
+  it('should show toast when task parentId changes', async () => {
     // 模拟 parentId 改变
-    mockTaskOperationService.moveTaskToStage.mockImplementation(() => {
+    mockTaskOperationService.moveTaskToStageDurably.mockImplementation(async () => {
       const updatedProject = { ...project };
       updatedProject.tasks = project.tasks.map(t =>
         t.id === 'task-2' ? { ...t, parentId: null } : t
@@ -310,24 +453,27 @@ describe('TaskOperationAdapterService - moveTaskToStage', () => {
       return success(undefined);
     });
     
-    const result = service.moveTaskToStage('task-2', 2, null, null);
+    const result = await service.moveTaskToStage('task-2', 2, null, null);
     
     expect(result.ok).toBe(true);
+    expect(mockTaskOperationService.moveTaskToStageDurably).toHaveBeenCalled();
+    expect(mockTaskOperationService.moveTaskToStage).not.toHaveBeenCalled();
     expect(mockRecorderService.showUndoToast).toHaveBeenCalled();
     expect(mockOptimisticStateService.discardSnapshot).not.toHaveBeenCalled();
   });
 
-  it('should discard snapshot when project is switched during operation', () => {
+  it('should discard snapshot when project is switched during operation', async () => {
     // 模拟操作期间项目切换
-    mockTaskOperationService.moveTaskToStage.mockImplementation(() => {
+    mockTaskOperationService.moveTaskToStageDurably.mockImplementation(async () => {
       // 切换到另一个项目
       mockActiveProjectIdSignal.set('proj-2');
       return success(undefined);
     });
     
-    const result = service.moveTaskToStage('task-1', 2, null, null);
+    const result = await service.moveTaskToStage('task-1', 2, null, null);
     
     expect(result.ok).toBe(true);
+    expect(mockTaskOperationService.moveTaskToStage).not.toHaveBeenCalled();
     expect(mockRecorderService.showUndoToast).not.toHaveBeenCalled();
     expect(mockOptimisticStateService.discardSnapshot).toHaveBeenCalledWith('snapshot-1');
     expect(mockLoggerCategory.warn).toHaveBeenCalledWith(
@@ -339,7 +485,7 @@ describe('TaskOperationAdapterService - moveTaskToStage', () => {
     );
   });
 
-  it('should not show toast when parentId is undefined vs null (edge case)', () => {
+  it('should not show toast when parentId is undefined vs null (edge case)', async () => {
     // 边缘情况：任务的 parentId 是 undefined（而不是 null）
     // 移动后 parentId 仍然是 undefined，应该被视为"没有变化"
     const taskWithUndefinedParent = createTask({ id: 'task-3', stage: 1, parentId: null });
@@ -352,40 +498,44 @@ describe('TaskOperationAdapterService - moveTaskToStage', () => {
     });
     mockProjectsSignal.set([projectWithEdgeCase]);
     
-    mockTaskOperationService.moveTaskToStage.mockReturnValue(success(undefined));
+    mockTaskOperationService.moveTaskToStageDurably.mockResolvedValue(success(undefined));
     
-    const result = service.moveTaskToStage('task-3', 1, null, null);
+    const result = await service.moveTaskToStage('task-3', 1, null, null);
     
     expect(result.ok).toBe(true);
+    expect(mockTaskOperationService.moveTaskToStage).not.toHaveBeenCalled();
     expect(mockRecorderService.showUndoToast).not.toHaveBeenCalled();
     expect(mockOptimisticStateService.discardSnapshot).toHaveBeenCalledWith('snapshot-1');
   });
 
-  it('should rollback snapshot when operation fails', () => {
+  it('should rollback snapshot when operation fails', async () => {
     // 模拟操作失败
     const failureResult = { ok: false, error: { code: 'ERROR', message: '操作失败' } };
-    mockTaskOperationService.moveTaskToStage.mockReturnValue(failureResult);
+    mockTaskOperationService.moveTaskToStageDurably.mockResolvedValue(failureResult);
     
-    const result = service.moveTaskToStage('task-1', 2, null, null);
+    const result = await service.moveTaskToStage('task-1', 2, null, null);
     
     expect(result.ok).toBe(false);
+    expect(mockTaskOperationService.moveTaskToStage).not.toHaveBeenCalled();
     expect(mockRecorderService.showUndoToast).not.toHaveBeenCalled();
     expect(mockOptimisticStateService.rollbackSnapshot).toHaveBeenCalledWith('snapshot-1');
+    expect(mockSyncCoordinatorService.markLocalChanges).not.toHaveBeenCalled();
   });
 
-  it('should rollback snapshot on conflict error (LWW 冲突)', () => {
+  it('should rollback snapshot on conflict error (LWW 冲突)', async () => {
     const conflictResult = { ok: false, error: { code: 'CONFLICT', message: '版本冲突' } };
-    mockTaskOperationService.moveTaskToStage.mockReturnValue(conflictResult);
+    mockTaskOperationService.moveTaskToStageDurably.mockResolvedValue(conflictResult);
 
-    const result = service.moveTaskToStage('task-1', 2, null, null);
+    const result = await service.moveTaskToStage('task-1', 2, null, null);
 
     expect(result.ok).toBe(false);
+    expect(mockTaskOperationService.moveTaskToStage).not.toHaveBeenCalled();
     expect(mockOptimisticStateService.rollbackSnapshot).toHaveBeenCalledWith('snapshot-1');
   });
 
-  it('should show toast when moving to unassigned area', () => {
+  it('should show toast when moving to unassigned area', async () => {
     // 模拟移动到待分配区
-    mockTaskOperationService.moveTaskToStage.mockImplementation(() => {
+    mockTaskOperationService.moveTaskToStageDurably.mockImplementation(async () => {
       const updatedProject = { ...project };
       updatedProject.tasks = project.tasks.map(t =>
         t.id === 'task-1' ? { ...t, stage: null } : t
@@ -394,17 +544,58 @@ describe('TaskOperationAdapterService - moveTaskToStage', () => {
       return success(undefined);
     });
     
-    const result = service.moveTaskToStage('task-1', null, null, null);
+    const result = await service.moveTaskToStage('task-1', null, null, null);
     
     expect(result.ok).toBe(true);
+    expect(mockTaskOperationService.moveTaskToStage).not.toHaveBeenCalled();
     expect(mockRecorderService.showUndoToast).toHaveBeenCalledWith('已移动到待分配区');
   });
 
-  it('warmup 应幂等且不抛错', async () => {
-    await expect(service.warmup()).resolves.toBeUndefined();
+  it('should use one durable core call when inserting between tasks and position together', async () => {
+    mockTaskOperationService.insertTaskBetweenAtPositionDurably.mockImplementation(async () => {
+      const updatedProject = { ...project };
+      updatedProject.tasks = project.tasks.map(t =>
+        t.id === 'task-1' ? { ...t, parentId: 'task-2', stage: 3, rank: 2000, x: 40, y: 60 } : t
+      );
+      mockProjectsSignal.set([updatedProject]);
+      return success(undefined);
+    });
 
-    const p1 = service.warmup();
-    const p2 = service.warmup();
-    await expect(Promise.all([p1, p2])).resolves.toBeDefined();
+    const result = await service.insertTaskBetweenAtPosition('task-1', 'source-1', 'target-1', 40, 60);
+
+    expect(result.ok).toBe(true);
+    expect(mockTaskOperationService.insertTaskBetweenAtPositionDurably).toHaveBeenCalledWith({
+      taskId: 'task-1',
+      sourceId: 'source-1',
+      targetId: 'target-1',
+      x: 40,
+      y: 60,
+    });
+    expect(mockTaskOperationService.insertTaskBetweenDurably).not.toHaveBeenCalled();
+    expect(mockTaskOperationService.insertTaskBetween).not.toHaveBeenCalled();
+    expect(mockRecorderService.setupSyncResultHandler).toHaveBeenCalledWith('snapshot-1');
+  });
+
+  registerTaskOperationAdapterLifecycleSpecs({
+    service: () => service,
+  });
+
+  registerTaskOperationAdapterPlannerSpecs({
+    service: () => service,
+    mockTaskOperationService: () => mockTaskOperationService,
+    mockUiStateService: () => mockUiStateService,
+    mockRecorderService: () => mockRecorderService,
+  });
+
+  registerTaskOperationAdapterProjectAttachmentSpecs({
+    service: () => service,
+    createProject,
+    createTask,
+    getProjects: () => mockProjectsSignal(),
+    setActiveProjectId: projectId => mockActiveProjectIdSignal.set(projectId),
+    setProjects: projects => mockProjectsSignal.set(projects),
+    mockChangeTrackerService: () => mockChangeTrackerService,
+    mockSyncCoordinatorService: () => mockSyncCoordinatorService,
+    mockActionQueueService: () => mockActionQueueService,
   });
 });

@@ -14,15 +14,15 @@ import { Task } from '../../../../models';
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     @if (connections && (connections.outgoing.length > 0 || connections.incoming.length > 0)) {
-      <div [ngClass]="{
+      <div class="text-task-connections-panel transition-[width,padding,border-color,background-color,color] duration-200" [ngClass]="{
         'flex-shrink-0 border-l border-violet-100 pl-2': !isMobile,
         'w-36': !isMobile && !isCollapsed(),
         'w-8': !isMobile && isCollapsed(),
         'border-t border-violet-100 pt-2 mt-2': isMobile
-      }" class="transition-[width,padding,border-color,background-color,color] duration-200">
+      }">
         
         <!-- 标题栏：点击可折叠/展开 -->
-        <div class="flex items-center gap-1 cursor-pointer select-none"
+        <div class="text-task-connections-header flex items-center gap-1 cursor-pointer select-none"
              [ngClass]="{'mb-1.5': !isCollapsed(), 'flex-col': !isMobile && isCollapsed()}"
              (click)="toggleCollapse($event)">
           <span class="text-violet-500 text-xs">🔗</span>
@@ -32,7 +32,7 @@ import { Task } from '../../../../models';
           } @else {
             <span class="text-[9px] text-violet-400 font-bold">{{connections.outgoing.length + connections.incoming.length}}</span>
           }
-          <svg class="w-3 h-3 text-violet-400 transition-transform ml-auto"
+          <svg class="text-task-connections-chevron w-3 h-3 text-violet-400 transition-transform ml-auto"
                [ngClass]="{'rotate-180': isCollapsed(), '-rotate-90': !isMobile && !isCollapsed(), 'rotate-0': isMobile && !isCollapsed()}"
                fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
@@ -51,13 +51,13 @@ import { Task } from '../../../../models';
                   </svg>
                   关联到
                 </div>
-                <div class="space-y-1">
+                <div class="text-task-connections-list space-y-1">
                   @for (conn of connections.outgoing; track conn.targetId) {
-                    <div class="flex items-start gap-2 p-1.5 bg-violet-50/50 rounded-lg border border-violet-100 group cursor-pointer hover:bg-violet-100/50 transition-colors"
+                    <div class="text-task-connection-card flex w-full min-w-0 items-start gap-2 p-1.5 bg-violet-50/50 rounded-lg border border-violet-100 group cursor-pointer hover:bg-violet-100/50 transition-colors"
                          (click)="onOpenTask(conn.targetTask!, $event)">
                       <div class="flex-1 min-w-0">
                         <div class="flex items-center gap-1.5">
-                          <span class="text-[9px] font-bold text-violet-400">{{projectState.compressDisplayId(conn.targetTask?.displayId || '?')}}</span>
+                          <span class="flex-shrink-0 text-[9px] font-bold text-violet-400">{{projectState.compressDisplayId(conn.targetTask?.displayId || '?')}}</span>
                           <span class="text-[11px] text-violet-700 truncate font-medium">{{conn.targetTask?.title || '未命名'}}</span>
                         </div>
                         @if (conn.description) {
@@ -82,13 +82,13 @@ import { Task } from '../../../../models';
                   </svg>
                   被关联
                 </div>
-                <div class="space-y-1">
+                <div class="text-task-connections-list space-y-1">
                   @for (conn of connections.incoming; track conn.sourceId) {
-                    <div class="flex items-start gap-2 p-1.5 bg-indigo-50/50 rounded-lg border border-indigo-100 group cursor-pointer hover:bg-indigo-100/50 transition-colors"
+                    <div class="text-task-connection-card flex w-full min-w-0 items-start gap-2 p-1.5 bg-indigo-50/50 rounded-lg border border-indigo-100 group cursor-pointer hover:bg-indigo-100/50 transition-colors"
                          (click)="onOpenTask(conn.sourceTask!, $event)">
                       <div class="flex-1 min-w-0">
                         <div class="flex items-center gap-1.5">
-                          <span class="text-[9px] font-bold text-indigo-400">{{projectState.compressDisplayId(conn.sourceTask?.displayId || '?')}}</span>
+                          <span class="flex-shrink-0 text-[9px] font-bold text-indigo-400">{{projectState.compressDisplayId(conn.sourceTask?.displayId || '?')}}</span>
                           <span class="text-[11px] text-indigo-700 truncate font-medium">{{conn.sourceTask?.title || '未命名'}}</span>
                         </div>
                         @if (conn.description) {
@@ -109,6 +109,41 @@ import { Task } from '../../../../models';
     }
   `,
   styles: [`
+    :host {
+      display: block;
+      max-width: 100%;
+      min-width: 0;
+    }
+
+    .text-task-connections-panel {
+      max-width: 100%;
+      overflow: hidden;
+    }
+
+    .text-task-connection-card {
+      max-width: 100%;
+    }
+
+    @container (max-width: 36rem) {
+      .text-task-connections-panel {
+        border-left-width: 0;
+        border-top: 1px solid rgba(139, 92, 246, 0.2);
+        margin-top: 0.5rem;
+        padding-left: 0;
+        padding-top: 0.5rem;
+        width: 100%;
+      }
+
+      .text-task-connections-panel .text-task-connections-header {
+        align-items: center;
+        flex-direction: row;
+      }
+
+      .text-task-connections-chevron {
+        margin-left: auto;
+      }
+    }
+
     .animate-collapse-open { 
       animation: collapseOpen 0.15s ease-out; 
     }

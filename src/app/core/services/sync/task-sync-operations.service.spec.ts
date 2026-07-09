@@ -19,13 +19,30 @@ import { RetryQueueService } from './retry-queue.service';
 import { SyncStateService } from './sync-state.service';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 import { SyncRpcClientService, type SyncRpcResult } from '../../../../services/sync-rpc-client.service';
+import { DataSafetyAuditPersistence } from '../../../../services/data-safety-audit-persistence';
 import { Task } from '../../../../models';
 import { TaskStore } from '../../state/stores';
-import { PermanentFailureError } from '../../../../utils/permanent-failure-error';
+import { resetBrowserNetworkSuspensionTrackingForTests } from '../../../../utils/browser-network-suspension';
 import {
-  createBrowserNetworkSuspendedError,
-  resetBrowserNetworkSuspensionTrackingForTests,
-} from '../../../../utils/browser-network-suspension';
+  registerTaskSyncOperationsBrowserSuspensionSpecs,
+  type TaskSyncOperationsBrowserSuspensionSpecContext,
+} from './task-sync-operations-browser-suspension.spec-helpers';
+import {
+  registerTaskSyncOperationsDeleteRpcSpecs,
+  type TaskSyncOperationsDeleteRpcSpecContext,
+} from './task-sync-operations-delete-rpc.spec-helpers';
+import {
+  registerTaskSyncOperationsDirectUpsertSpecs,
+  type TaskSyncOperationsDirectUpsertSpecContext,
+} from './task-sync-operations-direct-upsert.spec-helpers';
+import {
+  registerTaskSyncOperationsRpcUpsertSpecs,
+  type TaskSyncOperationsRpcUpsertSpecContext,
+} from './task-sync-operations-rpc-upsert.spec-helpers';
+import {
+  registerTaskSyncOperationsRetryGuardSpecs,
+  type TaskSyncOperationsRetryGuardSpecContext,
+} from './task-sync-operations-retry-guard.spec-helpers';
 
 function setVisibilityState(state: DocumentVisibilityState): void {
   Object.defineProperty(document, 'visibilityState', {
@@ -54,6 +71,7 @@ describe('TaskSyncOperationsService', () => {
   let taskFreshnessResult: { data: { id: string; updated_at: string | null; deleted_at: string | null } | null; error: unknown | null };
   let taskInsertResult: { data: { updated_at: string } | null; error: unknown | null };
   let taskUpdateResult: { data: { updated_at: string } | null; error: unknown | null };
+  let syncStateSnapshot: { lastSyncTime: string | null; pendingCount: number };
   const mockProjectDataService = {
     rowToTask: vi.fn((row: Task) => row),
   };
@@ -63,7 +81,7 @@ describe('TaskSyncOperationsService', () => {
     deleteAttachmentFilesFromStorage: vi.fn().mockResolvedValue(undefined),
     getTombstonesWithCache: vi.fn().mockResolvedValue({ data: [], error: null }),
     getLocalTombstones: vi.fn(() => new Set<string>()),
-    getLocalTombstoneTimestamp: vi.fn(() => undefined),
+    getLocalTombstoneTimestamp: vi.fn((_projectId: string, _taskId: string): number | undefined => undefined),
     clearLocalTombstones: vi.fn(),
     shouldMaterializeTaskDeletion: vi.fn((updatedAt: string | undefined | null, tombstoneTimestamp?: number) => {
       if (tombstoneTimestamp === undefined) {
@@ -78,6 +96,8 @@ describe('TaskSyncOperationsService', () => {
   const mockRetryQueue = {
     checkCircuitBreaker: vi.fn(() => true),
     add: vi.fn(() => true),
+    addDurably: vi.fn(async () => true),
+    hasEntity: vi.fn((_type: string, _entityId: string) => false),
     length: 0,
     recordCircuitSuccess: vi.fn(),
     recordCircuitFailure: vi.fn(),
@@ -99,10 +119,16 @@ describe('TaskSyncOperationsService', () => {
   };
   const mockSyncState = {
     isSessionExpired: vi.fn(() => false),
-    advanceLastSyncTimeIfIdle: vi.fn(() => true),
+    syncState: vi.fn(() => syncStateSnapshot),
+    advanceLastSyncTimeIfIdle: vi.fn((lastSyncTime: string) => {
+      syncStateSnapshot = { ...syncStateSnapshot, lastSyncTime };
+      return true;
+    }),
     setPendingCount: vi.fn(),
     setSyncError: vi.fn(),
-    setLastSyncTime: vi.fn(),
+    setLastSyncTime: vi.fn((lastSyncTime: string | null) => {
+      syncStateSnapshot = { ...syncStateSnapshot, lastSyncTime };
+    }),
   };
   const mockTaskStore = {
     getTask: vi.fn(),
@@ -117,6 +143,80 @@ describe('TaskSyncOperationsService', () => {
     handleAuthErrorWithRefresh: vi.fn(async () => false),
     isRlsPolicyViolation: vi.fn((_error?: any) => false),
   };
+
+  function getRetryGuardSpecContext(): TaskSyncOperationsRetryGuardSpecContext {
+    return {
+      service,
+      getUpsertPayload: () => upsertPayload,
+      mockClient,
+      mockRetryQueue,
+      mockSessionManager,
+      mockSyncRpcClient,
+      mockSyncState,
+      mockTaskStore,
+      deleteTasksRpcMock,
+    };
+  }
+
+  function getBrowserSuspensionSpecContext(): TaskSyncOperationsBrowserSuspensionSpecContext {
+    return {
+      service,
+      setVisibilityState,
+      mockClient,
+      mockLogger,
+      mockRetryQueue,
+      mockSessionManager,
+      mockTombstoneService,
+    };
+  }
+
+  function getDirectUpsertSpecContext(): TaskSyncOperationsDirectUpsertSpecContext {
+    return {
+      service,
+      getUpsertPayload: () => upsertPayload,
+      setUpsertPayload: payload => {
+        upsertPayload = payload;
+      },
+      setTaskFreshnessResult: result => {
+        taskFreshnessResult = result;
+      },
+      setTaskInsertResult: result => {
+        taskInsertResult = result;
+      },
+      setTaskUpdateResult: result => {
+        taskUpdateResult = result;
+      },
+      mockClient,
+      mockRetryQueue,
+      mockTaskStore,
+    };
+  }
+
+  function getRpcUpsertSpecContext(): TaskSyncOperationsRpcUpsertSpecContext {
+    return {
+      service,
+      getUpsertPayload: () => upsertPayload,
+      loadDataSafetyAudit: ownerUserId => new DataSafetyAuditPersistence().load(ownerUserId),
+      createSyncRpcResult,
+      mockSyncRpcClient,
+      mockRetryQueue,
+      mockSyncState,
+    };
+  }
+
+  function getDeleteRpcSpecContext(): TaskSyncOperationsDeleteRpcSpecContext {
+    return {
+      service,
+      getUpsertPayload: () => upsertPayload,
+      loadDataSafetyAudit: ownerUserId => new DataSafetyAuditPersistence().load(ownerUserId),
+      createSyncRpcResult,
+      mockClient,
+      mockSyncRpcClient,
+      mockTaskStore,
+      mockRetryQueue,
+      mockTombstoneService,
+    };
+  }
 
   const mockLogger = {
     debug: vi.fn(),
@@ -140,6 +240,10 @@ describe('TaskSyncOperationsService', () => {
       return {
         select: vi.fn(() => ({
           eq: vi.fn(() => ({
+            in: vi.fn(async (_column: string, ids: string[]) => ({
+              data: ids.map(id => ({ id })),
+              error: null,
+            })),
             eq: vi.fn(() => ({
               maybeSingle: vi.fn(async () => taskFreshnessResult),
             })),
@@ -197,7 +301,9 @@ describe('TaskSyncOperationsService', () => {
 
   beforeEach(() => {
     upsertPayload = null;
+    syncStateSnapshot = { lastSyncTime: null, pendingCount: 0 };
     vi.clearAllMocks();
+    localStorage.clear();
     resetBrowserNetworkSuspensionTrackingForTests();
     setVisibilityState('visible');
     mockClient.from.mockImplementation(defaultMockClientFrom);
@@ -303,83 +409,6 @@ describe('TaskSyncOperationsService', () => {
     service = TestBed.inject(TaskSyncOperationsService);
   });
 
-  it('pushTask 在浏览器网络挂起导致 session 暂不可用时应延后而非标记过期', async () => {
-    const task: Task = {
-      id: 'task-browser-suspended-session',
-      title: '任务',
-      content: '内容',
-      stage: 0,
-      parentId: null,
-      order: 0,
-      rank: 10000,
-      status: 'active',
-      x: 0,
-      y: 0,
-      displayId: 'T-S',
-      createdDate: new Date().toISOString(),
-      deletedAt: null,
-    };
-    setVisibilityState('hidden');
-    mockClient.auth.getSession.mockResolvedValueOnce({ data: { session: null } } as any);
-    mockSessionManager.tryRefreshSession.mockResolvedValueOnce(false);
-
-    const result = await service.pushTask(task, 'project-1', false, false, 'user-1');
-
-    expect(result).toBe(false);
-    expect(mockSessionManager.handleSessionExpired).not.toHaveBeenCalled();
-    expect(mockRetryQueue.add).toHaveBeenCalledWith('task', 'upsert', task, 'project-1', 'user-1');
-  });
-
-  it('getTombstoneIdsWithStatus 在浏览器网络挂起时应只用本地缓存且不告警', async () => {
-    const localTombstones = new Set(['task-local-delete']);
-    mockTombstoneService.getLocalTombstones.mockReturnValueOnce(localTombstones);
-    setVisibilityState('hidden');
-
-    const result = await service.getTombstoneIdsWithStatus('project-1');
-
-    expect(result.ids).toEqual(localTombstones);
-    expect(result.fromRemote).toBe(false);
-    expect(result.localCacheOnly).toBe(true);
-    expect(mockTombstoneService.getTombstonesWithCache).not.toHaveBeenCalled();
-    expect(mockLogger.warn).not.toHaveBeenCalled();
-  });
-
-  it('重试队列回放 task upsert 遇到浏览器网络挂起时应抛出延后错误，避免消耗 retry budget', async () => {
-    const task: Task = {
-      id: 'task-browser-suspended-replay',
-      title: '任务',
-      content: '内容',
-      stage: 0,
-      parentId: null,
-      order: 0,
-      rank: 10000,
-      status: 'active',
-      x: 0,
-      y: 0,
-      displayId: 'T-SR',
-      createdDate: new Date().toISOString(),
-      deletedAt: null,
-    };
-    setVisibilityState('hidden');
-    mockClient.auth.getSession.mockResolvedValueOnce({ data: { session: null } } as any);
-    mockSessionManager.tryRefreshSession.mockResolvedValueOnce(false);
-
-    await expect(service.pushTask(task, 'project-1', false, true, 'user-1'))
-      .rejects.toMatchObject({ name: 'BrowserNetworkSuspendedError' });
-    expect(mockRetryQueue.add).not.toHaveBeenCalled();
-  });
-
-  it('pushTaskPosition 在浏览器网络挂起导致 session 暂不可用时不应标记过期', async () => {
-    setVisibilityState('hidden');
-    mockClient.auth.getSession.mockResolvedValueOnce({ data: { session: null } } as any);
-    mockSessionManager.tryRefreshSession.mockResolvedValueOnce(false);
-
-    const result = await service.pushTaskPosition('task-position-suspended', 10, 20, 'project-1', undefined, 'user-1');
-
-    expect(result).toBe(false);
-    expect(mockSessionManager.handleSessionExpired).not.toHaveBeenCalled();
-  });
-
   it('pushTaskPosition 在 sync RPC 开启且有任务快照时应走受 CAS 保护的 task upsert', async () => {
     mockSyncRpcClient.isFeatureEnabled.mockReturnValue(true);
     const rpcResult: SyncRpcResult = createSyncRpcResult({
@@ -415,6 +444,7 @@ describe('TaskSyncOperationsService', () => {
       }),
       projectId: 'project-1',
       baseUpdatedAt: '2026-04-30T07:00:00.000Z',
+      writeIntent: 'task_structure_update',
     }));
     expect(mockClient.from).not.toHaveBeenCalledWith('tasks');
     expect(fallbackTask.x).toBe(10);
@@ -431,7 +461,49 @@ describe('TaskSyncOperationsService', () => {
     );
   });
 
-  it('pushTaskPosition 直接更新成功后应把服务端 canonical updated_at 写回 fallback 任务', async () => {
+  it('pushTaskPosition 收到本地操作 operationId 时应复用同一个 RPC 幂等键', async () => {
+    mockSyncRpcClient.isFeatureEnabled.mockReturnValue(true);
+    const operationId = '11111111-1111-4111-8111-111111111111';
+    const rpcResult: SyncRpcResult = createSyncRpcResult({
+      entityId: 'task-position-rpc-operation-id',
+      serverUpdatedAt: '2026-04-30T08:10:00.000Z',
+    });
+    mockSyncRpcClient.upsertTask.mockImplementationOnce(async () => rpcResult);
+    const fallbackTask = {
+      id: 'task-position-rpc-operation-id',
+      title: 'Position task with operationId',
+      content: 'Position task with operationId',
+      x: 1,
+      y: 2,
+      updatedAt: '2026-04-30T08:00:00.000Z',
+    } as Task;
+    mockTaskStore.getTask.mockReturnValue({ ...fallbackTask });
+
+    const result = await service.pushTaskPosition(
+      'task-position-rpc-operation-id',
+      30,
+      40,
+      'project-1',
+      fallbackTask,
+      'user-1',
+      operationId,
+    );
+
+    expect(result).toBe(true);
+    expect(mockSyncRpcClient.upsertTask).toHaveBeenCalledWith(expect.objectContaining({
+      operationId,
+      task: expect.objectContaining({
+        id: 'task-position-rpc-operation-id',
+        x: 30,
+        y: 40,
+      }),
+      projectId: 'project-1',
+      baseUpdatedAt: '2026-04-30T08:00:00.000Z',
+      writeIntent: 'task_structure_update',
+    }));
+  });
+
+  it('pushTaskPosition 直接更新成功后应把 x/y/rank 与服务端 canonical updated_at 写回 fallback 任务', async () => {
     const serverUpdatedAt = '2026-04-30T08:10:00.000Z';
     mockClient.from.mockImplementationOnce((table: string) => {
       if (table !== 'tasks') {
@@ -475,6 +547,7 @@ describe('TaskSyncOperationsService', () => {
                     && thirdValue === '2026-04-30T07:00:00.000Z'
                     && payload['x'] === 10
                     && payload['y'] === 20
+                    && payload['rank'] === 42
                       ? [{ updated_at: serverUpdatedAt }]
                       : [],
                   error: null,
@@ -491,6 +564,7 @@ describe('TaskSyncOperationsService', () => {
       content: 'Position task',
       x: 1,
       y: 2,
+      rank: 42,
       updatedAt: '2026-04-30T07:00:00.000Z',
     } as Task;
     mockTaskStore.getTask.mockReturnValueOnce({ ...fallbackTask });
@@ -507,458 +581,18 @@ describe('TaskSyncOperationsService', () => {
     expect(result).toBe(true);
     expect(fallbackTask.x).toBe(10);
     expect(fallbackTask.y).toBe(20);
+    expect(fallbackTask.rank).toBe(42);
     expect(fallbackTask.updatedAt).toBe(serverUpdatedAt);
     expect(mockTaskStore.setTask).toHaveBeenCalledWith(
       expect.objectContaining({
         id: 'task-position-direct',
         x: 10,
         y: 20,
+        rank: 42,
         updatedAt: serverUpdatedAt,
       }),
       'project-1',
     );
-  });
-
-  it('重试队列回放 task delete 遇到浏览器网络挂起时应抛出延后错误，避免消耗 retry budget', async () => {
-    mockClient.auth.getSession.mockRejectedValueOnce(createBrowserNetworkSuspendedError());
-
-    await expect(service.deleteTask('task-delete-suspended', 'project-1', 'user-1', true))
-      .rejects.toMatchObject({ name: 'BrowserNetworkSuspendedError' });
-    expect(mockRetryQueue.add).not.toHaveBeenCalled();
-  });
-
-  it('pushTask 应将 parking_meta 上行到 Supabase', async () => {
-    const parkingMeta = {
-      state: 'parked' as const,
-      parkedAt: new Date().toISOString(),
-      lastVisitedAt: new Date().toISOString(),
-      contextSnapshot: null,
-      reminder: null,
-      pinned: false,
-    };
-
-    const task: Task = {
-      id: 'task-1',
-      title: '任务',
-      content: '内容',
-      stage: 0,
-      parentId: null,
-      order: 0,
-      rank: 10000,
-      status: 'active',
-      x: 0,
-      y: 0,
-      displayId: 'T-1',
-      createdDate: new Date().toISOString(),
-      deletedAt: null,
-      parkingMeta,
-    };
-
-    const result = await service.pushTask(task, 'project-1');
-
-    expect(result).toBe(true);
-    expect(upsertPayload).toBeTruthy();
-    expect(upsertPayload?.['parking_meta']).toEqual(parkingMeta);
-  });
-
-  it('pushTask 直接 upsert 成功后应把服务端 canonical updated_at 写回本地任务', async () => {
-    const serverUpdatedAt = '2026-04-30T08:15:00.000Z';
-    mockClient.from.mockImplementation((table: string) => {
-      if (table === 'task_tombstones') {
-        return {
-          select: vi.fn(() => ({
-            eq: vi.fn(() => ({
-              maybeSingle: vi.fn(async () => ({ data: null, error: null })),
-            })),
-          })),
-        };
-      }
-
-      if (table === 'tasks') {
-        return {
-          select: vi.fn(() => ({
-            eq: vi.fn(() => ({
-              eq: vi.fn(() => ({
-                maybeSingle: vi.fn(async () => ({ data: null, error: null })),
-              })),
-            })),
-          })),
-          insert: vi.fn((payload: Record<string, unknown>) => {
-            upsertPayload = payload;
-            return {
-              select: vi.fn(() => ({
-                maybeSingle: vi.fn(async () => ({
-                  data: { updated_at: serverUpdatedAt },
-                  error: null,
-                })),
-              })),
-            };
-          }),
-          update: vi.fn(),
-        };
-      }
-
-      throw new Error(`Unexpected table: ${table}`);
-    });
-    const task: Task = {
-      id: 'task-canonical-direct',
-      title: '任务',
-      content: '内容',
-      stage: 0,
-      parentId: null,
-      order: 0,
-      rank: 10000,
-      status: 'active',
-      x: 0,
-      y: 0,
-      displayId: 'T-CD',
-      createdDate: '2026-04-30T08:00:00.000Z',
-      updatedAt: '2026-04-30T08:00:00.000Z',
-      deletedAt: null,
-    };
-    mockTaskStore.getTask.mockReturnValueOnce({ ...task });
-
-    const result = await service.pushTask(task, 'project-1');
-
-    expect(result).toBe(true);
-    expect(task.updatedAt).toBe(serverUpdatedAt);
-    expect(mockTaskStore.setTask).toHaveBeenCalledWith(
-      expect.objectContaining({
-        id: 'task-canonical-direct',
-        updatedAt: serverUpdatedAt,
-      }),
-      'project-1',
-    );
-  });
-
-  it('pushTask 直接 upsert 前若远端任务更新更晚则应抛出版本冲突并阻止覆盖', async () => {
-    mockClient.from.mockImplementation((table: string) => {
-      if (table === 'task_tombstones') {
-        return {
-          select: vi.fn(() => ({
-            eq: vi.fn(() => ({
-              maybeSingle: vi.fn(async () => ({ data: null, error: null })),
-            })),
-          })),
-        };
-      }
-
-      if (table === 'tasks') {
-        return {
-          select: vi.fn(() => ({
-            eq: vi.fn(() => ({
-              eq: vi.fn(() => ({
-                maybeSingle: vi.fn(async () => ({
-                  data: {
-                    id: 'task-direct-conflict',
-                    updated_at: '2026-04-30T09:00:00.000Z',
-                    deleted_at: null,
-                  },
-                  error: null,
-                })),
-              })),
-            })),
-          })),
-          insert: vi.fn((payload: Record<string, unknown>) => {
-            upsertPayload = payload;
-            return {
-              select: vi.fn(() => ({
-                maybeSingle: vi.fn(async () => ({
-                  data: { updated_at: new Date().toISOString() },
-                  error: null,
-                })),
-              })),
-            };
-          }),
-          update: vi.fn(),
-        };
-      }
-
-      throw new Error(`Unexpected table: ${table}`);
-    });
-
-    const task: Task = {
-      id: 'task-direct-conflict',
-      title: '任务',
-      content: '内容',
-      stage: 0,
-      parentId: null,
-      order: 0,
-      rank: 10000,
-      status: 'active',
-      x: 0,
-      y: 0,
-      displayId: 'T-DCF',
-      createdDate: '2026-04-30T08:00:00.000Z',
-      updatedAt: '2026-04-30T08:00:00.000Z',
-      deletedAt: null,
-    };
-
-    await expect(service.pushTask(task, 'project-1')).rejects.toBeInstanceOf(PermanentFailureError);
-
-    expect(upsertPayload).toBeNull();
-    expect(mockRetryQueue.add).not.toHaveBeenCalled();
-    expect(mockRetryQueue.recordCircuitSuccess).not.toHaveBeenCalled();
-  });
-
-  it('pushTask 直接写入在 preflight 后被并发更新抢先时应以版本冲突失败收口', async () => {
-    taskFreshnessResult = {
-      data: {
-        id: 'task-direct-cas-miss',
-        updated_at: '2026-04-30T08:00:00.000Z',
-        deleted_at: null,
-      },
-      error: null,
-    };
-    taskUpdateResult = {
-      data: null,
-      error: null,
-    };
-
-    const task: Task = {
-      id: 'task-direct-cas-miss',
-      title: '任务',
-      content: '内容',
-      stage: 0,
-      parentId: null,
-      order: 0,
-      rank: 10000,
-      status: 'active',
-      x: 0,
-      y: 0,
-      displayId: 'T-DCM',
-      createdDate: '2026-04-30T08:00:00.000Z',
-      updatedAt: '2026-04-30T08:00:00.000Z',
-      deletedAt: null,
-    };
-
-    await expect(service.pushTask(task, 'project-1')).rejects.toBeInstanceOf(PermanentFailureError);
-
-    expect(mockRetryQueue.add).not.toHaveBeenCalled();
-    expect(mockRetryQueue.recordCircuitSuccess).not.toHaveBeenCalled();
-  });
-
-  it('pushTask 直接 insert 在写回未返回行时应以版本冲突失败收口，避免 406 冒泡', async () => {
-    taskFreshnessResult = { data: null, error: null };
-    taskInsertResult = { data: null, error: null };
-
-    const task: Task = {
-      id: 'task-direct-insert-empty',
-      title: '任务',
-      content: '内容',
-      stage: 0,
-      parentId: null,
-      order: 0,
-      rank: 10000,
-      status: 'active',
-      x: 0,
-      y: 0,
-      displayId: 'T-DIE',
-      createdDate: '2026-04-30T08:00:00.000Z',
-      updatedAt: '2026-04-30T08:00:00.000Z',
-      deletedAt: null,
-    };
-
-    await expect(service.pushTask(task, 'project-1')).rejects.toBeInstanceOf(PermanentFailureError);
-
-    expect(upsertPayload).not.toBeNull();
-    expect(mockRetryQueue.add).not.toHaveBeenCalled();
-    expect(mockRetryQueue.recordCircuitSuccess).not.toHaveBeenCalled();
-  });
-
-  it('pushTask 在 sync RPC flag 开启时应走 RPC/CAS 而不是直接 table upsert', async () => {
-    mockSyncRpcClient.isFeatureEnabled.mockReturnValue(true);
-    const task: Task = {
-      id: 'task-rpc',
-      title: '任务',
-      content: '内容',
-      stage: 0,
-      parentId: null,
-      order: 0,
-      rank: 10000,
-      status: 'active',
-      x: 0,
-      y: 0,
-      displayId: 'T-RPC',
-      createdDate: new Date().toISOString(),
-      updatedAt: '2026-04-30T00:00:00.000Z',
-      deletedAt: null,
-    };
-
-    const result = await service.pushTask(task, 'project-1');
-
-    expect(result).toBe(true);
-    expect(mockSyncRpcClient.upsertTask).toHaveBeenCalledWith(expect.objectContaining({
-      operationId: expect.any(String),
-      task,
-      projectId: 'project-1',
-      baseUpdatedAt: '2026-04-30T00:00:00.000Z',
-    }));
-    expect(upsertPayload).toBeNull();
-    expect(mockRetryQueue.recordCircuitSuccess).toHaveBeenCalled();
-  });
-
-  it('pushTask 在 feature 默认关闭但 probe 成功时仍应走 sync_upsert_task', async () => {
-    mockSyncRpcClient.isFeatureEnabled.mockReturnValue(false);
-    mockSyncRpcClient.checkProtocol.mockImplementationOnce(async () => {
-      mockSyncRpcClient.isFeatureEnabled.mockReturnValue(true);
-      return { minProtocolVersion: 1, deploymentEpoch: 0 };
-    });
-    const task: Task = {
-      id: 'task-rpc-probed',
-      title: '任务',
-      content: '内容',
-      stage: 0,
-      parentId: null,
-      order: 0,
-      rank: 10000,
-      status: 'active',
-      x: 0,
-      y: 0,
-      displayId: 'T-RPCP',
-      createdDate: new Date().toISOString(),
-      updatedAt: '2026-05-14T00:00:00.000Z',
-      deletedAt: null,
-    };
-
-    const result = await service.pushTask(task, 'project-1');
-
-    expect(result).toBe(true);
-    expect(mockSyncRpcClient.checkProtocol).toHaveBeenCalledTimes(1);
-    expect(mockSyncRpcClient.upsertTask).toHaveBeenCalledWith(expect.objectContaining({
-      task,
-      projectId: 'project-1',
-      baseUpdatedAt: '2026-05-14T00:00:00.000Z',
-    }));
-    expect(upsertPayload).toBeNull();
-  });
-
-  it('pushTask 在 probe 判定客户端已过期时不应回退直接 table upsert', async () => {
-    mockSyncRpcClient.isFeatureEnabled.mockReturnValue(false);
-    mockSyncRpcClient.checkProtocol.mockImplementationOnce(async () => {
-      mockSyncRpcClient.isClientRejected.mockReturnValue(true);
-      return { minProtocolVersion: 99, deploymentEpoch: 99 };
-    });
-    const task: Task = {
-      id: 'task-rpc-rejected',
-      title: '任务',
-      content: '内容',
-      stage: 0,
-      parentId: null,
-      order: 0,
-      rank: 10000,
-      status: 'active',
-      x: 0,
-      y: 0,
-      displayId: 'T-RPCR',
-      createdDate: new Date().toISOString(),
-      updatedAt: '2026-05-14T00:00:00.000Z',
-      deletedAt: null,
-    };
-
-    const result = await service.pushTask(task, 'project-1', false, false, 'user-1');
-
-    expect(result).toBe(false);
-    expect(mockSyncRpcClient.checkProtocol).toHaveBeenCalledTimes(1);
-    expect(mockSyncRpcClient.upsertTask).not.toHaveBeenCalled();
-    expect(upsertPayload).toBeNull();
-    expect(mockSyncState.setSyncError).toHaveBeenCalledWith('当前客户端同步协议已过期，请刷新后重试');
-    expect(mockRetryQueue.add).not.toHaveBeenCalled();
-  });
-
-  it('pushTask sync RPC 成功后应把服务端 canonical updated_at 写回本地任务', async () => {
-    const serverUpdatedAt = '2026-04-30T08:20:00.000Z';
-    mockSyncRpcClient.isFeatureEnabled.mockReturnValue(true);
-    const rpcResult: SyncRpcResult = createSyncRpcResult({
-      entityId: 'task-rpc-canonical',
-      serverUpdatedAt,
-    });
-    mockSyncRpcClient.upsertTask.mockImplementationOnce(async () => rpcResult);
-    const task: Task = {
-      id: 'task-rpc-canonical',
-      title: '任务',
-      content: '内容',
-      stage: 0,
-      parentId: null,
-      order: 0,
-      rank: 10000,
-      status: 'active',
-      x: 0,
-      y: 0,
-      displayId: 'T-RPCC',
-      createdDate: '2026-04-30T08:00:00.000Z',
-      updatedAt: '2026-04-30T08:00:00.000Z',
-      deletedAt: null,
-    };
-
-    const result = await service.pushTask(task, 'project-1');
-
-    expect(result).toBe(true);
-    expect(task.updatedAt).toBe(serverUpdatedAt);
-  });
-
-  it('pushTask sync RPC 遇到 remote-newer 时应保留本地意图并阻止直接 table upsert', async () => {
-    mockSyncRpcClient.isFeatureEnabled.mockReturnValue(true);
-    const rpcResult: SyncRpcResult = createSyncRpcResult({
-      status: 'remote-newer',
-      remoteUpdatedAt: '2026-04-30T00:01:00.000Z',
-    });
-    mockSyncRpcClient.upsertTask.mockImplementationOnce(async () => rpcResult);
-    const task: Task = {
-      id: 'task-rpc-remote-newer',
-      title: '任务',
-      content: '内容',
-      stage: 0,
-      parentId: null,
-      order: 0,
-      rank: 10000,
-      status: 'active',
-      x: 0,
-      y: 0,
-      displayId: 'T-RPC2',
-      createdDate: new Date().toISOString(),
-      updatedAt: '2026-04-30T00:00:00.000Z',
-      deletedAt: null,
-    };
-
-    const result = await service.pushTask(task, 'project-1', false, false, 'user-1');
-
-    expect(result).toBe(false);
-    expect(upsertPayload).toBeNull();
-    expect(mockRetryQueue.add).toHaveBeenCalledWith('task', 'upsert', task, 'project-1', 'user-1');
-    expect(mockRetryQueue.recordCircuitSuccess).not.toHaveBeenCalled();
-  });
-
-  it('pushTask sync RPC 遇到 missing_task_timestamp 时应作为终止态旧写入丢弃', async () => {
-    mockSyncRpcClient.isFeatureEnabled.mockReturnValue(true);
-    const rpcResult: SyncRpcResult = createSyncRpcResult({
-      status: 'remote-newer',
-      reason: 'missing_task_timestamp',
-      remoteUpdatedAt: '2026-05-31T09:31:36.000Z',
-    });
-    mockSyncRpcClient.upsertTask.mockImplementationOnce(async () => rpcResult);
-    const task: Task = {
-      id: 'task-rpc-missing-timestamp',
-      title: '旧快照任务',
-      content: '旧快照任务',
-      stage: null,
-      parentId: null,
-      order: 0,
-      rank: 10000,
-      status: 'active',
-      x: 0,
-      y: 0,
-      displayId: 'T-RPCM',
-      createdDate: new Date().toISOString(),
-      deletedAt: null,
-    };
-
-    await expect(service.pushTask(task, 'project-1', false, false, 'user-1'))
-      .rejects.toBeInstanceOf(PermanentFailureError);
-
-    expect(upsertPayload).toBeNull();
-    expect(mockRetryQueue.add).not.toHaveBeenCalled();
-    expect(mockSyncState.setSyncError).not.toHaveBeenCalledWith('同步写入被服务端拒绝，已保留本地变更等待重试');
   });
 
   it('sourceUserId 与当前会话不匹配时应拒绝写云端并按原 owner 入队', async () => {
@@ -985,165 +619,62 @@ describe('TaskSyncOperationsService', () => {
 
     expect(result).toBe(false);
     expect(upsertPayload).toBeNull();
-    expect(mockRetryQueue.add).toHaveBeenCalledWith('task', 'upsert', task, 'project-1', 'user-1');
-  });
-
-  it('deleteTask 在 sourceUserId 与当前会话不匹配时应拒绝写云端并按原 owner 入队', async () => {
-    mockClient.auth.getSession.mockResolvedValueOnce({
-      data: { session: { user: { id: 'user-2' } } },
-    });
-
-    const result = await service.deleteTask('task-delete-owner-mismatch', 'project-1', 'user-1');
-
-    expect(result).toBe(false);
-    expect(mockRetryQueue.add).toHaveBeenCalledWith(
+    expect(mockRetryQueue.addDurably).toHaveBeenCalledWith(
       'task',
-      'delete',
-      { id: 'task-delete-owner-mismatch' },
+      'upsert',
+      task,
       'project-1',
       'user-1',
-    );
-  });
-
-  it('deleteTask 应优先调用带 project_id 的 purge_tasks_v3', async () => {
-    const result = await service.deleteTask('task-delete-scoped', 'project-1', 'user-1');
-
-    expect(result).toBe(true);
-    expect(mockClient.rpc).toHaveBeenCalledWith('purge_tasks_v3', {
-      p_project_id: 'project-1',
-      p_task_ids: ['task-delete-scoped'],
-    });
-  });
-
-  it('purgeTasksFromCloud 成功后应清理引用已删任务的连接重试项', async () => {
-    mockRetryQueue.removeByEntities.mockReturnValueOnce(['task-delete-scoped']);
-    mockRetryQueue.removeConnectionsReferencingTasks.mockReturnValueOnce(['conn-stale-a']);
-
-    const result = await service.purgeTasksFromCloud('project-1', ['task-delete-scoped'], 'user-1');
-
-    expect(result).toBe(true);
-    expect(mockRetryQueue.removeByEntities).toHaveBeenCalledWith('task', ['task-delete-scoped']);
-    expect(mockRetryQueue.removeConnectionsReferencingTasks).toHaveBeenCalledWith('project-1', ['task-delete-scoped']);
-  });
-
-  it('purgeTasksFromCloud 在 sync RPC 开启时应走 sync_delete_tasks 并清理附件与依赖重试项', async () => {
-    mockSyncRpcClient.isFeatureEnabled.mockReturnValue(true);
-    const rpcResult: SyncRpcResult = createSyncRpcResult({
-      entityId: 'project-1',
-      affectedCount: 2,
-      attachmentPaths: ['user/project/task/file.png'],
-    });
-    mockSyncRpcClient.deleteTasks.mockImplementationOnce(async () => rpcResult);
-
-    const result = await service.purgeTasksFromCloud('project-1', ['task-rpc-a', 'task-rpc-b'], 'user-1');
-
-    expect(result).toBe(true);
-    expect(mockSyncRpcClient.deleteTasks).toHaveBeenCalledWith(expect.objectContaining({
-      projectId: 'project-1',
-      taskIds: ['task-rpc-a', 'task-rpc-b'],
-      baseUpdatedAt: null,
-      deleteMode: 'purge',
-    }));
-    expect(mockClient.rpc).not.toHaveBeenCalledWith('purge_tasks_v3', expect.anything());
-    expect(mockTombstoneService.deleteAttachmentFilesFromStorage).toHaveBeenCalledWith(
-      mockClient,
-      ['user/project/task/file.png'],
-    );
-    expect(mockRetryQueue.removeConnectionsReferencingTasks).toHaveBeenCalledWith(
-      'project-1',
-      ['task-rpc-a', 'task-rpc-b'],
-    );
-  });
-
-  it('purgeTasksFromCloud 在 sync RPC 返回 deleted-remote-newer 时保留删除意图等待拉取合并', async () => {
-    mockSyncRpcClient.isFeatureEnabled.mockReturnValue(true);
-    const rpcResult: SyncRpcResult = createSyncRpcResult({
-      status: 'deleted-remote-newer',
-      remoteUpdatedAt: '2026-04-30T05:00:00.000Z',
-    });
-    mockSyncRpcClient.deleteTasks.mockImplementationOnce(async () => rpcResult);
-
-    const result = await service.purgeTasksFromCloud('project-1', ['task-rpc-conflict'], 'user-1');
-
-    expect(result).toBe(false);
-    expect(mockRetryQueue.add).toHaveBeenCalledWith(
-      'task',
-      'delete',
-      { id: 'task-rpc-conflict' },
-      'project-1',
-      'user-1',
-    );
-  });
-
-  it('softDeleteTasksBatch 在 sync RPC 开启时应走 sync_delete_tasks 而不是旧 safe_delete_tasks', async () => {
-    mockSyncRpcClient.isFeatureEnabled.mockReturnValue(true);
-    const rpcResult: SyncRpcResult = createSyncRpcResult({
-      entityId: 'project-1',
-      affectedCount: 2,
-      attachmentPaths: [] as string[],
-    });
-    mockSyncRpcClient.deleteTasks.mockImplementationOnce(async () => rpcResult);
-
-    const result = await service.softDeleteTasksBatch('project-1', ['task-soft-rpc-a', 'task-soft-rpc-b']);
-
-    expect(result).toBe(2);
-    expect(mockSyncRpcClient.deleteTasks).toHaveBeenCalledWith(expect.objectContaining({
-      projectId: 'project-1',
-      taskIds: ['task-soft-rpc-a', 'task-soft-rpc-b'],
-      baseUpdatedAt: null,
-      deleteMode: 'soft',
-    }));
-    expect(mockClient.rpc).not.toHaveBeenCalledWith('safe_delete_tasks', expect.anything());
-    expect(mockTombstoneService.addLocalTombstones).toHaveBeenCalledWith(
-      'project-1',
-      ['task-soft-rpc-a', 'task-soft-rpc-b'],
+      undefined,
+      undefined,
+      undefined,
       undefined,
     );
-    expect(mockRetryQueue.removeConnectionsReferencingTasks).toHaveBeenCalledWith(
+  });
+
+  it('pushTask 缺少 operationId 时不应现场生成临时 RPC 写入，应先持久化到 RetryQueue', async () => {
+    mockSyncRpcClient.isFeatureEnabled.mockReturnValue(true);
+    const task: Task = {
+      id: 'task-missing-operation-id',
+      title: '缺少 operationId 的任务',
+      content: '内容',
+      stage: 0,
+      parentId: null,
+      order: 0,
+      rank: 10000,
+      status: 'active',
+      x: 0,
+      y: 0,
+      displayId: 'T-MISSING-OP',
+      createdDate: new Date().toISOString(),
+      deletedAt: null,
+      updatedAt: '2026-06-29T00:00:00.000Z',
+    };
+
+    const result = await service.pushTask(
+      task,
       'project-1',
-      ['task-soft-rpc-a', 'task-soft-rpc-b'],
+      true,
+      false,
+      'user-1',
+      false,
+      'task_structure_update',
     );
-  });
 
-  it('softDeleteTasksBatch 在 feature 默认关闭但 probe 成功时仍应走 sync_delete_tasks', async () => {
-    mockSyncRpcClient.isFeatureEnabled.mockReturnValue(false);
-    mockSyncRpcClient.checkProtocol.mockImplementationOnce(async () => {
-      mockSyncRpcClient.isFeatureEnabled.mockReturnValue(true);
-      return { minProtocolVersion: 1, deploymentEpoch: 0 };
-    });
-    mockSyncRpcClient.deleteTasks.mockImplementationOnce(async () => createSyncRpcResult({
-      entityId: 'project-1',
-      affectedCount: 2,
-      attachmentPaths: [] as string[],
-    }));
-
-    const result = await service.softDeleteTasksBatch('project-1', ['task-soft-probed-a', 'task-soft-probed-b']);
-
-    expect(result).toBe(2);
-    expect(mockSyncRpcClient.checkProtocol).toHaveBeenCalledTimes(1);
-    expect(mockSyncRpcClient.deleteTasks).toHaveBeenCalledWith(expect.objectContaining({
-      projectId: 'project-1',
-      taskIds: ['task-soft-probed-a', 'task-soft-probed-b'],
-      deleteMode: 'soft',
-    }));
-    expect(mockClient.rpc).not.toHaveBeenCalledWith('safe_delete_tasks', expect.anything());
-  });
-
-  it('softDeleteTasksBatch 成功后也应清理引用已删任务的连接重试项', async () => {
-    mockClient.rpc.mockImplementationOnce(async (fn: string, args: Record<string, unknown>) => {
-      if (fn === 'safe_delete_tasks') {
-        return { data: 1, error: null, args };
-      }
-      throw new Error(`Unexpected rpc: ${fn}`);
-    });
-    mockRetryQueue.removeByEntities.mockReturnValueOnce(['task-soft-delete-scoped']);
-    mockRetryQueue.removeConnectionsReferencingTasks.mockReturnValueOnce(['conn-stale-soft-delete']);
-
-    const result = await service.softDeleteTasksBatch('project-1', ['task-soft-delete-scoped']);
-
-    expect(result).toBe(1);
-    expect(mockRetryQueue.removeByEntities).toHaveBeenCalledWith('task', ['task-soft-delete-scoped']);
-    expect(mockRetryQueue.removeConnectionsReferencingTasks).toHaveBeenCalledWith('project-1', ['task-soft-delete-scoped']);
+    expect(result).toBe(false);
+    expect(mockSyncRpcClient.upsertTask).not.toHaveBeenCalled();
+    expect(upsertPayload).toBeNull();
+    expect(mockRetryQueue.addDurably).toHaveBeenCalledWith(
+      'task',
+      'upsert',
+      task,
+      'project-1',
+      'user-1',
+      undefined,
+      'task_structure_update',
+      undefined,
+      expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i),
+    );
   });
 
   it('pullTasks 不应把 updatedAt 晚于 tombstone deleted_at 的恢复任务重新标记为删除', async () => {
@@ -1170,9 +701,11 @@ describe('TaskSyncOperationsService', () => {
       if (table === 'tasks') {
         return {
           select: vi.fn(() => ({
-            eq: vi.fn(async () => ({
-              data: [restoredTask],
-              error: null,
+            eq: vi.fn(() => ({
+              range: vi.fn(async () => ({
+                data: [restoredTask],
+                error: null,
+              })),
             })),
           })),
         };
@@ -1191,266 +724,75 @@ describe('TaskSyncOperationsService', () => {
     expect(result[0]?.deletedAt).toBeNull();
   });
 
-  it('pushTask 在 tombstone 查询失败时应 fail closed，避免误复活已删任务', async () => {
-    mockClient.from.mockImplementationOnce((table: string) => {
-      if (table === 'task_tombstones') {
+  it('getTombstoneIdsWithStatus 应返回本地与远端 tombstone 的 deleted_at 水位', async () => {
+    mockTombstoneService.getLocalTombstones.mockReturnValueOnce(new Set(['task-local']));
+    mockTombstoneService.getLocalTombstoneTimestamp.mockReturnValueOnce(
+      Date.parse('2026-04-22T00:00:00.000Z'),
+    );
+    mockTombstoneService.getTombstonesWithCache.mockResolvedValueOnce({
+      data: [
+        { task_id: 'task-remote', deleted_at: '2026-04-23T00:00:00.000Z' },
+        { task_id: 'task-remote-missing-deleted-at', deleted_at: null },
+      ],
+      error: null,
+    });
+
+    const result = await service.getTombstoneIdsWithStatus('project-1');
+
+    expect(result.ids).toEqual(new Set([
+      'task-local',
+      'task-remote',
+      'task-remote-missing-deleted-at',
+    ]));
+    expect(result.deletedAtByTaskId?.get('task-local')).toBe(Date.parse('2026-04-22T00:00:00.000Z'));
+    expect(result.deletedAtByTaskId?.get('task-remote')).toBe(Date.parse('2026-04-23T00:00:00.000Z'));
+    expect(result.deletedAtByTaskId?.has('task-remote-missing-deleted-at')).toBe(false);
+  });
+
+  it('pullTasks 应读取完整 Supabase REST 分页', async () => {
+    const rows = Array.from({ length: 1001 }, (_, index) => ({
+      id: `task-${index.toString().padStart(4, '0')}`,
+      title: `Task ${index}`,
+      content: `Content ${index}`,
+      updatedAt: new Date(Date.UTC(2026, 5, 9, 0, 1, index)).toISOString(),
+    })) as Task[];
+    const ranges: Array<[number, number]> = [];
+
+    mockClient.from.mockImplementation((table: string) => {
+      if (table === 'tasks') {
         return {
-          select: vi.fn(() => ({
-            eq: vi.fn(() => ({
-              maybeSingle: vi.fn(async () => ({
-                data: null,
-                error: { code: '42501', message: 'permission denied' },
-              })),
-            })),
-          })),
+          select: vi.fn(() => {
+            const query = {
+              eq: vi.fn(() => query),
+              gt: vi.fn(() => query),
+              range: vi.fn(async (from: number, to: number) => {
+                ranges.push([from, to]);
+                return { data: rows.slice(from, to + 1), error: null };
+              }),
+            };
+            return query;
+          }),
         };
       }
 
       throw new Error(`Unexpected table: ${table}`);
     });
+    mockTombstoneService.getTombstonesWithCache.mockResolvedValueOnce({ data: [], error: null });
 
-    const task: Task = {
-      id: 'task-tombstone-query-error',
-      title: '任务',
-      content: '内容',
-      stage: 0,
-      parentId: null,
-      order: 0,
-      rank: 10000,
-      status: 'active',
-      x: 0,
-      y: 0,
-      displayId: 'T-3',
-      createdDate: new Date().toISOString(),
-      deletedAt: null,
-    };
+    const result = await service.pullTasks('project-1');
 
-    const result = await service.pushTask(task, 'project-1');
-
-    expect(result).toBe(false);
-    expect(upsertPayload).toBeNull();
-      expect(mockRetryQueue.add).not.toHaveBeenCalled();
-      expect(mockRetryQueue.recordCircuitFailure).toHaveBeenCalled();
+    expect(result).toHaveLength(1001);
+    expect(result[0]?.id).toBe('task-0000');
+    expect(result[1000]?.id).toBe('task-1000');
+    expect(ranges).toEqual([
+      [0, 999],
+      [1000, 1999],
+    ]);
   });
 
-    it('重试队列回放 task upsert 遇到会话过期时不应抛出永久失败', async () => {
-      mockClient.from.mockImplementationOnce((table: string) => {
-        if (table === 'task_tombstones') {
-          return {
-            select: vi.fn(() => ({
-              eq: vi.fn(() => ({
-                maybeSingle: vi.fn(async () => ({
-                  data: null,
-                  error: { code: 'PGRST301', message: 'JWT expired' },
-                })),
-              })),
-            })),
-          };
-        }
-
-        throw new Error(`Unexpected table: ${table}`);
-      });
-      mockSessionManager.isSessionExpiredError.mockImplementation((error: { code?: string | number }) => error.code === 'PGRST301');
-      mockSessionManager.handleAuthErrorWithRefresh.mockResolvedValueOnce(false);
-
-      const task: Task = {
-        id: 'task-retry-auth-expired',
-        title: '任务',
-        content: '内容',
-        stage: 0,
-        parentId: null,
-        order: 0,
-        rank: 10000,
-        status: 'active',
-        x: 0,
-        y: 0,
-        displayId: 'T-4',
-        createdDate: new Date().toISOString(),
-        deletedAt: null,
-      };
-
-      const result = await service.pushTask(task, 'project-1', false, true, 'user-1');
-
-      expect(result).toBe(false);
-      expect(upsertPayload).toBeNull();
-      expect(mockRetryQueue.add).not.toHaveBeenCalled();
-    });
-
-    it('重试队列回放 task upsert 刷新后仍为 42501 时应抛永久失败', async () => {
-      let tombstoneLookupCount = 0;
-      mockClient.from.mockImplementation((table: string) => {
-        if (table === 'task_tombstones') {
-          return {
-            select: vi.fn(() => ({
-              eq: vi.fn(() => ({
-                maybeSingle: vi.fn(async () => {
-                  tombstoneLookupCount += 1;
-                  return tombstoneLookupCount === 1
-                    ? { data: null, error: { code: 'PGRST301', message: 'JWT expired' } }
-                    : { data: null, error: { code: '42501', message: 'RLS Policy Violation' } };
-                }),
-              })),
-            })),
-          };
-        }
-
-        if (table === 'tasks') {
-          return {
-            upsert: vi.fn((payload: Record<string, unknown>) => {
-              upsertPayload = payload;
-              return {
-                select: vi.fn(() => ({
-                  maybeSingle: vi.fn(async () => ({
-                    data: { updated_at: new Date().toISOString() },
-                    error: null,
-                  })),
-                })),
-              };
-            }),
-          };
-        }
-
-        throw new Error(`Unexpected table: ${table}`);
-      });
-      mockSessionManager.isSessionExpiredError.mockImplementation((error: { code?: string | number }) =>
-        error.code === 'PGRST301' || error.code === '42501'
-      );
-      mockSessionManager.handleAuthErrorWithRefresh.mockResolvedValueOnce(true);
-      mockSessionManager.isRlsPolicyViolation.mockImplementation((error: { code?: string | number }) => error.code === '42501');
-
-      const task: Task = {
-        id: 'task-retry-rls-denied-after-refresh',
-        title: '任务',
-        content: '内容',
-        stage: 0,
-        parentId: null,
-        order: 0,
-        rank: 10000,
-        status: 'active',
-        x: 0,
-        y: 0,
-        displayId: 'T-5',
-        createdDate: new Date().toISOString(),
-        deletedAt: null,
-      };
-
-      await expect(service.pushTask(task, 'project-1', false, true, 'user-1')).rejects.toBeInstanceOf(PermanentFailureError);
-      expect(mockRetryQueue.add).not.toHaveBeenCalled();
-      expect(upsertPayload).toBeNull();
-    });
-
-    it('前台 task upsert 在要求 tombstone 终止时应抛永久失败，供 ActionQueue 丢弃过期项', async () => {
-      mockClient.from.mockImplementationOnce((table: string) => {
-        if (table === 'task_tombstones') {
-          return {
-            select: vi.fn(() => ({
-              eq: vi.fn(() => ({
-                maybeSingle: vi.fn(async () => ({
-                  data: { task_id: 'task-foreground-tombstoned' },
-                  error: null,
-                })),
-              })),
-            })),
-          };
-        }
-
-        throw new Error(`Unexpected table: ${table}`);
-      });
-
-      const task: Task = {
-        id: 'task-foreground-tombstoned',
-        title: '任务',
-        content: '内容',
-        stage: 0,
-        parentId: null,
-        order: 0,
-        rank: 10000,
-        status: 'active',
-        x: 0,
-        y: 0,
-        displayId: 'T-6',
-        createdDate: new Date().toISOString(),
-        deletedAt: null,
-      };
-
-      await expect(service.pushTask(task, 'project-1', false, false, 'user-1', true)).rejects.toBeInstanceOf(PermanentFailureError);
-      expect(mockRetryQueue.add).not.toHaveBeenCalled();
-      expect(upsertPayload).toBeNull();
-    });
-
-    it('deleteTask 在会话已过期时应保留删除意图到重试队列而不是抛出', async () => {
-      mockSyncState.isSessionExpired.mockReturnValueOnce(true);
-
-      const result = await service.deleteTask('task-delete-session-expired', 'project-1', 'user-1');
-
-      expect(result).toBe(false);
-      expect(mockRetryQueue.add).toHaveBeenCalledWith(
-        'task',
-        'delete',
-        { id: 'task-delete-session-expired' },
-        'project-1',
-        'user-1',
-      );
-    });
-
-    it('重试队列回放 task delete 遇到会话过期时不应重复入队也不应抛出', async () => {
-      mockSyncState.isSessionExpired.mockReturnValueOnce(true);
-
-      const result = await service.deleteTask('task-delete-retry-session-expired', 'project-1', 'user-1', true);
-
-      expect(result).toBe(false);
-      expect(mockRetryQueue.add).not.toHaveBeenCalled();
-    });
-
-    it('重试队列回放单任务 delete 遇到 owner mismatch 时不应重复入队', async () => {
-      mockClient.auth.getSession.mockResolvedValueOnce({
-        data: { session: { user: { id: 'user-2' } } },
-      });
-
-      const result = await service.deleteTask('task-delete-retry-owner-mismatch', 'project-1', 'user-1', true);
-
-      expect(result).toBe(false);
-      expect(mockRetryQueue.add).not.toHaveBeenCalled();
-    });
-
-    it('重试队列回放批量任务删除遇到 owner mismatch 时不应重复入队', async () => {
-      mockClient.auth.getSession.mockResolvedValueOnce({
-        data: { session: { user: { id: 'user-2' } } },
-      });
-
-      const result = await service.purgeTasksFromCloud('project-1', ['task-delete-retry-owner-mismatch'], 'user-1', true);
-
-      expect(result).toBe(false);
-      expect(mockClient.rpc).not.toHaveBeenCalled();
-      expect(mockRetryQueue.add).not.toHaveBeenCalled();
-    });
-
-    it('重试队列回放批量任务删除在 purge 失败时不应自我重入队', async () => {
-      mockClient.rpc.mockImplementationOnce(async () => {
-        throw new Error('network unavailable');
-      });
-
-      const result = await service.purgeTasksFromCloud('project-1', ['task-delete-retry-rpc-failure'], 'user-1', true);
-
-      expect(result).toBe(false);
-      expect(mockRetryQueue.add).not.toHaveBeenCalled();
-    });
-
-  it('purgeTasksFromCloud 在 sourceUserId 与当前会话不匹配时应拒绝写云端并按原 owner 入队', async () => {
-    mockClient.auth.getSession.mockResolvedValueOnce({
-      data: { session: { user: { id: 'user-2' } } },
-    });
-
-    const result = await service.purgeTasksFromCloud('project-1', ['task-delete-bulk-owner-mismatch'], 'user-1');
-
-    expect(result).toBe(false);
-    expect(mockClient.rpc).not.toHaveBeenCalled();
-    expect(mockRetryQueue.add).toHaveBeenCalledWith(
-      'task',
-      'delete',
-      { id: 'task-delete-bulk-owner-mismatch' },
-      'project-1',
-      'user-1',
-    );
-  });
+  registerTaskSyncOperationsDirectUpsertSpecs(getDirectUpsertSpecContext);
+  registerTaskSyncOperationsRpcUpsertSpecs(getRpcUpsertSpecContext);
+  registerTaskSyncOperationsDeleteRpcSpecs(getDeleteRpcSpecContext);
+  registerTaskSyncOperationsBrowserSuspensionSpecs(getBrowserSuspensionSpecContext);
+  registerTaskSyncOperationsRetryGuardSpecs(getRetryGuardSpecContext);
 });

@@ -4,6 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DockConsoleStackComponent } from './dock-console-stack.component';
 import { DockEngineService } from '../../../../services/dock-engine.service';
 import { PARKING_CONFIG } from '../../../../config/parking.config';
+import { KnowledgeAnchorComponent } from '../../../shared/components/knowledge-anchor/knowledge-anchor.component';
+import { KnowledgeAnchorStubComponent } from '../../../../tests/stubs/knowledge-anchor.stub';
 import {
   resolveConsoleCardStablePoseKey,
   toConsoleCardFilter,
@@ -163,7 +165,12 @@ describe('DockConsoleStackComponent', () => {
     await TestBed.configureTestingModule({
       imports: [DockConsoleStackComponent],
       providers: [{ provide: DockEngineService, useValue: mockEngine }],
-    }).compileComponents();
+    })
+      .overrideComponent(DockConsoleStackComponent, {
+        remove: { imports: [KnowledgeAnchorComponent] },
+        add: { imports: [KnowledgeAnchorStubComponent] },
+      })
+      .compileComponents();
 
     fixture = TestBed.createComponent(DockConsoleStackComponent);
     component = fixture.componentInstance;
@@ -171,8 +178,45 @@ describe('DockConsoleStackComponent', () => {
   });
 
   afterEach(() => {
+    fixture?.destroy();
     vi.runOnlyPendingTimers();
     vi.useRealTimers();
+  });
+
+  it('lockInteractions 在旧 lock timer handle 为 0 时也应清理，避免上一批动画提前解锁交互', () => {
+    const internals = component as unknown as {
+      interactionLockTimer: ReturnType<typeof setTimeout> | null;
+      lockInteractions: (durationMs: number) => void;
+    };
+    const zeroTimer = 0 as unknown as ReturnType<typeof setTimeout>;
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout').mockImplementation(() => undefined);
+    internals.interactionLockTimer = zeroTimer;
+
+    try {
+      internals.lockInteractions(100);
+
+      expect(clearTimeoutSpy).toHaveBeenCalledWith(zeroTimer);
+    } finally {
+      clearTimeoutSpy.mockRestore();
+    }
+  });
+
+  it('ngOnDestroy 在 lock timer handle 为 0 时也应清理', () => {
+    const internals = component as unknown as {
+      interactionLockTimer: ReturnType<typeof setTimeout> | null;
+    };
+    const zeroTimer = 0 as unknown as ReturnType<typeof setTimeout>;
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout').mockImplementation(() => undefined);
+    internals.interactionLockTimer = zeroTimer;
+
+    try {
+      component.ngOnDestroy();
+
+      expect(clearTimeoutSpy).toHaveBeenCalledWith(zeroTimer);
+      expect(internals.interactionLockTimer).toBeNull();
+    } finally {
+      clearTimeoutSpy.mockRestore();
+    }
   });
 
   it('should render the focus card without explicit load buttons', () => {

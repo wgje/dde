@@ -476,7 +476,8 @@ export class DockConsoleStackComponent implements OnDestroy {
 
   ngOnDestroy(): void {
     this.clearMotionTimer();
-    if (this.interactionLockTimer) {
+    // 显式 null 判断：timer handle 为 0 时也要清理，避免销毁后残留解锁回调
+    if (this.interactionLockTimer !== null) {
       clearTimeout(this.interactionLockTimer);
       this.interactionLockTimer = null;
     }
@@ -725,7 +726,9 @@ export class DockConsoleStackComponent implements OnDestroy {
 
   private lockInteractions(durationMs: number): void {
     this.interactionLocked.set(true);
-    if (this.interactionLockTimer) {
+    // 显式 null 判断：上一批动画的 lock timer handle 为 0 时若漏清理，
+    // 它会在新一批动画进行中提前解锁交互，放行 settle 期间的重复点击
+    if (this.interactionLockTimer !== null) {
       clearTimeout(this.interactionLockTimer);
     }
     this.interactionLockTimer = setTimeout(() => {

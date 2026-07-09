@@ -17,10 +17,11 @@ const cpuCount = Math.max(1, cpus()?.length ?? 1);
 const defaultMaxWorkers = Math.min(4, cpuCount >= 4 ? cpuCount - 1 : cpuCount);
 const envMaxWorkers = parsePositiveInt(process.env.VITEST_MAX_WORKERS ?? process.env.VITEST_MAX_THREADS);
 const maxWorkers = Math.max(1, envMaxWorkers ?? defaultMaxWorkers);
+const cacheDir = process.env.VITEST_CACHE_DIR?.trim() || 'node_modules/.vitest';
 
 export default defineConfig({
   // 使用 cacheDir 替代弃用的 cache.dir
-  cacheDir: 'node_modules/.vitest',
+  cacheDir,
 
   // Angular templateUrl/styleUrl 内联插件（仅 Vitest 环境使用）
   plugins: [angularComponentInlinePlugin()],

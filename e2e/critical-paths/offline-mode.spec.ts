@@ -12,7 +12,7 @@ interface CapturedExportState {
 }
 
 async function stubFilePickerExport(page: Page): Promise<void> {
-  await page.evaluate(() => {
+  const installExportCapture = () => {
     const capture = {
       suggestedName: null as string | null,
       content: null as string | null,
@@ -38,7 +38,10 @@ async function stubFilePickerExport(page: Page): Promise<void> {
         },
       }),
     });
-  });
+  };
+
+  await page.addInitScript(installExportCapture);
+  await page.evaluate(installExportCapture);
 }
 
 async function readCapturedExport(page: Page): Promise<CapturedExportState> {
@@ -48,6 +51,44 @@ async function readCapturedExport(page: Page): Promise<CapturedExportState> {
       content: null,
     };
   });
+}
+
+async function triggerSettingsExport(page: Page): Promise<void> {
+  const exportButton = page.locator('[data-testid="settings-export-button"]').first();
+  await expect(exportButton).toBeVisible({ timeout: 10_000 });
+  await expect(exportButton).toBeEnabled({ timeout: 10_000 });
+  await exportButton.evaluate((element: HTMLElement) => element.click());
+}
+
+async function ensureServiceWorkerControlled(page: Page): Promise<boolean> {
+  const serviceWorkerReady = await page.evaluate(async () => {
+    if (!('serviceWorker' in navigator)) {
+      return false;
+    }
+
+    const registration = await Promise.race([
+      navigator.serviceWorker.ready,
+      new Promise<ServiceWorkerRegistration | null>(resolve => {
+        window.setTimeout(() => resolve(null), 1_500);
+      }),
+    ]).catch(() => null);
+    return !!registration;
+  }).catch(() => false);
+
+  if (!serviceWorkerReady) {
+    return false;
+  }
+
+  const controlled = await page.evaluate(() => !!navigator.serviceWorker.controller).catch(() => false);
+  if (controlled) {
+    return true;
+  }
+
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await testHelpers.waitForAppReady(page);
+  await testHelpers.ensureEditorReady(page, { mode: 'local' });
+
+  return page.evaluate(() => !!navigator.serviceWorker.controller).catch(() => false);
 }
 
 test.describe('关键路径 5: 离线同步和数据保护', () => {
@@ -75,10 +116,43 @@ test.describe('关键路径 5: 离线同步和数据保护', () => {
     await testHelpers.setOffline(page, context, false);
     await testHelpers.waitForSyncSettled(page, { timeout: 20_000 });
 
-    await page.reload();
+    await page.reload({ waitUntil: 'domcontentloaded' });
     await testHelpers.waitForAppReady(page);
     await testHelpers.ensureEditorReady(page, { mode: 'local' });
     await expect(page.locator(`[data-testid="task-card"]:has-text("${offlineUpdate}")`).first()).toBeVisible({ timeout: 10_000 });
+  });
+
+  test('PWA 断网刷新后仍应恢复本地未同步编辑', async ({ page, context }) => {
+    const serviceWorkerControlled = await ensureServiceWorkerControlled(page);
+    test.skip(
+      !serviceWorkerControlled,
+      '当前 E2E 服务器未启用 Angular Service Worker；该场景在生产 PWA 预览环境执行',
+    );
+
+    const taskTitle = `断网刷新-${testHelpers.uniqueId()}`;
+    const offlineUpdate = `${taskTitle}-本地未同步`;
+    testHelpers.trackTaskTitle(taskTitle);
+    testHelpers.trackTaskTitle(offlineUpdate);
+
+    await testHelpers.createTask(page, taskTitle);
+
+    await testHelpers.setOffline(page, context, true);
+    await testHelpers.waitForOfflineIndicator(page);
+
+    const editInput = await testHelpers.openTaskTitleEditor(page, taskTitle);
+    await editInput.fill(offlineUpdate);
+    await editInput.blur();
+
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await testHelpers.waitForAppReady(page);
+    await testHelpers.ensureEditorReady(page, { mode: 'local' });
+    await testHelpers.setOffline(page, context, true);
+    await testHelpers.waitForOfflineIndicator(page);
+
+    await testHelpers.waitForTaskCard(page, offlineUpdate, { timeout: 10_000 });
+
+    await testHelpers.setOffline(page, context, false);
+    await testHelpers.waitForSyncSettled(page, { timeout: 20_000, allowOfflineMode: true });
   });
 
   test('页面加载后数据完整性检查不应误报', async ({ page }) => {
@@ -144,7 +218,7 @@ test.describe('数据导入导出', () => {
     await stubFilePickerExport(page);
     await testHelpers.openSettings(page);
 
-    await page.locator('[data-testid="settings-export-button"]').first().click();
+    await triggerSettingsExport(page);
 
     await expect.poll(async () => (await readCapturedExport(page)).content, { timeout: 10_000 }).not.toBeNull();
     const capture = await readCapturedExport(page);
@@ -174,7 +248,7 @@ test.describe('数据导入导出', () => {
     await stubFilePickerExport(page);
     await testHelpers.openSettings(page);
 
-    await page.locator('[data-testid="settings-export-button"]').first().click();
+    await triggerSettingsExport(page);
 
     await expect.poll(async () => (await readCapturedExport(page)).content, { timeout: 10_000 }).not.toBeNull();
     const capture = await readCapturedExport(page);
@@ -208,10 +282,18 @@ test.describe('数据导入导出', () => {
       .then(() => true)
       .catch(() => false);
 
-    await exportButton.click();
+    await triggerSettingsExport(page);
 
-    const spinnerVisible = await spinnerPromise;
-    await expect.poll(async () => (await readCapturedExport(page)).content, { timeout: 10_000 }).not.toBeNull();
+    let spinnerVisible = false;
+    void spinnerPromise.then(value => {
+      spinnerVisible = value;
+    });
+    await expect
+      .poll(async () => {
+        const capture = await readCapturedExport(page);
+        return spinnerVisible || capture.content !== null;
+      }, { timeout: 10_000, intervals: [100, 200, 500] })
+      .toBe(true);
     const capture = await readCapturedExport(page);
     expect(spinnerVisible || !!capture.content).toBe(true);
   });

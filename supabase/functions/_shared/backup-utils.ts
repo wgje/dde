@@ -100,8 +100,14 @@ export interface BackupTask {
   priority?: string;
   /** 截止日期 */
   dueDate?: string | null;
+  expected_minutes?: number | null;
+  cognitive_load?: 'high' | 'low' | null;
+  wait_minutes?: number | null;
+  parkingMeta?: unknown | null;
+  attentionMeta?: unknown | null;
   createdAt?: string;
   updatedAt?: string;
+  completedAt?: string | null;
   deletedAt?: string | null;
   externalSourceLinks?: BackupExternalSourceLink[];
 }
@@ -226,6 +232,155 @@ export interface BackupLocalState {
    * 备份时一并打包，跨设备恢复后可继续 flushPendingLinks 完成同步。
    */
   externalSourcePendingLinks?: unknown[];
+  /**
+   * 尚未上传到 Supabase Storage 的附件二进制 outbox。
+   * Blob 必须编码成 JSON 可序列化数据，避免备份文件只保留附件元数据而丢失本体。
+   */
+  attachmentUploadOutbox?: BackupPendingAttachmentUpload[];
+  /**
+   * Personal data safety protocol snapshot.
+   *
+   * This is intentionally structural and dependency-free because this file is
+   * shared with Supabase Edge Function code. The richer client-side helpers live
+   * in `src/services/data-safety-*`.
+   */
+  dataSafety?: BackupDataSafetySnapshot;
+}
+
+export interface BackupPendingAttachmentUpload {
+  attachmentId: string;
+  blobKey: string;
+  fileName: string;
+  mimeType: string;
+  size: number;
+  createdAt: string;
+  encoding: 'base64';
+  blobBase64: string;
+}
+
+export interface BackupDataSafetySnapshot {
+  schemaVersion: '1.0.0';
+  exportedAt: string;
+  ownerUserId: string;
+  syncSnapshot: {
+    syncState: Record<string, unknown> & {
+      lastSyncTime: string | null;
+      pendingCount: number;
+    };
+    projectCursors: unknown[];
+    queueCounts: {
+      retryQueue: number;
+      actionQueue: number;
+      deadLetters: number;
+    };
+  };
+  replayLog: BackupDataSafetyReplayEntry[];
+  replayPlan: BackupDataSafetyReplayPlan;
+  lastWriteExplain: BackupDataSafetyLastWriteExplain | null;
+}
+
+export interface BackupDataSafetyReplayPlan {
+  idempotencyKey: string;
+  ownerUserId: string;
+  exportedAt: string;
+  steps: BackupDataSafetyReplayPlanStep[];
+  summary: {
+    replayable: number;
+    inspectOnly: number;
+    retryQueue: number;
+    actionQueue: number;
+    auditLog: number;
+  };
+}
+
+export interface BackupDataSafetyReplayPlanStep {
+  source: 'retryQueue' | 'actionQueue' | 'auditLog';
+  operationId: string;
+  entityType: string;
+  entityId: string;
+  operation: string;
+  replayable: boolean;
+  reason: string;
+  localTimestamp: number;
+  updatedAtBaseline?: string | null;
+  retryCount: number;
+  queue: {
+    enteredRetryQueue: boolean;
+    retryCount: number;
+    deadLettered?: boolean;
+  };
+  rpc: Record<string, unknown> & {
+    status: string;
+  };
+  lww: {
+    decision: string;
+    reason: string;
+  };
+  lastSyncTime: {
+    before: string | null;
+    after: string | null;
+    advanced: boolean;
+  };
+}
+
+export interface BackupDataSafetyReplayEntry {
+  operationId: string;
+  entityType: string;
+  entityId: string;
+  operation: string;
+  sourceUserId?: string;
+  localCommittedAt: number;
+  baseUpdatedAt?: string | null;
+  queue: {
+    enteredRetryQueue: boolean;
+    retryCount: number;
+    deadLettered?: boolean;
+  };
+  rpc: Record<string, unknown> & {
+    status: string;
+  };
+  lww: {
+    decision: string;
+    reason: string;
+  };
+  lastSyncTime: {
+    before: string | null;
+    after: string | null;
+    advanced: boolean;
+  };
+}
+
+export interface BackupDataSafetyLastWriteExplain {
+  operationId: string;
+  actor: {
+    sourceUserId?: string;
+  };
+  entity: {
+    type: string;
+    id: string;
+  };
+  operation: string;
+  localTimestamp: number;
+  updatedAtBaseline?: string | null;
+  beforeVersion?: string | null;
+  afterVersion?: string | null;
+  queueResult: {
+    enteredRetryQueue: boolean;
+    retryCount: number;
+    deadLettered?: boolean;
+  };
+  rpcResult: Record<string, unknown> & {
+    status: string;
+  };
+  lwwDecision: {
+    decision: string;
+    reason: string;
+  };
+  lastSyncTime: {
+    before: string | null;
+    after: string | null;
+    advanced: boolean;
+  };
 }
 
 /** 健康校验结果 */

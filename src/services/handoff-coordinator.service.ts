@@ -58,24 +58,41 @@ export function shouldDegradeMobileStartupRoute(routeUrl: string, isMobile: bool
   return routeUrl.endsWith('/flow') || routeUrl.includes('/task/');
 }
 
+function hasEffectiveProjects(input: HandoffDecisionInput): boolean {
+  // 【P0 秒开修复 2026-03-28】快照感知：快照中有项目时视为 hasProjects=true，
+  // 避免 effect 异步时序导致 prehydrate 结果未被 signal 反映而卡在 pending。
+  return input.hasProjects
+    || (input.snapshotProjectsTrusted && (input.snapshot?.projects?.length ?? 0) > 0);
+}
+
+function shouldWaitForAuth(input: HandoffDecisionInput, effectiveHasProjects: boolean): boolean {
+  return input.authConfigured &&
+    !effectiveHasProjects &&
+    (input.isCheckingSession || input.authRuntimeState === 'idle' || input.authRuntimeState === 'pending');
+}
+
+function resolveMobileDegradeState(
+  input: HandoffDecisionInput,
+  startupEntryRouteIntent: ReturnType<typeof resolveStartupEntryRouteIntent>,
+): { degraded: boolean; reason: string } {
+  if (startupEntryRouteIntent !== null) {
+    return { degraded: false, reason: 'mobile-default-text' };
+  }
+
+  return {
+    degraded: input.snapshot?.mobileDegraded === true || shouldDegradeMobileStartupRoute(input.routeUrl, input.isMobile),
+    reason: input.snapshot?.degradeReason ?? 'mobile-default-text',
+  };
+}
+
 function resolveHandoffResult(input: HandoffDecisionInput): HandoffResult {
   const startupEntryRouteIntent = resolveStartupEntryRouteIntent(input.routeUrl);
   const routeIntent = startupEntryRouteIntent
     ?? input.snapshot?.routeIntent
     ?? resolveRouteIntent(input.routeUrl, input.activeProjectId);
   const wantsSpecificProject = routeIntent.kind !== 'projects';
-  const mobileDegraded = startupEntryRouteIntent === null && (
-    input.snapshot?.mobileDegraded === true
-      || shouldDegradeMobileStartupRoute(input.routeUrl, input.isMobile)
-  );
-  const mobileDegradeReason = startupEntryRouteIntent === null
-    ? input.snapshot?.degradeReason ?? 'mobile-default-text'
-    : 'mobile-default-text';
-
-  // 【P0 秒开修复 2026-03-28】快照感知：快照中有项目时视为 hasProjects=true，
-  // 避免 effect 异步时序导致 prehydrate 结果未被 signal 反映而卡在 pending。
-  const effectiveHasProjects = input.hasProjects
-    || (input.snapshotProjectsTrusted && (input.snapshot?.projects?.length ?? 0) > 0);
+  const mobileDegrade = resolveMobileDegradeState(input, startupEntryRouteIntent);
+  const effectiveHasProjects = hasEffectiveProjects(input);
 
   if (input.bootstrapFailed) {
     return { kind: 'full', degradeReason: 'bootstrap-failed' };
@@ -85,11 +102,7 @@ function resolveHandoffResult(input: HandoffDecisionInput): HandoffResult {
     return { kind: 'login-required', degradeReason: null };
   }
 
-  if (
-    input.authConfigured &&
-    !effectiveHasProjects &&
-    (input.isCheckingSession || input.authRuntimeState === 'idle' || input.authRuntimeState === 'pending')
-  ) {
+  if (shouldWaitForAuth(input, effectiveHasProjects)) {
     return { kind: 'pending', degradeReason: null };
   }
 
@@ -101,8 +114,8 @@ function resolveHandoffResult(input: HandoffDecisionInput): HandoffResult {
     return applyNonBlockingLoginFallback(input, { kind: 'degraded-to-project', degradeReason: 'project-unavailable' });
   }
 
-  if (mobileDegraded) {
-    return applyNonBlockingLoginFallback(input, { kind: 'degraded-to-text', degradeReason: mobileDegradeReason });
+  if (mobileDegrade.degraded) {
+    return applyNonBlockingLoginFallback(input, { kind: 'degraded-to-text', degradeReason: mobileDegrade.reason });
   }
 
   return applyNonBlockingLoginFallback(input, { kind: 'full', degradeReason: null });

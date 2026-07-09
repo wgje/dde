@@ -156,6 +156,15 @@ describe('DockStatusMachinePipComponent', () => {
     expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-pip-summary"]')?.getAttribute('data-summary-mode')).toBe('regular');
   });
 
+  it('should prioritize burnout over rest reminders when both are active', () => {
+    isBurnoutActive.set(true);
+    restReminderActive.set(true);
+    fixture.detectChanges();
+
+    expect(component.primaryAlert().kind).toBe('burnout');
+    expect(component.primaryAlert().headline).toContain('负荷已过高');
+  });
+
   it('should render current focus and all secondary alerts in one task list without folding', () => {
     statusEntries.set([
       {

@@ -131,6 +131,24 @@ export class DockRadarZoneComponent implements OnDestroy {
     this.scheduleOverlayAvoidRectRefresh();
   });
 
+  private readonly promotionCleanupEffect = effect(() => {
+    const lockedTaskId = this.promotionLockTaskId();
+    if (!lockedTaskId) return;
+    if (this.isRadarTaskVisible(lockedTaskId)) return;
+    untracked(() => {
+      this.clearPromotionTimer();
+      this.magnetSlidingIds.update(prev => {
+        if (!prev.has(lockedTaskId)) return prev;
+        const next = new Set(prev);
+        next.delete(lockedTaskId);
+        return next;
+      });
+      if (this.promotionLockTaskId() === lockedTaskId) {
+        this.promotionLockTaskId.set(null);
+      }
+    });
+  });
+
   private longPressTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly hoverExitTimers = new Map<string, ReturnType<typeof setTimeout>>();
   // M-11 fix: focus float 使用独立 timer map，避免与 hover 交叉取消
@@ -210,11 +228,11 @@ export class DockRadarZoneComponent implements OnDestroy {
   );
 
   ngOnDestroy(): void {
-    if (this.longPressTimer) {
+    if (this.longPressTimer !== null) {
       clearTimeout(this.longPressTimer);
       this.longPressTimer = null;
     }
-    if (this.promotionTimer) {
+    if (this.promotionTimer !== null) {
       clearTimeout(this.promotionTimer);
       this.promotionTimer = null;
     }
@@ -303,6 +321,7 @@ export class DockRadarZoneComponent implements OnDestroy {
 
   onRadarItemFocus(taskId: string): void {
     this.clearHoverExitTimer(taskId);
+    this.clearFocusExitTimer(taskId);
     this.focusFloatIds.update(prev => {
       if (prev.has(taskId)) return prev;
       const next = new Set(prev);
@@ -333,7 +352,7 @@ export class DockRadarZoneComponent implements OnDestroy {
     this.touchStartY = event.touches?.[0]?.clientY ?? 0;
     this.touchActiveTaskId = taskId;
     this.touchLongPressed = false;
-    if (this.longPressTimer) clearTimeout(this.longPressTimer);
+    if (this.longPressTimer !== null) clearTimeout(this.longPressTimer);
     this.longPressTimer = setTimeout(() => {
       this.touchLongPressed = true;
     }, PARKING_CONFIG.RADAR_PROMOTION_DELAY_MS);
@@ -355,7 +374,7 @@ export class DockRadarZoneComponent implements OnDestroy {
   }
 
   onTouchEnd(): void {
-    if (this.longPressTimer) {
+    if (this.longPressTimer !== null) {
       clearTimeout(this.longPressTimer);
       this.longPressTimer = null;
     }
@@ -430,12 +449,21 @@ export class DockRadarZoneComponent implements OnDestroy {
       next.add(taskId);
       return next;
     });
-    if (this.promotionTimer) {
-      clearTimeout(this.promotionTimer);
-      this.promotionTimer = null;
-    }
+    this.clearPromotionTimer();
     this.promotionTimer = setTimeout(() => {
       this.promotionTimer = null;
+      if (!this.isRadarTaskVisible(taskId)) {
+        this.magnetSlidingIds.update(prev => {
+          if (!prev.has(taskId)) return prev;
+          const next = new Set(prev);
+          next.delete(taskId);
+          return next;
+        });
+        if (this.promotionLockTaskId() === taskId) {
+          this.promotionLockTaskId.set(null);
+        }
+        return;
+      }
       this.magnetSlidingIds.update(prev => {
         const next = new Set(prev);
         next.delete(taskId);
@@ -472,7 +500,7 @@ export class DockRadarZoneComponent implements OnDestroy {
     this.createFormLane.set(null);
   }
 
-  submitCreate(): void {
+  async submitCreate(): Promise<void> {
     if (!this.canInteract()) return;
     const lane = this.createFormLane();
     if (!lane) return;
@@ -482,10 +510,11 @@ export class DockRadarZoneComponent implements OnDestroy {
     const expectedMinutes = this.parseOptionalNumber(this.createExpected);
     const waitMinutes = this.parseOptionalNumber(this.createWait);
 
-    this.engine.createInDock(title, lane, this.createLoad, {
+    const createdId = await this.engine.createInDock(title, lane, this.createLoad, {
       expectedMinutes,
       waitMinutes,
     });
+    if (!createdId) return;
     this.closeCreateForm();
   }
 
@@ -531,6 +560,17 @@ export class DockRadarZoneComponent implements OnDestroy {
     // 雷达区属于专注控制台 UI，scrim（背景虚化）遮挡的是 app 主体内容，
     // 不应阻止专注控制台内部的交互。仅在 focus 进入/退出过渡动画期间禁用。
     return !this.engine.isFocusTransitionBlocking();
+  }
+
+  private clearPromotionTimer(): void {
+    if (this.promotionTimer === null) return;
+    clearTimeout(this.promotionTimer);
+    this.promotionTimer = null;
+  }
+
+  private isRadarTaskVisible(taskId: string): boolean {
+    return this.comboEntries().some(item => item.taskId === taskId)
+      || this.backupEntries().some(item => item.taskId === taskId);
   }
 
   private parseOptionalNumber(raw: string | number | null | undefined): number | null {
@@ -589,16 +629,14 @@ export class DockRadarZoneComponent implements OnDestroy {
   }
 
   private clearHoverExitTimer(taskId: string): void {
-    const timer = this.hoverExitTimers.get(taskId);
-    if (!timer) return;
-    clearTimeout(timer);
+    if (!this.hoverExitTimers.has(taskId)) return;
+    clearTimeout(this.hoverExitTimers.get(taskId)!);
     this.hoverExitTimers.delete(taskId);
   }
 
   private clearFocusExitTimer(taskId: string): void {
-    const timer = this.focusExitTimers.get(taskId);
-    if (!timer) return;
-    clearTimeout(timer);
+    if (!this.focusExitTimers.has(taskId)) return;
+    clearTimeout(this.focusExitTimers.get(taskId)!);
     this.focusExitTimers.delete(taskId);
   }
 
@@ -617,16 +655,14 @@ export class DockRadarZoneComponent implements OnDestroy {
   }
 
   private clearEnteringTimer(taskId: string): void {
-    const timer = this.enteringTimers.get(taskId);
-    if (!timer) return;
-    clearTimeout(timer);
+    if (!this.enteringTimers.has(taskId)) return;
+    clearTimeout(this.enteringTimers.get(taskId)!);
     this.enteringTimers.delete(taskId);
   }
 
   private clearRadarReturnTimer(taskId: string): void {
-    const timer = this.radarReturnTimers.get(taskId);
-    if (!timer) return;
-    clearTimeout(timer);
+    if (!this.radarReturnTimers.has(taskId)) return;
+    clearTimeout(this.radarReturnTimers.get(taskId)!);
     this.radarReturnTimers.delete(taskId);
   }
 

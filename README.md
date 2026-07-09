@@ -104,7 +104,7 @@ npm install
 npm start
 ```
 
-- **Node.js 要求**：`>= 18.19.0`
+- **Node.js 要求**：`>= 22.14.0`
 - **默认开发端口**：优先 `3000`；若该端口在本机被系统保留或占用，会自动回退到下一个可用端口
 - 如需固定端口，可设置 `PORT` 或 `NANOFLOW_DEV_SERVER_PORT`
 - 即使没有配置 Supabase，也能先以离线模式运行，所有核心功能都可用
@@ -630,6 +630,28 @@ Gate 现在会在冷启动、进入 reviewing 和页面重新可见时主动做�
 
 ## 文档导航
 
+### 真人阅读入口
+
+| 文档 | 说明 |
+|------|------|
+| [docs/README.md](docs/README.md) | 文档总入口：区分真人阅读 handbook、机器检索 Context7、历史归档与计划文档 |
+| [docs/handbook/index.md](docs/handbook/index.md) | 面向使用者、部署者和维护者的 GitHub Docs 风格阅读文档入口 |
+| [docs/handbook/01-get-started/index.md](docs/handbook/01-get-started/index.md) | 新手上手、离线模式、首个项目、云同步配置 |
+| [docs/handbook/02-use-nanoflow/index.md](docs/handbook/02-use-nanoflow/index.md) | 文本视图、Flow、Parking Dock、Focus、Black Box、思源锚点和 Android 小组件 |
+| [docs/handbook/03-data-sync-safety/index.md](docs/handbook/03-data-sync-safety/index.md) | 离线优先、同步冲突、备份恢复、安全隐私 |
+| [docs/handbook/04-deploy-operate/index.md](docs/handbook/04-deploy-operate/index.md) | 私有部署、Supabase 运维、Edge Functions、生产排障 |
+| [docs/handbook/05-develop-maintain/index.md](docs/handbook/05-develop-maintain/index.md) | 开发环境、仓库地图、测试质量、文档维护 |
+
+### AI / Context7 / 机器可读入口
+
+| 文档 | 说明 |
+|------|------|
+| [docs/context7/README.md](docs/context7/README.md) | 面向 Context7 MCP 和 AI 检索的 canonical 文档站入口，覆盖 guides / reference / contracts / runbooks / ADR / schemas / quality |
+| [docs/context7/source-map.md](docs/context7/source-map.md) | 常见 AI 问题到源码路径、服务边界和文档页的路由表 |
+| [docs/context7/quality/documentation-quality-gate.md](docs/context7/quality/documentation-quality-gate.md) | 文档质量门禁：metadata、链接覆盖、schema、检索入口和验证要求 |
+| [context7.json](context7.json) | Context7 解析配置：仅索引 `docs/context7`，排除源码、构建产物、归档与历史计划噪声 |
+| [llms.txt](llms.txt) | 面向 AI 助手的快速检索地图、硬规则与主题路由 |
+
 ### 使用者最常看的
 
 | 文档 | 说明 |
@@ -665,7 +687,7 @@ Gate 现在会在冷启动、进入 reviewing 和页面重新可见时主动做�
 
 ### 运行要求
 
-- **Node.js** `>= 18.19.0`
+- **Node.js** `>= 22.14.0`
 - `npm start` 会先执行 `npm run config`
 
 ### 常用命令
@@ -762,6 +784,9 @@ npm run test:e2e:perf          # E2E 性能测试
 npm run lint                   # ESLint 检查
 npm run lint:fix               # ESLint 自动修复
 npm run test:contracts         # 契约测试
+npm run health                 # 大改前的标准仓库健康门禁
+npm run health:strict          # 债务收敛/阶段验收门禁（含 ratchet）
+npm run health:full            # 慢速全量门禁（含 full test/e2e）
 npm run quality:guard:encoding # UTF-8 编码检查
 npm run perf:guard             # 完整性能门禁（构建 + nojit + 启动 + 字体 + supabase-ready）
 npm run perf:guard:no-regression # 无回归基线检查

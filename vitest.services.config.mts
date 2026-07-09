@@ -7,6 +7,10 @@ export default defineConfig({
     ...base.test,
     // 显式固定服务套件默认 worker，减少 setup/environment 重复开销。
     maxWorkers: 1,
+    // services lane 覆盖大量浏览器存储、IndexedDB、Angular TestBed 与全局 mock 用例；
+    // 共享文件环境会让状态跨 spec 污染，优先保证门禁稳定。
+    isolate: true,
+    fileParallelism: false,
     setupFiles: ['./src/test-setup.services.ts'],
     // 主要跑纯服务/逻辑类单测：更适合 threads 并行
     include: [

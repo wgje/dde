@@ -7,6 +7,7 @@ import { TestBed } from '@angular/core/testing';
 import { signal, WritableSignal } from '@angular/core';
 import { TaskOperationService } from '../../services/task-operation.service';
 import { TaskOperationAdapterService } from '../../services/task-operation-adapter.service';
+import { ConnectionAdapterService } from '../../services/connection-adapter.service';
 import { UndoService } from '../../services/undo.service';
 import { ProjectStateService } from '../../services/project-state.service';
 import { SyncCoordinatorService } from '../../services/sync-coordinator.service';
@@ -16,6 +17,11 @@ import { OptimisticStateService } from '../../services/optimistic-state.service'
 import { UiStateService } from '../../services/ui-state.service';
 import { ToastService } from '../../services/toast.service';
 import { LoggerService } from '../../services/logger.service';
+import { UserSessionService } from '../../services/user-session.service';
+import { WriteGuardService } from '../../services/write-guard.service';
+import { ParkingService } from '../../services/parking.service';
+import { ActionQueueService } from '../../services/action-queue.service';
+import { AuthService } from '../../services/auth.service';
 import { Project, Task } from '../../models';
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 
@@ -72,8 +78,29 @@ const mockLoggerService = {
   error: vi.fn()
 };
 
+const mockUserSessionService = {
+  isHintOnlyStartupPlaceholderVisible: vi.fn(() => false),
+};
+
+const mockWriteGuardService = {
+  isExportOnly: vi.fn(() => false),
+};
+
+const mockParkingService = {
+  handleTaskStatusChange: vi.fn(),
+};
+
+const mockActionQueueService = {
+  enqueueDurably: vi.fn(() => Promise.resolve('queued-action-1')),
+};
+
+const mockAuthService = {
+  currentUserId: vi.fn(() => 'test-user'),
+};
+
 describe('撤销功能集成测试', () => {
   let taskAdapter: TaskOperationAdapterService;
+  let connectionAdapter: ConnectionAdapterService;
   let undoService: UndoService;
   let layoutService: LayoutService;
   
@@ -122,6 +149,7 @@ describe('撤销功能集成测试', () => {
       providers: [
         TaskOperationService,
         TaskOperationAdapterService,
+        ConnectionAdapterService,
         UndoService,
         LayoutService,
         {
@@ -129,6 +157,7 @@ describe('撤销功能集成测试', () => {
           useValue: {
             activeProject: () => projectsSignal()[0],
             activeProjectId: () => projectsSignal()[0]?.id || null,
+            getProjectsWithCurrentData: () => projectsSignal(),
             getTask: (taskId: string) => projectsSignal()[0]?.tasks.find((t: Task) => t.id === taskId),
             updateProjects: (fn: (projects: Project[]) => Project[]) => {
               projectsSignal.update(fn);
@@ -140,30 +169,36 @@ describe('撤销功能集成测试', () => {
         { provide: OptimisticStateService, useValue: mockOptimisticState },
         { provide: UiStateService, useValue: mockUiState },
         { provide: ToastService, useValue: mockToastService },
-        { provide: LoggerService, useValue: mockLoggerService }
+        { provide: LoggerService, useValue: mockLoggerService },
+        { provide: UserSessionService, useValue: mockUserSessionService },
+        { provide: WriteGuardService, useValue: mockWriteGuardService },
+        { provide: ParkingService, useValue: mockParkingService },
+        { provide: ActionQueueService, useValue: mockActionQueueService },
+        { provide: AuthService, useValue: mockAuthService },
       ]
     });
     
     // 这些服务仅用于 DI 设置，不直接在测试中使用
     TestBed.inject(TaskOperationService);
     taskAdapter = TestBed.inject(TaskOperationAdapterService);
+    connectionAdapter = TestBed.inject(ConnectionAdapterService);
     undoService = TestBed.inject(UndoService);
     TestBed.inject(ProjectStateService);
     layoutService = TestBed.inject(LayoutService);
   });
 
   afterEach(() => {
-    undoService.clearHistory();
+    undoService?.clearHistory();
     vi.clearAllMocks();
   });
 
   describe('跨树连接撤销', () => {
-    it('添加跨树连接后应该能够撤销', () => {
+    it('添加跨树连接后应该能够撤销', async () => {
       const initialConnCount = projectsSignal()[0].connections.length;
       expect(initialConnCount).toBe(0);
       
       // 添加跨树连接
-      taskAdapter.connectionAdapter.addCrossTreeConnection('task-1', 'task-2');
+      await connectionAdapter.addCrossTreeConnection('task-1', 'task-2');
       expect(projectsSignal()[0].connections.length).toBe(1);
       expect(projectsSignal()[0].connections[0].source).toBe('task-1');
       expect(projectsSignal()[0].connections[0].target).toBe('task-2');
@@ -173,11 +208,11 @@ describe('撤销功能集成测试', () => {
       expect(undoService.undoCount()).toBe(1);
     });
 
-    it('添加并撤销跨树连接后连接数应恢复', () => {
+    it('添加并撤销跨树连接后连接数应恢复', async () => {
       expect(projectsSignal()[0].connections.length).toBe(0);
       
       // 添加跨树连接
-      taskAdapter.connectionAdapter.addCrossTreeConnection('task-1', 'task-2');
+      await connectionAdapter.addCrossTreeConnection('task-1', 'task-2');
       const undoAction = undoService.undo();
       expect(undoAction).not.toBeNull();
       
@@ -202,12 +237,12 @@ describe('撤销功能集成测试', () => {
   });
 
   describe('待分配任务分配撤销', () => {
-    it('将待分配任务分配到阶段后应该记录撤销', () => {
+    it('将待分配任务分配到阶段后应该记录撤销', async () => {
       const unassignedTask = projectsSignal()[0].tasks.find(t => t.id === 'unassigned-1');
       expect(unassignedTask?.stage).toBeNull();
       
       // 将待分配任务分配到 stage 2，成为 task-1 的子任务
-      const result = taskAdapter.moveTaskToStage('unassigned-1', 2, undefined, 'task-1');
+      const result = await taskAdapter.moveTaskToStage('unassigned-1', 2, undefined, 'task-1');
       expect(result.ok).toBe(true);
       
       // 验证任务已分配
@@ -219,9 +254,9 @@ describe('撤销功能集成测试', () => {
       expect(undoService.canUndo()).toBe(true);
     });
 
-    it('撤销分配操作后任务应恢复到待分配状态', () => {
+    it('撤销分配操作后任务应恢复到待分配状态', async () => {
       // 分配任务
-      taskAdapter.moveTaskToStage('unassigned-1', 2, undefined, 'task-1');
+      await taskAdapter.moveTaskToStage('unassigned-1', 2, undefined, 'task-1');
       
       // 执行撤销
       const undoAction = undoService.undo();
@@ -250,13 +285,13 @@ describe('撤销功能集成测试', () => {
   });
 
   describe('子树迁移撤销', () => {
-    it('子树迁移后应该记录撤销', () => {
+    it('子树迁移后应该记录撤销', async () => {
       // 验证初始状态
       const task1a = projectsSignal()[0].tasks.find(t => t.id === 'task-1a');
       expect(task1a?.parentId).toBe('task-1');
       
       // 将 task-1a 迁移到 task-2 下
-      const result = taskAdapter.moveSubtreeToNewParent('task-1a', 'task-2');
+      const result = await taskAdapter.moveSubtreeToNewParent('task-1a', 'task-2');
       expect(result.ok).toBe(true);
       
       // 验证迁移成功
@@ -267,9 +302,9 @@ describe('撤销功能集成测试', () => {
       expect(undoService.canUndo()).toBe(true);
     });
 
-    it('撤销子树迁移后应恢复原始父子关系', () => {
+    it('撤销子树迁移后应恢复原始父子关系', async () => {
       // 迁移子树
-      taskAdapter.moveSubtreeToNewParent('task-1a', 'task-2');
+      await taskAdapter.moveSubtreeToNewParent('task-1a', 'task-2');
       
       // 执行撤销
       const undoAction = undoService.undo();

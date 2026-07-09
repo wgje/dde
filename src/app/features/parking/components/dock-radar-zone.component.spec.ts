@@ -228,6 +228,19 @@ describe('DockRadarZoneComponent', () => {
     expect(mockEngine.insertToConsoleFromRadar).toHaveBeenCalledWith('S1');
   });
 
+  it('promoteToConsole should ignore a late promotion after the task leaves radar', async () => {
+    component.promoteToConsole('S1');
+    comboEntries.set([]);
+    fixture.detectChanges();
+
+    await vi.advanceTimersByTimeAsync(PARKING_CONFIG.CONSOLE_MAGNET_PULL_MS + 10);
+
+    expect(mockEngine.setMainTask).not.toHaveBeenCalled();
+    expect(mockEngine.insertToConsoleFromRadar).not.toHaveBeenCalled();
+    expect(component.isMagnetSliding('S1')).toBe(false);
+    expect(component.promotionLockTaskId()).toBeNull();
+  });
+
   it('should only mark first-seen radar items as entering once', async () => {
     comboEntries.set([
       { taskId: 'S1', title: 'Combo 1', lane: 'combo-select', load: 'low', expectedMinutes: 20, waitMinutes: null, dockedOrder: 1, status: 'pending_start', isMain: false },
@@ -250,6 +263,27 @@ describe('DockRadarZoneComponent', () => {
 
     expect(component.isEntering('S1')).toBe(false);
     expect(component.isEntering('S2')).toBe(false);
+  });
+
+  it('should clear entering timer when the timer handle is 0 before scheduling first-seen cleanup', () => {
+    const state = component as unknown as {
+      enteringTimers: Map<string, ReturnType<typeof setTimeout>>;
+    };
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+    state.enteringTimers.set('S2', 0 as unknown as ReturnType<typeof setTimeout>);
+
+    try {
+      comboEntries.set([
+        ...comboEntries(),
+        { taskId: 'S2', title: 'Combo 2', lane: 'combo-select', load: 'low', expectedMinutes: 25, waitMinutes: null, dockedOrder: 2, status: 'pending_start', isMain: false },
+      ]);
+      fixture.detectChanges();
+
+      expect(clearTimeoutSpy).toHaveBeenCalledWith(0);
+      expect(component.isEntering('S2')).toBe(true);
+    } finally {
+      clearTimeoutSpy.mockRestore();
+    }
   });
 
   it('promotion lock should ignore later radar promotions while the first is in flight', async () => {
@@ -312,6 +346,152 @@ describe('DockRadarZoneComponent', () => {
     expect(component.shouldAnimate('S1')).toBe(false);
   });
 
+  it('should clear hover exit timer when the timer handle is 0', () => {
+    const setTimeoutSpy = mockTimeoutHandleForDelay(
+      PARKING_CONFIG.MOTION.radar.hoverMs,
+      0 as unknown as ReturnType<typeof setTimeout>,
+    );
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+
+    try {
+      component.onRadarItemEnter('S1');
+      component.onRadarItemLeave('S1');
+      component.onRadarItemEnter('S1');
+
+      expect(clearTimeoutSpy).toHaveBeenCalledWith(0);
+      expect(component.shouldAnimate('S1')).toBe(true);
+    } finally {
+      setTimeoutSpy.mockRestore();
+      clearTimeoutSpy.mockRestore();
+    }
+  });
+
+  it('should clear focus exit timer when the timer handle is 0', () => {
+    const setTimeoutSpy = mockTimeoutHandleForDelay(
+      PARKING_CONFIG.MOTION.radar.hoverMs,
+      0 as unknown as ReturnType<typeof setTimeout>,
+    );
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+
+    try {
+      component.onRadarItemFocus('S1');
+      component.onRadarItemBlur('S1');
+      component.onRadarItemBlur('S1');
+
+      expect(clearTimeoutSpy).toHaveBeenCalledWith(0);
+    } finally {
+      setTimeoutSpy.mockRestore();
+      clearTimeoutSpy.mockRestore();
+    }
+  });
+
+  it('should keep radar float when focus returns before the exit timer settles', async () => {
+    component.onRadarItemFocus('S1');
+    expect(component.shouldAnimate('S1')).toBe(true);
+
+    component.onRadarItemBlur('S1');
+    await vi.advanceTimersByTimeAsync(120);
+    component.onRadarItemFocus('S1');
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(component.shouldAnimate('S1')).toBe(true);
+  });
+
+  it('should clear promotion timer when the timer handle is 0 and the task leaves radar', () => {
+    const state = component as unknown as {
+      promotionTimer: ReturnType<typeof setTimeout> | null;
+    };
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+    state.promotionTimer = 0 as unknown as ReturnType<typeof setTimeout>;
+
+    try {
+      component.promotionLockTaskId.set('S1');
+      fixture.detectChanges();
+      comboEntries.set([]);
+      fixture.detectChanges();
+
+      expect(clearTimeoutSpy).toHaveBeenCalledWith(0);
+      expect(state.promotionTimer).toBeNull();
+      expect(component.promotionLockTaskId()).toBeNull();
+    } finally {
+      clearTimeoutSpy.mockRestore();
+    }
+  });
+
+  it('should clear touch long press timer when the timer handle is 0', () => {
+    const setTimeoutSpy = mockTimeoutHandleForDelay(
+      PARKING_CONFIG.RADAR_PROMOTION_DELAY_MS,
+      0 as unknown as ReturnType<typeof setTimeout>,
+    );
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+
+    try {
+      component.onTouchStart({ touches: [{ clientY: 120 }] } as unknown as TouchEvent, 'S1');
+      component.onTouchEnd();
+
+      expect(clearTimeoutSpy).toHaveBeenCalledWith(0);
+    } finally {
+      setTimeoutSpy.mockRestore();
+      clearTimeoutSpy.mockRestore();
+    }
+  });
+
+  it('should clear existing touch long press timer when the timer handle is 0 before scheduling another', () => {
+    const setTimeoutSpy = mockTimeoutHandleForDelay(
+      PARKING_CONFIG.RADAR_PROMOTION_DELAY_MS,
+      0 as unknown as ReturnType<typeof setTimeout>,
+    );
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+
+    try {
+      component.onTouchStart({ touches: [{ clientY: 120 }] } as unknown as TouchEvent, 'S1');
+      component.onTouchStart({ touches: [{ clientY: 130 }] } as unknown as TouchEvent, 'S1');
+
+      expect(clearTimeoutSpy).toHaveBeenCalledWith(0);
+    } finally {
+      setTimeoutSpy.mockRestore();
+      clearTimeoutSpy.mockRestore();
+    }
+  });
+
+  it('should clear radar return timer when the timer handle is 0 and the task is evicted again', () => {
+    const state = component as unknown as {
+      radarReturnTimers: Map<string, ReturnType<typeof setTimeout>>;
+    };
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+    state.radarReturnTimers.set('W1', 0 as unknown as ReturnType<typeof setTimeout>);
+
+    try {
+      lastRadarEvictedTaskId.set('W1');
+      fixture.detectChanges();
+
+      expect(clearTimeoutSpy).toHaveBeenCalledWith(0);
+      expect(component.isRadarReturning('W1')).toBe(true);
+    } finally {
+      clearTimeoutSpy.mockRestore();
+    }
+  });
+
+  it('should clear owned timers on destroy when timer handles are 0', () => {
+    const state = component as unknown as {
+      longPressTimer: ReturnType<typeof setTimeout> | null;
+      promotionTimer: ReturnType<typeof setTimeout> | null;
+    };
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+    state.longPressTimer = 0 as unknown as ReturnType<typeof setTimeout>;
+    state.promotionTimer = 0 as unknown as ReturnType<typeof setTimeout>;
+
+    try {
+      fixture.destroy();
+
+      expect(clearTimeoutSpy).toHaveBeenCalledWith(0);
+      expect(state.longPressTimer).toBeNull();
+      expect(state.promotionTimer).toBeNull();
+    } finally {
+      clearTimeoutSpy.mockRestore();
+    }
+  });
+
   it('onWheel should toggle load only with alt key', () => {
     const preventDefault = vi.fn();
     component.onWheel({ altKey: false, deltaY: 120, preventDefault } as unknown as WheelEvent, 'S1');
@@ -336,14 +516,15 @@ describe('DockRadarZoneComponent', () => {
     expect(promoteSpy).toHaveBeenCalledWith('S1');
   });
 
-  it('submitCreate should create task in selected radar lane', () => {
+  it('submitCreate should create task in selected radar lane', async () => {
+    mockEngine.createInDock.mockResolvedValueOnce('dock-created-1');
     component.createFormLane.set('combo-select');
     component.createTitle = 'Radar Draft';
     component.createLoad = 'low';
     component.createExpected = '25';
     component.createWait = '5';
 
-    component.submitCreate();
+    await component.submitCreate();
 
     expect(mockEngine.createInDock).toHaveBeenCalledWith('Radar Draft', 'combo-select', 'low', {
       expectedMinutes: 25,
@@ -419,4 +600,14 @@ function isInsideCenterOcclusion(x: number, y: number): boolean {
   const dx = x - centerX;
   const dy = y - centerY;
   return ((dx * dx) / (rx * rx)) + ((dy * dy) / (ry * ry)) < 1;
+}
+
+function mockTimeoutHandleForDelay(delay: number, handle: ReturnType<typeof setTimeout>) {
+  const originalSetTimeout = globalThis.setTimeout;
+  return vi.spyOn(globalThis, 'setTimeout').mockImplementation((
+    (handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
+      if (timeout === delay) return handle;
+      return originalSetTimeout(handler, timeout, ...args);
+    }
+  ) as typeof setTimeout);
 }

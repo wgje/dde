@@ -274,7 +274,7 @@ export class DockStatusMachineComponent implements OnDestroy {
   }
 
   toggleMute(): void {
-    this.engine.toggleMuteWaitTone();
+    void this.engine.toggleMuteWaitTone();
   }
 
   requestPipToggle(): void {

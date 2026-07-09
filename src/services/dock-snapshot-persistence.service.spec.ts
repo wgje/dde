@@ -3,9 +3,19 @@ import { describe, beforeEach, afterEach, it, expect, vi } from 'vitest';
 import { LoggerService } from './logger.service';
 import type {
   DockSnapshotPersistenceService as DockSnapshotPersistenceServiceType,
-  SnapshotNormalizeContext,
 } from './dock-snapshot-persistence.service';
 import type { DockEntry, DockSnapshot } from '../models/parking-dock';
+import {
+  makeMinimalEntry,
+  makeMinimalSnapshot,
+  makeNormalizeContext,
+} from './dock-snapshot-persistence.spec-helpers';
+import {
+  registerDockSnapshotPendingPersistSpecs,
+  registerNormalizeNullableNumberSpecs,
+} from './dock-snapshot-persistence-pending.spec-helpers';
+import { registerDockSnapshotKeySpecs } from './dock-snapshot-persistence-key.spec-helpers';
+import { registerDockSnapshotNewerSpecs } from './dock-snapshot-persistence-newer.spec-helpers';
 
 vi.mock('idb-keyval', () => ({
   del: vi.fn(),
@@ -25,70 +35,6 @@ const mockLoggerCategory = {
 const mockLogger = {
   category: vi.fn(() => mockLoggerCategory),
 };
-
-// ─── Helpers ────────────────────────────────
-
-function makeNormalizeContext(overrides?: Partial<SnapshotNormalizeContext>): SnapshotNormalizeContext {
-  return {
-    muteWaitTone: false,
-    todayDateKey: '2025-01-15',
-    buildOverflowMeta: () => ({ comboSelectOverflow: 0, backupOverflow: 0 }),
-    ...overrides,
-  };
-}
-
-function makeMinimalEntry(overrides?: Partial<DockEntry>): Record<string, unknown> {
-  return {
-    taskId: 'task-1',
-    title: 'Test task',
-    sourceProjectId: 'proj-1',
-    status: 'pending_start',
-    load: 'low',
-    expectedMinutes: 30,
-    waitMinutes: null,
-    waitStartedAt: null,
-    lane: 'combo-select',
-    zoneSource: 'auto',
-    isMain: false,
-    dockedOrder: 0,
-    detail: '',
-    sourceKind: 'project-task',
-    systemSelected: false,
-    recommendedScore: null,
-    ...overrides,
-  };
-}
-
-function makeMinimalSnapshot(overrides?: Record<string, unknown>): Record<string, unknown> {
-  return {
-    version: 7,
-    entries: [],
-    focusMode: false,
-    isDockExpanded: true,
-    muteWaitTone: false,
-    session: {
-      firstDragIntervened: false,
-      focusBlurOn: false,
-      focusScrimOn: true,
-      mainTaskId: null,
-      comboSelectIds: [],
-      backupIds: [],
-    },
-    dailySlots: [],
-    suspendChainRootTaskId: null,
-    suspendRecommendationLocked: false,
-    pendingDecision: null,
-    lastRuleDecision: null,
-    dailyResetDate: '2025-01-15',
-    savedAt: '2025-01-15T10:00:00.000Z',
-    ...overrides,
-  };
-}
-
-async function callNormalizeNullableNumber(value: unknown): Promise<number | null> {
-  const { normalizeNullableNumber } = await import('./dock-snapshot-persistence.service');
-  return normalizeNullableNumber(value);
-}
 
 // ─── Test Suite ─────────────────────────────
 
@@ -128,74 +74,71 @@ describe('DockSnapshotPersistenceService', () => {
 
   // ─── localCacheKey / legacyLocalStorageKey ───
 
-  describe('localCacheKey', () => {
-    it('should include user id in the key', () => {
-      const key = service.localCacheKey('user-123');
-      expect(key).toBe('nanoflow.focus-session.v5.user-123');
-    });
-
-    it('should use "anonymous" for null user id', () => {
-      const key = service.localCacheKey(null);
-      expect(key).toBe('nanoflow.focus-session.v5.anonymous');
-    });
-
-    it('should use "anonymous" for empty string user id', () => {
-      // empty string is falsy → falls through to 'anonymous'
-      const key = service.localCacheKey('' as unknown as string);
-      expect(key).toBe('nanoflow.focus-session.v5.anonymous');
-    });
+  registerDockSnapshotKeySpecs({
+    getService: () => service,
   });
 
-  describe('legacyLocalStorageKey', () => {
-    it('should include user id in the key', () => {
-      const key = service.legacyLocalStorageKey('user-abc');
-      expect(key).toBe('nanoflow.dock-snapshot.v3.user-abc');
+  // ─── Immediate local persist ─────────────────
+
+  describe('persistImmediateSnapshot', () => {
+    it('should shadow the snapshot synchronously and enqueue IndexedDB without waiting for debounce', async () => {
+      const snapshot = makeMinimalSnapshot({
+        entries: [makeMinimalEntry({ taskId: 'task-2', dockedOrder: 1 })],
+        savedAt: '2025-01-15T12:34:56.000Z',
+      }) as unknown as DockSnapshot;
+      const immediateService = service as DockSnapshotPersistenceServiceType & {
+        persistImmediateSnapshot: (
+          snapshotFn: () => DockSnapshot,
+          userId: string | null,
+        ) => Promise<boolean>;
+      };
+
+      const write = immediateService.persistImmediateSnapshot(() => snapshot, 'user-1');
+
+      expect(JSON.parse(localStorage.getItem(service.legacyLocalStorageKey('user-1')) ?? '{}')).toMatchObject({
+        savedAt: '2025-01-15T12:34:56.000Z',
+        entries: [expect.objectContaining({ taskId: 'task-2', dockedOrder: 1 })],
+      });
+      await expect(write).resolves.toBe(true);
+      await Promise.resolve();
+      expect(mockSet).toHaveBeenCalledWith(
+        service.localCacheKey('user-1'),
+        expect.objectContaining({
+          savedAt: '2025-01-15T12:34:56.000Z',
+          entries: [expect.objectContaining({ taskId: 'task-2', dockedOrder: 1 })],
+        }),
+      );
     });
 
-    it('should use "anonymous" for null user id', () => {
-      const key = service.legacyLocalStorageKey(null);
-      expect(key).toBe('nanoflow.dock-snapshot.v3.anonymous');
+    it('should report failure when IndexedDB persist fails even if the shadow snapshot is written', async () => {
+      mockSet.mockRejectedValue(new Error('idb unavailable'));
+      const snapshot = makeMinimalSnapshot({
+        entries: [makeMinimalEntry({ taskId: 'task-idb-fail', dockedOrder: 1 })],
+        savedAt: '2025-01-15T12:34:56.000Z',
+      }) as unknown as DockSnapshot;
+      const immediateService = service as DockSnapshotPersistenceServiceType & {
+        persistImmediateSnapshot: (
+          snapshotFn: () => DockSnapshot,
+          userId: string | null,
+        ) => Promise<boolean>;
+      };
+
+      const write = immediateService.persistImmediateSnapshot(() => snapshot, 'user-1');
+
+      expect(JSON.parse(localStorage.getItem(service.legacyLocalStorageKey('user-1')) ?? '{}')).toMatchObject({
+        entries: [expect.objectContaining({ taskId: 'task-idb-fail' })],
+      });
+      await expect(write).resolves.toBe(false);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(mockSet).toHaveBeenCalledTimes(2);
     });
   });
 
   // ─── isSnapshotNewer ──────────────────────────
 
-  describe('isSnapshotNewer', () => {
-    it('should return true when incoming is newer than current', () => {
-      const incoming = { savedAt: '2025-01-15T12:00:00.000Z' } as DockSnapshot;
-      const current = { savedAt: '2025-01-15T10:00:00.000Z' } as DockSnapshot;
-      expect(service.isSnapshotNewer(incoming, current)).toBe(true);
-    });
-
-    it('should return false when incoming is older than current', () => {
-      const incoming = { savedAt: '2025-01-15T08:00:00.000Z' } as DockSnapshot;
-      const current = { savedAt: '2025-01-15T10:00:00.000Z' } as DockSnapshot;
-      expect(service.isSnapshotNewer(incoming, current)).toBe(false);
-    });
-
-    it('should return false when timestamps are equal', () => {
-      const incoming = { savedAt: '2025-01-15T10:00:00.000Z' } as DockSnapshot;
-      const current = { savedAt: '2025-01-15T10:00:00.000Z' } as DockSnapshot;
-      expect(service.isSnapshotNewer(incoming, current)).toBe(false);
-    });
-
-    it('should return false when incoming savedAt is invalid', () => {
-      const incoming = { savedAt: 'not-a-date' } as DockSnapshot;
-      const current = { savedAt: '2025-01-15T10:00:00.000Z' } as DockSnapshot;
-      expect(service.isSnapshotNewer(incoming, current)).toBe(false);
-    });
-
-    it('should return true when current savedAt is invalid', () => {
-      const incoming = { savedAt: '2025-01-15T10:00:00.000Z' } as DockSnapshot;
-      const current = { savedAt: 'garbage' } as DockSnapshot;
-      expect(service.isSnapshotNewer(incoming, current)).toBe(true);
-    });
-
-    it('should return false when both savedAt are invalid', () => {
-      const incoming = { savedAt: 'bad1' } as DockSnapshot;
-      const current = { savedAt: 'bad2' } as DockSnapshot;
-      expect(service.isSnapshotNewer(incoming, current)).toBe(false);
-    });
+  registerDockSnapshotNewerSpecs({
+    getService: () => service,
   });
 
   // ─── normalizeEntry ───────────────────────────
@@ -794,125 +737,13 @@ describe('DockSnapshotPersistenceService', () => {
 
   // ─── cancelPendingPersist ─────────────────────
 
-  describe('cancelPendingPersist', () => {
-    beforeEach(() => {
-      vi.useFakeTimers();
-    });
-
-    afterEach(() => {
-      vi.useRealTimers();
-    });
-
-    it('should not throw when called without pending persist', () => {
-      expect(() => service.cancelPendingPersist()).not.toThrow();
-    });
-
-    it('should shadow a scheduled snapshot to localStorage before canceling the debounced IDB write', () => {
-      // Schedule a persist, then cancel it
-      const snapshotFn = vi.fn(() =>
-        makeMinimalSnapshot({
-          focusMode: false,
-          session: {
-            firstDragIntervened: false,
-            focusBlurOn: false,
-            focusScrimOn: false,
-            mainTaskId: null,
-            comboSelectIds: [],
-            backupIds: [],
-          },
-          savedAt: '2025-01-15T11:00:00.000Z',
-        }) as unknown as DockSnapshot,
-      );
-      service.scheduleLocalPersist(snapshotFn, 'user-1', () => 0);
-
-      // Cancel before the debounce fires
-      service.cancelPendingPersist();
-
-      // Advance past debounce interval
-      vi.advanceTimersByTime(1000);
-
-      expect(snapshotFn).toHaveBeenCalledTimes(1);
-      expect(mockSet).not.toHaveBeenCalled();
-      expect(
-        JSON.parse(localStorage.getItem(service.legacyLocalStorageKey('user-1')) ?? '{}'),
-      ).toMatchObject({
-        focusMode: false,
-        savedAt: '2025-01-15T11:00:00.000Z',
-      });
-    });
-
-    it('should be idempotent', () => {
-      service.cancelPendingPersist();
-      service.cancelPendingPersist();
-      // no throw
-    });
-
-    it('discardPendingPersist should drop scheduled snapshot without shadow persist', async () => {
-      const snapshotFn = vi.fn(() =>
-        makeMinimalSnapshot({
-          savedAt: '2025-01-15T12:00:00.000Z',
-        }) as unknown as DockSnapshot,
-      );
-      service.scheduleLocalPersist(snapshotFn, 'user-1', () => 0);
-
-      await service.discardPendingPersist();
-      vi.advanceTimersByTime(1000);
-
-      expect(snapshotFn).not.toHaveBeenCalled();
-      expect(mockSet).not.toHaveBeenCalled();
-      expect(localStorage.getItem(service.legacyLocalStorageKey('user-1'))).toBeNull();
-    });
+  registerDockSnapshotPendingPersistSpecs({
+    getService: () => service,
+    makeMinimalSnapshot,
+    mockSet: () => mockSet,
   });
 });
 
 // ─── Standalone normalizeNullableNumber ─────
 
-describe('normalizeNullableNumber', () => {
-  it('should return null for null', async () => {
-    await expect(callNormalizeNullableNumber(null)).resolves.toBeNull();
-  });
-
-  it('should return null for undefined', async () => {
-    await expect(callNormalizeNullableNumber(undefined)).resolves.toBeNull();
-  });
-
-  it('should return null for empty string', async () => {
-    await expect(callNormalizeNullableNumber('')).resolves.toBeNull();
-  });
-
-  it('should return null for NaN', async () => {
-    await expect(callNormalizeNullableNumber(NaN)).resolves.toBeNull();
-  });
-
-  it('should return null for Infinity', async () => {
-    await expect(callNormalizeNullableNumber(Infinity)).resolves.toBeNull();
-  });
-
-  it('should return null for -Infinity', async () => {
-    await expect(callNormalizeNullableNumber(-Infinity)).resolves.toBeNull();
-  });
-
-  it('should return null for non-numeric string', async () => {
-    await expect(callNormalizeNullableNumber('abc')).resolves.toBeNull();
-  });
-
-  it('should return number for numeric value', async () => {
-    await expect(callNormalizeNullableNumber(42)).resolves.toBe(42);
-  });
-
-  it('should return number for zero', async () => {
-    await expect(callNormalizeNullableNumber(0)).resolves.toBe(0);
-  });
-
-  it('should return number for negative value', async () => {
-    await expect(callNormalizeNullableNumber(-10)).resolves.toBe(-10);
-  });
-
-  it('should parse numeric string to number', async () => {
-    await expect(callNormalizeNullableNumber('123')).resolves.toBe(123);
-  });
-
-  it('should parse float string to number', async () => {
-    await expect(callNormalizeNullableNumber('3.14')).resolves.toBe(3.14);
-  });
-});
+registerNormalizeNullableNumberSpecs();

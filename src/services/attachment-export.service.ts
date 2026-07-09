@@ -2,75 +2,40 @@
 import { Injectable, inject, signal, computed } from '@angular/core';
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
-import { Project, Attachment } from '../models';
+import { VirusScanService } from './virus-scan.service';
+import { Project, Task, Attachment } from '../models';
+import {
+  ATTACHMENT_EXPORT_CONFIG,
+  AttachmentDownloadSummary,
+  AttachmentManifest,
+  DownloadResult,
+  ExportManifest,
+  appendAttachmentManifestReference,
+  buildSkippedAttachmentDownloadResult,
+  calculateAttachmentTotalSize,
+  createAttachmentExportManifest,
+  createSimpleZip,
+  generateAttachmentBundlePath,
+  summarizeAttachmentDownloadResults,
+  ZipFileEntry,
+} from './attachment-export.helpers';
 
-export const ATTACHMENT_EXPORT_CONFIG = {
-  /** 批次大小（每批下载多少个附件） */
-  BATCH_SIZE: 5,
-  
-  /** 单个附件最大大小（字节）- 100MB */
-  MAX_SINGLE_FILE_SIZE: 100 * 1024 * 1024,
-  
-  /** 总导出最大大小（字节）- 500MB */
-  MAX_TOTAL_SIZE: 500 * 1024 * 1024,
-  
-  /** 下载超时（毫秒） */
-  DOWNLOAD_TIMEOUT: 60 * 1000,
-  
-  /** 重试次数 */
-  RETRY_COUNT: 3,
-  
-  /** 重试延迟（毫秒） */
-  RETRY_DELAY: 1000,
-  
-  /** ZIP 文件名前缀 */
-  FILENAME_PREFIX: 'nanoflow-attachments',
-  
-  /** 附件目录名 */
-  ATTACHMENTS_DIR: 'attachments',
-  
-  /** Manifest 文件名 */
-  MANIFEST_FILENAME: 'manifest.json',
-} as const;
+export {
+  ATTACHMENT_EXPORT_CONFIG,
+  appendAttachmentManifestReference,
+  buildSkippedAttachmentDownloadResult,
+  calculateAttachmentTotalSize,
+  summarizeAttachmentDownloadResults,
+} from './attachment-export.helpers';
+export type {
+  AttachmentManifest,
+  DownloadResult,
+  ExportManifest,
+} from './attachment-export.helpers';
 
 // ============================================
 // 类型定义
 // ============================================
-
-/**
- * 附件清单项
- */
-export interface AttachmentManifest {
-  id: string;
-  taskIds: string[];
-  projectIds: string[];
-  name: string;
-  mimeType: string;
-  size: number;
-  checksum?: string;
-  /** ZIP 内相对路径 */
-  bundlePath: string;
-  /** 原始 URL（可能已过期） */
-  originalUrl?: string;
-  /** 下载状态 */
-  downloadStatus?: 'pending' | 'success' | 'failed' | 'skipped';
-  /** 失败原因 */
-  failureReason?: string;
-}
-
-/**
- * 导出 Manifest
- */
-export interface ExportManifest {
-  version: string;
-  exportedAt: string;
-  totalAttachments: number;
-  totalSize: number;
-  successCount: number;
-  failedCount: number;
-  skippedCount: number;
-  attachments: AttachmentManifest[];
-}
 
 /**
  * 导出进度
@@ -102,16 +67,6 @@ export interface AttachmentExportResult {
   durationMs: number;
 }
 
-/**
- * 下载单个附件的结果
- */
-interface DownloadResult {
-  attachment: AttachmentManifest;
-  data?: Blob;
-  success: boolean;
-  error?: string;
-}
-
 // ============================================
 // 服务实现
 // ============================================
@@ -122,6 +77,7 @@ interface DownloadResult {
 export class AttachmentExportService {
   private readonly logger = inject(LoggerService).category('AttachmentExport');
   private readonly toast = inject(ToastService);
+  private readonly virusScan = inject(VirusScanService);
   
   // 状态信号
   private readonly _isExporting = signal(false);
@@ -156,60 +112,14 @@ export class AttachmentExportService {
     this.resetProgress();
     
     try {
-      // 1. 收集所有附件
-      this.updateProgress('collecting', 0);
-      const manifest = this.collectAttachments(projects);
-      
+      const manifest = this.prepareAttachmentManifest(projects);
       if (manifest.length === 0) {
-        this.updateProgress('complete', 100);
-        this._isExporting.set(false);
-        return {
-          success: true,
-          error: undefined,
-          manifest: this.createManifestData(manifest, 0, 0, 0),
-          durationMs: Date.now() - startTime,
-        };
+        return this.buildEmptyExportResult(manifest, startTime);
       }
-      
-      // 2. 检查总大小
-      const totalSize = manifest.reduce((sum, a) => sum + a.size, 0);
-      if (totalSize > ATTACHMENT_EXPORT_CONFIG.MAX_TOTAL_SIZE) {
-        throw new Error(`附件总大小 ${this.formatBytes(totalSize)} 超出限制 ${this.formatBytes(ATTACHMENT_EXPORT_CONFIG.MAX_TOTAL_SIZE)}`);
-      }
-      
-      this._progress.update(p => ({
-        ...p,
-        totalCount: manifest.length,
-        totalSize,
-      }));
-      
-      // 3. 下载附件
-      this.updateProgress('downloading', 10);
-      const downloadResults = await this.downloadAllAttachments(manifest);
-      
-      // 4. 打包为 ZIP
-      this.updateProgress('packaging', 80);
-      const zipResult = await this.createZipBundle(downloadResults, manifest);
-      
-      // 5. 统计结果
-      const successCount = downloadResults.filter(r => r.success).length;
-      const failedCount = downloadResults.filter(r => !r.success).length;
-      
-      this.updateProgress('complete', 100);
-      
-      this.logger.info('附件导出完成', {
-        total: manifest.length,
-        success: successCount,
-        failed: failedCount,
-      });
-      
-      return {
-        success: true,
-        blob: zipResult.blob,
-        filename: zipResult.filename,
-        manifest: this.createManifestData(manifest, successCount, failedCount, 0),
-        durationMs: Date.now() - startTime,
-      };
+
+      this.ensureTotalSizeWithinLimit(manifest);
+      this.initializeDownloadProgress(manifest);
+      return await this.exportPreparedAttachments(manifest, startTime);
     } catch (error) {
       this.updateProgress('failed', 0);
       this.logger.error('附件导出失败', error);
@@ -222,6 +132,75 @@ export class AttachmentExportService {
     } finally {
       this._isExporting.set(false);
     }
+  }
+
+  private prepareAttachmentManifest(projects: Project[]): AttachmentManifest[] {
+    this.updateProgress('collecting', 0);
+    return this.collectAttachments(projects);
+  }
+
+  private buildEmptyExportResult(
+    manifest: AttachmentManifest[],
+    startTime: number,
+  ): AttachmentExportResult {
+    this.updateProgress('complete', 100);
+    return {
+      success: true,
+      error: undefined,
+      manifest: createAttachmentExportManifest(manifest, 0, 0, 0),
+      durationMs: Date.now() - startTime,
+    };
+  }
+
+  private ensureTotalSizeWithinLimit(manifest: AttachmentManifest[]): void {
+    const totalSize = calculateAttachmentTotalSize(manifest);
+    if (totalSize <= ATTACHMENT_EXPORT_CONFIG.MAX_TOTAL_SIZE) {
+      return;
+    }
+
+    throw new Error(`附件总大小 ${this.formatBytes(totalSize)} 超出限制 ${this.formatBytes(ATTACHMENT_EXPORT_CONFIG.MAX_TOTAL_SIZE)}`);
+  }
+
+  private initializeDownloadProgress(manifest: AttachmentManifest[]): void {
+    this._progress.update(p => ({
+      ...p,
+      totalCount: manifest.length,
+      totalSize: calculateAttachmentTotalSize(manifest),
+    }));
+  }
+
+  private async exportPreparedAttachments(
+    manifest: AttachmentManifest[],
+    startTime: number,
+  ): Promise<AttachmentExportResult> {
+    this.updateProgress('downloading', 10);
+    const downloadResults = await this.downloadAllAttachments(manifest);
+
+    this.updateProgress('packaging', 80);
+    const zipResult = await this.createZipBundle(downloadResults, manifest);
+    const summary = summarizeAttachmentDownloadResults(downloadResults);
+
+    this.updateProgress('complete', 100);
+    this.logExportComplete(manifest.length, summary);
+
+    return {
+      success: true,
+      blob: zipResult.blob,
+      filename: zipResult.filename,
+      manifest: createAttachmentExportManifest(manifest, summary.successCount, summary.failedCount, 0),
+      durationMs: Date.now() - startTime,
+    };
+  }
+
+  private logExportComplete(
+    total: number,
+    summary: AttachmentDownloadSummary,
+  ): void {
+    this.logger.info('附件导出完成', {
+      total,
+      success: summary.successCount,
+      failed: summary.failedCount,
+    });
   }
   
   /**
@@ -250,52 +229,48 @@ export class AttachmentExportService {
         if (!task.attachments || task.deletedAt) continue;
         
         for (const att of task.attachments) {
-          const existing = attachmentMap.get(att.id);
-          
-          if (existing) {
-            // 附件已存在，添加引用
-            if (!existing.taskIds.includes(task.id)) {
-              existing.taskIds.push(task.id);
-            }
-            if (!existing.projectIds.includes(project.id)) {
-              existing.projectIds.push(project.id);
-            }
-          } else {
-            // 新附件
-            attachmentMap.set(att.id, {
-              id: att.id,
-              taskIds: [task.id],
-              projectIds: [project.id],
-              name: att.name,
-              mimeType: att.mimeType || 'application/octet-stream',
-              size: att.size || 0,
-              bundlePath: this.generateBundlePath(att),
-              originalUrl: att.url,
-              downloadStatus: 'pending',
-            });
-          }
+          if (att.deletedAt) continue;
+          this.upsertAttachmentManifest(attachmentMap, project.id, task, att);
         }
       }
     }
     
     return Array.from(attachmentMap.values());
   }
-  
-  /**
-   * 生成 ZIP 内路径
-   */
-  private generateBundlePath(att: Attachment): string {
-    const ext = this.getFileExtension(att.name);
-    const safeId = att.id.replace(/[^a-zA-Z0-9-]/g, '');
-    return `${ATTACHMENT_EXPORT_CONFIG.ATTACHMENTS_DIR}/${safeId}${ext}`;
+
+  private upsertAttachmentManifest(
+    attachmentMap: Map<string, AttachmentManifest>,
+    projectId: string,
+    task: Task,
+    attachment: Attachment,
+  ): void {
+    const existing = attachmentMap.get(attachment.id);
+    if (existing) {
+      appendAttachmentManifestReference(existing, task.id, projectId);
+      return;
+    }
+
+    attachmentMap.set(attachment.id, this.createAttachmentManifest(projectId, task.id, attachment));
   }
-  
-  /**
-   * 获取文件扩展名
-   */
-  private getFileExtension(filename: string): string {
-    const lastDot = filename.lastIndexOf('.');
-    return lastDot > 0 ? filename.substring(lastDot) : '';
+
+  private createAttachmentManifest(
+    projectId: string,
+    taskId: string,
+    attachment: Attachment,
+  ): AttachmentManifest {
+    return {
+      id: attachment.id,
+      taskIds: [taskId],
+      projectIds: [projectId],
+      name: attachment.name,
+      mimeType: attachment.mimeType || 'application/octet-stream',
+      size: attachment.size || 0,
+      scanFileId: attachment.scanMetadata?.fileId,
+      fileHash: attachment.scanMetadata?.fileHash,
+      bundlePath: generateAttachmentBundlePath(attachment),
+      originalUrl: attachment.url,
+      downloadStatus: 'pending',
+    };
   }
   
   // ==================== 下载附件 ====================
@@ -336,74 +311,109 @@ export class AttachmentExportService {
   private async downloadSingleAttachment(
     attachment: AttachmentManifest
   ): Promise<DownloadResult> {
-    const { RETRY_COUNT, RETRY_DELAY, DOWNLOAD_TIMEOUT, MAX_SINGLE_FILE_SIZE } = 
-      ATTACHMENT_EXPORT_CONFIG;
-    
-    // 检查 URL
-    if (!attachment.originalUrl) {
-      attachment.downloadStatus = 'skipped';
-      attachment.failureReason = 'URL 不存在';
-      return {
-        attachment,
-        success: false,
-        error: 'URL 不存在',
-      };
+    const skippedResult = this.getSkippedDownloadResult(attachment);
+    if (skippedResult) {
+      return skippedResult;
+    }
+
+    const securityFailure = await this.getSecurityFailureDownloadResult(attachment);
+    if (securityFailure) {
+      return securityFailure;
     }
     
-    // 检查文件大小
-    if (attachment.size > MAX_SINGLE_FILE_SIZE) {
-      attachment.downloadStatus = 'skipped';
-      attachment.failureReason = '文件过大';
-      return {
-        attachment,
-        success: false,
-        error: `文件过大：${this.formatBytes(attachment.size)}`,
-      };
-    }
-    
-    // 带重试的下载
     let lastError: Error | undefined;
-    
-    for (let attempt = 0; attempt < RETRY_COUNT; attempt++) {
+    for (let attempt = 0; attempt < ATTACHMENT_EXPORT_CONFIG.RETRY_COUNT; attempt++) {
       try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT);
-        
-        const response = await fetch(attachment.originalUrl, {
-          signal: controller.signal,
-        });
-        
-        clearTimeout(timeout);
-        
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`);
-        }
-        
-        const blob = await response.blob();
-        
-        // 计算校验和
-        attachment.checksum = await this.calculateBlobChecksum(blob);
-        attachment.downloadStatus = 'success';
-        
-        this._progress.update(p => ({
-          ...p,
-          processedSize: p.processedSize + blob.size,
-        }));
-        
-        return {
-          attachment,
-          data: blob,
-          success: true,
-        };
+        const blob = await this.fetchAttachmentBlob(attachment.originalUrl as string);
+        return await this.buildSuccessfulDownloadResult(attachment, blob);
       } catch (error) {
         lastError = error instanceof Error ? error : new Error('下载失败');
-        
-        if (attempt < RETRY_COUNT - 1) {
-          await this.delay(RETRY_DELAY * (attempt + 1));
-        }
+        await this.delayBeforeNextDownloadAttempt(attempt);
       }
     }
-    
+
+    return this.buildFailedDownloadResult(attachment, lastError);
+  }
+
+  private getSkippedDownloadResult(attachment: AttachmentManifest): DownloadResult | null {
+    if (!attachment.originalUrl) {
+      return buildSkippedAttachmentDownloadResult(attachment, 'URL 不存在');
+    }
+
+    if (attachment.size > ATTACHMENT_EXPORT_CONFIG.MAX_SINGLE_FILE_SIZE) {
+      return buildSkippedAttachmentDownloadResult(
+        attachment,
+        '文件过大',
+        `文件过大：${this.formatBytes(attachment.size)}`,
+      );
+    }
+
+    return null;
+  }
+
+  private async getSecurityFailureDownloadResult(attachment: AttachmentManifest): Promise<DownloadResult | null> {
+    if (!attachment.scanFileId) {
+      return buildSkippedAttachmentDownloadResult(attachment, '安全检查失败：缺少扫描记录');
+    }
+
+    const result = await this.virusScan.checkBeforeDownload(attachment.scanFileId, attachment.fileHash);
+    if (result.success) {
+      return null;
+    }
+
+    return buildSkippedAttachmentDownloadResult(
+      attachment,
+      '安全检查失败',
+      result.error || '附件安全检查失败',
+    );
+  }
+
+  private async fetchAttachmentBlob(url: string): Promise<Blob> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), ATTACHMENT_EXPORT_CONFIG.DOWNLOAD_TIMEOUT);
+
+    try {
+      const response = await fetch(url, { signal: controller.signal });
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      return await response.blob();
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  private async buildSuccessfulDownloadResult(
+    attachment: AttachmentManifest,
+    blob: Blob,
+  ): Promise<DownloadResult> {
+    attachment.checksum = await this.calculateBlobChecksum(blob);
+    attachment.downloadStatus = 'success';
+
+    this._progress.update(p => ({
+      ...p,
+      processedSize: p.processedSize + blob.size,
+    }));
+
+    return {
+      attachment,
+      data: blob,
+      success: true,
+    };
+  }
+
+  private async delayBeforeNextDownloadAttempt(attempt: number): Promise<void> {
+    if (attempt >= ATTACHMENT_EXPORT_CONFIG.RETRY_COUNT - 1) {
+      return;
+    }
+
+    await this.delay(ATTACHMENT_EXPORT_CONFIG.RETRY_DELAY * (attempt + 1));
+  }
+
+  private buildFailedDownloadResult(
+    attachment: AttachmentManifest,
+    lastError: Error | undefined,
+  ): DownloadResult {
     attachment.downloadStatus = 'failed';
     attachment.failureReason = lastError?.message || '下载失败';
     
@@ -430,7 +440,7 @@ export class AttachmentExportService {
     manifest: AttachmentManifest[]
   ): Promise<{ blob: Blob; filename: string }> {
     // 准备文件列表
-    const files: Array<{ path: string; data: Blob | string }> = [];
+    const files: ZipFileEntry[] = [];
     
     // 添加成功下载的附件
     for (const result of downloadResults) {
@@ -443,7 +453,7 @@ export class AttachmentExportService {
     }
     
     // 添加 manifest.json
-    const manifestData = this.createManifestData(
+    const manifestData = createAttachmentExportManifest(
       manifest,
       downloadResults.filter(r => r.success).length,
       downloadResults.filter(r => !r.success).length,
@@ -456,226 +466,11 @@ export class AttachmentExportService {
     });
     
     // 创建 ZIP
-    const zipBlob = await this.createSimpleZip(files);
+    const zipBlob = await createSimpleZip(files);
     
     const filename = this.generateFilename();
     
     return { blob: zipBlob, filename };
-  }
-  
-  /**
-   * 创建简单 ZIP 文件（Store 模式，无压缩）
-   * 
-   * ZIP 文件格式：
-   * - [Local file header 1]
-   * - [File data 1]
-   * - [Local file header 2]
-   * - [File data 2]
-   * - ...
-   * - [Central directory header 1]
-   * - [Central directory header 2]
-   * - ...
-   * - [End of central directory record]
-   */
-  private async createSimpleZip(
-    files: Array<{ path: string; data: Blob | string }>
-  ): Promise<Blob> {
-    const parts: BlobPart[] = [];
-    const centralDirectory: Uint8Array[] = [];
-    let offset = 0;
-    
-    for (const file of files) {
-      const pathBytes = new TextEncoder().encode(file.path);
-      let fileData: Uint8Array;
-      
-      if (typeof file.data === 'string') {
-        fileData = new TextEncoder().encode(file.data);
-      } else {
-        fileData = new Uint8Array(await file.data.arrayBuffer());
-      }
-      
-      const crc = this.crc32(fileData);
-      
-      // Local file header (30 bytes + filename)
-      const localHeader = this.createLocalFileHeader(
-        pathBytes,
-        fileData.length,
-        crc
-      );
-      
-      // Central directory file header
-      const centralHeader = this.createCentralDirectoryHeader(
-        pathBytes,
-        fileData.length,
-        crc,
-        offset
-      );
-      
-      parts.push(localHeader.buffer.slice(localHeader.byteOffset, localHeader.byteOffset + localHeader.byteLength) as ArrayBuffer);
-      parts.push(fileData.buffer.slice(fileData.byteOffset, fileData.byteOffset + fileData.byteLength) as ArrayBuffer);
-      
-      centralDirectory.push(centralHeader);
-      
-      offset += localHeader.length + fileData.length;
-    }
-    
-    // Central directory
-    const centralDirOffset = offset;
-    let centralDirSize = 0;
-    
-    for (const header of centralDirectory) {
-      parts.push(header.buffer.slice(header.byteOffset, header.byteOffset + header.byteLength) as ArrayBuffer);
-      centralDirSize += header.length;
-    }
-    
-    // End of central directory record
-    const eocd = this.createEndOfCentralDirectory(
-      files.length,
-      centralDirSize,
-      centralDirOffset
-    );
-    
-    parts.push(eocd.buffer.slice(eocd.byteOffset, eocd.byteOffset + eocd.byteLength) as ArrayBuffer);
-    
-    return new Blob(parts, { type: 'application/zip' });
-  }
-  
-  /**
-   * 创建 Local file header
-   */
-  private createLocalFileHeader(
-    filename: Uint8Array,
-    size: number,
-    crc: number
-  ): Uint8Array {
-    const header = new Uint8Array(30 + filename.length);
-    const view = new DataView(header.buffer);
-    
-    // Signature
-    view.setUint32(0, 0x04034b50, true);
-    // Version needed
-    view.setUint16(4, 20, true);
-    // General purpose flag
-    view.setUint16(6, 0, true);
-    // Compression method (0 = store)
-    view.setUint16(8, 0, true);
-    // Last mod time
-    view.setUint16(10, 0, true);
-    // Last mod date
-    view.setUint16(12, 0, true);
-    // CRC-32
-    view.setUint32(14, crc, true);
-    // Compressed size
-    view.setUint32(18, size, true);
-    // Uncompressed size
-    view.setUint32(22, size, true);
-    // Filename length
-    view.setUint16(26, filename.length, true);
-    // Extra field length
-    view.setUint16(28, 0, true);
-    // Filename
-    header.set(filename, 30);
-    
-    return header;
-  }
-  
-  /**
-   * 创建 Central directory file header
-   */
-  private createCentralDirectoryHeader(
-    filename: Uint8Array,
-    size: number,
-    crc: number,
-    localHeaderOffset: number
-  ): Uint8Array {
-    const header = new Uint8Array(46 + filename.length);
-    const view = new DataView(header.buffer);
-    
-    // Signature
-    view.setUint32(0, 0x02014b50, true);
-    // Version made by
-    view.setUint16(4, 20, true);
-    // Version needed
-    view.setUint16(6, 20, true);
-    // General purpose flag
-    view.setUint16(8, 0, true);
-    // Compression method
-    view.setUint16(10, 0, true);
-    // Last mod time
-    view.setUint16(12, 0, true);
-    // Last mod date
-    view.setUint16(14, 0, true);
-    // CRC-32
-    view.setUint32(16, crc, true);
-    // Compressed size
-    view.setUint32(20, size, true);
-    // Uncompressed size
-    view.setUint32(24, size, true);
-    // Filename length
-    view.setUint16(28, filename.length, true);
-    // Extra field length
-    view.setUint16(30, 0, true);
-    // File comment length
-    view.setUint16(32, 0, true);
-    // Disk number start
-    view.setUint16(34, 0, true);
-    // Internal file attributes
-    view.setUint16(36, 0, true);
-    // External file attributes
-    view.setUint32(38, 0, true);
-    // Relative offset of local header
-    view.setUint32(42, localHeaderOffset, true);
-    // Filename
-    header.set(filename, 46);
-    
-    return header;
-  }
-  
-  /**
-   * 创建 End of central directory record
-   */
-  private createEndOfCentralDirectory(
-    entryCount: number,
-    centralDirSize: number,
-    centralDirOffset: number
-  ): Uint8Array {
-    const eocd = new Uint8Array(22);
-    const view = new DataView(eocd.buffer);
-    
-    // Signature
-    view.setUint32(0, 0x06054b50, true);
-    // Disk number
-    view.setUint16(4, 0, true);
-    // Disk number with central directory
-    view.setUint16(6, 0, true);
-    // Number of entries on this disk
-    view.setUint16(8, entryCount, true);
-    // Total number of entries
-    view.setUint16(10, entryCount, true);
-    // Size of central directory
-    view.setUint32(12, centralDirSize, true);
-    // Offset of central directory
-    view.setUint32(16, centralDirOffset, true);
-    // Comment length
-    view.setUint16(20, 0, true);
-    
-    return eocd;
-  }
-  
-  /**
-   * CRC-32 计算
-   */
-  private crc32(data: Uint8Array): number {
-    let crc = 0xFFFFFFFF;
-    
-    for (let i = 0; i < data.length; i++) {
-      crc ^= data[i];
-      for (let j = 0; j < 8; j++) {
-        crc = (crc >>> 1) ^ (crc & 1 ? 0xEDB88320 : 0);
-      }
-    }
-    
-    return (crc ^ 0xFFFFFFFF) >>> 0;
   }
   
   // ==================== 辅助方法 ====================
@@ -688,27 +483,6 @@ export class AttachmentExportService {
       .replace(/[:.]/g, '-')
       .substring(0, 19);
     return `${ATTACHMENT_EXPORT_CONFIG.FILENAME_PREFIX}-${timestamp}.zip`;
-  }
-  
-  /**
-   * 创建 Manifest 数据
-   */
-  private createManifestData(
-    attachments: AttachmentManifest[],
-    successCount: number,
-    failedCount: number,
-    skippedCount: number
-  ): ExportManifest {
-    return {
-      version: '1.0',
-      exportedAt: new Date().toISOString(),
-      totalAttachments: attachments.length,
-      totalSize: attachments.reduce((sum, a) => sum + a.size, 0),
-      successCount,
-      failedCount,
-      skippedCount,
-      attachments,
-    };
   }
   
   /**

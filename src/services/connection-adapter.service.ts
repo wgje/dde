@@ -14,28 +14,21 @@
  */
 import { Injectable, inject } from '@angular/core';
 import { TaskOperationService } from './task-operation.service';
-import { SyncCoordinatorService } from './sync-coordinator.service';
-import { UndoService } from './undo.service';
 import { UiStateService } from './ui-state.service';
-import { ProjectStateService } from './project-state.service';
 import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
 import { UserSessionService } from './user-session.service';
-import { Project } from '../models';
-import { LayoutService } from './layout.service';
+import { TaskRecordTrackingService } from './task-record-tracking.service';
 
 @Injectable({
   providedIn: 'root'
 })
 export class ConnectionAdapterService {
   private readonly taskOps = inject(TaskOperationService);
-  private readonly syncCoordinator = inject(SyncCoordinatorService);
-  private readonly undoService = inject(UndoService);
   private readonly uiState = inject(UiStateService);
-  private readonly projectState = inject(ProjectStateService);
-  private readonly layoutService = inject(LayoutService);
   private readonly toastService = inject(ToastService);
   private readonly userSession = inject(UserSessionService);
+  private readonly recorder = inject(TaskRecordTrackingService);
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('ConnectionAdapter');
 
@@ -53,12 +46,16 @@ export class ConnectionAdapterService {
   /**
    * 添加跨树连接
    */
-  addCrossTreeConnection(sourceId: string, targetId: string): void {
+  async addCrossTreeConnection(sourceId: string, targetId: string): Promise<boolean> {
     if (this.blockHintOnlyMutation('编辑关联')) {
-      return;
+      return false;
     }
 
-    this.taskOps.addCrossTreeConnection(sourceId, targetId);
+    const saved = await this.taskOps.addCrossTreeConnectionDurably(sourceId, targetId);
+    if (!saved) {
+      this.logger.warn('添加连接本地持久化失败，未显示成功反馈', { sourceId, targetId });
+      return false;
+    }
     
     const isMobile = this.uiState.isMobile();
     
@@ -69,24 +66,30 @@ export class ConnectionAdapterService {
         duration: 5000,
         action: {
           label: '撤销',
-          onClick: () => {
+          pendingLabel: '撤销中...',
+          onClick: async () => {
             this.logger.info('用户撤回添加连接操作', { sourceId, targetId });
-            this.performUndo();
+            await this.performUndo();
           }
         }
       } : { duration: 3000 }
     );
+    return true;
   }
   
   /**
    * 删除连接
    */
-  removeConnection(sourceId: string, targetId: string): void {
+  async removeConnection(sourceId: string, targetId: string): Promise<boolean> {
     if (this.blockHintOnlyMutation('编辑关联')) {
-      return;
+      return false;
     }
 
-    this.taskOps.removeConnection(sourceId, targetId);
+    const saved = await this.taskOps.removeConnectionDurably(sourceId, targetId);
+    if (!saved) {
+      this.logger.warn('删除连接本地持久化失败，未显示成功反馈', { sourceId, targetId });
+      return false;
+    }
     
     const isMobile = this.uiState.isMobile();
     
@@ -97,30 +100,36 @@ export class ConnectionAdapterService {
         duration: 5000,
         action: {
           label: '撤销',
-          onClick: () => {
+          pendingLabel: '撤销中...',
+          onClick: async () => {
             this.logger.info('用户撤回删除连接操作', { sourceId, targetId });
-            this.performUndo();
+            await this.performUndo();
           }
         }
       } : { duration: 3000 }
     );
+    return true;
   }
   
   /**
    * 重连跨树连接（原子操作）
    * 在一个撤销单元内删除旧连接并创建新连接
    */
-  relinkCrossTreeConnection(
+  async relinkCrossTreeConnection(
     oldSourceId: string,
     oldTargetId: string,
     newSourceId: string,
     newTargetId: string
-  ): void {
+  ): Promise<boolean> {
     if (this.blockHintOnlyMutation('编辑关联')) {
-      return;
+      return false;
     }
 
-    this.taskOps.relinkCrossTreeConnection(oldSourceId, oldTargetId, newSourceId, newTargetId);
+    const saved = await this.taskOps.relinkCrossTreeConnectionDurably(oldSourceId, oldTargetId, newSourceId, newTargetId);
+    if (!saved) {
+      this.logger.warn('重连连接本地持久化失败，未显示成功反馈', { oldSourceId, oldTargetId, newSourceId, newTargetId });
+      return false;
+    }
     
     const isMobile = this.uiState.isMobile();
     
@@ -131,25 +140,33 @@ export class ConnectionAdapterService {
         duration: 5000,
         action: {
           label: '撤销',
-          onClick: () => {
+          pendingLabel: '撤销中...',
+          onClick: async () => {
             this.logger.info('用户撤回重连操作', { oldSourceId, oldTargetId, newSourceId, newTargetId });
-            this.performUndo();
+            await this.performUndo();
           }
         }
       } : { duration: 3000 }
     );
+    return true;
   }
   
   /**
    * 更新连接内容（标题和描述）
    */
-  updateConnectionContent(sourceId: string, targetId: string, title: string, description: string): void {
+  async updateConnectionContent(sourceId: string, targetId: string, title: string, description: string): Promise<boolean> {
     if (this.blockHintOnlyMutation('编辑关联')) {
-      return;
+      return false;
+    }
+
+    const saved = await this.taskOps.updateConnectionContentDurably(sourceId, targetId, title, description);
+    if (!saved) {
+      this.logger.warn('更新连接内容本地持久化失败，未标记编辑态', { sourceId, targetId });
+      return false;
     }
 
     this.uiState.markEditing();
-    this.taskOps.updateConnectionContent(sourceId, targetId, title, description);
+    return true;
   }
 
   // ========== 私有方法 ==========
@@ -157,69 +174,7 @@ export class ConnectionAdapterService {
   /**
    * 执行撤销操作（内部方法，用于 Toast 回调）
    */
-  private performUndo(): void {
-    const activeProject = this.projectState.activeProject();
-    const currentVersion = activeProject?.version;
-    const result = this.undoService.undo(currentVersion);
-    
-    if (!result) {
-      this.logger.warn('没有可撤销的操作');
-      return;
-    }
-    
-    if (result === 'version-mismatch') {
-      this.toastService.warning('撤销失败', '远程数据已更新过多，无法撤销。');
-      if (activeProject) {
-        this.undoService.clearOutdatedHistory(activeProject.id, currentVersion ?? 0);
-      }
-      return;
-    }
-    
-    if (typeof result === 'object' && 'type' in result && result.type === 'version-mismatch-forceable') {
-      this.toastService.warning(
-        '撤销注意', 
-        `当前内容已被新修改改变 (${result.versionDiff} 个版本)，撤销可能会覆盖最新内容。`
-      );
-      const action = this.undoService.forceUndo();
-      if (action) {
-        this.applyProjectSnapshot(action.projectId, action.data.before, {
-          kind: 'undo',
-          previousSnapshot: action.data.after,
-        });
-      }
-      return;
-    }
-    
-    const action = result;
-    this.applyProjectSnapshot(action.projectId, action.data.before, {
-      kind: 'undo',
-      previousSnapshot: action.data.after,
-    });
-    this.logger.info('撤销操作成功', { projectId: action.projectId, type: action.type });
-  }
-  
-  /**
-   * 应用项目快照（内部方法）
-   */
-  private applyProjectSnapshot(
-    projectId: string,
-    snapshot: Partial<Project>,
-    replay?: { kind: 'undo' | 'redo'; previousSnapshot?: Partial<Project> },
-  ): void {
-    this.projectState.updateProjects(projects => projects.map(p => {
-      if (p.id === projectId) {
-        return this.layoutService.rebalance({
-          ...p,
-          tasks: snapshot.tasks ?? p.tasks,
-          connections: snapshot.connections ?? p.connections
-        });
-      }
-      return p;
-    }));
-    this.syncCoordinator.markLocalChanges('structure');
-    this.syncCoordinator.schedulePersist();
-    if (replay) {
-      this.undoService.notifyReplayApplied(replay.kind, projectId, snapshot, replay.previousSnapshot);
-    }
+  private performUndo(): Promise<boolean> {
+    return this.recorder.performUndo();
   }
 }

@@ -1,35 +1,35 @@
-import { Injectable, inject, DestroyRef } from '@angular/core';
-import { Task, Project, Attachment } from '../models';
+import { Injectable, inject } from '@angular/core';
+import { Task, Project, Attachment, TaskAttentionDraftItem } from '../models';
 import { LayoutService } from './layout.service';
-import { LoggerService } from './logger.service';
-import { TaskTrashService } from './task-trash.service';
+import {
+  DurableDeleteResult,
+  DurableRestoreResult,
+  TaskTrashService,
+} from './task-trash.service';
 import { SubtreeOperationsService } from './subtree-operations.service';
 import { TaskCreationService, CreateTaskParams } from './task-creation.service';
-import { TaskMoveService, MoveTaskParams } from './task-move.service';
+import { TaskMoveService, MoveTaskParams, MoveTaskAtPositionParams } from './task-move.service';
 import { TaskAttributeService } from './task-attribute.service';
 import { TaskConnectionService } from './task-connection.service';
 import { ProjectStateService } from './project-state.service';
 import { TaskRecordTrackingService } from './task-record-tracking.service';
+import { Result, OperationError } from '../utils/result';
 import { LAYOUT_CONFIG } from '../config';
+import { getTaskConnections, type TaskConnectionQueryResult } from './task-connection-query.helpers';
 import {
-  Result, OperationError, ErrorCodes, success, failure
-} from '../utils/result';
+  type InsertBetweenAtPositionParams,
+  TaskOperationStructureController,
+  type InsertBetweenParams,
+} from './task-operation-structure.controller';
 
 
 
-/**
- * 任务插入参数
- */
-export interface InsertBetweenParams {
-  taskId: string;
-  sourceId: string;
-  targetId: string;
-}
+export type { InsertBetweenParams } from './task-operation-structure.controller';
 
 /**
  * 任务操作服务
  * 从 StoreService 拆分出来，专注于任务的 CRUD 操作
- * 
+ *
  * 【职责边界】
  * ✓ 任务创建、更新、删除
  * ✓ 任务移动、排序
@@ -45,157 +45,130 @@ export interface InsertBetweenParams {
 })
 export class TaskOperationService {
   private layoutService = inject(LayoutService);
-  private destroyRef = inject(DestroyRef);
-  private readonly loggerService = inject(LoggerService);
-  private readonly logger = this.loggerService.category('TaskOperation');
   private readonly trashService = inject(TaskTrashService);
   private readonly subtreeOps = inject(SubtreeOperationsService);
   private readonly taskCreation = inject(TaskCreationService);
   private readonly taskMove = inject(TaskMoveService);
   private readonly taskAttr = inject(TaskAttributeService);
   private readonly taskConn = inject(TaskConnectionService);
-  
+
   private projectState = inject(ProjectStateService);
   private recorder = inject(TaskRecordTrackingService);
-  
-  /** 需要重平衡的阶段 */
-  private stagesNeedingRebalance = new Set<number>();
-  
-  /** 重平衡定时器 */
-  private rebalanceTimer: ReturnType<typeof setTimeout> | null = null;
-  
-  constructor() {
-    // 注册清理逻辑，防止定时器内存泄漏
-    this.destroyRef.onDestroy(() => {
-      if (this.rebalanceTimer) {
-        clearTimeout(this.rebalanceTimer);
-        this.rebalanceTimer = null;
-      }
-    });
-  }
-  
+  private readonly structure = new TaskOperationStructureController({
+    applyRefusalStrategy: (task, candidateRank, parentRank, minChildRank, tasks) =>
+      this.applyRefusalStrategy(task, candidateRank, parentRank, minChildRank, tasks),
+    getActiveProject: () => this.getActiveProject(),
+    getTask: taskId => this.projectState.getTask(taskId),
+    layoutService: {
+      maxParentRank: (task, tasks) => this.layoutService.maxParentRank(task, tasks) ?? 0,
+      minChildRank: (taskId, tasks) => this.layoutService.minChildRank(taskId, tasks),
+      rebalance: project => this.layoutService.rebalance(project),
+      stageBase: stage => this.layoutService.stageBase(stage),
+    },
+    recordAndUpdate: mutator => this.recordAndUpdate(mutator),
+    recordAndUpdateDurably: mutator => this.recordAndUpdateDurably(mutator),
+    subtreeOps: this.subtreeOps,
+  });
 
-  
   // ========== 查询方法 ==========
-  
+
   /**
    * 检查指定阶段是否正在重平衡
    */
   isStageRebalancing(stage: number): boolean {
     return this.layoutService.isStageRebalancing(stage);
   }
-  
-  /**
-   * 获取任务的关联连接
-   */
-  getTaskConnections(project: Project | null, taskId: string): { 
-    outgoing: { targetId: string; targetTask: Task | undefined; description?: string }[];
-    incoming: { sourceId: string; sourceTask: Task | undefined; description?: string }[];
-  } {
-    if (!project) return { outgoing: [], incoming: [] };
-    
-    const tasks = project.tasks;
-    const connections = project.connections;
-    const taskMap = new Map(tasks.map(t => [t.id, t] as const));
 
-    // 排除父子关系的连接
-    const parentChildPairs = new Set<string>();
-    tasks.filter(t => t.parentId).forEach(t => {
-      parentChildPairs.add(`${t.parentId}->${t.id}`);
-    });
-
-    const outgoing = connections
-      .filter(c => c.source === taskId && !parentChildPairs.has(`${c.source}->${c.target}`))
-      .map(c => ({
-        targetId: c.target,
-        targetTask: taskMap.get(c.target),
-        description: c.description
-      }));
-
-    const incoming = connections
-      .filter(c => c.target === taskId && !parentChildPairs.has(`${c.source}->${c.target}`))
-      .map(c => ({
-        sourceId: c.source,
-        sourceTask: taskMap.get(c.source),
-        description: c.description
-      }));
-    
-    return { outgoing, incoming };
+  getTaskConnections(project: Project | null, taskId: string): TaskConnectionQueryResult {
+    return getTaskConnections(project, taskId);
   }
-  
-  // ========== 任务创建（委托给 TaskCreationService）==========
-  
-  /**
-   * 添加新任务
-   * @see TaskCreationService.addTask
-   */
-  addTask(params: CreateTaskParams): Result<string, OperationError> {
+
+  addTask(params: CreateTaskParams): Promise<Result<string, OperationError>> {
     return this.taskCreation.addTask(params);
   }
-  
-  /**
-   * 添加浮动任务（未分配阶段的任务）
-   * @see TaskCreationService.addFloatingTask
-   */
-  addFloatingTask(title: string, content: string, x: number, y: number): void {
-    this.taskCreation.addFloatingTask(title, content, x, y);
+
+  addTaskDurably(params: CreateTaskParams): Promise<Result<string, OperationError>> {
+    return this.taskCreation.addTaskDurably(params);
   }
-  
-  // ========== 任务内容更新 ==========
-  
-  // ========== 任务属性更新（委托给 TaskAttributeService）==========
-  
-  /**
-   * 更新任务内容
-   * @see TaskAttributeService.updateTaskContent
-   */
-  updateTaskContent(taskId: string, newContent: string): void {
-    this.taskAttr.updateTaskContent(taskId, newContent);
+
+  addFloatingTask(title: string, content: string, x: number, y: number): Promise<boolean> {
+    return this.taskCreation.addFloatingTask(title, content, x, y);
   }
-  
-  /**
-   * 更新任务标题
-   * @see TaskAttributeService.updateTaskTitle
-   */
-  updateTaskTitle(taskId: string, title: string): void {
-    this.taskAttr.updateTaskTitle(taskId, title);
+
+  addFloatingTaskDurably(title: string, content: string, x: number, y: number): Promise<boolean> {
+    return this.taskCreation.addFloatingTaskDurably(title, content, x, y);
   }
-  
-  /**
-   * 更新任务位置
-   * @see TaskAttributeService.updateTaskPosition
-   */
-  updateTaskPosition(taskId: string, x: number, y: number): void {
-    this.taskAttr.updateTaskPosition(taskId, x, y);
+
+  updateTaskContent(taskId: string, newContent: string): Promise<boolean> {
+    return this.taskAttr.updateTaskContent(taskId, newContent);
   }
-  
+
+  updateTaskContentDurably(taskId: string, newContent: string): Promise<boolean> {
+    return this.taskAttr.updateTaskContentDurably(taskId, newContent);
+  }
+
+  updateTaskTitle(taskId: string, title: string): Promise<boolean> {
+    return this.taskAttr.updateTaskTitle(taskId, title);
+  }
+
+  updateTaskTitleDurably(taskId: string, title: string): Promise<boolean> {
+    return this.taskAttr.updateTaskTitleDurably(taskId, title);
+  }
+
+  updateTaskDraft(
+    taskId: string,
+    draft: Partial<Pick<Task, 'title' | 'content'>>,
+  ): Promise<boolean> {
+    return this.taskAttr.updateTaskDraft(taskId, draft);
+  }
+
+  updateTaskDraftDurably(
+    taskId: string,
+    draft: Partial<Pick<Task, 'title' | 'content'>>,
+  ): Promise<boolean> {
+    return this.taskAttr.updateTaskDraftDurably(taskId, draft);
+  }
+
+  updateTaskPosition(taskId: string, x: number, y: number): Promise<boolean> {
+    return this.taskAttr.updateTaskPosition(taskId, x, y);
+  }
+
+  updateTaskPositionDurably(taskId: string, x: number, y: number): Promise<boolean> {
+    return this.taskAttr.updateTaskPositionDurably(taskId, x, y);
+  }
+
   /**
    * 更新任务位置并同步 Rank
    */
-  updateTaskPositionWithRankSync(taskId: string, x: number, y: number): void {
+  updateTaskPositionWithRankSync(taskId: string, x: number, y: number): Promise<boolean> {
+    return this.updateTaskPositionWithRankSyncDurably(taskId, x, y);
+  }
+
+  /**
+   * 更新任务位置并同步 Rank（本地 Outbox 持久化成功后再提交 UI）。
+   */
+  updateTaskPositionWithRankSyncDurably(taskId: string, x: number, y: number): Promise<boolean> {
     const project = this.getActiveProject();
-    if (!project) return;
-    
+    if (!project) return Promise.resolve(false);
+
     const task = this.projectState.getTask(taskId);
     if (!task || task.stage === null) {
-      this.updateTaskPosition(taskId, x, y);
-      return;
+      return this.updateTaskPositionDurably(taskId, x, y);
     }
-    
-    // 获取同一阶段的所有任务（排除自身）
+
+    const now = new Date().toISOString();
     const stageTasks = project.tasks
       .filter(t => t.stage === task.stage && t.id !== taskId && !t.deletedAt)
       .sort((a, b) => (a.y ?? 0) - (b.y ?? 0));
-    
-    // 根据新的 Y 坐标计算新的 rank
+
     let newRank: number;
     const RANK_STEP = LAYOUT_CONFIG.RANK_STEP;
-    
+
     if (stageTasks.length === 0) {
       newRank = task.rank;
     } else {
       const insertIndex = stageTasks.findIndex(t => (t.y ?? 0) > y);
-      
+
       if (insertIndex === -1) {
         const lastTask = stageTasks[stageTasks.length - 1];
         newRank = lastTask.rank + RANK_STEP;
@@ -206,166 +179,254 @@ export class TaskOperationService {
         const prevTask = stageTasks[insertIndex - 1];
         const nextTask = stageTasks[insertIndex];
         newRank = (prevTask.rank + nextTask.rank) / 2;
-        
+
         if (Math.abs(prevTask.rank - newRank) < 50) {
-          this.recordAndUpdate(p => this.layoutService.rebalance({
+          return this.recordAndUpdateDurably(p => this.layoutService.rebalance({
             ...p,
-            tasks: p.tasks.map(t => t.id === taskId ? { ...t, x, y, rank: newRank } : t)
-          }));
-          return;
+            tasks: p.tasks.map(t => t.id === taskId ? { ...t, x, y, rank: newRank, updatedAt: now } : t)
+          }), 'position');
         }
       }
     }
-    
-    this.updateActiveProjectRaw(p => ({
+
+    return this.recordAndUpdateDurably(p => ({
       ...p,
-      tasks: p.tasks.map(t => t.id === taskId ? { ...t, x, y, rank: newRank } : t)
-    }));
+      tasks: p.tasks.map(t => t.id === taskId ? { ...t, x, y, rank: newRank, updatedAt: now } : t)
+    }), 'position');
   }
-  
+
   /**
    * 更新任务状态
    * @see TaskAttributeService.updateTaskStatus
    */
-  updateTaskStatus(taskId: string, status: Task['status']): void {
-    this.taskAttr.updateTaskStatus(taskId, status);
+  updateTaskStatus(taskId: string, status: Task['status']): Promise<boolean> {
+    return this.taskAttr.updateTaskStatus(taskId, status);
   }
-  
-  // ========== 任务扩展属性（委托给 TaskAttributeService）==========
-  
-  /**
-   * 更新任务附件
-   * @see TaskAttributeService.updateTaskAttachments
-   */
-  updateTaskAttachments(taskId: string, attachments: Attachment[]): void {
-    this.taskAttr.updateTaskAttachments(taskId, attachments);
+
+  updateTaskStatusDurably(taskId: string, status: Task['status']): Promise<boolean> {
+    return this.taskAttr.updateTaskStatusDurably(taskId, status);
   }
-  
-  /**
-   * 添加单个附件
-   * @see TaskAttributeService.addTaskAttachment
-   */
-  addTaskAttachment(taskId: string, attachment: Attachment): void {
-    this.taskAttr.addTaskAttachment(taskId, attachment);
+
+  updateTaskParkingMetaDurably(taskId: string, parkingMeta: Task['parkingMeta'] | undefined): Promise<boolean> {
+    return this.taskAttr.updateTaskParkingMetaDurably(taskId, parkingMeta);
   }
-  
-  /**
-   * 移除单个附件
-   * @see TaskAttributeService.removeTaskAttachment
-   */
-  removeTaskAttachment(taskId: string, attachmentId: string): void {
-    this.taskAttr.removeTaskAttachment(taskId, attachmentId);
+
+  updateTaskParkingMetaBatchDurably(
+    updates: Array<{ taskId: string; parkingMeta: Task['parkingMeta'] | undefined }>,
+  ): Promise<boolean> {
+    return this.taskAttr.updateTaskParkingMetaBatchDurably(updates);
   }
-  
-  /**
-   * 更新任务优先级
-   * @see TaskAttributeService.updateTaskPriority
-   */
-  updateTaskPriority(taskId: string, priority: 'low' | 'medium' | 'high' | 'urgent' | undefined): void {
-    this.taskAttr.updateTaskPriority(taskId, priority);
+
+  updateTaskAttachments(taskId: string, attachments: Attachment[]): Promise<boolean> {
+    return this.taskAttr.updateTaskAttachments(taskId, attachments);
   }
-  
+
+  updateTaskAttachmentsDurably(taskId: string, attachments: Attachment[]): Promise<boolean> {
+    return this.taskAttr.updateTaskAttachmentsDurably(taskId, attachments);
+  }
+
+  addTaskAttachment(taskId: string, attachment: Attachment): Promise<boolean> {
+    return this.taskAttr.addTaskAttachment(taskId, attachment);
+  }
+
+  addTaskAttachmentDurably(taskId: string, attachment: Attachment): Promise<boolean> {
+    return this.taskAttr.addTaskAttachmentDurably(taskId, attachment);
+  }
+
+  removeTaskAttachment(taskId: string, attachmentId: string): Promise<boolean> {
+    return this.taskAttr.removeTaskAttachment(taskId, attachmentId);
+  }
+
+  removeTaskAttachmentDurably(taskId: string, attachmentId: string): Promise<boolean> {
+    return this.taskAttr.removeTaskAttachmentDurably(taskId, attachmentId);
+  }
+
+  updateTaskPriority(taskId: string, priority: 'low' | 'medium' | 'high' | 'urgent' | undefined): Promise<boolean> {
+    return this.taskAttr.updateTaskPriority(taskId, priority);
+  }
+
+  updateTaskPriorityDurably(
+    taskId: string,
+    priority: 'low' | 'medium' | 'high' | 'urgent' | undefined,
+  ): Promise<boolean> {
+    return this.taskAttr.updateTaskPriorityDurably(taskId, priority);
+  }
+
   /**
    * 更新任务截止日期
    * @see TaskAttributeService.updateTaskDueDate
    */
-  updateTaskDueDate(taskId: string, dueDate: string | null): void {
-    this.taskAttr.updateTaskDueDate(taskId, dueDate);
+  updateTaskDueDate(taskId: string, dueDate: string | null): Promise<boolean> {
+    return this.taskAttr.updateTaskDueDate(taskId, dueDate);
+  }
+
+  updateTaskDueDateDurably(taskId: string, dueDate: string | null): Promise<boolean> {
+    return this.taskAttr.updateTaskDueDateDurably(taskId, dueDate);
   }
 
   /**
    * 更新任务预计时长（分钟）
    * @see TaskAttributeService.updateTaskExpectedMinutes
    */
-  updateTaskExpectedMinutes(taskId: string, expectedMinutes: number | null): void {
-    this.taskAttr.updateTaskExpectedMinutes(taskId, expectedMinutes);
+  updateTaskExpectedMinutes(taskId: string, expectedMinutes: number | null): Promise<boolean> {
+    return this.taskAttr.updateTaskExpectedMinutes(taskId, expectedMinutes);
+  }
+
+  updateTaskExpectedMinutesDurably(taskId: string, expectedMinutes: number | null): Promise<boolean> {
+    return this.taskAttr.updateTaskExpectedMinutesDurably(taskId, expectedMinutes);
+  }
+
+  updateTaskPlannerFields(
+    taskId: string,
+    patch: {
+      expectedMinutes?: number | null;
+      waitMinutes?: number | null;
+      cognitiveLoad?: 'high' | 'low' | null;
+    },
+  ): Promise<boolean> {
+    return this.taskAttr.updateTaskPlannerFields(taskId, patch);
+  }
+
+  updateTaskPlannerFieldsDurably(
+    taskId: string,
+    patch: {
+      expectedMinutes?: number | null;
+      waitMinutes?: number | null;
+      cognitiveLoad?: 'high' | 'low' | null;
+    },
+  ): Promise<boolean> {
+    return this.taskAttr.updateTaskPlannerFieldsDurably(taskId, patch);
   }
 
   /**
    * 更新任务认知负荷
    * @see TaskAttributeService.updateTaskCognitiveLoad
    */
-  updateTaskCognitiveLoad(taskId: string, load: 'high' | 'low' | null): void {
-    this.taskAttr.updateTaskCognitiveLoad(taskId, load);
+  updateTaskCognitiveLoad(taskId: string, load: 'high' | 'low' | null): Promise<boolean> {
+    return this.taskAttr.updateTaskCognitiveLoad(taskId, load);
+  }
+
+  updateTaskCognitiveLoadDurably(taskId: string, load: 'high' | 'low' | null): Promise<boolean> {
+    return this.taskAttr.updateTaskCognitiveLoadDurably(taskId, load);
   }
 
   /**
    * 更新任务等待时长（分钟）
    * @see TaskAttributeService.updateTaskWaitMinutes
    */
-  updateTaskWaitMinutes(taskId: string, waitMinutes: number | null): void {
-    this.taskAttr.updateTaskWaitMinutes(taskId, waitMinutes);
+  updateTaskWaitMinutes(taskId: string, waitMinutes: number | null): Promise<boolean> {
+    return this.taskAttr.updateTaskWaitMinutes(taskId, waitMinutes);
   }
-  
+
+  updateTaskWaitMinutesDurably(taskId: string, waitMinutes: number | null): Promise<boolean> {
+    return this.taskAttr.updateTaskWaitMinutesDurably(taskId, waitMinutes);
+  }
+
   /**
    * 更新任务标签
    * @see TaskAttributeService.updateTaskTags
    */
-  updateTaskTags(taskId: string, tags: string[]): void {
-    this.taskAttr.updateTaskTags(taskId, tags);
+  updateTaskTags(taskId: string, tags: string[]): Promise<boolean> {
+    return this.taskAttr.updateTaskTags(taskId, tags);
   }
-  
+
+  updateTaskTagsDurably(taskId: string, tags: string[]): Promise<boolean> {
+    return this.taskAttr.updateTaskTagsDurably(taskId, tags);
+  }
+
+  updateTaskAttentionItems(taskId: string, items: TaskAttentionDraftItem[]): Promise<boolean> {
+    return this.taskAttr.updateTaskAttentionItems(taskId, items);
+  }
+
+  updateTaskAttentionItemsDurably(taskId: string, items: TaskAttentionDraftItem[]): Promise<boolean> {
+    return this.taskAttr.updateTaskAttentionItemsDurably(taskId, items);
+  }
+
   /**
    * 添加单个标签
    * @see TaskAttributeService.addTaskTag
    */
-  addTaskTag(taskId: string, tag: string): void {
-    this.taskAttr.addTaskTag(taskId, tag);
+  addTaskTag(taskId: string, tag: string): Promise<boolean> {
+    return this.taskAttr.addTaskTag(taskId, tag);
   }
-  
+
+  addTaskTagDurably(taskId: string, tag: string): Promise<boolean> {
+    return this.taskAttr.addTaskTagDurably(taskId, tag);
+  }
+
   /**
    * 移除单个标签
    * @see TaskAttributeService.removeTaskTag
    */
-  removeTaskTag(taskId: string, tag: string): void {
-    this.taskAttr.removeTaskTag(taskId, tag);
+  removeTaskTag(taskId: string, tag: string): Promise<boolean> {
+    return this.taskAttr.removeTaskTag(taskId, tag);
   }
-  
+
+  removeTaskTagDurably(taskId: string, tag: string): Promise<boolean> {
+    return this.taskAttr.removeTaskTagDurably(taskId, tag);
+  }
+
   // ========== 待办项操作（委托给 TaskAttributeService）==========
-  
+
   /**
    * 添加待办项
    * @see TaskAttributeService.addTodoItem
    */
-  addTodoItem(taskId: string, itemText: string): void {
-    this.taskAttr.addTodoItem(taskId, itemText);
+  addTodoItem(taskId: string, itemText: string): Promise<boolean> {
+    return this.taskAttr.addTodoItem(taskId, itemText);
   }
-  
+
+  addTodoItemDurably(taskId: string, itemText: string): Promise<boolean> {
+    return this.taskAttr.addTodoItemDurably(taskId, itemText);
+  }
+
   /**
    * 完成待办项
    * @see TaskAttributeService.completeUnfinishedItem
    */
-  completeUnfinishedItem(taskId: string, todoIndex: number): void {
-    this.taskAttr.completeUnfinishedItem(taskId, todoIndex);
+  completeUnfinishedItem(taskId: string, todoIndex: number): Promise<boolean> {
+    return this.taskAttr.completeUnfinishedItem(taskId, todoIndex);
   }
-  
+
+  completeUnfinishedItemDurably(taskId: string, todoIndex: number): Promise<boolean> {
+    return this.taskAttr.completeUnfinishedItemDurably(taskId, todoIndex);
+  }
+
   // ========== 任务删除与恢复（委托给 TaskTrashService） ==========
-  
+
   /**
    * 软删除任务（移动到回收站）
    * @see TaskTrashService.deleteTask
    */
-  deleteTask(taskId: string): void {
-    this.trashService.deleteTask(taskId);
+  deleteTask(taskId: string): Promise<DurableDeleteResult> {
+    return this.trashService.deleteTask(taskId);
   }
-  
+
+  deleteTaskDurably(taskId: string): Promise<DurableDeleteResult> {
+    return this.trashService.deleteTaskDurably(taskId);
+  }
+
   /**
    * 批量软删除任务（原子操作）
-   * 
+   *
    * 【核心算法】
    * 1. 级联收集：从显式选中的 ID 出发，收集所有后代任务 ID
    * 2. 去重：使用 Set 防止"选中父节点 + 选中子节点"导致的重复处理
    * 3. 一次性更新：合并为单个 Store 更新，避免同步风暴
-   * 
+   *
    * @param explicitIds 用户显式选中的任务 ID 列表
    * @returns 实际删除的任务数量（含级联子任务）
    * @see TaskTrashService.deleteTasksBatch
    */
-  deleteTasksBatch(explicitIds: string[]): number {
-    const result = this.trashService.deleteTasksBatch(explicitIds);
+  async deleteTasksBatch(explicitIds: string[]): Promise<number> {
+    const result = await this.trashService.deleteTasksBatch(explicitIds);
     return result.deletedTaskIds.size;
   }
-  
+
+  deleteTasksBatchDurably(explicitIds: string[]): Promise<DurableDeleteResult> {
+    return this.trashService.deleteTasksBatchDurably(explicitIds);
+  }
+
   /**
    * 计算批量删除将影响的任务数量（含级联子任务）
    * @see TaskTrashService.calculateBatchDeleteImpact
@@ -373,41 +434,58 @@ export class TaskOperationService {
   calculateBatchDeleteImpact(explicitIds: string[]): { total: number; explicit: number; cascaded: number } {
     return this.trashService.calculateBatchDeleteImpact(explicitIds);
   }
-  
+
   /**
    * 永久删除任务
    * @see TaskTrashService.permanentlyDeleteTask
    */
-  permanentlyDeleteTask(taskId: string): void {
-    this.trashService.permanentlyDeleteTask(taskId);
+  permanentlyDeleteTask(taskId: string): Promise<DurableDeleteResult> {
+    return this.trashService.permanentlyDeleteTask(taskId);
   }
-  
+
+  permanentlyDeleteTaskDurably(taskId: string): Promise<DurableDeleteResult> {
+    return this.trashService.permanentlyDeleteTaskDurably(taskId);
+  }
+
   /**
    * 从回收站恢复任务
    * @see TaskTrashService.restoreTask
    */
-  restoreTask(taskId: string): void {
-    this.trashService.restoreTask(taskId);
+  restoreTask(taskId: string): Promise<DurableRestoreResult> {
+    return this.trashService.restoreTask(taskId);
   }
-  
+
+  restoreTaskDurably(taskId: string): Promise<DurableRestoreResult> {
+    return this.trashService.restoreTaskDurably(taskId);
+  }
+
   /**
    * 清空回收站
    * @see TaskTrashService.emptyTrash
    */
-  emptyTrash(): void {
-    this.trashService.emptyTrash();
+  emptyTrash(): Promise<DurableDeleteResult> {
+    return this.trashService.emptyTrash();
   }
-  
+
+  emptyTrashDurably(): Promise<DurableDeleteResult> {
+    return this.trashService.emptyTrashDurably();
+  }
+
   /**
    * 清理超过保留期限的回收站项目
    * @see TaskTrashService.cleanupOldTrashItems
    */
-  cleanupOldTrashItems(): number {
+  cleanupOldTrashItems(): Promise<number> {
     return this.trashService.cleanupOldTrashItems();
   }
 
   /** 阶段 1 缺失时触发布局补偿，将最早的可见阶段恢复为根层。 */
-  repairMissingStageOne(): boolean {
+  repairMissingStageOne(): Promise<boolean> {
+    return this.repairMissingStageOneDurably();
+  }
+
+  /** 阶段 1 缺失时触发 durable-first 布局补偿。 */
+  async repairMissingStageOneDurably(): Promise<boolean> {
     const activeP = this.getActiveProject();
     if (!activeP) return false;
 
@@ -418,138 +496,112 @@ export class TaskOperationService {
       return false;
     }
 
-    this.recordAndUpdate(project => this.layoutService.rebalance(project));
-    return true;
+    return await this.recordAndUpdateDurably(project => this.layoutService.rebalance(project));
   }
-  
+
   // ========== 任务移动（委托给 TaskMoveService）==========
-  
+
   /**
    * 移动任务到指定阶段
    * @see TaskMoveService.moveTaskToStage
    */
-  moveTaskToStage(params: MoveTaskParams): Result<void, OperationError> {
+  moveTaskToStage(params: MoveTaskParams): Promise<Result<void, OperationError>> {
     return this.taskMove.moveTaskToStage(params);
   }
-  
+
+  moveTaskToStageDurably(params: MoveTaskParams): Promise<Result<void, OperationError>> {
+    return this.taskMove.moveTaskToStageDurably(params);
+  }
+
+  moveTaskToStageAtPosition(params: MoveTaskAtPositionParams): Promise<Result<void, OperationError>> {
+    return this.taskMove.moveTaskToStageAtPosition(params);
+  }
+
+  moveTaskToStageAtPositionDurably(params: MoveTaskAtPositionParams): Promise<Result<void, OperationError>> {
+    return this.taskMove.moveTaskToStageAtPositionDurably(params);
+  }
+
   /**
    * 将任务插入到两个已有节点之间
    */
-  insertTaskBetween(params: InsertBetweenParams): Result<void, OperationError> {
-    const { taskId, sourceId, targetId } = params;
-    
-    const activeP = this.getActiveProject();
-    if (!activeP) {
-      return failure(ErrorCodes.DATA_NOT_FOUND, '没有活动项目');
-    }
-
-    const sourceTask = this.projectState.getTask(sourceId);
-    const targetTask = this.projectState.getTask(targetId);
-    const insertTask = this.projectState.getTask(taskId);
-
-    if (!sourceTask || !targetTask || !insertTask) {
-      return failure(ErrorCodes.DATA_NOT_FOUND, '找不到相关任务');
-    }
-
-    if (targetTask.parentId !== sourceId) {
-      return failure(ErrorCodes.VALIDATION_ERROR, '目标任务不是源任务的直接子节点');
-    }
-
-    if (this.subtreeOps.wouldCreateCycle(taskId, sourceId, targetId, activeP.tasks)) {
-      return failure(ErrorCodes.LAYOUT_CYCLE_DETECTED, '操作会产生循环依赖');
-    }
-    
-    this.recordAndUpdate(p => {
-      const tasks = p.tasks.map(t => ({ ...t }));
-      const taskMap = new Map(tasks.map(t => [t.id, t] as const));
-
-      const source = taskMap.get(sourceId)!;
-      const target = taskMap.get(targetId)!;
-      const newTask = taskMap.get(taskId)!;
-
-      const targetSubtreeIds = this.subtreeOps.collectSubtreeIds(targetId, tasks);
-
-      const newTaskStage = (source.stage || 1) + 1;
-      newTask.parentId = sourceId;
-      newTask.stage = newTaskStage;
-
-      target.parentId = taskId;
-
-      targetSubtreeIds.forEach(id => {
-        const t = taskMap.get(id);
-        if (t && t.stage !== null) {
-          t.stage = t.stage + 1;
-        }
-      });
-      
-      const targetOriginalRank = target.rank;
-      newTask.rank = targetOriginalRank;
-      target.rank = newTask.rank + LAYOUT_CONFIG.RANK_STEP / 2;
-      
-      return this.layoutService.rebalance({ ...p, tasks });
-    });
-    
-    return success(undefined);
+  insertTaskBetween(params: InsertBetweenParams): Promise<Result<void, OperationError>> {
+    return this.structure.insertTaskBetween(params);
   }
-  
+
+  async insertTaskBetweenDurably(params: InsertBetweenParams): Promise<Result<void, OperationError>> {
+    return this.structure.insertTaskBetweenDurably(params);
+  }
+
+  insertTaskBetweenAtPosition(params: InsertBetweenAtPositionParams): Promise<Result<void, OperationError>> {
+    return this.structure.insertTaskBetweenAtPosition(params);
+  }
+
+  insertTaskBetweenAtPositionDurably(
+    params: InsertBetweenAtPositionParams,
+  ): Promise<Result<void, OperationError>> {
+    return this.structure.insertTaskBetweenAtPositionDurably(params);
+  }
+
   /**
    * 重新排序阶段内的任务
    */
-  reorderStage(stage: number, orderedIds: string[]): void {
-    this.recordAndUpdate(p => {
-      const tasks = p.tasks.map(t => ({ ...t }));
-      let cursorRank = tasks.filter(t => t.stage === stage).sort((a, b) => a.rank - b.rank)[0]?.rank 
-        ?? this.layoutService.stageBase(stage);
-      
-      orderedIds.forEach(id => {
-        const task = tasks.find(t => t.id === id && t.stage === stage);
-        if (!task) return;
-        
-        const parentRank = this.layoutService.maxParentRank(task, tasks);
-        const minChildRank = this.layoutService.minChildRank(task.id, tasks);
-        const candidate = cursorRank;
-        const placed = this.applyRefusalStrategy(task, candidate, parentRank, minChildRank, tasks);
-        if (!placed.ok) return;
-        task.rank = placed.rank;
-        cursorRank = placed.rank + LAYOUT_CONFIG.RANK_STEP;
-      });
-      
-      return this.layoutService.rebalance({ ...p, tasks });
-    });
+  reorderStage(stage: number, orderedIds: string[]): Promise<boolean> {
+    return this.structure.reorderStage(stage, orderedIds);
   }
-  
+
+  reorderStageDurably(stage: number, orderedIds: string[]): Promise<boolean> {
+    return this.structure.reorderStageDurably(stage, orderedIds);
+  }
+
   /**
    * 分离任务（从树中移除但保留子节点）
    * @see TaskMoveService.detachTask
    */
-  detachTask(taskId: string): void {
-    this.taskMove.detachTask(taskId);
+  detachTask(taskId: string): Promise<boolean> {
+    return this.taskMove.detachTaskDurably(taskId);
   }
-  
+
+  detachTaskDurably(taskId: string): Promise<boolean> {
+    return this.taskMove.detachTaskDurably(taskId);
+  }
+
   /**
    * 分离任务及其整个子树（移回待分配区）
    * @see TaskMoveService.moveTaskToStage (with newStage = null)
    */
-  detachTaskWithSubtree(taskId: string): Result<void, OperationError> {
+  detachTaskWithSubtree(taskId: string): Promise<Result<void, OperationError>> {
     return this.taskMove.moveTaskToStage({ taskId, newStage: null });
   }
-  
+
+  detachTaskWithSubtreeDurably(taskId: string): Promise<Result<void, OperationError>> {
+    return this.taskMove.moveTaskToStageDurably({ taskId, newStage: null });
+  }
+
   /**
    * 删除任务但保留子节点
    * @see TaskMoveService.deleteTaskKeepChildren
    */
-  deleteTaskKeepChildren(taskId: string): void {
-    this.taskMove.deleteTaskKeepChildren(taskId);
+  async deleteTaskKeepChildren(taskId: string): Promise<boolean> {
+    const result = await this.deleteTaskKeepChildrenDurably(taskId);
+    return result.saved;
   }
-  
+
+  deleteTaskKeepChildrenDurably(taskId: string): Promise<DurableDeleteResult> {
+    return this.trashService.deleteTaskDurably(taskId, true);
+  }
+
   // ========== 子树迁移操作 ==========
 
   /**
    * 将整个子任务树迁移到新的父任务下
    * @see TaskMoveService.moveSubtreeToNewParent
    */
-  moveSubtreeToNewParent(taskId: string, newParentId: string | null): Result<void, OperationError> {
+  moveSubtreeToNewParent(taskId: string, newParentId: string | null): Promise<Result<void, OperationError>> {
     return this.taskMove.moveSubtreeToNewParent(taskId, newParentId);
+  }
+
+  moveSubtreeToNewParentDurably(taskId: string, newParentId: string | null): Promise<Result<void, OperationError>> {
+    return this.taskMove.moveSubtreeToNewParentDurably(taskId, newParentId);
   }
 
 
@@ -559,10 +611,14 @@ export class TaskOperationService {
    * 添加跨树连接
    * @see TaskConnectionService.addCrossTreeConnection
    */
-  addCrossTreeConnection(sourceId: string, targetId: string): void {
-    this.taskConn.addCrossTreeConnection(sourceId, targetId);
+  addCrossTreeConnection(sourceId: string, targetId: string): Promise<boolean> {
+    return this.taskConn.addCrossTreeConnection(sourceId, targetId);
   }
-  
+
+  addCrossTreeConnectionDurably(sourceId: string, targetId: string): Promise<boolean> {
+    return this.taskConn.addCrossTreeConnectionDurably(sourceId, targetId);
+  }
+
   /**
    * 重连跨树连接（原子操作）
    * @see TaskConnectionService.relinkCrossTreeConnection
@@ -572,109 +628,73 @@ export class TaskOperationService {
     oldTargetId: string,
     newSourceId: string,
     newTargetId: string
-  ): void {
-    this.taskConn.relinkCrossTreeConnection(oldSourceId, oldTargetId, newSourceId, newTargetId);
+  ): Promise<boolean> {
+    return this.taskConn.relinkCrossTreeConnection(oldSourceId, oldTargetId, newSourceId, newTargetId);
   }
-  
+
+  relinkCrossTreeConnectionDurably(
+    oldSourceId: string,
+    oldTargetId: string,
+    newSourceId: string,
+    newTargetId: string
+  ): Promise<boolean> {
+    return this.taskConn.relinkCrossTreeConnectionDurably(oldSourceId, oldTargetId, newSourceId, newTargetId);
+  }
+
   /**
    * 移除连接（使用软删除策略）
    * @see TaskConnectionService.removeConnection
    */
-  removeConnection(sourceId: string, targetId: string): void {
-    this.taskConn.removeConnection(sourceId, targetId);
+  removeConnection(sourceId: string, targetId: string): Promise<boolean> {
+    return this.taskConn.removeConnection(sourceId, targetId);
   }
-  
+
+  removeConnectionDurably(sourceId: string, targetId: string): Promise<boolean> {
+    return this.taskConn.removeConnectionDurably(sourceId, targetId);
+  }
+
   /**
    * 更新连接内容（标题和描述）
    * @see TaskConnectionService.updateConnectionContent
    */
-  updateConnectionContent(sourceId: string, targetId: string, title: string, description: string): void {
-    this.taskConn.updateConnectionContent(sourceId, targetId, title, description);
+  updateConnectionContent(sourceId: string, targetId: string, title: string, description: string): Promise<boolean> {
+    return this.taskConn.updateConnectionContent(sourceId, targetId, title, description);
   }
-  
+
+  updateConnectionContentDurably(sourceId: string, targetId: string, title: string, description: string): Promise<boolean> {
+    return this.taskConn.updateConnectionContentDurably(sourceId, targetId, title, description);
+  }
+
   // ========== 私有辅助方法 ==========
-  
+
   private getActiveProject(): Project | null {
     return this.projectState.activeProject();
   }
-  
+
   private recordAndUpdate(mutator: (project: Project) => Project): void {
     this.recorder.recordAndUpdate(mutator);
   }
-  
-  private recordAndUpdateDebounced(mutator: (project: Project) => Project): void {
-    this.recorder.recordAndUpdateDebounced(mutator);
+
+  private recordAndUpdateDurably(
+    mutator: (project: Project) => Project,
+    updateType: 'content' | 'structure' | 'position' = 'structure',
+  ): Promise<boolean> {
+    return this.recorder.recordAndUpdateDurably(mutator, { updateType });
   }
-  
-  /**
-   * 【P2-40 修复】更正注释：此方法实际上会记录撤销历史
-   * 与 recordAndUpdateDebounced 的区别在于无防抖（立即执行）
-   */
-  private updateActiveProjectRaw(mutator: (project: Project) => Project): void {
-    this.recorder.recordAndUpdate(mutator);
-  }
-  
-  /**
-   * 计算插入位置的 rank 值
-   */
-  private computeInsertRank(stage: number, siblings: Task[], beforeId?: string | null, parentRank?: number | null): number {
-    const result = this.layoutService.computeInsertRank(stage, siblings, beforeId, parentRank);
-    if (result.needsRebalance) {
-      this.markStageForRebalance(stage);
-    }
-    return result.rank;
-  }
-  
-  /**
-   * 标记某阶段需要重平衡
-   */
-  private markStageForRebalance(stage: number): void {
-    this.stagesNeedingRebalance.add(stage);
-    if (this.rebalanceTimer) {
-      clearTimeout(this.rebalanceTimer);
-    }
-    this.rebalanceTimer = setTimeout(() => {
-      this.performStageRebalance();
-      this.rebalanceTimer = null;
-    }, 100);
-  }
-  
-  /**
-   * 执行阶段内的 rank 重平衡
-   */
-  private performStageRebalance(): void {
-    const activeP = this.getActiveProject();
-    if (!activeP || this.stagesNeedingRebalance.size === 0) return;
-    
-    const stages = Array.from(this.stagesNeedingRebalance);
-    this.stagesNeedingRebalance.clear();
-    
-    stages.forEach(s => this.layoutService.markStageRebalancing(s));
-    
-    try {
-      const rebalancedTasks = this.layoutService.rebalanceStageRanks(activeP.tasks, stages);
-      
-      if (rebalancedTasks !== activeP.tasks) {
-        this.recordAndUpdate(p => this.layoutService.rebalance({ ...p, tasks: rebalancedTasks }));
-      }
-    } finally {
-      stages.forEach(s => this.layoutService.clearStageRebalancing(s));
-    }
-  }
-  
+
   /**
    * 应用拒绝策略
    */
   private applyRefusalStrategy(
-    target: Task, 
-    candidateRank: number, 
-    parentRank: number | null, 
+    target: Task,
+    candidateRank: number,
+    parentRank: number | null,
     minChildRank: number,
     _allTasks: Task[]
   ): { ok: boolean; rank: number } {
     return this.layoutService.applyRefusalStrategy(target, candidateRank, parentRank, minChildRank);
   }
-  
+
 
   // ========== 子树替换操作（流程图逻辑链条功能） ==========
 
@@ -686,8 +706,16 @@ export class TaskOperationService {
     sourceTaskId: string,
     targetUnassignedId: string,
     specificChildId?: string
-  ): Result<{ detachedSubtreeRootId: string | null }, OperationError> {
+  ): Promise<Result<{ detachedSubtreeRootId: string | null }, OperationError>> {
     return this.taskMove.replaceChildSubtreeWithUnassigned(sourceTaskId, targetUnassignedId, specificChildId);
+  }
+
+  replaceChildSubtreeWithUnassignedDurably(
+    sourceTaskId: string,
+    targetUnassignedId: string,
+    specificChildId?: string
+  ): Promise<Result<{ detachedSubtreeRootId: string | null }, OperationError>> {
+    return this.taskMove.replaceChildSubtreeWithUnassignedDurably(sourceTaskId, targetUnassignedId, specificChildId);
   }
 
   /**
@@ -697,8 +725,15 @@ export class TaskOperationService {
   assignUnassignedToTask(
     sourceTaskId: string,
     targetUnassignedId: string
-  ): Result<void, OperationError> {
+  ): Promise<Result<void, OperationError>> {
     return this.taskMove.assignUnassignedToTask(sourceTaskId, targetUnassignedId);
+  }
+
+  assignUnassignedToTaskDurably(
+    sourceTaskId: string,
+    targetUnassignedId: string
+  ): Promise<Result<void, OperationError>> {
+    return this.taskMove.assignUnassignedToTaskDurably(sourceTaskId, targetUnassignedId);
   }
 
   /**

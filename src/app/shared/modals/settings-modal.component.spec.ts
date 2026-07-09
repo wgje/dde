@@ -17,6 +17,8 @@ import { FocusPreferenceService } from '../../../services/focus-preference.servi
 import { GateService } from '../../../services/gate.service';
 import { ExternalSourceCacheService } from '../../core/external-sources/external-source-cache.service';
 import { SiyuanPreviewService } from '../../core/external-sources/siyuan/siyuan-preview.service';
+import type { Project, Task } from '../../../models';
+import type { AttachmentImportItem } from '../../../services/attachment-import.service';
 
 describe('SettingsModalComponent', () => {
   let fixture: ComponentFixture<SettingsModalComponent>;
@@ -95,10 +97,12 @@ describe('SettingsModalComponent', () => {
 
   const mockDockEngine = {
     dailySlots,
-    addDailySlot: vi.fn(),
-    completeDailySlot: vi.fn(),
-    setDailySlotEnabled: vi.fn(),
-    removeDailySlot: vi.fn(),
+    dailySlotService: {
+      addDailySlot: vi.fn(),
+      completeDailySlot: vi.fn(),
+      setDailySlotEnabled: vi.fn(),
+      removeDailySlot: vi.fn(),
+    },
   };
 
   const mockLocalBackupService = {
@@ -199,6 +203,10 @@ describe('SettingsModalComponent', () => {
       restReminderHighLoadMinutes: 90,
       restReminderLowLoadMinutes: 30,
     });
+    mockDockEngine.dailySlotService.addDailySlot.mockReturnValue('slot-new');
+    mockDockEngine.dailySlotService.completeDailySlot.mockResolvedValue(true);
+    mockDockEngine.dailySlotService.setDailySlotEnabled.mockResolvedValue(true);
+    mockDockEngine.dailySlotService.removeDailySlot.mockResolvedValue(true);
 
     await TestBed.configureTestingModule({
       imports: [SettingsModalComponent],
@@ -229,6 +237,12 @@ describe('SettingsModalComponent', () => {
     expect(fixture.nativeElement.textContent).not.toContain('定期备份提醒');
   });
 
+  it('should render the appearance subcomponent with theme and color mode controls', () => {
+    expect(fixture.nativeElement.textContent).toContain('外观风格');
+    expect(fixture.nativeElement.textContent).toContain('颜色模式');
+    expect(fixture.nativeElement.textContent).toContain('薰衣草');
+  });
+
   it('should emit themeChange when a theme tile is selected', () => {
     const themeSpy = vi.fn();
     component.themeChange.subscribe(themeSpy);
@@ -247,6 +261,32 @@ describe('SettingsModalComponent', () => {
 
   it('should expose a stable settings modal test id', () => {
     expect(fixture.nativeElement.querySelector('[data-testid="settings-modal"]')).toBeTruthy();
+  });
+
+  it('should render pending local restore state in the backup preview', () => {
+    mockLocalBackupService.isAvailable.set(true);
+    mockLocalBackupService.hasSavedHandle.set(true);
+    mockLocalBackupService.directoryName.set('NanoFlow Backups');
+    component.localBackupUI.restoreStep.set('preview');
+    component.localBackupUI.restorePreview.set({
+      projects: 1,
+      tasks: 2,
+      connections: 1,
+      attachmentUploads: 1,
+      actionQueue: 2,
+      retryQueue: 3,
+      deadLetters: 1,
+      conflicts: 1,
+    });
+    fixture.detectChanges();
+
+    const text = fixture.nativeElement.textContent as string;
+    expect(text).toContain('本机待恢复状态');
+    expect(text).toContain('附件上传 1');
+    expect(text).toContain('待同步 2');
+    expect(text).toContain('待重试 3');
+    expect(text).toContain('失败记录 1');
+    expect(text).toContain('冲突副本 1');
   });
 
   it('should keep the black box toggle visible and functional', () => {
@@ -278,6 +318,45 @@ describe('SettingsModalComponent', () => {
 
     expect(mockFocusPreferenceService.setRestReminderHighLoadMinutes).toHaveBeenCalledWith(120);
     expect(mockFocusPreferenceService.setRestReminderLowLoadMinutes).toHaveBeenCalledWith(15);
+  });
+
+  it('should return routine slot persistence promises from settings controls', async () => {
+    let resolveComplete!: (saved: boolean) => void;
+    mockDockEngine.dailySlotService.completeDailySlot.mockReturnValueOnce(new Promise<boolean>(resolve => {
+      resolveComplete = resolve;
+    }));
+
+    const completion = component.completeRoutineSlot('slot-1') as unknown as Promise<void>;
+    let completed = false;
+    completion.then(() => {
+      completed = true;
+    });
+
+    expect(mockDockEngine.dailySlotService.completeDailySlot).toHaveBeenCalledWith('slot-1');
+    expect(typeof completion?.then).toBe('function');
+    await Promise.resolve();
+    expect(completed).toBe(false);
+
+    resolveComplete(true);
+    await completion;
+    expect(completed).toBe(true);
+
+    await component.toggleRoutineSlot('slot-1', false);
+    await component.removeRoutineSlot('slot-1');
+    expect(mockDockEngine.dailySlotService.setDailySlotEnabled).toHaveBeenCalledWith('slot-1', false);
+    expect(mockDockEngine.dailySlotService.removeDailySlot).toHaveBeenCalledWith('slot-1');
+  });
+
+  it('should keep routine slot form values when add persistence fails', async () => {
+    mockDockEngine.dailySlotService.addDailySlot.mockResolvedValueOnce('');
+    component.newRoutineTitle = '喝水';
+    component.newRoutineMaxCount = 2;
+
+    await component.addRoutineSlot();
+
+    expect(mockDockEngine.dailySlotService.addDailySlot).toHaveBeenCalledWith('喝水', 2);
+    expect(component.newRoutineTitle).toBe('喝水');
+    expect(component.newRoutineMaxCount).toBe(2);
   });
 
   it('should render SiYuan Knowledge Anchor local-only settings', () => {
@@ -431,6 +510,36 @@ describe('SettingsModalComponent', () => {
     expect(saveBtn!.disabled).toBe(false);
   });
 
+  it('should group attachment ZIP imports by project and summarize unmatched and failed items', async () => {
+    const alertSpy = vi.spyOn(globalThis, 'alert').mockImplementation(() => undefined);
+    const itemA = createAttachmentImportItem('task-a', 'task-a-file.txt');
+    const itemB = createAttachmentImportItem('task-b', 'task-b-file.txt');
+    const unmatchedItem = createAttachmentImportItem('missing-task', 'missing-file.txt');
+    component.projects = signal([
+      createProject('project-a', [createTask('task-a')]),
+      createProject('project-b', [createTask('task-b')]),
+    ]) as unknown as typeof component.projects;
+    mockAttachmentImportService.extractAttachmentsFromZip.mockResolvedValueOnce([itemA, itemB, unmatchedItem]);
+    mockAttachmentImportService.importAttachments
+      .mockResolvedValueOnce({ success: true, imported: 1, failed: 0, skipped: 0, errors: [] })
+      .mockResolvedValueOnce({
+        success: false,
+        imported: 0,
+        failed: 1,
+        skipped: 2,
+        errors: [{ taskId: 'task-b', attachmentName: 'task-b-file.txt', error: 'upload failed' }],
+      });
+
+    await component.handleAttachmentImportFileSelected(createFileInputEvent('attachments.zip'));
+
+    expect(mockAttachmentImportService.importAttachments).toHaveBeenNthCalledWith(1, 'project-a', [itemA]);
+    expect(mockAttachmentImportService.importAttachments).toHaveBeenNthCalledWith(2, 'project-b', [itemB]);
+    expect(alertSpy).toHaveBeenCalledWith(
+      '附件导入部分失败。\n成功: 1\n失败: 1\n跳过: 3\n首个错误: task-b-file.txt: upload failed',
+    );
+    expect(mockLogger.warn).toHaveBeenCalledWith('SettingsModal', '部分附件未匹配到项目，已跳过: 1');
+  });
+
   function findButtonByText(text: string): HTMLButtonElement {
     const buttons = Array.from(fixture.nativeElement.querySelectorAll('button')) as HTMLButtonElement[];
     const button = buttons.find(candidate => candidate.textContent?.includes(text));
@@ -438,5 +547,58 @@ describe('SettingsModalComponent', () => {
       throw new Error(`Button not found: ${text}`);
     }
     return button;
+  }
+
+  function createProject(id: string, tasks: Task[]): Project {
+    return {
+      id,
+      name: id,
+      description: '',
+      createdDate: '2026-01-01T00:00:00.000Z',
+      tasks,
+      connections: [],
+    };
+  }
+
+  function createTask(id: string): Task {
+    return {
+      id,
+      title: id,
+      content: '',
+      stage: null,
+      parentId: null,
+      order: 0,
+      rank: 0,
+      status: 'active',
+      x: 0,
+      y: 0,
+      createdDate: '2026-01-01T00:00:00.000Z',
+      displayId: id,
+    };
+  }
+
+  function createAttachmentImportItem(taskId: string, name: string): AttachmentImportItem {
+    return {
+      taskId,
+      metadata: {
+        id: `${taskId}-attachment`,
+        name,
+        size: 12,
+        mimeType: 'text/plain',
+      },
+      data: new Blob(['attachment'], { type: 'text/plain' }),
+    };
+  }
+
+  function createFileInputEvent(filename: string): Event {
+    return {
+      target: {
+        files: [{
+          name: filename,
+          arrayBuffer: vi.fn().mockResolvedValue(new ArrayBuffer(8)),
+        }],
+        value: filename,
+      },
+    } as unknown as Event;
   }
 });

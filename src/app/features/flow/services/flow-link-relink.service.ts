@@ -1,9 +1,13 @@
-import { Injectable, inject } from '@angular/core';
+import { Injectable, Injector, inject } from '@angular/core';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
 import { LoggerService } from '../../../../services/logger.service';
 import { ToastService } from '../../../../services/toast.service';
 import { Task } from '../../../../models';
+
+type ParentChildRelinkResult = 'success' | 'cancelled' | 'error';
+type ParentChildRelinkToEndResult = ParentChildRelinkResult | 'replace-subtree';
+type TaskToUnassignedLinkResult = 'replace-subtree' | 'create-parent-child' | 'none';
 
 /**
  * FlowLinkRelinkService - 连接线重连/子树迁移服务
@@ -20,11 +24,15 @@ import { Task } from '../../../../models';
   providedIn: 'root'
 })
 export class FlowLinkRelinkService {
+  private readonly injector = inject(Injector);
   private readonly projectState = inject(ProjectStateService);
-  private readonly taskOps = inject(TaskOperationAdapterService);
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('FlowLinkRelink');
   private readonly toast = inject(ToastService);
+
+  private get taskOps(): TaskOperationAdapterService {
+    return this.injector.get(TaskOperationAdapterService);
+  }
 
   private guardHintOnlyLinkMutation(actionLabel: string): boolean {
     if (!this.taskOps.isHintOnlyStartupReadOnly()) {
@@ -58,13 +66,13 @@ export class FlowLinkRelinkService {
    * @param specificChildId 要被替换的特定子任务 ID（仅在 replaceMode=true 时使用）
    * @returns 操作结果
    */
-  handleTaskToUnassignedLink(
+  async handleTaskToUnassignedLink(
     sourceId: string,
     targetId: string,
     targetTask: Task,
     replaceMode: boolean = false,
     specificChildId?: string
-  ): 'replace-subtree' | 'create-parent-child' | 'none' {
+  ): Promise<TaskToUnassignedLinkResult> {
     // 检查源任务是否已有子任务
     const existingChildren = this.taskOps.getDirectChildren(sourceId);
 
@@ -81,7 +89,7 @@ export class FlowLinkRelinkService {
         targetHasParent: !!targetTask.parentId
       });
 
-      const result = this.taskOps.replaceChildSubtreeWithUnassigned(sourceId, targetId, specificChildId);
+      const result = await this.taskOps.replaceChildSubtreeWithUnassigned(sourceId, targetId, specificChildId);
 
       if (result.ok) {
         // Toast 由 TaskOperationAdapterService 显示，这里不重复
@@ -100,7 +108,7 @@ export class FlowLinkRelinkService {
         replaceMode
       });
 
-      const result = this.taskOps.assignUnassignedToTask(sourceId, targetId);
+      const result = await this.taskOps.assignUnassignedToTask(sourceId, targetId);
 
       if (result.ok) {
         // Toast 由 TaskOperationAdapterService 显示，这里不重复
@@ -123,22 +131,17 @@ export class FlowLinkRelinkService {
    * @param newParentId 新父任务 ID（连接线的新源端）
    * @returns 操作结果：'success' | 'cancelled' | 'error'
    */
-  handleParentChildRelink(
+  async handleParentChildRelink(
     childTaskId: string,
     oldParentId: string,
     newParentId: string
-  ): 'success' | 'cancelled' | 'error' {
-    // 防止自连接
-    if (childTaskId === newParentId) {
-      this.toast.warning('无法连接', '节点不能连接到自身');
-      return 'error';
-    }
-
-    // 如果新旧父节点相同，无需操作
-    if (oldParentId === newParentId) {
-      this.logger.debug('父节点未变化，跳过迁移');
+  ): Promise<ParentChildRelinkResult> {
+    if (this.guardHintOnlyLinkMutation('迁移任务')) {
       return 'cancelled';
     }
+
+    const endpointResult = this.guardParentChildRelinkEndpoints(childTaskId, oldParentId, newParentId);
+    if (endpointResult) return endpointResult;
 
     const tasks = this.projectState.tasks();
     const childTask = this.projectState.getTask(childTaskId);
@@ -154,24 +157,55 @@ export class FlowLinkRelinkService {
       return 'error';
     }
 
-    // 🔴 严格规则：禁止待分配块成为已分配任务的父节点
     if (newParentTask.stage === null && childTask.stage !== null) {
       this.toast.warning('无法连接', '待分配块无法成为任务块的父节点');
       return 'error';
     }
 
-    // 待分配 → 待分配：仅调整层级，不进入阶段分配
     if (newParentTask.stage === null && childTask.stage === null) {
-      const moveResult = this.taskOps.moveTaskToStage(childTaskId, null, undefined, newParentId);
-      if (!moveResult.ok) {
-        this.toast.error('迁移失败', moveResult.error?.message || '未知错误');
-        return 'error';
-      }
-      this.toast.success('已建立待分配层级', `已将 "${childTask.title}" 挂载到新的待分配父节点`);
-      return 'success';
+      return this.moveUnassignedChildToParent(childTask, newParentTask);
     }
 
-    // 收集子树信息用于提示
+    return this.moveAssignedSubtreeToParent(childTaskId, oldParentId, newParentId, childTask, newParentTask, tasks);
+  }
+
+  private guardParentChildRelinkEndpoints(
+    childTaskId: string,
+    oldParentId: string,
+    newParentId: string
+  ): 'cancelled' | 'error' | null {
+    if (childTaskId === newParentId) {
+      this.toast.warning('无法连接', '节点不能连接到自身');
+      return 'error';
+    }
+
+    if (oldParentId === newParentId) {
+      this.logger.debug('父节点未变化，跳过迁移');
+      return 'cancelled';
+    }
+
+    return null;
+  }
+
+  private async moveUnassignedChildToParent(childTask: Task, newParentTask: Task): Promise<ParentChildRelinkResult> {
+    const moveResult = await this.taskOps.moveTaskToStage(childTask.id, null, undefined, newParentTask.id);
+    if (!moveResult.ok) {
+      this.toast.error('迁移失败', moveResult.error?.message || '未知错误');
+      return 'error';
+    }
+
+    this.toast.success('已建立待分配层级', `已将 "${childTask.title}" 挂载到新的待分配父节点`);
+    return 'success';
+  }
+
+  private async moveAssignedSubtreeToParent(
+    childTaskId: string,
+    oldParentId: string,
+    newParentId: string,
+    childTask: Task,
+    newParentTask: Task,
+    tasks: Task[]
+  ): Promise<ParentChildRelinkResult> {
     const subtreeIds = this.collectSubtreeIds(childTaskId, tasks);
     const subtreeCount = subtreeIds.size;
 
@@ -184,27 +218,27 @@ export class FlowLinkRelinkService {
       subtreeCount
     });
 
-    // 执行迁移
-    const result = this.taskOps.moveSubtreeToNewParent(childTaskId, newParentId);
-
-    if (result.ok) {
-      if (subtreeCount > 1) {
-        this.toast.success(
-          '子树迁移成功',
-          `已将 "${childTask.title}" 及其 ${subtreeCount - 1} 个子任务移动到 "${newParentTask.title}" 下`
-        );
-      } else {
-        this.toast.success(
-          '任务迁移成功',
-          `已将 "${childTask.title}" 移动到 "${newParentTask.title}" 下`
-        );
-      }
-      return 'success';
-    } else {
+    const result = await this.taskOps.moveSubtreeToNewParent(childTaskId, newParentId);
+    if (!result.ok) {
       const errorMessage = result.error?.message || '未知错误';
       this.toast.error('迁移失败', errorMessage);
       return 'error';
     }
+
+    this.showSubtreeMoveSuccess(childTask, newParentTask, subtreeCount);
+    return 'success';
+  }
+
+  private showSubtreeMoveSuccess(childTask: Task, newParentTask: Task, subtreeCount: number): void {
+    if (subtreeCount > 1) {
+      this.toast.success(
+        '子树迁移成功',
+        `已将 "${childTask.title}" 及其 ${subtreeCount - 1} 个子任务移动到 "${newParentTask.title}" 下`
+      );
+      return;
+    }
+
+    this.toast.success('任务迁移成功', `已将 "${childTask.title}" 移动到 "${newParentTask.title}" 下`);
   }
 
   /**
@@ -221,24 +255,18 @@ export class FlowLinkRelinkService {
    * @param newTargetId 新目标节点 ID（连接线被拖到的节点）
    * @returns 操作结果
    */
-  handleParentChildRelinkToEnd(
+  async handleParentChildRelinkToEnd(
     parentId: string,
     oldChildId: string,
     newTargetId: string
-  ): 'success' | 'cancelled' | 'error' | 'replace-subtree' {
-    // 防止自连接
-    if (parentId === newTargetId) {
-      this.toast.warning('无法连接', '节点不能连接到自身');
-      return 'error';
-    }
-
-    // 如果目标相同，无需操作
-    if (oldChildId === newTargetId) {
-      this.logger.debug('目标节点未变化，跳过操作');
+  ): Promise<ParentChildRelinkToEndResult> {
+    if (this.guardHintOnlyLinkMutation('替换子任务')) {
       return 'cancelled';
     }
 
-    const _tasks = this.projectState.tasks();
+    const endpointResult = this.guardParentChildRelinkToEndEndpoints(parentId, oldChildId, newTargetId);
+    if (endpointResult) return endpointResult;
+
     const parentTask = this.projectState.getTask(parentId);
     const oldChildTask = this.projectState.getTask(oldChildId);
     const newTargetTask = this.projectState.getTask(newTargetId);
@@ -262,55 +290,77 @@ export class FlowLinkRelinkService {
       newTargetStage: newTargetTask.stage
     });
 
-    // ========== 场景1：目标是待分配块 ==========
-    // 这是核心功能：将待分配块及其子树分配给父任务
-    // 只替换 oldChildId 对应的子任务（剥离为待分配块），其他子任务保持不变
     if (newTargetTask.stage === null && parentTask.stage !== null) {
-      this.logger.info('场景1：父子连接下游端点拖到待分配块（替换模式，只替换特定子任务）', {
-        parentId,
-        parentTitle: parentTask.title,
-        oldChildId,
-        newTargetId,
-        newTargetTitle: newTargetTask.title
-      });
-
-      // 使用 replaceMode = true，并传递 oldChildId 作为要被替换的特定子任务
-      const linkResult = this.handleTaskToUnassignedLink(parentId, newTargetId, newTargetTask, true, oldChildId);
-      // 转换返回类型
-      if (linkResult === 'replace-subtree') return 'replace-subtree';
-      if (linkResult === 'create-parent-child') return 'success';
-      return 'error';
+      return this.replaceRelinkTargetWithUnassigned(parentTask, oldChildId, newTargetTask);
     }
 
-    // ========== 场景2：目标是已分配任务块 ==========
-    // 已分配任务已经有自己的父节点（或是根任务），不能再建立父子关系
     if (newTargetTask.stage !== null) {
-      // 检查目标任务是否已有父节点
-      if (newTargetTask.parentId) {
-        this.toast.warning('无法连接', '目标任务已有父节点，无法建立新的父子关系');
-        return 'error';
-      }
-
-      // 目标是根任务（没有父节点）
-      // 这种情况可以考虑将目标任务移动到父任务下，但这是一个复杂操作
-      // 暂时不支持，提示用户使用其他方式
-      this.toast.warning('无法连接', '无法将已分配的根任务设为子任务，请使用拖拽节点的方式');
-      return 'error';
+      return this.rejectAssignedRelinkTarget(newTargetTask);
     }
 
-    // ========== 场景3：父任务是待分配块 ==========
-    // 待分配块之间可以建立父子关系
     if (parentTask.stage === null && newTargetTask.stage === null) {
-      const result = this.taskOps.moveTaskToStage(newTargetId, null, undefined, parentId);
-      if (!result.ok) {
-        this.toast.error('连接失败', result.error?.message || '未知错误');
-        return 'error';
-      }
-      this.toast.success('已建立待分配层级', '待分配块已挂载到新的父节点');
-      return 'success';
+      return this.linkUnassignedRelinkTarget(parentTask, newTargetTask);
     }
 
     return 'error';
+  }
+
+  private guardParentChildRelinkToEndEndpoints(
+    parentId: string,
+    oldChildId: string,
+    newTargetId: string
+  ): 'cancelled' | 'error' | null {
+    if (parentId === newTargetId) {
+      this.toast.warning('无法连接', '节点不能连接到自身');
+      return 'error';
+    }
+
+    if (oldChildId === newTargetId) {
+      this.logger.debug('目标节点未变化，跳过操作');
+      return 'cancelled';
+    }
+
+    return null;
+  }
+
+  private async replaceRelinkTargetWithUnassigned(
+    parentTask: Task,
+    oldChildId: string,
+    newTargetTask: Task
+  ): Promise<ParentChildRelinkToEndResult> {
+    this.logger.info('场景1：父子连接下游端点拖到待分配块（替换模式，只替换特定子任务）', {
+      parentId: parentTask.id,
+      parentTitle: parentTask.title,
+      oldChildId,
+      newTargetId: newTargetTask.id,
+      newTargetTitle: newTargetTask.title
+    });
+
+    const linkResult = await this.handleTaskToUnassignedLink(parentTask.id, newTargetTask.id, newTargetTask, true, oldChildId);
+    if (linkResult === 'replace-subtree') return 'replace-subtree';
+    if (linkResult === 'create-parent-child') return 'success';
+    return 'error';
+  }
+
+  private rejectAssignedRelinkTarget(newTargetTask: Task): ParentChildRelinkResult {
+    if (newTargetTask.parentId) {
+      this.toast.warning('无法连接', '目标任务已有父节点，无法建立新的父子关系');
+      return 'error';
+    }
+
+    this.toast.warning('无法连接', '无法将已分配的根任务设为子任务，请使用拖拽节点的方式');
+    return 'error';
+  }
+
+  private async linkUnassignedRelinkTarget(parentTask: Task, newTargetTask: Task): Promise<ParentChildRelinkResult> {
+    const result = await this.taskOps.moveTaskToStage(newTargetTask.id, null, undefined, parentTask.id);
+    if (!result.ok) {
+      this.toast.error('连接失败', result.error?.message || '未知错误');
+      return 'error';
+    }
+
+    this.toast.success('已建立待分配层级', '待分配块已挂载到新的父节点');
+    return 'success';
   }
 
   /**
@@ -324,53 +374,28 @@ export class FlowLinkRelinkService {
    * @param changedEnd 'from' | 'to' 哪一端被改变了
    * @returns 操作结果：'success' | 'cancelled' | 'error'
    */
-  handleCrossTreeRelink(
+  async handleCrossTreeRelink(
     oldSourceId: string,
     oldTargetId: string,
     newSourceId: string,
     newTargetId: string,
     changedEnd: 'from' | 'to'
-  ): 'success' | 'cancelled' | 'error' {
+  ): Promise<ParentChildRelinkResult> {
     if (this.guardHintOnlyLinkMutation('重连关联')) {
       return 'cancelled';
     }
 
-    // 防止自连接
-    if (newSourceId === newTargetId) {
-      this.toast.warning('无法连接', '节点不能连接到自身');
-      return 'error';
-    }
-
-    // 如果起点终点都没变，无需操作
-    if (oldSourceId === newSourceId && oldTargetId === newTargetId) {
-      this.logger.debug('跨树连接未变化，跳过');
-      return 'cancelled';
-    }
-
-    const _tasks = this.projectState.tasks();
-    const sourceTask = this.projectState.getTask(newSourceId);
-    const targetTask = this.projectState.getTask(newTargetId);
-
-    if (!sourceTask) {
-      this.toast.error('重连失败', '找不到起点任务');
-      return 'error';
-    }
-
-    if (!targetTask) {
-      this.toast.error('重连失败', '找不到终点任务');
-      return 'error';
-    }
-
-    // 检查是否已存在相同的跨树连接（排除已软删除的）
-    const project = this.projectState.activeProject();
-    const existingConnection = project?.connections?.find(
-      c => c.source === newSourceId && c.target === newTargetId && !c.deletedAt
+    const context = this.prepareCrossTreeRelink(
+      oldSourceId,
+      oldTargetId,
+      newSourceId,
+      newTargetId
     );
+    if (context.result) return context.result;
 
-    if (existingConnection) {
-      this.toast.warning('连接已存在', `"${sourceTask.title}" 到 "${targetTask.title}" 的关联已存在`);
-      return 'cancelled';
-    }
+    const { sourceTask, targetTask } = context;
+    const duplicateResult = this.cancelDuplicateCrossTreeRelink(sourceTask, targetTask);
+    if (duplicateResult) return duplicateResult;
 
     this.logger.info('执行跨树连接重连', {
       oldSourceId,
@@ -382,16 +407,92 @@ export class FlowLinkRelinkService {
       targetTitle: targetTask.title
     });
 
-    // 使用原子操作：在一个撤销单元内删除旧连接并创建新连接
-    this.taskOps.connectionAdapter.relinkCrossTreeConnection(oldSourceId, oldTargetId, newSourceId, newTargetId);
+    const saved = await this.taskOps.connectionAdapter.relinkCrossTreeConnection(oldSourceId, oldTargetId, newSourceId, newTargetId);
+    if (!saved) {
+      this.toast.error('重连失败', '关联变更未能写入本地队列');
+      return 'error';
+    }
 
-    const changedEndText = changedEnd === 'from' ? '起点' : '终点';
-    this.toast.success(
-      '关联重连成功',
-      `已将关联${changedEndText}从 "${changedEnd === 'from' ? this.projectState.getTask(oldSourceId)?.title : this.projectState.getTask(oldTargetId)?.title}" 移动到 "${changedEnd === 'from' ? sourceTask.title : targetTask.title}"`
+    this.showCrossTreeRelinkSuccess(oldSourceId, oldTargetId, changedEnd, sourceTask, targetTask);
+    return 'success';
+  }
+
+  private prepareCrossTreeRelink(
+    oldSourceId: string,
+    oldTargetId: string,
+    newSourceId: string,
+    newTargetId: string
+  ): { result: ParentChildRelinkResult; sourceTask?: never; targetTask?: never } | {
+    result: null;
+    sourceTask: Task;
+    targetTask: Task;
+  } {
+    const endpointResult = this.guardCrossTreeRelinkEndpoints(oldSourceId, oldTargetId, newSourceId, newTargetId);
+    if (endpointResult) return { result: endpointResult };
+
+    const sourceTask = this.projectState.getTask(newSourceId);
+    const targetTask = this.projectState.getTask(newTargetId);
+
+    if (!sourceTask) {
+      this.toast.error('重连失败', '找不到起点任务');
+      return { result: 'error' };
+    }
+
+    if (!targetTask) {
+      this.toast.error('重连失败', '找不到终点任务');
+      return { result: 'error' };
+    }
+
+    return { result: null, sourceTask, targetTask };
+  }
+
+  private guardCrossTreeRelinkEndpoints(
+    oldSourceId: string,
+    oldTargetId: string,
+    newSourceId: string,
+    newTargetId: string
+  ): 'cancelled' | 'error' | null {
+    if (newSourceId === newTargetId) {
+      this.toast.warning('无法连接', '节点不能连接到自身');
+      return 'error';
+    }
+
+    if (oldSourceId === newSourceId && oldTargetId === newTargetId) {
+      this.logger.debug('跨树连接未变化，跳过');
+      return 'cancelled';
+    }
+
+    return null;
+  }
+
+  private cancelDuplicateCrossTreeRelink(sourceTask: Task, targetTask: Task): 'cancelled' | null {
+    const project = this.projectState.activeProject();
+    const existingConnection = project?.connections?.find(
+      c => c.source === sourceTask.id && c.target === targetTask.id && !c.deletedAt
     );
 
-    return 'success';
+    if (!existingConnection) {
+      return null;
+    }
+
+    this.toast.warning('连接已存在', `"${sourceTask.title}" 到 "${targetTask.title}" 的关联已存在`);
+    return 'cancelled';
+  }
+
+  private showCrossTreeRelinkSuccess(
+    oldSourceId: string,
+    oldTargetId: string,
+    changedEnd: 'from' | 'to',
+    sourceTask: Task,
+    targetTask: Task
+  ): void {
+    const changedEndText = changedEnd === 'from' ? '起点' : '终点';
+    const oldTaskTitle = changedEnd === 'from'
+      ? this.projectState.getTask(oldSourceId)?.title
+      : this.projectState.getTask(oldTargetId)?.title;
+    const newTaskTitle = changedEnd === 'from' ? sourceTask.title : targetTask.title;
+
+    this.toast.success('关联重连成功', `已将关联${changedEndText}从 "${oldTaskTitle}" 移动到 "${newTaskTitle}"`);
   }
 
   /**
@@ -399,7 +500,7 @@ export class FlowLinkRelinkService {
    * @param childTaskId 被迁移的子任务 ID
    * @param oldParentId 原父任务 ID
    */
-  handleMoveSubtreeToRoot(childTaskId: string, oldParentId: string): 'success' | 'cancelled' | 'error' {
+  async handleMoveSubtreeToRoot(childTaskId: string, oldParentId: string): Promise<'success' | 'cancelled' | 'error'> {
     const tasks = this.projectState.tasks();
     const childTask = this.projectState.getTask(childTaskId);
 
@@ -420,7 +521,7 @@ export class FlowLinkRelinkService {
     });
 
     // 执行迁移（newParentId = null 表示迁移到根节点）
-    const result = this.taskOps.moveSubtreeToNewParent(childTaskId, null);
+    const result = await this.taskOps.moveSubtreeToNewParent(childTaskId, null);
 
     if (result.ok) {
       if (subtreeCount > 1) {

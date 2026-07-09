@@ -26,6 +26,7 @@ export { SessionManagerService } from './app/core/services/sync/session-manager.
 
 // ProjectDataService — 被 parking 轻量停泊任务加载、delta-sync-coordinator 使用
 export { ProjectDataService } from './app/core/services/sync/project-data.service';
+export type { ParkedTaskRemoval } from './app/core/services/sync/project-data.service';
 
 // ProjectSyncCursorService — 被 delta-sync-coordinator 使用（checkForDrift + commitProjectSyncCursor）
 export { ProjectSyncCursorService } from './app/core/services/sync/project-sync-cursor.service';
@@ -33,8 +34,12 @@ export { ProjectSyncCursorService } from './app/core/services/sync/project-sync-
 // TaskSyncOperationsService — 被 conflict-resolution 使用（getTombstoneIdsWithStatus）
 export { TaskSyncOperationsService } from './app/core/services/sync/task-sync-operations.service';
 
+// ConnectionSyncOperationsService — 被 action-queue-processors 使用（连接 Outbox 回放）
+export { ConnectionSyncOperationsService } from './app/core/services/sync/connection-sync-operations.service';
+
 // ProjectSaveFlightCoordinatorService — 被 conflict-resolution 使用（save 单飞项目保存）
 export { ProjectSaveFlightCoordinatorService } from './app/core/services/sync/project-save-flight-coordinator.service';
+export type { ProjectSaveResult } from './app/core/services/sync/project-save-flight-coordinator.service';
 
 // RealtimePollingService — 被 app-lifecycle-orchestrator, action-queue-processors 使用
 export { RealtimePollingService } from './app/core/services/sync/realtime-polling.service';

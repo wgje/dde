@@ -55,6 +55,141 @@ describe('SyncWriterLeaseService', () => {
     });
   }
 
+  function installFailingIndexedDb(message = 'idb unavailable'): unknown {
+    const globalWithIndexedDb = globalThis as { indexedDB?: unknown };
+    const originalIndexedDb = globalWithIndexedDb.indexedDB;
+    globalWithIndexedDb.indexedDB = {
+      open: () => {
+        const req: {
+          result: unknown;
+          error: Error | null;
+          onerror: (() => void) | null;
+          onsuccess: (() => void) | null;
+          onupgradeneeded: (() => void) | null;
+        } = {
+          result: null,
+          error: new Error(message),
+          onerror: null,
+          onsuccess: null,
+          onupgradeneeded: null,
+        };
+        Promise.resolve().then(() => req.onerror?.());
+        return req;
+      },
+    };
+    return originalIndexedDb;
+  }
+
+  function installLeaseIndexedDb(
+    options: { failDelete?: boolean; failNextGetAfterAcquire?: boolean } = {},
+  ): unknown {
+    const globalWithIndexedDb = globalThis as { indexedDB?: unknown };
+    const originalIndexedDb = globalWithIndexedDb.indexedDB;
+    const records = new Map<string, unknown>();
+    let failNextGetAfterPut = options.failNextGetAfterAcquire === true;
+    let shouldFailNextGet = false;
+    const objectStore = {
+      get: (key: string) => {
+        const shouldFailGet = shouldFailNextGet;
+        shouldFailNextGet = false;
+        const req: {
+          result: unknown;
+          error: Error | null;
+          onsuccess: (() => void) | null;
+          onerror: (() => void) | null;
+        } = {
+          result: shouldFailGet ? undefined : records.get(key),
+          error: shouldFailGet ? new Error('heartbeat failed') : null,
+          onsuccess: null,
+          onerror: null,
+        };
+        Promise.resolve().then(() => {
+          if (shouldFailGet) {
+            req.onerror?.();
+            return;
+          }
+          req.onsuccess?.();
+        });
+        return req;
+      },
+      put: (value: unknown, key: string) => {
+        const req: {
+          result: undefined;
+          error: Error | null;
+          onsuccess: (() => void) | null;
+          onerror: (() => void) | null;
+        } = {
+          result: undefined,
+          error: null,
+          onsuccess: null,
+          onerror: null,
+        };
+        Promise.resolve().then(() => {
+          records.set(key, value);
+          if (failNextGetAfterPut) {
+            shouldFailNextGet = true;
+            failNextGetAfterPut = false;
+          }
+          req.onsuccess?.();
+        });
+        return req;
+      },
+      delete: (key: string) => {
+        const req: {
+          result: undefined;
+          error: Error | null;
+          onsuccess: (() => void) | null;
+          onerror: (() => void) | null;
+        } = {
+          result: undefined,
+          error: options.failDelete ? new Error('release failed') : null,
+          onsuccess: null,
+          onerror: null,
+        };
+        Promise.resolve().then(() => {
+          if (options.failDelete) {
+            req.onerror?.();
+            return;
+          }
+          records.delete(key);
+          req.onsuccess?.();
+        });
+        return req;
+      },
+    };
+    const db = {
+      objectStoreNames: { contains: () => true },
+      createObjectStore: vi.fn(),
+      transaction: () => ({
+        objectStore: () => objectStore,
+      }),
+    };
+    globalWithIndexedDb.indexedDB = {
+      open: () => {
+        const req: {
+          result: unknown;
+          error: Error | null;
+          onerror: (() => void) | null;
+          onsuccess: (() => void) | null;
+          onupgradeneeded: (() => void) | null;
+        } = {
+          result: db,
+          error: null,
+          onerror: null,
+          onsuccess: null,
+          onupgradeneeded: null,
+        };
+        Promise.resolve().then(() => req.onsuccess?.());
+        return req;
+      },
+    };
+    return originalIndexedDb;
+  }
+
+  function restoreIndexedDb(originalIndexedDb: unknown): void {
+    (globalThis as { indexedDB?: unknown }).indexedDB = originalIndexedDb;
+  }
+
   beforeEach(() => {
     mockLoggerCategory.info.mockReset();
     mockLoggerCategory.warn.mockReset();
@@ -134,6 +269,29 @@ describe('SyncWriterLeaseService', () => {
     }));
   });
 
+  it('未显式配置 feature flag 时默认启用 single-writer lease', async () => {
+    const env = environment as unknown as MutableEnv;
+    delete env.syncLeaseEnabled;
+
+    const requestFn = vi.fn(async (
+      _name: string,
+      _opts: { signal?: AbortSignal },
+      callback: () => Promise<unknown>,
+    ) => {
+      await callback();
+    });
+    setLocks({ request: requestFn });
+
+    const service = buildService();
+    expect(service.isFeatureEnabled()).toBe(true);
+
+    const lease = await service.requestLease({ userId: 'u', projectId: 'p' });
+
+    expect(lease.mode).toBe('weblocks');
+    expect(requestFn).toHaveBeenCalledTimes(1);
+    await lease.release();
+  });
+
   it('feature 开启时禁止重入：同实例必须 release 才能再次 requestLease', async () => {
     const env = environment as unknown as MutableEnv;
     env.syncLeaseEnabled = true;
@@ -185,6 +343,130 @@ describe('SyncWriterLeaseService', () => {
       await lease.release();
     } finally {
       (globalThis as { indexedDB?: unknown }).indexedDB = originalIndexedDb;
+    }
+  });
+
+  it('IDB 降级路径的日志失败时仍返回 memory-only lease', async () => {
+    const env = environment as unknown as MutableEnv;
+    env.syncLeaseEnabled = true;
+    deleteLocks();
+    const originalIndexedDb = installFailingIndexedDb();
+    mockLoggerCategory.warn.mockImplementationOnce(() => {
+      throw new Error('logger failed');
+    });
+
+    try {
+      const service = buildService();
+      const lease = await service.requestLease({ userId: 'u', projectId: 'p' });
+
+      expect(lease.mode).toBe('memory-only');
+      expect(service.isHolder()).toBe(true);
+      await lease.release();
+      expect(service.isHolder()).toBe(false);
+    } finally {
+      restoreIndexedDb(originalIndexedDb);
+    }
+  });
+
+  it('IDB 降级和 memory-only release 的 breadcrumb 失败时仍完成 lease 生命周期', async () => {
+    const env = environment as unknown as MutableEnv;
+    env.syncLeaseEnabled = true;
+    deleteLocks();
+    const originalIndexedDb = installFailingIndexedDb();
+    mockSentry.addBreadcrumb.mockImplementationOnce(() => {
+      throw new Error('breadcrumb failed');
+    });
+
+    try {
+      const service = buildService();
+      const lease = await service.requestLease({ userId: 'u', projectId: 'p' });
+
+      expect(lease.mode).toBe('memory-only');
+      expect(service.isHolder()).toBe(true);
+      mockSentry.addBreadcrumb.mockImplementationOnce(() => {
+        throw new Error('release breadcrumb failed');
+      });
+      await expect(lease.release()).resolves.toBeUndefined();
+      expect(service.isHolder()).toBe(false);
+    } finally {
+      restoreIndexedDb(originalIndexedDb);
+    }
+  });
+
+  it('Web Locks 降级路径的 breadcrumb 失败时仍继续回退到 memory-only lease', async () => {
+    const env = environment as unknown as MutableEnv;
+    env.syncLeaseEnabled = true;
+    const requestFn = vi.fn(async () => {
+      throw new Error('weblocks unavailable');
+    });
+    setLocks({ request: requestFn });
+    const originalIndexedDb = installFailingIndexedDb();
+    mockSentry.addBreadcrumb.mockImplementationOnce(() => {
+      throw new Error('breadcrumb failed');
+    });
+
+    try {
+      const service = buildService();
+      const lease = await service.requestLease({ userId: 'u', projectId: 'p' });
+
+      expect(requestFn).toHaveBeenCalledTimes(1);
+      expect(lease.mode).toBe('memory-only');
+      await lease.release();
+      expect(service.isHolder()).toBe(false);
+    } finally {
+      restoreIndexedDb(originalIndexedDb);
+    }
+  });
+
+  it('IDB lease 释放失败时清理本地持有状态并保留释放错误', async () => {
+    const env = environment as unknown as MutableEnv;
+    env.syncLeaseEnabled = true;
+    deleteLocks();
+    const originalIndexedDb = installLeaseIndexedDb({ failDelete: true });
+
+    try {
+      const service = buildService();
+      const lease = await service.requestLease({ userId: 'u', projectId: 'p' });
+
+      expect(lease.mode).toBe('idb-lease');
+      expect(service.isHolder()).toBe(true);
+      await expect(lease.release()).rejects.toThrow('release failed');
+      expect(service.isHolder()).toBe(false);
+    } finally {
+      restoreIndexedDb(originalIndexedDb);
+    }
+  });
+
+  it('heartbeat 失败后的 debug 日志异常不产生未处理异步错误', async () => {
+    vi.useFakeTimers();
+    const env = environment as unknown as MutableEnv;
+    env.syncLeaseEnabled = true;
+    deleteLocks();
+    const originalIndexedDb = installLeaseIndexedDb({ failNextGetAfterAcquire: true });
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    mockLoggerCategory.debug.mockImplementationOnce(() => {
+      throw new Error('debug failed');
+    });
+
+    try {
+      const service = buildService();
+      const lease = await service.requestLease({ userId: 'u', projectId: 'p' });
+
+      expect(lease.mode).toBe('idb-lease');
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(mockLoggerCategory.debug).toHaveBeenCalledWith('lease_heartbeat_failed: heartbeat failed');
+      expect(consoleErrorSpy.mock.calls.some(args => args.some(arg => (
+        arg instanceof Error
+          ? arg.message === 'debug failed'
+          : String(arg).includes('debug failed')
+      )))).toBe(false);
+      expect(service.isHolder()).toBe(true);
+      await lease.release();
+      expect(service.isHolder()).toBe(false);
+    } finally {
+      restoreIndexedDb(originalIndexedDb);
+      consoleErrorSpy.mockRestore();
+      vi.useRealTimers();
     }
   });
 

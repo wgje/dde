@@ -219,6 +219,72 @@ describe('DeltaSyncCoordinatorService', () => {
       expect(calls).toEqual(['merge', 'persist', 'commit']);
     });
 
+    it('should preserve local attentionMeta when it is pending during delta merge', async () => {
+      const localAttentionMeta: Task['attentionMeta'] = {
+        items: [{
+          id: 'attention-local',
+          text: '本地僚机',
+          level: 'warning',
+          done: false,
+          createdAt: '2026-06-05T00:00:00.000Z',
+          updatedAt: '2026-06-05T00:00:00.000Z',
+        }],
+        updatedAt: '2026-06-05T00:00:00.000Z',
+      };
+      const remoteAttentionMeta: Task['attentionMeta'] = {
+        items: [{
+          id: 'attention-remote',
+          text: '远端僚机',
+          level: 'info',
+          done: false,
+          createdAt: '2026-06-05T00:00:00.000Z',
+          updatedAt: '2026-06-05T00:01:00.000Z',
+        }],
+        updatedAt: '2026-06-05T00:01:00.000Z',
+      };
+      const localTask = createTask({
+        id: 'task-1',
+        title: 'Local',
+        attentionMeta: localAttentionMeta,
+        updatedAt: '2026-06-05T00:00:00.000Z',
+      });
+      const remoteTask = createTask({
+        id: 'task-1',
+        title: 'Remote',
+        attentionMeta: remoteAttentionMeta,
+        updatedAt: '2026-06-05T00:01:00.000Z',
+      });
+      const currentProject = createProject({
+        tasks: [localTask],
+      });
+      mockProjectStateService.getProject.mockReturnValue(currentProject);
+      mockProjectStateService.projects.mockReturnValue([currentProject]);
+      mockChangeTrackerService.getPendingChange.mockReturnValue({
+        entityId: 'task-1',
+        entityType: 'task',
+        changeType: 'update',
+        projectId: 'project-1',
+        timestamp: Date.now(),
+        changedFields: ['attentionMeta'],
+        data: localTask,
+      } satisfies ChangeRecord);
+      mockSimpleSyncService.checkForDrift.mockResolvedValue({
+        tasks: [remoteTask],
+        connections: [],
+        nextCursor: null,
+      });
+
+      await service.performDeltaSync('project-1');
+
+      const updater = mockProjectStateService.updateProjects.mock.calls[0]?.[0] as
+        | ((projects: Project[]) => Project[])
+        | undefined;
+      expect(updater).toBeDefined();
+      const [mergedProject] = updater!([currentProject]);
+      expect(mergedProject.tasks[0].attentionMeta).toEqual(localAttentionMeta);
+      expect(mergedProject.tasks[0].title).toBe('Remote');
+    });
+
     it('should reuse connection LWW merge instead of raw replacement', async () => {
       const currentProject = createProject({
         updatedAt: '2026-04-19T00:00:00.000Z',

@@ -23,6 +23,7 @@ import { TaskCreationService } from '../../services/task-creation.service';
 import { TaskMoveService } from '../../services/task-move.service';
 import { TaskAttributeService } from '../../services/task-attribute.service';
 import { TaskConnectionService } from '../../services/task-connection.service';
+import { ParkingService } from '../../services/parking.service';
 import { Project, Task } from '../../models';
 import { FLOATING_TREE_CONFIG } from '../../config/layout.config';
 
@@ -133,6 +134,14 @@ describe('树遍历深度限制 (Tree Traversal Limits)', () => {
       recordAndUpdateDebounced: (mutator: (p: Project) => Project) => {
         project = mutator(project);
       },
+      recordAndUpdateDurably: async (mutator: (p: Project) => Project) => {
+        project = mutator(project);
+        return true;
+      },
+    };
+    const mockParkingService = {
+      handleTaskStatusChange: vi.fn(),
+      handleTaskSoftDelete: vi.fn(),
     };
 
     TestBed.configureTestingModule({
@@ -150,6 +159,7 @@ describe('树遍历深度限制 (Tree Traversal Limits)', () => {
         { provide: LoggerService, useValue: mockLogger },
         { provide: ProjectStateService, useValue: mockProjectState },
         { provide: TaskRecordTrackingService, useValue: mockRecorder },
+        { provide: ParkingService, useValue: mockParkingService },
       ],
     });
 

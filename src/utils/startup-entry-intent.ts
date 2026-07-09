@@ -100,6 +100,10 @@ function isStartupEntryIntentKind(value: string | null): value is StartupEntryIn
     || value === 'mark-gate-complete';
 }
 
+function isWidgetGateMutationIntent(value: StartupEntryIntentKind | null): value is 'mark-gate-read' | 'mark-gate-complete' {
+  return value === 'mark-gate-read' || value === 'mark-gate-complete';
+}
+
 function isUuidLike(value: string | null): value is string {
   return typeof value === 'string' && UUID_LIKE_PATTERN.test(value);
 }
@@ -141,11 +145,14 @@ export function resolveStartupEntryIntent(routeUrl: string | null): StartupEntry
 
   const rawIntent = params.get('intent');
   const rawGateEntryId = params.get('widgetGateEntryId');
+  const parsedIntent = isStartupEntryIntentKind(rawIntent) ? rawIntent : null;
   const intent: StartupEntryIntent = {
     entry: rawEntry,
-    intent: isStartupEntryIntentKind(rawIntent) ? rawIntent : null,
+    intent: parsedIntent,
     rawIntent,
-    widgetGateEntryId: isUuidLike(rawGateEntryId) ? rawGateEntryId : null,
+    widgetGateEntryId: isWidgetGateMutationIntent(parsedIntent) && isUuidLike(rawGateEntryId)
+      ? rawGateEntryId
+      : null,
   };
 
   if (rawEntry === 'twa' && params.get('widgetBootstrap') === '1') {
@@ -181,10 +188,10 @@ export function normalizeStartupEntryIntent(value: unknown): StartupEntryIntent 
     entry: rawEntry,
     intent,
     rawIntent,
-    widgetGateEntryId: isUuidLike(rawGateEntryId) ? rawGateEntryId : null,
+    widgetGateEntryId: isWidgetGateMutationIntent(intent) && isUuidLike(rawGateEntryId) ? rawGateEntryId : null,
   };
 
-  if (record.androidWidgetBootstrap === true) {
+  if (rawEntry === 'twa' && record.androidWidgetBootstrap === true) {
     intentValue.androidWidgetBootstrap = true;
   }
 

@@ -1,6 +1,89 @@
-import { test, expect, devices } from '@playwright/test';
+import { test, expect, devices, type Page } from '@playwright/test';
+import { waitForAppReady } from './shared/page-helpers';
 
 test.use({ ...devices['Pixel 5'] });
+
+async function waitForMobileTextReady(page: Page): Promise<void> {
+  const textLabel = page.locator('[data-testid="mobile-text-view-label"]');
+  if (!(await textLabel.isVisible({ timeout: 10_000 }).catch(() => false))) {
+    await waitForAppReady(page, { timeoutMs: 30_000 }).catch(() => undefined);
+  }
+
+  await expect(textLabel).toContainText('文本', { timeout: 10_000 });
+}
+
+type FlowPrewarmTraceEntry = {
+  status?: string;
+  reason?: string;
+  at?: number;
+};
+
+type MobileTextReadyMarkerWindow = Window & {
+  __NANOFLOW_MOBILE_TEXT_READY_AT__?: number;
+  __NANOFLOW_FLUSH_DEFERRED_IDLE__?: () => void;
+};
+
+function installMobileLaunchSnapshot(page: Page, options: {
+  projectName: string;
+  routeIntentKind?: 'project' | 'flow';
+  pathView?: 'text' | 'flow';
+}): Promise<void> {
+  return page.addInitScript(({ projectName, routeIntentKind, pathView }) => {
+    localStorage.setItem('nanoflow.launch-snapshot.v2', JSON.stringify({
+      version: 2,
+      savedAt: new Date().toISOString(),
+      activeProjectId: 'project-1',
+      lastActiveView: 'text',
+      preferredView: 'text',
+      resolvedLaunchView: 'text',
+      routeIntent: { kind: routeIntentKind, projectId: 'project-1', taskId: null },
+      mobileDegraded: pathView === 'flow',
+      degradeReason: pathView === 'flow' ? 'mobile-default-text' : null,
+      theme: 'default',
+      colorMode: 'light',
+      projects: [{
+        id: 'project-1',
+        name: projectName,
+        description: 'mobile flow prewarm',
+        updatedAt: new Date().toISOString(),
+        taskCount: 1,
+        openTaskCount: 1,
+        recentTasks: [{ id: 'task-1', title: 'Task 1', displayId: '1', status: 'active' }],
+      }],
+      currentProject: null,
+    }));
+  }, {
+    projectName: options.projectName,
+    routeIntentKind: options.routeIntentKind ?? 'project',
+    pathView: options.pathView ?? 'text',
+  });
+}
+
+async function waitForFlowPrewarmTraceStatus(
+  page: Page,
+  statuses: string[],
+  timeout = 10_000,
+  minAt?: number
+): Promise<FlowPrewarmTraceEntry[]> {
+  await page.waitForFunction(({ expectedStatuses, minAt }) => {
+    const trace = (
+      window as Window & {
+        __NANOFLOW_FLOW_PREWARM_TRACE__?: FlowPrewarmTraceEntry[];
+      }
+    ).__NANOFLOW_FLOW_PREWARM_TRACE__ ?? [];
+    return trace.some(entry =>
+      expectedStatuses.includes(entry.status ?? '')
+      && typeof entry.at === 'number'
+      && entry.at >= minAt
+    );
+  }, { expectedStatuses: statuses, minAt: minAt ?? 0 }, { timeout });
+
+  return page.evaluate(() => (
+    window as Window & {
+      __NANOFLOW_FLOW_PREWARM_TRACE__?: FlowPrewarmTraceEntry[];
+    }
+  ).__NANOFLOW_FLOW_PREWARM_TRACE__ ?? []);
+}
 
 test.describe('Mobile Startup Shell', () => {
   test('should render text startup without horizontal overflow and keep dock collapsed on mobile', async ({ page }) => {
@@ -34,9 +117,9 @@ test.describe('Mobile Startup Shell', () => {
     await page.goto('/projects/project-1/flow', { waitUntil: 'domcontentloaded' });
 
     await expect(page.locator('#initial-loader')).toBeVisible();
-    await expect(page.locator('[data-testid="mobile-text-view-label"]')).toContainText('文本');
-    await expect(page.locator('[data-testid="dock-v3-semicircle"]')).toHaveAttribute('aria-expanded', 'false');
-    await expect(page.locator('[data-testid="dock-v3-panel"]')).toHaveClass(/focus-collapsed/);
+    await waitForMobileTextReady(page);
+    await expect(page.locator('[data-testid="dock-v3-semicircle"]')).toHaveCount(0);
+    await expect(page.locator('[data-testid="dock-v3-panel"]')).toHaveCount(0);
 
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
     expect(overflow).toBeLessThanOrEqual(0);
@@ -115,7 +198,7 @@ test.describe('Mobile Startup Shell', () => {
     });
 
     await page.goto('/projects/project-1/text', { waitUntil: 'domcontentloaded' });
-    await expect(page.locator('[data-testid="mobile-text-view-label"]')).toContainText('文本');
+    await waitForMobileTextReady(page);
 
     await page.locator('[data-testid="flow-view-tab"]').first().click();
     await page.waitForSelector('[data-testid="flow-diagram"]', { timeout: 30000 });
@@ -198,5 +281,77 @@ test.describe('Mobile Startup Shell', () => {
 
     expect(events).toContain('loader.initial_visible');
     expect(events).toContain('app.start');
+  });
+
+  test('keeps mobile text ready while flow prewarm starts after startup', async ({ page }) => {
+    await page.addInitScript(() => {
+      const callbacks = new Map<number, IdleRequestCallback>();
+      let nextIdleHandle = 1;
+      window.requestIdleCallback = (callback: IdleRequestCallback): number => {
+        const handle = nextIdleHandle;
+        nextIdleHandle += 1;
+        callbacks.set(handle, callback);
+        return handle;
+      };
+      window.cancelIdleCallback = (handle: number): void => {
+        callbacks.delete(handle);
+      };
+      (window as MobileTextReadyMarkerWindow).__NANOFLOW_FLUSH_DEFERRED_IDLE__ = () => {
+        const pending = [...callbacks.entries()];
+        callbacks.clear();
+        for (const [, callback] of pending) {
+          setTimeout(() => callback({
+            didTimeout: false,
+            timeRemaining: () => 50,
+          }), 0);
+        }
+      };
+    });
+    await installMobileLaunchSnapshot(page, {
+      projectName: 'Prewarm Text Project',
+      routeIntentKind: 'flow',
+      pathView: 'flow',
+    });
+
+    await page.goto('/projects/project-1/flow', { waitUntil: 'domcontentloaded' });
+
+    await waitForMobileTextReady(page);
+    const textReadyAt = await page.evaluate(() => {
+      const marker = typeof performance !== 'undefined' && typeof performance.now === 'function'
+        ? performance.now()
+        : Date.now();
+      (window as MobileTextReadyMarkerWindow).__NANOFLOW_MOBILE_TEXT_READY_AT__ = marker;
+      (window as MobileTextReadyMarkerWindow).__NANOFLOW_FLUSH_DEFERRED_IDLE__?.();
+      return marker;
+    });
+    const trace = await waitForFlowPrewarmTraceStatus(
+      page,
+      ['scheduled', 'loading'],
+      10_000,
+      textReadyAt
+    );
+
+    await expect(page.locator('[data-testid="mobile-text-view-label"]')).toContainText('文本');
+    expect(trace.some(entry =>
+      (entry.status === 'scheduled' || entry.status === 'loading')
+      && typeof entry.at === 'number'
+      && entry.at >= textReadyAt
+    )).toBe(true);
+  });
+
+  test('switches from mobile text to visible flow diagram after flow prewarm is ready', async ({ page }) => {
+    await installMobileLaunchSnapshot(page, {
+      projectName: 'Prewarm Flow Project',
+      routeIntentKind: 'project',
+      pathView: 'text',
+    });
+
+    await page.goto('/projects/project-1/text', { waitUntil: 'domcontentloaded' });
+
+    await waitForMobileTextReady(page);
+    await waitForFlowPrewarmTraceStatus(page, ['ready'], 20_000);
+
+    await page.locator('[data-testid="flow-view-tab"]').first().click();
+    await expect(page.locator('[data-testid="flow-diagram"]').first()).toBeVisible({ timeout: 30_000 });
   });
 });

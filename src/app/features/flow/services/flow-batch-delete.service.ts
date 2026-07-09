@@ -21,6 +21,7 @@ export class FlowBatchDeleteService {
 
   /** 批量删除确认对话框状态 */
   readonly dialogData = signal<BatchDeleteDialogData | null>(null);
+  private isConfirmingBatchDelete = false;
 
   /**
    * 请求批量删除（由 Delete 键或工具栏按钮触发）
@@ -63,28 +64,38 @@ export class FlowBatchDeleteService {
    * @param clearSelectionCallback 清空选择的回调
    * @returns 删除的任务数量
    */
-  confirmBatchDelete(clearSelectionCallback?: () => void): number {
+  async confirmBatchDelete(clearSelectionCallback?: () => void): Promise<number> {
+    if (this.isConfirmingBatchDelete) {
+      return 0;
+    }
+
     const dialogData = this.dialogData();
     if (!dialogData) return 0;
 
-    // 清空选择
-    this.selectionService.clearSelection();
-    if (clearSelectionCallback) {
-      clearSelectionCallback();
-    }
+    this.isConfirmingBatchDelete = true;
+    try {
+      // 执行批量删除
+      const deletedCount = await this.taskOps.deleteTasksBatch(dialogData.selectedIds);
+      if (deletedCount <= 0) {
+        return 0;
+      }
 
-    // 执行批量删除
-    const deletedCount = this.taskOps.deleteTasksBatch(dialogData.selectedIds);
+      // 清空选择
+      this.selectionService.clearSelection();
+      if (clearSelectionCallback) {
+        clearSelectionCallback();
+      }
 
-    // 关闭弹窗
-    this.dialogData.set(null);
+      // 关闭弹窗
+      this.dialogData.set(null);
 
-    // 显示成功提示
-    if (deletedCount > 0) {
+      // 显示成功提示
       this.toast.success('操作成功', `已删除 ${deletedCount} 个任务`);
-    }
 
-    return deletedCount;
+      return deletedCount;
+    } finally {
+      this.isConfirmingBatchDelete = false;
+    }
   }
 
   /**

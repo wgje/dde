@@ -13,7 +13,12 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Injector, runInInjectionContext } from '@angular/core';
-import { TaskRepositoryBatchService } from './task-repository-batch.service';
+import {
+  buildConnectionSyncPlan,
+  buildTaskIncrementalUpdateRows,
+  buildTaskSaveRows,
+  TaskRepositoryBatchService,
+} from './task-repository-batch.service';
 import { SupabaseClientService } from './supabase-client.service';
 import { LoggerService } from './logger.service';
 import type { Task, Connection } from '../models';
@@ -67,13 +72,26 @@ function createSupabaseMock() {
   const selectAfterMutation = vi.fn().mockResolvedValue({ data: [{ id: 'matched' }], error: null });
 
   const inFn = vi.fn().mockResolvedValue({ error: null });
-  const isFn = vi.fn().mockResolvedValue({ data: [], error: null });
+  const rangeFn = vi.fn().mockResolvedValue({ data: [], error: null });
+  const orderFn = vi.fn(() => {
+    const p = Promise.resolve({ data: [], error: null }) as any;
+    p.range = rangeFn;
+    p.order = orderFn;
+    return p;
+  });
+  const isFn = vi.fn(() => {
+    const p = Promise.resolve({ data: [], error: null }) as any;
+    p.range = rangeFn;
+    p.order = orderFn;
+    return p;
+  });
   const eqFn = vi.fn(() => {
     const p = Promise.resolve({ error: null }) as any;
     p.in = inFn;
     p.eq = eqFn;
     p.is = isFn;
     p.select = selectAfterMutation;
+    p.order = orderFn;
     return p;
   });
   const update = vi.fn(() => ({ eq: eqFn }));
@@ -95,7 +113,7 @@ function createSupabaseMock() {
     client: () => ({ from, rpc }),
   } as unknown as SupabaseClientService;
 
-  return { mockSupabaseClientService, from, upsert, update, del, insert, rpc, inFn, eqFn, selectAfterMutation };
+  return { mockSupabaseClientService, from, upsert, update, del, insert, rpc, inFn, isFn, rangeFn, orderFn, eqFn, selectAfterMutation };
 }
 
 describe('TaskRepositoryBatchService', () => {
@@ -130,7 +148,7 @@ describe('TaskRepositoryBatchService', () => {
   describe('saveTasks', () => {
     it('should return success for empty task array', async () => {
       const result = await service.saveTasks('proj-1', []);
-      expect(result.success).toBe(true);
+      expect(result).toEqual({ success: true });
       expect(supabaseMock.from).not.toHaveBeenCalled();
     });
 
@@ -139,7 +157,7 @@ describe('TaskRepositoryBatchService', () => {
 
       const result = await service.saveTasks('proj-1', tasks);
 
-      expect(result.success).toBe(true);
+      expect(result).toEqual({ success: true });
       expect(supabaseMock.from).toHaveBeenCalledWith('tasks');
       expect(supabaseMock.upsert).toHaveBeenCalled();
     });
@@ -161,6 +179,56 @@ describe('TaskRepositoryBatchService', () => {
 
       const payload = supabaseMock.upsert.mock.calls[0][0] as Record<string, unknown>[];
       expect(payload[0]).toHaveProperty('deleted_at', ts);
+    });
+
+    it('should include parking_meta when saving parked tasks', async () => {
+      const parkingMeta = {
+        state: 'parked' as const,
+        parkedAt: '2026-06-08T00:00:00.000Z',
+        lastVisitedAt: '2026-06-08T00:00:00.000Z',
+        reminder: null,
+        pinned: false,
+        contextSnapshot: {
+          projectId: 'proj-1',
+          parentId: null,
+          order: 0,
+          rank: 10000,
+          savedAt: '2026-06-08T00:00:00.000Z',
+          contentHash: 'hash',
+          viewMode: 'text' as const,
+          cursorPosition: null,
+          scrollAnchor: null,
+          structuralAnchor: null,
+          flowViewport: null,
+        },
+      };
+      const task = createTask({ id: 'task-parked', parkingMeta });
+
+      await service.saveTasks('proj-1', [task]);
+
+      const payload = supabaseMock.upsert.mock.calls[0][0] as Record<string, unknown>[];
+      expect(payload[0]['parking_meta']).toEqual(parkingMeta);
+    });
+
+    it('should keep retrying compatible task schema fallbacks until old-schema writes succeed', async () => {
+      supabaseMock.upsert
+        .mockResolvedValueOnce({ error: { code: '42703', message: 'column tasks.completed_at does not exist' } })
+        .mockResolvedValueOnce({ error: { code: '42703', message: 'column tasks.attention_meta does not exist' } })
+        .mockResolvedValueOnce({ error: null });
+      const task = createTask({
+        id: 'task-old-schema',
+        completedAt: '2026-06-08T00:00:00.000Z',
+        attentionMeta: { items: [], updatedAt: '2026-06-08T00:00:00.000Z' },
+      });
+
+      const result = await service.saveTasks('proj-1', [task]);
+
+      expect(result).toEqual({ success: true });
+      expect(supabaseMock.upsert).toHaveBeenCalledTimes(3);
+      expect(supabaseMock.upsert.mock.calls[1][0][0]).not.toHaveProperty('completed_at');
+      expect(supabaseMock.upsert.mock.calls[1][0][0]).toHaveProperty('attention_meta');
+      expect(supabaseMock.upsert.mock.calls[2][0][0]).not.toHaveProperty('completed_at');
+      expect(supabaseMock.upsert.mock.calls[2][0][0]).not.toHaveProperty('attention_meta');
     });
 
     it('should return failure with failed count on error', async () => {
@@ -300,6 +368,168 @@ describe('TaskRepositoryBatchService', () => {
       expect(result.success).toBe(true);
       expect(supabaseMock.from).toHaveBeenCalledWith('connections');
     });
+
+    it('should retry transient connection delete failures before reporting failure', async () => {
+      let eqCallCount = 0;
+      supabaseMock.eqFn.mockImplementation(() => {
+        eqCallCount += 1;
+        const result = Promise.resolve({
+          error: eqCallCount === 3 ? { message: 'temporary 5xx' } : null,
+        }) as any;
+        result.in = supabaseMock.inFn;
+        result.eq = supabaseMock.eqFn;
+        result.is = supabaseMock.isFn;
+        result.select = supabaseMock.selectAfterMutation;
+        result.order = supabaseMock.orderFn;
+        return result;
+      });
+      const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(
+        ((handler: TimerHandler): ReturnType<typeof setTimeout> => {
+          if (typeof handler === 'function') {
+            handler();
+          }
+          return 0 as unknown as ReturnType<typeof setTimeout>;
+        }) as unknown as typeof setTimeout
+      );
+
+      try {
+        const result = await service.deleteConnections('proj-1', [
+          { source: 'a', target: 'b' },
+        ]);
+
+        expect(result).toEqual({ success: true });
+        expect(supabaseMock.update).toHaveBeenCalledTimes(2);
+      } finally {
+        setTimeoutSpy.mockRestore();
+      }
+    });
+  });
+
+  // ==================== syncConnections ====================
+
+  describe('syncConnections', () => {
+    it('should report failure when connection diff sync has unrecovered batch errors', async () => {
+      supabaseMock.upsert.mockResolvedValue({ error: { message: 'upsert failed' } });
+      const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(
+        ((handler: TimerHandler): ReturnType<typeof setTimeout> => {
+          if (typeof handler === 'function') {
+            handler();
+          }
+          return 0 as unknown as ReturnType<typeof setTimeout>;
+        }) as unknown as typeof setTimeout
+      );
+
+      try {
+        const result = await service.syncConnections('proj-1', [
+          createConnection({ id: 'conn-new', source: 'a', target: 'b' }),
+        ]);
+
+        expect(result.success).toBe(false);
+        expect(result.error).toContain('upsert failed');
+      } finally {
+        setTimeoutSpy.mockRestore();
+      }
+    });
+
+    it('should upsert new connections by id so retries are idempotent', async () => {
+      const conn = createConnection({ id: 'conn-new', source: 'a', target: 'b', description: 'test' });
+
+      const result = await service.syncConnections('proj-1', [conn]);
+
+      expect(result.success).toBe(true);
+      expect(supabaseMock.insert).not.toHaveBeenCalled();
+      expect(supabaseMock.upsert).toHaveBeenCalledWith(
+        [
+          expect.objectContaining({
+            id: 'conn-new',
+            project_id: 'proj-1',
+            source_id: 'a',
+            target_id: 'b',
+          }),
+        ],
+        { onConflict: 'id' }
+      );
+    });
+
+    it('should preserve client-generated connection ids in fallback upsert', async () => {
+      supabaseMock.isFn.mockResolvedValueOnce({ data: null, error: { message: 'load failed' } });
+      const conn = createConnection({ id: 'conn-fallback', source: 'a', target: 'b' });
+
+      const result = await service.syncConnections('proj-1', [conn]);
+
+      expect(result.success).toBe(true);
+      expect(supabaseMock.upsert).toHaveBeenCalledWith(
+        [
+          expect.objectContaining({
+            id: 'conn-fallback',
+            project_id: 'proj-1',
+            source_id: 'a',
+            target_id: 'b',
+          }),
+        ],
+        { onConflict: 'id' }
+      );
+    });
+
+    it('should load all remote connection pages before diffing', async () => {
+      const rows = Array.from({ length: 1001 }, (_, index) => ({
+        id: `remote-${index.toString().padStart(4, '0')}`,
+        project_id: 'proj-1',
+        source_id: `source-${index}`,
+        target_id: `target-${index}`,
+        title: null,
+        description: null,
+        deleted_at: null,
+        updated_at: '2026-06-09T00:00:00.000Z',
+      }));
+      const ranges: Array<[number, number]> = [];
+      const from = vi.fn((table: string) => {
+        if (table === 'connections') {
+          return {
+            select: vi.fn(() => {
+              const query = {
+                eq: vi.fn(() => query),
+                is: vi.fn(() => query),
+                order: vi.fn(() => query),
+                range: vi.fn(async (fromIndex: number, toIndex: number) => {
+                  ranges.push([fromIndex, toIndex]);
+                  return { data: rows.slice(fromIndex, toIndex + 1), error: null };
+                }),
+              };
+              return query;
+            }),
+            insert: supabaseMock.insert,
+            upsert: supabaseMock.upsert,
+          };
+        }
+        return { upsert: supabaseMock.upsert } as any;
+      });
+      const injector = Injector.create({
+        providers: [
+          { provide: LoggerService, useValue: mockLoggerService },
+          { provide: SupabaseClientService, useValue: { isConfigured: true, client: () => ({ from, rpc: supabaseMock.rpc }) } },
+        ],
+      });
+      const svc = runInInjectionContext(injector, () => new TaskRepositoryBatchService());
+
+      const result = await svc.syncConnections(
+        'proj-1',
+        rows.map((row) => createConnection({
+          id: row.id,
+          source: row.source_id,
+          target: row.target_id,
+          title: undefined,
+          description: undefined,
+          deletedAt: undefined,
+        })),
+      );
+
+      expect(result).toEqual({ success: true });
+      expect(ranges).toEqual([
+        [0, 999],
+        [1000, 1999],
+      ]);
+    });
   });
 
   // ==================== syncConnectionsIncremental ====================
@@ -390,5 +620,66 @@ describe('TaskRepositoryBatchService', () => {
       expect(result.stats?.deleted).toBe(0);
       expect(mockLoggerCategory.warn).toHaveBeenCalled();
     });
+  });
+});
+
+describe('buildTaskSaveRows', () => {
+  it('omits deleted_at for live tasks and keeps it for tombstoned tasks', () => {
+    const deletedAt = '2026-06-08T00:00:00.000Z';
+    const rows = buildTaskSaveRows('proj-1', [
+      createTask({ id: 'live-task', deletedAt: null }),
+      createTask({ id: 'deleted-task', deletedAt }),
+    ]);
+
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({ id: 'live-task', project_id: 'proj-1' });
+    expect(Object.prototype.hasOwnProperty.call(rows[0], 'deleted_at')).toBe(false);
+    expect(rows[1]).toMatchObject({
+      id: 'deleted-task',
+      project_id: 'proj-1',
+      deleted_at: deletedAt,
+    });
+  });
+});
+
+describe('buildTaskIncrementalUpdateRows', () => {
+  it('applies tombstone-wins unless deletedAt changed explicitly', () => {
+    const rows = buildTaskIncrementalUpdateRows(
+      'proj-1',
+      [
+        createTask({ id: 'title-only', deletedAt: null }),
+        createTask({ id: 'restore', deletedAt: null }),
+        createTask({ id: 'deleted', deletedAt: '2026-06-08T00:00:00.000Z' }),
+      ],
+      {
+        'title-only': ['title'],
+        restore: ['deletedAt'],
+      }
+    );
+
+    expect(Object.prototype.hasOwnProperty.call(rows[0], 'deleted_at')).toBe(false);
+    expect(rows[1]).toHaveProperty('deleted_at', null);
+    expect(rows[2]).toHaveProperty('deleted_at', '2026-06-08T00:00:00.000Z');
+  });
+});
+
+describe('buildConnectionSyncPlan', () => {
+  it('classifies connection deletes, inserts, updates, and unchanged rows by endpoints', () => {
+    const plan = buildConnectionSyncPlan(
+      [
+        createConnection({ id: 'remote-unchanged', source: 'a', target: 'b', description: 'same' }),
+        createConnection({ id: 'remote-update', source: 'b', target: 'c', description: 'old' }),
+        createConnection({ id: 'remote-delete', source: 'c', target: 'd' }),
+      ],
+      [
+        createConnection({ id: 'local-unchanged', source: 'a', target: 'b', description: 'same' }),
+        createConnection({ id: 'local-update', source: 'b', target: 'c', description: 'new' }),
+        createConnection({ id: 'local-insert', source: 'd', target: 'e' }),
+      ]
+    );
+
+    expect(plan.toDelete.map(conn => conn.id)).toEqual(['remote-delete']);
+    expect(plan.toInsert.map(conn => conn.id)).toEqual(['local-insert']);
+    expect(plan.toUpdate.map(conn => conn.id)).toEqual(['local-update']);
   });
 });

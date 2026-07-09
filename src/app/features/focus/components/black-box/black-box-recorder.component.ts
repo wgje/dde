@@ -175,6 +175,8 @@ export class BlackBoxRecorderComponent implements OnDestroy {
   private globalCleanups: (() => void)[] = [];
   private isPressActive = false;
   private startRequestId = 0;
+  private stopRequestId = 0;
+  private stopTranscribeInFlight = false;
   
   readonly recordZone = viewChild<ElementRef<HTMLElement>>('recordZone');
   
@@ -183,6 +185,8 @@ export class BlackBoxRecorderComponent implements OnDestroy {
   ngOnDestroy(): void {
     this.removeGlobalListeners();
     this.isPressActive = false;
+    this.stopRequestId += 1;
+    this.stopTranscribeInFlight = false;
     if (this.voiceService.isRecording()) {
       this.voiceService.cancelRecording();
     }
@@ -452,10 +456,19 @@ export class BlackBoxRecorderComponent implements OnDestroy {
    * 停止录音并进行转写
    */
   private async doStopAndTranscribe(): Promise<void> {
+    if (this.stopTranscribeInFlight) {
+      return;
+    }
+
     this.removeGlobalListeners();
-    
+    const requestId = ++this.stopRequestId;
+    this.stopTranscribeInFlight = true;
+
     try {
       const text = await this.voiceService.stopAndTranscribe();
+      if (requestId !== this.stopRequestId) {
+        return;
+      }
       
       if (text.trim()) {
         // 显示可编辑的转录结果，等待用户确认
@@ -464,6 +477,10 @@ export class BlackBoxRecorderComponent implements OnDestroy {
       }
     } catch (e) {
       this.logger.error('BlackBoxRecorder', 'Recording failed', e);
+    } finally {
+      if (requestId === this.stopRequestId) {
+        this.stopTranscribeInFlight = false;
+      }
     }
   }
 
@@ -479,9 +496,15 @@ export class BlackBoxRecorderComponent implements OnDestroy {
    * 移除所有全局事件监听
    */
   private removeGlobalListeners(): void {
-    for (const cleanup of this.globalCleanups) {
-      cleanup();
-    }
+    const cleanups = this.globalCleanups;
     this.globalCleanups = [];
+
+    for (const cleanup of cleanups) {
+      try {
+        cleanup();
+      } catch (err) {
+        this.logger.error('BlackBoxRecorder', 'Failed to remove global listener', err instanceof Error ? err.message : String(err));
+      }
+    }
   }
 }

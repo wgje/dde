@@ -12,6 +12,8 @@ describe('PerformanceTierService', () => {
   afterEach(() => {
     TestBed.resetTestingModule();
     vi.runOnlyPendingTimers();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
     vi.useRealTimers();
   });
 
@@ -22,5 +24,28 @@ describe('PerformanceTierService', () => {
 
     const service = TestBed.inject(PerformanceTierService);
     expect(service.tier()).toBe('T0');
+  });
+
+  it('销毁后迟到的 startMeasuring 不应重新启动 RAF 采样', () => {
+    const requestAnimationFrameSpy = vi.fn(() => 1);
+    const cancelAnimationFrameSpy = vi.fn();
+    vi.stubGlobal('requestAnimationFrame', requestAnimationFrameSpy);
+    vi.stubGlobal('cancelAnimationFrame', cancelAnimationFrameSpy);
+
+    TestBed.configureTestingModule({
+      providers: [PerformanceTierService],
+    });
+
+    const service = TestBed.inject(PerformanceTierService);
+    service.startMeasuring();
+    expect(requestAnimationFrameSpy).toHaveBeenCalledTimes(1);
+
+    service.ngOnDestroy();
+    expect(cancelAnimationFrameSpy).toHaveBeenCalledWith(1);
+
+    requestAnimationFrameSpy.mockClear();
+    service.startMeasuring();
+
+    expect(requestAnimationFrameSpy).not.toHaveBeenCalled();
   });
 });

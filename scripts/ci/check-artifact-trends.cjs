@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 /**
  * Compare Cloudflare deployment artifact metrics against the last main
- * baseline. Growth above 15% is a warning; growth above 30% fails.
+ * baseline. Growth above 15% is a warning; byte/rule growth above 30% fails.
+ * Count-only metrics stay warning-only because aggressive lazy splitting can
+ * improve startup budgets while intentionally increasing tiny chunk counts.
  */
 
 const fs = require('node:fs');
@@ -12,6 +14,11 @@ const DEFAULT_CURRENT = path.join(REPO_ROOT, 'dist', 'browser', 'artifact-manife
 const DEFAULT_BASELINE = path.join(REPO_ROOT, 'docs', 'cloudflare-artifact-baseline.json');
 const WARN_RATIO = 0.15;
 const FAIL_RATIO = 0.30;
+const WARNING_ONLY_METRICS = new Set([
+  'fileCount',
+  'rootJsCount',
+  'ngswAssetCount',
+]);
 
 const METRICS = [
   'fileCount',
@@ -67,7 +74,7 @@ function compareMetrics(current, baseline) {
     const next = metricValue(current, name);
     if (base === null || next === null || base <= 0) continue;
     const ratio = (next - base) / base;
-    if (ratio >= FAIL_RATIO) {
+    if (ratio >= FAIL_RATIO && !WARNING_ONLY_METRICS.has(name)) {
       failures.push(`${name} grew by ${percent(ratio)}% (${base} -> ${next})`);
     } else if (ratio >= WARN_RATIO) {
       warnings.push(`${name} grew by ${percent(ratio)}% (${base} -> ${next})`);

@@ -8,6 +8,7 @@ import {
   ensureAuthenticated as ensureSharedAuthenticated,
   ensureLoginModalVisible,
 } from '../shared/auth-helpers';
+import { waitForAppReady as waitForSharedAppReady } from '../shared/page-helpers';
 
 type EditorMode = 'local' | 'cloud';
 
@@ -22,12 +23,15 @@ interface CreateTaskOptions {
 
 interface WaitForSyncOptions {
   timeout?: number;
+  allowOfflineMode?: boolean;
 }
 
 interface WaitForCloudSyncOptions extends WaitForSyncOptions {
   observeActivity?: boolean;
   previousSyncMarker?: string | null;
 }
+
+const LOCAL_MODE_KEY = 'nanoflow.local-mode';
 
 // ============================================================================
 // 类型定义
@@ -89,6 +93,63 @@ async function clickIfVisible(locator: Locator, options?: { timeout?: number; fo
   } catch {
     return false;
   }
+}
+
+async function isLocalModeEnabled(page: Page): Promise<boolean> {
+  return page.evaluate((key) => localStorage.getItem(key) === 'true', LOCAL_MODE_KEY)
+    .catch(() => false);
+}
+
+async function enterLocalModeFromLoginModal(page: Page): Promise<void> {
+  if (await waitForLocalEditorReady(page, 5_000)) {
+    return;
+  }
+
+  await ensureLoginModalVisible(page);
+
+  const localModeButton = page.locator('[data-testid="local-mode-btn"]').first();
+  await expect(localModeButton).toBeVisible({ timeout: 10_000 });
+
+  try {
+    await localModeButton.click({ force: true });
+  } catch (error) {
+    if (!(await isLocalModeEnabled(page))) {
+      throw error;
+    }
+  }
+
+  await expect
+    .poll(() => isLocalModeEnabled(page), {
+      timeout: 10_000,
+      intervals: [100, 200, 300, 500],
+    })
+    .toBe(true);
+}
+
+async function waitForLocalEditorReady(page: Page, timeout = 15_000): Promise<boolean> {
+  const addTaskBtn = page.locator('[data-testid="add-task-btn"]');
+  if (await isElementVisible(addTaskBtn, 1200)) {
+    return true;
+  }
+
+  if (!(await isLocalModeEnabled(page))) {
+    return false;
+  }
+
+  const ready = await addTaskBtn
+    .waitFor({ state: 'visible', timeout })
+    .then(() => true)
+    .catch(() => false);
+  if (ready) {
+    return true;
+  }
+
+  await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => undefined);
+  await testHelpers.waitForAppReady(page);
+  return addTaskBtn
+    .waitFor({ state: 'visible', timeout: Math.min(timeout, 10_000) })
+    .then(() => true)
+    .catch(() => false);
 }
 
 async function dispatchBrowserNetworkState(page: Page, offline: boolean): Promise<void> {
@@ -175,32 +236,40 @@ async function findTaskCard(page: Page, title: string, timeout = 5000): Promise<
 async function ensureTaskEditMode(page: Page, title: string, timeout = 5000): Promise<Locator> {
   const taskCard = await findTaskCard(page, title, timeout);
   await expect(taskCard).toBeVisible({ timeout });
-  await taskCard.click({ force: true });
 
   const titleInput = taskCard.locator('[data-testid="task-title-input"]').first();
   const contentEditor = taskCard.locator('[data-testid="task-content-editor"]').first();
-  if ((await isElementVisible(titleInput, 600)) || (await isElementVisible(contentEditor, 600))) {
-    return taskCard;
-  }
-
   const editTriggers = [
+    taskCard.locator('[aria-label="编辑任务"]').first(),
+    taskCard.locator('button').filter({ hasText: /编辑/ }).first(),
     taskCard.locator('[data-testid="task-title-preview"]').first(),
     taskCard.locator('[data-testid="task-content"]').first(),
     taskCard.locator('[data-testid="task-content-empty"]').first(),
     taskCard.locator('[data-testid="task-title-label"]').first(),
+    taskCard,
   ];
 
-  for (const trigger of editTriggers) {
-    if (!(await clickIfVisible(trigger, { timeout: 800, force: true }))) {
-      continue;
-    }
+  await expect
+    .poll(async () => {
+      if ((await isElementVisible(titleInput, 150)) || (await isElementVisible(contentEditor, 150))) {
+        return 'editing';
+      }
 
-    if ((await isElementVisible(titleInput, 800)) || (await isElementVisible(contentEditor, 800))) {
-      return taskCard;
-    }
-  }
+      for (const trigger of editTriggers) {
+        if (await clickIfVisible(trigger, { timeout: 250, force: true })) {
+          break;
+        }
+      }
 
-  await expect(titleInput.or(contentEditor).first()).toBeVisible({ timeout });
+      return (await isElementVisible(titleInput, 150)) || (await isElementVisible(contentEditor, 150))
+        ? 'editing'
+        : 'preview';
+    }, {
+      timeout,
+      intervals: [100, 200, 400],
+    })
+    .toBe('editing');
+
   return taskCard;
 }
 
@@ -253,10 +322,7 @@ export const createdTestData: CreatedTestData = {
 export const testHelpers: TestHelpers = {
   /** 等待应用加载完成 */
   async waitForAppReady(page: Page): Promise<void> {
-    // 等待路由加载
-    await page.waitForSelector('[data-testid="app-container"]', { timeout: 10000 });
-    // 等待loading状态消失
-    await expect(page.locator('[data-testid="loading-indicator"]')).not.toBeVisible({ timeout: 10000 });
+    await waitForSharedAppReady(page, { timeoutMs: 30_000, recoverStaticLoader: true });
   },
 
   /** 强制使用云账号完成认证 */
@@ -284,6 +350,9 @@ export const testHelpers: TestHelpers = {
    * 3) 无云凭据时降级进入本地模式
    */
   async ensureEditorReady(page: Page, options?: EnsureEditorReadyOptions): Promise<void> {
+    const textViewTab = page.locator('[data-testid="text-view-tab"]').first();
+    await clickIfVisible(textViewTab, { timeout: 1000, force: true });
+
     const addTaskBtn = page.locator('[data-testid="add-task-btn"]');
     if (await isElementVisible(addTaskBtn, 1200)) {
       return;
@@ -295,13 +364,15 @@ export const testHelpers: TestHelpers = {
     const requireCloud = options?.requireCloud ?? mode === 'cloud';
 
     if (mode === 'local') {
-      await ensureLoginModalVisible(page);
-      await page.click('[data-testid="local-mode-btn"]');
+      if (!(await waitForLocalEditorReady(page))) {
+        await enterLocalModeFromLoginModal(page);
+      }
     } else if (hasCloudCreds) {
       await testHelpers.ensureCloudAuthenticated(page);
     } else if (!requireCloud) {
-      await ensureLoginModalVisible(page);
-      await page.click('[data-testid="local-mode-btn"]');
+      if (!(await waitForLocalEditorReady(page, 3000))) {
+        await enterLocalModeFromLoginModal(page);
+      }
     } else {
       throw new Error('该用例要求云登录，但未配置 TEST_USER_EMAIL / TEST_USER_PASSWORD');
     }
@@ -313,9 +384,11 @@ export const testHelpers: TestHelpers = {
     const textViewTab = page.locator('[data-testid="text-view-tab"]').first();
     await clickIfVisible(textViewTab, { timeout: 1000, force: true });
 
-    await page.click('[data-testid="add-task-btn"]', { force: true });
+    const addTaskButton = page.locator('[data-testid="add-task-btn"]').first();
+    await expect(addTaskButton).toBeEnabled({ timeout: 15_000 });
+    await addTaskButton.click({ force: true });
     const titleInput = page.locator('[data-testid="task-title-input"]').first();
-    await expect(titleInput).toBeVisible({ timeout: 5_000 });
+    await expect(titleInput).toBeEditable({ timeout: 10_000 });
     await titleInput.fill(title);
     await titleInput.press('Enter');
     await page.locator('[data-testid="app-container"]').first().click({ position: { x: 12, y: 12 }, force: true });
@@ -462,11 +535,12 @@ export const testHelpers: TestHelpers = {
 
   async waitForSyncSettled(page: Page, options?: WaitForSyncOptions): Promise<void> {
     const timeout = options?.timeout ?? 10_000;
+    const allowOfflineMode = options?.allowOfflineMode ?? false;
     await expect(getSyncIndicator(page)).toBeVisible({ timeout: Math.min(timeout, 5_000) });
     await expect
       .poll(async () => {
         const attrs = await readSyncAttributes(page);
-        return attrs.offline !== 'offline-indicator'
+        return (allowOfflineMode || attrs.offline !== 'offline-indicator')
           && attrs.pending !== 'pending-sync-indicator'
           && attrs.busy !== 'sync-busy-indicator';
       }, { timeout, intervals: [200, 300, 500, 1_000] })

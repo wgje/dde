@@ -1,12 +1,12 @@
 /**
  * 黑匣子面板组件
- * 
+ *
  * 显示黑匣子条目列表与文字补录入口
  */
 
-import { 
-  Component, 
-  ChangeDetectionStrategy, 
+import {
+  Component,
+  ChangeDetectionStrategy,
   inject,
   output,
   OnInit,
@@ -20,18 +20,18 @@ import { FocusPreferenceService } from '../../../../../services/focus-preference
 import { ToastService } from '../../../../../services/toast.service';
 import { BlackBoxTextInputComponent } from './black-box-text-input.component';
 import { BlackBoxDateGroupComponent } from './black-box-date-group.component';
-import { 
-  SwipeGestureState, 
-  SwipeDirection, 
-  startSwipeTracking, 
-  detectHorizontalSwipe 
+import {
+  SwipeGestureState,
+  SwipeDirection,
+  startSwipeTracking,
+  detectHorizontalSwipe
 } from '../../../../../utils/gesture';
 
 @Component({
   selector: 'app-black-box-panel',
   standalone: true,
   imports: [
-    CommonModule, 
+    CommonModule,
     BlackBoxTextInputComponent,
     BlackBoxDateGroupComponent
   ],
@@ -107,19 +107,19 @@ export class BlackBoxPanelComponent implements OnInit, OnDestroy {
   focusPrefs = inject(FocusPreferenceService);
   private readonly toast = inject(ToastService);
   readonly expandToken = input(0);
-  
+
   readonly entriesByDate = this.blackBoxService.entriesByDate;
   readonly pendingCount = this.blackBoxService.pendingCount;
-  
+
   /** 滑动切换视图事件 */
   readonly swipeToSwitch = output<SwipeDirection>();
-  
+
   // 滑动手势状态
   private swipeState: SwipeGestureState = { startX: 0, startY: 0, startTime: 0, isActive: false };
 
   // visibilitychange 监听器引用（用于 cleanup）
   private visibilityHandler: (() => void) | null = null;
-  
+
   /**
    * 组件初始化时先补本地快照，再走轻量远端刷新。
    * 远端刷新会被 single-flight 与 freshness window 去重，不再误报 manual pull。
@@ -130,9 +130,26 @@ export class BlackBoxPanelComponent implements OnInit, OnDestroy {
   }
 
   ngOnDestroy(): void {
-    if (this.visibilityHandler) {
-      document.removeEventListener('visibilitychange', this.visibilityHandler);
-      this.visibilityHandler = null;
+    const visibilityHandler = this.visibilityHandler;
+    this.visibilityHandler = null;
+    if (!visibilityHandler) {
+      return;
+    }
+    this.removeVisibilityListener(visibilityHandler);
+  }
+
+  private removeVisibilityListener(visibilityHandler: () => void): void {
+    try {
+      document.removeEventListener('visibilitychange', visibilityHandler);
+      return;
+    } catch {
+      // Best-effort component teardown.
+    }
+
+    try {
+      document.removeEventListener('visibilitychange', visibilityHandler);
+    } catch {
+      // Ignore destroy-time cleanup failures; state was already detached.
     }
   }
 
@@ -142,51 +159,77 @@ export class BlackBoxPanelComponent implements OnInit, OnDestroy {
    * freshness window 对 panel-open 已绕过，因此不会与定时轮询产生冗余请求。
    */
   private setupVisibilityRefresh(): void {
-    this.visibilityHandler = () => {
+    if (this.visibilityHandler) {
+      return;
+    }
+
+    const visibilityHandler = () => {
       if (document.visibilityState === 'visible') {
         void this.blackBoxService.refreshForView();
       }
     };
-    document.addEventListener('visibilitychange', this.visibilityHandler);
+    try {
+      document.addEventListener('visibilitychange', visibilityHandler);
+      this.visibilityHandler = visibilityHandler;
+    } catch {
+      try {
+        document.removeEventListener('visibilitychange', visibilityHandler);
+      } catch {
+        // Ignore rollback failures after listener setup failure.
+      }
+      this.visibilityHandler = null;
+    }
   }
-  
+
   /**
    * 处理转写完成
    */
-  onTranscribed(text: string): void {
-    if (text.trim()) {
-      const result = this.blackBoxService.create({ content: text.trim() });
-      if (!result.ok) {
-        this.toast.warning('保存失败', result.error.message);
-      }
+  async onTranscribed(text: string): Promise<void> {
+    const content = text.trim();
+    if (!content) {
+      return;
+    }
+
+    const result = await this.blackBoxService.createDurably({ content });
+    if (!result.ok) {
+      this.toast.warning('保存失败', result.error.message);
     }
   }
-  
+
   /**
    * 标记为已读
    */
-  onMarkRead(id: string): void {
-    this.blackBoxService.markAsRead(id);
+  async onMarkRead(id: string): Promise<void> {
+    const result = await this.blackBoxService.markAsReadDurably(id);
+    if (!result.ok) {
+      this.toast.warning('保存失败', result.error.message);
+    }
   }
-  
+
   /**
    * 标记为完成
    */
-  onMarkCompleted(id: string): void {
-    this.blackBoxService.markAsCompleted(id);
+  async onMarkCompleted(id: string): Promise<void> {
+    const result = await this.blackBoxService.markAsCompletedDurably(id);
+    if (!result.ok) {
+      this.toast.warning('保存失败', result.error.message);
+    }
   }
-  
+
   /**
    * 确认删除条目
    */
-  onConfirmDelete(id: string): void {
-    this.blackBoxService.delete(id);
+  async onConfirmDelete(id: string): Promise<void> {
+    const result = await this.blackBoxService.deleteDurably(id);
+    if (!result.ok) {
+      this.toast.warning('保存失败', result.error.message);
+    }
   }
-  
+
   // ===============================================
   // 滑动切换视图手势处理
   // ===============================================
-  
+
   /**
    * 滑动开始 - 在面板容器上调用
    */
@@ -194,27 +237,27 @@ export class BlackBoxPanelComponent implements OnInit, OnDestroy {
     if (event.touches.length !== 1) return;
     this.swipeState = startSwipeTracking(event.touches[0]);
   }
-  
+
   /**
    * 滑动结束 - 检测是否触发视图切换
    * 【重要】检测到有效滑动时阻止事件冒泡，避免 app.component 误打开侧边栏
    */
   onSwipeTouchEnd(event: TouchEvent): void {
     if (!this.swipeState.isActive) return;
-    
+
     const touch = event.changedTouches[0];
     const direction = detectHorizontalSwipe(
       this.swipeState,
       touch.clientX,
       touch.clientY
     );
-    
+
     if (direction) {
       // 阻止事件冒泡，避免 app.component 误判为侧边栏切换手势
       event.stopPropagation();
       this.swipeToSwitch.emit(direction);
     }
-    
+
     this.swipeState = { startX: 0, startY: 0, startTime: 0, isActive: false };
   }
 }

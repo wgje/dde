@@ -1,94 +1,15 @@
 import { TestBed } from '@angular/core/testing';
-import { signal } from '@angular/core';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { DockCompletionFlowService, DockCompletionContext } from './dock-completion-flow.service';
+import { DockCompletionFlowService } from './dock-completion-flow.service';
 import { DockZoneService } from './dock-zone.service';
 import { DockFragmentRestService } from './dock-fragment-rest.service';
-import { TimerHandle } from '../utils/timer-handle';
 import {
-  isWaitingLike,
-  isRunnableStatus,
-  isAutoPromotableStatus,
-  isConsoleBackgroundStatus,
-} from './dock-engine.utils';
-import {
-  DockEntry,
-  DockPendingDecision,
-  DockRuleDecision,
-  DockSchedulerPhase,
-  DockTaskStatus,
-  FragmentDefenseLevel,
-  RecommendationGroup,
-} from '../models/parking-dock';
-
-// ---------------------------------------------------------------------------
-//  Helper: build a minimal DockEntry with sensible defaults
-// ---------------------------------------------------------------------------
-
-function makeEntry(overrides: Partial<DockEntry> & { taskId: string }): DockEntry {
-  return {
-    title: overrides.taskId,
-    sourceProjectId: null,
-    status: 'pending_start',
-    load: 'low',
-    expectedMinutes: 25,
-    waitMinutes: null,
-    waitStartedAt: null,
-    lane: 'combo-select',
-    zoneSource: 'auto',
-    isMain: false,
-    dockedOrder: 0,
-    detail: '',
-    sourceKind: 'project-task',
-    systemSelected: false,
-    recommendedScore: null,
-    ...overrides,
-  };
-}
-
-// ---------------------------------------------------------------------------
-//  Mock services
-// ---------------------------------------------------------------------------
-
-const mockZoneService = {
-  resolveSourceProjectId: vi.fn((entry: DockEntry) => entry.sourceProjectId),
-};
-
-const mockFragmentRest = {
-  startFragmentEntryCountdown: vi.fn(),
-  stopFragmentEntryCountdown: vi.fn(),
-  setFragmentDismissed: vi.fn(),
-  getFragmentEventRecommendation: vi.fn(),
-};
-
-// ---------------------------------------------------------------------------
-//  Build a minimal DockCompletionContext from writable signals
-// ---------------------------------------------------------------------------
-
-function buildContext(initial: {
-  entries?: DockEntry[];
-  focusingEntry?: DockEntry | null;
-  focusMode?: boolean;
-  suspendChainRootTaskId?: string | null;
-}): DockCompletionContext {
-  const entries = signal<DockEntry[]>(initial.entries ?? []);
-  return {
-    entries,
-    pendingDecision: signal<DockPendingDecision | null>(null),
-    highlightedIds: signal<Set<string>>(new Set()),
-    lastRuleDecision: signal<DockRuleDecision | null>(null),
-    lastRecommendationGroups: signal<RecommendationGroup[]>([]),
-    schedulerPhase: signal<DockSchedulerPhase>('active'),
-    fragmentDefenseLevel: signal<FragmentDefenseLevel>(1),
-    lastConsoleDemotedTaskId: signal<string | null>(null),
-    consoleVisibleOrderHint: signal<string[]>([]),
-    consoleVisibleEntries: signal<DockEntry[]>(initial.entries ?? []),
-    focusingEntry: signal<DockEntry | null>(initial.focusingEntry ?? null),
-    focusMode: signal(initial.focusMode ?? false),
-    suspendChainRootTaskId: signal<string | null>(initial.suspendChainRootTaskId ?? null),
-    highlightClearTimer: new TimerHandle(),
-  };
-}
+  buildDockCompletionContext as buildContext,
+  makeDockCompletionEntry as makeEntry,
+  mockDockCompletionFragmentRest as mockFragmentRest,
+  mockDockCompletionZoneService as mockZoneService,
+} from './dock-completion-flow.service.spec-helpers';
+import { registerDockCompletionFlowHelperSpecs } from './dock-completion-flow-helper.spec-helpers';
 
 // ---------------------------------------------------------------------------
 //  Test suite
@@ -111,306 +32,9 @@ describe('DockCompletionFlowService', () => {
     service = TestBed.inject(DockCompletionFlowService);
   });
 
-  // =========================================================================
-  //  1. Status helpers
-  // =========================================================================
-
-  describe('status helpers', () => {
-    describe('isWaitingLike', () => {
-      it.each([
-        ['suspended_waiting', true],
-        ['wait_finished', true],
-        ['pending_start', false],
-        ['focusing', false],
-        ['stalled', false],
-        ['completed', false],
-      ] as [DockTaskStatus, boolean][])('isWaitingLike(%s) → %s', (status, expected) => {
-        expect(isWaitingLike(status)).toBe(expected);
-      });
-    });
-
-    describe('isRunnableStatus', () => {
-      it.each([
-        ['pending_start', true],
-        ['wait_finished', true],
-        ['stalled', true],
-        ['focusing', false],
-        ['suspended_waiting', false],
-        ['completed', false],
-      ] as [DockTaskStatus, boolean][])('isRunnableStatus(%s) → %s', (status, expected) => {
-        expect(isRunnableStatus(status)).toBe(expected);
-      });
-    });
-
-    describe('isAutoPromotableStatus', () => {
-      it.each([
-        ['pending_start', true],
-        ['stalled', true],
-        ['focusing', false],
-        ['suspended_waiting', false],
-        ['wait_finished', false],
-        ['completed', false],
-      ] as [DockTaskStatus, boolean][])('isAutoPromotableStatus(%s) → %s', (status, expected) => {
-        expect(isAutoPromotableStatus(status)).toBe(expected);
-      });
-    });
-
-    describe('isConsoleBackgroundStatus', () => {
-      it.each([
-        ['suspended_waiting', true],
-        ['wait_finished', true],
-        ['stalled', true],
-        ['pending_start', false],
-        ['focusing', false],
-        ['completed', false],
-      ] as [DockTaskStatus, boolean][])('isConsoleBackgroundStatus(%s) → %s', (status, expected) => {
-        expect(isConsoleBackgroundStatus(status)).toBe(expected);
-      });
-    });
-  });
-
-  // =========================================================================
-  //  2. Conversion helpers
-  // =========================================================================
-
-  describe('toSchedulerCandidate', () => {
-    it('maps all DockEntry fields into the scheduler candidate shape', () => {
-      const entry = makeEntry({
-        taskId: 'task-1',
-        lane: 'backup',
-        load: 'high',
-        expectedMinutes: 30,
-        waitMinutes: 10,
-        dockedOrder: 2,
-        manualOrder: 1,
-        relationScore: 42,
-        sourceProjectId: 'proj-1',
-      });
-
-      const candidate = service.toSchedulerCandidate(entry);
-
-      expect(candidate).toEqual({
-        taskId: 'task-1',
-        lane: 'backup',
-        load: 'high',
-        expectedMinutes: 30,
-        waitMinutes: 10,
-        dockedOrder: 2,
-        manualOrder: 1,
-        relationScore: 42,
-        sourceProjectId: 'proj-1',
-      });
-    });
-
-    it('normalizes undefined manualOrder and relationScore to null', () => {
-      const entry = makeEntry({ taskId: 'task-2' });
-      // manualOrder and relationScore are not set (undefined by default)
-
-      const candidate = service.toSchedulerCandidate(entry);
-
-      expect(candidate.manualOrder).toBeNull();
-      expect(candidate.relationScore).toBeNull();
-    });
-
-    it('falls back to zoneService.resolveSourceProjectId when entry.sourceProjectId is null', () => {
-      mockZoneService.resolveSourceProjectId.mockReturnValueOnce('resolved-proj');
-      const entry = makeEntry({ taskId: 'task-3', sourceProjectId: null });
-
-      const candidate = service.toSchedulerCandidate(entry);
-
-      expect(candidate.sourceProjectId).toBe('resolved-proj');
-      expect(mockZoneService.resolveSourceProjectId).toHaveBeenCalledWith(entry);
-    });
-  });
-
-  describe('toFocusTaskSlot', () => {
-    it('creates a FocusTaskSlot with mapped focusStatus and zone', () => {
-      const entry = makeEntry({
-        taskId: 'slot-1',
-        status: 'focusing',
-        load: 'high',
-        expectedMinutes: 45,
-        waitMinutes: null,
-        isMain: true,
-        dockedOrder: 0,
-        sourceProjectId: 'proj-a',
-        sourceKind: 'project-task',
-      });
-
-      const slot = service.toFocusTaskSlot(entry, 'command', 0);
-
-      expect(slot.slotId).toBe('slot-1');
-      expect(slot.taskId).toBe('slot-1');
-      expect(slot.estimatedMinutes).toBe(45);
-      expect(slot.waitMinutes).toBeNull();
-      expect(slot.cognitiveLoad).toBe('high');
-      expect(slot.focusStatus).toBe('focusing');
-      expect(slot.zone).toBe('command');
-      expect(slot.zoneIndex).toBe(0);
-      expect(slot.isMaster).toBe(true);
-      expect(slot.waitStartedAt).toBeNull();
-      expect(slot.waitEndAt).toBeNull();
-      expect(slot.sourceProjectId).toBe('proj-a');
-      expect(slot.sourceBlockType).toBeNull();
-      expect(slot.isFirstBatch).toBe(true);
-      expect(slot.inlineTitle).toBe('slot-1');
-    });
-
-    it('maps dock-created sourceKind to text sourceBlockType', () => {
-      const entry = makeEntry({
-        taskId: 'inline-1',
-        sourceKind: 'dock-created',
-      });
-
-      const slot = service.toFocusTaskSlot(entry);
-
-      expect(slot.sourceBlockType).toBe('text');
-    });
-
-    it('maps pending_start status to pending focusStatus', () => {
-      const entry = makeEntry({ taskId: 'ps-1', status: 'pending_start' });
-      expect(service.toFocusTaskSlot(entry).focusStatus).toBe('pending');
-    });
-
-    it('maps suspended_waiting to suspend-waiting', () => {
-      const entry = makeEntry({ taskId: 'sw-1', status: 'suspended_waiting' });
-      expect(service.toFocusTaskSlot(entry).focusStatus).toBe('suspend-waiting');
-    });
-
-    it('maps wait_finished to wait-ended', () => {
-      const entry = makeEntry({ taskId: 'wf-1', status: 'wait_finished' });
-      expect(service.toFocusTaskSlot(entry).focusStatus).toBe('wait-ended');
-    });
-
-    it('computes waitEndAt when waitStartedAt and waitMinutes are present', () => {
-      const startedAt = '2024-01-01T00:00:00.000Z';
-      const entry = makeEntry({
-        taskId: 'w-1',
-        waitStartedAt: startedAt,
-        waitMinutes: 10,
-      });
-
-      const slot = service.toFocusTaskSlot(entry);
-
-      const startMs = new Date(startedAt).getTime();
-      expect(slot.waitStartedAt).toBe(startMs);
-      expect(slot.waitEndAt).toBe(startMs + 10 * 60_000);
-    });
-
-    it('defaults zone to command and idx to 0', () => {
-      const entry = makeEntry({ taskId: 'default-1' });
-      const slot = service.toFocusTaskSlot(entry);
-      expect(slot.zone).toBe('command');
-      expect(slot.zoneIndex).toBe(0);
-    });
-  });
-
-  describe('getWaitRemainingSeconds', () => {
-    it('returns null when no wait timer is configured', () => {
-      const entry = makeEntry({ taskId: 'no-wait' });
-      expect(service.getWaitRemainingSeconds(entry)).toBeNull();
-    });
-
-    it('returns remaining seconds for an active wait timer', () => {
-      vi.useFakeTimers();
-      const now = Date.now();
-      vi.setSystemTime(now);
-
-      const entry = makeEntry({
-        taskId: 'wait-1',
-        waitStartedAt: new Date(now - 5 * 60_000).toISOString(),
-        waitMinutes: 10,
-      });
-
-      const remaining = service.getWaitRemainingSeconds(entry);
-      expect(remaining).toBe(5 * 60); // 5 minutes remaining
-
-      vi.useRealTimers();
-    });
-
-    it('returns 0 when wait time has fully elapsed', () => {
-      vi.useFakeTimers();
-      const now = Date.now();
-      vi.setSystemTime(now);
-
-      const entry = makeEntry({
-        taskId: 'wait-expired',
-        waitStartedAt: new Date(now - 15 * 60_000).toISOString(),
-        waitMinutes: 10,
-      });
-
-      expect(service.getWaitRemainingSeconds(entry)).toBe(0);
-
-      vi.useRealTimers();
-    });
-  });
-
-  // =========================================================================
-  //  3. deriveBackgroundStatus
-  // =========================================================================
-
-  describe('deriveBackgroundStatus', () => {
-    it('returns suspended_waiting when entry has an active wait timer', () => {
-      vi.useFakeTimers();
-      const now = Date.now();
-      vi.setSystemTime(now);
-
-      const entry = makeEntry({
-        taskId: 'bg-1',
-        waitStartedAt: new Date(now - 1 * 60_000).toISOString(),
-        waitMinutes: 10,
-      });
-
-      expect(service.deriveBackgroundStatus(entry)).toBe('suspended_waiting');
-      vi.useRealTimers();
-    });
-
-    it('returns wait_finished when wait timer has expired', () => {
-      vi.useFakeTimers();
-      const now = Date.now();
-      vi.setSystemTime(now);
-
-      const entry = makeEntry({
-        taskId: 'bg-2',
-        waitStartedAt: new Date(now - 20 * 60_000).toISOString(),
-        waitMinutes: 10,
-      });
-
-      expect(service.deriveBackgroundStatus(entry)).toBe('wait_finished');
-      vi.useRealTimers();
-    });
-
-    it('returns stalled when current focus is non-main and nextTarget is main', () => {
-      const entry = makeEntry({ taskId: 'bg-3', status: 'pending_start' });
-      const nextTarget = makeEntry({ taskId: 'next', isMain: true });
-      const currentFocus = makeEntry({ taskId: 'current', isMain: false });
-
-      expect(service.deriveBackgroundStatus(entry, nextTarget, currentFocus)).toBe('stalled');
-    });
-
-    it('preserves stalled status for already stalled entry', () => {
-      const entry = makeEntry({ taskId: 'bg-stall', status: 'stalled' });
-      expect(service.deriveBackgroundStatus(entry)).toBe('stalled');
-    });
-
-    it('returns stalled for a focusing entry being moved to background', () => {
-      const entry = makeEntry({ taskId: 'bg-focus', status: 'focusing' });
-      expect(service.deriveBackgroundStatus(entry)).toBe('stalled');
-    });
-
-    it('defaults to pending_start for entries with no special conditions', () => {
-      const entry = makeEntry({ taskId: 'bg-default', status: 'pending_start' });
-      expect(service.deriveBackgroundStatus(entry)).toBe('pending_start');
-    });
-
-    it('does not return stalled when currentFocus is main even if nextTarget is main', () => {
-      const entry = makeEntry({ taskId: 'bg-4', status: 'pending_start' });
-      const nextTarget = makeEntry({ taskId: 'next', isMain: true });
-      const currentFocus = makeEntry({ taskId: 'current', isMain: true });
-
-      // currentFocus.isMain === true, so the stalled branch is NOT taken
-      expect(service.deriveBackgroundStatus(entry, nextTarget, currentFocus)).toBe('pending_start');
-    });
+  registerDockCompletionFlowHelperSpecs({
+    service: () => service,
+    zoneService: () => mockZoneService,
   });
 
   // =========================================================================
@@ -464,6 +88,69 @@ describe('DockCompletionFlowService', () => {
       expect(ctx.highlightedIds()).toContain('root');
       expect(ctx.lastRuleDecision()?.type).toBe('completion_followup');
       expect(ctx.lastRuleDecision()?.reason).toContain('主任务等待结束');
+
+      vi.useRealTimers();
+    });
+
+    it('restores a wait-finished suspend root as main before fallback recommendations', () => {
+      vi.useFakeTimers();
+      const now = Date.now();
+      vi.setSystemTime(now);
+
+      const ctx = buildContext({
+        entries: [
+          makeEntry({
+            taskId: 'fresh-main',
+            title: 'fresh main',
+            isMain: true,
+            status: 'completed',
+            dockedOrder: 0,
+          }),
+          makeEntry({
+            taskId: 'suspended-root',
+            title: 'suspended root',
+            isMain: false,
+            status: 'wait_finished',
+            waitStartedAt: new Date(now - 20 * 60_000).toISOString(),
+            waitMinutes: 10,
+            dockedOrder: 1,
+          }),
+          makeEntry({
+            taskId: 'fresh-recommendation',
+            title: 'fresh recommendation',
+            isMain: false,
+            status: 'stalled',
+            dockedOrder: 2,
+          }),
+        ],
+        suspendChainRootTaskId: 'suspended-root',
+        focusMode: false,
+      });
+      ctx.pendingDecision.set({
+        rootTaskId: 'suspended-root',
+        rootRemainingMinutes: 0,
+        candidateGroups: [{ type: 'homologous-advancement', taskIds: ['fresh-recommendation'] }],
+        reason: 'stale recommendations',
+        createdAt: new Date(now).toISOString(),
+      });
+      service.init(ctx);
+
+      service.resolveAfterCompletion('fresh-main');
+
+      const restored = ctx.entries().find(entry => entry.taskId === 'suspended-root');
+      const freshRecommendation = ctx.entries().find(entry => entry.taskId === 'fresh-recommendation');
+      expect(restored).toMatchObject({
+        isMain: true,
+        status: 'focusing',
+        waitMinutes: null,
+        waitStartedAt: null,
+        systemSelected: false,
+        recommendationLocked: false,
+      });
+      expect(freshRecommendation?.isMain).toBe(false);
+      expect(ctx.pendingDecision()).toBeNull();
+      expect(ctx.highlightedIds()).toEqual(new Set(['suspended-root']));
+      expect(ctx.lastRuleDecision()?.recommendedTaskIds).toEqual(['suspended-root']);
 
       vi.useRealTimers();
     });

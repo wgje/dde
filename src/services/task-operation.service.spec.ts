@@ -21,6 +21,8 @@ import { ProjectStateService } from './project-state.service';
 import { TaskRecordTrackingService } from './task-record-tracking.service';
 import { TombstoneService } from '../core-bridge';
 import { Project, Task, Connection } from '../models';
+import { success } from '../utils/result';
+import { registerTaskOperationMoveStageSpecs } from './task-operation-move-stage.spec-helpers';
 
 const mockLoggerCategory = {
   info: vi.fn(),
@@ -87,6 +89,8 @@ function createProject(overrides: Partial<Project>): Project {
   };
 }
 
+registerTaskOperationMoveStageSpecs({ createTask, createProject });
+
 describe('TaskOperationService (deletedMeta restore)', () => {
   let service: TaskOperationService;
   let project: Project;
@@ -114,6 +118,10 @@ describe('TaskOperationService (deletedMeta restore)', () => {
       },
       recordAndUpdateDebounced: (mutator: (p: Project) => Project) => {
         project = mutator(project);
+      },
+      recordAndUpdateDurably: async (mutator: (p: Project) => Project) => {
+        project = mutator(project);
+        return true;
       },
       lastUpdateType: 'structure' as const,
     };
@@ -145,7 +153,7 @@ describe('TaskOperationService (deletedMeta restore)', () => {
     consoleDebugSpy?.mockRestore();
   });
 
-  it('deleteTask() 会写入 deletedMeta，restoreTask() 会消费并清除 deletedMeta', () => {
+  it('deleteTask() 会写入 deletedMeta，restoreTask() 会消费并清除 deletedMeta', async () => {
     const parent = createTask({
       id: 'parent',
       stage: 1,
@@ -196,7 +204,7 @@ describe('TaskOperationService (deletedMeta restore)', () => {
       connections,
     });
 
-    service.deleteTask('parent');
+    await service.deleteTask('parent');
 
     const afterDeleteParent = project.tasks.find(t => t.id === 'parent')!;
     const afterDeleteChild = project.tasks.find(t => t.id === 'child')!;
@@ -257,190 +265,10 @@ describe('TaskOperationService (deletedMeta restore)', () => {
   });
 });
 
-describe('TaskOperationService (moveTaskToStage parentId validation)', () => {
-  let service: TaskOperationService;
-  let project: Project;
-  let consoleLogSpy: ReturnType<typeof vi.spyOn> | undefined;
-  let consoleInfoSpy: ReturnType<typeof vi.spyOn> | undefined;
-  let consoleDebugSpy: ReturnType<typeof vi.spyOn> | undefined;
-
-  beforeEach(() => {
-    consoleLogSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-    consoleInfoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
-    consoleDebugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {});
-
-    project = createProject({});
-
-    const mockProjectState = {
-      activeProject: () => project,
-      getTask: (taskId: string) => project?.tasks.find(t => t.id === taskId),
-    };
-    const mockRecorder = {
-      recordAndUpdate: (mutator: (p: Project) => Project) => {
-        project = mutator(project);
-      },
-      recordAndUpdateDebounced: (mutator: (p: Project) => Project) => {
-        project = mutator(project);
-      },
-      lastUpdateType: 'structure' as const,
-    };
-
-    const injector = Injector.create({
-      providers: [
-        { provide: LayoutService, useClass: LayoutService },
-        { provide: ToastService, useClass: ToastService },
-        { provide: LoggerService, useValue: mockLoggerService },
-        { provide: ParkingService, useValue: mockParkingService },
-        { provide: TombstoneService, useValue: mockTombstoneService },
-        { provide: TaskTrashService, useClass: TaskTrashService },
-        { provide: SubtreeOperationsService, useClass: SubtreeOperationsService },
-        { provide: TaskCreationService, useClass: TaskCreationService },
-        { provide: TaskMoveService, useClass: TaskMoveService },
-        { provide: TaskAttributeService, useClass: TaskAttributeService },
-        { provide: TaskConnectionService, useClass: TaskConnectionService },
-        { provide: ProjectStateService, useValue: mockProjectState },
-        { provide: TaskRecordTrackingService, useValue: mockRecorder },
-      ],
-    });
-
-    service = runInInjectionContext(injector, () => new TaskOperationService());
-  });
-
-  afterEach(() => {
-    consoleLogSpy?.mockRestore();
-    consoleInfoSpy?.mockRestore();
-    consoleDebugSpy?.mockRestore();
-  });
-
-  it('移动任务到远距离阶段时应清除无效的 parentId', () => {
-    // 场景：root 在 stage=1，child 在 stage=2 且 parentId=root
-    // 当 child 移动到 stage=5 时，parentId 应被清除（因为 root 不在 stage=4）
-    const root = createTask({
-      id: 'root',
-      stage: 1,
-      parentId: null,
-      rank: 10000,
-      displayId: '1',
-    });
-    const child = createTask({
-      id: 'child',
-      stage: 2,
-      parentId: 'root',
-      rank: 20000,
-      displayId: '1,a',
-    });
-
-    project = createProject({ tasks: [root, child] });
-
-    // 移动 child 到 stage=5，不提供 newParentId
-    service.moveTaskToStage({ taskId: 'child', newStage: 5 });
-
-    const movedChild = project.tasks.find(t => t.id === 'child')!;
-    expect(movedChild.stage).toBe(5);
-    // parentId 应被清除，因为 root 在 stage=1，不是 stage=4
-    expect(movedChild.parentId).toBeNull();
-  });
-
-  it('移动任务到相邻阶段时应保留有效的 parentId', () => {
-    // 场景：root 在 stage=1，child 在 stage=2 且 parentId=root
-    // 由于 rebalance 会强制子任务 stage = parent.stage + 1，
-    // 移动到 stage=2 应保留 parentId
-    const root = createTask({
-      id: 'root',
-      stage: 1,
-      parentId: null,
-      rank: 10000,
-    });
-    const child = createTask({
-      id: 'child',
-      stage: 2,
-      parentId: 'root',
-      rank: 20000,
-    });
-
-    project = createProject({ tasks: [root, child] });
-
-    // 移动 child 到 stage=2（相邻阶段），不提供 newParentId
-    service.moveTaskToStage({ taskId: 'child', newStage: 2 });
-
-    const movedChild = project.tasks.find(t => t.id === 'child')!;
-    expect(movedChild.stage).toBe(2);
-    // parentId 应保留，因为 root 在 stage=1 = newStage - 1
-    expect(movedChild.parentId).toBe('root');
-  });
-
-  it('移动父任务时应级联更新所有子任务的 stage', () => {
-    // 场景：root 在 stage=1，child 在 stage=2，grandchild 在 stage=3
-    // 当 root 移动到 stage=3 时，child 应变为 stage=4，grandchild 应变为 stage=5
-    const stageOneAnchor = createTask({
-      id: 'stage-one-anchor',
-      stage: 1,
-      parentId: null,
-      rank: 5000,
-    });
-    const root = createTask({
-      id: 'root',
-      stage: 1,
-      parentId: null,
-      rank: 10000,
-    });
-    const child = createTask({
-      id: 'child',
-      stage: 2,
-      parentId: 'root',
-      rank: 20000,
-    });
-    const grandchild = createTask({
-      id: 'grandchild',
-      stage: 3,
-      parentId: 'child',
-      rank: 30000,
-    });
-
-    project = createProject({ tasks: [stageOneAnchor, root, child, grandchild] });
-
-    // 移动 root 到 stage=3
-    service.moveTaskToStage({ taskId: 'root', newStage: 3 });
-
-    const movedRoot = project.tasks.find(t => t.id === 'root')!;
-    const movedChild = project.tasks.find(t => t.id === 'child')!;
-    const movedGrandchild = project.tasks.find(t => t.id === 'grandchild')!;
-
-    expect(movedRoot.stage).toBe(3);
-    // 子任务应级联更新到 stage=4
-    expect(movedChild.stage).toBe(4);
-    // 孙任务应级联更新到 stage=5
-    expect(movedGrandchild.stage).toBe(5);
-  });
-
-  it('移动任务到未分配区域应清除 parentId', () => {
-    const root = createTask({
-      id: 'root',
-      stage: 1,
-      parentId: null,
-      rank: 10000,
-    });
-    const child = createTask({
-      id: 'child',
-      stage: 2,
-      parentId: 'root',
-      rank: 20000,
-    });
-
-    project = createProject({ tasks: [root, child] });
-
-    // 移动 child 到未分配区域（stage=null）
-    service.moveTaskToStage({ taskId: 'child', newStage: null });
-
-    const movedChild = project.tasks.find(t => t.id === 'child')!;
-    expect(movedChild.stage).toBeNull();
-    expect(movedChild.parentId).toBeNull();
-  });
-});
-
 describe('TaskOperationService (database constraint validation)', () => {
   let service: TaskOperationService;
   let project: Project;
+  let recordAndUpdateDurably: ReturnType<typeof vi.fn>;
   let consoleLogSpy: ReturnType<typeof vi.spyOn> | undefined;
   let consoleInfoSpy: ReturnType<typeof vi.spyOn> | undefined;
   let consoleDebugSpy: ReturnType<typeof vi.spyOn> | undefined;
@@ -463,6 +291,10 @@ describe('TaskOperationService (database constraint validation)', () => {
       recordAndUpdateDebounced: (mutator: (p: Project) => Project) => {
         project = mutator(project);
       },
+      recordAndUpdateDurably: recordAndUpdateDurably = vi.fn(async (mutator: (p: Project) => Project) => {
+        project = mutator(project);
+        return true;
+      }),
       lastUpdateType: 'structure' as const,
     };
 
@@ -493,8 +325,8 @@ describe('TaskOperationService (database constraint validation)', () => {
     consoleDebugSpy?.mockRestore();
   });
 
-  it('addTask 当 title 和 content 都为空时应设置默认 title', () => {
-    const result = service.addTask({
+  it('addTask 当 title 和 content 都为空时应设置默认 title', async () => {
+    const result = await service.addTask({
       title: '',
       content: '',
       targetStage: 1,
@@ -507,6 +339,25 @@ describe('TaskOperationService (database constraint validation)', () => {
       const newTask = project.tasks.find(t => t.id === result.value);
       expect(newTask).toBeDefined();
       expect(newTask!.title).toBe('新任务');
+    }
+  });
+
+  it('addTaskDurably 应通过本地持久化路径创建任务', async () => {
+    const result = await service.addTaskDurably({
+      title: '本地优先创建',
+      content: 'offline-first',
+      targetStage: 1,
+      parentId: null,
+      isSibling: false
+    });
+
+    expect(result.ok).toBe(true);
+    expect(recordAndUpdateDurably).toHaveBeenCalledTimes(1);
+    if (result.ok) {
+      const newTask = project.tasks.find(t => t.id === result.value);
+      expect(newTask).toBeDefined();
+      expect(newTask!.title).toBe('本地优先创建');
+      expect(newTask!.content).toBe('offline-first');
     }
   });
 
@@ -530,8 +381,8 @@ describe('TaskOperationService (database constraint validation)', () => {
     expect(updatedTask.title).toBe('新任务');
   });
 
-  it('addTask 当 title 有值但 content 为空时不应修改 title', () => {
-    const result = service.addTask({
+  it('addTask 当 title 有值但 content 为空时不应修改 title', async () => {
+    const result = await service.addTask({
       title: '我的标题',
       content: '',
       targetStage: 1,
@@ -546,8 +397,8 @@ describe('TaskOperationService (database constraint validation)', () => {
     }
   });
 
-  it('addFloatingTask 当 title 和 content 都为空时应设置默认 title', () => {
-    service.addFloatingTask('', '', 100, 200);
+  it('addFloatingTask 当 title 和 content 都为空时应设置默认 title', async () => {
+    await service.addFloatingTask('', '', 100, 200);
 
     const floatingTasks = project.tasks.filter(t => t.stage === null);
     expect(floatingTasks.length).toBeGreaterThan(0);
@@ -555,6 +406,279 @@ describe('TaskOperationService (database constraint validation)', () => {
     expect(newTask.title).toBe('新任务');
     expect(newTask.x).toBe(100);
     expect(newTask.y).toBe(200);
+  });
+
+  it('addFloatingTaskDurably 应通过本地持久化路径创建浮动任务', async () => {
+    const saved = await service.addFloatingTaskDurably('本地浮动', '', 100, 200);
+
+    expect(saved).toBe(true);
+    expect(recordAndUpdateDurably).toHaveBeenCalledTimes(1);
+    const floatingTasks = project.tasks.filter(t => t.stage === null);
+    expect(floatingTasks.length).toBeGreaterThan(0);
+    const newTask = floatingTasks[floatingTasks.length - 1];
+    expect(newTask.title).toBe('本地浮动');
+    expect(newTask.x).toBe(100);
+    expect(newTask.y).toBe(200);
+  });
+
+  it('deleteTaskDurably 应通过本地持久化路径软删除任务', async () => {
+    const task = createTask({ id: 'task-delete', title: '本地删除', deletedAt: null });
+    project = createProject({ tasks: [task] });
+
+    const result = await service.deleteTaskDurably('task-delete');
+
+    expect(result.saved).toBe(true);
+    expect(recordAndUpdateDurably).toHaveBeenCalledTimes(1);
+    expect(result.deletedTaskIds).toEqual(new Set(['task-delete']));
+    expect(project.tasks.find(t => t.id === 'task-delete')?.deletedAt).toBeTruthy();
+  });
+
+  it('deleteTaskKeepChildrenDurably 应软删除父任务并保留子任务', async () => {
+    const parent = createTask({ id: 'parent', stage: 1, parentId: null, deletedAt: null });
+    const child = createTask({ id: 'child', stage: 2, parentId: 'parent', deletedAt: null });
+    project = createProject({ tasks: [parent, child] });
+
+    const result = await service.deleteTaskKeepChildrenDurably('parent');
+
+    expect(result.saved).toBe(true);
+    expect(recordAndUpdateDurably).toHaveBeenCalledTimes(1);
+    expect(result.deletedTaskIds).toEqual(new Set(['parent']));
+    expect(project.tasks.find(t => t.id === 'parent')?.deletedAt).toBeTruthy();
+    expect(project.tasks.find(t => t.id === 'child')?.deletedAt).toBeNull();
+    expect(project.tasks.find(t => t.id === 'child')?.parentId).toBeNull();
+  });
+
+  it('trash restore and hard-delete durable wrappers 应复用本地持久化路径', async () => {
+    const deletedAt = '2026-06-01T00:00:00.000Z';
+    const deletedTask = createTask({
+      id: 'task-restore',
+      title: '恢复',
+      deletedAt,
+      deletedMeta: { parentId: null, stage: 1, order: 1, rank: 1000, x: 0, y: 0, parkingMeta: null },
+    });
+    const hardDeleteTask = createTask({ id: 'task-hard-delete', deletedAt });
+    const emptyTrashTask = createTask({ id: 'task-empty-trash', deletedAt });
+    project = createProject({ tasks: [deletedTask, hardDeleteTask, emptyTrashTask] });
+
+    const restoreResult = await service.restoreTaskDurably('task-restore');
+    const permanentResult = await service.permanentlyDeleteTaskDurably('task-hard-delete');
+    const emptyResult = await service.emptyTrashDurably();
+
+    expect(restoreResult.saved).toBe(true);
+    expect(permanentResult.saved).toBe(true);
+    expect(emptyResult.saved).toBe(true);
+    expect(recordAndUpdateDurably).toHaveBeenCalledTimes(3);
+    expect(project.tasks.map(task => task.id)).toEqual(['task-restore']);
+    expect(project.tasks[0].deletedAt).toBeNull();
+  });
+
+  it('moveTaskToStageDurably 应通过本地持久化路径移动任务', async () => {
+    const root = createTask({ id: 'root', stage: 1, parentId: null, rank: 1000 });
+    const task = createTask({ id: 'move-task', stage: 2, parentId: 'root', rank: 2000 });
+    project = createProject({ tasks: [root, task] });
+
+    const result = await service.moveTaskToStageDurably({ taskId: 'move-task', newStage: 5 });
+
+    expect(result.ok).toBe(true);
+    expect(recordAndUpdateDurably).toHaveBeenCalledTimes(1);
+    expect(project.tasks.find(t => t.id === 'move-task')?.stage).toBe(5);
+    expect(project.tasks.find(t => t.id === 'move-task')?.parentId).toBeNull();
+  });
+
+  it('insertTaskBetweenDurably 应通过本地持久化路径插入任务', async () => {
+    const source = createTask({ id: 'source', stage: 1, parentId: null, rank: 1000 });
+    const target = createTask({ id: 'target', stage: 2, parentId: 'source', rank: 2000 });
+    const inserted = createTask({ id: 'inserted', stage: null, parentId: null, rank: 3000 });
+    project = createProject({ tasks: [source, target, inserted] });
+
+    const result = await service.insertTaskBetweenDurably({
+      taskId: 'inserted',
+      sourceId: 'source',
+      targetId: 'target',
+    });
+
+    expect(result.ok).toBe(true);
+    expect(recordAndUpdateDurably).toHaveBeenCalledTimes(1);
+    expect(project.tasks.find(t => t.id === 'inserted')?.parentId).toBe('source');
+    expect(project.tasks.find(t => t.id === 'target')?.parentId).toBe('inserted');
+  });
+
+  it('insertTaskBetweenAtPositionDurably 应在同一次本地持久化提交中插入任务并写入落点', async () => {
+    const source = createTask({ id: 'source', stage: 1, parentId: null, rank: 1000 });
+    const target = createTask({ id: 'target', stage: 2, parentId: 'source', rank: 2000 });
+    const inserted = createTask({ id: 'inserted', stage: null, parentId: null, rank: 3000, x: 0, y: 0 });
+    project = createProject({ tasks: [source, target, inserted] });
+
+    const result = await service.insertTaskBetweenAtPositionDurably({
+      taskId: 'inserted',
+      sourceId: 'source',
+      targetId: 'target',
+      x: 40,
+      y: 60,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(recordAndUpdateDurably).toHaveBeenCalledTimes(1);
+    expect(project.tasks.find(t => t.id === 'inserted')).toMatchObject({
+      parentId: 'source',
+      stage: 2,
+      rank: 2000,
+      x: 40,
+      y: 60,
+    });
+    expect(project.tasks.find(t => t.id === 'target')?.parentId).toBe('inserted');
+  });
+
+  it('insertTaskBetweenDurably 在本地持久化失败时不提交 UI 变更', async () => {
+    const source = createTask({ id: 'source', stage: 1, parentId: null, rank: 1000 });
+    const target = createTask({ id: 'target', stage: 2, parentId: 'source', rank: 2000 });
+    const inserted = createTask({ id: 'inserted', stage: null, parentId: null, rank: 3000 });
+    project = createProject({ tasks: [source, target, inserted] });
+    recordAndUpdateDurably.mockResolvedValueOnce(false);
+
+    const result = await service.insertTaskBetweenDurably({
+      taskId: 'inserted',
+      sourceId: 'source',
+      targetId: 'target',
+    });
+
+    expect(result.ok).toBe(false);
+    expect(project.tasks.find(t => t.id === 'inserted')?.parentId).toBeNull();
+    expect(project.tasks.find(t => t.id === 'target')?.parentId).toBe('source');
+  });
+
+  it('reorderStageDurably 应通过本地持久化路径重排阶段任务', async () => {
+    const first = createTask({ id: 'first', stage: 1, parentId: null, rank: 1000 });
+    const second = createTask({ id: 'second', stage: 1, parentId: null, rank: 2000 });
+    project = createProject({ tasks: [first, second] });
+
+    const saved = await service.reorderStageDurably(1, ['second', 'first']);
+
+    expect(saved).toBe(true);
+    expect(recordAndUpdateDurably).toHaveBeenCalledTimes(1);
+    expect(project.tasks.find(t => t.id === 'second')?.rank).toBeLessThan(
+      project.tasks.find(t => t.id === 'first')!.rank,
+    );
+  });
+
+  it('repairMissingStageOne 默认入口应通过本地持久化路径修复缺失阶段 1', async () => {
+    const stageTwoRoot = createTask({ id: 'stage-two-root', stage: 2, parentId: null, rank: 2000 });
+    project = createProject({ tasks: [stageTwoRoot] });
+
+    const saved = await service.repairMissingStageOne();
+
+    expect(saved).toBe(true);
+    expect(recordAndUpdateDurably).toHaveBeenCalledTimes(1);
+  });
+
+  it('repairMissingStageOne 默认入口在本地持久化失败时不提交 UI 变更', async () => {
+    const stageTwoRoot = createTask({ id: 'stage-two-root', stage: 2, parentId: null, rank: 2000 });
+    project = createProject({ tasks: [stageTwoRoot] });
+    recordAndUpdateDurably.mockResolvedValueOnce(false);
+
+    const saved = await service.repairMissingStageOne();
+
+    expect(saved).toBe(false);
+    expect(recordAndUpdateDurably).toHaveBeenCalledTimes(1);
+  });
+
+  it('repairMissingStageOneDurably 应通过本地持久化路径修复缺失阶段 1', async () => {
+    const stageTwoRoot = createTask({ id: 'stage-two-root', stage: 2, parentId: null, rank: 2000 });
+    project = createProject({ tasks: [stageTwoRoot] });
+
+    const saved = await service.repairMissingStageOneDurably();
+
+    expect(saved).toBe(true);
+    expect(recordAndUpdateDurably).toHaveBeenCalledTimes(1);
+  });
+
+  it('updateTaskPositionWithRankSyncDurably 应通过本地持久化路径更新坐标和 rank', async () => {
+    const moving = createTask({ id: 'moving', stage: 1, parentId: null, rank: 1000, x: 0, y: 0 });
+    const after = createTask({ id: 'after', stage: 1, parentId: null, rank: 2000, x: 0, y: 200 });
+    project = createProject({ tasks: [moving, after] });
+
+    const saved = await service.updateTaskPositionWithRankSyncDurably('moving', 40, 300);
+
+    expect(saved).toBe(true);
+    expect(recordAndUpdateDurably).toHaveBeenCalledTimes(1);
+    const updated = project.tasks.find(task => task.id === 'moving');
+    expect(updated).toEqual(expect.objectContaining({
+      x: 40,
+      y: 300,
+      rank: expect.any(Number),
+    }));
+    expect(updated?.rank).toBeGreaterThan(after.rank);
+  });
+
+  it('detach and subtree durable wrappers 应复用本地持久化路径', async () => {
+    const root = createTask({ id: 'root', stage: 1, parentId: null, rank: 1000 });
+    const child = createTask({ id: 'child', stage: 2, parentId: 'root', rank: 2000 });
+    const newParent = createTask({ id: 'new-parent', stage: 1, parentId: null, rank: 3000 });
+    const moving = createTask({ id: 'moving', stage: 2, parentId: 'root', rank: 4000 });
+    project = createProject({ tasks: [root, child, newParent, moving] });
+
+    const detached = await service.detachTaskDurably('child');
+    const subtreeDetached = await service.detachTaskWithSubtreeDurably('root');
+    const moved = await service.moveSubtreeToNewParentDurably('moving', 'new-parent');
+
+    expect(detached).toBe(true);
+    expect(subtreeDetached.ok).toBe(true);
+    expect(moved.ok).toBe(true);
+    expect(recordAndUpdateDurably).toHaveBeenCalledTimes(3);
+    expect(project.tasks.find(t => t.id === 'child')?.stage).toBeNull();
+    expect(project.tasks.find(t => t.id === 'root')?.stage).toBeNull();
+    expect(project.tasks.find(t => t.id === 'moving')?.parentId).toBe('new-parent');
+  });
+
+  it('assignment durable wrappers 应复用本地持久化路径', async () => {
+    const taskMove = (service as unknown as { taskMove: TaskMoveService }).taskMove;
+    const replaceSpy = vi.spyOn(taskMove, 'replaceChildSubtreeWithUnassignedDurably')
+      .mockResolvedValue(success({ detachedSubtreeRootId: null }));
+    const assignSpy = vi.spyOn(taskMove, 'assignUnassignedToTaskDurably')
+      .mockResolvedValue(success(undefined));
+
+    const replaceResult = await service.replaceChildSubtreeWithUnassignedDurably('source', 'replace-target', 'old-child');
+    const assignResult = await service.assignUnassignedToTaskDurably('source', 'assign-target');
+
+    expect(replaceResult.ok).toBe(true);
+    expect(assignResult.ok).toBe(true);
+    expect(replaceSpy).toHaveBeenCalledWith('source', 'replace-target', 'old-child');
+    expect(assignSpy).toHaveBeenCalledWith('source', 'assign-target');
+  });
+
+  it('connection durable wrappers 应复用本地持久化路径', async () => {
+    project = createProject({
+      tasks: [
+        createTask({ id: 'task-1', stage: 1 }),
+        createTask({ id: 'task-2', stage: 2 }),
+        createTask({ id: 'task-3', stage: 1 }),
+        createTask({ id: 'task-4', stage: 2 }),
+      ],
+      connections: [
+        {
+          id: 'conn-old',
+          source: 'task-1',
+          target: 'task-2',
+          updatedAt: '2026-04-10T00:00:00.000Z',
+        },
+      ],
+    });
+
+    const addSaved = await service.addCrossTreeConnectionDurably('task-3', 'task-4');
+    const updateSaved = await service.updateConnectionContentDurably('task-3', 'task-4', '标题', '描述');
+    const relinkSaved = await service.relinkCrossTreeConnectionDurably('task-1', 'task-2', 'task-3', 'task-4');
+    const removeSaved = await service.removeConnectionDurably('task-3', 'task-4');
+
+    expect(addSaved).toBe(true);
+    expect(updateSaved).toBe(true);
+    expect(relinkSaved).toBe(true);
+    expect(removeSaved).toBe(true);
+    expect(recordAndUpdateDurably).toHaveBeenCalledTimes(4);
+    expect(project.connections.find(connection => connection.source === 'task-3' && connection.target === 'task-4')).toEqual(
+      expect.objectContaining({
+        deletedAt: expect.any(String),
+      })
+    );
   });
 
   it('updateTaskTitle 和 updateTaskContent 组合清空时应设置默认 title', () => {
@@ -570,5 +694,39 @@ describe('TaskOperationService (database constraint validation)', () => {
     service.updateTaskTitle('task-combo', '');
     updatedTask = project.tasks.find(t => t.id === 'task-combo')!;
     expect(updatedTask.title).toBe('新任务'); // 应设置默认值
+  });
+
+  it('updateTaskDraftDurably 应在一次本地持久化写入中保存标题和正文', async () => {
+    const task = createTask({ id: 'task-draft', title: '旧标题', content: '旧正文' });
+    project = createProject({ tasks: [task] });
+
+    const saved = await service.updateTaskDraftDurably('task-draft', {
+      title: '新标题',
+      content: '- [ ] 新正文',
+    });
+
+    expect(saved).toBe(true);
+    expect(recordAndUpdateDurably).toHaveBeenCalledTimes(1);
+    const updatedTask = project.tasks.find(t => t.id === 'task-draft')!;
+    expect(updatedTask).toEqual(expect.objectContaining({
+      title: '新标题',
+      content: '- [ ] 新正文',
+      hasIncompleteTask: true,
+      updatedAt: expect.any(String),
+    }));
+  });
+
+  it('updateTaskDraftDurably 在标题和正文都清空时应保持默认 title', async () => {
+    const task = createTask({ id: 'task-empty-draft', title: '旧标题', content: '旧正文' });
+    project = createProject({ tasks: [task] });
+
+    const saved = await service.updateTaskDraftDurably('task-empty-draft', {
+      title: '',
+      content: '',
+    });
+
+    expect(saved).toBe(true);
+    expect(recordAndUpdateDurably).toHaveBeenCalledTimes(1);
+    expect(project.tasks.find(t => t.id === 'task-empty-draft')?.title).toBe('新任务');
   });
 });

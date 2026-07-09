@@ -20,49 +20,18 @@ import { TombstoneService } from '../core-bridge';
 import { Project, Task } from '../models';
 import { ProjectStateService } from './project-state.service';
 import { TaskRecordTrackingService } from './task-record-tracking.service';
-
-// 测试数据工厂
-function createTask(overrides: Partial<Task> = {}): Task {
-  const now = new Date().toISOString();
-  return {
-    id: crypto.randomUUID(),
-    title: 'Test Task',
-    content: '',
-    stage: 1,
-    parentId: null,
-    order: 0,
-    rank: 10000,
-    status: 'active',
-    x: 100,
-    y: 100,
-    createdDate: now,
-    updatedAt: now,
-    displayId: '1',
-    deletedAt: null,
-    ...overrides,
-  };
-}
-
-function createProject(tasks: Task[] = []): Project {
-  const now = new Date().toISOString();
-  return {
-    id: 'project-1',
-    name: 'Test Project',
-    description: '',
-    createdDate: now,
-    updatedAt: now,
-    tasks,
-    connections: [],
-  };
-}
+import { createDeferred, createProject, createTask } from './task-trash.service.spec-helpers';
 
 describe('TaskTrashService', () => {
   let service: TaskTrashService;
   let mockLogger: { category: ReturnType<typeof vi.fn> };
   let mockLayoutService: Partial<LayoutService>;
+  let mockParkingService: { handleTaskSoftDelete: ReturnType<typeof vi.fn> };
   let mockTombstoneService: { clearLocalTombstones: ReturnType<typeof vi.fn> };
   let currentProject: Project | null;
   let recordAndUpdateCalls: number;
+  let recordAndUpdate: ReturnType<typeof vi.fn>;
+  let recordAndUpdateDurably: ReturnType<typeof vi.fn>;
   
   beforeEach(() => {
     currentProject = null;
@@ -88,21 +57,29 @@ describe('TaskTrashService', () => {
       getTask: vi.fn((taskId: string) => currentProject?.tasks.find(t => t.id === taskId) ?? null),
     };
     
-    const mockRecorder = {
-      recordAndUpdate: (mutator: (p: Project) => Project) => {
+    recordAndUpdate = vi.fn((mutator: (p: Project) => Project) => {
         recordAndUpdateCalls++;
         if (currentProject) {
           currentProject = mutator(currentProject);
         }
-      },
+        return Promise.resolve(true);
+      });
+    const mockRecorder = {
+      recordAndUpdate,
       recordAndUpdateDebounced: (mutator: (p: Project) => Project) => {
         if (currentProject) {
           currentProject = mutator(currentProject);
         }
       },
+      recordAndUpdateDurably: recordAndUpdateDurably = vi.fn(async (mutator: (p: Project) => Project) => {
+        if (currentProject) {
+          currentProject = mutator(currentProject);
+        }
+        return true;
+      }),
     };
 
-    const mockParkingService = {
+    mockParkingService = {
       handleTaskSoftDelete: vi.fn(),
     };
 
@@ -125,22 +102,22 @@ describe('TaskTrashService', () => {
   });
   
   describe('初始状态', () => {
-    it('无活动项目时删除返回空结果', () => {
+    it('无活动项目时删除返回空结果', async () => {
       currentProject = null;
-      const result = service.deleteTask('task-1');
+      const result = await service.deleteTask('task-1');
       expect(result.deletedTaskIds.size).toBe(0);
       expect(result.deletedConnectionIds).toHaveLength(0);
     });
     
-    it('任务不存在时返回空结果', () => {
+    it('任务不存在时返回空结果', async () => {
       currentProject = createProject([]);
-      const result = service.deleteTask('non-existent');
+      const result = await service.deleteTask('non-existent');
       expect(result.deletedTaskIds.size).toBe(0);
     });
   });
   
   describe('软删除任务', () => {
-    it('删除单个任务应设置 deletedAt', () => {
+    it('删除单个任务应设置 deletedAt', async () => {
       vi.useFakeTimers();
       vi.setSystemTime(new Date('2026-04-23T01:20:00.000Z'));
 
@@ -148,7 +125,7 @@ describe('TaskTrashService', () => {
       currentProject = createProject([task]);
 
       try {
-        const result = service.deleteTask('task-1');
+        const result = await service.deleteTask('task-1');
 
         expect(result.deletedTaskIds.has('task-1')).toBe(true);
         expect(result.deletedTaskIds.size).toBe(1);
@@ -162,14 +139,14 @@ describe('TaskTrashService', () => {
       }
     });
     
-    it('级联删除应包含所有子任务', () => {
+    it('级联删除应包含所有子任务', async () => {
       const root = createTask({ id: 'root', title: 'Root' });
       const child1 = createTask({ id: 'child1', parentId: 'root', title: 'Child 1' });
       const child2 = createTask({ id: 'child2', parentId: 'root', title: 'Child 2' });
       const grandchild = createTask({ id: 'grandchild', parentId: 'child1', title: 'Grandchild' });
       currentProject = createProject([root, child1, child2, grandchild]);
       
-      const result = service.deleteTask('root');
+      const result = await service.deleteTask('root');
       
       expect(result.deletedTaskIds.size).toBe(4);
       expect(result.deletedTaskIds.has('root')).toBe(true);
@@ -178,12 +155,12 @@ describe('TaskTrashService', () => {
       expect(result.deletedTaskIds.has('grandchild')).toBe(true);
     });
     
-    it('keepChildren=true 时应保留子任务', () => {
+    it('keepChildren=true 时应保留子任务', async () => {
       const root = createTask({ id: 'root', parentId: null, title: 'Root' });
       const child = createTask({ id: 'child', parentId: 'root', title: 'Child' });
       currentProject = createProject([root, child]);
       
-      const result = service.deleteTask('root', true);
+      const result = await service.deleteTask('root', true);
       
       // 只删除根任务
       expect(result.deletedTaskIds.size).toBe(1);
@@ -196,7 +173,7 @@ describe('TaskTrashService', () => {
       expect(childTask?.stage).toBe(1);
     });
     
-    it('删除任务应同时删除相关连接', () => {
+    it('删除任务应同时删除相关连接', async () => {
       const task1 = createTask({ id: 'task1' });
       const task2 = createTask({ id: 'task2' });
       const task3 = createTask({ id: 'task3' });
@@ -206,14 +183,68 @@ describe('TaskTrashService', () => {
         { id: 'conn2', source: 'task2', target: 'task3' },
       ];
       
-      const result = service.deleteTask('task2');
+      const result = await service.deleteTask('task2');
       
       expect(result.deletedConnectionIds).toContain('conn1');
       expect(result.deletedConnectionIds).toContain('conn2');
       expect(currentProject.connections).toHaveLength(0);
     });
 
-    it('批量删除父子重叠选择应只写入一次并保留原始恢复元数据', () => {
+    it('deleteTaskDurably 本地持久化失败时不得更新项目状态', async () => {
+      const task = createTask({ id: 'task-1', title: 'Root Task', deletedAt: null });
+      currentProject = createProject([task]);
+      recordAndUpdateDurably.mockResolvedValueOnce(false);
+
+      const result = await service.deleteTaskDurably('task-1');
+
+      expect(result.saved).toBe(false);
+      expect(result.deletedTaskIds).toEqual(new Set(['task-1']));
+      expect(recordAndUpdateDurably).toHaveBeenCalledTimes(1);
+      expect(recordAndUpdateCalls).toBe(0);
+      expect(currentProject.tasks.find(t => t.id === 'task-1')?.deletedAt).toBeNull();
+    });
+
+    it('deleteTask 默认入口应等待 durable 写入成功后再触发停泊联动', async () => {
+      const queueWrite = createDeferred<boolean>();
+      const task = createTask({ id: 'task-1', title: 'Root Task', deletedAt: null });
+      currentProject = createProject([task]);
+      recordAndUpdateDurably.mockImplementationOnce((mutator: (p: Project) => Project) => {
+        void queueWrite.promise.then((saved) => {
+          if (saved && currentProject) {
+            currentProject = mutator(currentProject);
+          }
+        });
+        return queueWrite.promise;
+      });
+
+      const resultPromise = service.deleteTask('task-1');
+
+      expect(mockParkingService.handleTaskSoftDelete).not.toHaveBeenCalled();
+      expect(currentProject.tasks.find(t => t.id === 'task-1')?.deletedAt).toBeNull();
+
+      queueWrite.resolve(true);
+      const result = await resultPromise;
+
+      expect(result.saved).toBe(true);
+      expect(result.deletedTaskIds).toEqual(new Set(['task-1']));
+      expect(mockParkingService.handleTaskSoftDelete).toHaveBeenCalledWith('task-1');
+      expect(currentProject.tasks.find(t => t.id === 'task-1')?.deletedAt).toBeTruthy();
+    });
+
+    it('deleteTask 默认入口 durable 写入失败时不得触发停泊联动或提交 UI 删除', async () => {
+      const task = createTask({ id: 'task-1', title: 'Root Task', deletedAt: null });
+      currentProject = createProject([task]);
+      recordAndUpdateDurably.mockResolvedValueOnce(false);
+
+      const result = await service.deleteTask('task-1');
+
+      expect(result.saved).toBe(false);
+      expect(result.deletedTaskIds).toEqual(new Set(['task-1']));
+      expect(mockParkingService.handleTaskSoftDelete).not.toHaveBeenCalled();
+      expect(currentProject.tasks.find(t => t.id === 'task-1')?.deletedAt).toBeNull();
+    });
+
+    it('批量删除父子重叠选择应只写入一次并保留原始恢复元数据', async () => {
       vi.useFakeTimers();
       vi.setSystemTime(new Date('2026-04-23T02:00:00.000Z'));
 
@@ -227,9 +258,9 @@ describe('TaskTrashService', () => {
       ];
 
       try {
-        const result = service.deleteTasksBatch(['root', 'child', 'child']);
+        const result = await service.deleteTasksBatch(['root', 'child', 'child']);
 
-        expect(recordAndUpdateCalls).toBe(1);
+        expect(recordAndUpdateDurably).toHaveBeenCalledTimes(1);
         expect(result.deletedTaskIds).toEqual(new Set(['root', 'child', 'grandchild']));
         expect(result.deletedConnectionIds).toEqual(['conn-root-child', 'conn-child-grandchild']);
         expect(currentProject.connections).toHaveLength(0);
@@ -247,7 +278,63 @@ describe('TaskTrashService', () => {
       }
     });
 
-    it('恢复批量删除的父任务应恢复子树内保存的连接', () => {
+    it('deleteTasksBatchDurably 应通过本地持久化路径批量删除', async () => {
+      const root = createTask({ id: 'root', stage: 1, parentId: null });
+      const child = createTask({ id: 'child', stage: 2, parentId: 'root' });
+      currentProject = createProject([root, child]);
+
+      const result = await service.deleteTasksBatchDurably(['root']);
+
+      expect(result.saved).toBe(true);
+      expect(recordAndUpdateDurably).toHaveBeenCalledTimes(1);
+      expect(result.deletedTaskIds).toEqual(new Set(['root', 'child']));
+      expect(currentProject.tasks.every(task => task.deletedAt)).toBe(true);
+    });
+
+    it('deleteTasksBatch 默认入口应等待 durable 写入成功后再触发停泊联动', async () => {
+      const queueWrite = createDeferred<boolean>();
+      const root = createTask({ id: 'root', stage: 1, parentId: null, deletedAt: null });
+      const child = createTask({ id: 'child', stage: 2, parentId: 'root', deletedAt: null });
+      currentProject = createProject([root, child]);
+      recordAndUpdateDurably.mockImplementationOnce((mutator: (p: Project) => Project) => {
+        void queueWrite.promise.then((saved) => {
+          if (saved && currentProject) {
+            currentProject = mutator(currentProject);
+          }
+        });
+        return queueWrite.promise;
+      });
+
+      const resultPromise = service.deleteTasksBatch(['root']);
+
+      expect(mockParkingService.handleTaskSoftDelete).not.toHaveBeenCalled();
+      expect(currentProject.tasks.every(task => task.deletedAt === null)).toBe(true);
+
+      queueWrite.resolve(true);
+      const result = await resultPromise;
+
+      expect(result.saved).toBe(true);
+      expect(result.deletedTaskIds).toEqual(new Set(['root', 'child']));
+      expect(mockParkingService.handleTaskSoftDelete).toHaveBeenCalledWith('root');
+      expect(mockParkingService.handleTaskSoftDelete).toHaveBeenCalledWith('child');
+      expect(currentProject.tasks.every(task => !!task.deletedAt)).toBe(true);
+    });
+
+    it('deleteTasksBatch 默认入口 durable 写入失败时不得触发停泊联动或提交 UI 删除', async () => {
+      const root = createTask({ id: 'root', stage: 1, parentId: null, deletedAt: null });
+      const child = createTask({ id: 'child', stage: 2, parentId: 'root', deletedAt: null });
+      currentProject = createProject([root, child]);
+      recordAndUpdateDurably.mockResolvedValueOnce(false);
+
+      const result = await service.deleteTasksBatch(['root']);
+
+      expect(result.saved).toBe(false);
+      expect(result.deletedTaskIds).toEqual(new Set(['root', 'child']));
+      expect(mockParkingService.handleTaskSoftDelete).not.toHaveBeenCalled();
+      expect(currentProject.tasks.every(task => task.deletedAt === null)).toBe(true);
+    });
+
+    it('恢复批量删除的父任务应恢复子树内保存的连接', async () => {
       const root = createTask({ id: 'root', stage: 1, parentId: null });
       const child = createTask({ id: 'child', stage: 1, parentId: 'root' });
       const grandchild = createTask({ id: 'grandchild', stage: 1, parentId: 'child' });
@@ -257,8 +344,8 @@ describe('TaskTrashService', () => {
         { id: 'conn-child-grandchild', source: 'child', target: 'grandchild' },
       ];
 
-      service.deleteTasksBatch(['root']);
-      const restoreResult = service.restoreTask('root');
+      await service.deleteTasksBatch(['root']);
+      const restoreResult = await service.restoreTask('root');
 
       expect(restoreResult.restoredTaskIds).toEqual(new Set(['root', 'child', 'grandchild']));
       expect(restoreResult.restoredConnectionIds.sort()).toEqual([
@@ -274,30 +361,83 @@ describe('TaskTrashService', () => {
   });
   
   describe('永久删除任务', () => {
-    it('永久删除应从列表中移除任务', () => {
+    it('永久删除应从列表中移除任务', async () => {
       const task = createTask({ id: 'task-1' });
       currentProject = createProject([task]);
       
-      const result = service.permanentlyDeleteTask('task-1');
+      const result = await service.permanentlyDeleteTask('task-1');
       
+      expect(result.saved).toBe(true);
       expect(result.deletedTaskIds.has('task-1')).toBe(true);
       expect(currentProject.tasks.find(t => t.id === 'task-1')).toBeUndefined();
     });
     
-    it('永久删除应级联删除子任务', () => {
+    it('永久删除应级联删除子任务', async () => {
       const root = createTask({ id: 'root' });
       const child = createTask({ id: 'child', parentId: 'root' });
       currentProject = createProject([root, child]);
       
-      const result = service.permanentlyDeleteTask('root');
+      const result = await service.permanentlyDeleteTask('root');
       
+      expect(result.saved).toBe(true);
       expect(result.deletedTaskIds.size).toBe(2);
       expect(currentProject.tasks).toHaveLength(0);
+    });
+
+    it('permanentlyDeleteTaskDurably 应等待本地持久化后移除任务', async () => {
+      const task = createTask({ id: 'task-1' });
+      currentProject = createProject([task]);
+
+      const result = await service.permanentlyDeleteTaskDurably('task-1');
+
+      expect(result.saved).toBe(true);
+      expect(recordAndUpdateDurably).toHaveBeenCalledTimes(1);
+      expect(currentProject.tasks).toHaveLength(0);
+    });
+
+    it('permanentlyDeleteTask 默认入口应等待 durable 写入成功后再移除任务', async () => {
+      const queueWrite = createDeferred<boolean>();
+      const task = createTask({ id: 'task-1' });
+      currentProject = createProject([task]);
+      recordAndUpdateDurably.mockImplementationOnce((mutator: (p: Project) => Project) => {
+        void queueWrite.promise.then((saved) => {
+          if (saved && currentProject) {
+            currentProject = mutator(currentProject);
+          }
+        });
+        return queueWrite.promise;
+      });
+
+      const resultPromise = service.permanentlyDeleteTask('task-1');
+
+      expect(recordAndUpdateCalls).toBe(0);
+      expect(currentProject.tasks.find(t => t.id === 'task-1')).toBeDefined();
+
+      queueWrite.resolve(true);
+      const result = await resultPromise;
+
+      expect(result.saved).toBe(true);
+      expect(result.deletedTaskIds).toEqual(new Set(['task-1']));
+      expect(recordAndUpdateCalls).toBe(0);
+      expect(currentProject.tasks.find(t => t.id === 'task-1')).toBeUndefined();
+    });
+
+    it('permanentlyDeleteTask 默认入口 durable 写入失败时不得提交 UI 删除', async () => {
+      const task = createTask({ id: 'task-1' });
+      currentProject = createProject([task]);
+      recordAndUpdateDurably.mockResolvedValueOnce(false);
+
+      const result = await service.permanentlyDeleteTask('task-1');
+
+      expect(result.saved).toBe(false);
+      expect(result.deletedTaskIds).toEqual(new Set(['task-1']));
+      expect(recordAndUpdateCalls).toBe(0);
+      expect(currentProject.tasks.find(t => t.id === 'task-1')).toBeDefined();
     });
   });
   
   describe('恢复任务', () => {
-    it('恢复任务应清除 deletedAt', () => {
+    it('恢复任务应清除 deletedAt', async () => {
       vi.useFakeTimers();
       vi.setSystemTime(new Date('2026-04-23T01:30:00.000Z'));
 
@@ -311,7 +451,7 @@ describe('TaskTrashService', () => {
       currentProject = createProject([task]);
 
       try {
-        const result = service.restoreTask('task-1');
+        const result = await service.restoreTask('task-1');
 
         expect(result.restoredTaskIds.has('task-1')).toBe(true);
         const restoredTask = currentProject.tasks.find(t => t.id === 'task-1');
@@ -324,7 +464,7 @@ describe('TaskTrashService', () => {
       }
     });
 
-    it('软删除并恢复任务应保留 parkingMeta 快照', () => {
+    it('软删除并恢复任务应保留 parkingMeta 快照', async () => {
       const parkingMeta = {
         state: 'parked' as const,
         parkedAt: '2026-04-23T00:00:00.000Z',
@@ -340,7 +480,7 @@ describe('TaskTrashService', () => {
       });
       currentProject = createProject([task]);
 
-      const deleteResult = service.deleteTask('task-parked');
+      const deleteResult = await service.deleteTask('task-parked');
 
       expect(deleteResult.deletedTaskIds.has('task-parked')).toBe(true);
       const deletedTask = currentProject.tasks.find(t => t.id === 'task-parked');
@@ -350,7 +490,7 @@ describe('TaskTrashService', () => {
         parkingMeta,
       });
 
-      const restoreResult = service.restoreTask('task-parked');
+      const restoreResult = await service.restoreTask('task-parked');
 
       expect(restoreResult.restoredTaskIds.has('task-parked')).toBe(true);
       const restoredTask = currentProject.tasks.find(t => t.id === 'task-parked');
@@ -359,7 +499,7 @@ describe('TaskTrashService', () => {
       expect(restoredTask?.stage).toBe(2);
     });
 
-    it('恢复 title 和 content 都为空的任务应设置默认 title', () => {
+    it('恢复 title 和 content 都为空的任务应设置默认 title', async () => {
       const task = createTask({ 
         id: 'task-empty', 
         title: '',
@@ -371,7 +511,7 @@ describe('TaskTrashService', () => {
       (task as any).deletedMeta = { parentId: null, stage: 1, order: 0, rank: 10000, x: 100, y: 100 };
       currentProject = createProject([task]);
       
-      const result = service.restoreTask('task-empty');
+      const result = await service.restoreTask('task-empty');
       
       expect(result.restoredTaskIds.has('task-empty')).toBe(true);
       const restoredTask = currentProject.tasks.find(t => t.id === 'task-empty');
@@ -379,7 +519,7 @@ describe('TaskTrashService', () => {
       expect(restoredTask?.deletedAt).toBeNull();
     });
 
-    it('恢复有 content 的任务不应修改空 title', () => {
+    it('恢复有 content 的任务不应修改空 title', async () => {
       const task = createTask({ 
         id: 'task-content', 
         title: '',
@@ -390,11 +530,78 @@ describe('TaskTrashService', () => {
       (task as any).deletedMeta = { parentId: null, stage: 1, order: 0, rank: 10000, x: 100, y: 100 };
       currentProject = createProject([task]);
       
-      const result = service.restoreTask('task-content');
+      await service.restoreTask('task-content');
       
       const restoredTask = currentProject.tasks.find(t => t.id === 'task-content');
       expect(restoredTask?.title).toBe('');
       expect(restoredTask?.content).toBe('有内容');
+    });
+
+    it('restoreTaskDurably 本地持久化成功后才清理本地 tombstone', async () => {
+      const task = createTask({
+        id: 'task-1',
+        deletedAt: new Date().toISOString(),
+        stage: null
+      });
+      (task as any).deletedMeta = { parentId: null, stage: 1, order: 0, rank: 10000, x: 100, y: 100 };
+      currentProject = createProject([task]);
+
+      const result = await service.restoreTaskDurably('task-1');
+
+      expect(result.saved).toBe(true);
+      expect(recordAndUpdateDurably).toHaveBeenCalledTimes(1);
+      expect(currentProject.tasks.find(t => t.id === 'task-1')?.deletedAt).toBeNull();
+      expect(mockTombstoneService.clearLocalTombstones).toHaveBeenCalledWith('project-1', ['task-1']);
+    });
+
+    it('restoreTask 默认入口应等待 durable 写入成功后再清理本地 tombstone', async () => {
+      const queueWrite = createDeferred<boolean>();
+      const task = createTask({
+        id: 'task-1',
+        deletedAt: new Date().toISOString(),
+        stage: null,
+      });
+      (task as any).deletedMeta = { parentId: null, stage: 1, order: 0, rank: 10000, x: 100, y: 100 };
+      currentProject = createProject([task]);
+      recordAndUpdateDurably.mockImplementationOnce((mutator: (p: Project) => Project) => {
+        void queueWrite.promise.then((saved) => {
+          if (saved && currentProject) {
+            currentProject = mutator(currentProject);
+          }
+        });
+        return queueWrite.promise;
+      });
+
+      const resultPromise = service.restoreTask('task-1');
+
+      expect(mockTombstoneService.clearLocalTombstones).not.toHaveBeenCalled();
+      expect(currentProject.tasks.find(t => t.id === 'task-1')?.deletedAt).toBeTruthy();
+
+      queueWrite.resolve(true);
+      const result = await resultPromise;
+
+      expect(result.saved).toBe(true);
+      expect(result.restoredTaskIds).toEqual(new Set(['task-1']));
+      expect(mockTombstoneService.clearLocalTombstones).toHaveBeenCalledWith('project-1', ['task-1']);
+      expect(currentProject.tasks.find(t => t.id === 'task-1')?.deletedAt).toBeNull();
+    });
+
+    it('restoreTask 默认入口 durable 写入失败时不得清理 tombstone 或提交 UI 恢复', async () => {
+      const task = createTask({
+        id: 'task-1',
+        deletedAt: new Date().toISOString(),
+        stage: null,
+      });
+      (task as any).deletedMeta = { parentId: null, stage: 1, order: 0, rank: 10000, x: 100, y: 100 };
+      currentProject = createProject([task]);
+      recordAndUpdateDurably.mockResolvedValueOnce(false);
+
+      const result = await service.restoreTask('task-1');
+
+      expect(result.saved).toBe(false);
+      expect(result.restoredTaskIds).toEqual(new Set(['task-1']));
+      expect(mockTombstoneService.clearLocalTombstones).not.toHaveBeenCalled();
+      expect(currentProject.tasks.find(t => t.id === 'task-1')?.deletedAt).toBeTruthy();
     });
   });
   
@@ -418,17 +625,114 @@ describe('TaskTrashService', () => {
   });
   
   describe('清空回收站', () => {
-    it('应永久删除所有回收站任务', () => {
+    it('应永久删除所有回收站任务', async () => {
       const activeTask = createTask({ id: 'active', deletedAt: null });
       const deletedTask1 = createTask({ id: 'deleted1', deletedAt: new Date().toISOString() });
       const deletedTask2 = createTask({ id: 'deleted2', deletedAt: new Date().toISOString() });
       currentProject = createProject([activeTask, deletedTask1, deletedTask2]);
       
-      const result = service.emptyTrash();
+      const result = await service.emptyTrash();
       
+      expect(result.saved).toBe(true);
       expect(result.deletedTaskIds.size).toBe(2);
       expect(currentProject.tasks).toHaveLength(1);
       expect(currentProject.tasks[0].id).toBe('active');
+    });
+
+    it('emptyTrashDurably 应通过本地持久化路径清空回收站', async () => {
+      const activeTask = createTask({ id: 'active', deletedAt: null });
+      const deletedTask = createTask({ id: 'deleted', deletedAt: new Date().toISOString() });
+      currentProject = createProject([activeTask, deletedTask]);
+
+      const result = await service.emptyTrashDurably();
+
+      expect(result.saved).toBe(true);
+      expect(recordAndUpdateDurably).toHaveBeenCalledTimes(1);
+      expect(result.deletedTaskIds).toEqual(new Set(['deleted']));
+      expect(currentProject.tasks.map(task => task.id)).toEqual(['active']);
+    });
+
+    it('emptyTrash 默认入口应等待 durable 写入成功后再移除任务', async () => {
+      const queueWrite = createDeferred<boolean>();
+      const activeTask = createTask({ id: 'active', deletedAt: null });
+      const deletedTask = createTask({ id: 'deleted', deletedAt: new Date().toISOString() });
+      currentProject = createProject([activeTask, deletedTask]);
+      recordAndUpdateDurably.mockImplementationOnce((mutator: (p: Project) => Project) => {
+        void queueWrite.promise.then((saved) => {
+          if (saved && currentProject) {
+            currentProject = mutator(currentProject);
+          }
+        });
+        return queueWrite.promise;
+      });
+
+      const resultPromise = service.emptyTrash();
+
+      expect(recordAndUpdateCalls).toBe(0);
+      expect(currentProject.tasks.map(task => task.id)).toEqual(['active', 'deleted']);
+
+      queueWrite.resolve(true);
+      const result = await resultPromise;
+
+      expect(result.saved).toBe(true);
+      expect(result.deletedTaskIds).toEqual(new Set(['deleted']));
+      expect(recordAndUpdateCalls).toBe(0);
+      expect(currentProject.tasks.map(task => task.id)).toEqual(['active']);
+    });
+
+    it('emptyTrash 默认入口 durable 写入失败时不得提交 UI 删除', async () => {
+      const activeTask = createTask({ id: 'active', deletedAt: null });
+      const deletedTask = createTask({ id: 'deleted', deletedAt: new Date().toISOString() });
+      currentProject = createProject([activeTask, deletedTask]);
+      recordAndUpdateDurably.mockResolvedValueOnce(false);
+
+      const result = await service.emptyTrash();
+
+      expect(result.saved).toBe(false);
+      expect(result.deletedTaskIds).toEqual(new Set(['deleted']));
+      expect(recordAndUpdateCalls).toBe(0);
+      expect(currentProject.tasks.map(task => task.id)).toEqual(['active', 'deleted']);
+    });
+  });
+
+  describe('自动清理回收站', () => {
+    it('cleanupOldTrashItems 默认入口应通过 durable 写入清理过期任务', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-06-15T00:00:00.000Z'));
+      const activeTask = createTask({ id: 'active', deletedAt: null });
+      const recentDeletedTask = createTask({ id: 'recent', deletedAt: '2026-06-01T00:00:00.000Z' });
+      const expiredDeletedTask = createTask({ id: 'expired', deletedAt: '2026-05-01T00:00:00.000Z' });
+      currentProject = createProject([activeTask, recentDeletedTask, expiredDeletedTask]);
+
+      try {
+        const cleanedCount = await service.cleanupOldTrashItems();
+
+        expect(cleanedCount).toBe(1);
+        expect(recordAndUpdateDurably).toHaveBeenCalledTimes(1);
+        expect(recordAndUpdateCalls).toBe(0);
+        expect(currentProject.tasks.map(task => task.id)).toEqual(['active', 'recent']);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('cleanupOldTrashItems 默认入口 durable 写入失败时不得提交 UI 清理', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-06-15T00:00:00.000Z'));
+      const expiredDeletedTask = createTask({ id: 'expired', deletedAt: '2026-05-01T00:00:00.000Z' });
+      currentProject = createProject([expiredDeletedTask]);
+      recordAndUpdateDurably.mockResolvedValueOnce(false);
+
+      try {
+        const cleanedCount = await service.cleanupOldTrashItems();
+
+        expect(cleanedCount).toBe(0);
+        expect(recordAndUpdateDurably).toHaveBeenCalledTimes(1);
+        expect(recordAndUpdateCalls).toBe(0);
+        expect(currentProject.tasks.map(task => task.id)).toEqual(['expired']);
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 });

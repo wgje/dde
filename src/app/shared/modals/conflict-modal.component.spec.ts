@@ -183,6 +183,79 @@ describe('ConflictModalComponent', () => {
     expect(fixture.nativeElement.textContent).toContain('正在保留本地修改并覆盖云端');
   });
 
+  it('should render operation-level conflict evidence when provided', () => {
+    host.conflictData = {
+      ...host.conflictData!,
+      operationConflicts: [
+        {
+          actionType: 'connection:update' as const,
+          entityType: 'connection' as const,
+          entityId: 'conn-1',
+          projectId: 'project-1',
+          operationId: 'op-conn-1',
+          localEntity: {
+            id: 'conn-1',
+            source: 'task-a',
+            target: 'task-b',
+            title: '本地关联',
+          },
+          remoteEntity: {
+            id: 'conn-1',
+            source: 'task-a',
+            target: 'task-c',
+            title: '云端关联',
+          },
+          message: '云端关联更新较新',
+          conflictedAt: '2026-05-13T10:24:00.000Z',
+          reason: 'remote-newer' as const,
+        },
+      ],
+    } as unknown as HostComponent['conflictData'];
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.textContent).toContain('操作级冲突证据');
+    expect(fixture.nativeElement.textContent).toContain('更新关联');
+    expect(fixture.nativeElement.textContent).toContain('task-a -> task-b · 本地关联');
+    expect(fixture.nativeElement.textContent).toContain('task-a -> task-c · 云端关联');
+    expect(fixture.nativeElement.textContent).toContain('云端关联更新较新');
+  });
+
+  it('should include task operation-level evidence in diff inputs', () => {
+    const localTask = createTask({
+      id: 'task-operation',
+      title: '本地任务证据',
+      updatedAt: '2026-05-13T10:24:00.000Z',
+    });
+    const remoteTask = createTask({
+      id: 'task-operation',
+      title: '云端任务证据',
+      updatedAt: '2026-05-13T10:25:00.000Z',
+    });
+    host.conflictData = {
+      projectId: 'project-1',
+      localProject: createProject('project-1', 'Local', '2026-05-13T10:24:00.000Z', []),
+      remoteProject: createProject('project-1', 'Remote', '2026-05-13T10:25:00.000Z', []),
+      operationConflicts: [
+        {
+          actionType: 'task:update' as const,
+          entityType: 'task' as const,
+          entityId: 'task-operation',
+          projectId: 'project-1',
+          operationId: 'op-task-operation',
+          localEntity: localTask,
+          remoteEntity: remoteTask,
+          message: '云端任务更新较新',
+          conflictedAt: '2026-05-13T10:26:00.000Z',
+          reason: 'remote-newer' as const,
+        },
+      ],
+    } as unknown as HostComponent['conflictData'];
+    fixture.detectChanges();
+
+    expect(host.modal.localTasks()).toEqual([localTask]);
+    expect(host.modal.remoteTasks()).toEqual([remoteTask]);
+  });
+
   it('should emit cancel when Escape is pressed (when not resolving)', () => {
     const cancelSpy = vi.fn();
     host.cancel.subscribe(cancelSpy);

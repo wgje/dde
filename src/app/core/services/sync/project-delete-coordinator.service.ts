@@ -11,8 +11,8 @@
  * - AGENTS.md §12 单文件 ≤ 800 行硬线；SimpleSyncService 长期越界，文件头要求只做「下切」。
  * - 删除链路自洽，依赖均可注入；唯一回 facade 依赖通过回调注入避免循环 DI：
  *   - `getSupabaseClient`（门面持有 sentry 归因 + 离线降级语义）
- * - sync-RPC 能力探测助手（shouldUseSyncRpc / primeProjectSyncRpcCapability /
- *   createSyncRpcOperationId）随删除链路一并迁入：门面侧已无其它消费者（推送链路自带副本）。
+ * - sync-RPC 能力探测助手（shouldUseSyncRpc / primeProjectSyncRpcCapability）
+ *   随删除链路一并迁入：门面侧已无其它消费者（推送链路自带副本）。
  *
  * 验证：SimpleSyncService.spec 的「项目软删除」用例通过公开 API `deleteProjectFromCloud(...)`
  * 覆盖本链路；门面 `deleteProjectFromCloud()` 委托后该套用例继续校验零回归。
@@ -21,6 +21,7 @@ import { Injectable, inject } from '@angular/core';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { LoggerService } from '../../../../services/logger.service';
 import { ClockSyncService } from '../../../../services/clock-sync.service';
+import { DataSafetyWriteAuditService } from '../../../../services/data-safety-write-audit.service';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 import { SyncRpcClientService } from '../../../../services/sync-rpc-client.service';
 import { SyncStateService } from './sync-state.service';
@@ -39,7 +40,6 @@ import {
   isBrowserNetworkSuspendedError,
   isBrowserNetworkSuspendedWindow,
 } from '../../../../utils/browser-network-suspension';
-import { createSyncOperationId } from '../../../../utils/sync-operation-id';
 
 /** 获取 Supabase 客户端回调（门面持有离线降级 + sentry 归因语义） */
 export type GetSupabaseClientHandler = () => Promise<SupabaseClient | null>;
@@ -53,6 +53,7 @@ export class ProjectDeleteCoordinatorService {
   private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly syncRpcClient = inject(SyncRpcClientService, { optional: true });
   private readonly projectStore = inject(ProjectStore, { optional: true });
+  private readonly dataSafetyWriteAudit = new DataSafetyWriteAuditService();
 
   /** 由 SimpleSyncService 构造期注入（避免循环 DI）。 */
   getSupabaseClientHandler: GetSupabaseClientHandler | null = null;
@@ -76,10 +77,6 @@ export class ProjectDeleteCoordinatorService {
     }
 
     await this.syncRpcClient.checkProtocol();
-  }
-
-  private createSyncRpcOperationId(): string {
-    return createSyncOperationId();
   }
 
   private buildProjectDeleteClientRejectedFailure(
@@ -113,6 +110,46 @@ export class ProjectDeleteCoordinatorService {
     });
   }
 
+  private buildProjectDeleteMissingOperationIdFailure(
+    projectId: string,
+    userId: string,
+  ): Result<void, OperationError> {
+    this.logger.warn('deleteProjectFromCloud: 缺少 operationId，已拒绝远端删除以避免临时幂等键', {
+      projectId,
+      userId,
+    });
+
+    return this.buildProjectDeleteRetryableFailure('缺少持久化操作 ID，删除将在本地队列恢复后重试', {
+      projectId,
+      userId,
+      reason: 'missing-operation-id',
+    });
+  }
+
+  private buildProjectDeleteSyncRpcUnavailableFailure(
+    projectId: string,
+    userId: string,
+    operationId: string,
+  ): Result<void, OperationError> {
+    this.logger.warn('deleteProjectFromCloud: 跳过 legacy soft_delete_project，保留本地删除等待 Sync RPC 重试', {
+      projectId,
+      userId,
+      operationId,
+      featureEnabled: this.syncRpcClient?.isFeatureEnabled() === true,
+      clientRejected: this.syncRpcClient?.isClientRejected() === true,
+    });
+
+    return this.buildProjectDeleteRetryableFailure('项目删除同步通道暂不可用，删除将在恢复后重试', {
+      projectId,
+      userId,
+      operationId,
+      reason: 'sync-rpc-unavailable',
+      deferred: true,
+      featureEnabled: this.syncRpcClient?.isFeatureEnabled() === true,
+      clientRejected: this.syncRpcClient?.isClientRejected() === true,
+    });
+  }
+
   private buildProjectDeleteAuthExpiredFailure(
     context: string,
     details: Record<string, unknown>,
@@ -130,32 +167,12 @@ export class ProjectDeleteCoordinatorService {
     client: SupabaseClient,
     projectId: string,
     userId: string,
+    operationId: string,
   ): Promise<Result<void, OperationError>> {
-    const { data: { session } } = await client.auth.getSession();
-    let sessionUserId = session?.user?.id ?? null;
+    const sessionUserId = await this.resolveProjectDeleteSessionUserId(client);
 
     if (!sessionUserId) {
-      const refreshed = await this.sessionManager.tryRefreshSession('deleteProjectFromCloud.getSession');
-      if (refreshed) {
-        const { data: { session: refreshedSession } } = await client.auth.getSession();
-        sessionUserId = refreshedSession?.user?.id ?? null;
-      }
-    }
-
-    if (!sessionUserId) {
-      if (isBrowserNetworkSuspendedWindow()) {
-        return this.buildProjectDeleteRetryableFailure('浏览器恢复连接中，请稍后重试', {
-          projectId,
-          userId,
-          reason: 'browser-network-suspended',
-          resumeDelayMs: getRemainingBrowserNetworkResumeDelayMs(),
-        });
-      }
-
-      return this.buildProjectDeleteAuthExpiredFailure('deleteProjectFromCloud.getSession', {
-        projectId,
-        userId,
-      });
+      return this.handleMissingProjectDeleteSession(projectId, userId);
     }
 
     if (sessionUserId !== userId) {
@@ -178,50 +195,130 @@ export class ProjectDeleteCoordinatorService {
     }
 
     if (this.shouldUseSyncRpc()) {
-      const result = await this.syncRpcClient!.deleteProject({
-        operationId: this.createSyncRpcOperationId(),
-        projectId,
-        baseUpdatedAt: this.projectStore?.getProject(projectId)?.updatedAt ?? null,
-      });
+      return await this.deleteProjectWithSyncRpc(projectId, userId, operationId);
+    }
 
-      if (result.status === 'applied' || result.status === 'idempotent-replay') {
-        if (result.serverUpdatedAt) {
-          this.clockSync.recordServerTimestamp(result.serverUpdatedAt, projectId);
-        }
-        return success(undefined);
+    return this.buildProjectDeleteSyncRpcUnavailableFailure(projectId, userId, operationId);
+  }
+
+  private async resolveProjectDeleteSessionUserId(client: SupabaseClient): Promise<string | null> {
+    const { data: { session } } = await client.auth.getSession();
+    if (session?.user?.id) {
+      return session.user.id;
+    }
+
+    const refreshed = await this.sessionManager.tryRefreshSession('deleteProjectFromCloud.getSession');
+    if (!refreshed) {
+      return null;
+    }
+
+    const { data: { session: refreshedSession } } = await client.auth.getSession();
+    return refreshedSession?.user?.id ?? null;
+  }
+
+  private handleMissingProjectDeleteSession(
+    projectId: string,
+    userId: string,
+  ): Result<void, OperationError> {
+    if (isBrowserNetworkSuspendedWindow()) {
+      return this.buildProjectDeleteBrowserSuspendedFailure(projectId, userId);
+    }
+
+    return this.buildProjectDeleteAuthExpiredFailure('deleteProjectFromCloud.getSession', {
+      projectId,
+      userId,
+    });
+  }
+
+  private buildProjectDeleteBrowserSuspendedFailure(
+    projectId: string,
+    userId: string,
+  ): Result<void, OperationError> {
+    return this.buildProjectDeleteRetryableFailure('浏览器恢复连接中，请稍后重试', {
+      projectId,
+      userId,
+      reason: 'browser-network-suspended',
+      resumeDelayMs: getRemainingBrowserNetworkResumeDelayMs(),
+    });
+  }
+
+  private async deleteProjectWithSyncRpc(
+    projectId: string,
+    userId: string,
+    operationId: string,
+  ): Promise<Result<void, OperationError>> {
+    const localTimestamp = Date.now();
+    const lastSyncTimeBefore = this.syncState().lastSyncTime;
+    const baseUpdatedAt = this.projectStore?.getProject(projectId)?.updatedAt ?? null;
+    const result = await this.syncRpcClient!.deleteProject({
+      operationId,
+      projectId,
+      baseUpdatedAt,
+    });
+
+    this.recordProjectDeleteRpcWriteAudit({
+      projectId,
+      userId,
+      operationId,
+      result,
+      localTimestamp,
+      baseUpdatedAt,
+      lastSyncTimeBefore,
+    });
+
+    if (result.status === 'applied' || result.status === 'idempotent-replay') {
+      if (result.serverUpdatedAt) {
+        this.clockSync.recordServerTimestamp(result.serverUpdatedAt, projectId);
       }
+      return success(undefined);
+    }
 
-      const isConflict = result.status === 'remote-newer' || result.status === 'deleted-remote-newer';
-      const message = result.status === 'client-version-rejected'
-        ? '当前客户端同步协议已过期，请刷新后重试'
-        : isConflict
-          ? '远端项目版本更新，请先同步后重试删除'
-          : '项目删除被服务端拒绝';
-      this.syncStateService.setSyncError(message);
-      this.sentryLazyLoader.captureMessage(
-        isConflict ? 'sync_rpc_project_delete_remote_newer' : 'sync_rpc_project_delete_rejected',
-        {
-          level: 'warning',
-          tags: { operation: 'deleteProjectFromCloud', entityType: 'project', status: result.status },
-          extra: {
-            projectId,
-            remoteUpdatedAt: result.remoteUpdatedAt,
-            reason: result.reason,
-            minProtocolVersion: result.minProtocolVersion,
-          },
-        },
-      );
+    return this.buildRejectedProjectDeleteSyncRpcResult(projectId, userId, result);
+  }
 
-      if (result.status === 'unauthorized') {
-        return failure(ErrorCodes.PERMISSION_DENIED, message, {
-          projectId,
-          userId,
-          retryable: false,
-          reason: result.reason,
-        });
-      }
+  private recordProjectDeleteRpcWriteAudit(input: {
+    projectId: string;
+    userId: string;
+    operationId: string;
+    result: Awaited<ReturnType<NonNullable<SyncRpcClientService>['deleteProject']>>;
+    localTimestamp: number;
+    baseUpdatedAt: string | null;
+    lastSyncTimeBefore: string | null;
+  }): void {
+    this.dataSafetyWriteAudit.recordWrite({
+      ownerUserId: input.userId,
+      operationId: input.operationId,
+      sourceUserId: input.userId,
+      entityType: 'project',
+      entityId: input.projectId,
+      operation: 'delete',
+      localTimestamp: input.localTimestamp,
+      updatedAtBaseline: input.baseUpdatedAt,
+      beforeVersion: input.baseUpdatedAt,
+      rpcResult: input.result,
+      enteredRetryQueue: false,
+      retryCount: 0,
+      lastSyncTimeBefore: input.lastSyncTimeBefore,
+      lastSyncTimeAfter: this.syncState().lastSyncTime,
+    });
+  }
 
-      return failure(isConflict ? ErrorCodes.SYNC_CONFLICT : ErrorCodes.OPERATION_FAILED, message, {
+  private buildRejectedProjectDeleteSyncRpcResult(
+    projectId: string,
+    userId: string,
+    result: Awaited<ReturnType<NonNullable<SyncRpcClientService>['deleteProject']>>,
+  ): Result<void, OperationError> {
+    const isConflict = result.status === 'remote-newer' || result.status === 'deleted-remote-newer';
+    const message = result.status === 'client-version-rejected'
+      ? '当前客户端同步协议已过期，请刷新后重试'
+      : isConflict
+        ? '远端项目版本更新，请先同步后重试删除'
+        : '项目删除被服务端拒绝';
+    this.syncStateService.setSyncError(message);
+    this.captureRejectedProjectDeleteSyncRpcResult(projectId, result, isConflict);
+
+    if (result.status === 'unauthorized') {
+      return failure(ErrorCodes.PERMISSION_DENIED, message, {
         projectId,
         userId,
         retryable: false,
@@ -229,15 +326,43 @@ export class ProjectDeleteCoordinatorService {
       });
     }
 
-    const { error } = await client.rpc('soft_delete_project', {
-      p_project_id: projectId,
+    return failure(isConflict ? ErrorCodes.SYNC_CONFLICT : ErrorCodes.OPERATION_FAILED, message, {
+      projectId,
+      userId,
+      retryable: false,
+      reason: result.reason,
     });
-    if (error) throw supabaseErrorToError(error);
-
-    return success(undefined);
   }
 
-  async deleteProjectFromCloud(projectId: string, userId: string): Promise<Result<void, OperationError>> {
+  private captureRejectedProjectDeleteSyncRpcResult(
+    projectId: string,
+    result: Awaited<ReturnType<NonNullable<SyncRpcClientService>['deleteProject']>>,
+    isConflict: boolean,
+  ): void {
+    this.sentryLazyLoader.captureMessage(
+      isConflict ? 'sync_rpc_project_delete_remote_newer' : 'sync_rpc_project_delete_rejected',
+      {
+        level: 'warning',
+        tags: { operation: 'deleteProjectFromCloud', entityType: 'project', status: result.status },
+        extra: {
+          projectId,
+          remoteUpdatedAt: result.remoteUpdatedAt,
+          reason: result.reason,
+          minProtocolVersion: result.minProtocolVersion,
+        },
+      },
+    );
+  }
+
+  async deleteProjectFromCloud(
+    projectId: string,
+    userId: string,
+    operationId?: string,
+  ): Promise<Result<void, OperationError>> {
+    if (operationId === undefined) {
+      return this.buildProjectDeleteMissingOperationIdFailure(projectId, userId);
+    }
+
     if (this.syncState().sessionExpired) {
       return this.buildProjectDeleteAuthExpiredFailure('deleteProjectFromCloud.preflight', {
         projectId,
@@ -246,12 +371,7 @@ export class ProjectDeleteCoordinatorService {
     }
 
     if (isBrowserNetworkSuspendedWindow()) {
-      return this.buildProjectDeleteRetryableFailure('浏览器恢复连接中，请稍后重试', {
-        projectId,
-        userId,
-        reason: 'browser-network-suspended',
-        resumeDelayMs: getRemainingBrowserNetworkResumeDelayMs(),
-      });
+      return this.buildProjectDeleteBrowserSuspendedFailure(projectId, userId);
     }
 
     const client = this.getSupabaseClientHandler ? await this.getSupabaseClientHandler() : null;
@@ -264,123 +384,120 @@ export class ProjectDeleteCoordinatorService {
     }
 
     try {
-      return await this.executeProjectDelete(client, projectId, userId);
+      return await this.executeProjectDelete(client, projectId, userId, operationId);
     } catch (e) {
       if (isBrowserNetworkSuspendedError(e)) {
-        return this.buildProjectDeleteRetryableFailure('浏览器恢复连接中，请稍后重试', {
-          projectId,
-          userId,
-          reason: 'browser-network-suspended',
-          resumeDelayMs: getRemainingBrowserNetworkResumeDelayMs(),
-        });
+        return this.buildProjectDeleteBrowserSuspendedFailure(projectId, userId);
       }
 
       const enhanced = supabaseErrorToError(e);
 
       if (this.sessionManager.isSessionExpiredError(enhanced)) {
-        const canRetry = await this.sessionManager.handleAuthErrorWithRefresh('deleteProjectFromCloud', {
-          projectId,
-          userId,
-          errorCode: enhanced.code,
-        });
-
-        if (canRetry) {
-          try {
-            return await this.executeProjectDelete(client, projectId, userId);
-          } catch (retryError) {
-            if (isBrowserNetworkSuspendedError(retryError) || isBrowserNetworkSuspendedWindow()) {
-              return this.buildProjectDeleteRetryableFailure('浏览器恢复连接中，请稍后重试', {
-                projectId,
-                userId,
-                reason: 'browser-network-suspended',
-                resumeDelayMs: getRemainingBrowserNetworkResumeDelayMs(),
-              });
-            }
-
-            const retryEnhanced = supabaseErrorToError(retryError);
-            if (this.sessionManager.isSessionExpiredError(retryEnhanced)) {
-              // 会话刷新成功后重试仍然失败：
-              // - 若为 42501 (RLS 违规)，说明是真正的权限不足，非会话过期
-              // - 若为 401，说明刷新未能完全恢复，标记为会话过期
-              if (this.sessionManager.isRlsPolicyViolation(retryEnhanced)) {
-                this.logger.warn('刷新会话后重试仍获 RLS 违规，判定为权限不足', {
-                  projectId, userId, errorCode: retryEnhanced.code,
-                });
-                return failure(ErrorCodes.PERMISSION_DENIED, '权限不足，无法删除此项目', {
-                  projectId,
-                  userId,
-                  retryable: false,
-                  errorCode: retryEnhanced.code,
-                  errorType: retryEnhanced.errorType,
-                });
-              }
-              return this.buildProjectDeleteAuthExpiredFailure('deleteProjectFromCloud.retryAfterRefresh', {
-                projectId,
-                userId,
-                errorCode: retryEnhanced.code,
-              });
-            }
-
-            return failure(
-              retryEnhanced.errorType === 'PermissionError' ? ErrorCodes.PERMISSION_DENIED : ErrorCodes.OPERATION_FAILED,
-              retryEnhanced.message,
-              {
-                projectId,
-                userId,
-                retryable: retryEnhanced.isRetryable,
-                errorCode: retryEnhanced.code,
-                errorType: retryEnhanced.errorType,
-              },
-            );
-          }
-        }
-
-        if (isBrowserNetworkSuspendedWindow()) {
-          return this.buildProjectDeleteRetryableFailure('浏览器恢复连接中，请稍后重试', {
-            projectId,
-            userId,
-            reason: 'browser-network-suspended',
-            resumeDelayMs: getRemainingBrowserNetworkResumeDelayMs(),
-          });
-        }
-
-        return this.buildProjectDeleteAuthExpiredFailure('deleteProjectFromCloud', {
-          projectId,
-          userId,
-          errorCode: enhanced.code,
-        });
+        return await this.handleProjectDeleteAuthError(client, projectId, userId, enhanced.code, operationId);
       }
 
       if (enhanced.errorType === 'PermissionError') {
-        this.logger.warn('删除项目权限不足', {
-          projectId,
-          userId,
-          error: enhanced,
-        });
-        return failure(ErrorCodes.PERMISSION_DENIED, enhanced.message, {
-          projectId,
-          userId,
-          retryable: false,
-          errorCode: enhanced.code,
-          errorType: enhanced.errorType,
-        });
+        return this.buildProjectDeletePermissionFailure(projectId, userId, enhanced);
       }
 
-      const retryable = enhanced.isRetryable || enhanced.errorType === 'OfflineError' || enhanced.errorType === 'NetworkError';
-      const errorCode = retryable ? ErrorCodes.SYNC_OFFLINE : ErrorCodes.OPERATION_FAILED;
-
-      this.logger.error('删除项目失败', {
-        projectId,
-        userId,
-        error: enhanced,
-      });
-      return failure(errorCode, enhanced.message, {
-        projectId,
-        userId,
-        retryable,
-        errorCode: enhanced.code,
-        errorType: enhanced.errorType,
-      });
+      return this.buildProjectDeleteOperationFailure(projectId, userId, enhanced);
     }
+  }
+
+  private async handleProjectDeleteAuthError(
+    client: SupabaseClient,
+    projectId: string,
+    userId: string,
+    errorCode: unknown,
+    operationId: string,
+  ): Promise<Result<void, OperationError>> {
+    const canRetry = await this.sessionManager.handleAuthErrorWithRefresh('deleteProjectFromCloud', {
+      projectId,
+      userId,
+      errorCode,
+    });
+
+    if (!canRetry) {
+      if (isBrowserNetworkSuspendedWindow()) {
+        return this.buildProjectDeleteBrowserSuspendedFailure(projectId, userId);
+      }
+      return this.buildProjectDeleteAuthExpiredFailure('deleteProjectFromCloud', { projectId, userId, errorCode });
+    }
+
+    try {
+      return await this.executeProjectDelete(client, projectId, userId, operationId);
+    } catch (retryError) {
+      return this.handleProjectDeleteRetryAfterRefreshError(projectId, userId, retryError);
+    }
+  }
+
+  private handleProjectDeleteRetryAfterRefreshError(
+    projectId: string,
+    userId: string,
+    retryError: unknown,
+  ): Result<void, OperationError> {
+    if (isBrowserNetworkSuspendedError(retryError) || isBrowserNetworkSuspendedWindow()) {
+      return this.buildProjectDeleteBrowserSuspendedFailure(projectId, userId);
+    }
+
+    const retryEnhanced = supabaseErrorToError(retryError);
+    if (!this.sessionManager.isSessionExpiredError(retryEnhanced)) {
+      return this.buildProjectDeleteOperationFailure(projectId, userId, retryEnhanced);
+    }
+
+    if (this.sessionManager.isRlsPolicyViolation(retryEnhanced)) {
+      this.logger.warn('刷新会话后重试仍获 RLS 违规，判定为权限不足', {
+        projectId, userId, errorCode: retryEnhanced.code,
+      });
+      return this.buildProjectDeletePermissionFailure(projectId, userId, retryEnhanced, '权限不足，无法删除此项目');
+    }
+
+    return this.buildProjectDeleteAuthExpiredFailure('deleteProjectFromCloud.retryAfterRefresh', {
+      projectId,
+      userId,
+      errorCode: retryEnhanced.code,
+    });
+  }
+
+  private buildProjectDeletePermissionFailure(
+    projectId: string,
+    userId: string,
+    enhanced: ReturnType<typeof supabaseErrorToError>,
+    message = enhanced.message,
+  ): Result<void, OperationError> {
+    this.logger.warn('删除项目权限不足', {
+      projectId,
+      userId,
+      error: enhanced,
+    });
+    return failure(ErrorCodes.PERMISSION_DENIED, message, {
+      projectId,
+      userId,
+      retryable: false,
+      errorCode: enhanced.code,
+      errorType: enhanced.errorType,
+    });
+  }
+
+  private buildProjectDeleteOperationFailure(
+    projectId: string,
+    userId: string,
+    enhanced: ReturnType<typeof supabaseErrorToError>,
+  ): Result<void, OperationError> {
+    const retryable = enhanced.isRetryable || enhanced.errorType === 'OfflineError' || enhanced.errorType === 'NetworkError';
+    const errorCode = retryable ? ErrorCodes.SYNC_OFFLINE : ErrorCodes.OPERATION_FAILED;
+
+    this.logger.error('删除项目失败', {
+      projectId,
+      userId,
+      error: enhanced,
+    });
+    return failure(errorCode, enhanced.message, {
+      projectId,
+      userId,
+      retryable,
+      errorCode: enhanced.code,
+      errorType: enhanced.errorType,
+    });
   }
 }

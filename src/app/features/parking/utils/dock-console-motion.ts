@@ -276,28 +276,76 @@ function buildConsoleMotionBatch({
   const renderCards = createStableConsoleRenderCards(postEntries);
   const motions: ConsoleCardMotionState[] = [];
 
-  renderCards.forEach(renderCard => {
-    const override = postOverrides?.get(renderCard.taskId);
-    const previous = preByTaskId.get(renderCard.taskId);
-    const fromPoseKey = override?.fromPoseKey
-      ?? (previous
-        ? resolveConsoleCardStablePoseKey(previous.entry, previous.index)
-        : defaultNewFromPoseKey
-          ?? renderCard.poseKey);
-    const toPoseKey = renderCard.poseKey;
-    if (fromPoseKey === toPoseKey && !override?.kind) return;
-
-    motions.push({
-      renderId: renderCard.renderId,
-      taskId: renderCard.taskId,
-      kind: override?.kind ?? (previous ? defaultShiftKind : defaultNewKind),
-      fromPoseKey,
-      toPoseKey,
-      durationMs,
-      easing,
-    });
+  addStableCardMotions(motions, renderCards, preByTaskId, {
+    durationMs,
+    easing,
+    defaultShiftKind,
+    defaultNewFromPoseKey,
+    defaultNewKind,
+    postOverrides,
   });
 
+  addRemovedCloneMotions(motions, renderCards, preByTaskId, removedClones, durationMs, easing);
+
+  return {
+    durationMs,
+    renderCards,
+    motions,
+  };
+}
+
+function addStableCardMotions(
+  motions: ConsoleCardMotionState[],
+  renderCards: ConsoleRenderCard[],
+  preByTaskId: Map<string, EntrySnapshot>,
+  options: Pick<
+    BuildConsoleMotionBatchOptions,
+    'durationMs' | 'easing' | 'defaultShiftKind' | 'defaultNewFromPoseKey' | 'defaultNewKind' | 'postOverrides'
+  >,
+): void {
+  renderCards.forEach(renderCard => {
+    const motion = createStableCardMotion(renderCard, preByTaskId, options);
+    if (motion) motions.push(motion);
+  });
+}
+
+function createStableCardMotion(
+  renderCard: ConsoleRenderCard,
+  preByTaskId: Map<string, EntrySnapshot>,
+  options: Pick<
+    BuildConsoleMotionBatchOptions,
+    'durationMs' | 'easing' | 'defaultShiftKind' | 'defaultNewFromPoseKey' | 'defaultNewKind' | 'postOverrides'
+  >,
+): ConsoleCardMotionState | null {
+  const override = options.postOverrides?.get(renderCard.taskId);
+  const previous = preByTaskId.get(renderCard.taskId);
+  const fromPoseKey = override?.fromPoseKey
+    ?? (previous
+      ? resolveConsoleCardStablePoseKey(previous.entry, previous.index)
+      : options.defaultNewFromPoseKey
+        ?? renderCard.poseKey);
+  const toPoseKey = renderCard.poseKey;
+  if (fromPoseKey === toPoseKey && !override?.kind) return null;
+
+  return {
+    renderId: renderCard.renderId,
+    taskId: renderCard.taskId,
+    kind: override?.kind ?? (previous ? options.defaultShiftKind : options.defaultNewKind!),
+    fromPoseKey,
+    toPoseKey,
+    durationMs: options.durationMs,
+    easing: options.easing ?? PARKING_CONFIG.MOTION.easing.enter,
+  };
+}
+
+function addRemovedCloneMotions(
+  motions: ConsoleCardMotionState[],
+  renderCards: ConsoleRenderCard[],
+  preByTaskId: Map<string, EntrySnapshot>,
+  removedClones: NonNullable<BuildConsoleMotionBatchOptions['removedClones']>,
+  durationMs: number,
+  easing: string,
+): void {
   removedClones.forEach(removed => {
     const previous = preByTaskId.get(removed.taskId);
     if (!previous) return;
@@ -320,12 +368,6 @@ function buildConsoleMotionBatch({
       easing,
     });
   });
-
-  return {
-    durationMs,
-    renderCards,
-    motions,
-  };
 }
 
 function createEntrySnapshotMap(entries: DockEntry[]): Map<string, EntrySnapshot> {

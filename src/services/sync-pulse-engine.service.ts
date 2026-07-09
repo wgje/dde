@@ -34,7 +34,7 @@ export type EventDrivenSyncPulseLike = {
   destroy: () => void;
   triggerNow: (reason: SyncPulseReason) => Promise<{
     status: 'success' | 'failed' | 'skipped';
-    skipReason?: 'disabled' | 'cooldown' | 'offline' | 'hidden' | 'unauthenticated' | 'resuming' | 'compensating' | 'post-heavy-cooldown' | 'same-ticket';
+    skipReason?: 'disabled' | 'cooldown' | 'offline' | 'hidden' | 'unauthenticated' | 'resuming' | 'compensating' | 'post-heavy-cooldown' | 'same-ticket' | 'in-flight';
     retryAfterMs?: number;
   }>;
 };
@@ -46,20 +46,47 @@ export class SyncPulseEngineService {
 
   private ref: EventDrivenSyncPulseLike | null = null;
   private loadPromise: Promise<EventDrivenSyncPulseLike | null> | null = null;
+  private pendingLoadDestroyPromise: Promise<unknown> | null = null;
+  private lifecycleGeneration = 0;
+  private lifecycleClosed = false;
 
   /** 懒加载并初始化引擎。 */
   initialize(): void {
-    void this.getLazy().then((service) => service?.initialize());
+    this.lifecycleClosed = false;
+    const generation = this.lifecycleGeneration;
+    void this.getLazy()
+      .then((service) => {
+        if (generation === this.lifecycleGeneration) {
+          try {
+            service?.initialize();
+          } catch (error) {
+            this.warn('EventDrivenSyncPulseService 初始化失败，降级关闭 pulse', error);
+          }
+        }
+      })
+      .catch((error) => {
+        this.warn('EventDrivenSyncPulseService 初始化失败，降级关闭 pulse', error);
+      });
   }
 
   /** 销毁引擎（保留 ref 以便后续 initialize 复用，语义与历史实现一致）。 */
   destroy(): void {
+    this.lifecycleClosed = true;
+    this.lifecycleGeneration += 1;
     if (this.ref) {
-      this.ref.destroy();
+      this.destroyRefSafely(this.ref);
       return;
     }
-    if (this.loadPromise) {
-      void this.loadPromise.then((service) => service?.destroy());
+    if (this.loadPromise && !this.pendingLoadDestroyPromise) {
+      this.pendingLoadDestroyPromise = this.loadPromise
+        .then((service) => {
+          if (service) {
+            this.destroyRefSafely(service);
+          }
+        })
+        .finally(() => {
+          this.pendingLoadDestroyPromise = null;
+        });
     }
   }
 
@@ -70,11 +97,29 @@ export class SyncPulseEngineService {
   async trigger(
     reason: SyncPulseReason,
   ): Promise<Awaited<ReturnType<EventDrivenSyncPulseLike['triggerNow']>> | null> {
-    const service = await this.getLazy();
-    if (!service) {
+    if (this.lifecycleClosed) {
       return null;
     }
-    return service.triggerNow(reason);
+
+    const generation = this.lifecycleGeneration;
+    const service = await this.getLazy();
+    if (!service || this.lifecycleClosed || generation !== this.lifecycleGeneration) {
+      return null;
+    }
+    try {
+      return await service.triggerNow(reason);
+    } catch (error) {
+      this.warn('EventDrivenSyncPulseService 触发失败，已跳过本次 pulse', error);
+    }
+    return null;
+  }
+
+  private destroyRefSafely(service: EventDrivenSyncPulseLike): void {
+    try {
+      service.destroy();
+    } catch (error) {
+      this.warn('EventDrivenSyncPulseService 销毁失败，已忽略迟到清理错误', error);
+    }
   }
 
   private async getLazy(): Promise<EventDrivenSyncPulseLike | null> {
@@ -92,7 +137,7 @@ export class SyncPulseEngineService {
         return service;
       })
       .catch((error) => {
-        this.logger.warn('EventDrivenSyncPulseService 懒加载失败，降级关闭 pulse', error);
+        this.warn('EventDrivenSyncPulseService 懒加载失败，降级关闭 pulse', error);
         return null;
       })
       .finally(() => {
@@ -100,5 +145,13 @@ export class SyncPulseEngineService {
       });
 
     return this.loadPromise;
+  }
+
+  private warn(message: string, error: unknown): void {
+    try {
+      this.logger.warn(message, error);
+    } catch {
+      // Warning sinks must not re-open lazy-load, initialize, or teardown failure paths.
+    }
   }
 }

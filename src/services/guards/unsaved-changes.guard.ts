@@ -18,7 +18,7 @@ import {
   ActivatedRouteSnapshot, 
   RouterStateSnapshot 
 } from '@angular/router';
-import { SyncStateService } from '../../app/core/services/sync/sync-state.service';
+import { SyncStateService } from '../../core-bridge';
 import { LoggerService } from '../logger.service';
 import { BeforeUnloadManagerService } from '../before-unload-manager.service';
 

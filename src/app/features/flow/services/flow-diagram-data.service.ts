@@ -1,4 +1,4 @@
-import { Injectable, inject } from '@angular/core';
+import { Injectable, Injector, inject } from '@angular/core';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { UiStateService } from '../../../../services/ui-state.service';
 import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
@@ -6,17 +6,30 @@ import { SyncCoordinatorService } from '../../../../services/sync-coordinator.se
 import { LoggerService } from '../../../../services/logger.service';
 import { ToastService } from '../../../../services/toast.service';
 import { DockEngineService } from '../../../../services/dock-engine.service';
-import { FlowDiagramConfigService, type GoJSLinkData } from './flow-diagram-config.service';
+import { FlowDiagramConfigService, type FlowRelationDisplayMode, type GoJSDiagramData } from './flow-diagram-config.service';
 import { FlowZoomService } from './flow-zoom.service';
-import { Task } from '../../../../models';
+import { Project, Task } from '../../../../models';
 import * as go from 'gojs';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
+import { applyDiagramData, collectCurrentDiagramMaps } from './flow-diagram-data-merge.helpers';
+import { FlowDiagramExportController } from './flow-diagram-export.controller';
+import { FlowDiagramSidecarExpansionController } from './flow-diagram-sidecar-expansion.controller';
 
-type FlowLinkDataWithPorts = GoJSLinkData & {
-  fromPortId: string;
-  toPortId: string;
-  points?: unknown;
-};
+interface DiagramUpdateContext {
+  diagram: go.Diagram;
+  model: go.GraphLinksModel;
+  project: Project;
+  activeTasks: Task[];
+  searchQuery: string;
+  lastUpdateType: string;
+  taskFingerprint: string;
+  taskVisualFingerprint: string;
+  dockFingerprint: string;
+  connSig: string;
+  relationDisplaySignature: string;
+  hasTaskDataChange: boolean;
+  hasTaskVisualChange: boolean;
+}
 
 /**
  * FlowDiagramDataService - 图表数据同步、导出与视图状态管理
@@ -33,10 +46,10 @@ type FlowLinkDataWithPorts = GoJSLinkData & {
   providedIn: 'root'
 })
 export class FlowDiagramDataService {
+  private readonly injector = inject(Injector);
   private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly projectState = inject(ProjectStateService);
   private readonly uiState = inject(UiStateService);
-  private readonly taskOps = inject(TaskOperationAdapterService);
   private readonly syncCoordinator = inject(SyncCoordinatorService);
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('FlowDiagramData');
@@ -44,6 +57,18 @@ export class FlowDiagramDataService {
   private readonly dockEngine = inject(DockEngineService);
   private readonly configService = inject(FlowDiagramConfigService);
   private readonly zoomService = inject(FlowZoomService);
+  private readonly sidecarExpansion = new FlowDiagramSidecarExpansionController();
+  private readonly exportController = new FlowDiagramExportController({
+    projectName: () => this.projectState.activeProject()?.name ?? '未命名项目',
+    toast: this.toast,
+    logger: this.logger,
+    sentry: this.sentryLazyLoader,
+    downloadBlob: (blob, filename) => this.downloadBlob(blob, filename),
+  });
+
+  private get taskOps(): TaskOperationAdapterService {
+    return this.injector.get(TaskOperationAdapterService);
+  }
 
   // ========== GoJS Diagram 引用 ==========
   private diagram: go.Diagram | null = null;
@@ -52,6 +77,9 @@ export class FlowDiagramDataService {
   private viewStateSaveTimer: ReturnType<typeof setTimeout> | null = null;
   private restoreViewStateTimer: ReturnType<typeof setTimeout> | null = null;
   private autoFitTimer: ReturnType<typeof setTimeout> | null = null;
+  private initialFitTimer: ReturnType<typeof setTimeout> | null = null;
+  private flowActivationFitRafIds: number[] = [];
+  private lifecycleGeneration = 0;
 
   // ========== 标志 ==========
   private isFirstLoad = true;
@@ -68,6 +96,9 @@ export class FlowDiagramDataService {
   private lastConnectionSignatureForData = '';
   private lastSearchQuery = '';
   private lastDockFingerprint = '';
+  private lastRelationDisplaySignature = '';
+  private relationDisplayMode: FlowRelationDisplayMode = 'all';
+  private relationFocusedTaskId: string | null = null;
 
   // ========== 外部设置 ==========
 
@@ -75,6 +106,9 @@ export class FlowDiagramDataService {
    * 由 FlowDiagramService 在初始化后调用，传入 diagram 实例
    */
   setDiagram(diagram: go.Diagram | null): void {
+    if (this.diagram !== diagram) {
+      this.lifecycleGeneration += 1;
+    }
     const wasDetached = this.diagram === null;
     this.diagram = diagram;
     if (diagram && wasDetached) {
@@ -87,80 +121,11 @@ export class FlowDiagramDataService {
   // ========== 导出功能 ==========
 
   async exportToPng(): Promise<Blob | null> {
-    if (!this.diagram) {
-      this.toast.error('导出失败', '流程图未加载');
-      return null;
-    }
-
-    try {
-      const imgData = this.diagram.makeImageData({
-        scale: 2,
-        background: '#F5F2E9',
-        type: 'image/png',
-        maxSize: new go.Size(4096, 4096)
-      }) as string;
-
-      if (!imgData) {
-        this.toast.error('导出失败', '无法生成图片');
-        return null;
-      }
-
-      const response = await fetch(imgData);
-      const blob = await response.blob();
-
-      this.downloadBlob(blob, `流程图_${this.getExportFileName()}.png`);
-      this.toast.success('导出成功', 'PNG 图片已下载');
-
-      return blob;
-    } catch (error) {
-      this.logger.error('导出 PNG 失败', error);
-      this.sentryLazyLoader.captureException(error, { tags: { operation: 'exportToPng' } });
-      this.toast.error('导出失败', '生成图片时发生错误');
-      // eslint-disable-next-line no-restricted-syntax -- 返回 null 语义正确：导出失败已通过 toast 通知用户
-      return null;
-    }
+    return this.exportController.exportToPng(this.diagram);
   }
 
   async exportToSvg(): Promise<Blob | null> {
-    if (!this.diagram) {
-      this.toast.error('导出失败', '流程图未加载');
-      return null;
-    }
-
-    try {
-      const svg = this.diagram.makeSvg({
-        scale: 1,
-        background: '#F5F2E9',
-        maxSize: new go.Size(4096, 4096)
-      });
-
-      if (!svg) {
-        this.toast.error('导出失败', '无法生成 SVG');
-        return null;
-      }
-
-      const serializer = new XMLSerializer();
-      const svgString = serializer.serializeToString(svg);
-      const blob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
-
-      this.downloadBlob(blob, `流程图_${this.getExportFileName()}.svg`);
-      this.toast.success('导出成功', 'SVG 图片已下载');
-
-      return blob;
-    } catch (error) {
-      this.logger.error('导出 SVG 失败', error);
-      this.sentryLazyLoader.captureException(error, { tags: { operation: 'exportToSvg' } });
-      this.toast.error('导出失败', '生成 SVG 时发生错误');
-      // eslint-disable-next-line no-restricted-syntax -- 返回 null 语义正确：导出失败已通过 toast 通知用户
-      return null;
-    }
-  }
-
-  private getExportFileName(): string {
-    const project = this.projectState.activeProject();
-    const projectName = project?.name || '未命名项目';
-    const date = new Date().toISOString().slice(0, 10);
-    return `${projectName}_${date}`;
+    return this.exportController.exportToSvg(this.diagram);
   }
 
   private downloadBlob(blob: Blob, filename: string): void {
@@ -207,7 +172,7 @@ export class FlowDiagramDataService {
       if (model) {
         const currentLinkCount = (model.linkDataArray || []).length;
         const parentChildCount = newTasks.filter(t => t.parentId).length;
-        const crossTreeCount = project.connections?.filter(c => !c.deletedAt).length || 0;
+        const crossTreeCount = this.computeVisibleCrossTreeLinkCount(project, newTasks);
         const expectedLinkCount = parentChildCount + crossTreeCount;
         if (currentLinkCount !== expectedLinkCount) {
           return true;
@@ -218,152 +183,59 @@ export class FlowDiagramDataService {
     return false;
   }
 
+  private computeVisibleCrossTreeLinkCount(project: Project, tasks: Task[]): number {
+    if (this.relationDisplayMode === 'hidden') return 0;
+
+    const taskIdSet = new Set(tasks.map(task => task.id));
+    const parentChildPairs = new Set(
+      tasks
+        .filter(task => task.parentId)
+        .map(task => `${task.parentId}->${task.id}`),
+    );
+    let count = 0;
+    for (const connection of project.connections ?? []) {
+      if (connection.deletedAt) continue;
+      if (!taskIdSet.has(connection.source) || !taskIdSet.has(connection.target)) continue;
+      if (parentChildPairs.has(`${connection.source}->${connection.target}`)) continue;
+      if (this.relationDisplayMode === 'focused') {
+        const focusedTaskId = this.relationFocusedTaskId;
+        if (!focusedTaskId || (connection.source !== focusedTaskId && connection.target !== focusedTaskId)) {
+          continue;
+        }
+      }
+      count += 1;
+    }
+    return count;
+  }
+
   /**
    * 更新图表数据
    */
   updateDiagram(tasks: Task[], forceRefresh: boolean = false): void {
-    if (!this.diagram) {
-      return;
-    }
-
-    const project = this.projectState.activeProject();
-    if (!project) {
-      return;
-    }
-
     try {
-      const lastUpdateType = this.taskOps.getLastUpdateType();
-      const model = this.diagram.model as go.GraphLinksModel;
-      const activeTasks = tasks.filter(t => !t.deletedAt);
-      const searchQuery = this.uiState.searchQuery();
-      const taskFingerprint = this.computeTaskFingerprint(activeTasks);
-      const taskVisualFingerprint = this.computeTaskVisualFingerprint(activeTasks, searchQuery.trim().length > 0);
-      const dockFingerprint = this.computeDockFingerprint();
-      const activeConns = project.connections?.filter(c => !c.deletedAt) ?? [];
-      const connSig = this.computeConnectionSignature(activeConns);
-      const hasTaskDataChange = taskFingerprint !== this.lastTaskFingerprint;
-      const hasTaskVisualChange = taskVisualFingerprint !== this.lastTaskVisualFingerprint;
+      const context = this.createDiagramUpdateContext(tasks);
+      if (!context) return;
 
       // 【2026-04-24 性能优化】先做最便宜的指纹短路，避免 30+ 任务场景下
       // 每次 signal emission 都执行 O(n) 的 currentNodeMap 构建 + detectStructuralChange。
       // 指纹已覆盖 title/updatedAt/displayId/parentId/stage/status/parkingMeta，再叠加连接与
       // docks/search 指纹，足以判断“任何影响图表显示的字段是否变化”。
-      if (!forceRefresh) {
-        if (!hasTaskDataChange
-            && connSig === this.lastConnectionSignatureForData
-            && searchQuery === this.lastSearchQuery
-            && dockFingerprint === this.lastDockFingerprint) {
-          return; // 数据无变化，跳过重建
-        }
-      }
+      if (this.canSkipByFingerprint(context, forceRefresh)) return;
 
       // 仅在可能需要重建时才构建 node 映射，并复用为 existingNodeMap（避免两次 O(n) 扫描）
-      const currentNodeMap = new Map<string, go.ObjectData>();
-      (model.nodeDataArray || []).forEach((n: go.ObjectData) => {
-        if (n.key) currentNodeMap.set(n.key as string, n);
-      });
+      const maps = collectCurrentDiagramMaps(context.model);
+      const hasStructuralChange = this.detectStructuralChange(maps.currentNodeMap, context.activeTasks);
 
-      const currentLinkMap = new Map<string, go.ObjectData>();
-      (model.linkDataArray || []).forEach((link: go.ObjectData) => {
-        if (link.key) currentLinkMap.set(link.key as string, link);
-      });
+      if (this.canSkipPositionOnlyUpdate(context, forceRefresh, hasStructuralChange)) return;
 
-      const hasStructuralChange = this.detectStructuralChange(currentNodeMap, activeTasks);
+      const diagramData = this.buildUpdatedDiagramData(context, maps.currentNodeMap);
+      this.pruneSidecarExpandedTaskIds(diagramData.nodeDataArray);
+      applyDiagramData(context.diagram, context.model, diagramData, maps);
+      this.updateDiagramFingerprints(context);
+      this.restoreSelectionAfterDataMerge(context.diagram, this.collectSelectedKeys(context.diagram));
 
-      if (lastUpdateType === 'position' && !forceRefresh && !hasStructuralChange && !hasTaskVisualChange) {
-        return;
-      }
-
-      const existingNodeMap = currentNodeMap;
-
-      const diagramData = this.configService.buildDiagramData(
-        activeTasks,
-        project,
-        searchQuery,
-        existingNodeMap,
-        {
-          dockedTaskIds: this.dockEngine.dockedTaskIds(),
-          focusedTaskId: this.dockEngine.focusingEntry()?.taskId ?? null,
-        },
-      );
-
-      const selectedKeys = new Set<string>();
-      this.diagram.selection.each((part: go.Part) => {
-        if (part.data?.key) {
-          selectedKeys.add(part.data.key);
-        }
-      });
-
-      this.diagram.startTransaction('update');
-      this.diagram.skipsUndoManager = true;
-
-      model.mergeNodeDataArray(diagramData.nodeDataArray);
-
-      const nextNodeMap = new Map<string, go.ObjectData>();
-      diagramData.nodeDataArray.forEach(node => nextNodeMap.set(node.key, node as go.ObjectData));
-      const linkDataWithPorts = diagramData.linkDataArray.map(link =>
-        this.buildLinkDataWithPorts(link, currentLinkMap, currentNodeMap, nextNodeMap)
-      );
-
-      model.mergeLinkDataArray(linkDataWithPorts);
-
-      const nodeKeys = new Set(diagramData.nodeDataArray.map(n => n.key));
-      const linkKeys = new Set(diagramData.linkDataArray.map(l => l.key));
-
-      const nodesToRemove = model.nodeDataArray.filter((n: go.ObjectData) => !nodeKeys.has(n.key as string));
-      nodesToRemove.forEach((n: go.ObjectData) => model.removeNodeData(n));
-
-      const linksToRemove = model.linkDataArray.filter((l: go.ObjectData) => !linkKeys.has(l.key as string));
-      linksToRemove.forEach((l: go.ObjectData) => model.removeLinkData(l));
-
-      this.diagram.skipsUndoManager = false;
-      this.diagram.commitTransaction('update');
-
-      // 【2026-02-25 性能优化】更新指纹缓存，下次无变化时可快速跳过
-      this.lastTaskFingerprint = taskFingerprint;
-      this.lastTaskVisualFingerprint = taskVisualFingerprint;
-      this.lastConnectionSignatureForData = connSig;
-      this.lastSearchQuery = searchQuery;
-      this.lastDockFingerprint = dockFingerprint;
-
-      if (selectedKeys.size > 0) {
-        // 先清除选中再恢复，确保 selectionChanged 回调触发（数据合并后 binding 可能覆盖了选中态边框）
-        this.diagram.clearSelection();
-        this.diagram.nodes.each((node: go.Node) => {
-          if (selectedKeys.has(node.data?.key)) {
-            node.isSelected = true;
-          }
-        });
-      }
-
-      // 【2026-02-25 性能优化】移除全量 invalidateRoute() 调用
-      // GoJS 的 mergeNodeDataArray/mergeLinkDataArray 已内置路由失效机制，
-      // 仅在节点位置或 link 端点变化时自动更新受影响的连线。
-      // 此前对所有 link 调用 invalidateRoute() 强制重算所有贝塞尔曲线，
-      // 配合自定义 getLinkPoint 4 策略回退，50 节点 + 50-100 链接时造成严重卡顿。
-
-      // Debug 日志
-      const linkData = model.linkDataArray;
-      if (linkData?.length > 0 && !this._familyColorLogged) {
-        this._familyColorLogged = true;
-        this.logger.info(`[LineageColor] 首条连线数据: ${JSON.stringify(linkData[0])}`);
-      }
-
-      if (this.isFirstLoad && diagramData.nodeDataArray.length > 0) {
-        this.isFirstLoad = false;
-        setTimeout(() => {
-          if (!this.diagram) return;
-          const viewState = this.projectState.getViewState();
-          if (!viewState) {
-            if (this.uiState.activeView() !== 'flow') {
-              this.pendingAutoFitToContents = true;
-              return;
-            }
-            this.zoomService.fitToContents();
-          }
-        }, 100);
-      }
-
+      this.logFirstFamilyColorLink(context.model);
+      this.scheduleInitialFitIfNeeded(diagramData);
     } catch (error) {
       this.sentryLazyLoader.captureException(error, { tags: { operation: 'updateDiagram' } });
       this.logger.error('❌ 更新流程图失败', error);
@@ -371,48 +243,200 @@ export class FlowDiagramDataService {
     }
   }
 
-  private buildLinkDataWithPorts(
-    link: GoJSLinkData,
-    currentLinkMap: ReadonlyMap<string, go.ObjectData>,
-    currentNodeMap: ReadonlyMap<string, go.ObjectData>,
-    nextNodeMap: ReadonlyMap<string, go.ObjectData>,
-  ): FlowLinkDataWithPorts {
-    const existingLink = currentLinkMap.get(link.key);
-    const points = this.shouldPreserveLinkPoints(link, existingLink, currentNodeMap, nextNodeMap)
-      ? existingLink?.points
-      : undefined;
+  private createDiagramUpdateContext(tasks: Task[]): DiagramUpdateContext | null {
+    if (!this.diagram) return null;
+
+    const project = this.projectState.activeProject();
+    if (!project) return null;
+
+    this.sidecarExpansion.ensureLoaded(project.id);
+
+    const activeTasks = tasks.filter(t => !t.deletedAt);
+    const searchQuery = this.uiState.searchQuery();
+    const taskFingerprint = this.computeTaskFingerprint(activeTasks);
+    const taskVisualFingerprint = this.computeTaskVisualFingerprint(activeTasks, searchQuery.trim().length > 0);
+    const dockFingerprint = this.computeDockFingerprint();
+    const activeConns = project.connections?.filter(c => !c.deletedAt) ?? [];
+    const connSig = this.computeConnectionSignature(activeConns);
+    const relationDisplaySignature = this.computeRelationDisplaySignature();
 
     return {
-      ...link,
-      points,
-      fromPortId: "",
-      toPortId: ""
+      diagram: this.diagram,
+      model: this.diagram.model as go.GraphLinksModel,
+      project,
+      activeTasks,
+      searchQuery,
+      lastUpdateType: this.taskOps.getLastUpdateType(),
+      taskFingerprint,
+      taskVisualFingerprint,
+      dockFingerprint,
+      connSig,
+      relationDisplaySignature,
+      hasTaskDataChange: taskFingerprint !== this.lastTaskFingerprint,
+      hasTaskVisualChange: taskVisualFingerprint !== this.lastTaskVisualFingerprint,
     };
   }
 
-  private shouldPreserveLinkPoints(
-    nextLink: GoJSLinkData,
-    currentLink: go.ObjectData | undefined,
-    currentNodeMap: ReadonlyMap<string, go.ObjectData>,
-    nextNodeMap: ReadonlyMap<string, go.ObjectData>,
-  ): boolean {
-    if (currentLink?.points === undefined || currentLink.points === null) return false;
-    if (currentLink.from !== nextLink.from || currentLink.to !== nextLink.to) return false;
-    if (currentLink.category !== nextLink.category || currentLink.curviness !== nextLink.curviness) return false;
-
-    return this.hasStableNodeLoc(currentNodeMap, nextNodeMap, nextLink.from)
-      && this.hasStableNodeLoc(currentNodeMap, nextNodeMap, nextLink.to);
+  private canSkipByFingerprint(context: DiagramUpdateContext, forceRefresh: boolean): boolean {
+    return !forceRefresh
+      && !context.hasTaskDataChange
+      && context.connSig === this.lastConnectionSignatureForData
+      && context.searchQuery === this.lastSearchQuery
+      && context.dockFingerprint === this.lastDockFingerprint
+      && context.relationDisplaySignature === this.lastRelationDisplaySignature;
   }
 
-  private hasStableNodeLoc(
-    currentNodeMap: ReadonlyMap<string, go.ObjectData>,
-    nextNodeMap: ReadonlyMap<string, go.ObjectData>,
-    key: string,
+  private canSkipPositionOnlyUpdate(
+    context: DiagramUpdateContext,
+    forceRefresh: boolean,
+    hasStructuralChange: boolean,
   ): boolean {
-    const currentLoc = currentNodeMap.get(key)?.loc;
-    const nextLoc = nextNodeMap.get(key)?.loc;
+    return context.lastUpdateType === 'position'
+      && !forceRefresh
+      && !hasStructuralChange
+      && !context.hasTaskVisualChange;
+  }
 
-    return currentLoc !== undefined && nextLoc !== undefined && currentLoc === nextLoc;
+  private buildUpdatedDiagramData(
+    context: DiagramUpdateContext,
+    existingNodeMap: Map<string, go.ObjectData>,
+  ): GoJSDiagramData {
+    return this.configService.buildDiagramData(
+      context.activeTasks,
+      context.project,
+      context.searchQuery,
+      existingNodeMap,
+      {
+        dockedTaskIds: this.dockEngine.dockedTaskIds(),
+        focusedTaskId: this.dockEngine.focusingEntry()?.taskId ?? null,
+      },
+      {
+        relationDisplayMode: this.relationDisplayMode,
+        focusedTaskId: this.relationFocusedTaskId,
+      },
+      this.sidecarExpansion.taskIds,
+    );
+  }
+
+  private collectSelectedKeys(diagram: go.Diagram): Set<string> {
+    const selectedKeys = new Set<string>();
+    diagram.selection.each((part: go.Part) => {
+      if (part.data?.key) {
+        selectedKeys.add(part.data.key);
+      }
+    });
+    return selectedKeys;
+  }
+
+  private updateDiagramFingerprints(context: DiagramUpdateContext): void {
+    // 【2026-02-25 性能优化】更新指纹缓存，下次无变化时可快速跳过
+    this.lastTaskFingerprint = context.taskFingerprint;
+    this.lastTaskVisualFingerprint = context.taskVisualFingerprint;
+    this.lastConnectionSignatureForData = context.connSig;
+    this.lastSearchQuery = context.searchQuery;
+    this.lastDockFingerprint = context.dockFingerprint;
+    this.lastRelationDisplaySignature = context.relationDisplaySignature;
+  }
+
+  private restoreSelectionAfterDataMerge(diagram: go.Diagram, selectedKeys: ReadonlySet<string>): void {
+    if (selectedKeys.size === 0) return;
+
+    // 先清除选中再恢复，确保 selectionChanged 回调触发（数据合并后 binding 可能覆盖了选中态边框）
+    diagram.clearSelection();
+    diagram.nodes.each((node: go.Node) => {
+      if (selectedKeys.has(node.data?.key)) {
+        node.isSelected = true;
+      }
+    });
+  }
+
+  private logFirstFamilyColorLink(model: go.GraphLinksModel): void {
+    const linkData = model.linkDataArray;
+    if (linkData?.length > 0 && !this._familyColorLogged) {
+      this._familyColorLogged = true;
+      this.logger.info(`[LineageColor] 首条连线数据: ${JSON.stringify(linkData[0])}`);
+    }
+  }
+
+  private scheduleInitialFitIfNeeded(diagramData: GoJSDiagramData): void {
+    if (!this.isFirstLoad || diagramData.nodeDataArray.length === 0) return;
+    if (!this.diagram) return;
+
+    this.isFirstLoad = false;
+    const scheduledDiagram = this.diagram;
+    const scheduledGeneration = this.lifecycleGeneration;
+    if (this.initialFitTimer !== null) {
+      clearTimeout(this.initialFitTimer);
+      this.initialFitTimer = null;
+    }
+    const initialFitTimer = setTimeout(() => {
+      if (this.initialFitTimer === initialFitTimer) {
+        this.initialFitTimer = null;
+      }
+      if (this.diagram !== scheduledDiagram || this.lifecycleGeneration !== scheduledGeneration) return;
+      const viewState = this.projectState.getViewState();
+      if (!viewState) {
+        if (this.uiState.activeView() !== 'flow') {
+          this.pendingAutoFitToContents = true;
+          return;
+        }
+        if (this.diagram === scheduledDiagram && this.lifecycleGeneration === scheduledGeneration) {
+          this.zoomService.fitToContents();
+        }
+      }
+    }, 100);
+    this.initialFitTimer = initialFitTimer;
+  }
+
+  setRelationDisplayMode(mode: FlowRelationDisplayMode, focusedTaskId: string | null): boolean {
+    const previousSignature = this.computeRelationDisplaySignature();
+    this.relationDisplayMode = mode;
+    this.relationFocusedTaskId = focusedTaskId;
+    return this.computeRelationDisplaySignature() !== previousSignature;
+  }
+
+  toggleSidecarExpanded(taskId: string): boolean {
+    if (!taskId) return false;
+    const project = this.projectState.activeProject();
+    if (!project) return false;
+
+    this.sidecarExpansion.ensureLoaded(project.id);
+    const nodeData = this.findNodeData(taskId);
+    const hasSignals = Boolean(nodeData?.sidecarHasSignals);
+    if (!hasSignals) return false;
+
+    const nextExpanded = this.sidecarExpansion.toggle(project.id, taskId);
+    this.setNodeSidecarExpanded(taskId, nextExpanded);
+    return nextExpanded;
+  }
+
+  private findNodeData(taskId: string): go.ObjectData | null {
+    const model = this.diagram?.model as go.GraphLinksModel | undefined;
+    if (!model) return null;
+    return model.nodeDataArray.find(node => node.key === taskId) ?? null;
+  }
+
+  private setNodeSidecarExpanded(taskId: string, expanded: boolean): void {
+    const model = this.diagram?.model as go.GraphLinksModel | undefined;
+    const nodeData = this.findNodeData(taskId);
+    if (!model || !nodeData) return;
+
+    model.setDataProperty(nodeData, 'sidecarExpanded', expanded);
+    model.setDataProperty(nodeData, 'sidecarTopVisible', expanded && this.hasNodeSidecarItems(nodeData, 'sidecarTopBadgeItems'));
+    model.setDataProperty(nodeData, 'sidecarRightVisible', expanded && this.hasNodeSidecarItems(nodeData, 'sidecarRightBadgeItems'));
+    model.setDataProperty(nodeData, 'sidecarBottomVisible', expanded && this.hasNodeSidecarItems(nodeData, 'sidecarBottomBadgeItems'));
+    model.setDataProperty(nodeData, 'sidecarLeftVisible', expanded && this.hasNodeSidecarItems(nodeData, 'sidecarLeftBadgeItems'));
+    const node = this.diagram?.findNodeForKey(taskId);
+    node?.updateTargetBindings();
+  }
+
+  private hasNodeSidecarItems(nodeData: go.ObjectData, property: string): boolean {
+    const value = nodeData[property];
+    return Array.isArray(value) && value.length > 0;
+  }
+
+  private pruneSidecarExpandedTaskIds(nodes: readonly { key: string; sidecarHasSignals?: boolean }[]): void {
+    this.sidecarExpansion.prune(nodes);
   }
 
   // ========== 视图状态 ==========
@@ -423,33 +447,39 @@ export class FlowDiagramDataService {
   saveViewState(): void {
     if (!this.diagram) return;
 
-    if (this.viewStateSaveTimer) {
+    if (this.viewStateSaveTimer !== null) {
       clearTimeout(this.viewStateSaveTimer);
     }
 
-    this.viewStateSaveTimer = setTimeout(() => {
-      if (!this.diagram) return;
+    const viewStateSaveTimer = setTimeout(() => {
+      if (this.viewStateSaveTimer !== viewStateSaveTimer) return;
+      try {
+        if (!this.diagram) return;
 
-      const projectId = this.projectState.activeProjectId();
-      if (!projectId) return;
+        const projectId = this.projectState.activeProjectId();
+        if (!projectId) return;
 
-      const scale = this.diagram.scale;
-      const pos = this.diagram.position;
+        const scale = this.diagram.scale;
+        const pos = this.diagram.position;
 
-      this.projectState.updateViewState(projectId, {
-        scale,
-        positionX: pos.x,
-        positionY: pos.y
-      });
-      this.syncCoordinator.markLocalChanges('position');
-      this.syncCoordinator.schedulePersist();
-
-      this.viewStateSaveTimer = null;
+        this.projectState.updateViewState(projectId, {
+          scale,
+          positionX: pos.x,
+          positionY: pos.y
+        });
+        this.syncCoordinator.markLocalChanges('position');
+        this.syncCoordinator.schedulePersist();
+      } finally {
+        if (this.viewStateSaveTimer === viewStateSaveTimer) {
+          this.viewStateSaveTimer = null;
+        }
+      }
     }, 1000);
+    this.viewStateSaveTimer = viewStateSaveTimer;
   }
 
   cancelPendingViewStateSave(): void {
-    if (this.viewStateSaveTimer) {
+    if (this.viewStateSaveTimer !== null) {
       clearTimeout(this.viewStateSaveTimer);
       this.viewStateSaveTimer = null;
     }
@@ -463,45 +493,67 @@ export class FlowDiagramDataService {
 
     const immediateViewState = this.projectState.getViewState();
     if (immediateViewState) {
-      this.pendingAutoFitToContents = false;
-      this.diagram.scale = immediateViewState.scale;
-      this.diagram.position = new go.Point(immediateViewState.positionX, immediateViewState.positionY);
+      this.applyViewState(immediateViewState);
       return;
     }
 
-    if (this.restoreViewStateTimer) {
+    if (this.restoreViewStateTimer !== null) {
       clearTimeout(this.restoreViewStateTimer);
       this.restoreViewStateTimer = null;
     }
 
-    this.restoreViewStateTimer = setTimeout(() => {
-      if (!this.diagram) return;
+    const restoreViewStateTimer = setTimeout(() => {
+      if (this.restoreViewStateTimer !== restoreViewStateTimer) return;
+      try {
+        if (!this.diagram) return;
 
-      const viewState = this.projectState.getViewState();
+        const viewState = this.projectState.getViewState();
 
-      if (viewState) {
-        this.pendingAutoFitToContents = false;
-        this.diagram.scale = viewState.scale;
-        this.diagram.position = new go.Point(viewState.positionX, viewState.positionY);
-      } else {
+        if (viewState) {
+          this.applyViewState(viewState);
+          return;
+        }
+
         if (this.uiState.activeView() !== 'flow') {
           this.pendingAutoFitToContents = true;
           return;
         }
 
-        if (this.autoFitTimer) {
-          clearTimeout(this.autoFitTimer);
+        this.scheduleAutoFitToContents();
+      } finally {
+        if (this.restoreViewStateTimer === restoreViewStateTimer) {
+          this.restoreViewStateTimer = null;
+        }
+      }
+    }, 200);
+    this.restoreViewStateTimer = restoreViewStateTimer;
+  }
+
+  private applyViewState(viewState: { scale: number; positionX: number; positionY: number }): void {
+    this.pendingAutoFitToContents = false;
+    if (!this.diagram) return;
+    this.diagram.scale = viewState.scale;
+    this.diagram.position = new go.Point(viewState.positionX, viewState.positionY);
+  }
+
+  private scheduleAutoFitToContents(): void {
+    if (this.autoFitTimer !== null) {
+      clearTimeout(this.autoFitTimer);
+      this.autoFitTimer = null;
+    }
+
+    const autoFitTimer = setTimeout(() => {
+      if (this.autoFitTimer !== autoFitTimer) return;
+      try {
+        if (!this.diagram) return;
+        this.zoomService.fitToContents();
+      } finally {
+        if (this.autoFitTimer === autoFitTimer) {
           this.autoFitTimer = null;
         }
-
-        this.autoFitTimer = setTimeout(() => {
-          if (!this.diagram) return;
-          this.zoomService.fitToContents();
-          this.autoFitTimer = null;
-        }, 300);
       }
-      this.restoreViewStateTimer = null;
-    }, 200);
+    }, 300);
+    this.autoFitTimer = autoFitTimer;
   }
 
   // ========== Flow 视图激活 ==========
@@ -523,12 +575,19 @@ export class FlowDiagramDataService {
     }
 
     this.pendingAutoFitToContents = false;
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        if (!this.diagram) return;
+    const scheduledDiagram = this.diagram;
+    const scheduledGeneration = this.lifecycleGeneration;
+    const firstRafId = requestAnimationFrame(() => {
+      this.flowActivationFitRafIds = this.flowActivationFitRafIds.filter(id => id !== firstRafId);
+      if (this.diagram !== scheduledDiagram || this.lifecycleGeneration !== scheduledGeneration) return;
+      const secondRafId = requestAnimationFrame(() => {
+        this.flowActivationFitRafIds = this.flowActivationFitRafIds.filter(id => id !== secondRafId);
+        if (this.diagram !== scheduledDiagram || this.lifecycleGeneration !== scheduledGeneration) return;
         this.zoomService.fitToContents();
       });
+      this.flowActivationFitRafIds.push(secondRafId);
     });
+    this.flowActivationFitRafIds.push(firstRafId);
   }
 
   // ========== 清理 ==========
@@ -537,24 +596,33 @@ export class FlowDiagramDataService {
    * 清理所有内部定时器
    */
   clearTimers(): void {
-    if (this.viewStateSaveTimer) {
+    if (this.viewStateSaveTimer !== null) {
       clearTimeout(this.viewStateSaveTimer);
       this.viewStateSaveTimer = null;
     }
-    if (this.restoreViewStateTimer) {
+    if (this.restoreViewStateTimer !== null) {
       clearTimeout(this.restoreViewStateTimer);
       this.restoreViewStateTimer = null;
     }
-    if (this.autoFitTimer) {
+    if (this.autoFitTimer !== null) {
       clearTimeout(this.autoFitTimer);
       this.autoFitTimer = null;
     }
+    if (this.initialFitTimer !== null) {
+      clearTimeout(this.initialFitTimer);
+      this.initialFitTimer = null;
+    }
+    for (const rafId of this.flowActivationFitRafIds) {
+      cancelAnimationFrame(rafId);
+    }
+    this.flowActivationFitRafIds = [];
   }
 
   /**
    * 销毁时重置状态
    */
   dispose(): void {
+    this.lifecycleGeneration += 1;
     this.clearTimers();
     this.diagram = null;
     this.isFirstLoad = true;
@@ -565,6 +633,10 @@ export class FlowDiagramDataService {
     this.lastConnectionSignatureForData = '';
     this.lastSearchQuery = '';
     this.lastDockFingerprint = '';
+    this.lastRelationDisplaySignature = '';
+    this.relationDisplayMode = 'all';
+    this.relationFocusedTaskId = null;
+    this.sidecarExpansion.reset();
   }
 
   // ========== 【2026-02-25 性能优化】增量更新辅助 ==========
@@ -635,5 +707,9 @@ export class FlowDiagramDataService {
       .map(c => `${c.source}->${c.target}|${c.title ?? ''}|${c.description ?? ''}|${c.updatedAt ?? ''}`)
       .sort()
       .join('|');
+  }
+
+  private computeRelationDisplaySignature(): string {
+    return `${this.relationDisplayMode}|${this.relationFocusedTaskId ?? ''}`;
   }
 }

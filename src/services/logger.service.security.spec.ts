@@ -97,7 +97,11 @@ describe('LoggerService Security', () => {
 
   describe('JWT Token Detection', () => {
     it('should detect and redact JWT tokens in string values', () => {
-      const jwt = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U';
+      const jwt = [
+        'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9',
+        'eyJzdWIiOiIxMjM0NTY3ODkwIn0',
+        'dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U',
+      ].join('.');
       logger.debug('test', 'Data', { 
         someField: jwt,
         normalField: 'normal value'

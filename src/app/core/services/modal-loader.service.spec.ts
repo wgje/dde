@@ -5,7 +5,7 @@
  * MIME=text/html 的 chunk 时，跳过重试、不上报 Sentry、给出"刷新"CTA toast。
  */
 import { Injector, runInInjectionContext } from '@angular/core';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ModalLoaderService } from './modal-loader.service';
 import { LoggerService } from '../../../services/logger.service';
 import { ToastService } from '../../../services/toast.service';
@@ -38,6 +38,10 @@ describe('ModalLoaderService stale-chunk handling', () => {
     });
 
     service = runInInjectionContext(injector, () => injector.get(ModalLoaderService));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it('"Failed to fetch dynamically imported module" 命中后应跳过重试，不调用 Sentry，并给出刷新 CTA', async () => {
@@ -78,10 +82,13 @@ describe('ModalLoaderService stale-chunk handling', () => {
   });
 
   it('真正的网络抖动（不命中 stale-chunk 规则）仍走原有重试逻辑', async () => {
+    vi.useFakeTimers();
     const loader = vi.fn().mockRejectedValue(new TypeError('NetworkError when attempting to fetch resource.'));
     const loadModal = (service as unknown as { loadModal: <T>(type: string, l: () => Promise<T>) => Promise<T> }).loadModal.bind(service);
 
-    await expect(loadModal('trash', loader)).rejects.toBeInstanceOf(TypeError);
+    const assertion = expect(loadModal('trash', loader)).rejects.toBeInstanceOf(TypeError);
+    await vi.advanceTimersByTimeAsync(3000);
+    await assertion;
 
     // MAX_RETRIES=2 → 总共调用 3 次
     expect(loader).toHaveBeenCalledTimes(3);
@@ -89,5 +96,46 @@ describe('ModalLoaderService stale-chunk handling', () => {
     expect(captureException).toHaveBeenCalled();
     // 不应给出 stale-chunk 刷新 CTA toast
     expect(toastWarn).not.toHaveBeenCalledWith('版本已更新', expect.anything(), expect.anything());
-  }, 15000);
+  });
+
+  it('同类型模态框并发加载时应复用同一个进行中的加载', async () => {
+    class TrashModalStub {}
+    let resolveLoader!: (component: typeof TrashModalStub) => void;
+    const deferredLoader = new Promise<typeof TrashModalStub>((resolve) => {
+      resolveLoader = resolve;
+    });
+    const loader = vi.fn(() => deferredLoader);
+    const loadModal = (service as unknown as { loadModal: <T>(type: string, l: () => Promise<T>) => Promise<T> }).loadModal.bind(service);
+
+    const first = loadModal('trash', loader);
+    const second = loadModal('trash', loader);
+
+    resolveLoader(TrashModalStub);
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+
+    expect(firstResult).toBe(TrashModalStub);
+    expect(secondResult).toBe(TrashModalStub);
+    expect(loader).toHaveBeenCalledTimes(1);
+  });
+
+  it('同类型进行中加载失败后应释放占用以允许后续重试', async () => {
+    class TrashModalStub {}
+    const staleChunkError = new TypeError('Failed to fetch dynamically imported module: https://x.dev/chunk-AAA.js');
+    const loader = vi.fn()
+      .mockRejectedValueOnce(staleChunkError)
+      .mockResolvedValueOnce(TrashModalStub);
+    const loadModal = (service as unknown as { loadModal: <T>(type: string, l: () => Promise<T>) => Promise<T> }).loadModal.bind(service);
+
+    const first = loadModal('trash', loader);
+    const second = loadModal('trash', loader);
+
+    expect(await Promise.allSettled([first, second])).toEqual([
+      { status: 'rejected', reason: staleChunkError },
+      { status: 'rejected', reason: staleChunkError },
+    ]);
+    expect(loader).toHaveBeenCalledTimes(1);
+
+    await expect(loadModal('trash', loader)).resolves.toBe(TrashModalStub);
+    expect(loader).toHaveBeenCalledTimes(2);
+  });
 });

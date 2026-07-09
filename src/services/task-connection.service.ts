@@ -194,32 +194,33 @@ export class TaskConnectionService {
    * 添加跨树连接
    * 如果存在已删除历史，则保留历史并创建新的活跃连接，避免复用已 tombstone 的旧 id
    */
-  addCrossTreeConnection(sourceId: string, targetId: string): void {
+  addCrossTreeConnection(sourceId: string, targetId: string): Promise<boolean> {
+    return this.addCrossTreeConnectionDurably(sourceId, targetId);
+  }
+
+  async addCrossTreeConnectionDurably(sourceId: string, targetId: string): Promise<boolean> {
     const activeP = this.getActiveProject();
-    if (!activeP) return;
-    if (!this.hasValidConnectionEndpoints(activeP, sourceId, targetId)) return;
+    if (!activeP) return false;
+    if (!this.hasValidConnectionEndpoints(activeP, sourceId, targetId)) return false;
     const now = new Date().toISOString();
 
     const activeConnections = this.getActiveConnectionsByPair(activeP, sourceId, targetId);
+    if (activeConnections.length === 1) {
+      return true;
+    }
 
-    // 如果存在且未删除，跳过
-    if (activeConnections.length > 0) {
-      if (activeConnections.length === 1) {
-        return;
-      }
-
-      this.recordAndUpdate(p => ({
+    if (activeConnections.length > 1) {
+      return this.recordAndUpdateDurably(p => ({
         ...p,
         connections: this.collapseDuplicateActiveConnections(p.connections, sourceId, targetId, now),
       }));
-      return;
     }
 
-    this.recordAndUpdate(p => ({
+    return this.recordAndUpdateDurably(p => ({
       ...p,
-      connections: [...p.connections, { 
+      connections: [...p.connections, {
         id: crypto.randomUUID(),
-        source: sourceId, 
+        source: sourceId,
         target: targetId,
         updatedAt: now,
       }]
@@ -240,13 +241,27 @@ export class TaskConnectionService {
     oldTargetId: string,
     newSourceId: string,
     newTargetId: string
-  ): void {
+  ): Promise<boolean> {
+    return this.relinkCrossTreeConnectionDurably(oldSourceId, oldTargetId, newSourceId, newTargetId);
+  }
+
+  async relinkCrossTreeConnectionDurably(
+    oldSourceId: string,
+    oldTargetId: string,
+    newSourceId: string,
+    newTargetId: string
+  ): Promise<boolean> {
     if (oldSourceId === newSourceId && oldTargetId === newTargetId) {
-      return;
+      return true;
     }
 
+    const activeP = this.getActiveProject();
+    if (!activeP) return false;
+    if (!this.hasValidConnectionEndpoints(activeP, newSourceId, newTargetId)) return false;
+    if (this.getActiveConnectionsByPair(activeP, oldSourceId, oldTargetId).length === 0) return false;
+
     const now = new Date().toISOString();
-    this.recordAndUpdate(p => {
+    return this.recordAndUpdateDurably(p => {
       if (!this.hasValidConnectionEndpoints(p, newSourceId, newTargetId)) {
         return p;
       }
@@ -265,7 +280,7 @@ export class TaskConnectionService {
         oldTargetId,
         now,
       );
-      
+
       if (!duplicateExists) {
         updatedConnections.push({
           id: crypto.randomUUID(),
@@ -273,19 +288,18 @@ export class TaskConnectionService {
           target: newTargetId,
           updatedAt: now,
         });
-      } else {
-        return {
-          ...p,
-          connections: this.collapseDuplicateActiveConnections(
-            updatedConnections,
-            newSourceId,
-            newTargetId,
-            now,
-          ),
-        };
+        return { ...p, connections: updatedConnections };
       }
 
-      return { ...p, connections: updatedConnections };
+      return {
+        ...p,
+        connections: this.collapseDuplicateActiveConnections(
+          updatedConnections,
+          newSourceId,
+          newTargetId,
+          now,
+        ),
+      };
     });
   }
 
@@ -293,9 +307,17 @@ export class TaskConnectionService {
    * 移除连接（使用软删除策略）
    * 设置 deletedAt 时间戳，让同步服务可以正确同步删除状态到其他设备
    */
-  removeConnection(sourceId: string, targetId: string): void {
+  removeConnection(sourceId: string, targetId: string): Promise<boolean> {
+    return this.removeConnectionDurably(sourceId, targetId);
+  }
+
+  async removeConnectionDurably(sourceId: string, targetId: string): Promise<boolean> {
+    const activeP = this.getActiveProject();
+    if (!activeP) return false;
+    if (this.getActiveConnectionsByPair(activeP, sourceId, targetId).length === 0) return false;
+
     const now = new Date().toISOString();
-    this.recordAndUpdate(p => {
+    return this.recordAndUpdateDurably(p => {
       const activeConnections = this.getActiveConnectionsByPair(p, sourceId, targetId);
 
       if (activeConnections.length === 0) {
@@ -312,9 +334,17 @@ export class TaskConnectionService {
   /**
    * 更新连接内容（标题和描述）
    */
-  updateConnectionContent(sourceId: string, targetId: string, title: string, description: string): void {
+  updateConnectionContent(sourceId: string, targetId: string, title: string, description: string): Promise<boolean> {
+    return this.updateConnectionContentDurably(sourceId, targetId, title, description);
+  }
+
+  async updateConnectionContentDurably(sourceId: string, targetId: string, title: string, description: string): Promise<boolean> {
+    const activeP = this.getActiveProject();
+    if (!activeP) return false;
+    if (this.getActiveConnectionsByPair(activeP, sourceId, targetId).length === 0) return false;
+
     const now = new Date().toISOString();
-    this.recordAndUpdateDebounced(p => {
+    return this.recordAndUpdateDurably(p => {
       const activeConnections = this.getActiveConnectionsByPair(p, sourceId, targetId);
 
       if (activeConnections.length === 0) {
@@ -351,5 +381,9 @@ export class TaskConnectionService {
 
   private recordAndUpdateDebounced(mutator: (project: Project) => Project): void {
     this.recorder.recordAndUpdateDebounced(mutator);
+  }
+
+  private recordAndUpdateDurably(mutator: (project: Project) => Project): Promise<boolean> {
+    return this.recorder.recordAndUpdateDurably(mutator, { updateType: 'structure' });
   }
 }

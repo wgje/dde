@@ -29,7 +29,7 @@ describe('check-artifact-trends', () => {
     }
   });
 
-  it('fails fast when a deploy artifact metric grows by more than 30 percent', () => {
+  it('fails fast when a byte-sized deploy artifact metric grows by more than 30 percent', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-artifact-trend-'));
     tempRoots.push(root);
     const baseline = writeManifest(root, 'baseline.json', {
@@ -41,8 +41,8 @@ describe('check-artifact-trends', () => {
       gojsFlowChunkBytes: 50_000,
     });
     const current = writeManifest(root, 'current.json', {
-      fileCount: 131,
-      totalBytes: 100_000,
+      fileCount: 100,
+      totalBytes: 131_000,
       rootJsCount: 10,
       headerRuleCount: 20,
       ngswAssetCount: 100,
@@ -52,7 +52,35 @@ describe('check-artifact-trends', () => {
     const result = runTrendGuard([`--baseline=${baseline}`, `--current=${current}`]);
 
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain('fileCount grew by 31.0%');
+    expect(result.stderr).toContain('totalBytes grew by 31.0%');
+  });
+
+  it('warns without failing when count-only metrics grow after lazy chunk splitting', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-artifact-trend-'));
+    tempRoots.push(root);
+    const baseline = writeManifest(root, 'baseline.json', {
+      fileCount: 100,
+      totalBytes: 100_000,
+      rootJsCount: 10,
+      headerRuleCount: 20,
+      ngswAssetCount: 100,
+      gojsFlowChunkBytes: 50_000,
+    });
+    const current = writeManifest(root, 'current.json', {
+      fileCount: 160,
+      totalBytes: 100_000,
+      rootJsCount: 18,
+      headerRuleCount: 20,
+      ngswAssetCount: 160,
+      gojsFlowChunkBytes: 50_000,
+    });
+
+    const result = runTrendGuard([`--baseline=${baseline}`, `--current=${current}`]);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('WARN fileCount grew by 60.0%');
+    expect(result.stdout).toContain('WARN rootJsCount grew by 80.0%');
+    expect(result.stdout).toContain('WARN ngswAssetCount grew by 60.0%');
   });
 
   it('warns without failing when a deploy artifact metric grows by more than 15 percent', () => {

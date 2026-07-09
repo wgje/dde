@@ -13,7 +13,7 @@
  * - 配额检查在上传前
  * - 断点续传支持（后续迭代）
  */
-import { Injectable, inject, signal } from '@angular/core';
+import { Injectable, Injector, inject, signal } from '@angular/core';
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
 import { AttachmentService } from './attachment.service';
@@ -22,6 +22,7 @@ import { SupabaseClientService } from './supabase-client.service';
 import { TaskOperationAdapterService } from './task-operation-adapter.service';
 import { Attachment } from '../models';
 import { ATTACHMENT_CONFIG } from '../config/attachment.config';
+import { extractAttachmentItemsFromZip, type AttachmentImportZipLimits } from './attachment-import-zip.helpers';
 
 // ============================================
 // 配置
@@ -48,6 +49,15 @@ export const ATTACHMENT_IMPORT_CONFIG = {
 
   /** 附件包 Manifest 文件名 */
   MANIFEST_FILENAME: 'manifest.json',
+
+  /** ZIP 中最多允许的文件条目数，防止异常包拖垮解析 */
+  MAX_ZIP_ENTRIES: 500,
+
+  /** 单个 ZIP 条目解压后的最大大小 */
+  MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES: ATTACHMENT_CONFIG.MAX_FILE_SIZE,
+
+  /** 整个 ZIP 解压后的最大总大小 */
+  MAX_ZIP_TOTAL_UNCOMPRESSED_BYTES: 100 * 1024 * 1024,
 } as const;
 
 // ============================================
@@ -110,25 +120,9 @@ interface BatchUploadResult {
   error?: string;
 }
 
-interface ZipEntryData {
-  data: Uint8Array;
-  uncompressedSize: number;
-  compressionMethod: number;
-}
-
-interface AttachmentBundleManifestItem {
-  id: string;
-  taskIds: string[];
-  projectIds: string[];
-  name: string;
-  mimeType: string;
-  size: number;
-  bundlePath: string;
-  downloadStatus?: 'pending' | 'success' | 'failed' | 'skipped';
-}
-
-interface AttachmentBundleManifest {
-  attachments: AttachmentBundleManifestItem[];
+interface AttachmentImportRun {
+  result: AttachmentImportResult;
+  validItems: AttachmentImportItem[];
 }
 
 // ============================================
@@ -139,12 +133,21 @@ interface AttachmentBundleManifest {
   providedIn: 'root'
 })
 export class AttachmentImportService {
+  private readonly injector = inject(Injector);
   private readonly logger = inject(LoggerService).category('AttachmentImport');
   private readonly toast = inject(ToastService);
   private readonly attachmentService = inject(AttachmentService);
   private readonly auth = inject(AuthService);
   private readonly supabase = inject(SupabaseClientService);
-  private readonly taskOpsAdapter = inject(TaskOperationAdapterService);
+  private readonly zipLimits: AttachmentImportZipLimits = {
+    maxEntries: ATTACHMENT_IMPORT_CONFIG.MAX_ZIP_ENTRIES,
+    maxEntryUncompressedBytes: ATTACHMENT_IMPORT_CONFIG.MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES,
+    maxTotalUncompressedBytes: ATTACHMENT_IMPORT_CONFIG.MAX_ZIP_TOTAL_UNCOMPRESSED_BYTES,
+  };
+
+  private get taskOpsAdapter(): TaskOperationAdapterService {
+    return this.injector.get(TaskOperationAdapterService);
+  }
   
   // ==================== 状态 ====================
   
@@ -199,148 +202,169 @@ export class AttachmentImportService {
     
     this._isImporting.set(true);
     this.abortController = new AbortController();
-    
-    const result: AttachmentImportResult = {
-      success: false,
-      imported: 0,
-      failed: 0,
-      skipped: 0,
-      errors: [],
-    };
+    const run = this.createImportRun(items);
     
     try {
-      // 阶段 1：过滤有效项
-      const validItems = items.filter(item => item.data);
-      const skippedCount = items.length - validItems.length;
-      result.skipped = skippedCount;
+      if (this.finishEmptyImport(run)) return run.result;
       
-      if (validItems.length === 0) {
-        this.logger.info('无有效附件需要导入');
-        this._progress.set({
-          stage: 'completed',
-          percentage: 100,
-          totalItems: 0,
-          completedItems: 0,
-          failedItems: 0,
-          skippedItems: skippedCount,
-        });
-        result.success = true;
-        return result;
-      }
+      const hasQuota = await this.ensureImportQuota(run);
+      if (!hasQuota) return run.result;
       
-      this.updateProgress('checking-quota', 5, undefined, validItems.length);
-      
-      // 阶段 2：配额检查
-      const totalSize = validItems.reduce((sum, item) => sum + item.metadata.size, 0);
-      const quotaCheck = await this.checkQuota(totalSize);
-      
-      if (!quotaCheck.hasQuota) {
-        this.toast.error(
-          '存储配额不足',
-          quotaCheck.message ?? '请清理一些附件后重试',
-          { duration: 5000 }
-        );
-        result.errors.push({
-          taskId: '',
-          attachmentName: '',
-          error: quotaCheck.message ?? '存储配额不足',
-        });
-        return result;
-      }
-      if (quotaCheck.message) {
-        this.toast.warning('存储空间提醒', quotaCheck.message);
-      }
-      
-      // 阶段 3：分批上传
-      this.updateProgress('uploading', 10, undefined, validItems.length);
-      
-      const batches = this.createBatches(validItems, ATTACHMENT_IMPORT_CONFIG.BATCH_SIZE);
-      let processedCount = 0;
-      
-      for (const batch of batches) {
-        if (this.abortController?.signal.aborted) {
-          this.logger.info('导入已被用户取消');
-          break;
-        }
-        
-        // 并发处理批次内的项目
-        const batchResults = await this.processBatch(
-          userId,
-          projectId,
-          batch
-        );
-        
-        for (const batchResult of batchResults) {
-          processedCount++;
-          
-          if (batchResult.status === 'success') {
-            result.imported++;
-          } else if (batchResult.status === 'skipped') {
-            result.skipped++;
-          } else {
-            result.failed++;
-            result.errors.push({
-              taskId: batchResult.taskId,
-              attachmentName: batchResult.attachmentName,
-              error: batchResult.error ?? '上传失败',
-            });
-          }
-
-          const percentage = 10 + (processedCount / validItems.length) * 85;
-          this._progress.update(p => ({
-            ...p,
-            stage: 'uploading',
-            percentage: Math.min(100, Math.max(0, percentage)),
-            currentItem: batchResult.attachmentName,
-            totalItems: validItems.length,
-            completedItems: result.imported,
-            failedItems: result.failed,
-            skippedItems: result.skipped,
-          }));
-        }
-      }
-      
-      // 完成
-      this._progress.update(p => ({
-        ...p,
-        stage: 'completed',
-        percentage: 100,
-        totalItems: validItems.length,
-        completedItems: result.imported,
-        failedItems: result.failed,
-        skippedItems: result.skipped,
-      }));
-      result.success = result.failed === 0;
-      
+      await this.uploadImportBatches(userId, projectId, run);
+      this.finishImportRun(run);
       this.logger.info('附件导入完成', {
-        imported: result.imported,
-        failed: result.failed,
-        skipped: result.skipped,
+        imported: run.result.imported,
+        failed: run.result.failed,
+        skipped: run.result.skipped,
       });
       
-      return result;
+      return run.result;
       
     } catch (error) {
-      this.logger.error('附件导入失败', error);
-      this._progress.update(p => ({
-        ...p,
-        stage: 'error',
-        percentage: 0,
-        completedItems: result.imported,
-        failedItems: result.failed,
-        skippedItems: result.skipped,
-      }));
-      result.errors.push({
-        taskId: '',
-        attachmentName: '',
-        error: error instanceof Error ? error.message : '未知错误',
-      });
-      return result;
+      return this.failImportRun(run, error);
       
     } finally {
       this._isImporting.set(false);
       this.abortController = null;
     }
+  }
+
+  private createImportRun(items: AttachmentImportItem[]): AttachmentImportRun {
+    const validItems = items.filter(item => item.data);
+    return {
+      validItems,
+      result: {
+        success: false,
+        imported: 0,
+        failed: 0,
+        skipped: items.length - validItems.length,
+        errors: [],
+      },
+    };
+  }
+
+  private finishEmptyImport(run: AttachmentImportRun): boolean {
+    if (run.validItems.length > 0) return false;
+
+    this.logger.info('无有效附件需要导入');
+    this._progress.set({
+      stage: 'completed',
+      percentage: 100,
+      totalItems: 0,
+      completedItems: 0,
+      failedItems: 0,
+      skippedItems: run.result.skipped,
+    });
+    run.result.success = true;
+    return true;
+  }
+
+  private async ensureImportQuota(run: AttachmentImportRun): Promise<boolean> {
+    this.updateProgress('checking-quota', 5, undefined, run.validItems.length);
+
+    const totalSize = run.validItems.reduce((sum, item) => sum + item.metadata.size, 0);
+    const quotaCheck = await this.checkQuota(totalSize);
+    if (!quotaCheck.hasQuota) {
+      this.toast.error(
+        '存储配额不足',
+        quotaCheck.message ?? '请清理一些附件后重试',
+        { duration: 5000 }
+      );
+      run.result.errors.push({
+        taskId: '',
+        attachmentName: '',
+        error: quotaCheck.message ?? '存储配额不足',
+      });
+      return false;
+    }
+
+    if (quotaCheck.message) {
+      this.toast.warning('存储空间提醒', quotaCheck.message);
+    }
+
+    return true;
+  }
+
+  private async uploadImportBatches(userId: string, projectId: string, run: AttachmentImportRun): Promise<void> {
+    this.updateProgress('uploading', 10, undefined, run.validItems.length);
+
+    const batches = this.createBatches(run.validItems, ATTACHMENT_IMPORT_CONFIG.BATCH_SIZE);
+    let processedCount = 0;
+
+    for (const batch of batches) {
+      if (this.abortController?.signal.aborted) {
+        this.logger.info('导入已被用户取消');
+        break;
+      }
+
+      const batchResults = await this.processBatch(userId, projectId, batch);
+      for (const batchResult of batchResults) {
+        processedCount++;
+        this.applyBatchResult(run, batchResult, processedCount);
+      }
+    }
+  }
+
+  private applyBatchResult(
+    run: AttachmentImportRun,
+    batchResult: BatchUploadResult,
+    processedCount: number,
+  ): void {
+    if (batchResult.status === 'success') {
+      run.result.imported++;
+    } else if (batchResult.status === 'skipped') {
+      run.result.skipped++;
+    } else {
+      run.result.failed++;
+      run.result.errors.push({
+        taskId: batchResult.taskId,
+        attachmentName: batchResult.attachmentName,
+        error: batchResult.error ?? '上传失败',
+      });
+    }
+
+    const percentage = 10 + (processedCount / run.validItems.length) * 85;
+    this._progress.update(p => ({
+      ...p,
+      stage: 'uploading',
+      percentage: Math.min(100, Math.max(0, percentage)),
+      currentItem: batchResult.attachmentName,
+      totalItems: run.validItems.length,
+      completedItems: run.result.imported,
+      failedItems: run.result.failed,
+      skippedItems: run.result.skipped,
+    }));
+  }
+
+  private finishImportRun(run: AttachmentImportRun): void {
+    this._progress.update(p => ({
+      ...p,
+      stage: 'completed',
+      percentage: 100,
+      totalItems: run.validItems.length,
+      completedItems: run.result.imported,
+      failedItems: run.result.failed,
+      skippedItems: run.result.skipped,
+    }));
+    run.result.success = run.result.failed === 0;
+  }
+
+  private failImportRun(run: AttachmentImportRun, error: unknown): AttachmentImportResult {
+    this.logger.error('附件导入失败', error);
+    this._progress.update(p => ({
+      ...p,
+      stage: 'error',
+      percentage: 0,
+      completedItems: run.result.imported,
+      failedItems: run.result.failed,
+      skippedItems: run.result.skipped,
+    }));
+    run.result.errors.push({
+      taskId: '',
+      attachmentName: '',
+      error: error instanceof Error ? error.message : '未知错误',
+    });
+    return run.result;
   }
   
   /**
@@ -434,20 +458,12 @@ export class AttachmentImportService {
   ): Promise<AttachmentImportItem[]> {
     this.updateProgress('extracting', 5);
 
-    const entries = await this.parseZipEntries(zipData);
-    if (entries.size === 0) {
-      return [];
-    }
-
-    const manifestItems = this.buildItemsFromManifest(entries);
-    if (manifestItems.length > 0) {
-      this.updateProgress('extracting', 100, undefined, manifestItems.length);
-      return manifestItems;
-    }
-
-    const fallbackItems = this.buildItemsFromTaskMap(entries, taskAttachmentMap);
-    this.updateProgress('extracting', 100, undefined, fallbackItems.length);
-    return fallbackItems;
+    const items = await extractAttachmentItemsFromZip(zipData, taskAttachmentMap, {
+      limits: this.zipLimits,
+      logger: this.logger,
+    });
+    this.updateProgress('extracting', 100, undefined, items.length);
+    return items;
   }
   
   // ==================== 私有方法 ====================
@@ -471,8 +487,6 @@ export class AttachmentImportService {
     projectId: string,
     batch: AttachmentImportItem[]
   ): Promise<BatchUploadResult[]> {
-    const results: BatchUploadResult[] = [];
-    
     // 并发上传，但限制并发数
     const semaphore = new Semaphore(ATTACHMENT_IMPORT_CONFIG.CONCURRENT_UPLOADS);
     
@@ -480,46 +494,7 @@ export class AttachmentImportService {
       await semaphore.acquire();
       
       try {
-        if (!item.data) {
-          return {
-            status: 'skipped' as const,
-            taskId: item.taskId,
-            attachmentName: item.metadata.name,
-            error: '附件数据缺失',
-          };
-        }
-        
-        // 将 Blob 转换为 File
-        const file = new File([item.data], item.metadata.name, {
-          type: item.metadata.mimeType,
-        });
-        
-        // 使用 AttachmentService 上传
-        const uploadResult = await this.attachmentService.uploadFile(
-          userId,
-          projectId,
-          item.taskId,
-          file
-        );
-        
-        if (uploadResult.success && uploadResult.attachment) {
-          // 上传后立即挂载到任务，保证“导入后可见且可同步”
-          this.taskOpsAdapter.addTaskAttachment(item.taskId, uploadResult.attachment);
-          return {
-            status: 'success' as const,
-            taskId: item.taskId,
-            attachmentName: item.metadata.name,
-            attachment: uploadResult.attachment,
-          };
-        } else {
-          return {
-            status: 'failed' as const,
-            taskId: item.taskId,
-            attachmentName: item.metadata.name,
-            error: uploadResult.error ?? '上传失败',
-          };
-        }
-        
+        return await this.processBatchItem(userId, projectId, item);
       } catch (error) {
         return {
           status: 'failed' as const,
@@ -533,10 +508,64 @@ export class AttachmentImportService {
       }
     });
     
-    const batchResults = await Promise.all(promises);
-    results.push(...batchResults);
-    
-    return results;
+    return Promise.all(promises);
+  }
+
+  private async processBatchItem(
+    userId: string,
+    projectId: string,
+    item: AttachmentImportItem,
+  ): Promise<BatchUploadResult> {
+    if (!item.data) {
+      return {
+        status: 'skipped',
+        taskId: item.taskId,
+        attachmentName: item.metadata.name,
+        error: '附件数据缺失',
+      };
+    }
+
+    const file = new File([item.data], item.metadata.name, {
+      type: item.metadata.mimeType,
+    });
+    const targetProjectId = item.projectId ?? projectId;
+    const uploadResult = await this.attachmentService.uploadFile(userId, targetProjectId, item.taskId, file);
+
+    if (!uploadResult.success) {
+      return {
+        status: 'failed',
+        taskId: item.taskId,
+        attachmentName: item.metadata.name,
+        error: uploadResult.error,
+      };
+    }
+
+    const restoredAttachment = this.restoreImportedAttachmentId(uploadResult.attachment, item);
+    const written = await this.taskOpsAdapter.addTaskAttachmentToProject(targetProjectId, item.taskId, restoredAttachment);
+    if (!written) {
+      return {
+        status: 'failed',
+        taskId: item.taskId,
+        attachmentName: item.metadata.name,
+        error: '目标任务不存在，附件未写入项目',
+      };
+    }
+
+    return {
+      status: 'success',
+      taskId: item.taskId,
+      attachmentName: item.metadata.name,
+      attachment: restoredAttachment,
+    };
+  }
+
+  private restoreImportedAttachmentId(uploadedAttachment: Attachment, item: AttachmentImportItem): Attachment {
+    return {
+      ...uploadedAttachment,
+      name: item.metadata.name,
+      mimeType: item.metadata.mimeType,
+      size: item.metadata.size,
+    };
   }
   
   /**
@@ -633,215 +662,6 @@ export class AttachmentImportService {
     return 0;
   }
 
-  /**
-   * 解析 ZIP 条目（支持 store/deflate）
-   */
-  private async parseZipEntries(zipData: ArrayBuffer): Promise<Map<string, ZipEntryData>> {
-    const bytes = new Uint8Array(zipData);
-    const view = new DataView(zipData);
-    const entries = new Map<string, ZipEntryData>();
-
-    const eocdOffset = this.findEndOfCentralDirectory(bytes, view);
-    if (eocdOffset < 0) {
-      this.logger.warn('ZIP 解析失败：未找到 EOCD');
-      return entries;
-    }
-
-    const totalEntries = view.getUint16(eocdOffset + 10, true);
-    let centralOffset = view.getUint32(eocdOffset + 16, true);
-
-    for (let i = 0; i < totalEntries; i++) {
-      if (centralOffset + 46 > bytes.length) break;
-
-      const signature = view.getUint32(centralOffset, true);
-      if (signature !== 0x02014b50) break;
-
-      const compressionMethod = view.getUint16(centralOffset + 10, true);
-      const compressedSize = view.getUint32(centralOffset + 20, true);
-      const uncompressedSize = view.getUint32(centralOffset + 24, true);
-      const fileNameLength = view.getUint16(centralOffset + 28, true);
-      const extraLength = view.getUint16(centralOffset + 30, true);
-      const commentLength = view.getUint16(centralOffset + 32, true);
-      const localHeaderOffset = view.getUint32(centralOffset + 42, true);
-
-      const nameStart = centralOffset + 46;
-      const nameEnd = nameStart + fileNameLength;
-      if (nameEnd > bytes.length) break;
-
-      const filename = new TextDecoder().decode(bytes.slice(nameStart, nameEnd));
-
-      if (localHeaderOffset + 30 > bytes.length) break;
-      const localSignature = view.getUint32(localHeaderOffset, true);
-      if (localSignature !== 0x04034b50) break;
-
-      const localNameLength = view.getUint16(localHeaderOffset + 26, true);
-      const localExtraLength = view.getUint16(localHeaderOffset + 28, true);
-      const dataStart = localHeaderOffset + 30 + localNameLength + localExtraLength;
-      const dataEnd = dataStart + compressedSize;
-      if (dataEnd > bytes.length) break;
-
-      const compressedData = bytes.slice(dataStart, dataEnd);
-      const data = await this.decompressZipEntry(compressionMethod, compressedData, uncompressedSize);
-
-      entries.set(filename, {
-        data,
-        uncompressedSize,
-        compressionMethod,
-      });
-
-      centralOffset += 46 + fileNameLength + extraLength + commentLength;
-    }
-
-    return entries;
-  }
-
-  /**
-   * 从 manifest 构建附件导入项
-   */
-  private buildItemsFromManifest(entries: Map<string, ZipEntryData>): AttachmentImportItem[] {
-    const manifestEntry = entries.get(ATTACHMENT_IMPORT_CONFIG.MANIFEST_FILENAME);
-    if (!manifestEntry) return [];
-
-    try {
-      const manifestText = new TextDecoder().decode(manifestEntry.data);
-      const manifest = JSON.parse(manifestText) as AttachmentBundleManifest;
-      if (!manifest || !Array.isArray(manifest.attachments)) return [];
-
-      const items: AttachmentImportItem[] = [];
-
-      for (const attachment of manifest.attachments) {
-        const taskIds = Array.isArray(attachment.taskIds) ? attachment.taskIds : [];
-        if (taskIds.length === 0) continue;
-        if (attachment.downloadStatus && attachment.downloadStatus !== 'success') continue;
-
-        const fileEntry = entries.get(attachment.bundlePath);
-        if (!fileEntry) continue;
-
-        const mimeType = attachment.mimeType || 'application/octet-stream';
-        const blob = new Blob([fileEntry.data], { type: mimeType });
-        const projectId = Array.isArray(attachment.projectIds) && attachment.projectIds.length > 0
-          ? attachment.projectIds[0]
-          : undefined;
-
-        for (const taskId of taskIds) {
-          items.push({
-            projectId,
-            taskId,
-            metadata: {
-              id: attachment.id,
-              name: attachment.name,
-              size: attachment.size || fileEntry.uncompressedSize,
-              mimeType,
-            },
-            data: blob,
-            zipPath: attachment.bundlePath,
-          });
-        }
-      }
-
-      return items;
-    } catch (error) {
-      this.logger.warn('解析附件 manifest 失败，回退到 taskAttachmentMap', { error });
-      return [];
-    }
-  }
-
-  /**
-   * 无 manifest 时，根据任务-附件映射回退提取
-   */
-  private buildItemsFromTaskMap(
-    entries: Map<string, ZipEntryData>,
-    taskAttachmentMap: Map<string, Array<{ id: string; name: string; size: number; mimeType: string }>>
-  ): AttachmentImportItem[] {
-    const items: AttachmentImportItem[] = [];
-
-    for (const [taskId, attachments] of taskAttachmentMap) {
-      for (const att of attachments) {
-        const ext = this.getFileExtension(att.name);
-        const candidatePaths = [
-          `attachments/${att.id}${ext}`,
-          `attachments/${att.id}`,
-          `attachments/${taskId}/${att.id}${ext}`,
-          `attachments/${taskId}/${att.id}`,
-        ];
-
-        const matchedPath = candidatePaths.find(path => entries.has(path));
-        if (!matchedPath) continue;
-
-        const entry = entries.get(matchedPath);
-        if (!entry) continue;
-
-        const mimeType = att.mimeType || 'application/octet-stream';
-        items.push({
-          taskId,
-          metadata: {
-            id: att.id,
-            name: att.name,
-            size: att.size || entry.uncompressedSize,
-            mimeType,
-          },
-          data: new Blob([entry.data], { type: mimeType }),
-          zipPath: matchedPath,
-        });
-      }
-    }
-
-    return items;
-  }
-
-  /**
-   * 定位 ZIP End of Central Directory
-   */
-  private findEndOfCentralDirectory(bytes: Uint8Array, view: DataView): number {
-    const minEocdSize = 22;
-    const maxCommentLength = 0xffff;
-    const searchStart = Math.max(0, bytes.length - minEocdSize - maxCommentLength);
-
-    for (let i = bytes.length - minEocdSize; i >= searchStart; i--) {
-      if (view.getUint32(i, true) === 0x06054b50) {
-        return i;
-      }
-    }
-
-    return -1;
-  }
-
-  /**
-   * 解压 ZIP 条目（支持 store 和 deflate）
-   */
-  private async decompressZipEntry(
-    compressionMethod: number,
-    compressedData: Uint8Array,
-    expectedSize: number
-  ): Promise<Uint8Array> {
-    // Store（无压缩）
-    if (compressionMethod === 0) {
-      return compressedData;
-    }
-
-    // Deflate（尽量兼容第三方 ZIP）
-    if (compressionMethod === 8 && typeof DecompressionStream !== 'undefined') {
-      const stream = new Blob([compressedData]).stream()
-        .pipeThrough(new DecompressionStream('deflate-raw'));
-      const buffer = await new Response(stream).arrayBuffer();
-      const inflated = new Uint8Array(buffer);
-      if (expectedSize > 0 && inflated.byteLength !== expectedSize) {
-        this.logger.warn('ZIP 解压后大小与预期不一致', {
-          expectedSize,
-          actualSize: inflated.byteLength,
-        });
-      }
-      return inflated;
-    }
-
-    throw new Error(`不支持的 ZIP 压缩方式: ${compressionMethod}`);
-  }
-
-  private getFileExtension(filename: string): string {
-    const index = filename.lastIndexOf('.');
-    if (index <= 0) return '';
-    return filename.slice(index);
-  }
 }
 
 // ============================================

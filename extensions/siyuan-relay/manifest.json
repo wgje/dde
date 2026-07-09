@@ -19,8 +19,12 @@
         "https://www.nanoflow.app/*",
         "https://nanoflow.pages.dev/*",
         "https://dde-eight.vercel.app/*",
-        "http://localhost/*",
-        "http://127.0.0.1/*"
+        "http://localhost:4200/*",
+        "http://localhost:5173/*",
+        "http://localhost:3020/*",
+        "http://127.0.0.1:4200/*",
+        "http://127.0.0.1:5173/*",
+        "http://127.0.0.1:3020/*"
       ],
       "js": ["src/content-script.js"],
       "run_at": "document_start"

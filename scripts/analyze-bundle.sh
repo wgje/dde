@@ -25,7 +25,8 @@ fi
 
 # 构建带 source map 的生产版本
 echo -e "${BLUE}🏗️ 构建生产版本（含 source maps）...${NC}"
-ng build --source-map
+npm run config
+node scripts/run-ng.cjs build --source-map
 
 # 确保输出目录存在
 mkdir -p dist/analysis

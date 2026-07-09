@@ -5,7 +5,7 @@
  *
  * 职责单一：
  * - addToRetryQueue / addToRetryQueueDurably：会话过期守卫 + 数据有效性校验
- *   （id / projectId）+ RetryQueueService.add(Durably) + pendingCount 同步 / 队列满错误
+ *   （id / projectId）+ RetryQueueService.addDurably + pendingCount 同步 / 队列满错误
  * - clearRetryQueue：清空重试队列 + 复位 pendingCount + 用户提示
  * - hasRetryQueueEntity：查询 RetryQueue 是否已含某实体（防御式可选方法）
  * - markSyncRecoveredIfIdle / hasPendingRetryRecovery：成功回放见底标志（drain flag）读写
@@ -24,9 +24,12 @@ import { LoggerService } from '../../../../services/logger.service';
 import { ToastService } from '../../../../services/toast.service';
 import {
   RetryQueueService,
+  type RetryQueueLastFailure,
+  type TaskDeleteBaseUpdatedAtMap,
   type RetryableEntityType,
   type RetryableOperation,
 } from './retry-queue.service';
+import type { TaskWriteIntent } from '../../../../services/sync-rpc-client.service';
 import { SyncStateService } from './sync-state.service';
 import { RECOVERABLE_SYNC_ERROR_MESSAGES } from '../../../../config/sync.config';
 import { nowISO } from '../../../../utils/date';
@@ -42,31 +45,42 @@ export class RetryQueueEnqueueService {
     return this.syncStateService.syncState;
   }
 
-  addToRetryQueue(
+  async addToRetryQueue(
     type: RetryableEntityType,
     operation: RetryableOperation,
     data: Task | Project | Connection | { id: string },
     projectId?: string,
     sourceUserId?: string,
     taskIdsToDelete?: string[],
-  ): boolean {
-    if (this.syncState().sessionExpired && type !== 'project') return false;
-    if (!data?.id) {
-      this.logger.warn('addToRetryQueue: 跳过无效数据（缺少 id）', { type, operation });
-      return false;
-    }
-    if ((type === 'task' || type === 'connection') && !projectId) {
-      this.logger.warn('addToRetryQueue: 跳过无效数据（缺少 projectId）', { type, operation, id: data.id });
-      return false;
-    }
-    const enqueued = this.retryQueueService.add(type, operation, data, projectId, sourceUserId, taskIdsToDelete);
-    if (enqueued) {
-      this.syncStateService.update({ pendingCount: this.retryQueueService.length });
-    } else {
-      this.syncStateService.setSyncError(RECOVERABLE_SYNC_ERROR_MESSAGES.RETRY_QUEUE_FULL);
-    }
-
-    return enqueued;
+    writeIntent?: TaskWriteIntent,
+    taskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap,
+    operationId?: string,
+    lastFailure?: RetryQueueLastFailure,
+  ): Promise<boolean> {
+    return lastFailure === undefined
+      ? this.addToRetryQueueDurably(
+          type,
+          operation,
+          data,
+          projectId,
+          sourceUserId,
+          taskIdsToDelete,
+          writeIntent,
+          taskDeleteBaseUpdatedAtMap,
+          operationId,
+        )
+      : this.addToRetryQueueDurably(
+          type,
+          operation,
+          data,
+          projectId,
+          sourceUserId,
+          taskIdsToDelete,
+          writeIntent,
+          taskDeleteBaseUpdatedAtMap,
+          operationId,
+          lastFailure,
+        );
   }
 
   async addToRetryQueueDurably(
@@ -76,6 +90,10 @@ export class RetryQueueEnqueueService {
     projectId?: string,
     sourceUserId?: string,
     taskIdsToDelete?: string[],
+    writeIntent?: TaskWriteIntent,
+    taskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap,
+    operationId?: string,
+    lastFailure?: RetryQueueLastFailure,
   ): Promise<boolean> {
     if (this.syncState().sessionExpired && type !== 'project') return false;
     if (!data?.id) {
@@ -87,7 +105,20 @@ export class RetryQueueEnqueueService {
       return false;
     }
 
-    const enqueued = await this.retryQueueService.addDurably(type, operation, data, projectId, sourceUserId, taskIdsToDelete);
+    const addArgs = [
+      type,
+      operation,
+      data,
+      projectId,
+      sourceUserId,
+      taskIdsToDelete,
+      writeIntent,
+      taskDeleteBaseUpdatedAtMap,
+      operationId,
+    ] as const;
+    const enqueued = lastFailure === undefined
+      ? await this.retryQueueService.addDurably(...addArgs)
+      : await this.retryQueueService.addDurably(...addArgs, lastFailure);
     if (enqueued) {
       this.syncStateService.update({ pendingCount: this.retryQueueService.length });
     } else {

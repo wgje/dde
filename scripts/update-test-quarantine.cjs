@@ -7,12 +7,9 @@ const DEFAULT_QUARANTINE_PATH = 'scripts/test-quarantine.json';
 const DEFAULT_P95_THRESHOLD_MS = 1200;
 const DEFAULT_FAILURE_RATE_THRESHOLD = 0.01;
 const DEFAULT_RECOVERY_DAYS = 7;
-const DEFAULT_MIN_SAMPLES = 1;
+const DEFAULT_MIN_SAMPLES = 3;
 const UPDATED_BY = 'scripts/update-test-quarantine.cjs@v1';
-const DEFAULT_SEED_FILES = [
-  'src/app/features/flow/components/flow-task-detail.component.spec.ts',
-  'src/services/user-session.service.spec.ts',
-];
+const DEFAULT_SEED_FILES = [];
 
 const toPosix = (value) => value.split(path.sep).join('/');
 const toAbsolutePath = (target) => (path.isAbsolute(target) ? target : path.join(projectRoot, target));

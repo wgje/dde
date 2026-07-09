@@ -44,6 +44,7 @@ export class FlowTaskDetailFormService {
 
   /** 解锁延迟定时器 */
   private unlockTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
+  private readonly focusedFieldTaskIds = new Map<'title' | 'content', string>();
   /** 跟踪当前任务 ID，用于检测任务切换 */
   private currentTaskId: string | null = null;
   /**
@@ -52,6 +53,7 @@ export class FlowTaskDetailFormService {
    */
   private isTaskSwitching = false;
   private lastConsumedReplay: UndoAppliedReplay | null = this.undoService.appliedReplay();
+  private readonly pendingSubmittedDrafts = new Map<'title' | 'content', { taskId: string; value: string }>();
 
   /**
    * 初始化 Split-Brain 同步 effect
@@ -67,11 +69,18 @@ export class FlowTaskDetailFormService {
         } else {
           // 同一任务：仅当输入框未聚焦时才同步
           if (!this.isTitleFocused) {
-            this.localTitle.set(task.title || '');
+            const title = task.title || '';
+            if (!this.shouldKeepPendingSubmittedDraft('title', task.id, title)) {
+              this.localTitle.set(title);
+            }
           }
           if (!this.isContentFocused) {
-            this.localContent.set(task.content || '');
+            const content = task.content || '';
+            if (!this.shouldKeepPendingSubmittedDraft('content', task.id, content)) {
+              this.localContent.set(content);
+            }
           }
+          this.clearSettledPendingDrafts(task);
         }
       } else {
         this.handleTaskClear();
@@ -98,9 +107,11 @@ export class FlowTaskDetailFormService {
 
       if (changedFields.includes('title')) {
         this.localTitle.set(task.title || '');
+        this.pendingSubmittedDrafts.delete('title');
       }
       if (changedFields.includes('content')) {
         this.localContent.set(task.content || '');
+        this.pendingSubmittedDrafts.delete('content');
       }
     });
   }
@@ -131,6 +142,7 @@ export class FlowTaskDetailFormService {
 
     if (field === 'title') {
       this.isTitleFocused = true;
+      this.focusedFieldTaskIds.set('title', task.id);
       const existingTimer = this.unlockTimers.get('title');
       if (existingTimer) {
         clearTimeout(existingTimer);
@@ -139,6 +151,7 @@ export class FlowTaskDetailFormService {
       this.lockTaskFields(task.id, ['title']);
     } else if (field === 'content') {
       this.isContentFocused = true;
+      this.focusedFieldTaskIds.set('content', task.id);
       const existingTimer = this.unlockTimers.get('content');
       if (existingTimer) {
         clearTimeout(existingTimer);
@@ -157,8 +170,10 @@ export class FlowTaskDetailFormService {
 
     if (field === 'title') {
       const value = this.localTitle();
+      this.protectSubmittedDraft('title', task.id, value);
       const timer = setTimeout(() => {
         this.isTitleFocused = false;
+        this.focusedFieldTaskIds.delete('title');
         this.unlockTaskFields(task.id, ['title']);
         this.unlockTimers.delete('title');
       }, 10000);
@@ -166,8 +181,10 @@ export class FlowTaskDetailFormService {
       return { field: 'title', taskId: task.id, value };
     } else if (field === 'content') {
       const value = this.localContent();
+      this.protectSubmittedDraft('content', task.id, value);
       const timer = setTimeout(() => {
         this.isContentFocused = false;
+        this.focusedFieldTaskIds.delete('content');
         this.unlockTaskFields(task.id, ['content']);
         this.unlockTimers.delete('content');
       }, 10000);
@@ -188,6 +205,7 @@ export class FlowTaskDetailFormService {
     }
 
     this.localTitle.set(value);
+    this.pendingSubmittedDrafts.delete('title');
     if (task) {
       return { taskId: task.id, title: value };
     }
@@ -205,6 +223,7 @@ export class FlowTaskDetailFormService {
     }
 
     this.localContent.set(value);
+    this.pendingSubmittedDrafts.delete('content');
     if (task) {
       return { taskId: task.id, content: value };
     }
@@ -268,6 +287,13 @@ export class FlowTaskDetailFormService {
       clearTimeout(timer);
     }
     this.unlockTimers.clear();
+
+    for (const [field, taskId] of this.focusedFieldTaskIds) {
+      this.unlockTaskFields(taskId, [field]);
+    }
+    this.focusedFieldTaskIds.clear();
+    this.isTitleFocused = false;
+    this.isContentFocused = false;
   }
 
   // ========== 私有方法 ==========
@@ -287,8 +313,10 @@ export class FlowTaskDetailFormService {
     this.currentTaskId = task.id;
     this.localTitle.set(task.title || '');
     this.localContent.set(task.content || '');
+    this.pendingSubmittedDrafts.clear();
     this.isTitleFocused = false;
     this.isContentFocused = false;
+    this.focusedFieldTaskIds.clear();
     this.unlockTimers.forEach(timer => clearTimeout(timer));
     this.unlockTimers.clear();
 
@@ -313,8 +341,10 @@ export class FlowTaskDetailFormService {
     this.currentTaskId = null;
     this.localTitle.set('');
     this.localContent.set('');
+    this.pendingSubmittedDrafts.clear();
     this.isTitleFocused = false;
     this.isContentFocused = false;
+    this.focusedFieldTaskIds.clear();
     this.unlockTimers.forEach(timer => clearTimeout(timer));
     this.unlockTimers.clear();
 
@@ -359,5 +389,29 @@ export class FlowTaskDetailFormService {
     }
 
     return containerElement.contains(activeElement) ? activeElement : null;
+  }
+
+  private protectSubmittedDraft(field: 'title' | 'content', taskId: string, value: string): void {
+    this.pendingSubmittedDrafts.set(field, { taskId, value });
+  }
+
+  private shouldKeepPendingSubmittedDraft(field: 'title' | 'content', taskId: string, incomingValue: string): boolean {
+    const pendingDraft = this.pendingSubmittedDrafts.get(field);
+    return !!pendingDraft
+      && pendingDraft.taskId === taskId
+      && pendingDraft.value !== incomingValue;
+  }
+
+  private clearSettledPendingDrafts(task: Task): void {
+    this.clearSettledPendingDraft('title', task.id, task.title || '');
+    this.clearSettledPendingDraft('content', task.id, task.content || '');
+  }
+
+  private clearSettledPendingDraft(field: 'title' | 'content', taskId: string, value: string): void {
+    const pendingDraft = this.pendingSubmittedDrafts.get(field);
+    if (!pendingDraft) return;
+    if (pendingDraft.taskId !== taskId || pendingDraft.value === value) {
+      this.pendingSubmittedDrafts.delete(field);
+    }
   }
 }

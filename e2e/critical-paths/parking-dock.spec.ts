@@ -1,5 +1,6 @@
 import { expect, Page, test } from '@playwright/test';
 import { testHelpers } from './helpers';
+import { waitForAppReady } from '../shared/page-helpers';
 
 const LOCAL_MODE_KEY = 'nanoflow.local-mode';
 const AUTH_CACHE_KEY = 'nanoflow.auth-cache';
@@ -12,6 +13,23 @@ async function ensureLocalModeFlag(page: Page): Promise<void> {
   }, { localModeKey: LOCAL_MODE_KEY, authCacheKey: AUTH_CACHE_KEY });
 }
 
+async function dismissLoginModalIfVisible(page: Page): Promise<void> {
+  const loginModal = page.locator('[data-testid="login-modal"]').first();
+  if (!(await testHelpers.isElementVisible(loginModal, 500))) {
+    return;
+  }
+
+  const localModeButton = loginModal.locator('[data-testid="local-mode-btn"]').first();
+  if (await testHelpers.isElementVisible(localModeButton, 1000)) {
+    await localModeButton.click({ force: true });
+  } else {
+    await loginModal.getByRole('button', { name: '取消' }).first().click({ force: true }).catch(() => {});
+  }
+
+  await ensureLocalModeFlag(page);
+  await expect(loginModal).toBeHidden({ timeout: 5000 });
+}
+
 async function bootstrapLocalWorkspace(page: Page): Promise<void> {
   await page.goto('/');
 
@@ -19,14 +37,77 @@ async function bootstrapLocalWorkspace(page: Page): Promise<void> {
   if (await testHelpers.isElementVisible(localModeBtn, 8000)) {
     await localModeBtn.click();
   } else {
-    await testHelpers.waitForAppReady(page);
+    await waitForAppReady(page, { timeoutMs: 30_000, recoverStaticLoader: true });
   }
   await ensureLocalModeFlag(page);
+  await dismissLoginModalIfVisible(page);
 
   await expect(page.locator('[data-testid="project-selector"]')).toBeVisible({ timeout: 15000 });
 }
 
-async function enterProjectWorkspace(page: Page): Promise<void> {
+function isReloadNavigationInterruption(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes('net::ERR_ABORTED') || message.includes('frame was detached');
+}
+
+async function reloadWorkspaceAfterStorageSeed(page: Page): Promise<void> {
+  try {
+    await page.reload({ waitUntil: 'domcontentloaded' });
+  } catch (error) {
+    if (!isReloadNavigationInterruption(error)) {
+      throw error;
+    }
+
+    await page.goto('/', { waitUntil: 'domcontentloaded' });
+  }
+
+  await waitForAppReady(page, { timeoutMs: 30_000, recoverStaticLoader: true });
+}
+
+async function activateSeededProjectAndWaitForDockRestore(
+  page: Page,
+  projectName: string,
+  expectedHudTitles: string[],
+): Promise<void> {
+  await testHelpers.clickIfVisible(
+    page.locator('[data-testid="local-mode-btn"]').first(),
+    { timeout: 1200, force: true },
+  );
+
+  const seededProject = page.locator('[data-testid="project-item"]').filter({ hasText: projectName }).first();
+  await expect(seededProject).toBeVisible({ timeout: 10_000 });
+  await seededProject.click({ force: true });
+
+  if (!(await testHelpers.isElementVisible(page.locator('[data-testid="project-shell-main-content"]').first(), 1500))) {
+    await seededProject.click({ force: true });
+    await enterVisibleProjectWorkspace(page);
+  }
+
+  const focusStage = page.locator('[data-testid="dock-v3-focus-stage"]');
+  await expect(page.locator('app-parking-dock').first()).toBeAttached({ timeout: 15_000 });
+  if (!(await testHelpers.isElementVisible(focusStage, 15_000))) {
+    await reloadWorkspaceAfterStorageSeed(page);
+    await testHelpers.clickIfVisible(
+      page.locator('[data-testid="local-mode-btn"]').first(),
+      { timeout: 1200, force: true },
+    );
+    const reloadedProject = page.locator('[data-testid="project-item"]').filter({ hasText: projectName }).first();
+    await expect(reloadedProject).toBeVisible({ timeout: 10_000 });
+    await reloadedProject.click({ force: true });
+    if (!(await testHelpers.isElementVisible(page.locator('[data-testid="project-shell-main-content"]').first(), 1500))) {
+      await reloadedProject.click({ force: true });
+      await enterVisibleProjectWorkspace(page);
+    }
+  }
+
+  await expect(focusStage).toBeVisible({ timeout: 15_000 });
+  const statusHud = page.locator('[data-testid="dock-v3-status-machine"]').first();
+  for (const title of expectedHudTitles) {
+    await expect(statusHud).toContainText(title, { timeout: 15_000 });
+  }
+}
+
+async function enterVisibleProjectWorkspace(page: Page): Promise<void> {
   const enterButton = page.getByRole('button', { name: /enter/i }).first();
   if (await testHelpers.isElementVisible(enterButton, 1500)) {
     await enterButton.click({ force: true });
@@ -35,23 +116,107 @@ async function enterProjectWorkspace(page: Page): Promise<void> {
   await expect(page.locator('[data-testid="project-shell-main-content"]').first()).toBeVisible({ timeout: 10000 });
 }
 
-async function createAndActivateProject(page: Page, projectName: string): Promise<void> {
-  const createProjectButton = page.locator('[data-testid="create-project-btn"]:visible').first();
-  await expect(createProjectButton).toBeVisible({ timeout: 8000 });
-  await createProjectButton.evaluate((element: HTMLElement) => element.click());
-  await expect(page.locator('[data-testid="new-project-modal"]')).toBeVisible({ timeout: 8000 });
+function projectItemByName(page: Page, projectName: string) {
+  return page.locator('[data-testid="project-item"]').filter({ hasText: projectName }).first();
+}
 
-  const nameInput = page.locator('[data-testid="project-name-input"]').first();
-  await nameInput.fill(projectName);
-  const submit = page.locator('[data-testid="create-project-confirm"]').first();
-  await expect(submit).toBeEnabled({ timeout: 5000 });
-  await submit.click({ force: true });
-  await expect(page.locator('[data-testid="new-project-modal"]')).toBeHidden({ timeout: 8000 });
-
-  const projectItem = page.locator(`[data-testid="project-item"]:has-text("${projectName}")`).first();
+async function expandProjectIntroCard(page: Page, projectName: string, projectId: string): Promise<void> {
+  const projectItem = page.locator(`[data-testid="project-item"][data-project-id="${projectId}"]`).first();
   await expect(projectItem).toBeVisible({ timeout: 10000 });
-  await projectItem.click({ force: true });
-  await enterProjectWorkspace(page);
+
+  const projectEntry = projectItem.locator('xpath=..');
+  const enterButton = projectEntry.getByRole('button', { name: /进入项目|enter/i }).first();
+  if (!(await testHelpers.isElementVisible(enterButton, 800))) {
+    await projectItem.click({ force: true });
+  }
+
+  await expect(enterButton, `项目 ${projectName} 的详情卡未展开`).toBeVisible({ timeout: 10000 });
+}
+
+async function enterProjectWorkspace(page: Page, projectName: string, projectId: string): Promise<void> {
+  const projectRoutePattern = new RegExp(`#/projects/${projectId}(?:/|$)`);
+  await expandProjectIntroCard(page, projectName, projectId);
+  const projectEntry = page.locator(`[data-testid="project-item"][data-project-id="${projectId}"]`).first().locator('xpath=..');
+  const enterButton = projectEntry.getByRole('button', { name: /进入项目|enter/i }).first();
+
+  await expect
+    .poll(async () => {
+      if (projectRoutePattern.test(page.url())) {
+        return 'active';
+      }
+
+      if (await testHelpers.isElementVisible(enterButton, 500)) {
+        await enterButton.click({ timeout: 1000 });
+      }
+      return projectRoutePattern.test(page.url()) ? 'active' : 'waiting';
+    }, { timeout: 20000, intervals: [100, 250, 500, 1000] })
+    .toBe('active');
+  await waitForAppReady(page, { timeoutMs: 30_000, recoverStaticLoader: true });
+  await expectProjectActive(page, projectName, projectId);
+  await expect(page.locator('[data-testid="project-shell-main-content"]').first()).toBeVisible({ timeout: 10000 });
+}
+
+async function expectProjectActive(page: Page, projectName: string, projectId: string): Promise<void> {
+  const projectItem = page.locator(`[data-testid="project-item"][data-project-id="${projectId}"]`).first();
+  await expect
+    .poll(async () => {
+      if (await testHelpers.isElementVisible(projectItem, 500)) {
+        return true;
+      }
+
+      await waitForAppReady(page, { timeoutMs: 30_000, recoverStaticLoader: true }).catch(() => undefined);
+      return testHelpers.isElementVisible(projectItem, 500);
+    }, {
+      timeout: 45_000,
+      intervals: [250, 500, 1_000],
+      message: `项目 ${projectName} 未在启动恢复后重新出现在项目列表`,
+    })
+    .toBe(true);
+  await expect(projectItem).toBeVisible({ timeout: 10000 });
+  await expect(projectItem, `项目 ${projectName} 未切换为当前活动项目`).toHaveClass(/bg-indigo-50/, { timeout: 10000 });
+}
+
+async function createAndActivateProject(page: Page, projectName: string): Promise<void> {
+  const projectModal = page.locator('[data-testid="new-project-modal"]');
+  const projectItem = projectItemByName(page, projectName);
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (await testHelpers.isElementVisible(projectItem, 500)) {
+      break;
+    }
+
+    try {
+      const createProjectButton = page.locator('[data-testid="create-project-btn"]:visible').first();
+      await expect(createProjectButton).toBeVisible({ timeout: 8000 });
+      await expect
+        .poll(async () => {
+          await createProjectButton.evaluate((element: HTMLElement) => element.click());
+          return testHelpers.isElementVisible(projectModal, 500);
+        }, { timeout: 8000, intervals: [100, 300, 700, 1000] })
+        .toBe(true);
+      await expect(projectModal).toBeVisible({ timeout: 1000 });
+
+      const nameInput = page.locator('[data-testid="project-name-input"]').first();
+      await expect(nameInput).toBeVisible({ timeout: 5000 });
+      await nameInput.fill(projectName);
+      const submit = page.locator('[data-testid="create-project-confirm"]').first();
+      await expect(submit).toBeEnabled({ timeout: 5000 });
+      await submit.click({ force: true });
+      await expect(projectModal).toBeHidden({ timeout: 8000 });
+    } catch (error) {
+      if (attempt === 2) {
+        throw error;
+      }
+      await waitForAppReady(page, { timeoutMs: 30_000, recoverStaticLoader: true });
+      await expect(projectModal).toBeHidden({ timeout: 3000 }).catch(() => {});
+    }
+  }
+
+  await expect(projectItem).toBeVisible({ timeout: 10000 });
+  const projectId = await projectItem.getAttribute('data-project-id');
+  expect(projectId, `项目 ${projectName} 缺少 data-project-id`).toBeTruthy();
+
+  await enterProjectWorkspace(page, projectName, projectId!);
+  await expectProjectActive(page, projectName, projectId!);
 }
 
 async function ensureTextReady(page: Page): Promise<void> {
@@ -60,58 +225,223 @@ async function ensureTextReady(page: Page): Promise<void> {
 }
 
 async function ensureFlowReady(page: Page): Promise<void> {
-  await testHelpers.clickIfVisible(
-    page.locator('[data-testid="flow-view-tab"]').first(),
-    { timeout: 3000, force: true },
-  );
+  const diagram = page.locator('[data-testid="flow-diagram"]').first();
+  const flowTab = page.locator('[data-testid="flow-view-tab"]').first();
+  const flowRetry = page.getByRole('button', { name: /流程图|加载|重试|刷新页面/i }).first();
 
-  await testHelpers.clickIfVisible(
-    page.getByRole('button', { name: /流程图|加载/i }).first(),
-    { timeout: 1500, force: true },
-  );
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (await testHelpers.isElementVisible(diagram, 1000)) {
+      return;
+    }
 
-  await expect(page.locator('[data-testid="flow-diagram"]').first()).toBeVisible({ timeout: 15000 });
+    await testHelpers.clickIfVisible(flowTab, { timeout: 3000, force: true });
+    await testHelpers.clickIfVisible(flowRetry, { timeout: 1500, force: true });
+
+    if (await testHelpers.isElementVisible(diagram, 15000)) {
+      return;
+    }
+
+    const appContainerVisible = await testHelpers.isElementVisible(
+      page.locator('[data-testid="app-container"]').first(),
+      1000,
+    );
+    if (!appContainerVisible) {
+      await page.goto('/', { waitUntil: 'domcontentloaded' });
+      await testHelpers.waitForAppReady(page);
+    }
+  }
+
+  await expect(diagram).toBeVisible({ timeout: 15000 });
 }
 
-async function ensureDockPanelVisible(page: Page): Promise<void> {
-  const panel = page.locator('[data-testid="dock-v3-panel"]').first();
-  if (await testHelpers.isElementVisible(panel, 800)) {
+async function closeMobileSidebarIfVisible(page: Page): Promise<void> {
+  const sidebar = page.locator('[data-testid="project-selector"]').first();
+
+  const isMobile = await page.evaluate(() => window.innerWidth < 768).catch(() => false);
+  if (!isMobile) {
     return;
   }
 
+  await expect(sidebar).toBeAttached({ timeout: 5000 });
+
+  const isClosed = async () => sidebar.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return element.getAttribute('aria-hidden') === 'true' || style.pointerEvents === 'none';
+  }).catch(() => true);
+
+  if (await isClosed()) {
+    return;
+  }
+
+  const backdrop = page.locator('[data-testid="project-selector-backdrop"]').first();
+  const closeButton = page.locator('[aria-label="关闭侧边栏"]').first();
+
+  await expect
+    .poll(async () => {
+      if (await isClosed()) {
+        return 'closed';
+      }
+
+      if (await testHelpers.isElementVisible(closeButton, 300)) {
+        await closeButton.click({ force: true }).catch(() => undefined);
+      } else if (await testHelpers.isElementVisible(backdrop, 300)) {
+        await backdrop.click({ force: true }).catch(() => undefined);
+      } else {
+        await page.evaluate(() => window.dispatchEvent(new Event('toggle-sidebar'))).catch(() => undefined);
+      }
+
+      if (!(await isClosed())) {
+        await page.evaluate(() => window.dispatchEvent(new Event('toggle-sidebar'))).catch(() => undefined);
+      }
+
+      return await isClosed() ? 'closed' : 'open';
+    }, {
+      timeout: 8000,
+      intervals: [100, 200, 400, 800],
+    })
+    .toBe('closed');
+  await expect(backdrop).toBeHidden({ timeout: 3000 });
+}
+
+async function setMobileViewport(page: Page, size = { width: 390, height: 844 }): Promise<void> {
+  await page.setViewportSize(size);
+  await expect
+    .poll(async () => page.evaluate(() => window.innerWidth), {
+      timeout: 5000,
+      intervals: [100, 200, 400],
+    })
+    .toBe(size.width);
+  await expect(page.locator('[data-testid="project-selector"]').first())
+    .toHaveAttribute('data-mobile-overlay', 'true', { timeout: 5000 });
+}
+
+async function ensureDockPanelVisible(page: Page): Promise<void> {
+  await dismissLoginModalIfVisible(page);
+  await closeMobileSidebarIfVisible(page);
+  const panel = page.locator('[data-testid="dock-v3-panel"]').first();
   const visibleTrigger = page.locator('[data-testid="dock-v3-semicircle"]:visible').first();
   const trigger = await testHelpers.isElementVisible(visibleTrigger, 800)
     ? visibleTrigger
     : page.locator('[data-testid="dock-v3-semicircle"]').first();
-  await trigger.click({ force: true });
+  const expanded = await trigger.getAttribute('aria-expanded').catch(() => null);
+  if (expanded === 'true' && await testHelpers.isElementVisible(panel, 800)) {
+    return;
+  }
+
+  await expect(trigger).toBeVisible({ timeout: 8000 });
+  await expect
+    .poll(async () => {
+      if (await testHelpers.isElementVisible(panel, 300)) {
+        return 'expanded';
+      }
+
+      await trigger.click();
+      return (await trigger.getAttribute('aria-expanded')) === 'true' ? 'expanded' : 'collapsed';
+    }, { timeout: 8000, intervals: [100, 200, 400, 800] })
+    .toBe('expanded');
   await expect(panel).toBeVisible({ timeout: 8000 });
 }
 
 async function dragTaskToDock(page: Page, sourceSelector: string): Promise<void> {
-  const dataTransfer = await page.evaluateHandle(() => new DataTransfer());
   const source = page.locator(sourceSelector).first();
   const target = page.locator('[data-testid="dock-v3-drop-zone"]').first();
+  const dockItems = page.locator('[data-testid="dock-v3-item"]');
 
   await expect(source).toBeVisible({ timeout: 10000 });
   await expect(target).toBeVisible({ timeout: 10000 });
+  const initialDockCount = await dockItems.count();
 
-  await source.dispatchEvent('dragstart', { dataTransfer });
-  await target.dispatchEvent('dragenter', { dataTransfer });
-  await target.dispatchEvent('dragover', { dataTransfer });
-  await target.dispatchEvent('drop', { dataTransfer });
-  await source.dispatchEvent('dragend', { dataTransfer });
+  const dragMeta = await source.evaluate((element) => {
+    const taskId =
+      element.getAttribute('data-unassigned-task')
+      ?? element.getAttribute('data-task-id')
+      ?? element.getAttribute('data-testid')?.replace(/^flow-palette-task-/, '')
+      ?? '';
+    const sourceKind = element.getAttribute('data-testid')?.startsWith('flow-palette-task-') ? 'flow' : 'text';
+
+    return {
+      taskId,
+      sourceKind,
+    };
+  });
+  expect(dragMeta.taskId, `拖拽源 ${sourceSelector} 缺少任务 ID`).toBeTruthy();
+
+  await expect
+    .poll(async () => {
+      const currentCount = await dockItems.count();
+      if (currentCount > initialDockCount) {
+        return currentCount;
+      }
+
+      await dispatchTaskDropSequence(page, source, target, dragMeta);
+      return dockItems.count();
+    }, {
+      timeout: 12_000,
+      intervals: [150, 300, 600, 900],
+      message: `任务 ${dragMeta.taskId} 未在超时内入坞`,
+    })
+    .toBeGreaterThan(initialDockCount);
+}
+
+async function dispatchTaskDropSequence(
+  page: Page,
+  source: ReturnType<Page['locator']>,
+  target: ReturnType<Page['locator']>,
+  dragMeta: { taskId: string; sourceKind: string },
+): Promise<void> {
+  await expect(source).toBeVisible({ timeout: 2000 });
+  await expect(target).toBeVisible({ timeout: 2000 });
+
+  const sourceBox = await source.boundingBox();
+  const targetBox = await target.boundingBox();
+  const eventInit = {
+    bubbles: true,
+    cancelable: true,
+    clientX: Math.round((targetBox?.x ?? 0) + (targetBox?.width ?? 0) / 2),
+    clientY: Math.round((targetBox?.y ?? 0) + (targetBox?.height ?? 0) / 2),
+  };
+  const dataTransfer = await page.evaluateHandle(({ taskId, sourceKind }) => {
+    const payload = {
+      v: 1,
+      type: 'task',
+      taskId,
+      projectId: null,
+      source: sourceKind,
+      fromProjectId: null,
+    };
+    const serialized = JSON.stringify(payload);
+    const transfer = new DataTransfer();
+    transfer.setData('application/x-nanoflow-task', serialized);
+    transfer.setData('text/task-id', taskId);
+    transfer.setData('text/plain', taskId);
+    transfer.setData('application/json', serialized);
+    transfer.effectAllowed = 'move';
+    return transfer;
+  }, dragMeta);
+
+  await source.dispatchEvent('dragstart', {
+    ...eventInit,
+    clientX: Math.round((sourceBox?.x ?? 0) + (sourceBox?.width ?? 0) / 2),
+    clientY: Math.round((sourceBox?.y ?? 0) + (sourceBox?.height ?? 0) / 2),
+    dataTransfer,
+  });
+  await target.dispatchEvent('dragenter', { ...eventInit, dataTransfer });
+  await target.dispatchEvent('dragover', { ...eventInit, dataTransfer });
+  await target.dispatchEvent('drop', { ...eventInit, dataTransfer });
+  await source.dispatchEvent('dragend', { ...eventInit, dataTransfer });
+  await dataTransfer.dispose();
 }
 
 async function clickVisibleFocusToggle(page: Page): Promise<boolean> {
   const selectors = [
-    '[data-testid="spotlight-trigger"]',
+    '[data-testid="focus-session-trigger"]',
     '[data-testid="project-shell-focus-session-toggle"]',
   ];
 
   for (const selector of selectors) {
     const toggle = page.locator(selector).first();
     if (await testHelpers.isElementVisible(toggle, 1200)) {
-      await toggle.click({ force: true });
+      await toggle.evaluate((element: HTMLElement) => element.click());
       return true;
     }
   }
@@ -128,16 +458,41 @@ async function triggerFocusToggle(page: Page): Promise<void> {
   });
 }
 
+async function dispatchFocusExitShortcut(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    document.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'L',
+      altKey: true,
+      shiftKey: true,
+      bubbles: true,
+      cancelable: true,
+    }));
+  });
+}
+
 async function waitForFocusTransitionStable(page: Page): Promise<void> {
   const mainContent = page.locator('[data-testid="project-shell-main-content"]').first();
   if (!(await mainContent.count())) {
     // 等待主内容容器出现（回退：元素尚未渲染）
-    await expect(mainContent).toBeAttached({ timeout: 3000 }).catch(() => {});
+    await expect(mainContent).toBeAttached({ timeout: 3000 }).catch(async () => {
+      await waitForAppReady(page, { timeoutMs: 30_000, recoverStaticLoader: true });
+    });
     return;
   }
 
   await expect
     .poll(async () => {
+      const shellVisible = await testHelpers.isElementVisible(mainContent, 250);
+      if (!shellVisible) {
+        const recovered = await waitForAppReady(page, {
+          timeoutMs: 30_000,
+          recoverStaticLoader: true,
+        })
+          .then(() => true)
+          .catch(() => false);
+        return recovered ? 'stable' : 'missing';
+      }
+
       const phase = await mainContent.getAttribute('data-dock-takeover-phase');
       return phase === 'entering' || phase === 'exiting' || phase === 'restoring'
         ? 'transitioning'
@@ -147,8 +502,35 @@ async function waitForFocusTransitionStable(page: Page): Promise<void> {
 }
 
 async function enterFocusMode(page: Page): Promise<void> {
-  await triggerFocusToggle(page);
-  await expect(page.locator('[data-testid="dock-v3-focus-stage"]')).toBeVisible({ timeout: 10000 });
+  const focusStage = page.locator('[data-testid="dock-v3-focus-stage"]').first();
+  const mainContent = page.locator('[data-testid="project-shell-main-content"]').first();
+  const disabledInlineTrigger = page.getByRole('button', { name: '进入专注后可用' }).first();
+
+  await expect
+    .poll(async () => {
+      if (await testHelpers.isElementVisible(focusStage, 250)) {
+        return 'stage';
+      }
+
+      const phase = await mainContent.getAttribute('data-dock-takeover-phase').catch(() => null);
+      if (phase === 'entering' || phase === 'focused' || phase === 'restoring') {
+        return await testHelpers.isElementVisible(focusStage, 500) ? 'stage' : 'transitioning';
+      }
+
+      if (await testHelpers.isElementVisible(disabledInlineTrigger, 150)) {
+        await expect(disabledInlineTrigger).toBeDisabled({ timeout: 500 }).catch(() => undefined);
+      }
+      await triggerFocusToggle(page);
+      if (await testHelpers.isElementVisible(focusStage, 250)) {
+        return 'stage';
+      }
+
+      return 'waiting';
+    }, {
+      timeout: 30_000,
+      intervals: [100, 250, 500, 1000],
+    })
+    .toBe('stage');
   await waitForFocusTransitionStable(page);
 }
 
@@ -158,15 +540,31 @@ async function openExitConfirm(page: Page): Promise<void> {
     return;
   }
 
-  await waitForFocusTransitionStable(page);
-
-  await triggerFocusToggle(page);
-  if (await testHelpers.isElementVisible(confirm, 1200)) {
-    return;
+  const focusStage = page.locator('[data-testid="dock-v3-focus-stage"]').first();
+  if (!(await testHelpers.isElementVisible(focusStage, 800))) {
+    await enterFocusMode(page);
   }
 
-  await page.keyboard.press('Alt+Shift+L');
-  await expect(confirm).toBeVisible({ timeout: 5000 });
+  await waitForFocusTransitionStable(page);
+
+  await expect
+    .poll(async () => {
+      if (await testHelpers.isElementVisible(confirm, 250)) {
+        return 'confirm';
+      }
+
+      await triggerFocusToggle(page);
+      if (await testHelpers.isElementVisible(confirm, 500)) {
+        return 'confirm';
+      }
+
+      await dispatchFocusExitShortcut(page);
+      return await testHelpers.isElementVisible(confirm, 500) ? 'confirm' : 'waiting';
+    }, {
+      timeout: 10_000,
+      intervals: [100, 250, 500, 1000],
+    })
+    .toBe('confirm');
 }
 
 async function saveAndExitFocus(page: Page): Promise<void> {
@@ -210,7 +608,15 @@ async function createDockTaskByForm(page: Page, title: string): Promise<void> {
   const panel = page.locator('[data-testid="dock-v3-panel"]').first();
   const toggle = panel.locator('[data-testid="dock-v3-create-toggle"]').first();
   await expect(toggle).toBeVisible({ timeout: 10000 });
-  await toggle.evaluate((el: HTMLElement) => el.click());
+  if ((await toggle.getAttribute('aria-expanded').catch(() => null)) !== 'true') {
+    await expect(toggle).toBeEnabled({ timeout: 15000 });
+    await expect
+      .poll(async () => {
+        await toggle.evaluate((el: HTMLElement) => el.click());
+        return toggle.getAttribute('aria-expanded');
+      }, { timeout: 5000, intervals: [100, 200, 400, 800] })
+      .toBe('true');
+  }
 
   const form = panel.locator('[data-testid="dock-v3-new-task-form"]').first();
   await expect(form).toBeVisible({ timeout: 5000 });
@@ -223,8 +629,11 @@ async function createDockTaskByForm(page: Page, title: string): Promise<void> {
   if ((await selects.count()) > 1) {
     await selects.nth(1).selectOption('low').catch(() => {});
   }
+  await form.getByPlaceholder('预计(min)').first().fill('15');
 
-  await panel.locator('[data-testid="dock-v3-create-submit"]').first().evaluate((el: HTMLElement) => el.click());
+  const submit = panel.locator('[data-testid="dock-v3-create-submit"]').first();
+  await expect(submit).toBeEnabled({ timeout: 5000 });
+  await submit.evaluate((el: HTMLElement) => el.click());
   await expect(page.locator('[data-testid="dock-v3-item"]').filter({ hasText: title }).first()).toBeVisible({ timeout: 10000 });
 }
 
@@ -304,6 +713,7 @@ async function prepareWaitChain(page: Page, prefix: string): Promise<{ mainTitle
   await createDockTaskByForm(page, mainTitle);
   await createDockTaskByForm(page, subTitle);
   await enterFocusMode(page);
+  await switchDockItemToConsole(page, mainTitle);
 
   const waitTrigger = page.locator('[data-testid="dock-v3-wait-trigger"]').first();
   await expect(waitTrigger).toBeVisible({ timeout: 10000 });
@@ -322,9 +732,11 @@ async function prepareWaitChain(page: Page, prefix: string): Promise<{ mainTitle
 }
 
 async function reachFragmentCountdownFromShortWait(page: Page, prefix: string): Promise<void> {
-  await createDockTaskByForm(page, `${prefix}-A`);
+  const mainTitle = `${prefix}-A`;
+  await createDockTaskByForm(page, mainTitle);
   await createDockTaskByForm(page, `${prefix}-B`);
   await enterFocusMode(page);
+  await switchDockItemToConsole(page, mainTitle);
 
   const waitTrigger = page.locator('[data-testid="dock-v3-wait-trigger"]').first();
   await expect(waitTrigger).toBeVisible({ timeout: 10000 });
@@ -367,6 +779,39 @@ async function confirmFocusedTaskCompletion(page: Page): Promise<void> {
   await expect(completeBtn).toBeHidden({ timeout: 10000 }).catch(() => {
     // 按钮可能仍可见（下一个任务的完成按钮），容忍超时
   });
+}
+
+async function switchDockItemToConsole(page: Page, title: string): Promise<void> {
+  const targetItem = page.locator('[data-testid="dock-v3-item"]').filter({ hasText: title }).first();
+  const firstConsoleCard = page.locator('[data-testid="dock-v3-console-card"]').first();
+
+  await expect(targetItem).toBeVisible({ timeout: 10000 });
+  await targetItem.scrollIntoViewIfNeeded();
+  await expect
+    .poll(async () => {
+      if ((await firstConsoleCard.textContent().catch(() => '')).includes(title)) {
+        return 'focused';
+      }
+
+      if (await testHelpers.isElementVisible(targetItem, 500)) {
+        await targetItem.evaluate((element: HTMLElement) => element.click());
+      }
+
+      await expect
+        .poll(async () => page.locator('[data-testid="dock-v3-console-card"].is-animating').count(), {
+          timeout: 2_000,
+          intervals: [100, 150, 250],
+        })
+        .toBe(0)
+        .catch(() => undefined);
+
+      return (await firstConsoleCard.textContent().catch(() => '')).includes(title) ? 'focused' : 'waiting';
+    }, {
+      timeout: 15_000,
+      intervals: [150, 300, 600],
+      message: `停泊坞任务 ${title} 未切换到主控台前台`,
+    })
+    .toBe('focused');
 }
 
 async function readDockSnapshotFromIdb(page: Page): Promise<any | null> {
@@ -438,6 +883,7 @@ async function readBlackBoxEntryFromIdb(page: Page, entryId: string): Promise<an
 
 test.describe('ParkingDock V3 critical paths', () => {
   test.describe.configure({ mode: 'serial' });
+  test.setTimeout(90_000);
 
   test('dock-v3 panel is always visible and focus stage toggles on/off', async ({ page }) => {
     await bootstrapLocalWorkspace(page);
@@ -595,12 +1041,17 @@ test.describe('ParkingDock V3 critical paths', () => {
 
     const dockItems = page.locator('[data-testid="dock-v3-item"]');
     await expect(dockItems).toHaveCount(2, { timeout: 10000 });
-    await dockItems.nth(1).scrollIntoViewIfNeeded();
-    await dockItems.nth(1).evaluate((el: HTMLElement) => el.click());
+    const secondaryTitle = `Secondary-B`;
+    await switchDockItemToConsole(page, secondaryTitle);
 
-    await expect(page.locator('[data-testid="dock-v3-dock-feedback"]')).toContainText(/已切换到前台|已改选前台任务/, { timeout: 5000 });
     await expect(page.locator('[data-testid="dock-v3-console-card"]').first()).toContainText(/Secondary-B/, { timeout: 10000 });
     await expect(page.locator('[data-testid="dock-v3-status-machine"]').first()).toContainText(/Secondary-B/, { timeout: 10000 });
+    await expect
+      .poll(async () => (await page.locator('[data-testid="dock-v3-dock-feedback"]').textContent().catch(() => '')).trim(), {
+        timeout: 3000,
+        intervals: [100, 200, 500],
+      })
+      .toMatch(/已切换到前台|已改选前台任务/);
   });
 
   test('status hud should render all four visible states directly when four entries are present', async ({ page }) => {
@@ -714,27 +1165,14 @@ test.describe('ParkingDock V3 critical paths', () => {
       savedAt: nowIso,
     });
 
-    await page.reload();
-    await testHelpers.waitForAppReady(page);
-    await testHelpers.clickIfVisible(
-      page.locator('[data-testid="local-mode-btn"]').first(),
-      { timeout: 1200, force: true },
-    );
-    const seededProject = page.locator('[data-testid="project-item"]').filter({ hasText: 'DockHudOverflow' }).first();
-    if (await testHelpers.isElementVisible(seededProject, 3000)) {
-      await seededProject.click({ force: true });
-    }
-    if (!(await testHelpers.isElementVisible(page.locator('[data-testid="project-shell-main-content"]').first(), 1500))) {
-      await page.locator('[data-testid="project-item"]').filter({ hasText: 'DockHudOverflow' }).first().click({ force: true });
-      await enterProjectWorkspace(page);
-    }
-
-    await expect(page.locator('[data-testid="dock-v3-focus-stage"]')).toBeVisible({ timeout: 10000 });
+    await reloadWorkspaceAfterStorageSeed(page);
+    await activateSeededProjectAndWaitForDockRestore(page, 'DockHudOverflow', [
+      'HUD Focus',
+      'HUD Wait A',
+      'HUD Wait B',
+      'HUD Stalled',
+    ]);
     const statusHud = page.locator('[data-testid="dock-v3-status-machine"]').first();
-    await expect(statusHud).toContainText('HUD Focus', { timeout: 10000 });
-    await expect(statusHud).toContainText('HUD Wait A', { timeout: 10000 });
-    await expect(statusHud).toContainText('HUD Wait B', { timeout: 10000 });
-    await expect(statusHud).toContainText('HUD Stalled', { timeout: 10000 });
     await expect(page.locator('[data-testid="dock-v3-status-overflow"]')).toHaveCount(0);
   });
 
@@ -824,6 +1262,7 @@ test.describe('ParkingDock V3 critical paths', () => {
     await openDestructiveExitChoices(page);
     await page.locator('[data-testid="dock-v3-exit-clear"]').click({ force: true });
     await expect(page.locator('[data-testid="dock-v3-focus-stage"]')).toBeHidden({ timeout: 10000 });
+    await waitForFocusTransitionStable(page);
     await expect(page.locator('[data-testid="dock-v3-item"]')).toHaveCount(0, { timeout: 10000 });
 
     await createDockTaskByForm(page, `ExitSave-${testHelpers.uniqueId()}`);
@@ -1003,7 +1442,8 @@ test.describe('ParkingDock V3 critical paths', () => {
   test('mobile dock affordances should stay inside the viewport', async ({ page }) => {
     await bootstrapLocalWorkspace(page);
     await createAndActivateProject(page, `DockMobile-${testHelpers.uniqueId()}`);
-    await page.setViewportSize({ width: 390, height: 844 });
+    await setMobileViewport(page);
+    await closeMobileSidebarIfVisible(page);
     await expect(page.locator('[data-testid="dock-v3-semicircle"]:visible').first()).toBeVisible({ timeout: 5000 });
 
     const viewport = page.viewportSize();
@@ -1048,8 +1488,9 @@ test.describe('ParkingDock V3 critical paths', () => {
     await page.keyboard.press('Alt+H');
     await expect(page.locator('[data-testid="dock-v3-help-overlay"]')).toBeHidden({ timeout: 5000 });
 
-    await page.setViewportSize({ width: 390, height: 844 });
+    await setMobileViewport(page);
     await waitForFocusTransitionStable(page);
+    await closeMobileSidebarIfVisible(page);
     await ensureDockPanelVisible(page);
     await expect(page.locator('[data-testid="dock-v3-console-card"]:visible').first()).toBeVisible({ timeout: 5000 });
 

@@ -34,8 +34,35 @@ export interface Attachment {
   size?: number;
   createdAt: string;
   signedAt?: string;
+  scanMetadata?: import('../config/virus-scan.config').AttachmentScanMetadata;
   /** 软删除时间戳 【P2-32 修复】补充缺失字段，与 models/index.ts 保持一致 */
   deletedAt?: string;
+}
+
+export type TaskAttentionLevel = 'info' | 'warning' | 'blocker';
+
+export interface TaskAttentionItem {
+  id: string;
+  text: string;
+  level: TaskAttentionLevel;
+  done: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TaskAttentionMeta {
+  items: TaskAttentionItem[];
+  pinned?: boolean;
+  updatedAt?: string;
+}
+
+export interface TaskAttentionDraftItem {
+  id?: string;
+  text: string;
+  level?: TaskAttentionLevel;
+  done?: boolean;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 /**
@@ -100,4 +127,7 @@ export interface Task {
    * 仅 status === 'active' 的任务可持有此字段
    */
   parkingMeta?: import('./parking').TaskParkingMeta | null;
+
+  /** 任务僚机注意事项元数据；仅解释任务自身，不参与图拓扑。 */
+  attentionMeta?: TaskAttentionMeta | null;
 }

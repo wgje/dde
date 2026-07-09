@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const dotenv = require('dotenv');
+const { writeTextFileIfChanged } = require('./write-file-if-changed.cjs');
 
 // 优先读取 .env.local，其次读取进程环境（方便 Vercel/Supabase 等 CI 环境）
 const localEnv = dotenv.config({ path: path.resolve(__dirname, '../.env.local') }).parsed || {};
@@ -30,6 +31,26 @@ const parseNumberEnv = (value, fallback) => {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
 };
+
+function tsStringLiteral(value) {
+  return JSON.stringify(String(value));
+}
+
+function htmlScriptStringLiteral(value) {
+  return tsStringLiteral(value)
+    .replace(/</g, '\\u003C')
+    .replace(/>/g, '\\u003E')
+    .replace(/&/g, '\\u0026')
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029');
+}
+
+function normalizeOriginGateMode(value) {
+  const normalized = String(value || '').trim();
+  return ['off', 'redirect', 'read-only', 'export-only'].includes(normalized)
+    ? normalized
+    : 'off';
+}
 
 const decodeBase64UrlJson = (segment) => {
   if (!segment) return null;
@@ -201,21 +222,34 @@ const hasDevAutoLogin = devAutoLoginEmail && devAutoLoginPassword;
 // 这些值默认为空字符串/false，保持与 Vercel 当前部署行为兼容；GitHub Actions 通过显式 env 注入。
 const sentryEnvironment = (process.env.NG_APP_SENTRY_ENVIRONMENT || localEnv.NG_APP_SENTRY_ENVIRONMENT || '').trim();
 const canonicalOrigin = (process.env.NG_APP_CANONICAL_ORIGIN || localEnv.NG_APP_CANONICAL_ORIGIN || '').trim();
-const originGateMode = (process.env.NG_APP_ORIGIN_GATE_MODE || localEnv.NG_APP_ORIGIN_GATE_MODE || 'off').trim();
+const originGateMode = normalizeOriginGateMode(
+  process.env.NG_APP_ORIGIN_GATE_MODE || localEnv.NG_APP_ORIGIN_GATE_MODE || 'off'
+);
 const readOnlyPreview = parseBooleanEnv(
   process.env.NG_APP_READ_ONLY_PREVIEW || localEnv.NG_APP_READ_ONLY_PREVIEW,
   false
 );
 const deploymentTarget = (process.env.NG_APP_DEPLOYMENT_TARGET || localEnv.NG_APP_DEPLOYMENT_TARGET || 'local').trim();
 const supabaseProjectAlias = (process.env.NG_APP_SUPABASE_PROJECT_ALIAS || localEnv.NG_APP_SUPABASE_PROJECT_ALIAS || 'local').trim();
-const sentryRelease = (process.env.NG_APP_SENTRY_RELEASE || localEnv.NG_APP_SENTRY_RELEASE || process.env.GITHUB_SHA || '').trim();
+const normalizeSentryReleaseInput = (value) => {
+  const trimmed = (value || '').trim();
+  return trimmed.startsWith('nanoflow@') ? trimmed.slice('nanoflow@'.length) : trimmed;
+};
+const sentryRelease = normalizeSentryReleaseInput(
+  process.env.NG_APP_SENTRY_RELEASE
+  || process.env.SENTRY_RELEASE
+  || localEnv.NG_APP_SENTRY_RELEASE
+  || localEnv.SENTRY_RELEASE
+  || process.env.GITHUB_SHA
+  || ''
+);
 const syncRpcEnabled = parseBooleanEnv(
   process.env.NG_APP_SYNC_RPC_ENABLED || localEnv.NG_APP_SYNC_RPC_ENABLED,
   false
 );
 const syncLeaseEnabled = parseBooleanEnv(
   process.env.NG_APP_SYNC_LEASE_ENABLED || localEnv.NG_APP_SYNC_LEASE_ENABLED,
-  false
+  true
 );
 const syncProtocolVersion = parseNumberEnv(
   process.env.NG_APP_SYNC_PROTOCOL_VERSION || localEnv.NG_APP_SYNC_PROTOCOL_VERSION,
@@ -264,10 +298,11 @@ if (!fs.existsSync(envDir)) {
 // 保证 `var SUPABASE_URL` 与 `<link rel="preconnect" href="...supabase.co">` 在 CI 中始终对齐，
 // 避免 cloudflare-migration-artifacts.contract.spec.ts 在无 env 时把硬编码的 supabase.co 提示
 // 与占位符 'YOUR_SUPABASE_URL' 拉扯成不一致状态。
-const indexHtmlPathForFallback = path.resolve(__dirname, '../index.html');
+const sourceIndexHtmlPath = path.resolve(__dirname, '../index.html');
+const generatedIndexHtmlPath = path.resolve(__dirname, '../.tmp/index.generated.html');
 const deriveSupabaseUrlFromIndexHtml = () => {
   try {
-    const html = fs.readFileSync(indexHtmlPathForFallback, 'utf-8');
+    const html = fs.readFileSync(sourceIndexHtmlPath, 'utf-8');
     const preconnectMatch = html.match(/<link\s+rel="preconnect"\s+href="(https:\/\/[a-z0-9-]+\.supabase\.co)"/i);
     if (preconnectMatch) return preconnectMatch[1];
     const dnsMatch = html.match(/<link\s+rel="dns-prefetch"\s+href="(https:\/\/[a-z0-9-]+\.supabase\.co)"/i);
@@ -282,7 +317,7 @@ const finalKey = supabaseAnonKey || 'YOUR_SUPABASE_ANON_KEY';
 
 // 开发环境自动登录配置（仅开发环境）
 const devAutoLoginConfig = hasDevAutoLogin 
-  ? `{ email: '${devAutoLoginEmail}', password: '${devAutoLoginPassword}' }`
+  ? `{ email: ${tsStringLiteral(devAutoLoginEmail)}, password: ${tsStringLiteral(devAutoLoginPassword)} }`
   : 'null';
 
 const devEnvContent = `// 此文件由 scripts/set-env.cjs 自动生成，请勿手动编辑
@@ -290,20 +325,20 @@ const devEnvContent = `// 此文件由 scripts/set-env.cjs 自动生成，请勿
 
 export const environment = {
   production: false,
-  supabaseUrl: '${finalUrl}',
-  supabaseAnonKey: '${finalKey}',
+  supabaseUrl: ${tsStringLiteral(finalUrl)},
+  supabaseAnonKey: ${tsStringLiteral(finalKey)},
   // Sentry DSN - 用于错误监控
-  SENTRY_DSN: '${sentryDsn}',
+  SENTRY_DSN: ${tsStringLiteral(sentryDsn)},
   // GoJS License Key - 生产环境需要配置以移除水印
-  gojsLicenseKey: '${gojsLicenseKey}',
+  gojsLicenseKey: ${tsStringLiteral(gojsLicenseKey)},
   // === Cloudflare 迁移：部署 / Sentry / Origin Gate 标识符 ===
-  sentryEnvironment: '${sentryEnvironment || 'development'}',
-  canonicalOrigin: '${canonicalOrigin}',
-  originGateMode: '${originGateMode}' as 'off' | 'redirect' | 'read-only' | 'export-only',
+  sentryEnvironment: ${tsStringLiteral(sentryEnvironment || 'development')},
+  canonicalOrigin: ${tsStringLiteral(canonicalOrigin)},
+  originGateMode: ${tsStringLiteral(originGateMode)} as 'off' | 'redirect' | 'read-only' | 'export-only',
   readOnlyPreview: ${readOnlyPreview ? 'true' : 'false'},
-  deploymentTarget: '${deploymentTarget}',
-  supabaseProjectAlias: '${supabaseProjectAlias}',
-  sentryRelease: '${sentryRelease}',
+  deploymentTarget: ${tsStringLiteral(deploymentTarget)},
+  supabaseProjectAlias: ${tsStringLiteral(supabaseProjectAlias)},
+  sentryRelease: ${tsStringLiteral(sentryRelease)},
   syncRpcEnabled: ${syncRpcEnabled ? 'true' : 'false'},
   syncLeaseEnabled: ${syncLeaseEnabled ? 'true' : 'false'},
   syncProtocolVersion: ${syncProtocolVersion},
@@ -319,20 +354,20 @@ const prodEnvContent = `// 此文件由 scripts/set-env.cjs 自动生成，请�
 
 export const environment = {
   production: true,
-  supabaseUrl: '${finalUrl}',
-  supabaseAnonKey: '${finalKey}',
+  supabaseUrl: ${tsStringLiteral(finalUrl)},
+  supabaseAnonKey: ${tsStringLiteral(finalKey)},
   // Sentry DSN - 用于错误监控
-  SENTRY_DSN: '${sentryDsn}',
+  SENTRY_DSN: ${tsStringLiteral(sentryDsn)},
   // GoJS License Key - 生产环境需要配置以移除水印
-  gojsLicenseKey: '${gojsLicenseKey}',
+  gojsLicenseKey: ${tsStringLiteral(gojsLicenseKey)},
   // === Cloudflare 迁移：部署 / Sentry / Origin Gate 标识符 ===
-  sentryEnvironment: '${sentryEnvironment || 'production'}',
-  canonicalOrigin: '${canonicalOrigin}',
-  originGateMode: '${originGateMode}' as 'off' | 'redirect' | 'read-only' | 'export-only',
+  sentryEnvironment: ${tsStringLiteral(sentryEnvironment || 'production')},
+  canonicalOrigin: ${tsStringLiteral(canonicalOrigin)},
+  originGateMode: ${tsStringLiteral(originGateMode)} as 'off' | 'redirect' | 'read-only' | 'export-only',
   readOnlyPreview: ${readOnlyPreview ? 'true' : 'false'},
-  deploymentTarget: '${deploymentTarget}',
-  supabaseProjectAlias: '${supabaseProjectAlias}',
-  sentryRelease: '${sentryRelease}',
+  deploymentTarget: ${tsStringLiteral(deploymentTarget)},
+  supabaseProjectAlias: ${tsStringLiteral(supabaseProjectAlias)},
+  sentryRelease: ${tsStringLiteral(sentryRelease)},
   syncRpcEnabled: ${syncRpcEnabled ? 'true' : 'false'},
   syncLeaseEnabled: ${syncLeaseEnabled ? 'true' : 'false'},
   syncProtocolVersion: ${syncProtocolVersion},
@@ -342,16 +377,16 @@ export const environment = {
 };
 `;
 
-fs.writeFileSync(targetPath, devEnvContent);
-fs.writeFileSync(targetPathProd, prodEnvContent);
+writeTextFileIfChanged(targetPath, devEnvContent);
+writeTextFileIfChanged(targetPathProd, prodEnvContent);
 
 console.log(`✅ 环境变量已写入:`);
 console.log(`   - ${targetPath} (development)`);
 console.log(`   - ${targetPathProd} (production)`);
 
 // === 同步注入 index.html 预加载脚本的 Supabase 配置 ===
-// 使用正则匹配，支持幂等执行（无论是占位符还是已注入的真实值都能正确替换）
-const indexHtmlPath = path.resolve(__dirname, '../index.html');
+// 使用正则匹配，支持幂等执行；只写入 .tmp 生成文件，避免污染仓库模板 index.html。
+const indexHtmlPath = sourceIndexHtmlPath;
 try {
   let indexHtml = fs.readFileSync(indexHtmlPath, 'utf-8');
   const urlPattern = /var supabaseUrl = '[^']*';/;
@@ -359,9 +394,9 @@ try {
   const preloadUrlPattern = /var preloadSupabaseUrl = '[^']*';/;
 
   if (urlPattern.test(indexHtml) && keyPattern.test(indexHtml)) {
-    indexHtml = indexHtml.replace(urlPattern, `var supabaseUrl = '${finalUrl}';`);
-    indexHtml = indexHtml.replace(keyPattern, `var supabaseAnonKey = '${finalKey}';`);
-    indexHtml = indexHtml.replace(preloadUrlPattern, `var preloadSupabaseUrl = '${finalUrl}';`);
+    indexHtml = indexHtml.replace(urlPattern, `var supabaseUrl = ${htmlScriptStringLiteral(finalUrl)};`);
+    indexHtml = indexHtml.replace(keyPattern, `var supabaseAnonKey = ${htmlScriptStringLiteral(finalKey)};`);
+    indexHtml = indexHtml.replace(preloadUrlPattern, `var preloadSupabaseUrl = ${htmlScriptStringLiteral(finalUrl)};`);
   } else {
     console.warn('⚠️ index.html 中未找到预加载脚本的 Supabase 配置占位符，跳过注入');
   }
@@ -372,7 +407,7 @@ try {
   const prewarmKeyPattern = /var SUPABASE_ANON_KEY = '[^']*';/g;
   if (prewarmUrlPattern.test(indexHtml)) {
     prewarmUrlPattern.lastIndex = 0;
-    indexHtml = indexHtml.replace(prewarmUrlPattern, `var SUPABASE_URL = '${finalUrl}';`);
+    indexHtml = indexHtml.replace(prewarmUrlPattern, `var SUPABASE_URL = ${htmlScriptStringLiteral(finalUrl)};`);
   }
 
   const supabaseHintUrl = /^https:\/\/[a-z0-9-]+\.supabase\.co$/i.test(finalUrl)
@@ -387,7 +422,7 @@ try {
   }
   if (prewarmKeyPattern.test(indexHtml)) {
     prewarmKeyPattern.lastIndex = 0;
-    indexHtml = indexHtml.replace(prewarmKeyPattern, `var SUPABASE_ANON_KEY = '${finalKey}';`);
+    indexHtml = indexHtml.replace(prewarmKeyPattern, `var SUPABASE_ANON_KEY = ${htmlScriptStringLiteral(finalKey)};`);
   }
 
   const disablePreloadPattern = /DISABLE_INDEX_DATA_PRELOAD_V1:\s*(true|false),/;
@@ -661,23 +696,20 @@ try {
     canonicalOriginPattern.lastIndex = 0;
     indexHtml = indexHtml.replace(
       canonicalOriginPattern,
-      `var CANONICAL_ORIGIN = '${escapeHtmlString(canonicalOrigin)}';`
+      `var CANONICAL_ORIGIN = ${htmlScriptStringLiteral(canonicalOrigin)};`
     );
   }
   if (originGateModePattern.test(indexHtml)) {
     originGateModePattern.lastIndex = 0;
     indexHtml = indexHtml.replace(
       originGateModePattern,
-      `var ORIGIN_GATE_MODE = '${escapeHtmlString(originGateMode || 'off')}';`
+      `var ORIGIN_GATE_MODE = ${htmlScriptStringLiteral(originGateMode)};`
     );
   }
 
-  fs.writeFileSync(indexHtmlPath, indexHtml);
-  console.log(`   - ${indexHtmlPath} (预加载脚本 Supabase + Boot Flags + Origin Gate 配置)`);
+  fs.mkdirSync(path.dirname(generatedIndexHtmlPath), { recursive: true });
+  writeTextFileIfChanged(generatedIndexHtmlPath, indexHtml);
+  console.log(`   - ${generatedIndexHtmlPath} (generated index: 预加载脚本 Supabase + Boot Flags + Origin Gate 配置)`);
 } catch (e) {
-  console.warn('⚠️ 无法更新 index.html 预加载脚本配置:', e.message);
-}
-
-function escapeHtmlString(value) {
-  return String(value).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+  console.warn('⚠️ 无法生成 index.html 预加载脚本配置:', e.message);
 }

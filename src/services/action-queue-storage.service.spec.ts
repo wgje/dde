@@ -1,81 +1,40 @@
-/**
- * ActionQueueStorageService 单元测试
- *
- * 测试覆盖：
- * 1. 错误分类（classifyError）
- * 2. 死信队列操作（移入、重试、放弃、清空）
- * 3. localStorage 持久化（保存/加载队列、保存/加载死信队列）
- * 4. 死信队列 TTL 清理
- * 5. 重试逻辑（handleRetry）
- * 6. 回调注册（onFailure / onStorageFailure）
- * 7. 网络监听器管理
- * 8. 状态重置
- */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Injector, runInInjectionContext, signal } from '@angular/core';
-import { ActionQueueStorageService, LOCAL_QUEUE_CONFIG, ActionQueueContext } from './action-queue-storage.service';
+import {
+  ActionQueueStorageService,
+  LOCAL_QUEUE_CONFIG,
+  ActionQueueContext,
+} from './action-queue-storage.service';
+import {
+  registerActionQueueStoragePureHelperSpecs,
+  registerActionQueueStorageRetrySpecs,
+  registerActionQueueStorageTailSpecs,
+} from './action-queue-storage-tail.spec-helpers';
+import { registerActionQueueStorageCoreSpecs } from './action-queue-storage-core.spec-helpers';
+import { registerActionQueueStorageOwnerSettlementSpecs } from './action-queue-storage-owner-settlement.spec-helpers';
+import { registerActionQueueStorageDeadLetterRestoreSpecs } from './action-queue-storage-dead-letter-restore.spec-helpers';
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { NetworkAwarenessService } from './network-awareness.service';
 import { AuthService } from './auth.service';
 import { QueueBackupService } from './queue-backup.service';
+import { ActionQueueOwnerStorageService } from './action-queue-owner-storage.service';
+import { ActionQueueSchedulerService } from './action-queue-scheduler.service';
 import { AUTH_CONFIG } from '../config/auth.config';
 import { mockSentryLazyLoaderService } from '../test-setup.mocks';
-import type { QueuedAction, DeadLetterItem } from './action-queue.types';
-
-const mockLoggerCategory = {
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
-  debug: vi.fn(),
-};
-
-const mockLoggerService = {
-  category: vi.fn(() => mockLoggerCategory),
-};
-
-const mockToastService = {
-  success: vi.fn(),
-  error: vi.fn(),
-  warning: vi.fn(),
-  info: vi.fn(),
-};
-
-const mockNetworkAwarenessService = {
-  setStoragePressure: vi.fn(),
-};
-
-const mockQueueBackupService = {
-  backupQueue: vi.fn().mockResolvedValue(true),
-  restoreQueue: vi.fn().mockResolvedValue(null),
-  getQueueBackupRecordId: vi.fn((userId: string) => `queue-backup:${userId}`),
-};
-
-function createMockAction(overrides: Partial<QueuedAction> = {}): QueuedAction {
-  return {
-    id: crypto.randomUUID(),
-    type: 'update',
-    entityType: 'task',
-    entityId: 'task-1',
-    payload: { task: { id: 'task-1', title: 'Test' } as any, projectId: 'proj-1' },
-    timestamp: Date.now(),
-    retryCount: 0,
-    priority: 'normal',
-    ...overrides,
-  };
-}
-
-function createMockContext(overrides: Partial<ActionQueueContext> = {}): ActionQueueContext {
-  return {
-    dequeue: vi.fn(),
-    syncSentryContext: vi.fn(),
-    processQueue: vi.fn().mockResolvedValue(undefined),
-    pendingActions: signal<QueuedAction[]>([]),
-    queueSize: signal(0),
-    ...overrides,
-  };
-}
+import {
+  createMockAction,
+  createMockContext,
+  flushQueueBackupRestore,
+  mockLoggerCategory,
+  mockLoggerService,
+  mockNetworkAwarenessService,
+  mockQueueBackupService,
+  mockToastService,
+  resetQueueBackupMocks,
+} from './action-queue-storage.spec-helpers';
+import type { QueuedAction } from './action-queue.types';
 
 describe('ActionQueueStorageService', () => {
   let service: ActionQueueStorageService;
@@ -87,6 +46,7 @@ describe('ActionQueueStorageService', () => {
   beforeEach(() => {
     localStorage.clear();
     vi.clearAllMocks();
+    resetQueueBackupMocks();
     currentUserId = signal<string | null>('user-a');
 
     consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -95,6 +55,8 @@ describe('ActionQueueStorageService', () => {
     const injector = Injector.create({
       providers: [
         ActionQueueStorageService,
+        ActionQueueOwnerStorageService,
+        ActionQueueSchedulerService,
         { provide: LoggerService, useValue: mockLoggerService },
         { provide: ToastService, useValue: mockToastService },
         { provide: SentryLazyLoaderService, useValue: mockSentryLazyLoaderService },
@@ -115,145 +77,9 @@ describe('ActionQueueStorageService', () => {
     consoleErrorSpy?.mockRestore();
   });
 
-  // ==================== 错误分类 ====================
-
-  describe('classifyError', () => {
-    it('should classify network errors', () => {
-      expect(service.classifyError('Network timeout')).toBe('network');
-      expect(service.classifyError('Failed to fetch')).toBe('network');
-      expect(service.classifyError('NetworkError occurred')).toBe('network');
-      expect(service.classifyError('connection refused')).toBe('network');
-      expect(service.classifyError('device offline')).toBe('network');
-    });
-
-    it('should classify timeout errors', () => {
-      expect(service.classifyError('request timeout')).toBe('timeout');
-      expect(service.classifyError('operation timed out')).toBe('timeout');
-      expect(service.classifyError('deadline exceeded')).toBe('timeout');
-    });
-
-    it('should classify permission errors', () => {
-      expect(service.classifyError('permission denied')).toBe('permission');
-      expect(service.classifyError('unauthorized access')).toBe('permission');
-      expect(service.classifyError('forbidden resource')).toBe('permission');
-      expect(service.classifyError('invalid jwt token')).toBe('permission');
-      expect(service.classifyError('policy violation')).toBe('permission');
-    });
-
-    it('should classify business errors', () => {
-      expect(service.classifyError('not found')).toBe('business');
-      expect(service.classifyError('duplicate key value')).toBe('business');
-      expect(service.classifyError('unique constraint failed')).toBe('business');
-      expect(service.classifyError('violates check constraint')).toBe('business');
-      expect(service.classifyError('invalid input syntax')).toBe('business');
-    });
-
-    it('should return unknown for unrecognized errors', () => {
-      expect(service.classifyError('something unexpected')).toBe('unknown');
-      expect(service.classifyError('')).toBe('unknown');
-    });
-  });
-
-  // ==================== 死信队列操作 ====================
-
-  describe('dead letter queue operations', () => {
-    it('moveToDeadLetter should add action to dead letter queue', () => {
-      const action = createMockAction();
-
-      service.moveToDeadLetter(action, 'test reason');
-
-      expect(service.deadLetterQueue().length).toBe(1);
-      expect(service.deadLetterSize()).toBe(1);
-      expect(service.hasDeadLetters()).toBe(true);
-      expect(ctx.dequeue).toHaveBeenCalledWith(action.id);
-    });
-
-    it('moveToDeadLetter should keep low priority actions in dead letter queue', () => {
-      const action = createMockAction({ priority: 'low' });
-
-      service.moveToDeadLetter(action, 'test reason');
-
-      expect(service.deadLetterQueue().length).toBe(1);
-      expect(ctx.dequeue).toHaveBeenCalledWith(action.id);
-    });
-
-    it('moveToDeadLetter should notify user for critical actions', () => {
-      const action = createMockAction({ priority: 'critical' });
-
-      service.moveToDeadLetter(action, 'critical failure');
-
-      expect(mockToastService.warning).toHaveBeenCalled();
-    });
-
-    it('dismissDeadLetter should remove item from dead letter queue', () => {
-      const action = createMockAction();
-      service.moveToDeadLetter(action, 'test');
-
-      service.dismissDeadLetter(action.id);
-
-      expect(service.deadLetterSize()).toBe(0);
-      expect(service.hasDeadLetters()).toBe(false);
-    });
-
-    it('retryDeadLetter should move item back to pending actions', () => {
-      const action = createMockAction({ retryCount: 3 });
-      service.moveToDeadLetter(action, 'test');
-
-      service.retryDeadLetter(action.id);
-
-      expect(service.deadLetterSize()).toBe(0);
-      expect(ctx.pendingActions().length).toBe(1);
-      // retry count should be reset
-      expect(ctx.pendingActions()[0].retryCount).toBe(0);
-    });
-
-    it('clearDeadLetterQueue should remove all items', () => {
-      service.moveToDeadLetter(createMockAction(), 'r1');
-      service.moveToDeadLetter(createMockAction(), 'r2');
-      expect(service.deadLetterSize()).toBe(2);
-
-      service.clearDeadLetterQueue();
-
-      expect(service.deadLetterSize()).toBe(0);
-      expect(service.hasDeadLetters()).toBe(false);
-    });
-
-    it('moveToDeadLetter should cap dead letter queue at MAX_DEAD_LETTER_SIZE', () => {
-      for (let i = 0; i < LOCAL_QUEUE_CONFIG.MAX_DEAD_LETTER_SIZE + 10; i++) {
-        service.moveToDeadLetter(createMockAction(), `reason-${i}`);
-      }
-
-      expect(service.deadLetterQueue().length).toBe(LOCAL_QUEUE_CONFIG.MAX_DEAD_LETTER_SIZE);
-    });
-  });
-
-  // ==================== 失败回调 ====================
-
-  describe('failure callbacks', () => {
-    it('onFailure callback should be called when action is moved to dead letter', () => {
-      const callback = vi.fn();
-      service.onFailure(callback);
-
-      const action = createMockAction();
-      service.moveToDeadLetter(action, 'test reason');
-
-      expect(callback).toHaveBeenCalledTimes(1);
-      expect(callback).toHaveBeenCalledWith(
-        expect.objectContaining({
-          action,
-          reason: 'test reason',
-        })
-      );
-    });
-
-    it('onStorageFailure callback should be registered', () => {
-      const callback = vi.fn();
-      service.onStorageFailure(callback);
-
-      // Callback is stored but not triggered until storage actually fails
-      // We verify it is registered by checking it does not throw
-      expect(() => service.onStorageFailure(callback)).not.toThrow();
-    });
+  registerActionQueueStorageCoreSpecs({
+    getService: () => service,
+    getContext: () => ctx,
   });
 
   // ==================== 持久化操作 ====================
@@ -270,6 +96,34 @@ describe('ActionQueueStorageService', () => {
       const parsed = JSON.parse(saved!);
       expect(parsed).toHaveLength(1);
       expect(parsed[0].id).toBe(action.id);
+      expect(mockQueueBackupService.backupQueue).toHaveBeenCalledWith([action], 'user-a');
+    });
+
+    it('saveQueueToStorage 在 localStorage 不可用时应写入 IndexedDB 备份而不是形成内存队列', async () => {
+      const action = createMockAction({ id: 'no-local-storage-action' });
+      const originalLocalStorage = globalThis.localStorage;
+
+      Object.defineProperty(globalThis, 'localStorage', {
+        value: undefined,
+        configurable: true,
+        writable: true,
+      });
+
+      try {
+        ctx.pendingActions.set([action]);
+
+        service.saveQueueToStorage();
+        await flushQueueBackupRestore();
+
+        expect(mockQueueBackupService.backupQueue).toHaveBeenCalledWith([action], 'user-a');
+        expect(ctx.pendingActions()).toEqual([action]);
+      } finally {
+        Object.defineProperty(globalThis, 'localStorage', {
+          value: originalLocalStorage,
+          configurable: true,
+          writable: true,
+        });
+      }
     });
 
     it('saveQueueToStorage 在 localStorage 配额失败但 IDB 备份成功后应让旧快照失效', async () => {
@@ -311,8 +165,7 @@ describe('ActionQueueStorageService', () => {
         mockQueueBackupService.restoreQueue.mockResolvedValue([freshAction]);
 
         service.saveQueueToStorage();
-        await Promise.resolve();
-        await Promise.resolve();
+        await flushQueueBackupRestore();
 
         expect(mockQueueBackupService.backupQueue).toHaveBeenCalled();
         expect(globalThis.localStorage.getItem(scopedKey)).toBeNull();
@@ -320,11 +173,69 @@ describe('ActionQueueStorageService', () => {
         ctx.pendingActions.set([]);
         ctx.queueSize.set(0);
         service.loadQueueFromStorage();
-        await Promise.resolve();
-        await Promise.resolve();
+        await flushQueueBackupRestore();
 
         expect(mockQueueBackupService.restoreQueue).toHaveBeenCalled();
         expect(ctx.pendingActions()).toEqual([freshAction]);
+      } finally {
+        Object.defineProperty(globalThis, 'localStorage', {
+          value: originalLocalStorage,
+          configurable: true,
+          writable: true,
+        });
+      }
+    });
+
+    it('saveQueueToStorage 在 localStorage 普通写失败但 IDB 备份成功后应从持久备份恢复', async () => {
+      const freshAction = createMockAction({ id: 'fresh-security-fallback-action' });
+      const scopedKey = `${LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY}.user-a`;
+      const originalLocalStorage = globalThis.localStorage;
+      const storageData = new Map<string, string>();
+      const failingStorage = {
+        getItem: (key: string) => storageData.get(key) ?? null,
+        setItem: (key: string, value: string) => {
+          if (key === scopedKey) {
+            throw new DOMException('blocked', 'SecurityError');
+          }
+          storageData.set(key, String(value));
+        },
+        removeItem: (key: string) => {
+          storageData.delete(key);
+        },
+        clear: () => {
+          storageData.clear();
+        },
+        key: (index: number) => Array.from(storageData.keys())[index] ?? null,
+        get length() {
+          return storageData.size;
+        },
+      } as Storage;
+
+      Object.defineProperty(globalThis, 'localStorage', {
+        value: failingStorage,
+        configurable: true,
+        writable: true,
+      });
+
+      try {
+        ctx.pendingActions.set([freshAction]);
+        mockQueueBackupService.backupQueue.mockResolvedValue(true);
+        mockQueueBackupService.restoreQueue.mockResolvedValue([freshAction]);
+
+        service.saveQueueToStorage();
+        await flushQueueBackupRestore();
+
+        expect(mockQueueBackupService.backupQueue).toHaveBeenCalledWith([freshAction], 'user-a');
+        expect(globalThis.localStorage.getItem(scopedKey)).toBeNull();
+
+        ctx.pendingActions.set([]);
+        ctx.queueSize.set(0);
+        service.loadQueueFromStorage();
+        await flushQueueBackupRestore();
+
+        expect(mockQueueBackupService.restoreQueue).toHaveBeenCalledWith('user-a', expect.any(Function));
+        expect(ctx.pendingActions()).toEqual([freshAction]);
+        expect(ctx.queueSize()).toBe(1);
       } finally {
         Object.defineProperty(globalThis, 'localStorage', {
           value: originalLocalStorage,
@@ -389,6 +300,19 @@ describe('ActionQueueStorageService', () => {
       }
     });
 
+    it('persistQueueSnapshotForOwner 在 IndexedDB 备份失败时不应把 localStorage 镜像当作 durable 成功', async () => {
+      const action = createMockAction({ id: 'local-only-durable-action' });
+
+      mockQueueBackupService.backupQueue.mockResolvedValueOnce(false);
+
+      const saved = await service.persistQueueSnapshotForOwner('user-a', [action]);
+
+      expect(saved).toBe(false);
+      expect(localStorage.getItem(`${LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY}.user-a`)).toBeTruthy();
+      expect(service.storageFailure()).toBe(true);
+      expect(service.queueFrozen()).toBe(true);
+    });
+
     it('loadQueueFromStorage should restore queue from localStorage', () => {
       const action = createMockAction();
       localStorage.setItem(
@@ -400,6 +324,147 @@ describe('ActionQueueStorageService', () => {
 
       expect(ctx.pendingActions().length).toBe(1);
       expect(ctx.queueSize()).toBe(1);
+    });
+
+    it('loadQueueFromStorage should let IndexedDB Outbox override stale localStorage mirror', async () => {
+      const staleAction = createMockAction({ id: 'stale-local-mirror' });
+      const durableAction = createMockAction({ id: 'durable-idb-outbox' });
+      localStorage.setItem(
+        `${LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY}.user-a`,
+        JSON.stringify([staleAction])
+      );
+      mockQueueBackupService.restoreQueue.mockResolvedValueOnce([durableAction]);
+
+      service.loadQueueFromStorage();
+      await flushQueueBackupRestore();
+
+      expect(mockQueueBackupService.restoreQueue).toHaveBeenCalledWith('user-a', expect.any(Function));
+      expect(ctx.pendingActions().map(action => action.id)).toEqual(['durable-idb-outbox']);
+      expect(ctx.queueSize()).toBe(1);
+    });
+
+    it('loadQueueFromStorage should preserve foreground writes while IndexedDB restore is pending', async () => {
+      const localAction = createMockAction({
+        id: 'local-before-restore',
+        operationId: 'op-local-before-restore',
+      });
+      const foregroundAction = createMockAction({
+        id: 'foreground-during-restore',
+        operationId: 'op-foreground-during-restore',
+      });
+      const backupDuplicate = createMockAction({
+        id: 'backup-duplicate-local',
+        operationId: 'op-local-before-restore',
+      });
+      const backupOnlyAction = createMockAction({
+        id: 'backup-only-action',
+        operationId: 'op-backup-only-action',
+      });
+      let resolveRestore: (queue: QueuedAction[]) => void = () => {};
+      const restorePromise = new Promise<QueuedAction[]>((resolve) => {
+        resolveRestore = resolve;
+      });
+      localStorage.setItem(
+        `${LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY}.user-a`,
+        JSON.stringify([localAction])
+      );
+      mockQueueBackupService.restoreQueue.mockReturnValueOnce(restorePromise);
+
+      service.loadQueueFromStorage();
+      expect(ctx.pendingActions().map(action => action.id)).toEqual(['local-before-restore']);
+
+      ctx.pendingActions.set([localAction, foregroundAction]);
+      ctx.queueSize.set(2);
+      resolveRestore([backupDuplicate, backupOnlyAction]);
+      await flushQueueBackupRestore();
+
+      expect(ctx.pendingActions().map(action => action.id)).toEqual([
+        'local-before-restore',
+        'foreground-during-restore',
+        'backup-only-action',
+      ]);
+      expect(ctx.queueSize()).toBe(3);
+    });
+
+    it('loadQueueFromStorage should preserve foreground updates to existing actions while IndexedDB restore is pending', async () => {
+      const localAction = createMockAction({
+        id: 'local-action-before-restore-update',
+        operationId: '22222222-2222-4222-8222-222222222222',
+        retryCount: 0,
+        syncState: 'pending_sync',
+        localCommittedAt: 100,
+      });
+      const foregroundUpdatedAction = {
+        ...localAction,
+        retryCount: 4,
+        syncState: 'retry_scheduled' as const,
+        localCommittedAt: 200,
+      };
+      const staleBackupAction = createMockAction({
+        id: 'stale-backup-copy',
+        operationId: '22222222-2222-4222-8222-222222222222',
+        retryCount: 0,
+        syncState: 'pending_sync',
+        localCommittedAt: 100,
+      });
+      let resolveRestore: (queue: QueuedAction[]) => void = () => {};
+      const restorePromise = new Promise<QueuedAction[]>((resolve) => {
+        resolveRestore = resolve;
+      });
+      localStorage.setItem(
+        `${LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY}.user-a`,
+        JSON.stringify([localAction])
+      );
+      mockQueueBackupService.restoreQueue.mockReturnValueOnce(restorePromise);
+
+      service.loadQueueFromStorage();
+      expect(ctx.pendingActions()).toEqual([expect.objectContaining({ retryCount: 0 })]);
+
+      ctx.pendingActions.set([foregroundUpdatedAction]);
+      ctx.queueSize.set(1);
+      resolveRestore([staleBackupAction]);
+      await flushQueueBackupRestore();
+
+      expect(ctx.pendingActions()).toEqual([
+        expect.objectContaining({
+          id: 'local-action-before-restore-update',
+          operationId: '22222222-2222-4222-8222-222222222222',
+          retryCount: 4,
+          syncState: 'retry_scheduled',
+          localCommittedAt: 200,
+        }),
+      ]);
+      expect(ctx.queueSize()).toBe(1);
+    });
+
+    it('loadQueueFromStorage should isolate rejected IndexedDB backup restore', async () => {
+      const restoreError = new Error('idb restore failed');
+      mockQueueBackupService.restoreQueue.mockRejectedValueOnce(restoreError);
+
+      service.loadQueueFromStorage();
+      await flushQueueBackupRestore();
+
+      expect(mockLoggerCategory.warn).toHaveBeenCalledWith(
+        'IndexedDB 队列备份恢复失败，保留当前队列视图',
+        expect.objectContaining({ ownerUserId: 'user-a', error: restoreError }),
+      );
+      expect(ctx.pendingActions()).toEqual([]);
+      expect(ctx.queueSize()).toBe(0);
+    });
+
+    it('loadQueueFromStorage should recover interrupted syncing actions as pending_sync', () => {
+      const action = createMockAction({
+        id: 'interrupted-syncing-action',
+        syncState: 'syncing',
+      });
+      localStorage.setItem(
+        `${LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY}.user-a`,
+        JSON.stringify([action])
+      );
+
+      service.loadQueueFromStorage();
+
+      expect(ctx.pendingActions()[0].syncState).toBe('pending_sync');
     });
 
     it('loadQueueFromStorage should ignore another owner scoped queue', () => {
@@ -454,11 +519,115 @@ describe('ActionQueueStorageService', () => {
       expect(localStorage.getItem(`${LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY}.user-a`)).toContain('scoped-user-action');
     });
 
+    it('saveQueueToStorage should enter escape mode when IndexedDB quota fallback rejects', async () => {
+      const originalLocalStorage = globalThis.localStorage;
+      const scopedKey = `${LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY}.user-a`;
+      const storageData = new Map<string, string>();
+      const quotaStorage = {
+        getItem: (key: string) => storageData.get(key) ?? null,
+        setItem: (key: string, value: string) => {
+          if (key === scopedKey) {
+            throw new DOMException('quota exceeded', 'QuotaExceededError');
+          }
+          storageData.set(key, String(value));
+        },
+        removeItem: (key: string) => {
+          storageData.delete(key);
+        },
+        clear: () => {
+          storageData.clear();
+        },
+        key: (index: number) => Array.from(storageData.keys())[index] ?? null,
+        get length() {
+          return storageData.size;
+        },
+      } as Storage;
+      const queuedAction = createMockAction({ id: 'quota-backup-reject' });
+      const backupError = new Error('idb backup failed');
+      const storageFailureCallback = vi.fn();
+
+      Object.defineProperty(globalThis, 'localStorage', {
+        value: quotaStorage,
+        configurable: true,
+        writable: true,
+      });
+
+      try {
+        ctx.pendingActions.set([queuedAction]);
+        service.onStorageFailure(storageFailureCallback);
+        mockQueueBackupService.backupQueue.mockRejectedValueOnce(backupError);
+
+        service.saveQueueToStorage();
+        await flushQueueBackupRestore();
+
+        expect(mockLoggerCategory.warn).toHaveBeenCalledWith(
+          'IndexedDB 队列备份失败，进入存储逃生模式',
+          expect.objectContaining({ ownerUserId: 'user-a', error: backupError }),
+        );
+        expect(service.storageFailure()).toBe(true);
+        expect(service.queueFrozen()).toBe(true);
+        expect(service.queueFreezeReason()).toBe('storage_failure');
+        expect(storageFailureCallback).toHaveBeenCalledWith({
+          queue: [queuedAction],
+          deadLetter: [],
+        });
+      } finally {
+        Object.defineProperty(globalThis, 'localStorage', {
+          value: originalLocalStorage,
+          configurable: true,
+          writable: true,
+        });
+      }
+    });
+
     it('loadQueueFromStorage should handle corrupted data gracefully', () => {
       localStorage.setItem(`${LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY}.user-a`, '{invalid json}');
 
       expect(() => service.loadQueueFromStorage()).not.toThrow();
       expect(mockLoggerCategory.warn).toHaveBeenCalled();
+    });
+
+    it('loadQueueFromStorage should freeze instead of treating corrupt local queue with no backup as empty', async () => {
+      const scopedKey = `${LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY}.user-a`;
+      const corruptedSnapshot = '{invalid json}';
+      const storageFailureCallback = vi.fn();
+      localStorage.setItem(scopedKey, corruptedSnapshot);
+      mockQueueBackupService.restoreQueue.mockResolvedValueOnce(null);
+      service.onStorageFailure(storageFailureCallback);
+
+      service.loadQueueFromStorage();
+      await flushQueueBackupRestore();
+
+      expect(mockQueueBackupService.restoreQueue).toHaveBeenCalledWith('user-a', expect.any(Function));
+      expect(service.storageFailure()).toBe(true);
+      expect(service.queueFrozen()).toBe(true);
+      expect(service.queueFreezeReason()).toBe('storage_failure');
+      expect(storageFailureCallback).toHaveBeenCalledWith({
+        queue: [],
+        deadLetter: [],
+      });
+      expect(localStorage.getItem(scopedKey)).toBe(corruptedSnapshot);
+      expect(mockLoggerCategory.warn).toHaveBeenCalledWith(
+        'owner-scoped 队列快照损坏且 IndexedDB 备份不可用，已冻结队列写入避免静默丢失',
+        expect.objectContaining({
+          ownerUserId: 'user-a',
+          storageKey: scopedKey,
+        }),
+      );
+    });
+
+    it('loadQueueFromStorage should accept an empty IndexedDB backup record for a corrupt local mirror', async () => {
+      const scopedKey = `${LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY}.user-a`;
+      localStorage.setItem(scopedKey, '{invalid json}');
+      mockQueueBackupService.restoreQueue.mockResolvedValueOnce([]);
+
+      service.loadQueueFromStorage();
+      await flushQueueBackupRestore();
+
+      expect(service.storageFailure()).toBe(false);
+      expect(service.queueFrozen()).toBe(false);
+      expect(ctx.pendingActions()).toEqual([]);
+      expect(ctx.queueSize()).toBe(0);
     });
 
     it('saveDeadLetterToStorage should persist dead letter queue', () => {
@@ -471,355 +640,102 @@ describe('ActionQueueStorageService', () => {
       expect(parsed).toHaveLength(1);
     });
 
-    it('saveDeadLetterToStorage should not delete untouched legacy global dead-letter queue for signed-in owners', () => {
-      localStorage.setItem(LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY, JSON.stringify([
-        {
-          action: createMockAction({ id: 'legacy-dead-letter' }),
-          failedAt: new Date().toISOString(),
-          reason: 'legacy',
+    it('saveDeadLetterToStorage should freeze and expose escape data when dead-letter persistence fails', () => {
+      const originalLocalStorage = globalThis.localStorage;
+      const storageData = new Map<string, string>();
+      const failingStorage = {
+        getItem: (key: string) => storageData.get(key) ?? null,
+        setItem: (key: string, value: string) => {
+          if (key === `${LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY}.user-a`) {
+            throw new DOMException('quota exceeded', 'QuotaExceededError');
+          }
+          storageData.set(key, String(value));
         },
-      ]));
+        removeItem: (key: string) => {
+          storageData.delete(key);
+        },
+        clear: () => {
+          storageData.clear();
+        },
+        key: (index: number) => Array.from(storageData.keys())[index] ?? null,
+        get length() {
+          return storageData.size;
+        },
+      } as Storage;
+      const storageFailureCallback = vi.fn();
 
-      service.moveToDeadLetter(createMockAction({ id: 'scoped-dead-letter' }), 'scoped');
-
-      expect(localStorage.getItem(LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY)).toContain('legacy-dead-letter');
-      expect(localStorage.getItem(`${LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY}.user-a`)).toContain('scoped-dead-letter');
-    });
-
-    it('loadDeadLetterFromStorage should restore dead letter queue with TTL filtering', () => {
-      const recentItem: DeadLetterItem = {
-        action: createMockAction(),
-        failedAt: new Date().toISOString(),
-        reason: 'recent',
-      };
-      const expiredItem: DeadLetterItem = {
-        action: createMockAction(),
-        failedAt: new Date(Date.now() - LOCAL_QUEUE_CONFIG.DEAD_LETTER_TTL - 1000).toISOString(),
-        reason: 'expired',
-      };
-
-      localStorage.setItem(
-        `${LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY}.user-a`,
-        JSON.stringify([recentItem, expiredItem])
-      );
-
-      service.loadDeadLetterFromStorage();
-
-      // Only the recent item should survive TTL filtering
-      expect(service.deadLetterQueue().length).toBe(1);
-      expect(service.deadLetterQueue()[0].reason).toBe('recent');
-    });
-
-    it('loadDeadLetterFromStorage should quarantine signed-in legacy global dead-letter into unknown-owner bucket', () => {
-      const legacyDeadLetter: DeadLetterItem = {
-        action: createMockAction({ id: 'legacy-global-dead-letter' }),
-        failedAt: new Date().toISOString(),
-        reason: 'legacy failed',
-      };
-      localStorage.setItem(LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY, JSON.stringify([legacyDeadLetter]));
-
-      service.loadDeadLetterFromStorage();
-
-      expect(service.deadLetterQueue()).toEqual([]);
-      expect(localStorage.getItem(`${LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY}.user-a`)).toBeNull();
-      expect(localStorage.getItem(LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY)).toBeNull();
-    });
-
-    it('loadDeadLetterFromStorage should quarantine legacy global dead-letter even for local-user', () => {
-      currentUserId.set(AUTH_CONFIG.LOCAL_MODE_USER_ID);
-      const legacyDeadLetter: DeadLetterItem = {
-        action: createMockAction({ id: 'legacy-local-dead-letter' }),
-        failedAt: new Date().toISOString(),
-        reason: 'legacy local failed',
-      };
-      localStorage.setItem(LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY, JSON.stringify([legacyDeadLetter]));
-
-      service.loadDeadLetterFromStorage();
-
-      expect(service.deadLetterQueue()).toEqual([]);
-      expect(localStorage.getItem(`${LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY}.${AUTH_CONFIG.LOCAL_MODE_USER_ID}`)).toBeNull();
-      expect(localStorage.getItem(LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY)).toBeNull();
-    });
-  });
-
-  // ==================== 重试逻辑 ====================
-
-  describe('handleRetry', () => {
-    it('should move business errors directly to dead letter queue', () => {
-      const action = createMockAction({ retryCount: 0 });
-
-      const result = service.handleRetry(action, 'not found');
-
-      expect(result).toBe('dead-letter');
-      expect(service.hasDeadLetters()).toBe(true);
-    });
-
-    it('should move permission errors directly to dead letter queue', () => {
-      const action = createMockAction({ retryCount: 0 });
-
-      const result = service.handleRetry(action, 'unauthorized');
-
-      expect(result).toBe('dead-letter');
-      expect(service.hasDeadLetters()).toBe(true);
-    });
-
-    it('should move localized auth-expired errors directly to dead letter queue', () => {
-      const action = createMockAction({ retryCount: 0 });
-
-      const result = service.handleRetry(action, 'SYNC_AUTH_EXPIRED | 登录已过期，请重新登录 | [AuthError:42501]');
-
-      expect(result).toBe('dead-letter');
-      expect(service.hasDeadLetters()).toBe(true);
-    });
-
-    it('should retry on network errors when under max retries', () => {
-      const action = createMockAction({ retryCount: 0 });
-      ctx.pendingActions.set([action]);
-
-      const result = service.handleRetry(action, 'Network timeout');
-
-      expect(result).toBe('retry');
-      expect(service.hasDeadLetters()).toBe(false);
-    });
-
-    it('should move to dead letter when max retries exceeded', () => {
-      const action = createMockAction({
-        retryCount: LOCAL_QUEUE_CONFIG.MAX_RETRIES,
+      Object.defineProperty(globalThis, 'localStorage', {
+        value: failingStorage,
+        configurable: true,
+        writable: true,
       });
 
-      const result = service.handleRetry(action, 'Network timeout');
+      try {
+        const action = createMockAction({ id: 'dead-letter-save-failure' });
+        service.onStorageFailure(storageFailureCallback);
 
-      expect(result).toBe('dead-letter');
-      expect(service.hasDeadLetters()).toBe(true);
+        service.moveToDeadLetter(action, 'quota');
+
+        expect(service.queueFrozen()).toBe(true);
+        expect(service.queueFreezeReason()).toBe('storage_failure');
+        expect(storageFailureCallback).toHaveBeenCalledWith({
+          queue: [],
+          deadLetter: [
+            expect.objectContaining({
+              action: expect.objectContaining({
+                id: action.id,
+                syncState: 'dead_letter',
+              }),
+            }),
+          ],
+        });
+        expect(globalThis.localStorage.getItem(`${LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY}.user-a`)).toBeNull();
+      } finally {
+        Object.defineProperty(globalThis, 'localStorage', {
+          value: originalLocalStorage,
+          configurable: true,
+          writable: true,
+        });
+      }
     });
 
-    it('should increment retry count on retriable errors', () => {
-      const action = createMockAction({ retryCount: 1 });
-      ctx.pendingActions.set([action]);
-
-      service.handleRetry(action, 'Network timeout');
-
-      const updated = ctx.pendingActions().find(a => a.id === action.id);
-      expect(updated?.retryCount).toBe(2);
+    registerActionQueueStorageOwnerSettlementSpecs({
+      getService: () => service,
+      createMockAction,
+      getCurrentUserId: () => currentUserId,
+      backupDeadLetters: (ownerUserId, items) =>
+        mockQueueBackupService.backupDeadLetters(items, ownerUserId),
     });
 
-    it('should defer browser-suspended errors without consuming retry budget', () => {
-      const action = createMockAction({ retryCount: 1 });
-      ctx.pendingActions.set([action]);
-      const scheduleRetrySpy = vi.spyOn(service, 'scheduleRetry');
-
-      const result = service.handleRetry(action, {
-        code: 'SYNC_OFFLINE',
-        message: '浏览器恢复连接中，请稍后重试',
-        details: {
-          reason: 'browser-network-suspended',
-          resumeDelayMs: 321,
-        },
-      } as never);
-
-      expect(result).toBe('retry');
-      expect(scheduleRetrySpy).toHaveBeenCalledWith(321);
-      expect(service.hasDeadLetters()).toBe(false);
-      expect(ctx.pendingActions().find(a => a.id === action.id)?.retryCount).toBe(1);
-    });
-
-    it('should defer flattened browser-suspended error strings without consuming retry budget', () => {
-      const action = createMockAction({ retryCount: LOCAL_QUEUE_CONFIG.MAX_RETRIES });
-      ctx.pendingActions.set([action]);
-      const scheduleRetrySpy = vi.spyOn(service, 'scheduleRetry');
-
-      const result = service.handleRetry(action, 'SYNC_OFFLINE | 浏览器恢复连接中，请稍后重试');
-
-      expect(result).toBe('retry');
-      expect(scheduleRetrySpy).toHaveBeenCalled();
-      expect(service.hasDeadLetters()).toBe(false);
-      expect(ctx.pendingActions().find(a => a.id === action.id)?.retryCount).toBe(LOCAL_QUEUE_CONFIG.MAX_RETRIES);
-    });
-
-    it('should defer partial retry handoff errors without consuming retry budget', () => {
-      const action = createMockAction({ retryCount: LOCAL_QUEUE_CONFIG.MAX_RETRIES });
-      ctx.pendingActions.set([action]);
-      const scheduleRetrySpy = vi.spyOn(service, 'scheduleRetry');
-
-      const result = service.handleRetry(action, {
-        code: 'SYNC_RETRY_HANDOFF_PENDING',
-        message: 'project batch sync partially delegated; some failures did not enter retry queue',
-        details: {
-          reason: 'partial-retry-handoff',
-          retryAfterMs: 432,
-        },
-      } as never);
-
-      expect(result).toBe('retry');
-      expect(scheduleRetrySpy).toHaveBeenCalledWith(432);
-      expect(service.hasDeadLetters()).toBe(false);
-      expect(ctx.pendingActions().find(a => a.id === action.id)?.retryCount).toBe(LOCAL_QUEUE_CONFIG.MAX_RETRIES);
-    });
-
-    it('should defer auth-pending errors without consuming retry budget', () => {
-      const action = createMockAction({ retryCount: LOCAL_QUEUE_CONFIG.MAX_RETRIES });
-      ctx.pendingActions.set([action]);
-      const scheduleRetrySpy = vi.spyOn(service, 'scheduleRetry');
-
-      const result = service.handleRetry(action, {
-        code: 'SYNC_AUTH_PENDING',
-        message: '认证状态尚未就绪，请稍后重试',
-        details: {
-          reason: 'auth-pending',
-        },
-      } as never);
-
-      expect(result).toBe('retry');
-      expect(scheduleRetrySpy).toHaveBeenCalled();
-      expect(service.hasDeadLetters()).toBe(false);
-      expect(ctx.pendingActions().find(a => a.id === action.id)?.retryCount).toBe(LOCAL_QUEUE_CONFIG.MAX_RETRIES);
+    registerActionQueueStorageDeadLetterRestoreSpecs({
+      getService: () => service,
+      createMockAction,
+      setCurrentUserId: userId => currentUserId.set(userId),
+      backupDeadLetters: (ownerUserId, items) =>
+        mockQueueBackupService.backupDeadLetters(items, ownerUserId),
+      flushBackupRestore: flushQueueBackupRestore,
     });
   });
 
-  // ==================== 辅助方法 ====================
-
-  describe('helper methods', () => {
-    it('getActionDescription should return human-readable description', () => {
-      const action = createMockAction({ type: 'create', entityType: 'task' });
-      expect(service.getActionDescription(action)).toContain('任务');
-    });
-
-    it('getActionLabel should return human-readable label', () => {
-      const action = createMockAction({ type: 'update', entityType: 'project' });
-      expect(service.getActionLabel(action)).toContain('项目');
-    });
+  registerActionQueueStorageRetrySpecs({
+    getService: () => service,
+    getContext: () => ctx,
+    createMockAction,
+    mockLoggerCategory,
+    mockSentryLazyLoaderService,
+    mockToastService,
   });
 
   // ==================== pauseDependentActions ====================
 
-  describe('pauseDependentActions', () => {
-    it('should log warning when dependent actions exist', () => {
-      const queue: QueuedAction[] = [
-        createMockAction({ type: 'update', entityType: 'task', entityId: 'task-1' }),
-        createMockAction({ type: 'delete', entityType: 'task', entityId: 'task-1' }),
-      ];
-
-      service.pauseDependentActions('task', 'task-1', queue);
-
-      expect(mockLoggerCategory.warn).toHaveBeenCalled();
-      expect(mockSentryLazyLoaderService.captureMessage).toHaveBeenCalled();
-    });
-
-    it('should not log when there are no dependent actions', () => {
-      const queue: QueuedAction[] = [
-        createMockAction({ type: 'create', entityType: 'task', entityId: 'task-1' }),
-      ];
-
-      service.pauseDependentActions('task', 'task-1', queue);
-
-      // create type is excluded from dependents
-      expect(mockSentryLazyLoaderService.captureMessage).not.toHaveBeenCalled();
-    });
-
-    it('should show toast when critical actions are blocked', () => {
-      const queue: QueuedAction[] = [
-        createMockAction({
-          type: 'update',
-          entityType: 'task',
-          entityId: 'task-1',
-          priority: 'critical',
-        }),
-      ];
-
-      service.pauseDependentActions('task', 'task-1', queue);
-
-      expect(mockToastService.warning).toHaveBeenCalled();
-    });
-  });
-
-  // ==================== 网络监听 / 重置 ====================
-
-  describe('network and reset', () => {
-    it('should track online status', () => {
-      service.isOnline = false;
-      expect(service.isOnline).toBe(false);
-
-      service.isOnline = true;
-      expect(service.isOnline).toBe(true);
-    });
-
-    it('reset should clear all state', () => {
-      service.moveToDeadLetter(createMockAction(), 'reason');
-      expect(service.hasDeadLetters()).toBe(true);
-
-      service.reset();
-
-      expect(service.hasDeadLetters()).toBe(false);
-      expect(service.deadLetterSize()).toBe(0);
-      expect(service.storageFailure()).toBe(false);
-      expect(service.isOnline).toBe(true);
-    });
-  });
-
-  // ==================== Task 2.1 新增测试 ====================
-
-  describe('escape export（逃生导出）', () => {
-    it('exportPendingActionsAsJson 应返回有效 JSON', () => {
-      const action1 = createMockAction({ id: 'a1' });
-      const action2 = createMockAction({ id: 'a2' });
-      ctx.pendingActions.set([action1, action2]);
-
-      const result = service.exportPendingActionsAsJson();
-      const parsed = JSON.parse(result);
-
-      expect(parsed).toHaveProperty('exportedAt');
-      expect(parsed).toHaveProperty('pendingActions');
-      expect(parsed.pendingActions).toHaveLength(2);
-      expect(parsed.metadata.source).toBe('action-queue-escape');
-    });
-
-    it('exportPendingActionsAsJson 空队列也应返回有效 JSON', () => {
-      ctx.pendingActions.set([]);
-
-      const result = service.exportPendingActionsAsJson();
-      const parsed = JSON.parse(result);
-
-      expect(parsed.pendingActions).toHaveLength(0);
-    });
-  });
-
-  describe('frozen retry timer（冻结重试计时器）', () => {
-    it('freezeQueueWrites 应启动重试计时器', () => {
-      vi.useFakeTimers();
-
-      (service as any).freezeQueueWrites('test_pressure');
-      expect(service.queueFrozen()).toBe(true);
-
-      // 验证计时器字段已设置
-      const timerField = (service as unknown as { frozenRetryTimer: ReturnType<typeof setTimeout> | null }).frozenRetryTimer;
-      expect(timerField).not.toBeNull();
-
-      vi.useRealTimers();
-    });
-
-    it('clearQueueFreeze 应停止重试计时器', () => {
-      vi.useFakeTimers();
-
-      (service as any).freezeQueueWrites('test_pressure');
-      (service as any).clearQueueFreeze();
-
-      const timerField = (service as unknown as { frozenRetryTimer: ReturnType<typeof setTimeout> | null }).frozenRetryTimer;
-      expect(timerField).toBeNull();
-      expect(service.queueFrozen()).toBe(false);
-
-      vi.useRealTimers();
-    });
-
-    it('reset 应清理冻结重试计时器', () => {
-      vi.useFakeTimers();
-
-      (service as any).freezeQueueWrites('test_pressure');
-      service.reset();
-
-      const timerField = (service as unknown as { frozenRetryTimer: ReturnType<typeof setTimeout> | null }).frozenRetryTimer;
-      expect(timerField).toBeNull();
-
-      vi.useRealTimers();
-    });
+  registerActionQueueStorageTailSpecs({
+    getService: () => service,
+    getContext: () => ctx,
+    createMockAction,
+    mockLoggerCategory,
+    mockSentryLazyLoaderService,
+    mockToastService,
   });
 });
+
+registerActionQueueStoragePureHelperSpecs(createMockAction);

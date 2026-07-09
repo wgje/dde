@@ -1,12 +1,12 @@
 /**
  * DynamicModalService - 指令式动态模态框渲染服务
- * 
+ *
  * 核心设计理念：
  * - 不再使用 *ngIf 触发模板显隐（"开关式"的陈旧思维）
  * - 调用 open(ComponentType) 直接渲染内容到 DOM
  * - 关闭时销毁组件，DOM 树保持干净
  * - 弹窗存在时才渲染节点，关闭即销毁
- * 
+ *
  * 使用示例：
  * ```typescript
  * const result = await dynamicModal.open(DeleteConfirmModalComponent, {
@@ -75,7 +75,21 @@ interface ModalStackItem {
   config: ModalConfig;
   escapeListener?: (e: KeyboardEvent) => void;
   /** 订阅清理数组（兼容 RxJS Subscription 和 Angular OutputRefSubscription） */
-  subscriptions: { unsubscribe(): void }[];
+  subscriptions: ModalSubscription[];
+}
+
+type ModalSubscription = { unsubscribe(): void };
+type SubscribableOutput<T = unknown> = {
+  subscribe?: (fn: (value: T) => void) => ModalSubscription;
+};
+type ResolvedModalConfig<T = unknown> =
+  Required<Omit<ModalConfig<T>, 'data' | 'containerSelector' | 'inputs' | 'outputs'>>
+  & Pick<ModalConfig<T>, 'data' | 'containerSelector' | 'inputs' | 'outputs'>;
+
+interface ModalShell {
+  backdropElement?: HTMLElement;
+  containerElement: HTMLElement;
+  contentWrapper: HTMLElement;
 }
 
 /** 默认配置 */
@@ -88,7 +102,7 @@ const DEFAULT_CONFIG: Required<Omit<ModalConfig, 'data' | 'containerSelector' | 
 
 /**
  * 动态模态框服务
- * 
+ *
  * 职责：
  * - 动态创建和销毁模态框组件
  * - 管理模态框栈（支持多层嵌套）
@@ -102,33 +116,33 @@ export class DynamicModalService {
   private injector = inject(EnvironmentInjector);
   private document = inject(DOCUMENT);
   private destroyRef = inject(DestroyRef);
-  
+
   /** 模态框栈 */
   private modalStack = signal<ModalStackItem[]>([]);
-  
+
   /** 当前打开的模态框数量 */
   readonly stackDepth = computed(() => this.modalStack().length);
-  
+
   /** 是否有任何模态框打开 */
   readonly hasOpenModal = computed(() => this.modalStack().length > 0);
-  
+
   /** 模态框 ID 计数器 */
   private idCounter = 0;
-  
+
   constructor() {
     // 清理：服务销毁时关闭所有模态框
     this.destroyRef.onDestroy(() => {
       this.closeAll();
     });
   }
-  
+
   /**
    * 打开模态框（指令式 API）
-   * 
+   *
    * @param component 要渲染的组件类型
    * @param config 模态框配置（包含传递给组件的数据）
    * @returns ModalRef 包含 close 方法和 result Promise
-   * 
+   *
    * 组件约定：
    * - 组件应该注入 MODAL_DATA 获取传入数据
    * - 组件应该注入 ModalRef 来关闭自身
@@ -138,23 +152,61 @@ export class DynamicModalService {
     component: Type<C>,
     config: ModalConfig<D> = {}
   ): ModalRef<R> {
-    const mergedConfig: Required<Omit<ModalConfig<D>, 'data' | 'containerSelector' | 'inputs' | 'outputs'>> & Pick<ModalConfig<D>, 'data' | 'containerSelector' | 'inputs' | 'outputs'> = {
+    const mergedConfig = this.mergeConfig(config);
+    const modalId = `modal-${++this.idCounter}`;
+    const { resultPromise, resolvePromise } = this.createResultPromise<R>();
+    const shell = this.createModalShell(modalId, mergedConfig);
+    const closeModal = (result?: R) => {
+      this.closeById(modalId, result);
+    };
+
+    const modalRefToken = this.createModalRefToken(closeModal, resultPromise);
+    const componentRef = this.createModalComponent(component, shell.contentWrapper, config.data, modalRefToken);
+    modalRefToken.componentRef = componentRef as ComponentRef<unknown>;
+    this.applyComponentInputs(componentRef, config.inputs);
+    const subscriptions = this.subscribeComponentOutputs(componentRef, config.outputs, closeModal);
+    this.appRef.attachView(componentRef.hostView);
+
+    const escapeListener = this.registerEscapeListener(mergedConfig, modalId, closeModal);
+    this.addToStack(modalId, componentRef, shell, mergedConfig, resolvePromise, escapeListener, subscriptions);
+    this.focusFirstElementOnNextFrame(shell.contentWrapper);
+
+    return modalRefToken;
+  }
+
+  private mergeConfig<D>(config: ModalConfig<D>): ResolvedModalConfig<D> {
+    return {
       ...DEFAULT_CONFIG,
       ...config
     };
-    
-    const modalId = `modal-${++this.idCounter}`;
-    
-    // 创建结果 Promise
-    let resolvePromise: (result: R) => void;
+  }
+
+  private createResultPromise<R>(): {
+    resolvePromise: (result: R) => void;
+    resultPromise: Promise<R>;
+  } {
+    let resolvePromise!: (result: R) => void;
     const resultPromise = new Promise<R>((resolve) => {
       resolvePromise = resolve;
     });
-    
-    // 获取或创建容器
-    const container = this.getOrCreateContainer(mergedConfig.containerSelector);
-    
-    // 创建模态框容器元素
+    return { resolvePromise, resultPromise };
+  }
+
+  private createModalShell<D>(modalId: string, config: ResolvedModalConfig<D>): ModalShell {
+    const container = this.getOrCreateContainer(config.containerSelector);
+    const containerElement = this.createModalContainer(modalId, config.zIndex);
+    const backdropElement = this.createBackdropElement(modalId, config);
+    const contentWrapper = this.createContentWrapper();
+
+    if (backdropElement) {
+      containerElement.appendChild(backdropElement);
+    }
+    containerElement.appendChild(contentWrapper);
+    container.appendChild(containerElement);
+    return { backdropElement, containerElement, contentWrapper };
+  }
+
+  private createModalContainer(modalId: string, zIndex: number): HTMLElement {
     const modalContainer = this.document.createElement('div');
     modalContainer.id = modalId;
     modalContainer.className = 'dynamic-modal-container';
@@ -164,215 +216,253 @@ export class DynamicModalService {
       display: flex;
       align-items: center;
       justify-content: center;
-      z-index: ${mergedConfig.zIndex + this.modalStack().length};
+      z-index: ${zIndex + this.modalStack().length};
     `;
-    
-    // 创建遮罩层
-    let backdropElement: HTMLElement | undefined;
-    if (mergedConfig.hasBackdrop) {
-      backdropElement = this.document.createElement('div');
-      backdropElement.className = 'dynamic-modal-backdrop';
-      backdropElement.style.cssText = `
-        position: absolute;
-        inset: 0;
-        background-color: rgba(0, 0, 0, 0.5);
-        transition: opacity 150ms ease-out;
-      `;
-      
-      if (mergedConfig.closeOnBackdropClick) {
-        backdropElement.addEventListener('click', () => {
-          this.closeById(modalId);
-        });
-      }
-      
-      modalContainer.appendChild(backdropElement);
+    return modalContainer;
+  }
+
+  private createBackdropElement<D>(modalId: string, config: ResolvedModalConfig<D>): HTMLElement | undefined {
+    if (!config.hasBackdrop) {
+      return undefined;
     }
-    
-    // 创建内容包装器
+
+    const backdropElement = this.document.createElement('div');
+    backdropElement.className = 'dynamic-modal-backdrop';
+    backdropElement.style.cssText = `
+      position: absolute;
+      inset: 0;
+      background-color: rgba(0, 0, 0, 0.5);
+      transition: opacity 150ms ease-out;
+    `;
+
+    if (config.closeOnBackdropClick) {
+      backdropElement.addEventListener('click', () => {
+        this.closeById(modalId);
+      });
+    }
+    return backdropElement;
+  }
+
+  private createContentWrapper(): HTMLElement {
     const contentWrapper = this.document.createElement('div');
     contentWrapper.className = 'dynamic-modal-content';
     contentWrapper.style.cssText = `
       position: relative;
       z-index: 1;
     `;
-    modalContainer.appendChild(contentWrapper);
-    
-    // 将容器添加到 DOM
-    container.appendChild(modalContainer);
-    
-    // 创建关闭函数
-    const closeModal = (result?: R) => {
-      this.closeById(modalId, result);
-    };
-    
-    // 创建自定义注入器，注入数据和 ModalRef
-    const modalRefToken = {
+    return contentWrapper;
+  }
+
+  private createModalRefToken<R>(closeModal: (result?: R) => void, resultPromise: Promise<R>): ModalRef<R> {
+    return {
       close: closeModal,
       result: resultPromise,
-      componentRef: null as unknown as ComponentRef<C>
+      componentRef: null as unknown as ComponentRef<unknown>
     };
-    
+  }
+
+  private createModalComponent<C, D, R>(
+    component: Type<C>,
+    hostElement: HTMLElement,
+    data: D | undefined,
+    modalRefToken: ModalRef<R>,
+  ): ComponentRef<C> {
     const customInjector = Injector.create({
       providers: [
-        { provide: MODAL_DATA, useValue: config.data },
+        { provide: MODAL_DATA, useValue: data },
         { provide: MODAL_REF, useValue: modalRefToken }
       ],
       parent: this.injector
     });
-    
-    // 动态创建组件
-    const componentRef = createComponent(component, {
+
+    return createComponent(component, {
       environmentInjector: this.injector,
       elementInjector: customInjector,
-      hostElement: contentWrapper
+      hostElement
     });
-    
-    // 更新 modalRefToken 的 componentRef
-    modalRefToken.componentRef = componentRef;
-    
-    // 设置组件输入（通过 setInput API）
-    if (config.inputs) {
-      for (const [key, value] of Object.entries(config.inputs)) {
-        componentRef.setInput(key, value);
+  }
+
+  private applyComponentInputs<C>(componentRef: ComponentRef<C>, inputs: Record<string, unknown> | undefined): void {
+    if (!inputs) {
+      return;
+    }
+
+    for (const [key, value] of Object.entries(inputs)) {
+      componentRef.setInput(key, value);
+    }
+  }
+
+  private subscribeComponentOutputs<C, R>(
+    componentRef: ComponentRef<C>,
+    outputs: ModalConfig['outputs'] | undefined,
+    closeModal: (result?: R) => void,
+  ): ModalSubscription[] {
+    const subscriptions: ModalSubscription[] = [];
+    this.subscribeConfiguredOutputs(componentRef, outputs, closeModal, subscriptions);
+    this.subscribeDefaultResultOutput(componentRef, outputs, 'close', closeModal, subscriptions);
+    this.subscribeDefaultResultOutput(componentRef, outputs, 'confirm', closeModal, subscriptions);
+    return subscriptions;
+  }
+
+  private subscribeConfiguredOutputs<C, R>(
+    componentRef: ComponentRef<C>,
+    outputs: ModalConfig['outputs'] | undefined,
+    closeModal: (result?: R) => void,
+    subscriptions: ModalSubscription[],
+  ): void {
+    if (!outputs) {
+      return;
+    }
+
+    const instance = componentRef.instance as Record<string, unknown>;
+    for (const [eventName, handler] of Object.entries(outputs)) {
+      const output = instance[eventName] as SubscribableOutput | undefined;
+      if (!output?.subscribe) {
+        continue;
       }
+
+      const subscription = eventName === 'close'
+        ? output.subscribe((value: unknown) => {
+          handler(value);
+          closeModal(value as R);
+        })
+        : output.subscribe(handler);
+      subscriptions.push(subscription);
     }
-    
-    // 订阅收集器（兼容 EventEmitter 和 output() 的 OutputEmitterRef）
-    const subscriptions: { unsubscribe(): void }[] = [];
-    
-    // 订阅配置中声明的输出事件
-    if (config.outputs) {
-      const inst = componentRef.instance as Record<string, unknown>;
-      for (const [eventName, handler] of Object.entries(config.outputs)) {
-        const eventEmitter = inst[eventName] as { subscribe?: (fn: (v: unknown) => void) => { unsubscribe(): void } } | undefined;
-        if (eventEmitter && typeof eventEmitter.subscribe === 'function') {
-          // 对 close 事件做特殊处理：先执行回调再关闭模态框
-          if (eventName === 'close') {
-            const sub = eventEmitter.subscribe((val: unknown) => {
-              handler(val);
-              closeModal(val as R);
-            });
-            subscriptions.push(sub);
-          } else {
-            const sub = eventEmitter.subscribe(handler);
-            subscriptions.push(sub);
-          }
-        }
+  }
+
+  private subscribeDefaultResultOutput<C, R>(
+    componentRef: ComponentRef<C>,
+    outputs: ModalConfig['outputs'] | undefined,
+    eventName: 'close' | 'confirm',
+    closeModal: (result?: R) => void,
+    subscriptions: ModalSubscription[],
+  ): void {
+    if (outputs?.[eventName]) {
+      return;
+    }
+
+    const instance = componentRef.instance as Record<string, unknown>;
+    const output = instance[eventName] as SubscribableOutput<R> | undefined;
+    if (!output?.subscribe) {
+      return;
+    }
+
+    subscriptions.push(output.subscribe((result: R) => closeModal(result)));
+  }
+
+  private registerEscapeListener<R>(
+    config: ResolvedModalConfig,
+    modalId: string,
+    closeModal: (result?: R) => void,
+  ): ((e: KeyboardEvent) => void) | undefined {
+    if (!config.closeOnEscape) {
+      return undefined;
+    }
+
+    const escapeListener = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') {
+        return;
       }
-    }
-    
-    // 如果 config.outputs 没有声明 close，仍然自动监听 close 事件
-    if (!config.outputs?.['close']) {
-      const instance = componentRef.instance as { close?: { subscribe: (fn: (result: R) => void) => { unsubscribe(): void } } };
-      if (instance.close && typeof instance.close.subscribe === 'function') {
-        const sub = instance.close.subscribe((result: R) => {
-          closeModal(result);
-        });
-        subscriptions.push(sub);
+
+      const stack = this.modalStack();
+      if (stack.length > 0 && stack[stack.length - 1].id === modalId) {
+        closeModal();
       }
-    }
-    // 如果 config.outputs 没有声明 confirm，仍然自动监听 confirm 事件
-    if (!config.outputs?.['confirm']) {
-      const instance = componentRef.instance as { confirm?: { subscribe: (fn: (data: R) => void) => { unsubscribe(): void } } };
-      if (instance.confirm && typeof instance.confirm.subscribe === 'function') {
-        const sub = instance.confirm.subscribe((data: R) => {
-          closeModal(data);
-        });
-        subscriptions.push(sub);
-      }
-    }
-    
-    // 附加到 Angular 应用
-    this.appRef.attachView(componentRef.hostView);
-    
-    // ESC 键处理
-    let escapeListener: ((e: KeyboardEvent) => void) | undefined;
-    if (mergedConfig.closeOnEscape) {
-      escapeListener = (e: KeyboardEvent) => {
-        if (e.key === 'Escape') {
-          // 只关闭栈顶的模态框
-          const stack = this.modalStack();
-          if (stack.length > 0 && stack[stack.length - 1].id === modalId) {
-            closeModal();
-          }
-        }
-      };
-      this.document.addEventListener('keydown', escapeListener);
-    }
-    
-    // 添加到栈
+    };
+    this.document.addEventListener('keydown', escapeListener);
+    return escapeListener;
+  }
+
+  private addToStack<R>(
+    modalId: string,
+    componentRef: ComponentRef<unknown>,
+    shell: ModalShell,
+    config: ResolvedModalConfig,
+    resolvePromise: (result: R) => void,
+    escapeListener: ((e: KeyboardEvent) => void) | undefined,
+    subscriptions: ModalSubscription[],
+  ): void {
     this.modalStack.update(stack => [...stack, {
       id: modalId,
       componentRef,
-      backdropElement,
-      containerElement: modalContainer,
-      resolve: resolvePromise! as (result: unknown) => void,
-      config: mergedConfig,
+      backdropElement: shell.backdropElement,
+      containerElement: shell.containerElement,
+      resolve: resolvePromise as (result: unknown) => void,
+      config,
       escapeListener,
       subscriptions
     }]);
-    
-    // 焦点管理：聚焦到模态框内第一个可聚焦元素
+  }
+
+  private focusFirstElementOnNextFrame(contentWrapper: HTMLElement): void {
     requestAnimationFrame(() => {
       const focusable = contentWrapper.querySelector<HTMLElement>(
         'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
       );
       focusable?.focus();
     });
-    
-    return {
-      close: closeModal,
-      result: resultPromise,
-      componentRef
-    };
   }
-  
+
   /**
    * 通过 ID 关闭模态框
    */
   private closeById(modalId: string, result?: unknown): void {
     const stack = this.modalStack();
     const index = stack.findIndex(item => item.id === modalId);
-    
+
     if (index === -1) return;
-    
+
     const item = stack[index];
-    
-    // 清理所有订阅
-    for (const sub of item.subscriptions) {
-      sub.unsubscribe();
-    }
-    
-    // 清理 ESC 监听器
-    if (item.escapeListener) {
-      this.document.removeEventListener('keydown', item.escapeListener);
-    }
-    
-    // 销毁组件
-    this.appRef.detachView(item.componentRef.hostView);
-    item.componentRef.destroy();
-    
-    // 移除 DOM 元素
-    item.containerElement.remove();
-    
-    // 返回结果
-    item.resolve(result);
-    
-    // 从栈中移除
+
+    // 先从栈中移除并结算结果，避免组件销毁钩子再次 close 时重入同一项。
     this.modalStack.update(s => s.filter(m => m.id !== modalId));
+    item.resolve(result);
+
+    this.cleanupModalItem(item);
   }
-  
+
+  private cleanupModalItem(item: ModalStackItem): void {
+    for (const sub of item.subscriptions) {
+      this.runModalCleanupStep(() => sub.unsubscribe());
+    }
+
+    if (item.escapeListener) {
+      this.runModalCleanupStep(() => {
+        this.document.removeEventListener('keydown', item.escapeListener as EventListener);
+      });
+    }
+
+    this.runModalCleanupStep(() => {
+      this.appRef.detachView(item.componentRef.hostView);
+    });
+    this.runModalCleanupStep(() => {
+      item.componentRef.destroy();
+    });
+    this.runModalCleanupStep(() => {
+      item.containerElement.remove();
+    });
+  }
+
+  private runModalCleanupStep(cleanup: () => void): void {
+    try {
+      cleanup();
+    } catch {
+      // Modal close must keep unwinding remaining DOM, listener and view cleanup.
+    }
+  }
+
   /**
    * 关闭栈顶模态框
    */
   close<R = unknown>(result?: R): void {
     const stack = this.modalStack();
     if (stack.length === 0) return;
-    
+
     const topModal = stack[stack.length - 1];
     this.closeById(topModal.id, result);
   }
-  
+
   /**
    * 关闭所有模态框
    */
@@ -383,7 +473,7 @@ export class DynamicModalService {
       this.closeById(stack[i].id);
     }
   }
-  
+
   /**
    * 获取或创建容器元素
    */

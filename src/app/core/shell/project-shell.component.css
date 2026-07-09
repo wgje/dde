@@ -1,0 +1,38 @@
+:host {
+  display: flex;
+  flex: 1;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+/* 文本栏折叠时内容隐藏：收起时立即隐藏，展开时延迟显示，避免内容在窄宽度下崩坏 */
+.text-col-inner {
+  opacity: 1;
+  transition: opacity 50ms ease-out 250ms;
+}
+.text-col-inner--hidden {
+  opacity: 0 !important;
+  transition: opacity 0ms ease-out 0ms;
+  pointer-events: none;
+}
+/*
+ * dock-main-content 动效改进：
+ * 1. 移除永久 will-change：常态下不需要 GPU 层，避免过渡前 composite 层污染
+ * 2. 改用 data-dock-takeover-phase 属性动态激活 will-change，仅在过渡期间启用 GPU
+ * 3. visibility 由 0ms 立即响应，去掉 delay — 原先 delay=var(--pk-shell-enter) 导致
+ *    opacity 开始渐变但 visibility 仍为 hidden，造成入场帧闪烁
+ * 4. opacity/filter 分层错开：opacity 比 filter 快 40ms，视觉上内容先现后虚化，
+ *    符合"先感知内容、再加深专注氛围"的认知节奏
+ */
+.dock-main-content {
+  transform-origin: center center;
+  backface-visibility: hidden;
+  contain: paint;
+}
+/* 仅在专注模式接管期间激活 GPU 合成层，避免常态多余层占用 */
+.dock-main-content[data-dock-takeover-phase="entering"],
+.dock-main-content[data-dock-takeover-phase="focused"],
+.dock-main-content[data-dock-takeover-phase="exiting"],
+.dock-main-content[data-dock-takeover-phase="restoring"] {
+  will-change: opacity, transform, filter;
+}

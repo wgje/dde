@@ -9,8 +9,11 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.93.2';
 // ==================== 配置 ====================
 
 const CLAMAV_API_URL = Deno.env.get('CLAMAV_API_URL') || 'http://clamav:3310';
-const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
-const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
+const SUPABASE_URL = Deno.env.get('SUPABASE_URL') ?? '';
+const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
+const SERVICE_ROLE_CLIENT_OPTIONS = {
+  auth: { autoRefreshToken: false, persistSession: false },
+} as const;
 
 // 扫描状态常量
 const SCAN_STATUS = {
@@ -37,6 +40,7 @@ interface ScanRequest {
 
 interface ScanResult {
   fileId: string;
+  fileHash?: string;
   status: string;
   threatName?: string;
   threatDescription?: string;
@@ -44,6 +48,39 @@ interface ScanResult {
   scanner: string;
   engineVersion?: string;
   signatureVersion?: string;
+}
+
+interface SupabaseQueryResult<TData = unknown> {
+  data: TData | null;
+  error: { message: string } | null;
+}
+
+interface SupabaseQueryBuilder<TData = unknown> extends PromiseLike<SupabaseQueryResult<TData>> {
+  select(columns?: string): SupabaseQueryBuilder<TData>;
+  eq(column: string, value: unknown): SupabaseQueryBuilder<TData>;
+  single<TRow = TData>(): Promise<SupabaseQueryResult<TRow>>;
+  maybeSingle<TRow = TData>(): Promise<SupabaseQueryResult<TRow>>;
+  update(values: Record<string, unknown>): SupabaseQueryBuilder<TData>;
+  upsert(values: Record<string, unknown>): Promise<SupabaseQueryResult<TData>>;
+}
+
+interface AttachmentScanStatusRow {
+  file_id: string;
+  status: string;
+  threat_name?: string | null;
+  threat_description?: string | null;
+  scanned_at?: string | null;
+  scanner?: string | null;
+  engine_version?: string | null;
+  signature_version?: string | null;
+}
+
+interface AttachmentScanHashRow {
+  file_hash?: string | null;
+}
+
+interface AttachmentScanFileIdRow {
+  file_id: string;
 }
 
 // ==================== CORS 处理 ====================
@@ -67,6 +104,7 @@ const ALLOWED_ORIGINS: string[] = (() => {
 
 /** 文件大小限制：10MB base64 编码后约 13.7MB */
 const MAX_FILE_BASE64_LENGTH = 10 * 1024 * 1024 * 1.37;
+const MAX_JSON_BODY_LENGTH = MAX_FILE_BASE64_LENGTH + 16 * 1024;
 
 /**
  * 根据请求来源返回 CORS 头
@@ -74,6 +112,7 @@ const MAX_FILE_BASE64_LENGTH = 10 * 1024 * 1024 * 1.37;
  */
 /** Vercel 预览域名项目级前缀（受控模式） */
 const VERCEL_PREVIEW_PREFIX = 'dde-';
+const ALLOW_PREVIEW_ORIGINS = Deno.env.get('ALLOW_PREVIEW_ORIGINS') === 'true';
 
 function getCorsHeaders(origin: string | null): Record<string, string> {
   let isAllowed = false;
@@ -85,11 +124,12 @@ function getCorsHeaders(origin: string | null): Record<string, string> {
       try {
         const url = new URL(origin);
         // Vercel 预览
-        if (url.hostname.startsWith(VERCEL_PREVIEW_PREFIX) && url.hostname.endsWith('.vercel.app')) {
+        if (ALLOW_PREVIEW_ORIGINS && url.protocol === 'https:'
+          && url.hostname.startsWith(VERCEL_PREVIEW_PREFIX) && url.hostname.endsWith('.vercel.app')) {
           isAllowed = true;
         }
         // Cloudflare Pages PR preview：*.nanoflow.pages.dev
-        if (!isAllowed && url.protocol === 'https:' && url.hostname.endsWith('.nanoflow.pages.dev')) {
+        if (!isAllowed && ALLOW_PREVIEW_ORIGINS && url.protocol === 'https:' && url.hostname.endsWith('.nanoflow.pages.dev')) {
           isAllowed = true;
         }
       } catch { /* 非法 origin 忽略 */ }
@@ -110,12 +150,12 @@ function getCorsHeaders(origin: string | null): Record<string, string> {
  */
 async function verifyAuth(req: Request): Promise<{ userId: string } | null> {
   const authHeader = req.headers.get('Authorization');
-  if (!authHeader) {
+  const token = authHeader?.match(/^Bearer\s+(.+)$/i)?.[1]?.trim();
+  if (!token) {
     return null;
   }
-  
-  const token = authHeader.replace('Bearer ', '');
-  const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+
+  const supabase = createServiceRoleClient();
   
   const { data: { user }, error } = await supabase.auth.getUser(token);
   if (error || !user) {
@@ -123,6 +163,79 @@ async function verifyAuth(req: Request): Promise<{ userId: string } | null> {
   }
   
   return { userId: user.id };
+}
+
+interface ServiceRoleClient {
+  auth: ReturnType<typeof createClient>['auth'];
+  from(table: string): SupabaseQueryBuilder;
+}
+
+function createServiceRoleClient(): ServiceRoleClient {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+    throw new Error('Supabase service configuration is not configured');
+  }
+
+  return createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, SERVICE_ROLE_CLIENT_OPTIONS) as unknown as ServiceRoleClient;
+}
+
+function isRequestBodyTooLarge(req: Request): boolean {
+  const contentLength = req.headers.get('content-length');
+  if (!contentLength) return false;
+  const bytes = Number.parseInt(contentLength, 10);
+  return Number.isFinite(bytes) && bytes > MAX_JSON_BODY_LENGTH;
+}
+
+class RequestBodyTooLargeError extends Error {
+  constructor() {
+    super('Request body too large');
+    this.name = 'RequestBodyTooLargeError';
+  }
+}
+
+async function readRequestTextWithLimit(req: Request, maxBytes = MAX_JSON_BODY_LENGTH): Promise<string> {
+  if (!req.body) return '';
+
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let receivedBytes = 0;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+
+      receivedBytes += value.byteLength;
+      if (receivedBytes > maxBytes) {
+        await reader.cancel().catch(() => undefined);
+        throw new RequestBodyTooLargeError();
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const combined = new Uint8Array(receivedBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    combined.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+
+  return new TextDecoder().decode(combined);
+}
+
+async function readJsonWithLimit<T>(req: Request): Promise<T> {
+  return JSON.parse(await readRequestTextWithLimit(req)) as T;
+}
+
+async function sha256HexBytes(bytes: Uint8Array): Promise<string> {
+  const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+  const digest = await crypto.subtle.digest('SHA-256', buffer);
+  return Array.from(new Uint8Array(digest))
+    .map(byte => byte.toString(16).padStart(2, '0'))
+    .join('');
 }
 
 // ==================== 主函数 ====================
@@ -137,26 +250,36 @@ serve(async (req: Request) => {
     return new Response('ok', { headers: corsHeaders });
   }
 
+  if (req.method !== 'POST') {
+    return jsonResponse({ error: 'Method not allowed', code: 'METHOD_NOT_ALLOWED' }, corsHeaders, 405);
+  }
+
+  if (isRequestBodyTooLarge(req)) {
+    return jsonResponse({ error: 'File too large (max 10MB)' }, corsHeaders, 413);
+  }
+
   try {
-    // 🔒 安全修复：添加认证检查（health 检查除外）
-    const body = await req.json() as ScanRequest;
+    const body = await readJsonWithLimit<ScanRequest>(req);
     const { action } = body;
 
-    // health 检查不需要认证（用于监控）
-    if (action === 'health') {
-      return handleHealthCheck(corsHeaders);
+    if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+      return jsonResponse({
+        error: 'Supabase service configuration is not configured',
+        code: 'SERVICE_NOT_CONFIGURED',
+      }, corsHeaders, 503);
     }
 
-    // 其他操作需要认证
+    // 所有操作都需要认证，避免匿名探测内部 ClamAV 状态
     const auth = await verifyAuth(req);
     if (!auth) {
       console.warn('🛡️ [VirusScan] Unauthorized request for action:', action);
       return jsonResponse({ error: 'Unauthorized', code: 'AUTH_REQUIRED' }, corsHeaders, 401);
     }
 
-    console.log('🛡️ [VirusScan] Authenticated user:', auth.userId.slice(0, 8) + '...', 'action:', action);
-
     switch (action) {
+      case 'health':
+        return handleHealthCheck(corsHeaders);
+
       case 'scan':
         return handleScan(body, auth.userId, corsHeaders);
       
@@ -173,6 +296,10 @@ serve(async (req: Request) => {
         return jsonResponse({ error: `Unknown action: ${action}` }, corsHeaders, 400);
     }
   } catch (error) {
+    if (error instanceof RequestBodyTooLargeError) {
+      return jsonResponse({ error: 'File too large (max 10MB)' }, corsHeaders, 413);
+    }
+
     console.error('Error processing request:', error);
     return jsonResponse({ error: 'Internal server error' }, corsHeaders, 500);
   }
@@ -205,8 +332,8 @@ async function handleHealthCheck(corsHeaders: Record<string, string>): Promise<R
 /**
  * 执行文件扫描
  */
-async function handleScan(body: ScanRequest, _userId: string, corsHeaders: Record<string, string>): Promise<Response> {
-  const { file, filename, hash, mimeType } = body;
+async function handleScan(body: ScanRequest, userId: string, corsHeaders: Record<string, string>): Promise<Response> {
+  const { file, filename, mimeType } = body;
   
   if (!file || !filename) {
     return jsonResponse({ error: 'Missing required fields: file, filename' }, corsHeaders, 400);
@@ -222,12 +349,13 @@ async function handleScan(body: ScanRequest, _userId: string, corsHeaders: Recor
   try {
     // 解码 base64 文件
     const fileBytes = Uint8Array.from(atob(file), c => c.charCodeAt(0));
+    const fileHash = await sha256HexBytes(fileBytes);
     
     // 调用 ClamAV 扫描
     const scanResult = await scanWithClamAv(fileBytes, filename);
     
     // 记录扫描结果
-    await saveScanResult(fileId, hash || '', scanResult);
+    await saveScanResult(fileId, userId, fileHash, scanResult);
     
     // SEC-C1 fix: ClamAV 失败时返回 FAILED 状态，不假装为 CLEAN
     const effectiveStatus = scanResult.status === SCAN_STATUS.FAILED
@@ -236,6 +364,7 @@ async function handleScan(body: ScanRequest, _userId: string, corsHeaders: Recor
 
     const result: ScanResult = {
       fileId,
+      fileHash,
       status: effectiveStatus,
       threatName: scanResult.virusName,
       threatDescription: scanResult.description,
@@ -248,13 +377,16 @@ async function handleScan(body: ScanRequest, _userId: string, corsHeaders: Recor
     return jsonResponse(result, corsHeaders);
   } catch (error) {
     console.error('Scan error:', error);
-    
-    // 保存失败记录
-    await saveScanResult(fileId, hash || '', {
-      infected: false,
-      status: SCAN_STATUS.FAILED,
-      error: String(error),
-    });
+
+    try {
+      await saveScanResult(fileId, userId, '', {
+        infected: false,
+        status: SCAN_STATUS.FAILED,
+        error: String(error),
+      });
+    } catch (saveError) {
+      console.error('Failed to persist failed scan result:', saveError);
+    }
     
     return jsonResponse({
       fileId,
@@ -277,15 +409,15 @@ async function handleStatusCheck(body: ScanRequest, userId: string, corsHeaders:
   }
 
   try {
-    const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+    const supabase = createServiceRoleClient();
     
     // SEC-C2 fix: 添加 user_id 过滤，防止 IDOR 越权访问
     const { data, error } = await supabase
       .from('attachment_scans')
-      .select('*')
+      .select('file_id,status,threat_name,threat_description,scanned_at,scanner,engine_version,signature_version')
       .eq('file_id', fileId)
       .eq('user_id', userId)
-      .single();
+      .single<AttachmentScanStatusRow>();
 
     if (error || !data) {
       return jsonResponse({ error: 'Scan record not found' }, corsHeaders, 404);
@@ -318,7 +450,7 @@ async function handleHashVerification(body: ScanRequest, userId: string, corsHea
   }
 
   try {
-    const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+    const supabase = createServiceRoleClient();
     
     // SEC-C2 fix: 添加 user_id 过滤
     const { data, error } = await supabase
@@ -326,7 +458,7 @@ async function handleHashVerification(body: ScanRequest, userId: string, corsHea
       .select('file_hash')
       .eq('file_id', fileId)
       .eq('user_id', userId)
-      .single();
+      .single<AttachmentScanHashRow>();
 
     if (error || !data) {
       return jsonResponse({ valid: false, error: 'File not found' }, corsHeaders);
@@ -357,26 +489,36 @@ async function handleRescan(body: ScanRequest, userId: string, corsHeaders: Reco
   }
 
   try {
-    const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+    const supabase = createServiceRoleClient();
     
     // SEC-C2 fix: 添加 user_id 过滤，仅允许操作自己的文件
-    const { data: existing } = await supabase
+    const { data: existing, error: lookupError } = await supabase
       .from('attachment_scans')
       .select('file_id')
       .eq('file_id', fileId)
       .eq('user_id', userId)
-      .maybeSingle();
+      .maybeSingle<AttachmentScanFileIdRow>();
+
+    if (lookupError) {
+      console.error('Rescan lookup error:', lookupError.message);
+      return jsonResponse({ error: 'Failed to queue rescan' }, corsHeaders, 500);
+    }
 
     if (!existing) {
       return jsonResponse({ error: 'Scan record not found' }, corsHeaders, 404);
     }
 
     // 更新状态为 scanning
-    await supabase
+    const { error: updateError } = await supabase
       .from('attachment_scans')
       .update({ status: SCAN_STATUS.SCANNING })
       .eq('file_id', fileId)
       .eq('user_id', userId);
+
+    if (updateError) {
+      console.error('Rescan status update error:', updateError.message);
+      return jsonResponse({ error: 'Failed to queue rescan' }, corsHeaders, 500);
+    }
 
     // TODO: 从 Storage 获取文件并重新扫描
     // 这里应该触发一个后台任务
@@ -419,6 +561,22 @@ interface ClamAvScanResult {
   signatureVersion?: string;
 }
 
+function readObjectField(value: unknown, key: string): unknown {
+  return typeof value === 'object' && value !== null
+    ? (value as Record<string, unknown>)[key]
+    : undefined;
+}
+
+function readStringField(value: unknown, key: string): string | undefined {
+  const field = readObjectField(value, key);
+  return typeof field === 'string' ? field : undefined;
+}
+
+function readBooleanField(value: unknown, key: string): boolean | undefined {
+  const field = readObjectField(value, key);
+  return typeof field === 'boolean' ? field : undefined;
+}
+
 /**
  * 使用 ClamAV 扫描文件
  */
@@ -441,14 +599,14 @@ async function scanWithClamAv(fileBytes: Uint8Array, filename: string): Promise<
       throw new Error(`ClamAV returned status ${response.status}`);
     }
 
-    const result = await response.json();
+    const result: unknown = await response.json();
     
     return {
-      infected: result.infected || false,
-      virusName: result.virus_name,
-      description: result.description,
-      engineVersion: result.engine_version,
-      signatureVersion: result.signature_version,
+      infected: readBooleanField(result, 'infected') ?? false,
+      virusName: readStringField(result, 'virus_name'),
+      description: readStringField(result, 'description'),
+      engineVersion: readStringField(result, 'engine_version'),
+      signatureVersion: readStringField(result, 'signature_version'),
     };
   } catch (error) {
     console.error('ClamAV scan error:', error);
@@ -469,17 +627,19 @@ async function scanWithClamAv(fileBytes: Uint8Array, filename: string): Promise<
  */
 async function saveScanResult(
   fileId: string, 
+  userId: string,
   fileHash: string, 
   result: ClamAvScanResult
 ): Promise<void> {
-  const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+  const supabase = createServiceRoleClient();
   
   const status = result.infected 
     ? SCAN_STATUS.THREAT_DETECTED 
     : (result.status || SCAN_STATUS.CLEAN);
 
-  await supabase.from('attachment_scans').upsert({
+  const { error: saveError } = await supabase.from('attachment_scans').upsert({
     file_id: fileId,
+    user_id: userId,
     file_hash: fileHash,
     status,
     threat_name: result.virusName,
@@ -490,6 +650,10 @@ async function saveScanResult(
     scanned_at: new Date().toISOString(),
     error_message: result.error,
   });
+
+  if (saveError) {
+    throw new Error(`Failed to save scan result: ${saveError.message}`);
+  }
 }
 
 /**

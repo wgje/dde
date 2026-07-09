@@ -149,9 +149,11 @@ export class BlackBoxEntryComponent {
     if (event.ctrlKey || event.metaKey || event.altKey) return;
 
     if (key === 'r') {
+      if (this.entry().isRead) return;
       event.preventDefault();
       this.onMarkRead(event);
     } else if (key === 'c') {
+      if (this.entry().isCompleted) return;
       event.preventDefault();
       this.onMarkCompleted(event);
     }
@@ -159,11 +161,13 @@ export class BlackBoxEntryComponent {
 
   onMarkRead(event: Event): void {
     event.stopPropagation();
+    if (this.entry().isRead) return;
     this.markRead.emit(this.entry().id);
   }
 
   onMarkCompleted(event: Event): void {
     event.stopPropagation();
+    if (this.entry().isCompleted) return;
     this.markCompleted.emit(this.entry().id);
   }
 

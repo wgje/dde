@@ -1,6 +1,6 @@
 import { TestBed } from '@angular/core/testing';
 import { signal } from '@angular/core';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   DockEngineLifecycleService,
   type DockEngineLifecycleContext,
@@ -19,7 +19,9 @@ import { DockFragmentRestService } from './dock-fragment-rest.service';
 import { DockZoneService } from './dock-zone.service';
 import { TaskStore } from '../core-bridge';
 import { AUTH_CONFIG } from '../config/auth.config';
+import { LOCAL_MODE_CHANGED_EVENT } from './guards/auth.guard';
 import type { DockEntry } from '../models/parking-dock';
+import { registerDockEngineLifecycleIdleCloudPullSpecs } from './dock-engine-lifecycle-idle-cloud-pull.spec-helpers';
 
 const mockLoggerCategory = {
   info: vi.fn(),
@@ -215,6 +217,10 @@ describe('DockEngineLifecycleService', () => {
     service = TestBed.inject(DockEngineLifecycleService);
   });
 
+  afterEach(() => {
+    TestBed.resetTestingModule();
+  });
+
   it('restoreLocalSnapshot 开始前应取消旧的 cloud sync timers', async () => {
     service.init(createContext('user-b'));
 
@@ -244,6 +250,52 @@ describe('DockEngineLifecycleService', () => {
 
     expect(mockCloudSync.seedFocusModeBaseline).toHaveBeenCalledWith('user-b', restoredSnapshot);
     expect(context.restoreSnapshot).toHaveBeenCalledWith(restoredSnapshot);
+  });
+
+  it('重复注册 visibility listener 时一次恢复只应调度一次 cloud pull', () => {
+    const context = createContext('user-a');
+    service.init(context);
+    service.registerDestroyCleanup(vi.fn());
+
+    try {
+      service.registerVisibilityListener();
+      service.registerVisibilityListener();
+      document.dispatchEvent(new Event('visibilitychange'));
+
+      expect(mockCloudSync.scheduleCloudPull).toHaveBeenCalledTimes(1);
+      expect(mockCloudSync.scheduleCloudPull).toHaveBeenCalledWith('user-a', false);
+    } finally {
+      TestBed.resetTestingModule();
+    }
+  });
+
+  it('销毁时单个资源清理失败仍应继续释放 Dock 生命周期资源', () => {
+    const context = createContext('user-a');
+    const extraCleanup = vi.fn();
+    const removeVisibilityListener = vi.spyOn(document, 'removeEventListener');
+    service.init(context);
+    service.registerDestroyCleanup(extraCleanup);
+    service.registerVisibilityListener();
+    mockCloudSync.cancelTimers.mockImplementationOnce(() => {
+      throw new Error('cloud cancel failed');
+    });
+
+    try {
+      expect(() => TestBed.resetTestingModule()).not.toThrow();
+
+      expect(mockSnapshotPersistence.cancelPendingPersist).toHaveBeenCalled();
+      expect(removeVisibilityListener).toHaveBeenCalledWith('visibilitychange', expect.any(Function));
+      expect(extraCleanup).toHaveBeenCalledTimes(1);
+      expect(mockLoggerCategory.warn).toHaveBeenCalledWith(
+        'Dock 生命周期资源清理失败，继续释放其余资源',
+        expect.objectContaining({
+          label: 'cloudSync.cancelTimers',
+          message: 'cloud cancel failed',
+        }),
+      );
+    } finally {
+      removeVisibilityListener.mockRestore();
+    }
   });
 
   it('空快照晚到时不应覆盖恢复窗口内新增的内存 Dock 状态', async () => {
@@ -303,6 +355,30 @@ describe('DockEngineLifecycleService', () => {
     );
   });
 
+  it('local-mode 事件到达后应重新绑定本地 owner 并启动快照恢复', async () => {
+    const context = createContext(null);
+    currentUserId.set(null);
+    service.init(context);
+
+    service.restoreInitialSnapshot();
+    TestBed.runInInjectionContext(() => {
+      service.registerEffects();
+    });
+    await flushEffects();
+
+    expect(context.getCurrentSnapshotUserId()).toBeNull();
+
+    localStorage.setItem(AUTH_CONFIG.LOCAL_MODE_CACHE_KEY, 'true');
+    window.dispatchEvent(new Event(LOCAL_MODE_CHANGED_EVENT));
+    await flushEffects();
+
+    expect(context.getCurrentSnapshotUserId()).toBe(AUTH_CONFIG.LOCAL_MODE_USER_ID);
+    expect(mockSnapshotPersistence.restoreLocalSnapshot).toHaveBeenCalledWith(
+      AUTH_CONFIG.LOCAL_MODE_USER_ID,
+      expect.any(Object),
+    );
+  });
+
   it('乱序完成的旧 restore 不应提前解锁 restoringSnapshot 或调度过期 cloud pull', async () => {
     const context = createContext('user-a');
     const restoreForB = createDeferred<null>();
@@ -342,48 +418,13 @@ describe('DockEngineLifecycleService', () => {
     expect(mockCloudSync.scheduleCloudPull).toHaveBeenCalledWith('user-c', true);
   });
 
-  it('restoreInitialSnapshot 应在本地 restore 完成后才触发 idle cloud pull', async () => {
-    const context = createContext('user-a');
-    const initialRestore = createDeferred<null>();
-    const hadRequestIdleCallback = 'requestIdleCallback' in window;
-    const originalRequestIdleCallback = (window as Window & {
-      requestIdleCallback?: (cb: () => void) => number;
-    }).requestIdleCallback;
-    let idleCallback: (() => void) | null = null;
-    (window as Window & {
-      requestIdleCallback?: (cb: () => void) => number;
-    }).requestIdleCallback = vi.fn((cb: () => void) => {
-      idleCallback = cb;
-      return 1;
-    });
-    mockSnapshotPersistence.restoreLocalSnapshot.mockImplementationOnce(() => initialRestore.promise);
-    service.init(context);
-
-    try {
-      service.restoreInitialSnapshot();
-      await flushEffects();
-
-      expect(mockCloudSync.scheduleCloudPull).not.toHaveBeenCalled();
-
-      initialRestore.resolve(null);
-      await flushEffects();
-
-      expect(mockCloudSync.scheduleCloudPull).not.toHaveBeenCalled();
-      expect(idleCallback).not.toBeNull();
-
-      idleCallback!();
-
-      expect(mockCloudSync.scheduleCloudPull).toHaveBeenCalledTimes(1);
-      expect(mockCloudSync.scheduleCloudPull).toHaveBeenCalledWith('user-a', true);
-    } finally {
-      if (hadRequestIdleCallback) {
-        (window as Window & {
-          requestIdleCallback?: (cb: () => void) => number;
-        }).requestIdleCallback = originalRequestIdleCallback;
-      } else {
-        delete (window as unknown as { requestIdleCallback?: (cb: () => void) => number }).requestIdleCallback;
-      }
-    }
+  registerDockEngineLifecycleIdleCloudPullSpecs({
+    getService: () => service,
+    createContext,
+    createDeferred,
+    flushEffects,
+    mockSnapshotPersistence,
+    mockCloudSync,
   });
 
   it('恢复期水化的 Dock 状态在解锁后不应作为本地新状态回写云端', async () => {

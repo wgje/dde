@@ -101,20 +101,29 @@ export class KnowledgeAnchorPopoverComponent {
   readonly result = signal<SiyuanPreviewResult>({ status: 'loading' });
   readonly maxWidth = SIYUAN_CONFIG.POPOVER_MAX_WIDTH_PX;
   readonly maxHeight = SIYUAN_CONFIG.POPOVER_MAX_HEIGHT_PX;
+  private loadSequence = 0;
 
   ngOnInit(): void {
     void this.load(false);
   }
 
   async load(forceRefresh: boolean): Promise<void> {
+    const requestSequence = ++this.loadSequence;
+    const requestLink = this.link();
     this.result.set({ status: 'loading' });
     try {
-      const result = await this.previewService.preview(this.link(), { forceRefresh });
+      const result = await this.previewService.preview(requestLink, { forceRefresh });
+      if (!this.isCurrentLoad(requestSequence, requestLink)) {
+        return;
+      }
       this.result.set(result);
       this.syncResolvedMetadata(result);
     } catch (error) {
+      if (!this.isCurrentLoad(requestSequence, requestLink)) {
+        return;
+      }
       this.logger.warn('桌面思源预览加载失败，降级为安全错误态', {
-        linkId: this.link().id,
+        linkId: requestLink.id,
         message: error instanceof Error ? error.message : 'unknown',
       });
       this.result.set({ status: 'error', errorCode: 'unknown' });
@@ -170,6 +179,13 @@ export class KnowledgeAnchorPopoverComponent {
         message: error instanceof Error ? error.message : 'unknown',
       });
     });
+  }
+
+  private isCurrentLoad(requestSequence: number, requestLink: ExternalSourceLink): boolean {
+    const currentLink = this.link();
+    return requestSequence === this.loadSequence
+      && currentLink.id === requestLink.id
+      && currentLink.targetId === requestLink.targetId;
   }
 
   private extractHPathTitle(hpath: string | undefined): string | undefined {

@@ -22,6 +22,83 @@ export interface LogEntry {
   data?: unknown;
 }
 
+const SENSITIVE_LOG_FIELDS = new Set([
+  'password',
+  'token',
+  'accesstoken',
+  'access_token',
+  'refreshtoken',
+  'refresh_token',
+  'secret',
+  'apikey',
+  'api_key',
+  'authorization',
+  'auth',
+  'secretkey',
+  'secret_key',
+  'encryptionkey',
+  'encryption_key',
+  'signingkey',
+  'signing_key',
+  'credential',
+  'credentials',
+  'private',
+  'privatekey',
+  'private_key',
+]);
+
+export function sanitizeLogData(data: unknown, depth = 0): unknown {
+  if (depth > 5) return '[MAX_DEPTH]';
+  if (data === null || data === undefined) return data;
+  if (data instanceof Error) return sanitizeLogError(data, depth);
+  if (typeof data === 'string') return sanitizeLogString(data);
+  if (typeof data !== 'object') return data;
+  if (Array.isArray(data)) return data.map(item => sanitizeLogData(item, depth + 1));
+  return sanitizeLogRecord(data as Record<string, unknown>, depth);
+}
+
+function sanitizeLogError(data: Error, depth: number): Record<string, unknown> {
+  const errorData = data as Error & { cause?: unknown };
+  const result: Record<string, unknown> = {
+    name: errorData.name,
+    message: sanitizeLogData(errorData.message, depth + 1),
+  };
+
+  if (errorData.stack) result.stack = sanitizeLogData(errorData.stack, depth + 1);
+  if (errorData.cause !== undefined) result.cause = sanitizeLogData(errorData.cause, depth + 1);
+  copyEnumerableLogFields(errorData as unknown as Record<string, unknown>, result, depth);
+  return result;
+}
+
+function copyEnumerableLogFields(
+  source: Record<string, unknown>,
+  target: Record<string, unknown>,
+  depth: number
+): void {
+  for (const [key, value] of Object.entries(source)) {
+    if (key in target) continue;
+    target[key] = sanitizeLogFieldValue(key, value, depth);
+  }
+}
+
+function sanitizeLogRecord(data: Record<string, unknown>, depth: number): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(data)) {
+    result[key] = sanitizeLogFieldValue(key, value, depth);
+  }
+  return result;
+}
+
+function sanitizeLogFieldValue(key: string, value: unknown, depth: number): unknown {
+  if (SENSITIVE_LOG_FIELDS.has(key.toLowerCase())) return '[REDACTED]';
+  if (typeof value === 'string') return sanitizeLogString(value);
+  return sanitizeLogData(value, depth + 1);
+}
+
+function sanitizeLogString(value: string): string {
+  return value.startsWith('eyJ') && value.length > 50 ? '[JWT_REDACTED]' : value;
+}
+
 /**
  * 统一日志服务
  * 替代分散的 console.log/warn/error 调用
@@ -231,112 +308,11 @@ export class LoggerService {
   }
   
   /**
-   * 敏感字段列表
-   * 这些字段在日志中会被替换为 [REDACTED]
-   */
-  // M-1 fix: 所有条目统一小写，因为查询时使用 key.toLowerCase() 匹配
-  private static readonly SENSITIVE_FIELDS = new Set([
-    'password',
-    'token',
-    'accesstoken',
-    'access_token',
-    'refreshtoken',
-    'refresh_token',
-    'secret',
-    'apikey',
-    'api_key',
-    'authorization',
-    'auth',
-    'secretkey',
-    'secret_key',
-    'encryptionkey',
-    'encryption_key',
-    'signingkey',
-    'signing_key',
-    'credential',
-    'credentials',
-    'private',
-    'privatekey',
-    'private_key',
-  ]);
-  
-  /**
    * 清洗敏感数据
    * 递归遍历对象，将敏感字段替换为 [REDACTED]
    */
-  private sanitizeData(data: unknown, depth = 0): unknown {
-    // 防止无限递归
-    if (depth > 5) return '[MAX_DEPTH]';
-
-    if (data === null || data === undefined) {
-      return data;
-    }
-
-    // Error 的 message / stack / cause 默认不可枚举，需显式保留
-    if (data instanceof Error) {
-      const errorData = data as Error & { cause?: unknown };
-      const result: Record<string, unknown> = {
-        name: errorData.name,
-        message: this.sanitizeData(errorData.message, depth + 1),
-      };
-
-      if (errorData.stack) {
-        result.stack = this.sanitizeData(errorData.stack, depth + 1);
-      }
-
-      if (errorData.cause !== undefined) {
-        result.cause = this.sanitizeData(errorData.cause, depth + 1);
-      }
-
-      // 兼容自定义 Error 子类上的可枚举字段
-      for (const [key, value] of Object.entries(errorData as unknown as Record<string, unknown>)) {
-        if (key in result) continue;
-        const lowerKey = key.toLowerCase();
-        if (LoggerService.SENSITIVE_FIELDS.has(lowerKey)) {
-          result[key] = '[REDACTED]';
-        } else if (typeof value === 'string' && value.startsWith('eyJ') && value.length > 50) {
-          result[key] = '[JWT_REDACTED]';
-        } else {
-          result[key] = this.sanitizeData(value, depth + 1);
-        }
-      }
-
-      return result;
-    }
-
-    // 字符串：检查是否像 JWT token
-    if (typeof data === 'string') {
-      // JWT token 模式：eyJ... 开头
-      if (data.startsWith('eyJ') && data.length > 50) {
-        return '[JWT_REDACTED]';
-      }
-      return data;
-    }
-
-    // 非对象类型直接返回
-    if (typeof data !== 'object') {
-      return data;
-    }
-
-    // 数组：递归处理每个元素
-    if (Array.isArray(data)) {
-      return data.map(item => this.sanitizeData(item, depth + 1));
-    }
-
-    // 对象：检查并清洗敏感字段
-    const result: Record<string, unknown> = {};
-    for (const [key, value] of Object.entries(data as Record<string, unknown>)) {
-      const lowerKey = key.toLowerCase();
-      if (LoggerService.SENSITIVE_FIELDS.has(lowerKey)) {
-        result[key] = '[REDACTED]';
-      } else if (typeof value === 'string' && value.startsWith('eyJ') && value.length > 50) {
-        // JWT token 值
-        result[key] = '[JWT_REDACTED]';
-      } else {
-        result[key] = this.sanitizeData(value, depth + 1);
-      }
-    }
-    return result;
+  private sanitizeData(data: unknown): unknown {
+    return sanitizeLogData(data);
   }
   
   /**

@@ -16,6 +16,7 @@
  */
 import { Injectable, inject, DestroyRef } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import type { Subscription } from 'rxjs';
 import { filter } from 'rxjs/operators';
 import { SwUpdate, VersionReadyEvent } from '@angular/service-worker';
 import { LoggerService } from './logger.service';
@@ -39,10 +40,14 @@ export class SwUpdateLifecycleService {
   private swUpdatePollTimer: ReturnType<typeof setInterval> | null = null;
   private swUpdateCheckInFlight = false;
   private lastSwUpdateCheckAt = 0;
+  private initialized = false;
+  private versionUpdatesSubscribed = false;
+  private versionUpdatesSubscription: Subscription | null = null;
   /** teardown 后置位，阻断在途/后续检查（替代历史 component.destroyed 守卫） */
   private stopped = false;
 
   private readonly handleSwUpdateVisibilityCheck = () => {
+    if (typeof document === 'undefined') return;
     if (document.visibilityState === 'visible') {
       void this.checkForSwUpdate('visibility');
     }
@@ -56,8 +61,14 @@ export class SwUpdateLifecycleService {
 
   /** 启动：订阅版本更新事件并开启周期/事件驱动的检查。 */
   initialize(): void {
-    if (this.swUpdate.isEnabled) {
-      this.swUpdate.versionUpdates
+    if (!this.swUpdate.isEnabled) {
+      return;
+    }
+
+    this.stopped = false;
+
+    if (!this.versionUpdatesSubscribed) {
+      this.versionUpdatesSubscription = this.swUpdate.versionUpdates
         .pipe(
           filter((evt): evt is VersionReadyEvent => evt.type === 'VERSION_READY'),
           takeUntilDestroyed(this.destroyRef)
@@ -92,32 +103,61 @@ export class SwUpdateLifecycleService {
             }
           );
         });
-      this.setupSwUpdateChecks();
+      this.versionUpdatesSubscribed = true;
     }
+
+    if (this.initialized) {
+      return;
+    }
+
+    if (!this.setupSwUpdateChecks()) {
+      this.unsubscribeVersionUpdates();
+      this.stopped = true;
+      return;
+    }
+    this.initialized = true;
   }
 
   /** 销毁：置位 stopped 并清理定时器与监听器。 */
   teardown(): void {
     this.stopped = true;
+    this.initialized = false;
+    this.unsubscribeVersionUpdates();
     this.teardownSwUpdateChecks();
   }
 
-  private setupSwUpdateChecks(): void {
-    this.scheduleSwUpdateCheck('startup', APP_LIFECYCLE_CONFIG.SW_UPDATE_INITIAL_CHECK_DELAY_MS, true);
+  private setupSwUpdateChecks(): boolean {
+    let pendingResource = 'startup-check-timer';
+    try {
+      this.scheduleSwUpdateCheck('startup', APP_LIFECYCLE_CONFIG.SW_UPDATE_INITIAL_CHECK_DELAY_MS, true);
 
-    if (!this.swUpdatePollTimer) {
-      this.swUpdatePollTimer = setInterval(() => {
-        void this.checkForSwUpdate('periodic');
-      }, APP_LIFECYCLE_CONFIG.SW_UPDATE_VISIBLE_POLL_INTERVAL_MS);
+      pendingResource = 'poll-timer';
+      if (this.swUpdatePollTimer === null) {
+        this.swUpdatePollTimer = setInterval(() => {
+          void this.checkForSwUpdate('periodic');
+        }, APP_LIFECYCLE_CONFIG.SW_UPDATE_VISIBLE_POLL_INTERVAL_MS);
+      }
+
+      pendingResource = 'document.visibilitychange';
+      if (typeof document !== 'undefined') {
+        document.addEventListener('visibilitychange', this.handleSwUpdateVisibilityCheck);
+      }
+      if (typeof window !== 'undefined') {
+        pendingResource = 'window.focus';
+        window.addEventListener('focus', this.handleSwUpdateFocusCheck);
+        pendingResource = 'window.online';
+        window.addEventListener('online', this.handleSwUpdateOnlineCheck);
+      }
+      return true;
+    } catch (error) {
+      this.teardownSwUpdateChecks();
+      this.warnSwUpdateSetupFailure(pendingResource, error);
+      return false;
     }
-
-    document.addEventListener('visibilitychange', this.handleSwUpdateVisibilityCheck);
-    window.addEventListener('focus', this.handleSwUpdateFocusCheck);
-    window.addEventListener('online', this.handleSwUpdateOnlineCheck);
   }
 
   private scheduleSwUpdateCheck(reason: SwUpdateCheckReason, delayMs: number, force = false): void {
-    if (this.swUpdateInitialCheckTimer) {
+    if (this.swUpdateInitialCheckTimer !== null) {
       clearTimeout(this.swUpdateInitialCheckTimer);
     }
 
@@ -132,7 +172,7 @@ export class SwUpdateLifecycleService {
       return;
     }
 
-    if (document.visibilityState === 'hidden') {
+    if (typeof document === 'undefined' || document.visibilityState === 'hidden') {
       return;
     }
 
@@ -141,10 +181,10 @@ export class SwUpdateLifecycleService {
       return;
     }
 
-    this.lastSwUpdateCheckAt = now;
     this.swUpdateCheckInFlight = true;
     try {
       const updateFound = await this.swUpdate.checkForUpdate();
+      this.lastSwUpdateCheckAt = now;
       if (updateFound) {
         this.logger.info('SwUpdate checkForUpdate detected a deploy version', { reason });
       } else {
@@ -161,16 +201,66 @@ export class SwUpdateLifecycleService {
   }
 
   private teardownSwUpdateChecks(): void {
-    if (this.swUpdateInitialCheckTimer) {
-      clearTimeout(this.swUpdateInitialCheckTimer);
+    if (this.swUpdateInitialCheckTimer !== null) {
+      const timer = this.swUpdateInitialCheckTimer;
       this.swUpdateInitialCheckTimer = null;
+      this.runSwUpdateCleanupStep('initial-check-timer', () => {
+        clearTimeout(timer);
+      });
     }
-    if (this.swUpdatePollTimer) {
-      clearInterval(this.swUpdatePollTimer);
+    if (this.swUpdatePollTimer !== null) {
+      const timer = this.swUpdatePollTimer;
       this.swUpdatePollTimer = null;
+      this.runSwUpdateCleanupStep('poll-timer', () => {
+        clearInterval(timer);
+      });
     }
-    document.removeEventListener('visibilitychange', this.handleSwUpdateVisibilityCheck);
-    window.removeEventListener('focus', this.handleSwUpdateFocusCheck);
-    window.removeEventListener('online', this.handleSwUpdateOnlineCheck);
+    if (typeof document !== 'undefined') {
+      this.runSwUpdateCleanupStep('document.visibilitychange', () => {
+        document.removeEventListener('visibilitychange', this.handleSwUpdateVisibilityCheck);
+      });
+    }
+    if (typeof window !== 'undefined') {
+      this.runSwUpdateCleanupStep('window.focus', () => {
+        window.removeEventListener('focus', this.handleSwUpdateFocusCheck);
+      });
+      this.runSwUpdateCleanupStep('window.online', () => {
+        window.removeEventListener('online', this.handleSwUpdateOnlineCheck);
+      });
+    }
+  }
+
+  private runSwUpdateCleanupStep(resource: string, action: () => void): void {
+    try {
+      action();
+    } catch (error) {
+      this.logger.warn(
+        'SwUpdate lifecycle resource cleanup failed; continuing remaining cleanup',
+        {
+          resource,
+          message: error instanceof Error ? error.message : String(error),
+        },
+      );
+    }
+  }
+
+  private unsubscribeVersionUpdates(): void {
+    this.versionUpdatesSubscription?.unsubscribe();
+    this.versionUpdatesSubscription = null;
+    this.versionUpdatesSubscribed = false;
+  }
+
+  private warnSwUpdateSetupFailure(resource: string, error: unknown): void {
+    try {
+      this.logger.warn(
+        'SwUpdate lifecycle setup failed; rolled back partial resources',
+        {
+          resource,
+          message: error instanceof Error ? error.message : String(error),
+        },
+      );
+    } catch {
+      // Warning sinks must not interrupt startup retryability.
+    }
   }
 }

@@ -1,32 +1,33 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-02-15T13:44:28.969Z",
+  "generatedAt": "2026-06-11T03:12:11.346Z",
   "updatedBy": "scripts/update-test-quarantine.cjs@v1",
   "thresholds": {
     "p95Ms": 1200,
     "failureRate7d": 0.01,
     "recoveryDays": 7,
-    "minSamples": 1
+    "minSamples": 3
   },
-  "files": [
-    "src/services/user-session.service.spec.ts"
-  ],
-  "entries": [
-    {
-      "file": "src/services/user-session.service.spec.ts",
-      "reason": "slow-or-flaky-lane",
-      "firstSeenAt": "2026-02-15T00:00:00.000Z",
-      "lastSeenAt": "2026-02-15T00:00:00.000Z",
-      "healthyStreakDays": 0,
-      "sampleCount": 0,
-      "failureSamples": 0,
-      "owner": "unassigned",
-      "note": "schema v2 新增 owner/note 字段（2026-04-16 T2-4）；请认领者根因分析后更新本字段。"
-    }
-  ],
+  "files": [],
+  "entries": [],
   "sources": {
-    "vitestReportsRequested": [],
-    "vitestReportsLoaded": [],
+    "seedFilesPinned": [],
+    "vitestReportsRequested": [
+      "D:\\Code\\dde\\test-results\\vitest-reports\\vitest-report-local-all-lane_node_minimal-forced-isolate-01.json",
+      "D:\\Code\\dde\\test-results\\vitest-reports\\vitest-report-local-all-lane_testbed_service-forced-isolate-04.json",
+      "D:\\Code\\dde\\test-results\\vitest-reports\\vitest-report-local-all-lane_testbed_component-shared-05.json",
+      "D:\\Code\\dde\\test-results\\vitest-reports\\vitest-report-local-all-lane_testbed_service-shared-03.json",
+      "D:\\Code\\dde\\test-results\\vitest-reports\\vitest-report-local-all-lane_node_minimal-shared-00.json",
+      "D:\\Code\\dde\\test-results\\vitest-reports\\vitest-report-local-all-lane_browser_minimal-shared-02.json"
+    ],
+    "vitestReportsLoaded": [
+      "test-results/vitest-reports/vitest-report-local-all-lane_node_minimal-forced-isolate-01.json",
+      "test-results/vitest-reports/vitest-report-local-all-lane_testbed_service-forced-isolate-04.json",
+      "test-results/vitest-reports/vitest-report-local-all-lane_testbed_component-shared-05.json",
+      "test-results/vitest-reports/vitest-report-local-all-lane_testbed_service-shared-03.json",
+      "test-results/vitest-reports/vitest-report-local-all-lane_node_minimal-shared-00.json",
+      "test-results/vitest-reports/vitest-report-local-all-lane_browser_minimal-shared-02.json"
+    ],
     "failureStatsRequested": [],
     "failureStatsLoaded": []
   }

@@ -208,7 +208,7 @@ export class ParkingNoticeComponent implements OnDestroy {
 
   readonly isExiting = signal(false);
   readonly dismissingNotice = signal<ParkingNotice | null>(null);
-  readonly renderNotice = computed<ParkingNotice | null>(() => this.currentNotice() ?? this.dismissingNotice());
+  readonly renderNotice = computed<ParkingNotice | null>(() => this.dismissingNotice() ?? this.currentNotice());
   readonly showSnoozeGuidance = computed(() => {
     const notice = this.currentNotice();
     if (!notice || notice.type !== 'reminder') return false;
@@ -228,6 +228,7 @@ export class ParkingNoticeComponent implements OnDestroy {
   private readonly noticeStateEffect = effect(() => {
     const notice = this.currentNotice();
     const noticeId = notice?.id ?? null;
+    if (this.dismissingNotice()) return;
     if (noticeId === this.lastNoticeId) return;
 
     this.lastNoticeId = noticeId;
@@ -259,51 +260,60 @@ export class ParkingNoticeComponent implements OnDestroy {
     return notice.actions.length > this.visibleActions(notice).length;
   }
 
-  handleAction(notice: ParkingNotice, key: ParkingNoticeActionKey): void {
+  async handleAction(notice: ParkingNotice, key: ParkingNoticeActionKey): Promise<void> {
+    let shouldDismiss = true;
     switch (key) {
       case 'start-work':
-        this.parkingService.startWork(notice.taskId);
+        shouldDismiss = await this.parkingService.startWork(notice.taskId);
         break;
       case 'snooze-5m':
-        this.reminderService.snooze5m(notice.taskId);
+        shouldDismiss = await this.reminderService.snooze5m(notice.taskId);
         break;
       case 'snooze-30m':
-        this.reminderService.snooze30m(notice.taskId);
+        shouldDismiss = await this.reminderService.snooze30m(notice.taskId);
         break;
       case 'snooze-2h-later':
-        this.reminderService.snooze2h(notice.taskId);
+        shouldDismiss = await this.reminderService.snooze2h(notice.taskId);
         break;
       case 'ignore':
-        this.reminderService.cancelReminder(notice.taskId);
+        shouldDismiss = await this.reminderService.cancelReminder(notice.taskId);
         break;
       case 'undo-eviction':
         if (notice.evictionTokenId) {
-          this.parkingService.undoEviction(notice.evictionTokenId);
+          shouldDismiss = await this.parkingService.undoEviction(notice.evictionTokenId);
+        } else {
+          shouldDismiss = false;
         }
         break;
       case 'keep-parked':
         if (notice.evictionItems && notice.evictionItems.length > 0) {
+          const results: boolean[] = [];
           for (const item of notice.evictionItems) {
-            this.parkingService.keepParked(item.taskId);
+            results.push(await this.parkingService.keepParked(item.taskId));
           }
+          shouldDismiss = results.every(Boolean);
         } else {
-          this.parkingService.keepParked(notice.taskId);
+          shouldDismiss = await this.parkingService.keepParked(notice.taskId);
         }
         break;
     }
 
-    this.dismissNotice('action');
+    if (shouldDismiss) {
+      this.dismissNotice('action');
+    }
   }
 
   toggleEvictionExpanded(): void {
     this.evictionExpanded.update(v => !v);
   }
 
-  undoEvictionItem(notice: ParkingNotice, item: ParkingNoticeEvictionItem, event: Event): void {
+  async undoEvictionItem(notice: ParkingNotice, item: ParkingNoticeEvictionItem, event: Event): Promise<void> {
     event.stopPropagation();
     if (!this.isEvictionTokenActive(item.evictionTokenId)) return;
 
-    this.parkingService.undoEviction(item.evictionTokenId);
+    const restored = await this.parkingService.undoEviction(item.evictionTokenId);
+    if (!restored) return;
+
     this.dismissedEvictionTokenIds.update((set) => {
       return new Set([...set, item.evictionTokenId]);
     });
@@ -439,15 +449,17 @@ export class ParkingNoticeComponent implements OnDestroy {
   }
 
   private clearAllTimers(): void {
-    if (this.immuneTimer) {
+    // 显式 null 判断：timer handle 为 0 时也必须清理，否则旧通知的 immune/fallback
+    // 回调会在下一条通知的免疫窗口内重放，提前解锁交互甚至误 dismiss 新通知
+    if (this.immuneTimer !== null) {
       clearTimeout(this.immuneTimer);
       this.immuneTimer = null;
     }
-    if (this.fallbackTimer) {
+    if (this.fallbackTimer !== null) {
       clearTimeout(this.fallbackTimer);
       this.fallbackTimer = null;
     }
-    if (this.dismissTimer) {
+    if (this.dismissTimer !== null) {
       clearTimeout(this.dismissTimer);
       this.dismissTimer = null;
     }

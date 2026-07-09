@@ -11,7 +11,11 @@
 
 import { Injectable, signal, computed } from '@angular/core';
 import { Project } from '../../../../models';
+import type { TaskDeleteBaseUpdatedAtMap } from '../../../../services/action-queue.types';
+import type { OperationConflictRecord } from '../../../../services/conflict-storage.helpers';
 import { SYNC_CONFIG } from '../../../../config/sync.config';
+
+export type CloudSyncPausedReason = 'no-session' | 'refresh-failed';
 
 /**
  * 同步状态
@@ -43,6 +47,13 @@ export interface SyncState {
    * 与"系统已接管"的语义矛盾。改走独立通道，让 UI 可以用合适的视觉等级渲染。
    */
   backgroundSyncNotice: string | null;
+  /**
+   * 云同步暂停原因（信息级，非错误）。
+   *
+   * 用于区分“本地数据仍可读写、但云端会话暂不可用”和真正的网络/服务中断。
+   * 该字段不影响本地写入链路，只驱动 UI 与生命周期恢复状态表达。
+   */
+  cloudSyncPausedReason: CloudSyncPausedReason | null;
   /** 是否存在冲突 */
   hasConflict: boolean;
   /** 冲突数据 */
@@ -63,6 +74,10 @@ export interface ConflictData {
   conflictedAt?: string;
   /** 冲突前已确认的待删除任务，解决冲突后仍需继续回放 */
   pendingTaskDeleteIds?: string[];
+  /** pendingTaskDeleteIds 对应的 task.updatedAt CAS 基线 */
+  pendingTaskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap;
+  /** 细粒度操作冲突证据，恢复 active conflict / modal 时不得丢弃 */
+  operationConflicts?: OperationConflictRecord[];
 }
 
 /**
@@ -88,6 +103,7 @@ export class SyncStateService {
     pendingCount: 0,
     syncError: null,
     backgroundSyncNotice: null,
+    cloudSyncPausedReason: null,
     hasConflict: false,
     conflictData: null
   });
@@ -105,6 +121,7 @@ export class SyncStateService {
   readonly sessionExpired = computed(() => this.syncState().sessionExpired);
   readonly pendingCount = computed(() => this.syncState().pendingCount);
   readonly backgroundSyncNotice = computed(() => this.syncState().backgroundSyncNotice);
+  readonly cloudSyncPausedReason = computed(() => this.syncState().cloudSyncPausedReason);
 
   /** 是否正在从远程加载（内部可写，外部只读）*/
   private readonly _isLoadingRemote = signal(false);
@@ -208,7 +225,7 @@ export class SyncStateService {
     //   - backgroundSyncNotice：partial-handoff 转交 RetryQueue 后的"后台同步中"信息条
     //     正是靠这里收口——drain 见底意味着自愈完成，notice 必须随之消失，否则 UI 会
     //     "RetryQueue 已空但琥珀条不消失"，与"已经自愈"语义矛盾。
-    this.update({ lastSyncTime, syncError: null, backgroundSyncNotice: null });
+    this.update({ lastSyncTime, syncError: null, backgroundSyncNotice: null, cloudSyncPausedReason: null });
     return true;
   }
 
@@ -267,6 +284,17 @@ export class SyncStateService {
     this.update({ backgroundSyncNotice: null });
   }
 
+  setCloudSyncPausedReason(reason: CloudSyncPausedReason | null): void {
+    this.update({ cloudSyncPausedReason: reason });
+  }
+
+  clearCloudSyncPausedReason(): void {
+    if (this.syncState().cloudSyncPausedReason === null) {
+      return;
+    }
+    this.update({ cloudSyncPausedReason: null });
+  }
+
   /**
    * @deprecated 自 2026-05-16 起改为转发到 {@link setBackgroundSyncNotice}。
    *
@@ -288,7 +316,7 @@ export class SyncStateService {
   }
 
   clearPendingRecoverableSyncError(): void {
-    if (this.recoverableSyncErrorTimer) {
+    if (this.recoverableSyncErrorTimer !== null) {
       clearTimeout(this.recoverableSyncErrorTimer);
       this.recoverableSyncErrorTimer = null;
     }
@@ -297,7 +325,11 @@ export class SyncStateService {
 
   private writeSyncError(syncError: string | null): void {
     this.update({ syncError });
-    this.syncErrorListener?.(syncError);
+    try {
+      this.syncErrorListener?.(syncError);
+    } catch {
+      // 中文注释：listener 属于外部 UI/协调器边界，不能反向打断同步状态写入链路。
+    }
   }
 
   registerSyncErrorListener(listener: (syncError: string | null) => void): void {

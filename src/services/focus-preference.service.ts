@@ -17,6 +17,7 @@ import { PreferenceService } from './preference.service';
 import { AuthService } from './auth.service';
 import { LoggerService } from './logger.service';
 import { focusPreferences } from '../state/focus-stores';
+import { FOCUS_CONFIG } from '../config/focus.config';
 
 /** LocalStorage 键：专注模式偏好 */
 const FOCUS_PREFERENCES_KEY = 'focus_preferences';
@@ -67,6 +68,7 @@ export class FocusPreferenceService {
       this.logger.debug('FocusPreferences', 'saved locally', withTimestamp);
     } catch (e) {
       this.logger.error('FocusPreferences', 'Failed to save locally', e instanceof Error ? e.message : String(e));
+      return;
     }
 
     // 2. 同步到云端（异步、不阻塞 UI）
@@ -84,9 +86,13 @@ export class FocusPreferenceService {
         return;
       }
 
-      await this.preferenceService.saveUserPreferences(userId, {
+      const syncedOrQueued = await this.preferenceService.saveUserPreferences(userId, {
         focusPreferences: prefs
       });
+      if (!syncedOrQueued) {
+        this.logger.warn('FocusPreferences', 'Cloud sync queued/failed (non-blocking)', userId);
+        return;
+      }
       this.logger.debug('FocusPreferences', 'synced to cloud');
     } catch (e) {
       // 云端同步失败时不影响本地使用（离线优先）
@@ -102,10 +108,10 @@ export class FocusPreferenceService {
   applyCloudPreferences(cloudPrefs: Partial<FocusPreferences>): void {
     const current = focusPreferences();
 
-    // 如果云端偏好携带 updatedAt 且旧于本地，跳过覆盖
-    const localTime = (current as unknown as Record<string, unknown>)['updatedAt'] as string | undefined;
-    const cloudTime = (cloudPrefs as unknown as Record<string, unknown>)['updatedAt'] as string | undefined;
-    if (localTime && cloudTime && cloudTime < localTime) {
+    // 如果云端偏好缺少 updatedAt 或旧于本地，不能覆盖本地较新的 LWW 偏好
+    const localTime = current.updatedAt;
+    const cloudTime = cloudPrefs.updatedAt;
+    if (localTime && (!cloudTime || cloudTime < localTime)) {
       this.logger.debug('FocusPreferences', 'cloud preference older than local, skipped', { localTime, cloudTime });
       return;
     }
@@ -149,7 +155,7 @@ export class FocusPreferenceService {
    * 设置每日最大跳过次数
    */
   setMaxSnoozePerDay(count: number): void {
-    const max = Math.max(0, Math.min(10, count));
+    const max = Math.max(0, Math.min(FOCUS_CONFIG.GATE.MAX_SNOOZE_PER_DAY, count));
     this.update({ maxSnoozePerDay: max });
   }
 

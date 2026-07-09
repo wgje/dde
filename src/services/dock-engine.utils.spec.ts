@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { PARKING_CONFIG } from '../config/parking.config';
-import type { DockEntry, DockTaskStatus, FocusTaskSlot } from '../models/parking-dock';
+import type { DockEntry, DockSnapshot, DockTaskStatus, FocusTaskSlot } from '../models/parking-dock';
 import {
   entryOrder,
   toFocusTaskSlot,
@@ -19,6 +19,7 @@ import {
   findConsoleEvictionCandidate,
   buildConsoleVisibleOrderHint,
   sortDockEntriesForDisplay,
+  applyDockSnapshotOverrides,
 } from './dock-engine.utils';
 
 // ---------------------------------------------------------------------------
@@ -43,6 +44,32 @@ function makeDockEntry(overrides: Partial<DockEntry> = {}): DockEntry {
     sourceKind: overrides.sourceKind ?? 'project-task',
     systemSelected: overrides.systemSelected ?? false,
     recommendedScore: overrides.recommendedScore ?? null,
+    ...overrides,
+  };
+}
+
+function makeDockSnapshot(overrides: Partial<DockSnapshot> = {}): DockSnapshot {
+  return {
+    version: 3,
+    entries: [makeDockEntry({ taskId: 'snapshot-entry' })],
+    focusMode: false,
+    isDockExpanded: true,
+    muteWaitTone: false,
+    session: {
+      firstDragIntervened: false,
+      focusBlurOn: false,
+      focusScrimOn: false,
+      mainTaskId: null,
+      comboSelectIds: [],
+      backupIds: [],
+    },
+    dailySlots: [],
+    suspendChainRootTaskId: null,
+    suspendRecommendationLocked: false,
+    pendingDecision: null,
+    lastRuleDecision: null,
+    dailyResetDate: '2026-01-01',
+    savedAt: '2026-01-01T00:00:00.000Z',
     ...overrides,
   };
 }
@@ -564,5 +591,63 @@ describe('sortDockEntriesForDisplay', () => {
     const sorted = sortDockEntriesForDisplay(entries, identity, noProject);
     // When scheduler scores are identical, dockedOrder determines position
     expect(sorted[0].dockedOrder).toBeLessThanOrEqual(sorted[1].dockedOrder);
+  });
+});
+
+// ---------------------------------------------------------------------------
+//  DockSnapshot override merging
+// ---------------------------------------------------------------------------
+
+describe('applyDockSnapshotOverrides', () => {
+  it('should merge dock preference overrides without mutating the source snapshot', () => {
+    const snapshot = makeDockSnapshot({
+      isDockExpanded: true,
+      muteWaitTone: false,
+      session: {
+        firstDragIntervened: true,
+        focusBlurOn: false,
+        focusScrimOn: false,
+        mainTaskId: 'main-task',
+        comboSelectIds: ['combo-1'],
+        backupIds: ['backup-1'],
+      },
+    });
+
+    const result = applyDockSnapshotOverrides(snapshot, {
+      isDockExpanded: false,
+      muteWaitTone: true,
+      focusScrimOn: true,
+    });
+
+    expect(result).toEqual({
+      ...snapshot,
+      isDockExpanded: false,
+      muteWaitTone: true,
+      session: {
+        ...snapshot.session,
+        focusScrimOn: true,
+      },
+    });
+    expect(snapshot.isDockExpanded).toBe(true);
+    expect(snapshot.muteWaitTone).toBe(false);
+    expect(snapshot.session.focusScrimOn).toBe(false);
+    expect(result.session).not.toBe(snapshot.session);
+  });
+
+  it('should preserve existing values when overrides are absent', () => {
+    const snapshot = makeDockSnapshot({
+      isDockExpanded: false,
+      muteWaitTone: true,
+      session: {
+        firstDragIntervened: false,
+        focusBlurOn: false,
+        focusScrimOn: true,
+        mainTaskId: null,
+        comboSelectIds: [],
+        backupIds: [],
+      },
+    });
+
+    expect(applyDockSnapshotOverrides(snapshot, {})).toEqual(snapshot);
   });
 });

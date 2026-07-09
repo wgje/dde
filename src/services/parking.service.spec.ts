@@ -19,11 +19,20 @@ import { GateService } from './gate.service';
 import { ContextRestoreService } from './context-restore.service';
 import { ProjectDataService } from '../core-bridge';
 import { PARKING_CONFIG } from '../config/parking.config';
+import { AUTH_CONFIG } from '../config/auth.config';
 import { AuthService } from './auth.service';
+import { TaskOperationAdapterService } from './task-operation-adapter.service';
 import { resetBrowserNetworkSuspensionTrackingForTests } from '../utils/browser-network-suspension';
+import { registerParkingLightweightSyncSpecs } from './parking-lightweight-sync.spec-helpers';
+import { registerParkingNoteAndKeepSpecs } from './parking-note-and-keep.spec-helpers';
+import { registerParkingPinnedSpecs } from './parking-pinned.spec-helpers';
+import { registerParkingSoftLimitAndLifecycleSpecs } from './parking-soft-limit-and-lifecycle.spec-helpers';
+import { registerParkingStatusChangeSpecs } from './parking-status-change.spec-helpers';
+import { registerParkingTaskActionsSpecs } from './parking-task-actions.spec-helpers';
 
 describe('ParkingService', () => {
   let service: ParkingService;
+  let onlineSpy: ReturnType<typeof vi.spyOn> | null = null;
 
   const taskMap = new Map<string, Task>();
   const parkedTasksSignal = signal<Task[]>([]);
@@ -83,6 +92,49 @@ describe('ParkingService', () => {
       syncParkedSignals();
     }),
     getTaskProjectId: vi.fn(() => 'proj-1'),
+  };
+
+  const mockTaskOpsAdapter = {
+    updateTaskParkingMeta: vi.fn(async (taskId: string, parkingMeta: TaskParkingMeta | undefined) => {
+      const current = taskMap.get(taskId);
+      if (!current) return false;
+      taskMap.set(taskId, {
+        ...current,
+        parkingMeta,
+        updatedAt: new Date().toISOString(),
+      });
+      syncParkedSignals();
+      return true;
+    }),
+    updateTaskParkingMetaBatch: vi.fn(async (
+      updates: Array<{ taskId: string; parkingMeta: TaskParkingMeta | undefined }>,
+    ) => {
+      for (const update of updates) {
+        const current = taskMap.get(update.taskId);
+        if (!current) return false;
+      }
+      for (const update of updates) {
+        const current = taskMap.get(update.taskId)!;
+        taskMap.set(update.taskId, {
+          ...current,
+          parkingMeta: update.parkingMeta,
+          updatedAt: new Date().toISOString(),
+        });
+      }
+      syncParkedSignals();
+      return true;
+    }),
+    updateTaskContent: vi.fn(async (taskId: string, content: string) => {
+      const current = taskMap.get(taskId);
+      if (!current) return false;
+      taskMap.set(taskId, {
+        ...current,
+        content,
+        updatedAt: new Date().toISOString(),
+      });
+      syncParkedSignals();
+      return true;
+    }),
   };
 
   const mockProjectStore = {
@@ -147,7 +199,12 @@ describe('ParkingService', () => {
 
   const mockProjectDataService = {
     loadParkedTasksCache: vi.fn(async () => ({ entries: [], cursor: null })),
-    pullParkedTasksDelta: vi.fn(async () => ({ entries: [], removedTaskIds: [], nextCursor: null })),
+    pullParkedTasksDelta: vi.fn(async () => ({
+      entries: [],
+      removedTasks: [] as { taskId: string; updatedAt: string | null }[],
+      removedTaskIds: [] as string[],
+      nextCursor: null as string | null,
+    })),
     saveParkedTasksCache: vi.fn(async () => {}),
   };
 
@@ -158,7 +215,18 @@ describe('ParkingService', () => {
     });
   };
 
+  const runEvictionCheck = (): Promise<void> =>
+    (service as unknown as { runEvictionCheck: () => Promise<void> }).runEvictionCheck();
+
+  const flushBackgroundEvictionCheck = async (): Promise<void> => {
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+  };
+
   beforeEach(() => {
+    resetBrowserNetworkSuspensionTrackingForTests();
+    onlineSpy = vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(true);
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-02-23T10:00:00.000Z'));
     setVisibilityState('visible');
@@ -169,8 +237,49 @@ describe('ParkingService', () => {
     parkedTaskIdsSignal.set(new Set());
     mockGateService.isActive.set(false);
     currentUserIdSignal.set(null);
-    localStorage.removeItem('nanoflow-local-mode');
+    localStorage.removeItem(AUTH_CONFIG.LOCAL_MODE_CACHE_KEY);
+    localStorage.removeItem(PARKING_CONFIG.SNAPSHOT_DRAFT_KEY);
     vi.clearAllMocks();
+    mockTaskOpsAdapter.updateTaskParkingMeta.mockImplementation(async (taskId: string, parkingMeta: TaskParkingMeta | undefined) => {
+      const current = taskMap.get(taskId);
+      if (!current) return false;
+      taskMap.set(taskId, {
+        ...current,
+        parkingMeta,
+        updatedAt: new Date().toISOString(),
+      });
+      syncParkedSignals();
+      return true;
+    });
+    mockTaskOpsAdapter.updateTaskParkingMetaBatch.mockImplementation(async (
+      updates: Array<{ taskId: string; parkingMeta: TaskParkingMeta | undefined }>,
+    ) => {
+      for (const update of updates) {
+        const current = taskMap.get(update.taskId);
+        if (!current) return false;
+      }
+      for (const update of updates) {
+        const current = taskMap.get(update.taskId)!;
+        taskMap.set(update.taskId, {
+          ...current,
+          parkingMeta: update.parkingMeta,
+          updatedAt: new Date().toISOString(),
+        });
+      }
+      syncParkedSignals();
+      return true;
+    });
+    mockTaskOpsAdapter.updateTaskContent.mockImplementation(async (taskId: string, content: string) => {
+      const current = taskMap.get(taskId);
+      if (!current) return false;
+      taskMap.set(taskId, {
+        ...current,
+        content,
+        updatedAt: new Date().toISOString(),
+      });
+      syncParkedSignals();
+      return true;
+    });
 
     TestBed.configureTestingModule({
       providers: [
@@ -186,6 +295,7 @@ describe('ParkingService', () => {
         { provide: ContextRestoreService, useValue: mockContextRestoreService },
         { provide: ProjectDataService, useValue: mockProjectDataService },
         { provide: AuthService, useValue: mockAuthService },
+        { provide: TaskOperationAdapterService, useValue: mockTaskOpsAdapter },
       ],
     });
 
@@ -194,8 +304,11 @@ describe('ParkingService', () => {
 
   afterEach(() => {
     service?.ngOnDestroy();
+    onlineSpy?.mockRestore();
+    onlineSpy = null;
     resetBrowserNetworkSuspensionTrackingForTests();
     setVisibilityState('visible');
+    localStorage.removeItem(PARKING_CONFIG.SNAPSHOT_DRAFT_KEY);
     vi.useRealTimers();
     TestBed.resetTestingModule();
   });
@@ -203,7 +316,7 @@ describe('ParkingService', () => {
   // ─── P-01: 预览任务刷新 lastVisitedAt ───
 
   describe('P-01: previewTask', () => {
-    it('预览停泊任务应刷新 lastVisitedAt', () => {
+    it('预览停泊任务应先 durable 刷新 lastVisitedAt 再进入预览', async () => {
       const oldTime = new Date('2026-02-20T10:00:00.000Z').toISOString();
       const task = createTask({
         id: 'preview-1',
@@ -212,18 +325,34 @@ describe('ParkingService', () => {
       taskMap.set(task.id, task);
       syncParkedSignals();
 
-      service.previewTask('preview-1');
+      await expect(service.previewTask('preview-1')).resolves.toBe(true);
 
       const updated = taskMap.get('preview-1');
       expect(updated?.parkingMeta?.lastVisitedAt).not.toBe(oldTime);
       expect(service.previewingTaskId()).toBe('preview-1');
     });
 
-    it('非停泊任务预览应静默忽略', () => {
+    it('非停泊任务预览应静默忽略', async () => {
       const task = createTask({ id: 'normal-1', parkingMeta: null });
       taskMap.set(task.id, task);
 
-      service.previewTask('normal-1');
+      await expect(service.previewTask('normal-1')).resolves.toBe(false);
+      expect(service.previewingTaskId()).toBeNull();
+    });
+
+    it('预览本地 durable 写入失败时不应切换预览状态', async () => {
+      const oldTime = new Date('2026-02-20T10:00:00.000Z').toISOString();
+      const task = createTask({
+        id: 'preview-fail',
+        parkingMeta: createParkingMeta({ lastVisitedAt: oldTime }),
+      });
+      taskMap.set(task.id, task);
+      syncParkedSignals();
+      mockTaskOpsAdapter.updateTaskParkingMeta.mockResolvedValueOnce(false);
+
+      await expect(service.previewTask('preview-fail')).resolves.toBe(false);
+
+      expect(taskMap.get('preview-fail')?.parkingMeta?.lastVisitedAt).toBe(oldTime);
       expect(service.previewingTaskId()).toBeNull();
     });
   });
@@ -231,7 +360,7 @@ describe('ParkingService', () => {
   // ─── P-02: startWork 切换任务 ───
 
   describe('P-02: startWork', () => {
-    it('切换到目标任务并将当前 focused 停泊', () => {
+    it('切换到目标任务并将当前 focused 停泊', async () => {
       const currentFocused = createTask({
         id: 'focused-1',
         title: '当前任务',
@@ -246,7 +375,7 @@ describe('ParkingService', () => {
       taskMap.set(targetTask.id, targetTask);
       syncParkedSignals();
 
-      service.startWork(targetTask.id);
+      await expect(service.startWork(targetTask.id)).resolves.toBe(true);
 
       // 当前 focused → parked
       expect(taskMap.get('focused-1')?.parkingMeta?.state).toBe('parked');
@@ -254,7 +383,7 @@ describe('ParkingService', () => {
       expect(taskMap.get('parked-1')?.parkingMeta?.state).toBe('focused');
     });
 
-    it('应保存当前 focused 任务的上下文快照', () => {
+    it('应保存当前 focused 任务的上下文快照', async () => {
       const currentFocused = createTask({
         id: 'focused-save',
         parkingMeta: createParkingMeta({ state: 'focused', parkedAt: null }),
@@ -267,12 +396,12 @@ describe('ParkingService', () => {
       taskMap.set(target.id, target);
       syncParkedSignals();
 
-      service.startWork(target.id);
+      await service.startWork(target.id);
 
       expect(mockContextRestoreService.saveSnapshot).toHaveBeenCalledWith('focused-save');
     });
 
-    it('应恢复目标任务的上下文快照', () => {
+    it('应恢复目标任务的上下文快照', async () => {
       const snapshot = {
         savedAt: new Date().toISOString(),
         contentHash: 'hash',
@@ -289,17 +418,17 @@ describe('ParkingService', () => {
       taskMap.set(target.id, target);
       syncParkedSignals();
 
-      service.startWork(target.id);
+      await service.startWork(target.id);
 
       expect(mockContextRestoreService.restore).toHaveBeenCalledWith('restore-target', snapshot);
     });
 
-    it('目标不存在时应 warn 并退出', () => {
-      service.startWork('nonexistent');
+    it('目标不存在时应 warn 并退出', async () => {
+      await expect(service.startWork('nonexistent')).resolves.toBe(false);
       expect(mockLoggerService.warn).toHaveBeenCalled();
     });
 
-    it('非 active 状态任务不应切换', () => {
+    it('非 active 状态任务不应切换', async () => {
       const completedTask = createTask({
         id: 'completed-task',
         status: 'completed',
@@ -308,12 +437,12 @@ describe('ParkingService', () => {
       taskMap.set(completedTask.id, completedTask);
       syncParkedSignals();
 
-      service.startWork('completed-task');
+      await expect(service.startWork('completed-task')).resolves.toBe(false);
 
       expect(mockLoggerService.warn).toHaveBeenCalled();
     });
 
-    it('记录 task-park 的 Undo 操作（P-34）', () => {
+    it('记录 task-park 的 Undo 操作（P-34）', async () => {
       const currentFocused = createTask({
         id: 'undo-focused',
         title: '当前任务',
@@ -328,7 +457,7 @@ describe('ParkingService', () => {
       taskMap.set(targetTask.id, targetTask);
       syncParkedSignals();
 
-      service.startWork(targetTask.id);
+      await service.startWork(targetTask.id);
 
       expect(mockUndoService.recordAction).toHaveBeenCalled();
       const action = mockUndoService.recordAction.mock.calls[0][0] as {
@@ -338,35 +467,88 @@ describe('ParkingService', () => {
       expect(action.type).toBe('task-park');
       expect(action.data.before.tasks.length).toBe(2);
     });
+
+    it('本地 durable 批量切换失败时不应恢复上下文、清预览或记录 undo', async () => {
+      const snapshot = {
+        savedAt: new Date().toISOString(),
+        contentHash: 'hash',
+        viewMode: 'text' as const,
+        cursorPosition: { line: 10, column: 5 },
+        scrollAnchor: null,
+        structuralAnchor: null,
+        flowViewport: null,
+      };
+      const currentFocused = createTask({
+        id: 'focused-fail',
+        parkingMeta: createParkingMeta({ state: 'focused', parkedAt: null }),
+      });
+      const targetTask = createTask({
+        id: 'target-fail',
+        parkingMeta: createParkingMeta({ state: 'parked', contextSnapshot: snapshot }),
+      });
+      taskMap.set(currentFocused.id, currentFocused);
+      taskMap.set(targetTask.id, targetTask);
+      syncParkedSignals();
+      await service.previewTask(targetTask.id);
+      mockTaskOpsAdapter.updateTaskParkingMetaBatch.mockResolvedValueOnce(false);
+
+      await expect(service.startWork(targetTask.id)).resolves.toBe(false);
+
+      expect(taskMap.get('focused-fail')?.parkingMeta?.state).toBe('focused');
+      expect(taskMap.get('target-fail')?.parkingMeta?.state).toBe('parked');
+      expect(service.previewingTaskId()).toBe('target-fail');
+      expect(mockContextRestoreService.restore).not.toHaveBeenCalledWith('target-fail', snapshot);
+      expect(mockUndoService.recordAction).not.toHaveBeenCalled();
+    });
   });
 
   // ─── P-09/P-10: 72h 衰老清理与撤回 ───
 
   describe('P-09/P-10: 衰老清理', () => {
-    it('72h 未访问任务应被自动清理', () => {
+    it('72h 未访问任务应在 durable 清理成功后发出通知', async () => {
       const staleTask = createTask({ id: 'stale-72h', parkingMeta: createParkingMeta() });
       taskMap.set(staleTask.id, staleTask);
       syncParkedSignals();
 
-      (service as unknown as { runEvictionCheck: () => void }).runEvictionCheck();
+      await runEvictionCheck();
 
       expect(taskMap.get('stale-72h')?.parkingMeta).toBeUndefined();
       expect(service.pendingNotices().length).toBe(1);
     });
 
-    it('清理通知包含撤回按钮', () => {
+    it('清理通知包含撤回按钮', async () => {
       const staleTask = createTask({ id: 'stale-undo', title: '可撤回', parkingMeta: createParkingMeta() });
       taskMap.set(staleTask.id, staleTask);
       syncParkedSignals();
 
-      (service as unknown as { runEvictionCheck: () => void }).runEvictionCheck();
+      await runEvictionCheck();
 
       const notice = service.pendingNotices()[0];
       expect(notice.type).toBe('eviction');
       expect(notice.actions.some(a => a.key === 'undo-eviction')).toBe(true);
     });
 
-    it('撤回应恢复原始停泊状态', () => {
+    it('本地 durable 清理失败时不应生成通知或可撤回 token', async () => {
+      const staleTask = createTask({
+        id: 'stale-clear-fail',
+        title: '清理失败任务',
+        parkingMeta: createParkingMeta(),
+      });
+      taskMap.set(staleTask.id, staleTask);
+      syncParkedSignals();
+      mockTaskOpsAdapter.updateTaskParkingMeta.mockResolvedValueOnce(false);
+
+      await runEvictionCheck();
+
+      expect(taskMap.get('stale-clear-fail')?.parkingMeta).toBeTruthy();
+      expect(service.pendingNotices().length).toBe(0);
+      expect(mockTaskOpsAdapter.updateTaskParkingMeta).toHaveBeenCalledWith(
+        'stale-clear-fail',
+        undefined,
+      );
+    });
+
+    it('撤回应通过本地 durable restore 恢复原始停泊状态', async () => {
       const staleTask = createTask({
         id: 'stale-restore',
         parkingMeta: createParkingMeta({ pinned: false }),
@@ -374,21 +556,42 @@ describe('ParkingService', () => {
       taskMap.set(staleTask.id, staleTask);
       syncParkedSignals();
 
-      (service as unknown as { runEvictionCheck: () => void }).runEvictionCheck();
+      await runEvictionCheck();
 
       const notice = service.pendingNotices()[0];
       const tokenId = notice.evictionTokenId!;
-      service.undoEviction(tokenId);
+      await expect(service.undoEviction(tokenId)).resolves.toBe(true);
 
       const restored = taskMap.get('stale-restore');
       expect(restored?.parkingMeta?.state).toBe('parked');
+    });
+
+    it('撤回本地 durable restore 失败时不应消费 token，允许后续重试', async () => {
+      const staleTask = createTask({
+        id: 'stale-restore-fail',
+        parkingMeta: createParkingMeta({ pinned: false }),
+      });
+      taskMap.set(staleTask.id, staleTask);
+      syncParkedSignals();
+
+      await runEvictionCheck();
+
+      const notice = service.pendingNotices()[0];
+      const tokenId = notice.evictionTokenId!;
+      mockTaskOpsAdapter.updateTaskParkingMeta.mockResolvedValueOnce(false);
+
+      await expect(service.undoEviction(tokenId)).resolves.toBe(false);
+      expect(taskMap.get('stale-restore-fail')?.parkingMeta).toBeUndefined();
+
+      await expect(service.undoEviction(tokenId)).resolves.toBe(true);
+      expect(taskMap.get('stale-restore-fail')?.parkingMeta?.state).toBe('parked');
     });
   });
 
   // ─── P-11: 手动移除可撤回 ───
 
   describe('P-11: removeParkedTask', () => {
-    it('移除后应显示 5s 撤回 Snackbar', () => {
+    it('本地 durable 移除后应显示 5s 撤回 Snackbar', async () => {
       const task = createTask({
         id: 'remove-1',
         title: '将移除的任务',
@@ -397,7 +600,7 @@ describe('ParkingService', () => {
       taskMap.set(task.id, task);
       syncParkedSignals();
 
-      service.removeParkedTask('remove-1');
+      await expect(service.removeParkedTask('remove-1')).resolves.toBe(true);
 
       expect(taskMap.get('remove-1')?.parkingMeta).toBeUndefined();
       expect(mockToastService.info).toHaveBeenCalled();
@@ -405,38 +608,60 @@ describe('ParkingService', () => {
       expect(call[0]).toContain('将移除的任务');
     });
 
-    it('移除时若正在预览应清除预览状态', () => {
+    it('移除时若正在预览应在 durable 成功后清除预览状态', async () => {
       const task = createTask({
         id: 'remove-preview',
         parkingMeta: createParkingMeta(),
       });
       taskMap.set(task.id, task);
       syncParkedSignals();
-      service.previewTask('remove-preview');
+      await service.previewTask('remove-preview');
 
-      service.removeParkedTask('remove-preview');
+      await expect(service.removeParkedTask('remove-preview')).resolves.toBe(true);
 
       expect(service.previewingTaskId()).toBeNull();
+    });
+
+    it('本地 durable 移除失败时不应清除停泊状态或显示撤回提示', async () => {
+      const task = createTask({
+        id: 'remove-fail',
+        title: '失败任务',
+        parkingMeta: createParkingMeta({ state: 'parked' }),
+      });
+      taskMap.set(task.id, task);
+      syncParkedSignals();
+      await service.previewTask('remove-fail');
+      mockTaskOpsAdapter.updateTaskParkingMeta.mockResolvedValueOnce(false);
+
+      await expect(service.removeParkedTask('remove-fail')).resolves.toBe(false);
+
+      expect(taskMap.get('remove-fail')?.parkingMeta?.state).toBe('parked');
+      expect(service.previewingTaskId()).toBe('remove-fail');
+      expect(mockToastService.info).not.toHaveBeenCalledWith(
+        expect.stringContaining('失败任务'),
+        undefined,
+        expect.anything(),
+      );
     });
   });
 
   // ─── P-16: 离线保护 ───
 
   describe('P-16: 离线清理保护', () => {
-    it('离线时不执行衰老清理', () => {
+    it('离线时不执行衰老清理', async () => {
       const staleTask = createTask({ id: 'offline-1', parkingMeta: createParkingMeta() });
       taskMap.set(staleTask.id, staleTask);
       syncParkedSignals();
 
       const onlineSpy = vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
-      (service as unknown as { runEvictionCheck: () => void }).runEvictionCheck();
+      await runEvictionCheck();
 
       expect(taskMap.get('offline-1')?.parkingMeta).toBeTruthy();
       expect(service.pendingNotices().length).toBe(0);
       onlineSpy.mockRestore();
     });
 
-    it('恢复在线后应立即重新执行衰老清理并发出通知', () => {
+    it('恢复在线后应立即重新执行衰老清理并发出通知', async () => {
       const staleTask = createTask({ id: 'offline-retry-1', parkingMeta: createParkingMeta() });
       taskMap.set(staleTask.id, staleTask);
       syncParkedSignals();
@@ -444,13 +669,14 @@ describe('ParkingService', () => {
       let isOnline = false;
       const onlineSpy = vi.spyOn(navigator, 'onLine', 'get').mockImplementation(() => isOnline);
 
-      (service as unknown as { runEvictionCheck: () => void }).runEvictionCheck();
+      await runEvictionCheck();
 
       expect(taskMap.get('offline-retry-1')?.parkingMeta).toBeTruthy();
       expect(service.pendingNotices().length).toBe(0);
 
       isOnline = true;
       window.dispatchEvent(new Event('online'));
+      await flushBackgroundEvictionCheck();
 
       expect(taskMap.get('offline-retry-1')?.parkingMeta).toBeUndefined();
       expect(service.pendingNotices().length).toBe(1);
@@ -460,441 +686,89 @@ describe('ParkingService', () => {
     });
   });
 
-  describe('停泊轻量同步鉴权保护', () => {
-    it('访客态初始化时不应触发停泊任务云端拉取', async () => {
-      await Promise.resolve();
-      await Promise.resolve();
-
-      expect(mockProjectDataService.pullParkedTasksDelta).not.toHaveBeenCalled();
-    });
-
-    it('登录后手动增量同步应恢复云端拉取', async () => {
+  describe('停泊后台增量同步异常隔离', () => {
+    it('恢复可见后的后台增量补拉失败应记录日志且不泄露 timer rejection', async () => {
+      await flushBackgroundEvictionCheck();
+      vi.clearAllMocks();
       currentUserIdSignal.set('user-1');
-
-      await (service as unknown as { syncParkedDelta: () => Promise<void> }).syncParkedDelta();
-
-      expect(mockProjectDataService.pullParkedTasksDelta).toHaveBeenCalledTimes(1);
-      expect(mockProjectDataService.pullParkedTasksDelta).toHaveBeenCalledWith(null, [], ['proj-1']);
-    });
-
-    it('项目列表未就绪时不应使用 activeProjectId 推进停泊游标', async () => {
-      currentUserIdSignal.set('user-1');
-      projectListSignal.set([]);
-
-      await (service as unknown as { syncParkedDelta: () => Promise<void> }).syncParkedDelta();
-
-      expect(mockProjectDataService.pullParkedTasksDelta).not.toHaveBeenCalled();
-    });
-
-    it('项目列表恢复后应快速补拉一次停泊任务增量', async () => {
-      currentUserIdSignal.set('user-1');
-      projectListSignal.set([]);
-
-      await (service as unknown as { syncParkedDelta: () => Promise<void> }).syncParkedDelta();
-      expect(mockProjectDataService.pullParkedTasksDelta).not.toHaveBeenCalled();
-
-      projectListSignal.set([createProject('proj-1')]);
-      await vi.advanceTimersByTimeAsync(500);
-
-      expect(mockProjectDataService.pullParkedTasksDelta).toHaveBeenCalledTimes(1);
-      expect(mockProjectDataService.pullParkedTasksDelta).toHaveBeenCalledWith(null, [], ['proj-1']);
-    });
-
-    it('挂起窗口内不应触发停泊任务云端拉取', async () => {
-      currentUserIdSignal.set('user-1');
-      setVisibilityState('hidden');
-
-      await (service as unknown as { syncParkedDelta: () => Promise<void> }).syncParkedDelta();
-
-      expect(mockProjectDataService.pullParkedTasksDelta).not.toHaveBeenCalled();
-    });
-
-    it('恢复可见后应延迟补拉一次停泊任务增量', async () => {
-      currentUserIdSignal.set('user-1');
-      setVisibilityState('hidden');
-
-      await (service as unknown as { syncParkedDelta: () => Promise<void> }).syncParkedDelta();
-      expect(mockProjectDataService.pullParkedTasksDelta).not.toHaveBeenCalled();
+      const deltaFailure = new Error('parked delta unavailable');
+      mockProjectDataService.pullParkedTasksDelta.mockRejectedValueOnce(deltaFailure);
 
       setVisibilityState('visible');
       document.dispatchEvent(new Event('visibilitychange'));
       await vi.advanceTimersByTimeAsync(1800);
+      await flushBackgroundEvictionCheck();
 
       expect(mockProjectDataService.pullParkedTasksDelta).toHaveBeenCalledTimes(1);
+      expect(mockLoggerService.warn).toHaveBeenCalledWith(
+        'ParkingService',
+        'background parked delta sync failed',
+        deltaFailure,
+      );
     });
   });
 
-  // ─── P-17: 无 focused 任务时切换 ───
-
-  describe('P-17: 无 focused 任务时 startWork', () => {
-    it('无 focused 任务时直接将目标设为 focused', () => {
-      const target = createTask({
-        id: 'only-task',
-        parkingMeta: createParkingMeta({ state: 'parked' }),
-      });
-      taskMap.set(target.id, target);
-      syncParkedSignals();
-
-      service.startWork('only-task');
-
-      expect(taskMap.get('only-task')?.parkingMeta?.state).toBe('focused');
-    });
+  registerParkingLightweightSyncSpecs({
+    getService: () => service,
+    createParkingMeta,
+    createProject,
+    createTask,
+    currentUserIdSignal,
+    projectListSignal,
+    setVisibilityState,
+    syncParkedSignals,
+    taskMap,
+    mockProjectDataService,
   });
 
-  // ─── P-21: 软上限警告 ───
-
-  describe('P-21: 软上限', () => {
-    it('parkedCount >= SOFT_LIMIT 时 isOverSoftLimit 为 true', () => {
-      for (let i = 0; i < PARKING_CONFIG.PARKED_TASK_SOFT_LIMIT; i++) {
-        const task = createTask({
-          id: `soft-${i}`,
-          parkingMeta: createParkingMeta({ state: 'parked' }),
-        });
-        taskMap.set(task.id, task);
-      }
-      syncParkedSignals();
-
-      expect(service.isOverSoftLimit()).toBe(true);
-    });
-
-    it('parkedCount < SOFT_LIMIT 时 isOverSoftLimit 为 false', () => {
-      const task = createTask({
-        id: 'single-parked',
-        parkingMeta: createParkingMeta({ state: 'parked' }),
-      });
-      taskMap.set(task.id, task);
-      syncParkedSignals();
-
-      expect(service.isOverSoftLimit()).toBe(false);
-    });
+  registerParkingSoftLimitAndLifecycleSpecs({
+    getService: () => service,
+    createTask,
+    createParkingMeta,
+    taskMap,
+    syncParkedSignals,
+    mockGateService,
   });
 
-  // ─── P-26: Gate 激活时通知排队 ───
-
-  describe('P-26: Gate 优先级队列', () => {
-    it('Gate 激活时 eviction 通知应排队', () => {
-      mockGateService.isActive.set(true);
-      const staleTask = createTask({ id: 'gate-stale', parkingMeta: createParkingMeta() });
-      taskMap.set(staleTask.id, staleTask);
-      syncParkedSignals();
-
-      (service as unknown as { runEvictionCheck: () => void }).runEvictionCheck();
-
-      // Gate 激活时 eviction 通知被延迟到 _deferredEvictionNotices 中
-      // 需要 flush 后才进入 pendingNotices
-      (service as unknown as { flushDeferredNotices: () => void }).flushDeferredNotices();
-      expect(service.pendingNotices().length).toBe(1);
-    });
+  registerParkingStatusChangeSpecs({
+    getService: () => service,
+    createTask,
+    createParkingMeta,
+    taskMap,
+    syncParkedSignals,
   });
 
-  // ─── P-27: 软删除停泊任务 ───
-
-  describe('P-27: handleTaskSoftDelete', () => {
-    it('软删除停泊任务应立即从停泊列表移除', () => {
-      const task = createTask({
-        id: 'soft-delete-1',
-        parkingMeta: createParkingMeta({ state: 'parked' }),
-      });
-      taskMap.set(task.id, task);
-      syncParkedSignals();
-
-      service.handleTaskSoftDelete('soft-delete-1');
-
-      expect(taskMap.get('soft-delete-1')?.parkingMeta).toBeUndefined();
-    });
-
-    it('正在预览的任务被软删除时应清除预览', () => {
-      const task = createTask({
-        id: 'soft-delete-preview',
-        parkingMeta: createParkingMeta({ state: 'parked' }),
-      });
-      taskMap.set(task.id, task);
-      syncParkedSignals();
-      service.previewTask('soft-delete-preview');
-
-      service.handleTaskSoftDelete('soft-delete-preview');
-
-      expect(service.previewingTaskId()).toBeNull();
-    });
+  registerParkingPinnedSpecs({
+    getService: () => service,
+    createTask,
+    createParkingMeta,
+    taskMap,
+    syncParkedSignals,
+    mockTaskOpsAdapter,
   });
 
-  // ─── P-30: 任务完成/归档时从停泊列表移除 ───
-
-  describe('P-30: handleTaskStatusChange', () => {
-    it('任务标记完成时应清除 parkingMeta', () => {
-      const task = createTask({
-        id: 'complete-1',
-        parkingMeta: createParkingMeta({ state: 'parked' }),
-      });
-      taskMap.set(task.id, task);
-      syncParkedSignals();
-
-      service.handleTaskStatusChange('complete-1', 'completed');
-
-      expect(taskMap.get('complete-1')?.parkingMeta).toBeUndefined();
-    });
-
-    it('任务归档时应清除 parkingMeta', () => {
-      const task = createTask({
-        id: 'archive-1',
-        parkingMeta: createParkingMeta({ state: 'parked' }),
-      });
-      taskMap.set(task.id, task);
-      syncParkedSignals();
-
-      service.handleTaskStatusChange('archive-1', 'archived');
-
-      expect(taskMap.get('archive-1')?.parkingMeta).toBeUndefined();
-    });
-
-    it('非终态状态变更不应影响 parkingMeta', () => {
-      const task = createTask({
-        id: 'status-other',
-        parkingMeta: createParkingMeta({ state: 'parked' }),
-      });
-      taskMap.set(task.id, task);
-      syncParkedSignals();
-
-      service.handleTaskStatusChange('status-other', 'active');
-
-      expect(taskMap.get('status-other')?.parkingMeta).toBeTruthy();
-    });
-  });
-
-  // ─── P-32: 固定任务豁免衰老清理 ───
-
-  describe('P-32: pinned 豁免', () => {
-    it('pinned 任务不应被衰老清理', () => {
-      const pinnedTask = createTask({
-        id: 'pinned-1',
-        parkingMeta: createParkingMeta({ pinned: true }),
-      });
-      taskMap.set(pinnedTask.id, pinnedTask);
-      syncParkedSignals();
-
-      (service as unknown as { runEvictionCheck: () => void }).runEvictionCheck();
-
-      expect(taskMap.get('pinned-1')?.parkingMeta).toBeTruthy();
-      expect(service.pendingNotices().length).toBe(0);
-    });
-
-    it('togglePinned 应切换 pinned 状态', () => {
-      const task = createTask({
-        id: 'toggle-pin',
-        parkingMeta: createParkingMeta({ pinned: false }),
-      });
-      taskMap.set(task.id, task);
-      syncParkedSignals();
-
-      service.togglePinned('toggle-pin');
-      expect(taskMap.get('toggle-pin')?.parkingMeta?.pinned).toBe(true);
-
-      service.togglePinned('toggle-pin');
-      expect(taskMap.get('toggle-pin')?.parkingMeta?.pinned).toBe(false);
-    });
-  });
-
-  // ─── P-37: 预览编辑（标题/备注） ───
-
-  describe('P-37: addNote', () => {
-    it('添加备注应追加到 content 末尾', () => {
-      const task = createTask({
-        id: 'note-1',
-        content: '原始内容',
-        parkingMeta: createParkingMeta(),
-      });
-      taskMap.set(task.id, task);
-      syncParkedSignals();
-
-      service.addNote('note-1', '这是备注');
-
-      const updated = taskMap.get('note-1');
-      expect(updated?.content).toContain('原始内容');
-      expect(updated?.content).toContain('这是备注');
-      expect(updated?.content).toContain('---');
-    });
-  });
-
-  // ─── keepParked (A6.4.2) ───
-
-  describe('keepParked', () => {
-    it('keepParked 应刷新 lastVisitedAt 防止衰老', () => {
-      const oldTime = new Date('2026-02-20T00:00:00.000Z').toISOString();
-      const task = createTask({
-        id: 'keep-1',
-        parkingMeta: createParkingMeta({ lastVisitedAt: oldTime }),
-      });
-      taskMap.set(task.id, task);
-      syncParkedSignals();
-
-      service.keepParked('keep-1');
-
-      const updated = taskMap.get('keep-1');
-      expect(updated?.parkingMeta?.lastVisitedAt).not.toBe(oldTime);
-      expect(mockToastService.info).toHaveBeenCalledWith('已保留，不会被自动清理');
-    });
+  registerParkingNoteAndKeepSpecs({
+    getService: () => service,
+    createTask,
+    createParkingMeta,
+    taskMap,
+    syncParkedSignals,
+    mockTaskStore,
+    mockTaskOpsAdapter,
+    mockToastService,
   });
 
   // ─── parkTask ───
 
-  describe('parkTask', () => {
-    it('应将 active 任务停泊', () => {
-      const task = createTask({ id: 'park-1', status: 'active' });
-      taskMap.set(task.id, task);
-
-      service.parkTask('park-1');
-
-      const updated = taskMap.get('park-1');
-      expect(updated?.parkingMeta?.state).toBe('parked');
-      expect(updated?.parkingMeta?.parkedAt).toBeTruthy();
-    });
-
-    it('应在停泊前保存上下文快照', () => {
-      const task = createTask({ id: 'park-snap', status: 'active' });
-      taskMap.set(task.id, task);
-
-      service.parkTask('park-snap');
-
-      expect(mockContextRestoreService.saveSnapshot).toHaveBeenCalledWith('park-snap');
-    });
-
-    it('非 active 状态停泊应静默忽略', () => {
-      const task = createTask({ id: 'park-completed', status: 'completed' });
-      taskMap.set(task.id, task);
-
-      service.parkTask('park-completed');
-
-      expect(taskMap.get('park-completed')?.parkingMeta).toBeNull();
-    });
-  });
-
-  // ─── quickSwitch (A6.1.4) ───
-
-  describe('quickSwitch', () => {
-    it('应切回最近的停泊任务', () => {
-      const recent = createTask({
-        id: 'recent-parked',
-        parkingMeta: createParkingMeta({ state: 'parked', parkedAt: new Date().toISOString() }),
-      });
-      taskMap.set(recent.id, recent);
-      syncParkedSignals();
-
-      service.quickSwitch();
-
-      expect(taskMap.get('recent-parked')?.parkingMeta?.state).toBe('focused');
-    });
-
-    it('无停泊任务时 quickSwitch 不应出错', () => {
-      expect(() => service.quickSwitch()).not.toThrow();
-    });
-  });
-
-  // ─── 批量清理逐条撤回 ───
-
-  describe('批量衰老清理', () => {
-    it('批量清理通知包含逐条撤回 token', () => {
-      const task1 = createTask({ id: 'batch-a', title: 'A', parkingMeta: createParkingMeta() });
-      const task2 = createTask({ id: 'batch-b', title: 'B', parkingMeta: createParkingMeta() });
-      taskMap.set(task1.id, task1);
-      taskMap.set(task2.id, task2);
-      syncParkedSignals();
-
-      (service as unknown as { runEvictionCheck: () => void }).runEvictionCheck();
-
-      const notice = service.pendingNotices()[0];
-      expect(notice.type).toBe('eviction');
-      expect(notice.evictionItems?.length).toBe(2);
-
-      const tokenId = notice.evictionItems?.[0]?.evictionTokenId;
-      expect(tokenId).toBeTruthy();
-      service.undoEviction(tokenId!);
-      expect(taskMap.get('batch-a')?.parkingMeta).toBeTruthy();
-    });
-
-    it('过期 token 不允许撤回', () => {
-      const staleTask = createTask({ id: 'expired-token', parkingMeta: createParkingMeta() });
-      taskMap.set(staleTask.id, staleTask);
-      syncParkedSignals();
-
-      (service as unknown as { runEvictionCheck: () => void }).runEvictionCheck();
-      const notice = service.pendingNotices()[0];
-      const tokenId = notice.evictionTokenId!;
-
-      vi.advanceTimersByTime(PARKING_CONFIG.EVICTION_UNDO_TIMEOUT_MS + 1);
-      service.undoEviction(tokenId);
-
-      expect(taskMap.get('expired-token')?.parkingMeta).toBeUndefined();
-    });
-  });
-
-  // ─── 提醒红点 (A5.3.5) ───
-
-  describe('提醒红点', () => {
-    it('连续淡出达到阈值应添加红点', () => {
-      for (let i = 0; i < PARKING_CONFIG.REMINDER_BADGE_THRESHOLD; i++) {
-        service.recordReminderFadeout('badge-task');
-      }
-
-      expect(service.badgedTaskIds().has('badge-task')).toBe(true);
-    });
-
-    it('clearBadge 应清除红点', () => {
-      for (let i = 0; i < PARKING_CONFIG.REMINDER_BADGE_THRESHOLD; i++) {
-        service.recordReminderFadeout('clear-badge-task');
-      }
-      expect(service.badgedTaskIds().has('clear-badge-task')).toBe(true);
-
-      service.clearBadge('clear-badge-task');
-      expect(service.badgedTaskIds().has('clear-badge-task')).toBe(false);
-    });
-  });
-
-  // ─── consumeNotice ───
-
-  describe('consumeNotice', () => {
-    it('应移除指定通知', () => {
-      const staleTask = createTask({ id: 'consume-1', parkingMeta: createParkingMeta() });
-      taskMap.set(staleTask.id, staleTask);
-      syncParkedSignals();
-
-      (service as unknown as { runEvictionCheck: () => void }).runEvictionCheck();
-      const noticeId = service.pendingNotices()[0].id;
-
-      service.consumeNotice(noticeId);
-      expect(service.pendingNotices().length).toBe(0);
-    });
-  });
-
-  // ─── hasUpcomingReminder ───
-
-  describe('hasUpcomingReminder', () => {
-    it('有 <1h 提醒时返回 true', () => {
-      const task = createTask({
-        id: 'reminder-upcoming',
-        parkingMeta: createParkingMeta({
-          state: 'parked',
-          reminder: {
-            reminderAt: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
-            snoozeCount: 0,
-            maxSnoozeCount: 5,
-          },
-        }),
-      });
-      taskMap.set(task.id, task);
-      syncParkedSignals();
-
-      expect(service.hasUpcomingReminder()).toBe(true);
-    });
-
-    it('无提醒时返回 false', () => {
-      const task = createTask({
-        id: 'no-reminder',
-        parkingMeta: createParkingMeta({ reminder: null }),
-      });
-      taskMap.set(task.id, task);
-      syncParkedSignals();
-
-      expect(service.hasUpcomingReminder()).toBe(false);
-    });
+  registerParkingTaskActionsSpecs({
+    getService: () => service,
+    createTask,
+    createParkingMeta,
+    taskMap,
+    syncParkedSignals,
+    mockContextRestoreService,
+    mockBeforeUnloadManager,
+    mockToastService,
+    mockTaskOpsAdapter,
   });
 });

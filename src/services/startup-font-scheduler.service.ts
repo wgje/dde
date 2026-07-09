@@ -1,4 +1,4 @@
-import { Injectable, inject, signal } from '@angular/core';
+import { DestroyRef, Injectable, inject, signal } from '@angular/core';
 import { STARTUP_PERF_CONFIG } from '../config/startup-performance.config';
 import { FEATURE_FLAGS } from '../config/feature-flags.config';
 import { LoggerService } from './logger.service';
@@ -19,6 +19,7 @@ type NetworkInfo = {
 @Injectable({ providedIn: 'root' })
 export class StartupFontSchedulerService {
   private readonly logger = inject(LoggerService).category('StartupFontScheduler');
+  private readonly destroyRef = inject(DestroyRef);
 
   private readonly enhancedFontLoadedSignal = signal(false);
   private readonly fontStylesheetName = 'lxgw-wenkai-screen.css';
@@ -34,6 +35,9 @@ export class StartupFontSchedulerService {
   private loading = false;
   private fallbackTimer: ReturnType<typeof setTimeout> | null = null;
   private forceFallbackTimer: ReturnType<typeof setTimeout> | null = null;
+  private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly pendingStylesheetLinks = new Set<HTMLLinkElement>();
+  private destroyed = false;
   /** 【修复 2026-02-19】加载失败重试次数 */
   private retryCount = 0;
   private static readonly MAX_RETRY = 2;
@@ -43,13 +47,22 @@ export class StartupFontSchedulerService {
     this.loadEnhancedFontStyles('interaction');
   };
 
+  constructor() {
+    this.destroyRef.onDestroy(() => {
+      this.destroyed = true;
+      this.clearTimers();
+      this.unbindInteractionListeners();
+      this.clearPendingStylesheetLinkCallbacks();
+    });
+  }
+
   initialize(): void {
-    if (this.initialized || typeof window === 'undefined' || typeof document === 'undefined') {
+    if (this.destroyed || this.initialized || typeof window === 'undefined' || typeof document === 'undefined') {
       return;
     }
-    this.initialized = true;
 
     if (this.isFontStylesheetPresent()) {
+      this.initialized = true;
       this.enhancedFontLoadedSignal.set(true);
       // 本地字体 CSS 已存在（SW 缓存命中等），仍需注入 CDN 补充字体
       this.injectCdnFallbackStylesheet();
@@ -57,26 +70,34 @@ export class StartupFontSchedulerService {
     }
 
     if (!this.isExtremeFirstpaintEnabled()) {
+      this.initialized = true;
       this.loadEnhancedFontStyles('immediate');
       return;
     }
 
-    this.bindFirstInteractionListeners();
+    try {
+      this.bindFirstInteractionListeners();
 
-    if (!this.isAggressiveDeferEnabled()) {
-      this.scheduleTimeoutFallback(false);
-      return;
+      if (!this.isAggressiveDeferEnabled()) {
+        this.scheduleTimeoutFallback(false);
+        this.initialized = true;
+        return;
+      }
+
+      if (!STARTUP_PERF_CONFIG.FONT_ENHANCED_INTERACTION_ONLY_V2) {
+        this.scheduleTimeoutFallback(false);
+        this.initialized = true;
+        return;
+      }
+
+      this.scheduleTimeoutFallback(true);
+      this.forceFallbackTimer = setTimeout(() => {
+        this.loadEnhancedFontStyles('force');
+      }, STARTUP_PERF_CONFIG.FONT_ENHANCED_FORCE_LOAD_MAX_DELAY_MS);
+      this.initialized = true;
+    } catch (error) {
+      this.rollbackDeferredFontSetup(error);
     }
-
-    if (!STARTUP_PERF_CONFIG.FONT_ENHANCED_INTERACTION_ONLY_V2) {
-      this.scheduleTimeoutFallback(false);
-      return;
-    }
-
-    this.scheduleTimeoutFallback(true);
-    this.forceFallbackTimer = setTimeout(() => {
-      this.loadEnhancedFontStyles('force');
-    }, STARTUP_PERF_CONFIG.FONT_ENHANCED_FORCE_LOAD_MAX_DELAY_MS);
   }
 
   isEnhancedFontLoaded(): boolean {
@@ -90,9 +111,48 @@ export class StartupFontSchedulerService {
   }
 
   private unbindInteractionListeners(): void {
-    window.removeEventListener('pointerdown', this.firstInteractionHandler);
-    window.removeEventListener('keydown', this.firstInteractionHandler);
-    window.removeEventListener('touchstart', this.firstInteractionHandler);
+    this.removeInteractionListener('pointerdown');
+    this.removeInteractionListener('keydown');
+    this.removeInteractionListener('touchstart');
+  }
+
+  private removeInteractionListener(eventName: 'pointerdown' | 'keydown' | 'touchstart'): void {
+    const remove = () => window.removeEventListener(eventName, this.firstInteractionHandler);
+    try {
+      remove();
+      return;
+    } catch (error) {
+      this.warnInteractionListenerCleanupFailure(eventName, error);
+    }
+
+    try {
+      remove();
+    } catch (error) {
+      this.warnInteractionListenerCleanupFailure(eventName, error);
+    }
+  }
+
+  private warnInteractionListenerCleanupFailure(
+    eventName: 'pointerdown' | 'keydown' | 'touchstart',
+    error: unknown,
+  ): void {
+    this.logger.warn('增强字体交互监听解绑失败，继续清理其他监听', {
+      eventName,
+      message: error instanceof Error ? error.message : 'unknown',
+    });
+  }
+
+  private rollbackDeferredFontSetup(error: unknown): void {
+    this.initialized = false;
+    this.clearTimers();
+    this.unbindInteractionListeners();
+    try {
+      this.logger.warn('增强字体延迟加载初始化失败，已回滚并允许重试', {
+        message: error instanceof Error ? error.message : 'unknown',
+      });
+    } catch {
+      // Warning sinks must not interrupt startup font retryability.
+    }
   }
 
   private scheduleTimeoutFallback(respectConstrainedNetwork: boolean): void {
@@ -102,18 +162,34 @@ export class StartupFontSchedulerService {
   }
 
   private clearTimers(): void {
-    if (this.fallbackTimer) {
+    if (this.fallbackTimer !== null) {
       clearTimeout(this.fallbackTimer);
       this.fallbackTimer = null;
     }
-    if (this.forceFallbackTimer) {
+    if (this.forceFallbackTimer !== null) {
       clearTimeout(this.forceFallbackTimer);
       this.forceFallbackTimer = null;
     }
+    if (this.retryTimer !== null) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = null;
+    }
+  }
+
+  private clearPendingStylesheetLinkCallbacks(): void {
+    for (const link of this.pendingStylesheetLinks) {
+      this.clearStylesheetLinkCallbacks(link);
+    }
+    this.pendingStylesheetLinks.clear();
+  }
+
+  private clearStylesheetLinkCallbacks(link: HTMLLinkElement): void {
+    link.onload = null;
+    link.onerror = null;
   }
 
   private loadEnhancedFontStyles(trigger: FontLoadTrigger, options: FontLoadOptions = {}): void {
-    if (this.enhancedFontLoadedSignal() || this.loading || typeof document === 'undefined') {
+    if (this.destroyed || this.enhancedFontLoadedSignal() || this.loading || typeof document === 'undefined') {
       return;
     }
 
@@ -209,7 +285,8 @@ export class StartupFontSchedulerService {
         this.logger.warn('增强字体加载失败，将在延迟后重试', {
           trigger, candidates, retry: this.retryCount
         });
-        setTimeout(() => {
+        this.retryTimer = setTimeout(() => {
+          this.retryTimer = null;
           this.loadEnhancedFontStyles('force');
         }, StartupFontSchedulerService.RETRY_DELAY_MS);
       } else {
@@ -225,8 +302,12 @@ export class StartupFontSchedulerService {
     link.setAttribute('data-nanoflow-enhanced-font', 'true');
     // 非阻塞加载：media="print" 让浏览器异步下载而不阻塞渲染
     link.media = 'print';
+    this.pendingStylesheetLinks.add(link);
 
     link.onload = () => {
+      if (this.destroyed) return;
+      this.pendingStylesheetLinks.delete(link);
+      this.clearStylesheetLinkCallbacks(link);
       link.media = 'all';
       this.loading = false;
       this.enhancedFontLoadedSignal.set(true);
@@ -236,6 +317,9 @@ export class StartupFontSchedulerService {
     };
 
     link.onerror = () => {
+      if (this.destroyed) return;
+      this.pendingStylesheetLinks.delete(link);
+      this.clearStylesheetLinkCallbacks(link);
       link.remove();
       this.logger.warn('增强字体加载失败，尝试备用路径', { trigger, href });
       this.injectStylesheetWithFallback(candidates, index + 1, trigger);
@@ -265,13 +349,20 @@ export class StartupFontSchedulerService {
     link.setAttribute('data-nanoflow-cdn-font', 'true');
     // 非阻塞加载：media="print" 让浏览器异步下载 CSS，加载完成后切换到 "all"
     link.media = 'print';
+    this.pendingStylesheetLinks.add(link);
 
     link.onload = () => {
+      if (this.destroyed) return;
+      this.pendingStylesheetLinks.delete(link);
+      this.clearStylesheetLinkCallbacks(link);
       link.media = 'all';
       this.logger.debug('CDN 补充字体样式已加载（覆盖额外 83 个子集）');
     };
 
     link.onerror = () => {
+      if (this.destroyed) return;
+      this.pendingStylesheetLinks.delete(link);
+      this.clearStylesheetLinkCallbacks(link);
       this.logger.warn('CDN 补充字体加载失败（不影响核心体验，仅低频字符使用系统回退字体）');
     };
 

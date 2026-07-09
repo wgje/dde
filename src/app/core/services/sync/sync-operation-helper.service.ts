@@ -134,9 +134,9 @@ export class SyncOperationHelperService {
     const client = this.getClient();
     if (!client) {
       if (addToRetryQueueOnFailure && !fromRetryQueue && retryEntityType && retryOperation && retryData) {
-          const enqueued = this.retryQueue.add(retryEntityType, retryOperation, retryData, projectId);
+          const enqueued = await this.retryQueue.addDurably(retryEntityType, retryOperation, retryData, projectId);
           if (!enqueued) {
-            this.logger.warn('execute: 重试队列已满，操作丢失（无客户端）', { entityId, operationName });
+            this.logger.warn('execute: 重试队列未能持久化，操作未确认保留（无客户端）', { entityId, operationName });
           }
       }
       return { 
@@ -162,71 +162,81 @@ export class SyncOperationHelperService {
     context: SyncOperationContext,
     options: SyncOperationOptions
   ): Promise<SyncOperationResult<T>> {
-    const { operationName, entityId, projectId, extra = {} } = context;
-    
-    // 获取 userId
+    try {
+      return await this.executeOperationWithCurrentUser(client, operation, context);
+    } catch (e) {
+      const enhanced = supabaseErrorToError(e);
+      if (!this.sessionManager.isSessionExpiredError(enhanced)) {
+        return await this.handleOperationError(enhanced, context, options);
+      }
+
+      return await this.handleAuthRetryableOperationError(client, operation, context, options, enhanced);
+    }
+  }
+
+  private async executeOperationWithCurrentUser<T>(
+    client: SupabaseClient,
+    operation: (client: SupabaseClient, userId: string) => Promise<T>,
+    context: SyncOperationContext,
+  ): Promise<SyncOperationResult<T>> {
     const userIdResult = await this.getUserId(client, context);
     if (userIdResult.success === false) {
       return { success: false, error: userIdResult.error };
     }
-    
-    try {
-      const result = await operation(client, userIdResult.userId);
-      return { success: true, data: result };
-    } catch (e) {
-      const enhanced = supabaseErrorToError(e);
-      
-      // 检查是否为 Auth 错误
-      if (this.sessionManager.isSessionExpiredError(enhanced)) {
-        this.logger.info(`${operationName}: 检测到认证错误，尝试刷新会话`, { entityId, errorCode: enhanced.code });
-        
-        const canRetry = await this.sessionManager.handleAuthErrorWithRefresh(operationName, {
-          entityId,
-          projectId,
-          errorCode: enhanced.code,
-          ...extra
-        });
-        
-        if (canRetry) {
-          // 刷新成功，重试一次
-          try {
-            const retryUserIdResult = await this.getUserId(client, context);
-            if (retryUserIdResult.success === false) {
-              return { success: false, error: retryUserIdResult.error };
-            }
-            
-            const retryResult = await operation(client, retryUserIdResult.userId);
-            return { success: true, data: retryResult };
-          } catch (retryError) {
-            const retryEnhanced = supabaseErrorToError(retryError);
-            
-            if (this.sessionManager.isSessionExpiredError(retryEnhanced)) {
-              // 会话刷新成功后重试仍然失败
-              if (this.sessionManager.isRlsPolicyViolation(retryEnhanced)) {
-                // 42501: RLS 策略违规，真正的权限不足，非会话过期
-                this.logger.warn('刷新会话后重试仍获 RLS 违规，判定为权限不足', {
-                  operationName, entityId, errorCode: retryEnhanced.code,
-                });
-                return { success: false, error: retryEnhanced };
-              }
-              // 非 RLS 的认证错误（如 401），标记会话过期并避免 Toast 轰炸
-              this.markSessionExpiredOnce();
-              return { success: false, error: retryEnhanced };
-            }
-            
-            // 其他错误走正常处理
-            return this.handleOperationError(retryEnhanced, context, options);
-          }
-        } else {
-          // 刷新失败，标记会话过期
-          this.markSessionExpiredOnce();
-          return { success: false, error: enhanced };
-        }
-      }
-      
-      // 其他错误类型
-      return this.handleOperationError(enhanced, context, options);
+
+    const result = await operation(client, userIdResult.userId);
+    return { success: true, data: result };
+  }
+
+  private async handleAuthRetryableOperationError<T>(
+    client: SupabaseClient,
+    operation: (client: SupabaseClient, userId: string) => Promise<T>,
+    context: SyncOperationContext,
+    options: SyncOperationOptions,
+    enhanced: EnhancedError,
+  ): Promise<SyncOperationResult<T>> {
+    const { operationName, entityId, projectId, extra = {} } = context;
+    this.logger.info(`${operationName}: 检测到认证错误，尝试刷新会话`, { entityId, errorCode: enhanced.code });
+
+    const canRetry = await this.sessionManager.handleAuthErrorWithRefresh(operationName, {
+      entityId,
+      projectId,
+      errorCode: enhanced.code,
+      ...extra
+    });
+    if (!canRetry) {
+      this.markSessionExpiredOnce();
+      return { success: false, error: enhanced };
     }
+
+    try {
+      return await this.executeOperationWithCurrentUser(client, operation, context);
+    } catch (retryError) {
+      const retryEnhanced = supabaseErrorToError(retryError);
+      return await this.handlePostRefreshRetryError(retryEnhanced, context, options);
+    }
+  }
+
+  private async handlePostRefreshRetryError<T>(
+    retryEnhanced: EnhancedError,
+    context: SyncOperationContext,
+    options: SyncOperationOptions,
+  ): Promise<SyncOperationResult<T>> {
+    if (!this.sessionManager.isSessionExpiredError(retryEnhanced)) {
+      return await this.handleOperationError(retryEnhanced, context, options);
+    }
+
+    if (this.sessionManager.isRlsPolicyViolation(retryEnhanced)) {
+      this.logger.warn('刷新会话后重试仍获 RLS 违规，判定为权限不足', {
+        operationName: context.operationName,
+        entityId: context.entityId,
+        errorCode: retryEnhanced.code,
+      });
+      return { success: false, error: retryEnhanced };
+    }
+
+    this.markSessionExpiredOnce();
+    return { success: false, error: retryEnhanced };
   }
   
   /**
@@ -272,73 +282,108 @@ export class SyncOperationHelperService {
   /**
    * 处理操作错误
    */
-  private handleOperationError<T>(
+  private async handleOperationError<T>(
     enhanced: EnhancedError,
     context: SyncOperationContext,
     options: SyncOperationOptions
-  ): SyncOperationResult<T> {
-    const { operationName, entityId, projectId, fromRetryQueue = false, extra = {} } = context;
-    const { addToRetryQueueOnFailure = true, retryEntityType, retryOperation, retryData } = options;
-    
-    // 永久失败错误
+  ): Promise<SyncOperationResult<T>> {
     if (isPermanentFailureError(enhanced)) {
-      this.logger.warn(`${operationName}: 永久失败`, { entityId, error: enhanced.message });
+      this.logger.warn(`${context.operationName}: 永久失败`, { entityId: context.entityId, error: enhanced.message });
       return { success: false, error: enhanced };
     }
-    
-    // 版本冲突
+
     if (enhanced.errorType === 'VersionConflictError') {
-      this.logger.warn(`${operationName}: 版本冲突`, { entityId });
-      this.toast.warning('版本冲突', '数据已被修改，请刷新后重试');
-      
-      this.sentryLazyLoader.captureMessage(`Optimistic lock conflict in ${operationName}`, {
-        level: 'warning',
-        tags: { operation: operationName, entityId, projectId: projectId ?? 'unknown' }
-      });
-      
+      return this.handleVersionConflictError(enhanced, context);
+    }
+
+    if (this.isForeignKeyError(enhanced)) {
+      return this.handleForeignKeyError(enhanced, context);
+    }
+
+    if (enhanced.isRetryable) {
+      await this.handleRetryableOperationError(enhanced, context, options);
       return { success: false, error: enhanced };
     }
-    
-    // 外键错误
-    const isForeignKeyError = enhanced.errorType === 'ForeignKeyError' ||
+
+    this.handleNonRetryableOperationError(enhanced, context);
+    return { success: false, error: enhanced };
+  }
+
+  private handleVersionConflictError<T>(
+    enhanced: EnhancedError,
+    context: SyncOperationContext,
+  ): SyncOperationResult<T> {
+    this.logger.warn(`${context.operationName}: 版本冲突`, { entityId: context.entityId });
+    this.toast.warning('版本冲突', '数据已被修改，请刷新后重试');
+
+    this.sentryLazyLoader.captureMessage(`Optimistic lock conflict in ${context.operationName}`, {
+      level: 'warning',
+      tags: {
+        operation: context.operationName,
+        entityId: context.entityId,
+        projectId: context.projectId ?? 'unknown'
+      }
+    });
+
+    return { success: false, error: enhanced };
+  }
+
+  private isForeignKeyError(enhanced: EnhancedError): boolean {
+    return enhanced.errorType === 'ForeignKeyError' ||
       enhanced.message?.includes('foreign key constraint') ||
       enhanced.message?.includes('violates foreign key') ||
-      enhanced.code === '23503' || enhanced.code === 23503;
-    
-    if (isForeignKeyError) {
-      this.logger.error(`${operationName}: 外键约束违规`, { entityId, error: enhanced.message });
-      
-      this.sentryLazyLoader.captureMessage(`Foreign key violation in ${operationName}`, {
-        level: 'warning',
-        tags: { operation: operationName, entityId, projectId: projectId ?? 'unknown' },
-        extra: { errorCode: enhanced.code, ...extra }
-      });
-      
-      return { success: false, error: enhanced };
-    }
-    
-    // 可重试错误
-    if (enhanced.isRetryable) {
-      this.logger.debug(`${operationName}: 失败 (${enhanced.errorType})`, { entityId, message: enhanced.message });
-      
-      if (addToRetryQueueOnFailure && !fromRetryQueue && retryEntityType && retryOperation && retryData) {
-          const enqueued = this.retryQueue.add(retryEntityType, retryOperation, retryData, projectId);
-          if (enqueued) {
-            this.logger.debug(`${operationName}: 已加入重试队列`, { entityId });
-          } else {
-            this.logger.warn(`${operationName}: 重试队列已满，操作丢失`, { entityId });
-          }
-      }
-    } else {
-      this.logger.error(`${operationName}: 不可重试的错误`, { entityId, error: enhanced });
-      
-      this.sentryLazyLoader.captureException(enhanced, {
-        tags: { operation: operationName, entityId, errorType: enhanced.errorType },
-        extra: { projectId, ...extra }
-      });
-    }
-    
+      enhanced.code === '23503' ||
+      enhanced.code === 23503;
+  }
+
+  private handleForeignKeyError<T>(
+    enhanced: EnhancedError,
+    context: SyncOperationContext,
+  ): SyncOperationResult<T> {
+    const { operationName, entityId, projectId, extra = {} } = context;
+    this.logger.error(`${operationName}: 外键约束违规`, { entityId, error: enhanced.message });
+
+    this.sentryLazyLoader.captureMessage(`Foreign key violation in ${operationName}`, {
+      level: 'warning',
+      tags: { operation: operationName, entityId, projectId: projectId ?? 'unknown' },
+      extra: { errorCode: enhanced.code, ...extra }
+    });
+
     return { success: false, error: enhanced };
+  }
+
+  private async handleRetryableOperationError(
+    enhanced: EnhancedError,
+    context: SyncOperationContext,
+    options: SyncOperationOptions,
+  ): Promise<void> {
+    const { operationName, entityId, projectId, fromRetryQueue = false } = context;
+    this.logger.debug(`${operationName}: 失败 (${enhanced.errorType})`, { entityId, message: enhanced.message });
+    if (fromRetryQueue) {
+      return;
+    }
+
+    const { addToRetryQueueOnFailure = true, retryEntityType, retryOperation, retryData } = options;
+    if (!addToRetryQueueOnFailure || !retryEntityType || !retryOperation || !retryData) {
+      return;
+    }
+
+    const enqueued = await this.retryQueue.addDurably(retryEntityType, retryOperation, retryData, projectId);
+    if (enqueued) {
+      this.logger.debug(`${operationName}: 已持久加入重试队列`, { entityId });
+    } else {
+      this.logger.warn(`${operationName}: 重试队列未能持久化，操作未确认保留`, { entityId });
+    }
+  }
+
+  private handleNonRetryableOperationError(enhanced: EnhancedError, context: SyncOperationContext): void {
+    const { operationName, entityId, projectId, extra = {} } = context;
+    this.logger.error(`${operationName}: 不可重试的错误`, { entityId, error: enhanced });
+
+    this.sentryLazyLoader.captureException(enhanced, {
+      tags: { operation: operationName, entityId, errorType: enhanced.errorType },
+      extra: { projectId, ...extra }
+    });
   }
   
   // ==================== 错误工厂 ====================

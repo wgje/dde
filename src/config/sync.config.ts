@@ -37,6 +37,8 @@ export const SYNC_CONFIG = {
   LOCAL_AUTOSAVE_INTERVAL: 3000,
   /** 连通性探测间隔（毫秒）- 用于在 VPN/网络切换后自动恢复在线状态 */
   CONNECTIVITY_PROBE_INTERVAL: 15000,
+  /** 连通性探测退避上限（毫秒）- 长时间离线时连续失败的探测间隔从基线指数退避到该上限 */
+  CONNECTIVITY_PROBE_MAX_INTERVAL: 120000,
   /** 连通性探测超时（毫秒）- 避免弱网时长时间挂起 */
   CONNECTIVITY_PROBE_TIMEOUT: 5000,
   // 【已清理】CIRCUIT_BREAKER_* 配置已迁移到 CIRCUIT_BREAKER_CONFIG
@@ -167,11 +169,11 @@ export const FIELD_SELECT_CONFIG = {
    * 【P0 修复】必须包含 content，否则同步时会丢失任务内容
    * 【P0-1 修复】必须包含 attachments，否则增量同步会清空附件列表
    */
-  TASK_LIST_FIELDS: 'id,title,content,stage,parent_id,order,rank,status,x,y,updated_at,deleted_at,short_id,attachments,tags,priority,due_date,expected_minutes,cognitive_load,wait_minutes,created_at,completed_at,parking_meta',
+  TASK_LIST_FIELDS: 'id,title,content,stage,parent_id,order,rank,status,x,y,updated_at,deleted_at,short_id,attachments,tags,priority,due_date,expected_minutes,cognitive_load,wait_minutes,created_at,completed_at,parking_meta,attention_meta',
   /** 任务详情字段（包含 content 和 attachments） */
-  TASK_DETAIL_FIELDS: 'id,title,content,stage,parent_id,order,rank,status,x,y,updated_at,deleted_at,short_id,attachments,tags,priority,due_date,expected_minutes,cognitive_load,wait_minutes,created_at,completed_at,parking_meta',
+  TASK_DETAIL_FIELDS: 'id,title,content,stage,parent_id,order,rank,status,x,y,updated_at,deleted_at,short_id,attachments,tags,priority,due_date,expected_minutes,cognitive_load,wait_minutes,created_at,completed_at,parking_meta,attention_meta',
   /** 任务完整字段（用于全量加载，替代 select('*')） */
-  TASK_FULL_FIELDS: 'id,title,content,stage,parent_id,order,rank,status,x,y,updated_at,deleted_at,short_id,attachments,created_at,completed_at,project_id,priority,due_date,expected_minutes,cognitive_load,wait_minutes,tags,parking_meta',
+  TASK_FULL_FIELDS: 'id,title,content,stage,parent_id,order,rank,status,x,y,updated_at,deleted_at,short_id,attachments,created_at,completed_at,project_id,priority,due_date,expected_minutes,cognitive_load,wait_minutes,tags,parking_meta,attention_meta',
   /** 连接字段 */
   CONNECTION_FIELDS: 'id,source_id,target_id,title,description,deleted_at,updated_at',
   /** 连接完整字段（用于全量加载，替代 select('*')） */
@@ -232,8 +234,8 @@ export const CIRCUIT_BREAKER_CONFIG = {
   RECOVERY_TIME: 30000,
   /** 半开状态允许的试探请求数 */
   HALF_OPEN_REQUESTS: 1,
-  /** 触发熔断的错误类型（网络不可达/服务端超时/网关错误） */
-  TRIGGER_ERROR_TYPES: ['NetworkError', 'NetworkTimeoutError', 'GatewayError', 'ServiceUnavailableError', 'UnknownServerError'] as readonly string[],
+  /** 触发熔断的错误类型（网络不可达/客户端与服务端超时/网关错误/门户劫持 HTML 响应） */
+  TRIGGER_ERROR_TYPES: ['NetworkError', 'NetworkTimeoutError', 'TimeoutError', 'RequestTimeoutError', 'GatewayError', 'ServiceUnavailableError', 'UnknownServerError', 'HtmlResponseError'] as readonly string[],
 } as const;
 
 /**

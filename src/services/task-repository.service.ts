@@ -8,8 +8,8 @@ import {
   getCompatibleTaskSelectFields,
   getCompatibleTaskWriteRow,
   markTaskCompletedAtColumnUnavailable,
-  omitTaskCompletedAtColumn,
 } from '../utils/task-schema-compat';
+import { fetchAllSupabasePages } from '../utils/supabase-pagination';
 import { FIELD_SELECT_CONFIG } from '../config/sync.config';
 import type { Database } from '../types/supabase';
 import { 
@@ -26,9 +26,7 @@ export type { TaskRow, ConnectionRow, ProjectRow } from './task-repository.types
  * 负责与 Supabase 的任务级 CRUD 操作
  * 使用独立的 tasks 和 connections 表
  */
-@Injectable({
-  providedIn: 'root'
-})
+@Injectable()
 export class TaskRepositoryService {
   private supabase = inject(SupabaseClientService);
   private readonly logger = inject(LoggerService).category('TaskRepository');
@@ -46,15 +44,41 @@ export class TaskRepositoryService {
   async loadTasks(projectId: string): Promise<Task[]> {
     if (!this.supabase.isConfigured) return [];
 
-    // 1. 加载所有任务（【P2-4 修复】使用具体字段替代 select('*')）
-    const loadTaskRows = async () => await this.supabase.client()
+    const taskRows = await this.loadTaskRows(projectId);
+    if (taskRows.length === 0) {
+      return [];
+    }
+
+    // 预先将所有行映射为 Task（包含将被过滤掉的软删/ tombstone 任务），
+    // 以便在父任务被删除时，让子任务能够“顶替”父任务的位置属性（stage/order/rank/x/y）。
+    const allTasks = taskRows.map(row => this.mapRowToTask(row));
+    const taskById = new Map(allTasks.map(t => [t.id, t] as const));
+    const tombstoneIds = await this.loadTaskTombstoneIds(projectId);
+    const removedIds = this.collectRemovedTaskIds(allTasks, tombstoneIds);
+    const keptTasks = allTasks
+      .filter(t => !removedIds.has(t.id) && !t.deletedAt)
+      .map(task => this.promoteTaskPastRemovedParents(task, removedIds, taskById));
+
+    this.logFilteredTaskCounts(projectId, allTasks, tombstoneIds);
+
+    return keptTasks;
+  }
+
+  private async loadTaskRows(projectId: string): Promise<TaskRow[]> {
+    // 【P2-4 修复】使用具体字段替代 select('*')
+    const loadTaskRows = async () => await fetchAllSupabasePages<TaskRow>(() => this.supabase.client()
       .from('tasks')
       .select(getCompatibleTaskSelectFields(FIELD_SELECT_CONFIG.TASK_FULL_FIELDS))
       .eq('project_id', projectId)
-      .order('created_at', { ascending: true });
+      .order('created_at', { ascending: true })
+      .order('id', { ascending: true }));
+    const maxSchemaFallbackAttempts = 3;
     let { data, error } = await loadTaskRows();
-    if (error && markTaskCompletedAtColumnUnavailable(error)) {
-      this.logger.warn('tasks.completed_at 缺失，任务仓库全量加载已降级为旧 schema 字段', {
+    for (let attempt = 1; error && attempt < maxSchemaFallbackAttempts; attempt += 1) {
+      if (!markTaskCompletedAtColumnUnavailable(error)) {
+        break;
+      }
+      this.logger.warn('tasks 可选字段缺失，任务仓库全量加载已降级为旧 schema 字段', {
         projectId,
         error,
       });
@@ -66,87 +90,85 @@ export class TaskRepositoryService {
       throw supabaseErrorToError(error);
     }
 
-    if (!data || data.length === 0) {
-      return [];
-    }
+    return (data || []) as unknown as TaskRow[];
+  }
 
-    // 预先将所有行映射为 Task（包含将被过滤掉的软删/ tombstone 任务），
-    // 以便在父任务被删除时，让子任务能够“顶替”父任务的位置属性（stage/order/rank/x/y）。
-    const allTasks = data.map(row => this.mapRowToTask(row as unknown as TaskRow));
-    const taskById = new Map(allTasks.map(t => [t.id, t] as const));
-
-    // 2. 获取该项目的所有 tombstone 记录
-    const { data: tombstones, error: tombstoneError } = await this.supabase.client()
+  private async loadTaskTombstoneIds(projectId: string): Promise<Set<string>> {
+    const { data: tombstones, error: tombstoneError } = await fetchAllSupabasePages<{ task_id: string }>(() => this.supabase.client()
       .from('task_tombstones')
       .select('task_id')
-      .eq('project_id', projectId);
-
-    // 3. 过滤掉已 tombstone 或软删除的任务
-    // tombstone 查询失败时降级：只依赖 deleted_at 过滤
-    const tombstoneIds = tombstoneError
-      ? new Set<string>()
-      : new Set((tombstones || []).map(t => t.task_id));
+      .eq('project_id', projectId)
+      .order('task_id', { ascending: true }));
 
     if (tombstoneError) {
       this.logger.warn('Failed to load tombstones (continuing without tombstone filtering)', tombstoneError);
+      return new Set();
     }
 
+    return new Set((tombstones || []).map(t => t.task_id));
+  }
+
+  private collectRemovedTaskIds(allTasks: Task[], tombstoneIds: Set<string>): Set<string> {
     const removedIds = new Set<string>();
-    for (const t of allTasks) {
-      if (tombstoneIds.has(t.id) || t.deletedAt) {
-        removedIds.add(t.id);
+    for (const task of allTasks) {
+      if (tombstoneIds.has(task.id) || task.deletedAt) {
+        removedIds.add(task.id);
       }
     }
+    return removedIds;
+  }
 
-    // 4. 子任务“顶替”父任务：
-    // 若 task.parentId 指向已删除任务（软删/ tombstone），则把该任务提升到父任务的位置，
-    // 并把 parentId 指向祖父（支持多层级联）。
-    const promote = (task: Task): Task => {
-      let promoted: Task = { ...task };
-      let parentId = promoted.parentId;
-      let guard = 0;
-      while (parentId && removedIds.has(parentId) && guard < 50) {
-        const removedParent = taskById.get(parentId);
-        if (!removedParent) {
-          // 父任务行已不存在（可能已被物理 purge），无法继承其位置信息，只能断开父子关系
-          parentId = null;
-          break;
-        }
+  private promoteTaskPastRemovedParents(
+    task: Task,
+    removedIds: Set<string>,
+    taskById: Map<string, Task>
+  ): Task {
+    let promoted: Task = { ...task };
+    let parentId = promoted.parentId;
+    let guard = 0;
 
-        promoted = {
-          ...promoted,
-          stage: removedParent.stage,
-          order: removedParent.order,
-          rank: removedParent.rank,
-          x: removedParent.x,
-          y: removedParent.y,
-        };
-
-        parentId = removedParent.parentId;
-        guard++;
+    while (parentId && removedIds.has(parentId) && guard < 50) {
+      const removedParent = taskById.get(parentId);
+      if (!removedParent) {
+        parentId = null;
+        break;
       }
 
-      if (guard > 0) {
-        promoted = { ...promoted, parentId: parentId ?? null };
-      }
+      promoted = this.inheritRemovedParentPosition(promoted, removedParent);
+      parentId = removedParent.parentId;
+      guard++;
+    }
 
-      if (promoted.parentId === promoted.id) {
-        promoted = { ...promoted, parentId: null };
-      }
-      return promoted;
+    if (guard > 0) {
+      promoted = { ...promoted, parentId: parentId ?? null };
+    }
+
+    return promoted.parentId === promoted.id
+      ? { ...promoted, parentId: null }
+      : promoted;
+  }
+
+  private inheritRemovedParentPosition(task: Task, removedParent: Task): Task {
+    return {
+      ...task,
+      stage: removedParent.stage,
+      order: removedParent.order,
+      rank: removedParent.rank,
+      x: removedParent.x,
+      y: removedParent.y,
     };
+  }
 
-    const keptTasks = allTasks
-      .filter(t => !removedIds.has(t.id) && !t.deletedAt)
-      .map(promote);
-
+  private logFilteredTaskCounts(
+    projectId: string,
+    allTasks: Task[],
+    tombstoneIds: Set<string>
+  ): void {
     const tombstoneCount = tombstoneIds.size;
     const softDeleteCount = allTasks.filter(t => t.deletedAt && !tombstoneIds.has(t.id)).length;
     if (tombstoneCount > 0 || softDeleteCount > 0) {
       this.logger.debug(`Filtered out ${tombstoneCount} tombstoned and ${softDeleteCount} soft-deleted tasks`, { projectId, tombstoneCount, softDeleteCount });
     }
-
-    return keptTasks;
   }
 
   /**
@@ -157,11 +179,13 @@ export class TaskRepositoryService {
     if (!this.supabase.isConfigured) return [];
 
     // 【P2-4 修复】使用具体字段替代 select('*')
-    const { data, error } = await this.supabase.client()
+    const { data, error } = await fetchAllSupabasePages<ConnectionRow>(() => this.supabase.client()
       .from('connections')
       .select(FIELD_SELECT_CONFIG.CONNECTION_FULL_FIELDS)
       .eq('project_id', projectId)
-      .is('deleted_at', null);
+      .is('deleted_at', null)
+      .order('updated_at', { ascending: true })
+      .order('id', { ascending: true }));
 
     if (error) {
       this.logger.error('Failed to load connections', error);
@@ -189,14 +213,18 @@ export class TaskRepositoryService {
       .from('tasks')
       .upsert(payload as never, { onConflict: 'id' });
 
+    const maxSchemaFallbackAttempts = 3;
     let { error } = await upsertTask(getCompatibleTaskWriteRow(rowToUpsert));
-    if (error && markTaskCompletedAtColumnUnavailable(error)) {
-      this.logger.warn('tasks.completed_at 缺失，任务仓库保存已降级为旧 schema 写入', {
+    for (let attempt = 1; error && attempt < maxSchemaFallbackAttempts; attempt += 1) {
+      if (!markTaskCompletedAtColumnUnavailable(error)) {
+        break;
+      }
+      this.logger.warn('tasks 可选字段缺失，任务仓库保存已降级为旧 schema 写入', {
         taskId: task.id,
         projectId,
         error,
       });
-      ({ error } = await upsertTask(omitTaskCompletedAtColumn(rowToUpsert)));
+      ({ error } = await upsertTask(getCompatibleTaskWriteRow(rowToUpsert)));
     }
 
     if (error) {
@@ -442,7 +470,7 @@ export class TaskRepositoryService {
   ): Promise<{ success: boolean; error?: string }> {
     const { data, error: fetchError } = await this.supabase.client()
       .from('tasks')
-      .select('attachments')
+      .select('attachments, updated_at')
       .eq('id', taskId)
       .maybeSingle();
 
@@ -459,11 +487,17 @@ export class TaskRepositoryService {
       (a: Attachment) => a.id !== attachmentId
     );
 
-    // 【P2-1 修复】与 addAttachmentFallback 保持一致，显式更新 updated_at
-    const { error } = await this.supabase.client()
+    // 与 addAttachmentFallback 保持一致，使用 updated_at 乐观锁避免并发附件写覆盖。
+    const updateQuery = this.supabase.client()
       .from('tasks')
       .update({ attachments: newAttachments as unknown as undefined, updated_at: new Date().toISOString() })
       .eq('id', taskId);
+
+    if (data.updated_at) {
+      (updateQuery as unknown as { eq: (col: string, val: string) => typeof updateQuery }).eq('updated_at', data.updated_at);
+    }
+
+    const { error } = await updateQuery;
 
     if (error) {
       return { success: false, error: error.message };
@@ -580,14 +614,20 @@ export class TaskRepositoryService {
     if (!this.supabase.isConfigured) return [];
 
     // 【P2-4 修复】使用具体字段替代 select('*')
-    const loadUpdatedTaskRows = async () => await this.supabase.client()
+    const loadUpdatedTaskRows = async () => await fetchAllSupabasePages<TaskRow>(() => this.supabase.client()
       .from('tasks')
       .select(getCompatibleTaskSelectFields(FIELD_SELECT_CONFIG.TASK_FULL_FIELDS))
       .eq('project_id', projectId)
-      .gt('updated_at', since);
+      .gt('updated_at', since)
+      .order('updated_at', { ascending: true })
+      .order('id', { ascending: true }));
+    const maxSchemaFallbackAttempts = 3;
     let { data, error } = await loadUpdatedTaskRows();
-    if (error && markTaskCompletedAtColumnUnavailable(error)) {
-      this.logger.warn('tasks.completed_at 缺失，任务仓库增量加载已降级为旧 schema 字段', {
+    for (let attempt = 1; error && attempt < maxSchemaFallbackAttempts; attempt += 1) {
+      if (!markTaskCompletedAtColumnUnavailable(error)) {
+        break;
+      }
+      this.logger.warn('tasks 可选字段缺失，任务仓库增量加载已降级为旧 schema 字段', {
         projectId,
         since,
         error,
@@ -634,8 +674,17 @@ export class TaskRepositoryService {
       cognitive_load: row.cognitive_load ?? null,
       wait_minutes: row.wait_minutes ?? null,
       // State Overlap 停泊元数据
-      parkingMeta: row.parking_meta ?? undefined,
+      parkingMeta: this.mapParkingMeta(row),
+      attentionMeta: row.attention_meta ?? null,
     });
+  }
+
+  private mapParkingMeta(row: TaskRow): Task['parkingMeta'] | undefined {
+    if (!Object.prototype.hasOwnProperty.call(row, 'parking_meta')) {
+      return undefined;
+    }
+
+    return row.parking_meta ?? null;
   }
 
   private mapTaskToRow(projectId: string, task: Task): Partial<TaskRow> {
@@ -663,6 +712,7 @@ export class TaskRepositoryService {
       completed_at: task.completedAt ?? null,
       // State Overlap 停泊元数据
       parking_meta: task.parkingMeta ?? null,
+      attention_meta: task.attentionMeta ?? null,
       // 注意：不需要手动设置 updated_at，数据库触发器会自动更新
     };
   }

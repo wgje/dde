@@ -1,13 +1,15 @@
-import 'jsr:@supabase/functions-js/edge-runtime.d.ts';
-
 import {
   createServiceRoleClient,
   getBearerToken,
   getCorsHeaders,
+  hasServiceRoleConfig,
+  isWidgetRequestBodyTooLargeError,
   isUuidLike,
   jsonResponse,
   parseWidgetToken,
+  readWidgetRequestJson,
   redactId,
+  serviceNotConfiguredPayload,
   sha256Hex,
   withPrivateNoStoreHeaders,
 } from '../_shared/widget-common.ts';
@@ -42,6 +44,11 @@ interface RequestBody {
   waitMinutes?: number;
 }
 
+interface FocusSessionUpdateRow {
+  id: string;
+  updated_at: string | null;
+}
+
 type SupabaseAdminClient = ReturnType<typeof createServiceRoleClient>;
 
 const WIDGET_DEVICE_SELECT = 'id,user_id,secret_hash,token_hash,binding_generation,revoked_at,expires_at';
@@ -70,7 +77,7 @@ async function loadDevice(
   if (byHash.error) {
     throw new Error(`load widget device by token_hash failed: ${byHash.error.message}`);
   }
-  if (byHash.data) return byHash.data as WidgetDeviceRow;
+  if (byHash.data) return byHash.data as unknown as WidgetDeviceRow;
 
   const parsed = parseWidgetToken(rawToken);
   if (!parsed) return null;
@@ -83,7 +90,7 @@ async function loadDevice(
   if (byId.error) {
     throw new Error(`load widget device by id failed: ${byId.error.message}`);
   }
-  const row = byId.data as WidgetDeviceRow | null;
+  const row = byId.data as unknown as WidgetDeviceRow | null;
   if (!row) return null;
   if (row.token_hash) return null;
 
@@ -122,14 +129,20 @@ async function maybePatchOwnedTask(
 
   const taskResult = await client
     .from('tasks')
-    .select('id,project_id')
+    .select('id,project_id,updated_at,deleted_at')
     .eq('id', taskId)
     .maybeSingle();
   if (taskResult.error) {
     throw new Error(`load task failed: ${taskResult.error.message}`);
   }
-  const taskRow = taskResult.data as { id: string; project_id: string } | null;
+  const taskRow = taskResult.data as {
+    id: string;
+    project_id: string;
+    updated_at: string | null;
+    deleted_at: string | null;
+  } | null;
   if (!taskRow) return;
+  if (taskRow.deleted_at || !taskRow.updated_at) return;
 
   const projectResult = await client
     .from('projects')
@@ -146,7 +159,11 @@ async function maybePatchOwnedTask(
     .from('tasks')
     .update(patch)
     .eq('id', taskId)
-    .eq('project_id', taskRow.project_id);
+    .eq('project_id', taskRow.project_id)
+    .eq('updated_at', taskRow.updated_at)
+    .is('deleted_at', null)
+    .select('id')
+    .maybeSingle();
   if (update.error) {
     throw new Error(`patch task failed: ${update.error.message}`);
   }
@@ -186,8 +203,12 @@ async function handleRequest(req: Request): Promise<Response> {
 
   let body: RequestBody;
   try {
-    body = (await req.json()) as RequestBody;
-  } catch {
+    body = await readWidgetRequestJson<RequestBody>(req);
+  } catch (error) {
+    if (isWidgetRequestBodyTooLargeError(error)) {
+      return errorResponse(responseHeaders, 413, 'REQUEST_BODY_TOO_LARGE', 'Request body too large');
+    }
+
     return errorResponse(responseHeaders, 400, 'INVALID_BODY', 'Request body must be valid JSON');
   }
 
@@ -216,6 +237,10 @@ async function handleRequest(req: Request): Promise<Response> {
     && (requestedWaitMinutes === undefined || requestedWaitMinutes <= 0)
   ) {
     return errorResponse(responseHeaders, 400, 'INVALID_WAIT_MINUTES', 'waitMinutes must be a positive number');
+  }
+
+  if (!hasServiceRoleConfig()) {
+    return jsonResponse({ ok: false, ...serviceNotConfiguredPayload() }, responseHeaders, 503);
   }
 
   const client = createServiceRoleClient();
@@ -284,7 +309,7 @@ async function handleRequest(req: Request): Promise<Response> {
     .eq('updated_at', session.updated_at)
     .is('ended_at', null)
     .select('id,updated_at')
-    .maybeSingle();
+    .maybeSingle<FocusSessionUpdateRow>();
 
   if (update.error) {
     console.error('[widget-focus-action] update failed', update.error);
@@ -322,20 +347,6 @@ async function handleRequest(req: Request): Promise<Response> {
       message: error instanceof Error ? error.message : String(error),
     });
   }
-
-  console.log('[widget-focus-action]', JSON.stringify({
-    event: `widget_focus_${action}_success`,
-    deviceId: redactId(device.id),
-    userId: redactId(device.user_id),
-    sessionId: redactId(session.id),
-    taskId: redactId(body.taskId),
-    completedTaskId: redactId(completedTaskId),
-    suspendedTaskId: redactId(suspendedTaskId),
-    mainTaskId: redactId(actionResult.mainTaskId),
-    comboCount: actionResult.comboSelectIds.length,
-    backupCount: actionResult.backupIds.length,
-    updatedAt: update.data.updated_at,
-  }));
 
   const responseTaskId =
     completedTaskId

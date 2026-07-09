@@ -6,21 +6,68 @@ import { supabaseErrorToError } from '../utils/supabase-error';
 import {
   getCompatibleTaskWriteRow,
   markTaskCompletedAtColumnUnavailable,
-  omitTaskCompletedAtColumn,
 } from '../utils/task-schema-compat';
+import { fetchAllSupabasePages } from '../utils/supabase-pagination';
 import { FIELD_SELECT_CONFIG } from '../config/sync.config';
 import { BATCH_RETRY_BASE_MS } from '../config/timeout.config';
 import type { ConnectionDeleteSummary } from './change-tracker.types';
-import type { TaskRow, ConnectionRow } from './task-repository.types';
+import {
+  buildConnectionSyncPlan,
+  buildTaskIncrementalUpdateRows,
+  buildTaskSaveRows,
+  mapTaskToRow,
+  type ConnectionSyncPlan,
+} from './task-repository-batch.helpers';
+import type { ConnectionRow } from './task-repository.types';
+
+export {
+  buildConnectionSyncPlan,
+  buildTaskIncrementalUpdateRows,
+  buildTaskSaveRows,
+  mapTaskToRow,
+} from './task-repository-batch.helpers';
+export type { ConnectionSyncPlan } from './task-repository-batch.helpers';
+
+const CONNECTION_BATCH_SIZE = 50;
+const CONNECTION_MAX_RETRIES = 2;
+const TASK_BATCH_SIZE = 50;
+const TASK_MAX_RETRIES = 2;
+
+interface IncrementalTaskSaveStats {
+  created: number;
+  updated: number;
+  deleted: number;
+}
+
+interface TaskBatchResult {
+  count: number;
+  errors: string[];
+}
+
+interface IncrementalConnectionSyncStats {
+  created: number;
+  updated: number;
+  deleted: number;
+}
+
+interface ConnectionBatchResult {
+  count: number;
+  errors: string[];
+}
+
+type ConnectionWriteRow = Pick<ConnectionRow, 'id' | 'project_id' | 'source_id' | 'target_id'>
+  & Partial<Pick<ConnectionRow, 'title' | 'description' | 'deleted_at'>>;
+
+type LoadConnectionsForSyncResult =
+  | { kind: 'loaded'; connections: Connection[] }
+  | { kind: 'fallback' };
 
 /**
  * 任务仓库批量操作服务
  * 处理批量保存、同步、删除等大规模数据操作
  * 从 TaskRepositoryService 拆分，保持单一职责
  */
-@Injectable({
-  providedIn: 'root'
-})
+@Injectable()
 export class TaskRepositoryBatchService {
   private supabase = inject(SupabaseClientService);
   private readonly logger = inject(LoggerService).category('TaskRepositoryBatch');
@@ -36,14 +83,7 @@ export class TaskRepositoryBatchService {
     if (!this.supabase.isConfigured) return { success: true };
     if (tasks.length === 0) return { success: true };
 
-    const taskRows = tasks.map(task => {
-      const row = this.mapTaskToRow(projectId, task);
-      const rowToUpsert: Record<string, unknown> = { ...row };
-      if ((task.deletedAt ?? null) === null) {
-        delete rowToUpsert.deleted_at;
-      }
-      return rowToUpsert;
-    });
+    const taskRows = buildTaskSaveRows(projectId, tasks);
 
     // 对于大批量任务，分批处理以避免超时和单次失败影响所有数据
     const BATCH_SIZE = 50;
@@ -87,8 +127,8 @@ export class TaskRepositoryBatchService {
         lastError
       });
       
-      return { 
-        success: false, 
+      return {
+        success: false,
         error: `${failedCount} 个任务保存失败: ${lastError}`,
         failedCount 
       };
@@ -107,141 +147,19 @@ export class TaskRepositoryBatchService {
   async syncConnections(projectId: string, connections: Connection[]): Promise<{ success: boolean; error?: string }> {
     if (!this.supabase.isConfigured) return { success: true };
 
-    const MAX_RETRIES = 2;
-    const errors: string[] = [];
-
     try {
-      // 1. 加载当前数据库中的连接
-      let existingConnections: Connection[] = [];
-      try {
-        existingConnections = await this.loadConnections(projectId);
-      } catch (loadError: unknown) {
-        const err = loadError as Error | undefined;
-        this.logger.warn('加载现有连接失败，尝试全量插入', { error: err?.message });
-        // 如果加载失败，回退到全量 upsert
-        return this.syncConnectionsFallback(projectId, connections);
-      }
+      const loadResult = await this.loadConnectionsForSync(projectId, connections);
+      if (loadResult.kind === 'fallback') return this.syncConnectionsFallback(projectId, connections);
       
-      // 2. 构建对比集合（使用 source-target 作为唯一标识）
-      const existingSet = new Set(existingConnections.map((c: Connection) => `${c.source}|${c.target}`));
-      const newSet = new Set(connections.map((c: Connection) => `${c.source}|${c.target}`));
-      
-      // 3. 找出需要删除的连接（在数据库中存在但本地不存在）
-      const toDelete = existingConnections.filter((c: Connection) => !newSet.has(`${c.source}|${c.target}`));
-      
-      // 4. 找出需要新增的连接（在本地存在但数据库中不存在）
-      const toInsert = connections.filter((c: Connection) => !existingSet.has(`${c.source}|${c.target}`));
-      
-      // 5. 找出需要更新的连接（两边都存在但 title、description 或 deletedAt 有变化）
-      const toUpdate = connections.filter((c: Connection) => {
-        const key = `${c.source}|${c.target}`;
-        if (!existingSet.has(key)) return false;
-        const existing = existingConnections.find((e: Connection) => e.source === c.source && e.target === c.target);
-        if (!existing) return false;
-        // 检查 title、description 或 deletedAt 是否变化
-        const titleChanged = existing.title !== c.title;
-        const descChanged = existing.description !== c.description;
-        const deletedAtChanged = existing.deletedAt !== c.deletedAt;
-        return titleChanged || descChanged || deletedAtChanged;
-      });
-
-      // 6. 批量软删除操作（【P1-2 修复】防止连接复活）
-      if (toDelete.length > 0) {
-        const BATCH_SIZE = 50;
-        const deletedAt = new Date().toISOString();
-        for (let i = 0; i < toDelete.length; i += BATCH_SIZE) {
-          const batch = toDelete.slice(i, i + BATCH_SIZE);
-          let success = false;
-          
-          for (let retry = 0; retry <= MAX_RETRIES && !success; retry++) {
-            // 使用软删除替代硬删除
-            const batchErrors: string[] = [];
-            for (const c of batch) {
-              const { error } = await this.supabase.client()
-                .from('connections')
-                .update({ deleted_at: deletedAt })
-                .eq('project_id', projectId)
-                .eq('source_id', c.source)
-                .eq('target_id', c.target);
-              if (error) batchErrors.push(error.message);
-            }
-            
-            if (batchErrors.length > 0) {
-              if (retry < MAX_RETRIES) {
-                await new Promise(r => setTimeout(r, BATCH_RETRY_BASE_MS * (retry + 1)));
-              } else {
-                errors.push(`批量软删除连接失败（${i}-${i + batch.length}）: ${batchErrors.join(', ')}`);
-              }
-            } else {
-              success = true;
-            }
-          }
-        }
-      }
-
-      // 7. 批量插入操作（提升性能）
-      if (toInsert.length > 0) {
-        const BATCH_SIZE = 50;
-        for (let i = 0; i < toInsert.length; i += BATCH_SIZE) {
-          const batch = toInsert.slice(i, i + BATCH_SIZE);
-          const connectionRows = batch.map((conn: Connection) => ({
-            project_id: projectId,
-            source_id: conn.source,
-            target_id: conn.target,
-            title: conn.title || null,
-            description: conn.description,
-            deleted_at: conn.deletedAt || null
-          }));
-
-          let success = false;
-          for (let retry = 0; retry <= MAX_RETRIES && !success; retry++) {
-            const { error: insertError } = await this.supabase.client()
-              .from('connections')
-              .insert(connectionRows);
-
-            if (insertError) {
-              if (retry < MAX_RETRIES) {
-                await new Promise(r => setTimeout(r, BATCH_RETRY_BASE_MS * (retry + 1)));
-              } else {
-                errors.push(`批量插入连接失败（${i}-${i + batch.length}）: ${insertError.message}`);
-              }
-            } else {
-              success = true;
-            }
-          }
-        }
-      }
-      
-      // 8. 执行更新操作（带重试），包括 description 和 deleted_at
-      for (const conn of toUpdate) {
-        let success = false;
-        for (let retry = 0; retry <= MAX_RETRIES && !success; retry++) {
-          const { error } = await this.supabase.client()
-            .from('connections')
-            .update({ 
-              title: conn.title || null,
-              description: conn.description,
-              deleted_at: conn.deletedAt || null  // 同步软删除状态
-            })
-            .eq('project_id', projectId)
-            .eq('source_id', conn.source)
-            .eq('target_id', conn.target);
-          
-          if (error) {
-            if (retry < MAX_RETRIES) {
-              await new Promise(r => setTimeout(r, BATCH_RETRY_BASE_MS * (retry + 1)));
-            } else {
-              errors.push(`更新连接失败 ${conn.source}->${conn.target}: ${error.message}`);
-            }
-          } else {
-            success = true;
-          }
-        }
-      }
+      const plan = buildConnectionSyncPlan(loadResult.connections, connections);
+      const errors = await this.executeConnectionSyncPlan(projectId, plan);
       
       if (errors.length > 0) {
-        this.logger.warn('连接同步部分失败', { errors });
-        // 部分成功也返回 success，只记录警告
+        this.logger.error('连接同步部分失败，保留失败状态等待后台重试', { errors });
+        return {
+          success: false,
+          error: errors.join('; '),
+        };
       }
       
       return { success: true };
@@ -252,24 +170,127 @@ export class TaskRepositoryBatchService {
     }
   }
 
+  private async loadConnectionsForSync(
+    projectId: string,
+    connections: Connection[]
+  ): Promise<LoadConnectionsForSyncResult> {
+    try {
+      return { kind: 'loaded', connections: await this.loadConnections(projectId) };
+    } catch (loadError: unknown) {
+      const err = loadError as Error | undefined;
+      this.logger.warn('加载现有连接失败，尝试全量插入', {
+        error: err?.message,
+        connectionCount: connections.length,
+      });
+      return { kind: 'fallback' };
+    }
+  }
+
+  private async executeConnectionSyncPlan(projectId: string, plan: ConnectionSyncPlan): Promise<string[]> {
+    const deleteErrors = await this.softDeleteConnectionBatches(projectId, plan.toDelete);
+    const insertErrors = await this.insertConnectionBatches(projectId, plan.toInsert);
+    const updateErrors = await this.updateConnections(projectId, plan.toUpdate);
+    return [...deleteErrors, ...insertErrors, ...updateErrors];
+  }
+
+  private async retryConnectionOperation(operation: () => Promise<string[]>): Promise<string[]> {
+    for (let retry = 0; retry <= CONNECTION_MAX_RETRIES; retry += 1) {
+      const errors = await operation();
+      if (errors.length === 0) return [];
+      if (retry === CONNECTION_MAX_RETRIES) return errors;
+      await new Promise(resolve => setTimeout(resolve, BATCH_RETRY_BASE_MS * (retry + 1)));
+    }
+    return [];
+  }
+
+  private async softDeleteConnectionBatches(projectId: string, connections: Connection[]): Promise<string[]> {
+    const errors: string[] = [];
+    const deletedAt = new Date().toISOString();
+    for (let i = 0; i < connections.length; i += CONNECTION_BATCH_SIZE) {
+      const batch = connections.slice(i, i + CONNECTION_BATCH_SIZE);
+      const batchErrors = await this.retryConnectionOperation(
+        () => this.softDeleteConnectionBatch(projectId, batch, deletedAt)
+      );
+      if (batchErrors.length > 0) {
+        errors.push(`批量软删除连接失败（${i}-${i + batch.length}）: ${batchErrors.join(', ')}`);
+      }
+    }
+    return errors;
+  }
+
+  private async softDeleteConnectionBatch(
+    projectId: string,
+    connections: Connection[],
+    deletedAt: string
+  ): Promise<string[]> {
+    const errors: string[] = [];
+    for (const conn of connections) {
+      const { error } = await this.supabase.client()
+        .from('connections')
+        .update({ deleted_at: deletedAt })
+        .eq('project_id', projectId)
+        .eq('source_id', conn.source)
+        .eq('target_id', conn.target);
+      if (error) errors.push(error.message);
+    }
+    return errors;
+  }
+
+  private async insertConnectionBatches(projectId: string, connections: Connection[]): Promise<string[]> {
+    const errors: string[] = [];
+    for (let i = 0; i < connections.length; i += CONNECTION_BATCH_SIZE) {
+      const batch = connections.slice(i, i + CONNECTION_BATCH_SIZE);
+      const rows = batch.map(conn => this.mapConnectionToRow(projectId, conn));
+      const batchErrors = await this.retryConnectionOperation(async () => {
+        const { error } = await this.supabase.client()
+          .from('connections')
+          .upsert(rows, { onConflict: 'id' });
+        return error ? [error.message] : [];
+      });
+      if (batchErrors.length > 0) {
+        errors.push(`批量插入连接失败（${i}-${i + batch.length}）: ${batchErrors.join(', ')}`);
+      }
+    }
+    return errors;
+  }
+
+  private async updateConnections(projectId: string, connections: Connection[]): Promise<string[]> {
+    const errors: string[] = [];
+    for (const conn of connections) {
+      const updateErrors = await this.retryConnectionOperation(() => this.updateConnection(projectId, conn));
+      if (updateErrors.length > 0) {
+        errors.push(`更新连接失败 ${conn.source}->${conn.target}: ${updateErrors.join(', ')}`);
+      }
+    }
+    return errors;
+  }
+
+  private async updateConnection(projectId: string, conn: Connection): Promise<string[]> {
+    const { error } = await this.supabase.client()
+      .from('connections')
+      .update({
+        title: conn.title || null,
+        description: conn.description,
+        deleted_at: conn.deletedAt || null
+      })
+      .eq('project_id', projectId)
+      .eq('source_id', conn.source)
+      .eq('target_id', conn.target);
+
+    return error ? [error.message] : [];
+  }
+
   /**
    * 连接同步的回退方法：全量 upsert
    */
   private async syncConnectionsFallback(projectId: string, connections: Connection[]): Promise<{ success: boolean; error?: string }> {
     if (connections.length === 0) return { success: true };
     
-    const connectionRows = connections.map(conn => ({
-      project_id: projectId,
-      source_id: conn.source,
-      target_id: conn.target,
-      title: conn.title || null,
-      description: conn.description,
-      deleted_at: conn.deletedAt || null
-    }));
+    const connectionRows = connections.map(conn => this.mapConnectionToRow(projectId, conn));
     
     const { error } = await this.supabase.client()
       .from('connections')
-      .upsert(connectionRows, { onConflict: 'project_id,source_id,target_id' });
+      .upsert(connectionRows, { onConflict: 'id' });
     
     if (error) {
       this.logger.error('Connection fallback sync failed', error);
@@ -295,111 +316,13 @@ export class TaskRepositoryBatchService {
     if (!this.supabase.isConfigured) return { success: true };
     
     const stats = { created: 0, updated: 0, deleted: 0 };
-    const errors: string[] = [];
-    const BATCH_SIZE = 50;
-    const MAX_RETRIES = 2;
-
-    // 1. 批量删除任务
-    if (taskIdsToDelete.length > 0) {
-      for (let i = 0; i < taskIdsToDelete.length; i += BATCH_SIZE) {
-        const batch = taskIdsToDelete.slice(i, i + BATCH_SIZE);
-        let success = false;
-        
-        for (let retry = 0; retry <= MAX_RETRIES && !success; retry++) {
-          // 优先走 purge RPC（写入 tombstone + 删除行），阻断旧端 upsert 复活。
-          // v2 支持在 tasks 行已不存在时也能落 tombstone（需要 projectId）。
-          const purgeV2Result = await this.supabase.client().rpc('purge_tasks_v2', {
-            p_project_id: projectId,
-            p_task_ids: batch
-          });
-
-          // 后端未部署/权限不足时降级为软删除（不再使用物理 DELETE）。
-          const error = purgeV2Result.error
-            ? (await this.supabase.client()
-                .from('tasks')
-                .update({ deleted_at: new Date().toISOString() })
-                .eq('project_id', projectId)
-                .in('id', batch)).error
-            : null;
-          
-          if (error) {
-            if (retry < MAX_RETRIES) {
-              await new Promise(r => setTimeout(r, BATCH_RETRY_BASE_MS * (retry + 1)));
-            } else {
-              errors.push(`批量删除任务失败（${i}-${i + batch.length}）: ${error.message}`);
-            }
-          } else {
-            success = true;
-            stats.deleted += batch.length;
-          }
-        }
-      }
-    }
-
-    // 2. 批量创建任务（使用 insert 而非 upsert，更明确语义）
-    if (tasksToCreate.length > 0) {
-      const createRows = tasksToCreate.map(task => this.mapTaskToRow(projectId, task));
-      
-      for (let i = 0; i < createRows.length; i += BATCH_SIZE) {
-        const batch = createRows.slice(i, i + BATCH_SIZE);
-        let success = false;
-        
-        for (let retry = 0; retry <= MAX_RETRIES && !success; retry++) {
-          // 使用 upsert 以处理重复创建的边缘情况
-          const { error } = await this.upsertTaskBatchWithSchemaFallback(batch, projectId);
-          
-          if (error) {
-            if (retry < MAX_RETRIES) {
-              await new Promise(r => setTimeout(r, BATCH_RETRY_BASE_MS * (retry + 1)));
-            } else {
-              errors.push(`批量创建任务失败（${i}-${i + batch.length}）: ${error.message}`);
-            }
-          } else {
-            success = true;
-            stats.created += batch.length;
-          }
-        }
-      }
-    }
-
-    // 3. 批量更新任务
-    if (tasksToUpdate.length > 0) {
-      const updateRows = tasksToUpdate.map(task => {
-        const row = this.mapTaskToRow(projectId, task);
-        const rowToUpdate: Record<string, unknown> = { ...row };
-        const changedFields = taskUpdateFieldsById?.[task.id] ?? [];
-
-        // tombstone-wins：
-        // - 如果本次更新没有显式修改 deletedAt（changedFields 不包含 deletedAt）
-        // - 且当前 task.deletedAt 为 null
-        // 则不发送 deleted_at 字段，避免把远端已存在的 deleted_at 覆盖回 null（导致复活）。
-        if ((task.deletedAt ?? null) === null && !changedFields.includes('deletedAt')) {
-          delete rowToUpdate.deleted_at;
-        }
-
-        return rowToUpdate;
-      });
-      
-      for (let i = 0; i < updateRows.length; i += BATCH_SIZE) {
-        const batch = updateRows.slice(i, i + BATCH_SIZE);
-        let success = false;
-        
-        for (let retry = 0; retry <= MAX_RETRIES && !success; retry++) {
-          const { error } = await this.upsertTaskBatchWithSchemaFallback(batch, projectId);
-          
-          if (error) {
-            if (retry < MAX_RETRIES) {
-              await new Promise(r => setTimeout(r, BATCH_RETRY_BASE_MS * (retry + 1)));
-            } else {
-              errors.push(`批量更新任务失败（${i}-${i + batch.length}）: ${error.message}`);
-            }
-          } else {
-            success = true;
-            stats.updated += batch.length;
-          }
-        }
-      }
-    }
+    const errors = await this.executeIncrementalTaskSave(projectId, {
+      tasksToCreate,
+      tasksToUpdate,
+      taskIdsToDelete,
+      taskUpdateFieldsById,
+      stats,
+    });
 
     if (errors.length > 0) {
       this.logger.error('增量保存任务部分失败', { errors });
@@ -411,6 +334,96 @@ export class TaskRepositoryBatchService {
     }
 
     return { success: true, stats };
+  }
+
+  private async executeIncrementalTaskSave(
+    projectId: string,
+    input: {
+      tasksToCreate: Task[];
+      tasksToUpdate: Task[];
+      taskIdsToDelete: string[];
+      taskUpdateFieldsById?: Record<string, string[] | undefined>;
+      stats: IncrementalTaskSaveStats;
+    }
+  ): Promise<string[]> {
+    const deleteResult = await this.deleteTaskBatches(projectId, input.taskIdsToDelete);
+    const createResult = await this.upsertTaskBatches(
+      projectId,
+      input.tasksToCreate.map(task => mapTaskToRow(projectId, task)),
+      '批量创建任务失败'
+    );
+    const updateResult = await this.upsertTaskBatches(
+      projectId,
+      buildTaskIncrementalUpdateRows(projectId, input.tasksToUpdate, input.taskUpdateFieldsById),
+      '批量更新任务失败'
+    );
+
+    input.stats.deleted += deleteResult.count;
+    input.stats.created += createResult.count;
+    input.stats.updated += updateResult.count;
+    return [...deleteResult.errors, ...createResult.errors, ...updateResult.errors];
+  }
+
+  private async deleteTaskBatches(projectId: string, taskIds: string[]): Promise<TaskBatchResult> {
+    const result: TaskBatchResult = { count: 0, errors: [] };
+    for (let i = 0; i < taskIds.length; i += TASK_BATCH_SIZE) {
+      const batch = taskIds.slice(i, i + TASK_BATCH_SIZE);
+      const error = await this.retryTaskBatch(() => this.purgeOrSoftDeleteTaskBatch(projectId, batch));
+      if (error) {
+        result.errors.push(`批量删除任务失败（${i}-${i + batch.length}）: ${error}`);
+      } else {
+        result.count += batch.length;
+      }
+    }
+    return result;
+  }
+
+  private async upsertTaskBatches(
+    projectId: string,
+    rows: Record<string, unknown>[],
+    label: string
+  ): Promise<TaskBatchResult> {
+    const result: TaskBatchResult = { count: 0, errors: [] };
+    for (let i = 0; i < rows.length; i += TASK_BATCH_SIZE) {
+      const batch = rows.slice(i, i + TASK_BATCH_SIZE);
+      const error = await this.retryTaskBatch(async () => {
+        const upsertResult = await this.upsertTaskBatchWithSchemaFallback(batch, projectId);
+        return upsertResult.error?.message ?? null;
+      });
+      if (error) {
+        result.errors.push(`${label}（${i}-${i + batch.length}）: ${error}`);
+      } else {
+        result.count += batch.length;
+      }
+    }
+    return result;
+  }
+
+  private async purgeOrSoftDeleteTaskBatch(projectId: string, taskIds: string[]): Promise<string | null> {
+    // 优先走 purge RPC（写入 tombstone + 删除行），阻断旧端 upsert 复活。
+    const purgeV2Result = await this.supabase.client().rpc('purge_tasks_v2', {
+      p_project_id: projectId,
+      p_task_ids: taskIds,
+    });
+    if (!purgeV2Result.error) return null;
+
+    // 后端未部署/权限不足时降级为软删除（不再使用物理 DELETE）。
+    const { error } = await this.supabase.client()
+      .from('tasks')
+      .update({ deleted_at: new Date().toISOString() })
+      .eq('project_id', projectId)
+      .in('id', taskIds);
+    return error?.message ?? null;
+  }
+
+  private async retryTaskBatch(operation: () => Promise<string | null>): Promise<string | null> {
+    for (let retry = 0; retry <= TASK_MAX_RETRIES; retry += 1) {
+      const error = await operation();
+      if (!error) return null;
+      if (retry === TASK_MAX_RETRIES) return error;
+      await new Promise(resolve => setTimeout(resolve, BATCH_RETRY_BASE_MS * (retry + 1)));
+    }
+    return null;
   }
 
   /**
@@ -425,127 +438,120 @@ export class TaskRepositoryBatchService {
     if (!this.supabase.isConfigured) return { success: true };
     
     const stats = { created: 0, updated: 0, deleted: 0 };
-    const errors: string[] = [];
-    const BATCH_SIZE = 50;
-    const MAX_RETRIES = 2;
-
-    // 1. 批量软删除连接（【P1-2 修复】防止连接复活）
-    if (connectionsToDelete.length > 0) {
-      const deletedAt = new Date().toISOString();
-      for (let i = 0; i < connectionsToDelete.length; i += BATCH_SIZE) {
-        const batch = connectionsToDelete.slice(i, i + BATCH_SIZE);
-        
-        for (const conn of batch) {
-          let success = false;
-          for (let retry = 0; retry <= MAX_RETRIES && !success; retry++) {
-            const { data, error } = await this.supabase.client()
-              .from('connections')
-              .update({ deleted_at: deletedAt })
-              .eq('project_id', projectId)
-              .eq('id', conn.id)
-              .select('id');
-            
-            if (error) {
-              if (retry < MAX_RETRIES) {
-                await new Promise(r => setTimeout(r, BATCH_RETRY_BASE_MS * (retry + 1)));
-              } else {
-                errors.push(`删除连接失败 ${conn.id} (${conn.source}->${conn.target}): ${error.message}`);
-              }
-            } else if (!data || data.length === 0) {
-              this.logger.warn('连接删除未命中远端记录，按幂等成功处理', {
-                projectId,
-                connectionId: conn.id,
-                source: conn.source,
-                target: conn.target,
-              });
-              success = true;
-            } else {
-              success = true;
-              stats.deleted += data.length;
-            }
-          }
-        }
-      }
-    }
-
-    // 2. 批量创建连接
-    if (connectionsToCreate.length > 0) {
-      for (let i = 0; i < connectionsToCreate.length; i += BATCH_SIZE) {
-        const batch = connectionsToCreate.slice(i, i + BATCH_SIZE);
-        const rows = batch.map(conn => ({
-          id: conn.id,
-          project_id: projectId,
-          source_id: conn.source,
-          target_id: conn.target,
-          title: conn.title || null,
-          description: conn.description,
-          deleted_at: conn.deletedAt || null
-        }));
-        
-        let success = false;
-        for (let retry = 0; retry <= MAX_RETRIES && !success; retry++) {
-          const { error } = await this.supabase.client()
-            .from('connections')
-            .upsert(rows, { onConflict: 'id' });
-          
-          if (error) {
-            if (retry < MAX_RETRIES) {
-              await new Promise(r => setTimeout(r, BATCH_RETRY_BASE_MS * (retry + 1)));
-            } else {
-              errors.push(`批量创建连接失败（${i}-${i + batch.length}）: ${error.message}`);
-            }
-          } else {
-            success = true;
-            stats.created += batch.length;
-          }
-        }
-      }
-    }
-
-    // 3. 批量更新连接（包括软删除状态）
-    if (connectionsToUpdate.length > 0) {
-      for (let i = 0; i < connectionsToUpdate.length; i += BATCH_SIZE) {
-        const batch = connectionsToUpdate.slice(i, i + BATCH_SIZE);
-        const rows = batch.map(conn => ({
-          id: conn.id,
-          project_id: projectId,
-          source_id: conn.source,
-          target_id: conn.target,
-          title: conn.title || null,
-          description: conn.description,
-          deleted_at: conn.deletedAt || null  // 包含软删除状态
-        }));
-        
-        let success = false;
-        for (let retry = 0; retry <= MAX_RETRIES && !success; retry++) {
-          const { error } = await this.supabase.client()
-            .from('connections')
-            .upsert(rows, { onConflict: 'id' });
-          
-          if (error) {
-            if (retry < MAX_RETRIES) {
-              await new Promise(r => setTimeout(r, BATCH_RETRY_BASE_MS * (retry + 1)));
-            } else {
-              errors.push(`批量更新连接失败（${i}-${i + batch.length}）: ${error.message}`);
-            }
-          } else {
-            success = true;
-            stats.updated += batch.length;
-          }
-        }
-      }
-    }
+    const errors = await this.executeIncrementalConnectionSync(projectId, {
+      connectionsToCreate,
+      connectionsToUpdate,
+      connectionsToDelete,
+      stats,
+    });
 
     if (errors.length > 0) {
       this.logger.error('增量同步连接部分失败', { errors });
-      return { 
-        success: false, 
+      return {
+        success: false,
         error: errors.join('; '),
         stats
       };
     }
 
     return { success: true, stats };
+  }
+
+  private async executeIncrementalConnectionSync(
+    projectId: string,
+    input: {
+      connectionsToCreate: Connection[];
+      connectionsToUpdate: Connection[];
+      connectionsToDelete: ConnectionDeleteSummary[];
+      stats: IncrementalConnectionSyncStats;
+    }
+  ): Promise<string[]> {
+    const deleteResult = await this.deleteConnectionSummariesById(projectId, input.connectionsToDelete);
+    const createResult = await this.upsertConnectionBatchesById(projectId, input.connectionsToCreate, '批量创建连接失败');
+    const updateResult = await this.upsertConnectionBatchesById(projectId, input.connectionsToUpdate, '批量更新连接失败');
+
+    input.stats.deleted += deleteResult.count;
+    input.stats.created += createResult.count;
+    input.stats.updated += updateResult.count;
+    return [...deleteResult.errors, ...createResult.errors, ...updateResult.errors];
+  }
+
+  private async deleteConnectionSummariesById(
+    projectId: string,
+    connections: ConnectionDeleteSummary[]
+  ): Promise<ConnectionBatchResult> {
+    const result: ConnectionBatchResult = { count: 0, errors: [] };
+    const deletedAt = new Date().toISOString();
+    for (let i = 0; i < connections.length; i += CONNECTION_BATCH_SIZE) {
+      const batch = connections.slice(i, i + CONNECTION_BATCH_SIZE);
+      for (const conn of batch) {
+        const deleteResult = await this.deleteConnectionSummaryById(projectId, conn, deletedAt);
+        result.count += deleteResult.count;
+        result.errors.push(...deleteResult.errors);
+      }
+    }
+    return result;
+  }
+
+  private async deleteConnectionSummaryById(
+    projectId: string,
+    conn: ConnectionDeleteSummary,
+    deletedAt: string
+  ): Promise<ConnectionBatchResult> {
+    let matchedRows = 0;
+    const errors = await this.retryConnectionOperation(async () => {
+      const { data, error } = await this.supabase.client()
+        .from('connections')
+        .update({ deleted_at: deletedAt })
+        .eq('project_id', projectId)
+        .eq('id', conn.id)
+        .select('id');
+      if (error) return [error.message];
+      matchedRows = data?.length ?? 0;
+      return [];
+    });
+
+    if (errors.length > 0) {
+      return {
+        count: 0,
+        errors: [`删除连接失败 ${conn.id} (${conn.source}->${conn.target}): ${errors.join(', ')}`],
+      };
+    }
+
+    if (matchedRows === 0) {
+      this.logger.warn('连接删除未命中远端记录，按幂等成功处理', {
+        projectId,
+        connectionId: conn.id,
+        source: conn.source,
+        target: conn.target,
+      });
+    }
+    return { count: matchedRows, errors: [] };
+  }
+
+  private async upsertConnectionBatchesById(
+    projectId: string,
+    connections: Connection[],
+    label: string
+  ): Promise<ConnectionBatchResult> {
+    const result: ConnectionBatchResult = { count: 0, errors: [] };
+    for (let i = 0; i < connections.length; i += CONNECTION_BATCH_SIZE) {
+      const batch = connections.slice(i, i + CONNECTION_BATCH_SIZE);
+      const rows = batch.map(conn => this.mapConnectionToRow(projectId, conn));
+      const errors = await this.retryConnectionOperation(async () => {
+        const { error } = await this.supabase.client()
+          .from('connections')
+          .upsert(rows, { onConflict: 'id' });
+        return error ? [error.message] : [];
+      });
+
+      if (errors.length > 0) {
+        result.errors.push(`${label}（${i}-${i + batch.length}）: ${errors.join(', ')}`);
+      } else {
+        result.count += batch.length;
+      }
+    }
+    return result;
   }
 
   // ========== 批量删除 ==========
@@ -604,15 +610,18 @@ export class TaskRepositoryBatchService {
     // 【P1-2 修复】软删除替代硬删除，防止连接复活
     const deletedAt = new Date().toISOString();
     for (const conn of connections) {
-      const { error } = await this.supabase.client()
-        .from('connections')
-        .update({ deleted_at: deletedAt })
-        .eq('project_id', projectId)
-        .eq('source_id', conn.source)
-        .eq('target_id', conn.target);
-      
-      if (error) {
-        errors.push(`删除连接 ${conn.source}->${conn.target} 失败: ${error.message}`);
+      const deleteErrors = await this.retryConnectionOperation(async () => {
+        const { error } = await this.supabase.client()
+          .from('connections')
+          .update({ deleted_at: deletedAt })
+          .eq('project_id', projectId)
+          .eq('source_id', conn.source)
+          .eq('target_id', conn.target);
+        return error ? [error.message] : [];
+      });
+
+      if (deleteErrors.length > 0) {
+        errors.push(`删除连接 ${conn.source}->${conn.target} 失败: ${deleteErrors.join(', ')}`);
       }
     }
 
@@ -633,14 +642,18 @@ export class TaskRepositoryBatchService {
       .from('tasks')
       .upsert(rows as never, { onConflict: 'id' });
 
+    const maxSchemaFallbackAttempts = 3;
     let result = await upsertBatch(batch.map(row => getCompatibleTaskWriteRow(row)));
-    if (result.error && markTaskCompletedAtColumnUnavailable(result.error)) {
-      this.logger.warn('tasks.completed_at 缺失，任务批量写入已降级为旧 schema 写入', {
+    for (let attempt = 1; result.error && attempt < maxSchemaFallbackAttempts; attempt += 1) {
+      if (!markTaskCompletedAtColumnUnavailable(result.error)) {
+        break;
+      }
+      this.logger.warn('tasks 可选字段缺失，任务批量写入已降级为旧 schema 写入', {
         projectId,
         batchSize: batch.length,
         error: result.error,
       });
-      result = await upsertBatch(batch.map(row => omitTaskCompletedAtColumn(row)));
+      result = await upsertBatch(batch.map(row => getCompatibleTaskWriteRow(row)));
     }
 
     return result;
@@ -654,11 +667,13 @@ export class TaskRepositoryBatchService {
     if (!this.supabase.isConfigured) return [];
 
     // 【P2-4 修复】使用具体字段替代 select('*')
-    const { data, error } = await this.supabase.client()
+    const { data, error } = await fetchAllSupabasePages<ConnectionRow>(() => this.supabase.client()
       .from('connections')
       .select(FIELD_SELECT_CONFIG.CONNECTION_FULL_FIELDS)
       .eq('project_id', projectId)
-      .is('deleted_at', null);
+      .is('deleted_at', null)
+      .order('updated_at', { ascending: true })
+      .order('id', { ascending: true }));
 
     if (error) {
       this.logger.error('Failed to load connections', error);
@@ -668,31 +683,16 @@ export class TaskRepositoryBatchService {
     return (data || []).map(row => this.mapRowToConnection(row as ConnectionRow));
   }
 
-  /** 将 Task 模型映射为数据库行格式 */
-  private mapTaskToRow(projectId: string, task: Task): Partial<TaskRow> {
+  /** 将 Connection 模型映射为数据库行格式，保留客户端生成的稳定 ID */
+  private mapConnectionToRow(projectId: string, conn: Connection): ConnectionWriteRow {
     return {
-      id: task.id,
+      id: conn.id,
       project_id: projectId,
-      parent_id: task.parentId,
-      title: task.title,
-      content: task.content,
-      stage: task.stage,
-      order: task.order,
-      rank: task.rank,
-      status: task.status,
-      x: task.x,
-      y: task.y,
-      short_id: task.shortId ?? null,
-      priority: task.priority ?? null,
-      due_date: task.dueDate ?? null,
-      expected_minutes: task.expected_minutes ?? null,
-      cognitive_load: task.cognitive_load ?? null,
-      wait_minutes: task.wait_minutes ?? null,
-      tags: task.tags ?? [],
-      attachments: task.attachments ?? [],
-      deleted_at: task.deletedAt ?? null,
-      completed_at: task.completedAt ?? null,
-      // 注意：不需要手动设置 updated_at，数据库触发器会自动更新
+      source_id: conn.source,
+      target_id: conn.target,
+      title: conn.title || null,
+      description: conn.description,
+      deleted_at: conn.deletedAt || null,
     };
   }
 

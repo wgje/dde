@@ -12,6 +12,7 @@ import { SyncCoordinatorService } from '../../../services/sync-coordinator.servi
 import { ConflictAutoResolverService } from '../../../services/conflict-auto-resolver.service';
 import { LoggerService } from '../../../services/logger.service';
 import { ProjectStore } from '../../core/state/stores';
+import { captureConflictFingerprint } from '../../../services/project-operation-conflict-fingerprint';
 
 function createConflictRecord(remoteSnapshotFresh = false) {
   const now = '2026-03-30T00:00:00.000Z';
@@ -46,6 +47,35 @@ function createConflictRecord(remoteSnapshotFresh = false) {
   };
 }
 
+function createTask(id: string, title: string, updatedAt: string) {
+  return {
+    id,
+    title,
+    content: title,
+    stage: null,
+    parentId: null,
+    order: 0,
+    rank: 0,
+    status: 'todo' as const,
+    x: 0,
+    y: 0,
+    createdDate: '2026-03-30T00:00:00.000Z',
+    updatedAt,
+    displayId: id,
+  };
+}
+
+function createConnection(id: string, source: string, target: string, title: string, updatedAt: string) {
+  return {
+    id,
+    source,
+    target,
+    title,
+    description: title,
+    updatedAt,
+  };
+}
+
 describe('DashboardModalComponent conflict resolution', () => {
   let component: DashboardModalComponent;
 
@@ -65,6 +95,7 @@ describe('DashboardModalComponent conflict resolution', () => {
     isSyncing: false,
     syncError: null as string | null,
     backgroundSyncNotice: null as string | null,
+    cloudSyncPausedReason: null as 'no-session' | 'refresh-failed' | null,
     offlineMode: false,
   });
 
@@ -139,6 +170,83 @@ describe('DashboardModalComponent conflict resolution', () => {
     });
 
     component = runInInjectionContext(injector, () => new DashboardModalComponent());
+  });
+
+  it('loadConflicts 应把 task 操作级冲突证据映射到任务差异数据源', async () => {
+    const localTask = createTask('task-1', '本地标题', '2026-03-30T00:05:00.000Z');
+    const remoteTask = createTask('task-1', '云端标题', '2026-03-30T00:10:00.000Z');
+    const record = {
+      ...createConflictRecord(false),
+      operationConflicts: [
+        {
+          actionType: 'task:update' as const,
+          entityType: 'task' as const,
+          entityId: 'task-1',
+          projectId: 'proj-1',
+          operationId: 'op-task-1',
+          localEntity: localTask,
+          remoteEntity: remoteTask,
+          message: '云端任务更新较新',
+          conflictedAt: '2026-03-30T00:11:00.000Z',
+          reason: 'remote-newer' as const,
+        },
+      ],
+    };
+    conflictStorageMock.getAllConflicts.mockResolvedValueOnce([record]);
+
+    await component.loadConflicts();
+
+    const [conflict] = component.conflictItems();
+    expect(conflict.localTasks).toEqual([localTask]);
+    expect(conflict.remoteTasks).toEqual([remoteTask]);
+    expect(conflict.localTaskCount).toBe(1);
+    expect(conflict.remoteTaskCount).toBe(1);
+  });
+
+  it('loadConflicts 应把 connection 操作级冲突证据映射为可见摘要', async () => {
+    const localConnection = createConnection('conn-1', 'task-a', 'task-b', '本地关联', '2026-03-30T00:05:00.000Z');
+    const remoteConnection = createConnection('conn-1', 'task-a', 'task-c', '云端关联', '2026-03-30T00:10:00.000Z');
+    const record = {
+      ...createConflictRecord(false),
+      operationConflicts: [
+        {
+          actionType: 'connection:update' as const,
+          entityType: 'connection' as const,
+          entityId: 'conn-1',
+          projectId: 'proj-1',
+          operationId: 'op-conn-1',
+          localEntity: localConnection,
+          remoteEntity: remoteConnection,
+          message: '云端关联更新较新',
+          conflictedAt: '2026-03-30T00:11:00.000Z',
+          reason: 'remote-newer' as const,
+        },
+      ],
+    };
+    conflictStorageMock.getAllConflicts.mockResolvedValueOnce([record]);
+
+    await component.loadConflicts();
+
+    const [conflict] = component.conflictItems() as unknown as Array<{
+      operationConflictSummaries: Array<{
+        id: string;
+        actionLabel: string;
+        reasonLabel: string;
+        localSummary: string;
+        remoteSummary: string;
+        message: string;
+      }>;
+    }>;
+    expect(conflict.operationConflictSummaries).toEqual([
+      {
+        id: 'op-conn-1',
+        actionLabel: '更新关联',
+        reasonLabel: '云端版本较新',
+        localSummary: 'task-a -> task-b · 本地关联',
+        remoteSummary: 'task-a -> task-c · 云端关联',
+        message: '云端关联更新较新',
+      },
+    ]);
   });
 
   it('resolveUseRemote 不应把存储中的 stale remote 重新注入 active conflict', async () => {
@@ -294,6 +402,73 @@ describe('DashboardModalComponent conflict resolution', () => {
     );
   });
 
+  it('applyAutoResolution 执行前应阻止旧 UI 建议覆盖已更新的冲突证据', async () => {
+    const originalRecord = createConflictRecord(true);
+    const localTask = createTask('task-1', '本地标题', '2026-03-30T00:05:00.000Z');
+    const remoteTask = createTask('task-1', '云端标题', '2026-03-30T00:10:00.000Z');
+    const latestRecord = {
+      ...originalRecord,
+      operationConflicts: [{
+        actionType: 'task:update' as const,
+        entityType: 'task' as const,
+        entityId: 'task-1',
+        projectId: 'proj-1',
+        operationId: 'op-task-new',
+        localEntity: localTask,
+        remoteEntity: remoteTask,
+        message: '后台同步追加了新的任务冲突证据',
+        conflictedAt: '2026-03-30T00:11:00.000Z',
+        reason: 'remote-newer' as const,
+      }],
+    };
+    const staleConflict = {
+      projectId: 'proj-1',
+      projectName: 'Local Project',
+      reason: 'version_mismatch',
+      reasonLabel: '版本不匹配',
+      conflictedAt: '2026-03-30T00:00:00.000Z',
+      localTaskCount: 1,
+      remoteTaskCount: 1,
+      localTasks: [localTask],
+      remoteTasks: [remoteTask],
+      operationConflictSummaries: [],
+      remoteSnapshotFresh: true,
+      isResolving: false,
+      autoReport: {
+        projectId: 'proj-1',
+        recommendations: [{
+          taskId: 'task-1',
+          title: 'Task 1',
+          recommendation: 'remote',
+          confidence: 'auto',
+          reason: '云端版本较新',
+          reasoning: ['云端更新时间更晚'],
+          conflictedFields: ['content'],
+        }],
+        autoCount: 1,
+        suggestCount: 0,
+        manualCount: 0,
+        generatedAt: '2026-03-30T00:00:00.000Z',
+        overallSuggestion: '可直接应用系统建议',
+      },
+      taskResolutions: new Map(),
+      selectiveMode: false,
+      sourceFingerprint: captureConflictFingerprint(originalRecord, null, 'user-1'),
+    } as unknown as Parameters<DashboardModalComponent['applyAutoResolution']>[0];
+    conflictStorageMock.getConflict.mockResolvedValueOnce(latestRecord);
+    const loadConflictsSpy = vi.spyOn(component, 'loadConflicts').mockResolvedValue(undefined);
+
+    await component.applyAutoResolution(staleConflict);
+
+    expect(conflictStorageMock.getConflict).toHaveBeenCalledWith('proj-1');
+    expect(projectOpsMock.resolveConflictWithPlan).not.toHaveBeenCalled();
+    expect(loadConflictsSpy).toHaveBeenCalled();
+    expect(toastMock.warning).toHaveBeenCalledWith(
+      '冲突已更新',
+      '冲突数据已变化，已刷新列表，请基于最新状态重新应用系统建议',
+    );
+  });
+
   it('retryAll 应先重放 RetryQueue，再处理 ActionQueue', async () => {
     await component.retryAll();
 
@@ -336,6 +511,20 @@ describe('DashboardModalComponent conflict resolution', () => {
       syncState.set({ ...syncState(), backgroundSyncNotice: null });
       expect(component.backgroundSyncNotice()).toBeNull();
       expect(component.syncError()).toBe('真错误');
+    });
+  });
+
+  describe('cloudSyncPausedReason 通道（本地可用但云同步暂停）', () => {
+    it('网络已恢复但会话不可用时应显示本地可用而非连接中断', () => {
+      syncState.set({
+        ...syncState(),
+        isOnline: true,
+        offlineMode: true,
+        cloudSyncPausedReason: 'no-session',
+      });
+
+      expect(component.detailedStatus()).toBe('本地数据可用 - 登录后继续云同步');
+      expect(component.hasIssues()).toBe(true);
     });
   });
 });

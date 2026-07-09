@@ -28,7 +28,7 @@ export function createPostHandoffSwRegistrationStrategy(
 
     function cleanup(): void {
       window.removeEventListener('nanoflow:boot-stage', onBootStage as EventListener);
-      if (delayedTimer) {
+      if (delayedTimer !== null) {
         clearTimeout(delayedTimer);
         delayedTimer = null;
       }
@@ -44,7 +44,7 @@ export function createPostHandoffSwRegistrationStrategy(
     }
 
     function scheduleRegistration(): void {
-      if (completed || delayedTimer) return;
+      if (completed || delayedTimer !== null) return;
       delayedTimer = setTimeout(() => completeRegistration(), delayMs);
     }
 

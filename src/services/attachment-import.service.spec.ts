@@ -23,6 +23,7 @@ import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
 import { SupabaseClientService } from './supabase-client.service';
 import { TaskOperationAdapterService } from './task-operation-adapter.service';
+import { parseZipEntries, type ParseZipEntriesOptions } from './attachment-import-zip.helpers';
 
 describe('AttachmentImportService', () => {
   let service: AttachmentImportService;
@@ -42,6 +43,7 @@ describe('AttachmentImportService', () => {
   };
   let mockTaskOpsAdapter: {
     addTaskAttachment: ReturnType<typeof vi.fn>;
+    addTaskAttachmentToProject: ReturnType<typeof vi.fn>;
   };
   
   const mockLogger = {
@@ -87,6 +89,7 @@ describe('AttachmentImportService', () => {
 
     mockTaskOpsAdapter = {
       addTaskAttachment: vi.fn(),
+      addTaskAttachmentToProject: vi.fn(() => true),
     };
     
     const injector = Injector.create({
@@ -159,10 +162,132 @@ describe('AttachmentImportService', () => {
         'task-1',
         expect.any(File)
       );
-      expect(mockTaskOpsAdapter.addTaskAttachment).toHaveBeenCalledWith(
+      expect(mockTaskOpsAdapter.addTaskAttachmentToProject).toHaveBeenCalledWith(
+        'project-1',
         'task-1',
         expect.objectContaining({ id: 'att-1' })
       );
+    });
+
+    it('条目带有项目 ID 时应上传到该项目而不是导入入口项目', async () => {
+      const items: AttachmentImportItem[] = [
+        {
+          projectId: 'project-a',
+          taskId: 'task-a',
+          metadata: { id: 'att-a', name: 'a.txt', size: 4, mimeType: 'text/plain' },
+          data: new Blob(['demo'], { type: 'text/plain' }),
+        },
+        {
+          projectId: 'project-b',
+          taskId: 'task-b',
+          metadata: { id: 'att-b', name: 'b.txt', size: 4, mimeType: 'text/plain' },
+          data: new Blob(['demo'], { type: 'text/plain' }),
+        },
+      ];
+
+      const result = await service.importAttachments('fallback-project', items);
+
+      expect(result.success).toBe(true);
+      expect(mockAttachmentService.uploadFile).toHaveBeenCalledTimes(2);
+      const uploadTargets = mockAttachmentService.uploadFile.mock.calls.map(([, projectId, taskId]) => ({
+        projectId,
+        taskId,
+      }));
+      expect(uploadTargets).toEqual(expect.arrayContaining([
+        { projectId: 'project-a', taskId: 'task-a' },
+        { projectId: 'project-b', taskId: 'task-b' },
+      ]));
+      expect(uploadTargets).not.toContainEqual({ projectId: 'fallback-project', taskId: 'task-a' });
+      expect(uploadTargets).not.toContainEqual({ projectId: 'fallback-project', taskId: 'task-b' });
+      expect(mockTaskOpsAdapter.addTaskAttachmentToProject).toHaveBeenCalledWith(
+        'project-a',
+        'task-a',
+        expect.objectContaining({ name: 'a.txt' }),
+      );
+      expect(mockTaskOpsAdapter.addTaskAttachmentToProject).toHaveBeenCalledWith(
+        'project-b',
+        'task-b',
+        expect.objectContaining({ name: 'b.txt' }),
+      );
+    });
+
+    it('应保留上传生成的附件 ID，确保后续刷新/下载路径一致', async () => {
+      mockAttachmentService.uploadFile.mockResolvedValue({
+        success: true,
+        attachment: {
+          id: 'generated-upload-id',
+          name: 'restored.txt',
+          type: 'file',
+          url: 'https://example.com/restored.txt',
+          mimeType: 'text/plain',
+          size: 4,
+          createdAt: '2026-06-01T00:00:00.000Z',
+        },
+      });
+      const items: AttachmentImportItem[] = [
+        {
+          projectId: 'project-1',
+          taskId: 'task-1',
+          metadata: { id: 'original-att-id', name: 'restored.txt', size: 4, mimeType: 'text/plain' },
+          data: new Blob(['demo'], { type: 'text/plain' }),
+        },
+      ];
+
+      const result = await service.importAttachments('project-1', items);
+
+      expect(result.success).toBe(true);
+      expect(mockTaskOpsAdapter.addTaskAttachmentToProject).toHaveBeenCalledWith(
+        'project-1',
+        'task-1',
+        expect.objectContaining({
+          id: 'generated-upload-id',
+          url: 'https://example.com/restored.txt',
+        }),
+      );
+    });
+
+    it('目标任务不存在时应标记导入失败，而不是把上传成功计为成功', async () => {
+      mockTaskOpsAdapter.addTaskAttachmentToProject.mockReturnValue(false);
+      const items: AttachmentImportItem[] = [
+        {
+          projectId: 'project-1',
+          taskId: 'missing-task',
+          metadata: { id: 'att-1', name: 'missing.txt', size: 4, mimeType: 'text/plain' },
+          data: new Blob(['demo'], { type: 'text/plain' }),
+        },
+      ];
+
+      const result = await service.importAttachments('project-1', items);
+
+      expect(result.success).toBe(false);
+      expect(result.failed).toBe(1);
+      expect(result.imported).toBe(0);
+      expect(result.errors[0]).toEqual(expect.objectContaining({
+        taskId: 'missing-task',
+        error: expect.stringContaining('目标任务不存在'),
+      }));
+    });
+
+    it('异步附件写入持久化失败时应标记导入失败', async () => {
+      mockTaskOpsAdapter.addTaskAttachmentToProject.mockResolvedValue(false);
+      const items: AttachmentImportItem[] = [
+        {
+          projectId: 'project-1',
+          taskId: 'task-1',
+          metadata: { id: 'att-1', name: 'durable-fail.txt', size: 4, mimeType: 'text/plain' },
+          data: new Blob(['demo'], { type: 'text/plain' }),
+        },
+      ];
+
+      const result = await service.importAttachments('project-1', items);
+
+      expect(result.success).toBe(false);
+      expect(result.failed).toBe(1);
+      expect(result.imported).toBe(0);
+      expect(result.errors[0]).toEqual(expect.objectContaining({
+        taskId: 'task-1',
+        error: expect.stringContaining('目标任务不存在'),
+      }));
     });
     
     it('上传失败应记录错误', async () => {
@@ -255,6 +380,43 @@ describe('AttachmentImportService', () => {
       expect(content).toBe('demo');
     });
 
+    it('应按 manifest 中 taskIds 与 projectIds 的位置保留跨项目引用', async () => {
+      const manifest = {
+        version: '1.0',
+        exportedAt: new Date().toISOString(),
+        totalAttachments: 1,
+        totalSize: 4,
+        successCount: 1,
+        failedCount: 0,
+        skippedCount: 0,
+        attachments: [
+          {
+            id: 'att-shared',
+            taskIds: ['task-a', 'task-b'],
+            projectIds: ['project-a', 'project-b'],
+            name: 'shared.txt',
+            mimeType: 'text/plain',
+            size: 4,
+            bundlePath: 'attachments/att-shared.txt',
+            downloadStatus: 'success',
+          }
+        ]
+      };
+
+      const zipData = createStoredZip([
+        { path: 'manifest.json', text: JSON.stringify(manifest) },
+        { path: 'attachments/att-shared.txt', text: 'demo' },
+      ]);
+
+      const items = await service.extractAttachmentsFromZip(zipData, new Map());
+
+      expect(items).toHaveLength(2);
+      expect(items.map(({ projectId, taskId }) => ({ projectId, taskId }))).toEqual([
+        { projectId: 'project-a', taskId: 'task-a' },
+        { projectId: 'project-b', taskId: 'task-b' },
+      ]);
+    });
+
     it('无 manifest 时应回退 taskAttachmentMap 路径匹配', async () => {
       const zipData = createStoredZip([
         { path: 'attachments/task-1/att-1.txt', text: 'fallback' },
@@ -267,6 +429,82 @@ describe('AttachmentImportService', () => {
       expect(items).toHaveLength(1);
       expect(items[0]?.taskId).toBe('task-1');
       expect(items[0]?.zipPath).toBe('attachments/task-1/att-1.txt');
+    });
+
+    it('应拒绝声明解压尺寸超过限制的 ZIP 条目', async () => {
+      const manifest = {
+        attachments: [
+          {
+            id: 'att-oversize',
+            taskIds: ['task-1'],
+            projectIds: ['project-1'],
+            name: 'oversize.txt',
+            mimeType: 'text/plain',
+            size: ATTACHMENT_IMPORT_CONFIG.MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES + 1,
+            bundlePath: 'attachments/att-oversize.txt',
+            downloadStatus: 'success',
+          }
+        ]
+      };
+      const zipData = createStoredZip([
+        { path: 'manifest.json', text: JSON.stringify(manifest) },
+        {
+          path: 'attachments/att-oversize.txt',
+          text: 'x',
+          declaredSize: ATTACHMENT_IMPORT_CONFIG.MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES + 1,
+        },
+      ]);
+
+      await expect(service.extractAttachmentsFromZip(zipData, new Map()))
+        .rejects.toThrow('ZIP 条目解压后大小超过限制');
+    });
+
+    it('应拒绝实际解压总大小超过限制的 ZIP，即使中心目录低报尺寸', async () => {
+      const zipData = createStoredZip(
+        Array.from({ length: 11 }, (_, index) => ({
+          path: `attachments/att-${index}.txt`,
+          text: 'x',
+          declaredSize: 1,
+        })),
+      );
+      const readZipEntryData = vi.fn().mockResolvedValue({
+        data: { byteLength: ATTACHMENT_IMPORT_CONFIG.MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES } as Uint8Array,
+        uncompressedSize: 1,
+        compressionMethod: 0,
+      });
+      const options: ParseZipEntriesOptions = {
+        limits: createZipLimits(),
+        logger: mockLogger.category(),
+        readZipEntryData,
+      };
+
+      await expect(parseZipEntries(zipData, options))
+        .rejects.toThrow('ZIP 解压后总大小超过限制');
+    });
+
+    it('manifest 引用不安全 ZIP 路径时不应导入附件', async () => {
+      const manifest = {
+        attachments: [
+          {
+            id: 'att-escape',
+            taskIds: ['task-1'],
+            projectIds: ['project-1'],
+            name: 'escape.txt',
+            mimeType: 'text/plain',
+            size: 4,
+            bundlePath: '../escape.txt',
+            downloadStatus: 'success',
+          }
+        ]
+      };
+      const zipData = createStoredZip([
+        { path: 'manifest.json', text: JSON.stringify(manifest) },
+        { path: '../escape.txt', text: 'demo' },
+      ]);
+
+      const items = await service.extractAttachmentsFromZip(zipData, new Map());
+
+      expect(items).toHaveLength(0);
     });
   });
   
@@ -349,7 +587,15 @@ describe('AttachmentImportService', () => {
   });
 });
 
-function createStoredZip(files: Array<{ path: string; text: string }>): ArrayBuffer {
+function createZipLimits() {
+  return {
+    maxEntries: ATTACHMENT_IMPORT_CONFIG.MAX_ZIP_ENTRIES,
+    maxEntryUncompressedBytes: ATTACHMENT_IMPORT_CONFIG.MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES,
+    maxTotalUncompressedBytes: ATTACHMENT_IMPORT_CONFIG.MAX_ZIP_TOTAL_UNCOMPRESSED_BYTES,
+  };
+}
+
+function createStoredZip(files: Array<{ path: string; text: string; declaredSize?: number }>): ArrayBuffer {
   const encoder = new TextEncoder();
   const fileRecords: Array<{
     nameBytes: Uint8Array;
@@ -365,6 +611,7 @@ function createStoredZip(files: Array<{ path: string; text: string }>): ArrayBuf
   for (const file of files) {
     const nameBytes = encoder.encode(file.path);
     const dataBytes = encoder.encode(file.text);
+    const declaredSize = file.declaredSize ?? dataBytes.length;
     const crc = crc32(dataBytes);
 
     const localHeader = new Uint8Array(30 + nameBytes.length);
@@ -375,7 +622,7 @@ function createStoredZip(files: Array<{ path: string; text: string }>): ArrayBuf
     lv.setUint16(8, 0, true);
     lv.setUint32(14, crc, true);
     lv.setUint32(18, dataBytes.length, true);
-    lv.setUint32(22, dataBytes.length, true);
+    lv.setUint32(22, declaredSize, true);
     lv.setUint16(26, nameBytes.length, true);
     lv.setUint16(28, 0, true);
     localHeader.set(nameBytes, 30);
@@ -389,7 +636,7 @@ function createStoredZip(files: Array<{ path: string; text: string }>): ArrayBuf
     cv.setUint16(10, 0, true);
     cv.setUint32(16, crc, true);
     cv.setUint32(20, dataBytes.length, true);
-    cv.setUint32(24, dataBytes.length, true);
+    cv.setUint32(24, declaredSize, true);
     cv.setUint16(28, nameBytes.length, true);
     cv.setUint16(30, 0, true);
     cv.setUint16(32, 0, true);

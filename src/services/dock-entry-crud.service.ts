@@ -25,15 +25,14 @@ import { DockPromotionService } from './dock-promotion.service';
 import { DockCompletionFlowService } from './dock-completion-flow.service';
 import { DockFragmentRestService } from './dock-fragment-rest.service';
 import { DockEngineLifecycleService } from './dock-engine-lifecycle.service';
-import { sanitizePlannerFields } from '../utils/planner-fields';
 import { 
   buildConsoleVisibleOrderHint, 
-  buildDockEntry, 
   findConsoleEvictionCandidate, 
   patchAllEntries, 
   patchEntryByTaskId 
 } from './dock-engine.utils';
 import { TimerHandle } from '../utils/timer-handle';
+import { prepareDockTaskEntry } from './dock-entry-docking.helpers';
 
 // ---------------------------------------------------------------------------
 //  Context interface — engine 在 constructor 中调用 init() 注入信号引用
@@ -65,11 +64,18 @@ export interface DockEntryCrudContext {
   consoleVisibleEntries: () => DockEntry[];
   
   // Callbacks to engine methods that stay
-  switchToTask: (taskId: string) => void;
+  switchToTask: (taskId: string) => Promise<boolean>;
   completeTask: (taskId: string) => void;
   rebalanceAutoZones: () => void;
   clearFirstMainSelectionWindow: () => void;
   startFirstMainSelectionWindow: (taskId: string) => void;
+  persistDockSnapshotNow: (entries: DockEntry[], overrides?: DockSnapshotOverrides) => Promise<boolean>;
+}
+
+export interface DockSnapshotOverrides {
+  isDockExpanded?: boolean;
+  muteWaitTone?: boolean;
+  focusScrimOn?: boolean;
 }
 
 @Injectable({
@@ -141,75 +147,86 @@ export class DockEntryCrudService {
       detail?: string;
       zoneSource?: DockZoneSource;
     },
-  ): boolean {
-    if (this.ctx.entries().some(entry => entry.taskId === taskId)) return false;
+  ): Promise<boolean> {
+    if (this.ctx.entries().some(entry => entry.taskId === taskId)) return Promise.resolve(false);
 
     const task = this.taskStore.getTask(taskId);
     if (!task || task.status !== 'active') {
       this.logger.warn(`Task ${taskId} is missing or not active; reject docking.`);
-      return false;
+      return Promise.resolve(false);
     }
-    if (!this.inlineCreation.ensureDockCapacity(task.title || 'Untitled task')) return false;
+    if (!this.inlineCreation.ensureDockCapacity(task.title || 'Untitled task')) return Promise.resolve(false);
 
     const sourceProjectId = this.taskSync.resolveTaskProjectId(taskId);
-    const zoneSource: DockZoneSource = options?.zoneSource ?? (lane ? 'manual' : 'auto');
-    const inferredRelation = lane
-      ? {
-          lane,
-          relationScore: lane === 'combo-select' ? PARKING_CONFIG.ZONE_MANUAL_COMBO_SCORE : PARKING_CONFIG.ZONE_MANUAL_BACKUP_SCORE,
-          relationReason: lane === 'combo-select' ? 'manual:combo-select' : 'manual:backup',
-        }
-      : this.zoneService.inferAutoLaneForTask(task, sourceProjectId, taskId);
-    const inheritedLoad: CognitiveLoad = task.cognitive_load === 'high' ? 'high' : 'low';
-    const plannerFields = sanitizePlannerFields({
-      expectedMinutes: options?.expectedMinutes ?? task.expected_minutes,
-      waitMinutes: options?.waitMinutes ?? task.wait_minutes,
-      cognitiveLoad: options?.load ?? task.cognitive_load,
-    });
-    const entry = buildDockEntry({
+    const { entry, plannerFields } = prepareDockTaskEntry({
       taskId,
-      title: task.title || 'Untitled task',
-      content: task.content ?? null,
+      task,
+      lane,
       sourceProjectId,
       currentEntryCount: this.ctx.entries().length,
-      lane: inferredRelation.lane,
-      zoneSource,
-      relationScore: inferredRelation.relationScore,
-      relationReason: inferredRelation.relationReason,
-      plannerFields,
-      inheritedLoad,
       muteWaitTone: this.ctx.muteWaitTone(),
-      options: {
-        sourceKind: options?.sourceKind,
-        sourceSection: options?.sourceSection,
-        detail: options?.detail,
-      },
+      options,
+      inferAutoLane: () => this.zoneService.inferAutoLaneForTask(task, sourceProjectId, taskId),
     });
 
-    if (plannerFields.adjusted) {
-      this.toast.info(DOCK_TOAST.WAIT_CORRECTION_TITLE, DOCK_TOAST.waitCorrectionBody(plannerFields.expectedMinutes ?? 0));
+    const next = [...this.ctx.entries(), entry];
+    return this.persistDockTaskSnapshot(taskId, entry, next, plannerFields.adjusted);
+  }
+
+  private persistDockTaskSnapshot(
+    taskId: string,
+    entry: DockEntry,
+    next: DockEntry[],
+    plannerFieldsAdjusted: boolean,
+  ): Promise<boolean> {
+    return this.ctx.persistDockSnapshotNow(next)
+      .then(persisted => this.applyPersistedDockTaskSnapshot(taskId, entry, next, persisted, plannerFieldsAdjusted))
+      .catch(error => {
+        this.logger.warn('Dock task snapshot persist failed', { taskId, error });
+        return false;
+      });
+  }
+
+  private applyPersistedDockTaskSnapshot(
+    taskId: string,
+    entry: DockEntry,
+    next: DockEntry[],
+    persisted: boolean,
+    plannerFieldsAdjusted: boolean,
+  ): boolean {
+    if (!persisted) {
+      this.logger.warn('Dock task snapshot persisted only in memory', { taskId });
+      return false;
     }
 
-    this.ctx.entries.update(prev => [...prev, entry]);
+    this.ctx.entries.set(next);
     this.ctx.rebalanceAutoZones();
-    this.taskSync.syncTaskPlannerFields(taskId, {
-      expected_minutes: entry.expectedMinutes,
-      cognitive_load: entry.load,
-      wait_minutes: entry.waitMinutes,
-    });
+    this.syncDockTaskPlannerFields(taskId, entry);
+    if (plannerFieldsAdjusted) {
+      this.toast.info(DOCK_TOAST.WAIT_CORRECTION_TITLE, DOCK_TOAST.waitCorrectionBody(entry.expectedMinutes ?? 0));
+    }
 
     if (!this.ctx.firstDragIntervened()) {
       this.setMainTask(taskId);
       this.ctx.firstDragIntervened.set(true);
     }
+
     return true;
+  }
+
+  private syncDockTaskPlannerFields(taskId: string, entry: DockEntry): void {
+    this.taskSync.syncTaskPlannerFields(taskId, {
+      expected_minutes: entry.expectedMinutes,
+      cognitive_load: entry.load,
+      wait_minutes: entry.waitMinutes,
+    });
   }
 
   /**
    * 统一外部拖拽入坞策略：
    * 文本/流程图拖拽默认进入备选区（backup），并视为手动分区。
    */
-  dockTaskFromExternalDrag(taskId: string, sourceSection?: Extract<DockSourceSection, 'text' | 'flow'>): boolean {
+  dockTaskFromExternalDrag(taskId: string, sourceSection?: Extract<DockSourceSection, 'text' | 'flow'>): Promise<boolean> {
     return this.dockTask(taskId, 'backup', {
       sourceSection,
       zoneSource: 'manual',
@@ -391,66 +408,106 @@ export class DockEntryCrudService {
     this.ctx.clearFirstMainSelectionWindow();
   }
 
-  clearDockForExit(): void {
-    this.ctx.entries.set([]);
-    this.ctx.highlightedIds.set(new Set());
-    this.ctx.suspendRecommendationLocked.set(false);
-    this.ctx.suspendChainRootTaskId.set(null);
-    this.ctx.waitEndNotifiedIds.clear();
-    this.ctx.firstDragIntervened.set(false);
-    this.ctx.clearFirstMainSelectionWindow();
-    this.ctx.pendingRadarEviction.set(null);
-    this.ctx.lastConsoleDemotedTaskId.set(null);
-    this.ctx.consoleVisibleOrderHint.set([]);
-  }
-
-  reorderDockEntries(sourceTaskId: string, targetTaskId: string): void {
-    if (!sourceTaskId || !targetTaskId || sourceTaskId === targetTaskId) return;
-
-    this.ctx.entries.update(prev => {
-      const activeEntries = prev.filter(entry => entry.status !== 'completed');
-      const sourceIndex = activeEntries.findIndex(entry => entry.taskId === sourceTaskId);
-      const targetIndex = activeEntries.findIndex(entry => entry.taskId === targetTaskId);
-      if (sourceIndex < 0 || targetIndex < 0) return prev;
-
-      const reordered = [...activeEntries];
-      const [moved] = reordered.splice(sourceIndex, 1);
-      reordered.splice(targetIndex, 0, moved);
-
-      const orderByTaskId = new Map<string, number>();
-      reordered.forEach((entry, index) => {
-        orderByTaskId.set(entry.taskId, index);
-      });
-
-      // completed entries 保留原样但 dockedOrder 推到尾部，避免与 active 序号冲突
-      const completedBaseOrder = reordered.length;
-      let completedOffset = 0;
-      let changed = false;
-      const next = prev.map(entry => {
-        const nextOrder = orderByTaskId.get(entry.taskId);
-        if (nextOrder !== undefined) {
-          if (entry.dockedOrder === nextOrder && entry.manualOrder === nextOrder) return entry;
-          changed = true;
-          return { ...entry, dockedOrder: nextOrder, manualOrder: nextOrder };
-        }
-        // completed 或非活跃 entry：序号推到活跃 entries 之后
-        const tailOrder = completedBaseOrder + completedOffset++;
-        if (entry.dockedOrder === tailOrder) return entry;
-        changed = true;
-        return { ...entry, dockedOrder: tailOrder };
-      });
-      return changed ? next : prev;
+  clearDockForExit(): Promise<boolean> {
+    const next: DockEntry[] = [];
+    return this.ctx.persistDockSnapshotNow(next).then(success => {
+      if (!success) {
+        this.logger.warn('Dock clear-exit snapshot persisted only in memory');
+        return false;
+      }
+      this.ctx.entries.set(next);
+      this.ctx.highlightedIds.set(new Set());
+      this.ctx.suspendRecommendationLocked.set(false);
+      this.ctx.suspendChainRootTaskId.set(null);
+      this.ctx.waitEndNotifiedIds.clear();
+      this.ctx.firstDragIntervened.set(false);
+      this.ctx.clearFirstMainSelectionWindow();
+      this.ctx.pendingRadarEviction.set(null);
+      this.ctx.lastConsoleDemotedTaskId.set(null);
+      this.ctx.consoleVisibleOrderHint.set([]);
+      return true;
     });
   }
 
-  toggleMuteWaitTone(): void {
-    const next = !this.ctx.muteWaitTone();
-    this.ctx.muteWaitTone.set(next);
-    this.ctx.entries.update(prev => patchAllEntries(prev, { snoozeRingMuted: next }));
+  reorderDockEntries(sourceTaskId: string, targetTaskId: string): Promise<boolean> {
+    if (!sourceTaskId || !targetTaskId || sourceTaskId === targetTaskId) {
+      return Promise.resolve(false);
+    }
+
+    const current = this.ctx.entries();
+    const next = this.buildReorderedEntries(current, sourceTaskId, targetTaskId);
+    if (next === current) return Promise.resolve(false);
+
+    return this.ctx.persistDockSnapshotNow(next).then(success => {
+      if (!success) {
+        this.logger.warn('Dock reorder snapshot persisted only in memory', {
+          sourceTaskId,
+          targetTaskId,
+        });
+        return false;
+      }
+      this.ctx.entries.set(next);
+      return true;
+    });
   }
 
-  setDockExpanded(expanded: boolean): void {
-    this.ctx.dockExpanded.set(expanded);
+  private buildReorderedEntries(
+    entries: DockEntry[],
+    sourceTaskId: string,
+    targetTaskId: string,
+  ): DockEntry[] {
+    const activeEntries = entries.filter(entry => entry.status !== 'completed');
+    const sourceIndex = activeEntries.findIndex(entry => entry.taskId === sourceTaskId);
+    const targetIndex = activeEntries.findIndex(entry => entry.taskId === targetTaskId);
+    if (sourceIndex < 0 || targetIndex < 0) return entries;
+
+    const reordered = [...activeEntries];
+    const [moved] = reordered.splice(sourceIndex, 1);
+    reordered.splice(targetIndex, 0, moved);
+
+    const orderByTaskId = new Map<string, number>();
+    reordered.forEach((entry, index) => {
+      orderByTaskId.set(entry.taskId, index);
+    });
+
+    // completed entries 保留原样但 dockedOrder 推到尾部，避免与 active 序号冲突
+    const completedBaseOrder = reordered.length;
+    let completedOffset = 0;
+    let changed = false;
+    const next = entries.map(entry => {
+      const nextOrder = orderByTaskId.get(entry.taskId);
+      if (nextOrder !== undefined) {
+        if (entry.dockedOrder === nextOrder && entry.manualOrder === nextOrder) return entry;
+        changed = true;
+        return { ...entry, dockedOrder: nextOrder, manualOrder: nextOrder };
+      }
+      // completed 或非活跃 entry：序号推到活跃 entries 之后
+      const tailOrder = completedBaseOrder + completedOffset++;
+      if (entry.dockedOrder === tailOrder) return entry;
+      changed = true;
+      return { ...entry, dockedOrder: tailOrder };
+    });
+
+    return changed ? next : entries;
+  }
+
+  toggleMuteWaitTone(): Promise<boolean> {
+    const next = !this.ctx.muteWaitTone();
+    const nextEntries = patchAllEntries(this.ctx.entries(), { snoozeRingMuted: next });
+    return this.ctx.persistDockSnapshotNow(nextEntries, { muteWaitTone: next }).then(persisted => {
+      if (!persisted) return false;
+      this.ctx.muteWaitTone.set(next);
+      this.ctx.entries.set(nextEntries);
+      return true;
+    });
+  }
+
+  setDockExpanded(expanded: boolean): Promise<boolean> {
+    return this.ctx.persistDockSnapshotNow(this.ctx.entries(), { isDockExpanded: expanded }).then(persisted => {
+      if (!persisted) return false;
+      this.ctx.dockExpanded.set(expanded);
+      return true;
+    });
   }
 
   /**

@@ -6,8 +6,10 @@ import { ActionQueueService } from '../../../services/action-queue.service';
 import { UiStateService } from '../../../services/ui-state.service';
 import { AuthService } from '../../../services/auth.service';
 import { NetworkAwarenessService } from '../../../services/network-awareness.service';
-import { AUTH_CONFIG, FEATURE_FLAGS } from '../../../config';
-import { isLocalModeEnabled } from '../../../services/guards/auth.guard';
+import {
+  readDemoBannerDismissed,
+  resolveRuntimeDemoBannerVisible,
+} from './demo-banner.helpers';
 
 /**
  * 离线状态通知 + 持久化状态指示器组件
@@ -57,7 +59,6 @@ import { isLocalModeEnabled } from '../../../services/guards/auth.guard';
   `,
 })
 export class OfflineBannerComponent {
-  private static readonly DEMO_BANNER_DISMISS_STORAGE_KEY = 'nanoflow.demo-banner-dismissed';
   private syncStateService = inject(SyncStateService);
   private actionQueue = inject(ActionQueueService);
   private toast = inject(ToastService);
@@ -154,7 +155,7 @@ export class OfflineBannerComponent {
   }
 
   private cancelFadeOut(): void {
-    if (this.fadeOutTimer) {
+    if (this.fadeOutTimer !== null) {
       clearTimeout(this.fadeOutTimer);
       this.fadeOutTimer = null;
     }
@@ -168,17 +169,11 @@ export class OfflineBannerComponent {
   }
 
   private showMobileDemoBanner(): boolean {
-    if (!this.isMobile()) {
-      return false;
-    }
-
-    if (this.isDemoBannerDismissed()) {
-      return false;
-    }
-
-    return isLocalModeEnabled()
-      || this.auth.currentUserId() === AUTH_CONFIG.LOCAL_MODE_USER_ID
-      || (FEATURE_FLAGS.DEMO_MODE_ENABLED ?? false);
+    return resolveRuntimeDemoBannerVisible({
+      isMobile: this.isMobile(),
+      dismissed: this.isDemoBannerDismissed(),
+      currentUserId: this.auth.currentUserId(),
+    });
   }
 
   private isDemoBannerDismissed(): boolean {
@@ -186,27 +181,6 @@ export class OfflineBannerComponent {
       return false;
     }
 
-    try {
-      const stored = localStorage.getItem(OfflineBannerComponent.DEMO_BANNER_DISMISS_STORAGE_KEY);
-      if (!stored) {
-        return false;
-      }
-
-      const data = JSON.parse(stored) as { timestamp?: unknown } | null;
-      if (!data || typeof data.timestamp !== 'number') {
-        localStorage.removeItem(OfflineBannerComponent.DEMO_BANNER_DISMISS_STORAGE_KEY);
-        return false;
-      }
-
-      const dismissExpiryMs = 7 * 24 * 60 * 60 * 1000;
-      if (Date.now() - data.timestamp < dismissExpiryMs) {
-        return true;
-      }
-
-      localStorage.removeItem(OfflineBannerComponent.DEMO_BANNER_DISMISS_STORAGE_KEY);
-      return false;
-    } catch {
-      return false;
-    }
+    return readDemoBannerDismissed(localStorage);
   }
 }

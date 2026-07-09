@@ -12,6 +12,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Injector, runInInjectionContext, DestroyRef } from '@angular/core';
 import { AuthService } from './auth.service';
+import { AuthSessionCacheService } from './auth-session-cache.service';
+import { AuthCredentialRequestService } from './auth-credential-request.service';
 import { SupabaseClientService } from './supabase-client.service';
 import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
@@ -44,6 +46,7 @@ describe('AuthService', () => {
     onSessionRestored$: { pipe: ReturnType<typeof vi.fn> };
     publishSessionRestored: ReturnType<typeof vi.fn>;
     publishSessionInvalidated: ReturnType<typeof vi.fn>;
+    publishSessionSignedOut: ReturnType<typeof vi.fn>;
   };
 
   async function ensureRuntimeAuthReady(): Promise<void> {
@@ -135,6 +138,7 @@ describe('AuthService', () => {
       onSessionRestored$: { pipe: vi.fn().mockReturnValue({ subscribe: vi.fn() }) },
       publishSessionRestored: vi.fn(),
       publishSessionInvalidated: vi.fn(),
+      publishSessionSignedOut: vi.fn(),
     };
     
     const mockDestroyRef = {
@@ -148,6 +152,8 @@ describe('AuthService', () => {
         { provide: LoggerService, useValue: mockLogger },
         { provide: EventBusService, useValue: mockEventBus },
         { provide: SentryLazyLoaderService, useValue: mockSentryLazyLoaderService },
+        AuthSessionCacheService,
+        AuthCredentialRequestService,
         { provide: DestroyRef, useValue: mockDestroyRef },
       ],
     });
@@ -471,6 +477,31 @@ describe('AuthService', () => {
       
       // 不应该设置过期标记
       expect(service.sessionExpired()).toBe(false);
+    });
+
+    it('主动登出应携带登出前 userId 发布 session-signed-out 事件（供 SessionManager 丢弃校验快照）', async () => {
+      await ensureRuntimeAuthReady();
+      authStateCallback!('SIGNED_IN', {
+        user: { id: 'user-1', email: 'test@example.com' }
+      });
+
+      await service.signOut();
+
+      expect(mockEventBus.publishSessionSignedOut).toHaveBeenCalledWith('AuthService.signOut', 'user-1');
+      // 主动登出不是过期：不得发布 session-invalidated（那会设置 sessionExpired 并弹提示）
+      expect(mockEventBus.publishSessionInvalidated).not.toHaveBeenCalled();
+    });
+
+    it('远端登出失败时不应发布 session-signed-out 事件', async () => {
+      await ensureRuntimeAuthReady();
+      authStateCallback!('SIGNED_IN', {
+        user: { id: 'user-1', email: 'test@example.com' }
+      });
+      mockSupabaseClient.signOut.mockRejectedValueOnce(new Error('network down'));
+
+      await expect(service.signOut()).rejects.toThrow('network down');
+
+      expect(mockEventBus.publishSessionSignedOut).not.toHaveBeenCalled();
     });
 
     it('主动登出时应同步清理本地 Supabase 凭证与启动预热缓存', async () => {

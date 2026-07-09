@@ -51,21 +51,47 @@ async function triggerDevGate(page: Page): Promise<void> {
   await expect(page.locator('[data-testid="settings-modal"]').first()).toBeHidden({ timeout: 8000 });
   await expect(page.locator('[data-testid="gate-overlay"]').first()).toBeVisible({ timeout: 10000 });
   await expect(page.locator('[data-testid="gate-card"]').first()).toBeVisible({ timeout: 10000 });
-  await expect(page.locator('[data-testid="gate-read-button"]').first()).toBeEnabled({ timeout: 5000 });
+  await expect(page.locator('[data-testid="gate-read-button"]').first()).toBeEnabled({ timeout: 15000 });
 }
 
 async function ensureFlowReady(page: Page): Promise<void> {
-  await testHelpers.clickIfVisible(page.locator('[data-testid="flow-view-tab"]').first(), {
-    timeout: 3000,
-    force: true,
-  });
+  const diagram = page.locator('[data-testid="flow-diagram"]').first();
+  const flowTab = page.locator('[data-testid="flow-view-tab"]').first();
+  const flowRetry = page.getByRole('button', { name: /流程图|加载|重试|刷新页面/i }).first();
+  const staticLoader = page.getByText('加载时间较长，可能是网络问题').first();
 
-  await testHelpers.clickIfVisible(page.getByRole('button', { name: /流程图|加载/i }).first(), {
-    timeout: 1500,
-    force: true,
-  });
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (await testHelpers.isElementVisible(diagram, 1000)) {
+      return;
+    }
 
-  await expect(page.locator('[data-testid="flow-diagram"]').first()).toBeVisible({ timeout: 15000 });
+    await testHelpers.clickIfVisible(flowTab, {
+      timeout: 3000,
+      force: true,
+    });
+
+    await testHelpers.clickIfVisible(flowRetry, {
+      timeout: 1500,
+      force: true,
+    });
+
+    if (await testHelpers.isElementVisible(diagram, 15000)) {
+      return;
+    }
+
+    const shellVisible = await testHelpers.isElementVisible(
+      page.locator('[data-testid="project-shell-main-content"]').first(),
+      1000,
+    );
+    const staticLoaderVisible = await testHelpers.isElementVisible(staticLoader, 500);
+    if (!shellVisible || staticLoaderVisible) {
+      await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => undefined);
+      await testHelpers.waitForAppReady(page);
+      await enterProjectWorkspace(page);
+    }
+  }
+
+  await expect(diagram).toBeVisible({ timeout: 15000 });
 }
 
 async function forceSpeechUnsupported(page: Page): Promise<void> {

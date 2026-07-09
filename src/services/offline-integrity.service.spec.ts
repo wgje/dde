@@ -348,6 +348,32 @@ describe('OfflineIntegrityService', () => {
       expect(() => service.startPeriodicCheck()).not.toThrow();
       expect(() => service.stopPeriodicCheck()).not.toThrow();
     });
+
+    it('销毁后不应重新启动定期校验', () => {
+      const intervalHandle = 1 as unknown as ReturnType<typeof setInterval>;
+      const setIntervalSpy = vi.spyOn(globalThis, 'setInterval').mockImplementation(() => intervalHandle);
+
+      try {
+        service.ngOnDestroy();
+        service.startPeriodicCheck();
+
+        expect(setIntervalSpy).not.toHaveBeenCalled();
+        expect((service as unknown as { checkInterval: ReturnType<typeof setInterval> | null }).checkInterval).toBeNull();
+      } finally {
+        (service as unknown as { checkInterval: ReturnType<typeof setInterval> | null }).checkInterval = null;
+      }
+    });
+
+    it('停止定期校验时应清理句柄为 0 的 interval', () => {
+      (service as unknown as { checkInterval: ReturnType<typeof setInterval> | null }).checkInterval =
+        0 as unknown as ReturnType<typeof setInterval>;
+      const clearIntervalSpy = vi.spyOn(globalThis, 'clearInterval').mockImplementation(() => undefined);
+
+      service.stopPeriodicCheck();
+
+      expect(clearIntervalSpy).toHaveBeenCalledWith(0);
+      expect((service as unknown as { checkInterval: ReturnType<typeof setInterval> | null }).checkInterval).toBeNull();
+    });
     
     it('多次启动应该是安全的', () => {
       service.startPeriodicCheck();

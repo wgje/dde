@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 import { expect, test, type APIRequestContext, type APIResponse } from '@playwright/test';
 
@@ -24,7 +25,11 @@ const FORBIDDEN_CONSOLE_PATTERNS = [
 ];
 
 const deployedBaseUrl = process.env.PLAYWRIGHT_BASE_URL;
-const shouldRun = typeof deployedBaseUrl === 'string' && /^https?:\/\//i.test(deployedBaseUrl);
+const requireSmokeOrigin = createRequire(import.meta.url);
+const { isDeployedSmokeOrigin } = requireSmokeOrigin('../scripts/smoke/deployed-smoke-origin.cjs') as {
+  isDeployedSmokeOrigin: (url: string | undefined) => boolean;
+};
+const shouldRun = isDeployedSmokeOrigin(deployedBaseUrl);
 
 interface ConsoleIssue {
   type: 'console' | 'pageerror' | 'requestfailed' | 'badResponse';

@@ -1,11 +1,28 @@
 import { Component, signal, Output, EventEmitter, computed, ChangeDetectionStrategy, inject, Input } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { Project, Task } from '../../../models';
+import type { Connection, Project, Task } from '../../../models';
 import { ConflictTaskDiffComponent, TaskResolutionMap } from '../components/conflict-task-diff.component';
 import { ConflictAutoResolverService } from '../../../services/conflict-auto-resolver.service';
 import { type ConflictResolutionPlan, type TaskResolutionChoice } from '../../../services/conflict-resolution.types';
+import type { OperationConflictRecord } from '../../../services/conflict-storage.helpers';
 
 type ConflictAction = 'local' | 'remote' | 'merge' | 'plan';
+
+type ConflictModalData = {
+  localProject: Project;
+  remoteProject: Project;
+  projectId: string;
+  operationConflicts?: OperationConflictRecord[];
+};
+
+interface OperationConflictSummary {
+  id: string;
+  actionLabel: string;
+  reasonLabel: string;
+  localSummary: string;
+  remoteSummary: string;
+  message: string;
+}
 
 /**
  * 冲突解决模态框组件
@@ -78,6 +95,36 @@ type ConflictAction = 'local' | 'remote' | 'merge' | 'plan';
             </div>
           </div>
         </div>
+
+        @if (operationConflictSummaries().length > 0) {
+          <div class="mb-4 border border-amber-200 bg-amber-50/70 px-3 py-2.5 text-xs dark:border-amber-800/50 dark:bg-amber-900/20">
+            <div class="mb-2 flex items-center justify-between gap-2">
+              <span class="font-semibold text-amber-800 dark:text-amber-200">操作级冲突证据</span>
+              <span class="text-[10px] text-amber-600 dark:text-amber-300">{{ operationConflictSummaries().length }} 项</span>
+            </div>
+            <div class="space-y-2">
+              @for (summary of operationConflictSummaries(); track summary.id) {
+                <div class="border-l-2 border-amber-300 pl-2 text-[11px] text-stone-600 dark:border-amber-600 dark:text-stone-300">
+                  <div class="mb-1 flex flex-wrap items-center gap-1.5">
+                    <span class="font-medium text-stone-800 dark:text-stone-100">{{ summary.actionLabel }}</span>
+                    <span class="rounded bg-amber-100 px-1 py-0.5 text-[10px] text-amber-700 dark:bg-amber-800/50 dark:text-amber-200">{{ summary.reasonLabel }}</span>
+                  </div>
+                  <div class="grid gap-1 sm:grid-cols-2">
+                    <div class="min-w-0">
+                      <span class="text-stone-400 dark:text-stone-500">本地：</span>
+                      <span class="break-words">{{ summary.localSummary }}</span>
+                    </div>
+                    <div class="min-w-0">
+                      <span class="text-stone-400 dark:text-stone-500">云端：</span>
+                      <span class="break-words">{{ summary.remoteSummary }}</span>
+                    </div>
+                  </div>
+                  <p class="mt-1 break-words text-stone-500 dark:text-stone-400">{{ summary.message }}</p>
+                </div>
+              }
+            </div>
+          </div>
+        }
 
         <!-- 差异详情开关 + 逐任务选择 -->
         <div class="mb-4 flex flex-wrap items-center justify-between gap-2">
@@ -294,11 +341,7 @@ type ConflictAction = 'local' | 'remote' | 'merge' | 'plan';
 export class ConflictModalComponent {
   private readonly autoResolver = inject(ConflictAutoResolverService);
 
-  private readonly conflictDataSignal = signal<{
-    localProject: Project;
-    remoteProject: Project;
-    projectId: string;
-  } | null>(null);
+  private readonly conflictDataSignal = signal<ConflictModalData | null>(null);
   private readonly isResolvingSignal = signal(false);
   private readonly activeResolutionSignal = signal<ConflictAction | null>(null);
 
@@ -308,11 +351,7 @@ export class ConflictModalComponent {
   readonly activeResolution = computed(() => this.activeResolutionSignal());
 
   @Input({ alias: 'conflictData' })
-  set conflictDataInput(value: {
-    localProject: Project;
-    remoteProject: Project;
-    projectId: string;
-  } | null) {
+  set conflictDataInput(value: ConflictModalData | null) {
     this.conflictDataSignal.set(value);
   }
 
@@ -342,13 +381,21 @@ export class ConflictModalComponent {
   /** 计算本地任务列表 */
   localTasks = computed<Task[]>(() => {
     const data = this.conflictData();
-    return data?.localProject?.tasks || [];
+    return this.mergeTaskOperationConflictEvidence(
+      data?.localProject?.tasks || [],
+      data?.operationConflicts,
+      'local',
+    );
   });
 
   /** 计算云端任务列表 */
   remoteTasks = computed<Task[]>(() => {
     const data = this.conflictData();
-    return data?.remoteProject?.tasks || [];
+    return this.mergeTaskOperationConflictEvidence(
+      data?.remoteProject?.tasks || [],
+      data?.operationConflicts,
+      'remote',
+    );
   });
 
   autoReport = computed(() => {
@@ -359,12 +406,15 @@ export class ConflictModalComponent {
 
     return this.autoResolver.analyze(
       data.projectId,
-      data.localProject?.tasks || [],
-      data.remoteProject?.tasks || [],
+      this.localTasks(),
+      this.remoteTasks(),
     );
   });
 
   recommendations = computed(() => this.autoReport()?.recommendations || []);
+  operationConflictSummaries = computed(() => this.mapOperationConflictSummaries(
+    this.conflictData()?.operationConflicts,
+  ));
   overallSuggestion = computed(() => this.autoReport()?.overallSuggestion || '系统已完成冲突诊断');
   activeResolutionLabel = computed(() => {
     switch (this.activeResolution()) {
@@ -431,6 +481,101 @@ export class ConflictModalComponent {
     event.preventDefault();
     event.stopPropagation();
     this.cancel.emit();
+  }
+
+  private mergeTaskOperationConflictEvidence(
+    snapshotTasks: Task[],
+    operationConflicts: OperationConflictRecord[] | undefined,
+    side: 'local' | 'remote',
+  ): Task[] {
+    if (!operationConflicts?.length) {
+      return snapshotTasks;
+    }
+
+    const merged = [...snapshotTasks];
+    const taskIndexes = new Map(merged.map((task, index) => [task.id, index]));
+
+    for (const conflict of operationConflicts) {
+      if (conflict.entityType !== 'task') {
+        continue;
+      }
+
+      const task = side === 'local'
+        ? conflict.localEntity as Task
+        : conflict.remoteEntity as Task | undefined;
+
+      if (!task?.id) {
+        continue;
+      }
+
+      const existingIndex = taskIndexes.get(task.id);
+      if (existingIndex === undefined) {
+        taskIndexes.set(task.id, merged.length);
+        merged.push(task);
+      } else {
+        merged[existingIndex] = task;
+      }
+    }
+
+    return merged;
+  }
+
+  private mapOperationConflictSummaries(
+    operationConflicts: OperationConflictRecord[] | undefined,
+  ): OperationConflictSummary[] {
+    if (!operationConflicts?.length) {
+      return [];
+    }
+
+    return operationConflicts.map((conflict, index) => ({
+      id: conflict.operationId || conflict.actionId || `${conflict.entityType}:${conflict.entityId}:${index}`,
+      actionLabel: this.getOperationConflictActionLabel(conflict.actionType),
+      reasonLabel: this.getOperationConflictReasonLabel(conflict.reason),
+      localSummary: this.summarizeOperationConflictEntity(conflict.localEntity, conflict.entityType),
+      remoteSummary: this.summarizeOperationConflictEntity(conflict.remoteEntity, conflict.entityType),
+      message: conflict.message,
+    }));
+  }
+
+  private getOperationConflictActionLabel(actionType: OperationConflictRecord['actionType']): string {
+    const labels: Record<OperationConflictRecord['actionType'], string> = {
+      'task:create': '创建任务',
+      'task:update': '更新任务',
+      'task:delete': '删除任务',
+      'connection:create': '创建关联',
+      'connection:update': '更新关联',
+      'connection:delete': '删除关联',
+    };
+
+    return labels[actionType];
+  }
+
+  private getOperationConflictReasonLabel(reason: OperationConflictRecord['reason']): string {
+    const labels: Record<OperationConflictRecord['reason'], string> = {
+      'remote-newer': '云端版本较新',
+      'remote-tombstone': '云端已删除',
+      version_mismatch: '版本不匹配',
+    };
+
+    return labels[reason];
+  }
+
+  private summarizeOperationConflictEntity(
+    entity: OperationConflictRecord['localEntity'] | OperationConflictRecord['remoteEntity'],
+    entityType: OperationConflictRecord['entityType'],
+  ): string {
+    if (!entity) {
+      return '无可用快照';
+    }
+
+    if (entityType === 'connection') {
+      const connection = entity as Connection;
+      const endpoints = `${connection.source || '?'} -> ${connection.target || '?'}`;
+      return connection.title ? `${endpoints} · ${connection.title}` : endpoints;
+    }
+
+    const task = entity as Task;
+    return task.title || task.displayId || task.id;
   }
 
   private getPendingManualSelections(): number {

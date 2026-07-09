@@ -3,7 +3,7 @@
  * - main 包体 <= 260KB（raw）
  * - main 静态 import-statement 数量 <= 10
  * - main/polyfills 静态依赖闭包体积 <= 340KB（raw）
- * - workspace shell chunk <= 125KB（raw）
+ * - workspace shell chunk <= 124KB（raw）
  * - modulepreload 数量 <= 10
  * - 首屏 modulepreload 不允许包含 route component chunk
  * - launch.html 必须作为 legacy bootstrap alias，与旧安装图标保持同一路启动能力
@@ -24,7 +24,7 @@ const STATS_CANDIDATES = [
 const STARTUP_MAIN_MAX_KB = Number(process.env.STARTUP_MAIN_MAX_KB || 260);
 const STARTUP_MODULEPRELOAD_MAX = Number(process.env.STARTUP_MODULEPRELOAD_MAX || 8);
 const STARTUP_INITIAL_STATIC_JS_MAX_KB = Number(process.env.STARTUP_INITIAL_STATIC_JS_MAX_KB || 340);
-const STARTUP_WORKSPACE_CHUNK_MAX_KB = Number(process.env.STARTUP_WORKSPACE_CHUNK_MAX_KB || 125);
+const STARTUP_WORKSPACE_CHUNK_MAX_KB = Number(process.env.STARTUP_WORKSPACE_CHUNK_MAX_KB || 124);
 const STARTUP_MAIN_STATIC_IMPORT_MAX = Number(process.env.STARTUP_MAIN_STATIC_IMPORT_MAX || 10);
 const STARTUP_LAUNCH_DISCOVERY_MAX_BYTES = Number(process.env.STARTUP_LAUNCH_DISCOVERY_MAX_BYTES || 16384);
 const HOTPATH_CONFIG_BARREL_BAN_ENABLED = String(

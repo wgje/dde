@@ -1,9 +1,15 @@
 import { TestBed } from '@angular/core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const requireAuthGuardMock = vi.fn();
-const projectExistsGuardMock = vi.fn();
-const canDeactivateMock = vi.fn();
+const {
+  requireAuthGuardMock,
+  projectExistsGuardMock,
+  canDeactivateMock,
+} = vi.hoisted(() => ({
+  requireAuthGuardMock: vi.fn(),
+  projectExistsGuardMock: vi.fn(),
+  canDeactivateMock: vi.fn(),
+}));
 
 vi.mock('./services/guards/auth.guard', () => ({
   requireAuthGuard: requireAuthGuardMock,
@@ -74,5 +80,20 @@ describe('app.routes lazy guard wrappers', () => {
 
     expect(result).toBe(true);
     expect(canDeactivateMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('unsavedChangesGuardLazy 在 lazy chunk 加载失败时应放行，避免导航卡死', async () => {
+    vi.resetModules();
+    vi.doMock('./services/guards/unsaved-changes.guard', () => {
+      throw new Error('unsaved changes guard chunk missing');
+    });
+    const { unsavedChangesGuardLazy: isolatedGuard } = await import('./app.routes');
+
+    const result = await TestBed.runInInjectionContext(() =>
+      isolatedGuard({} as never, {} as never, {} as never, {} as never)
+    );
+
+    expect(result).toBe(true);
+    vi.doUnmock('./services/guards/unsaved-changes.guard');
   });
 });

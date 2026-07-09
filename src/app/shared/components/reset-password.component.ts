@@ -1,4 +1,11 @@
-import { Component, inject, signal, OnInit, ChangeDetectionStrategy } from '@angular/core';
+import {
+  ChangeDetectionStrategy,
+  Component,
+  OnDestroy,
+  OnInit,
+  inject,
+  signal,
+} from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { Router } from '@angular/router';
@@ -155,11 +162,12 @@ import { LoggerService } from '../../../services/logger.service';
     }
   `]
 })
-export class ResetPasswordComponent implements OnInit {
+export class ResetPasswordComponent implements OnInit, OnDestroy {
   private supabase = inject(SupabaseClientService);
   private router = inject(Router);
   private toast = inject(ToastService);
   private readonly logger = inject(LoggerService);
+  private loginNavigationTimer: ReturnType<typeof setTimeout> | null = null;
 
   isLoading = signal(true);
   isValid = signal(false);
@@ -172,6 +180,10 @@ export class ResetPasswordComponent implements OnInit {
 
   async ngOnInit() {
     await this.verifyResetToken();
+  }
+
+  ngOnDestroy(): void {
+    this.clearLoginNavigationTimer();
   }
 
   private async getSupabaseClientOrThrow() {
@@ -249,6 +261,10 @@ export class ResetPasswordComponent implements OnInit {
     event.preventDefault();
     this.error.set(null);
 
+    if (this.isSubmitting()) {
+      return;
+    }
+
     // 验证密码（统一使用8位最小长度）
     if (this.newPassword.length < 8) {
       this.error.set('密码长度至少 8 个字符');
@@ -278,8 +294,10 @@ export class ResetPasswordComponent implements OnInit {
 
       // 登出并跳转到登录页
       await client.auth.signOut();
-      
-      setTimeout(() => {
+
+      this.clearLoginNavigationTimer();
+      this.loginNavigationTimer = setTimeout(() => {
+        this.loginNavigationTimer = null;
         void this.router.navigate(['/projects']);
       }, 2000);
     } catch (e: unknown) {
@@ -293,5 +311,14 @@ export class ResetPasswordComponent implements OnInit {
 
   goToLogin() {
     void this.router.navigate(['/projects']);
+  }
+
+  private clearLoginNavigationTimer(): void {
+    if (this.loginNavigationTimer === null) {
+      return;
+    }
+
+    clearTimeout(this.loginNavigationTimer);
+    this.loginNavigationTimer = null;
   }
 }

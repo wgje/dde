@@ -91,8 +91,9 @@ describe('reloadViaForceClearCache', () => {
 
     reloadViaForceClearCache(fallback);
 
-    // Flush microtask queue so the .catch() handler runs
-    await new Promise(resolve => setTimeout(resolve, 0));
+    // Flush microtasks only; timer-based waits can hang when another spec leaves fake timers active.
+    await Promise.resolve();
+    await Promise.resolve();
 
     expect(fallback).toHaveBeenCalledOnce();
   });

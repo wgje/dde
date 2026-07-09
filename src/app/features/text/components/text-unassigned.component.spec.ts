@@ -40,6 +40,7 @@ describe('TextUnassignedComponent', () => {
   const mockTaskAdapter = {
     updateTaskTitle: vi.fn(),
     updateTaskContent: vi.fn(),
+    updateTaskDraft: vi.fn(),
     deleteTask: vi.fn(),
     moveTaskToStage: vi.fn(() => ({ ok: true })),
   };
@@ -55,14 +56,14 @@ describe('TextUnassignedComponent', () => {
     getTask: vi.fn((taskId: string) => tasks().find(task => task.id === taskId) ?? null),
   };
   const mockParkingService = {
-    parkTask: vi.fn(),
+    parkTask: vi.fn().mockResolvedValue(true),
   };
   const mockDockEngine = {
     dockTask: vi.fn(() => true),
   };
   const mockReminderService = {
-    setReminder: vi.fn(),
-    cancelReminder: vi.fn(),
+    setReminder: vi.fn().mockResolvedValue(true),
+    cancelReminder: vi.fn().mockResolvedValue(true),
   };
   const mockToast = {
     info: vi.fn(),
@@ -75,6 +76,11 @@ describe('TextUnassignedComponent', () => {
   beforeEach(async () => {
     vi.clearAllMocks();
     tasks.set([createTask()]);
+    mockTaskAdapter.updateTaskTitle.mockResolvedValue(true);
+    mockTaskAdapter.updateTaskContent.mockResolvedValue(true);
+    mockTaskAdapter.updateTaskDraft.mockResolvedValue(true);
+    mockTaskAdapter.deleteTask.mockResolvedValue(true);
+    mockTaskAdapter.moveTaskToStage.mockResolvedValue({ ok: true });
     mockUiState.isTextSidebarVisible.set(true);
     mockUiState.isTextUnassignedOpen.set(true);
     mockUiState.toggleTextUnassignedOpen.mockImplementation(() => {
@@ -86,6 +92,9 @@ describe('TextUnassignedComponent', () => {
     mockUiState.hasTextUnassignedOpenPreference.mockReturnValue(true);
     mockUserSession.isHintOnlyStartupPlaceholderVisible.mockReturnValue(false);
     mockProjectState.getTask.mockImplementation((taskId: string) => tasks().find(task => task.id === taskId) ?? null);
+    mockReminderService.setReminder.mockResolvedValue(true);
+    mockReminderService.cancelReminder.mockResolvedValue(true);
+    mockParkingService.parkTask.mockResolvedValue(true);
 
     await TestBed.configureTestingModule({
       imports: [TextUnassignedComponent],
@@ -106,7 +115,44 @@ describe('TextUnassignedComponent', () => {
     fixture.detectChanges();
   });
 
-  it('parkTaskNow should persist draft edits before parking and sync the dock', () => {
+  it('成功的待分配重挂载不应重放合成 dragStart（避免拖拽状态永不结束）', async () => {
+    const dragged = createTask({ id: 'drag-source', stage: null });
+    const target = createTask({ id: 'drop-target', stage: null });
+    tasks.set([dragged, target]);
+    const dragStartSpy = vi.fn();
+    component.dragStart.subscribe(dragStartSpy);
+
+    const dataTransfer = {
+      getData: vi.fn((mime: string) => {
+        if (mime === 'application/x-nanoflow-task' || mime === 'application/json') {
+          return JSON.stringify({
+            v: 1,
+            type: 'task',
+            taskId: 'drag-source',
+            projectId: 'project-1',
+            source: 'text',
+          });
+        }
+        return '';
+      }),
+    };
+    const event = {
+      preventDefault: vi.fn(),
+      stopPropagation: vi.fn(),
+      dataTransfer,
+    } as unknown as DragEvent;
+
+    await (component as unknown as {
+      handleDropUnassigned: (event: DragEvent) => Promise<void>;
+    }).handleDropUnassigned(event);
+
+    expect(mockTaskAdapter.moveTaskToStage).toHaveBeenCalledWith('drag-source', null, undefined, 'drop-target');
+    // 合成 dragStart 会被父组件当成真实拖拽开始：重挂 document dragover 监听并
+    // 以 clientY=0 启动自动滚动，而且没有 dragend 收尾——严禁重放
+    expect(dragStartSpy).not.toHaveBeenCalled();
+  });
+
+  it('parkTaskNow should persist draft edits before parking and sync the dock', async () => {
     const task = tasks()[0]!;
     const internal = component as unknown as {
       editingTaskId: { set: (value: string | null) => void; (): string | null };
@@ -123,11 +169,15 @@ describe('TextUnassignedComponent', () => {
     internal.reminderMenuTaskId.set(task.id);
     fixture.detectChanges();
 
-    const parkButton = fixture.nativeElement.querySelector('[data-testid="text-unassigned-park-button"]') as HTMLButtonElement | null;
-    parkButton?.click();
+    await (component as unknown as { parkTaskNow: (task: Task) => Promise<void> })
+      .parkTaskNow(task);
 
-    expect(mockTaskAdapter.updateTaskTitle).toHaveBeenCalledWith(task.id, '停泊前标题');
-    expect(mockTaskAdapter.updateTaskContent).toHaveBeenCalledWith(task.id, '停泊前正文');
+    expect(mockTaskAdapter.updateTaskDraft).toHaveBeenCalledWith(task.id, {
+      title: '停泊前标题',
+      content: '停泊前正文',
+    });
+    expect(mockTaskAdapter.updateTaskTitle).not.toHaveBeenCalled();
+    expect(mockTaskAdapter.updateTaskContent).not.toHaveBeenCalled();
     expect(mockParkingService.parkTask).toHaveBeenCalledWith(task.id);
     expect(mockDockEngine.dockTask).toHaveBeenCalledWith(task.id, undefined, {
       sourceSection: 'text',
@@ -136,6 +186,57 @@ describe('TextUnassignedComponent', () => {
     expect(internal.editingTaskId()).toBeNull();
     expect(internal.isEditMode()).toBe(false);
     expect(internal.reminderMenuTaskId()).toBeNull();
+  });
+
+  it('should persist active draft before destroy clears edit state', () => {
+    const task = tasks()[0]!;
+    const internal = component as unknown as {
+      editingTaskId: { set: (value: string | null) => void };
+      isEditMode: { set: (value: boolean) => void };
+      localTitle: { set: (value: string) => void };
+      localContent: { set: (value: string) => void };
+    };
+
+    internal.editingTaskId.set(task.id);
+    internal.isEditMode.set(true);
+    internal.localTitle.set('销毁前标题');
+    internal.localContent.set('销毁前正文');
+
+    component.ngOnDestroy();
+
+    expect(mockTaskAdapter.updateTaskDraft).toHaveBeenCalledWith(task.id, {
+      title: '销毁前标题',
+      content: '销毁前正文',
+    });
+    expect(mockTaskAdapter.updateTaskTitle).not.toHaveBeenCalled();
+    expect(mockTaskAdapter.updateTaskContent).not.toHaveBeenCalled();
+  });
+
+  it('resetEditState should persist active draft before clearing edit state', async () => {
+    const task = tasks()[0]!;
+    const internal = component as unknown as {
+      editingTaskId: { set: (value: string | null) => void; (): string | null };
+      isEditMode: { set: (value: boolean) => void; (): boolean };
+      localTitle: { set: (value: string) => void };
+      localContent: { set: (value: string) => void };
+    };
+
+    internal.editingTaskId.set(task.id);
+    internal.isEditMode.set(true);
+    internal.localTitle.set('重置前标题');
+    internal.localContent.set('重置前正文');
+
+    const cleared = await component.resetEditState();
+
+    expect(cleared).toBe(true);
+    expect(mockTaskAdapter.updateTaskDraft).toHaveBeenCalledWith(task.id, {
+      title: '重置前标题',
+      content: '重置前正文',
+    });
+    expect(mockTaskAdapter.updateTaskTitle).not.toHaveBeenCalled();
+    expect(mockTaskAdapter.updateTaskContent).not.toHaveBeenCalled();
+    expect(internal.editingTaskId()).toBeNull();
+    expect(internal.isEditMode()).toBe(false);
   });
 
   it('should disable the park button when the task is already parked', () => {
@@ -210,15 +311,102 @@ describe('TextUnassignedComponent', () => {
     expect(mockToast.info).toHaveBeenCalledWith('会话确认中', '停泊任务暂不可用，owner 确认完成前保持只读');
   });
 
-  it('should block reminder changes while hint-only startup placeholder is read-only', () => {
+  it('should block reminder changes while hint-only startup placeholder is read-only', async () => {
     mockUserSession.isHintOnlyStartupPlaceholderVisible.mockReturnValue(true);
 
-    (component as unknown as {
-      setReminderPreset: (taskId: string, minutes: number) => void;
+    await (component as unknown as {
+      setReminderPreset: (taskId: string, minutes: number) => Promise<void>;
     }).setReminderPreset('task-1', 5);
 
     expect(mockReminderService.setReminder).not.toHaveBeenCalled();
     expect(mockToast.info).toHaveBeenCalledWith('会话确认中', '设置提醒暂不可用，owner 确认完成前保持只读');
+  });
+
+  it('should persist active draft before setting a reminder', async () => {
+    const task = createTask({
+      parkingMeta: {
+        state: 'parked',
+        parkedAt: new Date().toISOString(),
+        lastVisitedAt: new Date().toISOString(),
+        contextSnapshot: null,
+        reminder: null,
+        pinned: false,
+      },
+    });
+    tasks.set([task]);
+    const internal = component as unknown as {
+      setReminderPreset: (taskId: string, minutes: number) => Promise<void>;
+      editingTaskId: { set: (value: string | null) => void; (): string | null };
+      isEditMode: { set: (value: boolean) => void; (): boolean };
+      localTitle: { set: (value: string) => void; (): string };
+      localContent: { set: (value: string) => void; (): string };
+      reminderMenuTaskId: { set: (value: string | null) => void; (): string | null };
+    };
+
+    internal.editingTaskId.set(task.id);
+    internal.isEditMode.set(true);
+    internal.localTitle.set('提醒前标题');
+    internal.localContent.set('提醒前正文');
+    internal.reminderMenuTaskId.set(task.id);
+
+    await internal.setReminderPreset(task.id, 5);
+
+    expect(mockTaskAdapter.updateTaskDraft).toHaveBeenCalledWith(task.id, {
+      title: '提醒前标题',
+      content: '提醒前正文',
+    });
+    expect(mockTaskAdapter.updateTaskTitle).not.toHaveBeenCalled();
+    expect(mockTaskAdapter.updateTaskContent).not.toHaveBeenCalled();
+    expect(mockReminderService.setReminder).toHaveBeenCalledWith(task.id, expect.any(String));
+    expect(internal.editingTaskId()).toBe(task.id);
+    expect(internal.isEditMode()).toBe(true);
+    expect(internal.localTitle()).toBe('提醒前标题');
+    expect(internal.localContent()).toBe('提醒前正文');
+    expect(internal.reminderMenuTaskId()).toBeNull();
+  });
+
+  it('should not set a reminder when active draft persistence fails', async () => {
+    mockTaskAdapter.updateTaskDraft.mockResolvedValueOnce(false);
+    const task = createTask({
+      parkingMeta: {
+        state: 'parked',
+        parkedAt: new Date().toISOString(),
+        lastVisitedAt: new Date().toISOString(),
+        contextSnapshot: null,
+        reminder: null,
+        pinned: false,
+      },
+    });
+    tasks.set([task]);
+    const internal = component as unknown as {
+      setReminderPreset: (taskId: string, minutes: number) => Promise<void>;
+      editingTaskId: { set: (value: string | null) => void; (): string | null };
+      isEditMode: { set: (value: boolean) => void; (): boolean };
+      localTitle: { set: (value: string) => void; (): string };
+      localContent: { set: (value: string) => void; (): string };
+      reminderMenuTaskId: { set: (value: string | null) => void; (): string | null };
+    };
+
+    internal.editingTaskId.set(task.id);
+    internal.isEditMode.set(true);
+    internal.localTitle.set('提醒失败标题');
+    internal.localContent.set('提醒失败正文');
+    internal.reminderMenuTaskId.set(task.id);
+
+    await internal.setReminderPreset(task.id, 5);
+
+    expect(mockTaskAdapter.updateTaskDraft).toHaveBeenCalledWith(task.id, {
+      title: '提醒失败标题',
+      content: '提醒失败正文',
+    });
+    expect(mockTaskAdapter.updateTaskTitle).not.toHaveBeenCalled();
+    expect(mockTaskAdapter.updateTaskContent).not.toHaveBeenCalled();
+    expect(mockReminderService.setReminder).not.toHaveBeenCalled();
+    expect(internal.editingTaskId()).toBe(task.id);
+    expect(internal.isEditMode()).toBe(true);
+    expect(internal.localTitle()).toBe('提醒失败标题');
+    expect(internal.localContent()).toBe('提醒失败正文');
+    expect(internal.reminderMenuTaskId()).toBe(task.id);
   });
 
   it('should block entering edit mode while hint-only startup placeholder is read-only', () => {
@@ -239,11 +427,11 @@ describe('TextUnassignedComponent', () => {
     expect(mockToast.info).toHaveBeenCalledWith('会话确认中', '编辑任务暂不可用，owner 确认完成前保持只读');
   });
 
-  it('should keep local draft visible when save is blocked by hint-only startup placeholder', () => {
+  it('should keep local draft visible when save is blocked by hint-only startup placeholder', async () => {
     mockUserSession.isHintOnlyStartupPlaceholderVisible.mockReturnValue(true);
 
     const internal = component as unknown as {
-      saveTask: (task: Task) => void;
+      saveTask: (task: Task) => Promise<boolean>;
       editingTaskId: { set: (value: string | null) => void; (): string | null };
       isEditMode: { set: (value: boolean) => void; (): boolean };
       localTitle: { set: (value: string) => void; (): string };
@@ -255,8 +443,10 @@ describe('TextUnassignedComponent', () => {
     internal.localTitle.set('未保存标题');
     internal.localContent.set('未保存正文');
 
-    internal.saveTask(tasks()[0]!);
+    const saved = await internal.saveTask(tasks()[0]!);
 
+    expect(saved).toBe(false);
+    expect(mockTaskAdapter.updateTaskDraft).not.toHaveBeenCalled();
     expect(mockTaskAdapter.updateTaskTitle).not.toHaveBeenCalled();
     expect(mockTaskAdapter.updateTaskContent).not.toHaveBeenCalled();
     expect(internal.editingTaskId()).toBe('task-1');
@@ -264,6 +454,118 @@ describe('TextUnassignedComponent', () => {
     expect(internal.localTitle()).toBe('未保存标题');
     expect(internal.localContent()).toBe('未保存正文');
     expect(mockToast.info).toHaveBeenCalledWith('会话确认中', '编辑任务暂不可用，owner 确认完成前保持只读');
+  });
+
+  it('should keep local draft visible when durable save fails', async () => {
+    mockTaskAdapter.updateTaskDraft.mockResolvedValueOnce(false);
+
+    const internal = component as unknown as {
+      saveTask: (task: Task) => Promise<boolean>;
+      editingTaskId: { set: (value: string | null) => void; (): string | null };
+      isEditMode: { set: (value: boolean) => void; (): boolean };
+      localTitle: { set: (value: string) => void; (): string };
+      localContent: { set: (value: string) => void; (): string };
+    };
+
+    internal.editingTaskId.set('task-1');
+    internal.isEditMode.set(true);
+    internal.localTitle.set('离线失败标题');
+    internal.localContent.set('离线失败正文');
+
+    const saved = await internal.saveTask(tasks()[0]!);
+
+    expect(saved).toBe(false);
+    expect(mockTaskAdapter.updateTaskDraft).toHaveBeenCalledWith('task-1', {
+      title: '离线失败标题',
+      content: '离线失败正文',
+    });
+    expect(mockTaskAdapter.updateTaskTitle).not.toHaveBeenCalled();
+    expect(mockTaskAdapter.updateTaskContent).not.toHaveBeenCalled();
+    expect(internal.editingTaskId()).toBe('task-1');
+    expect(internal.isEditMode()).toBe(true);
+    expect(internal.localTitle()).toBe('离线失败标题');
+    expect(internal.localContent()).toBe('离线失败正文');
+  });
+
+  it('should park only after draft edits are durably saved', async () => {
+    mockTaskAdapter.updateTaskDraft.mockResolvedValueOnce(false);
+    const task = tasks()[0]!;
+    const internal = component as unknown as {
+      parkTaskNow: (task: Task) => Promise<boolean>;
+      editingTaskId: { set: (value: string | null) => void; (): string | null };
+      isEditMode: { set: (value: boolean) => void; (): boolean };
+      localTitle: { set: (value: string) => void };
+      localContent: { set: (value: string) => void };
+    };
+
+    internal.editingTaskId.set(task.id);
+    internal.isEditMode.set(true);
+    internal.localTitle.set('停泊前标题');
+    internal.localContent.set('停泊前正文');
+
+    const parked = await internal.parkTaskNow(task);
+
+    expect(parked).toBe(false);
+    expect(mockTaskAdapter.updateTaskDraft).toHaveBeenCalledWith(task.id, {
+      title: '停泊前标题',
+      content: '停泊前正文',
+    });
+    expect(mockTaskAdapter.updateTaskTitle).not.toHaveBeenCalled();
+    expect(mockTaskAdapter.updateTaskContent).not.toHaveBeenCalled();
+    expect(mockParkingService.parkTask).not.toHaveBeenCalled();
+    expect(mockDockEngine.dockTask).not.toHaveBeenCalled();
+    expect(internal.editingTaskId()).toBe(task.id);
+    expect(internal.isEditMode()).toBe(true);
+  });
+
+  it('should keep edit state when delete local persistence fails', async () => {
+    mockTaskAdapter.deleteTask.mockResolvedValueOnce(false);
+    const internal = component as unknown as {
+      deleteTask: (taskId: string) => Promise<boolean>;
+      editingTaskId: { set: (value: string | null) => void; (): string | null };
+      isEditMode: { set: (value: boolean) => void; (): boolean };
+      localTitle: { set: (value: string) => void; (): string };
+      localContent: { set: (value: string) => void; (): string };
+    };
+
+    internal.editingTaskId.set('task-1');
+    internal.isEditMode.set(true);
+    internal.localTitle.set('删除前标题');
+    internal.localContent.set('删除前正文');
+
+    const deleted = await internal.deleteTask('task-1');
+
+    expect(deleted).toBe(false);
+    expect(mockTaskAdapter.deleteTask).toHaveBeenCalledWith('task-1');
+    expect(internal.editingTaskId()).toBe('task-1');
+    expect(internal.isEditMode()).toBe(true);
+    expect(internal.localTitle()).toBe('删除前标题');
+    expect(internal.localContent()).toBe('删除前正文');
+  });
+
+  it('should report todo checkbox durable persistence failure without entering edit mode', async () => {
+    const task = createTask({ content: '- [ ] 本地优先' });
+    tasks.set([task]);
+    mockTaskAdapter.updateTaskContent.mockResolvedValueOnce(false);
+    const internal = component as unknown as {
+      onContentPreviewClick: (event: MouseEvent, task: Task) => Promise<boolean>;
+      editingTaskId: { (): string | null };
+      isEditMode: { (): boolean };
+    };
+    const checkbox = document.createElement('span');
+    checkbox.setAttribute('data-todo-index', '0');
+    const stopPropagation = vi.fn();
+
+    const saved = await internal.onContentPreviewClick(
+      { target: checkbox, stopPropagation } as unknown as MouseEvent,
+      task,
+    );
+
+    expect(saved).toBe(false);
+    expect(stopPropagation).toHaveBeenCalledTimes(1);
+    expect(mockTaskAdapter.updateTaskContent).toHaveBeenCalledWith('task-1', '- [x] 本地优先');
+    expect(internal.editingTaskId()).toBeNull();
+    expect(internal.isEditMode()).toBe(false);
   });
 
   it('should emit openLinkedTask when clicking a task markdown link in preview', () => {

@@ -24,26 +24,38 @@ import { validateProject } from '../../../utils/validation';
 // Sprint 8 技术债务修复：提取的子服务
 import { IndexedDBService, DataIntegrityService, DB_CONFIG, BackupService, DeltaSyncPersistenceService } from './persistence';
 import { SentryLazyLoaderService } from '../../../services/sentry-lazy-loader.service';
-
-/** 存储版本号（用于数据迁移） */
-const STORAGE_VERSION = 1;
+import { StoreMetadataPersistenceController, type StoreMeta } from './store-metadata-persistence.controller';
+import { StoreCacheCleanupController } from './store-cache-cleanup.controller';
+import {
+  recoverInterruptedDataSafetyRestoreFromIndexedDb,
+  type IndexedDbDataSafetyRestoreRecoveryResult,
+} from '../../../services/data-safety-indexeddb-adapter';
 
 /** 防抖延迟（毫秒） */
 const DEBOUNCE_DELAY = 1000;
 
-/**
- * 元数据结构
- */
-// 【P1-02 修复】添加 key 属性匹配 IndexedDB keyPath: 'key'
-interface StoreMeta {
-  key: string;
-  version: number;
-  lastSyncTime: string;
-  activeProjectId: string | null;
-  lastAuthenticatedUser?: {
-    userId: string;
-    email: string | null;
-  } | null;
+interface ProjectPersistenceSnapshot {
+  project: Project;
+  tasks: Task[];
+  connections: Connection[];
+}
+
+interface ProjectPersistenceStores {
+  projectStore: IDBObjectStore;
+  taskStore: IDBObjectStore;
+  connectionStore: IDBObjectStore;
+}
+
+interface WriteVerifyResult {
+  valid: boolean;
+  actual: { tasks: number; connections: number };
+  errors: string[];
+}
+
+interface LoadedProjectRecords {
+  project: Project;
+  tasks: Array<Task & { projectId: string }>;
+  connections: Array<Connection & { projectId: string }>;
 }
 
 @Injectable({
@@ -63,6 +75,17 @@ export class StorePersistenceService {
   private readonly backupService = inject(BackupService);
   private readonly deltaSyncPersistence = inject(DeltaSyncPersistenceService);
   private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
+  private readonly metadataPersistence = new StoreMetadataPersistenceController({
+    initDatabase: () => this.initDatabase(),
+    isRestoring: () => this.isRestoring,
+    activeProjectId: () => this.projectStore.activeProjectId(),
+    logger: this.logger,
+    sentryLazyLoader: this.sentryLazyLoader,
+  });
+  private readonly cacheCleanup = new StoreCacheCleanupController({
+    initDatabase: () => this.initDatabase(),
+    logger: this.logger,
+  });
   
   /** 防抖计时器 */
   private saveTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -105,15 +128,23 @@ export class StorePersistenceService {
     if (this.isRestoring) return;
     
     // 防抖：取消之前的计时器
-    const existingTimer = this.saveTimers.get(projectId);
-    if (existingTimer) {
+    if (this.saveTimers.has(projectId)) {
+      const existingTimer = this.saveTimers.get(projectId)!;
       clearTimeout(existingTimer);
     }
     
     // 设置新计时器
     const timer = setTimeout(async () => {
+      if (this.saveTimers.get(projectId) !== timer) {
+        return;
+      }
+
       this.saveTimers.delete(projectId);
-      await this.doSaveProject(projectId);
+      try {
+        await this.doSaveProject(projectId);
+      } catch (error) {
+        this.logger.error('防抖保存项目失败', { projectId, error });
+      }
     }, DEBOUNCE_DELAY);
     
     this.saveTimers.set(projectId, timer);
@@ -125,121 +156,150 @@ export class StorePersistenceService {
   private async doSaveProject(projectId: string): Promise<void> {
     try {
       const db = await this.initDatabase();
-      const project = this.projectStore.getProject(projectId);
-      
-      if (!project) {
-        this.logger.warn('项目不存在，跳过保存', { projectId });
-        return;
-      }
-      
-      const tasks = this.taskStore.getTasksByProject(projectId);
-      const connections = this.connectionStore.getConnectionsByProject(projectId);
-      
-      // 使用事务批量写入
-      const transaction = db.transaction(
-        [DB_CONFIG.stores.projects, DB_CONFIG.stores.tasks, DB_CONFIG.stores.connections],
-        'readwrite'
+      const snapshot = this.getProjectPersistenceSnapshot(projectId);
+      if (!snapshot) return;
+
+      await this.writeProjectSnapshot(db, projectId, snapshot, true);
+      const verifyResult = await this.verifyWriteIntegrity(
+        db,
+        projectId,
+        snapshot.tasks.length,
+        snapshot.connections.length
       );
-      
-      const projectStore = transaction.objectStore(DB_CONFIG.stores.projects);
-      const taskStore = transaction.objectStore(DB_CONFIG.stores.tasks);
-      const connectionStore = transaction.objectStore(DB_CONFIG.stores.connections);
-      
-      // 保存项目
-      projectStore.put(project);
-      
-      // 【P1-04 修复】先清理该项目的旧 task/connection 记录，防止已删除的条目残留
-      const taskIds = new Set(tasks.map(t => t.id));
-      const connIds = new Set(connections.map(c => c.id));
-      
-      // 通过 projectId 索引找到旧记录并删除不在当前集合中的
-      const taskIndex = taskStore.index('projectId');
-      const taskCursor = taskIndex.openCursor(IDBKeyRange.only(projectId));
-      taskCursor.onsuccess = (event) => {
-        const cursor = (event.target as IDBRequest<IDBCursorWithValue | null>).result;
-        if (cursor) {
-          if (!taskIds.has(cursor.value.id)) {
-            cursor.delete();
-          }
-          cursor.continue();
-        }
-      };
-      
-      const connIndex = connectionStore.index('projectId');
-      const connCursor = connIndex.openCursor(IDBKeyRange.only(projectId));
-      connCursor.onsuccess = (event) => {
-        const cursor = (event.target as IDBRequest<IDBCursorWithValue | null>).result;
-        if (cursor) {
-          if (!connIds.has(cursor.value.id)) {
-            cursor.delete();
-          }
-          cursor.continue();
-        }
-      };
-      
-      // 保存任务（带 projectId 索引）
-      for (const task of tasks) {
-        taskStore.put({ ...task, projectId });
-      }
-      
-      // 保存连接（带 projectId 索引）
-      for (const connection of connections) {
-        connectionStore.put({ ...connection, projectId });
-      }
-      
-      await new Promise<void>((resolve, reject) => {
-        transaction.oncomplete = () => resolve();
-        transaction.onerror = () => reject(transaction.error);
-      });
-      
-      // 【v5.8 新增】写入后完整性校验
-      const verifyResult = await this.verifyWriteIntegrity(db, projectId, tasks.length, connections.length);
       if (!verifyResult.valid) {
-        this.logger.error('IndexedDB 写入校验失败', { 
-          projectId, 
-          expected: { tasks: tasks.length, connections: connections.length },
-          actual: verifyResult.actual,
-          errors: verifyResult.errors
-        });
-        
-        // 【Senior Consultant P1】自动重试一次
-        this.logger.info('IndexedDB 写入校验失败，尝试重试...', { projectId });
-        const retrySuccess = await this.retryWriteOnce(projectId, project, tasks, connections);
-        
-        if (!retrySuccess) {
-          // 【降级策略】写入 localStorage 作为备份
-          this.logger.warn('IndexedDB 重试失败，降级到 localStorage 备份', { projectId });
-          this.fallbackToLocalStorage(projectId, project, tasks, connections);
-        }
-        
-        this.sentryLazyLoader.captureMessage('IndexedDB 写入校验失败', {
-          level: 'error',
-          tags: { operation: 'writeIntegrityCheck', projectId, retried: String(retrySuccess) },
-          extra: { 
-            expected: { tasks: tasks.length, connections: connections.length },
-            actual: verifyResult.actual,
-            errors: verifyResult.errors
-          }
-        });
+        await this.handleWriteIntegrityFailure(db, projectId, snapshot, verifyResult);
         return;
       }
-      
+
       this.logger.debug('项目数据已保存', { 
         projectId, 
-        tasksCount: tasks.length, 
-        connectionsCount: connections.length,
+        tasksCount: snapshot.tasks.length,
+        connectionsCount: snapshot.connections.length,
         verified: verifyResult.valid
       });
     } catch (err) {
-      this.logger.error('保存项目数据失败', { projectId, error: err });
-      this.sentryLazyLoader.captureException(err, { tags: { operation: 'saveProjectData', projectId } });
-      // 【Senior Consultant P1】降级到 localStorage
-      const project = this.projectStore.getProject(projectId);
-      const tasks = this.taskStore.getTasksByProject(projectId);
-      const connections = this.connectionStore.getConnectionsByProject(projectId);
-      if (project) {
-        this.fallbackToLocalStorage(projectId, project, tasks, connections);
+      this.handleSaveProjectError(projectId, err);
+    }
+  }
+
+  private getProjectPersistenceSnapshot(projectId: string): ProjectPersistenceSnapshot | null {
+    const project = this.projectStore.getProject(projectId);
+    if (!project) {
+      this.logger.warn('项目不存在，跳过保存', { projectId });
+      return null;
+    }
+
+    return {
+      project,
+      tasks: this.taskStore.getTasksByProject(projectId),
+      connections: this.connectionStore.getConnectionsByProject(projectId),
+    };
+  }
+
+  private async writeProjectSnapshot(
+    db: IDBDatabase,
+    projectId: string,
+    snapshot: ProjectPersistenceSnapshot,
+    pruneStaleRecords: boolean,
+  ): Promise<void> {
+    const transaction = db.transaction(
+      [DB_CONFIG.stores.projects, DB_CONFIG.stores.tasks, DB_CONFIG.stores.connections],
+      'readwrite'
+    );
+    const stores = this.getProjectPersistenceStores(transaction);
+
+    stores.projectStore.put(snapshot.project);
+    if (pruneStaleRecords) {
+      this.pruneStaleProjectRecords(projectId, snapshot, stores);
+    }
+    this.putProjectChildRecords(projectId, snapshot, stores);
+    await this.waitForTransaction(transaction);
+  }
+
+  private getProjectPersistenceStores(transaction: IDBTransaction): ProjectPersistenceStores {
+    return {
+      projectStore: transaction.objectStore(DB_CONFIG.stores.projects),
+      taskStore: transaction.objectStore(DB_CONFIG.stores.tasks),
+      connectionStore: transaction.objectStore(DB_CONFIG.stores.connections),
+    };
+  }
+
+  private pruneStaleProjectRecords(
+    projectId: string,
+    snapshot: ProjectPersistenceSnapshot,
+    stores: ProjectPersistenceStores,
+  ): void {
+    const taskIds = new Set(snapshot.tasks.map(t => t.id));
+    const connIds = new Set(snapshot.connections.map(c => c.id));
+    this.deleteRecordsMissingFromSnapshot(stores.taskStore, projectId, taskIds);
+    this.deleteRecordsMissingFromSnapshot(stores.connectionStore, projectId, connIds);
+  }
+
+  private deleteRecordsMissingFromSnapshot(
+    store: IDBObjectStore,
+    projectId: string,
+    retainedIds: Set<string>,
+  ): void {
+    const cursorRequest = store.index('projectId').openCursor(IDBKeyRange.only(projectId));
+    cursorRequest.onsuccess = (event) => {
+      const cursor = (event.target as IDBRequest<IDBCursorWithValue | null>).result;
+      if (!cursor) return;
+      if (!retainedIds.has(cursor.value.id)) {
+        cursor.delete();
       }
+      cursor.continue();
+    };
+  }
+
+  private putProjectChildRecords(
+    projectId: string,
+    snapshot: ProjectPersistenceSnapshot,
+    stores: ProjectPersistenceStores,
+  ): void {
+    for (const task of snapshot.tasks) {
+      stores.taskStore.put({ ...task, projectId });
+    }
+    for (const connection of snapshot.connections) {
+      stores.connectionStore.put({ ...connection, projectId });
+    }
+  }
+
+  private waitForTransaction(transaction: IDBTransaction): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+    });
+  }
+
+  private async handleWriteIntegrityFailure(
+    db: IDBDatabase,
+    projectId: string,
+    snapshot: ProjectPersistenceSnapshot,
+    verifyResult: WriteVerifyResult,
+  ): Promise<void> {
+    const expected = { tasks: snapshot.tasks.length, connections: snapshot.connections.length };
+    this.logger.error('IndexedDB 写入校验失败', { projectId, expected, actual: verifyResult.actual, errors: verifyResult.errors });
+    this.logger.info('IndexedDB 写入校验失败，尝试重试...', { projectId });
+    const retrySuccess = await this.retryWriteOnce(projectId, snapshot.project, snapshot.tasks, snapshot.connections);
+
+    if (!retrySuccess) {
+      this.logger.warn('IndexedDB 重试失败，降级到 localStorage 备份', { projectId });
+      this.fallbackToLocalStorage(projectId, snapshot.project, snapshot.tasks, snapshot.connections);
+    }
+
+    this.sentryLazyLoader.captureMessage('IndexedDB 写入校验失败', {
+      level: 'error',
+      tags: { operation: 'writeIntegrityCheck', projectId, retried: String(retrySuccess) },
+      extra: { expected, actual: verifyResult.actual, errors: verifyResult.errors }
+    });
+  }
+
+  private handleSaveProjectError(projectId: string, error: unknown): void {
+    this.logger.error('保存项目数据失败', { projectId, error });
+    this.sentryLazyLoader.captureException(error, { tags: { operation: 'saveProjectData', projectId } });
+    const snapshot = this.getProjectPersistenceSnapshot(projectId);
+    if (snapshot) {
+      this.fallbackToLocalStorage(projectId, snapshot.project, snapshot.tasks, snapshot.connections);
     }
   }
   
@@ -254,37 +314,13 @@ export class StorePersistenceService {
   ): Promise<boolean> {
     try {
       const db = await this.initDatabase();
-      
-      const transaction = db.transaction(
-        [DB_CONFIG.stores.projects, DB_CONFIG.stores.tasks, DB_CONFIG.stores.connections],
-        'readwrite'
-      );
-      
-      const projectStore = transaction.objectStore(DB_CONFIG.stores.projects);
-      const taskStore = transaction.objectStore(DB_CONFIG.stores.tasks);
-      const connectionStore = transaction.objectStore(DB_CONFIG.stores.connections);
-      
-      // 清除旧数据后重写
-      projectStore.put(project);
-      for (const task of tasks) {
-        taskStore.put({ ...task, projectId });
-      }
-      for (const connection of connections) {
-        connectionStore.put({ ...connection, projectId });
-      }
-      
-      await new Promise<void>((resolve, reject) => {
-        transaction.oncomplete = () => resolve();
-        transaction.onerror = () => reject(transaction.error);
-      });
-      
-      // 再次验证
+      await this.writeProjectSnapshot(db, projectId, { project, tasks, connections }, false);
       const verifyResult = await this.verifyWriteIntegrity(db, projectId, tasks.length, connections.length);
       if (verifyResult.valid) {
         this.logger.info('IndexedDB 重试写入成功', { projectId });
         return true;
       }
-      
+
       return false;
     } catch (err) {
       this.logger.error('IndexedDB 重试写入失败', { projectId, error: err });
@@ -338,7 +374,7 @@ export class StorePersistenceService {
     projectId: string, 
     expectedTaskCount: number, 
     expectedConnectionCount: number
-  ): Promise<{ valid: boolean; actual: { tasks: number; connections: number }; errors: string[] }> {
+  ): Promise<WriteVerifyResult> {
     const errors: string[] = [];
     
     try {
@@ -352,41 +388,15 @@ export class StorePersistenceService {
       const connectionStore = transaction.objectStore(DB_CONFIG.stores.connections);
       
       // 1. 验证项目存在
-      const savedProject = await new Promise<Project | undefined>((resolve, reject) => {
-        const request = projectStore.get(projectId);
-        request.onsuccess = () => resolve(request.result);
-        request.onerror = () => reject(request.error);
-      });
-      
-      if (!savedProject) {
-        errors.push('项目未成功写入');
-      } else if (!savedProject.id || !savedProject.name) {
-        errors.push('项目关键字段丢失');
-      }
+      await this.verifySavedProject(projectStore, projectId, errors);
       
       // 2. 验证任务数量（使用索引计数）
-      const taskIndex = taskStore.index('projectId');
-      const savedTaskCount = await new Promise<number>((resolve, reject) => {
-        const request = taskIndex.count(IDBKeyRange.only(projectId));
-        request.onsuccess = () => resolve(request.result);
-        request.onerror = () => reject(request.error);
-      });
-      
-      if (savedTaskCount !== expectedTaskCount) {
-        errors.push(`任务数量不匹配：期望 ${expectedTaskCount}，实际 ${savedTaskCount}`);
-      }
+      const savedTaskCount = await this.countProjectIndexedRecords(taskStore, projectId);
+      this.recordCountMismatch(errors, '任务', expectedTaskCount, savedTaskCount);
       
       // 3. 验证连接数量（使用索引计数）
-      const connectionIndex = connectionStore.index('projectId');
-      const savedConnectionCount = await new Promise<number>((resolve, reject) => {
-        const request = connectionIndex.count(IDBKeyRange.only(projectId));
-        request.onsuccess = () => resolve(request.result);
-        request.onerror = () => reject(request.error);
-      });
-      
-      if (savedConnectionCount !== expectedConnectionCount) {
-        errors.push(`连接数量不匹配：期望 ${expectedConnectionCount}，实际 ${savedConnectionCount}`);
-      }
+      const savedConnectionCount = await this.countProjectIndexedRecords(connectionStore, projectId);
+      this.recordCountMismatch(errors, '连接', expectedConnectionCount, savedConnectionCount);
       
       return {
         valid: errors.length === 0,
@@ -400,6 +410,39 @@ export class StorePersistenceService {
         actual: { tasks: -1, connections: -1 },
         errors
       };
+    }
+  }
+
+  private async verifySavedProject(
+    projectStore: IDBObjectStore,
+    projectId: string,
+    errors: string[],
+  ): Promise<void> {
+    const savedProject = await new Promise<Project | undefined>((resolve, reject) => {
+      const request = projectStore.get(projectId);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+
+    if (!savedProject) {
+      errors.push('项目未成功写入');
+    } else if (!savedProject.id || !savedProject.name) {
+      errors.push('项目关键字段丢失');
+    }
+  }
+
+  private countProjectIndexedRecords(store: IDBObjectStore, projectId: string): Promise<number> {
+    const index = store.index('projectId');
+    return new Promise<number>((resolve, reject) => {
+      const request = index.count(IDBKeyRange.only(projectId));
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+  }
+
+  private recordCountMismatch(errors: string[], label: '任务' | '连接', expected: number, actual: number): void {
+    if (actual !== expected) {
+      errors.push(`${label}数量不匹配：期望 ${expected}，实际 ${actual}`);
     }
   }
   
@@ -425,30 +468,7 @@ export class StorePersistenceService {
    * 保存元数据
    */
   async saveMeta(): Promise<void> {
-    if (this.isRestoring) return;
-    
-    try {
-      const db = await this.initDatabase();
-      const meta: StoreMeta = {
-        key: 'meta',
-        version: STORAGE_VERSION,
-        lastSyncTime: new Date().toISOString(),
-        activeProjectId: this.projectStore.activeProjectId()
-      };
-      
-      const transaction = db.transaction(DB_CONFIG.stores.meta, 'readwrite');
-      const store = transaction.objectStore(DB_CONFIG.stores.meta);
-      // 【P1-02 修复】keyPath='key' 时不需要传外部 key 参数
-      store.put(meta);
-      
-      await new Promise<void>((resolve, reject) => {
-        transaction.oncomplete = () => resolve();
-        transaction.onerror = () => reject(transaction.error);
-      });
-    } catch (err) {
-      this.logger.error('保存元数据失败', err);
-      this.sentryLazyLoader.captureException(err, { tags: { operation: 'saveMeta' } });
-    }
+    return this.metadataPersistence.saveMeta();
   }
   
   /**
@@ -463,106 +483,19 @@ export class StorePersistenceService {
     try {
       const db = await this.initDatabase();
       this.isRestoring = true;
-      
-      // 读取项目
-      const project = await this.getFromStore<Project>(db, DB_CONFIG.stores.projects, projectId);
-      if (!project) {
+
+      const records = await this.loadProjectRecords(db, projectId);
+      if (!records) {
         this.logger.debug('本地无缓存项目', { projectId });
         return false;
       }
-      
-      // 读取任务
-      const tasks = await this.getByIndex<Task & { projectId: string }>(
-        db, 
-        DB_CONFIG.stores.tasks, 
-        'projectId', 
-        projectId
-      );
-      
-      // 读取连接
-      const connections = await this.getByIndex<Connection & { projectId: string }>(
-        db, 
-        DB_CONFIG.stores.connections, 
-        'projectId', 
-        projectId
-      );
-      
-      // 【Week 2 - Schema 验证】验证恢复的数据完整性
-      // 组装完整项目用于验证
-      const fullProject: Partial<Project> = {
-        ...project,
-        tasks: tasks.map(t => {
-          const { projectId: _, ...task } = t;
-          return task as Task;
-        }),
-        connections: connections.map(c => {
-          const { projectId: _, ...conn } = c;
-          return conn as Connection;
-        })
-      };
-      
-      const validation = validateProject(fullProject);
-      
-      // 记录验证结果
-      if (validation.warnings.length > 0) {
-        this.logger.warn('项目数据验证警告', { 
-          projectId, 
-          warnings: validation.warnings.slice(0, 10) // 只记录前 10 个警告
-        });
-      }
-      
-      if (!validation.valid) {
-        // Critical 验证失败 - 返回 false，让调用者从云端重新获取
-        this.logger.error('项目数据验证失败，缓存可能已损坏', { 
-          projectId, 
-          errors: validation.errors.slice(0, 10)
-        });
-        this.sentryLazyLoader.captureMessage('IndexedDB 缓存数据验证失败', {
-          level: 'error',
-          tags: { operation: 'loadProject', projectId },
-          extra: { errors: validation.errors }
-        });
-        // 清理损坏的缓存
+
+      if (!await this.validateLoadedProject(projectId, records)) {
         await this.deleteProject(projectId);
         return false;
       }
-      
-      // 恢复到 Store
-      this.projectStore.setProject(project);
-      
-      // 软删除任务仍属于回收站保留窗口；永久删除依赖 tombstone/服务端清理收敛，
-      // 不能在本地恢复阶段提前把它们丢弃。
-      const restoredTasks = tasks;
-      const deletedTaskCount = restoredTasks.filter(t => t.deletedAt).length;
-      if (deletedTaskCount > 0) {
-        this.logger.debug('本地恢复保留回收站任务', { projectId, deletedTaskCount });
-      }
-      
-      // 【P1-05 修复】过滤软删除的连接以及引用已删除任务的孤立连接
-      const activeTaskIds = new Set(restoredTasks.filter(t => !t.deletedAt).map(t => t.id));
-      const activeConnections = connections.filter(c =>
-        !c.deletedAt && activeTaskIds.has(c.source) && activeTaskIds.has(c.target)
-      );
-      const filteredConnCount = connections.length - activeConnections.length;
-      if (filteredConnCount > 0) {
-        this.logger.debug('已过滤已删除连接', { projectId, filteredConnCount });
-      }
-      
-      this.taskStore.setTasks(restoredTasks.map(t => {
-        const { projectId: _, ...task } = t;
-        return task as Task;
-      }), projectId);
-      this.connectionStore.setConnections(activeConnections.map(c => {
-        const { projectId: _, ...conn } = c;
-        return conn as Connection;
-      }), projectId);
-      
-      this.logger.info('项目数据已从本地恢复', { 
-        projectId, 
-        tasksCount: restoredTasks.length,
-        connectionsCount: connections.length
-      });
-      
+
+      this.restoreProjectRecordsToStores(projectId, records);
       return true;
     } catch (err) {
       this.logger.error('恢复项目数据失败', { projectId, error: err });
@@ -571,6 +504,99 @@ export class StorePersistenceService {
     } finally {
       this.isRestoring = false;
     }
+  }
+
+  private async loadProjectRecords(db: IDBDatabase, projectId: string): Promise<LoadedProjectRecords | null> {
+    const project = await this.getFromStore<Project>(db, DB_CONFIG.stores.projects, projectId);
+    if (!project) return null;
+
+    const tasks = await this.getByIndex<Task & { projectId: string }>(
+      db,
+      DB_CONFIG.stores.tasks,
+      'projectId',
+      projectId
+    );
+    const connections = await this.getByIndex<Connection & { projectId: string }>(
+      db,
+      DB_CONFIG.stores.connections,
+      'projectId',
+      projectId
+    );
+    return { project, tasks, connections };
+  }
+
+  private async validateLoadedProject(projectId: string, records: LoadedProjectRecords): Promise<boolean> {
+    const validation = validateProject({
+      ...records.project,
+      tasks: this.stripProjectIdFromTasks(records.tasks),
+      connections: this.stripProjectIdFromConnections(records.connections)
+    });
+
+    if (validation.warnings.length > 0) {
+      this.logger.warn('项目数据验证警告', {
+        projectId,
+        warnings: validation.warnings.slice(0, 10)
+      });
+    }
+
+    if (validation.valid) return true;
+
+    this.logger.error('项目数据验证失败，缓存可能已损坏', {
+      projectId,
+      errors: validation.errors.slice(0, 10)
+    });
+    this.sentryLazyLoader.captureMessage('IndexedDB 缓存数据验证失败', {
+      level: 'error',
+      tags: { operation: 'loadProject', projectId },
+      extra: { errors: validation.errors }
+    });
+    return false;
+  }
+
+  private restoreProjectRecordsToStores(projectId: string, records: LoadedProjectRecords): void {
+    this.projectStore.setProject(records.project);
+
+    const restoredTasks = records.tasks;
+    const deletedTaskCount = restoredTasks.filter(t => t.deletedAt).length;
+    if (deletedTaskCount > 0) {
+      this.logger.debug('本地恢复保留回收站任务', { projectId, deletedTaskCount });
+    }
+
+    const activeConnections = this.getActiveLoadedConnections(restoredTasks, records.connections);
+    const filteredConnCount = records.connections.length - activeConnections.length;
+    if (filteredConnCount > 0) {
+      this.logger.debug('已过滤已删除连接', { projectId, filteredConnCount });
+    }
+
+    this.taskStore.setTasks(this.stripProjectIdFromTasks(restoredTasks), projectId);
+    this.connectionStore.setConnections(this.stripProjectIdFromConnections(activeConnections), projectId);
+    this.logger.info('项目数据已从本地恢复', {
+      projectId,
+      tasksCount: restoredTasks.length,
+      connectionsCount: records.connections.length
+    });
+  }
+
+  private getActiveLoadedConnections(
+    tasks: Array<Task & { projectId: string }>,
+    connections: Array<Connection & { projectId: string }>,
+  ): Array<Connection & { projectId: string }> {
+    const activeTaskIds = new Set(tasks.filter(t => !t.deletedAt).map(t => t.id));
+    return connections.filter(c => !c.deletedAt && activeTaskIds.has(c.source) && activeTaskIds.has(c.target));
+  }
+
+  private stripProjectIdFromTasks(tasks: Array<Task & { projectId: string }>): Task[] {
+    return tasks.map(t => {
+      const { projectId: _, ...task } = t;
+      return task as Task;
+    });
+  }
+
+  private stripProjectIdFromConnections(connections: Array<Connection & { projectId: string }>): Connection[] {
+    return connections.map(c => {
+      const { projectId: _, ...conn } = c;
+      return conn as Connection;
+    });
   }
   
   /**
@@ -593,15 +619,7 @@ export class StorePersistenceService {
    * 恢复元数据
    */
   async loadMeta(): Promise<StoreMeta | null> {
-    try {
-      const db = await this.initDatabase();
-      const meta = await this.getFromStore<StoreMeta>(db, DB_CONFIG.stores.meta, 'meta');
-      return meta;
-    } catch (err) {
-      this.logger.error('加载元数据失败', err);
-      // eslint-disable-next-line no-restricted-syntax -- 返回 null 语义正确：元数据加载失败使用默认值
-      return null;
-    }
+    return this.metadataPersistence.loadMeta();
   }
 
   async getMetadata(): Promise<StoreMeta | null> {
@@ -609,35 +627,7 @@ export class StorePersistenceService {
   }
 
   async setMetadata(metadata: Partial<StoreMeta>): Promise<void> {
-    if (this.isRestoring) return;
-
-    try {
-      const db = await this.initDatabase();
-      const existingMeta = await this.getFromStore<StoreMeta>(db, DB_CONFIG.stores.meta, 'meta');
-      const nextMeta: StoreMeta = {
-        key: 'meta',
-        version: existingMeta?.version ?? STORAGE_VERSION,
-        lastSyncTime: metadata.lastSyncTime ?? existingMeta?.lastSyncTime ?? new Date().toISOString(),
-        activeProjectId: Object.prototype.hasOwnProperty.call(metadata, 'activeProjectId')
-          ? (metadata.activeProjectId ?? null)
-          : (existingMeta?.activeProjectId ?? null),
-        lastAuthenticatedUser: Object.prototype.hasOwnProperty.call(metadata, 'lastAuthenticatedUser')
-          ? (metadata.lastAuthenticatedUser ?? null)
-          : (existingMeta?.lastAuthenticatedUser ?? null),
-      };
-
-      const transaction = db.transaction(DB_CONFIG.stores.meta, 'readwrite');
-      const store = transaction.objectStore(DB_CONFIG.stores.meta);
-      store.put(nextMeta);
-
-      await new Promise<void>((resolve, reject) => {
-        transaction.oncomplete = () => resolve();
-        transaction.onerror = () => reject(transaction.error);
-      });
-    } catch (err) {
-      this.logger.error('保存元数据失败', err);
-      throw err;
-    }
+    return this.metadataPersistence.setMetadata(metadata);
   }
   
   /**
@@ -651,149 +641,28 @@ export class StorePersistenceService {
    * @returns 有效的 activeProjectId 或 null
    */
   async getLastActiveProjectId(availableProjectIds: string[]): Promise<string | null> {
-    try {
-      const meta = await this.loadMeta();
-      const lastActiveId = meta?.activeProjectId;
-      
-      if (!lastActiveId) {
-        this.logger.debug('没有保存的 lastActiveProjectId');
-        return availableProjectIds[0] ?? null;
-      }
-      
-      // 检查该项目是否仍然存在
-      if (availableProjectIds.includes(lastActiveId)) {
-        this.logger.debug('恢复上次活动项目', { projectId: lastActiveId });
-        return lastActiveId;
-      }
-      
-      // 项目已被删除（可能在其他设备上）
-      this.logger.info('上次活动的项目已不存在，回退到第一个可用项目', { 
-        lastActiveId, 
-        availableCount: availableProjectIds.length 
-      });
-      return availableProjectIds[0] ?? null;
-    } catch (err) {
-      this.logger.error('获取 lastActiveProjectId 失败', err);
-      return availableProjectIds[0] ?? null;
-    }
+    return this.metadataPersistence.getLastActiveProjectId(availableProjectIds);
   }
   
   /**
    * 【新增】保存当前活动项目 ID（立即保存，不防抖）
    */
   async saveActiveProjectId(projectId: string | null): Promise<void> {
-    if (this.isRestoring) return;
-    
-    try {
-      const db = await this.initDatabase();
-      const existingMeta = await this.getFromStore<StoreMeta>(db, DB_CONFIG.stores.meta, 'meta');
-      
-      const meta: StoreMeta = {
-        key: 'meta',
-        version: existingMeta?.version ?? STORAGE_VERSION,
-        lastSyncTime: existingMeta?.lastSyncTime ?? new Date().toISOString(),
-        activeProjectId: projectId
-      };
-      
-      const transaction = db.transaction(DB_CONFIG.stores.meta, 'readwrite');
-      const store = transaction.objectStore(DB_CONFIG.stores.meta);
-      // 【P1-02 修复】keyPath='key' 时不需要传外部 key 参数
-      store.put(meta);
-      
-      await new Promise<void>((resolve, reject) => {
-        transaction.oncomplete = () => resolve();
-        transaction.onerror = () => reject(transaction.error);
-      });
-      
-      this.logger.debug('activeProjectId 已保存', { projectId });
-    } catch (err) {
-      this.logger.error('保存 activeProjectId 失败', err);
-    }
+    return this.metadataPersistence.saveActiveProjectId(projectId);
   }
   
   /**
    * 删除项目的本地缓存
    */
   async deleteProject(projectId: string): Promise<void> {
-    try {
-      const db = await this.initDatabase();
-      
-      const transaction = db.transaction(
-        [DB_CONFIG.stores.projects, DB_CONFIG.stores.tasks, DB_CONFIG.stores.connections],
-        'readwrite'
-      );
-      
-      // 删除项目
-      transaction.objectStore(DB_CONFIG.stores.projects).delete(projectId);
-      
-      // 删除相关任务
-      const taskStore = transaction.objectStore(DB_CONFIG.stores.tasks);
-      const taskIndex = taskStore.index('projectId');
-      const taskKeys = await new Promise<IDBValidKey[]>((resolve, reject) => {
-        const request = taskIndex.getAllKeys(projectId);
-        request.onsuccess = () => resolve(request.result);
-        request.onerror = () => reject(request.error);
-      });
-      for (const key of taskKeys) {
-        taskStore.delete(key);
-      }
-      
-      // 删除相关连接
-      const connStore = transaction.objectStore(DB_CONFIG.stores.connections);
-      const connIndex = connStore.index('projectId');
-      const connKeys = await new Promise<IDBValidKey[]>((resolve, reject) => {
-        const request = connIndex.getAllKeys(projectId);
-        request.onsuccess = () => resolve(request.result);
-        request.onerror = () => reject(request.error);
-      });
-      for (const key of connKeys) {
-        connStore.delete(key);
-      }
-      
-      await new Promise<void>((resolve, reject) => {
-        transaction.oncomplete = () => resolve();
-        transaction.onerror = () => reject(transaction.error);
-      });
-      
-      this.logger.info('项目本地缓存已删除', { projectId });
-    } catch (err) {
-      this.logger.error('删除项目缓存失败', { projectId, error: err });
-    }
+    return this.cacheCleanup.deleteProject(projectId);
   }
   
   /**
    * 清除所有本地缓存
    */
   async clearAll(): Promise<void> {
-    try {
-      const db = await this.initDatabase();
-      
-      const transaction = db.transaction(
-        [
-          DB_CONFIG.stores.projects,
-          DB_CONFIG.stores.tasks,
-          DB_CONFIG.stores.connections,
-          DB_CONFIG.stores.meta,
-          DB_CONFIG.stores.syncCursors,
-        ],
-        'readwrite'
-      );
-      
-      transaction.objectStore(DB_CONFIG.stores.projects).clear();
-      transaction.objectStore(DB_CONFIG.stores.tasks).clear();
-      transaction.objectStore(DB_CONFIG.stores.connections).clear();
-      transaction.objectStore(DB_CONFIG.stores.meta).clear();
-      transaction.objectStore(DB_CONFIG.stores.syncCursors).clear();
-      
-      await new Promise<void>((resolve, reject) => {
-        transaction.oncomplete = () => resolve();
-        transaction.onerror = () => reject(transaction.error);
-      });
-      
-      this.logger.info('所有本地缓存已清除');
-    } catch (err) {
-      this.logger.error('清除缓存失败', err);
-    }
+    return this.cacheCleanup.clearAll();
   }
   
   // ========== 辅助方法 ==========
@@ -878,6 +747,14 @@ export class StorePersistenceService {
     stats: { projectCount: number; taskCount: number; connectionCount: number; orphanedTasks: number; brokenConnections: number; };
   }> {
     return this.dataIntegrity.validateOfflineDataIntegrity();
+  }
+
+  /** 恢复上次崩溃或刷新中断的数据安全还原，必须在读取本地项目数据前执行 */
+  async recoverInterruptedDataSafetyRestore(
+    ownerUserId: string,
+  ): Promise<IndexedDbDataSafetyRestoreRecoveryResult> {
+    const db = await this.initDatabase();
+    return recoverInterruptedDataSafetyRestoreFromIndexedDb(db, ownerUserId);
   }
   
   /** 清理孤立数据 */

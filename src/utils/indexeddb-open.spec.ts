@@ -1,5 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { openIndexedDBAdaptive } from './indexeddb-open';
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+  vi.useRealTimers();
+});
 
 function createDbName(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
@@ -28,6 +34,40 @@ function deleteRawDB(dbName: string): Promise<void> {
 }
 
 describe('openIndexedDBAdaptive', () => {
+  it('closes a database that succeeds after a blocked open timeout already rejected', async () => {
+    vi.useFakeTimers();
+    const dbName = 'idb-adaptive-blocked-late-success';
+    const close = vi.fn();
+    const request = {
+      error: null,
+      result: {
+        close,
+        objectStoreNames: { contains: () => false },
+        version: 1,
+      } as unknown as IDBDatabase,
+      onblocked: null,
+      onerror: null,
+      onsuccess: null,
+      onupgradeneeded: null,
+      transaction: null,
+    } as unknown as IDBOpenDBRequest;
+
+    vi.stubGlobal('indexedDB', {
+      open: vi.fn(() => request),
+    });
+
+    const openPromise = openIndexedDBAdaptive({ dbName, targetVersion: 1 });
+    const rejection = expect(openPromise).rejects.toThrow(`IndexedDB open blocked for ${dbName}`);
+
+    request.onblocked?.({} as IDBVersionChangeEvent);
+    await vi.advanceTimersByTimeAsync(5000);
+    await rejection;
+
+    request.onsuccess?.({} as Event);
+
+    expect(close).toHaveBeenCalledOnce();
+  });
+
   it('reuses existing higher version without downgrade open', async () => {
     const dbName = createDbName('idb-adaptive-existing');
 

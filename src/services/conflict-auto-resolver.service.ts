@@ -47,13 +47,29 @@ export interface AutoResolutionReport {
 }
 
 type ComparableRecord = Record<string, unknown>;
+type RecommendationBase = Pick<TaskResolutionRecommendation, 'taskId' | 'title' | 'localTime' | 'remoteTime' | 'conflictedFields'>;
+type ConflictTiming = {
+  localTime: number;
+  remoteTime: number;
+  newerSide: 'local' | 'remote';
+  newerLabel: '本地' | '云端';
+  olderLabel: '本地' | '云端';
+  timeDiffMinutes: number;
+};
+type ContentRecommendationContext = {
+  local: Task;
+  remote: Task;
+  base: RecommendationBase;
+  contentFields: string[];
+  timing: ConflictTiming;
+};
 
 /** 字段名到中文标签的映射 */
 const FIELD_LABELS: Record<string, string> = {
   title: '标题', content: '内容', status: '状态', priority: '优先级',
   dueDate: '截止日期', tags: '标签', expected_minutes: '预估耗时',
   cognitive_load: '认知负荷', wait_minutes: '等待时间', attachments: '附件',
-  stage: '阶段', order: '排序', parentId: '父任务', rank: '层级排序',
+  attentionMeta: '任务僚机', stage: '阶段', order: '排序', parentId: '父任务', rank: '层级排序',
   x: 'X坐标', y: 'Y坐标', parkingMeta: '停泊状态',
 };
 
@@ -91,37 +107,10 @@ export class ConflictAutoResolverService {
     for (const id of allIds) {
       const local = localMap.get(id);
       const remote = remoteMap.get(id);
+      const recommendation = this.analyzeTaskPresence(id, local, remote);
 
-      if (local && remote) {
-        // 双方都有 — 需要分析冲突
-        const recommendation = this.analyzeConflictingTask(local, remote);
-        if (recommendation.conflictedFields.length > 0) {
-          recommendations.push(recommendation);
-        }
-      } else if (local && !remote) {
-        // 仅本地有 — 可能是本地新建或远程已删除
-        recommendations.push({
-          taskId: id,
-          title: local.title || '未命名任务',
-          recommendation: 'local',
-          confidence: 'auto',
-          reason: '此任务仅存在于本地（可能是离线时新建的），自动保留',
-          reasoning: ['任务仅存在于本地', '判断为离线期间新建的任务', '自动保留以防数据丢失'],
-          localTime: local.updatedAt,
-          conflictedFields: [],
-        });
-      } else if (!local && remote) {
-        // 仅远程有 — 可能是其他设备新建
-        recommendations.push({
-          taskId: id,
-          title: remote.title || '未命名任务',
-          recommendation: 'remote',
-          confidence: 'auto',
-          reason: '此任务仅存在于云端（来自其他设备），自动接收',
-          reasoning: ['任务仅存在于云端', '判断为其他设备新建的任务', '自动接收以保持多端同步'],
-          remoteTime: remote.updatedAt,
-          conflictedFields: [],
-        });
+      if (recommendation && recommendation.conflictedFields.length > 0) {
+        recommendations.push(recommendation);
       }
     }
 
@@ -148,62 +137,78 @@ export class ConflictAutoResolverService {
     };
   }
 
+  private analyzeTaskPresence(
+    id: string,
+    local: Task | undefined,
+    remote: Task | undefined,
+  ): TaskResolutionRecommendation | null {
+    if (local && remote) {
+      return this.analyzeConflictingTask(local, remote);
+    }
+
+    if (local) {
+      return this.createRecommendation({
+        taskId: id,
+        title: local.title || '未命名任务',
+        recommendation: 'local',
+        confidence: 'auto',
+        reason: '此任务仅存在于本地（可能是离线时新建的），自动保留',
+        reasoning: ['任务仅存在于本地', '判断为离线期间新建的任务', '自动保留以防数据丢失'],
+        localTime: local.updatedAt,
+        conflictedFields: [],
+      });
+    }
+
+    if (remote) {
+      return this.createRecommendation({
+        taskId: id,
+        title: remote.title || '未命名任务',
+        recommendation: 'remote',
+        confidence: 'auto',
+        reason: '此任务仅存在于云端（来自其他设备），自动接收',
+        reasoning: ['任务仅存在于云端', '判断为其他设备新建的任务', '自动接收以保持多端同步'],
+        remoteTime: remote.updatedAt,
+        conflictedFields: [],
+      });
+    }
+
+    return null;
+  }
+
   /**
    * 分析两个版本都存在的冲突任务
    */
   private analyzeConflictingTask(local: Task, remote: Task): TaskResolutionRecommendation {
-    const localTime = local.updatedAt ? new Date(local.updatedAt).getTime() : 0;
-    const remoteTime = remote.updatedAt ? new Date(remote.updatedAt).getTime() : 0;
-    const reasoning: string[] = [];
-    const conflictedFields: string[] = [];
-
-    // 找出所有不同的字段
     const contentFields = this.getContentDiffFields(local, remote);
     const layoutFields = this.getLayoutDiffFields(local, remote);
-    conflictedFields.push(...contentFields, ...layoutFields);
+    const conflictedFields = [...contentFields, ...layoutFields];
+    const base = this.createRecommendationBase(local, remote, conflictedFields);
 
-    // 没有差异 — 自动跳过
     if (conflictedFields.length === 0) {
-      return {
-        taskId: local.id,
-        title: local.title || remote.title || '未命名任务',
+      return this.createRecommendation({
+        ...base,
         recommendation: 'local',
         confidence: 'auto',
         reason: '两端内容一致，无需处理',
         reasoning: ['本地版本与云端版本完全一致', '无需任何操作'],
-        localTime: local.updatedAt,
-        remoteTime: remote.updatedAt,
         conflictedFields: [],
-      };
+      });
     }
 
-    // 只有布局/排序差异 — 自动接受远端
+    const timing = this.createConflictTiming(local, remote);
     if (contentFields.length === 0 && layoutFields.length > 0) {
-      const fieldLabels = layoutFields.map(f => FIELD_LABELS[f] || f).join('、');
-      reasoning.push(`差异仅涉及布局字段（${fieldLabels}）`);
-      reasoning.push('布局变化对内容无影响，自动使用较新的版本');
-      const newerSide = remoteTime >= localTime ? 'remote' : 'local';
-      reasoning.push(`${newerSide === 'remote' ? '云端' : '本地'}版本更新，选择该版本`);
-
-      return {
-        taskId: local.id,
-        title: local.title || remote.title || '未命名任务',
-        recommendation: newerSide,
-        confidence: 'auto',
-        reason: `仅${fieldLabels}有变化，自动使用较新版本`,
-        reasoning,
-        localTime: local.updatedAt,
-        remoteTime: remote.updatedAt,
-        conflictedFields,
-      };
+      return this.createLayoutOnlyRecommendation(base, layoutFields, timing);
     }
 
-    // 内容字段有差异 — 深度分析
+    return this.createContentRecommendation({ local, remote, base, contentFields, timing });
+  }
+
+  private createContentRecommendation(context: ContentRecommendationContext): TaskResolutionRecommendation {
+    const { local, remote, base, contentFields, timing } = context;
+    const reasoning: string[] = [];
     const hasContentDiff = contentFields.includes('content');
     const hasTitleDiff = contentFields.includes('title');
     const hasStatusDiff = contentFields.includes('status');
-
-    // 评估编辑量
     const localContentLen = (local.content || '').length;
     const remoteContentLen = (remote.content || '').length;
     const contentLenDiff = Math.abs(localContentLen - remoteContentLen);
@@ -211,115 +216,188 @@ export class ConflictAutoResolverService {
       ? contentLenDiff / Math.max(localContentLen, remoteContentLen)
       : 0;
 
-    // 时间差分析
-    const timeDiffMs = Math.abs(localTime - remoteTime);
-    const timeDiffMinutes = timeDiffMs / 60000;
-    const newerSide = remoteTime > localTime ? 'remote' : 'local';
-    const newerLabel = newerSide === 'remote' ? '云端' : '本地';
-    const olderLabel = newerSide === 'remote' ? '本地' : '云端';
-
     reasoning.push(`冲突字段：${contentFields.map(f => FIELD_LABELS[f] || f).join('、')}`);
+    this.appendTimingReasoning(reasoning, timing);
 
-    if (timeDiffMinutes > 0) {
-      if (timeDiffMinutes < 1) {
-        reasoning.push(`两端编辑时间相差不足 1 分钟（几乎同时编辑）`);
-      } else if (timeDiffMinutes < 60) {
-        reasoning.push(`${newerLabel}版本比${olderLabel}版本新 ${Math.round(timeDiffMinutes)} 分钟`);
-      } else {
-        const hours = Math.round(timeDiffMinutes / 60);
-        reasoning.push(`${newerLabel}版本比${olderLabel}版本新 ${hours} 小时`);
-      }
-    }
-
-    // 场景1：标题和内容同时被双方修改 — 高风险，需手动
     if (hasTitleDiff && hasContentDiff) {
-      reasoning.push('标题和内容同时存在差异，建议人工审阅');
-      return {
-        taskId: local.id,
-        title: local.title || remote.title || '未命名任务',
-        recommendation: newerSide,
-        confidence: 'manual',
-        reason: '标题和内容同时修改，需要您确认保留哪个版本',
-        reasoning,
-        localTime: local.updatedAt,
-        remoteTime: remote.updatedAt,
-        conflictedFields,
-      };
+      return this.createManualContentRecommendation(base, timing, reasoning);
     }
 
-    // 场景2：仅内容修改，编辑量差异大 — 保留编辑量多的
     if (hasContentDiff && contentLenRatio > 0.3) {
-      const moreSide = localContentLen > remoteContentLen ? 'local' : 'remote';
-      const moreLabel = moreSide === 'local' ? '本地' : '云端';
-      reasoning.push(`${moreLabel}版本内容更丰富（${moreSide === 'local' ? localContentLen : remoteContentLen} 字 vs ${moreSide === 'local' ? remoteContentLen : localContentLen} 字）`);
-      reasoning.push('建议保留内容更完整的版本');
-
-      return {
-        taskId: local.id,
-        title: local.title || remote.title || '未命名任务',
-        recommendation: moreSide,
-        confidence: 'suggest',
-        reason: `${moreLabel}版本内容更丰富，建议保留`,
-        reasoning,
-        localTime: local.updatedAt,
-        remoteTime: remote.updatedAt,
-        conflictedFields,
-      };
+      return this.createRichContentRecommendation(base, localContentLen, remoteContentLen, reasoning);
     }
 
-    // 场景3：内容修改但编辑量相近 — 适度风险，建议确认
     if (hasContentDiff) {
-      reasoning.push('双方内容有差异但编辑量相近');
-      reasoning.push(`系统默认推荐较新的${newerLabel}版本`);
-
-      return {
-        taskId: local.id,
-        title: local.title || remote.title || '未命名任务',
-        recommendation: newerSide,
-        confidence: 'suggest',
-        reason: `内容有差异，推荐使用较新的${newerLabel}版本`,
-        reasoning,
-        localTime: local.updatedAt,
-        remoteTime: remote.updatedAt,
-        conflictedFields,
-      };
+      return this.createSimilarContentRecommendation(base, timing, reasoning);
     }
 
-    // 场景4：附件存在差异但正文未改动 — 建议确认，避免静默覆盖素材
     if (contentFields.includes('attachments')) {
-      reasoning.push('附件列表发生变化，但正文没有直接改动');
-      reasoning.push(`系统默认推荐较新的${newerLabel}版本，但建议您确认素材保留方案`);
-
-      return {
-        taskId: local.id,
-        title: local.title || remote.title || '未命名任务',
-        recommendation: newerSide,
-        confidence: 'suggest',
-        reason: `附件有差异，推荐先确认后再采用${newerLabel}版本`,
-        reasoning,
-        localTime: local.updatedAt,
-        remoteTime: remote.updatedAt,
-        conflictedFields,
-      };
+      return this.createAttachmentRecommendation(base, timing, reasoning);
     }
 
-    // 场景5：仅状态/优先级/截止日期等元数据字段变化 — 使用较新的
+    return this.createMetadataRecommendation(base, timing, reasoning, hasStatusDiff, local, remote);
+  }
+
+  private createManualContentRecommendation(
+    base: RecommendationBase,
+    timing: ConflictTiming,
+    reasoning: string[],
+  ): TaskResolutionRecommendation {
+    reasoning.push('标题和内容同时存在差异，建议人工审阅');
+    return this.createRecommendation({
+      ...base,
+      recommendation: timing.newerSide,
+      confidence: 'manual',
+      reason: '标题和内容同时修改，需要您确认保留哪个版本',
+      reasoning,
+    });
+  }
+
+  private createRichContentRecommendation(
+    base: RecommendationBase,
+    localContentLen: number,
+    remoteContentLen: number,
+    reasoning: string[],
+  ): TaskResolutionRecommendation {
+    const moreSide = localContentLen > remoteContentLen ? 'local' : 'remote';
+    const moreLabel = moreSide === 'local' ? '本地' : '云端';
+    reasoning.push(`${moreLabel}版本内容更丰富（${moreSide === 'local' ? localContentLen : remoteContentLen} 字 vs ${moreSide === 'local' ? remoteContentLen : localContentLen} 字）`);
+    reasoning.push('建议保留内容更完整的版本');
+    return this.createRecommendation({
+      ...base,
+      recommendation: moreSide,
+      confidence: 'suggest',
+      reason: `${moreLabel}版本内容更丰富，建议保留`,
+      reasoning,
+    });
+  }
+
+  private createSimilarContentRecommendation(
+    base: RecommendationBase,
+    timing: ConflictTiming,
+    reasoning: string[],
+  ): TaskResolutionRecommendation {
+    reasoning.push('双方内容有差异但编辑量相近');
+    reasoning.push(`系统默认推荐较新的${timing.newerLabel}版本`);
+    return this.createRecommendation({
+      ...base,
+      recommendation: timing.newerSide,
+      confidence: 'suggest',
+      reason: `内容有差异，推荐使用较新的${timing.newerLabel}版本`,
+      reasoning,
+    });
+  }
+
+  private createAttachmentRecommendation(
+    base: RecommendationBase,
+    timing: ConflictTiming,
+    reasoning: string[],
+  ): TaskResolutionRecommendation {
+    reasoning.push('附件列表发生变化，但正文没有直接改动');
+    reasoning.push(`系统默认推荐较新的${timing.newerLabel}版本，但建议您确认素材保留方案`);
+    return this.createRecommendation({
+      ...base,
+      recommendation: timing.newerSide,
+      confidence: 'suggest',
+      reason: `附件有差异，推荐先确认后再采用${timing.newerLabel}版本`,
+      reasoning,
+    });
+  }
+
+  private createMetadataRecommendation(
+    base: RecommendationBase,
+    timing: ConflictTiming,
+    reasoning: string[],
+    hasStatusDiff: boolean,
+    local: Task,
+    remote: Task,
+  ): TaskResolutionRecommendation {
     if (hasStatusDiff) {
       reasoning.push(`任务状态变化：本地「${local.status}」vs 云端「${remote.status}」`);
     }
-    reasoning.push(`自动使用较新的${newerLabel}版本`);
+    reasoning.push(`自动使用较新的${timing.newerLabel}版本`);
+    return this.createRecommendation({
+      ...base,
+      recommendation: timing.newerSide,
+      confidence: 'auto',
+      reason: `元数据变化，自动使用较新的${timing.newerLabel}版本`,
+      reasoning,
+    });
+  }
 
+  private createRecommendationBase(
+    local: Task,
+    remote: Task,
+    conflictedFields: string[],
+  ): RecommendationBase {
     return {
       taskId: local.id,
       title: local.title || remote.title || '未命名任务',
-      recommendation: newerSide,
-      confidence: 'auto',
-      reason: `元数据变化，自动使用较新的${newerLabel}版本`,
-      reasoning,
       localTime: local.updatedAt,
       remoteTime: remote.updatedAt,
       conflictedFields,
     };
+  }
+
+  private createRecommendation(
+    recommendation: RecommendationBase & Omit<TaskResolutionRecommendation, keyof RecommendationBase>,
+  ): TaskResolutionRecommendation {
+    return recommendation;
+  }
+
+  private createConflictTiming(local: Task, remote: Task): ConflictTiming {
+    const localTime = local.updatedAt ? new Date(local.updatedAt).getTime() : 0;
+    const remoteTime = remote.updatedAt ? new Date(remote.updatedAt).getTime() : 0;
+    const newerSide = remoteTime > localTime ? 'remote' : 'local';
+    return {
+      localTime,
+      remoteTime,
+      newerSide,
+      newerLabel: newerSide === 'remote' ? '云端' : '本地',
+      olderLabel: newerSide === 'remote' ? '本地' : '云端',
+      timeDiffMinutes: Math.abs(localTime - remoteTime) / 60000,
+    };
+  }
+
+  private createLayoutOnlyRecommendation(
+    base: RecommendationBase,
+    layoutFields: string[],
+    timing: ConflictTiming,
+  ): TaskResolutionRecommendation {
+    const fieldLabels = layoutFields.map(f => FIELD_LABELS[f] || f).join('、');
+    const newerSide = timing.remoteTime >= timing.localTime ? 'remote' : 'local';
+    const reasoning = [
+      `差异仅涉及布局字段（${fieldLabels}）`,
+      '布局变化对内容无影响，自动使用较新的版本',
+      `${newerSide === 'remote' ? '云端' : '本地'}版本更新，选择该版本`,
+    ];
+
+    return this.createRecommendation({
+      ...base,
+      recommendation: newerSide,
+      confidence: 'auto',
+      reason: `仅${fieldLabels}有变化，自动使用较新版本`,
+      reasoning,
+    });
+  }
+
+  private appendTimingReasoning(reasoning: string[], timing: ConflictTiming): void {
+    if (timing.timeDiffMinutes <= 0) {
+      return;
+    }
+
+    if (timing.timeDiffMinutes < 1) {
+      reasoning.push(`两端编辑时间相差不足 1 分钟（几乎同时编辑）`);
+      return;
+    }
+
+    if (timing.timeDiffMinutes < 60) {
+      reasoning.push(`${timing.newerLabel}版本比${timing.olderLabel}版本新 ${Math.round(timing.timeDiffMinutes)} 分钟`);
+      return;
+    }
+
+    const hours = Math.round(timing.timeDiffMinutes / 60);
+    reasoning.push(`${timing.newerLabel}版本比${timing.olderLabel}版本新 ${hours} 小时`);
   }
 
   /**
@@ -328,7 +406,7 @@ export class ConflictAutoResolverService {
   private getContentDiffFields(local: Task, remote: Task): string[] {
     const fields: (keyof Task)[] = [
       'title', 'content', 'status', 'priority', 'dueDate', 'tags', 'expected_minutes',
-      'cognitive_load', 'wait_minutes', 'attachments', 'parkingMeta',
+      'cognitive_load', 'wait_minutes', 'attachments', 'parkingMeta', 'attentionMeta',
     ];
     return fields.filter(f => !this.fieldEqual(local[f], remote[f]));
   }

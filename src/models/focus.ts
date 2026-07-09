@@ -72,6 +72,8 @@ export interface BlackBoxEntry {
   syncStatus?: BlackBoxSyncStatus;
   /** 本地创建时间（用于离线排序） */
   localCreatedAt?: string;
+  /** 本地幂等操作 ID；用于崩溃/重放恢复时避免重复创建 */
+  clientOperationId?: string;
   
   // 元数据
   /** 原始音频时长（秒），转写后删除音频 */
@@ -117,6 +119,8 @@ export interface FocusPreferences {
   restReminderHighLoadMinutes: number;
   /** 低负荷累计专注多久后给休息轻提醒 */
   restReminderLowLoadMinutes: number;
+  /** 偏好最后更新时间；用于跨设备 LWW 合并，旧数据不能覆盖新本地设置 */
+  updatedAt?: string;
 }
 
 /**

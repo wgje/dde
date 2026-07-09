@@ -1,11 +1,13 @@
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { Injector } from '@angular/core';
 import { SupabaseClientService } from './supabase-client.service';
+import { SupabaseClientOptionsFactoryService } from './supabase-client-options-factory.service';
 import { LoggerService } from './logger.service';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import {
   resetBrowserNetworkSuspensionTrackingForTests,
 } from '../utils/browser-network-suspension';
+import { registerSupabaseAuthAutoRefreshSpecs } from './supabase-client.service.spec-helpers';
 
 const authClientMock = {
   auth: {
@@ -55,8 +57,8 @@ function setNavigatorOnLine(online: boolean): void {
 }
 
 async function flushAuthAutoRefresh(service: SupabaseClientService): Promise<void> {
-  const chain = (service as unknown as { authAutoRefreshSyncChain?: Promise<void> }).authAutoRefreshSyncChain;
-  await (chain ?? Promise.resolve());
+  const controller = (service as unknown as { authAutoRefresh?: { flush(): Promise<void> } }).authAutoRefresh;
+  await (controller?.flush() ?? Promise.resolve());
   await Promise.resolve();
 }
 
@@ -80,6 +82,7 @@ describe('SupabaseClientService', () => {
     const injector = Injector.create({
       providers: [
         { provide: SupabaseClientService, useClass: SupabaseClientService },
+        SupabaseClientOptionsFactoryService,
         { provide: LoggerService, useValue: { category: () => mockLoggerCategory } },
         { provide: SentryLazyLoaderService, useValue: mockSentry },
       ],
@@ -307,6 +310,47 @@ describe('SupabaseClientService', () => {
       expect(service.isOfflineMode()).toBe(false);
     });
 
+    it('probeReachability 收到 captive portal 的 HTML 200 时应判定不可达', async () => {
+      // lying-online 放大器：portal 把公开 health 端点劫持成 200 HTML 登录页，
+      // 若判可达会触发整条恢复扇出打向登录页，每 15s 一轮假恢复
+      const mutable = service as unknown as {
+        canInitialize: boolean;
+        supabaseUrl: string;
+        supabaseAnonKey: string;
+      };
+      mutable.canInitialize = true;
+      mutable.supabaseUrl = 'https://example.supabase.co';
+      mutable.supabaseAnonKey = 'anon-key';
+      fetchSpy.mockResolvedValueOnce(new Response('<html><body>WiFi Login</body></html>', {
+        status: 200,
+        headers: { 'content-type': 'text/html; charset=utf-8' },
+      }));
+
+      await expect(service.probeReachability({ force: true, timeoutMs: 1000 })).resolves.toBe(false);
+
+      expect(service.isOfflineMode()).toBe(true);
+    });
+
+    it('probeReachability 收到 JSON health 响应时保持可达判定', async () => {
+      const mutable = service as unknown as {
+        canInitialize: boolean;
+        supabaseUrl: string;
+        supabaseAnonKey: string;
+      };
+      mutable.canInitialize = true;
+      mutable.supabaseUrl = 'https://example.supabase.co';
+      mutable.supabaseAnonKey = 'anon-key';
+      service.isOfflineMode.set(true);
+      fetchSpy.mockResolvedValueOnce(new Response('{"description":"GoTrue is a user management API"}', {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }));
+
+      await expect(service.probeReachability({ force: true, timeoutMs: 1000 })).resolves.toBe(true);
+
+      expect(service.isOfflineMode()).toBe(false);
+    });
+
     it('请求级网络失败时应通知连接状态监听器', async () => {
       const mutable = service as unknown as {
         canInitialize: boolean;
@@ -344,9 +388,12 @@ describe('SupabaseClientService', () => {
       const listener = vi.fn();
       const unsubscribe = service.onConnectivityChange(listener);
 
-      await expect(
-        mutable.buildClientOptions().global.fetch('https://example.supabase.co/rest/v1/projects')
-      ).rejects.toThrow('Browser network IO suspended');
+      const error = await mutable.buildClientOptions().global
+        .fetch('https://example.supabase.co/rest/v1/projects')
+        .catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toBe('Browser network IO suspended');
 
       expect(fetchSpy).not.toHaveBeenCalled();
       expect(listener).not.toHaveBeenCalled();
@@ -366,12 +413,117 @@ describe('SupabaseClientService', () => {
       mutable.supabaseAnonKey = 'anon-key';
       service.isOfflineMode.set(true);
 
-      await expect(
-        mutable.buildClientOptions().global.fetch('https://example.supabase.co/rest/v1/projects')
-      ).rejects.toMatchObject({ name: 'BrowserNetworkSuspendedError' });
+      const error = await mutable.buildClientOptions().global
+        .fetch('https://example.supabase.co/rest/v1/projects')
+        .catch((caught: unknown) => caught);
+
+      expect(error).toMatchObject({ name: 'BrowserNetworkSuspendedError' });
 
       expect(fetchSpy).not.toHaveBeenCalled();
       expect(service.isOfflineMode()).toBe(true);
+    });
+
+    it('navigator 离线时请求级 fetch 应短路并同步标记连接中断', async () => {
+      const mutable = service as unknown as {
+        canInitialize: boolean;
+        supabaseUrl: string;
+        supabaseAnonKey: string;
+        buildClientOptions: () => { global: { fetch: (url: RequestInfo | URL, options?: RequestInit) => Promise<Response> } };
+      };
+      mutable.canInitialize = true;
+      mutable.supabaseUrl = 'https://example.supabase.co';
+      mutable.supabaseAnonKey = 'anon-key';
+      const listener = vi.fn();
+      const unsubscribe = service.onConnectivityChange(listener);
+      setNavigatorOnLine(false);
+
+      const error = await mutable.buildClientOptions().global
+        .fetch('https://example.supabase.co/rest/v1/projects')
+        .catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(DOMException);
+      expect((error as DOMException).name).toBe('NetworkError');
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(service.isOfflineMode()).toBe(true);
+      expect(listener).toHaveBeenCalledWith({ offline: true, source: 'request' });
+      unsubscribe();
+    });
+
+    it('403 响应不应触发 fetch 层 session refresh', async () => {
+      const mutable = service as unknown as {
+        canInitialize: boolean;
+        supabaseUrl: string;
+        supabaseAnonKey: string;
+        supabase: typeof authClientMock;
+        buildClientOptions: () => { global: { fetch: (url: RequestInfo | URL, options?: RequestInit) => Promise<Response> } };
+      };
+      mutable.canInitialize = true;
+      mutable.supabaseUrl = 'https://example.supabase.co';
+      mutable.supabaseAnonKey = 'anon-key';
+      mutable.supabase = authClientMock;
+      fetchSpy.mockResolvedValueOnce(new Response('forbidden', { status: 403 }));
+
+      const response = await mutable.buildClientOptions().global.fetch(
+        'https://example.supabase.co/rest/v1/tasks',
+        { method: 'GET', headers: { Authorization: 'Bearer old-token' } },
+      );
+
+      expect(response.status).toBe(403);
+      expect(authClientMock.auth.refreshSession).not.toHaveBeenCalled();
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('auth endpoint 401 响应不应递归触发 fetch 层 session refresh', async () => {
+      const mutable = service as unknown as {
+        canInitialize: boolean;
+        supabaseUrl: string;
+        supabaseAnonKey: string;
+        supabase: typeof authClientMock;
+        buildClientOptions: () => { global: { fetch: (url: RequestInfo | URL, options?: RequestInit) => Promise<Response> } };
+      };
+      mutable.canInitialize = true;
+      mutable.supabaseUrl = 'https://example.supabase.co';
+      mutable.supabaseAnonKey = 'anon-key';
+      mutable.supabase = authClientMock;
+      fetchSpy.mockResolvedValueOnce(new Response('unauthorized', { status: 401 }));
+
+      const response = await mutable.buildClientOptions().global.fetch(
+        'https://example.supabase.co/auth/v1/token?grant_type=refresh_token',
+        { method: 'POST', headers: { Authorization: 'Bearer old-token' } },
+      );
+
+      expect(response.status).toBe(401);
+      expect(authClientMock.auth.refreshSession).not.toHaveBeenCalled();
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('401 自愈刷新失败时应保留原始 401 响应且不重复提交请求', async () => {
+      const mutable = service as unknown as {
+        canInitialize: boolean;
+        supabaseUrl: string;
+        supabaseAnonKey: string;
+        supabase: typeof authClientMock;
+        buildClientOptions: () => { global: { fetch: (url: RequestInfo | URL, options?: RequestInit) => Promise<Response> } };
+      };
+      mutable.canInitialize = true;
+      mutable.supabaseUrl = 'https://example.supabase.co';
+      mutable.supabaseAnonKey = 'anon-key';
+      mutable.supabase = authClientMock;
+      authClientMock.auth.refreshSession.mockResolvedValueOnce({
+        data: { session: null },
+        error: { message: 'refresh failed' },
+      });
+      fetchSpy.mockResolvedValueOnce(new Response('expired', { status: 401 }));
+
+      const response = await mutable.buildClientOptions().global.fetch(
+        'https://example.supabase.co/rest/v1/tasks',
+        { method: 'GET', headers: { Authorization: 'Bearer old-token' } },
+      );
+
+      expect(response.status).toBe(401);
+      expect(await response.text()).toBe('expired');
+      expect(authClientMock.auth.refreshSession).toHaveBeenCalledTimes(1);
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
     });
 
     it('幂等请求被浏览器以 Failed to fetch 拒绝时，应按网关瞬时故障路径重试', async () => {
@@ -531,118 +683,12 @@ describe('SupabaseClientService', () => {
       expect(response.status).toBe(504);
     });
 
-    it('client 初始化后应接管 Auth 自动刷新，并在可见状态下启动', async () => {
-      const mutable = service as unknown as {
-        canInitialize: boolean;
-        supabaseUrl: string;
-        supabaseAnonKey: string;
-      };
-      mutable.canInitialize = true;
-      mutable.supabaseUrl = 'https://example.supabase.co';
-      mutable.supabaseAnonKey = 'anon-key';
-
-      await service.clientAsync();
-      await flushAuthAutoRefresh(service);
-
-      expect(authClientMock.auth.startAutoRefresh).toHaveBeenCalledTimes(1);
-      expect(authClientMock.auth.stopAutoRefresh).not.toHaveBeenCalled();
-    });
-
-    it('页面恢复时应等待浏览器网络恢复宽限期结束后再启动 Auth 自动刷新', async () => {
-      vi.useFakeTimers();
-      const mutable = service as unknown as {
-        canInitialize: boolean;
-        supabaseUrl: string;
-        supabaseAnonKey: string;
-      };
-      mutable.canInitialize = true;
-      mutable.supabaseUrl = 'https://example.supabase.co';
-      mutable.supabaseAnonKey = 'anon-key';
-
-      await service.clientAsync();
-      await Promise.resolve();
-
-      expect(authClientMock.auth.startAutoRefresh).toHaveBeenCalledTimes(1);
-
-      authClientMock.auth.startAutoRefresh.mockClear();
-      setVisibilityState('hidden');
-      document.dispatchEvent(new Event('visibilitychange'));
-      await flushAuthAutoRefresh(service);
-
-      expect(authClientMock.auth.stopAutoRefresh).toHaveBeenCalledTimes(1);
-
-      authClientMock.auth.stopAutoRefresh.mockClear();
-      setVisibilityState('visible');
-      document.dispatchEvent(new Event('visibilitychange'));
-      await flushAuthAutoRefresh(service);
-
-      expect(authClientMock.auth.stopAutoRefresh).not.toHaveBeenCalled();
-      expect(authClientMock.auth.startAutoRefresh).not.toHaveBeenCalled();
-
-      await vi.advanceTimersByTimeAsync(1499);
-      expect(authClientMock.auth.startAutoRefresh).not.toHaveBeenCalled();
-
-      await vi.advanceTimersByTimeAsync(2);
-      await flushAuthAutoRefresh(service);
-
-      expect(authClientMock.auth.startAutoRefresh).toHaveBeenCalledTimes(1);
-    });
-
-    it('网络恢复时应等待浏览器网络恢复宽限期结束后再启动 Auth 自动刷新', async () => {
-      vi.useFakeTimers();
-      const mutable = service as unknown as {
-        canInitialize: boolean;
-        supabaseUrl: string;
-        supabaseAnonKey: string;
-      };
-      mutable.canInitialize = true;
-      mutable.supabaseUrl = 'https://example.supabase.co';
-      mutable.supabaseAnonKey = 'anon-key';
-
-      await service.clientAsync();
-      await flushAuthAutoRefresh(service);
-
-      expect(authClientMock.auth.startAutoRefresh).toHaveBeenCalledTimes(1);
-
-      authClientMock.auth.startAutoRefresh.mockClear();
-      setNavigatorOnLine(false);
-      window.dispatchEvent(new Event('offline'));
-      await flushAuthAutoRefresh(service);
-
-      expect(authClientMock.auth.stopAutoRefresh).toHaveBeenCalledTimes(1);
-
-      authClientMock.auth.stopAutoRefresh.mockClear();
-      setNavigatorOnLine(true);
-      window.dispatchEvent(new Event('online'));
-      await flushAuthAutoRefresh(service);
-
-      expect(authClientMock.auth.startAutoRefresh).not.toHaveBeenCalled();
-
-      await vi.advanceTimersByTimeAsync(4999);
-      expect(authClientMock.auth.startAutoRefresh).not.toHaveBeenCalled();
-
-      await vi.advanceTimersByTimeAsync(2);
-      await flushAuthAutoRefresh(service);
-
-      expect(authClientMock.auth.startAutoRefresh).toHaveBeenCalledTimes(1);
-    });
-
-    it('连接中断模式内初始化客户端不应启动 Auth 自动刷新', async () => {
-      const mutable = service as unknown as {
-        canInitialize: boolean;
-        supabaseUrl: string;
-        supabaseAnonKey: string;
-      };
-      mutable.canInitialize = true;
-      mutable.supabaseUrl = 'https://example.supabase.co';
-      mutable.supabaseAnonKey = 'anon-key';
-      service.isOfflineMode.set(true);
-
-      await service.clientAsync();
-      await flushAuthAutoRefresh(service);
-
-      expect(authClientMock.auth.stopAutoRefresh).toHaveBeenCalledTimes(1);
-      expect(authClientMock.auth.startAutoRefresh).not.toHaveBeenCalled();
+    registerSupabaseAuthAutoRefreshSpecs({
+      authClientMock,
+      flushAuthAutoRefresh,
+      service: () => service,
+      setNavigatorOnLine,
+      setVisibilityState,
     });
   });
 
@@ -651,6 +697,23 @@ describe('SupabaseClientService', () => {
       const result = await service.getSession();
       expect(result).toBeDefined();
       expect(result.data).toBeDefined();
+    });
+  });
+
+  describe('signOut', () => {
+    it('throws when Supabase auth.signOut returns an error object', async () => {
+      const mutable = service as unknown as {
+        canInitialize: boolean;
+        supabaseUrl: string;
+        supabaseAnonKey: string;
+      };
+      const error = { message: 'revoke failed', status: 503 };
+      mutable.canInitialize = true;
+      mutable.supabaseUrl = 'https://example.supabase.co';
+      mutable.supabaseAnonKey = 'anon-key';
+      authClientMock.auth.signOut.mockResolvedValueOnce({ error });
+
+      await expect(service.signOut()).rejects.toBe(error);
     });
   });
 });

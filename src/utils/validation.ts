@@ -1,8 +1,20 @@
-import { Attachment, AttachmentType, Connection, Project, Task, TaskStatus } from '../models';
+import {
+  Attachment,
+  AttachmentType,
+  Connection,
+  Project,
+  Task,
+  TaskAttentionItem,
+  TaskAttentionLevel,
+  TaskAttentionMeta,
+  TaskStatus,
+} from '../models';
 import { ATTACHMENT_CONFIG } from '../config/attachment.config';
+import { AttachmentScanMetadata, SCAN_STATUS, ScanStatus } from '../config/virus-scan.config';
 import { TASK_PRIORITY_LIST } from '../config/task.config';
 import { nowISO } from './date';
 import { sanitizePlannerFields } from './planner-fields';
+import { sanitizeParkingMeta } from './parking-meta-sanitizer';
 import { utilLogger } from './standalone-logger';
 import { resolveTaskCompletionTimestamp } from './task-completion-time';
 
@@ -49,14 +61,36 @@ export interface ValidationResult {
   warnings: string[];
 }
 
+interface ValidationAccumulator {
+  errors: string[];
+  warnings: string[];
+}
+
+function toValidationResult({ errors, warnings }: ValidationAccumulator): ValidationResult {
+  return {
+    valid: errors.length === 0,
+    errors,
+    warnings,
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object';
+}
+
 export function isValidUUID(str: string): boolean {
   return UUID_REGEX.test(str);
 }
 
-export function validateAttachment(attachment: Partial<Attachment>): ValidationResult {
-  const errors: string[] = [];
-  const warnings: string[] = [];
+function isAttachmentType(value: unknown): value is AttachmentType {
+  return value === 'image' || value === 'document' || value === 'link' || value === 'file';
+}
 
+function isScanStatus(value: unknown): value is ScanStatus {
+  return Object.values(SCAN_STATUS).includes(value as ScanStatus);
+}
+
+function validateAttachmentIdentity(attachment: Partial<Attachment>, errors: string[]): void {
   if (!attachment.id || typeof attachment.id !== 'string') {
     errors.push('附件 ID 无效或缺失');
   }
@@ -66,54 +100,68 @@ export function validateAttachment(attachment: Partial<Attachment>): ValidationR
   } else if (attachment.name.length > 255) {
     errors.push('附件名称过长（最大 255 字符）');
   }
+}
 
+function validateAttachmentUrl(attachment: Partial<Attachment>, errors: string[], warnings: string[]): void {
   if (!attachment.url || typeof attachment.url !== 'string') {
     errors.push('附件 URL 无效或缺失');
-  } else {
-    try {
-      new URL(attachment.url);
-    } catch {
-      if (!attachment.url.startsWith('/') && !attachment.url.startsWith('storage/')) {
-        warnings.push('附件 URL 格式可能无效');
-      }
-    }
+    return;
   }
 
-  const validTypes: AttachmentType[] = ['image', 'document', 'link', 'file'];
-  if (!attachment.type || !validTypes.includes(attachment.type)) {
+  try {
+    new URL(attachment.url);
+  } catch {
+    if (!attachment.url.startsWith('/') && !attachment.url.startsWith('storage/')) {
+      warnings.push('附件 URL 格式可能无效');
+    }
+  }
+}
+
+function validateAttachmentTypeAndMime(attachment: Partial<Attachment>, errors: string[], warnings: string[]): void {
+  if (!isAttachmentType(attachment.type)) {
     errors.push(`附件类型无效: ${String(attachment.type)}`);
+    return;
   }
 
-  if (attachment.type && attachment.mimeType) {
-    const allowed = ALLOWED_MIME_TYPES[attachment.type];
-    if (allowed.length > 0 && !allowed.includes(attachment.mimeType)) {
-      warnings.push(`附件 MIME 类型 ${attachment.mimeType} 可能不受支持`);
-    }
+  if (!attachment.mimeType) {
+    return;
   }
 
-  if (attachment.size !== undefined) {
-    if (typeof attachment.size !== 'number' || attachment.size < 0) {
-      errors.push('附件大小无效');
-    } else if (attachment.size > MAX_ATTACHMENT_SIZE) {
-      errors.push(`附件过大: ${(attachment.size / 1024 / 1024).toFixed(2)}MB（最大 10MB）`);
-    }
+  const allowed = ALLOWED_MIME_TYPES[attachment.type];
+  if (allowed.length > 0 && !allowed.includes(attachment.mimeType)) {
+    warnings.push(`附件 MIME 类型 ${attachment.mimeType} 可能不受支持`);
   }
+}
+
+function validateAttachmentSize(attachment: Partial<Attachment>, errors: string[]): void {
+  if (attachment.size === undefined) {
+    return;
+  }
+
+  if (typeof attachment.size !== 'number' || attachment.size < 0) {
+    errors.push('附件大小无效');
+  } else if (attachment.size > MAX_ATTACHMENT_SIZE) {
+    errors.push(`附件过大: ${(attachment.size / 1024 / 1024).toFixed(2)}MB（最大 10MB）`);
+  }
+}
+
+export function validateAttachment(attachment: Partial<Attachment>): ValidationResult {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  validateAttachmentIdentity(attachment, errors);
+  validateAttachmentUrl(attachment, errors, warnings);
+  validateAttachmentTypeAndMime(attachment, errors, warnings);
+  validateAttachmentSize(attachment, errors);
 
   if (!attachment.createdAt || typeof attachment.createdAt !== 'string') {
     warnings.push('附件缺少创建时间');
   }
 
-  return {
-    valid: errors.length === 0,
-    errors,
-    warnings,
-  };
+  return toValidationResult({ errors, warnings });
 }
 
-export function validateTask(task: Partial<Task>): ValidationResult {
-  const errors: string[] = [];
-  const warnings: string[] = [];
-
+function validateTaskIdentity(task: Partial<Task>, errors: string[]): void {
   if (!task.id || typeof task.id !== 'string') {
     errors.push('任务 ID 无效或缺失');
   }
@@ -121,7 +169,9 @@ export function validateTask(task: Partial<Task>): ValidationResult {
   if (task.title !== undefined && typeof task.title !== 'string') {
     errors.push('任务标题必须是字符串');
   }
+}
 
+function validateTaskRankAndStage(task: Partial<Task>, errors: string[], warnings: string[]): void {
   if (task.rank !== undefined) {
     if (typeof task.rank !== 'number' || !Number.isFinite(task.rank)) {
       errors.push(`任务 ${task.id} 的 rank 无效: ${String(task.rank)}`);
@@ -132,26 +182,28 @@ export function validateTask(task: Partial<Task>): ValidationResult {
     }
   }
 
-  if (task.stage !== undefined && task.stage !== null) {
-    if (typeof task.stage !== 'number' || task.stage < 1) {
-      errors.push(`任务 ${task.id} 的 stage 无效: ${String(task.stage)}`);
-    }
+  if (task.stage !== undefined && task.stage !== null && (typeof task.stage !== 'number' || task.stage < 1)) {
+    errors.push(`任务 ${task.id} 的 stage 无效: ${String(task.stage)}`);
   }
+}
 
-  if (task.status !== undefined) {
-    const validStatuses: TaskStatus[] = ['active', 'completed', 'archived'];
-    if (!validStatuses.includes(task.status)) {
-      errors.push(`任务 ${task.id} 的状态无效: ${String(task.status)}`);
-    }
+function validateTaskStatusAndPosition(task: Partial<Task>, errors: string[], warnings: string[]): void {
+  const validStatuses: TaskStatus[] = ['active', 'completed', 'archived'];
+
+  if (task.status !== undefined && !validStatuses.includes(task.status)) {
+    errors.push(`任务 ${task.id} 的状态无效: ${String(task.status)}`);
   }
 
   if (task.x !== undefined && (typeof task.x !== 'number' || !Number.isFinite(task.x))) {
     warnings.push(`任务 ${task.id} 的 X 坐标无效`);
   }
+
   if (task.y !== undefined && (typeof task.y !== 'number' || !Number.isFinite(task.y))) {
     warnings.push(`任务 ${task.id} 的 Y 坐标无效`);
   }
+}
 
+function validateTaskStringFields(task: Partial<Task>, errors: string[], warnings: string[]): void {
   if (task.parentId !== undefined && task.parentId !== null && typeof task.parentId !== 'string') {
     errors.push(`任务 ${task.id} 的 parentId 无效`);
   }
@@ -171,7 +223,9 @@ export function validateTask(task: Partial<Task>): ValidationResult {
   if (task.shortId !== undefined && task.shortId !== null && typeof task.shortId !== 'string') {
     warnings.push(`任务 ${task.id} 的 shortId 无效`);
   }
+}
 
+function validateTaskCollections(task: Partial<Task>, errors: string[], warnings: string[]): void {
   if (task.attachments !== undefined) {
     if (!Array.isArray(task.attachments)) {
       errors.push(`任务 ${task.id} 的 attachments 必须为数组`);
@@ -195,11 +249,11 @@ export function validateTask(task: Partial<Task>): ValidationResult {
       }
     }
   }
+}
 
-  if (task.priority !== undefined) {
-    if (!TASK_PRIORITY_LIST.includes(task.priority)) {
-      errors.push(`任务 ${task.id} 的优先级无效: ${String(task.priority)}`);
-    }
+function validateTaskPriorityAndDueDate(task: Partial<Task>, errors: string[]): void {
+  if (task.priority !== undefined && !TASK_PRIORITY_LIST.includes(task.priority)) {
+    errors.push(`任务 ${task.id} 的优先级无效: ${String(task.priority)}`);
   }
 
   if (task.dueDate !== undefined && task.dueDate !== null) {
@@ -209,15 +263,15 @@ export function validateTask(task: Partial<Task>): ValidationResult {
       errors.push(`任务 ${task.id} 的截止日期无法解析`);
     }
   }
+}
 
-  if (task.expected_minutes !== undefined && task.expected_minutes !== null) {
-    if (
-      typeof task.expected_minutes !== 'number' ||
-      !Number.isFinite(task.expected_minutes) ||
-      task.expected_minutes <= 0
-    ) {
-      errors.push(`任务 ${task.id} 的预计时长无效`);
-    }
+function isPositiveFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0;
+}
+
+function validateTaskPlannerFields(task: Partial<Task>, errors: string[]): void {
+  if (task.expected_minutes !== undefined && task.expected_minutes !== null && !isPositiveFiniteNumber(task.expected_minutes)) {
+    errors.push(`任务 ${task.id} 的预计时长无效`);
   }
 
   if (task.cognitive_load !== undefined && task.cognitive_load !== null) {
@@ -226,14 +280,8 @@ export function validateTask(task: Partial<Task>): ValidationResult {
     }
   }
 
-  if (task.wait_minutes !== undefined && task.wait_minutes !== null) {
-    if (
-      typeof task.wait_minutes !== 'number' ||
-      !Number.isFinite(task.wait_minutes) ||
-      task.wait_minutes <= 0
-    ) {
-      errors.push(`任务 ${task.id} 的等待时长无效`);
-    }
+  if (task.wait_minutes !== undefined && task.wait_minutes !== null && !isPositiveFiniteNumber(task.wait_minutes)) {
+    errors.push(`任务 ${task.id} 的等待时长无效`);
   }
 
   if (
@@ -245,12 +293,21 @@ export function validateTask(task: Partial<Task>): ValidationResult {
   ) {
     errors.push(`任务 ${task.id} 的等待时长不能超过预计时长`);
   }
+}
 
-  return {
-    valid: errors.length === 0,
-    errors,
-    warnings,
-  };
+export function validateTask(task: Partial<Task>): ValidationResult {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  validateTaskIdentity(task, errors);
+  validateTaskRankAndStage(task, errors, warnings);
+  validateTaskStatusAndPosition(task, errors, warnings);
+  validateTaskStringFields(task, errors, warnings);
+  validateTaskCollections(task, errors, warnings);
+  validateTaskPriorityAndDueDate(task, errors);
+  validateTaskPlannerFields(task, errors);
+
+  return toValidationResult({ errors, warnings });
 }
 
 export function validateConnection(conn: Connection, taskIds: Set<string>): ValidationResult {
@@ -337,13 +394,11 @@ export function validateProject(project: Partial<Project>): ValidationResult {
 
 export function sanitizeAttachment(attachment: unknown): Attachment {
   const raw = attachment as Record<string, unknown>;
-  const validTypes: AttachmentType[] = ['image', 'document', 'link', 'file'];
-  const type = validTypes.includes(raw.type as AttachmentType) ? (raw.type as AttachmentType) : 'file';
+  const type = isAttachmentType(raw.type) ? raw.type : 'file';
 
   const _allowedProtocols = ['https:', 'http:', 'blob:'];
   const sanitizeUrl = (value: unknown): string => sanitizeUrlValue(value);
-
-  return {
+  const sanitized: Attachment = {
     id: String(raw.id || crypto.randomUUID()),
     type,
     name: String(raw.name || '未命名附件'),
@@ -352,39 +407,164 @@ export function sanitizeAttachment(attachment: unknown): Attachment {
     mimeType: typeof raw.mimeType === 'string' ? raw.mimeType : undefined,
     size: typeof raw.size === 'number' && raw.size >= 0 ? raw.size : undefined,
     createdAt: typeof raw.createdAt === 'string' ? raw.createdAt : nowISO(),
+    signedAt: typeof raw.signedAt === 'string' ? raw.signedAt : undefined,
+    deletedAt: typeof raw.deletedAt === 'string' ? raw.deletedAt : undefined,
+  };
+
+  const scanMetadata = sanitizeAttachmentScanMetadata(raw.scanMetadata);
+  if (scanMetadata) {
+    sanitized.scanMetadata = scanMetadata;
+  }
+
+  return sanitized;
+}
+
+function sanitizeAttachmentScanMetadata(value: unknown): AttachmentScanMetadata | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const metadata: AttachmentScanMetadata = {};
+  if (typeof value.fileId === 'string' && value.fileId.length > 0) {
+    metadata.fileId = value.fileId;
+  }
+  if (typeof value.fileHash === 'string' && value.fileHash.length > 0) {
+    metadata.fileHash = value.fileHash;
+  }
+  if (isScanStatus(value.scanStatus)) {
+    metadata.scanStatus = value.scanStatus;
+  }
+  if (typeof value.lastScannedAt === 'string') {
+    metadata.lastScannedAt = value.lastScannedAt;
+  }
+  if (isRecord(value.threat)) {
+    const threat = value.threat;
+    if (typeof threat.name === 'string' && typeof threat.description === 'string' && typeof threat.detectedAt === 'string') {
+      metadata.threat = {
+        name: threat.name,
+        description: threat.description,
+        detectedAt: threat.detectedAt,
+      };
+    }
+  }
+  if (Array.isArray(value.scanHistory)) {
+    const scanHistory = value.scanHistory
+      .filter(isRecord)
+      .map(entry => sanitizeScanHistoryEntry(entry))
+      .filter((entry): entry is NonNullable<AttachmentScanMetadata['scanHistory']>[number] => entry !== null)
+      .slice(0, 5);
+    if (scanHistory.length > 0) {
+      metadata.scanHistory = scanHistory;
+    }
+  }
+
+  return Object.keys(metadata).length > 0 ? metadata : undefined;
+}
+
+function sanitizeScanHistoryEntry(
+  entry: Record<string, unknown>,
+): NonNullable<AttachmentScanMetadata['scanHistory']>[number] | null {
+  if (
+    typeof entry.scannedAt !== 'string' ||
+    !isScanStatus(entry.status) ||
+    typeof entry.scanner !== 'string'
+  ) {
+    return null;
+  }
+
+  return {
+    scannedAt: entry.scannedAt,
+    status: entry.status,
+    scanner: entry.scanner,
   };
 }
 
-export function sanitizeTask(rawTask: unknown): Task {
-  const task = rawTask as Record<string, unknown>;
-  const fixes: string[] = [];
-
-  const attachments = Array.isArray(task.attachments)
+function sanitizeTaskAttachments(task: Record<string, unknown>): Attachment[] | undefined {
+  return Array.isArray(task.attachments)
     ? task.attachments.slice(0, MAX_ATTACHMENTS_PER_TASK).map(sanitizeAttachment)
     : undefined;
+}
 
-  const tags = Array.isArray(task.tags)
+function sanitizeTaskTags(task: Record<string, unknown>): string[] | undefined {
+  return Array.isArray(task.tags)
     ? (task.tags as unknown[]).filter((item): item is string => typeof item === 'string' && item.length > 0)
     : undefined;
+}
 
+function sanitizeTaskPriority(task: Record<string, unknown>): Task['priority'] {
   const rawPriority = task.priority as string | undefined;
-  const priority =
-    rawPriority && TASK_PRIORITY_LIST.includes(rawPriority as (typeof TASK_PRIORITY_LIST)[number])
-      ? (rawPriority as (typeof TASK_PRIORITY_LIST)[number])
-      : undefined;
+  return rawPriority && TASK_PRIORITY_LIST.includes(rawPriority as (typeof TASK_PRIORITY_LIST)[number])
+    ? (rawPriority as (typeof TASK_PRIORITY_LIST)[number])
+    : undefined;
+}
 
-  let dueDate: string | null | undefined;
+function sanitizeTaskDueDate(task: Record<string, unknown>): string | null | undefined {
   if (task.dueDate === null) {
-    dueDate = null;
-  } else if (typeof task.dueDate === 'string' && !Number.isNaN(new Date(task.dueDate).getTime())) {
-    dueDate = task.dueDate;
+    return null;
   }
 
-  const plannerFields = sanitizePlannerFields({
-    expectedMinutes: task.expected_minutes,
-    waitMinutes: task.wait_minutes,
-    cognitiveLoad: task.cognitive_load,
-  });
+  if (typeof task.dueDate === 'string' && !Number.isNaN(new Date(task.dueDate).getTime())) {
+    return task.dueDate;
+  }
+
+  return undefined;
+}
+
+function sanitizeTaskAttentionLevel(value: unknown): TaskAttentionLevel {
+  return value === 'warning' || value === 'blocker' ? value : 'info';
+}
+
+function sanitizeTaskAttentionItem(value: unknown, now: string): TaskAttentionItem | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const text = typeof value.text === 'string' ? value.text.trim() : '';
+  if (!text) {
+    return null;
+  }
+
+  return {
+    id: typeof value.id === 'string' && value.id.length > 0 ? value.id : crypto.randomUUID(),
+    text,
+    level: sanitizeTaskAttentionLevel(value.level),
+    done: typeof value.done === 'boolean' ? value.done : false,
+    createdAt: typeof value.createdAt === 'string' ? value.createdAt : now,
+    updatedAt: typeof value.updatedAt === 'string' ? value.updatedAt : now,
+  };
+}
+
+function sanitizeAttentionMeta(value: unknown): TaskAttentionMeta | null | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (value === null) {
+    return null;
+  }
+
+  if (!isRecord(value) || !Array.isArray(value.items)) {
+    return null;
+  }
+
+  const now = nowISO();
+  const items = value.items
+    .map(item => sanitizeTaskAttentionItem(item, now))
+    .filter((item): item is TaskAttentionItem => item !== null);
+
+  if (items.length === 0) {
+    return null;
+  }
+
+  return {
+    items,
+    pinned: typeof value.pinned === 'boolean' ? value.pinned : false,
+    updatedAt: typeof value.updatedAt === 'string' ? value.updatedAt : undefined,
+  };
+}
+
+function collectSanitizeTaskFixes(task: Record<string, unknown>, plannerAdjusted: boolean): string[] {
+  const fixes: string[] = [];
 
   if (!task.id) fixes.push('id');
   if (!task.title || typeof task.title !== 'string') fixes.push('title');
@@ -393,26 +573,53 @@ export function sanitizeTask(rawTask: unknown): Task {
   if (!task.status || !['active', 'completed', 'archived'].includes(String(task.status))) fixes.push('status');
   if (typeof task.x !== 'number' || !Number.isFinite(task.x)) fixes.push('x');
   if (typeof task.y !== 'number' || !Number.isFinite(task.y)) fixes.push('y');
-  if (plannerFields.adjusted) fixes.push('planner');
+  if (plannerAdjusted) fixes.push('planner');
 
-  const normalizedStatus =
-    task.status === 'completed'
-      ? 'completed'
-      : task.status === 'archived'
-        ? 'archived'
-        : 'active';
+  return fixes;
+}
+
+function normalizeTaskStatus(value: unknown): TaskStatus {
+  if (value === 'completed') {
+    return 'completed';
+  }
+
+  return value === 'archived' ? 'archived' : 'active';
+}
+
+function resolveSanitizedTaskCompletion(task: Record<string, unknown>, normalizedStatus: TaskStatus): {
+  createdDate: string;
+  updatedAt: string | undefined;
+  completedAt: string | null;
+} {
   const createdDate = typeof task.createdDate === 'string' ? task.createdDate : nowISO();
   const updatedAt = typeof task.updatedAt === 'string' ? task.updatedAt : undefined;
   const rawCompletedAt = typeof task.completedAt === 'string' ? task.completedAt : null;
-  // 兼容 completed_at 字段上线前的本地缓存，同时避免把后续同步/修复时钟固化为完成时间。
   const completedAt = normalizedStatus === 'completed'
     ? resolveTaskCompletionTimestamp({ completedAt: rawCompletedAt, updatedAt, createdDate })
     : null;
 
+  return { createdDate, updatedAt, completedAt };
+}
+
+function warnSanitizeTaskFixes(task: Record<string, unknown>, fixes: string[]): void {
   const isNgDevMode = Boolean((globalThis as { ngDevMode?: boolean }).ngDevMode);
   if (isNgDevMode && fixes.length > 0) {
     utilLogger.warn(`sanitizeTask: task ${String(task.id || 'unknown')} fixed fields: ${fixes.join(', ')}`);
   }
+}
+
+export function sanitizeTask(rawTask: unknown): Task {
+  const task = rawTask as Record<string, unknown>;
+  const plannerFields = sanitizePlannerFields({
+    expectedMinutes: task.expected_minutes,
+    waitMinutes: task.wait_minutes,
+    cognitiveLoad: task.cognitive_load,
+  });
+  const normalizedStatus = normalizeTaskStatus(task.status);
+  // 兼容 completed_at 字段上线前的本地缓存，同时避免把后续同步/修复时钟固化为完成时间。
+  const { createdDate, updatedAt, completedAt } = resolveSanitizedTaskCompletion(task, normalizedStatus);
+
+  warnSanitizeTaskFixes(task, collectSanitizeTaskFixes(task, plannerFields.adjusted));
 
   return {
     id: String(task.id || crypto.randomUUID()),
@@ -432,167 +639,87 @@ export function sanitizeTask(rawTask: unknown): Task {
     shortId: typeof task.shortId === 'string' ? task.shortId : undefined,
     hasIncompleteTask: Boolean(task.hasIncompleteTask),
     deletedAt: typeof task.deletedAt === 'string' ? task.deletedAt : null,
-    attachments,
-    tags,
-    priority,
-    dueDate,
+    attachments: sanitizeTaskAttachments(task),
+    tags: sanitizeTaskTags(task),
+    priority: sanitizeTaskPriority(task),
+    dueDate: sanitizeTaskDueDate(task),
     expected_minutes: plannerFields.expectedMinutes,
     cognitive_load: plannerFields.cognitiveLoad,
     wait_minutes: plannerFields.waitMinutes,
     parkingMeta: sanitizeParkingMeta(task.parkingMeta),
+    attentionMeta: sanitizeAttentionMeta(task.attentionMeta),
   };
 }
 
-/** 校验并清理停泊元数据，确保结构合法 */
-function sanitizeParkingMeta(value: unknown): import('../models/parking').TaskParkingMeta | undefined {
-  if (!value || typeof value !== 'object') return undefined;
-  const raw = value as Record<string, unknown>;
-  if (raw.state !== 'focused' && raw.state !== 'parked') return undefined;
-  return {
-    state: raw.state,
-    parkedAt: typeof raw.parkedAt === 'string' ? raw.parkedAt : null,
-    lastVisitedAt: typeof raw.lastVisitedAt === 'string' ? raw.lastVisitedAt : null,
-    // H-9 fix: 结构校验嵌套对象，防止空对象通过后导致下游 NaN/崩溃
-    contextSnapshot: sanitizeContextSnapshot(raw.contextSnapshot),
-    reminder: sanitizeReminder(raw.reminder),
-    pinned: typeof raw.pinned === 'boolean' ? raw.pinned : false,
-  };
+function sanitizeProjectTasks(rawTasks: unknown): Task[] {
+  return Array.isArray(rawTasks) ? rawTasks.map(sanitizeTask) : [];
 }
 
-/** H-9: 校验 contextSnapshot 嵌套字段 */
-function sanitizeContextSnapshot(value: unknown): import('../models/parking').TaskParkingMeta['contextSnapshot'] {
-  if (!value || typeof value !== 'object') return null;
-  const raw = value as Record<string, unknown>;
-  if (typeof raw.savedAt !== 'string' && typeof raw.savedAt !== 'number') return null;
-
-  // cursorPosition 需要是 { line, column } 结构或 null
-  let cursorPosition: { line: number; column: number } | null = null;
-  if (raw.cursorPosition && typeof raw.cursorPosition === 'object') {
-    const cp = raw.cursorPosition as Record<string, unknown>;
-    if (typeof cp.line === 'number' && typeof cp.column === 'number') {
-      cursorPosition = { line: cp.line, column: cp.column };
-    }
-  }
-
-  // scrollAnchor 需要是对象而非字符串
-  let scrollAnchor: import('../models/parking').ParkingScrollAnchor | null = null;
-  if (raw.scrollAnchor && typeof raw.scrollAnchor === 'object') {
-    const sa = raw.scrollAnchor as Record<string, unknown>;
-    if (typeof sa.scrollPercent === 'number') {
-      scrollAnchor = {
-        anchorType: sa.anchorType === 'heading' || sa.anchorType === 'line' ? sa.anchorType : 'line',
-        anchorIndex: typeof sa.anchorIndex === 'number' ? sa.anchorIndex : 0,
-        scrollPercent: sa.scrollPercent,
-        ...(typeof sa.anchorOffset === 'number' ? { anchorOffset: sa.anchorOffset } : {}),
-      };
-    }
-  }
-
-  // structuralAnchor 需要是对象
-  let structuralAnchor: import('../models/parking').ParkingStructuralAnchor | null = null;
-  if (raw.structuralAnchor && typeof raw.structuralAnchor === 'object') {
-    const sta = raw.structuralAnchor as Record<string, unknown>;
-    const validTypes = ['heading', 'gojs-node', 'line', 'fallback'] as const;
-    const saType = validTypes.includes(sta.type as typeof validTypes[number]) ? sta.type as typeof validTypes[number] : 'fallback';
-    structuralAnchor = {
-      type: saType,
-      label: typeof sta.label === 'string' ? sta.label : '',
-      ...(typeof sta.line === 'number' ? { line: sta.line } : {}),
-    };
-  }
-
-  // flowViewport 需要是对象
-  let flowViewport: import('../models/parking').ParkingFlowViewport | null = null;
-  if (raw.flowViewport && typeof raw.flowViewport === 'object') {
-    const fv = raw.flowViewport as Record<string, unknown>;
-    if (typeof fv.scale === 'number') {
-      flowViewport = {
-        scale: fv.scale,
-        selectedNodeId: typeof fv.selectedNodeId === 'string' ? fv.selectedNodeId : null,
-      };
-    }
-  }
-
-  return {
-    savedAt: typeof raw.savedAt === 'string' ? raw.savedAt : String(raw.savedAt),
-    contentHash: typeof raw.contentHash === 'string' ? raw.contentHash : '',
-    viewMode: raw.viewMode === 'flow' || raw.viewMode === 'text' ? raw.viewMode : 'text',
-    cursorPosition,
-    scrollAnchor,
-    structuralAnchor,
-    flowViewport,
-  };
-}
-
-/** H-9: 校验 reminder 嵌套字段 */
-function sanitizeReminder(value: unknown): import('../models/parking').TaskParkingMeta['reminder'] {
-  if (!value || typeof value !== 'object') return null;
-  const raw = value as Record<string, unknown>;
-  if (typeof raw.reminderAt !== 'string') return null;
-  return {
-    reminderAt: raw.reminderAt,
-    snoozeCount: typeof raw.snoozeCount === 'number' ? raw.snoozeCount : 0,
-    maxSnoozeCount: typeof raw.maxSnoozeCount === 'number' ? raw.maxSnoozeCount : 3,
-  } as import('../models/parking').TaskParkingMeta['reminder'];
-}
-
-export function sanitizeProject(rawProject: unknown): Project {
-  const project = rawProject as Record<string, unknown>;
-  const tasks = Array.isArray(project.tasks) ? (project.tasks as unknown[]).map(sanitizeTask) : [];
-
+function repairTaskParents(tasks: Task[]): Task[] {
   const taskIds = new Set(tasks.map(task => task.id));
-  const fixedTasks = tasks.map(task => {
+
+  return tasks.map(task => {
     if (task.parentId && !taskIds.has(task.parentId)) return { ...task, parentId: null };
     if (task.parentId === task.id) return { ...task, parentId: null };
     return task;
   });
+}
 
-  const connections: Connection[] = Array.isArray(project.connections)
-    ? (project.connections as unknown[])
-        .filter((item): item is Record<string, unknown> => {
-          const conn = item as Record<string, unknown>;
-          return Boolean(conn && conn.source && conn.target);
-        })
-        .map(conn => ({
-          id: conn.id ? String(conn.id) : crypto.randomUUID(),
-          source: String(conn.source),
-          target: String(conn.target),
-          title: conn.title ? String(conn.title) : undefined,
-          description: conn.description ? String(conn.description) : undefined,
-          updatedAt: typeof conn.updatedAt === 'string' ? conn.updatedAt : undefined,
-          deletedAt: conn.deletedAt ? String(conn.deletedAt) : undefined,
-        }))
-        .filter(conn => taskIds.has(conn.source) && taskIds.has(conn.target) && conn.source !== conn.target)
-    : [];
+function sanitizeProjectConnections(rawConnections: unknown, taskIds: Set<string>): Connection[] {
+  if (!Array.isArray(rawConnections)) {
+    return [];
+  }
 
-  const rawViewState = project.viewState as Record<string, unknown> | undefined;
-  const hasValidViewState =
-    rawViewState &&
-    typeof rawViewState.scale === 'number' &&
-    Number.isFinite(rawViewState.scale) &&
-    typeof rawViewState.positionX === 'number' &&
-    Number.isFinite(rawViewState.positionX) &&
-    typeof rawViewState.positionY === 'number' &&
-    Number.isFinite(rawViewState.positionY);
+  return rawConnections
+    .filter(isRecord)
+    .filter(conn => Boolean(conn.source && conn.target))
+    .map(conn => ({
+      id: conn.id ? String(conn.id) : crypto.randomUUID(),
+      source: String(conn.source),
+      target: String(conn.target),
+      title: conn.title ? String(conn.title) : undefined,
+      description: conn.description ? String(conn.description) : undefined,
+      updatedAt: typeof conn.updatedAt === 'string' ? conn.updatedAt : undefined,
+      deletedAt: conn.deletedAt ? String(conn.deletedAt) : undefined,
+    }))
+    .filter(conn => taskIds.has(conn.source) && taskIds.has(conn.target) && conn.source !== conn.target);
+}
 
-  const viewState = hasValidViewState
-    ? {
-        scale: Number(rawViewState.scale),
-        positionX: Number(rawViewState.positionX),
-        positionY: Number(rawViewState.positionY),
-      }
-    : undefined;
+function sanitizeProjectViewState(value: unknown): Project['viewState'] {
+  if (
+    !isRecord(value) ||
+    typeof value.scale !== 'number' ||
+    !Number.isFinite(value.scale) ||
+    typeof value.positionX !== 'number' ||
+    !Number.isFinite(value.positionX) ||
+    typeof value.positionY !== 'number' ||
+    !Number.isFinite(value.positionY)
+  ) {
+    return undefined;
+  }
+
+  return {
+    scale: Number(value.scale),
+    positionX: Number(value.positionX),
+    positionY: Number(value.positionY),
+  };
+}
+
+export function sanitizeProject(rawProject: unknown): Project {
+  const project = rawProject as Record<string, unknown>;
+  const tasks = sanitizeProjectTasks(project.tasks);
+  const taskIds = new Set(tasks.map(task => task.id));
 
   return {
     id: String(project.id || crypto.randomUUID()),
     name: String(project.name || '未命名项目'),
     description: String(project.description || ''),
     createdDate: typeof project.createdDate === 'string' ? project.createdDate : nowISO(),
-    tasks: fixedTasks,
-    connections,
+    tasks: repairTaskParents(tasks),
+    connections: sanitizeProjectConnections(project.connections, taskIds),
     updatedAt: typeof project.updatedAt === 'string' ? project.updatedAt : nowISO(),
     version: typeof project.version === 'number' ? project.version : 0,
-    viewState,
+    viewState: sanitizeProjectViewState(project.viewState),
     flowchartUrl: typeof project.flowchartUrl === 'string' ? sanitizeUrlValue(project.flowchartUrl) : undefined,
     flowchartThumbnailUrl:
       typeof project.flowchartThumbnailUrl === 'string' ? sanitizeUrlValue(project.flowchartThumbnailUrl) : undefined,

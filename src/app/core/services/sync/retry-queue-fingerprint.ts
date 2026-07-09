@@ -5,7 +5,7 @@
  * 持久化前裁剪。全部纯函数（无 `this`、无副作用）。
  *
  * - areStringArraysEqual：顺序敏感的字符串数组相等
- * - buildRefreshFingerprint：重试项刷新指纹（标量字段 + taskIdsToDelete 排序签名），
+ * - buildRefreshFingerprint：重试项刷新指纹（幂等键 + 数据快照 + taskIdsToDelete/CAS map 排序签名），
  *   用于识别"新快照覆盖旧 in-flight 项"而不被 loadFromStorage 浅复制误判
  * - buildBlackBoxRetryDataFingerprint：黑匣子条目数据指纹（含 focusMeta 归一），用于重试 noop 判定
  * - classifyErrorType：把 Error 归类成网络/超时/网关/未知等类型标签（驱动退避策略）
@@ -35,16 +35,49 @@ export function buildRefreshFingerprint(item: RetryQueueItem): string {
   const taskDeleteSignature = Array.isArray(item.taskIdsToDelete)
     ? [...item.taskIdsToDelete].sort().join(',')
     : '';
+  const taskDeleteBaseSignature = buildTaskDeleteBaseUpdatedAtMapSignature(item.taskDeleteBaseUpdatedAtMap);
 
   return [
     String(item.createdAt),
+    item.operationId,
     item.operation,
     item.projectId ?? '',
     item.sourceUserId ?? '',
+    item.writeIntent ?? '',
+    buildStableJsonSignature(item.data),
     updatedAt,
     deletedAt,
     taskDeleteSignature,
+    taskDeleteBaseSignature,
   ].join('|');
+}
+
+function buildStableJsonSignature(value: unknown): string {
+  if (value === null || typeof value !== 'object') {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(item => buildStableJsonSignature(item)).join(',')}]`;
+  }
+
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record)
+    .sort()
+    .map(key => `${JSON.stringify(key)}:${buildStableJsonSignature(record[key])}`)
+    .join(',')}}`;
+}
+
+function buildTaskDeleteBaseUpdatedAtMapSignature(
+  map: RetryQueueItem['taskDeleteBaseUpdatedAtMap'],
+): string {
+  if (!map) {
+    return '';
+  }
+
+  return Object.keys(map)
+    .sort()
+    .map(taskId => `${taskId}:${map[taskId] ?? null}`)
+    .join(',');
 }
 
 export function buildBlackBoxRetryDataFingerprint(entry: BlackBoxEntry): string {

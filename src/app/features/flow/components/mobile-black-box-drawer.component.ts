@@ -1,11 +1,11 @@
 /**
  * 移动端黑匣子抽屉组件
- * 
+ *
  * 底层抽屉内容：黑匣子数据区
  * 专为移动端抽屉布局优化
  */
 
-import { Component, ChangeDetectionStrategy, inject, OnInit, OnDestroy, output } from '@angular/core';
+import { Component, ChangeDetectionStrategy, Injector, inject, OnInit, OnDestroy, output } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { BlackBoxService } from '../../../../services/black-box.service';
 import { SpeechToTextService } from '../../../../services/speech-to-text.service';
@@ -17,19 +17,19 @@ import { BlackBoxDateGroupComponent } from '../../focus/components/black-box/bla
 import { StrataViewComponent } from '../../focus/components/strata/strata-view.component';
 import { StrataRestoreEvent } from '../../focus/components/strata/strata-layer.component';
 import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
-import { 
-  SwipeGestureState, 
-  SwipeDirection, 
-  startSwipeTracking, 
-  detectHorizontalSwipe 
+import {
+  SwipeGestureState,
+  SwipeDirection,
+  startSwipeTracking,
+  detectHorizontalSwipe
 } from '../../../../utils/gesture';
 
 @Component({
   selector: 'app-mobile-black-box-drawer',
   standalone: true,
   imports: [
-    CommonModule, 
-    BlackBoxRecorderComponent, 
+    CommonModule,
+    BlackBoxRecorderComponent,
     BlackBoxTextInputComponent,
     BlackBoxDateGroupComponent,
     StrataViewComponent
@@ -51,43 +51,43 @@ import {
             }
           </h2>
         </div>
-        
+
         <!-- 滚动内容区域 -->
         <div class="flex-1 overflow-y-auto overflow-x-hidden px-3 pb-8 flex flex-col gap-3 custom-scrollbar">
-          
+
           <!-- 录音按钮或文字输入 -->
           @if (speechService.isSupported()) {
-            <app-black-box-recorder 
+            <app-black-box-recorder
               (transcribed)="onTranscribed($event)" />
             <div class="mt-2">
-              <app-black-box-text-input 
+              <app-black-box-text-input
                 [showFallbackHint]="false"
                 (submitted)="onTranscribed($event)" />
             </div>
           } @else {
-            <app-black-box-text-input 
+            <app-black-box-text-input
               (submitted)="onTranscribed($event)" />
           }
-          
+
           <!-- 离线待处理提示 -->
           @if (speechService.offlinePendingCount() > 0) {
-            <div class="px-2 py-1.5 bg-amber-100 dark:bg-amber-900/30 
+            <div class="px-2 py-1.5 bg-amber-100 dark:bg-amber-900/30
                         rounded-lg text-xs text-amber-700 dark:text-amber-300
                         flex items-center gap-2">
               <span class="animate-pulse">📡</span>
               <span>{{ speechService.offlinePendingCount() }} 条录音待联网后转写</span>
             </div>
           }
-          
+
           <!-- 条目列表（按日期分组） -->
           @for (group of entriesByDate(); track group.date) {
-            <app-black-box-date-group 
+            <app-black-box-date-group
               [group]="group"
               (markRead)="onMarkRead($event)"
               (markCompleted)="onMarkCompleted($event)"
               (confirmDelete)="onConfirmDelete($event)" />
           }
-          
+
           <!-- 空状态 -->
           @if (entriesByDate().length === 0) {
             <div class="py-2 text-center text-[10px] leading-tight text-stone-400 dark:text-stone-500 sm:py-6 sm:text-xs">
@@ -109,7 +109,7 @@ import {
               <app-strata-view class="block h-full w-full" [alwaysShow]="true" (restoreItem)="onRestoreFromHistory($event)"></app-strata-view>
             </div>
           </div>
-          
+
         </div>
       </div>
     } @else {
@@ -128,33 +128,42 @@ import {
   `]
 })
 export class MobileBlackBoxDrawerComponent implements OnInit, OnDestroy {
+  private readonly injector = inject(Injector);
   private blackBoxService = inject(BlackBoxService);
   readonly speechService = inject(SpeechToTextService);
   readonly focusPrefs = inject(FocusPreferenceService);
   private readonly toast = inject(ToastService);
-  private readonly taskOpsAdapter = inject(TaskOperationAdapterService);
-  
+
+  private get taskOpsAdapter(): TaskOperationAdapterService {
+    return this.injector.get(TaskOperationAdapterService);
+  }
+
   readonly entriesByDate = this.blackBoxService.entriesByDate;
   readonly pendingCount = this.blackBoxService.pendingCount;
-  
+
   /** 滑动切换视图事件 */
   readonly swipeToSwitch = output<SwipeDirection>();
-  
+
   // 滑动手势状态
   private swipeState: SwipeGestureState = { startX: 0, startY: 0, startTime: 0, isActive: false };
 
   // visibilitychange 监听器引用（用于 cleanup）
   private visibilityHandler: (() => void) | null = null;
-  
+
   ngOnInit(): void {
     void this.blackBoxService.refreshForView();
     this.setupVisibilityRefresh();
   }
 
   ngOnDestroy(): void {
-    if (this.visibilityHandler) {
-      document.removeEventListener('visibilitychange', this.visibilityHandler);
-      this.visibilityHandler = null;
+    const visibilityHandler = this.visibilityHandler;
+    this.visibilityHandler = null;
+    if (visibilityHandler) {
+      try {
+        document.removeEventListener('visibilitychange', visibilityHandler);
+      } catch {
+        // 页面生命周期清理应尽力完成，避免销毁阶段抛错中断其他清理。
+      }
     }
   }
 
@@ -169,40 +178,56 @@ export class MobileBlackBoxDrawerComponent implements OnInit, OnDestroy {
         void this.blackBoxService.refreshForView();
       }
     };
-    document.addEventListener('visibilitychange', this.visibilityHandler);
+    try {
+      document.addEventListener('visibilitychange', this.visibilityHandler);
+    } catch {
+      this.visibilityHandler = null;
+    }
   }
-  
+
   /**
    * 处理转写完成
    */
-  onTranscribed(text: string): void {
-    if (text.trim()) {
-      const result = this.blackBoxService.create({ content: text.trim() });
-      if (!result.ok) {
-        this.toast.warning('保存失败', result.error.message);
-      }
+  async onTranscribed(text: string): Promise<void> {
+    const content = text.trim();
+    if (!content) {
+      return;
+    }
+
+    const result = await this.blackBoxService.createDurably({ content });
+    if (!result.ok) {
+      this.toast.warning('保存失败', result.error.message);
     }
   }
-  
+
   /**
    * 标记为已读
    */
-  onMarkRead(id: string): void {
-    this.blackBoxService.markAsRead(id);
+  async onMarkRead(id: string): Promise<void> {
+    const result = await this.blackBoxService.markAsReadDurably(id);
+    if (!result.ok) {
+      this.toast.warning('保存失败', result.error.message);
+    }
   }
-  
+
   /**
    * 标记为完成
    */
-  onMarkCompleted(id: string): void {
-    this.blackBoxService.markAsCompleted(id);
+  async onMarkCompleted(id: string): Promise<void> {
+    const result = await this.blackBoxService.markAsCompletedDurably(id);
+    if (!result.ok) {
+      this.toast.warning('保存失败', result.error.message);
+    }
   }
 
   /**
    * 确认删除条目
    */
-  onConfirmDelete(id: string): void {
-    this.blackBoxService.delete(id);
+  async onConfirmDelete(id: string): Promise<void> {
+    const result = await this.blackBoxService.deleteDurably(id);
+    if (!result.ok) {
+      this.toast.warning('保存失败', result.error.message);
+    }
   }
 
   /**
@@ -210,18 +235,24 @@ export class MobileBlackBoxDrawerComponent implements OnInit, OnDestroy {
    * - task → 恢复为 active 状态
    * - black_box → 取消完成标记
    */
-  onRestoreFromHistory(event: StrataRestoreEvent): void {
+  async onRestoreFromHistory(event: StrataRestoreEvent): Promise<void> {
     if (event.type === 'task') {
-      this.taskOpsAdapter.updateTaskStatus(event.id, 'active');
+      const restored = await this.taskOpsAdapter.updateTaskStatus(event.id, 'active');
+      if (!restored) {
+        this.toast.warning('恢复失败', '任务状态本地保存失败，请释放浏览器存储空间后重试');
+      }
     } else {
-      this.blackBoxService.update(event.id, { isCompleted: false });
+      const result = await this.blackBoxService.updateDurably(event.id, { isCompleted: false });
+      if (!result.ok) {
+        this.toast.warning('恢复失败', result.error.message);
+      }
     }
   }
-  
+
   // ===============================================
   // 滑动切换视图手势处理
   // ===============================================
-  
+
   /**
    * 滑动开始 - 在抽屉容器上调用
    * 用于检测水平滑动以切换视图
@@ -230,27 +261,27 @@ export class MobileBlackBoxDrawerComponent implements OnInit, OnDestroy {
     if (event.touches.length !== 1) return;
     this.swipeState = startSwipeTracking(event.touches[0]);
   }
-  
+
   /**
    * 滑动结束 - 检测是否触发视图切换
    * 【重要】检测到有效滑动时阻止事件冒泡，避免 app.component 误打开侧边栏
    */
   onSwipeTouchEnd(event: TouchEvent): void {
     if (!this.swipeState.isActive) return;
-    
+
     const touch = event.changedTouches[0];
     const direction = detectHorizontalSwipe(
       this.swipeState,
       touch.clientX,
       touch.clientY
     );
-    
+
     if (direction) {
       // 阻止事件冒泡，避免 app.component 误判为侧边栏切换手势
       event.stopPropagation();
       this.swipeToSwitch.emit(direction);
     }
-    
+
     this.swipeState = { startX: 0, startY: 0, startTime: 0, isActive: false };
   }
 }

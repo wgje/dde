@@ -1,18 +1,18 @@
 import { Injectable, signal, inject, effect, computed, PLATFORM_ID, DestroyRef } from '@angular/core';
 import { isPlatformBrowser } from '@angular/common';
 import { Meta } from '@angular/platform-browser';
-import { ThemeType, ColorMode } from '../models';
+import { ThemeType, ColorMode, UserPreferences } from '../models';
 import { CACHE_CONFIG } from '../config';
 import { UserPreferencesSyncService } from '../core-bridge';
 import { AuthService } from './auth.service';
 import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
+import { ActionQueueService } from './action-queue.service';
+import { PendingPreferenceOutboxService } from './pending-preference-outbox.service';
+import { createSyncOperationId } from '../utils/sync-operation-id';
 
 /** 本地颜色模式覆盖的存储键 */
 const LOCAL_COLOR_MODE_KEY = 'nanoflow.colorMode.local';
-
-/** 防抖延迟（毫秒） */
-const DEBOUNCE_DELAY = 1000;
 
 /**
  * 主题服务
@@ -29,10 +29,12 @@ const DEBOUNCE_DELAY = 1000;
 })
 export class ThemeService {
   private userPrefsSync = inject(UserPreferencesSyncService);
+  private actionQueue = inject(ActionQueueService);
   private authService = inject(AuthService);
   private toast = inject(ToastService);
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('Theme');
+  private readonly pendingPreferenceOutbox = inject(PendingPreferenceOutboxService);
   private meta = inject(Meta);
   private platformId = inject(PLATFORM_ID);
   private readonly destroyRef = inject(DestroyRef);
@@ -61,11 +63,9 @@ export class ThemeService {
   /** 主题保存状态 */
   readonly isSaving = signal(false);
   
-  /** 防抖计时器 */
-  private saveDebounceTimer: ReturnType<typeof setTimeout> | null = null;
-  
   /** 系统偏好媒体查询 */
   private systemPreferenceQuery: MediaQueryList | null = null;
+  private systemPreferenceHandler: ((event: MediaQueryListEvent) => void) | null = null;
   
   constructor() {
     if (isPlatformBrowser(this.platformId)) {
@@ -74,9 +74,10 @@ export class ThemeService {
       this.setupEffects();
     }
     this.destroyRef.onDestroy(() => {
-      if (this.saveDebounceTimer) {
-        clearTimeout(this.saveDebounceTimer);
-        this.saveDebounceTimer = null;
+      if (this.systemPreferenceQuery && this.systemPreferenceHandler) {
+        this.systemPreferenceQuery.removeEventListener('change', this.systemPreferenceHandler);
+        this.systemPreferenceQuery = null;
+        this.systemPreferenceHandler = null;
       }
     });
   }
@@ -86,26 +87,44 @@ export class ThemeService {
   /**
    * 设置色调主题
    */
-  async setTheme(theme: ThemeType) {
+  async setTheme(theme: ThemeType): Promise<boolean> {
+    const previousTheme = this.theme();
     this.theme.set(theme);
     this.applyThemeToDOM(theme);
-    localStorage.setItem(CACHE_CONFIG.THEME_CACHE_KEY, theme);
+    try {
+      localStorage.setItem(CACHE_CONFIG.THEME_CACHE_KEY, theme);
+    } catch (error) {
+      this.theme.set(previousTheme);
+      this.applyThemeToDOM(previousTheme);
+      this.logger.warn('主题本地缓存写入失败，已回滚本地主题状态', { theme, error });
+      return false;
+    }
     
     // 更新 PWA theme-color（读取主题实际背景色）
     this.updateThemeColorMeta();
     
-    // 防抖同步到云端
-    this.debouncedSyncPreferences();
+    return await this.enqueuePreferenceSync();
   }
   
   /**
    * 设置颜色模式
    */
-  setColorMode(mode: ColorMode) {
+  async setColorMode(mode: ColorMode): Promise<boolean> {
+    const previousMode = this.colorMode();
+    const previousDomMode = typeof document !== 'undefined'
+      ? document.documentElement.getAttribute('data-color-mode')
+      : null;
     this.colorMode.set(mode);
     
     // 保存到本地（设备级覆盖）
-    localStorage.setItem(LOCAL_COLOR_MODE_KEY, JSON.stringify(mode));
+    try {
+      localStorage.setItem(LOCAL_COLOR_MODE_KEY, JSON.stringify(mode));
+    } catch (error) {
+      this.colorMode.set(previousMode);
+      this.restoreColorModeDOM(previousDomMode);
+      this.logger.warn('颜色模式本地缓存写入失败，已回滚本地颜色模式状态', { mode, error });
+      return false;
+    }
     
     // 应用到 DOM
     this.applyColorModeToDOM(this.effectiveColorMode());
@@ -113,8 +132,7 @@ export class ThemeService {
     // 更新 PWA theme-color
     this.updateThemeColorMeta();
     
-    // 防抖同步到云端（作为默认值）
-    this.debouncedSyncPreferences();
+    return await this.enqueuePreferenceSync();
   }
   
   /**
@@ -123,18 +141,22 @@ export class ThemeService {
   async loadUserTheme() {
     const userId = this.authService.currentUserId();
     if (!userId) return;
+
+    const recoveredPreferences = await this.flushPendingPreferenceSync(userId);
     
     const prefs = await this.userPrefsSync.loadUserPreferences(userId);
-    if (prefs?.theme) {
-      this.theme.set(prefs.theme);
-      this.applyThemeToDOM(prefs.theme);
-      localStorage.setItem(CACHE_CONFIG.THEME_CACHE_KEY, prefs.theme);
+    const theme = recoveredPreferences?.theme ?? prefs?.theme;
+    if (theme) {
+      this.theme.set(theme);
+      this.applyThemeToDOM(theme);
+      localStorage.setItem(CACHE_CONFIG.THEME_CACHE_KEY, theme);
     }
     
     // 如果没有本地覆盖，使用云端的 colorMode 作为默认值
     const localOverride = localStorage.getItem(LOCAL_COLOR_MODE_KEY);
-    if (!localOverride && prefs?.colorMode) {
-      this.colorMode.set(prefs.colorMode);
+    const colorMode = recoveredPreferences?.colorMode ?? (!localOverride ? prefs?.colorMode : undefined);
+    if (colorMode) {
+      this.colorMode.set(colorMode);
       this.applyColorModeToDOM(this.effectiveColorMode());
       this.updateThemeColorMeta();
     }
@@ -159,6 +181,15 @@ export class ThemeService {
   applyColorModeToDOM(mode: 'light' | 'dark') {
     if (typeof document === 'undefined') return;
     document.documentElement.setAttribute('data-color-mode', mode);
+  }
+
+  private restoreColorModeDOM(previousMode: string | null): void {
+    if (typeof document === 'undefined') return;
+    if (previousMode === 'light' || previousMode === 'dark') {
+      document.documentElement.setAttribute('data-color-mode', previousMode);
+      return;
+    }
+    document.documentElement.removeAttribute('data-color-mode');
   }
   
   // ========== 私有方法 ==========
@@ -201,7 +232,7 @@ export class ThemeService {
     
     this.systemPreferenceQuery = window.matchMedia('(prefers-color-scheme: dark)');
     
-    const handler = (e: MediaQueryListEvent) => {
+    this.systemPreferenceHandler = (e: MediaQueryListEvent) => {
       this.systemColorMode.set(e.matches ? 'dark' : 'light');
       
       // 如果用户选择了 'system'，需要更新 DOM
@@ -212,7 +243,7 @@ export class ThemeService {
     };
     
     // 使用 addEventListener（现代浏览器）
-    this.systemPreferenceQuery.addEventListener('change', handler);
+    this.systemPreferenceQuery.addEventListener('change', this.systemPreferenceHandler);
   }
   
   /**
@@ -244,30 +275,127 @@ export class ThemeService {
     this.meta.updateTag({ name: 'theme-color', content: color });
   }
   
-  /**
-   * 防抖同步偏好到云端
-   */
-  private debouncedSyncPreferences() {
-    if (this.saveDebounceTimer) {
-      clearTimeout(this.saveDebounceTimer);
-    }
-    
-    this.saveDebounceTimer = setTimeout(async () => {
-      const userId = this.authService.currentUserId();
-      if (!userId) return;
-      
-      this.isSaving.set(true);
-      try {
-        await this.userPrefsSync.saveUserPreferences(userId, {
-          theme: this.theme(),
-          colorMode: this.colorMode(),
-        });
-      } catch (_error) {
-        this.toast.warning('主题保存失败', '将在下次联网时同步');
-      } finally {
-        this.isSaving.set(false);
+  private async enqueuePreferenceSync(): Promise<boolean> {
+    const userId = this.authService.currentUserId();
+    if (!userId) return true;
+
+    const currentPreferences: Partial<UserPreferences> = {
+      theme: this.theme(),
+      colorMode: this.colorMode(),
+    };
+    const operationId = createSyncOperationId();
+    const pending = await this.readPendingPreferenceForMerge(userId);
+    const preferences = pending
+      ? { ...pending.preferences, ...currentPreferences }
+      : currentPreferences;
+
+    this.isSaving.set(true);
+    try {
+      const actionId = await this.actionQueue.enqueueDurablyForOwner(userId, {
+        operationId,
+        type: 'update',
+        entityType: 'preference',
+        entityId: userId,
+        payload: {
+          userId,
+          sourceUserId: userId,
+          preferences,
+        },
+      });
+      if (!actionId) {
+        return await this.savePendingPreferenceSync(userId, preferences, operationId);
       }
-    }, DEBOUNCE_DELAY);
+      if (pending) {
+        await this.removeMergedPendingPreference(userId, preferences, operationId);
+      }
+      return true;
+    } catch {
+      return await this.savePendingPreferenceSync(userId, preferences, operationId);
+    } finally {
+      this.isSaving.set(false);
+    }
+  }
+
+  private async readPendingPreferenceForMerge(userId: string) {
+    try {
+      return await this.pendingPreferenceOutbox.readPendingPreference(userId);
+    } catch (error) {
+      this.logger.warn('主题 pending 偏好读取失败，本次仅写入当前主题变更', { userId, error });
+      // eslint-disable-next-line no-restricted-syntax -- pending 读取失败时跳过合并，当前主题变更仍会写入 ActionQueue
+      return null;
+    }
+  }
+
+  private async removeMergedPendingPreference(
+    userId: string,
+    preferences: Partial<UserPreferences>,
+    operationId: string,
+  ): Promise<void> {
+    try {
+      await this.pendingPreferenceOutbox.removePendingPreference(userId);
+    } catch (error) {
+      this.logger.warn('主题 pending 偏好已并入 ActionQueue，但清理恢复记录失败，将保留幂等副本', { userId, error });
+      await this.pendingPreferenceOutbox.savePendingPreference({
+        userId,
+        preferences,
+        operationId,
+      });
+    }
+  }
+
+  private async savePendingPreferenceSync(
+    userId: string,
+    preferences: Partial<UserPreferences>,
+    operationId: string,
+  ): Promise<boolean> {
+    try {
+      await this.pendingPreferenceOutbox.savePendingPreference({
+        userId,
+        preferences,
+        operationId,
+      });
+      this.toast.warning('主题保存失败', '已保留本地变更，将在恢复后自动同步');
+      return true;
+    } catch (error) {
+      this.logger.error('主题偏好 pending Outbox 写入失败', { userId, error });
+      this.toast.warning('主题保存失败', '本地同步队列不可用，请稍后重试');
+      return false;
+    }
+  }
+
+  private async flushPendingPreferenceSync(userId: string): Promise<{
+    theme?: ThemeType;
+    colorMode?: ColorMode;
+  } | null> {
+    const pending = await this.pendingPreferenceOutbox.readPendingPreference(userId);
+    if (!pending) {
+      return null;
+    }
+
+    try {
+      const actionId = await this.actionQueue.enqueueDurablyForOwner(userId, {
+        operationId: pending.operationId,
+        type: 'update',
+        entityType: 'preference',
+        entityId: userId,
+        payload: {
+          userId,
+          sourceUserId: userId,
+          preferences: pending.preferences,
+        },
+      });
+
+      if (actionId) {
+        await this.pendingPreferenceOutbox.removePendingPreference(userId);
+      }
+    } catch (error) {
+      this.logger.warn('主题 pending 偏好恢复入队失败，保留本地恢复记录', { userId, error });
+    }
+
+    return {
+      theme: pending.preferences.theme,
+      colorMode: pending.preferences.colorMode,
+    };
   }
   
   /**

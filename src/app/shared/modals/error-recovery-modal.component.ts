@@ -243,7 +243,7 @@ export class ErrorRecoveryModalComponent implements OnInit, OnDestroy {
   }
   
   private stopAutoSelectTimer(): void {
-    if (this.autoSelectTimer) {
+    if (this.autoSelectTimer !== null) {
       clearInterval(this.autoSelectTimer);
       this.autoSelectTimer = null;
     }

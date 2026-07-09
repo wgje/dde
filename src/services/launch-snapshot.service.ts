@@ -1,14 +1,17 @@
 import { Injectable } from '@angular/core';
 import type { ColorMode, Project, Task, ThemeType } from '../models';
-import type { LaunchRouteIntent, LaunchSnapshot, LaunchSnapshotProject, LaunchSnapshotTask } from '../models/launch-shell';
+import type { LaunchSnapshot, LaunchSnapshotProject, LaunchSnapshotTask } from '../models/launch-shell';
+import {
+  LAUNCH_SNAPSHOT_VERSION_V1,
+  LAUNCH_SNAPSHOT_VERSION_V2,
+  normalizeLaunchSnapshot,
+} from './launch-snapshot-normalization.helpers';
 import { resolveRouteIntent } from '../utils/route-intent';
 
 export type { LaunchSnapshot, LaunchSnapshotProject, LaunchSnapshotTask } from '../models/launch-shell';
 
 const LAUNCH_SNAPSHOT_STORAGE_KEY_V1 = 'nanoflow.launch-snapshot.v1';
 const LAUNCH_SNAPSHOT_STORAGE_KEY_V2 = 'nanoflow.launch-snapshot.v2';
-const LAUNCH_SNAPSHOT_VERSION_V1 = 1 as const;
-const LAUNCH_SNAPSHOT_VERSION_V2 = 2 as const;
 const MAX_PROJECTS = 6;
 const MAX_TASKS_PER_PROJECT = 3;
 const PERSIST_DEBOUNCE_MS = 400;
@@ -196,138 +199,7 @@ export class LaunchSnapshotService {
   }
 
   private normalize(value: unknown): LaunchSnapshot | null {
-    if (!value || typeof value !== 'object') {
-      return null;
-    }
-
-    const source = value as Partial<LaunchSnapshot>;
-    if (source.version !== LAUNCH_SNAPSHOT_VERSION_V1 && source.version !== LAUNCH_SNAPSHOT_VERSION_V2) {
-      return null;
-    }
-
-    const projects = Array.isArray(source.projects)
-      ? source.projects.map((project) => this.normalizeProject(project)).filter((project): project is LaunchSnapshotProject => !!project)
-      : [];
-
-    if (source.version === LAUNCH_SNAPSHOT_VERSION_V1) {
-      const activeProjectId = typeof source.activeProjectId === 'string' ? source.activeProjectId : null;
-      const preferredView = source.lastActiveView === 'flow' || source.lastActiveView === 'text'
-        ? source.lastActiveView
-        : null;
-      const currentProject = activeProjectId
-        ? projects.find((project) => project.id === activeProjectId) ?? null
-        : null;
-
-      return {
-        version: LAUNCH_SNAPSHOT_VERSION_V2,
-        savedAt: typeof source.savedAt === 'string' && source.savedAt ? source.savedAt : new Date().toISOString(),
-        activeProjectId,
-        lastActiveView: preferredView,
-        preferredView,
-        resolvedLaunchView: preferredView ?? 'text',
-        routeIntent: resolveRouteIntent(null, activeProjectId),
-        mobileDegraded: false,
-        degradeReason: null,
-        theme: source.theme ?? 'default',
-        colorMode: source.colorMode ?? 'system',
-        projects,
-        currentProject,
-      };
-    }
-
-    const activeProjectId = typeof source.activeProjectId === 'string' ? source.activeProjectId : null;
-    const preferredView = source.preferredView === 'flow' || source.preferredView === 'text'
-      ? source.preferredView
-      : source.lastActiveView === 'flow' || source.lastActiveView === 'text'
-        ? source.lastActiveView
-        : null;
-    const currentProject = this.normalizeProject(source.currentProject)
-      ?? (activeProjectId ? projects.find((project) => project.id === activeProjectId) ?? null : null);
-
-    return {
-      version: LAUNCH_SNAPSHOT_VERSION_V2,
-      savedAt: typeof source.savedAt === 'string' && source.savedAt ? source.savedAt : new Date().toISOString(),
-      userId: typeof source.userId === 'string' ? source.userId : null,
-      activeProjectId,
-      lastActiveView: source.lastActiveView === 'flow' || source.lastActiveView === 'text' ? source.lastActiveView : preferredView,
-      preferredView,
-      resolvedLaunchView: source.resolvedLaunchView === 'flow' || source.resolvedLaunchView === 'text'
-        ? source.resolvedLaunchView
-        : preferredView ?? 'text',
-      routeIntent: this.normalizeRouteIntent(source.routeIntent, activeProjectId),
-      mobileDegraded: source.mobileDegraded === true,
-      degradeReason: typeof source.degradeReason === 'string' ? source.degradeReason : null,
-      theme: source.theme ?? 'default',
-      colorMode: source.colorMode ?? 'system',
-      projects,
-      currentProject,
-    };
-  }
-
-  private normalizeProject(value: unknown): LaunchSnapshotProject | null {
-    if (!value || typeof value !== 'object') {
-      return null;
-    }
-
-    const source = value as Partial<LaunchSnapshotProject>;
-    if (typeof source.id !== 'string' || typeof source.name !== 'string') {
-      return null;
-    }
-
-    const recentTasks = Array.isArray(source.recentTasks)
-      ? source.recentTasks.map((task) => this.normalizeTask(task)).filter((task): task is LaunchSnapshotTask => !!task)
-      : [];
-
-    return {
-      id: source.id,
-      name: source.name,
-      description: typeof source.description === 'string' ? source.description : '',
-      updatedAt: typeof source.updatedAt === 'string' ? source.updatedAt : null,
-      taskCount: Number.isFinite(source.taskCount) ? Number(source.taskCount) : 0,
-      openTaskCount: Number.isFinite(source.openTaskCount) ? Number(source.openTaskCount) : 0,
-      recentTasks,
-    };
-  }
-
-  private normalizeTask(value: unknown): LaunchSnapshotTask | null {
-    if (!value || typeof value !== 'object') {
-      return null;
-    }
-
-    const source = value as Partial<LaunchSnapshotTask>;
-    if (
-      typeof source.id !== 'string' ||
-      typeof source.title !== 'string' ||
-      typeof source.displayId !== 'string' ||
-      (source.status !== 'active' && source.status !== 'completed' && source.status !== 'archived')
-    ) {
-      return null;
-    }
-
-    return {
-      id: source.id,
-      title: source.title,
-      displayId: source.displayId,
-      status: source.status,
-    };
-  }
-
-  private normalizeRouteIntent(value: unknown, activeProjectId: string | null): LaunchRouteIntent {
-    if (!value || typeof value !== 'object') {
-      return resolveRouteIntent(null, activeProjectId);
-    }
-
-    const source = value as Partial<LaunchRouteIntent>;
-    const kind = source.kind;
-    if (kind !== 'projects' && kind !== 'project' && kind !== 'text' && kind !== 'flow' && kind !== 'task') {
-      return resolveRouteIntent(null, activeProjectId);
-    }
-
-    return {
-      kind,
-      projectId: typeof source.projectId === 'string' ? source.projectId : activeProjectId,
-      taskId: typeof source.taskId === 'string' ? source.taskId : null,
-    };
+    return normalizeLaunchSnapshot(value);
   }
 
   private toV1Snapshot(snapshot: LaunchSnapshot): LaunchSnapshot {

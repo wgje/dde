@@ -3,7 +3,7 @@
  * 验证 XSS 防护和 URL 清洗功能
  */
 import { describe, it, expect, vi } from 'vitest';
-import { renderMarkdown, resolveMarkdownLinkTarget } from './markdown';
+import { renderMarkdown, renderMarkdownRawSafe, resolveMarkdownLinkTarget } from './markdown';
 import { securityLogger } from './standalone-logger';
 
 function decodeBackslashEntities(value: string | null): string | null {
@@ -208,6 +208,29 @@ describe('Markdown Security', () => {
       expect(String(message)).not.toContain('\r');
 
       warnSpy.mockRestore();
+    });
+
+    it('should preserve app link metadata after DOMPurify raw-safe sanitization', () => {
+      const taskHtml = renderMarkdownRawSafe('[task](task:task-123)');
+      const localHtml = renderMarkdownRawSafe('[local](C:\\Docs\\Plan.md)');
+      const localContainer = document.createElement('div');
+      localContainer.innerHTML = localHtml;
+      const localLink = localContainer.querySelector('a');
+
+      expect(taskHtml).toContain('data-link-kind="task"');
+      expect(taskHtml).toContain('data-task-link-id="task-123"');
+      expect(taskHtml).toContain('href="#task:task-123"');
+      expect(localHtml).toContain('data-link-kind="local"');
+      expect(decodeBackslashEntities(localLink?.getAttribute('data-local-link-path') ?? null)).toBe('C:\\Docs\\Plan.md');
+      expect(localHtml).toContain('href="#local-path"');
+    });
+
+    it('should keep dangerous href blocked after DOMPurify raw-safe sanitization', () => {
+      const html = renderMarkdownRawSafe('[bad](javascript:alert(1))');
+
+      expect(html).not.toContain('javascript:');
+      expect(html).toContain('data-link-kind="blocked"');
+      expect(html).toContain('href="#__nf_blocked__"');
     });
   });
 

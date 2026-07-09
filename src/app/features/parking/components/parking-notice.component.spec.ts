@@ -25,19 +25,19 @@ describe('ParkingNoticeComponent', () => {
 
   const mockParkingService = {
     pendingNotices,
-    startWork: vi.fn(),
+    startWork: vi.fn().mockResolvedValue(true),
     undoEviction: vi.fn(),
-    keepParked: vi.fn(),
+    keepParked: vi.fn().mockResolvedValue(true),
     consumeNotice: vi.fn(),
     getEvictionToken: vi.fn((tokenId: string) => ({ tokenId })),
   };
 
   const mockReminderService = {
     activeNotice: activeReminder,
-    snooze5m: vi.fn(),
-    snooze30m: vi.fn(),
-    snooze2h: vi.fn(),
-    cancelReminder: vi.fn(),
+    snooze5m: vi.fn().mockResolvedValue(true),
+    snooze30m: vi.fn().mockResolvedValue(true),
+    snooze2h: vi.fn().mockResolvedValue(true),
+    cancelReminder: vi.fn().mockResolvedValue(true),
     handleNoticeFadeout: vi.fn(),
     clearActiveNotice: vi.fn(() => activeReminder.set(null)),
   };
@@ -89,6 +89,14 @@ describe('ParkingNoticeComponent', () => {
     activeReminder.set(null);
     gateActive.set(false);
     isMobile.set(false);
+    mockParkingService.startWork.mockResolvedValue(true);
+    mockParkingService.undoEviction.mockResolvedValue(true);
+    mockParkingService.keepParked.mockResolvedValue(true);
+    mockParkingService.getEvictionToken.mockImplementation((tokenId: string) => ({ tokenId }));
+    mockReminderService.snooze5m.mockResolvedValue(true);
+    mockReminderService.snooze30m.mockResolvedValue(true);
+    mockReminderService.snooze2h.mockResolvedValue(true);
+    mockReminderService.cancelReminder.mockResolvedValue(true);
 
     await TestBed.configureTestingModule({
       imports: [ParkingNoticeComponent],
@@ -201,6 +209,32 @@ describe('ParkingNoticeComponent', () => {
       expect(mockParkingService.consumeNotice).toHaveBeenCalledWith('eviction-1');
     });
 
+    it('退场动画期间切到下一条通知时仍应消费原通知', () => {
+      const firstNotice = createEvictionNotice({ id: 'eviction-1' });
+      const nextNotice = createEvictionNotice({ id: 'eviction-2', taskId: 'task-2' });
+      pendingNotices.set([firstNotice]);
+      fixture.detectChanges();
+
+      vi.advanceTimersByTime(10);
+      fixture.detectChanges();
+
+      const input = document.createElement('input');
+      document.body.appendChild(input);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      document.body.removeChild(input);
+      expect(component.isExiting()).toBe(true);
+
+      pendingNotices.set([nextNotice]);
+      fixture.detectChanges();
+
+      expect(component.renderNotice()?.id).toBe('eviction-1');
+
+      vi.advanceTimersByTime(300);
+      fixture.detectChanges();
+
+      expect(mockParkingService.consumeNotice).toHaveBeenCalledWith('eviction-1');
+    });
+
     it('进入 interactive 后 eviction 应在有效滚动时 dismiss', () => {
       pendingNotices.set([createEvictionNotice()]);
       fixture.detectChanges();
@@ -224,38 +258,91 @@ describe('ParkingNoticeComponent', () => {
       expect(mockParkingService.consumeNotice).toHaveBeenCalledWith('eviction-1');
       scrollSpy.mockRestore();
     });
+
+    it('通知切换时即使 timer handle 为 0 也应清理 immune/fallback/dismiss 定时器', () => {
+      const internals = component as unknown as {
+        immuneTimer: ReturnType<typeof setTimeout> | null;
+        fallbackTimer: ReturnType<typeof setTimeout> | null;
+        dismissTimer: ReturnType<typeof setTimeout> | null;
+        clearAllTimers: () => void;
+      };
+      const zeroTimer = 0 as unknown as ReturnType<typeof setTimeout>;
+      const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout').mockImplementation(() => undefined);
+      internals.immuneTimer = zeroTimer;
+      internals.fallbackTimer = zeroTimer;
+      internals.dismissTimer = zeroTimer;
+
+      try {
+        internals.clearAllTimers();
+
+        // 旧通知的 handle-0 定时器若漏清理，会在新通知免疫窗口内重放并误 dismiss 新通知
+        expect(clearTimeoutSpy).toHaveBeenCalledTimes(3);
+        expect(internals.immuneTimer).toBeNull();
+        expect(internals.fallbackTimer).toBeNull();
+        expect(internals.dismissTimer).toBeNull();
+      } finally {
+        clearTimeoutSpy.mockRestore();
+      }
+    });
   });
 
   // ─── 动作委托 ───
 
   describe('handleAction 动作委托', () => {
-    it('undo-eviction 应调用 undoEviction 并消费通知', () => {
+    it('undo-eviction 应调用 undoEviction 并消费通知', async () => {
+      mockParkingService.undoEviction.mockResolvedValueOnce(true);
       const notice = createEvictionNotice();
       pendingNotices.set([notice]);
       fixture.detectChanges();
 
-      component.handleAction(notice, 'undo-eviction');
+      await component.handleAction(notice, 'undo-eviction');
       expect(mockParkingService.undoEviction).toHaveBeenCalledWith('token-1');
 
       vi.advanceTimersByTime(350);
       expect(mockParkingService.consumeNotice).toHaveBeenCalledWith('eviction-1');
     });
 
-    it('start-work 应调用 parkingService.startWork', () => {
+    it('undo-eviction 本地 restore 失败时不应关闭通知', async () => {
+      mockParkingService.undoEviction.mockResolvedValueOnce(false);
+      const notice = createEvictionNotice();
+      pendingNotices.set([notice]);
+      fixture.detectChanges();
+
+      await component.handleAction(notice, 'undo-eviction');
+
+      expect(mockParkingService.undoEviction).toHaveBeenCalledWith('token-1');
+      expect(component.isExiting()).toBe(false);
+      expect(component.renderNotice()?.id).toBe('eviction-1');
+    });
+
+    it('start-work 应调用 parkingService.startWork', async () => {
       const notice = createReminderNotice();
       activeReminder.set(notice);
       fixture.detectChanges();
 
-      component.handleAction(notice, 'start-work');
+      await component.handleAction(notice, 'start-work');
       expect(mockParkingService.startWork).toHaveBeenCalledWith('task-r');
     });
 
-    it('动作触发后应保留 renderNotice 直到退场动画结束', () => {
+    it('start-work 本地切换失败时不应关闭通知', async () => {
+      mockParkingService.startWork.mockResolvedValueOnce(false);
       const notice = createReminderNotice();
       activeReminder.set(notice);
       fixture.detectChanges();
 
-      component.handleAction(notice, 'ignore');
+      await component.handleAction(notice, 'start-work');
+
+      expect(mockParkingService.startWork).toHaveBeenCalledWith('task-r');
+      expect(component.isExiting()).toBe(false);
+      expect(component.renderNotice()?.id).toBe('reminder-1');
+    });
+
+    it('动作触发后应保留 renderNotice 直到退场动画结束', async () => {
+      const notice = createReminderNotice();
+      activeReminder.set(notice);
+      fixture.detectChanges();
+
+      await component.handleAction(notice, 'ignore');
 
       expect(component.renderNotice()?.id).toBe('reminder-1');
       expect(component.isExiting()).toBe(true);
@@ -264,54 +351,67 @@ describe('ParkingNoticeComponent', () => {
       expect(component.renderNotice()).toBeNull();
     });
 
-    it('snooze-5m 应调用 reminderService.snooze5m', () => {
+    it('snooze-5m 应调用 reminderService.snooze5m', async () => {
       const notice = createReminderNotice();
       activeReminder.set(notice);
       fixture.detectChanges();
 
-      component.handleAction(notice, 'snooze-5m');
+      await component.handleAction(notice, 'snooze-5m');
       expect(mockReminderService.snooze5m).toHaveBeenCalledWith('task-r');
     });
 
-    it('snooze-30m 应调用 reminderService.snooze30m', () => {
+    it('snooze-30m 应调用 reminderService.snooze30m', async () => {
       const notice = createReminderNotice();
       activeReminder.set(notice);
       fixture.detectChanges();
 
-      component.handleAction(notice, 'snooze-30m');
+      await component.handleAction(notice, 'snooze-30m');
       expect(mockReminderService.snooze30m).toHaveBeenCalledWith('task-r');
     });
 
-    it('snooze-2h-later 应调用 reminderService.snooze2h', () => {
+    it('snooze-2h-later 应调用 reminderService.snooze2h', async () => {
       const notice = createReminderNotice();
       activeReminder.set(notice);
       fixture.detectChanges();
 
-      component.handleAction(notice, 'snooze-2h-later');
+      await component.handleAction(notice, 'snooze-2h-later');
       expect(mockReminderService.snooze2h).toHaveBeenCalledWith('task-r');
     });
 
-    it('ignore 应调用 reminderService.cancelReminder', () => {
+    it('ignore 应调用 reminderService.cancelReminder', async () => {
       const notice = createReminderNotice();
       activeReminder.set(notice);
       fixture.detectChanges();
 
-      component.handleAction(notice, 'ignore');
+      await component.handleAction(notice, 'ignore');
       expect(mockReminderService.cancelReminder).toHaveBeenCalledWith('task-r');
     });
 
-    it('keep-parked 应调用 parkingService.keepParked', () => {
+    it('reminder 本地保存失败时不应关闭通知', async () => {
+      mockReminderService.cancelReminder.mockResolvedValueOnce(false);
+      const notice = createReminderNotice();
+      activeReminder.set(notice);
+      fixture.detectChanges();
+
+      await component.handleAction(notice, 'ignore');
+
+      expect(mockReminderService.cancelReminder).toHaveBeenCalledWith('task-r');
+      expect(component.isExiting()).toBe(false);
+      expect(component.renderNotice()?.id).toBe('reminder-1');
+    });
+
+    it('keep-parked 应调用 parkingService.keepParked', async () => {
       const notice = createEvictionNotice({
         actions: [{ key: 'keep-parked', label: '关闭' }],
       });
       pendingNotices.set([notice]);
       fixture.detectChanges();
 
-      component.handleAction(notice, 'keep-parked');
+      await component.handleAction(notice, 'keep-parked');
       expect(mockParkingService.keepParked).toHaveBeenCalledWith('task-1');
     });
 
-    it('keep-parked 批量应对每个 evictionItem 调用 keepParked', () => {
+    it('keep-parked 批量应对每个 evictionItem 调用 keepParked', async () => {
       const notice = createEvictionNotice({
         evictionItems: [
           { taskId: 'task-a', taskTitle: 'A', evictionTokenId: 'token-a' },
@@ -322,9 +422,46 @@ describe('ParkingNoticeComponent', () => {
       pendingNotices.set([notice]);
       fixture.detectChanges();
 
-      component.handleAction(notice, 'keep-parked');
+      await component.handleAction(notice, 'keep-parked');
       expect(mockParkingService.keepParked).toHaveBeenCalledWith('task-a');
       expect(mockParkingService.keepParked).toHaveBeenCalledWith('task-b');
+    });
+
+    it('keep-parked 本地保存失败时不应关闭通知', async () => {
+      mockParkingService.keepParked.mockResolvedValueOnce(false);
+      const notice = createEvictionNotice({
+        actions: [{ key: 'keep-parked', label: '关闭' }],
+      });
+      pendingNotices.set([notice]);
+      fixture.detectChanges();
+
+      await component.handleAction(notice, 'keep-parked');
+
+      expect(mockParkingService.keepParked).toHaveBeenCalledWith('task-1');
+      expect(component.isExiting()).toBe(false);
+      expect(component.renderNotice()?.id).toBe('eviction-1');
+    });
+
+    it('keep-parked 批量任一保存失败时不应关闭通知', async () => {
+      mockParkingService.keepParked
+        .mockResolvedValueOnce(true)
+        .mockResolvedValueOnce(false);
+      const notice = createEvictionNotice({
+        evictionItems: [
+          { taskId: 'task-a', taskTitle: 'A', evictionTokenId: 'token-a' },
+          { taskId: 'task-b', taskTitle: 'B', evictionTokenId: 'token-b' },
+        ],
+        actions: [{ key: 'keep-parked', label: '关闭' }],
+      });
+      pendingNotices.set([notice]);
+      fixture.detectChanges();
+
+      await component.handleAction(notice, 'keep-parked');
+
+      expect(mockParkingService.keepParked).toHaveBeenCalledWith('task-a');
+      expect(mockParkingService.keepParked).toHaveBeenCalledWith('task-b');
+      expect(component.isExiting()).toBe(false);
+      expect(component.renderNotice()?.id).toBe('eviction-1');
     });
   });
 
@@ -346,7 +483,8 @@ describe('ParkingNoticeComponent', () => {
   // ─── 批量逐条撤回 ───
 
   describe('批量逐条撤回', () => {
-    it('应按 token 调用 undo', () => {
+    it('应按 token 调用 undo', async () => {
+      mockParkingService.undoEviction.mockResolvedValueOnce(true);
       const notice = createEvictionNotice({
         id: 'batch-1',
         taskTitle: '2 个停泊任务已移回任务列表',
@@ -361,7 +499,7 @@ describe('ParkingNoticeComponent', () => {
       pendingNotices.set([notice]);
       fixture.detectChanges();
 
-      component.undoEvictionItem(
+      await component.undoEvictionItem(
         notice,
         notice.evictionItems![0],
         { stopPropagation: vi.fn() } as unknown as Event
@@ -371,7 +509,8 @@ describe('ParkingNoticeComponent', () => {
       expect(mockParkingService.consumeNotice).not.toHaveBeenCalled();
     });
 
-    it('所有 item 都撤回后应自动消散通知', () => {
+    it('所有 item 都撤回后应自动消散通知', async () => {
+      mockParkingService.undoEviction.mockResolvedValueOnce(true);
       // 只有一个 item 的批量通知
       const notice = createEvictionNotice({
         id: 'auto-dismiss',
@@ -389,7 +528,7 @@ describe('ParkingNoticeComponent', () => {
       mockParkingService.getEvictionToken.mockReturnValueOnce({ tokenId: 'token-solo' });
       mockParkingService.getEvictionToken.mockReturnValue(null as never);
 
-      component.undoEvictionItem(
+      await component.undoEvictionItem(
         notice,
         notice.evictionItems![0],
         { stopPropagation: vi.fn() } as unknown as Event
@@ -397,6 +536,30 @@ describe('ParkingNoticeComponent', () => {
 
       // 应该触发 dismissNotice (isExiting)
       expect(component.isExiting()).toBe(true);
+    });
+
+    it('逐条撤回本地 restore 失败时不应隐藏 item', async () => {
+      mockParkingService.undoEviction.mockResolvedValueOnce(false);
+      const notice = createEvictionNotice({
+        id: 'undo-fail',
+        evictionTokenId: null,
+        evictionItems: [
+          { taskId: 'task-a', taskTitle: 'A', evictionTokenId: 'token-a' },
+        ],
+        actions: [{ key: 'keep-parked', label: '关闭' }],
+      });
+      pendingNotices.set([notice]);
+      fixture.detectChanges();
+
+      await component.undoEvictionItem(
+        notice,
+        notice.evictionItems![0],
+        { stopPropagation: vi.fn() } as unknown as Event
+      );
+
+      expect(mockParkingService.undoEviction).toHaveBeenCalledWith('token-a');
+      expect(component.dismissedEvictionTokenIds().has('token-a')).toBe(false);
+      expect(component.isExiting()).toBe(false);
     });
 
     it('toggleEvictionExpanded 应切换展开状态', () => {

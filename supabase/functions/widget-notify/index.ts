@@ -1,5 +1,3 @@
-import 'jsr:@supabase/functions-js/edge-runtime.d.ts';
-
 import { Webhook } from 'https://esm.sh/standardwebhooks@1.0.0';
 
 import {
@@ -14,11 +12,15 @@ import {
   extractWidgetClientVersion,
   getClientIp,
   getCorsHeaders,
+  hasServiceRoleConfig,
+  isWidgetRequestBodyTooLargeError,
   jsonResponse,
   loadWidgetCapabilities,
   loadWidgetLimits,
   logWidgetEvent,
+  readWidgetRequestText,
   redactId,
+  serviceNotConfiguredPayload,
   sha256Hex,
   verifyJwtUser,
   withPrivateNoStoreHeaders,
@@ -583,9 +585,25 @@ Deno.serve(async (req) => {
     return jsonResponse({ error: 'Method not allowed', code: 'METHOD_NOT_ALLOWED' }, responseHeaders, 405);
   }
 
+  if (!hasServiceRoleConfig()) {
+    return jsonResponse(serviceNotConfiguredPayload(), responseHeaders, 503);
+  }
+
   const client = createServiceRoleClient();
   const limits = await loadWidgetLimits(client);
-  const rawBody = await req.text();
+  let rawBody: string;
+  try {
+    rawBody = await readWidgetRequestText(req);
+  } catch (error) {
+    if (isWidgetRequestBodyTooLargeError(error)) {
+      return jsonResponse(
+        { error: 'Request body too large', code: 'REQUEST_BODY_TOO_LARGE' },
+        responseHeaders,
+        413,
+      );
+    }
+    throw error;
+  }
   const webhookSecret = normalizeWidgetWebhookSecret(Deno.env.get('WIDGET_NOTIFY_WEBHOOK_SECRET') ?? null);
   if (!webhookSecret) {
     return jsonResponse({ error: 'Webhook secret is not configured', code: 'WEBHOOK_SECRET_MISSING' }, responseHeaders, 503);

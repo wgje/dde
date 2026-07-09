@@ -20,8 +20,36 @@ import { ToastService } from './toast.service';
 import { UserSessionService } from './user-session.service';
 import { ConnectionAdapterService } from './connection-adapter.service';
 import { WriteGuardService } from './write-guard.service';
-import { Task, Attachment } from '../models';
+import { ActionQueueService } from './action-queue.service';
+import { AuthService } from './auth.service';
+import { Task, Attachment, TaskAttentionDraftItem } from '../models';
 import { ErrorCodes, failure, Result, OperationError } from '../utils/result';
+import { blockTaskMutation, type TaskMutationBlockOptions } from './task-operation-mutation-guard.helpers';
+import { runTaskDurableFieldMutation } from './task-operation-durable-field.helpers';
+import { TaskOperationTrashAdapterController } from './task-operation-trash-adapter.controller';
+import {
+  addTaskAttachmentToProjectState,
+  enqueueTaskAttachmentProjectUpdateIfNeeded,
+} from './task-operation-attachment-project.helpers';
+import {
+  recordTaskPositionBatchDurably,
+  type TaskPositionPatch,
+} from './task-operation-position-batch.helpers';
+import { TaskOperationAdapterWarmupController } from './task-operation-adapter-warmup.controller';
+import {
+  runTaskCognitiveLoadMutation,
+  runTaskDueDateMutation,
+  runTaskExpectedMinutesMutation,
+  runTaskPlannerFieldsMutation,
+  runTaskPriorityMutation,
+  runTaskWaitMinutesMutation,
+  type TaskCognitiveLoadValue,
+  type TaskPlannerFieldsPatch,
+  type TaskPriorityValue,
+} from './task-operation-adapter-planner.helpers';
+import { TaskOperationAdapterMoveController } from './task-operation-adapter-move.controller';
+import { TaskOperationAdapterInsertController } from './task-operation-adapter-insert.controller';
+import { TaskOperationAdapterStructureController } from './task-operation-adapter-structure.controller';
 
 @Injectable({
   providedIn: 'root'
@@ -43,92 +71,110 @@ export class TaskOperationAdapterService {
   private toastService = inject(ToastService);
   private userSession = inject(UserSessionService);
   private writeGuard = inject(WriteGuardService);
+  private actionQueue = inject(ActionQueueService);
+  private authService = inject(AuthService);
+  private readonly mutationGuardRuntime = {
+    isExportOnly: () => this.writeGuard.isExportOnly(),
+    isHintOnlyStartupReadOnly: () => this.userSession.isHintOnlyStartupPlaceholderVisible?.() ?? false,
+    toastInfo: (title: string, message: string) => this.toastService.info(title, message),
+  };
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('TaskOpsAdapter');
-  private warmupPromise: Promise<void> | null = null;
-
-  constructor() {
-    // Callbacks eliminated: TaskOperationService now uses direct DI
-  }
+  private readonly durableFieldRuntime = {
+    blockLocalMutation: (actionLabel: string) => this.blockLocalMutation(actionLabel),
+    markContentEditing: () => { this.markLocalEditing(); this.recorder.lastUpdateType = 'content'; },
+    warn: (message: string, data: Record<string, unknown>) => this.logger.warn(message, data),
+  };
+  private readonly trashAdapter = new TaskOperationTrashAdapterController({
+    blockLocalMutation: (actionLabel) => this.blockLocalMutation(actionLabel),
+    core: this.core,
+    logger: this.logger,
+    markEditing: () => this.markLocalEditing(),
+    optimisticState: this.optimisticState,
+    projectState: this.projectState,
+    recorder: this.recorder,
+    rollbackSnapshotAfterDurableFailure: (snapshotId, message, data) =>
+      this.rollbackSnapshotAfterDurableFailure(snapshotId, message, data),
+  });
+  private readonly warmupController = new TaskOperationAdapterWarmupController({
+    activeProjectId: () => this.projectState.activeProjectId(),
+    isEditing: () => this.uiState.isEditing,
+    hasPendingLocalChanges: () => this.syncCoordinator.hasPendingLocalChanges(),
+    clearHistory: () => this.undoService.clearHistory(),
+  });
+  private readonly moveAdapter = new TaskOperationAdapterMoveController({
+    blockLocalMutationResult: <T>(actionLabel: string) =>
+      this.blockLocalMutationResult<T>(actionLabel),
+    core: this.core,
+    markStructureEditing: () => {
+      this.markLocalEditing();
+      this.recorder.lastUpdateType = 'structure';
+    },
+    optimisticState: this.optimisticState,
+    projectState: this.projectState,
+    recorder: this.recorder,
+    warn: (message, data) => this.logger.warn(message, data),
+  });
+  private readonly insertAdapter = new TaskOperationAdapterInsertController({
+    blockLocalMutationResult: <T>(actionLabel: string) =>
+      this.blockLocalMutationResult<T>(actionLabel),
+    core: this.core,
+    markStructureEditing: () => {
+      this.markLocalEditing();
+      this.recorder.lastUpdateType = 'structure';
+    },
+    optimisticState: this.optimisticState,
+    recorder: this.recorder,
+  });
+  private readonly structureAdapter = new TaskOperationAdapterStructureController({
+    blockLocalMutation: (actionLabel: string) => this.blockLocalMutation(actionLabel),
+    blockLocalMutationResult: <T>(actionLabel: string) =>
+      this.blockLocalMutationResult<T>(actionLabel),
+    core: this.core,
+    markStructureEditing: () => {
+      this.markLocalEditing();
+      this.recorder.lastUpdateType = 'structure';
+    },
+    optimisticState: this.optimisticState,
+    recorder: this.recorder,
+  });
 
   /**
    * 交互层预热（P1）
    * 仅触发轻量依赖访问，不阻断业务操作。
    */
-  async warmup(): Promise<void> {
-    if (this.warmupPromise) return this.warmupPromise;
-
-    this.warmupPromise = Promise.resolve().then(() => {
-      void this.projectState.activeProjectId();
-      void this.uiState.isEditing;
-      void this.syncCoordinator.hasPendingLocalChanges();
-      void this.undoService.clearHistory();
-    }).finally(() => {
-      this.warmupPromise = null;
-    });
-
-    return this.warmupPromise;
+  warmup(): Promise<void> {
+    return this.warmupController.warmup();
   }
-  
+
   // ========== 公共方法 ==========
 
   getLastUpdateType(): 'content' | 'structure' | 'position' {
     return this.recorder.lastUpdateType;
   }
 
-  isHintOnlyStartupReadOnly(): boolean {
-    return this.userSession.isHintOnlyStartupPlaceholderVisible?.() ?? false;
-  }
+  isHintOnlyStartupReadOnly(): boolean { return this.mutationGuardRuntime.isHintOnlyStartupReadOnly(); }
 
-  private blockHintOnlyMutation(actionLabel: string, options?: { toast?: boolean }): boolean {
-    if (!this.isHintOnlyStartupReadOnly()) {
-      return false;
-    }
-
-    if (options?.toast !== false) {
-      this.toastService.info('会话确认中', `${actionLabel}暂不可用，owner 确认完成前保持只读`);
-    }
-    return true;
-  }
-
-  private blockHintOnlyMutationResult<T>(actionLabel: string): Result<T, OperationError> | null {
-    if (!this.blockHintOnlyMutation(actionLabel)) {
-      return null;
-    }
-
-    return failure(ErrorCodes.PERMISSION_DENIED, '会话确认中，owner 确认完成前暂时只读');
-  }
-
-  private blockExportOnlyMutation(actionLabel: string, options?: { toast?: boolean }): boolean {
-    if (!this.writeGuard.isExportOnly()) {
-      return false;
-    }
-
-    if (options?.toast !== false) {
-      this.toastService.info(
-        '导出模式',
-        `${actionLabel}暂不可用，旧入口仅允许导出，请前往 https://nanoflow.pages.dev 继续编辑`
-      );
-    }
-    return true;
-  }
-
-  private blockExportOnlyMutationResult<T>(actionLabel: string): Result<T, OperationError> | null {
-    if (!this.blockExportOnlyMutation(actionLabel)) {
-      return null;
-    }
-
-    return failure(ErrorCodes.PERMISSION_DENIED, '导出模式下禁止本地写入');
-  }
-
-  private blockLocalMutation(actionLabel: string, options?: { toast?: boolean }): boolean {
-    return this.blockExportOnlyMutation(actionLabel, options)
-      || this.blockHintOnlyMutation(actionLabel, options);
+  private blockLocalMutation(actionLabel: string, options?: TaskMutationBlockOptions): boolean {
+    return blockTaskMutation(actionLabel, this.mutationGuardRuntime, options) !== null;
   }
 
   private blockLocalMutationResult<T>(actionLabel: string): Result<T, OperationError> | null {
-    return this.blockExportOnlyMutationResult<T>(actionLabel)
-      ?? this.blockHintOnlyMutationResult<T>(actionLabel);
+    const blocked = blockTaskMutation(actionLabel, this.mutationGuardRuntime);
+    if (!blocked) {
+      return null;
+    }
+
+    return failure(ErrorCodes.PERMISSION_DENIED, blocked.errorMessage);
+  }
+
+  private rollbackSnapshotAfterDurableFailure(
+    snapshotId: string,
+    message: string,
+    data: Record<string, unknown>,
+  ): void {
+    this.optimisticState.rollbackSnapshot(snapshotId);
+    this.logger.warn(message, data);
   }
 
   markEditing(): void {
@@ -136,69 +182,85 @@ export class TaskOperationAdapterService {
     this.syncCoordinator.markLocalChanges(this.recorder.lastUpdateType);
   }
 
+  private markLocalEditing(): void {
+    this.uiState.markEditing();
+  }
+
   get isUserEditing(): boolean {
     return this.uiState.isEditing || this.syncCoordinator.hasPendingLocalChanges();
   }
 
   /** 执行撤销操作 */
-  performUndo(): void {
+  performUndo(): Promise<boolean> {
     if (this.blockLocalMutation('撤销操作')) {
-      return;
+      return Promise.resolve(false);
     }
 
-    this.recorder.performUndo();
+    return this.recorder.performUndo();
   }
   /** 执行重做操作 */
-  performRedo(): void {
+  performRedo(): Promise<boolean> {
     if (this.blockLocalMutation('重做操作')) {
-      return;
+      return Promise.resolve(false);
     }
 
-    this.recorder.performRedo();
+    return this.recorder.performRedo();
   }
-  
+
   // ========== 任务内容操作 ==========
 
-  updateTaskContent(taskId: string, newContent: string): void {
-    if (this.blockLocalMutation('编辑任务')) {
-      return;
-    }
-
-    this.markEditing();
-    this.recorder.lastUpdateType = 'content';
-    this.core.updateTaskContent(taskId, newContent);
+  updateTaskContent(taskId: string, newContent: string): Promise<boolean> {
+    return runTaskDurableFieldMutation({
+      actionLabel: '编辑任务',
+      failureMessage: '任务内容本地持久化失败，未提交 UI 更新',
+      failureData: { taskId },
+      mutate: () => this.core.updateTaskContentDurably(taskId, newContent),
+    }, this.durableFieldRuntime);
   }
 
-  updateTaskTitle(taskId: string, title: string): void {
-    if (this.blockLocalMutation('编辑任务')) {
-      return;
-    }
-
-    this.markEditing();
-    this.recorder.lastUpdateType = 'content';
-    this.core.updateTaskTitle(taskId, title);
+  updateTaskTitle(taskId: string, title: string): Promise<boolean> {
+    return runTaskDurableFieldMutation({
+      actionLabel: '编辑任务',
+      failureMessage: '任务标题本地持久化失败，未提交 UI 更新',
+      failureData: { taskId },
+      mutate: () => this.core.updateTaskTitleDurably(taskId, title),
+    }, this.durableFieldRuntime);
   }
 
-  addTodoItem(taskId: string, itemText: string): void {
-    if (this.blockLocalMutation('编辑任务')) {
-      return;
-    }
-
-    this.markEditing();
-    this.core.addTodoItem(taskId, itemText);
+  updateTaskDraft(
+    taskId: string,
+    draft: Partial<Pick<Task, 'title' | 'content'>>,
+  ): Promise<boolean> {
+    return runTaskDurableFieldMutation({
+      actionLabel: '编辑任务',
+      failureMessage: '任务草稿本地持久化失败，未提交 UI 更新',
+      failureData: { taskId },
+      mutate: () => this.core.updateTaskDraftDurably(taskId, draft),
+    }, this.durableFieldRuntime);
   }
 
+  addTodoItem(taskId: string, itemText: string): Promise<boolean> {
+    return runTaskDurableFieldMutation({
+      actionLabel: '编辑任务',
+      failureMessage: '任务待办本地持久化失败，未提交 UI 更新',
+      failureData: { taskId },
+      mutate: () => this.core.addTodoItemDurably(taskId, itemText),
+    }, this.durableFieldRuntime);
+  }
 
-  
   // ========== 任务位置操作 ==========
 
-  updateTaskPosition(taskId: string, x: number, y: number): void {
+  async updateTaskPosition(taskId: string, x: number, y: number): Promise<boolean> {
     if (this.blockLocalMutation('移动任务', { toast: false })) {
-      return;
+      return false;
     }
 
     this.recorder.lastUpdateType = 'position';
-    this.core.updateTaskPosition(taskId, x, y);
+    const saved = await this.core.updateTaskPositionDurably(taskId, x, y);
+    if (!saved) {
+      this.logger.warn('任务位置本地持久化失败，未提交 UI 更新', { taskId, x, y });
+    }
+    return saved;
   }
 
   beginPositionBatch(): void {
@@ -227,162 +289,247 @@ export class TaskOperationAdapterService {
     this.undoService.cancelBatch();
   }
 
-  updateTaskPositionWithUndo(taskId: string, x: number, y: number): void {
+  async updateTaskPositionWithUndo(taskId: string, x: number, y: number): Promise<boolean> {
     if (this.blockLocalMutation('移动任务')) {
-      return;
+      return false;
     }
 
     this.recorder.lastUpdateType = 'position';
     const task = this.projectState.getTask(taskId);
-    if (!task) return;
-    if (Math.abs(task.x - x) < 1 && Math.abs(task.y - y) < 1) return;
+    if (!task) return false;
+    if (Math.abs(task.x - x) < 1 && Math.abs(task.y - y) < 1) return true;
 
     const now = new Date().toISOString();
-    this.recorder.recordAndUpdate(p => ({
+    const saved = await this.recorder.recordAndUpdateDurably(p => ({
       ...p,
       tasks: p.tasks.map(t =>
         t.id === taskId ? { ...t, x, y, updatedAt: now } : t
       )
-    }));
+    }), { updateType: 'position' });
+    if (!saved) {
+      this.logger.warn('任务位置本地持久化失败，未提交 UI 更新', { taskId, x, y });
+    }
+    return saved;
   }
 
-  updateTaskPositionWithRankSync(taskId: string, x: number, y: number, options?: { toast?: boolean }): void {
+  async updateTaskPositionsDurably(positions: TaskPositionPatch[]): Promise<boolean> {
+    if (positions.length === 0) {
+      return true;
+    }
+
+    if (this.blockLocalMutation('移动任务', { toast: false })) {
+      return false;
+    }
+
+    return recordTaskPositionBatchDurably(positions, this.recorder, this.logger);
+  }
+
+  async updateTaskPositionWithRankSync(taskId: string, x: number, y: number, options?: { toast?: boolean }): Promise<boolean> {
     if (this.blockLocalMutation('移动任务', options)) {
-      return;
+      return false;
     }
 
     this.recorder.lastUpdateType = 'position';
-    this.core.updateTaskPositionWithRankSync(taskId, x, y);
+    const saved = await this.core.updateTaskPositionWithRankSyncDurably(taskId, x, y);
+    if (!saved) {
+      this.logger.warn('任务位置排序本地持久化失败，未提交 UI 更新', { taskId, x, y });
+    }
+    return saved;
   }
-  
+
   // ========== 任务状态操作 ==========
 
-  updateTaskStatus(taskId: string, status: Task['status']): void {
+  async updateTaskStatus(taskId: string, status: Task['status']): Promise<boolean> {
     if (this.blockLocalMutation('更新任务状态')) {
-      return;
+      return false;
     }
 
-    this.markEditing();
+    this.markLocalEditing();
     this.recorder.lastUpdateType = 'content';
+    const saved = await this.core.updateTaskStatusDurably(taskId, status);
+    if (!saved) {
+      this.logger.warn('任务状态本地持久化失败，未提交 UI 更新', { taskId, status });
+      return false;
+    }
+
     const project = this.projectState.activeProject();
     if (project) {
       const task = this.projectState.getTask(taskId);
       if (task) this.changeTracker.lockTaskField(taskId, project.id, 'status');
     }
-    this.core.updateTaskStatus(taskId, status);
+    return true;
   }
 
   // ========== 任务扩展属性 ==========
 
-  updateTaskAttachments(taskId: string, attachments: Attachment[]): void {
-    if (this.blockLocalMutation('更新任务附件')) {
-      return;
-    }
-
-    this.markEditing();
-    this.recorder.lastUpdateType = 'content';
-    this.core.updateTaskAttachments(taskId, attachments);
+  updateTaskAttachments(taskId: string, attachments: Attachment[]): Promise<boolean> {
+    return runTaskDurableFieldMutation({
+      actionLabel: '更新任务附件',
+      failureMessage: '任务附件本地持久化失败，未提交 UI 更新',
+      failureData: { taskId },
+      mutate: () => this.core.updateTaskAttachmentsDurably(taskId, attachments),
+    }, this.durableFieldRuntime);
   }
 
-  addTaskAttachment(taskId: string, attachment: Attachment): void {
+  updateTaskParkingMeta(taskId: string, parkingMeta: Task['parkingMeta'] | undefined): Promise<boolean> {
+    return runTaskDurableFieldMutation({
+      actionLabel: '更新任务停泊状态',
+      failureMessage: '任务停泊状态本地持久化失败，未提交 UI 更新',
+      failureData: { taskId },
+      mutate: () => this.core.updateTaskParkingMetaDurably(taskId, parkingMeta),
+    }, this.durableFieldRuntime);
+  }
+
+  updateTaskParkingMetaBatch(
+    updates: Array<{ taskId: string; parkingMeta: Task['parkingMeta'] | undefined }>,
+  ): Promise<boolean> {
+    return runTaskDurableFieldMutation({
+      actionLabel: '批量更新任务停泊状态',
+      failureMessage: '任务停泊状态本地批量持久化失败，未提交 UI 更新',
+      failureData: { taskIds: updates.map(update => update.taskId) },
+      mutate: () => this.core.updateTaskParkingMetaBatchDurably(updates),
+    }, this.durableFieldRuntime);
+  }
+
+  addTaskAttachment(taskId: string, attachment: Attachment): Promise<boolean> {
+    return runTaskDurableFieldMutation({
+      actionLabel: '添加任务附件',
+      failureMessage: '任务附件添加本地持久化失败，未提交 UI 更新',
+      failureData: { taskId, attachmentId: attachment.id },
+      mutate: () => this.core.addTaskAttachmentDurably(taskId, attachment),
+    }, this.durableFieldRuntime);
+  }
+
+  async addTaskAttachmentToProject(projectId: string, taskId: string, attachment: Attachment): Promise<boolean> {
     if (this.blockLocalMutation('添加任务附件')) {
-      return;
+      return false;
     }
 
-    this.markEditing();
-    this.recorder.lastUpdateType = 'content';
-    this.core.addTaskAttachment(taskId, attachment);
-  }
-
-  removeTaskAttachment(taskId: string, attachmentId: string): void {
-    if (this.blockLocalMutation('移除任务附件')) {
-      return;
+    const currentProject = this.projectState.projects().find(project => project.id === projectId);
+    const currentTask = currentProject?.tasks.find(task => task.id === taskId);
+    if (!currentProject || !currentTask) {
+      this.logger.warn('添加附件失败：目标任务不存在', { projectId, taskId, attachmentId: attachment.id });
+      return false;
     }
 
-    this.markEditing();
-    this.recorder.lastUpdateType = 'content';
-    this.core.removeTaskAttachment(taskId, attachmentId);
-  }
-
-  updateTaskPriority(taskId: string, priority: 'low' | 'medium' | 'high' | 'urgent' | undefined): void {
-    if (this.blockLocalMutation('更新任务优先级')) {
-      return;
+    const outboxReady = await enqueueTaskAttachmentProjectUpdateIfNeeded({
+      project: currentProject,
+      projectId,
+      task: currentTask,
+      taskId,
+      attachment,
+    }, {
+      currentUserId: () => this.authService.currentUserId(),
+      enqueueDurably: action => this.actionQueue.enqueueDurably(action),
+      warn: (message, data) => this.logger.warn(message, data),
+    });
+    if (!outboxReady) {
+      return false;
     }
 
-    this.markEditing();
-    this.recorder.lastUpdateType = 'content';
-    this.core.updateTaskPriority(taskId, priority);
+    return addTaskAttachmentToProjectState({ projectId, taskId, attachment }, {
+      blockLocalMutation: () => false,
+      currentUserId: () => this.authService.currentUserId(),
+      getProjectsWithCurrentData: () => this.projectState.getProjectsWithCurrentData(),
+      persistOfflineSnapshot: (projects, ownerUserId) =>
+        this.syncCoordinator.saveOfflineSnapshotAndWait(projects, ownerUserId),
+      updateProjects: mutator => this.projectState.updateProjects(mutator),
+      markEditing: () => this.markLocalEditing(),
+      setLastUpdateType: updateType => { this.recorder.lastUpdateType = updateType; },
+      trackTaskUpdate: (id, task, fields) => this.changeTracker.trackTaskUpdate(id, task, fields),
+      markLocalChanges: updateType => this.syncCoordinator.markLocalChanges(updateType),
+      schedulePersist: () => this.syncCoordinator.schedulePersist(),
+      warn: (message, data) => this.logger.warn(message, data),
+    });
   }
 
-  updateTaskDueDate(taskId: string, dueDate: string | null): void {
-    if (this.blockLocalMutation('更新任务截止时间')) {
-      return;
-    }
-
-    this.markEditing();
-    this.recorder.lastUpdateType = 'content';
-    this.core.updateTaskDueDate(taskId, dueDate);
+  removeTaskAttachment(taskId: string, attachmentId: string): Promise<boolean> {
+    return runTaskDurableFieldMutation({
+      actionLabel: '移除任务附件',
+      failureMessage: '任务附件移除本地持久化失败，未提交 UI 更新',
+      failureData: { taskId, attachmentId },
+      mutate: () => this.core.removeTaskAttachmentDurably(taskId, attachmentId),
+    }, this.durableFieldRuntime);
   }
 
-  updateTaskExpectedMinutes(taskId: string, expectedMinutes: number | null): void {
-    if (this.blockLocalMutation('更新任务预估时长')) {
-      return;
-    }
-
-    this.markEditing();
-    this.recorder.lastUpdateType = 'content';
-    this.core.updateTaskExpectedMinutes(taskId, expectedMinutes);
+  updateTaskPriority(taskId: string, priority: TaskPriorityValue): Promise<boolean> {
+    return runTaskPriorityMutation(this.core, this.durableFieldRuntime, taskId, priority);
   }
 
-  updateTaskCognitiveLoad(taskId: string, load: 'high' | 'low' | null): void {
-    if (this.blockLocalMutation('更新任务认知负荷')) {
-      return;
-    }
-
-    this.markEditing();
-    this.recorder.lastUpdateType = 'content';
-    this.core.updateTaskCognitiveLoad(taskId, load);
+  updateTaskDueDate(taskId: string, dueDate: string | null): Promise<boolean> {
+    return runTaskDueDateMutation(this.core, this.durableFieldRuntime, taskId, dueDate);
   }
 
-  updateTaskWaitMinutes(taskId: string, waitMinutes: number | null): void {
-    if (this.blockLocalMutation('更新任务等待时长')) {
-      return;
-    }
-
-    this.markEditing();
-    this.recorder.lastUpdateType = 'content';
-    this.core.updateTaskWaitMinutes(taskId, waitMinutes);
+  updateTaskExpectedMinutes(taskId: string, expectedMinutes: number | null): Promise<boolean> {
+    return runTaskExpectedMinutesMutation(this.core, this.durableFieldRuntime, taskId, expectedMinutes);
   }
 
-  updateTaskTags(taskId: string, tags: string[]): void {
-    if (this.blockLocalMutation('更新任务标签')) {
-      return;
-    }
-
-    this.markEditing();
-    this.recorder.lastUpdateType = 'content';
-    this.core.updateTaskTags(taskId, tags);
+  updateTaskPlannerFields(
+    taskId: string,
+    patch: TaskPlannerFieldsPatch,
+  ): Promise<boolean> {
+    return runTaskPlannerFieldsMutation(this.core, this.durableFieldRuntime, taskId, patch);
   }
 
+  updateTaskCognitiveLoad(taskId: string, load: TaskCognitiveLoadValue): Promise<boolean> {
+    return runTaskCognitiveLoadMutation(this.core, this.durableFieldRuntime, taskId, load);
+  }
 
-  
-  // ========== 任务 CRUD ==========
+  updateTaskWaitMinutes(taskId: string, waitMinutes: number | null): Promise<boolean> {
+    return runTaskWaitMinutesMutation(this.core, this.durableFieldRuntime, taskId, waitMinutes);
+  }
+
+  updateTaskTags(taskId: string, tags: string[]): Promise<boolean> {
+    return runTaskDurableFieldMutation({
+      actionLabel: '更新任务标签',
+      failureMessage: '任务标签本地持久化失败，未提交 UI 更新',
+      failureData: { taskId },
+      mutate: () => this.core.updateTaskTagsDurably(taskId, tags),
+    }, this.durableFieldRuntime);
+  }
+
+  addTaskTag(taskId: string, tag: string): Promise<boolean> {
+    return runTaskDurableFieldMutation({
+      actionLabel: '添加任务标签',
+      failureMessage: '任务标签添加本地持久化失败，未提交 UI 更新',
+      failureData: { taskId, tag },
+      mutate: () => this.core.addTaskTagDurably(taskId, tag),
+    }, this.durableFieldRuntime);
+  }
+
+  removeTaskTag(taskId: string, tag: string): Promise<boolean> {
+    return runTaskDurableFieldMutation({
+      actionLabel: '移除任务标签',
+      failureMessage: '任务标签移除本地持久化失败，未提交 UI 更新',
+      failureData: { taskId, tag },
+      mutate: () => this.core.removeTaskTagDurably(taskId, tag),
+    }, this.durableFieldRuntime);
+  }
+
+  updateTaskAttentionItems(taskId: string, items: TaskAttentionDraftItem[]): Promise<boolean> {
+    return runTaskDurableFieldMutation({
+      actionLabel: '更新任务僚机',
+      failureMessage: '任务僚机注意事项本地持久化失败，未提交 UI 更新',
+      failureData: { taskId },
+      mutate: () => this.core.updateTaskAttentionItemsDurably(taskId, items),
+    }, this.durableFieldRuntime);
+  }
 
   /** 添加任务（带乐观更新） */
-  addTask(
+  async addTask(
     title: string,
     content: string,
     targetStage: number | null,
     parentId: string | null,
     isSibling: boolean
-  ): Result<string, OperationError> {
+  ): Promise<Result<string, OperationError>> {
     const blocked = this.blockLocalMutationResult<string>('创建任务');
     if (blocked) return blocked;
 
-    this.markEditing();
+    this.markLocalEditing();
     this.recorder.lastUpdateType = 'structure';
     const snapshot = this.optimisticState.createTaskSnapshot('', '创建');
-    const result = this.core.addTask({ title, content, targetStage, parentId, isSibling });
+    const result = await this.core.addTaskDurably({ title, content, targetStage, parentId, isSibling });
 
     if (result.ok) {
       this.recorder.showUndoToast(`已创建 "${title || '新任务'}"`);
@@ -394,309 +541,172 @@ export class TaskOperationAdapterService {
   }
 
   /** 添加浮动任务（Flow 视图中双击创建） */
-  addFloatingTask(title: string, content: string, x: number, y: number): void {
+  async addFloatingTask(title: string, content: string, x: number, y: number): Promise<boolean> {
     if (this.blockLocalMutation('创建任务')) {
-      return;
+      return false;
     }
 
-    this.markEditing();
+    this.markLocalEditing();
     this.recorder.lastUpdateType = 'structure';
     const snapshot = this.optimisticState.createTaskSnapshot('', '创建');
-    this.core.addFloatingTask(title, content, x, y);
+    const saved = await this.core.addFloatingTaskDurably(title, content, x, y);
+    if (!saved) {
+      this.optimisticState.rollbackSnapshot(snapshot.id);
+      this.logger.warn('浮动任务本地持久化失败，未提交 UI 更新', { title, x, y });
+      return false;
+    }
+
     this.recorder.showUndoToast(`已创建 "${title || '新任务'}"`);
     this.recorder.setupSyncResultHandler(snapshot.id);
+    return true;
   }
 
   /** 删除任务（带乐观更新） */
-  deleteTask(taskId: string): void {
-    if (this.blockLocalMutation('删除任务')) {
-      return;
-    }
-
-    this.markEditing();
-    this.recorder.lastUpdateType = 'structure';
-    const task = this.projectState.getTask(taskId);
-    const taskTitle = task?.title || '任务';
-    const snapshot = this.optimisticState.createTaskSnapshot(taskId, '删除');
-    this.core.deleteTask(taskId);
-    this.recorder.showUndoToast(`已删除 "${taskTitle}"`);
-    this.recorder.setupSyncResultHandler(snapshot.id);
+  async deleteTask(taskId: string): Promise<boolean> {
+    return this.trashAdapter.deleteTask(taskId);
   }
 
   /** 永久删除任务（从回收站中删除） */
-  permanentlyDeleteTask(taskId: string): void {
-    if (this.blockLocalMutation('删除任务')) {
-      return;
-    }
-
-    this.markEditing();
-    this.recorder.lastUpdateType = 'structure';
-    const snapshot = this.optimisticState.createTaskSnapshot(taskId, '删除');
-    this.core.permanentlyDeleteTask(taskId);
-    this.recorder.setupSyncResultHandler(snapshot.id);
+  async permanentlyDeleteTask(taskId: string): Promise<boolean> {
+    return this.trashAdapter.permanentlyDeleteTask(taskId);
   }
 
   /** 批量删除任务（原子操作，P0 熔断层） */
-  deleteTasksBatch(explicitIds: string[]): number {
-    if (explicitIds.length === 0) return 0;
-    const projectId = this.projectState.activeProjectId();
-    if (!projectId) return 0;
-    if (this.blockLocalMutation('删除任务')) {
-      return 0;
-    }
-
-    this.markEditing();
-    this.recorder.lastUpdateType = 'structure';
-    const snapshot = this.optimisticState.createTaskSnapshot(explicitIds[0], '删除');
-    const deletedCount = this.core.deleteTasksBatch(explicitIds);
-
-    // 后台异步调用服务端保护
-    this.recorder.triggerServerSideDelete(projectId, explicitIds, snapshot.id);
-    this.recorder.showUndoToast(`已删除 ${deletedCount} 个任务`);
-    this.recorder.setupSyncResultHandler(snapshot.id);
-    return deletedCount;
+  async deleteTasksBatch(explicitIds: string[]): Promise<number> {
+    return this.trashAdapter.deleteTasksBatch(explicitIds);
   }
 
   calculateBatchDeleteImpact(explicitIds: string[]): { total: number; explicit: number; cascaded: number } {
-    return this.core.calculateBatchDeleteImpact(explicitIds);
+    return this.trashAdapter.calculateBatchDeleteImpact(explicitIds);
   }
 
   /** 恢复已删除的任务 */
-  restoreTask(taskId: string): void {
-    if (this.blockLocalMutation('恢复任务')) {
-      return;
-    }
-
-    this.markEditing();
-    this.recorder.lastUpdateType = 'structure';
-    this.core.restoreTask(taskId);
+  async restoreTask(taskId: string): Promise<boolean> {
+    return this.trashAdapter.restoreTask(taskId);
   }
 
   /** 清空回收站 */
-  emptyTrash(): void {
-    if (this.blockLocalMutation('清空回收站')) {
-      return;
-    }
-
-    this.markEditing();
-    this.recorder.lastUpdateType = 'structure';
-    const snapshot = this.optimisticState.createTaskSnapshot('', '删除');
-    this.core.emptyTrash();
-    this.recorder.setupSyncResultHandler(snapshot.id);
+  async emptyTrash(): Promise<boolean> {
+    return this.trashAdapter.emptyTrash();
   }
-  
+
   // ========== 任务结构操作 ==========
 
   /** 移动任务到指定阶段 */
-  moveTaskToStage(
+  async moveTaskToStage(
     taskId: string,
     newStage: number | null,
     beforeTaskId?: string | null,
     newParentId?: string | null
-  ): Result<void, OperationError> {
-    const blocked = this.blockLocalMutationResult<void>('移动任务');
-    if (blocked) return blocked;
+  ): Promise<Result<void, OperationError>> {
+    return this.moveAdapter.moveTaskToStage(
+      taskId,
+      newStage,
+      beforeTaskId,
+      newParentId,
+    );
+  }
 
-    this.markEditing();
-    this.recorder.lastUpdateType = 'structure';
-
-    const projectIdBefore = this.projectState.activeProjectId();
-    const taskBefore = this.projectState.getTask(taskId);
-    const stageBefore = taskBefore?.stage ?? null;
-    const parentIdBefore = taskBefore?.parentId ?? null;
-    const snapshot = this.optimisticState.createTaskSnapshot(taskId, '移动');
-    const result = this.core.moveTaskToStage({ taskId, newStage, beforeTaskId, newParentId });
-
-    if (result.ok) {
-      const projectIdAfter = this.projectState.activeProjectId();
-      if (projectIdAfter !== projectIdBefore) {
-        this.logger.warn('项目在操作期间被切换', { projectIdBefore, projectIdAfter, taskId });
-        this.optimisticState.discardSnapshot(snapshot.id);
-        return result;
-      }
-
-      const taskAfter = this.projectState.getTask(taskId);
-      const stageAfter = taskAfter?.stage ?? null;
-      const parentIdAfter = taskAfter?.parentId ?? null;
-      const actuallyMoved = stageAfter !== stageBefore || parentIdAfter !== parentIdBefore;
-
-      if (actuallyMoved) {
-        const stageName = newStage === null ? '待分配区' : `阶段 ${newStage}`;
-        this.recorder.showUndoToast(`已移动到${stageName}`);
-        this.recorder.setupSyncResultHandler(snapshot.id);
-      } else {
-        this.optimisticState.discardSnapshot(snapshot.id);
-      }
-    } else {
-      this.optimisticState.rollbackSnapshot(snapshot.id);
-    }
-    return result;
+  async moveTaskToStageAtPosition(
+    taskId: string,
+    newStage: number | null,
+    beforeTaskId: string | null | undefined,
+    newParentId: string | null | undefined,
+    x: number,
+    y: number,
+  ): Promise<Result<void, OperationError>> {
+    return this.moveAdapter.moveTaskToStageAtPosition(
+      taskId,
+      newStage,
+      beforeTaskId,
+      newParentId,
+      x,
+      y,
+    );
   }
 
   /** 将任务插入到两个任务之间 */
-  insertTaskBetween(taskId: string, sourceId: string, targetId: string): Result<void, OperationError> {
-    const blocked = this.blockLocalMutationResult<void>('移动任务');
-    if (blocked) return blocked;
+  async insertTaskBetween(taskId: string, sourceId: string, targetId: string): Promise<Result<void, OperationError>> {
+    return this.insertAdapter.insertTaskBetween(taskId, sourceId, targetId);
+  }
 
-    this.markEditing();
-    this.recorder.lastUpdateType = 'structure';
-    const snapshot = this.optimisticState.createTaskSnapshot(taskId, '移动');
-    const result = this.core.insertTaskBetween({ taskId, sourceId, targetId });
-
-    if (result.ok) {
-      this.recorder.setupSyncResultHandler(snapshot.id);
-    } else {
-      this.optimisticState.rollbackSnapshot(snapshot.id);
-    }
-    return result;
+  async insertTaskBetweenAtPosition(
+    taskId: string,
+    sourceId: string,
+    targetId: string,
+    x: number,
+    y: number,
+  ): Promise<Result<void, OperationError>> {
+    return this.insertAdapter.insertTaskBetweenAtPosition(
+      taskId,
+      sourceId,
+      targetId,
+      x,
+      y,
+    );
   }
 
   /** 将整个子任务树迁移到新的父任务下 */
-  moveSubtreeToNewParent(taskId: string, newParentId: string | null): Result<void, OperationError> {
-    const blocked = this.blockLocalMutationResult<void>('移动子树');
-    if (blocked) return blocked;
-
-    this.markEditing();
-    this.recorder.lastUpdateType = 'structure';
-    const snapshot = this.optimisticState.createTaskSnapshot(taskId, '移动');
-    const result = this.core.moveSubtreeToNewParent(taskId, newParentId);
-
-    if (result.ok) {
-      this.recorder.showUndoToast('已移动子树');
-      this.recorder.setupSyncResultHandler(snapshot.id);
-    } else {
-      this.optimisticState.rollbackSnapshot(snapshot.id);
-    }
-    return result;
+  async moveSubtreeToNewParent(taskId: string, newParentId: string | null): Promise<Result<void, OperationError>> {
+    return this.structureAdapter.moveSubtreeToNewParent(taskId, newParentId);
   }
 
   /** 重排阶段内任务顺序 */
-  reorderStage(stage: number, orderedIds: string[]): void {
-    if (this.blockLocalMutation('重排任务')) {
-      return;
-    }
-
-    this.markEditing();
-    this.recorder.lastUpdateType = 'structure';
-    this.core.reorderStage(stage, orderedIds);
+  async reorderStage(stage: number, orderedIds: string[]): Promise<boolean> {
+    return this.structureAdapter.reorderStage(stage, orderedIds);
   }
 
   /** 分离任务（移回待分配区） */
-  detachTask(taskId: string): void {
-    if (this.blockLocalMutation('移动任务')) {
-      return;
-    }
-
-    this.markEditing();
-    this.recorder.lastUpdateType = 'structure';
-    this.core.detachTask(taskId);
+  async detachTask(taskId: string): Promise<boolean> {
+    return this.structureAdapter.detachTask(taskId);
   }
 
   /** 分离任务及其整个子树（移回待分配区） */
-  detachTaskWithSubtree(taskId: string) {
-    const blocked = this.blockLocalMutationResult<void>('移动子树');
-    if (blocked) return blocked;
-
-    this.markEditing();
-    this.recorder.lastUpdateType = 'structure';
-    const result = this.core.detachTaskWithSubtree(taskId);
-    this.recorder.showUndoToast('已移动到待分配区');
-    return result;
+  async detachTaskWithSubtree(taskId: string): Promise<Result<void, OperationError>> {
+    return this.structureAdapter.detachTaskWithSubtree(taskId);
   }
 
   // ========== 子树替换操作（流程图逻辑链条功能） ==========
 
   /** 将任务块的子树替换为待分配块子树 */
-  replaceChildSubtreeWithUnassigned(
+  async replaceChildSubtreeWithUnassigned(
     sourceTaskId: string,
     targetUnassignedId: string,
     specificChildId?: string
-  ): Result<{ detachedSubtreeRootId: string | null }, OperationError> {
-    const blocked = this.blockLocalMutationResult<{ detachedSubtreeRootId: string | null }>('重新挂载任务');
-    if (blocked) return blocked;
-
-    this.markEditing();
-    this.recorder.lastUpdateType = 'structure';
-    const snapshot = this.optimisticState.createTaskSnapshot(sourceTaskId, '移动');
-    const result = this.core.replaceChildSubtreeWithUnassigned(sourceTaskId, targetUnassignedId, specificChildId);
-
-    if (result.ok) {
-      const detachedInfo = result.value.detachedSubtreeRootId ? '，原子任务已移到待分配区' : '';
-      this.recorder.showUndoToast(`已分配待分配块${detachedInfo}`);
-      this.recorder.setupSyncResultHandler(snapshot.id);
-    } else {
-      this.optimisticState.rollbackSnapshot(snapshot.id);
-    }
-    return result;
+  ): Promise<Result<{ detachedSubtreeRootId: string | null }, OperationError>> {
+    return this.structureAdapter.replaceChildSubtreeWithUnassigned(
+      sourceTaskId,
+      targetUnassignedId,
+      specificChildId,
+    );
   }
 
   /** 将待分配块分配为任务块的子节点 */
-  assignUnassignedToTask(
+  async assignUnassignedToTask(
     sourceTaskId: string,
     targetUnassignedId: string
-  ): Result<void, OperationError> {
-    const blocked = this.blockLocalMutationResult<void>('重新挂载任务');
-    if (blocked) return blocked;
-
-    this.markEditing();
-    this.recorder.lastUpdateType = 'structure';
-    const snapshot = this.optimisticState.createTaskSnapshot(sourceTaskId, '移动');
-    const result = this.core.assignUnassignedToTask(sourceTaskId, targetUnassignedId);
-
-    if (result.ok) {
-      this.recorder.showUndoToast('已分配待分配块');
-      this.recorder.setupSyncResultHandler(snapshot.id);
-    } else {
-      this.optimisticState.rollbackSnapshot(snapshot.id);
-    }
-    return result;
+  ): Promise<Result<void, OperationError>> {
+    return this.structureAdapter.assignUnassignedToTask(sourceTaskId, targetUnassignedId);
   }
 
   /** 检查待分配块是否有父待分配块 */
   getUnassignedParent(taskId: string): string | null {
-    return this.core.getUnassignedParent(taskId);
+    return this.structureAdapter.getUnassignedParent(taskId);
   }
 
   /** 获取任务的直接子任务 */
   getDirectChildren(taskId: string): Task[] {
-    return this.core.getDirectChildren(taskId);
+    return this.structureAdapter.getDirectChildren(taskId);
   }
 
   /** 删除任务但保留子任务 */
-  deleteTaskKeepChildren(taskId: string): void {
-    if (this.blockLocalMutation('删除任务')) {
-      return;
-    }
-
-    this.markEditing();
-    this.recorder.lastUpdateType = 'structure';
-    const task = this.projectState.getTask(taskId);
-    const taskTitle = task?.title || '任务';
-    const snapshot = this.optimisticState.createTaskSnapshot(taskId, '删除');
-    this.core.deleteTaskKeepChildren(taskId);
-    this.recorder.showUndoToast(`已删除 "${taskTitle}"（保留子任务）`);
-    this.recorder.setupSyncResultHandler(snapshot.id);
+  async deleteTaskKeepChildren(taskId: string): Promise<boolean> {
+    return this.trashAdapter.deleteTaskKeepChildren(taskId);
   }
 
   /** 修复阶段 1 缺失导致的阶段链漂移。 */
-  repairMissingStageOne(): boolean {
-    if (this.blockLocalMutation('恢复阶段')) {
-      return false;
-    }
-
-    this.markEditing();
-    this.recorder.lastUpdateType = 'structure';
-    const snapshot = this.optimisticState.createTaskSnapshot('', '移动');
-    const repaired = this.core.repairMissingStageOne();
-
-    if (repaired) {
-      this.recorder.showUndoToast('已补回阶段 1');
-      this.recorder.setupSyncResultHandler(snapshot.id);
-    } else {
-      this.optimisticState.discardSnapshot(snapshot.id);
-    }
-
-    return repaired;
+  async repairMissingStageOne(): Promise<boolean> {
+    return this.structureAdapter.repairMissingStageOne();
   }
 
   // ========== 查询方法 ==========
@@ -705,7 +715,7 @@ export class TaskOperationAdapterService {
     return this.core.isStageRebalancing(stage);
   }
 
-  cleanupOldTrashItems(): number {
+  cleanupOldTrashItems(): Promise<number> {
     return this.core.cleanupOldTrashItems();
   }
 }

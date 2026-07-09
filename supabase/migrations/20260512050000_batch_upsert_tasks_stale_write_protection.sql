@@ -150,7 +150,7 @@ BEGIN
       NULLIF(v_task->>'deletedAt', '')::timestamptz,
       '[]'::jsonb,
       v_expected,
-      COALESCE(v_cognitive, 'low'),
+      v_cognitive,
       v_wait,
       v_task->'parkingMeta'
     )

@@ -56,6 +56,20 @@ describe('startup launch contract', () => {
     expect(urls).not.toContain('https://*.supabase.co/rpc/v1/*');
   });
 
+  it('ngsw-config should keep navigationPreload disabled so a cold gateway cannot surface phantom 504s', () => {
+    // 逻辑链：hash 路由 SPA（/#/projects/:id/text）的整页加载/刷新会触发导航请求。
+    // 当 navigationPreload=true 时，浏览器会在 SW 命中缓存壳之前并行向源站发起预加载请求。
+    // 由于 navigationUrls 为 "/**"，ngsw 始终从缓存返回 index.html，预加载请求纯属冗余；
+    // 一旦源站冷启动/网关超时返回 504，浏览器就会把它记到当前文档 URL 上，
+    // 在控制台留下 “Failed to load resource: 504 (Gateway Timeout)” 的幽灵错误（页面其实已从缓存正常加载）。
+    // 关闭 navigationPreload 可从根本上消除这条冗余源站请求，杜绝该幽灵 504。
+    const ngswConfigPath = path.join(process.cwd(), 'ngsw-config.json');
+    const ngswConfig = JSON.parse(fs.readFileSync(ngswConfigPath, 'utf8'));
+
+    expect(ngswConfig.navigationPreload).not.toBe(true);
+    expect(ngswConfig.navigationUrls).toContain('/**');
+  });
+
   it('manifest start_url should point to root startup path instead of launch.html', () => {
     const manifestPath = path.join(process.cwd(), 'public', 'manifest.webmanifest');
     const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));

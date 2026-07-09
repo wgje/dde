@@ -51,6 +51,9 @@ describe('DockDailySlotComponent', () => {
       { taskId: 'A', title: '主任务 A', waitMinutes: 5, waitStartedAt: new Date().toISOString() },
       { taskId: 'B', title: '主任务 B', waitMinutes: 10, waitStartedAt: new Date().toISOString() },
     ]);
+    mockEngine.dailySlotService.addDailySlot.mockResolvedValue('slot-new');
+    mockEngine.dailySlotService.completeDailySlot.mockResolvedValue(true);
+    mockEngine.dailySlotService.removeDailySlot.mockResolvedValue(true);
 
     await TestBed.configureTestingModule({
       imports: [DockDailySlotComponent],
@@ -67,15 +70,28 @@ describe('DockDailySlotComponent', () => {
     expect(component.soonestWaitLabel()).toContain('5min');
   });
 
-  it('addSlot should call engine.addDailySlot and reset form', () => {
+  it('addSlot should call engine.addDailySlot and reset form after persistence succeeds', async () => {
     component.newTitle = '喝水';
     component.newMaxCount = 2;
-    component.addSlot();
+    await component.addSlot();
 
     expect(mockEngine.dailySlotService.addDailySlot).toHaveBeenCalledWith('喝水', 2);
     expect(component.newTitle).toBe('');
     expect(component.newMaxCount).toBe(1);
     expect(component.showAddForm()).toBe(false);
+  });
+
+  it('addSlot should keep the form open when persistence fails', async () => {
+    mockEngine.dailySlotService.addDailySlot.mockResolvedValueOnce('');
+    component.newTitle = '喝水';
+    component.newMaxCount = 2;
+    component.showAddForm.set(true);
+
+    await component.addSlot();
+
+    expect(component.newTitle).toBe('喝水');
+    expect(component.newMaxCount).toBe(2);
+    expect(component.showAddForm()).toBe(true);
   });
 
   it('isSlotDone should match maxDailyCount rule', () => {

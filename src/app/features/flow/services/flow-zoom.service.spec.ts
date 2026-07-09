@@ -92,4 +92,25 @@ describe('FlowZoomService', () => {
     expect(mockProjectState.updateViewState).not.toHaveBeenCalled();
     expect(mockSyncCoordinator.schedulePersist).not.toHaveBeenCalled();
   });
+
+  it('取消待执行保存时即使浏览器 timer handle 为 0 也应清理，防止 teardown 后 stale 保存写回', () => {
+    attachDiagram(1, new go.Point(10, 20));
+    service.setViewStatePersistenceGuard(() => true);
+    const zeroTimer = 0 as unknown as ReturnType<typeof setTimeout>;
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(() => zeroTimer);
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout').mockImplementation(() => undefined);
+
+    try {
+      service.setZoom(1.6);
+      service.cancelPendingViewStateSave();
+
+      expect(clearTimeoutSpy).toHaveBeenCalledWith(zeroTimer);
+      expect(
+        (service as unknown as { viewStateSaveTimer: ReturnType<typeof setTimeout> | null }).viewStateSaveTimer
+      ).toBeNull();
+    } finally {
+      setTimeoutSpy.mockRestore();
+      clearTimeoutSpy.mockRestore();
+    }
+  });
 });

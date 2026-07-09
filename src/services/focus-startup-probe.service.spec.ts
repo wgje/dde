@@ -397,6 +397,105 @@ describe('FocusStartupProbeService', () => {
     expect(service.hasPendingGateWork()).toBe(false);
   });
 
+  it('启动探针本地加载期间用户切换时不应把过期探针标记为完成', async () => {
+    let resolveLocal = (): void => undefined;
+    const loadFromLocal = vi.fn().mockImplementation(() => new Promise<void>((resolve) => {
+      resolveLocal = resolve;
+    }));
+    const checkGate = vi.fn(() => gateState.set('reviewing'));
+    const pullChanges = vi.fn().mockResolvedValue(undefined);
+    const userIdSignal = signal<string | null>('user-1');
+
+    const injector = Injector.create({
+      providers: [
+        { provide: FocusStartupProbeService, useClass: FocusStartupProbeService },
+        { provide: AuthService, useValue: { currentUserId: userIdSignal } },
+        { provide: BlackBoxSyncService, useValue: { loadFromLocal, pullChanges } },
+        { provide: GateService, useValue: { checkGate, state: gateState } },
+        {
+          provide: LoggerService,
+          useValue: {
+            category: () => ({
+              debug: vi.fn(),
+              warn: vi.fn(),
+              info: vi.fn(),
+              error: vi.fn(),
+            }),
+          },
+        },
+      ],
+    });
+
+    const service = injector.get(FocusStartupProbeService);
+    service.initialize();
+    await flushPromises();
+
+    userIdSignal.set('user-2');
+    resolveLocal();
+    await flushPromises();
+
+    expect(checkGate).not.toHaveBeenCalled();
+    expect(pullChanges).not.toHaveBeenCalled();
+    expect(service.isProbeDone()).toBe(false);
+    expect(service.hasPendingGateWork()).toBe(false);
+  });
+
+  it('过期探针结束时不应清空新用户正在运行的探针句柄', async () => {
+    const localResolvers: Array<() => void> = [];
+    const loadFromLocal = vi.fn().mockImplementation(() => new Promise<void>((resolve) => {
+      localResolvers.push(resolve);
+    }));
+    const checkGate = vi.fn(() => gateState.set('reviewing'));
+    const pullChanges = vi.fn().mockResolvedValue(undefined);
+    const userIdSignal = signal<string | null>('user-1');
+
+    const injector = Injector.create({
+      providers: [
+        { provide: FocusStartupProbeService, useClass: FocusStartupProbeService },
+        { provide: AuthService, useValue: { currentUserId: userIdSignal } },
+        { provide: BlackBoxSyncService, useValue: { loadFromLocal, pullChanges } },
+        { provide: GateService, useValue: { checkGate, state: gateState } },
+        {
+          provide: LoggerService,
+          useValue: {
+            category: () => ({
+              debug: vi.fn(),
+              warn: vi.fn(),
+              info: vi.fn(),
+              error: vi.fn(),
+            }),
+          },
+        },
+      ],
+    });
+
+    const service = injector.get(FocusStartupProbeService);
+
+    try {
+      service.initialize();
+      await flushPromises();
+      expect(loadFromLocal).toHaveBeenCalledTimes(1);
+
+      userIdSignal.set('user-2');
+      service.initialize();
+      await flushPromises();
+      expect(loadFromLocal).toHaveBeenCalledTimes(2);
+
+      localResolvers[0]?.();
+      await flushPromises();
+
+      service.initialize();
+      await flushPromises();
+
+      expect(loadFromLocal).toHaveBeenCalledTimes(2);
+    } finally {
+      for (const resolve of localResolvers) {
+        resolve();
+      }
+      await flushPromises();
+    }
+  });
+
   it('resume-local 强制重探测时应绕过一次性初始化保护', async () => {
     const loadFromLocal = vi.fn().mockResolvedValue([]);
     const checkGate = vi.fn(() => gateState.set('reviewing'));

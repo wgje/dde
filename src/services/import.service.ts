@@ -17,25 +17,38 @@ import { Injectable, inject, signal, computed } from '@angular/core';
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
 import { LayoutService } from './layout.service';
-import { Project, Task, Connection, AttachmentType } from '../models';
+import { Project, Task, Connection } from '../models';
 // 【P2-44 修复】导入 sanitizeProject 用于导入数据消毒
 import { sanitizeProject } from '../utils/validation';
 import {
   filterParentChildDuplicateConnections,
   softDeleteParentChildDuplicateConnections,
 } from '../utils/parent-child-connection-integrity';
-import { 
-  ExportData, 
-  ExportMetadata, 
+import {
+  ExportData,
+  ExportMetadata,
   ExportProject,
   ExportTask,
-  ExportConnection,
   ExportExternalSourceLink,
 } from './export.service';
-import type { BackupData } from '../../supabase/functions/_shared/backup-utils';
 import { ExternalSourceLinkService } from '../app/core/external-sources/external-source-link.service';
 import type { ExternalSourceLink } from '../app/core/external-sources/external-source.model';
 import { parseSiyuanBlockLink } from '../app/core/external-sources/siyuan/siyuan-link-parser';
+import {
+  buildImportedProjectResult,
+  buildConcurrentImportRejection,
+  resolveImportProjectPlan,
+  summarizeImportExecution,
+} from './import-execution.helpers';
+import { validateImportFilePreflight } from './import-file-validation.helpers';
+import { buildImportProjectPreviews } from './import-preview.helpers';
+import { convertExportTaskToTask } from './import-task-conversion.helpers';
+import { verifyImportChecksum } from './import-checksum.helpers';
+import {
+  IMPORT_DATA_VERSION_LIMITS,
+  validateImportDataStructure,
+  validateImportVersion,
+} from './import-data-validation.helpers';
 
 // ============================================
 // 导入配置
@@ -43,10 +56,10 @@ import { parseSiyuanBlockLink } from '../app/core/external-sources/siyuan/siyuan
 
 export const IMPORT_CONFIG = {
   /** 支持的最低格式版本 */
-  MIN_SUPPORTED_VERSION: '1.0',
+  MIN_SUPPORTED_VERSION: IMPORT_DATA_VERSION_LIMITS.MIN_SUPPORTED_VERSION,
   
   /** 支持的最高格式版本 */
-  MAX_SUPPORTED_VERSION: '2.1',
+  MAX_SUPPORTED_VERSION: IMPORT_DATA_VERSION_LIMITS.MAX_SUPPORTED_VERSION,
   
   /** 最大文件大小（字节）- 50MB */
   MAX_FILE_SIZE: 50 * 1024 * 1024,
@@ -211,24 +224,12 @@ export class ImportService {
       type: file.type 
     });
     
-    // 1. 检查文件大小
-    if (file.size > IMPORT_CONFIG.MAX_FILE_SIZE) {
-      return {
-        valid: false,
-        error: `文件过大，最大支持 ${IMPORT_CONFIG.MAX_FILE_SIZE / 1024 / 1024}MB`,
-      };
-    }
-    
-    // 2. 检查文件类型
-    const mimeType = file.type || 'text/plain';
-    if (!IMPORT_CONFIG.ALLOWED_MIME_TYPES.includes(mimeType)) {
-      // 允许无类型的 .json 文件
-      if (!file.name.endsWith('.json')) {
-        return {
-          valid: false,
-          error: '不支持的文件类型，请选择 JSON 文件',
-        };
-      }
+    const preflightError = validateImportFilePreflight(file, {
+      maxFileSize: IMPORT_CONFIG.MAX_FILE_SIZE,
+      allowedMimeTypes: IMPORT_CONFIG.ALLOWED_MIME_TYPES,
+    });
+    if (preflightError) {
+      return preflightError;
     }
     
     // 3. 读取文件内容
@@ -255,7 +256,7 @@ export class ImportService {
     }
     
     // 5. 验证数据结构（BackupData 格式会被自动转换为 ExportData）
-    const structureValidation = this.validateDataStructure(data);
+    const structureValidation = validateImportDataStructure(data);
     if (!structureValidation.valid) {
       return structureValidation;
     }
@@ -264,7 +265,7 @@ export class ImportService {
     const validatedData = structureValidation.data ?? data;
     
     // 6. 验证版本兼容性
-    const versionValidation = this.validateVersion(validatedData.metadata.version);
+    const versionValidation = validateImportVersion(validatedData.metadata.version);
     if (!versionValidation.valid) {
       return versionValidation;
     }
@@ -281,55 +282,7 @@ export class ImportService {
   ): Promise<ImportPreview> {
     const errors: string[] = [];
     const warnings: string[] = [];
-    const conflicts: ImportConflict[] = [];
-    const projectPreviews: ImportProjectPreview[] = [];
-    
-    // 构建现有项目索引
-    const existingById = new Map(existingProjects.map(p => [p.id, p]));
-    const existingByName = new Map(existingProjects.map(p => [p.name.toLowerCase(), p]));
-    
-    for (const project of data.projects) {
-      // 统计
-      const taskCount = project.tasks?.length ?? 0;
-      const connectionCount = project.connections?.length ?? 0;
-      let attachmentCount = 0;
-      for (const task of project.tasks ?? []) {
-        attachmentCount += task.attachments?.length ?? 0;
-      }
-      
-      // 检查 ID 冲突
-      const existingById_ = existingById.get(project.id);
-      if (existingById_) {
-        conflicts.push({
-          projectId: project.id,
-          projectName: project.name,
-          existingProjectId: existingById_.id,
-          existingProjectName: existingById_.name,
-          type: 'id',
-        });
-      }
-      
-      // 检查名称冲突
-      const existingByName_ = existingByName.get(project.name.toLowerCase());
-      if (existingByName_ && existingByName_.id !== project.id) {
-        conflicts.push({
-          projectId: project.id,
-          projectName: project.name,
-          existingProjectId: existingByName_.id,
-          existingProjectName: existingByName_.name,
-          type: 'name',
-        });
-      }
-      
-      projectPreviews.push({
-        id: project.id,
-        name: project.name,
-        taskCount,
-        connectionCount,
-        attachmentCount,
-        hasConflict: existingById.has(project.id),
-      });
-    }
+    const previewData = buildImportProjectPreviews(data.projects, existingProjects);
     
     // 验证校验和
     const checksumValid = await this.verifyChecksum(data);
@@ -338,8 +291,7 @@ export class ImportService {
     }
     
     // 检查附件 URL 过期
-    const hasAttachments = projectPreviews.some(p => p.attachmentCount > 0);
-    if (hasAttachments) {
+    if (previewData.hasAttachments) {
       warnings.push('附件 URL 可能已过期，导入后需要重新上传附件');
     }
     
@@ -348,8 +300,8 @@ export class ImportService {
       errors,
       warnings,
       metadata: data.metadata,
-      projects: projectPreviews,
-      conflicts,
+      projects: previewData.projects,
+      conflicts: previewData.conflicts,
     };
   }
 
@@ -363,23 +315,14 @@ export class ImportService {
     onProjectImported?: (project: Project) => void | Promise<void>
   ): Promise<ImportExecutionResult> {
     if (this._isImporting()) {
-      return {
-        success: false,
-        error: '导入正在进行中',
-        importedCount: 0,
-        skippedCount: 0,
-        failedCount: 0,
-        details: [],
-        durationMs: 0,
-      };
+      return buildConcurrentImportRejection();
     }
     
     const startTime = Date.now();
     this._isImporting.set(true);
     this.updateProgress('preparing', 0);
     
-    const details: ImportProjectResult[] = [];
-    const existingById = new Map(existingProjects.map(p => [p.id, p]));
+    let details: ImportProjectResult[] = [];
     
     try {
       this.logger.info('开始导入', { 
@@ -387,39 +330,19 @@ export class ImportService {
         conflictStrategy: options.conflictStrategy 
       });
       
-      for (let i = 0; i < data.projects.length; i++) {
-        const exportProject = data.projects[i];
-        const progress = 10 + (i / data.projects.length) * 80;
-        this.updateProgress('importing', progress, exportProject.name);
-        
-        const result = await this.importProject(
-          exportProject,
-          existingById.get(exportProject.id),
-          options,
-          onProjectImported
-        );
-        
-        details.push(result);
-      }
+      details = await this.importProjects(data, existingProjects, options, onProjectImported);
       
       this.updateProgress('complete', 100);
       
-      const importedCount = details.filter(d => 
-        d.action === 'imported' || d.action === 'merged' || d.action === 'overwritten'
-      ).length;
-      const skippedCount = details.filter(d => d.action === 'skipped').length;
-      const failedCount = details.filter(d => d.action === 'failed').length;
+      const result = summarizeImportExecution(details, Date.now() - startTime);
       
-      this.logger.info('导入完成', { importedCount, skippedCount, failedCount });
+      this.logger.info('导入完成', {
+        importedCount: result.importedCount,
+        skippedCount: result.skippedCount,
+        failedCount: result.failedCount,
+      });
       
-      return {
-        success: failedCount === 0,
-        importedCount,
-        skippedCount,
-        failedCount,
-        details,
-        durationMs: Date.now() - startTime,
-      };
+      return result;
     } catch (error) {
       this.logger.error('导入失败', error);
       return {
@@ -435,6 +358,33 @@ export class ImportService {
       this._isImporting.set(false);
     }
   }
+
+  private async importProjects(
+    data: ExportData,
+    existingProjects: Project[],
+    options: ImportOptions,
+    onProjectImported?: (project: Project) => void | Promise<void>
+  ): Promise<ImportProjectResult[]> {
+    const details: ImportProjectResult[] = [];
+    const existingById = new Map(existingProjects.map(project => [project.id, project]));
+
+    for (let i = 0; i < data.projects.length; i++) {
+      const exportProject = data.projects[i];
+      const progress = 10 + (i / data.projects.length) * 80;
+      this.updateProgress('importing', progress, exportProject.name);
+
+      const result = await this.importProject(
+        exportProject,
+        existingById.get(exportProject.id),
+        options,
+        onProjectImported
+      );
+
+      details.push(result);
+    }
+
+    return details;
+  }
   
   /**
    * 导入单个项目
@@ -445,67 +395,31 @@ export class ImportService {
     options: ImportOptions,
     onProjectImported?: (project: Project) => void | Promise<void>
   ): Promise<ImportProjectResult> {
-    const { conflictStrategy } = options;
-    let generateNewIds = options.generateNewIds ?? false;
-    
-    // 标记是否为覆盖操作
-    let isOverwrite = false;
-    
-    // 处理冲突
-    if (existingProject) {
-      switch (conflictStrategy) {
-        case 'skip':
-          return {
-            projectId: exportProject.id,
-            projectName: exportProject.name,
-            success: true,
-            action: 'skipped',
-          };
-        
-        case 'overwrite':
-          // 覆盖：使用导入的数据
-          isOverwrite = true;
-          break;
-        
-        case 'merge':
-          // 合并：将导入的任务添加到现有项目
-          return this.mergeProject(exportProject, existingProject, onProjectImported);
-        
-        case 'rename':
-          // 重命名：必须重生整棵项目树 ID，避免与现有实体冲突
-          generateNewIds = true;
-          exportProject = {
-            ...exportProject,
-            name: `${exportProject.name} (导入)`,
-          };
-          // rename 后不再视为覆盖，而是新项目
-          break;
-      }
+    const plan = resolveImportProjectPlan(exportProject, existingProject, options);
+    if (plan.kind === 'skip') {
+      return plan.result;
+    }
+
+    if (plan.kind === 'merge') {
+      return this.mergeProject(plan.exportProject, plan.existingProject, onProjectImported);
     }
     
     try {
       // 转换为 Project 类型
-      const conversion = this.convertToProject(exportProject, generateNewIds);
+      const conversion = this.convertToProject(plan.exportProject, plan.generateNewIds);
       const project = conversion.project;
       
       // 调用回调保存项目
       if (onProjectImported) {
         await onProjectImported(project);
       }
-      await this.importExternalSourceLinks(exportProject, conversion.taskIdMap);
+      await this.importExternalSourceLinks(plan.exportProject, conversion.taskIdMap);
       
-      return {
-        projectId: project.id,
-        projectName: project.name,
-        success: true,
-        action: isOverwrite ? 'overwritten' : 'imported',
-        taskCount: project.tasks.length,
-        connectionCount: project.connections.length,
-      };
+      return buildImportedProjectResult(project, plan.action);
     } catch (error) {
       return {
-        projectId: exportProject.id,
-        projectName: exportProject.name,
+        projectId: plan.exportProject.id,
+        projectName: plan.exportProject.name,
         success: false,
         action: 'failed',
         error: error instanceof Error ? error.message : '导入失败',
@@ -522,48 +436,23 @@ export class ImportService {
     onProjectImported?: (project: Project) => void | Promise<void>
   ): Promise<ImportProjectResult> {
     try {
-      // 合并任务（按 ID 去重）
-      const existingTaskIds = new Set(existingProject.tasks.map(t => t.id));
-      const newExportTasks = (exportProject.tasks ?? [])
-        .filter(t => !existingTaskIds.has(t.id));
-      const newTasks = newExportTasks.map(t => this.convertToTask(t));
-      
-      // 合并连接（按 ID 去重）
-      const existingConnIds = new Set(existingProject.connections.map(c => c.id));
-      const newConnections = (exportProject.connections ?? [])
-        .filter(c => !existingConnIds.has(c.id))
-        .map(c => this.convertToConnection(c));
-      const importedConnections = filterParentChildDuplicateConnections( 
-        [...existingProject.tasks, ...newTasks],
-        newConnections,
-      );
-      const mergedTasks = [...existingProject.tasks, ...newTasks];
-      const mergedConnections = softDeleteParentChildDuplicateConnections(
-        mergedTasks,
-        [...existingProject.connections, ...importedConnections],
-        new Date().toISOString(),
-      );
-      
-      // 创建合并后的项目
-      const mergedProject: Project = {
-        ...existingProject,
-        tasks: mergedTasks,
-        connections: mergedConnections,
-        updatedAt: new Date().toISOString(),
-      };
+      const preparedMerge = this.prepareMergedProject(exportProject, existingProject);
       
       if (onProjectImported) {
-        await onProjectImported(mergedProject);
+        await onProjectImported(preparedMerge.project);
       }
-      await this.importExternalSourceLinks({ ...exportProject, tasks: newExportTasks }, new Map());
+      await this.importExternalSourceLinks(
+        { ...exportProject, tasks: preparedMerge.newExportTasks },
+        new Map()
+      );
       
       return {
-        projectId: mergedProject.id,
-        projectName: mergedProject.name,
+        projectId: preparedMerge.project.id,
+        projectName: preparedMerge.project.name,
         success: true,
         action: 'merged',
-        taskCount: newTasks.length,
-        connectionCount: importedConnections.length,
+        taskCount: preparedMerge.newTasks.length,
+        connectionCount: preparedMerge.importedConnections.length,
       };
     } catch (error) {
       return {
@@ -574,6 +463,67 @@ export class ImportService {
         error: error instanceof Error ? error.message : '合并失败',
       };
     }
+  }
+
+  private prepareMergedProject(
+    exportProject: ExportProject,
+    existingProject: Project
+  ): {
+    project: Project;
+    newExportTasks: ExportTask[];
+    newTasks: Task[];
+    importedConnections: Connection[];
+  } {
+    const existingTaskIds = new Set(existingProject.tasks.map(task => task.id));
+    const newExportTasks = (exportProject.tasks ?? [])
+      .filter(task => !existingTaskIds.has(task.id));
+    const newTasks = newExportTasks.map(task => this.convertToTask(task));
+    const existingConnIds = new Set(existingProject.connections.map(conn => conn.id));
+    const importedConnections = this.prepareMergeConnections(
+      exportProject,
+      existingProject,
+      newTasks,
+      existingConnIds,
+    );
+    const mergedTasks = [...existingProject.tasks, ...newTasks];
+
+    return {
+      project: {
+        ...existingProject,
+        tasks: mergedTasks,
+        connections: softDeleteParentChildDuplicateConnections(
+          mergedTasks,
+          [...existingProject.connections, ...importedConnections],
+          new Date().toISOString(),
+        ),
+        updatedAt: new Date().toISOString(),
+      },
+      newExportTasks,
+      newTasks,
+      importedConnections,
+    };
+  }
+
+  private prepareMergeConnections(
+    exportProject: ExportProject,
+    existingProject: Project,
+    newTasks: Task[],
+    existingConnIds: ReadonlySet<string>
+  ): Connection[] {
+    const taskIds = new Set([
+      ...existingProject.tasks.map(task => task.id),
+      ...newTasks.map(task => task.id),
+    ]);
+    const newConnections = (exportProject.connections ?? [])
+      .filter(conn => !existingConnIds.has(conn.id))
+      .map(conn => this.convertToConnection(conn));
+
+    return filterParentChildDuplicateConnections(
+      [...existingProject.tasks, ...newTasks],
+      newConnections.filter(conn => (
+        conn.deletedAt || (taskIds.has(conn.source) && taskIds.has(conn.target))
+      )),
+    );
   }
   
   // ==================== 转换方法 ====================
@@ -637,15 +587,20 @@ export class ImportService {
     const links: ExternalSourceLink[] = [];
     for (const task of exportProject.tasks ?? []) {
       const taskId = taskIdMap.get(task.id) ?? task.id;
+      const regenerateLinkId = taskId !== task.id;
       for (const link of task.externalSourceLinks ?? []) {
-        const normalized = this.toExternalSourceLink(link, taskId);
+        const normalized = this.toExternalSourceLink(link, taskId, regenerateLinkId);
         if (normalized) links.push(normalized);
       }
     }
     await this.externalSourceLinks.importPointers(links);
   }
 
-  private toExternalSourceLink(link: ExportExternalSourceLink, taskId: string): ExternalSourceLink | null {
+  private toExternalSourceLink(
+    link: ExportExternalSourceLink,
+    taskId: string,
+    regenerateId = false
+  ): ExternalSourceLink | null {
     if (link.sourceType !== 'siyuan-block' || !link.targetId || !link.uri) return null;
     // 校验 targetId 与 uri 是否符合思源块 ID 形式，否则丢弃并打 warn。
     // 不过滤会导致脏数据进 IndexedDB 且在推送到 Supabase 时被 CHECK 约束拒绝，反复重试。
@@ -655,7 +610,7 @@ export class ImportService {
       return null;
     }
     return {
-      id: link.id || crypto.randomUUID(),
+      id: regenerateId ? crypto.randomUUID() : (link.id || crypto.randomUUID()),
       taskId,
       sourceType: 'siyuan-block',
       targetId: parsed.blockId,
@@ -677,68 +632,7 @@ export class ImportService {
     exportTask: ExportProject['tasks'][0],
     idMap?: Map<string, string>
   ): Task {
-    const newId = idMap?.get(exportTask.id) ?? exportTask.id;
-    const newParentId = exportTask.parentId 
-      ? (idMap?.get(exportTask.parentId) ?? exportTask.parentId)
-      : null;
-    
-    return {
-      id: newId,
-      title: exportTask.title,
-      content: exportTask.content ?? '',
-      stage: exportTask.stage,
-      parentId: newParentId,
-      order: exportTask.order ?? 0,
-      rank: exportTask.rank ?? 10000,
-      status: (exportTask.status as Task['status']) ?? 'active',
-      x: exportTask.x ?? 0,
-      y: exportTask.y ?? 0,
-      displayId: exportTask.displayId ?? '',
-      shortId: exportTask.shortId,
-      createdDate: exportTask.createdAt ?? new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      // 兼容旧导出包：缺少完成时间时使用导出包中最接近完成语义的时间，最后才落到导入时间。
-      completedAt: exportTask.status === 'completed'
-        ? (exportTask.completedAt ?? exportTask.updatedAt ?? exportTask.createdAt ?? new Date().toISOString())
-        : null,
-      tags: exportTask.tags,
-      priority: exportTask.priority,
-      dueDate: exportTask.dueDate,
-      expected_minutes:
-        typeof exportTask.expected_minutes === 'number' ? exportTask.expected_minutes : null,
-      cognitive_load:
-        exportTask.cognitive_load === 'high' || exportTask.cognitive_load === 'low'
-          ? exportTask.cognitive_load
-          : null,
-      wait_minutes:
-        typeof exportTask.wait_minutes === 'number' ? exportTask.wait_minutes : null,
-      hasIncompleteTask: exportTask.hasIncompleteTask,
-      deletedAt: exportTask.deletedAt,
-      // 导入恢复停泊元数据，刷新 lastVisitedAt，清除过期提醒（A3.11）
-      parkingMeta: (exportTask as { parkingMeta?: import('../models/parking').TaskParkingMeta | null }).parkingMeta
-        ? (() => {
-            const meta = (exportTask as { parkingMeta: import('../models/parking').TaskParkingMeta }).parkingMeta;
-            return {
-              ...meta,
-              lastVisitedAt: new Date().toISOString(),
-              contextSnapshot: null,
-              reminder: meta.reminder && new Date(meta.reminder.reminderAt).getTime() > Date.now()
-                ? meta.reminder : null,
-            };
-          })()
-        : null,
-      // 附件需要重新上传，这里只保留元数据并标记为待上传
-      attachments: exportTask.attachments?.map(att => ({
-        id: att.id,
-        name: att.name,
-        size: att.size ?? 0,
-        mimeType: att.mimeType ?? 'application/octet-stream',
-        type: att.type ?? this.inferAttachmentType(att.mimeType ?? 'application/octet-stream'),
-        url: '', // URL 需要重新上传后生成
-        thumbnailUrl: att.thumbnailUrl,
-        createdAt: att.createdAt ?? new Date().toISOString(),
-      })),
-    };
+    return convertExportTaskToTask(exportTask, { idMap });
   }
   
   /**
@@ -758,240 +652,18 @@ export class ImportService {
       target: newTarget,
       title: exportConn.title,
       description: exportConn.description,
+      updatedAt: exportConn.updatedAt,
       deletedAt: exportConn.deletedAt,
     };
-  }
-  
-  // ==================== 验证方法 ====================
-  
-  /**
-   * 验证数据结构
-   * 支持 ExportData 格式和 BackupData（本地备份）格式，后者自动转换
-   */
-  private validateDataStructure(data: unknown): FileValidationResult {
-    if (!data || typeof data !== 'object') {
-      return { valid: false, error: '无效的数据格式' };
-    }
-    
-    const obj = data as Record<string, unknown>;
-    
-    // 检测是否为 BackupData 格式（本地备份文件）
-    // BackupData 有 payloadVersion + 扁平的 tasks/connections 数组，无 metadata 字段
-    if (this.isBackupDataFormat(obj)) {
-      const converted = this.convertBackupDataToExportData(obj as unknown as BackupData);
-      if (!converted) {
-        return { valid: false, error: '本地备份数据转换失败' };
-      }
-      return { valid: true, data: converted };
-    }
-    
-    // 标准 ExportData 格式验证
-    if (!obj['metadata'] || typeof obj['metadata'] !== 'object') {
-      return { valid: false, error: '缺少元数据' };
-    }
-    
-    if (!obj['projects'] || !Array.isArray(obj['projects'])) {
-      return { valid: false, error: '缺少项目数据' };
-    }
-    
-    const metadata = obj['metadata'] as Record<string, unknown>;
-    if (!metadata['version']) {
-      return { valid: false, error: '缺少版本信息' };
-    }
-    
-    // 验证每个项目
-    for (const project of obj['projects'] as unknown[]) {
-      if (!project || typeof project !== 'object') {
-        return { valid: false, error: '无效的项目数据' };
-      }
-      
-      const proj = project as Record<string, unknown>;
-      if (!proj['id'] || !proj['name']) {
-        return { valid: false, error: '项目缺少必需字段 (id, name)' };
-      }
-    }
-    
-    return { valid: true, data: data as ExportData };
-  }
-  
-  /**
-   * 检测数据是否为 BackupData 格式（本地灾难备份 / 坚果云备份）
-   */
-  private isBackupDataFormat(obj: Record<string, unknown>): boolean {
-    return (
-      typeof obj['payloadVersion'] === 'string' &&
-      Array.isArray(obj['projects']) &&
-      Array.isArray(obj['tasks']) &&
-      Array.isArray(obj['connections']) &&
-      !obj['metadata']
-    );
-  }
-  
-  /**
-   * 将 BackupData（扁平结构）转换为 ExportData（嵌套结构）
-   * 本地备份和坚果云备份文件使用 BackupData 格式，导入需要 ExportData 格式
-   */
-  private convertBackupDataToExportData(backup: BackupData): ExportData | null {
-    try {
-      // 按 projectId 分组 tasks 和 connections
-      const tasksByProject = new Map<string, ExportTask[]>();
-      const connectionsByProject = new Map<string, ExportConnection[]>();
-      
-      for (const task of backup.tasks ?? []) {
-        const projectId = task.projectId;
-        if (!tasksByProject.has(projectId)) {
-          tasksByProject.set(projectId, []);
-        }
-        tasksByProject.get(projectId)!.push({
-          id: task.id,
-          title: task.title,
-          content: task.content ?? '',
-          stage: task.stage ?? null,
-          parentId: task.parentId ?? null,
-          order: task.order ?? 0,
-          rank: task.rank ?? 0,
-          status: task.status ?? 'active',
-          x: task.x ?? 0,
-          y: task.y ?? 0,
-          displayId: task.displayId ?? task.shortId ?? task.id.slice(0, 6),
-          shortId: task.shortId,
-          createdAt: task.createdAt,
-          updatedAt: task.updatedAt,
-          deletedAt: task.deletedAt,
-          attachments: task.attachments?.map(att => {
-            if (typeof att === 'object' && att !== null) {
-              const a = att as Record<string, unknown>;
-              return {
-                id: String(a['id'] ?? ''),
-                name: String(a['name'] ?? ''),
-                size: Number(a['size'] ?? 0),
-                mimeType: String(a['mimeType'] ?? a['mime_type'] ?? ''),
-                type: (a['type'] as 'image' | 'document' | 'link' | 'file') ?? 'file',
-              };
-            }
-            return { id: '', name: '', size: 0, mimeType: '' };
-          }),
-          tags: task.tags,
-          priority: task.priority as ExportTask['priority'],
-          dueDate: task.dueDate,
-          externalSourceLinks: task.externalSourceLinks,
-        } as ExportTask);
-      }
-      
-      for (const conn of backup.connections ?? []) {
-        const projectId = conn.projectId;
-        if (!connectionsByProject.has(projectId)) {
-          connectionsByProject.set(projectId, []);
-        }
-        connectionsByProject.get(projectId)!.push({
-          id: conn.id,
-          source: conn.source,
-          target: conn.target,
-          title: conn.title,
-          description: conn.description,
-          deletedAt: conn.deletedAt,
-        });
-      }
-      
-      // 构建 ExportProject 列表
-      const projects: ExportProject[] = (backup.projects ?? []).map(proj => ({
-        id: proj.id,
-        name: proj.name,
-        description: proj.description ?? '',
-        tasks: tasksByProject.get(proj.id) ?? [],
-        connections: connectionsByProject.get(proj.id) ?? [],
-        createdAt: proj.createdAt,
-        updatedAt: proj.updatedAt,
-        version: proj.version,
-      }));
-      
-      const totalTasks = (backup.tasks ?? []).length;
-      const totalConnections = (backup.connections ?? []).length;
-      const totalAttachments = (backup.tasks ?? []).reduce(
-        (sum, t) => sum + (t.attachments?.length ?? 0), 0
-      );
-      
-      const metadata: ExportMetadata = {
-        exportedAt: backup.createdAt ?? new Date().toISOString(),
-        version: backup.payloadVersion ?? backup.version ?? '1.0',
-        appVersion: 'backup-restore',
-        projectCount: projects.length,
-        taskCount: totalTasks,
-        connectionCount: totalConnections,
-        attachmentCount: totalAttachments,
-        checksum: backup.checksum ?? '',
-        exportType: 'full',
-      };
-      
-      return { metadata, projects };
-    } catch {
-      return null; // eslint-disable-line no-restricted-syntax -- 文件解析失败时"无法读取"语义正确，null 触发调用方抛错提示
-    }
-  }
-  
-  /**
-   * 验证版本兼容性
-   */
-  private validateVersion(version: string): FileValidationResult {
-    const versionNum = parseFloat(version);
-    const minVersion = parseFloat(IMPORT_CONFIG.MIN_SUPPORTED_VERSION);
-    const maxVersion = parseFloat(IMPORT_CONFIG.MAX_SUPPORTED_VERSION);
-    
-    if (isNaN(versionNum)) {
-      return { valid: false, error: '无效的版本号' };
-    }
-    
-    if (versionNum < minVersion) {
-      return { 
-        valid: false, 
-        error: `版本过低，最低支持 v${IMPORT_CONFIG.MIN_SUPPORTED_VERSION}` 
-      };
-    }
-    
-    if (versionNum > maxVersion) {
-      return { 
-        valid: false, 
-        error: `版本过高，最高支持 v${IMPORT_CONFIG.MAX_SUPPORTED_VERSION}` 
-      };
-    }
-    
-    return { valid: true };
   }
   
   /**
    * 验证校验和
    */
   private async verifyChecksum(data: ExportData): Promise<boolean> {
-    const originalChecksum = data.metadata.checksum;
-    if (!originalChecksum) {
-      return true; // 无校验和时视为通过
-    }
-    
-    // 计算当前数据的校验和
-    const dataForChecksum = {
-      ...data,
-      metadata: { ...data.metadata, checksum: '' },
-    };
-    
-    const jsonString = JSON.stringify(dataForChecksum);
-    
-    try {
-      if (typeof crypto !== 'undefined' && crypto.subtle) {
-        const encoder = new TextEncoder();
-        const dataBuffer = encoder.encode(jsonString);
-        const hashBuffer = await crypto.subtle.digest('SHA-256', dataBuffer);
-        const hashArray = Array.from(new Uint8Array(hashBuffer));
-        const calculatedChecksum = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-        
-        return calculatedChecksum === originalChecksum;
-      }
-    } catch (e) {
-      // 降级处理：校验失败时允许继续
-      this.logger.debug('校验和验证失败', { error: e });
-    }
-    
-    // 简单 hash 无法准确验证，返回 true
-    return true;
+    return verifyImportChecksum(data, error => {
+      this.logger.debug('校验和验证失败', { error });
+    });
   }
   
   /**
@@ -1009,18 +681,4 @@ export class ImportService {
     });
   }
   
-  /**
-   * 根据 MIME 类型推断附件类型
-   */
-  private inferAttachmentType(mimeType: string): AttachmentType {
-    if (mimeType.startsWith('image/')) {
-      return 'image';
-    }
-    if (mimeType === 'application/pdf' || 
-        mimeType.includes('document') ||
-        mimeType.includes('text/')) {
-      return 'document';
-    }
-    return 'file';
-  }
 }

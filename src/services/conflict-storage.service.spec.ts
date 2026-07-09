@@ -1,9 +1,10 @@
 import { Injector, runInInjectionContext } from '@angular/core';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { ConflictStorageService } from './conflict-storage.service';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ConflictStorageService, toStoredConflictRecord } from './conflict-storage.service';
 import { LoggerService } from './logger.service';
 import { AuthService } from './auth.service';
 import { AUTH_CONFIG } from '../config/auth.config';
+import type { Project } from '../models';
 
 function createIdbRequest<T>(resolver: () => T): IDBRequest<T> {
   const request: Partial<IDBRequest<T>> = {};
@@ -23,28 +24,73 @@ function createIdbRequest<T>(resolver: () => T): IDBRequest<T> {
 
 function createFakeConflictDb(): IDBDatabase {
   const records = new Map<string, Record<string, unknown>>();
-  const store = {
-    put: (record: Record<string, unknown>) => createIdbRequest(() => {
-      records.set(record.scopedId as string, { ...record });
-      return record.scopedId as string;
-    }),
-    get: (scopedId: string) => createIdbRequest(() => records.get(scopedId)),
-    getAll: () => createIdbRequest(() => Array.from(records.values())),
-    delete: (scopedId: string) => createIdbRequest(() => {
-      records.delete(scopedId);
-      return undefined;
-    }),
-    index: (_name: string) => ({
-      getAll: (ownerUserId: string) => createIdbRequest(() =>
-        Array.from(records.values()).filter(record => record.ownerUserId === ownerUserId)
-      ),
-    }),
-  };
 
   return {
-    transaction: () => ({
-      objectStore: () => store,
-    }),
+    transaction: () => {
+      let completionScheduled = false;
+      const transaction: Partial<IDBTransaction> = {};
+      const scheduleComplete = () => {
+        if (completionScheduled) {
+          return;
+        }
+        completionScheduled = true;
+        queueMicrotask(() => transaction.oncomplete?.call(transaction as IDBTransaction, { target: transaction } as Event));
+      };
+      const store = {
+        put: (record: Record<string, unknown>) => createIdbRequest(() => {
+          records.set(record.scopedId as string, { ...record });
+          scheduleComplete();
+          return record.scopedId as string;
+        }),
+        get: (scopedId: string) => createIdbRequest(() => records.get(scopedId)),
+        getAll: () => createIdbRequest(() => Array.from(records.values())),
+        delete: (scopedId: string) => createIdbRequest(() => {
+          records.delete(scopedId);
+          scheduleComplete();
+          return undefined;
+        }),
+        index: (_name: string) => ({
+          getAll: (ownerUserId: string) => createIdbRequest(() =>
+            Array.from(records.values()).filter(record => record.ownerUserId === ownerUserId)
+          ),
+        }),
+      };
+
+      transaction.objectStore = () => store as unknown as IDBObjectStore;
+      return transaction;
+    },
+  } as unknown as IDBDatabase;
+}
+
+function createAbortAfterPutConflictDb(initialRecords: Record<string, unknown>[] = []): IDBDatabase {
+  const records = new Map<string, Record<string, unknown>>(
+    initialRecords.map(record => [record.scopedId as string, { ...record }]),
+  );
+
+  return {
+    transaction: () => {
+      const transaction: Partial<IDBTransaction> = {};
+      const store = {
+        get: (scopedId: string) => createIdbRequest(() => records.get(scopedId)),
+        put: (record: Record<string, unknown>) => {
+          const request: Partial<IDBRequest<string>> = {};
+          queueMicrotask(() => {
+            (request as { result: string }).result = record.scopedId as string;
+            request.onsuccess?.call(request as IDBRequest<string>, { target: request } as Event);
+            queueMicrotask(() => {
+              transaction.onabort?.call(transaction as IDBTransaction, { target: transaction } as Event);
+            });
+          });
+          return request as IDBRequest<string>;
+        },
+        index: (_name: string) => ({
+          getAll: (_ownerUserId: string) => createIdbRequest(() => []),
+        }),
+      };
+
+      transaction.objectStore = () => store as unknown as IDBObjectStore;
+      return transaction;
+    },
   } as unknown as IDBDatabase;
 }
 
@@ -67,7 +113,7 @@ describe('ConflictStorageService fallback isolation', () => {
     currentUserId: vi.fn(() => currentUserId),
   };
 
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
     localStorage.clear();
     currentUserId = 'user-a';
@@ -81,6 +127,11 @@ describe('ConflictStorageService fallback isolation', () => {
     });
 
     service = runInInjectionContext(injector, () => injector.get(ConflictStorageService));
+    await service.refreshConflictCount();
+  });
+
+  afterEach(async () => {
+    await service.closeStorageConnections();
   });
 
   it('clearFallbackStorageForOwner 应只清理指定 owner 的 scoped key', () => {
@@ -152,6 +203,231 @@ describe('ConflictStorageService fallback isolation', () => {
         localProject: expect.objectContaining({ name: 'Owner B' }),
       })
     );
+  });
+
+  it('saveConflict 应合并同项目的 operationConflicts，避免连续冲突覆盖早先证据', async () => {
+    vi.spyOn(service as unknown as { getDb: () => Promise<IDBDatabase> }, 'getDb').mockResolvedValue(createFakeConflictDb());
+
+    const baseProject = {
+      id: 'proj-operation-conflicts',
+      name: 'Local Project',
+      description: '',
+      createdDate: '2026-06-26T00:00:00.000Z',
+      updatedAt: '2026-06-26T00:00:00.000Z',
+      version: 3,
+      tasks: [{ id: 'task-a', title: 'Local task' } as Project['tasks'][number]],
+      connections: [{ id: 'connection-a', source: 'task-a', target: 'task-b' }],
+    };
+
+    await service.saveConflict({
+      projectId: 'proj-operation-conflicts',
+      ownerUserId: 'user-a',
+      localProject: baseProject,
+      conflictedAt: '2026-06-26T01:00:00.000Z',
+      localVersion: 3,
+      reason: 'version_mismatch',
+      acknowledged: false,
+      operationConflicts: [{
+        actionId: 'action-task-a',
+        actionType: 'task:update',
+        entityType: 'task',
+        entityId: 'task-a',
+        projectId: 'proj-operation-conflicts',
+        operationId: 'op-task-a',
+        localEntity: { id: 'task-a', title: 'Local task' },
+        code: 'TASK_REMOTE_NEWER',
+        message: 'Task conflict',
+        conflictedAt: '2026-06-26T01:00:00.000Z',
+        reason: 'remote-newer',
+      }],
+    } as Parameters<ConflictStorageService['saveConflict']>[0]);
+
+    await service.saveConflict({
+      projectId: 'proj-operation-conflicts',
+      ownerUserId: 'user-a',
+      localProject: baseProject,
+      conflictedAt: '2026-06-26T01:05:00.000Z',
+      localVersion: 3,
+      reason: 'version_mismatch',
+      acknowledged: false,
+      operationConflicts: [{
+        actionId: 'action-connection-a',
+        actionType: 'connection:update',
+        entityType: 'connection',
+        entityId: 'connection-a',
+        projectId: 'proj-operation-conflicts',
+        operationId: 'op-connection-a',
+        localEntity: { id: 'connection-a', source: 'task-a', target: 'task-b' },
+        code: 'CONNECTION_REMOTE_NEWER',
+        message: 'Connection conflict',
+        conflictedAt: '2026-06-26T01:05:00.000Z',
+        reason: 'remote-newer',
+      }],
+    } as Parameters<ConflictStorageService['saveConflict']>[0]);
+
+    const conflict = await service.getConflict('proj-operation-conflicts') as {
+      operationConflicts?: Array<{ operationId?: string }>;
+    } | null;
+
+    expect(conflict?.operationConflicts?.map(item => item.operationId)).toEqual([
+      'op-task-a',
+      'op-connection-a',
+    ]);
+  });
+
+  it('saveConflict 应合并 IndexedDB 与 fallback 中的 operationConflicts，避免恢复源互相覆盖', async () => {
+    const db = createFakeConflictDb();
+    vi.spyOn(service as unknown as { getDb: () => Promise<IDBDatabase> }, 'getDb').mockResolvedValue(db);
+
+    const baseProject = {
+      id: 'proj-operation-source-merge',
+      name: 'Local Project',
+      description: '',
+      createdDate: '2026-06-26T00:00:00.000Z',
+      updatedAt: '2026-06-26T00:00:00.000Z',
+      version: 3,
+      tasks: [{ id: 'task-a', title: 'Local task' } as Project['tasks'][number]],
+      connections: [{ id: 'connection-a', source: 'task-a', target: 'task-b' }],
+    };
+    const createRecord = (
+      operationId: string,
+      conflictedAt: string,
+    ): Parameters<ConflictStorageService['saveConflict']>[0] => ({
+      projectId: 'proj-operation-source-merge',
+      ownerUserId: 'user-a',
+      localProject: baseProject,
+      conflictedAt,
+      localVersion: 3,
+      reason: 'version_mismatch',
+      acknowledged: false,
+      operationConflicts: [{
+        actionId: `action-${operationId}`,
+        actionType: 'task:update',
+        entityType: 'task',
+        entityId: 'task-a',
+        projectId: 'proj-operation-source-merge',
+        operationId,
+        localEntity: { id: 'task-a', title: `Local ${operationId}` } as Project['tasks'][number],
+        code: 'TASK_REMOTE_NEWER',
+        message: `Task conflict ${operationId}`,
+        conflictedAt,
+        reason: 'remote-newer',
+      }],
+    } as Parameters<ConflictStorageService['saveConflict']>[0]);
+
+    await service.saveConflict(createRecord('op-indexed', '2026-06-26T01:00:00.000Z'));
+    await expect(service.getConflict('proj-operation-source-merge')).resolves.toEqual(expect.objectContaining({
+      operationConflicts: [expect.objectContaining({ operationId: 'op-indexed' })],
+    }));
+    localStorage.setItem(
+      'nanoflow.conflict.user-a.proj-operation-source-merge',
+      JSON.stringify(createRecord('op-fallback', '2026-06-26T01:05:00.000Z')),
+    );
+
+    await service.saveConflict(createRecord('op-incoming', '2026-06-26T01:10:00.000Z'));
+
+    const conflict = await service.getConflict('proj-operation-source-merge') as {
+      operationConflicts?: Array<{ operationId?: string }>;
+    } | null;
+
+    expect(conflict?.operationConflicts?.map(item => item.operationId)).toEqual([
+      'op-indexed',
+      'op-fallback',
+      'op-incoming',
+    ]);
+  });
+
+  it('saveConflict 应等待 IndexedDB transaction 完成，提交失败时保留 localStorage fallback', async () => {
+    vi.spyOn(service as unknown as { getDb: () => Promise<IDBDatabase> }, 'getDb').mockResolvedValue(createAbortAfterPutConflictDb());
+
+    const saved = await service.saveConflict({
+      projectId: 'proj-transaction-abort',
+      ownerUserId: 'user-a',
+      localProject: {
+        id: 'proj-transaction-abort',
+        name: 'Local survives transaction abort',
+        description: '',
+        createdDate: '2026-03-30T00:00:00.000Z',
+        updatedAt: '2026-03-30T00:00:00.000Z',
+        version: 2,
+        tasks: [],
+        connections: [],
+      },
+      remoteProject: {
+        id: 'proj-transaction-abort',
+        name: 'Remote side retained',
+        description: '',
+        createdDate: '2026-03-30T00:00:00.000Z',
+        updatedAt: '2026-03-30T01:00:00.000Z',
+        version: 3,
+        tasks: [],
+        connections: [],
+      },
+      remoteSnapshotFresh: true,
+      conflictedAt: '2026-03-30T02:00:00.000Z',
+      localVersion: 2,
+      remoteVersion: 3,
+      reason: 'version_mismatch',
+      acknowledged: false,
+    });
+
+    expect(saved).toBe(true);
+    expect(localStorage.getItem('nanoflow.conflict.user-a.proj-transaction-abort')).toContain('Local survives transaction abort');
+    expect(localStorage.getItem('nanoflow.conflict.user-a.proj-transaction-abort')).toContain('Remote side retained');
+  });
+
+  it('saveConflict 主存提交失败时 localStorage fallback 应保留已读到的 IndexedDB 操作证据', async () => {
+    const baseProject = {
+      id: 'proj-abort-preserve-existing',
+      name: 'Abort Preserve Existing',
+      description: '',
+      createdDate: '2026-06-26T00:00:00.000Z',
+      updatedAt: '2026-06-26T00:00:00.000Z',
+      version: 3,
+      tasks: [{ id: 'task-a', title: 'Local task' } as Project['tasks'][number]],
+      connections: [],
+    };
+    const createRecord = (
+      operationId: string,
+      conflictedAt: string,
+    ): Parameters<ConflictStorageService['saveConflict']>[0] => ({
+      projectId: 'proj-abort-preserve-existing',
+      ownerUserId: 'user-a',
+      localProject: baseProject,
+      conflictedAt,
+      localVersion: 3,
+      reason: 'version_mismatch',
+      acknowledged: false,
+      operationConflicts: [{
+        actionId: `action-${operationId}`,
+        actionType: 'task:update',
+        entityType: 'task',
+        entityId: 'task-a',
+        projectId: 'proj-abort-preserve-existing',
+        operationId,
+        localEntity: { id: 'task-a', title: `Local ${operationId}` } as Project['tasks'][number],
+        message: `Task conflict ${operationId}`,
+        conflictedAt,
+        reason: 'remote-newer',
+      }],
+    } as Parameters<ConflictStorageService['saveConflict']>[0]);
+    const existingRecord = toStoredConflictRecord(
+      createRecord('op-existing-abort', '2026-06-26T01:00:00.000Z'),
+      'user-a',
+    ) as unknown as Record<string, unknown>;
+    vi.spyOn(service as unknown as { getDb: () => Promise<IDBDatabase> }, 'getDb')
+      .mockResolvedValue(createAbortAfterPutConflictDb([existingRecord]));
+
+    const saved = await service.saveConflict(createRecord('op-incoming-abort', '2026-06-26T01:05:00.000Z'));
+    const fallback = JSON.parse(
+      localStorage.getItem('nanoflow.conflict.user-a.proj-abort-preserve-existing') ?? '{}',
+    ) as { operationConflicts?: Array<{ operationId?: string }> };
+
+    expect(saved).toBe(true);
+    expect(fallback.operationConflicts?.map(conflict => conflict.operationId)).toEqual([
+      'op-existing-abort',
+      'op-incoming-abort',
+    ]);
   });
 
   it('IndexedDB 主存 deleteConflict 显式指定 owner 时应删除目标 bucket', async () => {
@@ -243,6 +519,63 @@ describe('ConflictStorageService fallback isolation', () => {
       }),
     ]));
     expect(localStorage.getItem('nanoflow.conflict.user-a.proj-list-fallback')).toBeNull();
+  });
+
+  it('getAllConflicts 应合并 IndexedDB 与 fallback 中同项目的 operationConflicts', async () => {
+    const db = createFakeConflictDb();
+    vi.spyOn(service as unknown as { getDb: () => Promise<IDBDatabase> }, 'getDb').mockResolvedValue(db);
+
+    const baseProject = {
+      id: 'proj-list-source-merge',
+      name: 'List Source Merge',
+      description: '',
+      createdDate: '2026-06-26T00:00:00.000Z',
+      updatedAt: '2026-06-26T00:00:00.000Z',
+      version: 3,
+      tasks: [{ id: 'task-a', title: 'Local task' } as Project['tasks'][number]],
+      connections: [],
+    };
+    const createRecord = (
+      operationId: string,
+      conflictedAt: string,
+    ): Parameters<ConflictStorageService['saveConflict']>[0] => ({
+      projectId: 'proj-list-source-merge',
+      ownerUserId: 'user-a',
+      localProject: baseProject,
+      conflictedAt,
+      localVersion: 3,
+      reason: 'version_mismatch',
+      acknowledged: false,
+      operationConflicts: [{
+        actionId: `action-${operationId}`,
+        actionType: 'task:update',
+        entityType: 'task',
+        entityId: 'task-a',
+        projectId: 'proj-list-source-merge',
+        operationId,
+        localEntity: { id: 'task-a', title: `Local ${operationId}` } as Project['tasks'][number],
+        message: `Task conflict ${operationId}`,
+        conflictedAt,
+        reason: 'remote-newer',
+      }],
+    } as Parameters<ConflictStorageService['saveConflict']>[0]);
+
+    await service.saveConflict(createRecord('op-indexed-list', '2026-06-26T01:00:00.000Z'));
+    localStorage.setItem(
+      'nanoflow.conflict.user-a.proj-list-source-merge',
+      JSON.stringify(createRecord('op-fallback-list', '2026-06-26T01:05:00.000Z')),
+    );
+
+    const conflicts = await service.getAllConflicts();
+    const conflict = conflicts.find(item => item.projectId === 'proj-list-source-merge') as {
+      operationConflicts?: Array<{ operationId?: string }>;
+    } | undefined;
+
+    expect(conflict?.operationConflicts?.map(item => item.operationId)).toEqual([
+      'op-indexed-list',
+      'op-fallback-list',
+    ]);
+    expect(localStorage.getItem('nanoflow.conflict.user-a.proj-list-source-merge')).toBeNull();
   });
 
   it('fallback-only deleteConflict 应只删除当前 owner 的记录', async () => {
@@ -425,5 +758,20 @@ describe('ConflictStorageService fallback isolation', () => {
     });
 
     expect(ownerUserId).toBe('__legacy_unknown__');
+  });
+});
+
+describe('toStoredConflictRecord', () => {
+  it('isolates ownerless legacy records into the unknown-owner scoped bucket', () => {
+    const record = toStoredConflictRecord({
+      projectId: 'proj-legacy',
+      localProject: { id: 'proj-legacy', name: 'Legacy', tasks: [], connections: [] } as never,
+      conflictedAt: '2026-03-30T00:00:00.000Z',
+      localVersion: 1,
+      reason: 'version_mismatch',
+    });
+
+    expect(record.ownerUserId).toBe('__legacy_unknown__');
+    expect(record.scopedId).toBe('__legacy_unknown__::proj-legacy');
   });
 });

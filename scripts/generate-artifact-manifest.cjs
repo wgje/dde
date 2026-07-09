@@ -122,16 +122,38 @@ function readJsonIfExists(filePath) {
 }
 
 const rules = parseHeaders(path.join(DIST, '_headers'));
+const buildStats = readJsonIfExists(path.join(REPO_ROOT, 'dist', 'stats.json'));
+const statsOutputs = buildStats && typeof buildStats === 'object' && buildStats.outputs && typeof buildStats.outputs === 'object'
+  ? buildStats.outputs
+  : null;
 const files = {};
 const allFiles = walk(DIST);
 let totalBytes = 0;
 let rootJsCount = 0;
 let gojsFlowChunkBytes = 0;
 
+function toStatsKey(relative) {
+  return relative.split(path.sep).join('/');
+}
+
+function isGojsFlowInput(inputPath) {
+  const normalized = String(inputPath).replace(/\\/g, '/');
+  return normalized.includes('node_modules/gojs/')
+    || normalized.startsWith('src/app/features/flow/')
+    || normalized.startsWith('src/utils/flow-');
+}
+
 function isGojsFlowChunk(file, relative) {
   if (path.dirname(relative) !== '.' || path.extname(relative) !== '.js') return false;
   const name = path.basename(relative);
   if (/^(main|polyfills|runtime)-/.test(name)) return false;
+  if (statsOutputs) {
+    const output = statsOutputs[toStatsKey(relative)];
+    if (!output || typeof output !== 'object' || !output.inputs || typeof output.inputs !== 'object') {
+      return false;
+    }
+    return Object.keys(output.inputs).some(isGojsFlowInput);
+  }
   const head = fs.readFileSync(file, 'utf-8').slice(0, 256 * 1024);
   return /gojs|GoJS|go\.Diagram|FlowViewComponent|FlowTemplate|flow-task|floating-tree|Diagram/i.test(head);
 }

@@ -22,6 +22,8 @@ export type SameInstantComparator = (
   right: string | null | undefined,
 ) => boolean;
 
+type EquivalentEntry = ReturnType<typeof normalizeEntryForEquivalence>;
+
 /**
  * 把任意来源的 entry 归一化成等价比较友好的形态：
  * - focusMeta 的 `null` 与 `undefined` 统一成 `null`，并对内部可空字段递归归一；
@@ -62,6 +64,47 @@ export function normalizeEntryForEquivalence(entry: BlackBoxEntry): BlackBoxEntr
   };
 }
 
+function haveEquivalentFocusMeta(
+  localFocusMeta: BlackBoxEntry['focusMeta'],
+  remoteFocusMeta: BlackBoxEntry['focusMeta'],
+): boolean {
+  if (!localFocusMeta || !remoteFocusMeta) {
+    return localFocusMeta === remoteFocusMeta;
+  }
+
+  return localFocusMeta.source === remoteFocusMeta.source
+    && localFocusMeta.sessionId === remoteFocusMeta.sessionId
+    && localFocusMeta.title === remoteFocusMeta.title
+    && localFocusMeta.detail === remoteFocusMeta.detail
+    && localFocusMeta.lane === remoteFocusMeta.lane
+    && localFocusMeta.expectedMinutes === remoteFocusMeta.expectedMinutes
+    && localFocusMeta.waitMinutes === remoteFocusMeta.waitMinutes
+    && localFocusMeta.cognitiveLoad === remoteFocusMeta.cognitiveLoad
+    && localFocusMeta.dockEntryId === remoteFocusMeta.dockEntryId;
+}
+
+function haveEquivalentIdentityFields(
+  local: EquivalentEntry,
+  remote: EquivalentEntry,
+  sameInstant: SameInstantComparator,
+): boolean {
+  return local.id === remote.id
+    && local.projectId === remote.projectId
+    && local.userId === remote.userId
+    && local.content === remote.content
+    && local.date === remote.date
+    && sameInstant(local.createdAt, remote.createdAt)
+    && sameInstant(local.completedAt, remote.completedAt);
+}
+
+function haveEquivalentStateFields(local: EquivalentEntry, remote: EquivalentEntry): boolean {
+  return local.isRead === remote.isRead
+    && local.isCompleted === remote.isCompleted
+    && local.isArchived === remote.isArchived
+    && (local.snoozeUntil ?? null) === (remote.snoozeUntil ?? null)
+    && local.snoozeCount === remote.snoozeCount;
+}
+
 export function hasEquivalentEntryState(
   local: BlackBoxEntry,
   remote: BlackBoxEntry,
@@ -69,32 +112,9 @@ export function hasEquivalentEntryState(
 ): boolean {
   const normalizedLocal = normalizeEntryForEquivalence(local);
   const normalizedRemote = normalizeEntryForEquivalence(remote);
-  const localFocusMeta = normalizedLocal.focusMeta;
-  const remoteFocusMeta = normalizedRemote.focusMeta;
-  const focusMetaMatches = !localFocusMeta || !remoteFocusMeta
-    ? localFocusMeta === remoteFocusMeta
-    : localFocusMeta.source === remoteFocusMeta.source
-      && localFocusMeta.sessionId === remoteFocusMeta.sessionId
-      && localFocusMeta.title === remoteFocusMeta.title
-      && localFocusMeta.detail === remoteFocusMeta.detail
-      && localFocusMeta.lane === remoteFocusMeta.lane
-      && localFocusMeta.expectedMinutes === remoteFocusMeta.expectedMinutes
-      && localFocusMeta.waitMinutes === remoteFocusMeta.waitMinutes
-      && localFocusMeta.cognitiveLoad === remoteFocusMeta.cognitiveLoad
-      && localFocusMeta.dockEntryId === remoteFocusMeta.dockEntryId;
 
-  return normalizedLocal.id === normalizedRemote.id
-    && normalizedLocal.projectId === normalizedRemote.projectId
-    && normalizedLocal.userId === normalizedRemote.userId
-    && normalizedLocal.content === normalizedRemote.content
-    && normalizedLocal.date === normalizedRemote.date
-    && sameInstant(normalizedLocal.createdAt, normalizedRemote.createdAt)
-    && sameInstant(normalizedLocal.completedAt, normalizedRemote.completedAt)
-    && normalizedLocal.isRead === normalizedRemote.isRead
-    && normalizedLocal.isCompleted === normalizedRemote.isCompleted
-    && normalizedLocal.isArchived === normalizedRemote.isArchived
-    && (normalizedLocal.snoozeUntil ?? null) === (normalizedRemote.snoozeUntil ?? null)
-    && normalizedLocal.snoozeCount === normalizedRemote.snoozeCount
+  return haveEquivalentIdentityFields(normalizedLocal, normalizedRemote, sameInstant)
+    && haveEquivalentStateFields(normalizedLocal, normalizedRemote)
     && sameInstant(normalizedLocal.deletedAt, normalizedRemote.deletedAt)
-    && focusMetaMatches;
+    && haveEquivalentFocusMeta(normalizedLocal.focusMeta, normalizedRemote.focusMeta);
 }

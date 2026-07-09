@@ -349,29 +349,30 @@ export class DockDailySlotComponent {
     this.showAddForm.update(value => !value);
   }
 
-  addSlot(): void {
+  async addSlot(): Promise<void> {
     const title = this.newTitle.trim();
     if (!title) return;
-    this.engine.dailySlotService.addDailySlot(title, this.newMaxCount || 1);
+    const id = await this.engine.dailySlotService.addDailySlot(title, this.newMaxCount || 1);
+    if (!id) return;
     this.newTitle = '';
     this.newMaxCount = 1;
     this.showAddForm.set(false);
   }
 
-  completeDailySlot(slotId: string): void {
-    this.engine.dailySlotService.completeDailySlot(slotId);
+  completeDailySlot(slotId: string): Promise<boolean> {
+    return this.engine.dailySlotService.completeDailySlot(slotId);
   }
 
-  removeDailySlot(slotId: string): void {
-    this.engine.dailySlotService.removeDailySlot(slotId);
+  removeDailySlot(slotId: string): Promise<boolean> {
+    return this.engine.dailySlotService.removeDailySlot(slotId);
   }
 
   /**
    * 降级兜底（策划案 §7.6）：碎片阶段无日常任务时
    * 允许用户新建临时任务直接进入停泊坞
    */
-  createTempTask(): void {
-    this.engine.createInDock('临时任务', 'combo-select', 'low', {
+  async createTempTask(): Promise<void> {
+    await this.engine.createInDock('临时任务', 'combo-select', 'low', {
       expectedMinutes: 5,
     });
   }

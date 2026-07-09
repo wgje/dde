@@ -1,4 +1,4 @@
-import { Injector, runInInjectionContext, signal } from '@angular/core';
+import { DestroyRef, Injector, runInInjectionContext, signal } from '@angular/core';
 import { Router } from '@angular/router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AppAuthCoordinatorService } from './app-auth-coordinator.service';
@@ -12,6 +12,9 @@ import { OptimisticStateService } from '../../../services/optimistic-state.servi
 import { UndoService } from '../../../services/undo.service';
 import { WidgetBindingService } from '../../../services/widget-binding.service';
 import { ProjectDataService } from './sync/project-data.service';
+import { EventBusService } from '../../../services/event-bus.service';
+import { SyncStateService } from './sync/sync-state.service';
+import { AUTH_CONFIG } from '../../../config/auth.config';
 
 vi.mock('../../../services/guards', async () => {
   const actual = await vi.importActual<typeof import('../../../services/guards')>('../../../services/guards');
@@ -30,20 +33,32 @@ vi.mock('../../../services/migration.service', () => ({
   MigrationService: class MigrationService {},
 }));
 
+vi.mock('./app-auth-coordinator.helpers', async () => {
+  const actual = await vi.importActual<typeof import('./app-auth-coordinator.helpers')>('./app-auth-coordinator.helpers');
+  return {
+    ...actual,
+    waitForPromiseOrTimeout: vi.fn(actual.waitForPromiseOrTimeout),
+  };
+});
+
 import { AttachmentService } from '../../../services/attachment.service';
 import { MigrationService } from '../../../services/migration.service';
 import { disableLocalMode } from '../../../services/guards';
+import { registerAppAuthCoordinatorAuthFlowSpecs } from './app-auth-coordinator-auth-flows.spec-helpers';
+import { registerAppAuthCoordinatorBootstrapSpecs } from './app-auth-coordinator-bootstrap.spec-helpers';
 
 async function flushAsyncTimers(): Promise<void> {
   await new Promise(resolve => setTimeout(resolve, 0));
 }
 
-function setup(options?: {
+export function setup(options?: {
   injectorGet?: (token: unknown) => unknown;
 }) {
   const userId = signal<string | null>(null);
   const projects = signal<Array<{ id: string; syncSource?: 'local-only' | 'synced' }>>([]);
   const activeProjectId = signal<string | null>(null);
+  const eventBus = new EventBusService();
+  const destroyCallbacks: Array<() => void> = [];
   const logger = {
     debug: vi.fn(),
     info: vi.fn(),
@@ -82,6 +97,7 @@ function setup(options?: {
     resetPassword: vi.fn(),
     runtimeState: vi.fn(() => 'idle' as const),
     sessionInitialized: vi.fn(() => false),
+    sessionExpired: signal(false),
   };
 
   const userSessionMock = {
@@ -118,6 +134,9 @@ function setup(options?: {
   const widgetBindingMock = {
     revokeAllBindings: vi.fn().mockResolvedValue({ ok: true as const, value: { revokedCount: 0 } }),
   };
+  const syncStateMock = {
+    resetSessionExpired: vi.fn(),
+  };
 
   const injector = Injector.create({
     providers: [
@@ -148,6 +167,20 @@ function setup(options?: {
       },
       { provide: WidgetBindingService, useValue: widgetBindingMock },
       { provide: Router, useValue: routerMock },
+      { provide: EventBusService, useValue: eventBus },
+      { provide: SyncStateService, useValue: syncStateMock },
+      {
+        provide: DestroyRef,
+        useValue: {
+          onDestroy: (callback: () => void) => {
+            destroyCallbacks.push(callback);
+            return () => {
+              const index = destroyCallbacks.indexOf(callback);
+              if (index >= 0) destroyCallbacks.splice(index, 1);
+            };
+          },
+        },
+      },
     ],
   });
 
@@ -163,12 +196,17 @@ function setup(options?: {
     toastMock,
     routerMock,
     widgetBindingMock,
+    syncStateMock,
     userId,
     projects,
     activeProjectId,
     projectDataMock,
+    eventBus,
+    destroyCallbacks,
   };
 }
+
+export type AppAuthCoordinatorSpecSetup = typeof setup;
 
 describe('AppAuthCoordinatorService lazy dependency loading', () => {
   beforeEach(() => {
@@ -285,7 +323,7 @@ describe('signOut resilience', () => {
     );
   });
 
-  it('应在 auth.signOut 清空 currentUserId 前先执行 userSession teardown', async () => {
+  it('应在本地 userSession teardown 前先完成 Supabase 远端登出', async () => {
     const { service, userSessionMock, authMock, userId, widgetBindingMock } = setup();
     userId.set('user-1');
     authMock.signOut.mockImplementation(async () => {
@@ -299,11 +337,77 @@ describe('signOut resilience', () => {
     });
     expect(widgetBindingMock.revokeAllBindings).toHaveBeenCalledOnce();
     expect(widgetBindingMock.revokeAllBindings.mock.invocationCallOrder[0]).toBeLessThan(
-      userSessionMock.setCurrentUser.mock.invocationCallOrder[0]
-    );
-    expect(userSessionMock.setCurrentUser.mock.invocationCallOrder[0]).toBeLessThan(
       authMock.signOut.mock.invocationCallOrder[0]
     );
+    expect(authMock.signOut.mock.invocationCallOrder[0]).toBeLessThan(
+      userSessionMock.setCurrentUser.mock.invocationCallOrder[0]
+    );
+  });
+
+  it('Supabase 远端登出失败时应中断本地清理并提示重试', async () => {
+    const { service, authMock, toastMock, userId, logger, userSessionMock } = setup();
+    const error = new Error('network down');
+    userId.set('user-1');
+    authMock.signOut.mockRejectedValueOnce(error);
+
+    await expect(service.signOut()).resolves.toBe(false);
+
+    expect(userSessionMock.setCurrentUser).not.toHaveBeenCalled();
+    expect(userSessionMock.clearAllLocalData).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledWith('Supabase 远端登出失败，中断登出流程', error);
+    expect(toastMock.error).toHaveBeenCalledWith(
+      '退出登录失败',
+      expect.stringContaining('当前不会退出登录'),
+    );
+  });
+});
+
+describe('session invalidation handling', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('会话失效事件应使用事件携带的旧 owner 完成内存 teardown 且保留离线快照', async () => {
+    const { service: _service, eventBus, userSessionMock, userId } = setup();
+    userId.set('old-user');
+
+    eventBus.publishSessionInvalidated('background-refresh', 'old-user');
+    await Promise.resolve();
+
+    expect(userSessionMock.setCurrentUser).toHaveBeenCalledWith(null, {
+      skipPersistentReload: true,
+      previousUserIdHint: 'old-user',
+      preserveOfflineSnapshot: true,
+    });
+    expect(userId()).toBeNull();
+  });
+});
+
+describe('local mode entry', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('从过期云端会话进入本地模式时应通过 UserSessionService 完整切换 owner 并清除过期状态', async () => {
+    const { service, userSessionMock, syncStateMock, authMock, modalMock, toastMock, userId } = setup();
+    userId.set('cloud-user');
+    authMock.sessionExpired.set(true);
+
+    await service.handleLocalModeFromModal();
+
+    expect(userSessionMock.setCurrentUser).toHaveBeenCalledWith(AUTH_CONFIG.LOCAL_MODE_USER_ID, {
+      forceLoad: true,
+      previousUserIdHint: 'cloud-user',
+      preserveOfflineSnapshot: true,
+    });
+    expect(userSessionMock.loadProjects).not.toHaveBeenCalled();
+    expect(syncStateMock.resetSessionExpired).toHaveBeenCalledOnce();
+    expect(authMock.sessionExpired()).toBe(false);
+    expect(modalMock.closeByType).toHaveBeenCalledWith('login', {
+      success: true,
+      userId: AUTH_CONFIG.LOCAL_MODE_USER_ID,
+    });
+    expect(toastMock.info).toHaveBeenCalledWith('本地模式', '数据仅保存在本地，不会同步到云端');
   });
 });
 
@@ -610,203 +714,5 @@ describe('isLoginData type guard (tested indirectly via handleLogin)', () => {
   });
 });
 
-describe('handleSignup timeout protection', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  it('should complete normally when setCurrentUser resolves before the 8s timeout', async () => {
-    const { service, authMock, userSessionMock, toastMock, modalMock } = setup();
-    authMock.signUp.mockResolvedValue({ ok: true, value: { needsConfirmation: false, userId: 'signup-user-1' } });
-    userSessionMock.setCurrentUser.mockResolvedValue(undefined);
-
-    service.authEmail.set('test@example.com');
-    service.authPassword.set('password123');
-    service.authConfirmPassword.set('password123');
-
-    await service.handleSignup();
-
-  expect(disableLocalMode).toHaveBeenCalled();
-    expect(userSessionMock.setCurrentUser).toHaveBeenCalledWith('signup-user-1', { forceLoad: true });
-    expect(toastMock.success).toHaveBeenCalled();
-    expect(modalMock.closeByType).toHaveBeenCalledWith('login', { success: true, userId: 'signup-user-1' });
-    expect(service.isAuthLoading()).toBe(false);
-    expect(service.isSignupMode()).toBe(false);
-  });
-
-  it('should log warning and continue when setCurrentUser exceeds the 8s timeout', async () => {
-    vi.useFakeTimers();
-    const { service, authMock, userSessionMock, logger, toastMock } = setup();
-    authMock.signUp.mockResolvedValue({ ok: true, value: { needsConfirmation: false, userId: 'signup-user-2' } });
-    // setCurrentUser returns a promise that never resolves (simulates very slow load)
-    userSessionMock.setCurrentUser.mockReturnValue(new Promise(() => {}));
-
-    service.authEmail.set('test@example.com');
-    service.authPassword.set('password123');
-    service.authConfirmPassword.set('password123');
-
-    const signupPromise = service.handleSignup();
-
-    // Advance past the 8000ms timeout
-    await vi.advanceTimersByTimeAsync(8000);
-
-    await signupPromise;
-
-    expect(logger.warn).toHaveBeenCalledWith(
-      expect.stringContaining('[Signup]'),
-      expect.objectContaining({ timeoutMs: 8000 })
-    );
-    // Should still complete the signup flow despite timeout
-    expect(toastMock.success).toHaveBeenCalled();
-    expect(service.isAuthLoading()).toBe(false);
-  });
-
-  it('should use signUp result userId even when auth currentUserId signal is not prefilled', async () => {
-    const { service, authMock, userSessionMock, modalMock } = setup();
-    authMock.signUp.mockResolvedValue({ ok: true, value: { needsConfirmation: false, userId: 'signup-user-direct' } });
-    userSessionMock.setCurrentUser.mockResolvedValue(undefined);
-
-    service.authEmail.set('test@example.com');
-    service.authPassword.set('password123');
-    service.authConfirmPassword.set('password123');
-
-    await service.handleSignup();
-
-    expect(userSessionMock.setCurrentUser).toHaveBeenCalledWith('signup-user-direct', { forceLoad: true });
-    expect(modalMock.closeByType).toHaveBeenCalledWith('login', { success: true, userId: 'signup-user-direct' });
-  });
-
-  it('should not reach data load path when signup requires email confirmation', async () => {
-    const { service, authMock, userSessionMock } = setup();
-    authMock.signUp.mockResolvedValue({ ok: true, value: { needsConfirmation: true } });
-
-    service.authEmail.set('test@example.com');
-    service.authPassword.set('password123');
-    service.authConfirmPassword.set('password123');
-
-    await service.handleSignup();
-
-    expect(userSessionMock.setCurrentUser).not.toHaveBeenCalled();
-    expect(service.authError()).toBe('注册成功！请查收邮件并点击验证链接完成注册。');
-    expect(service.isAuthLoading()).toBe(false);
-  });
-
-  it('should reject signup when passwords do not match', async () => {
-    const { service, authMock } = setup();
-
-    service.authEmail.set('test@example.com');
-    service.authPassword.set('password123');
-    service.authConfirmPassword.set('different456');
-
-    await service.handleSignup();
-
-    expect(authMock.signUp).not.toHaveBeenCalled();
-    expect(service.authError()).toBe('两次输入的密码不一致');
-  });
-
-  it('should reject signup when password is shorter than 8 characters', async () => {
-    const { service, authMock } = setup();
-
-    service.authEmail.set('test@example.com');
-    service.authPassword.set('short');
-    service.authConfirmPassword.set('short');
-
-    await service.handleSignup();
-
-    expect(authMock.signUp).not.toHaveBeenCalled();
-    expect(service.authError()).toBe('密码长度至少8位');
-  });
-
-  it('should preserve the auth service signup error message', async () => {
-    const { service, authMock } = setup();
-    authMock.signUp.mockResolvedValue({
-      ok: false,
-      error: { code: 'UNKNOWN', message: '该邮箱已被注册' },
-    });
-
-    service.authEmail.set('existing@example.com');
-    service.authPassword.set('password123');
-    service.authConfirmPassword.set('password123');
-
-    await service.handleSignup();
-
-    expect(service.authError()).toBe('该邮箱已被注册');
-  });
-});
-
-describe('handleResetPassword error propagation', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
-
-  it('should preserve the auth service reset password error message', async () => {
-    const { service, authMock } = setup();
-    authMock.resetPassword.mockResolvedValue({
-      ok: false,
-      error: { code: 'UNKNOWN', message: '邮箱格式不正确或未验证' },
-    });
-
-    service.authEmail.set('invalid-email');
-
-    await service.handleResetPassword();
-
-    expect(service.authError()).toBe('邮箱格式不正确或未验证');
-  });
-});
-
-describe('bootstrapSession forceLoad', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
-
-  it('冷启动 bootstrapSession 应传 forceLoad: true 给 setCurrentUser', async () => {
-    const { service, authMock, userSessionMock, userId } = setup();
-    // 补充 bootstrapSession 内部使用的 signal 属性
-    authMock.checkSession.mockImplementation(async () => {
-      userId.set('cold-start-user');
-      return { userId: 'cold-start-user', email: 'test@x.com' };
-    });
-    userSessionMock.setCurrentUser.mockResolvedValue(undefined);
-
-    // 触发 bootstrap
-    await (service as unknown as { bootstrapSession: () => Promise<void> }).bootstrapSession();
-
-    expect(userSessionMock.setCurrentUser).toHaveBeenCalledWith('cold-start-user', { forceLoad: true });
-  });
-
-  it('bootstrap 超时转后台后若用户已登出，旧后台失败不应再次触发普通匿名重载', async () => {
-    const { service, authMock, userSessionMock, userId } = setup();
-    authMock.checkSession.mockResolvedValue({ userId: 'cold-start-user', email: 'test@x.com' });
-
-    let rejectBackgroundLoad: ((reason?: unknown) => void) | null = null;
-    const defaultSetCurrentUser = userSessionMock.setCurrentUser.getMockImplementation();
-    userSessionMock.setCurrentUser
-      .mockImplementationOnce(() => new Promise<void>((_resolve, reject) => {
-        userId.set('cold-start-user');
-        rejectBackgroundLoad = reject;
-      }))
-      .mockImplementation(defaultSetCurrentUser ?? (async (nextUserId: string | null) => {
-        userId.set(nextUserId);
-      }));
-
-    vi.spyOn(service as unknown as {
-      waitWithTimeout: <T>(promise: Promise<T>, timeoutMs: number) => Promise<'completed' | 'timeout'>;
-    }, 'waitWithTimeout').mockResolvedValue('timeout');
-
-    await (service as unknown as { bootstrapSession: () => Promise<void> }).bootstrapSession();
-    await expect(service.signOut()).resolves.toBe(true);
-
-    // @ts-expect-error TS2349 - closure reassignment defeats CFA
-    rejectBackgroundLoad?.(new Error('background load failed'));
-    await Promise.resolve();
-    await Promise.resolve();
-
-    expect(userSessionMock.setCurrentUser).toHaveBeenCalledTimes(2);
-    expect(userSessionMock.setCurrentUser).toHaveBeenNthCalledWith(1, 'cold-start-user', { forceLoad: true });
-    expect(userSessionMock.setCurrentUser).toHaveBeenNthCalledWith(2, null, { skipPersistentReload: true });
-  });
-});
+registerAppAuthCoordinatorAuthFlowSpecs({ setup, disableLocalMode });
+registerAppAuthCoordinatorBootstrapSpecs({ setup });

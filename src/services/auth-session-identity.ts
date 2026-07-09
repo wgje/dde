@@ -11,7 +11,11 @@
  * 为什么抽离：AGENTS.md §12 单文件 ≤ 800 行硬线；AuthService 长期越界，
  * 这些纯解析/分类工具自洽且零依赖服务态，适合先行下切。
  */
-import type { PersistedSessionIdentity } from './auth.service';
+
+export interface PersistedSessionIdentity {
+  userId: string;
+  email: string | null;
+}
 
 export function resolvePersistedSessionRecord(authData: unknown): Record<string, unknown> | null {
   if (!authData || typeof authData !== 'object') {

@@ -7,6 +7,8 @@ import { ExternalSourceLinkService } from '../../../core/external-sources/extern
 import { SiyuanPreviewService } from '../../../core/external-sources/siyuan/siyuan-preview.service';
 import { KnowledgeAnchorPopoverComponent } from './knowledge-anchor-popover.component';
 
+type PreviewMock = ReturnType<typeof vi.fn<SiyuanPreviewService['preview']>>;
+
 describe('KnowledgeAnchorPopoverComponent', () => {
   const link: ExternalSourceLink = {
     id: 'link-1',
@@ -24,7 +26,7 @@ describe('KnowledgeAnchorPopoverComponent', () => {
   let fixture: ComponentFixture<KnowledgeAnchorPopoverComponent>;
   let openLink: ReturnType<typeof vi.fn>;
   let updateMetadata: ReturnType<typeof vi.fn>;
-  let preview: ReturnType<typeof vi.fn>;
+  let preview: PreviewMock;
 
   beforeEach(async () => {
     openLink = vi.fn();
@@ -184,5 +186,67 @@ describe('KnowledgeAnchorPopoverComponent', () => {
     await staleFixture.whenStable();
 
     expect(updateMetadata).not.toHaveBeenCalled();
+  });
+
+  it('ignores a stale preview result when the link input changes before load resolves', async () => {
+    updateMetadata.mockClear();
+    const nextLink: ExternalSourceLink = {
+      ...link,
+      id: 'link-2',
+      targetId: '20260426123456-next999',
+      uri: 'siyuan://blocks/20260426123456-next999',
+      label: '思源 next999',
+    };
+    let resolveFirst!: (value: Awaited<ReturnType<typeof preview>>) => void;
+    preview.mockImplementationOnce(() => new Promise(resolve => {
+      resolveFirst = resolve;
+    }));
+
+    const raceFixture = TestBed.createComponent(KnowledgeAnchorPopoverComponent);
+    const linkInput = signal(link);
+    Object.assign(raceFixture.componentInstance as unknown as Record<string, unknown>, {
+      link: linkInput,
+    });
+    raceFixture.detectChanges();
+
+    linkInput.set(nextLink);
+    preview.mockResolvedValueOnce({
+      status: 'ready',
+      origin: 'network',
+      preview: {
+        linkId: nextLink.id,
+        blockId: nextLink.targetId,
+        title: '新块标题',
+        hpath: '/新知识/新块标题',
+        excerpt: 'new preview',
+        fetchedAt: '2026-05-28T12:36:00.000Z',
+        fetchStatus: 'ready',
+        truncated: false,
+      },
+    });
+    await raceFixture.componentInstance.load(false);
+
+    resolveFirst({
+      status: 'ready',
+      origin: 'network',
+      preview: {
+        linkId: link.id,
+        blockId: link.targetId,
+        title: '旧块标题',
+        hpath: '/旧知识/旧块标题',
+        excerpt: 'stale preview',
+        fetchedAt: '2026-05-28T12:34:00.000Z',
+        fetchStatus: 'ready',
+        truncated: false,
+      },
+    });
+    await raceFixture.whenStable();
+
+    expect(raceFixture.componentInstance.result().preview?.title).toBe('新块标题');
+    expect(updateMetadata).toHaveBeenCalledWith(nextLink.id, {
+      label: '新块标题',
+      hpath: '/新知识/新块标题',
+    });
+    expect(updateMetadata).not.toHaveBeenCalledWith(link.id, expect.anything());
   });
 });

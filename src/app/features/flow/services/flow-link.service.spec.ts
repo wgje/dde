@@ -9,6 +9,7 @@ import { LoggerService } from '../../../../services/logger.service';
 import { ToastService } from '../../../../services/toast.service';
 import { UiStateService } from '../../../../services/ui-state.service';
 import { FlowLinkRelinkService } from './flow-link-relink.service';
+import { UserSessionService } from '../../../../services/user-session.service';
 
 describe('FlowLinkService', () => {
   let service: FlowLinkService;
@@ -48,11 +49,11 @@ describe('FlowLinkService', () => {
 
     mockTaskOps = {
       connectionAdapter: {
-        removeConnection: vi.fn(),
-        updateConnectionContent: vi.fn(),
-        addCrossTreeConnection: vi.fn(),
+        removeConnection: vi.fn().mockResolvedValue(true),
+        updateConnectionContent: vi.fn().mockResolvedValue(true),
+        addCrossTreeConnection: vi.fn().mockResolvedValue(true),
       },
-      detachTask: vi.fn(),
+      detachTask: vi.fn().mockResolvedValue(true),
       moveTaskToStage: vi.fn(() => ({ ok: true })),
       getDirectChildren: vi.fn(() => []),
       isHintOnlyStartupReadOnly: vi.fn(() => hintOnlyReadOnly()),
@@ -88,6 +89,12 @@ describe('FlowLinkService', () => {
         {
           provide: UiStateService,
           useValue: uiStateMock,
+        },
+        {
+          provide: UserSessionService,
+          useValue: {
+            isHintOnlyStartupPlaceholderVisible: () => hintOnlyReadOnly(),
+          },
         },
         { provide: FlowLinkRelinkService, useValue: {} },
       ],
@@ -278,26 +285,42 @@ describe('FlowLinkService', () => {
     expect(service.shouldIgnoreConnectionEditorBackgroundClose()).toBe(false);
   });
 
-  it('删除跨树关联时应调用 removeConnection', () => {
+  it('删除跨树关联时应调用 removeConnection', async () => {
     service.openConnectionEditor('source-task', 'target-task', '跨树描述', 120, 220, '依赖', {
       isCrossTree: true,
       mode: 'edit',
     } as any);
 
-    const result = service.deleteCurrentConnection();
+    const result = await service.deleteCurrentConnection();
 
     expect(result).toBe(true);
     expect(mockTaskOps.connectionAdapter.removeConnection).toHaveBeenCalledWith('source-task', 'target-task');
     expect(mockTaskOps.detachTask).not.toHaveBeenCalled();
   });
 
-  it('解除父子关系时应调用 detachTask', () => {
+  it('删除跨树关联本地持久化失败时应保留编辑器', async () => {
+    service.openConnectionEditor('source-task', 'target-task', '跨树描述', 120, 220, '依赖', {
+      isCrossTree: true,
+      mode: 'edit',
+    } as any);
+    mockTaskOps.connectionAdapter.removeConnection.mockResolvedValueOnce(false);
+
+    const result = await service.deleteCurrentConnection();
+
+    expect(result).toBe(false);
+    expect(service.connectionEditorData()).toMatchObject({
+      sourceId: 'source-task',
+      targetId: 'target-task',
+    });
+  });
+
+  it('解除父子关系时应调用 detachTask', async () => {
     service.openConnectionEditor('parent-task', 'child-task', '', 120, 220, '', {
       isCrossTree: false,
       mode: 'preview',
     } as any);
 
-    const result = service.deleteCurrentConnection();
+    const result = await service.deleteCurrentConnection();
 
     expect(result).toBe(true);
     expect(mockTaskOps.detachTask).toHaveBeenCalledWith('child-task');
@@ -372,7 +395,23 @@ describe('FlowLinkService', () => {
     expect(mockToast.info).toHaveBeenCalledWith('会话确认中', '编辑关联暂不可用，owner 确认完成前保持只读');
   });
 
-  it('hint-only 时保存关联内容不应写入本地或触发适配器更新', () => {
+  it('保存关联内容持久化失败时应保留原编辑器内容', async () => {
+    service.openConnectionEditor('source-task', 'target-task', '旧描述', 120, 220, '旧标题', {
+      isCrossTree: true,
+      mode: 'preview',
+    } as any);
+    mockTaskOps.connectionAdapter.updateConnectionContent.mockResolvedValueOnce(false);
+
+    const saved = await service.saveConnectionContent('source-task', 'target-task', '新标题', '新描述');
+
+    expect(saved).toBe(false);
+    expect(service.connectionEditorData()).toMatchObject({
+      title: '旧标题',
+      description: '旧描述',
+    });
+  });
+
+  it('hint-only 时保存关联内容不应写入本地或触发适配器更新', async () => {
     service.openConnectionEditor('source-task', 'target-task', '旧描述', 120, 220, '旧标题', {
       isCrossTree: true,
       mode: 'preview',
@@ -381,7 +420,7 @@ describe('FlowLinkService', () => {
     hintOnlyReadOnly.set(true);
     TestBed.flushEffects();
 
-    service.saveConnectionContent('source-task', 'target-task', '新标题', '新描述');
+    await service.saveConnectionContent('source-task', 'target-task', '新标题', '新描述');
 
     expect(mockTaskOps.connectionAdapter.updateConnectionContent).not.toHaveBeenCalled();
     expect(service.connectionEditorData()).toMatchObject({
@@ -410,7 +449,7 @@ describe('FlowLinkService', () => {
     expect(service.connectionEditorData()).toBeNull();
   });
 
-  it('hint-only 时删除当前关联不应触发删除，并保持预览态编辑器', () => {
+  it('hint-only 时删除当前关联不应触发删除，并保持预览态编辑器', async () => {
     service.openConnectionEditor('source-task', 'target-task', '跨树描述', 120, 220, '依赖', {
       isCrossTree: true,
       mode: 'edit',
@@ -419,7 +458,7 @@ describe('FlowLinkService', () => {
     hintOnlyReadOnly.set(true);
     TestBed.flushEffects();
 
-    const result = service.deleteCurrentConnection();
+    const result = await service.deleteCurrentConnection();
 
     expect(result).toBe(false);
     expect(mockTaskOps.connectionAdapter.removeConnection).not.toHaveBeenCalled();
@@ -461,7 +500,7 @@ describe('FlowLinkService', () => {
     });
   });
 
-  it('hint-only 时操作菜单应先自动收起，删除入口随后保持无效', () => {
+  it('hint-only 时操作菜单应先自动收起，删除入口随后保持无效', async () => {
     service.showLinkActionMenu({
       from: 'source-task',
       to: 'target-task',
@@ -473,14 +512,43 @@ describe('FlowLinkService', () => {
     hintOnlyReadOnly.set(true);
     TestBed.flushEffects();
 
-    const result = service.deleteFromActionMenu();
+    const result = await service.deleteFromActionMenu();
 
     expect(result).toBeNull();
     expect(mockTaskOps.connectionAdapter.removeConnection).not.toHaveBeenCalled();
     expect(service.linkActionMenu()).toBeNull();
   });
 
-  it('hint-only 时删除提示应先自动收起，确认动作随后保持无效', () => {
+  it('操作菜单删除进行中时重复点击不应重复提交删除', async () => {
+    let resolveDelete!: (saved: boolean) => void;
+    mockTaskOps.connectionAdapter.removeConnection.mockReturnValueOnce(new Promise<boolean>(resolve => {
+      resolveDelete = resolve;
+    }));
+    service.showLinkActionMenu({
+      from: 'source-task',
+      to: 'target-task',
+      isCrossTree: true,
+      title: '依赖',
+      description: '跨树描述',
+    } as any, 180, 260);
+
+    const firstDelete = service.deleteFromActionMenu();
+    const secondDelete = service.deleteFromActionMenu();
+
+    expect(mockTaskOps.connectionAdapter.removeConnection).toHaveBeenCalledTimes(1);
+    await expect(secondDelete).resolves.toBeNull();
+
+    resolveDelete(true);
+
+    await expect(firstDelete).resolves.toEqual({
+      fromKey: 'source-task',
+      toKey: 'target-task',
+      isCrossTree: true,
+    });
+    expect(service.linkActionMenu()).toBeNull();
+  });
+
+  it('hint-only 时删除提示应先自动收起，确认动作随后保持无效', async () => {
     service.showLinkDeleteHint({
       from: 'source-task',
       to: 'target-task',
@@ -490,14 +558,14 @@ describe('FlowLinkService', () => {
     hintOnlyReadOnly.set(true);
     TestBed.flushEffects();
 
-    const result = service.confirmLinkDelete();
+    const result = await service.confirmLinkDelete();
 
     expect(result).toBeNull();
     expect(mockTaskOps.connectionAdapter.removeConnection).not.toHaveBeenCalled();
     expect(service.linkDeleteHint()).toBeNull();
   });
 
-  it('hint-only 时拖拽建链不应打开连接类型对话框', () => {
+  it('hint-only 时拖拽建链不应打开连接类型对话框', async () => {
     hintOnlyReadOnly.set(true);
     TestBed.flushEffects();
     mockProjectState.getTask.mockImplementation((taskId: string) => {
@@ -506,18 +574,18 @@ describe('FlowLinkService', () => {
       return null;
     });
 
-    const result = service.handleLinkGesture('source-task', 'target-task', 120, 200);
+    const result = await service.handleLinkGesture('source-task', 'target-task', 120, 200);
 
     expect(result).toBe('none');
     expect(service.linkTypeDialog()).toBeNull();
     expect(mockToast.info).toHaveBeenCalledWith('会话确认中', '创建连接暂不可用，owner 确认完成前保持只读');
   });
 
-  it('hint-only 时桌面端右键删除入口不应触发删除', () => {
+  it('hint-only 时桌面端右键删除入口不应触发删除', async () => {
     hintOnlyReadOnly.set(true);
     TestBed.flushEffects();
 
-    const result = service.deleteLink({
+    const result = await service.deleteLink({
       from: 'source-task',
       to: 'target-task',
       isCrossTree: true,
@@ -528,11 +596,11 @@ describe('FlowLinkService', () => {
     expect(mockToast.info).toHaveBeenCalledWith('会话确认中', '删除关联暂不可用，owner 确认完成前保持只读');
   });
 
-  it('hint-only 时快捷键批量删除跨树关联不应触发删除', () => {
+  it('hint-only 时快捷键批量删除跨树关联不应触发删除', async () => {
     hintOnlyReadOnly.set(true);
     TestBed.flushEffects();
 
-    service.handleDeleteCrossTreeLinks([
+    await service.handleDeleteCrossTreeLinks([
       {
         from: 'source-task',
         to: 'target-task',
@@ -544,7 +612,7 @@ describe('FlowLinkService', () => {
     expect(mockToast.info).toHaveBeenCalledWith('会话确认中', '删除关联暂不可用，owner 确认完成前保持只读');
   });
 
-  it('hint-only 时直接建立跨树关联不应显示成功提示', () => {
+  it('hint-only 时直接建立跨树关联不应显示成功提示', async () => {
     hintOnlyReadOnly.set(true);
     TestBed.flushEffects();
     mockProjectState.getTask.mockImplementation((taskId: string) => {
@@ -553,11 +621,74 @@ describe('FlowLinkService', () => {
       return null;
     });
 
-    const result = service.handleLinkGesture('source-task', 'target-task', 120, 200);
+    const result = await service.handleLinkGesture('source-task', 'target-task', 120, 200);
 
     expect(result).toBe('none');
     expect(mockTaskOps.connectionAdapter.addCrossTreeConnection).not.toHaveBeenCalled();
     expect(mockToast.info).toHaveBeenCalledWith('会话确认中', '创建连接暂不可用，owner 确认完成前保持只读');
     expect(mockToast.success).not.toHaveBeenCalledWith('已创建关联', '目标任务已有父级，已创建关联连接');
+  });
+
+  it('confirmCrossTreeLink 在本地持久化失败时应保留对话框并返回 false', async () => {
+    mockProjectState.getTask.mockImplementation((taskId: string) => {
+      if (taskId === 'source-task') return { id: 'source-task', title: '源任务', stage: 1, parentId: null };
+      if (taskId === 'target-task') return { id: 'target-task', title: '目标任务', stage: 2, parentId: 'parent-task' };
+      return null;
+    });
+    service.showLinkTypeDialog('source-task', 'target-task', 120, 200);
+    mockTaskOps.connectionAdapter.addCrossTreeConnection.mockResolvedValueOnce(false);
+
+    const result = await service.confirmCrossTreeLink();
+
+    expect(result).toBe(false);
+    expect(service.linkTypeDialog()).toMatchObject({
+      sourceId: 'source-task',
+      targetId: 'target-task',
+    });
+  });
+
+  it('dispose 应清空 root 单例上的临时连接 UI 状态，避免重建 Flow 视图时复用旧浮层', () => {
+    service.toggleLinkMode();
+    service.linkSourceTask.set({ id: 'source-task', title: '源任务' } as any);
+    service.showLinkTypeDialog('source-task', 'target-task', 120, 200);
+    service.openConnectionEditor('source-task', 'target-task', '旧描述', 120, 220, '旧标题', {
+      isCrossTree: true,
+      mode: 'edit',
+    } as any);
+    service.showLinkDeleteHint({ from: 'source-task', to: 'target-task', isCrossTree: true } as any, 200, 280);
+    service.showLinkActionMenu({ from: 'source-task', to: 'target-task', isCrossTree: true } as any, 180, 260);
+
+    service.dispose();
+    service.activate();
+
+    expect(service.isLinkMode()).toBe(false);
+    expect(service.linkSourceTask()).toBeNull();
+    expect(service.linkTypeDialog()).toBeNull();
+    expect(service.connectionEditorData()).toBeNull();
+    expect(service.connectionEditorPos()).toEqual({ x: 0, y: 0 });
+    expect(service.linkDeleteHint()).toBeNull();
+    expect(service.linkActionMenu()).toBeNull();
+  });
+
+  it('dispose 后快速重新激活时旧 textarea resize 定时器不应操作新视图 DOM', () => {
+    const textarea = document.createElement('textarea');
+    textarea.id = 'connectionDescTextarea';
+    Object.defineProperty(textarea, 'scrollHeight', { configurable: true, value: 88 });
+    document.body.appendChild(textarea);
+
+    try {
+      service.openConnectionEditor('source-task', 'target-task', '旧描述', 120, 220, '旧标题', {
+        isCrossTree: true,
+        mode: 'edit',
+      } as any);
+
+      service.dispose();
+      service.activate();
+      vi.advanceTimersByTime(50);
+
+      expect(textarea.style.height).toBe('');
+    } finally {
+      textarea.remove();
+    }
   });
 });

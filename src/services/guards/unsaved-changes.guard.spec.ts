@@ -23,7 +23,7 @@ import {
   ROUTE_LEAVE_PROTECTION_CONFIG,
   CanLeave
 } from './unsaved-changes.guard';
-import { SyncStateService } from '../../app/core/services/sync/sync-state.service';
+import { SyncStateService } from '../../core-bridge';
 import { LoggerService } from '../logger.service';
 import { BeforeUnloadManagerService } from '../before-unload-manager.service';
 import { ActivatedRouteSnapshot, RouterStateSnapshot } from '@angular/router';

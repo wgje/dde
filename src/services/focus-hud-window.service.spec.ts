@@ -136,4 +136,74 @@ describe('FocusHudWindowService', () => {
     expect(service.isActive()).toBe(false);
     expect(closeSpy).toHaveBeenCalledTimes(1);
   });
+
+  it('does not mount a PiP HUD when close wins the pending window request race', async () => {
+    let resolveWindow: (windowRef: Window) => void = () => undefined;
+    const pipDocument = document.implementation.createHTMLDocument('pip');
+    Object.defineProperty(pipDocument, 'defaultView', {
+      configurable: true,
+      value: window,
+    });
+    const closeSpy = vi.fn(() => {
+      (pipWindow as unknown as { closed: boolean }).closed = true;
+    });
+    const pipWindow = {
+      document: pipDocument,
+      closed: false,
+      focus: vi.fn(),
+      close: closeSpy,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    } as unknown as Window;
+    const requestWindow = vi.fn(
+      () =>
+        new Promise<Window>(resolve => {
+          resolveWindow = resolve;
+        })
+    );
+
+    Object.defineProperty(window, 'documentPictureInPicture', {
+      configurable: true,
+      value: { requestWindow },
+    });
+
+    const openPromise = service.open();
+    await service.close();
+    resolveWindow(pipWindow);
+
+    await expect(openPromise).resolves.toBe(false);
+    expect(service.isActive()).toBe(false);
+    expect(closeSpy).toHaveBeenCalledTimes(1);
+    expect(pipDocument.body.querySelector('[data-testid="dock-v3-status-machine-pip"]')).toBeNull();
+    expect(pipWindow.addEventListener).not.toHaveBeenCalled();
+  });
+
+  it('does not request a PiP HUD window after service destroy', async () => {
+    const pipDocument = document.implementation.createHTMLDocument('pip');
+    Object.defineProperty(pipDocument, 'defaultView', {
+      configurable: true,
+      value: window,
+    });
+    const pipWindow = {
+      document: pipDocument,
+      closed: false,
+      focus: vi.fn(),
+      close: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    } as unknown as Window;
+    const requestWindow = vi.fn().mockResolvedValue(pipWindow);
+
+    TestBed.resetTestingModule();
+    Object.defineProperty(window, 'documentPictureInPicture', {
+      configurable: true,
+      value: { requestWindow },
+    });
+
+    await expect(service.open()).resolves.toBe(false);
+
+    expect(requestWindow).not.toHaveBeenCalled();
+    expect(service.isActive()).toBe(false);
+    expect(pipDocument.body.querySelector('[data-testid="dock-v3-status-machine-pip"]')).toBeNull();
+  });
 });

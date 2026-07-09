@@ -17,8 +17,8 @@
  * 3. 都不可用时：每标签页只能 single-flush（基于内存 mutex），
  *    并上报 Sentry breadcrumb，不可作为生产模式。
  *
- * 默认 flag：`NG_APP_SYNC_LEASE_ENABLED=false`。本 PR 仅落服务与 spec，
- * 切换 RetryQueue/ActionQueue 真实写入路径必须由独立 PR 完成并配套 e2e。
+ * 默认 flag：未设置或 `NG_APP_SYNC_LEASE_ENABLED=true` 时启用。
+ * 只有显式 `NG_APP_SYNC_LEASE_ENABLED=false` 才降级到 memory-only。
  *
  * 【非边界】Web Locks 按 origin 隔离，**不能**解决新旧 origin 双写。
  *           origin 迁移仍依赖 §7 Canonical Origin Gate 与 export-only 策略。
@@ -79,7 +79,7 @@ export class SyncWriterLeaseService {
       ? crypto.randomUUID()
       : `tab-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
-  /** Feature flag：默认关闭。 */
+  /** Feature flag：默认启用，显式 false 才关闭。 */
   private readonly featureEnabled = signal<boolean>(this.readFeatureFlag());
 
   /** 当前是否持有 lease（仅本服务 instance 内可信，跨标签需走 lockName）。 */
@@ -111,7 +111,7 @@ export class SyncWriterLeaseService {
    */
   async requestLease(options: LeaseRequestOptions): Promise<LeaseHandle> {
     if (!this.featureEnabled()) {
-      // 默认关闭：返回 noop lease，调用方不应基于 mode 做强一致假设。
+      // 显式关闭：返回 noop lease，调用方不应基于 mode 做强一致假设。
       const noop = this.buildNoopHandle(options);
       this.holding.set(noop);
       return noop;
@@ -128,7 +128,7 @@ export class SyncWriterLeaseService {
         return await this.acquireViaWebLocks(lockName, options);
       } catch (err) {
         if (this.isAbortError(err)) throw err;
-        this.logger.warn(`web_locks_failed: ${(err as Error)?.message ?? err}; 降级到 IndexedDB lease`);
+        this.warn(`web_locks_failed: ${(err as Error)?.message ?? err}; 降级到 IndexedDB lease`);
         this.addLeaseBreadcrumb('sync_writer_lease_fallback', 'warning', lockName, 'idb-lease', {
           from: 'weblocks',
           reason: (err as Error)?.message ?? String(err),
@@ -142,7 +142,7 @@ export class SyncWriterLeaseService {
       return await this.acquireViaIndexedDb(lockName, options);
     } catch (err) {
       if (this.isAbortError(err)) throw err;
-      this.logger.warn(`idb_lease_failed: ${(err as Error)?.message ?? err}; 降级到 memory-only`);
+      this.warn(`idb_lease_failed: ${(err as Error)?.message ?? err}; 降级到 memory-only`);
       const noop = this.buildNoopHandle(options, 'memory-only');
       this.holding.set(noop);
       this.addLeaseBreadcrumb('sync_writer_lease_fallback', 'warning', noop.lockName, 'memory-only', {
@@ -215,9 +215,12 @@ export class SyncWriterLeaseService {
           mode: 'idb-lease',
           release: async () => {
             clearInterval(heartbeatTimer);
-            await this.releaseIndexedDbLease(db, lockName);
-            this.holding.set(null);
-            this.addLeaseBreadcrumb('sync_writer_lease_released', 'info', lockName, 'idb-lease');
+            try {
+              await this.releaseIndexedDbLease(db, lockName);
+            } finally {
+              this.holding.set(null);
+              this.addLeaseBreadcrumb('sync_writer_lease_released', 'info', lockName, 'idb-lease');
+            }
           },
         };
         this.holding.set(handle);
@@ -261,7 +264,7 @@ export class SyncWriterLeaseService {
   private startHeartbeat(db: IDBDatabase, lockName: string, ttlMs: number): ReturnType<typeof setInterval> {
     return setInterval(() => {
       void this.heartbeatIndexedDbLease(db, lockName, ttlMs).catch(err => {
-        this.logger.debug(`lease_heartbeat_failed: ${(err as Error)?.message ?? err}`);
+        this.debug(`lease_heartbeat_failed: ${(err as Error)?.message ?? err}`);
       });
     }, HEARTBEAT_INTERVAL_MS);
   }
@@ -352,17 +355,49 @@ export class SyncWriterLeaseService {
     mode: LeaseAcquisitionMode,
     extra: Record<string, unknown> = {},
   ): void {
-    this.sentryLazyLoader.addBreadcrumb({
-      category: 'sync.lease',
-      level,
-      message,
-      data: {
-        lockName,
+    try {
+      this.sentryLazyLoader.addBreadcrumb({
+        category: 'sync.lease',
+        level,
+        message,
+        data: {
+          lockName,
+          mode,
+          tabId: this.tabId,
+          ...extra,
+        },
+      });
+    } catch (err) {
+      this.warn('sync_writer_lease_breadcrumb_failed', {
+        message,
         mode,
-        tabId: this.tabId,
-        ...extra,
-      },
-    });
+        reason: (err as Error)?.message ?? String(err),
+      });
+    }
+  }
+
+  private warn(message: string, context?: unknown): void {
+    try {
+      if (context === undefined) {
+        this.logger.warn(message);
+        return;
+      }
+      this.logger.warn(message, context);
+    } catch {
+      // Lease fallback and release paths must not depend on observability sinks.
+    }
+  }
+
+  private debug(message: string, context?: unknown): void {
+    try {
+      if (context === undefined) {
+        this.logger.debug(message);
+        return;
+      }
+      this.logger.debug(message, context);
+    } catch {
+      // Heartbeat timers must not surface logging sink failures as async errors.
+    }
   }
 
   private isAbortError(err: unknown): boolean {
@@ -384,6 +419,6 @@ export class SyncWriterLeaseService {
 
   private readFeatureFlag(): boolean {
     const env = environment as unknown as SyncLeaseEnvironmentSlice;
-    return env.syncLeaseEnabled === true;
+    return env.syncLeaseEnabled !== false;
   }
 }

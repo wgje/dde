@@ -17,50 +17,68 @@ import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 @Injectable({ providedIn: 'root' })
 export class StartupBreadcrumbService {
   private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
+  private startupBreadcrumbRecorded = false;
+  private listenersAttached = false;
 
   private readonly flowRestoreListener = (event: Event) => {
-    const detail = (event as CustomEvent<{ mode?: 'applied' | 'degraded'; reason?: string; projectId?: string }>).detail;
-    const mode = detail?.mode === 'applied' ? 'applied' : 'degraded';
-    this.sentryLazyLoader.addBreadcrumb({
-      category: 'startup',
-      message: mode === 'applied' ? 'flow.restore.applied' : 'flow.restore.degraded',
-      level: 'info',
-      data: {
-        mode,
-        reason: detail?.reason ?? 'unknown',
-        projectId: detail?.projectId ?? null,
-      },
-    });
+    try {
+      const detail = (event as CustomEvent<{ mode?: 'applied' | 'degraded'; reason?: string; projectId?: string }>).detail;
+      const mode = detail?.mode === 'applied' ? 'applied' : 'degraded';
+      this.sentryLazyLoader.addBreadcrumb({
+        category: 'startup',
+        message: mode === 'applied' ? 'flow.restore.applied' : 'flow.restore.degraded',
+        level: 'info',
+        data: {
+          mode,
+          reason: detail?.reason ?? 'unknown',
+          projectId: detail?.projectId ?? null,
+        },
+      });
+    } catch {
+      // Observability failures must not break the flow restore event path.
+    }
   };
 
   private readonly syncPulseListener = (event: Event) => {
-    const detail = (event as CustomEvent<{ status?: string; reason?: string; skipReason?: string }>).detail;
-    this.sentryLazyLoader.addBreadcrumb({
-      category: 'sync',
-      message: 'sync.pulse.reason',
-      level: 'info',
-      data: {
-        status: detail?.status ?? 'unknown',
-        reason: detail?.reason ?? 'unknown',
-        skipReason: detail?.skipReason ?? null,
-      },
-    });
+    try {
+      const detail = (event as CustomEvent<{ status?: string; reason?: string; skipReason?: string }>).detail;
+      this.sentryLazyLoader.addBreadcrumb({
+        category: 'sync',
+        message: 'sync.pulse.reason',
+        level: 'info',
+        data: {
+          status: detail?.status ?? 'unknown',
+          reason: detail?.reason ?? 'unknown',
+          skipReason: detail?.skipReason ?? null,
+        },
+      });
+    } catch {
+      // Observability failures must not break the sync pulse event path.
+    }
   };
 
   /** 记录一次性启动 breadcrumb 并注册 flow-restore / sync-pulse 事件监听。 */
   initialize(): void {
-    this.recordStartupPreloadBreadcrumb();
-    this.recordModulePreloadModeBreadcrumb();
     if (typeof window === 'undefined') return;
+    if (!this.startupBreadcrumbRecorded) {
+      this.recordStartupPreloadBreadcrumb();
+      this.recordModulePreloadModeBreadcrumb();
+      this.startupBreadcrumbRecorded = true;
+    }
+    if (this.listenersAttached) return;
     window.addEventListener('nanoflow:flow-restore-status', this.flowRestoreListener as EventListener);
     window.addEventListener('nanoflow:sync-pulse', this.syncPulseListener as EventListener);
+    this.listenersAttached = true;
   }
 
   /** 注销事件监听。 */
   teardown(): void {
-    if (typeof window === 'undefined') return;
-    window.removeEventListener('nanoflow:flow-restore-status', this.flowRestoreListener as EventListener);
-    window.removeEventListener('nanoflow:sync-pulse', this.syncPulseListener as EventListener);
+    if (!this.listenersAttached) return;
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('nanoflow:flow-restore-status', this.flowRestoreListener as EventListener);
+      window.removeEventListener('nanoflow:sync-pulse', this.syncPulseListener as EventListener);
+    }
+    this.listenersAttached = false;
   }
 
   private recordStartupPreloadBreadcrumb(): void {

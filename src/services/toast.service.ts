@@ -1,4 +1,4 @@
-import { Injectable, signal, computed, untracked } from '@angular/core';
+import { Injectable, signal, computed, untracked, OnDestroy } from '@angular/core';
 import { TOAST_CONFIG } from '../config/ui.config';
 
 /**
@@ -53,7 +53,7 @@ export interface ToastMessage {
 @Injectable({
   providedIn: 'root'
 })
-export class ToastService {
+export class ToastService implements OnDestroy {
   /** 当前显示的 Toast 消息列表 */
   private toasts = signal<ToastMessage[]>([]);
   /** Toast 自动关闭定时器，避免重复消息创建时出现信号反馈风暴 */
@@ -183,7 +183,12 @@ export class ToastService {
     ));
     
     if (existingToast) {
-      // 相同消息已存在：仅重置关闭计时，不再删除重建，避免 signal 反馈循环
+      // 相同消息已存在：保留 id 并刷新可执行 action，避免点击到旧闭包。
+      this.toasts.update(current => current.map(item =>
+        item.id === existingToast.id
+          ? { ...item, action }
+          : item
+      ));
       this.refreshDismissTimer(existingToast.id, duration);
       return;
     }
@@ -287,5 +292,9 @@ export class ToastService {
   dismissAll(): void {
     this.clearAllDismissTimers();
     this.toasts.set([]);
+  }
+
+  ngOnDestroy(): void {
+    this.clearAllDismissTimers();
   }
 }

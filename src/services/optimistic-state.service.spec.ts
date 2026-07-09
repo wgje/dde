@@ -234,6 +234,30 @@ describe('OptimisticStateService', () => {
     });
 
     describe('restoreTasksFromSnapshot（窄化回滚）', () => {
+      it('可以读取快照中的任务副本且不暴露可变引用', () => {
+        mockProjectsSignal.update(projects => projects.map(project => ({
+          ...project,
+          tasks: project.tasks.map(task => task.id === 'task-1'
+            ? { ...task, updatedAt: '2026-04-01T00:00:00.000Z' }
+            : task),
+        })));
+        const snapshot = service.createSnapshot('task-delete', '删除任务');
+
+        mockProjectsSignal.update(projects => projects.map(project => ({
+          ...project,
+          tasks: project.tasks.map(task => task.id === 'task-1'
+            ? { ...task, title: '乐观删除后的标题', updatedAt: '2026-04-01T00:00:03.000Z' }
+            : task),
+        })));
+
+        const snapshotTask = service.getTaskFromSnapshot(snapshot.id, 'task-1');
+        expect(snapshotTask?.updatedAt).toBe('2026-04-01T00:00:00.000Z');
+        expect(snapshotTask?.title).toBe('任务1');
+
+        snapshotTask!.title = '外部不应改到快照';
+        expect(service.getTaskFromSnapshot(snapshot.id, 'task-1')?.title).toBe('任务1');
+      });
+
       it('只把指定任务恢复到快照状态，其它任务保持现状', () => {
         // 模拟"删除前快照"：task-1 没有 deletedAt，task-2 已经被早期删除了（带 deletedAt）
         mockProjectsSignal.update(projects => projects.map(p => ({
@@ -435,6 +459,27 @@ describe('OptimisticStateService', () => {
         service.reset();
 
         expect(service.activeSnapshotCount()).toBe(0);
+      });
+
+      it('cleanup timer id 为 0 时 reset 也应清理旧 timer', () => {
+        const clearIntervalSpy = vi.spyOn(globalThis, 'clearInterval')
+          .mockImplementation(() => undefined);
+        (service as any).cleanupTimer = 0;
+
+        service.reset();
+
+        expect(clearIntervalSpy).toHaveBeenCalledWith(0);
+      });
+    });
+
+    describe('startCleanupTimer', () => {
+      it('cleanup timer id 为 0 时不应重复启动新的清理 timer', () => {
+        const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
+        (service as any).cleanupTimer = 0;
+
+        (service as any).startCleanupTimer();
+
+        expect(setIntervalSpy).not.toHaveBeenCalled();
       });
     });
   });

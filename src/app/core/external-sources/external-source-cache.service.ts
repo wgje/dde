@@ -3,12 +3,18 @@ import { del, get, keys, set, update } from "idb-keyval";
 import { AuthService } from "../../../services/auth.service";
 import { AUTH_CONFIG } from "../../../config/auth.config";
 import { SIYUAN_CONFIG } from "../../../config/siyuan.config";
+import { createSyncOperationId, isSyncOperationId } from "../../../utils/sync-operation-id";
 import type {
   ExternalSourceLink,
   LocalSiyuanPreviewCache,
   PendingExternalSourceLink,
+  PendingExternalSourceLinkSyncState,
   SiyuanLocalConfig,
 } from "./external-source.model";
+
+const LOCAL_STORAGE_LINKS_PREFIX = "nanoflow.externalSource.links.";
+const LOCAL_STORAGE_PENDING_PREFIX = "nanoflow.externalSource.pending.";
+const LOCAL_STORAGE_DEAD_LETTERS_PREFIX = "nanoflow.externalSource.deadLetters.";
 
 @Injectable({ providedIn: "root" })
 export class ExternalSourceCacheService {
@@ -42,18 +48,58 @@ export class ExternalSourceCacheService {
     return `external-source-deadletters:${userId}`;
   }
 
-  async loadLinks(): Promise<ExternalSourceLink[]> {
-    const value = await get<ExternalSourceLink[]>(this.linksKey());
-    return Array.isArray(value) ? value : [];
+  async loadLinks(userId = this.ownerId()): Promise<ExternalSourceLink[]> {
+    let indexedLinks: ExternalSourceLink[] = [];
+    try {
+      indexedLinks = this.normalizeLinks(await get<ExternalSourceLink[]>(this.linksKey(userId)));
+    } catch {
+      indexedLinks = [];
+    }
+
+    return this.mergeLinks(indexedLinks, this.readLinksMirror(userId));
   }
 
-  async saveLinks(links: ExternalSourceLink[]): Promise<void> {
-    await set(this.linksKey(), links);
+  async saveLinks(links: ExternalSourceLink[], userId = this.ownerId()): Promise<void> {
+    try {
+      await set(this.linksKey(userId), links);
+      this.writeLinksMirror(userId, links);
+    } catch (error) {
+      if (!this.writeLinksMirror(userId, links)) {
+        throw error;
+      }
+    }
   }
 
   async loadPendingLinks(): Promise<PendingExternalSourceLink[]> {
-    const value = await get<PendingExternalSourceLink[]>(this.pendingLinksKey());
-    return Array.isArray(value) ? value.filter((entry) => entry?.link?.id) : [];
+    let indexedPending: PendingExternalSourceLink[] = [];
+    try {
+      indexedPending = this.normalizePendingEntries(
+        await get<PendingExternalSourceLink[]>(this.pendingLinksKey()),
+      );
+    } catch {
+      indexedPending = [];
+    }
+
+    return this.mergePendingEntries(indexedPending, this.readPendingMirror())
+      .filter((entry) => entry.syncState !== "dead_letter");
+  }
+
+  private normalizePendingEntry(
+    entry: Partial<PendingExternalSourceLink> & { link: ExternalSourceLink },
+    syncState: PendingExternalSourceLinkSyncState = entry.syncState ?? "pending_sync",
+  ): PendingExternalSourceLink {
+    const now = Date.now();
+    return {
+      link: entry.link,
+      operationId: isSyncOperationId(entry.operationId)
+        ? entry.operationId
+        : createSyncOperationId(),
+      localCommittedAt: typeof entry.localCommittedAt === "number" ? entry.localCommittedAt : now,
+      syncState,
+      retryCount: entry.retryCount ?? 0,
+      lastTriedAt: entry.lastTriedAt,
+      lastErrorCode: entry.lastErrorCode,
+    };
   }
 
   /**
@@ -63,71 +109,149 @@ export class ExternalSourceCacheService {
   async upsertPendingLink(
     link: ExternalSourceLink,
     options: { resetRetryCount?: boolean } = {},
-  ): Promise<void> {
-    await update<PendingExternalSourceLink[]>(this.pendingLinksKey(), (current) => {
-      const list = Array.isArray(current) ? current : [];
-      const next = new Map(list.map((entry) => [entry.link.id, entry]));
-      const previous = next.get(link.id);
-      next.set(link.id, {
-        link,
-        retryCount: options.resetRetryCount ? 0 : previous?.retryCount ?? 0,
-        lastTriedAt: previous?.lastTriedAt,
-        lastErrorCode: previous?.lastErrorCode,
+  ): Promise<PendingExternalSourceLink> {
+    const userId = this.ownerId();
+    const mirrorNext = this.upsertPendingLinkIntoList(
+      this.readPendingMirror(userId),
+      link,
+      options,
+    );
+    const mirrorEntry = this.findPendingEntry(mirrorNext, link.id);
+    if (!mirrorEntry) {
+      throw new Error(`Pending external source link ${link.id} was not enqueued`);
+    }
+
+    try {
+      let persistedNext = mirrorNext;
+      let persistedEntry = mirrorEntry;
+      await update<PendingExternalSourceLink[]>(this.pendingLinksKey(userId), current => {
+        const indexedNext = this.mergePendingEntries(
+          this.normalizePendingEntries(current),
+          mirrorNext,
+        );
+        persistedNext = indexedNext;
+        persistedEntry = this.findPendingEntry(indexedNext, link.id) ?? persistedEntry;
+        this.writePendingMirror(userId, indexedNext);
+        return indexedNext;
       });
-      return Array.from(next.values());
-    });
+      this.writePendingMirror(userId, persistedNext);
+      return persistedEntry;
+    } catch (error) {
+      if (this.writePendingMirror(userId, mirrorNext)) {
+        return mirrorEntry;
+      }
+      throw error;
+    }
   }
 
   async removePendingLink(linkId: string): Promise<void> {
-    await update<PendingExternalSourceLink[]>(this.pendingLinksKey(), (current) => {
-      if (!Array.isArray(current)) return [];
-      return current.filter((entry) => entry.link.id !== linkId);
-    });
+    const userId = this.ownerId();
+    const mirrorNext = this.readPendingMirror(userId).filter(entry => entry.link.id !== linkId);
+
+    try {
+      let persistedNext = mirrorNext;
+      await update<PendingExternalSourceLink[]>(this.pendingLinksKey(userId), current => {
+        const indexedNext = this.mergePendingEntries(
+          this.normalizePendingEntries(current),
+          mirrorNext,
+        ).filter(entry => entry.link.id !== linkId);
+        persistedNext = indexedNext;
+        this.writePendingMirror(userId, indexedNext);
+        return indexedNext;
+      });
+      this.writePendingMirror(userId, persistedNext);
+    } catch (error) {
+      if (this.writePendingMirror(userId, mirrorNext)) {
+        return;
+      }
+      throw error;
+    }
   }
 
   /**
    * 标记一次推送失败，递增 retryCount。超过 PENDING_MAX_RETRIES 则迁出到死信表。
    */
   async recordPendingFailure(linkId: string, errorCode: string): Promise<void> {
-    let movedToDeadLetter: PendingExternalSourceLink | null = null;
-    await update<PendingExternalSourceLink[]>(this.pendingLinksKey(), (current) => {
-      const list = Array.isArray(current) ? current : [];
-      const next: PendingExternalSourceLink[] = [];
-      for (const entry of list) {
-        if (entry.link.id !== linkId) {
-          next.push(entry);
-          continue;
-        }
-        const updated: PendingExternalSourceLink = {
-          link: entry.link,
-          retryCount: (entry.retryCount ?? 0) + 1,
-          lastTriedAt: new Date().toISOString(),
-          lastErrorCode: errorCode,
-        };
-        if (updated.retryCount > SIYUAN_CONFIG.PENDING_MAX_RETRIES) {
-          movedToDeadLetter = updated;
-        } else {
-          next.push(updated);
-        }
+    const userId = this.ownerId();
+    const mirrorCurrent = this.readPendingMirror(userId);
+    const outcome = this.applyPendingFailureMutation(mirrorCurrent, linkId, errorCode);
+    const mirrorNext = outcome.nextPendingLinks;
+    const movedToDeadLetter = outcome.movedToDeadLetter;
+
+    try {
+      let persistedNext = mirrorNext;
+      let indexedMovedToDeadLetter: PendingExternalSourceLink | null = null;
+      await update<PendingExternalSourceLink[]>(this.pendingLinksKey(userId), current => {
+        const indexedOutcome = this.applyPendingFailureMutation(
+          this.normalizePendingEntries(current),
+          linkId,
+          errorCode,
+        );
+        const indexedNext = this.mergePendingEntries(
+          indexedOutcome.nextPendingLinks,
+          mirrorNext,
+        );
+        persistedNext = indexedNext;
+        indexedMovedToDeadLetter = indexedOutcome.movedToDeadLetter;
+        this.writePendingMirror(userId, indexedNext);
+        return indexedNext;
+      });
+      this.writePendingMirror(userId, persistedNext);
+      const deadLetter = movedToDeadLetter ?? indexedMovedToDeadLetter;
+      if (deadLetter) {
+        await this.appendDeadLetter(deadLetter, userId);
       }
-      return next;
-    });
-    if (movedToDeadLetter) await this.appendDeadLetter(movedToDeadLetter);
+    } catch (error) {
+      if (this.writePendingMirror(userId, mirrorNext)) {
+        if (movedToDeadLetter) {
+          await this.appendDeadLetter(movedToDeadLetter, userId);
+        }
+        return;
+      }
+      throw error;
+    }
   }
 
   async loadDeadLetters(): Promise<PendingExternalSourceLink[]> {
-    const value = await get<PendingExternalSourceLink[]>(this.deadLettersKey());
-    return Array.isArray(value) ? value : [];
+    const userId = this.ownerId();
+    let indexedDeadLetters: PendingExternalSourceLink[] = [];
+    try {
+      indexedDeadLetters = this.normalizePendingEntries(
+        await get<PendingExternalSourceLink[]>(this.deadLettersKey(userId)),
+        "dead_letter",
+      );
+    } catch {
+      indexedDeadLetters = [];
+    }
+
+    return this.mergePendingEntries(indexedDeadLetters, this.readDeadLetterMirror(userId), "dead_letter")
+      .filter(entry => entry.syncState === "dead_letter");
   }
 
-  private async appendDeadLetter(entry: PendingExternalSourceLink): Promise<void> {
-    await update<PendingExternalSourceLink[]>(this.deadLettersKey(), (current) => {
-      const list = Array.isArray(current) ? current : [];
-      // 同 id 只保留最后一次失败记录，避免无界增长。
-      const next = new Map(list.map((item) => [item.link.id, item]));
-      next.set(entry.link.id, entry);
-      return Array.from(next.values());
-    });
+  private async appendDeadLetter(entry: PendingExternalSourceLink, userId = this.ownerId()): Promise<void> {
+    const mirrorNext = this.mergePendingEntries(
+      this.readDeadLetterMirror(userId),
+      [entry],
+      "dead_letter",
+    );
+
+    try {
+      await update<PendingExternalSourceLink[]>(this.deadLettersKey(userId), current => {
+        const indexedNext = this.mergePendingEntries(
+          this.normalizePendingEntries(current, "dead_letter"),
+          mirrorNext,
+          "dead_letter",
+        );
+        this.writeDeadLetterMirror(userId, indexedNext);
+        return indexedNext;
+      });
+      this.writeDeadLetterMirror(userId, mirrorNext);
+    } catch (error) {
+      if (this.writeDeadLetterMirror(userId, mirrorNext)) {
+        return;
+      }
+      throw error;
+    }
   }
 
   async getPreview(
@@ -138,6 +262,10 @@ export class ExternalSourceCacheService {
       this.previewKey(linkId, blockId),
     );
     if (value?.linkId === linkId && value.blockId === blockId) return value;
+
+    if (this.ownerId() !== AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+      return null;
+    }
 
     const legacy = await get<LocalSiyuanPreviewCache>(
       this.legacyPreviewKey(linkId, blockId),
@@ -233,4 +361,264 @@ export class ExternalSourceCacheService {
     const time = new Date(value.fetchedAt).getTime();
     return Number.isFinite(time) ? time : 0;
   }
+
+  private normalizeLinks(
+    links: ExternalSourceLink[] | null | undefined,
+  ): ExternalSourceLink[] {
+    return Array.isArray(links)
+      ? links.filter((link): link is ExternalSourceLink => this.isExternalSourceLink(link))
+      : [];
+  }
+
+  private readLinksMirror(userId = this.ownerId()): ExternalSourceLink[] {
+    return this.readLocalStorageArray<ExternalSourceLink>(this.linksMirrorKey(userId))
+      .filter((link): link is ExternalSourceLink => this.isExternalSourceLink(link));
+  }
+
+  private writeLinksMirror(userId = this.ownerId(), links: ExternalSourceLink[]): boolean {
+    return this.writeLocalStorageArray(this.linksMirrorKey(userId), this.normalizeLinks(links));
+  }
+
+  private mergeLinks(
+    indexedLinks: ExternalSourceLink[],
+    mirroredLinks: ExternalSourceLink[],
+  ): ExternalSourceLink[] {
+    const next = new Map<string, ExternalSourceLink>();
+    for (const link of [...mirroredLinks, ...indexedLinks]) {
+      if (!link?.id) continue;
+      const current = next.get(link.id);
+      if (!current) {
+        next.set(link.id, link);
+        continue;
+      }
+
+      const currentTime = new Date(current.updatedAt).getTime();
+      const nextTime = new Date(link.updatedAt).getTime();
+      if (Number.isFinite(nextTime) && (!Number.isFinite(currentTime) || nextTime >= currentTime)) {
+        next.set(link.id, link);
+      }
+    }
+
+    return [...next.values()];
+  }
+
+  private normalizePendingEntries(
+    entries: Array<PendingExternalSourceLink | (Partial<PendingExternalSourceLink> & { link?: ExternalSourceLink })> | null | undefined,
+    defaultSyncState: PendingExternalSourceLinkSyncState = "pending_sync",
+  ): PendingExternalSourceLink[] {
+    return Array.isArray(entries)
+      ? entries
+        .filter((entry): entry is Partial<PendingExternalSourceLink> & { link: ExternalSourceLink } =>
+          this.isPendingExternalSourceLink(entry))
+        .map(entry => this.normalizePendingEntry({
+          ...entry,
+          link: entry.link,
+        }, entry.syncState ?? defaultSyncState))
+      : [];
+  }
+
+  private readPendingMirror(userId = this.ownerId()): PendingExternalSourceLink[] {
+    return this.normalizePendingEntries(
+      this.readLocalStorageArray<PendingExternalSourceLink>(this.pendingMirrorKey(userId)),
+    );
+  }
+
+  private writePendingMirror(userId: string, entries: PendingExternalSourceLink[]): boolean {
+    return this.writeLocalStorageArray(this.pendingMirrorKey(userId), entries);
+  }
+
+  private mergePendingEntries(
+    indexedPending: PendingExternalSourceLink[],
+    mirroredPending: PendingExternalSourceLink[],
+    defaultSyncState: PendingExternalSourceLinkSyncState = "pending_sync",
+  ): PendingExternalSourceLink[] {
+    const next = new Map<string, PendingExternalSourceLink>();
+    for (const entry of [...mirroredPending, ...indexedPending]) {
+      if (!entry?.link?.id) continue;
+      const normalized = this.normalizePendingEntry(
+        { ...entry, link: entry.link },
+        entry.syncState ?? defaultSyncState,
+      );
+      const current = next.get(normalized.link.id);
+      if (!current || this.shouldPreferPendingEntry(normalized, current)) {
+        next.set(normalized.link.id, normalized);
+      }
+    }
+
+    return [...next.values()];
+  }
+
+  private shouldPreferPendingEntry(
+    candidate: PendingExternalSourceLink,
+    current: PendingExternalSourceLink,
+  ): boolean {
+    const candidateCommittedAt = candidate.localCommittedAt ?? 0;
+    const currentCommittedAt = current.localCommittedAt ?? 0;
+    if (candidateCommittedAt !== currentCommittedAt) {
+      return candidateCommittedAt > currentCommittedAt;
+    }
+
+    const candidateRetryCount = candidate.retryCount ?? 0;
+    const currentRetryCount = current.retryCount ?? 0;
+    if (candidateRetryCount !== currentRetryCount) {
+      return candidateRetryCount > currentRetryCount;
+    }
+
+    const candidateTriedAt = this.timeValue(candidate.lastTriedAt);
+    const currentTriedAt = this.timeValue(current.lastTriedAt);
+    if (candidateTriedAt !== currentTriedAt) {
+      return candidateTriedAt > currentTriedAt;
+    }
+
+    return candidate.syncState === "dead_letter" && current.syncState !== "dead_letter";
+  }
+
+  private readDeadLetterMirror(userId = this.ownerId()): PendingExternalSourceLink[] {
+    return this.normalizePendingEntries(
+      this.readLocalStorageArray<PendingExternalSourceLink>(this.deadLettersMirrorKey(userId)),
+      "dead_letter",
+    );
+  }
+
+  private writeDeadLetterMirror(userId: string, entries: PendingExternalSourceLink[]): boolean {
+    return this.writeLocalStorageArray(this.deadLettersMirrorKey(userId), entries);
+  }
+
+  private isPendingExternalSourceLink(
+    value: unknown,
+  ): value is Partial<PendingExternalSourceLink> & { link: ExternalSourceLink } {
+    if (!value || typeof value !== "object") {
+      return false;
+    }
+
+    const entry = value as Partial<PendingExternalSourceLink> & { link?: ExternalSourceLink };
+    return !!entry.link && this.isExternalSourceLink(entry.link);
+  }
+
+  private isExternalSourceLink(value: unknown): value is ExternalSourceLink {
+    if (!value || typeof value !== "object") {
+      return false;
+    }
+
+    const link = value as Partial<ExternalSourceLink>;
+    return typeof link.id === "string"
+      && link.id.length > 0
+      && typeof link.taskId === "string"
+      && link.taskId.length > 0
+      && typeof link.sourceType === "string"
+      && typeof link.targetId === "string"
+      && typeof link.uri === "string"
+      && typeof link.sortOrder === "number"
+      && typeof link.createdAt === "string"
+      && typeof link.updatedAt === "string";
+  }
+
+  private readLocalStorageArray<T>(key: string): T[] {
+    if (typeof localStorage === "undefined") {
+      return [];
+    }
+
+    try {
+      const raw = localStorage.getItem(key);
+      if (!raw) {
+        return [];
+      }
+      const parsed = JSON.parse(raw) as unknown;
+      return Array.isArray(parsed) ? parsed as T[] : [];
+    } catch {
+      localStorage.removeItem(key);
+      return [];
+    }
+  }
+
+  private writeLocalStorageArray<T>(key: string, entries: T[]): boolean {
+    if (typeof localStorage === "undefined") {
+      return false;
+    }
+
+    try {
+      localStorage.setItem(key, JSON.stringify(entries));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private linksMirrorKey(userId: string): string {
+    return `${LOCAL_STORAGE_LINKS_PREFIX}${userId}`;
+  }
+
+  private pendingMirrorKey(userId: string): string {
+    return `${LOCAL_STORAGE_PENDING_PREFIX}${userId}`;
+  }
+
+  private deadLettersMirrorKey(userId: string): string {
+    return `${LOCAL_STORAGE_DEAD_LETTERS_PREFIX}${userId}`;
+  }
+
+  private upsertPendingLinkIntoList(
+    list: PendingExternalSourceLink[],
+    link: ExternalSourceLink,
+    options: { resetRetryCount?: boolean },
+  ): PendingExternalSourceLink[] {
+    const next = new Map(list.map((entry) => [entry.link.id, entry]));
+    const previous = next.get(link.id);
+    next.set(link.id, this.normalizePendingEntry({
+      ...previous,
+      link,
+      retryCount: options.resetRetryCount ? 0 : previous?.retryCount ?? 0,
+    }, "pending_sync"));
+    return Array.from(next.values());
+  }
+
+  private findPendingEntry(
+    list: PendingExternalSourceLink[],
+    linkId: string,
+  ): PendingExternalSourceLink | undefined {
+    return list.find(entry => entry.link.id === linkId);
+  }
+
+  private applyPendingFailureMutation(
+    list: PendingExternalSourceLink[],
+    linkId: string,
+    errorCode: string,
+  ): {
+    nextPendingLinks: PendingExternalSourceLink[];
+    movedToDeadLetter: PendingExternalSourceLink | null;
+  } {
+    const nextPendingLinks: PendingExternalSourceLink[] = [];
+    let movedToDeadLetter: PendingExternalSourceLink | null = null;
+
+    for (const entry of list) {
+      if (entry.link.id !== linkId) {
+        nextPendingLinks.push(this.normalizePendingEntry(entry, entry.syncState));
+        continue;
+      }
+
+      const retryCount = (entry.retryCount ?? 0) + 1;
+      const syncState: PendingExternalSourceLinkSyncState = retryCount > SIYUAN_CONFIG.PENDING_MAX_RETRIES
+        ? "dead_letter"
+        : "retry_scheduled";
+      const updated = this.normalizePendingEntry({
+        ...entry,
+        retryCount,
+        lastTriedAt: new Date().toISOString(),
+        lastErrorCode: errorCode,
+      }, syncState);
+      if (syncState === "dead_letter") {
+        movedToDeadLetter = updated;
+      } else {
+        nextPendingLinks.push(updated);
+      }
+    }
+
+    return { nextPendingLinks, movedToDeadLetter };
+  }
+
+  private timeValue(value?: string): number {
+    if (!value) return 0;
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+
 }

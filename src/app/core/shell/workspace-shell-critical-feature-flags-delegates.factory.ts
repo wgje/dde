@@ -1,0 +1,57 @@
+import type {
+  WorkspaceShellCriticalFeatureFlagsDelegate,
+  WorkspaceShellCriticalFeatureFlagsLazyLoadDelegateOptions,
+} from './workspace-shell-critical-feature-flags-lazy-load-delegate.factory';
+
+type WorkspaceShellCriticalFeatureFlagsWarning =
+  WorkspaceShellCriticalFeatureFlagsLazyLoadDelegateOptions['warning'];
+
+interface WorkspaceShellCriticalFeatureFlagsToastLike {
+  warning: WorkspaceShellCriticalFeatureFlagsWarning;
+}
+
+export interface WorkspaceShellCriticalFeatureFlagsDelegatesOptions {
+  toast: WorkspaceShellCriticalFeatureFlagsToastLike;
+  warn: (message: string, context: unknown) => void;
+  getHostname?: WorkspaceShellCriticalFeatureFlagsLazyLoadDelegateOptions['getHostname'];
+  createCriticalFeatureFlagsLazyLoad?: (
+    options: WorkspaceShellCriticalFeatureFlagsLazyLoadDelegateOptions,
+  ) => WorkspaceShellCriticalFeatureFlagsDelegate;
+}
+
+export function createWorkspaceShellCriticalFeatureFlagsDelegates(
+  options: WorkspaceShellCriticalFeatureFlagsDelegatesOptions,
+): WorkspaceShellCriticalFeatureFlagsDelegate {
+  const lazyOptions: WorkspaceShellCriticalFeatureFlagsLazyLoadDelegateOptions = {
+    warn: options.warn,
+    warning: (title, message, warningOptions) =>
+      options.toast.warning(title, message, warningOptions),
+    getHostname: options.getHostname ?? readBrowserHostname,
+  };
+  if (options.createCriticalFeatureFlagsLazyLoad) {
+    return options.createCriticalFeatureFlagsLazyLoad(lazyOptions);
+  }
+
+  let delegatePromise: Promise<WorkspaceShellCriticalFeatureFlagsDelegate> | null = null;
+  return {
+    validate: () => {
+      void (delegatePromise ??= import('./workspace-shell-critical-feature-flags-lazy-load-delegate.factory')
+        .then(({ createWorkspaceShellCriticalFeatureFlagsLazyLoadDelegate }) =>
+          createWorkspaceShellCriticalFeatureFlagsLazyLoadDelegate(lazyOptions))
+        .catch(error => {
+          delegatePromise = null;
+          options.warn(
+            '关键安全开关 lazy-load delegate 加载失败，已跳过本次启动校验',
+            error,
+          );
+          throw error;
+        }))
+        .then(delegate => delegate.validate())
+        .catch(() => undefined);
+    },
+  };
+}
+
+function readBrowserHostname(): string | undefined {
+  return typeof window === 'undefined' ? undefined : window.location?.hostname;
+}

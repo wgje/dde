@@ -190,7 +190,7 @@ $$;
 -- ============================================
 
 CREATE TABLE IF NOT EXISTS public.projects (
-  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  id UUID PRIMARY KEY,
   owner_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   title TEXT,
   description TEXT,
@@ -260,7 +260,7 @@ COMMENT ON INDEX idx_project_members_invited_by IS
 -- ============================================
 
 CREATE TABLE IF NOT EXISTS public.tasks (
-  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  id UUID PRIMARY KEY,
   project_id UUID NOT NULL REFERENCES public.projects(id) ON DELETE CASCADE,
   parent_id UUID REFERENCES public.tasks(id) ON DELETE SET NULL,
   title TEXT NOT NULL DEFAULT '',
@@ -280,7 +280,7 @@ CREATE TABLE IF NOT EXISTS public.tasks (
   parking_meta JSONB DEFAULT NULL,
   -- 【2026-02-26 新增】Dock/Focus 规划属性
   expected_minutes INTEGER DEFAULT NULL,
-  cognitive_load TEXT DEFAULT 'low',
+  cognitive_load TEXT DEFAULT NULL,
   wait_minutes INTEGER DEFAULT NULL,
   deleted_at TIMESTAMP WITH TIME ZONE,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
@@ -319,7 +319,7 @@ COMMENT ON COLUMN public.tasks.parking_meta IS
 -- ============================================
 
 CREATE TABLE IF NOT EXISTS public.connections (
-  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  id UUID PRIMARY KEY,
   project_id UUID NOT NULL REFERENCES public.projects(id) ON DELETE CASCADE,
   source_id UUID NOT NULL REFERENCES public.tasks(id) ON DELETE CASCADE,
   target_id UUID NOT NULL REFERENCES public.tasks(id) ON DELETE CASCADE,
@@ -375,7 +375,7 @@ CREATE INDEX IF NOT EXISTS idx_connections_deleted_cleanup
 -- ============================================
 
 CREATE TABLE IF NOT EXISTS public.user_preferences (
-  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  id UUID PRIMARY KEY,
   user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   theme VARCHAR(20) DEFAULT 'default',
   layout_direction VARCHAR(10) DEFAULT 'ltr',
@@ -590,6 +590,74 @@ CREATE POLICY "transcription_usage_select" ON public.transcription_usage
   FOR SELECT TO authenticated USING ((SELECT auth.uid()) = user_id);
 
 -- INSERT/UPDATE/DELETE 由 Edge Function 使用 service_role 执行，无需用户策略
+
+CREATE OR REPLACE FUNCTION public.consume_transcription_quota(
+  p_user_id UUID,
+  p_usage_date DATE,
+  p_daily_limit INTEGER,
+  p_audio_seconds INTEGER DEFAULT 0
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+  v_usage_count INTEGER;
+  v_usage_id UUID;
+BEGIN
+  IF p_user_id IS NULL OR p_usage_date IS NULL OR p_daily_limit IS NULL OR p_daily_limit <= 0 THEN
+    RETURN jsonb_build_object('allowed', false, 'reason', 'invalid_quota_request', 'usage_count', 0);
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(hashtext('transcription_usage'), hashtext(p_user_id::TEXT || ':' || p_usage_date::TEXT));
+
+  SELECT count(*) INTO v_usage_count
+  FROM public.transcription_usage
+  WHERE user_id = p_user_id
+    AND date = p_usage_date;
+
+  IF v_usage_count >= p_daily_limit THEN
+    RETURN jsonb_build_object('allowed', false, 'reason', 'quota_exceeded', 'usage_count', v_usage_count);
+  END IF;
+
+  v_usage_id := extensions.gen_random_uuid();
+  INSERT INTO public.transcription_usage (id, user_id, date, audio_seconds)
+  VALUES (v_usage_id, p_user_id, p_usage_date, GREATEST(COALESCE(p_audio_seconds, 0), 0));
+
+  RETURN jsonb_build_object('allowed', true, 'usage_count', v_usage_count + 1, 'usage_id', v_usage_id);
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.consume_transcription_quota(UUID, DATE, INTEGER, INTEGER) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.consume_transcription_quota(UUID, DATE, INTEGER, INTEGER) TO service_role;
+
+CREATE OR REPLACE FUNCTION public.release_transcription_quota(
+  p_usage_id UUID,
+  p_user_id UUID
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+  v_deleted_count INTEGER := 0;
+BEGIN
+  IF p_usage_id IS NULL OR p_user_id IS NULL THEN
+    RETURN jsonb_build_object('released', false, 'reason', 'invalid_release_request', 'deleted_count', 0);
+  END IF;
+
+  DELETE FROM public.transcription_usage
+  WHERE id = p_usage_id AND user_id = p_user_id;
+  GET DIAGNOSTICS v_deleted_count = ROW_COUNT;
+
+  RETURN jsonb_build_object('released', v_deleted_count > 0, 'deleted_count', v_deleted_count);
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.release_transcription_quota(UUID, UUID) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.release_transcription_quota(UUID, UUID) TO service_role;
 
 -- ============================================
 -- 5.3 专注会话快照表 (focus_sessions) - Focus Console v3
@@ -2453,12 +2521,18 @@ Tombstone-aware 连接加载视图 - 过滤掉已永久删除的连接和软删�
 创建于 2026-01-07。
 ';
 
+REVOKE ALL ON TABLE public.active_connections FROM anon;
+REVOKE INSERT, UPDATE, DELETE ON TABLE public.active_connections FROM authenticated;
+GRANT SELECT ON TABLE public.active_connections TO authenticated;
+GRANT ALL ON TABLE public.active_connections TO service_role;
+
 -- 2) 创建辅助函数：批量检查任务是否在 tombstone 中
 CREATE OR REPLACE FUNCTION public.is_task_tombstoned(p_task_id uuid)
 RETURNS boolean
 LANGUAGE sql
 STABLE
 SECURITY DEFINER
+SET search_path TO 'pg_catalog', 'public'
 AS $$
   SELECT EXISTS (
     SELECT 1 
@@ -2466,9 +2540,6 @@ AS $$
     WHERE task_id = p_task_id
   );
 $$;
-
-ALTER FUNCTION public.is_task_tombstoned(uuid)
-  SET search_path TO 'pg_catalog', 'public';
 
 GRANT EXECUTE ON FUNCTION public.is_task_tombstoned(uuid) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.is_task_tombstoned(uuid) TO service_role;
@@ -2793,6 +2864,11 @@ DECLARE
   v_user_id uuid;
   v_title text;
   v_content text;
+  v_has_attachments boolean;
+  v_has_tags boolean;
+  v_priority text;
+  v_due_date timestamptz;
+  v_completed_at timestamptz;
   v_cognitive text;
   v_expected int;
   v_wait int;
@@ -2813,6 +2889,8 @@ BEGIN
     -- 安全校验：TEXT 长度限制（防 DoS / 数据溢出）
     v_title := v_task->>'title';
     v_content := v_task->>'content';
+    v_has_attachments := v_task ? 'attachments';
+    v_has_tags := v_task ? 'tags';
     IF v_title IS NOT NULL AND length(v_title) > 10000 THEN
       RAISE EXCEPTION 'Title too long (max 10000 chars) for task %', v_task->>'id';
     END IF;
@@ -2824,6 +2902,9 @@ BEGIN
     v_expected := (v_task->>'expectedMinutes')::integer;
     v_wait := (v_task->>'waitMinutes')::integer;
     v_cognitive := v_task->>'cognitiveLoad';
+    v_priority := NULLIF(v_task->>'priority', '');
+    v_due_date := NULLIF(COALESCE(v_task->>'dueDate', v_task->>'due_date'), '')::timestamptz;
+    v_completed_at := NULLIF(COALESCE(v_task->>'completedAt', v_task->>'completed_at'), '')::timestamptz;
 
     IF v_expected IS NOT NULL AND (v_expected <= 0 OR v_expected > 14400) THEN
       RAISE EXCEPTION 'expected_minutes out of range (1-14400) for task %', v_task->>'id';
@@ -2838,7 +2919,8 @@ BEGIN
     INSERT INTO public.tasks AS existing (
       id, project_id, title, content, stage, parent_id,
       "order", rank, status, x, y, short_id, deleted_at,
-      attachments, expected_minutes, cognitive_load, wait_minutes, parking_meta
+      attachments, tags, priority, due_date, completed_at,
+      expected_minutes, cognitive_load, wait_minutes, parking_meta
     )
     VALUES (
       (v_task->>'id')::uuid,
@@ -2854,9 +2936,13 @@ BEGIN
       COALESCE((v_task->>'y')::numeric, 0),
       v_task->>'shortId',
       (v_task->>'deletedAt')::timestamptz,
-      '[]'::jsonb,
+      CASE WHEN v_has_attachments THEN COALESCE(v_task->'attachments', '[]'::jsonb) ELSE '[]'::jsonb END,
+      CASE WHEN v_has_tags THEN COALESCE(v_task->'tags', '[]'::jsonb) ELSE '[]'::jsonb END,
+      v_priority,
+      v_due_date,
+      v_completed_at,
       v_expected,
-      COALESCE(v_cognitive, 'low'),
+      v_cognitive,
       v_wait,
       v_task->'parkingMeta'
     )
@@ -2872,7 +2958,17 @@ BEGIN
       y = EXCLUDED.y,
       short_id = EXCLUDED.short_id,
       deleted_at = EXCLUDED.deleted_at,
-      attachments = COALESCE(existing.attachments, '[]'::jsonb),
+      attachments = CASE
+        WHEN NOT v_has_attachments THEN existing.attachments
+        ELSE EXCLUDED.attachments
+      END,
+      tags = CASE
+        WHEN NOT v_has_tags THEN existing.tags
+        ELSE EXCLUDED.tags
+      END,
+      priority = EXCLUDED.priority,
+      due_date = EXCLUDED.due_date,
+      completed_at = EXCLUDED.completed_at,
       expected_minutes = EXCLUDED.expected_minutes,
       cognitive_load = EXCLUDED.cognitive_load,
       wait_minutes = EXCLUDED.wait_minutes,
@@ -2965,6 +3061,7 @@ COMMENT ON FUNCTION public.purge_tasks_v3 IS
 CREATE TABLE IF NOT EXISTS public.attachment_scans (
   id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
   file_id UUID NOT NULL,
+  user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE,
   file_hash VARCHAR(64), -- SHA-256 哈希
   status VARCHAR(20) NOT NULL DEFAULT 'pending',
   threat_name VARCHAR(255),
@@ -2983,6 +3080,9 @@ CREATE TABLE IF NOT EXISTS public.attachment_scans (
 
 -- 创建索引
 CREATE INDEX IF NOT EXISTS idx_attachment_scans_file_id ON public.attachment_scans(file_id);
+CREATE INDEX IF NOT EXISTS idx_attachment_scans_user_file
+  ON public.attachment_scans(user_id, file_id)
+  WHERE user_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_attachment_scans_status ON public.attachment_scans(status);
 CREATE INDEX IF NOT EXISTS idx_attachment_scans_scanned_at ON public.attachment_scans(scanned_at);
 CREATE INDEX IF NOT EXISTS idx_attachment_scans_file_hash ON public.attachment_scans(file_hash);
@@ -4449,9 +4549,7 @@ END $$;
 ALTER TABLE public.user_preferences
 DROP CONSTRAINT IF EXISTS user_preferences_dock_snapshot_size_check;
 
-DROP TABLE IF EXISTS public.project_members CASCADE;
-DROP TABLE IF EXISTS public.attachment_scans CASCADE;
-DROP TABLE IF EXISTS public.quarantined_files CASCADE;
+-- 运行时代码与安全策略仍依赖这些表；保留 schema，避免 fresh bootstrap 后失配。
 
 ALTER TABLE public.user_preferences
 DROP COLUMN IF EXISTS dock_snapshot;
@@ -5204,6 +5302,3156 @@ SET value = COALESCE(public.app_config.value, '{}'::jsonb) || jsonb_build_object
     ),
     description = EXCLUDED.description,
     updated_at = NOW();
+
+-- ============================================================
+-- Sync protocol / disaster-recovery final-state overlay (2026-06-06)
+-- 使一次性初始化脚本包含迁移链最终同步 RPC 支撑对象。
+-- ============================================================
+
+CREATE SCHEMA IF NOT EXISTS extensions;
+CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;
+
+CREATE TABLE IF NOT EXISTS public.sync_operation_log (
+  operation_id UUID PRIMARY KEY,
+  user_id UUID NOT NULL,
+  entity_type TEXT NOT NULL,
+  entity_id UUID NOT NULL,
+  status TEXT NOT NULL,
+  reject_reason TEXT,
+  protocol_version INTEGER,
+  deployment_epoch BIGINT,
+  deployment_target TEXT,
+  client_git_sha TEXT,
+  client_origin TEXT,
+  result_payload JSONB,
+  payload_digest TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT sync_operation_log_status_check
+    CHECK (status IN (
+      'applied',
+      'idempotent-replay',
+      'remote-newer',
+      'deleted-remote-newer',
+      'client-version-rejected',
+      'tombstoned',
+      'unauthorized',
+      'quarantined'
+    ))
+);
+
+ALTER TABLE public.sync_operation_log
+  ADD COLUMN IF NOT EXISTS deployment_epoch BIGINT,
+  ADD COLUMN IF NOT EXISTS deployment_target TEXT,
+  ADD COLUMN IF NOT EXISTS payload_digest TEXT,
+  ADD COLUMN IF NOT EXISTS result_payload JSONB;
+
+ALTER TABLE public.sync_operation_log
+  DROP CONSTRAINT IF EXISTS sync_operation_log_status_check;
+
+ALTER TABLE public.sync_operation_log
+  ADD CONSTRAINT sync_operation_log_status_check
+    CHECK (status IN (
+      'applied',
+      'idempotent-replay',
+      'remote-newer',
+      'deleted-remote-newer',
+      'client-version-rejected',
+      'tombstoned',
+      'unauthorized',
+      'quarantined'
+    ));
+
+CREATE INDEX IF NOT EXISTS idx_sync_operation_log_user_created
+  ON public.sync_operation_log (user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sync_operation_log_entity
+  ON public.sync_operation_log (entity_type, entity_id);
+CREATE INDEX IF NOT EXISTS idx_sync_operation_log_entity_created
+  ON public.sync_operation_log (entity_type, entity_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sync_operation_log_status_created
+  ON public.sync_operation_log (entity_type, status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sync_operation_log_payload_digest
+  ON public.sync_operation_log (payload_digest)
+  WHERE payload_digest IS NOT NULL;
+
+CREATE OR REPLACE FUNCTION public.sync_operation_log_fill_payload_digest()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $$
+DECLARE
+  v_payload_digest TEXT;
+BEGIN
+  v_payload_digest := NULLIF(current_setting('app.payload_digest', true), '');
+
+  IF NEW.payload_digest IS NULL AND v_payload_digest IS NOT NULL THEN
+    NEW.payload_digest := v_payload_digest;
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS sync_operation_log_fill_payload_digest ON public.sync_operation_log;
+CREATE TRIGGER sync_operation_log_fill_payload_digest
+  BEFORE INSERT ON public.sync_operation_log
+  FOR EACH ROW
+  EXECUTE FUNCTION public.sync_operation_log_fill_payload_digest();
+
+REVOKE ALL ON FUNCTION public.sync_operation_log_fill_payload_digest() FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.sync_operation_log_fill_payload_digest() TO service_role;
+
+ALTER TABLE public.sync_operation_log ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS sync_operation_log_owner_select ON public.sync_operation_log;
+CREATE POLICY sync_operation_log_owner_select
+  ON public.sync_operation_log
+  FOR SELECT
+  TO authenticated
+  USING (user_id = (SELECT auth.uid()));
+
+REVOKE ALL ON public.sync_operation_log FROM PUBLIC, anon;
+GRANT SELECT ON public.sync_operation_log TO authenticated;
+GRANT ALL ON public.sync_operation_log TO service_role;
+
+CREATE TABLE IF NOT EXISTS public.sync_protocol_state (
+  scope TEXT PRIMARY KEY,
+  min_protocol_version INTEGER NOT NULL DEFAULT 1,
+  deployment_epoch BIGINT NOT NULL DEFAULT 0,
+  reason TEXT,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+INSERT INTO public.sync_protocol_state (scope, min_protocol_version, deployment_epoch, reason)
+VALUES ('global', 1, 0, 'initial')
+ON CONFLICT (scope) DO NOTHING;
+
+ALTER TABLE public.sync_protocol_state ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS sync_protocol_state_authenticated_read ON public.sync_protocol_state;
+CREATE POLICY sync_protocol_state_authenticated_read
+  ON public.sync_protocol_state
+  FOR SELECT
+  TO authenticated
+  USING (true);
+
+REVOKE ALL ON public.sync_protocol_state FROM PUBLIC, anon;
+GRANT SELECT ON public.sync_protocol_state TO authenticated;
+GRANT ALL ON public.sync_protocol_state TO service_role;
+
+CREATE TABLE IF NOT EXISTS public.data_safety_flags (
+  key        TEXT PRIMARY KEY,
+  value      TEXT NOT NULL,
+  updated_by UUID,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT data_safety_flags_sync_mode_chk CHECK (
+    key <> 'sync_mode'
+    OR value IN ('normal', 'audit_only', 'read_only', 'quarantine')
+  )
+);
+
+CREATE TABLE IF NOT EXISTS public.data_safety_flag_audit (
+  id         BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  flag_key   TEXT NOT NULL,
+  old_value  TEXT,
+  new_value  TEXT NOT NULL,
+  changed_by UUID,
+  changed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+INSERT INTO public.data_safety_flags(key, value)
+VALUES ('sync_mode', 'normal')
+ON CONFLICT (key) DO NOTHING;
+
+ALTER TABLE public.data_safety_flags ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.data_safety_flags FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.data_safety_flag_audit ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.data_safety_flag_audit FORCE ROW LEVEL SECURITY;
+
+REVOKE ALL ON public.data_safety_flags FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON public.data_safety_flag_audit FROM PUBLIC, anon, authenticated;
+GRANT ALL ON public.data_safety_flags TO service_role;
+GRANT ALL ON public.data_safety_flag_audit TO service_role;
+
+DROP POLICY IF EXISTS data_safety_flags_service_all ON public.data_safety_flags;
+CREATE POLICY data_safety_flags_service_all
+  ON public.data_safety_flags
+  FOR ALL
+  TO service_role
+  USING (true)
+  WITH CHECK (true);
+
+DROP POLICY IF EXISTS data_safety_flag_audit_service_all ON public.data_safety_flag_audit;
+CREATE POLICY data_safety_flag_audit_service_all
+  ON public.data_safety_flag_audit
+  FOR ALL
+  TO service_role
+  USING (true)
+  WITH CHECK (true);
+
+CREATE OR REPLACE FUNCTION public.set_data_safety_flag(p_key TEXT, p_value TEXT)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_old_value TEXT;
+BEGIN
+  IF p_key <> 'sync_mode' THEN
+    RAISE EXCEPTION 'unsupported data safety flag: %', p_key;
+  END IF;
+
+  IF p_value NOT IN ('normal', 'audit_only', 'read_only', 'quarantine') THEN
+    RAISE EXCEPTION 'invalid sync_mode value: %', p_value;
+  END IF;
+
+  SELECT value INTO v_old_value
+  FROM public.data_safety_flags
+  WHERE key = p_key
+  FOR UPDATE;
+
+  INSERT INTO public.data_safety_flags(key, value, updated_by, updated_at)
+  VALUES (p_key, p_value, auth.uid(), now())
+  ON CONFLICT (key) DO UPDATE
+    SET value = EXCLUDED.value,
+        updated_by = EXCLUDED.updated_by,
+        updated_at = now();
+
+  INSERT INTO public.data_safety_flag_audit(flag_key, old_value, new_value, changed_by, changed_at)
+  VALUES (p_key, v_old_value, p_value, auth.uid(), now());
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.set_data_safety_flag(TEXT, TEXT) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.set_data_safety_flag(TEXT, TEXT) TO service_role;
+
+CREATE OR REPLACE FUNCTION public.enforce_data_safety_freeze()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_sync_mode TEXT;
+  v_bypass BOOLEAN := COALESCE(NULLIF(current_setting('app.data_safety_bypass', true), '')::BOOLEAN, false);
+BEGIN
+  SELECT value INTO v_sync_mode
+  FROM public.data_safety_flags
+  WHERE key = 'sync_mode';
+
+  IF COALESCE(v_sync_mode, 'normal') IN ('read_only', 'quarantine') AND NOT v_bypass THEN
+    RAISE EXCEPTION 'data_safety_write_blocked: %', v_sync_mode;
+  END IF;
+
+  IF TG_OP = 'DELETE' THEN
+    RETURN OLD;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.enforce_data_safety_freeze() FROM PUBLIC, anon, authenticated;
+
+DROP TRIGGER IF EXISTS trg_data_safety_freeze_tasks ON public.tasks;
+CREATE TRIGGER trg_data_safety_freeze_tasks
+  BEFORE INSERT OR UPDATE OR DELETE ON public.tasks
+  FOR EACH ROW
+  EXECUTE FUNCTION public.enforce_data_safety_freeze();
+
+DROP TRIGGER IF EXISTS trg_data_safety_freeze_connections ON public.connections;
+CREATE TRIGGER trg_data_safety_freeze_connections
+  BEFORE INSERT OR UPDATE OR DELETE ON public.connections
+  FOR EACH ROW
+  EXECUTE FUNCTION public.enforce_data_safety_freeze();
+
+DROP TRIGGER IF EXISTS trg_data_safety_freeze_projects ON public.projects;
+CREATE TRIGGER trg_data_safety_freeze_projects
+  BEFORE INSERT OR UPDATE OR DELETE ON public.projects
+  FOR EACH ROW
+  EXECUTE FUNCTION public.enforce_data_safety_freeze();
+
+DROP TRIGGER IF EXISTS trg_data_safety_freeze_black_box_entries ON public.black_box_entries;
+CREATE TRIGGER trg_data_safety_freeze_black_box_entries
+  BEFORE INSERT OR UPDATE OR DELETE ON public.black_box_entries
+  FOR EACH ROW
+  EXECUTE FUNCTION public.enforce_data_safety_freeze();
+
+CREATE TABLE IF NOT EXISTS public.sync_trusted_client_deployments (
+  client_git_sha   TEXT PRIMARY KEY,
+  deployment_epoch BIGINT NOT NULL,
+  deployment_target TEXT,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  retired_at       TIMESTAMPTZ
+);
+
+ALTER TABLE public.sync_trusted_client_deployments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.sync_trusted_client_deployments FORCE ROW LEVEL SECURITY;
+REVOKE ALL ON public.sync_trusted_client_deployments FROM PUBLIC, anon, authenticated;
+GRANT ALL ON public.sync_trusted_client_deployments TO service_role;
+
+DROP POLICY IF EXISTS sync_trusted_client_deployments_service_all ON public.sync_trusted_client_deployments;
+CREATE POLICY sync_trusted_client_deployments_service_all
+  ON public.sync_trusted_client_deployments
+  FOR ALL
+  TO service_role
+  USING (true)
+  WITH CHECK (true);
+
+CREATE TABLE IF NOT EXISTS public.sync_write_quarantine (
+  id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  operation_id    UUID NOT NULL,
+  user_id         UUID,
+  entity_type     TEXT NOT NULL,
+  entity_id       UUID,
+  client_git_sha  TEXT,
+  client_origin   TEXT,
+  reason          TEXT NOT NULL,
+  payload         JSONB NOT NULL,
+  payload_digest  TEXT NOT NULL,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  expires_at      TIMESTAMPTZ NOT NULL DEFAULT (now() + INTERVAL '30 days'),
+  reviewed_at     TIMESTAMPTZ,
+  reviewed_by     UUID,
+  review_decision TEXT CHECK (review_decision IS NULL OR review_decision IN ('replay', 'discard', 'escalate')),
+  CONSTRAINT sync_write_quarantine_operation_uniq UNIQUE (operation_id),
+  CONSTRAINT sync_write_quarantine_digest_uniq UNIQUE (payload_digest)
+);
+
+CREATE INDEX IF NOT EXISTS sync_write_quarantine_user_reason_idx
+  ON public.sync_write_quarantine (user_id, reason, created_at DESC);
+CREATE INDEX IF NOT EXISTS sync_write_quarantine_expires_idx
+  ON public.sync_write_quarantine (expires_at)
+  WHERE reviewed_at IS NULL;
+
+ALTER TABLE public.sync_write_quarantine ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.sync_write_quarantine FORCE ROW LEVEL SECURITY;
+REVOKE ALL ON public.sync_write_quarantine FROM PUBLIC, anon, authenticated;
+GRANT ALL ON public.sync_write_quarantine TO service_role;
+
+DROP POLICY IF EXISTS sync_write_quarantine_service_all ON public.sync_write_quarantine;
+CREATE POLICY sync_write_quarantine_service_all
+  ON public.sync_write_quarantine
+  FOR ALL
+  TO service_role
+  USING (true)
+  WITH CHECK (true);
+
+CREATE OR REPLACE FUNCTION public.sync_canonical_payload_digest(p_payload JSONB)
+RETURNS TEXT
+LANGUAGE sql
+IMMUTABLE
+SET search_path = public, extensions, pg_temp
+AS $$
+  SELECT encode(
+    extensions.digest(
+      (COALESCE(p_payload, '{}'::JSONB) - 'operation_id' - 'operationId')::TEXT,
+      'sha256'
+    ),
+    'hex'
+  );
+$$;
+
+REVOKE ALL ON FUNCTION public.sync_canonical_payload_digest(JSONB) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.sync_canonical_payload_digest(JSONB) TO service_role;
+
+CREATE OR REPLACE FUNCTION public.record_sync_write_quarantine(
+  p_operation_id UUID,
+  p_user_id UUID,
+  p_entity_type TEXT,
+  p_entity_id UUID,
+  p_client_git_sha TEXT,
+  p_client_origin TEXT,
+  p_reason TEXT,
+  p_payload JSONB
+)
+RETURNS BIGINT
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, extensions, pg_temp
+AS $$
+DECLARE
+  v_digest TEXT := public.sync_canonical_payload_digest(p_payload);
+  v_id BIGINT;
+BEGIN
+  INSERT INTO public.sync_write_quarantine(
+    operation_id, user_id, entity_type, entity_id,
+    client_git_sha, client_origin, reason, payload, payload_digest
+  )
+  VALUES (
+    p_operation_id, p_user_id, p_entity_type, p_entity_id,
+    p_client_git_sha, p_client_origin, p_reason, p_payload, v_digest
+  )
+  ON CONFLICT (operation_id) DO UPDATE
+    SET operation_id = EXCLUDED.operation_id
+  RETURNING id INTO v_id;
+
+  RETURN v_id;
+EXCEPTION WHEN unique_violation THEN
+  SELECT id INTO v_id
+  FROM public.sync_write_quarantine
+  WHERE operation_id = p_operation_id OR payload_digest = v_digest
+  ORDER BY id ASC
+  LIMIT 1;
+
+  RETURN v_id;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.record_sync_write_quarantine(UUID, UUID, TEXT, UUID, TEXT, TEXT, TEXT, JSONB)
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.record_sync_write_quarantine(UUID, UUID, TEXT, UUID, TEXT, TEXT, TEXT, JSONB)
+  TO service_role;
+
+CREATE OR REPLACE FUNCTION public.purge_expired_sync_write_quarantine()
+RETURNS INTEGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_deleted INTEGER;
+BEGIN
+  DELETE FROM public.sync_write_quarantine
+  WHERE expires_at < now()
+    AND reviewed_at IS NULL;
+
+  GET DIAGNOSTICS v_deleted = ROW_COUNT;
+  RETURN v_deleted;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.purge_expired_sync_write_quarantine() FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.purge_expired_sync_write_quarantine() TO service_role;
+
+CREATE TABLE IF NOT EXISTS public.task_change_audit (
+  id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  task_id         UUID NOT NULL,
+  project_id      UUID,
+  owner_id        UUID,
+  op              TEXT NOT NULL,
+  changed_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  old_stage       INTEGER,
+  old_parent_id   UUID,
+  old_content     TEXT,
+  old_title       TEXT,
+  old_updated_at  TIMESTAMPTZ,
+  old_deleted_at  TIMESTAMPTZ,
+  old_record      JSONB NOT NULL
+);
+
+ALTER TABLE public.task_change_audit
+  ADD COLUMN IF NOT EXISTS new_stage INTEGER,
+  ADD COLUMN IF NOT EXISTS new_parent_id UUID,
+  ADD COLUMN IF NOT EXISTS new_content TEXT,
+  ADD COLUMN IF NOT EXISTS new_title TEXT,
+  ADD COLUMN IF NOT EXISTS new_updated_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS new_deleted_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS operation_id UUID,
+  ADD COLUMN IF NOT EXISTS client_git_sha TEXT,
+  ADD COLUMN IF NOT EXISTS client_origin TEXT,
+  ADD COLUMN IF NOT EXISTS deployment_epoch BIGINT,
+  ADD COLUMN IF NOT EXISTS payload_digest TEXT,
+  ADD COLUMN IF NOT EXISTS origin_unverified BOOLEAN NOT NULL DEFAULT false,
+  ADD COLUMN IF NOT EXISTS suspicious BOOLEAN NOT NULL DEFAULT false,
+  ADD COLUMN IF NOT EXISTS suspicious_reason TEXT;
+
+CREATE INDEX IF NOT EXISTS task_change_audit_task_idx
+  ON public.task_change_audit (task_id, changed_at DESC);
+CREATE INDEX IF NOT EXISTS task_change_audit_project_idx
+  ON public.task_change_audit (project_id, changed_at DESC);
+CREATE INDEX IF NOT EXISTS task_change_audit_owner_idx
+  ON public.task_change_audit (owner_id, changed_at DESC);
+CREATE INDEX IF NOT EXISTS task_change_audit_operation_idx
+  ON public.task_change_audit (operation_id)
+  WHERE operation_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS task_change_audit_suspicious_idx
+  ON public.task_change_audit (owner_id, changed_at DESC)
+  WHERE suspicious;
+
+ALTER TABLE public.task_change_audit ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.task_change_audit FORCE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS task_change_audit_owner_select ON public.task_change_audit;
+CREATE POLICY task_change_audit_owner_select
+  ON public.task_change_audit
+  FOR SELECT
+  TO authenticated
+  USING (owner_id = (SELECT auth.uid()));
+
+DROP POLICY IF EXISTS task_change_audit_service_all ON public.task_change_audit;
+CREATE POLICY task_change_audit_service_all
+  ON public.task_change_audit
+  FOR ALL
+  TO service_role
+  USING (true)
+  WITH CHECK (true);
+
+REVOKE ALL ON public.task_change_audit FROM PUBLIC, anon;
+GRANT SELECT ON public.task_change_audit TO authenticated;
+GRANT ALL ON public.task_change_audit TO service_role;
+
+CREATE OR REPLACE FUNCTION public.capture_task_change_audit()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_owner UUID;
+  v_operation_id UUID;
+  v_client_git_sha TEXT;
+  v_client_origin TEXT;
+  v_deployment_epoch BIGINT;
+  v_payload_digest TEXT;
+  v_origin_unverified BOOLEAN := true;
+  v_suspicious BOOLEAN := false;
+  v_suspicious_reason TEXT;
+  v_epoch_text TEXT;
+BEGIN
+  SELECT p.owner_id INTO v_owner FROM public.projects p WHERE p.id = OLD.project_id;
+
+  v_operation_id := NULLIF(current_setting('app.operation_id', true), '')::UUID;
+  v_client_git_sha := NULLIF(current_setting('app.client_git_sha', true), '');
+  v_client_origin := NULLIF(current_setting('app.client_origin', true), '');
+  v_payload_digest := NULLIF(current_setting('app.payload_digest', true), '');
+  v_origin_unverified := COALESCE(NULLIF(current_setting('app.origin_unverified', true), '')::BOOLEAN, true);
+  v_epoch_text := NULLIF(current_setting('app.deployment_epoch', true), '');
+  IF v_epoch_text ~ '^[0-9]+$' THEN
+    v_deployment_epoch := v_epoch_text::BIGINT;
+  END IF;
+
+  IF v_operation_id IS NULL
+    OR v_client_git_sha IS NULL
+    OR v_client_origin IS NULL
+    OR v_payload_digest IS NULL
+  THEN
+    v_origin_unverified := true;
+  END IF;
+
+  IF TG_OP = 'DELETE' THEN
+    INSERT INTO public.task_change_audit (
+      task_id, project_id, owner_id, op, old_stage, old_parent_id,
+      old_content, old_title, old_updated_at, old_deleted_at, old_record,
+      operation_id, client_git_sha, client_origin, deployment_epoch,
+      payload_digest, origin_unverified, suspicious, suspicious_reason
+    )
+    VALUES (
+      OLD.id, OLD.project_id, v_owner, TG_OP, OLD.stage, OLD.parent_id,
+      OLD.content, OLD.title, OLD.updated_at, OLD.deleted_at, to_jsonb(OLD),
+      v_operation_id, v_client_git_sha, v_client_origin, v_deployment_epoch,
+      v_payload_digest, v_origin_unverified, false, NULL
+    );
+    RETURN OLD;
+  END IF;
+
+  IF OLD.stage IS NOT NULL
+    AND NEW.stage IS NULL
+    AND COALESCE(NEW.content, '') = COALESCE(NEW.title, '')
+  THEN
+    v_suspicious := true;
+    v_suspicious_reason := 'structure_degrade_content_equals_title';
+  END IF;
+
+  INSERT INTO public.task_change_audit (
+    task_id, project_id, owner_id, op, old_stage, old_parent_id,
+    old_content, old_title, old_updated_at, old_deleted_at, old_record,
+    new_stage, new_parent_id, new_content, new_title, new_updated_at, new_deleted_at,
+    operation_id, client_git_sha, client_origin, deployment_epoch,
+    payload_digest, origin_unverified, suspicious, suspicious_reason
+  )
+  VALUES (
+    OLD.id, OLD.project_id, v_owner, TG_OP, OLD.stage, OLD.parent_id,
+    OLD.content, OLD.title, OLD.updated_at, OLD.deleted_at, to_jsonb(OLD),
+    NEW.stage, NEW.parent_id, NEW.content, NEW.title, NEW.updated_at, NEW.deleted_at,
+    v_operation_id, v_client_git_sha, v_client_origin, v_deployment_epoch,
+    v_payload_digest, v_origin_unverified, v_suspicious, v_suspicious_reason
+  );
+
+  RETURN NEW;
+END;
+$$;
+
+ALTER FUNCTION public.capture_task_change_audit() OWNER TO postgres;
+
+DO $audit_owner_check$
+DECLARE
+  v_owner_bypasses_rls BOOLEAN;
+BEGIN
+  SELECT r.rolbypassrls INTO v_owner_bypasses_rls
+  FROM pg_proc p
+  JOIN pg_roles r ON r.oid = p.proowner
+  WHERE p.oid = 'public.capture_task_change_audit()'::regprocedure;
+
+  IF NOT COALESCE(v_owner_bypasses_rls, false) THEN
+    RAISE EXCEPTION 'capture_task_change_audit owner must BYPASSRLS before task_change_audit FORCE RLS';
+  END IF;
+END
+$audit_owner_check$;
+
+REVOKE ALL ON FUNCTION public.capture_task_change_audit() FROM PUBLIC, anon, authenticated;
+
+DROP TRIGGER IF EXISTS trg_task_change_audit_update ON public.tasks;
+CREATE TRIGGER trg_task_change_audit_update
+  AFTER UPDATE ON public.tasks
+  FOR EACH ROW
+  WHEN (
+    OLD.stage IS DISTINCT FROM NEW.stage
+    OR OLD.parent_id IS DISTINCT FROM NEW.parent_id
+    OR OLD.content IS DISTINCT FROM NEW.content
+    OR OLD.title IS DISTINCT FROM NEW.title
+    OR OLD.deleted_at IS DISTINCT FROM NEW.deleted_at
+  )
+  EXECUTE FUNCTION public.capture_task_change_audit();
+
+DROP TRIGGER IF EXISTS trg_task_change_audit_delete ON public.tasks;
+CREATE TRIGGER trg_task_change_audit_delete
+  AFTER DELETE ON public.tasks
+  FOR EACH ROW
+  EXECUTE FUNCTION public.capture_task_change_audit();
+
+CREATE TABLE IF NOT EXISTS public.task_change_audit_archive
+  (LIKE public.task_change_audit INCLUDING ALL);
+
+ALTER TABLE public.task_change_audit_archive ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.task_change_audit_archive FORCE ROW LEVEL SECURITY;
+REVOKE ALL ON public.task_change_audit_archive FROM PUBLIC, anon, authenticated;
+GRANT ALL ON public.task_change_audit_archive TO service_role;
+
+DROP POLICY IF EXISTS task_change_audit_archive_service_all ON public.task_change_audit_archive;
+CREATE POLICY task_change_audit_archive_service_all
+  ON public.task_change_audit_archive
+  FOR ALL
+  TO service_role
+  USING (true)
+  WITH CHECK (true);
+
+CREATE OR REPLACE FUNCTION public.archive_old_task_change_audit(
+  p_retention INTERVAL DEFAULT INTERVAL '180 days'
+)
+RETURNS INTEGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_moved INTEGER;
+BEGIN
+  WITH moved AS (
+    DELETE FROM public.task_change_audit
+    WHERE changed_at < now() - p_retention
+    RETURNING *
+  )
+  INSERT INTO public.task_change_audit_archive OVERRIDING SYSTEM VALUE
+  SELECT * FROM moved
+  ON CONFLICT (id) DO NOTHING;
+
+  GET DIAGNOSTICS v_moved = ROW_COUNT;
+  RETURN v_moved;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.archive_old_task_change_audit(INTERVAL) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.archive_old_task_change_audit(INTERVAL) TO service_role;
+
+ALTER TABLE public.connection_tombstones ADD COLUMN IF NOT EXISTS source_id uuid, ADD COLUMN IF NOT EXISTS target_id uuid;
+
+UPDATE public.connection_tombstones ct
+SET
+  source_id = c.source_id,
+  target_id = c.target_id
+FROM public.connections c
+WHERE ct.connection_id = c.id
+  AND (ct.source_id IS NULL OR ct.target_id IS NULL);
+
+CREATE INDEX IF NOT EXISTS idx_connection_tombstones_project_source_target_deleted
+  ON public.connection_tombstones (project_id, source_id, target_id, deleted_at DESC)
+  WHERE source_id IS NOT NULL AND target_id IS NOT NULL;
+
+CREATE OR REPLACE FUNCTION public.record_connection_tombstone()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path TO 'pg_catalog', 'public'
+AS $$
+BEGIN
+  INSERT INTO public.connection_tombstones (
+    connection_id,
+    project_id,
+    source_id,
+    target_id,
+    deleted_at,
+    deleted_by
+  )
+  VALUES (
+    OLD.id,
+    OLD.project_id,
+    OLD.source_id,
+    OLD.target_id,
+    now(),
+    auth.uid()
+  )
+  ON CONFLICT (connection_id)
+  DO UPDATE SET
+    project_id = EXCLUDED.project_id,
+    source_id = COALESCE(EXCLUDED.source_id, public.connection_tombstones.source_id),
+    target_id = COALESCE(EXCLUDED.target_id, public.connection_tombstones.target_id),
+    deleted_at = EXCLUDED.deleted_at,
+    deleted_by = EXCLUDED.deleted_by;
+
+  RETURN OLD;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_record_connection_tombstone ON public.connections;
+CREATE TRIGGER trg_record_connection_tombstone
+  BEFORE DELETE ON public.connections
+  FOR EACH ROW
+  EXECUTE FUNCTION public.record_connection_tombstone();
+
+CREATE OR REPLACE FUNCTION public.prevent_soft_deleted_row_resurrection()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+  IF OLD.deleted_at IS NOT NULL AND NEW.deleted_at IS NULL THEN
+    RAISE EXCEPTION 'soft-deleted % row cannot be resurrected via sync write', TG_TABLE_NAME
+      USING ERRCODE = 'P0001',
+            DETAIL = format('id=%s old_deleted_at=%s', COALESCE(NEW.id::text, '<unknown>'), OLD.deleted_at::text),
+            HINT = 'Pull latest remote state instead of clearing deleted_at.';
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_prevent_project_resurrection ON public.projects;
+CREATE TRIGGER trg_prevent_project_resurrection
+  BEFORE UPDATE ON public.projects
+  FOR EACH ROW
+  EXECUTE FUNCTION public.prevent_soft_deleted_row_resurrection();
+
+DROP TRIGGER IF EXISTS trg_prevent_black_box_resurrection ON public.black_box_entries;
+CREATE TRIGGER trg_prevent_black_box_resurrection
+  BEFORE UPDATE ON public.black_box_entries
+  FOR EACH ROW
+  EXECUTE FUNCTION public.prevent_soft_deleted_row_resurrection();
+
+DROP TRIGGER IF EXISTS trg_prevent_connection_resurrection ON public.connections;
+CREATE TRIGGER trg_prevent_connection_resurrection
+  BEFORE UPDATE ON public.connections
+  FOR EACH ROW
+  EXECUTE FUNCTION public.prevent_soft_deleted_row_resurrection();
+
+CREATE OR REPLACE FUNCTION public.prevent_black_box_content_loss()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+  IF NEW.content IS NULL OR btrim(NEW.content) = '' THEN
+    IF TG_OP = 'UPDATE'
+      AND OLD.content IS NOT NULL
+      AND btrim(OLD.content) <> ''
+    THEN
+      NEW.content := OLD.content;
+      RETURN NEW;
+    END IF;
+
+    RAISE EXCEPTION USING
+      ERRCODE = '23514',
+      MESSAGE = 'black_box_content_required',
+      DETAIL = 'black_box_entries.content cannot be empty for new entries.',
+      HINT = 'Hydrate the outgoing BlackBox payload from IndexedDB or pull the current server row before retrying.';
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS protect_black_box_content_loss ON public.black_box_entries;
+CREATE TRIGGER protect_black_box_content_loss
+  BEFORE INSERT OR UPDATE ON public.black_box_entries
+  FOR EACH ROW
+  EXECUTE FUNCTION public.prevent_black_box_content_loss();
+
+REVOKE ALL ON FUNCTION public.prevent_black_box_content_loss() FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.prevent_black_box_content_loss() TO service_role;
+
+-- ============================================================
+-- Task attention sidecar overlay (2026-06-05)
+-- 使一次性初始化后的最终状态包含任务僚机字段、读取 RPC 与批量写入保护。
+-- ============================================================
+
+ALTER TABLE public.tasks
+  ADD COLUMN IF NOT EXISTS attention_meta jsonb;
+
+ALTER TABLE public.tasks
+  ADD COLUMN IF NOT EXISTS completed_at timestamptz;
+
+ALTER TABLE public.tasks
+  ALTER COLUMN cognitive_load DROP DEFAULT;
+
+COMMENT ON COLUMN public.tasks.attention_meta IS
+  '任务僚机注意事项元数据（JSONB）。仅解释任务自身，不参与流程图拓扑。';
+
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'tasks_attention_meta_size_check' AND conrelid = 'public.tasks'::regclass)
+  THEN ALTER TABLE public.tasks ADD CONSTRAINT tasks_attention_meta_size_check CHECK (attention_meta IS NULL OR pg_column_size(attention_meta) <= 262144);
+  END IF;
+END $$;
+
+CREATE OR REPLACE VIEW public.active_tasks WITH (security_invoker = true) AS
+SELECT
+  t.id,
+  t.project_id,
+  t.parent_id,
+  t.title,
+  t.content,
+  t.stage,
+  t."order",
+  t.rank,
+  t.status,
+  t.x,
+  t.y,
+  t.short_id,
+  t.priority,
+  t.due_date,
+  t.tags,
+  t.attachments,
+  t.deleted_at,
+  t.created_at,
+  t.updated_at,
+  t.completed_at,
+  t.expected_minutes,
+  t.cognitive_load,
+  t.wait_minutes,
+  t.parking_meta,
+  t.attention_meta
+FROM public.tasks t
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM public.task_tombstones tt
+    WHERE tt.task_id = t.id
+  )
+  AND t.deleted_at IS NULL;
+
+COMMENT ON VIEW public.active_tasks IS
+  'Tombstone-aware 任务加载视图，包含任务僚机 attention_meta 与规划字段。';
+
+REVOKE ALL ON TABLE public.active_tasks FROM anon;
+REVOKE INSERT, UPDATE, DELETE ON TABLE public.active_tasks FROM authenticated;
+GRANT SELECT ON TABLE public.active_tasks TO authenticated;
+GRANT ALL ON TABLE public.active_tasks TO service_role;
+
+CREATE OR REPLACE FUNCTION public.get_full_project_data(p_project_id uuid)
+RETURNS json
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $function$
+DECLARE
+  v_result json;
+BEGIN
+  IF NOT public.user_has_project_access(p_project_id) THEN
+    RAISE EXCEPTION 'Access denied to project %', p_project_id;
+  END IF;
+
+  SELECT json_build_object(
+    'project', (
+      SELECT row_to_json(p.*)
+      FROM (
+        SELECT id, owner_id, title, description, created_date, updated_at, deleted_at, version
+        FROM public.projects
+        WHERE id = p_project_id
+      ) p
+    ),
+    'tasks', COALESCE((
+      SELECT json_agg(row_to_json(t.*) ORDER BY t."order")
+      FROM (
+        SELECT
+          id,
+          project_id,
+          title,
+          content,
+          stage,
+          parent_id,
+          "order",
+          rank,
+          status,
+          x,
+          y,
+          updated_at,
+          deleted_at,
+          short_id,
+          attachments,
+          tags,
+          priority,
+          due_date,
+          expected_minutes,
+          cognitive_load,
+          wait_minutes,
+          created_at,
+          completed_at,
+          parking_meta,
+          attention_meta
+        FROM public.tasks
+        WHERE project_id = p_project_id
+      ) t
+    ), '[]'::json),
+    'connections', COALESCE((
+      SELECT json_agg(row_to_json(c.*))
+      FROM (
+        SELECT id, source_id, target_id, title, description, deleted_at, updated_at
+        FROM public.connections
+        WHERE project_id = p_project_id
+      ) c
+    ), '[]'::json),
+    'task_tombstones', COALESCE((
+      SELECT json_agg(task_id)
+      FROM public.task_tombstones
+      WHERE project_id = p_project_id
+    ), '[]'::json),
+    'connection_tombstones', COALESCE((
+      SELECT json_agg(connection_id)
+      FROM public.connection_tombstones
+      WHERE project_id = p_project_id
+    ), '[]'::json)
+  ) INTO v_result;
+
+  RETURN v_result;
+END;
+$function$;
+
+COMMENT ON FUNCTION public.get_full_project_data(uuid) IS
+  'Returns full project payload including task attention_meta for owner-accessible projects.';
+
+REVOKE ALL ON FUNCTION public.get_full_project_data(uuid) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.get_full_project_data(uuid) TO authenticated;
+
+CREATE OR REPLACE FUNCTION public.batch_upsert_tasks(
+  p_tasks jsonb[],
+  p_project_id uuid
+)
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'pg_catalog', 'pg_temp'
+AS $$
+DECLARE
+  v_count integer := 0;
+  v_task jsonb;
+  v_task_id uuid;
+  v_user_id uuid;
+  v_title text;
+  v_content text;
+  v_has_content boolean;
+  v_has_attachments boolean;
+  v_has_tags boolean;
+  v_has_attention_meta boolean;
+  v_priority text;
+  v_due_date timestamptz;
+  v_completed_at timestamptz;
+  v_cognitive text;
+  v_expected int;
+  v_wait int;
+  v_payload_updated timestamptz;
+  v_existing_updated timestamptz;
+  v_existing_stage int;
+  v_existing_parent uuid;
+  v_existing_deleted timestamptz;
+  v_existing_exists boolean;
+  v_is_stale boolean;
+  v_skew_grace constant interval := interval '1 second';
+  v_sync_mode text;
+  v_write_intent text;
+BEGIN
+  v_user_id := auth.uid();
+  IF v_user_id IS NULL THEN
+    RAISE EXCEPTION 'Unauthorized: not authenticated';
+  END IF;
+
+  SELECT value INTO v_sync_mode
+  FROM public.data_safety_flags
+  WHERE key = 'sync_mode';
+  v_sync_mode := COALESCE(v_sync_mode, 'normal');
+
+  IF v_sync_mode IN ('read_only', 'quarantine') THEN
+    RAISE EXCEPTION 'sync_write_blocked: %', v_sync_mode;
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1
+    FROM public.projects p
+    WHERE p.id = p_project_id
+      AND p.owner_id = v_user_id
+  ) THEN
+    RAISE EXCEPTION 'Unauthorized: not project owner';
+  END IF;
+
+  IF COALESCE(array_length(p_tasks, 1), 0) > 100 THEN
+    RAISE EXCEPTION 'task batch too large (max 100)';
+  END IF;
+
+  FOREACH v_task IN ARRAY p_tasks
+  LOOP
+    v_title := v_task->>'title';
+    v_content := v_task->>'content';
+    v_has_content := v_task ? 'content';
+    v_has_attachments := v_task ? 'attachments';
+    v_has_tags := v_task ? 'tags';
+    v_has_attention_meta := (v_task ? 'attentionMeta') OR (v_task ? 'attention_meta');
+    v_task_id := (v_task->>'id')::uuid;
+    v_write_intent := COALESCE(NULLIF(v_task->>'write_intent', ''), NULLIF(v_task->>'writeIntent', ''), 'task_full_upsert');
+
+    IF v_write_intent NOT IN ('task_full_upsert', 'task_text_update', 'task_structure_update', 'task_soft_delete', 'task_attachment_update') THEN
+      RAISE EXCEPTION 'Unsupported task write intent % for task %', v_write_intent, v_task->>'id';
+    END IF;
+
+    IF v_title IS NOT NULL AND length(v_title) > 10000 THEN
+      RAISE EXCEPTION 'Title too long (max 10000 chars) for task %', v_task->>'id';
+    END IF;
+    IF v_content IS NOT NULL AND length(v_content) > 1000000 THEN
+      RAISE EXCEPTION 'Content too long (max 1000000 chars) for task %', v_task->>'id';
+    END IF;
+
+    v_expected := NULLIF(COALESCE(v_task->>'expectedMinutes', v_task->>'expected_minutes'), '')::integer;
+    v_wait := NULLIF(COALESCE(v_task->>'waitMinutes', v_task->>'wait_minutes'), '')::integer;
+    v_cognitive := NULLIF(COALESCE(v_task->>'cognitiveLoad', v_task->>'cognitive_load'), '');
+    v_priority := NULLIF(v_task->>'priority', '');
+    v_due_date := NULLIF(COALESCE(v_task->>'dueDate', v_task->>'due_date'), '')::timestamptz;
+    v_completed_at := NULLIF(COALESCE(v_task->>'completedAt', v_task->>'completed_at'), '')::timestamptz;
+
+    IF v_expected IS NOT NULL AND (v_expected <= 0 OR v_expected > 14400) THEN
+      RAISE EXCEPTION 'expected_minutes out of range (1-14400) for task %', v_task->>'id';
+    END IF;
+    IF v_wait IS NOT NULL AND (v_wait <= 0 OR v_wait > 14400) THEN
+      RAISE EXCEPTION 'wait_minutes out of range (1-14400) for task %', v_task->>'id';
+    END IF;
+    IF v_cognitive IS NOT NULL AND v_cognitive NOT IN ('low', 'high') THEN
+      RAISE EXCEPTION 'cognitive_load must be low or high for task %', v_task->>'id';
+    END IF;
+
+    v_payload_updated := NULLIF(v_task->>'updated_at', '')::timestamptz;
+    IF v_payload_updated IS NULL THEN
+      v_payload_updated := NULLIF(v_task->>'updatedAt', '')::timestamptz;
+    END IF;
+
+    v_existing_exists := FALSE;
+    SELECT TRUE, t.updated_at, t.stage, t.parent_id, t.deleted_at
+      INTO v_existing_exists, v_existing_updated, v_existing_stage, v_existing_parent, v_existing_deleted
+      FROM public.tasks t
+      WHERE t.id = v_task_id
+        AND t.project_id = p_project_id
+      FOR UPDATE;
+
+    v_is_stale := COALESCE(
+      v_existing_exists
+        AND v_payload_updated IS NOT NULL
+        AND v_existing_updated IS NOT NULL
+        AND v_existing_updated > v_payload_updated + v_skew_grace,
+      FALSE
+    );
+
+    IF v_existing_exists AND v_payload_updated IS NULL THEN
+      CONTINUE;
+    END IF;
+
+    IF v_is_stale THEN
+      CONTINUE;
+    END IF;
+
+    INSERT INTO public.tasks AS existing (
+      id, project_id, title, content, stage, parent_id,
+      "order", rank, status, x, y, short_id, deleted_at,
+      attachments, tags, priority, due_date, completed_at,
+      expected_minutes, cognitive_load, wait_minutes, parking_meta, attention_meta
+    )
+    VALUES (
+      v_task_id,
+      p_project_id,
+      v_title,
+      CASE WHEN v_has_content THEN v_content ELSE '' END,
+      NULLIF(v_task->>'stage', '')::integer,
+      NULLIF(COALESCE(v_task->>'parentId', v_task->>'parent_id'), '')::uuid,
+      COALESCE((v_task->>'order')::integer, 0),
+      COALESCE((v_task->>'rank')::numeric, 10000),
+      COALESCE(v_task->>'status', 'active'),
+      COALESCE((v_task->>'x')::numeric, 0),
+      COALESCE((v_task->>'y')::numeric, 0),
+      COALESCE(v_task->>'shortId', v_task->>'short_id'),
+      NULLIF(COALESCE(v_task->>'deletedAt', v_task->>'deleted_at'), '')::timestamptz,
+      CASE WHEN v_has_attachments THEN COALESCE(v_task->'attachments', '[]'::jsonb) ELSE '[]'::jsonb END,
+      CASE WHEN v_has_tags THEN COALESCE(v_task->'tags', '[]'::jsonb) ELSE '[]'::jsonb END,
+      v_priority,
+      v_due_date,
+      v_completed_at,
+      v_expected,
+      v_cognitive,
+      v_wait,
+      COALESCE(v_task->'parkingMeta', v_task->'parking_meta'),
+      COALESCE(v_task->'attentionMeta', v_task->'attention_meta')
+    )
+    ON CONFLICT (id) DO UPDATE SET
+      title = CASE WHEN v_write_intent IN ('task_structure_update', 'task_soft_delete', 'task_attachment_update') THEN existing.title ELSE EXCLUDED.title END,
+      content = CASE
+        WHEN v_write_intent IN ('task_structure_update', 'task_soft_delete', 'task_attachment_update') THEN existing.content
+        WHEN v_has_content THEN EXCLUDED.content
+        ELSE existing.content
+      END,
+      stage = CASE WHEN v_write_intent IN ('task_text_update', 'task_soft_delete', 'task_attachment_update') THEN existing.stage ELSE EXCLUDED.stage END,
+      parent_id = CASE WHEN v_write_intent IN ('task_text_update', 'task_soft_delete', 'task_attachment_update') THEN existing.parent_id ELSE EXCLUDED.parent_id END,
+      deleted_at = CASE
+        WHEN v_write_intent = 'task_soft_delete' THEN EXCLUDED.deleted_at
+        WHEN v_write_intent IN ('task_text_update', 'task_structure_update', 'task_attachment_update') THEN existing.deleted_at
+        ELSE EXCLUDED.deleted_at
+      END,
+      "order" = CASE WHEN v_write_intent IN ('task_text_update', 'task_attachment_update') THEN existing."order" ELSE EXCLUDED."order" END,
+      rank = CASE WHEN v_write_intent IN ('task_text_update', 'task_attachment_update') THEN existing.rank ELSE EXCLUDED.rank END,
+      status = CASE WHEN v_write_intent IN ('task_structure_update', 'task_attachment_update') THEN existing.status ELSE EXCLUDED.status END,
+      x = CASE WHEN v_write_intent IN ('task_text_update', 'task_attachment_update') THEN existing.x ELSE EXCLUDED.x END,
+      y = CASE WHEN v_write_intent IN ('task_text_update', 'task_attachment_update') THEN existing.y ELSE EXCLUDED.y END,
+      short_id = CASE WHEN v_write_intent = 'task_attachment_update' THEN existing.short_id ELSE EXCLUDED.short_id END,
+      attachments = CASE
+        WHEN NOT v_has_attachments THEN existing.attachments
+        WHEN v_write_intent IN ('task_text_update', 'task_structure_update', 'task_soft_delete') THEN existing.attachments
+        ELSE EXCLUDED.attachments
+      END,
+      tags = CASE
+        WHEN NOT v_has_tags THEN existing.tags
+        WHEN v_write_intent IN ('task_text_update', 'task_structure_update', 'task_soft_delete', 'task_attachment_update') THEN existing.tags
+        ELSE EXCLUDED.tags
+      END,
+      priority = CASE WHEN v_write_intent IN ('task_text_update', 'task_structure_update', 'task_attachment_update') THEN existing.priority ELSE EXCLUDED.priority END,
+      due_date = CASE WHEN v_write_intent IN ('task_text_update', 'task_structure_update', 'task_attachment_update') THEN existing.due_date ELSE EXCLUDED.due_date END,
+      completed_at = CASE WHEN v_write_intent IN ('task_text_update', 'task_structure_update', 'task_attachment_update') THEN existing.completed_at ELSE EXCLUDED.completed_at END,
+      expected_minutes = CASE WHEN v_write_intent IN ('task_structure_update', 'task_attachment_update') THEN existing.expected_minutes ELSE EXCLUDED.expected_minutes END,
+      cognitive_load = CASE WHEN v_write_intent IN ('task_structure_update', 'task_attachment_update') THEN existing.cognitive_load ELSE EXCLUDED.cognitive_load END,
+      wait_minutes = CASE WHEN v_write_intent IN ('task_structure_update', 'task_attachment_update') THEN existing.wait_minutes ELSE EXCLUDED.wait_minutes END,
+      parking_meta = CASE WHEN v_write_intent IN ('task_structure_update', 'task_attachment_update') THEN existing.parking_meta ELSE EXCLUDED.parking_meta END,
+      attention_meta = CASE
+        WHEN NOT v_has_attention_meta THEN existing.attention_meta
+        WHEN v_write_intent IN ('task_structure_update', 'task_soft_delete', 'task_attachment_update') THEN existing.attention_meta
+        ELSE EXCLUDED.attention_meta
+      END,
+      updated_at = now()
+    WHERE existing.project_id = p_project_id;
+
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'Task project mismatch';
+    END IF;
+
+    v_count := v_count + 1;
+  END LOOP;
+
+  RETURN v_count;
+END;
+$$;
+
+COMMENT ON FUNCTION public.batch_upsert_tasks(jsonb[], uuid) IS
+  'Owner-only batch upsert with stale-payload skip, sync freeze checks, missing-content guard, attachment payload sync, transitional write intents, and task attention_meta support. Returns rows actually applied.';
+
+REVOKE ALL ON FUNCTION public.batch_upsert_tasks(jsonb[], uuid) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.batch_upsert_tasks(jsonb[], uuid) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.batch_upsert_tasks(jsonb[], uuid) TO service_role;
+
+CREATE OR REPLACE FUNCTION public.sync_check_protocol()
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY INVOKER
+STABLE
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_min INTEGER;
+  v_epoch BIGINT;
+BEGIN
+  SELECT min_protocol_version, deployment_epoch
+    INTO v_min, v_epoch
+    FROM public.sync_protocol_state
+    WHERE scope = 'global';
+  RETURN jsonb_build_object(
+    'minProtocolVersion', COALESCE(v_min, 1),
+    'deploymentEpoch', COALESCE(v_epoch, 0)
+  );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.sync_check_protocol() FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.sync_check_protocol() TO authenticated;
+
+CREATE OR REPLACE FUNCTION public.sync_extract_local_updated(payload JSONB, entity_key TEXT)
+RETURNS TIMESTAMPTZ
+LANGUAGE sql
+IMMUTABLE
+SET search_path = public, pg_temp
+AS $$
+  SELECT NULLIF(
+    COALESCE(
+      payload->entity_key->>'updated_at',
+      payload->entity_key->>'updatedAt',
+      payload->>'base_updated_at'
+    ),
+    ''
+  )::TIMESTAMPTZ;
+$$;
+
+REVOKE ALL ON FUNCTION public.sync_extract_local_updated(JSONB, TEXT) FROM PUBLIC, anon;
+
+CREATE OR REPLACE FUNCTION public.sync_upsert_task(payload JSONB)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+  v_user UUID := auth.uid();
+  v_op_id UUID := (payload->>'operation_id')::UUID;
+  v_protocol INTEGER := COALESCE((payload->>'protocol_version')::INTEGER, 0);
+  v_local_updated TIMESTAMPTZ := public.sync_extract_local_updated(payload, 'task');
+  v_client_epoch BIGINT := COALESCE((payload->>'deployment_epoch')::BIGINT, 0);
+  v_deployment_target TEXT := payload->>'deployment_target';
+  v_task JSONB := payload->'task';
+  v_task_id UUID := (v_task->>'id')::UUID;
+  v_project_id UUID := (v_task->>'project_id')::UUID;
+  v_client_git TEXT := payload->>'client_git_sha';
+  v_client_origin TEXT := payload->>'client_origin';
+  v_payload_digest TEXT := encode(extensions.digest(payload::TEXT, 'sha256'), 'hex');
+  v_min_protocol INTEGER;
+  v_min_epoch BIGINT;
+  v_existing_owner UUID;
+  v_existing_project_id UUID;
+  v_existing_updated TIMESTAMPTZ;
+  v_existing_stage INTEGER;
+  v_existing_parent UUID;
+  v_existing_content TEXT;
+  v_existing_title TEXT;
+  v_existing_deleted TIMESTAMPTZ;
+  v_existing_attention_meta JSONB;
+  v_payload_stage INTEGER;
+  v_payload_parent UUID;
+  v_payload_deleted TIMESTAMPTZ;
+  v_task_for_write JSONB;
+  v_log_existing RECORD;
+  v_result JSONB;
+  v_written_updated TIMESTAMPTZ;
+  v_sync_mode TEXT;
+  v_quarantine_id BIGINT;
+  v_origin_unverified BOOLEAN := true;
+  v_changed_fields JSONB := '[]'::jsonb;
+  v_audit_id BIGINT;
+  v_skew_grace CONSTANT INTERVAL := INTERVAL '1 second';
+BEGIN
+  IF v_user IS NULL THEN
+    RETURN jsonb_build_object('status', 'unauthorized', 'reason', 'no auth');
+  END IF;
+  IF v_op_id IS NULL OR v_task_id IS NULL OR v_project_id IS NULL THEN
+    RETURN jsonb_build_object('status', 'unauthorized', 'reason', 'missing required fields');
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(hashtext('sync_upsert_task'), hashtext(v_task_id::TEXT));
+
+  SELECT user_id, payload_digest, result_payload, status, reject_reason
+    INTO v_log_existing
+    FROM public.sync_operation_log
+    WHERE operation_id = v_op_id;
+  IF FOUND THEN
+    IF v_log_existing.user_id <> v_user THEN
+      RETURN jsonb_build_object('status', 'unauthorized', 'reason', 'operation_id owned by other user');
+    END IF;
+    IF v_log_existing.payload_digest IS NOT NULL
+      AND v_log_existing.payload_digest IS DISTINCT FROM v_payload_digest
+    THEN
+      RETURN jsonb_build_object(
+        'status', 'unauthorized',
+        'reason', 'operation_id_payload_mismatch',
+        'operation_id', v_op_id,
+        'existing_payload_digest', v_log_existing.payload_digest,
+        'payload_digest', v_payload_digest
+      );
+    END IF;
+    RETURN COALESCE(
+      v_log_existing.result_payload,
+      jsonb_build_object('status', v_log_existing.status, 'reason', v_log_existing.reject_reason)
+    );
+  END IF;
+
+  SELECT min_protocol_version, deployment_epoch INTO v_min_protocol, v_min_epoch
+    FROM public.sync_protocol_state WHERE scope = 'global';
+  IF v_protocol < COALESCE(v_min_protocol, 1) OR v_client_epoch < COALESCE(v_min_epoch, 0) THEN
+    v_result := jsonb_build_object(
+      'status', 'client-version-rejected',
+      'decision', 'rejected',
+      'reason', CASE
+        WHEN v_protocol < COALESCE(v_min_protocol, 1) THEN 'protocol_version_below_min'
+        ELSE 'deployment_epoch_below_min'
+      END,
+      'minProtocolVersion', v_min_protocol,
+      'deploymentEpoch', COALESCE(v_min_epoch, 0)
+    );
+
+    INSERT INTO public.sync_operation_log (operation_id, user_id, entity_type, entity_id,
+      status, reject_reason, protocol_version, deployment_epoch, deployment_target, client_git_sha, client_origin,
+      payload_digest, result_payload)
+    VALUES (v_op_id, v_user, 'task', v_task_id, 'client-version-rejected',
+      v_result->>'reason', v_protocol, v_client_epoch, v_deployment_target, v_client_git, v_client_origin,
+      v_payload_digest, v_result);
+    RETURN v_result;
+  END IF;
+
+  SELECT COALESCE(value, 'normal') INTO v_sync_mode
+    FROM public.data_safety_flags
+    WHERE key = 'sync_mode';
+  v_sync_mode := COALESCE(v_sync_mode, 'normal');
+
+  SELECT NOT EXISTS (
+    SELECT 1
+    FROM public.sync_trusted_client_deployments d
+    WHERE d.client_git_sha = v_client_git
+      AND d.deployment_epoch = v_client_epoch
+      AND (d.deployment_target IS NULL OR d.deployment_target = v_deployment_target)
+      AND d.retired_at IS NULL
+  ) INTO v_origin_unverified;
+
+  v_origin_unverified := v_origin_unverified
+    OR v_client_git IS NULL OR btrim(v_client_git) = ''
+    OR v_client_origin IS NULL OR btrim(v_client_origin) = '';
+
+  SELECT p.owner_id INTO v_existing_owner FROM public.projects p WHERE p.id = v_project_id;
+  IF v_existing_owner IS DISTINCT FROM v_user THEN
+    v_result := jsonb_build_object('status', 'unauthorized', 'decision', 'rejected', 'reason', 'project_not_owned');
+    INSERT INTO public.sync_operation_log (operation_id, user_id, entity_type, entity_id,
+      status, reject_reason, protocol_version, deployment_epoch, deployment_target, client_git_sha, client_origin,
+      payload_digest, result_payload)
+    VALUES (v_op_id, v_user, 'task', v_task_id, 'unauthorized',
+      'project_not_owned', v_protocol, v_client_epoch, v_deployment_target, v_client_git, v_client_origin,
+      v_payload_digest, v_result);
+    RETURN v_result;
+  END IF;
+
+  SELECT t.project_id, p.owner_id, t.updated_at, t.stage, t.parent_id, t.content, t.title, t.deleted_at, t.attention_meta
+    INTO v_existing_project_id, v_existing_owner, v_existing_updated, v_existing_stage,
+      v_existing_parent, v_existing_content, v_existing_title, v_existing_deleted, v_existing_attention_meta
+    FROM public.tasks t
+    JOIN public.projects p ON p.id = t.project_id
+    WHERE t.id = v_task_id
+    FOR UPDATE;
+
+  IF v_existing_project_id IS NOT NULL
+    AND (v_existing_project_id <> v_project_id OR v_existing_owner IS DISTINCT FROM v_user)
+  THEN
+    v_result := jsonb_build_object('status', 'unauthorized', 'decision', 'rejected', 'reason', 'task_owned_by_other_project');
+    INSERT INTO public.sync_operation_log (operation_id, user_id, entity_type, entity_id,
+      status, reject_reason, protocol_version, deployment_epoch, deployment_target, client_git_sha, client_origin,
+      payload_digest, result_payload)
+    VALUES (v_op_id, v_user, 'task', v_task_id, 'unauthorized',
+      'task_owned_by_other_project', v_protocol, v_client_epoch, v_deployment_target, v_client_git, v_client_origin,
+      v_payload_digest, v_result);
+    RETURN v_result;
+  END IF;
+
+  v_payload_stage := NULLIF(v_task->>'stage', '')::INTEGER;
+  v_payload_parent := NULLIF(COALESCE(v_task->>'parentId', v_task->>'parent_id'), '')::UUID;
+  v_payload_deleted := NULLIF(COALESCE(v_task->>'deletedAt', v_task->>'deleted_at'), '')::TIMESTAMPTZ;
+  v_task_for_write := v_task;
+  IF v_local_updated IS NOT NULL
+    AND NOT (v_task_for_write ? 'updated_at')
+    AND NOT (v_task_for_write ? 'updatedAt')
+  THEN
+    v_task_for_write := jsonb_set(v_task_for_write, '{updated_at}', to_jsonb(v_local_updated::TEXT), true);
+  END IF;
+
+  IF v_existing_project_id IS NULL THEN
+    v_changed_fields := jsonb_build_array('insert');
+  ELSE
+    IF v_existing_stage IS DISTINCT FROM v_payload_stage THEN
+      v_changed_fields := v_changed_fields || jsonb_build_array('stage');
+    END IF;
+    IF v_existing_parent IS DISTINCT FROM v_payload_parent THEN
+      v_changed_fields := v_changed_fields || jsonb_build_array('parent_id');
+    END IF;
+    IF (v_task ? 'content') AND v_existing_content IS DISTINCT FROM (v_task->>'content') THEN
+      v_changed_fields := v_changed_fields || jsonb_build_array('content');
+    END IF;
+    IF v_existing_title IS DISTINCT FROM (v_task->>'title') THEN
+      v_changed_fields := v_changed_fields || jsonb_build_array('title');
+    END IF;
+    IF v_existing_deleted IS DISTINCT FROM v_payload_deleted THEN
+      v_changed_fields := v_changed_fields || jsonb_build_array('deleted_at');
+    END IF;
+    IF ((v_task ? 'attentionMeta') OR (v_task ? 'attention_meta'))
+      AND v_existing_attention_meta IS DISTINCT FROM COALESCE(v_task->'attentionMeta', v_task->'attention_meta')
+    THEN
+      v_changed_fields := v_changed_fields || jsonb_build_array('attention_meta');
+    END IF;
+  END IF;
+
+  IF v_existing_project_id IS NOT NULL AND v_local_updated IS NULL THEN
+    IF v_sync_mode = 'quarantine' THEN
+      v_quarantine_id := public.record_sync_write_quarantine(
+        v_op_id, v_user, 'task', v_task_id, v_client_git, v_client_origin, 'missing_task_timestamp', payload
+      );
+    END IF;
+
+    v_result := jsonb_build_object(
+      'status', CASE WHEN v_quarantine_id IS NULL THEN 'remote-newer' ELSE 'quarantined' END,
+      'decision', CASE WHEN v_quarantine_id IS NULL THEN 'rejected' ELSE 'quarantined' END,
+      'reason', 'missing_task_timestamp',
+      'quarantine_id', v_quarantine_id,
+      'remote_updated_at', v_existing_updated,
+      'changed_fields', v_changed_fields
+    );
+
+    INSERT INTO public.sync_operation_log (operation_id, user_id, entity_type, entity_id,
+      status, reject_reason, protocol_version, deployment_epoch, deployment_target, client_git_sha, client_origin,
+      payload_digest, result_payload)
+    VALUES (v_op_id, v_user, 'task', v_task_id, CASE WHEN v_quarantine_id IS NULL THEN 'remote-newer' ELSE 'quarantined' END,
+      'missing_task_timestamp', v_protocol, v_client_epoch, v_deployment_target, v_client_git, v_client_origin,
+      v_payload_digest, v_result);
+
+    RETURN v_result;
+  END IF;
+
+  IF v_sync_mode = 'read_only' THEN
+    v_result := jsonb_build_object(
+      'status', 'remote-newer',
+      'decision', 'rejected',
+      'reason', 'sync_read_only',
+      'remote_updated_at', v_existing_updated,
+      'changed_fields', v_changed_fields
+    );
+
+    INSERT INTO public.sync_operation_log (operation_id, user_id, entity_type, entity_id,
+      status, reject_reason, protocol_version, deployment_epoch, deployment_target, client_git_sha, client_origin,
+      payload_digest, result_payload)
+    VALUES (v_op_id, v_user, 'task', v_task_id, 'remote-newer',
+      'sync_read_only', v_protocol, v_client_epoch, v_deployment_target, v_client_git, v_client_origin,
+      v_payload_digest, v_result);
+
+    RETURN v_result;
+  END IF;
+
+  IF v_sync_mode = 'quarantine' THEN
+    v_quarantine_id := public.record_sync_write_quarantine(
+      v_op_id, v_user, 'task', v_task_id, v_client_git, v_client_origin, 'sync_quarantine', payload
+    );
+    v_result := jsonb_build_object(
+      'status', 'quarantined',
+      'decision', 'quarantined',
+      'reason', 'sync_quarantine',
+      'quarantine_id', v_quarantine_id,
+      'changed_fields', v_changed_fields
+    );
+
+    INSERT INTO public.sync_operation_log (operation_id, user_id, entity_type, entity_id,
+      status, reject_reason, protocol_version, deployment_epoch, deployment_target, client_git_sha, client_origin,
+      payload_digest, result_payload)
+    VALUES (v_op_id, v_user, 'task', v_task_id, 'quarantined',
+      'sync_quarantine', v_protocol, v_client_epoch, v_deployment_target, v_client_git, v_client_origin,
+      v_payload_digest, v_result);
+
+    RETURN v_result;
+  END IF;
+
+  IF v_existing_project_id IS NOT NULL
+    AND v_local_updated IS NOT NULL
+    AND v_existing_updated IS NOT NULL
+    AND v_existing_updated > v_local_updated + v_skew_grace
+  THEN
+    v_result := jsonb_build_object(
+      'status', 'remote-newer',
+      'decision', 'rejected',
+      'reason', 'stale_task_payload',
+      'remote_updated_at', v_existing_updated,
+      'changed_fields', v_changed_fields
+    );
+
+    INSERT INTO public.sync_operation_log (operation_id, user_id, entity_type, entity_id,
+      status, reject_reason, protocol_version, deployment_epoch, deployment_target, client_git_sha, client_origin,
+      payload_digest, result_payload)
+    VALUES (v_op_id, v_user, 'task', v_task_id, 'remote-newer',
+      'stale_task_payload', v_protocol, v_client_epoch, v_deployment_target, v_client_git, v_client_origin,
+      v_payload_digest, v_result);
+
+    RETURN v_result;
+  END IF;
+
+  PERFORM set_config('app.operation_id', v_op_id::TEXT, true);
+  PERFORM set_config('app.client_git_sha', COALESCE(v_client_git, ''), true);
+  PERFORM set_config('app.client_origin', COALESCE(v_client_origin, ''), true);
+  PERFORM set_config('app.deployment_epoch', v_client_epoch::TEXT, true);
+  PERFORM set_config('app.payload_digest', v_payload_digest, true);
+  PERFORM set_config('app.origin_unverified', v_origin_unverified::TEXT, true);
+
+  PERFORM public.batch_upsert_tasks(ARRAY[v_task_for_write], v_project_id);
+  SELECT t.updated_at INTO v_written_updated FROM public.tasks t WHERE t.id = v_task_id;
+  SELECT a.id INTO v_audit_id
+  FROM public.task_change_audit a
+  WHERE a.operation_id = v_op_id
+    AND a.task_id = v_task_id
+  ORDER BY a.id DESC
+  LIMIT 1;
+
+  v_result := jsonb_build_object(
+    'status', 'applied',
+    'decision', 'applied',
+    'reason', CASE
+      WHEN v_sync_mode = 'audit_only' THEN 'audit_only'
+      WHEN v_existing_project_id IS NULL THEN 'insert'
+      ELSE 'fresh-local-update'
+    END,
+    'operation_id', v_op_id,
+    'task_id', v_task_id,
+    'updated_at', v_written_updated,
+    'changed_fields', v_changed_fields,
+    'audit_id', v_audit_id,
+    'origin_unverified', v_origin_unverified
+  );
+
+  INSERT INTO public.sync_operation_log (operation_id, user_id, entity_type, entity_id,
+    status, protocol_version, deployment_epoch, deployment_target, client_git_sha, client_origin,
+    payload_digest, result_payload)
+  VALUES (v_op_id, v_user, 'task', v_task_id, 'applied',
+    v_protocol, v_client_epoch, v_deployment_target, v_client_git, v_client_origin,
+    v_payload_digest, v_result);
+
+  RETURN v_result;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.sync_upsert_connection(payload JSONB)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+  v_user UUID := auth.uid();
+  v_op_id UUID := (payload->>'operation_id')::UUID;
+  v_protocol INTEGER := COALESCE((payload->>'protocol_version')::INTEGER, 0);
+  v_local_updated TIMESTAMPTZ := public.sync_extract_local_updated(payload, 'connection');
+  v_client_epoch BIGINT := COALESCE((payload->>'deployment_epoch')::BIGINT, 0);
+  v_deployment_target TEXT := payload->>'deployment_target';
+  v_client_git TEXT := payload->>'client_git_sha';
+  v_client_origin TEXT := payload->>'client_origin';
+  v_payload_digest TEXT := encode(extensions.digest(payload::TEXT, 'sha256'), 'hex');
+  v_conn JSONB := payload->'connection';
+  v_local_deleted TIMESTAMPTZ := NULLIF(payload->'connection'->>'deleted_at', '')::TIMESTAMPTZ;
+  v_conn_id UUID := (v_conn->>'id')::UUID;
+  v_project_id UUID := (v_conn->>'project_id')::UUID;
+  v_min_protocol INTEGER;
+  v_min_epoch BIGINT;
+  v_local_freshness TIMESTAMPTZ;
+  v_same_id_tombstone_deleted TIMESTAMPTZ;
+  v_endpoint_tombstone_deleted TIMESTAMPTZ;
+  v_existing_owner UUID;
+  v_existing_project_id UUID;
+  v_existing_updated TIMESTAMPTZ;
+  v_existing_source UUID;
+  v_existing_target UUID;
+  v_existing_deleted TIMESTAMPTZ;
+  v_is_stale BOOLEAN;
+  v_skew_grace CONSTANT INTERVAL := INTERVAL '1 second';
+  v_log_existing RECORD;
+  v_result JSONB;
+  v_written_updated TIMESTAMPTZ;
+BEGIN
+  IF v_user IS NULL OR v_op_id IS NULL OR v_conn_id IS NULL OR v_project_id IS NULL THEN
+    RETURN jsonb_build_object('status', 'unauthorized', 'reason', 'missing required fields');
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(hashtext('sync_upsert_connection'), hashtext(v_conn_id::TEXT));
+  PERFORM set_config('app.payload_digest', v_payload_digest, true);
+
+  SELECT user_id, payload_digest, result_payload, status, reject_reason
+    INTO v_log_existing
+    FROM public.sync_operation_log
+    WHERE operation_id = v_op_id;
+  IF FOUND THEN
+    IF v_log_existing.user_id <> v_user THEN
+      RETURN jsonb_build_object('status', 'unauthorized', 'reason', 'operation_id owned by other user');
+    END IF;
+    IF v_log_existing.payload_digest IS NOT NULL
+      AND v_log_existing.payload_digest IS DISTINCT FROM v_payload_digest
+    THEN
+      RETURN jsonb_build_object(
+        'status', 'unauthorized',
+        'reason', 'operation_id_payload_mismatch',
+        'operation_id', v_op_id,
+        'existing_payload_digest', v_log_existing.payload_digest,
+        'payload_digest', v_payload_digest
+      );
+    END IF;
+    RETURN COALESCE(
+      v_log_existing.result_payload,
+      jsonb_build_object('status', v_log_existing.status, 'reason', v_log_existing.reject_reason)
+    );
+  END IF;
+
+  SELECT min_protocol_version, deployment_epoch INTO v_min_protocol, v_min_epoch
+    FROM public.sync_protocol_state WHERE scope = 'global';
+  IF v_protocol < COALESCE(v_min_protocol, 1) OR v_client_epoch < COALESCE(v_min_epoch, 0) THEN
+    INSERT INTO public.sync_operation_log (operation_id, user_id, entity_type, entity_id,
+      status, reject_reason, protocol_version, deployment_epoch, deployment_target, client_git_sha, client_origin)
+    VALUES (v_op_id, v_user, 'connection', v_conn_id, 'client-version-rejected',
+      CASE
+        WHEN v_protocol < COALESCE(v_min_protocol, 1) THEN 'protocol_version_below_min'
+        ELSE 'deployment_epoch_below_min'
+      END,
+      v_protocol, v_client_epoch, v_deployment_target, v_client_git, v_client_origin);
+    RETURN jsonb_build_object(
+      'status', 'client-version-rejected',
+      'minProtocolVersion', v_min_protocol,
+      'deploymentEpoch', COALESCE(v_min_epoch, 0)
+    );
+  END IF;
+
+  SELECT p.owner_id INTO v_existing_owner FROM public.projects p WHERE p.id = v_project_id;
+  IF v_existing_owner IS DISTINCT FROM v_user THEN
+    INSERT INTO public.sync_operation_log (operation_id, user_id, entity_type, entity_id,
+      status, reject_reason, protocol_version, deployment_epoch, deployment_target, client_git_sha, client_origin)
+    VALUES (v_op_id, v_user, 'connection', v_conn_id, 'unauthorized',
+      'project_not_owned', v_protocol, v_client_epoch, v_deployment_target, v_client_git, v_client_origin);
+    RETURN jsonb_build_object('status', 'unauthorized', 'reason', 'project_not_owned');
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1
+    FROM public.tasks source_task
+    JOIN public.tasks target_task ON target_task.id = (v_conn->>'target_id')::UUID
+    WHERE source_task.id = (v_conn->>'source_id')::UUID
+      AND source_task.project_id = v_project_id
+      AND target_task.project_id = v_project_id
+      AND source_task.deleted_at IS NULL
+      AND target_task.deleted_at IS NULL
+  ) THEN
+    INSERT INTO public.sync_operation_log (operation_id, user_id, entity_type, entity_id,
+      status, reject_reason, protocol_version, deployment_epoch, deployment_target, client_git_sha, client_origin)
+    VALUES (v_op_id, v_user, 'connection', v_conn_id, 'unauthorized',
+      'connection_endpoint_not_in_project', v_protocol, v_client_epoch, v_deployment_target, v_client_git, v_client_origin);
+    RETURN jsonb_build_object('status', 'unauthorized', 'reason', 'connection_endpoint_not_in_project');
+  END IF;
+
+  v_local_freshness := GREATEST(
+    COALESCE(v_local_updated, '-infinity'::TIMESTAMPTZ),
+    COALESCE(v_local_deleted, '-infinity'::TIMESTAMPTZ)
+  );
+
+  SELECT ct.deleted_at INTO v_same_id_tombstone_deleted
+    FROM public.connection_tombstones ct
+    WHERE ct.connection_id = v_conn_id
+    LIMIT 1;
+
+  IF v_same_id_tombstone_deleted IS NOT NULL THEN
+    INSERT INTO public.sync_operation_log (operation_id, user_id, entity_type, entity_id,
+      status, reject_reason, protocol_version, deployment_epoch, deployment_target, client_git_sha, client_origin)
+    VALUES (v_op_id, v_user, 'connection', v_conn_id, 'remote-newer',
+      'connection_tombstone', v_protocol, v_client_epoch, v_deployment_target, v_client_git, v_client_origin);
+    RETURN jsonb_build_object(
+      'status', 'remote-newer',
+      'remote_updated_at', v_same_id_tombstone_deleted,
+      'reason', 'connection_tombstone'
+    );
+  END IF;
+
+  SELECT ct.deleted_at INTO v_endpoint_tombstone_deleted
+    FROM public.connection_tombstones ct
+    WHERE ct.project_id = v_project_id
+      AND ct.source_id = (v_conn->>'source_id')::UUID
+      AND ct.target_id = (v_conn->>'target_id')::UUID
+    ORDER BY ct.deleted_at DESC
+    LIMIT 1;
+
+  IF v_endpoint_tombstone_deleted IS NOT NULL AND v_endpoint_tombstone_deleted >= v_local_freshness THEN
+    INSERT INTO public.sync_operation_log (operation_id, user_id, entity_type, entity_id,
+      status, reject_reason, protocol_version, deployment_epoch, deployment_target, client_git_sha, client_origin)
+    VALUES (v_op_id, v_user, 'connection', v_conn_id, 'remote-newer',
+      'endpoint_tombstone', v_protocol, v_client_epoch, v_deployment_target, v_client_git, v_client_origin);
+    RETURN jsonb_build_object(
+      'status', 'remote-newer',
+      'remote_updated_at', v_endpoint_tombstone_deleted,
+      'reason', 'endpoint_tombstone'
+    );
+  END IF;
+
+  SELECT ct.deleted_at INTO v_endpoint_tombstone_deleted
+    FROM public.connection_tombstones ct
+    WHERE ct.project_id = v_project_id
+      AND ct.source_id IS NULL
+      AND ct.target_id IS NULL
+    ORDER BY ct.deleted_at DESC
+    LIMIT 1;
+
+  IF v_endpoint_tombstone_deleted IS NOT NULL AND v_endpoint_tombstone_deleted >= v_local_freshness THEN
+    INSERT INTO public.sync_operation_log (operation_id, user_id, entity_type, entity_id,
+      status, reject_reason, protocol_version, deployment_epoch, deployment_target, client_git_sha, client_origin)
+    VALUES (v_op_id, v_user, 'connection', v_conn_id, 'remote-newer',
+      'legacy_endpointless_tombstone', v_protocol, v_client_epoch, v_deployment_target, v_client_git, v_client_origin);
+    RETURN jsonb_build_object(
+      'status', 'remote-newer',
+      'remote_updated_at', v_endpoint_tombstone_deleted,
+      'reason', 'legacy_endpointless_tombstone'
+    );
+  END IF;
+
+  SELECT c.project_id, p.owner_id, c.updated_at, c.source_id, c.target_id, c.deleted_at
+    INTO v_existing_project_id, v_existing_owner, v_existing_updated, v_existing_source, v_existing_target, v_existing_deleted
+    FROM public.connections c
+    JOIN public.projects p ON p.id = c.project_id
+    WHERE c.id = v_conn_id
+    FOR UPDATE;
+
+  IF v_existing_project_id IS NOT NULL
+    AND (v_existing_project_id <> v_project_id OR v_existing_owner IS DISTINCT FROM v_user)
+  THEN
+    INSERT INTO public.sync_operation_log (operation_id, user_id, entity_type, entity_id,
+      status, reject_reason, protocol_version, deployment_epoch, deployment_target, client_git_sha, client_origin)
+    VALUES (v_op_id, v_user, 'connection', v_conn_id, 'unauthorized',
+      'connection_owned_by_other_project', v_protocol, v_client_epoch, v_deployment_target, v_client_git, v_client_origin);
+    RETURN jsonb_build_object('status', 'unauthorized', 'reason', 'connection_owned_by_other_project');
+  END IF;
+
+  v_is_stale := COALESCE(
+    v_existing_updated IS NOT NULL
+      AND v_local_updated IS NOT NULL
+      AND v_existing_updated > v_local_updated + v_skew_grace,
+    FALSE
+  );
+
+  INSERT INTO public.connections AS c (id, project_id, source_id, target_id, title, description, deleted_at, updated_at)
+  VALUES (
+    v_conn_id,
+    v_project_id,
+    (v_conn->>'source_id')::UUID,
+    (v_conn->>'target_id')::UUID,
+    NULLIF(v_conn->>'title', ''),
+    NULLIF(v_conn->>'description', ''),
+    NULLIF(v_conn->>'deleted_at', '')::TIMESTAMPTZ,
+    NOW()
+  )
+  ON CONFLICT (id) DO UPDATE
+    SET source_id = CASE WHEN v_is_stale THEN v_existing_source ELSE EXCLUDED.source_id END,
+        target_id = CASE WHEN v_is_stale THEN v_existing_target ELSE EXCLUDED.target_id END,
+        deleted_at = CASE WHEN v_is_stale THEN v_existing_deleted ELSE EXCLUDED.deleted_at END,
+        title = EXCLUDED.title,
+        description = EXCLUDED.description,
+        updated_at = NOW()
+  RETURNING c.updated_at INTO v_written_updated;
+
+  v_result := jsonb_build_object(
+    'status', 'applied',
+    'operation_id', v_op_id,
+    'connection_id', v_conn_id,
+    'updated_at', v_written_updated,
+    'stale_payload', v_is_stale
+  );
+
+  INSERT INTO public.sync_operation_log (operation_id, user_id, entity_type, entity_id,
+    status, protocol_version, deployment_epoch, deployment_target, client_git_sha, client_origin, result_payload)
+  VALUES (v_op_id, v_user, 'connection', v_conn_id, 'applied',
+    v_protocol, v_client_epoch, v_deployment_target, v_client_git, v_client_origin, v_result);
+
+  RETURN v_result;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.sync_upsert_blackbox_entry(payload JSONB)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+  v_user UUID := auth.uid();
+  v_op_id UUID := (payload->>'operation_id')::UUID;
+  v_protocol INTEGER := COALESCE((payload->>'protocol_version')::INTEGER, 0);
+  v_local_updated TIMESTAMPTZ := public.sync_extract_local_updated(payload, 'entry');
+  v_client_epoch BIGINT := COALESCE((payload->>'deployment_epoch')::BIGINT, 0);
+  v_deployment_target TEXT := payload->>'deployment_target';
+  v_client_git TEXT := payload->>'client_git_sha';
+  v_client_origin TEXT := payload->>'client_origin';
+  v_payload_digest TEXT := encode(extensions.digest(payload::TEXT, 'sha256'), 'hex');
+  v_entry JSONB := payload->'entry';
+  v_entry_id UUID := (v_entry->>'id')::UUID;
+  v_project_id UUID := NULLIF(v_entry->>'project_id', '')::UUID;
+  v_min_protocol INTEGER;
+  v_min_epoch BIGINT;
+  v_existing_owner UUID;
+  v_existing_exists BOOLEAN := FALSE;
+  v_existing_updated TIMESTAMPTZ;
+  v_existing_project UUID;
+  v_existing_is_read BOOLEAN;
+  v_existing_is_completed BOOLEAN;
+  v_existing_completed_at TIMESTAMPTZ;
+  v_existing_is_archived BOOLEAN;
+  v_existing_snooze_until TIMESTAMPTZ;
+  v_existing_snooze_count INTEGER;
+  v_existing_deleted TIMESTAMPTZ;
+  v_existing_focus_meta JSONB;
+  v_is_stale BOOLEAN;
+  v_skew_grace CONSTANT INTERVAL := INTERVAL '1 second';
+  v_log_existing RECORD;
+  v_result JSONB;
+  v_written_updated TIMESTAMPTZ;
+BEGIN
+  IF v_user IS NULL OR v_op_id IS NULL OR v_entry_id IS NULL THEN
+    RETURN jsonb_build_object('status', 'unauthorized', 'reason', 'missing required fields');
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(hashtext('sync_upsert_blackbox_entry'), hashtext(v_entry_id::TEXT));
+  PERFORM set_config('app.payload_digest', v_payload_digest, true);
+
+  SELECT user_id, payload_digest, result_payload, status, reject_reason
+    INTO v_log_existing
+    FROM public.sync_operation_log
+    WHERE operation_id = v_op_id;
+  IF FOUND THEN
+    IF v_log_existing.user_id <> v_user THEN
+      RETURN jsonb_build_object('status', 'unauthorized', 'reason', 'operation_id owned by other user');
+    END IF;
+    IF v_log_existing.payload_digest IS NOT NULL
+      AND v_log_existing.payload_digest IS DISTINCT FROM v_payload_digest
+    THEN
+      RETURN jsonb_build_object(
+        'status', 'unauthorized',
+        'reason', 'operation_id_payload_mismatch',
+        'operation_id', v_op_id,
+        'existing_payload_digest', v_log_existing.payload_digest,
+        'payload_digest', v_payload_digest
+      );
+    END IF;
+    RETURN COALESCE(
+      v_log_existing.result_payload,
+      jsonb_build_object('status', v_log_existing.status, 'reason', v_log_existing.reject_reason)
+    );
+  END IF;
+
+  SELECT min_protocol_version, deployment_epoch INTO v_min_protocol, v_min_epoch
+    FROM public.sync_protocol_state WHERE scope = 'global';
+  IF v_protocol < COALESCE(v_min_protocol, 1) OR v_client_epoch < COALESCE(v_min_epoch, 0) THEN
+    INSERT INTO public.sync_operation_log (operation_id, user_id, entity_type, entity_id,
+      status, reject_reason, protocol_version, deployment_epoch, deployment_target, client_git_sha, client_origin)
+    VALUES (v_op_id, v_user, 'blackbox', v_entry_id, 'client-version-rejected',
+      CASE
+        WHEN v_protocol < COALESCE(v_min_protocol, 1) THEN 'protocol_version_below_min'
+        ELSE 'deployment_epoch_below_min'
+      END,
+      v_protocol, v_client_epoch, v_deployment_target, v_client_git, v_client_origin);
+    RETURN jsonb_build_object(
+      'status', 'client-version-rejected',
+      'minProtocolVersion', v_min_protocol,
+      'deploymentEpoch', COALESCE(v_min_epoch, 0)
+    );
+  END IF;
+
+  SELECT TRUE, b.user_id, b.updated_at, b.project_id, b.is_read, b.is_completed,
+      b.completed_at, b.is_archived, b.snooze_until, b.snooze_count, b.deleted_at, b.focus_meta
+    INTO v_existing_exists, v_existing_owner, v_existing_updated, v_existing_project,
+      v_existing_is_read, v_existing_is_completed, v_existing_completed_at, v_existing_is_archived,
+      v_existing_snooze_until, v_existing_snooze_count, v_existing_deleted, v_existing_focus_meta
+    FROM public.black_box_entries b
+    WHERE b.id = v_entry_id
+    FOR UPDATE;
+
+  IF v_existing_exists AND v_existing_owner IS NOT NULL AND v_existing_owner <> v_user THEN
+    INSERT INTO public.sync_operation_log (operation_id, user_id, entity_type, entity_id,
+      status, reject_reason, protocol_version, deployment_epoch, deployment_target, client_git_sha, client_origin)
+    VALUES (v_op_id, v_user, 'blackbox', v_entry_id, 'unauthorized',
+      'entry_owned_by_other', v_protocol, v_client_epoch, v_deployment_target, v_client_git, v_client_origin);
+    RETURN jsonb_build_object('status', 'unauthorized', 'reason', 'entry_owned_by_other');
+  END IF;
+
+  IF v_project_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM public.projects p WHERE p.id = v_project_id AND p.owner_id = v_user
+  ) THEN
+    INSERT INTO public.sync_operation_log (operation_id, user_id, entity_type, entity_id,
+      status, reject_reason, protocol_version, deployment_epoch, deployment_target, client_git_sha, client_origin)
+    VALUES (v_op_id, v_user, 'blackbox', v_entry_id, 'unauthorized',
+      'project_not_owned', v_protocol, v_client_epoch, v_deployment_target, v_client_git, v_client_origin);
+    RETURN jsonb_build_object('status', 'unauthorized', 'reason', 'project_not_owned');
+  END IF;
+
+  IF length(COALESCE(v_entry->>'content', '')) > 1000000 THEN
+    RETURN jsonb_build_object('status', 'unauthorized', 'reason', 'content_too_large');
+  END IF;
+
+  IF v_entry ? 'focus_meta' AND pg_column_size(v_entry->'focus_meta') > 262144 THEN
+    RETURN jsonb_build_object('status', 'unauthorized', 'reason', 'focus_meta_too_large');
+  END IF;
+
+  v_is_stale := COALESCE(
+    v_existing_exists
+      AND v_local_updated IS NOT NULL
+      AND v_existing_updated IS NOT NULL
+      AND v_existing_updated > v_local_updated + v_skew_grace,
+    FALSE
+  );
+
+  INSERT INTO public.black_box_entries AS b (
+    id, user_id, project_id, content, date, created_at, updated_at,
+    is_read, is_completed, completed_at, is_archived, snooze_until,
+    snooze_count, deleted_at, focus_meta
+  )
+  VALUES (
+    v_entry_id,
+    v_user,
+    v_project_id,
+    v_entry->>'content',
+    COALESCE(NULLIF(v_entry->>'date','')::DATE, CURRENT_DATE),
+    COALESCE(NULLIF(v_entry->>'created_at','')::TIMESTAMPTZ, NOW()),
+    NOW(),
+    COALESCE((v_entry->>'is_read')::BOOLEAN, FALSE),
+    COALESCE((v_entry->>'is_completed')::BOOLEAN, FALSE),
+    CASE
+      WHEN COALESCE((v_entry->>'is_completed')::BOOLEAN, FALSE) THEN
+        COALESCE(NULLIF(v_entry->>'completed_at','')::TIMESTAMPTZ, NULLIF(v_entry->>'completedAt','')::TIMESTAMPTZ, NOW())
+      ELSE NULL
+    END,
+    COALESCE((v_entry->>'is_archived')::BOOLEAN, FALSE),
+    NULLIF(v_entry->>'snooze_until','')::TIMESTAMPTZ,
+    COALESCE((v_entry->>'snooze_count')::INTEGER, 0),
+    NULLIF(v_entry->>'deleted_at','')::TIMESTAMPTZ,
+    v_entry->'focus_meta'
+  )
+  ON CONFLICT (id) DO UPDATE
+    SET content = CASE WHEN v_is_stale THEN b.content ELSE EXCLUDED.content END,
+        date = CASE WHEN v_is_stale THEN b.date ELSE EXCLUDED.date END,
+        project_id = CASE WHEN v_is_stale THEN v_existing_project ELSE EXCLUDED.project_id END,
+        is_read = CASE WHEN v_is_stale THEN v_existing_is_read ELSE EXCLUDED.is_read END,
+        is_completed = CASE WHEN v_is_stale THEN v_existing_is_completed ELSE EXCLUDED.is_completed END,
+        completed_at = CASE WHEN v_is_stale THEN v_existing_completed_at ELSE EXCLUDED.completed_at END,
+        is_archived = CASE WHEN v_is_stale THEN v_existing_is_archived ELSE EXCLUDED.is_archived END,
+        snooze_until = CASE WHEN v_is_stale THEN v_existing_snooze_until ELSE EXCLUDED.snooze_until END,
+        snooze_count = CASE WHEN v_is_stale THEN v_existing_snooze_count ELSE EXCLUDED.snooze_count END,
+        deleted_at = CASE WHEN v_is_stale THEN v_existing_deleted ELSE EXCLUDED.deleted_at END,
+        focus_meta = CASE WHEN v_is_stale THEN v_existing_focus_meta ELSE EXCLUDED.focus_meta END,
+        updated_at = CASE WHEN v_is_stale THEN b.updated_at ELSE NOW() END
+  RETURNING b.updated_at INTO v_written_updated;
+
+  v_result := jsonb_build_object(
+    'status', 'applied',
+    'operation_id', v_op_id,
+    'entry_id', v_entry_id,
+    'updated_at', v_written_updated,
+    'stale_payload', v_is_stale
+  );
+
+  INSERT INTO public.sync_operation_log (operation_id, user_id, entity_type, entity_id,
+    status, protocol_version, deployment_epoch, deployment_target, client_git_sha, client_origin, result_payload)
+  VALUES (v_op_id, v_user, 'blackbox', v_entry_id, 'applied',
+    v_protocol, v_client_epoch, v_deployment_target, v_client_git, v_client_origin, v_result);
+
+  RETURN v_result;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.sync_upsert_project(payload JSONB)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+  v_user UUID := auth.uid();
+  v_op_id UUID := (payload->>'operation_id')::UUID;
+  v_protocol INTEGER := COALESCE((payload->>'protocol_version')::INTEGER, 0);
+  v_local_updated TIMESTAMPTZ := public.sync_extract_local_updated(payload, 'project');
+  v_client_epoch BIGINT := COALESCE((payload->>'deployment_epoch')::BIGINT, 0);
+  v_deployment_target TEXT := payload->>'deployment_target';
+  v_client_git TEXT := payload->>'client_git_sha';
+  v_client_origin TEXT := payload->>'client_origin';
+  v_payload_digest TEXT := encode(extensions.digest(payload::TEXT, 'sha256'), 'hex');
+  v_project JSONB := payload->'project';
+  v_project_id UUID := (v_project->>'id')::UUID;
+  v_min_protocol INTEGER;
+  v_min_epoch BIGINT;
+  v_existing_owner UUID;
+  v_existing_updated TIMESTAMPTZ;
+  v_existing_deleted TIMESTAMPTZ;
+  v_existing_title TEXT;
+  v_existing_description TEXT;
+  v_existing_version INTEGER;
+  v_existing_migrated BOOLEAN;
+  v_is_stale BOOLEAN;
+  v_skew_grace CONSTANT INTERVAL := INTERVAL '1 second';
+  v_log_existing RECORD;
+  v_result JSONB;
+  v_written_updated TIMESTAMPTZ;
+BEGIN
+  IF v_user IS NULL OR v_op_id IS NULL OR v_project_id IS NULL THEN
+    RETURN jsonb_build_object('status', 'unauthorized', 'reason', 'missing required fields');
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(hashtext('sync_upsert_project'), hashtext(v_project_id::TEXT));
+  PERFORM set_config('app.payload_digest', v_payload_digest, true);
+
+  SELECT user_id, payload_digest, result_payload, status, reject_reason
+    INTO v_log_existing
+    FROM public.sync_operation_log
+    WHERE operation_id = v_op_id;
+  IF FOUND THEN
+    IF v_log_existing.user_id <> v_user THEN
+      RETURN jsonb_build_object('status', 'unauthorized', 'reason', 'operation_id owned by other user');
+    END IF;
+    IF v_log_existing.payload_digest IS NOT NULL
+      AND v_log_existing.payload_digest IS DISTINCT FROM v_payload_digest
+    THEN
+      RETURN jsonb_build_object(
+        'status', 'unauthorized',
+        'reason', 'operation_id_payload_mismatch',
+        'operation_id', v_op_id,
+        'existing_payload_digest', v_log_existing.payload_digest,
+        'payload_digest', v_payload_digest
+      );
+    END IF;
+    RETURN COALESCE(
+      v_log_existing.result_payload,
+      jsonb_build_object('status', v_log_existing.status, 'reason', v_log_existing.reject_reason)
+    );
+  END IF;
+
+  SELECT min_protocol_version, deployment_epoch INTO v_min_protocol, v_min_epoch
+    FROM public.sync_protocol_state WHERE scope = 'global';
+  IF v_protocol < COALESCE(v_min_protocol, 1) OR v_client_epoch < COALESCE(v_min_epoch, 0) THEN
+    INSERT INTO public.sync_operation_log (operation_id, user_id, entity_type, entity_id,
+      status, reject_reason, protocol_version, deployment_epoch, deployment_target, client_git_sha, client_origin)
+    VALUES (v_op_id, v_user, 'project', v_project_id, 'client-version-rejected',
+      CASE
+        WHEN v_protocol < COALESCE(v_min_protocol, 1) THEN 'protocol_version_below_min'
+        ELSE 'deployment_epoch_below_min'
+      END,
+      v_protocol, v_client_epoch, v_deployment_target, v_client_git, v_client_origin);
+    RETURN jsonb_build_object(
+      'status', 'client-version-rejected',
+      'minProtocolVersion', v_min_protocol,
+      'deploymentEpoch', COALESCE(v_min_epoch, 0)
+    );
+  END IF;
+
+  SELECT owner_id, updated_at, deleted_at, title, description, version, migrated_to_v2
+    INTO v_existing_owner, v_existing_updated, v_existing_deleted,
+         v_existing_title, v_existing_description, v_existing_version, v_existing_migrated
+    FROM public.projects
+    WHERE id = v_project_id
+    FOR UPDATE;
+
+  IF v_existing_owner IS NOT NULL AND v_existing_owner <> v_user THEN
+    INSERT INTO public.sync_operation_log (operation_id, user_id, entity_type, entity_id,
+      status, reject_reason, protocol_version, deployment_epoch, deployment_target, client_git_sha, client_origin)
+    VALUES (v_op_id, v_user, 'project', v_project_id, 'unauthorized',
+      'project_owned_by_other', v_protocol, v_client_epoch, v_deployment_target, v_client_git, v_client_origin);
+    RETURN jsonb_build_object('status', 'unauthorized', 'reason', 'project_owned_by_other');
+  END IF;
+
+  IF v_existing_deleted IS NOT NULL THEN
+    INSERT INTO public.sync_operation_log (operation_id, user_id, entity_type, entity_id,
+      status, reject_reason, protocol_version, deployment_epoch, deployment_target, client_git_sha, client_origin)
+    VALUES (v_op_id, v_user, 'project', v_project_id, 'deleted-remote-newer',
+      'remote_project_tombstone', v_protocol, v_client_epoch, v_deployment_target, v_client_git, v_client_origin);
+    RETURN jsonb_build_object(
+      'status', 'deleted-remote-newer',
+      'remote_updated_at', COALESCE(v_existing_updated, v_existing_deleted),
+      'reason', 'remote_project_tombstone'
+    );
+  END IF;
+
+  v_is_stale := COALESCE(
+    v_existing_updated IS NOT NULL
+      AND v_local_updated IS NOT NULL
+      AND v_existing_updated > v_local_updated + v_skew_grace,
+    FALSE
+  );
+
+  IF v_existing_updated IS NULL THEN
+    INSERT INTO public.projects AS p (id, owner_id, title, description, version, migrated_to_v2, deleted_at, updated_at)
+    VALUES (
+      v_project_id,
+      v_user,
+      v_project->>'title',
+      NULLIF(v_project->>'description', ''),
+      COALESCE((v_project->>'version')::INTEGER, 1),
+      COALESCE((v_project->>'migrated_to_v2')::BOOLEAN, TRUE),
+      NULLIF(v_project->>'deleted_at', '')::TIMESTAMPTZ,
+      NOW()
+    )
+    RETURNING p.updated_at INTO v_written_updated;
+  ELSE
+    UPDATE public.projects AS p
+    SET title = CASE WHEN v_is_stale THEN v_existing_title ELSE v_project->>'title' END,
+        description = CASE
+          WHEN v_is_stale THEN v_existing_description
+          ELSE NULLIF(v_project->>'description', '')
+        END,
+        version = CASE
+          WHEN v_is_stale THEN COALESCE(v_existing_version, p.version, 1)
+          ELSE COALESCE((v_project->>'version')::INTEGER, p.version, 1)
+        END,
+        migrated_to_v2 = CASE
+          WHEN v_is_stale THEN COALESCE(v_existing_migrated, TRUE)
+          ELSE COALESCE((v_project->>'migrated_to_v2')::BOOLEAN, TRUE)
+        END,
+        deleted_at = CASE
+          WHEN v_is_stale THEN v_existing_deleted
+          ELSE NULLIF(v_project->>'deleted_at', '')::TIMESTAMPTZ
+        END,
+        updated_at = NOW()
+    WHERE p.id = v_project_id
+    RETURNING p.updated_at INTO v_written_updated;
+  END IF;
+
+  v_result := jsonb_build_object(
+    'status', 'applied',
+    'operation_id', v_op_id,
+    'project_id', v_project_id,
+    'updated_at', v_written_updated,
+    'stale_payload', v_is_stale
+  );
+
+  INSERT INTO public.sync_operation_log (operation_id, user_id, entity_type, entity_id,
+    status, protocol_version, deployment_epoch, deployment_target, client_git_sha, client_origin, result_payload)
+  VALUES (v_op_id, v_user, 'project', v_project_id, 'applied',
+    v_protocol, v_client_epoch, v_deployment_target, v_client_git, v_client_origin, v_result);
+
+  RETURN v_result;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.sync_upsert_user_preferences(payload JSONB)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+  v_user UUID := auth.uid();
+  v_op_id UUID := (payload->>'operation_id')::UUID;
+  v_protocol INTEGER := COALESCE((payload->>'protocol_version')::INTEGER, 0);
+  v_client_epoch BIGINT := COALESCE((payload->>'deployment_epoch')::BIGINT, 0);
+  v_deployment_target TEXT := payload->>'deployment_target';
+  v_client_git TEXT := payload->>'client_git_sha';
+  v_client_origin TEXT := payload->>'client_origin';
+  v_target_user UUID := (payload->>'user_id')::UUID;
+  v_base_updated_at TIMESTAMPTZ := NULLIF(payload->>'base_updated_at', '')::TIMESTAMPTZ;
+  v_preferences JSONB := COALESCE(payload->'preferences', '{}'::JSONB);
+  v_payload_digest TEXT := encode(extensions.digest(payload::TEXT, 'sha256'), 'hex');
+  v_min_protocol INTEGER;
+  v_min_epoch BIGINT;
+  v_log_existing RECORD;
+  v_existing_preferences RECORD;
+  v_result JSONB;
+  v_written_updated TIMESTAMPTZ;
+BEGIN
+  IF v_user IS NULL THEN
+    RETURN jsonb_build_object('status', 'unauthorized', 'reason', 'no auth');
+  END IF;
+  IF v_op_id IS NULL OR v_target_user IS NULL OR v_target_user IS DISTINCT FROM v_user THEN
+    RETURN jsonb_build_object('status', 'unauthorized', 'reason', 'missing_or_mismatched_user');
+  END IF;
+  IF jsonb_typeof(v_preferences) IS DISTINCT FROM 'object' THEN
+    RETURN jsonb_build_object('status', 'unauthorized', 'reason', 'invalid_preferences');
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(hashtext('sync_upsert_user_preferences'), hashtext(v_target_user::TEXT));
+  PERFORM set_config('app.payload_digest', v_payload_digest, true);
+
+  SELECT user_id, payload_digest, result_payload, status, reject_reason
+    INTO v_log_existing
+    FROM public.sync_operation_log
+    WHERE operation_id = v_op_id;
+  IF FOUND THEN
+    IF v_log_existing.user_id <> v_user THEN
+      RETURN jsonb_build_object('status', 'unauthorized', 'reason', 'operation_id owned by other user');
+    END IF;
+    IF v_log_existing.payload_digest IS NOT NULL
+      AND v_log_existing.payload_digest IS DISTINCT FROM v_payload_digest
+    THEN
+      RETURN jsonb_build_object(
+        'status', 'unauthorized',
+        'reason', 'operation_id_payload_mismatch',
+        'operation_id', v_op_id,
+        'existing_payload_digest', v_log_existing.payload_digest,
+        'payload_digest', v_payload_digest
+      );
+    END IF;
+    RETURN COALESCE(
+      v_log_existing.result_payload,
+      jsonb_build_object('status', v_log_existing.status, 'reason', v_log_existing.reject_reason)
+    );
+  END IF;
+
+  SELECT min_protocol_version, deployment_epoch INTO v_min_protocol, v_min_epoch
+    FROM public.sync_protocol_state WHERE scope = 'global';
+  IF v_protocol < COALESCE(v_min_protocol, 1) OR v_client_epoch < COALESCE(v_min_epoch, 0) THEN
+    v_result := jsonb_build_object(
+      'status', 'client-version-rejected',
+      'reason', CASE
+        WHEN v_protocol < COALESCE(v_min_protocol, 1) THEN 'protocol_version_below_min'
+        ELSE 'deployment_epoch_below_min'
+      END,
+      'minProtocolVersion', v_min_protocol,
+      'deploymentEpoch', COALESCE(v_min_epoch, 0)
+    );
+
+    INSERT INTO public.sync_operation_log (operation_id, user_id, entity_type, entity_id,
+      status, reject_reason, protocol_version, deployment_epoch, deployment_target, client_git_sha, client_origin,
+      payload_digest, result_payload)
+    VALUES (v_op_id, v_user, 'user-preferences', v_target_user, 'client-version-rejected',
+      v_result->>'reason', v_protocol, v_client_epoch, v_deployment_target, v_client_git, v_client_origin,
+      v_payload_digest, v_result);
+    RETURN v_result;
+  END IF;
+
+  SELECT updated_at
+    INTO v_existing_preferences
+    FROM public.user_preferences WHERE user_id = v_target_user FOR UPDATE;
+  IF FOUND AND (
+    v_base_updated_at IS NULL
+    OR v_existing_preferences.updated_at > v_base_updated_at + INTERVAL '1 second'
+  ) THEN
+    v_result := jsonb_build_object( 'status', 'remote-newer',
+      'remote_updated_at', v_existing_preferences.updated_at,
+      'reason', CASE
+        WHEN v_base_updated_at IS NULL THEN 'missing_base_updated_at'
+        ELSE 'remote_updated_at_after_base'
+      END
+    );
+
+    INSERT INTO public.sync_operation_log (operation_id, user_id, entity_type, entity_id,
+      status, reject_reason, protocol_version, deployment_epoch, deployment_target, client_git_sha, client_origin,
+      payload_digest, result_payload)
+    VALUES (v_op_id, v_user, 'user-preferences', v_target_user, 'remote-newer',
+      v_result->>'reason', v_protocol, v_client_epoch, v_deployment_target, v_client_git, v_client_origin,
+      v_payload_digest, v_result);
+    RETURN v_result;
+  END IF;
+
+  INSERT INTO public.user_preferences AS prefs (
+    id,
+    user_id,
+    theme,
+    layout_direction,
+    floating_window_pref,
+    color_mode,
+    auto_resolve_conflicts,
+    local_backup_enabled,
+    local_backup_interval_ms,
+    last_backup_proof_at,
+    focus_preferences,
+    updated_at
+  )
+  VALUES (
+    v_target_user,
+    v_target_user,
+    COALESCE(NULLIF(v_preferences->>'theme', ''), 'default'),
+    COALESCE(NULLIF(v_preferences->>'layout_direction', ''), 'ltr'),
+    COALESCE(NULLIF(v_preferences->>'floating_window_pref', ''), 'auto'),
+    COALESCE(NULLIF(v_preferences->>'color_mode', ''), 'system'),
+    COALESCE((v_preferences->>'auto_resolve_conflicts')::BOOLEAN, TRUE),
+    COALESCE((v_preferences->>'local_backup_enabled')::BOOLEAN, FALSE),
+    COALESCE((v_preferences->>'local_backup_interval_ms')::INTEGER, 3600000),
+    NULLIF(v_preferences->>'last_backup_proof_at', '')::TIMESTAMPTZ,
+    CASE
+      WHEN v_preferences ? 'focus_preferences' THEN v_preferences->'focus_preferences'
+      ELSE '{"gateEnabled":true,"strataEnabled":true,"blackBoxEnabled":true,"maxSnoozePerDay":3}'::JSONB
+    END,
+    NOW()
+  )
+  ON CONFLICT (user_id) DO UPDATE
+  SET theme = CASE WHEN v_preferences ? 'theme' THEN EXCLUDED.theme ELSE prefs.theme END,
+      layout_direction = CASE
+        WHEN v_preferences ? 'layout_direction' THEN EXCLUDED.layout_direction
+        ELSE prefs.layout_direction
+      END,
+      floating_window_pref = CASE
+        WHEN v_preferences ? 'floating_window_pref' THEN EXCLUDED.floating_window_pref
+        ELSE prefs.floating_window_pref
+      END,
+      color_mode = CASE WHEN v_preferences ? 'color_mode' THEN EXCLUDED.color_mode ELSE prefs.color_mode END,
+      auto_resolve_conflicts = CASE
+        WHEN v_preferences ? 'auto_resolve_conflicts' THEN EXCLUDED.auto_resolve_conflicts
+        ELSE prefs.auto_resolve_conflicts
+      END,
+      local_backup_enabled = CASE
+        WHEN v_preferences ? 'local_backup_enabled' THEN EXCLUDED.local_backup_enabled
+        ELSE prefs.local_backup_enabled
+      END,
+      local_backup_interval_ms = CASE
+        WHEN v_preferences ? 'local_backup_interval_ms' THEN EXCLUDED.local_backup_interval_ms
+        ELSE prefs.local_backup_interval_ms
+      END,
+      last_backup_proof_at = CASE
+        WHEN v_preferences ? 'last_backup_proof_at' THEN EXCLUDED.last_backup_proof_at
+        ELSE prefs.last_backup_proof_at
+      END,
+      focus_preferences = CASE
+        WHEN v_preferences ? 'focus_preferences' THEN EXCLUDED.focus_preferences
+        ELSE prefs.focus_preferences
+      END,
+      updated_at = NOW()
+  RETURNING prefs.updated_at INTO v_written_updated;
+
+  v_result := jsonb_build_object(
+    'status', 'applied',
+    'operation_id', v_op_id,
+    'user_id', v_target_user,
+    'updated_at', v_written_updated
+  );
+
+  INSERT INTO public.sync_operation_log (operation_id, user_id, entity_type, entity_id,
+    status, protocol_version, deployment_epoch, deployment_target, client_git_sha, client_origin,
+    payload_digest, result_payload)
+  VALUES (v_op_id, v_user, 'user-preferences', v_target_user, 'applied',
+    v_protocol, v_client_epoch, v_deployment_target, v_client_git, v_client_origin,
+    v_payload_digest, v_result);
+
+  RETURN v_result;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.sync_upsert_focus_session(payload JSONB)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+  v_user UUID := auth.uid();
+  v_op_id UUID := (payload->>'operation_id')::UUID;
+  v_protocol INTEGER := COALESCE((payload->>'protocol_version')::INTEGER, 0);
+  v_client_epoch BIGINT := COALESCE((payload->>'deployment_epoch')::BIGINT, 0);
+  v_deployment_target TEXT := payload->>'deployment_target';
+  v_client_git TEXT := payload->>'client_git_sha';
+  v_client_origin TEXT := payload->>'client_origin';
+  v_record JSONB := COALESCE(payload->'focus_session', '{}'::JSONB);
+  v_session_id UUID := (v_record->>'id')::UUID;
+  v_target_user UUID := (v_record->>'user_id')::UUID;
+  v_session_state JSONB := COALESCE(v_record->'session_state', '{}'::JSONB);
+  v_payload_digest TEXT := encode(extensions.digest(payload::TEXT, 'sha256'), 'hex');
+  v_min_protocol INTEGER;
+  v_min_epoch BIGINT;
+  v_log_existing RECORD;
+  v_result JSONB;
+  v_started_at TIMESTAMPTZ;
+  v_ended_at TIMESTAMPTZ;
+  v_local_updated TIMESTAMPTZ;
+  v_local_saved_at TIMESTAMPTZ;
+  v_existing_owner UUID;
+  v_existing_updated TIMESTAMPTZ;
+  v_existing_saved_at TIMESTAMPTZ;
+  v_written_updated TIMESTAMPTZ;
+  v_is_stale BOOLEAN := FALSE;
+BEGIN
+  IF v_user IS NULL THEN
+    RETURN jsonb_build_object('status', 'unauthorized', 'reason', 'no auth');
+  END IF;
+  IF v_op_id IS NULL OR v_session_id IS NULL OR v_target_user IS NULL OR v_target_user IS DISTINCT FROM v_user THEN
+    RETURN jsonb_build_object('status', 'unauthorized', 'reason', 'missing_or_mismatched_user');
+  END IF;
+  IF jsonb_typeof(v_session_state) IS DISTINCT FROM 'object' THEN
+    RETURN jsonb_build_object('status', 'unauthorized', 'reason', 'invalid_focus_session');
+  END IF;
+
+  v_started_at := COALESCE(NULLIF(v_record->>'started_at', '')::TIMESTAMPTZ, NOW());
+  v_ended_at := NULLIF(v_record->>'ended_at', '')::TIMESTAMPTZ;
+  v_local_updated := COALESCE(NULLIF(v_record->>'updated_at', '')::TIMESTAMPTZ, NOW());
+  v_local_saved_at := NULLIF(v_record #>> '{session_state,savedAt}', '')::TIMESTAMPTZ;
+
+  PERFORM pg_advisory_xact_lock(hashtext('sync_upsert_focus_session'), hashtext(v_session_id::TEXT));
+  PERFORM set_config('app.payload_digest', v_payload_digest, true);
+
+  SELECT user_id, payload_digest, result_payload, status, reject_reason
+    INTO v_log_existing
+    FROM public.sync_operation_log
+    WHERE operation_id = v_op_id;
+  IF FOUND THEN
+    IF v_log_existing.user_id <> v_user THEN
+      RETURN jsonb_build_object('status', 'unauthorized', 'reason', 'operation_id owned by other user');
+    END IF;
+    IF v_log_existing.payload_digest IS NOT NULL
+      AND v_log_existing.payload_digest IS DISTINCT FROM v_payload_digest
+    THEN
+      RETURN jsonb_build_object(
+        'status', 'unauthorized',
+        'reason', 'operation_id_payload_mismatch',
+        'operation_id', v_op_id,
+        'existing_payload_digest', v_log_existing.payload_digest,
+        'payload_digest', v_payload_digest
+      );
+    END IF;
+    RETURN COALESCE(
+      v_log_existing.result_payload,
+      jsonb_build_object('status', v_log_existing.status, 'reason', v_log_existing.reject_reason)
+    );
+  END IF;
+
+  SELECT min_protocol_version, deployment_epoch INTO v_min_protocol, v_min_epoch
+    FROM public.sync_protocol_state WHERE scope = 'global';
+  IF v_protocol < COALESCE(v_min_protocol, 1) OR v_client_epoch < COALESCE(v_min_epoch, 0) THEN
+    v_result := jsonb_build_object(
+      'status', 'client-version-rejected',
+      'reason', CASE
+        WHEN v_protocol < COALESCE(v_min_protocol, 1) THEN 'protocol_version_below_min'
+        ELSE 'deployment_epoch_below_min'
+      END,
+      'minProtocolVersion', v_min_protocol,
+      'deploymentEpoch', COALESCE(v_min_epoch, 0)
+    );
+
+    INSERT INTO public.sync_operation_log (operation_id, user_id, entity_type, entity_id,
+      status, reject_reason, protocol_version, deployment_epoch, deployment_target, client_git_sha, client_origin,
+      payload_digest, result_payload)
+    VALUES (v_op_id, v_user, 'focus-session', v_session_id, 'client-version-rejected',
+      v_result->>'reason', v_protocol, v_client_epoch, v_deployment_target, v_client_git, v_client_origin,
+      v_payload_digest, v_result);
+    RETURN v_result;
+  END IF;
+
+  SELECT user_id, updated_at, NULLIF(session_state->>'savedAt', '')::TIMESTAMPTZ
+    INTO v_existing_owner, v_existing_updated, v_existing_saved_at
+    FROM public.focus_sessions
+    WHERE id = v_session_id
+    FOR UPDATE;
+
+  IF v_existing_owner IS NOT NULL AND v_existing_owner IS DISTINCT FROM v_user THEN
+    v_result := jsonb_build_object('status', 'unauthorized', 'reason', 'focus_session_owned_by_other_user');
+    INSERT INTO public.sync_operation_log (operation_id, user_id, entity_type, entity_id,
+      status, reject_reason, protocol_version, deployment_epoch, deployment_target, client_git_sha, client_origin,
+      payload_digest, result_payload)
+    VALUES (v_op_id, v_user, 'focus-session', v_session_id, 'unauthorized',
+      'focus_session_owned_by_other_user', v_protocol, v_client_epoch, v_deployment_target, v_client_git,
+      v_client_origin, v_payload_digest, v_result);
+    RETURN v_result;
+  END IF;
+
+  IF v_existing_owner = v_user
+    AND GREATEST(v_existing_updated, COALESCE(v_existing_saved_at, v_existing_updated))
+      > GREATEST(v_local_updated, COALESCE(v_local_saved_at, v_local_updated))
+  THEN
+    v_is_stale := TRUE;
+    v_written_updated := v_existing_updated;
+  ELSE
+    INSERT INTO public.focus_sessions AS sessions (
+      id,
+      user_id,
+      started_at,
+      ended_at,
+      session_state,
+      updated_at
+    )
+    VALUES (
+      v_session_id,
+      v_target_user,
+      v_started_at,
+      v_ended_at,
+      v_session_state,
+      v_local_updated
+    )
+    ON CONFLICT (id) DO UPDATE
+    SET started_at = EXCLUDED.started_at,
+        ended_at = EXCLUDED.ended_at,
+        session_state = EXCLUDED.session_state,
+        updated_at = EXCLUDED.updated_at
+    RETURNING sessions.updated_at INTO v_written_updated;
+  END IF;
+
+  v_result := jsonb_build_object(
+    'status', 'applied',
+    'operation_id', v_op_id,
+    'focus_session_id', v_session_id,
+    'updated_at', v_written_updated,
+    'stale_payload', v_is_stale
+  );
+
+  INSERT INTO public.sync_operation_log (operation_id, user_id, entity_type, entity_id,
+    status, protocol_version, deployment_epoch, deployment_target, client_git_sha, client_origin,
+    payload_digest, result_payload)
+  VALUES (v_op_id, v_user, 'focus-session', v_session_id, 'applied',
+    v_protocol, v_client_epoch, v_deployment_target, v_client_git, v_client_origin,
+    v_payload_digest, v_result);
+
+  RETURN v_result;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.sync_upsert_routine_task(payload JSONB)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+  v_user UUID := auth.uid();
+  v_op_id UUID := (payload->>'operation_id')::UUID;
+  v_protocol INTEGER := COALESCE((payload->>'protocol_version')::INTEGER, 0);
+  v_client_epoch BIGINT := COALESCE((payload->>'deployment_epoch')::BIGINT, 0);
+  v_deployment_target TEXT := payload->>'deployment_target';
+  v_client_git TEXT := payload->>'client_git_sha';
+  v_client_origin TEXT := payload->>'client_origin';
+  v_target_user UUID := (payload->>'user_id')::UUID;
+  v_task JSONB := COALESCE(payload->'routine_task', '{}'::JSONB);
+  v_task_id UUID := (v_task->>'id')::UUID;
+  v_title TEXT := NULLIF(v_task->>'title', '');
+  v_payload_digest TEXT := encode(extensions.digest(payload::TEXT, 'sha256'), 'hex');
+  v_min_protocol INTEGER;
+  v_min_epoch BIGINT;
+  v_log_existing RECORD;
+  v_result JSONB;
+  v_max_times_per_day INTEGER;
+  v_is_enabled BOOLEAN;
+  v_local_updated_text TEXT;
+  v_local_updated TIMESTAMPTZ;
+  v_existing_owner UUID;
+  v_existing_updated TIMESTAMPTZ;
+  v_written_updated TIMESTAMPTZ;
+  v_is_stale BOOLEAN := FALSE;
+BEGIN
+  IF v_user IS NULL THEN
+    RETURN jsonb_build_object('status', 'unauthorized', 'reason', 'no auth');
+  END IF;
+  IF v_op_id IS NULL OR v_task_id IS NULL OR v_target_user IS NULL OR v_target_user IS DISTINCT FROM v_user THEN
+    RETURN jsonb_build_object('status', 'unauthorized', 'reason', 'missing_or_mismatched_user');
+  END IF;
+  IF v_title IS NULL THEN
+    RETURN jsonb_build_object('status', 'unauthorized', 'reason', 'invalid_routine_task');
+  END IF;
+
+  v_max_times_per_day := COALESCE((v_task->>'max_times_per_day')::INTEGER, 1);
+  v_is_enabled := COALESCE((v_task->>'is_enabled')::BOOLEAN, TRUE);
+  v_local_updated_text := NULLIF(v_task->>'updated_at', '');
+  v_local_updated := COALESCE(v_local_updated_text::TIMESTAMPTZ, NOW());
+
+  PERFORM pg_advisory_xact_lock(hashtext('sync_upsert_routine_task'), hashtext(v_task_id::TEXT));
+  PERFORM set_config('app.payload_digest', v_payload_digest, true);
+
+  SELECT user_id, payload_digest, result_payload, status, reject_reason
+    INTO v_log_existing
+    FROM public.sync_operation_log
+    WHERE operation_id = v_op_id;
+  IF FOUND THEN
+    IF v_log_existing.user_id <> v_user THEN
+      RETURN jsonb_build_object('status', 'unauthorized', 'reason', 'operation_id owned by other user');
+    END IF;
+    IF v_log_existing.payload_digest IS NOT NULL
+      AND v_log_existing.payload_digest IS DISTINCT FROM v_payload_digest
+    THEN
+      RETURN jsonb_build_object(
+        'status', 'unauthorized',
+        'reason', 'operation_id_payload_mismatch',
+        'operation_id', v_op_id,
+        'existing_payload_digest', v_log_existing.payload_digest,
+        'payload_digest', v_payload_digest
+      );
+    END IF;
+    RETURN COALESCE(
+      v_log_existing.result_payload,
+      jsonb_build_object('status', v_log_existing.status, 'reason', v_log_existing.reject_reason)
+    );
+  END IF;
+
+  SELECT min_protocol_version, deployment_epoch INTO v_min_protocol, v_min_epoch
+    FROM public.sync_protocol_state WHERE scope = 'global';
+  IF v_protocol < COALESCE(v_min_protocol, 1) OR v_client_epoch < COALESCE(v_min_epoch, 0) THEN
+    v_result := jsonb_build_object(
+      'status', 'client-version-rejected',
+      'reason', CASE
+        WHEN v_protocol < COALESCE(v_min_protocol, 1) THEN 'protocol_version_below_min'
+        ELSE 'deployment_epoch_below_min'
+      END,
+      'minProtocolVersion', v_min_protocol,
+      'deploymentEpoch', COALESCE(v_min_epoch, 0)
+    );
+
+    INSERT INTO public.sync_operation_log (operation_id, user_id, entity_type, entity_id,
+      status, reject_reason, protocol_version, deployment_epoch, deployment_target, client_git_sha, client_origin,
+      payload_digest, result_payload)
+    VALUES (v_op_id, v_user, 'routine-task', v_task_id, 'client-version-rejected',
+      v_result->>'reason', v_protocol, v_client_epoch, v_deployment_target, v_client_git, v_client_origin,
+      v_payload_digest, v_result);
+    RETURN v_result;
+  END IF;
+
+  SELECT user_id, updated_at
+    INTO v_existing_owner, v_existing_updated
+    FROM public.routine_tasks
+    WHERE id = v_task_id
+    FOR UPDATE;
+
+  IF v_existing_owner IS NOT NULL AND v_existing_owner IS DISTINCT FROM v_user THEN
+    v_result := jsonb_build_object('status', 'unauthorized', 'reason', 'routine_task_owned_by_other_user');
+    INSERT INTO public.sync_operation_log (operation_id, user_id, entity_type, entity_id,
+      status, reject_reason, protocol_version, deployment_epoch, deployment_target, client_git_sha, client_origin,
+      payload_digest, result_payload)
+    VALUES (v_op_id, v_user, 'routine-task', v_task_id, 'unauthorized',
+      'routine_task_owned_by_other_user', v_protocol, v_client_epoch, v_deployment_target, v_client_git,
+      v_client_origin, v_payload_digest, v_result);
+    RETURN v_result;
+  END IF;
+
+  IF v_existing_owner = v_user
+    AND (v_local_updated_text IS NULL OR v_existing_updated > v_local_updated)
+  THEN
+    v_is_stale := TRUE;
+    v_written_updated := v_existing_updated;
+  ELSE
+    INSERT INTO public.routine_tasks AS tasks (
+      id,
+      user_id,
+      title,
+      max_times_per_day,
+      is_enabled,
+      updated_at
+    )
+    VALUES (
+      v_task_id,
+      v_target_user,
+      v_title,
+      v_max_times_per_day,
+      v_is_enabled,
+      v_local_updated
+    )
+    ON CONFLICT (id) DO UPDATE
+    SET title = EXCLUDED.title,
+        max_times_per_day = EXCLUDED.max_times_per_day,
+        is_enabled = EXCLUDED.is_enabled,
+        updated_at = EXCLUDED.updated_at
+    RETURNING tasks.updated_at INTO v_written_updated;
+  END IF;
+
+  v_result := jsonb_build_object(
+    'status', 'applied',
+    'operation_id', v_op_id,
+    'routine_task_id', v_task_id,
+    'updated_at', v_written_updated,
+    'stale_payload', v_is_stale
+  );
+
+  INSERT INTO public.sync_operation_log (operation_id, user_id, entity_type, entity_id,
+    status, protocol_version, deployment_epoch, deployment_target, client_git_sha, client_origin,
+    payload_digest, result_payload)
+  VALUES (v_op_id, v_user, 'routine-task', v_task_id, 'applied',
+    v_protocol, v_client_epoch, v_deployment_target, v_client_git, v_client_origin,
+    v_payload_digest, v_result);
+
+  RETURN v_result;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.sync_increment_routine_completion(payload JSONB)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+  v_user UUID := auth.uid();
+  v_op_id UUID := (payload->>'operation_id')::UUID;
+  v_protocol INTEGER := COALESCE((payload->>'protocol_version')::INTEGER, 0);
+  v_client_epoch BIGINT := COALESCE((payload->>'deployment_epoch')::BIGINT, 0);
+  v_deployment_target TEXT := payload->>'deployment_target';
+  v_client_git TEXT := payload->>'client_git_sha';
+  v_client_origin TEXT := payload->>'client_origin';
+  v_target_user UUID := (payload->>'user_id')::UUID;
+  v_completion JSONB := COALESCE(payload->'routine_completion', '{}'::JSONB);
+  v_completion_id UUID := (v_completion->>'id')::UUID;
+  v_routine_id UUID := (v_completion->>'routine_id')::UUID;
+  v_date_key DATE := NULLIF(v_completion->>'date_key', '')::DATE;
+  v_payload_digest TEXT := encode(extensions.digest(payload::TEXT, 'sha256'), 'hex');
+  v_min_protocol INTEGER;
+  v_min_epoch BIGINT;
+  v_log_existing RECORD;
+  v_result JSONB;
+  v_next_count INTEGER;
+  v_updated_at TIMESTAMPTZ;
+BEGIN
+  IF v_user IS NULL THEN
+    RETURN jsonb_build_object('status', 'unauthorized', 'reason', 'no auth');
+  END IF;
+  IF v_op_id IS NULL
+    OR v_completion_id IS NULL
+    OR v_routine_id IS NULL
+    OR v_date_key IS NULL
+    OR v_target_user IS NULL
+    OR v_target_user IS DISTINCT FROM v_user
+  THEN
+    RETURN jsonb_build_object('status', 'unauthorized', 'reason', 'missing_or_mismatched_user');
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(hashtext('sync_increment_routine_completion'), hashtext(v_completion_id::TEXT));
+  PERFORM set_config('app.payload_digest', v_payload_digest, true);
+
+  SELECT user_id, payload_digest, result_payload, status, reject_reason
+    INTO v_log_existing
+    FROM public.sync_operation_log
+    WHERE operation_id = v_op_id;
+  IF FOUND THEN
+    IF v_log_existing.user_id <> v_user THEN
+      RETURN jsonb_build_object('status', 'unauthorized', 'reason', 'operation_id owned by other user');
+    END IF;
+    IF v_log_existing.payload_digest IS NOT NULL
+      AND v_log_existing.payload_digest IS DISTINCT FROM v_payload_digest
+    THEN
+      RETURN jsonb_build_object(
+        'status', 'unauthorized',
+        'reason', 'operation_id_payload_mismatch',
+        'operation_id', v_op_id,
+        'existing_payload_digest', v_log_existing.payload_digest,
+        'payload_digest', v_payload_digest
+      );
+    END IF;
+    RETURN COALESCE(
+      v_log_existing.result_payload,
+      jsonb_build_object('status', v_log_existing.status, 'reason', v_log_existing.reject_reason)
+    );
+  END IF;
+
+  SELECT min_protocol_version, deployment_epoch INTO v_min_protocol, v_min_epoch
+    FROM public.sync_protocol_state WHERE scope = 'global';
+  IF v_protocol < COALESCE(v_min_protocol, 1) OR v_client_epoch < COALESCE(v_min_epoch, 0) THEN
+    v_result := jsonb_build_object(
+      'status', 'client-version-rejected',
+      'reason', CASE
+        WHEN v_protocol < COALESCE(v_min_protocol, 1) THEN 'protocol_version_below_min'
+        ELSE 'deployment_epoch_below_min'
+      END,
+      'minProtocolVersion', v_min_protocol,
+      'deploymentEpoch', COALESCE(v_min_epoch, 0)
+    );
+
+    INSERT INTO public.sync_operation_log (operation_id, user_id, entity_type, entity_id,
+      status, reject_reason, protocol_version, deployment_epoch, deployment_target, client_git_sha, client_origin,
+      payload_digest, result_payload)
+    VALUES (v_op_id, v_user, 'routine-completion', v_completion_id, 'client-version-rejected',
+      v_result->>'reason', v_protocol, v_client_epoch, v_deployment_target, v_client_git, v_client_origin,
+      v_payload_digest, v_result);
+    RETURN v_result;
+  END IF;
+
+  PERFORM 1
+    FROM public.routine_tasks
+    WHERE id = v_routine_id
+      AND user_id = v_user
+    FOR UPDATE;
+  IF NOT FOUND THEN
+    v_result := jsonb_build_object('status', 'unauthorized', 'reason', 'routine_not_owned');
+    INSERT INTO public.sync_operation_log (operation_id, user_id, entity_type, entity_id,
+      status, reject_reason, protocol_version, deployment_epoch, deployment_target, client_git_sha, client_origin,
+      payload_digest, result_payload)
+    VALUES (v_op_id, v_user, 'routine-completion', v_completion_id, 'unauthorized',
+      'routine_not_owned', v_protocol, v_client_epoch, v_deployment_target, v_client_git,
+      v_client_origin, v_payload_digest, v_result);
+    RETURN v_result;
+  END IF;
+
+  INSERT INTO public.routine_completion_events (id, routine_id, user_id, date_key)
+  VALUES (v_completion_id, v_routine_id, v_user, v_date_key)
+  ON CONFLICT (id) DO NOTHING;
+
+  IF NOT FOUND THEN
+    SELECT count, updated_at
+      INTO v_next_count, v_updated_at
+      FROM public.routine_completions
+      WHERE user_id = v_user
+        AND routine_id = v_routine_id
+        AND date_key = v_date_key;
+
+    v_result := jsonb_build_object(
+      'status', 'idempotent-replay',
+      'operation_id', v_op_id,
+      'routine_completion_id', v_completion_id,
+      'routine_id', v_routine_id,
+      'date_key', v_date_key,
+      'count', COALESCE(v_next_count, 0),
+      'updated_at', COALESCE(v_updated_at, NOW())
+    );
+
+    INSERT INTO public.sync_operation_log (operation_id, user_id, entity_type, entity_id,
+      status, protocol_version, deployment_epoch, deployment_target, client_git_sha, client_origin,
+      payload_digest, result_payload)
+    VALUES (v_op_id, v_user, 'routine-completion', v_completion_id, 'idempotent-replay',
+      v_protocol, v_client_epoch, v_deployment_target, v_client_git, v_client_origin,
+      v_payload_digest, v_result);
+    RETURN v_result;
+  END IF;
+
+  INSERT INTO public.routine_completions (id, routine_id, user_id, date_key, count)
+  VALUES (v_completion_id, v_routine_id, v_user, v_date_key, 1)
+  ON CONFLICT (user_id, routine_id, date_key) DO UPDATE
+  SET count = public.routine_completions.count + 1
+  RETURNING count, updated_at INTO v_next_count, v_updated_at;
+
+  v_result := jsonb_build_object(
+    'status', 'applied',
+    'operation_id', v_op_id,
+    'routine_completion_id', v_completion_id,
+    'routine_id', v_routine_id,
+    'date_key', v_date_key,
+    'count', v_next_count,
+    'updated_at', v_updated_at
+  );
+
+  INSERT INTO public.sync_operation_log (operation_id, user_id, entity_type, entity_id,
+    status, protocol_version, deployment_epoch, deployment_target, client_git_sha, client_origin,
+    payload_digest, result_payload)
+  VALUES (v_op_id, v_user, 'routine-completion', v_completion_id, 'applied',
+    v_protocol, v_client_epoch, v_deployment_target, v_client_git, v_client_origin,
+    v_payload_digest, v_result);
+
+  RETURN v_result;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.sync_delete_project(payload JSONB)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+  v_user UUID := auth.uid();
+  v_op_id UUID := (payload->>'operation_id')::UUID;
+  v_protocol INTEGER := COALESCE((payload->>'protocol_version')::INTEGER, 0);
+  v_base_updated TIMESTAMPTZ := NULLIF(payload->>'base_updated_at', '')::TIMESTAMPTZ;
+  v_client_epoch BIGINT := COALESCE((payload->>'deployment_epoch')::BIGINT, 0);
+  v_deployment_target TEXT := payload->>'deployment_target';
+  v_client_git TEXT := payload->>'client_git_sha';
+  v_client_origin TEXT := payload->>'client_origin';
+  v_payload_digest TEXT := encode(extensions.digest(payload::TEXT, 'sha256'), 'hex');
+  v_project_id UUID := (payload->>'project_id')::UUID;
+  v_min_protocol INTEGER;
+  v_min_epoch BIGINT;
+  v_existing_owner UUID;
+  v_existing_updated TIMESTAMPTZ;
+  v_existing_deleted TIMESTAMPTZ;
+  v_log_existing RECORD;
+  v_result JSONB;
+  v_written_updated TIMESTAMPTZ;
+BEGIN
+  IF v_user IS NULL OR v_op_id IS NULL OR v_project_id IS NULL THEN
+    RETURN jsonb_build_object('status', 'unauthorized', 'reason', 'missing required fields');
+  END IF;
+
+  PERFORM set_config('app.payload_digest', v_payload_digest, true);
+
+  SELECT user_id, payload_digest, result_payload, status, reject_reason
+    INTO v_log_existing
+    FROM public.sync_operation_log
+    WHERE operation_id = v_op_id;
+  IF FOUND THEN
+    IF v_log_existing.user_id <> v_user THEN
+      RETURN jsonb_build_object('status', 'unauthorized', 'reason', 'operation_id owned by other user');
+    END IF;
+    IF v_log_existing.payload_digest IS NOT NULL
+      AND v_log_existing.payload_digest IS DISTINCT FROM v_payload_digest
+    THEN
+      RETURN jsonb_build_object(
+        'status', 'unauthorized',
+        'reason', 'operation_id_payload_mismatch',
+        'operation_id', v_op_id,
+        'existing_payload_digest', v_log_existing.payload_digest,
+        'payload_digest', v_payload_digest
+      );
+    END IF;
+    RETURN COALESCE(
+      v_log_existing.result_payload,
+      jsonb_build_object('status', v_log_existing.status, 'reason', v_log_existing.reject_reason)
+    );
+  END IF;
+
+  SELECT min_protocol_version, deployment_epoch INTO v_min_protocol, v_min_epoch
+    FROM public.sync_protocol_state WHERE scope = 'global';
+  IF v_protocol < COALESCE(v_min_protocol, 1) OR v_client_epoch < COALESCE(v_min_epoch, 0) THEN
+    INSERT INTO public.sync_operation_log (operation_id, user_id, entity_type, entity_id,
+      status, reject_reason, protocol_version, deployment_epoch, deployment_target, client_git_sha, client_origin)
+    VALUES (v_op_id, v_user, 'project-delete', v_project_id, 'client-version-rejected',
+      CASE
+        WHEN v_protocol < COALESCE(v_min_protocol, 1) THEN 'protocol_version_below_min'
+        ELSE 'deployment_epoch_below_min'
+      END,
+      v_protocol, v_client_epoch, v_deployment_target, v_client_git, v_client_origin);
+    RETURN jsonb_build_object(
+      'status', 'client-version-rejected',
+      'minProtocolVersion', v_min_protocol,
+      'deploymentEpoch', COALESCE(v_min_epoch, 0)
+    );
+  END IF;
+
+  SELECT owner_id, updated_at, deleted_at
+    INTO v_existing_owner, v_existing_updated, v_existing_deleted
+    FROM public.projects
+    WHERE id = v_project_id
+    FOR UPDATE;
+
+  IF NOT FOUND THEN
+    v_result := jsonb_build_object('status', 'applied', 'project_id', v_project_id, 'deleted_count', 0);
+  ELSE
+    IF v_existing_owner IS DISTINCT FROM v_user THEN
+      INSERT INTO public.sync_operation_log (operation_id, user_id, entity_type, entity_id,
+        status, reject_reason, protocol_version, deployment_epoch, deployment_target, client_git_sha, client_origin)
+      VALUES (v_op_id, v_user, 'project-delete', v_project_id, 'unauthorized',
+        'project_not_owned', v_protocol, v_client_epoch, v_deployment_target, v_client_git, v_client_origin);
+      RETURN jsonb_build_object('status', 'unauthorized', 'reason', 'project_not_owned');
+    END IF;
+
+    IF v_existing_deleted IS NULL
+      AND v_base_updated IS NOT NULL
+      AND v_base_updated <> v_existing_updated
+    THEN
+      INSERT INTO public.sync_operation_log (operation_id, user_id, entity_type, entity_id,
+        status, reject_reason, protocol_version, deployment_epoch, deployment_target, client_git_sha, client_origin)
+      VALUES (v_op_id, v_user, 'project-delete', v_project_id, 'remote-newer',
+        'cas_mismatch', v_protocol, v_client_epoch, v_deployment_target, v_client_git, v_client_origin);
+      RETURN jsonb_build_object('status', 'remote-newer', 'remote_updated_at', v_existing_updated);
+    END IF;
+
+    IF v_existing_deleted IS NULL THEN
+      PERFORM public.soft_delete_project(v_project_id);
+      SELECT updated_at INTO v_written_updated FROM public.projects WHERE id = v_project_id;
+    ELSE
+      v_written_updated := v_existing_updated;
+    END IF;
+
+    v_result := jsonb_build_object(
+      'status', 'applied',
+      'operation_id', v_op_id,
+      'project_id', v_project_id,
+      'updated_at', v_written_updated
+    );
+  END IF;
+
+  INSERT INTO public.sync_operation_log (operation_id, user_id, entity_type, entity_id,
+    status, protocol_version, deployment_epoch, deployment_target, client_git_sha, client_origin, result_payload)
+  VALUES (v_op_id, v_user, 'project-delete', v_project_id, 'applied',
+    v_protocol, v_client_epoch, v_deployment_target, v_client_git, v_client_origin, v_result);
+
+  RETURN v_result;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.sync_delete_tasks(payload JSONB)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+  v_user UUID := auth.uid();
+  v_op_id UUID := (payload->>'operation_id')::UUID;
+  v_protocol INTEGER := COALESCE((payload->>'protocol_version')::INTEGER, 0);
+  v_client_epoch BIGINT := COALESCE((payload->>'deployment_epoch')::BIGINT, 0);
+  v_deployment_target TEXT := payload->>'deployment_target';
+  v_client_git TEXT := payload->>'client_git_sha';
+  v_client_origin TEXT := payload->>'client_origin';
+  v_payload_digest TEXT := encode(extensions.digest(payload::TEXT, 'sha256'), 'hex');
+  v_project_id UUID := (payload->>'project_id')::UUID;
+  v_delete_mode TEXT := COALESCE(NULLIF(payload->>'delete_mode', ''), 'purge');
+  v_task_ids UUID[];
+  v_base_map JSONB := payload->'base_updated_at_map';
+  v_min_protocol INTEGER;
+  v_min_epoch BIGINT;
+  v_owner_id UUID;
+  v_log_existing RECORD;
+  v_result JSONB;
+  v_deleted_count INTEGER;
+  v_attachment_paths TEXT[];
+  v_task_id UUID;
+  v_existing_updated TIMESTAMPTZ;
+  v_base_str TEXT;
+  v_base_ts TIMESTAMPTZ;
+  v_kept UUID[] := ARRAY[]::UUID[];
+  v_skipped UUID[] := ARRAY[]::UUID[];
+  v_skew_grace CONSTANT INTERVAL := INTERVAL '1 second';
+  v_missing_base_map BOOLEAN := v_base_map IS NULL OR jsonb_typeof(v_base_map) <> 'object';
+BEGIN
+  SELECT COALESCE(array_agg(task_id::UUID), ARRAY[]::UUID[])
+    INTO v_task_ids
+    FROM jsonb_array_elements_text(COALESCE(payload->'task_ids', '[]'::JSONB)) AS t(task_id);
+
+  IF v_user IS NULL OR v_op_id IS NULL OR v_project_id IS NULL OR array_length(v_task_ids, 1) IS NULL THEN
+    RETURN jsonb_build_object('status', 'unauthorized', 'reason', 'missing required fields');
+  END IF;
+
+  IF v_delete_mode NOT IN ('soft', 'purge') THEN
+    RETURN jsonb_build_object('status', 'unauthorized', 'reason', 'invalid delete_mode');
+  END IF;
+
+  PERFORM set_config('app.payload_digest', v_payload_digest, true);
+
+  SELECT user_id, payload_digest, result_payload, status, reject_reason
+    INTO v_log_existing
+    FROM public.sync_operation_log
+    WHERE operation_id = v_op_id;
+  IF FOUND THEN
+    IF v_log_existing.user_id <> v_user THEN
+      RETURN jsonb_build_object('status', 'unauthorized', 'reason', 'operation_id owned by other user');
+    END IF;
+    IF v_log_existing.payload_digest IS NOT NULL
+      AND v_log_existing.payload_digest IS DISTINCT FROM v_payload_digest
+    THEN
+      RETURN jsonb_build_object(
+        'status', 'unauthorized',
+        'reason', 'operation_id_payload_mismatch',
+        'operation_id', v_op_id,
+        'existing_payload_digest', v_log_existing.payload_digest,
+        'payload_digest', v_payload_digest
+      );
+    END IF;
+    RETURN COALESCE(
+      v_log_existing.result_payload,
+      jsonb_build_object('status', v_log_existing.status, 'reason', v_log_existing.reject_reason)
+    );
+  END IF;
+
+  SELECT min_protocol_version, deployment_epoch INTO v_min_protocol, v_min_epoch
+    FROM public.sync_protocol_state WHERE scope = 'global';
+  IF v_protocol < COALESCE(v_min_protocol, 1) OR v_client_epoch < COALESCE(v_min_epoch, 0) THEN
+    INSERT INTO public.sync_operation_log (operation_id, user_id, entity_type, entity_id,
+      status, reject_reason, protocol_version, deployment_epoch, deployment_target, client_git_sha, client_origin)
+    VALUES (v_op_id, v_user, 'task-delete', v_project_id, 'client-version-rejected',
+      CASE
+        WHEN v_protocol < COALESCE(v_min_protocol, 1) THEN 'protocol_version_below_min'
+        ELSE 'deployment_epoch_below_min'
+      END,
+      v_protocol, v_client_epoch, v_deployment_target, v_client_git, v_client_origin);
+    RETURN jsonb_build_object(
+      'status', 'client-version-rejected',
+      'minProtocolVersion', v_min_protocol,
+      'deploymentEpoch', COALESCE(v_min_epoch, 0)
+    );
+  END IF;
+
+  SELECT owner_id INTO v_owner_id
+    FROM public.projects
+    WHERE id = v_project_id
+      AND owner_id = v_user;
+
+  IF v_owner_id IS NULL THEN
+    INSERT INTO public.sync_operation_log (operation_id, user_id, entity_type, entity_id,
+      status, reject_reason, protocol_version, deployment_epoch, deployment_target, client_git_sha, client_origin)
+    VALUES (v_op_id, v_user, 'task-delete', v_project_id, 'unauthorized',
+      'project_not_owned', v_protocol, v_client_epoch, v_deployment_target, v_client_git, v_client_origin);
+    RETURN jsonb_build_object('status', 'unauthorized', 'reason', 'project_not_owned');
+  END IF;
+
+  FOREACH v_task_id IN ARRAY v_task_ids
+  LOOP
+    SELECT t.updated_at
+      INTO v_existing_updated
+      FROM public.tasks t
+      WHERE t.id = v_task_id
+        AND t.project_id = v_project_id
+      FOR UPDATE;
+
+    IF v_missing_base_map THEN
+      v_skipped := array_append(v_skipped, v_task_id);
+      CONTINUE;
+    END IF;
+
+    v_base_str := v_base_map->>(v_task_id::TEXT);
+    v_base_ts := NULLIF(v_base_str, '')::TIMESTAMPTZ;
+
+    IF v_base_ts IS NULL
+      OR (
+        v_existing_updated IS NOT NULL
+        AND v_existing_updated > v_base_ts + v_skew_grace
+      )
+    THEN
+      v_skipped := array_append(v_skipped, v_task_id);
+    ELSE
+      v_kept := array_append(v_kept, v_task_id);
+    END IF;
+  END LOOP;
+  v_task_ids := v_kept;
+
+  IF array_length(v_task_ids, 1) IS NULL THEN
+    v_result := jsonb_build_object(
+      'status', 'applied',
+      'operation_id', v_op_id,
+      'project_id', v_project_id,
+      'delete_mode', v_delete_mode,
+      'deleted_count', 0,
+      'attachment_paths', '[]'::JSONB,
+      'skipped_ids', COALESCE(to_jsonb(v_skipped), '[]'::JSONB)
+    );
+
+    INSERT INTO public.sync_operation_log (operation_id, user_id, entity_type, entity_id,
+      status, protocol_version, deployment_epoch, deployment_target, client_git_sha, client_origin, result_payload)
+    VALUES (v_op_id, v_user, 'task-delete', v_project_id, 'applied',
+      v_protocol, v_client_epoch, v_deployment_target, v_client_git, v_client_origin, v_result);
+
+    RETURN v_result;
+  END IF;
+
+  IF v_delete_mode = 'soft' THEN
+    v_deleted_count := public.safe_delete_tasks(v_task_ids, v_project_id);
+    v_attachment_paths := ARRAY[]::TEXT[];
+  ELSE
+    SELECT purged_count, attachment_paths
+      INTO v_deleted_count, v_attachment_paths
+      FROM public.purge_tasks_v3(v_project_id, v_task_ids);
+  END IF;
+
+  v_result := jsonb_build_object(
+    'status', 'applied',
+    'operation_id', v_op_id,
+    'project_id', v_project_id,
+    'delete_mode', v_delete_mode,
+    'deleted_count', COALESCE(v_deleted_count, 0),
+    'attachment_paths', COALESCE(to_jsonb(v_attachment_paths), '[]'::JSONB),
+    'skipped_ids', COALESCE(to_jsonb(v_skipped), '[]'::JSONB)
+  );
+
+  INSERT INTO public.sync_operation_log (operation_id, user_id, entity_type, entity_id,
+    status, protocol_version, deployment_epoch, deployment_target, client_git_sha, client_origin, result_payload)
+  VALUES (v_op_id, v_user, 'task-delete', v_project_id, 'applied',
+    v_protocol, v_client_epoch, v_deployment_target, v_client_git, v_client_origin, v_result);
+
+  RETURN v_result;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.sync_upsert_task(JSONB) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.sync_upsert_connection(JSONB) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.sync_upsert_blackbox_entry(JSONB) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.sync_upsert_project(JSONB) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.sync_upsert_user_preferences(JSONB) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.sync_upsert_focus_session(JSONB) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.sync_upsert_routine_task(JSONB) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.sync_increment_routine_completion(JSONB) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.sync_delete_project(JSONB) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.sync_delete_tasks(JSONB) FROM PUBLIC, anon;
+
+GRANT EXECUTE ON FUNCTION public.sync_upsert_task(JSONB) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.sync_upsert_connection(JSONB) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.sync_upsert_blackbox_entry(JSONB) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.sync_upsert_project(JSONB) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.sync_upsert_user_preferences(JSONB) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.sync_upsert_focus_session(JSONB) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.sync_upsert_routine_task(JSONB) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.sync_increment_routine_completion(JSONB) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.sync_delete_project(JSONB) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.sync_delete_tasks(JSONB) TO authenticated;
+
+COMMENT ON FUNCTION public.sync_upsert_task(JSONB) IS
+  'Sync-protected task upsert with idempotency, protocol fence, data-safety mode, quarantine, audit attribution, stale payload rejection, and task attention_meta diagnostics.';
+COMMENT ON FUNCTION public.sync_upsert_connection(JSONB) IS
+  'Sync-protected connection upsert with idempotency, protocol fence, tombstone guards, ownership checks, server-arrival LWW, and stale-write protection on source_id/target_id/deleted_at.';
+COMMENT ON FUNCTION public.sync_upsert_blackbox_entry(JSONB) IS
+  'Sync-protected blackbox upsert with idempotency, protocol fence, ownership checks, size guards, completed_at support, and stale-write protection.';
+COMMENT ON FUNCTION public.sync_upsert_project(JSONB) IS
+  'Sync-protected project upsert with idempotency, tombstone barrier, protocol fence, ownership checks, server-arrival LWW, and stale-write protection.';
+COMMENT ON FUNCTION public.sync_upsert_user_preferences(JSONB) IS
+  'Sync-protected user_preferences field patch with idempotency, protocol fence, auth.uid ownership, and operation log replay.';
+COMMENT ON FUNCTION public.sync_upsert_focus_session(JSONB) IS
+  'Sync-protected focus session upsert with idempotency, protocol fence, auth.uid ownership, operation log replay, and stale payload no-op protection.';
+COMMENT ON FUNCTION public.sync_upsert_routine_task(JSONB) IS
+  'Sync-protected routine task upsert with idempotency, protocol fence, auth.uid ownership, operation log replay, and stale payload no-op protection.';
+COMMENT ON FUNCTION public.sync_increment_routine_completion(JSONB) IS
+  'Sync-protected routine completion increment with idempotency, protocol fence, auth.uid ownership, event dedupe, operation log replay, and atomic counter updates.';
+COMMENT ON FUNCTION public.sync_delete_project(JSONB) IS
+  'Sync-protected project delete using soft_delete_project after idempotency, optional CAS, and protocol/deployment epoch fence.';
+COMMENT ON FUNCTION public.sync_delete_tasks(JSONB) IS
+  'Sync-protected task batch delete/purge wrapper around safe_delete_tasks/purge_tasks_v3 with idempotency, protocol fence, and optional base_updated_at_map stale-write filtering.';
 
 -- ============================================================
 -- 初始化完成

@@ -1,4 +1,4 @@
-import { Component, inject, input, output, signal, ChangeDetectionStrategy, ChangeDetectorRef, OnDestroy, effect } from '@angular/core';
+import { Component, Injector, inject, input, output, signal, ChangeDetectionStrategy, ChangeDetectorRef, OnDestroy, effect } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
 import { ToastService } from '../../../../services/toast.service';
@@ -258,7 +258,7 @@ export class TextUnassignedComponent implements OnDestroy {
   touchCancel = output<TouchEvent>();
   openLinkedTask = output<{ taskId: string; event: Event }>();
   
-  protected taskAdapter = inject(TaskOperationAdapterService);
+  private readonly injector = inject(Injector);
   protected uiState = inject(UiStateService);
   protected projectState = inject(ProjectStateService);
   protected parkingService = inject(ParkingService);
@@ -267,6 +267,10 @@ export class TextUnassignedComponent implements OnDestroy {
   protected toast = inject(ToastService);
   protected userSession = inject(UserSessionService);
   private cdr = inject(ChangeDetectorRef);
+
+  protected get taskAdapter(): TaskOperationAdapterService {
+    return this.injector.get(TaskOperationAdapterService);
+  }
 
   protected editingTaskId = signal<string | null>(null);
   protected isEditMode = signal(false);
@@ -283,7 +287,7 @@ export class TextUnassignedComponent implements OnDestroy {
   constructor() {
     effect(() => {
       if (!this.uiState.isTextSidebarVisible()) {
-        this.cancelEdit();
+        this.cancelEdit(true);
       }
     });
 
@@ -312,7 +316,7 @@ export class TextUnassignedComponent implements OnDestroy {
   }
 
   ngOnDestroy(): void {
-    this.cancelEdit();
+    void this.cancelEdit(true);
   }
 
   private guardHintOnlyMutation(actionLabel: string): boolean {
@@ -351,9 +355,12 @@ export class TextUnassignedComponent implements OnDestroy {
    * TextViewComponent 调用的公开方法
    * 退出编辑态并重置为预览折叠
    */
-  public resetEditState(): void {
-    this.cancelEdit();
-    this.cdr.markForCheck();
+  public async resetEditState(): Promise<boolean> {
+    const cleared = await this.cancelEdit(true);
+    if (cleared) {
+      this.cdr.markForCheck();
+    }
+    return cleared;
   }
 
   protected onTaskClick(task: Task): void {
@@ -364,7 +371,7 @@ export class TextUnassignedComponent implements OnDestroy {
       if (this.isEditMode()) {
         this.isEditMode.set(false); // 编辑 -> 预览
       } else {
-        this.cancelEdit(); // 预览 -> 折叠
+        void this.cancelEdit(); // 预览 -> 折叠
       }
     } else {
       this.editingTaskId.set(task.id);
@@ -400,7 +407,7 @@ export class TextUnassignedComponent implements OnDestroy {
    * 内容预览区域点击处理
    * 点击待办 checkbox 时切换完成状态；点击其他区域进入编辑模式
    */
-  protected onContentPreviewClick(event: MouseEvent, task: Task): void {
+  protected async onContentPreviewClick(event: MouseEvent, task: Task): Promise<boolean | void> {
     const linkTarget = handleMarkdownLinkAction(event, this.toast);
     if (linkTarget) {
       // task 类型链接：跳转到关联任务
@@ -420,14 +427,15 @@ export class TextUnassignedComponent implements OnDestroy {
     const todoIndex = getTodoIndexFromClick(event);
     if (todoIndex !== null) {
       if (this.guardHintOnlyMutation('编辑任务')) {
-        return;
+        return false;
       }
 
       // 点击了待办 checkbox，切换状态
       const newContent = toggleMarkdownTodo(task.content || '', todoIndex);
-      this.taskAdapter.updateTaskContent(task.id, newContent);
+      const saved = await this.taskAdapter.updateTaskContent(task.id, newContent);
       // 强制标记组件需要重新检测，确保 OnPush 模式下 UI 刷新
       this.cdr.markForCheck();
+      return saved;
     } else {
       // 点击非 checkbox 区域，进入编辑模式
       this.enterEdit(task);
@@ -450,66 +458,90 @@ export class TextUnassignedComponent implements OnDestroy {
     }
     
     // 焦点离开了编辑框容器，才进行保存
-    this.saveTask(task);
+    void this.saveTask(task);
   }
 
-  protected cancelEdit(): void {
+  protected async cancelEdit(persistDraft = false): Promise<boolean> {
+    if (persistDraft) {
+      const persisted = await this.persistActiveDraft();
+      if (!persisted) return false;
+    }
     this.editingTaskId.set(null);
     this.isEditMode.set(false);
     this.localTitle.set('');
     this.localContent.set('');
+    return true;
   }
 
-  protected saveTask(task: Task): void {
+  private async persistActiveDraft(): Promise<boolean> {
+    if (!this.isEditMode()) return true;
+    if (this.guardHintOnlyMutation('编辑任务')) return false;
+
+    const taskId = this.editingTaskId();
+    if (!taskId) return true;
+
+    const task = this.projectState.getTask(taskId);
+    if (!task) return true;
+
+    return this.persistTaskDraft(task, { preserveExistingTitleWhenBlank: true });
+  }
+
+  protected async saveTask(task: Task): Promise<boolean> {
     if (this.guardHintOnlyMutation('编辑任务')) {
-      return;
+      return false;
     }
 
-    const persisted = this.persistTaskDraft(task, { preserveExistingTitleWhenBlank: false });
+    const persisted = await this.persistTaskDraft(task, { preserveExistingTitleWhenBlank: false });
     if (!persisted) {
-      this.cancelEdit();
-      return;
+      return false;
     }
 
     // 保存后默认折叠为最小块，方便继续浏览
-    this.cancelEdit();
+    await this.cancelEdit();
     this.cdr.markForCheck();
+    return true;
   }
 
-  protected parkTaskNow(task: Task): void {
+  protected async parkTaskNow(task: Task): Promise<boolean> {
     if (this.guardHintOnlyMutation('停泊任务')) {
-      return;
+      return false;
     }
 
-    if (task.parkingMeta?.state === 'parked') return;
+    if (task.parkingMeta?.state === 'parked') return false;
 
     // 停泊前先落盘当前编辑内容，避免用户点“停泊”丢掉刚输入的标题/正文。
     if (this.editingTaskId() === task.id && this.isEditMode()) {
-      this.persistTaskDraft(task, { preserveExistingTitleWhenBlank: true });
+      const draftSaved = await this.persistTaskDraft(task, { preserveExistingTitleWhenBlank: true });
+      if (!draftSaved) return false;
     }
 
-    this.parkingService.parkTask(task.id);
+    const parked = await this.parkingService.parkTask(task.id);
+    if (!parked) return false;
     if (PARKING_CONFIG.DOCK_PARK_BUTTON_SYNC_MODE === 'on') {
-      this.dockEngine.dockTask(task.id, undefined, {
+      const docked = await this.dockEngine.dockTask(task.id, undefined, {
         sourceSection: 'text',
         zoneSource: 'auto',
       });
+      if (!docked) return false;
     }
 
     this.reminderMenuTaskId.set(null);
-    this.cancelEdit();
+    await this.cancelEdit();
     this.cdr.markForCheck();
+    return true;
   }
 
-  protected async deleteTask(taskId: string): Promise<void> {
+  protected async deleteTask(taskId: string): Promise<boolean> {
     if (this.guardHintOnlyMutation('删除任务')) {
-      return;
+      return false;
     }
 
-    await this.taskAdapter.deleteTask(taskId);
+    const deleted = await this.taskAdapter.deleteTask(taskId);
+    if (!deleted) return false;
     if (this.editingTaskId() === taskId) {
-      this.cancelEdit();
+      await this.cancelEdit();
     }
+    return true;
   }
 
 
@@ -552,31 +584,40 @@ export class TextUnassignedComponent implements OnDestroy {
     this.reminderMenuTaskId.set(null);
   }
 
-  protected setReminderPreset(taskId: string, minutes: number): void {
+  protected async setReminderPreset(taskId: string, minutes: number): Promise<void> {
     if (this.guardHintOnlyMutation('设置提醒')) {
       return;
     }
 
+    if (this.editingTaskId() === taskId && this.isEditMode()) {
+      const task = this.projectState.getTask(taskId);
+      if (!task) return;
+      const draftSaved = await this.persistTaskDraft(task, { preserveExistingTitleWhenBlank: true });
+      if (!draftSaved) return;
+    }
+
     const reminderAt = new Date(Date.now() + minutes * 60_000).toISOString();
-    this.reminderService.setReminder(taskId, reminderAt);
+    const saved = await this.reminderService.setReminder(taskId, reminderAt);
+    if (!saved) return;
     this.reminderMenuTaskId.set(null);
     this.cdr.markForCheck();
   }
 
-  protected clearReminder(taskId: string): void {
+  protected async clearReminder(taskId: string): Promise<void> {
     if (this.guardHintOnlyMutation('取消提醒')) {
       return;
     }
 
-    this.reminderService.cancelReminder(taskId);
+    const saved = await this.reminderService.cancelReminder(taskId);
+    if (!saved) return;
     this.reminderMenuTaskId.set(null);
     this.cdr.markForCheck();
   }
 
-  private persistTaskDraft(
+  private async persistTaskDraft(
     task: Task,
     options?: { preserveExistingTitleWhenBlank?: boolean },
-  ): boolean {
+  ): Promise<boolean> {
     const title = this.localTitle().trim();
     const content = this.localContent();
 
@@ -588,14 +629,14 @@ export class TextUnassignedComponent implements OnDestroy {
     const titleChanged = !!nextTitle && nextTitle !== task.title;
     const contentChanged = content !== (task.content || '');
 
-    if (titleChanged) {
-      this.taskAdapter.updateTaskTitle(task.id, nextTitle);
-    }
-    if (contentChanged) {
-      this.taskAdapter.updateTaskContent(task.id, content);
+    if (!titleChanged && !contentChanged) {
+      return true;
     }
 
-    return !!nextTitle;
+    return this.taskAdapter.updateTaskDraft(task.id, {
+      title: nextTitle,
+      content,
+    });
   }
 
   /**
@@ -613,7 +654,7 @@ export class TextUnassignedComponent implements OnDestroy {
     // 可选：添加视觉反馈
   }
 
-  protected handleDropUnassigned(event: DragEvent): void {
+  protected async handleDropUnassigned(event: DragEvent): Promise<void> {
     event.preventDefault();
     event.stopPropagation();
 
@@ -635,16 +676,10 @@ export class TextUnassignedComponent implements OnDestroy {
           // 实际应用中可以根据鼠标位置选择最近的块
           const targetTask = unassignedTasks[0];
           
-          // 使用适配器执行重新挂载操作
-          const result = this.taskAdapter.moveTaskToStage(draggedTask.id, null, undefined, targetTask.id);
-          
-          if (!result.ok) {
-            // 操作失败，但不需要显示错误消息（已由适配器处理）
-            return;
-          }
-          
-          // 操作成功，emit 事件通知父组件更新视图
-          this.dragStart.emit({ event: new DragEvent('drop'), task: draggedTask });
+          // 使用适配器执行重新挂载操作；store signals 会自动刷新视图。
+          // 禁止在这里 emit 合成 dragStart：父组件会把它当成真实拖拽开始，
+          // 重新挂 document dragover 监听并以 clientY=0 启动自动滚动，且没有 dragend 来收尾
+          await this.taskAdapter.moveTaskToStage(draggedTask.id, null, undefined, targetTask.id);
         }
       }
     } catch {
@@ -655,10 +690,7 @@ export class TextUnassignedComponent implements OnDestroy {
       const unassignedTasks = this.projectState.unassignedTasks().filter(t => t.id !== draggedTask.id);
       if (unassignedTasks.length === 0) return;
       const targetTask = unassignedTasks[0];
-      const result = this.taskAdapter.moveTaskToStage(draggedTask.id, null, undefined, targetTask.id);
-      if (result.ok) {
-        this.dragStart.emit({ event: new DragEvent('drop'), task: draggedTask });
-      }
+      await this.taskAdapter.moveTaskToStage(draggedTask.id, null, undefined, targetTask.id);
     }
   }
 

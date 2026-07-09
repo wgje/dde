@@ -29,6 +29,7 @@ import { ExternalSourceLinkService } from '../app/core/external-sources/external
 describe('ImportService', () => {
   let service: ImportService;
   let injector: Injector;
+  let mockExternalSourceLinks: { importPointers: ReturnType<typeof vi.fn> };
   
   const mockLogger = {
     category: () => ({
@@ -52,13 +53,14 @@ describe('ImportService', () => {
   
   beforeEach(() => {
     vi.clearAllMocks();
+    mockExternalSourceLinks = { importPointers: vi.fn().mockResolvedValue(undefined) };
     
     injector = Injector.create({
       providers: [
         { provide: LoggerService, useValue: mockLogger },
         { provide: ToastService, useValue: mockToast },
         { provide: LayoutService, useValue: mockLayoutService },
-        { provide: ExternalSourceLinkService, useValue: { importPointers: vi.fn().mockResolvedValue(undefined) } },
+        { provide: ExternalSourceLinkService, useValue: mockExternalSourceLinks },
       ],
     });
     
@@ -513,6 +515,37 @@ describe('ImportService', () => {
         }),
       ]);
     });
+
+    it('使用 merge 策略时应过滤引用缺失任务的导入连接', async () => {
+      const data = createValidExportData({
+        projects: [{
+          ...createValidExportData().projects[0],
+          tasks: [{
+            ...createValidExportData().projects[0].tasks[0],
+            id: 'task-new',
+          }],
+          connections: [{
+            id: 'dangling-connection',
+            source: 'task-new',
+            target: 'missing-task',
+          }],
+        }],
+      });
+      const existingProject = createExistingProject();
+      const onProjectImported = vi.fn().mockResolvedValue(undefined);
+
+      await service.executeImport(
+        data,
+        [existingProject],
+        { conflictStrategy: 'merge' },
+        onProjectImported
+      );
+
+      const mergedProject = onProjectImported.mock.calls[0][0] as Project;
+      expect(mergedProject.connections).not.toEqual([
+        expect.objectContaining({ id: 'dangling-connection' }),
+      ]);
+    });
     
     it('使用 rename 策略时应创建新项目', async () => {
       const data = createValidExportData();
@@ -551,6 +584,45 @@ describe('ImportService', () => {
       const importedProject = onProjectImported.mock.calls[0][0] as Project;
       expect(importedProject.id).not.toBe('proj-1');
       expect(importedProject.tasks[0].id).not.toBe('task-1');
+    });
+
+    it('generateNewIds 导入外部来源锚点时应同时重生 link ID', async () => {
+      const data = createValidExportData({
+        projects: [{
+          ...createValidExportData().projects[0],
+          tasks: [{
+            ...createValidExportData().projects[0].tasks[0],
+            externalSourceLinks: [{
+              id: 'link-1',
+              sourceType: 'siyuan-block',
+              targetId: '20260608112233-abcdefg',
+              uri: 'siyuan://blocks/20260608112233-abcdefg',
+              label: '源块',
+              sortOrder: 0,
+              deletedAt: null,
+              createdAt: '2026-06-08T00:00:00.000Z',
+              updatedAt: '2026-06-08T00:00:00.000Z',
+            }],
+          }],
+        }],
+      });
+      const onProjectImported = vi.fn().mockResolvedValue(undefined);
+
+      await service.executeImport(
+        data,
+        [],
+        { conflictStrategy: 'skip', generateNewIds: true },
+        onProjectImported
+      );
+
+      const importedProject = onProjectImported.mock.calls[0][0] as Project;
+      expect(mockExternalSourceLinks.importPointers).toHaveBeenCalledWith([
+        expect.objectContaining({
+          id: expect.not.stringMatching(/^link-1$/),
+          taskId: importedProject.tasks[0].id,
+          targetId: '20260608112233-abcdefg',
+        }),
+      ]);
     });
     
     it('应正确更新父子关系的 ID', async () => {

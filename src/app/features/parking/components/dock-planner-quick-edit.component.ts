@@ -4,6 +4,7 @@ import {
   Component,
   ElementRef,
   Input,
+  OnDestroy,
   computed,
   output,
   signal,
@@ -45,7 +46,7 @@ export type DockPlannerQuickEditPresentation = 'popover' | 'sheet';
     </div>
   `,
 })
-export class DockPlannerQuickEditComponent {
+export class DockPlannerQuickEditComponent implements OnDestroy {
   private readonly openState = signal(false);
   private readonly attentionState = signal(false);
   // pendingOpen 安全网：500ms 超时自动重置，防止父组件未响应时状态卡住
@@ -62,6 +63,7 @@ export class DockPlannerQuickEditComponent {
   set openInput(value: boolean) {
     this.openState.set(!!value);
     this.pendingOpen.set(false);
+    this.clearPendingOpenTimer();
   }
 
   @Input({ alias: 'attention' })
@@ -124,12 +126,22 @@ export class DockPlannerQuickEditComponent {
     if (!this.open()) {
       this.pendingOpen.set(true);
       // 安全网：500ms 内若父组件未响应 open 变化，自动重置 pendingOpen
-      if (this.pendingOpenTimerId !== null) clearTimeout(this.pendingOpenTimerId);
+      this.clearPendingOpenTimer();
       this.pendingOpenTimerId = setTimeout(() => {
         this.pendingOpenTimerId = null;
         this.pendingOpen.set(false);
       }, 500);
     }
     this.toggleRequested.emit();
+  }
+
+  ngOnDestroy(): void {
+    this.clearPendingOpenTimer();
+  }
+
+  private clearPendingOpenTimer(): void {
+    if (this.pendingOpenTimerId === null) return;
+    clearTimeout(this.pendingOpenTimerId);
+    this.pendingOpenTimerId = null;
   }
 }

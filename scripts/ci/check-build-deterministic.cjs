@@ -22,6 +22,13 @@ const REPO_ROOT = path.resolve(__dirname, '../..');
 const TMP = path.join(REPO_ROOT, '.tmp');
 const A = path.join(TMP, 'build-a');
 const B = path.join(TMP, 'build-b');
+const DETERMINISTIC_BUILD_ENV = {
+  ...process.env,
+  // Angular enables the persistent disk cache for local builds by default.
+  // The deterministic guard compares CI deploy artifacts, so both child builds
+  // must use CI cache semantics even when the guard is run on a developer box.
+  CI: 'true',
+};
 
 function sha256(file) {
   return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
@@ -102,7 +109,7 @@ function buildManifest(dir) {
 
 function run(cmd) {
   console.log('$ ' + cmd);
-  execSync(cmd, { cwd: REPO_ROOT, stdio: 'inherit', env: process.env });
+  execSync(cmd, { cwd: REPO_ROOT, stdio: 'inherit', env: DETERMINISTIC_BUILD_ENV });
 }
 
 function copyDist(dest) {

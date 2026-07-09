@@ -177,6 +177,15 @@ describe('WorkspaceModalCoordinatorService', () => {
     expect(config['closeOnEscape']).toBe(false);
   });
 
+  it('should not open login modal twice while an existing login modal is active', async () => {
+    await service.openLoginModal();
+    await service.openLoginModal();
+
+    expect(mockModalLoader.loadLoginModal).toHaveBeenCalledTimes(1);
+    expect(mockDynamicModal.open).toHaveBeenCalledTimes(1);
+    expect(mockToast.info).toHaveBeenCalledWith('登录窗口已打开', '请先完成当前登录流程');
+  });
+
   // ── closeLoginModal ────────────────────────────────────────
 
   it('should close login modal ref when it exists', async () => {

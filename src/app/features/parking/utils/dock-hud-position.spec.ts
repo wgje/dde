@@ -60,6 +60,19 @@ describe('dock-hud-position', () => {
       expect(Number.isInteger(result.x)).toBe(true);
       expect(Number.isInteger(result.y)).toBe(true);
     });
+
+    it('allows HUD to reach any edge with only 12px margin', () => {
+      const size = { width: 290, height: 220 };
+      const minMargin = 12;
+
+      const bottomRight = clampHudPosition({ x: window.innerWidth, y: window.innerHeight }, size);
+      expect(bottomRight.x).toBe(window.innerWidth - size.width - minMargin);
+      expect(bottomRight.y).toBe(window.innerHeight - size.height - minMargin);
+
+      const topRight = clampHudPosition({ x: window.innerWidth, y: 0 }, size);
+      expect(topRight.x).toBe(window.innerWidth - size.width - minMargin);
+      expect(topRight.y).toBe(minMargin);
+    });
   });
 
   describe('normalizeFlipRect (via clamp behavior)', () => {

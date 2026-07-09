@@ -1,0 +1,122 @@
+<section class="gate-actions-wrap">
+  <div class="primary-actions" role="group" aria-label="大门处理操作">
+    <button
+      data-testid="gate-read-button"
+      class="action-btn action-read"
+      [disabled]="isProcessing()"
+      (click)="markAsRead()">
+      <span class="action-icon">
+        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg>
+      </span>
+      <span class="action-label">已读</span>
+    </button>
+
+    <button
+      data-testid="gate-complete-button"
+      class="action-btn action-complete"
+      [disabled]="isProcessing()"
+      (click)="markAsCompleted()">
+      <span class="action-icon">
+        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="m19 12-7 7-7-7"/></svg>
+      </span>
+      <span class="action-label">完成</span>
+    </button>
+  </div>
+
+  <button
+    #captureFab
+    type="button"
+    class="quick-capture-fab"
+    [class.fab-recording]="isFabRecording()"
+    [class.fab-out-of-zone]="isFabOutOfZone()"
+    [class.fab-transcribing]="isFabTranscribing()"
+    [disabled]="isProcessing()"
+    (mousedown)="onFabMouseDown($event)"
+    (touchstart)="onFabTouchStart($event)"
+    [attr.aria-label]="speechSupported() ? '按住录音，松开自动转写；离开按钮区域取消' : '快速录入文字'"
+    data-testid="gate-quick-capture-toggle">
+    @if (isFabTranscribing()) {
+      <span class="fab-spinner"></span>
+    } @else if (isFabRecording()) {
+      <span class="fab-pulse"></span>
+    } @else {
+      <span class="fab-icon">
+        <!-- 【2026-04-23 倒置】默认图标改为麦克风：FAB 直接是录音按钮，去掉
+             "加号 → 开面板 → 面板内再按麦克风" 的两步流程。 -->
+        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M19 10a7 7 0 0 1-14 0"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="8" y1="22" x2="16" y2="22"/></svg>
+      </span>
+    }
+  </button>
+
+  @if (isFabRecording() || isFabTranscribing()) {
+    <div class="fab-hint" aria-live="polite">
+      @if (isFabOutOfZone()) {
+        松开取消
+      } @else if (isFabTranscribing()) {
+        转写中…
+      } @else {
+        松开结束录音
+      }
+    </div>
+  }
+
+  @if (quickCaptureOpen() && pendingTranscription()) {
+    <!-- 【2026-04-23 倒置】面板只承担"录完后确认编辑"职责：
+         录音由 FAB 长按直接触发，转写完成后自动打开此面板。用户只需编辑 / 保存 / 取消。
+         旧的"手动文本 + 面板内录音"入口已移除。 -->
+    <div class="quick-capture-mask" (click)="cancelPendingTranscription()"></div>
+
+    <section class="quick-capture-panel" data-testid="gate-quick-capture-panel">
+      <header class="panel-header">
+        <h3>确认刚才的录入</h3>
+        <button type="button" class="panel-close" (click)="cancelPendingTranscription()">关闭</button>
+      </header>
+
+      <div class="transcription-editor">
+        <textarea
+          class="transcription-input"
+          rows="4"
+          [(ngModel)]="editableTranscription"
+          placeholder="编辑转写内容..."
+          data-testid="gate-transcription-editor">
+        </textarea>
+        <div class="transcription-actions">
+          <button type="button" class="ghost-btn" (click)="cancelPendingTranscription()" data-testid="gate-transcription-cancel">取消</button>
+          <button type="button" class="solid-btn" [disabled]="!editableTranscription.trim()" (click)="confirmPendingTranscription()" data-testid="gate-transcription-confirm">保存</button>
+        </div>
+      </div>
+    </section>
+  }
+
+  @if (quickCaptureOpen() && !pendingTranscription() && manualQuickCaptureFallback()) {
+    <div class="quick-capture-mask" (click)="closeQuickCapture()"></div>
+
+    <section class="quick-capture-panel" data-testid="gate-quick-capture-panel">
+      <header class="panel-header">
+        <h3>快速记录</h3>
+        <button type="button" class="panel-close" (click)="closeQuickCapture()">关闭</button>
+      </header>
+
+      <textarea
+        class="capture-input"
+        rows="4"
+        [ngModel]="quickInputText()"
+        (ngModelChange)="quickInputText.set($event)"
+        placeholder="记录一个待处理想法..."
+        data-testid="gate-quick-input-editor">
+      </textarea>
+
+      <footer class="panel-footer">
+        <span class="hint">当前环境不支持语音录入，先用文字补记</span>
+
+        <button
+          type="button"
+          class="solid-btn"
+          [disabled]="!quickInputText().trim()"
+          (click)="submitQuickInput()">
+          保存
+        </button>
+      </footer>
+    </section>
+  }
+</section>

@@ -1,7 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { DestroyRef, Injector, runInInjectionContext, signal } from '@angular/core';
 import { ActionQueueService } from '../../services/action-queue.service';
+import { ActionQueueEnqueueMutationService } from '../../services/action-queue-enqueue-mutation.service';
+import { ActionQueueOwnerStorageService } from '../../services/action-queue-owner-storage.service';
+import { ActionQueueSchedulerService } from '../../services/action-queue-scheduler.service';
 import { ActionQueueStorageService, LOCAL_QUEUE_CONFIG } from '../../services/action-queue-storage.service';
+import { ActionQueueSyncWriterLeaseService } from '../../services/action-queue-sync-writer-lease.service';
+import { ActionQueueViewStateService } from '../../services/action-queue-view-state.service';
 import { ChangeTrackerService } from '../../services/change-tracker.service';
 import { LoggerService } from '../../services/logger.service';
 import { ToastService } from '../../services/toast.service';
@@ -14,6 +19,7 @@ import { RetryQueueService } from '../../app/core/services/sync/retry-queue.serv
 import { createMockDestroyRef, mockSentryLazyLoaderService } from '../../test-setup.mocks';
 import { SYNC_CONFIG, SYNC_DURABILITY_CONFIG } from '../../config';
 import type { Task, Connection } from '../../models';
+import type { DeadLetterItem, QueuedAction } from '../../services/action-queue.types';
 import { resetBrowserNetworkSuspensionTrackingForTests } from '../../utils/browser-network-suspension';
 
 const mockLoggerCategory = {
@@ -45,9 +51,52 @@ const mockNetworkAwarenessService = {
   setStoragePressure: vi.fn(),
 };
 
+const mockQueueBackupState = {
+  persistedQueue: [] as QueuedAction[],
+  persistedDeadLetters: [] as DeadLetterItem[],
+  recordFound: false,
+  deadLetterRecordFound: false,
+};
+
 const mockQueueBackupService = {
-  backupQueue: vi.fn().mockResolvedValue(true),
-  restoreQueue: vi.fn().mockResolvedValue(null),
+  backupQueue: vi.fn(async (queue: QueuedAction[]) => {
+    mockQueueBackupState.persistedQueue = queue;
+    mockQueueBackupState.recordFound = true;
+    return true;
+  }),
+  restoreQueue: vi.fn(async () => (
+    mockQueueBackupState.recordFound
+      ? mockQueueBackupState.persistedQueue
+      : null
+  )),
+  backupDeadLetters: vi.fn(async (deadLetters: DeadLetterItem[]) => {
+    mockQueueBackupState.persistedDeadLetters = deadLetters;
+    mockQueueBackupState.deadLetterRecordFound = true;
+    return true;
+  }),
+  restoreDeadLetters: vi.fn(async () => (
+    mockQueueBackupState.deadLetterRecordFound
+      ? mockQueueBackupState.persistedDeadLetters
+      : null
+  )),
+  updateQueue: vi.fn(async (
+    _ownerUserId: string,
+    updater: (
+      queue: QueuedAction[],
+      context: { recordFound: boolean },
+    ) => QueuedAction[],
+  ) => {
+    const recordFound = (
+      mockQueueBackupState.recordFound ||
+      mockQueueBackupState.persistedQueue.length > 0
+    );
+    mockQueueBackupState.persistedQueue = updater(
+      mockQueueBackupState.persistedQueue,
+      { recordFound },
+    );
+    mockQueueBackupState.recordFound = true;
+    return mockQueueBackupState.persistedQueue;
+  }),
 };
 
 const mockRetryQueueService = {
@@ -88,6 +137,10 @@ describe('Sync Integrity Invariants (2026-02-07)', () => {
     resetBrowserNetworkSuspensionTrackingForTests();
     localStorage.clear();
     vi.clearAllMocks();
+    mockQueueBackupState.persistedQueue = [];
+    mockQueueBackupState.persistedDeadLetters = [];
+    mockQueueBackupState.recordFound = false;
+    mockQueueBackupState.deadLetterRecordFound = false;
     Object.defineProperty(document, 'visibilityState', {
       value: 'visible',
       writable: true,
@@ -100,6 +153,11 @@ describe('Sync Integrity Invariants (2026-02-07)', () => {
     const injector = Injector.create({
       providers: [
         ActionQueueService,
+        ActionQueueEnqueueMutationService,
+        ActionQueueOwnerStorageService,
+        ActionQueueSchedulerService,
+        ActionQueueSyncWriterLeaseService,
+        ActionQueueViewStateService,
         ActionQueueStorageService,
         ChangeTrackerService,
         { provide: LoggerService, useValue: mockLoggerService },
@@ -122,7 +180,7 @@ describe('Sync Integrity Invariants (2026-02-07)', () => {
   });
 
   afterEach(() => {
-    actionQueue.reset();
+    actionQueue?.reset();
     destroyRefCleanup?.();
     resetBrowserNetworkSuspensionTrackingForTests();
     vi.useRealTimers();
@@ -156,7 +214,7 @@ describe('Sync Integrity Invariants (2026-02-07)', () => {
     expect(actionQueue.pendingActions().some(a => a.id === firstActionId)).toBe(true);
   });
 
-  it('QUEUE-DURABILITY-002: 冻结状态下应走内存兜底接收新写', () => {
+  it('QUEUE-DURABILITY-002: 冻结状态下应拒绝新写并保持队列不变', () => {
     actionQueueStorage.isOnline = false;
 
     actionQueue.enqueue({
@@ -177,8 +235,8 @@ describe('Sync Integrity Invariants (2026-02-07)', () => {
       payload: { task: createTask('task-2'), projectId: 'p-1' },
     });
 
-    expect(actionId).not.toBe('');
-    expect(actionQueue.queueSize()).toBe(sizeBeforeFreeze + 1);
+    expect(actionId).toBe('');
+    expect(actionQueue.queueSize()).toBe(sizeBeforeFreeze);
     expect(mockToastService.warning).toHaveBeenCalled();
   });
 
@@ -500,7 +558,7 @@ describe('Sync Integrity Invariants (2026-02-07)', () => {
 
   // ==================== SYNC-CROSS-012: Queue Semantics Convergence ====================
 
-  it('SYNC-CROSS-012: ActionQueue 冻结状态应走内存兜底继续入队', () => {
+  it('SYNC-CROSS-012: ActionQueue 冻结状态应拒绝新入队', () => {
     actionQueueStorage.isOnline = false;
 
     // 设置冻结状态
@@ -514,8 +572,8 @@ describe('Sync Integrity Invariants (2026-02-07)', () => {
       payload: { task: createTask('task-frozen'), projectId: 'p-1' },
     });
 
-    expect(id).not.toBe('');
-    expect(actionQueue.queueSize()).toBe(1);
+    expect(id).toBe('');
+    expect(actionQueue.queueSize()).toBe(0);
   });
 
   it('SYNC-CROSS-012: delete 已删除实体的 update 应被忽略', () => {

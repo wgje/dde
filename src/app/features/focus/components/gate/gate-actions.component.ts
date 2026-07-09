@@ -28,565 +28,8 @@ import { LoggerService } from '../../../../../services/logger.service';
   selector: 'app-gate-actions',
   standalone: true,
   imports: [CommonModule, FormsModule],
-  template: `
-    <section class="gate-actions-wrap">
-      <div class="primary-actions" role="group" aria-label="大门处理操作">
-        <button
-          data-testid="gate-read-button"
-          class="action-btn action-read"
-          [disabled]="isProcessing()"
-          (click)="markAsRead()">
-          <span class="action-icon">
-            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg>
-          </span>
-          <span class="action-label">已读</span>
-        </button>
-
-        <button
-          data-testid="gate-complete-button"
-          class="action-btn action-complete"
-          [disabled]="isProcessing()"
-          (click)="markAsCompleted()">
-          <span class="action-icon">
-            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="m19 12-7 7-7-7"/></svg>
-          </span>
-          <span class="action-label">完成</span>
-        </button>
-      </div>
-
-      <button
-        #captureFab
-        type="button"
-        class="quick-capture-fab"
-        [class.fab-recording]="isFabRecording()"
-        [class.fab-out-of-zone]="isFabOutOfZone()"
-        [class.fab-transcribing]="isFabTranscribing()"
-        [disabled]="isProcessing()"
-        (mousedown)="onFabMouseDown($event)"
-        (touchstart)="onFabTouchStart($event)"
-        [attr.aria-label]="speechSupported() ? '按住录音，松开自动转写；离开按钮区域取消' : '快速录入文字'"
-        data-testid="gate-quick-capture-toggle">
-        @if (isFabTranscribing()) {
-          <span class="fab-spinner"></span>
-        } @else if (isFabRecording()) {
-          <span class="fab-pulse"></span>
-        } @else {
-          <span class="fab-icon">
-            <!-- 【2026-04-23 倒置】默认图标改为麦克风：FAB 直接是录音按钮，去掉
-                 "加号 → 开面板 → 面板内再按麦克风" 的两步流程。 -->
-            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M19 10a7 7 0 0 1-14 0"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="8" y1="22" x2="16" y2="22"/></svg>
-          </span>
-        }
-      </button>
-
-      @if (isFabRecording() || isFabTranscribing()) {
-        <div class="fab-hint" aria-live="polite">
-          @if (isFabOutOfZone()) {
-            松开取消
-          } @else if (isFabTranscribing()) {
-            转写中…
-          } @else {
-            松开结束录音
-          }
-        </div>
-      }
-
-      @if (quickCaptureOpen() && pendingTranscription()) {
-        <!-- 【2026-04-23 倒置】面板只承担"录完后确认编辑"职责：
-             录音由 FAB 长按直接触发，转写完成后自动打开此面板。用户只需编辑 / 保存 / 取消。
-             旧的"手动文本 + 面板内录音"入口已移除。 -->
-        <div class="quick-capture-mask" (click)="cancelPendingTranscription()"></div>
-
-        <section class="quick-capture-panel" data-testid="gate-quick-capture-panel">
-          <header class="panel-header">
-            <h3>确认刚才的录入</h3>
-            <button type="button" class="panel-close" (click)="cancelPendingTranscription()">关闭</button>
-          </header>
-
-          <div class="transcription-editor">
-            <textarea
-              class="transcription-input"
-              rows="4"
-              [(ngModel)]="editableTranscription"
-              placeholder="编辑转写内容..."
-              data-testid="gate-transcription-editor">
-            </textarea>
-            <div class="transcription-actions">
-              <button type="button" class="ghost-btn" (click)="cancelPendingTranscription()" data-testid="gate-transcription-cancel">取消</button>
-              <button type="button" class="solid-btn" [disabled]="!editableTranscription.trim()" (click)="confirmPendingTranscription()" data-testid="gate-transcription-confirm">保存</button>
-            </div>
-          </div>
-        </section>
-      }
-
-      @if (quickCaptureOpen() && !pendingTranscription() && manualQuickCaptureFallback()) {
-        <div class="quick-capture-mask" (click)="closeQuickCapture()"></div>
-
-        <section class="quick-capture-panel" data-testid="gate-quick-capture-panel">
-          <header class="panel-header">
-            <h3>快速记录</h3>
-            <button type="button" class="panel-close" (click)="closeQuickCapture()">关闭</button>
-          </header>
-
-          <textarea
-            class="capture-input"
-            rows="4"
-            [ngModel]="quickInputText()"
-            (ngModelChange)="quickInputText.set($event)"
-            placeholder="记录一个待处理想法..."
-            data-testid="gate-quick-input-editor">
-          </textarea>
-
-          <footer class="panel-footer">
-            <span class="hint">当前环境不支持语音录入，先用文字补记</span>
-
-            <button
-              type="button"
-              class="solid-btn"
-              [disabled]="!quickInputText().trim()"
-              (click)="submitQuickInput()">
-              保存
-            </button>
-          </footer>
-        </section>
-      }
-    </section>
-  `,
-  styles: [`
-    :host {
-      display: block;
-      width: 100%;
-    }
-
-    .gate-actions-wrap {
-      position: relative;
-      width: 100%;
-      padding: 0.35rem 0.25rem 0.6rem;
-    }
-
-    .primary-actions {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 0.9rem;
-    }
-
-    .action-btn {
-      min-width: 150px;
-      border: 1px solid rgba(255, 255, 255, 0.12);
-      border-radius: 9999px;
-      padding: 0.9rem 1.8rem;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      gap: 0.75rem;
-      background: linear-gradient(180deg, rgba(255, 255, 255, 0.1) 0%, rgba(255, 255, 255, 0.03) 100%);
-      box-shadow: 
-        inset 0 1px 1px rgba(255, 255, 255, 0.15), 
-        inset 0 -1px 1px rgba(0, 0, 0, 0.2),
-        0 8px 20px -4px rgba(0, 0, 0, 0.4);
-      backdrop-filter: blur(20px);
-      -webkit-backdrop-filter: blur(20px);
-      color: rgba(255, 255, 255, 0.95);
-      transition: all var(--pk-panel-enter) var(--pk-ease-enter);
-      font-size: 0.95rem;
-      font-weight: 400;
-      letter-spacing: 0.06em;
-      cursor: pointer;
-    }
-
-    .action-btn:hover:not(:disabled) {
-      transform: translateY(-3px);
-      border-color: rgba(255, 255, 255, 0.2);
-      background: linear-gradient(180deg, rgba(255, 255, 255, 0.15) 0%, rgba(255, 255, 255, 0.05) 100%);
-      box-shadow: 
-        inset 0 1px 1px rgba(255, 255, 255, 0.25), 
-        inset 0 -1px 1px rgba(0, 0, 0, 0.2),
-        0 12px 28px -6px rgba(0, 0, 0, 0.5);
-    }
-
-    .action-btn:active:not(:disabled) {
-      transform: translateY(1px);
-      box-shadow: 
-        inset 0 1px 2px rgba(0, 0, 0, 0.2),
-        0 4px 12px -4px rgba(0, 0, 0, 0.3);
-      background: linear-gradient(180deg, rgba(255, 255, 255, 0.05) 0%, rgba(255, 255, 255, 0.02) 100%);
-    }
-
-    .action-btn:disabled {
-      opacity: 0.4;
-      cursor: not-allowed;
-      transform: none;
-      box-shadow: none;
-    }
-
-    .action-complete {
-      background: linear-gradient(180deg, rgba(255, 255, 255, 0.15) 0%, rgba(255, 255, 255, 0.05) 100%);
-      border-color: rgba(255, 255, 255, 0.18);
-    }
-
-    .action-icon {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      opacity: 0.85;
-    }
-
-    .fab-icon {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-
-    .quick-capture-fab {
-      position: absolute;
-      right: 0;
-      bottom: -3.5rem;
-      width: 64px;
-      height: 64px;
-      border-radius: 9999px;
-      border: 1px solid rgba(255, 255, 255, 0.2);
-      background: linear-gradient(135deg, rgba(45, 45, 50, 0.9) 0%, rgba(24, 24, 27, 0.95) 100%);
-      box-shadow: 
-        inset 0 1px 1px rgba(255, 255, 255, 0.2), 
-        inset 0 -1px 1px rgba(0, 0, 0, 0.4),
-        0 12px 32px -8px rgba(0, 0, 0, 0.7);
-      backdrop-filter: blur(20px);
-      -webkit-backdrop-filter: blur(20px);
-      color: rgba(255, 255, 255, 0.95);
-      transition: all var(--pk-panel-enter) var(--pk-ease-enter);
-      z-index: 4;
-      touch-action: none;
-      user-select: none;
-      -webkit-user-select: none;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      cursor: pointer;
-    }
-
-    .quick-capture-fab:hover:not(:disabled):not(.fab-recording) {
-      transform: translateY(-4px) scale(1.04);
-      box-shadow: 
-        inset 0 1px 1px rgba(255, 255, 255, 0.3), 
-        0 16px 40px -8px rgba(0, 0, 0, 0.8);
-      border-color: rgba(255, 255, 255, 0.3);
-      background: linear-gradient(135deg, rgba(55, 55, 60, 0.95) 0%, rgba(30, 30, 35, 0.98) 100%);
-    }
-
-    .quick-capture-fab:disabled {
-      opacity: 0.4;
-    }
-
-    .quick-capture-fab.fab-recording {
-      background: rgba(220, 38, 38, 0.85);
-      border-color: rgba(248, 113, 113, 0.4);
-      box-shadow: 0 0 0 4px rgba(220, 38, 38, 0.2), 0 8px 24px -8px rgba(0, 0, 0, 0.5);
-      animation: fab-breathe 1.5s ease-in-out infinite;
-    }
-
-    .quick-capture-fab.fab-recording.fab-out-of-zone {
-      background: rgba(82, 82, 91, 0.7);
-      border-color: rgba(255, 255, 255, 0.08);
-      box-shadow: 0 8px 24px -8px rgba(0, 0, 0, 0.5);
-      animation: none;
-      opacity: 0.6;
-    }
-
-    .quick-capture-fab.fab-transcribing {
-      background: rgba(24, 24, 27, 0.92);
-      border-color: rgba(255, 255, 255, 0.15);
-    }
-
-    .fab-icon {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-
-    .fab-pulse {
-      width: 14px;
-      height: 14px;
-      border-radius: 9999px;
-      background: white;
-    }
-
-    .fab-spinner {
-      width: 18px;
-      height: 18px;
-      border: 2px solid rgba(255, 255, 255, 0.25);
-      border-top-color: rgba(255, 255, 255, 0.9);
-      border-radius: 50%;
-      animation: spin 0.9s linear infinite;
-    }
-
-    .fab-hint {
-      position: absolute;
-      right: 0;
-      bottom: -4.6rem;
-      white-space: nowrap;
-      font-size: 0.7rem;
-      color: rgba(255, 255, 255, 0.5);
-      letter-spacing: 0.02em;
-      z-index: 4;
-      pointer-events: none;
-    }
-
-    @keyframes fab-breathe {
-      0%, 100% { transform: scale(1); }
-      50% { transform: scale(1.06); }
-    }
-
-    .quick-capture-mask {
-      position: fixed;
-      inset: 0;
-      background: rgba(0, 0, 0, 0.5);
-      backdrop-filter: blur(4px);
-      z-index: 90;
-    }
-
-    .quick-capture-panel {
-      position: fixed;
-      right: 1.5rem;
-      bottom: 1.5rem;
-      width: min(440px, calc(100vw - 3rem));
-      border-radius: 24px;
-      border: 1px solid rgba(255, 255, 255, 0.12);
-      background: linear-gradient(180deg, rgba(45, 45, 50, 0.85) 0%, rgba(24, 24, 27, 0.95) 100%);
-      box-shadow: 
-        inset 0 1px 1px rgba(255, 255, 255, 0.15), 
-        0 32px 64px -16px rgba(0, 0, 0, 0.9);
-      backdrop-filter: blur(32px);
-      -webkit-backdrop-filter: blur(32px);
-      padding: 1.25rem;
-      z-index: 91;
-      color: rgba(255, 255, 255, 0.95);
-      animation: panel-up var(--pk-panel-enter) var(--pk-ease-enter);
-    }
-
-    @keyframes panel-up {
-      from {
-        opacity: 0;
-        transform: translateY(20px) scale(0.95);
-      }
-      to {
-        opacity: 1;
-        transform: translateY(0) scale(1);
-      }
-    }
-
-    .panel-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      margin-bottom: 0.8rem;
-    }
-
-    .panel-header h3 {
-      margin: 0;
-      font-size: 0.9rem;
-      font-weight: 500;
-      letter-spacing: 0.04em;
-    }
-
-    .panel-close {
-      border: none;
-      background: transparent;
-      color: rgba(255, 255, 255, 0.5);
-      font-size: 0.8rem;
-      cursor: pointer;
-      transition: color var(--pk-panel-exit) var(--pk-ease-standard);
-    }
-
-    .panel-close:hover {
-      color: rgba(255, 255, 255, 0.9);
-    }
-
-    .transcription-editor {
-      border: 1px solid rgba(255, 255, 255, 0.08);
-      border-radius: 12px;
-      padding: 0.6rem;
-      margin-bottom: 0.6rem;
-      background: rgba(0, 0, 0, 0.2);
-      box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.2);
-    }
-
-    .transcription-input,
-    .capture-input {
-      width: 100%;
-      resize: none;
-      border: 1px solid rgba(255, 255, 255, 0.08);
-      border-radius: 12px;
-      background: rgba(0, 0, 0, 0.25);
-      color: rgba(255, 255, 255, 0.95);
-      padding: 0.7rem;
-      font-size: 0.85rem;
-      line-height: 1.5;
-      box-sizing: border-box;
-      font-family: inherit;
-      box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.2);
-      transition:
-        border-color var(--pk-panel-exit) var(--pk-ease-standard),
-        box-shadow var(--pk-panel-exit) var(--pk-ease-standard);
-    }
-
-    .transcription-input:focus,
-    .capture-input:focus {
-      outline: none;
-      border-color: rgba(255, 255, 255, 0.25);
-      box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.2), 0 0 0 2px rgba(255, 255, 255, 0.05);
-    }
-
-    .transcription-actions {
-      margin-top: 0.45rem;
-      display: flex;
-      justify-content: flex-end;
-      gap: 0.45rem;
-    }
-
-    .capture-input-row {
-      display: flex;
-      gap: 0.55rem;
-      align-items: stretch;
-      margin-bottom: 0.65rem;
-    }
-
-    .record-btn {
-      width: 48px;
-      min-width: 48px;
-      border-radius: 14px;
-      border: 1px solid rgba(255, 255, 255, 0.12);
-      background: linear-gradient(180deg, rgba(255, 255, 255, 0.1) 0%, rgba(255, 255, 255, 0.03) 100%);
-      box-shadow: 
-        inset 0 1px 1px rgba(255, 255, 255, 0.15), 
-        0 4px 12px -2px rgba(0, 0, 0, 0.3);
-      color: rgba(255, 255, 255, 0.9);
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      cursor: pointer;
-      transition: all 250ms cubic-bezier(0.25, 0.8, 0.25, 1);
-      touch-action: none;
-    }
-
-    .record-btn:hover:not(:disabled) {
-      background: linear-gradient(180deg, rgba(255, 255, 255, 0.15) 0%, rgba(255, 255, 255, 0.05) 100%);
-      border-color: rgba(255, 255, 255, 0.2);
-      box-shadow: 
-        inset 0 1px 1px rgba(255, 255, 255, 0.25), 
-        0 6px 16px -2px rgba(0, 0, 0, 0.4);
-      transform: translateY(-2px);
-    }
-
-    .record-btn.recording {
-      background: linear-gradient(180deg, rgba(239, 68, 68, 0.9) 0%, rgba(220, 38, 38, 0.95) 100%);
-      border-color: rgba(248, 113, 113, 0.5);
-      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.2), 0 4px 16px rgba(220, 38, 38, 0.4);
-    }
-
-    .record-btn.out-of-zone {
-      opacity: 0.58;
-    }
-
-    .record-stop {
-      width: 10px;
-      height: 10px;
-      border-radius: 2px;
-      background: white;
-    }
-
-    .spinner {
-      width: 14px;
-      height: 14px;
-      border: 2px solid rgba(245, 245, 244, 0.38);
-      border-top-color: rgba(245, 245, 244, 1);
-      border-radius: 50%;
-      animation: spin 0.9s linear infinite;
-    }
-
-    @keyframes spin {
-      to { transform: rotate(360deg); }
-    }
-
-    .panel-footer {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      gap: 0.65rem;
-    }
-
-    .hint {
-      font-size: 0.72rem;
-      color: rgba(255, 255, 255, 0.45);
-      line-height: 1.35;
-    }
-
-    .ghost-btn,
-    .solid-btn {
-      border-radius: 12px;
-      border: 1px solid rgba(255, 255, 255, 0.12);
-      padding: 0.5rem 1rem;
-      font-size: 0.85rem;
-      cursor: pointer;
-      transition: all 250ms cubic-bezier(0.25, 0.8, 0.25, 1);
-      letter-spacing: 0.04em;
-    }
-
-    .ghost-btn {
-      background: transparent;
-      color: rgba(255, 255, 255, 0.7);
-      border-color: transparent;
-    }
-
-    .ghost-btn:hover {
-      background: rgba(255, 255, 255, 0.08);
-      color: rgba(255, 255, 255, 0.95);
-    }
-
-    .solid-btn {
-      background: linear-gradient(180deg, rgba(255, 255, 255, 0.95) 0%, rgba(255, 255, 255, 0.85) 100%);
-      color: rgba(9, 9, 11, 0.95);
-      font-weight: 500;
-      border-color: transparent;
-      box-shadow: 0 2px 8px rgba(255, 255, 255, 0.15);
-    }
-
-    .solid-btn:hover:not(:disabled) {
-      background: linear-gradient(180deg, #fff 0%, rgba(255, 255, 255, 0.9) 100%);
-      box-shadow: 0 4px 16px rgba(255, 255, 255, 0.25);
-      transform: translateY(-2px);
-    }
-
-    .solid-btn:active:not(:disabled) {
-      transform: translateY(1px);
-      box-shadow: 0 2px 4px rgba(255, 255, 255, 0.1);
-    }
-
-    .solid-btn:disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
-      box-shadow: none;
-      transform: none;
-    }
-
-    @media (max-width: 640px) {
-      .quick-capture-fab {
-        right: 0;
-        width: 52px;
-        height: 52px;
-      }
-
-      .action-btn {
-        min-width: 118px;
-      }
-
-      .quick-capture-panel {
-        right: 0.75rem;
-        left: 0.75rem;
-        width: auto;
-      }
-    }
-  `],
+  templateUrl: './gate-actions.component.html',
+  styleUrl: './gate-actions.component.css',
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class GateActionsComponent implements OnDestroy {
@@ -621,6 +64,7 @@ export class GateActionsComponent implements OnDestroy {
   isFabOutOfZone = signal(false);
   isFabTranscribing = signal(false);
 
+  private isDestroyed = false;
   private globalCleanups: (() => void)[] = [];
 
   /** 长按定时器 */
@@ -636,8 +80,13 @@ export class GateActionsComponent implements OnDestroy {
   readonly captureFab = viewChild<ElementRef<HTMLElement>>('captureFab');
 
   ngOnDestroy(): void {
+    if (this.isDestroyed) return;
+    this.isDestroyed = true;
     this.clearLongPressTimer();
     this.removeGlobalListeners();
+    this.isFabRecording.set(false);
+    this.isFabOutOfZone.set(false);
+    this.isFabTranscribing.set(false);
   }
 
   markAsRead(): void {
@@ -666,6 +115,7 @@ export class GateActionsComponent implements OnDestroy {
   /** 鼠标按下 FAB：启动长按检测 */
   onFabMouseDown(event: MouseEvent): void {
     event.preventDefault();
+    if (this.isDestroyed) return;
     if (this.isFabTranscribing()) return;
 
     if (!this.speechService.isSupported()) {
@@ -709,6 +159,7 @@ export class GateActionsComponent implements OnDestroy {
   /** 触摸按下 FAB：启动长按检测 */
   onFabTouchStart(event: TouchEvent): void {
     event.preventDefault();
+    if (this.isDestroyed) return;
     if (this.isFabTranscribing()) return;
 
     if (!this.speechService.isSupported()) {
@@ -738,20 +189,28 @@ export class GateActionsComponent implements OnDestroy {
       // 【2026-04-23 倒置】短按不再打开面板（详见 mousedown 分支注释）。
       this.removeFabListeners();
     };
+    const onTouchCancel = () => {
+      this.clearLongPressTimer();
+      if (this.isFabRecording()) {
+        this.cancelFabRecording('touch cancelled');
+      }
+      this.removeFabListeners();
+    };
 
     document.addEventListener('touchmove', onTouchMove, { passive: true });
     document.addEventListener('touchend', onTouchEnd);
-    document.addEventListener('touchcancel', onTouchEnd);
+    document.addEventListener('touchcancel', onTouchCancel);
 
     this.globalCleanups.push(
       () => document.removeEventListener('touchmove', onTouchMove),
       () => document.removeEventListener('touchend', onTouchEnd),
-      () => document.removeEventListener('touchcancel', onTouchEnd)
+      () => document.removeEventListener('touchcancel', onTouchCancel)
     );
   }
 
   /** 在 FAB 上开始录音 */
   private startFabRecording(): void {
+    if (this.isDestroyed) return;
     if (!this.speechService.isSupported()) {
       if (this.isDevMode) {
         const mockTexts = GateActionsComponent.DEV_MOCK_TRANSCRIPTIONS;
@@ -772,12 +231,14 @@ export class GateActionsComponent implements OnDestroy {
 
     void this.speechService.startRecording()
       .then(() => {
+        if (this.isDestroyed) return;
         if (!this.isRecording()) {
           this.logger.warn('GateActions', 'FAB recording unavailable, fallback to manual quick capture');
           this.openManualQuickCaptureFallback();
         }
       })
       .catch(err => {
+        if (this.isDestroyed) return;
         this.logger.error('GateActions', 'FAB recording failed to start', err);
         this.toast.error('无法启动录音');
         this.openManualQuickCaptureFallback();
@@ -809,8 +270,7 @@ export class GateActionsComponent implements OnDestroy {
     this.isFabOutOfZone.set(false);
 
     if (outOfZone) {
-      this.speechService.cancelRecording();
-      this.logger.debug('GateActions', 'FAB recording cancelled: pointer left zone');
+      this.cancelFabRecording('pointer left zone');
       return;
     }
 
@@ -819,19 +279,31 @@ export class GateActionsComponent implements OnDestroy {
     void this.doFabTranscribe();
   }
 
+  private cancelFabRecording(reason: string): void {
+    this.isFabRecording.set(false);
+    this.isFabOutOfZone.set(false);
+    this.isFabTranscribing.set(false);
+    this.speechService.cancelRecording();
+    this.logger.debug('GateActions', `FAB recording cancelled: ${reason}`);
+  }
+
   /** FAB 录音转写 → 结果写入面板 */
   private async doFabTranscribe(): Promise<void> {
     try {
       const text = await this.speechService.stopAndTranscribe();
+      if (this.isDestroyed) return;
       if (text && text.trim()) {
         this.pendingTranscription.set(text);
         this.editableTranscription = text;
         this.quickCaptureOpen.set(true);
       }
     } catch (err) {
+      if (this.isDestroyed) return;
       this.logger.error('GateActions', 'FAB transcription failed', err instanceof Error ? err.message : String(err));
     } finally {
-      this.isFabTranscribing.set(false);
+      if (!this.isDestroyed) {
+        this.isFabTranscribing.set(false);
+      }
     }
   }
 
@@ -852,7 +324,7 @@ export class GateActionsComponent implements OnDestroy {
     const text = this.quickInputText().trim();
     if (!text) return;
 
-    const result = this.blackBoxService.create({ content: text });
+    const result = await this.blackBoxService.createDurably({ content: text });
 
     if (result.ok) {
       this.logger.info('GateActions', 'Quick input submitted');
@@ -871,14 +343,14 @@ export class GateActionsComponent implements OnDestroy {
    * 【2026-04-23 倒置】确认 = 直接把转写结果保存为黑匣子条目，然后关闭面板。
    * 不再把文本回填到"手动 textarea"（已移除），让用户一步到位，不用再点二次保存。
    */
-  confirmPendingTranscription(): void {
+  async confirmPendingTranscription(): Promise<void> {
     const text = this.editableTranscription.trim();
     if (!text) {
       this.cancelPendingTranscription();
       return;
     }
 
-    const result = this.blackBoxService.create({ content: text });
+    const result = await this.blackBoxService.createDurably({ content: text });
     if (result.ok) {
       this.logger.info('GateActions', 'Transcription saved to black box');
       this.toast.success('已记录');
@@ -992,6 +464,7 @@ export class GateActionsComponent implements OnDestroy {
   }
 
   private openManualQuickCaptureFallback(): void {
+    if (this.isDestroyed) return;
     this.isFabRecording.set(false);
     this.isFabOutOfZone.set(false);
     this.manualQuickCaptureFallback.set(true);
@@ -1045,9 +518,15 @@ export class GateActionsComponent implements OnDestroy {
   }
 
   private removeGlobalListeners(): void {
-    for (const cleanup of this.globalCleanups) {
-      cleanup();
-    }
+    const cleanups = this.globalCleanups;
     this.globalCleanups = [];
+
+    for (const cleanup of cleanups) {
+      try {
+        cleanup();
+      } catch (err) {
+        this.logger.error('GateActions', 'Failed to remove global listener', err instanceof Error ? err.message : String(err));
+      }
+    }
   }
 }

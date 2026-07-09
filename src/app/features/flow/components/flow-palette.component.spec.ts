@@ -12,6 +12,7 @@ import { BlackBoxService } from '../../../../services/black-box.service';
 import { FocusPreferenceService } from '../../../../services/focus-preference.service';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
+import { ToastService } from '../../../../services/toast.service';
 import { UiStateService } from '../../../../services/ui-state.service';
 import { blackBoxEntriesMap, resetFocusState } from '../../../../state/focus-stores';
 import { BlackBoxPanelComponent } from '../../focus/components/black-box/black-box-panel.component';
@@ -97,6 +98,7 @@ describe('FlowPaletteComponent', () => {
   const mockBlackBoxService = {
     pendingCount: signal(0),
     update: vi.fn(),
+    updateDurably: vi.fn().mockResolvedValue({ ok: true, value: {} }),
   };
 
   const mockFocusPreferenceService = {
@@ -104,7 +106,10 @@ describe('FlowPaletteComponent', () => {
   };
 
   const mockTaskOperationAdapterService = {
-    updateTaskStatus: vi.fn(),
+    updateTaskStatus: vi.fn().mockResolvedValue(true),
+  };
+  const mockToastService = {
+    warning: vi.fn(),
   };
 
   beforeEach(async () => {
@@ -132,6 +137,7 @@ describe('FlowPaletteComponent', () => {
         { provide: BlackBoxService, useValue: mockBlackBoxService },
         { provide: FocusPreferenceService, useValue: mockFocusPreferenceService },
         { provide: TaskOperationAdapterService, useValue: mockTaskOperationAdapterService },
+        { provide: ToastService, useValue: mockToastService },
       ],
     })
       .overrideComponent(FlowPaletteComponent, {
@@ -150,6 +156,7 @@ describe('FlowPaletteComponent', () => {
 
   afterEach(() => {
     fixture?.destroy();
+    vi.useRealTimers();
     TestBed.resetTestingModule();
     resetFocusState();
   });
@@ -209,5 +216,146 @@ describe('FlowPaletteComponent', () => {
 
     expect(component.completionBasis()).toEqual({ total: 3, completed: 2 });
     expect(component.completionRate()).toBe(67);
+  });
+
+  it('从沉积层恢复 black-box 条目时应使用 durable update', async () => {
+    await component.onRestoreFromHistory({ id: 'bb-restore', type: 'black_box' });
+
+    expect(mockBlackBoxService.updateDurably).toHaveBeenCalledWith('bb-restore', {
+      isCompleted: false,
+    });
+    expect(mockBlackBoxService.update).not.toHaveBeenCalled();
+    expect(component.activeWorkbenchTab()).toBe('blackbox');
+  });
+
+  it('从沉积层恢复 task 时应等待 durable 状态恢复后再切换和定位', async () => {
+    let resolveRestore!: () => void;
+    mockTaskOperationAdapterService.updateTaskStatus.mockReturnValueOnce(new Promise<boolean>(resolve => {
+      resolveRestore = () => resolve(true);
+    }));
+    const emittedTaskIds: string[] = [];
+    component.centerOnNode.subscribe(taskId => emittedTaskIds.push(taskId));
+    component.setWorkbenchTab('blackbox');
+
+    const pending = component.onRestoreFromHistory({ id: 'task-restore', type: 'task' });
+
+    await Promise.resolve();
+    expect(component.activeWorkbenchTab()).not.toBe('unfinished');
+    expect(emittedTaskIds).toEqual([]);
+
+    resolveRestore();
+    await pending;
+
+    expect(mockTaskOperationAdapterService.updateTaskStatus).toHaveBeenCalledWith('task-restore', 'active');
+    expect(component.activeWorkbenchTab()).toBe('unfinished');
+    expect(emittedTaskIds).toEqual(['task-restore']);
+  });
+
+  it('从沉积层恢复 task 本地持久化失败时不应切换和定位', async () => {
+    mockTaskOperationAdapterService.updateTaskStatus.mockResolvedValueOnce(false);
+    const emittedTaskIds: string[] = [];
+    component.centerOnNode.subscribe(taskId => emittedTaskIds.push(taskId));
+    component.setWorkbenchTab('blackbox');
+
+    await component.onRestoreFromHistory({ id: 'task-restore', type: 'task' });
+
+    expect(component.activeWorkbenchTab()).not.toBe('unfinished');
+    expect(emittedTaskIds).toEqual([]);
+    expect(mockToastService.warning).toHaveBeenCalledWith(
+      '恢复失败',
+      '任务状态本地保存失败，请释放浏览器存储空间后重试',
+    );
+  });
+
+  it('切换工作区焦点时应清理 handle 为 0 的旧 section focus timer', () => {
+    vi.useFakeTimers();
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+    const internal = component as unknown as {
+      sectionFocusTimer: ReturnType<typeof setTimeout> | null;
+    };
+    internal.sectionFocusTimer = 0 as unknown as ReturnType<typeof setTimeout>;
+
+    component.focusDashboardSection('unfinished');
+
+    expect(clearTimeoutSpy).toHaveBeenCalledWith(0);
+    expect(internal.sectionFocusTimer).not.toBe(0);
+  });
+
+  it('销毁时应清理 handle 为 0 的长按和 section focus timer', () => {
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+    const internal = component as unknown as {
+      touchState: {
+        longPressTimer: ReturnType<typeof setTimeout> | null;
+        ghost: HTMLElement | null;
+      };
+      sectionFocusTimer: ReturnType<typeof setTimeout> | null;
+    };
+    internal.touchState.longPressTimer = 0 as unknown as ReturnType<typeof setTimeout>;
+    internal.sectionFocusTimer = 0 as unknown as ReturnType<typeof setTimeout>;
+
+    component.ngOnDestroy();
+
+    expect(clearTimeoutSpy).toHaveBeenCalledWith(0);
+    expect(clearTimeoutSpy).toHaveBeenCalledTimes(2);
+    expect(internal.touchState.longPressTimer).toBeNull();
+    expect(internal.sectionFocusTimer).toBeNull();
+  });
+
+  it('触摸移动超过阈值时应取消 handle 为 0 的长按 timer', () => {
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+    const task = createTask('touch-cancel');
+    const internal = component as unknown as {
+      touchState: {
+        task: Task | null;
+        startX: number;
+        startY: number;
+        isDragging: boolean;
+        longPressTimer: ReturnType<typeof setTimeout> | null;
+        ghost: HTMLElement | null;
+      };
+    };
+    internal.touchState = {
+      task,
+      startX: 0,
+      startY: 0,
+      isDragging: false,
+      longPressTimer: 0 as unknown as ReturnType<typeof setTimeout>,
+      ghost: null,
+    };
+
+    component.onTouchMove({
+      touches: [{ clientX: 20, clientY: 0 }],
+    } as unknown as TouchEvent);
+
+    expect(clearTimeoutSpy).toHaveBeenCalledWith(0);
+    expect(internal.touchState.longPressTimer).toBeNull();
+  });
+
+  it('触摸结束时应清理 handle 为 0 的长按 timer', () => {
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+    const task = createTask('touch-end');
+    const internal = component as unknown as {
+      touchState: {
+        task: Task | null;
+        startX: number;
+        startY: number;
+        isDragging: boolean;
+        longPressTimer: ReturnType<typeof setTimeout> | null;
+        ghost: HTMLElement | null;
+      };
+    };
+    internal.touchState = {
+      task,
+      startX: 0,
+      startY: 0,
+      isDragging: false,
+      longPressTimer: 0 as unknown as ReturnType<typeof setTimeout>,
+      ghost: null,
+    };
+
+    component.onTouchEnd({} as TouchEvent);
+
+    expect(clearTimeoutSpy).toHaveBeenCalledWith(0);
+    expect(internal.touchState.longPressTimer).toBeNull();
   });
 });

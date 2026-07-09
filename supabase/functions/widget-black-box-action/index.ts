@@ -1,5 +1,3 @@
-import 'jsr:@supabase/functions-js/edge-runtime.d.ts';
-
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.93.2';
 
 /**
@@ -64,12 +62,14 @@ const ALLOWED_ORIGINS: string[] = (() => {
   ];
 })();
 const VERCEL_PREVIEW_PREFIX = 'dde-';
+const ALLOW_PREVIEW_ORIGINS = Deno.env.get('ALLOW_PREVIEW_ORIGINS') === 'true';
 
 const PRIVATE_NO_STORE_HEADERS = {
   'Cache-Control': 'private, no-store, max-age=0',
   'Pragma': 'no-cache',
   'Vary': 'Origin, Authorization',
 } as const;
+const MAX_WIDGET_REQUEST_BODY_BYTES = 1024 * 1024;
 
 // ---- 内联辅助（与 _shared/widget-common.ts 的同名实现等价）----
 
@@ -96,12 +96,14 @@ function getCorsHeaders(origin: string | null): Record<string, string> {
       try {
         const parsed = new URL(origin);
         // Vercel 预览
-        if (parsed.hostname.startsWith(VERCEL_PREVIEW_PREFIX)
+        if (ALLOW_PREVIEW_ORIGINS
+          && parsed.protocol === 'https:'
+          && parsed.hostname.startsWith(VERCEL_PREVIEW_PREFIX)
           && parsed.hostname.endsWith('.vercel.app')) {
           isAllowed = true;
         }
         // Cloudflare Pages PR preview：*.nanoflow.pages.dev
-        if (!isAllowed && parsed.protocol === 'https:'
+        if (!isAllowed && ALLOW_PREVIEW_ORIGINS && parsed.protocol === 'https:'
           && parsed.hostname.endsWith('.nanoflow.pages.dev')) {
           isAllowed = true;
         }
@@ -150,6 +152,66 @@ async function sha256Hex(value: string): Promise<string> {
   return Array.from(new Uint8Array(digest))
     .map((byte) => byte.toString(16).padStart(2, '0'))
     .join('');
+}
+
+class RequestBodyTooLargeError extends Error {
+  constructor() {
+    super(`Widget request body exceeds ${MAX_WIDGET_REQUEST_BODY_BYTES} bytes`);
+    this.name = 'RequestBodyTooLargeError';
+  }
+}
+
+function getContentLengthBytes(req: Request): number | null {
+  const contentLength = req.headers.get('content-length');
+  if (!contentLength) return null;
+
+  const bytes = Number.parseInt(contentLength, 10);
+  return Number.isFinite(bytes) && bytes >= 0 ? bytes : null;
+}
+
+async function readRequestTextWithLimit(req: Request): Promise<string> {
+  const contentLengthBytes = getContentLengthBytes(req);
+  if (contentLengthBytes !== null && contentLengthBytes > MAX_WIDGET_REQUEST_BODY_BYTES) {
+    throw new RequestBodyTooLargeError();
+  }
+
+  if (!req.body) {
+    return '';
+  }
+
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+
+      totalBytes += value.byteLength;
+      if (totalBytes > MAX_WIDGET_REQUEST_BODY_BYTES) {
+        await reader.cancel().catch(() => undefined);
+        throw new RequestBodyTooLargeError();
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const combined = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    combined.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+
+  return new TextDecoder().decode(combined);
+}
+
+async function readRequestJsonWithLimit<T>(req: Request): Promise<T> {
+  return JSON.parse(await readRequestTextWithLimit(req)) as T;
 }
 
 function redactId(value: string | null | undefined): string {
@@ -204,13 +266,54 @@ function parseWidgetToken(token: string | null): WidgetTokenPayload | null {
   }
 }
 
-type SupabaseAdminClient = ReturnType<typeof createClient>;
+type SupabaseErrorLike = { message: string; code?: string };
+type SupabaseMutationPayload = Record<string, unknown> | Record<string, unknown>[];
+
+interface SupabaseQueryResult<TData = unknown> {
+  data: TData | null;
+  error: SupabaseErrorLike | null;
+}
+
+interface SupabaseQueryBuilder<TData = unknown> extends PromiseLike<SupabaseQueryResult<TData>> {
+  select<TSelected = unknown[]>(columns: string): SupabaseQueryBuilder<TSelected>;
+  update(values: Record<string, unknown>): SupabaseQueryBuilder<TData>;
+  upsert(values: SupabaseMutationPayload, options?: Record<string, unknown>): SupabaseQueryBuilder<TData>;
+  eq(column: string, value: unknown): SupabaseQueryBuilder<TData>;
+  is(column: string, value: unknown): SupabaseQueryBuilder<TData>;
+  maybeSingle<TRow = unknown>(): Promise<SupabaseQueryResult<TRow>>;
+}
+
+interface SupabaseAdminClient {
+  from(table: string): SupabaseQueryBuilder;
+}
+
+interface BlackBoxActionUpdateRow {
+  id: string;
+  is_read: boolean | null;
+  is_completed: boolean | null;
+  snooze_until: string | null;
+  updated_at: string | null;
+  completed_at: string | null;
+}
 
 function createServiceRoleClient(): SupabaseAdminClient {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
     throw new Error('Supabase service role environment is not configured');
   }
-  return createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+  return createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+    auth: { autoRefreshToken: false, persistSession: false },
+  }) as unknown as SupabaseAdminClient;
+}
+
+function hasServiceRoleConfig(): boolean {
+  return Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY);
+}
+
+function serviceNotConfiguredPayload(): { error: string; code: 'SERVICE_NOT_CONFIGURED' } {
+  return {
+    error: 'Supabase service configuration is not configured',
+    code: 'SERVICE_NOT_CONFIGURED',
+  };
 }
 
 // ---- 业务入口 ----
@@ -237,7 +340,7 @@ async function loadDevice(
   if (byHash.error) {
     throw new Error(`load widget device by token_hash failed: ${byHash.error.message}`);
   }
-  if (byHash.data) return byHash.data as WidgetDeviceRow;
+  if (byHash.data) return byHash.data as unknown as WidgetDeviceRow;
 
   const parsed = parseWidgetToken(rawToken);
   if (!parsed) return null;
@@ -250,7 +353,7 @@ async function loadDevice(
   if (byId.error) {
     throw new Error(`load widget device by id failed: ${byId.error.message}`);
   }
-  const row = byId.data as WidgetDeviceRow | null;
+  const row = byId.data as unknown as WidgetDeviceRow | null;
   if (!row) return null;
   if (row.token_hash) return null;
 
@@ -279,8 +382,12 @@ async function handleRequest(req: Request): Promise<Response> {
 
   let body: RequestBody;
   try {
-    body = (await req.json()) as RequestBody;
-  } catch {
+    body = await readRequestJsonWithLimit<RequestBody>(req);
+  } catch (error) {
+    if (error instanceof RequestBodyTooLargeError) {
+      return errorResponse(responseHeaders, 413, 'REQUEST_BODY_TOO_LARGE', 'Request body too large');
+    }
+
     return errorResponse(responseHeaders, 400, 'INVALID_BODY', 'Request body must be valid JSON');
   }
 
@@ -293,6 +400,10 @@ async function handleRequest(req: Request): Promise<Response> {
     return errorResponse(responseHeaders, 400, 'INVALID_ACTION', "action must be 'read' or 'complete'");
   }
   const action: ActionKind = rawAction;
+
+  if (!hasServiceRoleConfig()) {
+    return jsonResponse({ ok: false, ...serviceNotConfiguredPayload() }, responseHeaders, 503);
+  }
 
   const client = createServiceRoleClient();
 
@@ -328,7 +439,7 @@ async function handleRequest(req: Request): Promise<Response> {
     .eq('user_id', device.user_id)
     .is('deleted_at', null)
     .select('id,is_read,is_completed,snooze_until,updated_at,completed_at')
-    .maybeSingle();
+    .maybeSingle<BlackBoxActionUpdateRow>();
 
   if (update.error) {
     console.error('[widget-black-box-action] update failed', update.error);
@@ -337,16 +448,6 @@ async function handleRequest(req: Request): Promise<Response> {
   if (!update.data) {
     return errorResponse(responseHeaders, 404, 'ENTRY_NOT_FOUND', 'Black box entry not found for user');
   }
-
-  console.log('[widget-black-box-action]', JSON.stringify({
-    event: 'widget_black_box_action_success',
-    action,
-    deviceId: redactId(device.id),
-    userId: redactId(device.user_id),
-    entryId: redactId(entryId),
-    snoozeUntil: update.data.snooze_until ?? null,
-    updatedAt: update.data.updated_at,
-  }));
 
   return jsonResponse(
     {

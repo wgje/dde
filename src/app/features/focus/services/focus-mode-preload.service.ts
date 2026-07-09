@@ -18,6 +18,13 @@ import { LoggerService } from '../../../../services/logger.service';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 import { IDLE_SCHEDULE_CONFIG } from '../../../../config/timeout.config';
 
+type WindowWithFocusIdleCallback = Window & {
+  requestIdleCallback?: (
+    callback: IdleRequestCallback,
+    options?: IdleRequestOptions,
+  ) => number;
+};
+
 /** 触发原因：记入 breadcrumb，便于启动性能追溯 */
 export type FocusModePreloadReason = 'startup' | 'p1' | 'intent';
 
@@ -54,7 +61,7 @@ export class FocusModePreloadService {
         });
       })
       .catch((error: unknown) => {
-        this.logger.warn('FocusMode 懒预热失败', error);
+        this.warnSafely('FocusMode 懒预热失败', error);
       })
       .finally(() => {
         // 重置 promise 以便失败后允许用户显式重试；breadcrumb 已记录
@@ -78,18 +85,31 @@ export class FocusModePreloadService {
       void this.preload(reason);
     };
 
-    if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
-      const requestIdle = (window as Window & {
-        requestIdleCallback: (
-          callback: IdleRequestCallback,
-          options?: IdleRequestOptions,
-        ) => number;
-      }).requestIdleCallback;
-      requestIdle(() => runPreload(), { timeout: 1800 });
-      return;
+    if (typeof window !== 'undefined') {
+      const requestIdle = (window as WindowWithFocusIdleCallback).requestIdleCallback;
+      if (typeof requestIdle === 'function') {
+        try {
+          requestIdle(() => runPreload(), { timeout: 1800 });
+          return;
+        } catch (error: unknown) {
+          this.warnIdleScheduleFallback(error);
+        }
+      }
     }
 
     // Safari 等无 requestIdleCallback 的 fallback
     setTimeout(runPreload, IDLE_SCHEDULE_CONFIG.SHORT_MS);
+  }
+
+  private warnIdleScheduleFallback(error: unknown): void {
+    this.warnSafely('FocusMode idle 预热调度失败，改用 timer fallback', error);
+  }
+
+  private warnSafely(message: string, error: unknown): void {
+    try {
+      this.logger.warn(message, error);
+    } catch {
+      // 日志失败不应重新打开预热调度或预热失败路径。
+    }
   }
 }

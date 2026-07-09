@@ -21,7 +21,9 @@ import {
   OnDestroy,
   AfterViewInit,
   inject,
-  ElementRef
+  ElementRef,
+  TemplateRef,
+  ContentChild
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { MobileDrawerGestureService } from '../services/mobile-drawer-gesture.service';
@@ -39,7 +41,8 @@ import { DRAWER_CONFIG, DrawerLayer, DrawerStateChangeEvent } from '../../../../
       [class.dragging]="gestureService.isDragging()"
       (touchstart)="onTouchStart($event)"
       (touchmove)="onTouchMove($event)"
-      (touchend)="onTouchEnd($event)">
+      (touchend)="onTouchEnd($event)"
+      (touchcancel)="onTouchCancel($event)">
 
       <div
         class="mobile-drawer-viewport absolute inset-x-0 overflow-hidden"
@@ -57,10 +60,8 @@ import { DRAWER_CONFIG, DrawerLayer, DrawerStateChangeEvent } from '../../../../
             
             <!-- 内容区域（flex-1 填充，滚动） -->
             <div class="flex-1 min-h-0 overflow-hidden">
-              @defer (when gestureService.hasOpenedTop() || gestureService.topPanelHeight() > collapsedThreshold) {
-                <ng-content select="[slot=top]"></ng-content>
-              } @error {
-                <div class="flex-1 flex items-center justify-center text-stone-400 text-xs">加载失败</div>
+              @if (shouldRenderTopDrawerContent()) {
+                <ng-container *ngTemplateOutlet="topDrawerTemplate"></ng-container>
               }
             </div>
 
@@ -103,10 +104,8 @@ import { DRAWER_CONFIG, DrawerLayer, DrawerStateChangeEvent } from '../../../../
             
             <!-- 内容区域（flex-1 填充，滚动） -->
             <div class="flex-1 min-h-0 overflow-hidden">
-              @defer (when gestureService.hasOpenedBottom() || gestureService.bottomPanelHeight() > collapsedThreshold) {
-                <ng-content select="[slot=bottom]"></ng-content>
-              } @error {
-                <div class="flex-1 flex items-center justify-center text-stone-400 text-xs">加载失败</div>
+              @if (shouldRenderBottomDrawerContent()) {
+                <ng-container *ngTemplateOutlet="bottomDrawerTemplate"></ng-container>
               }
             </div>
           </div>
@@ -153,6 +152,10 @@ import { DRAWER_CONFIG, DrawerLayer, DrawerStateChangeEvent } from '../../../../
 export class MobileDrawerContainerComponent implements OnInit, OnDestroy, AfterViewInit {
   readonly gestureService = inject(MobileDrawerGestureService);
   private readonly elementRef = inject(ElementRef);
+  @ContentChild('topDrawer', { read: TemplateRef })
+  topDrawerTemplate?: TemplateRef<unknown>;
+  @ContentChild('bottomDrawer', { read: TemplateRef })
+  bottomDrawerTemplate?: TemplateRef<unknown>;
   
   // 配置输入
   readonly enableTopDrawer = input<boolean>(true);
@@ -166,6 +169,8 @@ export class MobileDrawerContainerComponent implements OnInit, OnDestroy, AfterV
   
   // 触摸状态
   private isTouchCaptured = false;
+  private destroyed = false;
+  private pendingDrawerEmitTimer: ReturnType<typeof setTimeout> | null = null;
   
   ngOnInit(): void {
     this.gestureService.initialize();
@@ -180,6 +185,9 @@ export class MobileDrawerContainerComponent implements OnInit, OnDestroy, AfterV
   }
   
   ngOnDestroy(): void {
+    this.destroyed = true;
+    this.isTouchCaptured = false;
+    this.clearPendingDrawerEmitTimer();
     this.gestureService.destroy();
   }
   
@@ -187,6 +195,7 @@ export class MobileDrawerContainerComponent implements OnInit, OnDestroy, AfterV
    * 触摸开始
    */
   onTouchStart(event: TouchEvent): void {
+    if (this.destroyed) return;
     this.isTouchCaptured = this.gestureService.onTouchStart(event);
   }
   
@@ -194,6 +203,7 @@ export class MobileDrawerContainerComponent implements OnInit, OnDestroy, AfterV
    * 触摸移动
    */
   onTouchMove(event: TouchEvent): void {
+    if (this.destroyed) return;
     if (!this.isTouchCaptured) return;
     this.gestureService.onTouchMove(event);
   }
@@ -202,6 +212,7 @@ export class MobileDrawerContainerComponent implements OnInit, OnDestroy, AfterV
    * 触摸结束
    */
   onTouchEnd(_event: TouchEvent): void {
+    if (this.destroyed) return;
     if (!this.isTouchCaptured) return;
     
     const previousLayer = this.gestureService.activeLayer();
@@ -219,11 +230,60 @@ export class MobileDrawerContainerComponent implements OnInit, OnDestroy, AfterV
     
     this.isTouchCaptured = false;
   }
+
+  /**
+   * 触摸取消
+   */
+  onTouchCancel(_event: TouchEvent): void {
+    if (this.destroyed) return;
+    if (!this.isTouchCaptured) return;
+
+    this.gestureService.onTouchCancel();
+    this.isTouchCaptured = false;
+  }
+
+  shouldRenderTopDrawerContent(): boolean {
+    return !!this.topDrawerTemplate
+      && (this.gestureService.hasOpenedTop() || this.gestureService.topPanelHeight() > this.collapsedThreshold);
+  }
+
+  shouldRenderBottomDrawerContent(): boolean {
+    return !!this.bottomDrawerTemplate
+      && (this.gestureService.hasOpenedBottom() || this.gestureService.bottomPanelHeight() > this.collapsedThreshold);
+  }
+
+  private clearPendingDrawerEmitTimer(): void {
+    if (this.pendingDrawerEmitTimer) {
+      clearTimeout(this.pendingDrawerEmitTimer);
+      this.pendingDrawerEmitTimer = null;
+    }
+  }
+
+  private scheduleProgrammaticDrawerStateEmit(previousLayer: DrawerLayer): void {
+    if (this.destroyed) return;
+    this.clearPendingDrawerEmitTimer();
+    this.pendingDrawerEmitTimer = setTimeout(() => {
+      this.pendingDrawerEmitTimer = null;
+      if (this.destroyed) {
+        return;
+      }
+
+      const currentLayer = this.gestureService.activeLayer();
+      if (previousLayer !== currentLayer) {
+        this.drawerStateChange.emit({
+          previousLayer,
+          currentLayer,
+          triggeredBy: 'programmatic'
+        });
+      }
+    }, DRAWER_CONFIG.ANIMATION_DURATION);
+  }
   
   /**
    * 点击顶部面板把手切换状态
    */
   toggleTopPanel(): void {
+    if (this.destroyed) return;
     const currentHeight = this.gestureService.topPanelHeight();
     const previousLayer = this.gestureService.activeLayer();
     
@@ -233,23 +293,14 @@ export class MobileDrawerContainerComponent implements OnInit, OnDestroy, AfterV
       this.gestureService.collapseTopDrawer();
     }
     
-    // 发出事件
-    setTimeout(() => {
-      const currentLayer = this.gestureService.activeLayer();
-      if (previousLayer !== currentLayer) {
-        this.drawerStateChange.emit({
-          previousLayer,
-          currentLayer,
-          triggeredBy: 'programmatic'
-        });
-      }
-    }, DRAWER_CONFIG.ANIMATION_DURATION);
+    this.scheduleProgrammaticDrawerStateEmit(previousLayer);
   }
   
   /**
    * 点击底部面板把手切换状态
    */
   toggleBottomPanel(): void {
+    if (this.destroyed) return;
     const currentHeight = this.gestureService.bottomPanelHeight();
     const previousLayer = this.gestureService.activeLayer();
     
@@ -259,17 +310,7 @@ export class MobileDrawerContainerComponent implements OnInit, OnDestroy, AfterV
       this.gestureService.collapseBottomDrawer();
     }
     
-    // 发出事件
-    setTimeout(() => {
-      const currentLayer = this.gestureService.activeLayer();
-      if (previousLayer !== currentLayer) {
-        this.drawerStateChange.emit({
-          previousLayer,
-          currentLayer,
-          triggeredBy: 'programmatic'
-        });
-      }
-    }, DRAWER_CONFIG.ANIMATION_DURATION);
+    this.scheduleProgrammaticDrawerStateEmit(previousLayer);
   }
   
   // ========== 公共 API ==========
@@ -278,8 +319,13 @@ export class MobileDrawerContainerComponent implements OnInit, OnDestroy, AfterV
    * 程序化打开顶层抽屉
    */
   openTopDrawer(): void {
+    if (this.destroyed) return;
     const previousLayer = this.gestureService.activeLayer();
     this.gestureService.openTopDrawer();
+    if (previousLayer === 'top') {
+      return;
+    }
+
     this.drawerStateChange.emit({
       previousLayer,
       currentLayer: 'top',
@@ -291,8 +337,13 @@ export class MobileDrawerContainerComponent implements OnInit, OnDestroy, AfterV
    * 程序化打开底层抽屉
    */
   openBottomDrawer(): void {
+    if (this.destroyed) return;
     const previousLayer = this.gestureService.activeLayer();
     this.gestureService.openBottomDrawer();
+    if (previousLayer === 'bottom') {
+      return;
+    }
+
     this.drawerStateChange.emit({
       previousLayer,
       currentLayer: 'bottom',
@@ -304,8 +355,13 @@ export class MobileDrawerContainerComponent implements OnInit, OnDestroy, AfterV
    * 程序化关闭抽屉
    */
   closeDrawer(): void {
+    if (this.destroyed) return;
     const previousLayer = this.gestureService.activeLayer();
     this.gestureService.closeDrawer();
+    if (previousLayer === 'middle') {
+      return;
+    }
+
     this.drawerStateChange.emit({
       previousLayer,
       currentLayer: 'middle',

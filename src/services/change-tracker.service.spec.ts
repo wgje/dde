@@ -1,14 +1,19 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { Injector, runInInjectionContext } from '@angular/core';
 import { ChangeTrackerService } from './change-tracker.service';
+import {
+  CHANGE_TRACKER_FIELD_LOCKS_STORAGE_KEY,
+  CHANGE_TRACKER_PENDING_CHANGES_STORAGE_KEY,
+} from './change-tracker-persistence.helpers';
 import { LoggerService } from './logger.service';
 import { Task, Connection } from '../models';
 
 describe('ChangeTrackerService', () => {
   let service: ChangeTrackerService;
 
-  beforeEach(() => {
+  const createService = (): ChangeTrackerService => {
     const mockLogger = {
+      info: vi.fn(),
       debug: vi.fn(),
       warn: vi.fn(),
       error: vi.fn(),
@@ -26,7 +31,18 @@ describe('ChangeTrackerService', () => {
     });
 
     // ChangeTrackerService 内部使用 inject()，必须在注入上下文中实例化。
-    service = runInInjectionContext(injector, () => new ChangeTrackerService());
+    return runInInjectionContext(injector, () => new ChangeTrackerService());
+  };
+
+  beforeEach(() => {
+    localStorage.removeItem(CHANGE_TRACKER_PENDING_CHANGES_STORAGE_KEY);
+    localStorage.removeItem(CHANGE_TRACKER_FIELD_LOCKS_STORAGE_KEY);
+    service = createService();
+  });
+
+  afterEach(() => {
+    localStorage.removeItem(CHANGE_TRACKER_PENDING_CHANGES_STORAGE_KEY);
+    localStorage.removeItem(CHANGE_TRACKER_FIELD_LOCKS_STORAGE_KEY);
   });
 
   describe('任务变更追踪', () => {
@@ -69,6 +85,34 @@ describe('ChangeTrackerService', () => {
       const changes = service.getProjectChanges('project-1');
       expect(changes.taskIdsToDelete).toHaveLength(1);
       expect(changes.taskIdsToDelete[0]).toBe('task-1');
+    });
+
+    it('任务删除应保留删除前 updatedAt 作为服务端 CAS base', () => {
+      service.trackTaskDelete('project-1', 'task-1', {
+        ...mockTask,
+        updatedAt: '2026-05-14T09:20:00.000Z',
+      });
+
+      const changes = service.getProjectChanges('project-1');
+      expect(changes.taskIdsToDelete).toEqual(['task-1']);
+      expect(changes.taskDeleteBaseUpdatedAtMap).toEqual({
+        'task-1': '2026-05-14T09:20:00.000Z',
+      });
+    });
+
+    it('刷新后应恢复待同步删除意图和 CAS base', () => {
+      service.trackTaskDelete('project-1', 'task-1', {
+        ...mockTask,
+        updatedAt: '2026-05-14T09:20:00.000Z',
+      });
+
+      const recoveredService = createService();
+
+      const changes = recoveredService.getProjectChanges('project-1');
+      expect(changes.taskIdsToDelete).toEqual(['task-1']);
+      expect(changes.taskDeleteBaseUpdatedAtMap).toEqual({
+        'task-1': '2026-05-14T09:20:00.000Z',
+      });
     });
 
     it('创建后删除应该抵消', () => {
@@ -412,6 +456,15 @@ describe('ChangeTrackerService', () => {
       // 锁定 50ms
       service.lockTaskField(taskId, projectId, 'status', 50);
       expect(service.isTaskFieldLocked(taskId, projectId, 'status')).toBe(true);
+    });
+
+    it('刷新后应恢复未过期字段锁以防止远端旧字段覆盖本地编辑', () => {
+      service.lockTaskField(taskId, projectId, 'title', 60_000);
+
+      const recoveredService = createService();
+
+      expect(recoveredService.isTaskFieldLocked(taskId, projectId, 'title')).toBe(true);
+      expect(recoveredService.getLockedFields(taskId, projectId)).toEqual(['title']);
     });
 
     it('应该在超时后自动解锁', async () => {

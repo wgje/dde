@@ -1,14 +1,13 @@
 import { Injectable, inject, signal, DestroyRef } from '@angular/core';
 import { SupabaseClientService } from './supabase-client.service';
 import { EventBusService } from './event-bus.service';
-import { 
-  Result, OperationError, ErrorCodes, success, failure, humanizeErrorMessage 
+import {
+  Result, OperationError, ErrorCodes, failure
 } from '../utils/result';
-import { supabaseErrorToError } from '../utils/supabase-error';
 import { environment } from '../environments/environment';
 import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
-import { isLocalModeEnabled, saveAuthCache } from './guards/auth.guard';
+import { isLocalModeEnabled } from './guards/auth.guard';
 import { pushStartupTrace } from '../utils/startup-trace';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { AUTH_CONFIG } from '../config/auth.config';
@@ -18,10 +17,20 @@ import {
   isBrowserNetworkSuspendedWindow,
 } from '../utils/browser-network-suspension';
 import {
-  resolvePersistedSessionRecord as resolvePersistedSessionRecordPure,
-  resolvePersistedSessionIdentityFromAuthData as resolvePersistedSessionIdentityFromAuthDataPure,
   isAuthenticationError as isAuthenticationErrorPure,
+  type PersistedSessionIdentity,
 } from './auth-session-identity';
+import { AuthSessionCacheService } from './auth-session-cache.service';
+import { AuthCredentialRequestService } from './auth-credential-request.service';
+import type { AuthResult } from './auth-types';
+import { resolveInvalidatedOwnerUserId as resolveInvalidatedOwnerUserIdPure } from './auth-session-invalidation.helpers';
+import { AuthSessionStateWriter } from './auth-session-state-writer';
+import { AuthBackgroundSessionRefreshController } from './auth-background-session-refresh.controller';
+import { AuthStorageBridgeController } from './auth-storage-bridge.controller';
+import { AuthDevAutoLoginController } from './auth-dev-auto-login.controller';
+import { AuthCredentialFlowController } from './auth-credential-flow.controller';
+import { AuthSessionCheckController } from './auth-session-check.controller';
+export type { AuthResult } from './auth-types';
 
 export interface AuthState {
   isCheckingSession: boolean;
@@ -31,19 +40,10 @@ export interface AuthState {
   error: string | null;
 }
 
-/**
- * 认证结果类型
- */
-export interface AuthResult {
-  userId?: string;
-  email?: string;
-  needsConfirmation?: boolean;
-}
-
-export interface PersistedSessionIdentity {
-  userId: string;
-  email: string | null;
-}
+type AuthSessionUser = {
+  id: string;
+  email?: string | null;
+};
 
 /**
  * 认证服务
@@ -66,9 +66,8 @@ export class AuthService {
   private destroyRef = inject(DestroyRef);
   private eventBus = inject(EventBusService);
   private sentryLazyLoader = inject(SentryLazyLoaderService);
-  
-  /** 是否已尝试过开发环境自动登录 */
-  private devAutoLoginAttempted = false;
+  private authSessionCache = inject(AuthSessionCacheService);
+  private authCredentialRequests = inject(AuthCredentialRequestService);
   
   /** 是否为用户主动登出（区分 Token 过期） */
   private isManualSignOut = false;
@@ -134,6 +133,88 @@ export class AuthService {
   readonly sessionEmail = signal<string | null>(null);
   private pendingStorageBridgeSessionIdentity: PersistedSessionIdentity | null = null;
   private pendingSessionRestoredNotification = false;
+  private readonly sessionStateWriter = new AuthSessionStateWriter({
+    currentUserId: this.currentUserId,
+    persistedOwnerHint: this.persistedOwnerHintState,
+    persistedSessionUserId: this.persistedSessionUserIdState,
+    sessionEmail: this.sessionEmail,
+    sessionExpired: this.sessionExpired,
+    sessionInitialized: this.sessionInitialized,
+    runtimeState: this.runtimeState,
+    authState: this.authState,
+    setSentryUser: (user) => this.sentryLazyLoader.setUser(user),
+    clearCachedSessionArtifacts: () => this.clearCachedSessionArtifacts(),
+  });
+  private readonly backgroundSessionRefresh = new AuthBackgroundSessionRefreshController({
+    currentUserId: () => this.currentUserId(),
+    runtimeState: () => this.runtimeState(),
+    applySessionUser: (user) => this.applyBackgroundSessionUser(user),
+    invalidateSession: () => this.handleBackgroundSessionInvalid(),
+    isAuthenticationError: (error) => this.isAuthenticationError(error),
+    trace: (eventName, data) => pushStartupTrace(eventName, data),
+    debug: (message, data) => this.logger.debug(message, data),
+    warn: (message, data) => this.logger.warn(message, data),
+  });
+  private readonly storageBridgeController = new AuthStorageBridgeController({
+    storageKey: () => this.storageKey,
+    authRuntimeReady: () => this.authRuntimeReady,
+    isLocalModeEnabled: () => isLocalModeEnabled(),
+    currentUserId: () => this.currentUserId(),
+    localModeUserId: AUTH_CONFIG.LOCAL_MODE_USER_ID,
+    sessionExpired: () => this.sessionExpired(),
+    pendingStorageBridgeSessionIdentity: () => this.pendingStorageBridgeSessionIdentity,
+    setPendingStorageBridgeSessionIdentity: (identity) => {
+      this.pendingStorageBridgeSessionIdentity = identity;
+    },
+    setPersistedOwnerHint: (userId) => this.setPersistedOwnerHint(userId),
+    syncPersistedOwnerHintFromStorage: () => this.syncPersistedOwnerHintFromStorage(),
+    syncPersistedSessionUserIdFromStorage: () => this.syncPersistedSessionUserIdFromStorage(),
+    resolvePersistedSessionIdentityFromAuthData: (authData) => this.resolvePersistedSessionIdentityFromAuthData(authData),
+    applyConfirmedSessionIdentity: (userId, email, options) => this.applyConfirmedSessionIdentity(userId, email, options),
+    publishSessionRestored: (userId, source) => this.eventBus.publishSessionRestored(userId, source),
+    teardownInvalidatedSession: (source) => this.teardownInvalidatedSession(source),
+    debug: (message, data) => this.logger.debug(message, data),
+  });
+  private readonly devAutoLogin = new AuthDevAutoLoginController({
+    devAutoLogin: (environment as {
+      devAutoLogin?: { email: string; password: string } | null;
+    }).devAutoLogin,
+    production: (environment as { production?: boolean }).production,
+    signIn: (email, password) => this.signIn(email, password),
+    debug: (message, data) => this.logger.debug(message, data),
+    info: (message, data) => this.logger.info(message, data),
+    warn: (message, data) => this.logger.warn(message, data),
+  });
+  private readonly sessionCheck = new AuthSessionCheckController({
+    isSupabaseConfigured: () => this.supabase.isConfigured,
+    authState: this.authState,
+    sessionInitialized: this.sessionInitialized,
+    currentUserId: () => this.currentUserId(),
+    sessionEmail: () => this.sessionEmail(),
+    runtimeState: () => this.runtimeState(),
+    readLocalSessionFastPath: () => this.authSessionCache.readPersistedSessionIdentity(true),
+    isBrowserNetworkSuspendedWindow: () => isBrowserNetworkSuspendedWindow(),
+    isBrowserNetworkSuspendedError: (error) => isBrowserNetworkSuspendedError(error),
+    ensureRuntimeAuthReady: () => this.ensureRuntimeAuthReady(),
+    getSession: () => this.supabase.getSession(),
+    tryDevAutoLogin: () => this.tryDevAutoLogin(),
+    applyAuthenticatedIdentity: (userId, email, options) => {
+      this.sessionStateWriter.applyAuthenticatedIdentity(userId, email, options);
+    },
+    setPersistedOwnerHint: (userId) => this.setPersistedOwnerHint(userId),
+    setPersistedSessionUserId: (userId) => this.setPersistedSessionUserId(userId),
+    setProvisionalAuthState: (state) => this.setProvisionalAuthState(state),
+    scheduleBackgroundSessionRefresh: () => this.scheduleBackgroundSessionRefresh(),
+    scheduleRuntimeAuthReadyInitialization: () => this.scheduleRuntimeAuthReadyInitialization(),
+    trace: (eventName, data) => pushStartupTrace(eventName, data),
+    debug: (message, data) => this.logger.debug(message, data),
+    info: (message, data) => this.logger.info(message, data),
+    error: (message, data) => this.logger.error(message, data),
+  });
+  private readonly credentialFlow = new AuthCredentialFlowController({
+    authState: this.authState,
+    applyCredentialIdentity: (result) => this.applyCredentialIdentity(result),
+  });
   
   constructor() {
     if (!this.supabase.isConfigured) {
@@ -208,7 +289,7 @@ export class AuthService {
       return this.checkSessionPromise;
     }
     
-    this.checkSessionPromise = this.doCheckSession();
+    this.checkSessionPromise = this.sessionCheck.checkSession();
     try {
       return await this.checkSessionPromise;
     } finally {
@@ -228,7 +309,7 @@ export class AuthService {
    * 预期收益：冷启动节省 1-3s（跳过 getSession 网络往返）
    */
   peekPersistedSessionIdentity(): PersistedSessionIdentity | null {
-    return this.readPersistedSessionIdentity(false);
+    return this.authSessionCache.peekPersistedSessionIdentity();
   }
 
   /**
@@ -236,12 +317,7 @@ export class AuthService {
    * 当 access token 临近过期、但 refresh token 仍可恢复时，冷启动预填充依赖此提示命中正确的 owner-scoped 快照。
    */
   peekPersistedOwnerHint(): string | null {
-    const persistedIdentity = this.readPersistedSessionIdentity(false);
-    if (persistedIdentity?.userId) {
-      return persistedIdentity.userId;
-    }
-
-    return this.readPersistedOwnerHintFromStorage();
+    return this.authSessionCache.peekPersistedOwnerHint();
   }
 
   private setPersistedOwnerHint(userId: string | null): void {
@@ -260,331 +336,16 @@ export class AuthService {
     this.persistedSessionUserIdState.set(this.peekPersistedSessionIdentity()?.userId ?? null);
   }
 
-  private tryLocalSessionFastPath(): PersistedSessionIdentity | null {
-    return this.readPersistedSessionIdentity(true);
-  }
-
-  private getDeferredSessionFallback(): { userId: string | null; email: string | null } {
-    return {
-      userId: this.currentUserId(),
-      email: this.sessionEmail(),
-    };
-  }
-
-  private deferSessionCheckForBrowserResume(
-    source: 'preflight' | 'catch',
-  ): { userId: string | null; email: string | null } {
-    const fallback = this.getDeferredSessionFallback();
-
-    this.logger.info('[CheckSession] 浏览器网络挂起窗口内延后会话检查', {
-      source,
-      hasCachedUser: !!fallback.userId,
-    });
-
-    this.authState.update(s => ({
-      ...s,
-      userId: fallback.userId,
-      email: fallback.email,
-      error: null,
-    }));
-
-    this.scheduleBackgroundSessionRefresh();
-
-    const ensureRuntimeReady = () => {
-      void this.ensureRuntimeAuthReady().catch(() => {
-        // 恢复窗口内 runtime listener 初始化失败不阻断当前会话兜底。
-      });
-    };
-
-    if (typeof queueMicrotask === 'function') {
-      queueMicrotask(ensureRuntimeReady);
-    } else {
-      void Promise.resolve().then(ensureRuntimeReady);
-    }
-
-    return fallback;
-  }
-
-  private readPersistedOwnerHintFromStorage(): string | null {
-    try {
-      const storageKey = this.supabase.getStorageKey();
-      if (!storageKey) return null;
-
-      const raw = localStorage.getItem(storageKey);
-      if (!raw) return null;
-
-      const authData: unknown = JSON.parse(raw);
-      const sessionRecord = this.resolvePersistedSessionRecord(authData);
-      if (!sessionRecord) return null;
-
-      const refreshToken = sessionRecord['refresh_token'];
-      const accessToken = sessionRecord['access_token'];
-      if ((typeof refreshToken !== 'string' || !refreshToken)
-        && (typeof accessToken !== 'string' || !accessToken)) {
-        return null;
-      }
-
-      const user = sessionRecord['user'];
-      if (!user || typeof user !== 'object') {
-        return null;
-      }
-
-      const userId = (user as Record<string, unknown>)['id'];
-      return typeof userId === 'string' && userId.length > 0 ? userId : null;
-    } catch {
-        return null; // eslint-disable-line no-restricted-syntax -- localStorage 读取/JSON 解析失败时"无会话"语义正确，null 触发调用方降级
-    }
-  }
-
-  private resolvePersistedSessionRecord(authData: unknown): Record<string, unknown> | null {
-    return resolvePersistedSessionRecordPure(authData);
-  }
-
   private resolvePersistedSessionIdentityFromAuthData(authData: unknown): PersistedSessionIdentity | null {
-    return resolvePersistedSessionIdentityFromAuthDataPure(authData);
+    return this.authSessionCache.resolvePersistedSessionIdentityFromAuthData(authData);
   }
 
-  private readPersistedSessionIdentity(shouldLog: boolean): PersistedSessionIdentity | null {
-    try {
-      // 阶段 1：检查 index.html 预热脚本是否已拿到新鲜 session
-      const prewarm = (window as Window & { __NANOFLOW_SESSION_PREWARM__?: {
-        status: string;
-        session?: { access_token: string; expires_at: number; user?: { id: string; email?: string | null } | null };
-      } }).__NANOFLOW_SESSION_PREWARM__;
-
-      if (prewarm?.status === 'refreshed' && prewarm.session) {
-        const { session } = prewarm;
-        // 预热拿到的 session 包含 user 字段（从 /auth/v1/token 返回）
-        if (session.user?.id) {
-          if (shouldLog) {
-            this.logger.debug('[FastPath] 使用 index.html 预热 session', {
-              userId: session.user.id.substring(0, 8) + '...',
-              expiresAt: session.expires_at
-            });
-          }
-          return { userId: session.user.id, email: session.user.email ?? null };
-        }
-        // 预热成功但没有 user 字段 → 回退到 localStorage 解析
-      }
-
-      // 阶段 2：从 localStorage 读取 Supabase 缓存的 auth token
-      const storageKey = this.supabase.getStorageKey();
-      if (!storageKey) return null;
-
-      const raw = localStorage.getItem(storageKey);
-      if (!raw) return null;
-
-      const authData: unknown = JSON.parse(raw);
-  const record = this.resolvePersistedSessionRecord(authData);
-  if (!record) return null;
-
-      // Supabase JS SDK v2 存储格式：{ access_token, refresh_token, expires_at, user }
-      const accessToken = record['access_token'];
-      if (typeof accessToken !== 'string' || !accessToken) return null;
-
-      // 过期时间检查（秒级时间戳），保留 60s 缓冲避免边界竞争
-      const rawExpiresAt = record['expires_at'];
-      if (typeof rawExpiresAt === 'number') {
-        // 兼容毫秒和秒级时间戳
-        const expiresAt = rawExpiresAt > 1e12 ? Math.floor(rawExpiresAt / 1000) : rawExpiresAt;
-        const nowSec = Math.floor(Date.now() / 1000);
-        if (expiresAt <= nowSec + 60) {
-          if (shouldLog) {
-            this.logger.debug('[FastPath] 本地 token 即将过期，回退到网络检查');
-          }
-          return null;
-        }
-      }
-
-      // 提取 user 信息
-      const user = record['user'];
-      if (user && typeof user === 'object') {
-        const userRecord = user as Record<string, unknown>;
-        const userId = userRecord['id'];
-        if (typeof userId === 'string' && userId) {
-          const email = typeof userRecord['email'] === 'string' ? userRecord['email'] : null;
-          if (shouldLog) {
-            this.logger.debug('[FastPath] 使用 localStorage 缓存 session', {
-              userId: userId.substring(0, 8) + '...',
-              expiresAt: rawExpiresAt
-            });
-          }
-          return { userId, email };
-        }
-      }
-
-      return null;
-    } catch (e) {
-      if (shouldLog) {
-        this.logger.debug('[FastPath] 本地会话读取失败，回退到网络检查', e);
-      }
-        return null; // eslint-disable-line no-restricted-syntax -- 本地会话读取失败降级为网络检查，null 是正确语义
-    }
-  }
-
-  private async doCheckSession(): Promise<{ userId: string | null; email: string | null }> {
-    this.logger.debug('========== checkSession 开始 ==========');
-    
-    if (!this.supabase.isConfigured) {
-      this.logger.debug('Supabase 未配置，跳过会话检查');
-      this.authState.update(s => ({ ...s, isCheckingSession: false }));
-      this.sessionInitialized.set(true);
-      return { userId: null, email: null };
-    }
-    
-    this.authState.update(s => ({ ...s, isCheckingSession: true }));
-    
-    // 【性能优化 2026-03-24】先尝试本地快速路径，避免网络往返
-    const localSession = this.tryLocalSessionFastPath();
-    if (localSession) {
-      this.logger.debug('[FastPath] 本地会话命中，跳过网络 getSession()');
-      this.currentUserId.set(localSession.userId);
-      this.setPersistedOwnerHint(localSession.userId);
-      this.setPersistedSessionUserId(localSession.userId);
-      this.sessionEmail.set(localSession.email);
-      this.authState.update(s => ({
-        ...s,
-        userId: localSession.userId,
-        email: localSession.email,
-        error: null,
-        isCheckingSession: false,
-      }));
-
-      // 设置 Sentry 用户上下文（FastPath 也需要）
-      this.sentryLazyLoader.setUser({ id: localSession.userId, email: localSession.email ?? undefined });
-      // 【Bug 修复 2026-03-26】FastPath 必须完成与 finally 块相同的状态收尾，
-      // 否则 sessionInitialized 永远为 false → handoff 永远 pending → 界面空白。
-      this.sessionInitialized.set(true);
-      this.setProvisionalAuthState('ready');
-      pushStartupTrace('auth.fast_path_hit', {
-        userId: localSession.userId,
-        runtimeState: this.runtimeState(),
+  private scheduleRuntimeAuthReadyInitialization(): void {
+    queueMicrotask(() => {
+      void this.ensureRuntimeAuthReady().catch(() => {
+        // initAuthStateListener 失败不影响当前已登录状态
       });
-
-      // 后台异步刷新 SDK session 状态，确保 token 最终同步
-      this.scheduleBackgroundSessionRefresh();
-
-      // 【Bug 修复 2026-03-27】FastPath 跳过了 ensureRuntimeAuthReady()，
-      // 导致 onAuthStateChange 监听器从未注册 → TOKEN_REFRESHED / SIGNED_OUT
-      // 事件无法被处理 → token 可能过期而不刷新、跨标签登出不同步。
-      // 在后台延迟初始化，不阻塞 FastPath 的即时返回。
-      queueMicrotask(() => {
-        void this.ensureRuntimeAuthReady().catch(() => {
-          // initAuthStateListener 失败不影响当前已登录状态
-        });
-      });
-
-      return localSession;
-    }
-
-    if (isBrowserNetworkSuspendedWindow()) {
-      return this.deferSessionCheckForBrowserResume('preflight');
-    }
-    
-    // 网络回退路径：超时保护 5 秒（原 10 秒，移动端体验优化）
-    const SESSION_TIMEOUT = 5000;
-    
-    try {
-      await this.ensureRuntimeAuthReady();
-      this.logger.debug('正在调用 supabase.getSession()...');
-      const callStartTime = Date.now();
-      
-      let sessionResult: { data: { session: { user?: { id: string; email?: string | null } } | null } | null; error: { message: string; status?: number; name?: string } | null };
-      
-      try {
-        const sessionPromise = this.supabase.getSession();
-        const timeoutPromise = new Promise<never>((_, reject) => {
-          setTimeout(() => reject(new Error('会话检查超时')), SESSION_TIMEOUT);
-        });
-        
-        sessionResult = await Promise.race([sessionPromise, timeoutPromise]);
-        const callElapsed = Date.now() - callStartTime;
-        this.logger.debug(`getSession() 返回 (耗时 ${callElapsed}ms)`);
-      } catch (e) {
-        throw e;
-      }
-      
-      const { data, error } = sessionResult;
-      
-      if (error) {
-        this.logger.error('getSession() 返回错误', {
-          message: error.message,
-          status: error.status,
-          name: error.name
-        });
-        throw supabaseErrorToError(error);
-      }
-      
-      const session = data?.session;
-      this.logger.debug('会话状态', { exists: !!session });
-      
-      if (session?.user) {
-        const userId = session.user.id;
-        const email = session.user.email ?? null;
-        this.logger.debug('用户已登录', { 
-          userId: userId.substring(0, 8) + '...', 
-          email 
-        });
-        
-        this.currentUserId.set(userId);
-        this.setPersistedOwnerHint(userId);
-        this.setPersistedSessionUserId(userId);
-        this.sessionEmail.set(email);
-        this.authState.update(s => ({
-          ...s,
-          userId,
-          email,
-          error: null
-        }));
-
-        // 设置 Sentry 用户上下文（网络路径）
-        this.sentryLazyLoader.setUser({ id: userId, email: email ?? undefined });
-        
-        this.logger.debug('========== checkSession 成功 ==========');
-        return { userId, email };
-      }
-      
-      // 没有现有会话，尝试开发环境自动登录
-      this.logger.debug('无现有会话，尝试开发环境自动登录...');
-      const autoLoginResult = await this.tryDevAutoLogin();
-      if (autoLoginResult) {
-        this.logger.debug('========== 自动登录成功 ==========');
-        return autoLoginResult;
-      }
-      
-      this.logger.debug('========== 无会话，未登录 ==========');
-      this.setPersistedOwnerHint(null);
-      this.setPersistedSessionUserId(null);
-      return { userId: null, email: null };
-    } catch (e: unknown) {
-      if (isBrowserNetworkSuspendedError(e) || isBrowserNetworkSuspendedWindow()) {
-        return this.deferSessionCheckForBrowserResume('catch');
-      }
-
-      const err = e as Error | undefined;
-      this.logger.error('========== checkSession 异常 ==========', {
-        message: err?.message,
-        stack: err?.stack?.split('\n')?.slice(0, 3)?.join('\n'),
-        isTimeout: err?.message?.includes('超时')
-      });
-      
-      // 超时不是致命错误，只是记录并继续
-      const isTimeout = err?.message?.includes('超时');
-      if (!isTimeout) {
-        this.authState.update(s => ({
-          ...s,
-          error: err?.message ?? String(e)
-        }));
-      }
-      
-      // 注意：这里不抛出异常，而是返回 null
-      this.logger.debug('返回空会话，不阻断应用启动');
-      return { userId: null, email: null };
-    } finally {
-      this.logger.debug('设置 isCheckingSession = false, sessionInitialized = true');
-      this.authState.update(s => ({ ...s, isCheckingSession: false }));
-      this.sessionInitialized.set(true);
-    }
+    });
   }
 
   /**
@@ -596,80 +357,25 @@ export class AuthService {
    * 否则用户看到"已登录"但所有 API 调用失败 → 永远无数据。
    */
   private scheduleBackgroundSessionRefresh(): void {
-    const scheduleTask = (task: () => void) => {
-      if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
-        (window as Window & { requestIdleCallback: (cb: () => void, opts?: { timeout: number }) => number })
-          .requestIdleCallback(() => task(), { timeout: 3000 });
-      } else {
-        setTimeout(task, POLLING_CHECK_DELAY.CONDITION_READY);
-      }
-    };
-
-    scheduleTask(() => {
+    this.scheduleBackgroundAuthTask(() => {
       void this.supabase.getSession()
-        .then(result => {
-          if (result.error) {
-            // 区分"SDK 不可用"和"会话真的无效"：
-            // SDK 不可用（动态 import 失败、客户端初始化失败）时不清除状态，
-            // 与网络失败同等对待 — 本地缓存可能仍然有效。
-            const errorName = (result.error as { name?: string }).name;
-            if (errorName === 'ClientUnavailable') {
-              this.logger.debug('[BackgroundRefresh] SDK 客户端不可用，保留本地状态（稍后重试）');
-              pushStartupTrace('auth.background_refresh_client_unavailable', {
-                runtimeState: this.runtimeState(),
-                currentUserId: this.currentUserId(),
-              });
-              return;
-            }
-            this.logger.warn('[BackgroundRefresh] SDK getSession 返回错误，清除本地会话', result.error);
-            this.handleBackgroundSessionInvalid();
-            return;
-          }
-          const session = result.data?.session;
-          if (!session?.user) {
-            this.logger.warn('[BackgroundRefresh] SDK 返回空会话，本地缓存已失效');
-            pushStartupTrace('auth.background_refresh_invalid_session', {
-              runtimeState: this.runtimeState(),
-              currentUserId: this.currentUserId(),
-            });
-            this.handleBackgroundSessionInvalid();
-            return;
-          }
-          // 用 SDK 返回的最新 user 信息更新状态（可能 userId/email 有变化）
-          this.currentUserId.set(session.user.id);
-          this.setPersistedOwnerHint(session.user.id);
-          this.setPersistedSessionUserId(session.user.id);
-          this.sessionEmail.set(session.user.email ?? null);
-          this.authState.update(s => ({
-            ...s,
-            userId: session.user!.id,
-            email: session.user!.email ?? null,
-            error: null,
-          }));
-          this.logger.debug('[BackgroundRefresh] SDK session 已同步');
-          pushStartupTrace('auth.background_refresh_synced', {
-            userId: session.user.id,
-          });
-        })
-        .catch((e: unknown) => {
-          // 区分认证错误和网络错误：
-          // - 认证错误（401/403/token-related）→ 会话已失效，必须清除本地状态
-          // - 网络错误（timeout/dns/offline）→ 临时离线，保留本地缓存
-          const isAuthError = this.isAuthenticationError(e);
-          if (isAuthError) {
-            this.logger.warn('[BackgroundRefresh] SDK 抛出认证异常，清除本地会话', e);
-            pushStartupTrace('auth.background_refresh_auth_error', {
-              currentUserId: this.currentUserId(),
-            });
-            this.handleBackgroundSessionInvalid();
-          } else {
-            this.logger.debug('[BackgroundRefresh] SDK session 刷新失败（网络问题，保留本地状态）', e);
-            pushStartupTrace('auth.background_refresh_network_preserved', {
-              currentUserId: this.currentUserId(),
-            });
-          }
-        });
+        .then(result => this.backgroundSessionRefresh.handleResult(result))
+        .catch((e: unknown) => this.backgroundSessionRefresh.handleError(e));
     });
+  }
+
+  private scheduleBackgroundAuthTask(task: () => void): void {
+    if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
+      (window as Window & { requestIdleCallback: (cb: () => void, opts?: { timeout: number }) => number })
+        .requestIdleCallback(() => task(), { timeout: 3000 });
+      return;
+    }
+
+    setTimeout(task, POLLING_CHECK_DELAY.CONDITION_READY);
+  }
+
+  private applyBackgroundSessionUser(user: AuthSessionUser): void {
+    this.sessionStateWriter.applyAuthenticatedIdentity(user.id, user.email ?? null);
   }
 
   /**
@@ -704,61 +410,8 @@ export class AuthService {
    * @returns 登录成功返回用户信息，否则返回 null
    */
   private async tryDevAutoLogin(): Promise<{ userId: string | null; email: string | null } | null> {
-    // 防止重复尝试
-    if (this.devAutoLoginAttempted) {
-      return null;
-    }
-    this.devAutoLoginAttempted = true;
-    
-    // 检查是否配置了开发环境自动登录
-    const envWithDevLogin = environment as {
-      devAutoLogin?: { email: string; password: string } | null;
-      production?: boolean;
-    };
-    const devAutoLogin = envWithDevLogin.devAutoLogin;
-    if (!devAutoLogin || !devAutoLogin.email || !devAutoLogin.password) {
-      return null;
-    }
-    
-    // 仅在非生产环境启用
-    if (envWithDevLogin.production) {
-      this.logger.warn('⚠️ devAutoLogin 不应在生产环境使用，已忽略');
-      return null;
-    }
-    
-    // 开发环境日志：不泄露凭据
-    this.logger.debug('🔐 开发环境自动登录中...');
-    
-    try {
-      const result = await this.signIn(devAutoLogin.email, devAutoLogin.password);
-      
-      if (result.ok && result.value.userId) {
-        // 安全：只记录登录成功，不记录具体邮箱
-        this.logger.info('✅ 开发环境自动登录成功');
-        return { 
-          userId: result.value.userId, 
-          email: result.value.email ?? null 
-        };
-      } else {
-        // 开发环境凭据问题：使用 info 而非 warn，避免在控制台产生混淆
-        // 这是预期的静默降级，不是真正的错误
-        this.logger.info('ℹ️ 开发环境自动登录未成功，将以未登录状态运行');
-        return null;
-      }
-    } catch (e) {
-      // 网络异常等：静默降级为未登录状态
-      this.logger.info('ℹ️ 开发环境自动登录异常，静默降级', e);
-      // eslint-disable-next-line no-restricted-syntax -- 返回 null 语义正确：自动登录失败静默降级
-      return null;
-    }
+    return await this.devAutoLogin.tryDevAutoLogin();
   }
-
-  /**
-   * 登录
-   * @returns Result 类型，成功时包含用户信息
-   */
-  /** 登录超时时间（ms） */
-  private readonly SIGN_IN_TIMEOUT = 15000;
 
   async signIn(email: string, password: string): Promise<Result<AuthResult, OperationError>> {
     if (!this.supabase.isConfigured) {
@@ -767,51 +420,10 @@ export class AuthService {
         'Supabase 未配置。请设置 NG_APP_SUPABASE_URL 和 NG_APP_SUPABASE_ANON_KEY。'
       );
     }
-    
-    this.authState.update(s => ({ ...s, isLoading: true, error: null }));
-    
-    try {
-      // 【P0 修复 2026-02-08】给 signInWithPassword 加超时保护
-      // 防止网络异常时无限挂起，导致 UI 卡在 "登录中..." 无法操作
-      const signInPromise = this.supabase.signInWithPassword(email, password);
-      const timeoutPromise = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error('登录请求超时，请检查网络连接后重试')), this.SIGN_IN_TIMEOUT)
-      );
-      const { data, error } = await Promise.race([signInPromise, timeoutPromise]);
-      
-      if (error || !data.session?.user) {
-        const errorMsg = humanizeErrorMessage(error?.message || '登录失败');
-        this.authState.update(s => ({ ...s, error: errorMsg }));
-        return failure(ErrorCodes.SYNC_AUTH_EXPIRED, errorMsg);
-      }
-      
-      const userId = data.session.user.id;
-      const userEmail = data.session.user.email ?? null;
-      
-      // 【P0 修复 2026-02-08】不在此处设置 currentUserId
-      // 原因：signIn() 提前设置会导致后续 setCurrentUser() 判断 isUserChange=false，
-      // 从而跳过 loadUserData()，用户看到的是种子数据而非真实云端数据。
-      // currentUserId 统一由 handleLogin → setCurrentUser(userId, { forceLoad: true }) 设置。
-      this.sessionEmail.set(userEmail);
-      this.authState.update(s => ({
-        ...s,
-        userId,
-        email: userEmail,
-        error: null
-      }));
-      
-      return success({ userId, email: userEmail ?? undefined });
-    } catch (e: unknown) {
-      const err = e as Error | undefined;
-      const isTimeout = err?.message?.includes('超时');
-      const errorMsg = isTimeout
-        ? err!.message
-        : humanizeErrorMessage(err?.message ?? String(e));
-      this.authState.update(s => ({ ...s, error: errorMsg }));
-      return failure(ErrorCodes.UNKNOWN, errorMsg);
-    } finally {
-      this.authState.update(s => ({ ...s, isLoading: false }));
-    }
+
+    return await this.runCredentialRequest(() =>
+      this.authCredentialRequests.signIn(email, password)
+    );
   }
 
   /**
@@ -825,68 +437,10 @@ export class AuthService {
         'Supabase 未配置。请设置 NG_APP_SUPABASE_URL 和 NG_APP_SUPABASE_ANON_KEY。'
       );
     }
-    
-    this.authState.update(s => ({ ...s, isLoading: true, error: null }));
-    
-    try {
+    return await this.runCredentialRequest(async () => {
       await this.ensureRuntimeAuthReady();
-      const client = await this.supabase.clientAsync();
-      if (!client) {
-        const errorMsg = 'Supabase 客户端未就绪，请稍后重试';
-        this.authState.update(s => ({ ...s, error: errorMsg }));
-        return failure(ErrorCodes.SYNC_AUTH_EXPIRED, errorMsg);
-      }
-
-      // 【P0 修复 2026-02-08】给注册加超时保护
-      const signUpPromise = client.auth.signUp({
-        email,
-        password,
-        options: {
-          emailRedirectTo: `${this.getAuthRedirectOrigin()}/auth/callback`
-        }
-      });
-      const timeoutPromise = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error('注册请求超时，请检查网络连接后重试')), this.SIGN_IN_TIMEOUT)
-      );
-      const { data, error } = await Promise.race([signUpPromise, timeoutPromise]);
-      
-      if (error) {
-        const errorMsg = humanizeErrorMessage(error.message);
-        this.authState.update(s => ({ ...s, error: errorMsg }));
-        return failure(ErrorCodes.UNKNOWN, errorMsg);
-      }
-      
-      // 检查是否需要邮箱确认
-      if (data.user && !data.session) {
-        return success({ needsConfirmation: true });
-      }
-      
-      // 如果直接获得 session（禁用了邮箱确认的情况）
-      if (data.session?.user) {
-        const userId = data.session.user.id;
-        const userEmail = data.session.user.email ?? null;
-        
-        // 【P0 修复 2026-02-08】不在此处设置 currentUserId，由 setCurrentUser 统一管理
-        this.sessionEmail.set(userEmail);
-        this.authState.update(s => ({
-          ...s,
-          userId,
-          email: userEmail,
-          error: null
-        }));
-        
-        return success({ userId, email: userEmail ?? undefined });
-      }
-      
-      return success({});
-    } catch (e: unknown) {
-      const err = e as Error | undefined;
-      const errorMsg = humanizeErrorMessage(err?.message ?? String(e));
-      this.authState.update(s => ({ ...s, error: errorMsg }));
-      return failure(ErrorCodes.UNKNOWN, errorMsg);
-    } finally {
-      this.authState.update(s => ({ ...s, isLoading: false }));
-    }
+      return await this.authCredentialRequests.signUp(email, password);
+    });
   }
 
   /**
@@ -897,91 +451,44 @@ export class AuthService {
     if (!this.supabase.isConfigured) {
       return failure(ErrorCodes.SYNC_AUTH_EXPIRED, 'Supabase 未配置');
     }
-    
-    this.authState.update(s => ({ ...s, isLoading: true, error: null }));
-    
-    try {
+    return await this.runCredentialRequest(async () => {
       await this.ensureRuntimeAuthReady();
-      const client = await this.supabase.clientAsync();
-      if (!client) {
-        const errorMsg = 'Supabase 客户端未就绪，请稍后重试';
-        this.authState.update(s => ({ ...s, error: errorMsg }));
-        return failure(ErrorCodes.SYNC_AUTH_EXPIRED, errorMsg);
-      }
-
-      // 【P1 修复 2026-02-08】给重置密码加超时保护
-      const resetPromise = client.auth.resetPasswordForEmail(email, {
-        redirectTo: `${this.getAuthRedirectOrigin()}/reset-password`
-      });
-      const timeoutPromise = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error('请求超时，请检查网络连接后重试')), this.SIGN_IN_TIMEOUT)
-      );
-      const { error } = await Promise.race([resetPromise, timeoutPromise]);
-      
-      if (error) {
-        const errorMsg = humanizeErrorMessage(error.message);
-        this.authState.update(s => ({ ...s, error: errorMsg }));
-        return failure(ErrorCodes.UNKNOWN, errorMsg);
-      }
-      
-      return success(undefined);
-    } catch (e: unknown) {
-      const err = e as Error | undefined;
-      const errorMsg = humanizeErrorMessage(err?.message ?? String(e));
-      this.authState.update(s => ({ ...s, error: errorMsg }));
-      return failure(ErrorCodes.UNKNOWN, errorMsg);
-    } finally {
-      this.authState.update(s => ({ ...s, isLoading: false }));
-    }
+      return await this.authCredentialRequests.resetPassword(email);
+    });
   }
 
-  private getAuthRedirectOrigin(): string {
-    const env = environment as unknown as {
-      production?: boolean;
-      canonicalOrigin?: string;
-      deploymentTarget?: string;
-    };
-    const canonicalOrigin = typeof env.canonicalOrigin === 'string'
-      ? env.canonicalOrigin.trim().replace(/\/+$/, '')
-      : '';
+  private async runCredentialRequest<T extends AuthResult | void>(
+    request: () => Promise<Result<T, OperationError>>,
+  ): Promise<Result<T, OperationError>> {
+    return await this.credentialFlow.run(request);
+  }
 
-    if (
-      canonicalOrigin
-      && /^https?:\/\//i.test(canonicalOrigin)
-      && (env.production === true || env.deploymentTarget === 'production')
-    ) {
-      return canonicalOrigin;
+  private applyCredentialIdentity(result: AuthResult): void {
+    if (!result.userId) {
+      return;
     }
 
-    return window.location.origin;
+    // signIn/signUp 不设置 currentUserId；handleLogin/setCurrentUser 负责真实用户切换与数据加载。
+    const userEmail = result.email ?? null;
+    this.sessionEmail.set(userEmail);
+    this.authState.update(s => ({
+      ...s,
+      userId: result.userId ?? null,
+      email: userEmail,
+      error: null,
+    }));
   }
 
   /**
    * 登出
-    * 注意：先清理内存态 UI，再尝试 Supabase 远端登出，最后在 finally 中兜底清理本地缓存
-    * 这样可以同时保留 refresh token 远端撤销机会，并确保本地状态最终一定被清理
+   * 注意：先尝试 Supabase 远端登出，成功后才清理本地 auth artifacts。
+   * 这样可以保留 refresh token 的远端撤销机会；失败由上层提示重试。
    */
   async signOut(): Promise<void> {
     // 标记为手动登出，避免触发 sessionExpired 提示
     this.isManualSignOut = true;
-    
-    // 先清理本地状态
-    this.currentUserId.set(null);
-    this.setPersistedOwnerHint(null);
-    this.setPersistedSessionUserId(null);
-    this.sessionEmail.set(null);
-    this.sessionExpired.set(false);
-    this.authState.update(s => ({
-      ...s,
-      userId: null,
-      email: null,
-      error: null
-    }));
+    const signedOutUserId = this.currentUserId();
 
-    // 清除 Sentry 用户上下文
-    this.sentryLazyLoader.setUser(null);
-    
-    // 再调用 Supabase 登出
     try {
       if (this.supabase.isConfigured) {
         await this.supabase.signOut();
@@ -990,9 +497,19 @@ export class AuthService {
       if (this.supabase.isConfigured) {
         this.logger.warn('Supabase signOut failed', { error: e });
       }
-    } finally {
-      this.clearCachedSessionArtifacts();
+      this.isManualSignOut = false;
+      throw e;
     }
+
+    this.sessionStateWriter.clearInvalidatedSession({
+      keepLocalModeUser: false,
+      localModeUserId: AUTH_CONFIG.LOCAL_MODE_USER_ID,
+    });
+    this.sessionExpired.set(false);
+    this.clearCachedSessionArtifacts();
+    // 通知订阅方丢弃旧会话身份缓存（如 SessionManager 校验快照），
+    // 否则登出后 10s 内的 resume 快路仍会按旧 userId 放行恢复链路
+    this.eventBus.publishSessionSignedOut('AuthService.signOut', signedOutUserId);
   }
 
   /**
@@ -1013,26 +530,15 @@ export class AuthService {
       window.removeEventListener('storage', this.storageListener);
     }
     this.pendingStorageBridgeSessionIdentity = null;
-    this.currentUserId.set(null);
-    this.setPersistedOwnerHint(null);
-    this.setPersistedSessionUserId(null);
-    this.sessionEmail.set(null);
-    this.sessionExpired.set(false);
-    this.sessionInitialized.set(false);
     this.isManualSignOut = false;
-    this.devAutoLoginAttempted = false;
+    this.devAutoLogin.reset();
     this.authRuntimeReady = false;
     this.pendingSessionRestoredNotification = false;
     this.authStateSubscription?.unsubscribe();
     this.authStateSubscription = null;
     this.runtimeAuthReadyPromise = null;
-    this.runtimeState.set(this.supabase.isConfigured ? 'idle' : 'ready');
-    this.authState.set({
-      isCheckingSession: false,
-      isLoading: false,
-      userId: null,
-      email: null,
-      error: null
+    this.sessionStateWriter.reset({
+      runtimeState: this.supabase.isConfigured ? 'idle' : 'ready',
     });
   }
   
@@ -1099,105 +605,21 @@ export class AuthService {
   }
 
   private handleStorageEvent(event: StorageEvent): void {
-    if (!this.storageKey || event.key !== this.storageKey) {
-      return;
-    }
-
-    // 登出（token 被清除）在任何阶段都应立即响应
-    if (!event.newValue) {
-      this.teardownInvalidatedSession('AuthService.storageBridge');
-      return;
-    }
-
-    // Auth runtime 未就绪时忽略登入事件，避免与 onAuthStateChange 竞态
-    if (!this.authRuntimeReady) {
-      return;
-    }
-
-    if (isLocalModeEnabled() || this.currentUserId() === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
-      this.logger.debug('Storage bridge 忽略 local-user 模式下的跨标签页登入事件');
-      return;
-    }
-
-    try {
-      const parsed = JSON.parse(event.newValue) as unknown;
-      const sessionIdentity = this.resolvePersistedSessionIdentityFromAuthData(parsed);
-      const userId = sessionIdentity?.userId ?? null;
-      const email = sessionIdentity?.email ?? null;
-
-      if (!userId) {
-        this.syncPersistedOwnerHintFromStorage();
-        this.syncPersistedSessionUserIdFromStorage();
-        return;
-      }
-
-      if (this.currentUserId() === userId) {
-        this.pendingStorageBridgeSessionIdentity = null;
-        this.applyConfirmedSessionIdentity(userId, email, {
-          publishSessionRestored: this.sessionExpired(),
-          source: 'AuthService.storageBridge',
-        });
-        return;
-      }
-
-      const previousPendingUserId = this.pendingStorageBridgeSessionIdentity?.userId ?? null;
-      this.pendingStorageBridgeSessionIdentity = { userId, email };
-      this.setPersistedOwnerHint(userId);
-
-      if (previousPendingUserId === userId) {
-        return;
-      }
-
-      this.eventBus.publishSessionRestored(userId, 'AuthService.storageBridge');
-    } catch (error) {
-      this.syncPersistedOwnerHintFromStorage();
-      this.syncPersistedSessionUserIdFromStorage();
-      this.logger.debug('Storage bridge 解析 auth token 失败，已忽略', error);
-    }
+    this.storageBridgeController.handleStorageEvent(event);
   }
 
   private resolveInvalidatedOwnerUserId(currentUserId = this.currentUserId()): string | null {
-    if (currentUserId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
-      return null;
-    }
-
-    const candidates = [
+    return resolveInvalidatedOwnerUserIdPure({
+      localModeUserId: AUTH_CONFIG.LOCAL_MODE_USER_ID,
       currentUserId,
-      this.persistedSessionUserId(),
-      this.persistedOwnerHint(),
-    ];
-
-    for (const candidate of candidates) {
-      if (candidate && candidate !== AUTH_CONFIG.LOCAL_MODE_USER_ID) {
-        return candidate;
-      }
-    }
-
-    return null;
+      persistedSessionUserId: this.persistedSessionUserId(),
+      persistedOwnerHint: this.persistedOwnerHint(),
+    });
   }
 
   private clearCachedSessionArtifacts(): void {
     this.pendingStorageBridgeSessionIdentity = null;
-
-    try {
-      const storageKey = this.supabase.getStorageKey();
-      if (storageKey) {
-        localStorage.removeItem(storageKey);
-      }
-      saveAuthCache(null);
-    } catch {
-      // localStorage 不可用时静默降级
-    }
-
-    if (typeof window === 'undefined') {
-      return;
-    }
-
-    try {
-      delete (window as Window & { __NANOFLOW_SESSION_PREWARM__?: unknown }).__NANOFLOW_SESSION_PREWARM__;
-    } catch {
-      // window 只读异常时静默降级
-    }
+    this.authSessionCache.clearCachedSessionArtifacts();
   }
 
   private teardownInvalidatedSession(source: string): { invalidatedUserId: string | null; keepLocalModeUser: boolean } {
@@ -1212,23 +634,10 @@ export class AuthService {
       this.eventBus.publishSessionInvalidated(source, invalidatedUserId);
     }
 
-    if (!keepLocalModeUser) {
-      this.currentUserId.set(null);
-    }
-    this.setPersistedOwnerHint(null);
-    this.setPersistedSessionUserId(null);
-    this.sessionEmail.set(null);
-    this.authState.update((state) => ({
-      ...state,
-      userId: keepLocalModeUser ? AUTH_CONFIG.LOCAL_MODE_USER_ID : null,
-      email: null,
-      error: null,
-      isCheckingSession: false,
-    }));
-
-    this.clearCachedSessionArtifacts();
-
-    this.sentryLazyLoader.setUser(null);
+    this.sessionStateWriter.clearInvalidatedSession({
+      keepLocalModeUser,
+      localModeUserId: AUTH_CONFIG.LOCAL_MODE_USER_ID,
+    });
 
     return { invalidatedUserId, keepLocalModeUser };
   }
@@ -1328,11 +737,10 @@ export class AuthService {
       source?: string;
     },
   ): void {
-    this.currentUserId.set(userId);
-    this.setPersistedOwnerHint(userId);
-    this.setPersistedSessionUserId(userId);
-    this.sessionEmail.set(email);
-    this.sentryLazyLoader.setUser({ id: userId, email: email ?? undefined });
+    this.sessionStateWriter.applyAuthenticatedIdentity(userId, email, {
+      isCheckingSession: false,
+      syncSentryUser: true,
+    });
 
     const shouldPublishSessionRestored = options?.publishSessionRestored
       && (this.sessionExpired() || this.pendingSessionRestoredNotification);
@@ -1346,13 +754,6 @@ export class AuthService {
       this.notifySyncServiceSessionRestored(userId, options?.source ?? 'AuthService');
     }
 
-    this.authState.update(s => ({
-      ...s,
-      userId,
-      email,
-      error: null,
-      isCheckingSession: false,
-    }));
   }
   
   /**

@@ -7,7 +7,7 @@ const { ensureEnvFiles } = require('./ensure-env-files.cjs');
 
 const projectRoot = process.cwd();
 const srcRoot = path.join(projectRoot, 'src');
-const npxBin = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+const vitestCliPath = path.join(projectRoot, 'node_modules', 'vitest', 'vitest.mjs');
 
 const testFilePattern = /\.(spec|test)\.ts$/;
 const perfTestDir = 'src/tests/perf/';
@@ -15,6 +15,10 @@ const testBedPattern = /\bTestBed\b/;
 const domPattern = /\b(window|document|navigator|HTMLElement|HTML[A-Za-z]+Element|matchMedia|requestAnimationFrame|cancelAnimationFrame|ResizeObserver|MutationObserver|IntersectionObserver|CustomEvent|EventTarget)\b/;
 const componentPathPattern = /\/components\/|\.component\.(spec|test)\.ts$/;
 const componentContentPattern = /\b(createComponent\s*\(|ComponentFixture\s*<|TestBed\.createComponent\s*\()/;
+const explicitTestBedServiceFiles = new Set([
+  'src/services/dock-cloud-sync.service.spec.ts',
+  'src/services/simple-reminder.service.spec.ts',
+]);
 
 const LANE_NAMES = {
   nodeMinimal: 'lane_node_minimal',
@@ -36,25 +40,47 @@ const laneConfig = {
     defaultIsolate: false,
     forceIsolateFiles: [
       'src/app/core/services/app-auth-coordinator.service.spec.ts',
+      'src/app/core/services/sync/project-sync-cursor.service.spec.ts',
+      'src/services/disaster-backup.service.spec.ts',
+      'src/app/core/shell/workspace-shell-sidebar-resize-delegation.spec.ts',
+      'src/app/core/shell/workspace-shell-startup-entry-intent.factory.spec.ts',
+      'src/workspace-shell.component.spec.ts',
+    ],
+    exclusiveFiles: [
+      'src/tests/scripts/analyze-codegraph-mcp-log.spec.ts',
+      'src/tests/scripts/codegraph-nanoflow-overlay.spec.ts',
+      'src/tests/scripts/codegraph-nanoflow-overlay-source-boundaries.spec.ts',
+      'src/tests/scripts/validate-codegraph-overlay-docs.spec.ts',
     ],
   },
   [LANE_NAMES.browserMinimal]: {
     config: 'vitest.minimal.config.mts',
-    defaultIsolate: false,
+    defaultIsolate: true,
+    extraArgs: ['--no-file-parallelism'],
     forceIsolateFiles: [],
+    exclusiveFiles: [],
   },
   [LANE_NAMES.testbedService]: {
     config: 'vitest.config.mts',
-    defaultIsolate: false,
+    defaultIsolate: true,
+    extraArgs: ['--no-file-parallelism'],
     forceIsolateFiles: [
+      'src/services/dock-cloud-sync.service.spec.ts',
+      'src/services/dock-engine.service.spec.ts',
+      'src/services/dock-snapshot-persistence.service.spec.ts',
+      'src/app/features/flow/services/flow-touch.service.spec.ts',
+      'src/app/core/external-sources/external-source-cache.service.spec.ts',
       'src/app/features/flow/services/flow-overview.service.spec.ts',
+      'src/app/core/services/sync/task-sync-operations.service.spec.ts',
     ],
+    exclusiveFiles: [],
   },
   [LANE_NAMES.testbedComponent]: {
     config: 'vitest.config.mts',
-    defaultIsolate: false,
-    extraArgs: ['--fileParallelism=false'],
+    defaultIsolate: true,
+    extraArgs: ['--no-file-parallelism'],
     forceIsolateFiles: [],
+    exclusiveFiles: [],
   },
 };
 
@@ -69,6 +95,8 @@ const DEFAULT_MIN_FILE_ESTIMATES = 20;
 const DEFAULT_TIMING_OUT_DIR = 'test-results';
 const DEFAULT_VITEST_JSON_OUT_DIR = 'test-results/vitest-reports';
 const MAX_LIST_PREVIEW = 30;
+const MAX_VITEST_FILES_PER_SEGMENT = 120;
+const DEFAULT_VITEST_SEGMENT_TIMEOUT_MS = 15 * 60 * 1000;
 
 const toPosix = (value) => value.split(path.sep).join('/');
 
@@ -601,6 +629,10 @@ function classifyFile(file, content, overrides) {
     return overrides[file];
   }
 
+  if (explicitTestBedServiceFiles.has(file)) {
+    return LANE_NAMES.testbedService;
+  }
+
   if (testBedPattern.test(content)) {
     if (
       componentPathPattern.test(file)
@@ -794,9 +826,23 @@ function buildVitestJsonReportPath(vitestJsonOutDir, task) {
   return path.join(absoluteDir, `vitest-report-${safeMode}-${safeShard}-${safeLane}-${safeSegment}-${safeOrder}.json`);
 }
 
+function buildVitestCacheDir(task) {
+  const safeMode = sanitizeFilePart(task.mode) || 'mode';
+  const safeShard = sanitizeFilePart(task.shardLabel) || 'all';
+  const safeLane = sanitizeFilePart(task.laneName) || 'lane';
+  const safeSegment = sanitizeFilePart(task.segmentName) || 'segment';
+  const safeOrder = String(task.order).padStart(2, '0');
+  return path.join(
+    projectRoot,
+    'node_modules',
+    '.vitest-matrix',
+    `${safeMode}-${safeShard}-${safeLane}-${safeSegment}-${safeOrder}`
+  );
+}
+
 function buildVitestArgs(laneName, files, passthrough, forceIsolate, vitestJsonReportPath) {
   const lane = laneConfig[laneName];
-  const args = ['vitest', 'run', '--config', lane.config];
+  const args = ['run', '--config', lane.config];
   const lanePassthrough = forceIsolate === undefined
     ? passthrough
     : passthrough.filter((arg) => !isIsolateArg(arg));
@@ -833,40 +879,84 @@ function buildVitestArgs(laneName, files, passthrough, forceIsolate, vitestJsonR
   return args;
 }
 
-function spawnVitest(commandArgs) {
+function resolveVitestSegmentTimeoutMs() {
+  return parsePositiveInt(process.env.NANOFLOW_TEST_MATRIX_VITEST_TIMEOUT_MS)
+    ?? DEFAULT_VITEST_SEGMENT_TIMEOUT_MS;
+}
+
+function killProcessTree(pid) {
+  if (!pid || process.platform !== 'win32') return;
+
+  const killer = spawn('taskkill', ['/PID', String(pid), '/T', '/F'], {
+    stdio: 'ignore',
+    windowsHide: true,
+  });
+  killer.on('error', () => {});
+}
+
+function spawnVitest(commandArgs, envOverrides = {}) {
   return new Promise((resolve) => {
     const invokedAt = Date.now();
     let spawnedAt = invokedAt;
+    const timeoutMs = resolveVitestSegmentTimeoutMs();
+    let timedOut = false;
+    let settled = false;
+    let timeoutTimer = null;
+    let killGraceTimer = null;
 
-    // On Windows, spawning .cmd files (like npx.cmd) with stdio:'inherit' can
-    // fail with EINVAL in Node.js v22+ when the parent's stdio is a pipe
-    // (e.g. VS Code integrated terminal). Using shell:true routes through
-    // cmd.exe and avoids the EINVAL error.
     const spawnOpts = {
       cwd: projectRoot,
-      env: process.env,
+      env: {
+        ...process.env,
+        ...envOverrides,
+      },
       stdio: 'inherit',
     };
-    if (process.platform === 'win32') {
-      spawnOpts.shell = true;
-    }
 
-    const child = spawn(npxBin, commandArgs, spawnOpts);
+    const child = spawn(process.execPath, [vitestCliPath, ...commandArgs], spawnOpts);
+
+    const clearTimers = () => {
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+      if (killGraceTimer) clearTimeout(killGraceTimer);
+    };
+
+    const settle = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimers();
+      resolve({
+        ...result,
+        timedOut,
+        timeoutMs,
+      });
+    };
+
+    timeoutTimer = setTimeout(() => {
+      timedOut = true;
+      console.error(`[test:run] vitest segment timed out after ${timeoutMs}ms`);
+      child.kill('SIGTERM');
+      killGraceTimer = setTimeout(() => {
+        child.kill('SIGKILL');
+        killProcessTree(child.pid);
+      }, 1000);
+      killGraceTimer.unref?.();
+    }, timeoutMs);
+    timeoutTimer.unref?.();
 
     child.on('spawn', () => {
       spawnedAt = Date.now();
     });
 
-    child.on('exit', (code, signal) => {
-      const exitCode = signal ? 1 : (code ?? 1);
-      resolve({
+    child.on('close', (code, signal) => {
+      const exitCode = timedOut || signal ? 1 : (code ?? 1);
+      settle({
         exitCode,
         spawnOverheadMs: Math.max(0, spawnedAt - invokedAt),
       });
     });
 
     child.on('error', () => {
-      resolve({
+      settle({
         exitCode: 1,
         spawnOverheadMs: Math.max(0, Date.now() - invokedAt),
       });
@@ -877,33 +967,66 @@ function spawnVitest(commandArgs) {
 function buildLaneSegments(laneName, files) {
   const lane = laneConfig[laneName];
   const forcedIsolateSet = new Set(lane.forceIsolateFiles ?? []);
+  const exclusiveSet = new Set(lane.exclusiveFiles ?? []);
   const sharedFiles = [];
   const forcedIsolateFiles = [];
+  const exclusiveFiles = [];
 
   for (const file of files) {
-    if (forcedIsolateSet.has(file)) {
+    if (exclusiveSet.has(file)) {
+      exclusiveFiles.push(file);
+    } else if (forcedIsolateSet.has(file)) {
       forcedIsolateFiles.push(file);
     } else {
       sharedFiles.push(file);
     }
   }
 
-  const segments = [];
-  if (sharedFiles.length > 0) {
-    segments.push({
-      segmentName: 'shared',
-      files: sharedFiles,
-      forceIsolate: lane.defaultIsolate,
-      segmentOrder: 0,
-    });
-  }
+  const pushSegmentChunks = (segments, segmentName, segmentFiles, segmentOptions) => {
+    if (segmentFiles.length === 0) {
+      return;
+    }
 
-  if (forcedIsolateFiles.length > 0) {
+    if (segmentFiles.length <= MAX_VITEST_FILES_PER_SEGMENT) {
+      segments.push({
+        segmentName,
+        files: segmentFiles,
+        ...segmentOptions,
+      });
+      return;
+    }
+
+    const totalChunks = Math.ceil(segmentFiles.length / MAX_VITEST_FILES_PER_SEGMENT);
+    for (let index = 0; index < totalChunks; index += 1) {
+      const chunk = segmentFiles.slice(
+        index * MAX_VITEST_FILES_PER_SEGMENT,
+        (index + 1) * MAX_VITEST_FILES_PER_SEGMENT,
+      );
+      segments.push({
+        segmentName: `${segmentName}-${String(index + 1).padStart(2, '0')}`,
+        files: chunk,
+        ...segmentOptions,
+      });
+    }
+  };
+
+  const segments = [];
+  pushSegmentChunks(segments, 'shared', sharedFiles, {
+    forceIsolate: lane.defaultIsolate,
+    segmentOrder: 0,
+  });
+  pushSegmentChunks(segments, 'forced-isolate', forcedIsolateFiles, {
+    forceIsolate: true,
+    segmentOrder: 1,
+  });
+
+  if (exclusiveFiles.length > 0) {
     segments.push({
-      segmentName: 'forced-isolate',
-      files: forcedIsolateFiles,
+      segmentName: 'exclusive',
+      files: exclusiveFiles,
       forceIsolate: true,
-      segmentOrder: 1,
+      exclusive: true,
+      segmentOrder: 2,
     });
   }
 
@@ -1261,6 +1384,7 @@ function buildExecutionTasks(selectedLanes, laneBuckets, durationBaseline) {
         segmentOrder: segment.segmentOrder,
         files: segment.files,
         forceIsolate: segment.forceIsolate,
+        exclusive: segment.exclusive === true,
         dependencyId: previousTaskId,
         order,
         estimatedMs,
@@ -1333,6 +1457,7 @@ function markDependencyFailures(pendingTasks, completed, laneResults) {
       status: 'skipped_dependency_failure',
       segmentOrder: task.segmentOrder,
       vitestJsonReportPath: null,
+      vitestCacheDir: null,
     };
 
     completed.set(task.id, { exitCode: 1 });
@@ -1343,17 +1468,71 @@ function markDependencyFailures(pendingTasks, completed, laneResults) {
   return changed;
 }
 
+function markUnrunnablePendingTasks(pendingTasks, completed, laneResults) {
+  let changed = false;
+
+  for (let i = pendingTasks.length - 1; i >= 0; i -= 1) {
+    const task = pendingTasks[i];
+    pendingTasks.splice(i, 1);
+
+    const blocked = {
+      segmentName: task.segmentName,
+      files: task.files.length,
+      exitCode: 1,
+      durationMs: 0,
+      queuedAt: task.queuedAt,
+      startedAt: null,
+      endedAt: null,
+      spawnOverheadMs: 0,
+      status: 'blocked_dependency_unresolved',
+      dependencyId: task.dependencyId ?? null,
+      segmentOrder: task.segmentOrder,
+      vitestJsonReportPath: null,
+      vitestCacheDir: null,
+    };
+
+    completed.set(task.id, { exitCode: 1 });
+    appendSegmentResult(laneResults, task.laneName, blocked);
+    changed = true;
+  }
+
+  return changed;
+}
+
+function serializeRunnerError(error) {
+  if (!error || typeof error !== 'object') {
+    return {
+      name: null,
+      code: null,
+      message: String(error),
+      stack: null,
+    };
+  }
+
+  return {
+    name: typeof error.name === 'string' ? error.name : null,
+    code: typeof error.code === 'string' ? error.code : null,
+    message: typeof error.message === 'string' ? error.message : String(error),
+    stack: typeof error.stack === 'string' ? error.stack : null,
+  };
+}
+
 async function runLaneTask(task, passthrough) {
   const taskLabel = `${task.laneName}/${task.segmentName}`;
   console.log(`[test:run] start ${taskLabel}: ${task.files.length} files`);
 
   const vitestJsonReportPath = buildVitestJsonReportPath(task.vitestJsonOutDir, task);
+  const vitestCacheDir = buildVitestCacheDir(task);
   if (vitestJsonReportPath) {
     fs.mkdirSync(path.dirname(vitestJsonReportPath), { recursive: true });
     if (fs.existsSync(vitestJsonReportPath)) {
       fs.unlinkSync(vitestJsonReportPath);
     }
   }
+  if (fs.existsSync(vitestCacheDir)) {
+    fs.rmSync(vitestCacheDir, { recursive: true, force: true });
+  }
+  fs.mkdirSync(vitestCacheDir, { recursive: true });
 
   const startedAt = Date.now();
   const args = buildVitestArgs(
@@ -1363,7 +1542,7 @@ async function runLaneTask(task, passthrough) {
     task.forceIsolate,
     vitestJsonReportPath
   );
-  const result = await spawnVitest(args);
+  const result = await spawnVitest(args, { VITEST_CACHE_DIR: vitestCacheDir });
   const endedAt = Date.now();
 
   const segmentResult = {
@@ -1375,11 +1554,13 @@ async function runLaneTask(task, passthrough) {
     startedAt,
     endedAt,
     spawnOverheadMs: result.spawnOverheadMs,
-    status: 'executed',
+    status: result.timedOut ? 'timed_out' : 'executed',
     segmentOrder: task.segmentOrder,
     vitestJsonReportPath: vitestJsonReportPath && result.exitCode === 0 && fs.existsSync(vitestJsonReportPath)
       ? toProjectPathOrAbsolute(vitestJsonReportPath)
       : null,
+    vitestCacheDir: toProjectPathOrAbsolute(vitestCacheDir),
+    timeoutMs: result.timeoutMs,
   };
 
   console.log(`[test:run] finish ${taskLabel}: exit=${segmentResult.exitCode} durationMs=${segmentResult.durationMs}`);
@@ -1390,17 +1571,41 @@ async function runWithPool(taskQueue, laneResults, maxProcs, passthrough, enable
   const pendingTasks = [...taskQueue];
   const completed = new Map();
   let active = 0;
+  let exclusiveActive = false;
 
   return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+
     const schedule = () => {
-      markDependencyFailures(pendingTasks, completed, laneResults);
+      if (settled) return;
+
+      while (markDependencyFailures(pendingTasks, completed, laneResults)) {}
 
       while (active < maxProcs) {
-        const readyTasks = pendingTasks.filter((task) => {
+        if (exclusiveActive) {
+          break;
+        }
+
+        let readyTasks = pendingTasks.filter((task) => {
           if (!task.dependencyId) return true;
           const dep = completed.get(task.dependencyId);
           return Boolean(dep && dep.exitCode === 0);
         });
+
+        const readyExclusiveTasks = readyTasks.filter((task) => task.exclusive);
+        if (readyExclusiveTasks.length > 0) {
+          if (active > 0) {
+            break;
+          }
+          readyTasks = readyExclusiveTasks;
+        } else {
+          readyTasks = readyTasks.filter((task) => !task.exclusive);
+        }
 
         if (readyTasks.length === 0) {
           break;
@@ -1414,6 +1619,9 @@ async function runWithPool(taskQueue, laneResults, maxProcs, passthrough, enable
 
         pendingTasks.splice(index, 1);
         active += 1;
+        if (task.exclusive) {
+          exclusiveActive = true;
+        }
 
         runLaneTask({
           ...task,
@@ -1425,7 +1633,15 @@ async function runWithPool(taskQueue, laneResults, maxProcs, passthrough, enable
             completed.set(task.id, { exitCode: segmentResult.exitCode });
             appendSegmentResult(laneResults, task.laneName, segmentResult);
           })
-          .catch(() => {
+          .catch((error) => {
+            const runnerError = serializeRunnerError(error);
+            console.error(
+              `[test:run] runner error ${task.id}: ${runnerError.message}`,
+            );
+            if (runnerError.stack) {
+              console.error(runnerError.stack);
+            }
+
             const failed = {
               segmentName: task.segmentName,
               files: task.files.length,
@@ -1438,14 +1654,18 @@ async function runWithPool(taskQueue, laneResults, maxProcs, passthrough, enable
               status: 'runner_error',
               segmentOrder: task.segmentOrder,
               vitestJsonReportPath: null,
+              runnerError,
             };
             completed.set(task.id, { exitCode: 1 });
             appendSegmentResult(laneResults, task.laneName, failed);
           })
           .finally(() => {
             active -= 1;
+            if (task.exclusive) {
+              exclusiveActive = false;
+            }
             if (pendingTasks.length === 0 && active === 0) {
-              resolve();
+              finish();
             } else {
               schedule();
             }
@@ -1453,7 +1673,13 @@ async function runWithPool(taskQueue, laneResults, maxProcs, passthrough, enable
       }
 
       if (pendingTasks.length === 0 && active === 0) {
-        resolve();
+        finish();
+        return;
+      }
+
+      if (pendingTasks.length > 0 && active === 0) {
+        markUnrunnablePendingTasks(pendingTasks, completed, laneResults);
+        finish();
       }
     };
 

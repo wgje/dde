@@ -17,6 +17,7 @@ import {
   type ScanStatus,
   type AttachmentScanMetadata,
 } from '../config/virus-scan.config';
+import { extractSupabaseFunctionErrorMessage } from '../utils/supabase-functions-error';
 
 /**
  * 扫描错误类型
@@ -29,8 +30,7 @@ export type ScanErrorCode =
   | 'HASH_MISMATCH'
   | 'THREAT_DETECTED'
   | 'NETWORK_ERROR'
-  | 'CHECK_FAILED'
-  | 'FILE_TOO_LARGE';
+  | 'CHECK_FAILED';
 
 /**
  * 扫描响应接口
@@ -218,6 +218,7 @@ export class VirusScanService {
   createScanMetadata(result: ScanResult): AttachmentScanMetadata {
     const metadata: AttachmentScanMetadata = {
       lastScannedAt: result.scannedAt,
+      fileHash: result.fileHash,
       scanStatus: result.status,
       scanHistory: [
         {
@@ -227,6 +228,10 @@ export class VirusScanService {
         },
       ],
     };
+
+    if (!(result.status === SCAN_STATUS.SKIPPED && result.scanner === 'local')) {
+      metadata.fileId = result.fileId;
+    }
 
     if (result.status === SCAN_STATUS.THREAT_DETECTED && result.threatName) {
       metadata.threat = {
@@ -275,66 +280,35 @@ export class VirusScanService {
     try {
       const client = this.supabase.client();
       if (!client) {
-        return {
-          success: false,
-          error: '未连接到服务',
-          errorCode: 'SERVICE_UNAVAILABLE',
-        };
+        return this.createServiceUnavailableResponse();
       }
 
-      // 计算文件哈希（用于后续 TOCTOU 防护）
-      const fileHash = await this.calculateFileHash(file);
-
-      // 将文件转为 base64（Edge Function 需要）
-      const fileBase64 = await this.blobToBase64(file);
-
-      // 调用 Edge Function
-      const { data, error } = await Promise.race([
-        client.functions.invoke('virus-scan', {
-          body: {
-            action: 'scan',
-            file: fileBase64,
-            filename,
-            hash: fileHash,
-            mimeType: file.type,
-          },
-        }),
-        this.createTimeoutPromise(VIRUS_SCAN_CONFIG.UPLOAD_SCAN.TIMEOUT),
-      ]);
+      const { data, error } = await this.invokeUploadScan(client, file, filename);
 
       if (error) {
-        this.logger.error('扫描服务调用失败', { error });
-        return this.handleScanFailure(filename, error.message);
+        const errorMessage = await extractSupabaseFunctionErrorMessage(error, '扫描服务调用失败');
+        this.logger.error('扫描服务调用失败', { error, message: errorMessage });
+        return this.handleScanFailure(filename, errorMessage);
       }
 
-      // 解析扫描结果
-      const result: ScanResult = {
-        fileId: data.fileId || crypto.randomUUID(),
-        status: data.status as ScanStatus,
-        threatName: data.threatName,
-        threatDescription: data.threatDescription,
-        scannedAt: new Date().toISOString(),
-        scanner: 'supabase_edge_clamav',
-        engineVersion: data.engineVersion,
-        signatureVersion: data.signatureVersion,
-      };
+      if (!data) {
+        this.logger.error('扫描服务返回空数据', { filename });
+        return this.handleScanFailure(filename, '扫描服务返回空数据');
+      }
 
+      const result = this.createScanResult(data);
       this.lastScanResult.set(result);
 
-      // 处理威胁检测
-      if (result.status === SCAN_STATUS.THREAT_DETECTED) {
-        this.handleThreatDetected(result);
-        return {
-          success: false,
-          error: `检测到威胁: ${result.threatName}`,
-          errorCode: 'THREAT_DETECTED',
-          result,
-        };
-      }
-
-      return { success: true, result };
+      return this.createScanResponse(result);
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : '未知错误';
+      const errorMessage = await extractSupabaseFunctionErrorMessage(
+        error,
+        error instanceof Error ? error.message : '未知错误',
+      );
+
+      if (this.isNetworkScanError(error, errorMessage)) {
+        return this.handleNetworkScanFailure(filename, errorMessage);
+      }
       
       if (errorMessage.includes('timeout')) {
         return this.handleScanTimeout(filename);
@@ -344,6 +318,77 @@ export class VirusScanService {
     } finally {
       this.scanningCount.update(c => Math.max(0, c - 1));
     }
+  }
+
+  private createServiceUnavailableResponse(): ScanResponse {
+    return {
+      success: false,
+      error: '未连接到服务',
+      errorCode: 'SERVICE_UNAVAILABLE',
+    };
+  }
+
+  private async invokeUploadScan(
+    client: { functions: { invoke: (name: string, options: { body: Record<string, unknown> }) => Promise<{ data: Record<string, unknown> | null; error: { message: string } | null }> } },
+    file: Blob,
+    filename: string,
+  ): Promise<{ data: Record<string, unknown> | null; error: { message: string } | null }> {
+    const fileHash = await this.calculateFileHash(file);
+    const fileBase64 = await this.blobToBase64(file);
+
+    return Promise.race([
+      client.functions.invoke('virus-scan', {
+        body: {
+          action: 'scan',
+          file: fileBase64,
+          filename,
+          hash: fileHash,
+          mimeType: file.type,
+        },
+      }),
+      this.createTimeoutPromise(VIRUS_SCAN_CONFIG.UPLOAD_SCAN.TIMEOUT),
+    ]);
+  }
+
+  private createScanResult(data: Record<string, unknown>): ScanResult {
+    return {
+      fileId: typeof data['fileId'] === 'string' ? data['fileId'] : crypto.randomUUID(),
+      fileHash: typeof data['fileHash'] === 'string' ? data['fileHash'] : undefined,
+      status: data['status'] as ScanStatus,
+      threatName: typeof data['threatName'] === 'string' ? data['threatName'] : undefined,
+      threatDescription: typeof data['threatDescription'] === 'string' ? data['threatDescription'] : undefined,
+      scannedAt: new Date().toISOString(),
+      scanner: 'supabase_edge_clamav',
+      engineVersion: typeof data['engineVersion'] === 'string' ? data['engineVersion'] : undefined,
+      signatureVersion: typeof data['signatureVersion'] === 'string' ? data['signatureVersion'] : undefined,
+    };
+  }
+
+  private createScanResponse(result: ScanResult): ScanResponse {
+    if (result.status === SCAN_STATUS.CLEAN || result.status === SCAN_STATUS.SKIPPED) {
+      return { success: true, result };
+    }
+
+    if (result.status === SCAN_STATUS.THREAT_DETECTED) {
+      this.handleThreatDetected(result);
+      return {
+        success: false,
+        error: `检测到威胁: ${result.threatName}`,
+        errorCode: 'THREAT_DETECTED',
+        result,
+      };
+    }
+
+    this.logger.error('扫描结果非 clean，拒绝上传', {
+      fileId: result.fileId,
+      status: result.status,
+    });
+    return {
+      success: false,
+      error: '文件安全扫描未通过',
+      errorCode: 'SCAN_FAILED',
+      result,
+    };
   }
 
   /**
@@ -361,7 +406,12 @@ export class VirusScanService {
       });
 
       if (error || !data) {
-        return { success: false, error: error?.message || '获取状态失败' };
+        return {
+          success: false,
+          error: error
+            ? await extractSupabaseFunctionErrorMessage(error, '获取状态失败')
+            : '获取状态失败',
+        };
       }
 
       return {
@@ -371,7 +421,10 @@ export class VirusScanService {
     } catch (error) {
       return {
         success: false,
-        error: error instanceof Error ? error.message : '未知错误',
+        error: await extractSupabaseFunctionErrorMessage(
+          error,
+          error instanceof Error ? error.message : '未知错误',
+        ),
       };
     }
   }
@@ -419,8 +472,16 @@ export class VirusScanService {
   /**
    * 检查扫描状态是否过期
    */
-  private isScanStatusExpired(scannedAt: string): boolean {
+  private isScanStatusExpired(scannedAt: string | null | undefined): boolean {
+    if (typeof scannedAt !== 'string' || scannedAt.trim().length === 0) {
+      return true;
+    }
+
     const scanTime = new Date(scannedAt).getTime();
+    if (!Number.isFinite(scanTime)) {
+      return true;
+    }
+
     const now = Date.now();
     return now - scanTime > VIRUS_SCAN_CONFIG.DOWNLOAD_CHECK.STATUS_EXPIRY;
   }
@@ -556,6 +617,29 @@ export class VirusScanService {
           errorCode: 'SCAN_FAILED',
         };
     }
+  }
+
+  private handleNetworkScanFailure(filename: string, errorMessage: string): ScanResponse {
+    this.logger.warn('扫描网络中断，转入本地待上传队列', { filename, error: errorMessage });
+    return {
+      success: false,
+      error: errorMessage,
+      errorCode: 'NETWORK_ERROR',
+    };
+  }
+
+  private isNetworkScanError(error: unknown, errorMessage: string): boolean {
+    const normalized = `${error instanceof Error ? error.name : ''} ${errorMessage}`.toLowerCase();
+    return normalized.includes('failed to fetch')
+      || normalized.includes('networkerror')
+      || normalized.includes('network error')
+      || normalized.includes('load failed')
+      || normalized.includes('internet disconnected')
+      || normalized.includes('offline')
+      || normalized.includes('err_internet_disconnected')
+      || normalized.includes('err_network_changed')
+      || normalized.includes('err_connection')
+      || normalized.includes('connection reset');
   }
 
   /**

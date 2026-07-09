@@ -1,5 +1,7 @@
 import { TestBed } from '@angular/core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { TextTaskCardComponent } from './text-task-card.component';
 import { DockEngineService } from '../../../../services/dock-engine.service';
@@ -12,6 +14,8 @@ import { AttachmentService } from '../../../../services/attachment.service';
 import { ToastService } from '../../../../services/toast.service';
 import { TextViewTaskOpsService } from '../services/text-view-task-ops.service';
 import type { Task } from '../../../../models';
+import { KnowledgeAnchorComponent } from '../../../shared/components/knowledge-anchor/knowledge-anchor.component';
+import { KnowledgeAnchorStubComponent } from '../../../../tests/stubs/knowledge-anchor.stub';
 
 describe('TextTaskCardComponent', () => {
   const mockDockEngine = {
@@ -96,6 +100,7 @@ describe('TextTaskCardComponent', () => {
       userId: () => string | null;
       projectId: () => string | null;
       connections: () => null;
+      sidecarSummary: () => { badges: Array<{ label: string }> };
       stageNumber: () => number;
       cardClasses: Record<string, boolean>;
       onCardClick: (event: Event) => void;
@@ -130,13 +135,188 @@ describe('TextTaskCardComponent', () => {
         { provide: ToastService, useValue: mockToast },
         { provide: TextViewTaskOpsService, useValue: mockTextViewOps },
       ],
-    }).compileComponents();
+    })
+      .overrideComponent(TextTaskCardComponent, {
+        remove: { imports: [KnowledgeAnchorComponent] },
+        add: { imports: [KnowledgeAnchorStubComponent] },
+      })
+      .compileComponents();
+  });
+
+  afterEach(() => {
+    document.body
+      .querySelectorAll('[data-testid="text-task-sidecar-preview"]')
+      .forEach(element => element.remove());
   });
 
   it('should keep virtual list containment for collapsed cards', () => {
     const component = createComponent(false);
 
     expect(component.cardClasses['virtual-list-item']).toBe(true);
+  });
+
+  it('should expose derived sidecar badges for collapsed task previews', () => {
+    const component = createComponent(false) as unknown as {
+      task: () => Task;
+      connections: () => {
+        outgoing: Array<{ targetId: string }>;
+        incoming: Array<{ sourceId: string }>;
+      };
+      sidecarSummary: () => { badges: Array<{ label: string }> };
+    };
+    component.task = () => createTask({
+      priority: 'high',
+      wait_minutes: 10,
+      cognitive_load: 'high',
+      content: '- [ ] 确认接口字段',
+      tags: ['需联调'],
+    });
+    component.connections = () => ({
+      outgoing: [{ targetId: 'task-2' }],
+      incoming: [{ sourceId: 'task-3' }],
+    });
+
+    expect(component.sidecarSummary().badges.map(badge => badge.label)).toEqual([
+      '风险1',
+      '等待10m',
+      '高负荷',
+      '需联调',
+    ]);
+  });
+
+  it('should use a project-styled floating sidecar preview window', () => {
+    const source = readFileSync(
+      join(process.cwd(), 'src/app/features/text/components/text-task-card.component.ts'),
+      'utf-8',
+    );
+
+    expect(source).toContain('data-testid="text-task-sidecar-trigger"');
+    expect(source).toContain('[attr.aria-describedby]="sidecarPreviewDescriptionId()"');
+    expect(source).toContain('role="tooltip"');
+    expect(source).toContain('class="sr-only"');
+    expect(source).toContain("element.dataset['testid'] = 'text-task-sidecar-preview'");
+    expect(source).toContain("element.setAttribute('role', 'tooltip')");
+    expect(source).toContain('任务僚机');
+    expect(source).toContain("position: 'fixed'");
+    expect(source).toContain("document.body.appendChild(element)");
+    expect(source).toContain("pointerEvents: 'none'");
+    expect(source).toContain('showSidecarPreview($event)');
+    expect(source).toContain('hideSidecarPreview()');
+    expect(source).toContain('rounded-full border border-stone-200/70');
+    expect(source).toContain('bg-stone-50/70');
+    expect(source).toContain('[class.overflow-visible]="sidecarSummary().hasSignals"');
+    expect(source).toContain('[class.text-task-card--contains-paint]="!sidecarSummary().hasSignals"');
+    expect(source).not.toContain('[attr.title]="sidecarSummaryTooltipText() || null"');
+    expect(source).not.toContain("element.setAttribute('aria-hidden', 'true')");
+    expect(source).not.toContain('data-testid="text-task-sidecar-popover"');
+    expect(source).not.toContain('.text-task-sidecar-trigger:hover .text-task-sidecar-popover');
+    expect(source).not.toContain('.text-task-card:hover .text-task-sidecar-popover');
+  });
+
+  it('should expose sidecar preview lines as an accessible button description', () => {
+    const component = createComponent(false) as unknown as {
+      task: () => Task;
+      sidecarPreviewLines: () => string[];
+      sidecarPreviewDescriptionId: () => string;
+      sidecarPreviewDescriptionText: () => string;
+    };
+    component.task = () => createTask({ id: 'task:with spaces' });
+    component.sidecarPreviewLines = () => ['等待：10 分钟', '高负荷'];
+
+    expect(component.sidecarPreviewDescriptionId()).toBe('text-task-sidecar-description-task_with_spaces');
+    expect(component.sidecarPreviewDescriptionText()).toBe('任务僚机摘要：等待：10 分钟；高负荷');
+  });
+
+  it('should place the sidecar preview in viewport space to avoid clipping by scroll containers', () => {
+    const component = createComponent(false) as unknown as {
+      sidecarPreviewLines: () => string[];
+      showSidecarPreview: (event: Event) => void;
+      hideSidecarPreview: () => void;
+    };
+    component.sidecarPreviewLines = () => ['注意1：测试内容', '注意2：更多内容'];
+    const trigger = document.createElement('button');
+    Object.defineProperty(trigger, 'getBoundingClientRect', {
+      value: () => ({ left: 100, right: 140, top: 200, height: 18, width: 40, bottom: 218, x: 100, y: 200, toJSON: () => ({}) }),
+    });
+
+    component.showSidecarPreview({ currentTarget: trigger } as unknown as Event);
+
+    const preview = document.body.querySelector('[data-testid="text-task-sidecar-preview"]') as HTMLElement | null;
+    expect(preview).not.toBeNull();
+    expect(preview?.getAttribute('role')).toBe('tooltip');
+    expect(preview?.hasAttribute('aria-hidden')).toBe(false);
+    expect(preview?.style.position).toBe('fixed');
+    expect(preview?.style.left).toBe('148px');
+    expect(preview?.textContent).toContain('注意2：更多内容');
+
+    component.hideSidecarPreview();
+    expect(document.body.querySelector('[data-testid="text-task-sidecar-preview"]')).toBeNull();
+  });
+
+  it('should toggle the floating sidecar preview from the trigger click on mobile', () => {
+    const component = createComponent(false) as unknown as {
+      task: () => Task;
+      sidecarPreviewLines: () => string[];
+      onSidecarTriggerClick: (event: Event) => void;
+    };
+    component.task = () => createTask({ wait_minutes: 10 });
+    component.sidecarPreviewLines = () => ['等待：10 分钟'];
+    const trigger = document.createElement('button');
+    Object.defineProperty(trigger, 'getBoundingClientRect', {
+      value: () => ({ left: 100, right: 140, top: 200, height: 18, width: 40, bottom: 218, x: 100, y: 200, toJSON: () => ({}) }),
+    });
+    const stopPropagation = vi.fn();
+    const preventDefault = vi.fn();
+    const event = {
+      cancelable: true,
+      currentTarget: trigger,
+      target: trigger,
+      stopPropagation,
+      preventDefault,
+    } as unknown as Event;
+
+    component.onSidecarTriggerClick(event);
+
+    const preview = document.body.querySelector('[data-testid="text-task-sidecar-preview"]') as HTMLElement | null;
+    expect(preview).not.toBeNull();
+    expect(preview?.dataset['pinned']).toBe('true');
+    expect(preview?.textContent).toContain('等待：10 分钟');
+    expect(stopPropagation).toHaveBeenCalledTimes(1);
+    expect(preventDefault).toHaveBeenCalledTimes(1);
+
+    component.onSidecarTriggerClick(event);
+
+    expect(document.body.querySelector('[data-testid="text-task-sidecar-preview"]')).toBeNull();
+  });
+
+  it('should remove the floating sidecar preview when sidecar signals disappear', () => {
+    const component = createComponent(false) as unknown as {
+      task: () => Task;
+      sidecarPreviewLines: () => string[];
+      onSidecarTriggerClick: (event: Event) => void;
+      syncSidecarPreviewWithSummary: () => void;
+    };
+    component.task = () => createTask({ wait_minutes: 10 });
+    component.sidecarPreviewLines = () => ['等待：10 分钟'];
+    const trigger = document.createElement('button');
+    Object.defineProperty(trigger, 'getBoundingClientRect', {
+      value: () => ({ left: 100, right: 140, top: 200, height: 18, width: 40, bottom: 218, x: 100, y: 200, toJSON: () => ({}) }),
+    });
+
+    component.onSidecarTriggerClick({
+      cancelable: true,
+      currentTarget: trigger,
+      target: trigger,
+      stopPropagation: vi.fn(),
+      preventDefault: vi.fn(),
+    } as unknown as Event);
+    expect(document.body.querySelector('[data-testid="text-task-sidecar-preview"]')).not.toBeNull();
+
+    component.task = () => createTask({ wait_minutes: null, tags: [] });
+    component.sidecarPreviewLines = () => [];
+    component.syncSidecarPreviewWithSummary();
+
+    expect(document.body.querySelector('[data-testid="text-task-sidecar-preview"]')).toBeNull();
   });
 
   it('should opt out of virtual list containment once the card is expanded', () => {
@@ -228,8 +408,45 @@ describe('TextTaskCardComponent', () => {
     expect(emitSpy).not.toHaveBeenCalled();
   });
 
+  it('should keep the mobile drag handle visible for selected cards', () => {
+    const component = createComponent(true) as unknown as {
+      isMobile: () => boolean;
+      showMobileDragHandle: () => boolean;
+    };
+    component.isMobile = () => true;
+
+    expect(component.showMobileDragHandle()).toBe(true);
+  });
+
   it('should emit mobile drag start only from the explicit handle touch', () => {
     const component = createComponent(false) as unknown as {
+      isMobile: () => boolean;
+      onDragHandleTouchStart: (event: TouchEvent) => void;
+      touchStart: { emit: ReturnType<typeof vi.fn> };
+    };
+    const emitSpy = vi.spyOn(component.touchStart, 'emit');
+    const stopPropagation = vi.fn();
+    const preventDefault = vi.fn();
+    const event = {
+      cancelable: true,
+      stopPropagation,
+      preventDefault,
+    } as unknown as TouchEvent;
+    component.isMobile = () => true;
+
+    component.onDragHandleTouchStart(event);
+
+    expect(preventDefault).toHaveBeenCalledTimes(1);
+    expect(stopPropagation).toHaveBeenCalledTimes(1);
+    expect(emitSpy).toHaveBeenCalledWith({
+      event,
+      task: expect.objectContaining({ id: 'task-1' }),
+      gestureMode: 'handle',
+    });
+  });
+
+  it('should allow selected mobile cards to start dragging from the explicit handle', () => {
+    const component = createComponent(true) as unknown as {
       isMobile: () => boolean;
       onDragHandleTouchStart: (event: TouchEvent) => void;
       touchStart: { emit: ReturnType<typeof vi.fn> };

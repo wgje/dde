@@ -1,6 +1,6 @@
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { Injector } from '@angular/core';
-import { LocalBackupService } from './local-backup.service';
+import { buildLocalBackupFilename, LocalBackupService } from './local-backup.service';
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
 import { ExportService } from './export.service';
@@ -86,6 +86,23 @@ describe('LocalBackupService', () => {
       service.stopAutoBackup();
       expect(service.autoBackupEnabled()).toBe(false);
     });
+
+    it('停止时即使 interval handle 为 0 也应清理，避免重启后残留双备份周期', () => {
+      const zeroInterval = 0 as unknown as ReturnType<typeof setInterval>;
+      const clearIntervalSpy = vi.spyOn(globalThis, 'clearInterval').mockImplementation(() => undefined);
+      (service as unknown as { autoBackupTimer: ReturnType<typeof setInterval> | null }).autoBackupTimer = zeroInterval;
+
+      try {
+        service.stopAutoBackup(false);
+
+        expect(clearIntervalSpy).toHaveBeenCalledWith(zeroInterval);
+        expect(
+          (service as unknown as { autoBackupTimer: ReturnType<typeof setInterval> | null }).autoBackupTimer
+        ).toBeNull();
+      } finally {
+        clearIntervalSpy.mockRestore();
+      }
+    });
   });
 
   describe('setAutoBackupInterval', () => {
@@ -98,6 +115,23 @@ describe('LocalBackupService', () => {
   describe('ngOnDestroy', () => {
     it('清理时不出错', () => {
       expect(() => service.ngOnDestroy()).not.toThrow();
+    });
+
+    it('销毁后晚到的自动备份启动不应重新创建定时器', () => {
+      vi.useFakeTimers();
+      setPrivateSignal(service, '_isAuthorized', true);
+      service.ngOnDestroy();
+      const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
+
+      service.startAutoBackup(
+        () => [{ id: 'p1', name: 'Test', tasks: [], connections: [] }],
+        1000,
+        { silent: true },
+      );
+
+      expect(setIntervalSpy).not.toHaveBeenCalled();
+      expect((service as unknown as { autoBackupTimer: ReturnType<typeof setInterval> | null }).autoBackupTimer).toBeNull();
+      expect(service.autoBackupEnabled()).toBe(false);
     });
   });
 
@@ -234,6 +268,25 @@ describe('LocalBackupService', () => {
       performBackupSpy.mockRestore();
       service.stopAutoBackup();
     });
+
+    it('自动备份周期遇到项目提供者异常时应记录并继续运行', async () => {
+      setPrivateSignal(service, '_autoBackupEnabled', true);
+      (service as unknown as {
+        getProjectsFn: () => Array<{ id: string; name: string; tasks: []; connections: [] }>;
+        runAutoBackupCycle: () => Promise<void>;
+      }).getProjectsFn = () => {
+        throw new Error('projects provider failed');
+      };
+
+      await expect(
+        (service as unknown as { runAutoBackupCycle: () => Promise<void> }).runAutoBackupCycle()
+      ).resolves.toBeUndefined();
+
+      expect(mockLoggerCategory.error).toHaveBeenCalledWith(
+        '自动备份周期异常',
+        expect.objectContaining({ error: 'projects provider failed' }),
+      );
+    });
   });
 
   describe('performBackup', () => {
@@ -244,15 +297,62 @@ describe('LocalBackupService', () => {
       expect(result.success).toBe(false);
     });
 
+    it('并发 performBackup 只能允许一个备份进入写入阶段', async () => {
+      const backupBlob = new Blob(['{"payloadVersion":"2.0.0"}'], { type: 'application/json' });
+      const writable = {
+        write: vi.fn(async () => undefined),
+        close: vi.fn(async () => undefined),
+      };
+      const fileHandle = {
+        createWritable: vi.fn(async () => writable),
+        getFile: vi.fn(async () => new File([backupBlob], 'backup.json', { type: 'application/json' })),
+      };
+
+      (service as unknown as { directoryHandle: unknown }).directoryHandle = {
+        name: 'backups',
+        getFileHandle: vi.fn(async () => fileHandle),
+        removeEntry: vi.fn(async () => undefined),
+      };
+
+      let releasePermission!: () => void;
+      const permissionGate = new Promise<boolean>(resolve => {
+        releasePermission = () => resolve(true);
+      });
+      (service as unknown as { checkAndRestorePermission: () => Promise<boolean> }).checkAndRestorePermission =
+        vi.fn(() => permissionGate);
+
+      disasterBackupServiceMock.buildLocalBlob.mockResolvedValue({
+        payload: { payloadVersion: '2.0.0' },
+        blob: backupBlob,
+      });
+
+      const projects = [{ id: 'p1', name: 'Test', tasks: [], connections: [] }];
+      const first = service.performBackup(projects);
+      const second = service.performBackup(projects);
+
+      await Promise.resolve();
+      await Promise.resolve();
+      releasePermission();
+
+      const results = await Promise.all([first, second]);
+
+      expect(disasterBackupServiceMock.buildLocalBlob).toHaveBeenCalledTimes(1);
+      expect(results).toContainEqual(expect.objectContaining({
+        success: false,
+        error: '备份正在进行中',
+      }));
+    });
+
     it('授权目录后应通过 DisasterBackupService 生成灾备文件', async () => {
       const writes: Blob[] = [];
+      const backupBlob = new Blob(['{"payloadVersion":"2.0.0"}'], { type: 'application/json' });
       const writable = {
         write: vi.fn(async (blob: Blob) => { writes.push(blob); }),
         close: vi.fn(async () => undefined),
       };
       const fileHandle = {
         createWritable: vi.fn(async () => writable),
-        getFile: vi.fn(),
+        getFile: vi.fn(async () => new File([backupBlob], 'backup.json', { type: 'application/json' })),
       };
 
       (service as unknown as { directoryHandle: unknown }).directoryHandle = {
@@ -265,7 +365,7 @@ describe('LocalBackupService', () => {
 
       disasterBackupServiceMock.buildLocalBlob.mockResolvedValue({
         payload: { payloadVersion: '2.0.0' },
-        blob: new Blob(['{"payloadVersion":"2.0.0"}'], { type: 'application/json' }),
+        blob: backupBlob,
       });
 
       const result = await service.performBackup([{
@@ -355,4 +455,11 @@ describe('LocalBackupService', () => {
     });
     return injector.get(LocalBackupService);
   }
+});
+
+describe('buildLocalBackupFilename', () => {
+  it('使用固定前缀、时间戳和 JSON 后缀生成备份文件名', () => {
+    expect(buildLocalBackupFilename('2026-06-09_12-30-45'))
+      .toBe('nanoflow-backup-2026-06-09_12-30-45.json');
+  });
 });

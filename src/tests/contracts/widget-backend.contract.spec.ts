@@ -13,6 +13,15 @@ function readText(relativePath: string): string {
   return fs.readFileSync(path.join(process.cwd(), relativePath), 'utf8');
 }
 
+function readModelDatabaseTypes(): string {
+  return [
+    'src/models/supabase-types.ts',
+    'src/models/supabase-auxiliary-types.ts',
+  ]
+    .map(readText)
+    .join('\n');
+}
+
 function expectTypeScriptToParse(relativePath: string): void {
   const content = readText(relativePath);
   const source = ts.createSourceFile(relativePath, content, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TS);
@@ -200,7 +209,7 @@ describe('Widget backend foundation contract', () => {
 
   it('database type files must include widget tables and rate limit RPC', () => {
     const databaseTypes = readText('src/types/supabase.ts');
-    const modelTypes = readText('src/models/supabase-types.ts');
+    const modelTypes = readModelDatabaseTypes();
 
     for (const content of [databaseTypes, modelTypes]) {
       expect(content).toContain('widget_devices');
@@ -223,6 +232,56 @@ describe('Widget backend foundation contract', () => {
     expect(normalizeWidgetWebhookSecret(' plain-secret ')).toBe('plain-secret');
     expect(normalizeWidgetWebhookSecret('   ')).toBeNull();
     expect(buildWidgetWebhookSigningMessage('event-1', '1700000000', '{"ok":true}')).toBe('event-1.1700000000.{"ok":true}');
+  });
+
+  it('widget action and notify functions must cap request bodies before parsing', () => {
+    const shared = readText('supabase/functions/_shared/widget-common.ts');
+    const summaryFn = readText('supabase/functions/widget-summary/index.ts');
+    const notifyFn = readText('supabase/functions/widget-notify/index.ts');
+    const focusActionFn = readText('supabase/functions/widget-focus-action/index.ts');
+    const blackBoxActionFn = readText('supabase/functions/widget-black-box-action/index.ts');
+
+    expect(shared).toContain('DEFAULT_WIDGET_REQUEST_BODY_MAX_BYTES');
+    expect(shared).toContain('WidgetRequestBodyTooLargeError');
+    expect(shared).toContain('export async function readWidgetRequestText');
+    expect(shared).toContain('export async function readWidgetRequestJson');
+    expect(shared).toContain("req.headers.get('content-length')");
+    expect(shared).toContain('totalBytes > maxBytes');
+
+    for (const source of [summaryFn, notifyFn, focusActionFn]) {
+      expect(source).not.toContain('await req.text()');
+      expect(source).not.toContain('await req.json()');
+      expect(source).toContain('REQUEST_BODY_TOO_LARGE');
+    }
+
+    expect(summaryFn).toContain('readWidgetRequestText(req)');
+    expect(notifyFn).toContain('readWidgetRequestText(req)');
+    expect(focusActionFn).toContain('readWidgetRequestJson<RequestBody>(req)');
+
+    expect(blackBoxActionFn).not.toContain('await req.json()');
+    expect(blackBoxActionFn).toContain('MAX_WIDGET_REQUEST_BODY_BYTES');
+    expect(blackBoxActionFn).toContain('readRequestJsonWithLimit<RequestBody>(req)');
+    expect(blackBoxActionFn).toContain('REQUEST_BODY_TOO_LARGE');
+  });
+
+  it('widget register must use the shared bounded JSON reader', () => {
+    const registerFn = readText('supabase/functions/widget-register/index.ts');
+
+    expect(registerFn).toContain('readWidgetRequestJson');
+    expect(registerFn).toContain('isWidgetRequestBodyTooLargeError');
+    expect(registerFn).not.toContain('await req.json()');
+    expect(registerFn).toContain('body = await readWidgetRequestJson<WidgetRegisterRequest>(req)');
+    expect(registerFn).toContain("code: 'REQUEST_BODY_TOO_LARGE'");
+  });
+
+  it('widget register must reject stale binding generation writes before mutating device rows', () => {
+    const registerFn = readText('supabase/functions/widget-register/index.ts');
+
+    expect(registerFn).toContain('expectedBindingGeneration');
+    expect(registerFn).toContain("code: 'STALE_BINDING_GENERATION'");
+    expect(registerFn).toContain("code: 'INVALID_BINDING_GENERATION'");
+    expect(registerFn).toContain(".eq('binding_generation',");
+    expect(registerFn).toContain('buildStaleBindingGenerationPayload(');
   });
 
   it('widget edge functions must preserve auth split, binding generation checks, and private no-store responses', () => {
@@ -389,6 +448,10 @@ describe('Widget backend foundation contract', () => {
     expect(focusActionFn).toContain(".from('focus_sessions')");
     expect(focusActionFn).toContain(".is('ended_at', null)");
     expect(focusActionFn).toContain(".eq('updated_at', session.updated_at)");
+    expect(focusActionFn).toContain(".select('id,project_id,updated_at,deleted_at')");
+    expect(focusActionFn).toContain('if (taskRow.deleted_at || !taskRow.updated_at) return;');
+    expect(focusActionFn).toContain(".eq('updated_at', taskRow.updated_at)");
+    expect(focusActionFn).toContain(".is('deleted_at', null)");
     expect(focusActionFn).toContain("'ACTIVE_FOCUS_SESSION_NOT_FOUND'");
     expect(focusActionFn).toContain('withPrivateNoStoreHeaders(corsHeaders)');
     expect(focusReorderHelper).toContain('export function promoteSecondaryTaskToC2');

@@ -26,7 +26,7 @@ describe('AppProjectCoordinatorService rename guard', () => {
     expect((context as unknown as Record<string, unknown>)['originalProjectName']).toBe('');
   });
 
-  it('executeRenameProject should not throw when renameProjectName is null at runtime', () => {
+  it('executeRenameProject should not throw when renameProjectName is null at runtime', async () => {
     const renameProject = vi.fn();
     const success = vi.fn();
     const cancelRenameProject = vi.fn();
@@ -39,13 +39,13 @@ describe('AppProjectCoordinatorService rename guard', () => {
       cancelRenameProject,
     } as unknown as AppProjectCoordinatorService;
 
-    expect(() => AppProjectCoordinatorService.prototype.executeRenameProject.call(context)).not.toThrow();
+    await expect(AppProjectCoordinatorService.prototype.executeRenameProject.call(context)).resolves.toBeUndefined();
     expect(renameProject).not.toHaveBeenCalled();
     expect(success).not.toHaveBeenCalled();
     expect(cancelRenameProject).toHaveBeenCalledOnce();
   });
 
-  it('executeRenameProject should delegate to ProjectOperationService on valid rename', () => {
+  it('executeRenameProject should delegate to ProjectOperationService on valid rename', async () => {
     const renameProject = vi.fn().mockReturnValue(true);
     const success = vi.fn();
     const cancelRenameProject = vi.fn();
@@ -58,11 +58,38 @@ describe('AppProjectCoordinatorService rename guard', () => {
       cancelRenameProject,
     } as unknown as AppProjectCoordinatorService;
 
-    AppProjectCoordinatorService.prototype.executeRenameProject.call(context);
+    await AppProjectCoordinatorService.prototype.executeRenameProject.call(context);
 
     expect(renameProject).toHaveBeenCalledWith('proj-1', 'New Name');
     expect(success).toHaveBeenCalledOnce();
     expect(cancelRenameProject).toHaveBeenCalledOnce();
+  });
+
+  it('executeRenameProject should single-flight duplicate Enter and blur submissions', async () => {
+    let resolveRename!: (value: boolean) => void;
+    const renamePromise = new Promise<boolean>(resolve => {
+      resolveRename = resolve;
+    });
+    const renameProject = vi.fn().mockReturnValue(renamePromise);
+    const success = vi.fn();
+    const renamingProjectId = Object.assign(vi.fn(() => 'proj-1'), { set: vi.fn() });
+    const renameProjectName = Object.assign(vi.fn(() => 'New Name'), { set: vi.fn() });
+    const context = {
+      renamingProjectId,
+      renameProjectName,
+      originalProjectName: 'Old Name',
+      projectOps: { renameProject },
+      toast: { success },
+      cancelRenameProject: AppProjectCoordinatorService.prototype.cancelRenameProject,
+    } as unknown as AppProjectCoordinatorService;
+
+    const first = AppProjectCoordinatorService.prototype.executeRenameProject.call(context);
+    const second = AppProjectCoordinatorService.prototype.executeRenameProject.call(context);
+    resolveRename(true);
+    await Promise.all([first, second]);
+
+    expect(renameProject).toHaveBeenCalledTimes(1);
+    expect(success).toHaveBeenCalledTimes(1);
   });
 
   it('handleImportComplete should delegate existing project import to ProjectOperationService', async () => {
@@ -87,5 +114,54 @@ describe('AppProjectCoordinatorService rename guard', () => {
 
     expect(upsertImportedProject).toHaveBeenCalledWith(expect.objectContaining({ id: 'proj-1' }));
     expect(success).toHaveBeenCalledWith('导入成功', '项目 "Imported" 已更新');
+  });
+
+  it('saveProjectDetails should serialize description saves and keep editing on failed stale save', async () => {
+    let resolveFirst!: (value: { success: boolean; error?: string }) => void;
+    const firstSave = new Promise<{ success: boolean; error?: string }>(resolve => {
+      resolveFirst = resolve;
+    });
+    const updateProjectMetadata = vi
+      .fn()
+      .mockReturnValueOnce(firstSave)
+      .mockResolvedValueOnce({ success: true });
+    const editingValues: boolean[] = [];
+    let editing = true;
+    const drafts: Record<string, { description: string; createdDate: string }> = {
+      'proj-1': { description: 'first draft', createdDate: '' },
+    };
+    const context = {
+      projectDraft: AppProjectCoordinatorService.prototype.projectDraft,
+      runProjectDetailsSave: (
+        AppProjectCoordinatorService.prototype as unknown as {
+          runProjectDetailsSave: (projectId: string, description: string) => Promise<void>;
+        }
+      ).runProjectDetailsSave,
+      projectDrafts: () => drafts,
+      isEditingDescription: {
+        set: vi.fn((value: boolean) => {
+          editing = value;
+          editingValues.push(value);
+        }),
+      },
+      projectDetailsSaveFlights: new Map<string, Promise<void>>(),
+      projectOps: { updateProjectMetadata },
+    } as unknown as AppProjectCoordinatorService;
+
+    const first = AppProjectCoordinatorService.prototype.saveProjectDetails.call(context, 'proj-1');
+    drafts['proj-1'] = { description: 'second draft', createdDate: '' };
+    const second = AppProjectCoordinatorService.prototype.saveProjectDetails.call(context, 'proj-1');
+
+    await vi.waitFor(() => {
+      expect(updateProjectMetadata).toHaveBeenCalledTimes(1);
+    });
+
+    resolveFirst({ success: false, error: 'network' });
+    await Promise.all([first, second]);
+
+    expect(updateProjectMetadata).toHaveBeenNthCalledWith(1, 'proj-1', { description: 'first draft' });
+    expect(updateProjectMetadata).toHaveBeenNthCalledWith(2, 'proj-1', { description: 'second draft' });
+    expect(editing).toBe(false);
+    expect(editingValues).toEqual([true, false]);
   });
 });

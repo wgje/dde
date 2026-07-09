@@ -35,17 +35,23 @@ import {
   markTaskCompletedAtColumnUnavailable,
 } from '../../../../utils/task-schema-compat';
 import {
+  buildSupabaseKeysetOrFilter,
+  fetchAllSupabaseKeysetPages,
+  type SupabaseKeysetCursor,
+} from '../../../../utils/supabase-pagination';
+import {
   getRemainingBrowserNetworkResumeDelayMs,
   isBrowserNetworkSuspendedError,
   isBrowserNetworkSuspendedWindow,
 } from '../../../../utils/browser-network-suspension';
 import {
-  dedupeTasksByLatest,
-  dedupeConnectionsByLatest,
-  computeProjectSyncCursor,
-  isProjectRowAfterCursor,
   buildProjectSyncCursorFromProject as buildProjectSyncCursorFromProjectPure,
 } from './sync-delta-projection';
+import {
+  buildProjectDeltaDrift,
+  createEmptyProjectDeltaDrift,
+  resolveProjectDeltaWindow,
+} from './project-sync-drift.helpers';
 import {
   SyncCursorPersistenceService,
   compareProjectSyncCursor,
@@ -57,6 +63,11 @@ export interface ProjectDeltaDrift {
   tasks: Task[];
   connections: Connection[];
   nextCursor: ProjectSyncCursor | null;
+}
+
+interface DeltaQueryRows {
+  taskRows: TaskRow[];
+  connectionRows: ConnectionRow[];
 }
 
 /** 获取 Supabase 客户端回调（门面持有离线降级 + sentry 归因语义） */
@@ -79,72 +90,39 @@ export class ProjectSyncCursorService {
 
   async checkForDrift(projectId: string): Promise<ProjectDeltaDrift> {
     if (isBrowserNetworkSuspendedWindow()) {
-      this.logger.debug('浏览器网络挂起，跳过 Delta Sync 检查', {
-        projectId,
-        resumeDelayMs: getRemainingBrowserNetworkResumeDelayMs(),
-      });
-      return { tasks: [], connections: [], nextCursor: null };
+      return this.deferDeltaSyncDuringNetworkSuspension(projectId);
     }
 
     const client = this.getSupabaseClientHandler ? await this.getSupabaseClientHandler() : null;
     if (!client || !SYNC_CONFIG.DELTA_SYNC_ENABLED) {
-      return { tasks: [], connections: [], nextCursor: null };
+      return createEmptyProjectDeltaDrift();
     }
 
     const lastCursor = await this.ensureProjectSyncCursorLoaded(projectId);
     const lastSyncTime = lastCursor?.updatedAt ?? this.lastSyncTimeByProject.get(projectId);
     if (!lastSyncTime) {
-      return { tasks: [], connections: [], nextCursor: null };
+      return createEmptyProjectDeltaDrift();
     }
 
     try {
-      const driftMs = Math.abs(this.clockSync.currentDriftMs());
-      const lookbackMs = Math.max(SYNC_CONFIG.CURSOR_SAFETY_LOOKBACK_MS, driftMs);
-      const sinceMs = new Date(lastSyncTime).getTime() - lookbackMs;
-      const effectiveSince = new Date(Math.max(0, sinceMs)).toISOString();
-
-      const loadDeltaTasks = async () => await client
-        .from('tasks')
-        .select(getCompatibleTaskSelectFields(FIELD_SELECT_CONFIG.TASK_LIST_FIELDS))
-        .eq('project_id', projectId)
-        .gt('updated_at', effectiveSince)
-        .order('updated_at', { ascending: true })
-        .order('id', { ascending: true });
-      const [initialTasksResult, connectionsResult] = await Promise.all([
-        loadDeltaTasks(),
-        client.from('connections')
-          .select(FIELD_SELECT_CONFIG.CONNECTION_FIELDS)
-          .eq('project_id', projectId)
-          .gt('updated_at', effectiveSince)
-          .order('updated_at', { ascending: true })
-          .order('id', { ascending: true })
-      ]);
-      let tasksResult = initialTasksResult;
-
-      if (tasksResult.error && markTaskCompletedAtColumnUnavailable(tasksResult.error)) {
-        this.logger.warn('tasks.completed_at 缺失，Delta Sync 已降级为旧 schema 任务字段', {
-          projectId,
-          effectiveSince,
-          error: tasksResult.error,
-        });
-        tasksResult = await loadDeltaTasks();
-      }
-
-      if (tasksResult.error || connectionsResult.error) {
-        throw supabaseErrorToError(tasksResult.error || connectionsResult.error);
-      }
-
-      const rawTaskRows = ((tasksResult.data || []) as unknown) as TaskRow[];
-      const rawConnectionRows = ((connectionsResult.data || []) as unknown) as ConnectionRow[];
-      const taskRows = rawTaskRows.filter(row => isProjectRowAfterCursor('task', row.id, row.updated_at, lastCursor));
-      const connectionRows = rawConnectionRows.filter(row => isProjectRowAfterCursor('connection', row.id, row.updated_at, lastCursor));
-      const deltaTasks = dedupeTasksByLatest(
-        taskRows.map(row => this.projectDataService.rowToTask(row))
+      const { effectiveSince, lookbackMs } = resolveProjectDeltaWindow(
+        lastSyncTime,
+        this.clockSync.currentDriftMs(),
+        SYNC_CONFIG.CURSOR_SAFETY_LOOKBACK_MS,
       );
-      const deltaConnections = dedupeConnectionsByLatest(
-        connectionRows.map(row => this.projectDataService.rowToConnection(row))
+      const { taskRows, connectionRows } = await this.loadDeltaRows(
+        client,
+        projectId,
+        effectiveSince,
       );
-      const nextCursor = computeProjectSyncCursor(taskRows, connectionRows);
+      const drift = buildProjectDeltaDrift({
+        taskRows,
+        connectionRows,
+        lastCursor,
+        rowToTask: (row) => this.projectDataService.rowToTask(row),
+        rowToConnection: (row) => this.projectDataService.rowToConnection(row),
+      });
+      const { nextCursor } = drift;
       const maxUpdatedAt = nextCursor?.updatedAt ?? null;
 
       this.sentryLazyLoader.setContext('sync_delta', {
@@ -154,24 +132,121 @@ export class ProjectSyncCursorService {
         cursor_candidate: nextCursor
       });
 
-      return {
-        tasks: deltaTasks,
-        connections: deltaConnections,
-        nextCursor
-      };
+      return drift;
     } catch (e) {
       const enhanced = supabaseErrorToError(e);
       if (isBrowserNetworkSuspendedError(enhanced) || isBrowserNetworkSuspendedWindow()) {
-        this.logger.debug('浏览器网络挂起，跳过 Delta Sync 检查', {
-          projectId,
-          resumeDelayMs: getRemainingBrowserNetworkResumeDelayMs(),
-        });
-        return { tasks: [], connections: [], nextCursor: null };
+        return this.deferDeltaSyncDuringNetworkSuspension(projectId);
       }
 
       this.logger.error('Delta Sync 检查失败', e);
       throw e;
     }
+  }
+
+  private deferDeltaSyncDuringNetworkSuspension(projectId: string): ProjectDeltaDrift {
+    this.logger.debug('浏览器网络挂起，跳过 Delta Sync 检查', {
+      projectId,
+      resumeDelayMs: getRemainingBrowserNetworkResumeDelayMs(),
+    });
+    return createEmptyProjectDeltaDrift();
+  }
+
+  private async loadDeltaRows(
+    client: SupabaseClient,
+    projectId: string,
+    effectiveSince: string,
+  ): Promise<DeltaQueryRows> {
+    const loadDeltaTasks = async () => await fetchAllSupabaseKeysetPages<TaskRow>((cursor) =>
+      this.applyDeltaKeysetWindow(
+        client
+          .from('tasks')
+          .select(getCompatibleTaskSelectFields(FIELD_SELECT_CONFIG.TASK_LIST_FIELDS))
+          .eq('project_id', projectId),
+        cursor,
+        effectiveSince,
+      ));
+    const [initialTasksResult, connectionsResult] = await Promise.all([
+      loadDeltaTasks(),
+      this.loadDeltaConnections(client, projectId, effectiveSince),
+    ]);
+    const tasksResult = await this.resolveTaskSchemaFallback(
+      initialTasksResult,
+      loadDeltaTasks,
+      projectId,
+      effectiveSince,
+    );
+
+    if (tasksResult.error || connectionsResult.error) {
+      throw supabaseErrorToError(tasksResult.error || connectionsResult.error);
+    }
+
+    return {
+      taskRows: ((tasksResult.data || []) as unknown) as TaskRow[],
+      connectionRows: ((connectionsResult.data || []) as unknown) as ConnectionRow[],
+    };
+  }
+
+  private async loadDeltaConnections(
+    client: SupabaseClient,
+    projectId: string,
+    effectiveSince: string,
+  ) {
+    return await fetchAllSupabaseKeysetPages<ConnectionRow>((cursor) =>
+      this.applyDeltaKeysetWindow(
+        client
+          .from('connections')
+          .select(FIELD_SELECT_CONFIG.CONNECTION_FIELDS)
+          .eq('project_id', projectId),
+        cursor,
+        effectiveSince,
+      ));
+  }
+
+  /**
+   * Delta 窗口下界 + 稳定排序：首页用 `updated_at > effectiveSince`，
+   * 续页改用 (updated_at, id) keyset 过滤（与黑匣子增量同一范式）。
+   * offset 分页在翻页期间有并发写入时会因行左移静默跳行，
+   * 被跳过的行随后被游标封口成永久缺口，增量拉取必须走 keyset。
+   */
+  private applyDeltaKeysetWindow<Query extends {
+    gt(column: string, value: string): Query;
+    or(filter: string): Query;
+    order(column: string, options: { ascending: boolean }): Query;
+  }>(
+    query: Query,
+    cursor: SupabaseKeysetCursor | null,
+    effectiveSince: string,
+  ): Query {
+    const bounded = cursor
+      ? query.or(buildSupabaseKeysetOrFilter(cursor))
+      : query.gt('updated_at', effectiveSince);
+    return bounded
+      .order('updated_at', { ascending: true })
+      .order('id', { ascending: true });
+  }
+
+  private async resolveTaskSchemaFallback<T extends { error: unknown }>(
+    initialTasksResult: T,
+    loadDeltaTasks: () => Promise<T>,
+    projectId: string,
+    effectiveSince: string,
+  ): Promise<T> {
+    const maxSchemaFallbackAttempts = 3;
+    let tasksResult = initialTasksResult;
+    for (let attempt = 1; tasksResult.error && attempt < maxSchemaFallbackAttempts; attempt += 1) {
+      if (!markTaskCompletedAtColumnUnavailable(tasksResult.error)) {
+        break;
+      }
+      this.logger.warn('tasks 可选字段缺失，Delta Sync 已降级为旧 schema 任务字段', {
+        projectId,
+        effectiveSince,
+        error: tasksResult.error,
+      });
+      tasksResult = await loadDeltaTasks();
+    }
+
+    return tasksResult;
   }
 
   buildProjectSyncCursorFromProject(project: Project): ProjectSyncCursor | null {
@@ -182,7 +257,12 @@ export class ProjectSyncCursorService {
     return this.sessionManager.getRecentValidationSnapshot(60_000)?.userId ?? null;
   }
 
-  private async ensureProjectSyncCursorLoaded(projectId: string): Promise<ProjectSyncCursor | null> {
+  /**
+   * 加载项目当前的增量拉取游标（内存缓存 -> IndexedDB 持久化 -> legacy 时间戳）。
+   * 对外语义：返回"已应用到本地的拉取进度"，watermark 快路判定必须以它为基准，
+   * 而不是本地数据水位——本机推送回显会把本地水位抬平，游标之后仍可能有未拉取行。
+   */
+  async ensureProjectSyncCursorLoaded(projectId: string): Promise<ProjectSyncCursor | null> {
     const cached = this.syncCursorByProject.get(projectId);
     if (cached) return cached;
 
@@ -211,10 +291,23 @@ export class ProjectSyncCursorService {
   }
 
   async commitProjectSyncCursor(projectId: string, cursor: ProjectSyncCursor | null | undefined): Promise<void> {
-    if (!cursor) return;
-    const cursorMs = new Date(cursor.updatedAt).getTime();
-    if (!Number.isFinite(cursorMs)) return;
+    if (!this.isProjectSyncCursorCommitCandidate(cursor)) return;
+    if (this.shouldIgnoreStaleProjectSyncCursorCommit(projectId, cursor)) return;
 
+    const committed = await this.persistProjectSyncCursor(projectId, cursor);
+    const nextCursor = this.resolveCommittedProjectSyncCursor(projectId, committed, cursor);
+    this.applyProjectSyncCursorCommit(projectId, nextCursor);
+  }
+
+  private isProjectSyncCursorCommitCandidate(
+    cursor: ProjectSyncCursor | null | undefined,
+  ): cursor is ProjectSyncCursor {
+    if (!cursor) return false;
+    const cursorMs = new Date(cursor.updatedAt).getTime();
+    return Number.isFinite(cursorMs);
+  }
+
+  private shouldIgnoreStaleProjectSyncCursorCommit(projectId: string, cursor: ProjectSyncCursor): boolean {
     const existing = this.syncCursorByProject.get(projectId);
     if (existing && compareProjectSyncCursor(cursor, existing) < 0) {
       this.sentryLazyLoader.addBreadcrumb({
@@ -223,16 +316,70 @@ export class ProjectSyncCursorService {
         level: 'info',
         data: { projectId, existing, candidate: cursor },
       });
+      return true;
+    }
+
+    return false;
+  }
+
+  private async persistProjectSyncCursor(
+    projectId: string,
+    cursor: ProjectSyncCursor,
+  ): Promise<ProjectSyncCursor> {
+    try {
+      return await this.syncCursorPersistence.commitProjectCursor(
+        projectId,
+        this.getSyncCursorUserId(),
+        cursor,
+      );
+    } catch (error) {
+      this.logger.warn('项目同步游标持久化失败，未推进内存游标', {
+        projectId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      this.sentryLazyLoader.addBreadcrumb({
+        category: 'sync',
+        message: 'delta.cursor_commit_persistence_failed',
+        level: 'warning',
+        data: { projectId, cursor },
+      });
+      throw error;
+    }
+  }
+
+  private resolveCommittedProjectSyncCursor(
+    projectId: string,
+    committed: ProjectSyncCursor,
+    cursor: ProjectSyncCursor,
+  ): ProjectSyncCursor {
+    const nextCursor = compareProjectSyncCursor(committed, cursor) < 0
+      ? cursor
+      : committed;
+    if (nextCursor !== committed) {
+      this.sentryLazyLoader.addBreadcrumb({
+        category: 'sync',
+        message: 'delta.cursor_commit_result_ignored_stale',
+        level: 'info',
+        data: { projectId, committed, candidate: cursor },
+      });
+    }
+    return nextCursor;
+  }
+
+  private applyProjectSyncCursorCommit(projectId: string, nextCursor: ProjectSyncCursor): void {
+    const current = this.syncCursorByProject.get(projectId);
+    if (current && compareProjectSyncCursor(nextCursor, current) < 0) {
+      this.sentryLazyLoader.addBreadcrumb({
+        category: 'sync',
+        message: 'delta.cursor_commit_late_result_ignored_stale',
+        level: 'info',
+        data: { projectId, current, candidate: nextCursor },
+      });
       return;
     }
 
-    const committed = await this.syncCursorPersistence.commitProjectCursor(
-      projectId,
-      this.getSyncCursorUserId(),
-      cursor,
-    );
-    this.syncCursorByProject.set(projectId, committed);
-    this.lastSyncTimeByProject.set(projectId, committed.updatedAt);
+    this.syncCursorByProject.set(projectId, nextCursor);
+    this.lastSyncTimeByProject.set(projectId, nextCursor.updatedAt);
   }
 
   async commitProjectSyncTimestamp(projectId: string, timestamp: string): Promise<void> {

@@ -19,6 +19,18 @@ import {
   ConflictResolutionStrategy,
   MergeResult,
 } from './conflict-resolution.types';
+import { collectKeepBothTasks } from './conflict-resolution-keep-both.helpers';
+import {
+  appendUnprocessedRemoteTasks as appendUnprocessedRemoteTasksPure,
+  createTaskMergeState,
+  createTaskTombstoneSnapshot,
+  getTaskTombstoneCount,
+  keepConservativeLocalTask,
+  keepSoftDeletedLocalTask as keepSoftDeletedLocalTaskPure,
+  skipTombstoneTask as skipTombstoneTaskPure,
+  type TaskMergeState,
+  type TaskTombstones,
+} from './conflict-resolution-merge.helpers';
 
 // 重新导出类型以保持向后兼容
 export type {
@@ -26,6 +38,13 @@ export type {
   ConflictResolutionStrategy,
   MergeResult
 } from './conflict-resolution.types';
+
+type ProjectMergeCollections = {
+  localTasks: Task[];
+  remoteTasks: Task[];
+  localConnections: Project['connections'];
+  remoteConnections: Project['connections'];
+};
 
 /**
  * 冲突解决服务（LWW 简化版）
@@ -90,72 +109,85 @@ export class ConflictResolutionService {
     remoteProject?: Project
   ): Promise<Result<Project, OperationError>> {
     this.logger.info('[LWW] 解决冲突', { projectId, strategy });
-    
-    let resolvedProject: Project;
-    
+
     switch (strategy) {
       case 'local':
-        // LWW：使用本地版本（用户刚编辑的内容），递增版本号
-        resolvedProject = {
-          ...localProject,
-          version: Math.max(localProject.version ?? 0, remoteProject?.version ?? 0) + 1
-        };
-        this.markConflictResolved(projectId, 'local');
-        this.toast.success('已使用本地版本', '您的编辑已保留');
-        break;
-        
+        return success(this.resolveWithLocalVersion(projectId, localProject, remoteProject));
+
       case 'remote':
-        // 使用远程版本
-        if (!remoteProject) {
-          return failure(ErrorCodes.DATA_NOT_FOUND, '远程项目数据不存在');
-        }
-        resolvedProject = this.validateAndRebalance(remoteProject);
-        this.markConflictResolved(projectId, 'remote');
-        this.toast.success('已使用远程版本', '已同步其他设备的内容');
-        break;
-        
+        return this.resolveWithRemoteVersion(projectId, remoteProject);
+
       case 'merge':
-        // 智能合并：保留双方新增的任务，冲突时本地优先
-        if (!remoteProject) {
-          return failure(ErrorCodes.DATA_NOT_FOUND, '远程项目数据不存在');
-        }
-        // 【v5.9 关键修复】获取 tombstoneIds 防止已删除任务在合并时复活
-        // 使用带状态的方法，以便在查询失败时保守处理
-        const tombstoneResult = await this.taskSyncOps.getTombstoneIdsWithStatus(projectId);
-        const mergeResult = this.smartMerge(
-          localProject, 
-          remoteProject, 
-          tombstoneResult.ids,
-          tombstoneResult.localCacheOnly // 传入查询状态用于保守处理
-        );
-        resolvedProject = mergeResult.project;
-        
-        if (mergeResult.issues.length > 0) {
-          this.toast.info('智能合并完成', `已自动修复 ${mergeResult.issues.length} 个数据问题`);
-        }
-        if (mergeResult.conflictCount > 0) {
-          this.toast.warning('合并提示', `${mergeResult.conflictCount} 个任务存在修改冲突，已使用本地版本`);
-        }
-        
-        // 【v5.9】如果 tombstone 查询失败，警告用户
-        if (tombstoneResult.localCacheOnly && tombstoneResult.ids.size === 0) {
-          this.toast.warning('合并提示', '无法确认远程删除状态，已保守处理');
-        }
-        
-        this.markConflictResolved(projectId, 'local');
-        break;
-      
+        return await this.resolveWithMergedVersion(projectId, localProject, remoteProject);
+
       default:
-        // 未知策略，默认使用本地
         this.logger.warn('[LWW] 未知策略，默认使用本地', { strategy });
-        resolvedProject = {
-          ...localProject,
-          version: Math.max(localProject.version ?? 0, remoteProject?.version ?? 0) + 1
-        };
-        this.markConflictResolved(projectId, 'local');
+        return success(this.resolveWithLocalVersion(projectId, localProject, remoteProject, false));
     }
-    
+  }
+
+  private resolveWithLocalVersion(
+    projectId: string,
+    localProject: Project,
+    remoteProject?: Project,
+    showToast = true,
+  ): Project {
+    const resolvedProject = {
+      ...localProject,
+      version: Math.max(localProject.version ?? 0, remoteProject?.version ?? 0) + 1
+    };
+    this.markConflictResolved(projectId, 'local');
+    if (showToast) {
+      this.toast.success('已使用本地版本', '您的编辑已保留');
+    }
+    return resolvedProject;
+  }
+
+  private resolveWithRemoteVersion(
+    projectId: string,
+    remoteProject?: Project,
+  ): Result<Project, OperationError> {
+    if (!remoteProject) {
+      return failure(ErrorCodes.DATA_NOT_FOUND, '远程项目数据不存在');
+    }
+
+    const resolvedProject = this.validateAndRebalance(remoteProject);
+    this.markConflictResolved(projectId, 'remote');
+    this.toast.success('已使用远程版本', '已同步其他设备的内容');
     return success(resolvedProject);
+  }
+
+  private async resolveWithMergedVersion(
+    projectId: string,
+    localProject: Project,
+    remoteProject?: Project,
+  ): Promise<Result<Project, OperationError>> {
+    if (!remoteProject) {
+      return failure(ErrorCodes.DATA_NOT_FOUND, '远程项目数据不存在');
+    }
+
+    const tombstoneResult = await this.taskSyncOps.getTombstoneIdsWithStatus(projectId);
+    const mergeResult = this.smartMerge(
+      localProject,
+      remoteProject,
+      createTaskTombstoneSnapshot(tombstoneResult.ids, tombstoneResult.deletedAtByTaskId),
+      tombstoneResult.localCacheOnly,
+    );
+    this.notifySmartMergeResult(mergeResult, tombstoneResult.localCacheOnly, tombstoneResult.ids.size);
+    this.markConflictResolved(projectId, 'local');
+    return success(mergeResult.project);
+  }
+
+  private notifySmartMergeResult(mergeResult: MergeResult, localCacheOnly: boolean, tombstoneCount: number): void {
+    if (mergeResult.issues.length > 0) {
+      this.toast.info('智能合并完成', `已自动修复 ${mergeResult.issues.length} 个数据问题`);
+    }
+    if (mergeResult.conflictCount > 0) {
+      this.toast.warning('合并提示', `${mergeResult.conflictCount} 个任务存在修改冲突，已使用本地版本`);
+    }
+    if (localCacheOnly && tombstoneCount === 0) {
+      this.toast.warning('合并提示', '无法确认远程删除状态，已保守处理');
+    }
   }
 
   /**
@@ -184,7 +216,7 @@ export class ConflictResolutionService {
     const mergeResult = this.mergeWithResolutionPlan(
       localProject,
       remoteProject,
-      tombstoneResult.ids,
+      createTaskTombstoneSnapshot(tombstoneResult.ids, tombstoneResult.deletedAtByTaskId),
       plan,
       tombstoneResult.localCacheOnly,
     );
@@ -229,72 +261,57 @@ export class ConflictResolutionService {
     
     const localTasks = Array.isArray(localProject.tasks) ? localProject.tasks : [];
     const remoteTasks = Array.isArray(remoteProject.tasks) ? remoteProject.tasks : [];
-    
-    const remoteTaskMap = new Map(remoteTasks.map(t => [t.id, t]));
-    const mergedTasks: Task[] = [...remoteTasks]; // 从远程任务开始
-    let copiedCount = 0;
-    
-    for (const localTask of localTasks) {
-      const remoteTask = remoteTaskMap.get(localTask.id);
-      
-      if (!remoteTask) {
-        // 本地独有的任务，保留
-        mergedTasks.push(localTask);
-      } else {
-        // 双方都有的任务，检查是否有冲突
-        const isSame = localTask.title === remoteTask.title && 
-                       localTask.content === remoteTask.content &&
-                       localTask.status === remoteTask.status;
-        
-        if (!isSame) {
-          // 有冲突，创建本地版本的副本
-          const copyTask: Task = {
-            ...localTask,
-            id: crypto.randomUUID(), // 新 ID
-            title: `${localTask.title} (副本)`,
-            displayId: '', // 将由布局服务重新计算
-            shortId: this.conflictDetection.generateShortId(), // 生成新的永久短 ID
-            updatedAt: new Date().toISOString()
-          };
-          mergedTasks.push(copyTask);
-          copiedCount++;
-        }
-        // 如果相同，远程版本已经在 mergedTasks 中了
-      }
-    }
+    const { mergedTasks, copiedCount } = collectKeepBothTasks(localTasks, remoteTasks, {
+      createId: () => crypto.randomUUID(),
+      createShortId: () => this.conflictDetection.generateShortId(),
+      nowIso: () => new Date().toISOString(),
+    });
     
     // 合并 connections（Tombstone Wins 策略，确保删除状态不被逆转）
     const localConnections = Array.isArray(localProject.connections) ? localProject.connections : [];
     const remoteConnections = Array.isArray(remoteProject.connections) ? remoteProject.connections : [];
+    const resolvedProject = this.buildKeepBothProject(
+      localProject,
+      remoteProject,
+      mergedTasks,
+      localConnections,
+      remoteConnections,
+    );
+
+    this.markConflictResolved(projectId, 'local');
+    this.notifyKeepBothResult(copiedCount);
+    return success(resolvedProject);
+  }
+
+  private buildKeepBothProject(
+    localProject: Project,
+    remoteProject: Project,
+    mergedTasks: Task[],
+    localConnections: Project['connections'],
+    remoteConnections: Project['connections'],
+  ): Project {
     const mergedConnections = this.conflictDetection.mergeConnections(localConnections, remoteConnections);
     const connectionMap = new Map(mergedConnections.map(c => [c.id, c]));
-    
-    // 构建合并后的项目
-    let resolvedProject: Project = {
-      ...remoteProject, // 使用远程项目元数据
+    const resolvedProject: Project = {
+      ...remoteProject,
       tasks: mergedTasks,
       connections: Array.from(connectionMap.values()),
       updatedAt: new Date().toISOString(),
       version: Math.max(localProject.version ?? 0, remoteProject.version ?? 0) + 1
     };
-    
-    // 执行完整性检查和布局修复
     const { project: validatedProject, issues } = this.layoutService.validateAndFixTree(resolvedProject);
-    resolvedProject = validatedProject;
-    
     if (issues.length > 0) {
       this.logger.info('[KeepBoth] 修复了数据问题', { count: issues.length });
     }
-    
-    this.markConflictResolved(projectId, 'local');
-    
+    return validatedProject;
+  }
+
+  private notifyKeepBothResult(copiedCount: number): void {
     if (copiedCount > 0) {
       this.toast.success('已保留两者', `创建了 ${copiedCount} 个副本任务`);
     } else {
       this.toast.success('已保留两者', '本地独有的任务已保留');
     }
-    
-    return success(resolvedProject);
   }
 
   /**
@@ -321,184 +338,236 @@ export class ConflictResolutionService {
   smartMerge(
     local: Project, 
     remote: Project, 
-    tombstoneIds: Set<string>,
+    tombstoneIds: TaskTombstones,
     tombstoneQueryFailed: boolean = false
   ): MergeResult {
     const issues: string[] = [];
-    let conflictCount = 0;
+    const collections = this.getProjectMergeCollections(local, remote, issues, 'smartMerge');
+    this.warnSmartMergeConservativeMode(local.id, tombstoneIds, tombstoneQueryFailed, issues);
+
+    const state = createTaskMergeState(issues);
+    const remoteTaskMap = new Map(collections.remoteTasks.map(task => [task.id, task]));
+    for (const localTask of collections.localTasks) {
+      this.mergeSmartLocalTask(localTask, remoteTaskMap, local.id, tombstoneIds, tombstoneQueryFailed, state);
+    }
+
+    this.appendUnprocessedRemoteTasks(collections.remoteTasks, state, remoteTask => !remoteTask.deletedAt);
+    this.recordSmartMergeSummary(local.id, state);
+    const mergedProject = this.buildValidatedMergedProject(
+      local,
+      remote,
+      state.mergedTasks,
+      collections.localConnections,
+      collections.remoteConnections,
+      state.issues,
+    );
     
-    // 防御性检查：确保 tasks 数组存在
+    return {
+      project: mergedProject,
+      issues: state.issues,
+      conflictCount: state.conflictCount
+    };
+  }
+
+  private getProjectMergeCollections(
+    local: Project,
+    remote: Project,
+    issues?: string[],
+    logPrefix?: 'smartMerge',
+  ): ProjectMergeCollections {
     const localTasks = Array.isArray(local.tasks) ? local.tasks : [];
     const remoteTasks = Array.isArray(remote.tasks) ? remote.tasks : [];
     const localConnections = Array.isArray(local.connections) ? local.connections : [];
     const remoteConnections = Array.isArray(remote.connections) ? remote.connections : [];
-    
-    if (!Array.isArray(local.tasks)) {
-      this.logger.warn('smartMerge: local.tasks 不是数组，使用空数组', { projectId: local.id });
+
+    if (issues && logPrefix && !Array.isArray(local.tasks)) {
+      this.logger.warn(`${logPrefix}: local.tasks 不是数组，使用空数组`, { projectId: local.id });
       issues.push('本地项目 tasks 数据异常，已使用空数组');
     }
-    if (!Array.isArray(remote.tasks)) {
-      this.logger.warn('smartMerge: remote.tasks 不是数组，使用空数组', { projectId: remote.id });
+    if (issues && logPrefix && !Array.isArray(remote.tasks)) {
+      this.logger.warn(`${logPrefix}: remote.tasks 不是数组，使用空数组`, { projectId: remote.id });
       issues.push('远程项目 tasks 数据异常，已使用空数组');
     }
-    
-    // 【v5.9】tombstone 查询失败时的保守处理标记
-    if (tombstoneQueryFailed && tombstoneIds.size === 0) {
-      this.logger.warn('smartMerge: tombstone 查询失败且本地缓存为空，启用保守模式', { 
-        projectId: local.id 
-      });
-      this.sentryLazyLoader.captureMessage('smartMerge 启用保守模式', {
-        level: 'warning',
-        tags: { operation: 'smartMerge', projectId: local.id },
-        extra: { reason: 'tombstone 查询失败且本地缓存为空' }
-      });
-      issues.push('无法确认远程删除状态，已启用保守合并模式');
+
+    return { localTasks, remoteTasks, localConnections, remoteConnections };
+  }
+
+  private warnSmartMergeConservativeMode(
+    projectId: string,
+    tombstoneIds: TaskTombstones,
+    tombstoneQueryFailed: boolean,
+    issues: string[],
+  ): void {
+    if (!tombstoneQueryFailed || getTaskTombstoneCount(tombstoneIds) > 0) return;
+
+    this.logger.warn('smartMerge: tombstone 查询失败且本地缓存为空，启用保守模式', { projectId });
+    this.sentryLazyLoader.captureMessage('smartMerge 启用保守模式', {
+      level: 'warning',
+      tags: { operation: 'smartMerge', projectId },
+      extra: { reason: 'tombstone 查询失败且本地缓存为空' }
+    });
+    issues.push('无法确认远程删除状态，已启用保守合并模式');
+  }
+
+  private mergeSmartLocalTask(
+    localTask: Task,
+    remoteTaskMap: Map<string, Task>,
+    projectId: string,
+    tombstoneIds: TaskTombstones,
+    tombstoneQueryFailed: boolean,
+    state: TaskMergeState,
+  ): void {
+    state.processedIds.add(localTask.id);
+
+    if (this.skipTombstoneTask(localTask, tombstoneIds, state, 'smartMerge')) return;
+
+    const remoteTask = remoteTaskMap.get(localTask.id);
+    if (this.keepConservativeSmartTask(localTask, remoteTask, tombstoneIds, tombstoneQueryFailed, state)) return;
+    if (this.keepSoftDeletedLocalTask(localTask, remoteTask, state, 'smartMerge')) return;
+    if (!remoteTask) {
+      state.mergedTasks.push(localTask);
+      return;
     }
-    
-    // 创建任务映射
-    const _localTaskMap = new Map(localTasks.map(t => [t.id, t]));
-    const remoteTaskMap = new Map(remoteTasks.map(t => [t.id, t]));
-    
-    const mergedTasks: Task[] = [];
-    const processedIds = new Set<string>();
-    let skippedTombstoneCount = 0;
-    let preservedSoftDeleteCount = 0;
-    let conservativeSkipCount = 0; // v5.9: 保守跳过计数
-    
-    // 处理本地任务
-    for (const localTask of localTasks) {
-      processedIds.add(localTask.id);
-      
-      // 【关键修复】检查是否已被永久删除（在 tombstones 中）
-      if (tombstoneIds.has(localTask.id)) {
-        this.logger.info('smartMerge: 跳过 tombstone 任务', { taskId: localTask.id });
-        skippedTombstoneCount++;
-        continue; // 不保留已永久删除的任务
-      }
-      
-      const remoteTask = remoteTaskMap.get(localTask.id);
-      
-      // 【v5.9 保守处理】tombstone 查询失败时的特殊处理
-      // 【P0-08 修复】不再丢弃用户数据 —— 保留所有本地任务，宁可让已删除任务复活也不丢失用户编辑
-      // 在无法确认 tombstone 状态时，保守地保留本地任务
-      if (!remoteTask && tombstoneQueryFailed && tombstoneIds.size === 0) {
-        this.logger.warn('smartMerge: tombstone 不可用，保守保留本地任务', { 
-          taskId: localTask.id
-        });
-        mergedTasks.push(localTask);
-        conservativeSkipCount++;
-        continue;
-      }
-      
-      // 【BUG 修复】软删除任务的处理
-      // 情况 1: 本地软删除，远程不存在 → 保留本地软删除状态
-      // 情况 2: 本地软删除，远程存在 → 执行字段合并（保留删除状态）
-      if (localTask.deletedAt) {
-        if (!remoteTask) {
-          // 远程不存在该任务，保留本地的软删除任务
-          this.logger.debug('smartMerge: 保留软删除任务（远程不存在）', { taskId: localTask.id });
-          mergedTasks.push(localTask);
-          preservedSoftDeleteCount++;
-          continue;
-        }
-        // 远程存在，继续执行字段合并，让 mergeTaskFields 处理 deletedAt
-      }
-      
-      if (!remoteTask) {
-        // 本地存在但远程不存在
-        // 由于已经过滤了 tombstones，这里是真正的本地新增任务
-        mergedTasks.push(localTask);
-        continue;
-      }
-      
-      // 双方都有的任务，执行字段级合并（传入 projectId 用于字段锁检查）
-      const { mergedTask, hasConflict, contentConflictCopy } = this.conflictDetection.mergeTaskFields(localTask, remoteTask, local.id);
-      
-      if (hasConflict) {
-        conflictCount++;
-        this.logger.debug('任务存在字段冲突，已合并', { taskId: localTask.id });
-      }
-      
-      mergedTasks.push(mergedTask);
-      
-      // 【LWW 缺陷修复】如果 content 存在真正冲突，创建冲突副本
-      // 而不是尝试自动合并 - 让用户手动处理
-      if (contentConflictCopy) {
-        mergedTasks.push(contentConflictCopy);
-        this.logger.info('smartMerge: 创建 content 冲突副本', { 
-          originalId: localTask.id,
-          copyId: contentConflictCopy.id,
-          copyTitle: contentConflictCopy.title
-        });
-        issues.push(`任务 "${localTask.title || localTask.displayId}" 存在内容冲突，已创建副本`);
-      }
+
+    this.mergeSharedSmartTask(localTask, remoteTask, projectId, state);
+  }
+
+  private skipTombstoneTask(
+    task: Task,
+    tombstoneIds: TaskTombstones,
+    state: TaskMergeState,
+    logPrefix?: 'smartMerge',
+  ): boolean {
+    const skipped = skipTombstoneTaskPure(task, tombstoneIds, state);
+    if (!skipped) return false;
+
+    if (logPrefix) {
+      this.logger.info(`${logPrefix}: 跳过 tombstone 任务`, { taskId: task.id });
     }
-    
-    // 处理远程新增的任务
-    for (const remoteTask of remoteTasks) {
-      if (!processedIds.has(remoteTask.id)) {
-        // 远程任务不在 tombstones 中才添加（loadFullProject 已经过滤了）
-        // 但本地也可能有软删除状态
-        if (!remoteTask.deletedAt) {
-          mergedTasks.push(remoteTask);
-        }
-      }
+    return true;
+  }
+
+  private keepConservativeSmartTask(
+    localTask: Task,
+    remoteTask: Task | undefined,
+    tombstoneIds: TaskTombstones,
+    tombstoneQueryFailed: boolean,
+    state: TaskMergeState,
+  ): boolean {
+    const kept = keepConservativeLocalTask(localTask, remoteTask, tombstoneIds, tombstoneQueryFailed, state);
+    if (!kept) return false;
+
+    this.logger.warn('smartMerge: tombstone 不可用，保守保留本地任务', { taskId: localTask.id });
+    return true;
+  }
+
+  private keepSoftDeletedLocalTask(
+    localTask: Task,
+    remoteTask: Task | undefined,
+    state: TaskMergeState,
+    logPrefix?: 'smartMerge' | 'selectiveMerge',
+  ): boolean {
+    const kept = keepSoftDeletedLocalTaskPure(localTask, remoteTask, state);
+    if (!kept) return false;
+
+    if (logPrefix === 'smartMerge') {
+      this.logger.debug('smartMerge: 保留软删除任务（远程不存在）', { taskId: localTask.id });
     }
-    
-    if (skippedTombstoneCount > 0) {
-      this.logger.info('smartMerge: 已过滤 tombstone 任务', { 
-        count: skippedTombstoneCount, 
-        projectId: local.id 
+    return true;
+  }
+
+  private mergeSharedSmartTask(localTask: Task, remoteTask: Task, projectId: string, state: TaskMergeState): void {
+    const { mergedTask, hasConflict, contentConflictCopy } =
+      this.conflictDetection.mergeTaskFields(localTask, remoteTask, projectId);
+
+    if (hasConflict) {
+      state.conflictCount++;
+      this.logger.debug('任务存在字段冲突，已合并', { taskId: localTask.id });
+    }
+
+    state.mergedTasks.push(mergedTask);
+    if (contentConflictCopy) {
+      state.mergedTasks.push(contentConflictCopy);
+      this.logger.info('smartMerge: 创建 content 冲突副本', {
+        originalId: localTask.id,
+        copyId: contentConflictCopy.id,
+        copyTitle: contentConflictCopy.title
       });
-      issues.push(`已过滤 ${skippedTombstoneCount} 个已删除的任务`);
+      state.issues.push(`任务 "${localTask.title || localTask.displayId}" 存在内容冲突，已创建副本`);
     }
-    
-    if (preservedSoftDeleteCount > 0) {
-      this.logger.info('smartMerge: 保留软删除任务', { 
-        count: preservedSoftDeleteCount, 
-        projectId: local.id 
-      });
-    }
-    
-    // 【v5.9】记录保守跳过的任务
-    if (conservativeSkipCount > 0) {
-      this.logger.warn('smartMerge: 保守模式跳过任务', { 
-        count: conservativeSkipCount, 
-        projectId: local.id 
-      });
-      issues.push(`保守模式跳过 ${conservativeSkipCount} 个可能已删除的任务`);
-      this.sentryLazyLoader.captureMessage('smartMerge 保守跳过任务', {
-        level: 'warning',
-        tags: { operation: 'smartMerge', projectId: local.id },
-        extra: { conservativeSkipCount }
+  }
+
+  private appendUnprocessedRemoteTasks(
+    remoteTasks: Task[],
+    state: TaskMergeState,
+    shouldInclude: (remoteTask: Task) => boolean,
+  ): void {
+    appendUnprocessedRemoteTasksPure(remoteTasks, state, shouldInclude);
+  }
+
+  private recordSmartMergeSummary(projectId: string, state: TaskMergeState): void {
+    this.recordSkippedTombstoneSummary(projectId, state, 'smartMerge');
+    this.recordPreservedSoftDeleteSummary(projectId, state, 'smartMerge');
+    if (state.conservativeCount === 0) return;
+
+    this.logger.warn('smartMerge: 保守模式跳过任务', { count: state.conservativeCount, projectId });
+    state.issues.push(`保守模式跳过 ${state.conservativeCount} 个可能已删除的任务`);
+    this.sentryLazyLoader.captureMessage('smartMerge 保守跳过任务', {
+      level: 'warning',
+      tags: { operation: 'smartMerge', projectId },
+      extra: { conservativeSkipCount: state.conservativeCount }
+    });
+  }
+
+  private recordSkippedTombstoneSummary(
+    projectId: string,
+    state: TaskMergeState,
+    logPrefix?: 'smartMerge',
+  ): void {
+    if (state.skippedTombstoneCount === 0) return;
+
+    if (logPrefix) {
+      this.logger.info(`${logPrefix}: 已过滤 tombstone 任务`, {
+        count: state.skippedTombstoneCount,
+        projectId
       });
     }
-    
-    // 合并 connections
+    state.issues.push(`已过滤 ${state.skippedTombstoneCount} 个已删除的任务`);
+  }
+
+  private recordPreservedSoftDeleteSummary(
+    projectId: string,
+    state: TaskMergeState,
+    logPrefix: 'smartMerge' | 'selectiveMerge',
+  ): void {
+    if (state.preservedSoftDeleteCount === 0) return;
+
+    this.logger.info(`${logPrefix}: 保留软删除任务`, {
+      count: state.preservedSoftDeleteCount,
+      projectId
+    });
+  }
+
+  private buildValidatedMergedProject(
+    local: Project,
+    remote: Project,
+    mergedTasks: Task[],
+    localConnections: Project['connections'],
+    remoteConnections: Project['connections'],
+    issues: string[],
+  ): Project {
     const mergedConnections = this.conflictDetection.mergeConnections(localConnections, remoteConnections);
-    
-    // 构建合并后的项目
-    let mergedProject: Project = {
+    const mergedProject: Project = {
       ...local,
       tasks: mergedTasks,
       connections: mergedConnections,
       updatedAt: new Date().toISOString(),
-      // 使用较大的版本号 + 1
       version: Math.max(local.version ?? 0, remote.version ?? 0) + 1
     };
-    
-    // 合并后执行完整性检查
-    const { project: validatedProject, issues: validationIssues } = 
+    const { project: validatedProject, issues: validationIssues } =
       this.layoutService.validateAndFixTree(mergedProject);
-    
     issues.push(...validationIssues);
-    mergedProject = validatedProject;
-    
-    return {
-      project: mergedProject,
-      issues,
-      conflictCount
-    };
+    return validatedProject;
   }
 
   /**
@@ -507,126 +576,111 @@ export class ConflictResolutionService {
   private mergeWithResolutionPlan(
     local: Project,
     remote: Project,
-    tombstoneIds: Set<string>,
+    tombstoneIds: TaskTombstones,
     plan: ConflictResolutionPlan,
     tombstoneQueryFailed: boolean = false,
   ): MergeResult {
     const issues: string[] = [];
-    let conflictCount = 0;
-
     const taskChoices = plan.taskChoices ?? {};
-    const localTasks = Array.isArray(local.tasks) ? local.tasks : [];
-    const remoteTasks = Array.isArray(remote.tasks) ? remote.tasks : [];
-    const localConnections = Array.isArray(local.connections) ? local.connections : [];
-    const remoteConnections = Array.isArray(remote.connections) ? remote.connections : [];
+    const collections = this.getProjectMergeCollections(local, remote);
+    const state = createTaskMergeState(issues);
+    const remoteTaskMap = new Map(collections.remoteTasks.map(task => [task.id, task]));
 
-    const remoteTaskMap = new Map(remoteTasks.map(task => [task.id, task]));
-    const mergedTasks: Task[] = [];
-    const processedIds = new Set<string>();
-    let skippedTombstoneCount = 0;
-    let preservedSoftDeleteCount = 0;
-    let conservativeKeepCount = 0;
-
-    for (const localTask of localTasks) {
-      processedIds.add(localTask.id);
-
-      if (tombstoneIds.has(localTask.id)) {
-        skippedTombstoneCount++;
-        continue;
-      }
-
-      const remoteTask = remoteTaskMap.get(localTask.id);
-      const choice = taskChoices[localTask.id];
-      if (!remoteTask && choice === 'remote') {
-        continue;
-      }
-
-      if (!remoteTask && tombstoneQueryFailed && tombstoneIds.size === 0) {
-        mergedTasks.push(localTask);
-        conservativeKeepCount++;
-        continue;
-      }
-
-      if (localTask.deletedAt && !remoteTask) {
-        mergedTasks.push(localTask);
-        preservedSoftDeleteCount++;
-        continue;
-      }
-
-      if (!remoteTask) {
-        mergedTasks.push(localTask);
-        continue;
-      }
-
-      if (choice === 'local') {
-        mergedTasks.push(localTask);
-        continue;
-      }
-
-      if (choice === 'remote') {
-        mergedTasks.push(remoteTask);
-        continue;
-      }
-
-      const { mergedTask, hasConflict, contentConflictCopy } = this.conflictDetection.mergeTaskFields(
-        localTask,
-        remoteTask,
-        local.id,
-      );
-
-      if (hasConflict) {
-        conflictCount++;
-      }
-
-      mergedTasks.push(mergedTask);
-
-      if (contentConflictCopy) {
-        mergedTasks.push(contentConflictCopy);
-        issues.push(`任务 "${localTask.title || localTask.displayId}" 存在内容冲突，已创建副本`);
-      }
+    for (const localTask of collections.localTasks) {
+      this.mergePlannedLocalTask(localTask, remoteTaskMap, local.id, tombstoneIds, tombstoneQueryFailed, taskChoices, state);
     }
 
-    for (const remoteTask of remoteTasks) {
-      if (!processedIds.has(remoteTask.id) && taskChoices[remoteTask.id] !== 'local' && !remoteTask.deletedAt) {
-        mergedTasks.push(remoteTask);
-      }
-    }
-
-    if (skippedTombstoneCount > 0) {
-      issues.push(`已过滤 ${skippedTombstoneCount} 个已删除的任务`);
-    }
-
-    if (preservedSoftDeleteCount > 0) {
-      this.logger.info('selectiveMerge: 保留软删除任务', {
-        count: preservedSoftDeleteCount,
-        projectId: local.id,
-      });
-    }
-
-    if (conservativeKeepCount > 0) {
-      issues.push(`保守模式保留 ${conservativeKeepCount} 个本地任务`);
-    }
-
-    const mergedConnections = this.conflictDetection.mergeConnections(localConnections, remoteConnections);
-    let mergedProject: Project = {
-      ...local,
-      tasks: mergedTasks,
-      connections: mergedConnections,
-      updatedAt: new Date().toISOString(),
-      version: Math.max(local.version ?? 0, remote.version ?? 0) + 1,
-    };
-
-    const { project: validatedProject, issues: validationIssues } =
-      this.layoutService.validateAndFixTree(mergedProject);
-
-    issues.push(...validationIssues);
-    mergedProject = validatedProject;
+    this.appendUnprocessedRemoteTasks(
+      collections.remoteTasks,
+      state,
+      remoteTask => taskChoices[remoteTask.id] !== 'local' && !remoteTask.deletedAt,
+    );
+    this.recordPlannedMergeSummary(local.id, state);
+    const mergedProject = this.buildValidatedMergedProject(
+      local,
+      remote,
+      state.mergedTasks,
+      collections.localConnections,
+      collections.remoteConnections,
+      state.issues,
+    );
 
     return {
       project: mergedProject,
-      issues,
-      conflictCount,
+      issues: state.issues,
+      conflictCount: state.conflictCount,
     };
+  }
+
+  private mergePlannedLocalTask(
+    localTask: Task,
+    remoteTaskMap: Map<string, Task>,
+    projectId: string,
+    tombstoneIds: TaskTombstones,
+    tombstoneQueryFailed: boolean,
+    taskChoices: ConflictResolutionPlan['taskChoices'],
+    state: TaskMergeState,
+  ): void {
+    state.processedIds.add(localTask.id);
+
+    if (this.skipTombstoneTask(localTask, tombstoneIds, state)) return;
+
+    const remoteTask = remoteTaskMap.get(localTask.id);
+    const choice = taskChoices[localTask.id];
+    if (!remoteTask && choice === 'remote') return;
+    if (this.keepConservativePlannedTask(localTask, remoteTask, tombstoneIds, tombstoneQueryFailed, state)) return;
+    if (this.keepSoftDeletedLocalTask(localTask, remoteTask, state, 'selectiveMerge')) return;
+
+    this.mergePlannedTaskByChoice(localTask, remoteTask, choice, projectId, state);
+  }
+
+  private keepConservativePlannedTask(
+    localTask: Task,
+    remoteTask: Task | undefined,
+    tombstoneIds: TaskTombstones,
+    tombstoneQueryFailed: boolean,
+    state: TaskMergeState,
+  ): boolean {
+    return keepConservativeLocalTask(localTask, remoteTask, tombstoneIds, tombstoneQueryFailed, state);
+  }
+
+  private mergePlannedTaskByChoice(
+    localTask: Task,
+    remoteTask: Task | undefined,
+    choice: ConflictResolutionPlan['taskChoices'][string] | undefined,
+    projectId: string,
+    state: TaskMergeState,
+  ): void {
+    if (!remoteTask || choice === 'local') {
+      state.mergedTasks.push(localTask);
+      return;
+    }
+    if (choice === 'remote') {
+      state.mergedTasks.push(remoteTask);
+      return;
+    }
+
+    const { mergedTask, hasConflict, contentConflictCopy } = this.conflictDetection.mergeTaskFields(
+      localTask,
+      remoteTask,
+      projectId,
+    );
+    if (hasConflict) {
+      state.conflictCount++;
+    }
+    state.mergedTasks.push(mergedTask);
+    if (contentConflictCopy) {
+      state.mergedTasks.push(contentConflictCopy);
+      state.issues.push(`任务 "${localTask.title || localTask.displayId}" 存在内容冲突，已创建副本`);
+    }
+  }
+
+  private recordPlannedMergeSummary(projectId: string, state: TaskMergeState): void {
+    this.recordSkippedTombstoneSummary(projectId, state);
+    this.recordPreservedSoftDeleteSummary(projectId, state, 'selectiveMerge');
+    if (state.conservativeCount > 0) {
+      state.issues.push(`保守模式保留 ${state.conservativeCount} 个本地任务`);
+    }
   }
 
   /**

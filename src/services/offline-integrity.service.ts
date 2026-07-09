@@ -138,12 +138,15 @@ export class OfflineIntegrityService implements OnDestroy {
   
   /** 定期校验定时器 */
   private checkInterval: ReturnType<typeof setInterval> | null = null;
+  private destroyed = false;
   
   constructor() {
     // 不自动启动定期校验，由外部调用 startPeriodicCheck()
   }
   
   ngOnDestroy(): void {
+    if (this.destroyed) return;
+    this.destroyed = true;
     this.stopPeriodicCheck();
   }
   
@@ -151,7 +154,7 @@ export class OfflineIntegrityService implements OnDestroy {
    * 启动定期校验
    */
   startPeriodicCheck(): void {
-    if (this.checkInterval) return;
+    if (this.destroyed || this.checkInterval !== null) return;
     
     this.checkInterval = setInterval(() => {
       // 定期校验需要传入项目数据，由调用者提供
@@ -167,7 +170,7 @@ export class OfflineIntegrityService implements OnDestroy {
    * 停止定期校验
    */
   stopPeriodicCheck(): void {
-    if (this.checkInterval) {
+    if (this.checkInterval !== null) {
       clearInterval(this.checkInterval);
       this.checkInterval = null;
       this.logger.info('定期完整性校验已停止');
@@ -189,69 +192,80 @@ export class OfflineIntegrityService implements OnDestroy {
     this._isValidating.set(true);
     const startTime = Date.now();
     const issues: IntegrityIssue[] = [];
-    
-    let taskCount = 0;
-    let connectionCount = 0;
+    const stats = { taskCount: 0, connectionCount: 0 };
     
     try {
       for (const project of projects) {
         const projectIssues = this.validateProject(project);
         issues.push(...projectIssues);
-        taskCount += project.tasks.length;
-        connectionCount += project.connections.length;
+        stats.taskCount += project.tasks.length;
+        stats.connectionCount += project.connections.length;
       }
       
-      const checksum = this.generateChecksum(projects);
-      
-      const report: IntegrityReport = {
-        valid: issues.length === 0,
-        projectCount: projects.length,
-        taskCount,
-        connectionCount,
-        issues,
-        checksum,
-        timestamp: new Date().toISOString(),
-        durationMs: Date.now() - startTime,
-      };
-      
+      const report = this.buildIntegrityReport(projects, issues, stats, startTime);
       this._lastReport.set(report);
-      
-      // 记录结果
-      if (issues.length > 0) {
-        this.logger.warn('完整性校验发现问题', {
-          issueCount: issues.length,
-          criticalCount: issues.filter(i => i.severity === 'critical').length,
-          errorCount: issues.filter(i => i.severity === 'error').length,
-          warningCount: issues.filter(i => i.severity === 'warning').length,
-        });
-        
-        // 严重问题上报 Sentry
-        const criticalIssues = issues.filter(i => i.severity === 'critical');
-        if (criticalIssues.length > 0) {
-          this.sentryLazyLoader.captureMessage('OfflineIntegrity: Critical issues detected', {
-            level: 'error',
-            tags: { operation: 'offline-integrity-check' },
-            extra: {
-              criticalIssues,
-              projectCount: projects.length,
-              taskCount,
-            },
-          });
-        }
-      } else {
-        this.logger.debug('完整性校验通过', {
-          projectCount: projects.length,
-          taskCount,
-          connectionCount,
-          durationMs: report.durationMs,
-        });
-      }
-      
+      this.logIntegrityReport(report);
       return report;
       
     } finally {
       this._isValidating.set(false);
     }
+  }
+
+  private buildIntegrityReport(
+    projects: Project[],
+    issues: IntegrityIssue[],
+    stats: { taskCount: number; connectionCount: number },
+    startTime: number,
+  ): IntegrityReport {
+    return {
+      valid: issues.length === 0,
+      projectCount: projects.length,
+      taskCount: stats.taskCount,
+      connectionCount: stats.connectionCount,
+      issues,
+      checksum: this.generateChecksum(projects),
+      timestamp: new Date().toISOString(),
+      durationMs: Date.now() - startTime,
+    };
+  }
+
+  private logIntegrityReport(report: IntegrityReport): void {
+    if (report.issues.length === 0) {
+      this.logger.debug('完整性校验通过', {
+        projectCount: report.projectCount,
+        taskCount: report.taskCount,
+        connectionCount: report.connectionCount,
+        durationMs: report.durationMs,
+      });
+      return;
+    }
+
+    const criticalIssues = report.issues.filter(issue => issue.severity === 'critical');
+    this.logger.warn('完整性校验发现问题', {
+      issueCount: report.issues.length,
+      criticalCount: criticalIssues.length,
+      errorCount: report.issues.filter(issue => issue.severity === 'error').length,
+      warningCount: report.issues.filter(issue => issue.severity === 'warning').length,
+    });
+    this.captureCriticalIntegrityIssues(report, criticalIssues);
+  }
+
+  private captureCriticalIntegrityIssues(
+    report: IntegrityReport,
+    criticalIssues: IntegrityIssue[],
+  ): void {
+    if (criticalIssues.length === 0) return;
+
+    this.sentryLazyLoader.captureMessage('OfflineIntegrity: Critical issues detected', {
+      level: 'error',
+      tags: { operation: 'offline-integrity-check' },
+      extra: {
+        criticalIssues,
+        projectCount: report.projectCount,
+        taskCount: report.taskCount,
+      },
+    });
   }
   
   /**

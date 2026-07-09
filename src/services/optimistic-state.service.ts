@@ -276,6 +276,24 @@ export class OptimisticStateService {
     return true;
   }
 
+  /**
+   * 读取快照中的任务副本，用于异步保护流程取得操作前 CAS 基线。
+   */
+  getTaskFromSnapshot(snapshotId: string, taskId: string): Project['tasks'][number] | null {
+    const snapshot = this.snapshots.get(snapshotId);
+    if (!snapshot) {
+      return null;
+    }
+
+    for (const project of snapshot.projectsSnapshot) {
+      const task = project.tasks.find(candidate => candidate.id === taskId);
+      if (task) {
+        return { ...task };
+      }
+    }
+    return null;
+  }
+
   private indexSnapshotTasks(
     snapshot: OptimisticSnapshot,
     targetIds: Set<string>,
@@ -456,7 +474,7 @@ export class OptimisticStateService {
   }
   
   private startCleanupTimer(): void {
-    if (this.cleanupTimer) return;
+    if (this.cleanupTimer !== null) return;
     
     this.cleanupTimer = setInterval(() => {
       this.cleanupExpiredSnapshots();
@@ -464,7 +482,7 @@ export class OptimisticStateService {
   }
   
   private stopCleanupTimer(): void {
-    if (this.cleanupTimer) {
+    if (this.cleanupTimer !== null) {
       clearInterval(this.cleanupTimer);
       this.cleanupTimer = null;
     }

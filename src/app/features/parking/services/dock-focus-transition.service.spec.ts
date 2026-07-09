@@ -23,7 +23,10 @@ describe('DockFocusTransitionService', () => {
     focusTransition,
     lastExitAction,
     clearFocusChromeRestore: vi.fn(),
-    toggleFocusMode: vi.fn(() => focusMode.update((value) => !value)),
+    toggleFocusMode: vi.fn(() => {
+      focusMode.update((value) => !value);
+      return Promise.resolve(true);
+    }),
     holdNonCriticalWork: vi.fn(),
     beginFocusTransition: vi.fn((state: DockFocusTransitionState) => focusTransition.set(state)),
     finalizeClearDockForExit: vi.fn(),
@@ -81,6 +84,21 @@ describe('DockFocusTransitionService', () => {
     expect(service.floatingUiVisible()).toBe(true);
   });
 
+  it('rolls back the enter transition when focus mode commit fails', async () => {
+    dockedCount.set(1);
+    mockEngine.toggleFocusMode.mockResolvedValueOnce(false);
+
+    service.runEnterFocusTransition();
+    rafQueue.splice(0).forEach((callback) => callback(0));
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(PARKING_CONFIG.MOTION.focus.enterMs);
+
+    expect(focusMode()).toBe(false);
+    expect(service.floatingUiVisible()).toBe(false);
+    expect(focusTransition()).toBeNull();
+    expect(mockEngine.endFocusTransition).toHaveBeenCalledTimes(1);
+  });
+
   it('does not create a flip ghost during exit even when dock data exists', () => {
     dockedCount.set(1);
     focusMode.set(true);
@@ -89,5 +107,27 @@ describe('DockFocusTransitionService', () => {
 
     expect(focusTransition()?.phase).toBe('exiting');
     expect(service.flipGhost()).toBeNull();
+  });
+
+  it('starts chrome restore only after the exit transition unmounts', () => {
+    focusMode.set(true);
+
+    service.runExitFocusTransition();
+
+    const transitionDuration = focusTransition()?.durationMs ?? 0;
+    vi.advanceTimersByTime(transitionDuration);
+
+    expect(focusMode()).toBe(false);
+    expect(focusTransition()?.phase).toBe('exiting');
+    expect(mockEngine.beginFocusChromeRestore).not.toHaveBeenCalled();
+
+    const exitUnmountDelay = Math.max(
+      PARKING_CONFIG.MOTION.focus.exitMs,
+      PARKING_CONFIG.MOTION.hud.enterMs,
+    ) + 80;
+    vi.advanceTimersByTime(exitUnmountDelay);
+
+    expect(focusTransition()).toBeNull();
+    expect(mockEngine.beginFocusChromeRestore).toHaveBeenCalledTimes(1);
   });
 });

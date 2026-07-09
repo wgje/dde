@@ -185,6 +185,92 @@ describe('BeforeUnloadManagerService', () => {
       expect(secondEvent.defaultPrevented).toBe(true);
       expect(secondEvent.returnValue).toBe('您有未保存的内容，确定要离开吗？');
     });
+
+    it('pagehide 保存不应消费下一次 beforeunload 的确认跳过标记', () => {
+      const cb = vi.fn(() => true);
+      service.register('confirming-save', cb);
+      service.initialize();
+
+      service.suppressNextConfirmation();
+      window.dispatchEvent(new Event('pagehide'));
+
+      expect(cb).toHaveBeenCalledTimes(1);
+
+      const firstBeforeUnload = new Event('beforeunload', { cancelable: true }) as BeforeUnloadEvent;
+      Object.defineProperty(firstBeforeUnload, 'returnValue', {
+        configurable: true,
+        writable: true,
+        value: undefined,
+      });
+      window.dispatchEvent(firstBeforeUnload);
+
+      expect(cb).toHaveBeenCalledTimes(2);
+      expect(firstBeforeUnload.defaultPrevented).toBe(false);
+      expect(firstBeforeUnload.returnValue).toBeUndefined();
+
+      const secondBeforeUnload = new Event('beforeunload', { cancelable: true }) as BeforeUnloadEvent;
+      Object.defineProperty(secondBeforeUnload, 'returnValue', {
+        configurable: true,
+        writable: true,
+        value: undefined,
+      });
+      window.dispatchEvent(secondBeforeUnload);
+
+      expect(cb).toHaveBeenCalledTimes(3);
+      expect(secondBeforeUnload.defaultPrevented).toBe(true);
+      expect(secondBeforeUnload.returnValue).toBe('您有未保存的内容，确定要离开吗？');
+    });
+
+    it('下一次 beforeunload 无需确认时也消费 suppress 标记，避免误跳过后续确认', () => {
+      let shouldConfirm = false;
+      const cb = vi.fn(() => shouldConfirm);
+      service.register('conditional-save', cb);
+      service.initialize();
+
+      service.suppressNextConfirmation();
+      const firstEvent = new Event('beforeunload', { cancelable: true }) as BeforeUnloadEvent;
+      Object.defineProperty(firstEvent, 'returnValue', { configurable: true, writable: true, value: undefined });
+      window.dispatchEvent(firstEvent);
+
+      expect(cb).toHaveBeenCalledTimes(1);
+      expect(firstEvent.defaultPrevented).toBe(false);
+      expect(firstEvent.returnValue).toBeUndefined();
+
+      shouldConfirm = true;
+      const secondEvent = new Event('beforeunload', { cancelable: true }) as BeforeUnloadEvent;
+      Object.defineProperty(secondEvent, 'returnValue', { configurable: true, writable: true, value: undefined });
+      window.dispatchEvent(secondEvent);
+
+      expect(cb).toHaveBeenCalledTimes(2);
+      expect(secondEvent.defaultPrevented).toBe(true);
+      expect(secondEvent.returnValue).toBe('您有未保存的内容，确定要离开吗？');
+    });
+  });
+
+  describe('passive unload 保存', () => {
+    it('pagehide 与 hidden visibilitychange 同一退出突发中只执行一次保存回调', () => {
+      const cb = vi.fn();
+      const originalVisibilityState = Object.getOwnPropertyDescriptor(document, 'visibilityState');
+      service.register('passive-save', cb);
+      service.initialize();
+
+      try {
+        window.dispatchEvent(new Event('pagehide'));
+        Object.defineProperty(document, 'visibilityState', {
+          configurable: true,
+          value: 'hidden',
+        });
+        document.dispatchEvent(new Event('visibilitychange'));
+      } finally {
+        if (originalVisibilityState) {
+          Object.defineProperty(document, 'visibilityState', originalVisibilityState);
+        } else {
+          Reflect.deleteProperty(document, 'visibilityState');
+        }
+      }
+
+      expect(cb).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('回调异常隔离', () => {
@@ -198,6 +284,23 @@ describe('BeforeUnloadManagerService', () => {
       expect(() => service.triggerSave()).not.toThrow();
       expect(later).toHaveBeenCalledTimes(1);
       expect(mockLoggerCategory.error).toHaveBeenCalled();
+    });
+
+    it('回调抛错且错误日志失败时仍继续执行后续回调', () => {
+      const loggerError = new Error('logger sink unavailable');
+      const later = vi.fn(() => true);
+      mockLoggerCategory.error.mockImplementationOnce(() => {
+        throw loggerError;
+      });
+
+      service.register('bad', () => {
+        throw new Error('callback failed');
+      });
+      service.register('confirming-save', later);
+
+      expect(() => service.triggerSave()).not.toThrow();
+      expect(later).toHaveBeenCalledTimes(1);
+      expect(service.triggerSave()).toBe(true);
     });
 
     it('抛错的回调也不影响返回值的确认位', () => {
@@ -234,6 +337,55 @@ describe('BeforeUnloadManagerService', () => {
       addSpy.mockRestore();
     });
 
+    it('initialize 半途失败时应回滚已注册 listener，并允许后续重试不重复触发', () => {
+      const setupError = new Error('pagehide listener failed');
+      const cb = vi.fn(() => true);
+      const originalAddEventListener = window.addEventListener.bind(window);
+      const addSpy = vi.spyOn(window, 'addEventListener').mockImplementation(
+        function(
+          this: Window,
+          type: string,
+          listener: EventListenerOrEventListenerObject,
+          options?: boolean | AddEventListenerOptions
+        ) {
+          if (type === 'pagehide') {
+            throw setupError;
+          }
+          return originalAddEventListener(type, listener, options);
+        }
+      );
+      service.register('confirming-save', cb);
+
+      expect(() => service.initialize()).toThrow(setupError);
+      addSpy.mockRestore();
+
+      const failedSetupEvent = new Event('beforeunload', { cancelable: true }) as BeforeUnloadEvent;
+      Object.defineProperty(failedSetupEvent, 'returnValue', {
+        configurable: true,
+        writable: true,
+        value: undefined,
+      });
+      window.dispatchEvent(failedSetupEvent);
+
+      expect(cb).not.toHaveBeenCalled();
+      expect(failedSetupEvent.defaultPrevented).toBe(false);
+      expect(failedSetupEvent.returnValue).toBeUndefined();
+
+      service.initialize();
+
+      const retryEvent = new Event('beforeunload', { cancelable: true }) as BeforeUnloadEvent;
+      Object.defineProperty(retryEvent, 'returnValue', {
+        configurable: true,
+        writable: true,
+        value: undefined,
+      });
+      window.dispatchEvent(retryEvent);
+
+      expect(cb).toHaveBeenCalledTimes(1);
+      expect(retryEvent.defaultPrevented).toBe(true);
+      expect(retryEvent.returnValue).toBe('您有未保存的内容，确定要离开吗？');
+    });
+
     it('window 未定义时 initialize 是 no-op', () => {
       // 模拟 SSR 环境
       // 这里无法真实移除 window，只验证不抛错
@@ -261,6 +413,61 @@ describe('BeforeUnloadManagerService', () => {
 
       expect(removeSpy).toHaveBeenCalledWith('pagehide', expect.any(Function), { capture: true });
       removeSpy.mockRestore();
+    });
+
+    it('cleanup 后旧事件处理器即使被 late 调用也不应再执行保存回调', () => {
+      const cb = vi.fn(() => true);
+      const addSpy = vi.spyOn(window, 'addEventListener');
+      service.register('late-save', cb);
+      service.initialize();
+
+      const beforeUnloadHandler = addSpy.mock.calls.find(([type]) => type === 'beforeunload')?.[1];
+      expect(typeof beforeUnloadHandler).toBe('function');
+
+      (service as unknown as { cleanup: () => void }).cleanup();
+
+      const event = new Event('beforeunload', { cancelable: true }) as BeforeUnloadEvent;
+      Object.defineProperty(event, 'returnValue', { configurable: true, writable: true, value: undefined });
+      (beforeUnloadHandler as EventListener)(event);
+
+      expect(cb).not.toHaveBeenCalled();
+      expect(event.defaultPrevented).toBe(false);
+      expect(event.returnValue).toBeUndefined();
+      addSpy.mockRestore();
+    });
+
+    it('cleanup 中 listener 移除与清理日志同时失败时仍清空状态并屏蔽旧 handler', () => {
+      const cb = vi.fn(() => true);
+      const removeError = new Error('remove beforeunload failed');
+      const debugError = new Error('debug sink unavailable');
+      const addSpy = vi.spyOn(window, 'addEventListener');
+      const removeWindowListener = vi
+        .spyOn(window, 'removeEventListener')
+        .mockImplementationOnce(() => {
+          throw removeError;
+        });
+      mockLoggerCategory.debug.mockImplementation((message: string) => {
+        if (message === 'BeforeUnloadManager 已清理') {
+          throw debugError;
+        }
+      });
+      service.register('late-save', cb);
+      service.initialize();
+      const beforeUnloadHandler = addSpy.mock.calls.find(([type]) => type === 'beforeunload')?.[1];
+      expect(typeof beforeUnloadHandler).toBe('function');
+
+      expect(() => (service as unknown as { cleanup: () => void }).cleanup()).not.toThrow();
+
+      const event = new Event('beforeunload', { cancelable: true }) as BeforeUnloadEvent;
+      Object.defineProperty(event, 'returnValue', { configurable: true, writable: true, value: undefined });
+      (beforeUnloadHandler as EventListener)(event);
+
+      expect(cb).not.toHaveBeenCalled();
+      expect(event.defaultPrevented).toBe(false);
+      expect(event.returnValue).toBeUndefined();
+      expect(service.triggerSave()).toBe(false);
+      expect(removeWindowListener.mock.calls.filter(([type]) => type === 'beforeunload')).toHaveLength(2);
+      addSpy.mockRestore();
     });
   });
 });

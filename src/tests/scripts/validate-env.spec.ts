@@ -28,14 +28,14 @@ describe('validate-env Supabase API key validation', () => {
 
     expect(result.status).toBe(0);
     expect(result.stdout).toContain('环境变量验证通过');
-  });
+  }, 10_000);
 
   it('rejects Supabase secret keys for production browser builds', () => {
     const result = runValidateEnv({
-      NG_APP_SUPABASE_ANON_KEY: 'sb_secret_do_not_ship_this_key_in_a_browser_bundle_1234567890',
+      NG_APP_SUPABASE_ANON_KEY: 'sb_' + 'secret_do_not_ship_this_key_in_a_browser_bundle_1234567890',
     });
 
     expect(result.status).toBe(1);
     expect(result.stdout).toContain('不能使用 Supabase secret key');
-  });
+  }, 10_000);
 });

@@ -5,23 +5,25 @@
     (drawerStateChange)="onDrawerStateChange($event)">
     
     <!-- 顶层抽屉：待办 + 待分配 -->
-    <div slot="top" class="h-full">
-      <app-mobile-todo-drawer
-        [isDropTargetActive]="dragDrop.isDropTargetActive()"
-        [draggingTaskId]="touch.draggingId()"
-        [hasActiveDragSession]="hasPendingUnassignedTouchDrag()"
-        (centerOnNode)="onMobileDrawerCenterOnNode($event)"
-        (createUnassigned)="createUnassigned()"
-        (taskClick)="onUnassignedTaskClick($event)"
-        (taskDragStart)="onDragStart($event.event, $event.task)"
-        (taskDrop)="onUnassignedDrop($event.event)"
-        (taskTouchStart)="onUnassignedTouchStart($event.event, $event.task)"
-        (taskTouchMove)="onUnassignedTouchMove($event.event)"
-        (taskTouchEnd)="onUnassignedTouchEnd($event.event)"
-        (taskTouchCancel)="onUnassignedTouchCancel($event.event)"
-        (swipeToSwitch)="onDrawerSwipeToSwitch($event)">
-      </app-mobile-todo-drawer>
-    </div>
+    <ng-template #topDrawer>
+      <div class="h-full">
+        <app-mobile-todo-drawer
+          [isDropTargetActive]="dragDrop.isDropTargetActive()"
+          [draggingTaskId]="touch.draggingId()"
+          [hasActiveDragSession]="hasPendingUnassignedTouchDrag()"
+          (centerOnNode)="onMobileDrawerCenterOnNode($event)"
+          (createUnassigned)="createUnassigned()"
+          (taskClick)="onUnassignedTaskClick($event)"
+          (taskDragStart)="onDragStart($event.event, $event.task)"
+          (taskDrop)="onUnassignedDrop($event.event)"
+          (taskTouchStart)="onUnassignedTouchStart($event.event, $event.task)"
+          (taskTouchMove)="onUnassignedTouchMove($event.event)"
+          (taskTouchEnd)="onUnassignedTouchEnd($event.event)"
+          (taskTouchCancel)="onUnassignedTouchCancel($event.event)"
+          (swipeToSwitch)="onDrawerSwipeToSwitch($event)">
+        </app-mobile-todo-drawer>
+      </div>
+    </ng-template>
     
     <!-- 中间层：流程图 -->
     <div slot="middle" class="h-full relative" [style.backgroundColor]="'var(--theme-bg, #F5F2E9)'">
@@ -72,7 +74,11 @@
             [style.width.px]="isOverviewCollapsed() ? 24 : overviewSize().width"
             [style.height.px]="isOverviewCollapsed() ? 24 : overviewSize().height">
             @if (!isOverviewCollapsed()) {
-              <div #overviewDiv class="w-full h-full relative z-0" style="overflow: hidden; position: relative;"></div>
+              @if (useSvgMinimap()) {
+                <app-flow-minimap [width]="overviewSize().width" [height]="overviewSize().height" />
+              } @else {
+                <div #overviewDiv class="w-full h-full relative z-0" style="overflow: hidden; position: relative;"></div>
+              }
             }
             <button
               (pointerdown)="onOverviewTogglePointerDown($event)"
@@ -115,6 +121,7 @@
         [isResizingDrawer]="isResizingDrawerSignal()"
         [drawerHeightVh]="drawerHeight()"
         [isSelectMode]="selectMode.isSelectMode()"
+        [relationDisplayMode]="relationDisplayMode()"
         (zoomIn)="zoomIn()"
         (zoomOut)="zoomOut()"
         (autoLayout)="applyAutoLayout()"
@@ -127,7 +134,8 @@
         (exportStrategicReview)="exportStrategicReview()"
         (saveToCloud)="saveToCloud()"
         [saveToCloudCallback]="saveToCloudBound"
-        (toggleSelectMode)="toggleSelectMode()">
+        (toggleSelectMode)="toggleSelectMode()"
+        (toggleRelationDisplayMode)="toggleRelationDisplayMode()">
       </app-flow-toolbar>
 
       <!-- 任务详情面板 -->
@@ -140,32 +148,35 @@
         (positionChange)="taskDetailPos.set($event)"
         (drawerHeightChange)="drawerHeight.set($event)"
         (isResizingChange)="isResizingDrawerSignal.set($event)"
-        (titleChange)="taskOps.updateTaskTitle($event.taskId, $event.title)"
-        (contentChange)="taskOps.updateTaskContent($event.taskId, $event.content)"
-        (priorityChange)="taskOps.updateTaskPriority($event.taskId, $event.priority)"
-        (dueDateChange)="taskOps.updateTaskDueDate($event.taskId, $event.dueDate)"
-        (tagAdd)="taskOps.addTaskTag($event.taskId, $event.tag)"
-        (tagRemove)="taskOps.removeTaskTag($event.taskId, $event.tag)"
+        (titleChange)="taskDetailPersistence.persistTitle($event)"
+        (contentChange)="taskDetailPersistence.persistContent($event)"
+        (attentionChange)="taskDetailPersistence.persistAttentionItems($event)"
+        (priorityChange)="taskDetailPersistence.persistPriority($event)"
+        (dueDateChange)="taskDetailPersistence.persistDueDate($event)"
+        (tagAdd)="taskDetailPersistence.persistTagAdd($event)"
+        (tagRemove)="taskDetailPersistence.persistTagRemove($event)"
         (addSibling)="addSiblingTask($event)"
         (addChild)="addChildTask($event)"
-        (toggleStatus)="taskOps.toggleTaskStatus($event)"
+        (toggleStatus)="taskDetailPersistence.persistStatusToggle($event)"
         (archiveTask)="archiveTask($event)"
         (deleteTask)="deleteTask($event)"
         (parkTask)="parkTaskAction($event)"
-        (quickTodoAdd)="taskOps.addQuickTodo($event.taskId, $event.text)"
-        (attachmentAdd)="taskOps.addTaskAttachment($event.taskId, $event.attachment)"
-        (attachmentRemove)="taskOps.removeTaskAttachment($event.taskId, $event.attachmentId)"
-        (attachmentsChange)="taskOps.updateTaskAttachments($event.taskId, $event.attachments)"
+        (quickTodoAdd)="taskDetailPersistence.persistQuickTodo($event)"
+        (attachmentAdd)="taskDetailPersistence.persistAttachmentAdd($event)"
+        (attachmentRemove)="taskDetailPersistence.persistAttachmentRemove($event)"
+        (attachmentsChange)="taskDetailPersistence.persistAttachments($event)"
         (attachmentError)="taskOps.handleAttachmentError($event)">
       </app-flow-task-detail>
     </div>
     
     <!-- 底层抽屉：黑匣子 -->
-    <div slot="bottom" class="h-full">
-      <app-mobile-black-box-drawer
-        (swipeToSwitch)="onDrawerSwipeToSwitch($event)">
-      </app-mobile-black-box-drawer>
-    </div>
+    <ng-template #bottomDrawer>
+      <div class="h-full">
+        <app-mobile-black-box-drawer
+          (swipeToSwitch)="onDrawerSwipeToSwitch($event)">
+        </app-mobile-black-box-drawer>
+      </div>
+    </ng-template>
   </app-mobile-drawer-container>
   
   <!-- 移动端右侧滑出项目面板 -->
@@ -246,11 +257,15 @@
           
           <!-- 小地图内容 -->
           @if (!isOverviewCollapsed()) {
-            <!-- 让 Overview 画布在更低层级渲染，避免覆盖右上角折叠按钮的点击区域 -->
-            <!-- 添加明确的尺寸和 overflow 设置，确保 Canvas 正确渲染 -->
-            <div #overviewDiv 
-              class="w-full h-full relative z-0"
-              style="overflow: hidden; position: relative;"></div>
+            @if (useSvgMinimap()) {
+              <app-flow-minimap [width]="overviewSize().width" [height]="overviewSize().height" />
+            } @else {
+              <!-- 让 Overview 画布在更低层级渲染，避免覆盖右上角折叠按钮的点击区域 -->
+              <!-- 添加明确的尺寸和 overflow 设置，确保 Canvas 正确渲染 -->
+              <div #overviewDiv
+                class="w-full h-full relative z-0"
+                style="overflow: hidden; position: relative;"></div>
+            }
           }
           
           <!-- 折叠/展开按钮 -->
@@ -336,6 +351,7 @@
       [isResizingDrawer]="isResizingDrawerSignal()"
       [drawerHeightVh]="drawerHeight()"
       [isSelectMode]="selectMode.isSelectMode()"
+      [relationDisplayMode]="relationDisplayMode()"
       (zoomIn)="zoomIn()"
       (zoomOut)="zoomOut()"
       (autoLayout)="applyAutoLayout()"
@@ -348,7 +364,8 @@
       (exportStrategicReview)="exportStrategicReview()"
       (saveToCloud)="saveToCloud()"
       [saveToCloudCallback]="saveToCloudBound"
-      (toggleSelectMode)="toggleSelectMode()">
+      (toggleSelectMode)="toggleSelectMode()"
+      (toggleRelationDisplayMode)="toggleRelationDisplayMode()">
     </app-flow-toolbar>
 
     <!-- 任务详情面板 -->
@@ -361,23 +378,24 @@
       (positionChange)="taskDetailPos.set($event)"
       (drawerHeightChange)="drawerHeight.set($event)"
       (isResizingChange)="isResizingDrawerSignal.set($event)"
-      (titleChange)="taskOps.updateTaskTitle($event.taskId, $event.title)"
-      (contentChange)="taskOps.updateTaskContent($event.taskId, $event.content)"
-      (priorityChange)="taskOps.updateTaskPriority($event.taskId, $event.priority)"
-      (dueDateChange)="taskOps.updateTaskDueDate($event.taskId, $event.dueDate)"
-      (tagAdd)="taskOps.addTaskTag($event.taskId, $event.tag)"
-      (tagRemove)="taskOps.removeTaskTag($event.taskId, $event.tag)"
+      (titleChange)="taskDetailPersistence.persistTitle($event)"
+      (contentChange)="taskDetailPersistence.persistContent($event)"
+      (attentionChange)="taskDetailPersistence.persistAttentionItems($event)"
+      (priorityChange)="taskDetailPersistence.persistPriority($event)"
+      (dueDateChange)="taskDetailPersistence.persistDueDate($event)"
+      (tagAdd)="taskDetailPersistence.persistTagAdd($event)"
+      (tagRemove)="taskDetailPersistence.persistTagRemove($event)"
       (addSibling)="addSiblingTask($event)"
       (addChild)="addChildTask($event)"
-      (toggleStatus)="taskOps.toggleTaskStatus($event)"
+      (toggleStatus)="taskDetailPersistence.persistStatusToggle($event)"
       (archiveTask)="archiveTask($event)"
       (deleteTask)="deleteTask($event)"
       (parkTask)="parkTaskAction($event)"
       (openLinkedTask)="centerOnNode($event)"
-      (quickTodoAdd)="taskOps.addQuickTodo($event.taskId, $event.text)"
-      (attachmentAdd)="taskOps.addTaskAttachment($event.taskId, $event.attachment)"
-      (attachmentRemove)="taskOps.removeTaskAttachment($event.taskId, $event.attachmentId)"
-      (attachmentsChange)="taskOps.updateTaskAttachments($event.taskId, $event.attachments)"
+      (quickTodoAdd)="taskDetailPersistence.persistQuickTodo($event)"
+      (attachmentAdd)="taskDetailPersistence.persistAttachmentAdd($event)"
+      (attachmentRemove)="taskDetailPersistence.persistAttachmentRemove($event)"
+      (attachmentsChange)="taskDetailPersistence.persistAttachments($event)"
       (attachmentError)="taskOps.handleAttachmentError($event)">
     </app-flow-task-detail>
   </div>

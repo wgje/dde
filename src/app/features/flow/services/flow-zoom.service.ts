@@ -59,7 +59,8 @@ export class FlowZoomService {
   }
 
   cancelPendingViewStateSave(): void {
-    if (this.viewStateSaveTimer) {
+    // 显式 null 判断：浏览器 timer handle 可能为 0，truthiness 判断会漏清理并让 stale 保存在 teardown 后写回
+    if (this.viewStateSaveTimer !== null) {
       clearTimeout(this.viewStateSaveTimer);
       this.viewStateSaveTimer = null;
     }

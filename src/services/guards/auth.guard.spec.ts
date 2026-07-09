@@ -93,6 +93,33 @@ describe('requireAuthGuard', () => {
     expect(show).not.toHaveBeenCalled();
   });
 
+  it('本地模式已启用时应立即放行且不触发登录框', async () => {
+    localStorage.setItem(AUTH_CONFIG.LOCAL_MODE_CACHE_KEY, 'true');
+    const show = vi.fn();
+    const authMock = {
+      isConfigured: true,
+      authState: vi.fn().mockReturnValue({ isCheckingSession: false, userId: null }),
+      currentUserId: vi.fn().mockReturnValue(null),
+      sessionInitialized: vi.fn().mockReturnValue(false),
+    };
+
+    TestBed.configureTestingModule({
+      providers: [
+        { provide: AuthService, useValue: authMock },
+        { provide: ModalService, useValue: { show } },
+        { provide: LoggerService, useValue: createLoggerServiceMock() },
+      ],
+    });
+
+    const mockRoute = {} as ActivatedRouteSnapshot;
+    const mockState = { url: '/projects' } as RouterStateSnapshot;
+    const result = await TestBed.runInInjectionContext(() => requireAuthGuard(mockRoute, mockState));
+
+    expect(result).toBe(true);
+    expect(show).not.toHaveBeenCalled();
+    expect(authMock.authState).not.toHaveBeenCalled();
+  });
+
   it('已完成会话检查且未登录时应允许壳层挂载并弹登录框', async () => {
     const show = vi.fn();
     const authMock = {

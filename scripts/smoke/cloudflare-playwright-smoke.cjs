@@ -11,12 +11,9 @@
  */
 
 const { chromium } = require('@playwright/test');
+const { isDeployedSmokeOrigin } = require('./deployed-smoke-origin.cjs');
 
 const baseUrl = process.env.PLAYWRIGHT_BASE_URL;
-if (!baseUrl || !/^https?:\/\//i.test(baseUrl)) {
-  console.error('PLAYWRIGHT_BASE_URL must be an http(s) deployed origin.');
-  process.exit(2);
-}
 
 function normalizeProxyServer(server) {
   if (!server) return undefined;
@@ -178,7 +175,18 @@ async function main() {
   console.log(`version gitSha=${version.gitSha} sw=${JSON.stringify(swState)}`);
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.stack || error.message : String(error));
-  process.exit(1);
-});
+if (require.main === module) {
+  if (!isDeployedSmokeOrigin(baseUrl)) {
+    console.error('PLAYWRIGHT_BASE_URL must be an http(s) deployed origin.');
+    process.exit(2);
+  }
+
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.stack || error.message : String(error));
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  isDeployedSmokeOrigin,
+};

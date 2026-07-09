@@ -14,6 +14,16 @@ type TriggerReason =
   | 'focus'
   | 'manual';
 
+type TriggerSkipReason =
+  | 'handoff_not_ready'
+  | 'cooldown'
+  | 'auth_not_ready'
+  | 'offline'
+  | 'hidden'
+  | 'min_visible_not_reached';
+
+type TriggerRunResult = 'activated' | 'skipped' | 'ready';
+
 @Injectable({
   providedIn: 'root'
 })
@@ -81,6 +91,7 @@ export class StartupTierOrchestratorService {
   }
 
   markAuthReady(): void {
+    if (this.destroyed) return;
     this.authReady = true;
     if (this.handoffReady) {
       void this.triggerNow('p2', 'auth-ready');
@@ -107,6 +118,7 @@ export class StartupTierOrchestratorService {
     if (!this.p2SafetyTimer) {
       // 安全兜底：handoff 后若 P2 在 8s 内仍未激活，则强制推进，避免同步层永久饿死。
       this.p2SafetyTimer = setTimeout(() => {
+        if (this.destroyed) return;
         if (this.isTierReady('p2')) return;
         this.addBreadcrumb('startup.tier.p2.safety_force', { reason: 'timeout_8s' });
         this.authReady = true;
@@ -132,17 +144,32 @@ export class StartupTierOrchestratorService {
     const current = this.triggerPromise.get(tier);
     if (current) return current;
 
-    const running = this.runTrigger(tier, reason)
-      .catch(() => {
-        // 编排层仅做 gating，失败不向上抛，避免阻断主流程
-      })
-      .finally(() => {
-        if (this.triggerPromise.get(tier) === running) {
-          this.triggerPromise.delete(tier);
-        }
-      });
+    const running = Promise.resolve().finally(() => {
+      if (this.triggerPromise.get(tier) === running) {
+        this.triggerPromise.delete(tier);
+      }
+    });
 
     this.triggerPromise.set(tier, running);
+    let result: TriggerRunResult;
+    try {
+      result = this.runTrigger(tier, reason);
+    } catch {
+      if (this.triggerPromise.get(tier) === running) {
+        this.triggerPromise.delete(tier);
+      }
+      // 编排层仅做 gating，失败不向上抛，避免阻断主流程
+      return;
+    }
+
+    // 只让真实激活路径保留 single-flight；同步 skip 不能挡住同 tick 的状态变化触发。
+    if (result !== 'activated') {
+      if (this.triggerPromise.get(tier) === running) {
+        this.triggerPromise.delete(tier);
+      }
+      return;
+    }
+
     return running;
   }
 
@@ -150,110 +177,151 @@ export class StartupTierOrchestratorService {
     if (this.destroyed) return;
     this.destroyed = true;
 
-    if (this.p1Timer) {
+    if (this.p1Timer !== null) {
       clearTimeout(this.p1Timer);
       this.p1Timer = null;
     }
-    if (this.p2Timer) {
+    if (this.p2Timer !== null) {
       clearTimeout(this.p2Timer);
       this.p2Timer = null;
     }
-    if (this.p2SafetyTimer) {
+    if (this.p2SafetyTimer !== null) {
       clearTimeout(this.p2SafetyTimer);
       this.p2SafetyTimer = null;
     }
-    if (this.minVisibleTimer) {
+    if (this.minVisibleTimer !== null) {
       clearTimeout(this.minVisibleTimer);
       this.minVisibleTimer = null;
     }
 
     if (typeof window !== 'undefined') {
-      window.removeEventListener('online', this.onlineListener);
-      window.removeEventListener('focus', this.focusListener);
+      this.runDestroyCleanup('window.online', () => {
+        window.removeEventListener('online', this.onlineListener);
+      });
+      this.runDestroyCleanup('window.focus', () => {
+        window.removeEventListener('focus', this.focusListener);
+      });
     }
     if (typeof document !== 'undefined') {
-      document.removeEventListener('visibilitychange', this.visibilityListener);
+      this.runDestroyCleanup('document.visibilitychange', () => {
+        document.removeEventListener('visibilitychange', this.visibilityListener);
+      });
     }
   }
 
-  private async runTrigger(tier: StartupTier, reason: TriggerReason): Promise<void> {
-    if (this.isTierReady(tier)) return;
-
-    if (tier !== 'p0' && !this.handoffReady) {
-      this.addBreadcrumb('startup.tier.skip_reason', {
-        tier,
-        reason,
-        skip: 'handoff_not_ready'
-      });
-      return;
-    }
+  private runTrigger(tier: StartupTier, reason: TriggerReason): TriggerRunResult {
+    if (this.isTierReady(tier)) return 'ready';
 
     const now = Date.now();
-    const cooldown = STARTUP_PERF_CONFIG.SYNC_EVENT_COOLDOWN_MS;
-    const last = this.lastTriggerAt.get(tier) ?? 0;
-    if (now - last < cooldown) {
-      this.addBreadcrumb('startup.tier.skip_reason', {
-        tier,
-        reason,
-        skip: 'cooldown'
-      });
-      return;
+    if (this.shouldSkipTrigger(tier, reason, now)) {
+      return 'skipped';
     }
 
     if (tier === 'p1') {
-      this.lastTriggerAt.set(tier, now);
-      this.setTier('p1', true, reason);
+      this.activateTier('p1', reason, now);
+      return 'activated';
+    }
+
+    if (tier === 'p2' && this.canActivateP2(reason, now)) {
+      this.activateTier('p2', reason, now);
+      return 'activated';
+    }
+
+    return 'skipped';
+  }
+
+  private shouldSkipTrigger(tier: StartupTier, reason: TriggerReason, now: number): boolean {
+    if (tier !== 'p0' && !this.handoffReady) {
+      this.addSkipBreadcrumb(tier, reason, 'handoff_not_ready');
+      return true;
+    }
+
+    const cooldown = STARTUP_PERF_CONFIG.SYNC_EVENT_COOLDOWN_MS;
+    const last = this.lastTriggerAt.get(tier) ?? 0;
+    if (now - last < cooldown) {
+      this.addSkipBreadcrumb(tier, reason, 'cooldown');
+      return true;
+    }
+
+    return false;
+  }
+
+  private canActivateP2(reason: TriggerReason, now: number): boolean {
+    if (!this.authReady) {
+      this.addSkipBreadcrumb('p2', reason, 'auth_not_ready');
+      return false;
+    }
+
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      this.addSkipBreadcrumb('p2', reason, 'offline');
+      return false;
+    }
+
+    if (typeof document !== 'undefined' && document.hidden) {
+      this.addSkipBreadcrumb('p2', reason, 'hidden');
+      return false;
+    }
+
+    return this.hasMetMinimumVisibleTime(reason, now);
+  }
+
+  private hasMetMinimumVisibleTime(reason: TriggerReason, now: number): boolean {
+    const visibleElapsed = now - this.visibleSince;
+    const minVisible = STARTUP_PERF_CONFIG.P2_SYNC_MIN_VISIBLE_MS;
+    if (visibleElapsed >= minVisible) {
+      return true;
+    }
+
+    const waitMs = minVisible - visibleElapsed;
+    if (this.minVisibleTimer) clearTimeout(this.minVisibleTimer);
+    const minVisibleTimer = setTimeout(() => {
+      if (this.minVisibleTimer !== minVisibleTimer) return;
+      this.minVisibleTimer = null;
+      void this.triggerNow('p2', 'visible');
+    }, waitMs);
+    this.minVisibleTimer = minVisibleTimer;
+    this.addSkipBreadcrumb('p2', reason, 'min_visible_not_reached', { waitMs });
+    return false;
+  }
+
+  private activateTier(tier: StartupTier, reason: TriggerReason, now: number): void {
+    this.lastTriggerAt.set(tier, now);
+    this.setTier(tier, true, reason);
+  }
+
+  private runDestroyCleanup(resource: string, cleanup: () => void): void {
+    try {
+      cleanup();
       return;
+    } catch (error) {
+      this.addBreadcrumb('startup.tier.cleanup_failed', {
+        resource,
+        error: error instanceof Error ? error.message : String(error),
+      }, 'warning');
     }
 
-    if (tier === 'p2') {
-      if (!this.authReady) {
-        this.addBreadcrumb('startup.tier.skip_reason', {
-          tier,
-          reason,
-          skip: 'auth_not_ready'
-        });
-        return;
-      }
-
-      if (typeof navigator !== 'undefined' && !navigator.onLine) {
-        this.addBreadcrumb('startup.tier.skip_reason', {
-          tier,
-          reason,
-          skip: 'offline'
-        });
-        return;
-      }
-
-      if (typeof document !== 'undefined' && document.hidden) {
-        this.addBreadcrumb('startup.tier.skip_reason', {
-          tier,
-          reason,
-          skip: 'hidden'
-        });
-        return;
-      }
-
-      const visibleElapsed = now - this.visibleSince;
-      const minVisible = STARTUP_PERF_CONFIG.P2_SYNC_MIN_VISIBLE_MS;
-      if (visibleElapsed < minVisible) {
-        const waitMs = minVisible - visibleElapsed;
-        if (this.minVisibleTimer) clearTimeout(this.minVisibleTimer);
-        this.minVisibleTimer = setTimeout(() => {
-          void this.triggerNow('p2', 'visible');
-        }, waitMs);
-        this.addBreadcrumb('startup.tier.skip_reason', {
-          tier,
-          reason,
-          skip: 'min_visible_not_reached',
-          waitMs,
-        });
-        return;
-      }
-
-      this.lastTriggerAt.set(tier, now);
-      this.setTier('p2', true, reason);
+    try {
+      cleanup();
+    } catch (error) {
+      this.addBreadcrumb('startup.tier.cleanup_failed', {
+        resource,
+        error: error instanceof Error ? error.message : String(error),
+      }, 'warning');
     }
+  }
+
+  private addSkipBreadcrumb(
+    tier: StartupTier,
+    reason: TriggerReason,
+    skip: TriggerSkipReason,
+    data: Record<string, unknown> = {},
+  ): void {
+    this.addBreadcrumb('startup.tier.skip_reason', {
+      tier,
+      reason,
+      skip,
+      ...data,
+    });
   }
 
   private setTier(tier: StartupTier, ready: boolean, reason: TriggerReason): void {
@@ -273,12 +341,20 @@ export class StartupTierOrchestratorService {
     this.addBreadcrumb(`startup.tier.${tier}.done`, { tier, reason, ready });
   }
 
-  private addBreadcrumb(message: string, data: Record<string, unknown>): void {
-    this.sentry.addBreadcrumb({
-      category: 'startup',
-      message,
-      level: 'info',
-      data,
-    });
+  private addBreadcrumb(
+    message: string,
+    data: Record<string, unknown>,
+    level: 'info' | 'warning' = 'info',
+  ): void {
+    try {
+      this.sentry.addBreadcrumb({
+        category: 'startup',
+        message,
+        level,
+        data,
+      });
+    } catch {
+      // Startup breadcrumbs are observational and must not block tier progression or cleanup.
+    }
   }
 }

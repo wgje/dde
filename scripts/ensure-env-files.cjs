@@ -88,7 +88,7 @@ function ensureEnvFiles() {
   const supabaseProjectAlias = process.env.NG_APP_SUPABASE_PROJECT_ALIAS || localEnv.NG_APP_SUPABASE_PROJECT_ALIAS || 'local';
   const sentryRelease = process.env.NG_APP_SENTRY_RELEASE || localEnv.NG_APP_SENTRY_RELEASE || '';
   const syncRpcEnabled = parseBooleanEnv(process.env.NG_APP_SYNC_RPC_ENABLED || localEnv.NG_APP_SYNC_RPC_ENABLED, false);
-  const syncLeaseEnabled = parseBooleanEnv(process.env.NG_APP_SYNC_LEASE_ENABLED || localEnv.NG_APP_SYNC_LEASE_ENABLED, false);
+  const syncLeaseEnabled = parseBooleanEnv(process.env.NG_APP_SYNC_LEASE_ENABLED || localEnv.NG_APP_SYNC_LEASE_ENABLED, true);
   const syncProtocolVersion = parseNumberEnv(process.env.NG_APP_SYNC_PROTOCOL_VERSION || localEnv.NG_APP_SYNC_PROTOCOL_VERSION, 1);
   const deploymentEpoch = parseNumberEnv(process.env.NG_APP_DEPLOYMENT_EPOCH || localEnv.NG_APP_DEPLOYMENT_EPOCH, 0);
   const logs = [];

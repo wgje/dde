@@ -6,6 +6,9 @@
  */
 import { vi, beforeEach, afterEach } from 'vitest';
 import 'fake-indexeddb/auto';
+import { createBrowserStorageResetController } from './test-setup-browser-storage.mock';
+import { resetBrowserNetworkSuspensionTrackingForTests } from './utils/browser-network-suspension';
+export { createMockDestroyRef } from './test-setup-destroy-ref.mock';
 
 // ============================================
 // 🔒 全局模块 Mock（在任何导入之前）
@@ -22,7 +25,7 @@ import 'fake-indexeddb/auto';
  */
 const createChainableQuery = (defaultResponse = { data: null, error: null }) => {
   const mock: Record<string, unknown> = {};
-  
+
   // 链式方法（返回 this）
   const chainMethods = [
     'select', 'insert', 'update', 'upsert', 'delete',
@@ -44,7 +47,7 @@ const createChainableQuery = (defaultResponse = { data: null, error: null }) => 
   // 支持 await query 直接返回结果
   mock.then = (resolve: (value: unknown) => void) => 
     Promise.resolve(defaultResponse).then(resolve);
-  
+
   return mock;
 };
 
@@ -270,6 +273,9 @@ if (typeof globalThis.sessionStorage === 'undefined') {
   });
 }
 
+const { restoreBrowserStorageForTests, clearBrowserStorageForTests } =
+  createBrowserStorageResetController();
+
 const ensureNavigator = (): Navigator & Record<string, unknown> => {
   const globalWithNavigator = globalThis as typeof globalThis & { navigator?: Navigator & Record<string, unknown> };
   if (typeof globalWithNavigator.navigator === 'undefined') {
@@ -374,70 +380,170 @@ if (isIndexedDbFallback) {
 }
 
 // ============================================
-// DestroyRef Mock 工厂
-// @see docs/test-architecture-modernization-plan.md Section 2.2.3
-// ============================================
-
-/**
- * 创建 DestroyRef Mock 工厂函数
- * 用于测试使用 inject(DestroyRef) 的服务
- * 
- * @example
- * const { destroyRef, destroy } = createMockDestroyRef();
- * const injector = Injector.create({
- *   providers: [{ provide: DestroyRef, useValue: destroyRef }]
- * });
- * // 触发销毁回调
- * destroy();
- */
-export function createMockDestroyRef() {
-  const callbacks: Array<() => void> = [];
-  
-  const destroyRef = {
-    onDestroy: vi.fn((callback: () => void) => {
-      callbacks.push(callback);
-      // 返回取消注册函数
-      return () => {
-        const index = callbacks.indexOf(callback);
-        if (index > -1) callbacks.splice(index, 1);
-      };
-    }),
-  };
-  
-  const destroy = () => {
-    callbacks.forEach(cb => cb());
-    callbacks.length = 0;
-  };
-  
-  return { destroyRef, destroy };
-}
-
-// ============================================
 // 清理函数
 // ============================================
 
-export function resetMocks() {
-  localStorageMock.clear();
-  if (typeof globalThis.sessionStorage !== 'undefined') {
-    globalThis.sessionStorage.clear();
+const initialDocumentVisibilityStateDescriptor = typeof document === 'undefined'
+  ? undefined
+  : Object.getOwnPropertyDescriptor(document, 'visibilityState');
+
+function resetDocumentVisibilityForTests(): void {
+  if (typeof document === 'undefined') return;
+
+  if (initialDocumentVisibilityStateDescriptor) {
+    Object.defineProperty(document, 'visibilityState', initialDocumentVisibilityStateDescriptor);
   }
+
+  if (document.visibilityState !== 'visible') {
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      value: 'visible',
+    });
+  }
+}
+
+function resetIndexedDatabasesForTests(): void {
   if (isIndexedDbFallback) {
     Object.keys(indexedDBStores).forEach(k => delete indexedDBStores[k]);
-  } else if (typeof indexedDB !== 'undefined') {
-    const dbFactory = indexedDB as IDBFactory & {
-      databases?: () => Promise<Array<{ name?: string | null }>>;
-    };
+  }
+}
 
-    if (typeof dbFactory.databases === 'function') {
-      dbFactory.databases()
-        .then(dbs => dbs.forEach(db => {
-          if (db?.name) indexedDB.deleteDatabase(db.name);
-        }))
-        .catch(() => undefined);
-    }
+type VitestMockFunction = ReturnType<typeof vi.fn>;
+
+function asVitestMock(value: unknown): VitestMockFunction {
+  return value as VitestMockFunction;
+}
+
+function resetChainableSupabaseQueryMock(): void {
+  const defaultResponse = { data: null, error: null };
+  const chainMethods = [
+    'select', 'insert', 'update', 'upsert', 'delete',
+    'eq', 'neq', 'gt', 'gte', 'lt', 'lte',
+    'like', 'ilike', 'is', 'in', 'contains', 'containedBy',
+    'order', 'limit', 'range', 'filter', 'not', 'or', 'and',
+    'textSearch', 'match', 'overlaps', 'rangeGt', 'rangeLt',
+  ];
+
+  for (const method of chainMethods) {
+    asVitestMock(mockSupabaseQuery[method]).mockReset();
+    asVitestMock(mockSupabaseQuery[method]).mockReturnValue(mockSupabaseQuery);
   }
 
-  // 只清理 setup 内部的全局 mock（Sentry/Supabase），避免全局 clearAllMocks 的性能开销。
+  asVitestMock(mockSupabaseQuery.single).mockReset();
+  asVitestMock(mockSupabaseQuery.single).mockResolvedValue(defaultResponse);
+  asVitestMock(mockSupabaseQuery.maybeSingle).mockReset();
+  asVitestMock(mockSupabaseQuery.maybeSingle).mockResolvedValue(defaultResponse);
+  asVitestMock(mockSupabaseQuery.throwOnError).mockReset();
+  asVitestMock(mockSupabaseQuery.throwOnError).mockReturnValue(mockSupabaseQuery);
+  mockSupabaseQuery.then = (resolve: (value: unknown) => void) =>
+    Promise.resolve(defaultResponse).then(resolve);
+}
+
+function resetSupabaseMocksForTests(): void {
+  resetChainableSupabaseQueryMock();
+  resetSupabaseClientMocksForTests();
+  resetSupabaseAuthMocksForTests();
+  resetSupabaseStorageMocksForTests();
+  resetSupabaseChannelMocksForTests();
+}
+
+function resetSupabaseClientMocksForTests(): void {
+  mockSupabaseClient.from.mockReset();
+  mockSupabaseClient.from.mockImplementation((_table?: string) => mockSupabaseQuery);
+  mockSupabaseClient.rpc.mockReset();
+  mockSupabaseClient.rpc.mockResolvedValue({ data: null, error: null });
+  mockSupabaseClient.channel.mockReset();
+  mockSupabaseClient.channel.mockImplementation(() => mockSupabaseChannel);
+  mockSupabaseClient.removeChannel.mockReset();
+  mockSupabaseClient.removeChannel.mockResolvedValue('ok');
+  mockSupabaseClient.removeAllChannels.mockReset();
+  mockSupabaseClient.removeAllChannels.mockResolvedValue([]);
+  mockSupabaseClient.getChannels.mockReset();
+  mockSupabaseClient.getChannels.mockReturnValue([]);
+  mockSupabaseClient.realtime.connect.mockReset();
+  mockSupabaseClient.realtime.disconnect.mockReset();
+  mockSupabaseClient.realtime.setAuth.mockReset();
+  mockSupabaseClient.functions.invoke.mockReset();
+  mockSupabaseClient.functions.invoke.mockResolvedValue({ data: null, error: null });
+}
+
+function resetSupabaseAuthMocksForTests(): void {
+  mockSupabaseAuth.getSession.mockReset();
+  mockSupabaseAuth.getSession.mockResolvedValue({ data: { session: null }, error: null });
+  mockSupabaseAuth.getUser.mockReset();
+  mockSupabaseAuth.getUser.mockResolvedValue({ data: { user: null }, error: null });
+  mockSupabaseAuth.onAuthStateChange.mockReset();
+  mockSupabaseAuth.onAuthStateChange.mockImplementation(() => ({
+    data: {
+      subscription: { unsubscribe: vi.fn() },
+    },
+  }));
+  mockSupabaseAuth.signInWithPassword.mockReset();
+  mockSupabaseAuth.signInWithPassword.mockResolvedValue({ data: { session: null, user: null }, error: null });
+  mockSupabaseAuth.signUp.mockReset();
+  mockSupabaseAuth.signUp.mockResolvedValue({ data: { session: null, user: null }, error: null });
+  mockSupabaseAuth.signOut.mockReset();
+  mockSupabaseAuth.signOut.mockResolvedValue({ error: null });
+  mockSupabaseAuth.signInWithOAuth.mockReset();
+  mockSupabaseAuth.signInWithOAuth.mockResolvedValue({ data: { provider: 'google', url: 'mock-url' }, error: null });
+  mockSupabaseAuth.signInWithOtp.mockReset();
+  mockSupabaseAuth.signInWithOtp.mockResolvedValue({ data: { messageId: 'mock-id' }, error: null });
+  mockSupabaseAuth.verifyOtp.mockReset();
+  mockSupabaseAuth.verifyOtp.mockResolvedValue({ data: { session: null, user: null }, error: null });
+  mockSupabaseAuth.refreshSession.mockReset();
+  mockSupabaseAuth.refreshSession.mockResolvedValue({ data: { session: null, user: null }, error: null });
+  mockSupabaseAuth.updateUser.mockReset();
+  mockSupabaseAuth.updateUser.mockResolvedValue({ data: { user: null }, error: null });
+  mockSupabaseAuth.resetPasswordForEmail.mockReset();
+  mockSupabaseAuth.resetPasswordForEmail.mockResolvedValue({ data: {}, error: null });
+  mockSupabaseAuth.setSession.mockReset();
+  mockSupabaseAuth.setSession.mockResolvedValue({ data: { session: null, user: null }, error: null });
+  mockSupabaseAuth.exchangeCodeForSession.mockReset();
+  mockSupabaseAuth.exchangeCodeForSession.mockResolvedValue({ data: { session: null, user: null }, error: null });
+}
+
+function resetSupabaseStorageMocksForTests(): void {
+  mockSupabaseStorage.from.mockReset();
+  mockSupabaseStorage.from.mockImplementation((bucket: string) => createStorageBucketMock(bucket));
+  mockSupabaseStorage.listBuckets.mockReset();
+  mockSupabaseStorage.listBuckets.mockResolvedValue({ data: [], error: null });
+  mockSupabaseStorage.getBucket.mockReset();
+  mockSupabaseStorage.getBucket.mockResolvedValue({ data: { id: 'mock-bucket', name: 'mock-bucket' }, error: null });
+  mockSupabaseStorage.createBucket.mockReset();
+  mockSupabaseStorage.createBucket.mockResolvedValue({ data: { name: 'new-bucket' }, error: null });
+  mockSupabaseStorage.updateBucket.mockReset();
+  mockSupabaseStorage.updateBucket.mockResolvedValue({ data: { message: 'updated' }, error: null });
+  mockSupabaseStorage.deleteBucket.mockReset();
+  mockSupabaseStorage.deleteBucket.mockResolvedValue({ data: { message: 'deleted' }, error: null });
+  mockSupabaseStorage.emptyBucket.mockReset();
+  mockSupabaseStorage.emptyBucket.mockResolvedValue({ data: { message: 'emptied' }, error: null });
+}
+
+function resetSupabaseChannelMocksForTests(): void {
+  mockSupabaseChannel.on.mockReset();
+  mockSupabaseChannel.on.mockReturnThis();
+  mockSupabaseChannel.subscribe.mockReset();
+  mockSupabaseChannel.subscribe.mockImplementation((callback?: (status: string) => void) => {
+    if (callback) callback('SUBSCRIBED');
+    return mockSupabaseChannel;
+  });
+  mockSupabaseChannel.unsubscribe.mockReset();
+  mockSupabaseChannel.unsubscribe.mockResolvedValue('ok');
+  mockSupabaseChannel.send.mockReset();
+  mockSupabaseChannel.send.mockResolvedValue('ok');
+  mockSupabaseChannel.track.mockReset();
+  mockSupabaseChannel.track.mockResolvedValue('ok');
+  mockSupabaseChannel.untrack.mockReset();
+  mockSupabaseChannel.untrack.mockResolvedValue('ok');
+}
+
+export async function resetMocks() {
+  restoreBrowserStorageForTests();
+  clearBrowserStorageForTests();
+  resetDocumentVisibilityForTests();
+  resetIndexedDatabasesForTests();
+
+  // 只清理 setup 内部的全局 mock，避免全局 clearAllMocks 的性能开销。
   sentryMock.captureException.mockClear();
   sentryMock.captureMessage.mockClear();
   sentryMock.addBreadcrumb.mockClear();
@@ -449,34 +555,11 @@ export function resetMocks() {
   mockSentryLazyLoaderService.addBreadcrumb.mockClear();
   mockSentryLazyLoaderService.withScope.mockClear();
   mockSentryLazyLoaderService.setUser.mockClear();
-
-  // Supabase Client
-  mockSupabaseClient.from.mockClear();
-  mockSupabaseClient.rpc.mockClear();
-  mockSupabaseClient.channel.mockClear();
-  mockSupabaseClient.removeChannel.mockClear();
-  mockSupabaseClient.removeAllChannels.mockClear();
-  
-  // Supabase Auth
-  mockSupabaseAuth.getSession.mockClear();
-  mockSupabaseAuth.getUser.mockClear();
-  mockSupabaseAuth.onAuthStateChange.mockClear();
-  mockSupabaseAuth.signInWithPassword.mockClear();
-  mockSupabaseAuth.signUp.mockClear();
-  mockSupabaseAuth.signOut.mockClear();
-  mockSupabaseAuth.refreshSession.mockClear();
-  
-  // Supabase Storage
-  mockSupabaseStorage.from.mockClear();
-  
-  // Supabase Realtime Channel
-  mockSupabaseChannel.on.mockClear();
-  mockSupabaseChannel.subscribe.mockClear();
-  mockSupabaseChannel.unsubscribe.mockClear();
+  resetSupabaseMocksForTests();
 }
 
-beforeEach(() => {
-  resetMocks();
+beforeEach(async () => {
+  await resetMocks();
 });
 
 // ============================================
@@ -595,9 +678,12 @@ const normalizeTimersAfterEach = () => {
 
 afterEach(() => {
   if (!POLLUTION_GUARD_ENABLED || pollutionGuardConfig.disabled) {
+    resetBrowserNetworkSuspensionTrackingForTests();
     normalizeTimersAfterEach();
     return;
   }
+
+  resetBrowserNetworkSuspensionTrackingForTests();
 
   const leakedListeners = Array.from(listenerRegistry.values())
     .reduce((count, registry) => {

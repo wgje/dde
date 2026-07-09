@@ -8,6 +8,18 @@ import * as go from 'gojs';
 
 const POINTER_FALLBACK_GRACE_MS = TIMEOUT_CONFIG.QUICK;
 
+interface TouchResizeHandler {
+  startResize: (event: TouchEvent) => void;
+  cleanup: () => void;
+}
+
+interface TouchResizeOptions {
+  onHeightChange: (height: number) => void;
+  getInitialHeight: () => number;
+  calculateHeight: (startHeight: number, startY: number, currentY: number) => number;
+  onResizingChange?: (isResizing: boolean) => void;
+}
+
 /**
  * 触摸拖放回调
  */
@@ -17,12 +29,12 @@ export interface TouchDropCallback {
 
 /**
  * FlowTouchService - 移动端触摸处理服务
- * 
+ *
  * 职责：
  * - 移动端触摸拖放（长按开始拖动）
  * - 幽灵元素管理
  * - 触摸事件节流
- * 
+ *
  * 设计原则：
  * - 封装所有触摸相关逻辑
  * - 管理触摸状态机
@@ -37,14 +49,14 @@ export class FlowTouchService {
   private readonly zone = inject(NgZone);
   private readonly dragDropService = inject(FlowDragDropService);
   private activeInteractionType: 'touch' | 'pointer' | null = null;
-  
+
   // ========== 状态 ==========
-  
+
   /** 当前正在拖动的待分配任务ID */
   readonly draggingId = signal<string | null>(null);
   /** 待分配移动端拖拽会话是否存在（含长按前预备态）。 */
   readonly hasActiveSession = signal(false);
-  
+
   /** 触摸状态 */
   private touchState: UnassignedTouchState = createInitialUnassignedTouchState();
   /** 最近一次有效触点位置，用于 touchcancel / 丢失 touchend 兜底。 */
@@ -60,6 +72,7 @@ export class FlowTouchService {
   private pendingPointerFallbackCleanup: ReturnType<typeof setTimeout> | null = null;
   /** 进入 pointer fallback 后，由 pointermove 继续维持拖拽会话。 */
   private awaitingPointerFallback = false;
+  private pointerFallbackExpired: (() => void) | undefined;
 
   // ========== 流程图节点拖拽幽灵（移动端） ==========
 
@@ -68,32 +81,33 @@ export class FlowTouchService {
 
   /** 流程图节点拖拽的幽灵元素（与待分配长按拖拽的 ghost 分离，互不干扰） */
   private diagramDragGhost: HTMLElement | null = null;
-  
+
   /** 销毁标志 */
   private isDestroyed = false;
-  
+
   /** 活动的全局事件监听器（用于清理） */
   private activeListeners: Array<{
     type: string;
     handler: EventListener;
     options?: boolean | AddEventListenerOptions;
   }> = [];
-  
+
   // ========== 公开方法 ==========
-  
+
   /**
    * 触摸开始（待分配块）
    * @param event 触摸事件
    * @param task 被触摸的任务
    */
-  startTouch(event: TouchEvent, task: Task): void {
-    if (event.touches.length !== 1 || this.isDestroyed) return;
+  startTouch(event: TouchEvent, task: Task): boolean {
+    if (event.touches.length !== 1 || this.isDestroyed) return false;
 
     this.cleanup();
 
     const touch = event.touches[0];
     this.beginInteraction(task, touch.clientX, touch.clientY, 'touch');
     this.activeTouchId = touch.identifier ?? null;
+    return true;
   }
 
   /**
@@ -121,7 +135,7 @@ export class FlowTouchService {
 
     return true;
   }
-  
+
   /**
    * 触摸移动
    * @param event 触摸事件
@@ -130,7 +144,7 @@ export class FlowTouchService {
   handleTouchMove(event: TouchEvent): boolean {
     if (this.activeInteractionType !== 'touch') return false;
     if (!this.touchState.task || event.touches.length < 1) return false;
-    
+
     const touch = this.findTrackedTouch(event.touches);
     if (!touch) return false;
     return this.handleTrackedMove(touch.clientX, touch.clientY);
@@ -146,7 +160,7 @@ export class FlowTouchService {
 
     return this.handleTrackedMove(event.clientX, event.clientY);
   }
-  
+
   /**
    * 触摸结束
    * @param event 触摸事件
@@ -255,7 +269,7 @@ export class FlowTouchService {
    * 某些移动端浏览器在手指拖出源区域时会先发 touchcancel，再补 pointerup。
    * 拖拽中遇到该场景时先保留会话，等待 pointer 兜底完成真正 drop。
    */
-  deferCancelForPointerFallback(): boolean {
+  deferCancelForPointerFallback(onExpired?: () => void): boolean {
     if (this.activeInteractionType !== 'touch') {
       return false;
     }
@@ -264,6 +278,7 @@ export class FlowTouchService {
     }
 
     this.awaitingPointerFallback = true;
+    this.pointerFallbackExpired = onExpired;
     this.armPointerFallbackCleanup();
 
     return true;
@@ -316,39 +331,43 @@ export class FlowTouchService {
     clientX?: number,
     clientY?: number,
   ): void {
-    if (this.touchState.longPressTimer) {
-      clearTimeout(this.touchState.longPressTimer);
-    }
-    
-    const { task, isDragging } = this.touchState;
-    const resolvedClientX = clientX ?? this.lastTouchClientX;
-    const resolvedClientY = clientY ?? this.lastTouchClientY;
-    
-    if (task && isDragging && diagram && diagramDiv) {
-      const diagramRect = diagramDiv.getBoundingClientRect();
-      
-      // 检查是否在流程图区域内
-      if (resolvedClientX >= diagramRect.left && resolvedClientX <= diagramRect.right &&
-          resolvedClientY >= diagramRect.top && resolvedClientY <= diagramRect.bottom) {
-        
-        // 转换为流程图坐标
-        const x = resolvedClientX - diagramRect.left;
-        const y = resolvedClientY - diagramRect.top;
-        const pt = new go.Point(x, y);
-        const loc = diagram.transformViewToDoc(pt);
-        
-        // 查找插入位置
-        const insertInfo = this.dragDropService.findInsertPosition(loc, diagram);
-        
-        this.zone.run(() => {
-          callback(task, insertInfo, loc);
-        });
+    try {
+      if (this.touchState.longPressTimer !== null) {
+        const longPressTimer = this.touchState.longPressTimer;
+        this.touchState.longPressTimer = null;
+        this.clearTimerSafely(longPressTimer);
       }
+
+      const { task, isDragging } = this.touchState;
+      const resolvedClientX = clientX ?? this.lastTouchClientX;
+      const resolvedClientY = clientY ?? this.lastTouchClientY;
+
+      if (task && isDragging && diagram && diagramDiv) {
+        const diagramRect = diagramDiv.getBoundingClientRect();
+
+        // 检查是否在流程图区域内
+        if (resolvedClientX >= diagramRect.left && resolvedClientX <= diagramRect.right &&
+            resolvedClientY >= diagramRect.top && resolvedClientY <= diagramRect.bottom) {
+
+          // 转换为流程图坐标
+          const x = resolvedClientX - diagramRect.left;
+          const y = resolvedClientY - diagramRect.top;
+          const pt = new go.Point(x, y);
+          const loc = diagram.transformViewToDoc(pt);
+
+          // 查找插入位置
+          const insertInfo = this.dragDropService.findInsertPosition(loc, diagram);
+
+          this.zone.run(() => {
+            callback(task, insertInfo, loc);
+          });
+        }
+      }
+    } finally {
+      this.cleanup();
     }
-    
-    this.cleanup();
   }
-  
+
   /**
    * 清理状态
    */
@@ -356,13 +375,9 @@ export class FlowTouchService {
     const pointerCaptureElement = this.pointerCaptureElement;
     const activePointerId = this.activePointerId;
 
-    if (this.touchState.longPressTimer) {
-      clearTimeout(this.touchState.longPressTimer);
-    }
-    if (this.pendingPointerFallbackCleanup) {
-      clearTimeout(this.pendingPointerFallbackCleanup);
-      this.pendingPointerFallbackCleanup = null;
-    }
+    this.clearLongPressTimer();
+    this.clearPointerFallbackCleanupTimer();
+    this.pointerFallbackExpired = undefined;
     this.removeGhostElement();
     this.hasActiveSession.set(false);
     this.draggingId.set(null);
@@ -385,7 +400,7 @@ export class FlowTouchService {
       }
     }
   }
-  
+
   /**
    * 标记为已销毁并清理所有资源
    */
@@ -395,7 +410,7 @@ export class FlowTouchService {
     this.endDiagramNodeDragGhost();
     this.removeAllGlobalListeners();
   }
-  
+
   /**
    * 重置销毁标志（重新激活）
    */
@@ -453,9 +468,9 @@ export class FlowTouchService {
       try { el.remove(); } catch { /* GoJS 事件/DOM 操作防御性忽略 */ }
     });
   }
-  
+
   // ========== 抽屉拖动相关 ==========
-  
+
   /**
    * 创建抽屉拖动处理器
    * @param onHeightChange 高度变化回调
@@ -466,70 +481,19 @@ export class FlowTouchService {
     onHeightChange: (height: number) => void,
     onResizingChange: (isResizing: boolean) => void,
     getInitialHeight: () => number
-  ): {
-    startResize: (event: TouchEvent) => void;
-    cleanup: () => void;
-  } {
-    let isResizing = false;
-    let startY = 0;
-    let startHeight = 0;
-    let onMove: ((ev: TouchEvent) => void) | null = null;
-    let onEnd: (() => void) | null = null;
-    
-    const removeListeners = () => {
-      if (onMove) {
-        window.removeEventListener('touchmove', onMove as EventListener);
-        this.untrackListener('touchmove', onMove as EventListener);
+  ): TouchResizeHandler {
+    return this.createTouchResizeHandler({
+      onHeightChange,
+      getInitialHeight,
+      onResizingChange,
+      calculateHeight: (startHeight, startY, currentY) => {
+        const deltaY = startY - currentY;
+        const deltaVh = (deltaY / window.innerHeight) * 100;
+        return Math.max(15, Math.min(70, startHeight + deltaVh));
       }
-      if (onEnd) {
-        window.removeEventListener('touchend', onEnd);
-        window.removeEventListener('touchcancel', onEnd);
-        this.untrackListener('touchend', onEnd);
-        this.untrackListener('touchcancel', onEnd);
-      }
-      onMove = null;
-      onEnd = null;
-    };
-    
-    return {
-      startResize: (event: TouchEvent) => {
-        if (event.touches.length !== 1) return;
-        event.preventDefault();
-        
-        isResizing = true;
-        onResizingChange(true);
-        startY = event.touches[0].clientY;
-        startHeight = getInitialHeight();
-        
-        onMove = (ev: TouchEvent) => {
-          if (!isResizing || ev.touches.length !== 1) return;
-          ev.preventDefault();
-          
-          const deltaY = startY - ev.touches[0].clientY;
-          const deltaVh = (deltaY / window.innerHeight) * 100;
-          const newHeight = Math.max(15, Math.min(70, startHeight + deltaVh));
-          onHeightChange(newHeight);
-        };
-        
-        onEnd = () => {
-          isResizing = false;
-          onResizingChange(false);
-          removeListeners();
-        };
-        
-        window.addEventListener('touchmove', onMove as EventListener, { passive: false });
-        window.addEventListener('touchend', onEnd);
-        window.addEventListener('touchcancel', onEnd);
-        
-        // 追踪监听器
-        this.trackListener('touchmove', onMove as EventListener, { passive: false });
-        this.trackListener('touchend', onEnd);
-        this.trackListener('touchcancel', onEnd);
-      },
-      cleanup: removeListeners
-    };
+    });
   }
-  
+
   /**
    * 创建调色板拖动处理器
    * @param onHeightChange 高度变化回调
@@ -538,58 +502,66 @@ export class FlowTouchService {
   createPaletteResizeHandler(
     onHeightChange: (height: number) => void,
     getInitialHeight: () => number
-  ): {
-    startResize: (event: TouchEvent) => void;
-    cleanup: () => void;
-  } {
+  ): TouchResizeHandler {
+    return this.createTouchResizeHandler({
+      onHeightChange,
+      getInitialHeight,
+      calculateHeight: (startHeight, startY, currentY) => {
+        const delta = currentY - startY;
+        return Math.max(80, Math.min(500, startHeight + delta));
+      }
+    });
+  }
+
+  private createTouchResizeHandler(options: TouchResizeOptions): TouchResizeHandler {
     let isResizing = false;
     let startY = 0;
     let startHeight = 0;
     let onMove: ((ev: TouchEvent) => void) | null = null;
     let onEnd: (() => void) | null = null;
-    
+
     const removeListeners = () => {
-      if (onMove) {
-        window.removeEventListener('touchmove', onMove as EventListener);
-        this.untrackListener('touchmove', onMove as EventListener);
-      }
-      if (onEnd) {
-        window.removeEventListener('touchend', onEnd);
-        window.removeEventListener('touchcancel', onEnd);
-        this.untrackListener('touchend', onEnd);
-        this.untrackListener('touchcancel', onEnd);
-      }
+      const moveHandler = onMove;
+      const endHandler = onEnd;
       onMove = null;
       onEnd = null;
+      if (moveHandler) {
+        this.removeTrackedWindowListener('touchmove', moveHandler as EventListener);
+      }
+      if (endHandler) {
+        this.removeTrackedWindowListener('touchend', endHandler);
+        this.removeTrackedWindowListener('touchcancel', endHandler);
+      }
     };
-    
+
     return {
       startResize: (event: TouchEvent) => {
         if (event.touches.length !== 1) return;
         event.preventDefault();
-        
+        removeListeners();
+
         isResizing = true;
+        options.onResizingChange?.(true);
         startY = event.touches[0].clientY;
-        startHeight = getInitialHeight();
-        
+        startHeight = options.getInitialHeight();
+
         onMove = (ev: TouchEvent) => {
           if (!isResizing || ev.touches.length !== 1) return;
           ev.preventDefault();
-          
-          const delta = ev.touches[0].clientY - startY;
-          const newHeight = Math.max(80, Math.min(500, startHeight + delta));
-          onHeightChange(newHeight);
+
+          options.onHeightChange(options.calculateHeight(startHeight, startY, ev.touches[0].clientY));
         };
-        
+
         onEnd = () => {
           isResizing = false;
+          options.onResizingChange?.(false);
           removeListeners();
         };
-        
+
         window.addEventListener('touchmove', onMove as EventListener, { passive: false });
         window.addEventListener('touchend', onEnd);
         window.addEventListener('touchcancel', onEnd);
-        
+
         // 追踪监听器
         this.trackListener('touchmove', onMove as EventListener, { passive: false });
         this.trackListener('touchend', onEnd);
@@ -598,9 +570,9 @@ export class FlowTouchService {
       cleanup: removeListeners
     };
   }
-  
+
   // ========== 私有方法 ==========
-  
+
   /**
    * 创建幽灵元素
    */
@@ -650,10 +622,7 @@ export class FlowTouchService {
     const deltaY = Math.abs(clientY - this.touchState.startY);
 
     if (!this.touchState.isDragging && (deltaX > 15 || deltaY > 15)) {
-      if (this.touchState.longPressTimer) {
-        clearTimeout(this.touchState.longPressTimer);
-        this.touchState.longPressTimer = null;
-      }
+      this.clearLongPressTimer();
       return false;
     }
 
@@ -692,16 +661,40 @@ export class FlowTouchService {
   }
 
   private armPointerFallbackCleanup(): void {
-    if (this.pendingPointerFallbackCleanup) {
-      clearTimeout(this.pendingPointerFallbackCleanup);
-    }
+    this.clearPointerFallbackCleanupTimer();
 
     this.pendingPointerFallbackCleanup = setTimeout(() => {
       this.pendingPointerFallbackCleanup = null;
+      const onExpired = this.pointerFallbackExpired;
       this.cleanup();
+      onExpired?.();
     }, POINTER_FALLBACK_GRACE_MS);
   }
-  
+
+  private clearLongPressTimer(): void {
+    if (this.touchState.longPressTimer === null) return;
+
+    const longPressTimer = this.touchState.longPressTimer;
+    this.touchState.longPressTimer = null;
+    this.clearTimerSafely(longPressTimer);
+  }
+
+  private clearPointerFallbackCleanupTimer(): void {
+    if (this.pendingPointerFallbackCleanup === null) return;
+
+    const pendingPointerFallbackCleanup = this.pendingPointerFallbackCleanup;
+    this.pendingPointerFallbackCleanup = null;
+    this.clearTimerSafely(pendingPointerFallbackCleanup);
+  }
+
+  private clearTimerSafely(timer: ReturnType<typeof setTimeout>): void {
+    try {
+      clearTimeout(timer);
+    } catch {
+      // Timer cleanup is best-effort; local handles are invalidated first.
+    }
+  }
+
   /**
    * 移除幽灵元素
    */
@@ -711,14 +704,14 @@ export class FlowTouchService {
       this.touchState.ghost = null;
     }
   }
-  
+
   /**
    * 追踪全局事件监听器
    */
   private trackListener(type: string, handler: EventListener, options?: boolean | AddEventListenerOptions): void {
     this.activeListeners.push({ type, handler, options });
   }
-  
+
   /**
    * 取消追踪监听器
    */
@@ -728,15 +721,31 @@ export class FlowTouchService {
       this.activeListeners.splice(index, 1);
     }
   }
-  
+
+  private removeTrackedWindowListener(type: string, handler: EventListener): void {
+    try {
+      window.removeEventListener(type, handler);
+    } catch {
+      // Listener cleanup is best-effort; always untrack below to avoid stale state.
+    } finally {
+      this.untrackListener(type, handler);
+    }
+  }
+
   /**
    * 移除所有活动的全局监听器
    */
   private removeAllGlobalListeners(): void {
-    for (const listener of this.activeListeners) {
-      window.removeEventListener(listener.type, listener.handler);
-    }
+    const listeners = this.activeListeners;
     this.activeListeners = [];
+
+    for (const listener of listeners) {
+      try {
+        window.removeEventListener(listener.type, listener.handler, listener.options);
+      } catch {
+        // Listener cleanup is best-effort during dispose; continue removing the rest.
+      }
+    }
   }
 
   // ========== GoJS SelectionMoved 幽灵清理监听 ==========
@@ -753,11 +762,16 @@ export class FlowTouchService {
     if (!isMobile || !diagramInstance) return;
     if (this.diagramSelectionMovedListener) return;
 
-    this.diagramSelectionMovedListener = () => {
+    const listener = () => {
       if (!isMobile) return;
       this.endDiagramNodeDragGhost();
     };
-    diagramInstance.addDiagramListener('SelectionMoved', this.diagramSelectionMovedListener);
+    try {
+      diagramInstance.addDiagramListener('SelectionMoved', listener);
+      this.diagramSelectionMovedListener = listener;
+    } catch (error) {
+      this.warnDiagramDragGhostListenerSetupFailure(error);
+    }
   }
 
   /**
@@ -771,5 +785,15 @@ export class FlowTouchService {
       // 忽略图表已销毁时的错误
     }
     this.diagramSelectionMovedListener = null;
+  }
+
+  private warnDiagramDragGhostListenerSetupFailure(error: unknown): void {
+    try {
+      this.logger.warn('流程图节点拖拽幽灵监听注册失败，已跳过本次安装并允许重试', {
+        message: error instanceof Error ? error.message : 'unknown',
+      });
+    } catch {
+      // Warning sinks must not interrupt diagram listener setup.
+    }
   }
 }

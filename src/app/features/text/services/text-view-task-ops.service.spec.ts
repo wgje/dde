@@ -2,6 +2,13 @@ import { ElementRef, NgZone, signal } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { TextViewTaskOpsService } from './text-view-task-ops.service';
+import { registerTextViewTaskOpsAutoScrollSpecs } from './text-view-task-ops-auto-scroll.spec-helpers';
+import { registerTextViewTaskOpsCreateSpecs } from './text-view-task-ops-create.spec-helpers';
+import {
+  createTask,
+  initTextViewTaskOpsContext,
+  type StageFixture,
+} from './text-view-task-ops.test-helpers';
 import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { UiStateService } from '../../../../services/ui-state.service';
@@ -31,12 +38,19 @@ describe('TextViewTaskOpsService', () => {
   const mockUserSession = {
     isHintOnlyStartupPlaceholderVisible: vi.fn(() => false),
   };
+  const mockParkingService = {
+    parkTask: vi.fn(),
+  };
+  const mockDockEngine = {
+    dockTask: vi.fn(),
+  };
   const stageFilter = signal<number | 'all'>('all');
   const stageViewRootFilter = signal<'all' | string>('all');
   const isTextUnassignedOpen = signal(false);
+  let currentStages: StageFixture[] = [];
   const mockProjectState = {
     getTask: vi.fn((_id?: string): Task | null => null),
-    stages: vi.fn(() => []),
+    stages: vi.fn((): StageFixture[] => currentStages),
     tasks: vi.fn(() => []),
     unassignedTasks: vi.fn(() => []),
   };
@@ -61,33 +75,8 @@ describe('TextViewTaskOpsService', () => {
     } as DOMRect);
   };
 
-  const createTask = (overrides: Partial<Task> = {}): Task => ({
-    id: overrides.id ?? 'task-1',
-    title: overrides.title ?? 'Task',
-    content: overrides.content ?? '',
-    stage: 'stage' in overrides ? overrides.stage! : 1,
-    parentId: overrides.parentId ?? null,
-    order: overrides.order ?? 1,
-    rank: overrides.rank ?? 1000,
-    status: overrides.status ?? 'active',
-    x: overrides.x ?? 0,
-    y: overrides.y ?? 0,
-    createdDate: overrides.createdDate ?? new Date().toISOString(),
-    updatedAt: overrides.updatedAt ?? new Date().toISOString(),
-    displayId: overrides.displayId ?? '1',
-    deletedAt: overrides.deletedAt ?? null,
-  });
-
   const initOpsContext = () => {
-    service.init({
-      selectedTaskId: signal<string | null>(null),
-      deleteConfirmTask: signal<Task | null>(null),
-      deleteKeepChildren: signal(false),
-      focusFlowNode: { emit: vi.fn() } as never,
-      isMobile: signal(false),
-      getStagesRef: () => undefined,
-      getUnassignedRef: () => undefined,
-    });
+    initTextViewTaskOpsContext(service);
   };
 
   beforeEach(() => {
@@ -152,8 +141,8 @@ describe('TextViewTaskOpsService', () => {
             })),
           },
         },
-        { provide: ParkingService, useValue: {} },
-        { provide: DockEngineService, useValue: {} },
+        { provide: ParkingService, useValue: mockParkingService },
+        { provide: DockEngineService, useValue: mockDockEngine },
         { provide: UserSessionService, useValue: mockUserSession },
         {
           provide: TextViewDragDropService,
@@ -169,236 +158,86 @@ describe('TextViewTaskOpsService', () => {
   stageFilter.set('all');
   stageViewRootFilter.set('all');
   isTextUnassignedOpen.set(false);
+  currentStages = [];
   mockProjectState.getTask.mockReturnValue(null);
-  mockProjectState.stages.mockReturnValue([]);
   mockProjectState.tasks.mockReturnValue([]);
   mockProjectState.unassignedTasks.mockReturnValue([]);
   mockUiState.setStageFilter.mockClear();
     mockUserSession.isHintOnlyStartupPlaceholderVisible.mockReturnValue(false);
     mockTaskOpsAdapter.addTask.mockReset();
     mockTaskOpsAdapter.repairMissingStageOne.mockReset();
+    mockTaskOpsAdapter.repairMissingStageOne.mockResolvedValue(true);
     mockToast.info.mockReset();
     mockToast.warning.mockReset();
     mockToast.error.mockReset();
+    mockParkingService.parkTask.mockReset();
+    mockDockEngine.dockTask.mockReset();
+    mockParkingService.parkTask.mockReturnValue(true);
+    mockDockEngine.dockTask.mockReturnValue(true);
   });
 
-  it('should prefer the stage task list when that list can scroll', () => {
-    Object.defineProperty(stageTaskList, 'clientHeight', {
-      configurable: true,
-      value: 180,
-    });
-    Object.defineProperty(stageTaskList, 'scrollHeight', {
-      configurable: true,
-      value: 540,
-    });
-
-    expect(service.resolveAutoScrollContainer(1)).toBe(stageTaskList);
+  registerTextViewTaskOpsAutoScrollSpecs({
+    service: () => service,
+    outerScrollContainer: () => outerScrollContainer,
+    stageScrollContainer: () => stageScrollContainer,
+    stageTaskList: () => stageTaskList,
   });
 
-  it('should fall back to the stage list container when the task list cannot scroll', () => {
-    Object.defineProperty(stageTaskList, 'clientHeight', {
-      configurable: true,
-      value: 180,
-    });
-    Object.defineProperty(stageTaskList, 'scrollHeight', {
-      configurable: true,
-      value: 180,
-    });
-
-    expect(service.resolveAutoScrollContainer(1)).toBe(stageScrollContainer);
-    expect(service.resolveAutoScrollContainer(null)).toBe(stageScrollContainer);
+  registerTextViewTaskOpsCreateSpecs({
+    service: () => service,
+    mockTaskOpsAdapter: () => mockTaskOpsAdapter,
+    mockToast: () => mockToast,
+    mockUiState: () => mockUiState,
+    mockUserSession: () => mockUserSession,
+    setStageFilter: value => stageFilter.set(value),
+    setCurrentStages: stages => {
+      currentStages = stages;
+    },
   });
 
-  it('should fall back to the outer text view container when neither task list nor stage list can scroll', () => {
-    Object.defineProperty(stageTaskList, 'clientHeight', {
-      configurable: true,
-      value: 180,
-    });
-    Object.defineProperty(stageTaskList, 'scrollHeight', {
-      configurable: true,
-      value: 180,
-    });
-    Object.defineProperty(stageScrollContainer, 'clientHeight', {
-      configurable: true,
-      value: 320,
-    });
-    Object.defineProperty(stageScrollContainer, 'scrollHeight', {
-      configurable: true,
-      value: 320,
+  it('should keep task selected when parking rejects the task', async () => {
+    const selectedTaskId = signal<string | null>('task-1');
+    mockParkingService.parkTask.mockReturnValue(false);
+
+    service.init({
+      selectedTaskId,
+      deleteConfirmTask: signal<Task | null>(null),
+      deleteKeepChildren: signal(false),
+      focusFlowNode: { emit: vi.fn() } as never,
+      isMobile: signal(false),
+      getStagesRef: () => undefined,
+      getUnassignedRef: () => undefined,
     });
 
-    expect(service.resolveAutoScrollContainer(1)).toBe(outerScrollContainer);
-    expect(service.resolveAutoScrollContainer(null)).toBe(outerScrollContainer);
+    await service.onParkTask(createTask({ id: 'task-1' }));
+
+    expect(mockParkingService.parkTask).toHaveBeenCalledWith('task-1');
+    expect(mockDockEngine.dockTask).not.toHaveBeenCalled();
+    expect(selectedTaskId()).toBe('task-1');
   });
 
-  it('should keep the outer text view container when pointer is outside the stage list edge zones', () => {
-    Object.defineProperty(stageTaskList, 'clientHeight', {
-      configurable: true,
-      value: 180,
-    });
-    Object.defineProperty(stageTaskList, 'scrollHeight', {
-      configurable: true,
-      value: 180,
-    });
+  it('should keep task selected when dock sync fails after parking succeeds', async () => {
+    const selectedTaskId = signal<string | null>('task-1');
+    mockDockEngine.dockTask.mockReturnValue(false);
 
-    expect(service.resolveAutoScrollContainer(null, 250)).toBe(outerScrollContainer);
-  });
-
-  it('should use the stage list when pointer enters its edge zone without an active stage task list', () => {
-    Object.defineProperty(stageTaskList, 'clientHeight', {
-      configurable: true,
-      value: 180,
-    });
-    Object.defineProperty(stageTaskList, 'scrollHeight', {
-      configurable: true,
-      value: 180,
+    service.init({
+      selectedTaskId,
+      deleteConfirmTask: signal<Task | null>(null),
+      deleteKeepChildren: signal(false),
+      focusFlowNode: { emit: vi.fn() } as never,
+      isMobile: signal(false),
+      getStagesRef: () => undefined,
+      getUnassignedRef: () => undefined,
     });
 
-    expect(service.resolveAutoScrollContainer(null, 360)).toBe(stageScrollContainer);
-  });
+    await service.onParkTask(createTask({ id: 'task-1' }));
 
-  it('should fall back to the outer text view when the null-stage pointer is in the stage edge zone but the stage list is exhausted', () => {
-    Object.defineProperty(stageTaskList, 'clientHeight', {
-      configurable: true,
-      value: 180,
+    expect(mockParkingService.parkTask).toHaveBeenCalledWith('task-1');
+    expect(mockDockEngine.dockTask).toHaveBeenCalledWith('task-1', undefined, {
+      sourceSection: 'text',
+      zoneSource: 'auto',
     });
-    Object.defineProperty(stageTaskList, 'scrollHeight', {
-      configurable: true,
-      value: 180,
-    });
-    stageScrollContainer.scrollTop = 400;
-
-    expect(service.resolveAutoScrollContainer(null, 360)).toBe(outerScrollContainer);
-  });
-
-  it('should fall back to the stage list when the task list is already at the bottom edge', () => {
-    Object.defineProperty(stageTaskList, 'clientHeight', {
-      configurable: true,
-      value: 180,
-    });
-    Object.defineProperty(stageTaskList, 'scrollHeight', {
-      configurable: true,
-      value: 540,
-    });
-    stageTaskList.scrollTop = 360;
-
-    expect(service.resolveAutoScrollContainer(1, 270)).toBe(stageScrollContainer);
-  });
-
-  it('should keep the stage list as the auto-scroll container while it can still scroll downward', () => {
-    Object.defineProperty(stageTaskList, 'clientHeight', {
-      configurable: true,
-      value: 180,
-    });
-    Object.defineProperty(stageTaskList, 'scrollHeight', {
-      configurable: true,
-      value: 540,
-    });
-    stageTaskList.scrollTop = 120;
-
-    expect(service.resolveAutoScrollContainer(1, 270)).toBe(stageTaskList);
-  });
-
-  it('should fall back to the stage list when the task list is already at the top edge', () => {
-    Object.defineProperty(stageTaskList, 'clientHeight', {
-      configurable: true,
-      value: 180,
-    });
-    Object.defineProperty(stageTaskList, 'scrollHeight', {
-      configurable: true,
-      value: 540,
-    });
-    stageTaskList.scrollTop = 0;
-    stageScrollContainer.scrollTop = 120;
-
-    expect(service.resolveAutoScrollContainer(1, 110)).toBe(stageScrollContainer);
-  });
-
-  it('should fall back to the outer text view container when task list and stage list are both already at the bottom edge', () => {
-    Object.defineProperty(stageTaskList, 'clientHeight', {
-      configurable: true,
-      value: 180,
-    });
-    Object.defineProperty(stageTaskList, 'scrollHeight', {
-      configurable: true,
-      value: 540,
-    });
-    Object.defineProperty(stageScrollContainer, 'clientHeight', {
-      configurable: true,
-      value: 320,
-    });
-    Object.defineProperty(stageScrollContainer, 'scrollHeight', {
-      configurable: true,
-      value: 720,
-    });
-    stageTaskList.scrollTop = 360;
-    stageScrollContainer.scrollTop = 400;
-
-    expect(service.resolveAutoScrollContainer(1, 270)).toBe(outerScrollContainer);
-  });
-
-  it('should block create actions while hint-only startup placeholder is read-only', () => {
-    mockUserSession.isHintOnlyStartupPlaceholderVisible.mockReturnValue(true);
-
-    service.onCreateUnassigned();
-
-    expect(mockTaskOpsAdapter.addTask).not.toHaveBeenCalled();
-    expect(mockToast.info).toHaveBeenCalledWith('会话确认中', '创建任务暂不可用，owner 确认完成前保持只读');
-  });
-
-  it('should repair missing stage one instead of creating an extra stage', () => {
-    initOpsContext();
-    stageFilter.set(2);
-    mockProjectState.stages.mockReturnValue([
-      { stageNumber: 2, tasks: [createTask({ id: 'stage-2-root', stage: 2 })] },
-    ]);
-    mockTaskOpsAdapter.repairMissingStageOne.mockReturnValue(true);
-
-    service.onAddNewStage();
-
-    expect(mockTaskOpsAdapter.repairMissingStageOne).toHaveBeenCalledTimes(1);
-    expect(mockTaskOpsAdapter.addTask).not.toHaveBeenCalled();
-    expect(mockUiState.setStageFilter).toHaveBeenCalledWith('all');
-  });
-
-  it('should append a new stage when stage one is present', () => {
-    initOpsContext();
-    mockProjectState.stages.mockReturnValue([
-      { stageNumber: 1, tasks: [createTask({ id: 'stage-1-root', stage: 1 })] },
-      { stageNumber: 2, tasks: [createTask({ id: 'stage-2-child', stage: 2 })] },
-    ]);
-    mockTaskOpsAdapter.addTask.mockReturnValue({ ok: true, value: 'new-stage-task' });
-
-    service.onAddNewStage();
-
-    expect(mockTaskOpsAdapter.repairMissingStageOne).not.toHaveBeenCalled();
-    expect(mockTaskOpsAdapter.addTask).toHaveBeenCalledWith('', '', 3, null, false);
-  });
-
-  it('should ignore archived-only stages when deciding whether stage one is missing', () => {
-    initOpsContext();
-    mockProjectState.stages.mockReturnValue([
-      { stageNumber: 2, tasks: [createTask({ id: 'archived-stage-2', stage: 2, status: 'archived' })] },
-    ]);
-    mockTaskOpsAdapter.addTask.mockReturnValue({ ok: true, value: 'new-stage-task' });
-
-    service.onAddNewStage();
-
-    expect(mockTaskOpsAdapter.repairMissingStageOne).not.toHaveBeenCalled();
-    expect(mockTaskOpsAdapter.addTask).toHaveBeenCalledWith('', '', 3, null, false);
-  });
-
-  it('should not create a stage when missing-stage repair is unavailable', () => {
-    initOpsContext();
-    mockProjectState.stages.mockReturnValue([
-      { stageNumber: 2, tasks: [createTask({ id: 'stage-2-root', stage: 2 })] },
-    ]);
-    mockTaskOpsAdapter.repairMissingStageOne.mockReturnValue(false);
-
-    service.onAddNewStage();
-
-    expect(mockTaskOpsAdapter.repairMissingStageOne).toHaveBeenCalledTimes(1);
-    expect(mockTaskOpsAdapter.addTask).not.toHaveBeenCalled();
+    expect(selectedTaskId()).toBe('task-1');
   });
 
   it('should clear browser text selection on the first blank-area click and deselect on the next click', () => {

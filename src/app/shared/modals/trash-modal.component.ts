@@ -1,4 +1,4 @@
-import { Component, inject, signal, Output, EventEmitter, Input, computed, ChangeDetectionStrategy } from '@angular/core';
+import { Component, Injector, inject, signal, Output, EventEmitter, Input, computed, ChangeDetectionStrategy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ProjectStateService } from '../../../services/project-state.service';
 import { TaskOperationAdapterService } from '../../../services/task-operation-adapter.service';
@@ -294,9 +294,13 @@ export class TrashModalComponent {
   @Input() show = false;
   @Output() close = new EventEmitter<void>();
   
+  private readonly injector = inject(Injector);
   private readonly projectState = inject(ProjectStateService);
-  private readonly taskOpsAdapter = inject(TaskOperationAdapterService);
   private toast = inject(ToastService);
+
+  private get taskOpsAdapter(): TaskOperationAdapterService {
+    return this.injector.get(TaskOperationAdapterService);
+  }
   
   // 当前激活的标签页
   activeTab = signal<'deleted' | 'archived'>('deleted');
@@ -472,17 +476,25 @@ export class TrashModalComponent {
   /**
    * 恢复任务
    */
-  restoreTask(task: Task) {
-    this.taskOpsAdapter.restoreTask(task.id);
-    this.toast.success('已恢复', `任务 "${task.title}" 已恢复`);
+  async restoreTask(task: Task): Promise<void> {
+    const restored = await this.taskOpsAdapter.restoreTask(task.id);
+    if (restored) {
+      this.toast.success('已恢复', `任务 "${task.title}" 已恢复`);
+      return;
+    }
+    this.toast.warning('恢复失败', '任务恢复本地保存失败，请释放浏览器存储空间后重试');
   }
   
   /**
    * 取消归档任务
    */
-  unarchiveTask(task: Task) {
-    this.taskOpsAdapter.updateTaskStatus(task.id, 'active');
-    this.toast.success('已取消归档', `任务 "${task.title}" 已恢复到主视图`);
+  async unarchiveTask(task: Task): Promise<void> {
+    const restored = await this.taskOpsAdapter.updateTaskStatus(task.id, 'active');
+    if (restored) {
+      this.toast.success('已取消归档', `任务 "${task.title}" 已恢复到主视图`);
+      return;
+    }
+    this.toast.warning('取消归档失败', '任务状态本地保存失败，请释放浏览器存储空间后重试');
   }
   
   /**
@@ -495,11 +507,13 @@ export class TrashModalComponent {
   /**
    * 执行永久删除
    */
-  executePermanentDelete() {
+  async executePermanentDelete(): Promise<void> {
     const task = this.confirmDeleteTask();
     if (task) {
-      this.taskOpsAdapter.permanentlyDeleteTask(task.id);
-      this.toast.success('已删除', `任务 "${task.title}" 已永久删除`);
+      const deleted = await this.taskOpsAdapter.permanentlyDeleteTask(task.id);
+      if (deleted) {
+        this.toast.success('已删除', `任务 "${task.title}" 已永久删除`);
+      }
     }
     this.confirmDeleteTask.set(null);
   }
@@ -514,9 +528,11 @@ export class TrashModalComponent {
   /**
    * 执行清空回收站
    */
-  executeEmptyTrash() {
-    this.taskOpsAdapter.emptyTrash();
-    this.showEmptyConfirm.set(false);
-    this.toast.success('已清空', '回收站已清空');
+  async executeEmptyTrash(): Promise<void> {
+    const emptied = await this.taskOpsAdapter.emptyTrash();
+    if (emptied) {
+      this.showEmptyConfirm.set(false);
+      this.toast.success('已清空', '回收站已清空');
+    }
   }
 }

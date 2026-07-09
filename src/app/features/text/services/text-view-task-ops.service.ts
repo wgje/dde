@@ -1,4 +1,4 @@
-import { Injectable, inject, ElementRef, NgZone, type EventEmitter, type Signal, type WritableSignal } from '@angular/core';
+import { Injectable, Injector, inject, ElementRef, NgZone, type EventEmitter, type Signal, type WritableSignal } from '@angular/core';
 import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { UiStateService } from '../../../../services/ui-state.service';
@@ -10,6 +10,7 @@ import { DockEngineService } from '../../../../services/dock-engine.service';
 import { Task } from '../../../../models';
 import { getErrorMessage, isFailure } from '../../../../utils/result';
 import { TextViewDragDropService } from './text-view-drag-drop.service';
+import { TextViewNestedScrollHandoffController } from './text-view-nested-scroll-handoff.controller';
 import { PARKING_CONFIG } from '../../../../config/parking.config';
 import { clearActiveTextSelection, isInteractiveSelectionTarget } from '../../../../utils/text-selection';
 
@@ -19,22 +20,6 @@ function isNavigableLinkedTask(task: Task | undefined | null): task is Task {
 
 function hasStageAssignment(task: Task): task is Task & { stage: number } {
   return task.stage !== null && task.stage !== undefined;
-}
-
-const NESTED_SCROLL = {
-  BOUNDARY_EPSILON: 4, MIN_HANDOFF_VELOCITY: 0.18, MIN_MOMENTUM_VELOCITY: 0.03,
-  MAX_MOMENTUM_VELOCITY: 1.35, HANDOFF_VELOCITY_SCALE: 0.38, HANDOFF_THROTTLE_MS: 48,
-  WHEEL_OUTER_FOLLOW_SHARE: 0.1, WHEEL_MAX_OUTER_STEP_PX: 72,
-  WHEEL_MIN_DELTA_PX: 0.5, WHEEL_MAX_DELTA_PX: 520, WHEEL_LINE_HEIGHT_PX: 16,
-  WHEEL_DELTA_LINE_MODE: 1, WHEEL_DELTA_PAGE_MODE: 2,
-  MOMENTUM_RAMP_MS: 80, MOMENTUM_MAX_MS: 900, DECAY_PER_FRAME: 0.91, FRAME_MS: 16.67,
-} as const;
-
-interface NestedScrollState {
-  lastTop: number;
-  lastTime: number;
-  velocity: number;
-  handoffTimer: ReturnType<typeof setTimeout> | null;
 }
 
 /**
@@ -63,7 +48,7 @@ export interface TextViewOpsContext {
  */
 @Injectable()
 export class TextViewTaskOpsService {
-  private readonly taskOpsAdapter = inject(TaskOperationAdapterService);
+  private readonly injector = inject(Injector);
   private readonly projectState = inject(ProjectStateService);
   private readonly uiState = inject(UiStateService);
   private readonly userSession = inject(UserSessionService);
@@ -71,9 +56,14 @@ export class TextViewTaskOpsService {
   private readonly dragDropService = inject(TextViewDragDropService);
   private readonly elementRef = inject(ElementRef);
   private readonly ngZone = inject(NgZone);
+  private readonly nestedScrollHandoff = new TextViewNestedScrollHandoffController({ zone: this.ngZone });
   private readonly logger = inject(LoggerService).category('TextViewOps');
   private readonly parkingService = inject(ParkingService);
   private readonly dockEngine = inject(DockEngineService);
+
+  private get taskOpsAdapter(): TaskOperationAdapterService {
+    return this.injector.get(TaskOperationAdapterService);
+  }
 
   /** 组件上下文 */
   private ctx!: TextViewOpsContext;
@@ -81,13 +71,7 @@ export class TextViewTaskOpsService {
   /** 待清理的定时器列表（防止内存泄漏） */
   readonly pendingTimers: ReturnType<typeof setTimeout>[] = [];
   private pendingContainerClickGuardTaskId: string | null = null;
-  private nestedScrollRoot: HTMLElement | null = null;
-  private nestedScrollStates = new WeakMap<HTMLElement, NestedScrollState>();
-  private nestedTaskListCleanups = new Map<HTMLElement, () => void>();
-  private nestedScrollObserver: MutationObserver | null = null;
-  private nestedMomentumFrameId: number | null = null;
-  private nestedWheelFrameId: number | null = null; private pendingNestedWheel: { taskList: HTMLElement; delta: number } | null = null;
-  private nestedWheelControlledUntil = 0;
+  private readonly pendingCreateKeys = new Set<string>();
 
   /** 初始化：接收组件 signal 和 ViewChild 引用 */
   init(ctx: TextViewOpsContext): void {
@@ -105,10 +89,11 @@ export class TextViewTaskOpsService {
 
   /** 销毁：清理定时器 */
   destroy(): void {
-    this.detachNestedScrollHandoff();
+    this.nestedScrollHandoff.detach();
     this.pendingTimers.forEach(timer => clearTimeout(timer));
     this.pendingTimers.length = 0;
     this.pendingContainerClickGuardTaskId = null;
+    this.pendingCreateKeys.clear();
   }
 
   armContainerClickGuard(taskId: string): void {
@@ -176,290 +161,7 @@ export class TextViewTaskOpsService {
   }
 
   attachNestedScrollHandoff(root: HTMLElement): void {
-    this.detachNestedScrollHandoff();
-    this.nestedScrollRoot = root;
-    this.ngZone.runOutsideAngular(() => {
-      this.attachNestedTaskLists(root);
-      this.nestedScrollObserver = new MutationObserver(() => this.attachNestedTaskLists(root));
-      this.nestedScrollObserver.observe(root, { childList: true, subtree: true });
-    });
-  }
-
-  private detachNestedScrollHandoff(): void {
-    this.nestedScrollObserver?.disconnect();
-    this.nestedScrollObserver = null;
-    this.nestedTaskListCleanups.forEach(cleanup => cleanup());
-    this.nestedTaskListCleanups.clear();
-    this.nestedScrollStates = new WeakMap<HTMLElement, NestedScrollState>();
-    this.cancelNestedMomentum();
-    this.cancelNestedWheelFrame();
-    this.nestedScrollRoot = null;
-  }
-
-  private attachNestedTaskLists(root: HTMLElement): void {
-    root.querySelectorAll<HTMLElement>('[data-stage-task-list]')
-      .forEach(taskList => this.attachNestedTaskList(taskList));
-  }
-
-  private attachNestedTaskList(taskList: HTMLElement): void {
-    if (this.nestedTaskListCleanups.has(taskList)) return;
-    const onScroll = () => this.handleNestedTaskListScroll(taskList);
-    const onWheel = (event: WheelEvent) => this.handleNestedTaskListWheel(taskList, event);
-    taskList.addEventListener('scroll', onScroll, { passive: true });
-    taskList.addEventListener('wheel', onWheel, { passive: false });
-    this.nestedTaskListCleanups.set(taskList, () => {
-      taskList.removeEventListener('scroll', onScroll);
-      taskList.removeEventListener('wheel', onWheel);
-    });
-  }
-
-  private handleNestedTaskListWheel(taskList: HTMLElement, event: WheelEvent): void {
-    if (this.shouldIgnoreNestedWheel(event)) return;
-
-    const delta = this.normalizeNestedWheelDelta(event, taskList);
-    if (Math.abs(delta) < NESTED_SCROLL.WHEEL_MIN_DELTA_PX) return;
-
-    const direction = Math.sign(delta);
-    const chain = this.resolveNestedScrollChain(taskList);
-    const canScrollTaskList = this.canNestedScrollInDirection(taskList, direction);
-    const canScrollChain = chain.some(container => this.canNestedScrollInDirection(container, direction));
-    if (!canScrollTaskList && !canScrollChain) return;
-
-    if (event.cancelable) {
-      event.preventDefault();
-    }
-    this.cancelNestedMomentum();
-    this.queueNestedWheelDelta(taskList, delta);
-  }
-
-  private queueNestedWheelDelta(taskList: HTMLElement, delta: number): void {
-    if (this.pendingNestedWheel && this.pendingNestedWheel.taskList !== taskList) {
-      this.flushNestedWheelDelta();
-    }
-
-    const queuedDelta = (this.pendingNestedWheel?.delta ?? 0) + delta;
-    const maxDelta = NESTED_SCROLL.WHEEL_MAX_DELTA_PX;
-    this.pendingNestedWheel = { taskList, delta: Math.max(-maxDelta, Math.min(maxDelta, queuedDelta)) };
-
-    if (this.nestedWheelFrameId !== null) return;
-    this.nestedWheelFrameId = requestAnimationFrame(() => this.flushNestedWheelDelta());
-  }
-
-  private flushNestedWheelDelta(): void {
-    if (this.nestedWheelFrameId !== null) {
-      cancelAnimationFrame(this.nestedWheelFrameId);
-      this.nestedWheelFrameId = null;
-    }
-
-    const pendingWheel = this.pendingNestedWheel;
-    this.pendingNestedWheel = null;
-    if (!pendingWheel?.taskList.isConnected) return;
-
-    this.applyNestedWheelDelta(pendingWheel.taskList, pendingWheel.delta);
-  }
-
-  private applyNestedWheelDelta(taskList: HTMLElement, delta: number): void {
-    if (Math.abs(delta) < NESTED_SCROLL.WHEEL_MIN_DELTA_PX) return;
-
-    const direction = Math.sign(delta);
-    const chain = this.resolveNestedScrollChain(taskList);
-    const canScrollTaskList = this.canNestedScrollInDirection(taskList, direction);
-    const canScrollChain = chain.some(container => this.canNestedScrollInDirection(container, direction));
-    if (!canScrollTaskList && !canScrollChain) return;
-
-    this.nestedWheelControlledUntil = performance.now() + NESTED_SCROLL.HANDOFF_THROTTLE_MS;
-    const innerDelta = canScrollTaskList ? delta : 0;
-    const innerConsumed = this.applyNestedScrollElement(taskList, innerDelta, direction);
-    const followDelta = canScrollTaskList ? delta * NESTED_SCROLL.WHEEL_OUTER_FOLLOW_SHARE : 0;
-    const outerDelta = this.clampNestedOuterWheelDelta(delta - innerConsumed + followDelta);
-    if (canScrollChain && Math.abs(outerDelta) >= NESTED_SCROLL.WHEEL_MIN_DELTA_PX) {
-      this.applyNestedScrollChain(chain, outerDelta, direction);
-    }
-  }
-
-  private handleNestedTaskListScroll(taskList: HTMLElement): void {
-    const now = performance.now();
-    const state = this.readNestedScrollState(taskList, now);
-    const elapsed = Math.max(1, now - state.lastTime);
-    const delta = taskList.scrollTop - state.lastTop;
-    state.velocity = this.blendNestedVelocity(state.velocity, delta / elapsed);
-    state.lastTop = taskList.scrollTop;
-    state.lastTime = now;
-
-    const direction = Math.sign(state.velocity);
-    if (direction === 0 || !this.isNestedAtBoundary(taskList, direction)) {
-      this.cancelPendingNestedHandoff(state);
-      return;
-    }
-
-    if (now < this.nestedWheelControlledUntil) { this.cancelPendingNestedHandoff(state); return; }
-
-    if (Math.abs(state.velocity) >= NESTED_SCROLL.MIN_HANDOFF_VELOCITY) {
-      this.queueNestedHandoff(taskList, state, direction);
-    }
-  }
-
-  private readNestedScrollState(taskList: HTMLElement, now: number): NestedScrollState {
-    const existing = this.nestedScrollStates.get(taskList);
-    if (existing) return existing;
-
-    const state: NestedScrollState = {
-      lastTop: taskList.scrollTop,
-      lastTime: now,
-      velocity: 0,
-      handoffTimer: null,
-    };
-    this.nestedScrollStates.set(taskList, state);
-    return state;
-  }
-
-  private queueNestedHandoff(taskList: HTMLElement, state: NestedScrollState, direction: number): void {
-    if (state.handoffTimer !== null) return;
-
-    const chain = this.resolveNestedScrollChain(taskList);
-    if (!chain.some(container => this.canNestedScrollInDirection(container, direction))) return;
-
-    const velocity = this.clampNestedVelocity(state.velocity * NESTED_SCROLL.HANDOFF_VELOCITY_SCALE);
-    state.handoffTimer = setTimeout(() => {
-      state.handoffTimer = null;
-    }, NESTED_SCROLL.HANDOFF_THROTTLE_MS);
-    this.startNestedMomentum(chain, velocity);
-  }
-
-  private resolveNestedScrollChain(taskList: HTMLElement): HTMLElement[] {
-    const chain: HTMLElement[] = [];
-    const stageScroller = taskList.closest('[data-stage-scroll-container]');
-    if (stageScroller instanceof HTMLElement && this.canNestedScroll(stageScroller)) {
-      chain.push(stageScroller);
-    }
-    if (this.nestedScrollRoot && this.nestedScrollRoot !== stageScroller && this.canNestedScroll(this.nestedScrollRoot)) {
-      chain.push(this.nestedScrollRoot);
-    }
-    return chain;
-  }
-
-  private startNestedMomentum(chain: HTMLElement[], initialVelocity: number): void {
-    if (!chain.some(container => this.canNestedScrollInDirection(container, Math.sign(initialVelocity)))) return;
-    this.cancelNestedMomentum();
-
-    let velocity = this.clampNestedVelocity(initialVelocity);
-    const direction = Math.sign(velocity);
-    const initialConsumed = this.applyNestedScrollChain(chain, velocity * NESTED_SCROLL.FRAME_MS, direction);
-    if (Math.abs(initialConsumed) < NESTED_SCROLL.BOUNDARY_EPSILON) return;
-
-    velocity = this.decayNestedVelocity(velocity, NESTED_SCROLL.FRAME_MS);
-    let lastTime = performance.now();
-    const startedAt = lastTime;
-    const step = (now: number) => {
-      const elapsed = Math.max(1, now - lastTime);
-      lastTime = now;
-      const currentDirection = Math.sign(velocity);
-      const ramp = Math.min(1, (now - startedAt) / NESTED_SCROLL.MOMENTUM_RAMP_MS);
-      this.applyNestedScrollChain(chain, velocity * elapsed * ramp, currentDirection);
-      velocity = this.decayNestedVelocity(velocity, elapsed);
-
-      if (this.shouldStopNestedMomentum(chain, currentDirection, velocity, now - startedAt)) {
-        this.nestedMomentumFrameId = null;
-        return;
-      }
-
-      this.nestedMomentumFrameId = requestAnimationFrame(step);
-    };
-    this.nestedMomentumFrameId = requestAnimationFrame(step);
-  }
-
-  private applyNestedScrollChain(chain: HTMLElement[], delta: number, direction: number): number {
-    let remaining = delta;
-    let consumedTotal = 0;
-    for (const container of chain) {
-      const consumed = this.applyNestedScrollElement(container, remaining, direction);
-      consumedTotal += consumed;
-      remaining -= consumed;
-      if (Math.abs(remaining) < NESTED_SCROLL.BOUNDARY_EPSILON) return consumedTotal;
-    }
-    return consumedTotal;
-  }
-
-  private applyNestedScrollElement(container: HTMLElement, delta: number, direction: number): number {
-    if (direction === 0 || !this.canNestedScrollInDirection(container, direction)) return 0;
-    const before = container.scrollTop;
-    container.scrollTop += delta;
-    return container.scrollTop - before;
-  }
-
-  private shouldStopNestedMomentum(chain: HTMLElement[], direction: number, velocity: number, elapsed: number): boolean {
-    return direction === 0 || !chain.some(container => this.canNestedScrollInDirection(container, direction))
-      || Math.abs(velocity) < NESTED_SCROLL.MIN_MOMENTUM_VELOCITY || elapsed > NESTED_SCROLL.MOMENTUM_MAX_MS;
-  }
-
-  private cancelPendingNestedHandoff(state: NestedScrollState): void {
-    if (state.handoffTimer === null) return;
-    clearTimeout(state.handoffTimer);
-    state.handoffTimer = null;
-  }
-
-  private cancelNestedMomentum(): void {
-    if (this.nestedMomentumFrameId === null) return;
-    cancelAnimationFrame(this.nestedMomentumFrameId);
-    this.nestedMomentumFrameId = null;
-  }
-
-  private cancelNestedWheelFrame(): void {
-    if (this.nestedWheelFrameId !== null) {
-      cancelAnimationFrame(this.nestedWheelFrameId);
-      this.nestedWheelFrameId = null;
-    }
-    this.pendingNestedWheel = null;
-  }
-
-  private canNestedScroll(container: HTMLElement): boolean {
-    return container.scrollHeight - container.clientHeight > NESTED_SCROLL.BOUNDARY_EPSILON;
-  }
-
-  private canNestedScrollInDirection(container: HTMLElement, direction: number): boolean {
-    if (direction < 0) return container.scrollTop > NESTED_SCROLL.BOUNDARY_EPSILON;
-    const maxScrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
-    return container.scrollTop < maxScrollTop - NESTED_SCROLL.BOUNDARY_EPSILON;
-  }
-
-  private isNestedAtBoundary(container: HTMLElement, direction: number): boolean {
-    return !this.canNestedScrollInDirection(container, direction);
-  }
-
-  private shouldIgnoreNestedWheel(event: WheelEvent): boolean {
-    if (event.ctrlKey || Math.abs(event.deltaX) > Math.abs(event.deltaY)) {
-      return true;
-    }
-
-    return this.eventPathContains(event, node => this.isInteractiveNode(node));
-  }
-
-  private normalizeNestedWheelDelta(event: WheelEvent, taskList: HTMLElement): number {
-    let delta = event.deltaY;
-    if (event.deltaMode === NESTED_SCROLL.WHEEL_DELTA_LINE_MODE) {
-      delta *= NESTED_SCROLL.WHEEL_LINE_HEIGHT_PX;
-    } else if (event.deltaMode === NESTED_SCROLL.WHEEL_DELTA_PAGE_MODE) {
-      delta *= taskList.clientHeight;
-    }
-
-    return Math.max(-NESTED_SCROLL.WHEEL_MAX_DELTA_PX, Math.min(NESTED_SCROLL.WHEEL_MAX_DELTA_PX, delta));
-  }
-
-  private clampNestedOuterWheelDelta(delta: number): number {
-    const maxStep = NESTED_SCROLL.WHEEL_MAX_OUTER_STEP_PX;
-    return Math.max(-maxStep, Math.min(maxStep, delta));
-  }
-
-  private blendNestedVelocity(previous: number, next: number): number {
-    return previous * 0.35 + next * 0.65;
-  }
-
-  private decayNestedVelocity(velocity: number, elapsed: number): number {
-    return velocity * Math.pow(NESTED_SCROLL.DECAY_PER_FRAME, elapsed / NESTED_SCROLL.FRAME_MS);
-  }
-
-  private clampNestedVelocity(velocity: number): number {
-    return Math.max(-NESTED_SCROLL.MAX_MOMENTUM_VELOCITY, Math.min(NESTED_SCROLL.MAX_MOMENTUM_VELOCITY, velocity));
+    this.nestedScrollHandoff.attach(root);
   }
 
   // ========== DOM 辅助方法 ==========
@@ -765,18 +467,20 @@ export class TextViewTaskOpsService {
     this.ctx.focusFlowNode.emit(task.id);
   }
 
-  onCreateUnassigned(): void {
+  async onCreateUnassigned(): Promise<void> {
     if (this.guardHintOnlyMutation('创建任务')) {
       return;
     }
 
-    const result = this.taskOpsAdapter.addTask('', '', null, null, false);
-    if (isFailure(result)) {
-      this.toast.error('创建任务失败', getErrorMessage(result.error));
-    } else {
-      this.ctx.getUnassignedRef()?.setEditingTask(result.value, true);
-      this.scrollToTaskAndFocus(result.value, 'input');
-    }
+    await this.runCreateOnce('unassigned', async () => {
+      const result = await this.taskOpsAdapter.addTask('', '', null, null, false);
+      if (isFailure(result)) {
+        this.toast.error('创建任务失败', getErrorMessage(result.error));
+      } else {
+        await this.ctx.getUnassignedRef()?.setEditingTask(result.value, true);
+        this.scrollToTaskAndFocus(result.value, 'input');
+      }
+    });
   }
 
   // ========== 任务选择和操作 ==========
@@ -822,31 +526,35 @@ export class TextViewTaskOpsService {
     });
   }
 
-  onAddSibling(task: Task): void {
+  async onAddSibling(task: Task): Promise<void> {
     if (this.guardHintOnlyMutation('创建任务')) {
       return;
     }
 
-    const result = this.taskOpsAdapter.addTask('', '', task.stage, task.parentId, true);
-    if (isFailure(result)) {
-      this.toast.error('添加任务失败', getErrorMessage(result.error));
-    } else {
-      this.navigateToNewTask(result.value, task.stage);
-    }
+    await this.runCreateOnce(`sibling:${task.id}`, async () => {
+      const result = await this.taskOpsAdapter.addTask('', '', task.stage, task.parentId, true);
+      if (isFailure(result)) {
+        this.toast.error('添加任务失败', getErrorMessage(result.error));
+      } else {
+        this.navigateToNewTask(result.value, task.stage);
+      }
+    });
   }
 
-  onAddChild(task: Task): void {
+  async onAddChild(task: Task): Promise<void> {
     if (this.guardHintOnlyMutation('创建子任务')) {
       return;
     }
 
-    const newStage = (task.stage || 0) + 1;
-    const result = this.taskOpsAdapter.addTask('', '', newStage, task.id, false);
-    if (isFailure(result)) {
-      this.toast.error('添加任务失败', getErrorMessage(result.error));
-    } else {
-      this.navigateToNewTask(result.value, newStage);
-    }
+    await this.runCreateOnce(`child:${task.id}`, async () => {
+      const newStage = (task.stage || 0) + 1;
+      const result = await this.taskOpsAdapter.addTask('', '', newStage, task.id, false);
+      if (isFailure(result)) {
+        this.toast.error('添加任务失败', getErrorMessage(result.error));
+      } else {
+        this.navigateToNewTask(result.value, newStage);
+      }
+    });
   }
 
   onDeleteTask(task: Task): void {
@@ -858,35 +566,44 @@ export class TextViewTaskOpsService {
   }
 
   /** 停泊任务——将当前任务放入「稍后处理」停泊槽 */
-  onParkTask(task: Task): void {
+  async onParkTask(task: Task): Promise<void> {
     if (this.guardHintOnlyMutation('停泊任务')) {
       return;
     }
 
-    this.parkingService.parkTask(task.id);
+    const parked = await this.parkingService.parkTask(task.id);
+    if (!parked) {
+      return;
+    }
+
     if (PARKING_CONFIG.DOCK_PARK_BUTTON_SYNC_MODE === 'on') {
-      this.dockEngine.dockTask(task.id, undefined, {
+      const docked = await this.dockEngine.dockTask(task.id, undefined, {
         sourceSection: 'text',
         zoneSource: 'auto',
       });
+      if (!docked) {
+        return;
+      }
     }
     // 停泊后取消选中，回到列表视图
     this.ctx.selectedTaskId.set(null);
   }
 
-  onConfirmDelete(keepChildren: boolean): void {
+  async onConfirmDelete(keepChildren: boolean): Promise<void> {
     if (this.guardHintOnlyMutation('删除任务')) {
       return;
     }
 
     const task = this.ctx.deleteConfirmTask();
     if (task) {
-      this.ctx.selectedTaskId.set(null);
-      if (keepChildren) {
-        this.taskOpsAdapter.deleteTaskKeepChildren(task.id);
-      } else {
-        this.taskOpsAdapter.deleteTask(task.id);
+      const deleted = keepChildren
+        ? await this.taskOpsAdapter.deleteTaskKeepChildren(task.id)
+        : await this.taskOpsAdapter.deleteTask(task.id);
+      if (!deleted) {
+        return;
       }
+
+      this.ctx.selectedTaskId.set(null);
       this.ctx.deleteConfirmTask.set(null);
       this.ctx.deleteKeepChildren.set(false);
     }
@@ -913,19 +630,31 @@ export class TextViewTaskOpsService {
     void this.onJumpToTask(task.id);
   }
 
-  onAddNewStage(): void {
+  async onAddNewStage(): Promise<void> {
     if (this.guardHintOnlyMutation('创建阶段')) {
       return;
     }
 
     const stages = this.projectState.stages();
-    if (stages.length > 0 && stages.every(stage => stage.stageNumber !== 1) && stages.some(stage => stage.tasks.some(task => !task.deletedAt && task.status !== 'archived'))) { this.taskOpsAdapter.repairMissingStageOne(); this.uiState.setStageFilter('all'); return; }
+    if (
+      stages.length > 0
+      && stages.every(stage => stage.stageNumber !== 1)
+      && stages.some(stage => stage.tasks.some(task => !task.deletedAt && task.status !== 'archived'))
+    ) {
+      const repaired = await this.taskOpsAdapter.repairMissingStageOne();
+      if (repaired) {
+        this.uiState.setStageFilter('all');
+      }
+      return;
+    }
 
-    const nextStage = Math.max(...stages.map(stage => stage.stageNumber), 0) + 1;
-    const result = this.taskOpsAdapter.addTask('', '', nextStage, null, false);
-    if (isFailure(result)) {
-      this.toast.error('创建阶段失败', getErrorMessage(result.error));
-    } else { this.navigateToNewTask(result.value, nextStage); }
+    await this.runCreateOnce('stage', async () => {
+      const nextStage = Math.max(...stages.map(stage => stage.stageNumber), 0) + 1;
+      const result = await this.taskOpsAdapter.addTask('', '', nextStage, null, false);
+      if (isFailure(result)) {
+        this.toast.error('创建阶段失败', getErrorMessage(result.error));
+      } else { this.navigateToNewTask(result.value, nextStage); }
+    });
   }
 
   navigateToNewTask(taskId: string, stage: number | null): void {
@@ -937,6 +666,19 @@ export class TextViewTaskOpsService {
     }
     this.ctx.selectedTaskId.set(taskId);
     this.scrollToTaskAndFocus(taskId, 'input[data-title-input]');
+  }
+
+  private async runCreateOnce(key: string, operation: () => Promise<void>): Promise<void> {
+    if (this.pendingCreateKeys.has(key)) {
+      return;
+    }
+
+    this.pendingCreateKeys.add(key);
+    try {
+      await operation();
+    } finally {
+      this.pendingCreateKeys.delete(key);
+    }
   }
 
   hasChildren(task: Task): boolean {
@@ -957,21 +699,11 @@ export class TextViewTaskOpsService {
     if (beforeTaskId) {
       // 有明确的插入位置（在某个任务之前）
       const referenceTask = this.projectState.getTask(beforeTaskId) || null;
-      if (referenceTask?.parentId) {
-        const parentTask = this.projectState.getTask(referenceTask.parentId);
-        if (parentTask && parentTask.stage === stageNumber - 1) {
-          return referenceTask.parentId;
-        } else {
-          this.logger.debug('Drop 参照任务的 parentId 无效，不继承', {
-            referenceTaskId: beforeTaskId.slice(-4),
-            parentId: referenceTask.parentId?.slice(-4),
-            parentStage: parentTask?.stage ?? 'not found',
-            expectedParentStage: stageNumber - 1
-          });
-          return null;
-        }
-      }
-      return null;
+      return this.inferParentIdFromSibling(referenceTask, stageNumber, {
+        message: 'Drop 参照任务的 parentId 无效，不继承',
+        taskIdKey: 'referenceTaskId',
+        fallbackTaskId: beforeTaskId,
+      });
     }
 
     // 没有 beforeTaskId，说明拖到阶段最后
@@ -979,23 +711,34 @@ export class TextViewTaskOpsService {
     const targetStage = stages.find(s => s.stageNumber === stageNumber);
     if (targetStage && targetStage.tasks.length > 0) {
       const lastTask = targetStage.tasks[targetStage.tasks.length - 1];
-      if (lastTask?.parentId) {
-        const parentTask = this.projectState.getTask(lastTask.parentId);
-        if (parentTask && parentTask.stage === stageNumber - 1) {
-          return lastTask.parentId;
-        } else {
-          this.logger.debug('Drop 最后任务的 parentId 无效，不继承', {
-            lastTaskId: lastTask?.id?.slice(-4) ?? 'unknown',
-            parentId: lastTask?.parentId?.slice(-4) ?? null,
-            parentStage: parentTask?.stage ?? 'not found',
-            expectedParentStage: stageNumber - 1
-          });
-          return null;
-        }
-      }
-      return null;
+      return this.inferParentIdFromSibling(lastTask ?? null, stageNumber, {
+        message: 'Drop 最后任务的 parentId 无效，不继承',
+        taskIdKey: 'lastTaskId',
+        fallbackTaskId: lastTask?.id ?? null,
+      });
     }
 
     return undefined;
+  }
+
+  private inferParentIdFromSibling(
+    siblingTask: Task | null,
+    stageNumber: number,
+    logContext: { message: string; taskIdKey: string; fallbackTaskId: string | null },
+  ): string | null {
+    if (!siblingTask?.parentId) return null;
+
+    const parentTask = this.projectState.getTask(siblingTask.parentId);
+    if (parentTask && parentTask.stage === stageNumber - 1) {
+      return siblingTask.parentId;
+    }
+
+    this.logger.debug(logContext.message, {
+      [logContext.taskIdKey]: (logContext.fallbackTaskId ?? 'unknown').slice(-4),
+      parentId: siblingTask.parentId?.slice(-4),
+      parentStage: parentTask?.stage ?? 'not found',
+      expectedParentStage: stageNumber - 1
+    });
+    return null;
   }
 }

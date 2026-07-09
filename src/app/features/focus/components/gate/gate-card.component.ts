@@ -329,7 +329,11 @@ export class GateCardComponent {
     this.pointerStartY = event.clientY;
     this.dragOffset.set(0);
     this.isDragging.set(true);
-    (event.currentTarget as HTMLElement | null)?.setPointerCapture?.(event.pointerId);
+    try {
+      (event.currentTarget as HTMLElement | null)?.setPointerCapture?.(event.pointerId);
+    } catch {
+      // Pointer capture 是增强项；失败时保留已启动的拖拽状态。
+    }
   }
 
   onPointerMove(event: PointerEvent): void {

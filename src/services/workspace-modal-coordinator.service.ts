@@ -207,6 +207,11 @@ export class WorkspaceModalCoordinatorService {
   // ── Login ──────────────────────────────────────────────────────────
 
   async openLoginModal(): Promise<void> {
+    if (this._loginModalRef) {
+      this.toast.info('登录窗口已打开', '请先完成当前登录流程');
+      return;
+    }
+
     if (this.isModalLoading('login')) return;
     this.setModalLoading('login', true);
     try {

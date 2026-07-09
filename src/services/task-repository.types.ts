@@ -3,7 +3,7 @@
  * 
  * 数据库行类型和映射辅助类型
  */
-import { Attachment } from '../models';
+import { Attachment, TaskAttentionMeta } from '../models';
 
 /**
  * 数据库任务行类型
@@ -33,6 +33,7 @@ export interface TaskRow {
   updated_at: string;
   completed_at?: string | null;
   parking_meta?: import('../models/parking').TaskParkingMeta | null;
+  attention_meta?: TaskAttentionMeta | null;
 }
 
 /**

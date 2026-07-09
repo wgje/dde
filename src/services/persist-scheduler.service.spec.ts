@@ -24,6 +24,14 @@ const mockLoggerCategory = {
 };
 const mockLogger = { category: vi.fn(() => mockLoggerCategory) };
 
+function asTimeoutHandle(value: number): ReturnType<typeof setTimeout> {
+  return value as unknown as ReturnType<typeof setTimeout>;
+}
+
+function asIntervalHandle(value: number): ReturnType<typeof setInterval> {
+  return value as unknown as ReturnType<typeof setInterval>;
+}
+
 describe('PersistSchedulerService', () => {
   let service: PersistSchedulerService;
   let destroy: () => void;
@@ -161,6 +169,36 @@ describe('PersistSchedulerService', () => {
       await vi.advanceTimersByTimeAsync(1);
       expect(doPersist).toHaveBeenCalledTimes(1);
     });
+
+    it('persistTimer 句柄为 0 时后续 schedule 仍应取消旧防抖', () => {
+      const doPersist = vi.fn().mockResolvedValue(undefined);
+      service.setCallbacks({ saveSnapshot: vi.fn(), doPersist });
+      const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+      (service as unknown as { persistTimer: ReturnType<typeof setTimeout> | null }).persistTimer =
+        asTimeoutHandle(0);
+
+      service.schedulePersist(1000);
+
+      expect(clearTimeoutSpy).toHaveBeenCalledWith(0);
+    });
+
+    it('过期的 persistTimer 回调被新句柄替换后不应执行持久化', async () => {
+      const scheduledCallbacks: Array<() => void | Promise<void>> = [];
+      const handles = [asTimeoutHandle(1), asTimeoutHandle(2)];
+      vi.spyOn(globalThis, 'setTimeout').mockImplementation((handler: TimerHandler) => {
+        scheduledCallbacks.push(handler as () => void | Promise<void>);
+        return handles[scheduledCallbacks.length - 1] ?? asTimeoutHandle(99);
+      });
+      const doPersist = vi.fn().mockResolvedValue(undefined);
+      service.setCallbacks({ saveSnapshot: vi.fn(), doPersist });
+
+      service.schedulePersist(1000);
+      (service as unknown as { persistTimer: ReturnType<typeof setTimeout> | null }).persistTimer = handles[1];
+      await scheduledCallbacks[0]?.();
+
+      expect(doPersist).not.toHaveBeenCalled();
+      expect((service as unknown as { persistTimer: ReturnType<typeof setTimeout> | null }).persistTimer).toBe(handles[1]);
+    });
   });
 
   // ==========================================================================
@@ -252,6 +290,18 @@ describe('PersistSchedulerService', () => {
       expect(saveSnapshot).toHaveBeenCalledTimes(1);
     });
 
+    it('localAutosaveTimer 句柄为 0 时重复 start 不会启动第二个定时器', () => {
+      const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
+      const saveSnapshot = vi.fn();
+      service.setCallbacks({ saveSnapshot, doPersist: vi.fn().mockResolvedValue(undefined) });
+      (service as unknown as { localAutosaveTimer: ReturnType<typeof setInterval> | null }).localAutosaveTimer =
+        asIntervalHandle(0);
+
+      service.startLocalAutosave();
+
+      expect(setIntervalSpy).not.toHaveBeenCalled();
+    });
+
     it('stop 后不再调用 saveSnapshot', async () => {
       const saveSnapshot = vi.fn();
       service.setCallbacks({ saveSnapshot, doPersist: vi.fn().mockResolvedValue(undefined) });
@@ -260,6 +310,100 @@ describe('PersistSchedulerService', () => {
 
       await vi.advanceTimersByTimeAsync(SYNC_CONFIG.LOCAL_AUTOSAVE_INTERVAL * 2);
       expect(saveSnapshot).not.toHaveBeenCalled();
+    });
+
+    it('cleanup 后 late autosave tick 不应再调用 saveSnapshot', () => {
+      const intervalCallbacks: Array<() => void> = [];
+      const handles = [asIntervalHandle(1)];
+      vi.spyOn(globalThis, 'setInterval').mockImplementation((handler: TimerHandler) => {
+        intervalCallbacks.push(handler as () => void);
+        return handles[intervalCallbacks.length - 1] ?? asIntervalHandle(99);
+      });
+      const saveSnapshot = vi.fn();
+      service.setCallbacks({ saveSnapshot, doPersist: vi.fn().mockResolvedValue(undefined) });
+      service.startLocalAutosave();
+      expect(intervalCallbacks).toHaveLength(1);
+
+      (service as unknown as { cleanup: () => void }).cleanup();
+      intervalCallbacks[0]?.();
+
+      expect(saveSnapshot).not.toHaveBeenCalled();
+    });
+
+    it('saveSnapshot 抛错时应记录错误并继续后续 tick', async () => {
+      const error = new Error('snapshot failed');
+      const saveSnapshot = vi.fn()
+        .mockImplementationOnce(() => {
+          throw error;
+        })
+        .mockImplementation(() => undefined);
+      service.setCallbacks({ saveSnapshot, doPersist: vi.fn().mockResolvedValue(undefined) });
+      service.startLocalAutosave();
+
+      await vi.advanceTimersByTimeAsync(SYNC_CONFIG.LOCAL_AUTOSAVE_INTERVAL);
+      expect(mockLoggerCategory.error).toHaveBeenCalledWith('本地自动保存快照失败', error);
+
+      await vi.advanceTimersByTimeAsync(SYNC_CONFIG.LOCAL_AUTOSAVE_INTERVAL);
+      expect(saveSnapshot).toHaveBeenCalledTimes(2);
+    });
+
+    it('saveSnapshot 返回 rejected promise 时应记录错误', async () => {
+      const error = new Error('async snapshot failed');
+      const saveSnapshot = vi.fn().mockRejectedValueOnce(error);
+      service.setCallbacks({ saveSnapshot, doPersist: vi.fn().mockResolvedValue(undefined) });
+      service.startLocalAutosave();
+
+      await vi.advanceTimersByTimeAsync(SYNC_CONFIG.LOCAL_AUTOSAVE_INTERVAL);
+      await Promise.resolve();
+
+      expect(mockLoggerCategory.error).toHaveBeenCalledWith('本地自动保存快照失败', error);
+    });
+
+    it('慢 saveSnapshot 未完成时不应重叠执行，并在完成后补跑一次', async () => {
+      const resolvers: Array<() => void> = [];
+      const saveSnapshot = vi.fn(() => new Promise<void>((resolve) => {
+        resolvers.push(resolve);
+      }));
+      service.setCallbacks({ saveSnapshot, doPersist: vi.fn().mockResolvedValue(undefined) });
+      service.startLocalAutosave();
+
+      await vi.advanceTimersByTimeAsync(SYNC_CONFIG.LOCAL_AUTOSAVE_INTERVAL);
+      expect(saveSnapshot).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(SYNC_CONFIG.LOCAL_AUTOSAVE_INTERVAL * 2);
+      expect(saveSnapshot).toHaveBeenCalledTimes(1);
+
+      resolvers.shift()?.();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(saveSnapshot).toHaveBeenCalledTimes(2);
+
+      resolvers.shift()?.();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(saveSnapshot).toHaveBeenCalledTimes(2);
+    });
+
+    it('stopLocalAutosave 后不应继续执行已合并的 pending tick', async () => {
+      const resolvers: Array<() => void> = [];
+      const saveSnapshot = vi.fn(() => new Promise<void>((resolve) => {
+        resolvers.push(resolve);
+      }));
+      service.setCallbacks({ saveSnapshot, doPersist: vi.fn().mockResolvedValue(undefined) });
+      service.startLocalAutosave();
+
+      await vi.advanceTimersByTimeAsync(SYNC_CONFIG.LOCAL_AUTOSAVE_INTERVAL);
+      await vi.advanceTimersByTimeAsync(SYNC_CONFIG.LOCAL_AUTOSAVE_INTERVAL);
+      expect(saveSnapshot).toHaveBeenCalledTimes(1);
+
+      service.stopLocalAutosave();
+      resolvers.shift()?.();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(saveSnapshot).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -275,6 +419,17 @@ describe('PersistSchedulerService', () => {
       expect(destroy).toBeDefined();
       // 不抛异常即可
       expect(() => destroy()).not.toThrow();
+    });
+
+    it('cleanup 取消已排队 persist 后应同步清除 hasPending 状态', () => {
+      service.setCallbacks({ saveSnapshot: vi.fn(), doPersist: vi.fn().mockResolvedValue(undefined) });
+      service.schedulePersist(10_000);
+      expect(service.state().hasPending).toBe(true);
+
+      (service as unknown as { cleanup: () => void }).cleanup();
+
+      expect(service.state().hasPending).toBe(false);
+      expect(service.state().isPersisting).toBe(false);
     });
   });
 });

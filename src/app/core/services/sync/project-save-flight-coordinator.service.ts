@@ -22,11 +22,21 @@ import { Task, Project, Connection } from '../../../../models';
 import { LoggerService } from '../../../../services/logger.service';
 import { ChangeTrackerService } from '../../../../services/change-tracker.service';
 import { BatchSyncService } from './batch-sync.service';
-import { RetryQueueService, type RetryableEntityType, type RetryableOperation } from './retry-queue.service';
+import {
+  RetryQueueService,
+  type TaskDeleteBaseUpdatedAtMap,
+  type RetryableEntityType,
+  type RetryableOperation,
+} from './retry-queue.service';
 import { SyncStateService } from './sync-state.service';
 import { SessionManagerService } from './session-manager.service';
 import { buildProjectSaveFlightKey, buildProjectSaveSignature } from './project-save-keys';
 import { isProjectSaveNewer } from './project-save-freshness';
+import {
+  decideFailedProjectSaveFlightSettlement,
+  decideQueuedProjectSaveRequestMerge,
+  parseProjectSaveFlightKey,
+} from './project-save-flight-flow';
 
 /** 项目保存结果 */
 export type ProjectSaveResult = {
@@ -34,6 +44,7 @@ export type ProjectSaveResult = {
   conflict?: boolean;
   remoteData?: Project;
   newVersion?: number;
+  validationWarnings?: string[];
   projectPushed?: boolean;
   failedTaskIds?: string[];
   failedConnectionIds?: string[];
@@ -55,13 +66,18 @@ export type DurableRetryHandler = (
   projectId?: string,
   sourceUserId?: string,
   taskIdsToDelete?: string[],
+  writeIntent?: undefined,
+  taskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap,
+  operationId?: string,
 ) => Promise<boolean>;
 
 interface QueuedProjectSaveRequest {
   project: Project;
   userId: string;
+  operationId?: string;
   signature: string;
   taskIdsToDelete?: string[];
+  taskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap;
   promise: Promise<ProjectSaveResult>;
   resolve: (result: ProjectSaveResult) => void;
   reject: (error: unknown) => void;
@@ -70,8 +86,15 @@ interface QueuedProjectSaveRequest {
 interface ProjectSaveFlight {
   activeSignature: string;
   activeTaskIdsToDelete?: string[];
+  activeTaskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap;
   activePromise: Promise<ProjectSaveResult>;
   queuedRequest: QueuedProjectSaveRequest | null;
+}
+
+interface ProjectSaveRequestSnapshot {
+  signature: string;
+  taskIdsToDelete?: string[];
+  taskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap;
 }
 
 @Injectable({ providedIn: 'root' })
@@ -89,8 +112,14 @@ export class ProjectSaveFlightCoordinatorService {
   private readonly projectSaveFlights = new Map<string, ProjectSaveFlight>();
 
   /** 公开入口：单飞 + 折叠 + 重试协调地保存项目到云端。 */
-  save(project: Project, userId: string, taskIdsToDelete?: string[]): Promise<ProjectSaveResult> {
-    return this.saveProjectToCloudSingleFlight(project, userId, taskIdsToDelete);
+  save(
+    project: Project,
+    userId: string,
+    taskIdsToDelete?: string[],
+    taskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap,
+    operationId?: string,
+  ): Promise<ProjectSaveResult> {
+    return this.saveProjectToCloudSingleFlight(project, userId, taskIdsToDelete, taskDeleteBaseUpdatedAtMap, operationId);
   }
 
   private captureEffectiveTaskIdsToDelete(
@@ -114,6 +143,25 @@ export class ProjectSaveFlightCoordinatorService {
     return undefined;
   }
 
+  private captureEffectiveTaskDeleteBaseUpdatedAtMap(
+    projectId: string,
+    taskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap,
+    fallbackTaskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap,
+  ): TaskDeleteBaseUpdatedAtMap | undefined {
+    if (taskDeleteBaseUpdatedAtMap !== undefined) {
+      return { ...taskDeleteBaseUpdatedAtMap };
+    }
+
+    const trackedTaskDeleteBaseUpdatedAtMap = this.changeTracker.getProjectChanges(projectId).taskDeleteBaseUpdatedAtMap;
+    if (trackedTaskDeleteBaseUpdatedAtMap && Object.keys(trackedTaskDeleteBaseUpdatedAtMap).length > 0) {
+      return { ...trackedTaskDeleteBaseUpdatedAtMap };
+    }
+
+    return fallbackTaskDeleteBaseUpdatedAtMap === undefined
+      ? undefined
+      : { ...fallbackTaskDeleteBaseUpdatedAtMap };
+  }
+
   private getExistingProjectRetryTaskIdsToDelete(projectId: string, sourceUserId?: string): string[] | undefined {
     const retryQueue = this.retryQueueService as RetryQueueService & {
       getProjectRetryTaskIdsToDeleteForOwner?: (targetProjectId: string, targetSourceUserId?: string) => string[] | undefined;
@@ -129,6 +177,8 @@ export class ProjectSaveFlightCoordinatorService {
     userId: string,
     signature: string,
     taskIdsToDelete?: string[],
+    taskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap,
+    operationId?: string,
   ): QueuedProjectSaveRequest {
     let resolve!: (result: ProjectSaveResult) => void;
     let reject!: (error: unknown) => void;
@@ -140,8 +190,10 @@ export class ProjectSaveFlightCoordinatorService {
     return {
       project,
       userId,
+      operationId,
       signature,
       taskIdsToDelete,
+      taskDeleteBaseUpdatedAtMap,
       promise,
       resolve,
       reject,
@@ -200,16 +252,29 @@ export class ProjectSaveFlightCoordinatorService {
       ?? (queuedRequest.userId === this.sessionManager.getRecentValidationSnapshot(60_000)?.userId
         ? this.captureEffectiveTaskIdsToDelete(queuedRequest.project.id)
         : undefined);
-    const refreshed = this.durableRetryHandler
-      ? await this.durableRetryHandler(
-          'project',
-          'upsert',
-          queuedRequest.project,
-          undefined,
-          queuedRequest.userId,
-          latestTaskIdsToDelete,
-        )
-      : false;
+    let refreshed = false;
+    try {
+      refreshed = this.durableRetryHandler
+        ? await this.durableRetryHandler(
+            'project',
+            'upsert',
+            queuedRequest.project,
+            undefined,
+            queuedRequest.userId,
+            latestTaskIdsToDelete,
+            undefined,
+            queuedRequest.taskDeleteBaseUpdatedAtMap,
+            queuedRequest.operationId,
+          )
+        : false;
+    } catch (error) {
+      this.logger.warn('刷新项目重试队列 payload 失败，将继续执行排队中的项目云端持久化', {
+        projectId: queuedRequest.project.id,
+        userId: queuedRequest.userId,
+        error,
+      });
+      return false;
+    }
     if (!refreshed) {
       return false;
     }
@@ -229,38 +294,81 @@ export class ProjectSaveFlightCoordinatorService {
     userId: string,
     signature: string,
     taskIdsToDelete?: string[],
+    taskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap,
+    operationId?: string,
     flight?: ProjectSaveFlight,
     queuedRequest?: QueuedProjectSaveRequest,
   ): Promise<ProjectSaveResult> {
     const targetFlight = flight ?? {
       activeSignature: signature,
       activeTaskIdsToDelete: taskIdsToDelete ?? queuedRequest?.taskIdsToDelete,
+      activeTaskDeleteBaseUpdatedAtMap: taskDeleteBaseUpdatedAtMap ?? queuedRequest?.taskDeleteBaseUpdatedAtMap,
       activePromise: Promise.resolve({ success: false }),
       queuedRequest: null,
     };
-    const basePromise = this.batchSyncService.saveProjectToCloud(
+    const effectiveTaskIdsToDelete = taskIdsToDelete ?? queuedRequest?.taskIdsToDelete;
+    const effectiveTaskDeleteBaseUpdatedAtMap = taskDeleteBaseUpdatedAtMap ?? queuedRequest?.taskDeleteBaseUpdatedAtMap;
+    const effectiveOperationId = operationId ?? queuedRequest?.operationId;
+    const basePromise = this.startProjectSaveRequest(
       project,
       userId,
-      taskIdsToDelete ?? queuedRequest?.taskIdsToDelete,
+      effectiveTaskIdsToDelete,
+      effectiveTaskDeleteBaseUpdatedAtMap,
+      effectiveOperationId,
     );
-    const activePromise = queuedRequest
-      ? basePromise.then(
-          (result) => {
-            queuedRequest.resolve(result);
-            return result;
-          },
-          (error) => {
-            queuedRequest.reject(error);
-            throw error;
-          }
-        )
-      : basePromise;
+    const activePromise = this.bindQueuedProjectSaveResult(basePromise, queuedRequest);
 
     targetFlight.activeSignature = signature;
-    targetFlight.activeTaskIdsToDelete = taskIdsToDelete ?? queuedRequest?.taskIdsToDelete;
+    targetFlight.activeTaskIdsToDelete = effectiveTaskIdsToDelete;
+    targetFlight.activeTaskDeleteBaseUpdatedAtMap = effectiveTaskDeleteBaseUpdatedAtMap;
     targetFlight.activePromise = activePromise;
     this.projectSaveFlights.set(key, targetFlight);
 
+    this.watchProjectSaveFlightSettlement(key, targetFlight, activePromise);
+    return activePromise;
+  }
+
+  private startProjectSaveRequest(
+    project: Project,
+    userId: string,
+    taskIdsToDelete?: string[],
+    taskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap,
+    operationId?: string,
+  ): Promise<ProjectSaveResult> {
+    if (taskDeleteBaseUpdatedAtMap !== undefined) {
+      return operationId === undefined
+        ? this.batchSyncService.saveProjectToCloud(project, userId, taskIdsToDelete, taskDeleteBaseUpdatedAtMap)
+        : this.batchSyncService.saveProjectToCloud(project, userId, taskIdsToDelete, taskDeleteBaseUpdatedAtMap, operationId);
+    }
+
+    return operationId === undefined
+      ? this.batchSyncService.saveProjectToCloud(project, userId, taskIdsToDelete)
+      : this.batchSyncService.saveProjectToCloud(project, userId, taskIdsToDelete, undefined, operationId);
+  }
+
+  private bindQueuedProjectSaveResult(
+    basePromise: Promise<ProjectSaveResult>,
+    queuedRequest?: QueuedProjectSaveRequest,
+  ): Promise<ProjectSaveResult> {
+    if (!queuedRequest) return basePromise;
+
+    return basePromise.then(
+      (result) => {
+        queuedRequest.resolve(result);
+        return result;
+      },
+      (error) => {
+        queuedRequest.reject(error);
+        throw error;
+      }
+    );
+  }
+
+  private watchProjectSaveFlightSettlement(
+    key: string,
+    targetFlight: ProjectSaveFlight,
+    activePromise: Promise<ProjectSaveResult>,
+  ): void {
     void activePromise
       .then(
         (result) => this.settleProjectSaveFlight(key, targetFlight, result),
@@ -269,8 +377,6 @@ export class ProjectSaveFlightCoordinatorService {
       .catch((error) => {
         this.logger.warn('推进项目云端持久化单飞队列失败', { error, key });
       });
-
-    return activePromise;
   }
 
   private async settleProjectSaveFlight(
@@ -283,55 +389,78 @@ export class ProjectSaveFlightCoordinatorService {
     }
 
     if (!result.success) {
-      if (result.conflict || result.terminal) {
-        const separatorIndex = key.indexOf(':');
-        const userId = separatorIndex >= 0 ? key.slice(0, separatorIndex) : undefined;
-        const projectId = separatorIndex >= 0 ? key.slice(separatorIndex + 1) : key;
+      const queuedRequest = flight.queuedRequest;
+      const retryPayloadRefreshed = queuedRequest && !result.conflict && !result.terminal
+        ? await this.refreshQueuedProjectRetryPayload(queuedRequest, result.retryEnqueued)
+        : false;
+      const settlement = decideFailedProjectSaveFlightSettlement({
+        conflict: result.conflict === true,
+        terminal: result.terminal === true,
+        hasQueuedRequest: queuedRequest !== null,
+        retryPayloadRefreshed,
+      });
+
+      if (settlement.clearRetryMarker) {
+        const { projectId, userId } = parseProjectSaveFlightKey(key);
         this.clearProjectRetryMarker(projectId, userId);
       }
 
-      const queuedRequest = flight.queuedRequest;
-      if (!queuedRequest) {
+      if (settlement.kind === 'delete-flight' || !queuedRequest) {
         this.projectSaveFlights.delete(key);
         return;
       }
 
-      if (result.conflict || result.terminal) {
-        flight.queuedRequest = null;
-        this.projectSaveFlights.delete(key);
-        queuedRequest.resolve(result);
-        this.logger.debug(result.terminal
-          ? '项目云端持久化命中终止失败，折叠队列停止自动重放'
-          : '项目云端持久化冲突，折叠队列等待显式冲突解决', {
-          projectId: queuedRequest.project.id,
-          userId: queuedRequest.userId,
-          failureReason: result.failureReason ?? null,
-        });
+      if (settlement.kind === 'settle-queued') {
+        this.settleQueuedProjectSaveRequest(key, flight, queuedRequest, result, settlement.logKind);
         return;
       }
 
-      if (await this.refreshQueuedProjectRetryPayload(queuedRequest, result.retryEnqueued)) {
-        flight.queuedRequest = null;
-        this.projectSaveFlights.delete(key);
-        queuedRequest.resolve(result);
-        this.logger.debug('项目级重试已接管，折叠队列与当前失败结果一起结算', {
-          projectId: queuedRequest.project.id,
-          userId: queuedRequest.userId,
-          failureReason: result.failureReason ?? null,
-        });
-        return;
-      }
-
-      this.logger.debug('项目级失败未覆盖最新折叠快照，继续执行排队中的项目云端持久化', {
-        projectId: queuedRequest.project.id,
-        userId: queuedRequest.userId,
-        failureReason: result.failureReason ?? null,
-      });
+      this.logProjectSaveFlightAdvanceAfterFailure(queuedRequest, result);
       await this.advanceProjectSaveFlight(key, flight);
       return;
     }
 
     await this.advanceProjectSaveFlight(key, flight);
+  }
+
+  private settleQueuedProjectSaveRequest(
+    key: string,
+    flight: ProjectSaveFlight,
+    queuedRequest: QueuedProjectSaveRequest,
+    result: ProjectSaveResult,
+    logKind: 'conflict' | 'terminal' | 'retry-handoff',
+  ): void {
+    flight.queuedRequest = null;
+    this.projectSaveFlights.delete(key);
+    queuedRequest.resolve(result);
+    this.logger.debug(this.getQueuedProjectSaveSettlementMessage(logKind), {
+      projectId: queuedRequest.project.id,
+      userId: queuedRequest.userId,
+      failureReason: result.failureReason ?? null,
+    });
+  }
+
+  private getQueuedProjectSaveSettlementMessage(logKind: 'conflict' | 'terminal' | 'retry-handoff'): string {
+    if (logKind === 'terminal') {
+      return '项目云端持久化命中终止失败，折叠队列停止自动重放';
+    }
+
+    if (logKind === 'conflict') {
+      return '项目云端持久化冲突，折叠队列等待显式冲突解决';
+    }
+
+    return '项目级重试已接管，折叠队列与当前失败结果一起结算';
+  }
+
+  private logProjectSaveFlightAdvanceAfterFailure(
+    queuedRequest: QueuedProjectSaveRequest,
+    result: ProjectSaveResult,
+  ): void {
+    this.logger.debug('项目级失败未覆盖最新折叠快照，继续执行排队中的项目云端持久化', {
+      projectId: queuedRequest.project.id,
+      userId: queuedRequest.userId,
+      failureReason: result.failureReason ?? null,
+    });
   }
 
   private async abortProjectSaveFlight(
@@ -379,29 +508,115 @@ export class ProjectSaveFlightCoordinatorService {
       queuedRequest.userId,
       queuedRequest.signature,
       queuedRequest.taskIdsToDelete,
+      queuedRequest.taskDeleteBaseUpdatedAtMap,
+      queuedRequest.operationId,
       flight,
       queuedRequest,
     );
   }
 
-  private saveProjectToCloudSingleFlight(project: Project, userId: string, taskIdsToDelete?: string[]): Promise<ProjectSaveResult> {
+  private startNewProjectSaveFlight(
+    key: string,
+    project: Project,
+    userId: string,
+    taskIdsToDelete?: string[],
+    taskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap,
+    operationId?: string,
+  ): Promise<ProjectSaveResult> {
+    const effectiveTaskIdsToDelete = this.captureEffectiveTaskIdsToDelete(project.id, taskIdsToDelete);
+    const effectiveTaskDeleteBaseUpdatedAtMap = this.captureEffectiveTaskDeleteBaseUpdatedAtMap(
+      project.id,
+      taskDeleteBaseUpdatedAtMap,
+    );
+    const signature = buildProjectSaveSignature(
+      project,
+      effectiveTaskIdsToDelete,
+      effectiveTaskDeleteBaseUpdatedAtMap,
+    );
+    return this.startProjectSaveFlight(
+      key,
+      project,
+      userId,
+      signature,
+      effectiveTaskIdsToDelete,
+      effectiveTaskDeleteBaseUpdatedAtMap,
+      operationId,
+    );
+  }
+
+  private queueProjectSaveRequest(
+    existingFlight: ProjectSaveFlight,
+    project: Project,
+    userId: string,
+    signature: string,
+    taskIdsToDelete: string[] | undefined,
+    taskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap,
+    operationId?: string,
+  ): Promise<ProjectSaveResult> {
+    const queuedRequest = this.createQueuedProjectSaveRequest(
+      project,
+      userId,
+      signature,
+      taskIdsToDelete,
+      taskDeleteBaseUpdatedAtMap,
+      operationId,
+    );
+    existingFlight.queuedRequest = queuedRequest;
+    this.logger.debug('项目云端持久化排队等待单飞窗口结束', {
+      projectId: project.id,
+      userId,
+    });
+    return queuedRequest.promise;
+  }
+
+  private buildProjectSaveRequestSnapshot(
+    project: Project,
+    taskIdsToDelete?: string[],
+    taskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap,
+    fallbackTaskIdsToDelete?: string[],
+    fallbackTaskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap,
+  ): ProjectSaveRequestSnapshot {
+    const effectiveTaskIdsToDelete = this.captureEffectiveTaskIdsToDelete(
+      project.id,
+      taskIdsToDelete,
+      fallbackTaskIdsToDelete,
+    );
+    const effectiveTaskDeleteBaseUpdatedAtMap = this.captureEffectiveTaskDeleteBaseUpdatedAtMap(
+      project.id,
+      taskDeleteBaseUpdatedAtMap,
+      fallbackTaskDeleteBaseUpdatedAtMap,
+    );
+
+    return {
+      signature: buildProjectSaveSignature(project, effectiveTaskIdsToDelete, effectiveTaskDeleteBaseUpdatedAtMap),
+      taskIdsToDelete: effectiveTaskIdsToDelete,
+      taskDeleteBaseUpdatedAtMap: effectiveTaskDeleteBaseUpdatedAtMap,
+    };
+  }
+
+  private saveProjectToCloudSingleFlight(
+    project: Project,
+    userId: string,
+    taskIdsToDelete?: string[],
+    taskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap,
+    operationId?: string,
+  ): Promise<ProjectSaveResult> {
     const key = buildProjectSaveFlightKey(project.id, userId);
     const existingFlight = this.projectSaveFlights.get(key);
 
     if (!existingFlight) {
-      const effectiveTaskIdsToDelete = this.captureEffectiveTaskIdsToDelete(project.id, taskIdsToDelete);
-      const signature = buildProjectSaveSignature(project, effectiveTaskIdsToDelete);
-      return this.startProjectSaveFlight(key, project, userId, signature, effectiveTaskIdsToDelete);
+      return this.startNewProjectSaveFlight(key, project, userId, taskIdsToDelete, taskDeleteBaseUpdatedAtMap, operationId);
     }
 
-    const effectiveTaskIdsToDelete = this.captureEffectiveTaskIdsToDelete(
-      project.id,
+    const requestSnapshot = this.buildProjectSaveRequestSnapshot(
+      project,
       taskIdsToDelete,
+      taskDeleteBaseUpdatedAtMap,
       existingFlight.activeTaskIdsToDelete,
+      existingFlight.activeTaskDeleteBaseUpdatedAtMap,
     );
-    const signature = buildProjectSaveSignature(project, effectiveTaskIdsToDelete);
 
-    if (existingFlight.activeSignature === signature) {
+    if (existingFlight.activeSignature === requestSnapshot.signature) {
       this.logger.debug('复用进行中的项目云端持久化', {
         projectId: project.id,
         userId,
@@ -410,46 +625,154 @@ export class ProjectSaveFlightCoordinatorService {
     }
 
     if (existingFlight.queuedRequest) {
-      if (existingFlight.queuedRequest.signature === signature) {
-        return existingFlight.queuedRequest.promise;
-      }
-
-      const queuedRequestTaskIdsToDelete = this.captureEffectiveTaskIdsToDelete(
-        project.id,
-        taskIdsToDelete,
-        existingFlight.queuedRequest.taskIdsToDelete ?? existingFlight.activeTaskIdsToDelete,
+      return this.mergeQueuedProjectSaveRequest(
+        existingFlight,
+        project,
+        userId,
+        requestSnapshot.signature,
+        requestSnapshot.taskIdsToDelete,
+        requestSnapshot.taskDeleteBaseUpdatedAtMap,
+        operationId,
       );
-      const queuedRequestSignature = buildProjectSaveSignature(project, queuedRequestTaskIdsToDelete);
-
-      if (isProjectSaveNewer(project, existingFlight.queuedRequest.project)) {
-        existingFlight.queuedRequest.project = project;
-        existingFlight.queuedRequest.userId = userId;
-        existingFlight.queuedRequest.signature = queuedRequestSignature;
-        existingFlight.queuedRequest.taskIdsToDelete = queuedRequestTaskIdsToDelete;
-        this.logger.debug('合并项目云端持久化请求到更新/同等新鲜度的后到快照', {
-          projectId: project.id,
-          userId,
-        });
-      } else {
-        this.logger.debug('保留排队中的更新快照，忽略更旧的项目云端持久化请求', {
-          projectId: project.id,
-          userId,
-        });
-      }
-      return existingFlight.queuedRequest.promise;
     }
 
-    const queuedRequest = this.createQueuedProjectSaveRequest(
+    return this.queueProjectSaveRequest(
+      existingFlight,
       project,
       userId,
-      signature,
-      effectiveTaskIdsToDelete,
+      requestSnapshot.signature,
+      requestSnapshot.taskIdsToDelete,
+      requestSnapshot.taskDeleteBaseUpdatedAtMap,
+      operationId,
     );
-    existingFlight.queuedRequest = queuedRequest;
-    this.logger.debug('项目云端持久化排队等待单飞窗口结束', {
+  }
+
+  private mergeQueuedProjectSaveRequest(
+    existingFlight: ProjectSaveFlight,
+    project: Project,
+    userId: string,
+    signature: string,
+    taskIdsToDelete?: string[],
+    taskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap,
+    operationId?: string,
+  ): Promise<ProjectSaveResult> {
+    const queuedRequest = existingFlight.queuedRequest;
+    if (!queuedRequest) {
+      return existingFlight.activePromise;
+    }
+
+    const queuedSnapshot = this.buildProjectSaveRequestSnapshot(
+      project,
+      taskIdsToDelete,
+      taskDeleteBaseUpdatedAtMap,
+      queuedRequest.taskIdsToDelete ?? existingFlight.activeTaskIdsToDelete,
+      queuedRequest.taskDeleteBaseUpdatedAtMap ?? existingFlight.activeTaskDeleteBaseUpdatedAtMap,
+    );
+    const refreshedQueuedSignature = buildProjectSaveSignature(
+      queuedRequest.project,
+      queuedSnapshot.taskIdsToDelete,
+      queuedSnapshot.taskDeleteBaseUpdatedAtMap,
+    );
+    const mergeDecision = decideQueuedProjectSaveRequestMerge({
+      incomingSignature: signature,
+      queuedSignature: queuedRequest.signature,
+      queuedRefreshedSignature: refreshedQueuedSignature,
+      incomingIsNewer: isProjectSaveNewer(project, queuedRequest.project),
+    });
+
+    return this.applyQueuedProjectSaveRequestMerge(
+      queuedRequest,
+      project,
+      userId,
+      queuedSnapshot,
+      refreshedQueuedSignature,
+      mergeDecision,
+      operationId,
+    );
+  }
+
+  private applyQueuedProjectSaveRequestMerge(
+    queuedRequest: QueuedProjectSaveRequest,
+    project: Project,
+    userId: string,
+    queuedSnapshot: ProjectSaveRequestSnapshot,
+    refreshedQueuedSignature: string,
+    mergeDecision: ReturnType<typeof decideQueuedProjectSaveRequestMerge>,
+    operationId?: string,
+  ): Promise<ProjectSaveResult> {
+
+    if (mergeDecision.kind === 'reuse-queued') {
+      return queuedRequest.promise;
+    }
+
+    if (mergeDecision.kind === 'replace-queued') {
+      this.replaceQueuedProjectSaveRequest(
+        queuedRequest,
+        project,
+        userId,
+        queuedSnapshot.signature,
+        queuedSnapshot.taskIdsToDelete,
+        queuedSnapshot.taskDeleteBaseUpdatedAtMap,
+        operationId,
+      );
+      return queuedRequest.promise;
+    }
+
+    this.keepQueuedProjectSaveRequest(
+      queuedRequest,
+      project,
+      userId,
+      queuedSnapshot.taskIdsToDelete,
+      queuedSnapshot.taskDeleteBaseUpdatedAtMap,
+      refreshedQueuedSignature,
+      mergeDecision.refreshQueuedPayload,
+    );
+    return queuedRequest.promise;
+  }
+
+  private replaceQueuedProjectSaveRequest(
+    queuedRequest: QueuedProjectSaveRequest,
+    project: Project,
+    userId: string,
+    signature: string,
+    taskIdsToDelete?: string[],
+    taskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap,
+    operationId?: string,
+  ): void {
+    queuedRequest.project = project;
+    queuedRequest.userId = userId;
+    queuedRequest.operationId = operationId;
+    queuedRequest.signature = signature;
+    queuedRequest.taskIdsToDelete = taskIdsToDelete;
+    queuedRequest.taskDeleteBaseUpdatedAtMap = taskDeleteBaseUpdatedAtMap;
+    this.logger.debug('合并项目云端持久化请求到更新/同等新鲜度的后到快照', {
       projectId: project.id,
       userId,
     });
-    return queuedRequest.promise;
+  }
+
+  private keepQueuedProjectSaveRequest(
+    queuedRequest: QueuedProjectSaveRequest,
+    project: Project,
+    userId: string,
+    taskIdsToDelete: string[] | undefined,
+    taskDeleteBaseUpdatedAtMap: TaskDeleteBaseUpdatedAtMap | undefined,
+    refreshedSignature: string,
+    refreshQueuedPayload: boolean,
+  ): void {
+    if (refreshQueuedPayload) {
+      queuedRequest.signature = refreshedSignature;
+      queuedRequest.taskIdsToDelete = taskIdsToDelete;
+      queuedRequest.taskDeleteBaseUpdatedAtMap = taskDeleteBaseUpdatedAtMap ?? queuedRequest.taskDeleteBaseUpdatedAtMap;
+      this.logger.debug('保留排队中的更新快照，并刷新后到请求携带的删除 payload', {
+        projectId: project.id,
+        userId,
+        taskDeleteCount: taskIdsToDelete?.length ?? 0,
+      });
+    }
+    this.logger.debug('保留排队中的更新快照，忽略更旧的项目云端持久化请求', {
+      projectId: project.id,
+      userId,
+    });
   }
 }

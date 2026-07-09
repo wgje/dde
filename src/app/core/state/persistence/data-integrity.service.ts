@@ -49,6 +49,17 @@ export interface WriteVerifyResult {
   errors: string[];
 }
 
+interface OfflineIntegrityData {
+  projects: Project[];
+  tasks: Array<Task & { projectId?: string }>;
+  connections: Array<Connection & { projectId?: string }>;
+}
+
+interface OfflineIntegrityStats {
+  orphanedTasks: number;
+  brokenConnections: number;
+}
+
 @Injectable({
   providedIn: 'root'
 })
@@ -113,131 +124,169 @@ export class DataIntegrityService {
    */
   async validateOfflineDataIntegrity(): Promise<IntegrityCheckResult> {
     const issues: IntegrityIssue[] = [];
-    let orphanedTasks = 0;
-    let brokenConnections = 0;
+    const stats: OfflineIntegrityStats = { orphanedTasks: 0, brokenConnections: 0 };
     
     try {
-      const db = await this.indexedDB.initDatabase();
-      
-      // 1. 加载所有数据
-      const allProjects = await this.indexedDB.getAllFromStore<Project>(db, DB_CONFIG.stores.projects);
-      const allTasks = await this.indexedDB.getAllFromStore<Task & { projectId?: string }>(db, DB_CONFIG.stores.tasks);
-      const allConnections = await this.indexedDB.getAllFromStore<Connection & { projectId?: string }>(db, DB_CONFIG.stores.connections);
-      
-      // 2. 构建项目 ID 集合
-      const projectIds = new Set(allProjects.map(p => p.id));
-      
-      // 3. 检查孤立任务
-      const tasksByProject = new Map<string, Set<string>>();
-      for (const task of allTasks) {
-        const taskProjectId = task.projectId || '';
-        
-        if (!projectIds.has(taskProjectId)) {
-          issues.push({
-            type: 'orphaned-task',
-            entityId: task.id,
-            projectId: taskProjectId,
-            message: `任务 ${task.id} 属于不存在的项目 ${taskProjectId}`,
-            severity: 'warning'
-          });
-          orphanedTasks++;
-        }
-        
-        // 记录任务
-        if (!tasksByProject.has(taskProjectId)) {
-          tasksByProject.set(taskProjectId, new Set());
-        }
-        tasksByProject.get(taskProjectId)!.add(task.id);
-      }
-      
-      // 4. 检查断裂连接
-      for (const conn of allConnections) {
-        const connProjectId = conn.projectId || '';
-        const projectTasks = tasksByProject.get(connProjectId);
-        
-        if (!projectTasks?.has(conn.source)) {
-          issues.push({
-            type: 'broken-connection',
-            entityId: conn.id,
-            projectId: connProjectId,
-            message: `连接 ${conn.id} 的源任务 ${conn.source} 不存在`,
-            severity: 'warning'
-          });
-          brokenConnections++;
-        }
-        
-        if (!projectTasks?.has(conn.target)) {
-          issues.push({
-            type: 'broken-connection',
-            entityId: conn.id,
-            projectId: connProjectId,
-            message: `连接 ${conn.id} 的目标任务 ${conn.target} 不存在`,
-            severity: 'warning'
-          });
-          brokenConnections++;
-        }
-      }
-      
-      // 5. 记录结果
+      const data = await this.loadOfflineIntegrityData();
+      const projectIds = new Set(data.projects.map(p => p.id));
+      const tasksByProject = this.validateOfflineTasks(data.tasks, projectIds, issues, stats);
+      this.validateOfflineConnections(data.connections, tasksByProject, issues, stats);
       const hasErrors = issues.some(i => i.severity === 'error');
-      
-      if (issues.length > 0) {
-        this.logger.warn('离线数据完整性检查发现问题', {
-          issueCount: issues.length,
-          errorCount: issues.filter(i => i.severity === 'error').length,
-          warningCount: issues.filter(i => i.severity === 'warning').length
-        });
-        
-        if (hasErrors) {
-          this.sentryLazyLoader.captureMessage('离线数据完整性检查发现严重问题', {
-            level: 'error',
-            tags: { operation: 'validateOfflineDataIntegrity' },
-            extra: { 
-              errorCount: issues.filter(i => i.severity === 'error').length,
-              sampleIssues: issues.slice(0, 5)
-            }
-          });
-        }
-      } else {
-        this.logger.debug('离线数据完整性检查通过', {
-          projectCount: allProjects.length,
-          taskCount: allTasks.length,
-          connectionCount: allConnections.length
-        });
-      }
-      
-      return {
-        valid: !hasErrors,
-        issues,
-        stats: {
-          projectCount: allProjects.length,
-          taskCount: allTasks.length,
-          connectionCount: allConnections.length,
-          orphanedTasks,
-          brokenConnections
-        }
-      };
+
+      this.logOfflineIntegrityResult(data, issues, hasErrors);
+      return this.createOfflineIntegrityResult(data, issues, stats, !hasErrors);
     } catch (err) {
       this.logger.error('离线数据完整性检查失败', err);
       this.sentryLazyLoader.captureException(err, { tags: { operation: 'validateOfflineDataIntegrity' } });
-      
-      return {
-        valid: false,
-        issues: [{
-          type: 'invalid-data',
-          entityId: 'system',
-          message: `检查过程出错: ${err instanceof Error ? err.message : String(err)}`,
-          severity: 'error'
-        }],
-        stats: {
-          projectCount: 0,
-          taskCount: 0,
-          connectionCount: 0,
-          orphanedTasks: 0,
-          brokenConnections: 0
-        }
-      };
+      return this.createOfflineIntegrityFailure(err);
     }
+  }
+
+  private async loadOfflineIntegrityData(): Promise<OfflineIntegrityData> {
+    const db = await this.indexedDB.initDatabase();
+    const projects = await this.indexedDB.getAllFromStore<Project>(db, DB_CONFIG.stores.projects);
+    const tasks = await this.indexedDB.getAllFromStore<Task & { projectId?: string }>(db, DB_CONFIG.stores.tasks);
+    const connections = await this.indexedDB.getAllFromStore<Connection & { projectId?: string }>(
+      db,
+      DB_CONFIG.stores.connections,
+    );
+    return { projects, tasks, connections };
+  }
+
+  private validateOfflineTasks(
+    tasks: Array<Task & { projectId?: string }>,
+    projectIds: ReadonlySet<string>,
+    issues: IntegrityIssue[],
+    stats: OfflineIntegrityStats,
+  ): Map<string, Set<string>> {
+    const tasksByProject = new Map<string, Set<string>>();
+
+    for (const task of tasks) {
+      const taskProjectId = task.projectId || '';
+      if (!projectIds.has(taskProjectId)) {
+        issues.push({
+          type: 'orphaned-task',
+          entityId: task.id,
+          projectId: taskProjectId,
+          message: `任务 ${task.id} 属于不存在的项目 ${taskProjectId}`,
+          severity: 'warning',
+        });
+        stats.orphanedTasks++;
+      }
+
+      if (!tasksByProject.has(taskProjectId)) {
+        tasksByProject.set(taskProjectId, new Set());
+      }
+      tasksByProject.get(taskProjectId)!.add(task.id);
+    }
+
+    return tasksByProject;
+  }
+
+  private validateOfflineConnections(
+    connections: Array<Connection & { projectId?: string }>,
+    tasksByProject: ReadonlyMap<string, ReadonlySet<string>>,
+    issues: IntegrityIssue[],
+    stats: OfflineIntegrityStats,
+  ): void {
+    for (const conn of connections) {
+      const connProjectId = conn.projectId || '';
+      const projectTasks = tasksByProject.get(connProjectId);
+      this.validateOfflineConnectionEndpoint(conn, connProjectId, projectTasks, 'source', issues, stats);
+      this.validateOfflineConnectionEndpoint(conn, connProjectId, projectTasks, 'target', issues, stats);
+    }
+  }
+
+  private validateOfflineConnectionEndpoint(
+    conn: Connection,
+    projectId: string,
+    projectTasks: ReadonlySet<string> | undefined,
+    endpoint: 'source' | 'target',
+    issues: IntegrityIssue[],
+    stats: OfflineIntegrityStats,
+  ): void {
+    const taskId = conn[endpoint];
+    if (projectTasks?.has(taskId)) return;
+
+    issues.push({
+      type: 'broken-connection',
+      entityId: conn.id,
+      projectId,
+      message: `连接 ${conn.id} 的${endpoint === 'source' ? '源' : '目标'}任务 ${taskId} 不存在`,
+      severity: 'warning',
+    });
+    stats.brokenConnections++;
+  }
+
+  private logOfflineIntegrityResult(
+    data: OfflineIntegrityData,
+    issues: IntegrityIssue[],
+    hasErrors: boolean,
+  ): void {
+    if (issues.length === 0) {
+      this.logger.debug('离线数据完整性检查通过', {
+        projectCount: data.projects.length,
+        taskCount: data.tasks.length,
+        connectionCount: data.connections.length,
+      });
+      return;
+    }
+
+    const errorCount = issues.filter(i => i.severity === 'error').length;
+    this.logger.warn('离线数据完整性检查发现问题', {
+      issueCount: issues.length,
+      errorCount,
+      warningCount: issues.filter(i => i.severity === 'warning').length,
+    });
+
+    if (hasErrors) {
+      this.sentryLazyLoader.captureMessage('离线数据完整性检查发现严重问题', {
+        level: 'error',
+        tags: { operation: 'validateOfflineDataIntegrity' },
+        extra: {
+          errorCount,
+          sampleIssues: issues.slice(0, 5),
+        },
+      });
+    }
+  }
+
+  private createOfflineIntegrityResult(
+    data: OfflineIntegrityData,
+    issues: IntegrityIssue[],
+    stats: OfflineIntegrityStats,
+    valid: boolean,
+  ): IntegrityCheckResult {
+    return {
+      valid,
+      issues,
+      stats: {
+        projectCount: data.projects.length,
+        taskCount: data.tasks.length,
+        connectionCount: data.connections.length,
+        orphanedTasks: stats.orphanedTasks,
+        brokenConnections: stats.brokenConnections,
+      },
+    };
+  }
+
+  private createOfflineIntegrityFailure(err: unknown): IntegrityCheckResult {
+    return {
+      valid: false,
+      issues: [{
+        type: 'invalid-data',
+        entityId: 'system',
+        message: `检查过程出错: ${err instanceof Error ? err.message : String(err)}`,
+        severity: 'error',
+      }],
+      stats: {
+        projectCount: 0,
+        taskCount: 0,
+        connectionCount: 0,
+        orphanedTasks: 0,
+        brokenConnections: 0,
+      },
+    };
   }
   
   /**

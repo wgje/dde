@@ -27,6 +27,9 @@ import { LoggerService } from '../../../../services/logger.service';
 import { ThemeService } from '../../../../services/theme.service';
 import type { ExternalSourceLink } from '../../../core/external-sources/external-source.model';
 import { KnowledgeAnchorPopoverService } from '../../../shared/components/knowledge-anchor/knowledge-anchor-popover.service';
+import { resolveNodeClickInputState, shouldIgnoreNodeTemplateClick } from './flow-template-click.helpers';
+import { getSiyuanBadgeLabel } from './flow-template-siyuan.helpers';
+import { createFlowNodeSidecarTemplateParts } from './flow-template-sidecar.helpers';
 import * as go from 'gojs';
 import {
   GojsClickHandler,
@@ -38,6 +41,18 @@ import {
 // 重新导出类型以保持向后兼容
 export type { PortConfig, NodeStyleConfig } from './flow-template.types';
 export type { LinkStyleConfig } from './flow-template.types';
+
+interface NodeTemplateContext {
+  isMobile: boolean;
+  titleMaxSizeUnassigned: go.Size;
+  titleMaxSizeAssigned: go.Size;
+  titleFontUnassigned: string;
+  titleFontAssigned: string;
+  assignedWidth: number;
+  unassignedWidth: number;
+  portSize: number;
+  sidecarTitleMaxSize: go.Size;
+}
 
 @Injectable({
   providedIn: 'root'
@@ -90,11 +105,6 @@ export class FlowTemplateService {
     return data?.siyuanLink ?? null;
   }
 
-  private getSiyuanBadgeLabel(index: number | undefined): string {
-    if (!Number.isFinite(index) || (index ?? 0) <= 0) return '';
-    return String(index);
-  }
-
   private getGraphObjectViewportOrigin(
     event: go.InputEvent,
     obj: go.GraphObject,
@@ -132,6 +142,72 @@ export class FlowTemplateService {
   closeSiyuanPopover(): void {
     this.siyuanPopover.close();
   }
+
+  private handleNodeTemplateClick(e: go.InputEvent, node: go.GraphObject): void {
+    if (shouldIgnoreNodeTemplateClick(e)) return;
+
+    const goNode = node as go.Node;
+    const inputState = this.resolveNodeClickInputState(e);
+    const isSelectModeActive = inputState.isMobileMode && inputState.isDragSelectEnabled;
+
+    this.logger.debug('节点点击事件', {
+      isSelectModeActive,
+      isMobileMode: inputState.isMobileMode,
+      dragSelectToolEnabled: inputState.isDragSelectEnabled,
+      nodeSelected: goNode.isSelected,
+      nodeKey: goNode.key
+    });
+
+    if (isSelectModeActive) {
+      this.toggleNodeSelection(e, goNode, true);
+      return;
+    }
+
+    if (inputState.isSelectModifierPressed) {
+      this.toggleNodeSelection(e, goNode, false);
+      return;
+    }
+
+    this.selectSingleNodeAndNotify(e, goNode);
+  }
+
+  private resolveNodeClickInputState(e: go.InputEvent): {
+    isMobileMode: boolean;
+    isDragSelectEnabled: boolean;
+    isSelectModifierPressed: boolean;
+  } {
+    return resolveNodeClickInputState({
+      event: e,
+      isMobileMode: this.uiState.isMobile(),
+    });
+  }
+
+  private toggleNodeSelection(e: go.InputEvent, node: go.Node, shouldLogResult: boolean): void {
+    if (shouldLogResult) {
+      this.logger.debug('框选模式激活 - 切换节点选中状态', { from: node.isSelected, to: !node.isSelected });
+    }
+
+    e.handled = true;
+    e.diagram?.startTransaction('toggle-selection');
+    node.isSelected = !node.isSelected;
+    e.diagram?.commitTransaction('toggle-selection');
+    e.diagram?.raiseDiagramEvent('ChangedSelection');
+
+    if (shouldLogResult) {
+      this.logger.debug('选中状态已更新', {
+        nodeKey: node.key,
+        isSelected: node.isSelected,
+        totalSelected: e.diagram?.selection.count
+      });
+    }
+  }
+
+  private selectSingleNodeAndNotify(e: go.InputEvent, node: go.Node): void {
+    e.diagram?.clearSelection();
+    node.isSelected = true;
+    e.diagram?.raiseDiagramEvent('ChangedSelection');
+    flowTemplateEventHandlers.onNodeClick?.(node);
+  }
   
   // ========== 图层配置 ==========
   
@@ -167,287 +243,240 @@ export class FlowTemplateService {
    * - FlowEventService 统一监听和处理
    */
   setupNodeTemplate(diagram: go.Diagram): void {
-    const $ = go.GraphObject.make;
-    const isMobile = this.uiState.isMobile();
+    diagram.nodeTemplate = this.createNodeTemplate(this.createNodeTemplateContext());
+    this.logger.debug('节点模板已设置');
+  }
 
-    // 【2026-04-24 性能优化】converter 输出值全部 hoist 到 setupNodeTemplate 作用域常量。
-    // GoJS 会在每次 merge/binding 重算时调用 converter，若内部 new go.Size()/拼接字符串，
-    // 30+ 节点场景下会产生大量短命对象；hoist 后 converter 只返回已存在的引用。
-    const titleMaxSizeUnassigned = new go.Size(120, NaN);
-    const titleMaxSizeAssigned = new go.Size(160, NaN);
-    const titleFontUnassigned = "500 11px \"LXGW WenKai Screen\", sans-serif";
-    const titleFontAssigned = "400 12px \"LXGW WenKai Screen\", sans-serif";
-    const assignedWidth = GOJS_CONFIG.ASSIGNED_NODE_WIDTH;
-    const unassignedWidth = GOJS_CONFIG.UNASSIGNED_NODE_WIDTH;
-    const portSize = isMobile ? 24 : 10;
-    
-    const _allowedPortIds = ["T", "B", "L", "R"];
-    
-    /**
-     * 创建边缘连接手柄
-     * 使用 any 类型避免 GoJS 泛型类型不兼容问题
-     */
-    const makePort = (name: string, spot: go.Spot): GojsShapeBuilder => {
-      return $(go.Shape, "Circle", {
-        fill: "transparent",
-        stroke: null,
-        strokeWidth: isMobile ? 2 : 1,
-        desiredSize: new go.Size(portSize, portSize),
-        alignment: spot,
-        alignmentFocus: go.Spot.Center,
-        portId: name,
-        fromLinkable: true,
-        toLinkable: true,
-        fromSpot: go.Spot.None,
-        toSpot: go.Spot.None,
-        isActionable: false,
-        cursor: "crosshair",
-        mouseEnter: (e: go.InputEvent, obj: go.GraphObject, _prev: go.GraphObject | null) => {
-          if (e.diagram?.isReadOnly) return;
-          (obj as go.Shape).fill = "#4A8C8C";
-          (obj as go.Shape).stroke = "#44403C";
-        },
-        mouseLeave: (_e: go.InputEvent, obj: go.GraphObject, _next: go.GraphObject | null) => {
-          (obj as go.Shape).fill = "transparent";
-          (obj as go.Shape).stroke = null;
-        }
-      });
+  private createNodeTemplateContext(): NodeTemplateContext {
+    const isMobile = this.uiState.isMobile();
+    // GoJS 会频繁重算 binding converter，固定值集中创建以减少短命对象。
+    return {
+      isMobile,
+      titleMaxSizeUnassigned: new go.Size(120, NaN),
+      titleMaxSizeAssigned: new go.Size(160, NaN),
+      titleFontUnassigned: "500 11px \"LXGW WenKai Screen\", sans-serif",
+      titleFontAssigned: "400 12px \"LXGW WenKai Screen\", sans-serif",
+      assignedWidth: GOJS_CONFIG.ASSIGNED_NODE_WIDTH,
+      unassignedWidth: GOJS_CONFIG.UNASSIGNED_NODE_WIDTH,
+      portSize: isMobile ? 24 : 10,
+      sidecarTitleMaxSize: new go.Size(isMobile ? 96 : 150, NaN),
     };
-    
-    diagram.nodeTemplate = $(go.Node, "Spot",
+  }
+
+  private createNodeTemplate(context: NodeTemplateContext): go.Node {
+    const $ = go.GraphObject.make;
+    return $(go.Node, "Spot",
+      this.createNodeTemplateOptions(),
+      new go.Binding("location", "loc", go.Point.parse).makeTwoWay(go.Point.stringify),
+      this.createNodeBodyPanel(context),
+      ...createFlowNodeSidecarTemplateParts({
+        context,
+        onToggle: (taskId, part) => flowTemplateEventHandlers.onSidecarToggle?.(taskId, part),
+      }),
+      this.createSiyuanBadge(context),
+      this.createDockBadge(),
+      this.createDockFocusHighlight(context),
+      this.createPort("T", go.Spot.Top, context),
+      this.createPort("B", go.Spot.Bottom, context),
+      this.createPort("L", go.Spot.Left, context),
+      this.createPort("R", go.Spot.Right, context),
+    ) as go.Node;
+  }
+
+  private createNodeTemplateOptions(): Record<string, unknown> {
+    return {
+      locationSpot: go.Spot.Center,
+      layerName: 'Nodes',
+      selectionAdorned: true,
+      movable: true,
+      fromLinkable: false,
+      toLinkable: true,
+      fromLinkableDuplicates: false,
+      toLinkableDuplicates: true,
+      selectionChanged: (node: go.Part) => this.refreshNodeSelectionStyle(node),
+      click: ((e: go.InputEvent, node: go.GraphObject) => this.handleNodeTemplateClick(e, node)) as GojsClickHandler,
+      doubleClick: ((e: go.InputEvent, node: go.GraphObject) => {
+        e.handled = true;
+        flowTemplateEventHandlers.onNodeDoubleClick?.(node as go.Node);
+      }) as GojsClickHandler,
+    };
+  }
+
+  private refreshNodeSelectionStyle(node: go.Part): void {
+    const shape = node.findObject('SHAPE') as go.Shape | null;
+    if (!shape) return;
+    const data = node.data as { selectedBorderColor?: string; borderColor?: string; borderWidth?: number } | undefined;
+    shape.stroke = node.isSelected ? data?.selectedBorderColor || '#4A8C8C' : data?.borderColor || '#78716C';
+    shape.strokeWidth = node.isSelected ? 2 : data?.borderWidth ?? 1;
+  }
+
+  private createNodeBodyPanel(context: NodeTemplateContext): go.Panel {
+    const $ = go.GraphObject.make;
+    return $(go.Panel, "Auto",
       {
-        locationSpot: go.Spot.Center,
-        layerName: 'Nodes',
-        selectionAdorned: true,
-        movable: true,
+        name: "BODY",
+        portId: "",
         fromLinkable: false,
         toLinkable: true,
-        fromLinkableDuplicates: false,
-        toLinkableDuplicates: true,
-        // 选中状态变化时立即更新边框样式
-        // 注意：.ofObject() 绑定在 isSelected（Part 属性）变化时不会自动重新求值，
-        // 必须通过 selectionChanged 回调主动刷新 SHAPE 的 stroke / strokeWidth
-        selectionChanged: (node: go.Part) => {
-          const shape = node.findObject('SHAPE') as go.Shape | null;
-          if (!shape) return;
-          const data = node.data as { selectedBorderColor?: string; borderColor?: string; borderWidth?: number } | undefined;
-          if (node.isSelected) {
-            shape.stroke = data?.selectedBorderColor || '#4A8C8C';
-            shape.strokeWidth = 2;
-          } else {
-            shape.stroke = data?.borderColor || '#78716C';
-            shape.strokeWidth = data?.borderWidth ?? 1;
-          }
-        },
-        // 事件代理：通过全局事件总线发送信号
-        click: ((e: go.InputEvent, node: go.GraphObject) => {
-          // dragging 不是 go.InputEvent 的标准属性，使用 isTouchDevice + 检查 DraggingTool
-          const diagram = e.diagram;
-          if (diagram?.toolManager?.draggingTool?.isActive) return;
-          if (e.diagram?.lastInput.clickCount >= 2) return;
-          if (e.handled) return; // 已由 ClickSelectingTool 处理
-          
-          // 支持多选：检测 Shift/Ctrl/Cmd 键或框选模式
-          const input = e;
-          const lastInput = e.diagram?.lastInput as go.InputEvent;
-          const domEvent = (input as go.InputEvent & { event?: MouseEvent | PointerEvent | KeyboardEvent })?.event;
-
-          const shift = Boolean(input?.shift || lastInput?.shift || domEvent?.shiftKey);
-          const ctrl = Boolean(input?.control || lastInput?.control || (domEvent as MouseEvent | undefined)?.ctrlKey);
-          const meta = Boolean(input?.meta || lastInput?.meta || (domEvent as MouseEvent | undefined)?.metaKey); // Mac 的 Cmd 键
-          const isSelectModifierPressed = shift || ctrl || meta;
-          const isMobileMode = this.uiState.isMobile();
-          
-          // 框选模式（移动端切换）
-          const dragSelectTool = e.diagram?.toolManager.dragSelectingTool;
-          const isSelectModeActive = isMobileMode && Boolean(dragSelectTool && dragSelectTool.isEnabled);
-
-          this.logger.debug('节点点击事件', {
-            isSelectModeActive,
-            isMobileMode,
-            dragSelectToolEnabled: dragSelectTool?.isEnabled,
-            nodeSelected: (node as go.Node).isSelected,
-            nodeKey: (node as go.Node).key
-          });
-
-          // 移动端框选模式：点击节点立即切换选中状态
-          if (isSelectModeActive) {
-            this.logger.debug('框选模式激活 - 切换节点选中状态', { from: (node as go.Node).isSelected, to: !(node as go.Node).isSelected });
-            e.handled = true;
-            // 在事务中切换选中状态
-            e.diagram?.startTransaction('toggle-selection');
-            (node as go.Node).isSelected = !(node as go.Node).isSelected;
-            e.diagram?.commitTransaction('toggle-selection');
-            // 手动触发 ChangedSelection 事件
-            e.diagram?.raiseDiagramEvent('ChangedSelection');
-            this.logger.debug('选中状态已更新', { 
-              nodeKey: (node as go.Node).key, 
-              isSelected: (node as go.Node).isSelected,
-              totalSelected: e.diagram?.selection.count
-            });
-            return;
-          }
-
-          // 桌面端修饰键多选：阻止详情面板，具体切换由 ClickSelectingTool 处理
-          if (isSelectModifierPressed) {
-            // 兼容：不同 GoJS 版本/工具链下，ClickSelectingTool 与 node.click 的执行顺序可能变化。
-            // 若仅设置 e.handled=true 可能导致多选完全不生效；这里直接切换选中状态，保证 Shift/Ctrl/Cmd 点选稳定。
-            e.handled = true;
-            e.diagram?.startTransaction('toggle-selection');
-            (node as go.Node).isSelected = !(node as go.Node).isSelected;
-            e.diagram?.commitTransaction('toggle-selection');
-            e.diagram?.raiseDiagramEvent('ChangedSelection');
-            return;
-          }
-
-          // 普通点击：先同步更新 GoJS 选中态（移动端 ClickSelectingTool 可能未正确触发），再通知事件服务
-          e.diagram?.clearSelection();
-          (node as go.Node).isSelected = true;
-          e.diagram?.raiseDiagramEvent('ChangedSelection');
-          flowTemplateEventHandlers.onNodeClick?.(node as go.Node);
-        }) as GojsClickHandler,
-        doubleClick: ((e: go.InputEvent, node: go.GraphObject) => {
-          e.handled = true;
-          flowTemplateEventHandlers.onNodeDoubleClick?.(node as go.Node);
-        }) as GojsClickHandler
+        fromSpot: go.Spot.AllSides,
+        toSpot: go.Spot.AllSides,
+        cursor: "move",
       },
-      new go.Binding("location", "loc", go.Point.parse).makeTwoWay(go.Point.stringify),
-      
-      // 主面板
-      $(go.Panel, "Auto",
-        {
-          name: "BODY",
-          portId: "",
-          fromLinkable: false,
-          toLinkable: true,
-          fromSpot: go.Spot.AllSides,
-          toSpot: go.Spot.AllSides,
-          cursor: "move"
-        },
-        new go.Binding("width", "isUnassigned", (isUnassigned: boolean) =>
-          isUnassigned ? unassignedWidth : assignedWidth),
-        $(go.Shape, "RoundedRectangle", {
-          name: "SHAPE",
-          fill: "white",
-          stroke: "#78716C",
-          strokeWidth: 1,
-          parameter1: 10,
-          isPanelMain: true
-        },
-        new go.Binding("fill", "color"),
-        // stroke 初始值由 borderColor 数据属性决定；选中态由 selectionChanged 回调处理
-        new go.Binding("stroke", "borderColor"),
-        new go.Binding("strokeWidth", "borderWidth")),
-        
-        $(go.Panel, "Vertical",
-          {
-            pickable: false, // 【2026-04-24 性能优化】文本面板纯装饰，跳过指针命中测试
-          },
-          new go.Binding("margin", "isUnassigned", (isUnassigned: boolean) => isUnassigned ? 10 : 16),
-          $(go.TextBlock, { font: "bold 9px \"LXGW WenKai Screen\", sans-serif", stroke: "#78716C", alignment: go.Spot.Left },
-            new go.Binding("text", "displayId"),
-            new go.Binding("stroke", "displayIdColor"),
-            new go.Binding("visible", "isUnassigned", (isUnassigned: boolean) => !isUnassigned)),
-          $(go.TextBlock, { margin: new go.Margin(4, 0, 0, 0), font: titleFontAssigned, stroke: "#44403C" },
-            new go.Binding("text", "title"),
-            new go.Binding("font", "isUnassigned", (isUnassigned: boolean) =>
-              isUnassigned ? titleFontUnassigned : titleFontAssigned),
-            new go.Binding("stroke", "titleColor"),
-            new go.Binding("maxSize", "isUnassigned", (isUnassigned: boolean) =>
-              isUnassigned ? titleMaxSizeUnassigned : titleMaxSizeAssigned))
-        )
-      ),
-      
-      // 思源锚点徽标
-      $(go.Panel, "Auto",
-        {
-          alignment: new go.Spot(1, 1, -6, -6),
-          cursor: "pointer",
-          isActionable: true,
-          pickable: true,
-          visible: false,
-          mouseEnter: (event: go.InputEvent, obj: go.GraphObject) => {
-            if (this.uiState.isMobile()) return;
-            const link = this.getSiyuanLink(obj);
-            const origin = this.getGraphObjectViewportOrigin(event, obj);
-            if (!link || !origin) return;
-            this.setSiyuanBadgeHover(obj, true);
-            this.siyuanPopover.scheduleOpen(link, origin);
-          },
-          mouseLeave: (_event: go.InputEvent, obj: go.GraphObject) => {
-            this.setSiyuanBadgeHover(obj, false);
-            if (this.uiState.isMobile()) return;
-            this.siyuanPopover.scheduleClose();
-          },
-          click: (event: go.InputEvent, obj: go.GraphObject) => {
-            if (this.uiState.isMobile()) return;
-            event.handled = true;
-            const link = this.getSiyuanLink(obj);
-            const origin = this.getGraphObjectViewportOrigin(event, obj);
-            if (!link || !origin) return;
-            this.siyuanPopover.openNow(link, origin);
-          },
-        },
-        new go.Binding("visible", "hasSiyuanLink", (hasSiyuanLink: boolean) => Boolean(hasSiyuanLink) && !isMobile),
-        $(go.Shape, "RoundedRectangle", {
-          name: "SIYUAN_BADGE_SHAPE",
-          fill: "#eef2ff",
-          stroke: "#818cf8",
-          strokeWidth: 1,
-          parameter1: 5,
-        }),
-        $(go.Panel, "Horizontal",
-          { margin: new go.Margin(2, 5, 2, 5), defaultAlignment: go.Spot.Center },
-          $(go.TextBlock, {
-            font: "700 9px \"LXGW WenKai Screen\", sans-serif",
-            stroke: "#4f46e5",
-          },
-          new go.Binding('text', 'siyuanLinkBadgeIndex', (index?: number) => this.getSiyuanBadgeLabel(index))),
-        ),
-      ),
-
-      // 入坞徽标
-      $(go.Panel, "Auto",
-        {
-          alignment: new go.Spot(1, 0, -6, 6),
-          visible: false,
-          pickable: false, // ㄂026-04-24 性能优化】停泊徐章仅作视觉提示
-        },
-        new go.Binding("visible", "isDocked"),
-        $(go.Shape, "RoundedRectangle", {
-          fill: "#e0f2fe",
-          stroke: "#0284c7",
-          strokeWidth: 1,
-          parameter1: 5,
-        }),
-        $(go.TextBlock, "入坞", {
-          font: "600 8px \"LXGW WenKai Screen\", sans-serif",
-          stroke: "#0369a1",
-          margin: new go.Margin(2, 5, 2, 5),
-        }),
-      ),
-
+      new go.Binding("width", "isUnassigned", (isUnassigned: boolean) =>
+        isUnassigned ? context.unassignedWidth : context.assignedWidth),
       $(go.Shape, "RoundedRectangle", {
-        alignment: go.Spot.Center,
-        width: isMobile ? GOJS_CONFIG.UNASSIGNED_NODE_WIDTH + 10 : GOJS_CONFIG.ASSIGNED_NODE_WIDTH + 10,
-        height: 88,
-        parameter1: 12,
-        fill: null,
-        stroke: "#6366f1",
-        strokeWidth: 2,
-        opacity: 0.9,
-        visible: false,
-        pickable: false, // ㄂026-04-24 性能优化】专注高亮圈纯视觉元素
+        name: "SHAPE",
+        fill: "white",
+        stroke: "#78716C",
+        strokeWidth: 1,
+        parameter1: 10,
+        isPanelMain: true,
       },
-      new go.Binding("visible", "isDockFocused")),
+      new go.Binding("fill", "color"),
+      new go.Binding("stroke", "borderColor"),
+      new go.Binding("strokeWidth", "borderWidth")),
+      $(go.Panel, "Vertical",
+        { pickable: false },
+        new go.Binding("margin", "isUnassigned", (isUnassigned: boolean) => isUnassigned ? 10 : 16),
+        $(go.TextBlock, { font: "bold 9px \"LXGW WenKai Screen\", sans-serif", stroke: "#78716C", alignment: go.Spot.Left },
+          new go.Binding("text", "displayId"),
+          new go.Binding("stroke", "displayIdColor"),
+          new go.Binding("visible", "isUnassigned", (isUnassigned: boolean) => !isUnassigned)),
+        $(go.TextBlock, { margin: new go.Margin(4, 0, 0, 0), font: context.titleFontAssigned, stroke: "#44403C" },
+          new go.Binding("text", "title"),
+          new go.Binding("font", "isUnassigned", (isUnassigned: boolean) =>
+            isUnassigned ? context.titleFontUnassigned : context.titleFontAssigned),
+          new go.Binding("stroke", "titleColor"),
+          new go.Binding("maxSize", "isUnassigned", (isUnassigned: boolean) =>
+            isUnassigned ? context.titleMaxSizeUnassigned : context.titleMaxSizeAssigned)),
+      ),
+    ) as go.Panel;
+  }
 
-      makePort("T", go.Spot.Top),
-      makePort("B", go.Spot.Bottom),
-      makePort("L", go.Spot.Left),
-      makePort("R", go.Spot.Right)
-    );
-    
-    this.logger.debug('节点模板已设置');
+  private createSiyuanBadge(context: NodeTemplateContext): go.Panel {
+    const $ = go.GraphObject.make;
+    return $(go.Panel, "Auto",
+      this.createSiyuanBadgeOptions(),
+      new go.Binding("visible", "hasSiyuanLink", (hasSiyuanLink: boolean) => Boolean(hasSiyuanLink) && !context.isMobile),
+      $(go.Shape, "RoundedRectangle", {
+        name: "SIYUAN_BADGE_SHAPE",
+        fill: "#eef2ff",
+        stroke: "#818cf8",
+        strokeWidth: 1,
+        parameter1: 5,
+      }),
+      $(go.Panel, "Horizontal",
+        { margin: new go.Margin(2, 5, 2, 5), defaultAlignment: go.Spot.Center },
+        $(go.TextBlock, {
+          font: "700 9px \"LXGW WenKai Screen\", sans-serif",
+          stroke: "#4f46e5",
+        },
+          new go.Binding('text', 'siyuanLinkBadgeIndex', getSiyuanBadgeLabel)),
+      ),
+    ) as go.Panel;
+  }
+
+  private createSiyuanBadgeOptions(): Record<string, unknown> {
+    return {
+      alignment: new go.Spot(1, 1, -6, -6),
+      cursor: "pointer",
+      isActionable: true,
+      pickable: true,
+      visible: false,
+      mouseEnter: (event: go.InputEvent, obj: go.GraphObject) => this.handleSiyuanBadgeMouseEnter(event, obj),
+      mouseLeave: (_event: go.InputEvent, obj: go.GraphObject) => this.handleSiyuanBadgeMouseLeave(obj),
+      click: (event: go.InputEvent, obj: go.GraphObject) => this.handleSiyuanBadgeClick(event, obj),
+    };
+  }
+
+  private handleSiyuanBadgeMouseEnter(event: go.InputEvent, obj: go.GraphObject): void {
+    if (this.uiState.isMobile()) return;
+    const link = this.getSiyuanLink(obj);
+    const origin = this.getGraphObjectViewportOrigin(event, obj);
+    if (!link || !origin) return;
+    this.setSiyuanBadgeHover(obj, true);
+    this.siyuanPopover.scheduleOpen(link, origin);
+  }
+
+  private handleSiyuanBadgeMouseLeave(obj: go.GraphObject): void {
+    this.setSiyuanBadgeHover(obj, false);
+    if (!this.uiState.isMobile()) this.siyuanPopover.scheduleClose();
+  }
+
+  private handleSiyuanBadgeClick(event: go.InputEvent, obj: go.GraphObject): void {
+    if (this.uiState.isMobile()) return;
+    event.handled = true;
+    const link = this.getSiyuanLink(obj);
+    const origin = this.getGraphObjectViewportOrigin(event, obj);
+    if (link && origin) this.siyuanPopover.openNow(link, origin);
+  }
+
+  private createDockBadge(): go.Panel {
+    const $ = go.GraphObject.make;
+    return $(go.Panel, "Auto",
+      { alignment: new go.Spot(1, 0, -6, 24), visible: false, pickable: false },
+      new go.Binding("visible", "isDocked"),
+      $(go.Shape, "RoundedRectangle", {
+        fill: "#e0f2fe",
+        stroke: "#0284c7",
+        strokeWidth: 1,
+        parameter1: 5,
+      }),
+      $(go.TextBlock, "入坞", {
+        font: "600 8px \"LXGW WenKai Screen\", sans-serif",
+        stroke: "#0369a1",
+        margin: new go.Margin(2, 5, 2, 5),
+      }),
+    ) as go.Panel;
+  }
+
+  private createDockFocusHighlight(context: NodeTemplateContext): go.Shape {
+    const $ = go.GraphObject.make;
+    return $(go.Shape, "RoundedRectangle", {
+      alignment: go.Spot.Center,
+      width: context.isMobile ? GOJS_CONFIG.UNASSIGNED_NODE_WIDTH + 10 : GOJS_CONFIG.ASSIGNED_NODE_WIDTH + 10,
+      height: 88,
+      parameter1: 12,
+      fill: null,
+      stroke: "#6366f1",
+      strokeWidth: 2,
+      opacity: 0.9,
+      visible: false,
+      pickable: false,
+    },
+    new go.Binding("visible", "isDockFocused")) as go.Shape;
+  }
+
+  private createPort(name: string, spot: go.Spot, context: NodeTemplateContext): GojsShapeBuilder {
+    const $ = go.GraphObject.make;
+    return $(go.Shape, "Circle", {
+      fill: "transparent",
+      stroke: null,
+      strokeWidth: context.isMobile ? 2 : 1,
+      desiredSize: new go.Size(context.portSize, context.portSize),
+      alignment: spot,
+      alignmentFocus: go.Spot.Center,
+      portId: name,
+      fromLinkable: true,
+      toLinkable: true,
+      fromSpot: go.Spot.None,
+      toSpot: go.Spot.None,
+      isActionable: false,
+      cursor: "crosshair",
+      mouseEnter: (e: go.InputEvent, obj: go.GraphObject) => this.handlePortMouseEnter(e, obj),
+      mouseLeave: (_e: go.InputEvent, obj: go.GraphObject) => this.handlePortMouseLeave(obj),
+    }) as GojsShapeBuilder;
+  }
+
+  private handlePortMouseEnter(e: go.InputEvent, obj: go.GraphObject): void {
+    if (e.diagram?.isReadOnly) return;
+    (obj as go.Shape).fill = "#4A8C8C";
+    (obj as go.Shape).stroke = "#44403C";
+  }
+
+  private handlePortMouseLeave(obj: go.GraphObject): void {
+    (obj as go.Shape).fill = "transparent";
+    (obj as go.Shape).stroke = null;
   }
   
   // ========== Overview 模板 ==========

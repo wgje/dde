@@ -12,6 +12,8 @@ import {
 } from '../../../utils/browser-network-suspension';
 import { ExternalSourceCacheService } from './external-source-cache.service';
 import { ExternalSourceLinkService } from './external-source-link.service';
+import { registerExternalSourceLinkRefreshSpecs } from './external-source-link-refresh.spec-helpers';
+import type { ExternalSourceLink } from './external-source.model';
 
 function setVisibilityState(state: 'visible' | 'hidden') {
   Object.defineProperty(document, 'visibilityState', {
@@ -19,6 +21,16 @@ function setVisibilityState(state: 'visible' | 'hidden') {
     writable: true,
     configurable: true,
   });
+}
+
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, reject, resolve };
 }
 
 describe('ExternalSourceLinkService', () => {
@@ -55,13 +67,18 @@ describe('ExternalSourceLinkService', () => {
     remoteRows = [];
     loggerCategoryMock = { warn: vi.fn(), info: vi.fn(), debug: vi.fn(), error: vi.fn() };
     const from = vi.fn((table: string) => ({
-      select: vi.fn(() => ({
-        eq: vi.fn(async () => {
-          selectCallCount += 1;
-          if (selectError) return { data: null, error: selectError };
-          return { data: remoteRows, error: null };
-        }),
-      })),
+      select: vi.fn(() => {
+        const query = {
+          eq: vi.fn(() => query),
+          order: vi.fn(() => query),
+          range: vi.fn(async (fromIndex: number, toIndex: number) => {
+            selectCallCount += 1;
+            if (selectError) return { data: null, error: selectError };
+            return { data: remoteRows.slice(fromIndex, toIndex + 1), error: null };
+          }),
+        };
+        return query;
+      }),
       upsert: vi.fn(async (payload: unknown) => {
         upsertCallCount += 1;
         const queuedError = upsertErrorQueue.shift();
@@ -101,6 +118,40 @@ describe('ExternalSourceLinkService', () => {
     expect(link?.targetId).toBe('20260426123456-abc1234');
     expect(link?.uri).toBe('siyuan://blocks/20260426123456-abc1234?focus=1');
     expect(service.firstActiveLinkForTask('task-1')?.id).toBe(link?.id);
+  });
+
+  it('creates and queues a SiYuan pointer with Web Crypto fallback when crypto.randomUUID is unavailable', async () => {
+    const originalCrypto = globalThis.crypto;
+    let callCount = 0;
+    Object.defineProperty(globalThis, 'crypto', {
+      configurable: true,
+      value: {
+        getRandomValues: (array: Uint8Array) => {
+          callCount += 1;
+          array.fill(callCount);
+          return array;
+        },
+      },
+    });
+
+    try {
+      const service = TestBed.inject(ExternalSourceLinkService);
+      const cache = TestBed.inject(ExternalSourceCacheService);
+
+      const link = await service.bindSiyuanBlock('task-1', 'siyuan://blocks/20260426123456-abc1234');
+      const pending = await cache.loadPendingLinks();
+
+      expect(link?.id).toBe('01010101-0101-4101-8101-010101010101');
+      expect(service.firstActiveLinkForTask('task-1')?.id).toBe(link?.id);
+      expect(pending).toHaveLength(1);
+      expect(pending[0].link.id).toBe(link?.id);
+      expect(pending[0].operationId).toBe('02020202-0202-4202-8202-020202020202');
+    } finally {
+      Object.defineProperty(globalThis, 'crypto', {
+        configurable: true,
+        value: originalCrypto,
+      });
+    }
   });
 
   it('sync payload contains pointer metadata but no preview body fields', async () => {
@@ -149,6 +200,75 @@ describe('ExternalSourceLinkService', () => {
     expect(pending[0].lastErrorCode).toBe('no-client');
   });
 
+  it('recovers pending links from durable storage after service recreation and flushes them', async () => {
+    clientAsyncMock.mockImplementation(async () => null);
+    const firstService = TestBed.inject(ExternalSourceLinkService);
+    const cache = TestBed.inject(ExternalSourceCacheService);
+
+    const link = await firstService.bindSiyuanBlock('task-1', '20260426123456-abc1234');
+    await firstService.flushPendingLinks();
+
+    const pendingBeforeRecreation = await cache.loadPendingLinks();
+    expect(pendingBeforeRecreation).toHaveLength(1);
+    const operationId = pendingBeforeRecreation[0].operationId;
+    expect(upsertPayloads).toHaveLength(0);
+
+    clientAsyncMock.mockImplementation(async () => ({
+      from: vi.fn((table: string) => ({
+        select: vi.fn(() => {
+          const query = {
+            eq: vi.fn(() => query),
+            order: vi.fn(() => query),
+            range: vi.fn(async () => ({ data: [], error: null })),
+          };
+          return query;
+        }),
+        upsert: vi.fn(async (payload: unknown) => {
+          upsertPayloads.push({ table, payload });
+          return { error: null };
+        }),
+      })),
+    }));
+    TestBed.resetTestingModule();
+    TestBed.configureTestingModule({
+      providers: [
+        ExternalSourceLinkService,
+        { provide: AuthService, useValue: { currentUserId: authUser } },
+        { provide: SupabaseClientService, useValue: { clientAsync: clientAsyncMock } },
+        { provide: ToastService, useValue: { success: vi.fn(), info: vi.fn(), error: vi.fn() } },
+        { provide: LoggerService, useValue: { category: () => loggerCategoryMock } },
+      ],
+    });
+    const recreatedService = TestBed.inject(ExternalSourceLinkService);
+
+    await recreatedService.flushPendingLinks();
+
+    expect(upsertPayloads).toEqual([
+      expect.objectContaining({
+        table: 'external_source_links',
+        payload: expect.objectContaining({
+          id: link!.id,
+          task_id: 'task-1',
+          target_id: '20260426123456-abc1234',
+          operation_id: operationId,
+        }),
+      }),
+    ]);
+    expect(await TestBed.inject(ExternalSourceCacheService).loadPendingLinks()).toEqual([]);
+  });
+
+  it('does not expose a new link in UI when durable pending enqueue fails', async () => {
+    const service = TestBed.inject(ExternalSourceLinkService);
+    const cache = TestBed.inject(ExternalSourceCacheService);
+    vi.spyOn(cache, 'upsertPendingLink').mockRejectedValueOnce(new Error('idb write failed'));
+
+    await expect(service.bindSiyuanBlock('task-1', '20260426123456-abc1234')).rejects.toThrow('idb write failed');
+
+    expect(service.firstActiveLinkForTask('task-1')).toBeNull();
+    expect(await cache.loadLinks()).toHaveLength(0);
+    expect(await cache.loadPendingLinks()).toHaveLength(0);
+  });
+
   it('reloads local links when the current owner changes', async () => {
     const service = TestBed.inject(ExternalSourceLinkService);
     const first = await service.bindSiyuanBlock('task-a', '20260426123456-abc1234');
@@ -158,6 +278,58 @@ describe('ExternalSourceLinkService', () => {
     await service.ensureLoaded();
 
     expect(service.firstActiveLinkForTask('task-a')).toBeNull();
+  });
+
+  it('ignores a late ensureLoaded result from a previous owner', async () => {
+    const service = TestBed.inject(ExternalSourceLinkService);
+    const cache = TestBed.inject(ExternalSourceCacheService);
+    const now = new Date().toISOString();
+    const ownerALink: ExternalSourceLink = {
+      id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      taskId: 'task-owner-a',
+      sourceType: 'siyuan-block',
+      targetId: '20260614000000-ownerA',
+      uri: 'siyuan://blocks/20260614000000-ownerA?focus=1',
+      sortOrder: 0,
+      deletedAt: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const ownerBLink: ExternalSourceLink = {
+      ...ownerALink,
+      id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      taskId: 'task-owner-b',
+      targetId: '20260614000000-ownerB',
+      uri: 'siyuan://blocks/20260614000000-ownerB?focus=1',
+    };
+    const ownerALocal = createDeferred<ExternalSourceLink[]>();
+    vi.spyOn(cache, 'loadLinks')
+      .mockImplementationOnce(() => ownerALocal.promise)
+      .mockResolvedValueOnce([ownerBLink]);
+    vi.spyOn(cache, 'saveLinks').mockResolvedValue(undefined);
+    vi.spyOn(
+      service as unknown as {
+        pullRemoteLinks(): Promise<{ links: ExternalSourceLink[]; deferredBySuspension: boolean; failed: boolean }>;
+      },
+      'pullRemoteLinks',
+    ).mockResolvedValue({ links: [], deferredBySuspension: false, failed: false });
+    vi.spyOn(
+      service as unknown as {
+        pushLocalNewerLinks(localLinks: ExternalSourceLink[], remoteLinks: ExternalSourceLink[]): Promise<void>;
+      },
+      'pushLocalNewerLinks',
+    ).mockResolvedValue(undefined);
+
+    const ownerALoad = service.ensureLoaded();
+    authUser.set('00000000-0000-0000-0000-000000000002');
+    await service.ensureLoaded();
+
+    expect(service.links().map(link => link.id)).toEqual([ownerBLink.id]);
+
+    ownerALocal.resolve([ownerALink]);
+    await ownerALoad;
+
+    expect(service.links().map(link => link.id)).toEqual([ownerBLink.id]);
   });
 
   it('soft deletes links and hides them from active task anchors', async () => {
@@ -332,6 +504,37 @@ describe('ExternalSourceLinkService', () => {
     expect(pending[0].link.targetId).toBe('20260426123456-def5678');
   });
 
+  it('pushLocalNewerLinks records a durable pending operation before successful direct push', async () => {
+    const service = TestBed.inject(ExternalSourceLinkService) as unknown as {
+      pushLocalNewerLinks(localLinks: Array<Record<string, unknown>>, remoteLinks: Array<Record<string, unknown>>): Promise<void>;
+    };
+    const cache = TestBed.inject(ExternalSourceCacheService);
+    const upsertPendingSpy = vi.spyOn(cache, 'upsertPendingLink');
+    const removePendingSpy = vi.spyOn(cache, 'removePendingLink');
+    const now = new Date().toISOString();
+    const link = {
+      id: 'eeeeeeee-0000-4000-8000-000000000000',
+      taskId: 'task-local-newer',
+      sourceType: 'siyuan-block' as const,
+      targetId: '20260426123456-abc1234',
+      uri: 'siyuan://blocks/20260426123456-abc1234?focus=1',
+      sortOrder: 0,
+      deletedAt: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    await service.pushLocalNewerLinks([link], []);
+
+    const pendingEntry = await upsertPendingSpy.mock.results[0]?.value;
+    const payload = upsertPayloads[0] as { payload: Record<string, unknown> };
+    expect(upsertPendingSpy).toHaveBeenCalledWith(link, { resetRetryCount: false });
+    expect(removePendingSpy).toHaveBeenCalledWith(link.id);
+    expect(pendingEntry.operationId).toMatch(/[0-9a-f-]{36}/);
+    expect(payload.payload.operation_id).toBe(pendingEntry.operationId);
+    expect(await cache.loadPendingLinks()).toHaveLength(0);
+  });
+
   it('keeps retry counter so transient failures eventually move to dead letter', async () => {
     const service = TestBed.inject(ExternalSourceLinkService);
     const cache = TestBed.inject(ExternalSourceCacheService);
@@ -424,84 +627,14 @@ describe('ExternalSourceLinkService', () => {
     expect(ids).toContain('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb');
   });
 
-  it('refreshIfStale skips remote pull within the staleness window and forces it when force=true', async () => {
-    const service = TestBed.inject(ExternalSourceLinkService);
-    await service.ensureLoaded();
-    const baseline = clientAsyncMock.mock.calls.length;
-
-    // staleness 窗口内调用应直接 no-op，不触发新的 getClient。
-    await service.refreshIfStale(false);
-    expect(clientAsyncMock.mock.calls.length).toBe(baseline);
-
-    // force=true 强制一次额外 pull（模拟 online 事件 / 用户手动刷新）。
-    await service.refreshIfStale(true);
-    expect(clientAsyncMock.mock.calls.length).toBeGreaterThan(baseline);
-  });
-
-  it('refreshIfStale picks up new remote rows after force refresh', async () => {
-    const service = TestBed.inject(ExternalSourceLinkService);
-    await service.ensureLoaded();
-    expect(service.activeLinks()).toHaveLength(0);
-
-    const now = new Date().toISOString();
-    remoteRows = [
-      {
-        id: 'cccccccc-cccc-cccc-cccc-cccccccccccc',
-        user_id: '00000000-0000-0000-0000-000000000001',
-        task_id: 'task-remote',
-        source_type: 'siyuan-block',
-        target_id: '20260426999999-rem0001',
-        uri: 'siyuan://blocks/20260426999999-rem0001?focus=1',
-        label: null,
-        hpath: null,
-        role: null,
-        sort_order: 0,
-        deleted_at: null,
-        created_at: now,
-        updated_at: now,
-      },
-    ];
-
-    await service.refreshIfStale(true);
-
-    expect(service.firstActiveLinkForTask('task-remote')?.id).toBe(
-      'cccccccc-cccc-cccc-cccc-cccccccccccc',
-    );
-  });
-
-  it('refreshIfStale does not push local links when the remote pull fails', async () => {
-    const service = TestBed.inject(ExternalSourceLinkService);
-    await service.bindSiyuanBlock('task-1', '20260426123456-abc1234');
-    await service.flushPendingLinks();
-    upsertCallCount = 0;
-    selectError = new Error('pull failed');
-
-    await service.refreshIfStale(true);
-
-    expect(upsertCallCount).toBe(0);
-  });
-
-  it('浏览器恢复保护期内应延后 remote pull，并在保护期结束后自动补拉', async () => {
-    setVisibilityState('hidden');
-    const service = TestBed.inject(ExternalSourceLinkService);
-    const refreshSpy = vi.spyOn(service, 'refreshIfStale');
-
-    await service.ensureLoaded();
-    expect(selectCallCount).toBe(0);
-
-    vi.useFakeTimers();
-    try {
-      setVisibilityState('visible');
-      document.dispatchEvent(new Event('visibilitychange'));
-
-      await vi.advanceTimersByTimeAsync(1549);
-      expect(selectCallCount).toBe(0);
-
-      await vi.advanceTimersByTimeAsync(1);
-      expect(refreshSpy).toHaveBeenCalledWith(false);
-    } finally {
-      vi.useRealTimers();
-    }
+  registerExternalSourceLinkRefreshSpecs({
+    clientAsyncMock: () => clientAsyncMock,
+    getSelectCallCount: () => selectCallCount,
+    getUpsertCallCount: () => upsertCallCount,
+    setRemoteRows: (rows) => { remoteRows = rows; },
+    setSelectError: (error) => { selectError = error; },
+    setUpsertCallCount: (count) => { upsertCallCount = count; },
+    setVisibilityState,
   });
 
   it('BrowserNetworkSuspendedError 不应消耗思源锚点 pending 的 retry budget', async () => {
@@ -549,5 +682,108 @@ describe('ExternalSourceLinkService', () => {
     const pending = await cache.loadPendingLinks();
     expect(pending).toHaveLength(1);
     expect(pending[0].retryCount).toBe(1);
+  });
+
+  it('continues opportunistic listener cleanup when one removeEventListener throws', async () => {
+    const service = TestBed.inject(ExternalSourceLinkService);
+    await service.ensureLoaded();
+    const documentRemoveSpy = vi
+      .spyOn(document, 'removeEventListener')
+      .mockImplementationOnce(() => {
+        throw new Error('visibility cleanup failed');
+      });
+    const windowRemoveSpy = vi.spyOn(window, 'removeEventListener');
+    const internals = service as unknown as { opportunisticListenersBound: boolean };
+
+    try {
+      expect(() => TestBed.resetTestingModule()).not.toThrow();
+      expect(windowRemoveSpy).toHaveBeenCalledWith('online', expect.any(Function));
+      expect(internals.opportunisticListenersBound).toBe(false);
+    } finally {
+      documentRemoveSpy.mockRestore();
+      windowRemoveSpy.mockRestore();
+    }
+  });
+
+  it('continues opportunistic listener cleanup when cleanup warning logging throws', async () => {
+    const service = TestBed.inject(ExternalSourceLinkService);
+    await service.ensureLoaded();
+    const documentRemoveSpy = vi
+      .spyOn(document, 'removeEventListener')
+      .mockImplementationOnce(() => {
+        throw new Error('visibility cleanup failed');
+      });
+    const windowRemoveSpy = vi.spyOn(window, 'removeEventListener');
+    loggerCategoryMock.warn.mockImplementationOnce(() => {
+      throw new Error('logger unavailable');
+    });
+    const internals = service as unknown as { opportunisticListenersBound: boolean };
+
+    try {
+      expect(() => TestBed.resetTestingModule()).not.toThrow();
+      expect(windowRemoveSpy).toHaveBeenCalledWith('online', expect.any(Function));
+      expect(internals.opportunisticListenersBound).toBe(false);
+      expect(loggerCategoryMock.warn).toHaveBeenCalledWith(
+        '思源锚点 visibility 监听解绑失败，继续清理其他监听',
+        expect.objectContaining({ message: 'visibility cleanup failed' }),
+      );
+    } finally {
+      documentRemoveSpy.mockRestore();
+      windowRemoveSpy.mockRestore();
+    }
+  });
+
+  it('resume sync timer 注册失败时不应打穿恢复事件链路', async () => {
+    const service = TestBed.inject(ExternalSourceLinkService);
+    await service.ensureLoaded();
+    const scheduleError = new Error('schedule resume sync failed');
+    const setTimeoutSpy = vi
+      .spyOn(window, 'setTimeout')
+      .mockImplementation(() => {
+        throw scheduleError;
+      });
+
+    try {
+      expect(() => {
+        (service as unknown as { scheduleResumeSync: (forceRefresh?: boolean) => void })
+          .scheduleResumeSync(true);
+      }).not.toThrow();
+
+      expect(loggerCategoryMock.warn).toHaveBeenCalledWith(
+        '思源锚点恢复 timer 注册失败，等待下一次恢复事件重试',
+        expect.objectContaining({ message: 'schedule resume sync failed' }),
+      );
+    } finally {
+      setTimeoutSpy.mockRestore();
+    }
+  });
+
+  it('destroy cleanup 清理 resume sync timer 失败时仍应完成销毁', async () => {
+    const service = TestBed.inject(ExternalSourceLinkService);
+    await service.ensureLoaded();
+    const timerId = 456 as unknown as ReturnType<typeof window.setTimeout>;
+    const setTimeoutSpy = vi
+      .spyOn(window, 'setTimeout')
+      .mockImplementation(() => timerId);
+    const clearTimeoutSpy = vi
+      .spyOn(window, 'clearTimeout')
+      .mockImplementation(() => {
+        throw new Error('clear resume sync failed');
+      });
+
+    try {
+      (service as unknown as { scheduleResumeSync: (forceRefresh?: boolean) => void })
+        .scheduleResumeSync(true);
+
+      expect(() => TestBed.resetTestingModule()).not.toThrow();
+      expect(clearTimeoutSpy).toHaveBeenCalledWith(timerId);
+      expect(loggerCategoryMock.warn).toHaveBeenCalledWith(
+        '思源锚点恢复 timer 清理失败，继续清理其他资源',
+        expect.objectContaining({ message: 'clear resume sync failed' }),
+      );
+    } finally {
+      setTimeoutSpy.mockRestore();
+      clearTimeoutSpy.mockRestore();
+    }
   });
 });

@@ -14,6 +14,7 @@
  * 这些纯工具自洽且零依赖服务态，适合先行下切。
  */
 import { Project, Task, Connection } from '../models';
+import type { TaskDeleteBaseUpdatedAtMap } from './action-queue.types';
 
 export function computeLocalProjectWatermark(project: Project | undefined): number {
   if (!project) return 0;
@@ -52,12 +53,24 @@ export function buildConflictSnapshotSignature(
   localProject: Project | undefined,
   remoteProject: Project | undefined,
   pendingTaskDeleteIds?: string[],
+  pendingTaskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap,
 ): string {
   return JSON.stringify({
     localProject: localProject ?? null,
     remoteProject: remoteProject ?? null,
     pendingTaskDeleteIds: [...(pendingTaskDeleteIds ?? [])].sort(),
+    pendingTaskDeleteBaseUpdatedAtMap: normalizeTaskDeleteBaseUpdatedAtMap(pendingTaskDeleteBaseUpdatedAtMap),
   });
+}
+
+function normalizeTaskDeleteBaseUpdatedAtMap(
+  pendingTaskDeleteBaseUpdatedAtMap: TaskDeleteBaseUpdatedAtMap | undefined,
+): Record<string, string | null> {
+  return Object.fromEntries(
+    Object.entries(pendingTaskDeleteBaseUpdatedAtMap ?? {})
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([taskId, baseUpdatedAt]) => [taskId, baseUpdatedAt ?? null]),
+  );
 }
 
 export function buildPersistTaskSignature(task: Task): string {

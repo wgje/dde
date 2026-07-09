@@ -99,6 +99,18 @@ describe('android host contract', () => {
     const bootstrapActivity = readText('android/app/src/main/java/app/nanoflow/host/NanoflowWidgetBootstrapActivity.kt');
     const bindingService = readText('src/services/widget-binding.service.ts');
     const workspaceShell = readText('src/workspace-shell.component.ts');
+    // shell graph 装配已下切：委托入口保留在 controller-graph.factory，
+    // startupEntryRegistry/startupTemplateSurfaces 的实际装配在 builder factory
+    const workspaceShellGraphEntry = readText('src/app/core/shell/workspace-shell-controller-graph.factory.ts');
+    const workspaceShellGraph = readText('src/app/core/shell/workspace-shell-controller-graph-builder.factory.ts');
+    const startupTemplateSurfaces = readText('src/app/core/shell/workspace-shell-startup-template-surfaces.factory.ts');
+    const startupEntryRegistry = readText('src/app/core/shell/workspace-shell-startup-entry-registry.factory.ts');
+    const startupEntryOptions = readText('src/app/core/shell/workspace-shell-startup-entry-options.factory.ts');
+    const startupEntryDelegates = readText('src/app/core/shell/workspace-shell-startup-entry-delegates.factory.ts');
+    const startupEntryControllers = readText('src/app/core/shell/workspace-shell-startup-entry-controllers.factory.ts');
+    const startupEntryFactory = readText('src/app/core/shell/workspace-shell-startup-entry-intent.factory.ts');
+    const androidWidgetLazyLoad = readText('src/app/core/shell/workspace-shell-android-widget-lazy-load.controller.ts');
+    const startupEntryIntent = readText('src/utils/startup-entry-intent.ts');
 
     expect(contract).toContain('PARAM_WIDGET_BOOTSTRAP');
     expect(contract).toContain('PARAM_CALLBACK_URI');
@@ -121,8 +133,29 @@ describe('android host contract', () => {
     expect(bindingService).toContain('callbackIntentUrl');
     expect(bindingService).toContain("ANDROID_WIDGET_HOST_PACKAGE = 'app.nanoflow.twa'");
     expect(bindingService).toContain('package=${ANDROID_WIDGET_HOST_PACKAGE}');
-    expect(workspaceShell).toContain('resolveAndroidWidgetBootstrapRequest');
-    expect(workspaceShell).toContain('completeAndroidWidgetBootstrap');
+    expect(startupEntryIntent).toContain('resolveAndroidWidgetBootstrapRequest');
+    expect(startupEntryIntent).toContain('widgetBootstrapReturnUri');
+    expect(workspaceShell).toContain('createWorkspaceShellControllerGraph');
+    expect(workspaceShellGraphEntry).toContain('createWorkspaceShellControllerGraphFromContext');
+    expect(workspaceShellGraph).toContain('createWorkspaceShellStartupEntryRegistry');
+    expect(workspaceShellGraph).toContain('createWorkspaceShellStartupTemplateSurfaces');
+    expect(workspaceShellGraph).toContain('startupEntryRegistry.registerStartupEntryControllers');
+    expect(startupTemplateSurfaces).toContain('createWorkspaceShellStartupEntrySurface');
+    expect(startupTemplateSurfaces).toContain('options.registerStartupEntryControllers?.(startupEntryControllers)');
+    expect(startupTemplateSurfaces).toContain('createWorkspaceShellTemplateSurface');
+    expect(startupEntryRegistry).toContain('current = controllers');
+    expect(startupEntryOptions).toContain('export function createWorkspaceShellStartupEntrySurface');
+    expect(startupEntryOptions).toContain('return createWorkspaceShellStartupEntryDelegate({');
+    expect(startupEntryOptions).toContain('export function createWorkspaceShellStartupEntryDelegate');
+    expect(startupEntryOptions).toContain('return createWorkspaceShellStartupEntryDelegates(');
+    expect(startupEntryDelegates).toContain('createWorkspaceShellStartupEntryControllers');
+    expect(startupEntryControllers).toContain('createWorkspaceShellStartupEntryIntentResolver');
+    expect(startupEntryFactory).toContain("from '../../../utils/startup-entry-intent'");
+    expect(startupEntryControllers).toContain('pendingAndroidWidgetBootstrap');
+    expect(startupEntryOptions).toMatch(
+      /completeAndroidBootstrap:\s*\(?request\)?\s*=>\s*options\.widgetBinding\.completeAndroidBootstrap\(request\)/,
+    );
+    expect(androidWidgetLazyLoad).toContain('completeAndroidWidgetBootstrap: bootstrapRequest => this.complete(bootstrapRequest)');
   });
 
   it('keeps Android dirty push handling compatible with both payload variants', () => {
@@ -210,10 +243,13 @@ describe('android host contract', () => {
   });
 
   it('primes web Gate sync when Android widget opens the workspace', () => {
-    const shell = readText('src/workspace-shell.component.ts');
+    const startupEntryOptions = readText('src/app/core/shell/workspace-shell-startup-entry-options.factory.ts');
+    const startupEntryIntent = readText('src/app/core/shell/workspace-shell-startup-entry-intent.controller.ts');
     const probe = readText('src/services/focus-startup-probe.service.ts');
 
-    expect(shell).toContain('this.focusStartupProbe.primeWidgetWorkspaceGateSync()');
+    expect(startupEntryOptions).toContain('primeWidgetWorkspaceGateSync: () =>');
+    expect(startupEntryOptions).toContain('options.focusStartupProbe.primeWidgetWorkspaceGateSync()');
+    expect(startupEntryIntent).toContain('this.options.primeWidgetWorkspaceGateSync()');
     expect(probe).toContain('primeWidgetWorkspaceGateSync()');
     expect(probe).toContain("source: remoteFirst ? 'widget-open-workspace' : options.source");
   });
@@ -274,17 +310,24 @@ describe('android host contract', () => {
     expect(worker).toContain('scheduleFocusWaitReminder');
   });
 
-  it('keeps the optimistic wait preset state when remote wait submission is delayed or rejected', () => {
+  it('rolls back optimistic wait preset state when remote wait submission is rejected', () => {
     const receiver = readText('android/app/src/main/java/app/nanoflow/host/NanoflowWidgetReceiver.kt');
     const branchStart = receiver.indexOf('NanoflowWidgetActionFactory.FOCUS_ACTION_WAIT_PRESET ->');
     const branchEnd = receiver.indexOf('else -> {', branchStart);
     const waitPresetBranch = receiver.slice(branchStart, branchEnd);
+    const reminderCallCount = waitPresetBranch.match(/scheduleFocusWaitReminder/g)?.length ?? 0;
 
     expect(waitPresetBranch).toContain('repository.applyOptimisticFocusWait');
     expect(waitPresetBranch).toContain('repository.suspendFrontFocusTask');
     expect(waitPresetBranch).toContain('focus-wait-front-retry');
-    expect(waitPresetBranch).toContain('scheduleFocusWaitReminder');
-    expect(waitPresetBranch).not.toContain('rollbackOptimisticFocusPromotion');
+    expect(waitPresetBranch).toContain('repository.rollbackOptimisticFocusPromotion(appWidgetId, optimisticSnapshot)');
+    expect(waitPresetBranch).toMatch(
+      /if \(success\) \{[\s\S]*NanoflowWidgetRefreshWorker\.scheduleFocusWaitReminder/,
+    );
+    expect(waitPresetBranch).toMatch(
+      /else \{[\s\S]*repository\.rollbackOptimisticFocusPromotion\(appWidgetId, optimisticSnapshot\)[\s\S]*nanoflow_widget_focus_promote_failed_toast/,
+    );
+    expect(reminderCallCount).toBe(1);
   });
 
   it('keeps the focus widget advertised as a 4x2 launcher widget', () => {

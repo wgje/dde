@@ -6,7 +6,7 @@
  *
  * 使用与其他 Dock 子服务一致的 init(ctx) 上下文注入模式。
  */
-import { DestroyRef, Injectable, WritableSignal, effect, inject, untracked } from '@angular/core';
+import { DestroyRef, Injectable, WritableSignal, effect, inject, signal, untracked } from '@angular/core';
 import { PARKING_CONFIG } from '../config/parking.config';
 import { DOCK_NOTIFICATION } from '../config/dock-i18n.config';
 import { IDLE_SCHEDULE_CONFIG } from '../config/timeout.config';
@@ -37,7 +37,7 @@ import { DockAudioPlayer } from './dock-audio.utils';
 import { isWaitExpired, isWaitingLike, patchAllEntries } from './dock-engine.utils';
 import { TaskStore } from '../core-bridge';
 import { AUTH_CONFIG } from '../config/auth.config';
-import { isLocalModeEnabled } from './guards/auth.guard';
+import { isLocalModeEnabled, LOCAL_MODE_CHANGED_EVENT } from './guards/auth.guard';
 
 const EMPTY_LOCAL_SNAPSHOT_SAVED_AT = '1970-01-01T00:00:00.000Z';
 
@@ -122,10 +122,15 @@ export class DockEngineLifecycleService {
   private readonly audioPlayer = new DockAudioPlayer();
   private switchMaintenanceIdleId: number | null = null;
   private readonly switchMaintenanceFallback = new TimerHandle();
+  private idleCloudPullHandle: number | null = null;
+  private idleCloudPullFallback = new TimerHandle();
   private switchMaintenanceToken = 0;
   private snapshotRestoreToken = 0;
+  private readonly localModeRevision = signal(0);
+  private isDestroyed = false;
   private nonCriticalWorkHoldUntil = 0;
   private visibilityListener: (() => void) | null = null;
+  private localModeListener: (() => void) | null = null;
   private lastPersistenceFingerprint: string | null = null;
   private preserveNextEmptyRestoreForUnconfirmedInMemoryState = false;
 
@@ -146,7 +151,7 @@ export class DockEngineLifecycleService {
       this.ctx.tick.update(value => value + 1);
       this.checkWaitExpiry();
       this.checkPendingDecisionExpiry();
-      this.dailySlotService.resetDailySlotsIfNeeded();
+      void this.resetDailySlotsIfNeededSafely();
       this.fragmentRest.checkBurnoutCooldown();
       if (this.ctx.focusMode()) {
         this.fragmentRest.updateFragmentDefenseLevel();
@@ -181,6 +186,7 @@ export class DockEngineLifecycleService {
   // ---------------------------------------------------------------------------
 
   registerEffects(): void {
+    this.registerLocalModeListener();
     this.registerCoreEffects();
     this.registerReconciliationEffects();
     this.registerNotificationEffects();
@@ -190,6 +196,7 @@ export class DockEngineLifecycleService {
   private registerCoreEffects(): void {
     // DATA-C2 fix: cloud pull 必须在 local restore 完成后调度，避免竞态覆盖
     effect(() => {
+      this.localModeRevision();
       const userId = this.resolveConfirmedRestoreOwnerUserId();
       if (this.shouldDeferRestoreUntilAuthConfirmed(userId)) {
         this.clearSnapshotStateForUnconfirmedOwner();
@@ -206,6 +213,7 @@ export class DockEngineLifecycleService {
 
     // 状态变更时触发本地持久化和云端推送（通过 persistenceDeps 聚合信号，避免冗余触发）
     effect(() => {
+      this.localModeRevision();
       const persistenceFingerprint = this.buildPersistenceFingerprint(this.ctx.persistenceDeps());
       const confirmedOwnerUserId = this.resolveConfirmedRestoreOwnerUserId();
       if (this.shouldDeferRestoreUntilAuthConfirmed(confirmedOwnerUserId)) {
@@ -241,8 +249,16 @@ export class DockEngineLifecycleService {
     // 每日重置时间偏好变更
     effect(() => {
       this.focusPreferenceService.preferences().routineResetHourLocal;
-      this.dailySlotService.resetDailySlotsIfNeeded();
+      void this.resetDailySlotsIfNeededSafely();
     });
+  }
+
+  private async resetDailySlotsIfNeededSafely(): Promise<void> {
+    try {
+      await this.dailySlotService.resetDailySlotsIfNeeded();
+    } catch (error) {
+      this.logger.warn('日常任务日期重置持久化失败，已保留上一次可恢复状态', { error });
+    }
   }
 
   /** 外部状态协调 effect：检测外部完成的任务并同步 */
@@ -311,7 +327,10 @@ export class DockEngineLifecycleService {
   // ---------------------------------------------------------------------------
 
   registerVisibilityListener(): void {
-    if (typeof document !== 'undefined') {
+    if (this.visibilityListener || typeof document === 'undefined') {
+      return;
+    }
+
       this.visibilityListener = () => {
         if (document.visibilityState !== 'visible') return;
         const userId = this.ctx.getCurrentSnapshotUserId();
@@ -319,7 +338,6 @@ export class DockEngineLifecycleService {
         this.cloudSync.scheduleCloudPull(userId, false);
       };
       document.addEventListener('visibilitychange', this.visibilityListener);
-    }
   }
 
   private buildPersistenceFingerprint(deps: unknown[]): string {
@@ -335,18 +353,28 @@ export class DockEngineLifecycleService {
    * 仅最新 restore token 且 owner 未切换时才允许真正调度。
    */
   private scheduleIdleCloudPull(userId: string, restoreToken: number): void {
+    if (this.isDestroyed) {
+      return;
+    }
+    this.cancelIdleCloudPull();
+
     const scheduleIdle = (cb: () => void) => {
       const requestIdleCallback = typeof window !== 'undefined'
         ? (window as Window & { requestIdleCallback?: (cb: () => void) => number }).requestIdleCallback
         : undefined;
       if (typeof requestIdleCallback === 'function') {
-        requestIdleCallback(cb);
+        this.idleCloudPullHandle = requestIdleCallback(cb);
       } else {
         // 【超时治理 2026-04-16】常量化为 IDLE_SCHEDULE_CONFIG.STANDARD_MS
-        setTimeout(cb, IDLE_SCHEDULE_CONFIG.STANDARD_MS);
+        this.idleCloudPullFallback.schedule(cb, IDLE_SCHEDULE_CONFIG.STANDARD_MS);
       }
     };
     scheduleIdle(() => {
+      this.idleCloudPullHandle = null;
+      if (this.isDestroyed) {
+        return;
+      }
+
       if (restoreToken !== this.snapshotRestoreToken) {
         return;
       }
@@ -359,9 +387,39 @@ export class DockEngineLifecycleService {
     });
   }
 
+  private cancelIdleCloudPull(): void {
+    const g = typeof window !== 'undefined'
+      ? window as Window & { cancelIdleCallback?: (handle: number) => void }
+      : undefined;
+    const handle = this.idleCloudPullHandle;
+    this.idleCloudPullHandle = null;
+
+    try {
+      if (handle !== null && typeof g?.cancelIdleCallback === 'function') {
+        g.cancelIdleCallback(handle);
+      }
+    } finally {
+      this.idleCloudPullFallback.cancel();
+    }
+  }
+
   // ---------------------------------------------------------------------------
   //  Destroy Cleanup
   // ---------------------------------------------------------------------------
+
+  private registerLocalModeListener(): void {
+    if (this.localModeListener || typeof window === 'undefined') {
+      return;
+    }
+
+    this.localModeListener = () => {
+      this.localModeRevision.update(value => value + 1);
+    };
+    window.addEventListener(LOCAL_MODE_CHANGED_EVENT, this.localModeListener);
+    this.destroyRef.onDestroy(() => {
+      this.removeLocalModeListener();
+    });
+  }
 
   /**
    * 注册 DestroyRef 清理回调。
@@ -369,17 +427,66 @@ export class DockEngineLifecycleService {
    */
   registerDestroyCleanup(extraCleanup: () => void): void {
     this.destroyRef.onDestroy(() => {
-      this.tickInterval.stop();
-      this.audioPlayer.dispose();
-      this.cloudSync.cancelTimers();
-      this.fragmentRest.resetAll();
-      this.cancelSwitchMaintenance();
-      this.snapshotPersistence.cancelPendingPersist();
-      if (this.visibilityListener && typeof document !== 'undefined') {
-        document.removeEventListener('visibilitychange', this.visibilityListener);
-        this.visibilityListener = null;
-      }
-      extraCleanup();
+      this.isDestroyed = true;
+      ++this.snapshotRestoreToken;
+      ++this.switchMaintenanceToken;
+      this.runDestroyCleanup('tickInterval.stop', () => this.tickInterval.stop());
+      this.runDestroyCleanup('audioPlayer.dispose', () => this.audioPlayer.dispose());
+      this.runDestroyCleanup('cloudSync.cancelTimers', () => this.cloudSync.cancelTimers());
+      this.runDestroyCleanup('fragmentRest.resetAll', () => this.fragmentRest.resetAll());
+      this.runDestroyCleanup('cancelSwitchMaintenance', () => this.cancelSwitchMaintenance());
+      this.runDestroyCleanup('cancelIdleCloudPull', () => this.cancelIdleCloudPull());
+      this.runDestroyCleanup('snapshotPersistence.cancelPendingPersist', () =>
+        this.snapshotPersistence.cancelPendingPersist());
+      this.removeLocalModeListener();
+      this.removeVisibilityListener();
+      this.runDestroyCleanup('engine.extraCleanup', extraCleanup);
+    });
+  }
+
+  private removeLocalModeListener(): void {
+    const localModeListener = this.localModeListener;
+    this.localModeListener = null;
+    if (!localModeListener || typeof window === 'undefined') {
+      return;
+    }
+
+    this.runDestroyCleanup('window.local-mode-changed', () => {
+      window.removeEventListener(LOCAL_MODE_CHANGED_EVENT, localModeListener);
+    });
+  }
+
+  private removeVisibilityListener(): void {
+    const visibilityListener = this.visibilityListener;
+    this.visibilityListener = null;
+    if (!visibilityListener || typeof document === 'undefined') {
+      return;
+    }
+
+    this.runDestroyCleanup('document.visibilitychange', () => {
+      document.removeEventListener('visibilitychange', visibilityListener);
+    });
+  }
+
+  private runDestroyCleanup(label: string, cleanup: () => void): void {
+    try {
+      cleanup();
+      return;
+    } catch (error) {
+      this.warnDestroyCleanupFailure(label, error);
+    }
+
+    try {
+      cleanup();
+    } catch (error) {
+      this.warnDestroyCleanupFailure(label, error);
+    }
+  }
+
+  private warnDestroyCleanupFailure(label: string, error: unknown): void {
+    this.logger.warn('Dock 生命周期资源清理失败，继续释放其余资源', {
+      label,
+      message: error instanceof Error ? error.message : 'unknown',
     });
   }
 
@@ -585,6 +692,10 @@ export class DockEngineLifecycleService {
     this.preserveNextEmptyRestoreForUnconfirmedInMemoryState = false;
     this.ctx.restoringSnapshot.set(true);
     void this.restoreLocalSnapshot(userId, emptyRestoreBaselineFingerprint, preserveCurrentOnEmptyRestore).finally(() => {
+      if (this.isDestroyed) {
+        return;
+      }
+
       if (restoreToken !== this.snapshotRestoreToken) {
         return;
       }
@@ -640,6 +751,7 @@ export class DockEngineLifecycleService {
   private cancelSnapshotPersistenceWork(): void {
     this.snapshotPersistence.cancelPendingPersist();
     this.cloudSync.cancelTimers();
+    this.cancelIdleCloudPull();
   }
 
   private resolveConfirmedRestoreOwnerUserId(): string | null {

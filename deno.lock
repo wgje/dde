@@ -1,0 +1,69 @@
+{
+  "version": "5",
+  "remote": {
+    "https://deno.land/std@0.177.0/async/abortable.ts": "73acfb3ed7261ce0d930dbe89e43db8d34e017b063cf0eaa7d215477bf53442e",
+    "https://deno.land/std@0.177.0/async/deadline.ts": "c5facb0b404eede83e38bd2717ea8ab34faa2ffb20ef87fd261fcba32ba307aa",
+    "https://deno.land/std@0.177.0/async/debounce.ts": "adab11d04ca38d699444ac8a9d9856b4155e8dda2afd07ce78276c01ea5a4332",
+    "https://deno.land/std@0.177.0/async/deferred.ts": "42790112f36a75a57db4a96d33974a936deb7b04d25c6084a9fa8a49f135def8",
+    "https://deno.land/std@0.177.0/async/delay.ts": "73aa04cec034c84fc748c7be49bb15cac3dd43a57174bfdb7a4aec22c248f0dd",
+    "https://deno.land/std@0.177.0/async/mod.ts": "f04344fa21738e5ad6bea37a6bfffd57c617c2d372bb9f9dcfd118a1b622e576",
+    "https://deno.land/std@0.177.0/async/mux_async_iterator.ts": "70c7f2ee4e9466161350473ad61cac0b9f115cff4c552eaa7ef9d50c4cbb4cc9",
+    "https://deno.land/std@0.177.0/async/pool.ts": "fd082bd4aaf26445909889435a5c74334c017847842ec035739b4ae637ae8260",
+    "https://deno.land/std@0.177.0/async/retry.ts": "5efa3ba450ac0c07a40a82e2df296287b5013755d232049efd7ea2244f15b20f",
+    "https://deno.land/std@0.177.0/async/tee.ts": "47e42d35f622650b02234d43803d0383a89eb4387e1b83b5a40106d18ae36757",
+    "https://deno.land/std@0.177.0/http/server.ts": "cbb17b594651215ba95c01a395700684e569c165a567e4e04bba327f41197433",
+    "https://esm.sh/@supabase/supabase-js@2.93.2": "110762d3e483a8b61990c96be0e355ddafb3f5ba14ff3eeecf323e343b8bb1a0",
+    "https://esm.sh/standardwebhooks@1.0.0": "b8cafcb7e9a890c14c0eb74cb093f36333000122e2276cc204818f6a680c8ba9"
+  },
+  "workspace": {
+    "packageJson": {
+      "dependencies": [
+        "npm:@angular/build@^19.2.18",
+        "npm:@angular/cdk@^19.2.19",
+        "npm:@angular/cli@^19.2.18",
+        "npm:@angular/common@^19.2.18",
+        "npm:@angular/compiler-cli@^19.2.18",
+        "npm:@angular/compiler@^19.2.18",
+        "npm:@angular/core@^19.2.18",
+        "npm:@angular/forms@^19.2.18",
+        "npm:@angular/platform-browser-dynamic@^19.2.18",
+        "npm:@angular/platform-browser@^19.2.18",
+        "npm:@angular/router@^19.2.18",
+        "npm:@angular/service-worker@^19.2.18",
+        "npm:@playwright/test@^1.48.0",
+        "npm:@sentry/angular@^10.32.1",
+        "npm:@sentry/cli@^3.5.0",
+        "npm:@supabase/supabase-js@^2.84.0",
+        "npm:@types/dompurify@^3.0.5",
+        "npm:@types/node@^22.14.0",
+        "npm:@typescript-eslint/eslint-plugin@^8.48.1",
+        "npm:@typescript-eslint/parser@^8.48.1",
+        "npm:@vitest/coverage-v8@^4.0.14",
+        "npm:autoprefixer@^10.4.22",
+        "npm:cross-env@^10.1.0",
+        "npm:ctx7@~0.3.13",
+        "npm:dompurify@^3.3.1",
+        "npm:dotenv@^17.2.3",
+        "npm:esbuild@0.25.4",
+        "npm:eslint@^9.39.1",
+        "npm:fake-indexeddb@6",
+        "npm:globals@^16.5.0",
+        "npm:gojs@^3.1.1",
+        "npm:happy-dom@^20.0.11",
+        "npm:idb-keyval@^6.2.2",
+        "npm:postcss@^8.5.6",
+        "npm:rxjs@^7.8.2",
+        "npm:supabase@^2.105.0",
+        "npm:tailwindcss@^3.4.17",
+        "npm:typescript@5.8",
+        "npm:vite@^6.2.0",
+        "npm:vitest@^4.0.14",
+        "npm:web-vitals@^5.1.0",
+        "npm:zone.js@0.15"
+      ],
+      "overrides": {
+        "esbuild": "0.25.4"
+      }
+    }
+  }
+}

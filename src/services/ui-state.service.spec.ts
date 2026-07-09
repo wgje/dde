@@ -23,6 +23,16 @@ describe('UiStateService', () => {
     TestBed.resetTestingModule();
   });
 
+  function getTimerInternals(service: UiStateService): {
+    searchDebounceTimer: ReturnType<typeof setTimeout> | null;
+    editingTimer: ReturnType<typeof setTimeout> | null;
+  } {
+    return service as unknown as {
+      searchDebounceTimer: ReturnType<typeof setTimeout> | null;
+      editingTimer: ReturnType<typeof setTimeout> | null;
+    };
+  }
+
   it('应从 localStorage 恢复上次活跃视图', () => {
     localStorage.setItem(LAST_ACTIVE_VIEW_KEY, 'flow');
     TestBed.resetTestingModule();
@@ -140,6 +150,25 @@ describe('UiStateService', () => {
       }
     });
 
+    it('markEditing 应清理 handle 为 0 的旧编辑定时器', () => {
+      vi.useFakeTimers();
+      try {
+        const service = TestBed.inject(UiStateService);
+        const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+        const internal = getTimerInternals(service);
+        internal.editingTimer = 0 as unknown as ReturnType<typeof setTimeout>;
+
+        service.markEditing();
+
+        expect(clearTimeoutSpy).toHaveBeenCalledWith(0);
+        expect(internal.editingTimer).not.toBe(0);
+        expect(internal.editingTimer).not.toBeNull();
+        expect(service.isEditing).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('版本号机制应防止过期定时器回调清除新编辑会话', () => {
       vi.useFakeTimers();
       try {
@@ -179,6 +208,19 @@ describe('UiStateService', () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+
+    it('clearEditingState 应清理 handle 为 0 的编辑定时器', () => {
+      const service = TestBed.inject(UiStateService);
+      const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+      const internal = getTimerInternals(service);
+      internal.editingTimer = 0 as unknown as ReturnType<typeof setTimeout>;
+
+      service.clearEditingState();
+
+      expect(clearTimeoutSpy).toHaveBeenCalledWith(0);
+      expect(internal.editingTimer).toBeNull();
+      expect(service.isEditing).toBe(false);
     });
   });
 
@@ -238,6 +280,36 @@ describe('UiStateService', () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+
+    it('setSearchQueryDebounced 应清理 handle 为 0 的旧搜索定时器', () => {
+      vi.useFakeTimers();
+      try {
+        const service = TestBed.inject(UiStateService);
+        const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+        const internal = getTimerInternals(service);
+        internal.searchDebounceTimer = 0 as unknown as ReturnType<typeof setTimeout>;
+
+        service.setSearchQueryDebounced('hello');
+
+        expect(clearTimeoutSpy).toHaveBeenCalledWith(0);
+        expect(internal.searchDebounceTimer).not.toBe(0);
+        expect(internal.searchDebounceTimer).not.toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('clearSearch 应清理 handle 为 0 的搜索定时器', () => {
+      const service = TestBed.inject(UiStateService);
+      const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+      const internal = getTimerInternals(service);
+      internal.searchDebounceTimer = 0 as unknown as ReturnType<typeof setTimeout>;
+
+      service.clearSearch();
+
+      expect(clearTimeoutSpy).toHaveBeenCalledWith(0);
+      expect(internal.searchDebounceTimer).toBeNull();
     });
 
     it('clearSearch 后 hasActiveSearch 应为 false', () => {
@@ -310,5 +382,18 @@ describe('UiStateService', () => {
         vi.useRealTimers();
       }
     });
+  });
+
+  it('销毁时应清理 handle 为 0 的搜索和编辑定时器', () => {
+    const service = TestBed.inject(UiStateService);
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+    const internal = getTimerInternals(service);
+    internal.searchDebounceTimer = 0 as unknown as ReturnType<typeof setTimeout>;
+    internal.editingTimer = 0 as unknown as ReturnType<typeof setTimeout>;
+
+    TestBed.resetTestingModule();
+
+    expect(clearTimeoutSpy).toHaveBeenCalledWith(0);
+    expect(clearTimeoutSpy).toHaveBeenCalledTimes(2);
   });
 });

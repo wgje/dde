@@ -19,6 +19,7 @@ import { ToastService } from './toast.service';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { FEATURE_FLAGS } from '../config/feature-flags.config';
 import { Project, Task, Connection } from '../models';
+import { buildTaskCountDropViolation } from './circuit-breaker.rules';
 
 /**
  * 熔断分级配置
@@ -386,99 +387,12 @@ export class CircuitBreakerService {
     previousCount: number,
     currentCount: number
   ): CircuitBreakerViolation | null {
-    // 无变化或增加，不触发
-    if (currentCount >= previousCount) {
-      return null;
-    }
-    
-    // 之前为空，不触发
-    if (previousCount === 0) {
-      return null;
-    }
-    
-    const config = CLIENT_CIRCUIT_BREAKER_CONFIG.TASK_COUNT_DROP_CONFIG;
-    const dropCount = previousCount - currentCount;
-    const dropRatio = dropCount / previousCount;
-    
-    // 计算动态阈值（超大项目更宽松：从 100 个任务以上开始，每 100 个任务上浮 1%，上限 0.95）
-    // 中等项目仍以 80% 作为 L3 硬熔断边界，避免 100 → 15 这类明显丢失被降级为 L2。
-    const dynamicAdjustment = Math.max(0, previousCount - 100) / 100 * config.DYNAMIC_THRESHOLD_FACTOR;
-    const dynamicL3Threshold = Math.min(
-      0.95,
-      config.L3_HARD_BLOCK_THRESHOLD + dynamicAdjustment
+    return buildTaskCountDropViolation(
+      projectId,
+      previousCount,
+      currentCount,
+      CLIENT_CIRCUIT_BREAKER_CONFIG.TASK_COUNT_DROP_CONFIG,
     );
-    
-    // 小项目使用绝对值阈值
-    if (previousCount < config.MIN_TASK_COUNT_FOR_RATIO) {
-      // 对于小项目，只有全部删除才触发 L3
-      if (currentCount === 0) {
-        return {
-          rule: 'task_count_drop',
-          message: `小项目任务全部删除（${previousCount} → 0）`,
-          details: {
-            projectId,
-            previousCount,
-            currentCount,
-            dropCount,
-            dropRatio: 1,
-            level: 'L3'
-          }
-        };
-      }
-      return null;
-    }
-    
-    // 大项目使用相对值阈值
-    // L3 硬熔断：下降 >80% 或归零
-    if (dropRatio >= dynamicL3Threshold || currentCount === 0) {
-      return {
-        rule: 'task_count_drop',
-        message: `任务数骤降 ${(dropRatio * 100).toFixed(0)}%（${previousCount} → ${currentCount}）`,
-        details: {
-          projectId,
-          previousCount,
-          currentCount,
-          dropCount,
-          dropRatio,
-          level: 'L3',
-          threshold: dynamicL3Threshold
-        }
-      };
-    }
-    
-    // L2 软熔断：下降 50-80%
-    if (dropRatio >= config.L2_SOFT_BLOCK_THRESHOLD) {
-      return {
-        rule: 'task_count_drop',
-        message: `任务数下降 ${(dropRatio * 100).toFixed(0)}%（${previousCount} → ${currentCount}）`,
-        details: {
-          projectId,
-          previousCount,
-          currentCount,
-          dropCount,
-          dropRatio,
-          level: 'L2'
-        }
-      };
-    }
-    
-    // L1 警告：下降 20-50%
-    if (dropRatio >= config.L1_WARNING_THRESHOLD) {
-      return {
-        rule: 'task_count_drop',
-        message: `任务数下降 ${(dropRatio * 100).toFixed(0)}%（${previousCount} → ${currentCount}）`,
-        details: {
-          projectId,
-          previousCount,
-          currentCount,
-          dropCount,
-          dropRatio,
-          level: 'L1'
-        }
-      };
-    }
-    
-    return null;
   }
   
   /**
@@ -698,53 +612,71 @@ export class CircuitBreakerService {
     
     switch (result.level) {
       case 'L1':
-        // 记录日志 + Sentry 警告
-        this.logger.warn('熔断警告 (L1)', {
-          projectId,
-          violations: result.violations
-        });
-        this.sentryLazyLoader.captureMessage('CircuitBreaker: L1 Warning', {
-          level: 'warning',
-          tags: { level: 'L1', projectId },
-          extra: { violations: result.violations }
-        });
+        this.executeL1CircuitAction(result, projectId);
         break;
-        
       case 'L2':
-        // 阻止同步 + Toast 提示
-        this.logger.error('熔断触发 (L2)', {
-          projectId,
-          violations: result.violations
-        });
-        this.sentryLazyLoader.captureMessage('CircuitBreaker: L2 Soft Block', {
-          level: 'error',
-          tags: { level: 'L2', projectId },
-          extra: { violations: result.violations }
-        });
-        this.toast.warning(
-          '同步已暂停',
-          `检测到异常数据变更：${violationSummary}。请检查后重试。`
-        );
+        this.executeL2CircuitAction(result, projectId, violationSummary);
         break;
-        
       case 'L3':
-        // 阻止 + 强制导出提示
-        this.logger.error('硬熔断触发 (L3)', {
-          projectId,
-          violations: result.violations
-        });
-        this.sentryLazyLoader.captureMessage('CircuitBreaker: L3 Hard Block', {
-          level: 'fatal',
-          tags: { level: 'L3', projectId },
-          extra: { violations: result.violations }
-        });
-        this.toast.error(
-          '⚠️ 数据保护已触发',
-          `检测到严重数据异常：${violationSummary}。同步已停止，请立即导出数据备份。`,
-          { duration: 0 } // 不自动关闭
-        );
+        this.executeL3CircuitAction(result, projectId, violationSummary);
         break;
     }
+  }
+
+  private executeL1CircuitAction(
+    result: CircuitBreakerValidation,
+    projectId: string,
+  ): void {
+    this.logger.warn('熔断警告 (L1)', {
+      projectId,
+      violations: result.violations
+    });
+    this.sentryLazyLoader.captureMessage('CircuitBreaker: L1 Warning', {
+      level: 'warning',
+      tags: { level: 'L1', projectId },
+      extra: { violations: result.violations }
+    });
+  }
+
+  private executeL2CircuitAction(
+    result: CircuitBreakerValidation,
+    projectId: string,
+    violationSummary: string,
+  ): void {
+    this.logger.error('熔断触发 (L2)', {
+      projectId,
+      violations: result.violations
+    });
+    this.sentryLazyLoader.captureMessage('CircuitBreaker: L2 Soft Block', {
+      level: 'error',
+      tags: { level: 'L2', projectId },
+      extra: { violations: result.violations }
+    });
+    this.toast.warning(
+      '同步已暂停',
+      `检测到异常数据变更：${violationSummary}。请检查后重试。`
+    );
+  }
+
+  private executeL3CircuitAction(
+    result: CircuitBreakerValidation,
+    projectId: string,
+    violationSummary: string,
+  ): void {
+    this.logger.error('硬熔断触发 (L3)', {
+      projectId,
+      violations: result.violations
+    });
+    this.sentryLazyLoader.captureMessage('CircuitBreaker: L3 Hard Block', {
+      level: 'fatal',
+      tags: { level: 'L3', projectId },
+      extra: { violations: result.violations }
+    });
+    this.toast.error(
+      '⚠️ 数据保护已触发',
+      `检测到严重数据异常：${violationSummary}。同步已停止，请立即导出数据备份。`,
+      { duration: 0 } // 不自动关闭
+    );
   }
   
   /**

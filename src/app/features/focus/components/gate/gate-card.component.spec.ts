@@ -79,6 +79,24 @@ describe('GateCardComponent', () => {
     expect(mockGateService.markAsCompleted).toHaveBeenCalledOnce();
   });
 
+  it('continues the gate drag when pointer capture fails', () => {
+    component.onPointerDown({
+      button: 0,
+      pointerId: 1,
+      clientY: 100,
+      currentTarget: {
+        setPointerCapture: vi.fn(() => {
+          throw new Error('capture failed');
+        }),
+      },
+    } as unknown as PointerEvent);
+
+    component.onPointerMove({ pointerId: 1, clientY: 220 } as PointerEvent);
+    component.onPointerUp({ pointerId: 1 } as PointerEvent);
+
+    expect(mockGateService.markAsCompleted).toHaveBeenCalledOnce();
+  });
+
   it('impact tick should only pulse the gate card scene', () => {
     vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
       callback(0);

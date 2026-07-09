@@ -6,13 +6,44 @@ export interface ProjectShellTakeoverVisualState {
   scrimOn?: boolean;
 }
 
-export function resolveProjectShellTakeoverVisibility(
-  state: ProjectShellTakeoverVisualState,
-): 'visible' | 'hidden' {
-  if (!state.hiddenMode) return 'visible';
-  // hide 模式：exiting 和 restoring 需要可见以便看到退出动画
-  if (state.phase === 'exiting' || state.phase === 'restoring') return 'visible';
-  return 'hidden';
+export interface ProjectShellTakeoverPresentationInput {
+  phase: DockFocusChromePhase;
+  contentEffect: string;
+  focusMode: boolean;
+  scrimOn: boolean;
+}
+
+export interface ProjectShellTakeoverPresentation {
+  hidden: boolean;
+  dimmed: boolean;
+  nonInteractive: boolean;
+  opacity: number;
+  filter: string;
+  transform: string;
+  transition: string;
+}
+
+export function resolveProjectShellTakeoverPresentation(
+  input: ProjectShellTakeoverPresentationInput,
+): ProjectShellTakeoverPresentation {
+  const hidden = input.contentEffect === 'hide'
+    && (input.phase === 'entering' || input.phase === 'focused');
+  const dimmed = input.contentEffect === 'dim' && input.focusMode && input.scrimOn;
+  const visualState: ProjectShellTakeoverVisualState = {
+    phase: input.phase,
+    hiddenMode: hidden,
+    scrimOn: input.scrimOn,
+  };
+
+  return {
+    hidden,
+    dimmed,
+    nonInteractive: input.phase !== 'idle',
+    opacity: resolveProjectShellTakeoverOpacity(visualState),
+    filter: resolveProjectShellTakeoverFilter(visualState),
+    transform: resolveProjectShellTakeoverTransform(visualState),
+    transition: resolveProjectShellTakeoverTransition(input.phase),
+  };
 }
 
 export function resolveProjectShellTakeoverOpacity(
@@ -83,11 +114,10 @@ export function resolveProjectShellTakeoverTransition(
   phase: DockFocusChromePhase,
 ): string {
   if (phase === 'idle') {
-    return 'opacity 0ms linear, transform 0ms linear, filter 0ms linear, visibility 0ms linear 0ms';
+    return 'opacity 0ms linear, transform 0ms linear, filter 0ms linear';
   }
 
   return 'opacity var(--pk-shell-enter) var(--pk-ease-standard), '
     + 'transform var(--pk-shell-enter) var(--pk-ease-enter), '
-    + 'filter calc(var(--pk-shell-enter) + 40ms) var(--pk-ease-standard), '
-    + 'visibility 0ms linear 0ms';
+    + 'filter calc(var(--pk-shell-enter) + 40ms) var(--pk-ease-standard)';
 }

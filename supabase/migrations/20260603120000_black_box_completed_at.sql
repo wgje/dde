@@ -61,6 +61,8 @@ DECLARE
   v_existing_exists BOOLEAN := FALSE;
   v_existing_updated TIMESTAMPTZ;
   v_existing_project UUID;
+  v_existing_content TEXT;
+  v_existing_date DATE;
   v_existing_is_read BOOLEAN;
   v_existing_is_completed BOOLEAN;
   v_existing_completed_at TIMESTAMPTZ;
@@ -118,6 +120,8 @@ BEGIN
       b.user_id,
       b.updated_at,
       b.project_id,
+      b.content,
+      b.date,
       b.is_read,
       b.is_completed,
       b.completed_at,
@@ -131,6 +135,8 @@ BEGIN
       v_existing_owner,
       v_existing_updated,
       v_existing_project,
+      v_existing_content,
+      v_existing_date,
       v_existing_is_read,
       v_existing_is_completed,
       v_existing_completed_at,
@@ -212,8 +218,8 @@ BEGIN
     v_entry->'focus_meta'
   )
   ON CONFLICT (id) DO UPDATE
-    SET content = EXCLUDED.content,
-        date = EXCLUDED.date,
+    SET content = CASE WHEN v_is_stale THEN v_existing_content ELSE EXCLUDED.content END,
+        date = CASE WHEN v_is_stale THEN v_existing_date ELSE EXCLUDED.date END,
         project_id = CASE WHEN v_is_stale THEN v_existing_project ELSE EXCLUDED.project_id END,
         is_read = CASE WHEN v_is_stale THEN v_existing_is_read ELSE EXCLUDED.is_read END,
         is_completed = CASE WHEN v_is_stale THEN v_existing_is_completed ELSE EXCLUDED.is_completed END,

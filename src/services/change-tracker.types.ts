@@ -4,6 +4,7 @@
  */
 
 import { Task, Connection } from '../models';
+import type { TaskDeleteBaseUpdatedAtMap } from './action-queue.types';
 
 /**
  * 变更类型枚举
@@ -33,7 +34,7 @@ export interface ChangeRecord {
   revision?: number;
   /** 变更的字段（仅 update 类型有意义） */
   changedFields?: string[];
-  /** 实体数据（用于 create/update） */
+  /** 实体数据（用于 create/update，delete 可携带删除前快照用于 CAS base） */
   data?: Task | Connection;
 }
 
@@ -54,6 +55,8 @@ export interface ProjectChangeSummary {
   tasksToUpdate: Task[];
   /** 需要删除的任务ID */
   taskIdsToDelete: string[];
+  /** 删除任务前的 updatedAt，用于服务端 CAS delete / owner handoff replay */
+  taskDeleteBaseUpdatedAtMap: TaskDeleteBaseUpdatedAtMap;
   /** 需要创建的连接 */
   connectionsToCreate: Connection[];
   /** 需要更新的连接 */
@@ -79,3 +82,41 @@ export interface FieldLockData {
   duration: number;
 }
 
+export interface ProjectChangeBuckets {
+  tasksToCreate: Task[];
+  tasksToUpdate: Task[];
+  taskIdsToDelete: string[];
+  taskDeleteBaseUpdatedAtMap: TaskDeleteBaseUpdatedAtMap;
+  connectionsToCreate: Connection[];
+  connectionsToUpdate: Connection[];
+  connectionsToDelete: ConnectionDeleteSummary[];
+  invalidConnectionDeleteKeys: string[];
+  taskUpdateFieldsById: Record<string, string[] | undefined>;
+}
+
+export interface ChangeValidationResult {
+  valid: boolean;
+  warnings: string[];
+  errors: string[];
+  recommendations: string[];
+}
+
+export type DataLossRiskType =
+  | 'task-missing'
+  | 'connection-orphan'
+  | 'parent-child-inconsistency'
+  | 'duplicate-operation';
+
+export type DataLossRiskSeverity = 'low' | 'medium' | 'high';
+
+export interface DataLossRisk {
+  type: DataLossRiskType;
+  severity: DataLossRiskSeverity;
+  description: string;
+  affectedEntities: string[];
+}
+
+export interface DataLossRiskSummary {
+  hasRisk: boolean;
+  risks: DataLossRisk[];
+}

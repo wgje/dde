@@ -20,7 +20,7 @@
  */
 import { Injectable, inject } from '@angular/core';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { Task, Project, Connection } from '../../../../models';
+import { Project } from '../../../../models';
 import { LoggerService } from '../../../../services/logger.service';
 import { ToastService } from '../../../../services/toast.service';
 import { RequestThrottleService } from '../../../../services/request-throttle.service';
@@ -37,27 +37,29 @@ import {
 } from '../../../../utils/supabase-error';
 import { PermanentFailureError, isPermanentFailureError } from '../../../../utils/permanent-failure-error';
 import { createSyncOperationId } from '../../../../utils/sync-operation-id';
+import { REQUEST_THROTTLE_CONFIG } from '../../../../config/sync.config';
 import {
-  createProjectDirectConflictError as buildProjectDirectConflictError,
-  createProjectClockUncertainError as buildProjectClockUncertainError,
-  createProjectRpcConflictError as buildProjectRpcConflictError,
   createProjectRpcTerminalError as buildProjectRpcTerminalError,
   createProjectPersistenceTerminalError as buildProjectPersistenceTerminalError,
 } from './sync-project-errors';
-import type { RetryableEntityType, RetryableOperation } from './retry-queue.service';
-
-/** 获取 Supabase 客户端回调（门面持有离线降级 + sentry 归因语义） */
-export type GetSupabaseClientHandler = () => Promise<SupabaseClient | null>;
-
-/** durable 重试入队回调（门面 addToRetryQueueDurably，保留 session 守卫等完整语义） */
-export type DurableRetryHandler = (
-  type: RetryableEntityType,
-  operation: RetryableOperation,
-  data: Task | Project | Connection | { id: string },
-  projectId?: string,
-  sourceUserId?: string,
-  taskIdsToDelete?: string[],
-) => Promise<boolean>;
+import { ProjectPushDirectPersistenceController } from './project-push-direct-persistence.controller';
+import {
+  createProjectPushRetryContext,
+} from './project-push-retry-context';
+import { createRetryQueueLastFailure } from './retry-queue-failure-context';
+import { ProjectPushRpcResultHandlerService } from './project-push-rpc-result-handler.service';
+import type {
+  TaskDeleteBaseUpdatedAtMap,
+  RetryQueueLastFailure,
+} from './retry-queue.service';
+import type {
+  DurableRetryHandler,
+  GetSupabaseClientHandler,
+  ProjectPushExecutor,
+  ProjectPushRetryContext,
+  ProjectPushStatus,
+  ProjectPushStatusArgs,
+} from './project-push.types';
 
 @Injectable({ providedIn: 'root' })
 export class ProjectPushService {
@@ -71,6 +73,12 @@ export class ProjectPushService {
   private readonly projectDataService = inject(ProjectDataService);
   private readonly syncRpcClient = inject(SyncRpcClientService, { optional: true });
   private readonly projectStore = inject(ProjectStore, { optional: true });
+  private readonly rpcResultHandler = inject(ProjectPushRpcResultHandlerService);
+  private readonly directPersistence = new ProjectPushDirectPersistenceController({
+    clockSync: this.clockSync,
+    normalizeLocalProjectUpdatedAt: (project, serverUpdatedAt) =>
+      this.normalizeLocalProjectUpdatedAt(project, serverUpdatedAt),
+  });
 
   /** 由 SimpleSyncService 构造期注入（避免循环 DI）。 */
   getSupabaseClientHandler: GetSupabaseClientHandler | null = null;
@@ -85,8 +93,17 @@ export class ProjectPushService {
     fromRetryQueue = false,
     sourceUserId?: string,
     taskIdsToDelete?: string[],
+    taskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap,
+    operationId?: string,
   ): Promise<boolean> {
-    const result = await this.pushProjectWithStatus(project, fromRetryQueue, sourceUserId, taskIdsToDelete);
+    const result = await this.callPushProjectWithStatus({
+      project,
+      fromRetryQueue,
+      sourceUserId,
+      taskIdsToDelete,
+      taskDeleteBaseUpdatedAtMap,
+      operationId,
+    });
     return result.success;
   }
 
@@ -95,52 +112,145 @@ export class ProjectPushService {
     fromRetryQueue = false,
     sourceUserId?: string,
     taskIdsToDelete?: string[],
-  ): Promise<{ success: boolean; retryEnqueued: boolean; failureReason?: string }> {
-    let retryEnqueued = false;
-
-    const enqueueRetry = async (): Promise<boolean> => {
-      if (fromRetryQueue) {
-        return false;
-      }
-
-      retryEnqueued = this.durableRetryHandler
-        ? await this.durableRetryHandler('project', 'upsert', project, undefined, sourceUserId, taskIdsToDelete)
-        : false;
-      return retryEnqueued;
-    };
-
+    taskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap,
+    operationId?: string,
+  ): Promise<ProjectPushStatus> {
+    const { retryContext, args } = this.createProjectPushStatusRuntime(
+      project,
+      fromRetryQueue,
+      sourceUserId,
+      taskIdsToDelete,
+      taskDeleteBaseUpdatedAtMap,
+      operationId,
+    );
     if (this.syncState().sessionExpired) {
-      this.sessionManager.handleSessionExpired('pushProject', { projectId: project.id });
-      return {
-        success: false,
-        retryEnqueued,
-        failureReason: 'project sync session expired',
-      };
+      return this.handleProjectPushPreflightFailure(
+        project.id,
+        retryContext,
+        'project sync session expired',
+        true,
+      );
     }
 
     const client = this.getSupabaseClientHandler ? await this.getSupabaseClientHandler() : null;
     if (!client) {
-      await enqueueRetry();
-      return {
-        success: false,
-        retryEnqueued,
-        failureReason: 'supabase client unavailable for project sync',
-      };
+      return await this.handleProjectPushPreflightFailure(
+        project.id,
+        retryContext,
+        'supabase client unavailable for project sync',
+        false,
+      );
     }
 
-    // 【#95057880 修复】支持自动刷新后重试的内部执行函数（与 pushTask 对齐）
-    const executeProjectPush = async (): Promise<boolean> => {
-      const { data: { session } } = await client.auth.getSession();
-      let sessionUserId = session?.user?.id ?? null;
-      if (!sessionUserId) {
-        // 先尝试刷新会话，而非立即标记永久失败
-        const refreshed = await this.sessionManager.tryRefreshSession('pushProject.getSession');
-        if (refreshed) {
-          const { data: { session: newSession } } = await client.auth.getSession();
-          sessionUserId = newSession?.user?.id ?? null;
-        }
-      }
+    const executeProjectPush = this.createProjectPushExecutorFromStatusArgs(client, project, retryContext, args);
 
+    try {
+      const success = await this.throttle.execute(
+        `push-project:${project.id}`,
+        executeProjectPush,
+        // 单项写超时对齐 task/connection 的 30s 基线：项目元数据失败会中止整批保存，
+        // 60s 默认超时会让弱网挂起把批处理头部拖住两倍时间
+        { priority: 'high', retries: 2, timeout: REQUEST_THROTTLE_CONFIG.INDIVIDUAL_OPERATION_TIMEOUT }
+      );
+      return this.createProjectPushThrottleStatus(success, retryContext);
+    } catch (e) {
+      return await this.handleProjectPushFailure(e, project, retryContext, executeProjectPush);
+    }
+  }
+
+  private createProjectPushStatusRuntime(
+    project: Project,
+    fromRetryQueue: boolean,
+    sourceUserId: string | undefined,
+    taskIdsToDelete: string[] | undefined,
+    taskDeleteBaseUpdatedAtMap: TaskDeleteBaseUpdatedAtMap | undefined,
+    operationId: string | undefined,
+  ): {
+    retryContext: ProjectPushRetryContext;
+    args: ProjectPushStatusArgs;
+  } {
+    const retryOperationId = operationId ?? createSyncOperationId();
+    return {
+      retryContext: createProjectPushRetryContext({
+        durableRetryHandler: this.durableRetryHandler,
+        project,
+        fromRetryQueue,
+        sourceUserId,
+        taskIdsToDelete,
+        taskDeleteBaseUpdatedAtMap,
+        operationId: retryOperationId,
+      }),
+      args: {
+        fromRetryQueue,
+        sourceUserId,
+        taskIdsToDelete,
+        taskDeleteBaseUpdatedAtMap,
+        operationId: retryOperationId,
+      },
+    };
+  }
+
+  private async handleProjectPushPreflightFailure(
+    projectId: string,
+    retryContext: ProjectPushRetryContext,
+    failureReason: string,
+    sessionExpired: boolean,
+  ): Promise<ProjectPushStatus> {
+    await retryContext.enqueueRetry();
+    if (sessionExpired) {
+      this.sessionManager.handleSessionExpired('pushProject', { projectId });
+    }
+
+    return {
+      success: false,
+      retryEnqueued: retryContext.retryEnqueued,
+      failureReason,
+    };
+  }
+
+  private createProjectPushThrottleStatus(
+    success: boolean,
+    retryContext: ProjectPushRetryContext,
+  ): ProjectPushStatus {
+    return {
+      success,
+      retryEnqueued: retryContext.retryEnqueued,
+      failureReason: success
+        ? undefined
+        : (retryContext.retryEnqueued ? 'project sync queued for retry' : 'project push returned false'),
+    };
+  }
+
+  private createProjectPushExecutorFromStatusArgs(
+    client: SupabaseClient,
+    project: Project,
+    retryContext: ProjectPushRetryContext,
+    options: ProjectPushStatusArgs,
+  ): ProjectPushExecutor {
+    return this.createProjectPushExecutor(
+      client,
+      project,
+      options.fromRetryQueue,
+      options.sourceUserId,
+      options.taskIdsToDelete,
+      options.taskDeleteBaseUpdatedAtMap,
+      options.operationId,
+      retryContext.enqueueRetry,
+    );
+  }
+
+  private createProjectPushExecutor(
+    client: SupabaseClient,
+    project: Project,
+    fromRetryQueue: boolean,
+    sourceUserId: string | undefined,
+    taskIdsToDelete: string[] | undefined,
+    taskDeleteBaseUpdatedAtMap: TaskDeleteBaseUpdatedAtMap | undefined,
+    operationId: string | undefined,
+    enqueueRetry: (lastFailure?: RetryQueueLastFailure) => Promise<boolean>,
+  ): ProjectPushExecutor {
+    return async (): Promise<boolean> => {
+      const sessionUserId = await this.resolveProjectPushSessionUserId(client);
       if (!sessionUserId) {
         await enqueueRetry();
         this.sessionManager.handleSessionExpired('pushProject.getSession', { projectId: project.id });
@@ -165,144 +275,169 @@ export class ProjectPushService {
         enqueueRetry,
         sourceUserId,
         taskIdsToDelete,
+        taskDeleteBaseUpdatedAtMap,
+        operationId,
       );
     };
+  }
 
-    try {
-      const success = await this.throttle.execute(
-        `push-project:${project.id}`,
-        executeProjectPush,
-        { priority: 'high', retries: 2 }
-      );
-      return {
-        success,
-        retryEnqueued,
-        failureReason: success
-          ? undefined
-          : (retryEnqueued ? 'project sync queued for retry' : 'project push returned false'),
-      };
-    } catch (e) {
-      // 【#95057880 修复】PermanentFailureError 直接向上冒泡，不做二次处理
-      if (isPermanentFailureError(e)) {
-        throw e;
-      }
+  private async resolveProjectPushSessionUserId(client: SupabaseClient): Promise<string | null> {
+    const { data: { session } } = await client.auth.getSession();
+    const sessionUserId = session?.user?.id ?? null;
+    if (sessionUserId) {
+      return sessionUserId;
+    }
 
-      const enhanced = e && typeof e === 'object' && 'errorType' in e
-        ? e as EnhancedError
-        : supabaseErrorToError(e);
+    const refreshed = await this.sessionManager.tryRefreshSession('pushProject.getSession');
+    if (!refreshed) {
+      return null;
+    }
 
-      // 【#95057880 修复】检测到认证错误时先尝试刷新 session（与 pushTask 对齐）
-      if (this.sessionManager.isSessionExpiredError(enhanced)) {
-        const canRetry = await this.sessionManager.handleAuthErrorWithRefresh('pushProject', {
-          projectId: project.id,
-          errorCode: enhanced.code
-        });
-        if (canRetry) {
-          try {
-            const success = await executeProjectPush();
-            return {
-              success,
-              retryEnqueued,
-              failureReason: success
-                ? undefined
-                : (retryEnqueued ? 'project sync queued for retry after session refresh' : 'project push returned false after session refresh'),
-            };
-          } catch (retryError) {
-            if (isPermanentFailureError(retryError)) throw retryError;
-            const retryEnhanced = retryError && typeof retryError === 'object' && 'errorType' in retryError
-              ? retryError as EnhancedError
-              : supabaseErrorToError(retryError);
-            if (this.sessionManager.isSessionExpiredError(retryEnhanced)) {
-              // 会话刷新成功后重试仍然失败
-              if (this.sessionManager.isRlsPolicyViolation(retryEnhanced)) {
-                // 42501: RLS 策略违规，真正的权限不足，非会话过期
-                this.logger.warn('刷新会话后重试仍获 RLS 违规，判定为权限不足', {
-                  projectId: project.id,
-                  errorCode: retryEnhanced.code,
-                });
-                throw buildProjectPersistenceTerminalError(
-                  project.id,
-                  '项目同步权限校验失败，请重新登录后重试',
-                  'PermissionError',
-                  'SYNC_PROJECT_PERMISSION_DENIED',
-                );
-              }
-              await enqueueRetry();
-              this.sessionManager.handleSessionExpired('pushProject.retryAfterRefresh', {
-                projectId: project.id,
-                errorCode: retryEnhanced.code
-              });
-              return {
-                success: false,
-                retryEnqueued,
-                failureReason: 'project sync session expired after refresh',
-              };
-            }
+    const { data: { session: newSession } } = await client.auth.getSession();
+    return newSession?.user?.id ?? null;
+  }
 
-            if (retryEnhanced.errorType === 'VersionConflictError') {
-              this.toast.warning('版本冲突', '数据已被修改，请刷新后重试');
-              throw new PermanentFailureError('Version conflict', retryEnhanced, { operation: 'pushProject', projectId: project.id });
-            }
+  private async handleProjectPushFailure(
+    error: unknown,
+    project: Project,
+    retryContext: ProjectPushRetryContext,
+    executeProjectPush: ProjectPushExecutor,
+  ): Promise<ProjectPushStatus> {
+    if (isPermanentFailureError(error)) {
+      throw error;
+    }
 
-            if (retryEnhanced.isRetryable) {
-              await enqueueRetry();
-              return {
-                success: false,
-                retryEnqueued,
-                failureReason: retryEnhanced.message,
-              };
-            }
+    const enhanced = this.toEnhancedError(error);
+    if (this.sessionManager.isSessionExpiredError(enhanced)) {
+      return await this.handleProjectPushSessionError(enhanced, project, retryContext, executeProjectPush);
+    }
 
-            const isPermissionDenied = retryEnhanced.errorType === 'PermissionError';
-            const terminalMessage = isPermissionDenied
-              ? '项目同步权限校验失败，请重新登录后重试'
-              : retryEnhanced.message;
-            const terminalErrorType = isPermissionDenied ? 'PermissionError' : 'BusinessRuleError';
-            const terminalCode = isPermissionDenied
-              ? 'SYNC_PROJECT_PERMISSION_DENIED'
-              : (retryEnhanced.code ? String(retryEnhanced.code) : 'SYNC_PROJECT_PERSISTENCE_FAILED');
-            throw buildProjectPersistenceTerminalError(
-              project.id,
-              terminalMessage,
-              terminalErrorType,
-              terminalCode,
-            );
-          }
-        } else {
-          await enqueueRetry();
-          this.sessionManager.handleSessionExpired('pushProject', { projectId: project.id, errorCode: enhanced.code });
-          return {
-            success: false,
-            retryEnqueued,
-            failureReason: 'project sync session expired',
-          };
-        }
-      }
+    return await this.handleProjectPushEnhancedError(enhanced, project, retryContext);
+  }
 
-      if (enhanced.errorType === 'VersionConflictError') {
-        this.toast.warning('版本冲突', '数据已被修改，请刷新后重试');
-        throw new PermanentFailureError('Version conflict', enhanced, { operation: 'pushProject', projectId: project.id });
-      }
-
-      if (enhanced.isRetryable) {
-        await enqueueRetry();
-      } else {
-        const isPermissionDenied = enhanced.errorType === 'PermissionError';
-        throw buildProjectPersistenceTerminalError(
-          project.id,
-          isPermissionDenied ? '项目同步权限校验失败，请重新登录后重试' : enhanced.message,
-          isPermissionDenied ? 'PermissionError' : 'BusinessRuleError',
-          isPermissionDenied
-            ? 'SYNC_PROJECT_PERMISSION_DENIED'
-            : (enhanced.code ? String(enhanced.code) : 'SYNC_PROJECT_PERSISTENCE_FAILED'),
-        );
-      }
+  private async handleProjectPushSessionError(
+    enhanced: EnhancedError,
+    project: Project,
+    retryContext: ProjectPushRetryContext,
+    executeProjectPush: ProjectPushExecutor,
+  ): Promise<ProjectPushStatus> {
+    const canRetry = await this.sessionManager.handleAuthErrorWithRefresh('pushProject', {
+      projectId: project.id,
+      errorCode: enhanced.code
+    });
+    if (!canRetry) {
+      await retryContext.enqueueRetry();
+      this.sessionManager.handleSessionExpired('pushProject', { projectId: project.id, errorCode: enhanced.code });
       return {
         success: false,
-        retryEnqueued,
-        failureReason: enhanced.message,
+        retryEnqueued: retryContext.retryEnqueued,
+        failureReason: 'project sync session expired',
       };
     }
+
+    try {
+      const success = await executeProjectPush();
+      return {
+        success,
+        retryEnqueued: retryContext.retryEnqueued,
+        failureReason: success
+          ? undefined
+          : (
+              retryContext.retryEnqueued
+                ? 'project sync queued for retry after session refresh'
+                : 'project push returned false after session refresh'
+            ),
+      };
+    } catch (retryError) {
+      return await this.handleProjectPushRetryAfterRefreshError(retryError, project, retryContext);
+    }
+  }
+
+  private async handleProjectPushRetryAfterRefreshError(
+    retryError: unknown,
+    project: Project,
+    retryContext: ProjectPushRetryContext,
+  ): Promise<ProjectPushStatus> {
+    if (isPermanentFailureError(retryError)) {
+      throw retryError;
+    }
+
+    const retryEnhanced = this.toEnhancedError(retryError);
+    if (this.sessionManager.isSessionExpiredError(retryEnhanced)) {
+      return await this.handleProjectPushExpiredAfterRefresh(retryEnhanced, project, retryContext);
+    }
+
+    return await this.handleProjectPushEnhancedError(retryEnhanced, project, retryContext);
+  }
+
+  private async handleProjectPushExpiredAfterRefresh(
+    retryEnhanced: EnhancedError,
+    project: Project,
+    retryContext: ProjectPushRetryContext,
+  ): Promise<ProjectPushStatus> {
+    if (this.sessionManager.isRlsPolicyViolation(retryEnhanced)) {
+      this.logger.warn('刷新会话后重试仍获 RLS 违规，判定为权限不足', {
+        projectId: project.id,
+        errorCode: retryEnhanced.code,
+      });
+      throw buildProjectPersistenceTerminalError(
+        project.id,
+        '项目同步权限校验失败，请重新登录后重试',
+        'PermissionError',
+        'SYNC_PROJECT_PERMISSION_DENIED',
+      );
+    }
+
+    await retryContext.enqueueRetry();
+    this.sessionManager.handleSessionExpired('pushProject.retryAfterRefresh', {
+      projectId: project.id,
+      errorCode: retryEnhanced.code
+    });
+    return {
+      success: false,
+      retryEnqueued: retryContext.retryEnqueued,
+      failureReason: 'project sync session expired after refresh',
+    };
+  }
+
+  private async handleProjectPushEnhancedError(
+    enhanced: EnhancedError,
+    project: Project,
+    retryContext: ProjectPushRetryContext,
+  ): Promise<ProjectPushStatus> {
+    if (enhanced.errorType === 'VersionConflictError') {
+      this.toast.warning('版本冲突', '数据已被修改，请刷新后重试');
+      throw new PermanentFailureError('Version conflict', enhanced, { operation: 'pushProject', projectId: project.id });
+    }
+
+    if (!enhanced.isRetryable) {
+      this.throwProjectPushTerminalError(project.id, enhanced);
+    }
+
+    await retryContext.enqueueRetry(createRetryQueueLastFailure(enhanced));
+    return {
+      success: false,
+      retryEnqueued: retryContext.retryEnqueued,
+      failureReason: enhanced.message,
+    };
+  }
+
+  private throwProjectPushTerminalError(projectId: string, enhanced: EnhancedError): never {
+    const isPermissionDenied = enhanced.errorType === 'PermissionError';
+    throw buildProjectPersistenceTerminalError(
+      projectId,
+      isPermissionDenied ? '项目同步权限校验失败，请重新登录后重试' : enhanced.message,
+      isPermissionDenied ? 'PermissionError' : 'BusinessRuleError',
+      isPermissionDenied
+        ? 'SYNC_PROJECT_PERMISSION_DENIED'
+        : (enhanced.code ? String(enhanced.code) : 'SYNC_PROJECT_PERSISTENCE_FAILED'),
+    );
+  }
+
+  private toEnhancedError(error: unknown): EnhancedError {
+    return error && typeof error === 'object' && 'errorType' in error
+      ? error as EnhancedError
+      : supabaseErrorToError(error);
   }
 
   async pushProjectWithResult(
@@ -310,9 +445,18 @@ export class ProjectPushService {
     fromRetryQueue = false,
     sourceUserId?: string,
     taskIdsToDelete?: string[],
+    taskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap,
+    operationId?: string,
   ): Promise<{ success: boolean; conflict?: boolean; remoteData?: Project; retryEnqueued?: boolean; failureReason?: string; terminal?: boolean }> {
     try {
-      const result = await this.pushProjectWithStatus(project, fromRetryQueue, sourceUserId, taskIdsToDelete);
+      const result = await this.callPushProjectWithStatus({
+        project,
+        fromRetryQueue,
+        sourceUserId,
+        taskIdsToDelete,
+        taskDeleteBaseUpdatedAtMap,
+        operationId,
+      });
       return {
         success: result.success,
         retryEnqueued: result.retryEnqueued,
@@ -346,6 +490,50 @@ export class ProjectPushService {
     }
   }
 
+  private callPushProjectWithStatus(options: {
+    project: Project;
+    fromRetryQueue: boolean;
+    sourceUserId?: string;
+    taskIdsToDelete?: string[];
+    taskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap;
+    operationId?: string;
+  }): Promise<ProjectPushStatus> {
+    if (options.taskDeleteBaseUpdatedAtMap !== undefined) {
+      return options.operationId === undefined
+        ? this.pushProjectWithStatus(
+            options.project,
+            options.fromRetryQueue,
+            options.sourceUserId,
+            options.taskIdsToDelete,
+            options.taskDeleteBaseUpdatedAtMap,
+          )
+        : this.pushProjectWithStatus(
+            options.project,
+            options.fromRetryQueue,
+            options.sourceUserId,
+            options.taskIdsToDelete,
+            options.taskDeleteBaseUpdatedAtMap,
+            options.operationId,
+          );
+    }
+
+    return options.operationId === undefined
+      ? this.pushProjectWithStatus(
+          options.project,
+          options.fromRetryQueue,
+          options.sourceUserId,
+          options.taskIdsToDelete,
+        )
+      : this.pushProjectWithStatus(
+          options.project,
+          options.fromRetryQueue,
+          options.sourceUserId,
+          options.taskIdsToDelete,
+          undefined,
+          options.operationId,
+        );
+  }
+
   private shouldUseSyncRpc(): boolean {
     return this.syncRpcClient?.isFeatureEnabled() === true && this.syncRpcClient.isClientRejected() === false;
   }
@@ -363,6 +551,14 @@ export class ProjectPushService {
   }
 
   private throwProjectSyncRpcClientRejected(projectId: string): never {
+    const { message, result } = this.reportProjectSyncRpcClientRejected(projectId);
+    throw buildProjectRpcTerminalError(projectId, result, message);
+  }
+
+  private reportProjectSyncRpcClientRejected(projectId: string): {
+    message: string;
+    result: SyncRpcResult;
+  } {
     const message = '当前客户端同步协议已过期，请刷新后重试';
     const result: SyncRpcResult = {
       status: 'client-version-rejected',
@@ -376,11 +572,21 @@ export class ProjectPushService {
       extra: { projectId },
     });
 
-    throw buildProjectRpcTerminalError(projectId, result, message);
+    return { message, result };
   }
 
-  private createSyncRpcOperationId(): string {
-    return createSyncOperationId();
+  private async enqueueProjectSyncRpcClientRejectedRetry(
+    projectId: string,
+    enqueueRetry: ((lastFailure?: RetryQueueLastFailure) => Promise<boolean>) | undefined,
+  ): Promise<boolean> {
+    const { message } = this.reportProjectSyncRpcClientRejected(projectId);
+    await enqueueRetry?.({
+      errorType: 'ClientVersionRejectedError',
+      message,
+      remoteOutcome: 'unknown',
+      recordedAt: Date.now(),
+    });
+    return false;
   }
 
   private normalizeLocalProjectUpdatedAt(project: Project, serverUpdatedAt?: string | null): void {
@@ -398,33 +604,6 @@ export class ProjectPushService {
     this.clockSync.recordServerTimestamp(serverUpdatedAt, project.id);
   }
 
-  private async loadRemoteProjectFreshness(
-    client: SupabaseClient,
-    projectId: string,
-    userId: string,
-  ): Promise<{ updatedAt: string | null; deletedAt: string | null } | null> {
-    const { data, error } = await client
-      .from('projects')
-      .select('id,updated_at,deleted_at')
-      .eq('id', projectId)
-      .eq('owner_id', userId)
-      .maybeSingle();
-
-    if (error) {
-      throw supabaseErrorToError(error);
-    }
-
-    if (!data) {
-      return null;
-    }
-
-    const row = data as { updated_at?: string | null; deleted_at?: string | null };
-    return {
-      updatedAt: typeof row.updated_at === 'string' ? row.updated_at : null,
-      deletedAt: typeof row.deleted_at === 'string' ? row.deleted_at : null,
-    };
-  }
-
   private async handleProjectSyncRpcResult(
     result: SyncRpcResult,
     project: Project,
@@ -432,57 +611,28 @@ export class ProjectPushService {
     enqueueRetry: (() => Promise<boolean>) | undefined,
     sourceUserId: string | undefined,
     taskIdsToDelete: string[] | undefined,
+    taskDeleteBaseUpdatedAtMap: TaskDeleteBaseUpdatedAtMap | undefined,
+    operationId: string | undefined,
+    localTimestamp = Date.now(),
+    lastSyncTimeBefore = this.syncState().lastSyncTime,
+    updatedAtBaseline = project.updatedAt ?? null,
   ): Promise<boolean> {
-    if (result.status === 'applied' || result.status === 'idempotent-replay') {
-      this.normalizeLocalProjectUpdatedAt(project, result.serverUpdatedAt);
-      this.logger.debug('pushProject: sync RPC 写入成功', {
-        projectId: project.id,
-        status: result.status,
-      });
-      return true;
-    }
-
-    if (result.status === 'remote-newer' || result.status === 'deleted-remote-newer') {
-      this.logger.warn('pushProject: sync RPC CAS 拒绝，远端版本更新', {
-        projectId: project.id,
-        status: result.status,
-        remoteUpdatedAt: result.remoteUpdatedAt,
-        reason: result.reason,
-      });
-      this.sentryLazyLoader.captureMessage('sync_rpc_project_remote_newer', {
-        level: 'warning',
-        tags: { operation: 'pushProject', entityType: 'project', status: result.status },
-        extra: { projectId: project.id, remoteUpdatedAt: result.remoteUpdatedAt, reason: result.reason },
-      });
-      this.toast.warning('版本冲突', '数据已被修改，请刷新后重试');
-      throw buildProjectRpcConflictError(project.id, result);
-    }
-
-    if (result.status === 'unauthorized' && result.reason === 'supabase_client_unavailable') {
-      this.logger.warn('pushProject: sync RPC client 不可用，回退重试队列', {
-        projectId: project.id,
-        reason: result.reason,
-      });
-      if (!fromRetryQueue) {
-        if (enqueueRetry) {
-          await enqueueRetry();
-        } else if (this.durableRetryHandler) {
-          await this.durableRetryHandler('project', 'upsert', project, undefined, sourceUserId, taskIdsToDelete);
-        }
-      }
-      return false;
-    }
-
-    const message = result.status === 'client-version-rejected'
-      ? '当前客户端同步协议已过期，请刷新后重试'
-      : '项目同步权限校验失败，请重新登录后重试';
-    this.syncStateService.setSyncError(message);
-    this.sentryLazyLoader.captureMessage('sync_rpc_project_rejected', {
-      level: 'warning',
-      tags: { operation: 'pushProject', entityType: 'project', status: result.status },
-      extra: { projectId: project.id, reason: result.reason, minProtocolVersion: result.minProtocolVersion },
+    return await this.rpcResultHandler.handle({
+      result,
+      project,
+      fromRetryQueue,
+      enqueueRetry,
+      sourceUserId,
+      taskIdsToDelete,
+      taskDeleteBaseUpdatedAtMap,
+      operationId,
+      localTimestamp,
+      lastSyncTimeBefore,
+      updatedAtBaseline,
+      durableRetryHandler: this.durableRetryHandler,
+      normalizeLocalProjectUpdatedAt: (targetProject, serverUpdatedAt) =>
+        this.normalizeLocalProjectUpdatedAt(targetProject, serverUpdatedAt),
     });
-    throw buildProjectRpcTerminalError(project.id, result, message);
   }
 
   /**
@@ -493,146 +643,84 @@ export class ProjectPushService {
     project: Project,
     userId: string,
     fromRetryQueue = false,
-    enqueueRetry?: () => Promise<boolean>,
+    enqueueRetry?: (lastFailure?: RetryQueueLastFailure) => Promise<boolean>,
     sourceUserId?: string,
     taskIdsToDelete?: string[],
+    taskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap,
+    operationId?: string,
   ): Promise<boolean> {
     await this.primeProjectSyncRpcCapability();
 
+    if (operationId === undefined) {
+      await enqueueRetry?.();
+      return false;
+    }
+
     if (this.syncRpcClient?.isClientRejected() === true) {
-      this.throwProjectSyncRpcClientRejected(project.id);
+      return await this.enqueueProjectSyncRpcClientRejectedRetry(project.id, enqueueRetry);
     }
 
     if (this.shouldUseSyncRpc()) {
-      const result = await this.syncRpcClient!.upsertProject({
-        operationId: this.createSyncRpcOperationId(),
+      return await this.pushProjectViaSyncRpc(
         project,
-        ownerId: userId,
-        baseUpdatedAt: project.updatedAt ?? null,
-      });
-
-      return await this.handleProjectSyncRpcResult(
-        result,
-        project,
+        userId,
         fromRetryQueue,
         enqueueRetry,
         sourceUserId,
         taskIdsToDelete,
+        taskDeleteBaseUpdatedAtMap,
+        operationId,
       );
     }
 
-    const remoteProject = await this.loadRemoteProjectFreshness(client, project.id, userId);
-    const remoteHasTombstone = !!(remoteProject?.deletedAt && !project.deletedAt);
-    const remoteUpdatedAt = remoteProject?.updatedAt ?? null;
-    const localUpdatedAt = project.updatedAt ?? null;
-    const rawRemoteMs = remoteUpdatedAt ? new Date(remoteUpdatedAt).getTime() : Number.NaN;
-    const rawLocalMs = localUpdatedAt ? new Date(localUpdatedAt).getTime() : Number.NaN;
-    const timestampsDiffer = Number.isFinite(rawRemoteMs)
-      && Number.isFinite(rawLocalMs)
-      && rawLocalMs !== rawRemoteMs;
-    const clockSyncResult = timestampsDiffer
-      ? await this.clockSync.ensureSynced().catch(() => null)
-      : null;
-
-    if (timestampsDiffer && !clockSyncResult?.reliable) {
-      throw buildProjectClockUncertainError(
-        project.id,
-        localUpdatedAt,
-        remoteUpdatedAt,
-      );
+    if (!fromRetryQueue) {
+      await enqueueRetry?.();
+      return false;
     }
 
-    const remoteIsNewer = !!(
-      remoteUpdatedAt
-      && localUpdatedAt
-      && (
-        clockSyncResult?.reliable
-          ? this.clockSync.compareTimestamps(localUpdatedAt, remoteUpdatedAt) < 0
-          : rawRemoteMs > rawLocalMs
-      )
-    );
+    return await this.pushProjectViaDirectUpsert(client, project, userId);
+  }
 
-    if (remoteHasTombstone || remoteIsNewer) {
-      throw buildProjectDirectConflictError(
-        project.id,
-        remoteProject?.updatedAt ?? remoteProject?.deletedAt ?? null,
-        remoteHasTombstone ? 'remote-tombstone' : 'remote-newer',
-      );
-    }
-
-    const projectInsertPayload = {
-      id: project.id,
-      owner_id: userId,
-      title: project.name,
-      description: project.description,
-      version: project.version || 1,
-      migrated_to_v2: true,
-      deleted_at: project.deletedAt ?? null,
-    };
-    const projectUpdatePayload = {
-      title: project.name,
-      description: project.description,
-      version: project.version || 1,
-      migrated_to_v2: true,
-      deleted_at: project.deletedAt ?? null,
-    };
-
-    let data: { updated_at?: string | null } | null = null;
-    let error: unknown | null = null;
-
-    if (remoteProject?.updatedAt) {
-      ({ data, error } = await client
-        .from('projects')
-        .update(projectUpdatePayload)
-        .eq('id', project.id)
-        .eq('owner_id', userId)
-        .eq('updated_at', remoteProject.updatedAt)
-        .select('updated_at')
-        .maybeSingle());
-
-      if (!error && !data) {
-        throw buildProjectDirectConflictError(
-          project.id,
-          remoteProject.updatedAt,
-          'remote-newer',
-        );
-      }
-    } else if (remoteProject) {
-      throw buildProjectDirectConflictError(
-        project.id,
-        remoteProject.updatedAt ?? remoteProject.deletedAt ?? null,
-        'remote-newer',
-      );
-    } else {
-      ({ data, error } = await client
-        .from('projects')
-        .insert(projectInsertPayload)
-        .select('updated_at')
-        .maybeSingle());
-
-      const code = (error as { code?: string | number } | null)?.code;
-      if (error && (code === '23505' || code === 23505)) {
-        throw buildProjectDirectConflictError(
-          project.id,
-          project.updatedAt ?? null,
-          'remote-newer',
-        );
-      }
-
-      if (!error && !data) {
-        throw buildProjectDirectConflictError(
-          project.id,
-          project.updatedAt ?? null,
-          'remote-newer',
-        );
-      }
-    }
-
-    if (error) throw supabaseErrorToError(error);
-    this.normalizeLocalProjectUpdatedAt(
+  private async pushProjectViaSyncRpc(
+    project: Project,
+    userId: string,
+    fromRetryQueue: boolean,
+    enqueueRetry: (() => Promise<boolean>) | undefined,
+    sourceUserId: string | undefined,
+    taskIdsToDelete: string[] | undefined,
+    taskDeleteBaseUpdatedAtMap: TaskDeleteBaseUpdatedAtMap | undefined,
+    operationId: string,
+  ): Promise<boolean> {
+    const localTimestamp = Date.now();
+    const lastSyncTimeBefore = this.syncState().lastSyncTime;
+    const updatedAtBaseline = project.updatedAt ?? null;
+    const result = await this.syncRpcClient!.upsertProject({
+      operationId,
       project,
-      typeof data?.updated_at === 'string' ? data.updated_at : null,
+      ownerId: userId,
+      baseUpdatedAt: updatedAtBaseline,
+    });
+
+    return await this.handleProjectSyncRpcResult(
+      result,
+      project,
+      fromRetryQueue,
+      enqueueRetry,
+      sourceUserId,
+      taskIdsToDelete,
+      taskDeleteBaseUpdatedAtMap,
+      operationId,
+      localTimestamp,
+      lastSyncTimeBefore,
+      updatedAtBaseline,
     );
-    return true;
+  }
+
+  private async pushProjectViaDirectUpsert(
+    client: SupabaseClient,
+    project: Project,
+    userId: string,
+  ): Promise<boolean> {
+    return await this.directPersistence.pushProject(client, project, userId);
   }
 }

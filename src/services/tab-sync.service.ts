@@ -36,6 +36,14 @@
 import { Injectable, inject, OnDestroy, signal } from '@angular/core';
 import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
+import {
+  countActiveProjectTabs,
+  filterActiveRemoteLocksForTask,
+  findStaleRemoteLockKeys,
+  findStaleTabIds,
+  hasActiveRemoteEditLock,
+  type TabSyncActiveTab,
+} from './tab-sync.helpers';
 
 /**
  * 跨标签页消息类型
@@ -77,12 +85,7 @@ export interface ConcurrentEditEvent {
 /**
  * 活跃标签页追踪
  */
-interface ActiveTab {
-  tabId: string;
-  projectId: string;
-  projectName: string;
-  lastSeen: number;
-}
+type ActiveTab = TabSyncActiveTab;
 
 /**
  * 配置常量
@@ -158,19 +161,23 @@ export class TabSyncService implements OnDestroy {
   
   /** 【v5.10 新增】警告冷却追踪 */
   private lastWarningTime = new Map<string, number>();
+  private isDestroyed = false;
   
   constructor() {
     this.isSupported = typeof BroadcastChannel !== 'undefined';
     
     if (this.isSupported) {
-      this.setupChannel();
-      this.startHeartbeat();
+      if (this.setupChannel()) {
+        this.startHeartbeat();
+      }
     } else {
       this.logger.warn('BroadcastChannel 不受支持，多标签页同步已禁用');
     }
   }
   
   ngOnDestroy(): void {
+    if (this.isDestroyed) return;
+    this.isDestroyed = true;
     this.cleanup();
   }
   
@@ -181,6 +188,7 @@ export class TabSyncService implements OnDestroy {
    * @param projectName 项目名称（用于友好提示）
    */
   notifyProjectOpen(projectId: string, projectName: string): void {
+    if (this.isDestroyed) return;
     if (!this.isSupported || !this.channel) return;
     
     // 如果之前打开了其他项目，先通知关闭
@@ -212,21 +220,29 @@ export class TabSyncService implements OnDestroy {
    * 通知其他标签页：当前标签页关闭了项目
    */
   notifyProjectClose(): void {
+    if (this.isDestroyed) return;
     if (!this.isSupported || !this.channel) return;
     if (!this.currentProjectId) return;
-    
+
+    this.broadcastProjectCloseForCleanup();
+  }
+
+  private broadcastProjectCloseForCleanup(): void {
+    if (!this.isSupported || !this.channel) return;
+    if (!this.currentProjectId) return;
+
     const message: TabMessage = {
       type: 'project-closed',
       tabId: this.tabId,
       projectId: this.currentProjectId,
       timestamp: Date.now(),
     };
-    
+
     try {
       this.channel.postMessage(message);
     } catch { /* 通道已关闭 */ }
     this.logger.debug('广播项目关闭', { projectId: this.currentProjectId });
-    
+
     this.currentProjectId = null;
     this.currentProjectName = null;
   }
@@ -235,20 +251,13 @@ export class TabSyncService implements OnDestroy {
    * 获取当前打开同一项目的其他标签页数量
    */
   getOtherTabsCount(projectId: string): number {
-    let count = 0;
-    const now = Date.now();
-    
-    this.activeTabs.forEach((tab, tabId) => {
-      if (
-        tabId !== this.tabId
-        && tab.projectId === projectId
-        && now - tab.lastSeen <= TAB_SYNC_CONFIG.TAB_TIMEOUT
-      ) {
-        count++;
-      }
+    return countActiveProjectTabs({
+      tabs: this.activeTabs,
+      ownTabId: this.tabId,
+      projectId,
+      now: Date.now(),
+      timeoutMs: TAB_SYNC_CONFIG.TAB_TIMEOUT,
     });
-    
-    return count;
   }
   
   /**
@@ -262,6 +271,7 @@ export class TabSyncService implements OnDestroy {
    * @param updatedAt 项目最新的 updatedAt 时间戳
    */
   notifyDataSynced(projectId: string, updatedAt: string): void {
+    if (this.isDestroyed) return;
     if (!this.isSupported || !this.channel) return;
     
     const message: TabMessage = {
@@ -292,17 +302,21 @@ export class TabSyncService implements OnDestroy {
   
   // ========== 私有方法 ==========
   
-  private setupChannel(): void {
+  private setupChannel(): boolean {
     try {
       this.channel = new BroadcastChannel(TAB_SYNC_CONFIG.CHANNEL_NAME);
       this.channel.onmessage = (event) => this.handleMessage(event.data as TabMessage);
       this.logger.debug('BroadcastChannel 已建立', { tabId: this.tabId });
+      return true;
     } catch (e) {
       this.logger.error('BroadcastChannel 建立失败', e);
+      this.channel = null;
+      return false;
     }
   }
   
   private handleMessage(message: TabMessage): void {
+    if (this.isDestroyed) return;
     // 忽略自己发送的消息
     if (message.tabId === this.tabId) return;
     
@@ -392,12 +406,17 @@ export class TabSyncService implements OnDestroy {
   }
   
   private startHeartbeat(): void {
-    if (this.heartbeatTimer) return;
+    if (this.heartbeatTimer !== null) return;
     
-    this.heartbeatTimer = setInterval(() => {
+    const timer = setInterval(() => {
+      if (this.isDestroyed || this.heartbeatTimer !== timer) {
+        return;
+      }
+
       this.sendHeartbeat();
       this.cleanupStaleTabs();
     }, TAB_SYNC_CONFIG.HEARTBEAT_INTERVAL);
+    this.heartbeatTimer = timer;
   }
   
   private sendHeartbeat(): void {
@@ -417,30 +436,21 @@ export class TabSyncService implements OnDestroy {
   
   private cleanupStaleTabs(): void {
     const now = Date.now();
-    const staleTabIds: string[] = [];
-    
-    this.activeTabs.forEach((tab, tabId) => {
-      if (now - tab.lastSeen > TAB_SYNC_CONFIG.TAB_TIMEOUT) {
-        staleTabIds.push(tabId);
-      }
-    });
-    
-    for (const tabId of staleTabIds) {
+
+    for (const tabId of findStaleTabIds(this.activeTabs, now, TAB_SYNC_CONFIG.TAB_TIMEOUT)) {
       this.activeTabs.delete(tabId);
       this.logger.debug('清理过期标签页', { tabId });
     }
     
     // 【P3-20 修复】清理过期的远程编辑锁
-    this.remoteEditLocks.forEach((lock, key) => {
-      if (lock.expiresAt <= now) {
-        this.remoteEditLocks.delete(key);
-      }
-    });
+    for (const key of findStaleRemoteLockKeys(this.remoteEditLocks, now)) {
+      this.remoteEditLocks.delete(key);
+    }
   }
   
   private cleanup(): void {
     // 通知其他标签页当前标签页关闭
-    this.notifyProjectClose();
+    this.broadcastProjectCloseForCleanup();
     
     // 释放所有本地编辑锁
     this.releaseAllEditLocks();
@@ -449,9 +459,10 @@ export class TabSyncService implements OnDestroy {
     this.cleanupConcurrencyState();
     
     // 停止心跳
-    if (this.heartbeatTimer) {
-      clearInterval(this.heartbeatTimer);
+    if (this.heartbeatTimer !== null) {
+      const heartbeatTimer = this.heartbeatTimer;
       this.heartbeatTimer = null;
+      this.clearIntervalSafely(heartbeatTimer);
     }
     
     // 关闭 channel
@@ -480,6 +491,7 @@ export class TabSyncService implements OnDestroy {
    * @returns 是否成功获取锁（如果其他标签页已锁定则返回 false）
    */
   acquireEditLock(taskId: string, field: string): boolean {
+    if (this.isDestroyed) return true;
     if (!this.isSupported || !this.channel) return true;
     if (!TAB_CONCURRENCY_CONFIG.DETECT_CONCURRENT_EDIT) return true;
     
@@ -526,6 +538,10 @@ export class TabSyncService implements OnDestroy {
     this.stopLockRefresh(lockKey);
     
     const timer = setInterval(() => {
+      if (this.isDestroyed || this.lockRefreshTimers.get(lockKey) !== timer) {
+        return;
+      }
+
       const lock = this.localEditLocks.get(lockKey);
       if (!lock) {
         this.stopLockRefresh(lockKey);
@@ -548,11 +564,13 @@ export class TabSyncService implements OnDestroy {
    * 【v5.10 新增】停止锁刷新定时器
    */
   private stopLockRefresh(lockKey: string): void {
-    const timer = this.lockRefreshTimers.get(lockKey);
-    if (timer) {
-      clearInterval(timer);
-      this.lockRefreshTimers.delete(lockKey);
+    if (!this.lockRefreshTimers.has(lockKey)) {
+      return;
     }
+
+    const timer = this.lockRefreshTimers.get(lockKey);
+    this.lockRefreshTimers.delete(lockKey);
+    this.clearIntervalSafely(timer!);
   }
   
   /**
@@ -563,6 +581,7 @@ export class TabSyncService implements OnDestroy {
    * @param field 字段名
    */
   releaseEditLock(taskId: string, field: string): void {
+    if (this.isDestroyed) return;
     if (!this.isSupported || !this.channel) return;
     
     const lockKey = `${taskId}:${field}`;
@@ -583,7 +602,7 @@ export class TabSyncService implements OnDestroy {
   releaseAllEditLocks(): void {
     // 【v5.10】清除所有锁刷新定时器
     this.lockRefreshTimers.forEach(timer => {
-      clearInterval(timer);
+      this.clearIntervalSafely(timer);
     });
     this.lockRefreshTimers.clear();
     
@@ -601,36 +620,14 @@ export class TabSyncService implements OnDestroy {
    * @returns 是否正在被其他标签页编辑
    */
   isBeingEditedByOtherTab(taskId: string, field?: string): boolean {
-    const now = Date.now();
-    let edited = false;
-
-    this.remoteEditLocks.forEach(lock => {
-      if (
-        lock.taskId === taskId
-        && (!field || lock.field === field)
-        && lock.expiresAt > now
-      ) {
-        edited = true;
-      }
-    });
-
-    return edited;
+    return hasActiveRemoteEditLock(this.remoteEditLocks, taskId, field, Date.now());
   }
   
   /**
    * 获取正在编辑指定任务的其他标签页信息
    */
   getOtherEditorsForTask(taskId: string): TabEditLock[] {
-    const now = Date.now();
-    const editors: TabEditLock[] = [];
-    
-    this.remoteEditLocks.forEach(lock => {
-      if (lock.taskId === taskId && lock.expiresAt > now) {
-        editors.push(lock);
-      }
-    });
-    
-    return editors;
+    return filterActiveRemoteLocksForTask(this.remoteEditLocks, taskId, Date.now());
   }
   
   /**
@@ -743,11 +740,19 @@ export class TabSyncService implements OnDestroy {
   private cleanupConcurrencyState(): void {
     // 清理锁刷新定时器
     this.lockRefreshTimers.forEach(timer => {
-      clearInterval(timer);
+      this.clearIntervalSafely(timer);
     });
     this.lockRefreshTimers.clear();
     
     // 清理警告冷却追踪
     this.lastWarningTime.clear();
+  }
+
+  private clearIntervalSafely(timer: ReturnType<typeof setInterval>): void {
+    try {
+      clearInterval(timer);
+    } catch {
+      // Timer cleanup is best-effort; local state is invalidated before clearing.
+    }
   }
 }

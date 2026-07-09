@@ -1,8 +1,10 @@
 import { ChangeDetectionStrategy, Component, DestroyRef, computed, effect, inject, input, output } from '@angular/core';
 import { FEATURE_FLAGS } from '../../../config/feature-flags.config';
-import { IDLE_SCHEDULE_CONFIG } from '../../../config/timeout.config';
 import { PwaInstallPromptService } from '../../../services/pwa-install-prompt.service';
 import { ToastService } from '../../../services/toast.service';
+import {
+  createPwaInstallPromptInitializationScheduler,
+} from './pwa-install-prompt-initialization.scheduler';
 
 @Component({
   selector: 'app-pwa-install-prompt-banner',
@@ -48,11 +50,19 @@ export class PwaInstallPromptBannerComponent {
   readonly installHint = computed(() => this.pwaInstall.installHint());
 
   private promptInitScheduled = false;
+  private destroyed = false;
+  private promptIdleCallbackHandle: number | null = null;
 
   constructor() {
     effect(() => {
       const visible = this.showPrompt();
-      queueMicrotask(() => this.visibleChange.emit(visible));
+      queueMicrotask(() => {
+        if (this.destroyed) {
+          return;
+        }
+
+        this.visibleChange.emit(visible);
+      });
     });
 
     this.schedulePromptInitialization();
@@ -86,53 +96,20 @@ export class PwaInstallPromptBannerComponent {
       return;
     }
 
-    const init = () => this.pwaInstall.initialize();
-
-    if (typeof window === 'undefined') {
-      init();
-      return;
-    }
-
-    let initialized = false;
-    let idleTimer: ReturnType<typeof setTimeout> | null = null;
-    const cleanup = () => {
-      window.removeEventListener('pointerdown', onFirstIntent);
-      window.removeEventListener('keydown', onFirstIntent);
-      window.removeEventListener('touchstart', onFirstIntent);
-      if (idleTimer) {
-        clearTimeout(idleTimer);
-        idleTimer = null;
-      }
-    };
-    const initOnce = () => {
-      if (initialized) {
-        return;
-      }
-
-      initialized = true;
-      cleanup();
-      init();
-    };
-    const onFirstIntent = () => initOnce();
-
-    this.destroyRef.onDestroy(() => {
-      cleanup();
-      this.visibleChange.emit(false);
+    const scheduler = createPwaInstallPromptInitializationScheduler({
+      initialize: () => this.pwaInstall.initialize(),
+      isDestroyed: () => this.destroyed,
+      getIdleCallbackHandle: () => this.promptIdleCallbackHandle,
+      setIdleCallbackHandle: (handle) => {
+        this.promptIdleCallbackHandle = handle;
+      },
     });
 
-    window.addEventListener('pointerdown', onFirstIntent, { once: true, passive: true });
-    window.addEventListener('keydown', onFirstIntent, { once: true });
-    window.addEventListener('touchstart', onFirstIntent, { once: true, passive: true });
+    this.destroyRef.onDestroy(() => {
+      this.destroyed = true;
+      scheduler.teardown();
+    });
 
-    if ('requestIdleCallback' in window) {
-      (
-        window as Window & {
-          requestIdleCallback: (callback: IdleRequestCallback, options?: IdleRequestOptions) => number;
-        }
-      ).requestIdleCallback(() => initOnce(), { timeout: 2500 });
-      return;
-    }
-
-    idleTimer = setTimeout(initOnce, IDLE_SCHEDULE_CONFIG.SHORT_MS);
+    scheduler.schedule();
   }
 }

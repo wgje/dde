@@ -12,6 +12,31 @@ export type Database = {
   __InternalSupabase: {
     PostgrestVersion: "14.1"
   }
+  graphql_public: {
+    Tables: {
+      [_ in never]: never
+    }
+    Views: {
+      [_ in never]: never
+    }
+    Functions: {
+      graphql: {
+        Args: {
+          extensions?: Json
+          operationName?: string
+          query?: string
+          variables?: Json
+        }
+        Returns: Json
+      }
+    }
+    Enums: {
+      [_ in never]: never
+    }
+    CompositeTypes: {
+      [_ in never]: never
+    }
+  }
   public: {
     Tables: {
       app_config: {
@@ -40,8 +65,8 @@ export type Database = {
       }
       black_box_entries: {
         Row: {
-          content: string
           completed_at: string | null
+          content: string
           created_at: string | null
           date: string
           deleted_at: string | null
@@ -57,8 +82,8 @@ export type Database = {
           user_id: string | null
         }
         Insert: {
-          content: string
           completed_at?: string | null
+          content: string
           created_at?: string | null
           date?: string
           deleted_at?: string | null
@@ -74,8 +99,8 @@ export type Database = {
           user_id?: string | null
         }
         Update: {
-          content?: string
           completed_at?: string | null
+          content?: string
           created_at?: string | null
           date?: string
           deleted_at?: string | null
@@ -216,7 +241,7 @@ export type Database = {
           created_at?: string | null
           deleted_at?: string | null
           description?: string | null
-          id?: string
+          id: string
           project_id: string
           source_id: string
           target_id: string
@@ -456,7 +481,7 @@ export type Database = {
           data?: Json | null
           deleted_at?: string | null
           description?: string | null
-          id?: string
+          id: string
           migrated_to_v2?: boolean | null
           owner_id: string
           title?: string | null
@@ -997,7 +1022,7 @@ export type Database = {
           deleted_at?: string | null
           due_date?: string | null
           expected_minutes?: number | null
-          id?: string
+          id: string
           order?: number | null
           parent_id?: string | null
           parking_meta?: Json | null
@@ -1124,7 +1149,7 @@ export type Database = {
           created_at?: string | null
           floating_window_pref?: string | null
           focus_preferences?: Json | null
-          id?: string
+          id: string
           last_backup_proof_at?: string | null
           layout_direction?: string | null
           local_backup_enabled?: boolean | null
@@ -2083,8 +2108,10 @@ export type CompositeTypes<
     : never
 
 export const Constants = {
+  graphql_public: {
+    Enums: {},
+  },
   public: {
     Enums: {},
   },
 } as const
-

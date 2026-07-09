@@ -23,6 +23,27 @@ import { DeltaSyncCoordinatorService } from './delta-sync-coordinator.service';
 import { Project } from '../models';
 import { Result, success, failure, isFailure, ErrorCodes, OperationError } from '../utils/result';
 import { validateProject, sanitizeProject } from '../utils/validation';
+import type { TaskTombstones } from './conflict-resolution-merge.helpers';
+
+type ProjectResyncResult = {
+  success: boolean;
+  message: string;
+  conflictDetected?: boolean;
+};
+
+type OfflineMergeResult = {
+  project?: Project;
+  conflictProject?: Project;
+  synced: boolean;
+};
+
+type OfflineProjectToSync = {
+  project: Project;
+  reason: string;
+  conflictEvidenceFailed?: boolean;
+};
+
+const CONFLICT_EVIDENCE_SAVE_FAILED_MESSAGE = '发现冲突，但冲突证据保存失败，本地数据已保留';
 
 @Injectable({
   providedIn: 'root'
@@ -45,12 +66,8 @@ export class ProjectSyncOperationsService {
    * 重新同步当前活动项目
    */
   async resyncActiveProject(
-    getTombstoneIds: (projectId: string) => Promise<Set<string>>
-  ): Promise<{
-    success: boolean;
-    message: string;
-    conflictDetected?: boolean;
-  }> {
+    getTombstoneIds: (projectId: string) => Promise<TaskTombstones>
+  ): Promise<ProjectResyncResult> {
     const projectId = this.projectState.activeProjectId();
     const userId = this.authService.currentUserId();
     
@@ -69,73 +86,119 @@ export class ProjectSyncOperationsService {
     
     try {
       const remoteProject = await this.projectData.loadFullProject(projectId, userId);
-      
+
       if (!remoteProject) {
         return { success: false, message: '云端项目不存在' };
       }
-      
+
       const tombstoneIds = await getTombstoneIds(projectId);
       const localVersion = localProject.version ?? 0;
       const remoteVersion = remoteProject.version ?? 0;
-      
+
       if (localVersion === remoteVersion) {
-        const mergeResult = this.conflictService.smartMerge(localProject, remoteProject, tombstoneIds);
-        const validated = this.validateAndRebalance(mergeResult.project);
-        this.projectState.updateProjects(ps => 
-          ps.map(p => p.id === projectId ? validated : p)
-        );
-        return { success: true, message: '数据已是最新' };
+        return await this.applySameVersionResync(projectId, localProject, remoteProject, tombstoneIds);
       }
-      
+
       if (remoteVersion > localVersion) {
-        const mergeResult = this.conflictService.smartMerge(localProject, remoteProject, tombstoneIds);
-        
-        if (mergeResult.conflictCount > 0) {
-          await this.saveConflictSilently(localProject, remoteProject, mergeResult.issues);
-          this.logger.info('检测到冲突，已保存到冲突仓库', { 
-            projectId, 
-            conflictCount: mergeResult.conflictCount 
-          });
-        }
-        
-        const validated = this.validateAndRebalance(mergeResult.project);
-        this.projectState.updateProjects(ps => 
-          ps.map(p => p.id === projectId ? validated : p)
-        );
-        
-        this.changeTracker.clearProjectFieldLocks(projectId);
-        
-        return { 
-          success: true, 
-          message: mergeResult.conflictCount > 0 
-            ? `已合并，${mergeResult.conflictCount} 处冲突已保存供稍后处理`
-            : '已与云端同步',
-          conflictDetected: mergeResult.conflictCount > 0
-        };
+        return await this.applyRemoteNewerResync(projectId, localProject, remoteProject, tombstoneIds);
       }
       
-      const saveResult = await this.projectSaveCoordinator.save(localProject, userId);
-      
-      if (saveResult.success) {
-        this.changeTracker.clearProjectFieldLocks(projectId);
-        return { success: true, message: '本地更改已推送到云端' };
-      } else if (saveResult.conflict) {
-        if (saveResult.remoteData) {
-          await this.saveConflictSilently(localProject, saveResult.remoteData, []);
-        }
-        return { 
-          success: false, 
-          message: '发现版本冲突，已保存到冲突仓库',
-          conflictDetected: true
-        };
-      } else {
-        return { success: false, message: '同步失败' };
-      }
-      
+      return await this.pushLocalNewerProject(projectId, userId, localProject);
+
     } catch (error) {
       this.logger.error('重新同步失败', error);
       return { success: false, message: '同步时发生错误' };
     }
+  }
+
+  private async applySameVersionResync(
+    projectId: string,
+    localProject: Project,
+    remoteProject: Project,
+    tombstoneIds: TaskTombstones,
+  ): Promise<ProjectResyncResult> {
+    const mergeResult = this.conflictService.smartMerge(localProject, remoteProject, tombstoneIds);
+    if (mergeResult.conflictCount > 0) {
+      const conflictPersisted = await this.saveConflictSilently(localProject, remoteProject, mergeResult.issues);
+      if (!conflictPersisted) {
+        return this.createConflictEvidenceSaveFailedResult(projectId, mergeResult.conflictCount);
+      }
+    }
+
+    this.updateProjectInState(projectId, mergeResult.project);
+    return {
+      success: true,
+      message: mergeResult.conflictCount > 0
+        ? `已合并，${mergeResult.conflictCount} 处冲突已保存供稍后处理`
+        : '数据已是最新',
+      conflictDetected: mergeResult.conflictCount > 0,
+    };
+  }
+
+  private async applyRemoteNewerResync(
+    projectId: string,
+    localProject: Project,
+    remoteProject: Project,
+    tombstoneIds: TaskTombstones,
+  ): Promise<ProjectResyncResult> {
+    const mergeResult = this.conflictService.smartMerge(localProject, remoteProject, tombstoneIds);
+    if (mergeResult.conflictCount > 0) {
+      const conflictPersisted = await this.saveConflictSilently(localProject, remoteProject, mergeResult.issues);
+      if (!conflictPersisted) {
+        return this.createConflictEvidenceSaveFailedResult(projectId, mergeResult.conflictCount);
+      }
+      this.logger.info('检测到冲突，已保存到冲突仓库', {
+        projectId,
+        conflictCount: mergeResult.conflictCount
+      });
+    }
+
+    this.updateProjectInState(projectId, mergeResult.project);
+    this.changeTracker.clearProjectFieldLocks(projectId);
+    return {
+      success: true,
+      message: mergeResult.conflictCount > 0
+        ? `已合并，${mergeResult.conflictCount} 处冲突已保存供稍后处理`
+        : '已与云端同步',
+      conflictDetected: mergeResult.conflictCount > 0
+    };
+  }
+
+  private async pushLocalNewerProject(
+    projectId: string,
+    userId: string,
+    localProject: Project,
+  ): Promise<ProjectResyncResult> {
+    const saveResult = await this.projectSaveCoordinator.save(localProject, userId);
+    if (saveResult.success) {
+      this.changeTracker.clearProjectFieldLocks(projectId);
+      return { success: true, message: '本地更改已推送到云端' };
+    }
+
+    if (!saveResult.conflict) {
+      return { success: false, message: '同步失败' };
+    }
+
+    if (saveResult.remoteData) {
+      const conflictPersisted = await this.saveConflictSilently(localProject, saveResult.remoteData, []);
+      if (!conflictPersisted) {
+        return this.createConflictEvidenceSaveFailedResult(projectId, 1);
+      }
+    } else {
+      return this.createConflictEvidenceSaveFailedResult(projectId, 1);
+    }
+    return {
+      success: false,
+      message: '发现版本冲突，已保存到冲突仓库',
+      conflictDetected: true
+    };
+  }
+
+  private updateProjectInState(projectId: string, project: Project): void {
+    const validated = this.validateAndRebalance(project);
+    this.projectState.updateProjects(ps =>
+      ps.map(p => p.id === projectId ? validated : p)
+    );
   }
 
   /**
@@ -145,7 +208,7 @@ export class ProjectSyncOperationsService {
     cloudProjects: Project[], 
     offlineProjects: Project[],
     userId: string,
-    getTombstoneIds: (projectId: string) => Promise<Set<string>>,
+    getTombstoneIds: (projectId: string) => Promise<TaskTombstones>,
     onConflict: (local: Project, remote: Project) => void
   ): Promise<{ projects: Project[]; syncedCount: number; conflictProjects: Project[] }> {
     const cloudMap = new Map(cloudProjects.map(p => [p.id, p]));
@@ -155,84 +218,165 @@ export class ProjectSyncOperationsService {
     
     for (const offlineProject of offlineProjects) {
       const cloudProject = cloudMap.get(offlineProject.id);
-      
+
       if (!cloudProject) {
-        const result = await this.projectSaveCoordinator.save(offlineProject, userId);
-        if (result.success) {
-          const syncedProject = { ...offlineProject, version: result.newVersion ?? offlineProject.version };
-          mergedProjects.push(syncedProject);
-          syncedCount++;
-          this.logger.info('离线新建项目已同步:', offlineProject.name);
-        }
+        const mergeResult = await this.syncNewOfflineProject(offlineProject, userId);
+        if (mergeResult.project) mergedProjects.push(mergeResult.project);
+        if (mergeResult.synced) syncedCount++;
         continue;
       }
-      
-      const offlineVersion = offlineProject.version ?? 0;
-      const cloudVersion = cloudProject.version ?? 0;
-      
-      let shouldSyncOffline = false;
-      let reason = '';
-      let projectToSync = offlineProject;
-      
-      if (offlineVersion > cloudVersion) {
-        shouldSyncOffline = true;
-        reason = '版本号更高';
-      } else if (offlineVersion === cloudVersion) {
-        const hasContentDiff = this.deltaSyncCoordinator.hasProjectContentDifference(offlineProject, cloudProject);
-        
-        if (hasContentDiff) {
-          const offlineTime = new Date(offlineProject.updatedAt || 0).getTime();
-          const cloudTime = new Date(cloudProject.updatedAt || 0).getTime();
-          
-          if (offlineTime >= cloudTime) {
-            shouldSyncOffline = true;
-            reason = '本地有未同步的修改';
-          } else {
-            this.logger.info('检测到本地修改可能被覆盖', {
-              projectId: offlineProject.id,
-              offlineTime: new Date(offlineTime).toISOString(),
-              cloudTime: new Date(cloudTime).toISOString()
-            });
-            const tombstoneIds = await getTombstoneIds(offlineProject.id);
-            const mergedProject = this.conflictService.smartMerge(offlineProject, cloudProject, tombstoneIds);
-            shouldSyncOffline = true;
-            reason = '智能合并本地和云端修改';
-            projectToSync = mergedProject.project;
-          }
-        }
+
+      const mergeResult = await this.syncExistingOfflineProject(
+        offlineProject,
+        cloudProject,
+        userId,
+        getTombstoneIds,
+        onConflict,
+      );
+      if (mergeResult.project) {
+        this.replaceMergedProject(mergedProjects, offlineProject.id, mergeResult.project);
       }
-      
-      if (shouldSyncOffline) {
-        const projectWithVersion = { 
-          ...projectToSync, 
-          version: Math.max(offlineVersion, cloudVersion) + 1 
-        };
-        
-        this.logger.info('同步离线修改', { 
-          projectId: offlineProject.id, 
-          reason,
-          offlineVersion,
-          cloudVersion
-        });
-        
-        const result = await this.projectSaveCoordinator.save(projectWithVersion, userId);
-        if (result.success) {
-          const syncedProject = { ...projectWithVersion, version: result.newVersion ?? projectWithVersion.version };
-          const idx = mergedProjects.findIndex(p => p.id === offlineProject.id);
-          if (idx !== -1) {
-            mergedProjects[idx] = syncedProject;
-          }
-          syncedCount++;
-          this.logger.info('离线修改已同步:', offlineProject.name);
-        } else if (result.conflict) {
-          this.logger.warn('离线数据存在冲突', { projectName: offlineProject.name });
-          conflictProjects.push(offlineProject);
-          onConflict(offlineProject, result.remoteData!);
-        }
-      }
+      if (mergeResult.conflictProject) conflictProjects.push(mergeResult.conflictProject);
+      if (mergeResult.synced) syncedCount++;
     }
     
     return { projects: mergedProjects, syncedCount, conflictProjects };
+  }
+
+  private async syncNewOfflineProject(
+    offlineProject: Project,
+    userId: string,
+  ): Promise<OfflineMergeResult> {
+    const result = await this.projectSaveCoordinator.save(offlineProject, userId);
+    if (!result.success) {
+      return { synced: false };
+    }
+
+    this.logger.info('离线新建项目已同步:', offlineProject.name);
+    return {
+      project: { ...offlineProject, version: result.newVersion ?? offlineProject.version },
+      synced: true,
+    };
+  }
+
+  private async syncExistingOfflineProject(
+    offlineProject: Project,
+    cloudProject: Project,
+    userId: string,
+    getTombstoneIds: (projectId: string) => Promise<TaskTombstones>,
+    onConflict: (local: Project, remote: Project) => void,
+  ): Promise<OfflineMergeResult> {
+    const offlineVersion = offlineProject.version ?? 0;
+    const cloudVersion = cloudProject.version ?? 0;
+    const projectToSync = await this.selectOfflineProjectToSync(
+      offlineProject,
+      cloudProject,
+      getTombstoneIds,
+    );
+    if (!projectToSync) {
+      return { synced: false };
+    }
+
+    if (projectToSync.conflictEvidenceFailed) {
+      this.logger.warn('离线同版本合并冲突证据保存失败，跳过云端推送', {
+        projectId: offlineProject.id,
+      });
+      onConflict(offlineProject, cloudProject);
+      return { conflictProject: offlineProject, synced: false };
+    }
+
+    const projectWithVersion = {
+      ...projectToSync.project,
+      version: Math.max(offlineVersion, cloudVersion) + 1
+    };
+    this.logger.info('同步离线修改', {
+      projectId: offlineProject.id,
+      reason: projectToSync.reason,
+      offlineVersion,
+      cloudVersion
+    });
+
+    const result = await this.projectSaveCoordinator.save(projectWithVersion, userId);
+    if (result.success) {
+      this.logger.info('离线修改已同步:', offlineProject.name);
+      return {
+        project: { ...projectWithVersion, version: result.newVersion ?? projectWithVersion.version },
+        synced: true,
+      };
+    }
+
+    if (result.conflict) {
+      this.logger.warn('离线数据存在冲突', { projectName: offlineProject.name });
+      onConflict(offlineProject, result.remoteData!);
+      return { conflictProject: offlineProject, synced: false };
+    }
+
+    return { synced: false };
+  }
+
+  private async selectOfflineProjectToSync(
+    offlineProject: Project,
+    cloudProject: Project,
+    getTombstoneIds: (projectId: string) => Promise<TaskTombstones>,
+  ): Promise<OfflineProjectToSync | null> {
+    const offlineVersion = offlineProject.version ?? 0;
+    const cloudVersion = cloudProject.version ?? 0;
+    if (offlineVersion > cloudVersion) {
+      return { project: offlineProject, reason: '版本号更高' };
+    }
+
+    if (offlineVersion !== cloudVersion) {
+      return null;
+    }
+
+    return await this.selectSameVersionOfflineProjectToSync(offlineProject, cloudProject, getTombstoneIds);
+  }
+
+  private async selectSameVersionOfflineProjectToSync(
+    offlineProject: Project,
+    cloudProject: Project,
+    getTombstoneIds: (projectId: string) => Promise<TaskTombstones>,
+  ): Promise<OfflineProjectToSync | null> {
+    const hasContentDiff = this.deltaSyncCoordinator.hasProjectContentDifference(offlineProject, cloudProject);
+    if (!hasContentDiff) {
+      return null;
+    }
+
+    const offlineTime = new Date(offlineProject.updatedAt || 0).getTime();
+    const cloudTime = new Date(cloudProject.updatedAt || 0).getTime();
+    if (offlineTime >= cloudTime) {
+      return { project: offlineProject, reason: '本地有未同步的修改' };
+    }
+
+    this.logger.info('检测到本地修改可能被覆盖', {
+      projectId: offlineProject.id,
+      offlineTime: new Date(offlineTime).toISOString(),
+      cloudTime: new Date(cloudTime).toISOString()
+    });
+    const tombstoneIds = await getTombstoneIds(offlineProject.id);
+    const mergeResult = this.conflictService.smartMerge(offlineProject, cloudProject, tombstoneIds);
+    if (mergeResult.conflictCount > 0) {
+      const conflictPersisted = await this.saveConflictSilently(
+        offlineProject,
+        cloudProject,
+        mergeResult.issues,
+      );
+      if (!conflictPersisted) {
+        return {
+          project: offlineProject,
+          reason: '冲突证据保存失败',
+          conflictEvidenceFailed: true,
+        };
+      }
+    }
+    return { project: mergeResult.project, reason: '智能合并本地和云端修改' };
+  }
+
+  private replaceMergedProject(projects: Project[], projectId: string, project: Project): void {
+    const idx = projects.findIndex(p => p.id === projectId);
+    if (idx !== -1) {
+      projects[idx] = project;
+    }
   }
 
   /**
@@ -309,18 +453,35 @@ export class ProjectSyncOperationsService {
     localProject: Project, 
     remoteProject: Project,
     conflictedFields: string[]
-  ): Promise<void> {
-    await this.conflictStorage.saveConflict({
-      projectId: localProject.id,
-      localProject,
-      remoteProject,
-      remoteSnapshotFresh: true,
-      conflictedAt: new Date().toISOString(),
-      localVersion: localProject.version ?? 0,
-      remoteVersion: remoteProject.version ?? 0,
-      reason: 'version_mismatch',
-      conflictedFields,
-      acknowledged: false
-    });
+  ): Promise<boolean> {
+    try {
+      return await this.conflictStorage.saveConflict({
+        projectId: localProject.id,
+        localProject,
+        remoteProject,
+        remoteSnapshotFresh: true,
+        conflictedAt: new Date().toISOString(),
+        localVersion: localProject.version ?? 0,
+        remoteVersion: remoteProject.version ?? 0,
+        reason: 'version_mismatch',
+        conflictedFields,
+        acknowledged: false
+      });
+    } catch (error) {
+      this.logger.error('保存冲突证据失败', { projectId: localProject.id, error });
+      return false;
+    }
+  }
+
+  private createConflictEvidenceSaveFailedResult(
+    projectId: string,
+    conflictCount: number,
+  ): ProjectResyncResult {
+    this.logger.warn('冲突证据保存失败，保留本地项目状态', { projectId, conflictCount });
+    return {
+      success: false,
+      message: CONFLICT_EVIDENCE_SAVE_FAILED_MESSAGE,
+      conflictDetected: true,
+    };
   }
 }

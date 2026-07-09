@@ -37,20 +37,27 @@ app-project-shell {
   width: 6px;
   height: 6px;
 }
-::-webkit-scrollbar-track {
+::-webkit-scrollbar-track,
+.custom-scrollbar::-webkit-scrollbar-track {
   background: transparent;
 }
-::-webkit-scrollbar-thumb {
+::-webkit-scrollbar-thumb,
+.custom-scrollbar::-webkit-scrollbar-thumb {
   background: #e2e8f0;
+}
+::-webkit-scrollbar-thumb {
   border-radius: 9999px;
 }
-::-webkit-scrollbar-thumb:hover {
+::-webkit-scrollbar-thumb:hover,
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
   background: #cbd5e1;
 }
-[data-color-mode="dark"] ::-webkit-scrollbar-thumb {
+[data-color-mode="dark"] ::-webkit-scrollbar-thumb,
+[data-color-mode="dark"] .custom-scrollbar::-webkit-scrollbar-thumb {
   background: #4b5563;
 }
-[data-color-mode="dark"] ::-webkit-scrollbar-thumb:hover {
+[data-color-mode="dark"] ::-webkit-scrollbar-thumb:hover,
+[data-color-mode="dark"] .custom-scrollbar::-webkit-scrollbar-thumb:hover {
   background: #6b7280;
 }
 
@@ -62,81 +69,15 @@ app-project-shell {
   color-scheme: dark;
 }
 
-/* 移动端触摸交互优化 */
-.flow-canvas-container {
-  touch-action: none;
-}
-.sidebar-touch-area {
-  touch-action: pan-y pinch-zoom;
-}
-.main-content-area {
-  touch-action: pan-x pan-y;
-}
-.unassigned-drag-area {
-  touch-action: none;
-}
-
-/* Fisheye Effect for Unassigned Tasks */
-.fisheye-container {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 1rem;
-  overflow-x: auto;
-  height: 120px;
-}
-.fisheye-item {
-  transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
-  flex-shrink: 0;
-  width: 60px;
-  height: 60px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 0.75rem;
-  overflow: hidden;
-  background: white;
-  border: 1px solid #e2e8f0;
-  border-radius: 0.5rem;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-  cursor: pointer;
-}
-.fisheye-container:hover .fisheye-item {
-  opacity: 0.7;
-  transform: scale(0.9);
-}
-.fisheye-container .fisheye-item:hover {
-  opacity: 1;
-  transform: scale(1.8);
-  z-index: 10;
-  box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
-  border-color: #3b82f6;
-}
-
 /* Task Card Expansion Animation */
 .task-card {
   transition: all 0.3s ease-out;
 }
-.task-card-expanded {
-  flex-grow: 1;
-  min-height: 300px;
-}
-
-/* Flowchart Grid */
-.flow-bg {
-  background-image: radial-gradient(#cbd5e1 1px, transparent 1px);
-  background-size: 20px 20px;
-}
 
 /* 全局字体设置 - 霞鹜文楷屏幕阅读版 + 中文系统字体回退 */
 /* font-display: swap 生效时，LXGW 未加载前使用系统中文字体渲染，避免 FOIT */
-*, *::before, *::after,
-input, button, select, textarea {
+*, *::before, *::after {
   font-family: "LXGW WenKai Screen", -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif !important;
-}
-
-body {
-  font-family: "LXGW WenKai Screen", -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
 }
 
 /* ========== 主题变量 ========== */
@@ -460,20 +401,6 @@ body {
 .animate-dropdown {
   animation: dropdown 0.15s ease-out;
 }
-.animate-slide-down {
-  animation: slideDown 0.2s ease-out;
-}
-
-/* 快速创建按钮动画 */
-.quick-create-button {
-  @apply transition-all duration-300;
-}
-.quick-create-button:hover {
-  @apply scale-110;
-}
-.quick-create-button:active {
-  @apply scale-95;
-}
 
 @keyframes fadeIn {
   from { opacity: 0; }
@@ -500,26 +427,6 @@ body {
   from { opacity: 0; transform: translateY(-8px); }
   to { opacity: 1; transform: translateY(0); }
 }
-@keyframes slideDown {
-  from { opacity: 0; transform: translateY(-8px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-
-/* 展开收起动画 - 无抖动版本 */
-.animate-collapse-open {
-  animation: collapseOpen 0.15s ease-out;
-}
-
-@keyframes collapseOpen {
-  from { 
-    opacity: 0;
-    transform: translateY(-4px);
-  }
-  to { 
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
 
 /* Mobile-friendly tweaks */
 .responsive-stack {
@@ -535,8 +442,7 @@ body {
   /* 只对主要交互元素应用 44px 最小高度，排除紧凑按钮 */
   input,
   select,
-  textarea,
-  .touch-target {
+  textarea {
     min-height: 44px;
     padding-top: 0.5rem;
     padding-bottom: 0.5rem;
@@ -561,13 +467,7 @@ body {
     color: inherit;
     background-color: inherit;
   }
-  
-  /* 触摸设备上让某些隐藏元素始终可见 */
-  .touch-always-visible {
-    opacity: 1 !important;
-    visibility: visible !important;
-  }
-  
+
   /* 增加触摸设备上的点击反馈 */
   button:active,
   .cursor-pointer:active {
@@ -582,14 +482,6 @@ body {
 div[class*="diagram"] > div:last-child:not(:first-child):not([data-drag-ghost]) {
   opacity: 0 !important;
   pointer-events: none !important;
-}
-
-/* 移动端滚动优化 */
-.mobile-scroll {
-  -webkit-overflow-scrolling: touch;
-  touch-action: pan-y;
-  transform: translateZ(0);
-  backface-visibility: hidden;
 }
 
 /* 移动端抽屉滚动区域优化 */
@@ -822,16 +714,6 @@ div[class*="diagram"] > div:last-child:not(:first-child):not([data-drag-ghost]) 
   will-change: opacity, transform;
 }
 
-/* 展开/收起动画 */
-.collapsible-content {
-  will-change: height;
-}
-
-/* 悬停状态元素 */
-.hover-lift:hover {
-  will-change: transform;
-}
-
 /* ========== 性能优化：content-visibility ========== */
 /* 【性能优化 2026-02-05】对屏幕外内容延迟渲染 */
 
@@ -839,11 +721,6 @@ div[class*="diagram"] > div:last-child:not(:first-child):not([data-drag-ghost]) 
 .virtual-list-item {
   content-visibility: auto;
   contain-intrinsic-size: auto 72px; /* 估计高度 */
-}
-
-/* 隐藏的抽屉/面板 */
-.offscreen-panel {
-  content-visibility: hidden;
 }
 
 /* 折叠的区域 */
@@ -867,283 +744,6 @@ div[class*="diagram"] > div:last-child:not(:first-child):not([data-drag-ghost]) 
   width: 5px;
 }
 
-.custom-scrollbar::-webkit-scrollbar-track {
-  background: transparent;
-}
-
 .custom-scrollbar::-webkit-scrollbar-thumb {
-  background: #e2e8f0;
   border-radius: 10px;
-}
-
-.custom-scrollbar::-webkit-scrollbar-thumb:hover {
-  background: #cbd5e1;
-}
-
-/* ========== 深色模式通用覆盖 ========== */
-
-/* 深色模式下的自定义滚动条 */
-[data-color-mode="dark"] .custom-scrollbar::-webkit-scrollbar-thumb {
-  background: #4b5563;
-}
-
-[data-color-mode="dark"] .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-  background: #6b7280;
-}
-
-/* 深色模式下的 Markdown 预览 */
-[data-color-mode="dark"] .markdown-preview h1 {
-  color: #f3f4f6;
-  border-bottom-color: #374151;
-}
-
-[data-color-mode="dark"] .markdown-preview h2,
-[data-color-mode="dark"] .markdown-preview h3 {
-  color: #e5e7eb;
-}
-
-[data-color-mode="dark"] .markdown-preview h4,
-[data-color-mode="dark"] .markdown-preview h5,
-[data-color-mode="dark"] .markdown-preview h6,
-[data-color-mode="dark"] .markdown-preview p,
-[data-color-mode="dark"] .markdown-preview li {
-  color: #d1d5db;
-}
-
-[data-color-mode="dark"] .markdown-preview strong {
-  color: #f3f4f6;
-}
-
-[data-color-mode="dark"] .markdown-preview code {
-  background-color: #374151;
-  color: #fb923c;
-}
-
-/* ========================================================================
-   文本选择高亮（商用级视觉）
-   ------------------------------------------------------------------------
-   根因：浏览器默认的深蓝色 ::selection（#338FFF 系）会在 NanoFlow 的暖色
-         /靛蓝主题上显得突兀，明显暴露"网页感"。
-   目标：与品牌主色（indigo #4f46e5）保持一致，亮暗两套皆保证 AA 对比度，
-         且使用半透明色保留文字原色层次感，避免纯色遮盖破坏排版质感。
-   覆盖范围：全局 <p>/<span>/<h*>/<li>/<code> 以及 contenteditable。
-   刻意不覆盖：
-     - .flow-canvas-container 等已 user-select:none 的交互层
-     - <input>/<textarea> 沿用系统原生选区以保留 IME 兼容（仅微调 accent）
-   ======================================================================== */
-
-/* 亮色：靛蓝主色 18% 半透明 + 深靛字色，文字在选中后依然高对比 */
-::selection {
-  background-color: rgba(99, 102, 241, 0.22); /* indigo-500 @ 22% */
-  color: #1e1b4b;                              /* indigo-950，保留文字层次 */
-  text-shadow: none;
-}
-::-moz-selection {
-  background-color: rgba(99, 102, 241, 0.22);
-  color: #1e1b4b;
-  text-shadow: none;
-}
-
-/* 深色：提亮到 indigo-400 并拉高不透明度，避免暗背景上"看不见"选区 */
-[data-color-mode="dark"] ::selection {
-  background-color: rgba(129, 140, 248, 0.38); /* indigo-400 @ 38% */
-  color: #ede9fe;                               /* violet-100 */
-}
-[data-color-mode="dark"] ::-moz-selection {
-  background-color: rgba(129, 140, 248, 0.38);
-  color: #ede9fe;
-}
-
-/* 输入框/文本域：半透明在 IME 预输入下会发灰，统一用稍深且不透明度更低
-   的变体，避免压过输入字符 */
-input::selection,
-textarea::selection,
-[contenteditable] ::selection {
-  background-color: rgba(99, 102, 241, 0.28);
-  color: inherit;
-}
-input::-moz-selection,
-textarea::-moz-selection,
-[contenteditable] ::-moz-selection {
-  background-color: rgba(99, 102, 241, 0.28);
-  color: inherit;
-}
-[data-color-mode="dark"] input::selection,
-[data-color-mode="dark"] textarea::selection,
-[data-color-mode="dark"] [contenteditable] ::selection {
-  background-color: rgba(129, 140, 248, 0.42);
-  color: inherit;
-}
-[data-color-mode="dark"] input::-moz-selection,
-[data-color-mode="dark"] textarea::-moz-selection,
-[data-color-mode="dark"] [contenteditable] ::-moz-selection {
-  background-color: rgba(129, 140, 248, 0.42);
-  color: inherit;
-}
-
-/* 代码块：主题色在高亮代码上容易"糊"成一片，换成中性偏暖的琥珀灰，
-   既与品牌协调又不会遮挡语法高亮色 */
-pre ::selection,
-code ::selection,
-.markdown-preview code ::selection,
-.markdown-preview pre ::selection {
-  background-color: rgba(217, 119, 6, 0.22); /* amber-600 @ 22% */
-  color: inherit;
-}
-pre ::-moz-selection,
-code ::-moz-selection {
-  background-color: rgba(217, 119, 6, 0.22);
-  color: inherit;
-}
-[data-color-mode="dark"] pre ::selection,
-[data-color-mode="dark"] code ::selection,
-[data-color-mode="dark"] .markdown-preview code ::selection,
-[data-color-mode="dark"] .markdown-preview pre ::selection {
-  background-color: rgba(251, 191, 36, 0.28); /* amber-400 @ 28% */
-  color: inherit;
-}
-[data-color-mode="dark"] pre ::-moz-selection,
-[data-color-mode="dark"] code ::-moz-selection {
-  background-color: rgba(251, 191, 36, 0.28);
-  color: inherit;
-}
-
-/* 统一系统级强调色（checkbox/radio/range/progress 等原生控件），
-   让原生控件也吸收品牌主色，消除最后的"网页蓝" */
-:root {
-  accent-color: #4f46e5;
-}
-[data-color-mode="dark"] :root,
-[data-color-mode="dark"] {
-  accent-color: #818cf8;
-}
-
-
-[data-color-mode="dark"] .markdown-preview pre {
-  background-color: #111827;
-  color: #e5e7eb;
-}
-
-[data-color-mode="dark"] .markdown-preview blockquote {
-  border-left-color: #6b7280;
-  color: #9ca3af;
-}
-
-[data-color-mode="dark"] .markdown-preview a {
-  color: #818cf8;
-}
-
-[data-color-mode="dark"] .markdown-preview a:hover {
-  color: #a5b4fc;
-}
-
-[data-color-mode="dark"] .markdown-preview hr {
-  border-top-color: #4b5563;
-}
-
-/* 深色模式下的模态框背景覆盖 - 使用 CSS 变量 */
-[data-color-mode="dark"] .bg-white {
-  background-color: var(--theme-card-bg) !important;
-}
-
-[data-color-mode="dark"] .bg-slate-50 {
-  background-color: var(--theme-bg) !important;
-}
-
-[data-color-mode="dark"] .border-slate-200 {
-  border-color: var(--theme-border) !important;
-}
-
-[data-color-mode="dark"] .text-slate-800,
-[data-color-mode="dark"] .text-slate-700 {
-  color: var(--theme-text-dark) !important;
-}
-
-[data-color-mode="dark"] .text-slate-600,
-[data-color-mode="dark"] .text-slate-500,
-[data-color-mode="dark"] .text-slate-400 {
-  color: var(--theme-text) !important;
-}
-
-/* 深色模式下的悬停效果 - 使用正确的 CSS 转义语法 */
-[data-color-mode="dark"] .hover\:bg-slate-100:hover {
-  background-color: #374151 !important;
-}
-
-[data-color-mode="dark"] .hover\:bg-slate-50:hover {
-  background-color: #1f2937 !important;
-}
-
-/* 深色模式下的分割线 */
-[data-color-mode="dark"] .divide-slate-100 > :not([hidden]) ~ :not([hidden]),
-[data-color-mode="dark"] .divide-slate-200 > :not([hidden]) ~ :not([hidden]) {
-  border-color: var(--theme-border) !important;
-}
-
-/* ========== 高级感/典雅按钮设计 (Premium & Elegant Buttons) ========== */
-/* 基础按钮样式：圆滑、平滑过渡、简约 */
-.btn-base {
-  @apply inline-flex items-center justify-center gap-2 font-medium transition-all duration-300 ease-out select-none;
-  /* 增加圆滑度，消除干巴感 */
-  @apply rounded-full;
-  /* 触摸反馈 */
-  @apply active:scale-[0.97];
-}
-
-/* 主要按钮：高级感渐变或柔和纯色，带柔和阴影 */
-.btn-primary {
-  @apply btn-base px-6 py-2.5 text-sm text-white;
-  @apply bg-indigo-600 hover:bg-indigo-500 dark:bg-indigo-500 dark:hover:bg-indigo-400;
-  @apply shadow-[0_4px_14px_0_rgba(79,70,229,0.39)] hover:shadow-[0_6px_20px_rgba(79,70,229,0.23)] hover:-translate-y-0.5;
-  @apply dark:shadow-[0_4px_14px_0_rgba(99,102,241,0.39)] dark:hover:shadow-[0_6px_20px_rgba(99,102,241,0.23)];
-  @apply disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:translate-y-0 disabled:hover:shadow-none;
-}
-
-/* 次要按钮：柔和背景，无边框或极细边框 */
-.btn-secondary {
-  @apply btn-base px-6 py-2.5 text-sm;
-  @apply text-stone-700 bg-stone-100 hover:bg-stone-200;
-  @apply dark:text-stone-200 dark:bg-stone-800 dark:hover:bg-stone-700;
-  @apply shadow-sm hover:shadow-md hover:-translate-y-0.5;
-  @apply border border-transparent hover:border-stone-300 dark:hover:border-stone-600;
-}
-
-/* 幽灵按钮：透明背景，悬停时出现柔和背景 */
-.btn-ghost {
-  @apply btn-base px-4 py-2 text-sm;
-  @apply text-stone-600 hover:text-stone-900 hover:bg-stone-100/80;
-  @apply dark:text-stone-400 dark:hover:text-stone-100 dark:hover:bg-stone-800/80;
-}
-
-/* 图标按钮：完全圆形，柔和悬停 */
-.btn-icon {
-  @apply btn-base p-2;
-  @apply text-stone-500 hover:text-stone-800 hover:bg-stone-100;
-  @apply dark:text-stone-400 dark:hover:text-stone-200 dark:hover:bg-stone-800;
-}
-
-/* 紧凑按钮：用于工具栏等空间有限的地方 */
-.btn-compact-elegant {
-  @apply btn-base px-3 py-1.5 text-xs;
-  @apply text-stone-600 bg-white border border-stone-200 hover:bg-stone-50 hover:border-stone-300;
-  @apply dark:text-stone-300 dark:bg-stone-900 dark:border-stone-700 dark:hover:bg-stone-800 dark:hover:border-stone-600;
-  @apply shadow-sm hover:shadow;
-}
-
-/* 输入框高级感设计 */
-.input-elegant {
-  @apply w-full px-4 py-3 text-sm transition-all duration-300 ease-out;
-  @apply rounded-2xl border border-stone-200 bg-stone-50/50 text-stone-800;
-  @apply focus:bg-white focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10 focus:outline-none;
-  @apply dark:border-stone-700 dark:bg-stone-900/50 dark:text-stone-200;
-  @apply dark:focus:bg-stone-900 dark:focus:border-indigo-500 dark:focus:ring-indigo-500/20;
-  @apply placeholder:text-stone-400 dark:placeholder:text-stone-500;
-}
-
-/* 卡片高级感设计 */
-.card-elegant {
-  @apply bg-white/80 dark:bg-stone-900/80 backdrop-blur-xl;
-  @apply rounded-3xl border border-white/20 dark:border-stone-700/50;
-  @apply shadow-[0_8px_30px_rgb(0,0,0,0.04)] dark:shadow-[0_8px_30px_rgb(0,0,0,0.2)];
-  @apply transition-all duration-500;
 }

@@ -377,26 +377,17 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
               )
             } else {
               if (optimisticSnapshot != null) {
-                withContext(Dispatchers.Main) {
-                  Toast.makeText(
-                    appContext,
-                    appContext.getString(R.string.nanoflow_widget_focus_wait_toast),
-                    Toast.LENGTH_SHORT,
-                  ).show()
+                runCatching {
+                  repository.rollbackOptimisticFocusPromotion(appWidgetId, optimisticSnapshot)
+                  renderCurrentWidget()
                 }
-                NanoflowWidgetRefreshWorker.scheduleFocusWaitReminder(
+              }
+              withContext(Dispatchers.Main) {
+                Toast.makeText(
                   appContext,
-                  appWidgetId,
-                  normalizedWait,
-                )
-              } else {
-                withContext(Dispatchers.Main) {
-                  Toast.makeText(
-                    appContext,
-                    appContext.getString(R.string.nanoflow_widget_focus_promote_failed_toast),
-                    Toast.LENGTH_SHORT,
-                  ).show()
-                }
+                  appContext.getString(R.string.nanoflow_widget_focus_promote_failed_toast),
+                  Toast.LENGTH_SHORT,
+                ).show()
               }
               NanoflowWidgetRefreshWorker.enqueue(appContext, reason = "focus-wait-front-retry")
             }

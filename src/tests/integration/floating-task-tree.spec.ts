@@ -14,6 +14,7 @@ import { TaskCreationService } from '../../services/task-creation.service';
 import { TaskMoveService } from '../../services/task-move.service';
 import { TaskAttributeService } from '../../services/task-attribute.service';
 import { TaskConnectionService } from '../../services/task-connection.service';
+import { ParkingService } from '../../services/parking.service';
 import { Project, Task } from '../../models';
 import { isSuccess, isFailure, ErrorCodes } from '../../utils/result';
 
@@ -88,7 +89,15 @@ describe('浮动任务树 (Floating Task Tree)', () => {
       recordAndUpdateDebounced: (mutator: (p: Project) => Project) => {
         project = mutator(project);
       },
+      recordAndUpdateDurably: vi.fn(async (mutator: (p: Project) => Project) => {
+        project = mutator(project);
+        return true;
+      }),
       lastUpdateType: 'structure' as const,
+    };
+    const mockParkingService = {
+      handleTaskStatusChange: vi.fn(),
+      handleTaskSoftDelete: vi.fn(),
     };
 
     TestBed.configureTestingModule({
@@ -106,6 +115,7 @@ describe('浮动任务树 (Floating Task Tree)', () => {
         { provide: LoggerService, useValue: mockLogger },
         { provide: ProjectStateService, useValue: mockProjectState },
         { provide: TaskRecordTrackingService, useValue: mockRecorder },
+        { provide: ParkingService, useValue: mockParkingService },
       ],
     });
 
@@ -113,9 +123,9 @@ describe('浮动任务树 (Floating Task Tree)', () => {
   });
 
   describe('待分配区内创建树结构', () => {
-    it('应允许在待分配任务下创建子任务', () => {
+    it('应允许在待分配任务下创建子任务', async () => {
       // 创建待分配父任务
-      const parentResult = service.addTask({
+      const parentResult = await service.addTask({
         title: '待分配父任务',
         content: '',
         targetStage: null,
@@ -126,7 +136,7 @@ describe('浮动任务树 (Floating Task Tree)', () => {
       const parentId = (parentResult as any).value;
 
       // 在待分配父任务下创建子任务
-      const childResult = service.addTask({
+      const childResult = await service.addTask({
         title: '待分配子任务',
         content: '',
         targetStage: null,  // 子任务也在待分配区
@@ -144,9 +154,9 @@ describe('浮动任务树 (Floating Task Tree)', () => {
       expect(child?.parentId).toBe(parentId);
     });
 
-    it('应允许在待分配任务旁创建同级任务', () => {
+    it('应允许在待分配任务旁创建同级任务', async () => {
       // 创建待分配任务
-      const task1Result = service.addTask({
+      const task1Result = await service.addTask({
         title: '任务1',
         content: '',
         targetStage: null,
@@ -156,7 +166,7 @@ describe('浮动任务树 (Floating Task Tree)', () => {
       expect(isSuccess(task1Result)).toBe(true);
 
       // 创建同级任务
-      const task2Result = service.addTask({
+      const task2Result = await service.addTask({
         title: '任务2',
         content: '',
         targetStage: null,
@@ -173,7 +183,7 @@ describe('浮动任务树 (Floating Task Tree)', () => {
   });
 
   describe('同源不变性 (Homogeneous Tree Invariant)', () => {
-    it('应拒绝将待分配任务直接挂载到已分配任务下', () => {
+    it('应拒绝将待分配任务直接挂载到已分配任务下', async () => {
       // 创建已分配父任务
       const assignedParent = createTask({
         id: 'assigned-parent',
@@ -183,7 +193,7 @@ describe('浮动任务树 (Floating Task Tree)', () => {
       project = createProject({ tasks: [assignedParent] });
 
       // 尝试创建待分配子任务（应失败）
-      const result = service.addTask({
+      const result = await service.addTask({
         title: '待分配子任务',
         content: '',
         targetStage: null,  // 待分配
@@ -197,7 +207,7 @@ describe('浮动任务树 (Floating Task Tree)', () => {
       }
     });
 
-    it('应拒绝将已分配任务直接挂载到待分配任务下', () => {
+    it('应拒绝将已分配任务直接挂载到待分配任务下', async () => {
       // 创建待分配父任务
       const unassignedParent = createTask({
         id: 'unassigned-parent',
@@ -207,7 +217,7 @@ describe('浮动任务树 (Floating Task Tree)', () => {
       project = createProject({ tasks: [unassignedParent] });
 
       // 尝试创建已分配子任务（应失败）
-      const result = service.addTask({
+      const result = await service.addTask({
         title: '已分配子任务',
         content: '',
         targetStage: 1,  // 已分配
@@ -223,7 +233,7 @@ describe('浮动任务树 (Floating Task Tree)', () => {
   });
 
   describe('阶段溢出检测', () => {
-    it('应拒绝会导致阶段溢出的分配操作', () => {
+    it('应拒绝会导致阶段溢出的分配操作', async () => {
       // 创建一棵深度为 3 的待分配树
       const root = createTask({ id: 'root', stage: null, parentId: null });
       const child = createTask({ id: 'child', stage: null, parentId: 'root' });
@@ -235,7 +245,7 @@ describe('浮动任务树 (Floating Task Tree)', () => {
       project = createProject({ tasks: [root, child, grandchild, highStageTask] });
 
       // 尝试将待分配树分配到阶段 20（会导致孙任务超出 15+10=25 的限制）
-      const result = service.moveTaskToStage({
+      const result = await service.moveTaskToStage({
         taskId: 'root',
         newStage: 24,  // 子任务会到 25，孙任务会到 26，超出 25
       });
@@ -246,14 +256,14 @@ describe('浮动任务树 (Floating Task Tree)', () => {
       }
     });
 
-    it('应返回正确的错误信息包含所需阶段和最大阶段', () => {
+    it('应返回正确的错误信息包含所需阶段和最大阶段', async () => {
       const root = createTask({ id: 'root', stage: null, parentId: null });
       const child = createTask({ id: 'child', stage: null, parentId: 'root' });
       const highStageTask = createTask({ id: 'high', stage: 15, parentId: null });
       
       project = createProject({ tasks: [root, child, highStageTask] });
 
-      const result = service.moveTaskToStage({
+      const result = await service.moveTaskToStage({
         taskId: 'root',
         newStage: 25,  // 子任务会到 26，超出 15+10=25
       });
@@ -268,7 +278,7 @@ describe('浮动任务树 (Floating Task Tree)', () => {
   });
 
   describe('浮动树整体分配', () => {
-    it('分配父任务应级联分配所有后代', () => {
+    it('分配父任务应级联分配所有后代', async () => {
       // 创建待分配树：root -> child -> grandchild
       const root = createTask({ id: 'root', stage: null, parentId: null, title: 'Root' });
       const child = createTask({ id: 'child', stage: null, parentId: 'root', title: 'Child' });
@@ -277,7 +287,7 @@ describe('浮动任务树 (Floating Task Tree)', () => {
       project = createProject({ tasks: [root, child, grandchild] });
 
       // 将根任务分配到阶段 1
-      const result = service.moveTaskToStage({
+      const result = await service.moveTaskToStage({
         taskId: 'root',
         newStage: 1,
       });
@@ -294,19 +304,19 @@ describe('浮动任务树 (Floating Task Tree)', () => {
       expect(assignedGrandchild?.stage).toBe(3);
     });
 
-    it('应保留子树内部父子关系', () => {
+    it('应保留子树内部父子关系', async () => {
       const root = createTask({ id: 'root', stage: null, parentId: null });
       const child = createTask({ id: 'child', stage: null, parentId: 'root' });
       
       project = createProject({ tasks: [root, child] });
 
-      service.moveTaskToStage({ taskId: 'root', newStage: 1 });
+      await service.moveTaskToStage({ taskId: 'root', newStage: 1 });
 
       const assignedChild = project.tasks.find(t => t.id === 'child');
       expect(assignedChild?.parentId).toBe('root');
     });
 
-    it.skip('分配到现有父任务下时应正确更新 displayId', () => {
+    it.skip('分配到现有父任务下时应正确更新 displayId', async () => {
       // TODO: displayId 自动更新功能未实现
       // 创建一个已分配的父任务
       const existingParent = createTask({ 
@@ -334,7 +344,7 @@ describe('浮动任务树 (Floating Task Tree)', () => {
       });
 
       // 将浮动树分配到 existingParent 下
-      const result = service.moveTaskToStage({
+      const result = await service.moveTaskToStage({
         taskId: 'float-root',
         newStage: 2,  // existingParent.stage + 1
         newParentId: 'existing-parent',
@@ -363,7 +373,7 @@ describe('浮动任务树 (Floating Task Tree)', () => {
   });
 
   describe('子树拆分分配', () => {
-    it.skip('可单独分配某个子任务及其后代', () => {
+    it.skip('可单独分配某个子任务及其后代', async () => {
       // TODO: 当前实现会级联分配整个树，不支持部分分配
       // 创建待分配树：root -> child -> grandchild
       const root = createTask({ id: 'root', stage: null, parentId: null });
@@ -373,7 +383,7 @@ describe('浮动任务树 (Floating Task Tree)', () => {
       project = createProject({ tasks: [root, child, grandchild] });
 
       // 只分配 child 子树（不包括 root）
-      const result = service.moveTaskToStage({
+      const result = await service.moveTaskToStage({
         taskId: 'child',
         newStage: 1,
       });
@@ -395,7 +405,7 @@ describe('浮动任务树 (Floating Task Tree)', () => {
       expect(assignedChild?.parentId).toBeNull();
     });
 
-    it.skip('分配一个待分配子任务后，其兄弟任务应保持与父任务的关系', () => {
+    it.skip('分配一个待分配子任务后，其兄弟任务应保持与父任务的关系', async () => {
       // TODO: 当前实现会级联分配整个树，不支持部分分配
       // 创建待分配树：parent -> child1, child2, child3
       const parent = createTask({ id: 'parent', stage: null, parentId: null });
@@ -406,7 +416,7 @@ describe('浮动任务树 (Floating Task Tree)', () => {
       project = createProject({ tasks: [parent, child1, child2, child3] });
 
       // 只分配 child2（将其认领到一个新的已分配父任务下）
-      const result = service.moveTaskToStage({
+      const result = await service.moveTaskToStage({
         taskId: 'child2',
         newStage: 1,
         newParentId: null,  // 成为根任务
@@ -435,7 +445,7 @@ describe('浮动任务树 (Floating Task Tree)', () => {
   });
 
   describe('整树回收', () => {
-    it('解除分配应将整棵子树移回待分配区', () => {
+    it('解除分配应将整棵子树移回待分配区', async () => {
       // 创建已分配树
       const root = createTask({ id: 'root', stage: 1, parentId: null });
       const child = createTask({ id: 'child', stage: 2, parentId: 'root' });
@@ -444,7 +454,7 @@ describe('浮动任务树 (Floating Task Tree)', () => {
       project = createProject({ tasks: [root, child, grandchild] });
 
       // 将整棵树移回待分配区
-      const result = service.detachTaskWithSubtree('root');
+      const result = await service.detachTaskWithSubtree('root');
 
       expect(isSuccess(result)).toBe(true);
 
@@ -489,7 +499,7 @@ describe('浮动任务树 (Floating Task Tree)', () => {
   });
 
   describe('待分配区内部重组', () => {
-    it.skip('可在待分配区内重新组织父子关系', () => {
+    it.skip('可在待分配区内重新组织父子关系', async () => {
       // TODO: 待分配区内部重组功能待实现
       // 创建两个独立的待分配任务
       const task1 = createTask({ id: 'task1', stage: null, parentId: null });
@@ -498,7 +508,7 @@ describe('浮动任务树 (Floating Task Tree)', () => {
       project = createProject({ tasks: [task1, task2] });
 
       // 将 task2 设为 task1 的子任务
-      const result = service.moveTaskToStage({
+      const result = await service.moveTaskToStage({
         taskId: 'task2',
         newStage: null,
         newParentId: 'task1',
@@ -511,7 +521,7 @@ describe('浮动任务树 (Floating Task Tree)', () => {
       expect(updatedTask2?.parentId).toBe('task1');
     });
 
-    it.skip('应检测循环依赖', () => {
+    it.skip('应检测循环依赖', async () => {
       // TODO: 循环依赖检测功能待实现
       // 创建链式待分配任务：task1 -> task2 -> task3
       const task1 = createTask({ id: 'task1', stage: null, parentId: null });
@@ -521,7 +531,7 @@ describe('浮动任务树 (Floating Task Tree)', () => {
       project = createProject({ tasks: [task1, task2, task3] });
 
       // 尝试将 task1 设为 task3 的子任务（会形成循环）
-      const result = service.moveTaskToStage({
+      const result = await service.moveTaskToStage({
         taskId: 'task1',
         newStage: null,
         newParentId: 'task3',
@@ -533,7 +543,7 @@ describe('浮动任务树 (Floating Task Tree)', () => {
       }
     });
 
-    it.skip('应拒绝将待分配任务挂载到已分配任务下', () => {
+    it.skip('应拒绝将待分配任务挂载到已分配任务下', async () => {
       // TODO: 跨边界检测功能待实现
       const unassigned = createTask({ id: 'unassigned', stage: null, parentId: null });
       const assigned = createTask({ id: 'assigned', stage: 1, parentId: null });
@@ -541,7 +551,7 @@ describe('浮动任务树 (Floating Task Tree)', () => {
       project = createProject({ tasks: [unassigned, assigned] });
 
       // 尝试在待分配区内重组时指向已分配任务（应失败）
-      const result = service.moveTaskToStage({
+      const result = await service.moveTaskToStage({
         taskId: 'unassigned',
         newStage: null,  // 保持待分配
         newParentId: 'assigned',  // 但新父任务已分配

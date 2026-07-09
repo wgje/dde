@@ -137,10 +137,10 @@ describe('GlobalErrorHandler', () => {
       service.handleError(second);
 
       const persistedLogs = loggerSpy.error.mock.calls.filter(
-        ([message]: [string]) => message === 'Chunk load error persisted after reload'
+        (call) => call[0] === 'Chunk load error persisted after reload'
       );
       const fatalLogs = loggerSpy.error.mock.calls.filter(
-        ([message]: [string]) => message === 'FATAL ERROR'
+        (call) => call[0] === 'FATAL ERROR'
       );
       expect(reloadSpy).not.toHaveBeenCalled();
       expect(persistedLogs).toHaveLength(1);

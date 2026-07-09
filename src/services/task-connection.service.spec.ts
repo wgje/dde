@@ -1,130 +1,138 @@
-import { Injector } from '@angular/core';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { TaskConnectionService } from './task-connection.service';
-import { LoggerService } from './logger.service';
-import { ProjectStateService } from './project-state.service';
-import { TaskRecordTrackingService } from './task-record-tracking.service';
-import type { Connection, Project } from '../models';
+import type { Project } from '../models';
+import {
+  createProject,
+  createTaskConnectionServiceSpecContext,
+  type TaskConnectionServiceSpecContext,
+} from './task-connection.service.spec-helpers';
+import {
+  registerTaskConnectionRelinkSpecs,
+  type TaskConnectionRelinkSpecContext,
+} from './task-connection-relink.spec-helpers';
 
-function createProject(connections: Connection[] = []): Project {
-  return {
-    id: 'proj-1',
-    name: 'Project 1',
-    description: '',
-    createdDate: '2026-04-11T00:00:00.000Z',
-    updatedAt: '2026-04-11T00:00:00.000Z',
-    tasks: [
-      { id: 'task-1' },
-      { id: 'task-2' },
-      { id: 'task-3' },
-      { id: 'task-4' },
-    ] as Project['tasks'],
-    connections,
-  } as Project;
-}
+const BASE_CONNECTION_UPDATED_AT = '2026-04-10T00:00:00.000Z';
 
 describe('TaskConnectionService', () => {
   let service: TaskConnectionService;
   let activeProject: Project;
-  let projectState: {
-    activeProject: ReturnType<typeof vi.fn>;
-    getTask: ReturnType<typeof vi.fn>;
-  };
-  let recorder: {
-    recordAndUpdate: ReturnType<typeof vi.fn>;
-    recordAndUpdateDebounced: ReturnType<typeof vi.fn>;
-  };
+  let recorder: TaskConnectionServiceSpecContext['recorder'];
 
   beforeEach(() => {
     activeProject = createProject();
-
-    projectState = {
-      activeProject: vi.fn(() => activeProject),
-      getTask: vi.fn((taskId: string) => activeProject.tasks.find(task => task.id === taskId) ?? null),
-    };
-
-    recorder = {
-      recordAndUpdate: vi.fn((mutator: (project: Project) => Project) => {
-        activeProject = mutator(activeProject);
-      }),
-      recordAndUpdateDebounced: vi.fn((mutator: (project: Project) => Project) => {
-        activeProject = mutator(activeProject);
-      }),
-    };
-
-    const injector = Injector.create({
-      providers: [
-        { provide: TaskConnectionService, useClass: TaskConnectionService },
-        {
-          provide: LoggerService,
-          useValue: {
-            category: () => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }),
-          },
-        },
-        { provide: ProjectStateService, useValue: projectState },
-        { provide: TaskRecordTrackingService, useValue: recorder },
-      ],
+    const context = createTaskConnectionServiceSpecContext({
+      getActiveProject: () => activeProject,
+      setActiveProject: project => {
+        activeProject = project;
+      },
     });
 
-    service = injector.get(TaskConnectionService);
+    service = context.service;
+    recorder = context.recorder;
   });
 
-  it('addCrossTreeConnection 创建新连接时应写入 updatedAt', () => {
-    service.addCrossTreeConnection('task-1', 'task-2');
+  function getRelinkSpecContext(): TaskConnectionRelinkSpecContext {
+    return {
+      service,
+      recorder,
+      getActiveProject: () => activeProject,
+      setActiveProject: project => {
+        activeProject = project;
+      },
+    };
+  }
 
+  it('addCrossTreeConnection 创建新连接时应走本地持久化路径并写入 updatedAt', async () => {
+    const saved = await service.addCrossTreeConnection('task-1', 'task-2');
+
+    expect(saved).toBe(true);
+    expect(recorder.recordAndUpdateDurably).toHaveBeenCalledWith(expect.any(Function), {
+      updateType: 'structure',
+    });
+    expect(recorder.recordAndUpdate).not.toHaveBeenCalled();
     expect(activeProject.connections).toHaveLength(1);
-    expect(activeProject.connections[0]).toEqual(
-      expect.objectContaining({
-        source: 'task-1',
-        target: 'task-2',
-        updatedAt: expect.any(String),
-      })
-    );
+    expect(activeProject.connections[0]).toEqual(expect.objectContaining({
+      source: 'task-1',
+      target: 'task-2',
+      updatedAt: expect.any(String),
+    }));
   });
 
-  it('addCrossTreeConnection 遇到软删历史时应保留历史并创建新的活跃连接', () => {
+  it('addCrossTreeConnection 默认入口本地持久化失败时不提交 UI 连接', async () => {
+    recorder.recordAndUpdateDurably.mockResolvedValueOnce(false);
+
+    const saved = await service.addCrossTreeConnection('task-1', 'task-2');
+
+    expect(saved).toBe(false);
+    expect(recorder.recordAndUpdate).not.toHaveBeenCalled();
+    expect(activeProject.connections).toHaveLength(0);
+  });
+
+  it('addCrossTreeConnectionDurably 创建新连接时应先写入本地持久化队列', async () => {
+    const saved = await service.addCrossTreeConnectionDurably('task-1', 'task-2');
+
+    expect(saved).toBe(true);
+    expect(recorder.recordAndUpdateDurably).toHaveBeenCalledWith(expect.any(Function), {
+      updateType: 'structure',
+    });
+    expect(recorder.recordAndUpdate).not.toHaveBeenCalled();
+    expect(activeProject.connections).toHaveLength(1);
+    expect(activeProject.connections[0]).toEqual(expect.objectContaining({
+      source: 'task-1',
+      target: 'task-2',
+      updatedAt: expect.any(String),
+    }));
+  });
+
+  it('addCrossTreeConnectionDurably 在本地持久化失败时不提交 UI 连接', async () => {
+    recorder.recordAndUpdateDurably.mockResolvedValueOnce(false);
+
+    const saved = await service.addCrossTreeConnectionDurably('task-1', 'task-2');
+
+    expect(saved).toBe(false);
+    expect(activeProject.connections).toHaveLength(0);
+  });
+
+  it('addCrossTreeConnection 遇到软删历史时应保留历史并创建新的活跃连接', async () => {
     activeProject = createProject([
       {
         id: 'conn-1',
         source: 'task-1',
         target: 'task-2',
         deletedAt: '2026-04-10T01:00:00.000Z',
-        updatedAt: '2026-04-10T00:00:00.000Z',
+        updatedAt: BASE_CONNECTION_UPDATED_AT,
       },
     ]);
 
-    service.addCrossTreeConnection('task-1', 'task-2');
+    await service.addCrossTreeConnection('task-1', 'task-2');
 
     expect(activeProject.connections).toHaveLength(2);
-    expect(activeProject.connections.find(c => c.id === 'conn-1')).toEqual(
-      expect.objectContaining({
-        deletedAt: '2026-04-10T01:00:00.000Z',
-        updatedAt: '2026-04-10T00:00:00.000Z',
-      })
-    );
-    expect(activeProject.connections.find(c => c.id !== 'conn-1')).toEqual(
-      expect.objectContaining({
-        source: 'task-1',
-        target: 'task-2',
-        updatedAt: expect.any(String),
-      })
-    );
+    expect(activeProject.connections.find(c => c.id === 'conn-1')).toEqual(expect.objectContaining({
+      deletedAt: '2026-04-10T01:00:00.000Z',
+      updatedAt: BASE_CONNECTION_UPDATED_AT,
+    }));
+    expect(activeProject.connections.find(c => c.id !== 'conn-1')).toEqual(expect.objectContaining({
+      source: 'task-1',
+      target: 'task-2',
+      updatedAt: expect.any(String),
+    }));
     expect(activeProject.connections.find(c => c.id !== 'conn-1')?.deletedAt).toBeUndefined();
   });
 
-  it('addCrossTreeConnection 恢复前应先校验端点，避免恢复 self-link', () => {
+  it('addCrossTreeConnection 恢复前应先校验端点，避免恢复 self-link', async () => {
     activeProject = createProject([
       {
         id: 'conn-self-deleted',
         source: 'task-1',
         target: 'task-1',
         deletedAt: '2026-04-10T01:00:00.000Z',
-        updatedAt: '2026-04-10T00:00:00.000Z',
+        updatedAt: BASE_CONNECTION_UPDATED_AT,
       },
     ]);
 
-    service.addCrossTreeConnection('task-1', 'task-1');
+    const saved = await service.addCrossTreeConnection('task-1', 'task-1');
 
+    expect(saved).toBe(false);
     expect(activeProject.connections).toEqual([
       expect.objectContaining({
         id: 'conn-self-deleted',
@@ -133,7 +141,7 @@ describe('TaskConnectionService', () => {
     ]);
   });
 
-  it('addCrossTreeConnection 不应连接已删除任务', () => {
+  it('addCrossTreeConnection 不应连接已删除任务', async () => {
     activeProject = createProject();
     activeProject.tasks = activeProject.tasks.map(task => (
       task.id === 'task-2'
@@ -141,12 +149,13 @@ describe('TaskConnectionService', () => {
         : task
     ));
 
-    service.addCrossTreeConnection('task-1', 'task-2');
+    const saved = await service.addCrossTreeConnection('task-1', 'task-2');
 
+    expect(saved).toBe(false);
     expect(activeProject.connections).toHaveLength(0);
   });
 
-  it('addCrossTreeConnection 不应创建与 parentId 重复的非法连接', () => {
+  it('addCrossTreeConnection 不应创建与 parentId 重复的非法连接', async () => {
     activeProject = createProject();
     activeProject.tasks = activeProject.tasks.map(task => (
       task.id === 'task-2'
@@ -154,12 +163,13 @@ describe('TaskConnectionService', () => {
         : task
     ));
 
-    service.addCrossTreeConnection('task-1', 'task-2');
+    const saved = await service.addCrossTreeConnection('task-1', 'task-2');
 
+    expect(saved).toBe(false);
     expect(activeProject.connections).toHaveLength(0);
   });
 
-  it('addCrossTreeConnection 遇到同端点 active+deleted 混排时不应误恢复 deleted 记录', () => {
+  it('addCrossTreeConnection 遇到同端点 active+deleted 混排时不应误恢复 deleted 记录', async () => {
     activeProject = createProject([
       {
         id: 'conn-deleted',
@@ -176,14 +186,15 @@ describe('TaskConnectionService', () => {
       },
     ]);
 
-    service.addCrossTreeConnection('task-1', 'task-2');
+    const saved = await service.addCrossTreeConnection('task-1', 'task-2');
 
+    expect(saved).toBe(true);
     expect(activeProject.connections).toHaveLength(2);
     expect(activeProject.connections.find(c => c.id === 'conn-deleted')?.deletedAt).toBe('2026-04-10T01:00:00.000Z');
     expect(activeProject.connections.find(c => c.id === 'conn-active')?.deletedAt).toBeUndefined();
   });
 
-  it('addCrossTreeConnection 遇到同端点多条 active 记录时应自动收口为单条 active', () => {
+  it('addCrossTreeConnection 遇到同端点多条 active 记录时应自动收口为单条 active', async () => {
     activeProject = createProject([
       {
         id: 'conn-active-old',
@@ -199,8 +210,9 @@ describe('TaskConnectionService', () => {
       },
     ]);
 
-    service.addCrossTreeConnection('task-1', 'task-2');
+    const saved = await service.addCrossTreeConnection('task-1', 'task-2');
 
+    expect(saved).toBe(true);
     expect(activeProject.connections).toHaveLength(2);
     expect(activeProject.connections.find(c => c.id === 'conn-active-old')).toEqual(
       expect.objectContaining({
@@ -210,7 +222,7 @@ describe('TaskConnectionService', () => {
     expect(activeProject.connections.find(c => c.id === 'conn-active-new')?.deletedAt).toBeUndefined();
   });
 
-  it('addCrossTreeConnection 收口同端点 active 记录时在时间戳相同场景也应稳定保留同一 id', () => {
+  it('addCrossTreeConnection 收口同端点 active 记录时在时间戳相同场景也应稳定保留同一 id', async () => {
     activeProject = createProject([
       {
         id: 'conn-b',
@@ -226,7 +238,7 @@ describe('TaskConnectionService', () => {
       },
     ]);
 
-    service.addCrossTreeConnection('task-1', 'task-2');
+    await service.addCrossTreeConnection('task-1', 'task-2');
 
     expect(activeProject.connections.find(c => c.id === 'conn-b')?.deletedAt).toBeUndefined();
     expect(activeProject.connections.find(c => c.id === 'conn-a')).toEqual(
@@ -236,7 +248,7 @@ describe('TaskConnectionService', () => {
     );
   });
 
-  it('addCrossTreeConnection 遇到多条 deleted history 时应创建新的活跃连接且不复活旧记录', () => {
+  it('addCrossTreeConnection 遇到多条 deleted history 时应创建新的活跃连接且不复活旧记录', async () => {
     activeProject = createProject([
       {
         id: 'conn-deleted-old',
@@ -254,7 +266,7 @@ describe('TaskConnectionService', () => {
       },
     ]);
 
-    service.addCrossTreeConnection('task-1', 'task-2');
+    await service.addCrossTreeConnection('task-1', 'task-2');
 
     expect(activeProject.connections).toHaveLength(3);
     expect(activeProject.connections.find(c => c.id === 'conn-deleted-old')).toEqual(
@@ -277,24 +289,66 @@ describe('TaskConnectionService', () => {
     expect(activeProject.connections.find(c => !['conn-deleted-old', 'conn-deleted-new'].includes(c.id))?.deletedAt).toBeUndefined();
   });
 
-  it('removeConnection 软删时应同时刷新 updatedAt', () => {
+  it('removeConnection 软删时应走本地持久化路径并刷新 updatedAt', async () => {
     activeProject = createProject([
       {
         id: 'conn-1',
         source: 'task-1',
         target: 'task-2',
-        updatedAt: '2026-04-10T00:00:00.000Z',
+        updatedAt: BASE_CONNECTION_UPDATED_AT,
       },
     ]);
 
-    service.removeConnection('task-1', 'task-2');
+    const saved = await service.removeConnection('task-1', 'task-2');
 
+    expect(saved).toBe(true);
+    expect(recorder.recordAndUpdateDurably).toHaveBeenCalledWith(expect.any(Function), {
+      updateType: 'structure',
+    });
+    expect(recorder.recordAndUpdate).not.toHaveBeenCalled();
     expect(activeProject.connections[0].deletedAt).toBeTruthy();
     expect(activeProject.connections[0].updatedAt).toBeTruthy();
-    expect(activeProject.connections[0].updatedAt).not.toBe('2026-04-10T00:00:00.000Z');
+    expect(activeProject.connections[0].updatedAt).not.toBe(BASE_CONNECTION_UPDATED_AT);
   });
 
-  it('removeConnection 遇到同端点 active+deleted 混排时只应软删 active 记录', () => {
+  it('removeConnection 默认入口本地持久化失败时不提交 UI 软删', async () => {
+    activeProject = createProject([
+      {
+        id: 'conn-1',
+        source: 'task-1',
+        target: 'task-2',
+        updatedAt: BASE_CONNECTION_UPDATED_AT,
+      },
+    ]);
+    recorder.recordAndUpdateDurably.mockResolvedValueOnce(false);
+
+    const saved = await service.removeConnection('task-1', 'task-2');
+
+    expect(saved).toBe(false);
+    expect(recorder.recordAndUpdate).not.toHaveBeenCalled();
+    expect(activeProject.connections[0].deletedAt).toBeUndefined();
+  });
+
+  it('removeConnectionDurably 应通过本地持久化路径软删连接', async () => {
+    activeProject = createProject([
+      {
+        id: 'conn-1',
+        source: 'task-1',
+        target: 'task-2',
+        updatedAt: BASE_CONNECTION_UPDATED_AT,
+      },
+    ]);
+
+    const saved = await service.removeConnectionDurably('task-1', 'task-2');
+
+    expect(saved).toBe(true);
+    expect(recorder.recordAndUpdateDurably).toHaveBeenCalledWith(expect.any(Function), {
+      updateType: 'structure',
+    });
+    expect(activeProject.connections[0].deletedAt).toBeTruthy();
+  });
+
+  it('removeConnection 遇到同端点 active+deleted 混排时只应软删 active 记录', async () => {
     activeProject = createProject([
       {
         id: 'conn-deleted',
@@ -311,7 +365,7 @@ describe('TaskConnectionService', () => {
       },
     ]);
 
-    service.removeConnection('task-1', 'task-2');
+    await service.removeConnection('task-1', 'task-2');
 
     expect(activeProject.connections.find(c => c.id === 'conn-deleted')).toEqual(
       expect.objectContaining({
@@ -322,7 +376,7 @@ describe('TaskConnectionService', () => {
     expect(activeProject.connections.find(c => c.id === 'conn-active')?.deletedAt).toBeTruthy();
   });
 
-  it('removeConnection 遇到同端点多条 active 记录时应全部软删，避免幽灵连接回流', () => {
+  it('removeConnection 遇到同端点多条 active 记录时应全部软删，避免幽灵连接回流', async () => {
     activeProject = createProject([
       {
         id: 'conn-active-old',
@@ -338,13 +392,13 @@ describe('TaskConnectionService', () => {
       },
     ]);
 
-    service.removeConnection('task-1', 'task-2');
+    await service.removeConnection('task-1', 'task-2');
 
     expect(activeProject.connections.find(c => c.id === 'conn-active-old')?.deletedAt).toBeTruthy();
     expect(activeProject.connections.find(c => c.id === 'conn-active-new')?.deletedAt).toBeTruthy();
   });
 
-  it('updateConnectionContent 更新内容时应刷新 updatedAt', () => {
+  it('updateConnectionContent 更新内容时应走本地持久化路径并刷新 updatedAt', async () => {
     activeProject = createProject([
       {
         id: 'conn-1',
@@ -352,12 +406,17 @@ describe('TaskConnectionService', () => {
         target: 'task-2',
         title: 'Old',
         description: 'Old description',
-        updatedAt: '2026-04-10T00:00:00.000Z',
+        updatedAt: BASE_CONNECTION_UPDATED_AT,
       },
     ]);
 
-    service.updateConnectionContent('task-1', 'task-2', 'New', 'New description');
+    const saved = await service.updateConnectionContent('task-1', 'task-2', 'New', 'New description');
 
+    expect(saved).toBe(true);
+    expect(recorder.recordAndUpdateDurably).toHaveBeenCalledWith(expect.any(Function), {
+      updateType: 'structure',
+    });
+    expect(recorder.recordAndUpdateDebounced).not.toHaveBeenCalled();
     expect(activeProject.connections[0]).toEqual(
       expect.objectContaining({
         title: 'New',
@@ -365,10 +424,67 @@ describe('TaskConnectionService', () => {
         updatedAt: expect.any(String),
       })
     );
-    expect(activeProject.connections[0].updatedAt).not.toBe('2026-04-10T00:00:00.000Z');
+    expect(activeProject.connections[0].updatedAt).not.toBe(BASE_CONNECTION_UPDATED_AT);
   });
 
-  it('updateConnectionContent 遇到同端点 active+deleted 混排时只应改 active 记录', () => {
+  it('updateConnectionContent 默认入口本地持久化失败时不提交 UI 内容变更', async () => {
+    activeProject = createProject([
+      {
+        id: 'conn-1',
+        source: 'task-1',
+        target: 'task-2',
+        title: 'Old',
+        description: 'Old description',
+        updatedAt: BASE_CONNECTION_UPDATED_AT,
+      },
+    ]);
+    recorder.recordAndUpdateDurably.mockResolvedValueOnce(false);
+
+    const saved = await service.updateConnectionContent('task-1', 'task-2', 'New', 'New description');
+
+    expect(saved).toBe(false);
+    expect(recorder.recordAndUpdateDebounced).not.toHaveBeenCalled();
+    expect(activeProject.connections[0]).toEqual(
+      expect.objectContaining({
+        title: 'Old',
+        description: 'Old description',
+      }),
+    );
+  });
+
+  it('updateConnectionContentDurably 应通过本地持久化路径更新内容', async () => {
+    activeProject = createProject([
+      {
+        id: 'conn-1',
+        source: 'task-1',
+        target: 'task-2',
+        title: 'Old',
+        description: 'Old description',
+        updatedAt: BASE_CONNECTION_UPDATED_AT,
+      },
+    ]);
+
+    const saved = await service.updateConnectionContentDurably(
+      'task-1',
+      'task-2',
+      'New',
+      'New description'
+    );
+
+    expect(saved).toBe(true);
+    expect(recorder.recordAndUpdateDurably).toHaveBeenCalledWith(expect.any(Function), {
+      updateType: 'structure',
+    });
+    expect(recorder.recordAndUpdateDebounced).not.toHaveBeenCalled();
+    expect(activeProject.connections[0]).toEqual(
+      expect.objectContaining({
+        title: 'New',
+        description: 'New description',
+      })
+    );
+  });
+
+  it('updateConnectionContent 遇到同端点 active+deleted 混排时只应改 active 记录', async () => {
     activeProject = createProject([
       {
         id: 'conn-deleted',
@@ -389,7 +505,7 @@ describe('TaskConnectionService', () => {
       },
     ]);
 
-    service.updateConnectionContent('task-1', 'task-2', 'New title', 'New description');
+    await service.updateConnectionContent('task-1', 'task-2', 'New title', 'New description');
 
     expect(activeProject.connections.find(c => c.id === 'conn-deleted')).toEqual(
       expect.objectContaining({
@@ -406,7 +522,7 @@ describe('TaskConnectionService', () => {
     );
   });
 
-  it('updateConnectionContent 遇到同端点多条 active 记录时应只保留最新一条为 active', () => {
+  it('updateConnectionContent 遇到同端点多条 active 记录时应只保留最新一条为 active', async () => {
     activeProject = createProject([
       {
         id: 'conn-active-old',
@@ -426,7 +542,7 @@ describe('TaskConnectionService', () => {
       },
     ]);
 
-    service.updateConnectionContent('task-1', 'task-2', 'Merged title', 'Merged description');
+    await service.updateConnectionContent('task-1', 'task-2', 'Merged title', 'Merged description');
 
     expect(activeProject.connections.find(c => c.id === 'conn-active-old')).toEqual(
       expect.objectContaining({
@@ -442,199 +558,5 @@ describe('TaskConnectionService', () => {
     expect(activeProject.connections.find(c => c.id === 'conn-active-new')?.deletedAt).toBeUndefined();
   });
 
-  it('relinkCrossTreeConnection 应为旧连接删除和新连接创建都写入 updatedAt', () => {
-    activeProject = createProject([
-      {
-        id: 'conn-1',
-        source: 'task-1',
-        target: 'task-2',
-        updatedAt: '2026-04-10T00:00:00.000Z',
-      },
-    ]);
-
-    service.relinkCrossTreeConnection('task-1', 'task-2', 'task-3', 'task-4');
-
-    const oldConnection = activeProject.connections.find(c => c.source === 'task-1' && c.target === 'task-2');
-    const newConnection = activeProject.connections.find(c => c.source === 'task-3' && c.target === 'task-4');
-
-    expect(oldConnection).toEqual(
-      expect.objectContaining({
-        deletedAt: expect.any(String),
-        updatedAt: expect.any(String),
-      })
-    );
-    expect(oldConnection?.updatedAt).not.toBe('2026-04-10T00:00:00.000Z');
-    expect(newConnection).toEqual(
-      expect.objectContaining({
-        updatedAt: expect.any(String),
-      })
-    );
-  });
-
-  it('relinkCrossTreeConnection 指向软删同端点连接时应保留 deleted history 并创建新连接', () => {
-    activeProject = createProject([
-      {
-        id: 'conn-1',
-        source: 'task-1',
-        target: 'task-2',
-        updatedAt: '2026-04-10T00:00:00.000Z',
-      },
-      {
-        id: 'conn-2',
-        source: 'task-3',
-        target: 'task-4',
-        deletedAt: '2026-04-10T01:00:00.000Z',
-        updatedAt: '2026-04-10T01:00:00.000Z',
-      },
-    ]);
-
-    service.relinkCrossTreeConnection('task-1', 'task-2', 'task-3', 'task-4');
-
-    expect(activeProject.connections).toHaveLength(3);
-    expect(activeProject.connections.find(c => c.id === 'conn-1')).toEqual(
-      expect.objectContaining({
-        deletedAt: expect.any(String),
-      })
-    );
-    expect(activeProject.connections.find(c => c.id === 'conn-2')).toEqual(
-      expect.objectContaining({
-        source: 'task-3',
-        target: 'task-4',
-        deletedAt: '2026-04-10T01:00:00.000Z',
-        updatedAt: '2026-04-10T01:00:00.000Z',
-      })
-    );
-    expect(activeProject.connections.find(c => !['conn-1', 'conn-2'].includes(c.id))).toEqual(
-      expect.objectContaining({
-        source: 'task-3',
-        target: 'task-4',
-        updatedAt: expect.any(String),
-      })
-    );
-    expect(activeProject.connections.find(c => !['conn-1', 'conn-2'].includes(c.id))?.deletedAt).toBeUndefined();
-  });
-
-  it('relinkCrossTreeConnection 指向已有重复 active 目标对时应删除旧对并收口目标对', () => {
-    activeProject = createProject([
-      {
-        id: 'conn-old',
-        source: 'task-1',
-        target: 'task-2',
-        updatedAt: '2026-04-10T00:00:00.000Z',
-      },
-      {
-        id: 'conn-target-a',
-        source: 'task-3',
-        target: 'task-4',
-        updatedAt: '2026-04-10T02:00:00.000Z',
-      },
-      {
-        id: 'conn-target-b',
-        source: 'task-3',
-        target: 'task-4',
-        updatedAt: '2026-04-10T03:00:00.000Z',
-      },
-    ]);
-
-    service.relinkCrossTreeConnection('task-1', 'task-2', 'task-3', 'task-4');
-
-    expect(activeProject.connections.find(c => c.id === 'conn-old')).toEqual(
-      expect.objectContaining({
-        deletedAt: expect.any(String),
-      })
-    );
-    expect(activeProject.connections.find(c => c.id === 'conn-target-a')).toEqual(
-      expect.objectContaining({
-        deletedAt: expect.any(String),
-      })
-    );
-    expect(activeProject.connections.find(c => c.id === 'conn-target-b')?.deletedAt).toBeUndefined();
-  });
-
-  it('relinkCrossTreeConnection 在新端点非法时不应删除旧连接或恢复无效目标', () => {
-    activeProject = createProject([
-      {
-        id: 'conn-old',
-        source: 'task-1',
-        target: 'task-2',
-        updatedAt: '2026-04-10T00:00:00.000Z',
-      },
-      {
-        id: 'conn-invalid-deleted',
-        source: 'task-3',
-        target: 'task-3',
-        deletedAt: '2026-04-10T01:00:00.000Z',
-        updatedAt: '2026-04-10T01:00:00.000Z',
-      },
-    ]);
-
-    service.relinkCrossTreeConnection('task-1', 'task-2', 'task-3', 'task-3');
-
-    expect(activeProject.connections.find(c => c.id === 'conn-old')).toEqual(
-      expect.objectContaining({
-        updatedAt: '2026-04-10T00:00:00.000Z',
-      })
-    );
-    expect(activeProject.connections.find(c => c.id === 'conn-old')?.deletedAt).toBeUndefined();
-    expect(activeProject.connections.find(c => c.id === 'conn-invalid-deleted')).toEqual(
-      expect.objectContaining({
-        deletedAt: '2026-04-10T01:00:00.000Z',
-        updatedAt: '2026-04-10T01:00:00.000Z',
-      })
-    );
-  });
-
-  it('relinkCrossTreeConnection 不应重连到已删除任务', () => {
-    activeProject = createProject([
-      {
-        id: 'conn-old',
-        source: 'task-1',
-        target: 'task-2',
-        updatedAt: '2026-04-10T00:00:00.000Z',
-      },
-    ]);
-    activeProject.tasks = activeProject.tasks.map(task => (
-      task.id === 'task-4'
-        ? { ...task, deletedAt: '2026-04-10T01:00:00.000Z' }
-        : task
-    ));
-
-    service.relinkCrossTreeConnection('task-1', 'task-2', 'task-3', 'task-4');
-
-    expect(activeProject.connections).toEqual([
-      expect.objectContaining({
-        id: 'conn-old',
-        source: 'task-1',
-        target: 'task-2',
-        updatedAt: '2026-04-10T00:00:00.000Z',
-      }),
-    ]);
-  });
-
-  it('relinkCrossTreeConnection 不应重连到与 parentId 重复的非法端点对', () => {
-    activeProject = createProject([
-      {
-        id: 'conn-old',
-        source: 'task-3',
-        target: 'task-4',
-        updatedAt: '2026-04-10T00:00:00.000Z',
-      },
-    ]);
-    activeProject.tasks = activeProject.tasks.map(task => (
-      task.id === 'task-2'
-        ? { ...task, parentId: 'task-1' }
-        : task
-    ));
-
-    service.relinkCrossTreeConnection('task-3', 'task-4', 'task-1', 'task-2');
-
-    expect(activeProject.connections).toEqual([
-      expect.objectContaining({
-        id: 'conn-old',
-        source: 'task-3',
-        target: 'task-4',
-        updatedAt: '2026-04-10T00:00:00.000Z',
-      }),
-    ]);
-  });
+  registerTaskConnectionRelinkSpecs(getRelinkSpecContext);
 });

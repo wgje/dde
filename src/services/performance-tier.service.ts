@@ -18,14 +18,17 @@ export class PerformanceTierService implements OnDestroy {
   private lowWindowCount = 0;
   private recoverWindowCount = 0;
   private activeConsumers = 0;
+  private destroyed = false;
 
   ngOnDestroy(): void {
+    this.destroyed = true;
     this.activeConsumers = 0;
     this.pauseRaf();
   }
 
   /** 消费方调用以启动 FPS 采样（引用计数，多次调用安全） */
   startMeasuring(): void {
+    if (this.destroyed) return;
     this.activeConsumers += 1;
     if (this.activeConsumers === 1) {
       this.resumeRaf();
@@ -41,6 +44,7 @@ export class PerformanceTierService implements OnDestroy {
   }
 
   private resumeRaf(): void {
+    if (this.destroyed) return;
     if (this.rafId !== null) return;
     if (typeof window === 'undefined' || typeof performance === 'undefined' || typeof requestAnimationFrame === 'undefined') {
       return;
@@ -58,6 +62,7 @@ export class PerformanceTierService implements OnDestroy {
   }
 
   private onFrame(timestamp: number): void {
+    if (this.destroyed) return;
     this.frameCount += 1;
     const elapsed = timestamp - this.lastWindowStart;
     if (elapsed >= PARKING_CONFIG.FOCUS_PERF_SAMPLE_WINDOW_MS) {
