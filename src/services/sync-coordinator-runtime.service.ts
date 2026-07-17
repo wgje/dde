@@ -35,18 +35,18 @@ export class SyncCoordinatorRuntimeService {
 
   startLocalAutosave(): void {
     this.persistScheduler.setCallbacks({
-      saveSnapshot: () => {
-        const projects = this.projectState.projects();
+      saveSnapshot: async () => {
+        const projects = this.projectState.getProjectsWithCurrentData();
         if (projects.length === 0) return;
 
         const userId = this.authService.currentUserId();
         if (!userId) return;
 
-        const hash = projects.map(project => `${project.id}:${project.updatedAt ?? ''}:${project.version ?? 0}`).join('|');
+        const hash = `${userId}|${JSON.stringify(projects)}`;
         if (hash === this.lastSnapshotHash) return;
 
+        await this.projectData.saveOfflineSnapshotAndWait(projects, userId);
         this.lastSnapshotHash = hash;
-        this.projectData.saveOfflineSnapshot(projects);
       },
       doPersist: async () => {
         // 持久化交由 saveSnapshot 逻辑统一处理。
