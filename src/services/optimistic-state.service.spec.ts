@@ -23,6 +23,7 @@ import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
 import { Project } from '../models';
 import { OPTIMISTIC_CONFIG } from '../config';
+import { SessionRuntimeResetRegistry } from './session-runtime-reset.service';
 
 // ========== 模拟依赖服务 ==========
 
@@ -80,6 +81,7 @@ let mockActiveProjectIdSignal = signal<string | null>('proj-1');
 const mockProjectStateService = {
   projects: () => mockProjectsSignal(),
   activeProjectId: () => mockActiveProjectIdSignal(),
+  getProjectsWithCurrentData: vi.fn(() => mockProjectsSignal()),
   setProjects: vi.fn((projects: Project[]) => {
     mockProjectsSignal.set(projects);
   }),
@@ -114,6 +116,7 @@ const mockLoggerService = {
 describe('OptimisticStateService', () => {
   let service: OptimisticStateService;
   let injector: Injector;
+  let sessionRuntimeReset: SessionRuntimeResetRegistry;
   let consoleWarnSpy: ReturnType<typeof vi.spyOn> | undefined;
   let consoleErrorSpy: ReturnType<typeof vi.spyOn> | undefined;
 
@@ -126,16 +129,19 @@ describe('OptimisticStateService', () => {
 
     mockProjectsSignal = signal<Project[]>(createMockProjects());
     mockActiveProjectIdSignal = signal<string | null>('proj-1');
+    mockProjectStateService.getProjectsWithCurrentData = vi.fn(() => mockProjectsSignal());
 
     injector = Injector.create({
       providers: [
         { provide: ProjectStateService, useValue: mockProjectStateService },
         { provide: ToastService, useValue: mockToastService },
         { provide: LoggerService, useValue: mockLoggerService },
+        SessionRuntimeResetRegistry,
       ],
     });
 
     service = runInInjectionContext(injector, () => new OptimisticStateService());
+    sessionRuntimeReset = runInInjectionContext(injector, () => injector.get(SessionRuntimeResetRegistry));
   });
 
   afterEach(() => {
@@ -172,6 +178,15 @@ describe('OptimisticStateService', () => {
         
         service.createSnapshot('task-create');
         expect(service.activeSnapshotCount()).toBe(2);
+      });
+
+      it('应该通过只读接口返回快照创建时间，并在快照消失后返回 null', () => {
+        const snapshot = service.createSnapshot('task-update');
+
+        expect(service.getSnapshotCreatedAt(snapshot.id)).toBe(snapshot.createdAt);
+
+        service.commitSnapshot(snapshot.id);
+        expect(service.getSnapshotCreatedAt(snapshot.id)).toBeNull();
       });
     });
 
@@ -219,6 +234,32 @@ describe('OptimisticStateService', () => {
         );
       });
 
+      it('回滚项目更新时应该恢复完整项目数据而不是元数据壳', () => {
+        const fullProjects: Project[] = createMockProjects().map(project => ({
+          ...project,
+          tasks: project.tasks.map(task => ({ ...task })),
+          connections: project.connections.map(connection => ({ ...connection })),
+        }));
+        const projectShells: Project[] = fullProjects.map(project => ({
+          ...project,
+          tasks: [],
+          connections: [],
+        }));
+
+        mockProjectsSignal.set(projectShells);
+        mockProjectStateService.getProjectsWithCurrentData = vi.fn(() => fullProjects);
+
+        const snapshot = service.createSnapshot('project-update', 'rename');
+        const rolledBack = service.rollbackSnapshot(snapshot.id, false);
+
+        expect(rolledBack).toBe(true);
+        expect(mockProjectStateService.setProjects).toHaveBeenCalledWith(fullProjects);
+
+        const rolledBackProjects = mockProjectStateService.setProjects.mock.calls.at(-1)?.[0] as Project[];
+        expect(rolledBackProjects[0].tasks).toEqual(fullProjects[0].tasks);
+        expect(rolledBackProjects[0].connections).toEqual(fullProjects[0].connections);
+      });
+
       it('showToast=false 时不应显示提示', () => {
         const snapshot = service.createSnapshot('task-update', '更新任务');
         
@@ -230,6 +271,22 @@ describe('OptimisticStateService', () => {
       it('对不存在的快照应返回 false', () => {
         const result = service.rollbackSnapshot('non-existent-id');
         expect(result).toBe(false);
+      });
+
+      it('会话重置后旧快照不得回滚新会话状态', () => {
+        const snapshot = service.createSnapshot('project-delete', '删除项目');
+        mockProjectStateService.updateProjects(projects => projects.map(project => ({
+          ...project,
+          name: 'new-session-project',
+        })));
+
+        sessionRuntimeReset.resetAll('owner-change');
+        const rolledBack = service.rollbackSnapshot(snapshot.id);
+
+        expect(rolledBack).toBe(false);
+        expect(service.activeSnapshotCount()).toBe(0);
+        expect(mockProjectStateService.setProjects).not.toHaveBeenCalled();
+        expect(mockToastService.error).not.toHaveBeenCalled();
       });
     });
 

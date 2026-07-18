@@ -47,6 +47,7 @@ import { OPTIMISTIC_CONFIG } from '../config';
 import { Project } from '../models';
 import { LoggerService } from './logger.service';
 import { ProjectStateService } from './project-state.service';
+import { SessionRuntimeResetRegistry } from './session-runtime-reset.service';
 import { ToastService } from './toast.service';
 
 /**
@@ -74,6 +75,8 @@ export interface OptimisticSnapshot {
   type: SnapshotType;
   /** 创建时间戳 */
   createdAt: number;
+  /** 创建快照时的会话运行时 generation */
+  sessionGeneration: number;
   /** 项目快照（深拷贝） */
   projectsSnapshot: Project[];
   /** 当前活动项目 ID */
@@ -119,22 +122,30 @@ export class OptimisticStateService {
   private projectState = inject(ProjectStateService);
   private toastService = inject(ToastService);
   private destroyRef = inject(DestroyRef);
+  private sessionRuntimeReset = inject(SessionRuntimeResetRegistry);
   
   /** 快照存储 */
   private snapshots = new Map<string, OptimisticSnapshot>();
   
   /** 清理定时器 */
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
+  private sessionGeneration = 0;
+  private readonly unregisterSessionRuntimeReset: () => void;
   
   /** 活跃快照数量（用于调试） */
   readonly activeSnapshotCount = signal(0);
   
   constructor() {
+    this.unregisterSessionRuntimeReset = this.sessionRuntimeReset.register(
+      'OptimisticStateService',
+      () => this.resetSessionRuntime(),
+    );
     this.startCleanupTimer();
     
     this.destroyRef.onDestroy(() => {
       this.stopCleanupTimer();
       this.snapshots.clear();
+      this.unregisterSessionRuntimeReset();
     });
   }
   
@@ -147,13 +158,16 @@ export class OptimisticStateService {
     const id = crypto.randomUUID();
     const now = Date.now();
     
-    const projectsSnapshot = this.deepCloneProjects(this.projectState.projects());
+    const projectsSnapshot = this.deepCloneProjects(
+      this.projectState.getProjectsWithCurrentData(),
+    );
     const activeProjectId = this.projectState.activeProjectId();
     
     const snapshot: OptimisticSnapshot = {
       id,
       type,
       createdAt: now,
+      sessionGeneration: this.sessionGeneration,
       projectsSnapshot,
       activeProjectId,
       operationLabel
@@ -196,6 +210,7 @@ export class OptimisticStateService {
     if (snapshot) {
       this.snapshots.delete(snapshotId);
       this.updateSnapshotCount();
+      if (snapshot.sessionGeneration !== this.sessionGeneration) return;
       this.logger.debug('提交快照（成功）', { id: snapshotId, type: snapshot.type });
     }
   }
@@ -205,7 +220,11 @@ export class OptimisticStateService {
    */
   rollbackSnapshot(snapshotId: string, showToast = true): boolean {
     const snapshot = this.snapshots.get(snapshotId);
-    if (!snapshot) {
+    if (!snapshot || snapshot.sessionGeneration !== this.sessionGeneration) {
+      if (snapshot) {
+        this.snapshots.delete(snapshotId);
+        this.updateSnapshotCount();
+      }
       this.logger.warn('快照不存在，无法回滚', { snapshotId });
       return false;
     }
@@ -251,7 +270,11 @@ export class OptimisticStateService {
     options: { showToast?: boolean; toastTitle?: string; toastMessage?: string } = {},
   ): boolean {
     const snapshot = this.snapshots.get(snapshotId);
-    if (!snapshot) {
+    if (!snapshot || snapshot.sessionGeneration !== this.sessionGeneration) {
+      if (snapshot) {
+        this.snapshots.delete(snapshotId);
+        this.updateSnapshotCount();
+      }
       this.logger.warn('快照不存在，无法定点恢复任务', { snapshotId, taskCount: taskIds.length });
       return false;
     }
@@ -281,7 +304,7 @@ export class OptimisticStateService {
    */
   getTaskFromSnapshot(snapshotId: string, taskId: string): Project['tasks'][number] | null {
     const snapshot = this.snapshots.get(snapshotId);
-    if (!snapshot) {
+    if (!snapshot || snapshot.sessionGeneration !== this.sessionGeneration) {
       return null;
     }
 
@@ -330,7 +353,15 @@ export class OptimisticStateService {
    * 检查快照是否存在
    */
   hasSnapshot(snapshotId: string): boolean {
-    return this.snapshots.has(snapshotId);
+    return this.snapshots.get(snapshotId)?.sessionGeneration === this.sessionGeneration;
+  }
+
+  /** 返回快照创建时间，不暴露内部快照 Map 或可变对象。 */
+  getSnapshotCreatedAt(snapshotId: string): number | null {
+    const snapshot = this.snapshots.get(snapshotId);
+    return snapshot?.sessionGeneration === this.sessionGeneration
+      ? snapshot.createdAt
+      : null;
   }
   
   /**
@@ -354,7 +385,7 @@ export class OptimisticStateService {
    * 用户登出时调用
    */
   onUserLogout(): void {
-    this.clearAllSnapshots();
+    this.resetSessionRuntime();
   }
   
   // ========== 乐观操作高阶函数 ==========
@@ -514,5 +545,10 @@ export class OptimisticStateService {
     this.clearAllSnapshots();
     this.stopCleanupTimer();
     this.startCleanupTimer();
+  }
+
+  private resetSessionRuntime(): void {
+    this.sessionGeneration += 1;
+    this.clearAllSnapshots();
   }
 }
