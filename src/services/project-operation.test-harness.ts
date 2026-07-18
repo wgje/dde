@@ -38,10 +38,12 @@ export interface ProjectOperationServiceSpecContext {
   projectConflict: ProjectOperationConflictService;
   mockProjectState: {
     projects: Mock<() => Project[]>;
+    getProjectsWithCurrentData: Mock<() => Project[]>;
     updateProjects: UpdateProjectsMock;
     setActiveProjectId: Mock<(projectId: string | null) => void>;
     activeProjectId: Mock<() => string | null>;
     getProject: Mock<(projectId: string) => Project | undefined>;
+    getProjectWithCurrentData: Mock<(projectId: string) => Project | undefined>;
   };
   mockSyncCoordinator: {
     core: {
@@ -90,6 +92,7 @@ export interface ProjectOperationServiceSpecContext {
     createSnapshot: MockFn;
     commitSnapshot: MockFn;
     rollbackSnapshot: MockFn;
+    discardSnapshot: MockFn;
   };
   mockLayout: {
     rebalance: MockFn;
@@ -130,12 +133,15 @@ export function createProject(overrides: Partial<Project> = {}): Project {
 export function createDeferred<T = unknown>(): {
   promise: Promise<T>;
   resolve: (value: T | PromiseLike<T>) => void;
+  reject: (reason?: unknown) => void;
 } {
   let resolve: ((value: T | PromiseLike<T>) => void) | null = null;
-  const promise = new Promise<T>((res) => {
+  let reject: ((reason?: unknown) => void) | null = null;
+  const promise = new Promise<T>((res, rej) => {
     resolve = res;
+    reject = rej;
   });
-  return { promise, resolve: resolve! };
+  return { promise, resolve: resolve!, reject: reject! };
 }
 
 export function getProjectUpdater(
@@ -159,13 +165,16 @@ export function replayProjectUpdates(
 function createProjectStateMock(): ProjectStateMock {
   const mockProjectState = {
     projects: vi.fn((): Project[] => []),
+    getProjectsWithCurrentData: vi.fn((): Project[] => mockProjectState.projects()),
     updateProjects: vi.fn<(updater: ProjectUpdater) => void>(),
     setActiveProjectId: vi.fn<(projectId: string | null) => void>(),
     activeProjectId: vi.fn((): string | null => null),
     getProject: vi.fn((_projectId: string): Project | undefined => undefined),
+    getProjectWithCurrentData: vi.fn((projectId: string): Project | undefined =>
+      mockProjectState.getProjectsWithCurrentData().find(project => project.id === projectId)),
   };
   mockProjectState.updateProjects.mockImplementation((updater: ProjectUpdater) => {
-    updater(mockProjectState.projects());
+    updater(mockProjectState.getProjectsWithCurrentData());
   });
   return mockProjectState;
 }
@@ -229,6 +238,7 @@ function createProjectOperationMocks(): ProjectOperationMocks {
       createSnapshot: vi.fn(() => ({ id: 'snap-1' })),
       commitSnapshot: vi.fn(),
       rollbackSnapshot: vi.fn(),
+      discardSnapshot: vi.fn(),
     },
     mockLayout: { rebalance: vi.fn((project: Project) => project) },
     mockUndo: { clearHistory: vi.fn() },

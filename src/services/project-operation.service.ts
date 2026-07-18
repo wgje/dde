@@ -28,6 +28,11 @@ import { AUTH_CONFIG } from '../config/auth.config';
 import { EnqueueParams } from './action-queue.types';
 import { blockProjectMutation } from './project-operation-write-guard.helpers';
 
+interface ProjectOperationSessionContext {
+  sessionGeneration: number;
+  userId: string | null;
+}
+
 @Injectable({
   providedIn: 'root'
 })
@@ -42,6 +47,24 @@ export class ProjectOperationService {
   private readonly toastService = inject(ToastService);
   private readonly writeGuard = inject(WriteGuardService);
   private readonly projectConflict = inject(ProjectOperationConflictService);
+
+  private captureSessionContext(): ProjectOperationSessionContext {
+    return {
+      sessionGeneration: this.userSession.getCurrentSessionGeneration(),
+      userId: this.userSession.currentUserId(),
+    };
+  }
+
+  private isSessionContextCurrent(context: ProjectOperationSessionContext): boolean {
+    return this.userSession.isSessionContextCurrent(context.sessionGeneration, context.userId);
+  }
+
+  private discardStaleProjectOperation(
+    snapshotId: string,
+  ): { success: false; error: string } {
+    this.optimisticState.discardSnapshot(snapshotId);
+    return { success: false, error: '会话已切换' };
+  }
 
   private blockProjectMutation(actionLabel: string): { success: false; error: string } | null {
     return blockProjectMutation(actionLabel, {
@@ -59,53 +82,36 @@ export class ProjectOperationService {
     };
   }
 
+  private currentProjects(): Project[] {
+    return this.projectState.getProjectsWithCurrentData();
+  }
+
   private async commitProjectUpdateDurably(
     snapshotId: string,
     project: Project,
     queueErrorMessage: string,
+    sessionContext: ProjectOperationSessionContext,
     updateProjects?: (projects: Project[]) => Project[],
   ): Promise<{ success: boolean; error?: string }> {
-    const userId = this.userSession.currentUserId();
-    const isCloudBackedUser = !!userId && userId !== AUTH_CONFIG.LOCAL_MODE_USER_ID;
-    const nextProjects = updateProjects?.(this.projectState.projects());
-
-    if (isCloudBackedUser) {
-      const actionId = await this.actionQueue.enqueueDurably({
-        type: 'update',
-        entityType: 'project',
-        entityId: project.id,
-        payload: {
-          project: { ...project, syncSource: 'synced', pendingSync: true },
-          sourceUserId: userId,
-        },
-      });
-
-      if (!actionId) {
-        this.optimisticState.rollbackSnapshot(snapshotId, false);
-        this.toastService.error('本地保存失败', `${queueErrorMessage}，请释放浏览器存储空间后重试`);
-        this.projectData.saveOfflineSnapshot(this.projectState.projects());
-        return { success: false, error: queueErrorMessage };
-      }
-      if (nextProjects) {
-        const failure = await this.persistProjectSnapshotBeforeCommit(
-          snapshotId,
-          nextProjects,
-          { queuedActionId: actionId },
-        );
-        if (failure) {
-          return failure;
-        }
-      }
-    } else if (nextProjects) {
-      const failure = await this.persistProjectSnapshotBeforeCommit(
-        snapshotId,
-        nextProjects,
-      );
-      if (failure) {
-        return failure;
-      }
+    if (!this.isSessionContextCurrent(sessionContext)) {
+      return this.discardStaleProjectOperation(snapshotId);
     }
 
+    const nextProjects = updateProjects?.(this.currentProjects());
+    const failure = await this.prepareProjectUpdateCommit(
+      snapshotId,
+      project,
+      queueErrorMessage,
+      sessionContext,
+      nextProjects,
+    );
+    if (failure) {
+      return failure;
+    }
+
+    if (!this.isSessionContextCurrent(sessionContext)) {
+      return this.discardStaleProjectOperation(snapshotId);
+    }
     if (updateProjects) {
       this.projectState.updateProjects(updateProjects);
     }
@@ -113,8 +119,52 @@ export class ProjectOperationService {
     return { success: true };
   }
 
+  private async prepareProjectUpdateCommit(
+    snapshotId: string,
+    project: Project,
+    queueErrorMessage: string,
+    sessionContext: ProjectOperationSessionContext,
+    nextProjects: Project[] | undefined,
+  ): Promise<{ success: false; error: string } | null> {
+    const userId = sessionContext.userId;
+    const isCloudBackedUser = !!userId && userId !== AUTH_CONFIG.LOCAL_MODE_USER_ID;
+    if (!isCloudBackedUser) {
+      return nextProjects
+        ? this.persistProjectSnapshotBeforeCommit(snapshotId, nextProjects, sessionContext)
+        : null;
+    }
+
+    const actionId = await this.actionQueue.enqueueDurably({
+      type: 'update',
+      entityType: 'project',
+      entityId: project.id,
+      payload: {
+        project: { ...project, syncSource: 'synced', pendingSync: true },
+        sourceUserId: userId,
+      },
+    });
+    if (!this.isSessionContextCurrent(sessionContext)) {
+      return this.discardStaleProjectOperation(snapshotId);
+    }
+    if (!actionId) {
+      this.optimisticState.rollbackSnapshot(snapshotId, false);
+      this.toastService.error('本地保存失败', `${queueErrorMessage}，请释放浏览器存储空间后重试`);
+      this.projectData.saveOfflineSnapshot(this.currentProjects());
+      return { success: false, error: queueErrorMessage };
+    }
+
+    return nextProjects
+      ? this.persistProjectSnapshotBeforeCommit(
+        snapshotId,
+        nextProjects,
+        sessionContext,
+        { queuedActionId: actionId },
+      )
+      : null;
+  }
+
   private findProject(projectId: string): Project | null {
-    return this.projectState.projects().find(project => project.id === projectId) ?? null;
+    return this.projectState.getProjectWithCurrentData(projectId) ?? null;
   }
 
   private replaceProjectUpdater(project: Project): (projects: Project[]) => Project[] {
@@ -123,15 +173,41 @@ export class ProjectOperationService {
     );
   }
 
+  private buildDeleteQueueAction(projectId: string, userId: string | null): EnqueueParams {
+    const projectToDelete = this.findProject(projectId);
+    return {
+      type: 'delete',
+      entityType: 'project',
+      entityId: projectId,
+      payload: {
+        projectId,
+        userId: userId ?? AUTH_CONFIG.LOCAL_MODE_USER_ID,
+        sourceUserId: userId ?? undefined,
+        baseUpdatedAt: projectToDelete?.updatedAt ?? null,
+      },
+    };
+  }
+
   private async persistProjectSnapshotBeforeCommit(
     snapshotId: string,
     nextProjects: Project[],
+    sessionContext: ProjectOperationSessionContext,
     options: { queuedActionId?: string } = {},
   ): Promise<{ success: false; error: string } | null> {
+    if (!this.isSessionContextCurrent(sessionContext)) {
+      return this.discardStaleProjectOperation(snapshotId);
+    }
+
     try {
       await this.projectData.saveOfflineSnapshotAndWait(nextProjects);
+      if (!this.isSessionContextCurrent(sessionContext)) {
+        return this.discardStaleProjectOperation(snapshotId);
+      }
       return null;
     } catch {
+      if (!this.isSessionContextCurrent(sessionContext)) {
+        return this.discardStaleProjectOperation(snapshotId);
+      }
       this.discardQueuedAction(options.queuedActionId);
       this.optimisticState.rollbackSnapshot(snapshotId, false);
       this.toastService.error('本地保存失败', '离线快照未能写入，请释放浏览器存储空间后重试');
@@ -157,7 +233,7 @@ export class ProjectOperationService {
     this.optimisticState.commitSnapshot(snapshotId);
     this.syncCoordinator.markLocalChanges('structure');
     this.syncCoordinator.schedulePersist();
-    this.projectData.saveOfflineSnapshot(this.projectState.projects());
+    this.projectData.saveOfflineSnapshot(this.currentProjects());
   }
 
   // ========== 项目 CRUD 操作 ==========
@@ -174,8 +250,9 @@ export class ProjectOperationService {
     const blocked = this.blockProjectMutation('创建项目');
     if (blocked) return blocked;
 
+    const sessionContext = this.captureSessionContext();
     const balanced = this.layoutService.rebalance(project);
-    const userId = this.userSession.currentUserId();
+    const userId = sessionContext.userId;
     const isCloudBackedUser = !!userId && userId !== AUTH_CONFIG.LOCAL_MODE_USER_ID;
     const localProject = this.buildLocalProjectForUser(balanced, isCloudBackedUser);
     const createQueueAction: EnqueueParams = {
@@ -189,10 +266,13 @@ export class ProjectOperationService {
     const snapshot = this.optimisticState.createSnapshot('project-create', '创建项目');
     
     const addProjectUpdater = (projects: Project[]) => [...projects, localProject];
-    const nextProjects = addProjectUpdater(this.projectState.projects());
+    const nextProjects = addProjectUpdater(this.currentProjects());
     let actionId = '';
     if (isCloudBackedUser) {
       actionId = await this.actionQueue.enqueueDurably(createQueueAction);
+      if (!this.isSessionContextCurrent(sessionContext)) {
+        return this.discardStaleProjectOperation(snapshot.id);
+      }
       if (!actionId) {
         this.optimisticState.rollbackSnapshot(snapshot.id, false);
         this.toastService.error('本地保存失败', '离线同步队列未能写入，请释放浏览器存储空间后重试');
@@ -203,12 +283,16 @@ export class ProjectOperationService {
     const snapshotFailure = await this.persistProjectSnapshotBeforeCommit(
       snapshot.id,
       nextProjects,
+      sessionContext,
       { queuedActionId: isCloudBackedUser ? actionId : undefined },
     );
     if (snapshotFailure) {
       return snapshotFailure;
     }
 
+    if (!this.isSessionContextCurrent(sessionContext)) {
+      return this.discardStaleProjectOperation(snapshot.id);
+    }
     this.projectState.updateProjects(addProjectUpdater);
     this.projectState.setActiveProjectId(localProject.id);
     this.finalizeDurableLocalProjectMutation(snapshot.id);
@@ -222,28 +306,27 @@ export class ProjectOperationService {
     const blocked = this.blockProjectMutation('删除项目');
     if (blocked) return blocked;
 
-    const userId = this.userSession.currentUserId();
+    const sessionContext = this.captureSessionContext();
+    const userId = sessionContext.userId;
     const isCloudBackedUser = !!userId && userId !== AUTH_CONFIG.LOCAL_MODE_USER_ID;
-    const deleteQueueAction: EnqueueParams = {
-      type: 'delete',
-      entityType: 'project',
-      entityId: projectId,
-      payload: { projectId, userId: userId ?? AUTH_CONFIG.LOCAL_MODE_USER_ID, sourceUserId: userId ?? undefined }
-    };
+    const deleteQueueAction = this.buildDeleteQueueAction(projectId, userId);
     
     // 创建快照（乐观更新前）
     const snapshot = this.optimisticState.createSnapshot('project-delete', '删除项目');
     const activeProjectId = this.projectState.activeProjectId();
     const deleteProjectUpdater = (projects: Project[]) => projects.filter(project => project.id !== projectId);
-    const remainingProjects = deleteProjectUpdater(this.projectState.projects());
+    const remainingProjects = deleteProjectUpdater(this.currentProjects());
     
     let actionId = '';
     if (isCloudBackedUser) {
       actionId = await this.actionQueue.enqueueDurably(deleteQueueAction);
+      if (!this.isSessionContextCurrent(sessionContext)) {
+        return this.discardStaleProjectOperation(snapshot.id);
+      }
       if (!actionId) {
         this.optimisticState.rollbackSnapshot(snapshot.id, false);
         this.toastService.error('本地保存失败', '离线删除队列未能写入，请释放浏览器存储空间后重试');
-        this.projectData.saveOfflineSnapshot(this.projectState.projects());
+        this.projectData.saveOfflineSnapshot(this.currentProjects());
         return { success: false, error: '离线删除队列未能写入' };
       }
     }
@@ -251,12 +334,16 @@ export class ProjectOperationService {
     const snapshotFailure = await this.persistProjectSnapshotBeforeCommit(
       snapshot.id,
       remainingProjects,
+      sessionContext,
       { queuedActionId: isCloudBackedUser ? actionId : undefined },
     );
     if (snapshotFailure) {
       return snapshotFailure;
     }
 
+    if (!this.isSessionContextCurrent(sessionContext)) {
+      return this.discardStaleProjectOperation(snapshot.id);
+    }
     this.projectState.updateProjects(deleteProjectUpdater);
 
     if (activeProjectId === projectId) {
@@ -277,8 +364,9 @@ export class ProjectOperationService {
     const blocked = this.blockProjectMutation('保存项目设置');
     if (blocked) return blocked;
 
+    const sessionContext = this.captureSessionContext();
     const snapshot = this.optimisticState.createSnapshot('project-update', '保存项目设置');
-    const userId = this.userSession.currentUserId();
+    const userId = sessionContext.userId;
     const isCloudBackedUser = !!userId && userId !== AUTH_CONFIG.LOCAL_MODE_USER_ID;
     const currentProject = this.findProject(projectId);
     const updatedProject = currentProject
@@ -298,6 +386,7 @@ export class ProjectOperationService {
       snapshot.id,
       updatedProject,
       '离线项目更新队列未能写入',
+      sessionContext,
       this.replaceProjectUpdater(updatedProject),
     );
   }
@@ -313,8 +402,9 @@ export class ProjectOperationService {
     const trimmed = newName.trim();
     if (!trimmed) return false;
 
+    const sessionContext = this.captureSessionContext();
     const snapshot = this.optimisticState.createSnapshot('project-update', '重命名项目');
-    const userId = this.userSession.currentUserId();
+    const userId = sessionContext.userId;
     const isCloudBackedUser = !!userId && userId !== AUTH_CONFIG.LOCAL_MODE_USER_ID;
     const currentProject = this.findProject(projectId);
     const updatedProject = currentProject
@@ -330,6 +420,7 @@ export class ProjectOperationService {
       snapshot.id,
       updatedProject,
       '离线项目更新队列未能写入',
+      sessionContext,
       this.replaceProjectUpdater(updatedProject),
     );
     return result.success;
@@ -339,28 +430,57 @@ export class ProjectOperationService {
     const blocked = this.blockProjectMutation('导入项目');
     if (blocked) return blocked;
 
+    const sessionContext = this.captureSessionContext();
     const snapshot = this.optimisticState.createSnapshot('project-import', '导入项目');
-    const userId = this.userSession.currentUserId();
+    const userId = sessionContext.userId;
     const isCloudBackedUser = !!userId && userId !== AUTH_CONFIG.LOCAL_MODE_USER_ID;
-    const existingProject = this.projectState.getProject(project.id);
+    const existingProject = this.projectState.getProjectWithCurrentData(project.id);
     const localProject = this.buildLocalProjectForUser(project, isCloudBackedUser);
 
     if (!isCloudBackedUser || !userId) {
-      const upsertProjectUpdater = (projects: Project[]) => this.upsertProjectList(projects, localProject);
-      const failure = await this.persistProjectSnapshotBeforeCommit(
-        snapshot.id,
-        upsertProjectUpdater(this.projectState.projects()),
-      );
-      if (failure) {
-        return failure;
-      }
-      this.projectState.updateProjects(upsertProjectUpdater);
-      this.finalizeDurableLocalProjectMutation(snapshot.id);
-      return { success: true };
+      return this.persistImportedLocalProject(snapshot.id, localProject, sessionContext);
     }
 
+    return this.persistImportedCloudProject(
+      snapshot.id,
+      localProject,
+      !!existingProject,
+      userId,
+      sessionContext,
+    );
+  }
+
+  private async persistImportedLocalProject(
+    snapshotId: string,
+    localProject: Project,
+    sessionContext: ProjectOperationSessionContext,
+  ): Promise<{ success: boolean; error?: string }> {
+    const upsertProjectUpdater = (projects: Project[]) => this.upsertProjectList(projects, localProject);
+    const failure = await this.persistProjectSnapshotBeforeCommit(
+      snapshotId,
+      upsertProjectUpdater(this.currentProjects()),
+      sessionContext,
+    );
+    if (failure) {
+      return failure;
+    }
+    if (!this.isSessionContextCurrent(sessionContext)) {
+      return this.discardStaleProjectOperation(snapshotId);
+    }
+    this.projectState.updateProjects(upsertProjectUpdater);
+    this.finalizeDurableLocalProjectMutation(snapshotId);
+    return { success: true };
+  }
+
+  private async persistImportedCloudProject(
+    snapshotId: string,
+    localProject: Project,
+    hasExistingProject: boolean,
+    userId: string,
+    sessionContext: ProjectOperationSessionContext,
+  ): Promise<{ success: boolean; error?: string }> {
     const importQueueAction: EnqueueParams = {
-      type: existingProject ? 'update' : 'create',
+      type: hasExistingProject ? 'update' : 'create',
       entityType: 'project',
       entityId: localProject.id,
       payload: {
@@ -370,23 +490,30 @@ export class ProjectOperationService {
     };
 
     const actionId = await this.actionQueue.enqueueDurably(importQueueAction);
+    if (!this.isSessionContextCurrent(sessionContext)) {
+      return this.discardStaleProjectOperation(snapshotId);
+    }
     if (!actionId) {
-      this.optimisticState.rollbackSnapshot(snapshot.id, false);
+      this.optimisticState.rollbackSnapshot(snapshotId, false);
       this.toastService.error('本地保存失败', '离线导入队列未能写入，请释放浏览器存储空间后重试');
-      this.projectData.saveOfflineSnapshot(this.projectState.projects());
+      this.projectData.saveOfflineSnapshot(this.currentProjects());
       return { success: false, error: '离线导入队列未能写入' };
     }
     const snapshotFailure = await this.persistProjectSnapshotBeforeCommit(
-      snapshot.id,
-      this.upsertProjectList(this.projectState.projects(), localProject),
+      snapshotId,
+      this.upsertProjectList(this.currentProjects(), localProject),
+      sessionContext,
       { queuedActionId: actionId },
     );
     if (snapshotFailure) {
       return snapshotFailure;
     }
 
+    if (!this.isSessionContextCurrent(sessionContext)) {
+      return this.discardStaleProjectOperation(snapshotId);
+    }
     this.upsertLocalProject(localProject);
-    this.finalizeDurableLocalProjectMutation(snapshot.id);
+    this.finalizeDurableLocalProjectMutation(snapshotId);
     return { success: true };
   }
 
@@ -418,8 +545,9 @@ export class ProjectOperationService {
     const blocked = this.blockProjectMutation('更新流程图');
     if (blocked) return blocked;
 
+    const sessionContext = this.captureSessionContext();
     const snapshot = this.optimisticState.createSnapshot('project-update', '更新流程图');
-    const userId = this.userSession.currentUserId();
+    const userId = sessionContext.userId;
     const isCloudBackedUser = !!userId && userId !== AUTH_CONFIG.LOCAL_MODE_USER_ID;
     const currentProject = this.findProject(projectId);
     const updatedProject = currentProject
@@ -439,6 +567,7 @@ export class ProjectOperationService {
       snapshot.id,
       updatedProject,
       '离线项目更新队列未能写入',
+      sessionContext,
       this.replaceProjectUpdater(updatedProject),
     );
   }
