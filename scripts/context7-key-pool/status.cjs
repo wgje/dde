@@ -24,7 +24,21 @@ const STATUS_TOOL = {
       anonymousReason: { type: ['string', 'null'] },
       stateHealth: { enum: ['uninitialized', 'healthy', 'recovered-replica', 'fail-closed'] },
       slots: { type: 'array' },
-      runtime: { type: ['object', 'null'] },
+      runtime: {
+        type: ['object', 'null'],
+        properties: {
+          instanceId_12: { type: 'string', pattern: '^[0-9a-f]{12}$' },
+          startedAt: {
+            type: 'string',
+            format: 'date-time',
+            pattern: '^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$',
+          },
+          keyedDispatches: { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
+          anonymousDispatches: { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
+        },
+        required: ['instanceId_12', 'startedAt', 'keyedDispatches', 'anonymousDispatches'],
+        additionalProperties: false,
+      },
       updatedAt: { type: 'string' },
     },
     additionalProperties: false,
@@ -42,6 +56,13 @@ const ANONYMOUS_REASONS = new Set([
   'all-keyed-slots-unavailable',
   'state-unavailable-fail-closed',
 ]);
+const RUNTIME_KEYS = [
+  'instanceId_12',
+  'startedAt',
+  'keyedDispatches',
+  'anonymousDispatches',
+];
+const RUNTIME_INSTANCE_ID = /^[0-9a-f]{12}$/;
 
 function validDate(value) {
   if (!(value instanceof Date) || !Number.isFinite(value.getTime())) {
@@ -50,19 +71,68 @@ function validDate(value) {
   return new Date(value.getTime());
 }
 
+function healthStatusOf(health) {
+  if (!health || typeof health !== 'object' || Array.isArray(health)) {
+    throw new Error('invalid-state-health');
+  }
+  const prototype = Object.getPrototypeOf(health);
+  const keys = Object.keys(health);
+  if ((prototype !== Object.prototype && prototype !== null)
+    || !Object.hasOwn(health, 'status')
+    || keys.some(key => key !== 'status' && key !== 'reason')
+    || !HEALTH_VALUES.has(health.status)
+    || (Object.hasOwn(health, 'reason') && typeof health.reason !== 'string')) {
+    throw new Error('invalid-state-health');
+  }
+  return health.status;
+}
+
+function projectPublicRuntime(runtime) {
+  if (runtime === undefined || runtime === null) return null;
+  if (typeof runtime !== 'object' || Array.isArray(runtime)) {
+    throw new Error('invalid-public-runtime');
+  }
+  const prototype = Object.getPrototypeOf(runtime);
+  const keys = Object.keys(runtime).sort();
+  const expectedKeys = [...RUNTIME_KEYS].sort();
+  if ((prototype !== Object.prototype && prototype !== null)
+    || keys.length !== expectedKeys.length
+    || keys.some((key, index) => key !== expectedKeys[index])) {
+    throw new Error('invalid-public-runtime');
+  }
+  if (!RUNTIME_INSTANCE_ID.test(runtime.instanceId_12)
+    || !isCanonicalIso(runtime.startedAt)
+    || !isPublicCounter(runtime.keyedDispatches)
+    || !isPublicCounter(runtime.anonymousDispatches)) {
+    throw new Error('invalid-public-runtime');
+  }
+  return {
+    instanceId_12: runtime.instanceId_12,
+    startedAt: runtime.startedAt,
+    keyedDispatches: runtime.keyedDispatches,
+    anonymousDispatches: runtime.anonymousDispatches,
+  };
+}
+
+function isCanonicalIso(value) {
+  if (typeof value !== 'string') return false;
+  const parsed = new Date(value);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString() === value;
+}
+
+function isPublicCounter(value) {
+  return Number.isSafeInteger(value) && value >= 0;
+}
+
 function validateProjectionArguments(args) {
   if (!args || typeof args !== 'object' || Array.isArray(args)) {
     throw new Error('invalid-status-arguments');
   }
   const allowed = new Set(['state', 'health', 'activeRoute', 'now', 'reconciliation', 'runtime']);
   if (Object.keys(args).some(key => !allowed.has(key))) throw new Error('invalid-status-arguments');
-  if (!HEALTH_VALUES.has(args.health)) throw new Error('invalid-state-health');
+  healthStatusOf(args.health);
   if (args.reconciliation !== undefined && !['applied', 'not-applied'].includes(args.reconciliation)) {
     throw new Error('invalid-reconciliation-state');
-  }
-  if (args.runtime !== undefined && args.runtime !== null
-    && (typeof args.runtime !== 'object' || Array.isArray(args.runtime))) {
-    throw new Error('invalid-public-runtime');
   }
 }
 
@@ -100,15 +170,16 @@ function routeProjection(route) {
 function projectPublicStatus(args) {
   validateProjectionArguments(args);
   const now = validDate(args.now);
-  const runtime = args.runtime === undefined ? null : args.runtime;
+  const healthStatus = healthStatusOf(args.health);
+  const runtime = projectPublicRuntime(args.runtime);
   if (args.state === null || args.state === undefined) {
-    const failClosed = args.health === 'fail-closed';
+    const failClosed = healthStatus === 'fail-closed';
     return {
       schemaVersion: 1,
       mode: failClosed ? 'anonymous' : 'uninitialized',
       activeSlot: null,
       anonymousReason: failClosed ? 'state-unavailable-fail-closed' : null,
-      stateHealth: args.health,
+      stateHealth: healthStatus,
       slots: [],
       runtime,
       updatedAt: now.toISOString(),
@@ -128,7 +199,7 @@ function projectPublicStatus(args) {
     mode: route.mode,
     activeSlot: route.activeSlot,
     anonymousReason: route.anonymousReason,
-    stateHealth: args.health,
+    stateHealth: healthStatus,
     slots: publicSlots(args.state),
     runtime,
     updatedAt: args.state.updatedAt,

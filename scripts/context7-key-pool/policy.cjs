@@ -18,6 +18,8 @@ const SIMPLE_ERROR_CLASSES = new Set([
   'transient',
   'input-invalid',
 ]);
+const PERIOD_BOUNDARY_WINDOW_MS = 72 * 60 * 60 * 1000;
+const PERIOD_BOUNDARY_SEARCH_ITERATIONS = 32;
 const STATE_KEYS = [
   'periodId',
   'timeZone',
@@ -118,33 +120,33 @@ function periodIdAt(now, timeZone) {
   return `${String(parts.year).padStart(4, '0')}-${String(parts.month).padStart(2, '0')}`;
 }
 
-function timeZoneOffsetMs(date, timeZone) {
-  const parts = dateTimeParts(date, timeZone, true);
-  const representedAsUtc = Date.UTC(
-    parts.year,
-    parts.month - 1,
-    parts.day,
-    parts.hour,
-    parts.minute,
-    parts.second,
-  );
-  return representedAsUtc - Math.trunc(date.getTime() / 1000) * 1000;
+function utcMonthApproximation(year, month) {
+  const approximation = new Date(0);
+  approximation.setUTCHours(0, 0, 0, 0);
+  approximation.setUTCFullYear(year, month - 1, 1);
+  return approximation.getTime();
 }
 
-function localDateTimeAtZone(year, month, day, timeZone) {
-  const targetAsUtc = Date.UTC(year, month - 1, day, 0, 0, 0, 0);
-  let candidateMs = targetAsUtc;
-  for (let iteration = 0; iteration < 6; iteration += 1) {
-    const offsetMs = timeZoneOffsetMs(new Date(candidateMs), timeZone);
-    const correctedMs = targetAsUtc - offsetMs;
-    if (correctedMs === candidateMs) break;
-    candidateMs = correctedMs;
+function firstInstantOfPeriod(previousPeriod, targetPeriod, year, month, timeZone) {
+  const approximationMs = utcMonthApproximation(year, month);
+  let beforeMs = approximationMs - PERIOD_BOUNDARY_WINDOW_MS;
+  let atOrAfterMs = approximationMs + PERIOD_BOUNDARY_WINDOW_MS;
+  if (periodIdAt(new Date(beforeMs), timeZone) >= targetPeriod
+    || periodIdAt(new Date(atOrAfterMs), timeZone) < targetPeriod) {
+    fail('period-boundary-search-window');
   }
-  const candidate = new Date(candidateMs);
-  const parts = dateTimeParts(candidate, timeZone, true);
-  if (parts.year !== year || parts.month !== month || parts.day !== day
-    || parts.hour !== 0 || parts.minute !== 0 || parts.second !== 0) {
-    fail('unrepresentable-period-boundary');
+  for (let iteration = 0;
+    iteration < PERIOD_BOUNDARY_SEARCH_ITERATIONS && atOrAfterMs - beforeMs > 1;
+    iteration += 1) {
+    const midpointMs = beforeMs + Math.floor((atOrAfterMs - beforeMs) / 2);
+    if (periodIdAt(new Date(midpointMs), timeZone) < targetPeriod) beforeMs = midpointMs;
+    else atOrAfterMs = midpointMs;
+  }
+  const candidate = new Date(atOrAfterMs);
+  if (atOrAfterMs - beforeMs !== 1
+    || periodIdAt(candidate, timeZone) !== targetPeriod
+    || periodIdAt(new Date(atOrAfterMs - 1), timeZone) !== previousPeriod) {
+    fail('period-boundary-search-failed');
   }
   return candidate;
 }
@@ -154,7 +156,8 @@ function nextPeriodStartAt(periodId, timeZone) {
   assertTimeZone(timeZone);
   const nextYear = month === 12 ? year + 1 : year;
   const nextMonth = month === 12 ? 1 : month + 1;
-  return localDateTimeAtZone(nextYear, nextMonth, 1, timeZone);
+  const targetPeriod = `${String(nextYear).padStart(4, '0')}-${String(nextMonth).padStart(2, '0')}`;
+  return firstInstantOfPeriod(periodId, targetPeriod, nextYear, nextMonth, timeZone);
 }
 
 function previousPeriodId(periodId) {

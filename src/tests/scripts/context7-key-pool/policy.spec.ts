@@ -127,6 +127,20 @@ describe('Context7 key pool policy', () => {
     expect(() => policy.nextPeriodStartAt('2026-13', 'UTC')).toThrow('invalid-period-id');
   });
 
+  it('returns the first instant of a new local month when midnight is skipped by a zone transition', () => {
+    const boundary = policy.nextPeriodStartAt('2023-09', 'America/Asuncion');
+    expect(boundary.toISOString()).toBe('2023-10-01T04:00:00.000Z');
+    expect(policy.periodIdAt(boundary, 'America/Asuncion')).toBe('2023-10');
+    expect(policy.periodIdAt(new Date(boundary.getTime() - 1), 'America/Asuncion')).toBe('2023-09');
+  });
+
+  it('preserves low Gregorian years without the Date.UTC 1900 offset rule', () => {
+    const boundary = policy.nextPeriodStartAt('0098-12', 'UTC');
+    expect(boundary.toISOString()).toBe('0099-01-01T00:00:00.000Z');
+    expect(policy.periodIdAt(boundary, 'UTC')).toBe('0099-01');
+    expect(policy.periodIdAt(new Date(boundary.getTime() - 1), 'UTC')).toBe('0098-12');
+  });
+
   it('reserves ordinals 1 through 950 on slot 1, rejects a stale 951st reservation, then routes to slot 2', () => {
     const original = freshState();
     let state = original;

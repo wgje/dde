@@ -28,11 +28,19 @@ const { STATUS_TOOL, projectPublicStatus } = require(statusPath) as {
   STATUS_TOOL: unknown;
   projectPublicStatus(args: {
     state: any | null;
-    health: 'uninitialized' | 'healthy' | 'recovered-replica' | 'fail-closed';
+    health: {
+      status: 'uninitialized' | 'healthy' | 'recovered-replica' | 'fail-closed';
+      reason?: string;
+    };
     activeRoute?: any;
     now: Date;
     reconciliation?: 'applied' | 'not-applied';
-    runtime?: Record<string, unknown> | null;
+    runtime?: {
+      instanceId_12: string;
+      startedAt: string;
+      keyedDispatches: number;
+      anonymousDispatches: number;
+    } | null;
   }): Record<string, unknown>;
 };
 
@@ -61,7 +69,21 @@ describe('Context7 public status projection', () => {
           anonymousReason: { type: ['string', 'null'] },
           stateHealth: { enum: ['uninitialized', 'healthy', 'recovered-replica', 'fail-closed'] },
           slots: { type: 'array' },
-          runtime: { type: ['object', 'null'] },
+          runtime: {
+            type: ['object', 'null'],
+            properties: {
+              instanceId_12: { type: 'string', pattern: '^[0-9a-f]{12}$' },
+              startedAt: {
+                type: 'string',
+                format: 'date-time',
+                pattern: '^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$',
+              },
+              keyedDispatches: { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
+              anonymousDispatches: { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
+            },
+            required: ['instanceId_12', 'startedAt', 'keyedDispatches', 'anonymousDispatches'],
+            additionalProperties: false,
+          },
           updatedAt: { type: 'string' },
         },
         additionalProperties: false,
@@ -80,10 +102,15 @@ describe('Context7 public status projection', () => {
     state.activeSlots.reverse();
     state.records[FP[0]].attemptedCalls = 9;
     state.records[FP[0]].successfulCalls = 7;
-    const runtime = { childMode: 'keyed', generation: 3 };
+    const runtime = {
+      instanceId_12: '12ab34cd56ef',
+      startedAt: '2026-07-15T00:00:00.000Z',
+      keyedDispatches: 3,
+      anonymousDispatches: 1,
+    };
     const output = projectPublicStatus({
       state,
-      health: 'healthy',
+      health: { status: 'healthy' },
       activeRoute: { kind: 'keyed', periodId: '2026-07', slot: 1, fingerprintSha256: FP[0] },
       now: NOW,
       runtime,
@@ -100,7 +127,8 @@ describe('Context7 public status projection', () => {
       runtime,
       updatedAt: NOW.toISOString(),
     }));
-    expect(output.runtime).toBe(runtime);
+    expect(output.runtime).toEqual(runtime);
+    expect(output.runtime).not.toBe(runtime);
     expect(output.slots).toEqual([
       {
         slot: 1,
@@ -133,12 +161,12 @@ describe('Context7 public status projection', () => {
 
   it('derives the active route when none is supplied and projects anonymous routing safely', () => {
     const state = freshState();
-    expect(projectPublicStatus({ state, health: 'recovered-replica', now: NOW })).toEqual(
+    expect(projectPublicStatus({ state, health: { status: 'recovered-replica' }, now: NOW })).toEqual(
       expect.objectContaining({ mode: 'keyed', activeSlot: 1, stateHealth: 'recovered-replica' }),
     );
     const anonymous = projectPublicStatus({
       state,
-      health: 'healthy',
+      health: { status: 'healthy' },
       activeRoute: { kind: 'anonymous', reason: 'all-keyed-slots-unavailable' },
       now: NOW,
     });
@@ -147,14 +175,14 @@ describe('Context7 public status projection', () => {
     }));
     expect(() => projectPublicStatus({
       state,
-      health: 'healthy',
+      health: { status: 'healthy' },
       activeRoute: { kind: 'anonymous', reason: 'query=fixture-secret' },
       now: NOW,
     })).toThrow('invalid-active-route');
   });
 
   it('projects uninitialized and unavailable fail-closed state without inventing slots', () => {
-    expect(projectPublicStatus({ state: null, health: 'uninitialized', now: NOW })).toEqual({
+    expect(projectPublicStatus({ state: null, health: { status: 'uninitialized' }, now: NOW })).toEqual({
       schemaVersion: 1,
       mode: 'uninitialized',
       activeSlot: null,
@@ -164,7 +192,7 @@ describe('Context7 public status projection', () => {
       runtime: null,
       updatedAt: NOW.toISOString(),
     });
-    expect(projectPublicStatus({ state: null, health: 'fail-closed', now: NOW })).toEqual({
+    expect(projectPublicStatus({ state: null, health: { status: 'fail-closed', reason: 'primary-unavailable' }, now: NOW })).toEqual({
       schemaVersion: 1,
       mode: 'anonymous',
       activeSlot: null,
@@ -180,7 +208,7 @@ describe('Context7 public status projection', () => {
     const state = freshState();
     const output = projectPublicStatus({
       state,
-      health: 'healthy',
+      health: { status: 'healthy' },
       activeRoute: policy.selectRoute(state, NOW),
       now: NOW,
       reconciliation: 'not-applied',
@@ -195,12 +223,93 @@ describe('Context7 public status projection', () => {
 
   it('projects an in-memory fail-closed state as anonymous with its fixed reason', () => {
     const state = policy.createFailClosedState({ identities, timeZone: 'UTC', now: NOW });
-    const output = projectPublicStatus({ state, health: 'fail-closed', now: NOW });
+    const output = projectPublicStatus({
+      state,
+      health: { status: 'fail-closed', reason: 'state-store-unavailable' },
+      now: NOW,
+    });
     expect(output).toEqual(expect.objectContaining({
       mode: 'anonymous',
       activeSlot: null,
       anonymousReason: 'state-unavailable-fail-closed',
       stateHealth: 'fail-closed',
     }));
+  });
+
+  it('accepts only store health snapshot objects and never projects their internal reason', () => {
+    const state = freshState();
+    const output = projectPublicStatus({
+      state,
+      health: { status: 'healthy', reason: 'recovered-from-private-replica' },
+      now: NOW,
+    });
+    expect(output.stateHealth).toBe('healthy');
+    expect(JSON.stringify(output)).not.toContain('recovered-from-private-replica');
+    for (const health of [
+      'healthy',
+      [],
+      {},
+      { status: 'unknown' },
+      { status: 'healthy', reason: 7 },
+    ]) {
+      expect(() => projectPublicStatus({ state, health, now: NOW } as any)).toThrow('invalid-state-health');
+    }
+  });
+
+  it('projects only the exact public runtime shape into a fresh object', () => {
+    const state = freshState();
+    const runtime = {
+      instanceId_12: 'abcdef012345',
+      startedAt: '2026-07-15T00:00:00.000Z',
+      keyedDispatches: 12,
+      anonymousDispatches: 2,
+    };
+    const output = projectPublicStatus({ state, health: { status: 'healthy' }, now: NOW, runtime });
+    expect(output.runtime).toEqual(runtime);
+    expect(output.runtime).not.toBe(runtime);
+    expect(Object.keys(output.runtime as object).sort()).toEqual(Object.keys(runtime).sort());
+  });
+
+  it('rejects non-public, malformed, cyclic, callable, and array runtime values', () => {
+    const state = freshState();
+    const validRuntime = {
+      instanceId_12: 'abcdef012345',
+      startedAt: '2026-07-15T00:00:00.000Z',
+      keyedDispatches: 12,
+      anonymousDispatches: 2,
+    };
+    const cyclic = { ...validRuntime } as Record<string, unknown>;
+    cyclic.self = cyclic;
+    const { anonymousDispatches: _omitted, ...missingField } = validRuntime;
+    const invalidRuntimeValues: unknown[] = [
+      {
+        ...validRuntime,
+        fullFingerprint: FP[0],
+        path: 'private-state-path',
+        query: 'private-query',
+        stderr: 'private-stderr',
+        CONTEXT7_API_KEY_1: 'synthetic-secret',
+      },
+      cyclic,
+      () => validRuntime,
+      [validRuntime],
+      missingField,
+      { ...validRuntime, instanceId_12: 'ABCDEF012345' },
+      { ...validRuntime, instanceId_12: 'abcdef01234' },
+      { ...validRuntime, startedAt: '2026-07-15T00:00:00Z' },
+      { ...validRuntime, startedAt: 'not-a-date' },
+      { ...validRuntime, keyedDispatches: -1 },
+      { ...validRuntime, keyedDispatches: 1.5 },
+      { ...validRuntime, keyedDispatches: Number.MAX_SAFE_INTEGER + 1 },
+      { ...validRuntime, anonymousDispatches: '2' },
+    ];
+    for (const runtime of invalidRuntimeValues) {
+      expect(() => projectPublicStatus({
+        state,
+        health: { status: 'healthy' },
+        now: NOW,
+        runtime,
+      } as any)).toThrow('invalid-public-runtime');
+    }
   });
 });
