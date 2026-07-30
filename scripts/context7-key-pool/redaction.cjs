@@ -13,6 +13,7 @@ function createRedactor(secretValues) {
     const seen = new WeakMap();
     const visit = (value, key = '') => {
       if (SECRET_FIELD.test(key)) return '[REDACTED_SECRET]';
+      if (typeof value === 'function') return '[Function]';
       if (typeof value === 'string') return cleanString(value);
       if (!value || typeof value !== 'object') return value;
       if (seen.has(value)) return '[Circular]';
@@ -31,7 +32,14 @@ function createRedactor(secretValues) {
         if ('cause' in value) copy.cause = visit(value.cause, 'cause');
       }
       for (const [childKey, child] of Object.entries(value)) {
-        if (!Object.hasOwn(copy, childKey)) copy[childKey] = visit(child, childKey);
+        const redactedChildKey = cleanString(childKey);
+        let destinationKey = redactedChildKey;
+        let collisionIndex = 2;
+        while (Object.hasOwn(copy, destinationKey)) {
+          destinationKey = `${redactedChildKey}#${collisionIndex}`;
+          collisionIndex += 1;
+        }
+        copy[destinationKey] = visit(child, childKey);
       }
       return copy;
     };

@@ -72,6 +72,7 @@ describe('Context7 credential boundary', () => {
   it('redacts nested strings, Error fields, circular values and every CONTEXT7_API_KEY prefix field', () => {
     const first = 'fixture-secret-alpha';
     const second = 'fixture-secret-bravo';
+    let toJsonCalls = 0;
     const error = new Error(`request failed for ${second}`, { cause: { detail: `cause=${first}` } });
     const input: Record<string, unknown> = {
       message: `selected=${first}`,
@@ -79,10 +80,25 @@ describe('Context7 credential boundary', () => {
       CONTEXT7_API_KEY_1: 'field-value-is-always-redacted',
       context7_api_key_backup: 'case-insensitive-field-redaction',
       error,
+      toJSON: () => {
+        toJsonCalls += 1;
+        return { leaked: first };
+      },
+      [first]: 'safe-alpha-value',
+      [second]: 'safe-bravo-value',
     };
     input.self = input;
     const output = createRedactor([first, second])(input) as Record<string, unknown>;
     const serialized = JSON.stringify(output);
+    expect(toJsonCalls).toBe(0);
+    expect(output.toJSON).toBe('[Function]');
+    expect({
+      '[REDACTED_SECRET]': output['[REDACTED_SECRET]'],
+      '[REDACTED_SECRET]#2': output['[REDACTED_SECRET]#2'],
+    }).toEqual({
+      '[REDACTED_SECRET]': 'safe-alpha-value',
+      '[REDACTED_SECRET]#2': 'safe-bravo-value',
+    });
     expect(serialized).not.toContain(first);
     expect(serialized).not.toContain(second);
     expect(output.CONTEXT7_API_KEY_1).toBe('[REDACTED_SECRET]');
