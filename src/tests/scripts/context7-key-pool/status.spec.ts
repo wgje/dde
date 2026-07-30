@@ -256,6 +256,39 @@ describe('Context7 public status projection', () => {
     }
   });
 
+  it('rejects accessor-backed public snapshots without invoking their getters', () => {
+    const state = freshState();
+    let runtimeGetterCalls = 0;
+    const runtime = {
+      get instanceId_12(): string {
+        runtimeGetterCalls += 1;
+        return runtimeGetterCalls === 1 ? 'abcdef012345' : 'f'.repeat(64);
+      },
+      startedAt: '2026-07-15T00:00:00.000Z',
+      keyedDispatches: 12,
+      anonymousDispatches: 2,
+    };
+    expect.soft(() => projectPublicStatus({
+      state,
+      health: { status: 'healthy' },
+      now: NOW,
+      runtime,
+    })).toThrow('invalid-public-runtime');
+    expect.soft(runtimeGetterCalls).toBe(0);
+
+    let healthGetterCalls = 0;
+    const health = Object.defineProperty({}, 'status', {
+      enumerable: true,
+      configurable: true,
+      get: () => {
+        healthGetterCalls += 1;
+        return healthGetterCalls === 1 ? 'healthy' : 'not-a-health-state';
+      },
+    });
+    expect.soft(() => projectPublicStatus({ state, health, now: NOW } as any)).toThrow('invalid-state-health');
+    expect.soft(healthGetterCalls).toBe(0);
+  });
+
   it('projects only the exact public runtime shape into a fresh object', () => {
     const state = freshState();
     const runtime = {
@@ -268,6 +301,59 @@ describe('Context7 public status projection', () => {
     expect(output.runtime).toEqual(runtime);
     expect(output.runtime).not.toBe(runtime);
     expect(Object.keys(output.runtime as object).sort()).toEqual(Object.keys(runtime).sort());
+  });
+
+  it('rejects coercive runtime identifiers and emits only JSON-safe descriptor values', () => {
+    const state = freshState();
+    const runtimeSchema = (STATUS_TOOL as {
+      outputSchema: {
+        properties: {
+          runtime: {
+            properties: {
+              instanceId_12: { pattern: string };
+              startedAt: { pattern: string };
+              keyedDispatches: { minimum: number; maximum: number };
+              anonymousDispatches: { minimum: number; maximum: number };
+            };
+          };
+        };
+      };
+    }).outputSchema.properties.runtime;
+    const validRuntime = {
+      instanceId_12: 'abcdef012345',
+      startedAt: '2026-07-15T00:00:00.000Z',
+      keyedDispatches: 12,
+      anonymousDispatches: 2,
+    };
+    const projectRuntime = (instanceId_12: unknown) => projectPublicStatus({
+      state,
+      health: { status: 'healthy' },
+      now: NOW,
+      runtime: { ...validRuntime, instanceId_12 },
+    } as any);
+
+    const validOutput = projectRuntime(validRuntime.instanceId_12);
+    const serialized = JSON.stringify(validOutput);
+    const projectedRuntime = validOutput.runtime as typeof validRuntime;
+    expect(JSON.parse(serialized).runtime).toEqual(validRuntime);
+    expect(typeof projectedRuntime.instanceId_12).toBe('string');
+    expect(projectedRuntime.instanceId_12).toMatch(new RegExp(runtimeSchema.properties.instanceId_12.pattern));
+    expect(typeof projectedRuntime.startedAt).toBe('string');
+    expect(projectedRuntime.startedAt).toMatch(new RegExp(runtimeSchema.properties.startedAt.pattern));
+    for (const counter of [projectedRuntime.keyedDispatches, projectedRuntime.anonymousDispatches]) {
+      expect(typeof counter).toBe('number');
+      expect(Number.isSafeInteger(counter)).toBe(true);
+      expect(counter).toBeGreaterThanOrEqual(runtimeSchema.properties.keyedDispatches.minimum);
+      expect(counter).toBeLessThanOrEqual(runtimeSchema.properties.keyedDispatches.maximum);
+    }
+
+    const coerciveObject = {
+      syntheticPrivateField: 'synthetic-private-value',
+      toString: () => validRuntime.instanceId_12,
+    };
+    for (const instanceId_12 of [123456789012, 123456789012n, coerciveObject]) {
+      expect.soft(() => projectRuntime(instanceId_12)).toThrow('invalid-public-runtime');
+    }
   });
 
   it('accepts runtime timestamps only when they match the descriptor pattern', () => {

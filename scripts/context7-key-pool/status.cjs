@@ -74,20 +74,36 @@ function validDate(value) {
   return new Date(value.getTime());
 }
 
+function isEnumerableDataDescriptor(descriptor) {
+  return descriptor !== undefined
+    && descriptor.enumerable === true
+    && Object.hasOwn(descriptor, 'value');
+}
+
 function healthStatusOf(health) {
   if (!health || typeof health !== 'object' || Array.isArray(health)) {
     throw new Error('invalid-state-health');
   }
   const prototype = Object.getPrototypeOf(health);
-  const keys = Object.keys(health);
+  const descriptors = Object.getOwnPropertyDescriptors(health);
+  const keys = Reflect.ownKeys(descriptors);
+  const statusDescriptor = descriptors.status;
+  const reasonDescriptor = descriptors.reason;
   if ((prototype !== Object.prototype && prototype !== null)
-    || !Object.hasOwn(health, 'status')
-    || keys.some(key => key !== 'status' && key !== 'reason')
-    || !HEALTH_VALUES.has(health.status)
-    || (Object.hasOwn(health, 'reason') && typeof health.reason !== 'string')) {
+    || keys.length < 1
+    || keys.length > 2
+    || keys.some(key => typeof key !== 'string' || (key !== 'status' && key !== 'reason'))
+    || !isEnumerableDataDescriptor(statusDescriptor)
+    || (reasonDescriptor !== undefined && !isEnumerableDataDescriptor(reasonDescriptor))) {
     throw new Error('invalid-state-health');
   }
-  return health.status;
+  const status = statusDescriptor.value;
+  const reason = reasonDescriptor?.value;
+  if (!HEALTH_VALUES.has(status)
+    || (reasonDescriptor !== undefined && typeof reason !== 'string')) {
+    throw new Error('invalid-state-health');
+  }
+  return status;
 }
 
 function projectPublicRuntime(runtime) {
@@ -96,24 +112,33 @@ function projectPublicRuntime(runtime) {
     throw new Error('invalid-public-runtime');
   }
   const prototype = Object.getPrototypeOf(runtime);
-  const keys = Object.keys(runtime).sort();
-  const expectedKeys = [...RUNTIME_KEYS].sort();
+  const descriptors = Object.getOwnPropertyDescriptors(runtime);
+  const keys = Reflect.ownKeys(descriptors);
   if ((prototype !== Object.prototype && prototype !== null)
-    || keys.length !== expectedKeys.length
-    || keys.some((key, index) => key !== expectedKeys[index])) {
+    || keys.length !== RUNTIME_KEYS.length
+    || keys.some(key => typeof key !== 'string' || !RUNTIME_KEYS.includes(key))
+    || RUNTIME_KEYS.some(key => !isEnumerableDataDescriptor(descriptors[key]))) {
     throw new Error('invalid-public-runtime');
   }
-  if (!RUNTIME_INSTANCE_ID.test(runtime.instanceId_12)
-    || !isCanonicalIso(runtime.startedAt)
-    || !isPublicCounter(runtime.keyedDispatches)
-    || !isPublicCounter(runtime.anonymousDispatches)) {
+  const instanceId_12 = descriptors.instanceId_12.value;
+  const startedAt = descriptors.startedAt.value;
+  const keyedDispatches = descriptors.keyedDispatches.value;
+  const anonymousDispatches = descriptors.anonymousDispatches.value;
+  if (typeof instanceId_12 !== 'string'
+    || !RUNTIME_INSTANCE_ID.test(instanceId_12)
+    || typeof startedAt !== 'string'
+    || !isCanonicalIso(startedAt)
+    || typeof keyedDispatches !== 'number'
+    || !isPublicCounter(keyedDispatches)
+    || typeof anonymousDispatches !== 'number'
+    || !isPublicCounter(anonymousDispatches)) {
     throw new Error('invalid-public-runtime');
   }
   return {
-    instanceId_12: runtime.instanceId_12,
-    startedAt: runtime.startedAt,
-    keyedDispatches: runtime.keyedDispatches,
-    anonymousDispatches: runtime.anonymousDispatches,
+    instanceId_12,
+    startedAt,
+    keyedDispatches,
+    anonymousDispatches,
   };
 }
 
@@ -133,10 +158,13 @@ function validateProjectionArguments(args) {
   }
   const allowed = new Set(['state', 'health', 'activeRoute', 'now', 'reconciliation', 'runtime']);
   if (Object.keys(args).some(key => !allowed.has(key))) throw new Error('invalid-status-arguments');
-  healthStatusOf(args.health);
+  const healthStatus = healthStatusOf(args.health);
   if (args.reconciliation !== undefined && !['applied', 'not-applied'].includes(args.reconciliation)) {
     throw new Error('invalid-reconciliation-state');
   }
+  const now = validDate(args.now);
+  const runtime = projectPublicRuntime(args.runtime);
+  return { healthStatus, now, runtime };
 }
 
 function publicSlots(state) {
@@ -171,10 +199,7 @@ function routeProjection(route) {
 }
 
 function projectPublicStatus(args) {
-  validateProjectionArguments(args);
-  const now = validDate(args.now);
-  const healthStatus = healthStatusOf(args.health);
-  const runtime = projectPublicRuntime(args.runtime);
+  const { healthStatus, now, runtime } = validateProjectionArguments(args);
   if (args.state === null || args.state === undefined) {
     const failClosed = healthStatus === 'fail-closed';
     return {
