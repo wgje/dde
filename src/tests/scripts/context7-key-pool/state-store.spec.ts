@@ -341,6 +341,29 @@ describe('Context7 key-pool state store', () => {
     const files = await readdir(stateDir);
     expect(files.filter(file => /^(state|state\.backup)\.json\.corrupt\./.test(file))).toHaveLength(2);
 
+    const archiveRetryDir = await makeStateDir();
+    const archiveRetryBackup = join(archiveRetryDir, 'state.backup.json');
+    await writeFile(join(archiveRetryDir, 'state.json'), JSON.stringify(invalid), 'utf8');
+    await writeFile(archiveRetryBackup, JSON.stringify(invalid), 'utf8');
+    const archiveRetryOriginalRename = fsPromisesModule.rename.bind(fsPromisesModule);
+    let archiveRenameAttempts = 0;
+    const archiveRetrySpy = vi.spyOn(fsPromisesModule, 'rename').mockImplementation(async (from, to) => {
+      if (String(from) === archiveRetryBackup
+        && String(to).includes('state.backup.json.corrupt.')) {
+        archiveRenameAttempts += 1;
+        if (archiveRenameAttempts < 5) {
+          throw Object.assign(new Error('injected-archive-contention'), { code: 'EPERM' });
+        }
+      }
+      return archiveRetryOriginalRename(from, to);
+    });
+
+    const archiveRetried = await fixedStore(archiveRetryDir).read(context);
+    archiveRetrySpy.mockRestore();
+
+    expect(archiveRetried.stateRevision).toBe(8);
+    expect(archiveRenameAttempts).toBe(5);
+
     const interruptedDir = await makeStateDir();
     await writeFile(join(interruptedDir, 'state.json'), JSON.stringify(invalid), 'utf8');
     await writeFile(
@@ -364,6 +387,11 @@ describe('Context7 key-pool state store', () => {
 
     await writeFile(
       join(interruptedDir, 'state.json.corrupt.rev-9007199254740992.at-0-00000000-0000-4000-8000-000000000000'),
+      '{}',
+      'utf8',
+    );
+    await writeFile(
+      join(interruptedDir, 'state.json.corrupt.rev-9007199254740991.at-0-00000000-0000-4000-8000-000000000001'),
       '{}',
       'utf8',
     );
@@ -441,6 +469,7 @@ describe('Context7 key-pool state store', () => {
     const stateDir = await makeStateDir();
     const lockDir = join(stateDir, 'state.lock');
     const ownerPath = join(lockDir, 'owner.json');
+    const old = new Date('2000-01-01T00:00:00.000Z');
     await mkdir(lockDir);
     const owner = {
       ownerId: '11111111-1111-4111-8111-111111111111',
@@ -448,7 +477,6 @@ describe('Context7 key-pool state store', () => {
       claimedAt: '2000-01-01T00:00:00.000Z',
     };
     await writeFile(ownerPath, JSON.stringify(owner), 'utf8');
-    const old = new Date('2000-01-01T00:00:00.000Z');
     await utimes(ownerPath, old, old);
     await utimes(lockDir, old, old);
     const store = fixedStore(stateDir, {
@@ -463,9 +491,114 @@ describe('Context7 key-pool state store', () => {
 
     expect(preview.health.status).toBe('fail-closed');
     expect(JSON.parse(await readFile(ownerPath, 'utf8'))).toEqual(owner);
+
+    const liveCandidateStateDir = await makeStateDir();
+    const liveCandidateOwner = {
+      ownerId: '12121212-1212-4121-8121-121212121212',
+      pid: process.pid,
+      claimedAt: '2000-01-01T00:00:00.000Z',
+    };
+    const liveCandidatePath = join(
+      liveCandidateStateDir,
+      `.state.lock.candidate-${liveCandidateOwner.ownerId}`,
+    );
+    await mkdir(liveCandidatePath);
+    await writeFile(
+      join(liveCandidatePath, 'owner.json'),
+      JSON.stringify(liveCandidateOwner),
+      'utf8',
+    );
+    await utimes(liveCandidatePath, old, old);
+    const liveCandidateRead = await fixedStore(liveCandidateStateDir, {
+      stateDir: liveCandidateStateDir,
+      staleLockMs: 1,
+      processExists: () => true,
+    }).read(context);
+
+    expect(liveCandidateRead.health.status).toBe('healthy');
+    expect((await stat(liveCandidatePath)).isDirectory()).toBe(true);
+
+    const malformedCandidateStateDir = await makeStateDir();
+    const malformedCandidatePath = join(
+      malformedCandidateStateDir,
+      '.state.lock.candidate-not-a-uuid',
+    );
+    await mkdir(malformedCandidatePath);
+    await utimes(malformedCandidatePath, old, old);
+    const malformedCandidateRead = await fixedStore(malformedCandidateStateDir, {
+      stateDir: malformedCandidateStateDir,
+      staleLockMs: 1,
+      processExists: () => true,
+    }).read(context);
+
+    expect(malformedCandidateRead.health.status).toBe('healthy');
+    expect((await stat(malformedCandidatePath)).isDirectory()).toBe(true);
+
+    const mismatchedCandidateStateDir = await makeStateDir();
+    const mismatchedCandidatePath = join(
+      mismatchedCandidateStateDir,
+      '.state.lock.candidate-13131313-1313-4131-8131-131313131313',
+    );
+    await mkdir(mismatchedCandidatePath);
+    await writeFile(join(mismatchedCandidatePath, 'owner.json'), JSON.stringify({
+      ownerId: '14141414-1414-4141-8141-141414141414',
+      pid: process.pid,
+      claimedAt: '2000-01-01T00:00:00.000Z',
+    }), 'utf8');
+    await utimes(mismatchedCandidatePath, old, old);
+    const mismatchedCandidateRead = await fixedStore(mismatchedCandidateStateDir, {
+      stateDir: mismatchedCandidateStateDir,
+      staleLockMs: 1,
+      processExists: () => true,
+    }).read(context);
+
+    expect(mismatchedCandidateRead.health.status).toBe('healthy');
+    expect((await stat(mismatchedCandidatePath)).isDirectory()).toBe(true);
   });
 
   it('quarantines a proven-dead stale lock and token-checks release', async () => {
+    const abaDir = await makeStateDir();
+    const abaLockDir = join(abaDir, 'state.lock');
+    const deadOwner = {
+      ownerId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      pid: 414_141,
+      claimedAt: '2000-01-01T00:00:00.000Z',
+    };
+    const liveReplacement = {
+      ownerId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      pid: process.pid,
+      claimedAt: NOW_ISO,
+    };
+    await mkdir(abaLockDir);
+    await writeFile(join(abaLockDir, 'owner.json'), JSON.stringify(deadOwner), 'utf8');
+    let replacementPublished = false;
+    const abaStore = fixedStore(abaDir, {
+      stateDir: abaDir,
+      lockWaitMs: 30,
+      staleLockMs: 1,
+      processExists: async pid => {
+        if (pid === deadOwner.pid && !replacementPublished) {
+          replacementPublished = true;
+          await fsPromisesModule.rename(
+            abaLockDir,
+            join(abaDir, '.state.lock.test-displaced-dead-owner'),
+          );
+          await mkdir(abaLockDir);
+          await writeFile(join(abaLockDir, 'owner.json'), JSON.stringify(liveReplacement), 'utf8');
+          await writeFile(join(abaLockDir, 'live-owner-sentinel'), 'live', 'utf8');
+          return false;
+        }
+        return pid === liveReplacement.pid;
+      },
+      sleep: milliseconds => new Promise(resolve => setTimeout(resolve, Math.min(milliseconds, 5))),
+    });
+
+    const abaSnapshot = await abaStore.read(context);
+
+    expect(abaSnapshot.health.status).toBe('fail-closed');
+    expect(JSON.parse(await readFile(join(abaLockDir, 'owner.json'), 'utf8'))).toEqual(liveReplacement);
+    expect(await readFile(join(abaLockDir, 'live-owner-sentinel'), 'utf8')).toBe('live');
+
     const stateDir = await makeStateDir();
     const lockDir = join(stateDir, 'state.lock');
     const ownerPath = join(lockDir, 'owner.json');
@@ -479,6 +612,33 @@ describe('Context7 key-pool state store', () => {
     const old = new Date('2000-01-01T00:00:00.000Z');
     await utimes(ownerPath, old, old);
     await utimes(lockDir, old, old);
+    const abandonedCandidateOwner = {
+      ownerId: '15151515-1515-4151-8151-151515151515',
+      pid: 434_343,
+      claimedAt: '2000-01-01T00:00:00.000Z',
+    };
+    const abandonedCandidatePath = join(
+      stateDir,
+      `.state.lock.candidate-${abandonedCandidateOwner.ownerId}`,
+    );
+    await mkdir(abandonedCandidatePath);
+    await writeFile(
+      join(abandonedCandidatePath, 'owner.json'),
+      JSON.stringify(abandonedCandidateOwner),
+      'utf8',
+    );
+    await utimes(abandonedCandidatePath, old, old);
+    const originalRm = fsPromisesModule.rm.bind(fsPromisesModule);
+    let staleCleanupAttempts = 0;
+    const rmSpy = vi.spyOn(fsPromisesModule, 'rm').mockImplementation(async (target, options) => {
+      if (String(target).includes('.state.lock.quarantine-stale-')) {
+        staleCleanupAttempts += 1;
+        if (staleCleanupAttempts < 5) {
+          throw Object.assign(new Error('injected-stale-cleanup-contention'), { code: 'EPERM' });
+        }
+      }
+      return originalRm(target, options);
+    });
     const originalReconcile = policy.reconcileState;
     policy.reconcileState = args => {
       const state = originalReconcile(args);
@@ -493,7 +653,7 @@ describe('Context7 key-pool state store', () => {
       const store = fixedStore(stateDir, {
         stateDir,
         staleLockMs: 1,
-        processExists: pid => pid !== 424_242,
+        processExists: pid => ![424_242, abandonedCandidateOwner.pid].includes(pid),
       });
 
       const snapshot = await store.read(context);
@@ -503,8 +663,11 @@ describe('Context7 key-pool state store', () => {
         ownerId: '33333333-3333-4333-8333-333333333333',
       });
       await expect(stat(join(lockDir, 'dead-owner-sentinel'))).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(stat(abandonedCandidatePath)).rejects.toMatchObject({ code: 'ENOENT' });
       expect((await readdir(stateDir)).some(file => file.includes('dead-owner') && file.includes('quarantine'))).toBe(false);
+      expect(staleCleanupAttempts).toBe(5);
     } finally {
+      rmSpy.mockRestore();
       policy.reconcileState = originalReconcile;
     }
   });
@@ -530,6 +693,24 @@ describe('Context7 key-pool state store', () => {
 
     expect(preview.health.status).toBe('fail-closed');
     expect(await readFile(ownerPath, 'utf8')).toBe('{malformed');
+
+    const guardedDir = await makeStateDir();
+    const guardPath = join(guardedDir, 'state.lock.guard');
+    await mkdir(guardPath);
+    await utimes(guardPath, old, old);
+    const guardedStore = fixedStore(guardedDir, {
+      stateDir: guardedDir,
+      lockWaitMs: 30,
+      sleep: milliseconds => new Promise(resolve => setTimeout(resolve, Math.min(milliseconds, 5))),
+    });
+
+    const guardedPreview = await guardedStore.preview(context);
+
+    expect(guardedPreview).toMatchObject({
+      route: { kind: 'anonymous', reason: 'state-unavailable-fail-closed' },
+      health: { status: 'fail-closed' },
+    });
+    expect((await stat(guardPath)).isDirectory()).toBe(true);
   });
 
   it('rejects keyed dispatch when either mirrored replace cannot complete', async () => {
@@ -706,6 +887,23 @@ describe('Context7 key-pool state store', () => {
         return JSON.parse(JSON.stringify(value).replaceAll(syntheticSecret, '[redacted]'));
       },
     });
+    const eventPath = join(stateDir, 'events.jsonl');
+    const originalRename = fsPromisesModule.rename.bind(fsPromisesModule);
+    let rotationRetryAttempts = 0;
+    let firstRotationCompleted = false;
+    const rotationSpy = vi.spyOn(fsPromisesModule, 'rename').mockImplementation(async (from, to) => {
+      if (String(from) === eventPath
+        && String(to).includes('events.')
+        && String(to).endsWith('.jsonl')
+        && !firstRotationCompleted) {
+        rotationRetryAttempts += 1;
+        if (rotationRetryAttempts < 5) {
+          throw Object.assign(new Error('injected-event-rotation-contention'), { code: 'EPERM' });
+        }
+        firstRotationCompleted = true;
+      }
+      return originalRename(from, to);
+    });
 
     for (let attemptOrdinal = 1; attemptOrdinal <= 8; attemptOrdinal += 1) {
       await store.appendEvent({
@@ -719,6 +917,7 @@ describe('Context7 key-pool state store', () => {
         result: syntheticSecret,
       });
     }
+    rotationSpy.mockRestore();
 
     const eventFiles = (await readdir(stateDir)).filter(file => file.startsWith('events') && file.endsWith('.jsonl'));
     expect(eventFiles.length).toBeGreaterThan(1);
@@ -729,6 +928,7 @@ describe('Context7 key-pool state store', () => {
     expect(persisted).not.toContain('"query"');
     expect(persisted).toContain(rawFingerprint.slice(0, 12));
     expect(redactCalls).toBe(8);
+    expect(rotationRetryAttempts).toBe(5);
   });
 
   it('inspectStored is non-mutating and reports reconciliation not applied', async () => {

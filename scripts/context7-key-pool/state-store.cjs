@@ -15,6 +15,7 @@ const RETRYABLE_REPLACE_CODES = new Set(['EPERM', 'EACCES', 'EBUSY', 'ENOTEMPTY'
 const PRIMARY_NAME = 'state.json';
 const BACKUP_NAME = 'state.backup.json';
 const LOCK_NAME = 'state.lock';
+const GUARD_NAME = 'state.lock.guard';
 const OWNER_NAME = 'owner.json';
 const EVENT_NAME = 'events.jsonl';
 
@@ -283,6 +284,14 @@ function parseOwnerMetadata(value) {
   return { ownerId: value.ownerId, pid: value.pid, claimedAt: value.claimedAt };
 }
 
+function ownersEqual(left, right) {
+  return left !== null
+    && right !== null
+    && left.ownerId === right.ownerId
+    && left.pid === right.pid
+    && left.claimedAt === right.claimedAt;
+}
+
 async function readOwnerMetadata(lockDir) {
   let serialized;
   try {
@@ -318,21 +327,28 @@ async function directoryExists(directoryPath) {
   }
 }
 
-async function removeQuarantinedDirectory(directoryPath) {
-  try {
-    await fs.rm(directoryPath, { recursive: true, force: false });
-  } catch {
-    fail('state-lock-cleanup-failed');
+async function removeQuarantinedDirectory(directoryPath, sleep) {
+  for (let attempt = 1; attempt <= 5; attempt += 1) {
+    try {
+      await fs.rm(directoryPath, { recursive: true, force: false });
+      return;
+    } catch (error) {
+      const retryable = error && RETRYABLE_REPLACE_CODES.has(error.code);
+      if (!retryable || attempt === 5) fail('state-lock-cleanup-failed');
+      await sleep(Math.min(25, attempt * 5));
+    }
   }
+  fail('state-lock-cleanup-failed');
 }
 
 function createLockManager({ stateDir, lockWaitMs, staleLockMs, sleep, processExists }) {
   const publishedPath = path.join(stateDir, LOCK_NAME);
+  const guardPath = path.join(stateDir, GUARD_NAME);
 
-  async function renamePublishedToQuarantine(quarantinePath, failureCode) {
+  async function renamePathToQuarantine(sourcePath, quarantinePath, failureCode) {
     for (let attempt = 1; attempt <= 5; attempt += 1) {
       try {
-        await fs.rename(publishedPath, quarantinePath);
+        await fs.rename(sourcePath, quarantinePath);
         return true;
       } catch (error) {
         if (error && error.code === 'ENOENT') return false;
@@ -344,13 +360,26 @@ function createLockManager({ stateDir, lockWaitMs, staleLockMs, sleep, processEx
     fail(failureCode);
   }
 
-  async function quarantinePublished(reason) {
+  async function quarantinePublished(reason, expectedOwner) {
     const quarantinePath = path.join(
       stateDir,
       `.state.lock.quarantine-${reason}-${crypto.randomUUID()}`,
     );
-    if (!await renamePublishedToQuarantine(quarantinePath, 'state-lock-quarantine-failed')) return false;
-    await removeQuarantinedDirectory(quarantinePath);
+    if (!await renamePathToQuarantine(
+      publishedPath,
+      quarantinePath,
+      'state-lock-quarantine-failed',
+    )) return false;
+    const quarantinedOwner = await readOwnerMetadata(quarantinePath);
+    if (!ownersEqual(quarantinedOwner, expectedOwner)) {
+      try {
+        await fs.rename(quarantinePath, publishedPath);
+      } catch {
+        // The acquisition guard remains the fail-closed fence until this operation unwinds.
+      }
+      fail('state-lock-quarantine-owner-mismatch');
+    }
+    await removeQuarantinedDirectory(quarantinePath, sleep);
     return true;
   }
 
@@ -361,29 +390,33 @@ function createLockManager({ stateDir, lockWaitMs, staleLockMs, sleep, processEx
     } catch {
       fail('state-lock-read-failed');
     }
-    const nowMs = Date.now();
+    const candidatePrefix = '.state.lock.candidate-';
     for (const entry of entries) {
-      if (!entry.isDirectory() || !entry.name.startsWith('.state.lock.candidate-')) continue;
+      if (!entry.isDirectory() || !entry.name.startsWith(candidatePrefix)) continue;
+      const ownerId = entry.name.slice(candidatePrefix.length);
+      if (!UUID.test(ownerId)) continue;
       const candidatePath = path.join(stateDir, entry.name);
-      let metadata;
-      try {
-        metadata = await fs.stat(candidatePath);
-      } catch (error) {
-        if (error && error.code === 'ENOENT') continue;
-        fail('state-lock-read-failed');
-      }
-      if (nowMs - metadata.mtimeMs < staleLockMs) continue;
+      const owner = await readOwnerMetadata(candidatePath);
+      if (owner === null || owner.ownerId !== ownerId || !await ownerIsProvenDead(owner)) continue;
       const quarantinePath = path.join(
         stateDir,
-        `.state.lock.quarantine-candidate-${crypto.randomUUID()}`,
+        `.state.lock.quarantine-candidate-${owner.ownerId}-${crypto.randomUUID()}`,
       );
-      try {
-        await fs.rename(candidatePath, quarantinePath);
-      } catch (error) {
-        if (error && error.code === 'ENOENT') continue;
-        fail('state-lock-quarantine-failed');
+      if (!await renamePathToQuarantine(
+        candidatePath,
+        quarantinePath,
+        'state-lock-quarantine-failed',
+      )) continue;
+      const quarantinedOwner = await readOwnerMetadata(quarantinePath);
+      if (!ownersEqual(quarantinedOwner, owner)) {
+        try {
+          await fs.rename(quarantinePath, candidatePath);
+        } catch {
+          fail('state-lock-quarantine-failed');
+        }
+        continue;
       }
-      await removeQuarantinedDirectory(quarantinePath);
+      await removeQuarantinedDirectory(quarantinePath, sleep);
     }
   }
 
@@ -422,10 +455,102 @@ function createLockManager({ stateDir, lockWaitMs, staleLockMs, sleep, processEx
     try {
       await writeSyncedFile(path.join(candidatePath, OWNER_NAME), canonicalJson(owner));
     } catch (error) {
-      await removeQuarantinedDirectory(candidatePath).catch(() => {});
+      await removeQuarantinedDirectory(candidatePath, sleep).catch(() => {});
       throw error;
     }
     return candidatePath;
+  }
+
+  async function acquireGuard() {
+    const deadline = Date.now() + lockWaitMs;
+    while (true) {
+      try {
+        await fs.mkdir(guardPath);
+        return;
+      } catch (error) {
+        const contention = error && [
+          'EEXIST',
+          'ENOTEMPTY',
+          'EPERM',
+          'EACCES',
+          'EBUSY',
+        ].includes(error.code);
+        if (!contention) fail('state-lock-guard-acquire-failed');
+      }
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) fail('state-lock-guard-timeout');
+      await sleep(Math.min(25, remaining));
+    }
+  }
+
+  async function releaseGuard() {
+    for (let attempt = 1; attempt <= 5; attempt += 1) {
+      try {
+        await fs.rmdir(guardPath);
+        return;
+      } catch (error) {
+        const retryable = error && RETRYABLE_REPLACE_CODES.has(error.code);
+        if (!retryable || attempt === 5) fail('state-lock-guard-release-failed');
+        await sleep(Math.min(25, attempt * 5));
+      }
+    }
+    fail('state-lock-guard-release-failed');
+  }
+
+  async function withGuard(callback) {
+    await acquireGuard();
+    let result;
+    let operationError;
+    try {
+      result = await callback();
+    } catch (error) {
+      operationError = error;
+    }
+    try {
+      await releaseGuard();
+    } catch (releaseError) {
+      if (!operationError) operationError = releaseError;
+    }
+    if (operationError) throw operationError;
+    return result;
+  }
+
+  async function tryAcquireUnderGuard(owner) {
+    await cleanStaleCandidates();
+    const candidatePath = await createCandidate(owner);
+    let publishError;
+    try {
+      await fs.rename(candidatePath, publishedPath);
+      return true;
+    } catch (error) {
+      publishError = error;
+    }
+
+    const published = await publishedOwnerOrFailure();
+    if (published.kind === 'owned' && await ownerIsProvenDead(published.owner)) {
+      const confirmed = await publishedOwnerOrFailure();
+      if (confirmed.kind === 'owned'
+        && ownersEqual(confirmed.owner, published.owner)
+        && await ownerIsProvenDead(confirmed.owner)) {
+        await quarantinePublished('stale', confirmed.owner);
+        try {
+          await fs.rename(candidatePath, publishedPath);
+          return true;
+        } catch (error) {
+          await removeQuarantinedDirectory(candidatePath, sleep).catch(() => {});
+          if (error && RETRYABLE_REPLACE_CODES.has(error.code)) return false;
+          fail('state-lock-publish-failed');
+        }
+      }
+    }
+
+    await removeQuarantinedDirectory(candidatePath, sleep).catch(() => {});
+    if (published.kind === 'missing'
+      && publishError
+      && !['EEXIST', 'ENOTEMPTY', 'EPERM', 'EACCES', 'EBUSY'].includes(publishError.code)) {
+      fail('state-lock-publish-failed');
+    }
+    return false;
   }
 
   async function acquire() {
@@ -434,7 +559,6 @@ function createLockManager({ stateDir, lockWaitMs, staleLockMs, sleep, processEx
     } catch {
       fail('state-lock-directory-failed');
     }
-    await cleanStaleCandidates();
     const deadline = Date.now() + lockWaitMs;
     const owner = {
       ownerId: crypto.randomUUID(),
@@ -443,23 +567,14 @@ function createLockManager({ stateDir, lockWaitMs, staleLockMs, sleep, processEx
     };
 
     while (true) {
-      const candidatePath = await createCandidate(owner);
-      try {
-        await fs.rename(candidatePath, publishedPath);
-        return owner;
-      } catch (publishError) {
-        await removeQuarantinedDirectory(candidatePath).catch(() => {});
-        const published = await publishedOwnerOrFailure();
-        if (published.kind === 'owned' && await ownerIsProvenDead(published.owner)) {
-          await quarantinePublished('stale');
-          continue;
-        }
-        if (published.kind === 'missing'
-          && publishError
-          && !['EEXIST', 'ENOTEMPTY', 'EPERM', 'EACCES', 'EBUSY'].includes(publishError.code)) {
-          fail('state-lock-publish-failed');
-        }
+      const observed = await publishedOwnerOrFailure();
+      if (observed.kind === 'owned' && !await ownerIsProvenDead(observed.owner)) {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) fail('state-lock-timeout');
+        await sleep(Math.min(25, remaining));
+        continue;
       }
+      if (await withGuard(() => tryAcquireUnderGuard(owner))) return owner;
 
       const remaining = deadline - Date.now();
       if (remaining <= 0) fail('state-lock-timeout');
@@ -469,14 +584,18 @@ function createLockManager({ stateDir, lockWaitMs, staleLockMs, sleep, processEx
 
   async function release(owner) {
     const published = await publishedOwnerOrFailure();
-    if (published.kind === 'missing' || published.owner.ownerId !== owner.ownerId) return;
+    if (published.kind === 'missing' || !ownersEqual(published.owner, owner)) return;
     const quarantinePath = path.join(
       stateDir,
       `.state.lock.quarantine-release-${owner.ownerId}-${crypto.randomUUID()}`,
     );
-    if (!await renamePublishedToQuarantine(quarantinePath, 'state-lock-release-failed')) return;
+    if (!await renamePathToQuarantine(
+      publishedPath,
+      quarantinePath,
+      'state-lock-release-failed',
+    )) return;
     const quarantinedOwner = await readOwnerMetadata(quarantinePath);
-    if (quarantinedOwner === null || quarantinedOwner.ownerId !== owner.ownerId) {
+    if (!ownersEqual(quarantinedOwner, owner)) {
       try {
         await fs.rename(quarantinePath, publishedPath);
       } catch {
@@ -484,7 +603,7 @@ function createLockManager({ stateDir, lockWaitMs, staleLockMs, sleep, processEx
       }
       return;
     }
-    await removeQuarantinedDirectory(quarantinePath);
+    await removeQuarantinedDirectory(quarantinePath, sleep);
   }
 
   return { acquire, release };
@@ -511,10 +630,15 @@ async function persistRecoveredEnvelope(
         stateDir,
         `${path.basename(replica.filePath)}.corrupt.${revisionSegment}.at-${Date.now()}-${crypto.randomUUID()}`,
       );
-      try {
-        await fs.rename(replica.filePath, archivePath);
-      } catch {
-        fail('state-corrupt-archive-failed');
+      for (let attempt = 1; attempt <= 5; attempt += 1) {
+        try {
+          await fs.rename(replica.filePath, archivePath);
+          break;
+        } catch (error) {
+          const retryable = error && RETRYABLE_REPLACE_CODES.has(error.code);
+          if (!retryable || attempt === 5) fail('state-corrupt-archive-failed');
+          await sleep(Math.min(25, attempt * 5));
+        }
       }
     }
     await replacePreparedFile(tempPath, destinationPath, sleep);
@@ -560,8 +684,13 @@ async function archivedRevisionFloor(stateDir) {
   let maximum = null;
   for (const entry of entries) {
     if (!entry.isFile()) continue;
-    const revision = revisionFromCorruptArchiveName(entry.name);
-    if (revision !== null && (maximum === null || revision > maximum)) maximum = revision;
+    const namedRevision = revisionFromCorruptArchiveName(entry.name);
+    if (namedRevision === null) continue;
+    const archivedReplica = await readReplica(path.join(stateDir, entry.name));
+    if (archivedReplica.kind === 'io-error') fail('state-corrupt-archive-scan-failed');
+    if (archivedReplica.kind === 'missing'
+      || archivedReplica.observedRevision !== namedRevision) continue;
+    if (maximum === null || namedRevision > maximum) maximum = namedRevision;
   }
   return maximum;
 }
@@ -1013,10 +1142,15 @@ function createStateStore(rawOptions) {
             options.stateDir,
             `events.${timestamp}-${crypto.randomUUID()}.jsonl`,
           );
-          try {
-            await fs.rename(eventPath, rotatedPath);
-          } catch {
-            fail('state-event-rotate-failed');
+          for (let attempt = 1; attempt <= 5; attempt += 1) {
+            try {
+              await fs.rename(eventPath, rotatedPath);
+              break;
+            } catch (error) {
+              const retryable = error && RETRYABLE_REPLACE_CODES.has(error.code);
+              if (!retryable || attempt === 5) fail('state-event-rotate-failed');
+              await options.sleep(Math.min(25, attempt * 5));
+            }
           }
         }
         let handle;
