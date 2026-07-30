@@ -270,6 +270,42 @@ describe('Context7 public status projection', () => {
     expect(Object.keys(output.runtime as object).sort()).toEqual(Object.keys(runtime).sort());
   });
 
+  it('accepts runtime timestamps only when they match the descriptor pattern', () => {
+    const state = freshState();
+    const startedAtPatternSource = (STATUS_TOOL as {
+      outputSchema: {
+        properties: {
+          runtime: { properties: { startedAt: { pattern: string } } };
+        };
+      };
+    }).outputSchema.properties.runtime.properties.startedAt.pattern;
+    const startedAtPattern = new RegExp(startedAtPatternSource);
+    const validStartedAt = '2026-07-15T00:00:00.000Z';
+    expect(validStartedAt).toMatch(startedAtPattern);
+
+    const projectRuntime = (startedAt: string) => projectPublicStatus({
+      state,
+      health: { status: 'healthy' },
+      now: NOW,
+      runtime: {
+        instanceId_12: 'abcdef012345',
+        startedAt,
+        keyedDispatches: 12,
+        anonymousDispatches: 2,
+      },
+    }).runtime as { startedAt: string };
+
+    const projectedRuntimes = [projectRuntime(validStartedAt)];
+    for (const runtime of projectedRuntimes) {
+      expect(runtime.startedAt).toMatch(startedAtPattern);
+    }
+
+    const extendedYear = '+010000-01-01T00:00:00.000Z';
+    expect(new Date(extendedYear).toISOString()).toBe(extendedYear);
+    expect(extendedYear).not.toMatch(startedAtPattern);
+    expect(() => projectRuntime(extendedYear)).toThrow('invalid-public-runtime');
+  });
+
   it('rejects non-public, malformed, cyclic, callable, and array runtime values', () => {
     const state = freshState();
     const validRuntime = {

@@ -6,6 +6,9 @@ const {
   validateStatePayload,
 } = require('./policy.cjs');
 
+const RUNTIME_STARTED_AT_PATTERN_SOURCE = '^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$';
+const RUNTIME_STARTED_AT_PATTERN = new RegExp(RUNTIME_STARTED_AT_PATTERN_SOURCE);
+
 const STATUS_TOOL = {
   name: 'context7-pool-status',
   title: 'Context7 Pool Status',
@@ -31,7 +34,7 @@ const STATUS_TOOL = {
           startedAt: {
             type: 'string',
             format: 'date-time',
-            pattern: '^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$',
+            pattern: RUNTIME_STARTED_AT_PATTERN_SOURCE,
           },
           keyedDispatches: { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
           anonymousDispatches: { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
@@ -115,7 +118,7 @@ function projectPublicRuntime(runtime) {
 }
 
 function isCanonicalIso(value) {
-  if (typeof value !== 'string') return false;
+  if (typeof value !== 'string' || !RUNTIME_STARTED_AT_PATTERN.test(value)) return false;
   const parsed = new Date(value);
   return Number.isFinite(parsed.getTime()) && parsed.toISOString() === value;
 }
