@@ -160,8 +160,10 @@
     "@angular/platform-browser-dynamic": "^19.2.25",
     "@angular/router": "^19.2.25",
     "@angular/service-worker": "^19.2.25",
+    "@modelcontextprotocol/sdk": "1.25.1",
     "@sentry/angular": "^10.32.1",
     "@supabase/supabase-js": "2.110.3",
+    "@upstash/context7-mcp": "2.1.1",
     "dompurify": "^3.4.12",
     "gojs": "^3.1.1",
     "idb-keyval": "^6.2.2",
@@ -198,6 +200,7 @@
     "vitest": "^4.1.8"
   },
   "overrides": {
+    "@modelcontextprotocol/sdk": "1.25.1",
     "esbuild": "0.25.4",
     "pacote": {
       "tar": "7.5.16"
