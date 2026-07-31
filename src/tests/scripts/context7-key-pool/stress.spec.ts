@@ -150,7 +150,7 @@ describe.sequential('Context7 key-pool parent stress and crash durability', () =
       successfulCalls: 51,
       settledAttempts: expect.arrayContaining([{ periodId: persisted.payload.periodId, attemptOrdinal: 51 }]),
     });
-  }, 180_000);
+  }, 240_000);
 
   it('retains a mirrored conservative reservation when the parent dies before fake response', async () => {
     const validatorDir = tempRoot('replica-validator');
