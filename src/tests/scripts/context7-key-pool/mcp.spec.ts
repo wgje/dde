@@ -158,12 +158,209 @@ function writeSeededState(stateDir: string, successfulAttempts: number): void {
   fs.writeFileSync(path.join(stateDir, 'state.backup.json'), serialized);
 }
 
+function writeLocalRequireFailureHook(): { hookPath: string; sentinel: string; leakedPath: string } {
+  const root = tempRoot('require-hook');
+  const hookPath = path.join(root, 'fail-local-require.cjs');
+  const sentinel = 'RAW_LOCAL_REQUIRE_SENTINEL_MUST_NOT_LEAK';
+  const leakedPath = path.join(root, 'raw-absolute-state-path.json');
+  fs.writeFileSync(hookPath, `'use strict';
+const Module = require('node:module');
+const originalLoad = Module._load;
+Module._load = function guardedFixtureLoad(request, parent, isMain) {
+  if (request === './context7-key-pool/credentials.cjs') {
+    const error = new Error(${JSON.stringify(`${sentinel} ${leakedPath}`)});
+    error.stack = ${JSON.stringify(`Error: ${sentinel}\n    at ${leakedPath}:7:11`)};
+    throw error;
+  }
+  return originalLoad.call(this, request, parent, isMain);
+};
+`);
+  return { hookPath, sentinel, leakedPath };
+}
+
+function writeStateReadCounterHook(stateDir: string): {
+  hookPath: string;
+  readCount(): number;
+} {
+  const root = tempRoot('read-counter-hook');
+  const hookPath = path.join(root, 'count-state-reads.cjs');
+  const countPath = path.join(root, 'state-read-count.txt');
+  fs.writeFileSync(hookPath, `'use strict';
+const fs = require('node:fs');
+const fsp = require('node:fs/promises');
+const path = require('node:path');
+const stateDir = path.resolve(${JSON.stringify(stateDir)});
+const countPath = ${JSON.stringify(countPath)};
+const originalReadFile = fsp.readFile;
+let count = 0;
+fsp.readFile = async function countedReadFile(filePath, ...args) {
+  const resolved = path.resolve(String(filePath));
+  const name = path.basename(resolved);
+  if (path.dirname(resolved) === stateDir && (name === 'state.json' || name === 'state.backup.json')) {
+    count += 1;
+    fs.writeFileSync(countPath, String(count));
+  }
+  return originalReadFile.call(this, filePath, ...args);
+};
+`);
+  return {
+    hookPath,
+    readCount: () => fs.existsSync(countPath) ? Number(fs.readFileSync(countPath, 'utf8')) : 0,
+  };
+}
+
+function writeMalformedRouteOverrideHook(): string {
+  const root = tempRoot('malformed-route-hook');
+  const hookPath = path.join(root, 'malformed-route-override.cjs');
+  fs.writeFileSync(hookPath, `'use strict';
+const Module = require('node:module');
+const originalLoad = Module._load;
+Module._load = function routeOverrideFixture(request, parent, isMain) {
+  const loaded = originalLoad.call(this, request, parent, isMain);
+  if (request !== './context7-key-pool/runtime.cjs') return loaded;
+  return {
+    ...loaded,
+    createPoolRuntime(options) {
+      const runtime = loaded.createPoolRuntime(options);
+      return {
+        ...runtime,
+        getRouteOverride() {
+          return {kind:'anonymous',reason:'outcome-persistence-failed',extra:'forbidden'};
+        },
+      };
+    },
+  };
+};
+`);
+  return hookPath;
+}
+
 afterEach(async () => {
   while (clients.length > 0) await clients.pop()!.close();
   while (roots.length > 0) fs.rmSync(roots.pop()!, { recursive: true, force: true });
 }, 15_000);
 
 describe('stable Context7 key-pool parent MCP', () => {
+  it('normalizes local dependency bootstrap failures before MCP without raw stack or paths', () => {
+    const { hookPath, sentinel, leakedPath } = writeLocalRequireFailureHook();
+    const failed = spawnSync(process.execPath, ['--require', hookPath, parentPath], {
+      cwd: repoRoot,
+      env: getDefaultEnvironment(),
+      encoding: 'utf8',
+      input: '',
+      timeout: 5_000,
+    });
+    expect(failed.status).not.toBe(0);
+    expect(failed.stdout).toBe('');
+    expect(failed.stderr).toBe('context7-pool-bootstrap-failed\n');
+    expect(failed.stderr).not.toContain(sentinel);
+    expect(failed.stderr).not.toContain(leakedPath);
+    expect(failed.stderr).not.toContain(hookPath);
+  });
+
+  it('rejects non-empty status arguments before state reads or child activity', async () => {
+    const stateDir = tempRoot('status-input');
+    const pidFile = path.join(tempRoot('pid'), 'status-input-child.pid');
+    const counter = writeStateReadCounterHook(stateDir);
+    const parent = await startParent(stateDir, ['--pid-file', pidFile], {
+      NODE_OPTIONS: `--require=${counter.hookPath}`,
+    });
+
+    const empty = await parent.client.callTool({ name: 'context7-pool-status', arguments: {} });
+    expect(empty.isError).not.toBe(true);
+    const readsAfterEmpty = counter.readCount();
+    expect(readsAfterEmpty).toBeGreaterThan(0);
+    const invalid = await parent.client.callTool({
+      name: 'context7-pool-status',
+      arguments: { forbidden: 'raw-status-input-sentinel' },
+    });
+    expect(invalid).toEqual({
+      content: [{ type: 'text', text: 'context7-pool-input-invalid' }],
+      isError: true,
+    });
+    expect(JSON.stringify(invalid)).not.toContain('raw-status-input-sentinel');
+    expect(counter.readCount()).toBe(readsAfterEmpty);
+    expect(fs.existsSync(pidFile)).toBe(false);
+
+    for (const argumentsValue of [null, []]) {
+      const readsBeforeRejectedShape = counter.readCount();
+      await expect(parent.client.callTool({
+        name: 'context7-pool-status',
+        arguments: argumentsValue as any,
+      })).rejects.toMatchObject({ code: -32603 });
+      expect(counter.readCount()).toBe(readsBeforeRejectedShape);
+    }
+
+    const omitted = await parent.client.callTool({ name: 'context7-pool-status' });
+    expect(omitted.isError).not.toBe(true);
+    expect(fs.existsSync(pidFile)).toBe(false);
+  });
+
+  it('projects the live outcome-persistence latch without extra child or quota activity', async () => {
+    const stateDir = tempRoot('live-latch');
+    const pidFile = path.join(tempRoot('pid'), 'live-latch-child.pid');
+    const parent = await startParent(stateDir, ['--pid-file', pidFile], {
+      CONTEXT7_POOL_TEST_RECORD_OUTCOME_FAILURE: '1',
+    });
+    await expect(parent.client.callTool({
+      name: 'query-docs',
+      arguments: { libraryId: '/fixture', query: 'trigger synthetic persistence latch' },
+    })).resolves.toMatchObject({ content: [{ type: 'text', text: 'fixture-ok' }] });
+    const childPid = Number(await eventuallyFile(pidFile));
+
+    const first = statusFrom(await parent.client.callTool({ name: 'context7-pool-status', arguments: {} }));
+    expect(first).toMatchObject({
+      mode: 'anonymous',
+      activeSlot: null,
+      anonymousReason: 'outcome-persistence-failed',
+      runtime: { keyedDispatches: 1, anonymousDispatches: 0 },
+    });
+    expect(first.slots.map((slot: any) => slot.attemptedCalls)).toEqual([1, 0, 0, 0]);
+    expect(first.slots.map((slot: any) => slot.successfulCalls)).toEqual([0, 0, 0, 0]);
+
+    const second = statusFrom(await parent.client.callTool({ name: 'context7-pool-status' }));
+    expect(second).toMatchObject({
+      mode: 'anonymous',
+      activeSlot: null,
+      anonymousReason: 'outcome-persistence-failed',
+    });
+    expect(second.runtime).toEqual(first.runtime);
+    expect(second.slots).toEqual(first.slots);
+    expect(Number(fs.readFileSync(pidFile, 'utf8'))).toBe(childPid);
+    expect(() => process.kill(childPid, 0)).not.toThrow();
+  });
+
+  it('fails closed when a runtime route override is malformed', async () => {
+    const hookPath = writeMalformedRouteOverrideHook();
+    const pidFile = path.join(tempRoot('pid'), 'malformed-route-child.pid');
+    const parent = await startParent(tempRoot('malformed-route'), ['--pid-file', pidFile], {
+      NODE_OPTIONS: `--require=${hookPath}`,
+    });
+    const result = await parent.client.callTool({ name: 'context7-pool-status', arguments: {} });
+    expect(result).toEqual({
+      content: [{ type: 'text', text: 'context7-pool-tool-failed' }],
+      isError: true,
+    });
+    expect(JSON.stringify(result)).not.toContain('extra');
+    expect(fs.existsSync(pidFile)).toBe(false);
+  });
+
+  it('projects live store read failures as redacted fail-closed status', async () => {
+    const root = tempRoot('live-read-failure');
+    const stateDir = path.join(root, 'not-a-directory');
+    fs.writeFileSync(stateDir, 'synthetic state path blocker');
+    const parent = await startParent(stateDir);
+    const result = await parent.client.callTool({ name: 'context7-pool-status', arguments: {} });
+    const status = statusFrom(result);
+    expect(status).toMatchObject({
+      mode: 'anonymous',
+      activeSlot: null,
+      anonymousReason: 'state-unavailable-fail-closed',
+      stateHealth: 'fail-closed',
+    });
+    expect(JSON.stringify(result)).not.toContain(stateDir);
+  });
+
   it('preserves both official descriptors and advertises exactly the public status descriptor', async () => {
     const parent = await startParent(tempRoot());
     const listed = await parent.client.listTools();
@@ -257,7 +454,12 @@ describe('stable Context7 key-pool parent MCP', () => {
     const pidFile = path.join(tempRoot('pid'), 'child.pid');
     const parent = await startParent(tempRoot(), ['--pid-file', pidFile, '--immediate-exit']);
     const status = statusFrom(await parent.client.callTool({ name: 'context7-pool-status', arguments: {} }));
-    expect(status.mode).toBe('uninitialized');
+    expect(status).toMatchObject({
+      mode: 'keyed',
+      activeSlot: 1,
+      stateHealth: 'healthy',
+      runtime: { keyedDispatches: 0, anonymousDispatches: 0 },
+    });
     expect(fs.existsSync(pidFile)).toBe(false);
   });
 
@@ -316,31 +518,65 @@ describe('stable Context7 key-pool parent MCP', () => {
   }, 15_000);
 
   it('ignores fake launch overrides without both test gates and confines gated entries to fixture root', async () => {
-    const localAppData = tempRoot('localappdata');
-    const ignored = await startParent(tempRoot(), [], {
-      NODE_ENV: 'production',
-      LOCALAPPDATA: localAppData,
-      CONTEXT7_POOL_TEST_CHILD_COMMAND: path.join(localAppData, 'missing-command.exe'),
-      CONTEXT7_POOL_TEST_CHILD_ENTRY: path.join(localAppData, 'missing-entry.cjs'),
-      CONTEXT7_POOL_TEST_CHILD_ARGS: JSON.stringify(['--immediate-exit']),
-    });
-    const listed = await ignored.client.listTools();
-    expect(listed.tools.map(tool => tool.name)).toEqual([
-      'resolve-library-id', 'query-docs', 'context7-pool-status',
-    ]);
+    for (const gates of [
+      { NODE_ENV: 'production', CONTEXT7_POOL_TEST_FIXTURE: '0' },
+      { NODE_ENV: 'test', CONTEXT7_POOL_TEST_FIXTURE: '0' },
+      { NODE_ENV: 'production', CONTEXT7_POOL_TEST_FIXTURE: '1' },
+    ]) {
+      const localAppData = tempRoot('localappdata');
+      const ignored = await startParent(tempRoot(), [], {
+        ...gates,
+        LOCALAPPDATA: localAppData,
+        CONTEXT7_POOL_TEST_CHILD_COMMAND: path.join(localAppData, 'missing-command.exe'),
+        CONTEXT7_POOL_TEST_CHILD_ENTRY: path.join(localAppData, 'missing-entry.cjs'),
+        CONTEXT7_POOL_TEST_CHILD_ARGS: JSON.stringify(['--immediate-exit']),
+      });
+      const listed = await ignored.client.listTools();
+      expect(listed.tools.map(tool => tool.name)).toEqual([
+        'resolve-library-id', 'query-docs', 'context7-pool-status',
+      ]);
+      await ignored.close();
+    }
 
     const outside = path.join(tempRoot('outside'), 'outside.cjs');
     fs.writeFileSync(outside, 'process.exit(99);');
-    const rejected = spawnSync(process.execPath, [parentPath], {
-      cwd: repoRoot,
-      env: testEnv(tempRoot(), [], { CONTEXT7_POOL_TEST_CHILD_ENTRY: outside }),
-      encoding: 'utf8',
-      input: '',
-      timeout: 5_000,
-    });
-    expect(rejected.status).not.toBe(0);
-    expect(rejected.stderr).toBe('context7-pool-bootstrap-failed\n');
-  });
+    const traversal = path.join(fixtureRoot, '..', '..', '..', 'scripts', 'context7-key-pool-mcp.cjs');
+    for (const rejectedEntry of [outside, traversal]) {
+      const rejected = spawnSync(process.execPath, [parentPath], {
+        cwd: repoRoot,
+        env: testEnv(tempRoot(), [], { CONTEXT7_POOL_TEST_CHILD_ENTRY: rejectedEntry }),
+        encoding: 'utf8',
+        input: '',
+        timeout: 5_000,
+      });
+      expect(rejected.status).not.toBe(0);
+      expect(rejected.stdout).toBe('');
+      expect(rejected.stderr).toBe('context7-pool-bootstrap-failed\n');
+      expect(rejected.stderr).not.toContain(rejectedEntry);
+    }
+
+    const linkPath = path.join(fixtureRoot, `.context7-pool-escape-${process.pid}-${Date.now()}.cjs`);
+    let linkCreated = false;
+    try {
+      fs.symlinkSync(outside, linkPath, 'file');
+      linkCreated = true;
+      const rejectedLink = spawnSync(process.execPath, [parentPath], {
+        cwd: repoRoot,
+        env: testEnv(tempRoot(), [], { CONTEXT7_POOL_TEST_CHILD_ENTRY: linkPath }),
+        encoding: 'utf8',
+        input: '',
+        timeout: 5_000,
+      });
+      expect(rejectedLink.status).not.toBe(0);
+      expect(rejectedLink.stdout).toBe('');
+      expect(rejectedLink.stderr).toBe('context7-pool-bootstrap-failed\n');
+      expect(rejectedLink.stderr).not.toContain(outside);
+    } catch (error: any) {
+      if (!['EPERM', 'EACCES', 'ENOTSUP'].includes(error?.code)) throw error;
+    } finally {
+      if (linkCreated) fs.rmSync(linkPath, { force: true });
+    }
+  }, 30_000);
 
   it('--status inspects stored state without credentials or stdio and fails closed on corruption', () => {
     const missingDir = tempRoot('missing');

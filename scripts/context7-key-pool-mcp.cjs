@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 'use strict';
 
+const BOOTSTRAP_FAILURE = 'context7-pool-bootstrap-failed';
+
+async function bootstrap() {
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -26,8 +29,8 @@ const repoRoot = path.resolve(__dirname, '..');
 const fixtureRoot = path.resolve(repoRoot, 'src/tests/fixtures/context7-key-pool');
 const observerPath = path.resolve(__dirname, 'context7-key-pool/context7-fetch-observer.cjs');
 const OFFICIAL_TOOL_NAMES = new Set(['resolve-library-id', 'query-docs']);
-const BOOTSTRAP_FAILURE = 'context7-pool-bootstrap-failed';
 const TOOL_FAILURE = 'context7-pool-tool-failed';
+const INPUT_FAILURE = 'context7-pool-input-invalid';
 const DEFAULT_TIME_ZONE = 'UTC';
 const CLOSE_BOUND_MS = 6_000;
 
@@ -110,6 +113,13 @@ function publicFailure(failureClass = TOOL_FAILURE) {
   return { content: [{ type: 'text', text: failureClass }], isError: true };
 }
 
+function isEmptyStatusArguments(value) {
+  if (value === undefined) return true;
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return (prototype === Object.prototype || prototype === null) && Object.keys(value).length === 0;
+}
+
 function redactForStatus(env) {
   return createRedactor(KEY_NAMES.map(name => env[name]).filter(value => typeof value === 'string'));
 }
@@ -122,7 +132,7 @@ function createStore(env, redact) {
   });
 }
 
-async function storedPublicStatus(store, runtime) {
+async function inspectedPublicStatus(store) {
   const inspected = await store.inspectStored();
   const storedSnapshot = {
     state: inspected.state,
@@ -130,30 +140,73 @@ async function storedPublicStatus(store, runtime) {
     reconciliation: inspected.reconciliation,
     now: new Date(),
   };
-  const routeOverride = runtime?.getRouteOverride() ?? null;
   return projectPublicStatus({
     ...storedSnapshot,
-    ...(routeOverride ? { activeRoute: routeOverride } : {}),
-    runtime: runtime?.getPublicRuntime() ?? null,
+    runtime: null,
   });
+}
+
+function applyRuntimeRouteOverride(status, routeOverride) {
+  if (routeOverride === null) return status;
+  if (routeOverride === undefined
+    || routeOverride === null
+    || typeof routeOverride !== 'object'
+    || Array.isArray(routeOverride)
+    || Object.getPrototypeOf(routeOverride) !== Object.prototype
+    || Object.keys(routeOverride).sort().join(',') !== 'kind,reason'
+    || routeOverride.kind !== 'anonymous'
+    || routeOverride.reason !== 'outcome-persistence-failed') {
+    throw new Error('context7-pool-route-override-invalid');
+  }
+  return {
+    ...status,
+    mode: 'anonymous',
+    activeSlot: null,
+    anonymousReason: 'outcome-persistence-failed',
+  };
+}
+
+async function livePublicStatus(store, runtime, context) {
+  const snapshot = await store.read(context);
+  const baseStatus = projectPublicStatus({
+    state: snapshot.state,
+    health: snapshot.health,
+    reconciliation: 'applied',
+    now: new Date(),
+    runtime: runtime.getPublicRuntime(),
+  });
+  return applyRuntimeRouteOverride(baseStatus, runtime.getRouteOverride());
 }
 
 async function runStatus(env) {
   const redact = redactForStatus(env);
   const store = createStore(env, redact);
-  const status = redact(await storedPublicStatus(store, null));
+  const status = redact(await inspectedPublicStatus(store));
   process.stdout.write(`${JSON.stringify(status)}\n`);
 }
 
 function createApplication(env) {
   const credentials = loadCredentialPool(env);
   const redact = createRedactor(credentials.map(credential => credential.value));
-  const store = createStore(env, redact);
+  const baseStore = createStore(env, redact);
+  const store = testFixtureMode(env) && env.CONTEXT7_POOL_TEST_RECORD_OUTCOME_FAILURE === '1'
+    ? {
+        ...baseStore,
+        async recordOutcome() {
+          throw new Error('context7-pool-test-outcome-persistence-failed');
+        },
+      }
+    : baseStore;
   const launch = resolveLaunch(env);
+  const timeZone = currentTimeZone(env);
+  const context = {
+    identities: credentials.map(({ slot, fingerprintSha256 }) => ({ slot, fingerprintSha256 })),
+    timeZone,
+  };
   const runtime = createPoolRuntime({
     credentials,
     store,
-    timeZone: currentTimeZone(env),
+    timeZone,
     now: () => new Date(),
     sleep: milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)),
     redact,
@@ -170,11 +223,11 @@ function createApplication(env) {
       redact,
     }),
   });
-  return { redact, runtime, store };
+  return { context, redact, runtime, store };
 }
 
 async function runMcp(env) {
-  const { redact, runtime, store } = createApplication(env);
+  const { context, redact, runtime, store } = createApplication(env);
   const server = new Server(
     { name: 'nanoflow-context7-key-pool', version: '1.0.0' },
     { capabilities: { tools: {} } },
@@ -205,7 +258,8 @@ async function runMcp(env) {
     const name = request.params.name;
     try {
       if (name === STATUS_TOOL.name) {
-        const status = await storedPublicStatus(store, runtime);
+        if (!isEmptyStatusArguments(request.params.arguments)) return publicFailure(INPUT_FAILURE);
+        const status = await livePublicStatus(store, runtime, context);
         return {
           content: [{ type: 'text', text: JSON.stringify(status) }],
           structuredContent: status,
@@ -240,10 +294,10 @@ async function main() {
   await runMcp(process.env);
 }
 
-main().catch(error => {
-  try {
-    redactForStatus(process.env)(error);
-  } catch { /* fixed top-level failure remains secret independent */ }
+await main();
+}
+
+bootstrap().catch(() => {
   process.stderr.write(`${BOOTSTRAP_FAILURE}\n`);
   process.exitCode = 1;
 });

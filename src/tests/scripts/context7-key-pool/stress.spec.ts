@@ -1,5 +1,6 @@
 // @vitest-environment node
 
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -81,14 +82,41 @@ async function callMany(parent: ParentHandle, count: number, prefix: string): Pr
   }
 }
 
-async function mirroredAttemptCount(stateDir: string, expected: number): Promise<void> {
-  for (let attempt = 0; attempt < 500; attempt += 1) {
+function canonicalTree(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalTree);
+  if (value === null || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.keys(value as Record<string, unknown>)
+    .sort().map(key => [key, canonicalTree((value as Record<string, unknown>)[key])]));
+}
+
+function readAuthenticatedReplica(filePath: string): any {
+  const replica = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  const projection = JSON.stringify(canonicalTree({
+    schemaVersion: replica.schemaVersion,
+    revision: replica.revision,
+    payload: replica.payload,
+  }));
+  const checksum = createHash('sha256').update(projection).digest('hex');
+  if (replica.checksumSha256 !== checksum) throw new Error('replica-checksum-invalid');
+  return replica;
+}
+
+async function mirroredAttemptCount(stateDir: string, expected: number, maxAttempts = 500): Promise<void> {
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     try {
-      const primary = JSON.parse(fs.readFileSync(path.join(stateDir, 'state.json'), 'utf8'));
-      const backup = JSON.parse(fs.readFileSync(path.join(stateDir, 'state.backup.json'), 'utf8'));
-      const count = Object.values(primary.payload.records as Record<string, any>)
+      const primary = readAuthenticatedReplica(path.join(stateDir, 'state.json'));
+      const backup = readAuthenticatedReplica(path.join(stateDir, 'state.backup.json'));
+      const primaryCount = Object.values(primary.payload.records as Record<string, any>)
         .reduce((sum: number, record: any) => sum + record.attemptedCalls, 0);
-      if (count === expected && primary.revision === backup.revision && primary.checksumSha256 === backup.checksumSha256) return;
+      const backupCount = Object.values(backup.payload.records as Record<string, any>)
+        .reduce((sum: number, record: any) => sum + record.attemptedCalls, 0);
+      const samePayload = JSON.stringify(canonicalTree(primary.payload))
+        === JSON.stringify(canonicalTree(backup.payload));
+      if (primaryCount === expected
+        && backupCount === expected
+        && primary.revision === backup.revision
+        && primary.checksumSha256 === backup.checksumSha256
+        && samePayload) return;
     } catch { /* persistence is between atomic mirror steps */ }
     await new Promise(resolve => setTimeout(resolve, 10));
   }
@@ -114,7 +142,7 @@ describe.sequential('Context7 key-pool parent stress and crash durability', () =
     await callMany(restarted, 1, 'restart');
     const restartedStatus = await status(restarted);
     expect(restartedStatus.slots.map((slot: any) => slot.attemptedCalls)).toEqual([950, 51, 0, 0]);
-    expect(restartedStatus).toMatchObject({ mode: 'stored-unreconciled', activeSlot: null });
+    expect(restartedStatus).toMatchObject({ mode: 'keyed', activeSlot: 2 });
     const persisted = JSON.parse(fs.readFileSync(path.join(stateDir, 'state.json'), 'utf8'));
     const slotTwo = persisted.payload.activeSlots.find((identity: any) => identity.slot === 2);
     expect(persisted.payload.records[slotTwo.fingerprintSha256]).toMatchObject({
@@ -125,6 +153,24 @@ describe.sequential('Context7 key-pool parent stress and crash durability', () =
   }, 180_000);
 
   it('retains a mirrored conservative reservation when the parent dies before fake response', async () => {
+    const validatorDir = tempRoot('replica-validator');
+    const validatorPayload = { records: { slot: { attemptedCalls: 1 } } };
+    const validatorProjection = JSON.stringify({ schemaVersion: 1, revision: 7, payload: validatorPayload });
+    const validatorPrimary = {
+      schemaVersion: 1,
+      revision: 7,
+      checksumSha256: createHash('sha256').update(validatorProjection).digest('hex'),
+      payload: validatorPayload,
+    };
+    fs.writeFileSync(path.join(validatorDir, 'state.json'), JSON.stringify(validatorPrimary));
+    fs.writeFileSync(path.join(validatorDir, 'state.backup.json'), JSON.stringify({
+      ...validatorPrimary,
+      payload: { records: { slot: { attemptedCalls: 0 } } },
+    }));
+    await expect(mirroredAttemptCount(validatorDir, 1, 1)).rejects.toThrow(
+      'mirrored reservation count did not reach 1',
+    );
+
     const stateDir = tempRoot('crash');
     const worker = await startParent(stateDir, ['--delay-call', '30000']);
     const inFlight = worker.client.callTool({
@@ -138,10 +184,19 @@ describe.sequential('Context7 key-pool parent stress and crash durability', () =
     const restarted = await startParent(stateDir);
     const recovered = await status(restarted);
     expect(recovered.slots.map((slot: any) => slot.attemptedCalls)).toEqual([1, 0, 0, 0]);
-    const persisted = JSON.parse(fs.readFileSync(path.join(stateDir, 'state.json'), 'utf8'));
-    const slotOne = persisted.payload.activeSlots.find((identity: any) => identity.slot === 1);
-    const firstRecord = persisted.payload.records[slotOne.fingerprintSha256];
-    expect(firstRecord).toMatchObject({ attemptedCalls: 1, successfulCalls: 0, settledAttempts: [] });
+    const primary = readAuthenticatedReplica(path.join(stateDir, 'state.json'));
+    const backup = readAuthenticatedReplica(path.join(stateDir, 'state.backup.json'));
+    expect(backup.revision).toBe(primary.revision);
+    expect(backup.checksumSha256).toBe(primary.checksumSha256);
+    expect(canonicalTree(backup.payload)).toEqual(canonicalTree(primary.payload));
+    for (const replica of [primary, backup]) {
+      const slotOne = replica.payload.activeSlots.find((identity: any) => identity.slot === 1);
+      expect(replica.payload.records[slotOne.fingerprintSha256]).toMatchObject({
+        attemptedCalls: 1,
+        successfulCalls: 0,
+        settledAttempts: [],
+      });
+    }
   }, 30_000);
 
   it('serializes two independent parents sharing one state directory without lost updates', async () => {
