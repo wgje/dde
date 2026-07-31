@@ -142,7 +142,7 @@ describe.sequential('Context7 key-pool parent stress and crash durability', () =
     await callMany(restarted, 1, 'restart');
     const restartedStatus = await status(restarted);
     expect(restartedStatus.slots.map((slot: any) => slot.attemptedCalls)).toEqual([950, 51, 0, 0]);
-    expect(restartedStatus).toMatchObject({ mode: 'keyed', activeSlot: 2 });
+    expect(restartedStatus).toMatchObject({ mode: 'stored-unreconciled', activeSlot: null });
     const persisted = JSON.parse(fs.readFileSync(path.join(stateDir, 'state.json'), 'utf8'));
     const slotTwo = persisted.payload.activeSlots.find((identity: any) => identity.slot === 2);
     expect(persisted.payload.records[slotTwo.fingerprintSha256]).toMatchObject({
@@ -155,7 +155,11 @@ describe.sequential('Context7 key-pool parent stress and crash durability', () =
   it('retains a mirrored conservative reservation when the parent dies before fake response', async () => {
     const validatorDir = tempRoot('replica-validator');
     const validatorPayload = { records: { slot: { attemptedCalls: 1 } } };
-    const validatorProjection = JSON.stringify({ schemaVersion: 1, revision: 7, payload: validatorPayload });
+    const validatorProjection = JSON.stringify(canonicalTree({
+      schemaVersion: 1,
+      revision: 7,
+      payload: validatorPayload,
+    }));
     const validatorPrimary = {
       schemaVersion: 1,
       revision: 7,
@@ -163,10 +167,13 @@ describe.sequential('Context7 key-pool parent stress and crash durability', () =
       payload: validatorPayload,
     };
     fs.writeFileSync(path.join(validatorDir, 'state.json'), JSON.stringify(validatorPrimary));
+    expect(() => readAuthenticatedReplica(path.join(validatorDir, 'state.json'))).not.toThrow();
     fs.writeFileSync(path.join(validatorDir, 'state.backup.json'), JSON.stringify({
       ...validatorPrimary,
       payload: { records: { slot: { attemptedCalls: 0 } } },
     }));
+    expect(() => readAuthenticatedReplica(path.join(validatorDir, 'state.backup.json')))
+      .toThrow('replica-checksum-invalid');
     await expect(mirroredAttemptCount(validatorDir, 1, 1)).rejects.toThrow(
       'mirrored reservation count did not reach 1',
     );

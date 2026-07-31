@@ -345,10 +345,9 @@ describe('stable Context7 key-pool parent MCP', () => {
     expect(fs.existsSync(pidFile)).toBe(false);
   });
 
-  it('projects live store read failures as redacted fail-closed status', async () => {
-    const root = tempRoot('live-read-failure');
-    const stateDir = path.join(root, 'not-a-directory');
-    fs.writeFileSync(stateDir, 'synthetic state path blocker');
+  it('projects live stored-state inspection failures as redacted fail-closed status', async () => {
+    const stateDir = tempRoot('live-inspection-failure');
+    fs.writeFileSync(path.join(stateDir, 'state.json'), '{corrupt');
     const parent = await startParent(stateDir);
     const result = await parent.client.callTool({ name: 'context7-pool-status', arguments: {} });
     const status = statusFrom(result);
@@ -450,17 +449,19 @@ describe('stable Context7 key-pool parent MCP', () => {
     expect(parent.transport.pid).toBe(pid);
   }, 15_000);
 
-  it('serves local status without starting or calling any official child', async () => {
+  it('serves read-only status without initializing state or starting any official child', async () => {
+    const stateDir = tempRoot('read-only-status');
     const pidFile = path.join(tempRoot('pid'), 'child.pid');
-    const parent = await startParent(tempRoot(), ['--pid-file', pidFile, '--immediate-exit']);
+    const parent = await startParent(stateDir, ['--pid-file', pidFile, '--immediate-exit']);
     const status = statusFrom(await parent.client.callTool({ name: 'context7-pool-status', arguments: {} }));
     expect(status).toMatchObject({
-      mode: 'keyed',
-      activeSlot: 1,
-      stateHealth: 'healthy',
+      mode: 'uninitialized',
+      activeSlot: null,
       runtime: { keyedDispatches: 0, anonymousDispatches: 0 },
     });
     expect(fs.existsSync(pidFile)).toBe(false);
+    expect(fs.existsSync(path.join(stateDir, 'state.json'))).toBe(false);
+    expect(fs.existsSync(path.join(stateDir, 'state.backup.json'))).toBe(false);
   });
 
   it('recursively excludes secrets, full fingerprints, state paths, queries and child stderr from status', async () => {

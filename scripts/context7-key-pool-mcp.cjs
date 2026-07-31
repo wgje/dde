@@ -132,7 +132,7 @@ function createStore(env, redact) {
   });
 }
 
-async function inspectedPublicStatus(store) {
+async function inspectedPublicStatus(store, runtime = null) {
   const inspected = await store.inspectStored();
   const storedSnapshot = {
     state: inspected.state,
@@ -142,7 +142,7 @@ async function inspectedPublicStatus(store) {
   };
   return projectPublicStatus({
     ...storedSnapshot,
-    runtime: null,
+    runtime,
   });
 }
 
@@ -166,15 +166,8 @@ function applyRuntimeRouteOverride(status, routeOverride) {
   };
 }
 
-async function livePublicStatus(store, runtime, context) {
-  const snapshot = await store.read(context);
-  const baseStatus = projectPublicStatus({
-    state: snapshot.state,
-    health: snapshot.health,
-    reconciliation: 'applied',
-    now: new Date(),
-    runtime: runtime.getPublicRuntime(),
-  });
+async function livePublicStatus(store, runtime) {
+  const baseStatus = await inspectedPublicStatus(store, runtime.getPublicRuntime());
   return applyRuntimeRouteOverride(baseStatus, runtime.getRouteOverride());
 }
 
@@ -199,10 +192,6 @@ function createApplication(env) {
     : baseStore;
   const launch = resolveLaunch(env);
   const timeZone = currentTimeZone(env);
-  const context = {
-    identities: credentials.map(({ slot, fingerprintSha256 }) => ({ slot, fingerprintSha256 })),
-    timeZone,
-  };
   const runtime = createPoolRuntime({
     credentials,
     store,
@@ -223,11 +212,11 @@ function createApplication(env) {
       redact,
     }),
   });
-  return { context, redact, runtime, store };
+  return { redact, runtime, store };
 }
 
 async function runMcp(env) {
-  const { context, redact, runtime, store } = createApplication(env);
+  const { redact, runtime, store } = createApplication(env);
   const server = new Server(
     { name: 'nanoflow-context7-key-pool', version: '1.0.0' },
     { capabilities: { tools: {} } },
@@ -259,7 +248,7 @@ async function runMcp(env) {
     try {
       if (name === STATUS_TOOL.name) {
         if (!isEmptyStatusArguments(request.params.arguments)) return publicFailure(INPUT_FAILURE);
-        const status = await livePublicStatus(store, runtime, context);
+        const status = await livePublicStatus(store, runtime);
         return {
           content: [{ type: 'text', text: JSON.stringify(status) }],
           structuredContent: status,
