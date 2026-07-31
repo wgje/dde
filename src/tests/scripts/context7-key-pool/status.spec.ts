@@ -182,7 +182,12 @@ describe('Context7 public status projection', () => {
   });
 
   it('projects uninitialized and unavailable fail-closed state without inventing slots', () => {
-    expect(projectPublicStatus({ state: null, health: { status: 'uninitialized' }, now: NOW })).toEqual({
+    expect(projectPublicStatus({
+      state: null,
+      health: { status: 'uninitialized' },
+      activeRoute: { kind: 'anonymous', reason: 'outcome-persistence-failed' },
+      now: NOW,
+    })).toEqual({
       schemaVersion: 1,
       mode: 'uninitialized',
       activeSlot: null,
@@ -192,7 +197,12 @@ describe('Context7 public status projection', () => {
       runtime: null,
       updatedAt: NOW.toISOString(),
     });
-    expect(projectPublicStatus({ state: null, health: { status: 'fail-closed', reason: 'primary-unavailable' }, now: NOW })).toEqual({
+    expect(projectPublicStatus({
+      state: null,
+      health: { status: 'fail-closed', reason: 'primary-unavailable' },
+      activeRoute: { kind: 'anonymous', reason: 'outcome-persistence-failed' },
+      now: NOW,
+    })).toEqual({
       schemaVersion: 1,
       mode: 'anonymous',
       activeSlot: null,
@@ -206,19 +216,54 @@ describe('Context7 public status projection', () => {
 
   it('does not treat stored credentials as active before reconciliation is applied', () => {
     const state = freshState();
+    for (const activeRoute of [
+      undefined,
+      policy.selectRoute(state, NOW),
+      { kind: 'anonymous', reason: 'all-keyed-slots-unavailable' },
+    ]) {
+      const output = projectPublicStatus({
+        state,
+        health: { status: 'healthy' },
+        ...(activeRoute ? { activeRoute } : {}),
+        now: NOW,
+        reconciliation: 'not-applied',
+      });
+      expect(output).toEqual(expect.objectContaining({
+        mode: 'stored-unreconciled',
+        activeSlot: null,
+        anonymousReason: 'credentials-not-applied',
+      }));
+      expect(output.slots).toHaveLength(4);
+    }
+  });
+
+  it('applies only an exact runtime persistence override before reconciliation', () => {
+    const state = freshState();
     const output = projectPublicStatus({
       state,
       health: { status: 'healthy' },
-      activeRoute: policy.selectRoute(state, NOW),
+      activeRoute: { kind: 'anonymous', reason: 'outcome-persistence-failed' },
       now: NOW,
       reconciliation: 'not-applied',
     });
     expect(output).toEqual(expect.objectContaining({
-      mode: 'stored-unreconciled',
+      mode: 'anonymous',
       activeSlot: null,
-      anonymousReason: 'credentials-not-applied',
+      anonymousReason: 'outcome-persistence-failed',
     }));
-    expect(output.slots).toHaveLength(4);
+
+    for (const activeRoute of [
+      { kind: 'anonymous', reason: 'outcome-persistence-failed', extra: 'forbidden' },
+      { kind: 'anonymous', reason: 'other-internal-failure' },
+    ]) {
+      expect(() => projectPublicStatus({
+        state,
+        health: { status: 'healthy' },
+        activeRoute,
+        now: NOW,
+        reconciliation: 'not-applied',
+      })).toThrow('invalid-active-route');
+    }
   });
 
   it('projects an in-memory fail-closed state as anonymous with its fixed reason', () => {

@@ -235,6 +235,35 @@ Module._load = function routeOverrideFixture(request, parent, isMain) {
   return hookPath;
 }
 
+function writeStatusActiveRouteContractHook(): string {
+  const root = tempRoot('status-active-route-hook');
+  const hookPath = path.join(root, 'require-active-route.cjs');
+  fs.writeFileSync(hookPath, `'use strict';
+const Module = require('node:module');
+const originalLoad = Module._load;
+Module._load = function activeRouteContractFixture(request, parent, isMain) {
+  const loaded = originalLoad.call(this, request, parent, isMain);
+  if (request !== './context7-key-pool/status.cjs') return loaded;
+  return {
+    ...loaded,
+    projectPublicStatus(args) {
+      if (args && args.runtime && args.runtime.keyedDispatches === 1) {
+        const route = args.activeRoute;
+        if (!route
+          || route.kind !== 'anonymous'
+          || route.reason !== 'outcome-persistence-failed'
+          || Object.keys(route).sort().join(',') !== 'kind,reason') {
+          throw new Error('status-active-route-contract-missing');
+        }
+      }
+      return loaded.projectPublicStatus(args);
+    },
+  };
+};
+`);
+  return hookPath;
+}
+
 afterEach(async () => {
   while (clients.length > 0) await clients.pop()!.close();
   while (roots.length > 0) fs.rmSync(roots.pop()!, { recursive: true, force: true });
@@ -299,8 +328,10 @@ describe('stable Context7 key-pool parent MCP', () => {
   it('projects the live outcome-persistence latch without extra child or quota activity', async () => {
     const stateDir = tempRoot('live-latch');
     const pidFile = path.join(tempRoot('pid'), 'live-latch-child.pid');
+    const contractHook = writeStatusActiveRouteContractHook();
     const parent = await startParent(stateDir, ['--pid-file', pidFile], {
       CONTEXT7_POOL_TEST_RECORD_OUTCOME_FAILURE: '1',
+      NODE_OPTIONS: `--require=${contractHook}`,
     });
     await expect(parent.client.callTool({
       name: 'query-docs',
@@ -330,19 +361,23 @@ describe('stable Context7 key-pool parent MCP', () => {
     expect(() => process.kill(childPid, 0)).not.toThrow();
   });
 
-  it('fails closed when a runtime route override is malformed', async () => {
+  it('fails closed when a runtime route override is malformed for stored state', async () => {
     const hookPath = writeMalformedRouteOverrideHook();
     const pidFile = path.join(tempRoot('pid'), 'malformed-route-child.pid');
     const parent = await startParent(tempRoot('malformed-route'), ['--pid-file', pidFile], {
       NODE_OPTIONS: `--require=${hookPath}`,
     });
+    await expect(parent.client.callTool({
+      name: 'query-docs',
+      arguments: { libraryId: '/fixture', query: 'establish stored state' },
+    })).resolves.toMatchObject({ content: [{ type: 'text', text: 'fixture-ok' }] });
     const result = await parent.client.callTool({ name: 'context7-pool-status', arguments: {} });
     expect(result).toEqual({
       content: [{ type: 'text', text: 'context7-pool-tool-failed' }],
       isError: true,
     });
     expect(JSON.stringify(result)).not.toContain('extra');
-    expect(fs.existsSync(pidFile)).toBe(false);
+    expect(Number(await eventuallyFile(pidFile))).toBeGreaterThan(0);
   });
 
   it('projects live stored-state inspection failures as redacted fail-closed status', async () => {

@@ -59,6 +59,7 @@ const ANONYMOUS_REASONS = new Set([
   'all-keyed-slots-unavailable',
   'state-unavailable-fail-closed',
 ]);
+const RUNTIME_ANONYMOUS_REASON = 'outcome-persistence-failed';
 const RUNTIME_KEYS = [
   'instanceId_12',
   'startedAt',
@@ -184,8 +185,29 @@ function publicSlots(state) {
     });
 }
 
+function runtimeRouteProjection(route) {
+  if (!route || typeof route !== 'object' || Array.isArray(route)) return null;
+  const descriptors = Object.getOwnPropertyDescriptors(route);
+  const kindDescriptor = descriptors.kind;
+  const reasonDescriptor = descriptors.reason;
+  if (kindDescriptor?.value !== 'anonymous'
+    || reasonDescriptor?.value !== RUNTIME_ANONYMOUS_REASON) return null;
+  const prototype = Object.getPrototypeOf(route);
+  const keys = Reflect.ownKeys(descriptors);
+  if ((prototype !== Object.prototype && prototype !== null)
+    || keys.length !== 2
+    || keys.some(key => typeof key !== 'string' || (key !== 'kind' && key !== 'reason'))
+    || !isEnumerableDataDescriptor(kindDescriptor)
+    || !isEnumerableDataDescriptor(reasonDescriptor)) {
+    throw new Error('invalid-active-route');
+  }
+  return { mode: 'anonymous', activeSlot: null, anonymousReason: RUNTIME_ANONYMOUS_REASON };
+}
+
 function routeProjection(route) {
   if (!route || typeof route !== 'object' || Array.isArray(route)) throw new Error('invalid-active-route');
+  const runtimeRoute = runtimeRouteProjection(route);
+  if (runtimeRoute) return runtimeRoute;
   if (route.kind === 'keyed') {
     if (!Number.isInteger(route.slot) || route.slot < 1 || route.slot > 4) {
       throw new Error('invalid-active-route');
@@ -214,11 +236,14 @@ function projectPublicStatus(args) {
     };
   }
   validateStatePayload(args.state);
-  const route = (args.reconciliation || 'applied') === 'not-applied'
+  const reconciliationNotApplied = (args.reconciliation || 'applied') === 'not-applied';
+  const projectedActiveRoute = args.activeRoute === undefined
+    ? null
+    : routeProjection(args.activeRoute);
+  const route = reconciliationNotApplied
+    && projectedActiveRoute?.anonymousReason !== RUNTIME_ANONYMOUS_REASON
     ? { mode: 'stored-unreconciled', activeSlot: null, anonymousReason: 'credentials-not-applied' }
-    : routeProjection(args.activeRoute === undefined
-      ? selectRoute(args.state, now)
-      : args.activeRoute);
+    : (projectedActiveRoute || routeProjection(selectRoute(args.state, now)));
   return {
     schemaVersion: 1,
     periodId: args.state.periodId,

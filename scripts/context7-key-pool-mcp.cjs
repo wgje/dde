@@ -132,7 +132,7 @@ function createStore(env, redact) {
   });
 }
 
-async function inspectedPublicStatus(store, runtime = null) {
+async function inspectedPublicStatus(store, runtime = null, routeOverride = null) {
   const inspected = await store.inspectStored();
   const storedSnapshot = {
     state: inspected.state,
@@ -142,33 +142,13 @@ async function inspectedPublicStatus(store, runtime = null) {
   };
   return projectPublicStatus({
     ...storedSnapshot,
+    ...(routeOverride ? { activeRoute: routeOverride } : {}),
     runtime,
   });
 }
 
-function applyRuntimeRouteOverride(status, routeOverride) {
-  if (routeOverride === null) return status;
-  if (routeOverride === undefined
-    || routeOverride === null
-    || typeof routeOverride !== 'object'
-    || Array.isArray(routeOverride)
-    || Object.getPrototypeOf(routeOverride) !== Object.prototype
-    || Object.keys(routeOverride).sort().join(',') !== 'kind,reason'
-    || routeOverride.kind !== 'anonymous'
-    || routeOverride.reason !== 'outcome-persistence-failed') {
-    throw new Error('context7-pool-route-override-invalid');
-  }
-  return {
-    ...status,
-    mode: 'anonymous',
-    activeSlot: null,
-    anonymousReason: 'outcome-persistence-failed',
-  };
-}
-
 async function livePublicStatus(store, runtime) {
-  const baseStatus = await inspectedPublicStatus(store, runtime.getPublicRuntime());
-  return applyRuntimeRouteOverride(baseStatus, runtime.getRouteOverride());
+  return inspectedPublicStatus(store, runtime.getPublicRuntime(), runtime.getRouteOverride());
 }
 
 async function runStatus(env) {
