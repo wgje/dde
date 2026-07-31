@@ -784,6 +784,83 @@ describe('Context7 pool runtime', () => {
     expect(harness.calls).toHaveLength(1);
   });
 
+  it.each([
+    {
+      label: 'successful dispatch with late persistence resolve',
+      response: success('completed upstream'),
+      expectedOutcome: { kind: 'success' },
+      lateSettlement: 'resolve',
+    },
+    {
+      label: 'trusted auth failure with late persistence reject',
+      response: { result: success('upstream auth response'), failureEvidence: failureEvidence(401) },
+      expectedOutcome: { kind: 'auth-invalid' },
+      lateSettlement: 'reject',
+    },
+  ] as const)(
+    'caller cancellation latches an unsettled $label before preserving caller identity',
+    async ({ label, response, expectedOutcome, lateSettlement }) => {
+      const outcomeGate = deferred<void>();
+      const unhandled: unknown[] = [];
+      const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
+      process.on('unhandledRejection', onUnhandled);
+      try {
+        const harness = createHarness({
+          responses: {
+            '1': [response],
+            anonymous: [success('anonymous after unsettled outcome')],
+          },
+          recordOutcome: async () => outcomeGate.promise,
+        });
+        const controller = new AbortController();
+        const reason = new Error(`unique caller cancellation: ${label}`);
+        const call = harness.pool.callTool(
+          'query-docs',
+          { libraryId: '/x', query: label },
+          { signal: controller.signal },
+        );
+        const rejectionState = call.then(
+          value => ({ kind: 'resolved' as const, value, override: harness.pool.getRouteOverride() }),
+          error => ({ kind: 'rejected' as const, error, override: harness.pool.getRouteOverride() }),
+        );
+        await vi.waitFor(() => expect(harness.store.recordOutcome).toHaveBeenCalledTimes(1));
+        expect(harness.calls.map(entry => entry.key)).toEqual(['1']);
+        expect(harness.outcomes).toEqual([{ token: expect.any(Object), outcome: expectedOutcome }]);
+        expect(harness.pool.getRouteOverride()).toBeNull();
+
+        controller.abort(reason);
+        const observed = await observeWithin(rejectionState);
+        expect(observed).toEqual({
+          status: 'resolved',
+          value: {
+            kind: 'rejected',
+            error: reason,
+            override: { kind: 'anonymous', reason: 'outcome-persistence-failed' },
+          },
+        });
+
+        if (lateSettlement === 'resolve') outcomeGate.resolve();
+        else outcomeGate.reject(new Error('late persistence secret'));
+        await new Promise(resolve => setTimeout(resolve, 0));
+        expect(unhandled).toEqual([]);
+        expect(harness.pool.getRouteOverride()).toEqual({
+          kind: 'anonymous',
+          reason: 'outcome-persistence-failed',
+        });
+        expect(harness.calls).toHaveLength(1);
+
+        await expect(harness.pool.callTool('query-docs', { libraryId: '/anonymous', query: 'safe fallback' }))
+          .resolves.toEqual(success('anonymous after unsettled outcome'));
+        expect(harness.store.preview).toHaveBeenCalledTimes(1);
+        expect(harness.store.reserveExpected).toHaveBeenCalledTimes(1);
+        expect(harness.calls.map(entry => entry.key)).toEqual(['1', 'anonymous']);
+        expect(JSON.stringify(harness.events)).not.toMatch(/unique caller cancellation|late persistence secret/);
+      } finally {
+        process.removeListener('unhandledRejection', onUnhandled);
+      }
+    },
+  );
+
   it('propagates caller cancellation identity across an uncooperative preview boundary', async () => {
     const previewGate = deferred<void>();
     const harness = createHarness({ previewGate: previewGate.promise });
@@ -802,6 +879,40 @@ describe('Context7 pool runtime', () => {
     expect(observed).toEqual({ status: 'rejected', reason });
     expect(harness.childFactory).not.toHaveBeenCalled();
     expect(harness.calls).toEqual([]);
+    expect(harness.pool.getRouteOverride()).toBeNull();
+  });
+
+  it('close during unsettled outcome persistence stays closed without requiring a durable latch', async () => {
+    const outcomeGate = deferred<void>();
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const harness = createHarness({
+        responses: { '1': [success('completed before close')] },
+        recordOutcome: async () => outcomeGate.promise,
+      });
+      const call = harness.pool.callTool('query-docs', { libraryId: '/x', query: 'close pending outcome' });
+      await vi.waitFor(() => expect(harness.store.recordOutcome).toHaveBeenCalledTimes(1));
+      const closeObserved = await observeWithin(harness.pool.close());
+      const callObserved = await observeWithin(call);
+      expect(closeObserved).toEqual({ status: 'resolved', value: undefined });
+      expect(callObserved).toMatchObject({
+        status: 'rejected',
+        reason: { message: 'context7-pool-closed' },
+      });
+      expect(harness.pool.getRouteOverride()).toBeNull();
+      await expect(harness.pool.callTool('query-docs', { libraryId: '/x', query: 'after close' }))
+        .rejects.toMatchObject({ message: 'context7-pool-closed' });
+
+      outcomeGate.reject(new Error('late close persistence rejection'));
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(unhandled).toEqual([]);
+      expect(harness.calls).toHaveLength(1);
+      expect(harness.pool.getRouteOverride()).toBeNull();
+    } finally {
+      process.removeListener('unhandledRejection', onUnhandled);
+    }
   });
 
   it('close promptly rejects an uncooperative active child call without waiting FIFO', async () => {

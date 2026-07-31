@@ -646,16 +646,18 @@ function createPoolRuntime(options) {
       try {
         outcome = await persistOutcome(reservation, classification, operation);
       } catch (error) {
+        if (!closing) {
+          storageFaultLatched = true;
+          emit('outcome-persistence-failed', {
+            slot: reservation.slot,
+            fingerprint: String(reservation.fingerprintSha256).slice(0, 12),
+            ordinal: reservation.attemptOrdinal,
+            attempt: dispatchState.total,
+            failure: 'outcome-persistence-failed',
+          });
+        }
         if (operation.callerSignal?.aborted) throw operation.callerSignal.reason;
         if (closing && operation.controller.signal.aborted) throw operation.controller.signal.reason;
-        storageFaultLatched = true;
-        emit('outcome-persistence-failed', {
-          slot: reservation.slot,
-          fingerprint: String(reservation.fingerprintSha256).slice(0, 12),
-          ordinal: reservation.attemptOrdinal,
-          attempt: dispatchState.total,
-          failure: 'outcome-persistence-failed',
-        });
         return classification === null ? result : fixedFailure(classification.kind);
       }
       emit('outcome', {
