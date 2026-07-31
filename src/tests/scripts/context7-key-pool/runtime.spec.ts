@@ -102,6 +102,9 @@ type HarnessOptions = {
   operationTimeoutMs?: number;
   previewError?: unknown;
   omitRedact?: boolean;
+  previewGate?: Promise<void>;
+  reserveGate?: Promise<void>;
+  onEvent?: (event: Record<string, unknown>) => unknown;
 };
 
 function createHarness(options: HarnessOptions = {}) {
@@ -121,6 +124,7 @@ function createHarness(options: HarnessOptions = {}) {
   const store = {
     preview: vi.fn(async (_context: unknown, routeOptions: { excludeFingerprints?: string[] } = {}) => {
       events.push({ event: 'store.preview' });
+      if (options.previewGate) await options.previewGate;
       if (options.previewError !== undefined) throw options.previewError;
       if (previewRoutes.length > 0) return { route: previewRoutes.shift() };
       const excluded = new Set(routeOptions.excludeFingerprints ?? []);
@@ -129,6 +133,7 @@ function createHarness(options: HarnessOptions = {}) {
     }),
     reserveExpected: vi.fn(async (_context: unknown, route: any) => {
       events.push({ event: 'store.reserve', slot: route.slot });
+      if (options.reserveGate) await options.reserveGate;
       if (reserveResults.length > 0) return reserveResults.shift();
       if (route.kind === 'anonymous') return { kind: 'anonymous', route, token: null };
       ordinal += 1;
@@ -192,12 +197,33 @@ function createHarness(options: HarnessOptions = {}) {
     sleep: options.sleep ?? (async () => undefined),
     timeZone: 'UTC',
     redact,
-    onEvent: (event: Record<string, unknown>) => events.push(event),
+    onEvent: options.onEvent ?? ((event: Record<string, unknown>) => events.push(event)),
     operationTimeoutMs: options.operationTimeoutMs ?? 70_000,
   };
   if (options.omitRedact) delete runtimeOptions.redact;
   const pool = createPoolRuntime(runtimeOptions);
   return { pool, store, childFactory, children, calls, outcomes, events };
+}
+
+async function observeWithin<T>(promise: Promise<T>, milliseconds = 1000): Promise<
+  | { status: 'resolved'; value: T }
+  | { status: 'rejected'; reason: unknown }
+  | { status: 'timed-out' }
+> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise.then(
+        value => ({ status: 'resolved' as const, value }),
+        reason => ({ status: 'rejected' as const, reason }),
+      ),
+      new Promise<{ status: 'timed-out' }>(resolve => {
+        timer = setTimeout(() => resolve({ status: 'timed-out' }), milliseconds);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 describe('Context7 pool helper contracts', () => {
@@ -345,6 +371,54 @@ describe('Context7 pool runtime', () => {
     expect(harness.children.map(child => child.key)).toEqual(['1', 'anonymous']);
     expect(harness.children[0].closed).toBe(true);
     expect(harness.calls.map(call => call.key)).toEqual(['anonymous']);
+  });
+
+  it('rejects malformed anonymous reservations before child dispatch, counters or outcomes', async () => {
+    const validRoute = { kind: 'anonymous', reason: 'state-unavailable-fail-closed' };
+    const cases: Array<[string, Record<string, unknown>]> = [
+      ['keyed route', { kind: 'anonymous', route: keyed(1), token: null }],
+      ['missing route', { kind: 'anonymous', token: null }],
+      ['malformed route', { kind: 'anonymous', route: { ...validRoute, extra: true }, token: null }],
+      ['non-null token', { kind: 'anonymous', route: validRoute, token: keyedToken(1) }],
+      ['unknown reason', { kind: 'anonymous', route: { kind: 'anonymous', reason: 'untrusted-reason' }, token: null }],
+    ];
+    for (const [label, reservation] of cases) {
+      const harness = createHarness({
+        previewRoutes: [keyed(1)],
+        reserveResults: [reservation],
+      });
+      await expect(
+        harness.pool.callTool('query-docs', { libraryId: '/x', query: label }),
+        label,
+      ).rejects.toMatchObject({ message: 'context7-pool-reservation-invalid' });
+      expect(harness.calls, label).toEqual([]);
+      expect(harness.outcomes, label).toEqual([]);
+      expect(harness.pool.getPublicRuntime(), label).toMatchObject({
+        keyedDispatches: 0,
+        anonymousDispatches: 0,
+      });
+      await harness.pool.close();
+    }
+  });
+
+  it('accepts an exact allowed anonymous route while ignoring documented snapshot metadata', async () => {
+    const route = { kind: 'anonymous', reason: 'all-keyed-slots-unavailable' };
+    const harness = createHarness({
+      previewRoutes: [keyed(1)],
+      reserveResults: [{
+        kind: 'anonymous',
+        route,
+        token: null,
+        state: { snapshot: true },
+        health: { status: 'healthy' },
+        stateRevision: 4,
+      }],
+      responses: { anonymous: [success('anonymous safe')] },
+    });
+    await expect(harness.pool.callTool('query-docs', { libraryId: '/x', query: 'x' }))
+      .resolves.toEqual(success('anonymous safe'));
+    expect(harness.calls.map(call => call.key)).toEqual(['anonymous']);
+    expect(harness.pool.getPublicRuntime()).toMatchObject({ keyedDispatches: 0, anonymousDispatches: 1 });
   });
 
   it('records success after dispatch by the exact captured reservation token', async () => {
@@ -651,6 +725,125 @@ describe('Context7 pool runtime', () => {
     await expect(cancelled).rejects.toThrow('synthetic caller cancellation');
     expect(harness.pool.getPublicRuntime()).toMatchObject({ keyedDispatches: 0, anonymousDispatches: 1 });
     expect(harness.calls).toHaveLength(1);
+  });
+
+  it.each(['preview', 'reserveExpected', 'childFactory', 'child.callTool'] as const)(
+    'hard deadline settles an uncooperative %s boundary and ignores its late completion',
+    async boundary => {
+      const gate = deferred<any>();
+      const harness = createHarness({
+        operationTimeoutMs: 10,
+        ...(boundary === 'preview' ? { previewGate: gate.promise } : {}),
+        ...(boundary === 'reserveExpected' ? { reserveGate: gate.promise } : {}),
+        ...(boundary === 'childFactory' ? { childFactoryGate: gate.promise } : {}),
+        ...(boundary === 'child.callTool' ? { responses: { '1': [() => gate.promise] } } : {}),
+      });
+      const call = harness.pool.callTool('query-docs', { libraryId: '/x', query: boundary });
+      const observed = await observeWithin(call);
+
+      if (boundary === 'child.callTool') {
+        gate.resolve({ result: success('late child result'), failureEvidence: null });
+      } else {
+        gate.resolve(undefined);
+      }
+      await call.catch(() => undefined);
+      await vi.waitFor(() => {
+        if (boundary === 'childFactory') expect(harness.children[0]?.closed).toBe(true);
+        if (boundary === 'reserveExpected' || boundary === 'child.callTool') {
+          expect(harness.children[0]?.closed).toBe(true);
+        }
+      });
+
+      expect(observed, boundary).toMatchObject({
+        status: 'rejected',
+        reason: { message: 'context7-pool-deadline-exceeded' },
+      });
+      expect(harness.outcomes, boundary).toEqual([]);
+      if (boundary !== 'child.callTool') expect(harness.calls, boundary).toEqual([]);
+      else expect(harness.calls, boundary).toHaveLength(1);
+    },
+  );
+
+  it('recordOutcome deadline never redispatches a completed attempt and latches anonymous routing', async () => {
+    const outcomeGate = deferred<void>();
+    const harness = createHarness({
+      operationTimeoutMs: 10,
+      responses: { '1': [success('completed upstream')] },
+      recordOutcome: async () => outcomeGate.promise,
+    });
+    const call = harness.pool.callTool('query-docs', { libraryId: '/x', query: 'x' });
+    const observed = await observeWithin(call);
+    expect(observed).toEqual({ status: 'resolved', value: success('completed upstream') });
+    expect(harness.calls).toHaveLength(1);
+    expect(harness.pool.getRouteOverride()).toEqual({
+      kind: 'anonymous',
+      reason: 'outcome-persistence-failed',
+    });
+    outcomeGate.resolve();
+    await Promise.resolve();
+    expect(harness.calls).toHaveLength(1);
+  });
+
+  it('propagates caller cancellation identity across an uncooperative preview boundary', async () => {
+    const previewGate = deferred<void>();
+    const harness = createHarness({ previewGate: previewGate.promise });
+    const controller = new AbortController();
+    const reason = new Error('synthetic caller identity');
+    const call = harness.pool.callTool(
+      'query-docs',
+      { libraryId: '/x', query: 'x' },
+      { signal: controller.signal },
+    );
+    await vi.waitFor(() => expect(harness.store.preview).toHaveBeenCalledTimes(1));
+    controller.abort(reason);
+    const observed = await observeWithin(call);
+    previewGate.resolve();
+    await call.catch(() => undefined);
+    expect(observed).toEqual({ status: 'rejected', reason });
+    expect(harness.childFactory).not.toHaveBeenCalled();
+    expect(harness.calls).toEqual([]);
+  });
+
+  it('close promptly rejects an uncooperative active child call without waiting FIFO', async () => {
+    const childGate = deferred<any>();
+    const harness = createHarness({ responses: { '1': [() => childGate.promise] } });
+    const call = harness.pool.callTool('query-docs', { libraryId: '/x', query: 'x' });
+    await vi.waitFor(() => expect(harness.calls).toHaveLength(1));
+    const closeObserved = await observeWithin(harness.pool.close());
+    const callObserved = await observeWithin(call);
+    childGate.resolve({ result: success('late after close'), failureEvidence: null });
+    await call.catch(() => undefined);
+    expect(closeObserved).toEqual({ status: 'resolved', value: undefined });
+    expect(callObserved).toMatchObject({
+      status: 'rejected',
+      reason: { message: 'context7-pool-closed' },
+    });
+    expect(harness.outcomes).toEqual([]);
+    expect(harness.calls).toHaveLength(1);
+  });
+
+  it('observes an asynchronously rejecting event observer without unhandled rejection or backpressure', async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      let thenCalls = 0;
+      const observer = vi.fn(() => ({
+        then(_resolve: (value: unknown) => void, reject: (reason: unknown) => void) {
+          thenCalls += 1;
+          reject(new Error('synthetic observer rejection'));
+        },
+      }));
+      const harness = createHarness({ onEvent: observer });
+      await expect(harness.pool.callTool('query-docs', { libraryId: '/x', query: 'x' }))
+        .resolves.toEqual(success());
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(observer).toHaveBeenCalled();
+      expect(thenCalls).toBeGreaterThan(0);
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.removeListener('unhandledRejection', onUnhandled);
+    }
   });
 
   it('close bypasses FIFO, aborts an active hang, closes the child and rejects new work', async () => {

@@ -27,6 +27,11 @@ const MAX_FAILURE_BYTES = 4096;
 const CLOSE_TIMEOUT_MS = 5000;
 const FINGERPRINT = /^[0-9a-f]{64}$/;
 const PERIOD_ID = /^(\d{4})-(0[1-9]|1[0-2])$/;
+const STORE_ANONYMOUS_REASONS = new Set([
+  'all-keyed-slots-unavailable',
+  'state-unavailable-fail-closed',
+]);
+const INTERNAL_ANONYMOUS_REASON = 'outcome-persistence-failed';
 
 function isPlainObject(value) {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
@@ -212,6 +217,21 @@ function validKeyedReservation(reserved, prepared) {
     && routeIdentity(reserved.route) === prepared.identity;
 }
 
+function validAnonymousRoute(route, allowInternal = false) {
+  return exactKeys(route, ['kind', 'reason'])
+    && route.kind === 'anonymous'
+    && (STORE_ANONYMOUS_REASONS.has(route.reason)
+      || (allowInternal && route.reason === INTERNAL_ANONYMOUS_REASON));
+}
+
+function validAnonymousReservation(reserved) {
+  return isPlainObject(reserved)
+    && reserved.kind === 'anonymous'
+    && validAnonymousRoute(reserved.route)
+    && Object.hasOwn(reserved, 'token')
+    && reserved.token === null;
+}
+
 function createPoolRuntime(options) {
   if (!isPlainObject(options)) throw new Context7PoolError('options-invalid');
   const {
@@ -268,7 +288,10 @@ function createPoolRuntime(options) {
     for (const key of ['slot', 'fingerprint', 'ordinal', 'attempt', 'failure']) {
       if (Object.hasOwn(fields, key)) allowlisted[key] = fields[key];
     }
-    try { onEvent(allowlisted); } catch { /* observer isolation */ }
+    try {
+      const returned = onEvent(allowlisted);
+      Promise.resolve(returned).catch(() => undefined);
+    } catch { /* observer isolation */ }
   }
 
   function throwIfAborted(operation) {
@@ -297,6 +320,68 @@ function createPoolRuntime(options) {
     };
   }
 
+  function observeDetached(callback) {
+    try {
+      Promise.resolve().then(callback).catch(() => undefined);
+    } catch { /* detached cleanup isolation */ }
+  }
+
+  async function awaitExternal(operation, callback, hooks = {}) {
+    throwIfAborted(operation);
+    let abandoned = false;
+    let sourceSettled = false;
+    let sourceFulfilled = false;
+    let fulfilledValue;
+    let lateFulfillmentHandled = false;
+
+    const handleLateFulfillment = () => {
+      if (lateFulfillmentHandled || !sourceFulfilled || typeof hooks.onLateFulfilled !== 'function') return;
+      lateFulfillmentHandled = true;
+      observeDetached(() => hooks.onLateFulfilled(fulfilledValue));
+    };
+    const abandon = () => {
+      if (abandoned) return;
+      abandoned = true;
+      if (typeof hooks.onAbort === 'function') observeDetached(hooks.onAbort);
+      if (sourceSettled) handleLateFulfillment();
+    };
+
+    const source = Promise.resolve().then(callback);
+    const observed = source.then(
+      value => {
+        sourceSettled = true;
+        sourceFulfilled = true;
+        fulfilledValue = value;
+        if (abandoned) handleLateFulfillment();
+        return { kind: 'fulfilled', value };
+      },
+      error => {
+        sourceSettled = true;
+        return { kind: 'rejected', error };
+      },
+    );
+
+    let removeAbort;
+    const aborted = new Promise(resolve => {
+      const listener = () => {
+        abandon();
+        resolve({ kind: 'aborted' });
+      };
+      removeAbort = () => operation.controller.signal.removeEventListener('abort', listener);
+      operation.controller.signal.addEventListener('abort', listener, { once: true });
+      if (operation.controller.signal.aborted) listener();
+    });
+
+    const outcome = await Promise.race([observed, aborted]);
+    removeAbort?.();
+    if (operation.controller.signal.aborted || closing) {
+      abandon();
+      throwIfAborted(operation);
+    }
+    if (outcome.kind === 'rejected') throw outcome.error;
+    return outcome.value;
+  }
+
   async function closeChild(child) {
     if (!child || typeof child.close !== 'function') return;
     let timer;
@@ -314,6 +399,12 @@ function createPoolRuntime(options) {
     if (previous) await closeChild(previous.child);
   }
 
+  function detachPrepared(prepared) {
+    const ownsActive = active?.child === prepared.child && active?.generation === prepared.generation;
+    if (ownsActive) active = null;
+    if (!closing || ownsActive) observeDetached(() => closeChild(prepared.child));
+  }
+
   async function prepareChild(route, operation) {
     throwIfAborted(operation);
     const identity = routeIdentity(route);
@@ -328,11 +419,15 @@ function createPoolRuntime(options) {
     const generation = ++generationCounter;
     let child;
     try {
-      child = await childFactory({
-        apiKey: credential?.value,
-        route: clone(route),
-        signal: operation.controller.signal,
-      });
+      child = await awaitExternal(
+        operation,
+        () => childFactory({
+          apiKey: credential?.value,
+          route: clone(route),
+          signal: operation.controller.signal,
+        }),
+        { onLateFulfilled: lateChild => closeChild(lateChild) },
+      );
     } catch (error) {
       active = null;
       throwIfAborted(operation);
@@ -415,7 +510,7 @@ function createPoolRuntime(options) {
 
   async function listToolsOperation(operation) {
     throwIfAborted(operation);
-    const preview = await store.preview(context, {});
+    const preview = await awaitExternal(operation, () => store.preview(context, {}));
     throwIfAborted(operation);
     const prepared = await prepareChild(preview.route, operation);
     return clone(prepared.child.tools);
@@ -428,13 +523,14 @@ function createPoolRuntime(options) {
     return { result: value, failureEvidence: null };
   }
 
-  async function persistOutcome(token, classification) {
+  async function persistOutcome(token, classification, operation) {
     const outcome = outcomeForClassification(classification);
-    await store.recordOutcome(context, token, outcome);
+    await awaitExternal(operation, () => store.recordOutcome(context, token, outcome));
     return outcome;
   }
 
   async function dispatchAnonymous(name, args, route, operation, dispatchState) {
+    if (!validAnonymousRoute(route, true)) throw new Context7PoolError('route-invalid');
     if (dispatchState.total >= MAX_DISPATCHES) return fixedFailure('retry-exhausted');
     const prepared = await prepareChild(route, operation);
     throwIfAborted(operation);
@@ -446,7 +542,11 @@ function createPoolRuntime(options) {
     publicState.anonymousDispatches += 1;
     emit('dispatch', { attempt: dispatchState.total });
     try {
-      const raw = await dispatchedChild.callTool(name, args, { signal: operation.controller.signal });
+      const raw = await awaitExternal(
+        operation,
+        () => dispatchedChild.callTool(name, args, { signal: operation.controller.signal }),
+        { onAbort: () => detachPrepared(prepared) },
+      );
       throwIfAborted(operation);
       const { result, failureEvidence } = normalizeChildResponse(raw);
       const classification = classifyToolResult({ result, failureEvidence });
@@ -475,7 +575,7 @@ function createPoolRuntime(options) {
     while (dispatchState.total < MAX_DISPATCHES) {
       throwIfAborted(operation);
       const routeOptions = { excludeFingerprints: [...excludedFingerprints] };
-      const preview = await store.preview(context, routeOptions);
+      const preview = await awaitExternal(operation, () => store.preview(context, routeOptions));
       throwIfAborted(operation);
       // Attempt two is pinned to the first transient route, but reserveExpected
       // remains the durable eligibility fence. A changed store returns retry,
@@ -483,7 +583,11 @@ function createPoolRuntime(options) {
       const expectedRoute = pinnedTransientRoute ?? preview.route;
       const prepared = await prepareChild(expectedRoute, operation);
       throwIfAborted(operation);
-      const reserved = await store.reserveExpected(context, expectedRoute, routeOptions);
+      const reserved = await awaitExternal(
+        operation,
+        () => store.reserveExpected(context, expectedRoute, routeOptions),
+        { onAbort: () => detachPrepared(prepared) },
+      );
       throwIfAborted(operation);
 
       if (reserved.kind === 'retry') {
@@ -492,6 +596,9 @@ function createPoolRuntime(options) {
         continue;
       }
       if (reserved.kind === 'anonymous') {
+        if (!validAnonymousReservation(reserved)) {
+          throw new Context7PoolError('reservation-invalid');
+        }
         if (prepared.route.kind === 'keyed') await discardActive();
         return dispatchAnonymous(name, args, reserved.route, operation, dispatchState);
       }
@@ -517,7 +624,11 @@ function createPoolRuntime(options) {
       let result;
       let classification;
       try {
-        const raw = await dispatchedChild.callTool(name, args, { signal: operation.controller.signal });
+        const raw = await awaitExternal(
+          operation,
+          () => dispatchedChild.callTool(name, args, { signal: operation.controller.signal }),
+          { onAbort: () => detachPrepared(prepared) },
+        );
         throwIfAborted(operation);
         const normalized = normalizeChildResponse(raw);
         result = normalized.result;
@@ -533,8 +644,10 @@ function createPoolRuntime(options) {
       }
       let outcome;
       try {
-        outcome = await persistOutcome(reservation, classification);
+        outcome = await persistOutcome(reservation, classification, operation);
       } catch (error) {
+        if (operation.callerSignal?.aborted) throw operation.callerSignal.reason;
+        if (closing && operation.controller.signal.aborted) throw operation.controller.signal.reason;
         storageFaultLatched = true;
         emit('outcome-persistence-failed', {
           slot: reservation.slot,
@@ -602,9 +715,9 @@ function createPoolRuntime(options) {
     if (closePromise) return closePromise;
     closing = true;
     const closeError = new Context7PoolError('closed');
-    currentController?.abort(closeError);
     const previous = active;
     active = null;
+    currentController?.abort(closeError);
     closePromise = closeChild(previous?.child).then(() => {
       void queueTail.catch(() => undefined);
     });
