@@ -6,7 +6,6 @@ import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { spawnSync } from 'node:child_process';
-import { transferableAbortController } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 
 const require = createRequire(import.meta.url);
@@ -43,7 +42,6 @@ type ChildAdapterModule = {
   extractTrustedFailureEvidence(
     result: Record<string, unknown>,
     marker: string,
-    redact?: (value: unknown) => unknown,
   ): {
     result: Record<string, unknown>;
     failureEvidence: null | { kind: string; status: number | null; retryAfterSeconds: number | null };
@@ -63,6 +61,76 @@ function tempRoot(): string {
 
 function fakeArgs(...args: string[]): string[] {
   return args;
+}
+
+function writeLateExitMcpFixture(): string {
+  const root = tempRoot();
+  const entryPath = path.join(root, 'late-exit-context7-mcp.cjs');
+  const serverPath = require.resolve('@modelcontextprotocol/sdk/server/index.js');
+  const stdioPath = require.resolve('@modelcontextprotocol/sdk/server/stdio.js');
+  const typesPath = require.resolve('@modelcontextprotocol/sdk/types.js');
+  const tools = validTools();
+  fs.writeFileSync(entryPath, `'use strict';
+const { Server } = require(${JSON.stringify(serverPath)});
+const { StdioServerTransport } = require(${JSON.stringify(stdioPath)});
+const { ListToolsRequestSchema } = require(${JSON.stringify(typesPath)});
+const server = new Server({name:'late-exit-context7',version:'1.0.0'},{capabilities:{tools:{}}});
+server.setRequestHandler(ListToolsRequestSchema, async () => {
+  setTimeout(() => process.exit(0), 25);
+  return {tools:${JSON.stringify(tools)}};
+});
+server.connect(new StdioServerTransport()).catch(() => process.exit(29));
+`);
+  return entryPath;
+}
+
+function runAbortHarness(pidFile: string): ReturnType<typeof spawnSync> {
+  const root = tempRoot();
+  const harnessPath = path.join(root, 'abort-harness.cjs');
+  fs.writeFileSync(harnessPath, `'use strict';
+const { createContext7Child } = require(${JSON.stringify(childPath)});
+const fs = require('node:fs');
+const unhandled = [];
+process.on('unhandledRejection', (reason) => unhandled.push(String(reason)));
+(async () => {
+  const child = await createContext7Child({
+    apiKey: undefined,
+    inheritedEnv: {PATH: process.env.PATH || ''},
+    command: process.execPath,
+    entryPath: ${JSON.stringify(fakeMcpPath)},
+    observerPath: ${JSON.stringify(observerPath)},
+    args: ['--delay-call', '5000', '--pid-file', ${JSON.stringify(pidFile)}],
+    cwd: ${JSON.stringify(repoRoot)},
+    connectTimeoutMs: 2000,
+    callTimeoutMs: 5000,
+    redact: (value) => value,
+  });
+  const controller = new AbortController();
+  const startedAt = Date.now();
+  const pending = child.callTool(
+    'resolve-library-id',
+    {libraryName:'fixture',query:'fixture'},
+    {signal:controller.signal},
+  );
+  setTimeout(() => controller.abort(new Error('fixture in-flight cancellation')), 25);
+  let error = null;
+  try { await pending; } catch (caught) { error = String(caught && caught.message || caught); }
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const pid = Number(fs.readFileSync(${JSON.stringify(pidFile)}, 'utf8'));
+  let childAlive = true;
+  try { process.kill(pid, 0); } catch { childAlive = false; }
+  process.stdout.write(JSON.stringify({elapsedMs:Date.now()-startedAt,error,unhandled,childAlive}));
+})().catch((error) => {
+  process.stderr.write(String(error && error.stack || error));
+  process.exit(1);
+});
+`);
+  return spawnSync(process.execPath, [harnessPath], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    timeout: 10_000,
+    env: { PATH: process.env.PATH ?? '' },
+  });
 }
 
 async function fakeChild(options: {
@@ -518,6 +586,37 @@ describe('Context7 official child adapter', () => {
     expect(process.pid).toBeGreaterThan(0);
   });
 
+  it('notifies a late exit listener exactly once after the child closed following tools/list', async () => {
+    const child = await loadAdapter().createContext7Child({
+      apiKey: undefined,
+      inheritedEnv: { PATH: process.env.PATH ?? '' },
+      command: process.execPath,
+      entryPath: writeLateExitMcpFixture(),
+      observerPath,
+      args: [],
+      cwd: repoRoot,
+      connectTimeoutMs: 2_000,
+      callTimeoutMs: 2_000,
+      redact: (value: unknown) => value,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    let delivered = 0;
+    const unsubscribe = child.onExit(() => { delivered += 1; });
+    let cancelledDelivery = 0;
+    const cancelLate = child.onExit(() => { cancelledDelivery += 1; });
+    cancelLate();
+
+    expect(delivered).toBe(0);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(delivered).toBe(1);
+    expect(cancelledDelivery).toBe(0);
+    await child.close();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(delivered).toBe(1);
+    unsubscribe();
+  });
+
   it('ignores child stderr so a noisy child cannot leak or block on pipe backpressure', async () => {
     const child = await fakeChild({ args: ['--stderr-bytes', String(2 * 1024 * 1024)] });
     try {
@@ -527,20 +626,21 @@ describe('Context7 official child adapter', () => {
     }
   }, 10_000);
 
-  it('forwards an AbortSignal to a raw tools/call request without changing the result', async () => {
+  it('aborts a delayed in-flight tools/call promptly, closes the child, and leaves no unhandled rejection', () => {
     const root = tempRoot();
     const pidFile = path.join(root, 'abort.pid');
-    const child = await fakeChild({ args: ['--pid-file', pidFile] });
-    const controller = transferableAbortController();
-    await expect(child.callTool(
-      'resolve-library-id',
-      { libraryName: 'fixture', query: 'fixture' },
-      { signal: controller.signal },
-    )).resolves.toMatchObject({
-      result: { content: [{ type: 'text', text: 'fixture-ok' }] },
-      failureEvidence: null,
-    });
-    await child.close();
-    await expectPidStops(pidFile);
-  });
+    const result = runAbortHarness(pidFile);
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe('');
+    const evidence = JSON.parse(result.stdout) as {
+      elapsedMs: number;
+      error: string;
+      unhandled: string[];
+      childAlive: boolean;
+    };
+    expect(evidence.error).toMatch(/fixture in-flight cancellation|abort/i);
+    expect(evidence.elapsedMs).toBeLessThan(2_500);
+    expect(evidence.unhandled).toEqual([]);
+    expect(evidence.childAlive).toBe(false);
+  }, 10_000);
 });

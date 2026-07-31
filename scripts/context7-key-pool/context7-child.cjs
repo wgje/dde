@@ -250,20 +250,26 @@ async function createContext7Child(options) {
   });
   const exitListeners = new Set();
   let closed = false;
+  let exitDispatched = false;
   let closePromise = null;
   client.onerror = () => {};
-  client.onclose = () => {
+  const dispatchExit = () => {
+    if (exitDispatched) return;
     closed = true;
+    exitDispatched = true;
     for (const listener of [...exitListeners]) {
       try { listener(); } catch { /* listener isolation */ }
     }
+    exitListeners.clear();
   };
+  client.onclose = dispatchExit;
 
   const close = async () => {
     if (closePromise) return closePromise;
     closePromise = (async () => {
       closed = true;
       await client.close().catch(() => transport.close().catch(() => undefined));
+      dispatchExit();
     })();
     return closePromise;
   };
@@ -287,7 +293,7 @@ async function createContext7Child(options) {
             CallToolResultSchema,
             { timeout: callTimeoutMs, signal: callOptions.signal },
           );
-          return extractTrustedFailureEvidence(result, marker, redact);
+          return extractTrustedFailureEvidence(result, marker);
         } catch (error) {
           await close();
           throw safeError(error, marker, redact);
@@ -296,6 +302,15 @@ async function createContext7Child(options) {
       close,
       onExit(listener) {
         if (typeof listener !== 'function') throw new Error('context7-child-exit-listener-invalid');
+        if (closed) {
+          let active = true;
+          queueMicrotask(() => {
+            if (!active) return;
+            active = false;
+            try { listener(); } catch { /* listener isolation */ }
+          });
+          return () => { active = false; };
+        }
         exitListeners.add(listener);
         return () => exitListeners.delete(listener);
       },
