@@ -66,6 +66,15 @@ function keyed(slot: number) {
   return { kind: 'keyed', periodId: '2026-07', slot, fingerprintSha256: FP[slot - 1] };
 }
 
+function keyedToken(slot: number, overrides: Record<string, unknown> = {}) {
+  return {
+    ...keyed(slot),
+    attemptOrdinal: 1,
+    stateRevision: 0,
+    ...overrides,
+  };
+}
+
 function success(text = 'ok') {
   return { content: [{ type: 'text', text }] };
 }
@@ -92,6 +101,7 @@ type HarnessOptions = {
   sleep?: (ms: number, options?: { signal?: AbortSignal }) => Promise<void>;
   operationTimeoutMs?: number;
   previewError?: unknown;
+  omitRedact?: boolean;
 };
 
 function createHarness(options: HarnessOptions = {}) {
@@ -174,7 +184,7 @@ function createHarness(options: HarnessOptions = {}) {
   const redact = (value: unknown) => JSON.parse(JSON.stringify(value, (_key, entry) => (
     typeof entry === 'string' ? entry.replaceAll('fixture-secret', '[REDACTED]') : entry
   )));
-  const pool = createPoolRuntime({
+  const runtimeOptions: Record<string, unknown> = {
     credentials,
     store,
     childFactory,
@@ -184,7 +194,9 @@ function createHarness(options: HarnessOptions = {}) {
     redact,
     onEvent: (event: Record<string, unknown>) => events.push(event),
     operationTimeoutMs: options.operationTimeoutMs ?? 70_000,
-  });
+  };
+  if (options.omitRedact) delete runtimeOptions.redact;
+  const pool = createPoolRuntime(runtimeOptions);
   return { pool, store, childFactory, children, calls, outcomes, events };
 }
 
@@ -256,6 +268,21 @@ describe('Context7 pool helper contracts', () => {
     expect(error.kind).toBe('transient');
     expect(error.details).toEqual({ value: '[REDACTED]' });
   });
+
+  it('fails closed when runtime construction omits the required redactor', () => {
+    expect(() => createHarness({ omitRedact: true })).toThrowError(expect.objectContaining({
+      kind: 'configuration-invalid',
+      message: 'context7-pool-configuration-invalid',
+    }));
+  });
+
+  it('never identity-projects nested error details when no redactor is available', () => {
+    const error = new Context7PoolError('transient', {
+      nested: { credential: 'synthetic-sensitive-value', child: { stderr: 'nested-sensitive-detail' } },
+    });
+    expect(error.details).toEqual({ redaction: 'unavailable' });
+    expect(JSON.stringify(error)).not.toMatch(/synthetic-sensitive-value|nested-sensitive-detail/);
+  });
 });
 
 describe('Context7 pool runtime', () => {
@@ -298,7 +325,7 @@ describe('Context7 pool runtime', () => {
   it('closes and switches without dispatch when preview and reservation routes differ', async () => {
     const harness = createHarness({
       previewRoutes: [keyed(1), keyed(2)],
-      reserveResults: [{ kind: 'retry', route: keyed(2) }, { kind: 'keyed', route: keyed(2), token: { ...keyed(2), attemptOrdinal: 1 } }],
+      reserveResults: [{ kind: 'retry', route: keyed(2) }, { kind: 'keyed', route: keyed(2), token: keyedToken(2) }],
       responses: { '2': [success('slot2')] },
     });
     await expect(harness.pool.callTool('query-docs', { libraryId: '/x', query: 'x' })).resolves.toEqual(success('slot2'));
@@ -328,6 +355,40 @@ describe('Context7 pool runtime', () => {
     expect(harness.outcomes[0].token).toMatchObject({ slot: 1, attemptOrdinal: 1 });
     expect(harness.events.findIndex(event => event.event === 'child.dispatch'))
       .toBeLessThan(harness.events.findIndex(event => event.event === 'store.outcome'));
+  });
+
+  it('rejects every malformed keyed reservation before dispatch or outcome persistence', async () => {
+    const valid = { kind: 'keyed', route: keyed(1), token: keyedToken(1) };
+    const cases: Array<[string, Record<string, unknown>]> = [
+      ['reservation kind', { ...valid, kind: 'unexpected' }],
+      ['route kind', { ...valid, route: { kind: 'anonymous', reason: 'all-keyed-slots-unavailable' } }],
+      ['route period', { ...valid, route: { ...keyed(1), periodId: '2026-7' } }],
+      ['token missing kind', {
+        ...valid,
+        token: { periodId: '2026-07', slot: 1, fingerprintSha256: FP[0], attemptOrdinal: 1, stateRevision: 0 },
+      }],
+      ['token wrong kind', { ...valid, token: keyedToken(1, { kind: 'anonymous' }) }],
+      ['token period mismatch', { ...valid, token: keyedToken(1, { periodId: '2026-08' }) }],
+      ['token invalid period', { ...valid, token: keyedToken(1, { periodId: '0000-01' }) }],
+      ['token slot mismatch', { ...valid, token: keyedToken(1, { slot: 2 }) }],
+      ['token fingerprint mismatch', { ...valid, token: keyedToken(1, { fingerprintSha256: FP[1] }) }],
+      ['token short fingerprint', { ...valid, token: keyedToken(1, { fingerprintSha256: 'a'.repeat(12) }) }],
+      ['zero ordinal', { ...valid, token: keyedToken(1, { attemptOrdinal: 0 }) }],
+      ['unsafe ordinal', { ...valid, token: keyedToken(1, { attemptOrdinal: Number.MAX_SAFE_INTEGER + 1 }) }],
+      ['negative revision', { ...valid, token: keyedToken(1, { stateRevision: -1 }) }],
+      ['unsafe revision', { ...valid, token: keyedToken(1, { stateRevision: Number.MAX_SAFE_INTEGER + 1 }) }],
+      ['missing revision', { ...valid, token: { ...keyed(1), attemptOrdinal: 1 } }],
+    ];
+    for (const [label, reservation] of cases) {
+      const harness = createHarness({ reserveResults: [reservation] });
+      await expect(
+        harness.pool.callTool('query-docs', { libraryId: '/x', query: label }),
+        label,
+      ).rejects.toMatchObject({ message: 'context7-pool-reservation-invalid' });
+      expect(harness.calls, label).toEqual([]);
+      expect(harness.outcomes, label).toEqual([]);
+      await harness.pool.close();
+    }
   });
 
   it('routes all classifier branches to recordOutcome with exact allowlisted shapes', async () => {
@@ -418,6 +479,42 @@ describe('Context7 pool runtime', () => {
     expect(new Set(harness.outcomes.map(entry => JSON.stringify(entry.token))).size).toBe(3);
   });
 
+  it('pins transient attempt two to the first fingerprint despite preview drift, then excludes it', async () => {
+    const transient = { result: { ...success(), isError: true }, failureEvidence: null };
+    const harness = createHarness({
+      previewRoutes: [keyed(1), keyed(2), keyed(2)],
+      responses: { '1': [transient, transient], '2': [success('recovered')] },
+    });
+    await expect(harness.pool.callTool('query-docs', { libraryId: '/x', query: 'x' }))
+      .resolves.toEqual(success('recovered'));
+    expect(harness.calls.map(call => call.key)).toEqual(['1', '1', '2']);
+    expect(harness.store.reserveExpected.mock.calls.map(call => (call[1] as any).slot)).toEqual([1, 1, 2]);
+    expect(harness.store.preview.mock.calls.map(call => call[1])).toEqual([
+      { excludeFingerprints: [] },
+      { excludeFingerprints: [] },
+      { excludeFingerprints: [FP[0]] },
+    ]);
+    expect(harness.outcomes.map(entry => (entry.token as any).attemptOrdinal)).toEqual([1, 2, 3]);
+  });
+
+  it('does not dispatch a pinned retry when reserveExpected reports that route is no longer eligible', async () => {
+    const transient = { result: { ...success(), isError: true }, failureEvidence: null };
+    const harness = createHarness({
+      previewRoutes: [keyed(1), keyed(2), keyed(2)],
+      reserveResults: [
+        { kind: 'keyed', route: keyed(1), token: keyedToken(1) },
+        { kind: 'retry', route: keyed(2) },
+        { kind: 'keyed', route: keyed(2), token: keyedToken(2, { attemptOrdinal: 2, stateRevision: 1 }) },
+      ],
+      responses: { '1': [transient], '2': [success('safe switch')] },
+    });
+    await expect(harness.pool.callTool('query-docs', { libraryId: '/x', query: 'x' }))
+      .resolves.toEqual(success('safe switch'));
+    expect(harness.store.reserveExpected.mock.calls.map(call => (call[1] as any).slot)).toEqual([1, 1, 2]);
+    expect(harness.calls.map(call => call.key)).toEqual(['1', '2']);
+    expect(harness.outcomes.map(entry => entry.outcome)).toEqual([{ kind: 'transient' }, { kind: 'success' }]);
+  });
+
   it('sanitizes final failures and query digits never change state without trusted evidence', async () => {
     const hugeSecret = `fixture-secret-${'x'.repeat(6000)} 401 429`;
     const harness = createHarness({ responses: { '1': [{ result: { content: [{ type: 'text', text: hugeSecret }], isError: true }, failureEvidence: null }, success('ok')] } });
@@ -460,17 +557,41 @@ describe('Context7 pool runtime', () => {
     expect(second.childFactory).toHaveBeenCalledTimes(2);
   });
 
-  it('attributes an in-flight dispatch to the captured child and ignores stale exits', async () => {
-    const pending = deferred<any>();
-    const harness = createHarness({ responses: { '1': [() => pending.promise] } });
+  it('settles late child-one evidence on its captured reservation before activating child-two', async () => {
+    const childOneLate = deferred<any>();
+    const childTwoResult = deferred<any>();
+    const harness = createHarness({
+      responses: { '1': [() => childOneLate.promise], '2': [() => childTwoResult.promise] },
+    });
     const call = harness.pool.callTool('query-docs', { libraryId: '/x', query: 'x' });
     await vi.waitFor(() => expect(harness.calls).toHaveLength(1));
-    const dispatched = harness.calls[0].child;
-    dispatched.exit();
-    pending.resolve({ result: success('captured'), failureEvidence: null });
-    await expect(call).resolves.toEqual(success('captured'));
-    expect(harness.outcomes[0].token).toMatchObject({ slot: 1, attemptOrdinal: 1 });
-    expect(harness.calls[0]).toMatchObject({ child: dispatched, generation: dispatched.generation });
+    const childOne = harness.calls[0].child;
+    childOne.exit();
+    await Promise.resolve();
+    expect(harness.calls).toHaveLength(1);
+    expect(harness.children).toEqual([childOne]);
+
+    childOneLate.resolve({ result: success('stale marker payload'), failureEvidence: failureEvidence(401) });
+    await vi.waitFor(() => expect(harness.calls).toHaveLength(2));
+    const childTwo = harness.calls[1].child;
+    expect(childTwo).not.toBe(childOne);
+    expect(childTwo.generation).not.toBe(childOne.generation);
+    expect(harness.children).toEqual([childOne, childTwo]);
+
+    expect(harness.outcomes).toEqual([
+      { token: expect.objectContaining({ slot: 1, attemptOrdinal: 1 }), outcome: { kind: 'auth-invalid' } },
+    ]);
+
+    childTwoResult.resolve({ result: success('current generation'), failureEvidence: null });
+    await expect(call).resolves.toEqual(success('current generation'));
+    expect(harness.outcomes).toEqual([
+      { token: expect.objectContaining({ slot: 1, attemptOrdinal: 1 }), outcome: { kind: 'auth-invalid' } },
+      { token: expect.objectContaining({ slot: 2, attemptOrdinal: 2 }), outcome: { kind: 'success' } },
+    ]);
+    expect(harness.calls.map(entry => ({ child: entry.child, generation: entry.generation }))).toEqual([
+      { child: childOne, generation: childOne.generation },
+      { child: childTwo, generation: childTwo.generation },
+    ]);
   });
 
   it('stops mixed switching at the absolute nine-dispatch ceiling', async () => {
@@ -495,6 +616,41 @@ describe('Context7 pool runtime', () => {
     expect(after).not.toBe(before);
     expect(after).toMatchObject({ instanceId_12: before.instanceId_12, keyedDispatches: 1, anonymousDispatches: 0 });
     expect(JSON.stringify(after)).not.toContain('secret');
+  });
+
+  it('increments anonymous counters only for a real dispatch, not status, list, prepare, validation or queued cancel', async () => {
+    const anonymous = { kind: 'anonymous', reason: 'all-keyed-slots-unavailable' };
+    const pending = deferred<any>();
+    const harness = createHarness({
+      previewRoutes: [anonymous, anonymous],
+      responses: { anonymous: [() => pending.promise] },
+    });
+    expect(harness.pool.getPublicRuntime()).toMatchObject({ keyedDispatches: 0, anonymousDispatches: 0 });
+    expect(harness.pool.getRouteOverride()).toBeNull();
+    await harness.pool.listTools();
+    expect(harness.children).toHaveLength(1);
+    expect(harness.calls).toEqual([]);
+    expect(harness.pool.getPublicRuntime()).toMatchObject({ keyedDispatches: 0, anonymousDispatches: 0 });
+    await expect(harness.pool.callTool('query-docs', { libraryId: '/x', query: ' ' })).rejects.toMatchObject({
+      kind: 'input-invalid',
+    });
+    expect(harness.pool.getPublicRuntime()).toMatchObject({ keyedDispatches: 0, anonymousDispatches: 0 });
+
+    const active = harness.pool.callTool('query-docs', { libraryId: '/x', query: 'active' });
+    await vi.waitFor(() => expect(harness.calls).toHaveLength(1));
+    expect(harness.pool.getPublicRuntime()).toMatchObject({ keyedDispatches: 0, anonymousDispatches: 1 });
+    const controller = new AbortController();
+    const cancelled = harness.pool.callTool(
+      'query-docs',
+      { libraryId: '/x', query: 'queued' },
+      { signal: controller.signal },
+    );
+    controller.abort(new Error('synthetic caller cancellation'));
+    pending.resolve({ result: success('anonymous result'), failureEvidence: null });
+    await expect(active).resolves.toEqual(success('anonymous result'));
+    await expect(cancelled).rejects.toThrow('synthetic caller cancellation');
+    expect(harness.pool.getPublicRuntime()).toMatchObject({ keyedDispatches: 0, anonymousDispatches: 1 });
+    expect(harness.calls).toHaveLength(1);
   });
 
   it('close bypasses FIFO, aborts an active hang, closes the child and rejects new work', async () => {

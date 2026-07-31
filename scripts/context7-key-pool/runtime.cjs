@@ -25,6 +25,8 @@ const MAX_TRANSIENT_DISPATCHES = 3;
 const MAX_DISPATCHES = 9;
 const MAX_FAILURE_BYTES = 4096;
 const CLOSE_TIMEOUT_MS = 5000;
+const FINGERPRINT = /^[0-9a-f]{64}$/;
+const PERIOD_ID = /^(\d{4})-(0[1-9]|1[0-2])$/;
 
 function isPlainObject(value) {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
@@ -45,9 +47,10 @@ function clone(value) {
 }
 
 function safeRedact(value, redact) {
+  if (typeof redact !== 'function') return { redaction: 'unavailable' };
   let redacted;
   try {
-    redacted = typeof redact === 'function' ? redact(value) : value;
+    redacted = redact(value);
   } catch {
     redacted = { redaction: 'failed' };
   }
@@ -161,9 +164,52 @@ function fixedFailure(kind) {
 
 function routeIdentity(route) {
   if (!isPlainObject(route)) throw new Context7PoolError('route-invalid');
-  if (route.kind === 'keyed') return `keyed:${route.slot}:${route.fingerprintSha256}`;
+  if (route.kind === 'keyed') return `keyed:${route.periodId}:${route.slot}:${route.fingerprintSha256}`;
   if (route.kind === 'anonymous') return `anonymous:${route.reason}`;
   throw new Context7PoolError('route-invalid');
+}
+
+function validPeriodId(value) {
+  const match = typeof value === 'string' ? PERIOD_ID.exec(value) : null;
+  if (!match) return false;
+  const year = Number(match[1]);
+  return year >= 1 && year <= 9998;
+}
+
+function validKeyedRoute(route) {
+  return exactKeys(route, ['kind', 'periodId', 'slot', 'fingerprintSha256'])
+    && route.kind === 'keyed'
+    && validPeriodId(route.periodId)
+    && Number.isSafeInteger(route.slot)
+    && route.slot >= 1
+    && route.slot <= 4
+    && FINGERPRINT.test(route.fingerprintSha256);
+}
+
+function validKeyedReservation(reserved, prepared) {
+  if (!isPlainObject(reserved)
+    || reserved.kind !== 'keyed'
+    || !validKeyedRoute(reserved.route)
+    || !exactKeys(reserved.token, [
+      'kind',
+      'periodId',
+      'slot',
+      'fingerprintSha256',
+      'attemptOrdinal',
+      'stateRevision',
+    ])) return false;
+  const token = reserved.token;
+  return token.kind === 'keyed'
+    && validPeriodId(token.periodId)
+    && token.periodId === reserved.route.periodId
+    && token.slot === reserved.route.slot
+    && token.fingerprintSha256 === reserved.route.fingerprintSha256
+    && FINGERPRINT.test(token.fingerprintSha256)
+    && Number.isSafeInteger(token.attemptOrdinal)
+    && token.attemptOrdinal > 0
+    && Number.isSafeInteger(token.stateRevision)
+    && token.stateRevision >= 0
+    && routeIdentity(reserved.route) === prepared.identity;
 }
 
 function createPoolRuntime(options) {
@@ -179,6 +225,7 @@ function createPoolRuntime(options) {
     onEvent,
     operationTimeoutMs = 70000,
   } = options;
+  if (typeof redact !== 'function') throw new Context7PoolError('configuration-invalid');
   if (!Array.isArray(credentials)
     || !store
     || typeof store.preview !== 'function'
@@ -414,6 +461,7 @@ function createPoolRuntime(options) {
   async function callToolOperation(name, args, operation) {
     const dispatchState = { total: 0, transients: 0 };
     const excludedFingerprints = new Set();
+    let pinnedTransientRoute = null;
     if (storageFaultLatched) {
       return dispatchAnonymous(
         name,
@@ -429,12 +477,17 @@ function createPoolRuntime(options) {
       const routeOptions = { excludeFingerprints: [...excludedFingerprints] };
       const preview = await store.preview(context, routeOptions);
       throwIfAborted(operation);
-      const prepared = await prepareChild(preview.route, operation);
+      // Attempt two is pinned to the first transient route, but reserveExpected
+      // remains the durable eligibility fence. A changed store returns retry,
+      // so a stale pin can never dispatch without a fresh matching token.
+      const expectedRoute = pinnedTransientRoute ?? preview.route;
+      const prepared = await prepareChild(expectedRoute, operation);
       throwIfAborted(operation);
-      const reserved = await store.reserveExpected(context, preview.route, routeOptions);
+      const reserved = await store.reserveExpected(context, expectedRoute, routeOptions);
       throwIfAborted(operation);
 
       if (reserved.kind === 'retry') {
+        pinnedTransientRoute = null;
         await discardActive();
         continue;
       }
@@ -442,11 +495,7 @@ function createPoolRuntime(options) {
         if (prepared.route.kind === 'keyed') await discardActive();
         return dispatchAnonymous(name, args, reserved.route, operation, dispatchState);
       }
-      if (reserved.kind !== 'keyed'
-        || !isPlainObject(reserved.token)
-        || routeIdentity(reserved.route) !== prepared.identity
-        || reserved.token.slot !== reserved.route.slot
-        || reserved.token.fingerprintSha256 !== reserved.route.fingerprintSha256) {
+      if (!validKeyedReservation(reserved, prepared)) {
         throw new Context7PoolError('reservation-invalid');
       }
 
@@ -511,7 +560,12 @@ function createPoolRuntime(options) {
       if (outcome.kind === 'transient') {
         dispatchState.transients += 1;
         if (dispatchState.transients >= MAX_TRANSIENT_DISPATCHES) return fixedFailure('transient');
-        if (dispatchState.transients >= 2) excludedFingerprints.add(reservation.fingerprintSha256);
+        if (dispatchState.transients === 1) {
+          pinnedTransientRoute = clone(reserved.route);
+        } else {
+          excludedFingerprints.add(reservation.fingerprintSha256);
+          pinnedTransientRoute = null;
+        }
         await abortableSleep(1, operation);
       }
     }
