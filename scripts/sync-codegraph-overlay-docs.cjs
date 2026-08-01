@@ -4,55 +4,60 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { buildBaseline } = require('./lib/codegraph-overlay-baseline.cjs');
+const {
+  assertDocsTransactionClean,
+  assertNumericTokenOnlyChange,
+  createParticipantToken,
+  docsTransactionPaths,
+  fileEvidence,
+  inspectDocsTransaction,
+  sha256,
+  writeFileAtomically,
+  writeFsynced,
+} = require('./lib/codegraph-overlay-stability.cjs');
 
-const args = process.argv.slice(2);
-const rootArgIndex = args.indexOf('--root');
-const root = rootArgIndex >= 0 && args[rootArgIndex + 1]
-  ? path.resolve(args[rootArgIndex + 1])
-  : process.cwd();
+const DOC_PARTICIPANTS = [
+  { id: 'agents', relativePath: 'AGENTS.md' },
+  { id: 'adaptation', relativePath: 'docs/codegraph-nanoflow-adaptation.md' },
+];
+const DOC_PATHS = DOC_PARTICIPANTS.map(participant => participant.relativePath);
+const CANONICAL_PARTICIPANT_POLICY = Object.freeze({ allowMissingAnchors: false });
+const LEGACY_PARTIAL_FIXTURE_PARTICIPANT_POLICY = Object.freeze({ allowMissingAnchors: true });
 
-function readJson(relativePath) {
+function readJson(root, relativePath) {
   return JSON.parse(fs.readFileSync(path.join(root, relativePath), 'utf8'));
 }
 
-function readText(relativePath) {
-  return fs.readFileSync(path.join(root, relativePath), 'utf8');
-}
-
-function writeText(relativePath, text) {
-  fs.writeFileSync(path.join(root, relativePath), text);
-}
-
-function replaceOne(text, pattern, replacement, label) {
-  if (!pattern.test(text)) {
+function replaceAnchor(text, pattern, replacement, label, participant) {
+  const matches = text.match(new RegExp(pattern.source, pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`)) ?? [];
+  if (matches.length === 0) {
+    if (!participant.allowMissingAnchors) {
+      throw new Error(`codegraph-overlay-doc-sync-anchor-missing: ${label}`);
+    }
     return text;
   }
+  if (matches.length > 1) throw new Error(`codegraph-overlay-doc-sync-anchor-multiple: ${label}`);
   return text.replace(pattern, replacement);
 }
 
-function syncAgents(text, baseline) {
+function syncAgents(text, baseline, participant) {
+  const replaceOne = (value, pattern, replacement, label) => (
+    replaceAnchor(value, pattern, replacement, label, participant)
+  );
   let updated = text;
   updated = replaceOne(
     updated,
-    /Android 语义计数为\s+`androidKotlinClasses=\d+`、(?:`androidKotlinDataClasses=\d+`、`androidKotlinSealedClasses=\d+`、)?(?:`androidKotlinInterfaces=\d+`、`androidKotlinInterfaceEdges=\d+`、`androidKotlinExtendsEdges=\d+`、`androidKotlinImplementsEdges=\d+`、)?(?:`androidKotlinObjects=\d+`、`androidKotlinObjectEdges=\d+`、`androidKotlinCompanionObjects=\d+`、`androidKotlinCompanionObjectEdges=\d+`、)?`androidKotlinEnums=\d+`、`androidKotlinEnumMembers=\d+`、`androidKotlinEnumMemberEdges=\d+`、(?:`androidKotlinImports=\d+`、`androidKotlinImportEdges=\d+`、)?`androidKotlinConstructors=\d+`、`androidKotlinConstructorEdges=\d+`、`androidKotlinProperties=\d+`、`androidKotlinPropertyEdges=\d+`、`androidKotlinMethods=\d+`、`androidKotlinMethodEdges=\d+`、(?:`androidKotlinFunctions=\d+`、`androidKotlinFunctionEdges=\d+`、)?(?:`androidKotlinOverrideEdges=\d+`、`androidKotlinTypeReferenceEdges=\d+`、)?`androidKotlinCalls=\d+`、`androidKotlinCallEdges=\d+`、(?:`androidKotlinAnnotations=\d+`、`androidKotlinAnnotationEdges=\d+`、)?`androidManifestComponents=\d+`、`androidWidgetProviders=\d+`、`androidResourceReferences=\d+`/,
-    `Android 语义计数为 \`androidKotlinClasses=${baseline.androidKotlinClasses}\`、\`androidKotlinDataClasses=${baseline.androidKotlinDataClasses}\`、\`androidKotlinSealedClasses=${baseline.androidKotlinSealedClasses}\`、\`androidKotlinInterfaces=${baseline.androidKotlinInterfaces}\`、\`androidKotlinInterfaceEdges=${baseline.androidKotlinInterfaceEdges}\`、\`androidKotlinExtendsEdges=${baseline.androidKotlinExtendsEdges}\`、\`androidKotlinImplementsEdges=${baseline.androidKotlinImplementsEdges}\`、\`androidKotlinObjects=${baseline.androidKotlinObjects}\`、\`androidKotlinObjectEdges=${baseline.androidKotlinObjectEdges}\`、\`androidKotlinCompanionObjects=${baseline.androidKotlinCompanionObjects}\`、\`androidKotlinCompanionObjectEdges=${baseline.androidKotlinCompanionObjectEdges}\`、\`androidKotlinEnums=${baseline.androidKotlinEnums}\`、\`androidKotlinEnumMembers=${baseline.androidKotlinEnumMembers}\`、\`androidKotlinEnumMemberEdges=${baseline.androidKotlinEnumMemberEdges}\`、\`androidKotlinImports=${baseline.androidKotlinImports}\`、\`androidKotlinImportEdges=${baseline.androidKotlinImportEdges}\`、\`androidKotlinConstructors=${baseline.androidKotlinConstructors}\`、\`androidKotlinConstructorEdges=${baseline.androidKotlinConstructorEdges}\`、\`androidKotlinProperties=${baseline.androidKotlinProperties}\`、\`androidKotlinPropertyEdges=${baseline.androidKotlinPropertyEdges}\`、\`androidKotlinMethods=${baseline.androidKotlinMethods}\`、\`androidKotlinMethodEdges=${baseline.androidKotlinMethodEdges}\`、\`androidKotlinFunctions=${baseline.androidKotlinFunctions}\`、\`androidKotlinFunctionEdges=${baseline.androidKotlinFunctionEdges}\`、\`androidKotlinOverrideEdges=${baseline.androidKotlinOverrideEdges}\`、\`androidKotlinTypeReferenceEdges=${baseline.androidKotlinTypeReferenceEdges}\`、\`androidKotlinCalls=${baseline.androidKotlinCalls}\`、\`androidKotlinCallEdges=${baseline.androidKotlinCallEdges}\`、\`androidKotlinAnnotations=${baseline.androidKotlinAnnotations}\`、\`androidKotlinAnnotationEdges=${baseline.androidKotlinAnnotationEdges}\`、\`androidManifestComponents=${baseline.androidManifestComponents}\`、\`androidWidgetProviders=${baseline.androidWidgetProviders}\`、\`androidResourceReferences=${baseline.androidResourceReferences}\``,
+    /Android 语义计数为\s+[^。\n]+/,
+    `Android 语义计数为 ${androidSemanticCounts(baseline)}`,
     'AGENTS Android semantic count summary',
   );
-  for (const [label, value] of Object.entries(baseline)) {
-    if (label === 'graphNodes' || label === 'graphEdges') {
-      continue;
-    }
-    updated = replaceOne(
-      updated,
-      new RegExp(`${escapeRegex(label)}=\\d+`),
-      `${label}=${value}`,
-      `AGENTS.md ${label}`,
-    );
-  }
-  return updated;
+  return syncInlineCounterAssignments(updated, baseline);
 }
 
-function syncAdaptationDoc(text, baseline) {
+function syncAdaptationDoc(text, baseline, participant) {
+  const replaceOne = (value, pattern, replacement, label) => (
+    replaceAnchor(value, pattern, replacement, label, participant)
+  );
   let updated = text;
   updated = replaceOne(
     updated,
@@ -80,9 +85,15 @@ function syncAdaptationDoc(text, baseline) {
   );
   updated = replaceOne(
     updated,
-    /[\d,]+\s+host-directive edges,\s+[\d,]+\s+host-attribute edges,\s+[\d,]+\s+host-binding edges,\s+and\s+[\d,]+\s+host-listener edges/,
-    `${baseline.hostDirectiveEdges} host-directive edges, ${baseline.hostAttributeEdges} host-attribute edges, ${baseline.hostBindingEdges} host-binding edges, and ${baseline.hostListenerEdges} host-listener edges`,
-    'Angular host semantic summary',
+    /[\d,]+\s+host-directive edges/,
+    `${baseline.hostDirectiveEdges} host-directive edges`,
+    'Angular host-directive summary',
+  );
+  updated = replaceOne(
+    updated,
+    /[\d,]+\s+host-attribute edges,\s+[\d,]+\s+host-binding edges,\s+and\s+[\d,]+\s+host-listener edges/,
+    `${baseline.hostAttributeEdges} host-attribute edges, ${baseline.hostBindingEdges} host-binding edges, and ${baseline.hostListenerEdges} host-listener edges`,
+    'Angular host attribute/binding/listener summary',
   );
   updated = replaceOne(
     updated,
@@ -188,8 +199,8 @@ function syncAdaptationDoc(text, baseline) {
   );
   updated = replaceOne(
     updated,
-    /Android packaging\/resource graph summary:\s+[\d,]+\s+androidManifestComponents,\s+[\d,]+\s+androidWidgetProviders,\s+and\s+[\d,]+\s+androidResourceReferences/,
-    `Android packaging/resource graph summary: ${baseline.androidManifestComponents} androidManifestComponents, ${baseline.androidWidgetProviders} androidWidgetProviders, and ${baseline.androidResourceReferences} androidResourceReferences`,
+    /Android packaging\/resource graph summary:[^\n]*/,
+    androidPackagingSummary(baseline),
     'Android packaging/resource graph summary',
   );
   updated = replaceOne(
@@ -230,13 +241,13 @@ function syncAdaptationDoc(text, baseline) {
   );
   updated = replaceOne(
     updated,
-    /(`?policyDetails`?\s+array currently contains\s+)[\d,]+(\s+parsed policy detail records,\s+`?functionDetails`?\s+contains\s+)[\d,]+(\s+parsed SQL function definitions,\s+`?triggerDetails`?\s+contains\s+)[\d,]+(\s+parsed SQL trigger definitions,\s+`?indexDetails`?\s+contains\s+)[\d,]+(\s+parsed SQL index definitions,\s+and\s+`?constraintDetails`?\s+contains\s+)[\d,]+(\s+parsed SQL constraints)/,
+    /(`?policyDetails`?\s+array currently contains\s+)[\d,]+(\s+parsed policy detail\s+records,\s+`?functionDetails`?\s+contains\s+)[\d,]+(\s+parsed SQL function definitions,\s+`?triggerDetails`?\s+contains\s+)[\d,]+(\s+parsed SQL trigger definitions,\s+(?:and\s+)?`?indexDetails`?\s+contains\s+)[\d,]+(\s+parsed SQL index definitions,\s+and\s+`?constraintDetails`?\s+contains\s+)[\d,]+(\s+parsed SQL constraints)/,
     (_match, policyPrefix, functionPrefix, triggerPrefix, indexPrefix, constraintPrefix, suffix) => `${policyPrefix}${baseline.policyDetails}${functionPrefix}${baseline.migrationFunctionDetails}${triggerPrefix}${baseline.migrationTriggers}${indexPrefix}${baseline.migrationIndexDetails}${constraintPrefix}${baseline.migrationConstraintDetails}${suffix}`,
     'Supabase migration structured detail narrative',
   );
   updated = replaceOne(
     updated,
-    /(`?constraintValidationDetails`?\s+contains\s+)[\d,]+(\s+parsed SQL constraint validation statements)/,
+    /(`?constraintValidationDetails`?\s+contains\s+)[\d,]+(\s+parsed SQL constraint validation\s+statements)/,
     (_match, prefix, suffix) => `${prefix}${baseline.migrationConstraintValidationDetails}${suffix}`,
     'Supabase constraint validation detail narrative',
   );
@@ -251,6 +262,36 @@ function syncAdaptationDoc(text, baseline) {
     /Supabase structured detail summary:\s+[\d,]+\s+edgeFunctionTests,\s+[\d,]+\s+migrationFunctionDetails,\s+[\d,]+\s+migrationTriggers,\s+[\d,]+\s+migrationRlsDetails,\s+[\d,]+\s+migrationTests,\s+and\s+[\d,]+\s+policyDetails/,
     `Supabase structured detail summary: ${baseline.edgeFunctionTests} edgeFunctionTests, ${baseline.migrationFunctionDetails} migrationFunctionDetails, ${baseline.migrationTriggers} migrationTriggers, ${baseline.migrationRlsDetails} migrationRlsDetails, ${baseline.migrationTests} migrationTests, and ${baseline.policyDetails} policyDetails`,
     'Supabase structured detail summary',
+  );
+  updated = replaceOne(
+    updated,
+    /[\d,]+\s+AGENTS hard-rule anchors/,
+    `${baseline.hardRules} AGENTS hard-rule anchors`,
+    'AGENTS hard-rule anchor summary',
+  );
+  updated = replaceOne(
+    updated,
+    /[\d,]+\s+scoped hard-rule keyword nodes and\s+[\d,]+\s+hard-rule keyword reference edges/,
+    `${baseline.hardRuleKeywordNodes} scoped hard-rule keyword nodes and\n  ${baseline.hardRuleKeywordEdges} hard-rule keyword reference edges`,
+    'AGENTS hard-rule keyword narrative',
+  );
+  updated = replaceOne(
+    updated,
+    /All\s+[\d,]+\s+hard-rule keyword edges carry/,
+    `All ${baseline.hardRuleKeywordEdges} hard-rule keyword edges carry`,
+    'AGENTS hard-rule keyword mapping narrative',
+  );
+  updated = replaceOne(
+    updated,
+    /adds\s+[\d,]+\s+`?hard-rule-implementation`?\s+native\s+`?references`?\s+edges/,
+    `adds ${baseline.hardRuleImplementationEdges} \`hard-rule-implementation\` native \`references\` edges`,
+    'AGENTS hard-rule implementation narrative',
+  );
+  updated = replaceOne(
+    updated,
+    /to\s+[\d,]+\s+callable symbols that/,
+    `to ${baseline.hardRuleImplementationTargets} callable symbols that`,
+    'AGENTS hard-rule implementation target narrative',
   );
   updated = replaceOne(
     updated,
@@ -288,17 +329,330 @@ function syncAdaptationDoc(text, baseline) {
     `Angular external resource graph summary: ${baseline.templateUrlEdges} template-url edges and ${baseline.styleUrlEdges} style-url edges`,
     'Angular external resource graph summary',
   );
+  return syncInlineCounterAssignments(updated, baseline);
+}
+
+function syncInlineCounterAssignments(text, baseline) {
+  let updated = text;
+  for (const [label, value] of Object.entries(baseline)) {
+    if (label === 'graphNodes' || label === 'graphEdges') continue;
+    updated = updated.replace(new RegExp(`${escapeRegex(label)}=\\d+`, 'g'), `${label}=${value}`);
+  }
   return updated;
+}
+
+function androidSemanticCounts(baseline) {
+  const labels = [
+    'androidKotlinClasses', 'androidKotlinDataClasses', 'androidKotlinSealedClasses',
+    'androidKotlinInterfaces', 'androidKotlinInterfaceEdges', 'androidKotlinExtendsEdges',
+    'androidKotlinImplementsEdges', 'androidKotlinObjects', 'androidKotlinObjectEdges',
+    'androidKotlinCompanionObjects', 'androidKotlinCompanionObjectEdges', 'androidKotlinEnums',
+    'androidKotlinEnumMembers', 'androidKotlinEnumMemberEdges', 'androidKotlinImports',
+    'androidKotlinImportEdges', 'androidKotlinConstructors', 'androidKotlinConstructorEdges',
+    'androidKotlinProperties', 'androidKotlinPropertyEdges', 'androidKotlinMethods',
+    'androidKotlinMethodEdges', 'androidKotlinFunctions', 'androidKotlinFunctionEdges',
+    'androidKotlinOverrideEdges', 'androidKotlinTypeReferenceEdges', 'androidKotlinCalls',
+    'androidKotlinCallEdges', 'androidKotlinAnnotations', 'androidKotlinAnnotationEdges',
+    'androidManifestComponents', 'androidManifestPermissions', 'androidManifestUsesPermissionEdges',
+    'androidManifestQueries', 'androidManifestQueryEdges', 'androidManifestComponentPermissions',
+    'androidManifestComponentPermissionEdges', 'androidManifestIntentFilters',
+    'androidManifestIntentFilterActions', 'androidManifestIntentFilterActionEdges',
+    'androidManifestIntentFilterCategories', 'androidManifestIntentFilterCategoryEdges',
+    'androidManifestIntentFilterData', 'androidManifestIntentFilterDataEdges',
+    'androidWidgetProviders', 'androidResourceReferences', 'androidKotlinResourceReferences',
+    'androidKotlinResourceReferenceEdges',
+  ];
+  return labels.map(label => `\`${label}=${baseline[label]}\``).join('、');
+}
+
+function androidPackagingSummary(baseline) {
+  return `Android packaging/resource graph summary: ${baseline.androidManifestComponents} androidManifestComponents, ${baseline.androidManifestPermissions} androidManifestPermissions, ${baseline.androidManifestUsesPermissionEdges} androidManifestUsesPermissionEdges, ${baseline.androidManifestQueries} androidManifestQueries, ${baseline.androidManifestQueryEdges} androidManifestQueryEdges, ${baseline.androidManifestComponentPermissions} androidManifestComponentPermissions, ${baseline.androidManifestComponentPermissionEdges} androidManifestComponentPermissionEdges, ${baseline.androidManifestIntentFilters} androidManifestIntentFilters, ${baseline.androidManifestIntentFilterActions} androidManifestIntentFilterActions, ${baseline.androidManifestIntentFilterActionEdges} androidManifestIntentFilterActionEdges, ${baseline.androidManifestIntentFilterCategories} androidManifestIntentFilterCategories, ${baseline.androidManifestIntentFilterCategoryEdges} androidManifestIntentFilterCategoryEdges, ${baseline.androidManifestIntentFilterData} androidManifestIntentFilterData, ${baseline.androidManifestIntentFilterDataEdges} androidManifestIntentFilterDataEdges, ${baseline.androidWidgetProviders} androidWidgetProviders, ${baseline.androidResourceReferences} androidResourceReferences, ${baseline.androidKotlinResourceReferences} androidKotlinResourceReferences, and ${baseline.androidKotlinResourceReferenceEdges} androidKotlinResourceReferenceEdges.`;
 }
 
 function escapeRegex(value) {
   return String(value).replace(/[|\\{}()[\]^$+?.]/g, '\\$&');
 }
 
-const overlay = readJson('.codegraph/nanoflow-overlay.json');
-const baseline = buildBaseline(overlay);
-writeText('AGENTS.md', syncAgents(readText('AGENTS.md'), baseline));
-writeText('docs/codegraph-nanoflow-adaptation.md', syncAdaptationDoc(readText('docs/codegraph-nanoflow-adaptation.md'), baseline));
-console.log(
-  `CodeGraph overlay documentation counts synced (${baseline.graphNodes.toLocaleString('en-US')} nodes, ${baseline.graphEdges.toLocaleString('en-US')} edges).`,
-);
+function numericTokenOnlyCandidate(before, proposed, label) {
+  const beforeTokens = before.match(/[0-9]+(?:,[0-9]{3})*/g) ?? [];
+  const proposedTokens = proposed.match(/[0-9]+(?:,[0-9]{3})*/g) ?? [];
+  if (beforeTokens.length !== proposedTokens.length) {
+    throw new Error(`codegraph-overlay-doc-sync-numeric-token-count-drift: ${label}`);
+  }
+  let index = 0;
+  const output = before.replace(/[0-9]+(?:,[0-9]{3})*/g, () => proposedTokens[index++]);
+  assertNumericTokenOnlyChange(before, output, label);
+  return output;
+}
+
+function resolveParticipantPolicy(candidate) {
+  if (candidate === undefined || candidate === CANONICAL_PARTICIPANT_POLICY) {
+    return CANONICAL_PARTICIPANT_POLICY;
+  }
+  if (candidate === LEGACY_PARTIAL_FIXTURE_PARTICIPANT_POLICY) {
+    return LEGACY_PARTIAL_FIXTURE_PARTICIPANT_POLICY;
+  }
+  throw new Error('codegraph-overlay-doc-sync-participant-policy-invalid');
+}
+
+function docParticipants(root, participantPolicy) {
+  const normalizedRoot = path.resolve(root);
+  const policy = resolveParticipantPolicy(participantPolicy);
+  return DOC_PARTICIPANTS.map(definition => {
+    const absolutePath = path.resolve(normalizedRoot, definition.relativePath);
+    const normalizedRelativePath = path.relative(normalizedRoot, absolutePath).replace(/\\/g, '/');
+    if (normalizedRelativePath !== definition.relativePath) {
+      throw new Error(`codegraph-overlay-doc-sync-participant-path-invalid: ${definition.id}`);
+    }
+    return { ...definition, absolutePath, allowMissingAnchors: policy.allowMissingAnchors };
+  });
+}
+
+function buildDocOutputs(root, baseline, participantPolicy) {
+  const participants = docParticipants(root, participantPolicy);
+  const before = participants.map(participant => fs.readFileSync(participant.absolutePath, 'utf8'));
+  const proposed = [
+    syncAgents(before[0], baseline, participants[0]),
+    syncAdaptationDoc(before[1], baseline, participants[1]),
+  ];
+  return participants.map((participant, index) => ({
+    relativePath: participant.relativePath,
+    before: before[index],
+    after: numericTokenOnlyCandidate(before[index], proposed[index], participant.relativePath),
+  }));
+}
+
+function prepareTransaction(root, outputs) {
+  assertDocsTransactionClean(root);
+  const paths = docsTransactionPaths(root);
+  const plan = outputs.map(output => ({
+    path: output.relativePath,
+    preHash: sha256(Buffer.from(output.before, 'utf8')),
+    postHash: sha256(Buffer.from(output.after, 'utf8')),
+  }));
+  const token = createParticipantToken({ version: 1, participant: 'codegraph-overlay-doc-sync', plan });
+  const docs = outputs.map((output, index) => {
+    const absolutePath = path.join(root, output.relativePath);
+    return {
+      absolutePath,
+      postHash: plan[index].postHash,
+      postImage: path.join(paths.directory, `${index}.post`),
+      preHash: plan[index].preHash,
+      preImage: path.join(paths.directory, `${index}.pre`),
+      relativePath: output.relativePath,
+      tempPath: path.join(path.dirname(absolutePath), `.${path.basename(absolutePath)}.nanoflow-doc-sync-${token}.tmp`),
+    };
+  });
+  fs.mkdirSync(path.dirname(paths.preparingDirectory), { recursive: true });
+  fs.mkdirSync(paths.preparingDirectory);
+  docs.forEach((doc, index) => {
+    writeFsynced(path.join(paths.preparingDirectory, path.basename(doc.preImage)), outputs[index].before);
+    writeFsynced(path.join(paths.preparingDirectory, path.basename(doc.postImage)), outputs[index].after);
+  });
+  const journal = {
+    version: 1,
+    token,
+    phase: 'prepared',
+    docs: docs.map(doc => ({
+      path: doc.relativePath,
+      postHash: doc.postHash,
+      postImage: path.basename(doc.postImage),
+      preHash: doc.preHash,
+      preImage: path.basename(doc.preImage),
+      tempPath: path.relative(root, doc.tempPath).replace(/\\/g, '/'),
+    })),
+  };
+  writeJournal(paths.preparingJournal, journal);
+  docs.forEach((doc, index) => writeFsynced(doc.tempPath, outputs[index].after));
+  fs.renameSync(paths.preparingDirectory, paths.directory);
+  return { docs, journal, paths };
+}
+
+function writeJournal(journalPath, journal) {
+  writeFsynced(journalPath, `${JSON.stringify(journal, null, 2)}\n`);
+}
+
+function assertPreimages(docs) {
+  for (const doc of docs) {
+    if (fileEvidence(doc.absolutePath).sha256 !== doc.preHash) {
+      throw new Error(`codegraph-overlay-doc-sync-preimage-drift: ${doc.relativePath}`);
+    }
+  }
+}
+
+function publishTransaction(transaction, options = {}) {
+  options.beforeCas?.();
+  assertPreimages(transaction.docs);
+  for (let index = 0; index < transaction.docs.length; index += 1) {
+    const doc = transaction.docs[index];
+    fs.renameSync(doc.tempPath, doc.absolutePath);
+    transaction.journal.phase = index === 0 ? 'first-published' : 'published';
+    writeJournal(transaction.paths.journal, transaction.journal);
+    if (index === 0 && options.simulateCrashAfterFirstPublish) {
+      throw new Error('codegraph-overlay-doc-sync-simulated-crash');
+    }
+  }
+  cleanupTransaction(transaction);
+}
+
+function cleanupTransaction(transaction) {
+  for (const doc of transaction.docs) {
+    try {
+      fs.unlinkSync(doc.tempPath);
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+    }
+  }
+  fs.rmSync(transaction.paths.directory, { force: true, recursive: true });
+}
+
+function readPendingTransaction(root, pendingDirectory = docsTransactionPaths(root).directory) {
+  const basePaths = docsTransactionPaths(root);
+  const paths = { ...basePaths, directory: pendingDirectory, journal: path.join(pendingDirectory, 'journal.json') };
+  let journal;
+  try {
+    journal = JSON.parse(fs.readFileSync(paths.journal, 'utf8'));
+  } catch {
+    throw new Error('codegraph-overlay-doc-sync-unknown-hash: missing-or-invalid-journal');
+  }
+  if (journal?.version !== 1 || !/^[a-f0-9]{16}-[a-f0-9]{32}$/.test(journal?.token ?? '')) {
+    throw new Error('codegraph-overlay-doc-sync-unknown-hash: invalid-journal');
+  }
+  if (!Array.isArray(journal.docs) || journal.docs.length !== DOC_PATHS.length) {
+    throw new Error('codegraph-overlay-doc-sync-unknown-hash: invalid-participants');
+  }
+  const docs = journal.docs.map((doc, index) => {
+    if (doc.path !== DOC_PATHS[index] || doc.preImage !== `${index}.pre` || doc.postImage !== `${index}.post`) {
+      throw new Error('codegraph-overlay-doc-sync-unknown-hash: invalid-participant-path');
+    }
+    const expectedTemp = path.join(path.dirname(doc.path), `.${path.basename(doc.path)}.nanoflow-doc-sync-${journal.token}.tmp`).replace(/\\/g, '/');
+    if (doc.tempPath !== expectedTemp) {
+      throw new Error('codegraph-overlay-doc-sync-unknown-hash: invalid-temp-path');
+    }
+    return {
+      absolutePath: path.join(root, doc.path),
+      postHash: doc.postHash,
+      postImage: path.join(paths.directory, doc.postImage),
+      preHash: doc.preHash,
+      preImage: path.join(paths.directory, doc.preImage),
+      relativePath: doc.path,
+      tempPath: path.join(root, doc.tempPath),
+    };
+  });
+  return { docs, journal, paths };
+}
+
+function readVerifiedImage(filePath, expectedHash) {
+  const content = fs.readFileSync(filePath);
+  if (sha256(content) !== expectedHash) {
+    throw new Error('codegraph-overlay-doc-sync-unknown-hash: corrupt-image');
+  }
+  return content;
+}
+
+function recoverDocs(root) {
+  const pending = inspectDocsTransaction(root);
+  if (!pending.pending) return { recovered: false };
+  if (fs.existsSync(pending.directory) && fs.existsSync(pending.preparingDirectory)) {
+    throw new Error('codegraph-overlay-doc-sync-unknown-hash: multiple-transaction-directories');
+  }
+  if (fs.existsSync(pending.preparingDirectory) && !fs.existsSync(pending.preparingJournal)) {
+    fs.rmSync(pending.preparingDirectory, { force: true, recursive: true });
+    return { recovered: true, state: 'discarded-incomplete-preparation' };
+  }
+  const preparing = fs.existsSync(pending.preparingDirectory);
+  const transaction = readPendingTransaction(root, preparing ? pending.preparingDirectory : pending.directory);
+  const states = transaction.docs.map((doc) => {
+    const currentHash = fileEvidence(doc.absolutePath).sha256;
+    if (currentHash === doc.preHash) return 'pre';
+    if (currentHash === doc.postHash) return 'post';
+    throw new Error(`codegraph-overlay-doc-sync-unknown-hash: ${doc.relativePath}`);
+  });
+  if (preparing && states.some(state => state !== 'pre')) {
+    throw new Error('codegraph-overlay-doc-sync-unknown-hash: published-during-preparation');
+  }
+  if (preparing) {
+    cleanupTransaction(transaction);
+    return { recovered: true, state: 'discarded-preparation' };
+  }
+  if (states.includes('post')) {
+    transaction.docs.forEach((doc, index) => {
+      if (states[index] === 'pre') {
+        writeFileAtomically(doc.absolutePath, readVerifiedImage(doc.postImage, doc.postHash));
+      }
+    });
+  }
+  cleanupTransaction(transaction);
+  return { recovered: true, state: states.includes('post') ? 'rolled-forward' : 'rolled-back' };
+}
+
+function syncDocs(root, options = {}) {
+  assertDocsTransactionClean(root);
+  const overlay = readJson(root, '.codegraph/nanoflow-overlay.json');
+  const baseline = buildBaseline(overlay);
+  const outputs = buildDocOutputs(root, baseline, options.participantPolicy);
+  if (outputs.every(output => output.before === output.after)) return { baseline, changed: false };
+  const transaction = prepareTransaction(root, outputs);
+  publishTransaction(transaction, options);
+  return { baseline, changed: true };
+}
+
+function parseArgs(argv) {
+  const parsed = { root: process.cwd(), assertClean: false, recover: false, simulateCrashAfterFirstPublish: false };
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === '--root') parsed.root = path.resolve(requireValue(argv, ++index, arg));
+    else if (arg === '--assert-clean') parsed.assertClean = true;
+    else if (arg === '--recover') parsed.recover = true;
+    else if (arg === '--simulate-crash-after-first-publish') parsed.simulateCrashAfterFirstPublish = true;
+    else throw new Error(`unknown argument: ${arg}`);
+  }
+  const modes = [parsed.assertClean, parsed.recover, parsed.simulateCrashAfterFirstPublish].filter(Boolean).length;
+  if (modes > 1) throw new Error('sync mode flags are mutually exclusive');
+  return parsed;
+}
+
+function requireValue(argv, index, flag) {
+  const value = argv[index];
+  if (!value || value.startsWith('--')) throw new Error(`${flag} requires a value`);
+  return value;
+}
+
+function main(argv = process.argv.slice(2), dependencies = { syncDocs }) {
+  const args = parseArgs(argv);
+  if (args.assertClean) {
+    assertDocsTransactionClean(args.root);
+    console.log('CodeGraph overlay documentation transaction is clean.');
+    return;
+  }
+  if (args.recover) {
+    const result = recoverDocs(args.root);
+    console.log(`CodeGraph overlay documentation recovery ${result.recovered ? result.state : 'not-needed'}.`);
+    return;
+  }
+  const result = dependencies.syncDocs(args.root, {
+    participantPolicy: CANONICAL_PARTICIPANT_POLICY,
+    simulateCrashAfterFirstPublish: args.simulateCrashAfterFirstPublish,
+  });
+  console.log(
+    `CodeGraph overlay documentation counts synced (${result.baseline.graphNodes.toLocaleString('en-US')} nodes, ${result.baseline.graphEdges.toLocaleString('en-US')} edges).`,
+  );
+}
+
+if (require.main === module) {
+  try {
+    main();
+  } catch (error) {
+    console.error(error.message);
+    process.exit(1);
+  }
+}
+
+module.exports = {
+  LEGACY_PARTIAL_FIXTURE_PARTICIPANT_POLICY,
+  buildDocOutputs,
+  main,
+  parseArgs,
+  recoverDocs,
+  syncDocs,
+};

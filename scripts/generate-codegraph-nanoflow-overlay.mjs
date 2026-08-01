@@ -1,9 +1,31 @@
 #!/usr/bin/env node
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import ts from 'typescript';
+import nativeGraphSidecar from './lib/codegraph-native-graph-sidecar.cjs';
+import overlayStability from './lib/codegraph-overlay-stability.cjs';
+import sourcePolicy from './lib/codegraph-source-policy.cjs';
+
+const {
+  readNativeAndroidKotlinFunctionEndpoints,
+  readNativeAndroidKotlinImportEndpoints,
+} = nativeGraphSidecar;
+const {
+  assertParticipantPlan,
+  assertSourceManifestEqual,
+  assertStableOverlay,
+  writeFileAtomically,
+} = overlayStability;
+const { buildSourceManifest } = sourcePolicy;
 
 const DEFAULT_OUTPUT = path.join('.codegraph', 'nanoflow-overlay.json');
+const DEFAULT_ANDROID_IMPORT_SOURCE = 'local';
+const ANDROID_IMPORT_SOURCE_DEFAULT_ENV = 'NANOFLOW_CODEGRAPH_ANDROID_IMPORT_SOURCE_DEFAULT';
+const ANDROID_IMPORT_SOURCES = new Set(['local', 'native']);
+const DEFAULT_ANDROID_FUNCTION_SOURCE = 'native';
+const ANDROID_FUNCTION_SOURCE_DEFAULT_ENV = 'NANOFLOW_CODEGRAPH_ANDROID_FUNCTION_SOURCE_DEFAULT';
+const ANDROID_FUNCTION_SOURCES = new Set(['local', 'native']);
 const MAX_SYNTHETIC_EDGES_PER_CHANNEL = 40;
 const AGENTS_CONFIG_SOURCE_FILES = new Map([
   ['SYNC_CONFIG', 'src/config/sync.config.ts'],
@@ -48,22 +70,6 @@ const OFFICIAL_CODEGRAPH_LANGUAGES = new Set([
   'unknown',
 ]);
 ignoreBrokenStdoutPipe();
-const EXCLUDED_DIRS = new Set([
-  '.angular',
-  '.cache',
-  '.codegraph',
-  '.git',
-  '.tmp',
-  '.worktrees',
-  'build',
-  'coverage',
-  'dist',
-  'dist-ssr',
-  'node_modules',
-  'playwright-report',
-  'test-results',
-  'tmp',
-]);
 
 const TYPESCRIPT_STANDARD_LIBRARY_REFERENCES = readTypeScriptStandardLibraryReferences();
 
@@ -209,55 +215,32 @@ const CALL_RECEIVER_SKIP_NAMES = new Set(['self', 'this', 'cls', 'super']);
 const args = parseArgs(process.argv.slice(2));
 const root = path.resolve(args.root ?? process.cwd());
 const outputPath = path.resolve(root, args.output ?? DEFAULT_OUTPUT);
-const overlay = buildOverlay(root);
+const overlayOptions = {
+  androidFunctionSource: args.androidFunctionSource,
+  androidImportSource: args.androidImportSource,
+};
+const generationPlan = {
+  version: 1,
+  participant: 'generate-codegraph-nanoflow-overlay',
+  buildCount: 2,
+  root,
+  outputPath,
+};
+assertParticipantPlan(generationPlan);
+const sourceManifest0 = captureSourceManifest(root);
+const overlay1 = buildOverlay(root, overlayOptions, sourceManifest0.files);
+const sourceManifest1 = captureSourceManifest(root);
+assertSourceManifestEqual(sourceManifest0.entries, sourceManifest1.entries);
+const overlay2 = buildOverlay(root, overlayOptions, sourceManifest1.files);
+const sourceManifest2 = captureSourceManifest(root);
+assertSourceManifestEqual(sourceManifest1.entries, sourceManifest2.entries);
+assertStableOverlay(overlay1, overlay2);
 
 if (args.stdout) {
-  process.stdout.write(`${JSON.stringify(overlay, null, 2)}\n`);
+  process.stdout.write(`${JSON.stringify(overlay2, null, 2)}\n`);
 } else {
-  writeOverlayAtomically(outputPath, `${JSON.stringify(overlay, null, 2)}\n`);
+  writeFileAtomically(outputPath, `${JSON.stringify(overlay2, null, 2)}\n`);
   process.stdout.write(`[codegraph-overlay] Wrote ${toPosix(path.relative(root, outputPath))}\n`);
-}
-
-function writeOverlayAtomically(outputPath, content) {
-  const outputDir = path.dirname(outputPath);
-  fs.mkdirSync(outputDir, { recursive: true });
-  const tempPath = path.join(
-    outputDir,
-    `${path.basename(outputPath)}.tmp-${process.pid}-${Date.now()}`,
-  );
-  fs.writeFileSync(tempPath, content);
-  renameOverlayWithRetry(tempPath, outputPath);
-}
-
-function renameOverlayWithRetry(tempPath, outputPath) {
-  const retryableCodes = new Set(['EPERM', 'EACCES', 'EBUSY']);
-  const maxAttempts = 8;
-  let lastError = null;
-
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    try {
-      fs.renameSync(tempPath, outputPath);
-      return;
-    } catch (error) {
-      if (!retryableCodes.has(error?.code) || attempt === maxAttempts) {
-        try {
-          fs.unlinkSync(tempPath);
-        } catch {
-          // Best-effort cleanup; preserve the original rename failure.
-        }
-        throw error;
-      }
-
-      lastError = error;
-      sleepSync(25 * attempt);
-    }
-  }
-
-  throw lastError;
-}
-
-function sleepSync(milliseconds) {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
 }
 
 function parseArgs(rawArgs) {
@@ -265,6 +248,8 @@ function parseArgs(rawArgs) {
     root: undefined,
     output: undefined,
     stdout: false,
+    androidFunctionSource: undefined,
+    androidImportSource: undefined,
   };
 
   for (let index = 0; index < rawArgs.length; index += 1) {
@@ -283,6 +268,16 @@ function parseArgs(rawArgs) {
       parsed.stdout = true;
       continue;
     }
+    if (arg === '--android-import-source') {
+      parsed.androidImportSource = requireValue(rawArgs, index, arg);
+      index += 1;
+      continue;
+    }
+    if (arg === '--android-function-source') {
+      parsed.androidFunctionSource = requireValue(rawArgs, index, arg);
+      index += 1;
+      continue;
+    }
     if (arg === '--help' || arg === '-h') {
       printHelp();
       process.exit(0);
@@ -290,7 +285,35 @@ function parseArgs(rawArgs) {
     throw new Error(`Unknown argument: ${arg}`);
   }
 
+  parsed.androidImportSource = resolveAndroidImportSource(parsed.androidImportSource);
+  parsed.androidFunctionSource = resolveAndroidFunctionSource(parsed.androidFunctionSource);
   return parsed;
+}
+
+function resolveAndroidFunctionSource(explicitSource) {
+  const source = explicitSource
+    ?? process.env[ANDROID_FUNCTION_SOURCE_DEFAULT_ENV]
+    ?? DEFAULT_ANDROID_FUNCTION_SOURCE;
+  if (!ANDROID_FUNCTION_SOURCES.has(source)) {
+    const sourceName = explicitSource === undefined
+      ? ANDROID_FUNCTION_SOURCE_DEFAULT_ENV
+      : '--android-function-source';
+    throw new Error(`Invalid value for ${sourceName}: ${source}`);
+  }
+  return source;
+}
+
+function resolveAndroidImportSource(explicitSource) {
+  const source = explicitSource
+    ?? process.env[ANDROID_IMPORT_SOURCE_DEFAULT_ENV]
+    ?? DEFAULT_ANDROID_IMPORT_SOURCE;
+  if (!ANDROID_IMPORT_SOURCES.has(source)) {
+    const sourceName = explicitSource === undefined
+      ? ANDROID_IMPORT_SOURCE_DEFAULT_ENV
+      : '--android-import-source';
+    throw new Error(`Invalid value for ${sourceName}: ${source}`);
+  }
+  return source;
 }
 
 function ignoreBrokenStdoutPipe() {
@@ -327,6 +350,8 @@ function printHelp() {
   process.stdout.write(`  --root <path>       Project root to scan. Defaults to cwd.\n`);
   process.stdout.write(`  --out <path>        Output path relative to root. Defaults to ${DEFAULT_OUTPUT}.\n`);
   process.stdout.write(`  --stdout            Print JSON instead of writing a file.\n`);
+  process.stdout.write(`  --android-import-source <local|native>  Android import discovery source. Explicit CLI overrides ${ANDROID_IMPORT_SOURCE_DEFAULT_ENV}; built-in default is local.\n`);
+  process.stdout.write(`  --android-function-source <local|native>  Android function discovery source. Explicit CLI overrides ${ANDROID_FUNCTION_SOURCE_DEFAULT_ENV}; built-in default is native.\n`);
 }
 
 function readTypeScriptStandardLibraryReferences() {
@@ -399,8 +424,7 @@ function collectTypeScriptStandardLibraryDeclarations(node, references, namespac
   ts.forEachChild(node, child => collectTypeScriptStandardLibraryDeclarations(child, references, namespaceParts));
 }
 
-function buildOverlay(projectRoot) {
-  const allFiles = listFiles(projectRoot);
+function buildOverlay(projectRoot, options = {}, allFiles = listFiles(projectRoot)) {
   const sourceFiles = allFiles.filter(file => isJavaScriptFamilySource(file));
   const specBySubject = buildSpecMap(projectRoot, sourceFiles);
   const typescript = collectTypeScript(projectRoot, sourceFiles);
@@ -408,7 +432,12 @@ function buildOverlay(projectRoot) {
   const supabase = collectSupabase(projectRoot, allFiles);
   const agentRules = collectAgentRules(projectRoot);
   const context7 = collectContext7Docs(projectRoot, allFiles);
-  const android = collectAndroid(projectRoot, allFiles);
+  const android = collectAndroid(
+    projectRoot,
+    allFiles,
+    options.androidImportSource ?? 'local',
+    options.androidFunctionSource ?? DEFAULT_ANDROID_FUNCTION_SOURCE,
+  );
   const overlay = {
     schemaVersion: 1,
     generatedAt: new Date().toISOString(),
@@ -472,11 +501,17 @@ function buildOverlay(projectRoot) {
   };
 }
 
-function collectAndroid(projectRoot, allFiles) {
+function collectAndroid(
+  projectRoot,
+  allFiles,
+  androidImportSource = 'local',
+  androidFunctionSource = DEFAULT_ANDROID_FUNCTION_SOURCE,
+) {
   const androidFiles = allFiles
     .map(file => relative(projectRoot, file))
     .filter(file => /^android\//.test(file))
     .filter(file => /\.(?:kt|xml)$/i.test(file));
+  const androidKotlinFiles = androidFiles.filter(file => /\.kt$/i.test(file));
   const androidFileSet = new Set(androidFiles);
   const androidResourceIndex = buildAndroidResourceIndex(projectRoot, androidFiles);
   const files = androidFiles.map(file => ({
@@ -484,9 +519,19 @@ function collectAndroid(projectRoot, allFiles) {
     language: inferLanguage(file),
     relation: androidFileRelation(file),
   }));
-  const kotlinFileSymbols = androidFiles
-    .filter(file => /\.kt$/i.test(file))
-    .map(file => readAndroidKotlinFileSymbols(projectRoot, file));
+  const nativeImportsByFile = readAndroidKotlinImports(projectRoot, androidImportSource, androidKotlinFiles);
+  const nativeFunctionsByFile = readAndroidKotlinFunctions(
+    projectRoot,
+    androidFunctionSource,
+    androidKotlinFiles,
+  );
+  const kotlinFileSymbols = androidKotlinFiles
+    .map(file => readAndroidKotlinFileSymbols(
+      projectRoot,
+      file,
+      nativeImportsByFile,
+      nativeFunctionsByFile,
+    ));
   const kotlinClasses = kotlinFileSymbols.flatMap(symbols => symbols.classes);
   const kotlinEnums = kotlinFileSymbols.flatMap(symbols => symbols.enums);
   const kotlinImports = kotlinFileSymbols.flatMap(symbols => symbols.imports);
@@ -507,10 +552,14 @@ function collectAndroid(projectRoot, allFiles) {
   }
 
   const manifestComponents = [];
+  const manifestPermissions = [];
+  const manifestQueries = [];
   const widgetProviders = [];
   for (const manifestFile of androidFiles.filter(file => /AndroidManifest\.xml$/i.test(file))) {
     const source = readSnapshotFileUtf8(path.join(projectRoot, manifestFile));
     if (source === null) continue;
+    manifestPermissions.push(...readAndroidManifestUsesPermissions(source, manifestFile));
+    manifestQueries.push(...readAndroidManifestQueries(source, manifestFile));
     for (const component of readAndroidManifestComponents(source, manifestFile, kotlinClassBySimpleName)) {
       const kotlinClass = kotlinClassByQualifiedName.get(component.className)
         ?? kotlinClassBySimpleName.get(component.simpleName)
@@ -567,6 +616,31 @@ function collectAndroid(projectRoot, allFiles) {
     }
   }
 
+  const kotlinResourceReferences = [];
+  for (const file of androidFiles.filter(file => /\.kt$/i.test(file))) {
+    const source = readSnapshotFileUtf8(path.join(projectRoot, file));
+    if (source === null) continue;
+    const searchableSource = maskAndroidKotlinNonCode(source);
+    const referencePattern = /(?<![\w.])R\.(string|layout|drawable|id)\.([A-Za-z_][\w]*)\b/g;
+    let referenceMatch;
+    while ((referenceMatch = referencePattern.exec(searchableSource)) !== null) {
+      const reference = {
+        type: referenceMatch[1],
+        name: referenceMatch[2],
+        line: lineNumberAt(source, referenceMatch.index),
+      };
+      const targetFile = resolveAndroidResourcePath(reference, androidFileSet, androidResourceIndex);
+      if (!targetFile || !androidFileSet.has(targetFile)) continue;
+      kotlinResourceReferences.push({
+        sourceFile: file,
+        targetFile,
+        resourceType: reference.type,
+        resourceName: reference.name,
+        line: reference.line,
+      });
+    }
+  }
+
   return {
     files: uniqueObjects(files),
     kotlinClasses: uniqueObjects(kotlinClasses),
@@ -578,9 +652,12 @@ function collectAndroid(projectRoot, allFiles) {
     kotlinFunctions: uniqueObjects(kotlinFunctions),
     kotlinCalls: uniqueObjects(kotlinCalls),
     manifestComponents: uniqueObjects(manifestComponents),
+    manifestPermissions: uniqueObjects(manifestPermissions),
+    manifestQueries: uniqueObjects(manifestQueries),
     widgetProviders: uniqueObjects(widgetProviders),
     xmlResources: uniqueObjects(xmlResources),
     resourceReferences: uniqueObjects(resourceReferences),
+    kotlinResourceReferences: uniqueObjects(kotlinResourceReferences),
   };
 }
 
@@ -591,13 +668,18 @@ function buildAndroidResourceIndex(projectRoot, androidFiles) {
     if (pathResource && pathResource.type !== 'values') {
       registerAndroidResource(resourceIndex, pathResource.type, pathResource.name, file);
     }
-    if (!/^android\/app\/src\/main\/res\/values[^/]*\/[^/]+\.xml$/i.test(file)) {
+    if (!/\.xml$/i.test(file)) {
       continue;
     }
     const source = readSnapshotFileUtf8(path.join(projectRoot, file));
     if (source === null) continue;
-    for (const valueResource of readAndroidValuesResources(source)) {
-      registerAndroidResource(resourceIndex, valueResource.type, valueResource.name, file);
+    for (const idResource of readAndroidXmlIdResources(source)) {
+      registerAndroidResource(resourceIndex, idResource.type, idResource.name, file);
+    }
+    if (/^android\/app\/src\/main\/res\/values[^/]*\/[^/]+\.xml$/i.test(file)) {
+      for (const valueResource of readAndroidValuesResources(source)) {
+        registerAndroidResource(resourceIndex, valueResource.type, valueResource.name, file);
+      }
     }
   }
   return resourceIndex;
@@ -627,7 +709,21 @@ function readAndroidValuesResources(source) {
       name: attributes.name,
     });
   }
+  const itemPattern = /<\s*item\b([^>]*)>/gi;
+  while ((match = itemPattern.exec(String(source ?? ''))) !== null) {
+    const attributes = readXmlAttributes(match[1]);
+    if (!attributes.type || !attributes.name) continue;
+    resources.push({
+      type: attributes.type,
+      name: attributes.name,
+    });
+  }
   return uniqueObjects(resources);
+}
+
+function readAndroidXmlIdResources(source) {
+  return uniqueObjects([...String(source ?? '').matchAll(/@\+id\/([A-Za-z_][\w.]*)/g)]
+    .map(match => ({ type: 'id', name: match[1] })));
 }
 
 function androidFileRelation(filePath) {
@@ -641,7 +737,52 @@ function readAndroidKotlinClasses(projectRoot, relativeFile) {
   return readAndroidKotlinFileSymbols(projectRoot, relativeFile).classes;
 }
 
-function readAndroidKotlinFileSymbols(projectRoot, relativeFile) {
+function readAndroidKotlinImports(projectRoot, androidImportSource, androidKotlinFiles) {
+  if (androidImportSource === 'native') {
+    const { endpoints } = readNativeAndroidKotlinImportEndpoints({ root: projectRoot });
+    const androidKotlinFileSet = new Set(androidKotlinFiles);
+    const endpointsByFile = new Map();
+    for (const endpoint of endpoints) {
+      if (!androidKotlinFileSet.has(endpoint.file)) {
+        throw new Error(
+          `Native Android import completeness mismatch: extra endpoint file ${endpoint.file}:${endpoint.startLine}`,
+        );
+      }
+      const values = endpointsByFile.get(endpoint.file) ?? [];
+      values.push(endpoint);
+      endpointsByFile.set(endpoint.file, values);
+    }
+    return endpointsByFile;
+  }
+  return null;
+}
+
+function readAndroidKotlinFunctions(projectRoot, androidFunctionSource, androidKotlinFiles) {
+  if (androidFunctionSource === 'native') {
+    const { endpoints } = readNativeAndroidKotlinFunctionEndpoints({ root: projectRoot });
+    const androidKotlinFileSet = new Set(androidKotlinFiles);
+    const endpointsByFile = new Map();
+    for (const endpoint of endpoints) {
+      if (!androidKotlinFileSet.has(endpoint.file)) {
+        throw new Error(
+          `Native Android function completeness mismatch: extra endpoint file ${endpoint.file}:${endpoint.startLine}:${endpoint.nativeName}`,
+        );
+      }
+      const values = endpointsByFile.get(endpoint.file) ?? [];
+      values.push(endpoint);
+      endpointsByFile.set(endpoint.file, values);
+    }
+    return endpointsByFile;
+  }
+  return null;
+}
+
+function readAndroidKotlinFileSymbols(
+  projectRoot,
+  relativeFile,
+  nativeImportsByFile = null,
+  nativeFunctionsByFile = null,
+) {
   const filePath = path.join(projectRoot, relativeFile);
   const source = readSnapshotFileUtf8(filePath);
   if (source === null) return {
@@ -689,17 +830,32 @@ function readAndroidKotlinFileSymbols(projectRoot, relativeFile) {
   const nonEnumDeclarations = declarations.filter(declaration => declaration.classKind !== 'enum class');
   const companionObjects = readAndroidKotlinCompanionObjectsFromSource(source, relativeFile, packageName, nonEnumDeclarations);
   const classes = [...nonEnumDeclarations, ...companionObjects];
+  const callableClasses = readAndroidKotlinCallableOwnerClasses(source, classes);
   return {
     classes,
     enums: enumDeclarations.map(enumDeclaration => ({
       ...enumDeclaration,
       members: readAndroidKotlinEnumMembersFromSource(source, relativeFile, enumDeclaration),
     })),
-    imports: readAndroidKotlinImportsFromSource(source, relativeFile),
+    imports: nativeImportsByFile === null
+      ? readAndroidKotlinImportsFromSource(source, relativeFile)
+      : readAndroidKotlinImportsFromNativeEndpoints(
+          source,
+          relativeFile,
+          nativeImportsByFile.get(relativeFile) ?? [],
+        ),
     constructors: readAndroidKotlinConstructorsFromSource(source, relativeFile, packageName, classes),
     properties: readAndroidKotlinPropertiesFromSource(source, relativeFile, packageName, classes),
-    methods: readAndroidKotlinMethodsFromSource(source, relativeFile, packageName, classes),
-    functions: readAndroidKotlinFunctionsFromSource(source, relativeFile, packageName, classes),
+    methods: readAndroidKotlinMethodsFromSource(source, relativeFile, packageName, callableClasses),
+    functions: nativeFunctionsByFile === null
+      ? readAndroidKotlinFunctionsFromSource(source, relativeFile, packageName, callableClasses)
+      : readAndroidKotlinFunctionsFromNativeEndpoints(
+          source,
+          relativeFile,
+          packageName,
+          callableClasses,
+          nativeFunctionsByFile.get(relativeFile) ?? [],
+        ),
   };
 }
 
@@ -709,39 +865,101 @@ function compactAndroidKotlinSignature(value) {
 
 function readAndroidKotlinImportsFromSource(source, relativeFile) {
   const imports = [];
-  const importPattern = /^[ \t]*import\s+([A-Za-z_][\w.]*(?:\.\*)?)(?:\s+as\s+([A-Za-z_][\w]*))?[ \t]*$/gm;
-  let match;
-  while ((match = importPattern.exec(source)) !== null) {
-    const target = match[1];
-    const alias = match[2] ?? null;
-    const wildcard = target.endsWith('.*');
-    const importedName = wildcard ? '*' : target.split('.').at(-1);
-    const name = alias ?? (wildcard ? target : importedName);
-    const packageName = wildcard
-      ? target.slice(0, -2)
-      : target.split('.').slice(0, -1).join('.');
-    const line = lineNumberAt(source, match.index);
-    const column = columnNumberAt(source, match.index + match[0].indexOf('import'));
-    imports.push({
-      name,
-      qualifiedName: target,
-      importedName,
-      alias,
-      target,
-      packageName,
-      wildcard,
-      file: relativeFile,
-      line,
-      startLine: line,
-      endLine: line,
-      startColumn: column,
-      endColumn: column + match[0].trim().length,
-      signature: wildcard
-        ? `import ${target}`
-        : `import ${name} from ${target}`,
-    });
+  const sourceLines = String(source ?? '').split(/\r?\n/);
+  const maskedLines = maskAndroidKotlinNonCode(source).split(/\r?\n/);
+  for (let index = 0; index < maskedLines.length; index += 1) {
+    if (!readAndroidKotlinImportFromLine(maskedLines[index] ?? '', relativeFile, index + 1)) continue;
+    const item = readAndroidKotlinImportFromLine(sourceLines[index] ?? '', relativeFile, index + 1);
+    if (item) imports.push(item);
   }
   return imports;
+}
+
+function readAndroidKotlinImportsFromNativeEndpoints(source, relativeFile, endpoints) {
+  const contentHash = createHash('sha256').update(Buffer.from(source)).digest('hex');
+  const size = Buffer.byteLength(source);
+  const lines = source.split(/\r?\n/);
+  const nativeImports = endpoints.map(endpoint => {
+    if (endpoint.file !== relativeFile || endpoint.contentHash !== contentHash || endpoint.size !== size) {
+      throw new Error(`Native Android import endpoint is stale for ${relativeFile}:${endpoint.startLine}`);
+    }
+    const item = readAndroidKotlinImportFromLine(
+      lines[endpoint.startLine - 1] ?? '',
+      relativeFile,
+      endpoint.startLine,
+    );
+    const nativeComparableTarget = item?.target.endsWith('.*')
+      ? item.target.slice(0, -2)
+      : item?.target;
+    if (!item || nativeComparableTarget !== endpoint.nativeTarget) {
+      throw new Error(`Native Android import endpoint identity mismatch for ${relativeFile}:${endpoint.startLine}`);
+    }
+    return item;
+  });
+  assertNativeAndroidKotlinImportCompleteness(
+    readAndroidKotlinImportsFromSource(source, relativeFile),
+    nativeImports,
+    relativeFile,
+  );
+  return nativeImports;
+}
+
+function assertNativeAndroidKotlinImportCompleteness(sourceImports, nativeImports, relativeFile) {
+  const sourceIdentities = countAndroidKotlinImportIdentities(sourceImports);
+  const nativeIdentities = countAndroidKotlinImportIdentities(nativeImports);
+  const missing = [...sourceIdentities]
+    .filter(([identity, count]) => (nativeIdentities.get(identity) ?? 0) !== count)
+    .map(([identity]) => identity);
+  const extra = [...nativeIdentities]
+    .filter(([identity, count]) => (sourceIdentities.get(identity) ?? 0) !== count)
+    .map(([identity]) => identity);
+  if (missing.length > 0 || extra.length > 0) {
+    throw new Error(
+      `Native Android import completeness mismatch for ${relativeFile}: missing=${JSON.stringify(missing)}; extra=${JSON.stringify(extra)}`,
+    );
+  }
+}
+
+function countAndroidKotlinImportIdentities(imports) {
+  const counts = new Map();
+  for (const item of imports) {
+    const identity = `${item.line}\0${item.target}\0${item.alias ?? ''}`;
+    counts.set(identity, (counts.get(identity) ?? 0) + 1);
+  }
+  return counts;
+}
+
+function readAndroidKotlinImportFromLine(sourceLine, relativeFile, line) {
+  const match = /^([ \t]*)import\s+([A-Za-z_][\w.]*(?:\.\*)?)(?:\s+as\s+([A-Za-z_][\w]*))?[ \t]*$/.exec(sourceLine);
+  if (!match) return null;
+  return toAndroidKotlinImport(match[2], match[3] ?? null, relativeFile, line, match[1].length, match[0]);
+}
+
+function toAndroidKotlinImport(target, alias, relativeFile, line, column, sourceText) {
+  const wildcard = target.endsWith('.*');
+  const importedName = wildcard ? '*' : target.split('.').at(-1);
+  const name = alias ?? (wildcard ? target : importedName);
+  const packageName = wildcard
+    ? target.slice(0, -2)
+    : target.split('.').slice(0, -1).join('.');
+  return {
+    name,
+    qualifiedName: target,
+    importedName,
+    alias,
+    target,
+    packageName,
+    wildcard,
+    file: relativeFile,
+    line,
+    startLine: line,
+    endLine: line,
+    startColumn: column,
+    endColumn: column + sourceText.trim().length,
+    signature: wildcard
+      ? `import ${target}`
+      : `import ${name} from ${target}`,
+  };
 }
 
 function readAndroidKotlinHeritage(source, afterNameOffset) {
@@ -790,6 +1008,87 @@ function readAndroidKotlinDeclarationEndLine(source, declarationOffset, afterNam
   }
 
   return lineNumberAt(value, headerEndOffset) || fallbackLine;
+}
+
+function readAndroidKotlinCallableOwnerClasses(source, classes) {
+  const searchableSource = maskAndroidKotlinNonCode(source);
+  return classes.map(owner => {
+    const declarationOffset = findAndroidKotlinClassDeclarationOffset(searchableSource, owner);
+    if (declarationOffset < 0) return owner;
+    const nameOffset = searchableSource.indexOf(owner.name, declarationOffset);
+    if (nameOffset < 0) return owner;
+    let callableHeaderOffset = skipWhitespaceOffset(
+      searchableSource,
+      nameOffset + owner.name.length,
+    );
+    const hasTypeParameters = searchableSource[callableHeaderOffset] === '<';
+    if (hasTypeParameters) {
+      callableHeaderOffset = readAndroidKotlinClassTypeParametersEnd(
+        searchableSource,
+        callableHeaderOffset,
+      );
+      if (callableHeaderOffset === null) return owner;
+    }
+    const constructorOffset = skipWhitespaceOffset(searchableSource, callableHeaderOffset);
+    const constructorMatch = /^(?:(?:public|private|protected|internal)\s+)?constructor\b/.exec(
+      searchableSource.slice(constructorOffset),
+    );
+    if (constructorMatch) {
+      callableHeaderOffset = skipWhitespaceOffset(
+        searchableSource,
+        constructorOffset + constructorMatch[0].length,
+      );
+      if (searchableSource[callableHeaderOffset] !== '(') return owner;
+    } else if (!hasTypeParameters) return owner;
+    const endLine = readAndroidKotlinDeclarationEndLine(
+      searchableSource,
+      declarationOffset,
+      callableHeaderOffset,
+      owner.endLine,
+    );
+    return { ...owner, endLine };
+  });
+}
+
+function readAndroidKotlinClassTypeParametersEnd(source, openOffset) {
+  const value = String(source ?? '');
+  if (value[openOffset] !== '<') return null;
+  let angleDepth = 0;
+  let parenDepth = 0;
+  let squareDepth = 0;
+  for (let index = openOffset; index < value.length; index += 1) {
+    const char = value[index];
+    if (char === '-' && value[index + 1] === '>') {
+      index += 1;
+      continue;
+    }
+    if (char === '\n') {
+      let nextOffset = index + 1;
+      while (value[nextOffset] === ' ' || value[nextOffset] === '\t') nextOffset += 1;
+      if (/^(?:(?:public|private|protected|internal)\s+)*(?:fun|class|object|interface|enum\s+class)\b/.test(
+        value.slice(nextOffset),
+      )) return null;
+      continue;
+    }
+    if (char === '{' || char === '}' || char === ';' || char === '=') return null;
+    if (char === '<') angleDepth += 1;
+    else if (char === '>') {
+      angleDepth -= 1;
+      if (angleDepth < 0) return null;
+      if (angleDepth === 0) {
+        return parenDepth === 0 && squareDepth === 0 ? index + 1 : null;
+      }
+    } else if (char === '(') parenDepth += 1;
+    else if (char === ')') {
+      parenDepth -= 1;
+      if (parenDepth < 0) return null;
+    } else if (char === '[') squareDepth += 1;
+    else if (char === ']') {
+      squareDepth -= 1;
+      if (squareDepth < 0) return null;
+    }
+  }
+  return null;
 }
 
 function skipWhitespaceOffset(source, offset) {
@@ -1470,9 +1769,10 @@ function readAndroidKotlinMethodsFromSource(source, relativeFile, packageName, c
 
 function readAndroidKotlinFunctionsFromSource(source, relativeFile, packageName, classes) {
   const functions = [];
+  const searchableSource = maskAndroidKotlinNonCode(source);
   const functionPattern = /\b((?:(?:suspend|public|private|protected|internal|open|abstract|final|operator|infix|tailrec|inline|external)\s+)*)fun\s+(?:<[^>\n]+>\s*)?([A-Za-z_][\w]*)\s*/g;
   let match;
-  while ((match = functionPattern.exec(source)) !== null) {
+  while ((match = functionPattern.exec(searchableSource)) !== null) {
     const line = lineNumberAt(source, match.index);
     if (findAndroidKotlinOwnerClass(classes, line)) continue;
     const name = match[2];
@@ -1512,6 +1812,64 @@ function readAndroidKotlinFunctionsFromSource(source, relativeFile, packageName,
     });
   }
   return functions;
+}
+
+function readAndroidKotlinFunctionsFromNativeEndpoints(
+  source,
+  relativeFile,
+  packageName,
+  classes,
+  endpoints,
+) {
+  const contentHash = createHash('sha256').update(Buffer.from(source)).digest('hex');
+  const size = Buffer.byteLength(source);
+  for (const endpoint of endpoints) {
+    if (
+      endpoint.file !== relativeFile
+      || endpoint.contentHash !== contentHash
+      || endpoint.size !== size
+    ) {
+      throw new Error(
+        `Native Android function endpoint is stale for ${relativeFile}:${endpoint.startLine}:${endpoint.nativeName}`,
+      );
+    }
+  }
+  const functions = readAndroidKotlinFunctionsFromSource(
+    source,
+    relativeFile,
+    packageName,
+    classes,
+  );
+  assertNativeAndroidKotlinFunctionCompleteness(functions, endpoints, relativeFile);
+  return functions;
+}
+
+function assertNativeAndroidKotlinFunctionCompleteness(functions, endpoints, relativeFile) {
+  const localIdentities = new Map();
+  for (const item of functions) {
+    const identity = `${relativeFile}\0${item.line}\0${item.name}`;
+    if (localIdentities.has(identity)) {
+      throw new Error(`Local Android function identity is ambiguous: ${identity}`);
+    }
+    localIdentities.set(identity, item);
+  }
+
+  const nativeIdentities = new Map();
+  for (const endpoint of endpoints) {
+    const identity = `${endpoint.file}\0${endpoint.startLine}\0${endpoint.nativeName}`;
+    if (!endpoint.nativeNodeId || nativeIdentities.has(identity)) {
+      throw new Error(`Native Android function identity is ambiguous: ${identity}`);
+    }
+    nativeIdentities.set(identity, endpoint.nativeNodeId);
+  }
+
+  const missing = [...localIdentities.keys()].filter(identity => !nativeIdentities.has(identity));
+  const extra = [...nativeIdentities.keys()].filter(identity => !localIdentities.has(identity));
+  if (missing.length > 0 || extra.length > 0) {
+    throw new Error(
+      `Native Android function completeness mismatch for ${relativeFile}: ${JSON.stringify({ missing, extra })}`,
+    );
+  }
 }
 
 function readAndroidKotlinCallableTypeReferences(source, declarationOffset, signatureEndOffset) {
@@ -1994,6 +2352,7 @@ function readAndroidManifestComponents(source, file, kotlinClassBySimpleName) {
     const knownClass = kotlinClassBySimpleName.get(simpleName);
     const className = knownClass?.qualifiedName ?? resolveAndroidManifestClassName(rawName, manifestPackage);
     const blockText = match[0];
+    const intentFilters = readAndroidManifestIntentEntries(source, blockText, match.index, 'intent-filter');
     const metadata = [];
     const metadataPattern = /<\s*meta-data\b([^>]*?)\/?>/gi;
     let metadataMatch;
@@ -2006,14 +2365,6 @@ function readAndroidManifestComponents(source, file, kotlinClassBySimpleName) {
         line: lineNumberAt(source, match.index + metadataMatch.index),
       });
     }
-    const actionNames = [];
-    const actionPattern = /<\s*action\b([^>]*?)\/?>/gi;
-    let actionMatch;
-    while ((actionMatch = actionPattern.exec(blockText)) !== null) {
-      const actionAttributes = readXmlAttributes(actionMatch[1]);
-      const actionName = actionAttributes['android:name'] ?? actionAttributes.name;
-      if (actionName) actionNames.push(actionName);
-    }
     const line = lineNumberAt(source, match.index);
     components.push({
       componentType,
@@ -2025,11 +2376,144 @@ function readAndroidManifestComponents(source, file, kotlinClassBySimpleName) {
       startLine: line,
       endLine: lineNumberAt(source, match.index + blockText.length),
       exported: attributes['android:exported'] ?? attributes.exported ?? null,
-      actions: unique(actionNames),
+      permission: attributes['android:permission'] ?? attributes.permission ?? null,
+      actions: unique(intentFilters.flatMap(intentFilter => intentFilter.actions.map(action => action.name))),
+      intentFilters,
       metadata: metadata.filter(item => item.name || item.value || item.resource),
     });
   }
   return components;
+}
+
+function readAndroidManifestUsesPermissions(source, file) {
+  const permissions = [];
+  const permissionPattern = /<\s*(uses-permission(?:-sdk-23)?)\b([^>]*?)\/?>/gi;
+  let match;
+  while ((match = permissionPattern.exec(String(source ?? ''))) !== null) {
+    const attributes = readXmlAttributes(match[2]);
+    const permission = attributes['android:name'] ?? attributes.name;
+    if (!permission) continue;
+    permissions.push({
+      permission,
+      declarationType: match[1],
+      file,
+      line: lineNumberAt(source, match.index),
+    });
+  }
+  return uniqueObjects(permissions);
+}
+
+function readAndroidManifestQueries(source, file) {
+  const queries = [];
+  const queriesPattern = /<\s*queries\b[^>]*>([\s\S]*?)<\/\s*queries\s*>/gi;
+  let queriesMatch;
+  while ((queriesMatch = queriesPattern.exec(String(source ?? ''))) !== null) {
+    const blockText = queriesMatch[1];
+    const blockOffset = queriesMatch.index + queriesMatch[0].indexOf(blockText);
+    for (const queryType of ['package', 'provider']) {
+      const queryPattern = new RegExp(`<\\s*${queryType}\\b([^>]*?)\\/?>`, 'gi');
+      let queryMatch;
+      while ((queryMatch = queryPattern.exec(blockText)) !== null) {
+        const attributes = readXmlAttributes(queryMatch[1]);
+        const queryValue = queryType === 'package'
+          ? attributes['android:name'] ?? attributes.name
+          : attributes['android:authorities'] ?? attributes.authorities;
+        if (!queryValue) continue;
+        queries.push({
+          queryType,
+          queryValue,
+          attributes,
+          file,
+          line: lineNumberAt(source, blockOffset + queryMatch.index),
+        });
+      }
+    }
+    for (const intent of readAndroidManifestIntentEntries(source, blockText, blockOffset, 'intent')) {
+      queries.push({
+        queryType: 'intent',
+        queryValue: androidManifestIntentQueryValue(intent),
+        actions: intent.actions,
+        categories: intent.categories,
+        data: intent.data,
+        file,
+        line: intent.line,
+      });
+    }
+  }
+  return uniqueObjects(queries);
+}
+
+function readAndroidManifestIntentEntries(source, blockText, blockOffset, tagName) {
+  const entries = [];
+  const intentPattern = new RegExp(`<\\s*${tagName}\\b[^>]*>([\\s\\S]*?)<\\/\\s*${tagName}\\s*>`, 'gi');
+  let intentMatch;
+  while ((intentMatch = intentPattern.exec(String(blockText ?? ''))) !== null) {
+    const intentText = intentMatch[0];
+    const intentOffset = blockOffset + intentMatch.index;
+    entries.push({
+      actions: readAndroidManifestNamedElements(source, intentText, intentOffset, 'action'),
+      categories: readAndroidManifestNamedElements(source, intentText, intentOffset, 'category'),
+      data: readAndroidManifestDataElements(source, intentText, intentOffset),
+      line: lineNumberAt(source, intentOffset),
+    });
+  }
+  return entries;
+}
+
+function readAndroidManifestNamedElements(source, blockText, blockOffset, tagName) {
+  const items = [];
+  const pattern = new RegExp(`<\\s*${tagName}\\b([^>]*?)\\/?>`, 'gi');
+  let match;
+  while ((match = pattern.exec(String(blockText ?? ''))) !== null) {
+    const attributes = readXmlAttributes(match[1]);
+    const name = attributes['android:name'] ?? attributes.name;
+    if (!name) continue;
+    items.push({
+      name,
+      line: lineNumberAt(source, blockOffset + match.index),
+    });
+  }
+  return uniqueObjects(items);
+}
+
+function readAndroidManifestDataElements(source, blockText, blockOffset) {
+  const items = [];
+  const pattern = /<\s*data\b([^>]*?)\/?>/gi;
+  let match;
+  while ((match = pattern.exec(String(blockText ?? ''))) !== null) {
+    const attributes = readXmlAttributes(match[1]);
+    const data = {
+      scheme: attributes['android:scheme'] ?? attributes.scheme ?? null,
+      host: attributes['android:host'] ?? attributes.host ?? null,
+      port: attributes['android:port'] ?? attributes.port ?? null,
+      path: attributes['android:path'] ?? attributes.path ?? null,
+      pathPrefix: attributes['android:pathPrefix'] ?? attributes.pathPrefix ?? null,
+      pathPattern: attributes['android:pathPattern'] ?? attributes.pathPattern ?? null,
+      mimeType: attributes['android:mimeType'] ?? attributes.mimeType ?? null,
+      line: lineNumberAt(source, blockOffset + match.index),
+    };
+    if (Object.values(data).some(value => value !== null)) items.push(data);
+  }
+  return uniqueObjects(items);
+}
+
+function androidManifestIntentQueryValue(intent) {
+  return intent.actions?.[0]?.name
+    ?? intent.categories?.[0]?.name
+    ?? androidManifestDataValue(intent.data?.[0])
+    ?? `intent@${intent.line}`;
+}
+
+function androidManifestDataValue(data) {
+  return [
+    data?.scheme && `scheme=${data.scheme}`,
+    data?.host && `host=${data.host}`,
+    data?.port && `port=${data.port}`,
+    data?.path && `path=${data.path}`,
+    data?.pathPrefix && `pathPrefix=${data.pathPrefix}`,
+    data?.pathPattern && `pathPattern=${data.pathPattern}`,
+    data?.mimeType && `mimeType=${data.mimeType}`,
+  ].filter(Boolean).join(';');
 }
 
 function resolveAndroidManifestClassName(rawName, manifestPackage) {
@@ -2110,6 +2594,99 @@ function readAndroidXmlResourceReferences(source) {
   return uniqueObjects(references);
 }
 
+function maskAndroidKotlinNonCode(source) {
+  const text = String(source ?? '');
+  const output = text.split('');
+  let state = 'code';
+  let blockDepth = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    const next = text[index + 1];
+    const triple = text.slice(index, index + 3) === '"""';
+    if (state === 'code') {
+      if (char === '/' && next === '/') {
+        output[index] = ' ';
+        output[index + 1] = ' ';
+        index += 1;
+        state = 'line-comment';
+      } else if (char === '/' && next === '*') {
+        output[index] = ' ';
+        output[index + 1] = ' ';
+        index += 1;
+        blockDepth = 1;
+        state = 'block-comment';
+      } else if (triple) {
+        output[index] = ' ';
+        output[index + 1] = ' ';
+        output[index + 2] = ' ';
+        index += 2;
+        state = 'triple-string';
+      } else if (char === '"') {
+        output[index] = ' ';
+        state = 'string';
+      } else if (char === "'") {
+        output[index] = ' ';
+        state = 'char';
+      }
+      continue;
+    }
+
+    if (state === 'line-comment') {
+      if (char === '\n') {
+        state = 'code';
+      } else {
+        output[index] = ' ';
+      }
+      continue;
+    }
+
+    if (state === 'block-comment') {
+      if (char === '/' && next === '*') {
+        output[index] = ' ';
+        output[index + 1] = ' ';
+        index += 1;
+        blockDepth += 1;
+      } else if (char === '*' && next === '/') {
+        output[index] = ' ';
+        output[index + 1] = ' ';
+        index += 1;
+        blockDepth -= 1;
+        if (blockDepth === 0) state = 'code';
+      } else if (char !== '\n') {
+        output[index] = ' ';
+      }
+      continue;
+    }
+
+    if (state === 'triple-string') {
+      if (triple) {
+        output[index] = ' ';
+        output[index + 1] = ' ';
+        output[index + 2] = ' ';
+        index += 2;
+        state = 'code';
+      } else if (char !== '\n') {
+        output[index] = ' ';
+      }
+      continue;
+    }
+
+    if (char === '\\') {
+      output[index] = ' ';
+      if (index + 1 < output.length && text[index + 1] !== '\n') {
+        output[index + 1] = ' ';
+        index += 1;
+      }
+      continue;
+    }
+    output[index] = char === '\n' ? '\n' : ' ';
+    if ((state === 'string' && char === '"') || (state === 'char' && char === "'")) {
+      state = 'code';
+    }
+  }
+  return output.join('');
+}
+
 function findCurlyBlockEndLine(source, startLine) {
   const lines = String(source ?? '').split(/\r?\n/);
   let depth = 0;
@@ -2183,7 +2760,7 @@ function collectContext7Docs(projectRoot, allFiles) {
 
   const sourceMapRoutes = collectContext7SourceMapRoutes(projectRoot, sourceMapFile);
   for (const route of sourceMapRoutes) {
-    if (route.doc) documentPaths.add(route.doc);
+    for (const doc of context7SourceMapRouteDocs(route)) documentPaths.add(doc);
   }
 
   const routeQueriesByDoc = new Map();
@@ -2192,7 +2769,9 @@ function collectContext7Docs(projectRoot, allFiles) {
     for (const doc of route.secondary ?? []) appendMapValue(routeQueriesByDoc, doc, route.query);
   }
   for (const route of sourceMapRoutes) {
-    if (route.doc) appendMapValue(routeQueriesByDoc, route.doc, route.question);
+    for (const doc of context7SourceMapRouteDocs(route)) {
+      appendMapValue(routeQueriesByDoc, doc, route.question);
+    }
   }
 
   const documents = [...documentPaths]
@@ -2253,12 +2832,19 @@ function collectContext7SourceMapRoutes(projectRoot, sourceMapFile) {
     const row = readMarkdownTableRow(line);
     if (!row || row.length < 3 || /^question$/i.test(row[0])) continue;
     const question = row[0];
-    const doc = normalizeContext7Path(readContext7MarkdownLinkTarget(row[1]) ?? row[1]);
+    const docs = readContext7MarkdownLinkTargets(row[1])
+      .map(normalizeContext7Path)
+      .filter(Boolean);
+    if (docs.length === 0) {
+      const fallbackDoc = normalizeContext7Path(row[1]);
+      if (fallbackDoc) docs.push(fallbackDoc);
+    }
     const sourcePaths = readContext7SourcePathList(row[2]);
-    if (!question || !doc) continue;
+    if (!question || docs.length === 0) continue;
     routes.push({
       question,
-      doc,
+      doc: docs[0],
+      docs: unique(docs),
       sourcePaths,
       file: sourceMapFile,
       line: index + 1,
@@ -2297,9 +2883,16 @@ function normalizeContext7Path(value) {
   return `docs/context7/${text.replace(/^\/+/, '')}`;
 }
 
-function readContext7MarkdownLinkTarget(value) {
-  const match = /\[[^\]]+\]\(([^)]+)\)/.exec(String(value ?? ''));
-  return match?.[1] ?? null;
+function readContext7MarkdownLinkTargets(value) {
+  return [...String(value ?? '').matchAll(/\[[^\]]+\]\(([^)]+)\)/g)]
+    .map(match => match[1]);
+}
+
+function context7SourceMapRouteDocs(route) {
+  return unique([
+    ...(route?.docs ?? []),
+    route?.doc,
+  ].filter(Boolean));
 }
 
 function readContext7SourcePathList(value) {
@@ -5136,26 +5729,16 @@ function scriptKindForFile(filePath) {
 }
 
 function listFiles(projectRoot) {
-  const files = [];
-  walk(projectRoot, files);
-  return files.sort((a, b) => a.localeCompare(b));
+  return buildSourceManifest(projectRoot).entries
+    .map(entry => path.join(projectRoot, ...entry.path.split('/')));
 }
 
-function walk(directory, files) {
-  if (!fs.existsSync(directory)) return;
-
-  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
-    if (entry.isDirectory()) {
-      if (!EXCLUDED_DIRS.has(entry.name)) {
-        walk(path.join(directory, entry.name), files);
-      }
-      continue;
-    }
-
-    if (entry.isFile()) {
-      files.push(path.join(directory, entry.name));
-    }
-  }
+function captureSourceManifest(projectRoot) {
+  const manifest = buildSourceManifest(projectRoot);
+  return {
+    ...manifest,
+    files: manifest.entries.map(entry => path.join(projectRoot, ...entry.path.split('/'))),
+  };
 }
 
 function isJavaScriptFamilySource(filePath) {
@@ -5232,7 +5815,9 @@ function collectAngular(projectRoot, sourceFiles, specBySubject) {
 
     for (const statement of source.statements) {
       if (!ts.isClassDeclaration(statement) || !statement.name) continue;
-      const constructorDependencies = readConstructorDependencies(statement);
+      const injectDependencyDetails = readInjectDependencyDetails(source, statement);
+      const constructorDependencyDetails = readConstructorDependencyDetails(source, statement);
+      const constructorDependencies = unique(constructorDependencyDetails.map(detail => detail.name));
       fileConstructorInjects.push(...constructorDependencies);
 
       const component = readComponent(
@@ -5240,16 +5825,24 @@ function collectAngular(projectRoot, sourceFiles, specBySubject) {
         file,
         source,
         statement,
-        fileInjects,
+        injectDependencyDetails,
         fileDynamicImports,
-        constructorDependencies,
+        constructorDependencyDetails,
         specBySubject,
       );
       if (component) {
         components.push(component);
       }
 
-      const directive = readDirective(projectRoot, file, source, statement, fileInjects, constructorDependencies, specBySubject);
+      const directive = readDirective(
+        projectRoot,
+        file,
+        source,
+        statement,
+        injectDependencyDetails,
+        constructorDependencyDetails,
+        specBySubject,
+      );
       if (directive) {
         directives.push(directive);
       }
@@ -5259,7 +5852,15 @@ function collectAngular(projectRoot, sourceFiles, specBySubject) {
         pipes.push(pipe);
       }
 
-      const injectable = readInjectable(projectRoot, file, source, statement, fileInjects, constructorDependencies, specBySubject);
+      const injectable = readInjectable(
+        projectRoot,
+        file,
+        source,
+        statement,
+        injectDependencyDetails,
+        constructorDependencyDetails,
+        specBySubject,
+      );
       if (injectable) {
         injectables.push(injectable);
       }
@@ -5298,6 +5899,22 @@ function readInjectCall(node) {
   return readReferenceName(firstArg);
 }
 
+function readInjectDependencyDetails(source, classNode) {
+  const details = [];
+  visit(classNode, node => {
+    const name = readInjectCall(node);
+    if (!name) return;
+    details.push({
+      name,
+      injectionKind: 'inject',
+      line: readLine(source, node),
+      column: readColumn(source, node),
+      matchedNeedle: node.getText(source),
+    });
+  });
+  return uniqueObjects(details);
+}
+
 function readReferenceName(node) {
   if (!node) return null;
   if (ts.isIdentifier(node)) return node.text;
@@ -5328,9 +5945,9 @@ function readComponent(
   file,
   source,
   classNode,
-  fileInjects,
+  injectDependencyDetails,
   fileDynamicImports,
-  constructorDependencies,
+  constructorDependencyDetails,
   specBySubject,
 ) {
   const decorator = findDecoratorCall(classNode, 'Component');
@@ -5352,6 +5969,13 @@ function readComponent(
   const classSemantics = readClassSemantics(source, classNode);
   const hostMetadata = readHostMetadataProperty(source, metadata);
   const testMappings = findTestMappings(projectRoot, file, specBySubject);
+  const importDetails = readReferenceArrayPropertyDetails(source, metadata, 'imports');
+  const providerDetails = readReferenceArrayPropertyDetails(source, metadata, 'providers');
+  const dependencyDetails = uniqueObjects([
+    ...injectDependencyDetails,
+    ...constructorDependencyDetails,
+  ]);
+  const constructorDependencies = unique(constructorDependencyDetails.map(detail => detail.name));
 
   return {
     className,
@@ -5359,14 +5983,17 @@ function readComponent(
     selector,
     standalone: readBooleanProperty(metadata, 'standalone'),
     changeDetection: readChangeDetection(metadata),
-    imports: readReferenceArrayProperty(metadata, 'imports'),
-    providers: readReferenceArrayProperty(metadata, 'providers'),
+    imports: unique(importDetails.map(detail => detail.name)),
+    importDetails,
+    providers: unique(providerDetails.map(detail => detail.name)),
+    providerDetails,
     hostDirectives: readHostDirectivesProperty(source, metadata),
     templateUrl,
     templateInline,
     styleUrls,
-    dependencies: unique([...fileInjects, ...constructorDependencies]),
-    constructorDependencies: unique(constructorDependencies),
+    dependencies: unique(dependencyDetails.map(detail => detail.name)),
+    dependencyDetails,
+    constructorDependencies,
     dynamicImports: unique(fileDynamicImports),
     inputs: classSemantics.inputs,
     outputs: classSemantics.outputs,
@@ -5384,7 +6011,15 @@ function readComponent(
   };
 }
 
-function readDirective(projectRoot, file, source, classNode, fileInjects, constructorDependencies, specBySubject) {
+function readDirective(
+  projectRoot,
+  file,
+  source,
+  classNode,
+  injectDependencyDetails,
+  constructorDependencyDetails,
+  specBySubject,
+) {
   const decorator = findDecoratorCall(classNode, 'Directive');
   if (!decorator) return null;
 
@@ -5394,15 +6029,23 @@ function readDirective(projectRoot, file, source, classNode, fileInjects, constr
   const classSemantics = readClassSemantics(source, classNode);
   const hostMetadata = readHostMetadataProperty(source, metadata);
   const testMappings = findTestMappings(projectRoot, file, specBySubject);
+  const providerDetails = readReferenceArrayPropertyDetails(source, metadata, 'providers');
+  const dependencyDetails = uniqueObjects([
+    ...injectDependencyDetails,
+    ...constructorDependencyDetails,
+  ]);
+  const constructorDependencies = unique(constructorDependencyDetails.map(detail => detail.name));
   return {
     className: classNode.name.text,
     file: relative(projectRoot, file),
     selector: readStringProperty(metadata, 'selector'),
     standalone: readBooleanProperty(metadata, 'standalone'),
-    providers: readReferenceArrayProperty(metadata, 'providers'),
+    providers: unique(providerDetails.map(detail => detail.name)),
+    providerDetails,
     hostDirectives: readHostDirectivesProperty(source, metadata),
-    dependencies: unique([...fileInjects, ...constructorDependencies]),
-    constructorDependencies: unique(constructorDependencies),
+    dependencies: unique(dependencyDetails.map(detail => detail.name)),
+    dependencyDetails,
+    constructorDependencies,
     inputs: classSemantics.inputs,
     outputs: classSemantics.outputs,
     hostAttributes: hostMetadata.attributes,
@@ -5434,7 +6077,15 @@ function readPipe(projectRoot, file, source, classNode, specBySubject) {
   };
 }
 
-function readInjectable(projectRoot, file, source, classNode, fileInjects, constructorDependencies, specBySubject) {
+function readInjectable(
+  projectRoot,
+  file,
+  source,
+  classNode,
+  injectDependencyDetails,
+  constructorDependencyDetails,
+  specBySubject,
+) {
   const decorator = findDecoratorCall(classNode, 'Injectable');
   if (!decorator) return null;
 
@@ -5443,13 +6094,19 @@ function readInjectable(projectRoot, file, source, classNode, fileInjects, const
     ? readProviderScope(metadata, 'providedIn')
     : null;
   const testMappings = findReferencingTestMappings(projectRoot, classNode.name.text, specBySubject);
+  const dependencyDetails = uniqueObjects([
+    ...injectDependencyDetails,
+    ...constructorDependencyDetails,
+  ]);
+  const constructorDependencies = unique(constructorDependencyDetails.map(detail => detail.name));
 
   return {
     className: classNode.name.text,
     file: relative(projectRoot, file),
     providedIn,
-    dependencies: unique([...fileInjects, ...constructorDependencies]),
-    constructorDependencies: unique(constructorDependencies),
+    dependencies: unique(dependencyDetails.map(detail => detail.name)),
+    dependencyDetails,
+    constructorDependencies,
     line: readLine(source, classNode),
     tests: testFilesFromMappings(testMappings),
     testMappings,
@@ -6290,6 +6947,7 @@ function buildNativeGraph(overlay) {
         relation: 'context7-source-map-route',
         question: route.question,
         doc: route.doc,
+        docs: context7SourceMapRouteDocs(route),
         sourcePaths: route.sourcePaths,
       },
     });
@@ -6515,25 +7173,45 @@ function buildNativeGraph(overlay) {
   for (const component of overlay.angular?.components ?? []) {
     const sourceId = addReferenceNode(component.className, component.file, { kind: 'component' });
     addImportEdges(addNode, addReferenceNode, addEdge, sourceId, component.file, component);
-    addDependencyEdges(addReferenceNode, addEdge, sourceId, component.file, component.dependencies);
+    addDependencyEdges(
+      addReferenceNode,
+      addEdge,
+      sourceId,
+      component.file,
+      component.dependencies,
+      component.dependencyDetails,
+    );
     addTestEdges(addReferenceNode, addEdge, sourceId, component.tests, component.testMappings);
     addClassSemanticEdges(addReferenceNode, addEdge, sourceId, component.file, component);
     addAngularTemplateUsageEdges(addReferenceNode, addEdge, sourceId, component, angularTemplateUsageIndex);
-    for (const provider of component.providers ?? []) {
-      addEdge('references', sourceId, addReferenceNode(provider, component.file, { relation: 'provider' }), {
+    for (const provider of referenceDetails(component.providers, component.providerDetails)) {
+      addEdge('references', sourceId, addReferenceNode(provider.name, component.file, { relation: 'provider' }), {
         relation: 'provider',
+        line: provider.line,
+        column: provider.column,
+        matchedNeedle: provider.matchedNeedle,
       });
     }
   }
 
   for (const directive of overlay.angular?.directives ?? []) {
     const sourceId = addReferenceNode(directive.className, directive.file);
-    addDependencyEdges(addReferenceNode, addEdge, sourceId, directive.file, directive.dependencies);
+    addDependencyEdges(
+      addReferenceNode,
+      addEdge,
+      sourceId,
+      directive.file,
+      directive.dependencies,
+      directive.dependencyDetails,
+    );
     addTestEdges(addReferenceNode, addEdge, sourceId, directive.tests, directive.testMappings);
     addClassSemanticEdges(addReferenceNode, addEdge, sourceId, directive.file, directive);
-    for (const provider of directive.providers ?? []) {
-      addEdge('references', sourceId, addReferenceNode(provider, directive.file, { relation: 'provider' }), {
+    for (const provider of referenceDetails(directive.providers, directive.providerDetails)) {
+      addEdge('references', sourceId, addReferenceNode(provider.name, directive.file, { relation: 'provider' }), {
         relation: 'provider',
+        line: provider.line,
+        column: provider.column,
+        matchedNeedle: provider.matchedNeedle,
       });
     }
   }
@@ -6550,7 +7228,14 @@ function buildNativeGraph(overlay) {
 
   for (const injectable of overlay.angular?.injectables ?? []) {
     const sourceId = addReferenceNode(injectable.className, injectable.file);
-    addDependencyEdges(addReferenceNode, addEdge, sourceId, injectable.file, injectable.dependencies);
+    addDependencyEdges(
+      addReferenceNode,
+      addEdge,
+      sourceId,
+      injectable.file,
+      injectable.dependencies,
+      injectable.dependencyDetails,
+    );
     addTestEdges(addReferenceNode, addEdge, sourceId, injectable.tests, injectable.testMappings);
     if (injectable.providedIn) {
       addEdge('decorates', sourceId, addReferenceNode(injectable.providedIn, injectable.file, {
@@ -6681,13 +7366,22 @@ function buildNativeGraph(overlay) {
       });
     }
     for (const envVar of edgeFunction.envVars ?? []) {
-      addEdge('references', sourceId, addReferenceNode(envVar, edgeFunction.entry, { relation: 'env-var' }), {
+      addEdge('references', sourceId, addReferenceNode(envVar, edgeFunction.entry, {
         relation: 'env-var',
+        metadata: { envVar },
+      }), {
+        relation: 'env-var',
+        envVar,
       });
     }
     for (const riskTag of edgeFunction.riskTags ?? []) {
-      addEdge('decorates', sourceId, addReferenceNode(riskTag, edgeFunction.entry, { relation: 'risk-tag' }), {
+      addEdge('decorates', sourceId, addReferenceNode(riskTag, edgeFunction.entry, {
         relation: 'risk-tag',
+        metadata: { riskTag, riskSource: 'edge-function' },
+      }), {
+        relation: 'risk-tag',
+        riskTag,
+        riskSource: 'edge-function',
       });
     }
   }
@@ -6696,7 +7390,10 @@ function buildNativeGraph(overlay) {
     const sourceId = graphNodeId('file', migration.file, migration.name);
     addTestEdges(addReferenceNode, addEdge, sourceId, migration.tests, migration.testMappings);
     for (const table of migration.affectedTables ?? []) {
-      addEdge('references', sourceId, addReferenceNode(table, migration.file, { relation: 'table' }), {
+      addEdge('references', sourceId, addReferenceNode(table, migration.file, {
+        relation: 'table',
+        allowGlobalFallback: false,
+      }), {
         relation: 'table',
       });
     }
@@ -7144,8 +7841,13 @@ function buildNativeGraph(overlay) {
       });
     }
     for (const riskTag of migration.riskTags ?? []) {
-      addEdge('decorates', sourceId, addReferenceNode(riskTag, migration.file, { relation: 'risk-tag' }), {
+      addEdge('decorates', sourceId, addReferenceNode(riskTag, migration.file, {
         relation: 'risk-tag',
+        metadata: { riskTag, riskSource: 'migration' },
+      }), {
+        relation: 'risk-tag',
+        riskTag,
+        riskSource: 'migration',
       });
     }
   }
@@ -7315,14 +8017,16 @@ function buildNativeGraph(overlay) {
 
   for (const route of overlay.context7?.sourceMapRoutes ?? []) {
     const sourceId = context7SourceMapRouteNodeId(route);
-    const doc = context7DocsByFile.get(route.doc);
-    if (doc) {
-      addEdge('references', sourceId, context7DocumentNodeId(doc), {
-        relation: 'context7-source-map-doc',
-        question: route.question,
-        docPath: route.doc,
-        line: route.line,
-      });
+    for (const docPath of context7SourceMapRouteDocs(route)) {
+      const doc = context7DocsByFile.get(docPath);
+      if (doc) {
+        addEdge('references', sourceId, context7DocumentNodeId(doc), {
+          relation: 'context7-source-map-doc',
+          question: route.question,
+          docPath,
+          line: route.line,
+        });
+      }
     }
     for (const sourcePath of route.sourcePaths ?? []) {
       const sourcePathTarget = context7SourcePathTarget(overlay.project?.root, route.file, sourcePath);
@@ -7596,6 +8300,68 @@ function buildNativeGraph(overlay) {
     });
   }
 
+  for (const permission of overlay.android?.manifestPermissions ?? []) {
+    const manifestId = addNode('file', permission.file, permission.file, {
+      language: 'xml',
+      metadata: {
+        platform: 'android',
+        relation: 'android-manifest',
+      },
+    });
+    const permissionId = addNode('variable', permission.permission, permission.file, {
+      id: `variable:${permission.file}:android-permission:${permission.permission}`,
+      line: permission.line,
+      language: 'unknown',
+      signature: `${permission.declarationType} ${permission.permission}`,
+      metadata: {
+        platform: 'android',
+        relation: 'android-manifest-permission',
+        permission: permission.permission,
+      },
+    });
+    addEdge('references', manifestId, permissionId, {
+      relation: 'android-manifest-uses-permission',
+      permission: permission.permission,
+      declarationType: permission.declarationType,
+      line: permission.line,
+    }, {
+      line: permission.line,
+    });
+  }
+
+  for (const query of overlay.android?.manifestQueries ?? []) {
+    const manifestId = addNode('file', query.file, query.file, {
+      language: 'xml',
+      metadata: {
+        platform: 'android',
+        relation: 'android-manifest',
+      },
+    });
+    const queryId = addNode('variable', query.queryValue, query.file, {
+      id: `variable:${query.file}:android-manifest-query:${query.queryType}:${query.queryValue}`,
+      line: query.line,
+      language: 'unknown',
+      signature: `Android Manifest ${query.queryType} query ${query.queryValue}`,
+      metadata: {
+        platform: 'android',
+        relation: 'android-manifest-query',
+        queryType: query.queryType,
+        queryValue: query.queryValue,
+      },
+    });
+    addEdge('references', manifestId, queryId, {
+      relation: 'android-manifest-query',
+      queryType: query.queryType,
+      queryValue: query.queryValue,
+      actions: query.actions,
+      categories: query.categories,
+      data: query.data,
+      line: query.line,
+    }, {
+      line: query.line,
+    });
+  }
+
   for (const component of overlay.android?.manifestComponents ?? []) {
     const manifestId = addNode('file', component.file, component.file, {
       language: 'xml',
@@ -7616,6 +8382,91 @@ function buildNativeGraph(overlay) {
     }, {
       line: component.line,
     });
+    if (component.permission) {
+      const permissionId = addNode('variable', component.permission, component.file, {
+        id: `variable:${component.file}:android-permission:${component.permission}`,
+        line: component.line,
+        language: 'unknown',
+        signature: `Android component permission ${component.permission}`,
+        metadata: {
+          platform: 'android',
+          relation: 'android-manifest-permission',
+          permission: component.permission,
+        },
+      });
+      addEdge('references', classId, permissionId, {
+        relation: 'android-manifest-component-permission',
+        componentType: component.componentType,
+        className: component.className,
+        permission: component.permission,
+        line: component.line,
+      }, {
+        line: component.line,
+      });
+    }
+    for (const intentFilter of component.intentFilters ?? []) {
+      for (const action of intentFilter.actions ?? []) {
+        const actionId = addNode('variable', action.name, component.file, {
+          id: `variable:${component.file}:android-intent-action:${action.name}`,
+          line: action.line,
+          language: 'unknown',
+          signature: `Android intent action ${action.name}`,
+          metadata: {
+            platform: 'android',
+            relation: 'android-manifest-intent-filter-value',
+            valueType: 'action',
+          },
+        });
+        addEdge('references', classId, actionId, {
+          relation: 'android-manifest-intent-filter-action',
+          action: action.name,
+          line: action.line,
+        }, {
+          line: action.line,
+        });
+      }
+      for (const category of intentFilter.categories ?? []) {
+        const categoryId = addNode('variable', category.name, component.file, {
+          id: `variable:${component.file}:android-intent-category:${category.name}`,
+          line: category.line,
+          language: 'unknown',
+          signature: `Android intent category ${category.name}`,
+          metadata: {
+            platform: 'android',
+            relation: 'android-manifest-intent-filter-value',
+            valueType: 'category',
+          },
+        });
+        addEdge('references', classId, categoryId, {
+          relation: 'android-manifest-intent-filter-category',
+          category: category.name,
+          line: category.line,
+        }, {
+          line: category.line,
+        });
+      }
+      for (const data of intentFilter.data ?? []) {
+        const dataValue = androidManifestDataValue(data);
+        if (!dataValue) continue;
+        const dataId = addNode('variable', dataValue, component.file, {
+          id: `variable:${component.file}:android-intent-data:${dataValue}`,
+          line: data.line,
+          language: 'unknown',
+          signature: `Android intent data ${dataValue}`,
+          metadata: {
+            platform: 'android',
+            relation: 'android-manifest-intent-filter-value',
+            valueType: 'data',
+          },
+        });
+        addEdge('references', classId, dataId, {
+          relation: 'android-manifest-intent-filter-data',
+          ...data,
+        }, {
+          line: data.line,
+        });
+      }
+    }
   }
 
   for (const widgetProvider of overlay.android?.widgetProviders ?? []) {
@@ -7661,6 +8512,33 @@ function buildNativeGraph(overlay) {
     });
     addEdge('imports', sourceId, targetId, {
       relation: 'android-resource-reference',
+      resourceType: resourceReference.resourceType,
+      resourceName: resourceReference.resourceName,
+      line: resourceReference.line,
+    }, {
+      line: resourceReference.line,
+    });
+  }
+
+  for (const resourceReference of overlay.android?.kotlinResourceReferences ?? []) {
+    const sourceId = addNode('file', resourceReference.sourceFile, resourceReference.sourceFile, {
+      language: 'kotlin',
+      metadata: {
+        platform: 'android',
+        relation: 'android-kotlin-source',
+      },
+    });
+    const targetId = addNode('file', resourceReference.targetFile, resourceReference.targetFile, {
+      language: inferLanguage(resourceReference.targetFile),
+      metadata: {
+        platform: 'android',
+        relation: 'android-resource-file',
+        resourceType: resourceReference.resourceType,
+        resourceName: resourceReference.resourceName,
+      },
+    });
+    addEdge('references', sourceId, targetId, {
+      relation: 'android-kotlin-resource-reference',
       resourceType: resourceReference.resourceType,
       resourceName: resourceReference.resourceName,
       line: resourceReference.line,
@@ -7757,9 +8635,12 @@ function addImportEdges(addNode, addReferenceNode, addEdge, sourceId, sourceFile
     });
   }
 
-  for (const imported of item.imports ?? []) {
-    addEdge('imports', sourceId, addReferenceNode(imported, sourceFile, { relation: 'standalone-import' }), {
+  for (const imported of referenceDetails(item.imports, item.importDetails)) {
+    addEdge('imports', sourceId, addReferenceNode(imported.name, sourceFile, { relation: 'standalone-import' }), {
       relation: 'standalone-import',
+      line: imported.line,
+      column: imported.column,
+      matchedNeedle: imported.matchedNeedle,
     });
   }
 
@@ -7872,10 +8753,21 @@ function normalizeAngularRedirectPath(redirectTo) {
   return String(redirectTo ?? '').replace(/^\/+/, '');
 }
 
-function addDependencyEdges(addReferenceNode, addEdge, sourceId, sourceFile, dependencies) {
-  for (const dependency of dependencies ?? []) {
-    addEdge('type_of', sourceId, addReferenceNode(dependency, sourceFile, { relation: 'dependency' }), {
+function referenceDetails(names, details) {
+  if (Array.isArray(details) && details.length > 0) {
+    return details.filter(detail => detail?.name);
+  }
+  return (names ?? []).map(name => ({ name }));
+}
+
+function addDependencyEdges(addReferenceNode, addEdge, sourceId, sourceFile, dependencies, dependencyDetails) {
+  for (const dependency of referenceDetails(dependencies, dependencyDetails)) {
+    addEdge('type_of', sourceId, addReferenceNode(dependency.name, sourceFile, { relation: 'dependency' }), {
       relation: 'dependency',
+      injectionKind: dependency.injectionKind,
+      line: dependency.line,
+      column: dependency.column,
+      matchedNeedle: dependency.matchedNeedle,
     });
   }
 }
@@ -9482,17 +10374,25 @@ function findDecoratorCall(classNode, name) {
   return null;
 }
 
-function readConstructorDependencies(classNode) {
-  const dependencies = [];
+function readConstructorDependencyDetails(source, classNode) {
+  const details = [];
   for (const member of classNode.members) {
     if (!ts.isConstructorDeclaration(member)) continue;
 
     for (const parameter of member.parameters) {
       const injectedToken = findDecoratorCall(parameter, 'Inject')?.arguments?.[0];
-      dependencies.push(readReferenceName(injectedToken) ?? readTypeName(parameter.type));
+      const name = readReferenceName(injectedToken) ?? readTypeName(parameter.type);
+      if (!name) continue;
+      details.push({
+        name,
+        injectionKind: 'constructor',
+        line: readLine(source, parameter),
+        column: readColumn(source, parameter),
+        matchedNeedle: parameter.getText(source),
+      });
     }
   }
-  return unique(dependencies);
+  return uniqueObjects(details);
 }
 
 function nodeOptions(symbol) {
@@ -9917,15 +10817,21 @@ function readStringPropertyWithStartLine(source, objectLiteral, name) {
   };
 }
 
-function readReferenceArrayProperty(objectLiteral, name) {
+function readReferenceArrayPropertyDetails(source, objectLiteral, name) {
   const initializer = readPropertyInitializer(objectLiteral, name);
   if (!initializer) return [];
 
-  if (ts.isArrayLiteralExpression(initializer)) {
-    return unique(initializer.elements.flatMap(readProviderOrReferenceNames));
-  }
-
-  return unique(readProviderOrReferenceNames(initializer));
+  const entries = ts.isArrayLiteralExpression(initializer)
+    ? [...initializer.elements]
+    : [initializer];
+  return uniqueObjects(entries.flatMap(entry => (
+    readProviderOrReferenceNames(entry).map(referenceName => ({
+      name: referenceName,
+      line: readLine(source, entry),
+      column: readColumn(source, entry),
+      matchedNeedle: entry.getText(source),
+    }))
+  )));
 }
 
 function readAngularApplicationProviders(projectRoot, file, source) {

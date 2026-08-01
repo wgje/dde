@@ -9,7 +9,7 @@ const {
   RELATION_METADATA_CONTRACTS,
   ZERO_REASON_COUNTERS,
 } = require('./lib/codegraph-overlay-contract-manifest.cjs');
-
+const { assertDocsTransactionClean } = require('./lib/codegraph-overlay-stability.cjs');
 const args = process.argv.slice(2);
 const rootArgIndex = args.indexOf('--root');
 const root = path.resolve(rootArgIndex >= 0 ? args[rootArgIndex + 1] : process.cwd());
@@ -106,6 +106,12 @@ const DEDUP_CONTRACT_REQUIRED_GATES = [
   'npm run codegraph:overlay:docs:validate',
   'npm run codegraph:adapter:gate',
 ];
+const DEDUP_CONTRACT_CONTEXT_PACK_SOURCE_PATH = 'scripts/codegraph-nanoflow-mcp-stdio.cjs';
+const DEDUP_CONTRACT_REQUIRED_COVERED_CHILD_OWNERS = [
+  ['TypeScript', 'collectTypeScript()', null, ['readTypeScriptStandardLibraryReferences', 'collectTypeScriptStandardLibraryDeclarations']],
+  ['context-pack', 'contextPackSourceRankingQueryFor()', DEDUP_CONTRACT_CONTEXT_PACK_SOURCE_PATH,
+    ['queryTokens', 'localizedContextPackQueryAliases']],
+];
 const DEDUP_CONTRACT_REQUIRED_HOTSPOTS = [
   ['collectTypeScript()', 'scripts/generate-codegraph-nanoflow-overlay.mjs'],
   ['buildNativeGraph()', 'scripts/generate-codegraph-nanoflow-overlay.mjs'],
@@ -128,6 +134,9 @@ const DEDUP_CONTRACT_REQUIRED_HOTSPOTS = [
   ['formatNativeMarkdown()', 'scripts/query-codegraph-nanoflow-overlay.mjs'],
   ['contextPackSourceRankingQueryFor()', 'scripts/codegraph-nanoflow-mcp-stdio.cjs'],
   ['sanitizeContextPackBaseMarkdownSections()', 'scripts/codegraph-nanoflow-mcp-stdio.cjs'],
+];
+const DEDUP_CONTRACT_SOURCE_CONDITIONAL_HOTSPOTS = [
+  ['toNativeJsonFormatterResponse()', 'scripts/query-codegraph-nanoflow-overlay.mjs', 'toNativeJsonFormatterResponse'],
 ];
 const DEDUP_CONTRACT_REQUIRED_HOTSPOT_FIELDS = [
   'status',
@@ -182,7 +191,7 @@ const DEDUP_CONTRACT_AUGMENTED_MARKDOWN_FORBIDDEN_SOURCE_TOKENS = [
   { token: '### Code', kind: 'strict-native heading' },
 ];
 const DEDUP_CONTRACT_STRICT_NATIVE_MARKDOWN_FORBIDDEN_SOURCE_TOKENS = [
-  { token: 'formatEdgeMetadata', kind: 'augmented formatter token' },
+  ...['formatEdgeMetadata', 'formatNativeMarkdown', 'formatNanoFlowAugmentedMarkdown'].map(token => ({ token, kind: 'augmented formatter token' })),
   { token: '→', kind: 'augmented relationship separator' },
   { token: 'relation:', kind: 'NanoFlow metadata token' },
   { token: 'table:', kind: 'NanoFlow metadata token' },
@@ -191,15 +200,38 @@ const DEDUP_CONTRACT_STRICT_NATIVE_MARKDOWN_FORBIDDEN_SOURCE_TOKENS = [
 const DEDUP_CONTRACT_ANDROID_KOTLIN_SOURCE_PATH = 'scripts/generate-codegraph-nanoflow-overlay.mjs';
 const DEDUP_CONTRACT_TYPESCRIPT_SOURCE_PATH = 'scripts/generate-codegraph-nanoflow-overlay.mjs';
 const DEDUP_CONTRACT_TYPESCRIPT_DISCOVERY_PATTERN =
-  /\b(?:function|const|let|var)\s+((?:collectTypeScript|buildNativeGraph|buildImportAliasIndex|buildExportTargetIndex|resolveReferenceNodeId|addTypeScript[A-Za-z0-9_$]*|readImport[A-Za-z0-9_$]*|readExport[A-Za-z0-9_$]*|readCall[A-Za-z0-9_$]*|resolveImported[A-Za-z0-9_$]*|resolveNamespaceImport[A-Za-z0-9_$]*|addImportEdges|addTypeReferenceEdge))\b/g;
+  /\b(?:function|const|let|var)\s+((?:collectTypeScript(?:StandardLibrary[A-Za-z0-9_$]*)?|readTypeScriptStandardLibrary[A-Za-z0-9_$]*|buildNativeGraph|buildImportAliasIndex|buildExportTargetIndex|resolveReferenceNodeId|add(?:TypeScript|Import|TypeReference|LocalDeclaration|Parameter|ValueReference|JsxReference|InterfaceImplementation|MemberSemantic)[A-Za-z0-9_$]*|readImport[A-Za-z0-9_$]*|readExport[A-Za-z0-9_$]*|readCall[A-Za-z0-9_$]*|resolveImported[A-Za-z0-9_$]*|resolveNamespaceImport[A-Za-z0-9_$]*))\b/g;
+const PROJECT_SEMANTIC_DOC_COUNTERS = [
+  'angularComponents',
+  'angularDirectives',
+  'angularPipes',
+  'angularInjectables',
+  'angularInjectorFiles',
+  'angularInjectorDependencyReferences',
+  'angularApplicationProviders',
+  'standaloneImportEdges',
+  'angularInputEdges',
+  'angularOutputEdges',
+  'angularModelEdges',
+  'angularQueryEdges',
+  'angularSignalEdges',
+  'context7Documents',
+  'context7Categories',
+  'context7CategoryDocEdges',
+  'context7RetrievalRoutes',
+  'context7RetrievalPrimaryEdges',
+  'context7RetrievalSecondaryEdges',
+  'context7SourceMapRoutes',
+  'context7SourceMapDocEdges',
+  'context7SourceMapSourceEdges',
+];
 const DEDUP_CONTRACT_ANDROID_KOTLIN_DISCOVERY_PATTERN =
   /\b(?:function|const|let|var)\s+(collectAndroid|readAndroidKotlin[A-Za-z0-9_$]*|resolveAndroidKotlin[A-Za-z0-9_$]*|addAndroidKotlin[A-Za-z0-9_$]*)\b/g;
 const DEDUP_CONTRACT_QUERY_FORMATTER_SOURCE_PATH = 'scripts/query-codegraph-nanoflow-overlay.mjs';
 const DEDUP_CONTRACT_QUERY_FORMATTER_DISCOVERY_PATTERN =
   /\b(?:function|const|let|var)\s+((?:queryOverlay|queryScoringContext|scoreCandidate|scoreNanoFlowSemanticCandidate|scoreGraphNode|scoreNodeRelevanceForQuery|scorePathSegmentCoverage|scoreNativeProjection[A-Za-z0-9_$]*|scorePreferredSourceFileGroupForQuery|scoreSourceFileGroupForQuery|rankNodesForQuery|orderRelatedFilesForQuery|compareCandidateRank|compareExactRelationEdgeDisplayOrder|compareNodeSpecificity|compareNode|compareEdge|compareSyncBodyKeywordEndpointPriority|compareSyncConfigKeywordEndpointPriority|compareExplicitPathCodeBlockCandidate|compareExactRelationEdgeSourceOrder|compareNodeSourceOrder|compareGeneratedFileOrder|selectEntryPoints|selectAngularSemanticApiEdges|selectNodeForCandidateMatch|selectedContext7RetrievalRouteIds|sortAngularSemanticApiEdgesForSelection|sortExactRelationEdgesForSelection|orderNativeProjectionItems|compareNativeProjectionRelevance|lowInformation(?:Node|File)Penalty|queryAllowsTestFiles|isLowInformationTestFilePath|focusedExplicitPathCodeBlockFilePaths|explicitPathNativeCodeBlockNodes|exactRelationEndpointCodeBlockNodes|prioritizeExactRelationCodeBlockEdges|resolveNativeCodeBlockNode|format(?:NativeMarkdown|NanoFlowAugmentedMarkdown|StrictNative(?:Markdown|RelatedSymbol|Location|FilePath|EdgeLocation)|EdgeSource|Summary|InlineFileList|EdgeMetadata|MatchSummary)|build(?:GraphIndexes|BlastRadiusEntries|NotShownEntries|RelationshipGroups|StrictNativeMarkdownRelationshipGroups|NativeCodeBlocks|ExactRelationEdgeCodeBlocks|ProvenanceEdgeLineCodeBlocks(?:ForQuery)?|SourceBlocks)|capRelationshipGroups|filterRelationshipGroupsForMarkdown|exactMetadataQuer(?:y|ies)From(?:Terms|Edges)|edgeMatches(?:ExactMetadataQuery|QueryTermsWithEndpoints|AnyQueryTermWithEndpoints)|suppressed(?:ExactRelationEntryPointIds|NativeCodeBlockNodeIds|ExactRelationCodeBlockEndpointIds)|strictNative(?:CodeBlockBudgetReached|EdgeEndpointName)|shouldSuppress(?:BroadNativeCodeBlock|LocalEvidenceEndpointForOwnerPreferredRelation)|compare(?:StrictNativeMarkdownEdges|StrictNativeRelatedNodeOrder|ExactRelationEdgeCodeBlockOrder|ProvenanceEdgeLineCodeBlockOrder|NativeCodeBlockNodeOrder|NullableSourceLine)|toNativeJsonFormatterResponse|serializeNativeJson(?:Node|Edge|CodeBlock)|nativeJsonEdge(?:Line|Column)|pushNativeCodeBlock(?:WithinNativeBudget)?|read(?:NodeCodeBlock|EdgeLineCodeBlock|SourceBlock)[A-Za-z0-9_$]*|formatSourceBlockSymbols|truncateMarkdownOutput|groupMarkdownRelatedNodesByFile|formatSourceWindows|selectNanoFlowRelationGraphResults|expandExactRelationEdges|markdownRelatedSymbolKey))\b/g;
-const DEDUP_CONTRACT_CONTEXT_PACK_SOURCE_PATH = 'scripts/codegraph-nanoflow-mcp-stdio.cjs';
 const DEDUP_CONTRACT_CONTEXT_PACK_DISCOVERY_PATTERN =
-  /\b(?:function|const|let|var)\s+((?:rankContextPack[A-Za-z0-9_$]*|scoreContextPack[A-Za-z0-9_$]*|prioritizeContextPack[A-Za-z0-9_$]*Source[A-Za-z0-9_$]*|filterContextPack[A-Za-z0-9_$]*Source[A-Za-z0-9_$]*|shouldFilterContextPack[A-Za-z0-9_$]*Source[A-Za-z0-9_$]*|hasAvoidableLowValueContextPack[A-Za-z0-9_$]*Source[A-Za-z0-9_$]*|buildContextPack(?:OverlaySourceBlocks|SourceBlock|RelationshipLines[A-Za-z0-9_$]*|RelatedSymbolLines|NodesByName|QueryPlan)|injectContextPackOverlaySourceBlocks|removeContextPackSourceBlockChunks|(?:split|join|find|append|select|merge)ContextPack[A-Za-z0-9_$]*SourceBlock[A-Za-z0-9_$]*|selectContextPackDiagnostic[A-Za-z0-9_$]*|shouldIncludeContextPackOverlaySourceBlock|formatNanoFlowContextPackAsMarkdown|contextPack(?:ExploreQueryFor|RawQueryTerms|Diagnostic[A-Za-z0-9_$]*|TopRanked[A-Za-z0-9_$]*|NodeMatchesQueryTerms|BaseSourceFilterRelationQueries|BaseMetadata[A-Za-z0-9_$]*|BaseTextContains(?:Lifecycle|FocusedNode)Evidence|SourceBlockPriority|SourceBlockHas[A-Za-z0-9_$]*Evidence|SourceChunkContains(?:Line|FocusedLine)|SourceEntryHas[A-Za-z0-9_$]*SymbolEvidence|SourceEvidenceNodesForOverlay|SourceSelection[A-Za-z0-9_$]*|SourceFileRank|SourceOrdering[A-Za-z0-9_$]*|RelationshipNode(?:QueryScore|Penalty)|RelatedNodeLowValuePenalty|SourceFileLowValuePenalty)|isExactRelationQueryTerm|summarizeContextPack(?:SourceOrdering|SourceSelection|MarkdownText|QueryClassification|TopRanked[A-Za-z0-9_$]*)|classifyCodegraphDedupMaintenanceQuery|extractContextPack(?:BaseRelationshipSymbols|SourceBlockFiles?|SourceBlockFile)|sortRelationshipEdgesForMarkdown|filterRelationshipEdgesForMarkdown|shouldShowContextPackRelationshipEdge|groupMarkdownRelatedNodesByFile|buildRelationshipGroupsFromMatches|markdownRelatedSymbolKey|compareRelatedGraphNodeOrder|compareGraphNode(?:SourceOrder)?|relationshipEdgeSourceOrder|mergeContextPack(?:FileScore|LineWindows|WindowRanges)|appendContextPackSourceEvidence|expandQueryTokenAliases|scorePath(?:TermMatch|SegmentCoverage)|format(?:EdgeMetadata|MatchSummary)|queryMentionsCodegraph(?:ToolingSourcePollution|DedupMaintenance)|queryExplicitlyRequestsContextPackSourcePath|isRenderableContextPackSourcePath|isLowValueContextPackSourcePath|isCodegraphDedupMaintenanceSourcePath))\b/g;
+  /\b(?:function|const|let|var)\s+((?:rankContextPack[A-Za-z0-9_$]*|scoreContextPack[A-Za-z0-9_$]*|prioritizeContextPack[A-Za-z0-9_$]*Source[A-Za-z0-9_$]*|filterContextPack[A-Za-z0-9_$]*Source[A-Za-z0-9_$]*|shouldFilterContextPack[A-Za-z0-9_$]*Source[A-Za-z0-9_$]*|hasAvoidableLowValueContextPack[A-Za-z0-9_$]*Source[A-Za-z0-9_$]*|buildContextPack(?:OverlaySourceBlocks|SourceBlock|RelationshipLines[A-Za-z0-9_$]*|RelatedSymbolLines|NodesByName|QueryPlan)|injectContextPackOverlaySourceBlocks|removeContextPackSourceBlockChunks|(?:split|join|find|append|select|merge)ContextPack[A-Za-z0-9_$]*SourceBlock[A-Za-z0-9_$]*|selectContextPackDiagnostic[A-Za-z0-9_$]*|shouldIncludeContextPackOverlaySourceBlock|formatNanoFlowContextPackAsMarkdown|escapeContextPackRegExp|matchesContextPackMarkdownSectionHeading|isContextPackMajorMarkdownHeading|normalizeContextPackInsertedSectionLines|insertContextPack(?:SectionContent|RelationshipContent|Text)|contextPack(?:RelationshipSubsectionKind|SectionEndIndex|ContentEndBeforeTrailingBlanks|RelationshipSubsectionEnd|RequestedRelationEndpointPaths|QueryRequestsOverlayRelation)|countContextPack(?:RelationshipKindSections|SourceSections|MarkdownSectionHeadings)|duplicateContextPackRelationshipKindSectionCount|trimContextPackBlankLines|splitContextPackRelationshipLineGroups|findContextPackRelationshipSubsection|normalizeContextPackFileBudget|limitContextPack(?:OverlayEvidence|MarkdownSourceFiles)|is(?:Pure|WeakExplicit)NoHitContextPack|isOpaqueNoHitProbeTerm|groupContextPackSourceEvidenceByFile|isSameContextPackSourceEvidence|classifyContextPackBaseMarkdownHeading|recordContextPackBaseSectionFilteredLine|contextPack(?:ExploreQueryFor|RawQueryTerms|Diagnostic[A-Za-z0-9_$]*|TopRanked[A-Za-z0-9_$]*|NodeMatchesQueryTerms|BaseSourceFilterRelationQueries|BaseMetadata[A-Za-z0-9_$]*|BaseTextContains(?:Lifecycle|FocusedNode)Evidence|SourceBlockPriority|SourceBlockHas[A-Za-z0-9_$]*Evidence|SourceChunkContains(?:Line|FocusedLine)|SourceEntryHas[A-Za-z0-9_$]*SymbolEvidence|SourceEvidenceNodesForOverlay|SourceSelection[A-Za-z0-9_$]*|SourceFileRank|SourceOrdering[A-Za-z0-9_$]*|RelationshipNode(?:QueryScore|Penalty)|RelatedNodeLowValuePenalty|SourceFileLowValuePenalty)|isExactRelationQueryTerm|summarizeContextPack(?:SourceOrdering|SourceSelection|MarkdownText|QueryClassification|TopRanked[A-Za-z0-9_$]*)|classifyCodegraphDedupMaintenanceQuery|extractContextPack(?:BaseRelationshipSymbols|SourceBlockFiles?|SourceBlockFile)|sortRelationshipEdgesForMarkdown|filterRelationshipEdgesForMarkdown|shouldShowContextPackRelationshipEdge|groupMarkdownRelatedNodesByFile|buildRelationshipGroupsFromMatches|markdownRelatedSymbolKey|compareRelatedGraphNodeOrder|compareGraphNode(?:SourceOrder)?|relationshipEdgeSourceOrder|mergeContextPack(?:FileScore|LineWindows|WindowRanges)|appendContextPackSourceEvidence|expandQueryTokenAliases|queryTokens|localizedContextPackQueryAliases|scorePath(?:TermMatch|SegmentCoverage)|format(?:EdgeMetadata|MatchSummary)|queryMentionsCodegraph(?:ToolingSourcePollution|DedupMaintenance)|queryExplicitlyRequestsContextPackSourcePath|isRenderableContextPackSourcePath|isLowValueContextPackSourcePath|isCodegraphDedupMaintenanceSourcePath))\b/g;
 const STRICT_NATIVE_SOURCE_EVIDENCE_REQUIRED_TERMS = [
   'strict native source evidence contract',
   'relation-only codeBlocks',
@@ -319,6 +351,7 @@ const OVERLAY_EXCLUDED_DIRS = new Set([
   'tmp',
 ]);
 const MIGRATION_FILE_SOURCE_RELATIONS = new Set([
+  'table',
   'migration-constraint',
   'migration-constraint-validation',
   'migration-index',
@@ -355,9 +388,19 @@ const REGISTERED_RELATIONS = new Set([
   'android-kotlin-object',
   'android-kotlin-override',
   'android-kotlin-property',
+  'android-kotlin-resource-reference',
+  'android-kotlin-source',
   'android-kotlin-type-reference',
   'android-manifest',
   'android-manifest-component',
+  'android-manifest-component-permission',
+  'android-manifest-intent-filter-action',
+  'android-manifest-intent-filter-category',
+  'android-manifest-intent-filter-data',
+  'android-manifest-intent-filter-value',
+  'android-manifest-permission',
+  'android-manifest-query',
+  'android-manifest-uses-permission',
   'android-resource-file',
   'android-resource-reference',
   'android-widget-provider',
@@ -559,6 +602,12 @@ function expectNumber(file, label, expected, actual) {
   }
 }
 
+function expectEveryNumber(file, label, expected, text, pattern) {
+  for (const match of text.matchAll(pattern)) {
+    expectNumber(file, label, expected, Number(match[1].replace(/,/g, '')));
+  }
+}
+
 function recordGraphError(counts, category, message) {
   const count = counts.get(category) ?? 0;
   if (count < MAX_GRAPH_ERRORS_PER_CATEGORY) {
@@ -686,6 +735,30 @@ function validateOverlayEdgeShape(edge, index, nodesById, graphErrorCounts) {
       );
     }
   }
+  if (relation === 'table') {
+    validateMigrationTableTarget(edge, label, nodesById, graphErrorCounts);
+  }
+}
+
+function validateMigrationTableTarget(edge, label, nodesById, graphErrorCounts) {
+  const source = nodesById.get(edge.source);
+  const target = nodesById.get(edge.target);
+  const sourceFilePath = normalizeOverlayFilePath(source?.filePath);
+  const targetIsMigrationTable = (
+    source?.kind === 'file'
+    && sourceFilePath.startsWith('supabase/migrations/')
+    && sourceFilePath.endsWith('.sql')
+    && target?.kind === 'variable'
+    && target?.metadata?.relation === 'table'
+    && normalizeOverlayFilePath(target?.filePath) === sourceFilePath
+  );
+  if (!targetIsMigrationTable) {
+    recordGraphError(
+      graphErrorCounts,
+      'migration-table-target',
+      `${label} relation table from ${sourceFilePath || String(edge.source)} must target a SQL table node in the same migration`,
+    );
+  }
 }
 
 function validateRegisteredRelation(relation) {
@@ -703,6 +776,13 @@ function validateOverlayEdgeMetadata(edge) {
       if (metadata[field] === undefined || metadata[field] === null || metadata[field] === '') {
         errors.push(`relation ${contract.relation} missing metadata.${field}`);
       }
+    }
+    if (Array.isArray(contract.requiredAnyMetadata) && !contract.requiredAnyMetadata.some(field => (
+      metadata[field] !== undefined && metadata[field] !== null && metadata[field] !== ''
+    ))) {
+      errors.push(
+        `relation ${contract.relation} missing one of ${contract.requiredAnyMetadata.map(field => `metadata.${field}`).join(', ')}`,
+      );
     }
   }
 
@@ -770,8 +850,6 @@ function isAbsoluteOverlayPath(filePath) {
   const normalized = normalizeOverlayFilePath(filePath);
   return path.isAbsolute(filePath) || path.posix.isAbsolute(normalized) || /^[a-z]:\//i.test(normalized);
 }
-
-
 function validateAgents(text, baseline) {
   const file = 'AGENTS.md';
   for (const [label, expected] of Object.entries(baseline)) {
@@ -808,6 +886,10 @@ function validateAdaptationDoc(text, baseline) {
   validateCodexMcpConfigContract(text, file);
   validateSingleSharedTreeFreshnessContract(text, file);
   validateLocalCodeGraphSourceSetup(text, file);
+  for (const label of PROJECT_SEMANTIC_DOC_COUNTERS) {
+    const actual = readFirstNumber(text, new RegExp(`${escapeRegex(label)}=(\\d+)`), label, file);
+    expectNumber(file, label, baseline[label], actual);
+  }
   const graphMatch = /([\d,]+)\s+graph nodes and\s+([\d,]+)\s+graph edges/.exec(text);
   if (!graphMatch) {
     errors.push(`${file} missing graph projection summary`);
@@ -900,13 +982,28 @@ function validateAdaptationDoc(text, baseline) {
     expectNumber(file, 'androidKotlinAnnotationEdges', baseline.androidKotlinAnnotationEdges, Number(androidKotlinMatch[30].replace(/,/g, '')));
   }
 
-  const androidPackagingMatch = /Android packaging\/resource graph summary:\s+([\d,]+)\s+androidManifestComponents,\s+([\d,]+)\s+androidWidgetProviders,\s+and\s+([\d,]+)\s+androidResourceReferences/.exec(text);
+  const androidPackagingMatch = /Android packaging\/resource graph summary:\s+([\d,]+)\s+androidManifestComponents,\s+([\d,]+)\s+androidManifestPermissions,\s+([\d,]+)\s+androidManifestUsesPermissionEdges,\s+([\d,]+)\s+androidManifestQueries,\s+([\d,]+)\s+androidManifestQueryEdges,\s+([\d,]+)\s+androidManifestComponentPermissions,\s+([\d,]+)\s+androidManifestComponentPermissionEdges,\s+([\d,]+)\s+androidManifestIntentFilters,\s+([\d,]+)\s+androidManifestIntentFilterActions,\s+([\d,]+)\s+androidManifestIntentFilterActionEdges,\s+([\d,]+)\s+androidManifestIntentFilterCategories,\s+([\d,]+)\s+androidManifestIntentFilterCategoryEdges,\s+([\d,]+)\s+androidManifestIntentFilterData,\s+([\d,]+)\s+androidManifestIntentFilterDataEdges,\s+([\d,]+)\s+androidWidgetProviders,\s+([\d,]+)\s+androidResourceReferences,\s+([\d,]+)\s+androidKotlinResourceReferences,\s+and\s+([\d,]+)\s+androidKotlinResourceReferenceEdges/.exec(text);
   if (!androidPackagingMatch) {
     errors.push(`${file} missing Android packaging/resource graph summary`);
   } else {
     expectNumber(file, 'androidManifestComponents', baseline.androidManifestComponents, Number(androidPackagingMatch[1].replace(/,/g, '')));
-    expectNumber(file, 'androidWidgetProviders', baseline.androidWidgetProviders, Number(androidPackagingMatch[2].replace(/,/g, '')));
-    expectNumber(file, 'androidResourceReferences', baseline.androidResourceReferences, Number(androidPackagingMatch[3].replace(/,/g, '')));
+    expectNumber(file, 'androidManifestPermissions', baseline.androidManifestPermissions, Number(androidPackagingMatch[2].replace(/,/g, '')));
+    expectNumber(file, 'androidManifestUsesPermissionEdges', baseline.androidManifestUsesPermissionEdges, Number(androidPackagingMatch[3].replace(/,/g, '')));
+    expectNumber(file, 'androidManifestQueries', baseline.androidManifestQueries, Number(androidPackagingMatch[4].replace(/,/g, '')));
+    expectNumber(file, 'androidManifestQueryEdges', baseline.androidManifestQueryEdges, Number(androidPackagingMatch[5].replace(/,/g, '')));
+    expectNumber(file, 'androidManifestComponentPermissions', baseline.androidManifestComponentPermissions, Number(androidPackagingMatch[6].replace(/,/g, '')));
+    expectNumber(file, 'androidManifestComponentPermissionEdges', baseline.androidManifestComponentPermissionEdges, Number(androidPackagingMatch[7].replace(/,/g, '')));
+    expectNumber(file, 'androidManifestIntentFilters', baseline.androidManifestIntentFilters, Number(androidPackagingMatch[8].replace(/,/g, '')));
+    expectNumber(file, 'androidManifestIntentFilterActions', baseline.androidManifestIntentFilterActions, Number(androidPackagingMatch[9].replace(/,/g, '')));
+    expectNumber(file, 'androidManifestIntentFilterActionEdges', baseline.androidManifestIntentFilterActionEdges, Number(androidPackagingMatch[10].replace(/,/g, '')));
+    expectNumber(file, 'androidManifestIntentFilterCategories', baseline.androidManifestIntentFilterCategories, Number(androidPackagingMatch[11].replace(/,/g, '')));
+    expectNumber(file, 'androidManifestIntentFilterCategoryEdges', baseline.androidManifestIntentFilterCategoryEdges, Number(androidPackagingMatch[12].replace(/,/g, '')));
+    expectNumber(file, 'androidManifestIntentFilterData', baseline.androidManifestIntentFilterData, Number(androidPackagingMatch[13].replace(/,/g, '')));
+    expectNumber(file, 'androidManifestIntentFilterDataEdges', baseline.androidManifestIntentFilterDataEdges, Number(androidPackagingMatch[14].replace(/,/g, '')));
+    expectNumber(file, 'androidWidgetProviders', baseline.androidWidgetProviders, Number(androidPackagingMatch[15].replace(/,/g, '')));
+    expectNumber(file, 'androidResourceReferences', baseline.androidResourceReferences, Number(androidPackagingMatch[16].replace(/,/g, '')));
+    expectNumber(file, 'androidKotlinResourceReferences', baseline.androidKotlinResourceReferences, Number(androidPackagingMatch[17].replace(/,/g, '')));
+    expectNumber(file, 'androidKotlinResourceReferenceEdges', baseline.androidKotlinResourceReferenceEdges, Number(androidPackagingMatch[18].replace(/,/g, '')));
   }
 
   const bindingMatch = /records\s+([\d,]+)\s+template\s+bindings:\s+([\d,]+)\s+property,\s+([\d,]+)\s+event,\s+([\d,]+)\s+interpolation,\s+([\d,]+)\s+model,\s+([\d,]+)\s+control-flow,\s+and\s+([\d,]+)\s+structural directive bindings/.exec(text);
@@ -939,6 +1036,13 @@ function validateAdaptationDoc(text, baseline) {
     expectNumber(file, 'styleUrlEdges', baseline.styleUrlEdges, Number(resourceMatch[2].replace(/,/g, '')));
   }
 
+  const hardRuleAnchorMatch = /([\d,]+)\s+AGENTS hard-rule anchors/.exec(text);
+  if (!hardRuleAnchorMatch) {
+    errors.push(`${file} missing AGENTS hard-rule anchor summary`);
+  } else {
+    expectNumber(file, 'hardRules', baseline.hardRules, Number(hardRuleAnchorMatch[1].replace(/,/g, '')));
+  }
+
   const agentMatch = /([\d,]+)\s+hard-rule keyword edges and\s+([\d,]+)\s+hard-rule implementation edges/.exec(text);
   if (!agentMatch) {
     errors.push(`${file} missing AGENTS hard-rule summary`);
@@ -958,6 +1062,13 @@ function validateAdaptationDoc(text, baseline) {
     expectNumber(file, 'hardRuleImplementationEdges', baseline.hardRuleImplementationEdges, Number(agentNodeMatch[4].replace(/,/g, '')));
     expectNumber(file, 'hardRuleImplementationTargets', baseline.hardRuleImplementationTargets, Number(agentNodeMatch[5].replace(/,/g, '')));
   }
+
+  expectEveryNumber(file, 'hardRuleKeywordNodes', baseline.hardRuleKeywordNodes, text, /([\d,]+)\s+hard-rule keyword nodes/g);
+  expectEveryNumber(file, 'hardRuleKeywordEdges', baseline.hardRuleKeywordEdges, text, /([\d,]+)\s+hard-rule keyword(?: reference)? edges/g);
+  expectEveryNumber(file, 'hardRuleKeywordMappingEdges', baseline.hardRuleKeywordMappingEdges, text, /([\d,]+)\s+hard-rule keyword mapping edges/g);
+  expectEveryNumber(file, 'hardRuleImplementationEdges', baseline.hardRuleImplementationEdges, text, /([\d,]+)\s+hard-rule implementation edges/g);
+  expectEveryNumber(file, 'hardRuleImplementationTargets', baseline.hardRuleImplementationTargets, text, /([\d,]+)\s+hard-rule implementation targets/g);
+  expectEveryNumber(file, 'hardRuleImplementationTargets', baseline.hardRuleImplementationTargets, text, /([\d,]+)\s+callable symbols/g);
 
   const syncMatch = /([\d,]+)\s+sync-rule anchors,\s+([\d,]+)\s+sync-body keyword edges,\s+([\d,]+)\s+sync-config keyword edges,\s+and\s+([\d,]+)\s+config-source edges/.exec(text);
   if (!syncMatch) {
@@ -1404,6 +1515,8 @@ function validateCodexMcpConfigContract(text, file) {
   const required = [
     'Codex',
     'C:\\Users\\MI\\.codex\\config.toml',
+    'D:\\Code\\dde\\.codex\\config.toml',
+    'overrides',
     'codegraph:adapter:doctor',
     'adapter-first',
     'do not read or fall back',
@@ -1417,6 +1530,13 @@ function validateCodexMcpConfigContract(text, file) {
       'mcpConfig: source=codex',
       'NANOFLOW_CODEGRAPH_CODEX_CONFIG',
     );
+  }
+  const staleUserPrimaryPatterns = [
+    /Codex sessions use C:\\Users\\MI\\\.codex\\config\.toml as the current MCP source/i,
+    /Active wrapper, CodeGraph target, and MCP environment changes belong in C:\\Users\\MI\\\.codex\\config\.toml/i,
+  ];
+  if (staleUserPrimaryPatterns.some(pattern => pattern.test(text))) {
+    errors.push(`${file} conflicting Codex MCP config scope: D:\\Code\\dde\\.codex\\config.toml overrides C:\\Users\\MI\\.codex\\config.toml for this repository`);
   }
   const missing = required.filter(term => !text.includes(term));
   const forbidden = [];
@@ -1448,7 +1568,6 @@ function validateStrictNativeSourceEvidenceContract(text, file) {
     errors.push(`${file} missing strict native source evidence contract: ${missing.join(', ')}`);
   }
 }
-
 function validateStrictNativeOutputOrderContract(text, file) {
   const required = [
     'strict native output order',
@@ -1462,7 +1581,6 @@ function validateStrictNativeOutputOrderContract(text, file) {
     errors.push(`${file} missing strict native output order contract: ${missing.join(', ')}`);
   }
 }
-
 function validateStrictNativeObjectProjectionContract(text, file) {
   const required = [
     'strict native object projection',
@@ -1476,7 +1594,6 @@ function validateStrictNativeObjectProjectionContract(text, file) {
     errors.push(`${file} missing strict native object projection contract: ${missing.join(', ')}`);
   }
 }
-
 function validateAdapterGateContract(text, file) {
   const required = [
     'codegraph:adapter:gate',
@@ -1504,12 +1621,16 @@ function validateAdapterGateContract(text, file) {
     'bounded captured output',
     'descendant',
   ];
+  if (getPackageScripts()['codegraph:overlay:stable']) required.push(
+    'codegraph:overlay:stable', 'codegraph:overlay:docs:assert-clean', 'codegraph:overlay:docs:recover', 'stable overlay transaction',
+    'exactly two builds', 'source manifest path/size/SHA-256', 'generatedAt', 'node.updatedAt',
+    'numeric-token-only', 'overlay publication is atomic separately', 'recoverable two-document transaction',
+  );
   const missing = required.filter(term => !text.includes(term));
   if (missing.length > 0) {
     errors.push(`${file} missing adapter gate contract: ${missing.join(', ')}`);
   }
 }
-
 function validateAdapterFirstFallbackContract(text, file) {
   const required = [
     'adapter-first',
@@ -1520,7 +1641,7 @@ function validateAdapterFirstFallbackContract(text, file) {
     'codegraph:overlay:query',
     '--skip-refresh',
     'final native CodeGraph CLI',
-    '@colbymchenry/codegraph@1.2.0',
+    '@colbymchenry/codegraph@1.5.0',
     'only a locator',
   ];
   const missing = required.filter(term => !text.includes(term));
@@ -1532,7 +1653,7 @@ function validateAdapterFirstFallbackContract(text, file) {
 function validateUpstreamCodeGraphBoundaryContract(text, file) {
   const required = [
     'upstream CodeGraph fixed version',
-    '@colbymchenry/codegraph@1.2.0',
+    '@colbymchenry/codegraph@1.5.0',
     '--codegraph-target @colbymchenry/codegraph@<new-version>',
     'delegates generic TypeScript symbol/import/export/call/impact',
     'native Markdown/JSON formatter section order',
@@ -1603,8 +1724,8 @@ function validateStructuredDedupContract() {
   if (manifest.schemaVersion !== 1) {
     errors.push(`${DEDUP_CONTRACT_MANIFEST_PATH} schemaVersion must be 1`);
   }
-  if (manifest.upstreamCodeGraphVersion !== '@colbymchenry/codegraph@1.2.0') {
-    errors.push(`${DEDUP_CONTRACT_MANIFEST_PATH} upstreamCodeGraphVersion must be @colbymchenry/codegraph@1.2.0`);
+  if (manifest.upstreamCodeGraphVersion !== '@colbymchenry/codegraph@1.5.0') {
+    errors.push(`${DEDUP_CONTRACT_MANIFEST_PATH} upstreamCodeGraphVersion must be @colbymchenry/codegraph@1.5.0`);
   }
   if (manifest.fixedVersionUpgradeProbe !== '--codegraph-target @colbymchenry/codegraph@<new-version>') {
     errors.push(`${DEDUP_CONTRACT_MANIFEST_PATH} fixedVersionUpgradeProbe must use --codegraph-target @colbymchenry/codegraph@<new-version>`);
@@ -1619,18 +1740,14 @@ function validateStructuredDedupContract() {
     return;
   }
 
-  const hotspotsByName = new Map(hotspots.map(entry => [entry?.name, entry]));
-  const requiredHotspotKeys = new Set(
-    DEDUP_CONTRACT_REQUIRED_HOTSPOTS.map(([name, sourcePath]) => `${name}\0${sourcePath}`),
-  );
-  for (const [name, sourcePath] of DEDUP_CONTRACT_REQUIRED_HOTSPOTS) {
-    const entry = hotspotsByName.get(name);
-    if (!entry) {
-      errors.push(`${DEDUP_CONTRACT_MANIFEST_PATH} missing de-duplication hotspot ${name}`);
-      continue;
-    }
-    validateDedupManifestHotspot(entry, name, sourcePath);
-  }
+  const requiredHotspots = [
+    ...DEDUP_CONTRACT_REQUIRED_HOTSPOTS,
+    ...DEDUP_CONTRACT_SOURCE_CONDITIONAL_HOTSPOTS
+      .filter(([, sourcePath, sourceSymbol]) => dedupSourceDeclaresSymbol(sourcePath, sourceSymbol))
+      .map(([name, sourcePath]) => [name, sourcePath]),
+  ];
+  const requiredSourcePathsByName = new Map(requiredHotspots);
+  const hotspotNameCounts = new Map();
   for (let index = 0; index < hotspots.length; index += 1) {
     const entry = hotspots[index];
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
@@ -1638,21 +1755,35 @@ function validateStructuredDedupContract() {
       continue;
     }
     const name = typeof entry.name === 'string' ? entry.name : '';
-    const sourcePath = typeof entry.sourcePath === 'string' ? entry.sourcePath : '';
     if (!name.trim()) {
       errors.push(`${DEDUP_CONTRACT_MANIFEST_PATH} hotspot[${index}] name must be a non-empty string`);
       continue;
     }
+    hotspotNameCounts.set(name, (hotspotNameCounts.get(name) ?? 0) + 1);
+    const sourcePath = typeof entry.sourcePath === 'string' ? entry.sourcePath : '';
     if (!sourcePath.trim()) {
       errors.push(`${DEDUP_CONTRACT_MANIFEST_PATH} hotspot ${name} sourcePath must be a non-empty string`);
       continue;
     }
-    if (requiredHotspotKeys.has(`${name}\0${sourcePath}`)) {
-      continue;
-    }
-    validateDedupManifestHotspot(entry, name, sourcePath);
+    validateDedupManifestHotspot(entry, name, requiredSourcePathsByName.get(name) ?? sourcePath);
   }
-  validateAndroidKotlinDedupManifestCoverage(hotspots);
+  for (const name of [...hotspotNameCounts.keys()].sort()) {
+    if (hotspotNameCounts.get(name) > 1) {
+      errors.push(`${DEDUP_CONTRACT_MANIFEST_PATH} duplicate hotspot name ${name}`);
+    }
+  }
+  for (const [name] of requiredHotspots) {
+    if (!hotspotNameCounts.has(name)) {
+      errors.push(`${DEDUP_CONTRACT_MANIFEST_PATH} missing de-duplication hotspot ${name}`);
+    }
+  }
+  validateRequiredDedupManifestChildOwnership(hotspots);
+  validateDiscoveredDedupManifestCoverage(
+    'Android/Kotlin',
+    DEDUP_CONTRACT_ANDROID_KOTLIN_SOURCE_PATH,
+    DEDUP_CONTRACT_ANDROID_KOTLIN_DISCOVERY_PATTERN,
+    hotspots,
+  );
   validateDiscoveredDedupManifestCoverage(
     'TypeScript',
     DEDUP_CONTRACT_TYPESCRIPT_SOURCE_PATH,
@@ -1671,6 +1802,15 @@ function validateStructuredDedupContract() {
     DEDUP_CONTRACT_CONTEXT_PACK_DISCOVERY_PATTERN,
     hotspots,
   );
+}
+
+function dedupSourceDeclaresSymbol(sourcePath, symbol) {
+  try {
+    const escapedSymbol = symbol.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`\\b(?:function|const|let|var)\\s+${escapedSymbol}\\b`).test(readText(sourcePath));
+  } catch {
+    return false;
+  }
 }
 
 function validateDedupManifestCapabilities(manifest) {
@@ -1808,9 +1948,38 @@ function validateDedupManifestBoundaryFields(prefix, entry) {
   if (!DEDUP_CONTRACT_ALLOWED_EXTENSION_FIELD_POLICIES.has(entry.extensionFieldPolicy)) {
     errors.push(`${prefix} extensionFieldPolicy must be one of ${[...DEDUP_CONTRACT_ALLOWED_EXTENSION_FIELD_POLICIES].join(', ')}`);
   }
+  validateStrictNativeJsonFormatterBoundary(prefix, entry);
   validateStrictNativeMarkdownFormatterBoundary(prefix, entry);
   validateAugmentedMarkdownFormatterBoundary(prefix, entry);
   validateQueryRankingAndResultSelectionBoundary(prefix, entry);
+}
+
+function validateStrictNativeJsonFormatterBoundary(prefix, entry) {
+  const outputSurface = arrayOfStrings(entry.outputSurface);
+  if (entry.name !== 'toNativeJsonFormatterResponse()'
+    && (entry.extensionFieldPolicy !== 'strict-native' || !outputSurface.includes('nativeJson'))) {
+    return;
+  }
+
+  const sourceSymbols = new Set(arrayOfStrings(entry.sourceSymbols).map(normalizeDedupSymbolName));
+  const coveredChildSymbols = new Set(arrayOfStrings(entry.coveredChildSymbols).map(normalizeDedupSymbolName));
+  if (entry.duplicateBoundaryRole !== 'native-json-formatter') {
+    errors.push(`${prefix} strict-native nativeJson hotspot must use duplicateBoundaryRole native-json-formatter`);
+  }
+  if (entry.name !== 'toNativeJsonFormatterResponse()') {
+    errors.push(`${prefix} strict-native nativeJson hotspot must be named toNativeJsonFormatterResponse()`);
+  }
+  if (!sourceSymbols.has('toNativeJsonFormatterResponse')) {
+    errors.push(`${prefix} strict-native nativeJson sourceSymbols must include toNativeJsonFormatterResponse`);
+  }
+  if (outputSurface.length !== 1 || outputSurface[0] !== 'nativeJson') {
+    errors.push(`${prefix} strict-native nativeJson outputSurface must include only nativeJson`);
+  }
+  for (const symbol of [...sourceSymbols, ...coveredChildSymbols]) {
+    if (isStrictNativeMarkdownSourceSymbol(symbol) || symbol === 'formatNativeMarkdown') {
+      errors.push(`${prefix} strict-native nativeJson formatter must not include Markdown helper ${symbol}`);
+    }
+  }
 }
 
 function validateStrictNativeMarkdownFormatterBoundary(prefix, entry) {
@@ -1833,6 +2002,11 @@ function validateStrictNativeMarkdownFormatterBoundary(prefix, entry) {
     }
     if (coveredChildSymbols.has(symbol)) {
       errors.push(`${prefix} strict-native nativeMarkdown coveredChildSymbols must not include augmented formatter ${symbol}`);
+    }
+  }
+  for (const symbol of [...sourceSymbols, ...coveredChildSymbols]) {
+    if (isNativeJsonFormatterSourceSymbol(symbol)) {
+      errors.push(`${prefix} strict-native nativeMarkdown formatter must not include native JSON helper ${symbol}`);
     }
   }
   if (outputSurface.includes('augmentedMarkdown')) {
@@ -1928,6 +2102,12 @@ function isStrictNativeMarkdownSourceSymbol(symbol) {
     || symbol.startsWith('compareStrictNative')
     || symbol.startsWith('orderNativeProjection')
     || symbol.startsWith('strictNative');
+}
+
+function isNativeJsonFormatterSourceSymbol(symbol) {
+  return symbol === 'toNativeJsonFormatterResponse'
+    || symbol.startsWith('serializeNativeJson')
+    || symbol.startsWith('nativeJsonEdge');
 }
 
 function validateQueryRankingAndResultSelectionBoundary(prefix, entry) {
@@ -2157,36 +2337,6 @@ function extractFunctionBodyAtDeclaration(sourceText, declaration) {
   return null;
 }
 
-function validateAndroidKotlinDedupManifestCoverage(hotspots) {
-  const absolutePath = path.join(root, DEDUP_CONTRACT_ANDROID_KOTLIN_SOURCE_PATH);
-  if (!fs.existsSync(absolutePath)) {
-    errors.push(`${DEDUP_CONTRACT_MANIFEST_PATH} Android/Kotlin de-dup sourcePath does not exist: ${DEDUP_CONTRACT_ANDROID_KOTLIN_SOURCE_PATH}`);
-    return;
-  }
-  const sourceText = fs.readFileSync(absolutePath, 'utf8');
-  const discovered = new Set(
-    [...sourceText.matchAll(DEDUP_CONTRACT_ANDROID_KOTLIN_DISCOVERY_PATTERN)]
-      .map(match => match[1])
-      .filter(Boolean),
-  );
-  const registered = new Set();
-  for (const entry of hotspots) {
-    if (entry?.sourcePath !== DEDUP_CONTRACT_ANDROID_KOTLIN_SOURCE_PATH) continue;
-    for (const symbol of [
-      entry.name,
-      ...arrayOfStrings(entry.sourceSymbols),
-      ...arrayOfStrings(entry.coveredChildSymbols),
-    ]) {
-      const normalized = normalizeDedupSymbolName(symbol);
-      if (normalized) registered.add(normalized);
-    }
-  }
-  const missing = [...discovered].filter(symbol => !registered.has(symbol)).sort();
-  if (missing.length > 0) {
-    errors.push(`${DEDUP_CONTRACT_MANIFEST_PATH} missing Android/Kotlin de-duplication sourceSymbols or coveredChildSymbols: ${missing.join(', ')}`);
-  }
-}
-
 function validateDiscoveredDedupManifestCoverage(label, sourcePath, discoveryPattern, hotspots) {
   const absolutePath = path.join(root, sourcePath);
   if (!fs.existsSync(absolutePath)) {
@@ -2199,22 +2349,43 @@ function validateDiscoveredDedupManifestCoverage(label, sourcePath, discoveryPat
       .map(match => match[1])
       .filter(Boolean),
   );
-  const registered = new Set();
-  for (const entry of hotspots) {
-    if (entry?.sourcePath !== sourcePath) continue;
-    for (const symbol of [
-      entry.name,
-      ...arrayOfStrings(entry.sourceSymbols),
-      ...arrayOfStrings(entry.coveredChildSymbols),
-    ]) {
-      const normalized = normalizeDedupSymbolName(symbol);
-      if (normalized) registered.add(normalized);
-    }
-  }
+  const registered = new Set(
+    hotspots
+      .filter(entry => entry?.sourcePath === sourcePath)
+      .flatMap(dedupManifestSymbols)
+      .filter(Boolean),
+  );
   const missing = [...discovered].filter(symbol => !registered.has(symbol)).sort();
   if (missing.length > 0) {
     errors.push(`${DEDUP_CONTRACT_MANIFEST_PATH} missing ${label} de-duplication sourceSymbols or coveredChildSymbols: ${missing.join(', ')}`);
   }
+}
+
+function validateRequiredDedupManifestChildOwnership(hotspots) {
+  for (const [label, owner, sourcePath, requiredChildren] of DEDUP_CONTRACT_REQUIRED_COVERED_CHILD_OWNERS) {
+    const allSymbols = hotspots
+      .filter(entry => sourcePath === null || entry?.sourcePath === sourcePath)
+      .flatMap(dedupManifestSymbols);
+    const ownerCoveredSymbols = hotspots
+      .filter(entry => entry?.name === owner && (sourcePath === null || entry?.sourcePath === sourcePath))
+      .flatMap(entry => arrayOfStrings(entry?.coveredChildSymbols).map(normalizeDedupSymbolName));
+    const ownershipScope = sourcePath === null ? 'and nowhere else' : `for ${sourcePath} and nowhere else in that sourcePath`;
+    for (const symbol of requiredChildren) {
+      const ownerCount = ownerCoveredSymbols.filter(candidate => candidate === symbol).length;
+      const totalCount = allSymbols.filter(candidate => candidate === symbol).length;
+      if (ownerCount !== 1 || totalCount !== 1) {
+        errors.push(`required ${label} covered child ${symbol} must occur exactly once in ${owner}.coveredChildSymbols ${ownershipScope} (owner=${ownerCount}, total=${totalCount})`);
+      }
+    }
+  }
+}
+
+function dedupManifestSymbols(entry) {
+  return [
+    entry?.name,
+    ...arrayOfStrings(entry?.sourceSymbols),
+    ...arrayOfStrings(entry?.coveredChildSymbols),
+  ].map(normalizeDedupSymbolName);
 }
 
 function arrayOfStrings(values) {
@@ -2616,6 +2787,7 @@ function escapeRegex(value) {
   return String(value).replace(/[|\\{}()[\]^$+?.]/g, '\\$&');
 }
 
+try { assertDocsTransactionClean(root); } catch (error) { errors.push(error.message); }
 const overlay = readJson('.codegraph/nanoflow-overlay.json');
 const baseline = buildBaseline(overlay);
 validateOverlayGraphShape(overlay);

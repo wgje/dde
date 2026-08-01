@@ -3,30 +3,26 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import overlayBaseline from './lib/codegraph-overlay-baseline.cjs';
+import sourcePolicy from './lib/codegraph-source-policy.cjs';
+
+const { buildBaseline } = overlayBaseline;
+const { classifySourcePath, isSourceDirectoryExcluded } = sourcePolicy;
 
 const DEFAULT_OVERLAY = path.join('.codegraph', 'nanoflow-overlay.json');
+const OVERLAY_STALE_SKIP_REFRESH = 'overlay-stale-skip-refresh';
+const ANDROID_IMPORT_SOURCES = new Set(['local', 'native']);
 const SOURCE_BLOCK_FILE_LIMIT = 6;
 const MAX_MARKDOWN_OUTPUT_CHARS = 25_000;
 const NATIVE_CONTEXT_CODE_BLOCK_LIMIT = 5;
 const NATIVE_CONTEXT_CODE_BLOCK_SIZE = 1_500;
-const OVERLAY_REFRESH_EXCLUDED_DIRS = new Set([
-  '.angular',
-  '.cache',
-  '.codegraph',
-  '.git',
-  '.tmp',
-  '.worktrees',
-  'build',
-  'coverage',
-  'dist',
-  'dist-ssr',
-  'node_modules',
-  'playwright-report',
-  'test-results',
-  'tmp',
+const CONTEXT7_RELATION_CLOSURE = new Set([
+  'context7-category-doc',
+  'context7-retrieval-primary',
+  'context7-retrieval-secondary',
+  'context7-source-map-doc',
+  'context7-source-map-source',
 ]);
-const OVERLAY_RELEVANT_FILE_PATTERN =
-  /(?:^AGENTS\.md$|^package\.json$|\.(?:ts|tsx|mts|cts|js|jsx|mjs|cjs|html|css|scss|sass|less|sql|md|json)$)/i;
 const ANGULAR_SEMANTIC_API_QUERY_TERMS = new Set([
   'computed',
   'contentchild',
@@ -230,16 +226,47 @@ const args = profilePhase('parseArgs', () => parseArgs(process.argv.slice(2)));
 const root = path.resolve(args.root ?? process.cwd());
 const overlayPath = path.resolve(root, args.overlay ?? DEFAULT_OVERLAY);
 writeProfileMeta(root, overlayPath, args);
-const overlay = profilePhase('loadOverlay', () => loadOverlay(root, overlayPath));
+const overlay = profilePhase('loadOverlay', () => loadOverlay(root, overlayPath, args.androidImportSource));
 const matches = profilePhase('queryOverlay', () => queryOverlay(overlay, args.query, args.limit));
 const graphSelection = profilePhase('selectGraphResults', () => selectGraphResults(overlay, args.query, matches, args.limit));
-const graphNodes = rankNodesForQuery(graphSelection.nodes, args.query);
-const relationshipGroups = profilePhase('buildRelationshipGroups', () => buildRelationshipGroups(graphSelection.edges));
+const rankedGraphNodes = prioritizeContext7RetrievalNodes(
+  rankNodesForQuery(graphSelection.nodes, args.query),
+  graphSelection.edges,
+  args.query,
+);
+const graphNodes = fillGraphNodeBudgetWithRelevantEndpoints(
+  rankedGraphNodes.slice(0, args.limit),
+  graphSelection.edges,
+  overlay.graph?.nodes ?? [],
+  args.query,
+  args.limit,
+);
+const graphNodeIds = new Set(graphNodes.map(node => node.id));
+const preserveExactRelationSelection = exactMetadataQueriesFromEdges(
+  graphSelection.edges,
+  args.query,
+).length > 0;
+const closedGraphEdges = closeGraphEdgesOverSelectedNodes(
+  graphSelection.edges,
+  graphNodes,
+  overlay.graph?.nodes ?? [],
+);
+const graphEdges = preserveExactRelationSelection
+  ? graphSelection.edges
+    .filter(edge => graphNodeIds.has(edge.source) && graphNodeIds.has(edge.target))
+    .slice(0, args.limit)
+  : rankGraphEdgesForQuery(closedGraphEdges, graphNodes, args.query).slice(0, args.limit);
+const relationshipGroups = profilePhase('buildRelationshipGroups', () => buildRelationshipGroups(graphEdges));
 const coverage = profilePhase('summarizeOverlayCoverage', () => summarizeOverlayCoverage(overlay));
-const nativeEdges = profilePhase('toNativeEdges', () => graphSelection.edges.map(toNativeEdge));
+const nativeEdges = profilePhase('toNativeEdges', () => graphEdges.map(toNativeEdge));
+const blastRadius = buildBlastRadiusEntries(
+  graphNodes,
+  graphSelection.edges,
+  overlay.graph?.nodes ?? graphSelection.nodes,
+);
 const relatedFiles = orderRelatedFilesForQuery(unique(graphNodes
   .map(node => node.filePath)
-  .filter(Boolean)), args.query);
+  .filter(Boolean)), args.query).slice(0, args.limit);
 
 if (args.contextJson) {
   const contextRelationshipGroups = capRelationshipGroups(relationshipGroups, 20);
@@ -254,16 +281,14 @@ if (args.contextJson) {
     relatedFiles,
     stats: {
       nodeCount: graphNodes.length,
-      edgeCount: graphSelection.edges.length,
+      edgeCount: graphEdges.length,
       fileCount: relatedFiles.length,
     },
     relationshipGroups: contextRelationshipGroups,
-    blastRadius: buildBlastRadiusEntries(graphNodes, graphSelection.edges),
+    blastRadius,
     coverage,
   };
-  profilePhase('writeContextJson', () => {
-    process.stdout.write(`${JSON.stringify(response, null, 2)}\n`);
-  });
+  writeFreshOverlayOutput(root, overlayPath, 'writeContextJson', `${JSON.stringify(response, null, 2)}\n`);
 } else {
   const outputBudget = getExploreOutputBudget(coverage.typescriptFiles ?? graphNodes.length);
   const sourceBlocks = profilePhase('buildSourceBlocks', () => buildSourceBlocks(
@@ -271,17 +296,17 @@ if (args.contextJson) {
     graphNodes,
     outputBudget,
     args.query,
-    graphSelection.edges,
-  ));
+    graphEdges,
+  )).slice(0, args.limit);
   const shownSourceFiles = new Set(sourceBlocks.map(block => block.filePath));
-  const entryPoints = selectEntryPoints(graphNodes, matches, args.limit, args.query, graphSelection.edges);
+  const entryPoints = selectEntryPoints(graphNodes, matches, args.limit, args.query, graphEdges);
   const codeBlocks = profilePhase('buildNativeCodeBlocks', () => buildNativeCodeBlocks(
     root,
     graphNodes,
     entryPoints,
     args.query,
-    graphSelection.edges,
-  ));
+    graphEdges,
+  )).slice(0, args.limit);
   const response = {
   query: args.query,
   summary: formatSummary(graphNodes, relatedFiles),
@@ -301,9 +326,9 @@ if (args.contextJson) {
     codeBlockCount: codeBlocks.length,
     totalCodeSize: codeBlocks.reduce((total, block) => total + block.content.length, 0),
   },
-  displayEdges: graphSelection.edges,
+  displayEdges: graphEdges,
   relationshipGroups,
-  blastRadius: buildBlastRadiusEntries(graphNodes, graphSelection.edges),
+  blastRadius,
   notShown: buildNotShownEntries(graphNodes, shownSourceFiles),
   coverage,
   };
@@ -315,15 +340,10 @@ if (args.contextJson) {
     : '';
   const outputResponse = args.nativeJson ? toNativeJsonFormatterResponse(response) : response;
 
-  if (args.json) {
-    profilePhase('writeJson', () => {
-      process.stdout.write(`${JSON.stringify(outputResponse, null, 2)}\n`);
-    });
-  } else {
-    profilePhase('writeMarkdown', () => {
-      process.stdout.write(`${args.nativeMarkdown ? nativeMarkdown : response.markdown}\n`);
-    });
-  }
+  const outputText = args.json
+    ? `${JSON.stringify(outputResponse, null, 2)}\n`
+    : `${args.nativeMarkdown ? nativeMarkdown : response.markdown}\n`;
+  writeFreshOverlayOutput(root, overlayPath, args.json ? 'writeJson' : 'writeMarkdown', outputText);
 }
 
 function parseArgs(rawArgs) {
@@ -336,6 +356,7 @@ function parseArgs(rawArgs) {
     contextJson: false,
     nativeJson: false,
     nativeMarkdown: false,
+    androidImportSource: undefined,
     skipRefresh: process.env.NANOFLOW_OVERLAY_SKIP_REFRESH === '1',
   };
 
@@ -358,6 +379,15 @@ function parseArgs(rawArgs) {
     }
     if (arg === '--limit') {
       parsed.limit = parsePositiveIntegerArg(requireValue(rawArgs, index, arg), arg);
+      index += 1;
+      continue;
+    }
+    if (arg === '--android-import-source') {
+      const source = requireValue(rawArgs, index, arg);
+      if (!ANDROID_IMPORT_SOURCES.has(source)) {
+        throw new Error(`Invalid value for ${arg}: ${source}`);
+      }
+      parsed.androidImportSource = source;
       index += 1;
       continue;
     }
@@ -444,6 +474,7 @@ function printHelp() {
   process.stdout.write(`  --root <path>       Project root. Defaults to cwd.\n`);
   process.stdout.write(`  --overlay <path>    Overlay path relative to root. Defaults to ${DEFAULT_OVERLAY}.\n`);
   process.stdout.write(`  --limit <number>    Maximum matches. Defaults to 20.\n`);
+  process.stdout.write(`  --android-import-source <local|native>  Forward an explicit source when regenerating the overlay.\n`);
   process.stdout.write(`  --json              Print machine-readable JSON.\n`);
   process.stdout.write(`  --context-json      Print compact internal JSON for MCP context packs; mutually exclusive with --native-json.\n`);
   process.stdout.write(`  --native-json       Print the strict native CodeGraph JSON formatter projection; mutually exclusive with --context-json.\n`);
@@ -492,22 +523,23 @@ function writeProfileMeta(projectRoot, filePath, parsedArgs) {
   })}\n`);
 }
 
-function loadOverlay(projectRoot, filePath) {
+function loadOverlay(projectRoot, filePath, androidImportSource) {
   const fileExists = profilePhase('checkOverlayFile', () => fs.existsSync(filePath));
   if (!fileExists) {
-    ensureOverlay(projectRoot, 'missing-file');
+    ensureOverlay(projectRoot, 'missing-file', androidImportSource);
+  }
+
+  const stale = checkOverlayFreshness(projectRoot, filePath);
+  if (stale && args.skipRefresh) {
+    failOverlayStaleSkipRefresh();
+  }
+  if (stale) {
+    ensureOverlay(projectRoot, 'stale-source', androidImportSource);
   }
 
   let overlay = readOverlayJson(filePath);
   if (!Array.isArray(overlay.graph?.nodes)) {
-    ensureOverlay(projectRoot, 'missing-graph');
-    overlay = readOverlayJson(filePath);
-  }
-
-  const shouldRefresh = !args.skipRefresh
-    && profilePhase('checkOverlayFreshness', () => isOverlayStale(projectRoot, filePath));
-  if (shouldRefresh) {
-    ensureOverlay(projectRoot, 'stale-source');
+    ensureOverlay(projectRoot, 'missing-graph', androidImportSource);
     overlay = readOverlayJson(filePath);
   }
 
@@ -530,7 +562,23 @@ function isOverlayStale(projectRoot, filePath) {
   return hasNewerOverlayRelevantFile(projectRoot, overlayMtimeMs);
 }
 
-function hasNewerOverlayRelevantFile(directory, overlayMtimeMs) {
+function checkOverlayFreshness(projectRoot, filePath) {
+  return profilePhase('checkOverlayFreshness', () => isOverlayStale(projectRoot, filePath));
+}
+
+function writeFreshOverlayOutput(projectRoot, filePath, phase, outputText) {
+  if (checkOverlayFreshness(projectRoot, filePath)) {
+    failOverlayStaleSkipRefresh();
+  }
+  profilePhase(phase, () => process.stdout.write(outputText));
+}
+
+function failOverlayStaleSkipRefresh() {
+  fs.writeSync(process.stderr.fd, `${OVERLAY_STALE_SKIP_REFRESH}\n`);
+  process.exit(2);
+}
+
+function hasNewerOverlayRelevantFile(projectRoot, overlayMtimeMs, directory = projectRoot) {
   let entries;
   try {
     entries = fs.readdirSync(directory, { withFileTypes: true });
@@ -540,15 +588,16 @@ function hasNewerOverlayRelevantFile(directory, overlayMtimeMs) {
 
   for (const entry of entries) {
     const entryPath = path.join(directory, entry.name);
+    const relativePath = path.relative(projectRoot, entryPath).replace(/\\/g, '/');
     if (entry.isDirectory()) {
-      if (!OVERLAY_REFRESH_EXCLUDED_DIRS.has(entry.name)
-        && hasNewerOverlayRelevantFile(entryPath, overlayMtimeMs)) {
+      if (!isSourceDirectoryExcluded(relativePath)
+        && hasNewerOverlayRelevantFile(projectRoot, overlayMtimeMs, entryPath)) {
         return true;
       }
       continue;
     }
 
-    if (!entry.isFile() || !OVERLAY_RELEVANT_FILE_PATTERN.test(entry.name)) {
+    if (!entry.isFile() || classifySourcePath(relativePath) === null) {
       continue;
     }
 
@@ -564,9 +613,13 @@ function hasNewerOverlayRelevantFile(directory, overlayMtimeMs) {
   return false;
 }
 
-function ensureOverlay(projectRoot, reason) {
+function ensureOverlay(projectRoot, reason, androidImportSource) {
   const generator = path.join(scriptDir, 'generate-codegraph-nanoflow-overlay.mjs');
-  const result = profilePhase(`ensureOverlay:${reason}`, () => spawnSync(process.execPath, [generator, '--root', projectRoot], {
+  const generatorArgs = [generator, '--root', projectRoot];
+  if (androidImportSource !== undefined) {
+    generatorArgs.push('--android-import-source', androidImportSource);
+  }
+  const result = profilePhase(`ensureOverlay:${reason}`, () => spawnSync(process.execPath, generatorArgs, {
     cwd: projectRoot,
     encoding: 'utf8',
     windowsHide: true,
@@ -603,10 +656,24 @@ function queryOverlay(overlay, rawQuery, limit) {
     }
   }
 
-  return [...scoredByDisplayKey.values()]
-    .sort(compareCandidateRank)
+  const rankedCandidates = [...scoredByDisplayKey.values()].sort(compareCandidateRank);
+  return seedContext7RetrievalRouteCandidate(rankedCandidates, queryTerms)
     .slice(0, limit)
     .map(({ highValueRank: _highValueRank, explicitRank: _explicitRank, ...candidate }) => candidate);
+}
+
+function seedContext7RetrievalRouteCandidate(candidates, queryTerms) {
+  if (queryTerms.length <= 1
+    || !context7RetrievalSourceQueryApplies(queryTerms)
+    || queryTerms.some(isExplicitPathTerm)) {
+    return candidates;
+  }
+  const route = candidates.find(candidate => (
+    candidate.item?.metadata?.relation === 'context7-retrieval-route'
+    && queryTerms.some(term => candidateSearchText(candidate).includes(term))
+  ));
+  if (!route || candidates[0] === route) return candidates;
+  return [route, ...candidates.filter(candidate => candidate !== route)];
 }
 
 function buildNanoFlowOverlayCandidates(overlay) {
@@ -886,6 +953,11 @@ function selectGraphResults(overlay, rawQuery, matches, limit) {
     }
     if (edge.metadata?.relation === 'config-source' && selectedIds.has(edge.target)) {
       relatedSymbolIds.add(edge.source);
+    }
+    if (CONTEXT7_RELATION_CLOSURE.has(edge.metadata?.relation)
+      && (selectedIds.has(edge.source) || selectedIds.has(edge.target))) {
+      relatedSymbolIds.add(edge.source);
+      relatedSymbolIds.add(edge.target);
     }
   }
   addQualifiedOwnerSymbols(relatedSymbolIds, nodesById);
@@ -1591,7 +1663,11 @@ function isCombinedExactRelationQueryTerm(term, exactRelationQueries) {
 }
 
 function isMixedExactMetadataQueryTerm(term) {
-  return String(term ?? '').includes('-');
+  const normalized = String(term ?? '').toLowerCase();
+  return normalized.includes('-') || relationPolicySet([
+    'dependency',
+    'provider',
+  ]).has(normalized);
 }
 
 function edgeMatchesQueryTermsWithEndpoints(edge, nodesById, queryTerms) {
@@ -1820,6 +1896,273 @@ function scoreNodeRelevanceForQuery(node, context) {
   };
 }
 
+function fillGraphNodeBudgetWithRelevantEndpoints(nodes, edges, graphNodes, rawQuery, limit) {
+  if (nodes.length === 0) return nodes;
+  const queryTerms = queryTokens(rawQuery);
+  if (queryTargetsExactMemberNode(nodes, queryTerms)) return nodes;
+  const nodesById = new Map(graphNodes.map(node => [node.id, node]));
+  if (nodes.length >= limit) {
+    return retainEssentialAngularResourceEndpoints(nodes, edges, nodesById, rawQuery, limit);
+  }
+  const selected = [...nodes];
+  const selectedIds = new Set(nodes.map(node => node.id));
+  const selectedDisplayKeys = new Set(nodes.map(displaySymbolKey));
+  const includeTestEdges = queryAllowsTestFiles(rawQuery);
+  const structuralEdgeKinds = new Set(['imports', 'exports']);
+  const addNode = node => {
+    if (!node || selected.length >= limit || !isMarkdownSymbolNode(node)) return false;
+    const displayKey = displaySymbolKey(node);
+    if (selectedIds.has(node.id) || selectedDisplayKeys.has(displayKey)) return false;
+    selected.push(node);
+    selectedIds.add(node.id);
+    selectedDisplayKeys.add(displayKey);
+    return true;
+  };
+  const isSelected = id => {
+    if (selectedIds.has(id)) return true;
+    const node = nodesById.get(id);
+    return Boolean(node && selectedDisplayKeys.has(displaySymbolKey(node)));
+  };
+
+  let changed = true;
+  while (changed && selected.length < limit) {
+    changed = false;
+    for (const edge of edges) {
+      const sourceSelected = isSelected(edge.source);
+      const targetSelected = isSelected(edge.target);
+      if (!sourceSelected && !targetSelected) continue;
+      if (edge.metadata?.relation === 'test' && !includeTestEdges) continue;
+      if (!structuralEdgeKinds.has(edge.kind)
+        && !edgeMatchesAnyQueryTermWithEndpoints(edge, nodesById, queryTerms)) {
+        continue;
+      }
+      changed = addNode(nodesById.get(edge.source)) || changed;
+      changed = addNode(nodesById.get(edge.target)) || changed;
+      if (selected.length >= limit) break;
+    }
+  }
+  return retainEssentialAngularResourceEndpoints(selected, edges, nodesById, rawQuery, limit);
+}
+
+function queryTargetsExactMemberNode(nodes, queryTerms) {
+  if (queryTerms.length !== 1) return false;
+  const [term] = queryTerms;
+  const hasExactOwnerNode = nodes.some(node => (
+    node?.kind !== 'method'
+    && node?.kind !== 'property'
+    && [node.name, node.qualifiedName]
+      .some(value => String(value ?? '').toLowerCase() === term)
+  ));
+  if (hasExactOwnerNode) return false;
+  return nodes.some(node => (
+    (node?.kind === 'method' || node?.kind === 'property')
+    && [node.name, readQualifiedNameLeaf(node.qualifiedName)]
+      .some(value => String(value ?? '').toLowerCase() === term)
+  ));
+}
+
+function retainEssentialAngularResourceEndpoints(nodes, edges, nodesById, rawQuery, limit) {
+  const selected = [...nodes];
+  const selectedIds = new Set(selected.map(node => node.id));
+  const selectedComponentKeys = new Set(selected
+    .filter(node => node.kind === 'component')
+    .map(node => joinSearchText([node.name, node.filePath, node.startLine])));
+  const protectedIds = new Set();
+  if (selectedComponentKeys.size === 0) {
+    retainQuerySemanticEndpoints(selected, selectedIds, protectedIds, edges, nodesById, rawQuery, limit);
+    return selected;
+  }
+  const selectedComponentIds = new Set(selected
+    .filter(node => selectedComponentKeys.has(joinSearchText([node.name, node.filePath, node.startLine])))
+    .map(node => node.id));
+  for (const id of selectedComponentIds) protectedIds.add(id);
+  const candidates = edges
+    .filter(edge => (
+      selectedComponentIds.has(edge.source)
+      && !selectedIds.has(edge.target)
+      && (edge.metadata?.relation === 'template-url' || edge.metadata?.relation === 'template-binding')
+    ))
+    .sort((a, b) => (
+      Number(a.metadata?.relation !== 'template-url') - Number(b.metadata?.relation !== 'template-url')
+      || (a.line ?? Number.MAX_SAFE_INTEGER) - (b.line ?? Number.MAX_SAFE_INTEGER)
+      || (a.column ?? Number.MAX_SAFE_INTEGER) - (b.column ?? Number.MAX_SAFE_INTEGER)
+      || compareEdge(a, b)
+    ));
+  for (const edge of candidates.slice(0, 2)) {
+    const endpoint = nodesById.get(edge.target);
+    if (!endpoint || !isMarkdownSymbolNode(endpoint)) continue;
+    while (selected.length >= limit) {
+      const removableIndex = selected.findLastIndex(node => !protectedIds.has(node.id));
+      if (removableIndex < 0) return selected;
+      selectedIds.delete(selected[removableIndex].id);
+      selected.splice(removableIndex, 1);
+    }
+    selected.push(endpoint);
+    selectedIds.add(endpoint.id);
+    protectedIds.add(endpoint.id);
+  }
+  retainQuerySemanticEndpoints(selected, selectedIds, protectedIds, edges, nodesById, rawQuery, limit);
+  return selected;
+}
+
+function retainQuerySemanticEndpoints(
+  selected,
+  selectedIds,
+  protectedIds,
+  edges,
+  nodesById,
+  rawQuery,
+  limit,
+) {
+  const queryTerms = queryTokens(rawQuery);
+  const ownerNames = querySemanticOwnerNames(selected, queryTerms);
+  if (ownerNames.length === 0) return;
+
+  const selectedOwnerNodes = selected
+    .filter(node => ownerNames.some(owner => (
+      node.qualifiedName === owner || String(node.qualifiedName ?? '').startsWith(`${owner}::`)
+    )));
+  const ownerDisplayKeys = new Set(selectedOwnerNodes.map(displaySymbolKey));
+  const ownerSourceIds = new Set([...nodesById.values()]
+    .filter(node => ownerDisplayKeys.has(displaySymbolKey(node)))
+    .map(node => node.id));
+  const selectedOwnerRootNodes = selected
+    .filter(node => ownerNames.includes(String(node.qualifiedName ?? node.name ?? '')))
+  const ownerRootDisplayKeys = new Set(selectedOwnerRootNodes.map(displaySymbolKey));
+  const ownerRootIds = new Set([...nodesById.values()]
+    .filter(node => ownerRootDisplayKeys.has(displaySymbolKey(node)))
+    .map(node => node.id));
+  for (const id of ownerRootIds) protectedIds.add(id);
+  for (const node of selected) {
+    if (!ownerSourceIds.has(node.id)) continue;
+    const nodeTerms = [node.name, readQualifiedNameLeaf(node.qualifiedName)]
+      .map(value => String(value ?? '').toLowerCase());
+    if (queryTerms.some(term => nodeTerms.includes(term))) {
+      protectedIds.add(node.id);
+    }
+  }
+
+  const selectedDisplayKeys = new Set(selected.map(displaySymbolKey));
+  const candidateTargets = querySemanticEndpointCandidates(
+    edges,
+    ownerSourceIds,
+    ownerRootIds,
+    selectedIds,
+    nodesById,
+    queryTerms.length === 1 ? queryTerms[0] : null,
+  );
+  let addedEndpointCount = 0;
+  for (const targetId of candidateTargets) {
+    if (addedEndpointCount >= 6) break;
+    const endpoint = nodesById.get(targetId);
+    if (!endpoint || !isMarkdownSymbolNode(endpoint) || selectedDisplayKeys.has(displaySymbolKey(endpoint))) continue;
+    while (selected.length >= limit) {
+      const removableIndex = selected.findLastIndex(node => !protectedIds.has(node.id));
+      if (removableIndex < 0) return;
+      selectedDisplayKeys.delete(displaySymbolKey(selected[removableIndex]));
+      selectedIds.delete(selected[removableIndex].id);
+      selected.splice(removableIndex, 1);
+    }
+    selected.push(endpoint);
+    selectedIds.add(endpoint.id);
+    selectedDisplayKeys.add(displaySymbolKey(endpoint));
+    protectedIds.add(endpoint.id);
+    addedEndpointCount += 1;
+  }
+}
+
+function querySemanticOwnerNames(selected, queryTerms) {
+  const terms = new Set(queryTerms);
+  const hasSingleTerm = queryTerms.length === 1;
+  return unique(selected
+    .filter(node => {
+      const name = String(node.qualifiedName ?? node.name ?? '').toLowerCase();
+      if (!terms.has(name)) return false;
+      if (node.kind === 'type_alias' || node.kind === 'interface') return true;
+      return hasSingleTerm && !['file', 'import', 'method', 'parameter', 'property'].includes(node.kind);
+    })
+    .map(node => String(node.qualifiedName ?? node.name ?? '')));
+}
+
+function querySemanticEndpointCandidates(edges, ownerSourceIds, ownerRootIds, selectedIds, nodesById, exactTerm) {
+  const candidates = edges.flatMap(edge => {
+    const relation = String(edge.metadata?.relation ?? '');
+    const exportNameMatches = exactTerm && String(edge.metadata?.exportName ?? '').toLowerCase() === exactTerm;
+    const sourceOwned = ownerSourceIds.has(edge.source);
+    const targetOwned = ownerSourceIds.has(edge.target);
+    if (!exportNameMatches && !sourceOwned && !targetOwned) return [];
+    if (!querySemanticEndpointRelationApplies(relation, exportNameMatches)) return [];
+    const endpointIds = exportNameMatches
+      ? [edge.source, edge.target]
+      : [sourceOwned ? edge.target : edge.source];
+    const directRank = exportNameMatches || ownerRootIds.has(edge.source) || ownerRootIds.has(edge.target) ? 0 : 1;
+    return endpointIds
+      .filter(id => !selectedIds.has(id))
+      .map(id => ({ directRank, edge, id, node: nodesById.get(id), relation }));
+  });
+  return uniqueBy(candidates
+    .filter(candidate => candidate.node)
+    .sort((a, b) => a.directRank - b.directRank
+      || querySemanticEndpointRelationPriority(a.relation)
+      - querySemanticEndpointRelationPriority(b.relation)
+      || querySemanticEndpointNodePriority(a.node) - querySemanticEndpointNodePriority(b.node)
+      || compareEdge(a.edge, b.edge)), candidate => candidate.id)
+    .map(candidate => candidate.id);
+}
+
+function querySemanticEndpointRelationApplies(relation, exportNameMatches) {
+  if (exportNameMatches) return relation === 're-export' || relation === 'export-equals';
+  return [
+    'call', 'class-member', 'enum-member', 'extends', 'implements', 'interface-member',
+    'file-symbol', 'initializer-reference', 'new', 'parameter-type', 'return-type',
+    'type-literal-member', 'type-reference',
+  ].includes(relation);
+}
+
+function querySemanticEndpointRelationPriority(relation) {
+  if (relation === 're-export' || relation === 'export-equals') return 0;
+  if (relation === 'file-symbol') return 0;
+  if (relation === 'new' || relation === 'extends' || relation === 'implements') return 1;
+  if (relation.endsWith('-member')) return 2;
+  return 3;
+}
+
+function querySemanticEndpointNodePriority(node) {
+  const priorities = { interface: 0, property: 1, type_alias: 2, enum: 2, class: 3, method: 4, function: 4 };
+  return priorities[node?.kind] ?? 5;
+}
+
+function closeGraphEdgesOverSelectedNodes(edges, selectedNodes, graphNodes) {
+  const selectedById = new Map(selectedNodes.map(node => [node.id, node]));
+  const selectedIdByDisplayKey = new Map(selectedNodes
+    .map(node => [displaySymbolKey(node), node.id]));
+  const graphNodesById = new Map(graphNodes.map(node => [node.id, node]));
+  const resolveSelectedId = id => {
+    if (selectedById.has(id)) return id;
+    const node = graphNodesById.get(id);
+    return node ? selectedIdByDisplayKey.get(displaySymbolKey(node)) : undefined;
+  };
+  return uniqueBy(edges.flatMap(edge => {
+    const source = resolveSelectedId(edge.source);
+    const target = resolveSelectedId(edge.target);
+    if (!source || !target) return [];
+    return [{
+      ...edge,
+      source,
+      target,
+      sourceName: selectedById.get(source)?.name ?? edge.sourceName,
+      targetName: selectedById.get(target)?.name ?? edge.targetName,
+    }];
+  }), edge => joinSearchText([
+    edge.source,
+    edge.target,
+    edge.kind,
+    edge.line,
+    edge.column,
+    edge.metadata,
+  ]));
+}
+
 function rankNodesForQuery(nodes, rawQuery = '') {
   const context = queryScoringContext(rawQuery);
   if (context.queryTerms.length === 0) return nodes;
@@ -1846,6 +2189,127 @@ function rankNodesForQuery(nodes, rawQuery = '') {
       || compareNodeSpecificity(a.node, b.node)
       || a.index - b.index)
     .map(entry => entry.node);
+}
+
+function rankGraphEdgesForQuery(edges, nodes, rawQuery = '') {
+  const context = queryScoringContext(rawQuery);
+  if (context.queryTerms.length === 0) return edges;
+  const nodesById = new Map(nodes.map(node => [node.id, node]));
+  const exactOwnerContext = exactQueryOwnerContext(nodes, context.queryTerms);
+  const nodeRankById = new Map(rankNodesForQuery(nodes, rawQuery)
+    .map((node, index) => [node.id, index]));
+  return edges
+    .map((edge, index) => {
+      const sourceNode = nodesById.get(edge.source);
+      const targetNode = nodesById.get(edge.target);
+      const searchText = joinSearchText([
+        edgeSearchText(edge),
+        sourceNode ? nodeSearchText(sourceNode) : '',
+        targetNode ? nodeSearchText(targetNode) : '',
+      ]);
+      const sourceRank = nodeRankById.get(edge.source) ?? Number.MAX_SAFE_INTEGER;
+      const targetRank = nodeRankById.get(edge.target) ?? Number.MAX_SAFE_INTEGER;
+      return {
+        edge,
+        index,
+        exactRelationRank: context.queryTerms.some(term => edgeMatchesExactMetadataQuery(edge, term)) ? 1 : 0,
+        exactOwnerPriority: exactQueryEdgeBudgetPriority(
+          edge,
+          sourceNode,
+          targetNode,
+          exactOwnerContext,
+        ),
+        semanticPriority: semanticGraphEdgeBudgetPriority(edge, rawQuery),
+        explicitScore: scoreExplicitQueryTermText(
+          searchText,
+          context.focusedTerms,
+          context.explicitTerms,
+          5000,
+          400,
+        ),
+        matchedTermCount: context.queryTerms.reduce(
+          (count, term) => count + (searchText.includes(term) ? 1 : 0),
+          0,
+        ),
+        bestEndpointRank: Math.min(sourceRank, targetRank),
+        worstEndpointRank: Math.max(sourceRank, targetRank),
+      };
+    })
+    .sort((a, b) => b.exactRelationRank - a.exactRelationRank
+      || (a.exactRelationRank > 0 && b.exactRelationRank > 0 ? a.index - b.index : 0)
+      || a.exactOwnerPriority - b.exactOwnerPriority
+      || a.semanticPriority - b.semanticPriority
+      || b.explicitScore - a.explicitScore
+      || b.matchedTermCount - a.matchedTermCount
+      || a.bestEndpointRank - b.bestEndpointRank
+      || a.worstEndpointRank - b.worstEndpointRank
+      || a.index - b.index)
+    .map(entry => entry.edge);
+}
+
+function exactQueryOwnerContext(nodes, queryTerms) {
+  if (queryTerms.length !== 1) return null;
+  const [term] = queryTerms;
+  const ownerNames = unique(nodes
+    .filter(node => {
+      if (['file', 'import', 'method', 'parameter', 'property'].includes(node.kind)) return false;
+      return [node.name, node.qualifiedName]
+        .some(value => String(value ?? '').toLowerCase() === term);
+    })
+    .map(node => String(node.qualifiedName ?? node.name ?? '')));
+  if (ownerNames.length === 0) return null;
+  const rootIds = new Set(nodes
+    .filter(node => ownerNames.includes(String(node.qualifiedName ?? node.name ?? '')))
+    .map(node => node.id));
+  return {
+    term,
+    rootIds,
+    ownerIds: new Set(nodes
+      .filter(node => ownerNames.some(owner => (
+        node.qualifiedName === owner || String(node.qualifiedName ?? '').startsWith(`${owner}::`)
+      )))
+      .map(node => node.id)),
+  };
+}
+
+function exactQueryEdgeBudgetPriority(edge, sourceNode, targetNode, context) {
+  if (!context) return 10;
+  const relation = String(edge.metadata?.relation ?? '').toLowerCase();
+  if (String(edge.metadata?.exportName ?? '').toLowerCase() === context.term) return 0;
+  const sourceOwned = context.ownerIds.has(edge.source);
+  const targetOwned = context.ownerIds.has(edge.target);
+  if (!sourceOwned && !targetOwned) return 10;
+  const directRank = context.rootIds.has(edge.source) || context.rootIds.has(edge.target) ? 0 : 1;
+  if (relation.endsWith('-member') || relation === 'file-symbol') return directRank;
+  if (relation === 'new' || relation === 'extends' || relation === 'implements' || relation === 'call') {
+    return 1 + directRank;
+  }
+  if (relation === 'type-reference' || relation === 'parameter-type'
+    || relation === 'return-type' || relation === 'initializer-reference') {
+    if (context.rootIds.has(edge.source) && edge.source !== edge.target) return 0;
+    const endpoint = sourceOwned ? targetNode : sourceNode;
+    return 2 + directRank + querySemanticEndpointNodePriority(endpoint);
+  }
+  return 9;
+}
+
+function semanticGraphEdgeBudgetPriority(edge, rawQuery) {
+  const relation = String(edge.metadata?.relation ?? '').toLowerCase();
+  if (relation === 'test') return queryAllowsTestFiles(rawQuery) ? 2 : 5;
+  if ([
+    'android-kotlin-annotation',
+    'hard-rule-keyword',
+    'jsx-component',
+    'local-declaration',
+    'sync-rule-keyword',
+    'template-binding',
+    'template-url',
+    'type-literal-member',
+  ].includes(relation)) {
+    return 0;
+  }
+  if (edge.metadata?.isTypeOnly || relation === 're-export' || relation === 'export-equals') return 1;
+  return 2;
 }
 
 function orderRelatedFilesForQuery(filePaths, rawQuery = '') {
@@ -2001,7 +2465,7 @@ function filterRelationshipGroupsForMarkdown(groups, rawQuery) {
   );
 }
 
-function buildBlastRadiusEntries(nodes, edges) {
+function buildBlastRadiusEntries(nodes, edges, dependencyNodes = nodes) {
   const meaningfulKinds = new Set([
     'function',
     'method',
@@ -2026,7 +2490,7 @@ function buildBlastRadiusEntries(nodes, edges) {
     'imports',
     'decorates',
   ]);
-  const nodesById = new Map(nodes.map(node => [node.id, node]));
+  const nodesById = new Map(dependencyNodes.map(node => [node.id, node]));
   const roots = nodes
     .filter(node => meaningfulKinds.has(node.kind))
     .sort(compareNodeSourceOrder)
@@ -2069,15 +2533,15 @@ function buildBlastRadiusEntries(nodes, edges) {
 function buildNotShownEntries(nodes, shownSourceFiles) {
   return groupNodesByFile(nodes)
     .filter(([filePath]) => filePath !== '(unknown)' && !shownSourceFiles.has(filePath))
-    .slice(0, 10)
     .map(([filePath, groupedNodes]) => ({
       filePath,
       symbols: groupedNodes
-        .filter(node => node.kind !== 'import' && node.kind !== 'export')
+        .filter(node => node.kind !== 'file' && node.kind !== 'import' && node.kind !== 'export')
         .map(node => `${node.name}:${node.startLine ?? '?'}`)
         .slice(0, 12),
     }))
-    .filter(entry => entry.symbols.length > 0);
+    .filter(entry => entry.symbols.length > 0)
+    .slice(0, 10);
 }
 
 function isMarkdownSymbolNode(node) {
@@ -2562,6 +3026,7 @@ function formatStrictNativeMarkdown(context) {
   const entryIds = new Set(context.entryPoints.map(node => node.id));
   const allOtherSymbols = orderNativeProjectionItems(context.nodes
     .filter(node => !entryIds.has(node.id))
+    .filter(node => node.kind !== 'file')
     .filter(node => !isGeneratedFilePath(node.filePath))
     .filter(dedupeNodeByDisplay()), context.query);
   const otherSymbols = allOtherSymbols.slice(0, 10);
@@ -2901,6 +3366,25 @@ function context7RetrievalPrimaryCodeBlockNodes(nodes, entryPoints, edges, query
     .filter(Boolean), node => node.id);
 }
 
+function prioritizeContext7RetrievalNodes(nodes, edges, rawQuery) {
+  const queryTerms = queryTokens(rawQuery);
+  if (!context7RetrievalSourceQueryApplies(queryTerms)) return nodes;
+  const selectedRouteIds = selectedContext7RetrievalRouteIds(nodes, queryTerms);
+  if (selectedRouteIds.size === 0) return nodes;
+  const primaryDocIds = new Set(edges
+    .filter(edge => (
+      edge.metadata?.relation === 'context7-retrieval-primary'
+      && selectedRouteIds.has(edge.source)
+    ))
+    .map(edge => edge.target));
+  if (primaryDocIds.size === 0) return nodes;
+  return [
+    ...nodes.filter(node => primaryDocIds.has(node.id)),
+    ...nodes.filter(node => selectedRouteIds.has(node.id)),
+    ...nodes.filter(node => !primaryDocIds.has(node.id) && !selectedRouteIds.has(node.id)),
+  ];
+}
+
 function context7RetrievalSourceQueryApplies(queryTerms) {
   return queryTerms.some(term => (
     term === 'context7'
@@ -3103,6 +3587,9 @@ function edgeLineCodeBlockRelationQueries() {
     'template-component',
     'template-directive',
     'template-pipe',
+    'standalone-import',
+    'provider',
+    'dependency',
     'angular-app-provider',
     'host-directive',
     'host-attribute',
@@ -3119,6 +3606,9 @@ function edgeLineCodeBlockRelationQueries() {
 
 function edgeLineCodeBlocksAreAuthoritative(query) {
   const authoritativeQueries = relationPolicySet([
+    'standalone-import',
+    'provider',
+    'dependency',
     'angular-app-provider',
     'host-directive',
     'host-attribute',
@@ -3583,6 +4073,9 @@ function hasSameRangeSyntheticOperationTarget(sourceNode, targetNode) {
 
 function codeBlockSourceFirstRelationQueries() {
   return relationPolicySet([
+    'standalone-import',
+    'provider',
+    'dependency',
     'host-attribute',
     'host-binding',
     'host-listener',
@@ -4157,6 +4650,9 @@ function provenanceEdgeLineRelationNodeNameQueries() {
 
 function sourceOwnerEdgeLineRelationNodeNameQueries() {
   return relationPolicySet([
+    'standalone-import',
+    'provider',
+    'dependency',
     'angular-app-provider',
     'host-directive',
     'host-attribute',
@@ -4417,6 +4913,8 @@ function serializeNativeJsonNode(node) {
     language: node.language,
     startLine: node.startLine,
     endLine: node.endLine,
+    startColumn: node.startColumn,
+    endColumn: node.endColumn,
     signature: node.signature,
     docstring: node.docstring,
     visibility: node.visibility,
@@ -4626,7 +5124,7 @@ function groupMarkdownRelatedNodesByFile(nodes) {
   const groups = new Map();
   const seenDisplayKeys = new Set();
   const sortedNodes = nodes
-    .filter(node => node.kind !== 'import' && node.kind !== 'export')
+    .filter(node => node.kind !== 'file' && node.kind !== 'import' && node.kind !== 'export')
     .filter(node => {
       const key = markdownRelatedSymbolKey(node);
       if (seenDisplayKeys.has(key)) return false;
@@ -4921,6 +5419,7 @@ function languageForFile(filePath, node = null) {
 }
 
 function summarizeOverlayCoverage(overlay) {
+  const baseline = buildBaseline(overlay);
   return {
     typescriptFiles: overlay.typescript?.files?.length ?? 0,
     typescriptClasses: overlay.typescript?.classes?.length ?? 0,
@@ -4967,13 +5466,33 @@ function summarizeOverlayCoverage(overlay) {
     androidKotlinCalls: overlay.android?.kotlinCalls?.length ?? 0,
     androidKotlinAnnotations: countAndroidKotlinAnnotations(overlay.android),
     androidManifestComponents: overlay.android?.manifestComponents?.length ?? 0,
+    androidManifestPermissions: baseline.androidManifestPermissions,
+    androidManifestUsesPermissionEdges: baseline.androidManifestUsesPermissionEdges,
+    androidManifestQueries: baseline.androidManifestQueries,
+    androidManifestQueryEdges: baseline.androidManifestQueryEdges,
+    androidManifestComponentPermissions: baseline.androidManifestComponentPermissions,
+    androidManifestComponentPermissionEdges: baseline.androidManifestComponentPermissionEdges,
+    androidManifestIntentFilters: baseline.androidManifestIntentFilters,
+    androidManifestIntentFilterActions: baseline.androidManifestIntentFilterActions,
+    androidManifestIntentFilterActionEdges: baseline.androidManifestIntentFilterActionEdges,
+    androidManifestIntentFilterCategories: baseline.androidManifestIntentFilterCategories,
+    androidManifestIntentFilterCategoryEdges: baseline.androidManifestIntentFilterCategoryEdges,
+    androidManifestIntentFilterData: baseline.androidManifestIntentFilterData,
+    androidManifestIntentFilterDataEdges: baseline.androidManifestIntentFilterDataEdges,
     androidWidgetProviders: overlay.android?.widgetProviders?.length ?? 0,
     androidResourceReferences: overlay.android?.resourceReferences?.length ?? 0,
+    androidKotlinResourceReferences: baseline.androidKotlinResourceReferences,
+    androidKotlinResourceReferenceEdges: baseline.androidKotlinResourceReferenceEdges,
     hardRules: overlay.agentRules?.hardRules?.length ?? 0,
     context7Docs: overlay.context7?.documents?.length ?? 0,
     context7Categories: overlay.context7?.categories?.length ?? 0,
+    context7CategoryDocEdges: baseline.context7CategoryDocEdges,
     context7RetrievalRoutes: overlay.context7?.retrievalRoutes?.length ?? 0,
+    context7RetrievalPrimaryEdges: baseline.context7RetrievalPrimaryEdges,
+    context7RetrievalSecondaryEdges: baseline.context7RetrievalSecondaryEdges,
     context7SourceMapRoutes: overlay.context7?.sourceMapRoutes?.length ?? 0,
+    context7SourceMapDocEdges: baseline.context7SourceMapDocEdges,
+    context7SourceMapSourceEdges: baseline.context7SourceMapSourceEdges,
     graphNodes: overlay.graph?.nodes?.length ?? 0,
     graphEdges: overlay.graph?.edges?.length ?? 0,
   };
