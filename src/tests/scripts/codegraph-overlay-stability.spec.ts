@@ -48,6 +48,7 @@ interface DocsSyncModule {
   syncDocs(root: string, options?: {
     beforeCas?: () => void;
     participantPolicy?: unknown;
+    simulateCrashAfterFirstPublish?: boolean;
   }): unknown;
 }
 
@@ -539,6 +540,28 @@ describe('CodeGraph documentation count transaction', () => {
     expect(runSync(root, ['--assert-clean']).status).toBe(0);
     const recoveredValidation = runValidator(root);
     expect(recoveredValidation.status, recoveredValidation.stderr || recoveredValidation.stdout).toBe(0);
+  });
+
+  it('keeps the prepared recovery journal immutable after the first published document crashes', () => {
+    const root = makeFixture({ dynamicImportEdgesInDocs: 1, totalTestEdgesInDocs: 4 });
+    const journalPath = path.join(
+      root,
+      '.codegraph',
+      'codegraph-overlay-doc-sync-transaction',
+      'journal.json',
+    );
+    let preparedJournal = Buffer.alloc(0);
+
+    expect(() => loadSync().syncDocs(root, {
+      beforeCas: () => {
+        preparedJournal = fs.readFileSync(journalPath);
+      },
+      simulateCrashAfterFirstPublish: true,
+    })).toThrow('codegraph-overlay-doc-sync-simulated-crash');
+
+    expect(preparedJournal.length).toBeGreaterThan(0);
+    expect(fs.readFileSync(journalPath)).toEqual(preparedJournal);
+    expect(JSON.parse(preparedJournal.toString('utf8'))).toMatchObject({ phase: 'prepared' });
   });
 
   it('refuses recovery after an interrupted document changes to an unknown hash', () => {

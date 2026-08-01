@@ -229,13 +229,13 @@ writeProfileMeta(root, overlayPath, args);
 const overlay = profilePhase('loadOverlay', () => loadOverlay(root, overlayPath, args.androidImportSource));
 const matches = profilePhase('queryOverlay', () => queryOverlay(overlay, args.query, args.limit));
 const graphSelection = profilePhase('selectGraphResults', () => selectGraphResults(overlay, args.query, matches, args.limit));
-const rankedGraphNodes = prioritizeContext7RetrievalNodes(
-  rankNodesForQuery(graphSelection.nodes, args.query),
+const prioritizedGraphNodes = prioritizeContext7RetrievalNodes(
+  graphSelection.nodes,
   graphSelection.edges,
   args.query,
 );
 const graphNodes = fillGraphNodeBudgetWithRelevantEndpoints(
-  rankedGraphNodes.slice(0, args.limit),
+  prioritizedGraphNodes.slice(0, args.limit),
   graphSelection.edges,
   overlay.graph?.nodes ?? [],
   args.query,
@@ -255,7 +255,7 @@ const graphEdges = preserveExactRelationSelection
   ? graphSelection.edges
     .filter(edge => graphNodeIds.has(edge.source) && graphNodeIds.has(edge.target))
     .slice(0, args.limit)
-  : rankGraphEdgesForQuery(closedGraphEdges, graphNodes, args.query).slice(0, args.limit);
+  : closedGraphEdges.slice(0, args.limit);
 const relationshipGroups = profilePhase('buildRelationshipGroups', () => buildRelationshipGroups(graphEdges));
 const coverage = profilePhase('summarizeOverlayCoverage', () => summarizeOverlayCoverage(overlay));
 const nativeEdges = profilePhase('toNativeEdges', () => graphEdges.map(toNativeEdge));
@@ -2163,90 +2163,6 @@ function closeGraphEdgesOverSelectedNodes(edges, selectedNodes, graphNodes) {
   ]));
 }
 
-function rankNodesForQuery(nodes, rawQuery = '') {
-  const context = queryScoringContext(rawQuery);
-  if (context.queryTerms.length === 0) return nodes;
-  const scored = nodes.map((node, index) => ({
-    node,
-    index,
-    pathScore: scorePathTermMatch(node?.filePath, context.queryTerms),
-    lowInformationPenalty: lowInformationNodePenalty(node, rawQuery),
-    ...scoreNodeRelevanceForQuery(node, context),
-  }));
-  if (!scored.some(entry => (
-    entry.pathScore > 0
-    || entry.explicitScore > 0
-    || entry.coreScore > 0
-    || entry.lowInformationPenalty > 0
-  ))) return nodes;
-  return scored
-    .sort((a, b) => b.explicitScore - a.explicitScore
-      || b.pathScore - a.pathScore
-      || b.coreScore - a.coreScore
-      || highValueRank(b.node) - highValueRank(a.node)
-      || a.lowInformationPenalty - b.lowInformationPenalty
-      || b.fullScore - a.fullScore
-      || compareNodeSpecificity(a.node, b.node)
-      || a.index - b.index)
-    .map(entry => entry.node);
-}
-
-function rankGraphEdgesForQuery(edges, nodes, rawQuery = '') {
-  const context = queryScoringContext(rawQuery);
-  if (context.queryTerms.length === 0) return edges;
-  const nodesById = new Map(nodes.map(node => [node.id, node]));
-  const exactOwnerContext = exactQueryOwnerContext(nodes, context.queryTerms);
-  const nodeRankById = new Map(rankNodesForQuery(nodes, rawQuery)
-    .map((node, index) => [node.id, index]));
-  return edges
-    .map((edge, index) => {
-      const sourceNode = nodesById.get(edge.source);
-      const targetNode = nodesById.get(edge.target);
-      const searchText = joinSearchText([
-        edgeSearchText(edge),
-        sourceNode ? nodeSearchText(sourceNode) : '',
-        targetNode ? nodeSearchText(targetNode) : '',
-      ]);
-      const sourceRank = nodeRankById.get(edge.source) ?? Number.MAX_SAFE_INTEGER;
-      const targetRank = nodeRankById.get(edge.target) ?? Number.MAX_SAFE_INTEGER;
-      return {
-        edge,
-        index,
-        exactRelationRank: context.queryTerms.some(term => edgeMatchesExactMetadataQuery(edge, term)) ? 1 : 0,
-        exactOwnerPriority: exactQueryEdgeBudgetPriority(
-          edge,
-          sourceNode,
-          targetNode,
-          exactOwnerContext,
-        ),
-        semanticPriority: semanticGraphEdgeBudgetPriority(edge, rawQuery),
-        explicitScore: scoreExplicitQueryTermText(
-          searchText,
-          context.focusedTerms,
-          context.explicitTerms,
-          5000,
-          400,
-        ),
-        matchedTermCount: context.queryTerms.reduce(
-          (count, term) => count + (searchText.includes(term) ? 1 : 0),
-          0,
-        ),
-        bestEndpointRank: Math.min(sourceRank, targetRank),
-        worstEndpointRank: Math.max(sourceRank, targetRank),
-      };
-    })
-    .sort((a, b) => b.exactRelationRank - a.exactRelationRank
-      || (a.exactRelationRank > 0 && b.exactRelationRank > 0 ? a.index - b.index : 0)
-      || a.exactOwnerPriority - b.exactOwnerPriority
-      || a.semanticPriority - b.semanticPriority
-      || b.explicitScore - a.explicitScore
-      || b.matchedTermCount - a.matchedTermCount
-      || a.bestEndpointRank - b.bestEndpointRank
-      || a.worstEndpointRank - b.worstEndpointRank
-      || a.index - b.index)
-    .map(entry => entry.edge);
-}
-
 function exactQueryOwnerContext(nodes, queryTerms) {
   if (queryTerms.length !== 1) return null;
   const [term] = queryTerms;
@@ -2712,7 +2628,7 @@ function selectEntryPoints(nodes, matches, limit, rawQuery = '', edges = []) {
     const hasExplicitPathTerm = queryTerms.some(isExplicitPathTerm);
     if (hasExplicitPathTerm) {
       const cap = Math.max(1, Math.min(limit ?? 5, 8));
-      return rankNodesForQuery(selected, rawQuery).slice(0, cap);
+      return selected.slice(0, cap);
     }
     const specificNode = nodes.find(node => (
       node.kind !== 'file'
@@ -2737,7 +2653,7 @@ function selectEntryPoints(nodes, matches, limit, rawQuery = '', edges = []) {
   if (relationEntryPoints.length > 0) {
     return selected.slice(0, cap);
   }
-  return rankNodesForQuery(selected, rawQuery).slice(0, cap);
+  return selected.slice(0, cap);
 }
 
 function preferredExactRelationEntryPoints(nodes, edges, query) {

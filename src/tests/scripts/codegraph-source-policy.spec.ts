@@ -51,6 +51,29 @@ afterEach(() => {
 });
 
 describe('NanoFlow SourcePolicy v1', () => {
+  it('does not globally rerank native graph nodes or edges in the overlay query adapter', () => {
+    const querySource = fs.readFileSync(
+      path.join(process.cwd(), 'scripts', 'query-codegraph-nanoflow-overlay.mjs'),
+      'utf8',
+    );
+
+    expect(querySource).not.toMatch(/\brankNodesForQuery\s*\(/);
+    expect(querySource).not.toMatch(/\brankGraphEdgesForQuery\s*\(/);
+  });
+
+  it('discovers generic node and edge rank helpers as de-duplication hotspots', () => {
+    const validatorSource = fs.readFileSync(
+      path.join(process.cwd(), 'scripts', 'validate-codegraph-overlay-docs.cjs'),
+      'utf8',
+    );
+    const discoveryPatternSource = validatorSource.match(
+      /const DEDUP_CONTRACT_QUERY_FORMATTER_DISCOVERY_PATTERN\s*=\s*([\s\S]*?);/,
+    )?.[1] ?? '';
+
+    expect(discoveryPatternSource).toContain('rankNodesForQuery');
+    expect(discoveryPatternSource).toContain('rankGraphEdgesForQuery');
+  });
+
   it('classifies every required source family through one versioned policy', () => {
     expect(sourcePolicy.SOURCE_POLICY_VERSION).toBe(1);
     expect(sourcePolicy.SOURCE_POLICY_DIGEST).toMatch(/^[a-f0-9]{64}$/);

@@ -486,8 +486,6 @@ function publishTransaction(transaction, options = {}) {
   for (let index = 0; index < transaction.docs.length; index += 1) {
     const doc = transaction.docs[index];
     fs.renameSync(doc.tempPath, doc.absolutePath);
-    transaction.journal.phase = index === 0 ? 'first-published' : 'published';
-    writeJournal(transaction.paths.journal, transaction.journal);
     if (index === 0 && options.simulateCrashAfterFirstPublish) {
       throw new Error('codegraph-overlay-doc-sync-simulated-crash');
     }
