@@ -2,6 +2,7 @@
 'use strict';
 
 const { execFileSync } = require('node:child_process');
+const { loadRequiredFilesManifest } = require('./required-files-manifest.cjs');
 
 const projectRoot = process.cwd();
 
@@ -244,25 +245,36 @@ function collectViolations(changedFiles) {
 }
 
 function main() {
-  const explicitFiles = parseFilesArg();
-  const mode = parseModeArg();
-  let changedFiles = explicitFiles;
-
-  if (changedFiles.length === 0) {
-    const stagedFiles = getStagedFiles();
-    if (mode === 'staged') {
-      changedFiles = stagedFiles;
-    } else if (mode === 'staged-or-head') {
-      changedFiles = stagedFiles.length > 0 ? stagedFiles : getCiComparisonFiles();
-    } else if (mode === 'working-tree') {
-      changedFiles = getWorkingTreeFiles();
-    } else if (mode === 'working-tree-or-head') {
-      const workingTreeFiles = getWorkingTreeFiles();
-      changedFiles = workingTreeFiles.length > 0 ? workingTreeFiles : getCiComparisonFiles();
+  let mode = 'required-files-manifest';
+  let changedFiles;
+  try {
+    const manifestFiles = loadRequiredFilesManifest({ projectRoot });
+    if (manifestFiles) {
+      changedFiles = manifestFiles;
     } else {
-      console.error(`[context7-coupled-changes] unsupported mode: ${mode}`);
-      process.exit(1);
+      const explicitFiles = parseFilesArg();
+      mode = parseModeArg();
+      changedFiles = explicitFiles;
+
+      if (changedFiles.length === 0) {
+        const stagedFiles = getStagedFiles();
+        if (mode === 'staged') {
+          changedFiles = stagedFiles;
+        } else if (mode === 'staged-or-head') {
+          changedFiles = stagedFiles.length > 0 ? stagedFiles : getCiComparisonFiles();
+        } else if (mode === 'working-tree') {
+          changedFiles = getWorkingTreeFiles();
+        } else if (mode === 'working-tree-or-head') {
+          const workingTreeFiles = getWorkingTreeFiles();
+          changedFiles = workingTreeFiles.length > 0 ? workingTreeFiles : getCiComparisonFiles();
+        } else {
+          throw new Error(`unsupported mode: ${mode}`);
+        }
+      }
     }
+  } catch (error) {
+    console.error(`[context7-coupled-changes] ${error instanceof Error ? error.message : String(error)}`);
+    process.exit(1);
   }
 
   if (changedFiles.length === 0) {

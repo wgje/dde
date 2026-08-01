@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 const fs = require('node:fs');
 const path = require('node:path');
+const { loadRequiredFilesManifest } = require('./required-files-manifest.cjs');
 
 function normalizePath(input) {
   return input.replace(/\\/g, '/').replace(/^\.\//, '');
@@ -194,10 +195,21 @@ function findViolations(root, files) {
 
 function main() {
   const root = parseRootArg();
-  const explicitFiles = parseFilesArg();
-  const files = explicitFiles.length > 0
-    ? explicitFiles
-    : collectTypeScriptFiles(root, path.join(root, 'src'));
+  let files;
+  try {
+    const manifestFiles = loadRequiredFilesManifest({ projectRoot: root });
+    if (manifestFiles) {
+      files = manifestFiles;
+    } else {
+      const explicitFiles = parseFilesArg();
+      files = explicitFiles.length > 0
+        ? explicitFiles
+        : collectTypeScriptFiles(root, path.join(root, 'src'));
+    }
+  } catch (error) {
+    console.error(`[quality:guard:actionqueue-durable-enqueue] ${error instanceof Error ? error.message : String(error)}`);
+    process.exit(1);
+  }
 
   const violations = findViolations(root, files);
   if (violations.length === 0) {
