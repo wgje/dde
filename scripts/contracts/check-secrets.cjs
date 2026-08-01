@@ -16,6 +16,10 @@
 const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
+const {
+  getGitVisibleErrorCode,
+  listGitVisibleWorktreeFiles,
+} = require('./git-visible-worktree.cjs');
 
 // ───────────────────────── 规则 ─────────────────────────
 
@@ -88,14 +92,6 @@ const SCANNABLE_EXT = new Set([
   '.html', '.css', '.scss', '.sql', '.properties', '.vars',
 ]);
 
-/** 扫描跳过的目录（与现有 check-encoding-corruption.cjs 对齐） */
-const SKIP_DIRS = new Set([
-  '.angular', '.copilot-tracking', '.git', '.tmp', '.vscode',
-  '.worktrees',
-  'dist', 'node_modules', 'playwright-report', 'test-results', 'tmp',
-  'coverage', '.cache', '.vercel',
-]);
-
 /** 路径黑名单白名单（允许的例外，避免误报） */
 const BLACKLIST_EXCEPTIONS = [
   /^\.env\.template$/,
@@ -117,60 +113,6 @@ function getStagedFiles() {
 }
 
 /**
- * audit 模式文件清单：使用 git ls-files 获取已跟踪文件 + 未忽略的未跟踪文件。
- * git --exclude-standard 会自动跳过 .gitignore 命中的文件
- *（ai_conversations/、.worktrees/、.env、environment.ts 等）。
- */
-function getTrackedFiles() {
-  try {
-    const out = execFileSync('git', ['ls-files'], { encoding: 'utf-8', maxBuffer: 64 * 1024 * 1024 });
-    return out.split(/\r?\n/).filter(Boolean);
-  } catch {
-    // 不在 git 仓库，退回全量扫描
-    const acc = [];
-    walkDir(process.cwd(), acc);
-    return acc;
-  }
-}
-
-function getUntrackedFiles() {
-  try {
-    const out = execFileSync('git', ['ls-files', '--others', '--exclude-standard'], {
-      encoding: 'utf-8',
-      maxBuffer: 64 * 1024 * 1024,
-    });
-    return out.split(/\r?\n/).filter(Boolean);
-  } catch {
-    return [];
-  }
-}
-
-function getAuditFiles() {
-  const files = new Set([...getTrackedFiles(), ...getUntrackedFiles()]);
-  return Array.from(files).sort();
-}
-
-function walkDir(dir, acc) {
-  const entries = fs.readdirSync(dir, { withFileTypes: true });
-  for (const e of entries) {
-    const full = path.join(dir, e.name);
-    const rel = path.relative(process.cwd(), full).replace(/\\/g, '/');
-    if (e.isDirectory()) {
-      if (SKIP_DIRS.has(e.name)) continue;
-      walkDir(full, acc);
-    } else if (e.isFile()) {
-      acc.push(rel);
-    }
-  }
-}
-
-function getAllFiles() {
-  const acc = [];
-  walkDir(process.cwd(), acc);
-  return acc;
-}
-
-/**
  * 检查路径黑名单
  * @returns {string|null} 命中的规则名，否则 null
  */
@@ -189,15 +131,19 @@ function checkBlacklist(relPath) {
  * @returns {Array<{line: number, rule: string}>}
  */
 function scanFileContent(absPath) {
-  const hits = [];
-  let content;
   try {
     const stat = fs.statSync(absPath);
-    if (stat.size > 2 * 1024 * 1024) return hits; // > 2MB 跳过
-    content = fs.readFileSync(absPath, 'utf-8');
+    if (stat.size > 2 * 1024 * 1024) return []; // > 2MB 跳过
+    return scanFileBuffer(fs.readFileSync(absPath));
   } catch {
-    return hits;
+    return [];
   }
+}
+
+function scanFileBuffer(buffer) {
+  const hits = [];
+  if (buffer.length > 2 * 1024 * 1024) return hits;
+  const content = buffer.toString('utf-8');
   const lines = content.split(/\r?\n/);
   for (let i = 0; i < lines.length; i++) {
     for (const { name, pattern } of SECRET_PATTERNS) {
@@ -236,26 +182,37 @@ function isContentRuleExcepted(relPath, ruleName) {
   return CONTENT_RULE_EXCEPTIONS.some((entry) => entry.path.test(relPath) && entry.rules.has(ruleName));
 }
 
+function failAudit(error) {
+  console.error(`[check-secrets] FAIL reason=${getGitVisibleErrorCode(error)}`);
+  process.exit(1);
+}
+
 // ───────────────────────── main ─────────────────────────
 
 function main() {
   const args = process.argv.slice(2);
   const mode = args.find(a => a.startsWith('--mode='))?.slice('--mode='.length) || 'precommit';
 
-  let files;
+  let fileRecords;
   if (mode === 'audit') {
     console.log('[check-secrets] mode=audit — scanning tracked and untracked files (git ls-files --exclude-standard)');
-    files = getAuditFiles();
+    try {
+      fileRecords = listGitVisibleWorktreeFiles(process.cwd());
+    } catch (error) {
+      failAudit(error);
+    }
   } else {
-    files = getStagedFiles();
-    if (files.length === 0) {
+    const stagedFiles = getStagedFiles();
+    if (stagedFiles.length === 0) {
       console.log('[check-secrets] no staged files, skipping');
       process.exit(0);
     }
+    fileRecords = stagedFiles.map(relativePath => ({ relativePath, readBuffer: null }));
   }
 
   let violations = 0;
-  for (const rel of files) {
+  for (const fileRecord of fileRecords) {
+    const rel = fileRecord.relativePath;
     // 1. 路径黑名单（仅对未在 .gitignore 的文件有效，因为已跟踪的文件才会入库）
     const blacklistHit = checkBlacklist(rel);
     if (blacklistHit) {
@@ -269,9 +226,18 @@ function main() {
 
     // 3. 内容扫描（仅可扫描扩展）
     if (!isScannable(rel)) continue;
-    const abs = path.resolve(process.cwd(), rel);
-    if (!fs.existsSync(abs)) continue;
-    const hits = scanFileContent(abs);
+    let hits;
+    if (mode === 'audit') {
+      try {
+        hits = scanFileBuffer(fileRecord.readBuffer());
+      } catch (error) {
+        failAudit(error);
+      }
+    } else {
+      const abs = path.resolve(process.cwd(), rel);
+      if (!fs.existsSync(abs)) continue;
+      hits = scanFileContent(abs);
+    }
     for (const h of hits) {
       if (isContentRuleExcepted(rel, h.rule)) continue;
       console.error(`[check-secrets] BLOCKED path=${rel}:${h.line} rule=${h.rule}`);
@@ -289,7 +255,7 @@ function main() {
     process.exit(1);
   }
 
-  console.log(`[check-secrets] PASS — scanned ${files.length} file(s), 0 violations.`);
+  console.log(`[check-secrets] PASS — scanned ${fileRecords.length} file(s), 0 violations.`);
   process.exit(0);
 }
 
