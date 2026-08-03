@@ -195,6 +195,12 @@ async function readReplicaSnapshot(primaryPath, backupPath) {
   const selected = valid.reduce((current, candidate) => (
     current === null || candidate.envelope.revision > current.envelope.revision ? candidate : current
   ), null);
+  const invalidAtOrAboveSelected = [primary, backup].some(replica => (
+    replica.kind === 'invalid'
+    && replica.observedRevision !== null
+    && replica.observedRevision >= selected.envelope.revision
+  ));
+  if (invalidAtOrAboveSelected) return { kind: 'corrupt', replicas: [primary, backup] };
   return {
     kind: 'selected',
     envelope: selected.envelope,

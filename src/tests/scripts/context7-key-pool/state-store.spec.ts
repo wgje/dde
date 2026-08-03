@@ -267,6 +267,80 @@ describe('Context7 key-pool state store', () => {
     expect(await readEnvelope(join(stateDir, 'state.backup.json'))).toEqual(newer);
   });
 
+  it.each([
+    ['equal', 0],
+    ['higher', 1],
+  ] as const)(
+    'fails closed when an invalid replica advertises an equal or higher revision than the selected valid replica (%s)',
+    async (_relation, invalidRevisionOffset) => {
+      const stateDir = await makeStateDir();
+      const state = policy.reconcileState({
+        state: null,
+        identities,
+        timeZone: 'UTC',
+        now: new Date(NOW_ISO),
+      });
+      const valid = envelopeFor(state, 4);
+      const invalid: Envelope = {
+        ...valid,
+        revision: valid.revision + invalidRevisionOffset,
+        checksumSha256: `${valid.checksumSha256[0] === '0' ? '1' : '0'}${valid.checksumSha256.slice(1)}`,
+      };
+      await writeFile(join(stateDir, 'state.json'), JSON.stringify(valid), 'utf8');
+      await writeFile(join(stateDir, 'state.backup.json'), JSON.stringify(invalid), 'utf8');
+
+      const recovered = await fixedStore(stateDir).read(context);
+
+      expect(recovered.health.status).toBe('fail-closed');
+      expect(await readEnvelope(join(stateDir, 'state.backup.json'))).not.toEqual(valid);
+    },
+  );
+
+  it('recovers from a valid replica when the invalid replica advertises a lower revision', async () => {
+    const stateDir = await makeStateDir();
+    const state = policy.reconcileState({
+      state: null,
+      identities,
+      timeZone: 'UTC',
+      now: new Date(NOW_ISO),
+    });
+    const valid = envelopeFor(state, 4);
+    const lower = envelopeFor(state, 3);
+    const invalid: Envelope = {
+      ...lower,
+      checksumSha256: `${lower.checksumSha256[0] === '0' ? '1' : '0'}${lower.checksumSha256.slice(1)}`,
+    };
+    await writeFile(join(stateDir, 'state.json'), JSON.stringify(valid), 'utf8');
+    await writeFile(join(stateDir, 'state.backup.json'), JSON.stringify(invalid), 'utf8');
+
+    const recovered = await fixedStore(stateDir).read(context);
+
+    expect(recovered.health.status).toBe('recovered-replica');
+    expect(recovered.stateRevision).toBe(valid.revision);
+    expect(await readEnvelope(join(stateDir, 'state.json'))).toEqual(valid);
+    expect(await readEnvelope(join(stateDir, 'state.backup.json'))).toEqual(valid);
+  });
+
+  it('recovers from a valid replica when the invalid replica has no observable safe revision', async () => {
+    const stateDir = await makeStateDir();
+    const state = policy.reconcileState({
+      state: null,
+      identities,
+      timeZone: 'UTC',
+      now: new Date(NOW_ISO),
+    });
+    const valid = envelopeFor(state, 4);
+    await writeFile(join(stateDir, 'state.json'), JSON.stringify(valid), 'utf8');
+    await writeFile(join(stateDir, 'state.backup.json'), '{"revision":', 'utf8');
+
+    const recovered = await fixedStore(stateDir).read(context);
+
+    expect(recovered.health.status).toBe('recovered-replica');
+    expect(recovered.stateRevision).toBe(valid.revision);
+    expect(await readEnvelope(join(stateDir, 'state.json'))).toEqual(valid);
+    expect(await readEnvelope(join(stateDir, 'state.backup.json'))).toEqual(valid);
+  });
+
   it('rejects revision-only tampering and accepts reordered record keys with the same canonical checksum', async () => {
     const stateDir = await makeStateDir();
     const store = fixedStore(stateDir);
