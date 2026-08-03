@@ -172,10 +172,10 @@ function validTools(): Tool[] {
       title: 'Resolve a library',
       description: 'Resolve docs library identifiers.',
       inputSchema: {
+        $schema: 'http://json-schema.org/draft-07/schema#',
         type: 'object',
         required: ['libraryName', 'query'],
         properties: { libraryName: { type: 'string' }, query: { type: 'string' } },
-        additionalProperties: false,
       },
       annotations: { readOnlyHint: true },
       _meta: { fixture: true },
@@ -185,6 +185,7 @@ function validTools(): Tool[] {
       title: 'Query documentation',
       description: 'Query resolved documentation.',
       inputSchema: {
+        $schema: 'http://json-schema.org/draft-07/schema#',
         type: 'object',
         required: ['libraryId', 'query'],
         properties: { libraryId: { type: 'string' }, query: { type: 'string' } },
@@ -352,8 +353,19 @@ describe('Context7 official child adapter', () => {
     ['non-string required property', ['--tool-shape', 'required-non-string'], /./],
     ['changed required set', ['--tool-shape', 'required-drift'], /context7-child-tool-contract/],
     ['changed required string property', ['--tool-shape', 'string-drift'], /context7-child-tool-contract/],
+    ['extra optional property', ['--tool-shape', 'extra-property'], /context7-child-tool-contract:resolve-library-id:property-set/],
+    ['explicit additionalProperties true', ['--tool-shape', 'open-additional-properties'], /context7-child-tool-contract:resolve-library-id:additional-properties/],
   ])('rejects the first child for %s', async (_name, args, pattern) => {
     await expect(fakeChild({ args })).rejects.toThrow(pattern);
+  });
+
+  it('accepts the first child when additionalProperties is explicitly false', async () => {
+    const child = await fakeChild({ args: ['--tool-shape', 'closed-additional-properties'] });
+    try {
+      expect(child.tools[0]?.inputSchema.additionalProperties).toBe(false);
+    } finally {
+      await child.close();
+    }
   });
 
   it('canonicalizes every MCP-standard descriptor field and rejects replacement drift', () => {
@@ -548,6 +560,15 @@ describe('Context7 official child adapter', () => {
     });
     try {
       expect(child.tools.map((tool) => tool.name)).toEqual(['resolve-library-id', 'query-docs']);
+      for (const tool of child.tools) {
+        const contract = adapter.EXPECTED_CONTEXT7_TOOL_CONTRACT[tool.name] as {
+          stringProperties: string[];
+        };
+        expect(tool.inputSchema.$schema).toEqual(expect.any(String));
+        expect(Object.keys(tool.inputSchema.properties as Record<string, unknown>).sort())
+          .toEqual([...contract.stringProperties].sort());
+        expect(Object.hasOwn(tool.inputSchema, 'additionalProperties')).toBe(false);
+      }
     } finally {
       await child.close();
     }

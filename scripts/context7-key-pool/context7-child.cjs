@@ -92,6 +92,14 @@ function validateOfficialToolSet(tools, expectedSignature) {
     const expectedRequired = [...contract.required].sort();
     if (JSON.stringify(required) !== JSON.stringify(expectedRequired)) failContract(`${tool.name}:required-set`);
     if (!isPlainObject(schema.properties)) failContract(`${tool.name}:properties`);
+    const propertyNames = Object.keys(schema.properties).sort();
+    const expectedPropertyNames = [...contract.stringProperties].sort();
+    if (JSON.stringify(propertyNames) !== JSON.stringify(expectedPropertyNames)) {
+      failContract(`${tool.name}:property-set`);
+    }
+    if (Object.hasOwn(schema, 'additionalProperties') && schema.additionalProperties !== false) {
+      failContract(`${tool.name}:additional-properties`);
+    }
     for (const propertyName of contract.stringProperties) {
       const property = schema.properties[propertyName];
       if (!isPlainObject(property) || property.type !== 'string') {

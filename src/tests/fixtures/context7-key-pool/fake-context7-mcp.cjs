@@ -32,10 +32,10 @@ function baseTools() {
       title: 'Resolve a library',
       description: 'Resolve docs library identifiers.',
       inputSchema: {
+        $schema: 'http://json-schema.org/draft-07/schema#',
         type: 'object',
         required: ['libraryName', 'query'],
         properties: { libraryName: { type: 'string' }, query: { type: 'string' } },
-        additionalProperties: false,
       },
       annotations: { readOnlyHint: true },
       _meta: { fixture: true },
@@ -45,6 +45,7 @@ function baseTools() {
       title: 'Query documentation',
       description: 'Query resolved documentation.',
       inputSchema: {
+        $schema: 'http://json-schema.org/draft-07/schema#',
         type: 'object',
         required: ['libraryId', 'query'],
         properties: { libraryId: { type: 'string' }, query: { type: 'string' } },
@@ -65,6 +66,9 @@ function fixtureTools() {
     case 'required-non-string': tools[0].inputSchema.required = ['libraryName', 7]; break;
     case 'required-drift': tools[0].inputSchema.required = ['libraryName']; break;
     case 'string-drift': tools[0].inputSchema.properties.query = { type: 'number' }; break;
+    case 'extra-property': tools[0].inputSchema.properties.optionalAlias = { type: 'string' }; break;
+    case 'closed-additional-properties': tools[0].inputSchema.additionalProperties = false; break;
+    case 'open-additional-properties': tools[0].inputSchema.additionalProperties = true; break;
     default: break;
   }
   return tools;
