@@ -8,17 +8,21 @@ import { describe, expect, it } from 'vitest';
 const repoRoot = path.resolve(__dirname, '../../..');
 const scriptPath = path.join(repoRoot, 'scripts', 'contracts', 'check-human-docs-coupled-changes.cjs');
 const manifestHelperPath = path.join(repoRoot, 'scripts', 'contracts', 'required-files-manifest.cjs');
+const coveragePath = 'docs/handbook/change-coverage.json';
+const catalogPath = 'docs/handbook/catalog.json';
 
 const tempRoots: string[] = [];
 const commandKey = (...args: string[]): string => JSON.stringify(args);
 const GIT_COMMANDS = {
-  staged: commandKey('diff', '--cached', '--name-status', '-z', '--find-renames', '--diff-filter=ACMRD'),
-  unstaged: commandKey('diff', '--name-status', '-z', '--find-renames', '--diff-filter=ACMRD'),
+  staged: commandKey('diff', '--cached', '--name-status', '-z', '--find-renames', '--diff-filter=ACMRDT'),
+  unstaged: commandKey('diff', '--name-status', '-z', '--find-renames', '--diff-filter=ACMRDT'),
   untracked: commandKey('ls-files', '--others', '--exclude-standard', '-z'),
-  head: commandKey('diff-tree', '--no-commit-id', '--name-status', '-z', '--find-renames', '-r', '--diff-filter=ACMRD', 'HEAD'),
+  head: commandKey('diff-tree', '--no-commit-id', '--name-status', '-z', '--find-renames', '-r', '--diff-filter=ACMRDT', 'HEAD'),
+  showCoverage: commandKey('show', `HEAD:${coveragePath}`),
+  showCatalog: commandKey('show', `HEAD:${catalogPath}`),
 } as const;
 
-type FakeGitResponse = { fields?: string[]; status?: number; stderr?: string };
+type FakeGitResponse = { fields?: string[]; stdout?: string; status?: number; stderr?: string };
 type GitFixture = { root: string; runner: string; fakeBin: string; logPath: string };
 function createGitFixture(): GitFixture {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'human-docs-coupled-'));
@@ -57,6 +61,7 @@ function createGitFixture(): GitFixture {
     "const response = JSON.parse(process.env.FAKE_GIT_RESPONSES || '{}')[JSON.stringify(args)];",
     "if (!response) process.exit(97);",
     "if (response.stderr) process.stderr.write(response.stderr);",
+    "if (typeof response.stdout === 'string') process.stdout.write(response.stdout);",
     "if (response.fields?.length) process.stdout.write(`${response.fields.join('\\0')}\\0`);",
     "process.exit(response.status || 0);",
     '',
@@ -64,7 +69,7 @@ function createGitFixture(): GitFixture {
   if (process.platform === 'win32') {
     const gitPath = path.join(fakeBin, 'git.exe');
     try { fs.linkSync(process.execPath, gitPath); } catch { fs.copyFileSync(process.execPath, gitPath); }
-    for (const command of ['diff', 'diff-tree', 'ls-files', 'rev-parse']) {
+    for (const command of ['diff', 'diff-tree', 'ls-files', 'rev-parse', 'show']) {
       fs.writeFileSync(path.join(root, command), `process.argv.splice(2, 0, ${JSON.stringify(command)}); require(${JSON.stringify(fakeGitScript)});\n`);
     }
   } else {
@@ -122,6 +127,16 @@ function expectEvidenceUnavailable(result: ReturnType<typeof spawnSync>, fixture
   expect(result.stdout).toBe('');
   expect(result.stderr).toBe('[human-docs-coupled-changes] human-docs-coupled-evidence-unavailable\n');
   expect(result.stderr).not.toContain(fixture.root);
+}
+function headPolicyResponses(fixture: GitFixture): Record<string, FakeGitResponse> {
+  return {
+    [GIT_COMMANDS.showCoverage]: {
+      stdout: fs.readFileSync(path.join(fixture.root, coveragePath), 'utf8'),
+    },
+    [GIT_COMMANDS.showCatalog]: {
+      stdout: fs.readFileSync(path.join(fixture.root, catalogPath), 'utf8'),
+    },
+  };
 }
 function runGuard(files: string[]): ReturnType<typeof spawnSync> {
   return spawnSync(process.execPath, [scriptPath, `--files=${files.join(',')}`], {
@@ -499,6 +514,26 @@ describe('check-human-docs-coupled-changes Git evidence', { timeout: 10_000 }, (
     expect(result.stderr).toContain('changed: src/app/deleted.ts, src/app/duplicate.ts, src/app/line\nbreak.ts, src/app/new.ts, src/app/old.ts, src/app/untracked.ts');
     expect(gitLog(fixture)).toEqual([GIT_COMMANDS.staged, GIT_COMMANDS.unstaged, GIT_COMMANDS.untracked].map(command => JSON.parse(command)));
   });
+  it('treats a single-path Git type change as changed trigger evidence', () => {
+    const fixture = createGitFixture();
+    const typeChange = { fields: ['T', 'src/app/feature.ts'] };
+    const result = runGitFixture(fixture, {
+      [commandKey('diff', '--cached', '--name-status', '-z', '--find-renames', '--diff-filter=ACMRD')]: typeChange,
+      [commandKey('diff', '--cached', '--name-status', '-z', '--find-renames', '--diff-filter=ACMRDT')]: typeChange,
+      [commandKey('diff', '--name-status', '-z', '--find-renames', '--diff-filter=ACMRD')]: empty,
+      [commandKey('diff', '--name-status', '-z', '--find-renames', '--diff-filter=ACMRDT')]: empty,
+      [GIT_COMMANDS.untracked]: empty,
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('fixture-route');
+    expect(result.stderr).toContain('changed: src/app/feature.ts');
+    expect(gitLog(fixture)).toEqual([
+      GIT_COMMANDS.staged,
+      GIT_COMMANDS.unstaged,
+      GIT_COMMANDS.untracked,
+    ].map(command => JSON.parse(command)));
+  });
   it('accepts a mixed staged trigger and unstaged handbook companion', () => {
     const fixture = createGitFixture();
     const result = runGitFixture(fixture, {
@@ -545,16 +580,96 @@ describe('check-human-docs-coupled-changes Git evidence', { timeout: 10_000 }, (
     expect(gitLog(fixture)).toEqual([JSON.parse(GIT_COMMANDS.staged)]);
   });
 
-  it('preserves required-files manifest precedence without invoking Git', () => {
+  it('validates the required-files manifest before consulting dirty policy files', () => {
+    const fixture = createGitFixture();
+    fs.writeFileSync(path.join(fixture.root, coveragePath), 'secret dirty coverage');
+    fs.writeFileSync(path.join(fixture.root, catalogPath), 'secret dirty catalog');
+    const manifestPath = path.join(fixture.root, 'required-files.txt');
+    fs.writeFileSync(manifestPath, `schemaVersion=2\nroot=${fixture.root}\ndocs/handbook/page.md\nsrc/app/feature.ts\n`);
+
+    const result = runGitFixture(fixture, {}, 'working-tree-or-head', {
+      REQUIRED_FILES_MANIFEST_REQUIRED: '1',
+      REQUIRED_FILES_MANIFEST_PATH: manifestPath,
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('schemaVersion=1');
+    expect(result.stderr).not.toContain('secret dirty');
+    expect(gitLog(fixture)).toEqual([]);
+  });
+
+  it('uses HEAD policy for manifest-omitted coverage and catalog despite dirty worktree bypasses', () => {
+    const fixture = createGitFixture();
+    const responses = headPolicyResponses(fixture);
+    fs.writeFileSync(path.join(fixture.root, coveragePath), JSON.stringify({ version: 1, routes: [] }));
+    fs.writeFileSync(path.join(fixture.root, catalogPath), 'secret dirty catalog bypass');
+    const manifestPath = path.join(fixture.root, 'required-files.txt');
+    fs.writeFileSync(manifestPath, `schemaVersion=1\nroot=${fixture.root}\ndocs/handbook/page.md\nsrc/app/feature.ts\n`);
+
+    const result = runGitFixture(fixture, responses, 'working-tree-or-head', {
+      REQUIRED_FILES_MANIFEST_REQUIRED: '1',
+      REQUIRED_FILES_MANIFEST_PATH: manifestPath,
+    });
+
+    expect(result.status, String(result.stderr)).toBe(0);
+    expect(result.stdout).toContain('[human-docs-coupled-changes] passed');
+    expect(result.stderr).not.toContain('secret dirty');
+    expect(gitLog(fixture)).toEqual([
+      JSON.parse(GIT_COMMANDS.showCoverage),
+      JSON.parse(GIT_COMMANDS.showCatalog),
+    ]);
+  });
+
+  it('fails closed without leaking Git stderr when HEAD policy cannot be read', () => {
+    const fixture = createGitFixture();
+    const responses = headPolicyResponses(fixture);
+    responses[GIT_COMMANDS.showCoverage] = unavailable(fixture.root);
+    const manifestPath = path.join(fixture.root, 'required-files.txt');
+    fs.writeFileSync(manifestPath, `schemaVersion=1\nroot=${fixture.root}\ndocs/handbook/page.md\nsrc/app/feature.ts\n`);
+
+    const result = runGitFixture(fixture, responses, 'working-tree-or-head', {
+      REQUIRED_FILES_MANIFEST_REQUIRED: '1',
+      REQUIRED_FILES_MANIFEST_PATH: manifestPath,
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toContain('human-docs-coupled-evidence-unavailable');
+    expect(result.stderr).not.toContain(fixture.root);
+    expect(result.stderr).not.toContain('secret:');
+    expect(gitLog(fixture)).toEqual([
+      JSON.parse(GIT_COMMANDS.showCoverage),
+      JSON.parse(GIT_COMMANDS.showCatalog),
+    ]);
+  });
+
+  it('reads worktree policy without Git only when both policy files are in the manifest', () => {
+    const fixture = createGitFixture();
+    const manifestPath = path.join(fixture.root, 'required-files.txt');
+    fs.writeFileSync(manifestPath, `schemaVersion=1\nroot=${fixture.root}\ndocs/handbook/catalog.json\ndocs/handbook/change-coverage.json\ndocs/handbook/page.md\nsrc/app/feature.ts\n`);
+    const result = runGitFixture(fixture, {}, 'working-tree-or-head', {
+      REQUIRED_FILES_MANIFEST_REQUIRED: '1',
+      REQUIRED_FILES_MANIFEST_PATH: manifestPath,
+    });
+
+    expect(result.status, String(result.stderr)).toBe(0);
+    expect(result.stdout).toContain('[human-docs-coupled-changes] passed');
+    expect(gitLog(fixture)).toEqual([]);
+  });
+
+  it('preserves required-files manifest precedence while loading omitted policy from HEAD', () => {
     const fixture = createGitFixture();
     const manifestPath = path.join(fixture.root, 'required-files.txt');
     fs.writeFileSync(manifestPath, `schemaVersion=1\nroot=${fixture.root}\ndocs/handbook/page.md\nsrc/app/feature.ts\n`);
-    const result = runGitFixture(fixture, {}, 'working-tree-or-head', {
+    const result = runGitFixture(fixture, headPolicyResponses(fixture), 'working-tree-or-head', {
       REQUIRED_FILES_MANIFEST_REQUIRED: '1',
       REQUIRED_FILES_MANIFEST_PATH: manifestPath,
     });
     expect(result.status, String(result.stderr)).toBe(0);
     expect(result.stdout).toContain('[human-docs-coupled-changes] passed');
-    expect(gitLog(fixture)).toEqual([]);
+    expect(gitLog(fixture)).toEqual([
+      JSON.parse(GIT_COMMANDS.showCoverage),
+      JSON.parse(GIT_COMMANDS.showCatalog),
+    ]);
   });
 });

@@ -89,6 +89,34 @@ export class TaskRetryService {
     expect(result.stderr).not.toContain('safe-set-call');
   });
 
+  it("blocks RetryQueueService.add through a Pick alias without flagging ordinary structural add types", () => {
+    const root = createFixtureRoot();
+    writeFixtureFile(
+      root,
+      'src/app/features/tasks/picked-task-retry.service.ts',
+      `
+import { RetryQueueService } from '../../core/services/sync/retry-queue.service';
+
+type RetryQueueAddOnly = Pick<RetryQueueService, 'add'>;
+type LocalAdder = { add(value: string): boolean };
+
+export function queueTask(retryQueue: RetryQueueAddOnly, localAdder: LocalAdder): void {
+  new Set<string>().add('safe-set-call');
+  localAdder.add('safe-structural-call');
+  retryQueue.add('task', 'upsert', { id: 'task-1' });
+}
+`,
+    );
+
+    const result = runGuard(root);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('picked-task-retry.service.ts');
+    expect(result.stderr).toContain("retryQueue.add('task', 'upsert'");
+    expect(result.stderr).not.toContain('safe-set-call');
+    expect(result.stderr).not.toContain('safe-structural-call');
+  });
+
   it('allows durable RetryQueue calls and test-only compatibility calls', () => {
     const root = createFixtureRoot();
     writeFixtureFile(

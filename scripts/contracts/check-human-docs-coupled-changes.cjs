@@ -61,7 +61,7 @@ function parseNameStatus(output) {
   for (let index = 0; index < fields.length;) {
     const status = fields[index++];
     const firstPath = fields[index++];
-    if (!/^[ACMRD]/.test(status) || firstPath === undefined) {
+    if (!/^[ACMRDT]/.test(status) || firstPath === undefined) {
       throw new Error('human-docs-coupled-evidence-unavailable');
     }
     files.push(firstPath);
@@ -81,11 +81,11 @@ function uniqueFiles(files) {
 }
 
 function getStagedFiles() {
-  return parseNameStatus(runGit(['diff', '--cached', '--name-status', '-z', '--find-renames', '--diff-filter=ACMRD']));
+  return parseNameStatus(runGit(['diff', '--cached', '--name-status', '-z', '--find-renames', '--diff-filter=ACMRDT']));
 }
 
 function getUnstagedFiles() {
-  return parseNameStatus(runGit(['diff', '--name-status', '-z', '--find-renames', '--diff-filter=ACMRD']));
+  return parseNameStatus(runGit(['diff', '--name-status', '-z', '--find-renames', '--diff-filter=ACMRDT']));
 }
 
 function getUntrackedFiles() {
@@ -114,12 +114,12 @@ function canResolveGitRef(ref) {
 }
 
 function getFilesForRange(range) {
-  return parseNameStatus(runGit(['diff', '--name-status', '-z', '--find-renames', '--diff-filter=ACMRD', range]));
+  return parseNameStatus(runGit(['diff', '--name-status', '-z', '--find-renames', '--diff-filter=ACMRDT', range]));
 }
 
 function getHeadCommitFiles() {
   return parseNameStatus(runGit([
-    'diff-tree', '--no-commit-id', '--name-status', '-z', '--find-renames', '-r', '--diff-filter=ACMRD', 'HEAD',
+    'diff-tree', '--no-commit-id', '--name-status', '-z', '--find-renames', '-r', '--diff-filter=ACMRDT', 'HEAD',
   ]));
 }
 
@@ -188,21 +188,36 @@ function readAudience(relativePath) {
   return audience.trim();
 }
 
-function loadCoverage() {
+function readPolicyText(relativePath, manifestFiles) {
+  if (manifestFiles && !manifestFiles.includes(relativePath)) {
+    return runGit(['show', `HEAD:${relativePath}`]);
+  }
+  return fs.readFileSync(toAbsolute(relativePath), 'utf8');
+}
+
+function loadCoverage(manifestFiles) {
   const errors = [];
   let coverage;
   let catalog;
 
   try {
-    coverage = JSON.parse(fs.readFileSync(toAbsolute(coveragePath), 'utf8'));
+    coverage = JSON.parse(readPolicyText(coveragePath, manifestFiles));
   } catch (error) {
-    errors.push(`${coveragePath} must be valid JSON: ${error.message}`);
+    errors.push(
+      error instanceof Error && error.message === 'human-docs-coupled-evidence-unavailable'
+        ? error.message
+        : `${coveragePath} must be valid JSON`,
+    );
   }
 
   try {
-    catalog = JSON.parse(fs.readFileSync(toAbsolute(catalogPath), 'utf8'));
+    catalog = JSON.parse(readPolicyText(catalogPath, manifestFiles));
   } catch (error) {
-    errors.push(`${catalogPath} must be valid JSON: ${error.message}`);
+    errors.push(
+      error instanceof Error && error.message === 'human-docs-coupled-evidence-unavailable'
+        ? error.message
+        : `${catalogPath} must be valid JSON`,
+    );
   }
 
   if (errors.length > 0 || !coverage || !catalog) {
@@ -303,7 +318,15 @@ function collectViolations(changedFiles, routes) {
 }
 
 function main() {
-  const { coverage, errors } = loadCoverage();
+  let manifestFiles;
+  try {
+    manifestFiles = loadRequiredFilesManifest({ projectRoot });
+  } catch (error) {
+    console.error(`[human-docs-coupled-changes] ${error instanceof Error ? error.message : String(error)}`);
+    process.exit(1);
+  }
+
+  const { coverage, errors } = loadCoverage(manifestFiles);
 
   if (errors.length > 0 || !coverage) {
     console.error('[human-docs-coupled-changes] invalid coverage configuration:');
@@ -314,7 +337,6 @@ function main() {
   let mode = 'required-files-manifest';
   let changedFiles;
   try {
-    const manifestFiles = loadRequiredFilesManifest({ projectRoot });
     if (manifestFiles) {
       changedFiles = manifestFiles;
     } else {

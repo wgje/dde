@@ -62,6 +62,11 @@ const encodingGuardPath = path.join(
 
 const defaultTestContractsScript = 'npm run test:prepare-env && npm run audit:secrets && npm run quality:guard:encoding && cross-env REQUIRED_FILES_MANIFEST_REQUIRED=0 REQUIRED_FILES_MANIFEST_PATH= npm run quality:guard:actionqueue-durable-enqueue && cross-env REQUIRED_FILES_MANIFEST_REQUIRED=0 REQUIRED_FILES_MANIFEST_PATH= npm run quality:guard:retryqueue-durable-add && node scripts/contracts/check-flow-current-userid.cjs && cross-env REQUIRED_FILES_MANIFEST_REQUIRED=0 REQUIRED_FILES_MANIFEST_PATH= npm run quality:guard:coupled-changes && cross-env REQUIRED_FILES_MANIFEST_REQUIRED=0 REQUIRED_FILES_MANIFEST_PATH= npm run quality:guard:context7-coupled && cross-env REQUIRED_FILES_MANIFEST_REQUIRED=0 REQUIRED_FILES_MANIFEST_PATH= npm run quality:guard:human-docs-coupled && cross-env REQUIRED_FILES_MANIFEST_REQUIRED=0 REQUIRED_FILES_MANIFEST_PATH= npm run test:contract-specs';
 const repoSafeManifestFile = 'src/tests/scripts/check-actionqueue-durable-enqueue.spec.ts';
+const repoHumanDocsManifestFiles = [
+  'docs/handbook/catalog.json',
+  'docs/handbook/change-coverage.json',
+  repoSafeManifestFile,
+] as const;
 
 function canonicalRoot(root: string): string {
   return typeof realpathSync.native === 'function'
@@ -409,7 +414,22 @@ describe('required-files manifest parser', () => {
       expected: ['duplicate'],
     },
     {
-      name: 'rejects duplicate canonical identities reached through an in-repo directory alias',
+      name: 'rejects an in-repo directory alias before canonicalizing it into a manifest entry',
+      run: (fixture: ReturnType<typeof createActionqueueFixtureRoot>) => {
+        createDirectoryAlias(
+          path.join(fixture.root, 'src', 'app', 'features', 'tasks'),
+          path.join(fixture.root, 'src', 'app', 'features', 'z-tasks-alias'),
+        );
+        const manifestPath = writeManifest(
+          fixture.root,
+          ['src/app/features/z-tasks-alias/a-safe-task-save.service.ts'],
+        );
+        return runActionqueueGuard(fixture.root, [], manifestEnv(manifestPath));
+      },
+      expected: ['must be canonical repo-relative path'],
+    },
+    {
+      name: 'rejects a duplicate identity reached through an in-repo directory alias at the manifest boundary',
       run: (fixture: ReturnType<typeof createActionqueueFixtureRoot>) => {
         createDirectoryAlias(
           path.join(fixture.root, 'src', 'app', 'features', 'tasks'),
@@ -421,7 +441,7 @@ describe('required-files manifest parser', () => {
         );
         return runActionqueueGuard(fixture.root, [], manifestEnv(manifestPath));
       },
-      expected: ['duplicate'],
+      expected: ['must be canonical repo-relative path'],
     },
     {
       name: 'rejects unsorted entries',
@@ -482,7 +502,7 @@ describe('required-files manifest parser', () => {
     });
   }
 
-  it('rejects case-only canonical duplicates on Windows', () => {
+  it('rejects a case-only manifest alias on Windows before duplicate classification', () => {
     if (process.platform !== 'win32') {
       return;
     }
@@ -495,7 +515,7 @@ describe('required-files manifest parser', () => {
     const manifestPath = writeManifest(fixture.root, [upperCaseAlias, fixture.safeFile]);
     const result = runActionqueueGuard(fixture.root, [], manifestEnv(manifestPath));
 
-    expectFailure(result, 'duplicate');
+    expectFailure(result, 'must be canonical repo-relative path');
   });
 });
 
@@ -524,7 +544,7 @@ describe('required-files manifest guard selection', () => {
     expectPassed(result, '[quality:guard:retryqueue-durable-add] passed');
   });
 
-  it('canonicalizes a single in-repo alias before RetryQueue explicit-file classification', () => {
+  it('rejects a single in-repo alias before RetryQueue explicit-file classification', () => {
     const fixture = createRetryqueueFixtureRoot();
     createDirectoryAlias(
       path.join(fixture.root, 'src', 'app', 'features', 'tasks'),
@@ -536,14 +556,11 @@ describe('required-files manifest guard selection', () => {
     );
     const result = runRetryqueueGuard(fixture.root, [], manifestEnv(manifestPath));
 
-    expectFailure(
-      result,
-      fixture.badFile,
-      'RetryQueueService.add()',
-    );
+    expectFailure(result, 'must be canonical repo-relative path');
+    expect(combinedOutput(result)).not.toContain('RetryQueueService.add()');
   });
 
-  it('canonicalizes a single in-repo alias before coupled-change path classification', () => {
+  it('rejects an aliased coupled-change trigger instead of letting it masquerade as the canonical trigger', () => {
     const root = createTempRoot('nanoflow-required-files-coupled-alias-');
     const triggerFile = 'src/services/dock-snapshot-persistence.service.ts';
     writeFixtureFile(
@@ -561,7 +578,9 @@ describe('required-files manifest guard selection', () => {
     );
     const result = runNodeScript(coupledGuardPath, root, [], manifestEnv(manifestPath));
 
-    expectFailure(result, 'local-persistence-backup-restore', triggerFile);
+    expectFailure(result, 'must be canonical repo-relative path');
+    expect(combinedOutput(result)).not.toContain('local-persistence-backup-restore');
+    expect(combinedOutput(result)).not.toContain("localStorage.setItem('nanoflow.snapshot', 'value')");
   });
 
   const explicitFileCases = [
@@ -569,25 +588,28 @@ describe('required-files manifest guard selection', () => {
       name: 'makes the coupled-changes guard prefer the manifest over explicit --files input',
       scriptPath: coupledGuardPath,
       args: ['--files=src/services/dock-snapshot-persistence.service.ts'],
+      manifestFiles: [repoSafeManifestFile],
       success: '[quality:guard:coupled-changes] passed',
     },
     {
       name: 'makes the Context7 coupled-changes guard prefer the manifest over explicit --files input',
       scriptPath: context7GuardPath,
       args: ['--files=package.json'],
+      manifestFiles: [repoSafeManifestFile],
       success: '[context7-coupled-changes] passed',
     },
     {
       name: 'makes the human-docs coupled-changes guard prefer the manifest over explicit --files input',
       scriptPath: humanDocsGuardPath,
       args: ['--files=src/app/features/text/components/text-task-editor.component.ts'],
+      manifestFiles: repoHumanDocsManifestFiles,
       success: '[human-docs-coupled-changes] passed',
     },
   ] as const;
 
   for (const explicitFileCase of explicitFileCases) {
     it(explicitFileCase.name, () => {
-      const manifestPath = writeManifest(repoRoot, [repoSafeManifestFile]);
+      const manifestPath = writeManifest(repoRoot, explicitFileCase.manifestFiles);
       const result = runNodeScript(
         explicitFileCase.scriptPath,
         repoRoot,
@@ -603,23 +625,26 @@ describe('required-files manifest guard selection', () => {
     {
       name: 'makes the coupled-changes guard ignore invalid --mode when the manifest is active',
       scriptPath: coupledGuardPath,
+      manifestFiles: [repoSafeManifestFile],
       success: '[quality:guard:coupled-changes] passed',
     },
     {
       name: 'makes the Context7 coupled-changes guard ignore invalid --mode when the manifest is active',
       scriptPath: context7GuardPath,
+      manifestFiles: [repoSafeManifestFile],
       success: '[context7-coupled-changes] passed',
     },
     {
       name: 'makes the human-docs coupled-changes guard ignore invalid --mode when the manifest is active',
       scriptPath: humanDocsGuardPath,
+      manifestFiles: repoHumanDocsManifestFiles,
       success: '[human-docs-coupled-changes] passed',
     },
   ] as const;
 
   for (const invalidModeCase of invalidModeCases) {
     it(invalidModeCase.name, () => {
-      const manifestPath = writeManifest(repoRoot, [repoSafeManifestFile]);
+      const manifestPath = writeManifest(repoRoot, invalidModeCase.manifestFiles);
       const result = runNodeScript(
         invalidModeCase.scriptPath,
         repoRoot,

@@ -128,6 +128,11 @@ function validateManifestEntry(projectRoot, entry, index, previousEntry, seenEnt
     throw new Error(`${label} must resolve within the project root: ${entry}`);
   }
 
+  const canonicalEntry = path.relative(projectRoot, canonicalEntryPath).split(path.sep).join('/');
+  if (canonicalEntry !== entry) {
+    throw new Error(`${label} must be canonical repo-relative path: ${entry}`);
+  }
+
   if (!fs.statSync(canonicalEntryPath).isFile()) {
     throw new Error(`${label} references missing path: ${entry}`);
   }
@@ -139,7 +144,7 @@ function validateManifestEntry(projectRoot, entry, index, previousEntry, seenEnt
 
   return {
     canonicalIdentity,
-    canonicalEntry: path.relative(projectRoot, canonicalEntryPath).split(path.sep).join('/'),
+    canonicalEntry,
   };
 }
 

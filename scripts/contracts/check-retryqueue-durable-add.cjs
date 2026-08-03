@@ -95,6 +95,22 @@ function symbolDeclaresRetryQueueType(symbol, root) {
   });
 }
 
+function declarationBelongsToRetryQueueType(declaration, root) {
+  let current = declaration;
+  while (current) {
+    if (
+      (ts.isClassDeclaration(current) || ts.isInterfaceDeclaration(current))
+      && current.name
+      && RETRY_QUEUE_TYPE_NAMES.has(current.name.text)
+    ) {
+      const relativePath = normalizePath(path.relative(root, current.getSourceFile().fileName));
+      return RETRY_QUEUE_TYPE_FILES.has(relativePath);
+    }
+    current = current.parent;
+  }
+  return false;
+}
+
 function isRetryQueueType(type, checker, root, seen = new Set()) {
   if (!type || seen.has(type)) return false;
   seen.add(type);
@@ -117,6 +133,23 @@ function isRetryQueueType(type, checker, root, seen = new Set()) {
 
   const apparentType = checker.getApparentType(type);
   return apparentType !== type && isRetryQueueType(apparentType, checker, root, seen);
+}
+
+function hasRetryQueueAddDeclaration(type, receiver, checker, root) {
+  const addProperty = checker.getPropertyOfType(type, 'add');
+  if (!addProperty) return false;
+
+  if ((addProperty.declarations ?? []).some(declaration => (
+    declarationBelongsToRetryQueueType(declaration, root)
+  ))) {
+    return true;
+  }
+
+  const addType = checker.getTypeOfSymbolAtLocation(addProperty, receiver);
+  return checker.getSignaturesOfType(addType, ts.SignatureKind.Call).some(signature => {
+    const declaration = signature.getDeclaration?.() ?? signature.declaration;
+    return declaration ? declarationBelongsToRetryQueueType(declaration, root) : false;
+  });
 }
 
 function getUnsafeAddReceiver(node) {
@@ -156,7 +189,14 @@ function findViolations(root, program, explicitFiles) {
 
     const visit = node => {
       const receiver = getUnsafeAddReceiver(node);
-      if (receiver && isRetryQueueType(checker.getTypeAtLocation(receiver), checker, root)) {
+      const receiverType = receiver ? checker.getTypeAtLocation(receiver) : null;
+      if (
+        receiver
+        && (
+          isRetryQueueType(receiverType, checker, root)
+          || hasRetryQueueAddDeclaration(receiverType, receiver, checker, root)
+        )
+      ) {
         const start = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
         violations.push({
           file: relativePath,
