@@ -95,20 +95,31 @@ function symbolDeclaresRetryQueueType(symbol, root) {
   });
 }
 
-function declarationBelongsToRetryQueueType(declaration, root) {
-  let current = declaration;
-  while (current) {
-    if (
-      (ts.isClassDeclaration(current) || ts.isInterfaceDeclaration(current))
-      && current.name
-      && RETRY_QUEUE_TYPE_NAMES.has(current.name.text)
-    ) {
-      const relativePath = normalizePath(path.relative(root, current.getSourceFile().fileName));
-      return RETRY_QUEUE_TYPE_FILES.has(relativePath);
-    }
-    current = current.parent;
+function declarationBelongsToRetryQueueAdd(declaration, root) {
+  let member = declaration;
+  while (
+    member.parent
+    && !ts.isClassDeclaration(member.parent)
+    && !ts.isInterfaceDeclaration(member.parent)
+  ) {
+    member = member.parent;
   }
-  return false;
+
+  const owner = member.parent;
+  if (
+    !owner
+    || (!ts.isClassDeclaration(owner) && !ts.isInterfaceDeclaration(owner))
+    || !owner.name
+    || !RETRY_QUEUE_TYPE_NAMES.has(owner.name.text)
+    || !member.name
+    || (!ts.isIdentifier(member.name) && !ts.isStringLiteralLike(member.name))
+    || member.name.text !== 'add'
+  ) {
+    return false;
+  }
+
+  const relativePath = normalizePath(path.relative(root, owner.getSourceFile().fileName));
+  return RETRY_QUEUE_TYPE_FILES.has(relativePath);
 }
 
 function isRetryQueueType(type, checker, root, seen = new Set()) {
@@ -140,7 +151,7 @@ function hasRetryQueueAddDeclaration(type, receiver, checker, root) {
   if (!addProperty) return false;
 
   if ((addProperty.declarations ?? []).some(declaration => (
-    declarationBelongsToRetryQueueType(declaration, root)
+    declarationBelongsToRetryQueueAdd(declaration, root)
   ))) {
     return true;
   }
@@ -148,7 +159,7 @@ function hasRetryQueueAddDeclaration(type, receiver, checker, root) {
   const addType = checker.getTypeOfSymbolAtLocation(addProperty, receiver);
   return checker.getSignaturesOfType(addType, ts.SignatureKind.Call).some(signature => {
     const declaration = signature.getDeclaration?.() ?? signature.declaration;
-    return declaration ? declarationBelongsToRetryQueueType(declaration, root) : false;
+    return declaration ? declarationBelongsToRetryQueueAdd(declaration, root) : false;
   });
 }
 

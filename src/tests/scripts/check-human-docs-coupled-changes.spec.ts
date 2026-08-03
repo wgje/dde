@@ -120,6 +120,21 @@ function runGitFixture(
     timeout: 8_000,
   });
 }
+function runRealGit(root: string, args: readonly string[], input?: string) {
+  const blocked = new Set(['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE'].map(key => key.toLowerCase()));
+  const env = Object.fromEntries(Object.entries(process.env)
+    .filter(([key]) => !blocked.has(key.toLowerCase())));
+  return spawnSync('git', [...args], {
+    cwd: root,
+    env,
+    encoding: 'utf8',
+    input,
+    timeout: 8_000,
+  });
+}
+function expectGitSucceeded(result: ReturnType<typeof spawnSync>): void {
+  expect(result.status, `${result.stdout ?? ''}${result.stderr ?? ''}`).toBe(0);
+}
 function gitLog(fixture: GitFixture): string[][] {
   if (!fs.existsSync(fixture.logPath)) return [];
   return fs.readFileSync(fixture.logPath, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
@@ -554,6 +569,63 @@ describe('check-human-docs-coupled-changes Git evidence', { timeout: 10_000 }, (
       GIT_COMMANDS.verifyFixtureBase,
       GIT_COMMANDS.fixtureBaseRange,
     ].map(command => JSON.parse(command)));
+  });
+  it('collects a real Git regular-file-to-symlink type change from an explicit comparison range', () => {
+    const fixture = createGitFixture();
+    expectGitSucceeded(runRealGit(fixture.root, ['init', '--quiet']));
+    expectGitSucceeded(runRealGit(fixture.root, ['config', 'user.email', 'nanoflow-tests@example.invalid']));
+    expectGitSucceeded(runRealGit(fixture.root, ['config', 'user.name', 'NanoFlow Tests']));
+    expectGitSucceeded(runRealGit(fixture.root, [
+      'add',
+      'scripts/contracts/check-human-docs-coupled-changes.cjs',
+      'scripts/contracts/required-files-manifest.cjs',
+      coveragePath,
+      catalogPath,
+      'docs/handbook/page.md',
+      'src/app/feature.ts',
+    ]));
+    expectGitSucceeded(runRealGit(fixture.root, ['commit', '--quiet', '-m', 'base']));
+
+    const baseResult = runRealGit(fixture.root, ['rev-parse', 'HEAD']);
+    expectGitSucceeded(baseResult);
+    const base = String(baseResult.stdout).trim();
+    const blobResult = runRealGit(fixture.root, ['hash-object', '-w', '--stdin'], 'feature-target.ts');
+    expectGitSucceeded(blobResult);
+    const symlinkBlob = String(blobResult.stdout).trim();
+    expectGitSucceeded(runRealGit(fixture.root, [
+      'update-index',
+      '--cacheinfo',
+      `120000,${symlinkBlob},src/app/feature.ts`,
+    ]));
+    expectGitSucceeded(runRealGit(fixture.root, ['commit', '--quiet', '-m', 'type change']));
+
+    const range = `${base}...HEAD`;
+    const typeChange = runRealGit(fixture.root, [
+      'diff', '--name-status', '-z', '--find-renames', '--diff-filter=ACMRDT', range,
+    ]);
+    expectGitSucceeded(typeChange);
+    expect(typeChange.stdout).toBe('T\0src/app/feature.ts\0');
+
+    const cleanEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => ![
+      'git_dir', 'git_work_tree', 'git_index_file',
+      'required_files_manifest_required', 'required_files_manifest_path',
+      'human_docs_guard_diff_base', 'coupled_guard_diff_base',
+    ].includes(key.toLowerCase())));
+    const result = spawnSync(process.execPath, [fixture.runner, '--mode=staged-or-head'], {
+      cwd: fixture.root,
+      env: {
+        ...cleanEnv,
+        REQUIRED_FILES_MANIFEST_REQUIRED: '0',
+        REQUIRED_FILES_MANIFEST_PATH: '',
+        HUMAN_DOCS_GUARD_DIFF_BASE: base,
+      },
+      encoding: 'utf8',
+      timeout: 8_000,
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('fixture-route');
+    expect(result.stderr).toContain('changed: src/app/feature.ts');
   });
   it('accepts a mixed staged trigger and unstaged handbook companion', () => {
     const fixture = createGitFixture();

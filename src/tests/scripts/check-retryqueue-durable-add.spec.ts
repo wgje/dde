@@ -117,6 +117,28 @@ export function queueTask(retryQueue: RetryQueueAddOnly, localAdder: LocalAdder)
     expect(result.stderr).not.toContain('safe-structural-call');
   });
 
+  it("allows an adapter add property whose signature comes from RetryQueueService.addDurably", () => {
+    const root = createFixtureRoot();
+    writeFixtureFile(
+      root,
+      'src/app/features/tasks/durable-task-retry-adapter.ts',
+      `
+import { RetryQueueService } from '../../core/services/sync/retry-queue.service';
+
+type DurableAdapter = { add: RetryQueueService['addDurably'] };
+
+export async function queueTask(adapter: DurableAdapter): Promise<void> {
+  await adapter.add('task', 'upsert', { id: 'task-1' });
+}
+`,
+    );
+
+    const result = runGuard(root);
+
+    expect(result.status, String(result.stderr)).toBe(0);
+    expect(result.stdout).toContain('[quality:guard:retryqueue-durable-add] passed');
+  });
+
   it('allows durable RetryQueue calls and test-only compatibility calls', () => {
     const root = createFixtureRoot();
     writeFixtureFile(
