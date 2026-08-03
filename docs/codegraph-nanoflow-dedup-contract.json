@@ -617,7 +617,6 @@
         "lowInformationFilePenalty",
         "queryAllowsTestFiles",
         "isLowInformationTestFilePath",
-        "rankNodesForQuery",
         "selectEntryPoints",
         "orderRelatedFilesForQuery",
         "compareNodeSpecificity",

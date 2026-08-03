@@ -61,6 +61,21 @@ describe('NanoFlow SourcePolicy v1', () => {
     expect(querySource).not.toMatch(/\brankGraphEdgesForQuery\s*\(/);
   });
 
+  it('does not register the retired node ranker as a de-duplication hotspot', () => {
+    const contract = JSON.parse(fs.readFileSync(
+      path.join(process.cwd(), 'docs', 'codegraph-nanoflow-dedup-contract.json'),
+      'utf8',
+    )) as {
+      hotspots: Array<{ sourceSymbols?: string[]; coveredChildSymbols?: string[] }>;
+    };
+    const registeredSymbols = contract.hotspots.flatMap(hotspot => [
+      ...(hotspot.sourceSymbols ?? []),
+      ...(hotspot.coveredChildSymbols ?? []),
+    ]);
+
+    expect(registeredSymbols).not.toContain('rankNodesForQuery');
+  });
+
   it('discovers generic node and edge rank helpers as de-duplication hotspots', () => {
     const validatorSource = fs.readFileSync(
       path.join(process.cwd(), 'scripts', 'validate-codegraph-overlay-docs.cjs'),
