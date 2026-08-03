@@ -66,12 +66,23 @@ describe('NanoFlow SourcePolicy v1', () => {
       path.join(process.cwd(), 'scripts', 'validate-codegraph-overlay-docs.cjs'),
       'utf8',
     );
-    const discoveryPatternSource = validatorSource.match(
+    const discoveryPatternLiteral = validatorSource.match(
       /const DEDUP_CONTRACT_QUERY_FORMATTER_DISCOVERY_PATTERN\s*=\s*([\s\S]*?);/,
     )?.[1] ?? '';
+    const parsedPatternLiteral = discoveryPatternLiteral.match(/^\/([\s\S]*)\/([a-z]*)$/);
 
-    expect(discoveryPatternSource).toContain('rankNodesForQuery');
-    expect(discoveryPatternSource).toContain('rankGraphEdgesForQuery');
+    expect(parsedPatternLiteral).not.toBeNull();
+
+    const discoveryPattern = new RegExp(parsedPatternLiteral![1], parsedPatternLiteral![2]);
+    const syntheticQuerySource = [
+      'function rankGraphEdgesForQuery(edges) { return edges; }',
+      'function rankRelationshipEdgesForQuery(edges) { return edges; }',
+    ].join('\n');
+
+    expect(Array.from(syntheticQuerySource.matchAll(discoveryPattern), match => match[1])).toEqual([
+      'rankGraphEdgesForQuery',
+      'rankRelationshipEdgesForQuery',
+    ]);
   });
 
   it('classifies every required source family through one versioned policy', () => {
