@@ -6,6 +6,69 @@ import { expect, it } from 'vitest';
 
 import type { CodegraphOverlaySpecContext } from './codegraph-nanoflow-overlay.spec-context';
 
+function copyWrapperRuntimeBundle(wrapperScriptPath: string, destinationPath: string): void {
+  const sourceDir = path.dirname(wrapperScriptPath);
+  const destinationDir = path.dirname(destinationPath);
+  fs.copyFileSync(wrapperScriptPath, destinationPath);
+  for (const helperPath of [
+    'codegraph-nanoflow-dedup-query.cjs',
+    'codegraph-nanoflow-specialized-query.cjs',
+    'codegraph-codex-config.cjs',
+    path.join('lib', 'codegraph-context-outcome.cjs'),
+  ]) {
+    const targetPath = path.join(destinationDir, helperPath);
+    fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+    fs.copyFileSync(
+      path.join(sourceDir, helperPath),
+      targetPath,
+    );
+  }
+}
+
+interface CopiedWrapperContextResponse {
+  result: {
+    isError?: boolean;
+    content: Array<{ text: string }>;
+    structuredContent?: { outcome?: unknown };
+  };
+}
+
+function expectUsableCanonicalContext(response: CopiedWrapperContextResponse): void {
+  const outcome = response.result.structuredContent?.outcome as {
+    schemaVersion?: number;
+    status?: string;
+    usableContext?: boolean;
+    primaryFailureClass?: string | null;
+    base?: { textBytes?: number };
+    overlay?: { status?: string; isError?: boolean; failureClass?: string | null };
+  } | undefined;
+  expect(outcome).toEqual(expect.objectContaining({
+    schemaVersion: 1,
+    usableContext: true,
+    base: expect.objectContaining({
+      status: 'available',
+      isError: false,
+      textBytes: expect.any(Number),
+    }),
+  }));
+  expect(outcome?.base?.textBytes).toBeGreaterThan(0);
+  expect(['complete', 'partial']).toContain(outcome?.status);
+  expect(response.result.isError).toBe(outcome?.status === 'partial');
+  if (outcome?.status === 'partial') {
+    expect(outcome.primaryFailureClass).toEqual(expect.any(String));
+    expect(['stale', 'unavailable']).toContain(outcome.overlay?.status);
+    expect(outcome.overlay?.isError).toBe(true);
+    expect(outcome.overlay?.failureClass).toEqual(expect.any(String));
+  } else {
+    expect(outcome?.primaryFailureClass).toBeNull();
+    expect(outcome?.overlay).toEqual(expect.objectContaining({
+      status: 'available',
+      isError: false,
+      failureClass: null,
+    }));
+  }
+}
+
 export function registerCodegraphOverlayMcpLifecycleDiagnosticSpecs(
   context: CodegraphOverlaySpecContext,
 ): void {
@@ -19,20 +82,25 @@ export function registerCodegraphOverlayMcpLifecycleDiagnosticSpecs(
     waitForLogEvent,
     readJsonLine,
     WRAPPER_REPO_OVERLAY_RESPONSE_TIMEOUT_MS,
+    WRAPPER_REPO_OVERLAY_TEST_TIMEOUT_MS,
   } = context;
 
-  it('logs the effective codegraph target mode and version for MCP root-cause diagnosis', async () => {
+  it('logs the effective shared-daemon topology for MCP root-cause diagnosis', async () => {
     const logPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-codegraph-log-')), 'wrapper.log');
     tempRoots.push(path.dirname(logPath));
     const child = spawn(
       process.execPath,
-      [wrapperScriptPath, '@colbymchenry/codegraph@1.2.0', 'serve', '--mcp', '--path', repoRoot],
+      [wrapperScriptPath, '@colbymchenry/codegraph@1.5.0', 'serve', '--mcp', '--path', repoRoot],
       {
         cwd: repoRoot,
         stdio: ['pipe', 'pipe', 'pipe'],
         env: {
           ...process.env,
           ...WRAPPER_REPO_OVERLAY_ENV,
+          CODEGRAPH_NO_DAEMON: '0',
+          CODEGRAPH_NO_WATCH: '0',
+          CODEGRAPH_DAEMON_IDLE_TIMEOUT_MS: '300000',
+          CODEGRAPH_DAEMON_MAX_IDLE_MS: '1800000',
           NANOFLOW_CODEGRAPH_MCP_LOG: logPath,
         },
       },
@@ -42,13 +110,24 @@ export function registerCodegraphOverlayMcpLifecycleDiagnosticSpecs(
       const spawnEvent = await waitForLogEvent(logPath, 'child.spawn');
       expect(spawnEvent).toEqual(expect.objectContaining({
         mode: 'npx-package',
-        target: '@colbymchenry/codegraph@1.2.0',
-        packageVersion: '1.2.0',
+        target: '@colbymchenry/codegraph@1.5.0',
+        packageVersion: '1.5.0',
+        env: expect.objectContaining({
+          CODEGRAPH_NO_DAEMON: '0',
+          CODEGRAPH_NO_WATCH: '0',
+          CODEGRAPH_DAEMON_IDLE_TIMEOUT_MS: '300000',
+          CODEGRAPH_DAEMON_MAX_IDLE_MS: '1800000',
+        }),
+        runtimeTopology: expect.objectContaining({
+          mode: 'shared-daemon-proxy',
+          watcherOwnership: 'shared-daemon-single-watcher',
+          fileLockContentionRisk: 'single-writer',
+        }),
       }));
     } finally {
       child.kill();
     }
-  }, 15_000);
+  }, WRAPPER_REPO_OVERLAY_TEST_TIMEOUT_MS);
 
   it('logs Codex MCP config drift from the wrapper process itself', async () => {
     const logRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-codegraph-config-drift-'));
@@ -61,7 +140,7 @@ export function registerCodegraphOverlayMcpLifecycleDiagnosticSpecs(
       'command = "node"',
       'args = [',
       `  ${JSON.stringify(wrapperScriptPath)},`,
-      '  "@colbymchenry/codegraph@1.2.0",',
+      '  "@colbymchenry/codegraph@1.5.0",',
       '  "serve",',
       '  "--mcp",',
       `  ${JSON.stringify(repoRoot)}`,
@@ -107,7 +186,7 @@ export function registerCodegraphOverlayMcpLifecycleDiagnosticSpecs(
         source: 'startup',
         failureClass: 'mcp-host-config-mismatch',
         expected: expect.objectContaining({
-          codegraphTarget: '@colbymchenry/codegraph@1.2.0',
+          codegraphTarget: '@colbymchenry/codegraph@1.5.0',
           env: expect.objectContaining({
             NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '30000',
           }),
@@ -121,7 +200,7 @@ export function registerCodegraphOverlayMcpLifecycleDiagnosticSpecs(
         mismatches: expect.arrayContaining([
           expect.objectContaining({
             field: 'codegraphTarget',
-            expected: '@colbymchenry/codegraph@1.2.0',
+            expected: '@colbymchenry/codegraph@1.5.0',
             actual: fakeCodegraph,
           }),
           expect.objectContaining({
@@ -223,13 +302,13 @@ export function registerCodegraphOverlayMcpLifecycleDiagnosticSpecs(
     const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-codegraph-missing-config-inspector-'));
     tempRoots.push(projectRoot);
     const wrapperCopyPath = path.join(projectRoot, 'codegraph-nanoflow-mcp-stdio.cjs');
+    copyWrapperRuntimeBundle(wrapperScriptPath, wrapperCopyPath);
     fs.writeFileSync(
       wrapperCopyPath,
-      fs.readFileSync(wrapperScriptPath, 'utf8')
-        .replace(
-          'function inspectCodexMcpConfigAlignment()',
-          'function removedInspectCodexMcpConfigAlignment()',
-        ),
+      fs.readFileSync(wrapperCopyPath, 'utf8').replace(
+        'function inspectCodexMcpConfigAlignment()',
+        'function removedInspectCodexMcpConfigAlignment()',
+      ),
     );
 
     const fakeCodegraph = makeFakeCodegraph();
@@ -369,7 +448,7 @@ export function registerCodegraphOverlayMcpLifecycleDiagnosticSpecs(
     const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-codegraph-stale-wrapper-keepalive-'));
     tempRoots.push(projectRoot);
     const wrapperCopyPath = path.join(projectRoot, 'codegraph-nanoflow-mcp-stdio.cjs');
-    fs.copyFileSync(wrapperScriptPath, wrapperCopyPath);
+    copyWrapperRuntimeBundle(wrapperScriptPath, wrapperCopyPath);
 
     const fakeCodegraph = makeFakeCodegraph();
     const logPath = path.join(projectRoot, 'wrapper.log');
@@ -405,10 +484,8 @@ export function registerCodegraphOverlayMcpLifecycleDiagnosticSpecs(
           arguments: { query: 'ProjectShellComponent', overlayLimit: 1 },
         },
       })}\n`);
-      const contextResponse = await contextPromise as {
-        result: { isError?: boolean; content: Array<{ text: string }> };
-      };
-      expect(contextResponse.result.isError).not.toBe(true);
+      const contextResponse = await contextPromise as CopiedWrapperContextResponse;
+      expectUsableCanonicalContext(contextResponse);
 
       const staleEvent = await waitForLogEvent(logPath, 'wrapper.script.stale', 2_000);
       expect(staleEvent).toEqual(expect.objectContaining({
@@ -468,13 +545,13 @@ export function registerCodegraphOverlayMcpLifecycleDiagnosticSpecs(
     } finally {
       child.kill();
     }
-  }, 8_000);
+  }, 15_000);
 
   it('auto-recycles stale wrapper state after completing NanoFlow context tools when explicitly enabled', async () => {
     const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-codegraph-stale-wrapper-'));
     tempRoots.push(projectRoot);
     const wrapperCopyPath = path.join(projectRoot, 'codegraph-nanoflow-mcp-stdio.cjs');
-    fs.copyFileSync(wrapperScriptPath, wrapperCopyPath);
+    copyWrapperRuntimeBundle(wrapperScriptPath, wrapperCopyPath);
 
     const fakeCodegraph = makeFakeCodegraph();
     const logPath = path.join(projectRoot, 'wrapper.log');
@@ -511,10 +588,8 @@ export function registerCodegraphOverlayMcpLifecycleDiagnosticSpecs(
           arguments: { query: 'ProjectShellComponent', overlayLimit: 1 },
         },
       })}\n`);
-      const contextResponse = await contextPromise as {
-        result: { isError?: boolean; content: Array<{ text: string }> };
-      };
-      expect(contextResponse.result.isError).not.toBe(true);
+      const contextResponse = await contextPromise as CopiedWrapperContextResponse;
+      expectUsableCanonicalContext(contextResponse);
       expect(contextResponse.result.content[0].text).toMatch(
         /(?:## Exploration: ProjectShellComponent|\*\*Exploration: ProjectShellComponent\*\*)/,
       );
@@ -581,5 +656,5 @@ export function registerCodegraphOverlayMcpLifecycleDiagnosticSpecs(
     } finally {
       child.kill();
     }
-  }, 8_000);
+  }, WRAPPER_REPO_OVERLAY_TEST_TIMEOUT_MS);
 }

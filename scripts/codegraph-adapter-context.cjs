@@ -6,16 +6,51 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { isNodeCommand, readCodexCodegraphMcpConfig } = require('./codegraph-codex-config.cjs');
+const {
+  CODEGRAPH_DEDUP_MAINTENANCE_FOCUSED_QUERY,
+} = require('./codegraph-nanoflow-dedup-query.cjs');
+const {
+  classifySpecializedMaintenanceQuery,
+} = require('./codegraph-nanoflow-specialized-query.cjs');
+const {
+  OVERLAY_STALE_SKIP_REFRESH_FAILURE_CLASS,
+  buildNanoFlowContextOutcomeV1,
+  parseNanoFlowContextOutcomeV1,
+} = require('./lib/codegraph-context-outcome.cjs');
 
-const DEFAULT_CODEGRAPH_TARGET = '@colbymchenry/codegraph@1.2.0';
+const DEFAULT_CODEGRAPH_TARGET = '@colbymchenry/codegraph@1.5.0';
+const REQUIRED_FRESH_FALLBACK_ENV = {
+  NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '30000',
+  NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE: '0',
+};
 const DEFAULT_QUERY = 'ProjectShellComponent';
 const DEFAULT_TIMEOUT_MS = 60_000;
-const WRAPPER_TIMEOUT_HEADROOM_MIN_MS = 1_000;
+const WRAPPER_TIMEOUT_HEADROOM_MIN_MS = 2_500;
 const WRAPPER_TIMEOUT_HEADROOM_MAX_MS = 5_000;
 const TOOLING_TRIAGE_WRAPPER_TIMEOUT_MS = 15_000;
 const TOOLING_QUALITY_FOCUSED_QUERY = 'codegraph adapter context wrapper log guard sourceOrdering sourceSelection';
 const TOOLING_ISSUE_REGISTRY_FOCUSED_QUERY = 'docs/codegraph-nanoflow-adaptation-issues.md codegraph nanoflow adaptation issues';
 const TOOLING_TRIAGE_ANCHOR_SEGMENTS = new Set(['codegraph', 'nanoflow', 'mcp']);
+const KNOWN_OVERLAY_MCP_FAILURE_CLASSES = new Set([
+  OVERLAY_STALE_SKIP_REFRESH_FAILURE_CLASS,
+  'overlay-empty-response',
+  'overlay-invalid-json-shape',
+  'overlay-nonzero-exit',
+  'overlay-timeout',
+  'overlay-wrapper-error',
+  'overlay-error',
+]);
+const KNOWN_CONTEXT_MCP_FAILURE_CLASSES = new Set([
+  'base-codegraph-timeout',
+  'base-codegraph-timeout-overlay-only',
+  'base-codegraph-error',
+  'base-codegraph-unavailable',
+  'base-codegraph-child-exit',
+  'context-pack-entry-error',
+  'context-pack-error',
+  'shared-daemon-fallback-recovery-max-wait',
+  'child-stdout-stream-error',
+]);
 const TOOLING_TRIAGE_SEGMENTS = new Set([
   'adapter',
   'context',
@@ -311,7 +346,15 @@ function focusedAdapterOverlayQuery(query) {
     return issueRegistryQuery;
   }
   if (isLikelyDedupMaintenanceQuery(segments)) {
-    return rawQuery;
+    return CODEGRAPH_DEDUP_MAINTENANCE_FOCUSED_QUERY;
+  }
+  const specializedMaintenanceQuery = classifySpecializedMaintenanceQuery({
+    segments,
+    codegraphTooling: true,
+    context7Documentation: segments.includes('context7'),
+  }).focusedQuery;
+  if (specializedMaintenanceQuery) {
+    return specializedMaintenanceQuery;
   }
   if (isLikelyToolingQualityQuery(segments)) {
     return TOOLING_QUALITY_FOCUSED_QUERY;
@@ -383,6 +426,10 @@ function resolveWrapperInvocation(options) {
       codegraphTarget: options.codegraphTarget,
       codegraphArgs: ['serve', '--mcp', '--path', options.root],
       configEnv: {},
+      configScope: 'cli-override',
+      configPath: null,
+      configContractOverride: false,
+      configContractMismatches: [],
     };
   }
 
@@ -393,16 +440,31 @@ function resolveWrapperInvocation(options) {
   if (codexConfig.parseError && process.env.NANOFLOW_CODEGRAPH_CODEX_CONFIG) {
     throw new Error(`Unsupported Codex MCP config in ${codexConfig.path}: ${codexConfig.parseError}`);
   }
-  if (codexConfig.server && (codexConfig.appliesToRoot || process.env.NANOFLOW_CODEGRAPH_CODEX_CONFIG)) {
+  if (codexConfig.server && codexConfig.scope === 'project' && !codexConfig.appliesToRoot) {
+    throw new Error(`Active project Codex CodeGraph config does not apply to ${path.resolve(options.root)}: ${codexConfig.path}`);
+  }
+  if (codexConfig.server) {
     const args = Array.isArray(codexConfig.server.args) ? codexConfig.server.args : [];
     if (!isNodeCommand(codexConfig.server.command) || args.length < 2) {
       throw new Error(`Unsupported Codex MCP config in ${codexConfig.path}`);
     }
+    const configuredTarget = replaceWorkspaceFolder(args[1], options.root);
+    const configuredEnv = resolveConfigEnv(codexConfig.server.env ?? {});
+    const configContractMismatches = codexConfig.scope === 'override'
+      ? []
+      : freshFallbackConfigContractMismatches(configuredTarget, configuredEnv);
+    const configContractOverride = configContractMismatches.length > 0;
     return {
       wrapperScriptPath: replaceWorkspaceFolder(args[0], options.root),
-      codegraphTarget: replaceWorkspaceFolder(args[1], options.root),
+      codegraphTarget: configContractOverride ? DEFAULT_CODEGRAPH_TARGET : configuredTarget,
       codegraphArgs: args.slice(2).map(arg => replaceWorkspaceFolder(arg, options.root)),
-      configEnv: resolveConfigEnv(codexConfig.server.env ?? {}),
+      configEnv: configContractOverride
+        ? { ...configuredEnv, ...REQUIRED_FRESH_FALLBACK_ENV }
+        : configuredEnv,
+      configScope: codexConfig.scope ?? null,
+      configPath: codexConfig.path ?? null,
+      configContractOverride,
+      configContractMismatches,
     };
   }
 
@@ -410,8 +472,30 @@ function resolveWrapperInvocation(options) {
     wrapperScriptPath: path.join(options.root, 'scripts', 'codegraph-nanoflow-mcp-stdio.cjs'),
     codegraphTarget: DEFAULT_CODEGRAPH_TARGET,
     codegraphArgs: ['serve', '--mcp', '--path', options.root],
-    configEnv: {},
+    configEnv: { ...REQUIRED_FRESH_FALLBACK_ENV },
+    configScope: codexConfig.scope ?? null,
+    configPath: codexConfig.path ?? null,
+    configContractOverride: false,
+    configContractMismatches: [],
   };
+}
+
+function freshFallbackConfigContractMismatches(codegraphTarget, configEnv) {
+  const mismatches = [];
+  if (codegraphTarget !== DEFAULT_CODEGRAPH_TARGET) {
+    mismatches.push({
+      field: 'codegraphTarget',
+      expected: DEFAULT_CODEGRAPH_TARGET,
+      actual: codegraphTarget,
+    });
+  }
+  for (const [key, expected] of Object.entries(REQUIRED_FRESH_FALLBACK_ENV)) {
+    const actual = typeof configEnv[key] === 'string' ? configEnv[key] : null;
+    if (actual !== expected) {
+      mismatches.push({ field: `env.${key}`, expected, actual });
+    }
+  }
+  return mismatches;
 }
 
 function replaceWorkspaceFolder(value, root) {
@@ -645,17 +729,97 @@ function compactOverlayJson(overlayJson, limit = 8) {
   };
 }
 
-function overlayUnavailableSummary(failureClass, message) {
+function overlayUnavailableSummary(failureClass, message, rawResponse = null) {
   return {
     unavailable: true,
     failureClass,
     message: String(message ?? '').slice(0, 2_000),
+    rawResponse: typeof rawResponse === 'string'
+      ? rawResponse.slice(0, 4_000)
+      : null,
   };
+}
+
+function serializeAdapterError(error) {
+  if (!error || typeof error !== 'object') {
+    return {
+      name: typeof error,
+      message: String(error),
+    };
+  }
+  return {
+    name: typeof error.name === 'string' ? error.name : 'Error',
+    message: typeof error.message === 'string' ? error.message : String(error),
+    ...(typeof error.code === 'string' || typeof error.code === 'number' ? { code: error.code } : {}),
+    ...(typeof error.errno === 'string' || typeof error.errno === 'number' ? { errno: error.errno } : {}),
+    ...(typeof error.syscall === 'string' ? { syscall: error.syscall } : {}),
+    ...(typeof error.signal === 'string' ? { signal: error.signal } : {}),
+    ...(typeof error.stack === 'string' ? { stack: error.stack } : {}),
+  };
+}
+
+function classifyOverlayRequestFailure(error) {
+  const diagnosticError = serializeAdapterError(error);
+  if (
+    diagnosticError.code === 'ETIMEDOUT'
+    || /Timed out waiting for nanoflow_overlay_query/i.test(diagnosticError.message)
+  ) {
+    return 'overlay-request-timeout';
+  }
+  if (/Wrapper process (?:exited|errored) before nanoflow_overlay_query/i.test(diagnosticError.message)) {
+    return 'overlay-transport-error';
+  }
+  return 'overlay-request-error';
+}
+
+function shouldPreserveContextAcrossCriticalLogFailure(overlayResult) {
+  return overlayResult?.failureClass === 'overlay-transport-error';
+}
+
+async function requestOverlayProvenance(client, message) {
+  try {
+    return parseOverlayProvenanceResponse(
+      await client.request(message, 'nanoflow_overlay_query'),
+    );
+  } catch (error) {
+    const diagnosticError = serializeAdapterError(error);
+    const failureClass = classifyOverlayRequestFailure(error);
+    return {
+      ok: false,
+      text: '',
+      textBytes: 0,
+      matchCount: 0,
+      resultCount: 0,
+      nodeCount: 0,
+      edgeCount: 0,
+      failureClass,
+      message: diagnosticError.message,
+      error: diagnosticError,
+      output: {
+        ...overlayUnavailableSummary(failureClass, diagnosticError.message),
+        error: diagnosticError,
+      },
+    };
+  }
 }
 
 function parseOverlayProvenanceResponse(response) {
   const text = extractToolTextResponse(response);
   if (response?.result?.isError) {
+    const declaredFailureClass = normalizeOverlayMcpFailureClass(
+      response?.result?._meta?.nanoflowFailureClass,
+    );
+    if (declaredFailureClass) {
+      return {
+        ok: false,
+        text,
+        textBytes: Buffer.byteLength(text, 'utf8'),
+        matchCount: 0,
+        failureClass: declaredFailureClass,
+        message: text || `nanoflow_overlay_query returned ${declaredFailureClass}`,
+        output: overlayUnavailableSummary(declaredFailureClass, text, text || null),
+      };
+    }
     return {
       ok: false,
       text: '',
@@ -689,7 +853,11 @@ function parseOverlayProvenanceResponse(response) {
         matchCount: 0,
         failureClass: 'overlay-invalid-json-shape',
         message: 'nanoflow_overlay_query JSON response is missing matches',
-        output: overlayUnavailableSummary('overlay-invalid-json-shape', 'nanoflow_overlay_query JSON response is missing matches'),
+        output: overlayUnavailableSummary(
+          'overlay-invalid-json-shape',
+          'nanoflow_overlay_query JSON response is missing matches',
+          text,
+        ),
       };
     }
     return {
@@ -714,9 +882,35 @@ function parseOverlayProvenanceResponse(response) {
       matchCount: 0,
       failureClass: 'overlay-json-parse-error',
       message,
-      output: overlayUnavailableSummary('overlay-json-parse-error', message),
+      output: overlayUnavailableSummary('overlay-json-parse-error', message, text),
     };
   }
+}
+
+function normalizeOverlayMcpFailureClass(value) {
+  if (value === 'overlay-json-parse') return 'overlay-json-parse-error';
+  if (value === 'overlay-json-parse-error') return value;
+  if (KNOWN_OVERLAY_MCP_FAILURE_CLASSES.has(value)) return value;
+  return null;
+}
+
+function normalizeContextMcpFailureClass(value) {
+  if (value === 'success') return null;
+  return normalizeOverlayMcpFailureClass(value)
+    ?? (KNOWN_CONTEXT_MCP_FAILURE_CLASSES.has(value) ? value : null);
+}
+
+function isBaseContextFailureClass(value) {
+  return typeof value === 'string' && (
+    value.startsWith('base-codegraph-')
+    || value === 'shared-daemon-fallback-recovery-max-wait'
+    || value === 'child-stdout-stream-error'
+  );
+}
+
+function hasOwn(value, key) {
+  return Boolean(value && typeof value === 'object'
+    && Object.prototype.hasOwnProperty.call(value, key));
 }
 
 function compactOverlayMatch(match) {
@@ -739,37 +933,226 @@ function compactOverlayNode(node) {
   };
 }
 
-function classifyContextPackResponse(response) {
-  const text = extractToolTextResponse(response);
-  const mcpIsError = Boolean(response?.result?.isError);
-  let failureClass = mcpIsError ? 'mcp-error' : 'success';
-  const baseTimedOut = hasBaseCodegraphTimeoutText(text);
-  if (baseTimedOut) {
-    failureClass = mcpIsError ? 'base-codegraph-timeout' : 'base-codegraph-timeout-overlay-only';
-  }
-  if (
-    mcpIsError
-    && typeof text === 'string'
-    && !baseTimedOut
-    && hasNativeExplorationText(text)
-    && text.includes('### NanoFlow Overlay Error')
-  ) {
-    failureClass = text.includes('NanoFlow overlay query timed out')
-      ? 'overlay-timeout'
-      : 'overlay-error';
-    return {
-      isError: false,
-      mcpIsError,
-      partial: true,
-      failureClass,
+function parseContextOutcomeMetadata(response, text, mcpIsError, declaredFailureClass) {
+  const meta = response?.result?._meta;
+  if (hasOwn(meta, 'nanoflowFailureClass')
+    && meta.nanoflowFailureClass !== 'success'
+    && !declaredFailureClass) return null;
+  const hasCanonicalMetadata = [
+    'nanoflowOutcomeSchemaVersion',
+    'nanoflowOutcomeStatus',
+    'nanoflowContextUsable',
+  ].some(key => hasOwn(meta, key));
+  if (!hasCanonicalMetadata) {
+    return inferContextOutcomeFromLegacyMetadata({
       text,
-      textBytes: Buffer.byteLength(text, 'utf8'),
+      mcpIsError,
+      failureClass: declaredFailureClass,
+    });
+  }
+  if (meta?.nanoflowOutcomeSchemaVersion !== 1
+    || !['complete', 'partial', 'failed'].includes(meta?.nanoflowOutcomeStatus)
+    || typeof meta?.nanoflowContextUsable !== 'boolean') return null;
+
+  const status = meta.nanoflowOutcomeStatus;
+  const failureClass = status === 'complete' ? null : declaredFailureClass;
+  const baseFailed = status !== 'complete' && isBaseContextFailureClass(failureClass);
+  const baseStatus = status === 'complete'
+    ? 'available'
+    : (status === 'failed' || baseFailed ? 'unavailable' : 'available');
+  const overlayStatus = status === 'complete'
+    ? 'available'
+    : (failureClass === OVERLAY_STALE_SKIP_REFRESH_FAILURE_CLASS
+        ? 'stale'
+        : (status === 'partial' && baseFailed ? 'available' : 'unavailable'));
+  const overlayOwnsFailure = typeof failureClass === 'string'
+    && failureClass.startsWith('overlay-');
+  const outcome = buildNanoFlowContextOutcomeV1({
+    primaryFailureClass: failureClass,
+    base: {
+      status: baseStatus,
+      isError: baseStatus === 'unavailable',
+      textBytes: baseStatus === 'available' ? Buffer.byteLength(text, 'utf8') : 0,
+      failureClass: baseFailed ? failureClass : null,
+    },
+    overlay: {
+      status: overlayStatus,
+      isError: overlayStatus !== 'available',
+      failureClass: overlayStatus === 'available' || !overlayOwnsFailure ? null : failureClass,
+      generationId: null,
+    },
+  });
+  return outcome.status === status && outcome.usableContext === meta.nanoflowContextUsable
+    ? outcome
+    : null;
+}
+
+function inferContextOutcomeFromLegacyMetadata({ text, mcpIsError, failureClass }) {
+  if (!failureClass) return null;
+  const textBytes = Buffer.byteLength(text, 'utf8');
+  if (isBaseContextFailureClass(failureClass)) {
+    const overlayAvailable = failureClass === 'base-codegraph-timeout-overlay-only';
+    return buildNanoFlowContextOutcomeV1({
+      primaryFailureClass: failureClass,
+      base: { status: 'unavailable', isError: true, textBytes: 0, failureClass },
+      overlay: {
+        status: overlayAvailable ? 'available' : 'unavailable',
+        isError: !overlayAvailable,
+        failureClass: null,
+        generationId: null,
+      },
+    });
+  }
+  const baseAvailable = hasNativeExplorationText(text)
+    && text.trim() !== OVERLAY_STALE_SKIP_REFRESH_FAILURE_CLASS;
+  return buildNanoFlowContextOutcomeV1({
+    primaryFailureClass: failureClass,
+    base: {
+      status: baseAvailable ? 'available' : 'unavailable',
+      isError: !baseAvailable && mcpIsError,
+      textBytes: baseAvailable ? textBytes : 0,
+    },
+    overlay: {
+      status: failureClass === OVERLAY_STALE_SKIP_REFRESH_FAILURE_CLASS ? 'stale' : 'unavailable',
+      isError: true,
+      failureClass,
+      generationId: null,
+    },
+  });
+}
+
+function invalidContextOutcome(failureClass) {
+  return buildNanoFlowContextOutcomeV1({
+    primaryFailureClass: failureClass,
+    base: { status: 'unavailable', isError: true, textBytes: 0, failureClass },
+    overlay: { status: 'unavailable', isError: true, failureClass: null, generationId: null },
+  });
+}
+
+function hasContextOutcomeMetadata(response) {
+  const meta = response?.result?._meta;
+  return [
+    'nanoflowFailureClass',
+    'nanoflowOutcomeSchemaVersion',
+    'nanoflowOutcomeStatus',
+    'nanoflowContextUsable',
+  ].some(key => hasOwn(meta, key));
+}
+
+function inferContextOutcomeFromText({ text, mcpIsError, declaredFailureClass, baseTimedOut }) {
+  const textBytes = Buffer.byteLength(text, 'utf8');
+  if (text.trim() === OVERLAY_STALE_SKIP_REFRESH_FAILURE_CLASS) {
+    return buildNanoFlowContextOutcomeV1({
+      primaryFailureClass: OVERLAY_STALE_SKIP_REFRESH_FAILURE_CLASS,
+      base: { status: 'unavailable', isError: true, textBytes: 0 },
+      overlay: {
+        status: 'stale',
+        isError: true,
+        failureClass: OVERLAY_STALE_SKIP_REFRESH_FAILURE_CLASS,
+        generationId: null,
+      },
+    });
+  }
+
+  if (baseTimedOut) {
+    const overlayAvailable = hasNativeExplorationText(text);
+    return buildNanoFlowContextOutcomeV1({
+      primaryFailureClass: mcpIsError ? 'base-codegraph-timeout' : 'base-codegraph-timeout-overlay-only',
+      base: {
+        status: 'unavailable',
+        isError: mcpIsError,
+        textBytes: 0,
+        failureClass: 'base-codegraph-timeout',
+      },
+      overlay: {
+        status: overlayAvailable ? 'available' : 'unavailable',
+        isError: !overlayAvailable,
+        failureClass: overlayAvailable ? null : declaredFailureClass,
+        generationId: null,
+      },
+    });
+  }
+
+  if (mcpIsError && hasNativeExplorationText(text) && text.includes('### NanoFlow Overlay Error')) {
+    const overlayFailureClass = declaredFailureClass
+      ?? (text.includes('NanoFlow overlay query timed out') ? 'overlay-timeout' : 'overlay-error');
+    return buildNanoFlowContextOutcomeV1({
+      primaryFailureClass: overlayFailureClass,
+      base: { status: 'available', isError: false, textBytes },
+      overlay: {
+        status: overlayFailureClass === OVERLAY_STALE_SKIP_REFRESH_FAILURE_CLASS ? 'stale' : 'unavailable',
+        isError: true,
+        failureClass: overlayFailureClass,
+        generationId: null,
+      },
+    });
+  }
+
+  if (!mcpIsError) {
+    return buildNanoFlowContextOutcomeV1({
+      base: { status: textBytes > 0 ? 'available' : 'unavailable', isError: false, textBytes },
+      overlay: { status: 'available', isError: false, failureClass: null, generationId: null },
+    });
+  }
+
+  return buildNanoFlowContextOutcomeV1({
+    primaryFailureClass: declaredFailureClass ?? 'mcp-error',
+    base: { status: 'unavailable', isError: true, textBytes: 0 },
+    overlay: {
+      status: declaredFailureClass === OVERLAY_STALE_SKIP_REFRESH_FAILURE_CLASS ? 'stale' : 'unavailable',
+      isError: true,
+      failureClass: declaredFailureClass,
+      generationId: null,
+    },
+  });
+}
+
+function contextOutcomeFromResponse(response, text, mcpIsError, declaredFailureClass, baseTimedOut) {
+  const structuredContent = response?.result?.structuredContent;
+  if (hasOwn(structuredContent, 'outcome')) {
+    return {
+      outcome: parseNanoFlowContextOutcomeV1(structuredContent.outcome)
+        ?? invalidContextOutcome('context-outcome-invalid'),
+      source: 'structured',
+    };
+  }
+  if (hasContextOutcomeMetadata(response)) {
+    return {
+      outcome: parseContextOutcomeMetadata(response, text, mcpIsError, declaredFailureClass)
+        ?? invalidContextOutcome('context-outcome-metadata-invalid'),
+      source: 'metadata',
     };
   }
   return {
-    isError: mcpIsError,
+    outcome: inferContextOutcomeFromText({ text, mcpIsError, declaredFailureClass, baseTimedOut }),
+    source: 'text',
+  };
+}
+
+function classifyContextPackResponse(response) {
+  const text = extractToolTextResponse(response);
+  const mcpIsError = Boolean(response?.result?.isError);
+  const rawFailureClass = response?.result?._meta?.nanoflowFailureClass;
+  const declaredFailureClass = normalizeContextMcpFailureClass(rawFailureClass);
+  const baseTimedOut = hasBaseCodegraphTimeoutText(text);
+  const resolvedOutcome = contextOutcomeFromResponse(
+    response,
+    text,
     mcpIsError,
-    partial: baseTimedOut && hasNativeExplorationText(text),
+    declaredFailureClass,
+    baseTimedOut,
+  );
+  const outcome = resolvedOutcome.outcome;
+  const failureClass = outcome.primaryFailureClass
+    ?? (outcome.status === 'complete' ? 'success' : (mcpIsError ? 'mcp-error' : 'context-outcome-failed'));
+  return {
+    isError: !outcome.usableContext,
+    mcpIsError,
+    complete: outcome.status === 'complete',
+    partial: outcome.status === 'partial',
+    contextUsable: outcome.usableContext,
+    outcome,
+    outcomeSource: resolvedOutcome.source,
     failureClass,
     text: typeof text === 'string' ? text : '',
     textBytes: typeof text === 'string' ? Buffer.byteLength(text, 'utf8') : 0,
@@ -783,7 +1166,10 @@ function summarizeContextPackAttempt(attempt, classified) {
     maxFilesOmitted: attempt.maxFilesOmitted,
     isError: classified.isError,
     mcpIsError: classified.mcpIsError,
+    complete: classified.complete,
     partial: classified.partial,
+    contextUsable: classified.contextUsable,
+    outcomeStatus: classified.outcome?.status,
     failureClass: classified.failureClass,
     textBytes: classified.textBytes,
     textPreview: classified.text ? classified.text.slice(0, 240) : '',
@@ -826,8 +1212,23 @@ function isRetryableBaseTimeout(classified) {
 
 function shouldAcceptToolingOverlayOnlyTimeout(options, attempt, classified) {
   return attempt.maxFilesOmitted
-    && classified.failureClass === 'base-codegraph-timeout-overlay-only'
-    && isLikelyToolingTriageQuery(options.query);
+    && isLikelyToolingTriageQuery(options.query)
+    && (
+      classified.failureClass === 'base-codegraph-timeout-overlay-only'
+      || (classified.failureClass === 'base-codegraph-timeout' && classified.partial)
+    );
+}
+
+function acceptedContextPackResult(response, classified, attempts) {
+  return {
+    response,
+    text: classified.text,
+    attempts,
+    complete: classified.complete,
+    partial: classified.partial,
+    contextUsable: classified.contextUsable,
+    outcome: classified.outcome,
+  };
 }
 
 async function requestContextPackWithRetries(client, nextId, options) {
@@ -860,15 +1261,28 @@ async function requestContextPackWithRetries(client, nextId, options) {
 
     lastResponse = response;
     const classified = classifyContextPackResponse(response);
-    const attempt = summarizeContextPackAttempt(attemptConfig, classified);
+    const acceptToolingTimeout = shouldAcceptToolingOverlayOnlyTimeout(
+      options,
+      attemptConfig,
+      classified,
+    );
+    const effectiveClassified = acceptToolingTimeout && classified.isError
+      ? {
+          ...classified,
+          isError: false,
+          partial: true,
+          failureClass: 'base-codegraph-timeout-overlay-only',
+        }
+      : classified;
+    const attempt = summarizeContextPackAttempt(attemptConfig, effectiveClassified);
     attempts.push(attempt);
 
-    if (shouldAcceptToolingOverlayOnlyTimeout(options, attemptConfig, classified)) {
-      return {
-        response,
-        text: classified.text,
-        attempts,
-      };
+    if (acceptToolingTimeout) {
+      return acceptedContextPackResult(response, effectiveClassified, attempts);
+    }
+
+    if (classified.failureClass === OVERLAY_STALE_SKIP_REFRESH_FAILURE_CLASS) {
+      return acceptedContextPackResult(response, classified, attempts);
     }
 
     if (isRetryableBaseTimeout(classified) && !isLastAttempt) {
@@ -876,11 +1290,11 @@ async function requestContextPackWithRetries(client, nextId, options) {
     }
 
     if (!classified.isError) {
-      return {
-        response,
-        text: classified.text,
-        attempts,
-      };
+      return acceptedContextPackResult(response, classified, attempts);
+    }
+
+    if (classified.outcomeSource !== 'text') {
+      return acceptedContextPackResult(response, classified, attempts);
     }
 
     if (!isRetryableBaseTimeout(classified)) {
@@ -892,11 +1306,22 @@ async function requestContextPackWithRetries(client, nextId, options) {
   throw new Error('nanoflow_context_pack returned no response');
 }
 
-function analyzeLog(root, logPath) {
+function analyzeLog(root, logPath, options = {}) {
   const analyzerPath = path.join(root, 'scripts', 'analyze-codegraph-mcp-log.cjs');
+  const analyzerArgs = [
+    analyzerPath,
+    logPath,
+    '--json',
+    '--fail-on-current-source-ordering',
+    '--project-root',
+    root,
+  ];
+  if (!options.allowCriticalTransportFailure) {
+    analyzerArgs.push('--fail-on-critical');
+  }
   const result = spawnSync(
     process.execPath,
-    [analyzerPath, logPath, '--json', '--fail-on-critical', '--fail-on-current-source-ordering'],
+    analyzerArgs,
     {
       cwd: root,
       encoding: 'utf8',
@@ -916,14 +1341,105 @@ function analyzeLog(root, logPath) {
   return JSON.parse(result.stdout);
 }
 
-function waitForExit(child, timeoutMs) {
+function createChildCloseTracker(child) {
+  let closed = false;
+  let closeResult = null;
+  let resolveClose;
+  const closePromise = new Promise(resolve => {
+    resolveClose = resolve;
+  });
+  child.once('close', (code, signal) => {
+    closed = true;
+    closeResult = { code, signal };
+    resolveClose(closeResult);
+  });
+  return {
+    isClosed: () => closed,
+    result: () => closeResult,
+    wait(timeoutMs) {
+      if (closed) return Promise.resolve(closeResult);
+      return new Promise(resolve => {
+        const timer = setTimeout(() => resolve(null), timeoutMs);
+        closePromise.then(result => {
+          clearTimeout(timer);
+          resolve(result);
+        });
+      });
+    },
+  };
+}
+
+function endChildInput(child) {
+  if (!child.stdin || child.stdin.destroyed || child.stdin.writableEnded) return;
+  try {
+    child.stdin.end();
+  } catch {
+    // The process may already be closing; the close tracker remains authoritative.
+  }
+}
+
+function signalChild(child, signal) {
+  try {
+    return child.kill(signal);
+  } catch {
+    return false;
+  }
+}
+
+function terminateWindowsProcessTree(pid) {
   return new Promise(resolve => {
-    const timer = setTimeout(() => resolve(null), timeoutMs);
-    child.once('exit', (code, signal) => {
-      clearTimeout(timer);
-      resolve({ code, signal });
+    if (!pid) {
+      resolve({ attempted: false, code: null, signal: null, error: null });
+      return;
+    }
+    let killer;
+    try {
+      killer = spawn('taskkill', ['/PID', String(pid), '/T', '/F'], {
+        stdio: 'ignore',
+        windowsHide: true,
+      });
+    } catch (error) {
+      resolve({ attempted: true, code: null, signal: null, error });
+      return;
+    }
+    let settled = false;
+    const settle = result => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+    killer.once('error', error => {
+      settle({ attempted: true, code: null, signal: null, error });
+    });
+    killer.once('close', (code, signal) => {
+      settle({ attempted: true, code, signal, error: null });
     });
   });
+}
+
+async function shutdownProcessTree(child, closeTracker, options = {}) {
+  if (!child || closeTracker.isClosed()) return closeTracker.result();
+
+  const gracefulTimeoutMs = options.gracefulTimeoutMs ?? 3_000;
+  const forcedTimeoutMs = options.forcedTimeoutMs ?? 3_000;
+  endChildInput(child);
+  const gracefulClose = await closeTracker.wait(gracefulTimeoutMs);
+  if (gracefulClose) return gracefulClose;
+
+  if (process.platform === 'win32') {
+    const taskkill = await terminateWindowsProcessTree(child.pid);
+    if (taskkill.error) {
+      signalChild(child, 'SIGTERM');
+    }
+  } else {
+    signalChild(child, 'SIGTERM');
+  }
+
+  const terminatedClose = await closeTracker.wait(forcedTimeoutMs);
+  if (terminatedClose) return terminatedClose;
+
+  signalChild(child, 'SIGKILL');
+  return closeTracker.wait(forcedTimeoutMs);
 }
 
 async function main() {
@@ -955,6 +1471,9 @@ async function main() {
       env: {
         ...process.env,
         ...invocation.configEnv,
+        CODEGRAPH_NO_DAEMON: '1',
+        CODEGRAPH_NO_WATCH: '1',
+        NANOFLOW_CODEGRAPH_ALLOW_DAEMON: '0',
         NANOFLOW_CODEGRAPH_MCP_LOG: logPath,
         NANOFLOW_CODEGRAPH_REFRESH_ON_STARTUP: '0',
         NANOFLOW_CODEGRAPH_CONFIG_ALIGNMENT_MODE: 'adapter-fallback',
@@ -964,6 +1483,7 @@ async function main() {
       windowsHide: true,
     },
   );
+  const childCloseTracker = createChildCloseTracker(child);
   const client = createMcpClient(child, options.timeoutMs, { logPath });
   let nextRequestId = 1;
   const nextId = () => nextRequestId++;
@@ -979,7 +1499,7 @@ async function main() {
     const contextText = contextResult.text;
     const effectiveOverlayQuery = options.overlayQuery ?? focusedAdapterOverlayQuery(options.query);
 
-    const overlayResponse = await client.request({
+    const overlayResult = await requestOverlayProvenance(client, {
       jsonrpc: '2.0',
       id: nextId(),
       method: 'tools/call',
@@ -987,12 +1507,12 @@ async function main() {
         name: 'nanoflow_overlay_query',
         arguments: { query: effectiveOverlayQuery, limit: options.overlayQueryLimit, json: true },
       },
-    }, 'nanoflow_overlay_query');
-    const overlayResult = parseOverlayProvenanceResponse(overlayResponse);
+    });
 
-    child.stdin.end();
-    await waitForExit(child, 5_000);
-    const logAnalysis = analyzeLog(options.root, logPath);
+    await shutdownProcessTree(child, childCloseTracker);
+    const logAnalysis = analyzeLog(options.root, logPath, {
+      allowCriticalTransportFailure: shouldPreserveContextAcrossCriticalLogFailure(overlayResult),
+    });
     if (options.requireOverlayMatch && (!overlayResult.ok || overlayResult.resultCount < 1)) {
       const failureClass = overlayResult.failureClass ?? 'overlay-empty-result';
       throw new Error([
@@ -1009,13 +1529,38 @@ async function main() {
     const overlayOutput = overlayResult.ok
       ? (options.includeOverlayJson ? overlayResult.overlayJson : compactOverlayJson(overlayResult.overlayJson))
       : overlayResult.output;
+    const malformedOverlayResponse = [
+      'overlay-empty-response',
+      'overlay-json-parse-error',
+      'overlay-invalid-json-shape',
+    ].includes(overlayResult.failureClass);
+    const staleSkipRefreshFailure = (
+      overlayResult.failureClass === OVERLAY_STALE_SKIP_REFRESH_FAILURE_CLASS
+      || contextResult.attempts.some(
+        attempt => attempt.failureClass === OVERLAY_STALE_SKIP_REFRESH_FAILURE_CLASS,
+      )
+    );
+    const strictPartialContextFailure = contextResult.partial
+      && contextResult.outcome?.base?.status === 'available'
+      && contextResult.outcome?.overlay?.status !== 'available';
     const summary = {
-      ok: true,
+      ok: contextResult.complete
+        && !malformedOverlayResponse
+        && !staleSkipRefreshFailure
+        && !strictPartialContextFailure,
+      complete: contextResult.complete,
+      partial: contextResult.partial,
+      contextUsable: contextResult.contextUsable,
+      outcome: contextResult.outcome,
       query: options.query,
       overlayQuery: effectiveOverlayQuery,
       logPath,
       wrapperScriptPath: invocation.wrapperScriptPath,
       codegraphTarget: invocation.codegraphTarget,
+      configScope: invocation.configScope,
+      configPath: invocation.configPath,
+      configContractOverride: invocation.configContractOverride,
+      configContractMismatches: invocation.configContractMismatches,
       timeoutMs: options.timeoutMs,
       wrapperRequestTimeoutMs,
       toolingTriageFastTimeout: shouldUseFastToolingTriageTimeout(options),
@@ -1033,8 +1578,10 @@ async function main() {
         overlayNodeCount: overlayResult.nodeCount ?? 0,
         overlayEdgeCount: overlayResult.edgeCount ?? 0,
         overlayUnavailable: !overlayResult.ok,
+        overlayMalformed: malformedOverlayResponse,
         overlayFailureClass: overlayResult.failureClass,
         overlayFailureMessage: overlayResult.message,
+        overlayRequestError: overlayResult.error ?? null,
         transportHealthy: logAnalysis.transportHealthy,
         criticalTransportFailures: logAnalysis.criticalTransportFailures,
         overlayTimeouts: logAnalysis.overlayTimeouts,
@@ -1057,13 +1604,22 @@ async function main() {
       process.stdout.write('\n--- NanoFlow overlay JSON ---\n');
       process.stdout.write(`${JSON.stringify(overlayOutput, null, 2)}\n`);
     }
-  } catch (error) {
-    child.kill();
-    throw error;
+  } finally {
+    await shutdownProcessTree(child, childCloseTracker);
   }
 }
 
-main().catch(error => {
-  process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch(error => {
+    process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  createChildCloseTracker,
+  requestOverlayProvenance,
+  resolveWrapperInvocation,
+  shutdownProcessTree,
+  shouldPreserveContextAcrossCriticalLogFailure,
+};

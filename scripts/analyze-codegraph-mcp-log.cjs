@@ -10,8 +10,20 @@ const positional = [];
 let sinceValue = null;
 let observedAtValue = null;
 let directMcpErrorValue = null;
+let projectRootValue = null;
 for (let i = 0; i < args.length; i++) {
   const arg = args[i];
+  if (arg === '--project-root') {
+    flags.add('--project-root');
+    projectRootValue = args[i + 1] ?? null;
+    i++;
+    continue;
+  }
+  if (arg.startsWith('--project-root=')) {
+    flags.add('--project-root');
+    projectRootValue = arg.slice('--project-root='.length);
+    continue;
+  }
   if (arg === '--since') {
     flags.add('--since');
     sinceValue = args[i + 1] ?? null;
@@ -52,7 +64,9 @@ for (let i = 0; i < args.length; i++) {
   positional.push(arg);
 }
 const logPath = path.resolve(positional[0] ?? path.join('.codegraph', 'nanoflow-mcp-wrapper.log'));
-const projectRoot = inferProjectRootFromLogPath(logPath);
+const projectRoot = projectRootValue
+  ? path.resolve(projectRootValue)
+  : inferProjectRootFromLogPath(logPath);
 const sinceMs = sinceValue ? Date.parse(sinceValue) : Number.NaN;
 const observedDirectMcpError = normalizeOptionalText(
   directMcpErrorValue ?? process.env.NANOFLOW_CODEGRAPH_DIRECT_MCP_ERROR,
@@ -73,8 +87,13 @@ const WRAPPER_ENV_DIAGNOSTIC_KEYS = [
   'NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS',
   'NANOFLOW_CODEGRAPH_OVERLAY_QUERY_TIMEOUT_MS',
   'NANOFLOW_CODEGRAPH_REFRESH_ON_STARTUP',
+  'NANOFLOW_CODEGRAPH_SHARED_DAEMON_FALLBACK_RECOVERY',
+  'NANOFLOW_CODEGRAPH_SHARED_DAEMON_FALLBACK_RECOVERY_DELAY_MS',
+  'NANOFLOW_CODEGRAPH_SHARED_DAEMON_FALLBACK_RECOVERY_DEFER_MS',
+  'NANOFLOW_CODEGRAPH_SHARED_DAEMON_FALLBACK_RECOVERY_MAX_WAIT_MS',
   'NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE',
   'NANOFLOW_CODEGRAPH_CONFIG_ALIGNMENT_MODE',
+  'npm_config_cache',
 ];
 const SOURCE_ORDERING_GENERATED_FILE_PATTERNS = [
   /\.pb\.go$/,
@@ -207,10 +226,69 @@ function compactWrapperStart(event) {
     scriptSha256: event.scriptSha256,
     codegraphTarget: event.codegraphTarget,
     codegraphArgs: Array.isArray(event.codegraphArgs) ? event.codegraphArgs : undefined,
+    envObservationSchemaVersion: event.envObservationSchemaVersion,
+    observedEnvKeys: Array.isArray(event.observedEnvKeys) ? event.observedEnvKeys : undefined,
     env: compactWrapperEnv(event.env),
     effectiveChildEnv: compactWrapperEnv(event.effectiveChildEnv),
+    runtimeTopology: compactRuntimeTopology(event.runtimeTopology, event.effectiveChildEnv),
     codexConfigAlignment: compactCodexConfigAlignment(event.codexConfigAlignment),
   };
+}
+
+function compactRuntimeTopology(value, effectiveChildEnv = null) {
+  const env = effectiveChildEnv && typeof effectiveChildEnv === 'object'
+    ? effectiveChildEnv
+    : {};
+  const daemonDisabled = value?.daemonDisabled ?? envFlagEnabled(env.CODEGRAPH_NO_DAEMON);
+  const watchDisabled = value?.watchDisabled ?? env.CODEGRAPH_NO_WATCH === '1';
+  return {
+    mode: value?.mode ?? (daemonDisabled ? 'direct-session' : 'shared-daemon-proxy'),
+    watcherOwnership: value?.watcherOwnership ?? (
+      watchDisabled
+        ? 'disabled-manual-sync'
+        : daemonDisabled
+          ? 'per-wrapper-watcher'
+          : 'shared-daemon-single-watcher'
+    ),
+    fileLockContentionRisk: value?.fileLockContentionRisk ?? (
+      watchDisabled
+        ? 'none-no-watcher'
+        : daemonDisabled
+          ? 'multi-wrapper-writers'
+          : 'single-writer'
+    ),
+    daemonDisabled,
+    watchDisabled,
+    daemonIdleTimeoutMs: numberOrUndefined(
+      value?.daemonIdleTimeoutMs ?? env.CODEGRAPH_DAEMON_IDLE_TIMEOUT_MS,
+    ),
+    daemonMaxIdleMs: numberOrUndefined(
+      value?.daemonMaxIdleMs ?? env.CODEGRAPH_DAEMON_MAX_IDLE_MS,
+    ),
+  };
+}
+
+function runtimeTopologyFromEvent(event, fallbackTopology = null, effectiveChildEnv = null) {
+  if (!event) return fallbackTopology;
+  const value = event.event === 'child.runtime-topology.transition'
+    || event.event === 'child.runtime-topology.reset'
+      ? event.to
+      : event.runtimeTopology ?? event.runtime?.runtimeTopology;
+  if (!value || typeof value !== 'object') {
+    return fallbackTopology;
+  }
+  return compactRuntimeTopology(value, effectiveChildEnv);
+}
+
+function envFlagEnabled(value) {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  return normalized !== '' && normalized !== '0' && normalized !== 'false';
+}
+
+function numberOrUndefined(value) {
+  if (value === undefined || value === null || value === '') return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 function compactCodexConfigAlignment(value) {
@@ -300,18 +378,40 @@ function markSupersededContextWrapper(summary) {
   }
 }
 
-function enrichActivityWithWrapperIdentity(activity, wrapperStartsByRunId) {
+function eventHasContextOutcomeEvidence(event) {
+  return Boolean(event && typeof event === 'object' && [
+    'outcome',
+    'outcomeStatus',
+    'outcomeSchemaVersion',
+    'contextUsable',
+  ].some(key => Object.prototype.hasOwnProperty.call(event, key)));
+}
+
+function enrichActivityWithWrapperIdentity(
+  activity,
+  wrapperStartsByRunId,
+  runtimeTopologyByRunId = null,
+) {
   if (!activity?.event?.runId) return null;
   const wrapperStart = wrapperStartsByRunId.get(activity.event.runId);
   if (!wrapperStart) return null;
+  const compactedStart = compactWrapperStart(wrapperStart);
   return {
-    ...enrichWrapperStartWithDiskHash(compactWrapperStart(wrapperStart)),
+    ...enrichWrapperStartWithDiskHash({
+      ...compactedStart,
+      runtimeTopology: runtimeTopologyByRunId?.get?.(activity.event.runId)
+        ?? compactedStart.runtimeTopology,
+    }),
     latestTs: activity.event.ts,
     latestEvent: activity.event.event,
     latestRequestId: activity.event.requestId,
     latestRequestKind: activity.event.requestKind,
     latestTool: activity.event.tool,
     latestFailureClass: activity.event.failureClass,
+    latestHasContextOutcomeEvidence: eventHasContextOutcomeEvidence(activity.event),
+    latestOutcomeStatus: activity.event.outcomeStatus ?? activity.event.outcome?.status,
+    latestOutcomeSchemaVersion: activity.event.outcomeSchemaVersion ?? activity.event.outcome?.schemaVersion,
+    latestContextUsable: activity.event.contextUsable ?? activity.event.outcome?.usableContext,
   };
 }
 
@@ -335,6 +435,9 @@ function compactEvent(event, wrapperStartsByRunId = null) {
     contextJson: event.contextJson,
     kind: event.kind,
     failureClass: event.failureClass,
+    outcomeStatus: event.outcomeStatus ?? event.outcome?.status,
+    outcomeSchemaVersion: event.outcomeSchemaVersion ?? event.outcome?.schemaVersion,
+    contextUsable: event.contextUsable ?? event.outcome?.usableContext,
     fatal: event.fatal,
     message: event.message,
     textTail: textTail(event.text),
@@ -343,6 +446,7 @@ function compactEvent(event, wrapperStartsByRunId = null) {
     childExitClass: event.childExitClass,
     childExitName: event.childExitName,
     childUptimeMs: event.childUptimeMs,
+    currentChild: event.currentChild,
     mode: event.mode,
     reason: event.reason,
     target: event.target,
@@ -396,6 +500,13 @@ function compactEvent(event, wrapperStartsByRunId = null) {
     restartWindowMs: event.restartWindowMs,
     childRestartBackoffPending: event.childRestartBackoffPending,
     source: event.source,
+    from: event.from ? compactRuntimeTopology(event.from) : undefined,
+    to: event.to ? compactRuntimeTopology(event.to) : undefined,
+    runtimeTopology: event.runtimeTopology
+      ? compactRuntimeTopology(event.runtimeTopology)
+      : event.runtime?.runtimeTopology
+        ? compactRuntimeTopology(event.runtime.runtimeTopology)
+        : undefined,
     limit: event.limit,
     wrapperVersion: event.wrapperVersion,
     scriptPath: event.scriptPath,
@@ -669,6 +780,7 @@ function isExpectedHostStdioExit(event) {
 
 function isCriticalTransportFailure(event) {
   if (event.event === 'child.exit') {
+    if (event.currentChild === false) return false;
     return activeWorkCount(event) > 0;
   }
 
@@ -821,10 +933,11 @@ function warningTextExcerpt(text, maxLength = 1200) {
 }
 
 function isCodegraphAutoSyncDisabledEvent(event) {
-  if (
-    event?.baseResponseWarnings?.codegraphAutoSyncDisabled === true
-    || event?.responseWarnings?.codegraphAutoSyncDisabled === true
-  ) {
+  const responseWarnings = [event?.baseResponseWarnings, event?.responseWarnings];
+  if (responseWarnings.some(warnings => (
+    warnings?.codegraphAutoSyncDisabled === true
+    && isLeadingCodegraphAutoSyncDisabledWarningText(warnings?.textTail)
+  ))) {
     return true;
   }
   if (event?.event !== 'child.stderr') return false;
@@ -832,6 +945,31 @@ function isCodegraphAutoSyncDisabledEvent(event) {
   return text.includes('codegraph auto-sync is disabled')
     || (text.includes('auto-sync disabled') && text.includes('file lock'))
     || (text.includes('index is frozen') && text.includes('codegraph'));
+}
+
+function isLeadingCodegraphAutoSyncDisabledWarningText(text) {
+  const value = String(text ?? '');
+  const lower = value.toLowerCase();
+  const leadingLine = value
+    .split(/\r?\n/u)
+    .map(line => line.trim())
+    .find(Boolean);
+  if (!leadingLine) return false;
+  const normalizedLeadingLine = leadingLine
+    .replace(/^>\s*/u, '')
+    .replace(/^\*\*\s*/u, '')
+    .replace(/^\u26a0\ufe0f?\s*/u, '')
+    .replace(/^\*\*\s*/u, '')
+    .toLowerCase();
+  return normalizedLeadingLine.startsWith('codegraph auto-sync is disabled')
+    || (
+      normalizedLeadingLine.startsWith('auto-sync disabled')
+      && (lower.includes('file lock') || lower.includes('index is frozen'))
+    )
+    || (
+      normalizedLeadingLine.startsWith('codegraph')
+      && normalizedLeadingLine.includes('index is frozen')
+    );
 }
 
 function recordCodegraphAutoSyncDisabled(bucket, event, wrapperStartsByRunId) {
@@ -916,6 +1054,7 @@ function createSummary() {
     observedAt: isoFromMs(observedAtMs),
     observedDirectMcpError,
     observedDirectMcpFailureClass,
+    directMcpResponseEvidence: null,
     totalLines: 0,
     totalEvents: 0,
     malformedLines: 0,
@@ -1031,9 +1170,27 @@ function createSummary() {
       codegraphTargets: {},
       contextPackTimeoutMs: {},
       staleWrapperAutoRecycle: {},
+      runtimeTopologyModes: {},
+      watcherOwnership: {},
+      directWatcherContentionRisk: 0,
+      sharedDaemonProxyCount: 0,
+      inProcessFallbackCount: 0,
+      inProcessFallbackWatcherCount: 0,
+      inProcessFallbackRuns: [],
+      inProcessFallbackWatcherRuns: [],
       activeWindowMs: ACTIVE_WRAPPER_WINDOW_MS,
       detailLimit: ACTIVE_WRAPPER_DETAIL_LIMIT,
       latest: [],
+    },
+    sharedDaemonFallback: {
+      detected: 0,
+      watcherActivated: 0,
+      recoveryRequested: 0,
+      recoveryDeferred: 0,
+      recoveryForced: 0,
+      recoveryRestarted: 0,
+      recoveryReset: 0,
+      latest: null,
     },
     contextSourceOrdering: {
       ...createContextSourceOrderingSummary(),
@@ -1781,6 +1938,13 @@ function hasActiveStaleWrappersGuardFailure(summary) {
 }
 
 function hasUntrustedDirectMcpGuardFailure(summary) {
+  const evidence = summary?.directMcpResponseEvidence;
+  if (
+    evidence?.provenance === 'adapter-fallback-or-smoke'
+    && evidence?.trustedForAdapterJudgment === true
+  ) {
+    return false;
+  }
   const directMcpTrust = String(summary?.rootCauseSummary?.directMcpTrust ?? '');
   return directMcpTrust.startsWith('do-not-trust-direct-mcp');
 }
@@ -1853,7 +2017,12 @@ function selectLatestMatchingDiskRunActivity(activityByRunId, wrapperStartsByRun
     })[0];
 }
 
-function summarizeActiveWrappers(activityByRunId, wrapperStartsByRunId, referenceMs) {
+function summarizeActiveWrappers(
+  activityByRunId,
+  wrapperStartsByRunId,
+  runtimeTopologyByRunId,
+  referenceMs,
+) {
   const activityCutoffMs = Number.isFinite(referenceMs)
     ? referenceMs - ACTIVE_WRAPPER_WINDOW_MS
     : Number.NEGATIVE_INFINITY;
@@ -1862,7 +2031,11 @@ function summarizeActiveWrappers(activityByRunId, wrapperStartsByRunId, referenc
       const activityMs = Number.isFinite(activity.tsMs) ? activity.tsMs : Number.NEGATIVE_INFINITY;
       return activityMs >= activityCutoffMs;
     })
-    .map(activity => enrichActivityWithWrapperIdentity(activity, wrapperStartsByRunId))
+    .map(activity => enrichActivityWithWrapperIdentity(
+      activity,
+      wrapperStartsByRunId,
+      runtimeTopologyByRunId,
+    ))
     .filter(Boolean)
     .sort((a, b) => {
       const aTs = eventTimestampMs({ ts: a.latestTs });
@@ -1873,10 +2046,37 @@ function summarizeActiveWrappers(activityByRunId, wrapperStartsByRunId, referenc
   const codegraphTargets = {};
   const contextPackTimeoutMs = {};
   const staleWrapperAutoRecycle = {};
+  const runtimeTopologyModes = {};
+  const watcherOwnership = {};
+  let directWatcherContentionRisk = 0;
+  let sharedDaemonProxyCount = 0;
+  let inProcessFallbackCount = 0;
+  let inProcessFallbackWatcherCount = 0;
+  const inProcessFallbackRuns = [];
+  const inProcessFallbackWatcherRuns = [];
   for (const wrapper of latest) {
     count(codegraphTargets, wrapper.codegraphTarget);
     count(contextPackTimeoutMs, wrapper.env?.NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS);
     count(staleWrapperAutoRecycle, wrapper.env?.NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE);
+    count(runtimeTopologyModes, wrapper.runtimeTopology?.mode);
+    count(watcherOwnership, wrapper.runtimeTopology?.watcherOwnership);
+    if (
+      wrapper.runtimeTopology?.mode === 'direct-session'
+      && wrapper.runtimeTopology?.watchDisabled === false
+    ) {
+      directWatcherContentionRisk++;
+    }
+    if (wrapper.runtimeTopology?.mode === 'shared-daemon-proxy') {
+      sharedDaemonProxyCount++;
+    }
+    if (String(wrapper.runtimeTopology?.mode ?? '').startsWith('in-process-fallback')) {
+      inProcessFallbackCount++;
+      inProcessFallbackRuns.push(compactFallbackWrapperRuntime(wrapper));
+    }
+    if (wrapper.runtimeTopology?.mode === 'in-process-fallback-watcher') {
+      inProcessFallbackWatcherCount++;
+      inProcessFallbackWatcherRuns.push(compactFallbackWrapperRuntime(wrapper));
+    }
   }
 
   return {
@@ -1889,10 +2089,67 @@ function summarizeActiveWrappers(activityByRunId, wrapperStartsByRunId, referenc
     codegraphTargets,
     contextPackTimeoutMs,
     staleWrapperAutoRecycle,
+    runtimeTopologyModes,
+    watcherOwnership,
+    directWatcherContentionRisk,
+    sharedDaemonProxyCount,
+    inProcessFallbackCount,
+    inProcessFallbackWatcherCount,
+    inProcessFallbackRuns: inProcessFallbackRuns.slice(0, ACTIVE_WRAPPER_DETAIL_LIMIT),
+    inProcessFallbackWatcherRuns: inProcessFallbackWatcherRuns.slice(0, ACTIVE_WRAPPER_DETAIL_LIMIT),
     activeWindowMs: ACTIVE_WRAPPER_WINDOW_MS,
     detailLimit: ACTIVE_WRAPPER_DETAIL_LIMIT,
     latest: latest.slice(0, ACTIVE_WRAPPER_DETAIL_LIMIT),
   };
+}
+
+function compactFallbackWrapperRuntime(wrapper) {
+  return {
+    runId: wrapper.runId,
+    pid: wrapper.wrapperPid ?? wrapper.pid ?? null,
+    latestTs: wrapper.latestTs ?? null,
+    latestEvent: wrapper.latestEvent ?? null,
+    codegraphTarget: wrapper.codegraphTarget ?? null,
+    matchesDisk: wrapper.matchesDisk ?? null,
+    runtimeTopology: wrapper.runtimeTopology ?? null,
+  };
+}
+
+function recordSharedDaemonFallback(target, event, wrapperStartsByRunId) {
+  let matched = false;
+  if (
+    event.event === 'child.runtime-topology.transition'
+    && String(event.to?.mode ?? '').startsWith('in-process-fallback')
+  ) {
+    target.detected++;
+    if (event.to?.mode === 'in-process-fallback-watcher') {
+      target.watcherActivated++;
+    }
+    matched = true;
+  }
+  if (event.event === 'child.shared-daemon-fallback.recovery.request') {
+    target.recoveryRequested++;
+    matched = true;
+  }
+  if (event.event === 'child.shared-daemon-fallback.recovery.deferred') {
+    target.recoveryDeferred++;
+    matched = true;
+  }
+  if (event.event === 'child.shared-daemon-fallback.recovery.force') {
+    target.recoveryForced++;
+    matched = true;
+  }
+  if (event.event === 'child.restart' && event.reason === 'shared-daemon-fallback') {
+    target.recoveryRestarted++;
+    matched = true;
+  }
+  if (event.event === 'child.runtime-topology.reset') {
+    target.recoveryReset++;
+    matched = true;
+  }
+  if (matched) {
+    target.latest = compactEvent(event, wrapperStartsByRunId);
+  }
 }
 
 function distinctPresentKeys(counts) {
@@ -2045,8 +2302,12 @@ function inferProjectRootFromLogPath(resolvedLogPath) {
 function inspectCodexMcpConfig(summary) {
   const result = {
     source: 'codex',
+    scope: null,
     root: projectRoot,
     path: null,
+    userConfigPath: null,
+    projectConfigPath: null,
+    candidateConfigs: [],
     exists: false,
     parseError: null,
     appliesToRoot: null,
@@ -2103,7 +2364,11 @@ function inspectCodexMcpConfig(summary) {
 
   return {
     ...result,
+    scope: config.scope ?? null,
     path: config.path,
+    userConfigPath: config.userConfigPath ?? null,
+    projectConfigPath: config.projectConfigPath ?? null,
+    candidateConfigs: Array.isArray(config.candidateConfigs) ? config.candidateConfigs : [],
     exists: config.exists,
     parseError: config.parseError,
     appliesToRoot: config.appliesToRoot,
@@ -2117,6 +2382,174 @@ function inspectCodexMcpConfig(summary) {
     hostConfigAlignmentOverrides,
     mismatch,
     rootCause: mismatch ? hostConfigMismatchRootCause() : null,
+  };
+}
+
+function buildDirectMcpResponseEvidence(summary) {
+  const response = summary.currentContextWrapper;
+  const configuredResponse = summary.currentConfiguredContextWrapper;
+  const codexConfig = summary.codexMcpConfig;
+  const responseObserved = Boolean(response?.latestTs && response?.latestEvent);
+  const contextOutcomeSchemaVersion = response?.latestOutcomeSchemaVersion ?? null;
+  const contextOutcomeStatus = response?.latestOutcomeStatus ?? null;
+  const hasContextOutcomeEvidence = typeof response?.latestHasContextOutcomeEvidence === 'boolean'
+    ? response.latestHasContextOutcomeEvidence
+    : Boolean(response) && (
+        response.latestOutcomeSchemaVersion !== undefined
+        || response.latestOutcomeStatus !== undefined
+        || response.latestContextUsable !== undefined
+      );
+  const contextUsable = typeof response?.latestContextUsable === 'boolean'
+    ? response.latestContextUsable
+    : null;
+  const expectedContextUsable = contextOutcomeStatus === 'failed'
+    ? false
+    : (contextOutcomeStatus === 'complete' || contextOutcomeStatus === 'partial' ? true : null);
+  const contextOutcomeValid = !hasContextOutcomeEvidence
+    ? null
+    : contextOutcomeSchemaVersion === 1
+      && expectedContextUsable !== null
+      && contextUsable === expectedContextUsable;
+  const contextOutcomeFailureClass = hasContextOutcomeEvidence && !contextOutcomeValid
+    ? 'direct-mcp-context-outcome-invalid'
+    : contextOutcomeStatus === 'partial'
+      ? 'direct-mcp-context-partial'
+      : contextOutcomeStatus === 'failed'
+        ? 'direct-mcp-context-failed'
+        : null;
+  const callable = responseObserved
+    && response.latestEvent === 'nanoflow.context.response'
+    && (
+      hasContextOutcomeEvidence
+        ? contextOutcomeValid && contextUsable === true
+        : (response.latestFailureClass === 'success' || response.latestFailureClass == null)
+    );
+  const alignmentOverride = getWrapperConfigAlignmentOverride(response);
+  const targetComparison = codexConfig?.currentContextWrapperTarget ?? null;
+  const envComparison = codexConfig?.currentContextWrapperEnv ?? null;
+  const autoSyncDisabledRun = response?.runId
+    ? (summary.activeCodegraphAutoSyncDisabledRuns ?? [])
+        .find(run => run.runId === response.runId) ?? null
+    : null;
+  const adapterTrustBlockers = [];
+  const directHostTrustBlockers = [];
+
+  if (!responseObserved) {
+    adapterTrustBlockers.push('no-current-context-response');
+  } else {
+    if (contextOutcomeFailureClass) {
+      adapterTrustBlockers.push(contextOutcomeFailureClass);
+    } else if (!callable) {
+      adapterTrustBlockers.push('latest-context-response-not-successful');
+    }
+    if (response.supersededByFreshWrapper === true) {
+      adapterTrustBlockers.push('context-response-superseded-by-fresh-wrapper');
+    }
+    if (response.matchesDisk === false) {
+      adapterTrustBlockers.push('wrapper-script-stale');
+    } else if (response.matchesDisk !== true) {
+      adapterTrustBlockers.push('wrapper-script-identity-unverified');
+    }
+    if (!alignmentOverride) {
+      if (targetComparison?.matches === false) {
+        adapterTrustBlockers.push('codegraph-target-mismatch');
+      } else if (targetComparison?.matches !== true) {
+        adapterTrustBlockers.push('codegraph-target-unverified');
+      }
+      if (envComparison?.matches === false) {
+        adapterTrustBlockers.push('wrapper-env-mismatch');
+      } else if (envComparison?.matches !== true) {
+        adapterTrustBlockers.push('wrapper-env-unverified');
+      }
+    }
+    if (autoSyncDisabledRun) {
+      adapterTrustBlockers.push('codegraph-autosync-disabled');
+    }
+  }
+
+  directHostTrustBlockers.push(...adapterTrustBlockers);
+  if (alignmentOverride) {
+    directHostTrustBlockers.push('intentional-config-alignment-override');
+  }
+  if (!codexConfig?.codegraphServerConfigured) {
+    directHostTrustBlockers.push('codex-codegraph-config-unavailable');
+  } else {
+    if (targetComparison?.matches === false) {
+      directHostTrustBlockers.push('codegraph-target-mismatch');
+    } else if (targetComparison?.matches !== true) {
+      directHostTrustBlockers.push('codegraph-target-unverified');
+    }
+    if (envComparison?.matches === false) {
+      directHostTrustBlockers.push('wrapper-env-mismatch');
+    } else if (envComparison?.matches !== true) {
+      directHostTrustBlockers.push('wrapper-env-unverified');
+    }
+  }
+  if (!configuredResponse) {
+    directHostTrustBlockers.push('no-configured-context-response');
+  } else if (configuredResponse.runId !== response?.runId) {
+    directHostTrustBlockers.push('latest-response-not-from-configured-wrapper');
+  }
+
+  const uniqueAdapterTrustBlockers = [...new Set(adapterTrustBlockers)];
+  const uniqueDirectHostTrustBlockers = [...new Set(directHostTrustBlockers)];
+  const trustedForAdapterJudgment = responseObserved && uniqueAdapterTrustBlockers.length === 0;
+  const trustedForDirectHostHealth = responseObserved && uniqueDirectHostTrustBlockers.length === 0;
+  const status = !responseObserved
+    ? 'no-response-evidence'
+    : trustedForDirectHostHealth
+      ? 'response-trusted'
+      : trustedForAdapterJudgment
+        ? 'response-trusted-adapter-probe-only'
+        : 'response-untrusted';
+
+  return {
+    status,
+    provenance: alignmentOverride
+      ? 'adapter-fallback-or-smoke'
+      : 'codex-mcp-host-candidate',
+    responseObserved,
+    callable,
+    trustedForAdapterJudgment,
+    trustedForDirectHostHealth,
+    runId: response?.runId ?? null,
+    pid: response?.wrapperPid ?? response?.pid ?? null,
+    requestId: response?.latestRequestId ?? null,
+    requestKind: response?.latestRequestKind ?? null,
+    responseTs: response?.latestTs ?? null,
+    responseEvent: response?.latestEvent ?? null,
+    failureClass: response?.latestFailureClass ?? null,
+    contextOutcomeStatus,
+    contextOutcomeSchemaVersion,
+    contextUsable,
+    contextOutcomeFailureClass,
+    scriptSha256: response?.scriptSha256 ?? null,
+    diskScriptSha256: response?.diskScriptSha256 ?? null,
+    scriptMatchesDisk: response?.matchesDisk ?? null,
+    codegraphTarget: response?.codegraphTarget ?? null,
+    configuredCodegraphTarget: codexConfig?.expectedCodegraphTarget ?? null,
+    configuredConfigScope: codexConfig?.scope ?? null,
+    configuredConfigPath: codexConfig?.path ?? null,
+    targetMatchesConfig: targetComparison?.matches ?? null,
+    envMatchesConfig: envComparison?.matches ?? null,
+    configAlignmentStatus: alignmentOverride?.status ?? response?.codexConfigAlignment?.status ?? null,
+    configAlignmentReason: alignmentOverride?.reason ?? response?.codexConfigAlignment?.reason ?? null,
+    configuredContextResponseObserved: Boolean(configuredResponse),
+    configuredContextRunId: configuredResponse?.runId ?? null,
+    responseFromConfiguredWrapper: Boolean(
+      configuredResponse?.runId
+      && response?.runId
+      && configuredResponse.runId === response.runId
+    ),
+    indexFreshnessTrusted: !autoSyncDisabledRun,
+    autoSyncDisabled: Boolean(autoSyncDisabledRun),
+    autoSyncDisabledCount: autoSyncDisabledRun?.count ?? 0,
+    adapterTrustBlockers: uniqueAdapterTrustBlockers,
+    directHostTrustBlockers: uniqueDirectHostTrustBlockers,
+    trustBlockers: uniqueDirectHostTrustBlockers,
+    misdiagnosisGuard: callable && !trustedForDirectHostHealth
+      ? 'call-success-does-not-prove-current-config-or-index-health'
+      : null,
   };
 }
 
@@ -2154,25 +2587,69 @@ function compareExpectedWrapperEnv(wrapperStart, configuredEnv) {
       .filter(([, value]) => typeof value === 'string')
       .map(([key, value]) => [key, String(value)]),
   );
-  if (Object.keys(expected).length === 0) {
-    return { matches: null, expected, actual: null, mismatchedKeys: [], mismatches: [] };
-  }
-  if (!wrapperStart || !wrapperStart.env || typeof wrapperStart.env !== 'object') {
-    return { matches: null, expected, actual: null, mismatchedKeys: [], mismatches: [] };
-  }
-  const actual = Object.fromEntries(
-    Object.keys(expected).map(key => [
+  const wrapperEnv = wrapperStart?.env && typeof wrapperStart.env === 'object'
+    ? wrapperStart.env
+    : {};
+  const hasExplicitObservationSchema = Number.isInteger(wrapperStart?.envObservationSchemaVersion)
+    && wrapperStart.envObservationSchemaVersion >= 1
+    && Array.isArray(wrapperStart?.observedEnvKeys);
+  const observedKeys = new Set((hasExplicitObservationSchema
+    ? wrapperStart.observedEnvKeys
+    : Object.keys(wrapperEnv))
+    .filter(key => typeof key === 'string'));
+  const comparisonKeys = [...new Set([...Object.keys(expected), ...observedKeys])].sort();
+  const actual = wrapperStart
+    ? Object.fromEntries(comparisonKeys.map(key => [
+        key,
+        typeof wrapperEnv[key] === 'string' ? String(wrapperEnv[key]) : null,
+      ]))
+    : null;
+  const comparisons = comparisonKeys.map(key => {
+    const configured = Object.prototype.hasOwnProperty.call(expected, key);
+    const observed = observedKeys.has(key);
+    const actualValue = actual?.[key] ?? null;
+    if (!configured) {
+      return { key, status: 'not-configured', expected: null, actual: actualValue };
+    }
+    if (!wrapperStart || !observed) {
+      return { key, status: 'unobserved', expected: expected[key], actual: null };
+    }
+    return {
       key,
-      typeof wrapperStart.env[key] === 'string' ? String(wrapperStart.env[key]) : null,
-    ]),
-  );
+      status: envValuesMatch(key, actualValue, expected[key]) ? 'matched' : 'mismatched',
+      expected: expected[key],
+      actual: actualValue,
+    };
+  });
+  const matchedKeys = comparisons.filter(item => item.status === 'matched').map(item => item.key);
+  const mismatchedKeys = comparisons.filter(item => item.status === 'mismatched').map(item => item.key);
+  const unobservedKeys = comparisons.filter(item => item.status === 'unobserved').map(item => item.key);
+  const notConfiguredKeys = comparisons.filter(item => item.status === 'not-configured').map(item => item.key);
+  const mismatches = comparisons
+    .filter(item => item.status === 'mismatched')
+    .map(({ key, expected: expectedValue, actual: actualValue }) => ({
+      key,
+      expected: expectedValue,
+      actual: actualValue,
+    }));
+  const matches = mismatchedKeys.length > 0
+    ? false
+    : unobservedKeys.length > 0
+      ? null
+      : matchedKeys.length > 0
+        ? true
+        : null;
   const alignmentOverride = getWrapperConfigAlignmentOverride(wrapperStart);
   if (alignmentOverride) {
     return {
       matches: null,
       expected,
       actual,
+      comparisons,
+      matchedKeys,
       mismatchedKeys: [],
+      unobservedKeys,
+      notConfiguredKeys,
       mismatches: [],
       ignored: true,
       ignoredReason: alignmentOverride.reason,
@@ -2182,13 +2659,32 @@ function compareExpectedWrapperEnv(wrapperStart, configuredEnv) {
       configAlignmentMismatches: alignmentOverride.mismatches,
     };
   }
-  const mismatchedKeys = Object.keys(expected).filter(key => actual[key] !== expected[key]);
-  const mismatches = mismatchedKeys.map(key => ({
-    key,
-    expected: expected[key],
-    actual: actual[key],
-  }));
-  return { matches: mismatchedKeys.length === 0, expected, actual, mismatchedKeys, mismatches };
+  return {
+    matches,
+    expected,
+    actual,
+    comparisons,
+    matchedKeys,
+    mismatchedKeys,
+    unobservedKeys,
+    notConfiguredKeys,
+    mismatches,
+  };
+}
+
+function envValuesMatch(key, actual, expected) {
+  if (String(key).toLowerCase() === 'npm_config_cache') {
+    return normalizeWindowsPathForEnvComparison(actual) === normalizeWindowsPathForEnvComparison(expected);
+  }
+  return actual === expected;
+}
+
+function normalizeWindowsPathForEnvComparison(value) {
+  const normalized = path.win32.normalize(String(value ?? '').replace(/\//g, '\\'))
+    .replace(/\\/g, '/')
+    .toLowerCase();
+  if (/^[a-z]:\/$/.test(normalized)) return normalized;
+  return normalized.replace(/\/+$/, '');
 }
 
 function getWrapperConfigAlignmentOverride(wrapperStart) {
@@ -2301,7 +2797,7 @@ function hostConfigMismatchRootCause() {
       'codexMcpConfig.currentWrapperEnv',
       'codexMcpConfig.currentContextWrapperTarget',
       'codexMcpConfig.currentContextWrapperEnv',
-      'C:\\Users\\MI\\.codex\\config.toml',
+      'codexMcpConfig.path / active Codex config',
       'wrapper.start.codegraphTarget',
       'wrapper.start.env',
     ],
@@ -2319,6 +2815,13 @@ function buildRootCauseSummary(summary) {
     activeWrapperTargets: summary.activeWrappers?.codegraphTargets ?? {},
     activeContextPackTimeoutMs: summary.activeWrappers?.contextPackTimeoutMs ?? {},
     activeStaleWrapperAutoRecycle: summary.activeWrappers?.staleWrapperAutoRecycle ?? {},
+    activeInProcessFallbackCount: summary.activeWrappers?.inProcessFallbackCount ?? 0,
+    activeInProcessFallbackWatcherCount:
+      summary.activeWrappers?.inProcessFallbackWatcherCount ?? 0,
+    activeInProcessFallbackRuns: summary.activeWrappers?.inProcessFallbackRuns ?? [],
+    activeInProcessFallbackWatcherRuns:
+      summary.activeWrappers?.inProcessFallbackWatcherRuns ?? [],
+    sharedDaemonFallback: summary.sharedDaemonFallback ?? null,
     expectedCodegraphTarget: summary.codexMcpConfig?.expectedCodegraphTarget ?? null,
     currentWrapperTarget: summary.codexMcpConfig?.currentWrapperTarget?.actual ?? summary.currentWrapper?.codegraphTarget ?? null,
     currentContextWrapperTarget: summary.codexMcpConfig?.currentContextWrapperTarget?.actual ?? summary.currentContextWrapper?.codegraphTarget ?? null,
@@ -2357,6 +2860,7 @@ function buildRootCauseSummary(summary) {
     hasCurrentWrapperEvidence: summary.logFreshness?.hasCurrentWrapperEvidence ?? true,
     directMcpError: summary.observedDirectMcpError ?? null,
     observedDirectMcpFailureClass: summary.observedDirectMcpFailureClass ?? null,
+    directMcpResponseEvidence: summary.directMcpResponseEvidence ?? null,
   };
   let status = 'direct-mcp-currently-healthy';
   let failureBoundary = 'none';
@@ -2419,6 +2923,22 @@ function buildRootCauseSummary(summary) {
     recovery.push('Inspect currentChildRestartBackoff/currentBaseCodegraphUnavailable and retry after the base CodeGraph child restarts cleanly.');
   }
 
+  if (summary.activeWrappers.inProcessFallbackCount > 0) {
+    if (status === 'direct-mcp-currently-healthy') {
+      status = summary.activeWrappers.inProcessFallbackWatcherCount > 0
+        ? 'base-codegraph-shared-daemon-fallback-watcher'
+        : 'base-codegraph-shared-daemon-fallback';
+      failureBoundary = 'base-codegraph-process-topology';
+      directMcpTrust = 'do-not-trust-direct-mcp-until-fallback-proxies-restart';
+    }
+    failureClasses.push('active-shared-daemon-fallback');
+    if (summary.activeWrappers.inProcessFallbackWatcherCount > 0) {
+      failureClasses.push('active-in-process-fallback-watcher');
+    }
+    recovery.push('Restart or recycle the affected wrapper children so they reconnect to the shared daemon instead of retaining per-wrapper in-process engines.');
+    recovery.push('Inspect sharedDaemonFallback and activeWrappers.inProcessFallbackWatcherRuns before attributing later SQLite lock failures to the overlay adapter.');
+  }
+
   if (summary.codexMcpConfig?.mismatch === true) {
     if (status === 'direct-mcp-currently-healthy') {
       status = 'direct-mcp-host-config-mismatch';
@@ -2435,8 +2955,23 @@ function buildRootCauseSummary(summary) {
     ) {
       failureClasses.push('mcp-host-env-mismatch');
     }
-    recovery.push('Restart the Codex MCP host/session so direct MCP reloads C:\\Users\\MI\\.codex\\config.toml.');
+    recovery.push('Restart the Codex MCP host/session so direct MCP reloads the active config reported by codexMcpConfig.path.');
     recovery.push('Until restart, use npm run codegraph:adapter:context -- --query "<query>" --json for repository facts.');
+  }
+
+  if (
+    summary.directMcpResponseEvidence?.responseObserved === true
+    && summary.directMcpResponseEvidence?.trustedForAdapterJudgment === true
+    && summary.directMcpResponseEvidence?.trustedForDirectHostHealth === false
+    && status === 'direct-mcp-currently-healthy'
+  ) {
+    status = 'direct-mcp-response-provenance-untrusted';
+    failureBoundary = 'codex-mcp-host-evidence';
+    adapterFailureLikely = false;
+    directMcpTrust = 'do-not-trust-direct-mcp-until-configured-response-is-observed';
+    failureClasses.push('direct-mcp-response-provenance-untrusted');
+    recovery.push('Restart the Codex MCP host/session and require a fresh context response from a wrapper matching the active config reported by codexMcpConfig.path before declaring direct MCP healthy.');
+    recovery.push('The current response can still be used as an adapter fallback or smoke-probe result when directMcpResponseEvidence.trustedForAdapterJudgment=true.');
   }
 
   if (
@@ -2540,6 +3075,7 @@ function buildDiagnosticTriage(rootCauseSummary) {
       hasCurrentWrapperEvidence: observed.hasCurrentWrapperEvidence ?? true,
       directMcpError: observed.directMcpError ?? null,
       observedDirectMcpFailureClass: observed.observedDirectMcpFailureClass ?? null,
+      directMcpResponseEvidence: observed.directMcpResponseEvidence ?? null,
     },
     fallback,
     decisionContract: buildDiagnosticDecisionContract(rootCauseSummary),
@@ -2686,7 +3222,7 @@ function buildDiagnosticEvidenceGaps(rootCauseSummary) {
   ) {
     addGap({
       missingEvidence: 'current-configured-wrapper-evidence',
-      whyItMatters: 'Direct MCP has not shown a current wrapper that matches C:\\Users\\MI\\.codex\\config.toml, so host/session state may still be stale.',
+      whyItMatters: 'Direct MCP has not shown a current wrapper that matches the active config reported by codexMcpConfig.path, so host/session state may still be stale.',
       requiredEvidence: 'currentConfiguredWrapper.runId or currentConfiguredContextWrapper.runId after Codex MCP host/session restart',
       blocksConclusions: [
         'direct-mcp-healthy',
@@ -2770,7 +3306,7 @@ function buildDiagnosticRequiredEvidenceBeforeConclusion(rootCauseSummary) {
       conclusion: 'direct-mcp-healthy',
       requiredEvidence: [
         'Codex MCP host/session restart',
-        'fresh wrapper.start matching C:\\Users\\MI\\.codex\\config.toml',
+        'fresh wrapper.start matching codexMcpConfig.path / the active Codex config',
         'fresh nanoflow_context_pack response from the restarted direct MCP host',
       ],
       currentBlockingEvidence: [
@@ -2821,10 +3357,15 @@ function buildDiagnosticMisdiagnosisGuards(rootCauseSummary) {
     });
   }
   if (directMcpTrust.startsWith('do-not-trust-direct-mcp')) {
+    const responseEvidence = observed.directMcpResponseEvidence;
+    const successfulResponseIsUntrusted = responseEvidence?.callable === true
+      && responseEvidence?.trustedForDirectHostHealth === false;
     guards.push({
       mistakenConclusion: 'direct-mcp-healthy',
-      blockedBy: `directMcpTrust=${directMcpTrust}; current direct MCP evidence is not trustworthy for adapter quality decisions.`,
-      requiredEvidenceBeforeConclusion: 'fresh wrapper.start matching C:\\Users\\MI\\.codex\\config.toml plus a fresh nanoflow_context_pack response',
+      blockedBy: successfulResponseIsUntrusted
+        ? `A successful direct MCP response came from an untrusted wrapper; directMcpTrust=${directMcpTrust}; blockers=${responseEvidence.trustBlockers.join(',')}.`
+        : `directMcpTrust=${directMcpTrust}; current direct MCP evidence is not trustworthy for adapter quality decisions.`,
+      requiredEvidenceBeforeConclusion: 'fresh wrapper.start matching codexMcpConfig.path / the active Codex config plus a fresh nanoflow_context_pack response',
     });
   }
   if (
@@ -2921,6 +3462,7 @@ function analyzeLog() {
   }
 
   const wrapperStartsByRunId = new Map();
+  const runtimeTopologyByRunId = new Map();
   const latestRunActivityByRunId = new Map();
   const latestContextResponseByRunId = new Map();
   const autoSyncDisabledByRunId = new Map();
@@ -2929,6 +3471,20 @@ function analyzeLog() {
     if (!event) continue;
     if (event.event === 'wrapper.start' && event.runId) {
       wrapperStartsByRunId.set(event.runId, event);
+      runtimeTopologyByRunId.set(
+        event.runId,
+        compactRuntimeTopology(event.runtimeTopology, event.effectiveChildEnv),
+      );
+    } else if (event.runId) {
+      const wrapperStart = wrapperStartsByRunId.get(event.runId);
+      const nextRuntimeTopology = runtimeTopologyFromEvent(
+        event,
+        runtimeTopologyByRunId.get(event.runId),
+        wrapperStart?.effectiveChildEnv,
+      );
+      if (nextRuntimeTopology) {
+        runtimeTopologyByRunId.set(event.runId, nextRuntimeTopology);
+      }
     }
     if (Number.isFinite(sinceMs) && Number.isFinite(tsMs) && tsMs < sinceMs) {
       continue;
@@ -3014,6 +3570,7 @@ function analyzeLog() {
     recordStaleWrapperEvent(summary.staleWrapper, event, wrapperStartsByRunId);
     recordWrapperRuntimeDiagnostic(summary.wrapperRuntimeDiagnostics, event, wrapperStartsByRunId);
     recordCodegraphAutoSyncDisabled(summary.codegraphAutoSyncDisabled, event, wrapperStartsByRunId);
+    recordSharedDaemonFallback(summary.sharedDaemonFallback, event, wrapperStartsByRunId);
     if (isCodegraphAutoSyncDisabledEvent(event) && event.runId) {
       if (!autoSyncDisabledByRunId.has(event.runId)) {
         autoSyncDisabledByRunId.set(event.runId, createCodegraphAutoSyncDisabledSummary());
@@ -3077,9 +3634,16 @@ function analyzeLog() {
     : isTimestampInsideActiveWindow(latestWrapperStartMs, currentReferenceMs)
       ? summary.wrapperStarts.latest
       : null;
-  summary.currentWrapper = currentWrapperStart
-    ? enrichWrapperStartWithDiskHash(compactWrapperStart(currentWrapperStart))
-    : null;
+  if (currentWrapperStart) {
+    const compactedCurrentWrapper = compactWrapperStart(currentWrapperStart);
+    summary.currentWrapper = enrichWrapperStartWithDiskHash({
+      ...compactedCurrentWrapper,
+      runtimeTopology: runtimeTopologyByRunId.get(currentWrapperStart.runId)
+        ?? compactedCurrentWrapper.runtimeTopology,
+    });
+  } else {
+    summary.currentWrapper = null;
+  }
   const latestContextActivity = selectLatestCurrentRunActivity(
     latestContextResponseByRunId,
     wrapperStartsByRunId,
@@ -3091,12 +3655,21 @@ function analyzeLog() {
   summary.currentContextWrapper = currentContextWrapperStart
     ? {
         ...enrichWrapperStartWithDiskHash(compactWrapperStart(currentContextWrapperStart)),
+        runtimeTopology: runtimeTopologyByRunId.get(currentContextWrapperStart.runId)
+          ?? compactWrapperStart(currentContextWrapperStart).runtimeTopology,
         latestTs: latestContextActivity.event.ts,
         latestEvent: latestContextActivity.event.event,
         latestRequestId: latestContextActivity.event.requestId,
         latestRequestKind: latestContextActivity.event.requestKind,
         latestTool: latestContextActivity.event.tool,
         latestFailureClass: latestContextActivity.event.failureClass,
+        latestHasContextOutcomeEvidence: eventHasContextOutcomeEvidence(latestContextActivity.event),
+        latestOutcomeStatus: latestContextActivity.event.outcomeStatus
+          ?? latestContextActivity.event.outcome?.status,
+        latestOutcomeSchemaVersion: latestContextActivity.event.outcomeSchemaVersion
+          ?? latestContextActivity.event.outcome?.schemaVersion,
+        latestContextUsable: latestContextActivity.event.contextUsable
+          ?? latestContextActivity.event.outcome?.usableContext,
         supersededByFreshWrapper: false,
       }
     : null;
@@ -3104,6 +3677,7 @@ function analyzeLog() {
   summary.activeWrappers = summarizeActiveWrappers(
     latestRunActivityByRunId,
     wrapperStartsByRunId,
+    runtimeTopologyByRunId,
     currentReferenceMs,
   );
   summary.logFreshness.hasCurrentWrapperEvidence = Boolean(
@@ -3134,7 +3708,11 @@ function analyzeLog() {
     currentReferenceMs,
   );
   summary.currentDiskContextWrapper = latestDiskContextActivity
-    ? enrichActivityWithWrapperIdentity(latestDiskContextActivity, wrapperStartsByRunId)
+    ? enrichActivityWithWrapperIdentity(
+        latestDiskContextActivity,
+        wrapperStartsByRunId,
+        runtimeTopologyByRunId,
+      )
     : null;
   const currentRunId = summary.currentWrapper?.runId;
   const currentContextRunId = summary.currentContextWrapper?.runId;
@@ -3179,15 +3757,26 @@ function analyzeLog() {
   summary.transportHealthy = summary.criticalTransportFailures === 0;
   summary.currentTransportHealthy = summary.currentCriticalTransportFailures === 0;
   summary.transportHealthScope = summary.currentWrapper ? 'current-wrapper' : 'log-window';
-  summary.effectiveTransportHealthy = summary.currentWrapper
-    ? summary.currentTransportHealthy
-    : summary.transportHealthy;
-  summary.effectiveCriticalTransportFailures = summary.currentWrapper
-    ? summary.currentCriticalTransportFailures
-    : summary.criticalTransportFailures;
-  summary.latestEffectiveCriticalTransportFailure = summary.currentWrapper
-    ? summary.latestCurrentCriticalTransportFailure
-    : summary.latestCriticalTransportFailure;
+  const hostFailureWithoutCurrentWrapper = Boolean(
+    summary.observedDirectMcpFailureClass
+    && summary.logFreshness?.staleAgainstObservedAt === true
+    && summary.logFreshness?.hasCurrentWrapperEvidence === false,
+  );
+  summary.effectiveTransportHealthy = hostFailureWithoutCurrentWrapper
+    ? true
+    : summary.currentWrapper
+      ? summary.currentTransportHealthy
+      : summary.transportHealthy;
+  summary.effectiveCriticalTransportFailures = hostFailureWithoutCurrentWrapper
+    ? 0
+    : summary.currentWrapper
+      ? summary.currentCriticalTransportFailures
+      : summary.criticalTransportFailures;
+  summary.latestEffectiveCriticalTransportFailure = hostFailureWithoutCurrentWrapper
+    ? null
+    : summary.currentWrapper
+      ? summary.latestCurrentCriticalTransportFailure
+      : summary.latestCriticalTransportFailure;
   summary.codexMcpConfig = inspectCodexMcpConfig(summary);
   summary.currentConfiguredWrapper = selectLatestConfiguredWrapper(
     summary.activeWrappers.latest,
@@ -3200,8 +3789,13 @@ function analyzeLog() {
     currentReferenceMs,
   );
   summary.currentConfiguredContextWrapper = latestConfiguredContextActivity
-    ? enrichActivityWithWrapperIdentity(latestConfiguredContextActivity, wrapperStartsByRunId)
+    ? enrichActivityWithWrapperIdentity(
+        latestConfiguredContextActivity,
+        wrapperStartsByRunId,
+        runtimeTopologyByRunId,
+      )
     : null;
+  summary.directMcpResponseEvidence = buildDirectMcpResponseEvidence(summary);
   summary.rootCauseSummary = buildRootCauseSummary(summary);
   summary.diagnosticTriage = buildDiagnosticTriage(summary.rootCauseSummary);
   if (
@@ -3223,6 +3817,12 @@ function analyzeLog() {
   }
   if (summary.codexMcpConfig.mismatch) {
     summary.recommendations.push('Live CodeGraph MCP wrapper target/env does not match the active Codex MCP configuration; restart the MCP host/session so codegraph reconnects to the configured wrapper target, and until then use: npm run codegraph:adapter:context -- --query "<query>" --json');
+  }
+  if (
+    summary.directMcpResponseEvidence?.callable === true
+    && summary.directMcpResponseEvidence?.trustedForDirectHostHealth === false
+  ) {
+    summary.recommendations.push('A direct-style MCP context response was observed, but its wrapper provenance is not trusted for current host health; inspect directMcpResponseEvidence.runId/requestId/codegraphTarget/targetMatchesConfig/envMatchesConfig/trustBlockers before declaring the MCP fixed.');
   }
   if ((summary.codexMcpConfig.hostConfigAlignmentOverrides?.length ?? 0) > 0) {
     const modes = [...new Set(
@@ -3305,6 +3905,14 @@ function analyzeLog() {
   }
   if (summary.activeWrappers.distinctCodegraphTargets > 1) {
     summary.recommendations.push('Multiple active CodeGraph targets are handling MCP requests; inspect activeWrappers.codegraphTargets and activeWrappers.latest before judging whether the current Codex MCP config is loaded.');
+  }
+  if (summary.activeWrappers.directWatcherContentionRisk > 0) {
+    summary.recommendations.push('Active direct-session wrappers still own per-wrapper CodeGraph watchers; restart those MCP sessions so they reconnect through the shared daemon before file-lock contention disables auto-sync.');
+  }
+  if (summary.activeWrappers.inProcessFallbackWatcherCount > 0) {
+    summary.recommendations.push('Active shared-daemon proxies have fallen back to per-wrapper in-process watchers; inspect activeWrappers.inProcessFallbackWatcherRuns and sharedDaemonFallback, then recycle those child processes before SQLite writer contention disables auto-sync.');
+  } else if (summary.activeWrappers.inProcessFallbackCount > 0) {
+    summary.recommendations.push('Active shared-daemon proxies are serving through in-process fallback engines; inspect activeWrappers.inProcessFallbackRuns and recycle those child processes so they reconnect before fallback watchers start.');
   }
   if (
     distinctPresentKeys(summary.activeWrappers.contextPackTimeoutMs) > 1
@@ -3404,6 +4012,16 @@ try {
       `logFreshness.hasCurrentWrapperEvidence=${summary.logFreshness.hasCurrentWrapperEvidence}`,
       `observedDirectMcpError=${summary.observedDirectMcpError ?? '(none)'}`,
       `observedDirectMcpFailureClass=${summary.observedDirectMcpFailureClass ?? '(none)'}`,
+      `directMcpResponseEvidence.status=${summary.directMcpResponseEvidence?.status ?? '(unknown)'}`,
+      `directMcpResponseEvidence.provenance=${summary.directMcpResponseEvidence?.provenance ?? '(unknown)'}`,
+      `directMcpResponseEvidence.callable=${summary.directMcpResponseEvidence?.callable ?? false}`,
+      `directMcpResponseEvidence.contextOutcomeStatus=${summary.directMcpResponseEvidence?.contextOutcomeStatus ?? '(unobserved)'}`,
+      `directMcpResponseEvidence.contextUsable=${summary.directMcpResponseEvidence?.contextUsable ?? '(unobserved)'}`,
+      `directMcpResponseEvidence.contextOutcomeFailureClass=${summary.directMcpResponseEvidence?.contextOutcomeFailureClass ?? '(none)'}`,
+      `directMcpResponseEvidence.trustedForAdapterJudgment=${summary.directMcpResponseEvidence?.trustedForAdapterJudgment ?? false}`,
+      `directMcpResponseEvidence.trustedForDirectHostHealth=${summary.directMcpResponseEvidence?.trustedForDirectHostHealth ?? false}`,
+      `directMcpResponseEvidence.identity=${JSON.stringify({ runId: summary.directMcpResponseEvidence?.runId ?? null, pid: summary.directMcpResponseEvidence?.pid ?? null, requestId: summary.directMcpResponseEvidence?.requestId ?? null, responseTs: summary.directMcpResponseEvidence?.responseTs ?? null, codegraphTarget: summary.directMcpResponseEvidence?.codegraphTarget ?? null })}`,
+      `directMcpResponseEvidence.trustBlockers=${JSON.stringify(summary.directMcpResponseEvidence?.trustBlockers ?? [])}`,
       `effectiveTransportHealthy=${summary.effectiveTransportHealthy} transportHealthScope=${summary.transportHealthScope} effectiveCriticalTransportFailures=${summary.effectiveCriticalTransportFailures}`,
       `diagnosticTriage.status=${summary.diagnosticTriage?.status ?? '(unknown)'}`,
       `diagnosticTriage.failureBoundary=${summary.diagnosticTriage?.failureBoundary ?? '(unknown)'}`,
@@ -3465,6 +4083,11 @@ try {
       `activeWrappers.codegraphTargets=${JSON.stringify(summary.activeWrappers.codegraphTargets)}`,
       `activeWrappers.contextPackTimeoutMs=${JSON.stringify(summary.activeWrappers.contextPackTimeoutMs)}`,
       `activeWrappers.staleWrapperAutoRecycle=${JSON.stringify(summary.activeWrappers.staleWrapperAutoRecycle)}`,
+      `activeWrappers.inProcessFallbackCount=${summary.activeWrappers.inProcessFallbackCount}`,
+      `activeWrappers.inProcessFallbackWatcherCount=${summary.activeWrappers.inProcessFallbackWatcherCount}`,
+      `activeWrappers.inProcessFallbackRuns=${JSON.stringify(summary.activeWrappers.inProcessFallbackRuns)}`,
+      `activeWrappers.inProcessFallbackWatcherRuns=${JSON.stringify(summary.activeWrappers.inProcessFallbackWatcherRuns)}`,
+      `sharedDaemonFallback=${JSON.stringify(summary.sharedDaemonFallback)}`,
       `currentWrapper.scriptSha256=${summary.currentWrapper?.scriptSha256 ?? '(none)'}`,
       `currentWrapper.diskScriptSha256=${summary.currentWrapper?.diskScriptSha256 ?? '(none)'}`,
       `currentWrapper.matchesDisk=${summary.currentWrapper?.matchesDisk ?? '(unknown)'}`,

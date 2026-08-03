@@ -6,8 +6,11 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { isNodeCommand, readCodexCodegraphMcpConfig } = require('./codegraph-codex-config.cjs');
+const {
+  parseNanoFlowContextOutcomeV1,
+} = require('./lib/codegraph-context-outcome.cjs');
 
-const DEFAULT_CODEGRAPH_TARGET = '@colbymchenry/codegraph@1.2.0';
+const DEFAULT_CODEGRAPH_TARGET = '@colbymchenry/codegraph@1.5.0';
 const DEFAULT_QUERY = 'ProjectShellComponent';
 const DEFAULT_OVERLAY_QUERY = 'sync-rule-keyword';
 const DEFAULT_TIMEOUT_MS = 60_000;
@@ -358,8 +361,8 @@ function assertEmptyResourceDiscovery(response, label, resultKey) {
   }
 }
 
-function assertToolTextResponse(response, label) {
-  if (response?.result?.isError) {
+function assertToolTextResponse(response, label, { allowIsError = false } = {}) {
+  if (response?.result?.isError && !allowIsError) {
     throw new Error(`${label} returned MCP isError: ${response.result.content?.[0]?.text ?? ''}`);
   }
   const text = response?.result?.content?.[0]?.text;
@@ -367,6 +370,20 @@ function assertToolTextResponse(response, label) {
     throw new Error(`${label} returned no text content`);
   }
   return text;
+}
+
+function assertCanonicalContextOutcome(response, label) {
+  const outcome = parseNanoFlowContextOutcomeV1(response?.result?.structuredContent?.outcome);
+  if (!outcome) {
+    throw new Error(`${label} returned no canonical NanoFlow context outcome`);
+  }
+  const isError = Boolean(response?.result?.isError);
+  if (isError !== (outcome.status !== 'complete')) {
+    throw new Error(
+      `${label} returned MCP isError=${isError} for ${outcome.status} NanoFlow context outcome`,
+    );
+  }
+  return outcome;
 }
 
 function hasNativeExplorationHeading(text, query) {
@@ -429,7 +446,7 @@ function readLogEvents(logPath) {
     .map(line => JSON.parse(line));
 }
 
-function verifyStaleWrapperAnalysis(logAnalysis, logPath) {
+function verifyStaleWrapperAnalysis(logAnalysis, logPath, contextOutcome) {
   const failures = [];
   if (logAnalysis?.transportHealthy !== true) {
     failures.push('transportHealthy is not true');
@@ -469,14 +486,18 @@ function verifyStaleWrapperAnalysis(logAnalysis, logPath) {
   const contextResponse = events.find(event => (
     event.event === 'client.response'
     && event.requestKind === 'nanoflow-context-pack'
-    && event.failureClass === 'success'
+    && event.failureClass === contextOutcome?.primaryFailureClass
+    && event.isError === true
   ));
+  if (contextOutcome?.status !== 'partial' || contextOutcome?.usableContext !== true) {
+    failures.push(`stale context outcome is ${contextOutcome?.status}/${contextOutcome?.usableContext}`);
+  }
   const recycleGraceMs = Number(recycleRequest?.recycleGraceMs ?? 0);
   if (recycleGraceMs < 1000) {
     failures.push(`wrapper.script.stale.recycle.request recycleGraceMs is ${recycleRequest?.recycleGraceMs}`);
   }
   if (!contextResponse) {
-    failures.push('successful nanoflow_context_pack client.response is missing before stale shutdown');
+    failures.push('strict-partial nanoflow_context_pack client.response is missing before stale shutdown');
   }
   if (!staleShutdown) {
     failures.push('wrapper.shutdown.stale-wrapper-script parsed event is missing');
@@ -572,6 +593,20 @@ async function main() {
   if (options.simulateStaleWrapperScript) {
     const temporaryWrapperScriptPath = path.join(logRoot, 'codegraph-nanoflow-mcp-stdio.cjs');
     fs.copyFileSync(invocation.wrapperScriptPath, temporaryWrapperScriptPath);
+    fs.copyFileSync(
+      path.join(path.dirname(invocation.wrapperScriptPath), 'codegraph-nanoflow-dedup-query.cjs'),
+      path.join(logRoot, 'codegraph-nanoflow-dedup-query.cjs'),
+    );
+    fs.copyFileSync(
+      path.join(path.dirname(invocation.wrapperScriptPath), 'codegraph-nanoflow-specialized-query.cjs'),
+      path.join(logRoot, 'codegraph-nanoflow-specialized-query.cjs'),
+    );
+    const libraryRoot = path.join(logRoot, 'lib');
+    fs.mkdirSync(libraryRoot, { recursive: true });
+    fs.copyFileSync(
+      path.join(path.dirname(invocation.wrapperScriptPath), 'lib', 'codegraph-context-outcome.cjs'),
+      path.join(libraryRoot, 'codegraph-context-outcome.cjs'),
+    );
     invocation.wrapperScriptPath = temporaryWrapperScriptPath;
   }
   const wrapperRequestTimeoutMs = deriveWrapperRequestTimeoutMs(options.timeoutMs);
@@ -602,6 +637,7 @@ async function main() {
   const steps = [];
   let nextRequestId = 1;
   let contextText = '';
+  let contextOutcome = null;
   let overlayMatchCount = 0;
   let totalContextTextBytes = 0;
   let totalOverlayMatchCount = 0;
@@ -649,7 +685,18 @@ async function main() {
           arguments: { query: options.query, overlayLimit: options.overlayLimit },
         },
       }, `nanoflow_context_pack round ${round}`);
-      contextText = assertToolTextResponse(contextResponse, `nanoflow_context_pack round ${round}`);
+      contextOutcome = assertCanonicalContextOutcome(
+        contextResponse,
+        `nanoflow_context_pack round ${round}`,
+      );
+      contextText = assertToolTextResponse(
+        contextResponse,
+        `nanoflow_context_pack round ${round}`,
+        {
+          allowIsError: contextOutcome.status === 'partial'
+            && contextOutcome.usableContext === true,
+        },
+      );
       if (!hasNativeExplorationHeading(contextText, options.query)) {
         throw new Error(`nanoflow_context_pack round ${round} response is missing the expected native Exploration heading`);
       }
@@ -699,15 +746,16 @@ async function main() {
       }
     }
 
-    if (child.exitCode === null && child.signalCode === null) {
-      child.stdin.end();
-      await waitForExit(child, 5_000);
+    if (child.exitCode === null && child.signalCode === null) child.stdin.end();
+    const wrapperShutdown = await waitForExit(child, 5_000);
+    if (wrapperShutdown?.code !== 0 || wrapperShutdown.signal !== null) {
+      throw new Error(`wrapper-shutdown-failure exitCode=${wrapperShutdown === null ? 'timeout' : wrapperShutdown.code} signal=${wrapperShutdown?.signal ?? 'none'}`);
     }
     const logAnalysis = analyzeLog(options.root, logPath);
     const staleWrapperVerified = options.simulateStaleWrapperScript;
     const wrapperExit = latestWrapperExitAnalysis(logAnalysis);
     if (options.simulateStaleWrapperScript) {
-      verifyStaleWrapperAnalysis(logAnalysis, logPath);
+      verifyStaleWrapperAnalysis(logAnalysis, logPath, contextOutcome);
     }
     process.stdout.write(`${JSON.stringify({
       ok: true,
@@ -722,6 +770,7 @@ async function main() {
       simulateStaleWrapperScript: options.simulateStaleWrapperScript,
       staleWrapperVerified,
       staleWrapperRecycled,
+      contextOutcome,
       contextTextBytes: Buffer.byteLength(contextText, 'utf8'),
       totalContextTextBytes,
       overlayMatchCount,

@@ -6,15 +6,11 @@ import {
   childExitEvent,
   cleanupAnalyzerTempRoots,
   contextResponseEvent,
-  expectCleanCurrentContextSourceOrdering,
-  expectCurrentContextSourceOrderingIssue,
   makeCodexMcpConfig,
   makeLog,
   makeRawLog,
   makeScriptFile,
-  makeSourceOrderingFixture,
   runAnalyzer,
-  toolsListResponseEvent,
   wrapperStartEvent,
 } from './analyze-codegraph-mcp-log.spec-helpers';
 import {
@@ -23,6 +19,12 @@ import {
 import {
   registerAnalyzeCodegraphMcpLogActiveHashSpecs,
 } from './analyze-codegraph-mcp-log-active-hash.spec-helpers';
+import {
+  registerAnalyzeCodegraphMcpLogCurrentWrapperSpecs,
+} from './analyze-codegraph-mcp-log-current-wrapper.spec-helpers';
+import {
+  registerAnalyzeCodegraphMcpLogDirectMcpSpecs,
+} from './analyze-codegraph-mcp-log-direct-mcp.spec-helpers';
 import {
   registerAnalyzeCodegraphMcpLogSourceOrderingSpecs,
 } from './analyze-codegraph-mcp-log-source-ordering.spec-helpers';
@@ -90,6 +92,49 @@ describe('analyze-codegraph-mcp-log', () => {
     expect(summary.wrapperExit.idleUnclassified).toBe(0);
   }, ANALYZER_SPEC_TIMEOUT_MS);
 
+  it('surfaces direct per-wrapper watcher topology as file-lock contention risk', () => {
+    const script = makeScriptFile('shared-daemon-topology');
+    const logPath = makeLog([
+      wrapperStartEvent('direct-watcher-run', script, {
+        pid: 43100,
+        wrapperPid: 43100,
+        env: {
+          CODEGRAPH_NO_DAEMON: '0',
+          CODEGRAPH_NO_WATCH: '0',
+        },
+        effectiveChildEnv: {
+          CODEGRAPH_NO_DAEMON: '1',
+          CODEGRAPH_NO_WATCH: '0',
+          CODEGRAPH_DAEMON_IDLE_TIMEOUT_MS: '0',
+          CODEGRAPH_DAEMON_MAX_IDLE_MS: '0',
+        },
+        runtimeTopology: {
+          mode: 'direct-session',
+          watcherOwnership: 'per-wrapper-watcher',
+          fileLockContentionRisk: 'multi-wrapper-writers',
+          daemonDisabled: true,
+          watchDisabled: false,
+        },
+      }),
+      contextResponseEvent('direct-watcher-run', 'direct-watcher-context'),
+    ]);
+
+    const result = runAnalyzer(logPath);
+    const summary = JSON.parse(result.stdout);
+
+    expect(result.status).toBe(0);
+    expect(summary.currentWrapper.runtimeTopology).toEqual(expect.objectContaining({
+      mode: 'direct-session',
+      watcherOwnership: 'per-wrapper-watcher',
+      fileLockContentionRisk: 'multi-wrapper-writers',
+    }));
+    expect(summary.activeWrappers).toEqual(expect.objectContaining({
+      runtimeTopologyModes: { 'direct-session': 1 },
+      directWatcherContentionRisk: 1,
+      sharedDaemonProxyCount: 0,
+    }));
+  }, ANALYZER_SPEC_TIMEOUT_MS);
+
   it('preserves config-alignment evidence on wrapper runtime diagnostics', () => {
     const logPath = makeLog([
       {
@@ -104,7 +149,7 @@ describe('analyze-codegraph-mcp-log', () => {
           reason: 'current-wrapper-differs-from-codex-config',
           mismatchCount: 2,
           mismatches: [
-            { field: 'codegraphTarget', expected: '@colbymchenry/codegraph@1.2.0', actual: '@colbymchenry/codegraph@1.1.1' },
+            { field: 'codegraphTarget', expected: '@colbymchenry/codegraph@1.5.0', actual: '@colbymchenry/codegraph@1.1.1' },
             { field: 'env.NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS', expected: '30000', actual: '60000' },
           ],
         },
@@ -241,7 +286,7 @@ describe('analyze-codegraph-mcp-log', () => {
     const configPath = makeCodexMcpConfig({
       root: projectRoot,
       wrapperScriptPath: script.path,
-      codegraphTarget: '@colbymchenry/codegraph@1.2.0',
+      codegraphTarget: '@colbymchenry/codegraph@1.5.0',
       env: {
         CODEGRAPH_NO_DAEMON: '0',
         CODEGRAPH_NO_WATCH: '0',
@@ -269,11 +314,11 @@ describe('analyze-codegraph-mcp-log', () => {
     expect(result.stdout).toContain('diagnosticTriage.failureClasses=');
     expect(result.stdout).toContain('mcp-host-config-drift');
     expect(result.stdout).toContain('diagnosticTriage.primaryEvidence=');
-    expect(result.stdout).toContain('"expectedCodegraphTarget":"@colbymchenry/codegraph@1.2.0"');
+    expect(result.stdout).toContain('"expectedCodegraphTarget":"@colbymchenry/codegraph@1.5.0"');
     expect(result.stdout).toContain('"currentWrapperTarget":"@colbymchenry/codegraph@1.1.1"');
-    expect(result.stdout).toContain('"currentWrapperTargetComparison":{"matches":false,"expected":"@colbymchenry/codegraph@1.2.0","actual":"@colbymchenry/codegraph@1.1.1"}');
+    expect(result.stdout).toContain('"currentWrapperTargetComparison":{"matches":false,"expected":"@colbymchenry/codegraph@1.5.0","actual":"@colbymchenry/codegraph@1.1.1"}');
     expect(result.stdout).toContain('"hostConfigMismatches":');
-    expect(result.stdout).toContain('"field":"codegraphTarget","expected":"@colbymchenry/codegraph@1.2.0","actual":"@colbymchenry/codegraph@1.1.1"');
+    expect(result.stdout).toContain('"field":"codegraphTarget","expected":"@colbymchenry/codegraph@1.5.0","actual":"@colbymchenry/codegraph@1.1.1"');
     expect(result.stdout).toContain('"field":"env.NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS","key":"NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS","expected":"30000","actual":"60000"');
     expect(result.stdout).toContain('diagnosticTriage.fallback=npm run codegraph:adapter:context -- --query "<query>" --json');
     expect(result.stdout).toContain('diagnosticTriage.decisionContract=');
@@ -286,6 +331,138 @@ describe('analyze-codegraph-mcp-log', () => {
     expect(result.stdout).toContain('diagnosticTriage.misdiagnosisGuards=');
     expect(result.stdout).toContain('Restart the Codex MCP host/session');
     expect(result.stdout).toContain('npm run codegraph:adapter:context -- --query "<query>" --json');
+  }, ANALYZER_SPEC_TIMEOUT_MS);
+
+  it('classifies a configured env key omitted by a legacy wrapper log as unobserved', () => {
+    const script = makeScriptFile('module.exports = { version: "legacy-env-observation" };\n');
+    const logPath = makeLog([
+      wrapperStartEvent('legacy-env-run', script, {
+        codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+        env: {},
+      }),
+      contextResponseEvent('legacy-env-run', 'legacy-env-context'),
+    ]);
+    const configPath = makeCodexMcpConfig({
+      root: path.dirname(logPath),
+      wrapperScriptPath: script.path,
+      codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+      env: { npm_config_cache: 'D:/Code/tools/codegraph-npm-cache' },
+    });
+
+    const result = runAnalyzer(logPath, [], { NANOFLOW_CODEGRAPH_CODEX_CONFIG: configPath });
+    const summary = JSON.parse(result.stdout);
+
+    expect(result.status).toBe(0);
+    expect(summary.codexMcpConfig.mismatch).toBe(false);
+    expect(summary.codexMcpConfig.currentWrapperEnv).toEqual(expect.objectContaining({
+      matches: null,
+      mismatchedKeys: [],
+      unobservedKeys: ['npm_config_cache'],
+      comparisons: [expect.objectContaining({
+        key: 'npm_config_cache',
+        status: 'unobserved',
+        expected: 'D:/Code/tools/codegraph-npm-cache',
+        actual: null,
+      })],
+    }));
+  }, ANALYZER_SPEC_TIMEOUT_MS);
+
+  it.each([
+    ['drive path', 'D:/x/', String.raw`d:\x`],
+    ['UNC path', '//SERVER/share/cache/', String.raw`\\server\share\cache`],
+  ])('normalizes configured npm cache %s when the wrapper observation schema is explicit', (_label, expectedCache, actualCache) => {
+    const script = makeScriptFile('module.exports = { version: "explicit-env-observation" };\n');
+    const logPath = makeLog([
+      wrapperStartEvent('explicit-env-run', script, {
+        codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+        envObservationSchemaVersion: 1,
+        observedEnvKeys: ['npm_config_cache'],
+        env: { npm_config_cache: actualCache },
+      }),
+      contextResponseEvent('explicit-env-run', 'explicit-env-context'),
+    ]);
+    const configPath = makeCodexMcpConfig({
+      root: path.dirname(logPath),
+      wrapperScriptPath: script.path,
+      codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+      env: { npm_config_cache: expectedCache },
+    });
+
+    const result = runAnalyzer(logPath, [], { NANOFLOW_CODEGRAPH_CODEX_CONFIG: configPath });
+    const comparison = JSON.parse(result.stdout).codexMcpConfig.currentWrapperEnv;
+
+    expect(result.status).toBe(0);
+    expect(comparison).toEqual(expect.objectContaining({
+      matches: true,
+      matchedKeys: ['npm_config_cache'],
+      mismatchedKeys: [],
+      unobservedKeys: [],
+      comparisons: [expect.objectContaining({ key: 'npm_config_cache', status: 'matched' })],
+    }));
+  }, ANALYZER_SPEC_TIMEOUT_MS);
+
+  it('classifies an explicitly observed configured env difference as mismatched', () => {
+    const script = makeScriptFile('module.exports = { version: "mismatched-env-observation" };\n');
+    const logPath = makeLog([
+      wrapperStartEvent('mismatched-env-run', script, {
+        codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+        envObservationSchemaVersion: 1,
+        observedEnvKeys: ['npm_config_cache'],
+        env: { npm_config_cache: 'D:/other-cache' },
+      }),
+      contextResponseEvent('mismatched-env-run', 'mismatched-env-context'),
+    ]);
+    const configPath = makeCodexMcpConfig({
+      root: path.dirname(logPath),
+      wrapperScriptPath: script.path,
+      codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+      env: { npm_config_cache: 'D:/expected-cache' },
+    });
+
+    const result = runAnalyzer(logPath, [], { NANOFLOW_CODEGRAPH_CODEX_CONFIG: configPath });
+    const summary = JSON.parse(result.stdout);
+
+    expect(summary.codexMcpConfig.mismatch).toBe(true);
+    expect(summary.codexMcpConfig.currentWrapperEnv).toEqual(expect.objectContaining({
+      matches: false,
+      mismatchedKeys: ['npm_config_cache'],
+      comparisons: [expect.objectContaining({ key: 'npm_config_cache', status: 'mismatched' })],
+    }));
+  }, ANALYZER_SPEC_TIMEOUT_MS);
+
+  it('classifies an observed env key absent from active config as not-configured', () => {
+    const script = makeScriptFile('module.exports = { version: "not-configured-env-observation" };\n');
+    const logPath = makeLog([
+      wrapperStartEvent('not-configured-env-run', script, {
+        codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+        envObservationSchemaVersion: 1,
+        observedEnvKeys: ['npm_config_cache'],
+        env: { npm_config_cache: 'D:/runtime-only-cache' },
+      }),
+      contextResponseEvent('not-configured-env-run', 'not-configured-env-context'),
+    ]);
+    const configPath = makeCodexMcpConfig({
+      root: path.dirname(logPath),
+      wrapperScriptPath: script.path,
+      codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+      env: {},
+    });
+
+    const result = runAnalyzer(logPath, [], { NANOFLOW_CODEGRAPH_CODEX_CONFIG: configPath });
+    const comparison = JSON.parse(result.stdout).codexMcpConfig.currentWrapperEnv;
+
+    expect(result.status).toBe(0);
+    expect(comparison).toEqual(expect.objectContaining({
+      matches: null,
+      notConfiguredKeys: ['npm_config_cache'],
+      mismatchedKeys: [],
+      comparisons: [expect.objectContaining({
+        key: 'npm_config_cache',
+        status: 'not-configured',
+        expected: null,
+        actual: 'D:/runtime-only-cache',
+      })],
+    }));
   }, ANALYZER_SPEC_TIMEOUT_MS);
 
   it('lets --text override a base --json flag for npm-script guard usage', () => {
@@ -337,7 +514,7 @@ describe('analyze-codegraph-mcp-log', () => {
     const configPath = makeCodexMcpConfig({
       root: path.dirname(logPath),
       wrapperScriptPath: script.path,
-      codegraphTarget: '@colbymchenry/codegraph@1.2.0',
+      codegraphTarget: '@colbymchenry/codegraph@1.5.0',
       env: {
         CODEGRAPH_NO_DAEMON: '0',
         CODEGRAPH_NO_WATCH: '0',
@@ -370,7 +547,7 @@ describe('analyze-codegraph-mcp-log', () => {
         'direct-mcp-healthy',
       ]),
       primaryEvidence: expect.objectContaining({
-        expectedCodegraphTarget: '@colbymchenry/codegraph@1.2.0',
+        expectedCodegraphTarget: '@colbymchenry/codegraph@1.5.0',
         currentWrapperTarget: '@colbymchenry/codegraph@1.1.1',
         currentContextWrapperTarget: '@colbymchenry/codegraph@1.1.1',
         currentWrapperMatchesDisk: false,
@@ -415,211 +592,7 @@ describe('analyze-codegraph-mcp-log', () => {
     ]));
   }, ANALYZER_SPEC_TIMEOUT_MS);
 
-  it('uses observed direct MCP transport errors as host-boundary evidence when wrapper logs are stale', () => {
-    const script = makeScriptFile('module.exports = { version: "observed-direct-mcp-error" };\n');
-    const logPath = makeLog([
-      wrapperStartEvent('old-direct-mcp-run', script, {
-        ts: '2026-06-13T18:00:00.000Z',
-      }),
-      toolsListResponseEvent('old-direct-mcp-run', {
-        ts: '2026-06-13T18:01:00.000Z',
-      }),
-    ]);
-
-    const result = runAnalyzer(logPath, [
-      '--direct-mcp-error=Transport closed',
-      '--observed-at=2026-06-13T19:00:00.000Z',
-      '--fail-on-untrusted-direct-mcp',
-    ]);
-    const summary = JSON.parse(result.stdout);
-
-    expect(result.status).toBe(1);
-    expect(summary.observedDirectMcpError).toBe('Transport closed');
-    expect(summary.observedDirectMcpFailureClass).toBe('observed-direct-mcp-transport-closed');
-    expect(summary.rootCauseSummary).toEqual(expect.objectContaining({
-      status: 'direct-mcp-host-transport-closed',
-      failureBoundary: 'codex-mcp-host-transport',
-      adapterFailureLikely: false,
-      directMcpTrust: 'do-not-trust-direct-mcp-until-host-restarts',
-      failureClasses: expect.arrayContaining([
-        'observed-direct-mcp-transport-closed',
-        'mcp-host-wrapper-not-started',
-      ]),
-    }));
-    expect(summary.diagnosticTriage.primaryEvidence).toEqual(expect.objectContaining({
-      directMcpError: 'Transport closed',
-      observedDirectMcpFailureClass: 'observed-direct-mcp-transport-closed',
-      hasCurrentWrapperEvidence: false,
-    }));
-    expect(summary.diagnosticTriage.doNotMisdiagnoseAs).toEqual(expect.arrayContaining([
-      'adapter-source-regression',
-      'direct-mcp-healthy',
-      'wrapper-transport-crash',
-    ]));
-    expect(summary.diagnosticTriage.misdiagnosisGuards).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        mistakenConclusion: 'adapter-source-regression',
-        requiredEvidenceBeforeConclusion: 'npm run codegraph:adapter:context -- --query "<query>" --json',
-      }),
-      expect.objectContaining({
-        mistakenConclusion: 'wrapper-transport-crash',
-        blockedBy: expect.stringContaining('direct MCP reported observed-direct-mcp-transport-closed'),
-      }),
-    ]));
-    expect(summary.diagnosticTriage.evidenceGaps).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        missingEvidence: 'current-wrapper-log-evidence',
-        blocksConclusions: expect.arrayContaining([
-          'adapter-source-regression',
-          'wrapper-transport-crash',
-        ]),
-      }),
-      expect.objectContaining({
-        missingEvidence: 'fresh-adapter-fallback-result',
-        requiredCommand: 'npm run codegraph:adapter:context -- --query "<query>" --json',
-        blocksConclusions: expect.arrayContaining([
-          'adapter-source-regression',
-          'wrapper-transport-crash',
-        ]),
-      }),
-      expect.objectContaining({
-        missingEvidence: 'adapter-doctor-config-snapshot',
-        requiredCommand: 'npm run codegraph:adapter:doctor -- --explain',
-      }),
-    ]));
-    expect(summary.diagnosticTriage.requiredEvidenceBeforeConclusion).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        conclusion: 'adapter-source-regression',
-        requiredEvidence: expect.arrayContaining([
-          'fresh adapter fallback reproduces the same failure',
-          'adapter doctor confirms the current Codex MCP config and wrapper target/env',
-        ]),
-      }),
-      expect.objectContaining({
-        conclusion: 'wrapper-transport-crash',
-        requiredEvidence: expect.arrayContaining([
-          'latestEffectiveCriticalTransportFailure or currentCriticalTransportFailures > 0',
-        ]),
-      }),
-    ]));
-  }, ANALYZER_SPEC_TIMEOUT_MS);
-
-  it('does not let observed direct MCP errors hide current wrapper transport failures', () => {
-    const script = makeScriptFile('module.exports = { version: "current-wrapper-crash-still-wins" };\n');
-    const logPath = makeLog([
-      wrapperStartEvent('current-crash-run', script, {
-        ts: '2026-06-13T18:00:00.000Z',
-      }),
-      childExitEvent({
-        ts: '2026-06-13T18:01:00.000Z',
-        runId: 'current-crash-run',
-        code: 1,
-        activeRequestCount: 1,
-        pendingContextPackCount: 1,
-        activeRequests: [{ requestId: 'active-direct-mcp-request' }],
-      }),
-    ]);
-
-    const result = runAnalyzer(logPath, [
-      '--direct-mcp-error=Transport closed',
-      '--observed-at=2026-06-13T18:02:00.000Z',
-      '--fail-on-critical',
-    ]);
-    const summary = JSON.parse(result.stdout);
-
-    expect(result.status).toBe(1);
-    expect(summary.rootCauseSummary).toEqual(expect.objectContaining({
-      status: 'current-wrapper-transport-failure',
-      failureBoundary: 'mcp-wrapper-transport',
-      adapterFailureLikely: true,
-      directMcpTrust: 'do-not-trust-direct-mcp-until-current-transport-failure-is-fixed',
-      failureClasses: expect.arrayContaining([
-        'current-critical-transport-failure',
-        'observed-direct-mcp-transport-closed',
-      ]),
-    }));
-    expect(summary.diagnosticTriage.primaryEvidence).toEqual(expect.objectContaining({
-      directMcpError: 'Transport closed',
-      latestEffectiveCriticalTransportFailure: expect.objectContaining({
-        event: 'child.exit',
-      }),
-    }));
-    expect(summary.diagnosticTriage.doNotMisdiagnoseAs).not.toEqual(expect.arrayContaining([
-      'wrapper-transport-crash',
-    ]));
-  }, ANALYZER_SPEC_TIMEOUT_MS);
-
-  it('summarizes default stale wrapper keepalive without treating it as transport failure', () => {
-    const script = makeScriptFile('module.exports = { version: "fresh-stale-keepalive" };\n');
-    const staleHash = '8'.repeat(64);
-    const logPath = makeLog([
-      wrapperStartEvent('stale-keepalive-run', script, {
-        scriptSha256: staleHash,
-      }),
-      {
-        ts: '2026-06-13T18:00:01.000Z',
-        runId: 'stale-keepalive-run',
-        event: 'wrapper.script.stale',
-        startupScriptSha256: staleHash,
-        diskScriptSha256: script.sha256,
-        staleAgainstDisk: true,
-      },
-      {
-        ts: '2026-06-13T18:00:02.000Z',
-        runId: 'stale-keepalive-run',
-        event: 'wrapper.script.stale.continue',
-        failureClass: 'stale-wrapper-script',
-        tool: 'nanoflow_context_pack',
-        requestKind: 'nanoflow-context-pack',
-      },
-      {
-        ts: '2026-06-13T18:00:03.000Z',
-        runId: 'stale-keepalive-run',
-        event: 'wrapper.script.stale.recycle.skipped',
-        failureClass: 'stale-wrapper-script',
-        expectedExit: false,
-        autoRecycle: false,
-        investigation: {
-          transportShouldStayAlive: true,
-        },
-      },
-      contextResponseEvent('stale-keepalive-run', 'context-after-stale', {
-        ts: '2026-06-13T18:00:04.000Z',
-      }),
-      toolsListResponseEvent('stale-keepalive-run', {
-        ts: '2026-06-13T18:00:05.000Z',
-      }),
-    ]);
-
-    const result = runAnalyzer(logPath, ['--fail-on-critical']);
-    const summary = JSON.parse(result.stdout);
-
-    expect(result.status).toBe(0);
-    expect(summary.transportHealthy).toBe(true);
-    expect(summary.currentTransportHealthy).toBe(true);
-    expect(summary.criticalTransportFailures).toBe(0);
-    expect(summary.staleWrapper).toEqual(expect.objectContaining({
-      detected: 1,
-      continued: 1,
-      recycleSkipped: 1,
-      recycleRequested: 0,
-      shutdown: 0,
-    }));
-    expect(summary.currentStaleWrapper).toEqual(expect.objectContaining({
-      recycleSkipped: 1,
-      recycleRequested: 0,
-      shutdown: 0,
-      latest: expect.objectContaining({
-        event: 'wrapper.script.stale.recycle.skipped',
-        expectedExit: false,
-        autoRecycle: false,
-      }),
-    }));
-    expect(summary.recommendations).toEqual(expect.arrayContaining([
-      expect.stringContaining('skipped automatic recycle'),
-      expect.stringContaining('restart the MCP host/session'),
-    ]));
-  }, ANALYZER_SPEC_TIMEOUT_MS);
+  registerAnalyzeCodegraphMcpLogDirectMcpSpecs();
 
   it('fails when the child exits while requests are active', () => {
     const logPath = makeLog([
@@ -774,411 +747,7 @@ describe('analyze-codegraph-mcp-log', () => {
     expect(summary.latestCriticalTransportFailure.event).toBe('child.exit');
   }, ANALYZER_SPEC_TIMEOUT_MS);
 
-  it('does not fail on historical critical exits when the current wrapper is healthy', () => {
-    const script = makeScriptFile('module.exports = { version: "fresh" };\n');
-    const logPath = makeLog([
-      wrapperStartEvent('old-run', script, {
-        wrapperVersion: 'nanoflow-codegraph-wrapper-2026-06-09',
-        scriptSha256: '1'.repeat(64),
-      }),
-      childExitEvent({
-        runId: 'old-run',
-        code: 1,
-        activeRequestCount: 1,
-        pendingContextPackCount: 0,
-        activeRequests: [{ requestId: 'old-request' }],
-      }),
-      wrapperStartEvent('fresh-run', script, {
-        ts: '2026-06-13T18:01:00.000Z',
-      }),
-      contextResponseEvent('fresh-run', 'fresh-context', {
-        ts: '2026-06-13T18:01:01.000Z',
-      }),
-    ]);
-
-    const result = runAnalyzer(logPath, ['--fail-on-critical']);
-    const summary = JSON.parse(result.stdout);
-
-    expect(result.status).toBe(0);
-    expect(summary.transportHealthy).toBe(false);
-    expect(summary.criticalTransportFailures).toBe(1);
-    expect(summary.currentTransportHealthy).toBe(true);
-    expect(summary.currentCriticalTransportFailures).toBe(0);
-    expect(summary.latestCriticalTransportFailure).toEqual(expect.objectContaining({
-      runId: 'old-run',
-      event: 'child.exit',
-    }));
-    expect(summary.currentWrapper).toEqual(expect.objectContaining({
-      runId: 'fresh-run',
-      matchesDisk: true,
-      staleAgainstDisk: false,
-    }));
-  }, ANALYZER_SPEC_TIMEOUT_MS);
-
-  it('reports current wrapper health as the effective transport status when historical critical exits remain in the log', () => {
-    const script = makeScriptFile('module.exports = { version: "fresh-effective-health" };\n');
-    const logPath = makeLog([
-      wrapperStartEvent('historical-crash-run', script, {
-        wrapperVersion: 'nanoflow-codegraph-wrapper-2026-06-09',
-        scriptSha256: '1'.repeat(64),
-      }),
-      childExitEvent({
-        runId: 'historical-crash-run',
-        code: 1,
-        activeRequestCount: 1,
-        pendingContextPackCount: 0,
-        activeRequests: [{ requestId: 'historical-request' }],
-      }),
-      wrapperStartEvent('fresh-effective-run', script, {
-        ts: '2026-06-13T18:01:00.000Z',
-      }),
-      contextResponseEvent('fresh-effective-run', 'fresh-effective-context', {
-        ts: '2026-06-13T18:01:01.000Z',
-      }),
-    ]);
-
-    const jsonResult = runAnalyzer(logPath, ['--fail-on-critical']);
-    const summary = JSON.parse(jsonResult.stdout);
-
-    expect(jsonResult.status).toBe(0);
-    expect(summary.transportHealthy).toBe(false);
-    expect(summary.criticalTransportFailures).toBe(1);
-    expect(summary.currentTransportHealthy).toBe(true);
-    expect(summary.currentCriticalTransportFailures).toBe(0);
-    expect(summary.effectiveTransportHealthy).toBe(true);
-    expect(summary.effectiveCriticalTransportFailures).toBe(0);
-    expect(summary.transportHealthScope).toBe('current-wrapper');
-    expect(summary.latestEffectiveCriticalTransportFailure).toBeNull();
-    expect(summary.recommendations).toEqual(expect.arrayContaining([
-      expect.stringContaining('Historical critical transport failures remain in the log'),
-      expect.stringContaining('effectiveTransportHealthy/currentTransportHealthy'),
-    ]));
-    expect(summary.recommendations).not.toEqual(expect.arrayContaining([
-      'Inspect latestCriticalTransportFailure.requestId and active requests before changing overlay timeouts.',
-    ]));
-
-    const textResult = runAnalyzer(logPath, ['--fail-on-critical', '--text']);
-
-    expect(textResult.status).toBe(0);
-    expect(textResult.stdout).toContain('effectiveTransportHealthy=true transportHealthScope=current-wrapper effectiveCriticalTransportFailures=0');
-    expect(textResult.stdout).toContain('transportHealthy=false criticalTransportFailures=1');
-  }, ANALYZER_SPEC_TIMEOUT_MS);
-
-  it('does not treat older runs with the same script hash as the current wrapper run', () => {
-    const script = makeScriptFile('module.exports = { version: "same-hash" };\n');
-    const logPath = makeLog([
-      wrapperStartEvent('old-same-hash-run', script),
-      childExitEvent({
-        runId: 'old-same-hash-run',
-        code: 3221225794,
-        activeRequestCount: 1,
-        pendingContextPackCount: 0,
-      }),
-      wrapperStartEvent('latest-run', script, {
-        ts: '2026-06-13T18:01:00.000Z',
-      }),
-      contextResponseEvent('latest-run', 'latest-clean', {
-        ts: '2026-06-13T18:01:01.000Z',
-      }),
-    ]);
-
-    const result = runAnalyzer(logPath, ['--fail-on-critical']);
-    const summary = JSON.parse(result.stdout);
-
-    expect(result.status).toBe(0);
-    expect(summary.transportHealthy).toBe(false);
-    expect(summary.criticalTransportFailures).toBe(1);
-    expect(summary.currentWrapper.runId).toBe('latest-run');
-    expect(summary.currentTransportHealthy).toBe(true);
-    expect(summary.currentCriticalTransportFailures).toBe(0);
-    expect(summary.currentContextSourceOrdering).toEqual(expect.objectContaining({
-      total: 1,
-      topRankedNotFirst: 0,
-    }));
-  }, ANALYZER_SPEC_TIMEOUT_MS);
-
-  it('selects the current wrapper from the latest run activity, not only the last wrapper start', () => {
-    const activeScript = makeScriptFile('module.exports = { version: "active" };\n');
-    const idleScript = makeScriptFile('module.exports = { version: "idle" };\n');
-    const logPath = makeLog([
-      wrapperStartEvent('active-run', activeScript),
-      wrapperStartEvent('idle-run', idleScript, {
-        ts: '2026-06-13T18:01:00.000Z',
-      }),
-      contextResponseEvent('active-run', 'active-context', {
-        ts: '2026-06-13T18:02:00.000Z',
-      }),
-    ]);
-
-    const result = runAnalyzer(logPath, ['--fail-on-critical']);
-    const summary = JSON.parse(result.stdout);
-
-    expect(result.status).toBe(0);
-    expect(summary.currentWrapper).toEqual(expect.objectContaining({
-      runId: 'active-run',
-      scriptSha256: activeScript.sha256,
-      matchesDisk: true,
-    }));
-    expectCleanCurrentContextSourceOrdering(summary, { duplicateSourceSections: 0, topRankedMissing: 0 });
-  }, ANALYZER_SPEC_TIMEOUT_MS);
-
-  it('keeps current context-pack source-ordering diagnostics when the latest active run only lists tools', () => {
-    const contextScript = makeScriptFile('module.exports = { version: "context" };\n');
-    const toolsScript = makeScriptFile('module.exports = { version: "tools" };\n');
-    const logPath = makeLog([
-      wrapperStartEvent('context-run', contextScript),
-      contextResponseEvent('context-run', 'context-response'),
-      wrapperStartEvent('tools-run', toolsScript, {
-        ts: '2026-06-13T18:01:00.000Z',
-      }),
-      toolsListResponseEvent('tools-run'),
-    ]);
-
-    const result = runAnalyzer(logPath, ['--fail-on-critical']);
-    const summary = JSON.parse(result.stdout);
-
-    expect(result.status).toBe(0);
-    expect(summary.currentWrapper).toEqual(expect.objectContaining({
-      runId: 'tools-run',
-      scriptSha256: toolsScript.sha256,
-    }));
-    expect(summary.currentContextWrapper).toEqual(expect.objectContaining({
-      runId: 'context-run',
-      scriptSha256: contextScript.sha256,
-      matchesDisk: true,
-    }));
-    expect(summary.currentDiskContextWrapper).toEqual(expect.objectContaining({
-      runId: 'context-run',
-      scriptSha256: contextScript.sha256,
-      matchesDisk: true,
-    }));
-    expectCleanCurrentContextSourceOrdering(summary);
-    expect(summary.currentDiskContextSourceOrdering).toEqual(expect.objectContaining({
-      total: 1,
-      withDiagnostics: 1,
-      lowValueSourcePollution: 0,
-    }));
-  }, ANALYZER_SPEC_TIMEOUT_MS);
-
-  it('does not treat stale context-pack evidence as current after a fresh wrapper lists tools', () => {
-    const script = makeScriptFile('module.exports = { version: "fresh-after-stale-context" };\n');
-    const staleHash = '9'.repeat(64);
-    const logPath = makeLog([
-      wrapperStartEvent('stale-context-run', script, {
-        scriptSha256: staleHash,
-      }),
-      contextResponseEvent('stale-context-run', 'stale-context', {
-        ts: '2026-06-13T18:01:00.000Z',
-        sourceOrdering: makeSourceOrderingFixture({
-          firstSourceFiles: ['src/noisy.ts', 'src/app/core/services/real.service.ts'],
-          rankedOverlayFiles: ['src/app/core/services/real.service.ts'],
-          topRankedOverlayFile: 'src/app/core/services/real.service.ts',
-          topRankedOverlayFileVisibleIndex: 1,
-          firstSourceBlockIsTopRankedOverlayFile: false,
-        }),
-      }),
-      wrapperStartEvent('fresh-tools-run', script, {
-        ts: '2026-06-13T18:02:00.000Z',
-      }),
-      toolsListResponseEvent('fresh-tools-run', {
-        ts: '2026-06-13T18:02:01.000Z',
-      }),
-    ]);
-
-    const result = runAnalyzer(logPath, [
-      '--fail-on-stale-current-wrapper',
-      '--fail-on-current-source-ordering',
-    ]);
-    const summary = JSON.parse(result.stdout);
-
-    expect(result.status, result.stderr).toBe(0);
-    expect(summary.currentWrapper).toEqual(expect.objectContaining({
-      runId: 'fresh-tools-run',
-      matchesDisk: true,
-    }));
-    expect(summary.currentContextWrapper).toEqual(expect.objectContaining({
-      runId: 'stale-context-run',
-      rawMatchesDisk: false,
-      matchesDisk: null,
-      staleAgainstDisk: false,
-      supersededByFreshWrapper: true,
-    }));
-    expect(summary.currentContextSourceOrdering).toEqual(expect.objectContaining({
-      total: 1,
-      topRankedNotFirst: 1,
-    }));
-    expect(summary.recommendations).toEqual(expect.arrayContaining([
-      expect.stringContaining('context-pack response is older than a fresh wrapper start'),
-      expect.stringContaining('Historical context-pack source ordering issues remain'),
-    ]));
-    expect(summary.recommendations).not.toEqual(expect.arrayContaining([
-      expect.stringContaining('current context-pack wrapper script hash does not match'),
-      expect.stringContaining('current context-pack wrapper script hash could not be compared'),
-      expect.stringContaining('current wrapper still has context-pack source ordering issues'),
-    ]));
-  }, ANALYZER_SPEC_TIMEOUT_MS);
-
-  it('keeps stale context-pack evidence current when it responds after a fresh wrapper start', () => {
-    const script = makeScriptFile('module.exports = { version: "fresh-before-stale-context-response" };\n');
-    const staleHash = '7'.repeat(64);
-    const logPath = makeLog([
-      wrapperStartEvent('stale-context-run', script, {
-        scriptSha256: staleHash,
-      }),
-      wrapperStartEvent('fresh-tools-run', script, {
-        ts: '2026-06-13T18:02:00.000Z',
-      }),
-      toolsListResponseEvent('fresh-tools-run', {
-        ts: '2026-06-13T18:02:01.000Z',
-      }),
-      contextResponseEvent('stale-context-run', 'stale-context-after-fresh-start', {
-        ts: '2026-06-13T18:03:00.000Z',
-        sourceOrdering: makeSourceOrderingFixture({
-          firstSourceFiles: ['src/noisy.ts', 'src/app/core/services/real.service.ts'],
-          rankedOverlayFiles: ['src/app/core/services/real.service.ts'],
-          topRankedOverlayFile: 'src/app/core/services/real.service.ts',
-          topRankedOverlayFileVisibleIndex: 1,
-          firstSourceBlockIsTopRankedOverlayFile: false,
-        }),
-      }),
-    ]);
-
-    const result = runAnalyzer(logPath, [
-      '--fail-on-stale-current-wrapper',
-      '--fail-on-current-source-ordering',
-    ]);
-    const summary = JSON.parse(result.stdout);
-
-    expect(result.status, result.stderr).toBe(1);
-    expect(summary.currentWrapper).toEqual(expect.objectContaining({
-      runId: 'stale-context-run',
-      matchesDisk: false,
-      staleAgainstDisk: true,
-    }));
-    expect(summary.currentContextWrapper).toEqual(expect.objectContaining({
-      runId: 'stale-context-run',
-      matchesDisk: false,
-      staleAgainstDisk: true,
-      supersededByFreshWrapper: false,
-      latestTs: '2026-06-13T18:03:00.000Z',
-      latestRequestId: 'stale-context-after-fresh-start',
-    }));
-    expect(summary.recommendations).toEqual(expect.arrayContaining([
-      expect.stringContaining('current context-pack wrapper script hash does not match'),
-    ]));
-  }, ANALYZER_SPEC_TIMEOUT_MS);
-
-	  it('keeps current disk context diagnostics when a fresh wrapper exits after serving context', () => {
-	    const script = makeScriptFile('module.exports = { version: "fresh-exit-after-context" };\n');
-	    const logPath = makeLog([
-      wrapperStartEvent('fresh-run', script),
-      contextResponseEvent('fresh-run', 'fresh-context', {
-        ts: '2026-06-13T18:01:00.000Z',
-      }),
-      {
-        ts: '2026-06-13T18:02:00.000Z',
-        runId: 'fresh-run',
-        event: 'wrapper.exit',
-        failureClass: 'host-stdin-closed',
-        expectedExit: true,
-        transportClosedBy: 'client-stdin',
-        activeRequestsAtShutdown: 0,
-      },
-    ]);
-
-    const result = runAnalyzer(logPath);
-    const summary = JSON.parse(result.stdout);
-
-    expect(result.status).toBe(0);
-    expect(summary.currentDiskContextWrapper).toEqual(expect.objectContaining({
-      runId: 'fresh-run',
-      latestEvent: 'nanoflow.context.response',
-      matchesDisk: true,
-    }));
-    expect(summary.currentDiskContextSourceOrdering).toEqual(expect.objectContaining({
-      total: 1,
-      withDiagnostics: 1,
-      missingDiagnostics: 0,
-	    }));
-	  }, ANALYZER_SPEC_TIMEOUT_MS);
-
-	  it('keeps current disk context source-ordering diagnostics when a later stale wrapper serves context', () => {
-	    const script = makeScriptFile('module.exports = { version: "fresh-context-before-stale" };\n');
-	    const staleHash = '0'.repeat(64);
-	    const logPath = makeLog([
-	      wrapperStartEvent('fresh-run', script),
-	      contextResponseEvent('fresh-run', 'fresh-bad-context', {
-	        sourceOrdering: makeSourceOrderingFixture({
-	          firstSourceFiles: ['src/noisy.ts', 'src/app/core/services/real.service.ts'],
-	          rankedOverlayFiles: ['src/app/core/services/real.service.ts'],
-	          topRankedOverlayFile: 'src/app/core/services/real.service.ts',
-	          topRankedOverlayFileVisibleIndex: 1,
-	          firstSourceBlockIsTopRankedOverlayFile: false,
-	        }),
-	      }),
-	      wrapperStartEvent('stale-run', script.path, {
-	        ts: '2026-06-13T18:01:00.000Z',
-	        scriptSha256: staleHash,
-	      }),
-	      contextResponseEvent('stale-run', 'stale-context', {
-	        ts: '2026-06-13T18:01:01.000Z',
-	      }),
-	    ]);
-
-	    const result = runAnalyzer(logPath, ['--fail-on-current-source-ordering']);
-	    const summary = JSON.parse(result.stdout);
-
-	    expect(result.status, result.stderr).toBe(1);
-	    expect(summary.currentContextWrapper).toEqual(expect.objectContaining({
-	      runId: 'stale-run',
-	      matchesDisk: false,
-	    }));
-	    expect(summary.currentDiskContextWrapper).toEqual(expect.objectContaining({
-	      runId: 'fresh-run',
-	      latestEvent: 'nanoflow.context.response',
-	      matchesDisk: true,
-	    }));
-	    expect(summary.currentDiskContextSourceOrdering).toEqual(expect.objectContaining({
-	      total: 1,
-	      withDiagnostics: 1,
-	      topRankedNotFirst: 1,
-	      lowValueSourcePollution: 0,
-	    }));
-	  }, ANALYZER_SPEC_TIMEOUT_MS);
-
-	  it('fails current source-ordering guard when diagnostics are present but incomplete', () => {
-	    const script = makeScriptFile('module.exports = { version: "partial-source-ordering" };\n');
-	    const logPath = makeLog([
-	      wrapperStartEvent('partial-run', script),
-	      contextResponseEvent('partial-run', 'partial-context', {
-	        sourceOrdering: {
-	          sourceSectionCount: 1,
-	          duplicateSourceSectionCount: 0,
-	        },
-	      }),
-	    ]);
-
-	    const result = runAnalyzer(logPath, ['--fail-on-current-source-ordering']);
-	    const summary = JSON.parse(result.stdout);
-
-	    expect(result.status, result.stderr).toBe(1);
-	    expect(summary.currentContextSourceOrdering).toEqual(expect.objectContaining({
-	      total: 1,
-	      withDiagnostics: 0,
-	      missingDiagnostics: 1,
-	      latestMissingDiagnostics: expect.objectContaining({
-	        requestId: 'partial-context',
-        missingSourceOrderingFields: expect.arrayContaining([
-          'sourceRankingQuery',
-          'sourceVisibilityQuery',
-          'firstSourceFiles',
-          'rankedOverlayFileDetails',
-          'topRankedOverlayFileVisibleIndex',
-	          'firstSourceBlockIsTopRankedOverlayFile',
-	        ]),
-	      }),
-	    }));
-	  }, ANALYZER_SPEC_TIMEOUT_MS);
+  registerAnalyzeCodegraphMcpLogCurrentWrapperSpecs();
 
   registerAnalyzeCodegraphMcpLogOverlayDiagnosticSpecs();
 

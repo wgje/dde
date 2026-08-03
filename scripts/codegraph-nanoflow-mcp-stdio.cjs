@@ -5,8 +5,25 @@ const { spawn } = require('node:child_process');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
+const {
+  CODEGRAPH_DEDUP_MAINTENANCE_FOCUSED_QUERY,
+} = require('./codegraph-nanoflow-dedup-query.cjs');
+const {
+  classifySpecializedMaintenanceQuery,
+} = require('./codegraph-nanoflow-specialized-query.cjs');
+const {
+  buildNanoFlowContextOutcomeV1,
+  isNanoFlowContextOutcomeError,
+} = require('./lib/codegraph-context-outcome.cjs');
 
-const WRAPPER_VERSION = 'nanoflow-codegraph-wrapper-2026-06-13';
+const WRAPPER_VERSION = 'nanoflow-codegraph-wrapper-2026-07-14.1';
+const CODEGRAPH_DAEMON_IDLE_TIMEOUT_DEFAULT = '300000';
+const CODEGRAPH_DAEMON_MAX_IDLE_DEFAULT = '1800000';
+const DIAGNOSTIC_LOG_MAX_BYTES_DEFAULT = 16 * 1024 * 1024;
+const DIAGNOSTIC_LOG_LOCK_WAIT_MS = 2_000;
+const DIAGNOSTIC_LOG_LOCK_STALE_MS = 10_000;
+const DIAGNOSTIC_QUERY_PREVIEW_CHARS = 512;
+const DIAGNOSTIC_QUERY_TAIL_CHARS = 96;
 const WRAPPER_OUTPUT_MODES = {
   overlayTool: 'markdown',
   contextOverlayQuery: 'json',
@@ -15,7 +32,9 @@ const WRAPPER_OUTPUT_MODES = {
   nativeMarkdown: 'native-markdown',
   contextPack: 'markdown',
 };
+const OVERLAY_STALE_SKIP_REFRESH = 'overlay-stale-skip-refresh';
 const DIAGNOSTIC_SCHEMA_VERSION = 2;
+const ENV_OBSERVATION_SCHEMA_VERSION = 1;
 const CODEGRAPH_CHILD_ENV_KEYS = [
   'CODEGRAPH_NO_DAEMON',
   'CODEGRAPH_NO_WATCH',
@@ -30,7 +49,28 @@ const WRAPPER_CODEX_CONFIG_ENV_KEYS = [
   'CODEGRAPH_DAEMON_MAX_IDLE_MS',
   'NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS',
   'NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE',
+  'npm_config_cache',
 ];
+const WRAPPER_START_OBSERVED_ENV_KEYS = [...new Set([
+  ...CODEGRAPH_CHILD_ENV_KEYS,
+  'CODEGRAPH_MCP_DEBUG',
+  'NANOFLOW_CODEGRAPH_OVERLAY_QUERY_TIMEOUT_MS',
+  'NANOFLOW_CODEGRAPH_OVERLAY_QUERY_MAX_BUFFER_BYTES',
+  'NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS',
+  'NANOFLOW_CODEGRAPH_REFRESH_ON_STARTUP',
+  'NANOFLOW_CODEGRAPH_CHILD_RESTART_BACKOFF_AFTER',
+  'NANOFLOW_CODEGRAPH_CHILD_RESTART_BACKOFF_INITIAL_MS',
+  'NANOFLOW_CODEGRAPH_CHILD_RESTART_BACKOFF_MAX_MS',
+  'NANOFLOW_CODEGRAPH_CHILD_RESTART_BACKOFF_WINDOW_MS',
+  'NANOFLOW_CODEGRAPH_SHARED_DAEMON_FALLBACK_RECOVERY',
+  'NANOFLOW_CODEGRAPH_SHARED_DAEMON_FALLBACK_RECOVERY_DELAY_MS',
+  'NANOFLOW_CODEGRAPH_SHARED_DAEMON_FALLBACK_RECOVERY_DEFER_MS',
+  'NANOFLOW_CODEGRAPH_SHARED_DAEMON_FALLBACK_RECOVERY_MAX_WAIT_MS',
+  'NANOFLOW_CODEGRAPH_STALE_WRAPPER_RECYCLE_GRACE_MS',
+  'NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE',
+  'NANOFLOW_CODEGRAPH_CONFIG_ALIGNMENT_MODE',
+  'npm_config_cache',
+])];
 const WRAPPER_CODEX_CONFIG_NEXT_EVIDENCE = [
   'wrapper.start.codexConfigAlignment',
   'wrapper.config.mismatch',
@@ -61,6 +101,7 @@ if (rawArgs.length === 0) {
 
 const codegraphArgs = normalizeCodegraphArgs(rawArgs);
 const projectRoot = resolveProjectRoot(codegraphArgs);
+const startupChildEnvNormalization = normalizeCodegraphChildEnv(process.env);
 const diagnostics = createDiagnostics(projectRoot);
 const OVERLAY_QUERY_TIMEOUT_MS = parsePositiveIntegerEnv(
   'NANOFLOW_CODEGRAPH_OVERLAY_QUERY_TIMEOUT_MS',
@@ -347,6 +388,16 @@ const CONTEXT_PACK_TOOLING_LIFECYCLE_DIAGNOSTIC_SEGMENTS = new Set([
   'timeouts',
 ]);
 const CONTEXT_PACK_TOOLING_QUALITY_FOCUSED_QUERY = 'codegraph adapter context wrapper log guard sourceOrdering sourceSelection';
+const CONTEXT_PACK_TOOLING_RUNTIME_DIAGNOSTICS_FOCUSED_QUERY = [
+  'scripts/codegraph-nanoflow-mcp-stdio.cjs',
+  'forwardNanoFlowContextPackRequest',
+  'handleNanoFlowContextPackEntryError',
+  'summarizeChildStderrDiagnostics',
+  'child.stdin.write.error',
+  'client.stdout.error',
+  'requestTrace',
+  'diagnostics',
+].join(' ');
 const CONTEXT_PACK_TOOLING_QUALITY_SEGMENTS = new Set([
   'duplicate',
   'duplicates',
@@ -418,6 +469,20 @@ const CHILD_RESTART_BACKOFF_WINDOW_MS = parsePositiveIntegerEnv(
   'NANOFLOW_CODEGRAPH_CHILD_RESTART_BACKOFF_WINDOW_MS',
   10_000,
 );
+const SHARED_DAEMON_FALLBACK_RECOVERY_ENABLED =
+  process.env.NANOFLOW_CODEGRAPH_SHARED_DAEMON_FALLBACK_RECOVERY !== '0';
+const SHARED_DAEMON_FALLBACK_RECOVERY_DELAY_MS = parsePositiveIntegerEnv(
+  'NANOFLOW_CODEGRAPH_SHARED_DAEMON_FALLBACK_RECOVERY_DELAY_MS',
+  250,
+);
+const SHARED_DAEMON_FALLBACK_RECOVERY_DEFER_MS = parsePositiveIntegerEnv(
+  'NANOFLOW_CODEGRAPH_SHARED_DAEMON_FALLBACK_RECOVERY_DEFER_MS',
+  250,
+);
+const SHARED_DAEMON_FALLBACK_RECOVERY_MAX_WAIT_MS = parsePositiveIntegerEnv(
+  'NANOFLOW_CODEGRAPH_SHARED_DAEMON_FALLBACK_RECOVERY_MAX_WAIT_MS',
+  30_000,
+);
 const STALE_WRAPPER_RECYCLE_GRACE_MS = parsePositiveIntegerEnv(
   'NANOFLOW_CODEGRAPH_STALE_WRAPPER_RECYCLE_GRACE_MS',
   2_000,
@@ -459,22 +524,11 @@ diagnostics.log('wrapper.start', {
   projectRoot,
   cwd: process.cwd(),
   outputModes: WRAPPER_OUTPUT_MODES,
-  env: pickEnv(process.env, [
-    ...CODEGRAPH_CHILD_ENV_KEYS,
-    'CODEGRAPH_MCP_DEBUG',
-    'NANOFLOW_CODEGRAPH_OVERLAY_QUERY_TIMEOUT_MS',
-    'NANOFLOW_CODEGRAPH_OVERLAY_QUERY_MAX_BUFFER_BYTES',
-    'NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS',
-    'NANOFLOW_CODEGRAPH_REFRESH_ON_STARTUP',
-    'NANOFLOW_CODEGRAPH_CHILD_RESTART_BACKOFF_AFTER',
-    'NANOFLOW_CODEGRAPH_CHILD_RESTART_BACKOFF_INITIAL_MS',
-    'NANOFLOW_CODEGRAPH_CHILD_RESTART_BACKOFF_MAX_MS',
-    'NANOFLOW_CODEGRAPH_CHILD_RESTART_BACKOFF_WINDOW_MS',
-    'NANOFLOW_CODEGRAPH_STALE_WRAPPER_RECYCLE_GRACE_MS',
-    'NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE',
-    'NANOFLOW_CODEGRAPH_CONFIG_ALIGNMENT_MODE',
-  ]),
+  envObservationSchemaVersion: ENV_OBSERVATION_SCHEMA_VERSION,
+  observedEnvKeys: WRAPPER_START_OBSERVED_ENV_KEYS,
+  env: pickEnv(process.env, WRAPPER_START_OBSERVED_ENV_KEYS),
   effectiveChildEnv: pickEnv(createCodegraphChildEnv(), CODEGRAPH_CHILD_ENV_KEYS),
+  runtimeTopology: summarizeCodegraphRuntimeTopology(createCodegraphChildEnv()),
   overlayQueryTimeoutMs: OVERLAY_QUERY_TIMEOUT_MS,
   overlayQueryMaxBufferBytes: OVERLAY_QUERY_MAX_BUFFER_BYTES,
   contextPackTimeoutMs: CONTEXT_PACK_TIMEOUT_MS,
@@ -485,10 +539,37 @@ diagnostics.log('wrapper.start', {
     maxMs: CHILD_RESTART_BACKOFF_MAX_MS,
     windowMs: CHILD_RESTART_BACKOFF_WINDOW_MS,
   },
+  sharedDaemonFallbackRecovery: {
+    enabled: SHARED_DAEMON_FALLBACK_RECOVERY_ENABLED,
+    delayMs: SHARED_DAEMON_FALLBACK_RECOVERY_DELAY_MS,
+    deferMs: SHARED_DAEMON_FALLBACK_RECOVERY_DEFER_MS,
+    maxWaitMs: SHARED_DAEMON_FALLBACK_RECOVERY_MAX_WAIT_MS,
+  },
   staleWrapperRecycleGraceMs: STALE_WRAPPER_RECYCLE_GRACE_MS,
   staleWrapperAutoRecycle: STALE_WRAPPER_AUTO_RECYCLE,
   codexConfigAlignment: summarizeCodexMcpConfigAlignment(startupCodexConfigAlignment),
 });
+if (startupChildEnvNormalization.corrections.length > 0) {
+  diagnostics.log('wrapper.env.normalized', {
+    failureClass: 'stale-host-daemon-lifetime-env',
+    corrections: startupChildEnvNormalization.corrections,
+    receivedEnv: startupChildEnvNormalization.receivedEnv,
+    effectiveChildEnv: pickEnv(createCodegraphChildEnv(), CODEGRAPH_CHILD_ENV_KEYS),
+    investigation: {
+      failureBoundary: 'codex-mcp-host-env-to-wrapper-child',
+      failureClass: 'stale-host-daemon-lifetime-env',
+      transportShouldStayAlive: true,
+      likelyRootCause: 'The Codex MCP host supplied a non-positive shared-daemon lifetime value from a stale session; the wrapper replaced it with the pinned positive contract before spawning CodeGraph.',
+      nextEvidence: [
+        'wrapper.start.env',
+        'wrapper.env.normalized.corrections',
+        'wrapper.start.effectiveChildEnv',
+        'child.spawn.env',
+        'codegraph:adapter:doctor -- --strict --explain',
+      ],
+    },
+  });
+}
 logWrapperConfigAlignmentIfNeeded('startup', null, startupCodexConfigAlignment);
 
 if (REFRESH_ON_STARTUP) {
@@ -542,6 +623,13 @@ let lastClientOutputFlushAtMs = 0;
 let childStdinBackpressured = false;
 let wrapperShutdownCause = null;
 let childRestartTimer = null;
+let childRuntimeTopology = summarizeCodegraphRuntimeTopology(createCodegraphChildEnv());
+let sharedDaemonFallbackRecoveryTimer = null;
+let sharedDaemonFallbackRecoveryChild = null;
+let sharedDaemonFallbackRecoveryRequestedAtMs = 0;
+let sharedDaemonFallbackRecoveryDeferCount = 0;
+let sharedDaemonFallbackRecoveryTrigger = null;
+let sharedDaemonFallbackDetectedAtMs = 0;
 const childRestartExitTimestamps = [];
 const recentDiagnosticHistory = {
   childStderr: [],
@@ -589,7 +677,9 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
 
 function spawnManagedCodegraph(reason) {
   const previousPid = child?.pid ?? null;
+  const previousRuntimeTopology = childRuntimeTopology;
   clearChildRestartTimer();
+  clearSharedDaemonFallbackRecoveryTimer();
   const retainedChildInputQueue = extractRestartChildInputQueue(reason);
   childExited = false;
   childStdoutBuffer = Buffer.alloc(0);
@@ -598,14 +688,32 @@ function spawnManagedCodegraph(reason) {
   const childStartedAtMs = Date.now();
   child = spawnCodegraph(codegraphTarget, codegraphArgs);
   child.__nanoflowStartedAtMs = childStartedAtMs;
+  childRuntimeTopology = summarizeCodegraphRuntimeTopology(createCodegraphChildEnv());
+  sharedDaemonFallbackRecoveryChild = null;
+  sharedDaemonFallbackRecoveryRequestedAtMs = 0;
+  sharedDaemonFallbackRecoveryDeferCount = 0;
+  sharedDaemonFallbackRecoveryTrigger = null;
+  sharedDaemonFallbackDetectedAtMs = 0;
   attachChildEventHandlers(child);
   diagnostics.log(reason === 'startup' ? 'child.managed.start' : 'child.restart', {
     reason,
     previousPid,
     pid: child.pid,
     childStartedAtMs,
+    runtimeTopology: childRuntimeTopology,
     runtime: summarizeRuntimeState(),
   });
+  if (reason !== 'startup' && isInProcessFallbackTopology(previousRuntimeTopology)) {
+    diagnostics.log('child.runtime-topology.reset', {
+      reason,
+      previousPid,
+      pid: child.pid,
+      from: previousRuntimeTopology,
+      to: childRuntimeTopology,
+      failureClass: 'shared-daemon-fallback-recovered-by-child-restart',
+      runtime: summarizeRuntimeState(),
+    });
+  }
   replayCodegraphSessionToChild(reason);
   restoreRestartChildInputQueue(retainedChildInputQueue, reason);
   flushChildInputQueue();
@@ -669,6 +777,7 @@ function attachChildEventHandlers(managedChild) {
 
   managedChild.stderr.on('data', chunk => {
     const text = chunk.toString('utf8');
+    observeChildRuntimeTopology(managedChild, text);
     const stderrDiagnostics = summarizeChildStderrDiagnostics(text);
     const runtime = summarizeRuntimeState();
     rememberDiagnosticHistory('childStderr', {
@@ -774,10 +883,12 @@ function attachChildEventHandlers(managedChild) {
   });
 
   managedChild.on('exit', (code, signal) => {
+    const currentChild = managedChild === child;
     const runtime = summarizeRuntimeState();
     const childExitDiagnostics = buildChildExitDiagnostics(code, signal, managedChild);
     diagnostics.log('child.exit', {
       pid: managedChild.pid,
+      currentChild,
       code,
       signal,
       ...childExitDiagnostics,
@@ -786,7 +897,7 @@ function attachChildEventHandlers(managedChild) {
       rootCauseSnapshot: buildRootCauseSnapshot(runtime),
       runtime,
     });
-    if (managedChild !== child) {
+    if (!currentChild) {
       diagnostics.log('child.exit.stale', {
         pid: managedChild.pid,
         code,
@@ -797,6 +908,7 @@ function attachChildEventHandlers(managedChild) {
     }
 
     childExited = true;
+    clearSharedDaemonFallbackRecoveryTimer();
     clearChildTerminationTimer();
     if (signal) {
       writeToWrapperStderr(`[codegraph-nanoflow-mcp-stdio] Codegraph exited from signal ${signal}.\n`, {
@@ -805,15 +917,15 @@ function attachChildEventHandlers(managedChild) {
       });
     }
     if (shuttingDown) {
-      const runtime = summarizeRuntimeState();
-      diagnostics.log('wrapper.exit', {
-        code: 0,
-        reason: 'child-exit',
-        ...(wrapperShutdownCause ?? buildWrapperShutdownCause('child-exit', runtime)),
-        rootCauseSnapshot: buildRootCauseSnapshot(runtime),
-        runtime,
+      const shutdownRuntime = summarizeRuntimeState();
+      diagnostics.log('wrapper.exit.await-child-close', {
+        code,
+        signal,
+        childPid: managedChild.pid,
+        ...(wrapperShutdownCause ?? buildWrapperShutdownCause('child-exit', shutdownRuntime)),
+        rootCauseSnapshot: buildRootCauseSnapshot(shutdownRuntime),
+        runtime: shutdownRuntime,
       });
-      process.exit(0);
       return;
     }
 
@@ -848,6 +960,18 @@ function attachChildEventHandlers(managedChild) {
       rootCauseSnapshot: buildRootCauseSnapshot(runtime),
       runtime,
     });
+    if (managedChild === child && shuttingDown) {
+      clearChildTerminationTimer();
+      const shutdownRuntime = summarizeRuntimeStateSafely();
+      diagnostics.log('wrapper.exit', {
+        code: 0,
+        reason: 'child-exit',
+        ...(wrapperShutdownCause ?? buildWrapperShutdownCause('child-exit', shutdownRuntime)),
+        rootCauseSnapshot: buildRootCauseSnapshot(shutdownRuntime),
+        runtime: shutdownRuntime,
+      });
+      process.exit(0);
+    }
   });
 
   managedChild.stdin.on('error', error => {
@@ -896,6 +1020,272 @@ function buildChildProcessErrorInvestigation(failureClass, transportShouldStayAl
       'child.stderr',
       'wrapper.exit',
       'runtime',
+    ],
+  };
+}
+
+function observeChildRuntimeTopology(managedChild, text) {
+  if (managedChild !== child || shuttingDown || childExited) {
+    return null;
+  }
+
+  const value = String(text ?? '');
+  const startupTopology = summarizeCodegraphRuntimeTopology(createCodegraphChildEnv());
+  if (startupTopology.daemonDisabled) {
+    return null;
+  }
+
+  let latestTransition = null;
+  if (isSharedDaemonConnectionLostText(value)) {
+    latestTransition = applyChildRuntimeTopologyTransition(managedChild, {
+      reason: 'shared-daemon-connection-lost',
+      text: value,
+      nextTopology: {
+      ...startupTopology,
+      mode: 'in-process-fallback',
+      watcherOwnership: startupTopology.watchDisabled
+        ? 'disabled-manual-sync'
+        : 'in-process-fallback-initializing',
+      fileLockContentionRisk: startupTopology.watchDisabled
+        ? 'none-no-watcher'
+        : 'multi-wrapper-writers-pending',
+      },
+    }) ?? latestTransition;
+  }
+  if (
+    isCodegraphFileWatcherActiveText(value)
+    && isInProcessFallbackTopology(childRuntimeTopology)
+    && childRuntimeTopology.watchDisabled === false
+  ) {
+    latestTransition = applyChildRuntimeTopologyTransition(managedChild, {
+      reason: 'fallback-file-watcher-active',
+      text: value,
+      nextTopology: {
+        ...childRuntimeTopology,
+        mode: 'in-process-fallback-watcher',
+        watcherOwnership: 'per-wrapper-fallback-watcher',
+        fileLockContentionRisk: 'multi-wrapper-writers',
+      },
+    }) ?? latestTransition;
+  }
+  return latestTransition;
+}
+
+function applyChildRuntimeTopologyTransition(managedChild, { reason, text, nextTopology }) {
+  if (!nextTopology || runtimeTopologiesEqual(childRuntimeTopology, nextTopology)) {
+    return null;
+  }
+
+  const from = childRuntimeTopology;
+  childRuntimeTopology = nextTopology;
+  if (!sharedDaemonFallbackDetectedAtMs) {
+    sharedDaemonFallbackDetectedAtMs = Date.now();
+  }
+  const failureClass = nextTopology.mode === 'in-process-fallback-watcher'
+    ? 'shared-daemon-fallback-watcher'
+    : 'shared-daemon-fallback';
+  const runtime = summarizeRuntimeState();
+  diagnostics.log('child.runtime-topology.transition', {
+    pid: managedChild.pid,
+    reason,
+    failureClass,
+    from,
+    to: nextTopology,
+    textTail: warningTextTail(text, 1200),
+    investigation: buildSharedDaemonFallbackInvestigation(failureClass),
+    rootCauseSnapshot: buildRootCauseSnapshot(runtime),
+    runtime,
+  });
+  requestSharedDaemonFallbackRecovery(managedChild, reason);
+  return { reason, failureClass, from, to: nextTopology };
+}
+
+function requestSharedDaemonFallbackRecovery(managedChild, trigger) {
+  if (managedChild !== child || shuttingDown || childExited) {
+    return;
+  }
+  const startupTopology = summarizeCodegraphRuntimeTopology(createCodegraphChildEnv());
+  if (startupTopology.daemonDisabled || !SHARED_DAEMON_FALLBACK_RECOVERY_ENABLED) {
+    diagnostics.log('child.shared-daemon-fallback.recovery.skipped', {
+      pid: managedChild.pid,
+      trigger,
+      failureClass: 'shared-daemon-fallback',
+      reason: startupTopology.daemonDisabled
+        ? 'shared-daemon-disabled-by-config'
+        : 'recovery-disabled-by-env',
+      runtime: summarizeRuntimeState(),
+    });
+    return;
+  }
+
+  if (sharedDaemonFallbackRecoveryTimer && sharedDaemonFallbackRecoveryChild === managedChild) {
+    diagnostics.log('child.shared-daemon-fallback.recovery.coalesced', {
+      pid: managedChild.pid,
+      trigger,
+      originalTrigger: sharedDaemonFallbackRecoveryTrigger,
+      failureClass: 'shared-daemon-fallback',
+      runtime: summarizeRuntimeState(),
+    });
+    return;
+  }
+
+  sharedDaemonFallbackRecoveryChild = managedChild;
+  sharedDaemonFallbackRecoveryRequestedAtMs = sharedDaemonFallbackRecoveryRequestedAtMs || Date.now();
+  sharedDaemonFallbackRecoveryTrigger = sharedDaemonFallbackRecoveryTrigger ?? trigger;
+  diagnostics.log('child.shared-daemon-fallback.recovery.request', {
+    pid: managedChild.pid,
+    trigger,
+    failureClass: 'shared-daemon-fallback',
+    delayMs: SHARED_DAEMON_FALLBACK_RECOVERY_DELAY_MS,
+    maxWaitMs: SHARED_DAEMON_FALLBACK_RECOVERY_MAX_WAIT_MS,
+    runtime: summarizeRuntimeState(),
+  });
+  scheduleSharedDaemonFallbackRecoveryAttempt(
+    managedChild,
+    SHARED_DAEMON_FALLBACK_RECOVERY_DELAY_MS,
+  );
+}
+
+function scheduleSharedDaemonFallbackRecoveryAttempt(managedChild, delayMs) {
+  clearSharedDaemonFallbackRecoveryTimer();
+  sharedDaemonFallbackRecoveryChild = managedChild;
+  sharedDaemonFallbackRecoveryTimer = setTimeout(() => {
+    sharedDaemonFallbackRecoveryTimer = null;
+    attemptSharedDaemonFallbackRecovery(managedChild);
+  }, delayMs);
+  sharedDaemonFallbackRecoveryTimer.unref?.();
+}
+
+function attemptSharedDaemonFallbackRecovery(managedChild) {
+  if (managedChild !== child || shuttingDown || childExited) {
+    diagnostics.log('child.shared-daemon-fallback.recovery.cancelled', {
+      pid: managedChild?.pid ?? null,
+      failureClass: 'shared-daemon-fallback',
+      reason: managedChild !== child
+        ? 'child-already-replaced'
+        : shuttingDown
+          ? 'wrapper-shutting-down'
+          : 'child-already-exited',
+      runtime: summarizeRuntimeState(),
+    });
+    return;
+  }
+
+  const busyReasons = sharedDaemonFallbackRecoveryBusyReasons();
+  const elapsedMs = sharedDaemonFallbackRecoveryRequestedAtMs > 0
+    ? Date.now() - sharedDaemonFallbackRecoveryRequestedAtMs
+    : 0;
+  if (busyReasons.length > 0 && elapsedMs < SHARED_DAEMON_FALLBACK_RECOVERY_MAX_WAIT_MS) {
+    sharedDaemonFallbackRecoveryDeferCount++;
+    diagnostics.log('child.shared-daemon-fallback.recovery.deferred', {
+      pid: managedChild.pid,
+      failureClass: 'shared-daemon-fallback',
+      busyReasons,
+      elapsedMs,
+      deferCount: sharedDaemonFallbackRecoveryDeferCount,
+      nextDelayMs: SHARED_DAEMON_FALLBACK_RECOVERY_DEFER_MS,
+      maxWaitMs: SHARED_DAEMON_FALLBACK_RECOVERY_MAX_WAIT_MS,
+      runtime: summarizeRuntimeState(),
+    });
+    scheduleSharedDaemonFallbackRecoveryAttempt(
+      managedChild,
+      SHARED_DAEMON_FALLBACK_RECOVERY_DEFER_MS,
+    );
+    return;
+  }
+
+  if (busyReasons.length > 0) {
+    diagnostics.log('child.shared-daemon-fallback.recovery.force', {
+      pid: managedChild.pid,
+      failureClass: 'shared-daemon-fallback-recovery-max-wait',
+      busyReasons,
+      elapsedMs,
+      deferCount: sharedDaemonFallbackRecoveryDeferCount,
+      maxWaitMs: SHARED_DAEMON_FALLBACK_RECOVERY_MAX_WAIT_MS,
+      rootCauseSnapshot: buildRootCauseSnapshot(summarizeRuntimeState()),
+      runtime: summarizeRuntimeState(),
+    });
+    failBaseCodegraphPendingRequests(
+      'shared-daemon-fallback-recovery-max-wait',
+      managedChild.pid,
+      null,
+      null,
+    );
+    failPendingContextPacksForBaseChildExit(
+      'shared-daemon-fallback-recovery-max-wait',
+      managedChild.pid,
+      null,
+      null,
+    );
+    clearAllSuppressedChildResponseIds('shared-daemon-fallback-recovery', managedChild.pid);
+    clearAllExpiredContextPackIds('shared-daemon-fallback-recovery', managedChild.pid);
+  }
+
+  const runtime = summarizeRuntimeState();
+  diagnostics.log('child.shared-daemon-fallback.recovery.restart', {
+    pid: managedChild.pid,
+    failureClass: 'shared-daemon-fallback',
+    trigger: sharedDaemonFallbackRecoveryTrigger,
+    elapsedMs,
+    deferCount: sharedDaemonFallbackRecoveryDeferCount,
+    runtimeTopology: childRuntimeTopology,
+    rootCauseSnapshot: buildRootCauseSnapshot(runtime),
+    runtime,
+  });
+  clearChildRestartTimer();
+  clearChildTerminationTimer();
+  terminateProcessTree(managedChild.pid, managedChild);
+  spawnManagedCodegraph('shared-daemon-fallback');
+}
+
+function sharedDaemonFallbackRecoveryBusyReasons() {
+  const reasons = [];
+  if (activeClientRequests.size > 0) reasons.push('active-client-requests');
+  if (pendingContextPacks.size > 0) reasons.push('pending-context-packs');
+  if (pendingToolsListIds.size > 0) reasons.push('pending-tools-list');
+  if (childInputQueue.length > 0) reasons.push('child-input-queue');
+  if (childStdinBackpressured) reasons.push('child-stdin-backpressure');
+  if (childStdoutBuffer.length > 0) reasons.push('buffered-child-stdout');
+  return reasons;
+}
+
+function isSharedDaemonConnectionLostText(text) {
+  return /Shared daemon connection lost; serving this session in-process \(degraded\)/i.test(
+    String(text ?? ''),
+  );
+}
+
+function isCodegraphFileWatcherActiveText(text) {
+  return /\[CodeGraph MCP\]\s+File watcher active\b/i.test(String(text ?? ''));
+}
+
+function isInProcessFallbackTopology(value) {
+  return String(value?.mode ?? '').startsWith('in-process-fallback');
+}
+
+function runtimeTopologiesEqual(left, right) {
+  return left?.mode === right?.mode
+    && left?.watcherOwnership === right?.watcherOwnership
+    && left?.fileLockContentionRisk === right?.fileLockContentionRisk
+    && left?.daemonDisabled === right?.daemonDisabled
+    && left?.watchDisabled === right?.watchDisabled;
+}
+
+function buildSharedDaemonFallbackInvestigation(failureClass) {
+  return {
+    failureBoundary: 'base-codegraph-process-topology',
+    failureClass,
+    transportShouldStayAlive: true,
+    likelyRootCause: failureClass === 'shared-daemon-fallback-watcher'
+      ? 'The upstream shared-daemon proxy permanently fell back to an in-process engine and started a per-wrapper watcher, creating another SQLite writer candidate.'
+      : 'The upstream shared-daemon proxy lost its daemon socket and permanently switched this live session to its in-process fallback engine.',
+    nextEvidence: [
+      'child.runtime-topology.transition',
+      'child.shared-daemon-fallback.recovery.request',
+      'child.shared-daemon-fallback.recovery.restart',
+      'child.restart',
+      '.codegraph/daemon.log',
+      'hostMcp.activeInProcessFallbackWatcherRuns',
     ],
   };
 }
@@ -962,6 +1352,7 @@ function handleChildOutputStreamError(managedChild, stream, error) {
   clearAllSuppressedChildResponseIds('child-stdout-stream-error', managedChild.pid);
   clearAllExpiredContextPackIds('child-stdout-stream-error', managedChild.pid);
   clearChildRestartTimer();
+  clearSharedDaemonFallbackRecoveryTimer();
   clearChildTerminationTimer();
   terminateProcessTree(managedChild.pid, managedChild);
   spawnManagedCodegraph('stdout-stream-error');
@@ -1110,7 +1501,7 @@ function failBaseCodegraphPendingRequests(failureClass, childPid, code, signal) 
       requestKind: requestTrace.requestKind,
       method: requestTrace.method,
       tool: requestTrace.tool,
-      query: requestTrace.query,
+      ...summarizeDiagnosticQuery(requestTrace.query),
       elapsedMs: Date.now() - requestTrace.startedAtMs,
     })),
     runtime: summarizeRuntimeState(),
@@ -1160,13 +1551,12 @@ function failPendingContextPacksForBaseChildExit(failureClass, childPid, code, s
   for (const [internalId, pending] of failedContextPacks) {
     clearTimeout(pending.timeoutTimer);
     pendingContextPacks.delete(internalId);
+    const text = 'Base CodeGraph child exited before responding. Retry after the wrapper restarts the child or use the codegraph CLI fallback.';
+    const failed = buildNanoFlowContextPackFailureResult({ text, failureClass });
     writeJsonToClient({
       jsonrpc: '2.0',
       id: pending.originalId,
-      error: {
-        code: -32001,
-        message: 'Base CodeGraph child exited before responding. Retry after the wrapper restarts the child or use the codegraph CLI fallback.',
-      },
+      result: failed.result,
     }, {
       source: 'nanoflow-context-pack',
       contextId: pending.contextId,
@@ -1510,6 +1900,7 @@ function scheduleStaleWrapperRecycle(delayMs = STALE_WRAPPER_RECYCLE_GRACE_MS) {
       runtime,
     });
     clearChildRestartTimer();
+    clearSharedDaemonFallbackRecoveryTimer();
     requestChildShutdown('stale-wrapper-script');
   }, scheduledDelayMs);
   staleWrapperRecycleTimer.unref?.();
@@ -1533,6 +1924,7 @@ function requestClientStdinShutdown(streamEvent) {
     runtime,
   });
   clearChildRestartTimer();
+  clearSharedDaemonFallbackRecoveryTimer();
   clearStaleWrapperRecycleTimer();
   requestChildShutdown('client-stdin');
 }
@@ -1596,6 +1988,7 @@ function requestClientStdioShutdown({
     runtime,
   });
   clearChildRestartTimer();
+  clearSharedDaemonFallbackRecoveryTimer();
   clearStaleWrapperRecycleTimer();
   requestChildShutdown(transportClosedBy);
 }
@@ -1615,6 +2008,7 @@ function shutdownAndExit() {
     runtime,
   });
   clearChildRestartTimer();
+  clearSharedDaemonFallbackRecoveryTimer();
   clearStaleWrapperRecycleTimer();
   requestChildShutdown('signal');
   terminateChildTree(child.pid);
@@ -1879,6 +2273,14 @@ function clearChildRestartTimer() {
   childRestartTimer = null;
 }
 
+function clearSharedDaemonFallbackRecoveryTimer() {
+  if (!sharedDaemonFallbackRecoveryTimer) {
+    return;
+  }
+  clearTimeout(sharedDaemonFallbackRecoveryTimer);
+  sharedDaemonFallbackRecoveryTimer = null;
+}
+
 function scheduleNanoFlowOverlayRefresh(projectRoot) {
   setTimeout(() => refreshNanoFlowOverlay(projectRoot), 0).unref();
 }
@@ -2042,6 +2444,7 @@ function resolveProjectRoot(args) {
 }
 
 function spawnCodegraph(target, childArgs) {
+  const childEnv = createCodegraphChildEnv();
   if (target.startsWith('@colbymchenry/codegraph@')) {
     const npxArgs = ['-y', target, ...childArgs];
     diagnostics.log('child.spawn', {
@@ -2051,16 +2454,17 @@ function spawnCodegraph(target, childArgs) {
       target,
       packageName: target.replace(/@[^@]+$/, ''),
       packageVersion: target.includes('@') ? target.split('@').at(-1) : null,
-      env: pickEnv(createCodegraphChildEnv(), CODEGRAPH_CHILD_ENV_KEYS),
+      env: pickEnv(childEnv, CODEGRAPH_CHILD_ENV_KEYS),
+      runtimeTopology: summarizeCodegraphRuntimeTopology(childEnv),
     });
     if (process.platform === 'win32') {
       return spawn(
         'cmd.exe',
         ['/d', '/s', '/c', quoteCmdCommand(['npx', ...npxArgs])],
-        createSpawnOptions(),
+        createSpawnOptions(childEnv),
       );
     }
-    return spawn('npx', npxArgs, createSpawnOptions());
+    return spawn('npx', npxArgs, createSpawnOptions(childEnv));
   }
 
   const resolvedTarget = normalizePath(target);
@@ -2110,29 +2514,107 @@ function spawnCodegraph(target, childArgs) {
     args: [resolvedTarget, ...childArgs],
     target,
     resolvedTarget,
-    env: pickEnv(createCodegraphChildEnv(), CODEGRAPH_CHILD_ENV_KEYS),
+    env: pickEnv(childEnv, CODEGRAPH_CHILD_ENV_KEYS),
+    runtimeTopology: summarizeCodegraphRuntimeTopology(childEnv),
   });
-  return spawn(process.execPath, [resolvedTarget, ...childArgs], createSpawnOptions());
+  return spawn(process.execPath, [resolvedTarget, ...childArgs], createSpawnOptions(childEnv));
 }
 
-function createSpawnOptions() {
+function createSpawnOptions(env = createCodegraphChildEnv()) {
   return {
     cwd: process.cwd(),
-    env: createCodegraphChildEnv(),
+    env,
     stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: true,
   };
 }
 
 function createCodegraphChildEnv() {
-  const allowDaemon = process.env.NANOFLOW_CODEGRAPH_ALLOW_DAEMON === '1';
+  const daemonOverride = process.env.NANOFLOW_CODEGRAPH_ALLOW_DAEMON;
+  const configuredNoDaemon = process.env.CODEGRAPH_NO_DAEMON ?? '0';
+  const noDaemon = daemonOverride === '0'
+    ? '1'
+    : daemonOverride === '1'
+      ? '0'
+      : configuredNoDaemon;
   return {
     ...process.env,
-    CODEGRAPH_NO_DAEMON: allowDaemon ? (process.env.CODEGRAPH_NO_DAEMON ?? '0') : '1',
+    CODEGRAPH_NO_DAEMON: noDaemon,
     CODEGRAPH_NO_WATCH: process.env.CODEGRAPH_NO_WATCH ?? '0',
-    CODEGRAPH_DAEMON_IDLE_TIMEOUT_MS: process.env.CODEGRAPH_DAEMON_IDLE_TIMEOUT_MS ?? '60000',
-    CODEGRAPH_DAEMON_MAX_IDLE_MS: process.env.CODEGRAPH_DAEMON_MAX_IDLE_MS ?? '60000',
+    CODEGRAPH_DAEMON_IDLE_TIMEOUT_MS:
+      positiveIntegerEnvValue(process.env.CODEGRAPH_DAEMON_IDLE_TIMEOUT_MS)
+      ?? CODEGRAPH_DAEMON_IDLE_TIMEOUT_DEFAULT,
+    CODEGRAPH_DAEMON_MAX_IDLE_MS:
+      positiveIntegerEnvValue(process.env.CODEGRAPH_DAEMON_MAX_IDLE_MS)
+      ?? CODEGRAPH_DAEMON_MAX_IDLE_DEFAULT,
   };
+}
+
+function normalizeCodegraphChildEnv(env) {
+  const receivedEnv = pickEnv(env, [
+    'CODEGRAPH_DAEMON_IDLE_TIMEOUT_MS',
+    'CODEGRAPH_DAEMON_MAX_IDLE_MS',
+  ]);
+  const corrections = [];
+  normalizePositiveIntegerChildEnv(
+    env,
+    'CODEGRAPH_DAEMON_IDLE_TIMEOUT_MS',
+    CODEGRAPH_DAEMON_IDLE_TIMEOUT_DEFAULT,
+    corrections,
+  );
+  normalizePositiveIntegerChildEnv(
+    env,
+    'CODEGRAPH_DAEMON_MAX_IDLE_MS',
+    CODEGRAPH_DAEMON_MAX_IDLE_DEFAULT,
+    corrections,
+  );
+  return { receivedEnv, corrections };
+}
+
+function normalizePositiveIntegerChildEnv(env, key, fallback, corrections) {
+  if (env[key] === undefined) return;
+  const effective = positiveIntegerEnvValue(env[key]);
+  if (effective !== null) return;
+  const received = String(env[key]);
+  env[key] = fallback;
+  corrections.push({
+    key,
+    received,
+    effective: fallback,
+    reason: 'non-positive-or-invalid',
+  });
+}
+
+function positiveIntegerEnvValue(value) {
+  const parsed = Number.parseInt(value ?? '', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? String(parsed) : null;
+}
+
+function summarizeCodegraphRuntimeTopology(env) {
+  const daemonDisabled = isTruthyEnvValue(env.CODEGRAPH_NO_DAEMON);
+  const watchDisabled = env.CODEGRAPH_NO_WATCH === '1';
+  return {
+    mode: daemonDisabled ? 'direct-session' : 'shared-daemon-proxy',
+    watcherOwnership: watchDisabled
+      ? 'disabled-manual-sync'
+      : daemonDisabled
+        ? 'per-wrapper-watcher'
+        : 'shared-daemon-single-watcher',
+    fileLockContentionRisk: watchDisabled
+      ? 'none-no-watcher'
+      : daemonDisabled
+        ? 'multi-wrapper-writers'
+        : 'single-writer',
+    daemonDisabled,
+    watchDisabled,
+    daemonIdleTimeoutMs: Number(env.CODEGRAPH_DAEMON_IDLE_TIMEOUT_MS),
+    daemonMaxIdleMs: Number(env.CODEGRAPH_DAEMON_MAX_IDLE_MS),
+  };
+}
+
+function isTruthyEnvValue(value) {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  return normalized !== '' && normalized !== '0' && normalized !== 'false';
 }
 
 function quoteCmdCommand(args) {
@@ -2422,7 +2904,6 @@ function forwardToCodegraph(jsonText) {
     diagnostics.log('nanoflow.overlay.handle', {
       ...summarizeMcpMessage(message),
       ...requestTraceDiagnostics(requestTrace),
-      query: requestTrace?.query,
       runtime: summarizeRuntimeState(),
     });
     if (staleWrapperScript) {
@@ -2437,7 +2918,6 @@ function forwardToCodegraph(jsonText) {
     diagnostics.log('nanoflow.context.forward.start', {
       ...summarizeMcpMessage(message),
       ...requestTraceDiagnostics(requestTrace),
-      query: requestTrace?.query,
       runtime: summarizeRuntimeState(),
     });
     if (staleWrapperScript) {
@@ -2512,12 +2992,26 @@ function writeBaseCodegraphUnavailableResponse(message, requestTrace, source) {
     return true;
   }
 
+  const unavailableMessage = 'Base CodeGraph child is restarting or unavailable. Retry after the wrapper logs child.restart or use the codegraph CLI fallback.';
+  if (source === 'nanoflow-context-pack') {
+    const failureClass = 'base-codegraph-unavailable';
+    const failed = buildNanoFlowContextPackFailureResult({
+      text: unavailableMessage,
+      failureClass,
+    });
+    return writeJsonToClient({
+      jsonrpc: '2.0',
+      id: message.id,
+      result: failed.result,
+    }, { source, failureClass });
+  }
+
   return writeJsonToClient({
     jsonrpc: '2.0',
     id: message.id,
     error: {
       code: -32001,
-      message: 'Base CodeGraph child is restarting or unavailable. Retry after the wrapper logs child.restart or use the codegraph CLI fallback.',
+      message: unavailableMessage,
     },
   }, {
     source,
@@ -2539,17 +3033,65 @@ function rememberCodegraphSessionMessage(message) {
 }
 
 function writeToCodegraphStdin(text, reason) {
+  const writeDiagnostics = buildChildInputWriteDiagnostics(text, reason);
   if (!child || childExited || child.stdin.destroyed || child.stdin.writableEnded) {
     diagnostics.log('child.stdin.write.skip', {
       reason,
+      ...writeDiagnostics,
       childExited,
       runtime: summarizeRuntimeState(),
     });
     return false;
   }
 
-  childInputQueue.push({ text, reason });
+  childInputQueue.push({ text, reason, writeDiagnostics });
   return flushChildInputQueue();
+}
+
+function buildChildInputWriteDiagnostics(text, reason) {
+  let message;
+  try {
+    message = JSON.parse(String(text ?? '').trim());
+  } catch {
+    return { reason };
+  }
+  const pending = message?.id === undefined
+    ? null
+    : pendingContextPacks.get(String(message.id));
+  const requestTrace = pending?.requestTrace
+    ?? (message?.id === undefined ? null : getClientRequestTrace(message.id));
+  return {
+    reason,
+    childRequestId: message?.id,
+    internalId: pending ? message.id : undefined,
+    originalId: pending?.originalId,
+    contextId: pending?.contextId,
+    ...requestTraceDiagnostics(requestTrace),
+  };
+}
+
+function buildChildStdinWriteInvestigation(failureClass) {
+  return {
+    failureBoundary: 'base-codegraph-child',
+    failureClass,
+    transportShouldStayAlive: true,
+    likelyRootCause: 'Writing a traced MCP request to the base CodeGraph child stdin failed; inspect the request identity, error code, child exit events, and restart state',
+    nextEvidence: [
+      'requestId',
+      'clientId',
+      'requestKind',
+      'tool',
+      'query',
+      'childRequestId',
+      'error.name',
+      'error.message',
+      'error.code',
+      'error.syscall',
+      'child.exit',
+      'child.restart',
+      'runtime',
+    ],
+  };
 }
 
 function flushChildInputQueue() {
@@ -2561,18 +3103,27 @@ function flushChildInputQueue() {
     return false;
   }
 
+  let activeEntry = null;
   try {
     while (childInputQueue.length > 0) {
-      const { text, reason } = childInputQueue.shift();
+      activeEntry = childInputQueue.shift();
+      const { text, reason, writeDiagnostics = {} } = activeEntry;
       const ok = child.stdin.write(text, error => {
         if (!error) {
           return;
         }
+        const failureClass = 'child-stdin-write-error';
+        const runtime = summarizeRuntimeStateSafely();
         diagnostics.log('child.stdin.write.error', {
+          failureClass,
           message: error.message,
           code: error.code,
           reason,
-          runtime: summarizeRuntimeState(),
+          ...writeDiagnostics,
+          error: serializeDiagnosticError(error),
+          investigation: buildChildStdinWriteInvestigation(failureClass),
+          rootCauseSnapshot: buildRootCauseSnapshot(runtime),
+          runtime,
         });
         if (error.code !== 'EPIPE' && error.code !== 'ERR_STREAM_DESTROYED') {
           writeToWrapperStderr(`[codegraph-nanoflow-mcp-stdio] Codegraph stdin write error: ${error.message}\n`, {
@@ -2587,6 +3138,7 @@ function flushChildInputQueue() {
         childStdinBackpressured = true;
         diagnostics.log('child.stdin.backpressure', {
           reason,
+          ...writeDiagnostics,
           bytes: Buffer.byteLength(text, 'utf8'),
           queuedMessages: childInputQueue.length,
           runtime: summarizeRuntimeState(),
@@ -2595,13 +3147,22 @@ function flushChildInputQueue() {
         child.stdin.once('drain', onChildStdinDrain);
         return false;
       }
+      activeEntry = null;
     }
   } catch (error) {
+    const failureClass = 'child-stdin-write-throw';
+    const runtime = summarizeRuntimeStateSafely();
     diagnostics.log('child.stdin.write.throw', {
+      failureClass,
       message: error?.message,
       code: error?.code,
+      reason: activeEntry?.reason,
+      ...(activeEntry?.writeDiagnostics ?? {}),
+      error: serializeDiagnosticError(error),
       queuedMessages: childInputQueue.length,
-      runtime: summarizeRuntimeState(),
+      investigation: buildChildStdinWriteInvestigation(failureClass),
+      rootCauseSnapshot: buildRootCauseSnapshot(runtime),
+      runtime,
     });
     if (error?.code !== 'EPIPE' && error?.code !== 'ERR_STREAM_DESTROYED') {
       writeToWrapperStderr(`[codegraph-nanoflow-mcp-stdio] Codegraph stdin write error: ${error.message}\n`, {
@@ -2742,6 +3303,50 @@ function handleMcpResourceDiscoveryRequest(message, requestTrace) {
     failureClass: 'success',
     augmentation: 'resources-discovery',
   });
+}
+
+function buildNanoFlowContextPackToolResult(text, outcome, failureClass) {
+  return {
+    content: [{ type: 'text', text: String(text ?? '') }],
+    isError: isNanoFlowContextOutcomeError(outcome),
+    structuredContent: { outcome },
+    _meta: {
+      nanoflowFailureClass: failureClass,
+      nanoflowOutcomeSchemaVersion: outcome.schemaVersion,
+      nanoflowOutcomeStatus: outcome.status,
+      nanoflowContextUsable: outcome.usableContext,
+    },
+  };
+}
+
+function buildNanoFlowContextPackFailureResult({
+  text,
+  failureClass,
+  baseText = '',
+  baseIsError = true,
+  overlayAvailable = false,
+  overlayFailureClass = null,
+  overlayGenerationId = null,
+}) {
+  const outcome = buildNanoFlowContextOutcomeV1({
+    primaryFailureClass: failureClass,
+    base: {
+      available: !baseIsError && Buffer.byteLength(baseText, 'utf8') > 0,
+      isError: baseIsError,
+      text: baseText,
+      failureClass: baseIsError ? failureClass : null,
+    },
+    overlay: {
+      available: overlayAvailable,
+      isError: !overlayAvailable,
+      failureClass: overlayAvailable ? null : overlayFailureClass,
+      generationId: overlayGenerationId,
+    },
+  });
+  return {
+    outcome,
+    result: buildNanoFlowContextPackToolResult(text, outcome, failureClass),
+  };
 }
 
 function forwardNanoFlowContextPackRequest(message, requestTrace) {
@@ -2889,22 +3494,19 @@ function handleNanoFlowContextPackEntryError(message, requestTrace, error) {
     return true;
   }
 
+  const failureClass = 'context-pack-entry-error';
+  const text = [
+    'NanoFlow context pack failed before forwarding to base CodeGraph.',
+    '',
+    errorToMessage(error),
+    '',
+    'The MCP wrapper is still alive; retry a narrower query or use a native CodeGraph tool directly.',
+  ].join('\n');
+  const failed = buildNanoFlowContextPackFailureResult({ text, failureClass });
   return writeJsonToClient({
     jsonrpc: '2.0',
     id: message.id,
-    result: {
-      content: [{
-        type: 'text',
-        text: [
-          'NanoFlow context pack failed before forwarding to base CodeGraph.',
-          '',
-          errorToMessage(error),
-          '',
-          'The MCP wrapper is still alive; retry a narrower query or use a native CodeGraph tool directly.',
-        ].join('\n'),
-      }],
-      isError: true,
-    },
+    result: failed.result,
   }, {
     source: 'nanoflow-context-pack',
     contextId,
@@ -2963,6 +3565,7 @@ function startPendingContextPackOverlay(internalId) {
       timeoutMs: overlayTimeoutMs,
       contextTimeoutMs: CONTEXT_PACK_TIMEOUT_MS,
       overlayTimeoutMs: OVERLAY_QUERY_TIMEOUT_MS,
+      overlayRecoveryGraceMs: CONTEXT_PACK_TIMEOUT_OVERLAY_GRACE_MS,
       queryPlan: buildContextPackQueryPlan(pending, {
         deadlineRemainingMs,
         overlayTimeoutMs,
@@ -2995,6 +3598,7 @@ function buildContextPackQueryPlan(pending, extra = {}) {
     overlayLimit: pending.overlayLimit,
     contextTimeoutMs: CONTEXT_PACK_TIMEOUT_MS,
     overlayTimeoutMs: OVERLAY_QUERY_TIMEOUT_MS,
+    overlayRecoveryGraceMs: CONTEXT_PACK_TIMEOUT_OVERLAY_GRACE_MS,
     ...extra,
   };
 }
@@ -3090,17 +3694,17 @@ function failPendingContextPackForwarding(internalId, source) {
     investigation: buildContextPackInvestigation('base-codegraph-unavailable'),
   });
 
+  const failureClass = 'base-codegraph-unavailable';
+  const text = 'Base CodeGraph child is restarting or unavailable. Retry after the wrapper logs child.restart or use the codegraph CLI fallback.';
+  const failed = buildNanoFlowContextPackFailureResult({ text, failureClass });
   return writeJsonToClient({
     jsonrpc: '2.0',
     id: pending.originalId,
-    error: {
-      code: -32001,
-      message: 'Base CodeGraph child is restarting or unavailable. Retry after the wrapper logs child.restart or use the codegraph CLI fallback.',
-    },
+    result: failed.result,
   }, {
     source: 'nanoflow-context-pack',
     contextId: pending.contextId,
-    failureClass: 'base-codegraph-unavailable',
+    failureClass,
   });
 }
 
@@ -3124,8 +3728,11 @@ async function handleCodegraphContextPackResponse(message) {
   }
   clearTimeout(pending.timeoutTimer);
 
+  let baseText = '';
+  let baseIsError = true;
   try {
-    const baseText = extractMcpText(message?.result?.content);
+    baseText = extractMcpText(message?.result?.content);
+    baseIsError = Boolean(message?.result?.isError || message?.error);
     const baseElapsedMs = Date.now() - pending.startedAtMs;
     const overlayResult = await resolvePendingContextPackOverlayForTimeout(message.id, pending);
     const overlay = overlayResult.overlay;
@@ -3139,8 +3746,11 @@ async function handleCodegraphContextPackResponse(message) {
       schemaVersion: 1,
       query: pending.query,
       projectRoot,
+      maxFiles: pending.maxFiles,
+      maxFilesExplicit: !pending.maxFilesWasDefaulted,
+      overlayLimit: pending.overlayLimit,
       baseCodegraph: {
-        isError: Boolean(message?.result?.isError || message?.error),
+        isError: baseIsError,
         text: message?.error ? JSON.stringify(message.error) : baseText,
       },
       nanoFlowOverlay: {
@@ -3150,7 +3760,7 @@ async function handleCodegraphContextPackResponse(message) {
         relationshipGroups: overlay.data?.relationshipGroups ?? {},
         nodes: overlay.data?.nodes ?? [],
         edges: overlay.data?.edges ?? [],
-        coverage: overlay.data?.coverage ?? (overlay.data ? summarizeOverlayCoverage() : null),
+        coverage: overlay.data?.coverage ?? null,
         rawError: overlay.isError ? overlay.text : undefined,
       },
       nextSteps: [
@@ -3162,16 +3772,39 @@ async function handleCodegraphContextPackResponse(message) {
     augmentContextPackIssueRegistryOverlay(pack.nanoFlowOverlay, pending.query);
     const qualityDiagnostics = {};
     const text = formatNanoFlowContextPackAsMarkdown(pack, qualityDiagnostics);
-    const baseResponseWarnings = summarizeMcpTextWarnings(baseText);
-    const responseWarnings = mergeMcpTextWarnings(
-      baseResponseWarnings,
-      summarizeMcpTextWarnings(text),
-    );
     const failureClass = pack.baseCodegraph.isError
       ? 'base-codegraph-error'
       : (pack.nanoFlowOverlay.isError ? (overlay.diagnostics?.failureClass ?? 'overlay-error') : 'success');
+    const outcome = buildNanoFlowContextOutcomeV1({
+      primaryFailureClass: failureClass === 'success' ? null : failureClass,
+      base: {
+        available: !pack.baseCodegraph.isError && baseText.trim().length > 0,
+        isError: pack.baseCodegraph.isError,
+        text: baseText,
+      },
+      overlay: {
+        available: !pack.nanoFlowOverlay.isError,
+        isError: pack.nanoFlowOverlay.isError,
+        failureClass: pack.nanoFlowOverlay.isError ? failureClass : null,
+        generationId: overlay.data?.generationId ?? null,
+      },
+    });
+    const effectiveFailureClass = outcome.primaryFailureClass ?? 'success';
+    const responseText = outcome.status === 'partial'
+      && outcome.base.status === 'available'
+      && outcome.overlay.status !== 'available'
+      ? formatNanoFlowPartialContextAsMarkdown(
+          baseText,
+          pack.nanoFlowOverlay.rawError ?? failureClass,
+        )
+      : text;
+    const baseResponseWarnings = summarizeMcpTextWarnings(baseText);
+    const responseWarnings = mergeMcpTextWarnings(
+      baseResponseWarnings,
+      summarizeMcpTextWarnings(responseText),
+    );
     const runtime = summarizeRuntimeState();
-    const responseRootCauseSnapshot = failureClass === 'success'
+    const responseRootCauseSnapshot = effectiveFailureClass === 'success'
       ? undefined
       : buildRootCauseSnapshot(runtime);
     const queryClassification = summarizeContextPackQueryClassification(pending.query);
@@ -3195,8 +3828,8 @@ async function handleCodegraphContextPackResponse(message) {
         overlayRecoveryTimedOut,
         overlayRecoveryTimeoutMs,
       }),
-      textBytes: Buffer.byteLength(text, 'utf8'),
-      textStartsWithJson: text.trimStart().startsWith('{'),
+      textBytes: Buffer.byteLength(responseText, 'utf8'),
+      textStartsWithJson: responseText.trimStart().startsWith('{'),
       baseResponse: summarizeMcpResponse(message),
       baseResponseWarnings,
       responseWarnings,
@@ -3206,7 +3839,11 @@ async function handleCodegraphContextPackResponse(message) {
       sourceSelection: qualityDiagnostics.sourceSelection,
       baseIsError: pack.baseCodegraph.isError,
       overlayIsError: pack.nanoFlowOverlay.isError,
-      failureClass,
+      outcome,
+      outcomeSchemaVersion: outcome.schemaVersion,
+      outcomeStatus: outcome.status,
+      contextUsable: outcome.usableContext,
+      failureClass: effectiveFailureClass,
       baseElapsedMs,
       overlayElapsedMs,
       overlayRecoveryTimedOut,
@@ -3218,28 +3855,26 @@ async function handleCodegraphContextPackResponse(message) {
       overlayEdgeCount: pack.nanoFlowOverlay.edges.length,
       overlayRelationshipGroupCount: Object.keys(pack.nanoFlowOverlay.relationshipGroups ?? {}).length,
       sourceOrdering: summarizeContextPackSourceOrdering(
-        text,
+        responseText,
         pending.query,
         contextPackSourceEvidenceNodesForOverlay(pack.nanoFlowOverlay),
         pack.nanoFlowOverlay.matches,
       ),
-      investigation: buildContextPackInvestigation(failureClass),
+      investigation: buildContextPackInvestigation(effectiveFailureClass),
       rootCauseSnapshot: responseRootCauseSnapshot,
       runtime,
     });
 
+    const result = buildNanoFlowContextPackToolResult(responseText, outcome, effectiveFailureClass);
     writeJsonToClient({
       jsonrpc: '2.0',
       id: pending.originalId,
-      result: {
-        content: [{ type: 'text', text }],
-        isError: pack.baseCodegraph.isError || pack.nanoFlowOverlay.isError,
-      },
+      result,
     }, {
       source: 'nanoflow-context-pack',
       contextId: pending.contextId,
       overlayQueryId: overlay.diagnostics?.queryId,
-      failureClass,
+      failureClass: effectiveFailureClass,
       rootCauseSnapshot: responseRootCauseSnapshot,
     });
   } catch (error) {
@@ -3262,22 +3897,28 @@ async function handleCodegraphContextPackResponse(message) {
       rootCauseSnapshot: buildRootCauseSnapshot(runtime),
       runtime,
     });
+    const failureClass = 'context-pack-error';
+    const errorText = errorToMessage(error);
+    const responseText = !baseIsError && Buffer.byteLength(baseText, 'utf8') > 0
+      ? formatNanoFlowPartialContextAsMarkdown(baseText, errorText)
+      : [
+          'NanoFlow context pack failed while combining base CodeGraph and overlay results.',
+          '',
+          errorText,
+          '',
+          'The MCP wrapper is still alive; retry a narrower query or use a native CodeGraph tool directly.',
+        ].join('\n');
+    const failed = buildNanoFlowContextPackFailureResult({
+      text: responseText,
+      failureClass,
+      baseText,
+      baseIsError,
+      overlayFailureClass: failureClass,
+    });
     writeJsonToClient({
       jsonrpc: '2.0',
       id: pending.originalId,
-      result: {
-        content: [{
-          type: 'text',
-          text: [
-            'NanoFlow context pack failed while combining base CodeGraph and overlay results.',
-            '',
-            errorToMessage(error),
-            '',
-            'The MCP wrapper is still alive; retry a narrower query or use a native CodeGraph tool directly.',
-          ].join('\n'),
-        }],
-        isError: true,
-      },
+      result: failed.result,
     }, {
       source: 'nanoflow-context-pack',
       contextId: pending.contextId,
@@ -3325,6 +3966,9 @@ async function handleNanoFlowContextPackTimeoutResponse(internalId, pending) {
     schemaVersion: 1,
     query: pending.query,
     projectRoot,
+    maxFiles: pending.maxFiles,
+    maxFilesExplicit: !pending.maxFilesWasDefaulted,
+    overlayLimit: pending.overlayLimit,
     baseCodegraph: {
       isError: true,
       text: '',
@@ -3337,7 +3981,7 @@ async function handleNanoFlowContextPackTimeoutResponse(internalId, pending) {
       relationshipGroups: overlay?.data?.relationshipGroups ?? {},
       nodes: overlay?.data?.nodes ?? [],
       edges: overlay?.data?.edges ?? [],
-      coverage: overlay?.data?.coverage ?? (overlay?.data ? summarizeOverlayCoverage() : null),
+      coverage: overlay?.data?.coverage ?? null,
       rawError: overlay?.isError ? overlay.text : undefined,
     },
     nextSteps: [
@@ -3352,6 +3996,16 @@ async function handleNanoFlowContextPackTimeoutResponse(internalId, pending) {
   const failureClass = overlaySucceeded
     ? 'base-codegraph-timeout-overlay-only'
     : 'base-codegraph-timeout';
+  const overlayFailureClass = overlaySucceeded
+    ? null
+    : (overlay?.diagnostics?.failureClass ?? 'overlay-error');
+  const failed = buildNanoFlowContextPackFailureResult({
+    text,
+    failureClass,
+    overlayAvailable: overlaySucceeded,
+    overlayFailureClass,
+    overlayGenerationId: overlay?.data?.generationId ?? null,
+  });
   const elapsedMs = Date.now() - pending.startedAtMs;
   const overlayElapsedMs = pending.overlayStartedAtMs
     ? Date.now() - pending.overlayStartedAtMs
@@ -3378,6 +4032,10 @@ async function handleNanoFlowContextPackTimeoutResponse(internalId, pending) {
     overlayRecoveryTimedOut,
     overlayRecoveryTimeoutMs,
     failureClass,
+    outcome: failed.outcome,
+    outcomeSchemaVersion: failed.outcome.schemaVersion,
+    outcomeStatus: failed.outcome.status,
+    contextUsable: failed.outcome.usableContext,
     recoveredWithOverlayOnly: overlaySucceeded,
     textBytes: Buffer.byteLength(text, 'utf8'),
     textStartsWithJson: text.trimStart().startsWith('{'),
@@ -3404,10 +4062,7 @@ async function handleNanoFlowContextPackTimeoutResponse(internalId, pending) {
   writeJsonToClient({
     jsonrpc: '2.0',
     id: pending.originalId,
-    result: {
-      content: [{ type: 'text', text }],
-      isError: !overlaySucceeded,
-    },
+    result: failed.result,
   }, {
     source: 'nanoflow-context-pack',
     contextId: pending.contextId,
@@ -3504,6 +4159,9 @@ async function handleNanoFlowOverlayToolCall(message, requestTrace) {
       result: {
         content: [{ type: 'text', text: overlay.text }],
         isError: overlay.isError,
+        _meta: {
+          nanoflowFailureClass: failureClass,
+        },
       },
     }, {
       source: 'nanoflow-overlay',
@@ -3774,6 +4432,7 @@ function runNanoFlowOverlayQuery(query, limit, options = {}) {
             error,
             timedOut,
             outputLimitExceeded,
+            stderr,
           }),
           outputMode,
           timedOut,
@@ -3794,19 +4453,26 @@ function runNanoFlowOverlayQuery(query, limit, options = {}) {
       const effectiveError = error
         ?? (timedOut ? new Error(timeoutMessage) : null)
         ?? (outputLimitExceeded ? new Error(`NanoFlow overlay query exceeded ${OVERLAY_QUERY_MAX_BUFFER_BYTES} bytes of output.`) : null);
-      const text = status === 0
+      const rawText = status === 0
         ? stdout.trim()
         : (effectiveError?.message || stderr || stdout || 'NanoFlow overlay query failed.').trim();
       let data = null;
       let jsonParseOk = null;
       let jsonParseError = null;
+      let jsonShapeError = null;
+      const emptyJsonResponse = status === 0 && jsonOutput && rawText.length === 0;
       if (status === 0 && jsonOutput) {
-        try {
-          data = JSON.parse(text);
-          jsonParseOk = true;
-        } catch (parseError) {
+        if (emptyJsonResponse) {
           jsonParseOk = false;
-          jsonParseError = errorToMessage(parseError);
+        } else {
+          try {
+            data = JSON.parse(rawText);
+            jsonParseOk = true;
+            jsonShapeError = validateOverlayJsonResponseShape(data, options);
+          } catch (parseError) {
+            jsonParseOk = false;
+            jsonParseError = errorToMessage(parseError);
+          }
         }
       }
       const failureClass = classifyOverlayQueryFailure({
@@ -3817,8 +4483,16 @@ function runNanoFlowOverlayQuery(query, limit, options = {}) {
         outputLimitExceeded,
         jsonOutput,
         jsonParseError,
+        jsonShapeError,
+        emptyJsonResponse,
+        stderr,
       });
-      const isError = status !== 0 || failureClass === 'overlay-json-parse';
+      const text = failureClass === OVERLAY_STALE_SKIP_REFRESH
+        ? OVERLAY_STALE_SKIP_REFRESH
+        : (failureClass === 'overlay-empty-response'
+            ? 'NanoFlow overlay query returned no text content.'
+            : rawText);
+      const isError = status !== 0 || failureClass !== 'success';
       const runtime = summarizeRuntimeState();
       const resultStats = summarizeOverlayToolResultStats(stdout, {
         jsonExpected: jsonOutput,
@@ -3843,6 +4517,7 @@ function runNanoFlowOverlayQuery(query, limit, options = {}) {
         jsonExpected: jsonOutput,
         jsonParseOk,
         jsonParseError,
+        jsonShapeError,
         outputMode,
         overlayFile,
         stderr: stderr.trimEnd(),
@@ -3975,6 +4650,7 @@ function buildOverlayInvestigation(failureClass) {
     'overlay-max-buffer': 'overlay subprocess produced more output than the wrapper buffer budget',
     'overlay-json-parse': 'overlay subprocess exited successfully but stdout was not valid JSON for the requested output mode',
     'overlay-process-error': 'overlay subprocess failed to spawn or emitted a process error',
+    [OVERLAY_STALE_SKIP_REFRESH]: 'skip-refresh rejected an overlay that is stale against current repository sources',
     'overlay-nonzero-exit': 'overlay subprocess exited non-zero; inspect stderrTail and profilePhases',
     'overlay-signal-exit': 'overlay subprocess exited from a signal',
     'overlay-wrapper-error': 'wrapper-side overlay handler threw before or after the subprocess result',
@@ -4381,13 +5057,13 @@ function extractOverlayProfileDiagnostics(stderrLines) {
 }
 
 function getOverlayFileDiagnostics(root) {
-  const overlayPath = path.join(root, '.codegraph', 'nanoflow-overlay.json');
-  const relativePath = path.relative(root, overlayPath).split(path.sep).join('/');
+  const currentPath = path.join(root, '.codegraph', 'nanoflow-generations', 'CURRENT.json');
+  const relativePath = path.relative(root, currentPath).split(path.sep).join('/');
   try {
-    const stat = fs.statSync(overlayPath);
+    const stat = fs.statSync(currentPath);
     const nowMs = Date.now();
     return {
-      path: overlayPath,
+      path: currentPath,
       relativePath,
       exists: true,
       bytes: stat.size,
@@ -4397,7 +5073,7 @@ function getOverlayFileDiagnostics(root) {
     };
   } catch (error) {
     return {
-      path: overlayPath,
+      path: currentPath,
       relativePath,
       exists: false,
       error: errorToMessage(error),
@@ -4689,6 +5365,13 @@ function buildContextPackRelatedSymbolLines(nodes, matches, contextSourceFileRan
   return lines;
 }
 
+function formatNanoFlowPartialContextAsMarkdown(baseText, overlayErrorText) {
+  const warning = '> **Partial NanoFlow context:** base CodeGraph context remains usable; the NanoFlow overlay is unavailable.';
+  const contextText = String(baseText ?? '');
+  const overlayErrorSection = `### NanoFlow Overlay Error\n\n${String(overlayErrorText ?? '').trim()}`;
+  return `${warning}\n\n${contextText}\n\n${overlayErrorSection}`;
+}
+
 function formatNanoFlowContextPackAsMarkdown(pack, qualityDiagnostics = null) {
   const lines = [];
   const queryData = pack.nanoFlowOverlay.rawError ? null : {
@@ -4699,17 +5382,25 @@ function formatNanoFlowContextPackAsMarkdown(pack, qualityDiagnostics = null) {
     coverage: pack.nanoFlowOverlay.coverage ?? {},
   };
   const data = pack.nanoFlowOverlay.data ?? queryData;
-  const relationshipGroups = data?.relationshipGroups ?? pack.nanoFlowOverlay.relationshipGroups ?? buildRelationshipGroupsFromMatches(pack.nanoFlowOverlay.matches ?? []);
-  const matches = data?.matches ?? pack.nanoFlowOverlay.matches ?? [];
-  const nodes = data?.nodes ?? pack.nanoFlowOverlay.nodes ?? [];
-  const codeBlocks = data?.codeBlocks ?? pack.nanoFlowOverlay.codeBlocks ?? [];
+  const sourceRankingQuery = contextPackSourceRankingQueryFor(pack.query);
+  const budgetedEvidence = limitContextPackOverlayEvidence({
+    relationshipGroups: data?.relationshipGroups
+      ?? pack.nanoFlowOverlay.relationshipGroups
+      ?? buildRelationshipGroupsFromMatches(pack.nanoFlowOverlay.matches ?? []),
+    matches: data?.matches ?? pack.nanoFlowOverlay.matches ?? [],
+    nodes: data?.nodes ?? pack.nanoFlowOverlay.nodes ?? [],
+    codeBlocks: data?.codeBlocks ?? pack.nanoFlowOverlay.codeBlocks ?? [],
+  }, pack.maxFiles, pack.maxFilesExplicit, sourceRankingQuery);
+  const relationshipGroups = budgetedEvidence.relationshipGroups;
+  const matches = budgetedEvidence.matches;
+  const nodes = budgetedEvidence.nodes;
+  const codeBlocks = budgetedEvidence.codeBlocks;
   const sourceEvidenceNodes = mergeContextPackSourceEvidenceNodes(nodes, codeBlocks);
   const coverage = data?.coverage ?? pack.nanoFlowOverlay.coverage ?? {};
   const rewrittenBaseText = rewriteContextPackExplorationHeading(
     pack.baseCodegraph.text?.trim(),
     pack.query,
   );
-  const sourceRankingQuery = contextPackSourceRankingQueryFor(pack.query);
   const sourceVisibilityQuery = pack.query;
   const baseSectionFilteringResult = sanitizeContextPackBaseMarkdownSections(
     rewrittenBaseText,
@@ -4722,6 +5413,29 @@ function formatNanoFlowContextPackAsMarkdown(pack, qualityDiagnostics = null) {
     qualityDiagnostics.baseSectionFiltering = baseSectionFilteringResult.diagnostics;
     qualityDiagnostics.baseTextDiagnostics = summarizeContextPackMarkdownText(baseText);
     qualityDiagnostics.rawBaseTextDiagnostics = summarizeContextPackMarkdownText(rewrittenBaseText);
+  }
+  if (isPureNoHitContextPack({
+    baseText,
+    baseIsError: pack.baseCodegraph.isError,
+    overlayIsError: pack.nanoFlowOverlay.isError,
+    matches,
+    nodes,
+    codeBlocks,
+    relationshipGroups,
+  })) {
+    return baseText || `## Exploration: ${pack.query}\n\nNo code context matched this query.`;
+  }
+  if (isWeakExplicitNoHitContextPack({
+    query: pack.query,
+    baseText,
+    baseIsError: pack.baseCodegraph.isError,
+    overlayIsError: pack.nanoFlowOverlay.isError,
+    matches,
+    nodes,
+    codeBlocks,
+    relationshipGroups,
+  })) {
+    return `## Exploration: ${pack.query}\n\nNo code context matched this query.`;
   }
   const sourceVisibilityQueryTerms = queryTokens(String(sourceVisibilityQuery ?? '').toLowerCase());
   const overlaySourceFileRankEntries = prioritizeContextPackPreferredSymbolEvidence(
@@ -4750,7 +5464,7 @@ function formatNanoFlowContextPackAsMarkdown(pack, qualityDiagnostics = null) {
     matches,
     overlaySourceFileRanks,
     pack.query,
-  );
+  ).slice(0, normalizeContextPackFileBudget(pack.maxFiles, pack.maxFilesExplicit));
   const injectedBaseText = prioritizedBaseText
     ? injectContextPackOverlaySourceBlocks(prioritizedBaseText, overlaySourceBlocks)
     : '';
@@ -4850,12 +5564,12 @@ function formatNanoFlowContextPackAsMarkdown(pack, qualityDiagnostics = null) {
   );
   const finalSourceFileRanks = new Map(finalSourceFileRankEntries
     .map((entry, index) => [entry.normalizedFilePath, index]));
-  const finalText = prioritizeContextPackBaseSourceBlocks(
+  const finalText = limitContextPackMarkdownSourceFiles(prioritizeContextPackBaseSourceBlocks(
     renderedText,
     finalSourceFileRanks,
     pack.query,
     finalSourceFileRankEntries,
-  );
+  ), normalizeContextPackFileBudget(pack.maxFiles, pack.maxFilesExplicit));
   if (qualityDiagnostics && typeof qualityDiagnostics === 'object') {
     qualityDiagnostics.sourceSelection = summarizeContextPackSourceSelection({
       rawQuery: pack.query,
@@ -4873,6 +5587,189 @@ function formatNanoFlowContextPackAsMarkdown(pack, qualityDiagnostics = null) {
     });
   }
   return finalText;
+}
+
+function normalizeContextPackFileBudget(value, explicit) {
+  if (explicit !== true) return Number.MAX_SAFE_INTEGER;
+  return Number.isInteger(value) && value > 0 ? value : 1;
+}
+
+function limitContextPackOverlayEvidence(evidence, maxFilesValue, maxFilesExplicit, rawQuery) {
+  if (maxFilesExplicit !== true) {
+    return {
+      relationshipGroups: evidence.relationshipGroups ?? {},
+      matches: Array.isArray(evidence.matches) ? evidence.matches : [],
+      nodes: Array.isArray(evidence.nodes) ? evidence.nodes : [],
+      codeBlocks: Array.isArray(evidence.codeBlocks) ? evidence.codeBlocks : [],
+    };
+  }
+  const maxFiles = normalizeContextPackFileBudget(maxFilesValue, maxFilesExplicit);
+  const nodes = Array.isArray(evidence.nodes) ? evidence.nodes : [];
+  const codeBlocks = Array.isArray(evidence.codeBlocks) ? evidence.codeBlocks : [];
+  const matches = Array.isArray(evidence.matches) ? evidence.matches : [];
+  const rankedPaths = rankContextPackSourceFileEntries(
+    mergeContextPackSourceEvidenceNodes(nodes, codeBlocks),
+    rawQuery,
+    matches,
+  ).map(entry => entry.filePath);
+  const fallbackPaths = [
+    ...nodes.map(node => node?.filePath),
+    ...codeBlocks.map(block => block?.filePath),
+    ...matches.map(match => match?.file ?? match?.filePath ?? match?.item?.filePath),
+  ];
+  const requestedRelationEndpointPaths = contextPackRequestedRelationEndpointPaths(evidence, rawQuery);
+  const orderedPaths = [];
+  const seenPaths = new Set();
+  for (const filePath of [...requestedRelationEndpointPaths, ...rankedPaths, ...fallbackPaths]) {
+    const normalized = normalizeSearchPath(filePath);
+    if (!normalized || seenPaths.has(normalized)) continue;
+    seenPaths.add(normalized);
+    orderedPaths.push(normalized);
+  }
+  const allowedPaths = new Set(orderedPaths.slice(0, maxFiles));
+  if (allowedPaths.size === 0) {
+    return {
+      relationshipGroups: {},
+      matches: [],
+      nodes: [],
+      codeBlocks: [],
+    };
+  }
+
+  const belongsToAllowedFile = item => {
+    const filePath = item?.filePath ?? item?.file ?? item?.item?.filePath;
+    return allowedPaths.has(normalizeSearchPath(filePath));
+  };
+  const budgetedNodes = nodes.filter(belongsToAllowedFile);
+  const endpointKeys = new Set(budgetedNodes.flatMap(node => [
+    node?.id,
+    node?.name,
+    node?.qualifiedName,
+  ].filter(Boolean)));
+  const relationshipGroups = Object.fromEntries(Object.entries(evidence.relationshipGroups ?? {})
+    .map(([kind, rawEdges]) => [
+      kind,
+      (Array.isArray(rawEdges) ? rawEdges : []).filter(edge => (
+        endpointKeys.has(edge?.source) && endpointKeys.has(edge?.target)
+      )),
+    ])
+    .filter(([, edges]) => edges.length > 0));
+
+  return {
+    relationshipGroups,
+    matches: matches.filter(belongsToAllowedFile),
+    nodes: budgetedNodes,
+    codeBlocks: codeBlocks.filter(belongsToAllowedFile),
+  };
+}
+
+function contextPackRequestedRelationEndpointPaths(evidence, rawQuery = '') {
+  const queryTerms = queryTokens(String(rawQuery ?? '').toLowerCase());
+  const querySegments = new Set(contextPackSearchSignalSegments(queryTerms));
+  const endpointKeys = new Set();
+  for (const rawEdges of Object.values(evidence?.relationshipGroups ?? {})) {
+    for (const edge of Array.isArray(rawEdges) ? rawEdges : []) {
+      if (!contextPackQueryRequestsOverlayRelation(edge?.relation ?? edge?.metadata?.relation, queryTerms, querySegments)) {
+        continue;
+      }
+      for (const endpoint of [edge?.source, edge?.target]) {
+        if (endpoint) endpointKeys.add(String(endpoint));
+      }
+    }
+  }
+  if (endpointKeys.size === 0) return [];
+
+  const allowLowValueEndpoint = queryMentionsTests(rawQuery);
+  return unique((Array.isArray(evidence?.nodes) ? evidence.nodes : [])
+    .filter(node => [node?.id, node?.name, node?.qualifiedName]
+      .some(endpoint => endpoint && endpointKeys.has(String(endpoint))))
+    .map(node => normalizeSearchPath(node?.filePath))
+    .filter(filePath => filePath && (
+      allowLowValueEndpoint
+      || contextPackSourceFileLowValuePenalty(filePath, queryTerms, rawQuery) <= 0
+      || queryExplicitlyRequestsContextPackSourcePath(filePath, queryTerms)
+    )));
+}
+
+function contextPackQueryRequestsOverlayRelation(relationValue, queryTerms, querySegments) {
+  const relation = normalizeContextPackResourceRelation(relationValue);
+  if (!relation) return false;
+  if (queryTerms.some(term => normalizeContextPackResourceRelation(term) === relation)) {
+    return true;
+  }
+  const relationSegments = splitSearchSignalSegments(relation)
+    .map(segment => segment.toLowerCase())
+    .filter(segment => segment.length >= 2);
+  return relationSegments.length > 1 && relationSegments.every(segment => querySegments.has(segment));
+}
+
+function isPureNoHitContextPack({
+  baseText,
+  baseIsError,
+  overlayIsError,
+  matches,
+  nodes,
+  codeBlocks,
+  relationshipGroups,
+}) {
+  if (baseIsError || overlayIsError) return false;
+  const hasOverlayRelationships = Object.values(relationshipGroups ?? {})
+    .some(edges => Array.isArray(edges) && edges.length > 0);
+  if (matches.length > 0 || nodes.length > 0 || codeBlocks.length > 0 || hasOverlayRelationships) {
+    return false;
+  }
+  return !baseText || /(?:found\s+0\s+symbols|no\s+(?:matching\s+)?(?:symbols|results|code context)|nothing\s+matched)/i.test(baseText);
+}
+
+function isWeakExplicitNoHitContextPack({
+  query,
+  baseText,
+  baseIsError,
+  overlayIsError,
+  matches,
+  nodes,
+  codeBlocks,
+  relationshipGroups,
+}) {
+  if (baseIsError || overlayIsError || !baseText) return false;
+  const hasOverlayRelationships = Object.values(relationshipGroups ?? {})
+    .some(edges => Array.isArray(edges) && edges.length > 0);
+  if (matches.length > 0 || nodes.length > 0 || codeBlocks.length > 0 || hasOverlayRelationships) {
+    return false;
+  }
+
+  const explicitTerms = unique([
+    ...explicitContextPackQueryTerms(query),
+    ...queryTokens(String(query ?? '').toLowerCase()).filter(isOpaqueNoHitProbeTerm),
+  ]);
+  if (explicitTerms.length === 0) return false;
+
+  const evidenceText = String(baseText)
+    .split(/\r?\n/)
+    .filter(line => !/^\s*(?:##\s+|\*\*)?Exploration\b/i.test(line))
+    .join('\n')
+    .toLowerCase();
+  return explicitTerms.every(term => !evidenceText.includes(term));
+}
+
+function isOpaqueNoHitProbeTerm(term) {
+  const value = String(term ?? '');
+  return value.length >= 12
+    && /[_-]/.test(value)
+    && /\d/.test(value);
+}
+
+function limitContextPackMarkdownSourceFiles(text, maxFiles) {
+  if (!text) return text;
+  const sourceSection = findContextPackSourceSection(text);
+  if (!sourceSection || sourceSection.blocksStart < 0) return text;
+  const chunks = splitContextPackSourceBlockChunks(text.slice(sourceSection.blocksStart, sourceSection.end));
+  if (chunks.length <= maxFiles) return text;
+  return [
+    text.slice(0, sourceSection.blocksStart),
+    joinContextPackSourceBlockChunks(chunks.slice(0, maxFiles)),
+    text.slice(sourceSection.end),
+  ].join('');
 }
 
 function prioritizeContextPackBaseSourceBlocks(baseText, sourceFileRanks, rawQuery = '', rankedEntries = []) {
@@ -5025,6 +5922,28 @@ function contextPackFocusedSourceReorderNodeKind(kind) {
 }
 
 function shouldFilterContextPackBaseSourceBlocks(rawQuery, orderedEntries, rankedEntries = []) {
+  const specializedSourceScope = contextPackSpecializedMaintenanceSourceScopeFor(rawQuery);
+  if (specializedSourceScope) {
+    const scopedVisibleEntries = orderedEntries.filter(entry => (
+      contextPackSourcePathMatchesSpecializedMaintenanceScope(
+        extractContextPackSourceBlockFile(entry.chunk),
+        specializedSourceScope,
+      )
+    ));
+    const hasScopedRankedAlternative = rankedEntries.some(entry => (
+      contextPackSourcePathMatchesSpecializedMaintenanceScope(
+        entry?.filePath ?? entry?.normalizedFilePath,
+        specializedSourceScope,
+      )
+    ));
+    if (
+      hasScopedRankedAlternative
+      && scopedVisibleEntries.length > 0
+      && scopedVisibleEntries.length < orderedEntries.length
+    ) {
+      return true;
+    }
+  }
   if (orderedEntries.length <= 1) return false;
   if (queryMentionsCodegraphTooling(rawQuery) && orderedEntries.some(entry => {
     const filePath = extractContextPackSourceBlockFile(entry.chunk);
@@ -5051,6 +5970,24 @@ function filterContextPackBaseSourceBlockEntries(orderedEntries, rankedEntries =
   const queryTerms = queryTokens(String(rawQuery ?? '').toLowerCase());
   const sourceFileLowValuePenalty = (filePath) => contextPackSourceFileLowValuePenalty(filePath, queryTerms, rawQuery);
   const issueRegistryFocusedQuery = contextPackIssueRegistryQueryFor(rawQuery, queryTerms);
+  const specializedSourceScope = contextPackSpecializedMaintenanceSourceScopeFor(rawQuery);
+  if (specializedSourceScope) {
+    const hasScopedRankedAlternative = rankedEntries.some(entry => (
+      contextPackSourcePathMatchesSpecializedMaintenanceScope(
+        entry?.filePath ?? entry?.normalizedFilePath,
+        specializedSourceScope,
+      )
+    ));
+    const scopedEntries = orderedEntries.filter(entry => (
+      contextPackSourcePathMatchesSpecializedMaintenanceScope(
+        extractContextPackSourceBlockFile(entry.chunk),
+        specializedSourceScope,
+      )
+    ));
+    if (hasScopedRankedAlternative && scopedEntries.length > 0) {
+      return scopedEntries.slice(0, CONTEXT_PACK_BASE_SOURCE_FILTER_LIMIT);
+    }
+  }
   const firstPreferredRankedEntry = prioritizeContextPackPreferredSymbolEvidence(
     rankedEntries,
     rawQuery,
@@ -5516,13 +6453,19 @@ function contextPackSourceEntryHasExplicitSymbolEvidence(entry, rawQuery = '') {
 }
 
 function contextPackSourceEntryHasPreferredSymbolEvidence(entry, rawQuery = '', precomputedQueryTerms = null) {
+  const filePath = entry?.filePath ?? entry?.normalizedFilePath;
+  if (
+    queryMentionsCodegraphRuntimeDiagnostics(rawQuery)
+    && normalizeSearchPath(filePath) === 'scripts/codegraph-nanoflow-mcp-stdio.cjs'
+  ) {
+    return true;
+  }
   if (!contextPackSourceEntryHasExplicitSymbolEvidence(entry, rawQuery)) {
     return false;
   }
   const queryTerms = Array.isArray(precomputedQueryTerms)
     ? precomputedQueryTerms
     : queryTokens(String(rawQuery ?? '').toLowerCase());
-  const filePath = entry?.filePath ?? entry?.normalizedFilePath;
   if (isCodegraphToolingSourcePath(filePath)) {
     return true;
   }
@@ -5568,10 +6511,16 @@ function prioritizeContextPackPreferredSymbolEvidence(entries, rawQuery = '', qu
 }
 
 function contextPackPreferredSymbolEvidenceTier(entry, rawQuery = '', queryTerms = null) {
+  const filePath = entry?.filePath ?? entry?.normalizedFilePath;
+  if (
+    queryMentionsCodegraphRuntimeDiagnostics(rawQuery)
+    && normalizeSearchPath(filePath) === 'scripts/codegraph-nanoflow-mcp-stdio.cjs'
+  ) {
+    return 4;
+  }
   if (!contextPackSourceEntryHasExplicitSymbolEvidence(entry, rawQuery)) {
     return 0;
   }
-  const filePath = entry?.filePath ?? entry?.normalizedFilePath;
   if (isCodegraphToolingSourcePath(filePath)) {
     return 3;
   }
@@ -5664,6 +6613,15 @@ function summarizeContextPackSourceOrdering(text, rawQuery = '', nodes = [], mat
     rankedOverlayFileEntries,
   );
   const baseSourceReorderAllowed = baseSourceReorderReason !== 'native-order-preserved';
+  const topRankedOverlayDecision = summarizeContextPackTopRankedOverlayDecision({
+    rawEntry: rawTopRankedOverlayEntry,
+    selectedEntry: topRankedOverlayEntry,
+    rawQuery,
+    sourceFiles,
+    selectionReason: topRankedOverlayFileSelectionReason,
+    baseSourceReorderAllowed,
+    baseSourceReorderReason,
+  });
   return {
     sourceRankingQuery,
     sourceVisibilityQuery,
@@ -5714,20 +6672,8 @@ function summarizeContextPackSourceOrdering(text, rawQuery = '', nodes = [], mat
     }),
     topRankedOverlayFile,
     topRankedOverlayFileSelectionReason,
-    topRankedOverlayDecision: summarizeContextPackTopRankedOverlayDecision({
-      rawEntry: rawTopRankedOverlayEntry,
-      selectedEntry: topRankedOverlayEntry,
-      rawQuery,
-      sourceFiles,
-      selectionReason: topRankedOverlayFileSelectionReason,
-      baseSourceReorderAllowed,
-      baseSourceReorderReason,
-    }),
-    topRankedOverlayFileSkippedLowValue: Boolean(
-      rawTopRankedOverlayFile
-      && topRankedOverlayFile
-      && rawTopRankedOverlayFile !== topRankedOverlayFile
-    ),
+    topRankedOverlayDecision,
+    topRankedOverlayFileSkippedLowValue: topRankedOverlayDecision.skippedLowValue === true,
     topRankedOverlayFileVisibleIndex,
     firstSourceBlockIsTopRankedOverlayFile: Boolean(topRankedOverlayFile && topRankedOverlayFileVisibleIndex === 0),
     topRankedOverlayFileMissing: Boolean(topRankedOverlayFile && topRankedOverlayFileVisibleIndex < 0),
@@ -5903,6 +6849,13 @@ function contextPackSourceSelectionFileDetail(filePath, rawQuery, queryTerms, ra
 }
 
 function contextPackSourceSelectionFilterReason(filePath, rawQuery, queryTerms, rankedEntry = null) {
+  const specializedSourceScope = contextPackSpecializedMaintenanceSourceScopeFor(rawQuery);
+  if (
+    specializedSourceScope
+    && !contextPackSourcePathMatchesSpecializedMaintenanceScope(filePath, specializedSourceScope)
+  ) {
+    return 'specialized-maintenance-unrelated-source';
+  }
   if (
     queryMentionsCodegraphToolingSourcePollution(rawQuery)
     && isCodegraphToolingPollutionSourcePath(filePath)
@@ -5962,7 +6915,10 @@ function contextPackVisibleSourceFileDetails(sourceFiles, rankedOverlayFileEntri
 
 function selectContextPackDiagnosticTopRankedOverlayEntry(entries, rawQuery = '', sourceEvidenceEntries = []) {
   const queryTerms = queryTokens(String(rawQuery ?? '').toLowerCase());
-  const preferredEntry = prioritizeContextPackPreferredSymbolEvidence(entries, rawQuery, queryTerms).find(entry => (
+  const preferredCandidates = sourceEvidenceEntries.length > 0
+    ? sourceEvidenceEntries
+    : entries;
+  const preferredEntry = prioritizeContextPackPreferredSymbolEvidence(preferredCandidates, rawQuery, queryTerms).find(entry => (
     contextPackSourceEntryHasPreferredSymbolEvidence(entry, rawQuery, queryTerms)
   ));
   if (preferredEntry) {
@@ -6070,12 +7026,15 @@ function summarizeContextPackTopRankedOverlayDecision({
   const queryTerms = queryTokens(String(rawQuery ?? '').toLowerCase());
   const rawFile = normalizeSearchPath(rawEntry?.filePath ?? rawEntry?.normalizedFilePath);
   const selectedFile = normalizeSearchPath(selectedEntry?.filePath ?? selectedEntry?.normalizedFilePath);
-  const rawLowValuePenalty = rawFile
-    ? contextPackSourceFileLowValuePenalty(rawFile, queryTerms, rawQuery)
-    : null;
-  const selectedLowValuePenalty = selectedFile
-    ? contextPackSourceFileLowValuePenalty(selectedFile, queryTerms, rawQuery)
-    : null;
+  const rawDecisionEntry = contextPackTopRankedOverlayDecisionEntry(rawEntry, rawQuery, sourceFiles, queryTerms);
+  const selectedDecisionEntry = contextPackTopRankedOverlayDecisionEntry(selectedEntry, rawQuery, sourceFiles, queryTerms);
+  const rawLowValuePenalty = rawDecisionEntry?.lowValuePenalty ?? null;
+  const selectedLowValuePenalty = selectedDecisionEntry?.lowValuePenalty ?? null;
+  const rawCandidateSkippedLowValue = Number(rawLowValuePenalty ?? 0) > 0
+    && Number(selectedLowValuePenalty ?? 0) <= 0;
+  const selectedOverlayPreferredPenaltyWaived = contextPackSourceFileEntryHasOverlayEvidence(selectedEntry)
+    && Number(selectedDecisionEntry?.rawLowValuePenalty ?? 0) > 0
+    && Number(selectedLowValuePenalty ?? 0) <= 0;
   const result = {
     rawFile: rawFile || null,
     selectedFile: selectedFile || null,
@@ -6094,16 +7053,15 @@ function summarizeContextPackTopRankedOverlayDecision({
       rawFile
       && selectedFile
       && rawFile !== selectedFile
-      && Number(rawLowValuePenalty ?? 0) > 0
-      && Number(selectedLowValuePenalty ?? 0) <= 0
+      && (rawCandidateSkippedLowValue || selectedOverlayPreferredPenaltyWaived)
     ),
     baseSourceReorderAllowed,
     baseSourceReorderReason,
     queryMentionsTests: queryMentionsTests(rawQuery),
     queryMentionsCodegraphDedupMaintenance: queryMentionsCodegraphDedupMaintenance(rawQuery),
     queryMentionsCodegraphTooling: queryMentionsCodegraphTooling(rawQuery),
-    rawEntry: contextPackTopRankedOverlayDecisionEntry(rawEntry, rawQuery, sourceFiles, queryTerms),
-    selectedEntry: contextPackTopRankedOverlayDecisionEntry(selectedEntry, rawQuery, sourceFiles, queryTerms),
+    rawEntry: rawDecisionEntry,
+    selectedEntry: selectedDecisionEntry,
   };
   for (const key of Object.keys(result)) {
     if (result[key] === undefined || result[key] === null) {
@@ -6122,6 +7080,10 @@ function contextPackTopRankedOverlayDecisionEntry(entry, rawQuery = '', sourceFi
   if (!filePath) {
     return null;
   }
+  const rawLowValuePenalty = Number.isFinite(Number(entry.lowValuePenalty))
+    ? Number(entry.lowValuePenalty)
+    : contextPackSourceFileLowValuePenalty(filePath, terms, rawQuery);
+  const preferredSymbolEvidence = contextPackSourceEntryHasPreferredSymbolEvidence(entry, rawQuery, terms);
   const result = {
     filePath,
     visibleIndex: sourceFiles.indexOf(filePath),
@@ -6134,13 +7096,13 @@ function contextPackTopRankedOverlayDecisionEntry(entry, rawQuery = '', sourceFi
     symbolScore: entry.symbolScore,
     codeBlockScore: entry.codeBlockScore,
     sourceBlockScore: entry.sourceBlockScore,
-    lowValuePenalty: contextPackSourceFileLowValuePenalty(filePath, terms, rawQuery),
-    rawLowValuePenalty: entry.lowValuePenalty,
+    lowValuePenalty: preferredSymbolEvidence ? 0 : rawLowValuePenalty,
+    rawLowValuePenalty,
     pathClassLowValue: isLowValueContextPackSourcePath(filePath),
     codegraphToolingSource: isCodegraphToolingSourcePath(filePath),
     dedupMaintenanceSource: isCodegraphDedupMaintenanceSourcePath(filePath),
     explicitSymbolEvidence: contextPackSourceEntryHasExplicitSymbolEvidence(entry, rawQuery),
-    preferredSymbolEvidence: contextPackSourceEntryHasPreferredSymbolEvidence(entry, rawQuery, terms),
+    preferredSymbolEvidence,
     explicitFileRequested: queryExplicitlyRequestsContextPackFilePath(filePath, terms),
     explicitSourcePathRequested: queryExplicitlyRequestsContextPackSourcePath(filePath, terms),
   };
@@ -7093,10 +8055,20 @@ function contextPackExploreQueryFor(rawQuery = '') {
 
   const querySegments = contextPackSearchSignalSegments(queryTerms);
   if (queryMentionsCodegraphDedupMaintenance(query, querySegments)) {
-    return query;
+    return CODEGRAPH_DEDUP_MAINTENANCE_FOCUSED_QUERY;
+  }
+  const specializedMaintenanceQuery = contextPackSpecializedMaintenanceQueryFor(query, querySegments);
+  if (specializedMaintenanceQuery) {
+    return specializedMaintenanceQuery;
   }
   if (queryMentionsCodegraphToolingQuality(query, querySegments)) {
     return CONTEXT_PACK_TOOLING_QUALITY_FOCUSED_QUERY;
+  }
+  if (queryMentionsCodegraphRuntimeDiagnostics(query, querySegments)) {
+    return unique([
+      ...CONTEXT_PACK_TOOLING_RUNTIME_DIAGNOSTICS_FOCUSED_QUERY.split(/\s+/),
+      ...explicitContextPackQueryTerms(query),
+    ]).join(' ');
   }
   const hasToolingIntent = querySegments.some(segment => CONTEXT_PACK_OVERLAY_TOOLING_INTENT_SEGMENTS.has(segment));
   const hasToolingOutputNoise = querySegments.some(segment => (
@@ -7142,10 +8114,20 @@ function contextPackFocusedQueryFor(rawQuery = '') {
 
   const querySegments = contextPackSearchSignalSegments(queryTerms);
   if (queryMentionsCodegraphDedupMaintenance(query, querySegments)) {
-    return query;
+    return CODEGRAPH_DEDUP_MAINTENANCE_FOCUSED_QUERY;
+  }
+  const specializedMaintenanceQuery = contextPackSpecializedMaintenanceQueryFor(query, querySegments);
+  if (specializedMaintenanceQuery) {
+    return specializedMaintenanceQuery;
   }
   if (queryMentionsCodegraphToolingQuality(query, querySegments)) {
     return CONTEXT_PACK_TOOLING_QUALITY_FOCUSED_QUERY;
+  }
+  if (queryMentionsCodegraphRuntimeDiagnostics(query, querySegments)) {
+    return unique([
+      ...CONTEXT_PACK_TOOLING_RUNTIME_DIAGNOSTICS_FOCUSED_QUERY.split(/\s+/),
+      ...explicitContextPackQueryTerms(query),
+    ]).join(' ');
   }
   const hasToolingIntent = querySegments.some(segment => CONTEXT_PACK_OVERLAY_TOOLING_INTENT_SEGMENTS.has(segment));
   const noiseSegments = new Set(CONTEXT_PACK_OVERLAY_QUERY_NOISE_SEGMENTS);
@@ -7176,12 +8158,7 @@ function contextPackFocusedQueryFor(rawQuery = '') {
 function contextPackSourceRankingQueryFor(rawQuery = '') {
   const query = String(rawQuery ?? '').trim();
   if (!query) return query;
-  // dedup 维护查询保留原文（helper 符号名就是排序信号）；其余工具查询包括
-  // pollution 诊断都用聚焦 query 排序，避免 runtime/error/logging 这类
-  // 泛化诊断词把业务符号顶到 wrapper 工具源码前面。
-  return queryMentionsCodegraphDedupMaintenance(query)
-    ? query
-    : contextPackFocusedQueryFor(query) || query;
+  return contextPackFocusedQueryFor(query) || query;
 }
 
 function rewriteContextPackExplorationHeading(text, query) {
@@ -7208,6 +8185,17 @@ function sanitizeContextPackBaseMarkdownSections(text, rawQuery = '', nodes = []
   const queryTerms = queryTokens(String(rawQuery ?? '').toLowerCase());
   const rankedEntries = rankContextPackSourceFileEntries(nodes, contextPackSourceRankingQueryFor(rawQuery), matches);
   const baseSourceBlockFiles = extractContextPackSourceBlockFiles(text);
+  const specializedSourceScope = contextPackSpecializedMaintenanceSourceScopeFor(rawQuery);
+  const hasSpecializedSourceAlternative = Boolean(specializedSourceScope) && (
+    rankedEntries.some(entry => contextPackSourcePathMatchesSpecializedMaintenanceScope(
+      entry?.filePath ?? entry?.normalizedFilePath,
+      specializedSourceScope,
+    ))
+    || baseSourceBlockFiles.some(filePath => contextPackSourcePathMatchesSpecializedMaintenanceScope(
+      filePath,
+      specializedSourceScope,
+    ))
+  );
   const hasCleanAlternative = rankedEntries.some(entry => (
     contextPackSourceFileLowValuePenalty(entry.filePath ?? entry.normalizedFilePath, queryTerms, rawQuery) <= 0
     || contextPackSourceEntryHasPreferredSymbolEvidence(entry, rawQuery, queryTerms)
@@ -7247,6 +8235,8 @@ function sanitizeContextPackBaseMarkdownSections(text, rawQuery = '', nodes = []
         queryTerms,
         nodesByName,
         hasCleanAlternative,
+        specializedSourceScope,
+        hasSpecializedSourceAlternative,
       );
       if (decision.filtered) {
         recordContextPackBaseSectionFilteredLine(diagnostics, decision);
@@ -7282,6 +8272,7 @@ function classifyContextPackBaseMarkdownHeading(line) {
   if (/^(?:#{2,4}\s+|\*\*)Blast radius\b/i.test(trimmed)) return 'Blast radius';
   if (/^(?:#{2,4}\s+Relationships\b|\*\*Relationships\*\*$)/i.test(trimmed)) return 'Relationships';
   if (/^(?:#{2,4}\s+Related Symbols\b|\*\*Related Symbols\*\*$)/i.test(trimmed)) return 'Related Symbols';
+  if (/^(?:#{2,4}\s+|\*\*)Not shown above\b/i.test(trimmed)) return 'Not shown';
   if (/^#{2,4}\s+/.test(trimmed)) return 'Other';
   if (/^\*\*[^*\n]+\*\*$/.test(trimmed) && !/^\*\*(?:calls|references|contains|type_of):\*\*$/i.test(trimmed)) {
     return 'Other';
@@ -7296,6 +8287,8 @@ function contextPackBaseMetadataLineFilterDecision(
   queryTerms,
   nodesByName,
   hasCleanAlternative,
+  specializedSourceScope = null,
+  hasSpecializedSourceAlternative = false,
 ) {
   const lineText = String(line ?? '');
   const explicitFilePath = extractSearchPathFromText(lineText);
@@ -7305,6 +8298,9 @@ function contextPackBaseMetadataLineFilterDecision(
       rawQuery,
       queryTerms,
       hasCleanAlternative,
+      'path',
+      specializedSourceScope,
+      hasSpecializedSourceAlternative,
     );
     if (pathDecision.filtered) {
       return {
@@ -7324,6 +8320,8 @@ function contextPackBaseMetadataLineFilterDecision(
       queryTerms,
       hasCleanAlternative,
       'symbol',
+      specializedSourceScope,
+      hasSpecializedSourceAlternative,
     );
     if (pathDecision.filtered) {
       return {
@@ -7335,7 +8333,13 @@ function contextPackBaseMetadataLineFilterDecision(
     }
   }
 
-  const textNoiseReason = contextPackBaseMetadataTextNoiseReason(lineText, rawQuery, hasCleanAlternative);
+  const textNoiseReason = contextPackBaseMetadataTextNoiseReason(
+    lineText,
+    rawQuery,
+    hasCleanAlternative,
+    specializedSourceScope,
+    hasSpecializedSourceAlternative,
+  );
   if (textNoiseReason) {
     return {
       filtered: true,
@@ -7355,10 +8359,38 @@ function contextPackBaseMetadataPathFilterDecision(
   queryTerms,
   hasCleanAlternative,
   source = 'path',
+  specializedSourceScope = null,
+  hasSpecializedSourceAlternative = false,
 ) {
   if (!hasCleanAlternative) return { filtered: false };
   if (queryExplicitlyRequestsContextPackFilePath(filePath, queryTerms)) return { filtered: false };
   if (queryExplicitlyRequestsContextPackSourcePath(filePath, queryTerms)) return { filtered: false };
+  if (
+    hasSpecializedSourceAlternative
+    && specializedSourceScope
+    && !contextPackSourcePathMatchesSpecializedMaintenanceScope(filePath, specializedSourceScope)
+  ) {
+    return {
+      filtered: true,
+      reason: source === 'symbol'
+        ? 'specialized-maintenance-unrelated-symbol'
+        : 'specialized-maintenance-unrelated-source',
+      filePath: normalizeSearchPath(filePath),
+      specializedSourceScope: specializedSourceScope.id,
+    };
+  }
+  if (
+    queryMentionsCodegraphDedupMaintenance(rawQuery)
+    && !isCodegraphDedupMaintenanceSourcePath(filePath)
+  ) {
+    return {
+      filtered: true,
+      reason: source === 'symbol'
+        ? 'dedup-maintenance-unrelated-symbol'
+        : 'dedup-maintenance-unrelated-source',
+      filePath: normalizeSearchPath(filePath),
+    };
+  }
   if (queryMentionsCodegraphTooling(rawQuery) && isCodegraphToolingSourcePath(filePath)) {
     return { filtered: false };
   }
@@ -7405,7 +8437,20 @@ function extractContextPackBaseRelationshipSymbols(line) {
     .filter(Boolean);
 }
 
-function contextPackBaseMetadataTextNoiseReason(line, rawQuery, hasCleanAlternative) {
+function contextPackBaseMetadataTextNoiseReason(
+  line,
+  rawQuery,
+  hasCleanAlternative,
+  specializedSourceScope = null,
+  hasSpecializedSourceAlternative = false,
+) {
+  if (
+    hasSpecializedSourceAlternative
+    && specializedSourceScope
+    && !contextPackMetadataLineMatchesSpecializedMaintenanceScope(line, specializedSourceScope)
+  ) {
+    return 'specialized-maintenance-unrelated-symbol';
+  }
   if (!hasCleanAlternative || !queryMentionsCodegraphToolingSourcePollution(rawQuery)) {
     return '';
   }
@@ -7762,20 +8807,143 @@ function queryMentionsCodegraphToolingQuality(query, precomputedSegments = null)
     ].some(segment => segmentSet.has(segment)));
 }
 
+function contextPackSpecializedMaintenanceQueryFor(query, precomputedSegments = null) {
+  return classifyContextPackSpecializedMaintenanceQuery(query, precomputedSegments).focusedQuery;
+}
+
+function classifyContextPackSpecializedMaintenanceQuery(query, precomputedSegments = null) {
+  const segments = Array.isArray(precomputedSegments)
+    ? precomputedSegments
+    : contextPackSearchSignalSegments(queryTokens(query));
+  return classifySpecializedMaintenanceQuery({
+    segments,
+    codegraphTooling: queryMentionsCodegraphTooling(query),
+    context7Documentation: queryMentionsContext7Documentation(query),
+  });
+}
+
+function contextPackSpecializedMaintenanceSourceScopeFor(query, precomputedClassification = null) {
+  if (queryMentionsCodegraphDedupMaintenance(query)) {
+    return null;
+  }
+  const classification = precomputedClassification
+    ?? classifyContextPackSpecializedMaintenanceQuery(query);
+  if (classification.strictNativeOutputMaintenance) {
+    return {
+      id: 'strict-native-output-maintenance',
+      exactPaths: ['scripts/query-codegraph-nanoflow-overlay.mjs'],
+      pathPrefixes: [],
+      metadataSignals: [
+        'query-codegraph-nanoflow-overlay',
+        'formatstrictnativemarkdown',
+        'formatnativemarkdown',
+        'buildstrictnativemarkdownrelationshipgroups',
+        'nativejsonedgeline',
+      ],
+    };
+  }
+  if (classification.context7Maintenance) {
+    return {
+      id: 'context7-maintenance',
+      exactPaths: [],
+      pathPrefixes: ['docs/context7/'],
+      metadataSignals: ['context7', 'docs/context7/'],
+    };
+  }
+  if (classification.toolingFixtureQuality) {
+    return {
+      id: 'tooling-fixture-quality',
+      exactPaths: [
+        'src/tests/scripts/codegraph-nanoflow-overlay-mcp-context-quality-tooling-fixtures.helpers.ts',
+      ],
+      pathPrefixes: [],
+      metadataSignals: [
+        'codegraph-nanoflow-overlay-mcp-context-quality-tooling-fixtures',
+        'buildfakecodegraphexplorescript',
+        'writefakecodegraphexplorescript',
+      ],
+    };
+  }
+  return null;
+}
+
+function contextPackSourcePathMatchesSpecializedMaintenanceScope(filePath, sourceScope) {
+  const normalizedFilePath = normalizeSearchPath(filePath);
+  if (!normalizedFilePath || !sourceScope) return false;
+  return (sourceScope.exactPaths ?? []).some(candidate => normalizedFilePath === normalizeSearchPath(candidate))
+    || (sourceScope.pathPrefixes ?? []).some(prefix => (
+      normalizedFilePath.startsWith(normalizeSearchPath(prefix))
+    ));
+}
+
+function contextPackMetadataLineMatchesSpecializedMaintenanceScope(line, sourceScope) {
+  const normalizedLine = String(line ?? '').replace(/\\/g, '/').toLowerCase();
+  if (!normalizedLine || !sourceScope) return false;
+  return (sourceScope.exactPaths ?? []).some(candidate => normalizedLine.includes(normalizeSearchPath(candidate)))
+    || (sourceScope.pathPrefixes ?? []).some(prefix => normalizedLine.includes(normalizeSearchPath(prefix)))
+    || (sourceScope.metadataSignals ?? []).some(signal => normalizedLine.includes(String(signal).toLowerCase()));
+}
+
+function queryMentionsCodegraphRuntimeDiagnostics(query, precomputedSegments = null) {
+  if (!queryMentionsCodegraphTooling(query)) return false;
+  const segments = Array.isArray(precomputedSegments)
+    ? precomputedSegments
+    : queryTokens(query)
+      .flatMap(term => splitSearchSignalSegments(term))
+      .map(segment => segment.toLowerCase())
+      .filter(segment => segment.length >= 2);
+  const segmentSet = new Set(segments);
+  const hasRuntimeBoundary = [
+    'mcp',
+    'stderr',
+    'stdin',
+    'stdout',
+    'stdio',
+    'transport',
+    'wrapper',
+  ].some(segment => segmentSet.has(segment));
+  const hasDiagnosticIntent = [
+    'diagnostic',
+    'diagnostics',
+    'error',
+    'errors',
+    'exception',
+    'fatal',
+    'log',
+    'logging',
+    'runtime',
+    'uncaught',
+    'unhandled',
+    'warning',
+    'write',
+  ].some(segment => segmentSet.has(segment));
+  return hasRuntimeBoundary && hasDiagnosticIntent;
+}
+
 function queryMentionsCodegraphDedupMaintenance(query, precomputedSegments = null) {
   return classifyCodegraphDedupMaintenanceQuery(query, precomputedSegments)
     .codegraphDedupMaintenance;
 }
 
 function summarizeContextPackQueryClassification(query, precomputedSegments = null) {
-  const dedupMaintenance = classifyCodegraphDedupMaintenanceQuery(query, precomputedSegments);
-  const segments = dedupMaintenance.segments;
+  const segments = Array.isArray(precomputedSegments)
+    ? unique(precomputedSegments
+      .map(segment => String(segment).toLowerCase())
+      .filter(segment => segment.length >= 2))
+    : contextPackSearchSignalSegments(queryTokens(query));
+  const dedupMaintenance = classifyCodegraphDedupMaintenanceQuery(query, segments);
+  const specializedMaintenance = classifyContextPackSpecializedMaintenanceQuery(query, segments);
+  const specializedSourceScope = contextPackSpecializedMaintenanceSourceScopeFor(query, specializedMaintenance);
   return {
     ...dedupMaintenance,
     codegraphTooling: queryMentionsCodegraphTooling(query),
     codegraphToolingQuality: queryMentionsCodegraphToolingQuality(query, segments),
     codegraphToolingSourcePollution: queryMentionsCodegraphToolingSourcePollution(query, segments),
     context7Documentation: queryMentionsContext7Documentation(query),
+    strictNativeOutputMaintenance: specializedMaintenance.strictNativeOutputMaintenance,
+    context7Maintenance: specializedMaintenance.context7Maintenance,
+    toolingFixtureQuality: specializedMaintenance.toolingFixtureQuality,
+    specializedMaintenanceSourceScope: specializedSourceScope?.id ?? null,
     tests: queryMentionsTests(query),
   };
 }
@@ -8751,72 +9919,6 @@ function addEdge(groups, kind, source, target, metadata = {}) {
   groups[kind] = group;
 }
 
-function summarizeOverlayCoverage() {
-  const overlayPath = path.join(projectRoot, '.codegraph', 'nanoflow-overlay.json');
-  try {
-    const overlay = JSON.parse(fs.readFileSync(overlayPath, 'utf8'));
-    return {
-      typescriptClasses: overlay.typescript?.classes?.length ?? 0,
-      typescriptFunctions: overlay.typescript?.functions?.length ?? 0,
-      typescriptInterfaces: overlay.typescript?.interfaces?.length ?? 0,
-      typescriptTypeAliases: overlay.typescript?.types?.length ?? 0,
-      typescriptConstants: overlay.typescript?.variables?.filter(variable => variable.isConst).length ?? 0,
-      typescriptVariables: overlay.typescript?.variables?.filter(variable => !variable.isConst).length ?? 0,
-      typescriptImports: overlay.typescript?.imports?.length ?? 0,
-      typescriptExports: overlay.typescript?.exports?.length ?? 0,
-      typescriptParameters: overlay.graph?.nodes?.filter(node => node.kind === 'parameter').length ?? 0,
-      components: overlay.angular?.components?.length ?? 0,
-      directives: overlay.angular?.directives?.length ?? 0,
-      pipes: overlay.angular?.pipes?.length ?? 0,
-      injectables: overlay.angular?.injectables?.length ?? 0,
-      injectors: overlay.angular?.injectors?.length ?? 0,
-      dynamicImports: overlay.angular?.dynamicImports?.length ?? 0,
-      routes: overlay.angular?.routes?.length ?? 0,
-      edgeFunctions: overlay.supabase?.edgeFunctions?.length ?? 0,
-      migrations: overlay.supabase?.migrations?.length ?? 0,
-      androidFiles: overlay.android?.files?.length ?? 0,
-      androidKotlinClasses: overlay.android?.kotlinClasses?.length ?? 0,
-      androidKotlinDataClasses: (overlay.android?.kotlinClasses ?? [])
-        .filter(kotlinClass => kotlinClass.modifiers?.includes('data')).length,
-      androidKotlinSealedClasses: (overlay.android?.kotlinClasses ?? [])
-        .filter(kotlinClass => kotlinClass.modifiers?.includes('sealed')).length,
-      androidKotlinInterfaces: (overlay.android?.kotlinClasses ?? [])
-        .filter(kotlinClass => kotlinClass.classKind === 'interface').length,
-      androidKotlinObjects: (overlay.android?.kotlinClasses ?? [])
-        .filter(kotlinClass => kotlinClass.classKind === 'object' && !kotlinClass.isCompanionObject).length,
-      androidKotlinCompanionObjects: (overlay.android?.kotlinClasses ?? [])
-        .filter(kotlinClass => kotlinClass.isCompanionObject).length,
-      androidKotlinEnums: overlay.android?.kotlinEnums?.length ?? 0,
-      androidKotlinEnumMembers: (overlay.android?.kotlinEnums ?? [])
-        .flatMap(kotlinEnum => kotlinEnum.members ?? []).length,
-      androidKotlinImports: overlay.android?.kotlinImports?.length ?? 0,
-      androidKotlinConstructors: overlay.android?.kotlinConstructors?.length ?? 0,
-      androidKotlinProperties: overlay.android?.kotlinProperties?.length ?? 0,
-      androidKotlinMethods: overlay.android?.kotlinMethods?.length ?? 0,
-      androidKotlinCalls: overlay.android?.kotlinCalls?.length ?? 0,
-      androidKotlinAnnotations: countAndroidKotlinAnnotations(overlay.android),
-      androidManifestComponents: overlay.android?.manifestComponents?.length ?? 0,
-      androidWidgetProviders: overlay.android?.widgetProviders?.length ?? 0,
-      androidResourceReferences: overlay.android?.resourceReferences?.length ?? 0,
-      hardRules: overlay.agentRules?.hardRules?.length ?? 0,
-      graphNodes: overlay.graph?.nodes?.length ?? 0,
-      graphEdges: overlay.graph?.edges?.length ?? 0,
-    };
-  } catch {
-    return null;
-  }
-}
-
-function countAndroidKotlinAnnotations(android) {
-  return [
-    ...(android?.kotlinClasses ?? []),
-    ...(android?.kotlinEnums ?? []),
-    ...(android?.kotlinConstructors ?? []),
-    ...(android?.kotlinProperties ?? []),
-    ...(android?.kotlinMethods ?? []),
-  ].flatMap(item => item?.annotations ?? []).length;
-}
-
 function createNanoFlowOverlayToolDefinition() {
   return {
     name: 'nanoflow_overlay_query',
@@ -8903,8 +10005,54 @@ function writeToClient(line) {
     return true;
   }
 
-  clientOutputQueue.push(formatClientOutput(line));
+  clientOutputQueue.push({
+    chunk: formatClientOutput(line),
+    outputDiagnostics: buildClientOutputDiagnostics(line),
+  });
   return flushClientOutputQueue();
+}
+
+function buildClientOutputDiagnostics(line) {
+  let response;
+  try {
+    response = JSON.parse(String(line ?? ''));
+  } catch {
+    return {};
+  }
+  if (response?.id === undefined) {
+    return {
+      response: {
+        id: undefined,
+        ...summarizeMcpResponse(response),
+      },
+    };
+  }
+  const completedTrace = findRecentClientResponseTrace(response.id);
+  return {
+    responseId: response.id,
+    ...(completedTrace ? {
+      requestId: completedTrace.requestId,
+      clientId: completedTrace.clientId,
+      requestKind: completedTrace.requestKind,
+      method: completedTrace.method,
+      tool: completedTrace.tool,
+      query: completedTrace.query,
+    } : {}),
+    response: {
+      id: response.id,
+      ...summarizeMcpResponse(response),
+    },
+  };
+}
+
+function findRecentClientResponseTrace(responseId) {
+  for (let index = recentDiagnosticHistory.clientResponses.length - 1; index >= 0; index -= 1) {
+    const entry = recentDiagnosticHistory.clientResponses[index];
+    if (String(entry?.clientId) === String(responseId)) {
+      return entry;
+    }
+  }
+  return null;
 }
 
 function formatClientOutput(line) {
@@ -8925,7 +10073,7 @@ function flushClientOutputQueue() {
   }
 
   while (clientOutputQueue.length > 0) {
-    const chunk = clientOutputQueue.shift();
+    const { chunk, outputDiagnostics = {} } = clientOutputQueue.shift();
     let ok = false;
     try {
       ok = process.stdout.write(chunk);
@@ -8936,6 +10084,7 @@ function flushClientOutputQueue() {
         bytes: chunk.length,
         queuedMessages: clientOutputQueue.length,
         bufferedChildStdoutBytes: childStdoutBuffer.length,
+        ...outputDiagnostics,
       });
       return false;
     }
@@ -8945,6 +10094,7 @@ function flushClientOutputQueue() {
         bytes: chunk.length,
         queuedMessages: clientOutputQueue.length,
         bufferedChildStdoutBytes: childStdoutBuffer.length,
+        ...outputDiagnostics,
         runtime: summarizeRuntimeState(),
       });
       process.stdin.pause?.();
@@ -9039,6 +10189,15 @@ function createDiagnostics(root) {
   const logPath = process.env.NANOFLOW_CODEGRAPH_MCP_LOG
     ? path.resolve(process.env.NANOFLOW_CODEGRAPH_MCP_LOG)
     : path.join(root, '.codegraph', 'nanoflow-mcp-wrapper.log');
+  const maxLogBytes = Math.max(
+    64 * 1024,
+    parsePositiveIntegerEnv(
+      'NANOFLOW_CODEGRAPH_MCP_LOG_MAX_BYTES',
+      DIAGNOSTIC_LOG_MAX_BYTES_DEFAULT,
+    ),
+  );
+  const archivePath = `${logPath}.1`;
+  const lockPath = `${logPath}.lock`;
 
   try {
     fs.mkdirSync(path.dirname(logPath), { recursive: true });
@@ -9063,7 +10222,13 @@ function createDiagnostics(root) {
         ...data,
       };
       try {
-        fs.appendFileSync(logPath, `${JSON.stringify(entry)}\n`, 'utf8');
+        appendBoundedDiagnosticEntry({
+          logPath,
+          archivePath,
+          lockPath,
+          maxLogBytes,
+          entry,
+        });
       } catch (error) {
         if (!logWriteFailureReported) {
           logWriteFailureReported = true;
@@ -9079,6 +10244,139 @@ function createDiagnostics(root) {
       }
     },
   };
+}
+
+function appendBoundedDiagnosticEntry({ logPath, archivePath, lockPath, maxLogBytes, entry }) {
+  withDiagnosticLogLock(lockPath, () => {
+    let serialized = serializeDiagnosticEntry(entry, maxLogBytes);
+    const currentBytes = fileSizeOrZero(logPath);
+    if (currentBytes + Buffer.byteLength(serialized, 'utf8') > maxLogBytes) {
+      entry.diagnosticLogRotation = rotateDiagnosticLog({
+        logPath,
+        archivePath,
+        maxLogBytes,
+        previousBytes: currentBytes,
+      });
+      serialized = serializeDiagnosticEntry(entry, maxLogBytes);
+    }
+    fs.appendFileSync(logPath, serialized, 'utf8');
+  });
+}
+
+function serializeDiagnosticEntry(entry, maxLogBytes) {
+  const serialized = `${JSON.stringify(entry)}\n`;
+  if (Buffer.byteLength(serialized, 'utf8') <= maxLogBytes) {
+    return serialized;
+  }
+  const compacted = {
+    ts: entry.ts,
+    runId: entry.runId,
+    seq: entry.seq,
+    sinceStartMs: entry.sinceStartMs,
+    wrapperPid: entry.wrapperPid,
+    diagnosticSchemaVersion: entry.diagnosticSchemaVersion,
+    event: entry.event,
+    requestId: entry.requestId,
+    failureClass: entry.failureClass,
+    diagnosticEntryTruncated: {
+      originalBytes: Buffer.byteLength(serialized, 'utf8'),
+      maxLogBytes,
+      omittedKeys: Object.keys(entry).filter(key => ![
+        'ts',
+        'runId',
+        'seq',
+        'sinceStartMs',
+        'wrapperPid',
+        'diagnosticSchemaVersion',
+        'event',
+        'requestId',
+        'failureClass',
+      ].includes(key)),
+    },
+  };
+  return `${JSON.stringify(compacted)}\n`;
+}
+
+function rotateDiagnosticLog({ logPath, archivePath, maxLogBytes, previousBytes }) {
+  const archivedText = readDiagnosticLogTail(logPath, maxLogBytes);
+  const temporaryArchivePath = `${archivePath}.${process.pid}.${Date.now()}.tmp`;
+  fs.writeFileSync(temporaryArchivePath, archivedText, 'utf8');
+  fs.rmSync(archivePath, { force: true });
+  fs.renameSync(temporaryArchivePath, archivePath);
+  fs.truncateSync(logPath, 0);
+  return {
+    reason: 'max-bytes-exceeded',
+    maxLogBytes,
+    previousBytes,
+    archivedBytes: Buffer.byteLength(archivedText, 'utf8'),
+    archivePath,
+  };
+}
+
+function readDiagnosticLogTail(logPath, maxBytes) {
+  if (!fs.existsSync(logPath)) return '';
+  const size = fileSizeOrZero(logPath);
+  if (size <= maxBytes) {
+    return fs.readFileSync(logPath, 'utf8');
+  }
+  const start = Math.max(0, size - maxBytes);
+  const buffer = Buffer.alloc(size - start);
+  const handle = fs.openSync(logPath, 'r');
+  try {
+    fs.readSync(handle, buffer, 0, buffer.length, start);
+  } finally {
+    fs.closeSync(handle);
+  }
+  const text = buffer.toString('utf8');
+  const firstNewline = text.indexOf('\n');
+  return firstNewline >= 0 ? text.slice(firstNewline + 1) : '';
+}
+
+function fileSizeOrZero(filePath) {
+  try {
+    return fs.statSync(filePath).size;
+  } catch {
+    return 0;
+  }
+}
+
+function withDiagnosticLogLock(lockPath, callback) {
+  const deadline = Date.now() + DIAGNOSTIC_LOG_LOCK_WAIT_MS;
+  while (true) {
+    let handle;
+    try {
+      handle = fs.openSync(lockPath, 'wx');
+    } catch (error) {
+      if (error?.code !== 'EEXIST') throw error;
+      removeStaleDiagnosticLogLock(lockPath);
+      if (Date.now() >= deadline) {
+        throw new Error(`Timed out waiting for diagnostic log lock: ${lockPath}`);
+      }
+      sleepSync(5);
+      continue;
+    }
+    try {
+      return callback();
+    } finally {
+      fs.closeSync(handle);
+      fs.rmSync(lockPath, { force: true });
+    }
+  }
+}
+
+function removeStaleDiagnosticLogLock(lockPath) {
+  try {
+    const ageMs = Date.now() - fs.statSync(lockPath).mtimeMs;
+    if (ageMs > DIAGNOSTIC_LOG_LOCK_STALE_MS) {
+      fs.rmSync(lockPath, { force: true });
+    }
+  } catch {
+    // Another writer may have released the lock between stat and removal.
+  }
+}
+
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 function pickEnv(env, names) {
@@ -9171,7 +10469,6 @@ function logStaleWrapperScriptContinuation(message, requestTrace, source, staleD
     ...requestTraceDiagnostics(requestTrace),
     source,
     tool: message.params?.name,
-    query: requestTrace?.query,
     failureClass: 'stale-wrapper-script',
     ...staleDetails,
     investigation: {
@@ -9343,7 +10640,7 @@ function compareCodexConfigAlignment(expected, actual) {
   }
   for (const [key, expectedValue] of Object.entries(expected.env ?? {})) {
     const actualValue = actual.env?.[key] ?? null;
-    if (actualValue !== expectedValue) {
+    if (!sameEnvValueForDiagnostics(key, actualValue, expectedValue)) {
       mismatches.push({
         field: `env.${key}`,
         expected: expectedValue,
@@ -9364,6 +10661,21 @@ function samePathForDiagnostics(actual, expected) {
 
 function sameConfigValueForDiagnostics(actual, expected) {
   return normalizeConfigValueForDiagnostics(actual) === normalizeConfigValueForDiagnostics(expected);
+}
+
+function sameEnvValueForDiagnostics(key, actual, expected) {
+  if (String(key).toLowerCase() === 'npm_config_cache') {
+    return normalizeWindowsPathForDiagnostics(actual) === normalizeWindowsPathForDiagnostics(expected);
+  }
+  return actual === expected;
+}
+
+function normalizeWindowsPathForDiagnostics(value) {
+  const normalized = path.win32.normalize(String(value ?? '').replace(/\//g, '\\'))
+    .replace(/\\/g, '/')
+    .toLowerCase();
+  if (/^[a-z]:\/$/.test(normalized)) return normalized;
+  return normalized.replace(/\/+$/, '');
 }
 
 function normalizeConfigValueForDiagnostics(value) {
@@ -9702,8 +11014,35 @@ function summarizeMcpMessage(message) {
     id: message?.id,
     method: message?.method,
     tool: message?.params?.name,
-    query: getMessageQuery(message),
+    ...summarizeDiagnosticQuery(getMessageQuery(message)),
     hasParams: Boolean(message?.params),
+  };
+}
+
+function summarizeDiagnosticQuery(query) {
+  if (typeof query !== 'string') {
+    return {};
+  }
+
+  const queryChars = query.length;
+  const queryBytes = Buffer.byteLength(query, 'utf8');
+  if (queryChars <= DIAGNOSTIC_QUERY_PREVIEW_CHARS) {
+    return {
+      query,
+      queryChars,
+      queryBytes,
+      queryTruncated: false,
+    };
+  }
+
+  const separator = ' ... ';
+  const tail = query.slice(-DIAGNOSTIC_QUERY_TAIL_CHARS);
+  const headLength = DIAGNOSTIC_QUERY_PREVIEW_CHARS - separator.length - tail.length;
+  return {
+    query: `${query.slice(0, headLength)}${separator}${tail}`,
+    queryChars,
+    queryBytes,
+    queryTruncated: true,
   };
 }
 
@@ -9732,12 +11071,13 @@ function beginClientRequest(message, rawText = '') {
     requestKind: requestTrace.requestKind,
     method: requestTrace.method,
     tool: requestTrace.tool,
-    query: requestTrace.query,
+    ...summarizeDiagnosticQuery(requestTrace.query),
     rawMessageBytes: requestTrace.rawMessageBytes,
     startedAtMs: requestTrace.startedAtMs,
   });
   diagnostics.log('client.request.start', {
     ...requestTrace,
+    ...summarizeDiagnosticQuery(requestTrace.query),
     hasParams: Boolean(message?.params),
     argumentKeys: getMessageArgumentKeys(message),
     activeRequestCount: activeClientRequests.size,
@@ -9766,7 +11106,7 @@ function completeClientRequest(id, response, extra = {}) {
     requestKind: requestTrace.requestKind,
     method: requestTrace.method,
     tool: requestTrace.tool,
-    query: requestTrace.query,
+    ...summarizeDiagnosticQuery(requestTrace.query),
     elapsedMs: Date.now() - requestTrace.startedAtMs,
     failureClass: extra.failureClass,
     isError: responseSummary.isError,
@@ -9780,7 +11120,6 @@ function completeClientRequest(id, response, extra = {}) {
     id,
     method: requestTrace.method,
     tool: requestTrace.tool,
-    query: requestTrace.query,
     rawMessageBytes: requestTrace.rawMessageBytes,
     elapsedMs: Date.now() - requestTrace.startedAtMs,
     activeRequestCount: activeClientRequests.size,
@@ -9803,7 +11142,7 @@ function requestTraceDiagnostics(requestTrace) {
     clientId: requestTrace.clientId,
     requestKind: requestTrace.requestKind,
     tool: requestTrace.tool,
-    query: requestTrace.query,
+    ...summarizeDiagnosticQuery(requestTrace.query),
     rawMessageBytes: requestTrace.rawMessageBytes,
   };
 }
@@ -9853,7 +11192,21 @@ function summarizeMcpResponse(message) {
 
 function summarizeChildStderrDiagnostics(text) {
   const value = typeof text === 'string' ? text : '';
-  const warningSummary = summarizeMcpTextWarnings(value);
+  if (isSharedDaemonConnectionLostText(value)) {
+    return {
+      failureClass: 'shared-daemon-fallback',
+      textTail: warningTextTail(value, 2000),
+      investigation: buildSharedDaemonFallbackInvestigation('shared-daemon-fallback'),
+    };
+  }
+  if (isCodegraphFileWatcherActiveText(value) && isInProcessFallbackTopology(childRuntimeTopology)) {
+    return {
+      failureClass: 'shared-daemon-fallback-watcher',
+      textTail: warningTextTail(value, 2000),
+      investigation: buildSharedDaemonFallbackInvestigation('shared-daemon-fallback-watcher'),
+    };
+  }
+  const warningSummary = summarizeMcpTextWarnings(value, { allowEmbeddedDiagnostic: true });
   if (warningSummary.codegraphAutoSyncDisabled) {
     return {
       failureClass: warningSummary.failureClass,
@@ -9879,6 +11232,8 @@ function buildBaseCodegraphStderrInvestigation(failureClass) {
   const likelyRootCauseByClass = {
     'codegraph-autosync-disabled': 'Base CodeGraph reported that file watching or auto-sync is disabled; index freshness cannot be trusted until the lock is released and the graph is synced.',
     'base-codegraph-stderr-exception': 'Base CodeGraph emitted exception-like stderr while the wrapper was serving a request; inspect textTail, runtime.activeRequests, and any following child.exit or client.response events.',
+    'shared-daemon-fallback': 'The shared CodeGraph daemon connection was lost and the upstream proxy permanently switched this wrapper child to an in-process fallback engine.',
+    'shared-daemon-fallback-watcher': 'The in-process fallback engine started its own file watcher, so this wrapper became another potential SQLite writer.',
   };
   return {
     failureBoundary: 'base-codegraph-child',
@@ -9905,9 +11260,9 @@ function isBaseCodegraphStderrExceptionText(text) {
     || /Unhandled(?:Promise)?Rejection|uncaughtException/i.test(value);
 }
 
-function summarizeMcpTextWarnings(text) {
+function summarizeMcpTextWarnings(text, options = {}) {
   const value = typeof text === 'string' ? text : '';
-  const codegraphAutoSyncDisabled = isCodegraphAutoSyncDisabledText(value);
+  const codegraphAutoSyncDisabled = isCodegraphAutoSyncDisabledText(value, options);
   if (!codegraphAutoSyncDisabled) {
     return {
       codegraphAutoSyncDisabled: false,
@@ -9934,11 +11289,35 @@ function mergeMcpTextWarnings(...summaries) {
   };
 }
 
-function isCodegraphAutoSyncDisabledText(text) {
-  const value = String(text ?? '').toLowerCase();
-  return value.includes('codegraph auto-sync is disabled')
-    || (value.includes('auto-sync disabled') && value.includes('file lock'))
-    || (value.includes('index is frozen') && value.includes('codegraph'));
+function isCodegraphAutoSyncDisabledText(text, options = {}) {
+  const value = String(text ?? '');
+  const lower = value.toLowerCase();
+  if (options.allowEmbeddedDiagnostic === true) {
+    return lower.includes('codegraph auto-sync is disabled')
+      || (lower.includes('auto-sync disabled') && lower.includes('file lock'))
+      || (lower.includes('index is frozen') && lower.includes('codegraph'));
+  }
+
+  const leadingLine = value
+    .split(/\r?\n/u)
+    .map(line => line.trim())
+    .find(Boolean);
+  if (!leadingLine) return false;
+  const normalizedLeadingLine = leadingLine
+    .replace(/^>\s*/u, '')
+    .replace(/^\*\*\s*/u, '')
+    .replace(/^\u26a0\ufe0f?\s*/u, '')
+    .replace(/^\*\*\s*/u, '')
+    .toLowerCase();
+  return normalizedLeadingLine.startsWith('codegraph auto-sync is disabled')
+    || (
+      normalizedLeadingLine.startsWith('auto-sync disabled')
+      && (lower.includes('file lock') || lower.includes('index is frozen'))
+    )
+    || (
+      normalizedLeadingLine.startsWith('codegraph')
+      && normalizedLeadingLine.includes('index is frozen')
+    );
 }
 
 function warningTextTail(text, maxLength = 1200) {
@@ -9980,20 +11359,39 @@ function classifyOverlayQueryFailure({
   outputLimitExceeded,
   jsonOutput = false,
   jsonParseError = null,
+  jsonShapeError = null,
+  emptyJsonResponse = false,
+  stderr = '',
 }) {
   if (timedOut) return 'overlay-timeout';
   if (outputLimitExceeded) return 'overlay-max-buffer';
   if (error) return 'overlay-process-error';
-  if (status === 0 && jsonOutput && jsonParseError) return 'overlay-json-parse';
-  if (status === 0) return 'success';
   if (signal) return 'overlay-signal-exit';
+  if (status !== 0 && String(stderr).split(/\r?\n/).includes(OVERLAY_STALE_SKIP_REFRESH)) {
+    return OVERLAY_STALE_SKIP_REFRESH;
+  }
+  if (status === 0 && jsonOutput && emptyJsonResponse) return 'overlay-empty-response';
+  if (status === 0 && jsonOutput && jsonParseError) return 'overlay-json-parse';
+  if (status === 0 && jsonOutput && jsonShapeError) return 'overlay-invalid-json-shape';
+  if (status === 0) return 'success';
   return 'overlay-nonzero-exit';
+}
+
+function validateOverlayJsonResponseShape(data, options = {}) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    return 'NanoFlow overlay query JSON response must be an object.';
+  }
+  if (!options.nativeJson && !Array.isArray(data.matches)) {
+    return 'NanoFlow overlay query JSON response is missing matches.';
+  }
+  return null;
 }
 
 function summarizeRuntimeState() {
   const now = Date.now();
   return {
     childPid: child?.pid ?? null,
+    runtimeTopology: childRuntimeTopology,
     childExited,
     shuttingDown,
     clientStdinShutdownRequested,
@@ -10007,6 +11405,18 @@ function summarizeRuntimeState() {
     expiredContextPackCount: expiredContextPackIds.size,
     expiredContextPackTimerCount: expiredContextPackIdTimers.size,
     activeOverlayRefreshLockPath,
+    sharedDaemonFallbackDetectedAtMs: sharedDaemonFallbackDetectedAtMs || null,
+    sharedDaemonFallbackDetectedAgeMs: sharedDaemonFallbackDetectedAtMs > 0
+      ? now - sharedDaemonFallbackDetectedAtMs
+      : null,
+    sharedDaemonFallbackRecoveryEnabled: SHARED_DAEMON_FALLBACK_RECOVERY_ENABLED,
+    sharedDaemonFallbackRecoveryTimerActive: Boolean(sharedDaemonFallbackRecoveryTimer),
+    sharedDaemonFallbackRecoveryRequestedAtMs: sharedDaemonFallbackRecoveryRequestedAtMs || null,
+    sharedDaemonFallbackRecoveryElapsedMs: sharedDaemonFallbackRecoveryRequestedAtMs > 0
+      ? now - sharedDaemonFallbackRecoveryRequestedAtMs
+      : null,
+    sharedDaemonFallbackRecoveryDeferCount,
+    sharedDaemonFallbackRecoveryTrigger,
     activeRequestCount: activeClientRequests.size,
     pendingContextPackCount: pendingContextPacks.size,
     pendingContextPackIds: [...pendingContextPacks.keys()].slice(0, 8),
@@ -10037,7 +11447,7 @@ function summarizeRuntimeState() {
       requestKind: requestTrace.requestKind,
       method: requestTrace.method,
       tool: requestTrace.tool,
-      query: requestTrace.query,
+      ...summarizeDiagnosticQuery(requestTrace.query),
       elapsedMs: now - requestTrace.startedAtMs,
     })),
   };

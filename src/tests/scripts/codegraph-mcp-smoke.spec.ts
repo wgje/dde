@@ -5,15 +5,66 @@ import { spawnSync } from 'node:child_process';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { registerCodegraphMcpSmokeAdapterSpecs } from './codegraph-mcp-smoke-adapter.spec-helpers';
+import { registerCodegraphMcpSmokeDaemonSpecs } from './codegraph-mcp-smoke-daemon.spec-helpers';
 import { registerCodegraphMcpSmokeRepeatSpecs } from './codegraph-mcp-smoke-repeat.spec-helpers';
 import { registerCodegraphMcpSmokeStaleWrapperSpecs } from './codegraph-mcp-smoke-stale-wrapper.spec-helpers';
+import { writeCodegraphOverlayCoreFixtureFiles } from './codegraph-nanoflow-overlay-fixture-core.spec-helpers';
 
 const repoRoot = path.resolve(__dirname, '../../..');
 const smokeScriptPath = path.join(repoRoot, 'scripts', 'smoke-codegraph-mcp-wrapper.cjs');
 const adapterContextScriptPath = path.join(repoRoot, 'scripts', 'codegraph-adapter-context.cjs');
 const analyzerScriptPath = path.join(repoRoot, 'scripts', 'analyze-codegraph-mcp-log.cjs');
 const packageJsonPath = path.join(repoRoot, 'package.json');
+const overlayGeneratorScriptPath = path.join(repoRoot, 'scripts', 'generate-codegraph-nanoflow-overlay.mjs');
 const tempRoots: string[] = [];
+
+function writeFixtureFile(root: string, relativePath: string, content: string): void {
+  const filePath = path.join(root, relativePath);
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, content);
+}
+
+function makeFreshMcpProject(): string {
+  const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-codegraph-smoke-project-'));
+  tempRoots.push(projectRoot);
+  writeCodegraphOverlayCoreFixtureFiles(projectRoot, writeFixtureFile);
+  writeFixtureFile(
+    projectRoot,
+    'src/app/core/shell/project-shell.component.ts',
+    "export class ProjectShellComponent {}\n",
+  );
+  for (const relativePath of [
+    'codegraph-nanoflow-mcp-stdio.cjs',
+    'codegraph-nanoflow-dedup-query.cjs',
+    'codegraph-nanoflow-specialized-query.cjs',
+    'analyze-codegraph-mcp-log.cjs',
+    'codegraph-adapter-context.cjs',
+    'codegraph-codex-config.cjs',
+    'query-codegraph-nanoflow-overlay.mjs',
+    path.join('lib', 'codegraph-context-outcome.cjs'),
+    path.join('lib', 'codegraph-overlay-baseline.cjs'),
+    path.join('lib', 'codegraph-source-policy.cjs'),
+  ]) {
+    const targetPath = path.join(projectRoot, 'scripts', relativePath);
+    fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+    fs.copyFileSync(path.join(repoRoot, 'scripts', relativePath), targetPath);
+  }
+  const generated = spawnSync(
+    process.execPath,
+    [overlayGeneratorScriptPath, '--root', projectRoot, '--android-function-source', 'local'],
+    {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      maxBuffer: 32 * 1024 * 1024,
+    },
+  );
+  expect(generated.status, [
+    `stdout: ${generated.stdout}`,
+    `stderr: ${generated.stderr}`,
+    `error: ${generated.error?.message ?? ''}`,
+  ].join('\n')).toBe(0);
+  return projectRoot;
+}
 
 function makeFakeCodegraph(): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-codegraph-smoke-fake-'));
@@ -90,6 +141,37 @@ function makeEnvEchoFakeCodegraph(envName: string): string {
   return fakePath;
 }
 
+function makeEnvCaptureFakeCodegraph(envName: string, capturePath: string): string {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-codegraph-smoke-env-capture-'));
+  tempRoots.push(root);
+  const fakePath = path.join(root, 'fake-codegraph-env-capture.cjs');
+  fs.writeFileSync(
+    fakePath,
+    [
+      "'use strict';",
+      "const fs = require('node:fs');",
+      "const readline = require('node:readline');",
+      `fs.writeFileSync(${JSON.stringify(capturePath)}, process.env[${JSON.stringify(envName)}] ?? '');`,
+      "const rl = readline.createInterface({ input: process.stdin });",
+      "rl.on('line', line => {",
+      "  if (!line.trim()) return;",
+      "  const message = JSON.parse(line);",
+      "  if (message.method === 'tools/list') {",
+      "    console.log(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { tools: [{ name: 'codegraph_explore', description: 'fake', inputSchema: { type: 'object' } }] } }));",
+      "    return;",
+      "  }",
+      "  if (message.method === 'tools/call' && message.params?.name === 'codegraph_explore') {",
+      "    console.log(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: '## Exploration: daemon env\\nbase context' }] } }));",
+      "    return;",
+      "  }",
+      "  console.log(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { content: [] } }));",
+      "});",
+      '',
+    ].join('\n'),
+  );
+  return fakePath;
+}
+
 function makeHangingExploreFakeCodegraph(): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-codegraph-smoke-hanging-fake-'));
   tempRoots.push(root);
@@ -138,6 +220,20 @@ function makeConfigBackedAdapterProject(): string {
   fs.copyFileSync(
     path.join(repoRoot, 'scripts', 'codegraph-codex-config.cjs'),
     path.join(scriptsRoot, 'codegraph-codex-config.cjs'),
+  );
+  fs.copyFileSync(
+    path.join(repoRoot, 'scripts', 'codegraph-nanoflow-dedup-query.cjs'),
+    path.join(scriptsRoot, 'codegraph-nanoflow-dedup-query.cjs'),
+  );
+  fs.copyFileSync(
+    path.join(repoRoot, 'scripts', 'codegraph-nanoflow-specialized-query.cjs'),
+    path.join(scriptsRoot, 'codegraph-nanoflow-specialized-query.cjs'),
+  );
+  const libraryRoot = path.join(scriptsRoot, 'lib');
+  fs.mkdirSync(libraryRoot, { recursive: true });
+  fs.copyFileSync(
+    path.join(repoRoot, 'scripts', 'lib', 'codegraph-context-outcome.cjs'),
+    path.join(libraryRoot, 'codegraph-context-outcome.cjs'),
   );
   fs.writeFileSync(
     path.join(scriptsRoot, 'query-codegraph-nanoflow-overlay.mjs'),
@@ -271,32 +367,68 @@ describe('smoke-codegraph-mcp-wrapper', () => {
     const summary = JSON.parse(result.stdout) as {
       ok?: boolean;
       steps?: string[];
+      contextOutcome?: {
+        schemaVersion?: number;
+        status?: string;
+        usableContext?: boolean;
+        primaryFailureClass?: string | null;
+        base?: { status?: string; isError?: boolean; textBytes?: number };
+        overlay?: { status?: string; isError?: boolean; failureClass?: string | null };
+      };
     };
     expect(summary.ok).toBe(true);
     expect(summary.steps).toContain('nanoflow_context_pack');
+    expect(summary.contextOutcome).toEqual(expect.objectContaining({
+      schemaVersion: 1,
+      status: 'complete',
+      usableContext: true,
+      primaryFailureClass: null,
+      base: expect.objectContaining({
+        status: 'available',
+        isError: false,
+        textBytes: expect.any(Number),
+      }),
+      overlay: expect.objectContaining({
+        status: 'available',
+        isError: false,
+        failureClass: null,
+      }),
+    }));
+    expect(summary.contextOutcome?.base?.textBytes).toBeGreaterThan(0);
   }, 60_000);
 
-  it('passes CodeGraph daemon env from Codex MCP config to the base child process', () => {
+  it('rejects a noncanonical structured outcome from the configured wrapper', () => {
     const projectRoot = makeConfigBackedAdapterProject();
-    const fakeCodegraph = makeEnvEchoFakeCodegraph('CODEGRAPH_NO_DAEMON');
-    const codexConfigPath = writeCodexConfig(projectRoot, fakeCodegraph, {
-      CODEGRAPH_NO_DAEMON: '1',
-      CODEGRAPH_DAEMON_IDLE_TIMEOUT_MS: '60000',
-      CODEGRAPH_DAEMON_MAX_IDLE_MS: '60000',
-    });
+    fs.writeFileSync(
+      path.join(projectRoot, 'scripts', 'lib', 'codegraph-context-outcome.cjs'),
+      [
+        "'use strict';",
+        'function buildNanoFlowContextOutcomeV1() {',
+        "  return { schemaVersion: 1, status: 'complete' };",
+        '}',
+        'module.exports = {',
+        '  buildNanoFlowContextOutcomeV1,',
+        '  isNanoFlowContextOutcomeError: () => false,',
+        '};',
+        '',
+      ].join('\n'),
+    );
+    const fakeCodegraph = makeFakeCodegraph();
+    const codexConfigPath = writeCodexConfig(projectRoot, fakeCodegraph);
     const result = spawnSync(
       process.execPath,
       [
-        adapterContextScriptPath,
+        smokeScriptPath,
         '--root',
         projectRoot,
         '--query',
-        'env',
+        'ProjectShellComponent',
+        '--overlay-query',
+        'sync-rule-keyword',
         '--overlay-limit',
         '1',
         '--overlay-query-limit',
         '1',
-        '--json',
         '--timeout-ms',
         '15000',
       ],
@@ -311,37 +443,51 @@ describe('smoke-codegraph-mcp-wrapper', () => {
       },
     );
 
-    expect(result.status, [
-      `stdout: ${result.stdout}`,
-      `stderr: ${result.stderr}`,
-      `error: ${result.error?.message ?? ''}`,
-    ].join('\n')).toBe(0);
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain(
+      'nanoflow_context_pack round 1 returned no canonical NanoFlow context outcome',
+    );
+  }, 60_000);
 
-    const summary = JSON.parse(result.stdout) as {
-      contextText?: string;
-    };
-    expect(summary.contextText).toContain('CODEGRAPH_NO_DAEMON=1');
-  }, 30_000);
-
-  it('forces the base CodeGraph child to run without the shared daemon by default', () => {
+  it('rejects a canonical partial outcome when MCP isError is false', () => {
     const projectRoot = makeConfigBackedAdapterProject();
-    const fakeCodegraph = makeEnvEchoFakeCodegraph('CODEGRAPH_NO_DAEMON');
-    const codexConfigPath = writeCodexConfig(projectRoot, fakeCodegraph, {
-      CODEGRAPH_NO_DAEMON: '0',
-    });
+    fs.writeFileSync(
+      path.join(projectRoot, 'scripts', 'lib', 'codegraph-context-outcome.cjs'),
+      [
+        "'use strict';",
+        'function buildNanoFlowContextOutcomeV1() {',
+        '  return {',
+        '    schemaVersion: 1,',
+        "    status: 'partial',",
+        '    usableContext: true,',
+        "    primaryFailureClass: 'overlay-stale-skip-refresh',",
+        "    base: { status: 'available', isError: false, textBytes: 1 },",
+        "    overlay: { status: 'stale', isError: true, failureClass: 'overlay-stale-skip-refresh', generationId: null },",
+        '  };',
+        '}',
+        'module.exports = {',
+        '  buildNanoFlowContextOutcomeV1,',
+        '  isNanoFlowContextOutcomeError: () => false,',
+        '};',
+        '',
+      ].join('\n'),
+    );
+    const fakeCodegraph = makeFakeCodegraph();
+    const codexConfigPath = writeCodexConfig(projectRoot, fakeCodegraph);
     const result = spawnSync(
       process.execPath,
       [
-        adapterContextScriptPath,
+        smokeScriptPath,
         '--root',
         projectRoot,
         '--query',
-        'env',
+        'ProjectShellComponent',
+        '--overlay-query',
+        'sync-rule-keyword',
         '--overlay-limit',
         '1',
         '--overlay-query-limit',
         '1',
-        '--json',
         '--timeout-ms',
         '15000',
       ],
@@ -356,17 +502,21 @@ describe('smoke-codegraph-mcp-wrapper', () => {
       },
     );
 
-    expect(result.status, [
-      `stdout: ${result.stdout}`,
-      `stderr: ${result.stderr}`,
-      `error: ${result.error?.message ?? ''}`,
-    ].join('\n')).toBe(0);
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain(
+      'nanoflow_context_pack round 1 returned MCP isError=false for partial NanoFlow context outcome',
+    );
+  }, 60_000);
 
-    const summary = JSON.parse(result.stdout) as {
-      contextText?: string;
-    };
-    expect(summary.contextText).toContain('CODEGRAPH_NO_DAEMON=1');
-  }, 30_000);
+  registerCodegraphMcpSmokeDaemonSpecs({
+    repoRoot,
+    adapterContextScriptPath,
+    smokeScriptPath,
+    makeConfigBackedAdapterProject,
+    makeEnvEchoFakeCodegraph,
+    makeEnvCaptureFakeCodegraph,
+    writeCodexConfig,
+  });
 
   it('fails on a missing Codex MCP config instead of reading stale VS Code MCP config for smoke verification', () => {
     const projectRoot = makeConfigBackedAdapterProject();
@@ -401,7 +551,11 @@ describe('smoke-codegraph-mcp-wrapper', () => {
       },
     );
 
-    expect(result.status).not.toBe(0);
+    expect(result.status, [
+      `stdout: ${result.stdout}`,
+      `stderr: ${result.stderr}`,
+      `error: ${result.error?.message ?? ''}`,
+    ].join('\n')).not.toBe(0);
     expect(result.stderr).toContain(`Codex MCP config not found: ${codexConfigPath}`);
     expect(result.stderr).not.toContain('.vscode');
   }, 10_000);
@@ -469,12 +623,13 @@ describe('smoke-codegraph-mcp-wrapper', () => {
 
   it('keeps one wrapper process alive across tools/list, resource discovery, context pack, overlay query, and tools/list', () => {
     const fakeCodegraph = makeFakeCodegraph();
+    const projectRoot = makeFreshMcpProject();
     const result = spawnSync(
       process.execPath,
       [
         smokeScriptPath,
         '--root',
-        repoRoot,
+        projectRoot,
         '--codegraph-target',
         fakeCodegraph,
         '--query',
@@ -529,12 +684,13 @@ describe('smoke-codegraph-mcp-wrapper', () => {
 
   it('provides an adapter-preserving context CLI fallback through a fresh wrapper', () => {
     const fakeCodegraph = makeFakeCodegraph();
+    const projectRoot = makeFreshMcpProject();
     const result = spawnSync(
       process.execPath,
       [
         adapterContextScriptPath,
         '--root',
-        repoRoot,
+        projectRoot,
         '--codegraph-target',
         fakeCodegraph,
         '--query',
@@ -583,8 +739,9 @@ describe('smoke-codegraph-mcp-wrapper', () => {
     }));
   }, 90_000);
 
-  it('lets the wrapper report base CodeGraph timeout before the adapter CLI gives up', () => {
+  it('returns partial overlay context after the wrapper reports a base CodeGraph timeout', () => {
     const fakeCodegraph = makeHangingExploreFakeCodegraph();
+    const projectRoot = makeFreshMcpProject();
     const logRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-codegraph-adapter-context-timeout-'));
     tempRoots.push(logRoot);
     const logPath = path.join(logRoot, 'wrapper.log');
@@ -593,7 +750,7 @@ describe('smoke-codegraph-mcp-wrapper', () => {
       [
         adapterContextScriptPath,
         '--root',
-        repoRoot,
+        projectRoot,
         '--codegraph-target',
         fakeCodegraph,
         '--query',
@@ -601,7 +758,7 @@ describe('smoke-codegraph-mcp-wrapper', () => {
         '--overlay-limit',
         '1',
         '--timeout-ms',
-        '2000',
+        '6000',
         '--json',
       ],
       {
@@ -615,12 +772,52 @@ describe('smoke-codegraph-mcp-wrapper', () => {
       },
     );
 
-    expect(result.status).not.toBe(0);
-    expect(result.stderr).toMatch(/nanoflow_(?:context_pack|overlay_query) returned MCP isError/);
-    expect(result.stderr).not.toContain('Timed out waiting for nanoflow_context_pack');
+    expect(result.status, [
+      `stdout: ${result.stdout}`,
+      `stderr: ${result.stderr}`,
+      `error: ${result.error?.message ?? ''}`,
+    ].join('\n')).toBe(0);
+    const summary = JSON.parse(result.stdout) as {
+      ok?: boolean;
+      partial?: boolean;
+      contextUsable?: boolean;
+      outcome?: {
+        status?: string;
+        usableContext?: boolean;
+        primaryFailureClass?: string;
+      };
+      contextText?: string;
+      diagnostics?: {
+        transportHealthy?: boolean;
+        criticalTransportFailures?: number;
+        contextAttempts?: Array<{
+          mcpIsError?: boolean;
+          partial?: boolean;
+          failureClass?: string;
+        }>;
+      };
+    };
+    expect(summary.ok).toBe(false);
+    expect(summary.partial).toBe(true);
+    expect(summary.contextUsable).toBe(true);
+    expect(summary.outcome).toEqual(expect.objectContaining({
+      status: 'partial',
+      usableContext: true,
+      primaryFailureClass: 'base-codegraph-timeout-overlay-only',
+    }));
+    expect(summary.contextText).toContain('### Base CodeGraph Error');
+    expect(summary.diagnostics).toEqual(expect.objectContaining({
+      transportHealthy: true,
+      criticalTransportFailures: 0,
+      contextAttempts: [expect.objectContaining({
+        mcpIsError: true,
+        partial: true,
+        failureClass: 'base-codegraph-timeout-overlay-only',
+      })],
+    }));
     const logText = fs.readFileSync(logPath, 'utf8');
     expect(logText).toContain('"event":"nanoflow.context.timeout"');
-    expect(logText).toContain('"failureClass":"base-codegraph-timeout"');
+    expect(logText).toContain('"failureClass":"base-codegraph-timeout-overlay-only"');
   }, 30_000);
 
   it('lets the wrapper report base CodeGraph timeout before the smoke client gives up', () => {
@@ -667,6 +864,7 @@ describe('smoke-codegraph-mcp-wrapper', () => {
     repoRoot,
     smokeScriptPath,
     makeFakeCodegraph,
+    makeFreshMcpProject,
   });
 
   registerCodegraphMcpSmokeAdapterSpecs({
@@ -674,6 +872,7 @@ describe('smoke-codegraph-mcp-wrapper', () => {
     smokeScriptPath,
     analyzerScriptPath,
     makeFakeCodegraph,
+    makeFreshMcpProject,
     trackTempRoot: root => tempRoots.push(root),
   });
 
