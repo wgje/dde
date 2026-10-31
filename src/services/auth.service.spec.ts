@@ -1,8 +1,6 @@
 /**
  * AuthService 认证服务测试
- * 
  * 测试模式：Injector 隔离模式（无 TestBed 依赖）
- * 
  * 覆盖场景：
  * - onAuthStateChange 监听
  * - Token 刷新成功/失败处理
@@ -11,6 +9,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Injector, runInInjectionContext, DestroyRef } from '@angular/core';
+import { Subject, type Observable } from 'rxjs';
 import { AuthService } from './auth.service';
 import { AuthSessionCacheService } from './auth-session-cache.service';
 import { AuthCredentialRequestService } from './auth-credential-request.service';
@@ -19,32 +18,61 @@ import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
 import { EventBusService } from './event-bus.service';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
+import { SyncStateService } from '../app/core/services/sync/sync-state.service';
 import { mockSentryLazyLoaderService } from '../test-setup.mocks';
 import { AUTH_CONFIG } from '../config/auth.config';
-import { environment } from '../environments/environment';
 import {
-  createBrowserNetworkSuspendedError,
   ensureBrowserNetworkSuspensionTracking,
   resetBrowserNetworkSuspensionTrackingForTests,
 } from '../utils/browser-network-suspension';
+import { registerAuthServiceSignedOutPendingBridgeSpecs } from './auth-service-signed-out-pending-bridge.spec-helpers';
+import { registerAuthServiceSessionResilienceSpecs } from './auth-service-session-resilience.spec-helpers';
+import { registerAuthServicePersistedOwnerHintSpecs } from './auth-service-persisted-owner-hint.spec-helpers';
+import { registerAuthServiceCredentialSessionFenceSpecs } from './auth-service-credential-session-fence.spec-helpers';
+import { registerAuthServiceBackgroundSessionRefreshAuthoritySpecs } from './auth-service-background-session-refresh-authority.spec-helpers';
+import { AUTHORITY_KEY, installCanonicalAuthority } from './auth-service-signed-out-pending-bridge.spec-helpers';
 
+function createDeferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(accept => { resolve = accept; });
+  return { promise, resolve };
+}
+
+function createListenerClient(onRegister?: () => void) {
+  const unsubscribe = vi.fn();
+  const onAuthStateChange = vi.fn(() => {
+    onRegister?.(); return { data: { subscription: { unsubscribe } } };
+  });
+  return { client: { auth: { onAuthStateChange } }, onAuthStateChange, unsubscribe };
+}
+type RuntimeReadyState = { runtimeAuthReadyPromise: Promise<void> | null };
 describe('AuthService', () => {
   let service: AuthService;
   let injector: Injector;
+  let syncStateService: SyncStateService;
+  let destroyCallbacks: Array<() => void>;
+  let realAuthClientCleanup: Array<() => Promise<void>>;
   let mockToastService: { show: ReturnType<typeof vi.fn>; warning: ReturnType<typeof vi.fn> };
   let mockSupabaseClient: {
     isConfigured: boolean;
     client: ReturnType<typeof vi.fn>;
     clientAsync: ReturnType<typeof vi.fn>;
     getSession: ReturnType<typeof vi.fn>;
+    signInWithPassword: ReturnType<typeof vi.fn>;
+    consumeCredentialRequestIdForAccessToken: ReturnType<typeof vi.fn>;
+    authorizeSignupAdoption: ReturnType<typeof vi.fn>;
+    reset: ReturnType<typeof vi.fn>;
     signOut: ReturnType<typeof vi.fn>;
     getStorageKey: ReturnType<typeof vi.fn>;
   };
   let authStateCallback: ((event: string, session: unknown) => void) | null = null;
   let mockUnsubscribe: ReturnType<typeof vi.fn>;
+  let sessionRecoveryRequired$: Subject<{ type: 'session-recovery-required'; source: string }>;
   let mockEventBus: {
-    onSessionRestored$: { pipe: ReturnType<typeof vi.fn> };
+    onSessionRestored$: Observable<unknown>;
+    onSessionRecoveryRequired$: Observable<{ type: 'session-recovery-required'; source: string }>;
     publishSessionRestored: ReturnType<typeof vi.fn>;
+    publishSessionRecoveryRequired: ReturnType<typeof vi.fn>;
     publishSessionInvalidated: ReturnType<typeof vi.fn>;
     publishSessionSignedOut: ReturnType<typeof vi.fn>;
   };
@@ -64,10 +92,15 @@ describe('AuthService', () => {
     window.dispatchEvent(event);
   }
 
-  function createPersistedSessionPayload(userId: string, email: string | null, wrapped = false): string {
+  function createPersistedSessionPayload(
+    userId: string,
+    email: string | null,
+    wrapped = false,
+    accessToken = 'access-token',
+  ): string {
     const nowSec = Math.floor(Date.now() / 1000);
     const payload = {
-      access_token: 'access-token',
+      access_token: accessToken,
       refresh_token: 'refresh-token',
       expires_at: nowSec + 3600,
       user: { id: userId, email },
@@ -95,11 +128,13 @@ describe('AuthService', () => {
   beforeEach(async () => {
     vi.clearAllMocks();
     authStateCallback = null;
+    destroyCallbacks = [];
+    realAuthClientCleanup = [];
     mockUnsubscribe = vi.fn();
     resetBrowserNetworkSuspensionTrackingForTests();
     ensureBrowserNetworkSuspensionTracking();
     setVisibilityState('visible');
-    
+    if (typeof window.requestIdleCallback !== 'function') Reflect.deleteProperty(window, 'requestIdleCallback');
     mockToastService = {
       show: vi.fn(),
       warning: vi.fn(),
@@ -130,19 +165,30 @@ describe('AuthService', () => {
         data: { session: null },
         error: null
       }),
+      signInWithPassword: vi.fn(),
+      consumeCredentialRequestIdForAccessToken: vi.fn().mockReturnValue(null),
+      authorizeSignupAdoption: vi.fn(),
+      reset: vi.fn(),
       signOut: vi.fn().mockResolvedValue(undefined),
       getStorageKey: vi.fn().mockReturnValue('sb-test-auth-token'),
     };
     
+    sessionRecoveryRequired$ = new Subject<{ type: 'session-recovery-required'; source: string }>();
     mockEventBus = {
-      onSessionRestored$: { pipe: vi.fn().mockReturnValue({ subscribe: vi.fn() }) },
+      onSessionRestored$: new Subject<unknown>().asObservable(),
+      onSessionRecoveryRequired$: sessionRecoveryRequired$.asObservable(),
       publishSessionRestored: vi.fn(),
+      publishSessionRecoveryRequired: vi.fn((source: string) => {
+        sessionRecoveryRequired$.next({ type: 'session-recovery-required', source });
+      }),
       publishSessionInvalidated: vi.fn(),
       publishSessionSignedOut: vi.fn(),
     };
     
     const mockDestroyRef = {
-      onDestroy: vi.fn(),
+      onDestroy: vi.fn((callback: () => void) => {
+        destroyCallbacks.push(callback);
+      }),
     };
     
     injector = Injector.create({
@@ -152,6 +198,7 @@ describe('AuthService', () => {
         { provide: LoggerService, useValue: mockLogger },
         { provide: EventBusService, useValue: mockEventBus },
         { provide: SentryLazyLoaderService, useValue: mockSentryLazyLoaderService },
+        SyncStateService,
         AuthSessionCacheService,
         AuthCredentialRequestService,
         { provide: DestroyRef, useValue: mockDestroyRef },
@@ -159,15 +206,18 @@ describe('AuthService', () => {
     });
     
     service = runInInjectionContext(injector, () => new AuthService());
+    syncStateService = injector.get(SyncStateService);
   });
   
-  afterEach(() => {
+  afterEach(async () => {
     resetBrowserNetworkSuspensionTrackingForTests();
     setVisibilityState('visible');
     localStorage.removeItem('sb-test-auth-token');
     localStorage.removeItem(AUTH_CONFIG.LOCAL_MODE_CACHE_KEY);
     delete (window as Window & { __NANOFLOW_SESSION_PREWARM__?: unknown }).__NANOFLOW_SESSION_PREWARM__;
+    delete (globalThis as Record<string, unknown>)[AUTHORITY_KEY];
     service.reset();
+    await Promise.all(realAuthClientCleanup.map(cleanup => cleanup()));
   });
   
   describe('onAuthStateChange 监听', () => {
@@ -179,9 +229,101 @@ describe('AuthService', () => {
     it('ensureRuntimeAuthReady 后才应该注册认证状态变更监听器，且只注册一次', async () => {
       await ensureRuntimeAuthReady();
       await ensureRuntimeAuthReady();
-
       expect(mockSupabaseClient.clientAsync).toHaveBeenCalledTimes(1);
       expect(authStateCallback).toBeDefined();
+    });
+
+    it.each([1, 2])('%i 次 null client 后显式重试应注册一次监听器', async nullCount => {
+      const listener = createListenerClient();
+      for (let attempt = 0; attempt < nullCount; attempt += 1) mockSupabaseClient.clientAsync.mockResolvedValueOnce(null);
+      mockSupabaseClient.clientAsync.mockResolvedValueOnce(listener.client);
+      for (let attempt = 0; attempt < nullCount; attempt += 1) { await ensureRuntimeAuthReady(); expect(service.runtimeState()).toBe('pending'); }
+      await ensureRuntimeAuthReady();
+      expect(mockSupabaseClient.clientAsync).toHaveBeenCalledTimes(nullCount + 1);
+      expect(listener.onAuthStateChange).toHaveBeenCalledTimes(1);
+    });
+    it('clientAsync 同步重入应共享同一 published listener flight', async () => {
+      let nested!: Promise<void>, publishedFlight: Promise<void> | null = null;
+      const pendingClient = createDeferred<ReturnType<typeof createListenerClient>['client']>(); const client = (mockSupabaseClient.client as () => ReturnType<typeof createListenerClient>['client'])();
+      mockSupabaseClient.clientAsync.mockImplementationOnce(() => { publishedFlight = (service as unknown as RuntimeReadyState).runtimeAuthReadyPromise; nested = ensureRuntimeAuthReady(); return pendingClient.promise; });
+      const outer = ensureRuntimeAuthReady(); pendingClient.resolve(client);
+      await Promise.all([outer, nested]);
+      expect([publishedFlight !== null, ...[mockSupabaseClient.clientAsync, client.auth.onAuthStateChange].map(mock => mock.mock.calls.length)]).toEqual([true, 1, 1]);
+      authStateCallback!('SIGNED_IN', { user: { id: 'once', email: null } }); (service as unknown as { sessionExpired: { set: (value: boolean) => void } }).sessionExpired.set(true); authStateCallback!('TOKEN_REFRESHED', { user: { id: 'once', email: null } });
+      expect(mockEventBus.publishSessionRestored).toHaveBeenCalledTimes(1);
+      service.reset(); expect(mockUnsubscribe).toHaveBeenCalledTimes(1);
+    });
+    it.each(['clientAsync', 'onAuthStateChange'] as const)('%s 失败应保留原错误并允许重试', async stage => {
+      const failure = new Error(stage);
+      if (stage === 'clientAsync') mockSupabaseClient.clientAsync.mockRejectedValueOnce(failure);
+      else mockSupabaseClient.clientAsync.mockResolvedValueOnce({ auth: { onAuthStateChange: vi.fn(() => { throw failure; }) } });
+      await expect(ensureRuntimeAuthReady()).rejects.toBe(failure);
+      expect(service.runtimeState()).toBe('failed');
+      expect((service as unknown as RuntimeReadyState).runtimeAuthReadyPromise).toBeNull();
+      await ensureRuntimeAuthReady();
+      expect(authStateCallback).toBeTypeOf('function');
+    });
+    it.each(['accepted', 'returned-stale'] as const)('%s subscription teardown 应恰好一次', async mode => {
+      const destroy = () => (injector as Injector & { destroy: () => void }).destroy();
+      const listener = createListenerClient(mode === 'returned-stale' ? destroy : undefined);
+      mockSupabaseClient.clientAsync.mockResolvedValueOnce(listener.client);
+      await ensureRuntimeAuthReady();
+      if (mode === 'accepted') { destroy(); service.reset(); }
+      expect(listener.unsubscribe).toHaveBeenCalledTimes(1);
+      mockSupabaseClient.clientAsync.mockClear();
+      await ensureRuntimeAuthReady();
+      expect(mockSupabaseClient.clientAsync).not.toHaveBeenCalled();
+    });
+    it('client 初始化期间销毁服务后不应注册 stale 监听器或结算 ready', async () => {
+      const pendingClient = createDeferred<ReturnType<typeof createListenerClient>['client']>();
+      const listenerClient = createListenerClient();
+      mockSupabaseClient.clientAsync.mockReturnValueOnce(pendingClient.promise);
+      const ready = ensureRuntimeAuthReady();
+      (injector as Injector & { destroy: () => void }).destroy();
+      pendingClient.resolve(listenerClient.client);
+      await ready;
+      expect(listenerClient.onAuthStateChange).not.toHaveBeenCalled();
+      expect(service.runtimeState()).not.toBe('ready');
+    });
+
+    it('reset 后旧 client flight 不应注册、结算或清除新 flight', async () => {
+      const pendingA = createDeferred<ReturnType<typeof createListenerClient>['client']>();
+      const pendingB = createDeferred<ReturnType<typeof createListenerClient>['client']>();
+      const listenerA = createListenerClient();
+      const listenerB = createListenerClient();
+      mockSupabaseClient.clientAsync
+        .mockReturnValueOnce(pendingA.promise)
+        .mockReturnValueOnce(pendingB.promise);
+      const flightA = ensureRuntimeAuthReady();
+      service.reset();
+      const flightB = ensureRuntimeAuthReady();
+      const internalFlightB = (service as unknown as RuntimeReadyState).runtimeAuthReadyPromise;
+      pendingA.resolve(listenerA.client);
+      await flightA;
+      expect(listenerA.onAuthStateChange).not.toHaveBeenCalled();
+      expect(service.runtimeState()).toBe('pending');
+      expect((service as unknown as RuntimeReadyState).runtimeAuthReadyPromise).toBe(internalFlightB);
+      pendingB.resolve(listenerB.client);
+      await flightB;
+      expect(listenerB.onAuthStateChange).toHaveBeenCalledTimes(1);
+      expect(service.runtimeState()).toBe('ready');
+    });
+
+    it.each([
+      ['reset', () => service.reset()],
+      ['destroy', () => (injector as Injector & { destroy: () => void }).destroy()],
+    ])('%s 后已排队的 stale 认证回调不应恢复身份', async (_name, invalidate) => {
+      await ensureRuntimeAuthReady();
+      const queuedCallback = authStateCallback!;
+
+      invalidate();
+      queuedCallback('SIGNED_IN', {
+        user: { id: 'stale-user', email: 'stale@example.com' },
+      });
+
+      expect(service.currentUserId()).toBeNull();
+      expect(service.authState().userId).toBeNull();
+      expect(mockEventBus.publishSessionRestored).not.toHaveBeenCalled();
     });
     
     it('TOKEN_REFRESHED 事件应该清除过期标记', async () => {
@@ -191,7 +333,7 @@ describe('AuthService', () => {
       (service as unknown as { sessionExpired: { set: (v: boolean) => void } }).sessionExpired.set(true);
       expect(service.sessionExpired()).toBe(true);
       
-      // 触发 TOKEN_REFRESHED 事件
+      authStateCallback!('SIGNED_IN', { user: { id: 'user-1', email: 'test@example.com' } });
       authStateCallback!('TOKEN_REFRESHED', {
         user: { id: 'user-1', email: 'test@example.com' }
       });
@@ -199,172 +341,152 @@ describe('AuthService', () => {
       // 过期标记应该被清除
       expect(service.sessionExpired()).toBe(false);
     });
-    
+
+    it('steady-state same-user TOKEN_REFRESHED 不应补发 session restored', async () => {
+      await ensureRuntimeAuthReady();
+
+      authStateCallback!('SIGNED_IN', {
+        user: { id: 'user-1', email: 'test@example.com' }
+      });
+
+      mockEventBus.publishSessionRestored.mockClear();
+
+      authStateCallback!('TOKEN_REFRESHED', {
+        user: { id: 'user-1', email: 'test@example.com' }
+      });
+
+      expect(mockEventBus.publishSessionRestored).not.toHaveBeenCalled();
+    });
+
+    it('显式 signOut 后迟到的旧会话 TOKEN_REFRESHED 不应恢复已登出的 owner', async () => {
+      await ensureRuntimeAuthReady();
+
+      localStorage.setItem(
+        'sb-test-auth-token',
+        createPersistedSessionPayload('user-a', 'a@example.com', false, 'token-a'),
+      );
+      authStateCallback!('SIGNED_IN', {
+        access_token: 'token-a',
+        user: { id: 'user-a', email: 'a@example.com' },
+      });
+
+      expect(service.currentUserId()).toBe('user-a');
+      expect(service.authState().userId).toBe('user-a');
+      expect(service.authState().email).toBe('a@example.com');
+      expect(service.sessionEmail()).toBe('a@example.com');
+      expect(service.persistedOwnerHint()).toBe('user-a');
+      expect(service.persistedSessionUserId()).toBe('user-a');
+      mockEventBus.publishSessionRestored.mockClear();
+      mockEventBus.publishSessionInvalidated.mockClear();
+
+      await service.signOut();
+
+      expect(service.currentUserId()).toBeNull();
+      expect(service.authState().userId).toBeNull();
+      expect(service.authState().email).toBeNull();
+      expect(service.sessionEmail()).toBeNull();
+      expect(service.persistedOwnerHint()).toBeNull();
+      expect(service.persistedSessionUserId()).toBeNull();
+      expect(mockEventBus.publishSessionRestored).not.toHaveBeenCalled();
+      expect(mockEventBus.publishSessionInvalidated).not.toHaveBeenCalled();
+
+      localStorage.setItem(
+        'sb-test-auth-token',
+        createPersistedSessionPayload('user-a', 'a@example.com', false, 'token-a'),
+      );
+      expect(JSON.parse(localStorage.getItem('sb-test-auth-token') ?? '{}')).toMatchObject({
+        access_token: 'token-a',
+        user: { id: 'user-a', email: 'a@example.com' },
+      });
+
+      authStateCallback!('TOKEN_REFRESHED', {
+        access_token: 'token-a',
+        user: { id: 'user-a', email: 'a@example.com' },
+      });
+
+      expect(service.currentUserId()).toBeNull();
+      expect(service.authState().userId).toBeNull();
+      expect(service.authState().email).toBeNull();
+      expect(service.sessionEmail()).toBeNull();
+      expect(service.persistedOwnerHint()).toBeNull();
+      expect(service.persistedSessionUserId()).toBeNull();
+      expect(mockEventBus.publishSessionRestored).not.toHaveBeenCalled();
+      expect(mockEventBus.publishSessionInvalidated).not.toHaveBeenCalled();
+    });
+
     it('SIGNED_IN 事件应该更新用户信息', async () => {
       await ensureRuntimeAuthReady();
 
       expect(service.currentUserId()).toBeNull();
-      
+
       // 触发 SIGNED_IN 事件
       authStateCallback!('SIGNED_IN', {
         user: { id: 'user-1', email: 'test@example.com' }
       });
-      
+
       expect(service.currentUserId()).toBe('user-1');
       expect(service.sessionEmail()).toBe('test@example.com');
     });
 
-    it('storage 事件应先发布 teardown 再桥接跨标签页登出状态', () => {
-      service.currentUserId.set('user-1');
-      service.sessionEmail.set('test@example.com');
-      let userIdDuringInvalidation: string | null | undefined;
-      mockEventBus.publishSessionInvalidated.mockImplementation(() => {
-        userIdDuringInvalidation = service.currentUserId();
+    it('steady-state same-user SIGNED_IN 不应补发 session restored', async () => {
+      await ensureRuntimeAuthReady();
+
+      authStateCallback!('SIGNED_IN', {
+        user: { id: 'user-1', email: 'test@example.com' }
       });
 
-      dispatchStorageEvent(null);
+      mockEventBus.publishSessionRestored.mockClear();
 
-      expect(mockEventBus.publishSessionInvalidated).toHaveBeenCalledWith('AuthService.storageBridge', 'user-1');
-      expect(userIdDuringInvalidation).toBe('user-1');
-      expect(service.currentUserId()).toBeNull();
-      expect(service.sessionEmail()).toBeNull();
-      expect(mockSentryLazyLoaderService.setUser).toHaveBeenCalledWith(null);
-    });
+      authStateCallback!('SIGNED_IN', {
+        user: { id: 'user-1', email: 'test@example.com' }
+      });
 
-    it('storage 登出在 currentUserId 尚未提升时也应使用 persisted owner hint 做 teardown', () => {
-      const nowSec = Math.floor(Date.now() / 1000);
-      localStorage.setItem('sb-test-auth-token', JSON.stringify({
-        access_token: 'fresh-token',
-        refresh_token: 'refresh-token',
-        expires_at: nowSec + 3600,
-        user: {
-          id: 'hint-user',
-          email: 'hint@example.com',
-        },
-      }));
-      service.reset();
-      service = runInInjectionContext(injector, () => new AuthService());
-
-      expect(service.currentUserId()).toBeNull();
-      expect(service.persistedOwnerHint()).toBe('hint-user');
-
-      dispatchStorageEvent(null);
-
-      expect(mockEventBus.publishSessionInvalidated).toHaveBeenCalledWith('AuthService.storageBridge', 'hint-user');
-    });
-
-    it('local-user 不应被跨标签页 cloud logout 误清空', () => {
-      service.currentUserId.set(AUTH_CONFIG.LOCAL_MODE_USER_ID);
-
-      dispatchStorageEvent(null);
-
-      expect(mockEventBus.publishSessionInvalidated).not.toHaveBeenCalled();
-      expect(service.currentUserId()).toBe(AUTH_CONFIG.LOCAL_MODE_USER_ID);
-    });
-
-    it('local-user 即使残留云端 persisted hint，也不应发布 remote invalidated teardown', () => {
-      const nowSec = Math.floor(Date.now() / 1000);
-      localStorage.setItem('sb-test-auth-token', JSON.stringify({
-        access_token: 'fresh-token',
-        refresh_token: 'refresh-token',
-        expires_at: nowSec + 3600,
-        user: {
-          id: 'cloud-user',
-          email: 'cloud@example.com',
-        },
-      }));
-      service.reset();
-      service = runInInjectionContext(injector, () => new AuthService());
-      service.currentUserId.set(AUTH_CONFIG.LOCAL_MODE_USER_ID);
-
-      dispatchStorageEvent(null);
-
-      expect(mockEventBus.publishSessionInvalidated).not.toHaveBeenCalled();
-      expect(service.currentUserId()).toBe(AUTH_CONFIG.LOCAL_MODE_USER_ID);
-      expect(service.persistedOwnerHint()).toBeNull();
-      expect(service.persistedSessionUserId()).toBeNull();
-    });
-
-    it('auth runtime 就绪前应忽略 storage 登入事件，避免与 onAuthStateChange 竞态', () => {
-      dispatchStorageEvent(createPersistedSessionPayload('cross-tab-user', 'cross@tab.com'));
-
-      expect(service.currentUserId()).toBeNull();
-      expect(service.sessionEmail()).toBeNull();
-    });
-
-    it('auth runtime 就绪后应正常处理 storage 登入事件', async () => {
-      await ensureRuntimeAuthReady();
-
-      dispatchStorageEvent(createPersistedSessionPayload('cross-tab-user', 'cross@tab.com'));
-
-      expect(service.currentUserId()).toBeNull();
-      expect(service.persistedOwnerHint()).toBe('cross-tab-user');
-      expect(service.persistedSessionUserId()).toBeNull();
-      expect(service.sessionEmail()).toBeNull();
-      expect(mockEventBus.publishSessionRestored).toHaveBeenCalledWith('cross-tab-user', 'AuthService.storageBridge');
-    });
-
-    it('storage user-only payload 不应被当成 confirmed session bridge', async () => {
-      await ensureRuntimeAuthReady();
-
-      dispatchStorageEvent(JSON.stringify({ user: { id: 'cross-tab-user', email: 'cross@tab.com' } }));
-
-      expect(service.persistedOwnerHint()).toBeNull();
       expect(mockEventBus.publishSessionRestored).not.toHaveBeenCalled();
     });
 
-    it('storage 登录待切换期间收到 SIGNED_IN 也不应提前确认新 owner', async () => {
+    it('sync sessionExpired arm 后 same-user TOKEN_REFRESHED 应只发布一次 session restored', async () => {
       await ensureRuntimeAuthReady();
-
-      dispatchStorageEvent(createPersistedSessionPayload('cross-tab-user', 'cross@tab.com'));
 
       authStateCallback!('SIGNED_IN', {
-        user: { id: 'cross-tab-user', email: 'cross@tab.com' },
+        user: { id: 'user-1', email: 'test@example.com' }
       });
 
-      expect(service.currentUserId()).toBeNull();
-      expect(service.persistedSessionUserId()).toBeNull();
+      mockEventBus.publishSessionRestored.mockClear();
+
+      syncStateService.setSessionExpired(true);
+
+      authStateCallback!('TOKEN_REFRESHED', {
+        user: { id: 'user-1', email: 'test@example.com' }
+      });
+      authStateCallback!('TOKEN_REFRESHED', {
+        user: { id: 'user-1', email: 'test@example.com' }
+      });
+
       expect(mockEventBus.publishSessionRestored).toHaveBeenCalledTimes(1);
+      expect(mockEventBus.publishSessionRestored).toHaveBeenCalledWith('user-1', 'AuthService');
     });
 
-    it('local-user 模式下应忽略跨标签页 cloud 登录桥接', async () => {
-      await ensureRuntimeAuthReady();
-      localStorage.setItem(AUTH_CONFIG.LOCAL_MODE_CACHE_KEY, 'true');
-      service.currentUserId.set(AUTH_CONFIG.LOCAL_MODE_USER_ID);
-
-      dispatchStorageEvent(createPersistedSessionPayload('cross-tab-user', 'cross@tab.com'));
-
-      expect(service.currentUserId()).toBe(AUTH_CONFIG.LOCAL_MODE_USER_ID);
-      expect(service.sessionEmail()).toBeNull();
-      expect(service.persistedOwnerHint()).toBeNull();
-    });
-
-    it('auth runtime 就绪后应兼容 wrapped currentSession 结构的 storage 登入事件', async () => {
+    it('armed old-user recovery 不应恢复不同用户，也不应在错用户后残留为迟到恢复', async () => {
       await ensureRuntimeAuthReady();
 
-      dispatchStorageEvent(createPersistedSessionPayload('wrapped-cross-tab-user', 'wrapped@tab.com', true));
+      authStateCallback!('SIGNED_IN', {
+        user: { id: 'user-1', email: 'test@example.com' }
+      });
 
-      expect(service.currentUserId()).toBeNull();
-      expect(service.sessionEmail()).toBeNull();
-      expect(service.persistedOwnerHint()).toBe('wrapped-cross-tab-user');
-      expect(mockEventBus.publishSessionRestored).toHaveBeenCalledWith('wrapped-cross-tab-user', 'AuthService.storageBridge');
+      mockEventBus.publishSessionRestored.mockClear();
+
+      syncStateService.setSessionExpired(true);
+
+      authStateCallback!('SIGNED_IN', {
+        user: { id: 'user-2', email: 'other@example.com' }
+      });
+      authStateCallback!('TOKEN_REFRESHED', {
+        user: { id: 'user-1', email: 'test@example.com' }
+      });
+
+      expect(mockEventBus.publishSessionRestored).not.toHaveBeenCalled();
     });
 
-    it('completeCrossTabSessionRestore 应在 owner 切换完成后补齐确认态', async () => {
-      await ensureRuntimeAuthReady();
-      localStorage.setItem('sb-test-auth-token', createPersistedSessionPayload('cross-tab-user', 'cross@tab.com'));
-
-      dispatchStorageEvent(createPersistedSessionPayload('cross-tab-user', 'cross@tab.com'));
-
-      service.currentUserId.set('cross-tab-user');
-      service.completeCrossTabSessionRestore('cross-tab-user');
-
-      expect(service.currentUserId()).toBe('cross-tab-user');
-      expect(service.persistedSessionUserId()).toBe('cross-tab-user');
-      expect(service.sessionEmail()).toBe('cross@tab.com');
-      expect(service.authState().userId).toBe('cross-tab-user');
-      expect(service.authState().email).toBe('cross@tab.com');
-    });
   });
   
   describe('会话过期检测', () => {
@@ -396,58 +518,6 @@ describe('AuthService', () => {
         '请重新登录以继续同步数据',
         { duration: 0 }
       );
-    });
-
-    it('后台 refresh 判定会话失效时也应先 teardown 再清 auth signal', () => {
-      service.currentUserId.set('user-1');
-      service.sessionEmail.set('test@example.com');
-      localStorage.setItem('sb-test-auth-token', createPersistedSessionPayload('user-1', 'test@example.com'));
-      (window as Window & { __NANOFLOW_SESSION_PREWARM__?: unknown }).__NANOFLOW_SESSION_PREWARM__ = {
-        status: 'refreshed',
-        session: {
-          access_token: 'access-token',
-          refresh_token: 'refresh-token',
-          expires_in: 3600,
-          expires_at: Math.floor(Date.now() / 1000) + 3600,
-          token_type: 'bearer',
-          user: { id: 'user-1', email: 'test@example.com' },
-        },
-      };
-      let userIdDuringInvalidation: string | null | undefined;
-      mockEventBus.publishSessionInvalidated.mockImplementation(() => {
-        userIdDuringInvalidation = service.currentUserId();
-      });
-
-      (service as unknown as {
-        handleBackgroundSessionInvalid: () => void;
-      }).handleBackgroundSessionInvalid();
-
-      expect(mockEventBus.publishSessionInvalidated).toHaveBeenCalledWith('AuthService.backgroundRefresh', 'user-1');
-      expect(userIdDuringInvalidation).toBe('user-1');
-      expect(service.currentUserId()).toBeNull();
-      expect(service.sessionEmail()).toBeNull();
-      expect(localStorage.getItem('sb-test-auth-token')).toBeNull();
-      expect((window as Window & { __NANOFLOW_SESSION_PREWARM__?: unknown }).__NANOFLOW_SESSION_PREWARM__).toBeUndefined();
-    });
-
-    it('background invalidation 后同标签页重新登录应补发 session restored', async () => {
-      await ensureRuntimeAuthReady();
-
-      authStateCallback!('SIGNED_IN', {
-        user: { id: 'user-1', email: 'test@example.com' }
-      });
-
-      (service as unknown as {
-        handleBackgroundSessionInvalid: () => void;
-      }).handleBackgroundSessionInvalid();
-
-      mockEventBus.publishSessionRestored.mockClear();
-
-      authStateCallback!('SIGNED_IN', {
-        user: { id: 'user-1', email: 'test@example.com' }
-      });
-
-      expect(mockEventBus.publishSessionRestored).toHaveBeenCalledWith('user-1', 'AuthService');
     });
 
     it('local-user 收到 SIGNED_OUT 时不应误判为云端会话过期', async () => {
@@ -524,7 +594,26 @@ describe('AuthService', () => {
       expect((window as Window & { __NANOFLOW_SESSION_PREWARM__?: unknown }).__NANOFLOW_SESSION_PREWARM__).toBeUndefined();
     });
   });
-  
+
+  registerAuthServiceCredentialSessionFenceSpecs(() => ({
+    service,
+    mockLogger,
+    realAuthClientCleanup,
+    mockSupabaseClient,
+    mockEventBus,
+    ensureRuntimeAuthReady,
+    dispatchStorageEvent,
+    dispatchAuthStateChange: (event, session) => authStateCallback!(event, session),
+    createPersistedSessionPayload,
+  }));
+  registerAuthServiceBackgroundSessionRefreshAuthoritySpecs(() => ({
+    service,
+    mockSupabaseClient,
+    mockEventBus,
+    ensureRuntimeAuthReady,
+    dispatchAuthStateChange: (event, session) => authStateCallback!(event, session),
+    createPersistedSessionPayload,
+  }));
   describe('reset', () => {
     it('应该重置所有状态', async () => {
       await ensureRuntimeAuthReady();
@@ -547,12 +636,7 @@ describe('AuthService', () => {
   });
 
   describe('password reset redirect origin', () => {
-    it('生产环境应使用 canonical origin 生成 password reset 回跳地址', async () => {
-      const original = {
-        production: environment.production,
-        canonicalOrigin: environment.canonicalOrigin,
-        deploymentTarget: environment.deploymentTarget,
-      };
+    it('密码重置应委托隔离凭证请求且不复用 primary client', async () => {
       const resetPasswordForEmail = vi.fn().mockResolvedValue({ error: null });
       mockSupabaseClient.clientAsync.mockResolvedValue({
         auth: {
@@ -564,180 +648,151 @@ describe('AuthService', () => {
           resetPasswordForEmail,
         },
       });
+      await ensureRuntimeAuthReady();
+      mockSupabaseClient.clientAsync.mockClear();
+      const resetPassword = vi.spyOn(
+        injector.get(AuthCredentialRequestService),
+        'resetPassword',
+      ).mockResolvedValue({ ok: true, value: undefined });
 
-      environment.production = true;
-      environment.canonicalOrigin = 'https://nanoflow.pages.dev';
-      environment.deploymentTarget = 'production';
-
-      try {
-        await service.resetPassword('user@example.com');
-      } finally {
-        environment.production = original.production;
-        environment.canonicalOrigin = original.canonicalOrigin;
-        environment.deploymentTarget = original.deploymentTarget;
-      }
-
-      expect(resetPasswordForEmail).toHaveBeenCalledWith('user@example.com', {
-        redirectTo: 'https://nanoflow.pages.dev/reset-password',
+      await expect(service.resetPassword('user@example.com')).resolves.toEqual({
+        ok: true,
+        value: undefined,
       });
+
+      expect(resetPassword).toHaveBeenCalledOnce();
+      expect(resetPassword).toHaveBeenCalledWith('user@example.com');
+      expect(mockSupabaseClient.clientAsync).not.toHaveBeenCalled();
+      expect(resetPasswordForEmail).not.toHaveBeenCalled();
     });
 
-    it('生产环境注册确认邮件应使用 canonical origin 生成 emailRedirectTo', async () => {
-      const original = {
-        production: environment.production,
-        canonicalOrigin: environment.canonicalOrigin,
-        deploymentTarget: environment.deploymentTarget,
-      };
-      const signUp = vi.fn().mockResolvedValue({
-        data: { user: { id: 'new-user', email: 'user@example.com' }, session: null },
-        error: null,
+    it('注册应委托隔离凭证请求并透传提交 fence，不初始化 primary client', async () => {
+      const canCommit = vi.fn().mockReturnValue(true);
+      const signUp = vi.spyOn(injector.get(AuthCredentialRequestService), 'signUp')
+        .mockResolvedValue({ ok: true, value: { needsConfirmation: true } });
+      await expect(service.signUp('user@example.com', 'password-123', canCommit))
+        .resolves.toEqual({ ok: true, value: { needsConfirmation: true } });
+      expect(signUp).toHaveBeenCalledWith(
+        'user@example.com',
+        'password-123',
+        expect.any(Function),
+        expect.any(Function),
+      );
+      const delegatedCanCommit = signUp.mock.calls[0]?.[2];
+      expect(delegatedCanCommit?.({ userId: 'new-user', email: 'user@example.com' })).toBe(true);
+      expect(canCommit).toHaveBeenCalledWith({ userId: 'new-user', email: 'user@example.com' });
+      expect(mockSupabaseClient.clientAsync).not.toHaveBeenCalled();
+    });
+    it.each([['current attempt', 'current', true], ['replacement modal', 'replaced', false],
+      ['logout', 'logout', false], ['teardown', 'reset', false], ['newer primary', 'newer', false]] as const)(
+      'signup adoption candidate: %s', async (_label, mode, expected) => {
+      installCanonicalAuthority();
+      let current = true, adopted: boolean | undefined;
+      const sessionA = { access_token: 'token-a', user: { id: 'signup-a', email: 'a@example.com' } };
+      const candidate = createDeferred<void>();
+      mockSupabaseClient.authorizeSignupAdoption.mockImplementation(async (_session, authorize) => {
+        await candidate.promise; return authorize();
       });
-      mockSupabaseClient.clientAsync.mockResolvedValue({
-        auth: {
-          onAuthStateChange: vi.fn((callback: (event: string, session: unknown) => void) => {
-            authStateCallback = callback;
-            return { data: { subscription: { unsubscribe: mockUnsubscribe } } };
-          }),
-          getSession: vi.fn().mockResolvedValue({ data: { session: null }, error: null }),
-          signUp,
-        },
-      });
-
-      environment.production = true;
-      environment.canonicalOrigin = 'https://nanoflow.pages.dev';
-      environment.deploymentTarget = 'production';
-
-      try {
-        await service.signUp('user@example.com', 'password-123');
-      } finally {
-        environment.production = original.production;
-        environment.canonicalOrigin = original.canonicalOrigin;
-        environment.deploymentTarget = original.deploymentTarget;
+      vi.spyOn(injector.get(AuthCredentialRequestService), 'signUp')
+        .mockImplementation(async (_email, _password, _canCommit, publish) => {
+          try { adopted = await publish!(sessionA); } catch { adopted = false; }
+          return { ok: true, value: adopted ? { userId: 'signup-a', email: 'a@example.com' } : {} };
+        });
+      localStorage.setItem('sb-test-auth-token', createPersistedSessionPayload('signup-a', 'a@example.com', false, 'token-a'));
+      const signup = service.signUp('a@example.com', 'password-123', () => current);
+      await vi.waitFor(() => expect(mockSupabaseClient.authorizeSignupAdoption).toHaveBeenCalledOnce());
+      if (mode === 'replaced') current = false; else if (mode === 'reset') service.reset(); else if (mode === 'logout') await service.signOut();
+      if (mode === 'newer') {
+        localStorage.setItem('sb-test-auth-token', createPersistedSessionPayload('signup-a', 'a@example.com', false, 'token-b'));
       }
-
-      expect(signUp).toHaveBeenCalledWith({
-        email: 'user@example.com',
-        password: 'password-123',
-        options: {
-          emailRedirectTo: 'https://nanoflow.pages.dev/auth/callback',
-        },
-      });
+      expect(mockSupabaseClient.reset).not.toHaveBeenCalled();
+      candidate.resolve();
+      await signup;
+      expect.soft(adopted).toBe(expected);
+      expect.soft(mockSupabaseClient.reset).toHaveBeenCalledTimes(expected ? 1 : 0);
     });
   });
 
-  describe('checkSession 异常容错', () => {
-    it('异常对象无 stack 时不应触发二次 slice 错误', async () => {
-      mockSupabaseClient.getSession.mockRejectedValueOnce({ message: 'mock-session-error' });
+  describe('auth identity fence', () => {
+    it('changes for accepted identity transitions but not unrelated auth state updates', async () => {
+      await ensureRuntimeAuthReady();
+      const initial = service.captureAuthIdentityFence();
+      service.authState.update(state => ({ ...state, isLoading: true, error: 'temporary' }));
+      expect(service.captureAuthIdentityFence()).toBe(initial);
 
-      await expect(service.checkSession()).resolves.toEqual({
-        userId: null,
-        email: null
+      authStateCallback!('SIGNED_IN', {
+        access_token: 'token-a', user: { id: 'user-a', email: 'a@example.com' },
       });
-
-      expect(service.authState().error).toBe('mock-session-error');
-      expect(service.authState().isCheckingSession).toBe(false);
-    });
-
-    it('浏览器网络挂起时应返回当前缓存身份而不是记录异常', async () => {
-      service.setProvisionalCurrentUserId('cached-user');
-      (service.sessionEmail as { set: (value: string | null) => void }).set('cached@example.com');
-      mockSupabaseClient.getSession.mockRejectedValueOnce(createBrowserNetworkSuspendedError());
-
-      await expect(service.checkSession()).resolves.toEqual({
-        userId: 'cached-user',
-        email: 'cached@example.com',
+      const firstA = service.captureAuthIdentityFence();
+      authStateCallback!('SIGNED_IN', {
+        access_token: 'token-a-2', user: { id: 'user-a', email: 'a@example.com' },
       });
-
-      expect(service.authState().error).toBeNull();
-      expect(service.authState().isCheckingSession).toBe(false);
-    });
-
-    it('页面隐藏时应走挂起预检而不是发起 getSession 请求', async () => {
-      service.setProvisionalCurrentUserId('cached-user');
-      setVisibilityState('hidden');
-
-      await expect(service.checkSession()).resolves.toEqual({
-        userId: 'cached-user',
-        email: null,
+      const secondA = service.captureAuthIdentityFence();
+      authStateCallback!('SIGNED_IN', {
+        access_token: 'token-b', user: { id: 'user-b', email: 'b@example.com' },
       });
-
-      expect(mockSupabaseClient.getSession).not.toHaveBeenCalled();
-    });
-  });
-
-  describe('persisted owner hint', () => {
-    it('access token 即将过期时仍应返回 owner hint，但不应命中 fast-path identity', () => {
-      const nowSec = Math.floor(Date.now() / 1000);
-      localStorage.setItem('sb-test-auth-token', JSON.stringify({
-        access_token: 'expired-soon-token',
-        refresh_token: 'refresh-token',
-        expires_at: nowSec + 30,
-        user: {
-          id: 'user-1',
-          email: 'user-1@example.com',
-        },
-      }));
-
-      expect(service.peekPersistedSessionIdentity()).toBeNull();
-      expect(service.peekPersistedOwnerHint()).toBe('user-1');
-    });
-
-    it('应兼容 currentSession 包裹的持久化 auth 结构', () => {
-      const nowSec = Math.floor(Date.now() / 1000);
-      localStorage.setItem('sb-test-auth-token', JSON.stringify({
-        currentSession: {
-          access_token: 'expired-soon-token',
-          refresh_token: 'refresh-token',
-          expires_at: nowSec + 30,
-          user: {
-            id: 'wrapped-user',
-            email: 'wrapped@example.com',
-          },
-        },
-      }));
-
-      expect(service.peekPersistedOwnerHint()).toBe('wrapped-user');
-    });
-
-    it('fresh currentSession 结构应命中 confirmed session fast-path', () => {
-      const nowSec = Math.floor(Date.now() / 1000);
-      localStorage.setItem('sb-test-auth-token', JSON.stringify({
-        currentSession: {
-          access_token: 'fresh-token',
-          refresh_token: 'refresh-token',
-          expires_at: nowSec + 3600,
-          user: {
-            id: 'fresh-wrapped-user',
-            email: 'fresh@example.com',
-          },
-        },
-      }));
-
-      expect(service.peekPersistedSessionIdentity()).toEqual({
-        userId: 'fresh-wrapped-user',
-        email: 'fresh@example.com',
+      const ownerB = service.captureAuthIdentityFence();
+      authStateCallback!('SIGNED_IN', {
+        access_token: 'token-a-3', user: { id: 'user-a', email: 'a@example.com' },
       });
+      const reloginA = service.captureAuthIdentityFence();
+
+      expect(new Set([initial, firstA, secondA, ownerB, reloginA]).size).toBe(5);
     });
 
-    it('signOut 应立即清空 persisted owner hint signal', async () => {
-      const nowSec = Math.floor(Date.now() / 1000);
-      localStorage.setItem('sb-test-auth-token', JSON.stringify({
-        access_token: 'fresh-token',
-        refresh_token: 'refresh-token',
-        expires_at: nowSec + 3600,
-        user: {
-          id: 'signal-user',
-          email: 'signal@example.com',
-        },
-      }));
-      service.reset();
-      service = runInInjectionContext(injector, () => new AuthService());
-
-      expect(service.persistedOwnerHint()).toBe('signal-user');
-
+    it('keeps a rejected late refresh equal when current and pending identities stay equal', async () => {
+      await ensureRuntimeAuthReady();
+      authStateCallback!('SIGNED_IN', {
+        access_token: 'token-a', user: { id: 'user-a', email: 'a@example.com' },
+      });
       await service.signOut();
+      const signedOut = service.captureAuthIdentityFence();
 
-      expect(service.persistedOwnerHint()).toBeNull();
+      authStateCallback!('TOKEN_REFRESHED', {
+        access_token: 'token-a', user: { id: 'user-a', email: 'a@example.com' },
+      });
+
+      expect(service.captureAuthIdentityFence()).toBe(signedOut);
     });
   });
+
+  registerAuthServiceSessionResilienceSpecs(() => ({
+    service,
+    injector,
+    destroyCallbacks,
+    recreateService: () => {
+      service = runInInjectionContext(injector, () => new AuthService());
+      return service;
+    },
+    ensureRuntimeAuthReady,
+    dispatchAuthStateChange: (event, session) => {
+      authStateCallback!(event, session);
+    },
+    mockSupabaseClient,
+    mockEventBus,
+    dispatchStorageEvent,
+    setVisibilityState,
+    createPersistedSessionPayload,
+  }));
+
+  registerAuthServicePersistedOwnerHintSpecs({
+    service: () => service,
+    recreateService: () => {
+      service = runInInjectionContext(injector, () => new AuthService());
+      return service;
+    },
+  });
+
+  registerAuthServiceSignedOutPendingBridgeSpecs(() => ({
+    service,
+    ensureRuntimeAuthReady,
+    dispatchAuthStateChange: (event, session) => {
+      authStateCallback!(event, session);
+    },
+    dispatchStorageEvent,
+    createPersistedSessionPayload,
+    mockEventBus,
+    mockSupabaseClient,
+    mockToastService,
+  }));
 });

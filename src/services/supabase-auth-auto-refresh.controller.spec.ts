@@ -540,4 +540,34 @@ describe('SupabaseAuthAutoRefreshController', () => {
       }
     }
   });
+
+  it('reset 后应忽略迟到的 proactive refresh 成功，不发布旧 generation 指标', async () => {
+    const refresh = createDeferred();
+    const client = createClient();
+    vi.spyOn(client.auth, 'getSession').mockResolvedValue({
+      data: { session: { expires_at: Math.floor(Date.now() / 1000) + 1 } },
+      error: null,
+    } as never);
+    const refreshSession = vi.spyOn(client.auth, 'refreshSession')
+      .mockReturnValue(refresh.promise as never);
+    const logger = { debug: vi.fn(), warn: vi.fn() };
+    const controller = new SupabaseAuthAutoRefreshController({
+      isOfflineMode: () => false,
+      logger,
+    });
+    const proactive = (controller as unknown as {
+      proactivelyRefreshIfNearingExpiry(
+        client: SupabaseClient<Database>, reason: 'online', syncGeneration: number,
+      ): Promise<void>;
+    }).proactivelyRefreshIfNearingExpiry;
+
+    const pending = proactive.call(controller, client, 'online', 0);
+    await waitForMockCall(refreshSession, 1);
+    controller.reset(null);
+    refresh.resolve();
+    await pending;
+
+    expect(controller.getMetrics()).toMatchObject({ totalAttempts: 1, successCount: 0, failureCount: 0 });
+    expect(logger.debug).not.toHaveBeenCalledWith('恢复时主动刷新 session 成功', expect.anything());
+  });
 });

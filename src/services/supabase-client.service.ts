@@ -27,6 +27,26 @@ import {
   SupabaseAuthAutoRefreshController,
   type SupabaseAuthAutoRefreshReason,
 } from './supabase-auth-auto-refresh.controller';
+import {
+  SupabaseCredentialRequestSessionBindingController,
+  type SignupSessionPublicationFence,
+} from './supabase-credential-request-session-binding.controller';
+import type { AuthCredentialStateCommitPredicate } from './auth-credential-flow.controller';
+import {
+  getCanonicalAuthStorageAuthority,
+  SupabaseAuthClientLifecycleController,
+  type SupabaseAuthClientCandidate,
+} from './supabase-auth-client-lifecycle.controller';
+import { SupabaseAuthScopedRequestCacheController } from './supabase-auth-scoped-request-cache.controller';
+
+export interface CredentialRequestSessionBinding {
+  requestId: string;
+  previousPersistedSession: string | null;
+}
+
+export type CredentialSignInFetchContext = {
+  requestId: string;
+};
 
 export interface SupabaseConnectivityChange {
   offline: boolean;
@@ -41,32 +61,23 @@ type SupabaseConnectivityListener = (change: SupabaseConnectivityChange) => void
 export class SupabaseClientService {
   private readonly logger = inject(LoggerService).category('SupabaseClient');
   private readonly clientOptionsFactory = inject(SupabaseClientOptionsFactoryService);
+  private readonly authClientLifecycle = new SupabaseAuthClientLifecycleController();
+  private readonly authScopedRequestCache = new SupabaseAuthScopedRequestCacheController({
+    anonymousBearerToken: () => this.supabaseAnonKey,
+    authority: getCanonicalAuthStorageAuthority,
+    isCandidateCurrent: candidate => this.authClientLifecycle.isCurrent(candidate),
+    onCacheHit: signature => this.logger.debug('请求去重命中，复用缓存结果', { signature }),
+  });
   private supabase: SupabaseClient<Database> | null = null;
   private initPromise: Promise<SupabaseClient<Database> | null> | null = null;
-
-  // 【鲁棒性 3】fetch 层 401 重试计数，防止无限重试
-  // key: 请求 URL + method，value: 已重试次数
+  // Fetch 401 retry counts are bounded per request signature.
   private readonly fetch401RetryCount = new Map<string, number>();
   private readonly MAX_FETCH_401_RETRIES = 1; // 最多重试一次（总共 2 次请求）
-
-  // 【根因修复 2026-04-20】Supabase 网关瞬时 5xx（502/503/504）静默重试。
-  // 背景：用户控制台频繁出现 "Access-Control-Allow-Origin ... blocked by CORS"，
-  // 实为 Supabase edge 返回 502 时未携带 CORS 头，被浏览器错报为 CORS 错误。
-  // 这类 5xx 几乎都是上游 PostgREST 瞬时波动，重试一次即可恢复。
-  // 仅对幂等方法（GET/HEAD）启用，写操作由上层 RetryQueue 负责。
+  // Transient gateway retries stay limited to idempotent requests.
   private readonly MAX_FETCH_GATEWAY_RETRIES = 2; // 最多额外重试 2 次（总共 3 次请求）
   private readonly FETCH_GATEWAY_RETRY_BASE_MS = 300; // 指数退避基数：300ms → 600ms
   private readonly FETCH_GATEWAY_RETRY_JITTER_MS = 150; // 抖动上限，避免雷鸣群效应
 
-  // 【鲁棒性 8】请求去重缓存 - 防止网络不稳定时同一请求重复发送
-  // key: 请求签名（method+url+body hash），value: { promise, createdAt, response }
-  private readonly requestDeduplicationCache = new Map<string, {
-    promise: Promise<Response>;
-    createdAt: number;
-    response?: Response;
-  }>();
-  private readonly REQUEST_DEDUP_TTL_MS = 5000; // 5s 内去重
-  
   private reachabilityProbePromise: Promise<boolean> | null = null;
   private readonly connectivityListeners = new Set<SupabaseConnectivityListener>();
   private lastReachabilityProbeAt = 0;
@@ -82,7 +93,14 @@ export class SupabaseClientService {
     isOfflineMode: () => this.isOfflineMode(),
     logger: this.logger,
   });
-
+  private readonly credentialRequestSessionBinding =
+    new SupabaseCredentialRequestSessionBindingController({
+      getStorageKey: () => this.getStorageKey(),
+      getSupabaseUrl: () => this.supabaseUrl,
+      getSupabaseAnonKey: () => this.supabaseAnonKey,
+      buildSignupClientOptions: (storageKey, storage, fetchHandler) =>
+        this.clientOptionsFactory.buildSignupClientOptions(storageKey, storage, fetchHandler),
+    });
   constructor() {
     const supabaseUrl = environment.supabaseUrl;
     const supabaseAnonKey = environment.supabaseAnonKey;
@@ -125,43 +143,57 @@ export class SupabaseClientService {
   get isConfigured(): boolean {
     return this.canInitialize;
   }
-
-  /**
-   * 返回 Supabase auth token 在 localStorage 中的存储键名。
-   * 供本地会话快速路径读取（避免重复硬编码 key 格式）。
-   */
   getStorageKey(): string | null {
     if (!this.canInitialize || !this.supabaseUrl) return null;
     return resolveSupabaseStorageKey(this.supabaseUrl);
   }
-
+  consumeCredentialRequestIdForAccessToken(
+    accessToken: string,
+  ): CredentialRequestSessionBinding | null {
+    return this.credentialRequestSessionBinding.consume(accessToken);
+  }
   async clientAsync(): Promise<SupabaseClient<Database> | null> {
     if (!this.canInitialize) return null;
     if (this.supabase) return this.supabase;
     if (this.initPromise) return this.initPromise;
-
-    this.initPromise = import('@supabase/supabase-js')
-      .then(({ createClient }) => {
-        this.supabase = createClient<Database>(
+    const storageKey = this.getStorageKey();
+    if (!storageKey) return null;
+    const promise = this.authClientLifecycle.beginCandidate(storageKey)
+      .then(async candidate => {
+        const { createClient } = await import('@supabase/supabase-js');
+        const client = createClient<Database>(
           this.supabaseUrl,
           this.supabaseAnonKey,
-          this.buildClientOptions()
+          this.buildClientOptions(candidate)
         );
+        try {
+          await client.auth.getSession();
+          const promoted = await this.authClientLifecycle.promote(candidate);
+          if (!promoted || !this.authClientLifecycle.isCurrent(candidate) || this.initPromise !== promise) {
+            return this.authClientLifecycle.disposeClient(client);
+          }
+        } catch (error) {
+          this.authClientLifecycle.disposeClient(client);
+          throw error;
+        }
+        this.supabase = client;
         this.ensureAuthAutoRefreshLifecycle();
         void this.syncAuthAutoRefresh('client-init');
         return this.supabase;
       })
       .catch((error) => {
+        if (this.initPromise !== promise) return null;
+        if (error instanceof Error && error.message.startsWith('AUTH_')) return null;
         this.logger.error('Supabase 客户端初始化失败', error);
         this.configurationError.set('Supabase 客户端初始化失败');
         this.supabase = null;
         return null;
       })
       .finally(() => {
-        this.initPromise = null;
+        if (this.initPromise === promise) this.initPromise = null;
       });
-
-    return this.initPromise;
+    this.initPromise = promise;
+    return promise;
   }
 
   async ensureClientReady(): Promise<void> {
@@ -324,10 +356,6 @@ export class SupabaseClientService {
     return false;
   }
 
-  /**
-   * 同步客户端获取仅用于“已就绪路径”。
-   * 未就绪时抛出可诊断错误，调用方应改用 clientAsync/ensureClientReady。
-   */
   client(): SupabaseClient<Database> {
     if (!this.canInitialize) {
       throw new Error('Supabase 未配置，请提供 NG_APP_SUPABASE_URL 与 NG_APP_SUPABASE_ANON_KEY');
@@ -340,17 +368,19 @@ export class SupabaseClientService {
 
   reset(): void {
     const client = this.supabase;
+    this.authScopedRequestCache.reset();
+    this.authClientLifecycle.reset();
     this.authAutoRefresh.reset(client);
+    if (client) this.authClientLifecycle.disposeClient(client);
     this.supabase = null;
     this.initPromise = null;
+    this.credentialRequestSessionBinding.clearCompletedBindings();
   }
-
   private ensureAuthAutoRefreshLifecycle(): void {
     this.authAutoRefresh.bindLifecycle(reason => {
       void this.syncAuthAutoRefresh(reason);
     });
   }
-
   private syncAuthAutoRefresh(
     reason: SupabaseAuthAutoRefreshReason
   ): Promise<void> {
@@ -358,10 +388,6 @@ export class SupabaseClientService {
       void this.syncAuthAutoRefresh('resume-timer');
     });
   }
-
-  /**
-   * 【鲁棒性 5】获取 token 续签指标（供调试/监控使用）
-   */
   getProactiveRefreshMetrics() {
     return this.authAutoRefresh.getMetrics();
   }
@@ -376,43 +402,97 @@ export class SupabaseClientService {
     return client.auth.getSession();
   }
 
-  async signInWithPassword(email: string, password: string): Promise<AuthResponse> {
+  async signInWithPassword(
+    email: string,
+    password: string,
+    credentialRequestId?: string,
+  ): Promise<AuthResponse> {
     const client = await this.clientAsync();
     if (!client) {
       throw new Error('Supabase 未配置，无法登录');
     }
-    return client.auth.signInWithPassword({ email, password });
+    if (!credentialRequestId) {
+      return client.auth.signInWithPassword({ email, password });
+    }
+    return await this.credentialRequestSessionBinding.runSignIn(
+      credentialRequestId,
+      () => client.auth.signInWithPassword({ email, password }),
+    );
   }
 
-  async signOut(): Promise<void> {
-    const client = await this.clientAsync();
-    if (!client) return;
-    const result = await client.auth.signOut();
-    if (result?.error) {
-      throw result.error;
+  async signUpIsolated(
+    email: string,
+    password: string,
+    emailRedirectTo: string,
+    canCommit: AuthCredentialStateCommitPredicate,
+    afterSessionCommit: SignupSessionPublicationFence,
+  ): Promise<AuthResponse> {
+    if (!this.canInitialize) throw new Error('AUTH_SIGNUP_CONFIGURATION_UNAVAILABLE');
+    return await this.credentialRequestSessionBinding.runSignUp(
+      email, password, emailRedirectTo, canCommit, afterSessionCommit,
+    );
+  }
+
+  async authorizeSignupAdoption(
+    expected: { access_token: string; user: { id: string; email?: string | null } },
+    authorize: () => boolean,
+  ): Promise<boolean> {
+    const storageKey = this.getStorageKey();
+    if (!this.canInitialize || !storageKey) return false;
+    const lifecycle = new SupabaseAuthClientLifecycleController();
+    const candidate = await lifecycle.beginCandidate(storageKey);
+    try {
+      const { createClient } = await import('@supabase/supabase-js');
+      const client = createClient<Database>(this.supabaseUrl, this.supabaseAnonKey,
+        this.clientOptionsFactory.buildSignupAdoptionClientOptions(
+          candidate.storageKey, candidate.storage,
+        ));
+      try {
+        const { data, error } = await client.auth.getSession();
+        const session = data.session;
+        return !error && !!session
+          && session.access_token === expected.access_token
+          && session.user.id === expected.user.id
+          && (session.user.email ?? null) === (expected.user.email ?? null)
+          && authorize();
+      } finally {
+        const cleanups: Array<Promise<unknown>> = [];
+        try {
+          cleanups.push(Promise.resolve(client.auth.dispose()));
+        } catch (error) {
+          cleanups.push(Promise.reject(error));
+        }
+        try {
+          cleanups.push(Promise.resolve(client.removeAllChannels()));
+        } catch (error) {
+          cleanups.push(Promise.reject(error));
+        }
+        await Promise.allSettled(cleanups);
+      }
+    } finally {
+      lifecycle.reset();
     }
   }
 
-  /**
-   * 【根本修复】Supabase 客户端 fetch 层 401 自愈拦截器。
-   *
-   * 问题：REST/Functions/Storage 端点收到 401（JWT expired）后，Supabase JS 自身不会
-   * 自动刷新+重试，而是把错误抛回调用方；各调用点必须自行实现 withAuthRetry。这种
-   * 分散式自愈容易遗漏路径（如未经测试的冷门端点），造成控制台刷 401。
-   *
-   * 方案：把自愈逻辑下沉到 fetch 层——所有经 Supabase 客户端发出的请求都透明地获得
-   *   "401 → refreshSession → retry once" 能力。Refresh token 自身请求（/auth/v1/token）
-   *   绕过本逻辑以避免递归。每个请求最多重试一次，避免风暴。
-   *
-   * 这是三层防御的最内层：预防（proactivelyRefreshIfNearingExpiry）+ 拦截（本方法）
-   * + 兜底（上层的 withAuthRetry 仍保留）。任何一层单独都能解决大部分问题，三层叠加
-   *   逼近零可见 401 错误。
-   */
-  private async supabaseFetch(url: RequestInfo | URL, options: RequestInit = {}): Promise<Response> {
+  signOut(): Promise<void> {
+    return this.clientAsync().then(client => {
+      if (!client) return;
+      const operation = client.auth.signOut().then(result => {
+        if (result?.error) throw result.error;
+      });
+      this.authClientLifecycle.holdPublicationUntil(operation, SUPABASE_CLIENT_FETCH_MAX_MS);
+      return operation;
+    });
+  }
+  private async supabaseFetch(
+    url: RequestInfo | URL,
+    options: RequestInit = {},
+    authGeneration?: SupabaseAuthClientCandidate,
+  ): Promise<Response> {
+    const credentialSignInContext = this.credentialRequestSessionBinding.currentFetchContext();
     if (isBrowserNetworkSuspendedWindow()) {
       throw createBrowserNetworkSuspendedError();
     }
-
     // 离线时直接拒绝，避免等待超时产生 AbortError
     if (typeof navigator !== 'undefined' && !navigator.onLine) {
       this.setOfflineModeState(true, 'request');
@@ -422,71 +502,28 @@ export class SupabaseClientService {
     if (this.isOfflineMode()) {
       throw createBrowserNetworkSuspendedError();
     }
-
     // 【鲁棒性 8】请求去重：5s 内的重复读取请求复用前一个结果（GET/HEAD + 只读 RPC，写操作不去重）
     const httpMethod = getSupabaseRequestMethod(url, options);
     const isGatewayRetrySafeRequest = isGatewayRetrySafeSupabaseRequest(url, options, httpMethod);
 
     if (isGatewayRetrySafeRequest) {
       const signature = buildSupabaseRequestSignature(url, options);
-      const cached = this.requestDeduplicationCache.get(signature);
-
-      if (cached && Date.now() - cached.createdAt < this.REQUEST_DEDUP_TTL_MS) {
-        this.logger.debug('请求去重命中，复用缓存结果', { signature });
-        if (cached.response) {
-          return cached.response.clone();
-        }
-        // 【根因修复】cached.response 未就绪时，多个并发 awaiter 会拿到同一个原始
-        // Response 实例；一旦下游（如 Supabase JS）消费 body，其他 awaiter 再读就会
-        // 抛 "Failed to execute 'text' on 'Response': body stream already read"。
-        // 必须 clone 后再返回，保证每个 awaiter 独占 body 流。
-        const sharedResponse = await cached.promise;
-        return sharedResponse.clone();
-      }
-
-      // 清理过期缓存
-      this.cleanupDeduplicationCache();
-
-      // 缓存本次请求的 promise，后续请求会 await 它而不是重新发送
-      const fetchPromise = (async () => {
-        try {
-          // 【根因修复 2026-04-20】读取请求启用网关 5xx 静默重试，吸收 Supabase edge
-          // 瞬时 502/503/504（浏览器常误报为 CORS 错误），避免上抛到 UI。
-          const response = await this.fetchWithGatewayRetry(url, options);
-          const cacheEntry = this.requestDeduplicationCache.get(signature);
-          if (cacheEntry) {
-            cacheEntry.response = response.clone();
-          }
-          return response;
-        } catch (err) {
-          // 请求失败时主动清除缓存，允许后续请求立即重试而非复用失败的 promise
-          this.requestDeduplicationCache.delete(signature);
-          throw err;
-        }
-      })();
-
-      this.requestDeduplicationCache.set(signature, {
-        promise: fetchPromise,
-        createdAt: Date.now()
+      const dedupResponse = await this.authScopedRequestCache.execute({
+        candidate: authGeneration,
+        signature,
+        options,
+        request: url,
+        fetch: () => this.fetchWithGatewayRetry(url, options),
       });
-
-      // 【根因修复】首个调用方也必须 clone：若并发 awaiter 同时存在，双方拿到的都是
-      // 同一个原始 Response；这里 clone 后再交给 handle401Retry 与下游消费。
-      const dedupResponse = (await fetchPromise).clone();
       return await this.handle401Retry(url, options, dedupResponse);
     }
 
-    // 非幂等请求（POST/PATCH/PUT/DELETE 等）：直接发送，不去重
     const directResponse = await this.fetchWithTimeout(url, options);
-    return await this.handle401Retry(url, options, directResponse);
+    const response = await this.handle401Retry(url, options, directResponse);
+    await this.credentialRequestSessionBinding.bindResponse(credentialSignInContext, url, options, response);
+    return response;
   }
 
-  /**
-   * 【精准自愈策略】处理 401 响应的重试逻辑：
-   * 1. 401 + JWT 问题特征 + 未超过重试上限 → 刷新重试
-   * 2. 5xx 网关错误 → 不刷新（与认证无关）
-   * 3. 其他 4xx / 3xx / 2xx → 直接返回（非自愈场景）
-   */
   private async handle401Retry(
     url: RequestInfo | URL,
     options: RequestInit,
@@ -554,15 +591,6 @@ export class SupabaseClientService {
     }
   }
 
-  /**
-   * 通过 response headers 判断 401 是否由 JWT 问题引起（而非 RLS 权限）。
-   * 优势：不消费 body（下游 Supabase JS 仍能正常解析），且精准识别——避免对真正的
-   * 权限错误做无意义的 refresh 浪费网络 / 触发 Supabase 速率限制。
-   *
-   * PostgREST/GoTrue 的约定：
-   *   - JWT 相关 401 返回 WWW-Authenticate: Bearer error="invalid_token"
-   *   - 某些 Edge Function / Storage 实现直接返回 401 无 header → 为保守起见放行
-   */
   private looksLikeJwtAuthFailure(response: Response): boolean {
     const wwwAuth = response.headers.get('www-authenticate') ?? '';
     if (wwwAuth.toLowerCase().includes('invalid_token') || wwwAuth.toLowerCase().includes('expired_token')) {
@@ -576,10 +604,6 @@ export class SupabaseClientService {
     return false;
   }
 
-  /**
-   * 判断一个请求是否应该参与 401 自愈拦截。
-   * 排除 /auth/v1/ 自身的请求（refresh token、signIn 等）以防递归。
-   */
   private shouldAttemptJwtRefreshForFetch(url: RequestInfo | URL): boolean {
     const urlStr = typeof url === 'string'
       ? url
@@ -600,18 +624,6 @@ export class SupabaseClientService {
 
   private buildFetch401RetryKey(url: RequestInfo | URL, options: RequestInit): string {
     return buildSupabaseFetch401RetryKey(url, options);
-  }
-
-  /**
-   * 【鲁棒性 8】清理过期的去重缓存
-   */
-  private cleanupDeduplicationCache(): void {
-    const now = Date.now();
-    for (const [key, entry] of this.requestDeduplicationCache) {
-      if (now - entry.createdAt > this.REQUEST_DEDUP_TTL_MS) {
-        this.requestDeduplicationCache.delete(key);
-      }
-    }
   }
 
   /**
@@ -674,7 +686,7 @@ export class SupabaseClientService {
     try {
       await response.body?.cancel();
     } catch {
-      // 忽略 cancel 异常，继续重试 // eslint-disable-line no-restricted-syntax
+      // 忽略 cancel 异常，继续重试。
     }
   }
 
@@ -711,9 +723,6 @@ export class SupabaseClientService {
     return false;
   }
 
-  /**
-   * 从原 fetch 包装中抽出：承担「超时 + 离线探测 + 错误分级」等副作用。
-   */
   private async fetchWithTimeout(url: RequestInfo | URL, options: RequestInit): Promise<Response> {
     const callerSignal = options.signal;
     const controller = new AbortController();
@@ -757,10 +766,12 @@ export class SupabaseClientService {
     }
   }
 
-  private buildClientOptions() {
+  private buildClientOptions(authGeneration?: SupabaseAuthClientCandidate) {
     return this.clientOptionsFactory.buildClientOptions(
       this.supabaseUrl,
-      (url: RequestInfo | URL, options: RequestInit = {}) => this.supabaseFetch(url, options),
+      (url: RequestInfo | URL, options: RequestInit = {}) =>
+        this.supabaseFetch(url, options, authGeneration),
+      authGeneration,
     );
   }
 }

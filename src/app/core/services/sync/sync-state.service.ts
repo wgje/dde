@@ -9,11 +9,12 @@
  * 从 SimpleSyncService 提取，作为 Sprint 3 技术债务修复的一部分
  */
 
-import { Injectable, signal, computed } from '@angular/core';
+import { Injectable, signal, computed, inject } from '@angular/core';
 import { Project } from '../../../../models';
 import type { TaskDeleteBaseUpdatedAtMap } from '../../../../services/action-queue.types';
 import type { OperationConflictRecord } from '../../../../services/conflict-storage.helpers';
 import { SYNC_CONFIG } from '../../../../config/sync.config';
+import { EventBusService } from '../../../../services/event-bus.service';
 
 export type CloudSyncPausedReason = 'no-session' | 'refresh-failed';
 
@@ -89,6 +90,7 @@ export interface ConflictData {
   providedIn: 'root'
 })
 export class SyncStateService {
+  private readonly eventBus = inject(EventBusService, { optional: true });
   private syncErrorListener: ((syncError: string | null) => void) | null = null;
   private pendingRecoverableSyncError: string | null = null;
   private recoverableSyncErrorTimer: ReturnType<typeof setTimeout> | null = null;
@@ -131,7 +133,13 @@ export class SyncStateService {
    * 更新同步状态
    */
   update(partial: Partial<SyncState>): void {
-    this._syncState.update(state => ({ ...state, ...partial }));
+    const previousState = this._syncState();
+    const nextState = { ...previousState, ...partial };
+    this._syncState.set(nextState);
+
+    if (!previousState.sessionExpired && nextState.sessionExpired) {
+      this.eventBus?.publishSessionRecoveryRequired?.('SyncStateService');
+    }
   }
   
   /**

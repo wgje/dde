@@ -9,26 +9,39 @@ import {
   success,
 } from '../utils/result';
 import { SupabaseClientService } from './supabase-client.service';
+import { AuthPasswordRecoveryService } from './auth-password-recovery.service';
+import type { AuthCredentialStateCommitPredicate } from './auth-credential-flow.controller';
 import type { AuthResult } from './auth-types';
-
-type SupabaseAuthClient = NonNullable<Awaited<ReturnType<SupabaseClientService['clientAsync']>>>;
 
 type AuthProviderUser = {
   id: string;
   email?: string | null;
 };
 
+export type AuthSignupSessionPublicationFence = (session: {
+  access_token: string;
+  user: AuthProviderUser;
+}) => Promise<boolean>;
+
 @Injectable({
   providedIn: 'root',
 })
 export class AuthCredentialRequestService {
   private readonly supabase = inject(SupabaseClientService);
+  private readonly passwordRecovery = inject(AuthPasswordRecoveryService, { optional: true });
   private readonly requestTimeoutMs = 15000;
 
-  async signIn(email: string, password: string): Promise<Result<AuthResult, OperationError>> {
+  async signIn(
+    email: string,
+    password: string,
+    credentialRequestId?: string,
+  ): Promise<Result<AuthResult, OperationError>> {
     try {
+      const signInRequest = credentialRequestId
+        ? this.supabase.signInWithPassword(email, password, credentialRequestId)
+        : this.supabase.signInWithPassword(email, password);
       const { data, error } = await this.withTimeout(
-        this.supabase.signInWithPassword(email, password),
+        signInRequest,
         '登录请求超时，请检查网络连接后重试',
       );
 
@@ -43,17 +56,20 @@ export class AuthCredentialRequestService {
     }
   }
 
-  async signUp(email: string, password: string): Promise<Result<AuthResult, OperationError>> {
+  async signUp(
+    email: string,
+    password: string,
+    canCommitCredentialState?: AuthCredentialStateCommitPredicate,
+    afterSessionCommit?: AuthSignupSessionPublicationFence,
+  ): Promise<Result<AuthResult, OperationError>> {
     try {
-      const client = await this.supabase.clientAsync();
-      if (!client) {
-        return failure(
-          ErrorCodes.SYNC_AUTH_EXPIRED,
-          'Supabase 客户端未就绪，请稍后重试',
-        );
-      }
-
-      const { data, error } = await this.submitSignUpWithTimeout(client, email, password);
+      const { data, error } = await this.supabase.signUpIsolated(
+        email,
+        password,
+        `${this.getAuthRedirectOrigin()}/auth/callback`,
+        canCommitCredentialState ?? (() => false),
+        afterSessionCommit ?? (async () => false),
+      );
 
       if (error) {
         return failure(ErrorCodes.UNKNOWN, humanizeErrorMessage(error.message));
@@ -75,46 +91,17 @@ export class AuthCredentialRequestService {
 
   async resetPassword(email: string): Promise<Result<void, OperationError>> {
     try {
-      const client = await this.supabase.clientAsync();
-      if (!client) {
-        return failure(
-          ErrorCodes.SYNC_AUTH_EXPIRED,
-          'Supabase 客户端未就绪，请稍后重试',
-        );
+      if (!this.passwordRecovery) {
+        return failure(ErrorCodes.UNKNOWN, '密码恢复服务未就绪，请稍后重试');
       }
-
-      const { error } = await this.withTimeout(
-        client.auth.resetPasswordForEmail(email, {
-          redirectTo: `${this.getAuthRedirectOrigin()}/reset-password`,
-        }),
+      await this.withTimeout(
+        this.passwordRecovery.requestPasswordReset(email, this.getAuthRedirectOrigin()),
         '请求超时，请检查网络连接后重试',
       );
-
-      if (error) {
-        return failure(ErrorCodes.UNKNOWN, humanizeErrorMessage(error.message));
-      }
-
       return success(undefined);
     } catch (error: unknown) {
       return failure(ErrorCodes.UNKNOWN, this.toGenericErrorMessage(error));
     }
-  }
-
-  private async submitSignUpWithTimeout(
-    client: SupabaseAuthClient,
-    email: string,
-    password: string,
-  ): Promise<Awaited<ReturnType<SupabaseAuthClient['auth']['signUp']>>> {
-    return await this.withTimeout(
-      client.auth.signUp({
-        email,
-        password,
-        options: {
-          emailRedirectTo: `${this.getAuthRedirectOrigin()}/auth/callback`,
-        },
-      }),
-      '注册请求超时，请检查网络连接后重试',
-    );
   }
 
   private async withTimeout<T>(request: PromiseLike<T>, timeoutMessage: string): Promise<T> {
@@ -149,12 +136,13 @@ export class AuthCredentialRequestService {
       ? env.canonicalOrigin.trim().replace(/\/+$/, '')
       : '';
 
-    if (
-      canonicalOrigin
-      && /^https?:\/\//i.test(canonicalOrigin)
-      && (env.production === true || env.deploymentTarget === 'production')
-    ) {
-      return canonicalOrigin;
+    // The generated test/local environment can retain production-shaped defaults while
+    // deploymentTarget still identifies the runtime as local. Redirect policy follows
+    // the explicit deployment target so local tests and preview builds use their origin.
+    const isProduction = env.deploymentTarget === 'production';
+    if (isProduction) {
+      if (canonicalOrigin && /^https:\/\//i.test(canonicalOrigin)) return canonicalOrigin;
+      throw new Error('AUTH_REDIRECT_ORIGIN_MUST_USE_HTTPS');
     }
 
     return window.location.origin;

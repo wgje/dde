@@ -18,6 +18,19 @@ describe('AuthDevAutoLoginController', () => {
     expect(ctx.info).toHaveBeenCalledWith('✅ 开发环境自动登录成功');
   });
 
+  it('forwards the credential commit predicate to dev sign in', async () => {
+    const ctx = createContext();
+    const canCommitCredentialState = vi.fn(() => true);
+
+    await new AuthDevAutoLoginController(ctx).tryDevAutoLogin(canCommitCredentialState);
+
+    expect(ctx.signIn).toHaveBeenCalledWith(
+      'dev@example.com',
+      'secret',
+      canCommitCredentialState,
+    );
+  });
+
   it('does not run without credentials or in production', async () => {
     const missing = createContext({ devAutoLogin: null });
     await expect(new AuthDevAutoLoginController(missing).tryDevAutoLogin()).resolves.toBeNull();

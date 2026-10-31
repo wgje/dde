@@ -1,5 +1,9 @@
 import type { WritableSignal } from '@angular/core';
 import { supabaseErrorToError } from '../utils/supabase-error';
+import type {
+  AuthCredentialStateCommitPredicate,
+  AuthCredentialStateIdentity,
+} from './auth-credential-flow.controller';
 import type { AuthState } from './auth.service';
 import type { PersistedSessionIdentity } from './auth-session-identity';
 
@@ -18,19 +22,29 @@ type AuthSessionResult = {
   error: { message: string; status?: number; name?: string } | null;
 };
 
+type AuthSessionCheckFence = {
+  generation: number;
+  userId: string | null;
+  pendingOwnerUserId: string | null;
+};
+
 export interface AuthSessionCheckContext {
   isSupabaseConfigured: () => boolean;
   authState: WritableSignal<AuthState>;
   sessionInitialized: WritableSignal<boolean>;
   currentUserId: () => string | null;
+  pendingOwnerUserId: () => string | null;
   sessionEmail: () => string | null;
+  authIdentityGeneration: () => number;
   runtimeState: () => string;
   readLocalSessionFastPath: () => PersistedSessionIdentity | null;
   isBrowserNetworkSuspendedWindow: () => boolean;
   isBrowserNetworkSuspendedError: (error: unknown) => boolean;
   ensureRuntimeAuthReady: () => Promise<void>;
   getSession: () => Promise<AuthSessionResult>;
-  tryDevAutoLogin: () => Promise<AuthCheckSessionResult | null>;
+  tryDevAutoLogin: (
+    canCommitCredentialState: AuthCredentialStateCommitPredicate,
+  ) => Promise<AuthCheckSessionResult | null>;
   applyAuthenticatedIdentity: (
     userId: string,
     email: string | null,
@@ -71,15 +85,23 @@ export class AuthSessionCheckController {
       return this.deferForBrowserResume('preflight');
     }
 
+    const checkFence = this.captureCheckFence();
+    let shouldFinalize = true;
     try {
-      const sessionIdentity = this.resolveNetworkSessionIdentity(await this.loadSessionWithTimeout());
+      const sessionResult = await this.loadSessionWithTimeout();
+      if (!this.isCheckFenceCurrent(checkFence)) {
+        shouldFinalize = false; return this.resolveStaleCheckResult(checkFence, 'network-result');
+      }
+      const sessionIdentity = this.resolveNetworkSessionIdentity(sessionResult);
       if (sessionIdentity) return sessionIdentity;
 
       this.context.debug('无现有会话，尝试开发环境自动登录...');
-      const autoLoginResult = await this.context.tryDevAutoLogin();
+      const autoLoginResult = await this.context.tryDevAutoLogin(identity => this.canCommitCredentialState(checkFence, identity));
+      if (!this.canCommitCredentialState(checkFence, autoLoginResult ?? undefined)) {
+        shouldFinalize = false; return this.resolveStaleCheckResult(checkFence, 'auto-login');
+      }
       if (autoLoginResult) {
-        this.context.debug('========== 自动登录成功 ==========');
-        return autoLoginResult;
+        this.context.debug('========== 自动登录成功 =========='); return autoLoginResult;
       }
 
       this.context.debug('========== 无会话，未登录 ==========');
@@ -87,12 +109,62 @@ export class AuthSessionCheckController {
       this.context.setPersistedSessionUserId(null);
       return { userId: null, email: null };
     } catch (e: unknown) {
+      if (!this.isCheckFenceCurrent(checkFence)) {
+        shouldFinalize = false; return this.resolveStaleCheckResult(checkFence, 'error');
+      }
       return this.handleError(e);
     } finally {
-      this.context.debug('设置 isCheckingSession = false, sessionInitialized = true');
-      this.context.authState.update(s => ({ ...s, isCheckingSession: false }));
-      this.context.sessionInitialized.set(true);
+      if (shouldFinalize) {
+        this.context.debug('设置 isCheckingSession = false, sessionInitialized = true');
+        this.context.authState.update(s => ({ ...s, isCheckingSession: false }));
+        this.context.sessionInitialized.set(true);
+      }
     }
+  }
+
+  private captureCheckFence(): AuthSessionCheckFence {
+    return {
+      generation: this.context.authIdentityGeneration(),
+      userId: this.context.currentUserId(),
+      pendingOwnerUserId: this.context.pendingOwnerUserId(),
+    };
+  }
+
+  private isCheckFenceCurrent(fence: AuthSessionCheckFence): boolean {
+    return this.context.authIdentityGeneration() === fence.generation
+      && this.context.currentUserId() === fence.userId
+      && this.context.pendingOwnerUserId() === fence.pendingOwnerUserId;
+  }
+
+  private canCommitCredentialState(
+    fence: AuthSessionCheckFence,
+    identity?: AuthCredentialStateIdentity,
+  ): boolean {
+    if (this.isCheckFenceCurrent(fence)) {
+      return true;
+    }
+
+    return !!identity?.userId
+      && this.context.currentUserId() === identity.userId
+      && this.context.sessionEmail() === (identity.email ?? null)
+      && this.context.pendingOwnerUserId() === fence.pendingOwnerUserId;
+  }
+
+  private resolveStaleCheckResult(fence: AuthSessionCheckFence, stage: string): AuthCheckSessionResult {
+    const result = {
+      userId: this.context.currentUserId(),
+      email: this.context.sessionEmail(),
+    };
+    this.context.debug('忽略过期的 checkSession 结果', {
+      stage,
+      expectedGeneration: fence.generation,
+      currentGeneration: this.context.authIdentityGeneration(),
+      expectedUserId: fence.userId,
+      currentUserId: result.userId,
+      expectedPendingOwnerUserId: fence.pendingOwnerUserId,
+      currentPendingOwnerUserId: this.context.pendingOwnerUserId(),
+    });
+    return result;
   }
 
   private applyLocalSessionFastPath(localSession: PersistedSessionIdentity): AuthCheckSessionResult {
@@ -117,13 +189,17 @@ export class AuthSessionCheckController {
     this.context.debug('正在调用 supabase.getSession()...');
     const callStartTime = Date.now();
     const sessionPromise = this.context.getSession();
-    const timeoutPromise = new Promise<never>((_, reject) => {
-      setTimeout(() => reject(new Error('会话检查超时')), 5000);
-    });
-
-    const sessionResult = await Promise.race([sessionPromise, timeoutPromise]);
-    this.context.debug(`getSession() 返回 (耗时 ${Date.now() - callStartTime}ms)`);
-    return sessionResult;
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    try {
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timeoutId = setTimeout(() => reject(new Error('会话检查超时')), 5000);
+      });
+      const sessionResult = await Promise.race([sessionPromise, timeoutPromise]);
+      this.context.debug(`getSession() 返回 (耗时 ${Date.now() - callStartTime}ms)`);
+      return sessionResult;
+    } finally {
+      if (timeoutId !== null) clearTimeout(timeoutId);
+    }
   }
 
   private resolveNetworkSessionIdentity(sessionResult: AuthSessionResult): AuthCheckSessionResult | null {

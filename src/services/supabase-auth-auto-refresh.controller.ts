@@ -163,7 +163,7 @@ export class SupabaseAuthAutoRefreshController {
 
         this.clearResumeTimer();
         if (this.shouldProactivelyRefresh(reason)) {
-          await this.proactivelyRefreshIfNearingExpiry(client, reason);
+          await this.proactivelyRefreshIfNearingExpiry(client, reason, syncGeneration);
         }
         if (!this.isCurrentSyncGeneration(syncGeneration)) {
           return;
@@ -320,9 +320,12 @@ export class SupabaseAuthAutoRefreshController {
   private async proactivelyRefreshIfNearingExpiry(
     client: SupabaseClient<Database>,
     reason: SupabaseAuthAutoRefreshReason,
+    syncGeneration: number,
   ): Promise<void> {
+    if (!this.isCurrentSyncGeneration(syncGeneration)) return;
     try {
       const { data, error } = await client.auth.getSession();
+      if (!this.isCurrentSyncGeneration(syncGeneration)) return;
       if (error || !data.session?.expires_at) return;
 
       const remainingMs = data.session.expires_at * 1000 - Date.now();
@@ -331,15 +334,22 @@ export class SupabaseAuthAutoRefreshController {
       this.metrics.totalAttempts++;
       this.metrics.nearingExpiryCount++;
       this.options.logger.debug('浏览器恢复时 token 临近/已过期，主动刷新', { reason, remainingMs });
-      await this.refreshSession(client, reason);
+      await this.refreshSession(client, reason, syncGeneration);
     } catch (error) {
+      if (!this.isCurrentSyncGeneration(syncGeneration)) return;
       this.options.logger.debug('恢复时主动校验 session 异常', { reason, error });
     }
   }
 
-  private async refreshSession(client: SupabaseClient<Database>, reason: SupabaseAuthAutoRefreshReason): Promise<void> {
+  private async refreshSession(
+    client: SupabaseClient<Database>,
+    reason: SupabaseAuthAutoRefreshReason,
+    syncGeneration: number,
+  ): Promise<void> {
+    if (!this.isCurrentSyncGeneration(syncGeneration)) return;
     try {
       const { error } = await client.auth.refreshSession();
+      if (!this.isCurrentSyncGeneration(syncGeneration)) return;
       if (error) {
         this.options.logger.warn('恢复时主动刷新 session 失败', { reason, error: error.message });
         this.recordRefreshFailure();
@@ -349,6 +359,7 @@ export class SupabaseAuthAutoRefreshController {
       this.metrics.successCount++;
       this.metrics.lastRefreshAt = Date.now();
     } catch (refreshError) {
+      if (!this.isCurrentSyncGeneration(syncGeneration)) return;
       this.options.logger.debug('恢复时主动刷新 session 抛出异常', { reason, error: refreshError });
       this.recordRefreshFailure();
     }

@@ -74,7 +74,9 @@ export class AppAuthCoordinatorService {
     currentUserId: () => this.auth.currentUserId(),
     isAuthConfigured: () => this.auth.isConfigured,
     revokeWidgetBindings: () => this.widgetBinding.revokeAllBindings(),
-    signOutRemoteSession: () => this.auth.signOut(),
+    signOutRemoteSession: async () => {
+      await this.auth.signOut();
+    },
     notifyLocalLogoutServices: () => this.notifyLocalServicesForSignOut(),
     setCurrentUser: (userId, options) => this.userSession.setCurrentUser(userId, options),
     clearAllLocalData: userId => this.userSession.clearAllLocalData(userId),

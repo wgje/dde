@@ -7,7 +7,15 @@ import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import {
   resetBrowserNetworkSuspensionTrackingForTests,
 } from '../utils/browser-network-suspension';
-import { registerSupabaseAuthAutoRefreshSpecs } from './supabase-client.service.spec-helpers';
+import {
+  registerSupabaseAuthAutoRefreshSpecs,
+  registerSupabaseClientLifecycleSpecs,
+} from './supabase-client.service.spec-helpers';
+import { registerSupabaseClientCredentialSessionBindingSpecs } from './supabase-client-credential-session-binding.spec-helpers';
+import type {
+  CanonicalAuthGeneration,
+  CanonicalAuthStorageAuthority,
+} from './supabase-auth-client-lifecycle.controller';
 
 const authClientMock = {
   auth: {
@@ -17,7 +25,9 @@ const authClientMock = {
     refreshSession: vi.fn().mockResolvedValue({ data: { session: null }, error: null }),
     startAutoRefresh: vi.fn().mockResolvedValue(undefined),
     stopAutoRefresh: vi.fn().mockResolvedValue(undefined),
+    dispose: vi.fn().mockResolvedValue(undefined),
   },
+  removeAllChannels: vi.fn().mockResolvedValue([]),
 };
 
 const createClientMock = vi.fn(() => authClientMock);
@@ -62,9 +72,11 @@ async function flushAuthAutoRefresh(service: SupabaseClientService): Promise<voi
   await Promise.resolve();
 }
 
-describe('SupabaseClientService', () => {
+  describe('SupabaseClientService', () => {
   let service: SupabaseClientService;
   let fetchSpy: ReturnType<typeof vi.spyOn>;
+  let authGeneration: CanonicalAuthGeneration;
+  let canonicalAuthority: CanonicalAuthStorageAuthority;
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -76,8 +88,31 @@ describe('SupabaseClientService', () => {
     authClientMock.auth.refreshSession.mockResolvedValue({ data: { session: null }, error: null });
     authClientMock.auth.startAutoRefresh.mockResolvedValue(undefined);
     authClientMock.auth.stopAutoRefresh.mockResolvedValue(undefined);
+    authClientMock.auth.dispose.mockResolvedValue(undefined);
+    authClientMock.removeAllChannels.mockResolvedValue([]);
     setVisibilityState('visible');
     setNavigatorOnLine(true);
+    authGeneration = {
+      storageKey: 'sb-example-auth-token-nanoflow-g-test',
+      storage: {
+        getItem: vi.fn().mockResolvedValue(null),
+        setItem: vi.fn().mockResolvedValue(undefined),
+        removeItem: vi.fn().mockResolvedValue(undefined),
+      },
+      promote: vi.fn().mockResolvedValue('noop'),
+      retire: vi.fn(),
+    };
+    canonicalAuthority = {
+      createGeneration: vi.fn().mockResolvedValue(authGeneration),
+      peekBundle: vi.fn(),
+      readBundle: vi.fn(),
+      compareAndSwap: vi.fn(),
+      startSessionPrewarm: vi.fn(),
+    };
+    Object.defineProperty(globalThis, '__NANOFLOW_AUTH_CANONICAL_STORAGE__', {
+      configurable: true,
+      value: canonicalAuthority,
+    });
     fetchSpy = vi.spyOn(globalThis, 'fetch');
     const injector = Injector.create({
       providers: [
@@ -94,9 +129,14 @@ describe('SupabaseClientService', () => {
     resetBrowserNetworkSuspensionTrackingForTests();
     setVisibilityState('visible');
     setNavigatorOnLine(true);
+    const storageKey = service.getStorageKey();
+    if (storageKey) {
+      localStorage.removeItem(storageKey);
+    }
     service.reset();
     vi.useRealTimers();
     fetchSpy.mockRestore();
+    delete (globalThis as Record<string, unknown>)['__NANOFLOW_AUTH_CANONICAL_STORAGE__'];
   });
 
   describe('初始状态', () => {
@@ -139,7 +179,22 @@ describe('SupabaseClientService', () => {
     });
   });
 
+  registerSupabaseClientCredentialSessionBindingSpecs(() => ({
+    service,
+    fetchSpy,
+    createClientMock,
+    authClientMock,
+  }));
+
   describe('deferred client', () => {
+    registerSupabaseClientLifecycleSpecs(() => ({
+      authClientMock,
+      authGeneration,
+      canonicalAuthority,
+      createClientMock,
+      service,
+    }));
+
     it('buildClientOptions 应启用 Realtime worker 和 heartbeatCallback', () => {
       const mutable = service as unknown as {
         supabaseUrl: string;

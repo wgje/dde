@@ -8,6 +8,10 @@ import {
   resolvePersistedSessionRecord,
   type PersistedSessionIdentity,
 } from './auth-session-identity';
+import {
+  getCanonicalAuthStorageAuthority,
+  type CanonicalAuthBundle,
+} from './supabase-auth-client-lifecycle.controller';
 
 type SessionPrewarmState = {
   status: string;
@@ -52,10 +56,7 @@ export class AuthSessionCacheService {
 
   readPersistedOwnerHintFromStorage(): string | null {
     try {
-      const storageKey = this.supabase.getStorageKey();
-      if (!storageKey) return null;
-
-      const raw = localStorage.getItem(storageKey);
+      const raw = this.readCanonicalSessionRaw();
       if (!raw) return null;
 
       const authData: unknown = JSON.parse(raw);
@@ -79,10 +80,6 @@ export class AuthSessionCacheService {
 
   clearCachedSessionArtifacts(): void {
     try {
-      const storageKey = this.supabase.getStorageKey();
-      if (storageKey) {
-        localStorage.removeItem(storageKey);
-      }
       saveAuthCache(null);
     } catch {
       // localStorage 不可用时静默降级
@@ -97,6 +94,21 @@ export class AuthSessionCacheService {
     }
   }
 
+  captureCanonicalSessionRemoval(): () => Promise<void> {
+    const storageKey = this.supabase.getStorageKey();
+    const authority = getCanonicalAuthStorageAuthority();
+    const expected = storageKey && authority ? authority.peekBundle(storageKey) : null;
+    return async () => {
+      if (!storageKey || !authority || !expected?.session) return;
+      const next: CanonicalAuthBundle = { session: null, codeVerifier: null, user: null };
+      try {
+        await authority.compareAndSwap({ storageKey, expected, next });
+      } catch {
+        // A newer canonical bundle owns the key; stale cleanup is a no-op.
+      }
+    };
+  }
+
   private readPrewarmedSessionIdentity(shouldLog: boolean): PersistedSessionIdentity | null {
     if (typeof window === 'undefined') return null;
 
@@ -105,6 +117,14 @@ export class AuthSessionCacheService {
     }).__NANOFLOW_SESSION_PREWARM__;
 
     if (prewarm?.status !== 'refreshed' || !prewarm.session?.user?.id) return null;
+    const canonicalRaw = this.readCanonicalSessionRaw();
+    const canonicalData: unknown = canonicalRaw ? JSON.parse(canonicalRaw) : null;
+    const canonicalRecord = resolvePersistedSessionRecord(canonicalData);
+    const canonicalIdentity = resolvePersistedSessionIdentityFromAuthData(canonicalData);
+    if (
+      canonicalRecord?.['access_token'] !== prewarm.session.access_token
+      || canonicalIdentity?.userId !== prewarm.session.user.id
+    ) return null;
 
     if (shouldLog) {
       this.logger.debug('[FastPath] 使用 index.html 预热 session', {
@@ -120,10 +140,7 @@ export class AuthSessionCacheService {
   }
 
   private readLocalStorageSessionIdentity(shouldLog: boolean): PersistedSessionIdentity | null {
-    const storageKey = this.supabase.getStorageKey();
-    if (!storageKey) return null;
-
-    const raw = localStorage.getItem(storageKey);
+    const raw = this.readCanonicalSessionRaw();
     if (!raw) return null;
 
     const authData: unknown = JSON.parse(raw);
@@ -141,6 +158,12 @@ export class AuthSessionCacheService {
     }
 
     return identity;
+  }
+
+  private readCanonicalSessionRaw(): string | null {
+    const storageKey = this.supabase.getStorageKey();
+    const authority = getCanonicalAuthStorageAuthority();
+    return storageKey && authority ? authority.peekBundle(storageKey).session : null;
   }
 
   private hasAnySessionToken(record: Record<string, unknown>): boolean {

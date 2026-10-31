@@ -1,10 +1,15 @@
 import type { OperationError, Result } from '../utils/result';
+import type { AuthCredentialStateCommitPredicate } from './auth-credential-flow.controller';
 import type { AuthResult } from './auth-types';
 
 export interface AuthDevAutoLoginControllerContext {
   devAutoLogin?: { email: string; password: string } | null;
   production?: boolean;
-  signIn: (email: string, password: string) => Promise<Result<AuthResult, OperationError>>;
+  signIn: (
+    email: string,
+    password: string,
+    canCommitCredentialState?: AuthCredentialStateCommitPredicate,
+  ) => Promise<Result<AuthResult, OperationError>>;
   debug: (message: string, data?: unknown) => void;
   info: (message: string, data?: unknown) => void;
   warn: (message: string, data?: unknown) => void;
@@ -19,7 +24,9 @@ export class AuthDevAutoLoginController {
     this.attempted = false;
   }
 
-  async tryDevAutoLogin(): Promise<{ userId: string | null; email: string | null } | null> {
+  async tryDevAutoLogin(
+    canCommitCredentialState?: AuthCredentialStateCommitPredicate,
+  ): Promise<{ userId: string | null; email: string | null } | null> {
     if (this.attempted) {
       return null;
     }
@@ -38,7 +45,11 @@ export class AuthDevAutoLoginController {
     this.context.debug('🔐 开发环境自动登录中...');
 
     try {
-      const result = await this.context.signIn(devAutoLogin.email, devAutoLogin.password);
+      const result = await this.context.signIn(
+        devAutoLogin.email,
+        devAutoLogin.password,
+        canCommitCredentialState,
+      );
 
       if (result.ok && result.value.userId) {
         this.context.info('✅ 开发环境自动登录成功');

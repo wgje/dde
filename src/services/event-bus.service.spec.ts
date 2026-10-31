@@ -95,6 +95,16 @@ describe('EventBusService', () => {
     });
   });
 
+  describe('publishSessionRecoveryRequired / onSessionRecoveryRequired$', () => {
+    it('发布会话恢复前置条件事件', async () => {
+      const eventPromise = firstValueFrom(service.onSessionRecoveryRequired$.pipe(take(1)));
+      service.publishSessionRecoveryRequired('SyncStateService');
+      const event = await eventPromise;
+      expect(event.type).toBe('session-recovery-required');
+      expect(event.source).toBe('SyncStateService');
+    });
+  });
+
   describe('allEvents$', () => {
     it('接收所有类型的事件', async () => {
       const eventPromise = firstValueFrom(service.allEvents$.pipe(take(1)));

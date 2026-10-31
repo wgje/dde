@@ -63,6 +63,12 @@ export interface SessionRestoredEvent {
   readonly source: string;
 }
 
+/** 同步侧已进入会话过期冻结态，等待下一次确认过的 auth 恢复来解冻 */
+export interface SessionRecoveryRequiredEvent {
+  readonly type: 'session-recovery-required';
+  readonly source: string;
+}
+
 /** 后台刷新发现会话已失效（FastPath 乐观设置被推翻） */
 export interface SessionInvalidatedEvent {
   readonly type: 'session-invalidated';
@@ -89,6 +95,7 @@ export type AppEvent =
   | SyncStatusEvent
   | ForceSyncRequestEvent
   | TaskUpdateEvent
+  | SessionRecoveryRequiredEvent
   | SessionRestoredEvent
   | SessionInvalidatedEvent
   | SessionSignedOutEvent;
@@ -106,6 +113,7 @@ export class EventBusService {
   private readonly _syncStatus$ = new Subject<SyncStatusEvent>();
   private readonly _forceSyncRequest$ = new Subject<ForceSyncRequestEvent>();
   private readonly _taskUpdate$ = new Subject<TaskUpdateEvent>();
+  private readonly _sessionRecoveryRequired$ = new Subject<SessionRecoveryRequiredEvent>();
   private readonly _sessionRestored$ = new Subject<SessionRestoredEvent>();
   private readonly _sessionInvalidated$ = new Subject<SessionInvalidatedEvent>();
   private readonly _sessionSignedOut$ = new Subject<SessionSignedOutEvent>();
@@ -136,6 +144,9 @@ export class EventBusService {
   /** 任务更新事件流 */
   readonly onTaskUpdate$: Observable<TaskUpdateEvent> = this._taskUpdate$.asObservable();
   
+  /** 会话恢复前置条件事件流（sync runtime 已冻结，等待下一次确认过的 auth 恢复） */
+  readonly onSessionRecoveryRequired$: Observable<SessionRecoveryRequiredEvent> = this._sessionRecoveryRequired$.asObservable();
+
   /** 会话恢复事件流 */
   readonly onSessionRestored$: Observable<SessionRestoredEvent> = this._sessionRestored$.asObservable();
   
@@ -223,6 +234,17 @@ export class EventBusService {
   ): void {
     const event: TaskUpdateEvent = { type: 'task-update', taskId, updateType, source };
     this._taskUpdate$.next(event);
+    this._events$.next(event);
+    this._lastEvent.set(event);
+  }
+
+  /**
+   * 发布会话恢复前置条件事件。
+   * 订阅方只应 arm 一次性恢复资格，不得在这里直接恢复同步运行时。
+   */
+  publishSessionRecoveryRequired(source: string): void {
+    const event: SessionRecoveryRequiredEvent = { type: 'session-recovery-required', source };
+    this._sessionRecoveryRequired$.next(event);
     this._events$.next(event);
     this._lastEvent.set(event);
   }

@@ -2,12 +2,49 @@ import { Injectable, inject } from '@angular/core';
 import { LoggerService } from './logger.service';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { resolveSupabaseStorageKey } from './supabase-client-configuration';
+import type { CanonicalAuthStorageAdapter } from './supabase-auth-client-lifecycle.controller';
 
 type RealtimeHeartbeatPayload = string | {
   status?: string;
   event?: string;
   reason?: string;
 };
+
+export interface PasswordRecoveryStorage {
+  getItem: (key: string) => string | null | Promise<string | null>;
+  setItem: (key: string, value: string) => void | Promise<void>;
+  removeItem: (key: string) => void | Promise<void>;
+}
+
+class PasswordRecoveryStorageAdapter implements PasswordRecoveryStorage {
+  private readonly allowedKeys: Set<string>;
+
+  constructor(
+    private readonly storage: PasswordRecoveryStorage,
+    storageKey: string,
+  ) {
+    this.allowedKeys = new Set([storageKey, `${storageKey}-code-verifier`, `${storageKey}-user`]);
+  }
+
+  getItem(key: string) {
+    this.requireAllowed(key);
+    return this.storage.getItem(key);
+  }
+
+  setItem(key: string, value: string) {
+    this.requireAllowed(key);
+    return this.storage.setItem(key, value);
+  }
+
+  removeItem(key: string) {
+    this.requireAllowed(key);
+    return this.storage.removeItem(key);
+  }
+
+  private requireAllowed(key: string): void {
+    if (!this.allowedKeys.has(key)) throw new Error('AUTH_RECOVERY_STORAGE_KEY_REJECTED');
+  }
+}
 
 @Injectable({
   providedIn: 'root',
@@ -19,9 +56,10 @@ export class SupabaseClientOptionsFactoryService {
   buildClientOptions(
     supabaseUrl: string,
     fetchHandler: (url: RequestInfo | URL, options?: RequestInit) => Promise<Response>,
+    authGeneration?: { storageKey: string; storage: CanonicalAuthStorageAdapter | Storage },
   ) {
     return {
-      auth: this.buildAuthClientOptions(supabaseUrl),
+      auth: this.buildAuthClientOptions(supabaseUrl, authGeneration),
       global: {
         fetch: fetchHandler,
       },
@@ -32,21 +70,112 @@ export class SupabaseClientOptionsFactoryService {
     };
   }
 
-  private buildAuthClientOptions(supabaseUrl: string) {
+  buildPasswordRecoveryClientOptions(
+    storageKey: string,
+    storage: PasswordRecoveryStorage,
+  ) {
     return {
-      storage: typeof window !== 'undefined' ? window.localStorage : undefined,
-      storageKey: resolveSupabaseStorageKey(supabaseUrl) ?? undefined,
+      auth: {
+        storage,
+        storageKey,
+        lock: this.buildNavigatorLockHandler(),
+        autoRefreshToken: false,
+        persistSession: true,
+        detectSessionInUrl: false,
+        flowType: 'pkce' as const,
+      },
+    };
+  }
+
+  buildAuthCallbackClientOptions(storageKey: string) {
+    return {
+      auth: {
+        storageKey,
+        lock: this.buildNavigatorLockHandler(),
+        autoRefreshToken: false,
+        persistSession: false,
+        detectSessionInUrl: false,
+        flowType: 'pkce' as const,
+        skipAutoInitialize: true,
+      },
+    };
+  }
+
+  buildSignupClientOptions(
+    storageKey: string,
+    storage: PasswordRecoveryStorage,
+    fetchHandler: (url: RequestInfo | URL, options?: RequestInit) => Promise<Response>,
+  ) {
+    return {
+      auth: {
+        storage,
+        storageKey,
+        lock: this.buildNavigatorLockHandler(),
+        autoRefreshToken: false,
+        persistSession: true,
+        detectSessionInUrl: false,
+        flowType: 'pkce' as const,
+        skipAutoInitialize: true,
+      },
+      global: { fetch: fetchHandler },
+    };
+  }
+
+  buildSignupAdoptionClientOptions(storageKey: string, storage: CanonicalAuthStorageAdapter) {
+    return {
+      auth: {
+        storage,
+        storageKey,
+        lock: this.buildNavigatorLockHandler(),
+        autoRefreshToken: false,
+        persistSession: true,
+        detectSessionInUrl: false,
+        flowType: 'pkce' as const,
+        skipAutoInitialize: true,
+      },
+    };
+  }
+
+  buildPasswordRecoveryStorage(
+    storageKey: string,
+    storage: PasswordRecoveryStorage,
+  ): PasswordRecoveryStorage {
+    return new PasswordRecoveryStorageAdapter(storage, storageKey);
+  }
+
+  private buildAuthClientOptions(
+    supabaseUrl: string,
+    authGeneration?: { storageKey: string; storage: CanonicalAuthStorageAdapter | Storage },
+  ) {
+    return {
+      storage: authGeneration?.storage
+        ?? (typeof window !== 'undefined' ? window.localStorage : undefined),
+      storageKey: authGeneration?.storageKey ?? resolveSupabaseStorageKey(supabaseUrl) ?? undefined,
       lock: this.buildNavigatorLockHandler(),
       autoRefreshToken: true,
       persistSession: true,
-      detectSessionInUrl: true,
+      detectSessionInUrl: !this.isAuthUrlIsolationRoute(),
       flowType: 'pkce' as const,
     };
   }
 
+  private isAuthUrlIsolationRoute(): boolean {
+    if (typeof window === 'undefined') {
+      return false;
+    }
+    const path = window.location.pathname.replace(/\/+$/, '');
+    const hashPath = window.location.hash.slice(1).split('?')[0]?.replace(/\/+$/, '');
+    return path === '/reset-password'
+      || path === '/auth/callback'
+      || hashPath === '/reset-password'
+      || hashPath === '/auth/callback';
+  }
+
   private buildNavigatorLockHandler() {
     if (typeof navigator === 'undefined' || !navigator.locks) {
-      return async <T>(_name: string, _acquireTimeout: number, fn: () => Promise<T>): Promise<T> => await fn();
+      return async <T>(): Promise<T> => {
+        throw new Error('AUTH_GENERATION_LOCK_UNAVAILABLE');
+      };
     }
 
     return async <T>(name: string, acquireTimeout: number, fn: () => Promise<T>): Promise<T> => {
