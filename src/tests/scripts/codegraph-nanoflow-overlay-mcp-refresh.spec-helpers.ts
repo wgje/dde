@@ -18,12 +18,22 @@ export function registerCodegraphOverlayMcpRefreshSpecs(context: CodegraphOverla
     parseJsonLines,
   } = context;
 
-  it('writes generated overlay files atomically to avoid readers seeing partial JSON', () => {
+  it('delegates immutable generation and CURRENT publication to the atomic publisher', () => {
     const generatorSource = fs.readFileSync(scriptPath, 'utf8');
+    const publisherSource = fs.readFileSync(
+      path.join(repoRoot, 'scripts', 'lib', 'codegraph-overlay-generation-publisher.cjs'),
+      'utf8',
+    );
 
-    expect(generatorSource).toContain('writeOverlayAtomically');
-    expect(generatorSource).toContain('fs.renameSync');
-    expect(generatorSource).toContain('.tmp-');
+    expect(generatorSource).toContain("import overlayGenerationPublisher from './lib/codegraph-overlay-generation-publisher.cjs';");
+    expect(generatorSource).toContain('createOverlayGenerationPublisher');
+    expect(generatorSource).toContain('publisher.publish({');
+    expect(publisherSource).toContain('function writeFsynced');
+    expect(publisherSource).toContain('fs.fsyncSync');
+    expect(publisherSource).toContain('fs.renameSync(preparingDirectory, finalDirectory)');
+    expect(publisherSource).toContain('const currentTempPath =');
+    expect(publisherSource).toContain('fs.renameSync(currentTempPath, currentPath)');
+    expect(publisherSource).toContain('codegraph-overlay-publication-current-readback-drift');
   });
 
   it('skips background overlay refresh when another wrapper owns the refresh lock', async () => {

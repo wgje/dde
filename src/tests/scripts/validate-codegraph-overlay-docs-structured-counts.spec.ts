@@ -64,6 +64,75 @@ describe('validate-codegraph-overlay-docs structured detail counts', () => {
     );
   });
 
+  it('syncs Android Manifest and Kotlin resource semantic counts from the overlay baseline', () => {
+    const root = makeFixture();
+    const adaptationPath = path.join(root, 'docs', 'codegraph-nanoflow-adaptation.md');
+    fs.writeFileSync(
+      adaptationPath,
+      fs.readFileSync(adaptationPath, 'utf8').replace(
+        /Android packaging\/resource graph summary:.*/,
+        'Android packaging/resource graph summary: 0 androidManifestComponents, 0 androidManifestPermissions, 0 androidManifestUsesPermissionEdges, 0 androidManifestQueries, 0 androidManifestQueryEdges, 0 androidManifestComponentPermissions, 0 androidManifestComponentPermissionEdges, 0 androidManifestIntentFilters, 0 androidManifestIntentFilterActions, 0 androidManifestIntentFilterActionEdges, 0 androidManifestIntentFilterCategories, 0 androidManifestIntentFilterCategoryEdges, 0 androidManifestIntentFilterData, 0 androidManifestIntentFilterDataEdges, 0 androidWidgetProviders, 0 androidResourceReferences, 0 androidKotlinResourceReferences, and 0 androidKotlinResourceReferenceEdges.',
+      ),
+    );
+
+    const result = runSync(root);
+
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+    expect(fs.readFileSync(adaptationPath, 'utf8')).toContain(
+      'Android packaging/resource graph summary: 1 androidManifestComponents, 1 androidManifestPermissions, 1 androidManifestUsesPermissionEdges, 1 androidManifestQueries, 1 androidManifestQueryEdges, 1 androidManifestComponentPermissions, 1 androidManifestComponentPermissionEdges, 1 androidManifestIntentFilters, 1 androidManifestIntentFilterActions, 1 androidManifestIntentFilterActionEdges, 1 androidManifestIntentFilterCategories, 1 androidManifestIntentFilterCategoryEdges, 1 androidManifestIntentFilterData, 1 androidManifestIntentFilterDataEdges, 1 androidWidgetProviders, 1 androidResourceReferences, 1 androidKotlinResourceReferences, and 1 androidKotlinResourceReferenceEdges.',
+    );
+  });
+
+  it('syncs every repeated inline semantic counter assignment', () => {
+    const root = makeFixture();
+    const adaptationPath = path.join(root, 'docs', 'codegraph-nanoflow-adaptation.md');
+    fs.appendFileSync(
+      adaptationPath,
+      '\nRepeated counters: `angularInjectorFiles=0`, `context7SourceMapDocEdges=0`, `androidManifestPermissions=0`.\n',
+    );
+
+    const result = runSync(root);
+
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+    expect(fs.readFileSync(adaptationPath, 'utf8')).toContain(
+      'Repeated counters: `angularInjectorFiles=1`, `context7SourceMapDocEdges=1`, `androidManifestPermissions=1`.',
+    );
+  });
+
+  it('syncs hard-rule anchor and repeated evidence narrative counts', () => {
+    const root = makeFixture({
+      hardRulesInDocs: 0,
+      hardRuleKeywordNodesInDocs: 0,
+      hardRuleKeywordEdgesInDocs: 0,
+      hardRuleKeywordMappingEdgesInDocs: 0,
+      hardRuleImplementationTargetsInDocs: 0,
+    });
+    const adaptationPath = path.join(root, 'docs', 'codegraph-nanoflow-adaptation.md');
+    fs.appendFileSync(
+      adaptationPath,
+      [
+        '',
+        '0 scoped hard-rule keyword nodes and',
+        '  0 hard-rule keyword reference edges expose current constraints.',
+        '  All 0 hard-rule keyword edges carry provenance.',
+        '  The implementation evidence layer adds 0 `hard-rule-implementation` native `references` edges',
+        '  from the AGENTS keyword to 0 callable symbols that contain AST-proven calls.',
+        '',
+      ].join('\n'),
+    );
+
+    const result = runSync(root);
+
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+    expect(fs.readFileSync(path.join(root, 'AGENTS.md'), 'utf8')).toContain('hardRules=1');
+    const synced = fs.readFileSync(adaptationPath, 'utf8');
+    expect(synced).toContain('1 AGENTS hard-rule anchors');
+    expect(synced).toContain('1 scoped hard-rule keyword nodes and\n  1 hard-rule keyword reference edges');
+    expect(synced).toContain('All 1 hard-rule keyword edges carry');
+    expect(synced).toContain('adds 1 `hard-rule-implementation` native `references` edges');
+    expect(synced).toContain('to 1 callable symbols that');
+  });
+
   it('syncs documented Angular host semantic counts from the overlay baseline', () => {
     const root = makeFixture();
     const adaptationPath = path.join(root, 'docs', 'codegraph-nanoflow-adaptation.md');
@@ -80,6 +149,32 @@ describe('validate-codegraph-overlay-docs structured detail counts', () => {
     expect(result.status, result.stderr || result.stdout).toBe(0);
     expect(fs.readFileSync(adaptationPath, 'utf8')).toContain(
       '0 host-directive edges, 1 host-attribute edges, 1 host-binding edges, and 1 host-listener edges',
+    );
+  });
+
+  it('syncs Angular host semantic counts when the documentation splits the host summaries', () => {
+    const root = makeFixture();
+    const adaptationPath = path.join(root, 'docs', 'codegraph-nanoflow-adaptation.md');
+    fs.writeFileSync(
+      adaptationPath,
+      fs.readFileSync(adaptationPath, 'utf8').replace(
+        /[\d,]+\s+host-directive edges,\s+[\d,]+\s+host-attribute edges,\s+[\d,]+\s+host-binding edges,\s+and\s+[\d,]+\s+host-listener edges/,
+        [
+          '0 host-directive edges because the real tree does not use this metadata yet.',
+          'The current real tree has 0 host-attribute edges, 0 host-binding edges, and 0 host-listener edges.',
+        ].join('\n'),
+      ),
+    );
+
+    const result = runSync(root);
+
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+    const synced = fs.readFileSync(adaptationPath, 'utf8');
+    expect(synced).toContain(
+      '0 host-directive edges because the real tree does not use this metadata yet.',
+    );
+    expect(synced).toContain(
+      'The current real tree has 1 host-attribute edges, 1 host-binding edges, and 1 host-listener edges.',
     );
   });
 
@@ -157,13 +252,14 @@ describe('validate-codegraph-overlay-docs structured detail counts', () => {
 
     expect(result.status, result.stderr || result.stdout).toBe(0);
     const text = fs.readFileSync(adaptationPath, 'utf8');
-    expect(text).toContain(
+    const normalizedText = text.replace(/\s+/g, ' ');
+    expect(normalizedText).toContain(
       'The Supabase select-field layer adds 2 native `supabase-select-field` property nodes, 3 `supabase-select-field` edges, 2 method/function `references` edges from `.select(...)` call sites to selected fields, 1 inline select field nodes, 1 inline select provenance edges, and 1 `sync-required-field` edges',
     );
-    expect(text).toContain(
+    expect(normalizedText).toContain(
       'The incremental-predicate layer adds 1 `supabase-incremental-predicate` nodes, 1 method/function predicate `references` edges, and 1 `sync-required-predicate` edges',
     );
-    expect(text).toContain(
+    expect(normalizedText).toContain(
       'The Storage bucket layer adds 1 `supabase-storage-bucket` nodes and 1 native `references` edges for buckets.',
     );
     expect(text).toContain(

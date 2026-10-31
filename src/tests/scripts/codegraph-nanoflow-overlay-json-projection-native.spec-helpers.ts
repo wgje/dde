@@ -179,6 +179,8 @@ export function registerCodegraphOverlayJsonProjectionNativeSpecs(
       'language',
       'startLine',
       'endLine',
+      'startColumn',
+      'endColumn',
       'signature',
       'docstring',
       'visibility',
@@ -206,8 +208,6 @@ export function registerCodegraphOverlayJsonProjectionNativeSpecs(
       expect(node).not.toHaveProperty('metadata');
       expect(node).not.toHaveProperty('decorators');
       expect(node).not.toHaveProperty('typeParameters');
-      expect(node).not.toHaveProperty('startColumn');
-      expect(node).not.toHaveProperty('endColumn');
       expect(node).not.toHaveProperty('updatedAt');
     }
     for (const edge of response.edges as Array<Record<string, unknown>>) {
@@ -224,6 +224,42 @@ export function registerCodegraphOverlayJsonProjectionNativeSpecs(
         content: expect.any(String),
       }));
     }
+  });
+
+  it('preserves schema-valid falsy native node fields with source columns', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-codegraph-native-json-falsy-node-'));
+    tempRoots.push(root);
+    const entry = 'src/sample.ts';
+    writeFile(root, entry, 'function internalHelper() { return 1; }\n');
+    writeEdgeFunctionFixtureOverlay(root, {
+      files: [entry],
+      nodes: [{
+        id: `function:${entry}:internalHelper`,
+        kind: 'function',
+        name: 'internalHelper',
+        qualifiedName: 'internalHelper',
+        filePath: entry,
+        language: 'typescript',
+        startLine: 1,
+        endLine: 1,
+        startColumn: 0,
+        endColumn: 0,
+        isExported: false,
+      }],
+      edges: [],
+    });
+
+    const result = queryOverlay(root, 'internalHelper', ['--limit', '20', '--native-json']);
+
+    expectSpawnSuccess(result);
+    const response = JSON.parse(result.stdout) as {
+      nodes: Array<Record<string, unknown>>;
+    };
+    expect(response.nodes.find(node => node.name === 'internalHelper')).toEqual(expect.objectContaining({
+      startColumn: 0,
+      endColumn: 0,
+      isExported: false,
+    }));
   });
 
   it('omits absent strict native JSON edge coordinates instead of zero-filling them', () => {
@@ -318,7 +354,7 @@ export function registerCodegraphOverlayJsonProjectionNativeSpecs(
     const response = JSON.parse(result.stdout);
     expect(response.edges).toEqual([expect.objectContaining({
       source: functionNode.id,
-      target: headerNode.id,
+      target: `variable:${entry}:transcribe.Authorization`,
       kind: 'references',
       line: 2,
     })]);
@@ -465,12 +501,12 @@ export function registerCodegraphOverlayJsonProjectionNativeSpecs(
           source: anchorNode.id,
           target: generatedNode.id,
           kind: 'references',
-          metadata: { relation: 'generated-json-fixture' },
+          metadata: { relation: 'initializer-reference' },
         }],
       },
     }, null, 2));
 
-    const result = queryOverlay(root, 'generated-json-fixture', ['--limit', '20', '--native-json']);
+    const result = queryOverlay(root, 'initializer-reference', ['--limit', '20', '--native-json']);
 
     expectSpawnSuccess(result);
     const response = JSON.parse(result.stdout);

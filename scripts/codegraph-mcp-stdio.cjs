@@ -54,10 +54,15 @@ child.on('error', error => {
 child.on('exit', (code, signal) => {
   childExited = true;
   clearChildTerminationTimer();
-  if (signal) {
+  const cleanExit = code === 0 && signal === null;
+  if (shuttingDown && !cleanExit) {
+    const normalizedCode = Number.isInteger(code) ? code : 'null';
+    const normalizedSignal = typeof signal === 'string' && /^[A-Z0-9]+$/.test(signal) ? signal : 'null';
+    process.stderr.write(`[codegraph-mcp-stdio] codegraph-child-shutdown-failure exitCode=${normalizedCode} signal=${normalizedSignal}\n`);
+  } else if (signal) {
     process.stderr.write(`[codegraph-mcp-stdio] Codegraph exited from signal ${signal}.\n`);
   }
-  process.exit(shuttingDown ? 0 : (code ?? 1));
+  process.exit(cleanExit ? 0 : (Number.isInteger(code) && code !== 0 ? code : 1));
 });
 
 child.stdin.on('error', error => {

@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { CodegraphOverlaySpecContext } from './codegraph-nanoflow-overlay.spec-context';
 import { registerCodegraphOverlayBaseSpecs } from './codegraph-nanoflow-overlay-base.spec-helpers';
 import {
@@ -10,6 +10,11 @@ import {
   officialCodeGraphNodeKinds,
 } from './codegraph-nanoflow-overlay-codegraph-constants.spec-helpers';
 import { registerCodegraphOverlayContext7Specs } from './codegraph-nanoflow-overlay-context7.spec-helpers';
+import {
+  createOverlayQueryTestRunner,
+  publishOverlayAtRoot,
+  upgradeLegacyOverlayFixture,
+} from './codegraph-overlay-generation-test-helpers';
 import { writeCodegraphOverlayCoreFixtureFiles } from './codegraph-nanoflow-overlay-fixture-core.spec-helpers';
 import { writeCodegraphOverlayGraphFixtureFiles } from './codegraph-nanoflow-overlay-fixture-graph.spec-helpers';
 import { registerCodegraphOverlayJsonProjectionSpecs } from './codegraph-nanoflow-overlay-json-projection.spec-helpers';
@@ -30,6 +35,15 @@ import { registerCodegraphOverlayTypeScriptFilteringSpecs } from './codegraph-na
 const repoRoot = path.resolve(__dirname, '../../..');
 const scriptPath = path.join(repoRoot, 'scripts', 'generate-codegraph-nanoflow-overlay.mjs');
 const queryScriptPath = path.join(repoRoot, 'scripts', 'query-codegraph-nanoflow-overlay.mjs');
+const queryTestRunnerRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-query-test-runner-'));
+const queryTestRunnerPath = createOverlayQueryTestRunner({
+  directory: queryTestRunnerRoot,
+  generatorScriptPath: scriptPath,
+  queryScriptPath,
+});
+const androidImportSourceDefaultEnv = 'NANOFLOW_CODEGRAPH_ANDROID_IMPORT_SOURCE_DEFAULT';
+const androidFunctionSourceDefaultEnv = 'NANOFLOW_CODEGRAPH_ANDROID_FUNCTION_SOURCE_DEFAULT';
+const androidSourceDefaultEnvNames = new Set([androidImportSourceDefaultEnv, androidFunctionSourceDefaultEnv].map(key => key.toLowerCase()));
 const wrapperScriptPath = path.join(repoRoot, 'scripts', 'codegraph-nanoflow-mcp-stdio.cjs');
 const codexConfigHelperPath = path.join(repoRoot, 'scripts', 'codegraph-codex-config.cjs');
 const adapterContextScriptPath = path.join(repoRoot, 'scripts', 'codegraph-adapter-context.cjs');
@@ -45,12 +59,21 @@ const WRAPPER_REPO_OVERLAY_ENV = {
   NANOFLOW_CODEGRAPH_REFRESH_ON_STARTUP: '0',
 };
 const tempRoots: string[] = [];
+const dirtyFixtureRoots = new Set<string>();
 const originalWrapperLogPath = process.env.NANOFLOW_CODEGRAPH_MCP_LOG;
+const originalAndroidSourceDefaultEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => androidSourceDefaultEnvNames.has(key.toLowerCase())));
+
+function removeAndroidSourceDefaultEnvAliases(env: NodeJS.ProcessEnv): void {
+  for (const key of Object.keys(env)) {
+    if (androidSourceDefaultEnvNames.has(key.toLowerCase())) delete env[key];
+  }
+}
 
 function writeFile(root: string, relativePath: string, content: string): void {
   const filePath = path.join(root, relativePath);
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, content);
+  dirtyFixtureRoots.add(root);
 }
 
 function makeFixture(): string {
@@ -69,11 +92,91 @@ function runOverlay(root: string, args: string[] = []) {
   });
 }
 
-function queryOverlay(root: string, query: string, args: string[] | number = []) {
-  const extraArgs = typeof args === 'number' ? ['--limit', String(args)] : args;
+function makeFreshMcpFixture(): string {
+  const root = makeFixture();
+  for (const relativePath of [
+    'scripts/query-codegraph-nanoflow-overlay.mjs',
+    'scripts/contracts/codegraph-nanoflow-overlay-v1.json',
+    'scripts/contracts/codegraph-overlay-generation-v1.json',
+    'scripts/lib/codegraph-nanoflow-overlay-v1-schema.cjs',
+    'scripts/lib/codegraph-nanoflow-overlay-v1-schema-angular-support.cjs',
+    'scripts/lib/codegraph-nanoflow-overlay-v1-schema-graph.cjs',
+    'scripts/lib/codegraph-nanoflow-overlay-v1-schema-supabase-android.cjs',
+    'scripts/lib/codegraph-nanoflow-overlay-v1-schema-typescript.cjs',
+    'scripts/lib/codegraph-overlay-baseline.cjs',
+    'scripts/lib/codegraph-overlay-candidate-index.mjs',
+    'scripts/lib/codegraph-overlay-context-assembly.mjs',
+    'scripts/lib/codegraph-overlay-current-receipt.cjs',
+    'scripts/lib/codegraph-overlay-generation-format.cjs',
+    'scripts/lib/codegraph-overlay-native-codeblock-evidence.mjs',
+    'scripts/lib/codegraph-overlay-native-codeblock-selection.mjs',
+    'scripts/lib/codegraph-overlay-output-projection.mjs',
+    'scripts/lib/codegraph-overlay-query-terms.mjs',
+    'scripts/lib/codegraph-overlay-semantic-selection.mjs',
+    'scripts/lib/codegraph-source-policy.cjs',
+  ]) {
+    writeFile(root, relativePath, fs.readFileSync(path.join(repoRoot, relativePath), 'utf8'));
+  }
+  writeFile(
+    root,
+    'src/app/core/shell/project-shell.component.ts',
+    [
+      "import { Component } from '@angular/core';",
+      '',
+      '@Component({',
+      "  selector: 'app-project-shell',",
+      '  standalone: true,',
+      "  template: '<main>Project shell</main>',",
+      '})',
+      'export class ProjectShellComponent {}',
+      '',
+    ].join('\n'),
+  );
+  const result = runOverlay(root);
+  expectSpawnSuccess(result);
+  publishOverlayAtRoot(root, JSON.parse(result.stdout));
+  dirtyFixtureRoots.delete(root);
+  return root;
+}
+
+function queryOverlay(
+  root: string,
+  query: string,
+  args: string[] | number = [],
+  envOverrides: NodeJS.ProcessEnv = {},
+  publishCurrent = true,
+) {
+  const requestedArgs = typeof args === 'number' ? ['--limit', String(args)] : args;
+  const overlayArgIndex = requestedArgs.indexOf('--overlay');
+  const explicitFixtureOverlayPath = overlayArgIndex >= 0 ? requestedArgs[overlayArgIndex + 1] : undefined;
+  const defaultFixtureOverlayPath = path.join(root, '.codegraph', 'nanoflow-overlay.json');
+  const fixtureOverlayPath = explicitFixtureOverlayPath
+    ? path.join(root, explicitFixtureOverlayPath)
+    : dirtyFixtureRoots.has(root) && fs.existsSync(defaultFixtureOverlayPath)
+      ? defaultFixtureOverlayPath
+      : undefined;
+  const extraArgs = overlayArgIndex < 0
+    ? requestedArgs
+    : requestedArgs.filter((_arg, index) => index !== overlayArgIndex && index !== overlayArgIndex + 1);
+  if (publishCurrent && (fixtureOverlayPath || dirtyFixtureRoots.has(root))) {
+    const generated = runOverlay(root);
+    expectSpawnSuccess(generated);
+    let generatedOverlay = JSON.parse(generated.stdout);
+    if (fixtureOverlayPath) generatedOverlay = upgradeLegacyOverlayFixture(
+      generatedOverlay,
+      JSON.parse(fs.readFileSync(fixtureOverlayPath, 'utf8')),
+    );
+    publishOverlayAtRoot(root, generatedOverlay);
+    dirtyFixtureRoots.delete(root);
+  }
+  const env = { ...process.env };
+  removeAndroidSourceDefaultEnvAliases(env);
+  env[androidFunctionSourceDefaultEnv] = 'local';
+  Object.assign(env, envOverrides);
   return spawnSync(process.execPath, [queryScriptPath, '--root', root, '--query', query, '--json', ...extraArgs], {
     cwd: repoRoot,
     encoding: 'utf-8',
+    env,
     maxBuffer: 32 * 1024 * 1024,
   });
 }
@@ -84,6 +187,17 @@ function expectSpawnSuccess(result: ReturnType<typeof spawnSync>): void {
     `stdout: ${result.stdout}`,
     `error: ${result.error?.message ?? ''}`,
   ].join('\n')).toBe(0);
+}
+
+function normalizeGeneratedTimestamps(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(item => normalizeGeneratedTimestamps(item));
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [
+    key,
+    key === 'generatedAt' || key === 'updatedAt'
+      ? `<normalized-${key}>`
+      : normalizeGeneratedTimestamps(item),
+  ]));
 }
 
 function makeFakeCodegraph(): string {
@@ -513,6 +627,7 @@ async function writeManyJsonLines(
 }
 
 async function removeTempRoot(root: string): Promise<void> {
+  dirtyFixtureRoots.delete(root);
   for (let attempt = 0; attempt < 5; attempt += 1) {
     try {
       fs.rmSync(root, { recursive: true, force: true });
@@ -588,13 +703,21 @@ function findMcpHeaderEnd(buffer: Buffer): { index: number; length: number } | n
 }
 
 describe('generate-codegraph-nanoflow-overlay', { timeout: 10_000 }, () => {
+  afterAll(async () => {
+    await removeTempRoot(queryTestRunnerRoot);
+  });
+
   beforeEach(() => {
+    removeAndroidSourceDefaultEnvAliases(process.env);
+    process.env[androidFunctionSourceDefaultEnv] = 'local';
     const logRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-codegraph-test-log-'));
     tempRoots.push(logRoot);
     process.env.NANOFLOW_CODEGRAPH_MCP_LOG = path.join(logRoot, 'wrapper.log');
   });
 
   afterEach(async () => {
+    removeAndroidSourceDefaultEnvAliases(process.env);
+    Object.assign(process.env, originalAndroidSourceDefaultEnv);
     if (originalWrapperLogPath === undefined) {
       delete process.env.NANOFLOW_CODEGRAPH_MCP_LOG;
     } else {
@@ -610,7 +733,7 @@ describe('generate-codegraph-nanoflow-overlay', { timeout: 10_000 }, () => {
   const context: CodegraphOverlaySpecContext = {
     repoRoot,
     scriptPath,
-    queryScriptPath,
+    queryScriptPath: queryTestRunnerPath,
     wrapperScriptPath,
     codexConfigHelperPath,
     adapterContextScriptPath,
@@ -625,6 +748,7 @@ describe('generate-codegraph-nanoflow-overlay', { timeout: 10_000 }, () => {
     officialCodeGraphNodeKinds,
     writeFile,
     makeFixture,
+    makeFreshMcpFixture,
     runOverlay,
     queryOverlay,
     expectSpawnSuccess,
@@ -647,7 +771,7 @@ describe('generate-codegraph-nanoflow-overlay', { timeout: 10_000 }, () => {
     readMcpFrame,
   };
 
-  it('skips source files that disappear between overlay collection passes', () => {
+  it('fails closed when source files disappear between overlay collection passes', () => {
     const root = makeFixture();
     const vanishingFile = path.join(root, 'src', 'vanishing-source.ts');
     writeFile(root, 'src/vanishing-source.ts', 'export const vanishingSource = 1;\n');
@@ -686,7 +810,36 @@ describe('generate-codegraph-nanoflow-overlay', { timeout: 10_000 }, () => {
       },
     );
 
-    expectSpawnSuccess(result);
+    expect(result.status).not.toBe(0);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toContain('codegraph-overlay-source-manifest-drift');
+  });
+
+  it('fails closed without CURRENT and advances each explicitly published generation', () => {
+    const root = makeFixture();
+    const missingCurrent = queryOverlay(root, 'app', [], {}, false);
+    expect(missingCurrent.status).toBe(2);
+    expect(missingCurrent.stdout).toBe('');
+    expect(missingCurrent.stderr).toBe('overlay-current-current-missing\n');
+
+    const generated = runOverlay(root);
+    expectSpawnSuccess(generated);
+    const overlay = JSON.parse(generated.stdout);
+    const first = publishOverlayAtRoot(root, overlay);
+    expect(first.current.sequence).toBe('1');
+    expectSpawnSuccess(queryOverlay(root, 'app', [], {}, false));
+
+    const second = publishOverlayAtRoot(root, overlay);
+    expect(second.current.sequence).toBe('2');
+    expectSpawnSuccess(queryOverlay(root, 'app', [], {}, false));
+    expect(fs.existsSync(path.join(root, '.codegraph', 'nanoflow-overlay.json'))).toBe(false);
+  });
+
+  it('publishes fresh MCP fixtures through CURRENT without legacy raw overlay authority', () => {
+    const root = makeFreshMcpFixture();
+    expect(fs.existsSync(path.join(root, '.codegraph', 'nanoflow-generations', 'CURRENT.json'))).toBe(true);
+    expect(fs.existsSync(path.join(root, '.codegraph', 'nanoflow-overlay.json'))).toBe(false);
+    expectSpawnSuccess(queryOverlay(root, 'ProjectShellComponent'));
   });
 
   registerCodegraphOverlayBaseSpecs(context);

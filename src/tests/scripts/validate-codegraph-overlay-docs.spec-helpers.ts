@@ -1,14 +1,62 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import {
+  configureFixtureCurrentReceipt,
+  installFixtureCurrentReceiptModuleLoader,
+  restoreFixtureCurrentReceiptEnvironment,
+  restoreFixtureCurrentReceiptModuleLoader,
+  runSyncWithFixtureCurrentReceipt,
+  runValidatorWithFixtureCurrentReceipt,
+} from './codegraph-overlay-current-receipt-fixture.spec-helpers';
 import { writeDedupContractFixture } from './validate-codegraph-overlay-docs-fixtures.spec-helpers';
+import { buildValidateCodegraphOverlayDocsOverlayGraph } from './validate-codegraph-overlay-docs-overlay-graph.spec-helpers';
+
+type BaseOverlayFixture = ReturnType<typeof buildValidateCodegraphOverlayDocsOverlayGraph>;
+type OverlayFixtureRecord = Record<string, unknown>;
+
+interface AndroidOverlayFixture {
+  kotlinClasses: OverlayFixtureRecord[];
+  kotlinEnums: OverlayFixtureRecord[];
+  kotlinImports: OverlayFixtureRecord[];
+  kotlinConstructors: OverlayFixtureRecord[];
+  kotlinProperties: OverlayFixtureRecord[];
+  kotlinMethods: OverlayFixtureRecord[];
+  kotlinFunctions: OverlayFixtureRecord[];
+  kotlinCalls: OverlayFixtureRecord[];
+  kotlinResourceReferences: OverlayFixtureRecord[];
+  manifestPermissions: OverlayFixtureRecord[];
+  manifestQueries: OverlayFixtureRecord[];
+  manifestComponents: OverlayFixtureRecord[];
+  widgetProviders: OverlayFixtureRecord[];
+  resourceReferences: OverlayFixtureRecord[];
+}
+
+interface Context7OverlayFixture {
+  documents: OverlayFixtureRecord[];
+  categories: OverlayFixtureRecord[];
+  retrievalRoutes: OverlayFixtureRecord[];
+  sourceMapRoutes: OverlayFixtureRecord[];
+}
+
+type ValidateDocsOverlayFixture = Omit<BaseOverlayFixture, 'angular'> & {
+  angular: BaseOverlayFixture['angular'] & {
+    directives?: OverlayFixtureRecord[];
+    pipes?: OverlayFixtureRecord[];
+    injectables?: OverlayFixtureRecord[];
+    injectors?: OverlayFixtureRecord[];
+    applicationProviders?: OverlayFixtureRecord[];
+  };
+  android?: AndroidOverlayFixture;
+  context7?: Context7OverlayFixture;
+};
 
 export const repoRoot = path.resolve(__dirname, '../../..');
 const scriptPath = path.join(repoRoot, 'scripts', 'validate-codegraph-overlay-docs.cjs');
 const syncScriptPath = path.join(repoRoot, 'scripts', 'sync-codegraph-overlay-docs.cjs');
+installFixtureCurrentReceiptModuleLoader();
 export const packageJsonPath = path.join(repoRoot, 'package.json');
-export const agentsDocPath = path.join(repoRoot, 'AGENTS.md');
+export const agentsDocPath = path.join(repoRoot, 'docs', 'codegraph-nanoflow-agent-contract.md');
 export const adaptationDocPath = path.join(repoRoot, 'docs', 'codegraph-nanoflow-adaptation.md');
 export const testFullSuiteWorkflowPath = path.join(repoRoot, '.github', 'workflows', 'test-full-suite.yml');
 export const overlayBaselineModulePath = path.join(repoRoot, 'scripts', 'lib', 'codegraph-overlay-baseline.cjs');
@@ -23,6 +71,7 @@ export function makeFixture(options: {
   angularRouteGuardEdgesInDocs?: number;
   edgeFunctionTestsInDocs?: number;
   edgeFunctionHeaderEdgesInDocs?: number;
+  hardRulesInDocs?: number;
   hardRuleKeywordNodesInDocs?: number;
   hardRuleKeywordEdgesInDocs?: number;
   hardRuleKeywordMappingEdgesInDocs?: number;
@@ -72,6 +121,7 @@ export function makeFixture(options: {
   styleUrlEdgesInDocs?: number;
   totalTestEdgesInDocs?: number;
   testEdgesWithMatchedNeedleInDocs?: number;
+  androidKotlinClassesInDocs?: number;
   androidKotlinDataClassesInDocs?: number;
   androidKotlinSealedClassesInDocs?: number;
   androidKotlinInterfacesInDocs?: number;
@@ -91,21 +141,27 @@ export function makeFixture(options: {
   androidKotlinConstructorEdgesInDocs?: number;
   androidKotlinPropertiesInDocs?: number;
   androidKotlinPropertyEdgesInDocs?: number;
+  androidKotlinMethodsInDocs?: number;
+  androidKotlinMethodEdgesInDocs?: number;
   androidKotlinFunctionsInDocs?: number;
   androidKotlinFunctionEdgesInDocs?: number;
   androidKotlinOverrideEdgesInDocs?: number;
   androidKotlinTypeReferenceEdgesInDocs?: number;
+  androidKotlinCallsInDocs?: number;
+  androidKotlinCallEdgesInDocs?: number;
   androidKotlinAnnotationsInDocs?: number;
   androidKotlinAnnotationEdgesInDocs?: number;
   androidManifestComponentsInDocs?: number;
   androidWidgetProvidersInDocs?: number;
   androidResourceReferencesInDocs?: number;
 } = {}): string {
+  installFixtureCurrentReceiptModuleLoader();
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-codegraph-docs-'));
 	  tempRoots.push(root);
 	  fs.mkdirSync(path.join(root, '.codegraph'), { recursive: true });
 	  fs.mkdirSync(path.join(root, 'docs'), { recursive: true });
-  fs.mkdirSync(path.join(root, 'scripts'), { recursive: true });
+	  fs.mkdirSync(path.join(root, 'scripts'), { recursive: true });
+	  configureFixtureCurrentReceipt(root);
 	  fs.writeFileSync(
 	    path.join(root, 'package.json'),
 	    JSON.stringify({
@@ -114,296 +170,155 @@ export function makeFixture(options: {
 	      },
 	    }, null, 2),
 	  );
-	  const sourceNodeId = 'class:src/a.ts:A';
-  const targetNodeId = 'class:src/b.ts:B';
-  const migrationFileNodeId = 'file:supabase/migrations/20260601000000_sample.sql';
-  const hardRuleKeywordNodeId = 'variable:AGENTS.md:hard-rule-keyword:crypto.randomUUID';
-  const syncRuleNodeId = 'variable:AGENTS.md:sync-rule:SYNC_CONFIG.DEBOUNCE_DELAY';
-  const syncRuleKeywordNodeId = 'variable:AGENTS.md:sync-rule-keyword:SYNC_CONFIG.DEBOUNCE_DELAY';
-  const configPropertyNodeId = 'property:src/config/sync.config.ts:SYNC_CONFIG.DEBOUNCE_DELAY';
   writeDedupContractFixture(root);
-  const selectFieldNodeId = 'property:src/config/sync.config.ts:FIELD_SELECT_CONFIG.TASK_FIELDS.content';
-  const inlineSelectFieldNodeId = 'property:src/services/sample.service.ts:SampleService.load.tasks.content';
-  const incrementalPredicateNodeId = 'variable:src/services/sample.service.ts:supabase-incremental-predicate:tasks.updated_at';
-  const storageBucketNodeId = 'variable:src/services/sample.service.ts:supabase-storage-bucket:attachments';
-  const rpcNodeId = 'variable:src/services/sample.service.ts:supabase-rpc:sample_rpc';
-  const tableWriteNodeId = 'variable:src/services/sample.service.ts:supabase-table-write:tasks.upsert';
-  const realtimeChannelNodeId = 'variable:src/services/sample.service.ts:supabase-realtime-channel:tasks';
-  const realtimePostgresChangeNodeId = 'variable:src/services/sample.service.ts:supabase-realtime-postgres-change:tasks';
-  const realtimeStatusNodeId = 'variable:src/services/sample.service.ts:supabase-realtime-status:SUBSCRIBED';
-  const realtimeRemoveChannelNodeId = 'variable:src/services/sample.service.ts:supabase-realtime-remove-channel:tasks';
-  const realtimeUnsubscribeNodeId = 'variable:src/services/sample.service.ts:supabase-realtime-unsubscribe:tasks';
-  const realtimeRemoveAllChannelsNodeId = 'variable:src/services/sample.service.ts:supabase-realtime-remove-all-channels';
-  const sqlFunctionNodeId = 'function:supabase/migrations/20260601000000_sample.sql:public.sample_fn';
-  const triggerNodeId = 'variable:supabase/migrations/20260601000000_sample.sql:sample_trigger';
-  const migrationIndexNodeId = 'variable:supabase/migrations/20260601000000_sample.sql:idx_tasks_project_id';
-  const migrationConstraintNodeId = 'variable:supabase/migrations/20260601000000_sample.sql:tasks_project_id_fkey';
-  const policyNodeId = 'variable:supabase/migrations/20260601000000_sample.sql:tasks_select_policy';
-  const privilegeNodeId = 'variable:supabase/migrations/20260601000000_sample.sql:privilege:grant:usage';
-  const privilegeObjectNodeId = 'variable:supabase/migrations/20260601000000_sample.sql:privilege-object:public.tasks';
-  const privilegeRoleNodeId = 'variable:supabase/migrations/20260601000000_sample.sql:privilege-role:authenticated';
-  const migrationRealtimePublicationNodeId = 'variable:supabase/migrations/20260601000000_sample.sql:migration-realtime-publication:supabase_realtime:add:public.tasks:1';
-  const migrationViewNodeId = 'variable:supabase/migrations/20260601000000_sample.sql:migration-view:public.active_tasks:2';
-  const migrationFileSourceRelations = new Set([
-    'migration-constraint',
-    'migration-constraint-validation',
-    'migration-index',
-    'migration-realtime-publication',
-    'migration-rls',
-    'migration-view',
-    'policy-command',
-    'policy-role',
-    'policy-type',
-    'policy-using',
-    'policy-with-check',
-    'privilege-grant',
-    'privilege-object',
-    'privilege-revoke',
-    'privilege-role',
-    'sql-function',
-    'trigger',
-    'trigger-function',
-  ]);
-  const graphNode = (
-    id: string,
+  const overlay: ValidateDocsOverlayFixture = buildValidateCodegraphOverlayDocsOverlayGraph();
+  const hasFixtureOption = (name: string): boolean => Object.prototype.hasOwnProperty.call(options, name);
+  const androidConstructorPropertyDrift = [
+    'androidKotlinConstructorsInDocs',
+    'androidKotlinConstructorEdgesInDocs',
+    'androidKotlinPropertiesInDocs',
+    'androidKotlinPropertyEdgesInDocs',
+  ].some(hasFixtureOption);
+  const androidImportDrift = [
+    'androidKotlinImportsInDocs',
+    'androidKotlinImportEdgesInDocs',
+  ].some(hasFixtureOption);
+  const androidOverrideTypeDrift = [
+    'androidKotlinOverrideEdgesInDocs',
+    'androidKotlinTypeReferenceEdgesInDocs',
+  ].some(hasFixtureOption);
+  const androidFunctionDrift = [
+    'androidKotlinFunctionsInDocs',
+    'androidKotlinFunctionEdgesInDocs',
+  ].some(hasFixtureOption);
+  const androidPlatformDrift = [
+    'androidManifestComponentsInDocs',
+    'androidWidgetProvidersInDocs',
+    'androidResourceReferencesInDocs',
+  ].some(hasFixtureOption);
+  const graphSource = overlay.graph.nodes[0].id;
+  const graphTarget = overlay.graph.nodes[1].id;
+  const addFixtureEdge = (
     kind: string,
-    name: string,
-    filePath: string,
-    metadata?: Record<string, unknown>,
-  ) => ({
-    id,
-    kind,
-    name,
-    qualifiedName: name,
-    filePath,
-    language: filePath.endsWith('.sql') ? 'unknown' : 'typescript',
-    startLine: 1,
-    endLine: 1,
-    startColumn: 0,
-    endColumn: 0,
-    ...(metadata ? { metadata } : {}),
-  });
-  const rawGraphEdges = [
-    { metadata: { relation: 'dynamic-import' } },
-    { metadata: { relation: 'dynamic-import' } },
-    { metadata: { relation: 'angular-route-guard' } },
-    { metadata: { relation: 'angular-route-resolver' } },
-    { metadata: { relation: 'angular-route-redirect' } },
-    { metadata: { relation: 'angular-route-provider' } },
-    { metadata: { relation: 'angular-app-provider', provider: 'provideRouter', providerKind: 'factory-call' } },
-    { metadata: { relation: 'android-kotlin-class' } },
-    { metadata: { relation: 'android-manifest' } },
-    { metadata: { relation: 'android-manifest-component' } },
-    { metadata: { relation: 'android-resource-file' } },
-    { metadata: { relation: 'android-resource-reference' } },
-    { metadata: { relation: 'android-widget-provider' } },
-    { metadata: { relation: 'host-attribute' } },
-    { metadata: { relation: 'host-binding' } },
-    { metadata: { relation: 'host-listener' } },
-    { metadata: { relation: 'edge-function-source' } },
-    { metadata: { relation: 'edge-function-route' } },
-    { metadata: { relation: 'edge-function-method' } },
-    { metadata: { relation: 'edge-function-header', header: 'Authorization', normalizedHeader: 'authorization' } },
-    { metadata: { relation: 'edge-function-invoke' } },
-    { metadata: { relation: 'template-component' } },
-    { metadata: { relation: 'template-directive' } },
-    { metadata: { relation: 'template-pipe' } },
-    { kind: 'imports', metadata: { relation: 'template-url' } },
-    { kind: 'imports', metadata: { relation: 'style-url' } },
-    { metadata: { relation: 'template-binding' } },
-    { metadata: { relation: 'test', testMapping: 'same-basename' } },
-    { metadata: { relation: 'test', testMapping: 'class-reference' } },
-    { metadata: { relation: 'test', testMapping: 'path-reference', matchedNeedle: 'supabase/functions/sample' } },
-    { metadata: { relation: 'test', testMapping: 'route-reference', matchedNeedle: 'functions/v1/sample' } },
-    { metadata: { relation: 'test', testMapping: 'filename-reference', matchedNeedle: '20260601000000_sample.sql' } },
-    { metadata: { relation: 'hard-rule-keyword', keywordMapping: 'hard-rule-keyword' } },
-    { metadata: { relation: 'hard-rule-implementation' } },
-    { metadata: { relation: 'sync-rule' } },
-    { metadata: { keywordMapping: 'sync-body-keyword' } },
-    { metadata: { keywordMapping: 'sync-config-keyword' } },
-    { metadata: { relation: 'config-property', parentConfigPath: 'SYNC_CONFIG' } },
-    { metadata: { relation: 'config-source', configProperty: 'DEBOUNCE_DELAY' } },
-    { metadata: { relation: 'sync-config-source' } },
-    { metadata: { relation: 'context7-doc' } },
-    { metadata: { relation: 'context7-category' } },
-    { metadata: { relation: 'context7-category-doc' } },
-    { metadata: { relation: 'context7-retrieval-route' } },
-    { metadata: { relation: 'context7-retrieval-primary' } },
-    { metadata: { relation: 'context7-retrieval-secondary' } },
-    { metadata: { relation: 'context7-source-map-route' } },
-    { metadata: { relation: 'context7-source-map-doc' } },
-    { metadata: { relation: 'context7-source-map-source' } },
-    { metadata: { relation: 'context7-source-path' } },
-    { metadata: { relation: 'sql-function' } },
-    { metadata: { relation: 'trigger' } },
-    { metadata: { relation: 'trigger-function' } },
-    { metadata: { relation: 'migration-index' } },
-    { metadata: { relation: 'migration-constraint' } },
-    { metadata: { relation: 'migration-constraint-validation' } },
-    { metadata: { relation: 'migration-rls' } },
-    { metadata: { relation: 'migration-realtime-publication', publication: 'supabase_realtime', action: 'add', table: 'public.tasks' } },
-    { metadata: { relation: 'migration-view', view: 'public.active_tasks' } },
-    { metadata: { relation: 'policy-command' } },
-    { metadata: { relation: 'policy-type' } },
-    { metadata: { relation: 'policy-role' } },
-    { metadata: { relation: 'policy-using' } },
-    { metadata: { relation: 'policy-with-check' } },
-    { metadata: { relation: 'privilege-grant', action: 'grant' } },
-    { metadata: { relation: 'privilege-revoke', action: 'revoke' } },
-    { metadata: { relation: 'privilege-object', objectName: 'public.tasks' } },
-    { metadata: { relation: 'privilege-role', role: 'authenticated' } },
-    { metadata: { relation: 'supabase-rpc', functionName: 'sample_rpc' } },
-    { metadata: { relation: 'supabase-table-write', table: 'tasks', writeOperation: 'upsert' } },
-    { metadata: { relation: 'supabase-realtime-channel' } },
-    { metadata: { relation: 'supabase-realtime-postgres-change' } },
-    { metadata: { relation: 'supabase-realtime-status', status: 'SUBSCRIBED', action: 'subscribed', owner: 'SampleService.listen' } },
-    { metadata: { relation: 'supabase-realtime-remove-channel' } },
-    { metadata: { relation: 'supabase-realtime-unsubscribe' } },
-    { metadata: { relation: 'supabase-realtime-remove-all-channels' } },
-    { metadata: { relation: 'supabase-storage-bucket', bucket: 'attachments', storageSource: 'typescript' } },
-    { kind: 'contains', metadata: { relation: 'supabase-select-field' } },
-    { kind: 'references', metadata: { relation: 'supabase-select-field' } },
-    { kind: 'references', metadata: { relation: 'supabase-select-field', selectSource: 'inline-select' } },
-    { metadata: { relation: 'sync-required-field' } },
-    { metadata: { relation: 'supabase-incremental-predicate' } },
-    { metadata: { relation: 'sync-required-predicate' } },
+    relation: string,
+    metadata: Record<string, unknown> = {},
+  ): void => {
+    overlay.graph.edges.push({
+      source: graphSource,
+      target: graphTarget,
+      kind,
+      metadata: { relation, ...metadata },
+    });
+  };
+  overlay.angular = {
+    ...overlay.angular,
+    directives: [{}],
+    pipes: [{}],
+    injectables: [{}],
+    injectors: [{ dependencies: ['SampleDependency'] }],
+    applicationProviders: [{}],
+  };
+  for (const [kind, relation] of [
+    ['imports', 'standalone-import'],
+    ['references', 'input'],
+    ['calls', 'output'],
+    ['references', 'query'],
+    ['calls', 'signal'],
+  ]) {
+    addFixtureEdge(kind, relation);
+  }
+  overlay.android = {
+    kotlinClasses: [
+      { modifiers: ['data'], annotations: [{ name: 'Serializable' }] },
+      { classKind: 'object', isCompanionObject: false },
+      { classKind: 'object', isCompanionObject: true },
+    ],
+    kotlinEnums: [{ members: [{}] }],
+    kotlinImports: androidImportDrift ? [] : [{}],
+    kotlinConstructors: androidConstructorPropertyDrift ? [] : [{}],
+    kotlinProperties: androidConstructorPropertyDrift ? [] : [{}],
+    kotlinMethods: [{}],
+    kotlinFunctions: androidFunctionDrift ? [] : [{}],
+    kotlinCalls: [{}],
+    kotlinResourceReferences: androidPlatformDrift ? [] : [{}],
+    manifestPermissions: androidPlatformDrift ? [] : [{}],
+    manifestQueries: androidPlatformDrift ? [] : [{}],
+    manifestComponents: androidPlatformDrift ? [] : [{
+      permission: 'android.permission.BIND_APPWIDGET',
+      intentFilters: [{ actions: [{}], categories: [{}], data: [{}] }],
+    }],
+    widgetProviders: androidPlatformDrift ? [] : [{}],
+    resourceReferences: androidPlatformDrift ? [] : [{}],
+  };
+  const androidFixtureEdges = [
+    ['extends', 'android-kotlin-extends'],
+    ['implements', 'android-kotlin-implements'],
+    ['contains', 'android-kotlin-object'],
+    ['contains', 'android-kotlin-companion-object'],
+    ['contains', 'android-kotlin-enum-member'],
+    ['contains', 'android-kotlin-method'],
+    ['calls', 'android-kotlin-call'],
+    ['decorates', 'android-kotlin-annotation'],
+    ...(!androidImportDrift ? [['imports', 'android-kotlin-import']] : []),
+    ...(!androidConstructorPropertyDrift ? [
+      ['contains', 'android-kotlin-constructor'],
+      ['contains', 'android-kotlin-property'],
+    ] : []),
   ];
-  const targetByRelation = new Map<string, string>([
-    ['hard-rule-keyword', hardRuleKeywordNodeId],
-    ['hard-rule-implementation', sourceNodeId],
-    ['sync-rule', syncRuleNodeId],
-    ['config-property', configPropertyNodeId],
-    ['config-source', configPropertyNodeId],
-    ['sync-config-source', configPropertyNodeId],
-    ['sql-function', sqlFunctionNodeId],
-    ['trigger', triggerNodeId],
-    ['trigger-function', triggerNodeId],
-    ['migration-index', migrationIndexNodeId],
-    ['migration-constraint', migrationConstraintNodeId],
-    ['migration-constraint-validation', migrationConstraintNodeId],
-    ['migration-realtime-publication', migrationRealtimePublicationNodeId],
-    ['migration-view', migrationViewNodeId],
-    ['policy-command', policyNodeId],
-    ['policy-type', policyNodeId],
-    ['policy-role', policyNodeId],
-    ['policy-using', policyNodeId],
-    ['policy-with-check', policyNodeId],
-    ['privilege-grant', privilegeNodeId],
-    ['privilege-revoke', privilegeNodeId],
-    ['privilege-object', privilegeObjectNodeId],
-    ['privilege-role', privilegeRoleNodeId],
-    ['supabase-rpc', rpcNodeId],
-    ['supabase-table-write', tableWriteNodeId],
-    ['supabase-realtime-channel', realtimeChannelNodeId],
-    ['supabase-realtime-postgres-change', realtimePostgresChangeNodeId],
-    ['supabase-realtime-status', realtimeStatusNodeId],
-    ['supabase-realtime-remove-channel', realtimeRemoveChannelNodeId],
-    ['supabase-realtime-unsubscribe', realtimeUnsubscribeNodeId],
-    ['supabase-realtime-remove-all-channels', realtimeRemoveAllChannelsNodeId],
-    ['supabase-storage-bucket', storageBucketNodeId],
-    ['sync-required-field', selectFieldNodeId],
-    ['supabase-incremental-predicate', incrementalPredicateNodeId],
-    ['sync-required-predicate', incrementalPredicateNodeId],
-  ]);
-  const graphEdges = rawGraphEdges.map(edge => {
-    const relation = edge.metadata?.relation;
-    const selectFieldTarget = edge.metadata?.relation === 'supabase-select-field'
-      && edge.metadata?.selectSource === 'inline-select'
-      ? inlineSelectFieldNodeId
-      : selectFieldNodeId;
-    const keywordTarget = edge.metadata?.keywordMapping === 'sync-config-keyword'
-      ? syncRuleKeywordNodeId
-      : targetNodeId;
-    return {
-      source: relation !== undefined && migrationFileSourceRelations.has(relation)
-        ? migrationFileNodeId
-        : sourceNodeId,
-      target: relation === 'supabase-select-field'
-        ? selectFieldTarget
-        : (relation !== undefined ? targetByRelation.get(relation) : keywordTarget) ?? targetNodeId,
-      kind: edge.kind ?? 'references',
-      ...edge,
-    };
-  });
-
-  const overlay = {
-    angular: {
-      dynamicImports: [{}, {}],
-      routes: [{}],
-      components: [
-        {
-          templateBindings: [
-            { kind: 'property' },
-            { kind: 'event' },
-            { kind: 'interpolation' },
-          ],
-        },
-      ],
-    },
-    agentRules: {
-      syncRules: [{ name: 'SYNC_CONFIG.DEBOUNCE_DELAY' }],
-    },
-    supabase: {
-      edgeFunctions: [
-        {
-          sourceFiles: ['supabase/functions/sample/index.ts', 'supabase/functions/_shared/cors.ts'],
-          imports: [{}],
-          tests: ['src/tests/contracts/sample-edge-function.spec.ts'],
-          testMappings: [{}],
-        },
-      ],
-      migrations: [
-        {
-          functionDetails: [{}],
-          triggerDetails: [{}],
-          indexDetails: [{}],
-          constraintDetails: [{}],
-          constraintValidationDetails: [{}],
-          rlsDetails: [{}],
-          realtimePublicationDetails: [{}],
-          viewDetails: [{}],
-          policyDetails: [{}],
-          privilegeDetails: [{}],
-          tests: ['src/tests/contracts/sample-migration.spec.ts'],
-          testMappings: [{}],
-        },
-      ],
-    },
-    graph: {
-      nodes: [
-        graphNode(sourceNodeId, 'class', 'A', 'src/a.ts'),
-        graphNode(targetNodeId, 'class', 'B', 'src/b.ts'),
-        graphNode(migrationFileNodeId, 'file', '20260601000000_sample.sql', 'supabase/migrations/20260601000000_sample.sql'),
-        graphNode(hardRuleKeywordNodeId, 'variable', 'crypto.randomUUID()', 'AGENTS.md', { relation: 'hard-rule-keyword' }),
-        graphNode(syncRuleNodeId, 'variable', 'SYNC_CONFIG.DEBOUNCE_DELAY', 'AGENTS.md', { relation: 'sync-rule' }),
-        graphNode(syncRuleKeywordNodeId, 'variable', 'SYNC_CONFIG.DEBOUNCE_DELAY', 'AGENTS.md', { relation: 'sync-rule-keyword' }),
-        graphNode(configPropertyNodeId, 'property', 'SYNC_CONFIG.DEBOUNCE_DELAY', 'src/config/sync.config.ts', { relation: 'config-property' }),
-        graphNode(selectFieldNodeId, 'property', 'content', 'src/config/sync.config.ts', { relation: 'supabase-select-field' }),
-        graphNode(inlineSelectFieldNodeId, 'property', 'content', 'src/services/sample.service.ts', { relation: 'supabase-select-field', selectSource: 'inline-select' }),
-        graphNode(incrementalPredicateNodeId, 'variable', 'updated_at > last_sync_time', 'src/services/sample.service.ts', { relation: 'supabase-incremental-predicate' }),
-        graphNode(storageBucketNodeId, 'variable', 'attachments', 'src/services/sample.service.ts', { relation: 'supabase-storage-bucket' }),
-        graphNode(rpcNodeId, 'variable', 'sample_rpc', 'src/services/sample.service.ts', { relation: 'supabase-rpc' }),
-        graphNode(tableWriteNodeId, 'variable', 'tasks.upsert', 'src/services/sample.service.ts', { relation: 'supabase-table-write' }),
-        graphNode(realtimeChannelNodeId, 'variable', 'tasks', 'src/services/sample.service.ts', { relation: 'supabase-realtime-channel' }),
-        graphNode(realtimePostgresChangeNodeId, 'variable', 'public.tasks *', 'src/services/sample.service.ts', { relation: 'supabase-realtime-postgres-change' }),
-        graphNode(realtimeStatusNodeId, 'variable', 'SUBSCRIBED', 'src/services/sample.service.ts', { relation: 'supabase-realtime-status' }),
-        graphNode(realtimeRemoveChannelNodeId, 'variable', 'removeChannel tasks', 'src/services/sample.service.ts', { relation: 'supabase-realtime-remove-channel' }),
-        graphNode(realtimeUnsubscribeNodeId, 'variable', 'unsubscribe tasks', 'src/services/sample.service.ts', { relation: 'supabase-realtime-unsubscribe' }),
-        graphNode(realtimeRemoveAllChannelsNodeId, 'variable', 'removeAllChannels', 'src/services/sample.service.ts', { relation: 'supabase-realtime-remove-all-channels' }),
-        graphNode(sqlFunctionNodeId, 'function', 'public.sample_fn', 'supabase/migrations/20260601000000_sample.sql', { relation: 'sql-function' }),
-        graphNode(triggerNodeId, 'variable', 'sample_trigger', 'supabase/migrations/20260601000000_sample.sql', { relation: 'trigger' }),
-        graphNode(migrationIndexNodeId, 'variable', 'idx_tasks_project_id', 'supabase/migrations/20260601000000_sample.sql', { relation: 'migration-index' }),
-        graphNode(migrationConstraintNodeId, 'variable', 'tasks_project_id_fkey', 'supabase/migrations/20260601000000_sample.sql', { relation: 'migration-constraint' }),
-        graphNode(migrationRealtimePublicationNodeId, 'variable', 'supabase_realtime add public.tasks', 'supabase/migrations/20260601000000_sample.sql', { relation: 'migration-realtime-publication' }),
-        graphNode(migrationViewNodeId, 'variable', 'public.active_tasks', 'supabase/migrations/20260601000000_sample.sql', { relation: 'migration-view' }),
-        graphNode(policyNodeId, 'variable', 'tasks_select_policy', 'supabase/migrations/20260601000000_sample.sql', { relation: 'policy' }),
-        graphNode(privilegeNodeId, 'variable', 'usage', 'supabase/migrations/20260601000000_sample.sql', { relation: 'privilege' }),
-        graphNode(privilegeObjectNodeId, 'variable', 'public.tasks', 'supabase/migrations/20260601000000_sample.sql', { relation: 'privilege-object' }),
-        graphNode(privilegeRoleNodeId, 'variable', 'authenticated', 'supabase/migrations/20260601000000_sample.sql', { relation: 'privilege-role' }),
-        graphNode('variable:edge-function-header', 'variable', 'Authorization', 'supabase/functions/sample/index.ts', { relation: 'edge-function-header' }),
-      ],
-      edges: graphEdges,
-    },
+  for (const [kind, relation] of androidFixtureEdges) {
+    addFixtureEdge(kind, relation);
+  }
+  if (!androidPlatformDrift) {
+    addFixtureEdge('references', 'android-manifest-uses-permission', {
+      permission: 'android.permission.POST_NOTIFICATIONS',
+      declarationType: 'uses-permission',
+    });
+    addFixtureEdge('references', 'android-manifest-query', {
+      queryType: 'package',
+      queryValue: 'com.example.calendar',
+    });
+    addFixtureEdge('references', 'android-manifest-component-permission', {
+      componentType: 'receiver',
+      className: 'SampleReceiver',
+      permission: 'android.permission.BIND_APPWIDGET',
+    });
+    addFixtureEdge('references', 'android-manifest-intent-filter-action', { action: 'android.intent.action.VIEW' });
+    addFixtureEdge('references', 'android-manifest-intent-filter-category', { category: 'android.intent.category.DEFAULT' });
+    addFixtureEdge('references', 'android-manifest-intent-filter-data', { scheme: 'nanoflow' });
+    addFixtureEdge('references', 'android-kotlin-resource-reference', {
+      resourceType: 'string',
+      resourceName: 'app_name',
+    });
+  }
+  if (!androidFunctionDrift) {
+    addFixtureEdge('contains', 'android-kotlin-function', {
+      functionName: 'sampleFunction',
+    });
+  }
+  if (!androidOverrideTypeDrift) {
+    addFixtureEdge('overrides', 'android-kotlin-override', {
+      memberName: 'sampleMember',
+      targetName: 'Base::sampleMember',
+    });
+    addFixtureEdge('type_of', 'android-kotlin-type-reference', {
+      typeName: 'SampleType',
+      targetName: 'SampleType',
+      typeRole: 'return',
+    });
+  }
+  overlay.context7 = {
+    documents: [{}],
+    categories: [{ docs: ['docs/context7/index.md'] }],
+    retrievalRoutes: [{
+      query: 'sample',
+      primary: 'docs/context7/index.md',
+      secondary: ['docs/context7/source-map.md'],
+    }],
+    sourceMapRoutes: [{
+      question: 'sample question',
+      doc: 'docs/context7/index.md',
+      sourcePaths: ['src/a.ts'],
+    }],
   };
 
   fs.writeFileSync(
@@ -417,6 +332,7 @@ export function makeFixture(options: {
   const angularRouteGuardEdgesInDocs = options.angularRouteGuardEdgesInDocs ?? 1;
   const edgeFunctionTestsInDocs = options.edgeFunctionTestsInDocs ?? 1;
   const edgeFunctionHeaderEdgesInDocs = options.edgeFunctionHeaderEdgesInDocs ?? 1;
+  const hardRulesInDocs = options.hardRulesInDocs ?? 1;
   const hardRuleKeywordNodesInDocs = options.hardRuleKeywordNodesInDocs ?? 1;
   const hardRuleKeywordEdgesInDocs = options.hardRuleKeywordEdgesInDocs ?? 1;
   const hardRuleKeywordMappingEdgesInDocs = options.hardRuleKeywordMappingEdgesInDocs ?? 1;
@@ -466,48 +382,84 @@ export function makeFixture(options: {
   const styleUrlEdgesInDocs = options.styleUrlEdgesInDocs ?? 1;
   const totalTestEdgesInDocs = options.totalTestEdgesInDocs ?? 5;
   const testEdgesWithMatchedNeedleInDocs = options.testEdgesWithMatchedNeedleInDocs ?? 3;
-  const androidKotlinDataClassesInDocs = options.androidKotlinDataClassesInDocs ?? 0;
+  const androidKotlinClassesInDocs = options.androidKotlinClassesInDocs ?? 3;
+  const androidKotlinDataClassesInDocs = options.androidKotlinDataClassesInDocs ?? 1;
   const androidKotlinSealedClassesInDocs = options.androidKotlinSealedClassesInDocs ?? 0;
   const androidKotlinInterfacesInDocs = options.androidKotlinInterfacesInDocs ?? 0;
   const androidKotlinInterfaceEdgesInDocs = options.androidKotlinInterfaceEdgesInDocs ?? 0;
-  const androidKotlinExtendsEdgesInDocs = options.androidKotlinExtendsEdgesInDocs ?? 0;
-  const androidKotlinImplementsEdgesInDocs = options.androidKotlinImplementsEdgesInDocs ?? 0;
-  const androidKotlinEnumsInDocs = options.androidKotlinEnumsInDocs ?? 0;
-  const androidKotlinObjectsInDocs = options.androidKotlinObjectsInDocs ?? 0;
-  const androidKotlinObjectEdgesInDocs = options.androidKotlinObjectEdgesInDocs ?? 0;
-  const androidKotlinCompanionObjectsInDocs = options.androidKotlinCompanionObjectsInDocs ?? 0;
-  const androidKotlinCompanionObjectEdgesInDocs = options.androidKotlinCompanionObjectEdgesInDocs ?? 0;
-  const androidKotlinEnumMembersInDocs = options.androidKotlinEnumMembersInDocs ?? 0;
-  const androidKotlinEnumMemberEdgesInDocs = options.androidKotlinEnumMemberEdgesInDocs ?? 0;
-  const androidKotlinImportsInDocs = options.androidKotlinImportsInDocs ?? 0;
-  const androidKotlinImportEdgesInDocs = options.androidKotlinImportEdgesInDocs ?? 0;
-  const androidKotlinConstructorsInDocs = options.androidKotlinConstructorsInDocs ?? 0;
-  const androidKotlinConstructorEdgesInDocs = options.androidKotlinConstructorEdgesInDocs ?? 0;
-  const androidKotlinPropertiesInDocs = options.androidKotlinPropertiesInDocs ?? 0;
-  const androidKotlinPropertyEdgesInDocs = options.androidKotlinPropertyEdgesInDocs ?? 0;
-  const androidKotlinFunctionsInDocs = options.androidKotlinFunctionsInDocs ?? 0;
-  const androidKotlinFunctionEdgesInDocs = options.androidKotlinFunctionEdgesInDocs ?? 0;
-  const androidKotlinOverrideEdgesInDocs = options.androidKotlinOverrideEdgesInDocs ?? 0;
-  const androidKotlinTypeReferenceEdgesInDocs = options.androidKotlinTypeReferenceEdgesInDocs ?? 0;
-  const androidKotlinAnnotationsInDocs = options.androidKotlinAnnotationsInDocs ?? 0;
-  const androidKotlinAnnotationEdgesInDocs = options.androidKotlinAnnotationEdgesInDocs ?? 0;
-  const androidManifestComponentsInDocs = options.androidManifestComponentsInDocs ?? 0;
-  const androidWidgetProvidersInDocs = options.androidWidgetProvidersInDocs ?? 0;
-  const androidResourceReferencesInDocs = options.androidResourceReferencesInDocs ?? 0;
+  const androidKotlinExtendsEdgesInDocs = options.androidKotlinExtendsEdgesInDocs ?? 1;
+  const androidKotlinImplementsEdgesInDocs = options.androidKotlinImplementsEdgesInDocs ?? 1;
+  const androidKotlinEnumsInDocs = options.androidKotlinEnumsInDocs ?? 1;
+  const androidKotlinObjectsInDocs = options.androidKotlinObjectsInDocs ?? 1;
+  const androidKotlinObjectEdgesInDocs = options.androidKotlinObjectEdgesInDocs ?? 1;
+  const androidKotlinCompanionObjectsInDocs = options.androidKotlinCompanionObjectsInDocs ?? 1;
+  const androidKotlinCompanionObjectEdgesInDocs = options.androidKotlinCompanionObjectEdgesInDocs ?? 1;
+  const androidKotlinEnumMembersInDocs = options.androidKotlinEnumMembersInDocs ?? 1;
+  const androidKotlinEnumMemberEdgesInDocs = options.androidKotlinEnumMemberEdgesInDocs ?? 1;
+  const androidKotlinImportsInDocs = options.androidKotlinImportsInDocs ?? 1;
+  const androidKotlinImportEdgesInDocs = options.androidKotlinImportEdgesInDocs ?? 1;
+  const androidKotlinConstructorsInDocs = options.androidKotlinConstructorsInDocs ?? 1;
+  const androidKotlinConstructorEdgesInDocs = options.androidKotlinConstructorEdgesInDocs ?? 1;
+  const androidKotlinPropertiesInDocs = options.androidKotlinPropertiesInDocs ?? 1;
+  const androidKotlinPropertyEdgesInDocs = options.androidKotlinPropertyEdgesInDocs ?? 1;
+  const androidKotlinMethodsInDocs = options.androidKotlinMethodsInDocs ?? 1;
+  const androidKotlinMethodEdgesInDocs = options.androidKotlinMethodEdgesInDocs ?? 1;
+  const androidKotlinFunctionsInDocs = options.androidKotlinFunctionsInDocs ?? 1;
+  const androidKotlinFunctionEdgesInDocs = options.androidKotlinFunctionEdgesInDocs ?? 1;
+  const androidKotlinOverrideEdgesInDocs = options.androidKotlinOverrideEdgesInDocs ?? 1;
+  const androidKotlinTypeReferenceEdgesInDocs = options.androidKotlinTypeReferenceEdgesInDocs ?? 1;
+  const androidKotlinCallsInDocs = options.androidKotlinCallsInDocs ?? 1;
+  const androidKotlinCallEdgesInDocs = options.androidKotlinCallEdgesInDocs ?? 1;
+  const androidKotlinAnnotationsInDocs = options.androidKotlinAnnotationsInDocs ?? 1;
+  const androidKotlinAnnotationEdgesInDocs = options.androidKotlinAnnotationEdgesInDocs ?? 1;
+  const androidManifestComponentsInDocs = options.androidManifestComponentsInDocs ?? 1;
+  const androidWidgetProvidersInDocs = options.androidWidgetProvidersInDocs ?? 1;
+  const androidResourceReferencesInDocs = options.androidResourceReferencesInDocs ?? 1;
+  const androidManifestPermissionsInDocs = 1;
+  const androidManifestQueriesInDocs = 1;
+  const androidManifestComponentPermissionsInDocs = 1;
+  const androidManifestIntentFiltersInDocs = 1;
+  const androidManifestIntentFilterActionsInDocs = 1;
+  const androidManifestIntentFilterCategoriesInDocs = 1;
+  const androidManifestIntentFilterDataInDocs = 1;
+  const androidKotlinResourceReferencesInDocs = 1;
   fs.writeFileSync(
     path.join(root, 'AGENTS.md'),
     [
+      'Production overlay authority: `.codegraph/nanoflow-generations/CURRENT.json` selects one immutable `.codegraph/nanoflow-generations/<generation-id>/`; its `compatibility/nanoflow-overlay.json` is validated by `scripts/lib/codegraph-overlay-current-receipt.cjs` through `readOverlayCurrentReceipt(projectRoot)`.',
       'graphNodes=2',
       `graphEdges=${graphEdgesInDocs}`,
+      'angularComponents=1',
+      'angularDirectives=1',
+      'angularPipes=1',
+      'angularInjectables=1',
+      'angularInjectorFiles=1',
+      'angularInjectorDependencyReferences=1',
+      'angularApplicationProviders=1',
+      'standaloneImportEdges=1',
+      'angularInputEdges=1',
+      'angularOutputEdges=1',
+      'angularModelEdges=0',
+      'angularQueryEdges=1',
+      'angularSignalEdges=1',
+      'context7Documents=1',
+      'context7Categories=1',
+      'context7CategoryDocEdges=1',
+      'context7RetrievalRoutes=1',
+      'context7RetrievalPrimaryEdges=1',
+      'context7RetrievalSecondaryEdges=1',
+      'context7SourceMapRoutes=1',
+      'context7SourceMapDocEdges=1',
+      'context7SourceMapSourceEdges=1',
       'context-pack diagnostics include sourceOrdering, queryClassification, sourceOrdering.queryClassification, sourceSectionCount, duplicateSourceSectionCount, relationshipsSectionCount, duplicateRelationshipsSectionCount, relationshipKindSectionCounts, duplicateRelationshipKindSectionCount, relatedSymbolsSectionCount, duplicateRelatedSymbolsSectionCount, baseSourceReorderAllowed, firstSourceFiles, visibleSourceFileDetails, visibleIndex, rankedIndex, rankedOverlayFiles, rankedOverlayFileDetails, matchRank, nodeRank, matchScore, nodeScore, pathScore, symbolScore, sourceBlockScore, lowValuePenalty, rawLowValuePenalty, pathClassLowValue, codegraphToolingSource, dedupMaintenanceSource, explicitSymbolEvidence, preferredSymbolEvidence, explicitFileRequested, explicitPathRequested, explicitSourcePathRequested, rawTopRankedOverlayFile, topRankedOverlayFile, topRankedOverlayFileSelectionReason, topRankedOverlayFileSkippedLowValue, topRankedOverlayFileVisibleIndex, firstSourceBlockIsTopRankedOverlayFile, and topRankedOverlayFileMissing',
-      'MCP log guard diagnostics include wrapperStarts, wrapperStarts.versions, wrapperStarts.latest.scriptSha256, currentWrapper, currentWrapper.diskScriptSha256, currentWrapper.matchesDisk, currentWrapper.staleAgainstDisk, currentDiskWrapper, currentDiskWrapper.latestRequestKind, currentConfiguredWrapper, currentConfiguredWrapper.codegraphTarget, currentContextWrapper, currentContextWrapper.diskScriptSha256, currentContextWrapper.matchesDisk, currentContextWrapper.staleAgainstDisk, currentContextWrapper.latestTs, currentContextWrapper.latestRequestId, currentDiskContextWrapper, currentDiskContextWrapper.latestRequestKind, currentConfiguredContextWrapper, currentConfiguredContextWrapper.codegraphTarget, activeWrappers, activeWrappers.total, activeWrappers.staleAgainstDisk, activeWrappers.distinctScriptSha256, activeWrappers.activeWindowMs, currentContextSourceOrdering, currentContextSourceOrdering.baseSectionFilteredLines, currentContextSourceOrdering.latestBaseSectionFiltering, currentDiskContextSourceOrdering, currentDiskContextSourceOrdering.baseSectionFilteredLines, currentDiskContextSourceOrdering.latestBaseSectionFiltering, contextSourceOrdering, contextSourceOrdering.baseSectionFilteredLines, contextSourceOrdering.latestBaseSectionFiltering, queryClassification, sourceOrdering.queryClassification, codegraphToolingSource, dedupMaintenanceSource, wrapperRuntimeDiagnostics, currentWrapperRuntimeDiagnostics, codegraphAutoSyncDisabled, currentCodegraphAutoSyncDisabled, activeCodegraphAutoSyncDisabled, activeCodegraphAutoSyncDisabledRuns, diagnosticTriage, diagnosticTriage.status, diagnosticTriage.failureBoundary, diagnosticTriage.adapterFailureLikely, diagnosticTriage.directMcpTrust, diagnosticTriage.failureClasses, diagnosticTriage.doNotMisdiagnoseAs, diagnosticTriage.primaryEvidence, diagnosticTriage.primaryEvidence.directMcpError, diagnosticTriage.primaryEvidence.hostConfigAlignmentOverrides, diagnosticTriage.nextAction, codexMcpConfig.hostConfigAlignmentOverrides, observedDirectMcpError, observedDirectMcpFailureClass, hostMcp.rootCauseSummary, rootCauseSummary.status, rootCauseSummary.failureBoundary, rootCauseSummary.adapterFailureLikely, rootCauseSummary.failureClasses, rootCauseSummary.directMcpTrust, rootCauseSummary.fallback, rootCauseSummary.recovery, host-mcp:observed-direct-mcp-error, --direct-mcp-error, direct-mcp-host-transport-closed, observed-direct-mcp-transport-closed, fresh-config-mismatch, stale-config-mismatch, failureClasses, observed.directMcpError, observed.liveWrapperProcessCount, observed.autoSyncDisabled, observed.activeAutoSyncDisabledCount, observed.activeAutoSyncDisabledRuns, observed.liveProcessMismatches, baseResponseWarnings, responseWarnings, missingDiagnostics, duplicateSourceSections, duplicateRelationshipsSections, duplicateRelationshipKindSections, duplicateRelatedSymbolsSections, topRankedNotFirst, topRankedMissing, lowValueVisibleSourceBlocks, lowValueSourcePollution, latestIssue, latestMissingDiagnostics, wrapper.fatal, and wrapper.runtime.diagnostic',
+      'MCP log guard diagnostics include wrapperStarts, wrapperStarts.versions, wrapperStarts.latest.scriptSha256, currentWrapper, currentWrapper.runtimeTopology, currentWrapper.diskScriptSha256, currentWrapper.matchesDisk, currentWrapper.staleAgainstDisk, currentDiskWrapper, currentDiskWrapper.latestRequestKind, currentConfiguredWrapper, currentConfiguredWrapper.codegraphTarget, currentContextWrapper, currentContextWrapper.diskScriptSha256, currentContextWrapper.matchesDisk, currentContextWrapper.staleAgainstDisk, currentContextWrapper.latestTs, currentContextWrapper.latestRequestId, currentDiskContextWrapper, currentDiskContextWrapper.latestRequestKind, currentConfiguredContextWrapper, currentConfiguredContextWrapper.codegraphTarget, activeWrappers, activeWrappers.total, activeWrappers.runtimeTopologyModes, activeWrappers.directWatcherContentionRisk, activeWrappers.sharedDaemonProxyCount, activeWrappers.staleAgainstDisk, activeWrappers.distinctScriptSha256, activeWrappers.activeWindowMs, currentContextSourceOrdering, currentContextSourceOrdering.baseSectionFilteredLines, currentContextSourceOrdering.latestBaseSectionFiltering, currentDiskContextSourceOrdering, currentDiskContextSourceOrdering.baseSectionFilteredLines, currentDiskContextSourceOrdering.latestBaseSectionFiltering, contextSourceOrdering, contextSourceOrdering.baseSectionFilteredLines, contextSourceOrdering.latestBaseSectionFiltering, queryClassification, sourceOrdering.queryClassification, codegraphToolingSource, dedupMaintenanceSource, wrapperRuntimeDiagnostics, currentWrapperRuntimeDiagnostics, codegraphAutoSyncDisabled, currentCodegraphAutoSyncDisabled, activeCodegraphAutoSyncDisabled, activeCodegraphAutoSyncDisabledRuns, activeDirectWatcherRuns, host-mcp:active-direct-watchers, diagnosticTriage, diagnosticTriage.status, diagnosticTriage.failureBoundary, diagnosticTriage.adapterFailureLikely, diagnosticTriage.directMcpTrust, diagnosticTriage.failureClasses, diagnosticTriage.doNotMisdiagnoseAs, diagnosticTriage.primaryEvidence, diagnosticTriage.primaryEvidence.directMcpError, diagnosticTriage.primaryEvidence.hostConfigAlignmentOverrides, diagnosticTriage.nextAction, codexMcpConfig.hostConfigAlignmentOverrides, observedDirectMcpError, observedDirectMcpFailureClass, hostMcp.rootCauseSummary, rootCauseSummary.status, rootCauseSummary.failureBoundary, rootCauseSummary.adapterFailureLikely, rootCauseSummary.failureClasses, rootCauseSummary.directMcpTrust, rootCauseSummary.fallback, rootCauseSummary.recovery, host-mcp:observed-direct-mcp-error, --direct-mcp-error, direct-mcp-host-transport-closed, observed-direct-mcp-transport-closed, fresh-config-mismatch, stale-config-mismatch, failureClasses, observed.directMcpError, observed.liveWrapperProcessCount, observed.autoSyncDisabled, observed.activeAutoSyncDisabledCount, observed.activeAutoSyncDisabledRuns, observed.activeDirectWatcherCount, observed.activeDirectWatcherRuns, observed.liveProcessMismatches, baseResponseWarnings, responseWarnings, missingDiagnostics, duplicateSourceSections, duplicateRelationshipsSections, duplicateRelationshipKindSections, duplicateRelatedSymbolsSections, topRankedNotFirst, topRankedMissing, lowValueVisibleSourceBlocks, lowValueSourcePollution, latestIssue, latestMissingDiagnostics, wrapper.fatal, and wrapper.runtime.diagnostic',
       'Wrapper Codex config alignment logs wrapper.start.codexConfigAlignment, wrapper.config.mismatch, wrapper.config.match, wrapper.config.override, and wrapper.config.unavailable; config drift uses mcp-host-config-mismatch and carries expected, actual, mismatches, and investigation.failureBoundary=codex-mcp-host. adapter-fallback and smoke overrides are reported through hostConfigAlignmentOverrides with ignored=true, ignoredReason=wrapper-config-alignment-intentional-override, and alignmentMode, and must not trigger --fail-on-host-config-mismatch.',
       'Stale wrapper handling logs wrapper.script.stale and wrapper.script.stale.continue while completing the current nanoflow_context_pack or nanoflow_overlay_query response; the Codex default NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE=0 logs wrapper.script.stale.recycle.skipped while keeping the stale transport alive until the host/session is restarted. Only explicit stale-smoke or recycle diagnostic runs set NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE=1 and log wrapper.script.stale.recycle.request plus wrapper.shutdown.stale-wrapper-script after the current response succeeds. stale must not become a client-visible isError that pushes agents to the native CodeGraph CLI.',
-      'adapter-first NanoFlow adapter CLI fallback runs codegraph:adapter:context with nanoflow_context_pack and nanoflow_overlay_query, or codegraph:overlay:query --skip-refresh for focused relations; @colbymchenry/codegraph@1.2.0 is final native CodeGraph CLI degradation and only a locator.',
-      'upstream CodeGraph fixed version is @colbymchenry/codegraph@1.2.0; upgrade probes must use --codegraph-target @colbymchenry/codegraph@<new-version> before changing the pin. The adapter delegates generic TypeScript symbol/import/export/call/impact discovery to native CodeGraph. native Markdown/JSON formatter section order, strict native output projection, and context exploration source ordering are upstream delegation boundaries. The adapter must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact. NanoFlow overlay owns only project-specific semantics, output-quality policy, Codex host reliability, and repository hard-rule anchors.',
+      'adapter-first NanoFlow adapter CLI fallback runs codegraph:adapter:context with nanoflow_context_pack and nanoflow_overlay_query, or codegraph:overlay:query --skip-refresh for focused relations; @colbymchenry/codegraph@1.5.0 is final native CodeGraph CLI degradation and only a locator.',
+      'upstream CodeGraph fixed version is @colbymchenry/codegraph@1.5.0; upgrade probes must use --codegraph-target @colbymchenry/codegraph@<new-version> before changing the pin. The adapter delegates generic TypeScript symbol/import/export/call/impact discovery to native CodeGraph. native Markdown/JSON formatter section order, strict native output projection, and context exploration source ordering are upstream delegation boundaries. The adapter must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact. NanoFlow overlay owns only project-specific semantics, output-quality policy, Codex host reliability, and repository hard-rule anchors.',
       'De-duplication hotspot audit backlog: collectTypeScript(), buildNativeGraph(), buildImportAliasIndex(), buildExportTargetIndex(), resolveReferenceNodeId(), addTypeScriptCallableEdges(), collectAndroid(), readAndroidKotlinFileSymbols(), readAndroidKotlinMethodCalls(), resolveAndroidKotlinCallTarget(), resolveAndroidKotlinTypeTarget(), addAndroidKotlinTypeReferenceEdges(), addAndroidKotlinOverrideEdges(), addAndroidKotlinAnnotationEdges(), queryOverlay(), scoreCandidate(), selectGraphResults(), formatStrictNativeMarkdown(), formatNativeMarkdown(), contextPackSourceRankingQueryFor(), and sanitizeContextPackBaseMarkdownSections() are temporary allowed duplicates only to attach NanoFlow metadata.relation to native-shaped endpoints; Android/Kotlin duplicate hotspots attach Android Manifest/widget/resource/project semantics to native-shaped Kotlin/XML endpoints; queryOverlay(), scoreCandidate(), and selectGraphResults() are query/ranking duplicate hotspots; formatStrictNativeMarkdown() is a formatter duplicate hotspot for strict native Markdown; formatNativeMarkdown() is a formatter duplicate hotspot for augmented/default Markdown projection; contextPackSourceRankingQueryFor() and sanitizeContextPackBaseMarkdownSections() are source-ordering duplicate hotspot entries; delegated upstream owner is native CodeGraph; docs/codegraph-nanoflow-dedup-contract.json is the machine-readable contract; removal trigger is an upstream extension point or native projection hook; verification gate is codegraph:overlay:docs:validate plus codegraph:adapter:gate.',
-      'Codex MCP config contract: Codex sessions use C:\\Users\\MI\\.codex\\config.toml as the current MCP source; codegraph:adapter:doctor reports mcpConfig: source=codex for this workspace; NANOFLOW_CODEGRAPH_CODEX_CONFIG can override this path; Codex MCP env must set NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS=30000 and NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE=0; codegraph:adapter:context, codegraph:mcp:smoke, and codegraph:adapter:doctor do not read or fall back to .vscode/mcp.json.',
-      'For current Codex usage, .vscode/mcp.json is not the active CodeGraph MCP configuration and must not be edited, repaired, or diagnosed as the fix target for Codex MCP failures; active wrapper, CodeGraph target, and MCP environment changes belong in C:\\Users\\MI\\.codex\\config.toml or a NANOFLOW_CODEGRAPH_CODEX_CONFIG temporary Codex config.',
+      'Codex MCP config contract: NANOFLOW_CODEGRAPH_CODEX_CONFIG overrides D:\\Code\\dde\\.codex\\config.toml, which overrides C:\\Users\\MI\\.codex\\config.toml for this repository; codegraph:adapter:doctor reports the active scope/path; Codex MCP env must set CODEGRAPH_NO_DAEMON=0, CODEGRAPH_NO_WATCH=0, CODEGRAPH_DAEMON_IDLE_TIMEOUT_MS=300000, CODEGRAPH_DAEMON_MAX_IDLE_MS=1800000, NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS=30000, and NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE=0; codegraph:adapter:context intentionally overrides direct/no-watch; codegraph:adapter:context, codegraph:mcp:smoke, and codegraph:adapter:doctor do not read or fall back to .vscode/mcp.json.',
+      'For current Codex usage, .vscode/mcp.json is not the active CodeGraph MCP configuration and must not be edited, repaired, or diagnosed as the fix target for Codex MCP failures; active wrapper, CodeGraph target, and MCP environment changes belong in D:\\Code\\dde\\.codex\\config.toml, its user-level fallback C:\\Users\\MI\\.codex\\config.toml, or a NANOFLOW_CODEGRAPH_CODEX_CONFIG temporary Codex config.',
       'query-path relevance keeps context-json nodes, relatedFiles, entryPoints, codeBlocks, and strict native Markdown ordered by segmented file-name matches such as vitest services config mts',
       'strict native output order keeps native JSON field order query/summary/entryPoints/nodes/edges/codeBlocks/relatedFiles/stats and native Markdown section order Code Context -> Entry Points -> Relationships -> Related Symbols -> Code stable',
       'strict native object projection keeps node fields ordered as id/kind/name/qualifiedName/filePath/language/startLine/endLine/signature/docstring/visibility/isExported/isAsync/isStatic/isAbstract, edge fields ordered as source/target/kind/line/column, and codeBlock fields ordered as filePath/startLine/endLine/language/content/nodeName/nodeKind while stripping metadata/provenance/sourceName/targetName extension fields',
@@ -534,10 +486,12 @@ export function makeFixture(options: {
       'edgeFunctionMethodEdges=1',
       'edgeFunctionHeaderNodes=1',
       `edgeFunctionHeaderEdges=${edgeFunctionHeaderEdgesInDocs}`,
+      'edgeFunctionEnvVarNodes=1',
+      'edgeFunctionEnvVarEdges=1',
       'edgeFunctionInvokeEdges=1',
       'edgeFunctionTests=1',
       'edgeFunctionTestEdges=1',
-      'androidKotlinClasses=0',
+      `androidKotlinClasses=${androidKotlinClassesInDocs}`,
       `androidKotlinDataClasses=${androidKotlinDataClassesInDocs}`,
       `androidKotlinSealedClasses=${androidKotlinSealedClassesInDocs}`,
       `androidKotlinInterfaces=${androidKotlinInterfacesInDocs}`,
@@ -557,19 +511,34 @@ export function makeFixture(options: {
       `androidKotlinConstructorEdges=${androidKotlinConstructorEdgesInDocs}`,
       `androidKotlinProperties=${androidKotlinPropertiesInDocs}`,
       `androidKotlinPropertyEdges=${androidKotlinPropertyEdgesInDocs}`,
-      'androidKotlinMethods=0',
-      'androidKotlinMethodEdges=0',
+      `androidKotlinMethods=${androidKotlinMethodsInDocs}`,
+      `androidKotlinMethodEdges=${androidKotlinMethodEdgesInDocs}`,
       `androidKotlinFunctions=${androidKotlinFunctionsInDocs}`,
       `androidKotlinFunctionEdges=${androidKotlinFunctionEdgesInDocs}`,
       `androidKotlinOverrideEdges=${androidKotlinOverrideEdgesInDocs}`,
       `androidKotlinTypeReferenceEdges=${androidKotlinTypeReferenceEdgesInDocs}`,
-      'androidKotlinCalls=0',
-      'androidKotlinCallEdges=0',
+      `androidKotlinCalls=${androidKotlinCallsInDocs}`,
+      `androidKotlinCallEdges=${androidKotlinCallEdgesInDocs}`,
       `androidKotlinAnnotations=${androidKotlinAnnotationsInDocs}`,
       `androidKotlinAnnotationEdges=${androidKotlinAnnotationEdgesInDocs}`,
       `androidManifestComponents=${androidManifestComponentsInDocs}`,
+      `androidManifestPermissions=${androidManifestPermissionsInDocs}`,
+      'androidManifestUsesPermissionEdges=1',
+      `androidManifestQueries=${androidManifestQueriesInDocs}`,
+      'androidManifestQueryEdges=1',
+      `androidManifestComponentPermissions=${androidManifestComponentPermissionsInDocs}`,
+      'androidManifestComponentPermissionEdges=1',
+      `androidManifestIntentFilters=${androidManifestIntentFiltersInDocs}`,
+      `androidManifestIntentFilterActions=${androidManifestIntentFilterActionsInDocs}`,
+      'androidManifestIntentFilterActionEdges=1',
+      `androidManifestIntentFilterCategories=${androidManifestIntentFilterCategoriesInDocs}`,
+      'androidManifestIntentFilterCategoryEdges=1',
+      `androidManifestIntentFilterData=${androidManifestIntentFilterDataInDocs}`,
+      'androidManifestIntentFilterDataEdges=1',
       `androidWidgetProviders=${androidWidgetProvidersInDocs}`,
       `androidResourceReferences=${androidResourceReferencesInDocs}`,
+      `androidKotlinResourceReferences=${androidKotlinResourceReferencesInDocs}`,
+      'androidKotlinResourceReferenceEdges=1',
       'templateBindings=3',
       'property=1',
       'event=1',
@@ -591,6 +560,7 @@ export function makeFixture(options: {
       'routeReferenceTestEdges=1',
       'invokeReferenceTestEdges=0',
       'filenameReferenceTestEdges=1',
+      `hardRules=${hardRulesInDocs}`,
       `hardRuleKeywordNodes=${hardRuleKeywordNodesInDocs}`,
       `hardRuleKeywordEdges=${hardRuleKeywordEdgesInDocs}`,
       `hardRuleKeywordMappingEdges=${hardRuleKeywordMappingEdgesInDocs}`,
@@ -676,6 +646,8 @@ export function makeFixture(options: {
       'syncRequiredPredicateEdges=1',
       `supabaseRpcNodes=${supabaseRpcNodesInDocs}`,
       `supabaseTableWriteNodes=${supabaseTableWriteNodesInDocs}`,
+      'supabaseRiskTagNodes=1',
+      'supabaseRiskTagEdges=1',
       '',
     ].join('\n'),
   );
@@ -683,15 +655,17 @@ export function makeFixture(options: {
   fs.writeFileSync(
     path.join(root, 'docs', 'codegraph-nanoflow-adaptation.md'),
     [
+      'Production overlay authority: `.codegraph/nanoflow-generations/CURRENT.json` selects one immutable `.codegraph/nanoflow-generations/<generation-id>/`; its `compatibility/nanoflow-overlay.json` is validated by `scripts/lib/codegraph-overlay-current-receipt.cjs` through `readOverlayCurrentReceipt(projectRoot)`.',
       `${graphNodesInDocs} graph nodes and ${graphEdgesInDocs} graph edges in the native-shaped projection;`,
+      'Project semantic coverage counters: angularComponents=1, angularDirectives=1, angularPipes=1, angularInjectables=1, angularInjectorFiles=1, angularInjectorDependencyReferences=1, angularApplicationProviders=1, standaloneImportEdges=1, angularInputEdges=1, angularOutputEdges=1, angularModelEdges=0, angularQueryEdges=1, angularSignalEdges=1, context7Documents=1, context7Categories=1, context7CategoryDocEdges=1, context7RetrievalRoutes=1, context7RetrievalPrimaryEdges=1, context7RetrievalSecondaryEdges=1, context7SourceMapRoutes=1, context7SourceMapDocEdges=1, and context7SourceMapSourceEdges=1.',
       `2 dynamic import entries, ${dynamicImportEdgesInDocs} dynamic import graph edges, and 1 Angular route`,
       `${angularRouteGuardEdgesInDocs} angular-route-guard edges and 1 angular-route-resolver edges`,
       '1 angular-route-redirect edges and 1 angular-route-provider edges',
       '0 host-directive edges, 1 host-attribute edges, 1 host-binding edges, and 1 host-listener edges',
       `1 Supabase Edge Functions with 0 env-var references after following relative helper imports under supabase/functions, 2 followed source/helper files counted per Edge Function, 1 recorded source import relations, 1 native edge-function-source import edges, 1 generated /functions/v1/<name> route nodes/edges, 1 explicit req.method method references currently found in the real tree, 1 implementation-side edge-function-invoke edges, and 1 native test-reference edges`,
       `The Supabase Edge Function header layer adds 1 edge-function-header native-shaped variable nodes and ${edgeFunctionHeaderEdgesInDocs} native references edges across request headers.`,
-      `Android Kotlin member graph summary: 0 androidKotlinClasses, ${androidKotlinDataClassesInDocs} androidKotlinDataClasses, ${androidKotlinSealedClassesInDocs} androidKotlinSealedClasses, ${androidKotlinInterfacesInDocs} androidKotlinInterfaces, ${androidKotlinInterfaceEdgesInDocs} androidKotlinInterfaceEdges, ${androidKotlinExtendsEdgesInDocs} androidKotlinExtendsEdges, ${androidKotlinImplementsEdgesInDocs} androidKotlinImplementsEdges, ${androidKotlinObjectsInDocs} androidKotlinObjects, ${androidKotlinObjectEdgesInDocs} androidKotlinObjectEdges, ${androidKotlinCompanionObjectsInDocs} androidKotlinCompanionObjects, ${androidKotlinCompanionObjectEdgesInDocs} androidKotlinCompanionObjectEdges, ${androidKotlinEnumsInDocs} androidKotlinEnums, ${androidKotlinEnumMembersInDocs} androidKotlinEnumMembers, ${androidKotlinEnumMemberEdgesInDocs} androidKotlinEnumMemberEdges, ${androidKotlinImportsInDocs} androidKotlinImports, ${androidKotlinImportEdgesInDocs} androidKotlinImportEdges, ${androidKotlinConstructorsInDocs} androidKotlinConstructors, ${androidKotlinConstructorEdgesInDocs} androidKotlinConstructorEdges, ${androidKotlinPropertiesInDocs} androidKotlinProperties, ${androidKotlinPropertyEdgesInDocs} androidKotlinPropertyEdges, 0 androidKotlinMethods, 0 androidKotlinMethodEdges, ${androidKotlinFunctionsInDocs} androidKotlinFunctions, ${androidKotlinFunctionEdgesInDocs} androidKotlinFunctionEdges, ${androidKotlinOverrideEdgesInDocs} androidKotlinOverrideEdges, ${androidKotlinTypeReferenceEdgesInDocs} androidKotlinTypeReferenceEdges, 0 androidKotlinCalls, 0 androidKotlinCallEdges, ${androidKotlinAnnotationsInDocs} androidKotlinAnnotations, and ${androidKotlinAnnotationEdgesInDocs} androidKotlinAnnotationEdges.`,
-      `Android packaging/resource graph summary: ${androidManifestComponentsInDocs} androidManifestComponents, ${androidWidgetProvidersInDocs} androidWidgetProviders, and ${androidResourceReferencesInDocs} androidResourceReferences.`,
+      `Android Kotlin member graph summary: ${androidKotlinClassesInDocs} androidKotlinClasses, ${androidKotlinDataClassesInDocs} androidKotlinDataClasses, ${androidKotlinSealedClassesInDocs} androidKotlinSealedClasses, ${androidKotlinInterfacesInDocs} androidKotlinInterfaces, ${androidKotlinInterfaceEdgesInDocs} androidKotlinInterfaceEdges, ${androidKotlinExtendsEdgesInDocs} androidKotlinExtendsEdges, ${androidKotlinImplementsEdgesInDocs} androidKotlinImplementsEdges, ${androidKotlinObjectsInDocs} androidKotlinObjects, ${androidKotlinObjectEdgesInDocs} androidKotlinObjectEdges, ${androidKotlinCompanionObjectsInDocs} androidKotlinCompanionObjects, ${androidKotlinCompanionObjectEdgesInDocs} androidKotlinCompanionObjectEdges, ${androidKotlinEnumsInDocs} androidKotlinEnums, ${androidKotlinEnumMembersInDocs} androidKotlinEnumMembers, ${androidKotlinEnumMemberEdgesInDocs} androidKotlinEnumMemberEdges, ${androidKotlinImportsInDocs} androidKotlinImports, ${androidKotlinImportEdgesInDocs} androidKotlinImportEdges, ${androidKotlinConstructorsInDocs} androidKotlinConstructors, ${androidKotlinConstructorEdgesInDocs} androidKotlinConstructorEdges, ${androidKotlinPropertiesInDocs} androidKotlinProperties, ${androidKotlinPropertyEdgesInDocs} androidKotlinPropertyEdges, ${androidKotlinMethodsInDocs} androidKotlinMethods, ${androidKotlinMethodEdgesInDocs} androidKotlinMethodEdges, ${androidKotlinFunctionsInDocs} androidKotlinFunctions, ${androidKotlinFunctionEdgesInDocs} androidKotlinFunctionEdges, ${androidKotlinOverrideEdgesInDocs} androidKotlinOverrideEdges, ${androidKotlinTypeReferenceEdgesInDocs} androidKotlinTypeReferenceEdges, ${androidKotlinCallsInDocs} androidKotlinCalls, ${androidKotlinCallEdgesInDocs} androidKotlinCallEdges, ${androidKotlinAnnotationsInDocs} androidKotlinAnnotations, and ${androidKotlinAnnotationEdgesInDocs} androidKotlinAnnotationEdges.`,
+      `Android packaging/resource graph summary: ${androidManifestComponentsInDocs} androidManifestComponents, ${androidManifestPermissionsInDocs} androidManifestPermissions, 1 androidManifestUsesPermissionEdges, ${androidManifestQueriesInDocs} androidManifestQueries, 1 androidManifestQueryEdges, ${androidManifestComponentPermissionsInDocs} androidManifestComponentPermissions, 1 androidManifestComponentPermissionEdges, ${androidManifestIntentFiltersInDocs} androidManifestIntentFilters, ${androidManifestIntentFilterActionsInDocs} androidManifestIntentFilterActions, 1 androidManifestIntentFilterActionEdges, ${androidManifestIntentFilterCategoriesInDocs} androidManifestIntentFilterCategories, 1 androidManifestIntentFilterCategoryEdges, ${androidManifestIntentFilterDataInDocs} androidManifestIntentFilterData, 1 androidManifestIntentFilterDataEdges, ${androidWidgetProvidersInDocs} androidWidgetProviders, ${androidResourceReferencesInDocs} androidResourceReferences, ${androidKotlinResourceReferencesInDocs} androidKotlinResourceReferences, and 1 androidKotlinResourceReferenceEdges.`,
       'records 3 template bindings: 1 property, 1 event, 1 interpolation, 0 model, 0 control-flow, and 0 structural directive bindings',
       'adds 1 `template-component` edges, 1 `template-directive` edges in the current fixture, and 1 `template-pipe` edges',
       `Angular external resource graph summary: ${templateUrlEdgesInDocs} template-url edges and ${styleUrlEdgesInDocs} style-url edges`,
@@ -700,6 +674,7 @@ export function makeFixture(options: {
       'Realtime graph summary: 1 supabase-realtime-channel edges, 1 supabase-realtime-postgres-change edges, 1 supabase-realtime-status edges, 1 supabase-realtime-remove-channel edges, 1 supabase-realtime-unsubscribe edges, and 1 supabase-realtime-remove-all-channels edges',
       `Select and storage node summary: ${supabaseSelectFieldNodesInDocs} supabase-select-field nodes, ${inlineSelectFieldNodesInDocs} inline select field nodes, ${supabaseIncrementalPredicateNodesInDocs} supabase-incremental-predicate nodes, and ${supabaseStorageBucketNodesInDocs} supabase-storage-bucket nodes.`,
       `Select and storage graph summary: 3 supabase-select-field edges, 2 supabase-select-field reference edges, 1 inline select provenance edges, 1 sync-required-field edges, 1 supabase-incremental-predicate edges, 1 sync-required-predicate edges, and 1 supabase-storage-bucket edges`,
+      `${hardRulesInDocs} AGENTS hard-rule anchors`,
       `${hardRuleKeywordNodesInDocs} hard-rule keyword nodes, ${hardRuleKeywordEdgesInDocs} hard-rule keyword edges, ${hardRuleKeywordMappingEdgesInDocs} hard-rule keyword mapping edges, 1 hard-rule implementation edges, and ${hardRuleImplementationTargetsInDocs} hard-rule implementation targets`,
       `${hardRuleKeywordEdgesInDocs} hard-rule keyword edges and 1 hard-rule implementation edges`,
       `1 sync-rule anchors, ${configRulesInDocs} config-rule anchors, ${syncRuleNodesInDocs} sync-rule nodes, ${syncRuleKeywordNodesInDocs} sync-rule keyword nodes, ${syncRuleKeywordEdgesInDocs} sync-rule keyword edges, 1 sync-body keyword edges, 1 sync-config keyword edges, ${configPropertyNodesInDocs} config-property nodes, ${configPropertyEdgesInDocs} config-property edges, ${configPropertyParentEdgesInDocs} config-property parent edges, 1 config-source edges, ${configSourcePropertyEdgesInDocs} config-source property edges, and ${syncConfigSourceEdgesInDocs} sync-config-source edges`,
@@ -718,11 +693,11 @@ export function makeFixture(options: {
       'MCP log guard diagnostics include wrapperStarts, wrapperStarts.versions, wrapperStarts.latest.scriptSha256, currentWrapper, currentWrapper.diskScriptSha256, currentWrapper.matchesDisk, currentWrapper.staleAgainstDisk, currentDiskWrapper, currentDiskWrapper.latestRequestKind, currentConfiguredWrapper, currentConfiguredWrapper.codegraphTarget, currentContextWrapper, currentContextWrapper.diskScriptSha256, currentContextWrapper.matchesDisk, currentContextWrapper.staleAgainstDisk, currentContextWrapper.latestTs, currentContextWrapper.latestRequestId, currentDiskContextWrapper, currentDiskContextWrapper.latestRequestKind, currentConfiguredContextWrapper, currentConfiguredContextWrapper.codegraphTarget, activeWrappers, activeWrappers.total, activeWrappers.staleAgainstDisk, activeWrappers.distinctScriptSha256, activeWrappers.activeWindowMs, currentContextSourceOrdering, currentContextSourceOrdering.baseSectionFilteredLines, currentContextSourceOrdering.latestBaseSectionFiltering, currentDiskContextSourceOrdering, currentDiskContextSourceOrdering.baseSectionFilteredLines, currentDiskContextSourceOrdering.latestBaseSectionFiltering, contextSourceOrdering, contextSourceOrdering.baseSectionFilteredLines, contextSourceOrdering.latestBaseSectionFiltering, queryClassification, sourceOrdering.queryClassification, codegraphToolingSource, dedupMaintenanceSource, wrapperRuntimeDiagnostics, currentWrapperRuntimeDiagnostics, codegraphAutoSyncDisabled, currentCodegraphAutoSyncDisabled, activeCodegraphAutoSyncDisabled, activeCodegraphAutoSyncDisabledRuns, diagnosticTriage, diagnosticTriage.status, diagnosticTriage.failureBoundary, diagnosticTriage.adapterFailureLikely, diagnosticTriage.directMcpTrust, diagnosticTriage.failureClasses, diagnosticTriage.doNotMisdiagnoseAs, diagnosticTriage.primaryEvidence, diagnosticTriage.primaryEvidence.directMcpError, diagnosticTriage.primaryEvidence.hostConfigAlignmentOverrides, diagnosticTriage.nextAction, codexMcpConfig.hostConfigAlignmentOverrides, observedDirectMcpError, observedDirectMcpFailureClass, hostMcp.rootCauseSummary, rootCauseSummary.status, rootCauseSummary.failureBoundary, rootCauseSummary.adapterFailureLikely, rootCauseSummary.failureClasses, rootCauseSummary.directMcpTrust, rootCauseSummary.fallback, rootCauseSummary.recovery, host-mcp:observed-direct-mcp-error, --direct-mcp-error, direct-mcp-host-transport-closed, observed-direct-mcp-transport-closed, fresh-config-mismatch, stale-config-mismatch, failureClasses, observed.directMcpError, observed.liveWrapperProcessCount, observed.autoSyncDisabled, observed.activeAutoSyncDisabledCount, observed.activeAutoSyncDisabledRuns, observed.liveProcessMismatches, baseResponseWarnings, responseWarnings, missingDiagnostics, duplicateSourceSections, duplicateRelationshipsSections, duplicateRelationshipKindSections, duplicateRelatedSymbolsSections, topRankedNotFirst, topRankedMissing, lowValueVisibleSourceBlocks, lowValueSourcePollution, latestIssue, latestMissingDiagnostics, wrapper.fatal, and wrapper.runtime.diagnostic.',
       'Wrapper Codex config alignment logs wrapper.start.codexConfigAlignment, wrapper.config.mismatch, wrapper.config.match, wrapper.config.override, and wrapper.config.unavailable; config drift uses mcp-host-config-mismatch and carries expected, actual, mismatches, and investigation.failureBoundary=codex-mcp-host. adapter-fallback and smoke overrides are reported through hostConfigAlignmentOverrides with ignored=true, ignoredReason=wrapper-config-alignment-intentional-override, and alignmentMode, and must not trigger --fail-on-host-config-mismatch.',
       'Stale wrapper handling logs wrapper.script.stale and wrapper.script.stale.continue while completing the current nanoflow_context_pack or nanoflow_overlay_query response; the Codex default NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE=0 logs wrapper.script.stale.recycle.skipped while keeping the stale transport alive until the host/session is restarted. Only explicit stale-smoke or recycle diagnostic runs set NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE=1 and log wrapper.script.stale.recycle.request plus wrapper.shutdown.stale-wrapper-script after the current response succeeds. stale must not become a client-visible isError that pushes agents to the native CodeGraph CLI.',
-      'The adapter-first NanoFlow adapter CLI fallback runs codegraph:adapter:context with nanoflow_context_pack and nanoflow_overlay_query, or codegraph:overlay:query --skip-refresh for focused relations; @colbymchenry/codegraph@1.2.0 is final native CodeGraph CLI degradation and only a locator.',
-      'The upstream CodeGraph fixed version is @colbymchenry/codegraph@1.2.0; upgrade probes must use --codegraph-target @colbymchenry/codegraph@<new-version> before changing the pin. The adapter delegates generic TypeScript symbol/import/export/call/impact discovery to native CodeGraph. native Markdown/JSON formatter section order, strict native output projection, and context exploration source ordering are upstream delegation boundaries. The adapter must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact. NanoFlow overlay owns only project-specific semantics, output-quality policy, Codex host reliability, and repository hard-rule anchors.',
+      'The adapter-first NanoFlow adapter CLI fallback runs codegraph:adapter:context with nanoflow_context_pack and nanoflow_overlay_query, or codegraph:overlay:query --skip-refresh for focused relations; @colbymchenry/codegraph@1.5.0 is final native CodeGraph CLI degradation and only a locator.',
+      'The upstream CodeGraph fixed version is @colbymchenry/codegraph@1.5.0; upgrade probes must use --codegraph-target @colbymchenry/codegraph@<new-version> before changing the pin. The adapter delegates generic TypeScript symbol/import/export/call/impact discovery to native CodeGraph. native Markdown/JSON formatter section order, strict native output projection, and context exploration source ordering are upstream delegation boundaries. The adapter must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact. NanoFlow overlay owns only project-specific semantics, output-quality policy, Codex host reliability, and repository hard-rule anchors.',
       'De-duplication hotspot audit backlog: collectTypeScript(), buildNativeGraph(), buildImportAliasIndex(), buildExportTargetIndex(), resolveReferenceNodeId(), addTypeScriptCallableEdges(), collectAndroid(), readAndroidKotlinFileSymbols(), readAndroidKotlinMethodCalls(), resolveAndroidKotlinCallTarget(), resolveAndroidKotlinTypeTarget(), addAndroidKotlinTypeReferenceEdges(), addAndroidKotlinOverrideEdges(), addAndroidKotlinAnnotationEdges(), queryOverlay(), scoreCandidate(), selectGraphResults(), formatStrictNativeMarkdown(), formatNativeMarkdown(), contextPackSourceRankingQueryFor(), and sanitizeContextPackBaseMarkdownSections() are temporary allowed duplicates only to attach NanoFlow metadata.relation to native-shaped endpoints; Android/Kotlin duplicate hotspots attach Android Manifest/widget/resource/project semantics to native-shaped Kotlin/XML endpoints; queryOverlay(), scoreCandidate(), and selectGraphResults() are query/ranking duplicate hotspots; formatStrictNativeMarkdown() is a formatter duplicate hotspot for strict native Markdown; formatNativeMarkdown() is a formatter duplicate hotspot for augmented/default Markdown projection; contextPackSourceRankingQueryFor() and sanitizeContextPackBaseMarkdownSections() are source-ordering duplicate hotspot entries; delegated upstream owner is native CodeGraph; docs/codegraph-nanoflow-dedup-contract.json is the machine-readable contract; removal trigger is an upstream extension point or native projection hook; verification gate is codegraph:overlay:docs:validate plus codegraph:adapter:gate.',
-      'Codex MCP config contract: Codex sessions use C:\\Users\\MI\\.codex\\config.toml as the current MCP source; codegraph:adapter:doctor reports mcpConfig: source=codex for this workspace; NANOFLOW_CODEGRAPH_CODEX_CONFIG can override this path; Codex MCP env must set NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS=30000 and NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE=0; codegraph:adapter:context, codegraph:mcp:smoke, and codegraph:adapter:doctor do not read or fall back to .vscode/mcp.json.',
-      'For current Codex usage, .vscode/mcp.json is not the active CodeGraph MCP configuration and must not be edited, repaired, or diagnosed as the fix target for Codex MCP failures; active wrapper, CodeGraph target, and MCP environment changes belong in C:\\Users\\MI\\.codex\\config.toml or a NANOFLOW_CODEGRAPH_CODEX_CONFIG temporary Codex config.',
+      'Codex MCP config contract: NANOFLOW_CODEGRAPH_CODEX_CONFIG overrides D:\\Code\\dde\\.codex\\config.toml, which overrides C:\\Users\\MI\\.codex\\config.toml for this repository; codegraph:adapter:doctor reports mcpConfig: source=codex and the active scope/path; Codex MCP env must set NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS=30000 and NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE=0; codegraph:adapter:context, codegraph:mcp:smoke, and codegraph:adapter:doctor do not read or fall back to .vscode/mcp.json.',
+      'For current Codex usage, .vscode/mcp.json is not the active CodeGraph MCP configuration and must not be edited, repaired, or diagnosed as the fix target for Codex MCP failures; active wrapper, CodeGraph target, and MCP environment changes belong in D:\\Code\\dde\\.codex\\config.toml, its user-level fallback C:\\Users\\MI\\.codex\\config.toml, or a NANOFLOW_CODEGRAPH_CODEX_CONFIG temporary Codex config.',
       '## Local CodeGraph Source Setup',
       '```powershell',
       'cd D:\\Code\\tools\\codegraph',
@@ -784,17 +759,11 @@ export function makeFixture(options: {
 }
 
 export function runValidator(root: string) {
-  return spawnSync(process.execPath, [scriptPath, '--root', root], {
-    cwd: repoRoot,
-    encoding: 'utf-8',
-  });
+  return runValidatorWithFixtureCurrentReceipt(root, repoRoot, scriptPath);
 }
 
 export function runSync(root: string) {
-  return spawnSync(process.execPath, [syncScriptPath, '--root', root], {
-    cwd: repoRoot,
-    encoding: 'utf-8',
-  });
+  return runSyncWithFixtureCurrentReceipt(root, repoRoot, syncScriptPath);
 }
 
 
@@ -803,4 +772,6 @@ export function cleanupCodegraphOverlayDocsFixtures(): void {
     const root = tempRoots.pop();
     if (root) fs.rmSync(root, { recursive: true, force: true });
   }
+  restoreFixtureCurrentReceiptModuleLoader();
+  restoreFixtureCurrentReceiptEnvironment();
 }

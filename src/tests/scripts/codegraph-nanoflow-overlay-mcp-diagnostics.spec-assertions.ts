@@ -139,8 +139,8 @@ function assertOverlayQueryStart(
       activeRequestCount: expect.any(Number),
     }),
     overlayFile: expect.objectContaining({
-      path: path.join(repoRoot, '.codegraph', 'nanoflow-overlay.json'),
-      relativePath: '.codegraph/nanoflow-overlay.json',
+      path: path.join(repoRoot, '.codegraph', 'nanoflow-generations', 'CURRENT.json'),
+      relativePath: '.codegraph/nanoflow-generations/CURRENT.json',
       exists: true,
       bytes: expect.any(Number),
       mtimeMs: expect.any(Number),
@@ -195,8 +195,7 @@ function assertOverlayQueryExit(
       skipRefresh: true,
     }),
     profilePhases: expect.arrayContaining([
-      expect.objectContaining({ phase: 'readOverlayFile', elapsedMs: expect.any(Number) }),
-      expect.objectContaining({ phase: 'parseOverlayJson', elapsedMs: expect.any(Number) }),
+      expect.objectContaining({ phase: 'readOverlayCurrentReceipt', elapsedMs: expect.any(Number) }),
     ]),
     lastProfilePhase: expect.objectContaining({
       phase: expect.any(String),

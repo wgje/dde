@@ -80,13 +80,30 @@ export function registerCodegraphOverlayMcpLifecycleTimeoutSpecs(context: Codegr
 
       const response = (await responsePromise) as {
         id: number;
-        error: { code: number; message: string };
+        result: {
+          isError: boolean;
+          content: Array<{ text: string }>;
+          structuredContent: { outcome: Record<string, unknown> };
+          _meta: Record<string, unknown>;
+        };
       };
       expect(response.id).toBe(94);
-      expect(response.error).toEqual(expect.objectContaining({
-        code: -32001,
-        message: expect.stringContaining('Base CodeGraph child exited before responding'),
-      }));
+      expect(response.result.isError).toBe(true);
+      expect(response.result.content[0].text).toContain('Base CodeGraph child exited before responding');
+      expect(response.result.structuredContent.outcome).toEqual({
+        schemaVersion: 1,
+        status: 'failed',
+        usableContext: false,
+        primaryFailureClass: 'base-codegraph-child-exit',
+        base: { status: 'unavailable', isError: true, textBytes: 0 },
+        overlay: { status: 'unavailable', isError: true, failureClass: null, generationId: null },
+      });
+      expect(response.result._meta).toEqual({
+        nanoflowFailureClass: 'base-codegraph-child-exit',
+        nanoflowOutcomeSchemaVersion: 1,
+        nanoflowOutcomeStatus: 'failed',
+        nanoflowContextUsable: false,
+      });
 
       const responseEvent = await waitForLogEvent(
         logPath,
@@ -96,6 +113,8 @@ export function registerCodegraphOverlayMcpLifecycleTimeoutSpecs(context: Codegr
       );
       expect(responseEvent).toEqual(expect.objectContaining({
         failureClass: 'base-codegraph-child-exit',
+        isError: true,
+        hasError: false,
         runtime: expect.objectContaining({
           pendingContextPackCount: 0,
           activeRequestCount: 0,
@@ -167,12 +186,46 @@ export function registerCodegraphOverlayMcpLifecycleTimeoutSpecs(context: Codegr
       })}\n`);
       const unavailableResponse = (await unavailableResponsePromise) as {
         id: number;
-        error: { code: number; message: string };
+        result: {
+          isError: boolean;
+          content: Array<{ text: string }>;
+          structuredContent: { outcome: Record<string, unknown> };
+          _meta: Record<string, unknown>;
+        };
       };
       expect(unavailableResponse.id).toBe(91);
-      expect(unavailableResponse.error).toEqual(expect.objectContaining({
-        code: -32001,
-        message: expect.stringContaining('Base CodeGraph child is restarting or unavailable'),
+      expect(unavailableResponse.result.isError).toBe(true);
+      expect(unavailableResponse.result.content[0].text)
+        .toContain('Base CodeGraph child is restarting or unavailable');
+      expect(unavailableResponse.result.structuredContent.outcome).toEqual({
+        schemaVersion: 1,
+        status: 'failed',
+        usableContext: false,
+        primaryFailureClass: 'base-codegraph-unavailable',
+        base: { status: 'unavailable', isError: true, textBytes: 0 },
+        overlay: { status: 'unavailable', isError: true, failureClass: null, generationId: null },
+      });
+      expect(unavailableResponse.result._meta).toEqual({
+        nanoflowFailureClass: 'base-codegraph-unavailable',
+        nanoflowOutcomeSchemaVersion: 1,
+        nanoflowOutcomeStatus: 'failed',
+        nanoflowContextUsable: false,
+      });
+
+      const unavailableResponseEvent = await waitForLogEvent(
+        logPath,
+        'client.response',
+        2_000,
+        (entry) => entry.clientId === 91,
+      );
+      expect(unavailableResponseEvent).toEqual(expect.objectContaining({
+        failureClass: 'base-codegraph-unavailable',
+        isError: true,
+        hasError: false,
+        runtime: expect.objectContaining({
+          pendingContextPackCount: 0,
+          activeRequestCount: 0,
+        }),
       }));
 
       const events = parseJsonLines(logPath);

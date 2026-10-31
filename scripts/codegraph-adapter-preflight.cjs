@@ -168,13 +168,15 @@ function buildReport(args) {
   checks.push(makeCheck('git:status', true));
 
   const doctor = runJsonScript(args.root, 'codegraph-adapter-doctor.cjs', []);
-  checks.push(makeCheck('doctor', doctor.body !== null, {
+  const doctorOk = doctor.status === 0 && doctor.body?.ok === true;
+  checks.push(makeCheck('doctor', doctorOk, {
     status: doctor.status,
     healthy: doctor.body?.ok === true,
   }));
 
   const leaseStatus = runJsonScript(args.root, 'agent-file-lease.cjs', ['status']);
-  checks.push(makeCheck('lease:status', leaseStatus.status === 0 && leaseStatus.body?.ok === true, {
+  const leaseStatusOk = leaseStatus.status === 0 && leaseStatus.body?.ok === true;
+  checks.push(makeCheck('lease:status', leaseStatusOk, {
     status: leaseStatus.status,
   }));
 
@@ -189,7 +191,7 @@ function buildReport(args) {
   }
 
   let claim = null;
-  if (args.claims.length > 0 && targetFiles.leaseConflicts.length === 0) {
+  if (args.claims.length > 0 && doctorOk && leaseStatusOk && targetFiles.leaseConflicts.length === 0) {
     const claimResult = runJsonScript(args.root, 'agent-file-lease.cjs', [
       'claim',
       '--owner',

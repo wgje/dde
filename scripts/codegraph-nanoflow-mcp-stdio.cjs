@@ -3575,6 +3575,8 @@ function startPendingContextPackOverlay(internalId) {
 
   pending.overlayQuery = overlayQuery;
   pending.overlayStartedAtMs = overlayStartedAtMs;
+  pending.overlayTimeoutMs = overlayTimeoutMs;
+  pending.overlayDeadlineMs = overlayStartedAtMs + overlayTimeoutMs;
   pending.overlayPromise = runNanoFlowOverlayQuery(overlayQuery, pending.overlayLimit, {
     contextJson: true,
     timeoutMs: overlayTimeoutMs,
@@ -3597,7 +3599,10 @@ function buildContextPackQueryPlan(pending, extra = {}) {
     baseMaxFiles: pending.baseMaxFiles,
     overlayLimit: pending.overlayLimit,
     contextTimeoutMs: CONTEXT_PACK_TIMEOUT_MS,
-    overlayTimeoutMs: OVERLAY_QUERY_TIMEOUT_MS,
+    overlayTimeoutMs: pending.overlayTimeoutMs ?? OVERLAY_QUERY_TIMEOUT_MS,
+    overlayDeadlineRemainingMs: Number.isFinite(pending.overlayDeadlineMs)
+      ? Math.max(0, pending.overlayDeadlineMs - Date.now())
+      : null,
     overlayRecoveryGraceMs: CONTEXT_PACK_TIMEOUT_OVERLAY_GRACE_MS,
     ...extra,
   };
@@ -3612,11 +3617,11 @@ async function resolvePendingContextPackOverlay(internalId, pending) {
 
 async function resolvePendingContextPackOverlayForTimeout(internalId, pending) {
   const overlayPromise = resolvePendingContextPackOverlay(internalId, pending);
-  const deadlineWaitMs = pending.deadlineMs - Date.now();
+  const overlayDeadlineWaitMs = (pending.overlayDeadlineMs ?? pending.deadlineMs) - Date.now();
   const overlayRecoveryTimeoutMs = Math.max(
     1,
-    deadlineWaitMs > 0
-      ? deadlineWaitMs + CONTEXT_PACK_TIMEOUT_OVERLAY_GRACE_MS
+    overlayDeadlineWaitMs > 0
+      ? overlayDeadlineWaitMs + CONTEXT_PACK_TIMEOUT_OVERLAY_GRACE_MS
       : CONTEXT_PACK_TIMEOUT_OVERLAY_GRACE_MS,
   );
   const timeoutSentinel = Symbol('context-pack-overlay-timeout');

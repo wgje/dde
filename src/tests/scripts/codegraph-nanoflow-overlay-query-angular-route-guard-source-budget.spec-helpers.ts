@@ -191,7 +191,7 @@ export function registerCodegraphOverlayAngularRouteGuardSourceBudgetSpecs(
     expectSpawnSuccess(result);
     expectSpawnSuccess(nativeMarkdownResult);
     const response = JSON.parse(result.stdout);
-    expect(response.summary).toBe('Found 4 relevant code symbols across 2 files.');
+    expect(response.summary).toBe('Found 5 relevant code symbols across 2 files.');
     expect(response.nodes).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: routeNode.id, kind: 'route', name: 'projects' }),
       expect.objectContaining({ id: guardNode.id, kind: 'function', name: 'requireAuthGuardLazy' }),
@@ -254,6 +254,10 @@ export function registerCodegraphOverlayAngularRouteGuardSourceBudgetSpecs(
         language: 'typescript',
         startLine: routeLine,
         endLine: routeLine,
+        metadata: {
+          framework: 'angular',
+          path: routeName,
+        },
       };
       const guardNode = {
         id: `function:${routeFile}:${guardName}`,

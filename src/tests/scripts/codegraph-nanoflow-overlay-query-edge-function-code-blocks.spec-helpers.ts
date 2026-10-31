@@ -12,6 +12,9 @@ export function registerCodegraphOverlayEdgeFunctionCodeBlockSpecs(
   context: CodegraphOverlaySpecContext,
 ): void {
   const { makeFixture, queryOverlay, expectSpawnSuccess, tempRoots, writeFile, repoRoot, queryScriptPath } = context;
+  const fixtureQueryArgs = (...args: string[]): string[] => [
+    '--overlay', '.codegraph/nanoflow-overlay.json', ...args,
+  ];
 
   it('uses Edge Function source blocks for strict native route relation code blocks', () => {
     const root = makeFixture();
@@ -171,7 +174,7 @@ export function registerCodegraphOverlayEdgeFunctionCodeBlockSpecs(
       ],
     });
 
-    const result = queryOverlay(root, 'edge-function-route', ['--limit', '20', '--native-json']);
+    const result = queryOverlay(root, 'edge-function-route', fixtureQueryArgs('--limit', '20', '--native-json'));
 
     expectSpawnSuccess(result);
     const response = JSON.parse(result.stdout);
@@ -232,6 +235,11 @@ export function registerCodegraphOverlayEdgeFunctionCodeBlockSpecs(
         language: 'typescript',
         startLine: 2,
         endLine: 2,
+        metadata: {
+          platform: 'supabase-edge-function',
+          relation: 'edge-function-route',
+          invokeName: name,
+        },
       };
       nodes.push(functionNode, routeNode);
       edges.push({
@@ -254,7 +262,10 @@ export function registerCodegraphOverlayEdgeFunctionCodeBlockSpecs(
       edges,
     });
 
-    const result = queryOverlay(root, 'edge-function-route', ['--limit', '20', '--native-json']);
+    const result = queryOverlay(root, 'edge-function-route', [
+      '--overlay', '.codegraph/nanoflow-overlay.json',
+      '--limit', '20', '--native-json',
+    ]);
 
     expectSpawnSuccess(result);
     const response = JSON.parse(result.stdout);
@@ -324,7 +335,7 @@ export function registerCodegraphOverlayEdgeFunctionCodeBlockSpecs(
       }],
     });
 
-    const result = queryOverlay(root, 'edge-function-header', ['--limit', '20', '--native-json']);
+    const result = queryOverlay(root, 'edge-function-header', fixtureQueryArgs('--limit', '20', '--native-json'));
     const markdown = spawnSync(process.execPath, [
       queryScriptPath,
       '--root',
@@ -446,8 +457,8 @@ export function registerCodegraphOverlayEdgeFunctionCodeBlockSpecs(
       edges,
     });
 
-    const methodResult = queryOverlay(root, 'edge-function-method', ['--limit', '20', '--native-json']);
-    const headerResult = queryOverlay(root, 'edge-function-header', ['--limit', '20', '--native-json']);
+    const methodResult = queryOverlay(root, 'edge-function-method', fixtureQueryArgs('--limit', '20', '--native-json'));
+    const headerResult = queryOverlay(root, 'edge-function-header', fixtureQueryArgs('--limit', '20', '--native-json'));
 
     expectSpawnSuccess(methodResult);
     expectSpawnSuccess(headerResult);
@@ -579,7 +590,7 @@ export function registerCodegraphOverlayEdgeFunctionCodeBlockSpecs(
       }],
     });
 
-    const result = queryOverlay(root, 'edge-function-header', ['--limit', '20', '--native-json']);
+    const result = queryOverlay(root, 'edge-function-header', fixtureQueryArgs('--limit', '20', '--native-json'));
     const markdownResult = spawnSync(process.execPath, [
       queryScriptPath,
       '--root',
@@ -681,7 +692,7 @@ export function registerCodegraphOverlayEdgeFunctionCodeBlockSpecs(
       }],
     });
 
-    const result = queryOverlay(root, 'Authorization edge-function-header', ['--limit', '20', '--native-json']);
+    const result = queryOverlay(root, 'Authorization edge-function-header', fixtureQueryArgs('--limit', '20', '--native-json'));
     const markdownResult = spawnSync(process.execPath, [
       queryScriptPath,
       '--root',

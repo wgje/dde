@@ -20,6 +20,7 @@ export interface CodegraphOverlaySpecContext {
   officialCodeGraphNodeKinds: Set<string>;
   writeFile(root: string, relativePath: string, content: string): void;
   makeFixture(): string;
+  makeFreshMcpFixture(): string;
   runOverlay(root: string, args?: string[]): OverlaySpawnResult;
   queryOverlay(root: string, query: string, args?: string[] | number): OverlaySpawnResult;
   expectSpawnSuccess(result: OverlaySpawnResult): void;

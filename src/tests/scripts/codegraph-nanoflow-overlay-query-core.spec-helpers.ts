@@ -2,7 +2,7 @@ import { expect, it } from 'vitest';
 import type { CodegraphOverlaySpecContext } from './codegraph-nanoflow-overlay.spec-context';
 
 export function registerCodegraphOverlayQueryCoreSpecs(context: CodegraphOverlaySpecContext): void {
-  const { makeFixture, queryOverlay, expectSpawnSuccess } = context;
+  const { makeFixture, writeFile, queryOverlay, expectSpawnSuccess } = context;
 
   it('queries overlay relationships by NanoFlow-specific dependency names', () => {
     const root = makeFixture();
@@ -98,6 +98,127 @@ export function registerCodegraphOverlayQueryCoreSpecs(context: CodegraphOverlay
       nodeName: 'SampleComponent',
       filePath: 'src/app/features/sample/sample.component.ts',
     }));
+  });
+
+  it('uses Angular standalone import and local provider metadata lines for exact relation queries', () => {
+    const root = makeFixture();
+    const componentPath = 'src/app/features/sample/sample.component.ts';
+
+    const standaloneResult = queryOverlay(
+      root,
+      'standalone-import SampleComponent LazyPanelComponent',
+      ['--limit', '20', '--native-json'],
+    );
+
+    expectSpawnSuccess(standaloneResult);
+    const standaloneResponse = JSON.parse(standaloneResult.stdout);
+    expect(standaloneResponse.edges.length).toBeGreaterThan(0);
+    expect(standaloneResponse.edges.every((edge: { kind?: string }) => edge.kind === 'imports')).toBe(true);
+    expect(standaloneResponse.codeBlocks).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        filePath: componentPath,
+        content: expect.stringContaining('imports: [LazyPanelComponent]'),
+      }),
+    ]));
+
+    const providerResult = queryOverlay(
+      root,
+      'provider SampleComponent SampleService',
+      ['--limit', '20', '--native-json'],
+    );
+
+    expectSpawnSuccess(providerResult);
+    const providerResponse = JSON.parse(providerResult.stdout);
+    expect(providerResponse.edges.length).toBeGreaterThan(0);
+    expect(providerResponse.edges.every((edge: { kind?: string }) => edge.kind === 'references')).toBe(true);
+    expect(providerResponse.codeBlocks).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        filePath: componentPath,
+        content: expect.stringContaining('providers: [SampleService]'),
+      }),
+    ]));
+  });
+
+  it('keeps inject and constructor dependency provenance scoped to the declaring Angular class', () => {
+    const root = makeFixture();
+    const sourcePath = 'src/app/features/sample/dependency-provenance.service.ts';
+    writeFile(
+      root,
+      sourcePath,
+      [
+        "import { Injectable, inject } from '@angular/core';",
+        '',
+        'export class FirstService {}',
+        'export class SecondService {}',
+        '',
+        '@Injectable()',
+        'export class InjectConsumer {',
+        '  private readonly first = inject(FirstService);',
+        '}',
+        '',
+        '@Injectable()',
+        'export class ConstructorConsumer {',
+        '  constructor(private readonly second: SecondService) {}',
+        '}',
+        '',
+      ].join('\n'),
+    );
+
+    const result = queryOverlay(
+      root,
+      'dependency InjectConsumer ConstructorConsumer FirstService SecondService',
+      ['--limit', '40'],
+    );
+
+    expectSpawnSuccess(result);
+    const response = JSON.parse(result.stdout);
+    const injectConsumerId = `class:${sourcePath}:InjectConsumer`;
+    const constructorConsumerId = `class:${sourcePath}:ConstructorConsumer`;
+    const firstServiceId = `class:${sourcePath}:FirstService`;
+    const secondServiceId = `class:${sourcePath}:SecondService`;
+    expect(response.edges).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'type_of',
+        source: injectConsumerId,
+        target: firstServiceId,
+        metadata: expect.objectContaining({
+          relation: 'dependency',
+          injectionKind: 'inject',
+        }),
+      }),
+      expect.objectContaining({
+        kind: 'type_of',
+        source: constructorConsumerId,
+        target: secondServiceId,
+        metadata: expect.objectContaining({
+          relation: 'dependency',
+          injectionKind: 'constructor',
+        }),
+      }),
+    ]));
+    expect(response.edges).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ source: injectConsumerId, target: secondServiceId }),
+      expect.objectContaining({ source: constructorConsumerId, target: firstServiceId }),
+    ]));
+
+    const nativeResult = queryOverlay(
+      root,
+      'dependency InjectConsumer ConstructorConsumer FirstService SecondService',
+      ['--limit', '40', '--native-json'],
+    );
+
+    expectSpawnSuccess(nativeResult);
+    const nativeResponse = JSON.parse(nativeResult.stdout);
+    expect(nativeResponse.codeBlocks).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        filePath: sourcePath,
+        content: expect.stringContaining('inject(FirstService)'),
+      }),
+      expect.objectContaining({
+        filePath: sourcePath,
+        content: expect.stringContaining('constructor(private readonly second: SecondService)'),
+      }),
+    ]));
   });
 
   it('queries Angular application bootstrap providers as focused native relationships', () => {

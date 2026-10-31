@@ -47,6 +47,8 @@ export function registerCodegraphOverlayJsonProjectionSpecs(context: CodegraphOv
       'language',
       'startLine',
       'endLine',
+      'startColumn',
+      'endColumn',
       'signature',
       'docstring',
       'visibility',
@@ -305,7 +307,7 @@ export function registerCodegraphOverlayJsonProjectionSpecs(context: CodegraphOv
     expect(nodeFiles.indexOf('src/app/contracts/contract.pb.ts')).toBeGreaterThan(0);
     expect(nodeFiles.indexOf('src/app/contracts/contract_pb.ts')).toBeGreaterThan(0);
     expect(response.stats.nodeCount).toBe(response.nodes.length);
-    expect(response.summary).toBe('Found 5 relevant code symbols across 4 files.');
+    expect(response.summary).toBe('Found 9 relevant code symbols across 4 files.');
     expect(response.relatedFiles[0]).toBe('src/app/contracts/handwritten.ts');
     expect(response.relatedFiles.indexOf('src/app/contracts/contract.generated.ts')).toBeGreaterThan(0);
     expect(response.relatedFiles.indexOf('src/app/contracts/contract.pb.ts')).toBeGreaterThan(0);
@@ -557,7 +559,7 @@ export function registerCodegraphOverlayJsonProjectionSpecs(context: CodegraphOv
     const response = JSON.parse(result.stdout);
     expect(response.edges).toEqual(expect.arrayContaining([
       expect.objectContaining({
-        source: ruleNode.id,
+        source: 'variable:AGENTS.md:FOCUS_CONFIG.GATE.MAX_SNOOZE_PER_DAY',
         target: propertyNode.id,
         kind: 'references',
       }),

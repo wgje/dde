@@ -298,7 +298,7 @@ export function registerCodegraphOverlayMarkdownNativeGeneratedPatternSpecs(
       '--root',
       root,
       '--query',
-      'related-sort-fixture',
+      'RelatedSortAnchor GeneratedRelated',
       '--limit',
       '20',
       '--native-markdown',

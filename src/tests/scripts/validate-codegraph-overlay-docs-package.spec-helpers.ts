@@ -16,7 +16,7 @@ import {
 } from './validate-codegraph-overlay-docs.spec-helpers';
 
 export function registerValidateCodegraphOverlayDocsPackageSpecs(): void {
-  it('exposes a fresh overlay validation gate instead of validating stale generated JSON', () => {
+  it('exposes a read-only overlay validation gate and keeps generation explicit', () => {
     const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8')) as {
       scripts?: Record<string, string>;
     };
@@ -24,13 +24,22 @@ export function registerValidateCodegraphOverlayDocsPackageSpecs(): void {
     const adaptationDoc = fs.readFileSync(adaptationDocPath, 'utf8');
 
     expect(packageJson.scripts?.['codegraph:overlay:validate']).toBe(
-      'npm run codegraph:overlay && npm run codegraph:overlay:docs:validate',
+      'npm run codegraph:overlay:docs:assert-clean && npm run codegraph:overlay:docs:validate',
+    );
+    expect(packageJson.scripts?.['codegraph:overlay:stable']).toBe(
+      'node scripts/run-codegraph-overlay-stability.cjs',
     );
     expect(packageJson.scripts?.['codegraph:overlay:docs:sync']).toBe(
       'node scripts/sync-codegraph-overlay-docs.cjs',
     );
+    expect(packageJson.scripts?.['codegraph:overlay:docs:assert-clean']).toBe(
+      'node scripts/sync-codegraph-overlay-docs.cjs --assert-clean',
+    );
+    expect(packageJson.scripts?.['codegraph:overlay:docs:recover']).toBe(
+      'node scripts/sync-codegraph-overlay-docs.cjs --recover',
+    );
     expect(packageJson.scripts?.['codegraph:overlay:sync']).toBe(
-      'npm run codegraph:overlay && npm run codegraph:overlay:docs:sync',
+      'npm run codegraph:overlay:stable && npm run codegraph:overlay:docs:sync',
     );
     expect(packageJson.scripts?.['codegraph:adapter:doctor']).toBe(
       'node scripts/codegraph-adapter-doctor.cjs',
@@ -57,6 +66,8 @@ export function registerValidateCodegraphOverlayDocsPackageSpecs(): void {
     expect(agentsDoc).toContain('codegraph:adapter:context');
     expect(agentsDoc).toContain('codegraph:adapter:quick-gate');
     expect(agentsDoc).toContain('codegraph:overlay:baseline:manifest');
+    expect(agentsDoc).toContain('numeric-token-only');
+    expect(agentsDoc).toContain('codegraph:overlay:docs:recover');
     expect(adaptationDoc).toContain('npm run codegraph:overlay:validate');
     expect(adaptationDoc).toContain('npm run codegraph:overlay:sync');
     expect(adaptationDoc).toContain('npm run codegraph:overlay:baseline:manifest');
@@ -65,7 +76,10 @@ export function registerValidateCodegraphOverlayDocsPackageSpecs(): void {
     expect(adaptationDoc).toContain('npm run codegraph:adapter:doctor');
     expect(adaptationDoc).toContain('npm run codegraph:adapter:quick-gate');
     expect(adaptationDoc).toContain('npm run agent:file-lease');
-    expect(adaptationDoc).toContain('regenerates `.codegraph/nanoflow-overlay.json` before validating');
+    expect(adaptationDoc).toContain('codegraph:overlay:docs:assert-clean');
+    expect(adaptationDoc).toContain('codegraph:overlay:stable');
+    expect(adaptationDoc).toContain('numeric-token-only');
+    expect(adaptationDoc).toContain('codegraph:overlay:docs:recover');
     expect(adaptationDoc).toContain('native graph shape/health');
   });
 
@@ -116,6 +130,32 @@ export function registerValidateCodegraphOverlayDocsPackageSpecs(): void {
     expect(syncScript).toContain("require('./lib/codegraph-overlay-baseline.cjs')");
     expect(validatorScript).not.toContain('function buildBaseline(');
     expect(syncScript).not.toContain('function buildBaseline(');
+  });
+
+  it('requires the recoverable stable-artifact command contract in both authoritative docs', () => {
+    const root = makeFixture();
+    const fixturePackagePath = path.join(root, 'package.json');
+    const fixturePackage = JSON.parse(fs.readFileSync(fixturePackagePath, 'utf8')) as {
+      scripts: Record<string, string>;
+    };
+    fixturePackage.scripts['codegraph:overlay:stable'] = 'node scripts/run-codegraph-overlay-stability.cjs';
+    fs.writeFileSync(fixturePackagePath, `${JSON.stringify(fixturePackage, null, 2)}\n`);
+    const contract = 'stable overlay transaction codegraph:overlay:stable codegraph:overlay:docs:assert-clean codegraph:overlay:docs:recover exactly two builds source manifest path/size/SHA-256 generatedAt node.updatedAt numeric-token-only overlay publication is atomic separately recoverable two-document transaction';
+    for (const relativePath of ['AGENTS.md', 'docs/codegraph-nanoflow-adaptation.md']) {
+      const filePath = path.join(root, relativePath);
+      fs.appendFileSync(filePath, `\n${contract}\n`);
+    }
+    expect(runValidator(root).status).toBe(0);
+    for (const relativePath of ['AGENTS.md', 'docs/codegraph-nanoflow-adaptation.md']) {
+      const filePath = path.join(root, relativePath);
+      fs.writeFileSync(filePath, fs.readFileSync(filePath, 'utf8').replace('numeric-token-only', 'numeric-token-removed'));
+    }
+
+    const result = runValidator(root);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('AGENTS.md missing adapter gate contract');
+    expect(result.stderr).toContain('docs/codegraph-nanoflow-adaptation.md missing adapter gate contract');
   });
 
   it('runs the full adapter gate from CI instead of relying on local-only checks', () => {

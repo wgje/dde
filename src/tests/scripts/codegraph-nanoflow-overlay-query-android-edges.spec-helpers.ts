@@ -492,4 +492,185 @@ export function registerCodegraphOverlayAndroidEdgeQuerySpecs(context: Codegraph
     expect(response.markdown).toContain('now: Instant = Instant.now(),');
     expect(response.markdown).toContain('): WidgetBlackBoxOptimisticPatch? {');
   });
+
+  it('projects Android Manifest permissions queries intent filters and Kotlin resources as native references', () => {
+    const root = makeFixture();
+    const manifestPath = 'android/app/src/main/AndroidManifest.xml';
+    const receiverPath = 'android/app/src/main/java/app/nanoflow/host/NanoflowWidgetReceiver.kt';
+    const layoutPath = 'android/app/src/main/res/layout/nanoflow_widget_compact.xml';
+    const drawablePath = 'android/app/src/main/res/drawable/nanoflow_widget_background.xml';
+    const stringsPath = 'android/app/src/main/res/values/strings.xml';
+
+    writeFile(root, manifestPath, [
+      '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="app.nanoflow">',
+      '  <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />',
+      '  <queries>',
+      '    <package android:name="com.example.calendar" />',
+      '    <intent>',
+      '      <action android:name="android.intent.action.VIEW" />',
+      '      <category android:name="android.intent.category.BROWSABLE" />',
+      '      <data android:scheme="https" android:host="nanoflow.app" />',
+      '    </intent>',
+      '  </queries>',
+      '  <application android:label="NanoFlow">',
+      '    <receiver',
+      '      android:name=".host.NanoflowWidgetReceiver"',
+      '      android:permission="android.permission.BIND_APPWIDGET"',
+      '      android:exported="false">',
+      '      <intent-filter>',
+      '        <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />',
+      '        <category android:name="android.intent.category.DEFAULT" />',
+      '        <data android:scheme="nanoflow" android:host="widget" />',
+      '      </intent-filter>',
+      '    </receiver>',
+      '  </application>',
+      '</manifest>',
+      '',
+    ].join('\n'));
+    writeFile(root, receiverPath, [
+      'package app.nanoflow.host',
+      '',
+      'class NanoflowWidgetReceiver {',
+      '  val title = R.string.nanoflow_widget_title',
+      '  val layout = R.layout.nanoflow_widget_compact',
+      '  val background = R.drawable.nanoflow_widget_background',
+      '  val titleView = R.id.widget_title',
+      '  val secondaryView = R.id.secondary_widget_action',
+      '  val missingView = R.id.missing_widget',
+      '  val platformContent = android.R.id.content',
+      '  val debugLayout = "R.layout.nanoflow_widget_compact"',
+      '  // R.drawable.nanoflow_widget_background is documentation only.',
+      '}',
+      '',
+    ].join('\n'));
+    writeFile(root, layoutPath, [
+      '<TextView xmlns:android="http://schemas.android.com/apk/res/android"',
+      '  android:id="@+id/widget_title"',
+      '  android:background="@drawable/nanoflow_widget_background"',
+      '  android:layout_width="match_parent"',
+      '  android:layout_height="wrap_content" />',
+      '',
+    ].join('\n'));
+    writeFile(root, drawablePath, [
+      '<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle" />',
+      '',
+    ].join('\n'));
+    writeFile(root, stringsPath, [
+      '<resources>',
+      '  <string name="nanoflow_widget_title">NanoFlow</string>',
+      '  <item type="id" name="secondary_widget_action" />',
+      '</resources>',
+      '',
+    ].join('\n'));
+
+    const result = queryOverlay(root, [
+      'android-manifest-uses-permission',
+      'android-manifest-query',
+      'android-manifest-component-permission',
+      'android-manifest-intent-filter-action',
+      'android-manifest-intent-filter-category',
+      'android-manifest-intent-filter-data',
+      'android-kotlin-resource-reference',
+    ].join(' '), ['--limit', '120']);
+
+    expectSpawnSuccess(result);
+    const response = JSON.parse(result.stdout);
+    expect(response.edges).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'references',
+        metadata: expect.objectContaining({
+          relation: 'android-manifest-uses-permission',
+          permission: 'android.permission.POST_NOTIFICATIONS',
+        }),
+      }),
+      expect.objectContaining({
+        kind: 'references',
+        metadata: expect.objectContaining({
+          relation: 'android-manifest-query',
+          queryType: 'package',
+          queryValue: 'com.example.calendar',
+        }),
+      }),
+      expect.objectContaining({
+        kind: 'references',
+        metadata: expect.objectContaining({
+          relation: 'android-manifest-query',
+          queryType: 'intent',
+          queryValue: 'android.intent.action.VIEW',
+        }),
+      }),
+      expect.objectContaining({
+        kind: 'references',
+        metadata: expect.objectContaining({
+          relation: 'android-manifest-component-permission',
+          permission: 'android.permission.BIND_APPWIDGET',
+        }),
+      }),
+      expect.objectContaining({
+        kind: 'references',
+        metadata: expect.objectContaining({
+          relation: 'android-manifest-intent-filter-action',
+          action: 'android.appwidget.action.APPWIDGET_UPDATE',
+        }),
+      }),
+      expect.objectContaining({
+        kind: 'references',
+        metadata: expect.objectContaining({
+          relation: 'android-manifest-intent-filter-category',
+          category: 'android.intent.category.DEFAULT',
+        }),
+      }),
+      expect.objectContaining({
+        kind: 'references',
+        metadata: expect.objectContaining({
+          relation: 'android-manifest-intent-filter-data',
+          scheme: 'nanoflow',
+          host: 'widget',
+        }),
+      }),
+    ]));
+    const kotlinResourceEdges = response.edges.filter((edge: {
+      metadata?: { relation?: string };
+    }) => edge.metadata?.relation === 'android-kotlin-resource-reference');
+    expect(kotlinResourceEdges.map((edge: {
+      metadata: { resourceType: string; resourceName: string };
+    }) => `${edge.metadata.resourceType}/${edge.metadata.resourceName}`).sort()).toEqual([
+      'drawable/nanoflow_widget_background',
+      'id/secondary_widget_action',
+      'id/widget_title',
+      'layout/nanoflow_widget_compact',
+      'string/nanoflow_widget_title',
+    ]);
+    expect(kotlinResourceEdges).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        metadata: expect.objectContaining({
+          resourceType: 'id',
+          resourceName: 'content',
+        }),
+      }),
+    ]));
+    expect(response.nodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'file', filePath: receiverPath, language: 'kotlin' }),
+      expect.objectContaining({ kind: 'file', filePath: layoutPath, language: 'xml' }),
+      expect.objectContaining({ kind: 'file', filePath: drawablePath, language: 'xml' }),
+      expect.objectContaining({ kind: 'file', filePath: stringsPath, language: 'xml' }),
+    ]));
+    expect(response.coverage).toEqual(expect.objectContaining({
+      androidManifestPermissions: 1,
+      androidManifestUsesPermissionEdges: 1,
+      androidManifestQueries: 2,
+      androidManifestQueryEdges: 2,
+      androidManifestComponentPermissions: 1,
+      androidManifestComponentPermissionEdges: 1,
+      androidManifestIntentFilters: 1,
+      androidManifestIntentFilterActions: 1,
+      androidManifestIntentFilterActionEdges: 1,
+      androidManifestIntentFilterCategories: 1,
+      androidManifestIntentFilterCategoryEdges: 1,
+      androidManifestIntentFilterData: 1,
+      androidManifestIntentFilterDataEdges: 1,
+      androidKotlinResourceReferences: 5,
+      androidKotlinResourceReferenceEdges: 5,
+    }));
+  });
 }

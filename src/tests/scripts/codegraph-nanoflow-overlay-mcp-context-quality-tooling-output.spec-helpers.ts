@@ -19,6 +19,7 @@ export function registerCodegraphOverlayMcpContextQualityToolingOutputSpecs(cont
     tempRoots,
     writeFile,
     readJsonLine,
+    waitForLogEvent,
   } = context;
 
   it('filters generic output wording from tooling context-pack overlay queries', async () => {
@@ -393,6 +394,188 @@ export function registerCodegraphOverlayMcpContextQualityToolingOutputSpecs(cont
     expect(text).toContain('return { source: "codex", root };');
     expect(sourceHeaders.join('\n')).not.toContain('knip.config.js');
     expect(sourceHeaders.join('\n')).not.toContain('Json(type_alias)');
+  }, 12_000);
+
+  it('focuses strict native output maintenance queries on formatter sources', async () => {
+    const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-codegraph-context-strict-native-output-focus-'));
+    tempRoots.push(projectRoot);
+    writeFile(
+      projectRoot,
+      'scripts/query-codegraph-nanoflow-overlay.mjs',
+      [
+        'function formatStrictNativeMarkdown(response) {',
+        "  return response.nodes.map(node => node.name).join('\\n');",
+        '}',
+        '',
+        'function nativeJsonEdgeLine(edge) {',
+        '  return edge.line;',
+        '}',
+        '',
+      ].join('\n'),
+    );
+    writeFile(
+      projectRoot,
+      'src/app/features/flow/components/noisy-output.component.ts',
+      [
+        'export class NoisyOutputComponent {',
+        '  saved = output<void>();',
+        '}',
+        '',
+      ].join('\n'),
+    );
+
+    const noisyQuery = [
+      'alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima',
+      'NanoFlow CodeGraph strict native output markdown json related symbols line numbering standard current adaptation quality',
+    ].join(' ');
+    const focusedQuery = [
+      'scripts/query-codegraph-nanoflow-overlay.mjs',
+      'formatStrictNativeMarkdown',
+      'formatNativeMarkdown',
+      'buildStrictNativeMarkdownRelationshipGroups',
+      'nativeJsonEdgeLine',
+    ].join(' ');
+    const noisyResponse = {
+      query: noisyQuery,
+      matches: [
+        { kind: 'property', name: 'saved', file: 'src/app/features/flow/components/noisy-output.component.ts' },
+      ],
+      nodes: [
+        {
+          id: 'property:src/app/features/flow/components/noisy-output.component.ts:saved',
+          kind: 'property',
+          name: 'saved',
+          qualifiedName: 'NoisyOutputComponent::saved',
+          filePath: 'src/app/features/flow/components/noisy-output.component.ts',
+          language: 'typescript',
+          startLine: 2,
+          endLine: 2,
+        },
+      ],
+      relationshipGroups: {},
+      coverage: { graphNodes: 1, graphEdges: 0 },
+    };
+    const focusedResponse = {
+      query: focusedQuery,
+      matches: [
+        { kind: 'function', name: 'formatStrictNativeMarkdown', file: 'scripts/query-codegraph-nanoflow-overlay.mjs' },
+        { kind: 'function', name: 'nativeJsonEdgeLine', file: 'scripts/query-codegraph-nanoflow-overlay.mjs' },
+      ],
+      nodes: [
+        {
+          id: 'function:scripts/query-codegraph-nanoflow-overlay.mjs:formatStrictNativeMarkdown',
+          kind: 'function',
+          name: 'formatStrictNativeMarkdown',
+          qualifiedName: 'formatStrictNativeMarkdown',
+          filePath: 'scripts/query-codegraph-nanoflow-overlay.mjs',
+          language: 'javascript',
+          startLine: 1,
+          endLine: 3,
+        },
+        {
+          id: 'function:scripts/query-codegraph-nanoflow-overlay.mjs:nativeJsonEdgeLine',
+          kind: 'function',
+          name: 'nativeJsonEdgeLine',
+          qualifiedName: 'nativeJsonEdgeLine',
+          filePath: 'scripts/query-codegraph-nanoflow-overlay.mjs',
+          language: 'javascript',
+          startLine: 5,
+          endLine: 7,
+        },
+      ],
+      codeBlocks: [
+        {
+          filePath: 'scripts/query-codegraph-nanoflow-overlay.mjs',
+          startLine: 1,
+          endLine: 7,
+          language: 'javascript',
+          content: [
+            'function formatStrictNativeMarkdown(response) {',
+            "  return response.nodes.map(node => node.name).join('\\n');",
+            '}',
+            '',
+            'function nativeJsonEdgeLine(edge) {',
+            '  return edge.line;',
+            '}',
+          ].join('\n'),
+          nodeName: 'formatStrictNativeMarkdown',
+          nodeKind: 'function',
+        },
+      ],
+      relationshipGroups: {},
+      coverage: { graphNodes: 2, graphEdges: 0 },
+    };
+    writeQueryAwareOverlayResponseScript(projectRoot, focusedQuery, focusedResponse, noisyResponse);
+
+    const fakeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-codegraph-strict-native-output-focus-fake-'));
+    tempRoots.push(fakeRoot);
+    const fakeCodegraph = path.join(fakeRoot, 'fake-codegraph.cjs');
+    writeFakeCodegraphExploreScript(fakeCodegraph, {
+      focusedQuery,
+      focused: {
+        includeMaxFiles: true,
+        preludeLines: [
+          'Found 1 symbol across 1 file.',
+          '',
+          '**Blast radius — what depends on these (update/verify before editing)**',
+          '',
+          '- `saved` (src/app/features/flow/components/noisy-output.component.ts:2) — no callers',
+        ],
+        sourceBlocks: [
+          {
+            header: 'src/app/features/flow/components/noisy-output.component.ts — NoisyOutputComponent(class)',
+            language: 'typescript',
+            lines: [
+              '1\texport class NoisyOutputComponent {',
+              '2\t  saved = output<void>();',
+              '3\t}',
+            ],
+          },
+        ],
+      },
+      fallback: {
+        includeMaxFiles: true,
+        sourceBlocks: [
+          {
+            header: 'src/app/features/flow/components/noisy-output.component.ts — NoisyOutputComponent(class)',
+            language: 'typescript',
+            lines: [
+              '1\texport class NoisyOutputComponent {',
+              '2\t  saved = output<void>();',
+              '3\t}',
+            ],
+          },
+        ],
+      },
+    });
+
+    const text = await callContextPack({
+      repoRoot,
+      wrapperScriptPath,
+      projectRoot,
+      fakeCodegraph,
+      readJsonLine,
+      query: noisyQuery,
+    });
+
+    const sourceHeaders = extractContextSourceHeaders(text);
+    expect(text).toContain(`baseQuery=${focusedQuery}`);
+    expect(sourceHeaders[0]).toContain('scripts/query-codegraph-nanoflow-overlay.mjs');
+    expect(text).toContain('formatStrictNativeMarkdown');
+    expect(text).toContain('nativeJsonEdgeLine');
+    expect(sourceHeaders.some(header => header.includes('noisy-output.component.ts'))).toBe(false);
+    expect(text).not.toContain('`saved`');
+
+    const responseEvent = await waitForLogEvent(
+      process.env.NANOFLOW_CODEGRAPH_MCP_LOG ?? '',
+      'nanoflow.context.response',
+      2_000,
+      (entry) => entry.query === noisyQuery,
+    );
+    expect(responseEvent.queryClassification).toEqual(expect.objectContaining({
+      strictNativeOutputMaintenance: true,
+      specializedMaintenanceSourceScope: 'strict-native-output-maintenance',
+    }));
   }, 12_000);
 
 }

@@ -85,6 +85,21 @@ function writeRawOverlayResponseScript(projectRoot: string, rawOutput: string): 
   );
 }
 
+function writeDelayedOverlayResponseScript(
+  projectRoot: string,
+  delayMs: number,
+  payload: Record<string, unknown>,
+): void {
+  const scriptPath = path.join(projectRoot, 'scripts', 'query-codegraph-nanoflow-overlay.mjs');
+  fs.mkdirSync(path.dirname(scriptPath), { recursive: true });
+  fs.writeFileSync(scriptPath, [
+    '#!/usr/bin/env node',
+    `const payload = ${JSON.stringify(payload)};`,
+    `setTimeout(() => process.stdout.write(JSON.stringify(payload)), ${delayMs});`,
+    '',
+  ].join('\n'));
+}
+
 function writeStaleOverlayFailureScript(projectRoot: string): void {
   const scriptPath = path.join(projectRoot, 'scripts', 'query-codegraph-nanoflow-overlay.mjs');
   fs.mkdirSync(path.dirname(scriptPath), { recursive: true });
@@ -602,7 +617,7 @@ export function registerCodegraphOverlayMcpContextPackSpecs(context: CodegraphOv
       ...WRAPPER_REPO_OVERLAY_ENV,
       NANOFLOW_CODEGRAPH_MCP_LOG: logPath,
       NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '150',
-      NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_OVERLAY_GRACE_MS: '150',
+      NANOFLOW_CODEGRAPH_CONTEXT_PACK_OVERLAY_GRACE_MS: '150',
       NANOFLOW_CODEGRAPH_OVERLAY_QUERY_TIMEOUT_MS: '500',
     });
 
@@ -656,6 +671,69 @@ export function registerCodegraphOverlayMcpContextPackSpecs(context: CodegraphOv
       child.kill();
     }
   }, 20_000);
+
+  it('waits for the overlay deadline after base context returns first', async () => {
+    const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-context-overlay-deadline-'));
+    tempRoots.push(projectRoot);
+    const query = 'overlay-deadline-after-base';
+    const generationId = 'g-delayed-overlay-deadline';
+    writeDelayedOverlayResponseScript(projectRoot, 220, {
+      query,
+      generationId,
+      matches: [],
+      nodes: [],
+      edges: [],
+      relationshipGroups: {},
+      relatedFiles: [],
+      coverage: { graphNodes: 1, graphEdges: 0 },
+    });
+    const baseText = `## Exploration: ${query}\n\nbase-returned-before-overlay`;
+    const fakeCodegraph = makeContextPackBaseFake(tempRoots, baseText);
+    const logPath = path.join(projectRoot, 'wrapper.log');
+    const child = spawnContextPackWrapper(repoRoot, wrapperScriptPath, projectRoot, fakeCodegraph, {
+      ...WRAPPER_REPO_OVERLAY_ENV,
+      NANOFLOW_CODEGRAPH_MCP_LOG: logPath,
+      NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '100',
+      NANOFLOW_CODEGRAPH_CONTEXT_PACK_OVERLAY_GRACE_MS: '20',
+      NANOFLOW_CODEGRAPH_OVERLAY_QUERY_TIMEOUT_MS: '500',
+    });
+
+    try {
+      const response = await callWrapperTool(child, readJsonLine, 37, 'nanoflow_context_pack', {
+        query, maxFiles: 1, overlayLimit: 1,
+      });
+      expect(response.error).toBeUndefined();
+      expect(response.result?.isError).toBe(false);
+      expect(response.result?.structuredContent?.outcome).toEqual(expect.objectContaining({
+        status: 'complete',
+        usableContext: true,
+        primaryFailureClass: null,
+        base: expect.objectContaining({ status: 'available' }),
+        overlay: expect.objectContaining({ status: 'available', generationId }),
+      }));
+      const logEntries = parseJsonLines(logPath);
+      const contextResponseEntry = logEntries.find(
+        entry => entry.event === 'nanoflow.context.response' && entry.query === query,
+      );
+      expect(contextResponseEntry).toEqual(expect.objectContaining({
+        failureClass: 'success',
+        baseElapsedMs: expect.any(Number),
+        overlayElapsedMs: expect.any(Number),
+        overlayRecoveryTimedOut: false,
+        overlayRecoveryTimeoutMs: expect.any(Number),
+        queryPlan: expect.objectContaining({
+          contextTimeoutMs: 100,
+          overlayTimeoutMs: 500,
+        }),
+      }));
+      expect(contextResponseEntry?.baseElapsedMs).toBeLessThan(100);
+      expect(contextResponseEntry?.overlayElapsedMs).toBeGreaterThanOrEqual(220);
+      expect(contextResponseEntry?.overlayRecoveryTimeoutMs).toBeGreaterThan(220);
+      expect(logEntries.some(entry => entry.event === 'overlay.query.timeout')).toBe(false);
+    } finally {
+      child.kill();
+    }
+  }, 10_000);
 
   it.each([
     { mode: 'entry', failureClass: 'context-pack-entry-error', status: 'failed', baseStatus: 'unavailable' },

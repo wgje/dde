@@ -483,13 +483,15 @@ function verifyStaleWrapperAnalysis(logAnalysis, logPath, contextOutcome) {
   const events = readLogEvents(logPath);
   const recycleRequest = events.find(event => event.event === 'wrapper.script.stale.recycle.request');
   const staleShutdown = events.find(event => event.event === 'wrapper.shutdown.stale-wrapper-script');
+  const contextStatus = contextOutcome?.status;
   const contextResponse = events.find(event => (
     event.event === 'client.response'
     && event.requestKind === 'nanoflow-context-pack'
-    && event.failureClass === contextOutcome?.primaryFailureClass
-    && event.isError === true
+    && ((contextStatus === 'complete' && event.isError === false)
+      || (contextStatus === 'partial' && event.failureClass === contextOutcome?.primaryFailureClass
+        && event.isError === true))
   ));
-  if (contextOutcome?.status !== 'partial' || contextOutcome?.usableContext !== true) {
+  if (!['complete', 'partial'].includes(contextStatus) || contextOutcome?.usableContext !== true) {
     failures.push(`stale context outcome is ${contextOutcome?.status}/${contextOutcome?.usableContext}`);
   }
   const recycleGraceMs = Number(recycleRequest?.recycleGraceMs ?? 0);
@@ -497,7 +499,7 @@ function verifyStaleWrapperAnalysis(logAnalysis, logPath, contextOutcome) {
     failures.push(`wrapper.script.stale.recycle.request recycleGraceMs is ${recycleRequest?.recycleGraceMs}`);
   }
   if (!contextResponse) {
-    failures.push('strict-partial nanoflow_context_pack client.response is missing before stale shutdown');
+    failures.push('usable nanoflow_context_pack client.response is missing before stale shutdown');
   }
   if (!staleShutdown) {
     failures.push('wrapper.shutdown.stale-wrapper-script parsed event is missing');

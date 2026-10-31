@@ -1,10 +1,88 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import {
+  spawn,
+  spawnSync,
+  type ChildProcessWithoutNullStreams,
+} from 'node:child_process';
 import { expect, it } from 'vitest';
 
 import type { CodegraphOverlaySpecContext } from './codegraph-nanoflow-overlay.spec-context';
+
+async function waitForProcessExit(
+  exitPromise: Promise<unknown>,
+  timeoutMs: number,
+): Promise<boolean> {
+  return Promise.race([
+    exitPromise.then(() => true),
+    new Promise<boolean>((resolve) => setTimeout(() => resolve(false), timeoutMs)),
+  ]);
+}
+
+async function terminateTestProcessTree(
+  child: ChildProcessWithoutNullStreams,
+  exitPromise: Promise<unknown>,
+  logPath: string,
+): Promise<void> {
+  if (!child.pid || child.exitCode !== null || child.signalCode !== null) return;
+  if (await waitForProcessExit(exitPromise, 500)) return;
+  if (process.platform !== 'win32') {
+    child.kill('SIGTERM');
+    return;
+  }
+
+  const result = spawnSync('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], {
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+  if (result.error || result.status !== 0) {
+    const fallbackPids = readLoggedChildPids(logPath);
+    for (const pid of fallbackPids) {
+      forceKillTestProcess(pid);
+    }
+    forceKillTestProcess(child.pid);
+    if (await waitForProcessExit(exitPromise, 1_000)) return;
+    throw new Error([
+      `Failed to terminate CodeGraph test process tree ${child.pid}`,
+      result.error?.message ?? '',
+      result.stderr?.trim() ?? '',
+      fallbackPids.length > 0 ? `fallbackPids=${fallbackPids.join(',')}` : '',
+    ].filter(Boolean).join(': '));
+  }
+}
+
+function readLoggedChildPids(logPath: string): number[] {
+  if (!fs.existsSync(logPath)) return [];
+  const pids = new Set<number>();
+  for (const line of fs.readFileSync(logPath, 'utf8').split(/\r?\n/u)) {
+    if (!line.trim()) continue;
+    try {
+      const entry = JSON.parse(line) as {
+        event?: string;
+        pid?: unknown;
+        childPid?: unknown;
+        runtime?: { childPid?: unknown };
+      };
+      if (!entry.event?.startsWith('child.')) continue;
+      for (const candidate of [entry.pid, entry.childPid, entry.runtime?.childPid]) {
+        const pid = Number(candidate);
+        if (Number.isInteger(pid) && pid > 0) pids.add(pid);
+      }
+    } catch {
+      // Ignore a partially written final diagnostics line during forced cleanup.
+    }
+  }
+  return [...pids];
+}
+
+function forceKillTestProcess(pid: number): void {
+  try {
+    process.kill(pid, 'SIGKILL');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+  }
+}
 
 export function registerCodegraphOverlayMcpTransportTailSpecs(context: CodegraphOverlaySpecContext): void {
   const {
@@ -15,6 +93,7 @@ export function registerCodegraphOverlayMcpTransportTailSpecs(context: Codegraph
     makeBlockedInputFakeCodegraph,
     makeReplayBackpressureFakeCodegraph,
     readJsonLine,
+    waitForExit,
     waitForLogEvent,
     writeManyJsonLines,
     adaptationDocPath,
@@ -37,6 +116,8 @@ export function registerCodegraphOverlayMcpTransportTailSpecs(context: Codegraph
         },
       },
     );
+    const exitPromise = waitForExit(child);
+    const closePromise = new Promise<void>((resolve) => child.once('close', () => resolve()));
 
     try {
       const largeQuery = 'blocked-child-stdin '.repeat(128);
@@ -58,12 +139,18 @@ export function registerCodegraphOverlayMcpTransportTailSpecs(context: Codegraph
       const event = await eventPromise;
       expect(event.queuedMessages).toBeGreaterThanOrEqual(0);
       expect(event.bytes).toBeGreaterThan(1024);
-      child.stdin.destroy();
+      expect(event.queryTruncated).toBe(true);
+      expect(Number(event.queryChars)).toBeGreaterThan(512);
+      expect(Number(event.queryBytes)).toBeGreaterThan(512);
+      expect(String(event.query)).toHaveLength(512);
       await writePromise;
     } finally {
       child.stdout.resume();
       child.stderr.resume();
-      child.kill();
+      child.stdin.destroy();
+      await terminateTestProcessTree(child, exitPromise, logPath);
+      await exitPromise;
+      await closePromise;
     }
   }, 15_000);
 

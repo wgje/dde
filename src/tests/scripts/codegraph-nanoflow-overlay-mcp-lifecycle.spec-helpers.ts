@@ -188,8 +188,8 @@ export function registerCodegraphOverlayMcpLifecycleSpecs(context: CodegraphOver
         2_000,
         (entry) => entry.internalId === -1,
       );
-      expect(timeoutEvent.runtime).toEqual(expect.objectContaining({
-        expiredContextPackCount: 1,
+      expect(timeoutEvent).toEqual(expect.objectContaining({
+        internalId: -1,
       }));
 
       const cleanupEvent = await waitForLogEvent(

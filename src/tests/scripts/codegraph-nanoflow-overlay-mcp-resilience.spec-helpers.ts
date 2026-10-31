@@ -11,7 +11,7 @@ import { registerCodegraphOverlayMcpTransportSpecs } from './codegraph-nanoflow-
 import type { CodegraphOverlaySpecContext } from './codegraph-nanoflow-overlay.spec-context';
 
 export function registerCodegraphOverlayMcpResilienceSpecs(context: CodegraphOverlaySpecContext): void {
-  const { repoRoot, wrapperScriptPath, WRAPPER_REPO_OVERLAY_ENV, WRAPPER_REPO_OVERLAY_RESPONSE_TIMEOUT_MS, WRAPPER_REPO_OVERLAY_TEST_TIMEOUT_MS, tempRoots, writeFile, makeContentLengthFakeCodegraph, makeFakeCodegraph, makeHangingExploreFakeCodegraph, makeBlockedInputFakeCodegraph, readJsonLine, readMcpFrame, writeMcpFrame, writeManyJsonLines, waitForLogEvent, waitForExit, parseJsonLines } = context;
+  const { repoRoot, wrapperScriptPath, WRAPPER_REPO_OVERLAY_ENV, WRAPPER_REPO_OVERLAY_RESPONSE_TIMEOUT_MS, WRAPPER_REPO_OVERLAY_TEST_TIMEOUT_MS, tempRoots, writeFile, makeFreshMcpFixture, makeContentLengthFakeCodegraph, makeFakeCodegraph, makeHangingExploreFakeCodegraph, makeBlockedInputFakeCodegraph, readJsonLine, readMcpFrame, writeMcpFrame, writeManyJsonLines, waitForLogEvent, waitForExit, parseJsonLines } = context;
   it('translates child Content-Length MCP frames before augmenting tools/list', async () => {
     const fakeCodegraph = makeContentLengthFakeCodegraph();
     const child = spawn(
@@ -149,12 +149,13 @@ export function registerCodegraphOverlayMcpResilienceSpecs(context: CodegraphOve
   }, 8_000);
 
   it('writes wrapper diagnostics for startup, tool injection, and overlay calls', async () => {
+    const projectRoot = makeFreshMcpFixture();
     const fakeCodegraph = makeFakeCodegraph();
     const logPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-codegraph-log-')), 'wrapper.log');
     tempRoots.push(path.dirname(logPath));
     const child = spawn(
       process.execPath,
-      [wrapperScriptPath, fakeCodegraph, 'serve', '--mcp', '--path', repoRoot],
+      [wrapperScriptPath, fakeCodegraph, 'serve', '--mcp', '--path', projectRoot],
       {
         cwd: repoRoot,
         stdio: ['pipe', 'pipe', 'pipe'],
@@ -184,7 +185,7 @@ export function registerCodegraphOverlayMcpResilienceSpecs(context: CodegraphOve
       await queryResponsePromise;
 
       const logEntries = parseJsonLines(logPath);
-      assertWrapperDiagnosticsLog(logEntries, { logPath, repoRoot, wrapperScriptPath });
+      assertWrapperDiagnosticsLog(logEntries, { logPath, repoRoot: projectRoot, wrapperScriptPath });
     } finally {
       child.kill();
     }
@@ -248,7 +249,7 @@ export function registerCodegraphOverlayMcpResilienceSpecs(context: CodegraphOve
         outputMode: 'markdown',
         jsonExpected: false,
         overlayFile: expect.objectContaining({
-          relativePath: '.codegraph/nanoflow-overlay.json',
+          relativePath: '.codegraph/nanoflow-generations/CURRENT.json',
         }),
         investigation: expect.objectContaining({
           failureBoundary: 'overlay-subprocess',
@@ -503,13 +504,32 @@ export function registerCodegraphOverlayMcpResilienceSpecs(context: CodegraphOve
       })}\n`);
 
       const contextResponse = await contextResponsePromise as {
-        result: { isError: boolean; content: Array<{ text: string }> };
+        result: {
+          isError: boolean;
+          content: Array<{ text: string }>;
+          structuredContent?: { outcome?: Record<string, unknown> };
+          _meta?: Record<string, unknown>;
+        };
       };
-      expect(contextResponse.result.isError).toBe(false);
+      expect(contextResponse.result.isError).toBe(true);
       expect(contextResponse.result.content[0].text).toContain('No base CodeGraph context was returned.');
       expect(contextResponse.result.content[0].text).toContain('OverlayOnlyController');
       expect(contextResponse.result.content[0].text).toContain('OverlayOnlyController::setup → OverlayOnlyService::initialize');
       expect(contextResponse.result.content[0].text).toContain('overlayOnlyFixture: 1');
+      expect(contextResponse.result.structuredContent?.outcome).toEqual({
+        schemaVersion: 1,
+        status: 'partial',
+        usableContext: true,
+        primaryFailureClass: 'base-codegraph-timeout-overlay-only',
+        base: { status: 'unavailable', isError: true, textBytes: 0 },
+        overlay: { status: 'available', isError: false, failureClass: null, generationId: null },
+      });
+      expect(contextResponse.result._meta).toEqual({
+        nanoflowFailureClass: 'base-codegraph-timeout-overlay-only',
+        nanoflowOutcomeSchemaVersion: 1,
+        nanoflowOutcomeStatus: 'partial',
+        nanoflowContextUsable: true,
+      });
 
       const timeoutEvent = await waitForLogEvent(logPath, 'nanoflow.context.timeout', 2_000);
       expect(timeoutEvent).toEqual(expect.objectContaining({
@@ -527,7 +547,7 @@ export function registerCodegraphOverlayMcpResilienceSpecs(context: CodegraphOve
         2_000,
         (entry) => entry.clientId === 45
           && entry.failureClass === 'base-codegraph-timeout-overlay-only'
-          && entry.isError === false,
+          && entry.isError === true,
       );
     } finally {
       child.kill();

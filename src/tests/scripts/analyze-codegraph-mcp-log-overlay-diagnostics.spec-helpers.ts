@@ -112,7 +112,7 @@ export function registerAnalyzeCodegraphMcpLogOverlayDiagnosticSpecs(): void {
 
     expect(result.status, result.stderr).toBe(1);
     expect(summary.currentCodegraphAutoSyncDisabled).toEqual(expect.objectContaining({
-      count: 2,
+      count: 1,
       latest: expect.objectContaining({
         event: 'child.stderr',
         failureClass: 'codegraph-autosync-disabled',

@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { expect, it } from 'vitest';
+import { registerCodegraphAdapterDoctorHostMcpConfigSpecs } from './codegraph-adapter-doctor-host-mcp-config.spec-helpers';
 
 interface CodegraphAdapterDoctorHostMcpSpecContext {
   makeRoot(): string;
@@ -35,6 +36,147 @@ export function registerCodegraphAdapterDoctorHostMcpSpecs(
     writeCodexConfig,
   } = context;
 
+  it('reports an unreadable host MCP log instead of treating it as empty', () => {
+    const root = makeRoot();
+    writePackage(root, requiredScripts());
+    mkdirSync(path.join(root, '.codegraph'), { recursive: true });
+    mkdirSync(path.join(root, '.codegraph', 'nanoflow-mcp-wrapper.log'));
+    mkdirSync(path.join(root, 'scripts'), { recursive: true });
+    writeFileSync(path.join(root, '.codegraph', 'nanoflow-overlay.json'), JSON.stringify({
+      graph: { nodes: [], edges: [] },
+    }));
+    writeFileSync(path.join(root, 'scripts', 'codegraph-nanoflow-mcp-stdio.cjs'), 'fresh wrapper\n');
+    const codexConfigDir = mkdtempSync(path.join(tmpdir(), 'nanoflow-codex-doctor-config-'));
+    trackTempRoot(codexConfigDir);
+    const codexConfigPath = path.join(codexConfigDir, 'config.toml');
+    writeCodexConfig(root, codexConfigPath);
+
+    const result = runDoctor(root, ['--json', '--direct-mcp-error', 'Transport closed'], {
+      ...process.env,
+      NANOFLOW_CODEGRAPH_CODEX_CONFIG: codexConfigPath,
+      NANOFLOW_CODEGRAPH_DOCTOR_PROCESS_LIST_JSON: '[]',
+    });
+
+    expect(result.status, result.stderr || result.stdout).toBe(1);
+    const report = JSON.parse(result.stdout);
+    expect(report.hostMcp.logReadError).toEqual(expect.objectContaining({
+      message: expect.any(String),
+    }));
+    expect(report.hostMcp.rootCauseSummary?.failureClasses).toContain('host-mcp-log-read-failed');
+    expect(report.checks).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        name: 'host-mcp:log-read',
+        ok: false,
+      }),
+    ]));
+  });
+
+  it('fails before auto-sync degradation when a live wrapper still owns a direct watcher', () => {
+    const root = makeRoot();
+    writePackage(root, requiredScripts());
+    mkdirSync(path.join(root, '.codegraph'), { recursive: true });
+    mkdirSync(path.join(root, 'scripts'), { recursive: true });
+    writeFileSync(
+      path.join(root, '.codegraph', 'nanoflow-overlay.json'),
+      JSON.stringify({ graph: { nodes: [], edges: [] } }),
+    );
+    const wrapperPath = path.join(root, 'scripts', 'codegraph-nanoflow-mcp-stdio.cjs');
+    const wrapperSource = 'fresh wrapper\n';
+    writeFileSync(wrapperPath, wrapperSource);
+    const wrapperSha256 = sha256(wrapperSource);
+    writeFileSync(
+      path.join(root, '.codegraph', 'nanoflow-mcp-wrapper.log'),
+      [
+        JSON.stringify({
+          ts: '2026-07-14T04:00:00.000Z',
+          runId: 'direct-watcher-live',
+          pid: 43001,
+          wrapperPid: 43001,
+          event: 'wrapper.start',
+          scriptPath: wrapperPath,
+          scriptSha256: wrapperSha256,
+          codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+          env: {
+            CODEGRAPH_NO_DAEMON: '0',
+            CODEGRAPH_NO_WATCH: '0',
+            CODEGRAPH_DAEMON_IDLE_TIMEOUT_MS: '300000',
+            CODEGRAPH_DAEMON_MAX_IDLE_MS: '1800000',
+            NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '30000',
+            NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE: '0',
+          },
+          effectiveChildEnv: {
+            CODEGRAPH_NO_DAEMON: '1',
+            CODEGRAPH_NO_WATCH: '0',
+            CODEGRAPH_DAEMON_IDLE_TIMEOUT_MS: '300000',
+            CODEGRAPH_DAEMON_MAX_IDLE_MS: '1800000',
+          },
+          runtimeTopology: {
+            mode: 'direct-session',
+            watcherOwnership: 'per-wrapper-watcher',
+            fileLockContentionRisk: 'multi-wrapper-writers',
+            daemonDisabled: true,
+            watchDisabled: false,
+          },
+        }),
+        JSON.stringify({
+          ts: '2026-07-14T04:00:01.000Z',
+          runId: 'direct-watcher-live',
+          wrapperPid: 43001,
+          event: 'nanoflow.context.response',
+          requestId: 'direct-watcher-context',
+          failureClass: 'success',
+        }),
+      ].join('\n') + '\n',
+    );
+    const codexConfigDir = mkdtempSync(path.join(tmpdir(), 'nanoflow-codex-doctor-config-'));
+    trackTempRoot(codexConfigDir);
+    const codexConfigPath = path.join(codexConfigDir, 'config.toml');
+    writeCodexConfig(root, codexConfigPath);
+
+    const result = runDoctor(root, [], {
+      ...process.env,
+      NANOFLOW_CODEGRAPH_CODEX_CONFIG: codexConfigPath,
+      NANOFLOW_CODEGRAPH_DOCTOR_PROCESS_LIST_JSON: JSON.stringify([
+        {
+          pid: 43001,
+          parentPid: 13880,
+          commandLine: `"${process.execPath}" ${wrapperPath} @colbymchenry/codegraph@1.5.0 serve --mcp --path ${root}`,
+        },
+      ]),
+    });
+
+    expect(result.status, result.stderr || result.stdout).toBe(1);
+    const report = JSON.parse(result.stdout);
+    expect(report.hostMcp.currentWrapperRuntimeTopology).toEqual(expect.objectContaining({
+      mode: 'direct-session',
+      watcherOwnership: 'per-wrapper-watcher',
+      fileLockContentionRisk: 'multi-wrapper-writers',
+    }));
+    expect(report.hostMcp.activeDirectWatcherRuns).toEqual([
+      expect.objectContaining({
+        runId: 'direct-watcher-live',
+        pid: 43001,
+        mode: 'direct-session',
+      }),
+    ]);
+    expect(report.checks).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        name: 'host-mcp:active-direct-watchers',
+        ok: false,
+        count: 1,
+      }),
+    ]));
+    expect(report.hostMcp.rootCauseSummary).toEqual(expect.objectContaining({
+      failureClasses: expect.arrayContaining(['active-direct-wrapper-watchers']),
+      observed: expect.objectContaining({
+        activeDirectWatcherCount: 1,
+      }),
+      recovery: expect.arrayContaining([
+        expect.stringContaining('shared daemon'),
+      ]),
+    }));
+  });
+
   it('reports current CodeGraph auto-sync disabled as an index-frozen host MCP check', () => {
     const root = makeRoot();
     writePackage(root, requiredScripts());
@@ -59,7 +201,7 @@ export function registerCodegraphAdapterDoctorHostMcpSpecs(
           event: 'wrapper.start',
           scriptPath: wrapperPath,
           scriptSha256: wrapperSha256,
-          codegraphTarget: '@colbymchenry/codegraph@1.2.0',
+          codegraphTarget: '@colbymchenry/codegraph@1.5.0',
           env: {
             NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '30000',
             NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE: '0',
@@ -92,7 +234,7 @@ export function registerCodegraphAdapterDoctorHostMcpSpecs(
         {
           pid: 41000,
           parentPid: 13880,
-          commandLine: `"${process.execPath}" ${wrapperPath} @colbymchenry/codegraph@1.2.0 serve --mcp --path ${root}`,
+          commandLine: `"${process.execPath}" ${wrapperPath} @colbymchenry/codegraph@1.5.0 serve --mcp --path ${root}`,
         },
       ]),
     });
@@ -146,7 +288,7 @@ export function registerCodegraphAdapterDoctorHostMcpSpecs(
           event: 'wrapper.start',
           scriptPath: wrapperPath,
           scriptSha256: wrapperSha256,
-          codegraphTarget: '@colbymchenry/codegraph@1.2.0',
+          codegraphTarget: '@colbymchenry/codegraph@1.5.0',
           env: {
             NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '30000',
             NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE: '0',
@@ -186,7 +328,7 @@ export function registerCodegraphAdapterDoctorHostMcpSpecs(
         {
           pid: 41003,
           parentPid: 13880,
-          commandLine: `"${process.execPath}" ${wrapperPath} @colbymchenry/codegraph@1.2.0 serve --mcp --path ${root}`,
+          commandLine: `"${process.execPath}" ${wrapperPath} @colbymchenry/codegraph@1.5.0 serve --mcp --path ${root}`,
         },
       ]),
     });
@@ -210,6 +352,118 @@ export function registerCodegraphAdapterDoctorHostMcpSpecs(
     ]));
   });
 
+  it('ignores response warning flags when the captured evidence is source code rather than a leading banner', () => {
+    const root = makeRoot();
+    writePackage(root, requiredScripts());
+    mkdirSync(path.join(root, '.codegraph'), { recursive: true });
+    mkdirSync(path.join(root, 'scripts'), { recursive: true });
+    writeFileSync(
+      path.join(root, '.codegraph', 'nanoflow-overlay.json'),
+      JSON.stringify({ graph: { nodes: [], edges: [] } }),
+    );
+    const wrapperPath = path.join(root, 'scripts', 'codegraph-nanoflow-mcp-stdio.cjs');
+    const wrapperSource = 'fresh wrapper\n';
+    writeFileSync(wrapperPath, wrapperSource);
+    const wrapperSha256 = sha256(wrapperSource);
+    const sourceWarningTail = [
+      '...139\\t    }));',
+      '140\\t  });',
+      "144\\tconst warning = 'CodeGraph auto-sync is DISABLED - live file watching stopped, so the index is frozen. Reason: CodeGraph file lock held by another process past the retry budget; auto-sync disabled.';",
+    ].join('\n');
+    writeFileSync(
+      path.join(root, '.codegraph', 'nanoflow-mcp-wrapper.log'),
+      [
+        JSON.stringify({
+          ts: '2026-07-14T04:00:00.000Z',
+          runId: 'source-warning-response',
+          pid: 41004,
+          wrapperPid: 41004,
+          event: 'wrapper.start',
+          scriptPath: wrapperPath,
+          scriptSha256: wrapperSha256,
+          codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+          env: {
+            CODEGRAPH_NO_DAEMON: '0',
+            CODEGRAPH_NO_WATCH: '0',
+            CODEGRAPH_DAEMON_IDLE_TIMEOUT_MS: '300000',
+            CODEGRAPH_DAEMON_MAX_IDLE_MS: '1800000',
+            NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '30000',
+            NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE: '0',
+          },
+          effectiveChildEnv: {
+            CODEGRAPH_NO_DAEMON: '0',
+            CODEGRAPH_NO_WATCH: '0',
+            CODEGRAPH_DAEMON_IDLE_TIMEOUT_MS: '300000',
+            CODEGRAPH_DAEMON_MAX_IDLE_MS: '1800000',
+          },
+          runtimeTopology: {
+            mode: 'shared-daemon-proxy',
+            watcherOwnership: 'shared-daemon-single-watcher',
+            fileLockContentionRisk: 'single-writer',
+            daemonDisabled: false,
+            watchDisabled: false,
+          },
+        }),
+        JSON.stringify({
+          ts: '2026-07-14T04:00:02.000Z',
+          runId: 'source-warning-response',
+          pid: 41004,
+          wrapperPid: 41004,
+          event: 'nanoflow.context.response',
+          requestId: 'context-with-source-warning-literal',
+          failureClass: 'success',
+          baseResponseWarnings: {
+            codegraphAutoSyncDisabled: true,
+            failureClass: 'codegraph-autosync-disabled',
+            textTail: sourceWarningTail,
+          },
+          responseWarnings: {
+            codegraphAutoSyncDisabled: true,
+            failureClass: 'codegraph-autosync-disabled',
+            textTail: sourceWarningTail,
+          },
+        }),
+      ].join('\n') + '\n',
+    );
+    const codexConfigDir = mkdtempSync(path.join(tmpdir(), 'nanoflow-codex-doctor-config-'));
+    trackTempRoot(codexConfigDir);
+    const codexConfigPath = path.join(codexConfigDir, 'config.toml');
+    writeCodexConfig(root, codexConfigPath);
+
+    const result = runDoctor(root, [], {
+      ...process.env,
+      NANOFLOW_CODEGRAPH_CODEX_CONFIG: codexConfigPath,
+      NANOFLOW_CODEGRAPH_DOCTOR_PROCESS_LIST_JSON: JSON.stringify([
+        {
+          pid: 41004,
+          parentPid: 13880,
+          commandLine: `"${process.execPath}" ${wrapperPath} @colbymchenry/codegraph@1.5.0 serve --mcp --path ${root}`,
+        },
+      ]),
+    });
+
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+    const report = JSON.parse(result.stdout);
+    expect(report.hostMcp.currentCodegraphAutoSyncDisabled).toEqual(expect.objectContaining({
+      count: 0,
+      latest: null,
+    }));
+    expect(report.hostMcp.activeCodegraphAutoSyncDisabled).toEqual(expect.objectContaining({
+      count: 0,
+      latest: null,
+    }));
+    expect(report.checks).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        name: 'host-mcp:current-autosync-disabled',
+        ok: true,
+      }),
+      expect.objectContaining({
+        name: 'host-mcp:active-autosync-disabled',
+        ok: true,
+      }),
+    ]));
+  });
+
   it('reports auto-sync disabled warnings from live non-current wrappers as direct MCP risk', () => {
     const root = makeRoot();
     writePackage(root, requiredScripts());
@@ -223,7 +477,7 @@ export function registerCodegraphAdapterDoctorHostMcpSpecs(
     const wrapperSource = 'fresh wrapper\n';
     writeFileSync(wrapperPath, wrapperSource);
     const wrapperSha256 = sha256(wrapperSource);
-    const expectedTarget = '@colbymchenry/codegraph@1.2.0';
+    const expectedTarget = '@colbymchenry/codegraph@1.5.0';
     writeFileSync(
       path.join(root, '.codegraph', 'nanoflow-mcp-wrapper.log'),
       [
@@ -237,6 +491,10 @@ export function registerCodegraphAdapterDoctorHostMcpSpecs(
           scriptSha256: wrapperSha256,
           codegraphTarget: expectedTarget,
           env: {
+            CODEGRAPH_NO_DAEMON: '0',
+            CODEGRAPH_NO_WATCH: '0',
+            CODEGRAPH_DAEMON_IDLE_TIMEOUT_MS: '300000',
+            CODEGRAPH_DAEMON_MAX_IDLE_MS: '1800000',
             NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '30000',
             NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE: '0',
           },
@@ -352,7 +610,7 @@ export function registerCodegraphAdapterDoctorHostMcpSpecs(
     const wrapperSource = 'fresh wrapper\n';
     writeFileSync(wrapperPath, wrapperSource);
     const wrapperSha256 = sha256(wrapperSource);
-    const expectedTarget = '@colbymchenry/codegraph@1.2.0';
+    const expectedTarget = '@colbymchenry/codegraph@1.5.0';
     const warningText = 'CodeGraph auto-sync is DISABLED - live file watching stopped, so the index is frozen.';
     const wrapperEvents = Array.from({ length: 7 }, (_, index) => {
       const pid = 42000 + index;
@@ -424,7 +682,7 @@ export function registerCodegraphAdapterDoctorHostMcpSpecs(
     const wrapperSource = 'fresh wrapper\n';
     writeFileSync(wrapperPath, wrapperSource);
     const wrapperSha256 = sha256(wrapperSource);
-    const expectedTarget = '@colbymchenry/codegraph@1.2.0';
+    const expectedTarget = '@colbymchenry/codegraph@1.5.0';
     writeFileSync(
       path.join(root, '.codegraph', 'nanoflow-mcp-wrapper.log'),
       [
@@ -438,6 +696,10 @@ export function registerCodegraphAdapterDoctorHostMcpSpecs(
           scriptSha256: wrapperSha256,
           codegraphTarget: expectedTarget,
           env: {
+            CODEGRAPH_NO_DAEMON: '0',
+            CODEGRAPH_NO_WATCH: '0',
+            CODEGRAPH_DAEMON_IDLE_TIMEOUT_MS: '300000',
+            CODEGRAPH_DAEMON_MAX_IDLE_MS: '1800000',
             NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '30000',
             NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE: '0',
           },
@@ -487,94 +749,5 @@ export function registerCodegraphAdapterDoctorHostMcpSpecs(
     expect(report.hostMcp.currentWrapperEnvMatchesConfig).toBe(true);
   });
 
-  it('ignores PowerShell process-list commands that mention the wrapper path', () => {
-    const root = makeRoot();
-    writePackage(root, requiredScripts());
-    mkdirSync(path.join(root, '.codegraph'), { recursive: true });
-    mkdirSync(path.join(root, 'scripts'), { recursive: true });
-    writeFileSync(
-      path.join(root, '.codegraph', 'nanoflow-overlay.json'),
-      JSON.stringify({ graph: { nodes: [], edges: [] } }),
-    );
-    const wrapperPath = path.join(root, 'scripts', 'codegraph-nanoflow-mcp-stdio.cjs');
-    writeFileSync(wrapperPath, 'fresh wrapper\n');
-    const codexConfigDir = mkdtempSync(path.join(tmpdir(), 'nanoflow-codex-doctor-config-'));
-    trackTempRoot(codexConfigDir);
-    const codexConfigPath = path.join(codexConfigDir, 'config.toml');
-    writeCodexConfig(root, codexConfigPath, process.execPath);
-
-    const result = runDoctor(root, [], {
-      ...process.env,
-      NANOFLOW_CODEGRAPH_CODEX_CONFIG: codexConfigPath,
-      NANOFLOW_CODEGRAPH_DOCTOR_PROCESS_LIST_JSON: JSON.stringify([
-        {
-          pid: 7773,
-          parentPid: 13880,
-          commandLine: `"C:\\Program Files\\PowerShell\\7\\pwsh.exe" -Command "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*${wrapperPath}*' }"`,
-        },
-      ]),
-    });
-
-    expect(result.status, result.stderr || result.stdout).toBe(0);
-    const report = JSON.parse(result.stdout);
-    expect(report.hostMcp.liveProcesses).toEqual(expect.objectContaining({
-      checked: true,
-      matchingWrapperCount: 0,
-      commandMismatchCount: 0,
-      targetMismatchCount: 0,
-    }));
-    expect(report.checks).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        name: 'host-mcp:live-process-config',
-        ok: true,
-      }),
-    ]));
-  });
-
-  it('prints expected and actual values for failing Codex MCP environment checks', () => {
-    const root = makeRoot();
-    writePackage(root, requiredScripts());
-    mkdirSync(path.join(root, '.codegraph'), { recursive: true });
-    mkdirSync(path.join(root, 'scripts'), { recursive: true });
-    writeFileSync(
-      path.join(root, '.codegraph', 'nanoflow-overlay.json'),
-      JSON.stringify({ graph: { nodes: [], edges: [] } }),
-    );
-    writeFileSync(path.join(root, 'scripts', 'codegraph-nanoflow-mcp-stdio.cjs'), 'fresh wrapper\n');
-    const codexConfigDir = mkdtempSync(path.join(tmpdir(), 'nanoflow-codex-doctor-config-'));
-    trackTempRoot(codexConfigDir);
-    const codexConfigPath = path.join(codexConfigDir, 'config.toml');
-    writeFileSync(
-      codexConfigPath,
-      [
-        '[mcp_servers.codegraph]',
-        'command = "node"',
-        'args = [',
-        `  ${JSON.stringify(path.join(root, 'scripts', 'codegraph-nanoflow-mcp-stdio.cjs'))},`,
-        '  "@colbymchenry/codegraph@1.2.0",',
-        '  "serve",',
-        '  "--mcp",',
-        `  ${JSON.stringify('--path')},`,
-        `  ${JSON.stringify(root)},`,
-        ']',
-        '',
-        '[mcp_servers.codegraph.env]',
-        'NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS = "1000"',
-        '',
-      ].join('\n'),
-    );
-
-    const result = runDoctor(root, ['--explain'], {
-      ...process.env,
-      NANOFLOW_CODEGRAPH_CODEX_CONFIG: codexConfigPath,
-    });
-
-    expect(result.status).toBe(1);
-    expect(result.stdout).toContain(
-      '- FAIL mcp-config:env:NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS expected=30000 actual=1000',
-    );
-    expect(result.stdout).toContain(
-      '- FAIL mcp-config:env:NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE expected=0 actual=<missing>',
-    );
-  });
+  registerCodegraphAdapterDoctorHostMcpConfigSpecs(context);
 }

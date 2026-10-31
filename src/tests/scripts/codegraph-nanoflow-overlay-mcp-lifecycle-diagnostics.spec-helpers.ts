@@ -545,7 +545,7 @@ export function registerCodegraphOverlayMcpLifecycleDiagnosticSpecs(
     } finally {
       child.kill();
     }
-  }, 15_000);
+  }, WRAPPER_REPO_OVERLAY_TEST_TIMEOUT_MS);
 
   it('auto-recycles stale wrapper state after completing NanoFlow context tools when explicitly enabled', async () => {
     const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-codegraph-stale-wrapper-'));

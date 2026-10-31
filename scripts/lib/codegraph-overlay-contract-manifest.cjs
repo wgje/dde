@@ -6,17 +6,15 @@ const DIAGNOSTIC_COUNTERS = new Set([
 ]);
 
 const ZERO_REASON_COUNTERS = new Map([
+  ['angularModelEdges', 'current real Angular sources do not use the model() signal API; fixture coverage protects parser behavior'],
   ['angularRouteResolverEdges', 'current real routes do not use route resolvers; fixture coverage protects parser behavior'],
   ['angularRouteProviderEdges', 'current real routes do not use route-level providers; fixture coverage protects parser behavior'],
   ['hostDirectiveEdges', 'current real Angular sources do not use hostDirectives; fixture coverage protects parser behavior'],
-  ['templateDirectiveEdges', 'current real Angular sources declare no directives; fixture coverage protects parser behavior'],
   ['androidKotlinSealedClasses', 'current Android sources do not declare sealed classes; fixture coverage protects parser behavior'],
   ['androidKotlinInterfaces', 'current Android sources do not declare Kotlin interfaces; fixture coverage protects parser behavior'],
   ['androidKotlinInterfaceEdges', 'current Android sources do not declare Kotlin interfaces; fixture coverage protects parser behavior'],
   ['invokeReferenceTestEdges', 'current Edge Function tests do not use invoke-reference mapping evidence'],
   ['migrationConstraintValidationNodes', 'validation edges reuse existing constraint nodes instead of creating separate validation nodes'],
-  ['supabaseRealtimeUnsubscribeNodes', 'current real Realtime cleanup uses removeChannel rather than direct unsubscribe'],
-  ['supabaseRealtimeUnsubscribeEdges', 'current real Realtime cleanup uses removeChannel rather than direct unsubscribe'],
   ['supabaseRealtimeRemoveAllChannelsNodes', 'current real Realtime cleanup does not call removeAllChannels'],
   ['supabaseRealtimeRemoveAllChannelsEdges', 'current real Realtime cleanup does not call removeAllChannels'],
 ]);
@@ -24,9 +22,21 @@ const ZERO_REASON_COUNTERS = new Map([
 const RELATION_METADATA_CONTRACTS = [
   { relation: 'android-kotlin-function', requiredMetadata: ['functionName'] },
   { relation: 'android-kotlin-override', requiredMetadata: ['memberName', 'targetName'] },
+  { relation: 'android-kotlin-resource-reference', requiredMetadata: ['resourceType', 'resourceName'] },
   { relation: 'android-kotlin-type-reference', requiredMetadata: ['typeName', 'targetName', 'typeRole'] },
+  { relation: 'android-manifest-component-permission', requiredMetadata: ['componentType', 'className', 'permission'] },
+  { relation: 'android-manifest-intent-filter-action', requiredMetadata: ['action'] },
+  { relation: 'android-manifest-intent-filter-category', requiredMetadata: ['category'] },
+  {
+    relation: 'android-manifest-intent-filter-data',
+    requiredMetadata: [],
+    requiredAnyMetadata: ['scheme', 'host', 'path', 'pathPrefix', 'pathPattern', 'mimeType', 'port'],
+  },
+  { relation: 'android-manifest-query', requiredMetadata: ['queryType', 'queryValue'] },
+  { relation: 'android-manifest-uses-permission', requiredMetadata: ['permission', 'declarationType'] },
   { relation: 'angular-app-provider', requiredMetadata: ['provider', 'providerKind'] },
   { relation: 'edge-function-header', requiredMetadata: ['header', 'normalizedHeader'] },
+  { relation: 'env-var', requiredMetadata: ['envVar'] },
   { relation: 'migration-realtime-publication', requiredMetadata: ['publication', 'action', 'table'] },
   { relation: 'migration-view', requiredMetadata: ['view'] },
   { relation: 'supabase-realtime-status', requiredMetadata: ['status', 'action', 'owner'] },
@@ -37,9 +47,33 @@ const RELATION_METADATA_CONTRACTS = [
   { relation: 'privilege-revoke', requiredMetadata: ['action'] },
   { relation: 'privilege-object', requiredMetadata: ['objectName'] },
   { relation: 'privilege-role', requiredMetadata: ['role'] },
+  { relation: 'risk-tag', requiredMetadata: ['riskTag', 'riskSource'] },
 ];
 
 const PROJECT_SEMANTIC_COVERAGE_CONTRACTS = [
+  {
+    domain: 'Angular declarations and dependency injection',
+    counters: [
+      'angularComponents',
+      'angularDirectives',
+      'angularPipes',
+      'angularInjectables',
+      'angularInjectorFiles',
+      'angularInjectorDependencyReferences',
+      'angularApplicationProviders',
+      'standaloneImportEdges',
+    ],
+  },
+  {
+    domain: 'Angular inputs, outputs, queries, and signals',
+    counters: [
+      'angularInputEdges',
+      'angularOutputEdges',
+      'angularModelEdges',
+      'angularQueryEdges',
+      'angularSignalEdges',
+    ],
+  },
   {
     domain: 'Angular routing',
     counters: [
@@ -71,6 +105,78 @@ const PROJECT_SEMANTIC_COVERAGE_CONTRACTS = [
     ],
   },
   {
+    domain: 'Android/Kotlin symbols',
+    counters: [
+      'androidKotlinClasses',
+      'androidKotlinDataClasses',
+      'androidKotlinSealedClasses',
+      'androidKotlinInterfaces',
+      'androidKotlinInterfaceEdges',
+      'androidKotlinExtendsEdges',
+      'androidKotlinImplementsEdges',
+      'androidKotlinObjects',
+      'androidKotlinObjectEdges',
+      'androidKotlinCompanionObjects',
+      'androidKotlinCompanionObjectEdges',
+      'androidKotlinEnums',
+      'androidKotlinEnumMembers',
+      'androidKotlinEnumMemberEdges',
+      'androidKotlinImports',
+      'androidKotlinImportEdges',
+      'androidKotlinConstructors',
+      'androidKotlinConstructorEdges',
+      'androidKotlinProperties',
+      'androidKotlinPropertyEdges',
+      'androidKotlinMethods',
+      'androidKotlinMethodEdges',
+      'androidKotlinFunctions',
+      'androidKotlinFunctionEdges',
+      'androidKotlinOverrideEdges',
+      'androidKotlinTypeReferenceEdges',
+      'androidKotlinCalls',
+      'androidKotlinCallEdges',
+      'androidKotlinAnnotations',
+      'androidKotlinAnnotationEdges',
+    ],
+  },
+  {
+    domain: 'Android Manifest, widgets, and resources',
+    counters: [
+      'androidManifestComponents',
+      'androidManifestPermissions',
+      'androidManifestUsesPermissionEdges',
+      'androidManifestQueries',
+      'androidManifestQueryEdges',
+      'androidManifestComponentPermissions',
+      'androidManifestComponentPermissionEdges',
+      'androidManifestIntentFilters',
+      'androidManifestIntentFilterActions',
+      'androidManifestIntentFilterActionEdges',
+      'androidManifestIntentFilterCategories',
+      'androidManifestIntentFilterCategoryEdges',
+      'androidManifestIntentFilterData',
+      'androidManifestIntentFilterDataEdges',
+      'androidWidgetProviders',
+      'androidResourceReferences',
+      'androidKotlinResourceReferences',
+      'androidKotlinResourceReferenceEdges',
+    ],
+  },
+  {
+    domain: 'Context7 retrieval and source maps',
+    counters: [
+      'context7Documents',
+      'context7Categories',
+      'context7CategoryDocEdges',
+      'context7RetrievalRoutes',
+      'context7RetrievalPrimaryEdges',
+      'context7RetrievalSecondaryEdges',
+      'context7SourceMapRoutes',
+      'context7SourceMapDocEdges',
+      'context7SourceMapSourceEdges',
+    ],
+  },
+  {
     domain: 'Supabase Edge Functions',
     counters: [
       'edgeFunctions',
@@ -81,9 +187,18 @@ const PROJECT_SEMANTIC_COVERAGE_CONTRACTS = [
       'edgeFunctionMethodEdges',
       'edgeFunctionHeaderNodes',
       'edgeFunctionHeaderEdges',
+      'edgeFunctionEnvVarNodes',
+      'edgeFunctionEnvVarEdges',
       'edgeFunctionInvokeEdges',
       'edgeFunctionTests',
       'edgeFunctionTestEdges',
+    ],
+  },
+  {
+    domain: 'Supabase environment and risk semantics',
+    counters: [
+      'supabaseRiskTagNodes',
+      'supabaseRiskTagEdges',
     ],
   },
   {
@@ -175,6 +290,7 @@ const PROJECT_SEMANTIC_COVERAGE_CONTRACTS = [
       'routeReferenceTestEdges',
       'invokeReferenceTestEdges',
       'filenameReferenceTestEdges',
+      'hardRules',
       'hardRuleKeywordNodes',
       'hardRuleKeywordEdges',
       'hardRuleKeywordMappingEdges',
@@ -197,10 +313,12 @@ const PROJECT_SEMANTIC_COVERAGE_CONTRACTS = [
   },
 ];
 
-function counterContract(name) {
+function counterContract(name, value) {
   return {
     volatility: DIAGNOSTIC_COUNTERS.has(name) ? 'diagnostic' : 'stable',
-    ...(ZERO_REASON_COUNTERS.has(name) ? { zeroReason: ZERO_REASON_COUNTERS.get(name) } : {}),
+    ...(value === 0 && ZERO_REASON_COUNTERS.has(name)
+      ? { zeroReason: ZERO_REASON_COUNTERS.get(name) }
+      : {}),
   };
 }
 

@@ -683,6 +683,29 @@ export function registerCodegraphAdapterContextCliRecoverySpecs(
     expect(contextRequestCount).toBe(1);
   }, 60_000);
 
+  it('derives the fast tooling triage budget from the caller deadline', () => {
+    const projectRoot = makeConfigBackedAdapterProject();
+    const codegraphTarget = makeContextReturningFakeCodegraph();
+
+    for (const [timeoutMs, expectedWrapperTimeoutMs] of [
+      [20_000, 15_000],
+      [60_000, 45_000],
+      [120_000, 90_000],
+    ] as const) {
+      const result = runAdapterContext({
+        projectRoot,
+        codegraphTarget,
+        query: 'codegraph mcp wrapper current reader timeout',
+        args: ['--overlay-limit', '1', '--overlay-query-limit', '1', '--timeout-ms', String(timeoutMs)],
+      });
+
+      expect(result.status, [result.stdout, result.stderr, result.error?.message ?? ''].join('\n')).toBe(0);
+      const summary = JSON.parse(result.stdout) as AdapterSummary;
+      expect(summary.toolingTriageFastTimeout).toBe(true);
+      expect(summary.wrapperRequestTimeoutMs).toBe(expectedWrapperTimeoutMs);
+    }
+  }, 60_000);
+
   it('keeps context output when the standalone overlay provenance query exceeds the output budget', () => {
     const projectRoot = makeTempAdapterProject();
     const fakeCodegraph = makeContextReturningFakeCodegraph();

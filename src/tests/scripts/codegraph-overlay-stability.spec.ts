@@ -39,8 +39,14 @@ interface StabilityRunner {
     generatorPath: string;
     outputPath: string;
     root: string;
+    stdio?: 'inherit' | 'pipe';
     timeoutMs: number;
-  }): Promise<{ output: { bytes: number; sha256: string }; participantToken: string; planDigest: string }>;
+  }): Promise<{
+    output: { bytes: number; sha256: string };
+    participantToken: string;
+    planDigest: string;
+    publication: { compatibilityDigest: string; generationId: string; sequence: string };
+  }>;
 }
 
 interface DocsSyncModule {
@@ -94,7 +100,7 @@ function makeFixture(options: Parameters<typeof makeDocsFixture>[0] = {}): strin
   const packagePath = path.join(root, 'package.json');
   const packageJson = JSON.parse(fs.readFileSync(packagePath, 'utf8')) as Record<string, unknown>;
   fs.writeFileSync(packagePath, `${JSON.stringify({ name: 'canonical-doc-sync-fixture', ...packageJson }, null, 2)}\n`);
-  const sourceAgents = fs.readFileSync(path.join(repoRoot, 'AGENTS.md'), 'utf8');
+  const sourceAgents = fs.readFileSync(path.join(repoRoot, 'docs', 'codegraph-nanoflow-agent-contract.md'), 'utf8');
   const androidCountAnchor = sourceAgents.match(/Android \u8bed\u4e49\u8ba1\u6570\u4e3a\s+[^\u3002\n]+/)?.[0];
   if (!androidCountAnchor) throw new Error('fixture AGENTS Android semantic count anchor missing');
   const agentsPath = path.join(root, 'AGENTS.md');
@@ -297,15 +303,15 @@ describe('CodeGraph overlay stability helper', () => {
     expect(helper).not.toMatch(/\b(?:listFiles|readdirSync|opendirSync|globSync|walk)\b/);
   });
 
-  it('keeps direct query and MCP refresh paths on the stable generator without package aliases', () => {
-    for (const relativePath of [
-      'scripts/query-codegraph-nanoflow-overlay.mjs',
-      'scripts/codegraph-nanoflow-mcp-stdio.cjs',
-    ]) {
-      const source = fs.readFileSync(path.join(repoRoot, relativePath), 'utf8');
-      expect(source).toContain('generate-codegraph-nanoflow-overlay.mjs');
-      expect(source).not.toContain('npm run codegraph:overlay:stable');
-    }
+  it('keeps Query on the shared CURRENT reader and MCP refresh on the stable generator', () => {
+    const query = fs.readFileSync(path.join(repoRoot, 'scripts/query-codegraph-nanoflow-overlay.mjs'), 'utf8');
+    const mcp = fs.readFileSync(path.join(repoRoot, 'scripts/codegraph-nanoflow-mcp-stdio.cjs'), 'utf8');
+
+    expect(query).toContain('codegraph-overlay-current-receipt.cjs');
+    expect(query).not.toContain('generate-codegraph-nanoflow-overlay.mjs');
+    expect(query).not.toContain('npm run codegraph:overlay:stable');
+    expect(mcp).toContain('generate-codegraph-nanoflow-overlay.mjs');
+    expect(mcp).not.toContain('npm run codegraph:overlay:stable');
   });
 
   it('publishes a disposable project only after the two-build contract succeeds', () => {
@@ -324,14 +330,24 @@ describe('CodeGraph overlay stability helper', () => {
     ], { cwd: repoRoot, encoding: 'utf8', timeout: 30_000 });
 
     expect(result.status, result.stderr || result.stdout).toBe(0);
-    const overlay = JSON.parse(fs.readFileSync(outputPath, 'utf8')) as {
+    const generationRoot = path.join(root, '.codegraph', 'nanoflow-generations');
+    const current = JSON.parse(fs.readFileSync(path.join(generationRoot, 'CURRENT.json'), 'utf8')) as {
+      generationId: string;
+    };
+    const overlay = JSON.parse(fs.readFileSync(path.join(
+      generationRoot,
+      current.generationId,
+      'compatibility',
+      'nanoflow-overlay.json',
+    ), 'utf8')) as {
       graph?: { nodes?: unknown[] };
       project?: { root?: string };
     };
     expect(overlay.project?.root).toBe(root);
     expect(overlay.graph?.nodes?.length).toBeGreaterThan(0);
-    expect(fs.readdirSync(path.dirname(outputPath))).toEqual(['nanoflow-overlay.json']);
-  });
+    expect(fs.existsSync(outputPath)).toBe(false);
+    expect(current.generationId).toMatch(/^g-[a-f0-9]{64}$/);
+  }, 30_000);
 });
 
 describe('CodeGraph stable generation runner', () => {
@@ -341,14 +357,23 @@ describe('CodeGraph stable generation runner', () => {
     const invocationPath = path.join(root, 'invocation.json');
     const stubGenerator = path.join(root, 'stub-generator.cjs');
     fs.writeFileSync(stubGenerator, [
+      "const crypto = require('node:crypto');",
       "const fs = require('node:fs');",
       "const path = require('node:path');",
       "const args = process.argv.slice(2);",
-      "const value = name => args[args.indexOf(name) + 1];",
-      "const output = value('--out');",
-      "fs.mkdirSync(path.dirname(output), { recursive: true });",
-      "fs.writeFileSync(output, JSON.stringify({ ok: true }) + '\\n');",
+      "const root = args[args.indexOf('--root') + 1];",
+      "const generationId = 'g-' + 'a'.repeat(64);",
+      "const generationRoot = path.join(root, '.codegraph', 'nanoflow-generations');",
+      "const generationPath = path.join(generationRoot, generationId);",
+      "const compatibilityPath = path.join(generationPath, 'compatibility', 'nanoflow-overlay.json');",
+      "const compatibility = Buffer.from(JSON.stringify({ ok: true }) + '\\n');",
+      "const compatibilityDigest = crypto.createHash('sha256').update(compatibility).digest('hex');",
+      "fs.mkdirSync(path.dirname(compatibilityPath), { recursive: true });",
+      "fs.writeFileSync(compatibilityPath, compatibility);",
+      "const current = { compatibilityDigest, contractDigest: '8ea13a94e966e16efe3d91821a891a2f8b3c2e696d5ff812093760260d98464f', generationId, manifestDigest: '1'.repeat(64), overlaySchemaDigest: '3d4c1049024c8895f5e2fe5504bf2814b87d66211d93a9ff22bc901be8db9031', protocol: 'codegraph-overlay-generation-v1', publishedAt: '2026-08-03T00:00:00.000Z', receiptDigest: '3'.repeat(64), schemaVersion: 1, sequence: '1', sourcePolicyDigest: 'ca78ea5e17d32399faac676bcab26fc1d7f48186a89792774d37a6b8549d0ca3' };",
+      "fs.writeFileSync(path.join(generationRoot, 'CURRENT.json'), JSON.stringify(current) + '\\n');",
       `fs.writeFileSync(${JSON.stringify(invocationPath)}, JSON.stringify({ args, token: process.env.NANOFLOW_CODEGRAPH_STABILITY_PARTICIPANT_TOKEN, plan: process.env.NANOFLOW_CODEGRAPH_STABILITY_PLAN_DIGEST }));`,
+      "process.stdout.write('[codegraph-overlay] ' + JSON.stringify({ compatibilityDigest, generationId, sequence: '1' }) + '\\n');",
     ].join('\n'));
 
     const runner = loadRunner();
@@ -369,12 +394,50 @@ describe('CodeGraph stable generation runner', () => {
     expect(invocation.plan).toBe(result.planDigest);
     expect(result.output.bytes).toBeGreaterThan(0);
     expect(result.output.sha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(result.publication).toEqual({
+      compatibilityDigest: result.output.sha256,
+      generationId: `g-${'a'.repeat(64)}`,
+      sequence: '1',
+    });
+    expect(fs.existsSync(outputPath)).toBe(false);
     expect(runner.buildStableGenerationPlan({ root, outputPath })).toEqual(expect.objectContaining({
       buildCount: 2,
       participant: 'generate-codegraph-nanoflow-overlay',
     }));
     expect(loadHelper().planDigest(runner.buildStableGenerationPlan({ root, outputPath })))
       .toBe(result.planDigest);
+  });
+
+  it('rejects a child result that does not identify the observed CURRENT generation', async () => {
+    const root = makeTempRoot('nanoflow-overlay-stable-mismatch-');
+    const outputPath = path.join(root, '.codegraph', 'nanoflow-overlay.json');
+    const stubGenerator = path.join(root, 'stub-generator.cjs');
+    fs.writeFileSync(stubGenerator, [
+      "const crypto = require('node:crypto');",
+      "const fs = require('node:fs');",
+      "const path = require('node:path');",
+      "const args = process.argv.slice(2);",
+      "const root = args[args.indexOf('--root') + 1];",
+      "const generationId = 'g-' + 'b'.repeat(64);",
+      "const generationRoot = path.join(root, '.codegraph', 'nanoflow-generations');",
+      "const compatibility = Buffer.from('{}\\n');",
+      "const compatibilityDigest = crypto.createHash('sha256').update(compatibility).digest('hex');",
+      "const compatibilityPath = path.join(generationRoot, generationId, 'compatibility', 'nanoflow-overlay.json');",
+      "fs.mkdirSync(path.dirname(compatibilityPath), { recursive: true });",
+      "fs.writeFileSync(compatibilityPath, compatibility);",
+      "const current = { compatibilityDigest, contractDigest: '8ea13a94e966e16efe3d91821a891a2f8b3c2e696d5ff812093760260d98464f', generationId, manifestDigest: '1'.repeat(64), overlaySchemaDigest: '3d4c1049024c8895f5e2fe5504bf2814b87d66211d93a9ff22bc901be8db9031', protocol: 'codegraph-overlay-generation-v1', publishedAt: '2026-08-03T00:00:00.000Z', receiptDigest: '3'.repeat(64), schemaVersion: 1, sequence: '1', sourcePolicyDigest: 'ca78ea5e17d32399faac676bcab26fc1d7f48186a89792774d37a6b8549d0ca3' };",
+      "fs.writeFileSync(path.join(generationRoot, 'CURRENT.json'), JSON.stringify(current) + '\\n');",
+      "process.stdout.write('[codegraph-overlay] ' + JSON.stringify({ compatibilityDigest, generationId: 'g-' + 'c'.repeat(64), sequence: '1' }) + '\\n');",
+    ].join('\n'));
+
+    await expect(loadRunner().runStableGenerator({
+      generatorPath: stubGenerator,
+      outputPath,
+      root,
+      stdio: 'pipe',
+      timeoutMs: 5_000,
+    })).rejects.toThrow('codegraph-overlay-stability-publication-mismatch');
+    expect(fs.existsSync(outputPath)).toBe(false);
   });
 
   it('terminates and fails closed when its generator participant exceeds the bound', async () => {

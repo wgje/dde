@@ -27,7 +27,7 @@ const DEFAULT_QUERY = 'ProjectShellComponent';
 const DEFAULT_TIMEOUT_MS = 60_000;
 const WRAPPER_TIMEOUT_HEADROOM_MIN_MS = 2_500;
 const WRAPPER_TIMEOUT_HEADROOM_MAX_MS = 5_000;
-const TOOLING_TRIAGE_WRAPPER_TIMEOUT_MS = 15_000;
+const TOOLING_TRIAGE_WRAPPER_TIMEOUT_RATIO = 0.75;
 const TOOLING_QUALITY_FOCUSED_QUERY = 'codegraph adapter context wrapper log guard sourceOrdering sourceSelection';
 const TOOLING_ISSUE_REGISTRY_FOCUSED_QUERY = 'docs/codegraph-nanoflow-adaptation-issues.md codegraph nanoflow adaptation issues';
 const TOOLING_TRIAGE_ANCHOR_SEGMENTS = new Set(['codegraph', 'nanoflow', 'mcp']);
@@ -280,7 +280,7 @@ function deriveWrapperRequestTimeoutMs(timeoutMs, options = {}) {
   );
   const derived = Math.max(1, timeoutMs - headroomMs);
   return shouldUseFastToolingTriageTimeout(options)
-    ? Math.min(derived, TOOLING_TRIAGE_WRAPPER_TIMEOUT_MS)
+    ? Math.min(derived, Math.max(1, Math.floor(timeoutMs * TOOLING_TRIAGE_WRAPPER_TIMEOUT_RATIO)))
     : derived;
 }
 

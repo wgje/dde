@@ -20,7 +20,15 @@ type DedupContractHotspotFixture = {
 };
 
 const dedupContractHotspots: DedupContractHotspotFixture[] = [
-  { name: 'collectTypeScript()', sourcePath: 'scripts/generate-codegraph-nanoflow-overlay.mjs', language: 'typescript' },
+  {
+    name: 'collectTypeScript()',
+    sourcePath: 'scripts/generate-codegraph-nanoflow-overlay.mjs',
+    language: 'typescript',
+    coveredChildSymbols: [
+      'readTypeScriptStandardLibraryReferences',
+      'collectTypeScriptStandardLibraryDeclarations',
+    ],
+  },
   { name: 'buildNativeGraph()', sourcePath: 'scripts/generate-codegraph-nanoflow-overlay.mjs', language: 'typescript' },
   { name: 'buildImportAliasIndex()', sourcePath: 'scripts/generate-codegraph-nanoflow-overlay.mjs', language: 'typescript' },
   { name: 'buildExportTargetIndex()', sourcePath: 'scripts/generate-codegraph-nanoflow-overlay.mjs', language: 'typescript' },
@@ -30,8 +38,24 @@ const dedupContractHotspots: DedupContractHotspotFixture[] = [
     name: 'collectAndroid()',
     sourcePath: 'scripts/generate-codegraph-nanoflow-overlay.mjs',
     language: 'kotlin/xml',
-    coveredChildSymbols: ['readAndroidKotlinClasses'],
-    allowedRelations: ['android-kotlin-class', 'android-manifest-component', 'android-widget-provider', 'android-resource-reference'],
+    coveredChildSymbols: ['readAndroidKotlinClasses', 'readAndroidKotlinFunctions'],
+    allowedRelations: [
+      'android-kotlin-class',
+      'android-kotlin-resource-reference',
+      'android-kotlin-source',
+      'android-manifest-component',
+      'android-manifest-component-permission',
+      'android-manifest-intent-filter-action',
+      'android-manifest-intent-filter-category',
+      'android-manifest-intent-filter-data',
+      'android-manifest-intent-filter-value',
+      'android-manifest-permission',
+      'android-manifest-query',
+      'android-manifest-uses-permission',
+      'android-resource-file',
+      'android-resource-reference',
+      'android-widget-provider',
+    ],
   },
   {
     name: 'readAndroidKotlinFileSymbols()',
@@ -56,8 +80,11 @@ const dedupContractHotspots: DedupContractHotspotFixture[] = [
       'readAndroidKotlinInlineAnnotations',
       'readAndroidKotlinAnnotationLine',
       'readAndroidKotlinTypeReferencesFromTypeText',
+      'readAndroidKotlinCallableOwnerClasses',
+      'readAndroidKotlinClassTypeParametersEnd',
       'readAndroidKotlinMethodsFromSource',
       'readAndroidKotlinFunctionsFromSource',
+      'readAndroidKotlinFunctionsFromNativeEndpoints',
       'readAndroidKotlinCallableTypeReferences',
       'readAndroidKotlinParameterTypeReferences',
       'readAndroidKotlinVisibility',
@@ -155,6 +182,8 @@ const dedupContractHotspots: DedupContractHotspotFixture[] = [
     allowedRelations: ['metadata.relation', 'sourceSelection diagnostics'],
     coveredChildSymbols: [
       'contextPackExploreQueryFor',
+      'queryTokens',
+      'localizedContextPackQueryAliases',
       'summarizeContextPackQueryClassification',
       'classifyCodegraphDedupMaintenanceQuery',
       'queryMentionsCodegraphDedupMaintenance',
@@ -203,7 +232,7 @@ export function writeDedupContractFixture(root: string): void {
     path.join(root, 'docs', 'codegraph-nanoflow-dedup-contract.json'),
     JSON.stringify({
       schemaVersion: 1,
-      upstreamCodeGraphVersion: '@colbymchenry/codegraph@1.2.0',
+      upstreamCodeGraphVersion: '@colbymchenry/codegraph@1.5.0',
       fixedVersionUpgradeProbe: '--codegraph-target @colbymchenry/codegraph@<new-version>',
       nativeDelegationContract: {
         delegatedGenericCapabilities: [

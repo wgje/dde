@@ -108,7 +108,7 @@ export function registerCodegraphOverlayMarkdownNativeProjectionSpecs(
       '--root',
       root,
       '--query',
-      'native-section-order-fixture',
+      'NativeSectionAnchor',
       '--limit',
       '20',
       '--native-markdown',
@@ -141,7 +141,7 @@ export function registerCodegraphOverlayMarkdownNativeProjectionSpecs(
 
   registerCodegraphOverlayMarkdownNativeGeneratedPatternSpecs(context);
 
-  it('omits undefined line suffixes from strict native Markdown related symbols', () => {
+  it('uses canonical line coordinates for strict native Markdown related symbols', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-codegraph-native-md-related-lines-'));
     tempRoots.push(root);
     writeFile(root, 'src/anchor.ts', 'export function RelatedLineAnchor(): void {}\n');
@@ -220,7 +220,7 @@ export function registerCodegraphOverlayMarkdownNativeProjectionSpecs(
       '--root',
       root,
       '--query',
-      'related-line-fixture',
+      'relatedWithoutLine',
       '--limit',
       '20',
       '--native-markdown',
@@ -230,7 +230,7 @@ export function registerCodegraphOverlayMarkdownNativeProjectionSpecs(
     });
 
     expectSpawnSuccess(result);
-    expect(result.stdout).toContain('- src/related.ts: relatedWithoutLine');
+    expect(result.stdout).toContain('- **relatedWithoutLine** (constant) - src/related.ts:1');
     expect(result.stdout).not.toContain('relatedWithoutLine:undefined');
   });
 
@@ -465,7 +465,7 @@ export function registerCodegraphOverlayMarkdownNativeProjectionSpecs(
       '--root',
       root,
       '--query',
-      'native-related-budget-fixture',
+      'NativeRelatedBudgetAnchor',
       '--limit',
       '20',
       '--native-markdown',
@@ -556,7 +556,7 @@ export function registerCodegraphOverlayMarkdownNativeProjectionSpecs(
     expect(result.stdout).toContain('- Code block budget reached; additional matching nodes may have omitted source.');
   });
 
-  it('omits undefined file names from strict native Markdown entry point symbols', () => {
+  it('uses a canonical fallback path for legacy strict native Markdown fixture symbols', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-codegraph-native-md-related-files-'));
     tempRoots.push(root);
     writeFile(root, 'src/anchor.ts', 'export function RelatedFileAnchor(): void {}\n');
@@ -633,7 +633,7 @@ export function registerCodegraphOverlayMarkdownNativeProjectionSpecs(
       '--root',
       root,
       '--query',
-      'related-file-fixture',
+      'relatedWithoutFile',
       '--limit',
       '20',
       '--native-markdown',
@@ -643,7 +643,7 @@ export function registerCodegraphOverlayMarkdownNativeProjectionSpecs(
     });
 
     expectSpawnSuccess(result);
-    expect(result.stdout).toContain('- **relatedWithoutFile** (variable) - (unknown):1');
+    expect(result.stdout).toContain('- **relatedWithoutFile** (variable) - src/fixture.ts:1');
     expect(result.stdout).not.toContain('- **relatedWithoutFile** (variable) - undefined:1');
   });
 

@@ -1,0 +1,18 @@
+{
+  "schemaVersion": "1",
+  "kind": "CODEGRAPH_SOURCEPOLICY_ROOT_BINDING_RECEIPT",
+  "status": "PENDING_EXTERNAL_AUTHORITY",
+  "rootContractPath": "scripts/contracts/codegraph-read-identity-v2.json",
+  "rootContractSha256": "7d63296a2209ecac85653699748f93a183ddda37844c114d363efd257dd4936f",
+  "companionPath": "scripts/contracts/codegraph-read-identity-v2-companion.json",
+  "companionSha256": "bd32be0260f561d19927caf3de7e4dd4cf394e0512e76282145e2d05bff19b02",
+  "sourcePolicyDigest": null,
+  "contractSetDigest": null,
+  "implementationParts": null,
+  "authorityRequirement": {
+    "issuer": "EXTERNAL_AUTHORITY_ONLY",
+    "signature": "REQUIRED",
+    "ledger": "REQUIRED",
+    "trustAnchor": "REQUIRED"
+  }
+}

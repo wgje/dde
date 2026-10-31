@@ -72,6 +72,12 @@ CodeGraph AST index does not fully model:
   or `styleUrls` decorator property.
 - Angular `inject()` dependency edges.
 - Angular constructor dependency edges.
+- Exact `standalone-import`, component/directive `provider`, and `dependency`
+  queries keep the owning decorator or injection declaration line as the first
+  native source evidence. Dependency edges preserve `injectionKind=inject` or
+  `injectionKind=constructor` plus source line/column, and injection collection
+  is scoped per declaring class rather than shared across every class in one
+  TypeScript file.
 - Angular application bootstrap provider edges from
   `bootstrapApplication(..., { providers })` and `ApplicationConfig.providers`.
   Object providers, direct provider tokens, spread providers, and provider
@@ -140,6 +146,15 @@ CodeGraph AST index does not fully model:
   the `AndroidManifest.xml` file node to the resolved Kotlin class with
   `metadata.relation = "android-manifest-component"`, preserving component type,
   exported state, intent actions, raw manifest name, and source line.
+- Android Manifest permissions, package/provider/intent queries, component-level
+  permissions, and intent-filter action/category/data values are emitted as
+  closed native `references` edges. Their NanoFlow meanings are carried by
+  `android-manifest-uses-permission`, `android-manifest-query`,
+  `android-manifest-component-permission`, and the
+  `android-manifest-intent-filter-*` relation family; metadata preserves the
+  permission declaration type, query type/value, component owner, and concrete
+  intent value fields. The validator fails closed when those relations are
+  unregistered or required metadata is absent.
 - Android Kotlin host classes under `android/` are emitted as native `class`
   nodes with `language = "kotlin"`, package-qualified names, source ranges, and
   file containment edges, so Manifest class references resolve to the real
@@ -218,8 +233,8 @@ CodeGraph AST index does not fully model:
   `metadata.relation = "android-kotlin-annotation"`, and strict native
   JSON/Markdown keep the relation evidence through closed edges and focused
   source blocks while stripping NanoFlow metadata.
-- Android Kotlin member graph summary: 50 androidKotlinClasses, 28 androidKotlinDataClasses, 0 androidKotlinSealedClasses, 0 androidKotlinInterfaces, 0 androidKotlinInterfaceEdges, 7 androidKotlinExtendsEdges, 1 androidKotlinImplementsEdges, 5 androidKotlinObjects, 5 androidKotlinObjectEdges, 5 androidKotlinCompanionObjects, 5 androidKotlinCompanionObjectEdges, 8 androidKotlinEnums, 36 androidKotlinEnumMembers, 36 androidKotlinEnumMemberEdges, 135 androidKotlinImports, 135 androidKotlinImportEdges, 32 androidKotlinConstructors, 32 androidKotlinConstructorEdges, 837 androidKotlinProperties, 837 androidKotlinPropertyEdges, 269 androidKotlinMethods, 269 androidKotlinMethodEdges, 13 androidKotlinFunctions, 13 androidKotlinFunctionEdges, 29 androidKotlinOverrideEdges, 317 androidKotlinTypeReferenceEdges, 732 androidKotlinCalls, 732 androidKotlinCallEdges, 19 androidKotlinAnnotations, and 19 androidKotlinAnnotationEdges.
-- Android packaging/resource graph summary: 7 androidManifestComponents, 1 androidWidgetProviders, and 46 androidResourceReferences.
+- Android Kotlin member graph summary: 174 androidKotlinClasses, 71 androidKotlinDataClasses, 7 androidKotlinSealedClasses, 7 androidKotlinInterfaces, 0 androidKotlinInterfaceEdges, 9 androidKotlinExtendsEdges, 20 androidKotlinImplementsEdges, 20 androidKotlinObjects, 20 androidKotlinObjectEdges, 8 androidKotlinCompanionObjects, 8 androidKotlinCompanionObjectEdges, 19 androidKotlinEnums, 79 androidKotlinEnumMembers, 79 androidKotlinEnumMemberEdges, 487 androidKotlinImports, 487 androidKotlinImportEdges, 86 androidKotlinConstructors, 86 androidKotlinConstructorEdges, 1750 androidKotlinProperties, 1750 androidKotlinPropertyEdges, 622 androidKotlinMethods, 622 androidKotlinMethodEdges, 32 androidKotlinFunctions, 32 androidKotlinFunctionEdges, 74 androidKotlinOverrideEdges, 720 androidKotlinTypeReferenceEdges, 1171 androidKotlinCalls, 1171 androidKotlinCallEdges, 34 androidKotlinAnnotations, and 34 androidKotlinAnnotationEdges.
+- Android packaging/resource graph summary: 7 androidManifestComponents, 3 androidManifestPermissions, 3 androidManifestUsesPermissionEdges, 3 androidManifestQueries, 3 androidManifestQueryEdges, 1 androidManifestComponentPermissions, 1 androidManifestComponentPermissionEdges, 6 androidManifestIntentFilters, 6 androidManifestIntentFilterActions, 6 androidManifestIntentFilterActionEdges, 3 androidManifestIntentFilterCategories, 3 androidManifestIntentFilterCategoryEdges, 1 androidManifestIntentFilterData, 1 androidManifestIntentFilterDataEdges, 1 androidWidgetProviders, 46 androidResourceReferences, 276 androidKotlinResourceReferences, and 276 androidKotlinResourceReferenceEdges.
 - Android App Widget provider metadata is emitted as native `references` edges
   from the resolved receiver class to the `res/xml/*.xml` provider file with
   `metadata.relation = "android-widget-provider"`. Querying this relation is
@@ -230,6 +245,13 @@ CodeGraph AST index does not fully model:
   emitted as native `imports` edges with `metadata.relation =
   "android-resource-reference"` so provider XML can lead to the concrete layout
   or resource file.
+- Kotlin `R.string`, `R.layout`, `R.drawable`, and `R.id` references are emitted
+  as native `references` edges with `metadata.relation =
+  "android-kotlin-resource-reference"`. Edges resolve only to indexed project
+  resources, preserve `resourceType` and `resourceName`, and exclude
+  `android.R`, comments, strings, and unresolved resources. Relation-only source
+  evidence remains source-first and uses the real Kotlin owner before the
+  resource endpoint.
 - Supabase Edge Function entry points.
 - Supabase Edge Function environment variable references, including relative
   imports into `supabase/functions/_shared` helper modules.
@@ -546,21 +568,19 @@ coverage numbers in this document as current:
 npm run codegraph:overlay:validate
 ```
 
-This command regenerates `.codegraph/nanoflow-overlay.json` before validating
-`AGENTS.md` and this adaptation document against the generated graph baseline.
-It also enforces native graph shape/health: overlay nodes must use native
-CodeGraph kinds and project-local paths, edges must use native kinds with closed
-endpoints, and migration semantic relations must be sourced from migration file
-nodes. Treat those checks as the concrete quality gate behind `badNodes=0`,
-`badEdges=0`, `migrationVarSources=0`, and `noisyMigrationTables=0`; broad
-`graphNodes` / `graphEdges` totals remain diagnostics only.
-The lower-level `npm run codegraph:overlay:docs:validate` command is useful for
-debugging a known overlay snapshot, but it must not be used as the final freshness
-gate after code, migration, AGENTS, or documentation changes.
-When only generated coverage counts drift after an intentional semantic change,
-use `npm run codegraph:overlay:sync` to regenerate the overlay and rewrite the
-generated count blocks in `AGENTS.md` and this document, then still finish with
-`npm run codegraph:overlay:validate`.
+This command publishes one immutable `.codegraph/nanoflow-generations/<generation-id>/` and advances `.codegraph/nanoflow-generations/CURRENT.json` before validating the docs.
+Production reads use `scripts/lib/codegraph-overlay-current-receipt.cjs`
+through `readOverlayCurrentReceipt(projectRoot)`; `compatibility/nanoflow-overlay.json` is generation-local only.
+The stable overlay transaction runs `codegraph:overlay:docs:assert-clean`, then `codegraph:overlay:stable`, performing exactly two builds around source manifest path/size/SHA-256 snapshots M0/M1/M2.
+Full normalized equality and native graph shape/health ignore only `generatedAt` and graph `node.updatedAt`,
+preserves array order and non-diagnostic semantic counters; overlay publication is atomic separately.
+Documentation sync is numeric-token-only and
+uses a recoverable two-document transaction with fsynced same-directory temps,
+journaled pre/post images, and preimage CAS. `codegraph:overlay:docs:assert-clean`
+is read-only; `codegraph:overlay:docs:recover` accepts only recognized hashes.
+There is no cross-three-file simultaneous atomicity claim. The lower-level docs
+validator remains snapshot-only. After intentional count drift, run
+`npm run codegraph:overlay:sync`, then finish with `codegraph:overlay:validate`.
 
 Single shared tree freshness and multi-agent conflict handling is the default
 coordination model for NanoFlow agents. CodeGraph remains the first repository
@@ -591,7 +611,7 @@ npm run codegraph:adapter:doctor -- --direct-mcp-error "Transport closed" --expl
 node scripts/analyze-codegraph-mcp-log.cjs .codegraph\nanoflow-mcp-wrapper.log --text --observed-at now --direct-mcp-error "Transport closed"
 ```
 
-It reports package script wiring, `.codegraph/nanoflow-overlay.json` freshness,
+It reports package script wiring, authenticated CURRENT/immutable-generation freshness,
 graph size, and current `agent:file-lease` state. `--explain` renders the same
 checks as a human-readable summary; `--strict` also checks CI workflow wiring,
 quick-gate wiring, infra-test coverage, gate-owned wrapper logs, and strict log
@@ -600,15 +620,44 @@ latest wrapper and latest context-pack-producing wrapper startup script hashes
 against the current on-disk `scripts/codegraph-nanoflow-mcp-stdio.cjs`, and
 reports `host-mcp:current-wrapper` / `host-mcp:current-context-wrapper`. If the
 live process list is available and contains CodeGraph wrapper processes, doctor
-uses those wrapper pids to filter shared-log `wrapper.start` and
-`nanoflow.context.response` evidence before selecting current wrapper records.
+uses each wrapper's process identity, not PID alone, to filter shared-log
+`wrapper.start` and `nanoflow.context.response` evidence before selecting
+current wrapper records. On Windows the identity includes
+`Win32_Process.CreationDate`; on POSIX it is derived from `ps etimes`. A log
+event with the same PID but a timestamp earlier than the current process start,
+allowing a 5000ms clock-skew window, is historical PID-reuse evidence and must
+not revive an old direct watcher, target mismatch, or auto-sync-disabled run.
 The `hostMcp.liveWrapperLogFilter` object records whether that filter was
-applied, which pids anchored it, and how many fixture/stale wrapper log entries
-were ignored. If no live wrapper process evidence is available, doctor falls
+applied, `liveWrapperPids`, `liveWrapperProcesses[].startedAt`,
+`processStartClockSkewMs`, total ignored entries, and the separate
+`ignoredPidReuseWrapperStarts` / `ignoredPidReuseContextResponses` counts. If
+no process start time is available, doctor conservatively retains PID-only
+matching; if no live wrapper process evidence is available, doctor falls
 back to historical log order so offline log inspection still works. If the
 latest host context wrapper is stale, treat host `Transport closed` as a
 session/config refresh problem until a fresh wrapper smoke or adapter fallback
 proves the current disk script is failing.
+Live process collection also records `parentName` and `parentCommandLine`.
+Wrappers whose parent is explicitly a Codex process remain host candidates;
+wrappers whose parent is explicitly a non-Codex Node, Vitest, PowerShell, or
+smoke process are retained under `hostMcp.liveProcesses.auxiliaryProcesses`
+with `classificationReason=wrapper-parent-is-not-codex-host` and excluded from
+host target/command mismatch checks and live-log PID filtering. Missing parent
+evidence is `unknown` and remains a host candidate, so the diagnostic does not
+hide a real second Codex instance merely because parent inspection failed.
+Context evidence has a second supersession boundary for host configuration.
+If a context-producing wrapper has a target/env mismatch, its last
+`nanoflow.context.response` is older than a later
+`currentConfiguredWrapper` start, and that later wrapper matches disk plus the
+active Codex target/env, doctor sets
+`currentContextWrapperConfigSupersededByFreshWrapper=true`, records
+`currentContextWrapperSupersededReason=config`, preserves the old comparison in
+`currentContextWrapperRawEnv` / `currentContextWrapperRawTarget`, and makes the
+effective context env/target checks unknown rather than failed. If the
+misconfigured wrapper emits another context response after the configured
+wrapper start, it is still active evidence and strict doctor must fail; a new
+wrapper start in a different task does not prove that every old Codex MCP
+transport reconnected.
 If the agent already observed a direct MCP tool-layer error such as
 `Transport closed`, pass that exact error to doctor with
 `--direct-mcp-error`. Doctor must fail `host-mcp:observed-direct-mcp-error`,
@@ -694,23 +743,19 @@ adapter is healthy end to end:
 npm run codegraph:adapter:gate
 ```
 
-That gate composes the actual full runner steps: `npm run
-codegraph:adapter:preflight` for shared-tree freshness, `npm run
-codegraph:overlay:validate` for fresh overlay generation plus
-graph/documentation shape checks, `npm run codegraph:adapter:infra:test` for
-the gate runner, doctor, preflight, file-lease, MCP smoke, and documentation
-validator self-tests, `npm run codegraph:adapter:context` for adapter-first
-fallback verification, `codegraph:adapter:context:packaged-artifacts` for the
-focused minified-bundle/source-map/lockfile context-pack regression, `npm run
-codegraph:overlay:test` for the Vitest
-extraction/query/native JSON/native Markdown contract suite, `npm run
-codegraph:mcp:smoke` for wrapper process continuity,
-`codegraph:mcp:stale-smoke` for stale wrapper continuation, and `npm run
-codegraph:mcp:log:guard` for current wrapper diagnostics and context-pack
-source-ordering regressions. `npm run codegraph:overlay:baseline:manifest` and
-`npm run codegraph:adapter:quick-gate` remain related auxiliary gates, but they
-are not separate full-gate steps unless `scripts/run-codegraph-adapter-gate.cjs`
-adds them to the printed plan. The fresh smoke and guard steps are
+That gate owns the formal direct order: docs `assert-clean` once with a 30-second
+bound, stable generation once with a 20-minute bound (internally exactly two
+builds), then the validator once with a 10-minute bound. It does not nest package
+aliases or double-generate. The remaining plan runs adapter preflight and doctor,
+adapter infrastructure tests, tooling dependency closure, adapter context and
+focused source-quality checks, `codegraph:overlay:test`, `codegraph:mcp:smoke` / `codegraph:mcp:stale-smoke`,
+and the strict log guard. `codegraph:adapter:context:packaged-artifacts` retains
+the minified-bundle/source-map/lockfile regression. Printed invocation counts and
+the formal plan digest are byte-semantic test contracts. The generator, raw docs
+validator, query/MCP refresh paths, and gate therefore share direct fail-closed
+transaction checks instead of relying only on package aliases. The auxiliary
+`codegraph:overlay:baseline:manifest` and quick gate are not extra full-gate
+steps. The fresh smoke and guard steps are
 wired through the gate-owned `codegraph-adapter-gate-mcp-wrapper.log`; stale
 continuation uses the separate `codegraph-adapter-gate-stale-mcp-wrapper.log`
 so strict current-wrapper health is not polluted by the intentional stale
@@ -730,6 +775,11 @@ per-step timeout via
 `NANOFLOW_CODEGRAPH_GATE_STEP_TIMEOUT_MS`, reports a bounded captured output
 tail for noisy direct commands, and cleans up matching CodeGraph descendant
 processes so a hung adapter step cannot leave the gate indefinitely stuck.
+An explicit positive `timeoutMs` on a printed-plan command overrides that
+global default for that command only. The full `codegraph:overlay:test` parity
+step uses `900000ms` because the 421-test native/overlay suite can exceed the
+generic ten-minute budget under concurrent repository load; all other steps
+retain the normal default unless their plan entry explicitly says otherwise.
 `codegraph:adapter:doctor` also checks `host-mcp:log-parse`; malformed wrapper
 log lines are reported through `hostMcp.logMalformedLines` and
 `hostMcp.latestMalformedLogLine` instead of being silently discarded, because a
@@ -741,10 +791,10 @@ line can hide the real root cause. The MCP log analyzer also exposes
 `previousEvent`, and `nextEvent` so a half-written JSON line can be traced to
 the surrounding wrapper run without guessing.
 
-The generated file is local-only:
+The immutable generation tree and selector are local-only:
 
 ```text
-.codegraph/nanoflow-overlay.json
+.codegraph/nanoflow-generations/<generation-id>/
 ```
 
 It is ignored by git with the rest of `.codegraph/`.
@@ -759,7 +809,7 @@ This MCP tool asks CodeGraph for the base `codegraph_explore` result, queries th
 NanoFlow overlay, and returns one native CodeGraph-style Markdown response:
 
 - The original `codegraph_explore` sections when CodeGraph returns them. The
-  pinned `@colbymchenry/codegraph@1.2.0` base explore renderer uses
+  pinned `@colbymchenry/codegraph@1.5.0` base explore renderer uses
   `**Exploration: ...**`, `**Relationships**`, and `**Source Code**`; the
   wrapper still recognizes legacy `## Exploration` / `### Source Code` output
   from older fixtures and stale hosts.
@@ -1046,6 +1096,17 @@ npm run codegraph:overlay:docs:validate
 npm run codegraph:overlay:query -- --query RetryQueue --native-json
 npm run codegraph:overlay:query -- --query RetryQueue --native-markdown
 ```
+
+With `--skip-refresh` (including implicit context JSON and the environment
+equivalent), `isOverlayStale()` remains the sole freshness authority. A stale
+overlay fails before query/formatting; a fresh result is serialized, checked
+once more, and written to stdout once. At most two freshness checks run. Stale
+paths emit no stdout, write the exact stderr line `overlay-stale-skip-refresh`,
+do not invoke the generator, and do not mutate overlay bytes or metadata. Fresh
+skip and non-skip projections remain byte-compatible. An external writer can
+still change source after the final synchronous check and before or while stdout
+is written; closing that residual TOCTOU requires locking or version coordination
+outside this adapter boundary.
 
 When using the MCP wrapper, the same query is available as the MCP tool
 `nanoflow_overlay_query`. The wrapper adds both `nanoflow_context_pack` and
@@ -1413,9 +1474,21 @@ relationship counts below.
   edges, initializer-reference edges, and TSX JSX component render edges use
   only native CodeGraph edge kinds; the specific reason is stored in
   `metadata.relation`.
-- 82 Angular components, 1 pipe, and 251 Angular injectables.
-- 426 Angular DI dependency references (`inject()` plus constructor DI).
-- 115 dynamic import entries, 114 dynamic import graph edges, and 26 Angular route
+- Angular declaration and dependency-injection graph summary: `angularComponents=88`,
+  `angularDirectives=3`, `angularPipes=1`, `angularInjectables=273`,
+  `angularInjectorFiles=605`, `angularInjectorDependencyReferences=1943`, and
+  `angularApplicationProviders=1`.
+- Angular imports and reactive API graph summary: `standaloneImportEdges=172`,
+  `angularInputEdges=193`, `angularOutputEdges=220`, `angularModelEdges=0`,
+  `angularQueryEdges=22`, and `angularSignalEdges=490`. The real tree currently
+  has no projected Angular model relation; fixture/spec coverage preserves that
+  supported zero-count contract.
+- Context7 retrieval and source-map graph summary: `context7Documents=72`,
+  `context7Categories=17`, `context7CategoryDocEdges=72`,
+  `context7RetrievalRoutes=14`, `context7RetrievalPrimaryEdges=14`,
+  `context7RetrievalSecondaryEdges=40`, `context7SourceMapRoutes=16`,
+  `context7SourceMapDocEdges=21`, and `context7SourceMapSourceEdges=37`.
+- 120 dynamic import entries, 117 dynamic import graph edges, and 28 Angular route
   anchors. The current real tree has 3 `angular-route-guard` edges
   (`canActivate` and `canDeactivate`) and 0 `angular-route-resolver` edges;
   resolver parsing is covered by fixtures and excludes ordinary object
@@ -1425,31 +1498,34 @@ relationship counts below.
   queries; the current real tree has 0 `angular-route-provider` edges.
 - Route, template binding, template declaration usage, signal, input/output/model, provider/import,
   host-directive, host attribute, host binding/listener, Edge Function env, migration table, and migration policy edges are included
-  when present. Current Angular template extraction records 3,238 template bindings: 1,324 property, 1,047 event, 317 interpolation, 23 model, 521 control-flow, and 6 structural directive bindings, with 0 template-local
+  when present. Current Angular template extraction records 3,312 template bindings: 1,368 property, 1,071 event, 319 interpolation, 23 model, 525 control-flow, and 6 structural directive bindings, with 0 template-local
   alias/contextual-variable bindings, 0 pipe-name-as-binding entries, and 0
-  `@defer on` trigger-word bindings. The template declaration usage layer adds 70 `template-component` edges, 3 `template-directive` edges in the current
+  `@defer on` trigger-word bindings. The template declaration usage layer adds 75 `template-component` edges, 3 `template-directive` edges in the current
   real tree (the workspace shell slot `@Directive` declarations `app-workspace-overlays`, `app-workspace-sidebar`, and `app-workspace-shell-core` used as elements in `src/workspace-shell.component.html`), and 6 `template-pipe` edges; fixtures cover directive selector lists, `:not(...)` exclusions,
   quoted attribute values containing `.` or `,`, Angular `bind-` attribute
   prefixes, inline-template source line offsets, directive selector parsing, and
   relation query output.
   `hostDirectives` are parsed from class entries and object entries with
-  `inputs` / `outputs` alias metadata; the current real tree has 0
-  host-directive edges because it does not use this Angular metadata yet.
+  `inputs` / `outputs` alias metadata; the current real tree has 0 host-directive edges because it does not use this Angular metadata yet.
   `host` metadata object entries are parsed into `host-attribute`,
   `host-binding`, and `host-listener` relationships with the static value or
-  expression preserved in edge metadata. The current real tree has 2
-  host-attribute edges, 5 host-binding edges, and 24 host-listener edges.
+  expression preserved in edge metadata. The current real tree has 6 host-attribute edges, 5 host-binding edges, and 24 host-listener edges.
 - 9 Supabase Edge Functions with 37 env-var references after following relative
-  helper imports under `supabase/functions`, 20 followed source/helper files
-  counted per Edge Function (`14` unique files), 12 recorded source import
-  relations, 12 native `edge-function-source` import edges, 9 generated
+  helper imports under `supabase/functions`, 24 followed source/helper files
+  counted per Edge Function (`14` unique files), 16 recorded source import
+  relations, 16 native `edge-function-source` import edges, 9 generated
   `/functions/v1/<name>` route nodes/edges, 31 explicit `req.method` method
   and CORS allowed-method references currently found in the real tree
   (`method-equality=7`, `method-inequality-guard=8`,
   `cors-allowed-methods=16`; covering `OPTIONS` and `POST`), 10
-  implementation-side `edge-function-invoke` edges, and 18
+  implementation-side `edge-function-invoke` edges, and 42
   native test-reference edges from Edge Function entry nodes to 18 spec/contract
   file references.
+  `env-var` nodes/edges are stable project-semantic counters and preserve
+  `metadata.envVar`. Edge Function and migration `risk-tag` nodes/edges are also
+  fail-closed coverage counters; their metadata preserves `riskTag` and
+  `riskSource=edge-function|migration` so a nonzero prose count cannot hide a
+  missing semantic graph relation.
 - Supabase Realtime implementation extraction adds 2 native
   `supabase-realtime-channel` nodes/edges and 1 native
   `supabase-realtime-postgres-change` node/edge in the current real tree. The
@@ -1459,9 +1535,10 @@ relationship counts below.
   The Realtime lifecycle layer adds 3 native
   `supabase-realtime-remove-channel` nodes/edges for concrete cleanup paths in
   `RealtimePollingService` and `BlackBoxSyncQueueRealtimeLayer`; the current
-  real tree has 2 `supabase-realtime-unsubscribe` and 0
+  real tree has 2 `supabase-realtime-unsubscribe` and 5
   `supabase-realtime-remove-all-channels` edges.
-  Realtime graph summary: 2 supabase-realtime-channel edges, 1 supabase-realtime-postgres-change edges, 6 supabase-realtime-status edges, 3 supabase-realtime-remove-channel edges, 2 supabase-realtime-unsubscribe edges, and 0 supabase-realtime-remove-all-channels edges.
+  Realtime graph summary: 2 supabase-realtime-channel edges, 1 supabase-realtime-postgres-change edges, 6 supabase-realtime-status edges, 3 supabase-realtime-remove-channel edges, 2 supabase-realtime-unsubscribe edges, and 5 supabase-realtime-remove-all-channels edges.
+  Realtime node summary: 2 supabase-realtime-channel nodes, 1 supabase-realtime-postgres-change nodes, 6 supabase-realtime-status nodes, 3 supabase-realtime-remove-channel nodes, 2 supabase-realtime-unsubscribe nodes, and 5 supabase-realtime-remove-all-channels nodes.
   Template-derived channel names and `postgres_changes` filters are preserved in
   readable `${...}` form in default JSON metadata, and strict `nativeJson`
   codeBlocks still prioritize the owner method instead of the synthetic
@@ -1483,23 +1560,23 @@ relationship counts below.
   migration-constraint-validation edges, `280` privilege-grant edges, `378` privilege-revoke edges, `472`
   privilege-object edges, `650` privilege-role edges, `65` migration test
   edges, `0` migration variable-sourced edges). The
-  structured `policyDetails` array currently contains 64 parsed policy detail
-  records, `functionDetails` contains 121 parsed SQL function definitions,
+  structured `policyDetails` array currently contains 109 parsed policy detail
+  records, `functionDetails` contains 151 parsed SQL function definitions,
   `triggerDetails` contains 40 parsed SQL trigger definitions, and
-  `indexDetails` contains 64 parsed SQL index definitions, and
-  `constraintDetails` contains 59 parsed SQL constraints.
-  `constraintValidationDetails` contains 6 parsed SQL constraint validation
+  `indexDetails` contains 87 parsed SQL index definitions, and
+  `constraintDetails` contains 63 parsed SQL constraints.
+  `constraintValidationDetails` contains 8 parsed SQL constraint validation
   statements and reuses the corresponding constraint nodes instead of creating
   validation-only graph nodes. The structured
-  `privilegeDetails` array contains 472 parsed PostgreSQL `GRANT` / `REVOKE`
+  `privilegeDetails` array contains 662 parsed PostgreSQL `GRANT` / `REVOKE`
   statements, backed by 480 privilege nodes, 472 privilege-object nodes, and
   650 privilege-role nodes.
-  Supabase structured detail summary: 18 edgeFunctionTests, 121 migrationFunctionDetails, 40 migrationTriggers, 66 migrationRlsDetails, 65 migrationTests, and 64 policyDetails.
-  The Supabase migration node summary is 121 SQL function nodes, 121 SQL function edges, 40 trigger edges, 40 trigger-function edges, 65 migration-index nodes, 65 migration-index edges, 59 migration-constraint nodes, 59 migration-constraint edges, 0 migration-constraint-validation nodes, 6 migration-constraint-validation edges, and 66 migration-rls edges.
-  The Supabase policy/privilege node summary is 118 policy nodes, 63 policy-command edges, 63 policy-type edges, 63 policy-role edges, 52 policy-using edges, 23 policy-with-check edges, 480 privilege nodes, 472 privilege-object nodes, 280 privilege-grant edges, 378 privilege-revoke edges, 472 privilege-object edges, 650 privilege-role nodes, and 650 privilege-role edges.
-  The Supabase migration test summary is 65 migration tests and 65 migration test edges.
-  The migration graph summary is 121 SQL function edges, 40 trigger-function edges, 65 migration-index edges, 59 migration-constraint edges, 6 migration-constraint-validation edges, and 66 migration-rls edges. The policy and privilege graph summary
-  is 63 policy-command edges, 63 policy-type edges, 63 policy-role edges, 52 policy-using edges, 23 policy-with-check edges, 280 privilege-grant edges, 378 privilege-revoke edges, 472 privilege-object edges, and 650 privilege-role edges.
+  Supabase structured detail summary: 42 edgeFunctionTests, 151 migrationFunctionDetails, 40 migrationTriggers, 109 migrationRlsDetails, 173 migrationTests, and 109 policyDetails.
+  The Supabase migration node summary is 151 SQL function nodes, 151 SQL function edges, 40 trigger edges, 40 trigger-function edges, 87 migration-index nodes, 87 migration-index edges, 63 migration-constraint nodes, 63 migration-constraint edges, 0 migration-constraint-validation nodes, 8 migration-constraint-validation edges, and 109 migration-rls edges.
+  The Supabase policy/privilege node summary is 179 policy nodes, 108 policy-command edges, 108 policy-type edges, 108 policy-role edges, 86 policy-using edges, 47 policy-with-check edges, 706 privilege nodes, 684 privilege-object nodes, 425 privilege-grant edges, 720 privilege-revoke edges, 684 privilege-object edges, 1055 privilege-role nodes, and 1055 privilege-role edges.
+  The Supabase migration test summary is 173 migration tests and 173 migration test edges.
+  The migration graph summary is 151 SQL function edges, 40 trigger-function edges, 87 migration-index edges, 63 migration-constraint edges, 8 migration-constraint-validation edges, and 109 migration-rls edges. The policy and privilege graph summary
+  is 108 policy-command edges, 108 policy-type edges, 108 policy-role edges, 86 policy-using edges, 47 policy-with-check edges, 425 privilege-grant edges, 720 privilege-revoke edges, 684 privilege-object edges, and 1055 privilege-role edges.
   Statement-level `ALTER PUBLICATION <name> ADD|DROP|SET TABLE` entries are
   split on top-level commas into per-table `migration-realtime-publication`
   facts that link the Realtime publication to the same tables the TypeScript
@@ -1508,17 +1585,17 @@ relationship counts below.
   facts with materialized/orReplace markers; dollar-quoted function bodies are
   never parsed as publication or view statements.
   The migration publication/view summary is 4 migration-realtime-publication edges backed by 4 publication nodes from 4 parsed publication details, and 4 migration-view edges backed by 4 view nodes from 4 parsed view details.
-- 5 AGENTS hard-rule anchors, all with body text stored on hard-rule metadata
-  for body-only terms such as `断网可写`; 14 scoped hard-rule keyword nodes and
-  14 hard-rule keyword reference edges expose high-signal constraints such as
+- 6 AGENTS hard-rule anchors, all with body text stored on hard-rule metadata
+  for body-only terms such as `断网可写`; 19 scoped hard-rule keyword nodes and
+  19 hard-rule keyword reference edges expose high-signal constraints such as
   `crypto.randomUUID()`, `@defer`, `visibility:hidden`, `StoreService`, and
-  `content`. All 14 hard-rule keyword edges carry
+  `content`. All 19 hard-rule keyword edges carry
   `keywordMapping: hard-rule-keyword` and `matchedNeedle`. The implementation
-  evidence layer adds 58 `hard-rule-implementation` native `references` edges
-  from the `crypto.randomUUID()` AGENTS keyword to 51 callable symbols that
+  evidence layer adds 76 `hard-rule-implementation` native `references` edges
+  from the `crypto.randomUUID()` AGENTS keyword to 63 callable symbols that
   contain AST-proven calls.
-  The AGENTS hard-rule node/provenance summary is 18 hard-rule keyword nodes, 18 hard-rule keyword edges, 18 hard-rule keyword mapping edges, 60 hard-rule implementation edges, and 53 hard-rule implementation targets.
-  The AGENTS hard-rule graph summary is 18 hard-rule keyword edges and 60 hard-rule implementation edges. The AGENTS sync-rule graph summary is 19 sync-rule anchors, 20 sync-body keyword edges, 5 sync-config keyword edges, and 14 config-source edges.
+  The AGENTS hard-rule node/provenance summary is 19 hard-rule keyword nodes, 19 hard-rule keyword edges, 19 hard-rule keyword mapping edges, 76 hard-rule implementation edges, and 63 hard-rule implementation targets.
+  The AGENTS hard-rule graph summary is 19 hard-rule keyword edges and 76 hard-rule implementation edges. The AGENTS sync-rule graph summary is 19 sync-rule anchors, 20 sync-body keyword edges, 5 sync-config keyword edges, and 14 config-source edges.
 - 19 AGENTS-derived sync-rule anchors, including 14 `*_CONFIG.*` baseline rows
   from the §9 key configuration table, with 25 explicit AGENTS keyword nodes and
   25 keyword reference edges for synchronization/config terms such as
@@ -1536,23 +1613,23 @@ relationship counts below.
   `SYNC_CONFIG` constant while exact `sync-config-source` queries bring back the
   corresponding property provenance for strict native codeBlocks.
   The AGENTS sync-rule node/provenance summary is 19 sync-rule anchors, 14 config-rule anchors, 19 sync-rule nodes, 25 sync-rule keyword nodes, 25 sync-rule keyword edges, 20 sync-body keyword edges, 5 sync-config keyword edges, 88 config-property nodes, 88 config-property edges, 37 config-property parent edges, 14 config-source edges, 14 config-source property edges, and 5 sync-config-source edges.
-- The Supabase select-field layer adds 240 native `supabase-select-field` property nodes, 438 `supabase-select-field` edges, 330 method/function `references` edges from `.select(...)` call sites to selected fields, 132 inline select field nodes, 134 inline select provenance edges, and 3 `sync-required-field` edges from the AGENTS `content` hard-rule keyword to tasks field nodes. The incremental-predicate layer adds 2 `supabase-incremental-predicate` nodes, 2 method/function predicate `references` edges, and 4 `sync-required-predicate` edges from AGENTS keywords to query predicates. The Storage bucket layer adds 6 `supabase-storage-bucket` nodes and 6 native `references` edges
+- The Supabase select-field layer adds 212 native `supabase-select-field` property nodes, 393 `supabase-select-field` edges, 285 method/function `references` edges from `.select(...)` call sites to selected fields, 104 inline select field nodes, 105 inline select provenance edges, and 6 `sync-required-field` edges from the AGENTS `content` hard-rule keyword to tasks field nodes. The incremental-predicate layer adds 1 `supabase-incremental-predicate` nodes, 1 method/function predicate `references` edges, and 2 `sync-required-predicate` edges from AGENTS keywords to query predicates. The Storage bucket layer adds 10 `supabase-storage-bucket` nodes and 10 native `references` edges
   for the real `attachments` bucket across client calls and `storage.objects`
   policies.
-  Select and storage node summary: 240 supabase-select-field nodes, 132 inline select field nodes, 2 supabase-incremental-predicate nodes, and 6 supabase-storage-bucket nodes.
-  Select and storage graph summary: 438 supabase-select-field edges, 330 supabase-select-field reference edges, 134 inline select provenance edges, 3 sync-required-field edges, 2 supabase-incremental-predicate edges, 4 sync-required-predicate edges, and 6 supabase-storage-bucket edges.
-- The Supabase RPC/table-write layer adds 20 `supabase-rpc` nodes and 26 native
-  `references` edges for static `rpc(...)` calls, plus 37
-  `supabase-table-write` nodes and 64 native `references` edges for static
+  Select and storage node summary: 212 supabase-select-field nodes, 104 inline select field nodes, 1 supabase-incremental-predicate nodes, and 10 supabase-storage-bucket nodes.
+  Select and storage graph summary: 393 supabase-select-field edges, 285 supabase-select-field reference edges, 105 inline select provenance edges, 6 sync-required-field edges, 1 supabase-incremental-predicate edges, 2 sync-required-predicate edges, and 10 supabase-storage-bucket edges.
+- The Supabase RPC/table-write layer adds 22 `supabase-rpc` nodes and 34 native
+  `references` edges for static `rpc(...)` calls, plus 19
+  `supabase-table-write` nodes and 35 native `references` edges for static
   `.from(...).insert/update/upsert/delete` write chains. The real tree currently
   contains table-write operations for `insert`, `update`, and `upsert`; fixture
   coverage locks `delete` parsing and query output.
-  The operation node summary is 20 Supabase RPC nodes and 26 Supabase RPC edges; 37 Supabase table-write nodes and 64 Supabase table-write edges.
-  The operation graph summary is 26 Supabase RPC edges and 64 Supabase table-write edges.
-- The Supabase Edge Function header layer adds 45 `edge-function-header`
-  native-shaped `variable` nodes and 45 native `references` edges across
+  The operation node summary is 22 Supabase RPC nodes and 34 Supabase RPC edges; 19 Supabase table-write nodes and 35 Supabase table-write edges.
+  The operation graph summary is 34 Supabase RPC edges and 35 Supabase table-write edges.
+- The Supabase Edge Function header layer adds 46 `edge-function-header`
+  native-shaped `variable` nodes and 46 native `references` edges across
   request auth, CORS, content-length, webhook-signature, and proxy-IP headers.
-- A synced diagnostic run reported 105,778 graph nodes and 200,204 graph edges in the native-shaped projection. `codegraph:overlay:sync` refreshes this
+- A synced diagnostic run reported 144,248 graph nodes and 273,138 graph edges in the native-shaped projection. `codegraph:overlay:sync` refreshes this
   top-level diagnostic summary, while the validator only requires the summary to
   be present because this document and `AGENTS.md` both participate in the graph
   and exact totals would otherwise oscillate as self-referential helper rows.
@@ -1567,15 +1644,15 @@ relationship counts below.
 - 148 CommonJS require edges, 74 CommonJS export edges, 81 `implements` edges,
   1,056 `decorates` edges, 125 `decorator-argument` edges, and 8 `overrides`
   edges; all emitted edge kinds are from CodeGraph's native edge-kind set.
-- 541 total test-reference edges; all 541 carry provenance in
-  `metadata.testMapping`. Angular contributes 60 `same-basename` edges and
-  398 `class-reference` edges. Supabase contributes 17 `path-reference` edges,
-  1 `route-reference` edge, 0 `invoke-reference` edges, and 65
+- 797 total test-reference edges; all 797 carry provenance in
+  `metadata.testMapping`. Angular contributes 71 `same-basename` edges and
+  511 `class-reference` edges. Supabase contributes 40 `path-reference` edges,
+  2 `route-reference` edge, 0 `invoke-reference` edges, and 173
   `filename-reference` edges. Default JSON `relationshipGroups` and Markdown
-  render `testMapping`; 3,618 template/path/route/filename-derived edges also render
+  render `testMapping`; 5,588 template/path/route/filename-derived edges also render
   `matchedNeedle`, while strict native JSON strips it with the rest of NanoFlow
   metadata.
-- Angular external resource graph summary: 18 template-url edges and 9 style-url edges.
+- Angular external resource graph summary: 19 template-url edges and 10 style-url edges.
 - Latest overlay audit: 0 bad nodes, 0 bad edges, 0 unresolved call placeholder
   nodes, 0 migration variable-sourced semantic edges, and 0 noisy migration
   table anchors from `IF`, `ONLY`, `SCHEMA`, `CONFLICT`, `FUNCTION`, `SET`, or
@@ -1591,7 +1668,8 @@ relationship counts below.
 
 ## MCP Startup
 
-For Codex, `C:\Users\MI\.codex\config.toml` points the `codegraph` MCP server at:
+For this repository, the active project config `D:\Code\dde\.codex\config.toml`
+points the `codegraph` MCP server at:
 
 ```text
 scripts/codegraph-nanoflow-mcp-stdio.cjs
@@ -1602,12 +1680,16 @@ starting the real CodeGraph MCP server. It can run either the pinned npm package
 or a local build. Startup background refresh is disabled by default to avoid
 competing with latency-sensitive MCP queries; set
 `NANOFLOW_CODEGRAPH_REFRESH_ON_STARTUP=1` only when you explicitly want a wrapper
-process to refresh `.codegraph/nanoflow-overlay.json` in the background.
+process to publish an immutable generation and advance the CURRENT selector in the background.
 
-Codex-side adapter tooling treats `C:\Users\MI\.codex\config.toml` as the
-authoritative MCP configuration for this workspace. `codegraph:adapter:context`,
-`codegraph:mcp:smoke`, and `codegraph:adapter:doctor` first read that Codex
-config and verify that its `codegraph` server applies to the requested `--root`.
+Codex-side adapter tooling resolves the active MCP configuration in this order:
+explicit `NANOFLOW_CODEGRAPH_CODEX_CONFIG`, repository `.codex/config.toml`,
+then user `C:\Users\MI\.codex\config.toml`. A repository config that declares
+`[mcp_servers.codegraph]` always overrides the user server. If its `--path` does
+not match the requested root, tooling reports `appliesToRoot=false` as an active
+project contract error instead of falling back to the user config.
+`codegraph:adapter:context`, `codegraph:mcp:smoke`, and
+`codegraph:adapter:doctor` verify the selected server against the requested root.
 They do not read or fall back to `.vscode/mcp.json`. If an explicit
 `NANOFLOW_CODEGRAPH_CODEX_CONFIG` path is missing, context and smoke fail fast
 with `Codex MCP config not found`; doctor reports `mcpConfig: source=codex` and
@@ -1616,23 +1698,45 @@ workspace files.
 For current Codex usage, `.vscode/mcp.json` is not the active CodeGraph MCP
 configuration and must not be edited, repaired, or diagnosed as the fix target
 for Codex MCP failures. Active wrapper, CodeGraph target, and MCP environment
-changes belong in `C:\Users\MI\.codex\config.toml`, or in an explicit temporary
-Codex config selected through `NANOFLOW_CODEGRAPH_CODEX_CONFIG`, then verified
+changes belong in the doctor-resolved active config, currently
+`D:\Code\dde\.codex\config.toml`; the user config is a fallback only when no
+project server is declared. An explicit temporary Codex config selected through
+`NANOFLOW_CODEGRAPH_CODEX_CONFIG` remains the highest-priority override. Verify
 with `codegraph:adapter:doctor`, `codegraph:mcp:smoke`, and
 `codegraph:mcp:log:guard`.
 `NANOFLOW_CODEGRAPH_CODEX_CONFIG=<path-to-config.toml>` can point those tools at
 a temporary Codex config for smoke tests or upgrade probes without touching the
 real global file.
+After `codegraph:adapter:doctor --repair-config` changes the active file, disk
+contract success is not runtime success. Until a wrapper start matching the
+repaired target, env, and current script is observed, the doctor report uses
+`pendingHostRestart=true`, `runtimeOk=false`, `ok=false`, and a nonzero exit so
+automation cannot mistake a required Codex MCP host restart for recovery.
 
 ## Upstream Version And De-Duplication Boundary
 
 The upstream CodeGraph fixed version for NanoFlow is
-`@colbymchenry/codegraph@1.2.0`. Upgrade probes must run through
+`@colbymchenry/codegraph@1.5.0`. Upgrade probes must run through
 `--codegraph-target @colbymchenry/codegraph@<new-version>` first, using
 `npm run codegraph:adapter:context` and `node scripts/smoke-codegraph-mcp-wrapper.cjs`,
-before changing the pinned target in `C:\Users\MI\.codex\config.toml`,
+before changing the pinned target in the doctor-resolved active Codex config,
 `scripts/codegraph-adapter-context.cjs`, `scripts/smoke-codegraph-mcp-wrapper.cjs`,
 tests, and this document.
+
+The upstream [`v1.5.0` release](https://github.com/colbymchenry/codegraph/releases/tag/v1.5.0)
+was promoted after the official binary reported `1.5.0`,
+an explicit-target NanoFlow context pack succeeded, and a three-round wrapper
+smoke completed with zero transport failures or overlay timeouts. Upstream
+`1.5.0` moves parsing for supported languages into the native Rust kernel while
+preserving graph parity and automatically falling back for unsupported platforms
+or individual parse failures. NanoFlow does not duplicate that kernel, watcher,
+generic ranking, or resolver work; those remain upstream responsibilities.
+
+The project adaptation itself lives in `D:\Code\dde`: its wrapper, overlay,
+queries, doctor, gate, tests, docs, and project Codex config are repository-owned.
+`D:\Code\tools\codegraph` is only an optional upstream source clone/fork used
+when changing CodeGraph itself. It is not consulted by the default package-mode
+runtime and must not contain NanoFlow's project adaptation contract.
 
 The adapter delegates generic TypeScript symbol/import/export/call/impact
 discovery to native CodeGraph. native Markdown/JSON formatter section order,
@@ -1656,15 +1760,51 @@ De-duplication hotspot audit backlog:
 
 | Hotspot | Current status | delegated upstream owner | removal trigger | verification gate |
 | --- | --- | --- | --- | --- |
-| `collectTypeScript()` | temporary allowed only to attach NanoFlow metadata.relation for Angular, Supabase, tests, and hard-rule overlay edges after native CodeGraph locates generic TypeScript/import/export/reference/call/impact shape | native CodeGraph owns generic TypeScript symbol/import/export/reference/call/impact discovery | upstream extension point or native projection hook can carry NanoFlow relation metadata without rebuilding generic TypeScript graph shape | `codegraph:overlay:docs:validate` plus `codegraph:adapter:gate` |
+| `collectTypeScript()` | temporary allowed only to attach NanoFlow metadata.relation for Angular, Supabase, tests, and hard-rule overlay edges after native CodeGraph locates generic TypeScript/import/export/reference/call/impact shape; standard-library declaration readers are covered children used only to suppress unresolved platform noise | native CodeGraph owns generic TypeScript symbol/import/export/reference/call/impact discovery | upstream extension point or native projection hook can carry NanoFlow relation metadata without rebuilding generic TypeScript graph shape | `codegraph:overlay:docs:validate` plus `codegraph:adapter:gate` |
 | `buildNativeGraph()` | temporary allowed only to preserve native-shaped endpoint fields while projecting NanoFlow-specific relations into strict native JSON/Markdown | native CodeGraph owns node schema, edge schema, indexing, auto-sync, search ranking, callers/callees, and impact traversal | upstream formatter/projection hook accepts NanoFlow relation metadata and strict source-block policy without a parallel native graph projection | `codegraph:overlay:docs:validate` plus `codegraph:adapter:gate` |
 | `buildImportAliasIndex()`, `buildExportTargetIndex()`, `resolveReferenceNodeId()` | temporary allowed only to close NanoFlow project-semantic relation endpoints across same-file aliases, imports, re-exports, default exports, namespace imports, and CommonJS require aliases | native CodeGraph owns generic import/export/reference resolution | upstream resolved endpoint API or native projection hook exposes import/export alias closure that NanoFlow can annotate with `metadata.relation` | `codegraph:overlay:docs:validate` plus `codegraph:adapter:gate` |
 | `addTypeScriptCallableEdges()` | temporary allowed only while Supabase select/rpc/storage/table-write/incremental predicate edges share traversal with ordinary TypeScript callable discovery | native CodeGraph owns generic call/return/new/reference graph behavior | Supabase-specific relation emission is split from generic `calls`, `returns`, and `instantiates`, or native call graph endpoints can be annotated without local traversal | `codegraph:overlay:docs:validate` plus `codegraph:adapter:gate` |
 | `collectAndroid()`, `readAndroidKotlinFileSymbols()`, `readAndroidKotlinMethodCalls()`, `resolveAndroidKotlinCallTarget()`, `resolveAndroidKotlinTypeTarget()`, `addAndroidKotlinTypeReferenceEdges()`, `addAndroidKotlinOverrideEdges()`, `addAndroidKotlinAnnotationEdges()` | Android/Kotlin duplicate hotspots; temporary allowed only to attach NanoFlow Android Manifest/widget/resource/project semantics and `metadata.relation` to native-shaped Kotlin/XML endpoints | native CodeGraph owns generic Kotlin symbol/import/call/type/decorator/override discovery, auto-sync, indexing, generic search ranking, callers/callees, and impact traversal | upstream extension point or native projection hook can carry NanoFlow Android relation metadata and source-evidence policy without rebuilding generic Kotlin/XML graph shape | `codegraph:overlay:docs:validate` plus `codegraph:adapter:gate` |
 | `queryOverlay()`, `scoreCandidate()`, `selectGraphResults()` | query/ranking duplicate hotspots; temporary allowed for exact NanoFlow `metadata.relation` filtering, project-semantic boosts, and overlay-only issue/AGENTS/Context7 routing, not for generic search ranking | native CodeGraph owns generic query parsing, candidate ranking, callers/callees, and impact result selection | native search/ranking exposes project relation filters or post-filter hooks so NanoFlow keeps only relation-exact filtering and semantic boosts | `codegraph:overlay:docs:validate` plus `codegraph:adapter:gate` |
+| `toNativeJsonFormatterResponse()` | strict-native JSON formatter duplicate hotspot; temporary allowed to preserve upstream field names, falsy/null values, source columns, closed edge endpoints, and relation source evidence while stripping NanoFlow extension fields | native CodeGraph owns the native JSON schema and formatter contract | native formatter accepts NanoFlow relation metadata plus source-evidence policy and emits strict native JSON directly | `codegraph:overlay:docs:validate` plus `codegraph:adapter:gate` |
 | `formatStrictNativeMarkdown()` | strict-native formatter duplicate hotspot; temporary allowed to render NanoFlow relation source evidence in native Markdown section order while stripping extension fields, and must not use `formatNativeMarkdown()` or `formatNanoFlowAugmentedMarkdown()` as its source symbol | native CodeGraph owns native Markdown section order, source block framing, related symbols, and relationship display | native formatter accepts NanoFlow relation metadata plus source-evidence policy and emits strict native Markdown directly | `codegraph:overlay:docs:validate` plus `codegraph:adapter:gate` |
 | `formatNativeMarkdown()` | augmented/default Markdown projection hotspot; temporary allowed to delegate to `formatNanoFlowAugmentedMarkdown()` for NanoFlow coverage and relation evidence, but not allowed to masquerade as the strict-native formatter | native CodeGraph owns generic native Markdown formatter sections; NanoFlow owns only augmented relation evidence and coverage projection | native formatter accepts NanoFlow relation metadata plus source-evidence policy, leaving only the augmented NanoFlow-specific projection in the adapter | `codegraph:overlay:docs:validate` plus `codegraph:adapter:gate` |
-| `contextPackSourceRankingQueryFor()`, `sanitizeContextPackBaseMarkdownSections()` | source-ordering duplicate hotspot entries; temporary allowed for output-quality policy, low-value source suppression, sourceSelection diagnostics, and base-section pollution filtering | native CodeGraph owns generic search ranking and base exploration source ordering | native context pack exposes source/relationship ordering hooks or stops returning avoidable build/cache/generated/tooling pollution for NanoFlow queries | `codegraph:overlay:docs:validate` plus `codegraph:adapter:gate` |
+| `contextPackSourceRankingQueryFor()`, `sanitizeContextPackBaseMarkdownSections()` | source-ordering duplicate hotspot entries; temporary allowed for output-quality policy, low-value source suppression, sourceSelection diagnostics, base-section pollution filtering, and localized query-token aliases that drive only those NanoFlow policies | native CodeGraph owns generic query parsing, search ranking, and base exploration source ordering | native context pack exposes source/relationship ordering hooks or stops returning avoidable build/cache/generated/tooling pollution for NanoFlow queries | `codegraph:overlay:docs:validate` plus `codegraph:adapter:gate` |
+
+### Android import default soak and rollback
+
+The Android import resolver precedence is explicit
+`--android-import-source <local|native>`, then
+`NANOFLOW_CODEGRAPH_ANDROID_IMPORT_SOURCE_DEFAULT`, then the built-in `local`
+default. B2a does not flip that built-in default and does not remove the local
+parser. The query command accepts the same explicit flag and forwards it only
+when a missing, incomplete, or stale overlay must be regenerated; without the
+flag, the generator inherits the rollout environment. Selecting `native` is
+fail-closed: native database, freshness, identity, or completeness failures are
+returned to the caller and never caught to retry with `local`.
+
+Use the environment variable for a reversible native soak. An immediate
+rollback is either an explicit `--android-import-source local` on generation or
+query regeneration, or restoring/unsetting the environment value so the
+built-in `local` default applies. Explicit CLI selection must override even a
+conflicting rollout environment.
+
+A future default flip remains blocked until all of the following hold for the
+three-import fixture and a representative workspace sample:
+
+- normalized overlay bytes match for built-in local, explicit local,
+  environment-selected native, and explicit native runs;
+- missing/stale query regeneration observes environment-selected native and an
+  explicit local rollback succeeds without changing query output;
+- native failures remain fail-closed and the local rollback remains available;
+- across at least five warm `--stdout` runs per source, native median elapsed
+  time is no more than `1.25x` local median or one second slower, whichever
+  permits the larger bound.
+
+Stop the soak on any output mismatch, missing/stale native database failure,
+rollback failure, or performance-bound breach. Parser deletion and the built-in
+default flip are separate later atoms and must not be combined with this
+resolver/soak contract.
 
 The structured manifest records query/formatter and context-pack duplicate
 boundaries with `duplicateBoundaryRole`, `outputSurface`, and
@@ -1682,13 +1822,19 @@ the helper under the narrow NanoFlow-owned hotspot with its removal trigger and
 verification gates.
 
 The active Codex config runs the repository wrapper directly and keeps the
-CodeGraph target pinned in `C:\Users\MI\.codex\config.toml`; it does not use
-`.vscode/mcp.json` as a Codex repair source. The current config sets
+CodeGraph target pinned in `D:\Code\dde\.codex\config.toml`, which overrides
+the user-level `C:\Users\MI\.codex\config.toml` for this repository; it does
+not use `.vscode/mcp.json` as a Codex repair source. The current config sets
 `CODEGRAPH_NO_DAEMON=0`, `CODEGRAPH_NO_WATCH=0`,
-`CODEGRAPH_DAEMON_IDLE_TIMEOUT_MS=0`,
-`CODEGRAPH_DAEMON_MAX_IDLE_MS=0`,
+`CODEGRAPH_DAEMON_IDLE_TIMEOUT_MS=300000`,
+`CODEGRAPH_DAEMON_MAX_IDLE_MS=1800000`,
 `NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS=30000`, and
-`NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE=0`. The wrapper supervises the
+`NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE=0`. The live Codex path respects
+that upstream shared-daemon contract: all MCP wrappers proxy to one CodeGraph
+daemon, one `MCPEngine`, one SQLite writer, and one watcher. The short-lived
+`codegraph:adapter:context` fallback intentionally overrides this with
+`CODEGRAPH_NO_DAEMON=1` and `CODEGRAPH_NO_WATCH=1`, so it cannot add another
+long-lived watcher while repairing a broken host session. The wrapper supervises the
 base CodeGraph child process: if that child exits while the host stdin is still
 open, the wrapper records `child.restart.request` and `child.restart`, starts a
 fresh child, replays `initialize` / `notifications/initialized` to it, and
@@ -1700,6 +1846,95 @@ class/name. This is the first root-cause split for future `Transport closed`
 reports: `windows-native-crash`, `nonzero-exit`, `signal`, and `zero-exit`
 should be handled differently from overlay query timeouts or stale wrapper
 state.
+If a stale Codex host still injects `CODEGRAPH_DAEMON_IDLE_TIMEOUT_MS=0` or
+`CODEGRAPH_DAEMON_MAX_IDLE_MS=0`, the wrapper now normalizes those non-positive
+values to `300000` and `1800000` before spawning the child. It records
+`wrapper.env.normalized` with received/effective values, so the repair is both
+self-protecting and auditable instead of silently forwarding a zero-lifetime
+daemon contract.
+
+The shared JSONL diagnostic log is bounded by
+`NANOFLOW_CODEGRAPH_MCP_LOG_MAX_BYTES`, defaulting to 16 MiB. The wrapper keeps
+one bounded `.1` archive, serializes writes through a short cross-process lock,
+and annotates the first post-rotation event with `diagnosticLogRotation`.
+Oversized single events are compacted to identity/failure metadata rather than
+allowing one response to break the log budget.
+Long request queries are bounded before JSONL serialization: `query` preserves
+a 512-character head/tail preview, while `queryChars`, `queryBytes`, and
+`queryTruncated` preserve size and truncation evidence. Request history and
+`runtime.activeRequests` use the same projection, so a burst of large requests
+cannot multiply full query bodies across synchronous diagnostics and delay the
+`child.stdin.backpressure` event that should pause client input.
+Every `wrapper.start` and `child.spawn` entry records `runtimeTopology.mode`,
+`runtimeTopology.watcherOwnership`, `runtimeTopology.fileLockContentionRisk`,
+`runtimeTopology.daemonDisabled`, `runtimeTopology.watchDisabled`, and the
+effective daemon idle values. Healthy live Codex evidence is
+`shared-daemon-proxy` / `shared-daemon-single-watcher` / `single-writer`.
+`analyze-codegraph-mcp-log.cjs` preserves these fields in `currentWrapper` and
+`activeWrappers`, including `activeWrappers.runtimeTopologyModes`,
+`activeWrappers.directWatcherContentionRisk`, and
+`activeWrappers.sharedDaemonProxyCount`. `codegraph:adapter:doctor` reports
+`currentWrapperRuntimeTopology`, `currentContextWrapperRuntimeTopology`, and
+`activeDirectWatcherRuns`; `host-mcp:active-direct-watchers` fails before lock
+contention reaches CodeGraph's permanent auto-sync degradation threshold.
+Startup topology is not sufficient evidence after a daemon loss. In upstream
+CodeGraph 1.5.0, `src/mcp/proxy.ts` sets `daemonStatus='failed'` when the shared
+socket closes, permanently routes later requests through `handleLocally()`, and
+creates an in-process `MCPEngine`; initialization of that engine may then print
+`File watcher active`. With many long-lived Codex wrappers, one daemon loss can
+therefore turn one shared watcher into many fallback watchers even though every
+`wrapper.start` still says `shared-daemon-proxy`.
+
+The repository wrapper now treats those upstream stderr messages as runtime
+topology transitions. `Shared daemon connection lost` records
+`child.runtime-topology.transition` to `in-process-fallback`; a coalesced or
+later `File watcher active` records `in-process-fallback-watcher` with
+`per-wrapper-fallback-watcher` and `multi-wrapper-writers`. Recovery is enabled
+by default. It waits for an idle request boundary, logs
+`child.shared-daemon-fallback.recovery.request` and any `recovery.deferred`
+events, then logs `recovery.restart`, replaces only the base child, replays the
+MCP session, and records `child.restart(reason=shared-daemon-fallback)` plus
+`child.runtime-topology.reset`. Defaults are a 250 ms initial delay, 250 ms
+defer interval, and 30000 ms maximum wait; diagnostic runs may override them
+with `NANOFLOW_CODEGRAPH_SHARED_DAEMON_FALLBACK_RECOVERY`,
+`NANOFLOW_CODEGRAPH_SHARED_DAEMON_FALLBACK_RECOVERY_DELAY_MS`,
+`NANOFLOW_CODEGRAPH_SHARED_DAEMON_FALLBACK_RECOVERY_DEFER_MS`, and
+`NANOFLOW_CODEGRAPH_SHARED_DAEMON_FALLBACK_RECOVERY_MAX_WAIT_MS`.
+
+The analyzer applies the latest runtime transition to each active run and
+reports `activeWrappers.inProcessFallbackCount`,
+`activeWrappers.inProcessFallbackWatcherCount`, the affected run lists, and a
+`sharedDaemonFallback` event summary. Doctor reports
+`activeSharedDaemonFallbackRuns` and `activeInProcessFallbackWatcherRuns`; its
+new topology checks fail before a writer-lock retry budget is exhausted. When
+the wrapper intentionally kills the replaced child, that old process logs
+`child.exit(currentChild=false)`. The analyzer excludes this stale cleanup exit
+from critical transport failures so active requests on the new child cannot be
+misattributed to the old PID.
+Doctor exposes a safe stale-wrapper cleanup entry for old Codex-host processes
+that remain alive after their task is idle:
+
+```powershell
+node scripts/codegraph-adapter-doctor.cjs --cleanup-stale-wrappers
+node scripts/codegraph-adapter-doctor.cjs --cleanup-stale-wrappers --apply-cleanup --cleanup-run-id <runId>
+```
+
+The first command is always a dry run. A candidate must have concrete stale
+script/env/target or auto-sync-disabled evidence, no active request/queue work,
+and exceed the idle guard. Apply mode re-reads the operating-system process
+list, revalidates PID start time, wrapper command line, and CodeGraph target,
+then terminates only that wrapper process tree; it never targets the Codex
+parent. A complete app-server restart remains the correct way to replace all
+healthy-but-old task wrappers at once.
+Auto-sync warning extraction from MCP response content is banner-anchored: the
+first non-empty response line must be the CodeGraph auto-sync-disabled/index-
+frozen banner, with optional Markdown quote, emphasis, or warning-marker
+prefixes. Matching text inside returned source code, test fixtures, or later
+diagnostic tails is not runtime failure evidence. `child.stderr` remains the
+broader diagnostic channel because upstream warnings can be mixed with process
+prefixes there. The analyzer and doctor revalidate stored `responseWarnings`
+against this rule so historical false-positive log entries do not keep a live
+host marked index-frozen after the wrapper is repaired.
 If a host reports `Transport closed` immediately after a wrapper script change,
 first distinguish stale-wrapper host/session state from a real crash with
 `codegraph:adapter:doctor`, `codegraph:mcp:log:guard`, or fresh
@@ -1731,12 +1966,18 @@ combined NanoFlow overlay section timed out. In that partial case the adapter
 CLI exits successfully because repository context is available, while
 `mcpIsError=true`, `partial=true`, and `failureClass=overlay-timeout` preserve
 the overlay failure evidence for follow-up `codegraph:overlay:query --skip-refresh`.
+When skip-refresh detects stale source, direct and context-pack MCP responses
+return `isError=true`, exact marker content, and
+`_meta.nanoflowFailureClass=overlay-stale-skip-refresh`. The adapter accepts
+that exact declared class, preserves it in direct and context diagnostics, and
+forces `summary.ok=false` if either path observes it. This does not change
+malformed, oversized, timeout, transport, or partial-native recovery precedence.
 For screenshot-level truncation or very wide queries, first
 retry `npm run codegraph:adapter:context -- --query "<same search>" --max-files 1 --json`;
 only then fall through to `codegraph:overlay:query --skip-refresh` or native
 CodeGraph CLI location plus targeted disk reads.
 Only when those NanoFlow adapter fallbacks also fail should the agent use
-`npx -y @colbymchenry/codegraph@1.2.0 ...` as a final native CodeGraph CLI
+`npx -y @colbymchenry/codegraph@1.5.0 ...` as a final native CodeGraph CLI
 degradation, and that native result is only a locator until the overlay semantic
 layer is restored or explicitly reported unavailable.
 
@@ -1748,8 +1989,10 @@ can happen before the wrapper receives any request, so
 fresh-wrapper evidence. State the unavailability once, then run
 `npm run codegraph:adapter:context -- --query "<same search>" --json`. After
 adapter fallback succeeds, run `npm run codegraph:adapter:doctor -- --explain`.
-For Codex sessions, the doctor reports `mcpConfig: source=codex` and reads
-`C:\Users\MI\.codex\config.toml` under `mcpConfig`, including
+For Codex sessions, the doctor reports `mcpConfig: source=codex` and resolves
+the active config in precedence order: explicit
+`NANOFLOW_CODEGRAPH_CODEX_CONFIG`, `D:\Code\dde\.codex\config.toml`, then
+`C:\Users\MI\.codex\config.toml`. Its `mcpConfig` report includes
 `codegraphServerConfigured`, `wrapperScriptExists`, `codegraphTarget`, and
 `runtimeToolDiscoveryVisible`. `runtimeToolDiscoveryVisible` is intentionally
 `unknown-host-state` because the doctor cannot inspect Codex's current tool
@@ -1763,7 +2006,7 @@ Default package mode:
 
 ```json
 "${workspaceFolder}/scripts/codegraph-nanoflow-mcp-stdio.cjs",
-"@colbymchenry/codegraph@1.2.0",
+"@colbymchenry/codegraph@1.5.0",
 "serve",
 "--mcp",
 "--path",
@@ -1782,15 +2025,27 @@ Local source mode after building `D:\Code\tools\codegraph`:
 ```
 
 Use local source mode only when actively developing CodeGraph itself. Keep the
-pinned package mode for normal NanoFlow work.
+pinned package mode for normal NanoFlow work. The local source tree belongs in
+`D:\Code\tools\codegraph`; the NanoFlow-specific adaptation remains in
+`D:\Code\dde` in both modes.
+
+On this workstation, both Codex config scopes set
+`npm_config_cache=D:/Code/tools/codegraph-npm-cache`. The first interrupted
+`1.5.0` download left the default user `_npx` install without `package.json`, so
+letting a restarted host use that cache would fail before the wrapper reached
+CodeGraph. The controlled cache contains a verified `1.5.0` package install and
+is a runtime artifact only: it is not the adaptation layer and it is not the
+optional upstream source clone.
 
 In the default configuration, MCP calls still run the pinned
-`@colbymchenry/codegraph@1.2.0` package through the NanoFlow wrapper. The wrapper
+`@colbymchenry/codegraph@1.5.0` package through the NanoFlow wrapper. The wrapper
 queries the overlay, injects `nanoflow_context_pack` and
 `nanoflow_overlay_query`, and logs the effective target mode/version to
 `.codegraph/nanoflow-mcp-wrapper.log`. Changes under `D:\Code\tools\codegraph`
-do not affect Codex MCP calls until `C:\Users\MI\.codex\config.toml` is switched
-to the local `dist/bin/codegraph.js` path and that local source is rebuilt.
+do not affect Codex MCP calls until the active config is switched to the local
+`dist/bin/codegraph.js` path and that local source is rebuilt. In this repository
+the active config is normally `D:\Code\dde\.codex\config.toml`; the user config
+is only the fallback when the project does not declare the `codegraph` server.
 
 The wrapper startup log also includes `wrapperVersion`, `scriptPath`,
 `scriptSha256`, `logPath`, `diagnosticSchemaVersion`, and `outputModes`;
@@ -1854,6 +2109,14 @@ blocks, strict native JSON `codeBlocks`, or strict native Markdown code blocks.
 This prevents broad natural-language queries from being filled by files that
 only mention the words in metadata while the actual symbol source is pushed down
 by alphabetical file order.
+
+When an explicit symbol/path term or a high-entropy diagnostic probe has no
+NanoFlow overlay evidence and upstream CodeGraph returns only weak unrelated
+symbols without literal evidence for that explicit term, the wrapper collapses
+the response to the minimal native-shaped no-hit statement. This quality rule
+does not replace upstream generic ranking: ordinary natural-language queries
+continue to trust upstream exploration even when they do not contain a literal
+token match.
 
 Context-pack overlay query selection strips diagnostic noise terms such as
 `context-pack`, `quality`, `source`, `ordering`, `related`, `symbols`,
@@ -2012,8 +2275,8 @@ allowed for CLI freshness, but the wrapper must rely on an explicit
 signature for this bug in `.codegraph/nanoflow-mcp-wrapper.log` is
 `overlay.query.timeout` plus structured `profilePhases` showing
 `checkOverlayFreshness` followed by `ensureOverlay:stale-source`, or `loadOverlay`
-taking tens of seconds; that means the query path rebuilt
-`.codegraph/nanoflow-overlay.json`, not that the upstream CodeGraph daemon or MCP
+taking tens of seconds; that means the query path validated the selected immutable
+generation, not that the upstream CodeGraph daemon or MCP
 transport crashed.
 
 Run `npm run codegraph:mcp:log:guard` before manual log spelunking. The guard
@@ -2062,7 +2325,8 @@ The guard reports `overlay.query.timeout` separately from expected
 `host-stdin-closed` shutdowns. Non-timeout overlay subprocess failures are
 summarized under `overlayFailures`; use `overlayFailures.byClass`,
 `overlayFailures.byDate`, and `overlayFailures.latest` to separate
-`overlay-nonzero-exit`, `overlay-max-buffer`, `overlay-json-parse`, and
+`overlay-stale-skip-refresh`, `overlay-nonzero-exit`, `overlay-max-buffer`,
+`overlay-json-parse`, and
 `overlay-signal-exit` from transport failures before changing wrapper restart or
 timeout behavior. Base CodeGraph child startup failures are summarized under
 `childSpawnErrors`; use `childSpawnErrors.byCode`, `childSpawnErrors.byDate`,
@@ -2135,6 +2399,13 @@ differs from `C:\Users\MI\.codex\config.toml`, or when
 This strict mode is intended for wrapper repair sessions and release readiness;
 the default log guard also carries `--fail-on-untrusted-direct-mcp` so routine
 triage fails fast when direct MCP is known untrusted.
+When a guard analyzes a gate-owned or other out-of-tree log, pass the repository
+explicitly with `--project-root <repo-root>`; log location is not project
+identity. Intentional `smoke` / `adapter-fallback` config overrides may prove
+`trustedForAdapterJudgment=true`, but remain
+`trustedForDirectHostHealth=false`. The untrusted-direct guard therefore does
+not fail a successful non-direct probe, while the JSON root-cause summary still
+forbids claiming that the connected direct host is healthy.
 The regular JSON and text log-guard output must front-load a compact
 `diagnosticTriage` object before bulky historical event buckets. That object is
 derived from the full root-cause summary and must include
@@ -2212,11 +2483,25 @@ The JSON summary includes `wrapperStarts.total`,
 `currentDiskContextWrapper`, `currentDiskContextWrapper.latestRequestKind`,
 `currentConfiguredContextWrapper`,
 `currentConfiguredContextWrapper.codegraphTarget`,
+`currentContextWrapperSupersededByFreshWrapper`,
+`currentContextWrapperScriptSupersededByFreshWrapper`,
+`currentContextWrapperConfigSupersededByFreshWrapper`,
+`currentContextWrapperSupersededReason`,
+`currentContextWrapperRawEnv`, `currentContextWrapperRawTarget`,
 `activeWrappers`, `hostMcp.liveWrapperLogFilter`,
 `hostMcp.liveWrapperLogFilter.applied`,
 `hostMcp.liveWrapperLogFilter.liveWrapperPids`,
+`hostMcp.liveWrapperLogFilter.liveWrapperProcesses`,
+`hostMcp.liveWrapperLogFilter.processStartClockSkewMs`,
 `hostMcp.liveWrapperLogFilter.ignoredWrapperStarts`,
 `hostMcp.liveWrapperLogFilter.ignoredContextResponses`,
+`hostMcp.liveWrapperLogFilter.ignoredPidReuseWrapperStarts`,
+`hostMcp.liveWrapperLogFilter.ignoredPidReuseContextResponses`,
+`hostMcp.liveProcesses.wrapperProcessCount`,
+`hostMcp.liveProcesses.matchingWrapperCount`,
+`hostMcp.liveProcesses.auxiliaryProcessCount`,
+`hostMcp.liveProcesses.auxiliaryProcesses`,
+`hostMcp.liveProcesses.hostParentPids`,
 `malformedLineNumbers`, `malformedLineRootCauseClasses`,
 `malformedLineDetails`,
 `currentContextSourceOrdering`,
@@ -2248,6 +2533,7 @@ wrapper PID filtering. The root-cause summaries must include `status`,
 `failureBoundary`, `failureClasses`, `adapterFailureLikely`, `directMcpTrust`,
 `fallback`, `recovery`, `expected`, `observed.autoSyncDisabled`,
 `observed.activeAutoSyncDisabledCount`, `observed.activeAutoSyncDisabledRuns`,
+`observed.activeDirectWatcherCount`, `observed.activeDirectWatcherRuns`,
 `observed.liveProcessMismatches`, `observed.directMcpError`, and
 `observed.liveWrapperProcessCount`, so a stale Codex MCP host, host transport
 closure, stale wrapper script, target/env mismatch, live stale process, and
@@ -2378,6 +2664,7 @@ For post-mortem review, inspect these fields before changing timeouts:
   writing output when it failed.
 - `failureClass` on overlay/context events before changing timeouts:
   `overlay-timeout`, `overlay-max-buffer`, `overlay-json-parse`,
+  `overlay-stale-skip-refresh`,
   `overlay-nonzero-exit`, `overlay-signal-exit`, `base-codegraph-timeout`,
   `base-codegraph-error`, `context-pack-error`, `overlay-wrapper-error`,
   `invalid-params`, or `success`.

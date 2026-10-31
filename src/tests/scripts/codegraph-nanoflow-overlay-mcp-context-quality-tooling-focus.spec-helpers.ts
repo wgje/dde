@@ -294,4 +294,180 @@ export function registerCodegraphOverlayMcpContextQualityToolingFocusSpecs(
       expect(text).not.toContain('insertConnectionReturningUpdatedAt');
     }
   }, 12_000);
+
+  it('focuses broad helper fixture quality queries on the context-quality fixture helper', async () => {
+    const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-codegraph-context-helper-fixture-quality-focus-'));
+    tempRoots.push(projectRoot);
+    writeFile(
+      projectRoot,
+      'src/tests/scripts/codegraph-nanoflow-overlay-mcp-context-quality-tooling-fixtures.helpers.ts',
+      [
+        'export function buildFakeCodegraphExploreScript(config) {',
+        '  return JSON.stringify(config);',
+        '}',
+        '',
+        'export function writeFakeCodegraphExploreScript(filePath, config) {',
+        '  return [filePath, buildFakeCodegraphExploreScript(config)];',
+        '}',
+        '',
+      ].join('\n'),
+    );
+    writeFile(
+      projectRoot,
+      'src/tests/scripts/analyze-codegraph-mcp-log-current-wrapper.spec-helpers.ts',
+      [
+        'export function registerAnalyzeCodegraphMcpLogCurrentWrapperSpecs() {',
+        '  return true;',
+        '}',
+        '',
+      ].join('\n'),
+    );
+    writeFile(
+      projectRoot,
+      'src/app/core/external-sources/external-source.model.ts',
+      [
+        "export type ExternalSourceLinkRow = { sourceType: string };",
+        '',
+      ].join('\n'),
+    );
+
+    const noisyQuery = 'NanoFlow CodeGraph current adaptation helper fixtures generic script source blocks quality standard';
+    const focusedQuery = [
+      'src/tests/scripts/codegraph-nanoflow-overlay-mcp-context-quality-tooling-fixtures.helpers.ts',
+      'buildFakeCodegraphExploreScript',
+      'writeFakeCodegraphExploreScript',
+      'context-pack source quality fixtures',
+    ].join(' ');
+    const noisyResponse = {
+      query: noisyQuery,
+      matches: [
+        { kind: 'function', name: 'registerAnalyzeCodegraphMcpLogCurrentWrapperSpecs', file: 'src/tests/scripts/analyze-codegraph-mcp-log-current-wrapper.spec-helpers.ts' },
+        { kind: 'type_alias', name: 'ExternalSourceLinkRow', file: 'src/app/core/external-sources/external-source.model.ts' },
+      ],
+      nodes: [
+        {
+          id: 'function:src/tests/scripts/analyze-codegraph-mcp-log-current-wrapper.spec-helpers.ts:registerAnalyzeCodegraphMcpLogCurrentWrapperSpecs',
+          kind: 'function',
+          name: 'registerAnalyzeCodegraphMcpLogCurrentWrapperSpecs',
+          qualifiedName: 'registerAnalyzeCodegraphMcpLogCurrentWrapperSpecs',
+          filePath: 'src/tests/scripts/analyze-codegraph-mcp-log-current-wrapper.spec-helpers.ts',
+          language: 'typescript',
+          startLine: 1,
+          endLine: 3,
+        },
+        {
+          id: 'type_alias:src/app/core/external-sources/external-source.model.ts:ExternalSourceLinkRow',
+          kind: 'type_alias',
+          name: 'ExternalSourceLinkRow',
+          qualifiedName: 'ExternalSourceLinkRow',
+          filePath: 'src/app/core/external-sources/external-source.model.ts',
+          language: 'typescript',
+          startLine: 1,
+          endLine: 1,
+        },
+      ],
+      relationshipGroups: {},
+      coverage: { graphNodes: 2, graphEdges: 0 },
+    };
+    const focusedResponse = {
+      query: focusedQuery,
+      matches: [
+        { kind: 'function', name: 'buildFakeCodegraphExploreScript', file: 'src/tests/scripts/codegraph-nanoflow-overlay-mcp-context-quality-tooling-fixtures.helpers.ts' },
+        { kind: 'function', name: 'writeFakeCodegraphExploreScript', file: 'src/tests/scripts/codegraph-nanoflow-overlay-mcp-context-quality-tooling-fixtures.helpers.ts' },
+      ],
+      nodes: [
+        {
+          id: 'function:src/tests/scripts/codegraph-nanoflow-overlay-mcp-context-quality-tooling-fixtures.helpers.ts:buildFakeCodegraphExploreScript',
+          kind: 'function',
+          name: 'buildFakeCodegraphExploreScript',
+          qualifiedName: 'buildFakeCodegraphExploreScript',
+          filePath: 'src/tests/scripts/codegraph-nanoflow-overlay-mcp-context-quality-tooling-fixtures.helpers.ts',
+          language: 'typescript',
+          startLine: 1,
+          endLine: 3,
+        },
+        {
+          id: 'function:src/tests/scripts/codegraph-nanoflow-overlay-mcp-context-quality-tooling-fixtures.helpers.ts:writeFakeCodegraphExploreScript',
+          kind: 'function',
+          name: 'writeFakeCodegraphExploreScript',
+          qualifiedName: 'writeFakeCodegraphExploreScript',
+          filePath: 'src/tests/scripts/codegraph-nanoflow-overlay-mcp-context-quality-tooling-fixtures.helpers.ts',
+          language: 'typescript',
+          startLine: 5,
+          endLine: 7,
+        },
+      ],
+      relationshipGroups: {},
+      coverage: { graphNodes: 2, graphEdges: 0 },
+    };
+    writeQueryAwareOverlayResponseScript(projectRoot, focusedQuery, focusedResponse, noisyResponse);
+
+    const fakeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-codegraph-helper-fixture-quality-focus-fake-'));
+    tempRoots.push(fakeRoot);
+    const fakeCodegraph = path.join(fakeRoot, 'fake-codegraph.cjs');
+    writeFakeCodegraphExploreScript(fakeCodegraph, {
+      focusedQuery,
+      focused: {
+        includeMaxFiles: true,
+        preludeLines: [
+          'Found 2 symbols across 2 files.',
+          '',
+          '**Relationships**',
+          '',
+          '**references:**',
+          '- ExternalSourceLinkRow → registerAnalyzeCodegraphMcpLogCurrentWrapperSpecs',
+        ],
+        sourceBlocks: [
+          {
+            header: 'src/tests/scripts/analyze-codegraph-mcp-log-current-wrapper.spec-helpers.ts — registerAnalyzeCodegraphMcpLogCurrentWrapperSpecs(function)',
+            language: 'typescript',
+            lines: [
+              '1\texport function registerAnalyzeCodegraphMcpLogCurrentWrapperSpecs() {',
+              '2\t  return true;',
+              '3\t}',
+            ],
+          },
+          {
+            header: 'src/app/core/external-sources/external-source.model.ts — ExternalSourceLinkRow(type_alias)',
+            language: 'typescript',
+            lines: [
+              "1\texport type ExternalSourceLinkRow = { sourceType: string };",
+            ],
+          },
+        ],
+      },
+      fallback: {
+        includeMaxFiles: true,
+        sourceBlocks: [
+          {
+            header: 'src/tests/scripts/analyze-codegraph-mcp-log-current-wrapper.spec-helpers.ts — registerAnalyzeCodegraphMcpLogCurrentWrapperSpecs(function)',
+            language: 'typescript',
+            lines: ['1\texport function registerAnalyzeCodegraphMcpLogCurrentWrapperSpecs() {', '2\t  return true;', '3\t}'],
+          },
+          {
+            header: 'src/app/core/external-sources/external-source.model.ts — ExternalSourceLinkRow(type_alias)',
+            language: 'typescript',
+            lines: ["1\texport type ExternalSourceLinkRow = { sourceType: string };"],
+          },
+        ],
+      },
+    });
+
+    const text = await callContextPack({
+      repoRoot,
+      wrapperScriptPath,
+      projectRoot,
+      fakeCodegraph,
+      readJsonLine,
+      query: noisyQuery,
+    });
+
+    const sourceHeaders = extractContextSourceHeaders(text);
+    expect(text).toContain(`baseQuery=${focusedQuery}`);
+    expect(sourceHeaders[0]).toContain('codegraph-nanoflow-overlay-mcp-context-quality-tooling-fixtures.helpers.ts');
+    expect(text).toContain('buildFakeCodegraphExploreScript');
+    expect(text).toContain('writeFakeCodegraphExploreScript');
+    expect(text).not.toContain('registerAnalyzeCodegraphMcpLogCurrentWrapperSpecs');
+    expect(text).not.toContain('ExternalSourceLinkRow');
+  }, 12_000);
 }

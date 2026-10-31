@@ -75,6 +75,15 @@ export function registerCodegraphOverlayMcpTransportSpecs(context: CodegraphOver
         transportShouldStayAlive: false,
       }),
     }));
+    const logEntries = parseJsonLines(logPath);
+    const childExitIndex = logEntries.findIndex(entry => entry.event === 'child.exit');
+    const childCloseIndex = logEntries.findIndex(entry => entry.event === 'child.close');
+    const wrapperExitIndex = logEntries.findIndex(entry => (
+      entry.event === 'wrapper.exit' && entry.reason === 'child-exit'
+    ));
+    expect(childExitIndex).toBeGreaterThanOrEqual(0);
+    expect(childCloseIndex).toBeGreaterThan(childExitIndex);
+    expect(wrapperExitIndex).toBeGreaterThan(childCloseIndex);
   }, 8_000);
 
   it('records child close diagnostics after an unexpected base CodeGraph exit', async () => {
@@ -658,6 +667,95 @@ export function registerCodegraphOverlayMcpTransportSpecs(context: CodegraphOver
           failureBoundary: 'mcp-host-transport',
           failureClass: 'host-stdout-closed',
           transportShouldStayAlive: false,
+        }),
+      }));
+    } finally {
+      child.kill();
+    }
+  }, 8_000);
+
+  it('keeps response identity when a wrapper stdout write throws', async () => {
+    const fakeCodegraph = makeFakeCodegraph();
+    const probeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-codegraph-client-stdout-write-probe-'));
+    tempRoots.push(probeRoot);
+    const probePath = path.join(probeRoot, 'client-stdout-write-error-probe.cjs');
+    fs.writeFileSync(
+      probePath,
+      [
+        "'use strict';",
+        "if (String(process.argv[1] ?? '').endsWith('codegraph-nanoflow-mcp-stdio.cjs')) {",
+        '  const originalWrite = process.stdout.write.bind(process.stdout);',
+        '  let injected = false;',
+        '  process.stdout.write = function patchedStdoutWrite(chunk, ...args) {',
+        "    const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);",
+        "    if (!injected && text.includes('\\\"id\\\":87')) {",
+        '      injected = true;',
+        "      const error = new Error('probe wrapper stdout write failure');",
+        "      error.code = 'EPIPE';",
+        "      error.syscall = 'write';",
+        '      throw error;',
+        '    }',
+        '    return originalWrite(chunk, ...args);',
+        '  };',
+        '}',
+        '',
+      ].join('\n'),
+    );
+    const logPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-codegraph-log-')), 'wrapper.log');
+    tempRoots.push(path.dirname(logPath));
+    const child = spawn(
+      process.execPath,
+      [wrapperScriptPath, fakeCodegraph, 'serve', '--mcp', '--path', repoRoot],
+      {
+        cwd: repoRoot,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: {
+          ...process.env,
+          ...WRAPPER_REPO_OVERLAY_ENV,
+          NANOFLOW_CODEGRAPH_MCP_LOG: logPath,
+          NODE_OPTIONS: [process.env.NODE_OPTIONS, '--require', probePath].filter(Boolean).join(' '),
+        },
+      },
+    );
+    const exitPromise = waitForExit(child);
+
+    try {
+      child.stdin.write(`${JSON.stringify({
+        jsonrpc: '2.0',
+        id: 87,
+        method: 'tools/call',
+        params: {
+          name: 'codegraph_explore',
+          arguments: { query: 'stdout response trace probe' },
+        },
+      })}\n`);
+
+      const stdoutErrorEvent = await waitForLogEvent(
+        logPath,
+        'client.stdout.error',
+        2_000,
+        (entry) => (
+          typeof entry.error === 'object'
+          && entry.error !== null
+          && 'message' in entry.error
+          && entry.error.message === 'probe wrapper stdout write failure'
+        ),
+      );
+      const exit = await exitPromise;
+      expect(exit.code).toBe(0);
+      expect(stdoutErrorEvent).toEqual(expect.objectContaining({
+        failureClass: 'host-stdout-closed',
+        operation: 'write',
+        responseId: 87,
+        requestId: expect.any(String),
+        clientId: 87,
+        requestKind: 'codegraph-tool',
+        tool: 'codegraph_explore',
+        query: 'stdout response trace probe',
+        response: expect.objectContaining({
+          id: 87,
+          hasError: false,
+          isError: false,
         }),
       }));
     } finally {

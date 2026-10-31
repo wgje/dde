@@ -54,7 +54,7 @@ export function registerAnalyzeCodegraphMcpLogChildFailureSpecs(): void {
     const script = makeScriptFile('module.exports = { version: "runtime-diagnostic" };\n');
     const logPath = makeLog([
       wrapperStartEvent('runtime-diagnostic-run', script, {
-        codegraphTarget: '@colbymchenry/codegraph@1.2.0',
+        codegraphTarget: '@colbymchenry/codegraph@1.5.0',
       }),
       {
         ts: '2026-06-12T08:24:04.596Z',

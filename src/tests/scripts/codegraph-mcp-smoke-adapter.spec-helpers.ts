@@ -9,16 +9,25 @@ interface CodegraphMcpSmokeAdapterSpecContext {
   smokeScriptPath: string;
   analyzerScriptPath: string;
   makeFakeCodegraph(): string;
+  makeFreshMcpProject(): string;
   trackTempRoot(root: string): void;
 }
 
 export function registerCodegraphMcpSmokeAdapterSpecs(
   context: CodegraphMcpSmokeAdapterSpecContext,
 ): void {
-  const { repoRoot, smokeScriptPath, analyzerScriptPath, makeFakeCodegraph, trackTempRoot } = context;
+  const {
+    repoRoot,
+    smokeScriptPath,
+    analyzerScriptPath,
+    makeFakeCodegraph,
+    makeFreshMcpProject,
+    trackTempRoot,
+  } = context;
 
   it('honors an explicit wrapper diagnostics log path for gate-owned evidence', () => {
     const fakeCodegraph = makeFakeCodegraph();
+    const projectRoot = makeFreshMcpProject();
     const logRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-codegraph-smoke-log-'));
     trackTempRoot(logRoot);
     const logPath = path.join(logRoot, 'codegraph-adapter-gate-mcp-wrapper.log');
@@ -27,7 +36,7 @@ export function registerCodegraphMcpSmokeAdapterSpecs(
       [
         smokeScriptPath,
         '--root',
-        repoRoot,
+        projectRoot,
         '--codegraph-target',
         fakeCodegraph,
         '--query',
@@ -74,12 +83,13 @@ export function registerCodegraphMcpSmokeAdapterSpecs(
 
   it('keeps the top-ranked overlay source first in smoke diagnostics', () => {
     const fakeCodegraph = makeFakeCodegraph();
+    const projectRoot = makeFreshMcpProject();
     const result = spawnSync(
       process.execPath,
       [
         smokeScriptPath,
         '--root',
-        repoRoot,
+        projectRoot,
         '--codegraph-target',
         fakeCodegraph,
         '--query',

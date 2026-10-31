@@ -68,6 +68,394 @@ No active issues are recorded yet.
 
 ## Fixed Issues
 
+## CG-NF-20260718-004: Backpressure diagnostics amplified large queries before the child pipe filled
+
+- status: fixed
+- reported_at: 2026-07-18
+- reporter: codex-agent
+- feature_scope: MCP child-stdin backpressure, bounded root-cause diagnostics, and deterministic test-process cleanup
+- query_surface: mcp-smoke | log-guard
+- query: `npx vitest run --config vitest.config.mts --no-file-parallelism --maxWorkers 1 src/tests/scripts/codegraph-nanoflow-overlay.spec.ts -t "backpressure|backs off rapid base CodeGraph child restarts"`
+- expected: Large concurrent CodeGraph requests should produce `child.stdin.backpressure` promptly, pause client input, retain enough query identity and size evidence for diagnosis, and leave no wrapper/base-child process after the test closes stdin.
+- actual: Each request copied the full large query into several events and again into up to eight `runtime.activeRequests` entries. Synchronous JSONL serialization plus repeated test-side log parsing delayed the actual pipe-backpressure event beyond the test deadline, while Windows `taskkill` failures during memory pressure could misclassify an already-exiting wrapper or leak its fake child.
+- evidence:
+  - docs_contract: `AGENTS.md` and `docs/codegraph-nanoflow-adaptation.md` bounded diagnostics, backpressure, and wrapper exit contracts
+  - output_summary: The isolated RED timed out after 15 seconds; after bounding diagnostic query previews and adding logged-child-PID cleanup fallback, the focused three-test group passed in 4.25 seconds and the backpressure case completed in 2.59 seconds.
+  - log_guard: The temporary wrapper log showed repeated multi-kilobyte query copies in `client.request.start`, `client.message`, `client.forward.child`, and `runtime.activeRequests` before `child.stdin.backpressure`; this was diagnostic amplification, not a live Codex host transport failure.
+- freshness_checks:
+  - mcp_result: not-run
+  - adapter_fallback_result: not-run
+  - wrapper_stale: no
+  - overlay_stale: no
+  - transport_failure: no
+- likely_root_cause: implementation-gap
+- repair_target: context-pack-wrapper | tests | docs
+- doc_update_needed: yes
+- verification_gate: `npx vitest run --config vitest.config.mts --no-file-parallelism --maxWorkers 1 src/tests/scripts/codegraph-nanoflow-overlay.spec.ts -t "backpressure|backs off rapid base CodeGraph child restarts"`
+- resolution_notes: Diagnostic `query` values now preserve a bounded 512-character head/tail preview plus `queryChars`, `queryBytes`, and `queryTruncated`. The same projection is used in request history and `runtime.activeRequests`. Windows test cleanup first waits for graceful wrapper exit, then uses `taskkill`, and finally force-kills child PIDs recovered from the run-local diagnostics log if `taskkill` cannot start.
+
+## CG-NF-20260718-003: Explicit missing-symbol context packs preserved unrelated weak upstream hits
+
+- status: fixed
+- reported_at: 2026-07-18
+- reporter: codex-agent
+- feature_scope: native-quality no-hit output when upstream CodeGraph returns weak unrelated symbols
+- query_surface: nanoflow_context_pack | adapter-context-cli
+- query: `nanoflow_context_pack(query="DefinitelyMissingSymbol20260718")`
+- expected: When an explicit symbol/path or high-entropy probe has no NanoFlow evidence and the upstream response contains no literal evidence for that explicit term, the context pack should return one minimal no-hit statement without unrelated source, Relationships, Related Symbols, Coverage, or Next Steps.
+- actual: Upstream returned unrelated symbols and source for an impossible explicit query, and the wrapper treated that weak response as a hit because the base text did not contain an explicit `0 symbols` marker.
+- evidence:
+  - docs_contract: `docs/codegraph-nanoflow-adaptation.md` output-quality and weak-hit ordering contract
+  - output_summary: The RED fixture rendered `UnrelatedService` plus synthetic sections; the fixed wrapper now emits only `## Exploration: DefinitelyMissingSymbol20260718` and `No code context matched this query.`
+  - log_guard: Current live host was transport-healthy with matching wrapper/config hashes and no critical failure; this was an output-quality gap, not a transport failure.
+- freshness_checks:
+  - mcp_result: success
+  - adapter_fallback_result: success
+  - wrapper_stale: no
+  - overlay_stale: yes
+  - transport_failure: no
+- likely_root_cause: source-ordering
+- repair_target: context-pack-wrapper | tests | docs
+- doc_update_needed: yes
+- verification_gate: `npx vitest run --config vitest.config.mts --no-file-parallelism --maxWorkers 1 src/tests/scripts/codegraph-nanoflow-overlay.spec.ts -t "keeps a pure no-hit|collapses unrelated weak upstream hits"`
+- resolution_notes: Weak-hit collapse is intentionally limited to explicit symbol/path terms or high-entropy probe tokens and only runs when overlay evidence is empty. Natural-language generic ranking remains upstream-owned.
+
+## CG-NF-20260718-002: Supabase env-var and risk-tag relations were not fail-closed by coverage contracts
+
+- status: fixed
+- reported_at: 2026-07-18
+- reporter: codex-agent
+- feature_scope: Supabase Edge Function environment references and Edge Function/migration risk semantics
+- query_surface: overlay-query-cli | docs-validator
+- query: `npm run codegraph:overlay:docs:validate`
+- expected: Documented `env-var` and `risk-tag` relations must have stable node/edge counters, required identity metadata, and project-semantic coverage checks that fail when either relation disappears.
+- actual: The graph emitted both relations and docs narrated their counts, but the shared baseline and project-semantic contract did not include them; clearing all such edges could still pass the formal coverage check.
+- evidence:
+  - docs_contract: `docs/codegraph-nanoflow-adaptation.md` Supabase Edge Function and migration risk-tag sections
+  - output_summary: RED manifest lacked four counters and the validator accepted zero coverage; the fixed contract requires `envVar`, `riskTag`, and `riskSource` metadata and fails closed on zero edges.
+  - log_guard: No wrapper or transport failure was involved.
+- freshness_checks:
+  - mcp_result: not-run
+  - adapter_fallback_result: success
+  - wrapper_stale: no
+  - overlay_stale: yes
+  - transport_failure: no
+- likely_root_cause: implementation-gap
+- repair_target: generator | tests | docs
+- doc_update_needed: yes
+- verification_gate: `npx vitest run --config vitest.config.mts --no-file-parallelism --maxWorkers 1 src/tests/scripts/codegraph-overlay-baseline-manifest.spec.ts src/tests/scripts/validate-codegraph-overlay-docs.spec.ts src/tests/scripts/validate-codegraph-overlay-docs-structured-counts.spec.ts`
+- resolution_notes: The baseline now exposes `edgeFunctionEnvVarNodes/Edges` and `supabaseRiskTagNodes/Edges`; relation metadata identifies the environment variable and whether a risk tag came from an Edge Function or migration.
+
+## CG-NF-20260718-001: Angular metadata and DI relations lacked declaration-line and class-scoped query evidence
+
+- status: fixed
+- reported_at: 2026-07-18
+- reporter: codex-agent
+- feature_scope: Angular standalone imports, local providers, inject(), and constructor DI relation-query completeness
+- query_surface: nanoflow_overlay_query
+- query: `nanoflow_overlay_query(query="dependency InjectConsumer ConstructorConsumer FirstService SecondService", json=true)`
+- expected: Exact `standalone-import`, `provider`, and `dependency` queries should return only their relation graph, render the owning decorator/injection declaration lines, distinguish `inject` from constructor provenance, and keep dependencies scoped to the declaring class.
+- actual: Standalone/provider queries selected target symbol bodies rather than decorator metadata lines; file-wide `inject()` collection assigned one class's dependency to other decorated classes in the same file; dependency edges had no provenance metadata.
+- evidence:
+  - docs_contract: `AGENTS.md` and `docs/codegraph-nanoflow-adaptation.md` Angular standalone metadata and DI contract
+  - output_summary: RED fixtures showed provider edge pollution, missing declaration-line blocks, missing `injectionKind`, and a spurious `ConstructorConsumer -> FirstService` edge.
+  - log_guard: Current MCP host was healthy; the defect reproduced in the fresh fixture generator/query path.
+- freshness_checks:
+  - mcp_result: success
+  - adapter_fallback_result: success
+  - wrapper_stale: no
+  - overlay_stale: yes
+  - transport_failure: no
+- likely_root_cause: implementation-gap | source-ordering
+- repair_target: generator | query-selection | native-json | tests | docs
+- doc_update_needed: yes
+- verification_gate: `npx vitest run --config vitest.config.mts --no-file-parallelism --maxWorkers 1 src/tests/scripts/codegraph-nanoflow-overlay.spec.ts -t "uses Angular standalone import|keeps inject and constructor dependency provenance"`
+- resolution_notes: The generator preserves per-class dependency details with source line/column and `injectionKind`; exact relation formatting now treats the owner declaration line as authoritative native source evidence.
+
+## CG-NF-20260714-011: Android semantic edges were generated but absent from the relation and coverage contracts
+
+- status: fixed
+- reported_at: 2026-07-14
+- reporter: codex-agent
+- feature_scope: Android Manifest permission/query/intent-filter and Kotlin resource relation contract completeness
+- query_surface: overlay-query-cli | adapter-context-cli
+- query: `npm run codegraph:overlay:docs:validate`
+- expected: Every documented Android relation is registered, has fail-closed metadata requirements, contributes stable non-zero coverage counters, and survives formal overlay/document synchronization.
+- actual: The fresh graph already contained the new B-stage relations, but validation rejected them as unregistered and the Android summary exposed only component/widget/XML-resource counts. Repeated stale Angular and Context7 counter assignments also survived the first sync pass.
+- evidence:
+  - docs_contract: `AGENTS.md` and `docs/codegraph-nanoflow-adaptation.md` Android Manifest/Kotlin resource semantics
+  - output_summary: Formal sync now reports 2 Manifest permissions, 1 query, 1 component permission, 6 intent-filter actions, 3 categories, 1 data entry, and 276 Kotlin resource references with matching closed edges; all repeated inline counters synchronize globally.
+  - log_guard: This was a documentation/coverage contract gap, not an MCP transport or stale-wrapper failure.
+- freshness_checks:
+  - mcp_result: not-run
+  - adapter_fallback_result: success
+  - wrapper_stale: no
+  - overlay_stale: no
+  - transport_failure: no
+- likely_root_cause: implementation-gap
+- repair_target: docs | tests
+- doc_update_needed: yes
+- verification_gate: `npm run codegraph:overlay:docs:validate` and `npx vitest run --config vitest.minimal-node.config.mts src/tests/scripts/codegraph-overlay-baseline-manifest.spec.ts src/tests/scripts/validate-codegraph-overlay-docs.spec.ts src/tests/scripts/validate-codegraph-overlay-docs-structured-counts.spec.ts`
+- resolution_notes: The relation registry now includes Manifest permission/query/intent-filter nodes and edges plus Kotlin source/resource relations. Edge metadata contracts require permission, query, component, intent, and resource identity; intent-filter data requires at least one concrete scheme/host/path/pattern/MIME/port field. The shared baseline feeds docs and query Coverage, and sync replaces every repeated inline counter assignment rather than only the first occurrence.
+
+## CG-NF-20260714-010: Context-pack no-hit, hard budgets, and malformed overlay recovery were not fail-closed
+
+- status: fixed
+- reported_at: 2026-07-14
+- reporter: codex-agent
+- feature_scope: native-quality no-hit output, final output budgets, and malformed overlay preservation/recovery
+- query_surface: overlay-query-cli | nanoflow_context_pack | nanoflow_overlay_query | adapter-context-cli
+- query: `nanoflow_context_pack(query="DefinitelyMissingSymbol", maxFiles=1, overlayLimit=1)`
+- expected: Pure no-hit output stays minimal; explicit `maxFiles=1` / `limit=1` constrain final source, node, edge, and file projections; empty, non-JSON, and invalid-shape overlay responses fail closed while preserving upstream base evidence.
+- actual: Context packs appended synthetic empty Relationships/Related Symbols/Coverage/Next Steps sections, post-processing expanded beyond caller budgets, empty responses hid the overlay error, and valid JSON missing `matches` was reported as success.
+- evidence:
+  - docs_contract: C-stage strict-native, context-pack quality, hard-budget, and malformed-response requirements
+  - output_summary: Query projections obey final caller budgets; pure no-hit context packs stay minimal; malformed overlay responses retain base context and bounded raw evidence while reporting failure.
+  - log_guard: Fresh wrapper tests verify overlay failure classes and keep the MCP transport alive after malformed responses.
+- freshness_checks:
+  - mcp_result: success
+  - adapter_fallback_result: success
+  - wrapper_stale: no
+  - overlay_stale: no
+  - transport_failure: no
+- likely_root_cause: implementation-gap
+- repair_target: query-selection | context-pack-wrapper | tests
+- doc_update_needed: no
+- verification_gate: `npx vitest run --config vitest.minimal-node.config.mts src/tests/scripts/codegraph-nanoflow-overlay.spec.ts -t "budget|context-pack|malformed overlay"` and `npx vitest run --config vitest.minimal-node.config.mts src/tests/scripts/codegraph-adapter-context-cli.spec.ts`
+
+## CG-NF-20260714-009: Strict native JSON omits source columns present on overlay nodes
+
+- status: fixed
+- reported_at: 2026-07-14
+- reporter: codex-agent
+- feature_scope: strict native CodeGraph JSON field and source-location parity
+- query_surface: overlay-query-cli
+- query: `node scripts/query-codegraph-nanoflow-overlay.mjs --query dangerousPatterns --native-json --skip-refresh`
+- expected: Strict native JSON preserves native-style `startColumn` and `endColumn` together with valid falsy/null fields such as `isExported=false`, `visibility=null`, and column `0`.
+- actual: Fixed. `serializeNativeJsonNode()` now projects source columns and still removes only `undefined`, so valid `false`, `null`, and `0` values survive in upstream field order.
+- evidence:
+  - docs_contract: `AGENTS.md` native-style TypeScript node field contract
+  - output_summary: `preserves falsy and null native node fields with source columns` passes, and strict native key allowlist/order contracts include `startColumn/endColumn`.
+  - log_guard: Existing wrapper and adapter log guards remain unchanged; this repair is isolated to strict native JSON serialization.
+- freshness_checks:
+  - mcp_result: not-run
+  - adapter_fallback_result: success
+  - wrapper_stale: no
+  - overlay_stale: no
+  - transport_failure: no
+- likely_root_cause: implementation-gap
+- repair_target: native-json | tests
+- doc_update_needed: no
+- verification_gate: `npx vitest run --config vitest.minimal-node.config.mts src/tests/scripts/codegraph-nanoflow-overlay.spec.ts -t "strict native JSON|preserves falsy and null native node fields"`
+
+## CG-NF-20260714-007: Android Manifest permissions, queries, intent filters, and Kotlin R references are absent
+
+- status: fixed
+- reported_at: 2026-07-14
+- reporter: codex-agent
+- feature_scope: documented Android Manifest, widget, resource, and Kotlin project semantics
+- query_surface: overlay-query-cli
+- query: `node scripts/query-codegraph-nanoflow-overlay.mjs --query "android manifest permission queries intent-filter" --json --skip-refresh`
+- expected: The result should expose native-shaped relations for Manifest `uses-permission`, `queries`, and `intent-filter` declarations, plus Kotlin `R.resourceType.resourceName` references to Android resource endpoints.
+- actual: The fresh overlay query returned 226 nodes and `android-manifest-component`, but no permission, package-query, intent-filter, or Kotlin-resource-reference relation. The 46 current `android-resource-reference` edges were XML-to-resource references only.
+- evidence:
+  - docs_contract: `AGENTS.md` NanoFlow Android Manifest/widget/resource project-semantic contract and `docs/codegraph-nanoflow-adaptation.md` Android semantic coverage section
+  - output_summary: A current-disk verification graph now contains `android-manifest-uses-permission`, `android-manifest-query`, component permission, intent-filter action/category/data, and 276 `android-kotlin-resource-reference` edges with closed native-shaped endpoints.
+  - log_guard: `npm run codegraph:mcp:log:guard` passed with `directMcpTrust=trust-current-wrapper`, project config scope, matching target/env, zero active auto-sync-disabled runs, and no critical transport failure.
+- freshness_checks:
+  - mcp_result: not-run
+  - adapter_fallback_result: success
+  - wrapper_stale: no
+  - overlay_stale: no
+  - transport_failure: no
+- likely_root_cause: implementation-gap
+- repair_target: generator | tests
+- doc_update_needed: no
+- verification_gate: `npx vitest run --config vitest.config.mts src/tests/scripts/codegraph-nanoflow-overlay.spec.ts -t "projects Android Manifest permissions queries intent filters and Kotlin resources as native references"`
+- resolution_notes: The overlay now parses Manifest permissions, package/provider/intent queries, component permissions, and per-filter action/category/data values into native `references` edges. Kotlin project `R.string/layout/drawable/id` references resolve only to indexed resources, including `@+id` and values `<item type="id">`; platform `android.R`, missing resources, comments, and strings are excluded.
+
+## CG-NF-20260714-008: Context7 source-map routes drop secondary documentation links
+
+- status: fixed
+- reported_at: 2026-07-14
+- reporter: codex-agent
+- feature_scope: documented Context7 retrieval and source-map routing semantics
+- query_surface: overlay-query-cli
+- query: `node scripts/query-codegraph-nanoflow-overlay.mjs --query "context7 source map multiple docs invalid source path" --json --skip-refresh`
+- expected: Every documentation link in a source-map row should produce a `context7-source-map-doc` edge, while each source path remains independently queryable and eligible for path-validity diagnostics.
+- actual: `docs/context7/source-map.md` contains multiple rows with two primary documentation links, but the overlay stored one singular `doc` per route and reported 16 source-map routes with only 16 `context7-source-map-doc` edges. Secondary docs in those rows were not represented.
+- evidence:
+  - docs_contract: `AGENTS.md` Context7 retrieval/source-map semantic contract and `docs/codegraph-nanoflow-adaptation.md` Context7 graph summary
+  - output_summary: The current shape keeps legacy `doc` plus ordered `docs[]`; the real 16 routes now produce 21 closed `context7-source-map-doc` edges. The validator also rejects unmatched third-column file/directory/glob evidence.
+  - log_guard: `npm run codegraph:mcp:log:guard` passed with current project-configured wrapper evidence, trusted index freshness, and no transport or source-ordering blocker.
+- freshness_checks:
+  - mcp_result: not-run
+  - adapter_fallback_result: success
+  - wrapper_stale: no
+  - overlay_stale: no
+  - transport_failure: no
+- likely_root_cause: implementation-gap
+- repair_target: generator | docs | tests
+- doc_update_needed: no
+- verification_gate: `npx vitest run --config vitest.config.mts src/tests/scripts/codegraph-nanoflow-overlay.spec.ts -t "emits Context7 catalog and source-map semantics"; npx vitest run --config vitest.config.mts src/tests/scripts/validate-context7-docs.spec.ts`
+- resolution_notes: Source-map parsing now preserves every Markdown doc link while retaining `doc` as the first-link compatibility field. Document indexing, route query provenance, route metadata, and graph emission consume the full `docs[]`. `validate-context7-docs.cjs` validates third-column evidence fail-closed and accepts real files, directories, and matching globs.
+
+## CG-NF-20260714-005: Broad helper and fixture quality queries select unrelated helpers and business Source types
+
+- status: fixed
+- reported_at: 2026-07-14
+- reporter: codex-agent
+- feature_scope: context-pack tooling query focusing, source ordering, and low-value helper filtering
+- query_surface: nanoflow_context_pack
+- query: `NanoFlow CodeGraph current adaptation helper fixtures generic script source blocks quality standard`
+- expected: A broad tooling-fixture quality query should lead with the CodeGraph context-quality fixture helper or another directly relevant adapter implementation source, without filling the first source budget with unrelated analyzer helpers or business `*Source` types.
+- actual: The first source was `src/tests/scripts/analyze-codegraph-mcp-log-current-wrapper.spec-helpers.ts`; blast-radius results also promoted `OverviewUpdateSource`, `ExternalSourceLinkRow`, and `NanoFlowEntrySource`, while the directly relevant context-quality fixture helper was not first.
+- evidence:
+  - docs_contract: `docs/codegraph-nanoflow-adaptation.md` context-pack source-ordering and low-value source quality contract
+  - output_summary: A fresh adapter run now returns only `src/tests/scripts/codegraph-nanoflow-overlay-mcp-context-quality-tooling-fixtures.helpers.ts` in the final source set, with `buildFakeCodegraphExploreScript` and `writeFakeCodegraphExploreScript` visible and no analyzer helper or business `*Source` noise.
+  - log_guard: The fresh wrapper response recorded `specializedMaintenanceSourceScope=tooling-fixture-quality`, filtered unrelated base metadata/source, and matched the final on-disk wrapper hash.
+- freshness_checks:
+  - mcp_result: success
+  - adapter_fallback_result: success
+  - wrapper_stale: no
+  - overlay_stale: no
+  - transport_failure: no
+- likely_root_cause: query-ranking | source-ordering
+- repair_target: context-pack-wrapper | tests
+- doc_update_needed: no
+- verification_gate: `npx vitest run --config vitest.config.mts src/tests/scripts/codegraph-nanoflow-overlay.spec.ts -t "focuses broad helper fixture quality queries"`
+- resolution_notes: Shared specialized-query classification now gives helper/fixture maintenance a canonical query and an authoritative source scope. Unrelated native base source blocks and metadata are removed only when scoped overlay evidence exists. The focused regression and the full 421-test overlay/wrapper suite pass.
+
+## CG-NF-20260714-004: Context7 retrieval source-map maintenance queries are captured by generic map and Android route symbols
+
+- status: fixed
+- reported_at: 2026-07-14
+- reporter: codex-agent
+- feature_scope: Context7 retrieval/source-map route semantics and context-pack source quality
+- query_surface: nanoflow_context_pack
+- query: `NanoFlow CodeGraph context7 retrieval source map docs route standard current adaptation quality`
+- expected: Context7 retrieval and source-map maintenance queries should return the retrieval helper, route map, or Context7 source-map documentation as the first evidence and include the documented Context7 relations.
+- actual: The first source was `src/utils/result.ts:map`; Android `NanoflowBootstrapContract.kt` also entered the blast radius, and the response reported no matching overlay symbols.
+- evidence:
+  - docs_contract: `AGENTS.md` Context7 retrieval/source-map coverage and `docs/codegraph-nanoflow-adaptation.md` source quality contract
+  - output_summary: A fresh adapter run now returns `docs/context7/source-map.md`, `docs/context7/catalog.json`, and `docs/context7/index.md`; the documented `context7-retrieval-primary` and `context7-source-map-source` relations remain visible, while `map()`, Android bootstrap, and `ExternalSourceLink` noise are absent.
+  - log_guard: The fresh wrapper response recorded `specializedMaintenanceSourceScope=context7-maintenance`, filtered unrelated base metadata/source, and matched the final on-disk wrapper hash.
+- freshness_checks:
+  - mcp_result: success
+  - adapter_fallback_result: success
+  - wrapper_stale: no
+  - overlay_stale: no
+  - transport_failure: no
+- likely_root_cause: implementation-gap | query-ranking
+- repair_target: context-pack-wrapper | tests
+- doc_update_needed: no
+- verification_gate: `npx vitest run --config vitest.config.mts src/tests/scripts/codegraph-nanoflow-overlay.spec.ts -t "focuses Context7 retrieval source-map maintenance queries"`
+- resolution_notes: Context7 maintenance intent is rewritten to canonical retrieval/source-map terms, and the output-quality layer treats `docs/context7/` as authoritative only when matching overlay evidence is available. The focused regression and the full 421-test overlay/wrapper suite pass.
+
+## CG-NF-20260714-003: Strict native output maintenance queries are captured by Angular output() business symbols
+
+- status: fixed
+- reported_at: 2026-07-14
+- reporter: codex-agent
+- feature_scope: strict native Markdown/JSON output contract and context-pack tooling query focusing
+- query_surface: nanoflow_context_pack
+- query: `NanoFlow CodeGraph strict native output markdown json related symbols line numbering standard current adaptation quality`
+- expected: Strict-native output maintenance queries should lead with formatter/projection implementation such as `formatStrictNativeMarkdown` or `formatNativeMarkdown`, while preserving native section and source-line quality evidence.
+- actual: The first sources were Angular business components exposing `output()` signals, including flow batch-delete, cascade-assign, and connection-editor components.
+- evidence:
+  - docs_contract: `docs/codegraph-nanoflow-dedup-contract.json` formatter boundary and `docs/codegraph-nanoflow-adaptation.md` strict-native output contract
+  - output_summary: A fresh adapter run now returns only `scripts/query-codegraph-nanoflow-overlay.mjs` in the final source set, with `formatStrictNativeMarkdown`, `formatNativeMarkdown`, `buildStrictNativeMarkdownRelationshipGroups`, and `nativeJsonEdgeLine` as the focused query surface and no Angular `output()` component noise.
+  - log_guard: The fresh wrapper response recorded `specializedMaintenanceSourceScope=strict-native-output-maintenance`, filtered unrelated base metadata/source, and matched the final on-disk wrapper hash.
+- freshness_checks:
+  - mcp_result: success
+  - adapter_fallback_result: success
+  - wrapper_stale: no
+  - overlay_stale: no
+  - transport_failure: no
+- likely_root_cause: query-ranking | source-ordering
+- repair_target: context-pack-wrapper | tests
+- doc_update_needed: no
+- verification_gate: `npx vitest run --config vitest.config.mts src/tests/scripts/codegraph-nanoflow-overlay.spec.ts -t "focuses strict native output maintenance queries"`
+- resolution_notes: Strict-native maintenance intent now has a canonical formatter query and an authoritative formatter source scope, while unrelated native base output is retained only when no scoped overlay alternative exists. The focused regression and the full 421-test overlay/wrapper suite pass.
+
+## CG-NF-20260714-006: Shared-daemon fallback and direct MCP watchers exhaust the writer-lock retry budget
+
+- status: fixed
+- reported_at: 2026-07-14
+- reporter: codex-agent
+- feature_scope: Codex MCP process topology, upstream CodeGraph watcher ownership, config repair, transport recovery, warning-evidence integrity, and root-cause logging
+- query_surface: nanoflow_context_pack | adapter-context-cli | adapter-doctor | log-guard | mcp-smoke
+- query: `CodeGraph shared daemon runtime topology wrapper diagnostics current MCP recovery`
+- expected: Live Codex wrappers should proxy through one upstream CodeGraph daemon so the project has one SQLite writer and one watcher; fresh adapter fallback should remain isolated and watcher-free.
+- actual: The wrapper first forced `CODEGRAPH_NO_DAEMON=1` even though the active Codex config declared `0`. Twenty concurrent wrappers therefore launched independent watchers against the same `.codegraph` index; 44 active runs logged file-lock retry exhaustion, auto-sync disabled, and a frozen index. After that config bug was repaired, upstream CodeGraph 1.2.0 exposed a deeper topology failure: when the shared daemon socket closed, every still-live proxy permanently switched to `in-process (degraded)`, and fallback `MCPEngine` instances later started their own watchers. Because diagnostics previously trusted only `wrapper.start.runtimeTopology`, doctor still reported zero direct watchers while fallback watchers were writing. An older shared daemon also used zero idle/backstop values and remained permanently degraded. After process recovery, response-warning detection still scanned whole context-pack bodies, so source code that merely contained the literal `CodeGraph auto-sync is DISABLED` was counted as a new active index freeze. A later quick gate exposed a second historical-evidence bug: Windows reused PID `51860`, and doctor associated the 2026-07-06 direct watcher with the live 2026-07-13 shared-daemon wrapper because it correlated logs by PID alone. The next closure exposed three lifecycle gaps: stale hosts could still inject daemon lifetime `0`, old Codex task wrappers accumulated under one app-server without a safe targeted cleanup entry, and the shared wrapper JSONL grew past 106 MB. The final quick-gate blocker was separate: log guard inferred project root from its gate-owned temp log directory, missed the repository `.codex/config.toml`, and rejected a healthy smoke probe as untrusted direct MCP evidence.
+- evidence:
+  - docs_contract: `D:\Code\dde\.codex\config.toml`, `AGENTS.md`, and `docs/codegraph-nanoflow-adaptation.md` shared-daemon contract
+  - output_summary: RED smoke captured configured `CODEGRAPH_NO_DAEMON=0` becoming effective `1`. A later RED smoke kept `CODEGRAPH_NO_DAEMON=0`, emitted upstream `Shared daemon connection lost` plus `File watcher active`, and proved that the old wrapper never restarted its still-live degraded child. After repair, the same two-round smoke records both runtime transitions, restarts the base child, preserves the parent transport, and ends with zero active fallback watchers. The complete wrapper/analyzer/doctor suite passes 147/147 tests. A second RED fixture reproduced the warning-literal false positive; after banner-anchored detection, the real log's active auto-sync-disabled count fell from 14 to 0 while genuine stderr and leading-banner warnings remained detected. A third RED fixture reproduced PID reuse with the same PID on two dates; after process-start-aware correlation, `activeCodegraphAutoSyncDisabled.count=0`, `activeDirectWatcherRuns=[]`, and the ignored historical start/context are reported separately.
+  - log_guard: `wrapper.start.runtimeTopology` and `child.spawn.runtimeTopology` report startup topology, while `child.runtime-topology.transition` and `child.runtime-topology.reset` now report live topology. The wrapper detects `in-process-fallback` and `in-process-fallback-watcher`, records recovery request/defer/restart evidence, and replaces the base child at an idle boundary. Analyzer fields `inProcessFallbackCount`, `inProcessFallbackWatcherCount`, and `sharedDaemonFallback` plus doctor fields `activeSharedDaemonFallbackRuns` and `activeInProcessFallbackWatcherRuns` prevent startup topology from hiding a runtime watcher. `child.exit(currentChild=false)` identifies replaced stale-child cleanup and is excluded from critical transport classification. Response warning evidence is accepted only from a leading CodeGraph banner; analyzer and doctor revalidate historical warning flags, while `child.stderr` remains broad. Doctor preserves live `startedAt`, compares event time against process start with a 5000ms skew allowance, and emits `liveWrapperProcesses`, `ignoredPidReuseWrapperStarts`, and `ignoredPidReuseContextResponses`. It also records parent process identity: Codex-owned wrappers remain host evidence, while explicitly non-Codex smoke/Vitest/fallback wrappers are visible under `auxiliaryProcesses` and cannot create a false host target mismatch. An older mismatched context env/target is superseded only when a config-aligned wrapper starts after that context's last response; if the old wrapper responds again later, strict doctor still fails and requires a full host restart.
+- freshness_checks:
+  - mcp_result: failed
+  - adapter_fallback_result: success
+  - wrapper_stale: no
+  - overlay_stale: no
+  - transport_failure: yes
+- likely_root_cause: transport | implementation-gap | stale-wrapper
+- repair_target: context-pack-wrapper | log-guard | tests | docs
+- doc_update_needed: yes
+- verification_gate: `npx vitest run --config vitest.config.mts --no-file-parallelism --maxWorkers 1 src/tests/scripts/codegraph-mcp-smoke.spec.ts src/tests/scripts/codegraph-adapter-doctor.spec.ts src/tests/scripts/analyze-codegraph-mcp-log.spec.ts`; `npx vitest run src/tests/scripts/codegraph-nanoflow-overlay.spec.ts -t "logs base response warnings when|does not classify auto-sync warning literals"`; `npx vitest run src/tests/scripts/codegraph-adapter-context-cli.spec.ts`; `node scripts/smoke-codegraph-mcp-wrapper.cjs --repeat 3 --timeout-ms 90000`; `npm run codegraph:adapter:context -- --query "CodeGraph shared daemon runtime topology wrapper diagnostics current MCP recovery" --json`; `npm run codegraph:adapter:quick-gate`
+- resolution_notes: Live wrappers now respect the configured upstream shared daemon; adapter fallback explicitly forces direct/no-watch. Both project and user Codex configs use the upstream 5-minute idle and 30-minute inactivity backstop. The wrapper additionally supervises upstream's permanent in-process fallback: it tracks runtime topology from stderr, waits for an idle request boundary, then restarts only the base child so it can reconnect without closing the parent MCP transport. Analyzer and doctor fail on active fallback engines/watchers before auto-sync is frozen, and replaced stale-child exits cannot borrow the new child's active-request state. Response warning extraction is leading-banner-only for MCP content and broad only for stderr, preventing source/test literals from reviving a false index-freeze diagnosis. Live-log filtering treats PID plus process start time as the process identity, so Windows PID reuse cannot make a historical direct watcher or index-freeze warning active again; platforms without start-time evidence retain the conservative PID-only fallback. Parent-process classification prevents concurrent adapter/smoke test wrappers from being treated as Codex host drift, while unknown parent evidence stays conservative. Non-positive daemon lifetime values are normalized and logged before child spawn, the shared diagnostic log is capped with one bounded archive, and doctor provides dry-run plus runId-targeted stale wrapper cleanup with PID/start/command revalidation. Gate log analysis now receives an explicit repository `--project-root`; intentional smoke/fallback overrides remain untrusted for direct-host health but no longer fail the direct-host guard as if they were a connected-host response. Gate test outer timeouts exceed the runner budgets they observe, so high machine load does not turn successful cleanup into `status=null`. A fresh wrapper loads this recovery by default; old live wrappers and the current task's already-closed transport still require a complete Codex MCP host/session restart.
+
+## CG-NF-20260714-002: Broad de-duplication maintenance queries preserve raw noise instead of canonical contract sources
+
+- status: fixed
+- reported_at: 2026-07-14
+- reporter: codex-agent
+- feature_scope: de-duplication boundary maintenance, context-pack query focusing, source ordering, and adapter provenance quality
+- query_surface: nanoflow_context_pack | adapter-context-cli | log-guard
+- query: `NanoFlow CodeGraph current adaptation quality dedup maintenance source ordering test helper pollution remaining semantic gaps native output standard`
+- expected: Broad de-duplication maintenance intent should be rewritten to the authoritative de-dup contract and implementation files, keeping adapter/wrapper/validator source first without becoming a second generic CodeGraph ranking engine.
+- actual: Before the fix, direct MCP returned context-quality test fixture helpers and Android bootstrap source first. A fresh adapter run recorded `top-ranked-overlay-not-first`; its standalone broad overlay query also timed out once.
+- evidence:
+  - docs_contract: `docs/codegraph-nanoflow-dedup-contract.json` query/source-ordering duplicate boundary
+  - output_summary: Query-aware RED fixtures proved the raw query selected test and Android noise. After repair, the first source files are `scripts/validate-codegraph-overlay-docs.cjs`, `scripts/query-codegraph-nanoflow-overlay.mjs`, and `scripts/codegraph-nanoflow-mcp-stdio.cjs`.
+  - log_guard: The fresh adapter response reports `topRankedOverlayFileVisibleIndex=0`, `firstSourceBlockIsTopRankedOverlayFile=true`, eight filtered unrelated metadata lines, and zero overlay timeouts.
+- freshness_checks:
+  - mcp_result: success
+  - adapter_fallback_result: success
+  - wrapper_stale: no
+  - overlay_stale: no
+  - transport_failure: no
+- likely_root_cause: implementation-gap | query-ranking | source-ordering
+- repair_target: context-pack-wrapper | query-selection | tests | docs
+- doc_update_needed: yes
+- verification_gate: `npx vitest run --config vitest.config.mts src/tests/scripts/codegraph-nanoflow-overlay.spec.ts -t "de-duplication"; npx vitest run --config vitest.config.mts src/tests/scripts/codegraph-adapter-context-cli.spec.ts; npm run codegraph:adapter:context -- --query "NanoFlow CodeGraph current adaptation quality dedup maintenance source ordering test helper pollution remaining semantic gaps native output standard" --json; npm run codegraph:overlay:docs:validate`
+- resolution_notes: Adapter and wrapper now share one path-focused de-duplication maintenance query. The wrapper applies it consistently to base exploration, overlay lookup, and source ranking, while preserving the original query in the exploration heading. Native `Not shown above` metadata is classified and filtered to de-duplication maintenance sources, so unrelated Android, migration, e2e, generic map, and CI entries no longer consume output budget.
+
+## CG-NF-20260714-001: Top-ranked decision helpers bypassed de-dup manifest discovery
+
+- status: fixed
+- reported_at: 2026-07-14
+- reporter: codex-agent
+- feature_scope: context-pack source-ordering diagnostics and native CodeGraph delegation boundaries
+- query_surface: docs-validator
+- query: `summarizeContextPackTopRankedOverlayDecision contextPackTopRankedOverlayDecisionEntry`
+- expected: Top-ranked source decision helpers must be discovered by the docs validator and registered in the de-dup manifest so NanoFlow diagnostic policy cannot silently expand into generic ranking ownership.
+- actual: The validator covered `contextPackDiagnostic...` helpers but missed `contextPackTopRanked...` and `summarizeContextPackTopRanked...`; unregistered decision helpers therefore passed validation.
+- evidence:
+  - docs_contract: `docs/codegraph-nanoflow-dedup-contract.json` context-pack source-ordering hotspot
+  - output_summary: A RED fixture appended two unregistered top-ranked decision helpers and the validator exited 0; after repair it reports both names until they are registered.
+  - log_guard: not applicable; this was a manifest discovery gap.
+- freshness_checks:
+  - mcp_result: not-run
+  - adapter_fallback_result: not-run
+  - wrapper_stale: no
+  - overlay_stale: no
+  - transport_failure: no
+- likely_root_cause: implementation-gap
+- repair_target: docs | tests
+- doc_update_needed: yes
+- verification_gate: `npx vitest run --config vitest.config.mts src/tests/scripts/validate-codegraph-overlay-docs.spec.ts -t "top-ranked decision diagnostic helper"; npm run codegraph:overlay:docs:validate`
+- resolution_notes: Discovery now covers `contextPackTopRanked...` and `summarizeContextPackTopRanked...`; the manifest registers the two current decision helpers.
+
 ## CG-NF-20260708-002: Context-pack diagnostic helpers could bypass the de-duplication manifest
 
 - status: fixed
@@ -1523,6 +1911,84 @@ No active issues are recorded yet.
 - doc_update_needed: yes
 - verification_gate: `npx vitest run --config vitest.config.mts --no-file-parallelism --maxWorkers 1 src/tests/scripts/codegraph-adapter-doctor.spec.ts -t "classifies observed direct MCP Transport closed even when no new wrapper log was written"; npm run codegraph:adapter:doctor -- --explain --direct-mcp-error "Transport closed"`
 - resolution_notes: Doctor now records `hostMcp.logEvidence` and projects it into root-cause JSON and human-readable explain output. The key fields are `observedAt`, `latestTs`, `latestEvent`, `latestRunId`, `latestLogAgeMs`, `activeWindowMs`, `staleAgainstObservedAt`, `hasCurrentWrapperEvidence`, `liveWrapperLogFilter.ignoredWrapperStarts`, `liveWrapperLogFilter.ignoredContextResponses`, `currentEvidenceWindow.ignoredWrapperStarts`, `currentEvidenceWindow.ignoredContextResponses`, and `noCurrentWrapperEvidence`.
+
+## CG-NF-20260727-001: Non-zero overlay counters retained stale zero reasons
+
+- status: fixed
+- reported_at: 2026-07-27
+- reporter: codex-agent
+- feature_scope: generated overlay baseline manifest and project semantic coverage fail-closed behavior
+- query_surface: overlay-query-cli
+- query: `npm run codegraph:overlay:manifest:generate`
+- expected: A baseline counter may carry `zeroReason` only while its generated value is exactly `0`; counters backed by real project relations must not retain stale zero-value exemptions.
+- actual: Before the repair, `counterContract(name)` attached every registered zero reason without checking the generated value, while template-directive and Realtime unsubscribe relations were already present in the real overlay.
+- evidence:
+  - docs_contract: `scripts/lib/codegraph-overlay-contract-manifest.cjs` is the shared machine contract for generated counter volatility and zero-value exemptions.
+  - output_summary: RED coverage made a zero-reason counter non-zero and still observed `zeroReason`; the real overlay also contradicted three stale map entries.
+  - log_guard: No transport or wrapper failure was involved; this was isolated to generated baseline contract data.
+- freshness_checks:
+  - mcp_result: success
+  - adapter_fallback_result: success
+  - wrapper_stale: no
+  - overlay_stale: no
+  - transport_failure: no
+- likely_root_cause: implementation-gap
+- repair_target: generator | tests | docs
+- doc_update_needed: yes
+- verification_gate: `npx vitest run --config vitest.config.mts --no-file-parallelism --maxWorkers 1 src/tests/scripts/codegraph-overlay-baseline-manifest.spec.ts; npm run codegraph:overlay:docs:validate`
+- resolution_notes: `counterContract(name, value)` now emits `zeroReason` only for a zero value, and stale template-directive plus Realtime unsubscribe exemptions were removed. Regression coverage locks both the non-zero fail-open case and the current real-project relation set.
+
+## CG-NF-20260727-002: Strict native JSON helpers shared the Markdown formatter hotspot
+
+- status: fixed
+- reported_at: 2026-07-27
+- reporter: codex-agent
+- feature_scope: strict-native JSON formatter ownership and CodeGraph de-duplication manifest boundaries
+- query_surface: overlay-query-cli
+- query: `toNativeJsonFormatterResponse serializeNativeJsonNode serializeNativeJsonEdge nativeJsonEdgeLine nativeJsonEdgeColumn`
+- expected: Strict-native JSON owns an independent `native-json-formatter` hotspot with only the `nativeJson` output surface; its serializer helpers must not be absorbed by strict or augmented Markdown formatter entries.
+- actual: Before the repair, `toNativeJsonFormatterResponse` and its serializers were covered children of `formatStrictNativeMarkdown()`, so the machine contract could not independently enforce native JSON ownership.
+- evidence:
+  - docs_contract: `docs/codegraph-nanoflow-dedup-contract.json` strict-native projection boundary and the de-duplication hotspot table in `docs/codegraph-nanoflow-adaptation.md`.
+  - output_summary: RED tests could remove the JSON formatter boundary or move JSON helpers into the Markdown hotspot without a dedicated boundary error.
+  - log_guard: No runtime transport failure was involved; this was a static ownership-contract gap.
+- freshness_checks:
+  - mcp_result: success
+  - adapter_fallback_result: success
+  - wrapper_stale: no
+  - overlay_stale: no
+  - transport_failure: no
+- likely_root_cause: implementation-gap
+- repair_target: native-json | docs | tests
+- doc_update_needed: yes
+- verification_gate: `npx vitest run --config vitest.config.mts --no-file-parallelism --maxWorkers 1 src/tests/scripts/validate-codegraph-overlay-docs.spec.ts -t "strict native JSON"; npm run codegraph:overlay:docs:validate`
+- resolution_notes: The manifest now registers `toNativeJsonFormatterResponse()` as a source-conditional required `native-json-formatter` hotspot, keeps its serializer helpers under that entry, and rejects Markdown ownership or output-surface drift.
+
+## CG-NF-20260727-003: Context-pack output shapers could bypass de-duplication discovery
+
+- status: fixed
+- reported_at: 2026-07-27
+- reporter: codex-agent
+- feature_scope: context-pack filtering/output shaping and de-duplication manifest child closure
+- query_surface: nanoflow_context_pack
+- query: `insertContextPackSectionContent insertContextPackRelationshipContent limitContextPackOverlayEvidence limitContextPackMarkdownSourceFiles isPureNoHitContextPack classifyContextPackBaseMarkdownHeading`
+- expected: Every helper that inserts, filters, budgets, classifies, or suppresses context-pack output must be discovered and registered under the context-pack filter hotspot, preventing an untracked parallel formatter layer.
+- actual: Before the repair, the discovery pattern covered source ranking but omitted several section insertion, relationship insertion, hard-budget, no-hit, grouping, and base-heading classification helpers.
+- evidence:
+  - docs_contract: `docs/codegraph-nanoflow-dedup-contract.json` context-pack filter hotspot and `docs/codegraph-nanoflow-adaptation.md` machine-discovery contract.
+  - output_summary: RED tests removed representative output-shaping children without triggering the missing-helper contract.
+  - log_guard: No transport or source-ordering runtime failure was required; this was static manifest coverage.
+- freshness_checks:
+  - mcp_result: success
+  - adapter_fallback_result: not-run
+  - wrapper_stale: no
+  - overlay_stale: no
+  - transport_failure: no
+- likely_root_cause: implementation-gap
+- repair_target: context-pack-wrapper | docs | tests
+- doc_update_needed: yes
+- verification_gate: `npx vitest run --config vitest.config.mts --no-file-parallelism --maxWorkers 1 src/tests/scripts/validate-codegraph-overlay-docs.spec.ts -t "context-pack output shaping"; npm run codegraph:overlay:docs:validate`
+- resolution_notes: The validator now discovers context-pack section/relationship insertion, overlay/source-file limits, no-hit checks, source-evidence grouping, and base-heading classification helpers; the manifest registers them under `sanitizeContextPackBaseMarkdownSections()`.
 
 ## Entry Template
 

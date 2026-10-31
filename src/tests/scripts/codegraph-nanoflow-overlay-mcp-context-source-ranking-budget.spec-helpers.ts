@@ -170,4 +170,78 @@ export function registerCodegraphOverlayMcpContextSourceRankingBudgetSpecs(
       child.kill();
     }
   }, 12_000);
+
+  it('enforces maxFiles across final context-pack source and relation evidence', async () => {
+    const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-codegraph-context-hard-file-budget-'));
+    tempRoots.push(projectRoot);
+    const files = ['src/primary-budget.ts', 'src/secondary-budget.ts'];
+    for (const [index, file] of files.entries()) {
+      writeFile(projectRoot, file, `export function BudgetEvidence${index}(): number { return ${index}; }\n`);
+    }
+    writeFile(
+      projectRoot,
+      'scripts/query-codegraph-nanoflow-overlay.mjs',
+      [
+        '#!/usr/bin/env node',
+        `const files = ${JSON.stringify(files)};`,
+        'const nodes = files.map((file, index) => ({',
+        '  id: `function:${file}:BudgetEvidence${index}`,',
+        '  kind: "function",',
+        '  name: `BudgetEvidence${index}`,',
+        '  qualifiedName: `BudgetEvidence${index}`,',
+        '  filePath: file,',
+        '  language: "typescript",',
+        '  startLine: 1,',
+        '  endLine: 1',
+        '}));',
+        'process.stdout.write(JSON.stringify({',
+        '  query: "BudgetEvidence",',
+        '  matches: nodes.map(node => ({ kind: node.kind, name: node.name, file: node.filePath })),',
+        '  nodes,',
+        '  edges: [{ source: nodes[0].id, target: nodes[1].id, kind: "calls" }],',
+        '  relationshipGroups: { calls: [{ source: nodes[0].id, target: nodes[1].id, kind: "calls" }] },',
+        '  relatedFiles: files,',
+        '  coverage: { graphNodes: 2, graphEdges: 1 }',
+        '}));',
+        '',
+      ].join('\n'),
+    );
+    const fakeCodegraph = makeFakeCodegraph();
+    const child = spawn(
+      process.execPath,
+      [wrapperScriptPath, fakeCodegraph, 'serve', '--mcp', '--path', projectRoot],
+      {
+        cwd: repoRoot,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: {
+          ...process.env,
+          NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '5000',
+          NANOFLOW_CODEGRAPH_OVERLAY_QUERY_TIMEOUT_MS: '5000',
+        },
+      },
+    );
+
+    try {
+      const responsePromise = readJsonLine(child, 8_000);
+      child.stdin.write(`${JSON.stringify({
+        jsonrpc: '2.0',
+        id: 53,
+        method: 'tools/call',
+        params: {
+          name: 'nanoflow_context_pack',
+          arguments: { query: 'BudgetEvidence', maxFiles: 1, overlayLimit: 1 },
+        },
+      })}\n`);
+      const response = await responsePromise as {
+        result: { isError: boolean; content: Array<{ text: string }> };
+      };
+      const text = response.result.content[0].text;
+      expect(response.result.isError).toBe(false);
+      expect([...text.matchAll(/^####\s+(.+)$/gm)]).toHaveLength(1);
+      expect(text).toContain(files[0]);
+      expect(text).not.toContain(files[1]);
+    } finally {
+      child.kill();
+    }
+  }, 12_000);
 }

@@ -5,25 +5,40 @@ import { expect, it } from 'vitest';
 
 import type { CodegraphOverlaySpecContext } from './codegraph-nanoflow-overlay.spec-context';
 
+const OVERLAY_OUTPUT_MODES = [
+  { label: 'Markdown', args: [] },
+  { label: 'JSON', args: ['--json'] },
+  { label: 'context JSON', args: ['--context-json'] },
+  { label: 'native JSON', args: ['--native-json'] },
+  { label: 'native Markdown', args: ['--native-markdown'] },
+] as const;
+
+function overlayQueryEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  for (const key of Object.keys(env)) {
+    if (key.toUpperCase() === 'NANOFLOW_OVERLAY_SKIP_REFRESH') delete env[key];
+  }
+  return { ...env, ...overrides };
+}
+
 export function registerCodegraphOverlayQueryLatencySpecs(context: CodegraphOverlaySpecContext): void {
   const {
     makeFixture,
     writeFile,
     expectSpawnSuccess,
+    queryOverlay,
     repoRoot,
-    scriptPath,
-    queryScriptPath,
     parseJsonLinesFromText,
   } = context;
+  const currentQueryScriptPath = path.join(repoRoot, 'scripts', 'query-codegraph-nanoflow-overlay.mjs');
 
-  it('can skip synchronous stale overlay refreshes for latency-sensitive MCP queries', () => {
+  it('keeps skip-refresh as a CURRENT-only compatibility no-op without regenerating', () => {
     const root = makeFixture();
-    const generateResult = spawnSync(process.execPath, [scriptPath, '--root', root], {
-      cwd: repoRoot,
-      encoding: 'utf-8',
-    });
-    expectSpawnSuccess(generateResult);
-
+    expectSpawnSuccess(queryOverlay(root, 'SampleService'));
+    const generationRoot = path.join(root, '.codegraph', 'nanoflow-generations');
+    const currentPath = path.join(generationRoot, 'CURRENT.json');
+    const currentBytes = fs.readFileSync(currentPath);
+    const generationEntries = fs.readdirSync(generationRoot).sort();
     writeFile(
       root,
       'src/app/features/sample/stale-overlay-skipped.ts',
@@ -33,127 +48,81 @@ export function registerCodegraphOverlayQueryLatencySpecs(context: CodegraphOver
       ].join('\n'),
     );
 
-    const result = spawnSync(process.execPath, [
-      queryScriptPath,
-      '--root',
-      root,
-      '--query',
-      'StaleOverlaySkippedClass',
-      '--context-json',
-      '--skip-refresh',
-    ], {
-      cwd: repoRoot,
-      encoding: 'utf-8',
-      maxBuffer: 32 * 1024 * 1024,
-    });
+    const cases = [
+      ...OVERLAY_OUTPUT_MODES.map(mode => ({ ...mode, args: [...mode.args, '--skip-refresh'] })),
+      { label: 'implicit context JSON', args: ['--context-json'] },
+      { label: 'environment skip', args: ['--json'], env: { NANOFLOW_OVERLAY_SKIP_REFRESH: '1' } },
+    ];
+    for (const testCase of cases) {
+      const result = spawnSync(process.execPath, [
+        currentQueryScriptPath,
+        '--root', root,
+        '--query', 'StaleOverlaySkippedClass',
+        ...testCase.args,
+      ], {
+        cwd: repoRoot,
+        encoding: 'utf-8',
+        env: overlayQueryEnv({ NANOFLOW_OVERLAY_QUERY_PROFILE: '1', ...testCase.env }),
+        maxBuffer: 32 * 1024 * 1024,
+      });
 
-    expectSpawnSuccess(result);
-    const response = JSON.parse(result.stdout);
-    expect(response.matches).toEqual([]);
-    expect(response.nodes).toEqual([]);
-  });
+      expectSpawnSuccess(result);
+      const phases = parseJsonLinesFromText(result.stderr)
+        .filter(entry => entry.event === 'nanoflow.overlay.profile')
+        .map(entry => entry.phase);
+      expect(phases.filter(phase => phase === 'readOverlayCurrentReceipt'), testCase.label).toHaveLength(1);
+      expect(phases, testCase.label).not.toContain('checkOverlayFreshness');
+      expect(phases.some(phase => String(phase).startsWith('ensureOverlay:')), testCase.label).toBe(false);
+      expect(phases).toContain('queryOverlay');
+    }
+    expect(fs.readFileSync(currentPath)).toEqual(currentBytes);
+    expect(fs.readdirSync(generationRoot).sort()).toEqual(generationEntries);
+    expect(fs.existsSync(path.join(root, '.codegraph', 'nanoflow-overlay.json'))).toBe(false);
+  }, 30_000);
 
-  it('treats compact context JSON queries as latency-sensitive even without an explicit skip flag', () => {
+  it('keeps fresh skip and non-skip projections byte-identical with one bounded CURRENT read', () => {
     const root = makeFixture();
-    const generateResult = spawnSync(process.execPath, [scriptPath, '--root', root], {
-      cwd: repoRoot,
-      encoding: 'utf-8',
-    });
-    expectSpawnSuccess(generateResult);
+    expectSpawnSuccess(queryOverlay(root, 'SampleService'));
+    const currentPath = path.join(root, '.codegraph', 'nanoflow-generations', 'CURRENT.json');
+    const currentBytes = fs.readFileSync(currentPath);
 
-    const newSourcePath = path.join(root, 'src/app/features/sample/context-json-stale.ts');
-    writeFile(
-      root,
-      'src/app/features/sample/context-json-stale.ts',
-      [
-        'export class ContextJsonStaleClass {}',
-        '',
-      ].join('\n'),
-    );
-    const futureMtime = new Date(Date.now() + 2000);
-    fs.utimesSync(newSourcePath, futureMtime, futureMtime);
+    for (const mode of OVERLAY_OUTPUT_MODES) {
+      const results = [false, true].map(skipRefresh => spawnSync(process.execPath, [
+        currentQueryScriptPath,
+        '--root', root,
+        '--query', 'SampleService',
+        ...mode.args,
+        ...(skipRefresh ? ['--skip-refresh'] : []),
+      ], {
+        cwd: repoRoot,
+        encoding: 'utf-8',
+        env: overlayQueryEnv({ NANOFLOW_OVERLAY_QUERY_PROFILE: '1' }),
+        maxBuffer: 32 * 1024 * 1024,
+      }));
+      results.forEach(expectSpawnSuccess);
+      expect(results[1].stdout, mode.label).toBe(results[0].stdout);
+      for (const result of results) {
+        const phases = parseJsonLinesFromText(result.stderr)
+          .filter(entry => entry.event === 'nanoflow.overlay.profile')
+          .map(entry => entry.phase);
+        expect(phases.filter(phase => phase === 'readOverlayCurrentReceipt'), mode.label).toHaveLength(1);
+        expect(phases, mode.label).not.toContain('checkOverlayFreshness');
+        expect(phases.at(-1), mode.label).toEqual(expect.stringMatching(/^write(?:ContextJson|Json|Markdown)$/));
+        expect(phases.filter(phase => String(phase).startsWith('write'))).toHaveLength(1);
+        expect(phases.some(phase => String(phase).startsWith('ensureOverlay:'))).toBe(false);
+      }
+    }
+    expect(fs.readFileSync(currentPath)).toEqual(currentBytes);
+  }, 30_000);
 
-    const result = spawnSync(process.execPath, [
-      queryScriptPath,
-      '--root',
-      root,
-      '--query',
-      'ContextJsonStaleClass',
-      '--context-json',
-    ], {
-      cwd: repoRoot,
-      encoding: 'utf-8',
-      maxBuffer: 32 * 1024 * 1024,
-    });
-
-    expectSpawnSuccess(result);
-    const response = JSON.parse(result.stdout);
-    expect(response.matches).toEqual([]);
-    expect(response.nodes).toEqual([]);
-  });
-
-  it('profiles overlay file reads and JSON parse separately for timeout diagnosis', () => {
+  it('requires explicit publication before newly added source symbols become queryable', () => {
     const root = makeFixture();
-    const generateResult = spawnSync(process.execPath, [scriptPath, '--root', root], {
-      cwd: repoRoot,
-      encoding: 'utf-8',
-    });
-    expectSpawnSuccess(generateResult);
-
-    const result = spawnSync(process.execPath, [
-      queryScriptPath,
-      '--root',
-      root,
-      '--query',
-      'SampleService',
-      '--context-json',
-      '--skip-refresh',
-    ], {
-      cwd: repoRoot,
-      encoding: 'utf-8',
-      env: {
-        ...process.env,
-        NANOFLOW_OVERLAY_QUERY_PROFILE: '1',
-      },
-      maxBuffer: 32 * 1024 * 1024,
-    });
-
-    expectSpawnSuccess(result);
-    const profiles = parseJsonLinesFromText(result.stderr);
-    expect(profiles).toContainEqual(expect.objectContaining({
-      event: 'nanoflow.overlay.profile.meta',
-      pid: expect.any(Number),
-      root,
-      overlayPath: path.join(root, '.codegraph', 'nanoflow-overlay.json'),
-      query: 'SampleService',
-      limit: 20,
-      skipRefresh: true,
-      contextJson: true,
-      json: true,
-      nativeJson: false,
-      nativeMarkdown: false,
-    }));
-    expect(profiles).toContainEqual(expect.objectContaining({
-      event: 'nanoflow.overlay.profile',
-      phase: 'readOverlayFile',
-      elapsedMs: expect.any(Number),
-    }));
-    expect(profiles).toContainEqual(expect.objectContaining({
-      event: 'nanoflow.overlay.profile',
-      phase: 'parseOverlayJson',
-      elapsedMs: expect.any(Number),
-    }));
-  });
-
-  it('refreshes stale overlay files before querying newly added source symbols', () => {
-    const root = makeFixture();
-    const generateResult = spawnSync(process.execPath, [scriptPath, '--root', root], {
-      cwd: repoRoot,
-      encoding: 'utf-8',
-    });
-    expectSpawnSuccess(generateResult);
-
-    const newSourcePath = path.join(root, 'src/app/features/sample/stale-overlay-fresh.ts');
+    expectSpawnSuccess(queryOverlay(root, 'SampleService'));
+    const generationRoot = path.join(root, '.codegraph', 'nanoflow-generations');
+    const currentPath = path.join(generationRoot, 'CURRENT.json');
+    const firstCurrentBytes = fs.readFileSync(currentPath);
+    const firstCurrent = JSON.parse(firstCurrentBytes.toString('utf8')) as { sequence: string };
+    const firstGenerationEntries = fs.readdirSync(generationRoot).sort();
     writeFile(
       root,
       'src/app/features/sample/stale-overlay-fresh.ts',
@@ -164,11 +133,9 @@ export function registerCodegraphOverlayQueryLatencySpecs(context: CodegraphOver
         '',
       ].join('\n'),
     );
-    const futureMtime = new Date(Date.now() + 2000);
-    fs.utimesSync(newSourcePath, futureMtime, futureMtime);
 
-    const result = spawnSync(process.execPath, [
-      queryScriptPath,
+    const beforePublication = spawnSync(process.execPath, [
+      currentQueryScriptPath,
       '--root',
       root,
       '--query',
@@ -179,13 +146,25 @@ export function registerCodegraphOverlayQueryLatencySpecs(context: CodegraphOver
       encoding: 'utf-8',
     });
 
-    expectSpawnSuccess(result);
-    const response = JSON.parse(result.stdout);
-    expect(response.nodes).toEqual(expect.arrayContaining([
+    expectSpawnSuccess(beforePublication);
+    expect(JSON.parse(beforePublication.stdout).nodes).not.toEqual(expect.arrayContaining([
       expect.objectContaining({
         name: 'StaleOverlayFreshClass',
         filePath: 'src/app/features/sample/stale-overlay-fresh.ts',
       }),
     ]));
+    expect(fs.readFileSync(currentPath)).toEqual(firstCurrentBytes);
+    expect(fs.readdirSync(generationRoot).sort()).toEqual(firstGenerationEntries);
+
+    const afterPublication = queryOverlay(root, 'StaleOverlayFreshClass');
+    expectSpawnSuccess(afterPublication);
+    expect(JSON.parse(afterPublication.stdout).nodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        name: 'StaleOverlayFreshClass',
+        filePath: 'src/app/features/sample/stale-overlay-fresh.ts',
+      }),
+    ]));
+    const secondCurrent = JSON.parse(fs.readFileSync(currentPath, 'utf8')) as { sequence: string };
+    expect(BigInt(secondCurrent.sequence)).toBeGreaterThan(BigInt(firstCurrent.sequence));
   }, 10_000);
 }

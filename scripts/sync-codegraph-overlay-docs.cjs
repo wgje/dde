@@ -5,6 +5,9 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { buildBaseline } = require('./lib/codegraph-overlay-baseline.cjs');
 const {
+  readOverlayCurrentReceipt,
+} = require('./lib/codegraph-overlay-current-receipt.cjs');
+const {
   assertDocsTransactionClean,
   assertNumericTokenOnlyChange,
   createParticipantToken,
@@ -16,16 +19,20 @@ const {
   writeFsynced,
 } = require('./lib/codegraph-overlay-stability.cjs');
 
-const DOC_PARTICIPANTS = [
-  { id: 'agents', relativePath: 'AGENTS.md' },
-  { id: 'adaptation', relativePath: 'docs/codegraph-nanoflow-adaptation.md' },
-];
-const DOC_PATHS = DOC_PARTICIPANTS.map(participant => participant.relativePath);
+const AGENT_CONTRACT_RELATIVE_PATH = 'docs/codegraph-nanoflow-agent-contract.md';
+const LEGACY_AGENT_CONTRACT_RELATIVE_PATH = 'AGENTS.md';
+const ADAPTATION_DOC_RELATIVE_PATH = 'docs/codegraph-nanoflow-adaptation.md';
 const CANONICAL_PARTICIPANT_POLICY = Object.freeze({ allowMissingAnchors: false });
 const LEGACY_PARTIAL_FIXTURE_PARTICIPANT_POLICY = Object.freeze({ allowMissingAnchors: true });
 
-function readJson(root, relativePath) {
-  return JSON.parse(fs.readFileSync(path.join(root, relativePath), 'utf8'));
+function docParticipantDefinitions(root) {
+  const agentContractPath = fs.existsSync(path.join(root, AGENT_CONTRACT_RELATIVE_PATH))
+    ? AGENT_CONTRACT_RELATIVE_PATH
+    : LEGACY_AGENT_CONTRACT_RELATIVE_PATH;
+  return [
+    { id: 'agents', relativePath: agentContractPath },
+    { id: 'adaptation', relativePath: ADAPTATION_DOC_RELATIVE_PATH },
+  ];
 }
 
 function replaceAnchor(text, pattern, replacement, label, participant) {
@@ -142,6 +149,13 @@ function syncAdaptationDoc(text, baseline, participant) {
     /Realtime node summary:\s+[\d,]+\s+supabase-realtime-channel nodes,\s+[\d,]+\s+supabase-realtime-postgres-change nodes,\s+[\d,]+\s+supabase-realtime-status nodes,\s+[\d,]+\s+supabase-realtime-remove-channel nodes,\s+[\d,]+\s+supabase-realtime-unsubscribe nodes,\s+and\s+[\d,]+\s+supabase-realtime-remove-all-channels nodes/,
     `Realtime node summary: ${baseline.supabaseRealtimeChannelNodes} supabase-realtime-channel nodes, ${baseline.supabaseRealtimePostgresChangeNodes} supabase-realtime-postgres-change nodes, ${baseline.supabaseRealtimeStatusNodes} supabase-realtime-status nodes, ${baseline.supabaseRealtimeRemoveChannelNodes} supabase-realtime-remove-channel nodes, ${baseline.supabaseRealtimeUnsubscribeNodes} supabase-realtime-unsubscribe nodes, and ${baseline.supabaseRealtimeRemoveAllChannelsNodes} supabase-realtime-remove-all-channels nodes`,
     'Realtime node summary',
+  );
+  updated = replaceAnchor(
+    updated,
+    /real tree has\s+[\d,]+\s+`supabase-realtime-unsubscribe`\s+and\s+[\d,]+\s+`supabase-realtime-remove-all-channels`\s+edges/,
+    `real tree has ${baseline.supabaseRealtimeUnsubscribeEdges} \`supabase-realtime-unsubscribe\` and ${baseline.supabaseRealtimeRemoveAllChannelsEdges} \`supabase-realtime-remove-all-channels\` edges`,
+    'Realtime cleanup prose summary',
+    { ...participant, allowMissingAnchors: true },
   );
   updated = replaceOne(
     updated,
@@ -398,7 +412,7 @@ function resolveParticipantPolicy(candidate) {
 function docParticipants(root, participantPolicy) {
   const normalizedRoot = path.resolve(root);
   const policy = resolveParticipantPolicy(participantPolicy);
-  return DOC_PARTICIPANTS.map(definition => {
+  return docParticipantDefinitions(normalizedRoot).map(definition => {
     const absolutePath = path.resolve(normalizedRoot, definition.relativePath);
     const normalizedRelativePath = path.relative(normalizedRoot, absolutePath).replace(/\\/g, '/');
     if (normalizedRelativePath !== definition.relativePath) {
@@ -506,6 +520,7 @@ function cleanupTransaction(transaction) {
 
 function readPendingTransaction(root, pendingDirectory = docsTransactionPaths(root).directory) {
   const basePaths = docsTransactionPaths(root);
+  const docPaths = docParticipantDefinitions(root).map(participant => participant.relativePath);
   const paths = { ...basePaths, directory: pendingDirectory, journal: path.join(pendingDirectory, 'journal.json') };
   let journal;
   try {
@@ -516,11 +531,11 @@ function readPendingTransaction(root, pendingDirectory = docsTransactionPaths(ro
   if (journal?.version !== 1 || !/^[a-f0-9]{16}-[a-f0-9]{32}$/.test(journal?.token ?? '')) {
     throw new Error('codegraph-overlay-doc-sync-unknown-hash: invalid-journal');
   }
-  if (!Array.isArray(journal.docs) || journal.docs.length !== DOC_PATHS.length) {
+  if (!Array.isArray(journal.docs) || journal.docs.length !== docPaths.length) {
     throw new Error('codegraph-overlay-doc-sync-unknown-hash: invalid-participants');
   }
   const docs = journal.docs.map((doc, index) => {
-    if (doc.path !== DOC_PATHS[index] || doc.preImage !== `${index}.pre` || doc.postImage !== `${index}.post`) {
+    if (doc.path !== docPaths[index] || doc.preImage !== `${index}.pre` || doc.postImage !== `${index}.post`) {
       throw new Error('codegraph-overlay-doc-sync-unknown-hash: invalid-participant-path');
     }
     const expectedTemp = path.join(path.dirname(doc.path), `.${path.basename(doc.path)}.nanoflow-doc-sync-${journal.token}.tmp`).replace(/\\/g, '/');
@@ -586,8 +601,11 @@ function recoverDocs(root) {
 
 function syncDocs(root, options = {}) {
   assertDocsTransactionClean(root);
-  const overlay = readJson(root, '.codegraph/nanoflow-overlay.json');
-  const baseline = buildBaseline(overlay);
+  const currentReceipt = readOverlayCurrentReceipt(root);
+  if (!currentReceipt.ok) {
+    throw new Error(`codegraph-overlay-doc-sync-current-${currentReceipt.errorCode.toLowerCase().replaceAll('_', '-')}`);
+  }
+  const baseline = buildBaseline(currentReceipt.overlay);
   const outputs = buildDocOutputs(root, baseline, options.participantPolicy);
   if (outputs.every(output => output.before === output.after)) return { baseline, changed: false };
   const transaction = prepareTransaction(root, outputs);

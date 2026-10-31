@@ -5,6 +5,57 @@ import { expect, it } from 'vitest';
 import { makeFixture, runValidator } from './validate-codegraph-overlay-docs.spec-helpers';
 
 export function registerValidateCodegraphOverlayDocsTailSpecs(): void {
+  it.each([
+    'AGENTS.md',
+    'docs/codegraph-nanoflow-adaptation.md',
+  ])('rejects legacy root overlay authority in %s', relativePath => {
+    const root = makeFixture();
+    const filePath = path.join(root, relativePath);
+    fs.writeFileSync(
+      filePath,
+      fs.readFileSync(filePath, 'utf8').replace(
+        '.codegraph/nanoflow-generations/CURRENT.json',
+        '.codegraph/nanoflow-overlay.json',
+      ),
+    );
+
+    const result = runValidator(root);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      `${relativePath} missing immutable generation selector .codegraph/nanoflow-generations/CURRENT.json`,
+    );
+    expect(result.stderr).toContain(
+      `${relativePath} must not describe .codegraph/nanoflow-overlay.json as production authority`,
+    );
+  });
+
+  it.each([
+    'AGENTS.md',
+    'docs/codegraph-nanoflow-adaptation.md',
+  ])('requires the complete immutable generation reader contract in %s', relativePath => {
+    const root = makeFixture();
+    const filePath = path.join(root, relativePath);
+    fs.writeFileSync(
+      filePath,
+      fs.readFileSync(filePath, 'utf8')
+        .replace('.codegraph/nanoflow-generations/CURRENT.json', 'CURRENT-selector')
+        .replace('.codegraph/nanoflow-generations/<generation-id>/', 'generation-directory')
+        .replace('compatibility/nanoflow-overlay.json', 'compatibility-copy')
+        .replace('scripts/lib/codegraph-overlay-current-receipt.cjs', 'shared-reader-module')
+        .replace('readOverlayCurrentReceipt(projectRoot)', 'shared-reader-api'),
+    );
+
+    const result = runValidator(root);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(`${relativePath} missing immutable generation selector`);
+    expect(result.stderr).toContain(`${relativePath} missing immutable generation directory contract`);
+    expect(result.stderr).toContain(`${relativePath} missing generation compatibility copy contract`);
+    expect(result.stderr).toContain(`${relativePath} missing shared CURRENT reader module`);
+    expect(result.stderr).toContain(`${relativePath} missing shared CURRENT reader API`);
+  });
+
   it('does not treat self-referential global graph totals as freshness gates', () => {
     const root = makeFixture();
     const agentsPath = path.join(root, 'AGENTS.md');
@@ -151,6 +202,32 @@ export function registerValidateCodegraphOverlayDocsTailSpecs(): void {
     expect(result.status).toBe(1);
     expect(result.stderr).toContain('AGENTS.md hardRuleKeywordEdges expected 1, found 0');
     expect(result.stderr).toContain('docs/codegraph-nanoflow-adaptation.md hardRuleKeywordEdges expected 1, found 0');
+  });
+
+  it('fails when documented hard-rule anchor counts drift from the overlay', () => {
+    const root = makeFixture({ hardRulesInDocs: 0 });
+
+    const result = runValidator(root);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('AGENTS.md hardRules expected 1, found 0');
+    expect(result.stderr).toContain('docs/codegraph-nanoflow-adaptation.md hardRules expected 1, found 0');
+  });
+
+  it('fails when an extra hard-rule evidence narrative carries stale counts', () => {
+    const root = makeFixture();
+    const adaptationPath = path.join(root, 'docs', 'codegraph-nanoflow-adaptation.md');
+    fs.appendFileSync(
+      adaptationPath,
+      '\nHistorical evidence: 0 hard-rule keyword nodes, 0 hard-rule implementation edges, and 0 hard-rule implementation targets.\n',
+    );
+
+    const result = runValidator(root);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('docs/codegraph-nanoflow-adaptation.md hardRuleKeywordNodes expected 1, found 0');
+    expect(result.stderr).toContain('docs/codegraph-nanoflow-adaptation.md hardRuleImplementationEdges expected 1, found 0');
+    expect(result.stderr).toContain('docs/codegraph-nanoflow-adaptation.md hardRuleImplementationTargets expected 1, found 0');
   });
 
   it('fails when documented AGENTS node and config provenance counts drift from the overlay', () => {

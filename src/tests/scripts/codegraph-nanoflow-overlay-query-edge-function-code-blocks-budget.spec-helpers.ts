@@ -11,6 +11,9 @@ export function registerCodegraphOverlayEdgeFunctionCodeBlockBudgetSpecs(
   context: CodegraphOverlaySpecContext,
 ): void {
   const { tempRoots, writeFile, queryOverlay, expectSpawnSuccess, repoRoot, queryScriptPath } = context;
+  const fixtureQueryArgs = (...args: string[]): string[] => [
+    '--overlay', '.codegraph/nanoflow-overlay.json', ...args,
+  ];
 
   it('does not backfill Edge Function method and header budgets with synthetic variables', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-codegraph-edge-method-header-no-variable-backfill-'));
@@ -102,8 +105,8 @@ export function registerCodegraphOverlayEdgeFunctionCodeBlockBudgetSpecs(
       edges,
     });
 
-    const methodResult = queryOverlay(root, 'edge-function-method', ['--limit', '20', '--native-json']);
-    const headerResult = queryOverlay(root, 'edge-function-header', ['--limit', '20', '--native-json']);
+    const methodResult = queryOverlay(root, 'edge-function-method', fixtureQueryArgs('--limit', '20', '--native-json'));
+    const headerResult = queryOverlay(root, 'edge-function-header', fixtureQueryArgs('--limit', '20', '--native-json'));
 
     expectSpawnSuccess(methodResult);
     expectSpawnSuccess(headerResult);
@@ -197,7 +200,7 @@ export function registerCodegraphOverlayEdgeFunctionCodeBlockBudgetSpecs(
       edges,
     });
 
-    const result = queryOverlay(root, 'edge-function-invoke', ['--limit', '20', '--native-json']);
+    const result = queryOverlay(root, 'edge-function-invoke', fixtureQueryArgs('--limit', '20', '--native-json'));
 
     expectSpawnSuccess(result);
     const response = JSON.parse(result.stdout);
@@ -272,7 +275,7 @@ export function registerCodegraphOverlayEdgeFunctionCodeBlockBudgetSpecs(
     );
 
     const methodNode = {
-      id: `method:${serviceFile}:WidgetDirectNotifyService::sendDirectWidgetBlackBoxNotify`,
+      id: `method:${serviceFile}:WidgetDirectNotifyService.sendDirectWidgetBlackBoxNotify`,
       kind: 'method',
       name: 'sendDirectWidgetBlackBoxNotify',
       qualifiedName: 'WidgetDirectNotifyService::sendDirectWidgetBlackBoxNotify',
@@ -319,7 +322,7 @@ export function registerCodegraphOverlayEdgeFunctionCodeBlockBudgetSpecs(
       }],
     });
 
-    const result = queryOverlay(root, 'edge-function-invoke sendDirectWidgetBlackBoxNotify', ['--limit', '20', '--native-json']);
+    const result = queryOverlay(root, 'edge-function-invoke sendDirectWidgetBlackBoxNotify', fixtureQueryArgs('--limit', '20', '--native-json'));
 
     expectSpawnSuccess(result);
     const response = JSON.parse(result.stdout);
@@ -427,7 +430,7 @@ export function registerCodegraphOverlayEdgeFunctionCodeBlockBudgetSpecs(
       edges,
     });
 
-    const result = queryOverlay(root, 'edge-function-method', ['--limit', '20', '--native-json']);
+    const result = queryOverlay(root, 'edge-function-method', fixtureQueryArgs('--limit', '20', '--native-json'));
 
     expectSpawnSuccess(result);
     const response = JSON.parse(result.stdout);

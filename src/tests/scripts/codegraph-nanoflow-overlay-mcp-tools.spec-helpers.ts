@@ -7,12 +7,13 @@ import { expect, it } from 'vitest';
 import type { CodegraphOverlaySpecContext } from './codegraph-nanoflow-overlay.spec-context';
 
 export function registerCodegraphOverlayMcpToolSpecs(context: CodegraphOverlaySpecContext): void {
-  const { repoRoot, wrapperScriptPath, WRAPPER_REPO_OVERLAY_ENV, WRAPPER_REPO_OVERLAY_RESPONSE_TIMEOUT_MS, WRAPPER_REPO_OVERLAY_TEST_TIMEOUT_MS, tempRoots, makeFakeCodegraph, readJsonLine, parseJsonLines } = context;
+  const { repoRoot, wrapperScriptPath, WRAPPER_REPO_OVERLAY_ENV, WRAPPER_REPO_OVERLAY_RESPONSE_TIMEOUT_MS, WRAPPER_REPO_OVERLAY_TEST_TIMEOUT_MS, tempRoots, makeFreshMcpFixture, makeFakeCodegraph, readJsonLine, parseJsonLines } = context;
   it('adds a NanoFlow overlay MCP tool beside the base codegraph tools', async () => {
+    const projectRoot = makeFreshMcpFixture();
     const fakeCodegraph = makeFakeCodegraph();
     const child = spawn(
       process.execPath,
-      [wrapperScriptPath, fakeCodegraph, 'serve', '--mcp', '--path', repoRoot],
+      [wrapperScriptPath, fakeCodegraph, 'serve', '--mcp', '--path', projectRoot],
       {
         cwd: repoRoot,
         stdio: ['pipe', 'pipe', 'pipe'],
@@ -514,12 +515,13 @@ export function registerCodegraphOverlayMcpToolSpecs(context: CodegraphOverlaySp
   }, WRAPPER_REPO_OVERLAY_TEST_TIMEOUT_MS);
 
   it('keeps a fresh wrapper process alive across context pack, AGENTS overlay query, and tools/list', async () => {
+    const projectRoot = makeFreshMcpFixture();
     const fakeCodegraph = makeFakeCodegraph();
     const logPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-codegraph-log-')), 'wrapper.log');
     tempRoots.push(path.dirname(logPath));
     const child = spawn(
       process.execPath,
-      [wrapperScriptPath, fakeCodegraph, 'serve', '--mcp', '--path', repoRoot],
+      [wrapperScriptPath, fakeCodegraph, 'serve', '--mcp', '--path', projectRoot],
       {
         cwd: repoRoot,
         stdio: ['pipe', 'pipe', 'pipe'],
@@ -599,8 +601,8 @@ export function registerCodegraphOverlayMcpToolSpecs(context: CodegraphOverlaySp
         signature: 'sync-rule keyword updated_at',
         metadata: expect.objectContaining({
           relation: 'sync-rule-keyword',
-          ownerHeading: '5.2 Offline-first 数据流',
-          rule: '读路径',
+          ownerHeading: '5.2 Offline-first',
+          rule: 'Read path',
         }),
       }));
 

@@ -3,7 +3,18 @@ import { expect, it } from 'vitest';
 import type { CodegraphOverlaySpecContext } from './codegraph-nanoflow-overlay.spec-context';
 
 export function registerCodegraphOverlayTypeScriptCoreSpecs(context: CodegraphOverlaySpecContext): void {
-  const { makeFixture, runOverlay, queryOverlay, expectSpawnSuccess, officialCodeGraphLanguages, officialCodeGraphNodeKinds } = context;
+  const { makeFixture, writeFile, runOverlay, queryOverlay, expectSpawnSuccess, officialCodeGraphLanguages, officialCodeGraphNodeKinds } = context;
+  const writeGraphFixture = (root: string, nodes: object[], edges: object[]): void => writeFile(
+    root,
+    '.codegraph/query-budget.json',
+    JSON.stringify({
+      typescript: { files: [], classes: [], functions: [], interfaces: [], types: [], variables: [], enums: [], namespaces: [], imports: [], exports: [] },
+      angular: { components: [], directives: [], pipes: [], injectables: [], injectors: [], dynamicImports: [], routes: [] },
+      supabase: { edgeFunctions: [], migrations: [] },
+      agentRules: { hardRules: [], syncRules: [] },
+      graph: { nodes, edges },
+    }),
+  );
 
   it('uses only official CodeGraph Language enum values in graph nodes', () => {
     const root = makeFixture();
@@ -147,6 +158,56 @@ export function registerCodegraphOverlayTypeScriptCoreSpecs(context: CodegraphOv
         target: 'class:src/app/features/sample/sample.repository.ts:SampleRepository',
       }),
     ]));
+  });
+
+  it('retains member edges attached to an equivalent owner node id', () => {
+    const root = makeFixture();
+    const base = { kind: 'interface', name: 'SamplePort', qualifiedName: 'SamplePort', filePath: 'src/sample.ts', language: 'typescript', startLine: 1, endLine: 3 };
+    const owners = Array.from({ length: 4 }, (_value, index) => ({
+      ...base,
+      id: `interface:src/sample.ts:SamplePort:${index}`,
+    }));
+    const member = { id: 'method:src/sample.ts:SamplePort.run', kind: 'method', name: 'run', qualifiedName: 'SamplePort::run', filePath: 'src/sample.ts', language: 'typescript', startLine: 2, endLine: 2 };
+    const noise = Array.from({ length: 8 }, (_value, index) => ({
+      id: `class:src/noise-${index}.ts:SamplePortNoise${index}`,
+      kind: 'class',
+      name: `SamplePortNoise${index}`,
+      qualifiedName: `SamplePortNoise${index}`,
+      filePath: `src/noise-${index}.ts`,
+      language: 'typescript',
+      startLine: 1,
+      endLine: 1,
+    }));
+    writeGraphFixture(root, [...owners, member, ...noise], [{
+      source: owners[3].id, target: member.id, kind: 'contains', metadata: { relation: 'interface-member' },
+    }]);
+
+    const result = queryOverlay(root, 'SamplePort', ['--overlay', '.codegraph/query-budget.json', '--skip-refresh', '--limit', '2']);
+
+    expectSpawnSuccess(result);
+    const response = JSON.parse(result.stdout);
+    expect(response.nodes).toEqual(expect.arrayContaining([expect.objectContaining({ name: 'run' })]));
+    expect(response.displayEdges).toEqual(expect.arrayContaining([
+      expect.objectContaining({ sourceName: 'SamplePort', targetName: 'run' }),
+    ]));
+  });
+
+  it('ranks direct new and call edges ahead of a root self type edge', () => {
+    const root = makeFixture();
+    const owner = { id: 'class:src/engine.ts:Engine', kind: 'class', name: 'Engine', qualifiedName: 'Engine', filePath: 'src/engine.ts', language: 'typescript', startLine: 1, endLine: 2 };
+    const dependency = { id: 'class:src/repo.ts:Repository', kind: 'class', name: 'Repository', qualifiedName: 'Repository', filePath: 'src/repo.ts', language: 'typescript', startLine: 1, endLine: 1 };
+    writeGraphFixture(root, [owner, dependency], [
+      { source: owner.id, target: owner.id, kind: 'type_of', metadata: { relation: 'initializer-reference' } },
+      { source: owner.id, target: dependency.id, kind: 'instantiates', metadata: { relation: 'new' } },
+      { source: owner.id, target: dependency.id, kind: 'calls', metadata: { relation: 'call' } },
+    ]);
+
+    const result = queryOverlay(root, 'Engine', ['--overlay', '.codegraph/query-budget.json', '--skip-refresh', '--limit', '2']);
+
+    expectSpawnSuccess(result);
+    const edgeKinds = JSON.parse(result.stdout).displayEdges.map((edge: { kind: string }) => edge.kind);
+    expect(edgeKinds).toEqual(expect.arrayContaining(['instantiates', 'calls']));
+    expect(edgeKinds).not.toContain('type_of');
   });
 
   it('treats exported arrow and function-expression variables as TypeScript function nodes', () => {

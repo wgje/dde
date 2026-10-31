@@ -10,6 +10,21 @@ export function assertBaseOverlayMigrationGraph(overlay: ParsedOverlay): void {
       filePath: 'supabase/migrations/20260609020000_drop_entity_uuid_defaults.sql',
       metadata: expect.objectContaining({ platform: 'supabase-migration' }),
     }));
+    const migrationTableId = 'variable:supabase/migrations/20260609020000_drop_entity_uuid_defaults.sql:tasks';
+    const collidingTypeScriptMethodId = 'method:src/services/sql-table-name-collision.service.ts:SqlTableNameCollisionService.tasks';
+    expect(overlay.graph.nodes).toContainEqual(expect.objectContaining({
+      id: collidingTypeScriptMethodId,
+      kind: 'method',
+      name: 'tasks',
+      filePath: 'src/services/sql-table-name-collision.service.ts',
+    }));
+    expect(overlay.graph.nodes).toContainEqual(expect.objectContaining({
+      id: migrationTableId,
+      kind: 'variable',
+      name: 'tasks',
+      filePath: 'supabase/migrations/20260609020000_drop_entity_uuid_defaults.sql',
+      metadata: expect.objectContaining({ relation: 'table' }),
+    }));
     const migrationFunctionId = 'function:supabase/migrations/20260609020000_drop_entity_uuid_defaults.sql:public.touch_updated_at';
     expect(overlay.graph.nodes).toContainEqual(expect.objectContaining({
       id: migrationFunctionId,
@@ -390,6 +405,7 @@ export function assertBaseOverlayMigrationGraph(overlay: ParsedOverlay): void {
       expect.objectContaining({
         kind: 'references',
         source: migrationFileId,
+        target: migrationTableId,
         metadata: expect.objectContaining({ relation: 'table' }),
       }),
       expect.objectContaining({
@@ -741,5 +757,11 @@ export function assertBaseOverlayMigrationGraph(overlay: ParsedOverlay): void {
         }),
       }),
     ]));
+    expect(overlay.graph.edges).not.toContainEqual(expect.objectContaining({
+      kind: 'references',
+      source: migrationFileId,
+      target: collidingTypeScriptMethodId,
+      metadata: expect.objectContaining({ relation: 'table' }),
+    }));
     expect(overlay.graph.edges.filter((edge: { source: string }) => edge.source.startsWith('variable:supabase/migrations/'))).toEqual([]);
 }

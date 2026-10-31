@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import ts from 'typescript';
 import nativeGraphSidecar from './lib/codegraph-native-graph-sidecar.cjs';
+import overlayGenerationPublisher from './lib/codegraph-overlay-generation-publisher.cjs';
 import overlayStability from './lib/codegraph-overlay-stability.cjs';
 import sourcePolicy from './lib/codegraph-source-policy.cjs';
 
@@ -12,10 +13,13 @@ const {
   readNativeAndroidKotlinImportEndpoints,
 } = nativeGraphSidecar;
 const {
+  acquireOverlayPublicationLease,
+  createOverlayGenerationPublisher,
+} = overlayGenerationPublisher;
+const {
   assertParticipantPlan,
   assertSourceManifestEqual,
   assertStableOverlay,
-  writeFileAtomically,
 } = overlayStability;
 const { buildSourceManifest } = sourcePolicy;
 
@@ -227,20 +231,51 @@ const generationPlan = {
   outputPath,
 };
 assertParticipantPlan(generationPlan);
-const sourceManifest0 = captureSourceManifest(root);
-const overlay1 = buildOverlay(root, overlayOptions, sourceManifest0.files);
-const sourceManifest1 = captureSourceManifest(root);
-assertSourceManifestEqual(sourceManifest0.entries, sourceManifest1.entries);
-const overlay2 = buildOverlay(root, overlayOptions, sourceManifest1.files);
-const sourceManifest2 = captureSourceManifest(root);
-assertSourceManifestEqual(sourceManifest1.entries, sourceManifest2.entries);
-assertStableOverlay(overlay1, overlay2);
+const publicationSession = args.stdout ? null : acquireOverlayPublicationLease({
+  projectRoot: root,
+  owner: `codegraph-overlay-generator:${process.pid}`,
+  ttlMs: 60 * 60 * 1000,
+});
+try {
+  const sourceManifest0 = captureSourceManifest(root);
+  const overlay1 = buildOverlay(root, overlayOptions, sourceManifest0.files);
+  const sourceManifest1 = captureSourceManifest(root);
+  assertSourceManifestEqual(sourceManifest0.entries, sourceManifest1.entries);
+  const overlay2 = buildOverlay(root, overlayOptions, sourceManifest1.files);
+  const sourceManifest2 = captureSourceManifest(root);
+  const sourceManifestDigest = assertSourceManifestEqual(
+    sourceManifest1.entries,
+    sourceManifest2.entries,
+  );
+  assertStableOverlay(overlay1, overlay2);
 
-if (args.stdout) {
-  process.stdout.write(`${JSON.stringify(overlay2, null, 2)}\n`);
-} else {
-  writeFileAtomically(outputPath, `${JSON.stringify(overlay2, null, 2)}\n`);
-  process.stdout.write(`[codegraph-overlay] Wrote ${toPosix(path.relative(root, outputPath))}\n`);
+  if (args.stdout) {
+    process.stdout.write(`${JSON.stringify(overlay2, null, 2)}\n`);
+  } else {
+    const publisher = createOverlayGenerationPublisher({
+      readLeaseEvidence: publicationSession.readLeaseEvidence,
+    });
+    const publication = publisher.publish({
+      configDigest: digestRecord(overlayOptions),
+      overlay: overlay2,
+      projectRoot: root,
+      publishedAt: new Date().toISOString(),
+      setupDigest: digestRecord(generationPlan),
+      sourceManifestDigest,
+      toolchainDigest: digestRecord({ node: process.versions.node, typescript: ts.version }),
+    });
+    process.stdout.write(`[codegraph-overlay] ${JSON.stringify({
+      compatibilityDigest: publication.current.compatibilityDigest,
+      generationId: publication.current.generationId,
+      sequence: publication.current.sequence,
+    })}\n`);
+  }
+} finally {
+  if (publicationSession) publicationSession.release();
+}
+
+function digestRecord(value) {
+  return createHash('sha256').update(JSON.stringify(value), 'utf8').digest('hex');
 }
 
 function parseArgs(rawArgs) {
@@ -984,7 +1019,13 @@ function readAndroidKotlinHeritageTypes(source, afterNameOffset) {
     .filter(Boolean);
 }
 
-function readAndroidKotlinDeclarationEndLine(source, declarationOffset, afterNameOffset, fallbackLine) {
+function readAndroidKotlinDeclarationEndLine(
+  source,
+  declarationOffset,
+  afterNameOffset,
+  fallbackLine,
+  allowMultilineHeritage = false,
+) {
   const value = String(source ?? '');
   let cursor = skipWhitespaceOffset(value, afterNameOffset);
   let headerEndOffset = Math.max(declarationOffset, afterNameOffset);
@@ -998,6 +1039,12 @@ function readAndroidKotlinDeclarationEndLine(source, declarationOffset, afterNam
   }
 
   if (value[cursor] === ':') {
+    if (allowMultilineHeritage) {
+      const bodyOpenOffset = findAndroidKotlinDeclarationBodyOpenOffset(value, cursor + 1);
+      if (bodyOpenOffset >= 0) {
+        return lineNumberAt(value, findCurlyBlockEndOffset(value, bodyOpenOffset));
+      }
+    }
     const heritageEndOffset = findAndroidKotlinDeclarationHeaderEndOffset(value, cursor + 1);
     headerEndOffset = Math.max(headerEndOffset, heritageEndOffset);
     cursor = skipWhitespaceOffset(value, heritageEndOffset);
@@ -1039,15 +1086,45 @@ function readAndroidKotlinCallableOwnerClasses(source, classes) {
         constructorOffset + constructorMatch[0].length,
       );
       if (searchableSource[callableHeaderOffset] !== '(') return owner;
-    } else if (!hasTypeParameters) return owner;
+    } else if (
+      !hasTypeParameters
+      && searchableSource[constructorOffset] !== '('
+      && searchableSource[constructorOffset] !== '{'
+    ) return owner;
     const endLine = readAndroidKotlinDeclarationEndLine(
       searchableSource,
       declarationOffset,
       callableHeaderOffset,
       owner.endLine,
+      true,
     );
     return { ...owner, endLine };
   });
+}
+
+function findAndroidKotlinDeclarationBodyOpenOffset(source, startOffset) {
+  const value = String(source ?? '');
+  let parenDepth = 0;
+  let angleDepth = 0;
+  let bracketDepth = 0;
+  for (let index = Math.max(0, startOffset); index < value.length; index += 1) {
+    const char = value[index];
+    if (char === '(') parenDepth += 1;
+    else if (char === ')') parenDepth = Math.max(0, parenDepth - 1);
+    else if (char === '<') angleDepth += 1;
+    else if (char === '>') angleDepth = Math.max(0, angleDepth - 1);
+    else if (char === '[') bracketDepth += 1;
+    else if (char === ']') bracketDepth = Math.max(0, bracketDepth - 1);
+    else if (
+      char === '{'
+      && parenDepth === 0
+      && angleDepth === 0
+      && bracketDepth === 0
+    ) {
+      return index;
+    }
+  }
+  return -1;
 }
 
 function readAndroidKotlinClassTypeParametersEnd(source, openOffset) {
@@ -1773,6 +1850,17 @@ function readAndroidKotlinFunctionsFromSource(source, relativeFile, packageName,
   const functionPattern = /\b((?:(?:suspend|public|private|protected|internal|open|abstract|final|operator|infix|tailrec|inline|external)\s+)*)fun\s+(?:<[^>\n]+>\s*)?([A-Za-z_][\w]*)\s*/g;
   let match;
   while ((match = functionPattern.exec(searchableSource)) !== null) {
+    const declarationPrefix = searchableSource.slice(
+      Math.max(0, match.index - 160),
+      match.index,
+    );
+    if (/\b[A-Za-z_][\w.]*\s*\.\s*$/.test(declarationPrefix)) continue;
+    if (searchableSource[functionPattern.lastIndex] === '.') continue;
+    const openParenOffset = searchableSource.indexOf('(', functionPattern.lastIndex);
+    if (
+      openParenOffset >= 0
+      && searchableSource.slice(functionPattern.lastIndex, openParenOffset).includes('.')
+    ) continue;
     const line = lineNumberAt(source, match.index);
     if (findAndroidKotlinOwnerClass(classes, line)) continue;
     const name = match[2];
@@ -5112,7 +5200,7 @@ function readSupabaseRealtimePostgresChangeCall(callExpression, stringBindings, 
     event: config.event,
     schema: config.schema,
     table: config.table,
-    filter: config.filter,
+    filter: config.filter ?? '',
     line: readLine(callExpression.getSourceFile(), callExpression),
     column: readColumn(callExpression.getSourceFile(), callExpression),
   };
@@ -7854,7 +7942,7 @@ function buildNativeGraph(overlay) {
 
   for (const hardRule of overlay.agentRules?.hardRules ?? []) {
     const sourceId = addReferenceNode(hardRule.heading, hardRule.file);
-    addEdge('decorates', sourceId, addReferenceNode('AGENTS.md', hardRule.file, { kind: 'file', relation: 'agent-instruction' }), {
+    addEdge('decorates', sourceId, addReferenceNode('AGENTS.md', hardRule.file, { kind: 'file', relation: 'source-file' }), {
       relation: 'hard-rule',
       line: hardRule.line,
     });
@@ -9625,7 +9713,6 @@ function addClassSemanticEdges(addReferenceNode, addEdge, sourceId, sourceFile, 
 
   for (const hostBinding of item.hostBindings ?? []) {
     addEdge('references', sourceId, addReferenceNode(hostBinding.name, sourceFile, {
-      relation: 'host-binding',
       allowGlobalFallback: false,
       line: hostBinding.line,
     }), {
@@ -9640,7 +9727,6 @@ function addClassSemanticEdges(addReferenceNode, addEdge, sourceId, sourceFile, 
 
   for (const hostListener of item.hostListeners ?? []) {
     addEdge('calls', sourceId, addReferenceNode(hostListener.name, sourceFile, {
-      relation: 'host-listener',
       allowGlobalFallback: false,
       line: hostListener.line,
     }), {
@@ -13313,7 +13399,7 @@ function readPolicyExpression(policyTail, clause) {
 function collectAgentRules(projectRoot) {
   const agentsPath = path.join(projectRoot, 'AGENTS.md');
   if (!fs.existsSync(agentsPath)) {
-    return { hardRules: [], syncRules: [] };
+    return { syncRules: [], hardRules: [] };
   }
 
   const hardRules = [];

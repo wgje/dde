@@ -1,4 +1,6 @@
 import { expect, it } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 import {
@@ -122,7 +124,7 @@ export function registerAnalyzeCodegraphMcpLogActiveWrapperSpecs(): void {
     const configPath = makeCodexMcpConfig({
       root: path.dirname(logPath),
       wrapperScriptPath: script.path,
-      codegraphTarget: '@colbymchenry/codegraph@1.2.0',
+      codegraphTarget: '@colbymchenry/codegraph@1.5.0',
       env: {
         NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '30000',
         NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE: '0',
@@ -138,7 +140,7 @@ export function registerAnalyzeCodegraphMcpLogActiveWrapperSpecs(): void {
     expect(summary.codexMcpConfig).toEqual(expect.objectContaining({
       exists: true,
       codegraphServerConfigured: true,
-      expectedCodegraphTarget: '@colbymchenry/codegraph@1.2.0',
+      expectedCodegraphTarget: '@colbymchenry/codegraph@1.5.0',
       mismatch: true,
       rootCause: expect.objectContaining({
         failureBoundary: 'mcp-host-config',
@@ -146,7 +148,7 @@ export function registerAnalyzeCodegraphMcpLogActiveWrapperSpecs(): void {
       }),
     }));
     expect(summary.codexMcpConfig.currentWrapperTarget).toEqual(expect.objectContaining({
-      expected: '@colbymchenry/codegraph@1.2.0',
+      expected: '@colbymchenry/codegraph@1.5.0',
       actual: '@colbymchenry/codegraph@1.1.1',
       matches: false,
     }));
@@ -166,14 +168,14 @@ export function registerAnalyzeCodegraphMcpLogActiveWrapperSpecs(): void {
         'mcp-host-env-mismatch',
       ]),
       observed: expect.objectContaining({
-        expectedCodegraphTarget: '@colbymchenry/codegraph@1.2.0',
+        expectedCodegraphTarget: '@colbymchenry/codegraph@1.5.0',
         currentWrapperTarget: '@colbymchenry/codegraph@1.1.1',
         currentWrapperEnvMismatchedKeys: ['NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS'],
         hostConfigMismatches: expect.arrayContaining([
           expect.objectContaining({
             scope: 'currentWrapper',
             field: 'codegraphTarget',
-            expected: '@colbymchenry/codegraph@1.2.0',
+            expected: '@colbymchenry/codegraph@1.5.0',
             actual: '@colbymchenry/codegraph@1.1.1',
           }),
           expect.objectContaining({
@@ -191,7 +193,7 @@ export function registerAnalyzeCodegraphMcpLogActiveWrapperSpecs(): void {
     }));
     expect(summary.diagnosticTriage.primaryEvidence).toEqual(expect.objectContaining({
       currentWrapperTargetComparison: expect.objectContaining({
-        expected: '@colbymchenry/codegraph@1.2.0',
+        expected: '@colbymchenry/codegraph@1.5.0',
         actual: '@colbymchenry/codegraph@1.1.1',
         matches: false,
       }),
@@ -209,7 +211,7 @@ export function registerAnalyzeCodegraphMcpLogActiveWrapperSpecs(): void {
         expect.objectContaining({
           scope: 'currentWrapper',
           field: 'codegraphTarget',
-          expected: '@colbymchenry/codegraph@1.2.0',
+          expected: '@colbymchenry/codegraph@1.5.0',
           actual: '@colbymchenry/codegraph@1.1.1',
         }),
         expect.objectContaining({
@@ -230,7 +232,7 @@ export function registerAnalyzeCodegraphMcpLogActiveWrapperSpecs(): void {
     const script = makeScriptFile('module.exports = { version: "fresh-adapter-fallback" };\n');
     const logPath = makeLog([
       wrapperStartEvent('adapter-fallback-run', script, {
-        codegraphTarget: '@colbymchenry/codegraph@1.2.0',
+        codegraphTarget: '@colbymchenry/codegraph@1.5.0',
         env: {
           NANOFLOW_CODEGRAPH_CONFIG_ALIGNMENT_MODE: 'adapter-fallback',
           NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '15000',
@@ -241,14 +243,14 @@ export function registerAnalyzeCodegraphMcpLogActiveWrapperSpecs(): void {
           reason: 'wrapper-config-alignment-intentional-override',
           alignmentMode: 'adapter-fallback',
           expected: {
-            codegraphTarget: '@colbymchenry/codegraph@1.2.0',
+            codegraphTarget: '@colbymchenry/codegraph@1.5.0',
             env: {
               NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '30000',
               NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE: '0',
             },
           },
           actual: {
-            codegraphTarget: '@colbymchenry/codegraph@1.2.0',
+            codegraphTarget: '@colbymchenry/codegraph@1.5.0',
             env: {
               NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '15000',
               NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE: '0',
@@ -269,7 +271,7 @@ export function registerAnalyzeCodegraphMcpLogActiveWrapperSpecs(): void {
     const configPath = makeCodexMcpConfig({
       root: path.dirname(logPath),
       wrapperScriptPath: script.path,
-      codegraphTarget: '@colbymchenry/codegraph@1.2.0',
+      codegraphTarget: '@colbymchenry/codegraph@1.5.0',
       env: {
         NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '30000',
         NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE: '0',
@@ -326,6 +328,87 @@ export function registerAnalyzeCodegraphMcpLogActiveWrapperSpecs(): void {
     ]));
   }, 15_000);
 
+  it('uses an explicit project root for gate smoke provenance without claiming direct host health', () => {
+    const script = makeScriptFile('module.exports = { version: "gate-smoke-project-root" };\n');
+    const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-mcp-project-root-'));
+    const configuredEnv = {
+      NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '30000',
+      NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE: '0',
+    };
+    const smokeEnv = {
+      ...configuredEnv,
+      NANOFLOW_CODEGRAPH_CONFIG_ALIGNMENT_MODE: 'smoke',
+      NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '85000',
+    };
+    try {
+      fs.mkdirSync(path.join(projectRoot, '.codex'), { recursive: true });
+      fs.writeFileSync(path.join(projectRoot, '.codex', 'config.toml'), [
+        '[mcp_servers.codegraph]',
+        'command = "node"',
+        'args = [',
+        `  ${JSON.stringify(script.path)},`,
+        '  "@colbymchenry/codegraph@1.5.0",',
+        '  "serve",',
+        '  "--mcp",',
+        '  "--path",',
+        `  ${JSON.stringify(projectRoot)},`,
+        ']',
+        '',
+        '[mcp_servers.codegraph.env]',
+        'NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS = "30000"',
+        'NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE = "0"',
+        '',
+      ].join('\n'));
+      const logPath = makeLog([
+        wrapperStartEvent('gate-smoke-run', script, {
+          codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+          env: smokeEnv,
+          codexConfigAlignment: {
+            status: 'override',
+            reason: 'wrapper-config-alignment-intentional-override',
+            alignmentMode: 'smoke',
+            expected: {
+              codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+              env: configuredEnv,
+            },
+            actual: {
+              codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+              env: smokeEnv,
+            },
+            mismatchCount: 1,
+          },
+        }),
+        contextResponseEvent('gate-smoke-run', 'gate-smoke-context'),
+      ]);
+
+      const result = runAnalyzer(logPath, [
+        '--project-root',
+        projectRoot,
+        '--fail-on-untrusted-direct-mcp',
+      ]);
+      const summary = JSON.parse(result.stdout);
+
+      expect(result.status, result.stderr || result.stdout).toBe(0);
+      expect(summary.codexMcpConfig).toEqual(expect.objectContaining({
+        root: projectRoot,
+        scope: 'project',
+        codegraphServerConfigured: true,
+        expectedCodegraphTarget: '@colbymchenry/codegraph@1.5.0',
+      }));
+      expect(summary.directMcpResponseEvidence).toEqual(expect.objectContaining({
+        status: 'response-trusted-adapter-probe-only',
+        provenance: 'adapter-fallback-or-smoke',
+        trustedForAdapterJudgment: true,
+        trustedForDirectHostHealth: false,
+      }));
+      expect(summary.rootCauseSummary).toEqual(expect.objectContaining({
+        directMcpTrust: 'do-not-trust-direct-mcp-until-configured-response-is-observed',
+      }));
+    } finally {
+      fs.rmSync(projectRoot, { recursive: true, force: true });
+    }
+  }, 15_000);
+
   it('does not treat stale historical wrapper activity as current direct MCP evidence', () => {
     const script = makeScriptFile('module.exports = { version: "fresh-script-old-config-host" };\n');
     const logPath = makeLog([
@@ -344,7 +427,7 @@ export function registerAnalyzeCodegraphMcpLogActiveWrapperSpecs(): void {
     const configPath = makeCodexMcpConfig({
       root: path.dirname(logPath),
       wrapperScriptPath: script.path,
-      codegraphTarget: '@colbymchenry/codegraph@1.2.0',
+      codegraphTarget: '@colbymchenry/codegraph@1.5.0',
       env: {
         NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '30000',
         NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE: '0',
@@ -379,7 +462,7 @@ export function registerAnalyzeCodegraphMcpLogActiveWrapperSpecs(): void {
         'mcp-host-wrapper-not-started',
       ]),
       observed: expect.objectContaining({
-        expectedCodegraphTarget: '@colbymchenry/codegraph@1.2.0',
+        expectedCodegraphTarget: '@colbymchenry/codegraph@1.5.0',
         currentWrapperTarget: null,
         activeWrapperCount: 0,
         latestLogAgeMs: 2_640_000,
@@ -468,6 +551,147 @@ export function registerAnalyzeCodegraphMcpLogActiveWrapperSpecs(): void {
     ]));
   }, 15_000);
 
+  it('uses runtime topology transitions instead of startup topology for active fallback watcher diagnosis', () => {
+    const script = makeScriptFile('module.exports = { version: "runtime-fallback-watcher" };\n');
+    const logPath = makeLog([
+      wrapperStartEvent('runtime-fallback-run', script, {
+        ts: '2026-06-13T18:00:00.000Z',
+        effectiveChildEnv: {
+          CODEGRAPH_NO_DAEMON: '0',
+          CODEGRAPH_NO_WATCH: '0',
+        },
+        runtimeTopology: {
+          mode: 'shared-daemon-proxy',
+          watcherOwnership: 'shared-daemon-single-watcher',
+          fileLockContentionRisk: 'single-writer',
+          daemonDisabled: false,
+          watchDisabled: false,
+        },
+      }),
+      toolsListResponseEvent('runtime-fallback-run', {
+        ts: '2026-06-13T18:00:10.000Z',
+      }),
+      {
+        ts: '2026-06-13T18:00:20.000Z',
+        runId: 'runtime-fallback-run',
+        event: 'child.runtime-topology.transition',
+        reason: 'shared-daemon-connection-lost',
+        from: {
+          mode: 'shared-daemon-proxy',
+          watcherOwnership: 'shared-daemon-single-watcher',
+          fileLockContentionRisk: 'single-writer',
+        },
+        to: {
+          mode: 'in-process-fallback',
+          watcherOwnership: 'in-process-fallback-initializing',
+          fileLockContentionRisk: 'multi-wrapper-writers-pending',
+          daemonDisabled: false,
+          watchDisabled: false,
+        },
+      },
+      {
+        ts: '2026-06-13T18:00:30.000Z',
+        runId: 'runtime-fallback-run',
+        event: 'child.runtime-topology.transition',
+        reason: 'fallback-file-watcher-active',
+        from: {
+          mode: 'in-process-fallback',
+          watcherOwnership: 'in-process-fallback-initializing',
+          fileLockContentionRisk: 'multi-wrapper-writers-pending',
+        },
+        to: {
+          mode: 'in-process-fallback-watcher',
+          watcherOwnership: 'per-wrapper-fallback-watcher',
+          fileLockContentionRisk: 'multi-wrapper-writers',
+          daemonDisabled: false,
+          watchDisabled: false,
+        },
+      },
+    ]);
+
+    const result = runAnalyzer(logPath, ['--fail-on-untrusted-direct-mcp']);
+    const summary = JSON.parse(result.stdout);
+
+    expect(result.status).toBe(1);
+    expect(summary.activeWrappers).toEqual(expect.objectContaining({
+      runtimeTopologyModes: { 'in-process-fallback-watcher': 1 },
+      watcherOwnership: { 'per-wrapper-fallback-watcher': 1 },
+      inProcessFallbackCount: 1,
+      inProcessFallbackWatcherCount: 1,
+    }));
+    expect(summary.activeWrappers.latest).toEqual([
+      expect.objectContaining({
+        runId: 'runtime-fallback-run',
+        runtimeTopology: expect.objectContaining({
+          mode: 'in-process-fallback-watcher',
+          watcherOwnership: 'per-wrapper-fallback-watcher',
+          fileLockContentionRisk: 'multi-wrapper-writers',
+        }),
+      }),
+    ]);
+    expect(summary.rootCauseSummary).toEqual(expect.objectContaining({
+      status: 'base-codegraph-shared-daemon-fallback-watcher',
+      failureBoundary: 'base-codegraph-process-topology',
+      directMcpTrust: 'do-not-trust-direct-mcp-until-fallback-proxies-restart',
+      failureClasses: expect.arrayContaining([
+        'active-shared-daemon-fallback',
+        'active-in-process-fallback-watcher',
+      ]),
+      observed: expect.objectContaining({
+        activeInProcessFallbackCount: 1,
+        activeInProcessFallbackWatcherCount: 1,
+      }),
+    }));
+    expect(summary.recommendations).toEqual(expect.arrayContaining([
+      expect.stringContaining('shared-daemon proxies have fallen back to per-wrapper in-process watchers'),
+    ]));
+  }, 15_000);
+
+  it('ignores response warning flags whose evidence is a source-code literal rather than a leading banner', () => {
+    const script = makeScriptFile('module.exports = { version: "fresh-script-source-warning" };\n');
+    const sourceWarningTail = [
+      '...139\\t    }));',
+      '140\\t  });',
+      "144\\tconst warning = 'CodeGraph auto-sync is DISABLED - live file watching stopped, so the index is frozen. Reason: CodeGraph file lock held by another process past the retry budget; auto-sync disabled.';",
+    ].join('\n');
+    const logPath = makeLog([
+      wrapperStartEvent('source-warning-run', script),
+      contextResponseEvent('source-warning-run', 'source-warning-context', {
+        baseResponseWarnings: {
+          codegraphAutoSyncDisabled: true,
+          failureClass: 'codegraph-autosync-disabled',
+          textTail: sourceWarningTail,
+        },
+        responseWarnings: {
+          codegraphAutoSyncDisabled: true,
+          failureClass: 'codegraph-autosync-disabled',
+          textTail: sourceWarningTail,
+        },
+      }),
+    ]);
+
+    const result = runAnalyzer(logPath, ['--fail-on-untrusted-direct-mcp']);
+    const summary = JSON.parse(result.stdout);
+
+    expect(result.status).toBe(0);
+    expect(summary.codegraphAutoSyncDisabled).toEqual(expect.objectContaining({
+      count: 0,
+      latest: null,
+    }));
+    expect(summary.currentCodegraphAutoSyncDisabled).toEqual(expect.objectContaining({
+      count: 0,
+      latest: null,
+    }));
+    expect(summary.activeCodegraphAutoSyncDisabled).toEqual(expect.objectContaining({
+      count: 0,
+      latest: null,
+    }));
+    expect(summary.rootCauseSummary.failureClasses).not.toEqual(expect.arrayContaining([
+      'codegraph-autosync-disabled',
+      'active-wrapper-autosync-disabled',
+    ]));
+  }, 15_000);
+
   it('can fail the guard when root cause says direct MCP is untrusted', () => {
     const script = makeScriptFile('module.exports = { version: "fresh-script-old-config-host" };\n');
     const logPath = makeLog([
@@ -483,7 +707,7 @@ export function registerAnalyzeCodegraphMcpLogActiveWrapperSpecs(): void {
     const configPath = makeCodexMcpConfig({
       root: path.dirname(logPath),
       wrapperScriptPath: script.path,
-      codegraphTarget: '@colbymchenry/codegraph@1.2.0',
+      codegraphTarget: '@colbymchenry/codegraph@1.5.0',
       env: {
         NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '30000',
         NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE: '0',

@@ -42,6 +42,9 @@ function countAndroidKotlinAnnotations(android) {
 function buildBaseline(overlay) {
   const graphNodes = overlay.graph?.nodes ?? [];
   const graphEdges = overlay.graph?.edges ?? [];
+  const androidManifestComponents = overlay.android?.manifestComponents ?? [];
+  const androidManifestIntentFilters = androidManifestComponents
+    .flatMap(component => component.intentFilters ?? []);
   const edgeFunctions = overlay.supabase?.edgeFunctions ?? [];
   const migrations = overlay.supabase?.migrations ?? [];
   const templateBindings = (overlay.angular?.components ?? []).flatMap(component => component.templateBindings ?? []);
@@ -62,6 +65,20 @@ function buildBaseline(overlay) {
   return {
     graphNodes: graphNodes.length,
     graphEdges: graphEdges.length,
+    angularComponents: overlay.angular?.components?.length ?? 0,
+    angularDirectives: overlay.angular?.directives?.length ?? 0,
+    angularPipes: overlay.angular?.pipes?.length ?? 0,
+    angularInjectables: overlay.angular?.injectables?.length ?? 0,
+    angularInjectorFiles: overlay.angular?.injectors?.length ?? 0,
+    angularInjectorDependencyReferences: (overlay.angular?.injectors ?? [])
+      .flatMap(injector => injector.dependencies ?? []).length,
+    angularApplicationProviders: overlay.angular?.applicationProviders?.length ?? 0,
+    standaloneImportEdges: countRelation(graphEdges, 'standalone-import'),
+    angularInputEdges: countRelation(graphEdges, 'input'),
+    angularOutputEdges: countRelation(graphEdges, 'output'),
+    angularModelEdges: countRelation(graphEdges, 'model'),
+    angularQueryEdges: countRelation(graphEdges, 'query'),
+    angularSignalEdges: countRelation(graphEdges, 'signal'),
     dynamicImports: overlay.angular?.dynamicImports?.length ?? 0,
     dynamicImportEdges: countRelation(graphEdges, 'dynamic-import'),
     angularRoutes: overlay.angular?.routes?.length ?? 0,
@@ -81,6 +98,8 @@ function buildBaseline(overlay) {
     edgeFunctionMethodEdges: countRelation(graphEdges, 'edge-function-method'),
     edgeFunctionHeaderNodes: graphNodes.filter(node => node?.metadata?.relation === 'edge-function-header').length,
     edgeFunctionHeaderEdges: countRelation(graphEdges, 'edge-function-header'),
+    edgeFunctionEnvVarNodes: countNodeRelation(graphNodes, 'env-var'),
+    edgeFunctionEnvVarEdges: countRelation(graphEdges, 'env-var'),
     edgeFunctionInvokeEdges: countRelation(graphEdges, 'edge-function-invoke'),
     edgeFunctionTests: edgeFunctions.flatMap(edgeFunction => edgeFunction.tests ?? []).length,
     edgeFunctionTestEdges: edgeFunctions.flatMap(edgeFunction => edgeFunction.testMappings ?? []).length,
@@ -127,9 +146,37 @@ function buildBaseline(overlay) {
     androidKotlinCallEdges: countRelation(graphEdges, 'android-kotlin-call'),
     androidKotlinAnnotations: countAndroidKotlinAnnotations(overlay.android),
     androidKotlinAnnotationEdges: countRelation(graphEdges, 'android-kotlin-annotation'),
-    androidManifestComponents: overlay.android?.manifestComponents?.length ?? 0,
+    androidManifestComponents: androidManifestComponents.length,
+    androidManifestPermissions: overlay.android?.manifestPermissions?.length ?? 0,
+    androidManifestUsesPermissionEdges: countRelation(graphEdges, 'android-manifest-uses-permission'),
+    androidManifestQueries: overlay.android?.manifestQueries?.length ?? 0,
+    androidManifestQueryEdges: countRelation(graphEdges, 'android-manifest-query'),
+    androidManifestComponentPermissions: androidManifestComponents
+      .filter(component => String(component.permission ?? '').length > 0).length,
+    androidManifestComponentPermissionEdges: countRelation(graphEdges, 'android-manifest-component-permission'),
+    androidManifestIntentFilters: androidManifestIntentFilters.length,
+    androidManifestIntentFilterActions: androidManifestIntentFilters
+      .flatMap(intentFilter => intentFilter.actions ?? []).length,
+    androidManifestIntentFilterActionEdges: countRelation(graphEdges, 'android-manifest-intent-filter-action'),
+    androidManifestIntentFilterCategories: androidManifestIntentFilters
+      .flatMap(intentFilter => intentFilter.categories ?? []).length,
+    androidManifestIntentFilterCategoryEdges: countRelation(graphEdges, 'android-manifest-intent-filter-category'),
+    androidManifestIntentFilterData: androidManifestIntentFilters
+      .flatMap(intentFilter => intentFilter.data ?? []).length,
+    androidManifestIntentFilterDataEdges: countRelation(graphEdges, 'android-manifest-intent-filter-data'),
     androidWidgetProviders: overlay.android?.widgetProviders?.length ?? 0,
     androidResourceReferences: overlay.android?.resourceReferences?.length ?? 0,
+    androidKotlinResourceReferences: overlay.android?.kotlinResourceReferences?.length ?? 0,
+    androidKotlinResourceReferenceEdges: countRelation(graphEdges, 'android-kotlin-resource-reference'),
+    context7Documents: overlay.context7?.documents?.length ?? 0,
+    context7Categories: overlay.context7?.categories?.length ?? 0,
+    context7CategoryDocEdges: countRelation(graphEdges, 'context7-category-doc'),
+    context7RetrievalRoutes: overlay.context7?.retrievalRoutes?.length ?? 0,
+    context7RetrievalPrimaryEdges: countRelation(graphEdges, 'context7-retrieval-primary'),
+    context7RetrievalSecondaryEdges: countRelation(graphEdges, 'context7-retrieval-secondary'),
+    context7SourceMapRoutes: overlay.context7?.sourceMapRoutes?.length ?? 0,
+    context7SourceMapDocEdges: countRelation(graphEdges, 'context7-source-map-doc'),
+    context7SourceMapSourceEdges: countRelation(graphEdges, 'context7-source-map-source'),
     totalTestEdges: countRelation(graphEdges, 'test'),
     testEdgesWithTestMapping: graphEdges.filter(edge => edge?.metadata?.testMapping).length,
     testEdgesWithMatchedNeedle: graphEdges.filter(edge => edge?.metadata?.matchedNeedle).length,
@@ -139,6 +186,7 @@ function buildBaseline(overlay) {
     routeReferenceTestEdges: countTestMapping(graphEdges, 'route-reference'),
     invokeReferenceTestEdges: countTestMapping(graphEdges, 'invoke-reference'),
     filenameReferenceTestEdges: countTestMapping(graphEdges, 'filename-reference'),
+    hardRules: overlay.agentRules?.hardRules?.length ?? 0,
     hardRuleKeywordNodes: countNodeRelation(graphNodes, 'hard-rule-keyword'),
     hardRuleKeywordEdges: countRelation(graphEdges, 'hard-rule-keyword'),
     hardRuleKeywordMappingEdges: countKeywordMapping(graphEdges, 'hard-rule-keyword'),
@@ -204,6 +252,8 @@ function buildBaseline(overlay) {
     privilegeRevokeEdges: countRelation(graphEdges, 'privilege-revoke'),
     privilegeObjectEdges: countRelation(graphEdges, 'privilege-object'),
     privilegeRoleEdges: countRelation(graphEdges, 'privilege-role'),
+    supabaseRiskTagNodes: countNodeRelation(graphNodes, 'risk-tag'),
+    supabaseRiskTagEdges: countRelation(graphEdges, 'risk-tag'),
     supabaseRpcNodes: countNodeRelation(graphNodes, 'supabase-rpc'),
     supabaseRpcEdges: countRelation(graphEdges, 'supabase-rpc'),
     supabaseTableWriteNodes: countNodeRelation(graphNodes, 'supabase-table-write'),

@@ -21,7 +21,10 @@ export function registerCodegraphOverlayQueryOutputSpecs(context: CodegraphOverl
       `export function outsideSecret() { return '${leakedSourceMarker}'; }\n`,
     );
 
-    const outsideRelativePath = path.join('..', path.basename(outsideRoot), 'leak.ts').replace(/\\/g, '/');
+    const linkedOutsideRoot = path.join(root, 'src', 'outside-link');
+    fs.mkdirSync(path.dirname(linkedOutsideRoot), { recursive: true });
+    fs.symlinkSync(outsideRoot, linkedOutsideRoot, 'junction');
+    const outsideRelativePath = 'src/outside-link/leak.ts';
     writeFile(root, '.codegraph/nanoflow-overlay.json', JSON.stringify({
       schemaVersion: 1,
       project: { root },
@@ -39,7 +42,7 @@ export function registerCodegraphOverlayQueryOutputSpecs(context: CodegraphOverl
         edges: [],
       },
       typescript: {
-        files: [],
+        files: Array.from({ length: 500 }, (_value, index) => `src/dummy-${index}.ts`),
         classes: [],
         functions: [],
         interfaces: [],
@@ -69,14 +72,15 @@ export function registerCodegraphOverlayQueryOutputSpecs(context: CodegraphOverl
     }));
 
     const result = queryOverlay(root, 'outsideSecret');
-
     expectSpawnSuccess(result);
-    const response = JSON.parse(result.stdout);
+    const response = JSON.parse(result.stdout) as {
+      nodes?: Array<{ name?: string; filePath?: string }>;
+      markdown?: string;
+    };
     expect(response.nodes).toEqual(expect.arrayContaining([
       expect.objectContaining({ name: 'outsideSecret', filePath: outsideRelativePath }),
     ]));
-    expect(response.codeBlocks).toEqual([]);
-    expect(response.markdown).not.toContain('export function outsideSecret');
+    expect(response.markdown).not.toContain(leakedSourceMarker);
     expect(result.stdout).not.toContain(leakedSourceMarker);
   }, 10_000);
 
@@ -107,6 +111,142 @@ export function registerCodegraphOverlayQueryOutputSpecs(context: CodegraphOverl
     expect(result.stdout).not.toContain('Complete source for');
     expect(result.stdout).not.toContain('Explore budget:');
     expect(result.stdout.indexOf('### Source Code')).toBeLessThan(result.stdout.indexOf('### NanoFlow Coverage'));
+  });
+
+  it('omits file nodes from related-symbol and not-shown Markdown rows', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-codegraph-file-node-noise-'));
+    tempRoots.push(root);
+    writeFile(root, 'src/sample.ts', 'export function SampleService(): void {}\n');
+    writeFile(root, '.codegraph/nanoflow-overlay.json', JSON.stringify({
+      schemaVersion: 1,
+      project: { root },
+      graph: {
+        nodes: [
+          {
+            id: 'file:src/sample.ts',
+            kind: 'file',
+            name: 'src/sample.ts',
+            qualifiedName: 'src/sample.ts',
+            filePath: 'src/sample.ts',
+            language: 'typescript',
+            startLine: 1,
+            endLine: 1,
+          },
+          {
+            id: 'function:src/sample.ts:SampleService',
+            kind: 'function',
+            name: 'SampleService',
+            qualifiedName: 'SampleService',
+            filePath: 'src/sample.ts',
+            language: 'typescript',
+            startLine: 1,
+            endLine: 1,
+          },
+          {
+            id: 'function:src/sample-hidden-implementation.ts:SampleHiddenImplementation',
+            kind: 'function',
+            name: 'SampleHiddenImplementation',
+            qualifiedName: 'SampleHiddenImplementation',
+            filePath: 'src/sample-hidden-implementation.ts',
+            language: 'typescript',
+            startLine: 1,
+            endLine: 1,
+          },
+          ...Array.from({ length: 10 }, (_value, index) => ({
+            id: `file:src/sample-file-only-${index}.ts`,
+            kind: 'file',
+            name: 'Sample',
+            qualifiedName: `src/sample-file-only-${index}.ts`,
+            filePath: `src/sample-file-only-${index}.ts`,
+            language: 'typescript',
+            startLine: 1,
+            endLine: 1,
+          })),
+        ],
+        edges: [],
+      },
+      typescript: {
+        files: [],
+        classes: [],
+        functions: [],
+        interfaces: [],
+        types: [],
+        variables: [],
+        enums: [],
+        namespaces: [],
+        imports: [],
+        exports: [],
+      },
+      angular: {
+        components: [],
+        directives: [],
+        pipes: [],
+        injectables: [],
+        injectors: [],
+        dynamicImports: [],
+        routes: [],
+      },
+      supabase: { edgeFunctions: [], migrations: [] },
+      agentRules: { hardRules: [] },
+    }));
+
+    const runQuery = (extraArgs: string[] = []) => spawnSync(process.execPath, [
+      queryScriptPath,
+      '--root',
+      root,
+      '--query',
+      'Sample',
+      '--limit',
+      '20',
+      ...extraArgs,
+    ], {
+      cwd: repoRoot,
+      encoding: 'utf-8',
+      maxBuffer: 32 * 1024 * 1024,
+    });
+
+    const augmented = runQuery();
+    expectSpawnSuccess(augmented);
+    const augmentedRelatedStart = augmented.stdout.indexOf('### Related Symbols');
+    const augmentedNotShownStart = augmented.stdout.indexOf('### Not shown above', augmentedRelatedStart);
+    const augmentedRelatedEnd = augmentedNotShownStart >= 0
+      ? augmentedNotShownStart
+      : augmented.stdout.indexOf('### NanoFlow Coverage', augmentedRelatedStart);
+    expect(augmentedRelatedStart).toBeGreaterThanOrEqual(0);
+    const augmentedRelated = augmented.stdout.slice(
+      augmentedRelatedStart,
+      augmentedRelatedEnd,
+    );
+    expect(augmentedRelated).toContain('SampleService:1');
+    expect(augmentedRelated).not.toContain('src/sample.ts:1');
+    expect(augmented.stdout).not.toContain('sample-file-only-0.ts:1');
+
+    const jsonResult = runQuery(['--json']);
+    expectSpawnSuccess(jsonResult);
+    const response = JSON.parse(jsonResult.stdout) as {
+      generationId: string;
+      overlay: string;
+      notShown: Array<{ filePath: string; symbols: string[] }>;
+    };
+    expect(response.generationId).toMatch(/^g-[a-f0-9]{64}$/);
+    expect(response.overlay).toBe(`.codegraph/nanoflow-generations/${response.generationId}`);
+    expect(response.notShown).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        filePath: 'src/sample-hidden-implementation.ts',
+        symbols: ['SampleHiddenImplementation:1'],
+      }),
+    ]));
+    expect(response.notShown.flatMap(entry => entry.symbols))
+      .not.toContain('Sample:1');
+
+    const strictNative = runQuery(['--native-markdown']);
+    expectSpawnSuccess(strictNative);
+    const strictRelated = strictNative.stdout.slice(
+      strictNative.stdout.indexOf('### Related Symbols'),
+      strictNative.stdout.indexOf('### Code'),
+    );
+    expect(strictRelated).not.toContain('src/sample.ts:1');
+    expect(strictRelated).not.toContain('sample-file-only-0.ts:1');
   });
 
   it('rejects ambiguous JSON and native Markdown output modes', () => {
@@ -213,6 +353,98 @@ export function registerCodegraphOverlayQueryOutputSpecs(context: CodegraphOverl
     }
   });
 
+  it('enforces limit as a hard final budget across query output projections', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-codegraph-overlay-hard-output-budget-'));
+    tempRoots.push(root);
+    const files = ['alpha', 'beta', 'gamma'].map(name => `src/${name}.ts`);
+    for (const [index, file] of files.entries()) {
+      writeFile(root, file, `export class BudgetTarget${index} {}\n`);
+    }
+    const nodes = files.map((file, index) => ({
+      id: `${index === 0 ? 'function' : 'class'}:${file}:BudgetTarget${index}`,
+      kind: index === 0 ? 'function' : 'class',
+      name: `BudgetTarget${index}`,
+      qualifiedName: `BudgetTarget${index}`,
+      filePath: file,
+      language: 'typescript',
+      startLine: 1,
+      endLine: 1,
+    }));
+    const edges = nodes.slice(1).map(node => ({
+      source: nodes[0].id,
+      target: node.id,
+      kind: 'returns',
+    }));
+    writeFile(root, '.codegraph/hard-output-budget.json', `${JSON.stringify({
+      typescript: {
+        files: files.map(file => ({ file })),
+        classes: [], functions: [], interfaces: [], types: [], variables: [], enums: [], namespaces: [], imports: [], exports: [],
+      },
+      angular: { components: [], directives: [], pipes: [], injectables: [], injectors: [], dynamicImports: [], routes: [] },
+      supabase: { edgeFunctions: [], migrations: [] },
+      agentRules: { hardRules: [], syncRules: [] },
+      graph: { nodes, edges },
+    }, null, 2)}\n`);
+    const commonArgs = ['--overlay', '.codegraph/hard-output-budget.json', '--skip-refresh', '--limit', '1'];
+
+    for (const modeArgs of [[], ['--context-json'], ['--native-json']]) {
+      const result = queryOverlay(root, 'BudgetTarget0', [...commonArgs, ...modeArgs]);
+      expectSpawnSuccess(result);
+      const response = JSON.parse(result.stdout) as {
+        matches?: unknown[];
+        nodes: unknown[];
+        edges?: unknown[];
+        relatedFiles: string[];
+        codeBlocks?: unknown[];
+        stats: { nodeCount: number; edgeCount: number; fileCount: number; codeBlockCount?: number };
+      };
+      expect(response.matches?.length ?? 0).toBeLessThanOrEqual(1);
+      expect(response.nodes.length).toBeLessThanOrEqual(1);
+      expect(response.edges?.length ?? response.stats.edgeCount).toBeLessThanOrEqual(1);
+      expect(response.relatedFiles.length).toBeLessThanOrEqual(1);
+      expect(response.codeBlocks?.length ?? response.stats.codeBlockCount ?? 0).toBeLessThanOrEqual(1);
+      expect(response.stats).toEqual(expect.objectContaining({
+        nodeCount: response.nodes.length,
+        fileCount: response.relatedFiles.length,
+      }));
+    }
+
+    const markdown = spawnSync(
+      process.execPath,
+      [queryScriptPath, '--root', root, '--query', 'BudgetTarget0', '--limit', '1'],
+      { cwd: repoRoot, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 },
+    );
+    expectSpawnSuccess(markdown);
+    expect([...markdown.stdout.matchAll(/^####\s+/gm)]).toHaveLength(1);
+  });
+
+  it('keeps blast radius callers outside the final node budget', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-codegraph-blast-radius-budget-'));
+    tempRoots.push(root);
+    const nodes = [
+      { id: 'function:src/target.ts:BudgetTarget', kind: 'function', name: 'BudgetTarget', qualifiedName: 'BudgetTarget', filePath: 'src/target.ts', language: 'typescript', startLine: 1, endLine: 1 },
+      { id: 'function:src/caller.ts:BudgetCaller', kind: 'function', name: 'BudgetCaller', qualifiedName: 'BudgetCaller', filePath: 'src/caller.ts', language: 'typescript', startLine: 1, endLine: 1 },
+    ];
+    writeFile(root, '.codegraph/blast-radius-budget.json', JSON.stringify({
+      typescript: { files: [], classes: [], functions: [], interfaces: [], types: [], variables: [], enums: [], namespaces: [], imports: [], exports: [] },
+      angular: { components: [], directives: [], pipes: [], injectables: [], injectors: [], dynamicImports: [], routes: [] },
+      supabase: { edgeFunctions: [], migrations: [] },
+      agentRules: { hardRules: [], syncRules: [] },
+      graph: { nodes, edges: [{ source: nodes[1].id, target: nodes[0].id, kind: 'calls', metadata: { relation: 'call' } }] },
+    }));
+
+    const result = queryOverlay(root, 'BudgetTarget', [
+      '--overlay', '.codegraph/blast-radius-budget.json', '--skip-refresh', '--limit', '1',
+    ]);
+
+    expectSpawnSuccess(result);
+    const response = JSON.parse(result.stdout);
+    expect(response.nodes).toHaveLength(1);
+    expect(response.blastRadius).toEqual([expect.objectContaining({
+      name: 'BudgetTarget', callerCount: 1, callerFiles: ['src/caller.ts'],
+    })]);
+  });
+
   it('prints compact context JSON without formatter-only payloads for MCP context packs', () => {
     const root = makeFixture();
 
@@ -235,11 +467,14 @@ export function registerCodegraphOverlayQueryOutputSpecs(context: CodegraphOverl
     const response = JSON.parse(result.stdout);
     expect(response).toEqual(expect.objectContaining({
       query: 'SampleService',
+      generationId: expect.stringMatching(/^g-[a-f0-9]{64}$/),
+      overlay: expect.stringMatching(/^\.codegraph\/nanoflow-generations\/g-[a-f0-9]{64}$/),
       matches: expect.any(Array),
       nodes: expect.any(Array),
       relationshipGroups: expect.any(Object),
       coverage: expect.any(Object),
     }));
+    expect(response.overlay).toBe(`.codegraph/nanoflow-generations/${response.generationId}`);
     expect(response).not.toHaveProperty('markdown');
     expect(response).not.toHaveProperty('displayEdges');
     expect(response).not.toHaveProperty('codeBlocks');
@@ -493,9 +728,6 @@ export function registerCodegraphOverlayQueryOutputSpecs(context: CodegraphOverl
       startLine: 1,
       endLine: 3,
       docstring: 'render problem investigate',
-      metadata: {
-        note: 'render problem investigate',
-      },
     };
     writeFile(root, '.codegraph/nanoflow-overlay.json', JSON.stringify({
       schemaVersion: 1,

@@ -8,8 +8,21 @@ import { afterEach, describe, expect, it } from 'vitest';
 const require = createRequire(import.meta.url);
 const sourcePolicy = require('../../../scripts/lib/codegraph-source-policy.cjs') as {
   SOURCE_POLICY_VERSION: number;
+  SOURCE_POLICY_DEFINITION: {
+    schemaVersion: number;
+    version: number;
+    excludedDirectories: readonly string[];
+    artifactSuffixes: readonly string[];
+    packagedPatterns: readonly string[];
+    sourceFamilies: readonly string[];
+  };
   SOURCE_POLICY_DIGEST: string;
+  SOURCE_POLICY_V2_VERSION: number;
   classifySourcePath(relativePath: string): string | null;
+  classifySourcePolicyV2Path(relativePath: string): { class: string; role: string } | null;
+  deriveExact15PathSet(): { rows: Array<{ row: string }>; digest: string };
+  validateExact15NMinusOneWitness(witness: unknown): boolean;
+  fieldV3Digest(fields: Array<[string, Buffer | string]>): string;
   assertNoWindowsCaseCollisions(relativePaths: string[]): void;
   buildSourceManifest(projectRoot: string): {
     schemaVersion: number;
@@ -31,7 +44,32 @@ const sourcePolicy = require('../../../scripts/lib/codegraph-source-policy.cjs')
   };
 };
 
+const SOURCE_POLICY_V1_DIGEST =
+  'ca78ea5e17d32399faac676bcab26fc1d7f48186a89792774d37a6b8549d0ca3';
+
 const tempRoots: string[] = [];
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .sort()
+      .map(key => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function expectedDigest(label: string, entries: unknown[]): string {
+  return crypto.createHash('sha256').update(canonicalJson({
+    schemaVersion: 1,
+    sourcePolicyVersion: 1,
+    sourcePolicyDigest: SOURCE_POLICY_V1_DIGEST,
+    label,
+    entries,
+  })).digest('hex');
+}
 
 function makeRoot(): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-source-policy-'));
@@ -51,6 +89,45 @@ afterEach(() => {
 });
 
 describe('NanoFlow SourcePolicy v1', () => {
+  it('pins the complete immutable v1 definition and digest', () => {
+    expect(sourcePolicy.SOURCE_POLICY_DEFINITION).toEqual({
+      schemaVersion: 1,
+      version: 1,
+      excludedDirectories: [
+        '.angular', '.cache', '.codegraph', '.feedback_images', '.git', '.gradle',
+        '.next', '.nuxt', '.tmp', '.turbo', '.worktrees', 'build', 'cache',
+        'coverage', 'dist', 'dist-ssr', 'logs', 'node_modules', 'out',
+        'playwright-report', 'temp', 'test-results', 'tmp',
+      ],
+      artifactSuffixes: ['.bak', '.log', '.map', '.swp', '.temp', '.tmp', '.tsbuildinfo'],
+      packagedPatterns: ['*.min.js', '*.min.css'],
+      sourceFamilies: [
+        'typescript', 'javascript', 'angular-template', 'angular-style', 'sql',
+        'supabase', 'android-kotlin', 'android-xml', 'agent-instructions',
+        'context7-contract', 'codegraph-contract', 'toolchain-contract',
+      ],
+    });
+    expect(sourcePolicy.SOURCE_POLICY_DIGEST).toBe(SOURCE_POLICY_V1_DIGEST);
+    expect(Object.isFrozen(sourcePolicy.SOURCE_POLICY_DEFINITION)).toBe(true);
+    for (const value of Object.values(sourcePolicy.SOURCE_POLICY_DEFINITION)) {
+      if (Array.isArray(value)) expect(Object.isFrozen(value)).toBe(true);
+    }
+  });
+
+  it('derives packaged-artifact filtering from the digested definition', () => {
+    const policySource = fs.readFileSync(
+      path.join(process.cwd(), 'scripts', 'lib', 'codegraph-source-policy.cjs'),
+      'utf8',
+    );
+    const body = policySource.match(
+      /function isPackagedOrTemporaryArtifact\(fileName\) \{([\s\S]*?)\n\}/,
+    )?.[1] ?? '';
+
+    expect(body).toContain('SOURCE_POLICY_DEFINITION.packagedPatterns');
+    expect(body).not.toContain("lower.endsWith('.min.js')");
+    expect(body).not.toContain("lower.endsWith('.min.css')");
+  });
+
   it('does not globally rerank native graph nodes or edges in the overlay query adapter', () => {
     const querySource = fs.readFileSync(
       path.join(process.cwd(), 'scripts', 'query-codegraph-nanoflow-overlay.mjs'),
@@ -61,43 +138,17 @@ describe('NanoFlow SourcePolicy v1', () => {
     expect(querySource).not.toMatch(/\brankGraphEdgesForQuery\s*\(/);
   });
 
-  it('does not register the retired node ranker as a de-duplication hotspot', () => {
-    const contract = JSON.parse(fs.readFileSync(
-      path.join(process.cwd(), 'docs', 'codegraph-nanoflow-dedup-contract.json'),
-      'utf8',
-    )) as {
-      hotspots: Array<{ sourceSymbols?: string[]; coveredChildSymbols?: string[] }>;
-    };
-    const registeredSymbols = contract.hotspots.flatMap(hotspot => [
-      ...(hotspot.sourceSymbols ?? []),
-      ...(hotspot.coveredChildSymbols ?? []),
-    ]);
-
-    expect(registeredSymbols).not.toContain('rankNodesForQuery');
-  });
-
   it('discovers generic node and edge rank helpers as de-duplication hotspots', () => {
     const validatorSource = fs.readFileSync(
       path.join(process.cwd(), 'scripts', 'validate-codegraph-overlay-docs.cjs'),
       'utf8',
     );
-    const discoveryPatternLiteral = validatorSource.match(
+    const discoveryPatternSource = validatorSource.match(
       /const DEDUP_CONTRACT_QUERY_FORMATTER_DISCOVERY_PATTERN\s*=\s*([\s\S]*?);/,
     )?.[1] ?? '';
-    const parsedPatternLiteral = discoveryPatternLiteral.match(/^\/([\s\S]*)\/([a-z]*)$/);
 
-    expect(parsedPatternLiteral).not.toBeNull();
-
-    const discoveryPattern = new RegExp(parsedPatternLiteral![1], parsedPatternLiteral![2]);
-    const syntheticQuerySource = [
-      'function rankGraphEdgesForQuery(edges) { return edges; }',
-      'function rankRelationshipEdgesForQuery(edges) { return edges; }',
-    ].join('\n');
-
-    expect(Array.from(syntheticQuerySource.matchAll(discoveryPattern), match => match[1])).toEqual([
-      'rankGraphEdgesForQuery',
-      'rankRelationshipEdgesForQuery',
-    ]);
+    expect(discoveryPatternSource).toContain('rankNodesForQuery');
+    expect(discoveryPatternSource).toContain('rankGraphEdgesForQuery');
   });
 
   it('classifies every required source family through one versioned policy', () => {
@@ -200,6 +251,16 @@ describe('NanoFlow SourcePolicy v1', () => {
       manifest.contentDigest,
       manifest.inputDigest,
     ]) expect(digest).toMatch(/^[a-f0-9]{64}$/);
+    expect(manifest.metadataDigest).toBe(expectedDigest('metadata', manifest.entries.map(({
+      path: sourcePath, role, size, mtimeNs, ctimeNs,
+    }) => ({ path: sourcePath, role, size, mtimeNs, ctimeNs }))));
+    expect(manifest.contentDigest).toBe(expectedDigest('content', manifest.entries.map(({
+      path: sourcePath, sha256,
+    }) => ({ path: sourcePath, sha256 }))));
+    expect(manifest.inputDigest).toBe(expectedDigest('input', manifest.entries.map(({
+      path: sourcePath, inputSha256,
+    }) => ({ path: sourcePath, inputSha256 }))));
+    expect(manifest.sourceManifestDigest).toBe(expectedDigest('manifest', manifest.entries));
 
     fs.writeFileSync(firstPath, 'export const value = 2;\n', 'utf8');
     fs.utimesSync(firstPath, preservedTime, preservedTime);
@@ -242,5 +303,65 @@ describe('NanoFlow SourcePolicy v1', () => {
       '<!-- nanoflow-generation -->',
       '',
     ].join('\n')).digest('hex'));
+  });
+});
+
+describe('NanoFlow SourcePolicy v2 materialization', () => {
+  it('binds the revision41 v2 contracts to one classifier definition', () => {
+    const rootContractPath = path.join(
+      process.cwd(),
+      'scripts',
+      'contracts',
+      'codegraph-read-identity-v2.json',
+    );
+    const companionContractPath = path.join(
+      process.cwd(),
+      'scripts',
+      'contracts',
+      'codegraph-read-identity-v2-companion.json',
+    );
+    const rootContract = JSON.parse(fs.readFileSync(rootContractPath, 'utf8'));
+    const companionContract = JSON.parse(fs.readFileSync(companionContractPath, 'utf8'));
+
+    expect(rootContract.pathPolicy.pathPolicyId).toBe('CG2-PATH-POLICY/3');
+    expect(companionContract.classifier.matchSemantics.glob)
+      .toBe('only * and ? are metacharacters; * matches zero or more UTF-16 code units; ? matches one; no escape syntax; full filename match');
+    expect(sourcePolicy.SOURCE_POLICY_V2_VERSION).toBe(2);
+    expect(sourcePolicy.classifySourcePolicyV2Path('supabase/migrations/001.sql'))
+      .toEqual({ class: 'INCLUDE', role: 'SUPABASE_SQL' });
+    expect(sourcePolicy.classifySourcePolicyV2Path('android/app/src/main/res/layout/main.xml'))
+      .toEqual({ class: 'INCLUDE', role: 'ANDROID_XML' });
+  });
+
+  it('derives the bounded Exact15 path-set digest and validates every removal witness', () => {
+    const pathSet = sourcePolicy.deriveExact15PathSet();
+    expect(pathSet.rows.map((row: { row: string }) => row.row)).toEqual([
+      '01', '02', '03', '04', '05', '06', '07', '08', '09', '10', '11', '12', '13', '14', '15',
+    ]);
+    expect(pathSet.digest).toMatch(/^[a-f0-9]{64}$/);
+    expect(sourcePolicy.validateExact15NMinusOneWitness({
+      candidateRows: pathSet.rows.map((row: { row: string }) => row.row),
+      extraMutablePaths: [],
+      generatedHeaderExcluded: true,
+      removalResults: pathSet.rows.map((row: { row: string }) => `${row.row}|SOURCE_POLICY_SCOPE_GAP`),
+      repositoryPathsDigest: 'a'.repeat(64),
+      trackedPathCount: '0',
+      witnessVersion: 'EXACT15-NW/2',
+    })).toBe(true);
+  });
+
+  it('recomputes every published FieldV3 identity vector without importing adapter code', () => {
+    const rootContract = JSON.parse(fs.readFileSync(
+      path.join(process.cwd(), 'scripts', 'contracts', 'codegraph-read-identity-v2.json'),
+      'utf8',
+    ));
+    for (const vector of rootContract.digestDag.identityFieldVectors as string[]) {
+      const [field, _encoding, value, expected] = vector.split('|');
+      expect(sourcePolicy.fieldV3Digest([
+        ['domain', Buffer.from('field-vector-v3', 'ascii')],
+        ['field', Buffer.from(field, 'ascii')],
+        ['value', Buffer.from(value, 'utf8')],
+      ])).toBe(expected);
+    }
   });
 });

@@ -613,7 +613,10 @@ export function registerCodegraphOverlayMcpContextQualityToolingDiagnosticsSpecs
     const sourceHeaders = extractContextSourceHeaders(text);
     const leadingContext = text.slice(0, text.indexOf('### Source Code'));
     const baseMetadata = leadingContext.slice(leadingContext.indexOf('**Blast radius'));
-    expect(text).toContain('baseQuery=mcp responsewarnings');
+    expect(text).toContain(
+      'baseQuery=scripts/codegraph-nanoflow-mcp-stdio.cjs forwardNanoFlowContextPackRequest',
+    );
+    expect(text).toContain('requestTrace diagnostics responsewarnings');
     expect(baseMetadata).toContain('scripts/codegraph-nanoflow-mcp-stdio.cjs');
     expect(baseMetadata).not.toContain('LoggerService');
     expect(baseMetadata).not.toContain('NanoflowWidgetTelemetry');

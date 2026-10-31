@@ -102,6 +102,18 @@ export function writeCodegraphOverlayExtraFixtureFiles(root: string, writeFile: 
   );
   writeFile(
     root,
+    'src/services/sql-table-name-collision.service.ts',
+    [
+      'export class SqlTableNameCollisionService {',
+      '  tasks(): string[] {',
+      '    return [];',
+      '  }',
+      '}',
+      '',
+    ].join('\n'),
+  );
+  writeFile(
+    root,
     'src/services/realtime-client.service.ts',
     [
       'type RealtimeChannel = {',

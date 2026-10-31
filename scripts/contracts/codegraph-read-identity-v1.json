@@ -1,0 +1,67 @@
+{
+  "schemaVersion": 1,
+  "protocol": "codegraph-read-identity-v1",
+  "operation": "read",
+  "limits": {
+    "requestBytes": 8192,
+    "responseBytes": 89479168,
+    "fileBytes": 67108864,
+    "pathCharacters": 32767,
+    "components": 256,
+    "timeoutMs": 15000
+  },
+  "requestKeys": [
+    "maxBytes",
+    "nonce",
+    "operation",
+    "protocol",
+    "relativePath",
+    "root"
+  ],
+  "successKeys": [
+    "attestation",
+    "bytesBase64",
+    "identity",
+    "lastWriteTime",
+    "nonce",
+    "ok",
+    "protocol",
+    "sha256",
+    "size"
+  ],
+  "errorKeys": [
+    "error",
+    "nonce",
+    "ok",
+    "protocol"
+  ],
+  "attestationKeys": [
+    "binaryIdentity",
+    "binarySha256",
+    "buildId",
+    "protocolSha256",
+    "sourceSha256"
+  ],
+  "identityKeys": [
+    "fileId",
+    "volumeSerial"
+  ],
+  "errors": [
+    "UNSUPPORTED_PLATFORM",
+    "INVALID_REQUEST",
+    "INVALID_ROOT",
+    "INVALID_PATH",
+    "PATH_NOT_FOUND",
+    "PATH_REPARSE",
+    "PATH_CASE_MISMATCH",
+    "PATH_HARDLINK",
+    "PATH_NOT_REGULAR",
+    "FILE_TOO_LARGE",
+    "FILE_DRIFT",
+    "FILE_READ_FAILED",
+    "TOOL_UNAVAILABLE",
+    "TOOL_UNTRUSTED",
+    "TOOL_TIMEOUT",
+    "PROTOCOL_INVALID"
+  ]
+}

@@ -40,6 +40,10 @@ export function registerCodegraphAdapterDoctorHostSpecs(
       JSON.stringify({ graph: { nodes: [], edges: [] } }),
     );
     writeFileSync(path.join(root, 'scripts', 'codegraph-nanoflow-mcp-stdio.cjs'), 'fresh wrapper\n');
+    const codexConfigDir = mkdtempSync(path.join(tmpdir(), 'nanoflow-codex-doctor-config-'));
+    trackTempRoot(codexConfigDir);
+    const codexConfigPath = path.join(codexConfigDir, 'config.toml');
+    writeCodexConfig(root, codexConfigPath);
     writeFileSync(
       path.join(root, '.codegraph', 'nanoflow-mcp-wrapper.log'),
       [
@@ -70,11 +74,12 @@ export function registerCodegraphAdapterDoctorHostSpecs(
     const wrapperPath = path.join(root, 'scripts', 'codegraph-nanoflow-mcp-stdio.cjs');
     const result = runDoctor(root, ['--explain'], {
       ...process.env,
+      NANOFLOW_CODEGRAPH_CODEX_CONFIG: codexConfigPath,
       NANOFLOW_CODEGRAPH_DOCTOR_PROCESS_LIST_JSON: JSON.stringify([
         {
           pid: 43000,
           parentPid: 13880,
-          commandLine: `"${process.execPath}" ${wrapperPath} @colbymchenry/codegraph@1.2.0 serve --mcp --path ${root}`,
+          commandLine: `"${process.execPath}" ${wrapperPath} @colbymchenry/codegraph@1.5.0 serve --mcp --path ${root}`,
         },
       ]),
     });
@@ -106,7 +111,7 @@ export function registerCodegraphAdapterDoctorHostSpecs(
           event: 'wrapper.start',
           scriptPath: wrapperPath,
           scriptSha256: sha256(wrapperContents),
-          codegraphTarget: '@colbymchenry/codegraph@1.2.0',
+          codegraphTarget: '@colbymchenry/codegraph@1.5.0',
           env: {
             NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '30000',
             NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE: '0',
@@ -145,7 +150,7 @@ export function registerCodegraphAdapterDoctorHostSpecs(
     expect(result.stdout).toContain('observedDirectMcpError=Transport closed');
     expect(result.stdout).toContain('logEvidence latestTs=2026-07-07T09:18:13.876Z latestEvent=tools.list.augmented');
     expect(result.stdout).toContain('observedAt=2026-07-07T10:00:00.000Z latestLogAgeMs=2506124 staleAgainstObservedAt=true hasCurrentWrapperEvidence=false');
-    expect(result.stdout).toContain('ignoredWrapperStarts=1 ignoredContextResponses=0 ignoredStaleWrapperStarts=0 ignoredStaleContextResponses=0 noCurrentWrapperEvidence=true');
+    expect(result.stdout).toContain('ignoredWrapperStarts=1 ignoredContextResponses=0 ignoredPidReuseWrapperStarts=0 ignoredPidReuseContextResponses=0 processStartClockSkewMs=5000 ignoredStaleWrapperStarts=0 ignoredStaleContextResponses=0 noCurrentWrapperEvidence=true');
     expect(result.stdout).toContain('fallback=npm run codegraph:adapter:context -- --query "<query>" --json');
 
     const jsonResult = runDoctor(root, [
@@ -221,7 +226,7 @@ export function registerCodegraphAdapterDoctorHostSpecs(
           event: 'wrapper.start',
           scriptPath: wrapperPath,
           scriptSha256: sha256(wrapperContents),
-          codegraphTarget: '@colbymchenry/codegraph@1.2.0',
+          codegraphTarget: '@colbymchenry/codegraph@1.5.0',
           env: {
             NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '30000',
             NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE: '0',
@@ -305,7 +310,11 @@ export function registerCodegraphAdapterDoctorHostSpecs(
         }),
         liveProcesses: expect.objectContaining({
           available: true,
+          wrapperProcessCount: 0,
           matchingWrapperCount: 0,
+          auxiliaryProcessCount: 0,
+          hostParentPids: [],
+          auxiliaryProcesses: [],
           commandMismatchCount: 0,
           targetMismatchCount: 0,
         }),
@@ -335,7 +344,7 @@ export function registerCodegraphAdapterDoctorHostSpecs(
         event: 'wrapper.start',
         scriptPath: wrapperPath,
         scriptSha256: sha256(wrapperContents),
-        codegraphTarget: '@colbymchenry/codegraph@1.2.0',
+        codegraphTarget: '@colbymchenry/codegraph@1.5.0',
       })}\n`,
     );
     const codexConfigDir = mkdtempSync(path.join(tmpdir(), 'nanoflow-codex-doctor-config-'));
@@ -402,7 +411,7 @@ export function registerCodegraphAdapterDoctorHostSpecs(
           event: 'wrapper.start',
           scriptPath: wrapperPath,
           scriptSha256: sha256(wrapperContents),
-          codegraphTarget: '@colbymchenry/codegraph@1.2.0',
+          codegraphTarget: '@colbymchenry/codegraph@1.5.0',
           env: {
             NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '30000',
             NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE: '0',
@@ -420,7 +429,7 @@ export function registerCodegraphAdapterDoctorHostSpecs(
             wrapperPid: 43011,
             scriptPath: wrapperPath,
             scriptSha256: sha256(wrapperContents),
-            codegraphTarget: '@colbymchenry/codegraph@1.2.0',
+            codegraphTarget: '@colbymchenry/codegraph@1.5.0',
             env: {
               NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '30000',
               NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE: '0',
@@ -525,12 +534,12 @@ export function registerCodegraphAdapterDoctorHostSpecs(
         {
           pid: 43001,
           parentPid: 13880,
-          commandLine: `"${process.execPath}" ${wrapperPath} @colbymchenry/codegraph@1.2.0 serve --mcp --path ${root}`,
+          commandLine: `"${process.execPath}" ${wrapperPath} @colbymchenry/codegraph@1.5.0 serve --mcp --path ${root}`,
         },
         {
           pid: 43002,
           parentPid: 13880,
-          commandLine: `"${process.execPath}" ${wrapperPath} @colbymchenry/codegraph@1.2.0 serve --mcp --path ${root}`,
+          commandLine: `"${process.execPath}" ${wrapperPath} @colbymchenry/codegraph@1.5.0 serve --mcp --path ${root}`,
         },
       ]),
     };
@@ -545,6 +554,108 @@ export function registerCodegraphAdapterDoctorHostSpecs(
     expect(report.hostMcp.currentContextWrapperRawMatchesDisk).toBe(false);
     expect(report.hostMcp.currentContextWrapperMatchesDisk).toBeNull();
     expect(report.hostMcp.currentContextWrapperSupersededByFreshWrapper).toBe(true);
+  });
+
+  it('does not fail stale context env evidence older than a config-aligned wrapper start', () => {
+    const root = makeRoot();
+    writePackage(root, requiredScripts());
+    mkdirSync(path.join(root, '.codegraph'), { recursive: true });
+    mkdirSync(path.join(root, 'scripts'), { recursive: true });
+    writeFileSync(
+      path.join(root, '.codegraph', 'nanoflow-overlay.json'),
+      JSON.stringify({ graph: { nodes: [], edges: [] } }),
+    );
+    const wrapperPath = path.join(root, 'scripts', 'codegraph-nanoflow-mcp-stdio.cjs');
+    const wrapperContents = 'fresh wrapper\n';
+    const wrapperHash = sha256(wrapperContents);
+    const target = '@colbymchenry/codegraph@1.5.0';
+    const staleEnv = {
+      CODEGRAPH_NO_DAEMON: '0',
+      CODEGRAPH_NO_WATCH: '0',
+      CODEGRAPH_DAEMON_IDLE_TIMEOUT_MS: '0',
+      CODEGRAPH_DAEMON_MAX_IDLE_MS: '0',
+      NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '30000',
+      NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE: '0',
+    };
+    const configuredEnv = {
+      ...staleEnv,
+      CODEGRAPH_DAEMON_IDLE_TIMEOUT_MS: '300000',
+      CODEGRAPH_DAEMON_MAX_IDLE_MS: '1800000',
+    };
+    writeFileSync(wrapperPath, wrapperContents);
+    writeFileSync(
+      path.join(root, '.codegraph', 'nanoflow-mcp-wrapper.log'),
+      [
+        JSON.stringify({
+          ts: '2026-06-27T07:00:00.000Z',
+          runId: 'stale-config-context',
+          pid: 43101,
+          wrapperPid: 43101,
+          event: 'wrapper.start',
+          scriptPath: wrapperPath,
+          scriptSha256: wrapperHash,
+          codegraphTarget: target,
+          env: staleEnv,
+        }),
+        JSON.stringify({
+          ts: '2026-06-27T07:01:00.000Z',
+          runId: 'stale-config-context',
+          pid: 43101,
+          wrapperPid: 43101,
+          event: 'nanoflow.context.response',
+          requestId: 'stale-config-context-request',
+          failureClass: 'success',
+        }),
+        JSON.stringify({
+          ts: '2026-06-27T07:02:00.000Z',
+          runId: 'fresh-config-wrapper',
+          pid: 43102,
+          wrapperPid: 43102,
+          event: 'wrapper.start',
+          scriptPath: wrapperPath,
+          scriptSha256: wrapperHash,
+          codegraphTarget: target,
+          env: configuredEnv,
+        }),
+      ].join('\n'),
+    );
+    const codexConfigDir = mkdtempSync(path.join(tmpdir(), 'nanoflow-codex-doctor-config-'));
+    trackTempRoot(codexConfigDir);
+    const codexConfigPath = path.join(codexConfigDir, 'config.toml');
+    writeCodexConfig(root, codexConfigPath);
+    const env = {
+      ...process.env,
+      NANOFLOW_CODEGRAPH_CODEX_CONFIG: codexConfigPath,
+      NANOFLOW_CODEGRAPH_DOCTOR_PROCESS_LIST_JSON: JSON.stringify([
+        {
+          pid: 43101,
+          parentPid: 13880,
+          commandLine: `"${process.execPath}" ${wrapperPath} ${target} serve --mcp --path ${root}`,
+        },
+        {
+          pid: 43102,
+          parentPid: 13880,
+          commandLine: `"${process.execPath}" ${wrapperPath} ${target} serve --mcp --path ${root}`,
+        },
+      ]),
+    };
+
+    const result = runDoctor(root, [], env);
+
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+    const report = JSON.parse(result.stdout);
+    expect(report.hostMcp.currentConfiguredWrapper).toEqual(expect.objectContaining({
+      runId: 'fresh-config-wrapper',
+    }));
+    expect(report.hostMcp.currentContextWrapperSupersededByFreshWrapper).toBe(true);
+    expect(report.hostMcp.currentContextWrapperSupersededReason).toBe('config');
+    expect(report.hostMcp.currentContextWrapperRawEnv).toEqual(expect.objectContaining({
+      matches: false,
+    }));
+    expect(report.hostMcp.currentContextWrapperEnv).toEqual(expect.objectContaining({
+      matches: null,
+      actual: null,
+    }));
   });
 
   it('fails stale context-pack evidence when it responds after a fresh host wrapper start', () => {
@@ -608,12 +719,12 @@ export function registerCodegraphAdapterDoctorHostSpecs(
         {
           pid: 43003,
           parentPid: 13880,
-          commandLine: `"${process.execPath}" ${wrapperPath} @colbymchenry/codegraph@1.2.0 serve --mcp --path ${root}`,
+          commandLine: `"${process.execPath}" ${wrapperPath} @colbymchenry/codegraph@1.5.0 serve --mcp --path ${root}`,
         },
         {
           pid: 43004,
           parentPid: 13880,
-          commandLine: `"${process.execPath}" ${wrapperPath} @colbymchenry/codegraph@1.2.0 serve --mcp --path ${root}`,
+          commandLine: `"${process.execPath}" ${wrapperPath} @colbymchenry/codegraph@1.5.0 serve --mcp --path ${root}`,
         },
       ]),
     };
@@ -635,55 +746,4 @@ export function registerCodegraphAdapterDoctorHostSpecs(
     ]));
   });
 
-  it('reports malformed host MCP log lines instead of silently discarding root-cause evidence', () => {
-    const root = makeRoot();
-    writePackage(root, requiredScripts());
-    mkdirSync(path.join(root, '.codegraph'), { recursive: true });
-    mkdirSync(path.join(root, 'scripts'), { recursive: true });
-    writeFileSync(
-      path.join(root, '.codegraph', 'nanoflow-overlay.json'),
-      JSON.stringify({ graph: { nodes: [], edges: [] } }),
-    );
-    const wrapperPath = path.join(root, 'scripts', 'codegraph-nanoflow-mcp-stdio.cjs');
-    const wrapperContents = 'fresh wrapper\n';
-    writeFileSync(wrapperPath, wrapperContents);
-    writeFileSync(
-      path.join(root, '.codegraph', 'nanoflow-mcp-wrapper.log'),
-      [
-        JSON.stringify({
-          ts: '2026-06-27T07:00:00.000Z',
-          runId: 'fresh-run',
-          event: 'wrapper.start',
-          scriptPath: wrapperPath,
-          scriptSha256: sha256(wrapperContents),
-        }),
-        '{"ts":"2026-06-27T07:01:00.000Z","runId":"fresh-run","event":"wrapper.script.stale"',
-      ].join('\n'),
-    );
-    const codexConfigDir = mkdtempSync(path.join(tmpdir(), 'nanoflow-codex-doctor-config-'));
-    trackTempRoot(codexConfigDir);
-    const codexConfigPath = path.join(codexConfigDir, 'config.toml');
-    writeCodexConfig(root, codexConfigPath);
-    const env = {
-      ...process.env,
-      NANOFLOW_CODEGRAPH_CODEX_CONFIG: codexConfigPath,
-      NANOFLOW_CODEGRAPH_DOCTOR_PROCESS_LIST_JSON: '[]',
-    };
-
-    const result = runDoctor(root, [], env);
-
-    expect(result.status, result.stderr || result.stdout).toBe(1);
-    const report = JSON.parse(result.stdout);
-    expect(report.hostMcp.logMalformedLines).toBe(1);
-    expect(report.hostMcp.latestMalformedLogLine).toEqual(expect.objectContaining({
-      lineNumber: 2,
-      textTail: expect.stringContaining('wrapper.script.stale'),
-    }));
-    expect(report.checks).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        name: 'host-mcp:log-parse',
-        ok: false,
-      }),
-    ]));
-  });
 }

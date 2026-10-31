@@ -113,6 +113,7 @@
     "docs:human:guard": "npm run docs:human:validate && npm run quality:guard:human-docs-coupled:working-tree",
     "docs:validate": "npm run docs:context7:guard && npm run docs:human:guard",
     "codegraph:native-sidecar:audit": "node --no-warnings scripts/lib/codegraph-native-graph-sidecar.cjs --root . --json",
+    "codegraph:read-identity:build": "node scripts/build-codegraph-read-identity-win32.cjs --json",
     "codegraph:overlay": "node scripts/generate-codegraph-nanoflow-overlay.mjs",
     "codegraph:overlay:stdout": "node scripts/generate-codegraph-nanoflow-overlay.mjs --stdout",
     "codegraph:overlay:stable": "node scripts/run-codegraph-overlay-stability.cjs",

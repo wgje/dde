@@ -2,14 +2,92 @@
 'use strict';
 
 const { spawn } = require('node:child_process');
+const fs = require('node:fs');
 const path = require('node:path');
 const {
   createParticipantToken,
   fileEvidence,
   planDigest,
 } = require('./lib/codegraph-overlay-stability.cjs');
+const {
+  CONTRACT,
+  CONTRACT_DIGEST,
+  canonicalControlBytes,
+} = require('./lib/codegraph-overlay-generation-format.cjs');
 
 const DEFAULT_TIMEOUT_MS = 20 * 60 * 1000;
+const GENERATOR_RESULT_PREFIX = '[codegraph-overlay] ';
+const SHA256 = new RegExp(CONTRACT.patterns.sha256);
+const GENERATION_ID = new RegExp(CONTRACT.patterns.generationId);
+const SEQUENCE = new RegExp(CONTRACT.patterns.sequence);
+
+function exactKeys(value, expected) {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    && JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...expected].sort());
+}
+
+function canonicalTimestamp(value) {
+  if (typeof value !== 'string') return false;
+  const time = Date.parse(value);
+  return Number.isFinite(time) && new Date(time).toISOString() === value;
+}
+
+function parseGeneratorPublication(stdout) {
+  const lines = stdout.split(/\r?\n/).filter(line => line.startsWith(GENERATOR_RESULT_PREFIX));
+  if (lines.length !== 1) throw new Error('codegraph-overlay-stability-result-invalid');
+  let publication;
+  try { publication = JSON.parse(lines[0].slice(GENERATOR_RESULT_PREFIX.length)); } catch { /* below */ }
+  if (!exactKeys(publication, ['compatibilityDigest', 'generationId', 'sequence'])
+    || !SHA256.test(publication.compatibilityDigest)
+    || !GENERATION_ID.test(publication.generationId)
+    || !SEQUENCE.test(publication.sequence)) {
+    throw new Error('codegraph-overlay-stability-result-invalid');
+  }
+  return Object.freeze(publication);
+}
+
+function readCanonicalCurrent(currentPath) {
+  const bytes = fs.readFileSync(currentPath);
+  if (bytes.length > CONTRACT.limits.controlFileBytes) {
+    throw new Error('codegraph-overlay-stability-current-invalid');
+  }
+  let current;
+  try { current = JSON.parse(bytes.toString('utf8')); } catch { /* below */ }
+  if (!exactKeys(current, CONTRACT.currentKeys) || !canonicalControlBytes(current).equals(bytes)
+    || !GENERATION_ID.test(current.generationId) || !SHA256.test(current.compatibilityDigest)
+    || !SHA256.test(current.manifestDigest) || !SHA256.test(current.receiptDigest)
+    || !SEQUENCE.test(current.sequence) || !canonicalTimestamp(current.publishedAt)
+    || current.schemaVersion !== CONTRACT.schemaVersion || current.protocol !== CONTRACT.protocol
+    || current.contractDigest !== CONTRACT_DIGEST
+    || current.overlaySchemaDigest !== CONTRACT.overlaySchemaDigest
+    || current.sourcePolicyDigest !== CONTRACT.sourcePolicyDigest) {
+    throw new Error('codegraph-overlay-stability-current-invalid');
+  }
+  return { bytes, current };
+}
+
+function readPublishedOutput(root, publication) {
+  const generationRoot = path.join(root, ...CONTRACT.paths.generationRoot.split('/'));
+  const currentPath = path.join(generationRoot, CONTRACT.paths.current);
+  const before = readCanonicalCurrent(currentPath);
+  if (before.current.generationId !== publication.generationId
+    || before.current.sequence !== publication.sequence
+    || before.current.compatibilityDigest !== publication.compatibilityDigest) {
+    throw new Error('codegraph-overlay-stability-publication-mismatch');
+  }
+  const compatibilityPath = path.join(
+    generationRoot,
+    publication.generationId,
+    ...CONTRACT.paths.compatibility.split('/'),
+  );
+  const output = fileEvidence(compatibilityPath);
+  const after = readCanonicalCurrent(currentPath);
+  if (!before.bytes.equals(after.bytes)) throw new Error('codegraph-overlay-stability-current-drift');
+  if (output.sha256 !== publication.compatibilityDigest) {
+    throw new Error('codegraph-overlay-stability-compatibility-drift');
+  }
+  return output;
+}
 
 function buildStableGenerationPlan(options) {
   return {
@@ -38,9 +116,24 @@ function runStableGenerator(options) {
         NANOFLOW_CODEGRAPH_STABILITY_PARTICIPANT_TOKEN: participantToken,
         NANOFLOW_CODEGRAPH_STABILITY_PLAN_DIGEST: digest,
       },
-      stdio: options.stdio ?? 'inherit',
+      stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
     });
+    let stdout = '';
+    let stderr = '';
+    let captureError = null;
+    const capture = (current, chunk, target) => {
+      if (captureError) return current;
+      if (Buffer.byteLength(current, 'utf8') + chunk.length > CONTRACT.limits.controlFileBytes) {
+        captureError = new Error('codegraph-overlay-stability-output-limit');
+        child.kill('SIGTERM');
+        return current;
+      }
+      if (options.stdio === undefined || options.stdio === 'inherit') target.write(chunk);
+      return current + chunk.toString('utf8');
+    };
+    child.stdout.on('data', chunk => { stdout = capture(stdout, chunk, process.stdout); });
+    child.stderr.on('data', chunk => { stderr = capture(stderr, chunk, process.stderr); });
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
@@ -53,19 +146,22 @@ function runStableGenerator(options) {
     });
     child.once('close', (code, signal) => {
       clearTimeout(timer);
-      if (timedOut) {
-        reject(new Error(`codegraph-overlay-stability-timeout: ${timeoutMs}ms`));
-        return;
+      try {
+        if (timedOut) throw new Error(`codegraph-overlay-stability-timeout: ${timeoutMs}ms`);
+        if (captureError) throw captureError;
+        if (code !== 0) {
+          throw new Error(`codegraph-overlay-stability-generator-failed: code=${code} signal=${signal ?? 'none'}`);
+        }
+        const publication = parseGeneratorPublication(stdout);
+        resolve({
+          output: readPublishedOutput(root, publication),
+          participantToken,
+          planDigest: digest,
+          publication,
+        });
+      } catch (error) {
+        reject(error);
       }
-      if (code !== 0) {
-        reject(new Error(`codegraph-overlay-stability-generator-failed: code=${code} signal=${signal ?? 'none'}`));
-        return;
-      }
-      resolve({
-        output: fileEvidence(outputPath),
-        participantToken,
-        planDigest: digest,
-      });
     });
   });
 }

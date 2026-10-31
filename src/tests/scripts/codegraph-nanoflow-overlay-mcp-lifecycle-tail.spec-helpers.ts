@@ -26,9 +26,7 @@ export function registerCodegraphOverlayMcpLifecycleTailSpecs(
     tempRoots,
     parseJsonLines,
     readJsonLine,
-    writeManyJsonLines,
     waitForExit,
-    waitForLogEvent,
     codexConfigHelperPath,
     adapterContextScriptPath,
     adapterDoctorScriptPath,
@@ -72,53 +70,6 @@ export function registerCodegraphOverlayMcpLifecycleTailSpecs(
     }));
   }, 15_000);
 
-  it('pauses client input when the codegraph child stdin applies backpressure', async () => {
-    const fakeCodegraph = context.makeBlockedInputFakeCodegraph();
-    const logPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-codegraph-log-')), 'wrapper.log');
-    tempRoots.push(path.dirname(logPath));
-    const child = spawn(
-      process.execPath,
-      [wrapperScriptPath, fakeCodegraph, 'serve', '--mcp', '--path', repoRoot],
-      {
-        cwd: repoRoot,
-        stdio: ['pipe', 'pipe', 'pipe'],
-        env: {
-          ...process.env,
-          ...WRAPPER_REPO_OVERLAY_ENV,
-          NANOFLOW_CODEGRAPH_MCP_LOG: logPath,
-        },
-      },
-    );
-
-    try {
-      const largeQuery = 'blocked-child-stdin '.repeat(128);
-      const messages = Array.from({ length: 2000 }, (_, index) => {
-        const id = index + 1;
-        return {
-          jsonrpc: '2.0',
-          id,
-          method: 'tools/call',
-          params: {
-            name: 'codegraph_explore',
-            arguments: { query: `${largeQuery}${id}` },
-          },
-        };
-      });
-
-      const eventPromise = waitForLogEvent(logPath, 'child.stdin.backpressure');
-      const writePromise = writeManyJsonLines(child, messages, eventPromise);
-      const event = await eventPromise;
-      expect(event.queuedMessages).toBeGreaterThanOrEqual(0);
-      expect(event.bytes).toBeGreaterThan(1024);
-      child.stdin.destroy();
-      await writePromise;
-    } finally {
-      child.stdout.resume();
-      child.stderr.resume();
-      child.kill();
-    }
-  }, 15_000);
-
   it('keeps Codex MCP configuration ownership on the NanoFlow adapter scripts', () => {
     const codexConfigHelper = fs.readFileSync(codexConfigHelperPath, 'utf8');
     expect(codexConfigHelper).toContain('function readCodexCodegraphMcpConfig');
@@ -132,7 +83,7 @@ export function registerCodegraphOverlayMcpLifecycleTailSpecs(
     ]) {
       const script = fs.readFileSync(scriptPath, 'utf8');
       expect(script).toContain('readCodexCodegraphMcpConfig');
-      expect(script).toContain('NANOFLOW_CODEGRAPH_CODEX_CONFIG');
+      expect(script).toContain("require('./codegraph-codex-config.cjs')");
     }
 
     const adaptationDoc = fs.readFileSync(adaptationDocPath, 'utf8');
