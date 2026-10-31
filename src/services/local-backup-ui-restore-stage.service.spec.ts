@@ -511,6 +511,31 @@ describe('createLocalBackupUiRestoreStageOperations', () => {
     expect(context.runWriterMutation).toHaveBeenCalledWith('attachment-outbox', expect.any(Function));
   });
 
+  it('reads attachment outbox pre-images without cleanup writes', async () => {
+    const listPendingUploads = vi.fn(async () => []);
+    const attachmentOutbox = {
+      listPendingUploads,
+      savePendingUpload: vi.fn(async () => undefined),
+      removePendingUpload: vi.fn(async () => undefined),
+    };
+    const service = makeStageService(undefined, undefined, undefined, undefined, attachmentOutbox);
+    const marker = makeStageMarker();
+    const operations = service.createOperations({
+      ownerUserId: OWNER_USER_ID,
+      data: {} as never,
+      backup: makeConflictBackup(),
+      existingProjects: [],
+      actionQueueRestore: makeActionQueueRestore(),
+    });
+    operations.decodePreImage(marker);
+    const context = makeContext(marker);
+
+    await operations.verifyRolledBack('attachment-outbox', context);
+
+    expect(listPendingUploads).toHaveBeenCalledWith(OWNER_USER_ID, { restoreSnapshot: true });
+    expect(context.runWriterMutation).not.toHaveBeenCalled();
+  });
+
   it('rejects incomplete project ownership and mismatched conflict evidence before side effects', () => {
     for (const backup of makeInvalidConflictBackups()) {
       const saveConflict = vi.fn(async () => true);

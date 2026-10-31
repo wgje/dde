@@ -386,7 +386,9 @@ export class LocalBackupUiRestoreStageService {
     ownerUserId: string,
     context: LocalBackupUiRestoreStageOperationContext,
   ): Promise<LocalBackupUiRestoreStageSnapshots['attachmentOutbox']> {
-    const uploads = await this.attachmentOutbox.listPendingUploads(ownerUserId);
+    const uploads = await this.attachmentOutbox.listPendingUploads(ownerUserId, {
+      restoreSnapshot: true,
+    });
     await context.checkpoint();
     const encoded: LocalBackupUiRestoreStageSnapshots['attachmentOutbox'] = [];
     for (const upload of uploads) {

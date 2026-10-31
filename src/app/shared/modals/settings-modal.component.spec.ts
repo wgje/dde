@@ -22,6 +22,8 @@ import type { AttachmentImportItem } from '../../../services/attachment-import.s
 import { DisasterBackupService } from '../../../services/disaster-backup.service';
 import { BackupDataSafetyMetadataRestoreService } from '../../../services/backup-data-safety-metadata-restore.service';
 import { SessionRuntimeResetRegistry } from '../../../services/session-runtime-reset.service';
+import { LocalBackupUiRestoreStageService } from '../../../services/local-backup-ui-restore-stage.service';
+import { LocalBackupUiRestoreTransactionService } from '../../../services/local-backup-ui-restore-transaction.service';
 import {
   registerSettingsModalSiyuanOwnerGenerationSpecs,
 } from './settings-modal-siyuan-owner-generation.spec-helpers';
@@ -236,6 +238,11 @@ describe('SettingsModalComponent', () => {
         { provide: LocalBackupService, useValue: mockLocalBackupService },
         { provide: DisasterBackupService, useValue: mockDisasterBackupService },
         { provide: BackupDataSafetyMetadataRestoreService, useValue: mockMetadataRestoreService },
+        {
+          provide: LocalBackupUiRestoreStageService,
+          useValue: { createOperations: vi.fn(), createRecoveryOperations: vi.fn() },
+        },
+        { provide: LocalBackupUiRestoreTransactionService, useValue: { prepare: vi.fn(), takeoverExpired: vi.fn() } },
         { provide: ThemeService, useValue: mockThemeService },
         { provide: DockEngineService, useValue: mockDockEngine },
         { provide: FocusPreferenceService, useValue: mockFocusPreferenceService },
