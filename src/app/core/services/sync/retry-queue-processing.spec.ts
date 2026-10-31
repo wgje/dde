@@ -265,6 +265,86 @@ describe('retry queue processing helpers', () => {
     });
   });
 
+  it('quarantines task upserts without writeIntent before replay', () => {
+    expect(classifyRetryQueueItemPreflight({
+      item: {
+        id: 'queue-task-missing-intent',
+        type: 'task',
+        operation: 'upsert',
+        projectId: 'project-1',
+        sourceUserId: 'user-1',
+        data: {
+          id: '11111111-1111-4111-8111-111111111111',
+          updatedAt: '2026-06-08T00:00:00.000Z',
+        },
+      },
+      existsInQueue: true,
+      currentUserId: 'user-1',
+      localModeUserId: 'local-user',
+      shouldSilentlyDropUnownedLegacyItem: false,
+    })).toEqual({
+      kind: 'quarantine',
+      reason: 'legacy task upsert 缺少 writeIntent，禁止猜测为 full upsert',
+    });
+  });
+
+  it('applies owner isolation before evaluating a missing task writeIntent', () => {
+    const data = {
+      id: '11111111-1111-4111-8111-111111111111',
+      updatedAt: '2026-06-08T00:00:00.000Z',
+    };
+
+    expect(classifyRetryQueueItemPreflight({
+      item: {
+        id: 'queue-task-local-user',
+        type: 'task',
+        operation: 'upsert',
+        projectId: 'project-1',
+        sourceUserId: 'local-user',
+        data,
+      },
+      existsInQueue: true,
+      currentUserId: null,
+      localModeUserId: 'local-user',
+      shouldSilentlyDropUnownedLegacyItem: true,
+    })).toEqual({ kind: 'remove-terminal', reason: 'drop-legacy-local-user' });
+
+    expect(classifyRetryQueueItemPreflight({
+      item: {
+        id: 'queue-task-other-user',
+        type: 'task',
+        operation: 'upsert',
+        projectId: 'project-1',
+        sourceUserId: 'other-user',
+        data,
+      },
+      existsInQueue: true,
+      currentUserId: 'user-1',
+      localModeUserId: 'local-user',
+      shouldSilentlyDropUnownedLegacyItem: false,
+    })).toEqual({
+      kind: 'quarantine',
+      reason: '跨账号重试项来源 other-user 与当前账号 user-1 不匹配',
+    });
+
+    expect(classifyRetryQueueItemPreflight({
+      item: {
+        id: 'queue-task-missing-source',
+        type: 'task',
+        operation: 'upsert',
+        projectId: 'project-1',
+        data,
+      },
+      existsInQueue: true,
+      currentUserId: 'user-1',
+      localModeUserId: 'local-user',
+      shouldSilentlyDropUnownedLegacyItem: false,
+    })).toEqual({
+      kind: 'quarantine',
+      reason: 'legacy 重试项缺少来源元数据，无法安全判断归属',
+    });
+  });
+
   it('allows current-owner retry items with required metadata to replay', () => {
     expect(classifyRetryQueueItemPreflight({
       item: {
@@ -273,6 +353,7 @@ describe('retry queue processing helpers', () => {
         operation: 'upsert',
         projectId: 'project-1',
         sourceUserId: 'user-1',
+        writeIntent: 'task_full_upsert',
         data: {
           id: '11111111-1111-4111-8111-111111111111',
           updatedAt: '2026-06-08T00:00:00.000Z',

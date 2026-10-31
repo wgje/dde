@@ -43,8 +43,15 @@ export function registerRetryQueueServiceLifecycleSpecs(
     } = getContext();
     setOnline(true);
     syncWriterLeaseMock.isFeatureEnabled.mockReturnValue(true);
+    syncWriterLeaseMock.requestLease.mockResolvedValueOnce({
+      tabId: 'tab-test',
+      lockName: 'nanoflow-sync:test:test-user:__global__',
+      mode: 'idb-lease',
+      signal: new AbortController().signal,
+      release: releaseLeaseMock,
+    });
     const task = createTask('leased-task');
-    service.add('task', 'upsert', task, 'project-lease', 'test-user');
+    service.add('task', 'upsert', task, 'project-lease', 'test-user', undefined, 'task_full_upsert');
 
     const result = await service.processQueueSlice({ maxItems: 1, maxDurationMs: 1000 });
 
@@ -57,9 +64,81 @@ export function registerRetryQueueServiceLifecycleSpecs(
       task,
       'project-lease',
       'test-user',
-      undefined,
+      'task_full_upsert',
       expect.stringMatching(SYNC_OPERATION_ID_PATTERN),
     );
+    expect(releaseLeaseMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('processQueueSlice 在 sync writer lease 退化为 memory-only 时应延后且不重放云写', async () => {
+    const {
+      service,
+      handler,
+      releaseLeaseMock,
+      syncWriterLeaseMock,
+      setOnline,
+      createTask,
+    } = getContext();
+    setOnline(true);
+    syncWriterLeaseMock.isFeatureEnabled.mockReturnValue(true);
+    syncWriterLeaseMock.requestLease.mockResolvedValueOnce({
+      tabId: 'tab-test',
+      lockName: 'nanoflow-sync:test:test-user:__global__',
+      mode: 'memory-only',
+      release: releaseLeaseMock,
+    });
+    const task = createTask('memory-only-lease-task');
+    service.add('task', 'upsert', task, 'project-memory-only', 'test-user');
+
+    const result = await service.processQueueSlice({ maxItems: 1, maxDurationMs: 1000 });
+
+    expect(result.processed).toBe(0);
+    expect(result.completed).toBe(false);
+    expect(result.remaining).toBe(1);
+    expect(handler.pushTask).not.toHaveBeenCalled();
+    expect(service.getItems()).toEqual([
+      expect.objectContaining({
+        data: expect.objectContaining({ id: task.id }),
+        retryCount: 0,
+      }),
+    ]);
+    expect(releaseLeaseMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('processQueueSlice 在首项 replay 期间丢失 lease 后应停止并保留未结算队列项', async () => {
+    const {
+      service,
+      handler,
+      releaseLeaseMock,
+      syncWriterLeaseMock,
+      setOnline,
+      createTask,
+    } = getContext();
+    const leaseController = new AbortController();
+    setOnline(true);
+    syncWriterLeaseMock.isFeatureEnabled.mockReturnValue(true);
+    syncWriterLeaseMock.requestLease.mockResolvedValueOnce({
+      tabId: 'tab-test',
+      lockName: 'nanoflow-sync:test:test-user:__global__',
+      mode: 'idb-lease',
+      signal: leaseController.signal,
+      release: releaseLeaseMock,
+    });
+    vi.mocked(handler.pushTask).mockImplementationOnce(async () => {
+      leaseController.abort();
+      return true;
+    });
+    const firstTask = createTask('lease-lost-first');
+    const secondTask = createTask('lease-lost-second');
+    service.add('task', 'upsert', firstTask, 'project-lease-lost', 'test-user', undefined, 'task_full_upsert');
+    service.add('task', 'upsert', secondTask, 'project-lease-lost', 'test-user', undefined, 'task_full_upsert');
+
+    const result = await service.processQueueSlice({ maxItems: 2, maxDurationMs: 1000 });
+
+    expect(result.processed).toBe(1);
+    expect(result.completed).toBe(false);
+    expect(handler.pushTask).toHaveBeenCalledTimes(1);
+    expect(service.getItems()).toHaveLength(2);
     expect(releaseLeaseMock).toHaveBeenCalledTimes(1);
   });
 
@@ -207,15 +286,15 @@ export function registerRetryQueueServiceLifecycleSpecs(
       .mockResolvedValue(undefined);
 
     destroy();
-    await Promise.resolve();
-    await Promise.resolve();
+    await vi.waitFor(() => {
+      expect(closeStorageConnectionsSpy).toHaveBeenCalledTimes(1);
+      expect(loggerCategory.warn).toHaveBeenCalledWith(
+        'RetryQueue 销毁持久化失败，继续关闭存储连接',
+        saveError,
+      );
+    });
 
     expect(saveImmediateSpy).toHaveBeenCalledTimes(1);
-    expect(closeStorageConnectionsSpy).toHaveBeenCalledTimes(1);
-    expect(loggerCategory.warn).toHaveBeenCalledWith(
-      'RetryQueue 销毁持久化失败，继续关闭存储连接',
-      saveError,
-    );
   });
 
   it('销毁回调中关闭存储连接失败不应逃逸到异步边界', async () => {
@@ -233,15 +312,15 @@ export function registerRetryQueueServiceLifecycleSpecs(
       .mockRejectedValue(closeError);
 
     destroy();
-    await Promise.resolve();
-    await Promise.resolve();
+    await vi.waitFor(() => {
+      expect(closeStorageConnectionsSpy).toHaveBeenCalledTimes(1);
+      expect(loggerCategory.warn).toHaveBeenCalledWith(
+        'RetryQueue 销毁关闭存储连接失败',
+        closeError,
+      );
+    });
 
     expect(saveImmediateSpy).toHaveBeenCalledTimes(1);
-    expect(closeStorageConnectionsSpy).toHaveBeenCalledTimes(1);
-    expect(loggerCategory.warn).toHaveBeenCalledWith(
-      'RetryQueue 销毁关闭存储连接失败',
-      closeError,
-    );
   });
 
   it('销毁后晚到的构造期存储加载不应重新应用队列项', async () => {

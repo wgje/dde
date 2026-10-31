@@ -1,6 +1,7 @@
 import { expect, it, vi } from 'vitest';
 
 import type { Task } from '../../../../models';
+import { localBackupUiRestoreWriterQuiescence } from '../../../../services/local-backup-ui-restore-writer-quiescence.service';
 import type { RetryQueueItem, RetryQueueService } from './retry-queue.service';
 
 export interface RetryQueueBackupRestoreSpecContext {
@@ -11,6 +12,70 @@ export interface RetryQueueBackupRestoreSpecContext {
 export function registerRetryQueueBackupRestoreSpecs(
   getContext: () => RetryQueueBackupRestoreSpecContext,
 ): void {
+  it('validated restore 应只使用捕获时钟并在 quiescence 内转发 policy', async () => {
+    const { service, createTask } = getContext();
+    const task = createTask('retry-validated-restore-captured-time');
+    const validationNow = Date.now();
+    const maxItemAge = (service as unknown as { MAX_ITEM_AGE: number }).MAX_ITEM_AGE;
+    const item = makeBackupRetryQueueItem(task, {
+      createdAt: validationNow - maxItemAge + 1,
+    });
+    const runAsyncSpy = vi.spyOn(localBackupUiRestoreWriterQuiescence, 'runAsync');
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(validationNow + maxItemAge);
+
+    try {
+      const restoredCount = await restoreWithValidatedPolicy(service, [item], validationNow);
+
+      expect(restoredCount).toBe(1);
+      expect(service.getItems().map(queueItem => queueItem.data.id)).toEqual([task.id]);
+      expect(localStorage.getItem('nanoflow.retry-queue.legacy-review.test-user')).toBeNull();
+      expect(runAsyncSpy).toHaveBeenCalledWith('test-user', 'retry-queue', expect.any(Function));
+    } finally {
+      nowSpy.mockRestore();
+      runAsyncSpy.mockRestore();
+    }
+  });
+
+  it.each([
+    { reason: 'expired', mutate: (item: RetryQueueItem, now: number, service: RetryQueueService) => ({
+      ...item,
+      createdAt: now - (service as unknown as { MAX_ITEM_AGE: number }).MAX_ITEM_AGE,
+    }) },
+    { reason: 'max-retries', mutate: (item: RetryQueueItem, _now: number, service: RetryQueueService) => ({
+      ...item,
+      retryCount: (service as unknown as { MAX_RETRIES: number }).MAX_RETRIES,
+    }) },
+    { reason: 'invalid', mutate: (item: RetryQueueItem) => ({
+      ...item,
+      data: { ...item.data, id: 'not-a-uuid' },
+    }) },
+    { reason: 'foreign', mutate: (item: RetryQueueItem) => ({
+      ...item,
+      sourceUserId: 'other-user',
+    }) },
+  ])('validated restore 应在 mutation 前拒绝 $reason 且不产生 terminal evidence', async ({ mutate }) => {
+    const { service, createTask } = getContext();
+    const validationNow = Date.now();
+    const acceptedItem = makeBackupRetryQueueItem(createTask('retry-validated-accepted'));
+    const rejectedItem = mutate(
+      makeBackupRetryQueueItem(createTask('retry-validated-rejected')),
+      validationNow,
+      service,
+    );
+    const queueStorageBefore = localStorage.getItem('nanoflow.retry-queue');
+    const ownerEvidenceBefore = localStorage.getItem('nanoflow.retry-queue.legacy-review.test-user');
+    const foreignEvidenceBefore = localStorage.getItem('nanoflow.retry-queue.legacy-review.other-user');
+
+    await expect(
+      restoreWithValidatedPolicy(service, [acceptedItem, rejectedItem], validationNow),
+    ).rejects.toThrow(/validated restore/i);
+
+    expect(service.getItems()).toEqual([]);
+    expect(localStorage.getItem('nanoflow.retry-queue')).toBe(queueStorageBefore);
+    expect(localStorage.getItem('nanoflow.retry-queue.legacy-review.test-user')).toBe(ownerEvidenceBefore);
+    expect(localStorage.getItem('nanoflow.retry-queue.legacy-review.other-user')).toBe(foreignEvidenceBefore);
+  });
+
   it('restoreFromBackupItems 应合并当前 owner 的备份重试项且保留前台和 hidden 队列', async () => {
     const { service, createTask } = getContext();
     const currentTask = createTask('retry-restore-current');
@@ -201,4 +266,39 @@ export function registerRetryQueueBackupRestoreSpecs(
       saveImmediateSpy.mockRestore();
     }
   });
+}
+
+function restoreWithValidatedPolicy(
+  service: RetryQueueService,
+  items: unknown[],
+  validationNow: number,
+): Promise<number> {
+  return (service as unknown as {
+    restoreFromBackupItems(
+      restoreItems: unknown[],
+      ownerUserId: string,
+      policy: { validationNow: number; terminalEvidence: 'forbid' },
+    ): Promise<number>;
+  }).restoreFromBackupItems(items, 'test-user', {
+    validationNow,
+    terminalEvidence: 'forbid',
+  });
+}
+
+function makeBackupRetryQueueItem(
+  task: Task,
+  overrides: Partial<RetryQueueItem> = {},
+): RetryQueueItem {
+  return {
+    id: crypto.randomUUID(),
+    type: 'task',
+    operation: 'upsert',
+    data: task,
+    projectId: 'project-validated-restore',
+    retryCount: 0,
+    createdAt: Date.now(),
+    sourceUserId: 'test-user',
+    operationId: crypto.randomUUID(),
+    ...overrides,
+  };
 }

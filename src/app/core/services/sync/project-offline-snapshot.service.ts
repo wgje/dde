@@ -1,6 +1,7 @@
 import { Injectable, inject } from '@angular/core';
 
 import { AuthService } from '../../../../services/auth.service';
+import { DataSafetyWriteAuditService } from '../../../../services/data-safety-write-audit.service';
 import { LoggerService } from '../../../../services/logger.service';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 import { StartupPlaceholderStateService } from '../../../../services/startup-placeholder-state.service';
@@ -11,6 +12,8 @@ import {
   getSnapshotByteSize as getSnapshotByteSizePure,
   normalizeOfflineSnapshotProject as normalizeOfflineSnapshotProjectPure,
 } from './project-data-projection';
+import { validateOfflineSnapshotProjects } from './project-offline-snapshot-validation';
+import { createSyncOperationId } from '../../../../utils/sync-operation-id';
 
 export type StartupOfflineSnapshotSource = 'idb' | 'localStorage' | 'none';
 
@@ -40,12 +43,15 @@ type StartupSnapshotCandidate = {
   snapshot: ParsedOfflineSnapshotEnvelope;
 };
 
+const OFFLINE_SNAPSHOT_DB_OPEN_TIMEOUT_MS = 5000;
+
 @Injectable({ providedIn: 'root' })
 export class ProjectOfflineSnapshotService {
   private readonly authService = inject(AuthService, { optional: true });
   private readonly logger = inject(LoggerService).category('ProjectData');
   private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly startupPlaceholderState = inject(StartupPlaceholderStateService, { optional: true });
+  private readonly dataSafetyWriteAudit = new DataSafetyWriteAuditService();
 
   private readonly OFFLINE_CACHE_KEY = CACHE_CONFIG.OFFLINE_CACHE_KEY;
   private readonly CACHE_VERSION = CACHE_CONFIG.CACHE_VERSION;
@@ -150,11 +156,12 @@ export class ProjectOfflineSnapshotService {
       ?? this.authService?.currentUserId()
       ?? this.authService?.peekPersistedSessionIdentity?.()?.userId
       ?? AUTH_CONFIG.LOCAL_MODE_USER_ID;
+    const savedAt = new Date().toISOString();
     const payload = JSON.stringify({
       projects: cleanedProjects,
       version: this.CACHE_VERSION,
       ownerUserId: snapshotOwnerUserId,
-      savedAt: new Date().toISOString(),
+      savedAt,
     });
 
     const sizeKB = Math.round(payload.length / 1024);
@@ -168,14 +175,57 @@ export class ProjectOfflineSnapshotService {
     }
 
     const localStorageSaved = this.saveSnapshotToLocalStorage(payload, snapshotOwnerUserId);
+    let indexedDbSaved = false;
 
     try {
       await this.saveSnapshotToIDB(payload, snapshotOwnerUserId);
+      indexedDbSaved = true;
     } catch (error) {
       this.logger.warn('离线快照保存失败（IndexedDB）', error);
       if (options.requireIndexedDB && !localStorageSaved) {
         throw error;
       }
+    }
+
+    if (localStorageSaved || indexedDbSaved) {
+      this.recordOfflineSnapshotWriteAudit(snapshotOwnerUserId, savedAt, {
+        localStorage: localStorageSaved ? 'saved' : 'failed',
+        indexedDB: indexedDbSaved ? 'saved' : 'failed',
+      });
+    }
+  }
+
+  private recordOfflineSnapshotWriteAudit(
+    ownerUserId: string,
+    savedAt: string,
+    settlement: { localStorage: 'saved' | 'failed'; indexedDB: 'saved' | 'failed' },
+  ): void {
+    const normalizedOwnerUserId = this.normalizeSnapshotOwnerUserId(ownerUserId);
+    try {
+      this.dataSafetyWriteAudit.recordWrite({
+        ownerUserId: normalizedOwnerUserId,
+        operationId: createSyncOperationId(),
+        sourceUserId: normalizedOwnerUserId,
+        entityType: 'offline-snapshot',
+        entityId: this.getOfflineSnapshotRecordId(normalizedOwnerUserId),
+        operation: 'replace',
+        localTimestamp: Date.parse(savedAt),
+        updatedAtBaseline: null,
+        beforeVersion: null,
+        rpcResult: {
+          status: 'applied',
+          reason: 'offline-snapshot-settled',
+          decision: 'local-offline-snapshot-replaced',
+          entityId: this.getOfflineSnapshotRecordId(normalizedOwnerUserId),
+          raw: { settlement },
+        },
+        enteredRetryQueue: false,
+        retryCount: 0,
+        lastSyncTimeBefore: null,
+        lastSyncTimeAfter: null,
+      });
+    } catch (error) {
+      this.logger.warn('离线快照 DataSafety 写入审计记录失败', error);
     }
   }
 
@@ -210,21 +260,67 @@ export class ProjectOfflineSnapshotService {
 
   private async saveSnapshotToIDB(payload: string, ownerUserId: string): Promise<void> {
     const db = await this.openSnapshotDB();
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction('snapshots', 'readwrite');
-      tx.objectStore('snapshots').put({
+    await this.runSnapshotWriteTransaction(db, store => {
+      store.put({
         id: this.getOfflineSnapshotRecordId(this.normalizeSnapshotOwnerUserId(ownerUserId)),
         ownerUserId: this.normalizeSnapshotOwnerUserId(ownerUserId),
         data: payload,
       });
-      tx.oncomplete = () => {
-        db.close();
+    });
+  }
+
+  private runSnapshotWriteTransaction(
+    db: IDBDatabase,
+    write: (store: IDBObjectStore) => void,
+  ): Promise<void> {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const close = (): void => {
+        try {
+          db.close();
+        } catch {
+          // A close failure must not replace the transaction outcome.
+        }
+      };
+      const resolveOnce = (): void => {
+        if (settled) return;
+        settled = true;
+        close();
         resolve();
       };
-      tx.onerror = () => {
-        db.close();
-        reject(tx.error);
+      const rejectOnce = (error: unknown): void => {
+        if (settled) return;
+        settled = true;
+        close();
+        reject(error);
       };
+
+      let tx: IDBTransaction;
+      try {
+        tx = db.transaction('snapshots', 'readwrite');
+      } catch (error) {
+        rejectOnce(error);
+        return;
+      }
+
+      tx.oncomplete = resolveOnce;
+      tx.onerror = () => rejectOnce(
+        tx.error ?? new DOMException('Offline snapshot transaction failed', 'UnknownError'),
+      );
+      tx.onabort = () => rejectOnce(
+        tx.error ?? new DOMException('Offline snapshot transaction aborted', 'AbortError'),
+      );
+
+      try {
+        write(tx.objectStore('snapshots'));
+      } catch (error) {
+        try {
+          tx.abort();
+        } catch {
+          // The transaction may already be inactive; preserve the original error.
+        }
+        rejectOnce(error);
+      }
     });
   }
 
@@ -261,20 +357,56 @@ export class ProjectOfflineSnapshotService {
         db.close();
         reject(tx.error);
       };
+      tx.onabort = () => {
+        db.close();
+        reject(tx.error ?? new DOMException('Offline snapshot read aborted', 'AbortError'));
+      };
     });
   }
 
   private openSnapshotDB(): Promise<IDBDatabase> {
     return new Promise((resolve, reject) => {
       const request = indexedDB.open('nanoflow-offline-snapshots', 1);
+      let settled = false;
+      const timeoutId = setTimeout(() => {
+        rejectOnce(new DOMException(
+          'Offline snapshot IndexedDB open timed out',
+          'TimeoutError',
+        ));
+      }, OFFLINE_SNAPSHOT_DB_OPEN_TIMEOUT_MS);
+      const resolveOnce = (db: IDBDatabase): void => {
+        if (settled) {
+          try {
+            db.close();
+          } catch {
+            // A timed-out or blocked request may still succeed later; close it.
+          }
+          return;
+        }
+        settled = true;
+        clearTimeout(timeoutId);
+        resolve(db);
+      };
+      const rejectOnce = (error: unknown): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeoutId);
+        reject(error);
+      };
       request.onupgradeneeded = () => {
         const db = request.result;
         if (!db.objectStoreNames.contains('snapshots')) {
           db.createObjectStore('snapshots', { keyPath: 'id' });
         }
       };
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error);
+      request.onsuccess = () => resolveOnce(request.result);
+      request.onerror = () => rejectOnce(
+        request.error ?? new DOMException('Offline snapshot IndexedDB open failed', 'UnknownError'),
+      );
+      request.onblocked = () => rejectOnce(new DOMException(
+        'Offline snapshot IndexedDB open blocked by another connection',
+        'InvalidStateError',
+      ));
     });
   }
 
@@ -409,18 +541,28 @@ export class ProjectOfflineSnapshotService {
 
   private parseSnapshotEnvelope(raw: string): ParsedOfflineSnapshotEnvelope | null {
     try {
-      const parsed = JSON.parse(raw) as { projects?: Project[]; ownerUserId?: unknown; savedAt?: unknown };
-      if (Array.isArray(parsed?.projects)) {
-        return {
-          projects: parsed.projects.map((project: Project) => normalizeOfflineSnapshotProjectPure(project)),
-          ownerUserId: typeof parsed.ownerUserId === 'string' && parsed.ownerUserId.trim().length > 0
-            ? parsed.ownerUserId
-            : null,
-          savedAt: typeof parsed.savedAt === 'string' && parsed.savedAt.trim().length > 0
-            ? parsed.savedAt
-            : null,
-        };
+      const parsed = JSON.parse(raw) as unknown;
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        this.logger.warn('快照数据结构校验失败', { errors: ['snapshot envelope must be an object'] });
+        return null;
       }
+
+      const envelope = parsed as Record<string, unknown>;
+      const validation = validateOfflineSnapshotProjects(envelope['projects']);
+      if (!validation.valid) {
+        this.logger.warn('快照数据结构校验失败', { errors: validation.errors });
+        return null;
+      }
+
+      return {
+        projects: validation.projects.map(project => normalizeOfflineSnapshotProjectPure(project)),
+        ownerUserId: typeof envelope['ownerUserId'] === 'string' && envelope['ownerUserId'].trim().length > 0
+          ? envelope['ownerUserId']
+          : null,
+        savedAt: typeof envelope['savedAt'] === 'string' && envelope['savedAt'].trim().length > 0
+          ? envelope['savedAt']
+          : null,
+      };
     } catch (error) {
       this.logger.warn('快照数据解析失败', error);
     }
@@ -566,21 +708,11 @@ export class ProjectOfflineSnapshotService {
 
   private async clearSnapshotFromIDB(ownerUserId: string): Promise<void> {
     const db = await this.openSnapshotDB();
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction('snapshots', 'readwrite');
-      const store = tx.objectStore('snapshots');
+    await this.runSnapshotWriteTransaction(db, store => {
       store.delete(this.getOfflineSnapshotRecordId(ownerUserId));
       if (ownerUserId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
         store.delete(this.LEGACY_OFFLINE_SNAPSHOT_RECORD_ID);
       }
-      tx.oncomplete = () => {
-        db.close();
-        resolve();
-      };
-      tx.onerror = () => {
-        db.close();
-        reject(tx.error);
-      };
     });
   }
 }

@@ -47,7 +47,7 @@ export function registerRetryQueueReplayBehaviorSpecs(
   it('task replay handler 返回 false 时应保留队列项，避免 auth/tombstone 保护误删重试意图', async () => {
     const { service, handler, setOnline, createTask } = getContext();
     const task = createTask('task-auth-tombstone-replay-retained');
-    service.add('task', 'upsert', task, 'p-auth-tombstone');
+    service.add('task', 'upsert', task, 'p-auth-tombstone', undefined, undefined, 'task_full_upsert');
     setOnline(true);
     (handler.pushTask as MockFn).mockResolvedValueOnce(false);
 
@@ -58,10 +58,37 @@ export function registerRetryQueueReplayBehaviorSpecs(
       task,
       'p-auth-tombstone',
       'test-user',
-      undefined,
+      'task_full_upsert',
       expect.stringMatching(SYNC_OPERATION_ID_PATTERN),
     );
     expect(service.getItems().map(item => item.data.id)).toContain(task.id);
+  });
+
+  it('缺少 writeIntent 的 task upsert 应保留隔离证据且禁止自动重放', async () => {
+    const { service, handler, setOnline, createTask } = getContext();
+    const task = createTask('task-replay-missing-write-intent');
+    expect(service.add('task', 'upsert', task, 'p-missing-intent', 'test-user')).toBe(true);
+    const queuedItem = service.getItems()[0];
+    if (!queuedItem) throw new Error('expected queued retry item');
+    setOnline(true);
+
+    await service.processQueueSlice({ maxItems: 1, maxDurationMs: 1000 });
+
+    expect(handler.pushTask).not.toHaveBeenCalled();
+    expect(service.getItems()).toEqual([]);
+    const records = JSON.parse(
+      localStorage.getItem('nanoflow.retry-queue.legacy-review.test-user') ?? '[]',
+    ) as Array<{ item: RetryQueueItem; reason: string; ownerUserId: string }>;
+    expect(records).toEqual([
+      expect.objectContaining({
+        item: expect.objectContaining({
+          id: queuedItem.id,
+          data: expect.objectContaining({ id: task.id }),
+        }),
+        ownerUserId: 'test-user',
+        reason: 'legacy task upsert 缺少 writeIntent，禁止猜测为 full upsert',
+      }),
+    ]);
   });
 
   it('processQueueSlice 修复缺失 operationId 后若无法立即持久化则不应发起远端重放', async () => {
@@ -115,6 +142,7 @@ export function registerRetryQueueReplayBehaviorSpecs(
         createdAt: now - 1000,
         sourceUserId: 'test-user',
         operationId: stableUUID('loaded-duplicate-older-operation'),
+        writeIntent: 'task_full_upsert',
       },
       {
         id: stableUUID('loaded-duplicate-newer-item'),
@@ -126,6 +154,7 @@ export function registerRetryQueueReplayBehaviorSpecs(
         createdAt: now,
         sourceUserId: 'test-user',
         operationId: stableUUID('loaded-duplicate-newer-operation'),
+        writeIntent: 'task_full_upsert',
       },
     ];
     (service as unknown as { applyLoadedItems(items: RetryQueueItem[]): void })
@@ -139,7 +168,7 @@ export function registerRetryQueueReplayBehaviorSpecs(
       expect.objectContaining({ title: 'newer local title' }),
       'project-newer',
       'test-user',
-      undefined,
+      'task_full_upsert',
       stableUUID('loaded-duplicate-newer-operation'),
     );
   });
@@ -165,10 +194,15 @@ export function registerRetryQueueReplayBehaviorSpecs(
   it('task 永久失败的终态证据持久化失败时应保留队列项，禁止静默删除', async () => {
     const { service, handler, setOnline, createTask } = getContext();
     const task = createTask('task-terminal-evidence-permanent-failure');
-    service.add('task', 'upsert', task, 'p-terminal-evidence', 'test-user');
+    service.add('task', 'upsert', task, 'p-terminal-evidence', 'test-user', undefined, 'task_full_upsert');
     setOnline(true);
+    const originalSetItem = localStorage.setItem.bind(localStorage);
     const setItemSpy = vi.spyOn(localStorage, 'setItem')
-      .mockImplementationOnce(() => {
+      .mockImplementation((key, value) => {
+        if (key !== 'nanoflow.retry-queue.legacy-review.test-user') {
+          originalSetItem(key, value);
+          return;
+        }
         throw new Error('legacy review storage unavailable');
       });
     (handler.pushTask as MockFn).mockRejectedValueOnce(
@@ -191,17 +225,89 @@ export function registerRetryQueueReplayBehaviorSpecs(
     }
   });
 
+  it('task 永久失败终态结算期间刷新 operationId 时应保留最新队列项', async () => {
+    const { service, handler, setOnline, createTask, stableUUID } = getContext();
+    const originalTask = createTask('task-terminal-refresh-original');
+    const refreshedTask = createTask('task-terminal-refresh-latest');
+    const taskId = stableUUID('task-terminal-refresh-id');
+    const originalOperationId = stableUUID('task-terminal-refresh-operation-original');
+    const refreshedOperationId = stableUUID('task-terminal-refresh-operation-latest');
+    originalTask.id = taskId;
+    refreshedTask.id = taskId;
+    refreshedTask.title = 'latest edit after terminal replay started';
+    const addWithOperationId = service.add.bind(service) as unknown as (
+      type: 'task',
+      operation: 'upsert',
+      data: Task,
+      projectId: string,
+      sourceUserId: string,
+      taskIdsToDelete: undefined,
+      writeIntent: 'task_text_update',
+      taskDeleteBaseUpdatedAtMap: undefined,
+      operationId: string,
+    ) => boolean;
+    addWithOperationId(
+      'task',
+      'upsert',
+      originalTask,
+      'project-terminal-refresh',
+      'test-user',
+      undefined,
+      'task_text_update',
+      undefined,
+      originalOperationId,
+    );
+    setOnline(true);
+    const terminalEvidenceTarget = service as unknown as {
+      persistTerminalRetryEvidence(item: RetryQueueItem, reason: string): Promise<boolean>;
+    };
+    vi.spyOn(terminalEvidenceTarget, 'persistTerminalRetryEvidence').mockImplementationOnce(async () => {
+      addWithOperationId(
+        'task',
+        'upsert',
+        refreshedTask,
+        'project-terminal-refresh',
+        'test-user',
+        undefined,
+        'task_text_update',
+        undefined,
+        refreshedOperationId,
+      );
+      return true;
+    });
+    (handler.pushTask as MockFn).mockRejectedValueOnce(
+      new PermanentFailureError('older operation is terminal'),
+    );
+
+    await service.processQueueSlice({ maxItems: 1, maxDurationMs: 1000 });
+
+    expect(service.getItems()).toEqual([
+      expect.objectContaining({
+        data: expect.objectContaining({
+          id: taskId,
+          title: refreshedTask.title,
+        }),
+        operationId: refreshedOperationId,
+      }),
+    ]);
+  });
+
   it('task 最大重试终态证据持久化失败时应保留队列项，禁止静默删除', async () => {
     const { service, handler, setOnline, createTask } = getContext();
     const task = createTask('task-terminal-evidence-max-retries');
     const maxRetries = (service as unknown as { MAX_RETRIES: number }).MAX_RETRIES;
-    service.add('task', 'upsert', task, 'p-terminal-evidence', 'test-user');
+    service.add('task', 'upsert', task, 'p-terminal-evidence', 'test-user', undefined, 'task_full_upsert');
     const retryItem = service.getItems()[0];
     if (!retryItem) throw new Error('expected retry item');
     retryItem.retryCount = maxRetries - 1;
     setOnline(true);
+    const originalSetItem = localStorage.setItem.bind(localStorage);
     const setItemSpy = vi.spyOn(localStorage, 'setItem')
-      .mockImplementationOnce(() => {
+      .mockImplementation((key, value) => {
+        if (key !== 'nanoflow.retry-queue.legacy-review.test-user') {
+          originalSetItem(key, value);
+          return;
+        }
         throw new Error('legacy review storage unavailable');
       });
     (handler.pushTask as MockFn).mockResolvedValueOnce(false);
@@ -228,8 +334,8 @@ export function registerRetryQueueReplayBehaviorSpecs(
     const firstTask = createTask('task-stop-on-session-expired-a');
     const secondTask = createTask('task-stop-on-session-expired-b');
     let sessionExpired = false;
-    service.add('task', 'upsert', firstTask, 'p-stop-expired');
-    service.add('task', 'upsert', secondTask, 'p-stop-expired');
+    service.add('task', 'upsert', firstTask, 'p-stop-expired', undefined, undefined, 'task_full_upsert');
+    service.add('task', 'upsert', secondTask, 'p-stop-expired', undefined, undefined, 'task_full_upsert');
     setOnline(true);
     (handler.isSessionExpired as MockFn).mockImplementation(() => sessionExpired);
     (handler.pushTask as MockFn).mockImplementationOnce(async () => {
@@ -250,8 +356,8 @@ export function registerRetryQueueReplayBehaviorSpecs(
     const secondTask = createTask('task-auth-boundary-error-b');
     const authError = new Error('Auth refresh result was discarded');
     authError.name = 'AuthRefreshDiscardedError';
-    service.add('task', 'upsert', firstTask, 'p-auth-boundary');
-    service.add('task', 'upsert', secondTask, 'p-auth-boundary');
+    service.add('task', 'upsert', firstTask, 'p-auth-boundary', undefined, undefined, 'task_full_upsert');
+    service.add('task', 'upsert', secondTask, 'p-auth-boundary', undefined, undefined, 'task_full_upsert');
     setOnline(true);
     const recordCircuitFailureSpy = vi.spyOn(service, 'recordCircuitFailure');
     (handler.pushTask as MockFn).mockRejectedValueOnce(authError);
@@ -278,8 +384,8 @@ export function registerRetryQueueReplayBehaviorSpecs(
     const firstTask = createTask('task-server-pressure-a');
     const secondTask = createTask('task-server-pressure-b');
     const maxRetries = (service as unknown as { MAX_RETRIES: number }).MAX_RETRIES;
-    service.add('task', 'upsert', firstTask, 'p-server-pressure');
-    service.add('task', 'upsert', secondTask, 'p-server-pressure');
+    service.add('task', 'upsert', firstTask, 'p-server-pressure', undefined, undefined, 'task_full_upsert');
+    service.add('task', 'upsert', secondTask, 'p-server-pressure', undefined, undefined, 'task_full_upsert');
     const firstQueueItem = service.getItems()[0];
     if (!firstQueueItem) throw new Error('expected first retry item');
     firstQueueItem.retryCount = maxRetries - 1;

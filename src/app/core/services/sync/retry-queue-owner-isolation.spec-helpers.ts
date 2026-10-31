@@ -120,6 +120,8 @@ export function registerRetryQueueOwnerIsolationSpecs(
       await vi.waitFor(() => {
         expect(service.getItems().map(item => item.data.id)).toEqual([currentTask.id]);
       });
+      expect(service.getProjectPendingWriteState('p-1', 'test-user')).toBe('pending');
+      expect(service.getProjectPendingWriteState('p-2', 'test-user')).toBe('clear');
 
       service.clearCurrentView();
       (service as unknown as { saveToLocalStorage: () => void }).saveToLocalStorage();
@@ -137,6 +139,35 @@ export function registerRetryQueueOwnerIsolationSpecs(
       await vi.waitFor(() => {
         expect(service.getItems().map(item => item.data.id)).toEqual([otherTask.id]);
       });
+      expect(service.getProjectPendingWriteState('p-2', 'other-user')).toBe('pending');
+      expect(service.getProjectPendingWriteState('p-2', 'test-user')).toBe('unknown');
+    });
+
+    it.each([['失败回放', false], ['unknown replay 对账', true]] as const)('owner 切换后晚到的%s不应结算旧切片', async (_label, unknownOutcome) => {
+      const projectId = `p-stale-owner-${unknownOutcome ? 'unknown' : 'failed'}`;
+      const lastFailure = unknownOutcome
+        ? { errorType: 'TimeoutError', message: 'stale owner unknown outcome', remoteOutcome: 'unknown' as const, recordedAt: Date.now() }
+        : undefined;
+      const item = createRetryQueueItem({ type: 'task', operation: 'upsert', data: createTask(projectId), projectId,
+        sourceUserId: 'test-user', writeIntent: 'task_full_upsert', lastFailure });
+      (service as unknown as { queue: RetryQueueItem[] }).queue = [item];
+      let releaseLateResult: (() => void) | undefined;
+      const reconcileLateCall = vi.fn((_item: RetryQueueItem) => new Promise<'replay'>(resolve => { releaseLateResult = () => resolve('replay'); }));
+      const lateCall = unknownOutcome ? reconcileLateCall : vi.mocked(handler.pushTask)
+        .mockImplementationOnce(() => new Promise<boolean>(resolve => { releaseLateResult = () => resolve(false); }));
+      if (unknownOutcome) handler.reconcileUnknownOutcome = reconcileLateCall;
+      setOnline(true);
+      const processing = service.processQueue();
+      await vi.waitFor(() => expect(lateCall).toHaveBeenCalledOnce());
+      authServiceMock.currentUserId.mockReturnValue('other-user');
+      service.clearCurrentView();
+      releaseLateResult?.();
+      await processing;
+      const hiddenItems = (service as unknown as { hiddenQueueItems: RetryQueueItem[] }).hiddenQueueItems;
+      expect(hiddenItems).toEqual([expect.objectContaining({ id: item.id, retryCount: 0, lastFailure })]);
+      expect(service.getProjectPendingWriteState(projectId, 'test-user')).toBe('pending');
+      if (unknownOutcome) expect(handler.pushTask).not.toHaveBeenCalled();
+      expect(localStorage.getItem('nanoflow.retry-queue.legacy-review.test-user')).toBeNull();
     });
 
     it('晚到的存储加载结果不应覆盖当前 owner 新增的重试项', async () => {
@@ -207,6 +238,7 @@ export function registerRetryQueueOwnerIsolationSpecs(
 
       try {
         await (service as unknown as { loadFromStorage(): Promise<void> }).loadFromStorage();
+        expect(service.getProjectPendingWriteState('p-stale', 'test-user')).toBe('clear');
       } finally {
         loadFromIdbSpy.mockRestore();
       }
