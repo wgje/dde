@@ -30,10 +30,10 @@ interface ExtensionResponsePayload {
 interface ExtensionMessage {
   type?: unknown;
   requestId?: unknown;
+  ownerUserId?: unknown;
   ok?: unknown;
   data?: ExtensionResponsePayload;
   errorCode?: unknown;
-  errorMessage?: unknown;
 }
 
 type RelayRequestType =
@@ -68,11 +68,12 @@ export class SiyuanExtensionProvider implements SiyuanPreviewProvider {
     return this.pingExtension();
   }
 
-  async diagnoseConnection(): Promise<{ ok: boolean; errorCode?: SiyuanPreviewErrorCode }> {
+  async diagnoseConnection(ownerUserId: string): Promise<{ ok: boolean; errorCode?: SiyuanPreviewErrorCode }> {
     if (typeof window === 'undefined') return { ok: false, errorCode: 'runtime-not-supported' };
+    if (!this.isValidOwnerUserId(ownerUserId)) return { ok: false, errorCode: 'not-configured' };
     if (!await this.pingExtension()) return { ok: false, errorCode: 'extension-unavailable' };
     try {
-      const response = await this.postConnectionTest();
+      const response = await this.postConnectionTest(ownerUserId);
       if (response.ok === true) return { ok: true };
       return { ok: false, errorCode: this.readErrorCode(response.errorCode) };
     } catch (error) {
@@ -81,14 +82,25 @@ export class SiyuanExtensionProvider implements SiyuanPreviewProvider {
     }
   }
 
-  async getBlockPreview(blockId: string, signal?: AbortSignal): Promise<SiyuanBlockPreview> {
+  async getBlockPreview(blockId: string, signal?: AbortSignal): Promise<SiyuanBlockPreview>;
+  async getBlockPreview(
+    blockId: string,
+    signal: AbortSignal | undefined,
+    ownerUserId: string,
+  ): Promise<SiyuanBlockPreview>;
+  async getBlockPreview(
+    blockId: string,
+    signal?: AbortSignal,
+    ownerUserId?: string,
+  ): Promise<SiyuanBlockPreview> {
     if (!isValidSiyuanBlockId(blockId)) throw new SiyuanProviderError('block-not-found');
     if (typeof window === 'undefined') throw new SiyuanProviderError('runtime-not-supported');
+    if (!this.isValidOwnerUserId(ownerUserId)) throw new SiyuanProviderError('not-configured');
 
-    const response = await this.postRequest(blockId, signal);
+    const response = await this.postRequest(blockId, signal, ownerUserId);
     if (!response.ok) {
       const code = this.readErrorCode(response.errorCode);
-      throw new SiyuanProviderError(code, this.truncate(String(response.errorMessage ?? code), 240));
+      throw new SiyuanProviderError(code);
     }
 
     const data = response.data;
@@ -112,8 +124,16 @@ export class SiyuanExtensionProvider implements SiyuanPreviewProvider {
    * - 旧扩展（不识别 set-config）会在 PREVIEW_FETCH_TIMEOUT_MS 后超时，归为 extension-unavailable，
    *   UI 层据此提示用户更新扩展。
    */
-  async pushConfig(input: SiyuanPushConfigInput): Promise<SiyuanPushConfigResult> {
+  async pushConfig(
+    input: SiyuanPushConfigInput,
+    ownerUserId: string,
+    configIssuedAt: number,
+  ): Promise<SiyuanPushConfigResult> {
     if (typeof window === 'undefined') return { ok: false, errorCode: 'runtime-not-supported' };
+    if (!this.isValidOwnerUserId(ownerUserId)) return { ok: false, errorCode: 'not-configured' };
+    if (!Number.isSafeInteger(configIssuedAt) || configIssuedAt <= 0) {
+      return { ok: false, errorCode: 'not-configured' };
+    }
     if (!await this.pingExtension()) return { ok: false, errorCode: 'extension-unavailable' };
     // payload 严格只携带 baseUrl/token；token === undefined 表示"保持现状"；token === '' 表示"清除"。
     const payload: Record<string, unknown> = { baseUrl: input.baseUrl };
@@ -122,6 +142,8 @@ export class SiyuanExtensionProvider implements SiyuanPreviewProvider {
       const response = await this.postRelayRequest({
         requestType: 'nanoflow.siyuan.set-config',
         responseType: 'nanoflow.siyuan.set-config-result',
+        ownerUserId,
+        configIssuedAt,
         payload,
       });
       if (response.ok === true) return { ok: true };
@@ -137,18 +159,20 @@ export class SiyuanExtensionProvider implements SiyuanPreviewProvider {
    * - 旧扩展不识别该消息 → 超时 → 返回 null，UI 据此切换到"扩展版本过旧"提示。
    * - hasToken 仅为布尔，绝不回传 token 明文。
    */
-  async getConfigStatus(): Promise<SiyuanExtensionConfigStatus | null> {
-    const result = await this.probeConfigStatus();
+  async getConfigStatus(ownerUserId: string): Promise<SiyuanExtensionConfigStatus | null> {
+    const result = await this.probeConfigStatus(ownerUserId);
     return result.kind === 'ok' ? result.status : null;
   }
 
-  async probeConfigStatus(): Promise<SiyuanExtensionConfigProbeResult> {
+  async probeConfigStatus(ownerUserId: string): Promise<SiyuanExtensionConfigProbeResult> {
     if (typeof window === 'undefined') return { kind: 'unavailable' };
+    if (!this.isValidOwnerUserId(ownerUserId)) return { kind: 'error', errorCode: 'not-configured' };
     if (!await this.pingExtension()) return { kind: 'unavailable' };
     try {
       const response = await this.postRelayRequest({
         requestType: 'nanoflow.siyuan.get-config-status',
         responseType: 'nanoflow.siyuan.config-status-result',
+        ownerUserId,
       });
       if (response.ok !== true || !response.data) {
         return { kind: 'error', errorCode: this.readErrorCode(response.errorCode) };
@@ -215,18 +239,24 @@ export class SiyuanExtensionProvider implements SiyuanPreviewProvider {
     }
   }
 
-  private postConnectionTest(signal?: AbortSignal): Promise<ExtensionMessage> {
+  private postConnectionTest(ownerUserId: string, signal?: AbortSignal): Promise<ExtensionMessage> {
     return this.postRelayRequest({
       requestType: 'nanoflow.siyuan.test-connection',
       responseType: 'nanoflow.siyuan.test-connection-result',
+      ownerUserId,
       signal,
     });
   }
 
-  private postRequest(blockId: string, signal?: AbortSignal): Promise<ExtensionMessage> {
+  private postRequest(
+    blockId: string,
+    signal: AbortSignal | undefined,
+    ownerUserId: string,
+  ): Promise<ExtensionMessage> {
     return this.postRelayRequest({
       requestType: 'nanoflow.siyuan.get-preview',
       responseType: 'nanoflow.siyuan.preview-result',
+      ownerUserId,
       payload: { blockId, includeChildren: true, maxChildren: SIYUAN_CONFIG.MAX_PREVIEW_CHILDREN, maxChars: SIYUAN_CONFIG.MAX_PREVIEW_CHARS },
       signal,
     });
@@ -235,10 +265,13 @@ export class SiyuanExtensionProvider implements SiyuanPreviewProvider {
   private postRelayRequest(args: {
     requestType: RelayRequestType;
     responseType: RelayResponseType;
+    ownerUserId: string;
+    configIssuedAt?: number;
     payload?: Record<string, unknown>;
     signal?: AbortSignal;
   }): Promise<ExtensionMessage> {
-    const { requestType, responseType, payload, signal } = args;
+    const { requestType, responseType, ownerUserId, configIssuedAt, payload, signal } = args;
+    if (!this.isValidOwnerUserId(ownerUserId)) return Promise.reject(new SiyuanProviderError('not-configured'));
     const requestId = createSyncOperationId();
     return new Promise<ExtensionMessage>((resolve, reject) => {
       // 提前返回：调用方在我们准备 timer/listener 之前就已 abort，避免无谓的事件订阅。
@@ -263,12 +296,14 @@ export class SiyuanExtensionProvider implements SiyuanPreviewProvider {
         if (!this.isTrustedWindowMessage(event)) return;
         const message = event.data as ExtensionMessage;
         if (message.type !== responseType || message.requestId !== requestId) return;
+        if (message.ownerUserId !== ownerUserId) return;
         cleanup();
         resolve(message);
       };
       signal?.addEventListener('abort', abortListener, { once: true });
       window.addEventListener('message', listener);
-      const request: Record<string, unknown> = { type: requestType, requestId };
+      const request: Record<string, unknown> = { type: requestType, requestId, ownerUserId };
+      if (configIssuedAt !== undefined) request.configIssuedAt = configIssuedAt;
       if (payload) request.payload = payload;
       try {
         window.postMessage(request, window.location.origin);
@@ -281,6 +316,10 @@ export class SiyuanExtensionProvider implements SiyuanPreviewProvider {
 
   private isTrustedWindowMessage(event: MessageEvent<unknown>): boolean {
     return event.source === window && event.origin === window.location.origin && typeof event.data === 'object' && event.data !== null;
+  }
+
+  private isValidOwnerUserId(value: unknown): value is string {
+    return typeof value === 'string' && value.length > 0 && value.length <= 128;
   }
 
   private readChildBlocks(value: unknown): SiyuanChildBlockPreview[] | undefined {

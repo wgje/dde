@@ -1,8 +1,9 @@
 import { Injectable, inject } from '@angular/core';
 import { SIYUAN_CONFIG } from '../../../../config/siyuan.config';
 import { LoggerService } from '../../../../services/logger.service';
+import { SessionRuntimeResetRegistry } from '../../../../services/session-runtime-reset.service';
 import { ExternalSourceCacheService } from '../external-source-cache.service';
-import type { ExternalSourceLink, LocalSiyuanPreviewCache, SiyuanPreviewErrorCode, SiyuanPreviewResult } from '../external-source.model';
+import type { ExternalSourceLink, LocalSiyuanPreviewCache, SiyuanBlockPreview, SiyuanPreviewErrorCode, SiyuanPreviewResult } from '../external-source.model';
 import { SiyuanDirectProvider } from './siyuan-direct-provider';
 import { SiyuanExtensionProvider } from './siyuan-extension-provider';
 import {
@@ -15,10 +16,12 @@ import {
 } from './siyuan-provider.interface';
 
 interface ActivePreviewRequest {
+  ownerUserId: string;
   linkId: string;
   blockId: string;
   controller: AbortController;
   requestSeq: number;
+  cacheGeneration: number;
 }
 
 @Injectable({ providedIn: 'root' })
@@ -27,12 +30,22 @@ export class SiyuanPreviewService {
   private readonly extensionProvider = inject(SiyuanExtensionProvider);
   private readonly directProvider = inject(SiyuanDirectProvider);
   private readonly logger = inject(LoggerService).category('SiyuanPreview');
+  private readonly sessionRuntimeReset = inject(SessionRuntimeResetRegistry);
   private activeRequest?: ActivePreviewRequest;
   private requestSeq = 0;
+  private lastExtensionConfigIssuedAt = 0;
   private readonly inFlight = new Map<string, Promise<SiyuanPreviewResult>>();
 
+  constructor() {
+    this.sessionRuntimeReset.register('SiyuanPreviewService', () => this.resetSessionRuntime());
+  }
+
   async diagnoseConnection(): Promise<{ ok: boolean; mode: 'extension-relay' | 'direct' | 'cache-only'; errorCode?: SiyuanPreviewErrorCode }> {
-    const config = await this.cache.loadConfig();
+    const ownerUserId = this.cache.ownerId();
+    const config = await this.cache.loadConfig(ownerUserId);
+    if (!this.isOwnerCurrent(ownerUserId)) {
+      return { ok: false, mode: config.runtimeMode, errorCode: 'not-configured' };
+    }
     if (config.runtimeMode === 'cache-only') return { ok: true, mode: 'cache-only' };
     if (config.runtimeMode === 'direct') {
       if (!config.token) return { ok: false, mode: 'direct', errorCode: 'not-configured' };
@@ -40,7 +53,10 @@ export class SiyuanPreviewService {
         ? { ok: true, mode: 'direct' }
         : { ok: false, mode: 'direct', errorCode: 'runtime-not-supported' };
     }
-    const diagnosis = await this.extensionProvider.diagnoseConnection();
+    const diagnosis = await this.extensionProvider.diagnoseConnection(ownerUserId);
+    if (!this.isOwnerCurrent(ownerUserId)) {
+      return { ok: false, mode: 'extension-relay', errorCode: 'not-configured' };
+    }
     if (diagnosis.ok) return { ok: true, mode: 'extension-relay' };
     return { ok: false, mode: 'extension-relay', errorCode: diagnosis.errorCode ?? 'unknown' };
   }
@@ -50,11 +66,19 @@ export class SiyuanPreviewService {
    * 其它模式直接返回 runtime-not-supported，避免把 token 误推到错误的通道。
    */
   async pushExtensionConfig(input: SiyuanPushConfigInput): Promise<SiyuanPushConfigResult> {
-    const config = await this.cache.loadConfig();
+    const configIssuedAt = this.nextExtensionConfigIssuedAt();
+    const ownerUserId = this.cache.ownerId();
+    const config = await this.cache.loadConfig(ownerUserId);
+    if (!this.isOwnerCurrent(ownerUserId)) {
+      return { ok: false, errorCode: 'not-configured' };
+    }
     if (config.runtimeMode !== 'extension-relay') {
       return { ok: false, errorCode: 'runtime-not-supported' };
     }
-    return this.extensionProvider.pushConfig(input);
+    const result = await this.extensionProvider.pushConfig(input, ownerUserId, configIssuedAt);
+    return this.isOwnerCurrent(ownerUserId)
+      ? result
+      : { ok: false, errorCode: 'not-configured' };
   }
 
   /**
@@ -63,24 +87,38 @@ export class SiyuanPreviewService {
    * 其它模式始终返回 null。
    */
   async getExtensionConfigStatus(): Promise<SiyuanExtensionConfigStatus | null> {
-    const config = await this.cache.loadConfig();
+    const ownerUserId = this.cache.ownerId();
+    const config = await this.cache.loadConfig(ownerUserId);
+    if (!this.isOwnerCurrent(ownerUserId)) return null;
     if (config.runtimeMode !== 'extension-relay') return null;
-    return this.extensionProvider.getConfigStatus();
+    const status = await this.extensionProvider.getConfigStatus(ownerUserId);
+    return this.isOwnerCurrent(ownerUserId) ? status : null;
   }
 
   async probeExtensionConfigStatus(): Promise<SiyuanExtensionConfigProbeResult> {
-    const config = await this.cache.loadConfig();
+    const ownerUserId = this.cache.ownerId();
+    const config = await this.cache.loadConfig(ownerUserId);
+    if (!this.isOwnerCurrent(ownerUserId)) return { kind: 'unavailable' };
     if (config.runtimeMode !== 'extension-relay') return { kind: 'unavailable' };
-    return this.extensionProvider.probeConfigStatus();
+    const result = await this.extensionProvider.probeConfigStatus(ownerUserId);
+    return this.isOwnerCurrent(ownerUserId) ? result : { kind: 'unavailable' };
   }
 
   async preview(link: ExternalSourceLink, options?: { forceRefresh?: boolean }): Promise<SiyuanPreviewResult> {
-    const cached = await this.cache.getPreview(link.id, link.targetId);
+    const ownerUserId = this.cache.ownerId();
+    const requestSeq = this.requestSeq;
+    const cacheGeneration = this.cache.previewGeneration(link.id, ownerUserId);
+    const cached = await this.cache.getPreview(link.id, link.targetId, ownerUserId);
+    if (!this.isOwnerCurrent(ownerUserId)
+      || this.requestSeq !== requestSeq
+      || this.cache.previewGeneration(link.id, ownerUserId) !== cacheGeneration) {
+      return { status: 'loading' };
+    }
     if (cached && !options?.forceRefresh) {
       const stale = Date.now() - new Date(cached.fetchedAt).getTime() > SIYUAN_CONFIG.CACHE_STALE_MS;
       // 只在缓存过期时触发后台刷新，遵守 CACHE_STALE_MS 预算并避免每次悬停都打 API。
       if (stale) {
-        void this.refreshDeduped(link, undefined, false).catch(error => {
+        void this.refreshDeduped(link, undefined, false, ownerUserId, cacheGeneration).catch(error => {
           this.logger.debug('后台刷新思源预览失败，继续使用本机缓存', {
             linkId: link.id,
             blockId: link.targetId,
@@ -90,10 +128,17 @@ export class SiyuanPreviewService {
       }
       return { status: 'ready', preview: cached, stale, origin: 'cache' };
     }
-    return this.refreshDeduped(link, cached ?? undefined, options?.forceRefresh === true);
+    return this.refreshDeduped(
+      link,
+      cached ?? undefined,
+      options?.forceRefresh === true,
+      ownerUserId,
+      cacheGeneration,
+    );
   }
 
   abortActive(): void {
+    this.requestSeq += 1;
     this.activeRequest?.controller.abort();
     this.activeRequest = undefined;
   }
@@ -102,34 +147,49 @@ export class SiyuanPreviewService {
     link: ExternalSourceLink,
     fallback: LocalSiyuanPreviewCache | undefined,
     forceRefresh: boolean,
+    ownerUserId: string,
+    cacheGeneration: number,
   ): Promise<SiyuanPreviewResult> {
-    const key = this.previewRequestKey(link, forceRefresh);
+    const key = this.previewRequestKey(link, forceRefresh, ownerUserId, cacheGeneration);
     const existing = this.inFlight.get(key);
     if (existing) return existing;
 
-    const request = this.refresh(link, fallback).finally(() => {
-      this.inFlight.delete(key);
+    const request = this.refresh(link, fallback, ownerUserId, cacheGeneration).finally(() => {
+      if (this.inFlight.get(key) === request) {
+        this.inFlight.delete(key);
+      }
     });
     this.inFlight.set(key, request);
     return request;
   }
 
-  async refresh(link: ExternalSourceLink, fallback?: LocalSiyuanPreviewCache): Promise<SiyuanPreviewResult> {
-    const requestSeq = ++this.requestSeq;
-    this.activeRequest?.controller.abort();
-    const controller = new AbortController();
-    this.activeRequest = { linkId: link.id, blockId: link.targetId, controller, requestSeq };
+  async refresh(
+    link: ExternalSourceLink,
+    fallback?: LocalSiyuanPreviewCache,
+    ownerUserId = this.cache.ownerId(),
+    cacheGeneration = this.cache.previewGeneration(link.id, ownerUserId),
+  ): Promise<SiyuanPreviewResult> {
+    if (!this.isOwnerCurrent(ownerUserId)
+      || this.cache.previewGeneration(link.id, ownerUserId) !== cacheGeneration) {
+      return { status: 'loading' };
+    }
+    const { controller, requestSeq } = this.beginPreviewRequest(link, ownerUserId, cacheGeneration);
 
     try {
-      const provider = await this.selectProvider();
+      const provider = await this.selectProvider(ownerUserId);
+      if (!this.isOwnerCurrent(ownerUserId)) {
+        return { status: 'loading' };
+      }
       if (!provider) {
         return fallback
           ? { status: 'cache-only', preview: fallback, errorCode: 'extension-unavailable', stale: true, origin: 'cache' }
           : { status: 'error', errorCode: 'extension-unavailable' };
       }
-      const preview = await provider.getBlockPreview(link.targetId, controller.signal);
-      if (!this.isCurrent(link, controller, requestSeq, preview.blockId)) {
-        return fallback ? { status: 'cache-only', preview: fallback, stale: true, origin: 'cache' } : { status: 'loading' };
+      const preview = await this.getProviderPreview(provider, link.targetId, controller.signal, ownerUserId);
+      if (!this.isCurrent(link, controller, requestSeq, preview.blockId, ownerUserId)) {
+        return this.isOwnerCurrent(ownerUserId) && fallback
+          ? { status: 'cache-only', preview: fallback, stale: true, origin: 'cache' }
+          : { status: 'loading' };
       }
       const cache: LocalSiyuanPreviewCache = {
         ...preview,
@@ -137,9 +197,15 @@ export class SiyuanPreviewService {
         fetchedAt: new Date().toISOString(),
         fetchStatus: 'ready',
       };
-      await this.cache.savePreview(cache);
+      const saved = await this.cache.savePreview(cache, ownerUserId, cacheGeneration);
+      if (!saved || !this.isCurrent(link, controller, requestSeq, preview.blockId, ownerUserId)) {
+        return { status: 'loading' };
+      }
       return { status: 'ready', preview: cache, origin: 'network' };
     } catch (error) {
+      if (!this.isRequestCurrent(link, controller, requestSeq, ownerUserId)) {
+        return { status: 'loading' };
+      }
       const errorCode = error instanceof SiyuanProviderError ? error.code : 'unknown';
       return fallback
         ? { status: 'cache-only', preview: fallback, errorCode, stale: true, origin: 'cache' }
@@ -147,8 +213,27 @@ export class SiyuanPreviewService {
     }
   }
 
-  private async selectProvider(): Promise<SiyuanPreviewProvider | null> {
-    const config = await this.cache.loadConfig();
+  private beginPreviewRequest(
+    link: ExternalSourceLink,
+    ownerUserId: string,
+    cacheGeneration: number,
+  ): Pick<ActivePreviewRequest, 'controller' | 'requestSeq'> {
+    const requestSeq = this.requestSeq;
+    this.activeRequest?.controller.abort();
+    const controller = new AbortController();
+    this.activeRequest = {
+      ownerUserId,
+      linkId: link.id,
+      blockId: link.targetId,
+      controller,
+      requestSeq,
+      cacheGeneration,
+    };
+    return { controller, requestSeq };
+  }
+
+  private async selectProvider(ownerUserId: string): Promise<SiyuanPreviewProvider | null> {
+    const config = await this.cache.loadConfig(ownerUserId);
     if (config.runtimeMode === 'cache-only') return null;
     if (config.runtimeMode === 'direct') return await this.directProvider.isAvailable() ? this.directProvider : null;
     // 显式选择 extension-relay 的用户可能正是为了避免 token 落到 direct 模式的 fetch 流量里，
@@ -156,15 +241,63 @@ export class SiyuanPreviewService {
     return await this.extensionProvider.isAvailable() ? this.extensionProvider : null;
   }
 
-  private previewRequestKey(link: ExternalSourceLink, forceRefresh: boolean): string {
-    return `${this.cache.ownerId()}:${link.id}:${link.targetId}:${forceRefresh ? 'force' : 'normal'}`;
+  private getProviderPreview(
+    provider: SiyuanPreviewProvider,
+    blockId: string,
+    signal: AbortSignal,
+    ownerUserId: string,
+  ): Promise<SiyuanBlockPreview> {
+    return provider === this.extensionProvider
+      ? this.extensionProvider.getBlockPreview(blockId, signal, ownerUserId)
+      : provider.getBlockPreview(blockId, signal);
   }
 
-  private isCurrent(link: ExternalSourceLink, controller: AbortController, requestSeq: number, blockId: string): boolean {
-    return this.activeRequest?.linkId === link.id
+  private nextExtensionConfigIssuedAt(): number {
+    this.lastExtensionConfigIssuedAt = Math.max(Date.now(), this.lastExtensionConfigIssuedAt + 1);
+    return this.lastExtensionConfigIssuedAt;
+  }
+
+  private previewRequestKey(
+    link: ExternalSourceLink,
+    forceRefresh: boolean,
+    ownerUserId: string,
+    cacheGeneration: number,
+  ): string {
+    return `${ownerUserId}:${link.id}:${link.targetId}:${cacheGeneration}:${forceRefresh ? 'force' : 'normal'}`;
+  }
+
+  private isCurrent(
+    link: ExternalSourceLink,
+    controller: AbortController,
+    requestSeq: number,
+    blockId: string,
+    ownerUserId: string,
+  ): boolean {
+    return this.isRequestCurrent(link, controller, requestSeq, ownerUserId)
+      && blockId === link.targetId;
+  }
+
+  private isRequestCurrent(
+    link: ExternalSourceLink,
+    controller: AbortController,
+    requestSeq: number,
+    ownerUserId: string,
+  ): boolean {
+    return this.isOwnerCurrent(ownerUserId)
+      && this.activeRequest?.ownerUserId === ownerUserId
+      && this.activeRequest.linkId === link.id
       && this.activeRequest.blockId === link.targetId
       && this.activeRequest.controller === controller
       && this.activeRequest.requestSeq === requestSeq
-      && blockId === link.targetId;
+      && this.cache.previewGeneration(link.id, ownerUserId) === this.activeRequest.cacheGeneration;
+  }
+
+  private isOwnerCurrent(ownerUserId: string): boolean {
+    return this.cache.ownerId() === ownerUserId;
+  }
+
+  private resetSessionRuntime(): void {
+    this.abortActive();
+    this.inFlight.clear();
   }
 }

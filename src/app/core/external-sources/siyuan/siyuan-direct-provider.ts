@@ -57,6 +57,7 @@ export class SiyuanDirectProvider implements SiyuanPreviewProvider {
   async getBlockPreview(blockId: string, signal?: AbortSignal): Promise<SiyuanBlockPreview> {
     if (!isValidSiyuanBlockId(blockId)) throw new SiyuanProviderError('block-not-found');
     const config = await this.cache.loadConfig();
+    signal?.throwIfAborted();
     if (config.runtimeMode !== 'direct' || !isTrustedSiyuanDirectBaseUrl(config.baseUrl, currentPageLocation())) {
       throw new SiyuanProviderError('runtime-not-supported');
     }
