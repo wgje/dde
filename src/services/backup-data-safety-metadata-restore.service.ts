@@ -299,12 +299,13 @@ export class BackupDataSafetyMetadataRestoreService implements DataSafetyMetadat
     marker: BackupMetadataRestoreMarker,
   ): Promise<string[]> {
     const errors: string[] = [];
+    const touchedProjectIds = new Set(marker.touchedProjectIds);
     if (!ensureRestoreMarkerOwnership(errors, marker)) return errors;
     await attemptRollback(errors, 'sync cursors', async () => {
       await replaceScopedCursorRows(
         db,
         marker.ownerUserId,
-        new Set(marker.touchedProjectIds),
+        touchedProjectIds,
         marker.cursorRecords.map(record => ({
           projectId: record.projectId,
           userId: marker.ownerUserId,
@@ -315,11 +316,11 @@ export class BackupDataSafetyMetadataRestoreService implements DataSafetyMetadat
     });
     if (!ensureRestoreMarkerOwnership(errors, marker)) return errors;
     await attemptRollback(errors, 'task tombstones', () => {
-      restoreStorageValue(TASK_TOMBSTONES_STORAGE_KEY, marker.taskTombstonesRaw);
+      restoreScopedTaskTombstones(marker.taskTombstonesRaw, touchedProjectIds);
     });
     if (!ensureRestoreMarkerOwnership(errors, marker)) return errors;
     await attemptRollback(errors, 'connection tombstones', () => {
-      restoreStorageValue(CONNECTION_TOMBSTONES_STORAGE_KEY, marker.connectionTombstonesRaw);
+      restoreScopedConnectionTombstones(marker.connectionTombstonesRaw, touchedProjectIds);
     });
     if (!ensureRestoreMarkerOwnership(errors, marker)) return errors;
     await attemptRollback(errors, 'data-safety audit', () => {
@@ -608,8 +609,13 @@ function writeRestoreMarker(marker: BackupMetadataRestoreMarker): void {
 
 function readRestoreMarker(ownerUserId: string): BackupMetadataRestoreMarker | null {
   const raw = readStorageValue(getRestoreMarkerStorageKey(ownerUserId));
-  if (!raw) return null;
-  const parsed = JSON.parse(raw) as unknown;
+  if (raw === null) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch {
+    throw new Error('backup metadata restore marker is invalid');
+  }
   const marker = normalizeRestoreMarker(parsed, ownerUserId);
   if (!marker) {
     throw new Error('backup metadata restore marker is invalid');
@@ -738,6 +744,131 @@ function restoreStorageValue(key: string, value: string | null): void {
     return;
   }
   localStorage.setItem(key, value);
+}
+
+function restoreScopedTaskTombstones(
+  rawPreImage: string | null,
+  touchedProjectIds: ReadonlySet<string>,
+): void {
+  const preImage = parseTaskTombstoneObject(
+    rawPreImage,
+    'backup metadata task tombstone pre-image',
+  );
+  const restored: DataSafetyTaskTombstoneSnapshot = Object.create(null) as DataSafetyTaskTombstoneSnapshot;
+  for (const projectId of touchedProjectIds) {
+    if (!Object.prototype.hasOwnProperty.call(preImage, projectId)) continue;
+    const value = preImage[projectId];
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw new Error(`backup metadata task tombstones for ${projectId} are invalid`);
+    }
+    const entries: Record<string, number> = Object.create(null) as Record<string, number>;
+    for (const [taskId, timestamp] of Object.entries(value)) {
+      if (typeof timestamp !== 'number' || !Number.isFinite(timestamp)) {
+        throw new Error(`backup metadata task tombstone ${projectId}/${taskId} is invalid`);
+      }
+      entries[taskId] = timestamp;
+    }
+    restored[projectId] = entries;
+  }
+
+  const currentRaw = readStorageValue(TASK_TOMBSTONES_STORAGE_KEY);
+  if (currentRaw === rawPreImage) {
+    restoreStorageValue(TASK_TOMBSTONES_STORAGE_KEY, rawPreImage);
+    return;
+  }
+
+  const current = parseTaskTombstoneObject(currentRaw, 'current task tombstone state');
+  const merged = Object.assign(
+    Object.create(null) as Record<string, unknown>,
+    current,
+  );
+  for (const projectId of touchedProjectIds) delete merged[projectId];
+  for (const projectId of touchedProjectIds) {
+    if (Object.prototype.hasOwnProperty.call(restored, projectId)) {
+      merged[projectId] = restored[projectId];
+    }
+  }
+
+  if (rawPreImage === null && Object.keys(merged).length === 0) {
+    localStorage.removeItem(TASK_TOMBSTONES_STORAGE_KEY);
+    return;
+  }
+  localStorage.setItem(TASK_TOMBSTONES_STORAGE_KEY, JSON.stringify(merged));
+}
+
+function restoreScopedConnectionTombstones(
+  rawPreImage: string | null,
+  touchedProjectIds: ReadonlySet<string>,
+): void {
+  const preImage = parseConnectionTombstoneArray(
+    rawPreImage,
+    'backup metadata connection tombstone pre-image',
+  );
+  for (const entry of preImage) {
+    const projectId = getConnectionTombstoneProjectId(entry);
+    if (projectId === null || !touchedProjectIds.has(projectId)) continue;
+    const record = entry as Record<string, unknown>;
+    const connectionId = record['connectionId'] ?? record['id'];
+    if (typeof connectionId !== 'string' || connectionId.length === 0
+      || typeof record['timestamp'] !== 'number'
+      || !Number.isFinite(record['timestamp'])) {
+      throw new Error(`backup metadata connection tombstone for ${projectId} is invalid`);
+    }
+  }
+
+  const currentRaw = readStorageValue(CONNECTION_TOMBSTONES_STORAGE_KEY);
+  if (currentRaw === rawPreImage) {
+    restoreStorageValue(CONNECTION_TOMBSTONES_STORAGE_KEY, rawPreImage);
+    return;
+  }
+
+  const current = parseConnectionTombstoneArray(currentRaw, 'current connection tombstone state');
+  const restored = [
+    ...current.filter(entry => {
+      const projectId = getConnectionTombstoneProjectId(entry);
+      return projectId === null || !touchedProjectIds.has(projectId);
+    }),
+    ...preImage.filter(entry => {
+      const projectId = getConnectionTombstoneProjectId(entry);
+      return projectId !== null && touchedProjectIds.has(projectId);
+    }),
+  ];
+
+  if (rawPreImage === null && restored.length === 0) {
+    localStorage.removeItem(CONNECTION_TOMBSTONES_STORAGE_KEY);
+    return;
+  }
+  localStorage.setItem(CONNECTION_TOMBSTONES_STORAGE_KEY, JSON.stringify(restored));
+}
+
+function parseTaskTombstoneObject(raw: string | null, label: string): Record<string, unknown> {
+  let parsed: unknown;
+  try {
+    parsed = raw === null ? {} : JSON.parse(raw) as unknown;
+  } catch {
+    throw new Error(`${label} is invalid`);
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error(`${label} is invalid`);
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function parseConnectionTombstoneArray(raw: string | null, label: string): unknown[] {
+  let parsed: unknown;
+  try {
+    parsed = raw === null ? [] : JSON.parse(raw) as unknown;
+  } catch {
+    throw new Error(`${label} is invalid`);
+  }
+  if (!Array.isArray(parsed)) throw new Error(`${label} is invalid`);
+  return parsed;
+}
+
+function getConnectionTombstoneProjectId(entry: unknown): string | null {
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
+  const projectId = (entry as Record<string, unknown>)['projectId'];
+  return typeof projectId === 'string' ? projectId : null;
 }
 
 function parseStorageJson(key: string, fallback: unknown): unknown {
