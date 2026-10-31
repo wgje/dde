@@ -8,6 +8,7 @@
 
 import { serve } from 'https://deno.land/std@0.177.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.93.2'
+import { traceGroqTranscription } from '../_shared/langfuse.ts'
 
 /**
  * 允许的来源白名单
@@ -436,7 +437,14 @@ serve(async (req: Request) => {
 
     let groqResponse: Response;
     try {
-      groqResponse = await fetch(GROQ_API_ENDPOINT, {
+      groqResponse = await traceGroqTranscription({
+        userId: user.id,
+        fileSizeBytes: audioFile.size,
+        mimeType: normalizeMimeType(audioFile.type),
+        fileExtension: getFileExtension(audioFile.name),
+        model: 'whisper-large-v3',
+        language: 'zh',
+      }, GROQ_API_ENDPOINT, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${groqApiKey}`,

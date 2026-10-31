@@ -10,6 +10,9 @@ verify_jwt = false
 [functions.cleanup-attachments]
 verify_jwt = false
 
+[functions.virus-scan]
+verify_jwt = false
+
 [functions.widget-register]
 verify_jwt = false
 

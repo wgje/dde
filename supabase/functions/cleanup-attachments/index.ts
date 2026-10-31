@@ -3,10 +3,15 @@
 // 建议通过 Supabase Cron Job 每天调用一次
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.93.2";
+import {
+  claimTaskAttachmentCleanup,
+  drainAttachmentCleanupOutbox,
+  type AttachmentCleanupOutboxClient,
+} from "./cleanup-outbox.ts";
 
 // 配置常量 - 与前端附件清理策略保持一致
 const RETENTION_DAYS = 30; // 软删除附件保留天数
-const BATCH_SIZE = 100; // 每批处理的文件数
+const MAX_OUTBOX_JOBS_PER_RUN = 100; // 每次执行最多处理的持久化 Storage 删除任务数
 const MAX_TASKS_PER_RUN = 500; // 每次执行最多处理的任务数（防止超时）
 const MAINTENANCE_SECRET = Deno.env.get("CLEANUP_ATTACHMENTS_SECRET")
   ?? Deno.env.get("MAINTENANCE_CRON_SECRET")
@@ -98,6 +103,7 @@ interface CleanupTaskRow {
 }
 
 interface CleanupTaskQueryBuilder {
+  neq(column: string, value: unknown): CleanupTaskQueryBuilder;
   gt(column: string, value: unknown): CleanupTaskQueryBuilder;
   order(column: string, options: { ascending: boolean }): {
     limit(count: number): Promise<{
@@ -228,7 +234,8 @@ async function fetchCleanupTaskPage(
         attachments,
         projects!inner(owner_id)
       `)
-    .not("attachments", "is", null);
+    .not("attachments", "is", null)
+    .neq("attachments", "[]");
 
   if (afterTaskId) {
     query = query.gt("id", afterTaskId);
@@ -346,7 +353,7 @@ Deno.serve(async (req: Request) => {
     // 按 id 游标轮转扫描，避免固定 limit 永远卡在前 MAX_TASKS_PER_RUN 个任务。
     const cleanupCursor = await readAttachmentCleanupCursor(supabase as unknown as CleanupCursorClient);
     const taskFetch = await fetchCleanupTasks(supabase as unknown as CleanupTaskClient, cleanupCursor);
-    let tasks = taskFetch.tasks;
+    const tasks = taskFetch.tasks;
     const hasMore = taskFetch.hasMore;
     const nextCursor = taskFetch.nextCursor;
     const scanWrapped = taskFetch.scanWrapped;
@@ -411,69 +418,39 @@ Deno.serve(async (req: Request) => {
       }
     }
 
-    // 如果没有需要清理的附件
-    if (attachmentsToDelete.length === 0) {
-      await logCleanup(supabase as unknown as CleanupLogClient, "attachment_cleanup", {
-        cutoffDate: cutoffISOString,
-        attachmentsToDelete: 0,
-        claimedAttachmentsToDelete: 0,
-        storageDeletedCount: 0,
-        dbUpdatedCount: 0,
-        storageErrorCount: 0,
-        dbErrorCount: 0,
-        hasMore,
-        tasksProcessed: tasks.length,
-        nextCursor,
-        scanWrapped,
-      });
-
-      return new Response(
-        JSON.stringify({
-          success: true,
-          message: "No expired attachments to clean up",
-          deletedCount: 0,
-          storageDeletedCount: 0,
-          hasMore,
-          tasksProcessed: tasks.length,
-          nextCursor,
-          scanWrapped,
-        }),
-        {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        }
-      );
-    }
-
-    // 先通过 updated_at CAS 从 DB 中移除过期附件，再删除 Storage 对象。
-    // 如果反过来先删 Storage，用户在清理窗口内恢复附件时会出现“DB 仍引用但文件已丢”的硬损坏。
-    // 当前顺序的最坏结果是 Storage 遗留无引用对象，后续可通过维护日志/对象生命周期继续清理。
+    // 在同一数据库事务中执行 updated_at CAS 与 outbox 入队。
+    // Storage 删除由持久化 worker 重试，避免元数据已移除但对象删除失败后永久遗留。
     let dbUpdatedCount = 0;
     const dbErrors: string[] = [];
     const claimedAttachmentsToDelete: AttachmentToDelete[] = [];
+    const outboxClient = supabase as unknown as AttachmentCleanupOutboxClient;
 
     for (const [taskId, taskState] of taskUpdates) {
       const taskDeletedAttachments = attachmentsToDelete.filter(a => a.taskId === taskId);
+      if (!taskState.updatedAt) {
+        dbErrors.push(`Task ${taskId}: Skipped DB update - task has no updated_at CAS value`);
+        continue;
+      }
 
       try {
-        let updateQuery = supabase
-          .from("tasks")
-          .update({
-            attachments:
-              taskState.remainingAttachments.length > 0 ? taskState.remainingAttachments : null,
-          })
-          .eq("id", taskId)
-          .eq("project_id", taskState.projectId);
+        const claimResult = await claimTaskAttachmentCleanup(outboxClient, {
+          taskId,
+          projectId: taskState.projectId,
+          expectedUpdatedAt: taskState.updatedAt,
+          remainingAttachments: taskState.remainingAttachments,
+          jobs: taskDeletedAttachments.map(attachment => ({
+            bucket: 'attachments',
+            objectPath:
+              `${attachment.ownerId}/${attachment.projectId}/${attachment.taskId}/${attachment.fileName}`,
+            ownerId: attachment.ownerId,
+            projectId: attachment.projectId,
+            taskId: attachment.taskId,
+          })),
+        });
 
-        if (taskState.updatedAt) {
-          updateQuery = updateQuery.eq("updated_at", taskState.updatedAt);
-        }
-
-        const { data: updatedRows, error: updateError } = await updateQuery.select("id");
-
-        if (updateError) {
-          dbErrors.push(`Task ${taskId}: ${updateError.message}`);
-        } else if (!updatedRows || updatedRows.length === 0) {
+        if (claimResult.error) {
+          dbErrors.push(`Task ${taskId}: ${claimResult.error}`);
+        } else if (!claimResult.claimed) {
           dbErrors.push(`Task ${taskId}: Skipped DB update - task changed during cleanup`);
         } else {
           dbUpdatedCount++;
@@ -487,42 +464,20 @@ Deno.serve(async (req: Request) => {
       }
     }
 
-    const storagePaths = claimedAttachmentsToDelete.map(
-      (a) => `${a.ownerId}/${a.projectId}/${a.taskId}/${a.fileName}`
+    // 即使本轮没有新过期附件，也要推进以前失败或尚未处理的持久化任务。
+    const outboxResult = await drainAttachmentCleanupOutbox(
+      outboxClient,
+      MAX_OUTBOX_JOBS_PER_RUN,
     );
-
-    let storageDeletedCount = 0;
-    const storageErrors: string[] = [];
-
-    for (let i = 0; i < storagePaths.length; i += BATCH_SIZE) {
-      const batch = storagePaths.slice(i, i + BATCH_SIZE);
-
-      // 逐个文件尝试删除，确保单个失败不影响整批
-      for (const path of batch) {
-        try {
-          const { error: storageError } = await supabase.storage
-            .from("attachments")
-            .remove([path]);
-
-          if (storageError) {
-            storageErrors.push(`${path}: ${storageError.message}`);
-          } else {
-            storageDeletedCount++;
-          }
-        } catch (e) {
-          // 捕获单个文件删除的意外错误，继续处理下一个
-          const errorMsg = e instanceof Error ? e.message : String(e);
-          storageErrors.push(`${path}: ${errorMsg}`);
-          console.warn('Failed to delete expired attachment', redactCleanupError(`${path}: ${errorMsg}`));
-        }
-      }
-    }
+    const storageDeletedCount = outboxResult.deletedCount;
+    const storageErrors = outboxResult.errors;
 
     // 记录清理日志
     await logCleanup(supabase as unknown as CleanupLogClient, "attachment_cleanup", {
       cutoffDate: cutoffISOString,
       attachmentsToDelete: attachmentsToDelete.length,
       claimedAttachmentsToDelete: claimedAttachmentsToDelete.length,
+      outboxClaimedCount: outboxResult.claimedCount,
       storageDeletedCount,
       dbUpdatedCount,
       storageErrorCount: storageErrors.length,
@@ -535,9 +490,35 @@ Deno.serve(async (req: Request) => {
       scanWrapped,
     });
 
+    if (
+      attachmentsToDelete.length === 0
+      && outboxResult.claimedCount === 0
+      && storageErrors.length === 0
+    ) {
+      return new Response(
+        JSON.stringify({
+          success: true,
+          message: "No expired attachments to clean up",
+          deletedCount: 0,
+          storageDeletedCount: 0,
+          dbUpdatedCount: 0,
+          hasMore,
+          tasksProcessed: tasks.length,
+          nextCursor,
+          scanWrapped,
+        }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }
+      );
+    }
+
     const result: CleanupResult = {
       success: storageErrors.length === 0 && dbErrors.length === 0,
-      message: `Cleaned up ${storageDeletedCount} files from storage, updated ${dbUpdatedCount} tasks`,
+      message: attachmentsToDelete.length === 0
+        ? `Processed ${outboxResult.claimedCount} pending cleanup jobs, deleted ${storageDeletedCount} files from storage`
+        : `Cleaned up ${storageDeletedCount} files from storage, updated ${dbUpdatedCount} tasks`,
       deletedCount: attachmentsToDelete.length,
       storageDeletedCount,
       dbUpdatedCount,

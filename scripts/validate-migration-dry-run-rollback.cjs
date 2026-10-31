@@ -48,6 +48,13 @@ const RISK_PATTERNS = [
   },
 ];
 
+const CLI_INCOMPATIBLE_PATTERNS = [
+  {
+    pattern: /\bDROP\s+INDEX\s+CONCURRENTLY\b/i,
+    message: 'DROP INDEX CONCURRENTLY is incompatible with Supabase CLI db push; use SET LOCAL lock_timeout with a regular DROP INDEX so lock contention fails fast and rolls back.',
+  },
+];
+
 function parseArgs(argv) {
   const options = {
     root: process.cwd(),
@@ -89,29 +96,102 @@ function relativePath(root, filePath) {
   return normalizePath(path.relative(root, filePath));
 }
 
+function pathIdentityKey(pathApi, filePath) {
+  return pathApi.sep === '\\' ? filePath.toLowerCase() : filePath;
+}
+
+function isPathContained(pathApi, root, candidate) {
+  const relative = pathApi.relative(root, candidate);
+  return relative === '' || (relative !== '..'
+    && !relative.startsWith(`..${pathApi.sep}`) && !pathApi.isAbsolute(relative));
+}
+
 function collectMigrationFiles(root) {
   const dir = path.join(root, MIGRATION_DIR);
-  if (!fs.existsSync(dir)) {
-    return [];
+  let stats, canonicalRoot, canonicalDir;
+  try {
+    stats = fs.statSync(dir);
+    canonicalRoot = fs.realpathSync(root);
+    canonicalDir = fs.realpathSync(dir);
+  } catch {
+    throw new Error('migration-evidence-migrations-path-unavailable');
   }
+  if (!stats.isDirectory()) {
+    throw new Error('migration-evidence-migrations-path-not-directory');
+  }
+  if (!isPathContained(path, canonicalRoot, canonicalDir)) throw new Error('migration-evidence-migrations-path-canonical-escape');
 
-  return fs.readdirSync(dir, { withFileTypes: true })
+  const files = fs.readdirSync(dir, { withFileTypes: true })
     .filter(entry => entry.isFile() && entry.name.toLowerCase().endsWith('.sql'))
-    .map(entry => path.join(dir, entry.name))
-    .sort((left, right) => left.localeCompare(right));
+    .map(entry => {
+      const filePath = path.join(dir, entry.name);
+      const readPath = fs.realpathSync(filePath);
+      if (!isPathContained(path, canonicalDir, readPath)) throw new Error('migration-evidence-migration-path-canonical-escape');
+      return { filePath, readPath };
+    })
+    .sort((left, right) => left.filePath.localeCompare(right.filePath));
+  if (files.length === 0) {
+    throw new Error('migration-evidence-migration-set-empty');
+  }
+  return { canonicalDir, files };
 }
 
 function loadManifest(manifestPath) {
-  if (!fs.existsSync(manifestPath)) {
-    return { schemaVersion: 1, entries: [] };
+  let stats, canonicalPath;
+  try {
+    canonicalPath = fs.realpathSync(manifestPath);
+    stats = fs.statSync(canonicalPath);
+  } catch {
+    throw new Error('migration-evidence-manifest-path-unavailable');
+  }
+  if (!stats.isFile()) {
+    throw new Error('migration-evidence-manifest-path-not-file');
   }
 
-  const parsed = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+  // Realpath-before-read reduces static link escapes but is not race-free.
+  const parsed = JSON.parse(fs.readFileSync(canonicalPath, 'utf8'));
   if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.entries)) {
     throw new Error('migration dry-run manifest must contain an entries array');
   }
 
   return parsed;
+}
+
+function prepareManifest(root, canonicalDir, entries) {
+  const byPath = new Map();
+  const reverse = [];
+  const errors = [];
+  const seen = new Set();
+  for (const entry of entries) {
+    const raw = typeof entry?.path === 'string' ? entry.path : '';
+    if (!raw) {
+      errors.push('manifest entry must contain a path');
+      continue;
+    }
+    const absolute = path.resolve(root, path.posix.normalize(raw.replace(/\\/g, '/')));
+    const key = pathIdentityKey(path, relativePath(root, absolute));
+    if (seen.has(key)) {
+      errors.push(`${raw}: duplicate migration dry-run manifest entry`);
+      continue;
+    }
+    seen.add(key);
+    if (!isPathContained(path, path.join(root, MIGRATION_DIR), absolute)) {
+      errors.push(`${raw}: manifest path must stay inside ${MIGRATION_DIR}`);
+      continue;
+    }
+    let canonical;
+    try { canonical = fs.realpathSync(absolute); } catch {
+      reverse.push({ key, raw, stale: true });
+      continue;
+    }
+    if (!isPathContained(path, canonicalDir, canonical)) {
+      errors.push(`${raw}: manifest path canonical target must stay inside migration directory`);
+      continue;
+    }
+    byPath.set(key, entry);
+    reverse.push({ key, raw, stale: false });
+  }
+  return { byPath, errors, reverse };
 }
 
 function stripSqlCommentsAndStrings(source) {
@@ -235,6 +315,13 @@ function classifyMigration(source) {
   };
 }
 
+function validateCliCompatibility(source) {
+  const stripped = stripSqlCommentsAndStrings(source);
+  return CLI_INCOMPATIBLE_PATTERNS
+    .filter(rule => rule.pattern.test(stripped))
+    .map(rule => rule.message);
+}
+
 function validateManifestEntry(entry, expectedCategory) {
   const errors = [];
   if (!entry || typeof entry !== 'object') {
@@ -268,24 +355,29 @@ function buildPsqlPlan(transactionSafeFiles) {
 }
 
 function validate(options) {
-  const migrationFiles = collectMigrationFiles(options.root);
-  const manifest = loadManifest(options.manifest);
-  const manifestByPath = new Map(manifest.entries.map(entry => [normalizePath(entry.path ?? ''), entry]));
+  const { canonicalDir, files: migrationFiles } = collectMigrationFiles(options.root);
+  const manifestState = prepareManifest(options.root, canonicalDir, loadManifest(options.manifest).entries);
   const errors = [];
   const transactionDryRunFiles = [];
   const manualReview = [];
+  const migrationByPath = new Map();
 
-  for (const filePath of migrationFiles) {
+  for (const { filePath, readPath } of migrationFiles) {
     const relative = relativePath(options.root, filePath);
-    const source = fs.readFileSync(filePath, 'utf8');
+    const source = fs.readFileSync(readPath, 'utf8');
     const classification = classifyMigration(source);
-
+    migrationByPath.set(pathIdentityKey(path, relative), classification);
+    const compatibilityErrors = validateCliCompatibility(source);
+    if (compatibilityErrors.length > 0) {
+      errors.push(...compatibilityErrors.map(error => `${relative}: ${error}`));
+      continue;
+    }
     if (classification.category === 'transaction-safe') {
       transactionDryRunFiles.push(relative);
       continue;
     }
 
-    const manifestEntry = manifestByPath.get(relative);
+    const manifestEntry = manifestState.byPath.get(pathIdentityKey(path, relative));
     if (!manifestEntry) {
       errors.push(`${relative}: missing migration dry-run manifest entry for ${classification.category} (${classification.reasons.join(', ')})`);
       continue;
@@ -304,6 +396,15 @@ function validate(options) {
       rollbackStrategy: manifestEntry.rollbackStrategy,
       requiresDataSafetyExport: true,
     });
+  }
+  errors.push(...manifestState.errors);
+  for (const item of manifestState.reverse) {
+    const classification = migrationByPath.get(item.key);
+    if (item.stale || !classification) {
+      errors.push(`${item.raw}: stale migration dry-run manifest entry`);
+    } else if (classification.category === 'transaction-safe') {
+      errors.push(`${item.raw}: transaction-safe migration must not have a dry-run manifest entry`);
+    }
   }
 
   const report = {
@@ -353,6 +454,8 @@ if (require.main === module) {
 
 module.exports = {
   classifyMigration,
+  isPathContained,
+  pathIdentityKey,
   stripSqlCommentsAndStrings,
   validate,
 };

@@ -628,6 +628,7 @@ export type Database = {
           entity_type: string
           operation_id: string
           payload_digest: string | null
+          replay_payload_digest: string | null
           protocol_version: number | null
           reject_reason: string | null
           result_payload: Json | null
@@ -644,6 +645,7 @@ export type Database = {
           entity_type: string
           operation_id: string
           payload_digest?: string | null
+          replay_payload_digest?: string | null
           protocol_version?: number | null
           reject_reason?: string | null
           result_payload?: Json | null
@@ -660,6 +662,7 @@ export type Database = {
           entity_type?: string
           operation_id?: string
           payload_digest?: string | null
+          replay_payload_digest?: string | null
           protocol_version?: number | null
           reject_reason?: string | null
           result_payload?: Json | null
@@ -1174,6 +1177,50 @@ export type Database = {
           user_id?: string
         }
         Relationships: []
+      }
+      widget_black_box_action_receipts: {
+        Row: {
+          action: string
+          canonical_response: Json
+          created_at: string
+          device_id: string
+          entry_id: string
+          expires_at: string
+          operation_id: string
+          origin_binding_generation: number
+          user_id: string
+        }
+        Insert: {
+          action: string
+          canonical_response: Json
+          created_at?: string
+          device_id: string
+          entry_id: string
+          expires_at?: string
+          operation_id: string
+          origin_binding_generation: number
+          user_id: string
+        }
+        Update: {
+          action?: string
+          canonical_response?: Json
+          created_at?: string
+          device_id?: string
+          entry_id?: string
+          expires_at?: string
+          operation_id?: string
+          origin_binding_generation?: number
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "widget_black_box_action_receipts_device_id_fkey"
+            columns: ["device_id"]
+            isOneToOne: false
+            referencedRelation: "widget_devices"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       widget_devices: {
         Row: {
@@ -1779,6 +1826,17 @@ export type Database = {
       }
     }
     Functions: {
+      apply_widget_black_box_action: {
+        Args: {
+          p_action: string
+          p_device_id: string
+          p_entry_id: string
+          p_operation_id?: string
+          p_origin_binding_generation: number
+          p_user_id: string
+        }
+        Returns: Json
+      }
       append_task_attachment: {
         Args: { p_attachment: Json; p_task_id: string }
         Returns: boolean
@@ -1956,10 +2014,17 @@ export type Database = {
         Args: { entity_key: string; payload: Json }
         Returns: string
       }
+      sync_increment_routine_completion: {
+        Args: { payload: Json }
+        Returns: Json
+      }
       sync_upsert_blackbox_entry: { Args: { payload: Json }; Returns: Json }
       sync_upsert_connection: { Args: { payload: Json }; Returns: Json }
+      sync_upsert_focus_session: { Args: { payload: Json }; Returns: Json }
       sync_upsert_project: { Args: { payload: Json }; Returns: Json }
+      sync_upsert_routine_task: { Args: { payload: Json }; Returns: Json }
       sync_upsert_task: { Args: { payload: Json }; Returns: Json }
+      sync_upsert_user_preferences: { Args: { payload: Json }; Returns: Json }
       user_accessible_project_ids: { Args: never; Returns: string[] }
       user_has_project_access: {
         Args: { p_project_id: string }

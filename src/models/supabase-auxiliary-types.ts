@@ -167,7 +167,7 @@ export interface ConnectionTombstoneInsert {
 export interface BlackBoxEntryRow {
   id: string;
   project_id: string | null;
-  user_id: string | null;
+  user_id: string;
   content: string;
   focus_meta: Json | null;
   date: string;
@@ -189,7 +189,7 @@ export interface BlackBoxEntryInsert {
   focus_meta?: Json | null;
   date?: string;
   project_id?: string | null;
-  user_id?: string | null;
+  user_id: string;
   created_at?: string | null;
   updated_at?: string | null;
   completed_at?: string | null;
@@ -207,6 +207,7 @@ export interface BlackBoxEntryUpdate {
   focus_meta?: Json | null;
   date?: string;
   project_id?: string | null;
+  user_id?: string;
   is_read?: boolean | null;
   is_completed?: boolean | null;
   is_archived?: boolean | null;
@@ -224,7 +225,7 @@ export interface BlackBoxEntryUpdate {
 /** 语音转写用量行数据 */
 export interface TranscriptionUsageRow {
   id: string;
-  user_id: string | null;
+  user_id: string;
   date: string;
   audio_seconds: number | null;
   created_at: string | null;
@@ -233,7 +234,7 @@ export interface TranscriptionUsageRow {
 /** 语音转写用量插入数据 */
 export interface TranscriptionUsageInsert {
   id: string;
-  user_id?: string | null;
+  user_id: string;
   date?: string;
   audio_seconds?: number | null;
   created_at?: string | null;
@@ -243,7 +244,7 @@ export interface TranscriptionUsageInsert {
 export interface TranscriptionUsageUpdate {
   audio_seconds?: number | null;
   date?: string;
-  user_id?: string | null;
+  user_id?: string;
 }
 
 // ============================================
@@ -254,7 +255,7 @@ export interface TranscriptionUsageUpdate {
 export interface AttachmentScanRow {
   id: string;
   file_id: string;
-  user_id: string | null;
+  user_id: string;
   scanner: string;
   status: string;
   threat_name: string | null;
@@ -264,6 +265,9 @@ export interface AttachmentScanRow {
   engine_version: string | null;
   signature_version: string | null;
   scanned_at: string | null;
+  rescan_token: string | null;
+  rescan_started_at: string | null;
+  next_rescan_at: string | null;
   created_at: string | null;
   updated_at: string | null;
 }
@@ -271,7 +275,7 @@ export interface AttachmentScanRow {
 /** 附件扫描插入数据 */
 export interface AttachmentScanInsert {
   file_id: string;
-  user_id?: string | null;
+  user_id: string;
   id?: string;
   scanner?: string;
   status?: string;
@@ -282,11 +286,14 @@ export interface AttachmentScanInsert {
   engine_version?: string | null;
   signature_version?: string | null;
   scanned_at?: string | null;
+  rescan_token?: string | null;
+  rescan_started_at?: string | null;
+  next_rescan_at?: string | null;
 }
 
 /** 附件扫描更新数据 */
 export interface AttachmentScanUpdate {
-  user_id?: string | null;
+  user_id?: string;
   scanner?: string;
   status?: string;
   threat_name?: string | null;
@@ -296,6 +303,9 @@ export interface AttachmentScanUpdate {
   engine_version?: string | null;
   signature_version?: string | null;
   scanned_at?: string | null;
+  rescan_token?: string | null;
+  rescan_started_at?: string | null;
+  next_rescan_at?: string | null;
 }
 
 // ============================================
