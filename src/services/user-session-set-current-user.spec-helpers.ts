@@ -245,7 +245,31 @@ export function registerUserSessionSetCurrentUserSpecs(getContext: () => UserSes
         expect(context.mockStorePersistence['recoverInterruptedDataSafetyRestore']).not.toHaveBeenCalled();
       });
 
-      it('数据安全还原恢复失败时应记录警告并继续加载当前用户数据', async () => {
+      it('数据安全还原返回未完成错误时应保留标记并停止加载当前用户数据', async () => {
+        const recoveryErrors = ['restore rollback failed'];
+        (context.mockStorePersistence['recoverInterruptedDataSafetyRestore'] as ReturnType<typeof vi.fn>)
+          .mockResolvedValueOnce({ recovered: false, errors: recoveryErrors });
+        const loadUserDataSpy = vi.spyOn(
+          context.service as unknown as {
+            loadUserData: (userId: string, sessionGuard?: unknown) => Promise<void>;
+          },
+          'loadUserData'
+        ).mockResolvedValue(undefined);
+
+        await expect(context.service.setCurrentUser('restore-user', { forceLoad: true }))
+          .resolves.toBeUndefined();
+
+        expect(context.mockLoggerCategory.warn).toHaveBeenCalledWith(
+          '恢复中断的数据安全还原未完成，保留标记并停止加载本地数据',
+          { ownerUserId: 'restore-user', errors: recoveryErrors },
+        );
+        expect(context.mockActionQueue['reloadFromStorageForCurrentOwner']).not.toHaveBeenCalled();
+        expect(context.mockRetryQueue['reloadFromStorageForCurrentOwner']).not.toHaveBeenCalled();
+        expect(context.mockConflictStorage['refreshConflictCount']).not.toHaveBeenCalled();
+        expect(loadUserDataSpy).not.toHaveBeenCalled();
+      });
+
+      it('数据安全还原恢复抛错时应保留标记并停止加载当前用户数据', async () => {
         const recoveryError = new Error('restore recovery failed');
         (context.mockStorePersistence['recoverInterruptedDataSafetyRestore'] as ReturnType<typeof vi.fn>)
           .mockRejectedValueOnce(recoveryError);
@@ -260,10 +284,13 @@ export function registerUserSessionSetCurrentUserSpecs(getContext: () => UserSes
           .resolves.toBeUndefined();
 
         expect(context.mockLoggerCategory.warn).toHaveBeenCalledWith(
-          '恢复中断的数据安全还原失败，保留标记并继续加载本地数据',
+          '恢复中断的数据安全还原失败，保留标记并停止加载本地数据',
           recoveryError,
         );
-        expect(loadUserDataSpy).toHaveBeenCalledWith('restore-user', expect.any(Object));
+        expect(context.mockActionQueue['reloadFromStorageForCurrentOwner']).not.toHaveBeenCalled();
+        expect(context.mockRetryQueue['reloadFromStorageForCurrentOwner']).not.toHaveBeenCalled();
+        expect(context.mockConflictStorage['refreshConflictCount']).not.toHaveBeenCalled();
+        expect(loadUserDataSpy).not.toHaveBeenCalled();
       });
 
       it('owner reload 时 ActionQueue 抛错也应继续重载 RetryQueue 并完成会话刷新', async () => {

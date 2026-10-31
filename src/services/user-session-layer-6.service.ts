@@ -119,13 +119,15 @@ export abstract class UserSessionLayer6 extends UserSessionLayer5 {
     try {
       const recovery = await this.storePersistence.recoverInterruptedDataSafetyRestore(context.userId);
       if (recovery.errors.length > 0) {
-        this.logger.warn('恢复中断的数据安全还原存在未完成错误，保留标记并继续加载本地数据', {
+        this.logger.warn('恢复中断的数据安全还原未完成，保留标记并停止加载本地数据', {
           ownerUserId: context.userId,
           errors: recovery.errors,
         });
+        return false;
       }
     } catch (error) {
-      this.logger.warn('恢复中断的数据安全还原失败，保留标记并继续加载本地数据', error);
+      this.logger.warn('恢复中断的数据安全还原失败，保留标记并停止加载本地数据', error);
+      return false;
     }
     return true;
   }
