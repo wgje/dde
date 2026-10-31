@@ -100,21 +100,23 @@ export abstract class UserSessionLayer6 extends UserSessionLayer5 {
     context: SetCurrentUserContext,
     sessionGuard: SessionGuardContext,
   ): Promise<boolean> {
-    if (!context.userId) return true;
     if (this.shouldAbortStaleSession(sessionGuard, 'setCurrentUser:before-data-safety-recovery')) {
       return false;
     }
 
+    const restoreOwnerUserId = context.userId ?? AUTH_CONFIG.LOCAL_MODE_USER_ID;
     const localBackupRecovery = await this.localBackupUiRestoreStartupRecovery.recover(
-      context.userId,
+      restoreOwnerUserId,
     );
     if (localBackupRecovery.status === 'blocked') {
       this.logger.warn('本地备份还原启动恢复被阻止，保留标记并停止加载本地数据', {
-        ownerUserId: context.userId,
+        ownerUserId: restoreOwnerUserId,
         reason: localBackupRecovery.reason,
       });
       return false;
     }
+
+    if (!context.userId) return true;
 
     try {
       const recovery = await this.storePersistence.recoverInterruptedDataSafetyRestore(context.userId);

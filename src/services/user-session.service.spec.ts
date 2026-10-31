@@ -587,6 +587,21 @@ describe('UserSessionService', () => {
         mockLocalBackupUiRestoreStartupRecovery.recover.mockResolvedValue({ status: 'none' });
       }
     });
+
+    it('checks the local owner before loading anonymous session data', async () => {
+      mockLocalBackupUiRestoreStartupRecovery.recover.mockResolvedValueOnce({
+        status: 'blocked',
+        reason: 'active-or-mutated',
+      });
+
+      await service.setCurrentUser(null, { forceLoad: true });
+
+      expect(mockLocalBackupUiRestoreStartupRecovery.recover)
+        .toHaveBeenCalledWith(AUTH_CONFIG.LOCAL_MODE_USER_ID);
+      expect(mockStorePersistence['recoverInterruptedDataSafetyRestore']).not.toHaveBeenCalled();
+      expect(mockActionQueue['reloadFromStorageForCurrentOwner']).not.toHaveBeenCalled();
+      expect(mockRetryQueue['reloadFromStorageForCurrentOwner']).not.toHaveBeenCalled();
+    });
   });
 
   describe('clearAllLocalData', () => {

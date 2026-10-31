@@ -123,17 +123,59 @@ describe('local backup UI restore stage protocol', () => {
     expect(context.runtime.abortBeforeMutation).not.toHaveBeenCalled();
   });
 
-  it('aborts before mutation when any pre-image slot fails decoding', async () => {
+  it('retains the journal and blocks when a pre-image slot fails decoding', async () => {
     const context = createContext();
     context.operations.decodePreImage = vi.fn(() => {
       throw new Error('metadata slot malformed');
     });
 
-    await expect(runLocalBackupUiRestoreStageProtocol(context.runtime, context.operations))
-      .rejects.toThrow('metadata slot malformed');
+    const result = await runLocalBackupUiRestoreStageProtocol(
+      context.runtime,
+      context.operations,
+    );
 
-    expect(context.runtime.abortBeforeMutation).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({
+      status: 'blocked',
+      ownershipLost: false,
+      dataState: 'partial',
+      error: expect.objectContaining({ message: 'metadata slot malformed' }),
+    });
+    expect(context.runtime.marker()).toMatchObject({
+      state: 'prepared',
+      phase: 'pre-image-captured',
+    });
+    expect(context.runtime.abortBeforeMutation).not.toHaveBeenCalled();
     expect(context.operations.apply).not.toHaveBeenCalled();
+    expect(context.runtime.finalize).not.toHaveBeenCalled();
+  });
+
+  it('retains a partial journal when startup pre-image decoding fails', async () => {
+    const initialMarker = createMarker({
+      state: 'rollback-failed',
+      phase: 'action-queue',
+      completedStages: ['projects', 'attachment-outbox', 'action-queue'],
+      rollbackCompletedStages: ['action-queue'],
+    });
+    const context = createContext(undefined, initialMarker);
+    context.operations.decodePreImage = vi.fn(() => {
+      throw new Error('pre-image evidence changed');
+    });
+
+    const result = await runLocalBackupUiRestoreStartupRollbackProtocol(
+      context.runtime,
+      context.operations,
+    );
+
+    expect(result).toMatchObject({
+      status: 'blocked',
+      ownershipLost: false,
+      dataState: 'partial',
+      error: expect.objectContaining({ message: 'pre-image evidence changed' }),
+    });
+    expect(context.runtime.marker()).toEqual(initialMarker);
+    expect(context.runtime.abortBeforeMutation).not.toHaveBeenCalled();
+    expect(context.operations.rollback).not.toHaveBeenCalled();
+    expect(context.runtime.finalize).not.toHaveBeenCalled();
   });
 
   it('startup rollback skips stages already confirmed in rollbackCompletedStages', async () => {

@@ -83,8 +83,7 @@ export async function runLocalBackupUiRestoreStageProtocol(
   try {
     operations.decodePreImage(runtime.marker());
   } catch (error) {
-    await runtime.abortBeforeMutation();
-    throw error;
+    return blockedResult(error, isOwnershipLost(error), 'partial', {});
   }
 
   const stageResults: Partial<Record<LocalBackupUiRestoreStage, unknown>> = {};
@@ -130,8 +129,7 @@ export async function runLocalBackupUiRestoreStartupRollbackProtocol(
   try {
     operations.decodePreImage(runtime.marker());
   } catch (error) {
-    await runtime.abortBeforeMutation();
-    throw error;
+    return blockedResult(error, isOwnershipLost(error), 'partial', {});
   }
 
   return await rollbackStages(
