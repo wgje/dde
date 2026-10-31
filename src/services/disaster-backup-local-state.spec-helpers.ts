@@ -173,6 +173,8 @@ export function registerDisasterBackupLocalStateSpecs(context: DisasterBackupLoc
     it('buildLocalPayload should include pending attachment upload outbox bytes in local data safety package', async () => {
       const pendingBlob = new Blob([new Uint8Array([78, 70])], { type: 'text/plain' });
       const listPendingUploads = vi.fn().mockResolvedValue([{
+        ownerUserId: 'user-1',
+        operationId: 'attachment:create:attachment-1',
         attachmentId: 'attachment-1',
         blobKey: 'attachment-1',
         fileName: 'offline.txt',
@@ -204,8 +206,10 @@ export function registerDisasterBackupLocalStateSpecs(context: DisasterBackupLoc
         autoBackupIntervalMs: 900000,
       });
 
-      expect(listPendingUploads).toHaveBeenCalled();
+      expect(listPendingUploads).toHaveBeenCalledWith('user-1');
       expect(payload.localState?.attachmentUploadOutbox).toEqual([{
+        ownerUserId: 'user-1',
+        operationId: 'attachment:create:attachment-1',
         attachmentId: 'attachment-1',
         blobKey: 'attachment-1',
         fileName: 'offline.txt',

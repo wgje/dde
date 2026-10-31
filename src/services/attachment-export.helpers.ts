@@ -72,6 +72,7 @@ export interface DownloadResult {
 export interface AttachmentDownloadSummary {
   successCount: number;
   failedCount: number;
+  skippedCount: number;
 }
 
 export interface ZipFileEntry {
@@ -117,10 +118,16 @@ export function summarizeAttachmentDownloadResults(
   results: DownloadResult[],
 ): AttachmentDownloadSummary {
   return results.reduce<AttachmentDownloadSummary>(
-    (summary, result) => result.success
-      ? { ...summary, successCount: summary.successCount + 1 }
-      : { ...summary, failedCount: summary.failedCount + 1 },
-    { successCount: 0, failedCount: 0 },
+    (summary, result) => {
+      if (result.success) {
+        return { ...summary, successCount: summary.successCount + 1 };
+      }
+      if (result.attachment.downloadStatus === 'skipped') {
+        return { ...summary, skippedCount: summary.skippedCount + 1 };
+      }
+      return { ...summary, failedCount: summary.failedCount + 1 };
+    },
+    { successCount: 0, failedCount: 0, skippedCount: 0 },
   );
 }
 

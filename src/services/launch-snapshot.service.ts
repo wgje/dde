@@ -1,4 +1,4 @@
-import { Injectable } from '@angular/core';
+import { inject, Injectable } from '@angular/core';
 import type { ColorMode, Project, Task, ThemeType } from '../models';
 import type { LaunchSnapshot, LaunchSnapshotProject, LaunchSnapshotTask } from '../models/launch-shell';
 import {
@@ -6,6 +6,11 @@ import {
   LAUNCH_SNAPSHOT_VERSION_V2,
   normalizeLaunchSnapshot,
 } from './launch-snapshot-normalization.helpers';
+import {
+  beginLocalBackupUiRestoreWriter,
+  type LocalBackupUiRestoreWriterHandle,
+} from './local-backup-ui-restore-writer-quiescence-tracker';
+import { SessionRuntimeResetRegistry } from './session-runtime-reset.service';
 import { resolveRouteIntent } from '../utils/route-intent';
 
 export type { LaunchSnapshot, LaunchSnapshotProject, LaunchSnapshotTask } from '../models/launch-shell';
@@ -33,8 +38,14 @@ type CaptureOptions = {
 })
 export class LaunchSnapshotService {
   private persistTimer: ReturnType<typeof setTimeout> | null = null;
+  private persistGeneration = 0;
   private pendingSnapshot: LaunchSnapshot | null = null;
   private pendingCaptureArgs: { projects: Project[]; options: CaptureOptions } | null = null;
+  private pendingWriter: { ownerUserId: string; handle: LocalBackupUiRestoreWriterHandle } | null = null;
+  private readonly unregisterSessionRuntimeReset = inject(SessionRuntimeResetRegistry).register(
+    'LaunchSnapshotService',
+    () => this.cancelPendingPersist(),
+  );
   private readonly pagehideListener = () => this.flushPendingPersist();
   private readonly visibilityChangeListener = () => {
     if (document.hidden) {
@@ -53,6 +64,9 @@ export class LaunchSnapshotService {
   }
 
   dispose(): void {
+    this.unregisterSessionRuntimeReset();
+    this.cancelPendingPersist();
+
     if (typeof window !== 'undefined') {
       window.removeEventListener('pagehide', this.pagehideListener);
     }
@@ -129,14 +143,10 @@ export class LaunchSnapshotService {
       return;
     }
 
+    this.beginPendingWriter(snapshot.userId ?? null);
     this.pendingSnapshot = snapshot;
-    if (this.persistTimer) {
-      clearTimeout(this.persistTimer);
-    }
-
-    this.persistTimer = setTimeout(() => {
-      this.flushPendingPersist();
-    }, PERSIST_DEBOUNCE_MS);
+    this.pendingCaptureArgs = null;
+    this.schedulePersistTimer(() => this.flushPendingPersist());
   }
 
   /**
@@ -144,33 +154,34 @@ export class LaunchSnapshotService {
    * 避免在每次信号变化时都做 sort/slice/map（capture 开销）。
    */
   schedulePersistDeferred(projects: Project[], options: CaptureOptions): void {
+    this.beginPendingWriter(options.userId ?? null);
+    this.pendingSnapshot = null;
     this.pendingCaptureArgs = { projects, options };
-    if (this.persistTimer) {
-      clearTimeout(this.persistTimer);
-    }
-
-    this.persistTimer = setTimeout(() => {
+    this.schedulePersistTimer(() => {
       if (this.pendingCaptureArgs) {
         const { projects: p, options: o } = this.pendingCaptureArgs;
         this.pendingCaptureArgs = null;
         this.pendingSnapshot = this.capture(p, o);
       }
       this.flushPendingPersist();
-    }, PERSIST_DEBOUNCE_MS);
+    });
   }
 
   cancelPendingPersist(): void {
-    if (this.persistTimer) {
+    this.persistGeneration += 1;
+    if (this.persistTimer !== null) {
       clearTimeout(this.persistTimer);
       this.persistTimer = null;
     }
 
     this.pendingCaptureArgs = null;
     this.pendingSnapshot = null;
+    this.releasePendingWriter();
   }
 
   flushPendingPersist(): void {
-    if (this.persistTimer) {
+    this.persistGeneration += 1;
+    if (this.persistTimer !== null) {
       clearTimeout(this.persistTimer);
       this.persistTimer = null;
     }
@@ -182,6 +193,7 @@ export class LaunchSnapshotService {
     }
 
     if (!this.pendingSnapshot || typeof localStorage === 'undefined') {
+      this.releasePendingWriter();
       return;
     }
 
@@ -195,7 +207,45 @@ export class LaunchSnapshotService {
       // localStorage 写入失败时静默降级，不阻断主流程。
     } finally {
       this.pendingSnapshot = null;
+      this.releasePendingWriter();
     }
+  }
+
+  private schedulePersistTimer(onElapsed: () => void): void {
+    if (this.persistTimer !== null) {
+      clearTimeout(this.persistTimer);
+    }
+
+    const generation = ++this.persistGeneration;
+    const timer = setTimeout(() => {
+      if (generation !== this.persistGeneration || timer !== this.persistTimer) {
+        return;
+      }
+      onElapsed();
+    }, PERSIST_DEBOUNCE_MS);
+    this.persistTimer = timer;
+  }
+
+  private beginPendingWriter(ownerUserId: string | null): void {
+    if (!ownerUserId) {
+      this.releasePendingWriter();
+      return;
+    }
+    if (this.pendingWriter?.ownerUserId === ownerUserId) {
+      this.pendingWriter.handle.renew();
+      return;
+    }
+    this.releasePendingWriter();
+    this.pendingWriter = {
+      ownerUserId,
+      handle: beginLocalBackupUiRestoreWriter(ownerUserId, 'launch-snapshot'),
+    };
+  }
+
+  private releasePendingWriter(): void {
+    const handle = this.pendingWriter?.handle ?? null;
+    this.pendingWriter = null;
+    handle?.release();
   }
 
   private normalize(value: unknown): LaunchSnapshot | null {

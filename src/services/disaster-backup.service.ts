@@ -37,10 +37,16 @@ import {
   isBrowserNetworkSuspendedError,
   isBrowserNetworkSuspendedWindow,
 } from '../utils/browser-network-suspension';
-import { fetchAllSupabasePages, type SupabaseRangeQuery } from '../utils/supabase-pagination';
+import {
+  fetchAllSupabaseKeysetPagesByCursor,
+  type SupabaseLimitQuery,
+} from '../utils/supabase-pagination';
 import { DataSafetyAuditPersistence } from './data-safety-audit-persistence';
 import { AttachmentUploadOutboxService } from './attachment-upload-outbox.service';
 import { DisasterBackupLocalStateReader } from './disaster-backup-local-state.reader';
+import { SyncStateService } from '../core-bridge';
+import { FOCUS_CONFIG } from '../config/focus.config';
+import { isValidBlackBoxId, isValidBlackBoxProjectId } from './black-box-sync-push-uuid-guard';
 
 /**
  * 允许被动态查询的备份表白名单
@@ -57,9 +63,10 @@ const BACKUP_TABLES = [
 ] as const;
 type BackupTable = (typeof BACKUP_TABLES)[number];
 
-interface BackupTableRangeQuery extends SupabaseRangeQuery {
-  eq(col: string, val: string): BackupTableRangeQuery;
-  order(col: string, options?: { ascending?: boolean }): BackupTableRangeQuery;
+interface BackupTableKeysetQuery extends SupabaseLimitQuery {
+  eq(col: string, val: string): BackupTableKeysetQuery;
+  gt(col: string, val: string): BackupTableKeysetQuery;
+  order(col: string, options?: { ascending?: boolean }): BackupTableKeysetQuery;
 }
 
 export interface LocalDisasterBackupOptions {
@@ -109,6 +116,13 @@ interface SupabaseRoutineCompletionRow {
   updated_at?: string;
 }
 
+interface BackupRemoteUserState {
+  focusSessions: BackupFocusSession[];
+  transcriptionUsage: BackupTranscriptionUsage[];
+  routineTasks: BackupRoutineTask[];
+  routineCompletions: BackupRoutineCompletion[];
+}
+
 interface RemoteBackupReadState {
   deferred: boolean;
 }
@@ -129,12 +143,22 @@ export class DisasterBackupService {
   private readonly externalSourceLinks = inject(ExternalSourceLinkService);
   private readonly externalSourceCache = inject(ExternalSourceCacheService);
   private readonly attachmentUploadOutbox = inject(AttachmentUploadOutboxService, { optional: true });
+  private readonly syncStateService = inject(SyncStateService, { optional: true });
   private readonly dataSafetyAuditPersistence = new DataSafetyAuditPersistence();
   private readonly localStateReader = new DisasterBackupLocalStateReader({
     conflictStorage: this.conflictStorage,
     externalSourceCache: this.externalSourceCache,
     attachmentUploadOutbox: this.attachmentUploadOutbox,
     dataSafetyAuditPersistence: this.dataSafetyAuditPersistence,
+    readSyncState: this.syncStateService
+      ? () => {
+          const state = this.syncStateService!.syncState();
+          return {
+            lastSyncTime: state.lastSyncTime,
+            pendingCount: state.pendingCount,
+          };
+        }
+      : undefined,
   });
 
   async buildLocalPayload(
@@ -142,15 +166,24 @@ export class DisasterBackupService {
     options: LocalDisasterBackupOptions,
   ): Promise<BackupData> {
     const userId = this.resolveEffectiveUserId();
+    const backupOwnerUserId = userId ?? AUTH_CONFIG.LOCAL_MODE_USER_ID;
     const visibleProjectIds = new Set(projects.map((project) => project.id));
     const remoteReadState: RemoteBackupReadState = { deferred: false };
 
     await this.externalSourceLinks.ensureLoaded();
     const payloadBase = this.buildProjectPayload(projects, userId);
-    const userPreferences = await this.collectUserPreferences(userId, options, remoteReadState);
-    const blackBoxEntries = this.collectBlackBoxEntries(userId);
+    const userPreferences = await this.collectUserPreferences(
+      userId,
+      options,
+      remoteReadState,
+    );
+    const blackBoxEntries = await this.collectBlackBoxEntries(backupOwnerUserId);
     const remoteState = await this.collectRemoteUserState(userId, remoteReadState);
-    const localState = await this.localStateReader.readLocalState(userId, visibleProjectIds);
+    const localState = await this.localStateReader.readLocalState(
+      backupOwnerUserId,
+      visibleProjectIds,
+      userId,
+    );
 
     const coverage: BackupCoverage = {
       includesProjectData: true,
@@ -312,7 +345,11 @@ export class DisasterBackupService {
       focusPreferences,
     };
 
-    const rows = await this.fetchUserScopedRows<SupabaseUserPreferenceRow>('user_preferences', userId, remoteReadState);
+    const rows = await this.fetchUserScopedRows<SupabaseUserPreferenceRow>(
+      'user_preferences',
+      userId,
+      remoteReadState,
+    );
     if (rows.length === 0) {
       return [base];
     }
@@ -325,51 +362,50 @@ export class DisasterBackupService {
     }));
   }
 
-  private collectBlackBoxEntries(userId: string | null): BackupBlackBoxEntry[] {
-    const entriesMap = this.readValue<Map<string, BackupBlackBoxEntry>>(this.blackBoxService.entriesMap) ?? new Map();
-    return Array.from(entriesMap.values()).map((entry) => ({
-      ...entry,
-    })).filter((entry) => {
-      if (!userId) {
-        return entry.userId === AUTH_CONFIG.LOCAL_MODE_USER_ID;
-      }
-
-      return entry.userId === userId;
-    }).map((entry) => ({
-      id: entry.id,
-      projectId: entry.projectId,
-      userId: entry.userId,
-      content: entry.content,
-      date: entry.date,
-      createdAt: entry.createdAt,
-      updatedAt: entry.updatedAt,
-      completedAt: entry.completedAt,
-      isRead: entry.isRead,
-      isCompleted: entry.isCompleted,
-      isArchived: entry.isArchived,
-      snoozeUntil: entry.snoozeUntil,
-      snoozeCount: entry.snoozeCount,
-      deletedAt: entry.deletedAt,
-      focusMeta: entry.focusMeta,
-    }));
+  private async collectBlackBoxEntries(ownerUserId: string): Promise<BackupBlackBoxEntry[]> {
+    const durable = projectBlackBoxRows(await readDurableBlackBoxRows(), ownerUserId);
+    const memorySource = this.readValue<unknown>(this.blackBoxService.entriesMap);
+    if (!(memorySource instanceof Map)) throw new Error('Black Box export memory evidence is invalid');
+    const memory = projectBlackBoxRows([...memorySource.entries()].map(([key, value]) => ({ key, value })), ownerUserId, true);
+    if (memory.length > 0 && !sameValue(memory, durable)) {
+      throw new Error('Black Box export durable and memory evidence diverged');
+    }
+    return durable;
   }
 
   private async collectRemoteUserState(
     userId: string | null,
     remoteReadState: RemoteBackupReadState,
-  ): Promise<{
-    focusSessions: BackupFocusSession[];
-    transcriptionUsage: BackupTranscriptionUsage[];
-    routineTasks: BackupRoutineTask[];
-    routineCompletions: BackupRoutineCompletion[];
-  }> {
+  ): Promise<BackupRemoteUserState> {
     const [focusSessions, transcriptionUsage, routineTasks, routineCompletions] = await Promise.all([
       this.fetchUserScopedRows<SupabaseFocusSessionRow>('focus_sessions', userId, remoteReadState),
-      this.fetchUserScopedRows<SupabaseTranscriptionUsageRow>('transcription_usage', userId, remoteReadState),
+      this.fetchUserScopedRows<SupabaseTranscriptionUsageRow>(
+        'transcription_usage',
+        userId,
+        remoteReadState,
+      ),
       this.fetchUserScopedRows<SupabaseRoutineTaskRow>('routine_tasks', userId, remoteReadState),
-      this.fetchUserScopedRows<SupabaseRoutineCompletionRow>('routine_completions', userId, remoteReadState),
+      this.fetchUserScopedRows<SupabaseRoutineCompletionRow>(
+        'routine_completions',
+        userId,
+        remoteReadState,
+      ),
     ]);
 
+    return this.mapRemoteUserState(
+      focusSessions,
+      transcriptionUsage,
+      routineTasks,
+      routineCompletions,
+    );
+  }
+
+  private mapRemoteUserState(
+    focusSessions: SupabaseFocusSessionRow[],
+    transcriptionUsage: SupabaseTranscriptionUsageRow[],
+    routineTasks: SupabaseRoutineTaskRow[],
+    routineCompletions: SupabaseRoutineCompletionRow[],
+  ): BackupRemoteUserState {
     return {
       focusSessions: focusSessions.map((row) => ({
         id: row.id,
@@ -420,6 +456,10 @@ export class DisasterBackupService {
       return [];
     }
 
+    if (remoteReadState.deferred) {
+      return [];
+    }
+
     if (isBrowserNetworkSuspendedWindow()) {
       this.markRemoteBackupReadDeferred(remoteReadState, table, 'browser-window');
       return [];
@@ -427,17 +467,12 @@ export class DisasterBackupService {
 
     try {
       const client = this.supabase.client();
-      // Supabase 客户端类型对动态表名 union 推导较慢，使用 unknown 收敛于入口
-      // 实际类型由白名单 + `T` 参数保证
-      const result = await fetchAllSupabasePages<T>(() => (client.from as unknown as (t: BackupTable) => {
-        select(cols: string): {
-          eq(col: string, val: string): BackupTableRangeQuery;
-        };
-      })(table)
-        .select('*')
-        .eq('user_id', userId)
-        .order(this.resolveBackupTableOrderColumn(table), { ascending: true })
-        .order('id', { ascending: true }));
+      const result = await fetchAllSupabaseKeysetPagesByCursor<T, string>(cursor =>
+        this.buildBackupTableKeysetQuery(client, table, userId, cursor), {
+        readCursor: row => this.readBackupRowId(row),
+        cursorKey: (cursor) => cursor,
+        isCursorAfter: (previous, next) => next > previous,
+      });
 
       if (result.error) {
         const enhanced = supabaseErrorToError(result.error);
@@ -450,7 +485,9 @@ export class DisasterBackupService {
         throw new Error(`Backup table ${table} query failed: ${enhanced.message}`);
       }
 
-      return Array.isArray(result.data) ? (result.data as T[]) : [];
+      return Array.isArray(result.data)
+        ? this.sortBackupRows(table, result.data as T[])
+        : [];
     } catch (error) {
       const enhanced = supabaseErrorToError(error);
       if (isBrowserNetworkSuspendedError(enhanced)) {
@@ -462,6 +499,24 @@ export class DisasterBackupService {
     }
   }
 
+  private buildBackupTableKeysetQuery(
+    client: unknown,
+    table: BackupTable,
+    userId: string,
+    cursor: string | null,
+  ): BackupTableKeysetQuery {
+    const typedClient = client as {
+      from(table: BackupTable): {
+        select(columns: string): {
+          eq(column: string, value: string): BackupTableKeysetQuery;
+        };
+      };
+    };
+    let query = typedClient.from(table).select('*').eq('user_id', userId);
+    if (cursor) query = query.gt('id', cursor);
+    return query.order('id', { ascending: true });
+  }
+
   private resolveBackupTableOrderColumn(table: BackupTable): string {
     if (table === 'transcription_usage') {
       return 'date';
@@ -470,6 +525,40 @@ export class DisasterBackupService {
       return 'updated_at';
     }
     return 'updated_at';
+  }
+
+  private readBackupRowId(row: unknown): string | null {
+    if (!row || typeof row !== 'object' || !('id' in row)) return null;
+    const id = row.id;
+    return typeof id === 'string' && id.length > 0 ? id : null;
+  }
+
+  private sortBackupRows<T>(table: BackupTable, rows: T[]): T[] {
+    const orderColumn = this.resolveBackupTableOrderColumn(table);
+    return [...rows].sort((left, right) => {
+      const order = this.compareBackupRowValues(
+        this.readBackupRowValue(left, orderColumn),
+        this.readBackupRowValue(right, orderColumn),
+      );
+      if (order !== 0) return order;
+      return this.compareBackupRowValues(
+        this.readBackupRowValue(left, 'id'),
+        this.readBackupRowValue(right, 'id'),
+      );
+    });
+  }
+
+  private readBackupRowValue(row: unknown, column: string): string | null {
+    if (!row || typeof row !== 'object' || !(column in row)) return null;
+    const value = row[column as keyof typeof row];
+    return typeof value === 'string' ? value : null;
+  }
+
+  private compareBackupRowValues(left: string | null, right: string | null): number {
+    if (left === right) return 0;
+    if (left === null) return 1;
+    if (right === null) return -1;
+    return left.localeCompare(right);
   }
 
   private markRemoteBackupReadDeferred(
@@ -500,4 +589,116 @@ export class DisasterBackupService {
     }
     return source as T | undefined;
   }
+}
+
+type UnknownRecord = Record<string, unknown>;
+
+async function readDurableBlackBoxRows(): Promise<unknown[]> {
+  const db = await openExistingBlackBoxDb();
+  if (!db) return [];
+  try {
+    const storeName = FOCUS_CONFIG.IDB_STORES.BLACK_BOX_ENTRIES;
+    if (!db.objectStoreNames.contains(storeName)) return [];
+    return await new Promise<unknown[]>((resolve, reject) => {
+      const tx = db.transaction(storeName, 'readonly');
+      const request = tx.objectStore(storeName).getAll();
+      let rows: unknown[] | null = null;
+      request.onsuccess = () => { rows = request.result ?? []; };
+      tx.oncomplete = () => rows === null
+        ? reject(new Error('Black Box export read completed without rows'))
+        : resolve(rows);
+      tx.onerror = () => reject(tx.error ?? request.error ?? new Error('Black Box export transaction failed'));
+      tx.onabort = () => reject(tx.error ?? request.error ?? new Error('Black Box export transaction aborted'));
+    });
+  } catch (error) {
+    throw new Error(`Black Box export durable read failed: ${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    db.close();
+  }
+}
+
+function openExistingBlackBoxDb(): Promise<IDBDatabase | null> {
+  if (typeof indexedDB === 'undefined') return Promise.resolve(null);
+  return new Promise((resolve, reject) => {
+    let absent = false;
+    const request = indexedDB.open(FOCUS_CONFIG.SYNC.IDB_NAME);
+    request.onupgradeneeded = () => { absent = true; request.transaction?.abort(); };
+    request.onsuccess = () => { absent ? (request.result.close(), resolve(null)) : resolve(request.result); };
+    request.onerror = () => absent ? resolve(null) : reject(request.error ?? new Error('Black Box export open failed'));
+    request.onblocked = () => reject(new Error('Black Box export open blocked'));
+  });
+}
+
+function projectBlackBoxRows(rows: unknown[], ownerUserId: string, keyed = false): BackupBlackBoxEntry[] {
+  const projected: BackupBlackBoxEntry[] = [];
+  for (const candidate of rows) {
+    const wrapper = keyed && isRecord(candidate) ? candidate : null;
+    const row = wrapper ? wrapper['value'] : candidate;
+    if (!isRecord(row) || !nonEmpty(row['userId'])) throw new Error('Black Box export row has an invalid owner');
+    if (row['userId'] !== ownerUserId) continue;
+    const entry = projectBlackBoxRow(row);
+    if (wrapper && wrapper['key'] !== entry.id) throw new Error('Black Box export memory key is invalid');
+    projected.push(entry);
+  }
+  return projected.sort((left, right) => left.id.localeCompare(right.id));
+}
+
+function projectBlackBoxRow(row: UnknownRecord): BackupBlackBoxEntry {
+  const id = row['id'];
+  const projectId = row['projectId'];
+  const userId = row['userId'];
+  const content = row['content'];
+  const date = row['date'];
+  const createdAt = row['createdAt'];
+  const updatedAt = row['updatedAt'];
+  const completedAt = row['completedAt'];
+  const isRead = row['isRead'];
+  const isCompleted = row['isCompleted'];
+  const isArchived = row['isArchived'];
+  const snoozeUntil = row['snoozeUntil'];
+  const snoozeCount = row['snoozeCount'];
+  const deletedAt = row['deletedAt'];
+  const focusMeta = row['focusMeta'];
+  const valid = typeof id === 'string' && isValidBlackBoxId(id)
+    && isValidBlackBoxProjectId(projectId as string | null | undefined)
+    && typeof userId === 'string' && userId.length > 0
+    && typeof content === 'string' && validDate(date as string)
+    && validTimestamp(createdAt as string) && validTimestamp(updatedAt as string)
+    && optionalTimestamp(completedAt as string | null | undefined) && typeof isRead === 'boolean'
+    && typeof isCompleted === 'boolean' && typeof isArchived === 'boolean'
+    && optionalDate(snoozeUntil as string | null | undefined) && optionalCount(snoozeCount as number | undefined)
+    && (deletedAt === null || validTimestamp(deletedAt as string))
+    && (focusMeta === undefined || isJsonValue(focusMeta));
+  if (!valid) throw new Error('Black Box export contains a malformed current-owner row');
+  return {
+    id, projectId: projectId as string | null, userId,
+    content, date: date as string, createdAt: createdAt as string,
+    updatedAt: updatedAt as string, completedAt: completedAt as string | null | undefined,
+    isRead, isCompleted, isArchived,
+    snoozeUntil: snoozeUntil as string | null | undefined, snoozeCount: snoozeCount as number | undefined,
+    deletedAt: deletedAt as string | null, focusMeta,
+  };
+}
+
+function isRecord(value: unknown): value is UnknownRecord { return !!value && typeof value === 'object' && !Array.isArray(value); }
+function nonEmpty(value: unknown): value is string { return typeof value === 'string' && value.trim().length > 0; }
+function validTimestamp(value: unknown): value is string { return nonEmpty(value) && Number.isFinite(Date.parse(value)); }
+function validDate(value: unknown): value is string {
+  return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)
+    && new Date(`${value}T00:00:00.000Z`).toISOString().startsWith(value);
+}
+function optionalTimestamp(value: unknown): boolean { return value === undefined || value === null || validTimestamp(value); }
+function optionalDate(value: unknown): boolean { return value === undefined || value === null || validDate(value); }
+function optionalCount(value: unknown): boolean { return value === undefined || Number.isInteger(value) && (value as number) >= 0; }
+function isJsonValue(value: unknown): boolean {
+  return value === null || typeof value === 'string' || typeof value === 'boolean'
+    || typeof value === 'number' && Number.isFinite(value)
+    || Array.isArray(value) && value.every(isJsonValue)
+    || isRecord(value) && Object.values(value).every(isJsonValue);
+}
+function sameValue(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (Array.isArray(left) && Array.isArray(right)) return left.length === right.length && left.every((item, i) => sameValue(item, right[i]));
+  if (!isRecord(left) || !isRecord(right)) return false;
+  const keys = Object.keys(left); return keys.length === Object.keys(right).length && keys.every(key => key in right && sameValue(left[key], right[key]));
 }

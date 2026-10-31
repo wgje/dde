@@ -3,7 +3,13 @@ export async function openExistingDb(name: string): Promise<IDBDatabase | null> 
 
   return new Promise((resolve) => {
     let createdDuringOpen = false;
+    let settled = false;
     const request = indexedDB.open(name);
+    const settleNull = (): void => {
+      if (settled) return;
+      settled = true;
+      resolve(null);
+    };
 
     request.onupgradeneeded = () => {
       createdDuringOpen = true;
@@ -11,16 +17,18 @@ export async function openExistingDb(name: string): Promise<IDBDatabase | null> 
     };
 
     request.onsuccess = () => {
-      if (createdDuringOpen) {
-        request.result.close();
-        resolve(null);
+      const database = request.result;
+      if (settled || createdDuringOpen) {
+        database?.close();
+        settleNull();
         return;
       }
-      resolve(request.result);
+      settled = true;
+      resolve(database);
     };
 
-    request.onerror = () => resolve(null);
-    request.onblocked = () => resolve(null);
+    request.onerror = () => settleNull();
+    request.onblocked = () => settleNull();
   });
 }
 

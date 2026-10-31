@@ -16,13 +16,25 @@ export function filterTaskTombstonesByVisibleProjects(
   parsed: unknown,
   visibleProjectIds: Set<string>,
 ): Record<string, unknown> {
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    return {};
+  if (!isUnknownRecord(parsed)) {
+    throw new Error('Task tombstone storage must be an object');
   }
 
-  return Object.fromEntries(
-    Object.entries(parsed).filter(([projectId]) => visibleProjectIds.has(projectId)),
-  );
+  const visibleEntries: Array<[string, unknown]> = [];
+  for (const [projectId, tombstones] of Object.entries(parsed)) {
+    if (!projectId) throw new Error('Task tombstone requires a non-empty project ID');
+    if (!visibleProjectIds.has(projectId)) continue;
+    if (!isUnknownRecord(tombstones)) {
+      throw new Error(`Task tombstone project ${projectId} must contain an ID map`);
+    }
+    for (const [taskId, timestamp] of Object.entries(tombstones)) {
+      if (!taskId || !isValidTombstoneTimestamp(timestamp)) {
+        throw new Error(`Task tombstone project ${projectId} contains an invalid ID or timestamp`);
+      }
+    }
+    visibleEntries.push([projectId, tombstones]);
+  }
+  return Object.fromEntries(visibleEntries);
 }
 
 export function filterConnectionTombstonesByVisibleProjects(
@@ -30,17 +42,44 @@ export function filterConnectionTombstonesByVisibleProjects(
   visibleProjectIds: Set<string>,
 ): unknown[] {
   if (!Array.isArray(parsed)) {
-    return [];
+    throw new Error('Connection tombstone storage must be an array');
   }
 
-  return parsed.filter((entry) => {
-    if (!entry || typeof entry !== 'object' || !('projectId' in entry)) {
-      return false;
-    }
+  const visibleEntries: Record<string, unknown>[] = [];
+  for (const entry of parsed) {
+    if (!isUnknownRecord(entry)) throw new Error('Connection tombstone row must be an object');
+    const projectId = nonEmptyString(entry['projectId']);
+    if (!projectId) throw new Error('Connection tombstone requires a non-empty project ID');
+    if (!visibleProjectIds.has(projectId)) continue;
 
-    const projectId = (entry as Record<string, unknown>)['projectId'];
-    return typeof projectId === 'string' && visibleProjectIds.has(projectId);
-  });
+    const hasId = Object.prototype.hasOwnProperty.call(entry, 'id');
+    const hasConnectionId = Object.prototype.hasOwnProperty.call(entry, 'connectionId');
+    const id = hasId ? nonEmptyString(entry['id']) : null;
+    const connectionId = hasConnectionId ? nonEmptyString(entry['connectionId']) : null;
+    if ((!hasId && !hasConnectionId) || (hasId && !id) || (hasConnectionId && !connectionId)) {
+      throw new Error(`Connection tombstone project ${projectId} contains an invalid ID`);
+    }
+    if (id && connectionId && id !== connectionId) {
+      throw new Error(`Connection tombstone project ${projectId} contains conflicting IDs`);
+    }
+    if (!isValidTombstoneTimestamp(entry['timestamp'])) {
+      throw new Error(`Connection tombstone project ${projectId} contains an invalid timestamp`);
+    }
+    visibleEntries.push(entry);
+  }
+  return visibleEntries;
+}
+
+function isValidTombstoneTimestamp(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+}
+
+function nonEmptyString(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+function isUnknownRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 export function readDockSnapshotSavedAt(value: unknown): string | null {

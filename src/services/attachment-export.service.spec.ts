@@ -319,10 +319,14 @@ describe('AttachmentExportService', () => {
 
       const result = await service.exportAttachments([project]);
 
-      expect(result.success).toBe(true);
-      expect(result.manifest?.failedCount).toBe(1);
+      expect(result.success).toBe(false);
+      expect(result.blob).toBeUndefined();
+      expect(result.filename).toBeUndefined();
+      expect(result.manifest?.failedCount).toBe(0);
+      expect(result.manifest?.skippedCount).toBe(1);
       expect(result.manifest?.attachments[0].downloadStatus).toBe('skipped');
       expect(result.manifest?.attachments[0].failureReason).toContain('安全检查失败');
+      expect(service.progress().stage).toBe('failed');
       expect(fetchSpy).not.toHaveBeenCalled();
     });
     
@@ -337,8 +341,12 @@ describe('AttachmentExportService', () => {
       await vi.runAllTimersAsync();
       const result = await resultPromise;
       
-      expect(result.success).toBe(true); // 部分失败不影响整体
+      expect(result.success).toBe(false);
+      expect(result.blob).toBeUndefined();
+      expect(result.filename).toBeUndefined();
       expect(result.manifest?.failedCount).toBe(1);
+      expect(result.manifest?.skippedCount).toBe(0);
+      expect(service.progress().stage).toBe('failed');
     });
     
     it('应跳过没有 URL 的附件', async () => {
@@ -362,9 +370,13 @@ describe('AttachmentExportService', () => {
       // 不需要 mock fetch，因为没有 URL 就不会调用 fetch
       
       const result = await service.exportAttachments([project]);
-      
-      // 没有 URL 的附件状态应该是 skipped 或 failed
-      expect(result.manifest?.attachments[0].downloadStatus).toMatch(/skipped|failed/);
+
+      expect(result.success).toBe(false);
+      expect(result.blob).toBeUndefined();
+      expect(result.filename).toBeUndefined();
+      expect(result.manifest?.failedCount).toBe(0);
+      expect(result.manifest?.skippedCount).toBe(1);
+      expect(result.manifest?.attachments[0].downloadStatus).toBe('skipped');
       expect(result.manifest?.attachments[0].failureReason).toContain('URL');
     });
     
@@ -375,7 +387,12 @@ describe('AttachmentExportService', () => {
       const project = createProject({ tasks: [{ attachments: [att] }] });
       
       const result = await service.exportAttachments([project]);
-      
+
+      expect(result.success).toBe(false);
+      expect(result.blob).toBeUndefined();
+      expect(result.filename).toBeUndefined();
+      expect(result.manifest?.failedCount).toBe(0);
+      expect(result.manifest?.skippedCount).toBe(1);
       expect(result.manifest?.attachments[0].downloadStatus).toBe('skipped');
       expect(result.manifest?.attachments[0].failureReason).toContain('过大');
     });
@@ -572,6 +589,24 @@ describe('AttachmentExportService', () => {
       mockCreateObjectURL.mockRestore();
       mockRevokeObjectURL.mockRestore();
     });
+
+    it('附件字节跳过时不应创建下载 URL 或点击下载', async () => {
+      const att = createAttachment({ url: '' });
+      const project = createProject({ tasks: [{ attachments: [att] }] });
+      const mockCreateElement = vi.spyOn(document, 'createElement');
+      const mockCreateObjectURL = vi.spyOn(URL, 'createObjectURL');
+
+      const result = await service.exportAndDownload([project]);
+
+      expect(result.success).toBe(false);
+      expect(result.blob).toBeUndefined();
+      expect(result.filename).toBeUndefined();
+      expect(mockCreateElement).not.toHaveBeenCalled();
+      expect(mockCreateObjectURL).not.toHaveBeenCalled();
+
+      mockCreateElement.mockRestore();
+      mockCreateObjectURL.mockRestore();
+    });
   });
   
   // ==================== Manifest 测试 ====================
@@ -601,9 +636,11 @@ describe('AttachmentExportService', () => {
       const result = await service.exportAttachments([project]);
       
       expect(result.manifest?.totalAttachments).toBe(2);
-      // att1 成功，att2 失败（没有URL）
+      expect(result.success).toBe(false);
+      expect(result.blob).toBeUndefined();
       expect(result.manifest?.successCount).toBe(1);
-      expect(result.manifest?.failedCount).toBe(1);
+      expect(result.manifest?.failedCount).toBe(0);
+      expect(result.manifest?.skippedCount).toBe(1);
     });
     
     it('应包含 bundlePath', async () => {
@@ -640,7 +677,7 @@ describe('attachment export helpers', () => {
     expect(manifest.projectIds).toEqual(['proj-1', 'proj-1']);
   });
 
-  it('summarizes successful and failed download results in one pass', () => {
+  it('summarizes successful, failed, and skipped download results in one pass', () => {
     const attachment: AttachmentManifest = {
       id: 'att-1',
       taskIds: ['task-1'],
@@ -651,15 +688,26 @@ describe('attachment export helpers', () => {
       bundlePath: 'attachments/att-1.pdf',
       downloadStatus: 'pending',
     };
+    const failedAttachment: AttachmentManifest = {
+      ...attachment,
+      id: 'att-2',
+      downloadStatus: 'failed',
+      failureReason: 'HTTP 500',
+    };
+    const skippedAttachment: AttachmentManifest = {
+      ...attachment,
+      id: 'att-3',
+    };
 
     const summary = summarizeAttachmentDownloadResults([
       { attachment, success: true, data: new Blob(['ok']) },
-      buildSkippedAttachmentDownloadResult(attachment, 'URL 不存在'),
+      { attachment: failedAttachment, success: false, error: 'HTTP 500' },
+      buildSkippedAttachmentDownloadResult(skippedAttachment, 'URL 不存在'),
     ]);
 
-    expect(summary).toEqual({ successCount: 1, failedCount: 1 });
-    expect(attachment.downloadStatus).toBe('skipped');
-    expect(attachment.failureReason).toBe('URL 不存在');
+    expect(summary).toEqual({ successCount: 1, failedCount: 1, skippedCount: 1 });
+    expect(skippedAttachment.downloadStatus).toBe('skipped');
+    expect(skippedAttachment.failureReason).toBe('URL 不存在');
   });
 
   it('calculates manifest total size from collected attachments', () => {

@@ -12,26 +12,54 @@ describe('disaster-backup-local-state.helpers', () => {
   it('只保留可见项目的任务 tombstone', () => {
     expect(filterTaskTombstonesByVisibleProjects({
       'project-1': { 'task-1': 123 },
-      'project-2': { 'task-2': 456 },
+      'project-2': { '': -1 },
     }, new Set(['project-1']))).toEqual({
       'project-1': { 'task-1': 123 },
     });
   });
 
-  it('非法任务 tombstone 记录回退为空对象', () => {
-    expect(filterTaskTombstonesByVisibleProjects(null, new Set(['project-1']))).toEqual({});
-    expect(filterTaskTombstonesByVisibleProjects(['project-1'], new Set(['project-1']))).toEqual({});
+  it.each([
+    null,
+    ['project-1'],
+    { 'project-1': ['task-1'] },
+    { 'project-1': { '': 123 } },
+    { 'project-1': { 'task-1': -1 } },
+    { 'project-1': { 'task-1': Number.POSITIVE_INFINITY } },
+  ])('拒绝非法或旧数组任务 tombstone 根和可见记录', (value) => {
+    expect(() => filterTaskTombstonesByVisibleProjects(
+      value,
+      new Set(['project-1']),
+    )).toThrow(/task tombstone/i);
   });
 
-  it('只保留带可见项目 ID 的连接 tombstone', () => {
+  it('保留可见连接 tombstone 的单别名或匹配双别名，并跳过可识别的外部项目', () => {
     expect(filterConnectionTombstonesByVisibleProjects([
-      { projectId: 'project-1', connectionId: 'conn-1' },
-      { projectId: 'project-2', connectionId: 'conn-2' },
-      { connectionId: 'conn-3' },
-      null,
+      { projectId: 'project-1', id: 'conn-1', timestamp: 1 },
+      { projectId: 'project-1', connectionId: 'conn-2', timestamp: 2 },
+      { projectId: 'project-1', id: 'conn-3', connectionId: 'conn-3', timestamp: 3 },
+      { projectId: 'project-2', id: '', timestamp: -1 },
     ], new Set(['project-1']))).toEqual([
-      { projectId: 'project-1', connectionId: 'conn-1' },
+      { projectId: 'project-1', id: 'conn-1', timestamp: 1 },
+      { projectId: 'project-1', connectionId: 'conn-2', timestamp: 2 },
+      { projectId: 'project-1', id: 'conn-3', connectionId: 'conn-3', timestamp: 3 },
     ]);
+  });
+
+  it.each([
+    null,
+    {},
+    [null],
+    [{ id: 'conn-1', timestamp: 1 }],
+    [{ projectId: '', id: 'conn-1', timestamp: 1 }],
+    [{ projectId: 'project-1', id: '', timestamp: 1 }],
+    [{ projectId: 'project-1', id: 'conn-1', connectionId: 'conn-2', timestamp: 1 }],
+    [{ projectId: 'project-1', id: 'conn-1', timestamp: -1 }],
+    [{ projectId: 'project-1', id: 'conn-1', timestamp: Number.NaN }],
+  ])('拒绝非法、无项目或歧义的可见连接 tombstone', (value) => {
+    expect(() => filterConnectionTombstonesByVisibleProjects(
+      value,
+      new Set(['project-1']),
+    )).toThrow(/connection tombstone/i);
   });
 
   it('读取 dock snapshot savedAt 时拒绝空值和非字符串', () => {

@@ -175,10 +175,26 @@ export class AttachmentExportService {
   ): Promise<AttachmentExportResult> {
     this.updateProgress('downloading', 10);
     const downloadResults = await this.downloadAllAttachments(manifest);
+    const summary = summarizeAttachmentDownloadResults(downloadResults);
+    const exportManifest = createAttachmentExportManifest(
+      manifest,
+      summary.successCount,
+      summary.failedCount,
+      summary.skippedCount,
+    );
+
+    if (summary.failedCount > 0 || summary.skippedCount > 0) {
+      this.updateProgress('failed', 80);
+      return {
+        success: false,
+        error: `附件导出不完整：${summary.failedCount} 个下载失败，${summary.skippedCount} 个已跳过`,
+        manifest: exportManifest,
+        durationMs: Date.now() - startTime,
+      };
+    }
 
     this.updateProgress('packaging', 80);
     const zipResult = await this.createZipBundle(downloadResults, manifest);
-    const summary = summarizeAttachmentDownloadResults(downloadResults);
 
     this.updateProgress('complete', 100);
     this.logExportComplete(manifest.length, summary);
@@ -187,7 +203,7 @@ export class AttachmentExportService {
       success: true,
       blob: zipResult.blob,
       filename: zipResult.filename,
-      manifest: createAttachmentExportManifest(manifest, summary.successCount, summary.failedCount, 0),
+      manifest: exportManifest,
       durationMs: Date.now() - startTime,
     };
   }
@@ -200,6 +216,7 @@ export class AttachmentExportService {
       total,
       success: summary.successCount,
       failed: summary.failedCount,
+      skipped: summary.skippedCount,
     });
   }
   
