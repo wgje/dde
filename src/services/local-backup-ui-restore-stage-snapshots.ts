@@ -395,6 +395,51 @@ export function deriveLocalBackupUiRestoreRetryQueueRestoredItems(
     }));
 }
 
+/**
+ * Projects the RetryQueue merge without consulting the post-write storage.
+ * The stage verifier uses this projection so a stable stale read cannot be
+ * mistaken for a successful restore.
+ */
+export function projectLocalBackupUiRestoreRetryQueueItems(
+  preImage: LocalBackupUiRestoreRetryQueuePreImage,
+  restoredItems: readonly UnknownRecord[],
+  ownerUserId: string,
+): UnknownRecord[] {
+  if (!isValidRetryQueueRestoreItems(preImage.restoredItems, ownerUserId)
+    || !isValidRetryQueueRestoreItems(restoredItems, ownerUserId)) {
+    throw invalidSlot('retryQueue');
+  }
+
+  const currentItems = readRetryQueueSnapshotItems(preImage.indexedDb, preImage.localStorage);
+  const mergedItems: UnknownRecord[] = currentItems.map(item => cloneRetryQueueItem(item));
+  const currentIdentities = new Set(currentItems.map(item => retryQueueRestoreIdentity(item)));
+  const currentEntityKeys = new Set(currentItems.map(item => retryQueueEntityKey(item)));
+  const restoredEntityIndexes = new Map<string, number>();
+
+  for (const restoredItem of restoredItems) {
+    const identity = retryQueueRestoreIdentity(restoredItem);
+    if (currentIdentities.has(identity)) continue;
+
+    const entityKey = retryQueueEntityKey(restoredItem);
+    if (currentEntityKeys.has(entityKey)) continue;
+
+    const existingRestoredIndex = restoredEntityIndexes.get(entityKey);
+    if (existingRestoredIndex !== undefined) {
+      const existing = mergedItems[existingRestoredIndex];
+      if (existing && Number(restoredItem['createdAt']) >= Number(existing['createdAt'])) {
+        mergedItems[existingRestoredIndex] = cloneRetryQueueItem(restoredItem);
+      }
+      continue;
+    }
+
+    restoredEntityIndexes.set(entityKey, mergedItems.length);
+    currentIdentities.add(identity);
+    mergedItems.push(cloneRetryQueueItem(restoredItem));
+  }
+
+  return mergedItems;
+}
+
 function decodeDeadLetters(value: unknown, ownerUserId: string): LocalBackupUiRestoreDeadLetterPreImage {
   const record = requireRecord(value, 'deadLetters');
   const indexedDb = record['indexedDb'];
@@ -535,6 +580,21 @@ function retryQueueIdentitiesConflict(left: UnknownRecord, right: UnknownRecord)
   return canonicalUuidIdentity(left['id']) === canonicalUuidIdentity(right['id'])
     || canonicalUuidIdentity(left['operationId']) === canonicalUuidIdentity(right['operationId'])
     || retryQueueEffectiveIdentity(left) === retryQueueEffectiveIdentity(right);
+}
+
+function retryQueueRestoreIdentity(item: UnknownRecord): string {
+  return `operation:${canonicalUuidIdentity(item['operationId'])}`;
+}
+
+function retryQueueEntityKey(item: UnknownRecord): string {
+  return retryQueueEffectiveIdentity(item);
+}
+
+function cloneRetryQueueItem(item: UnknownRecord): UnknownRecord {
+  return {
+    ...item,
+    data: isRecord(item['data']) ? { ...item['data'] } : item['data'],
+  };
 }
 
 function retryQueueEffectiveIdentity(item: UnknownRecord): string {

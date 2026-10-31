@@ -2,6 +2,9 @@ import type { DataSafetyExportPackage } from './data-safety-package';
 import {
   CONFLICT_FALLBACK_KEY_PREFIX,
   getConflictFallbackKey,
+  mergeConflictOperationEvidence,
+  mergeConflictRecords,
+  selectPreferredConflictRecord,
   toStoredConflictRecord,
   type ConflictRecord,
   type StoredConflictRecord,
@@ -49,6 +52,89 @@ export async function readConflictRestoreSnapshot(
     indexedDbRecords,
     fallbackLocalStorageEntries: readOwnerFallbackEntries(ownerUserId),
   };
+}
+
+export function projectConflictRestoreSnapshot(
+  preImage: DataSafetyConflictRestoreSnapshot,
+  incomingRecords: readonly ConflictRecord[],
+  ownerUserId: string,
+): DataSafetyConflictRestoreSnapshot {
+  const indexedDbRecords = preImage.indexedDbRecords === null
+    ? null
+    : preImage.indexedDbRecords.map(record => ({ ...record }));
+  const fallbackLocalStorageEntries = { ...preImage.fallbackLocalStorageEntries };
+
+  for (const incomingRecord of incomingRecords) {
+    if (incomingRecord.ownerUserId !== ownerUserId) {
+      throw invalidConflictRestore('target record owner does not match restore owner');
+    }
+
+    const storedIdentity = toStoredConflictRecord(incomingRecord, ownerUserId);
+    const existingIndexedRecord = indexedDbRecords?.find(record => (
+      record.scopedId === storedIdentity.scopedId
+    )) ?? null;
+    const fallbackKey = getConflictFallbackKey(incomingRecord.projectId, ownerUserId);
+    const fallbackRecord = parseFallbackConflictRecord(fallbackLocalStorageEntries[fallbackKey]);
+    const recoveredRecord = mergeConflictRestoreStorageSources(
+      existingIndexedRecord,
+      fallbackRecord,
+    );
+    const mergedRecord = mergeConflictOperationEvidence(
+      mergeConflictRecords(recoveredRecord, incomingRecord),
+      existingIndexedRecord,
+      fallbackRecord,
+      incomingRecord,
+    );
+
+    if (indexedDbRecords !== null) {
+      const nextStoredRecord = toStoredConflictRecord(mergedRecord, ownerUserId);
+      const existingIndex = indexedDbRecords.findIndex(record => (
+        record.scopedId === nextStoredRecord.scopedId
+      ));
+      if (existingIndex === -1) indexedDbRecords.push(nextStoredRecord);
+      else indexedDbRecords[existingIndex] = nextStoredRecord;
+      continue;
+    }
+
+    fallbackLocalStorageEntries[fallbackKey] = JSON.stringify(mergedRecord);
+  }
+
+  return {
+    indexedDbRecords: indexedDbRecords?.sort((left, right) => (
+      left.scopedId.localeCompare(right.scopedId)
+    )) ?? null,
+    fallbackLocalStorageEntries,
+  };
+}
+
+function mergeConflictRestoreStorageSources(
+  indexedRecord: StoredConflictRecord | null,
+  fallbackRecord: ConflictRecord | null,
+): ConflictRecord | null {
+  const preferredRecord = selectPreferredConflictRecord(indexedRecord, fallbackRecord);
+  if (!indexedRecord || !fallbackRecord || !preferredRecord) {
+    return preferredRecord;
+  }
+
+  const secondaryRecord = preferredRecord === indexedRecord ? fallbackRecord : indexedRecord;
+  return mergeConflictOperationEvidence(
+    mergeConflictRecords(secondaryRecord, preferredRecord),
+    secondaryRecord,
+    preferredRecord,
+  );
+}
+
+function parseFallbackConflictRecord(rawValue: string | undefined): ConflictRecord | null {
+  if (!rawValue) return null;
+  try {
+    return JSON.parse(rawValue) as ConflictRecord | null;
+  } catch {
+    return null;
+  }
+}
+
+function invalidConflictRestore(reason: string): Error {
+  return new Error(`conflict restore payload is invalid: ${reason}`);
 }
 
 export async function restoreConflicts(pkg: DataSafetyExportPackage): Promise<void> {

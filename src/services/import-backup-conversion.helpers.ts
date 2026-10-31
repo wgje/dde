@@ -5,11 +5,15 @@ import type {
   BackupTask,
 } from '../../supabase/functions/_shared/backup-utils';
 import type { SavePendingAttachmentUploadInput } from './attachment-upload-outbox.service';
-import type { QueuedAction } from './action-queue.types';
+import type { DeadLetterItem, QueuedAction } from './action-queue.types';
 import {
   extractBackupActionQueueActions,
   mergeRestoredQueuedActions,
 } from './action-queue-restore.helpers';
+import {
+  extractRestorableDeadLetters,
+  mergeRestoredDeadLetters,
+} from './action-queue-owner-dead-letter-restore.helpers';
 import type { ConflictRecord } from './conflict-storage.service';
 import type { OperationConflictRecord } from './conflict-storage.helpers';
 import type {
@@ -73,6 +77,76 @@ export async function restoreAttachmentUploadOutboxItems(
 ): Promise<number> {
   const preparedUploads = prepareAttachmentUploadItems(pendingUploads);
   return savePreparedAttachmentUploads(preparedUploads, uploadOutbox, options);
+}
+
+export function deriveAttachmentUploadOutboxRestoreTarget(
+  preImage: readonly (
+    BackupPendingAttachmentUpload & { ownerUserId: string; operationId: string }
+  )[],
+  backup: BackupData,
+  expectedOwnerUserId: string,
+): Array<BackupPendingAttachmentUpload & { ownerUserId: string; operationId: string }> {
+  if (!isNonEmptyString(expectedOwnerUserId)) {
+    throw invalidAttachmentUploadOutbox('restore owner is missing');
+  }
+
+  const target = new Map<
+    string,
+    BackupPendingAttachmentUpload & { ownerUserId: string; operationId: string }
+  >();
+  for (const upload of preImage) {
+    if (upload.ownerUserId !== expectedOwnerUserId
+      || !isNonEmptyString(upload.blobKey)
+      || !isNonEmptyString(upload.operationId)) {
+      throw invalidAttachmentUploadOutbox('pre-image owner or storage identity mismatch');
+    }
+    const identity = attachmentUploadIdentity(upload);
+    if (target.has(identity)) {
+      throw invalidAttachmentUploadOutbox('pre-image contains duplicate storage identity');
+    }
+    target.set(identity, normalizeAttachmentUploadSnapshot(upload));
+  }
+
+  const rawUploads = backup.localState?.attachmentUploadOutbox;
+  const decodedUploads = decodeAttachmentUploadOutboxFromBackup(backup, expectedOwnerUserId);
+  const restoredUploads = Array.isArray(rawUploads)
+    ? rawUploads as Array<BackupPendingAttachmentUpload & { ownerUserId: string; operationId: string }>
+    : [];
+  if (restoredUploads.length !== decodedUploads.length) {
+    throw invalidAttachmentUploadOutbox('decoded restore payload is incomplete');
+  }
+  for (const upload of restoredUploads) {
+    const identity = attachmentUploadIdentity(upload);
+    target.set(identity, normalizeAttachmentUploadSnapshot(upload));
+  }
+
+  return Array.from(target.values()).sort((left, right) => (
+    left.blobKey.localeCompare(right.blobKey)
+    || left.operationId.localeCompare(right.operationId)
+  ));
+}
+
+function attachmentUploadIdentity(
+  upload: Pick<BackupPendingAttachmentUpload, 'ownerUserId' | 'blobKey' | 'operationId'>,
+): string {
+  return JSON.stringify([upload.ownerUserId, upload.blobKey, upload.operationId]);
+}
+
+function normalizeAttachmentUploadSnapshot(
+  upload: BackupPendingAttachmentUpload & { ownerUserId: string; operationId: string },
+): BackupPendingAttachmentUpload & { ownerUserId: string; operationId: string } {
+  return {
+    ownerUserId: upload.ownerUserId,
+    operationId: upload.operationId,
+    attachmentId: upload.attachmentId,
+    blobKey: upload.blobKey,
+    fileName: upload.fileName,
+    mimeType: upload.mimeType,
+    size: upload.size,
+    createdAt: upload.createdAt,
+    encoding: 'base64',
+    blobBase64: upload.blobBase64,
+  };
 }
 
 async function savePreparedAttachmentUploads(
@@ -174,6 +248,75 @@ export function restoreDeadLettersFromBackup(
   }
 
   return actionQueueStorage.restoreDeadLettersFromBackupItems(deadLetters, ownerUserId);
+}
+
+export interface DeadLetterRestoreTargetSnapshot {
+  indexedDb: {
+    id: string;
+    ownerUserId: string;
+    deadLetters: DeadLetterItem[];
+    savedAt: string;
+  } | null;
+  localStorage: string | null;
+}
+
+/**
+ * Projects the owner-scoped dead-letter merge before the storage mutation.
+ * The persisted timestamp is intentionally left to the verifier because the
+ * queue backup service generates it at write time.
+ */
+export function deriveDeadLetterRestoreTarget(
+  preImage: DeadLetterRestoreTargetSnapshot,
+  backup: BackupData,
+  ownerUserId: string,
+): DeadLetterRestoreTargetSnapshot {
+  const current = [
+    ...(preImage.indexedDb?.deadLetters ?? []),
+    ...parseDeadLetterLocalStorage(preImage.localStorage),
+  ];
+  const incoming = Array.isArray(backup.localState?.deadLetters)
+    ? extractRestorableDeadLetters(
+      backup.localState.deadLetters,
+      ownerUserId,
+      item => resolveDeadLetterOwner(item, ownerUserId),
+    )
+    : [];
+  const mergeResult = mergeRestoredDeadLetters(current, incoming);
+  if (mergeResult.restoredCount === 0) {
+    return {
+      indexedDb: preImage.indexedDb,
+      localStorage: preImage.localStorage,
+    };
+  }
+  const merged = mergeResult.queue;
+  const nextRecord = preImage.indexedDb
+    ? { ...preImage.indexedDb, deadLetters: merged }
+    : null;
+  return {
+    indexedDb: nextRecord,
+    localStorage: preImage.localStorage === null && incoming.length === 0
+      ? null
+      : JSON.stringify(merged),
+  };
+}
+
+function parseDeadLetterLocalStorage(value: string | null): DeadLetterItem[] {
+  if (value === null) return [];
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed) ? parsed as DeadLetterItem[] : [];
+  } catch {
+    return [];
+  }
+}
+
+function resolveDeadLetterOwner(item: DeadLetterItem, ownerUserId: string): string {
+  const payload = item.action.payload as unknown;
+  return payload && typeof payload === 'object'
+    && 'sourceUserId' in payload
+    && typeof payload.sourceUserId === 'string'
+    ? payload.sourceUserId
+    : ownerUserId;
 }
 
 export async function restoreConflictsFromBackup(

@@ -2,12 +2,14 @@ import { describe, expect, it } from 'vitest';
 import type { BackupData } from '../../supabase/functions/_shared/backup-utils';
 import {
   convertBackupDataToExportData,
+  deriveAttachmentUploadOutboxRestoreTarget,
   restoreActionQueueFromBackup,
   restoreAttachmentUploadOutboxFromBackup,
   restoreConflictsFromBackup,
   restoreDeadLettersFromBackup,
   restoreRetryQueueFromBackup,
 } from './import-backup-conversion.helpers';
+import type { SavePendingAttachmentUploadInput } from './attachment-upload-outbox.service';
 import type { DeadLetterItem, QueuedAction } from './action-queue.types';
 import type { RetryQueueItem } from '../app/core/services/sync/retry-queue.service';
 import type { ConflictRecord } from './conflict-storage.service';
@@ -273,6 +275,88 @@ describe('restoreAttachmentUploadOutboxFromBackup', () => {
       createdAt: '2026-06-18T00:00:00.000Z',
     }));
     expect(Array.from(new Uint8Array(await savedUploads[0].blob.arrayBuffer()))).toEqual([78, 70]);
+  });
+
+  it('projects the complete owner-scoped upsert result from pre-image and backup', async () => {
+    const ownerUserId = 'restore-owner';
+    const makeUpload = (
+      attachmentId: string,
+      blobKey: string,
+      operationId: string,
+      blobBase64: string,
+    ) => ({
+      ownerUserId,
+      operationId,
+      attachmentId,
+      blobKey,
+      fileName: `${attachmentId}.txt`,
+      mimeType: 'text/plain',
+      size: 1,
+      createdAt: '2026-06-18T00:00:00.000Z',
+      encoding: 'base64' as const,
+      blobBase64,
+    });
+    const preImage = [
+      makeUpload('attachment-replaced-old', 'blob-same', 'operation-same', 'QQ=='),
+      makeUpload('attachment-kept', 'blob-kept', 'operation-kept', 'RA=='),
+    ];
+    const backup = {
+      localState: {
+        dataSafety: { ownerUserId },
+        attachmentUploadOutbox: [
+          makeUpload('attachment-replaced', 'blob-same', 'operation-same', 'Qg=='),
+          makeUpload('attachment-added', 'blob-added', 'operation-added', 'Qw=='),
+        ],
+      },
+    } as BackupData;
+    const target = deriveAttachmentUploadOutboxRestoreTarget(preImage, backup, ownerUserId);
+    const persisted = new Map<string, SavePendingAttachmentUploadInput>();
+    const identity = (upload: Pick<SavePendingAttachmentUploadInput, 'ownerUserId' | 'blobKey' | 'operationId'>) => (
+      JSON.stringify([upload.ownerUserId, upload.blobKey, upload.operationId])
+    );
+    const toSaveInput = (upload: typeof preImage[number]): SavePendingAttachmentUploadInput => ({
+      ownerUserId: upload.ownerUserId,
+      operationId: upload.operationId,
+      attachmentId: upload.attachmentId,
+      blobKey: upload.blobKey,
+      fileName: upload.fileName,
+      mimeType: upload.mimeType,
+      size: upload.size,
+      createdAt: upload.createdAt,
+      blob: new Blob([
+        Uint8Array.from(atob(upload.blobBase64), character => character.charCodeAt(0)),
+      ], { type: upload.mimeType }),
+    });
+    for (const upload of preImage) {
+      persisted.set(identity(upload), toSaveInput(upload));
+    }
+
+    const restoredCount = await restoreAttachmentUploadOutboxFromBackup(backup, {
+      savePendingUpload: async upload => {
+        persisted.set(identity(upload), upload);
+      },
+    });
+    const actual = await Promise.all(Array.from(persisted.values(), async upload => {
+      const bytes = new Uint8Array(await upload.blob.arrayBuffer());
+      const blobBase64 = btoa(Array.from(bytes, byte => String.fromCharCode(byte)).join(''));
+      return {
+        ownerUserId: upload.ownerUserId,
+        operationId: upload.operationId,
+        attachmentId: upload.attachmentId,
+        blobKey: upload.blobKey,
+        fileName: upload.fileName,
+        mimeType: upload.mimeType,
+        size: upload.size,
+        createdAt: upload.createdAt,
+        encoding: 'base64' as const,
+        blobBase64,
+      };
+    }));
+    actual.sort((left, right) => left.blobKey.localeCompare(right.blobKey)
+      || left.operationId.localeCompare(right.operationId));
+
+    expect(restoredCount).toBe(2);
+    expect(actual).toEqual(target);
   });
 });
 
