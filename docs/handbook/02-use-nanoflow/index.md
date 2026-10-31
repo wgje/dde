@@ -2,7 +2,7 @@
 title: 使用 NanoFlow
 status: canonical
 audience: user
-last_verified: 2026-06-13
+last_verified: 2026-07-15
 category: use-nanoflow
 source_paths:
   - README.md
@@ -44,6 +44,9 @@ source_paths:
 | [Black Box 黑匣子](05-black-box.md) | 快速记录想法、语音、临时输入 | 长期保存任务状态 |
 | [思源知识锚点](06-siyuan-knowledge-anchors.md) | 把任务连接到思源块或资料来源 | 把 NanoFlow 变成第二个知识库 |
 | [Android 小组件](07-android-widget.md) | 在手机桌面看摘要和提醒 | 完整编辑任务 |
+| [任务僚机与计划信息](08-task-sidecar-and-planning.md) | 扫读任务风险、等待、认知负荷和注意事项 | 代替任务正文、待办清单或流程图关系 |
+| [项目、设置与回收站](09-project-settings-and-recovery.md) | 创建项目、调整设置、备份、恢复误删任务 | 在不备份的情况下清空回收站或批量导入 |
+| [附件与文件安全](10-attachments-and-file-safety.md) | 上传、查看、备份和恢复任务附件 | 把文件选择成功误认为上传、扫描和备份全部完成 |
 
 ## 不要混淆的几个概念
 
@@ -79,5 +82,8 @@ source_paths:
 ## 下一步
 
 - 每天的主界面：读 [文本视图](01-text-view.md)。
+- 整理任务的时间和注意力信息：读 [任务僚机与计划信息](08-task-sidecar-and-planning.md)。
+- 创建项目、配置备份或恢复误删任务：读 [项目、设置与回收站](09-project-settings-and-recovery.md)。
+- 上传、扫描或迁移任务文件：读 [附件与文件安全](10-attachments-and-file-safety.md)。
 - 暂存任务：读 [Parking Dock 停泊坞](03-parking-dock.md)。
 - 专注流程：读 [Focus 专注模式](04-focus-mode.md)。

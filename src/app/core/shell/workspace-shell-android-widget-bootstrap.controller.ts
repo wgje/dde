@@ -5,13 +5,12 @@ import type {
 import type { RuntimePlatformSnapshot } from '../../../utils/runtime-platform';
 import type { AndroidWidgetBootstrapCallbackResult } from '../../../services/widget-binding.service';
 import {
-  resolveAndroidWidgetBootstrapCaptureDecision,
-  resolveAndroidWidgetBootstrapTrust,
-} from './workspace-shell-android-widget-bootstrap.helpers';
-
-type AndroidWidgetBootstrapCompleteResult =
-  | { ok: true; value: AndroidWidgetBootstrapCallbackResult }
-  | { ok: false; error: { code: string; message: string } };
+  WorkspaceShellAndroidWidgetBootstrapCompletionController,
+  type WorkspaceShellAndroidWidgetBootstrapCompleteResult,
+} from './workspace-shell-android-widget-bootstrap-completion.controller';
+import {
+  WorkspaceShellAndroidWidgetBootstrapCaptureController,
+} from './workspace-shell-android-widget-bootstrap-capture.controller';
 
 export interface WorkspaceShellAndroidWidgetBootstrapControllerOptions {
   getPendingBootstrap: () => AndroidWidgetBootstrapRequest | null;
@@ -22,182 +21,66 @@ export interface WorkspaceShellAndroidWidgetBootstrapControllerOptions {
   consumeStartupEntryIntent: (onCleanupFailed?: () => void) => void;
   completeAndroidBootstrap: (
     request: AndroidWidgetBootstrapRequest,
-  ) => Promise<AndroidWidgetBootstrapCompleteResult>;
+  ) => Promise<WorkspaceShellAndroidWidgetBootstrapCompleteResult>;
   currentUserId: () => string | null;
   isSessionInitialized: () => boolean;
   navigateToCallback: (callback: AndroidWidgetBootstrapCallbackResult) => void;
   readRuntimePlatform: () => Pick<RuntimePlatformSnapshot, 'isAndroid' | 'isTwa'>;
   warn: (message: string, context?: unknown) => void;
   warningToast: (title: string, message: string) => void;
+  completionController?: Pick<
+    WorkspaceShellAndroidWidgetBootstrapCompletionController,
+    'complete' | 'isInFlight'
+  >;
+  captureController?: Pick<
+    WorkspaceShellAndroidWidgetBootstrapCaptureController,
+    'captureFromRoute' | 'clearCompletedBootstrapState'
+  >;
 }
 
 export class WorkspaceShellAndroidWidgetBootstrapController {
-  private captureKey: string | null = null;
-  private inFlight = false;
+  private readonly captureController: Pick<
+    WorkspaceShellAndroidWidgetBootstrapCaptureController,
+    'captureFromRoute' | 'clearCompletedBootstrapState'
+  >;
+  private readonly completionController: Pick<
+    WorkspaceShellAndroidWidgetBootstrapCompletionController,
+    'complete' | 'isInFlight'
+  >;
 
-  constructor(private readonly options: WorkspaceShellAndroidWidgetBootstrapControllerOptions) {}
+  constructor(private readonly options: WorkspaceShellAndroidWidgetBootstrapControllerOptions) {
+    this.captureController = options.captureController
+      ?? new WorkspaceShellAndroidWidgetBootstrapCaptureController({
+        getPendingBootstrap: options.getPendingBootstrap,
+        setPendingBootstrap: options.setPendingBootstrap,
+        setDeferredStartupEntryIntent: options.setDeferredStartupEntryIntent,
+        persistPendingBootstrap: options.persistPendingBootstrap,
+        persistDeferredStartupEntryIntent: options.persistDeferredStartupEntryIntent,
+        consumeStartupEntryIntent: options.consumeStartupEntryIntent,
+        readRuntimePlatform: options.readRuntimePlatform,
+        warn: options.warn,
+      });
+    this.completionController = options.completionController
+      ?? new WorkspaceShellAndroidWidgetBootstrapCompletionController({
+        completeAndroidBootstrap: options.completeAndroidBootstrap,
+        currentUserId: options.currentUserId,
+        isSessionInitialized: options.isSessionInitialized,
+        navigateToCallback: options.navigateToCallback,
+        settleBootstrapState: () => this.captureController.clearCompletedBootstrapState(),
+        warn: options.warn,
+        warningToast: options.warningToast,
+      });
+  }
 
   isInFlight(): boolean {
-    return this.inFlight;
+    return this.completionController.isInFlight();
   }
 
   captureFromRoute(routeUrl: string | null): boolean {
-    const decision = resolveAndroidWidgetBootstrapCaptureDecision({
-      routeUrl,
-      currentCaptureKey: this.captureKey,
-      isTrustedBootstrapRequest: (bootstrapRequest, nextRouteUrl) =>
-        resolveAndroidWidgetBootstrapTrust({
-          bootstrapRequest,
-          routeUrl: nextRouteUrl,
-          runtimePlatform: this.options.readRuntimePlatform(),
-          pendingBootstrap: this.options.getPendingBootstrap(),
-        }),
-    });
-
-    if (decision.kind === 'none') {
-      this.captureKey = decision.nextCaptureKey;
-      return false;
-    }
-
-    this.captureKey = decision.captureKey;
-
-    if (decision.kind === 'corrupt' || decision.kind === 'untrusted') {
-      this.clearPendingBootstrap();
-      this.setDeferredStartupEntryIntent(decision.startupEntryIntent);
-      this.safeWarn(decision.kind === 'corrupt'
-        ? '忽略损坏的 Android widget bootstrap 参数'
-        : '忽略不可信环境中的 Android widget bootstrap 请求');
-      this.consumeStartupEntryIntent(decision.captureKey);
-      return true;
-    }
-
-    this.options.setPendingBootstrap(decision.bootstrapRequest);
-    this.persistPendingBootstrap(decision.bootstrapRequest);
-    this.setDeferredStartupEntryIntent(decision.startupEntryIntent);
-    this.consumeStartupEntryIntent(decision.captureKey);
-    return true;
+    return this.captureController.captureFromRoute(routeUrl);
   }
 
-  async complete(bootstrapRequest: AndroidWidgetBootstrapRequest): Promise<void> {
-    const completionUserId = this.options.currentUserId();
-    const sessionInitializedAtStart = this.options.isSessionInitialized();
-    this.inFlight = true;
-
-    try {
-      let result: AndroidWidgetBootstrapCompleteResult;
-      try {
-        result = await this.options.completeAndroidBootstrap(bootstrapRequest);
-      } catch (error) {
-        this.safeWarn('Android widget bootstrap 完成异常', {
-          error,
-          hostInstanceId: bootstrapRequest.hostInstanceId,
-        });
-        return;
-      }
-
-      if (!this.isCompletionScopeCurrent(completionUserId, sessionInitializedAtStart)) {
-        this.safeWarn('忽略陈旧的 Android widget bootstrap 完成结果', {
-          hostInstanceId: bootstrapRequest.hostInstanceId,
-          completionUserId,
-          currentUserId: this.options.currentUserId(),
-          sessionInitialized: this.options.isSessionInitialized(),
-        });
-        return;
-      }
-
-      this.setDeferredStartupEntryIntent(null);
-
-      this.clearPendingBootstrap();
-      if (!result.ok) {
-        this.safeWarn('Android widget bootstrap 失败', {
-          code: result.error.code,
-          message: result.error.message,
-          hostInstanceId: bootstrapRequest.hostInstanceId,
-        });
-        this.safeWarningToast('Android 小组件初始化失败', '绑定未完成，请重新打开 NanoFlow 小组件');
-        return;
-      }
-
-      this.options.navigateToCallback(result.value);
-    } finally {
-      this.inFlight = false;
-    }
-  }
-
-  private isCompletionScopeCurrent(
-    completionUserId: string | null,
-    sessionInitializedAtStart: boolean,
-  ): boolean {
-    return sessionInitializedAtStart
-      && !!completionUserId
-      && this.options.isSessionInitialized()
-      && this.options.currentUserId() === completionUserId;
-  }
-
-  private clearPendingBootstrap(): void {
-    this.options.setPendingBootstrap(null);
-    this.persistPendingBootstrap(null);
-  }
-
-  private releaseCaptureKey(captureKey: string): void {
-    if (this.captureKey === captureKey) {
-      this.captureKey = null;
-    }
-  }
-
-  private consumeStartupEntryIntent(captureKey: string): void {
-    try {
-      this.options.consumeStartupEntryIntent(() => this.releaseCaptureKey(captureKey));
-    } catch (error) {
-      this.releaseCaptureKey(captureKey);
-      this.safeWarn('Android widget bootstrap startup query cleanup failed', error);
-    }
-  }
-
-  private setDeferredStartupEntryIntent(startupEntryIntent: StartupEntryIntent | null): void {
-    this.options.setDeferredStartupEntryIntent(startupEntryIntent);
-    this.persistDeferredStartupEntryIntent(startupEntryIntent);
-  }
-
-  private persistPendingBootstrap(request: AndroidWidgetBootstrapRequest | null): void {
-    try {
-      this.options.persistPendingBootstrap(request);
-    } catch (error) {
-      this.safeWarn('Android widget bootstrap pending state persistence failed', {
-        error,
-        hostInstanceId: request?.hostInstanceId ?? null,
-      });
-    }
-  }
-
-  private persistDeferredStartupEntryIntent(startupEntryIntent: StartupEntryIntent | null): void {
-    try {
-      this.options.persistDeferredStartupEntryIntent(startupEntryIntent);
-    } catch (error) {
-      this.safeWarn('Android widget bootstrap startup intent persistence failed', {
-        error,
-        startupEntryIntent,
-      });
-    }
-  }
-
-  private safeWarn(message: string, context?: unknown): void {
-    try {
-      if (context === undefined) {
-        this.options.warn(message);
-      } else {
-        this.options.warn(message, context);
-      }
-    } catch {
-      // Bootstrap cleanup must not depend on observability sinks.
-    }
-  }
-
-  private safeWarningToast(title: string, message: string): void {
-    try {
-      this.options.warningToast(title, message);
-    } catch {
-      // Bootstrap completion is already settled before notifying the user.
-    }
+  complete(bootstrapRequest: AndroidWidgetBootstrapRequest): Promise<void> {
+    return this.completionController.complete(bootstrapRequest);
   }
 }

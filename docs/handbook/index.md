@@ -1,13 +1,14 @@
 ---
 title: NanoFlow 使用手册
 status: canonical
-audience: user, operator
-last_verified: 2026-06-13
+audience: user, operator, contributor, maintainer
+last_verified: 2026-07-15
 category: root
 source_paths:
   - README.md
   - docs/handbook/catalog.json
   - docs/context7/index.md
+  - docs/handbook/05-develop-maintain/index.md
   - AGENTS.md
 ---
 
@@ -22,6 +23,8 @@ NanoFlow 是一个离线优先的个人任务工作台。它不是团队协作�
 - [应该先读哪一部分](#应该先读哪一部分)
 - [按场景选择文档](#按场景选择文档)
 - [NanoFlow 的基本使用思路](#nanoflow-的基本使用思路)
+- [遇到问题先去哪里](#遇到问题先去哪里)
+- [维护或改造项目时从哪里开始](#维护或改造项目时从哪里开始)
 - [这套手册和 Context7 文档的区别](#这套手册和-context7-文档的区别)
 - [阅读时需要记住的规则](#阅读时需要记住的规则)
 - [下一步](#下一步)
@@ -36,6 +39,7 @@ NanoFlow 是一个离线优先的个人任务工作台。它不是团队协作�
 | 准备把重要数据放进来 | [数据、同步与安全](03-data-sync-safety/index.md) | [备份与恢复](03-data-sync-safety/03-backup-and-restore.md) |
 | 想在多台设备之间同步 | [云同步配置](01-get-started/04-cloud-sync-setup.md) | [同步与冲突处理](03-data-sync-safety/02-sync-and-conflicts.md) |
 | 想自己部署私有实例 | [部署与运维](04-deploy-operate/index.md) | [Supabase 运维](04-deploy-operate/02-supabase-operations.md) |
+| 要改代码、接手维护或补充文档 | [开发与维护](05-develop-maintain/index.md) | [仓库地图](05-develop-maintain/02-repository-map.md)、[测试与质量](05-develop-maintain/03-testing-and-quality.md) |
 
 ## 按场景选择文档
 
@@ -45,6 +49,7 @@ NanoFlow 是一个离线优先的个人任务工作台。它不是团队协作�
 | [使用 NanoFlow](02-use-nanoflow/index.md) | 文本视图、流程图、Parking Dock、Focus、Black Box、思源锚点、Android 小组件 |
 | [数据、同步与安全](03-data-sync-safety/index.md) | 离线保存、同步状态、冲突、备份、恢复、密钥、隐私 |
 | [部署与运维](04-deploy-operate/index.md) | 私有部署、Supabase、Edge Functions、生产问题排查 |
+| [开发与维护](05-develop-maintain/index.md) | 开发环境、源码所有权、验证门禁、文档同步和运行时活动审计 |
 
 ## NanoFlow 的基本使用思路
 
@@ -57,11 +62,38 @@ NanoFlow 最顺的使用方式不是“把所有事情都塞进一个列表”�
 5. **关系复杂时再打开流程图**：流程图适合看结构、依赖和导出，不适合作为手机端常驻主界面。
 6. **重要数据先备份再折腾**：批量删除、导入、迁移、换设备、清浏览器数据前，都应该先导出。
 
+## 遇到问题先去哪里
+
+先按你看到的现象分流。不要为了“让问题消失”直接刷新、清缓存或在另一台设备重建同名任务；这些操作往往会减少可恢复的证据。
+
+| 你遇到的情况 | 先读 | 先避免什么 |
+| --- | --- | --- |
+| 界面已经变了，但另一台设备还没看到 | [离线优先模型](03-data-sync-safety/01-offline-first-model.md) | 在两台设备上同时重做同一项修改 |
+| 看见待同步、冲突、红色状态或死信提示 | [同步诊断与冲突中心](03-data-sync-safety/05-sync-diagnostics-and-conflict-center.md) | 清除浏览器数据、直接覆盖其中一边 |
+| 要导入旧数据、恢复误删或换浏览器/电脑 | [备份与恢复](03-data-sync-safety/03-backup-and-restore.md) | 未导出就导入、迁移或重装 |
+| 看见离线、存储空间、数据库异常、只读或版本刷新提示 | [应用安装、离线与错误恢复](01-get-started/06-pwa-offline-and-error-recovery.md) | 反复刷新、卸载 PWA 或清站点数据 |
+| 想确认本地模式的数据范围 | [本地离线模式](01-get-started/02-local-only-mode.md) | 把关闭 Demo 横幅当成数据已经上云 |
+
+先保留当前浏览器、当前账号和最近的导出文件，再按对应页面的步骤操作。无法确定可信来源时，先导出；导出会给你一个可以回退和比较的副本。
+
+## 维护或改造项目时从哪里开始
+
+维护者面对的不是单个功能按钮，而是一组相互约束的边界：离线状态、同步契约、移动端行为、数据库策略和文档都可能同时受到影响。不要只凭文件名猜测改动位置，也不要用一次宽泛的全量测试代替对实际变化的证明。
+
+建议按下面的顺序进入维护工作：
+
+1. 先读 [开发与维护](05-develop-maintain/index.md)，按改动类型选出合适的工作路径。
+2. 打开 [仓库地图](05-develop-maintain/02-repository-map.md)，确定功能、状态、服务、后端和文档各自的所有权边界。
+3. 用 [测试与质量](05-develop-maintain/03-testing-and-quality.md) 选择能直接证明改动的最小门禁；跨越同步、迁移、性能或发布边界时再扩大验证。
+4. 只要产品行为、运维步骤或恢复路径发生变化，就同时更新对应的中文手册；源码契约发生变化时，还要更新 Context7 文档。具体规则见 [文档维护](05-develop-maintain/04-documentation-maintenance.md)。
+
+这组维护者页面不是普通使用的必读内容。它的作用是让接手者知道哪里可以改、哪里不能绕过、完成后应留下什么验证证据。
+
 ## 这套手册和 Context7 文档的区别
 
 | 文档 | 给谁看 | 怎么使用 |
 | --- | --- | --- |
-| `docs/handbook` | 使用者、私有实例操作者 | 用中文解释功能、步骤、注意事项、验收方式和常见误解 |
+| `docs/handbook` | 使用者、私有实例操作者、贡献者 | 用中文解释功能、步骤、注意事项、验收方式和常见误解；维护者分类补充工作边界和验证路径 |
 | `docs/context7` | AI Agent、维护者 | 提供源码路径、模型字段、契约、参考页和机器检索入口 |
 
 如果你只是想使用 NanoFlow，优先读这套手册。只有在你要改代码、查源码边界、维护同步契约时，才需要打开 Context7 文档。
@@ -81,3 +113,4 @@ NanoFlow 最顺的使用方式不是“把所有事情都塞进一个列表”�
 - 每天怎么用：读 [使用 NanoFlow](02-use-nanoflow/index.md)。
 - 先保护数据：读 [备份与恢复](03-data-sync-safety/03-backup-and-restore.md)。
 - 自己部署：读 [私有部署](04-deploy-operate/01-private-deployment.md)。
+- 接手维护：读 [开发与维护](05-develop-maintain/index.md)。

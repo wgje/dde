@@ -13,11 +13,18 @@ import {
 
 describe('WorkspaceShellStartupEntryIntentController', () => {
   it('opens sidebar tools and loads the black box recorder for enabled blackbox shortcuts', () => {
-    const { controller, loadBlackBoxRecorder, preloadSidebarTools, setSidebarOpen } = createController();
+    const activateSidebarTools = vi.fn();
+    const {
+      controller,
+      loadBlackBoxRecorder,
+      preloadSidebarTools,
+      setSidebarOpen,
+    } = createController({ activateSidebarTools });
 
     controller.apply(blackBoxRecorderIntent());
 
     expect(setSidebarOpen).toHaveBeenCalledWith(true);
+    expect(activateSidebarTools).toHaveBeenCalledTimes(1);
     expect(preloadSidebarTools).toHaveBeenCalledWith('intent');
     expect(loadBlackBoxRecorder).toHaveBeenCalledTimes(1);
   });

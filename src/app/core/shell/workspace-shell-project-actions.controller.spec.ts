@@ -1,10 +1,14 @@
 import { signal } from '@angular/core';
 import { describe, expect, it, vi } from 'vitest';
+import type { ActiveProjectOwner } from '../../../services/project-state.service';
 
 import {
   WorkspaceShellProjectActionsController,
   type WorkspaceShellProjectActionsControllerOptions,
 } from './workspace-shell-project-actions.controller';
+import type {
+  WorkspaceShellProjectMutationController,
+} from './workspace-shell-project-mutation.controller';
 
 function createController(
   overrides: Partial<WorkspaceShellProjectActionsControllerOptions> = {},
@@ -62,6 +66,35 @@ function createController(
 }
 
 describe('WorkspaceShellProjectActionsController', () => {
+  it('delegates project mutations to the mutation controller', () => {
+    const projectMutation = {
+      onRenameProjectNameInput: vi.fn(),
+      startProjectDescriptionEdit: vi.fn(),
+    } as unknown as WorkspaceShellProjectMutationController;
+    const { controller } = createController({ projectMutation });
+    const editEvent = { stopPropagation: vi.fn() } as unknown as Event;
+    const inputEvent = { target: { value: 'Renamed' } } as unknown as Event;
+
+    controller.startProjectDescriptionEdit(editEvent);
+    controller.onRenameProjectNameInput(inputEvent);
+
+    expect(projectMutation.startProjectDescriptionEdit).toHaveBeenCalledWith(editEvent);
+    expect(projectMutation.onRenameProjectNameInput).toHaveBeenCalledWith(inputEvent);
+  });
+
+  it('forwards the exact delete owner object to the mutation controller', async () => {
+    const confirmDeleteProject = vi.fn();
+    const projectMutation = { confirmDeleteProject } as unknown as WorkspaceShellProjectMutationController;
+    const { controller } = createController({ projectMutation });
+    const owner: ActiveProjectOwner = Object.freeze({ projectId: 'project-a', generation: 4 });
+    const event = {} as Event;
+
+    await controller.confirmDeleteProject('project-a', 'Project A', event, owner);
+
+    expect(confirmDeleteProject).toHaveBeenCalledWith('project-a', 'Project A', event, owner);
+    expect(confirmDeleteProject.mock.calls[0]?.[3]).toBe(owner);
+  });
+
   it('opens a project and checks the mobile focus gate', () => {
     const { controller, options } = createController();
 
@@ -93,33 +126,6 @@ describe('WorkspaceShellProjectActionsController', () => {
     expect(options.projectCoord.enterProject).toHaveBeenCalledWith('project-1', options.sidebarOpen);
     expect(options.projectCoord.handleProjectDoubleClick).not.toHaveBeenCalled();
     expect(options.checkGateForMobileProjectEntry).toHaveBeenCalledTimes(1);
-  });
-
-  it('blocks hint-only project mutations but still lets coordinator-only cleanup actions run', async () => {
-    const stopPropagation = vi.fn();
-    const { controller, options } = createController({
-      userSession: {
-        isHintOnlyStartupPlaceholderVisible: vi.fn(() => true),
-        switchActiveProject: vi.fn(),
-      },
-    });
-
-    controller.startProjectDescriptionEdit({ stopPropagation } as unknown as Event);
-    controller.updateProjectDraft('project-1', 'description', 'draft');
-    await controller.confirmDeleteProject('project-1', 'Project', {} as Event);
-    controller.executeRenameProject();
-    controller.saveProjectDetails('project-1');
-
-    expect(stopPropagation).toHaveBeenCalledTimes(1);
-    expect(options.projectCoord.isEditingDescription.set).not.toHaveBeenCalled();
-    expect(options.projectCoord.updateProjectDraft).not.toHaveBeenCalled();
-    expect(options.projectCoord.confirmDeleteProject).not.toHaveBeenCalled();
-    expect(options.projectCoord.executeRenameProject).toHaveBeenCalledTimes(1);
-    expect(options.projectCoord.saveProjectDetails).toHaveBeenCalledWith('project-1');
-    expect(options.toast.info).toHaveBeenCalledWith(
-      '会话确认中',
-      '编辑项目简介暂不可用，owner 确认完成前保持只读',
-    );
   });
 
   it('opens parked search results through the dock instead of focusing the flow node', () => {
@@ -210,19 +216,4 @@ describe('WorkspaceShellProjectActionsController', () => {
     expect(options.dockEngine.setDockExpanded).toHaveBeenCalledTimes(1);
   });
 
-  it('writes project form input values through the project coordinator', () => {
-    const { controller, options } = createController();
-
-    controller.onRenameProjectNameInput({ target: { value: 'Renamed' } } as unknown as Event);
-    controller.onProjectDescriptionInput('project-1', {
-      target: { value: 'Description' },
-    } as unknown as Event);
-
-    expect(options.projectCoord.renameProjectName.set).toHaveBeenCalledWith('Renamed');
-    expect(options.projectCoord.updateProjectDraft).toHaveBeenCalledWith(
-      'project-1',
-      'description',
-      'Description',
-    );
-  });
 });

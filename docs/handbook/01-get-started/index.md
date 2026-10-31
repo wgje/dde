@@ -2,7 +2,7 @@
 title: 开始使用
 status: canonical
 audience: user, operator
-last_verified: 2026-06-13
+last_verified: 2026-07-15
 category: get-started
 source_paths:
   - README.md
@@ -28,6 +28,8 @@ source_paths:
 2. 再读 [本地离线模式](02-local-only-mode.md)，弄清楚没有登录和云同步时数据保存在哪里。
 3. 然后跟着 [第一个项目演练](03-first-project.md) 创建一个很小的真实项目。
 4. 如果你确实需要多设备、附件、语音转写或 Android 小组件，再读 [云同步配置](04-cloud-sync-setup.md)。
+5. 如果你想弄清启动、登录、离线和状态提示，读 [启动、登录与状态提示](05-startup-login-and-status.md)。
+6. 如果你想把应用装到主屏、处理离线或理解错误恢复弹窗，读 [应用安装、离线与错误恢复](06-pwa-offline-and-error-recovery.md)。
 
 ## 每篇文档解决什么问题
 
@@ -37,6 +39,8 @@ source_paths:
 | [本地离线模式](02-local-only-mode.md) | 你不想马上配置 Supabase | 知道哪些功能本地可用，哪些功能必须依赖云端 |
 | [第一个项目演练](03-first-project.md) | 你想用一个小例子理解日常流程 | 创建任务树、编辑任务、停泊任务、进入 Focus、恢复误删 |
 | [云同步配置](04-cloud-sync-setup.md) | 你准备登录和跨设备使用 | 配置 Supabase、Storage、Edge Functions 和基础验收步骤 |
+| [启动、登录与状态提示](05-startup-login-and-status.md) | 你不确定“正在恢复”“待同步”“登录失效”等提示的含义 | 判断本地、登录、云同步和 Android 小组件入口的当前状态 |
+| [应用安装、离线与错误恢复](06-pwa-offline-and-error-recovery.md) | 你想安装 PWA，或遇到离线、存储受限和可恢复错误 | 安全判断安装提示、待同步、恢复弹窗和数据修复提示 |
 
 ## 开始前先理解的边界
 
@@ -67,4 +71,5 @@ NanoFlow 的默认设计是离线优先，因此“没有云服务”不等于�
 
 - 想立刻运行项目：继续读 [快速开始](01-quickstart.md)。
 - 已经能打开应用：继续读 [第一个项目演练](03-first-project.md)。
+- 想安装应用或处理离线异常：读 [应用安装、离线与错误恢复](06-pwa-offline-and-error-recovery.md)。
 - 准备放入重要数据：先读 [备份与恢复](../03-data-sync-safety/03-backup-and-restore.md)。

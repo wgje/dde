@@ -2,12 +2,13 @@
 title: 快速开始
 status: canonical
 audience: user, operator
-last_verified: 2026-06-13
+last_verified: 2026-07-15
 category: get-started
 source_paths:
   - README.md
   - package.json
   - scripts/run-ng.cjs
+  - scripts/dev-server-port.cjs
   - scripts/set-env.cjs
 ---
 
@@ -62,15 +63,15 @@ npm install
 npm start
 ```
 
-这个命令会先执行环境准备，再通过项目脚本启动 Angular 开发服务器。默认优先使用 `3000` 端口；如果端口被占用，项目脚本可能选择下一个可用端口。终端输出里会显示实际访问地址。
+这个命令会先执行环境准备，再通过项目脚本启动 Angular 开发服务器。默认优先使用 `3000` 端口；如果端口被占用，项目脚本会在终端说明实际使用或需要你指定的端口。终端输出里的 URL 才是当前应打开的地址。
 
-如果你必须固定端口，可以设置：
+如果你必须固定端口，使用 npm 参数而不是直接复制只适用于 POSIX shell 的 `PORT=3000` 写法：
 
 ```bash
-PORT=3000
+npm start -- --port 3000
 ```
 
-或使用项目支持的 `NANOFLOW_DEV_SERVER_PORT`。
+启动脚本会尊重显式的 `--port` 参数。该端口不可用时，先选择一个空闲端口或停止自己启动的旧开发服务器，再重新运行命令；不要只凭浏览器里仍然打开的旧页面判断新服务器已启动。
 
 ## 打开后怎么验收
 

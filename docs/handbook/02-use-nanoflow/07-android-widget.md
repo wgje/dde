@@ -2,7 +2,7 @@
 title: Android 小组件
 status: canonical
 audience: user, operator
-last_verified: 2026-07-15
+last_verified: 2026-11-01
 category: use-nanoflow
 source_paths:
   - README.md
@@ -53,8 +53,8 @@ NanoFlow 当前只保留 Android 手机端小组件路径。它适合在桌面�
 1. 把 NanoFlow 小组件加到 Android 主屏。第一次显示 loading 或 setup 状态是正常的。
 2. 如果你看到 `Widget 尚未连接`、`请先打开 NanoFlow 完成初始化` 或 `打开 NanoFlow 后会自动完成绑定并刷新摘要`，点按组件或直接打开 NanoFlow。
 3. 宿主会把你带到 NanoFlow 的 Android/TWA 打开链路。Web 侧会在当前登录会话下完成 widget register，然后回跳到宿主的 `nanoflow-widget://bootstrap` 回调。
-4. 回调被接受后，宿主会马上尝试一次摘要刷新，并在成功后回到桌面；这次 inline refresh 最多等 10 秒。超时或失败时会提示 `Widget 已连接，摘要稍后会自动刷新`，后台仍会补一轮 follow-up refresh。
-5. 绑定请求只对当前设备、当前安装和当前 widget 实例有效，而且有约 15 分钟时效。回调参数无效、过期、实例已变化，或者当前桌面上的组件已经被删掉时，你会看到 `Widget 连接未完成，请回到桌面重新点按组件`。
+
+绑定完成期间如果登录会话发生变化，NanoFlow 会丢弃陈旧回调，不会把旧账号的结果写回当前会话；绑定失败会保留可重试状态，并提示重新打开 NanoFlow 小组件。
 
 用户可以这样确认绑定已经完成：
 

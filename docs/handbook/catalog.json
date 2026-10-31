@@ -1,7 +1,7 @@
 {
   "title": "NanoFlow 使用手册",
   "status": "canonical",
-  "last_verified": "2026-06-13",
+  "last_verified": "2026-07-15",
   "root": "docs/handbook/index.md",
   "categories": [
     {
@@ -29,6 +29,16 @@
           "title": "云同步配置",
           "path": "docs/handbook/01-get-started/04-cloud-sync-setup.md",
           "purpose": "配置登录、多设备同步、附件、Edge Functions 和相关环境变量。"
+        },
+        {
+          "title": "启动、登录与状态提示",
+          "path": "docs/handbook/01-get-started/05-startup-login-and-status.md",
+          "purpose": "说明应用启动、会话恢复、离线状态、小组件跳转和常见状态提示应该如何理解与处理。"
+        },
+        {
+          "title": "应用安装、离线与错误恢复",
+          "path": "docs/handbook/01-get-started/06-pwa-offline-and-error-recovery.md",
+          "purpose": "说明 PWA 安装、离线与存储受限提示、错误恢复选择和本地数据修复后的安全处理顺序。"
         }
       ]
     },
@@ -72,6 +82,21 @@
           "title": "Android 小组件",
           "path": "docs/handbook/02-use-nanoflow/07-android-widget.md",
           "purpose": "说明 Android-only 小组件能显示什么、需要哪些云端能力、没有 FCM 时如何退化。"
+        },
+        {
+          "title": "任务僚机与计划信息",
+          "path": "docs/handbook/02-use-nanoflow/08-task-sidecar-and-planning.md",
+          "purpose": "说明如何用预计时长、等待时间、认知负荷和注意事项组织任务，并理解 Flow 摘要与跨项目搜索后的停泊任务预览。"
+        },
+        {
+          "title": "项目、设置与回收站",
+          "path": "docs/handbook/02-use-nanoflow/09-project-settings-and-recovery.md",
+          "purpose": "说明项目上下文、设置中的数据操作、JSON 与附件备份、本地增强备份，以及回收站和归档恢复的安全流程。"
+        },
+        {
+          "title": "附件与文件安全",
+          "path": "docs/handbook/02-use-nanoflow/10-attachments-and-file-safety.md",
+          "purpose": "说明附件上传、进度与扫描状态、失败恢复、删除，以及 JSON 和 ZIP 备份之间的边界。"
         }
       ]
     },
@@ -100,6 +125,11 @@
           "title": "安全与隐私",
           "path": "docs/handbook/03-data-sync-safety/04-security-and-privacy.md",
           "purpose": "说明密钥、RLS、私有附件、Markdown 安全、本地数据和第三方服务边界。"
+        },
+        {
+          "title": "同步诊断与冲突中心",
+          "path": "docs/handbook/03-data-sync-safety/05-sync-diagnostics-and-conflict-center.md",
+          "purpose": "说明如何读取同步状态、处理待同步与死信、重新同步项目、解决本地和云端冲突，并在队列冻结时导出证据。"
         }
       ]
     },
@@ -133,34 +163,34 @@
     },
     {
       "id": "develop-maintain",
-      "title": "Develop and Maintain",
+      "title": "开发与维护",
       "landing": "docs/handbook/05-develop-maintain/index.md",
-      "description": "Set up a contributor environment, navigate the repository, test changes, and maintain docs.",
+      "description": "面向贡献者和维护者：准备开发环境、定位源码所有权、选择验证门禁，并让真人手册与机器文档跟随产品变化。",
       "articles": [
         {
-          "title": "Development Environment",
+          "title": "开发环境",
           "path": "docs/handbook/05-develop-maintain/01-development-environment.md",
-          "purpose": "Install dependencies, run the app, and choose verification commands."
+          "purpose": "安装依赖、启动应用、管理环境变量，并区分本地离线和云端开发。"
         },
         {
-          "title": "Repository Map",
+          "title": "仓库地图",
           "path": "docs/handbook/05-develop-maintain/02-repository-map.md",
-          "purpose": "Find source areas, services, state stores, tests, Supabase code, and docs."
+          "purpose": "按改动场景找到功能、状态、服务、测试、Supabase、Android 和文档的正确边界。"
         },
         {
-          "title": "Testing and Quality",
+          "title": "测试与质量",
           "path": "docs/handbook/05-develop-maintain/03-testing-and-quality.md",
-          "purpose": "Use unit, service, component, E2E, contract, quality, and performance gates."
+          "purpose": "选择单元、服务、组件、端到端、契约、质量和性能门禁，并正确解释失败结果。"
         },
         {
-          "title": "Documentation Maintenance",
+          "title": "文档维护",
           "path": "docs/handbook/05-develop-maintain/04-documentation-maintenance.md",
-          "purpose": "Keep human and machine documentation synchronized and validated."
+          "purpose": "让中文使用手册、Context7 源码契约和可执行文档覆盖映射保持同步且可验证。"
         },
         {
           "title": "Runtime Entry and Activity Audit",
           "path": "docs/handbook/05-develop-maintain/05-runtime-entry-activity-audit.md",
-          "purpose": "Harden interaction entries, self-running activities, timers, subscriptions, queues, and async business chains."
+          "purpose": "审计交互入口、自动活动、计时器、订阅、队列和异步业务链，避免恢复或后台活动失控。"
         }
       ]
     }
