@@ -146,6 +146,104 @@ describe('LocalBackupDeferredRetryScheduler', () => {
     }
   });
 
+  it('clear invalidates the old retry timer and allows rescheduling when timeout cleanup fails', () => {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+    const queuedTimeouts = new Map<number, () => void>();
+    let nextTimerId = 1;
+    const timerCleanupError = new Error('retry timer cleanup failed');
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation((callback: TimerHandler) => {
+      const timerId = nextTimerId++;
+      queuedTimeouts.set(timerId, callback as () => void);
+      return timerId as unknown as ReturnType<typeof setTimeout>;
+    });
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout').mockImplementation((timerId) => {
+      if ((timerId as unknown as number) === 1) {
+        throw timerCleanupError;
+      }
+    });
+
+    try {
+      scheduler.schedule();
+
+      expect(() => scheduler.clear()).not.toThrow();
+
+      scheduler.schedule();
+      queuedTimeouts.get(1)?.();
+      queuedTimeouts.get(2)?.();
+
+      expect(setTimeoutSpy).toHaveBeenCalledTimes(2);
+      expect(clearTimeoutSpy).toHaveBeenCalledWith(1);
+      expect(runRetry).toHaveBeenCalledOnce();
+    } finally {
+      setTimeoutSpy.mockRestore();
+      clearTimeoutSpy.mockRestore();
+    }
+  });
+
+  it('clear keeps a captured visibility callback stale when listener cleanup fails', () => {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+    let capturedVisibilityHandler: EventListener | null = null;
+    const listenerCleanupError = new Error('visibility listener cleanup failed');
+    const addEventListenerSpy = vi
+      .spyOn(document, 'addEventListener')
+      .mockImplementation((type, listener, options) => {
+        if (type === 'visibilitychange') {
+          capturedVisibilityHandler = listener as EventListener;
+        }
+        return Document.prototype.addEventListener.call(document, type, listener, options);
+      });
+    const removeEventListenerSpy = vi.spyOn(document, 'removeEventListener').mockImplementation(() => {
+      throw listenerCleanupError;
+    });
+
+    try {
+      scheduler.schedule();
+
+      expect(() => scheduler.clear()).not.toThrow();
+
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+      capturedVisibilityHandler!(new Event('visibilitychange'));
+      vi.advanceTimersByTime(1000);
+
+      expect(runRetry).not.toHaveBeenCalled();
+    } finally {
+      addEventListenerSpy.mockRestore();
+      removeEventListenerSpy.mockRestore();
+    }
+  });
+
+  it('continues arming one retry when visibility listener removal fails', () => {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+    let capturedVisibilityHandler: EventListener | null = null;
+    const listenerCleanupError = new Error('visibility listener cleanup failed');
+    const addEventListenerSpy = vi
+      .spyOn(document, 'addEventListener')
+      .mockImplementation((type, listener, options) => {
+        if (type === 'visibilitychange') {
+          capturedVisibilityHandler = listener as EventListener;
+        }
+        return Document.prototype.addEventListener.call(document, type, listener, options);
+      });
+    const removeEventListenerSpy = vi.spyOn(document, 'removeEventListener').mockImplementation(() => {
+      throw listenerCleanupError;
+    });
+
+    try {
+      scheduler.schedule();
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+
+      expect(() => capturedVisibilityHandler!(new Event('visibilitychange'))).not.toThrow();
+      vi.advanceTimersByTime(200);
+      capturedVisibilityHandler!(new Event('visibilitychange'));
+      vi.advanceTimersByTime(200);
+
+      expect(runRetry).toHaveBeenCalledOnce();
+    } finally {
+      addEventListenerSpy.mockRestore();
+      removeEventListenerSpy.mockRestore();
+    }
+  });
+
   it('does not run a deferred retry when auto backup is disabled before the timer fires', () => {
     Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
 

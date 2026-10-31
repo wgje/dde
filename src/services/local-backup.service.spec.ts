@@ -1,5 +1,5 @@
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { Injector } from '@angular/core';
+import { Injector, signal } from '@angular/core';
 import { buildLocalBackupFilename, LocalBackupService } from './local-backup.service';
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
@@ -9,6 +9,16 @@ import { PreferenceService } from './preference.service';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { DisasterBackupService } from './disaster-backup.service';
 import { resetBrowserNetworkSuspensionTrackingForTests } from '../utils/browser-network-suspension';
+import { AuthService } from './auth.service';
+import { SessionRuntimeResetRegistry } from './session-runtime-reset.service';
+import { del, get, set } from 'idb-keyval';
+
+vi.mock('idb-keyval', async (importOriginal) => ({
+  ...await importOriginal<typeof import('idb-keyval')>(),
+  del: vi.fn(async () => undefined),
+  get: vi.fn(async () => undefined),
+  set: vi.fn(async () => undefined),
+}));
 
 const mockLoggerCategory = {
   info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(),
@@ -24,6 +34,9 @@ const exportServiceMock = {
 
 describe('LocalBackupService', () => {
   let service: LocalBackupService;
+  let currentUserIdSignal = signal<string | null>('user-1');
+  let sessionRuntimeReset: SessionRuntimeResetRegistry;
+  let idbStore: Map<string, unknown>;
 
   beforeEach(() => {
     localStorage.clear();
@@ -32,6 +45,10 @@ describe('LocalBackupService', () => {
     mockLoggerCategory.error.mockReset();
     mockLoggerCategory.debug.mockReset();
     exportServiceMock.recordLocalBackupSuccess.mockReset();
+    idbStore = new Map<string, unknown>();
+    vi.mocked(get).mockReset().mockImplementation(async key => idbStore.get(String(key)));
+    vi.mocked(set).mockReset().mockImplementation(async (key, value) => { idbStore.set(String(key), value); });
+    vi.mocked(del).mockReset().mockImplementation(async key => { idbStore.delete(String(key)); });
     service = createService();
     disasterBackupServiceMock.buildLocalBlob.mockReset();
   });
@@ -103,12 +120,310 @@ describe('LocalBackupService', () => {
         clearIntervalSpy.mockRestore();
       }
     });
+
+    it('interval 清理失败时仍应失效本地句柄并完成停止状态同步', () => {
+      const intervalTimer = 1 as unknown as ReturnType<typeof setInterval>;
+      const timerCleanupError = new Error('auto backup interval cleanup failed');
+      const clearIntervalSpy = vi.spyOn(globalThis, 'clearInterval').mockImplementation(() => {
+        throw timerCleanupError;
+      });
+      const deferredRetryScheduler = (
+        service as unknown as { deferredRetryScheduler: { clear: () => void } }
+      ).deferredRetryScheduler;
+      const deferredRetryClearSpy = vi.spyOn(deferredRetryScheduler, 'clear');
+      (service as unknown as { autoBackupTimer: ReturnType<typeof setInterval> | null }).autoBackupTimer = intervalTimer;
+      setPrivateSignal(service, '_autoBackupEnabled', true);
+
+      try {
+        expect(() => service.stopAutoBackup()).not.toThrow();
+
+        expect(clearIntervalSpy).toHaveBeenCalledWith(intervalTimer);
+        expect(deferredRetryClearSpy).toHaveBeenCalledOnce();
+        expect(
+          (service as unknown as { autoBackupTimer: ReturnType<typeof setInterval> | null }).autoBackupTimer
+        ).toBeNull();
+        expect(service.autoBackupEnabled()).toBe(false);
+        expect(mockLoggerCategory.warn).toHaveBeenCalledWith(
+          '自动备份定时器清理失败，继续停止自动备份',
+          timerCleanupError,
+        );
+      } finally {
+        clearIntervalSpy.mockRestore();
+        deferredRetryClearSpy.mockRestore();
+      }
+    });
   });
 
   describe('setAutoBackupInterval', () => {
     it('设置备份间隔', () => {
       service.setAutoBackupInterval(60000);
       expect(service.autoBackupIntervalMs()).toBe(60000);
+    });
+  });
+
+  describe('startAutoBackup', () => {
+    it('interval 安装失败时应保持关闭状态并隔离平台异常', () => {
+      const timerScheduleError = new Error('auto backup interval scheduling failed');
+      setPrivateSignal(service, '_isAuthorized', true);
+      setPrivateSignal(service, '_autoBackupEnabled', true);
+      const setIntervalSpy = vi.spyOn(globalThis, 'setInterval').mockImplementation(() => {
+        throw timerScheduleError;
+      });
+
+      try {
+        expect(() => service.startAutoBackup(
+          () => [{ id: 'p1', name: 'Test', tasks: [], connections: [] }],
+          1000,
+          { silent: true },
+        )).not.toThrow();
+
+        expect(setIntervalSpy).toHaveBeenCalledOnce();
+        expect(
+          (service as unknown as { autoBackupTimer: ReturnType<typeof setInterval> | null }).autoBackupTimer
+        ).toBeNull();
+        expect(service.autoBackupEnabled()).toBe(false);
+        expect(mockLoggerCategory.warn).toHaveBeenCalledWith(
+          '自动备份定时器启动失败，已保持关闭状态',
+          timerScheduleError,
+        );
+      } finally {
+        setIntervalSpy.mockRestore();
+      }
+    });
+  });
+
+  describe('会话运行时重置', () => {
+    it('登出时立即分离目录授权、owner 状态和自动备份', async () => {
+      vi.useFakeTimers();
+      currentUserIdSignal.set('old-user');
+      setPrivateSignal(service, '_isAuthorized', true);
+      service.startAutoBackup(
+        () => [{ id: 'old-project', name: 'Old', tasks: [], connections: [] }],
+        1000,
+        { silent: true },
+      );
+      expect((service as unknown as { autoBackupTimer: unknown }).autoBackupTimer).not.toBeNull();
+
+      sessionRuntimeReset.resetAll('owner-change');
+      expect(service.isAuthorized()).toBe(false);
+      expect(service.directoryName()).toBeNull();
+      expect(service.hasSavedHandle()).toBe(false);
+      expect(service.permissionState()).toBeNull();
+      expect(service.autoBackupEnabled()).toBe(false);
+      expect((service as unknown as { directoryHandle: unknown }).directoryHandle).toBeNull();
+      expect((service as unknown as { restoreHandlePromise: unknown }).restoreHandlePromise).toBeNull();
+      currentUserIdSignal.set(null);
+      await Promise.resolve();
+
+      expect((service as unknown as { autoBackupTimer: unknown }).autoBackupTimer).toBeNull();
+      expect(service.autoBackupEnabled()).toBe(false);
+    });
+
+    it('切换到新 owner 后不会沿用旧 owner 授权或自动备份 timer', async () => {
+      vi.useFakeTimers();
+      currentUserIdSignal.set('old-user');
+      setPrivateSignal(service, '_isAuthorized', true);
+      const getProjects = () => [{ id: 'current-project', name: 'Current', tasks: [], connections: [] }];
+      service.startAutoBackup(getProjects, 1000, { silent: true });
+      const oldTimer = (service as unknown as { autoBackupTimer: unknown }).autoBackupTimer;
+
+      sessionRuntimeReset.resetAll('owner-change');
+      currentUserIdSignal.set('new-user');
+      await Promise.resolve();
+
+      const newTimer = (service as unknown as { autoBackupTimer: unknown }).autoBackupTimer;
+      expect(newTimer).toBeNull();
+      expect(oldTimer).not.toBeNull();
+      expect(service.isAuthorized()).toBe(false);
+      expect(service.autoBackupEnabled()).toBe(false);
+    });
+
+    it('旧会话 Blob 晚到时不得写入备份文件或记录成功', async () => {
+      const backupBlob = new Blob(['{"payloadVersion":"2.0.0"}'], { type: 'application/json' });
+      const fileHandle = {
+        createWritable: vi.fn(),
+        getFile: vi.fn(),
+      };
+      (service as unknown as { directoryHandle: unknown }).directoryHandle = {
+        name: 'backups',
+        getFileHandle: vi.fn(async () => fileHandle),
+        removeEntry: vi.fn(async () => undefined),
+      };
+      (service as unknown as { checkAndRestorePermission: () => Promise<boolean> }).checkAndRestorePermission =
+        vi.fn(async () => true);
+      let resolveBlob!: (value: { payload: object; blob: Blob }) => void;
+      disasterBackupServiceMock.buildLocalBlob.mockReturnValueOnce(
+        new Promise(resolve => { resolveBlob = resolve; }),
+      );
+
+      const pending = service.performBackup([
+        { id: 'old-project', name: 'Old', tasks: [], connections: [] },
+      ]);
+      sessionRuntimeReset.resetAll('owner-change');
+      currentUserIdSignal.set('new-user');
+      resolveBlob({ payload: { payloadVersion: '2.0.0' }, blob: backupBlob });
+
+      await expect(pending).resolves.toEqual({ success: false, error: '会话已切换' });
+      expect(fileHandle.createWritable).not.toHaveBeenCalled();
+      expect(exportServiceMock.recordLocalBackupSuccess).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('目录 owner 绑定', () => {
+    it('隔离 authenticated A/B，拒绝 B 的 permission/write/list/read 并可恢复 fresh A', async () => {
+      const handleA = createDirectoryHandleMock('a-backups', 'granted');
+      window.showDirectoryPicker = vi.fn(async () => handleA);
+      service.ngOnDestroy();
+      service = createService('user-a');
+
+      await expect(service.requestDirectoryAccess()).resolves.toEqual({
+        success: true,
+        directoryName: 'a-backups',
+      });
+
+      sessionRuntimeReset.resetAll('owner-change');
+      expect(service.directoryName()).toBeNull();
+      expect(service.isAuthorized()).toBe(false);
+      currentUserIdSignal.set('user-b');
+      await flushOwnerRebind();
+
+      await expect(service.checkAndRestorePermission()).resolves.toBe(false);
+      await expect(service.performBackup([
+        { id: 'b-project', name: 'B', tasks: [], connections: [] },
+      ])).resolves.toEqual(expect.objectContaining({ success: false }));
+      await expect(service.listBackupFiles()).resolves.toEqual([]);
+      await expect(service.readBackupFile('nanoflow-backup-a.json')).resolves.toBeNull();
+      expect(handleA.queryPermission).not.toHaveBeenCalled();
+      expect(handleA.requestPermission).not.toHaveBeenCalled();
+      expect(handleA.getFileHandle).not.toHaveBeenCalled();
+      expect(handleA.values).not.toHaveBeenCalled();
+
+      await switchOwner('user-a');
+      await expect(service.checkAndRestorePermission({ request: false })).resolves.toBe(true);
+      expect(service.directoryName()).toBe('a-backups');
+      expect(service.isAuthorized()).toBe(true);
+      expect(handleA.queryPermission).toHaveBeenCalledWith({ mode: 'readwrite' });
+    });
+
+    it('isolates local and authenticated scopes and restores the local scope after restart', async () => {
+      const localHandle = createDirectoryHandleMock('local-backups', 'granted');
+      window.showDirectoryPicker = vi.fn(async () => localHandle);
+      service.ngOnDestroy();
+      service = createService(null);
+      await expect(service.requestDirectoryAccess()).resolves.toEqual({
+        success: true,
+        directoryName: 'local-backups',
+      });
+
+      await switchOwner('user-a');
+      await expect(service.checkAndRestorePermission()).resolves.toBe(false);
+      expect(service.directoryName()).toBeNull();
+      expect(localHandle.queryPermission).not.toHaveBeenCalled();
+
+      service.ngOnDestroy();
+      service = createService(null);
+      await expect(service.checkAndRestorePermission({ request: false })).resolves.toBe(true);
+      expect(service.directoryName()).toBe('local-backups');
+      expect(localHandle.queryPermission).toHaveBeenCalledWith({ mode: 'readwrite' });
+    });
+
+    it('rejects a late A picker continuation after A to B to A', async () => {
+      const lateHandle = createDirectoryHandleMock('late-a', 'granted');
+      let resolvePicker!: (handle: FileSystemDirectoryHandle) => void;
+      window.showDirectoryPicker = vi.fn(() => new Promise<FileSystemDirectoryHandle>(resolve => {
+        resolvePicker = resolve;
+      }));
+      service.ngOnDestroy();
+      service = createService('user-a');
+
+      const pending = service.requestDirectoryAccess();
+      await Promise.resolve();
+      await switchOwner('user-b');
+      await switchOwner('user-a');
+      resolvePicker(lateHandle);
+
+      await expect(pending).resolves.toEqual({ success: false, error: '会话已切换' });
+      expect(service.directoryName()).toBeNull();
+      expect(service.isAuthorized()).toBe(false);
+      expect(lateHandle.queryPermission).not.toHaveBeenCalled();
+      expect(lateHandle.requestPermission).not.toHaveBeenCalled();
+      expect(lateHandle.getFileHandle).not.toHaveBeenCalled();
+      expect(idbStore.size).toBe(0);
+    });
+
+    it('drops a deferred A directory listing after A to B to A and returns fresh A once', async () => {
+      const filename = buildLocalBackupFilename('2026-06-09_12-30-45');
+      const file = new File(['backup'], filename, { type: 'application/json' });
+      const fileHandle = { getFile: vi.fn(async () => file) } as unknown as FileSystemFileHandle;
+      let markStarted!: () => void;
+      let releaseListing!: () => void;
+      const started = new Promise<void>(resolve => { markStarted = resolve; });
+      const listingGate = new Promise<void>(resolve => { releaseListing = resolve; });
+      const handle = createDirectoryHandleMock('a-backups', 'granted');
+      handle.values = vi.fn()
+        .mockImplementationOnce(async function* () {
+          markStarted();
+          await listingGate;
+          yield { kind: 'file', name: filename };
+        })
+        .mockImplementation(async function* () { yield { kind: 'file', name: filename }; });
+      handle.getFileHandle = vi.fn(async () => fileHandle) as FileSystemDirectoryHandle['getFileHandle'];
+      await authorizeOwnerHandle(handle);
+      const staleListing = service.listBackupFiles();
+      await started;
+      await switchOwner('user-b');
+      await switchOwner('user-a');
+      releaseListing();
+
+      await expect(staleListing).resolves.toEqual([]);
+      await expect(service.listBackupFiles()).resolves.toEqual([
+        expect.objectContaining({ name: filename, size: file.size }),
+      ]);
+    });
+
+    it('drops a deferred A file read after A to B to A and returns fresh A once', async () => {
+      const filename = buildLocalBackupFilename('2026-06-09_12-30-45');
+      const file = new File(['backup'], filename, { type: 'application/json' });
+      let markStarted!: () => void;
+      let releaseRead!: () => void;
+      const started = new Promise<void>(resolve => { markStarted = resolve; });
+      const readGate = new Promise<void>(resolve => { releaseRead = resolve; });
+      const getFile = vi.fn(async () => {
+        if (getFile.mock.calls.length === 1) {
+          markStarted();
+          await readGate;
+        }
+        return file;
+      });
+      const handle = createDirectoryHandleMock('a-backups', 'granted');
+      handle.getFileHandle = vi.fn(async (_name: string): Promise<FileSystemFileHandle> => ({
+        getFile,
+      } as unknown as FileSystemFileHandle));
+      await authorizeOwnerHandle(handle);
+      const staleRead = service.readBackupFile(filename);
+      await started;
+      await switchOwner('user-b');
+      await switchOwner('user-a');
+      releaseRead();
+
+      await expect(staleRead).resolves.toBeNull();
+      await expect(service.readBackupFile(filename)).resolves.toBe(file);
+      expect(getFile).toHaveBeenCalledTimes(2);
+    });
+
+    it('ignores legacy unowned state and handle without deleting directory files', async () => {
+      const legacyHandle = createDirectoryHandleMock('legacy-backups', 'granted');
+      localStorage.setItem('nanoflow.local-backup.directory-name', 'legacy-backups');
+      localStorage.setItem('nanoflow.local-backup.auto-enabled', 'true');
+      idbStore.set('nanoflow.local-backup.directory-handle', legacyHandle);
+      service.ngOnDestroy();
+      service = createService('user-a');
+
+      await expect(service.checkAndRestorePermission({ request: false })).resolves.toBe(false);
+      expect(service.directoryName()).toBeNull();
+      expect(service.autoBackupEnabled()).toBe(false);
+      expect(legacyHandle.removeEntry).not.toHaveBeenCalled();
+      expect(idbStore.get('nanoflow.local-backup.directory-handle')).toBe(legacyHandle);
     });
   });
 
@@ -440,7 +755,26 @@ describe('LocalBackupService', () => {
     );
   }
 
-  function createService(): LocalBackupService {
+  async function switchOwner(userId: string | null): Promise<void> {
+    sessionRuntimeReset.resetAll('owner-change');
+    currentUserIdSignal.set(userId);
+    await flushOwnerRebind();
+  }
+
+  async function authorizeOwnerHandle(handle: FileSystemDirectoryHandle): Promise<void> {
+    window.showDirectoryPicker = vi.fn(async () => handle);
+    service.ngOnDestroy();
+    service = createService('user-a');
+    await service.requestDirectoryAccess();
+  }
+
+  async function flushOwnerRebind(): Promise<void> {
+    await Promise.resolve();
+    await Promise.resolve();
+  }
+
+  function createService(initialUserId: string | null = 'user-1'): LocalBackupService {
+    currentUserIdSignal = signal<string | null>(initialUserId);
     const injector = Injector.create({
       providers: [
         { provide: LocalBackupService, useClass: LocalBackupService },
@@ -451,8 +785,11 @@ describe('LocalBackupService', () => {
         { provide: PreferenceService, useValue: { get: vi.fn(), set: vi.fn(), syncLocalBackupSettings: vi.fn() } },
         { provide: SentryLazyLoaderService, useValue: { captureException: vi.fn() } },
         { provide: DisasterBackupService, useValue: disasterBackupServiceMock },
+        { provide: AuthService, useValue: { currentUserId: currentUserIdSignal } },
+        SessionRuntimeResetRegistry,
       ],
     });
+    sessionRuntimeReset = injector.get(SessionRuntimeResetRegistry);
     return injector.get(LocalBackupService);
   }
 });

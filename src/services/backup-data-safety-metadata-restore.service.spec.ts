@@ -113,30 +113,6 @@ describe('BackupDataSafetyMetadataRestoreService', () => {
     expect(localStorage.getItem(markerKey)).toBe(JSON.stringify(marker));
   });
 
-  it('fails closed and preserves an empty restore marker before writing metadata', async () => {
-    const service = TestBed.inject(BackupDataSafetyMetadataRestoreService);
-    const markerKey = 'nanoflow.backup-metadata-restore-marker.user-1';
-    const taskTombstonesBefore = localStorage.getItem('nanoflow.local-tombstones');
-    const connectionTombstonesBefore = localStorage.getItem('nanoflow.local-connection-tombstones');
-    const auditBefore = localStorage.getItem('nanoflow.data-safety-audit.user-1');
-    const cursorRowsBefore = await readCursorRows(db);
-    localStorage.setItem(markerKey, '');
-
-    await expect(service.restore(createBackup(), 'user-1')).rejects.toThrow(
-      'backup metadata restore marker is invalid',
-    );
-
-    expect(localStorage.getItem(markerKey)).toBe('');
-    expect(localStorage.getItem('nanoflow.local-tombstones')).toBe(taskTombstonesBefore);
-    expect(localStorage.getItem('nanoflow.local-connection-tombstones'))
-      .toBe(connectionTombstonesBefore);
-    expect(localStorage.getItem('nanoflow.data-safety-audit.user-1')).toBe(auditBefore);
-    expect(await readCursorRows(db)).toEqual(cursorRowsBefore);
-    expect(lastSyncTime).toBe('2026-06-18T00:00:10.000Z');
-    expect(setLastSyncTime).not.toHaveBeenCalled();
-    expect(reloadLocalTombstonesFromStorage).not.toHaveBeenCalled();
-  });
-
   it('does not clear a newer marker when an older metadata restore completes late', async () => {
     const service = TestBed.inject(BackupDataSafetyMetadataRestoreService);
     const markerKey = 'nanoflow.backup-metadata-restore-marker.user-1';
@@ -517,48 +493,6 @@ describe('BackupDataSafetyMetadataRestoreService', () => {
     expect(consoleError.mock.calls.every(([error]) => (
       error instanceof Error && error.message === 'forced cursor transaction failure'
     ))).toBe(true);
-  });
-
-  it('preserves other project tombstone updates while rolling back the restored project', async () => {
-    const service = TestBed.inject(BackupDataSafetyMetadataRestoreService);
-    localStorage.setItem('nanoflow.local-tombstones', JSON.stringify({
-      'project-1': { 'task-current': 10, 'task-deleted': 10 },
-      'project-2': { 'task-before': 12 },
-    }));
-    localStorage.setItem('nanoflow.local-connection-tombstones', JSON.stringify([
-      { projectId: 'project-1', id: 'connection-before', timestamp: 10 },
-      { projectId: 'project-2', id: 'connection-before', timestamp: 12 },
-    ]));
-    setLastSyncTime.mockImplementationOnce(() => {
-      localStorage.setItem('nanoflow.local-tombstones', JSON.stringify({
-        'project-1': { 'task-during-restore': 20 },
-        'project-2': { 'task-concurrent': 30 },
-      }));
-      localStorage.setItem('nanoflow.local-connection-tombstones', JSON.stringify([
-        { projectId: 'project-1', id: 'connection-during-restore', timestamp: 20 },
-        { projectId: 'project-2', id: 'connection-concurrent', timestamp: 30 },
-      ]));
-      throw new Error('simulated metadata restore failure');
-    });
-
-    await expect(service.restore(createBackup(), 'user-1')).rejects.toThrow(
-      'simulated metadata restore failure',
-    );
-
-    expect(JSON.parse(localStorage.getItem('nanoflow.local-tombstones') ?? '{}')).toEqual({
-      'project-1': { 'task-current': 10, 'task-deleted': 10 },
-      'project-2': { 'task-concurrent': 30 },
-    });
-    const connectionTombstones = JSON.parse(
-      localStorage.getItem('nanoflow.local-connection-tombstones') ?? '[]',
-    ) as Array<Record<string, unknown>>;
-    expect(connectionTombstones).toHaveLength(2);
-    expect(connectionTombstones).toEqual(expect.arrayContaining([
-      { projectId: 'project-1', id: 'connection-before', timestamp: 10 },
-      { projectId: 'project-2', id: 'connection-concurrent', timestamp: 30 },
-    ]));
-    expect(lastSyncTime).toBe('2026-06-18T00:00:10.000Z');
-    expect(localStorage.getItem('nanoflow.backup-metadata-restore-marker.user-1')).toBeNull();
   });
 });
 

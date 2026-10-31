@@ -30,14 +30,16 @@ export class LocalBackupDeferredRetryScheduler {
 
   clear(): void {
     this.retryGeneration += 1;
-    if (this.retryTimer !== null) {
-      clearTimeout(this.retryTimer);
-      this.retryTimer = null;
+    const retryTimer = this.retryTimer;
+    this.retryTimer = null;
+    if (retryTimer !== null) {
+      this.clearTimeoutSafely(retryTimer);
     }
 
-    if (this.visibilityRetryHandler && typeof document !== 'undefined') {
-      document.removeEventListener('visibilitychange', this.visibilityRetryHandler);
-      this.visibilityRetryHandler = null;
+    const visibilityRetryHandler = this.visibilityRetryHandler;
+    this.visibilityRetryHandler = null;
+    if (visibilityRetryHandler && typeof document !== 'undefined') {
+      this.removeVisibilityListenerSafely(visibilityRetryHandler);
     }
   }
 
@@ -48,15 +50,18 @@ export class LocalBackupDeferredRetryScheduler {
 
     const generation = ++this.retryGeneration;
     const onVisibilityChange = () => {
-      if (generation !== this.retryGeneration) {
+      if (
+        generation !== this.retryGeneration
+        || this.visibilityRetryHandler !== onVisibilityChange
+      ) {
         return;
       }
       if (document.visibilityState !== 'visible') {
         return;
       }
 
-      document.removeEventListener('visibilitychange', onVisibilityChange);
       this.visibilityRetryHandler = null;
+      this.removeVisibilityListenerSafely(onVisibilityChange);
       this.armRetryTimer(generation);
     };
 
@@ -100,5 +105,21 @@ export class LocalBackupDeferredRetryScheduler {
 
   private canRunRetry(): boolean {
     return this.options.isEnabled() && this.options.hasProjectsProvider();
+  }
+
+  private clearTimeoutSafely(retryTimer: ReturnType<typeof setTimeout>): void {
+    try {
+      clearTimeout(retryTimer);
+    } catch {
+      // The generation and local handle are already invalidated.
+    }
+  }
+
+  private removeVisibilityListenerSafely(listener: EventListener): void {
+    try {
+      document.removeEventListener('visibilitychange', listener);
+    } catch {
+      // The local handler identity guard keeps a retained browser listener stale.
+    }
   }
 }

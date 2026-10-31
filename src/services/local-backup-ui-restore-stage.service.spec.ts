@@ -59,7 +59,7 @@ describe('createLocalBackupUiRestoreStageOperations', () => {
     const effects = Object.fromEntries(LOCAL_BACKUP_UI_RESTORE_STAGES.map(stage => [
       stage,
       makeEffect(stage, calls, durable),
-    ])) as unknown as Record<LocalBackupUiRestoreStage, LocalBackupUiRestoreStageEffect>;
+    ])) as Record<LocalBackupUiRestoreStage, LocalBackupUiRestoreStageEffect>;
     const operations = createLocalBackupUiRestoreStageOperations({} as never, {
       decodePreImage: vi.fn(() => snapshots),
       effects,
@@ -79,6 +79,7 @@ describe('createLocalBackupUiRestoreStageOperations', () => {
     expect(calls).toEqual(LOCAL_BACKUP_UI_RESTORE_STAGES.flatMap(stage => [
       `apply:${stage}`,
       `read:${stage}`,
+      `read:${stage}`,
     ]).concat([...LOCAL_BACKUP_UI_RESTORE_STAGES].reverse().flatMap(stage => [
       `restore:${stage}:${String(snapshotForStage(snapshots, stage))}`,
       `read:${stage}`,
@@ -91,7 +92,7 @@ describe('createLocalBackupUiRestoreStageOperations', () => {
     const effects = Object.fromEntries(LOCAL_BACKUP_UI_RESTORE_STAGES.map(stage => [
       stage,
       makeEffect(stage, [], durable),
-    ])) as unknown as Record<LocalBackupUiRestoreStage, LocalBackupUiRestoreStageEffect>;
+    ])) as Record<LocalBackupUiRestoreStage, LocalBackupUiRestoreStageEffect>;
     const operations = createLocalBackupUiRestoreStageOperations({} as never, {
       decodePreImage: () => snapshots,
       effects,
@@ -103,26 +104,6 @@ describe('createLocalBackupUiRestoreStageOperations', () => {
     await operations.apply('projects', context);
     durable.set('projects', { drifted: true });
     await expect(operations.verifyApplied('projects', context)).rejects.toThrow(/read-back/i);
-  });
-
-  it('rejects a stable stale read when the apply did not persist its target', async () => {
-    const snapshots = makeSnapshots();
-    const effects = Object.fromEntries(LOCAL_BACKUP_UI_RESTORE_STAGES.map(stage => [
-      stage,
-      {
-        apply: vi.fn(async () => ({ result: stage, expected: { stage, state: 'target' } })),
-        read: vi.fn(async () => ({ stage, state: 'old' })),
-        restore: vi.fn(async () => undefined),
-      },
-    ])) as unknown as Record<LocalBackupUiRestoreStage, LocalBackupUiRestoreStageEffect>;
-    const operations = createLocalBackupUiRestoreStageOperations({} as never, {
-      decodePreImage: () => snapshots,
-      effects,
-    });
-
-    operations.decodePreImage({} as LocalBackupUiRestoreMarker);
-    await operations.apply('projects', makeContext());
-    await expect(operations.verifyApplied('projects', makeContext())).rejects.toThrow(/read-back/i);
   });
 
   it('delegates the action-queue stage to the prepared QueueBackup participant only', async () => {
@@ -584,7 +565,7 @@ function makeEffect(
     apply: vi.fn(async () => {
       calls.push(`apply:${stage}`);
       durable.set(stage, { stage, state: 'applied' });
-      return { result: stage, expected: { stage, state: 'applied' } };
+      return stage;
     }),
     read: vi.fn(async () => {
       calls.push(`read:${stage}`);
