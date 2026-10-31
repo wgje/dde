@@ -257,8 +257,8 @@ export function registerTaskSyncOperationsRetryGuardSpecs(
     }));
   });
 
-  it('sync RPC 不可用时不应调用 legacy purge RPC 绕过 stale-write CAS', async () => {
-    const { service, mockClient, mockSyncRpcClient, mockTaskStore } = getContext();
+  it('sync RPC 不可用时应保留耐久删除意图且不调用 legacy purge RPC', async () => {
+    const { service, mockClient, mockRetryQueue, mockSyncRpcClient, mockTaskStore } = getContext();
     mockSyncRpcClient.isFeatureEnabled.mockReturnValue(false);
     mockTaskStore.getTask.mockReturnValue({
       id: 'task-legacy-cas',
@@ -290,10 +290,21 @@ export function registerTaskSyncOperationsRetryGuardSpecs(
 
     const result = await service.purgeTasksFromCloud('project-1', ['task-legacy-cas'], 'user-1');
 
-    expect(result).toBe(true);
+    expect(result).toBe(false);
     expect(mockClient.rpc).not.toHaveBeenCalledWith('purge_tasks_v3', expect.anything());
     expect(mockClient.rpc).not.toHaveBeenCalledWith('purge_tasks_v2', expect.anything());
-    expect(updateEqCount).toBeGreaterThanOrEqual(3);
+    expect(updateEqCount).toBe(0);
+    expect(mockRetryQueue.addDurably).toHaveBeenCalledWith(
+      'task',
+      'delete',
+      { id: 'task-legacy-cas', baseUpdatedAt: '2026-04-01T00:00:00.000Z' },
+      'project-1',
+      'user-1',
+      undefined,
+      undefined,
+      undefined,
+      expect.any(String),
+    );
   });
 
   it('重试队列回放单任务 delete 遇到 owner mismatch 时不应重复入队', async () => {
@@ -399,7 +410,7 @@ export function registerTaskSyncOperationsRetryGuardSpecs(
       undefined,
       undefined,
       undefined,
-      undefined,
+      expect.any(String),
     );
   });
 }

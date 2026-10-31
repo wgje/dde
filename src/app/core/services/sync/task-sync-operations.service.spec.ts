@@ -22,6 +22,7 @@ import { SyncRpcClientService, type SyncRpcResult } from '../../../../services/s
 import { DataSafetyAuditPersistence } from '../../../../services/data-safety-audit-persistence';
 import { Task } from '../../../../models';
 import { TaskStore } from '../../state/stores';
+import { TaskDeleteConflictCaptureService } from './task-delete-conflict-capture.service';
 import { resetBrowserNetworkSuspensionTrackingForTests } from '../../../../utils/browser-network-suspension';
 import {
   registerTaskSyncOperationsBrowserSuspensionSpecs,
@@ -134,6 +135,9 @@ describe('TaskSyncOperationsService', () => {
     getTask: vi.fn(),
     setTask: vi.fn(),
   };
+  const mockTaskDeleteConflictCapture = {
+    capture: vi.fn(async () => true),
+  };
   const mockSessionManager = {
     tryRefreshSession: vi.fn(async () => false),
     handleSessionExpired: vi.fn(() => {
@@ -213,6 +217,7 @@ describe('TaskSyncOperationsService', () => {
       mockClient,
       mockSyncRpcClient,
       mockTaskStore,
+      mockTaskDeleteConflictCapture,
       mockRetryQueue,
       mockTombstoneService,
     };
@@ -392,6 +397,7 @@ describe('TaskSyncOperationsService', () => {
           useValue: mockRetryQueue,
         },
         { provide: SyncRpcClientService, useValue: mockSyncRpcClient },
+        { provide: TaskDeleteConflictCaptureService, useValue: mockTaskDeleteConflictCapture },
         {
           provide: SyncStateService,
           useValue: mockSyncState,

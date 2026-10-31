@@ -1,11 +1,11 @@
+import type { DataSafetyWriteAuditInput } from '../../../../services/data-safety-write-audit.service';
+import { createProjectTaskDeleteOperationId } from '../../../../services/project-operation-child-operation-id';
 import type { SyncRpcResult } from '../../../../services/sync-rpc-client.service';
-import { supabaseErrorToError } from '../../../../utils/supabase-error';
 import type { TaskPurgeResult } from './task-sync-operations.types';
 
 export interface TaskBaseUpdatedAtSource {
   updatedAt?: string | null;
 }
-
 export interface BuildTaskBaseUpdatedAtMapOptions {
   taskIds: readonly string[];
   overrideMap?: Record<string, string | null | undefined>;
@@ -35,36 +35,29 @@ export interface TaskDeleteSessionRefresher {
   tryRefreshSession(context: string): Promise<boolean>;
 }
 
-interface TaskSoftDeleteQueryResult {
-  data: unknown;
-  error: unknown;
+export interface ResolveRejectedTaskDeleteConflictPurgeResultOptions {
+  taskIds: string[];
+  conflictTaskIds: string[];
+  hasRetryEntity(taskId: string): boolean;
+  removeConflictRetries(taskIds: string[]): void;
+  captureConflict(): Promise<boolean>;
 }
 
-interface TaskSoftDeleteQueryLike extends PromiseLike<TaskSoftDeleteQueryResult> {}
-
-interface TaskSoftDeleteUpdateChain {
-  eq(column: string, value: string): TaskSoftDeleteUpdateChain;
-  select(columns: string): {
-    maybeSingle(): TaskSoftDeleteQueryLike;
-  };
+export interface SettledLocalTaskDeleteWriteAuditRecorder {
+  recordWrite(input: DataSafetyWriteAuditInput): unknown;
 }
 
-export interface TaskSoftDeleteClient {
-  from(table: 'tasks'): {
-    update(values: { deleted_at: string; updated_at: string }): TaskSoftDeleteUpdateChain;
-  };
-}
-
-export interface SoftDeleteTasksWithBaseGuardOptions {
-  client: TaskSoftDeleteClient;
+export interface RecordSettledLocalTaskDeleteWriteAuditOptions {
+  dataSafetyWriteAudit: SettledLocalTaskDeleteWriteAuditRecorder;
   projectId: string;
-  taskIds: readonly string[];
-  baseUpdatedAtMap: Record<string, string | null | undefined>;
-  deletedAt?: string;
-  logger: {
-    warn(message: string, context?: Record<string, unknown>): void;
-    error(message: string, context?: Record<string, unknown>): void;
-  };
+  ownerUserId: string | null | undefined;
+  operationId: string;
+  taskIds: string[];
+  localTimestamp: number;
+  baseUpdatedAtMap?: Record<string, string | null | undefined>;
+  getTask?: (taskId: string) => TaskBaseUpdatedAtSource | undefined;
+  lastSyncTimeBefore: string | null;
+  lastSyncTimeAfter: string | null;
 }
 
 export function createTaskPurgeResult(
@@ -72,8 +65,11 @@ export function createTaskPurgeResult(
   deletedTaskIds: string[],
   skippedTaskIds: string[],
   retriedTaskIds: string[],
+  conflictTaskIds: string[] = [],
 ): TaskPurgeResult {
-  return { success, deletedTaskIds, skippedTaskIds, retriedTaskIds };
+  return conflictTaskIds.length > 0
+    ? { success, deletedTaskIds, skippedTaskIds, retriedTaskIds, conflictTaskIds }
+    : { success, deletedTaskIds, skippedTaskIds, retriedTaskIds };
 }
 
 export function createRejectedTaskPurgeResult(
@@ -87,12 +83,14 @@ export function createSettledTaskPurgeResult(
   deletedTaskIds: string[],
   skippedTaskIds: string[],
   retriedTaskIds: string[] = [],
+  conflictTaskIds: string[] = [],
 ): TaskPurgeResult {
   return createTaskPurgeResult(
     skippedTaskIds.length === 0,
     deletedTaskIds,
     skippedTaskIds,
     retriedTaskIds,
+    conflictTaskIds,
   );
 }
 
@@ -113,6 +111,91 @@ export function createRetryTrackedRejectedTaskPurgeResult(
   hasRetryEntity: (taskId: string) => boolean,
 ): TaskPurgeResult {
   return createRetryTrackedTaskPurgeResult([], taskIds, hasRetryEntity);
+}
+
+export async function resolveRejectedTaskDeleteConflictPurgeResult(
+  options: ResolveRejectedTaskDeleteConflictPurgeResultOptions,
+): Promise<TaskPurgeResult> {
+  const rejectedResult = createRetryTrackedRejectedTaskPurgeResult(
+    options.taskIds,
+    options.hasRetryEntity,
+  );
+  if (options.conflictTaskIds.length === 0) {
+    return rejectedResult;
+  }
+
+  const conflictPersisted = await options.captureConflict();
+  if (conflictPersisted) {
+    options.removeConflictRetries(options.conflictTaskIds);
+  }
+  return {
+    ...rejectedResult,
+    retriedTaskIds: conflictPersisted ? [] : rejectedResult.retriedTaskIds,
+    conflictTaskIds: [...options.conflictTaskIds],
+    conflictPersisted,
+  };
+}
+
+export function recordSettledLocalTaskDeleteWriteAudit(
+  options: RecordSettledLocalTaskDeleteWriteAuditOptions,
+): void {
+  const shouldDeriveChildOperationIds = options.taskIds.length > 1;
+  for (const taskId of options.taskIds) {
+    const retryBaseUpdatedAt = resolveTaskDeleteRetryBaseUpdatedAt(
+      taskId,
+      options.baseUpdatedAtMap,
+      options.getTask,
+    );
+    const baseUpdatedAt = retryBaseUpdatedAt ?? null;
+    const operationId = shouldDeriveChildOperationIds
+      ? createProjectTaskDeleteOperationId(
+        options.operationId,
+        options.projectId,
+        taskId,
+        retryBaseUpdatedAt,
+      )
+      : options.operationId;
+
+    options.dataSafetyWriteAudit.recordWrite({
+      ownerUserId: options.ownerUserId,
+      operationId,
+      sourceUserId: options.ownerUserId ?? undefined,
+      entityType: 'task',
+      entityId: taskId,
+      operation: 'delete',
+      writeIntent: 'task_soft_delete',
+      localTimestamp: options.localTimestamp,
+      updatedAtBaseline: baseUpdatedAt,
+      beforeVersion: baseUpdatedAt,
+      rpcResult: {
+        status: 'applied',
+        decision: 'local-only-task-delete',
+        affectedCount: 1,
+        raw: { source: 'local-only-task-delete' },
+      },
+      enteredRetryQueue: true,
+      retryCount: 1,
+      lastSyncTimeBefore: options.lastSyncTimeBefore,
+      lastSyncTimeAfter: options.lastSyncTimeAfter,
+    });
+  }
+}
+
+function resolveTaskDeleteRetryBaseUpdatedAt(
+  taskId: string,
+  baseUpdatedAtMap: Record<string, string | null | undefined> | undefined,
+  getTask: ((taskId: string) => TaskBaseUpdatedAtSource | undefined) | undefined,
+): string | null | undefined {
+  const mappedBaseUpdatedAt = baseUpdatedAtMap?.[taskId];
+  if (mappedBaseUpdatedAt !== undefined) {
+    return mappedBaseUpdatedAt;
+  }
+
+  const updatedAt = getTask?.(taskId)?.updatedAt;
+  if (typeof updatedAt === 'string' && updatedAt.length > 0) {
+    return updatedAt;
+  }
+  return updatedAt === null ? null : undefined;
 }
 
 export function collectRetriedTaskIds(
@@ -200,122 +283,4 @@ export function selectAppliedTaskDeleteIds(
     deletedTaskIds: taskIds.filter(id => !skippedSet.has(id)),
     skippedTaskIds,
   };
-}
-
-export interface LegacyPurgeSoftDeleteFallbackSelectionOptions {
-  taskIds: readonly string[];
-  existingTaskIds: ReadonlySet<string>;
-  updatedTaskIds: readonly string[];
-}
-
-export interface LegacyPurgeSoftDeleteFallbackSelection {
-  softDeleteTaskIds: string[];
-  skippedTaskIds: string[];
-}
-
-export function selectLegacyPurgeSoftDeleteFallbackIds(
-  options: LegacyPurgeSoftDeleteFallbackSelectionOptions,
-): LegacyPurgeSoftDeleteFallbackSelection {
-  const softDeleteTaskIds = options.taskIds.filter(id => options.existingTaskIds.has(id));
-  if (softDeleteTaskIds.length === 0) {
-    return {
-      softDeleteTaskIds,
-      skippedTaskIds: [],
-    };
-  }
-
-  const updatedSet = new Set(options.updatedTaskIds);
-  return {
-    softDeleteTaskIds,
-    skippedTaskIds: softDeleteTaskIds.filter(id => !updatedSet.has(id)),
-  };
-}
-
-export interface ResolveLegacyPurgeSoftDeleteFallbackIdsOptions {
-  taskIds: readonly string[];
-  existingTaskIds: ReadonlySet<string>;
-  softDeleteExistingTaskIds(taskIds: string[]): Promise<readonly string[]>;
-}
-
-export interface LegacyPurgeSoftDeleteFallbackResult {
-  updatedTaskIds: string[];
-  skippedTaskIds: string[];
-}
-
-export async function resolveLegacyPurgeSoftDeleteFallbackIds(
-  options: ResolveLegacyPurgeSoftDeleteFallbackIdsOptions,
-): Promise<LegacyPurgeSoftDeleteFallbackResult> {
-  const { softDeleteTaskIds } = selectLegacyPurgeSoftDeleteFallbackIds({
-    taskIds: options.taskIds,
-    existingTaskIds: options.existingTaskIds,
-    updatedTaskIds: [],
-  });
-
-  if (softDeleteTaskIds.length === 0) {
-    return {
-      updatedTaskIds: [],
-      skippedTaskIds: [],
-    };
-  }
-
-  const rawUpdatedTaskIds = await options.softDeleteExistingTaskIds(softDeleteTaskIds);
-  const selection = selectLegacyPurgeSoftDeleteFallbackIds({
-    taskIds: options.taskIds,
-    existingTaskIds: options.existingTaskIds,
-    updatedTaskIds: rawUpdatedTaskIds,
-  });
-  const skippedSet = new Set(selection.skippedTaskIds);
-
-  return {
-    updatedTaskIds: selection.softDeleteTaskIds.filter(id => !skippedSet.has(id)),
-    skippedTaskIds: selection.skippedTaskIds,
-  };
-}
-
-export async function softDeleteTasksWithBaseGuard(
-  options: SoftDeleteTasksWithBaseGuardOptions,
-): Promise<string[]> {
-  const {
-    client,
-    projectId,
-    taskIds,
-    baseUpdatedAtMap,
-    deletedAt = new Date().toISOString(),
-    logger,
-  } = options;
-  const updatedTaskIds: string[] = [];
-
-  for (const taskId of taskIds) {
-    const baseUpdatedAt = baseUpdatedAtMap[taskId];
-    if (!baseUpdatedAt) {
-      logger.warn('跳过缺少 updatedAt 基线的任务软删降级，避免陈旧删除覆盖远端', {
-        projectId,
-        taskId,
-      });
-      continue;
-    }
-
-    const { data, error } = await client
-      .from('tasks')
-      .update({ deleted_at: deletedAt, updated_at: deletedAt })
-      .eq('project_id', projectId)
-      .eq('id', taskId)
-      .eq('updated_at', baseUpdatedAt)
-      .select('id')
-      .maybeSingle();
-
-    if (error) {
-      logger.error('任务软删降级失败', { projectId, taskId, error });
-      throw supabaseErrorToError(error);
-    }
-
-    if (!data) {
-      logger.warn('跳过远端已前进的任务软删降级', { projectId, taskId, baseUpdatedAt });
-      continue;
-    }
-
-    updatedTaskIds.push(taskId);
-  }
-
-  return updatedTaskIds;
 }

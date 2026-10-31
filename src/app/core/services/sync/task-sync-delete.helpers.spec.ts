@@ -10,12 +10,11 @@ import {
   createSettledTaskPurgeResult,
   createTaskPurgeResult,
   getSkippedTaskDeleteIds,
+  resolveRejectedTaskDeleteConflictPurgeResult,
   resolveTaskDeleteSessionUserId,
-  resolveLegacyPurgeSoftDeleteFallbackIds,
   selectAppliedTaskDeleteIds,
-  selectLegacyPurgeSoftDeleteFallbackIds,
-  softDeleteTasksWithBaseGuard,
 } from './task-sync-delete.helpers';
+
 
 describe('task-sync-delete helpers', () => {
   it('createTaskPurgeResult 应保持 purge 结果结构稳定', () => {
@@ -89,6 +88,50 @@ describe('task-sync-delete helpers', () => {
     expect(hasRetryEntity).toHaveBeenCalledTimes(2);
     expect(hasRetryEntity).toHaveBeenCalledWith('task-skipped-retry');
     expect(hasRetryEntity).toHaveBeenCalledWith('task-skipped-new');
+  });
+
+  it('resolveRejectedTaskDeleteConflictPurgeResult 应清理冲突重试并保留持久化结果', async () => {
+    const removeConflictRetries = vi.fn();
+    const captureConflict = vi.fn(async () => true);
+
+    await expect(resolveRejectedTaskDeleteConflictPurgeResult({
+      taskIds: ['task-conflict'],
+      conflictTaskIds: ['task-conflict'],
+      hasRetryEntity: vi.fn(() => true),
+      removeConflictRetries,
+      captureConflict,
+    })).resolves.toEqual({
+      success: false,
+      deletedTaskIds: [],
+      skippedTaskIds: ['task-conflict'],
+      retriedTaskIds: [],
+      conflictTaskIds: ['task-conflict'],
+      conflictPersisted: true,
+    });
+
+    expect(removeConflictRetries).toHaveBeenCalledWith(['task-conflict']);
+    expect(captureConflict).toHaveBeenCalledOnce();
+  });
+
+  it('resolveRejectedTaskDeleteConflictPurgeResult 在冲突持久化失败时应保留重试删除意图', async () => {
+    const removeConflictRetries = vi.fn();
+
+    await expect(resolveRejectedTaskDeleteConflictPurgeResult({
+      taskIds: ['task-conflict'],
+      conflictTaskIds: ['task-conflict'],
+      hasRetryEntity: vi.fn(() => true),
+      removeConflictRetries,
+      captureConflict: vi.fn(async () => false),
+    })).resolves.toEqual({
+      success: false,
+      deletedTaskIds: [],
+      skippedTaskIds: ['task-conflict'],
+      retriedTaskIds: ['task-conflict'],
+      conflictTaskIds: ['task-conflict'],
+      conflictPersisted: false,
+    });
+
+    expect(removeConflictRetries).not.toHaveBeenCalled();
   });
 
   it('createRetryTrackedRejectedTaskPurgeResult 应把请求任务作为跳过任务并收集重试集合', () => {
@@ -247,185 +290,4 @@ describe('task-sync-delete helpers', () => {
     });
   });
 
-  it('selectLegacyPurgeSoftDeleteFallbackIds 应只对仍存在的任务计算软删和重试集合', () => {
-    expect(selectLegacyPurgeSoftDeleteFallbackIds({
-      taskIds: ['task-1', 'missing-task', 'task-2', 'task-3'],
-      existingTaskIds: new Set(['task-1', 'task-2', 'task-3']),
-      updatedTaskIds: ['task-1', 'foreign-task', 'task-3', 'task-1'],
-    })).toEqual({
-      softDeleteTaskIds: ['task-1', 'task-2', 'task-3'],
-      skippedTaskIds: ['task-2'],
-    });
-  });
-
-  it('selectLegacyPurgeSoftDeleteFallbackIds 应在不存在远端任务时返回空集合', () => {
-    expect(selectLegacyPurgeSoftDeleteFallbackIds({
-      taskIds: ['missing-task'],
-      existingTaskIds: new Set(),
-      updatedTaskIds: ['missing-task'],
-    })).toEqual({
-      softDeleteTaskIds: [],
-      skippedTaskIds: [],
-    });
-  });
-
-  it('resolveLegacyPurgeSoftDeleteFallbackIds 应只软删仍存在的任务并计算重试集合', async () => {
-    const softDeleteExistingTaskIds = vi.fn(async () => [
-      'task-1',
-      'foreign-task',
-      'task-3',
-      'task-1',
-    ]);
-
-    await expect(resolveLegacyPurgeSoftDeleteFallbackIds({
-      taskIds: ['task-1', 'missing-task', 'task-2', 'task-3'],
-      existingTaskIds: new Set(['task-1', 'task-2', 'task-3']),
-      softDeleteExistingTaskIds,
-    })).resolves.toEqual({
-      updatedTaskIds: ['task-1', 'task-3'],
-      skippedTaskIds: ['task-2'],
-    });
-
-    expect(softDeleteExistingTaskIds).toHaveBeenCalledOnce();
-    expect(softDeleteExistingTaskIds).toHaveBeenCalledWith(['task-1', 'task-2', 'task-3']);
-  });
-
-  it('resolveLegacyPurgeSoftDeleteFallbackIds 无远端任务时不应调用软删回调', async () => {
-    const softDeleteExistingTaskIds = vi.fn(async () => ['missing-task']);
-
-    await expect(resolveLegacyPurgeSoftDeleteFallbackIds({
-      taskIds: ['missing-task'],
-      existingTaskIds: new Set(),
-      softDeleteExistingTaskIds,
-    })).resolves.toEqual({
-      updatedTaskIds: [],
-      skippedTaskIds: [],
-    });
-
-    expect(softDeleteExistingTaskIds).not.toHaveBeenCalled();
-  });
-
-  it('softDeleteTasksWithBaseGuard 应按 updatedAt 基线逐个执行 CAS 软删', async () => {
-    const maybeSingle = vi.fn(async () => ({ data: { id: 'task-1' }, error: null }));
-    const select = vi.fn(() => ({ maybeSingle }));
-    const eq = vi.fn(function (
-      this: { eq: typeof eq; select: typeof select },
-      _column: string,
-      _value: string,
-    ) {
-      return this;
-    });
-    const update = vi.fn(() => ({ eq, select }));
-    const client = { from: vi.fn(() => ({ update })) };
-    const logger = { warn: vi.fn(), error: vi.fn() };
-
-    await expect(softDeleteTasksWithBaseGuard({
-      client,
-      projectId: 'project-1',
-      taskIds: ['task-1'],
-      baseUpdatedAtMap: { 'task-1': '2026-06-14T00:00:00.000Z' },
-      deletedAt: '2026-06-15T00:00:00.000Z',
-      logger,
-    })).resolves.toEqual(['task-1']);
-
-    expect(client.from).toHaveBeenCalledWith('tasks');
-    expect(update).toHaveBeenCalledWith({
-      deleted_at: '2026-06-15T00:00:00.000Z',
-      updated_at: '2026-06-15T00:00:00.000Z',
-    });
-    expect(eq).toHaveBeenCalledWith('project_id', 'project-1');
-    expect(eq).toHaveBeenCalledWith('id', 'task-1');
-    expect(eq).toHaveBeenCalledWith('updated_at', '2026-06-14T00:00:00.000Z');
-    expect(select).toHaveBeenCalledWith('id');
-    expect(logger.warn).not.toHaveBeenCalled();
-    expect(logger.error).not.toHaveBeenCalled();
-  });
-
-  it('softDeleteTasksWithBaseGuard 缺少基线时应跳过，避免陈旧删除覆盖远端', async () => {
-    const client = { from: vi.fn() };
-    const logger = { warn: vi.fn(), error: vi.fn() };
-
-    await expect(softDeleteTasksWithBaseGuard({
-      client,
-      projectId: 'project-1',
-      taskIds: ['task-without-baseline'],
-      baseUpdatedAtMap: { 'task-without-baseline': null },
-      deletedAt: '2026-06-15T00:00:00.000Z',
-      logger,
-    })).resolves.toEqual([]);
-
-    expect(client.from).not.toHaveBeenCalled();
-    expect(logger.warn).toHaveBeenCalledWith(
-      '跳过缺少 updatedAt 基线的任务软删降级，避免陈旧删除覆盖远端',
-      { projectId: 'project-1', taskId: 'task-without-baseline' },
-    );
-  });
-
-  it('softDeleteTasksWithBaseGuard 远端版本已前进时应跳过该任务', async () => {
-    const maybeSingle = vi.fn(async () => ({ data: null, error: null }));
-    const select = vi.fn(() => ({ maybeSingle }));
-    const eq = vi.fn(function (
-      this: { eq: typeof eq; select: typeof select },
-      _column: string,
-      _value: string,
-    ) {
-      return this;
-    });
-    const update = vi.fn(() => ({ eq, select }));
-    const client = { from: vi.fn(() => ({ update })) };
-    const logger = { warn: vi.fn(), error: vi.fn() };
-
-    await expect(softDeleteTasksWithBaseGuard({
-      client,
-      projectId: 'project-1',
-      taskIds: ['remote-newer'],
-      baseUpdatedAtMap: { 'remote-newer': '2026-06-14T00:00:00.000Z' },
-      deletedAt: '2026-06-15T00:00:00.000Z',
-      logger,
-    })).resolves.toEqual([]);
-
-    expect(logger.warn).toHaveBeenCalledWith(
-      '跳过远端已前进的任务软删降级',
-      {
-        projectId: 'project-1',
-        taskId: 'remote-newer',
-        baseUpdatedAt: '2026-06-14T00:00:00.000Z',
-      },
-    );
-    expect(logger.error).not.toHaveBeenCalled();
-  });
-
-  it('softDeleteTasksWithBaseGuard 数据库错误应转换为增强错误并抛出', async () => {
-    const dbError = { code: '42501', message: 'permission denied' };
-    const maybeSingle = vi.fn(async () => ({ data: null, error: dbError }));
-    const select = vi.fn(() => ({ maybeSingle }));
-    const eq = vi.fn(function (
-      this: { eq: typeof eq; select: typeof select },
-      _column: string,
-      _value: string,
-    ) {
-      return this;
-    });
-    const update = vi.fn(() => ({ eq, select }));
-    const client = { from: vi.fn(() => ({ update })) };
-    const logger = { warn: vi.fn(), error: vi.fn() };
-
-    await expect(softDeleteTasksWithBaseGuard({
-      client,
-      projectId: 'project-1',
-      taskIds: ['task-error'],
-      baseUpdatedAtMap: { 'task-error': '2026-06-14T00:00:00.000Z' },
-      deletedAt: '2026-06-15T00:00:00.000Z',
-      logger,
-    })).rejects.toMatchObject({
-      code: '42501',
-      errorType: 'PermissionError',
-      isRetryable: false,
-    });
-
-    expect(logger.error).toHaveBeenCalledWith(
-      '任务软删降级失败',
-      { projectId: 'project-1', taskId: 'task-error', error: dbError },
-    );
-  });
 });

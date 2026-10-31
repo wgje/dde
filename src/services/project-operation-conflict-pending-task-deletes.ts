@@ -45,6 +45,40 @@ export function resolveEffectivePendingTaskDeleteBaseUpdatedAtMap(
   return Object.keys(picked).length > 0 ? picked : undefined;
 }
 
+export function resolveRefreshedPendingTaskDeleteBaseUpdatedAtMap(
+  remoteProject: {
+    tasks?: Array<{ id: string; updatedAt?: string | null }>;
+  } | null | undefined,
+  pendingTaskDeleteIds: string[],
+  fallbackBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap,
+  compatibilityRemoteUpdatedAt?: string | null,
+): TaskDeleteBaseUpdatedAtMap | undefined {
+  const remoteTasksById = new Map(
+    (remoteProject?.tasks ?? []).map(task => [task.id, task]),
+  );
+  const refreshed: TaskDeleteBaseUpdatedAtMap = {};
+
+  for (const taskId of pendingTaskDeleteIds) {
+    const remoteUpdatedAt = remoteTasksById.get(taskId)?.updatedAt;
+    if (typeof remoteUpdatedAt === 'string' && remoteUpdatedAt.length > 0) {
+      refreshed[taskId] = remoteUpdatedAt;
+      continue;
+    }
+    if (
+      pendingTaskDeleteIds.length === 1
+      && compatibilityRemoteUpdatedAt !== undefined
+    ) {
+      refreshed[taskId] = compatibilityRemoteUpdatedAt;
+      continue;
+    }
+    if (Object.prototype.hasOwnProperty.call(fallbackBaseUpdatedAtMap ?? {}, taskId)) {
+      refreshed[taskId] = fallbackBaseUpdatedAtMap?.[taskId] ?? null;
+    }
+  }
+
+  return Object.keys(refreshed).length > 0 ? refreshed : undefined;
+}
+
 export function createPendingTaskDeleteOperationId(
   project: Pick<Project, 'id' | 'version' | 'updatedAt'>,
   taskId: string,

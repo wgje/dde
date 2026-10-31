@@ -99,7 +99,7 @@ describe('TaskDeleteRpcRejectionReporterService', () => {
     });
   });
 
-  it('handles rejected delete RPC by setting sync error, reporting, queueing, and auditing', async () => {
+  it('handles remote-newer delete RPC as a persisted conflict without retrying it', async () => {
     const service = TestBed.inject(TaskDeleteRpcRejectionReporterService);
     const result: SyncRpcResult = {
       status: 'deleted-remote-newer',
@@ -108,7 +108,7 @@ describe('TaskDeleteRpcRejectionReporterService', () => {
     };
     const queueTaskDeletesForRetry = vi.fn(async () => ['task-rpc-rejected']);
 
-    await service.handleRejectedTaskDeleteRpc({
+    const outcome = await service.handleRejectedTaskDeleteRpc({
       result,
       projectId: 'project-1',
       taskIds: ['task-rpc-rejected'],
@@ -123,15 +123,11 @@ describe('TaskDeleteRpcRejectionReporterService', () => {
     });
 
     expect(setSyncError).toHaveBeenCalledWith('远端版本更新，删除意图已保留等待拉取合并');
-    expect(queueTaskDeletesForRetry).toHaveBeenCalledWith(
-      ['task-rpc-rejected'],
-      'project-1',
-      false,
-      'user-1',
-      false,
-      { 'task-rpc-rejected': '2026-06-16T01:00:00.000Z' },
-      'op-delete-rpc-rejected',
-    );
+    expect(queueTaskDeletesForRetry).not.toHaveBeenCalled();
+    expect(outcome).toEqual({
+      queuedTaskIds: [],
+      conflictTaskIds: ['task-rpc-rejected'],
+    });
     expect(captureMessage).toHaveBeenCalledWith('sync_rpc_task_delete_remote_newer', {
       level: 'warning',
       tags: {
@@ -150,7 +146,7 @@ describe('TaskDeleteRpcRejectionReporterService', () => {
     expect(new DataSafetyAuditPersistence().load('user-1').lastWriteExplain).toMatchObject({
       operationId: 'op-delete-rpc-rejected',
       entity: { type: 'task', id: 'task-rpc-rejected' },
-      queueResult: { enteredRetryQueue: true, retryCount: 1 },
+      queueResult: { enteredRetryQueue: false, retryCount: 0 },
       rpcResult: {
         status: 'deleted-remote-newer',
         remoteUpdatedAt: '2026-06-16T01:30:00.000Z',

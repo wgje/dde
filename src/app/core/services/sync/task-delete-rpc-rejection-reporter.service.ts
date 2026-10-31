@@ -28,6 +28,11 @@ export interface RejectedTaskDeleteRpcHandlerInput {
   ) => Promise<string[]>;
 }
 
+export interface RejectedTaskDeleteRpcOutcome {
+  queuedTaskIds: string[];
+  conflictTaskIds: string[];
+}
+
 @Injectable({ providedIn: 'root' })
 export class TaskDeleteRpcRejectionReporterService {
   private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
@@ -77,7 +82,9 @@ export class TaskDeleteRpcRejectionReporterService {
     });
   }
 
-  async handleRejectedTaskDeleteRpc(input: RejectedTaskDeleteRpcHandlerInput): Promise<void> {
+  async handleRejectedTaskDeleteRpc(
+    input: RejectedTaskDeleteRpcHandlerInput,
+  ): Promise<RejectedTaskDeleteRpcOutcome> {
     const isConflict = input.result.status === 'remote-newer'
       || input.result.status === 'deleted-remote-newer';
     this.syncStateService.setSyncError(
@@ -91,15 +98,18 @@ export class TaskDeleteRpcRejectionReporterService {
       isConflict,
     );
 
-    const queuedTaskIds = await input.queueTaskDeletesForRetry(
-      input.taskIds,
-      input.projectId,
-      input.fromRetryQueue,
-      input.sourceUserId,
-      false,
-      input.baseUpdatedAtMap,
-      input.operationId,
-    );
+    const conflictTaskIds = isConflict ? input.taskIds : [];
+    const queuedTaskIds = isConflict
+      ? []
+      : await input.queueTaskDeletesForRetry(
+          input.taskIds,
+          input.projectId,
+          input.fromRetryQueue,
+          input.sourceUserId,
+          false,
+          input.baseUpdatedAtMap,
+          input.operationId,
+        );
     this.taskDeleteRpcWriteAudit.recordTaskDeleteRpcWriteAudit({
       operationId: input.operationId,
       sourceUserId: input.sourceUserId,
@@ -111,6 +121,7 @@ export class TaskDeleteRpcRejectionReporterService {
       lastSyncTimeBefore: input.lastSyncTimeBefore,
       lastSyncTimeAfter: this.syncStateService.syncState().lastSyncTime,
     });
+    return { queuedTaskIds, conflictTaskIds };
   }
 
   captureRejectedTaskDeleteRpc(

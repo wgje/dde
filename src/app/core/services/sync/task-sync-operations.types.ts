@@ -44,6 +44,8 @@ export interface TaskPurgeResult {
   deletedTaskIds: string[];
   skippedTaskIds: string[];
   retriedTaskIds: string[];
+  conflictTaskIds?: string[];
+  conflictPersisted?: boolean;
 }
 
 export interface RemoteTaskFreshness {

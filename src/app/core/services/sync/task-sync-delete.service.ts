@@ -8,25 +8,41 @@ import {
   buildSingleTaskBaseUpdatedAtOverride,
   createRejectedTaskPurgeResult,
   createRetryTrackedRejectedTaskPurgeResult,
-  createRetryTrackedTaskPurgeResult,
   createSettledTaskPurgeResult,
+  recordSettledLocalTaskDeleteWriteAudit,
+  resolveRejectedTaskDeleteConflictPurgeResult,
   resolveTaskDeleteSessionUserId,
-  resolveLegacyPurgeSoftDeleteFallbackIds,
-  selectAppliedTaskDeleteIds,
-  softDeleteTasksWithBaseGuard,
 } from './task-sync-delete.helpers';
+import { applySuccessfulTaskDeleteRpc, executeAppliedPurgeTaskDeleteRpc } from './task-sync-delete-rpc-execution.helpers';
 import type { TaskDeleteRequest, TaskPurgeResult } from './task-sync-operations.types';
 import { TaskDeleteRpcWriteAuditService } from './task-delete-rpc-write-audit.service';
-import { TaskDeleteRpcRejectionReporterService } from './task-delete-rpc-rejection-reporter.service';
+import { TaskDeleteConflictCaptureService } from './task-delete-conflict-capture.service';
+import {
+  TaskDeleteRpcRejectionReporterService,
+  type RejectedTaskDeleteRpcOutcome,
+} from './task-delete-rpc-rejection-reporter.service';
+import {
+  buildTaskDeleteBatches,
+  executeTaskDeleteBatchesSequentially,
+  mergeTaskPurgeResults,
+  sumTaskDeleteAffectedCounts,
+  SYNC_DELETE_TASKS_RPC_BATCH_LIMIT,
+} from './task-sync-delete-batching.helpers';
+import {
+  handleSoftDeleteSyncRpcClientRejected,
+  handleSoftDeleteSyncRpcUnavailable,
+  preserveSoftDeleteTasksAfterRpcFailure,
+} from './task-sync-delete-rejection.helpers';
 
 @Injectable({ providedIn: 'root' })
 export class TaskSyncDeleteService extends TaskSyncOperationsBase {
   private readonly taskDeleteRpcWriteAudit = inject(TaskDeleteRpcWriteAuditService);
   private readonly taskDeleteRpcRejectionReporter = inject(TaskDeleteRpcRejectionReporterService);
+  private readonly taskDeleteConflictCapture = inject(TaskDeleteConflictCaptureService);
   private readonly hasRetriedTaskDelete = (taskId: string): boolean =>
     this.retryQueueService.hasEntity('task', taskId);
 
-  /** 删除云端任务（优先 purge RPC 写入 tombstone，降级为软删除） */
+  /** 删除云端任务（仅经 sync_delete_tasks；不可用时保留耐久重试意图） */
   async deleteTask(
     taskId: string,
     projectId: string,
@@ -190,83 +206,117 @@ export class TaskSyncDeleteService extends TaskSyncOperationsBase {
     operationId?: string,
   ): Promise<number> {
     if (taskIds.length === 0) return 0;
-
     const client = this.getSupabaseClient();
     if (!client) {
-      this.logger.warn('softDeleteTasksBatch: 离线模式，跳过服务端删除', { taskIds });
-      // 【NEW-5 修复】离线时添加本地 tombstone，防止下次同步拉取时任务复活
-      this.tombstoneService.addLocalTombstones(projectId, taskIds, tombstoneTimestamps);
-      this.settleDeletedTaskDependencies(projectId, taskIds);
-      return taskIds.length;
+      return this.handleOfflineSoftDeleteTasks(projectId, taskIds, tombstoneTimestamps);
     }
-
-    try {
-      await this.primeTaskSyncRpcCapability();
-
-      if (this.syncRpcClient?.isClientRejected() === true) {
-        return await this.handleSoftDeleteSyncRpcClientRejected(projectId, taskIds, tombstoneTimestamps, baseUpdatedAtMap, operationId);
-      }
-
-      if (this.shouldUseSyncRpc()) {
-        return await this.softDeleteTasksViaSyncRpc(
-          client,
-          projectId,
-          taskIds,
-          tombstoneTimestamps,
-          baseUpdatedAtMap,
-          operationId,
-        );
-      }
-
-      if (operationId !== undefined) {
-        this.logger.warn('softDeleteTasksBatch: sync RPC 不可用，已保留带 operationId 的删除意图等待重试', {
-          projectId,
-          taskIds,
-          operationId,
-        });
-        this.tombstoneService.addLocalTombstones(projectId, taskIds, tombstoneTimestamps);
-        this.settleDeletedTaskDependencies(projectId, taskIds);
-        await this.queueTaskDeletesForRetry(taskIds, projectId, false, undefined, false, baseUpdatedAtMap, operationId);
-        return -1;
-      }
-
-      return await this.softDeleteTasksViaLegacyRpc(client, projectId, taskIds, tombstoneTimestamps);
-    } catch (e) {
-      return await this.fallbackSoftDeleteTasksBatch(client, projectId, taskIds, tombstoneTimestamps, e, baseUpdatedAtMap);
+    const effectiveOperationId = operationId ?? this.createSyncRpcOperationId();
+    if (taskIds.length > SYNC_DELETE_TASKS_RPC_BATCH_LIMIT) {
+      return await this.executeSoftDeleteTaskChunks(
+        client, projectId, taskIds, effectiveOperationId, tombstoneTimestamps, baseUpdatedAtMap,
+      );
     }
+    return await this.executeSoftDeleteTasksBatch(
+      client, projectId, taskIds, effectiveOperationId, tombstoneTimestamps, baseUpdatedAtMap,
+    );
   }
 
-  private async handleSoftDeleteSyncRpcClientRejected(
-    projectId: string,
-    taskIds: string[],
+  private async executeSoftDeleteTasksBatch(
+    client: SupabaseClient, projectId: string, taskIds: string[], operationId: string,
     tombstoneTimestamps?: Record<string, string | number | null | undefined>,
     baseUpdatedAtMap?: Record<string, string | null | undefined>,
-    operationId?: string,
   ): Promise<number> {
-    this.reportTaskSyncRpcClientRejected('softDeleteTasksBatch', {
-      projectId,
-      taskIds,
-    });
-    this.tombstoneService.addLocalTombstones(projectId, taskIds, tombstoneTimestamps);
-    this.settleDeletedTaskDependencies(projectId, taskIds);
-    if (operationId !== undefined) {
-      await this.queueTaskDeletesForRetry(taskIds, projectId, false, undefined, false, baseUpdatedAtMap, operationId);
+    try {
+      await this.primeTaskSyncRpcCapability();
+      if (this.syncRpcClient?.isClientRejected() === true) {
+        return await handleSoftDeleteSyncRpcClientRejected({
+          projectId,
+          taskIds,
+          reportClientRejected: (operation, extra) =>
+            this.reportTaskSyncRpcClientRejected(operation, extra),
+          preserveForRetry: () => this.preserveSoftDeleteTasksForRetry(
+            client, projectId, taskIds, operationId, tombstoneTimestamps, baseUpdatedAtMap,
+          ),
+        });
+      }
+      if (this.shouldUseSyncRpc()) {
+        return await this.softDeleteTasksViaSyncRpc(
+          client, projectId, taskIds, operationId, tombstoneTimestamps, baseUpdatedAtMap,
+        );
+      }
+      return await handleSoftDeleteSyncRpcUnavailable({
+        projectId,
+        taskIds,
+        operationId,
+        logWarning: (message, context) => this.logger.warn(message, context),
+        preserveForRetry: () => this.preserveSoftDeleteTasksForRetry(
+          client, projectId, taskIds, operationId, tombstoneTimestamps, baseUpdatedAtMap,
+        ),
+      });
+    } catch (e) {
+      return await preserveSoftDeleteTasksAfterRpcFailure({
+        projectId,
+        taskIds,
+        operationId,
+        error: e,
+        logError: (message, context) => this.logger.error(message, context),
+        captureException: (error, operation, context) =>
+          this.captureExceptionWithContext(error, operation, context),
+        preserveForRetry: () => this.preserveSoftDeleteTasksForRetry(
+          client, projectId, taskIds, operationId, tombstoneTimestamps, baseUpdatedAtMap,
+        ),
+      });
     }
-    return -1;
   }
 
-  private async softDeleteTasksViaSyncRpc(
+  private async executeSoftDeleteTaskChunks(
     client: SupabaseClient,
     projectId: string,
     taskIds: string[],
+    parentOperationId: string,
     tombstoneTimestamps?: Record<string, string | number | null | undefined>,
     baseUpdatedAtMap?: Record<string, string | null | undefined>,
-    operationId?: string,
+  ): Promise<number> {
+    const batches = buildTaskDeleteBatches({
+      parentOperationId,
+      projectId,
+      deleteMode: 'soft',
+      taskIds,
+      tombstoneTimestamps,
+      baseUpdatedAtMap,
+    });
+    const counts = await executeTaskDeleteBatchesSequentially(batches, batch => (
+      this.executeSoftDeleteTasksBatch(
+        client,
+        projectId,
+        batch.taskIds,
+        batch.operationId,
+        batch.tombstoneTimestamps,
+        batch.baseUpdatedAtMap,
+      )
+    ));
+    return sumTaskDeleteAffectedCounts(counts);
+  }
+
+  private handleOfflineSoftDeleteTasks(
+    projectId: string,
+    taskIds: string[],
+    tombstoneTimestamps?: Record<string, string | number | null | undefined>,
+  ): number {
+    this.logger.warn('softDeleteTasksBatch: 离线模式，跳过服务端删除', { taskIds });
+    this.tombstoneService.addLocalTombstones(projectId, taskIds, tombstoneTimestamps);
+    this.settleDeletedTaskDependencies(projectId, taskIds);
+    return taskIds.length;
+  }
+
+  private async softDeleteTasksViaSyncRpc(
+    client: SupabaseClient, projectId: string, taskIds: string[], operationId: string,
+    tombstoneTimestamps?: Record<string, string | number | null | undefined>,
+    baseUpdatedAtMap?: Record<string, string | null | undefined>,
   ): Promise<number> {
     const resolvedBaseUpdatedAtMap = buildTaskDeleteBaseUpdatedAtMap(taskIds, baseUpdatedAtMap, this.taskStore);
-    const effectiveOperationId = operationId ?? this.createSyncRpcOperationId();
     const result = await this.syncRpcClient!.deleteTasks({
-      operationId: effectiveOperationId,
+      operationId,
       projectId,
       taskIds,
       baseUpdatedAt: null,
@@ -275,115 +325,109 @@ export class TaskSyncDeleteService extends TaskSyncOperationsBase {
     });
 
     if (result.status === 'applied' || result.status === 'idempotent-replay') {
-      await this.applySuccessfulTaskDeleteRpc(client, result, projectId, taskIds, tombstoneTimestamps);
-      this.taskDeleteRpcRejectionReporter.reportSkippedTaskDeletes(
-        result,
-        projectId,
-        'softDeleteTasksBatch',
-        this.logger,
+      return await this.settleSuccessfulSoftDeleteTasksViaSyncRpc(
+        client, result, projectId, taskIds, tombstoneTimestamps,
       );
-      return result.affectedCount ?? taskIds.length;
     }
 
-    await this.handleRejectedTaskDeleteRpc(
-      result,
-      projectId,
-      taskIds,
-      false,
-      undefined,
-      'softDeleteTasksBatch',
-      resolvedBaseUpdatedAtMap,
-      effectiveOperationId,
+    const rejectionOutcome = await this.handleRejectedTaskDeleteRpc(
+      result, projectId, taskIds, false, undefined, 'softDeleteTasksBatch',
+      resolvedBaseUpdatedAtMap, operationId,
     );
-    this.tombstoneService.addLocalTombstones(projectId, taskIds, tombstoneTimestamps);
-    return -1;
+    await resolveRejectedTaskDeleteConflictPurgeResult({
+      taskIds, conflictTaskIds: rejectionOutcome.conflictTaskIds,
+      hasRetryEntity: this.hasRetriedTaskDelete,
+      removeConflictRetries: ids => this.retryQueueService.removeByEntities('task', ids),
+      captureConflict: () => this.taskDeleteConflictCapture.capture({
+        projectId, taskIds: rejectionOutcome.conflictTaskIds, sourceUserId: undefined,
+        baseUpdatedAtMap: resolvedBaseUpdatedAtMap, remoteUpdatedAt: result.remoteUpdatedAt,
+      }),
+    });
+    if (rejectionOutcome.queuedTaskIds.length > 0) {
+      this.tombstoneService.addLocalTombstones(
+        projectId,
+        rejectionOutcome.queuedTaskIds,
+        tombstoneTimestamps,
+      );
+    }
+    return rejectionOutcome.conflictTaskIds.length === 0
+      && rejectionOutcome.queuedTaskIds.length === taskIds.length
+      ? taskIds.length
+      : -1;
   }
 
-  private async softDeleteTasksViaLegacyRpc(
+  private async settleSuccessfulSoftDeleteTasksViaSyncRpc(
     client: SupabaseClient,
+    result: SyncRpcResult,
     projectId: string,
     taskIds: string[],
     tombstoneTimestamps?: Record<string, string | number | null | undefined>,
   ): Promise<number> {
-    this.logger.debug('softDeleteTasksBatch: 调用 safe_delete_tasks RPC', {
+    await applySuccessfulTaskDeleteRpc({
+      client, result, projectId, taskIds, tombstoneTimestamps,
+      tombstoneService: this.tombstoneService,
+      settleDeletedTaskDependencies: (settledProjectId, settledTaskIds) => this
+        .settleDeletedTaskDependencies(settledProjectId, settledTaskIds),
+      logger: this.logger,
+    });
+    this.taskDeleteRpcRejectionReporter.reportSkippedTaskDeletes(
+      result,
       projectId,
-      taskIds,
-      taskCount: taskIds.length
-    });
-
-    const { data, error } = await client.rpc('safe_delete_tasks', {
-      p_task_ids: taskIds,
-      p_project_id: projectId
-    });
-
-    if (error) {
-      return this.handleLegacySoftDeleteRpcError(error, projectId, taskIds);
-    }
-
-    this.tombstoneService.addLocalTombstones(projectId, taskIds, tombstoneTimestamps);
-    this.settleDeletedTaskDependencies(projectId, taskIds);
-
-    this.logger.info('softDeleteTasksBatch: 删除成功', {
-      projectId,
-      requestedCount: taskIds.length,
-      affectedCount: data
-    });
-
-    return data ?? 0;
+      'softDeleteTasksBatch',
+      this.logger,
+    );
+    return result.affectedCount ?? taskIds.length;
   }
 
-  private handleLegacySoftDeleteRpcError(
-    error: { message?: string },
-    projectId: string,
-    taskIds: string[],
-  ): number {
-    if (!error.message?.includes('Bulk delete blocked')) {
-      throw supabaseErrorToError(error);
-    }
-
-    this.logger.warn('softDeleteTasksBatch: 服务端熔断阻止删除', {
-      projectId,
-      taskIds,
-      error: error.message
-    });
-    this.toast.warning('删除被阻止', error.message);
-    this.sentryLazyLoader.captureMessage('Server circuit breaker blocked delete', {
-      level: 'warning',
-      tags: { operation: 'softDeleteTasksBatch', projectId },
-      extra: { taskIds, error: error.message }
-    });
-    return -1;
-  }
-
-  private async fallbackSoftDeleteTasksBatch(
+  private async preserveSoftDeleteTasksForRetry(
     client: SupabaseClient,
     projectId: string,
     taskIds: string[],
-    tombstoneTimestamps: Record<string, string | number | null | undefined> | undefined,
-    error: unknown,
+    operationId: string,
+    tombstoneTimestamps?: Record<string, string | number | null | undefined>,
     baseUpdatedAtMap?: Record<string, string | null | undefined>,
   ): Promise<number> {
-    this.logger.error('softDeleteTasksBatch 失败', error);
-    this.captureExceptionWithContext(error, 'softDeleteTasksBatch', {
+    const localTimestamp = Date.now();
+    const lastSyncTimeBefore = this.syncStateService.syncState().lastSyncTime;
+    this.tombstoneService.addLocalTombstones(projectId, taskIds, tombstoneTimestamps);
+    this.settleDeletedTaskDependencies(projectId, taskIds);
+    const queuedTaskIds = await this.queueTaskDeletesForRetry(
+      taskIds,
       projectId,
-      taskCount: taskIds.length
-    });
+      false,
+      undefined,
+      false,
+      baseUpdatedAtMap,
+      operationId,
+    );
+    if (queuedTaskIds.length === taskIds.length) {
+      recordSettledLocalTaskDeleteWriteAudit({
+        dataSafetyWriteAudit: this.dataSafetyWriteAudit,
+        projectId,
+        ownerUserId: await this.resolveTaskDeleteAuditOwner(client),
+        operationId,
+        taskIds,
+        localTimestamp,
+        baseUpdatedAtMap,
+        getTask: taskId => this.taskStore?.getTask(taskId),
+        lastSyncTimeBefore,
+        lastSyncTimeAfter: this.syncStateService.syncState().lastSyncTime,
+      });
+    }
+    return queuedTaskIds.length === taskIds.length ? taskIds.length : -1;
+  }
 
-    this.logger.warn('softDeleteTasksBatch: RPC 失败，降级为逐个更新');
+  private async resolveTaskDeleteAuditOwner(client: SupabaseClient): Promise<string | undefined> {
     try {
-      const updatedTaskIds = await this.softDeleteTasksWithBaseGuard(client, projectId, taskIds, baseUpdatedAtMap);
-      this.tombstoneService.addLocalTombstones(projectId, updatedTaskIds, tombstoneTimestamps);
-      this.settleDeletedTaskDependencies(projectId, updatedTaskIds);
-
-      return updatedTaskIds.length;
-    } catch (fallbackError) {
-      this.logger.error('softDeleteTasksBatch: 完全失败', fallbackError);
-      this.tombstoneService.addLocalTombstones(projectId, taskIds, tombstoneTimestamps);
-      return -1;
+      const { data: { session } } = await client.auth.getSession();
+      return session?.user?.id;
+    } catch (error) {
+      this.logger.warn('读取本地任务删除审计 owner 失败，跳过持久化审计', { error });
+      return undefined;
     }
   }
 
-  /** 永久删除云端任务（tombstone + 物理删除，v3→v2→v1 降级） */
+  /** 永久删除云端任务（由 sync_delete_tasks 原子写入 tombstone 并物理删除） */
   async purgeTasksFromCloud(
     projectId: string,
     taskIds: string[],
@@ -412,45 +456,131 @@ export class TaskSyncDeleteService extends TaskSyncOperationsBase {
     operationId?: string,
   ): Promise<TaskPurgeResult> {
     if (taskIds.length === 0) return createSettledTaskPurgeResult([], []);
-
+    const effectiveOperationId = operationId ?? this.createSyncRpcOperationId();
     const client = this.getSupabaseClient();
     if (!client) {
-      this.logger.warn('purgeTasksFromCloud: 离线模式，稍后重试', { taskIds });
-      await this.queueTaskDeletesForRetry(taskIds, projectId, fromRetryQueue, sourceUserId, false, baseUpdatedAtMap, operationId);
-      return createRetryTrackedRejectedTaskPurgeResult(taskIds, this.hasRetriedTaskDelete);
+      return await this.preserveOfflinePurgeTasks(
+        projectId, taskIds, sourceUserId, fromRetryQueue, baseUpdatedAtMap, effectiveOperationId,
+      );
     }
+    if (taskIds.length > SYNC_DELETE_TASKS_RPC_BATCH_LIMIT) {
+      return await this.executePurgeTaskChunks(
+        client, projectId, taskIds, sourceUserId, fromRetryQueue,
+        baseUpdatedAtMap, effectiveOperationId,
+      );
+    }
+    return await this.executePurgeTasksFromCloudDetailed(
+      client, projectId, taskIds, sourceUserId, fromRetryQueue,
+      baseUpdatedAtMap, effectiveOperationId,
+    );
+  }
 
+  private async executePurgeTaskChunks(
+    client: SupabaseClient,
+    projectId: string,
+    taskIds: string[],
+    sourceUserId: string | undefined,
+    fromRetryQueue: boolean,
+    baseUpdatedAtMap: Record<string, string | null | undefined> | undefined,
+    parentOperationId: string,
+  ): Promise<TaskPurgeResult> {
+    const batches = buildTaskDeleteBatches({
+      parentOperationId,
+      projectId,
+      deleteMode: 'purge',
+      taskIds,
+      baseUpdatedAtMap,
+    });
+    const results = await executeTaskDeleteBatchesSequentially(batches, batch => (
+      this.executePurgeTasksFromCloudDetailed(
+        client,
+        projectId,
+        batch.taskIds,
+        sourceUserId,
+        fromRetryQueue,
+        batch.baseUpdatedAtMap,
+        batch.operationId,
+      )
+    ));
+    return mergeTaskPurgeResults(results);
+  }
+
+  private async preserveOfflinePurgeTasks(
+    projectId: string,
+    taskIds: string[],
+    sourceUserId: string | undefined,
+    fromRetryQueue: boolean,
+    baseUpdatedAtMap: Record<string, string | null | undefined> | undefined,
+    operationId: string,
+  ): Promise<TaskPurgeResult> {
+    this.logger.warn('purgeTasksFromCloud: 离线模式，稍后重试', { taskIds });
+    await this.queueTaskDeletesForRetry(
+      taskIds, projectId, fromRetryQueue, sourceUserId, false, baseUpdatedAtMap, operationId,
+    );
+    return createRetryTrackedRejectedTaskPurgeResult(taskIds, this.hasRetriedTaskDelete);
+  }
+
+  private async executePurgeTasksFromCloudDetailed(
+    client: SupabaseClient,
+    projectId: string,
+    taskIds: string[],
+    sourceUserId: string | undefined,
+    fromRetryQueue: boolean,
+    baseUpdatedAtMap: Record<string, string | null | undefined> | undefined,
+    operationId: string,
+  ): Promise<TaskPurgeResult> {
     try {
-      if (!await this.ensurePurgeTaskSessionOwner(client, projectId, taskIds, sourceUserId, fromRetryQueue, baseUpdatedAtMap, operationId)) {
+      if (!await this.ensurePurgeTaskSessionOwner(
+        client,
+        projectId,
+        taskIds,
+        sourceUserId,
+        fromRetryQueue,
+        baseUpdatedAtMap,
+        operationId,
+      )) {
         return createRetryTrackedRejectedTaskPurgeResult(taskIds, this.hasRetriedTaskDelete);
       }
-
       await this.primeTaskSyncRpcCapability();
-
       if (this.syncRpcClient?.isClientRejected() === true) {
-        this.reportTaskSyncRpcClientRejected('purgeTasksFromCloud', {
+        this.reportTaskSyncRpcClientRejected('purgeTasksFromCloud', { projectId, taskIds });
+        return await this.preservePurgeTasksForRetry(
+          projectId, taskIds, sourceUserId, fromRetryQueue, baseUpdatedAtMap, operationId,
+        );
+      }
+      if (this.shouldUseSyncRpc()) {
+        return await this.purgeTasksViaSyncRpc(
+          client,
           projectId,
           taskIds,
-        });
-        const queuedTaskIds = operationId === undefined
-          ? []
-          : await this.queueTaskDeletesForRetry(taskIds, projectId, fromRetryQueue, sourceUserId, false, baseUpdatedAtMap, operationId);
-        return createRejectedTaskPurgeResult(taskIds, queuedTaskIds);
+          sourceUserId,
+          fromRetryQueue,
+          baseUpdatedAtMap,
+          operationId,
+        );
       }
-
-      if (this.shouldUseSyncRpc()) {
-        return await this.purgeTasksViaSyncRpc(client, projectId, taskIds, sourceUserId, fromRetryQueue, baseUpdatedAtMap, operationId);
-      }
-
-      if (operationId !== undefined) {
-        const queuedTaskIds = await this.queueTaskDeletesForRetry(taskIds, projectId, fromRetryQueue, sourceUserId, false, baseUpdatedAtMap, operationId);
-        return createRejectedTaskPurgeResult(taskIds, queuedTaskIds);
-      }
-
-      return await this.purgeTasksViaLegacyCascade(client, projectId, taskIds, sourceUserId, fromRetryQueue, baseUpdatedAtMap, operationId);
+      return await this.preservePurgeTasksForRetry(
+        projectId, taskIds, sourceUserId, fromRetryQueue, baseUpdatedAtMap, operationId,
+      );
     } catch (e) {
-      return await this.handlePurgeTasksError(e, projectId, taskIds, sourceUserId, fromRetryQueue, baseUpdatedAtMap, operationId);
+      return await this.handlePurgeTasksError(
+        e, projectId, taskIds, sourceUserId, fromRetryQueue, baseUpdatedAtMap, operationId,
+      );
     }
+  }
+
+  private async preservePurgeTasksForRetry(
+    projectId: string,
+    taskIds: string[],
+    sourceUserId: string | undefined,
+    fromRetryQueue: boolean,
+    baseUpdatedAtMap: Record<string, string | null | undefined> | undefined,
+    operationId: string,
+  ): Promise<TaskPurgeResult> {
+    const queuedTaskIds = await this.queueTaskDeletesForRetry(
+      taskIds, projectId, fromRetryQueue, sourceUserId, false, baseUpdatedAtMap, operationId,
+    );
+    return createRejectedTaskPurgeResult(taskIds, queuedTaskIds);
   }
 
   private async ensurePurgeTaskSessionOwner(
@@ -499,158 +629,54 @@ export class TaskSyncDeleteService extends TaskSyncOperationsBase {
   }
 
   private async purgeTasksViaSyncRpc(
-    client: SupabaseClient,
-    projectId: string,
-    taskIds: string[],
-    sourceUserId: string | undefined,
-    fromRetryQueue: boolean,
-    baseUpdatedAtMap?: Record<string, string | null | undefined>,
-    operationId?: string,
+    client: SupabaseClient, projectId: string, taskIds: string[],
+    sourceUserId: string | undefined, fromRetryQueue: boolean,
+    baseUpdatedAtMap?: Record<string, string | null | undefined>, operationId?: string,
   ): Promise<TaskPurgeResult> {
     const resolvedBaseUpdatedAtMap = buildTaskDeleteBaseUpdatedAtMap(taskIds, baseUpdatedAtMap, this.taskStore) ?? {};
     const effectiveOperationId = operationId ?? this.createSyncRpcOperationId();
     const localTimestamp = Date.now();
     const lastSyncTimeBefore = this.syncStateService.syncState().lastSyncTime;
     const result = await this.syncRpcClient!.deleteTasks({
-      operationId: effectiveOperationId,
-      projectId,
-      taskIds,
-      baseUpdatedAt: null,
-      deleteMode: 'purge',
-      baseUpdatedAtMap: resolvedBaseUpdatedAtMap,
+      operationId: effectiveOperationId, projectId, taskIds, baseUpdatedAt: null,
+      deleteMode: 'purge', baseUpdatedAtMap: resolvedBaseUpdatedAtMap,
     });
 
     if (result.status === 'applied' || result.status === 'idempotent-replay') {
-      return await this.handleAppliedPurgeTaskDeleteRpc(
+      return await executeAppliedPurgeTaskDeleteRpc({
         client,
         result,
         projectId,
         taskIds,
         sourceUserId,
-        resolvedBaseUpdatedAtMap,
-        effectiveOperationId,
+        baseUpdatedAtMap: resolvedBaseUpdatedAtMap,
+        operationId: effectiveOperationId,
         localTimestamp,
         lastSyncTimeBefore,
-      );
+        getLastSyncTime: () => this.syncStateService.syncState().lastSyncTime,
+        tombstoneService: this.tombstoneService,
+        settleDeletedTaskDependencies: (settledProjectId, settledTaskIds) =>
+          this.settleDeletedTaskDependencies(settledProjectId, settledTaskIds),
+        logger: this.logger,
+        taskDeleteRpcRejectionReporter: this.taskDeleteRpcRejectionReporter,
+        taskDeleteRpcWriteAudit: this.taskDeleteRpcWriteAudit,
+        taskDeleteConflictCapture: this.taskDeleteConflictCapture,
+      });
     }
 
-    await this.handleRejectedTaskDeleteRpc(
-      result,
-      projectId,
-      taskIds,
-      fromRetryQueue,
-      sourceUserId,
-      'purgeTasksFromCloud',
-      resolvedBaseUpdatedAtMap,
-      effectiveOperationId,
-      localTimestamp,
-      lastSyncTimeBefore,
+    const rejectionOutcome = await this.handleRejectedTaskDeleteRpc(
+      result, projectId, taskIds, fromRetryQueue, sourceUserId, 'purgeTasksFromCloud',
+      resolvedBaseUpdatedAtMap, effectiveOperationId, localTimestamp, lastSyncTimeBefore,
     );
-    return createRetryTrackedRejectedTaskPurgeResult(taskIds, this.hasRetriedTaskDelete);
-  }
-
-  private async handleAppliedPurgeTaskDeleteRpc(
-    client: SupabaseClient,
-    result: SyncRpcResult,
-    projectId: string,
-    taskIds: string[],
-    sourceUserId: string | undefined,
-    baseUpdatedAtMap: Record<string, string | null>,
-    operationId: string,
-    localTimestamp: number,
-    lastSyncTimeBefore: string | null,
-  ): Promise<TaskPurgeResult> {
-    await this.applySuccessfulTaskDeleteRpc(client, result, projectId, taskIds);
-    const { deletedTaskIds, skippedTaskIds } = selectAppliedTaskDeleteIds(result, taskIds);
-    this.taskDeleteRpcRejectionReporter.reportSkippedTaskDeletes(
-      result,
-      projectId,
-      'purgeTasksFromCloud',
-      this.logger,
-    );
-    this.taskDeleteRpcWriteAudit.recordTaskDeleteRpcWriteAudit({
-      operationId,
-      sourceUserId,
-      taskIds: deletedTaskIds,
-      result,
-      localTimestamp,
-      baseUpdatedAtMap,
-      queuedTaskIds: [],
-      lastSyncTimeBefore,
-      lastSyncTimeAfter: this.syncStateService.syncState().lastSyncTime,
+    return await resolveRejectedTaskDeleteConflictPurgeResult({
+      taskIds, conflictTaskIds: rejectionOutcome.conflictTaskIds,
+      hasRetryEntity: this.hasRetriedTaskDelete,
+      removeConflictRetries: ids => this.retryQueueService.removeByEntities('task', ids),
+      captureConflict: () => this.taskDeleteConflictCapture.capture({
+        projectId, taskIds: rejectionOutcome.conflictTaskIds, sourceUserId,
+        baseUpdatedAtMap: resolvedBaseUpdatedAtMap, remoteUpdatedAt: result.remoteUpdatedAt,
+      }),
     });
-    return createSettledTaskPurgeResult(deletedTaskIds, skippedTaskIds);
-  }
-
-  private async purgeTasksViaLegacyCascade(
-    client: SupabaseClient,
-    projectId: string,
-    taskIds: string[],
-    sourceUserId: string | undefined,
-    fromRetryQueue: boolean,
-    baseUpdatedAtMap?: Record<string, string | null | undefined>,
-    operationId?: string,
-  ): Promise<TaskPurgeResult> {
-    const result = await this.softDeleteInsteadOfPurge(client, projectId, taskIds, sourceUserId, fromRetryQueue, baseUpdatedAtMap, operationId);
-    return createRetryTrackedTaskPurgeResult(
-      result.updatedTaskIds,
-      result.skippedTaskIds,
-      this.hasRetriedTaskDelete,
-    );
-  }
-
-  private async softDeleteInsteadOfPurge(
-    client: SupabaseClient,
-    projectId: string,
-    taskIds: string[],
-    sourceUserId: string | undefined,
-    fromRetryQueue: boolean,
-    baseUpdatedAtMap?: Record<string, string | null | undefined>,
-    operationId?: string,
-  ): Promise<{ updatedTaskIds: string[]; skippedTaskIds: string[] }> {
-    const existingTaskIds = await this.loadExistingTaskIdsForSoftDeleteFallback(client, projectId, taskIds);
-    const { updatedTaskIds, skippedTaskIds } = await resolveLegacyPurgeSoftDeleteFallbackIds({
-      taskIds,
-      existingTaskIds,
-      softDeleteExistingTaskIds: ids => this.softDeleteTasksWithBaseGuard(
-        client,
-        projectId,
-        ids,
-        baseUpdatedAtMap,
-      ),
-    });
-    if (skippedTaskIds.length > 0) {
-      await this.queueTaskDeletesForRetry(skippedTaskIds, projectId, fromRetryQueue, sourceUserId, false, baseUpdatedAtMap, operationId);
-    }
-
-    this.tombstoneService.addLocalTombstones(projectId, updatedTaskIds);
-    this.settleDeletedTaskDependencies(projectId, updatedTaskIds);
-    this.logger.warn('purgeTasksFromCloud: 已降级为软删除（已添加本地 tombstone 保护）', {
-      projectId,
-      taskIds: updatedTaskIds,
-      skippedTaskIds,
-    });
-
-    return { updatedTaskIds, skippedTaskIds };
-  }
-
-  private async loadExistingTaskIdsForSoftDeleteFallback(
-    client: SupabaseClient,
-    projectId: string,
-    taskIds: string[],
-  ): Promise<Set<string>> {
-    const { data, error } = await client
-      .from('tasks')
-      .select('id')
-      .eq('project_id', projectId)
-      .in('id', taskIds);
-
-    if (error) {
-      this.logger.error('purgeTasksFromCloud: 软删除预检失败', error);
-      throw supabaseErrorToError(error);
-    }
-
-    return new Set((data ?? []).map(row => String((row as { id: string }).id)));
   }
 
   private async handlePurgeTasksError(
@@ -705,47 +731,6 @@ export class TaskSyncDeleteService extends TaskSyncOperationsBase {
     return createRetryTrackedRejectedTaskPurgeResult(taskIds, this.hasRetriedTaskDelete);
   }
 
-  private async applySuccessfulTaskDeleteRpc(
-    client: SupabaseClient,
-    result: SyncRpcResult,
-    projectId: string,
-    taskIds: string[],
-    tombstoneTimestamps?: Record<string, string | number | null | undefined>,
-  ): Promise<void> {
-    if (result.attachmentPaths && result.attachmentPaths.length > 0) {
-      await this.tombstoneService.deleteAttachmentFilesFromStorage(client, result.attachmentPaths);
-    }
-
-    const { deletedTaskIds, skippedTaskIds } = selectAppliedTaskDeleteIds(result, taskIds);
-
-    this.tombstoneService.addLocalTombstones(projectId, deletedTaskIds, tombstoneTimestamps);
-    this.settleDeletedTaskDependencies(projectId, deletedTaskIds);
-    this.logger.info('sync_delete_tasks 成功', {
-      projectId,
-      taskCount: taskIds.length,
-      deletedCount: deletedTaskIds.length,
-      skippedCount: skippedTaskIds.length,
-      affectedCount: result.affectedCount ?? null,
-      status: result.status,
-    });
-  }
-
-  private async softDeleteTasksWithBaseGuard(
-    client: SupabaseClient,
-    projectId: string,
-    taskIds: string[],
-    overrideBaseUpdatedAtMap?: Record<string, string | null | undefined>,
-  ): Promise<string[]> {
-    const baseUpdatedAtMap = buildTaskDeleteBaseUpdatedAtMap(taskIds, overrideBaseUpdatedAtMap, this.taskStore) ?? {};
-    return softDeleteTasksWithBaseGuard({
-      client,
-      projectId,
-      taskIds,
-      baseUpdatedAtMap,
-      logger: this.logger,
-    });
-  }
-
   private async handleRejectedTaskDeleteRpc(
     result: SyncRpcResult,
     projectId: string,
@@ -757,8 +742,8 @@ export class TaskSyncDeleteService extends TaskSyncOperationsBase {
     operationId?: string,
     localTimestamp = Date.now(),
     lastSyncTimeBefore = this.syncStateService.syncState().lastSyncTime,
-  ): Promise<void> {
-    await this.taskDeleteRpcRejectionReporter.handleRejectedTaskDeleteRpc({
+  ): Promise<RejectedTaskDeleteRpcOutcome> {
+    return await this.taskDeleteRpcRejectionReporter.handleRejectedTaskDeleteRpc({
       result,
       projectId,
       taskIds,
