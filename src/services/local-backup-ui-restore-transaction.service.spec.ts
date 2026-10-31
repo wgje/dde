@@ -97,10 +97,10 @@ describe('prepareLocalBackupUiRestoreTransaction', () => {
       'journal.create',
       'journal.read',
       'journal.verify',
-      'queue-backup.prepare',
-      'queue-backup.read-state',
       'marker-heartbeat.start',
       'marker-heartbeat.verify',
+      'queue-backup.prepare',
+      'queue-backup.read-state',
     ]);
     expect(markerStore.current).toEqual(expect.objectContaining({
       schemaVersion: 2,
@@ -244,6 +244,71 @@ describe('prepareLocalBackupUiRestoreTransaction', () => {
 
     expect(order).not.toContain('journal.clear');
     expect(order).not.toContain('quiescence.abort');
+  });
+
+  it('settles queue evidence and releases the writer freeze when queue prepare fails', async () => {
+    const order: string[] = [];
+    const markerStore = { current: null as unknown };
+    const dependencies = makeDependencies(order, markerStore);
+    vi.spyOn(dependencies.queueBackup, 'applyPersonalBackupRestoreTransitionV2')
+      .mockImplementationOnce(async command => {
+        order.push('queue-backup.prepare');
+        throw new Error(`queue ${command.kind} failed`);
+      });
+
+    await expect(prepareLocalBackupUiRestoreTransaction({
+      ownerUserId: OWNER_USER_ID,
+      source: { kind: 'local-file', reference: 'backup.json', checksum: SOURCE_DIGEST },
+      touchedProjectIds: ['project-1'],
+      currentProjects: [],
+      retryQueueRestoreItems: [],
+      restoredActionQueueItems: [],
+      blackBoxBackup: makeBackup([]),
+    }, dependencies)).rejects.toThrow('queue prepare failed');
+
+    expect(order).toEqual(expect.arrayContaining([
+      'marker-heartbeat.start',
+      'marker-heartbeat.verify',
+      'queue-backup.prepare',
+      'queue-backup.rollback',
+      'queue-backup.read-provider',
+      'marker-heartbeat.stop',
+      'journal.clear',
+      'quiescence.abort',
+    ]));
+    expect(markerStore.current).toBeNull();
+  });
+
+  it('stops a lost marker heartbeat while retaining journal and quiescence evidence', async () => {
+    const order: string[] = [];
+    const markerStore = { current: null as unknown };
+    const dependencies = makeDependencies(order, markerStore);
+    dependencies.startMarkerHeartbeat = () => ({
+      marker: () => markerStore.current as never,
+      hasOwnership: () => false,
+      verifyOwnership: vi.fn(async () => {
+        order.push('marker-heartbeat.verify');
+        return false;
+      }),
+      stop: vi.fn(async () => {
+        order.push('marker-heartbeat.stop');
+      }),
+    });
+
+    await expect(prepareLocalBackupUiRestoreTransaction({
+      ownerUserId: OWNER_USER_ID,
+      source: { kind: 'local-file', reference: 'backup.json', checksum: SOURCE_DIGEST },
+      touchedProjectIds: ['project-1'],
+      currentProjects: [],
+      retryQueueRestoreItems: [],
+      restoredActionQueueItems: [],
+      blackBoxBackup: makeBackup([]),
+    }, dependencies)).rejects.toThrow(/heartbeat ownership/i);
+
+    expect(order).toContain('marker-heartbeat.stop');
+    expect(order).not.toContain('queue-backup.prepare');
+    expect(order).not.toContain('quiescence.abort');
+    expect(markerStore.current).not.toBeNull();
   });
 
   it('rejects an expired retryQueue footprint before creating the durable marker', async () => {

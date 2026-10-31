@@ -153,6 +153,8 @@ export async function prepareLocalBackupUiRestoreTransaction(
   const touchedProjectIds = normalizeProjectIds(input.touchedProjectIds);
   const quiescence = await dependencies.prepareQuiescence(input.ownerUserId);
   let markerCreated = false;
+  let markerHeartbeat: LocalBackupUiRestoreMarkerHeartbeat | null = null;
+  let preparedHandle: PreparedLocalBackupUiRestoreTransaction | null = null;
   try {
     const capturedPreImage = await dependencies.capturePreImage({
       ownerUserId: input.ownerUserId,
@@ -187,14 +189,11 @@ export async function prepareLocalBackupUiRestoreTransaction(
     if (!await journal.verifyOwnership(marker)) {
       throw new Error('local backup UI restore marker ownership lost');
     }
-    await quiescence.runMutation('action-queue', () => (
-      prepareActionQueueRestore(input, preImage, queueIdentity, dependencies)
-    ));
-    const markerHeartbeat = dependencies.startMarkerHeartbeat(journal, marker);
+    markerHeartbeat = dependencies.startMarkerHeartbeat(journal, marker);
     if (!await markerHeartbeat.verifyOwnership()) {
       throw new Error('local backup UI restore marker heartbeat ownership lost');
     }
-    return createPreparedHandle(
+    preparedHandle = createPreparedHandle(
       quiescence,
       journal,
       markerHeartbeat,
@@ -202,9 +201,24 @@ export async function prepareLocalBackupUiRestoreTransaction(
       dependencies.queueBackup,
       input.restoredActionQueueItems.length,
     );
+    await quiescence.runMutation('action-queue', () => (
+      prepareActionQueueRestore(input, preImage, queueIdentity, dependencies)
+    ));
+    return preparedHandle;
   } catch (error) {
     if (!markerCreated) {
       await quiescence.abortBeforeMutation();
+    } else if (preparedHandle) {
+      try {
+        await preparedHandle.abortBeforeMutation();
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          'local backup UI restore prepare cleanup failed',
+        );
+      }
+    } else if (markerHeartbeat) {
+      await markerHeartbeat.stop();
     }
     throw error;
   }
