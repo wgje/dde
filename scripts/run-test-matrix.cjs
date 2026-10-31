@@ -12,7 +12,8 @@ const vitestCliPath = path.join(projectRoot, 'node_modules', 'vitest', 'vitest.m
 const testFilePattern = /\.(spec|test)\.ts$/;
 const perfTestDir = 'src/tests/perf/';
 const testBedPattern = /\bTestBed\b/;
-const domPattern = /\b(window|document|navigator|HTMLElement|HTML[A-Za-z]+Element|matchMedia|requestAnimationFrame|cancelAnimationFrame|ResizeObserver|MutationObserver|IntersectionObserver|CustomEvent|EventTarget)\b/;
+const moduleRegistryMutationPattern = /\bvi\.resetModules\s*\(/;
+const domPattern = /\b(window|document|navigator|HTMLElement|HTML[A-Za-z]+Element|matchMedia|requestAnimationFrame|cancelAnimationFrame|ResizeObserver|MutationObserver|IntersectionObserver|CustomEvent|EventTarget|MouseEvent|PointerEvent|KeyboardEvent|FocusEvent|DragEvent|TouchEvent|WheelEvent|InputEvent|ClipboardEvent)\b/;
 const componentPathPattern = /\/components\/|\.component\.(spec|test)\.ts$/;
 const componentContentPattern = /\b(createComponent\s*\(|ComponentFixture\s*<|TestBed\.createComponent\s*\()/;
 const explicitTestBedServiceFiles = new Set([
@@ -97,6 +98,8 @@ const DEFAULT_VITEST_JSON_OUT_DIR = 'test-results/vitest-reports';
 const MAX_LIST_PREVIEW = 30;
 const MAX_VITEST_FILES_PER_SEGMENT = 120;
 const DEFAULT_VITEST_SEGMENT_TIMEOUT_MS = 15 * 60 * 1000;
+const PROCESS_TREE_KILL_GRACE_MS = 1000;
+const WINDOWS_TASKKILL_TIMEOUT_MS = 5000;
 
 const toPosix = (value) => value.split(path.sep).join('/');
 
@@ -884,14 +887,68 @@ function resolveVitestSegmentTimeoutMs() {
     ?? DEFAULT_VITEST_SEGMENT_TIMEOUT_MS;
 }
 
-function killProcessTree(pid) {
-  if (!pid || process.platform !== 'win32') return;
+function signalOwnedProcessGroup(child, signal) {
+  const pid = child.pid;
+  if (Number.isInteger(pid) && pid > 0) {
+    try {
+      process.kill(-pid, signal);
+      return;
+    } catch (_error) {
+      // Fall back to the exact child if the owned group no longer exists.
+    }
+  }
+  child.kill(signal);
+}
 
-  const killer = spawn('taskkill', ['/PID', String(pid), '/T', '/F'], {
-    stdio: 'ignore',
-    windowsHide: true,
+function killWindowsProcessTree(child) {
+  return new Promise((resolve) => {
+    const pid = child.pid;
+    if (!Number.isInteger(pid) || pid <= 0) {
+      child.kill('SIGKILL');
+      resolve();
+      return;
+    }
+
+    let settled = false;
+    let timer;
+    let killer;
+    const finish = (fallbackToChild) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      if (fallbackToChild) child.kill('SIGKILL');
+      resolve();
+    };
+
+    try {
+      killer = spawn('taskkill', ['/PID', String(pid), '/T', '/F'], {
+        shell: false,
+        stdio: 'ignore',
+        windowsHide: true,
+      });
+    } catch (_error) {
+      finish(true);
+      return;
+    }
+
+    timer = setTimeout(() => {
+      killer.kill('SIGKILL');
+      finish(true);
+    }, WINDOWS_TASKKILL_TIMEOUT_MS);
+    killer.on('error', () => finish(true));
+    killer.on('close', (code) => finish(code !== 0));
   });
-  killer.on('error', () => {});
+}
+
+async function cleanupTimedOutProcess(child) {
+  if (process.platform === 'win32') {
+    await killWindowsProcessTree(child);
+    return;
+  }
+
+  signalOwnedProcessGroup(child, 'SIGTERM');
+  await new Promise((resolve) => setTimeout(resolve, PROCESS_TREE_KILL_GRACE_MS));
+  signalOwnedProcessGroup(child, 'SIGKILL');
 }
 
 function spawnVitest(commandArgs, envOverrides = {}) {
@@ -902,7 +959,7 @@ function spawnVitest(commandArgs, envOverrides = {}) {
     let timedOut = false;
     let settled = false;
     let timeoutTimer = null;
-    let killGraceTimer = null;
+    let cleanupPromise = null;
 
     const spawnOpts = {
       cwd: projectRoot,
@@ -911,19 +968,17 @@ function spawnVitest(commandArgs, envOverrides = {}) {
         ...envOverrides,
       },
       stdio: 'inherit',
+      detached: process.platform !== 'win32',
     };
 
     const child = spawn(process.execPath, [vitestCliPath, ...commandArgs], spawnOpts);
 
-    const clearTimers = () => {
-      if (timeoutTimer) clearTimeout(timeoutTimer);
-      if (killGraceTimer) clearTimeout(killGraceTimer);
-    };
-
-    const settle = (result) => {
+    const settle = async (result) => {
+      if (settled) return;
+      if (cleanupPromise) await cleanupPromise;
       if (settled) return;
       settled = true;
-      clearTimers();
+      if (timeoutTimer) clearTimeout(timeoutTimer);
       resolve({
         ...result,
         timedOut,
@@ -931,17 +986,19 @@ function spawnVitest(commandArgs, envOverrides = {}) {
       });
     };
 
+    const startCleanup = () => {
+      cleanupPromise ??= cleanupTimedOutProcess(child);
+      return cleanupPromise;
+    };
+
     timeoutTimer = setTimeout(() => {
       timedOut = true;
       console.error(`[test:run] vitest segment timed out after ${timeoutMs}ms`);
-      child.kill('SIGTERM');
-      killGraceTimer = setTimeout(() => {
-        child.kill('SIGKILL');
-        killProcessTree(child.pid);
-      }, 1000);
-      killGraceTimer.unref?.();
+      startCleanup().then(() => settle({
+        exitCode: 1,
+        spawnOverheadMs: Math.max(0, spawnedAt - invokedAt),
+      }));
     }, timeoutMs);
-    timeoutTimer.unref?.();
 
     child.on('spawn', () => {
       spawnedAt = Date.now();
@@ -949,14 +1006,14 @@ function spawnVitest(commandArgs, envOverrides = {}) {
 
     child.on('close', (code, signal) => {
       const exitCode = timedOut || signal ? 1 : (code ?? 1);
-      settle({
+      void settle({
         exitCode,
         spawnOverheadMs: Math.max(0, spawnedAt - invokedAt),
       });
     });
 
     child.on('error', () => {
-      settle({
+      void settle({
         exitCode: 1,
         spawnOverheadMs: Math.max(0, Date.now() - invokedAt),
       });
@@ -972,10 +1029,15 @@ function buildLaneSegments(laneName, files) {
   const forcedIsolateFiles = [];
   const exclusiveFiles = [];
 
+  const requiresModuleRegistryIsolation = (file) => {
+    const content = fs.readFileSync(toAbsolutePath(file), 'utf8');
+    return moduleRegistryMutationPattern.test(content);
+  };
+
   for (const file of files) {
     if (exclusiveSet.has(file)) {
       exclusiveFiles.push(file);
-    } else if (forcedIsolateSet.has(file)) {
+    } else if (forcedIsolateSet.has(file) || requiresModuleRegistryIsolation(file)) {
       forcedIsolateFiles.push(file);
     } else {
       sharedFiles.push(file);
@@ -1745,6 +1807,11 @@ async function main() {
 
   const selectedLanes = options.selectedLanes;
   const { tasks, laneResults } = buildExecutionTasks(selectedLanes, lanes, durationBaseline);
+  if (tasks.length === 0) {
+    throw new Error(
+      `selected test lanes produced no execution tasks: selectedLanes=${selectedLanes.join(',')} taskCount=0`
+    );
+  }
 
   const activeLaneCount = selectedLanes
     .filter((laneName) => lanes[laneName] && lanes[laneName].length > 0)
@@ -1759,10 +1826,6 @@ async function main() {
   console.log(`[test:run] timingIn loaded=${timingInputs.loadedPaths.length}/${options.timingInputPaths.length} includeQuarantine=${options.includeQuarantine}`);
   if (options.vitestJsonOutDir) {
     console.log(`[test:run] vitestJsonOutDir=${options.vitestJsonOutDir}`);
-  }
-
-  if (tasks.length === 0) {
-    console.log('[test:run] no tasks to execute.');
   }
 
   const startedAt = Date.now();

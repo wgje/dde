@@ -51,6 +51,16 @@ describe('run-test-matrix Vitest cache isolation contract', () => {
     expect(nodeMinimalConfig).toContain("'src/workspace-shell.component.spec.ts'");
   });
 
+  it('automatically isolates specs that reset the shared module registry', () => {
+    const matrixSource = readWorkspaceFile('scripts/run-test-matrix.cjs');
+
+    expect(matrixSource).toContain('moduleRegistryMutationPattern');
+    expect(matrixSource).toContain('requiresModuleRegistryIsolation(file)');
+    expect(matrixSource).toMatch(
+      /forcedIsolateSet\.has\(file\)\s*\|\|\s*requiresModuleRegistryIsolation\(file\)/,
+    );
+  });
+
   it('runs CodeGraph overlay specs as an exclusive segment outside other lanes', () => {
     const matrixSource = readWorkspaceFile('scripts/run-test-matrix.cjs');
     const nodeMinimalConfig = matrixSource.match(
@@ -70,6 +80,14 @@ describe('run-test-matrix Vitest cache isolation contract', () => {
 
     expect(matrixSource).toContain("'src/services/dock-cloud-sync.service.spec.ts'");
     expect(matrixSource).toContain('LANE_NAMES.testbedService');
+  });
+
+  it('classifies specs that instantiate browser event constructors into a DOM lane', () => {
+    const matrixSource = readWorkspaceFile('scripts/run-test-matrix.cjs');
+    const domPattern = matrixSource.match(/const domPattern = \/([^\n]+)\//)?.[1] ?? '';
+
+    expect(domPattern).toContain('MouseEvent');
+    expect(domPattern).toContain('PointerEvent');
   });
 
   it('keeps stateful DockCloudSync TestBed specs out of the shared service segment', () => {
