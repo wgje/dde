@@ -16,3 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "NanoFlowAndroidHost"
 include(":app")
+include(":device-test")

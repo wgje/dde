@@ -2,27 +2,74 @@ package app.nanoflow.host
 
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
-import kotlinx.coroutines.runBlocking
+
+internal inline fun nanoflowWidgetAttemptSafely(
+  action: () -> Unit,
+  reportFailure: (Throwable) -> Unit = {},
+) {
+  try {
+    action()
+  } catch (error: Throwable) {
+    runCatching { reportFailure(error) }
+  }
+}
+
+internal class NanoflowWidgetSecureTransitionFence {
+  private var generation = 0L
+  private var quarantinedGeneration: Long? = null
+
+  @Synchronized
+  fun commit(confirmsExactBinding: Boolean = false, write: () -> Boolean): Boolean {
+    if (quarantinedGeneration != null && !confirmsExactBinding) return false
+    val attempt = ++generation
+    val committed = try {
+      write()
+    } catch (error: Throwable) {
+      quarantinedGeneration = attempt
+      throw error
+    }
+    if (!committed) quarantinedGeneration = attempt
+    else if (confirmsExactBinding) quarantinedGeneration = null
+    return committed
+  }
+
+  @Synchronized fun canTrustBinding(): Boolean = quarantinedGeneration == null
+  @Synchronized fun <T> readIfTrusted(read: () -> T): T? =
+    if (quarantinedGeneration == null) read() else null
+}
 
 class NanoflowFirebaseMessagingService : FirebaseMessagingService() {
   override fun onNewToken(token: String) {
     super.onNewToken(token)
     val hasInstalledWidgets = NanoflowWidgetReceiver.hasInstalledWidgets(applicationContext)
-    NanoflowWidgetTelemetry.info(
-      "widget_push_token_received",
-      mapOf(
-        "hasInstalledWidgets" to hasInstalledWidgets,
-        "tokenLength" to token.length,
-      ),
-    )
+    nanoflowWidgetAttemptSafely({
+      NanoflowWidgetTelemetry.info(
+        "widget_push_token_received",
+        mapOf("hasInstalledWidgets" to hasInstalledWidgets, "tokenLength" to token.length),
+      )
+    })
     if (!hasInstalledWidgets) {
       return
     }
 
-    runBlocking {
-      NanoflowWidgetRepository(applicationContext).rememberPushToken(token)
-    }
-    NanoflowWidgetRefreshWorker.enqueue(applicationContext, reason = "fcm-token-rotated")
+    nanoflowWidgetAttemptSafely({
+      NanoflowWidgetStore(applicationContext).rememberPushTokenSynchronously(token)
+    }, { error ->
+      NanoflowWidgetTelemetry.warn(
+        "widget_push_token_persist_failed",
+        mapOf("errorType" to error.javaClass.simpleName),
+        error,
+      )
+    })
+    nanoflowWidgetAttemptSafely({
+      NanoflowWidgetRefreshWorker.enqueue(applicationContext, reason = "fcm-token-rotated")
+    }, { error ->
+      NanoflowWidgetTelemetry.warn(
+        "widget_push_token_refresh_enqueue_failed",
+        mapOf("errorType" to error.javaClass.simpleName),
+        error,
+      )
+    })
   }
 
   override fun onMessageReceived(message: RemoteMessage) {
@@ -35,41 +82,36 @@ class NanoflowFirebaseMessagingService : FirebaseMessagingService() {
 
     val hasInstalledWidgets = NanoflowWidgetReceiver.hasInstalledWidgets(applicationContext)
     if (!hasInstalledWidgets) {
-      NanoflowWidgetTelemetry.warn(
-        "widget_push_dirty_dropped",
-        mapOf("reason" to "no-installed-widgets"),
-      )
+      nanoflowWidgetAttemptSafely({
+        NanoflowWidgetTelemetry.warn("widget_push_dirty_dropped", mapOf("reason" to "no-installed-widgets"))
+      })
       return
     }
 
-    NanoflowWidgetTelemetry.info(
-      "widget_push_dirty_delivered",
-      mapOf(
-        "hasInstalledWidgets" to true,
-        "messageId" to message.messageId,
-      ),
-    )
+    nanoflowWidgetAttemptSafely({
+      NanoflowWidgetTelemetry.info(
+        "widget_push_dirty_delivered",
+        mapOf("hasInstalledWidgets" to true, "messageId" to NanoflowWidgetTelemetry.redactId(message.messageId.orEmpty())),
+      )
+    })
 
-    // 2026-04-22 颠覆性压缩：FCM data payload 携带 focusActiveHint 时，先用 hint 在 0ms 内翻转
-    // 本地缓存 summary 的 focus.active 并立刻重绘 widget，再异步走 summary fetch 拉权威数据。
-    // 这一步把用户可感延迟从「~8s（FCM→widget-summary 回环）」压缩到「~0.5s（FCM 即绘）」。
-    val focusHintRaw = message.data["focusActiveHint"]
-    val hintActive: Boolean? = when (focusHintRaw) {
-      "true" -> true
-      "false" -> false
-      else -> null
-    }
-    if (hintActive != null) {
-      val context = applicationContext
-      val changed = runBlocking {
-        NanoflowWidgetRepository(context).applyFocusActiveHint(hintActive)
-      }
-      if (changed.isNotEmpty()) {
-        // 走 Receiver 的统一 partial update 路径：保留既有 folme-friendly 动画策略，避免抖动。
-        NanoflowWidgetReceiver.refreshAllWidgets(context)
-      }
-    }
-
-    NanoflowWidgetRefreshWorker.enqueue(applicationContext, reason = "widget-dirty-push")
+    nanoflowWidgetAttemptSafely({
+      NanoflowWidgetFocusHintWorker.enqueueIfComplete(applicationContext, message.data)
+    }, { error ->
+      NanoflowWidgetTelemetry.warn(
+        "widget_focus_hint_enqueue_failed",
+        mapOf("errorType" to error.javaClass.simpleName),
+        error,
+      )
+    })
+    nanoflowWidgetAttemptSafely({
+      NanoflowWidgetRefreshWorker.enqueue(applicationContext, reason = "widget-dirty-push")
+    }, { error ->
+      NanoflowWidgetTelemetry.warn(
+        "widget_push_refresh_enqueue_failed",
+        mapOf("errorType" to error.javaClass.simpleName),
+        error,
+      )
+    })
   }
 }

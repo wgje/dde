@@ -4,6 +4,12 @@ import android.appwidget.AppWidgetManager
 import android.content.ComponentName
 import android.content.Context
 import android.net.Uri
+import androidx.datastore.preferences.core.MutablePreferences
+import androidx.datastore.preferences.core.booleanPreferencesKey
+import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.core.longPreferencesKey
+import androidx.datastore.preferences.core.stringPreferencesKey
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
@@ -16,21 +22,203 @@ import java.time.Duration
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.locks.ReentrantReadWriteLock
+import kotlin.concurrent.read
+import kotlin.concurrent.write
 
-data class WidgetBlackBoxOptimisticSnapshot(
-  val summary: WidgetSummaryResponse,
-  val selectedEntryId: String?,
-)
+internal fun selectedTaskIndexKey(id: Int) = intPreferencesKey("instance.$id.selectedTaskIndex")
+internal fun focusWaitMenuOpenKey(id: Int) = booleanPreferencesKey("instance.$id.focusWaitMenuOpen")
 
-data class WidgetBlackBoxOptimisticPatch(
-  val blackBox: WidgetBlackBoxSummary,
-  val nextSelectedEntryId: String?,
-)
-
-data class WidgetFocusOptimisticSnapshot(
-  val summary: WidgetSummaryResponse,
+internal data class WidgetFocusOptimisticSnapshot(
+  val source: NanoflowWidgetOptimisticSummarySnapshot,
   val selectedTaskIndex: Int,
   val focusWaitMenuOpen: Boolean = false,
+)
+
+internal sealed interface WidgetOptimisticResult<out Snapshot> {
+  data class Committed<Snapshot>(val snapshot: Snapshot) : WidgetOptimisticResult<Snapshot>
+  data object CurrentNoSnapshot : WidgetOptimisticResult<Nothing>
+  data object RejectedStale : WidgetOptimisticResult<Nothing>
+}
+internal typealias WidgetOptimisticSummaryResult = WidgetOptimisticResult<NanoflowWidgetOptimisticSummarySnapshot>
+private suspend inline fun <Source, Snapshot> WidgetOptimisticResult<Source>.mapCommitted(
+  transform: suspend (Source) -> WidgetOptimisticResult<Snapshot>,
+): WidgetOptimisticResult<Snapshot> = when (this) {
+  is WidgetOptimisticResult.Committed -> transform(snapshot)
+  WidgetOptimisticResult.CurrentNoSnapshot -> WidgetOptimisticResult.CurrentNoSnapshot
+  WidgetOptimisticResult.RejectedStale -> WidgetOptimisticResult.RejectedStale
+}
+private fun <Snapshot> NanoflowWidgetOptimisticSummarySnapshot.currentNoSnapshot(
+  onCurrent: () -> Unit = {},
+): WidgetOptimisticResult<Snapshot> = if (ticket.commitIfCurrent(onCurrent))
+  WidgetOptimisticResult.CurrentNoSnapshot else WidgetOptimisticResult.RejectedStale
+private fun <Snapshot> WidgetOptimisticResult<Snapshot>.publishIfCommitted(
+  ticket: NanoflowWidgetAuthoritativeRefreshTicket,
+  publish: () -> Unit,
+): WidgetOptimisticResult<Snapshot> = also { result ->
+  if (result is WidgetOptimisticResult.Committed) ticket.commitIfCurrent(publish)
+}
+
+internal fun clearLocalWidgetState(prefs: MutablePreferences, id: Int) {
+  prefs.remove(sizeBucketKey(id))
+  prefs.remove(gatePageIndexKey(id))
+  prefs.remove(gateSelectedEntryIdKey(id))
+  prefs.remove(selectedTaskIndexKey(id))
+  prefs.remove(focusWaitMenuOpenKey(id))
+  prefs.remove(lastAppliedLayoutSignatureKey(id))
+}
+
+data class PendingFocusActiveHint(
+  val active: Boolean,
+  val sessionId: String,
+  val revisionMicros: Long,
+  val eventId: String,
+  val deviceId: String,
+  val bindingGeneration: Int,
+  val issuedAtMs: Long,
+)
+
+data class PendingFocusMutation(
+  val action: String,
+  val issuedAtMs: Long,
+)
+
+internal data class NanoflowWidgetAuthoritativeRefreshTicket(
+  val processEpoch: String,
+  val bindingEpoch: Long,
+  val owner: NanoflowWidgetBindingIdentity?,
+  val appWidgetId: Int,
+  val attempt: Long,
+  internal val bindingSerial: Long,
+  private val registry: NanoflowWidgetAuthoritativeRefreshAttemptRegistryCore,
+) {
+  fun isCurrent(): Boolean = registry.isCurrent(this)
+  fun commitIfCurrent(block: () -> Unit): Boolean = registry.commitIfCurrent(this, block)
+}
+
+internal open class NanoflowWidgetAuthoritativeRefreshAttemptRegistryCore {
+  private class WidgetState(var attempt: Long = 0L)
+  private val bindingFence = ReentrantReadWriteLock(true)
+  private val widgets = ConcurrentHashMap<Int, WidgetState>()
+  private val processEpoch = UUID.randomUUID().toString()
+  @Volatile private var bindingEpoch = Long.MIN_VALUE
+  @Volatile private var bindingSerial = 0L
+  @Volatile private var owner: NanoflowWidgetBindingIdentity? = null
+
+  fun issue(owner: NanoflowWidgetBindingIdentity?, bindingEpoch: Long, appWidgetId: Int):
+    NanoflowWidgetAuthoritativeRefreshTicket {
+    ensureBinding(owner, bindingEpoch)
+    return bindingFence.read {
+      val state = widgets.computeIfAbsent(appWidgetId) { WidgetState() }
+      synchronized(state) {
+        state.attempt += 1L
+        NanoflowWidgetAuthoritativeRefreshTicket(
+          processEpoch, bindingEpoch, owner, appWidgetId, state.attempt, bindingSerial, this,
+        )
+      }
+    }
+  }
+
+  fun invalidateBinding() = bindingFence.write {
+    bindingSerial += 1L
+    bindingEpoch = Long.MIN_VALUE
+    owner = null
+    widgets.clear()
+  }
+
+  fun invalidateWidget(appWidgetId: Int) = bindingFence.read {
+    widgets[appWidgetId]?.let { state -> synchronized(state) { state.attempt += 1L } }
+  }
+
+  fun isCurrent(ticket: NanoflowWidgetAuthoritativeRefreshTicket): Boolean = bindingFence.read {
+    val state = widgets[ticket.appWidgetId] ?: return@read false
+    synchronized(state) { matches(ticket, state) }
+  }
+
+  fun commitIfCurrent(ticket: NanoflowWidgetAuthoritativeRefreshTicket, block: () -> Unit): Boolean =
+    bindingFence.read {
+      val state = widgets[ticket.appWidgetId] ?: return@read false
+      synchronized(state) {
+        if (!matches(ticket, state)) return@synchronized false
+        block()
+        true
+      }
+    }
+
+  private fun ensureBinding(nextOwner: NanoflowWidgetBindingIdentity?, nextEpoch: Long) {
+    if (owner == nextOwner && bindingEpoch == nextEpoch) return
+    bindingFence.write {
+      if (owner != nextOwner || bindingEpoch != nextEpoch) {
+        bindingSerial += 1L
+        owner = nextOwner
+        bindingEpoch = nextEpoch
+        widgets.clear()
+      }
+    }
+  }
+
+  private fun matches(ticket: NanoflowWidgetAuthoritativeRefreshTicket, state: WidgetState): Boolean =
+    ticket.processEpoch == processEpoch && ticket.bindingSerial == bindingSerial &&
+      ticket.bindingEpoch == bindingEpoch && ticket.owner == owner && ticket.attempt == state.attempt
+}
+
+internal class NanoflowWidgetAuthoritativeRenderPreparation {
+  var sizeBucket: String? = null
+  var clearFocusHint: PendingFocusActiveHint? = null
+  var gatePageIndex: Int = 0
+  var gateSelectedEntryId: String? = null
+  var gateSelectionChanged: Boolean = false
+
+  fun selectGate(pageIndex: Int, entryId: String?) {
+    gatePageIndex = pageIndex.coerceAtLeast(0)
+    gateSelectedEntryId = entryId
+    gateSelectionChanged = true
+  }
+}
+
+internal data class NanoflowWidgetAuthoritativeRefreshCommit(
+  val summary: WidgetSummaryResponse,
+  val clearWidgetContext: Boolean = false,
+  val clearBinding: Boolean = false,
+  val backoffSeconds: Int? = null,
+  val clearBackoff: Boolean = false,
+  val clearRegisteredPushToken: Boolean = false,
+  val clearFocusHint: PendingFocusActiveHint? = null,
+  val clearFocusMutation: PendingFocusMutation? = null,
+)
+
+internal fun clearExpectedAuthoritativeFocusState(
+  prefs: MutablePreferences,
+  id: Int,
+  commit: NanoflowWidgetAuthoritativeRefreshCommit,
+) {
+  commit.clearFocusHint?.let { expected ->
+    val current = NanoflowWidgetFocusHintPreferences.read(prefs, id)
+    val hint = current?.hint
+    if (current?.issuedAtMs == expected.issuedAtMs && hint?.eventId == expected.eventId &&
+      hint.revisionMicros == expected.revisionMicros && hint.deviceId == expected.deviceId &&
+      hint.bindingGeneration == expected.bindingGeneration
+    ) NanoflowWidgetFocusHintPreferences.write(prefs, id, current.copy(projectable = false))
+  }
+  val actionKey = stringPreferencesKey("instance.$id.pendingFocusMutationAction")
+  val issuedKey = longPreferencesKey("instance.$id.pendingFocusMutationIssuedAtMs")
+  commit.clearFocusMutation?.let { expected ->
+    if (prefs[actionKey] == expected.action && prefs[issuedKey] == expected.issuedAtMs) {
+      prefs.remove(actionKey)
+      prefs.remove(issuedKey)
+    }
+  }
+}
+
+internal fun stripSensitiveWidgetSummary(summary: WidgetSummaryResponse) = summary.copy(
+  focus = summary.focus.copy(title = null, projectTitle = null),
+  blackBox = summary.blackBox.copy(
+    previews = summary.blackBox.previews.map { it.copy(content = null, projectTitle = null) },
+    gatePreview = summary.blackBox.gatePreview.copy(content = null, projectTitle = null),
+  ),
+  dock = summary.dock.copy(items = summary.dock.items.map { it.copy(title = null, projectTitle = null) }),
 )
 
 private const val FOCUS_HINT_GRACE_MS = 30_000L
@@ -39,28 +227,20 @@ private const val FOCUS_MUTATION_COMPLETE = "complete-front"
 private const val FOCUS_MUTATION_WAIT = "wait-front"
 private const val GATE_READ_REAPPEAR_COOLDOWN_MS = 30 * 60 * 1000L
 
-internal fun hasActionableOptimisticGateEntry(
-  blackBox: WidgetBlackBoxSummary,
-  privacyMode: Boolean,
-  now: Instant = Instant.now(),
-): Boolean {
-  if (blackBox.pendingCount <= 0) {
-    return true
-  }
+private data class NanoflowWidgetFocusProjection(
+  val summary: WidgetSummaryResponse,
+  val clearHint: PendingFocusActiveHint? = null,
+  val publishReconciled: (() -> Unit)? = null,
+)
 
-  return resolveRenderableGateEntriesForBlackBox(blackBox, privacyMode, now)
-    .firstOrNull { preview -> isActionableOptimisticGatePreview(preview, privacyMode) } != null
-}
+private data class NanoflowWidgetMutationProjection(
+  val summary: WidgetSummaryResponse,
+  val clearMutation: PendingFocusMutation? = null,
+  val publishReconciled: (() -> Unit)? = null,
+)
 
-private fun isActionableOptimisticGatePreview(
-  preview: WidgetGatePreview,
-  privacyMode: Boolean,
-): Boolean {
-  if (preview.entryId.isNullOrBlank()) {
-    return false
-  }
-
-  return privacyMode || !preview.content.isNullOrBlank()
+private fun Throwable.rethrowWidgetRefreshCancellation() {
+  if (this is CancellationException) throw this
 }
 
 internal fun resolveRenderableGateEntriesForBlackBox(
@@ -113,26 +293,6 @@ internal fun resolveRenderableGateEntriesForBlackBox(
   val fallbackPreview = fallbackEntries.firstOrNull { !it.entryId.isNullOrBlank() }
     ?: fallbackEntries.firstOrNull()
   return fallbackPreview?.let(::listOf) ?: emptyList()
-}
-
-private fun preferRicherGatePreviewForBlackBox(
-  current: WidgetGatePreview,
-  candidate: WidgetGatePreview,
-): WidgetGatePreview {
-  return if (gatePreviewRichnessForBlackBox(candidate) >= gatePreviewRichnessForBlackBox(current)) {
-    candidate
-  } else {
-    current
-  }
-}
-
-private fun gatePreviewRichnessForBlackBox(preview: WidgetGatePreview): Int {
-  var score = 0
-  if (!preview.entryId.isNullOrBlank()) score += 8
-  if (!preview.content.isNullOrBlank()) score += 4
-  if (!preview.createdAt.isNullOrBlank()) score += 2
-  if (!preview.projectTitle.isNullOrBlank()) score += 1
-  return score
 }
 
 private fun isGateReadCoolingDownForBlackBox(
@@ -236,18 +396,6 @@ private fun resolveBlackBoxUnreadCountForPatch(blackBox: WidgetBlackBoxSummary):
 
   val previewUnreadCount = blackBox.previews.count { !it.isRead }
   return previewUnreadCount.coerceAtMost(pendingCount)
-}
-
-private fun areSameGatePreview(left: WidgetGatePreview, right: WidgetGatePreview): Boolean {
-  val leftEntryId = left.entryId?.takeIf { it.isNotBlank() }
-  val rightEntryId = right.entryId?.takeIf { it.isNotBlank() }
-  if (leftEntryId != null && rightEntryId != null) {
-    return leftEntryId == rightEntryId
-  }
-
-  return left.content == right.content
-    && left.createdAt == right.createdAt
-    && left.projectId == right.projectId
 }
 
 private data class VisibleCommandCenterTask(
@@ -555,99 +703,55 @@ class NanoflowWidgetRepository(private val context: Context) {
     store.persistPendingPushToken(normalizedPushToken)
   }
 
-  private suspend fun repairMissingPushTokenState(
+  private suspend fun reportMissingPushTokenState(
     appWidgetId: Int,
     summary: WidgetSummaryResponse,
+    ticket: NanoflowWidgetAuthoritativeRefreshTicket,
   ) {
     if (!summary.degradedReasons.contains(pushTokenRepairDegradedReason)) {
       return
     }
 
-    store.clearRegisteredPushTokenState()
     if (!BuildConfig.NANOFLOW_FCM_ENABLED) {
-      NanoflowWidgetTelemetry.warn(
-        "widget_push_token_repair_skipped",
-        mapOf(
-          "appWidgetId" to appWidgetId,
-          "reason" to "fcm-disabled",
-        ),
-      )
+      publishAuthoritativeRefreshIfCurrent(ticket) {
+        NanoflowWidgetTelemetry.warn(
+          "widget_push_token_repair_skipped",
+          mapOf("appWidgetId" to appWidgetId, "reason" to "fcm-disabled"),
+        )
+      }
       return
     }
 
     if (!store.readPendingPushToken().isNullOrBlank()) {
-      NanoflowWidgetTelemetry.info(
-        "widget_push_token_repair_already_pending",
-        mapOf("appWidgetId" to appWidgetId),
-      )
+      publishAuthoritativeRefreshIfCurrent(ticket) {
+        NanoflowWidgetTelemetry.info("widget_push_token_repair_already_pending", mapOf("appWidgetId" to appWidgetId))
+      }
       return
     }
 
-    NanoflowWidgetTelemetry.warn(
-      "widget_push_token_repair_skipped",
-      mapOf(
-        "appWidgetId" to appWidgetId,
-        "reason" to "token-fetch-deferred",
-      ),
-    )
-  }
-
-  suspend fun refreshInstalledWidgets() {
-    val appWidgetManager = AppWidgetManager.getInstance(context)
-    val componentName = ComponentName(context, NanoflowWidgetReceiver::class.java)
-    val appWidgetIds = appWidgetManager.getAppWidgetIds(componentName)
-
-    for (appWidgetId in appWidgetIds) {
-      refreshSummary(appWidgetId)
+    publishAuthoritativeRefreshIfCurrent(ticket) {
+      NanoflowWidgetTelemetry.warn(
+        "widget_push_token_repair_skipped",
+        mapOf("appWidgetId" to appWidgetId, "reason" to "token-fetch-deferred"),
+      )
     }
   }
 
-  /**
-   * 2026-04-22 颠覆性压缩：根据 FCM data payload 携带的 focusActiveHint 对每个已安装的
-   * appWidget 的缓存 summary 做乐观内联。返回被改动过的 appWidgetId 列表，以便上层立即触发渲染
-   * （而无需等 widget-summary 边缘函数回环，节省 ~5s）。
-   *
-   * 设计口径：
-   * - 只修改 focus.active + focus.valid 两个字段，其它 focus slot 元数据（title / projectId 等）
-   *   保持原值——因为 hint 只能告诉你「是否专注」，而不能告诉你「专注的是哪个任务」。
-   * - valid 的计算依赖于原来 title/taskId 是否存在；这里保守地复用旧 valid。
-   * - 若缓存中 focus.active 已经等于 hint，跳过以免写无用缓存引发 UI 闪烁。
-   * - 后续的 refreshSummary 会在短暂 grace 窗口内保留该 hint，避免旧 summary 把 UI 打回去。
-   */
-  suspend fun applyFocusActiveHint(hintActive: Boolean): List<Int> {
+  private fun publishAuthoritativeRefreshIfCurrent(
+    ticket: NanoflowWidgetAuthoritativeRefreshTicket,
+    publish: () -> Unit,
+  ): Boolean = ticket.commitIfCurrent { runCatching(publish) }
+
+  internal suspend fun refreshInstalledWidgets(): List<NanoflowWidgetAuthoritativeRefreshTicket> {
     val appWidgetManager = AppWidgetManager.getInstance(context)
     val componentName = ComponentName(context, NanoflowWidgetReceiver::class.java)
     val appWidgetIds = appWidgetManager.getAppWidgetIds(componentName)
-    val changed = mutableListOf<Int>()
-    val desiredValid = hintActive
+    val committed = mutableListOf<NanoflowWidgetAuthoritativeRefreshTicket>()
+
     for (appWidgetId in appWidgetIds) {
-      store.persistPendingFocusActiveHint(appWidgetId, hintActive)
-      val cached = store.readSummary(appWidgetId) ?: continue
-      if (cached.focus.active == hintActive && cached.focus.valid == desiredValid) {
-        continue
-      }
-      // hint 口径下 valid 直接跟随 hint：
-      // - hint=true 时即便旧缓存没有可用 focus slot，也要先切到专注模式骨架；
-      // - hint=false 时立即撤回到 Gate 视图。
-      val patched = cached.copy(
-        focus = cached.focus.copy(
-          active = hintActive,
-          valid = desiredValid,
-        ),
-      )
-      store.saveSummary(appWidgetId, patched)
-      changed += appWidgetId
+      refreshSummary(appWidgetId) { committed += it }
     }
-    if (changed.isNotEmpty()) {
-      NanoflowWidgetTelemetry.info(
-        "widget_focus_hint_applied",
-        mapOf(
-          "hintActive" to hintActive,
-          "appWidgetIds" to changed.joinToString(","),
-        ),
-      )
-    }
-    return changed
+    return committed
   }
 
   /**
@@ -661,114 +765,119 @@ class NanoflowWidgetRepository(private val context: Context) {
    * - 本方法只负责远端提交；调用方负责在提交前先做本地乐观补丁并立即重绘。
    * - 不触发 refreshSummary：让调用方决定（避免一次点击触发两轮 HTTP 放大服务端压力）。
    */
-  suspend fun applyOptimisticBlackBoxAction(
+  internal suspend fun applyOptimisticBlackBoxAction(
     appWidgetId: Int,
     entryId: String,
     action: BlackBoxEntryAction,
-  ): WidgetBlackBoxOptimisticSnapshot? {
-    val cached = store.readSummary(appWidgetId) ?: return null
-    val privacyMode = store.isPrivacyModeEnabled()
-    val gateEntries = resolveRenderableGateEntries(cached, privacyMode)
-    val selectedGateIndex = if (gateEntries.isEmpty()) {
-      0
-    } else {
-      resolveGatePageIndex(appWidgetId, gateEntries)
-    }
-    val previousSelectedEntryId = store.readGateSelectedEntryId(appWidgetId)
-    val optimisticPatch = buildOptimisticBlackBoxActionPatch(
-      blackBox = cached.blackBox,
-      entryId = entryId,
-      action = action,
-      gateEntries = gateEntries,
-      selectedGateIndex = selectedGateIndex,
-      previousSelectedEntryId = previousSelectedEntryId,
-    ) ?: return null
-    val patchedBlackBox = optimisticPatch.blackBox
-    // 完成动作没有下一条可执行条目时保留旧卡片等权威刷新；已读动作则必须本地移走当前条目，
-    // 让 repeated read 重新进入 30 分钟冷却时也有即时反馈。
-    if (action != BlackBoxEntryAction.READ && !hasActionableOptimisticGateEntry(patchedBlackBox, privacyMode)) {
-      NanoflowWidgetTelemetry.info(
-        "widget_black_box_action_optimistic_skipped_unrenderable_gate",
-        mapOf(
-          "appWidgetId" to appWidgetId,
-          "entryId" to NanoflowWidgetTelemetry.redactId(entryId),
-          "action" to action.wireValue,
-          "pendingCount" to patchedBlackBox.pendingCount,
-        ),
+  ): WidgetOptimisticResult<WidgetBlackBoxOptimisticSnapshot> =
+    store.readOptimisticSummary(appWidgetId).mapCommitted { source ->
+      val cached = source.summary
+      val privacyMode = store.isPrivacyModeEnabled()
+      val gateEntries = resolveRenderableGateEntries(cached, privacyMode)
+      val selectedGateIndex = if (gateEntries.isEmpty()) {
+        0
+      } else {
+        resolveGatePageIndex(appWidgetId, gateEntries)
+      }
+      val previousSelectedEntryId = store.readGateSelectedEntryId(appWidgetId)
+      val optimisticPatch = buildOptimisticBlackBoxActionPatch(
+        blackBox = cached.blackBox,
+        entryId = entryId,
+        action = action,
+        gateEntries = gateEntries,
+        selectedGateIndex = selectedGateIndex,
+        previousSelectedEntryId = previousSelectedEntryId,
+      ) ?: return@mapCommitted source.currentNoSnapshot()
+      val patchedBlackBox = optimisticPatch.blackBox
+      // 完成动作没有下一条可执行条目时保留旧卡片等权威刷新；已读动作则必须本地移走当前条目，
+      // 让 repeated read 重新进入 30 分钟冷却时也有即时反馈。
+      if (action != BlackBoxEntryAction.READ && !hasActionableOptimisticGateEntry(patchedBlackBox, privacyMode)) {
+        return@mapCommitted source.currentNoSnapshot {
+          NanoflowWidgetTelemetry.info(
+            "widget_black_box_action_optimistic_skipped_unrenderable_gate",
+            mapOf(
+              "appWidgetId" to appWidgetId,
+              "entryId" to NanoflowWidgetTelemetry.redactId(entryId),
+              "action" to action.wireValue,
+              "pendingCount" to patchedBlackBox.pendingCount,
+            ),
+          )
+        }
+      }
+      val patched = cached.copy(
+        blackBox = patchedBlackBox,
       )
-      return null
+      val shouldAdvanceSelection = previousSelectedEntryId == entryId || previousSelectedEntryId.isNullOrBlank() ||
+        cached.blackBox.gatePreview.entryId == entryId
+      val selectedEntryId = if (shouldAdvanceSelection) optimisticPatch.nextSelectedEntryId else previousSelectedEntryId
+      val committed = WidgetBlackBoxOptimisticSnapshot(source, previousSelectedEntryId)
+      store.commitOptimisticSummary(appWidgetId, source, patched, committed) {
+        val key = gateSelectedEntryIdKey(appWidgetId)
+        selectedEntryId?.let { this[key] = it } ?: remove(key)
+      }.publishIfCommitted(source.ticket) {
+        NanoflowWidgetTelemetry.info(
+          "widget_black_box_action_optimistic_applied",
+          mapOf(
+            "appWidgetId" to appWidgetId,
+            "entryId" to NanoflowWidgetTelemetry.redactId(entryId),
+            "action" to action.wireValue,
+            "pendingCount" to patched.blackBox.pendingCount,
+            "unreadCount" to resolveBlackBoxUnreadCount(patched),
+          ),
+        )
+      }
     }
-    val patched = cached.copy(
-      blackBox = patchedBlackBox,
-    )
-    store.saveSummary(appWidgetId, patched)
-    if (previousSelectedEntryId == entryId || previousSelectedEntryId.isNullOrBlank() || cached.blackBox.gatePreview.entryId == entryId) {
-      store.persistGateSelectedEntryId(appWidgetId, optimisticPatch.nextSelectedEntryId)
-    }
 
-    NanoflowWidgetTelemetry.info(
-      "widget_black_box_action_optimistic_applied",
-      mapOf(
-        "appWidgetId" to appWidgetId,
-        "entryId" to NanoflowWidgetTelemetry.redactId(entryId),
-        "action" to action.wireValue,
-        "pendingCount" to patched.blackBox.pendingCount,
-        "unreadCount" to resolveBlackBoxUnreadCount(patched),
-      ),
-    )
-
-    return WidgetBlackBoxOptimisticSnapshot(
-      summary = cached,
-      selectedEntryId = previousSelectedEntryId,
-    )
-  }
-
-  suspend fun rollbackOptimisticBlackBoxAction(
+  internal suspend fun rollbackOptimisticBlackBoxAction(
     appWidgetId: Int,
     snapshot: WidgetBlackBoxOptimisticSnapshot,
+  ): WidgetOptimisticResult<Unit> = store.commitOptimisticSummary(
+    appWidgetId,
+    snapshot.source,
+    snapshot.source.summary,
+    Unit,
   ) {
-    store.saveSummary(appWidgetId, snapshot.summary)
-    store.persistGateSelectedEntryId(appWidgetId, snapshot.selectedEntryId)
+    val key = gateSelectedEntryIdKey(appWidgetId)
+    snapshot.selectedEntryId?.let { this[key] = it } ?: remove(key)
   }
 
   /**
    * Focus C 位点击：本地先把目标槽位提到 #1，同时保留主/副任务属性，
    * 让桌面小组件立即反馈；随后 widget-focus-action 会改写云端快照作为权威状态。
    */
-  suspend fun applyOptimisticFocusPromotion(
+  internal suspend fun applyOptimisticFocusPromotion(
     appWidgetId: Int,
     taskId: String,
-  ): WidgetFocusOptimisticSnapshot? {
-    val cached = store.readSummary(appWidgetId) ?: return null
-    if (cached.focus.active != true || !cached.focus.valid) return null
-    val visibleTasks = resolveVisibleCommandCenterTasks(cached)
-    if (visibleTasks.firstOrNull()?.taskId == taskId) return null
+  ): WidgetOptimisticResult<WidgetFocusOptimisticSnapshot> =
+    store.readOptimisticSummary(appWidgetId).mapCommitted { source ->
+      val cached = source.summary
+      if (cached.focus.active != true || !cached.focus.valid) return@mapCommitted source.currentNoSnapshot()
+      val visibleTasks = resolveVisibleCommandCenterTasks(cached)
+      if (visibleTasks.firstOrNull()?.taskId == taskId) return@mapCommitted source.currentNoSnapshot()
 
-    val target = visibleTasks.firstOrNull { it.taskId == taskId } ?: return null
-    if (!target.valid) return null
-    val reorderedTasks = buildList {
-      add(target)
-      addAll(visibleTasks.filterNot { it.taskId == taskId })
+      val target = visibleTasks.firstOrNull { it.taskId == taskId }
+        ?: return@mapCommitted source.currentNoSnapshot()
+      if (!target.valid) return@mapCommitted source.currentNoSnapshot()
+      val reorderedTasks = buildList {
+        add(target)
+        addAll(visibleTasks.filterNot { it.taskId == taskId })
+      }
+      val previousSelectedTaskIndex = store.readSelectedTaskIndex(appWidgetId)
+      val patched = patchSummaryWithVisibleCommandTasks(cached, reorderedTasks)
+      val committed = WidgetFocusOptimisticSnapshot(source, previousSelectedTaskIndex)
+      store.commitOptimisticSummary(appWidgetId, source, patched, committed) {
+        this[selectedTaskIndexKey(appWidgetId)] = 0
+      }.publishIfCommitted(source.ticket) {
+        NanoflowWidgetTelemetry.info(
+          "widget_focus_promote_optimistic_applied",
+          mapOf(
+            "appWidgetId" to appWidgetId,
+            "taskId" to NanoflowWidgetTelemetry.redactId(taskId),
+            "dockItemCount" to reorderedTasks.drop(1).size,
+          ),
+        )
+      }
     }
-    val previousSelectedTaskIndex = store.readSelectedTaskIndex(appWidgetId)
-    val patched = patchSummaryWithVisibleCommandTasks(cached, reorderedTasks)
-    store.saveSummary(appWidgetId, patched)
-    store.persistSelectedTaskIndex(appWidgetId, 0)
-
-    NanoflowWidgetTelemetry.info(
-      "widget_focus_promote_optimistic_applied",
-      mapOf(
-        "appWidgetId" to appWidgetId,
-        "taskId" to NanoflowWidgetTelemetry.redactId(taskId),
-        "dockItemCount" to reorderedTasks.drop(1).size,
-      ),
-    )
-
-    return WidgetFocusOptimisticSnapshot(
-      summary = cached,
-      selectedTaskIndex = previousSelectedTaskIndex,
-    )
-  }
 
   suspend fun isVisibleCommandCenterTaskPromotable(appWidgetId: Int, taskId: String): Boolean {
     val cached = store.readSummary(appWidgetId) ?: return false
@@ -777,98 +886,99 @@ class NanoflowWidgetRepository(private val context: Context) {
     }
   }
 
-  suspend fun applyOptimisticFocusCompletion(
+  internal suspend fun applyOptimisticFocusCompletion(
     appWidgetId: Int,
     taskId: String,
-  ): WidgetFocusOptimisticSnapshot? {
-    val cached = store.readSummary(appWidgetId) ?: return null
-    if (cached.focus.active != true || !cached.focus.valid) return null
-    val visibleTasks = resolveVisibleCommandCenterTasks(cached)
-    val target = visibleTasks.firstOrNull() ?: return null
-    if (target.taskId != taskId || !target.valid) return null
+  ): WidgetOptimisticResult<WidgetFocusOptimisticSnapshot> =
+    store.readOptimisticSummary(appWidgetId).mapCommitted { source ->
+      val cached = source.summary
+      if (cached.focus.active != true || !cached.focus.valid) return@mapCommitted source.currentNoSnapshot()
+      val visibleTasks = resolveVisibleCommandCenterTasks(cached)
+      val target = visibleTasks.firstOrNull() ?: return@mapCommitted source.currentNoSnapshot()
+      if (target.taskId != taskId || !target.valid) return@mapCommitted source.currentNoSnapshot()
 
-    val remainingTasks = visibleTasks.drop(1).mapIndexed { index, task ->
-      if (target.isMain && visibleTasks.drop(1).none { it.isMain } && index == 0) {
-        task.copy(isMain = true)
-      } else {
-        task
+      val remainingTasks = visibleTasks.drop(1).mapIndexed { index, task ->
+        if (target.isMain && visibleTasks.drop(1).none { it.isMain } && index == 0) {
+          task.copy(isMain = true)
+        } else {
+          task
+        }
+      }
+      val previousSelectedTaskIndex = store.readSelectedTaskIndex(appWidgetId)
+      val previousWaitMenuOpen = store.readFocusWaitMenuOpen(appWidgetId)
+      val patched = patchSummaryWithVisibleCommandTasks(cached, remainingTasks)
+      val committed = WidgetFocusOptimisticSnapshot(source, previousSelectedTaskIndex, previousWaitMenuOpen)
+      store.commitOptimisticSummary(appWidgetId, source, patched, committed) {
+        this[selectedTaskIndexKey(appWidgetId)] = 0
+        this[focusWaitMenuOpenKey(appWidgetId)] = false
+        this[pendingFocusMutationActionKey(appWidgetId)] = FOCUS_MUTATION_COMPLETE
+        this[pendingFocusMutationIssuedAtKey(appWidgetId)] = System.currentTimeMillis()
+      }.publishIfCommitted(source.ticket) {
+        NanoflowWidgetTelemetry.info(
+          "widget_focus_complete_optimistic_applied",
+          mapOf(
+            "appWidgetId" to appWidgetId,
+            "taskId" to NanoflowWidgetTelemetry.redactId(taskId),
+            "remainingVisibleCount" to remainingTasks.size,
+          ),
+        )
       }
     }
-    val previousSelectedTaskIndex = store.readSelectedTaskIndex(appWidgetId)
-    val previousWaitMenuOpen = store.readFocusWaitMenuOpen(appWidgetId)
-    val patched = patchSummaryWithVisibleCommandTasks(cached, remainingTasks)
-    store.saveSummary(appWidgetId, patched)
-    store.persistSelectedTaskIndex(appWidgetId, 0)
-    store.persistFocusWaitMenuOpen(appWidgetId, false)
-    store.persistPendingFocusMutation(appWidgetId, FOCUS_MUTATION_COMPLETE)
 
-    NanoflowWidgetTelemetry.info(
-      "widget_focus_complete_optimistic_applied",
-      mapOf(
-        "appWidgetId" to appWidgetId,
-        "taskId" to NanoflowWidgetTelemetry.redactId(taskId),
-        "remainingVisibleCount" to remainingTasks.size,
-      ),
-    )
-
-    return WidgetFocusOptimisticSnapshot(
-      summary = cached,
-      selectedTaskIndex = previousSelectedTaskIndex,
-      focusWaitMenuOpen = previousWaitMenuOpen,
-    )
-  }
-
-  suspend fun applyOptimisticFocusWait(
+  internal suspend fun applyOptimisticFocusWait(
     appWidgetId: Int,
     taskId: String,
     waitMinutes: Int,
-  ): WidgetFocusOptimisticSnapshot? {
-    val cached = store.readSummary(appWidgetId) ?: return null
-    if (cached.focus.active != true || !cached.focus.valid) return null
-    val visibleTasks = resolveVisibleCommandCenterTasks(cached)
-    val target = visibleTasks.firstOrNull() ?: return null
-    if (target.taskId != taskId || !target.valid) return null
+  ): WidgetOptimisticResult<WidgetFocusOptimisticSnapshot> =
+    store.readOptimisticSummary(appWidgetId).mapCommitted { source ->
+      val cached = source.summary
+      if (cached.focus.active != true || !cached.focus.valid) return@mapCommitted source.currentNoSnapshot()
+      val visibleTasks = resolveVisibleCommandCenterTasks(cached)
+      val target = visibleTasks.firstOrNull() ?: return@mapCommitted source.currentNoSnapshot()
+      if (target.taskId != taskId || !target.valid) return@mapCommitted source.currentNoSnapshot()
 
-    val normalizedWait = waitMinutes.coerceAtLeast(1)
-    val waitEndAt = Instant.now().plus(Duration.ofMinutes(normalizedWait.toLong())).toString()
-    val suspended = target.copy(
-      waitMinutes = normalizedWait,
-      waitEndAt = waitEndAt,
-      waitExpired = false,
-    )
-    val reorderedTasks = visibleTasks.drop(1) + suspended
-    val previousSelectedTaskIndex = store.readSelectedTaskIndex(appWidgetId)
-    val previousWaitMenuOpen = store.readFocusWaitMenuOpen(appWidgetId)
-    val patched = patchSummaryWithVisibleCommandTasks(cached, reorderedTasks)
-    store.saveSummary(appWidgetId, patched)
-    store.persistSelectedTaskIndex(appWidgetId, 0)
-    store.persistFocusWaitMenuOpen(appWidgetId, false)
-    store.persistPendingFocusMutation(appWidgetId, FOCUS_MUTATION_WAIT)
+      val normalizedWait = waitMinutes.coerceAtLeast(1)
+      val waitEndAt = Instant.now().plus(Duration.ofMinutes(normalizedWait.toLong())).toString()
+      val suspended = target.copy(
+        waitMinutes = normalizedWait,
+        waitEndAt = waitEndAt,
+        waitExpired = false,
+      )
+      val reorderedTasks = visibleTasks.drop(1) + suspended
+      val previousSelectedTaskIndex = store.readSelectedTaskIndex(appWidgetId)
+      val previousWaitMenuOpen = store.readFocusWaitMenuOpen(appWidgetId)
+      val patched = patchSummaryWithVisibleCommandTasks(cached, reorderedTasks)
+      val committed = WidgetFocusOptimisticSnapshot(source, previousSelectedTaskIndex, previousWaitMenuOpen)
+      store.commitOptimisticSummary(appWidgetId, source, patched, committed) {
+        this[selectedTaskIndexKey(appWidgetId)] = 0
+        this[focusWaitMenuOpenKey(appWidgetId)] = false
+        this[pendingFocusMutationActionKey(appWidgetId)] = FOCUS_MUTATION_WAIT
+        this[pendingFocusMutationIssuedAtKey(appWidgetId)] = System.currentTimeMillis()
+      }.publishIfCommitted(source.ticket) {
+        NanoflowWidgetTelemetry.info(
+          "widget_focus_wait_optimistic_applied",
+          mapOf(
+            "appWidgetId" to appWidgetId,
+            "taskId" to NanoflowWidgetTelemetry.redactId(taskId),
+            "waitMinutes" to normalizedWait,
+          ),
+        )
+      }
+    }
 
-    NanoflowWidgetTelemetry.info(
-      "widget_focus_wait_optimistic_applied",
-      mapOf(
-        "appWidgetId" to appWidgetId,
-        "taskId" to NanoflowWidgetTelemetry.redactId(taskId),
-        "waitMinutes" to normalizedWait,
-      ),
-    )
-
-    return WidgetFocusOptimisticSnapshot(
-      summary = cached,
-      selectedTaskIndex = previousSelectedTaskIndex,
-      focusWaitMenuOpen = previousWaitMenuOpen,
-    )
-  }
-
-  suspend fun rollbackOptimisticFocusPromotion(
+  internal suspend fun rollbackOptimisticFocusPromotion(
     appWidgetId: Int,
     snapshot: WidgetFocusOptimisticSnapshot,
+  ): WidgetOptimisticResult<Unit> = store.commitOptimisticSummary(
+    appWidgetId,
+    snapshot.source,
+    snapshot.source.summary,
+    Unit,
   ) {
-    store.saveSummary(appWidgetId, snapshot.summary)
-    store.persistSelectedTaskIndex(appWidgetId, snapshot.selectedTaskIndex)
-    store.persistFocusWaitMenuOpen(appWidgetId, snapshot.focusWaitMenuOpen)
-    store.clearPendingFocusMutation(appWidgetId)
+    this[selectedTaskIndexKey(appWidgetId)] = snapshot.selectedTaskIndex
+    this[focusWaitMenuOpenKey(appWidgetId)] = snapshot.focusWaitMenuOpen
+    remove(pendingFocusMutationActionKey(appWidgetId))
+    remove(pendingFocusMutationIssuedAtKey(appWidgetId))
   }
 
   suspend fun promoteFocusSecondaryTask(appWidgetId: Int, taskId: String): Boolean {
@@ -1106,8 +1216,12 @@ class NanoflowWidgetRepository(private val context: Context) {
     return true
   }
 
-  suspend fun refreshSummary(appWidgetId: Int): WidgetSummaryResponse {
-    val binding = store.readBinding()
+  internal suspend fun refreshSummary(
+    appWidgetId: Int,
+    onCommitted: ((NanoflowWidgetAuthoritativeRefreshTicket) -> Unit)? = null,
+  ): WidgetSummaryResponse {
+    val attempt = store.beginAuthoritativeRefresh(appWidgetId)
+    val binding = attempt.binding
     if (binding == null) {
       val fallback = WidgetSummaryResponse(
         trustState = "auth-required",
@@ -1115,16 +1229,22 @@ class NanoflowWidgetRepository(private val context: Context) {
         code = "WIDGET_BOOTSTRAP_REQUIRED",
         degradedReasons = listOf("bootstrap-required"),
       )
-      store.saveSummary(appWidgetId, fallback)
-      NanoflowWidgetTelemetry.warn(
-        "widget_summary_fetch_failure",
-        mapOf(
-          "appWidgetId" to appWidgetId,
-          "code" to fallback.code,
-          "reason" to "binding-missing",
-          "trustState" to fallback.trustState,
-        ),
-      )
+      val committedTicket = store.commitAuthoritativeRefresh(
+        attempt.ticket,
+        NanoflowWidgetAuthoritativeRefreshCommit(summary = fallback),
+      ) ?: return fallback
+      publishAuthoritativeRefreshIfCurrent(committedTicket) {
+        onCommitted?.invoke(committedTicket)
+        NanoflowWidgetTelemetry.warn(
+          "widget_summary_fetch_failure",
+          mapOf(
+            "appWidgetId" to appWidgetId,
+            "code" to fallback.code,
+            "reason" to "binding-missing",
+            "trustState" to fallback.trustState,
+          ),
+        )
+      }
       return fallback
     }
 
@@ -1132,16 +1252,19 @@ class NanoflowWidgetRepository(private val context: Context) {
     if (store.isRateLimitBackoffActive()) {
       val cachedSummary = store.readSummary(appWidgetId)
       if (cachedSummary != null) {
-        NanoflowWidgetTelemetry.warn(
-          "widget_summary_fetch_failure",
-          mapOf(
-            "appWidgetId" to appWidgetId,
-            "code" to cachedSummary.code,
-            "reason" to "rate-limit-backoff-active",
-            "sourceState" to cachedSummary.sourceState,
-            "trustState" to cachedSummary.trustState,
-          ),
-        )
+        publishAuthoritativeRefreshIfCurrent(attempt.ticket) {
+          onCommitted?.invoke(attempt.ticket)
+          NanoflowWidgetTelemetry.warn(
+            "widget_summary_fetch_failure",
+            mapOf(
+              "appWidgetId" to appWidgetId,
+              "code" to cachedSummary.code,
+              "reason" to "rate-limit-backoff-active",
+              "sourceState" to cachedSummary.sourceState,
+              "trustState" to cachedSummary.trustState,
+            ),
+          )
+        }
         return cachedSummary
       }
     }
@@ -1161,44 +1284,44 @@ class NanoflowWidgetRepository(private val context: Context) {
       ),
     )
 
-    val response = runCatching {
+    val response = try {
       postJson(
         url = "${resolveWidgetSupabaseUrl()}/functions/v1/widget-summary",
         bearerToken = binding.widgetToken,
         body = requestBody,
       )
-    }.getOrElse { error ->
+    } catch (error: Throwable) {
+      error.rethrowWidgetRefreshCancellation()
       val fallback = buildTransportFallback(cachedSummary, error)
-      store.saveSummary(appWidgetId, fallback)
-      NanoflowWidgetTelemetry.warn(
-        "widget_summary_fetch_failure",
-        mapOf(
-          "appWidgetId" to appWidgetId,
-          "code" to fallback.code,
-          "hasCachedSummary" to (cachedSummary != null),
-          "instanceId" to NanoflowWidgetTelemetry.redactId(instanceId),
-          "reason" to "transport-failed",
-          "sourceState" to fallback.sourceState,
-          "trustState" to fallback.trustState,
-        ),
-        error,
-      )
+      val committedTicket = store.commitAuthoritativeRefresh(
+        attempt.ticket,
+        NanoflowWidgetAuthoritativeRefreshCommit(summary = fallback),
+      ) ?: return fallback
+      publishAuthoritativeRefreshIfCurrent(committedTicket) {
+        onCommitted?.invoke(committedTicket)
+        NanoflowWidgetTelemetry.warn(
+          "widget_summary_fetch_failure",
+          mapOf(
+            "appWidgetId" to appWidgetId,
+            "code" to fallback.code,
+            "hasCachedSummary" to (cachedSummary != null),
+            "instanceId" to NanoflowWidgetTelemetry.redactId(instanceId),
+            "reason" to "transport-failed",
+            "sourceState" to fallback.sourceState,
+            "trustState" to fallback.trustState,
+          ),
+          error,
+        )
+      }
       return fallback
     }
 
-    val summary = runCatching {
+    var parseFailure: Throwable? = null
+    val summary = try {
       json.decodeFromString(WidgetSummaryResponse.serializer(), response.body)
-    }.getOrElse { error ->
-      NanoflowWidgetTelemetry.warn(
-        "widget_summary_fetch_failure",
-        mapOf(
-          "appWidgetId" to appWidgetId,
-          "instanceId" to NanoflowWidgetTelemetry.redactId(instanceId),
-          "reason" to "summary-parse-failed",
-          "statusCode" to response.statusCode,
-        ),
-        error,
-      )
+    } catch (error: Throwable) {
+      error.rethrowWidgetRefreshCancellation()
+      parseFailure = error
       WidgetSummaryResponse(
         trustState = "untrusted",
         error = "无法解析 widget-summary 响应",
@@ -1207,72 +1330,41 @@ class NanoflowWidgetRepository(private val context: Context) {
       )
     }
     val normalizedSummary = preserveCachedContextForTransientSummary(summary, cachedSummary)
-    val hintedSummary = reconcileRecentFocusHint(appWidgetId, normalizedSummary, cachedSummary)
-    val mutationReconciledSummary = reconcilePendingFocusMutation(appWidgetId, normalizedSummary, cachedSummary)
-    val reconciledSummary = if (mutationReconciledSummary.sourceState == "cloud-pending-local-focus-mutation") {
-      mutationReconciledSummary
+    val hintProjection = resolveEffectiveSummaryWithFocusHint(appWidgetId, normalizedSummary)
+    val mutationProjection = resolvePendingFocusMutation(appWidgetId, normalizedSummary, cachedSummary)
+    val reconciledSummary = if (mutationProjection.summary.sourceState == "cloud-pending-local-focus-mutation") {
+      mutationProjection.summary
     } else {
-      hintedSummary
+      hintProjection.summary
+    }
+    val durableSummary = if (mutationProjection.summary.sourceState == "cloud-pending-local-focus-mutation") {
+      mutationProjection.summary
+    } else {
+      normalizedSummary
     }
     val shouldResetWidgetContext = reconciledSummary.code in widgetContextResetCodes
-
-    if (shouldResetWidgetContext) {
-      store.clearWidgetBindingContext(appWidgetId)
-    }
-
-    if (reconciledSummary.code in bindingResetCodes) {
-      store.clearBindingState()
-      NanoflowWidgetTelemetry.warn(
-        "widget_token_revoked",
-        mapOf(
-          "appWidgetId" to appWidgetId,
-          "code" to reconciledSummary.code,
-          "instanceId" to NanoflowWidgetTelemetry.redactId(instanceId),
-        ),
-      )
-    }
-
-    // DRILL-04: 收到 RATE_LIMITED 时记录退避时长
-    // DRILL-07: WIDGET_REFRESH_DISABLED 也触发退避（30 分钟），避免反复 503
+    val shouldResetBinding = reconciledSummary.code in bindingResetCodes
     val retryAfter = reconciledSummary.retryAfterSeconds
-    if (reconciledSummary.code == "RATE_LIMITED" && retryAfter != null && retryAfter > 0) {
-      store.persistRateLimitBackoff(retryAfter)
-      NanoflowWidgetTelemetry.warn(
-        "widget_summary_backoff_applied",
-        mapOf(
-          "appWidgetId" to appWidgetId,
-          "code" to reconciledSummary.code,
-          "retryAfterSeconds" to retryAfter,
-        ),
-      )
-    } else if (reconciledSummary.code == "WIDGET_REFRESH_DISABLED") {
-      store.persistRateLimitBackoff(30 * 60)
-      NanoflowWidgetTelemetry.warn(
-        "widget_killswitch_applied",
-        mapOf(
-          "appWidgetId" to appWidgetId,
-          "code" to reconciledSummary.code,
-          "reason" to "widget-refresh-disabled",
-          "instanceId" to NanoflowWidgetTelemetry.redactId(instanceId),
-        ),
-      )
-      NanoflowWidgetTelemetry.warn(
-        "widget_summary_backoff_applied",
-        mapOf(
-          "appWidgetId" to appWidgetId,
-          "code" to reconciledSummary.code,
-          "retryAfterSeconds" to 30 * 60,
-        ),
-      )
-    } else if (reconciledSummary.code !in transientContextPreservingCodes) {
-      store.clearRateLimitBackoff()
+    val backoffSeconds = when {
+      reconciledSummary.code == "RATE_LIMITED" && retryAfter != null && retryAfter > 0 -> retryAfter
+      reconciledSummary.code == "WIDGET_REFRESH_DISABLED" -> 30 * 60
+      else -> null
     }
-
-    repairMissingPushTokenState(appWidgetId, reconciledSummary)
-
-    store.saveSummary(appWidgetId, reconciledSummary)
-    scheduleGateReadCooldownRefreshFromSummary(appWidgetId, reconciledSummary)
-
+    val shouldClearBackoff = backoffSeconds == null && reconciledSummary.code !in transientContextPreservingCodes
+    val shouldRepairPushToken = reconciledSummary.degradedReasons.contains(pushTokenRepairDegradedReason)
+    val committedTicket = store.commitAuthoritativeRefresh(
+      attempt.ticket,
+      NanoflowWidgetAuthoritativeRefreshCommit(
+        summary = durableSummary,
+        clearWidgetContext = shouldResetWidgetContext,
+        clearBinding = shouldResetBinding,
+        backoffSeconds = backoffSeconds,
+        clearBackoff = shouldClearBackoff,
+        clearRegisteredPushToken = shouldRepairPushToken,
+        clearFocusHint = hintProjection.clearHint,
+        clearFocusMutation = mutationProjection.clearMutation,
+      ),
+    ) ?: return reconciledSummary
     val summaryTelemetryFields = mapOf(
       "appWidgetId" to appWidgetId,
       "code" to reconciledSummary.code,
@@ -1286,43 +1378,120 @@ class NanoflowWidgetRepository(private val context: Context) {
       "trustState" to reconciledSummary.trustState,
     )
 
-    if (response.statusCode >= 400) {
+    publishAuthoritativeRefreshIfCurrent(committedTicket) {
+      onCommitted?.invoke(committedTicket)
+      hintProjection.publishReconciled?.invoke()
+      mutationProjection.publishReconciled?.invoke()
+      publishRefreshSummaryTelemetry(
+        appWidgetId = appWidgetId,
+        summary = reconciledSummary,
+        responseStatusCode = response.statusCode,
+        retryAfter = retryAfter,
+        shouldResetBinding = shouldResetBinding,
+        instanceId = instanceId,
+        parseFailure = parseFailure,
+        summaryTelemetryFields = summaryTelemetryFields,
+      )
+      scheduleGateReadCooldownRefreshFromSummary(appWidgetId, reconciledSummary)
+    }
+    reportMissingPushTokenState(appWidgetId, reconciledSummary, committedTicket)
+
+    return reconciledSummary
+  }
+
+  private fun publishRefreshSummaryTelemetry(
+    appWidgetId: Int,
+    summary: WidgetSummaryResponse,
+    responseStatusCode: Int,
+    retryAfter: Int?,
+    shouldResetBinding: Boolean,
+    instanceId: String,
+    parseFailure: Throwable?,
+    summaryTelemetryFields: Map<String, Any?>,
+  ) {
+    if (parseFailure != null) {
+      NanoflowWidgetTelemetry.warn(
+        "widget_summary_fetch_failure",
+        mapOf(
+          "appWidgetId" to appWidgetId,
+          "instanceId" to NanoflowWidgetTelemetry.redactId(instanceId),
+          "reason" to "summary-parse-failed",
+          "statusCode" to responseStatusCode,
+        ),
+        parseFailure,
+      )
+    }
+    if (shouldResetBinding) {
+      NanoflowWidgetTelemetry.warn(
+        "widget_token_revoked",
+        mapOf(
+          "appWidgetId" to appWidgetId,
+          "code" to summary.code,
+          "instanceId" to NanoflowWidgetTelemetry.redactId(instanceId),
+        ),
+      )
+    }
+    when {
+      summary.code == "RATE_LIMITED" && retryAfter != null && retryAfter > 0 -> {
+        NanoflowWidgetTelemetry.warn(
+          "widget_summary_backoff_applied",
+          mapOf(
+            "appWidgetId" to appWidgetId,
+            "code" to summary.code,
+            "retryAfterSeconds" to retryAfter,
+          ),
+        )
+      }
+      summary.code == "WIDGET_REFRESH_DISABLED" -> {
+        NanoflowWidgetTelemetry.warn(
+          "widget_killswitch_applied",
+          mapOf(
+            "appWidgetId" to appWidgetId,
+            "code" to summary.code,
+            "reason" to "widget-refresh-disabled",
+            "instanceId" to NanoflowWidgetTelemetry.redactId(instanceId),
+          ),
+        )
+        NanoflowWidgetTelemetry.warn(
+          "widget_summary_backoff_applied",
+          mapOf(
+            "appWidgetId" to appWidgetId,
+            "code" to summary.code,
+            "retryAfterSeconds" to 30 * 60,
+          ),
+        )
+      }
+    }
+    if (responseStatusCode >= 400) {
       NanoflowWidgetTelemetry.warn(
         "widget_summary_fetch_failure",
         summaryTelemetryFields + mapOf("reason" to "server-response"),
       )
     } else {
-      NanoflowWidgetTelemetry.info(
-        "widget_summary_fetch_success",
-        summaryTelemetryFields,
-      )
+      NanoflowWidgetTelemetry.info("widget_summary_fetch_success", summaryTelemetryFields)
     }
-
-    if (reconciledSummary.freshnessState == "stale") {
+    if (summary.freshnessState == "stale") {
       NanoflowWidgetTelemetry.warn(
         "widget_stale_render",
         mapOf(
           "appWidgetId" to appWidgetId,
-          "code" to reconciledSummary.code,
-          "sourceState" to reconciledSummary.sourceState,
-          "trustState" to reconciledSummary.trustState,
+          "code" to summary.code,
+          "sourceState" to summary.sourceState,
+          "trustState" to summary.trustState,
         ),
       )
     }
-
-    if (reconciledSummary.trustState == "untrusted") {
+    if (summary.trustState == "untrusted") {
       NanoflowWidgetTelemetry.warn(
         "widget_untrusted_render",
         mapOf(
           "appWidgetId" to appWidgetId,
-          "code" to reconciledSummary.code,
-          "degradedReasons" to reconciledSummary.degradedReasons,
-          "sourceState" to reconciledSummary.sourceState,
+          "code" to summary.code,
+          "degradedReasons" to summary.degradedReasons,
+          "sourceState" to summary.sourceState,
         ),
       )
     }
-
-    return reconciledSummary
   }
 
   private fun scheduleGateReadCooldownRefreshFromSummary(appWidgetId: Int, summary: WidgetSummaryResponse) {
@@ -1336,8 +1505,24 @@ class NanoflowWidgetRepository(private val context: Context) {
     NanoflowWidgetRefreshWorker.scheduleGateReadCooldownRefresh(context, appWidgetId, delayMs)
   }
 
-  suspend fun buildRenderModel(appWidgetId: Int): WidgetRenderModel {
-    val sizeBucket = store.readSizeBucket(appWidgetId) ?: resolveSizeBucket(appWidgetId)
+  suspend fun buildRenderModel(appWidgetId: Int): WidgetRenderModel =
+    buildRenderModelInternal(appWidgetId, preparation = null)
+
+  internal suspend fun buildAuthoritativeRenderModel(
+    appWidgetId: Int,
+    ticket: NanoflowWidgetAuthoritativeRefreshTicket,
+  ): WidgetRenderModel? {
+    if (!ticket.isCurrent()) return null
+    val preparation = NanoflowWidgetAuthoritativeRenderPreparation()
+    val model = buildRenderModelInternal(appWidgetId, preparation)
+    return model.takeIf { store.commitAuthoritativeRenderPreparation(ticket, preparation) }
+  }
+
+  private suspend fun buildRenderModelInternal(
+    appWidgetId: Int,
+    preparation: NanoflowWidgetAuthoritativeRenderPreparation?,
+  ): WidgetRenderModel {
+    val sizeBucket = store.readSizeBucket(appWidgetId) ?: resolveSizeBucket(appWidgetId, preparation)
     val sizeTier = when (sizeBucket) {
       "4x3" -> WidgetSizeTier.LARGE
       "4x2" -> WidgetSizeTier.MEDIUM
@@ -1346,8 +1531,9 @@ class NanoflowWidgetRepository(private val context: Context) {
     // 兼容旧字段：仅 SMALL 视为 compact，避免大尺寸误用紧凑布局
     val compact = sizeTier == WidgetSizeTier.SMALL
     val binding = store.readBinding()
-    val summary = store.readSummary(appWidgetId)
-    if (summary == null) {
+    val storedSummary = if (preparation == null) store.readSummary(appWidgetId)
+      else store.readSummaryForAuthoritativeRender(appWidgetId)
+    if (storedSummary == null) {
       return if (binding != null && !isBindingExpired(binding)) {
         buildStateRenderModel(
           title = context.getString(R.string.nanoflow_widget_sync_ready_title),
@@ -1371,6 +1557,7 @@ class NanoflowWidgetRepository(private val context: Context) {
         )
       }
     }
+    val summary = effectiveSummaryWithFocusHint(appWidgetId, storedSummary, preparation)
 
     val showAuthRequired = summary.trustState == "auth-required"
     val showSetup = summary.code in bootstrapRequiredCodes
@@ -1429,7 +1616,8 @@ class NanoflowWidgetRepository(private val context: Context) {
 
     val statusLine = buildStatusLine(summary)
     val statusBadge = buildStatusBadge(summary)
-    val privacyMode = store.isPrivacyModeEnabled()
+    val privacyMode = if (preparation == null) store.isPrivacyModeEnabled()
+      else store.readPrivacyModeForAuthoritativeRender()
     val gateEntries = resolveRenderableGateEntries(summary, privacyMode)
     val hasFocusState = summary.focus.active == true && summary.focus.valid
     val gateQueueCount = resolveGateQueueCount(summary)
@@ -1456,7 +1644,7 @@ class NanoflowWidgetRepository(private val context: Context) {
     val metricsLine = buildMetricsLine(summary)
 
     if (isGateMode) {
-      val displayedGateEntries = resolveDisplayedGateEntries(appWidgetId, summary, privacyMode)
+      val displayedGateEntries = resolveDisplayedGateEntries(appWidgetId, summary, privacyMode, preparation)
       val gateContentCards = if (isGateEmpty) buildGateEmptyContentCards()
         else buildGateContentCards(summary, displayedGateEntries, privacyMode)
       val primaryGateCard = gateContentCards.firstOrNull()
@@ -1728,7 +1916,10 @@ class NanoflowWidgetRepository(private val context: Context) {
     }
   }
 
-  private suspend fun resolveSizeBucket(appWidgetId: Int): String {
+  private suspend fun resolveSizeBucket(
+    appWidgetId: Int,
+    preparation: NanoflowWidgetAuthoritativeRenderPreparation? = null,
+  ): String {
     val options = AppWidgetManager.getInstance(context).getAppWidgetOptions(appWidgetId)
     val minWidth = options.getInt(AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH, 0)
     val minHeight = options.getInt(AppWidgetManager.OPTION_APPWIDGET_MIN_HEIGHT, 0)
@@ -1738,7 +1929,8 @@ class NanoflowWidgetRepository(private val context: Context) {
       minWidth >= 220 || minHeight >= 120 -> "4x2"
       else -> "2x2"
     }
-    store.persistSizeBucket(appWidgetId, sizeBucket)
+    if (preparation == null) store.persistSizeBucket(appWidgetId, sizeBucket)
+    else preparation.sizeBucket = sizeBucket
     return sizeBucket
   }
 
@@ -1974,13 +2166,14 @@ class NanoflowWidgetRepository(private val context: Context) {
     appWidgetId: Int,
     summary: WidgetSummaryResponse,
     privacyMode: Boolean,
+    preparation: NanoflowWidgetAuthoritativeRenderPreparation? = null,
   ): List<WidgetGatePreview> {
     val gateEntries = resolveRenderableGateEntries(summary, privacyMode)
     if (gateEntries.isEmpty()) {
       return gateEntries
     }
 
-    val selectedGateIndex = resolveGatePageIndex(appWidgetId, gateEntries)
+    val selectedGateIndex = resolveGatePageIndex(appWidgetId, gateEntries, preparation)
     return if (selectedGateIndex <= 0) {
       gateEntries
     } else {
@@ -1988,10 +2181,16 @@ class NanoflowWidgetRepository(private val context: Context) {
     }
   }
 
-  private suspend fun resolveGatePageIndex(appWidgetId: Int, entries: List<WidgetGatePreview>): Int {
+  private suspend fun resolveGatePageIndex(
+    appWidgetId: Int,
+    entries: List<WidgetGatePreview>,
+    preparation: NanoflowWidgetAuthoritativeRenderPreparation? = null,
+  ): Int {
     if (entries.isEmpty()) {
-      store.persistGatePageIndex(appWidgetId, 0)
-      store.persistGateSelectedEntryId(appWidgetId, null)
+      if (preparation == null) {
+        store.persistGatePageIndex(appWidgetId, 0)
+        store.persistGateSelectedEntryId(appWidgetId, null)
+      } else preparation.selectGate(0, null)
       return 0
     }
 
@@ -2002,8 +2201,10 @@ class NanoflowWidgetRepository(private val context: Context) {
       ?.takeIf { it >= 0 }
       ?: storedIndex.coerceIn(0, entries.lastIndex)
     if (normalizedIndex != storedIndex || entries[normalizedIndex].entryId != selectedEntryId) {
-      store.persistGatePageIndex(appWidgetId, normalizedIndex)
-      store.persistGateSelectedEntryId(appWidgetId, entries[normalizedIndex].entryId)
+      if (preparation == null) {
+        store.persistGatePageIndex(appWidgetId, normalizedIndex)
+        store.persistGateSelectedEntryId(appWidgetId, entries[normalizedIndex].entryId)
+      } else preparation.selectGate(normalizedIndex, entries[normalizedIndex].entryId)
     }
     return normalizedIndex
   }
@@ -2065,51 +2266,85 @@ class NanoflowWidgetRepository(private val context: Context) {
     )
   }
 
-  private suspend fun reconcileRecentFocusHint(
+  private suspend fun effectiveSummaryWithFocusHint(
     appWidgetId: Int,
     summary: WidgetSummaryResponse,
-    cachedSummary: WidgetSummaryResponse?,
+    preparation: NanoflowWidgetAuthoritativeRenderPreparation? = null,
   ): WidgetSummaryResponse {
-    val pendingHint = store.readPendingFocusActiveHint(appWidgetId) ?: return summary
+    val pendingHint = if (preparation == null) null else store.readPendingFocusActiveHintSnapshot(appWidgetId)
+    val projection = resolveEffectiveSummaryWithFocusHint(
+      appWidgetId,
+      summary,
+      suppliedHint = pendingHint,
+      readFromStore = preparation == null,
+    )
+    if (projection.clearHint != null) {
+      if (preparation == null) store.clearPendingFocusActiveHint(appWidgetId)
+      else preparation.clearFocusHint = projection.clearHint
+    }
+    if (preparation == null) projection.publishReconciled?.invoke()
+    return projection.summary
+  }
+
+  private suspend fun resolveEffectiveSummaryWithFocusHint(
+    appWidgetId: Int,
+    summary: WidgetSummaryResponse,
+    suppliedHint: PendingFocusActiveHint? = null,
+    readFromStore: Boolean = true,
+  ): NanoflowWidgetFocusProjection {
+    val pendingHint = (if (readFromStore) store.readPendingFocusActiveHint(appWidgetId) else suppliedHint)
+      ?: return NanoflowWidgetFocusProjection(summary)
     val hintAgeMs = System.currentTimeMillis() - pendingHint.issuedAtMs
     if (hintAgeMs > FOCUS_HINT_GRACE_MS || summary.code in widgetContextResetCodes || summary.code in bindingResetCodes) {
-      store.clearPendingFocusActiveHint(appWidgetId)
-      return summary
+      return NanoflowWidgetFocusProjection(summary, pendingHint)
     }
 
-    if (summary.focus.active == pendingHint.active) {
-      store.clearPendingFocusActiveHint(appWidgetId)
-      return summary
+    val cloudUpdatedAtMicros = parseCloudUpdatedAtMicros(summary.cloudUpdatedAt)
+    if (cloudUpdatedAtMicros != null && cloudUpdatedAtMicros >= pendingHint.revisionMicros) {
+      return NanoflowWidgetFocusProjection(summary, pendingHint)
     }
 
-    NanoflowWidgetTelemetry.info(
-      "widget_focus_hint_reconciled",
-      mapOf(
-        "appWidgetId" to appWidgetId,
-        "hintActive" to pendingHint.active,
-        "hintAgeMs" to hintAgeMs,
-        "summaryFocusActive" to summary.focus.active,
-      ),
-    )
-
-    val hintedFocus = (cachedSummary?.focus ?: summary.focus).copy(
+    val hintedFocus = summary.focus.copy(
       active = pendingHint.active,
       valid = pendingHint.active,
     )
 
-    return summary.copy(
-      sourceState = "cloud-pending-local-hint",
-      focus = hintedFocus,
-      warnings = (summary.warnings + "focus-hint-pending").distinct(),
+    return NanoflowWidgetFocusProjection(
+      summary.copy(
+        sourceState = "cloud-pending-local-hint",
+        focus = hintedFocus,
+        warnings = (summary.warnings + "focus-hint-pending").distinct(),
+      ),
+      publishReconciled = {
+        NanoflowWidgetTelemetry.info(
+          "widget_focus_hint_reconciled",
+          mapOf(
+            "appWidgetId" to appWidgetId,
+            "hintActive" to pendingHint.active,
+            "hintAgeMs" to hintAgeMs,
+            "hintRevisionMicros" to pendingHint.revisionMicros,
+            "summaryFocusActive" to summary.focus.active,
+          ),
+        )
+      },
     )
   }
 
-  private suspend fun reconcilePendingFocusMutation(
+  private fun parseCloudUpdatedAtMicros(value: String?): Long? {
+    val instant = runCatching { Instant.parse(value?.trim()?.takeIf { it.isNotEmpty() } ?: return null) }
+      .getOrNull() ?: return null
+    return runCatching {
+      Math.addExact(Math.multiplyExact(instant.epochSecond, 1_000_000L), instant.nano / 1_000L)
+    }.getOrNull()
+  }
+
+  private suspend fun resolvePendingFocusMutation(
     appWidgetId: Int,
     summary: WidgetSummaryResponse,
     cachedSummary: WidgetSummaryResponse?,
-  ): WidgetSummaryResponse {
-    val pendingMutation = store.readPendingFocusMutation(appWidgetId) ?: return summary
+  ): NanoflowWidgetMutationProjection {
+    val pendingMutation = store.readPendingFocusMutation(appWidgetId)
+      ?: return NanoflowWidgetMutationProjection(summary)
     val mutationAgeMs = System.currentTimeMillis() - pendingMutation.issuedAtMs
     if (
       mutationAgeMs > FOCUS_MUTATION_GRACE_MS
@@ -2117,30 +2352,31 @@ class NanoflowWidgetRepository(private val context: Context) {
       || summary.code in bindingResetCodes
       || cachedSummary == null
     ) {
-      store.clearPendingFocusMutation(appWidgetId)
-      return summary
+      return NanoflowWidgetMutationProjection(summary, pendingMutation)
     }
 
     if (focusTaskSignature(summary) == focusTaskSignature(cachedSummary)) {
-      store.clearPendingFocusMutation(appWidgetId)
-      return summary
+      return NanoflowWidgetMutationProjection(summary, pendingMutation)
     }
 
-    NanoflowWidgetTelemetry.info(
-      "widget_focus_mutation_reconciled",
-      mapOf(
-        "appWidgetId" to appWidgetId,
-        "action" to pendingMutation.action,
-        "mutationAgeMs" to mutationAgeMs,
+    return NanoflowWidgetMutationProjection(
+      summary.copy(
+        sourceState = "cloud-pending-local-focus-mutation",
+        focus = cachedSummary.focus,
+        dock = cachedSummary.dock,
+        commandCenter = cachedSummary.commandCenter,
+        warnings = (summary.warnings + "focus-mutation-pending").distinct(),
       ),
-    )
-
-    return summary.copy(
-      sourceState = "cloud-pending-local-focus-mutation",
-      focus = cachedSummary.focus,
-      dock = cachedSummary.dock,
-      commandCenter = cachedSummary.commandCenter,
-      warnings = (summary.warnings + "focus-mutation-pending").distinct(),
+      publishReconciled = {
+        NanoflowWidgetTelemetry.info(
+          "widget_focus_mutation_reconciled",
+          mapOf(
+            "appWidgetId" to appWidgetId,
+            "action" to pendingMutation.action,
+            "mutationAgeMs" to mutationAgeMs,
+          ),
+        )
+      },
     )
   }
 

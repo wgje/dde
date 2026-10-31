@@ -2,6 +2,7 @@ package app.nanoflow.host
 
 import android.content.SharedPreferences
 import android.content.Context
+import androidx.datastore.preferences.core.MutablePreferences
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
@@ -12,27 +13,44 @@ import androidx.datastore.preferences.preferencesDataStore
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
 import java.util.UUID
 
 private val Context.widgetDataStore by preferencesDataStore(name = "nanoflow_widget")
+internal fun instanceIdKey(id: Int) = stringPreferencesKey("instance.$id.id")
+internal fun sizeBucketKey(id: Int) = stringPreferencesKey("instance.$id.sizeBucket")
+internal fun gatePageIndexKey(id: Int) = intPreferencesKey("instance.$id.gatePageIndex")
+internal fun lastAppliedLayoutSignatureKey(id: Int) = stringPreferencesKey("instance.$id.lastAppliedLayoutSignature")
 
-data class PendingFocusActiveHint(
-  val active: Boolean,
-  val issuedAtMs: Long,
+internal data class NanoflowWidgetOptimisticSummarySnapshot(
+  val summary: WidgetSummaryResponse,
+  val ticket: NanoflowWidgetAuthoritativeRefreshTicket,
 )
 
-data class PendingFocusMutation(
-  val action: String,
-  val issuedAtMs: Long,
+internal data class NanoflowWidgetAuthoritativeRefreshStart(
+  val ticket: NanoflowWidgetAuthoritativeRefreshTicket,
+  val binding: StoredWidgetBinding?,
+  val summary: WidgetSummaryResponse?,
 )
 
-class NanoflowWidgetStore(private val context: Context) {
-  private val summaryCacheFormatVersion = 1
+internal fun Iterable<NanoflowWidgetAuthoritativeRefreshTicket>.retainCurrentRefreshSuccessTickets(
+  reportSuccess: (NanoflowWidgetAuthoritativeRefreshTicket) -> Unit,
+): List<NanoflowWidgetAuthoritativeRefreshTicket> = filter { ticket ->
+  ticket.commitIfCurrent { reportSuccess(ticket) }
+}
+
+class NanoflowWidgetStore internal constructor(
+  private val context: Context,
+  private val securePreferencesOverride: SharedPreferences? = null,
+) {
+  private val summaryCacheFormatVersion = 2
   private val json = Json {
     ignoreUnknownKeys = true
     explicitNulls = false
   }
+  private val authoritativeState = NanoflowWidgetAuthoritativeStatePreferences(json, summaryCacheFormatVersion)
 
   private val installationIdKey = stringPreferencesKey("binding.installationId")
   private val legacyDeviceIdKey = stringPreferencesKey("binding.deviceId")
@@ -41,12 +59,25 @@ class NanoflowWidgetStore(private val context: Context) {
   private val legacyBindingGenerationKey = intPreferencesKey("binding.bindingGeneration")
   private val legacyExpiresAtKey = stringPreferencesKey("binding.expiresAt")
   private val legacyPendingPushTokenKey = stringPreferencesKey("binding.pendingPushToken")
+  private val bindingMirrorPhaseKey = stringPreferencesKey("binding.mirror.phase")
+  private val bindingMirrorEpochKey = longPreferencesKey("binding.mirror.epoch")
+  private val bindingMirrorDeviceIdKey = stringPreferencesKey("binding.mirror.deviceId")
+  private val bindingMirrorGenerationKey = intPreferencesKey("binding.mirror.generation")
   private val pendingBootstrapNoncePrefix = "instance.bootstrapNonce."
   private val pendingBootstrapIssuedAtPrefix = "instance.bootstrapIssuedAt."
   private val pendingBootstrapPushTokenPrefix = "instance.bootstrapPushToken."
   private val privacyModeKey = booleanPreferencesKey("settings.privacyMode")
 
+  companion object {
+    private val bindingMutex = Mutex()
+    private val authoritativeRefreshAttempts = NanoflowWidgetAuthoritativeRefreshAttemptRegistry()
+    private val processFence = NanoflowWidgetProcessCommitFence()
+    private val pushTokenLock = Any()
+    private val secureTransitionFence = NanoflowWidgetSecureTransitionFence()
+  }
+
   private val securePreferences: SharedPreferences by lazy {
+    securePreferencesOverride ?: run {
     val appContext = context.applicationContext
     val masterKey = MasterKey.Builder(appContext)
       .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
@@ -59,48 +90,118 @@ class NanoflowWidgetStore(private val context: Context) {
       EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
       EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
     )
+    }
   }
 
-  suspend fun ensureDeviceIdentity(): WidgetDeviceIdentity {
+  suspend fun ensureDeviceIdentity(): WidgetDeviceIdentity = bindingMutex.withLock {
     val snapshot = context.widgetDataStore.data.first()
     migrateLegacySecureFields(snapshot)
     val installationId = securePreferences.getString("binding.installationId", null)
-      ?: snapshot[installationIdKey]
-      ?: UUID.randomUUID().toString()
-    val deviceId = securePreferences.getString("binding.deviceId", null)
-      ?: UUID.randomUUID().toString()
-    val deviceSecret = securePreferences.getString("binding.deviceSecret", null)
-      ?: UUID.randomUUID().toString()
-
-    securePreferences.edit()
-      .putString("binding.installationId", installationId)
-      .putString("binding.deviceId", deviceId)
-      .putString("binding.deviceSecret", deviceSecret)
-      .apply()
-
-    context.widgetDataStore.edit { prefs ->
-      prefs[installationIdKey] = installationId
-    }
-
-    return WidgetDeviceIdentity(
-      installationId = installationId,
-      deviceId = deviceId,
-      deviceSecret = deviceSecret,
-    )
+      ?: snapshot[installationIdKey] ?: UUID.randomUUID().toString()
+    val deviceId = securePreferences.getString("binding.deviceId", null) ?: UUID.randomUUID().toString()
+    val deviceSecret = securePreferences.getString("binding.deviceSecret", null) ?: UUID.randomUUID().toString()
+    check(secureTransitionFence.commit {
+      securePreferences.edit().putString("binding.installationId", installationId)
+        .putString("binding.deviceId", deviceId).putString("binding.deviceSecret", deviceSecret).commit()
+    }) { "Secure widget identity commit failed" }
+    context.widgetDataStore.edit { it[installationIdKey] = installationId }
+    WidgetDeviceIdentity(installationId, deviceId, deviceSecret)
   }
 
-  suspend fun readBinding(): StoredWidgetBinding? {
+  suspend fun readBinding(): StoredWidgetBinding? = bindingMutex.withLock {
     migrateLegacySecureFields(context.widgetDataStore.data.first())
-    val widgetToken = securePreferences.getString("binding.widgetToken", null)?.trim()?.takeIf { it.isNotBlank() } ?: return null
-    val deviceId = securePreferences.getString("binding.deviceId", null)?.trim()?.takeIf { it.isNotBlank() } ?: return null
-    val bindingGeneration = securePreferences.getInt("binding.bindingGeneration", 0).takeIf { it > 0 } ?: return null
-    val expiresAt = securePreferences.getString("binding.expiresAt", null)?.trim()?.takeIf { it.isNotBlank() } ?: return null
-    return StoredWidgetBinding(
-      widgetToken = widgetToken,
-      deviceId = deviceId,
-      bindingGeneration = bindingGeneration,
-      expiresAt = expiresAt,
-    )
+    recoverBindingMirrorLocked(context.widgetDataStore.data.first())
+  }
+
+  internal suspend fun beginAuthoritativeRefresh(
+    appWidgetId: Int,
+  ): NanoflowWidgetAuthoritativeRefreshStart = bindingMutex.withLock {
+      migrateLegacySecureFields(context.widgetDataStore.data.first())
+      val binding = recoverBindingMirrorLocked(context.widgetDataStore.data.first())
+      val snapshot = context.widgetDataStore.data.first()
+      val mirror = readBindingMirror(snapshot) ?: NanoflowWidgetBindingMirror(
+        if (binding == null) NanoflowWidgetBindingMirrorPhase.EMPTY else NanoflowWidgetBindingMirrorPhase.ACTIVE,
+        0L,
+        binding?.let { NanoflowWidgetBindingIdentity(it.deviceId, it.bindingGeneration) },
+      )
+      context.widgetDataStore.edit { authoritativeState.clearMismatched(it, mirror.target, mirror.epoch) }
+      NanoflowWidgetAuthoritativeRefreshStart(
+        authoritativeRefreshAttempts.issue(mirror.target, mirror.epoch, appWidgetId),
+        binding,
+        authoritativeState.readAuthoritativeSummary(snapshot, appWidgetId, mirror.target, mirror.epoch),
+      )
+  }
+
+  internal suspend fun commitAuthoritativeRefresh(
+    ticket: NanoflowWidgetAuthoritativeRefreshTicket,
+    commit: NanoflowWidgetAuthoritativeRefreshCommit,
+    localMutation: MutablePreferences.() -> Unit = {},
+  ): NanoflowWidgetAuthoritativeRefreshTicket? {
+    return bindingMutex.withLock {
+      val binding = recoverBindingMirrorLocked(context.widgetDataStore.data.first())
+      val snapshot = context.widgetDataStore.data.first()
+      val mirror = readBindingMirror(snapshot) ?: return@withLock null
+      val owner = binding?.let { NanoflowWidgetBindingIdentity(it.deviceId, it.bindingGeneration) }
+      if (ticket.owner == null) return@withLock null
+      if (!ticket.isCurrent() || ticket.owner != owner || ticket.bindingEpoch != mirror.epoch) return@withLock null
+
+      var renderTicket = ticket
+      if (commit.clearBinding) {
+        clearBindingStateLocked(clearPendingPushToken = false)
+        val clearedMirror = readBindingMirror(context.widgetDataStore.data.first()) ?: return@withLock null
+        renderTicket = authoritativeRefreshAttempts.issue(null, clearedMirror.epoch, ticket.appWidgetId)
+      } else if (commit.clearWidgetContext) {
+        clearWidgetBindingContextLocked(ticket.appWidgetId, invalidateAuthoritativeAttempt = false)
+      }
+
+      if (commit.clearRegisteredPushToken) clearRegisteredPushTokenStateLocked()
+      var accepted = false
+      context.widgetDataStore.edit { prefs ->
+        accepted = renderTicket.commitIfCurrent {
+          clearExpectedAuthoritativeFocusState(prefs, ticket.appWidgetId, commit)
+          authoritativeState.save(prefs, renderTicket, commit.summary)
+          prefs.localMutation()
+          when {
+            commit.backoffSeconds != null -> authoritativeState.persistBackoff(prefs, renderTicket, commit.backoffSeconds)
+            commit.clearBackoff -> authoritativeState.clearBackoff(prefs)
+          }
+        }
+      }
+      renderTicket.takeIf { accepted }
+    }
+  }
+
+  internal suspend fun persistSignatureIfCurrent(
+    ticket: NanoflowWidgetAuthoritativeRefreshTicket?,
+    appWidgetId: Int,
+    signature: String,
+  ): Boolean {
+    if (ticket == null) {
+      persistLastAppliedLayoutSignature(appWidgetId, signature)
+      return true
+    }
+    return bindingMutex.withLock {
+      val binding = recoverBindingMirrorLocked(context.widgetDataStore.data.first())
+      val mirror = readBindingMirror(context.widgetDataStore.data.first()) ?: return@withLock false
+      val owner = binding?.let { NanoflowWidgetBindingIdentity(it.deviceId, it.bindingGeneration) }
+      if (!ticket.isCurrent() || ticket.owner != owner || ticket.bindingEpoch != mirror.epoch) return@withLock false
+      context.widgetDataStore.edit { it[lastAppliedLayoutSignatureKey(appWidgetId)] = signature }
+      true
+    }
+  }
+
+  internal suspend fun commitAuthoritativeRenderPreparation(
+    ticket: NanoflowWidgetAuthoritativeRefreshTicket,
+    preparation: NanoflowWidgetAuthoritativeRenderPreparation,
+  ): Boolean = bindingMutex.withLock {
+    val binding = recoverBindingMirrorLocked(context.widgetDataStore.data.first())
+    val mirror = readBindingMirror(context.widgetDataStore.data.first()) ?: return@withLock false
+    val owner = binding?.let { NanoflowWidgetBindingIdentity(it.deviceId, it.bindingGeneration) }
+    if (!ticket.isCurrent() || ticket.owner != owner || ticket.bindingEpoch != mirror.epoch) return@withLock false
+    context.widgetDataStore.edit { prefs ->
+      authoritativeState.applyRenderPreparation(prefs, ticket.appWidgetId, preparation, processFence::invalidate)
+    }
+    true
   }
 
   suspend fun applyBootstrapPayload(payload: WidgetBootstrapPayload, acceptedPushToken: String?) {
@@ -112,39 +213,58 @@ class NanoflowWidgetStore(private val context: Context) {
       ?.trim()
       ?.trimEnd('/')
       ?.takeIf { it.isNotBlank() }
-    val currentPendingPushToken = securePreferences.getString("binding.pendingPushToken", null)
-      ?.trim()
-      ?.takeIf { it.isNotBlank() }
     val normalizedAcceptedPushToken = acceptedPushToken
       ?.trim()
       ?.takeIf { it.isNotBlank() }
-
-    val editor = securePreferences.edit()
-      .putString("binding.installationId", normalizedInstallationId)
-      .putString("binding.deviceId", normalizedDeviceId)
-      .putString("binding.widgetToken", normalizedWidgetToken)
-      .putInt("binding.bindingGeneration", payload.bindingGeneration)
-      .putString("binding.expiresAt", normalizedExpiresAt)
-      .putString("binding.supabaseUrl", normalizedSupabaseUrl)
-
-    if (!normalizedAcceptedPushToken.isNullOrBlank()) {
-      editor.putString("binding.registeredPushToken", normalizedAcceptedPushToken)
-      editor.putLong("binding.registeredPushTokenAckAtMs", System.currentTimeMillis())
-      if (currentPendingPushToken == normalizedAcceptedPushToken) {
-        editor.remove("binding.pendingPushToken")
-      }
-    }
-
-    editor.apply()
-
     val hostWidgetId = payload.hostInstanceId.toIntOrNull()
-    if (hostWidgetId != null && !payload.instanceId.isNullOrBlank()) {
-      persistInstanceId(hostWidgetId, payload.instanceId)
+    val hostInstanceId = payload.instanceId?.trim()?.takeIf { it.isNotBlank() }
+
+    val target = NanoflowWidgetBindingIdentity(normalizedDeviceId, payload.bindingGeneration)
+    authoritativeRefreshAttempts.invalidateWidgetBinding()
+    bindingMutex.withLock {
+      val snapshot = context.widgetDataStore.data.first()
+      migrateLegacySecureFields(snapshot)
+      authoritativeRefreshAttempts.invalidateWidgetBinding()
+      processFence.replaceBinding(null)
+      val pending = NanoflowWidgetBindingMirror(
+        NanoflowWidgetBindingMirrorPhase.INVALIDATING,
+        (snapshot[bindingMirrorEpochKey] ?: 0L) + 1L,
+        target,
+      )
+      context.widgetDataStore.edit { prefs ->
+        writeBindingMirror(prefs, pending)
+        authoritativeState.clearMismatched(prefs, target, pending.epoch)
+        NanoflowWidgetFocusHintPreferences.clearAll(prefs)
+      }
+      synchronized(pushTokenLock) {
+        val pendingPushToken = securePreferences.getString("binding.pendingPushToken", null)?.trim()
+        val editor = securePreferences.edit()
+          .putString("binding.installationId", normalizedInstallationId)
+          .putString("binding.deviceId", normalizedDeviceId)
+          .putString("binding.widgetToken", normalizedWidgetToken)
+          .putInt("binding.bindingGeneration", payload.bindingGeneration)
+          .putString("binding.expiresAt", normalizedExpiresAt)
+          .putString("binding.supabaseUrl", normalizedSupabaseUrl)
+        if (!normalizedAcceptedPushToken.isNullOrBlank()) {
+          editor.putString("binding.registeredPushToken", normalizedAcceptedPushToken)
+          editor.putLong("binding.registeredPushTokenAckAtMs", System.currentTimeMillis())
+          if (pendingPushToken == normalizedAcceptedPushToken) editor.remove("binding.pendingPushToken")
+        }
+        check(secureTransitionFence.commit(confirmsExactBinding = true) { editor.commit() }) {
+          "Secure widget binding commit failed" }
+      }
+      retireLegacySecureFields(snapshot)
+      context.widgetDataStore.edit { prefs ->
+        check(readBindingMirror(prefs) == pending) { "Widget binding transition was superseded" }
+        writeBindingMirror(prefs, pending.copy(phase = NanoflowWidgetBindingMirrorPhase.ACTIVE))
+        if (hostWidgetId != null && hostInstanceId != null) prefs[instanceIdKey(hostWidgetId)] = hostInstanceId
+      }
+      processFence.replaceBinding(target)
     }
   }
 
-  fun readRuntimeSupabaseUrl(): String? {
-    return securePreferences.getString("binding.supabaseUrl", null)
+  fun readRuntimeSupabaseUrl(): String? = secureTransitionFence.readIfTrusted {
+    securePreferences.getString("binding.supabaseUrl", null)
       ?.trim()
       ?.trimEnd('/')
       ?.takeIf { it.isNotBlank() }
@@ -187,11 +307,8 @@ class NanoflowWidgetStore(private val context: Context) {
     }
   }
 
-  suspend fun persistInstanceId(appWidgetId: Int, instanceId: String) {
-    context.widgetDataStore.edit { prefs ->
-      prefs[instanceIdKey(appWidgetId)] = instanceId
-    }
-  }
+  suspend fun persistInstanceId(appWidgetId: Int, instanceId: String) =
+    context.widgetDataStore.edit { it[instanceIdKey(appWidgetId)] = instanceId }
 
   suspend fun ensureInstanceId(appWidgetId: Int): String {
     val snapshot = context.widgetDataStore.data.first()
@@ -208,77 +325,91 @@ class NanoflowWidgetStore(private val context: Context) {
     return instanceId
   }
 
-  suspend fun readInstanceId(appWidgetId: Int): String? {
-    return context.widgetDataStore.data.first()[instanceIdKey(appWidgetId)]
-  }
+  suspend fun readInstanceId(appWidgetId: Int): String? = context.widgetDataStore.data.first()[instanceIdKey(appWidgetId)]
 
-  suspend fun persistSizeBucket(appWidgetId: Int, sizeBucket: String) {
-    context.widgetDataStore.edit { prefs ->
-      prefs[sizeBucketKey(appWidgetId)] = sizeBucket
+  suspend fun persistSizeBucket(appWidgetId: Int, sizeBucket: String) =
+    context.widgetDataStore.edit { it[sizeBucketKey(appWidgetId)] = sizeBucket }
+
+  suspend fun readSizeBucket(appWidgetId: Int): String? = context.widgetDataStore.data.first()[sizeBucketKey(appWidgetId)]
+
+  suspend fun persistGatePageIndex(appWidgetId: Int, pageIndex: Int) =
+    context.widgetDataStore.edit { it[gatePageIndexKey(appWidgetId)] = pageIndex.coerceAtLeast(0) }
+
+  suspend fun readGatePageIndex(appWidgetId: Int): Int =
+    context.widgetDataStore.data.first()[gatePageIndexKey(appWidgetId)] ?: 0
+
+  suspend fun readSelectedTaskIndex(appWidgetId: Int): Int =
+    context.widgetDataStore.data.first()[selectedTaskIndexKey(appWidgetId)] ?: 0
+
+  suspend fun persistFocusWaitMenuOpen(appWidgetId: Int, open: Boolean) =
+    context.widgetDataStore.edit { it[focusWaitMenuOpenKey(appWidgetId)] = open }
+
+  suspend fun readFocusWaitMenuOpen(appWidgetId: Int): Boolean =
+    context.widgetDataStore.data.first()[focusWaitMenuOpenKey(appWidgetId)] ?: false
+
+  internal suspend fun persistPendingFocusActiveHint(
+    appWidgetId: Int,
+    hint: NanoflowWidgetFocusHint,
+  ): NanoflowWidgetFocusHintDecision = bindingMutex.withLock {
+    val binding = recoverBindingMirrorLocked(context.widgetDataStore.data.first())
+      ?: return@withLock NanoflowWidgetFocusHintDecision.IGNORED
+    val snapshot = context.widgetDataStore.data.first()
+    val current = NanoflowWidgetFocusHintPreferences.read(snapshot, appWidgetId)
+    val resolution = NanoflowWidgetFocusHintStateMachine.resolve(
+      current,
+      hint,
+      NanoflowWidgetBindingIdentity(binding.deviceId, binding.bindingGeneration),
+      System.currentTimeMillis(),
+    )
+    if (resolution.next != current) {
+      processFence.invalidate()
+      context.widgetDataStore.edit { prefs -> NanoflowWidgetFocusHintPreferences.write(prefs, appWidgetId, resolution.next) }
     }
-  }
-
-  suspend fun readSizeBucket(appWidgetId: Int): String? {
-    return context.widgetDataStore.data.first()[sizeBucketKey(appWidgetId)]
-  }
-
-  suspend fun persistGatePageIndex(appWidgetId: Int, pageIndex: Int) {
-    context.widgetDataStore.edit { prefs ->
-      prefs[gatePageIndexKey(appWidgetId)] = pageIndex.coerceAtLeast(0)
-    }
-  }
-
-  suspend fun readGatePageIndex(appWidgetId: Int): Int {
-    return context.widgetDataStore.data.first()[gatePageIndexKey(appWidgetId)] ?: 0
-  }
-
-  /** 历史兼容字段：旧版 widget 的本地 tab 下标缓存。当前实现固定以前台 C 位为 0。 */
-  suspend fun persistSelectedTaskIndex(appWidgetId: Int, taskIndex: Int) {
-    context.widgetDataStore.edit { prefs ->
-      prefs[selectedTaskIndexKey(appWidgetId)] = taskIndex.coerceAtLeast(0)
-    }
-  }
-
-  suspend fun readSelectedTaskIndex(appWidgetId: Int): Int {
-    return context.widgetDataStore.data.first()[selectedTaskIndexKey(appWidgetId)] ?: 0
-  }
-
-  suspend fun persistFocusWaitMenuOpen(appWidgetId: Int, open: Boolean) {
-    context.widgetDataStore.edit { prefs ->
-      prefs[focusWaitMenuOpenKey(appWidgetId)] = open
-    }
-  }
-
-  suspend fun readFocusWaitMenuOpen(appWidgetId: Int): Boolean {
-    return context.widgetDataStore.data.first()[focusWaitMenuOpenKey(appWidgetId)] ?: false
-  }
-
-  suspend fun persistPendingFocusActiveHint(appWidgetId: Int, active: Boolean) {
-    context.widgetDataStore.edit { prefs ->
-      prefs[pendingFocusActiveHintKey(appWidgetId)] = active
-      prefs[pendingFocusActiveHintIssuedAtKey(appWidgetId)] = System.currentTimeMillis()
-    }
+    resolution.decision
   }
 
   suspend fun readPendingFocusActiveHint(appWidgetId: Int): PendingFocusActiveHint? {
-    val snapshot = context.widgetDataStore.data.first()
-    val active = snapshot[pendingFocusActiveHintKey(appWidgetId)] ?: return null
-    val issuedAtMs = snapshot[pendingFocusActiveHintIssuedAtKey(appWidgetId)] ?: return null
-    return PendingFocusActiveHint(active = active, issuedAtMs = issuedAtMs)
+    return bindingMutex.withLock { readPendingFocusActiveHintLocked(appWidgetId, removeMismatched = true) }
+  }
+
+  internal suspend fun readPendingFocusActiveHintSnapshot(appWidgetId: Int): PendingFocusActiveHint? =
+    bindingMutex.withLock { readPendingFocusActiveHintLocked(appWidgetId, removeMismatched = false) }
+
+  private suspend fun readPendingFocusActiveHintLocked(
+    appWidgetId: Int,
+    removeMismatched: Boolean,
+  ): PendingFocusActiveHint? {
+    val binding = recoverBindingMirrorLocked(context.widgetDataStore.data.first()) ?: return null
+    val current = NanoflowWidgetFocusHintPreferences.read(context.widgetDataStore.data.first(), appWidgetId) ?: return null
+    val hint = current.hint
+    if (hint.deviceId != binding.deviceId || hint.bindingGeneration != binding.bindingGeneration) {
+      if (removeMismatched) {
+        processFence.invalidate()
+        context.widgetDataStore.edit { NanoflowWidgetFocusHintPreferences.remove(it, appWidgetId) }
+      }
+      return null
+    }
+    if (!current.projectable || current.ambiguous) return null
+    return PendingFocusActiveHint(
+      hint.active, hint.sessionId, hint.revisionMicros, hint.eventId,
+      hint.deviceId, hint.bindingGeneration, current.issuedAtMs,
+    )
   }
 
   suspend fun clearPendingFocusActiveHint(appWidgetId: Int) {
-    context.widgetDataStore.edit { prefs ->
-      prefs.remove(pendingFocusActiveHintKey(appWidgetId))
-      prefs.remove(pendingFocusActiveHintIssuedAtKey(appWidgetId))
+    bindingMutex.withLock {
+      val current = NanoflowWidgetFocusHintPreferences.read(context.widgetDataStore.data.first(), appWidgetId) ?: return@withLock
+      if (!current.projectable) return@withLock
+      processFence.invalidate()
+      context.widgetDataStore.edit { prefs ->
+        NanoflowWidgetFocusHintPreferences.write(prefs, appWidgetId, current.copy(projectable = false))
+      }
     }
   }
 
-  suspend fun persistPendingFocusMutation(appWidgetId: Int, action: String) {
-    context.widgetDataStore.edit { prefs ->
-      prefs[pendingFocusMutationActionKey(appWidgetId)] = action
-      prefs[pendingFocusMutationIssuedAtKey(appWidgetId)] = System.currentTimeMillis()
-    }
+  internal suspend fun issueFocusHintRenderTicket(appWidgetId: Int): NanoflowWidgetRenderTicket? {
+    readBinding() ?: return null
+    return processFence.issue(appWidgetId)
   }
 
   suspend fun readPendingFocusMutation(appWidgetId: Int): PendingFocusMutation? {
@@ -286,13 +417,6 @@ class NanoflowWidgetStore(private val context: Context) {
     val action = snapshot[pendingFocusMutationActionKey(appWidgetId)] ?: return null
     val issuedAtMs = snapshot[pendingFocusMutationIssuedAtKey(appWidgetId)] ?: return null
     return PendingFocusMutation(action = action, issuedAtMs = issuedAtMs)
-  }
-
-  suspend fun clearPendingFocusMutation(appWidgetId: Int) {
-    context.widgetDataStore.edit { prefs ->
-      prefs.remove(pendingFocusMutationActionKey(appWidgetId))
-      prefs.remove(pendingFocusMutationIssuedAtKey(appWidgetId))
-    }
   }
 
   suspend fun persistGateSelectedEntryId(appWidgetId: Int, entryId: String?) {
@@ -325,122 +449,166 @@ class NanoflowWidgetStore(private val context: Context) {
     return context.widgetDataStore.data.first()[lastAppliedLayoutSignatureKey(appWidgetId)]
   }
 
-  suspend fun readPendingPushToken(): String? {
+  suspend fun readPendingPushToken(): String? = bindingMutex.withLock {
     migrateLegacySecureFields(context.widgetDataStore.data.first())
-    return securePreferences.getString("binding.pendingPushToken", null)
+    secureTransitionFence.readIfTrusted { securePreferences.getString("binding.pendingPushToken", null) }
   }
-
-  suspend fun readRegisteredPushToken(): String? {
+  suspend fun readRegisteredPushToken(): String? = bindingMutex.withLock {
     migrateLegacySecureFields(context.widgetDataStore.data.first())
-    return securePreferences.getString("binding.registeredPushToken", null)
+    secureTransitionFence.readIfTrusted { securePreferences.getString("binding.registeredPushToken", null) }
   }
-
-  suspend fun readRegisteredPushTokenAckAtMs(): Long? {
+  suspend fun readRegisteredPushTokenAckAtMs(): Long? = bindingMutex.withLock {
     migrateLegacySecureFields(context.widgetDataStore.data.first())
-    return securePreferences.getLong("binding.registeredPushTokenAckAtMs", 0L)
-      .takeIf { it > 0L }
+    secureTransitionFence.readIfTrusted {
+      securePreferences.getLong("binding.registeredPushTokenAckAtMs", 0L).takeIf { it > 0L }
+    }
   }
 
   suspend fun persistPendingPushToken(pushToken: String) {
-    securePreferences.edit()
-      .putString("binding.pendingPushToken", pushToken)
-      .apply()
+    synchronized(pushTokenLock) {
+      check(secureTransitionFence.commit {
+        securePreferences.edit().putString("binding.pendingPushToken", pushToken).commit()
+      }) {
+        "Pending push token commit failed"
+      }
+    }
+  }
+
+  fun rememberPushTokenSynchronously(pushToken: String, nowMs: Long = System.currentTimeMillis()): Boolean {
+    val normalized = pushToken.trim()
+    if (normalized.isBlank()) return false
+    return synchronized(pushTokenLock) {
+      if (!secureTransitionFence.canTrustBinding()) return@synchronized false
+      val pending = securePreferences.getString("binding.pendingPushToken", null)
+      val registered = securePreferences.getString("binding.registeredPushToken", null)?.trim()
+      val acknowledgedAt = securePreferences.getLong("binding.registeredPushTokenAckAtMs", 0L)
+      if (!NanoflowWidgetPushTokenDedupe.shouldPersist(normalized, pending, registered, acknowledgedAt, nowMs)) return@synchronized false
+      check(secureTransitionFence.commit {
+        securePreferences.edit().putString("binding.pendingPushToken", normalized).commit()
+      }) {
+        "Pending push token commit failed"
+      }
+      true
+    }
   }
 
   suspend fun clearRegisteredPushTokenState() {
-    securePreferences.edit()
-      .remove("binding.registeredPushToken")
-      .remove("binding.registeredPushTokenAckAtMs")
-      .apply()
+    clearRegisteredPushTokenStateLocked()
+  }
+
+  private fun clearRegisteredPushTokenStateLocked() = synchronized(pushTokenLock) {
+    check(secureTransitionFence.commit { securePreferences.edit().remove("binding.registeredPushToken")
+      .remove("binding.registeredPushTokenAckAtMs").commit() }) { "Registered push token clear failed" }
   }
 
   suspend fun clearBindingState(clearPendingPushToken: Boolean = false) {
-    val editor = securePreferences.edit()
-      .remove("binding.widgetToken")
-      .remove("binding.bindingGeneration")
-      .remove("binding.expiresAt")
-      .remove("binding.registeredPushToken")
-      .remove("binding.registeredPushTokenAckAtMs")
-
-    if (clearPendingPushToken) {
-      editor.remove("binding.pendingPushToken")
+    authoritativeRefreshAttempts.invalidateWidgetBinding()
+    processFence.replaceBinding(null)
+    bindingMutex.withLock { clearBindingStateLocked(clearPendingPushToken) }
+  }
+  private suspend fun clearBindingStateLocked(clearPendingPushToken: Boolean) {
+    authoritativeRefreshAttempts.invalidateWidgetBinding()
+    val snapshot = context.widgetDataStore.data.first()
+    val pending = NanoflowWidgetBindingMirror(
+      NanoflowWidgetBindingMirrorPhase.INVALIDATING,
+      (snapshot[bindingMirrorEpochKey] ?: 0L) + 1L,
+      null,
+    )
+    context.widgetDataStore.edit { prefs ->
+      writeBindingMirror(prefs, pending)
+      authoritativeState.clearMismatched(prefs, null, pending.epoch)
+      NanoflowWidgetFocusHintPreferences.clearAll(prefs)
     }
-
-    editor.apply()
+    synchronized(pushTokenLock) {
+      val editor = securePreferences.edit().remove("binding.widgetToken")
+        .remove("binding.bindingGeneration").remove("binding.expiresAt")
+        .remove("binding.registeredPushToken").remove("binding.registeredPushTokenAckAtMs")
+      if (clearPendingPushToken) editor.remove("binding.pendingPushToken")
+      check(secureTransitionFence.commit(confirmsExactBinding = true) { editor.commit() }) {
+        "Secure widget binding clear failed" }
+    }
+    retireLegacySecureFields(snapshot)
+    context.widgetDataStore.edit { prefs ->
+      check(readBindingMirror(prefs) == pending) { "Widget binding clear was superseded" }
+      writeBindingMirror(prefs, pending.copy(phase = NanoflowWidgetBindingMirrorPhase.EMPTY))
+    }
   }
 
   suspend fun clearWidgetState(appWidgetId: Int) {
-    context.widgetDataStore.edit { prefs ->
-      prefs.remove(instanceIdKey(appWidgetId))
-      prefs.remove(sizeBucketKey(appWidgetId))
-      prefs.remove(gatePageIndexKey(appWidgetId))
-      prefs.remove(gateSelectedEntryIdKey(appWidgetId))
-      prefs.remove(selectedTaskIndexKey(appWidgetId))
-      prefs.remove(focusWaitMenuOpenKey(appWidgetId))
-      prefs.remove(pendingFocusActiveHintKey(appWidgetId))
-      prefs.remove(pendingFocusActiveHintIssuedAtKey(appWidgetId))
-      prefs.remove(pendingFocusMutationActionKey(appWidgetId))
-      prefs.remove(pendingFocusMutationIssuedAtKey(appWidgetId))
-      prefs.remove(summaryJsonKey(appWidgetId))
-      prefs.remove(summaryCacheFormatVersionKey(appWidgetId))
-      prefs.remove(summaryUpdatedAtKey(appWidgetId))
-      prefs.remove(stringPreferencesKey(pendingBootstrapNonceKey(appWidgetId)))
-      prefs.remove(longPreferencesKey(pendingBootstrapIssuedAtKey(appWidgetId)))
-      prefs.remove(stringPreferencesKey(pendingBootstrapPushTokenKey(appWidgetId)))
-      prefs.remove(lastAppliedLayoutSignatureKey(appWidgetId))
+    authoritativeRefreshAttempts.invalidateWidget(appWidgetId)
+    processFence.invalidate()
+    bindingMutex.withLock {
+      context.widgetDataStore.edit { prefs ->
+        authoritativeState.clearBindingScopedState(prefs, appWidgetId)
+        clearLocalWidgetState(prefs, appWidgetId)
+      }
     }
   }
 
   suspend fun clearWidgetBindingContext(appWidgetId: Int) {
+    authoritativeRefreshAttempts.invalidateWidget(appWidgetId)
+    processFence.invalidate()
+    bindingMutex.withLock {
+      clearWidgetBindingContextLocked(appWidgetId, invalidateAuthoritativeAttempt = false)
+    }
+  }
+
+  private suspend fun clearWidgetBindingContextLocked(appWidgetId: Int, invalidateAuthoritativeAttempt: Boolean) {
+    if (invalidateAuthoritativeAttempt) authoritativeRefreshAttempts.invalidateWidget(appWidgetId)
+    processFence.invalidate()
     context.widgetDataStore.edit { prefs ->
-      prefs.remove(instanceIdKey(appWidgetId))
-      prefs.remove(summaryJsonKey(appWidgetId))
-      prefs.remove(summaryCacheFormatVersionKey(appWidgetId))
-      prefs.remove(summaryUpdatedAtKey(appWidgetId))
-      prefs.remove(pendingFocusActiveHintKey(appWidgetId))
-      prefs.remove(pendingFocusActiveHintIssuedAtKey(appWidgetId))
-      prefs.remove(pendingFocusMutationActionKey(appWidgetId))
-      prefs.remove(pendingFocusMutationIssuedAtKey(appWidgetId))
-      prefs.remove(stringPreferencesKey(pendingBootstrapNonceKey(appWidgetId)))
-      prefs.remove(longPreferencesKey(pendingBootstrapIssuedAtKey(appWidgetId)))
-      prefs.remove(stringPreferencesKey(pendingBootstrapPushTokenKey(appWidgetId)))
+      authoritativeState.clearBindingScopedState(prefs, appWidgetId)
     }
   }
 
   suspend fun clearAllWidgetState(clearPendingPushToken: Boolean = false) {
-    clearBindingState(clearPendingPushToken = clearPendingPushToken)
-    context.widgetDataStore.edit { prefs ->
-      val keysToRemove = prefs.asMap().keys.filter { key ->
-        val name = key.name
-        name.startsWith("instance.")
-          || name.startsWith("summary.")
-          || name.startsWith(pendingBootstrapNoncePrefix)
-          || name.startsWith(pendingBootstrapIssuedAtPrefix)
-          || name.startsWith(pendingBootstrapPushTokenPrefix)
+    authoritativeRefreshAttempts.invalidateWidgetBinding()
+    processFence.replaceBinding(null)
+    bindingMutex.withLock {
+      clearBindingStateLocked(clearPendingPushToken)
+      context.widgetDataStore.edit { prefs ->
+        val keysToRemove = prefs.asMap().keys.filter { key ->
+          val name = key.name
+          name.startsWith("instance.")
+            || name.startsWith("summary.")
+            || name.startsWith(pendingBootstrapNoncePrefix)
+            || name.startsWith(pendingBootstrapIssuedAtPrefix)
+            || name.startsWith(pendingBootstrapPushTokenPrefix)
+        }
+        keysToRemove.forEach { prefs.remove(it) }
       }
-      keysToRemove.forEach { prefs.remove(it) }
     }
   }
 
-  suspend fun saveSummary(appWidgetId: Int, summary: WidgetSummaryResponse) {
-    val sanitized = if (isPrivacyModeEnabled()) stripSensitiveFields(summary) else summary
-    context.widgetDataStore.edit { prefs ->
-      prefs[summaryJsonKey(appWidgetId)] = json.encodeToString(WidgetSummaryResponse.serializer(), sanitized)
-      prefs[summaryCacheFormatVersionKey(appWidgetId)] = summaryCacheFormatVersion
-      prefs[summaryUpdatedAtKey(appWidgetId)] = System.currentTimeMillis()
-    }
+  internal suspend fun readOptimisticSummary(appWidgetId: Int): WidgetOptimisticSummaryResult {
+    val start = beginAuthoritativeRefresh(appWidgetId)
+    if (start.binding == null || start.ticket.owner == null) return WidgetOptimisticResult.RejectedStale
+    val summary = start.summary ?: return WidgetOptimisticResult.CurrentNoSnapshot
+    return WidgetOptimisticResult.Committed(NanoflowWidgetOptimisticSummarySnapshot(summary, start.ticket))
+  }
+  internal suspend fun <Snapshot> commitOptimisticSummary(
+    appWidgetId: Int,
+    source: NanoflowWidgetOptimisticSummarySnapshot,
+    summary: WidgetSummaryResponse,
+    committed: Snapshot,
+    localMutation: MutablePreferences.() -> Unit,
+  ): WidgetOptimisticResult<Snapshot> {
+    if (source.ticket.appWidgetId != appWidgetId) return WidgetOptimisticResult.RejectedStale
+    return if (commitAuthoritativeRefresh(
+      source.ticket, NanoflowWidgetAuthoritativeRefreshCommit(summary), localMutation,
+    ) != null) WidgetOptimisticResult.Committed(committed) else WidgetOptimisticResult.RejectedStale
   }
 
   /** 上次成功 fetch 的本地 wall-clock 时间（millis）；用于 sync_badge 显示「刚刚 / N 分前」。 */
-  suspend fun readSummaryUpdatedAt(appWidgetId: Int): Long? {
-    val snapshot = context.widgetDataStore.data.first()
-    return snapshot[summaryUpdatedAtKey(appWidgetId)]
-  }
+  suspend fun readSummaryUpdatedAt(appWidgetId: Int): Long? =
+    context.widgetDataStore.data.first()[authoritativeState.summaryUpdatedKey(appWidgetId)]
 
   suspend fun readSummary(appWidgetId: Int): WidgetSummaryResponse? {
     val snapshot = context.widgetDataStore.data.first()
-    if (snapshot[summaryCacheFormatVersionKey(appWidgetId)] != summaryCacheFormatVersion) {
-      if (snapshot[summaryJsonKey(appWidgetId)] != null) {
+    val mirror = readBindingMirror(snapshot) ?: return null
+    if (!authoritativeState.ownerMatches(snapshot, appWidgetId, mirror.target, mirror.epoch)) return null
+    if (snapshot[authoritativeState.summaryVersionKey(appWidgetId)] != summaryCacheFormatVersion) {
+      if (snapshot[authoritativeState.summaryJsonKey(appWidgetId)] != null) {
         migratePrivacyModeDefault(appWidgetId, clearLegacySummary = true)
       } else if (snapshot[privacyModeKey] == null) {
         migratePrivacyModeDefault(appWidgetId, clearLegacySummary = false)
@@ -448,7 +616,7 @@ class NanoflowWidgetStore(private val context: Context) {
       return null
     }
 
-    val raw = snapshot[summaryJsonKey(appWidgetId)] ?: return null
+    val raw = snapshot[authoritativeState.summaryJsonKey(appWidgetId)] ?: return null
     if (snapshot[privacyModeKey] == null) {
       migratePrivacyModeDefault(appWidgetId, clearLegacySummary = false)
     }
@@ -457,6 +625,14 @@ class NanoflowWidgetStore(private val context: Context) {
       json.decodeFromString(WidgetSummaryResponse.serializer(), raw)
     }.getOrNull()
   }
+
+  internal suspend fun readSummaryForAuthoritativeRender(appWidgetId: Int): WidgetSummaryResponse? {
+    val snapshot = context.widgetDataStore.data.first()
+    val mirror = readBindingMirror(snapshot) ?: return null
+    return authoritativeState.readAuthoritativeSummary(snapshot, appWidgetId, mirror.target, mirror.epoch)
+}
+  internal suspend fun readPrivacyModeForAuthoritativeRender(): Boolean =
+    context.widgetDataStore.data.first()[privacyModeKey] ?: false
 
   /** 直接展示 widget 正文优先，显式开启隐私模式时再收敛到最小摘要 */
   suspend fun isPrivacyModeEnabled(): Boolean {
@@ -480,100 +656,10 @@ class NanoflowWidgetStore(private val context: Context) {
     }
   }
 
-  /**
-   * 隐私模式下本地缓存只保存最小摘要字段（P2-05）：
-   * 擦除 Black Box 正文、任务正文、项目标题等敏感明文，只保留计数与状态
-   */
-  private fun stripSensitiveFields(summary: WidgetSummaryResponse): WidgetSummaryResponse {
-    return summary.copy(
-      focus = summary.focus.copy(
-        title = null,
-        projectTitle = null,
-      ),
-      blackBox = summary.blackBox.copy(
-        previews = summary.blackBox.previews.map { preview ->
-          preview.copy(
-            content = null,
-            projectTitle = null,
-          )
-        },
-        gatePreview = summary.blackBox.gatePreview.copy(
-          content = null,
-          projectTitle = null,
-        ),
-      ),
-      dock = summary.dock.copy(
-        items = summary.dock.items.map { item ->
-          item.copy(title = null, projectTitle = null)
-        },
-      ),
-    )
-  }
-
-  private fun instanceIdKey(appWidgetId: Int): Preferences.Key<String> {
-    return stringPreferencesKey("instance.$appWidgetId.id")
-  }
-
-  private fun sizeBucketKey(appWidgetId: Int): Preferences.Key<String> {
-    return stringPreferencesKey("instance.$appWidgetId.sizeBucket")
-  }
-
-  private fun gatePageIndexKey(appWidgetId: Int): Preferences.Key<Int> {
-    return intPreferencesKey("instance.$appWidgetId.gatePageIndex")
-  }
-
-  private fun selectedTaskIndexKey(appWidgetId: Int): Preferences.Key<Int> {
-    return intPreferencesKey("instance.$appWidgetId.selectedTaskIndex")
-  }
-
-  private fun focusWaitMenuOpenKey(appWidgetId: Int): Preferences.Key<Boolean> {
-    return booleanPreferencesKey("instance.$appWidgetId.focusWaitMenuOpen")
-  }
-
-  private fun pendingFocusActiveHintKey(appWidgetId: Int): Preferences.Key<Boolean> {
-    return booleanPreferencesKey("instance.$appWidgetId.pendingFocusActiveHint")
-  }
-
-  private fun pendingFocusActiveHintIssuedAtKey(appWidgetId: Int): Preferences.Key<Long> {
-    return longPreferencesKey("instance.$appWidgetId.pendingFocusActiveHintIssuedAtMs")
-  }
-
-  private fun pendingFocusMutationActionKey(appWidgetId: Int): Preferences.Key<String> {
-    return stringPreferencesKey("instance.$appWidgetId.pendingFocusMutationAction")
-  }
-
-  private fun pendingFocusMutationIssuedAtKey(appWidgetId: Int): Preferences.Key<Long> {
-    return longPreferencesKey("instance.$appWidgetId.pendingFocusMutationIssuedAtMs")
-  }
-
-  private fun gateSelectedEntryIdKey(appWidgetId: Int): Preferences.Key<String> {
-    return stringPreferencesKey("instance.$appWidgetId.gateSelectedEntryId")
-  }
-
-  private fun lastAppliedLayoutSignatureKey(appWidgetId: Int): Preferences.Key<String> {
-    return stringPreferencesKey("instance.$appWidgetId.lastAppliedLayoutSignature")
-  }
-
-  private fun summaryJsonKey(appWidgetId: Int): Preferences.Key<String> {
-    return stringPreferencesKey("summary.$appWidgetId.json")
-  }
-
-  private fun summaryCacheFormatVersionKey(appWidgetId: Int): Preferences.Key<Int> {
-    return intPreferencesKey("summary.$appWidgetId.cacheFormatVersion")
-  }
-
-  private fun summaryUpdatedAtKey(appWidgetId: Int): Preferences.Key<Long> {
-    return longPreferencesKey("summary.$appWidgetId.updatedAt")
-  }
-
-  private val rateLimitBackoffUntilKey = longPreferencesKey("rateLimit.backoffUntilMs")
-
   private suspend fun migratePrivacyModeDefault(appWidgetId: Int, clearLegacySummary: Boolean) {
     context.widgetDataStore.edit { prefs ->
       if (clearLegacySummary) {
-        prefs.remove(summaryJsonKey(appWidgetId))
-        prefs.remove(summaryCacheFormatVersionKey(appWidgetId))
-        prefs.remove(summaryUpdatedAtKey(appWidgetId))
+        authoritativeState.clearWidget(prefs, appWidgetId)
       }
 
       if (prefs[privacyModeKey] == null) {
@@ -582,46 +668,30 @@ class NanoflowWidgetStore(private val context: Context) {
     }
   }
 
-  /** 记录 429 限流退避截止时间 */
-  suspend fun persistRateLimitBackoff(retryAfterSeconds: Int) {
-    val backoffUntilMs = System.currentTimeMillis() + retryAfterSeconds * 1000L
-    context.widgetDataStore.edit { prefs ->
-      prefs[rateLimitBackoffUntilKey] = backoffUntilMs
-    }
-  }
-
   /** 检查当前是否仍在限流退避期内 */
   suspend fun isRateLimitBackoffActive(): Boolean {
-    val backoffUntilMs = context.widgetDataStore.data.first()[rateLimitBackoffUntilKey] ?: return false
-    return System.currentTimeMillis() < backoffUntilMs
-  }
-
-  /** 清除限流退避状态 */
-  suspend fun clearRateLimitBackoff() {
-    context.widgetDataStore.edit { prefs ->
-      prefs.remove(rateLimitBackoffUntilKey)
+    return bindingMutex.withLock {
+      val binding = recoverBindingMirrorLocked(context.widgetDataStore.data.first())
+      val snapshot = context.widgetDataStore.data.first()
+      val mirror = readBindingMirror(snapshot) ?: return@withLock false
+      val owner = binding?.let { NanoflowWidgetBindingIdentity(it.deviceId, it.bindingGeneration) }
+      val until = authoritativeState.backoffUntil(snapshot, owner, mirror.epoch) ?: return@withLock false
+      System.currentTimeMillis() < until
     }
   }
 
-  private fun pendingBootstrapNonceKey(appWidgetId: Int): String {
-    return "$pendingBootstrapNoncePrefix$appWidgetId"
-  }
-
-  private fun pendingBootstrapIssuedAtKey(appWidgetId: Int): String {
-    return "$pendingBootstrapIssuedAtPrefix$appWidgetId"
-  }
-
-  private fun pendingBootstrapPushTokenKey(appWidgetId: Int): String {
-    return "$pendingBootstrapPushTokenPrefix$appWidgetId"
-  }
+  private fun pendingBootstrapNonceKey(id: Int) = "$pendingBootstrapNoncePrefix$id"
+  private fun pendingBootstrapIssuedAtKey(id: Int) = "$pendingBootstrapIssuedAtPrefix$id"
+  private fun pendingBootstrapPushTokenKey(id: Int) = "$pendingBootstrapPushTokenPrefix$id"
 
   private suspend fun migrateLegacySecureFields(snapshot: Preferences) {
+    val secureSnapshot = secureTransitionFence.readIfTrusted { securePreferences.all } ?: return
     val secureEditor = securePreferences.edit()
     var secureChanged = false
 
     fun migrateString(legacyKey: Preferences.Key<String>, secureKey: String) {
       val legacyValue = snapshot[legacyKey]
-      if (!legacyValue.isNullOrBlank() && securePreferences.getString(secureKey, null).isNullOrBlank()) {
+      if (!legacyValue.isNullOrBlank() && (secureSnapshot[secureKey] as? String).isNullOrBlank()) {
         secureEditor.putString(secureKey, legacyValue)
         secureChanged = true
       }
@@ -635,23 +705,22 @@ class NanoflowWidgetStore(private val context: Context) {
     migrateString(legacyPendingPushTokenKey, "binding.pendingPushToken")
 
     val legacyBindingGeneration = snapshot[legacyBindingGenerationKey]
-    if (legacyBindingGeneration != null && securePreferences.getInt("binding.bindingGeneration", 0) == 0) {
+    if (legacyBindingGeneration != null && (secureSnapshot["binding.bindingGeneration"] as? Int ?: 0) == 0) {
       secureEditor.putInt("binding.bindingGeneration", legacyBindingGeneration)
       secureChanged = true
     }
 
     if (secureChanged) {
-      secureEditor.apply()
+      check(secureTransitionFence.commit { secureEditor.commit() }) { "Legacy secure widget binding migration failed" }
     }
+    retireLegacySecureFields(snapshot)
+  }
 
-    if (
-      snapshot[legacyDeviceIdKey] != null ||
-      snapshot[legacyDeviceSecretKey] != null ||
-      snapshot[legacyWidgetTokenKey] != null ||
-      snapshot[legacyBindingGenerationKey] != null ||
-      snapshot[legacyExpiresAtKey] != null ||
-      snapshot[legacyPendingPushTokenKey] != null
-    ) {
+  private suspend fun retireLegacySecureFields(snapshot: Preferences) {
+    val hasLegacy = snapshot[legacyDeviceIdKey] != null || snapshot[legacyDeviceSecretKey] != null ||
+      snapshot[legacyWidgetTokenKey] != null || snapshot[legacyBindingGenerationKey] != null ||
+      snapshot[legacyExpiresAtKey] != null || snapshot[legacyPendingPushTokenKey] != null
+    if (hasLegacy) {
       context.widgetDataStore.edit { prefs ->
         prefs.remove(legacyDeviceIdKey)
         prefs.remove(legacyDeviceSecretKey)
@@ -662,4 +731,49 @@ class NanoflowWidgetStore(private val context: Context) {
       }
     }
   }
+
+  private fun readSecureBinding(): StoredWidgetBinding? {
+    val token = securePreferences.getString("binding.widgetToken", null)?.trim()?.takeIf(String::isNotEmpty) ?: return null
+    val device = securePreferences.getString("binding.deviceId", null)?.trim()?.takeIf(String::isNotEmpty) ?: return null
+    val generation = securePreferences.getInt("binding.bindingGeneration", 0).takeIf { it > 0 } ?: return null
+    val expiresAt = securePreferences.getString("binding.expiresAt", null)?.trim()?.takeIf(String::isNotEmpty) ?: return null
+    return StoredWidgetBinding(token, device, generation, expiresAt)
+  }
+
+  private suspend fun recoverBindingMirrorLocked(snapshot: Preferences): StoredWidgetBinding? {
+    if (!secureTransitionFence.canTrustBinding()) {
+      processFence.replaceBinding(null)
+      return null
+    }
+    val secure = readSecureBinding()
+    val identity = secure?.let { NanoflowWidgetBindingIdentity(it.deviceId, it.bindingGeneration) }
+    val current = readBindingMirror(snapshot)
+    val resolved = NanoflowWidgetBindingMirrorRecovery.resolve(current, identity)
+    if (resolved != current) context.widgetDataStore.edit { writeBindingMirror(it, resolved) }
+    val active = resolved.phase == NanoflowWidgetBindingMirrorPhase.ACTIVE && resolved.target == identity
+    processFence.replaceBinding(if (active) identity else null)
+    return secure?.takeIf { active }
+  }
+
+  private fun readBindingMirror(prefs: Preferences): NanoflowWidgetBindingMirror? {
+    val phaseName = prefs[bindingMirrorPhaseKey] ?: return null
+    val phase = runCatching { NanoflowWidgetBindingMirrorPhase.valueOf(phaseName) }.getOrNull() ?: return null
+    val target = prefs[bindingMirrorDeviceIdKey]?.let { device ->
+      prefs[bindingMirrorGenerationKey]?.takeIf { it > 0 }?.let { NanoflowWidgetBindingIdentity(device, it) }
+    }
+    return NanoflowWidgetBindingMirror(phase, prefs[bindingMirrorEpochKey] ?: 0L, target)
+  }
+
+  private fun writeBindingMirror(prefs: MutablePreferences, mirror: NanoflowWidgetBindingMirror) {
+    prefs[bindingMirrorPhaseKey] = mirror.phase.name
+    prefs[bindingMirrorEpochKey] = mirror.epoch
+    if (mirror.target == null) {
+      prefs.remove(bindingMirrorDeviceIdKey)
+      prefs.remove(bindingMirrorGenerationKey)
+    } else {
+      prefs[bindingMirrorDeviceIdKey] = mirror.target.deviceId
+      prefs[bindingMirrorGenerationKey] = mirror.target.bindingGeneration
+    }
+  }
+
 }

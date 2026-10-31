@@ -4,23 +4,16 @@ import android.app.Activity
 import android.content.Intent
 import android.os.Bundle
 import android.widget.Toast
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 
 class NanoflowWidgetBootstrapActivity : Activity() {
-  private val bootstrapScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-  private var inlineRefreshJob: Job? = null
+  private var bootstrapOwner: NanoflowWidgetBootstrapOwner? = null
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
+    bootstrapOwner = NanoflowWidgetBootstrapProcessCoordinator.attach(
+      applicationContext,
+      ::handleBootstrapOutcome,
+    )
     handleBootstrapIntent(intent)
   }
 
@@ -31,91 +24,77 @@ class NanoflowWidgetBootstrapActivity : Activity() {
   }
 
   override fun onDestroy() {
-    inlineRefreshJob?.cancel()
-    bootstrapScope.cancel()
+    bootstrapOwner?.let { owner ->
+      NanoflowWidgetBootstrapProcessCoordinator.detach(owner)
+    }
+    bootstrapOwner = null
     super.onDestroy()
   }
 
   private fun handleBootstrapIntent(intent: Intent?) {
-    inlineRefreshJob?.cancel()
-    val repository = NanoflowWidgetRepository(applicationContext)
-    val accepted = runBlocking {
-      repository.consumeBootstrapUri(intent?.data)
-    }
-    if (accepted) {
-      NanoflowWidgetRefreshWorker.syncPeriodicRefresh(
-        applicationContext,
-        enabled = NanoflowWidgetReceiver.hasInstalledWidgets(applicationContext),
-      )
-      refreshAfterBootstrap(repository)
-    } else {
-      showBootstrapToast(R.string.nanoflow_widget_bootstrap_failed_toast)
-      finish()
-    }
+    val owner = bootstrapOwner ?: return
+    NanoflowWidgetBootstrapProcessCoordinator.submit(owner, intent?.data)
   }
 
-  private fun refreshAfterBootstrap(repository: NanoflowWidgetRepository) {
-    inlineRefreshJob = bootstrapScope.launch {
-      var shouldCompleteAcceptedCallback = true
-      try {
-        NanoflowWidgetTelemetry.info(
-          "widget_bootstrap_inline_refresh_started",
-          mapOf("timeoutMs" to BOOTSTRAP_INLINE_REFRESH_TIMEOUT_MS),
-        )
-        val completed = withTimeoutOrNull(BOOTSTRAP_INLINE_REFRESH_TIMEOUT_MS) {
-          refreshInstalledWidgetsInline(repository)
-          true
-        }
-        if (completed == true) {
-          NanoflowWidgetTelemetry.info("widget_bootstrap_inline_refresh_succeeded")
+  private fun handleBootstrapOutcome(outcome: NanoflowWidgetBootstrapOutcome) {
+    when (outcome) {
+      is NanoflowWidgetBootstrapOutcome.Completed -> {
+        if (outcome.accepted) {
+          handleAcceptedBootstrap()
         } else {
-          NanoflowWidgetTelemetry.warn(
-            "widget_bootstrap_inline_refresh_timed_out",
-            mapOf("timeoutMs" to BOOTSTRAP_INLINE_REFRESH_TIMEOUT_MS),
-          )
-          showBootstrapToast(R.string.nanoflow_widget_bootstrap_refresh_delayed_toast)
-        }
-      } catch (error: CancellationException) {
-        shouldCompleteAcceptedCallback = false
-        throw error
-      } catch (error: Throwable) {
-        NanoflowWidgetTelemetry.warn(
-          "widget_bootstrap_inline_refresh_failed",
-          mapOf("errorClass" to (error::class.simpleName ?: "unknown")),
-          error,
-        )
-        showBootstrapToast(R.string.nanoflow_widget_bootstrap_refresh_delayed_toast)
-      } finally {
-        if (shouldCompleteAcceptedCallback && !isFinishing) {
-          enqueueBootstrapFollowUp()
-          returnToWidgetHostSurface()
+          showBootstrapToast(R.string.nanoflow_widget_bootstrap_failed_toast)
           finish()
         }
+      }
+      is NanoflowWidgetBootstrapOutcome.Failed -> {
+        NanoflowWidgetTelemetry.warn(
+          event = "widget_bootstrap_callback_delivery_failed",
+          fields = mapOf(
+            "generation" to outcome.generation,
+            "requestFingerprint" to outcome.fingerprint,
+            "errorType" to outcome.exceptionType,
+          ),
+        )
+        showBootstrapToast(R.string.nanoflow_widget_bootstrap_failed_toast)
+        finish()
       }
     }
   }
 
-  private suspend fun refreshInstalledWidgetsInline(repository: NanoflowWidgetRepository) {
-    withContext(Dispatchers.IO) {
-      repository.refreshInstalledWidgets()
-      NanoflowWidgetReceiver.refreshAllWidgets(applicationContext)
-    }
+  private fun handleAcceptedBootstrap() {
+    completeAcceptedBootstrap(
+      syncPeriodicRefresh = {
+        NanoflowWidgetRefreshWorker.syncPeriodicRefresh(
+          applicationContext,
+          enabled = NanoflowWidgetReceiver.hasInstalledWidgets(applicationContext),
+        )
+      },
+      enqueueFollowUp = {
+        NanoflowWidgetRefreshWorker.enqueue(
+          applicationContext,
+          reason = "bootstrap-callback-followup",
+        )
+        NanoflowWidgetTelemetry.info("widget_bootstrap_followup_submitted")
+      },
+      launchHome = ::returnToWidgetHostSurface,
+      finish = ::finish,
+      reportFailure = ::reportBootstrapCompletionFailure,
+    )
   }
 
   private fun showBootstrapToast(messageResId: Int) {
     Toast.makeText(applicationContext, getString(messageResId), Toast.LENGTH_SHORT).show()
   }
 
-  private fun enqueueBootstrapFollowUp() {
-    runCatching {
-      NanoflowWidgetRefreshWorker.enqueue(applicationContext, reason = "bootstrap-callback-followup")
-    }.onFailure { error ->
-      NanoflowWidgetTelemetry.warn(
-        "widget_bootstrap_followup_enqueue_failed",
-        mapOf("errorClass" to (error::class.simpleName ?: "unknown")),
-        error,
-      )
-    }
+  private fun reportBootstrapCompletionFailure(step: String, error: Throwable) {
+    NanoflowWidgetTelemetry.warn(
+      event = "widget_bootstrap_completion_step_failed",
+      fields = mapOf(
+        "step" to step,
+        "errorClass" to (error::class.simpleName ?: "unknown"),
+      ),
+      error = error,
+    )
   }
 
   private fun returnToWidgetHostSurface() {
@@ -124,19 +103,51 @@ class NanoflowWidgetBootstrapActivity : Activity() {
       flags = Intent.FLAG_ACTIVITY_NEW_TASK
     }
 
+    startActivity(homeIntent)
+    NanoflowWidgetTelemetry.info("widget_bootstrap_return_home_started")
+  }
+}
+
+internal fun completeAcceptedBootstrap(
+  syncPeriodicRefresh: () -> Unit,
+  enqueueFollowUp: () -> Unit,
+  launchHome: () -> Unit,
+  finish: () -> Unit,
+  reportFailure: (String, Throwable) -> Unit,
+) {
+  try {
+    attemptBootstrapCompletionStep(
+      step = "periodic-refresh-sync",
+      reportFailure = reportFailure,
+      action = syncPeriodicRefresh,
+    )
+    attemptBootstrapCompletionStep(
+      step = "follow-up-enqueue",
+      reportFailure = reportFailure,
+      action = enqueueFollowUp,
+    )
+    attemptBootstrapCompletionStep(
+      step = "home-launch",
+      reportFailure = reportFailure,
+      action = launchHome,
+    )
+  } finally {
     try {
-      startActivity(homeIntent)
-      NanoflowWidgetTelemetry.info("widget_bootstrap_return_home_started")
-    } catch (error: RuntimeException) {
-      NanoflowWidgetTelemetry.warn(
-        "widget_bootstrap_return_home_failed",
-        mapOf("errorClass" to error.javaClass.simpleName),
-        error,
-      )
+      finish()
+    } catch (error: Throwable) {
+      runCatching { reportFailure("finish", error) }
     }
   }
+}
 
-  companion object {
-    private const val BOOTSTRAP_INLINE_REFRESH_TIMEOUT_MS = 10_000L
+private inline fun attemptBootstrapCompletionStep(
+  step: String,
+  reportFailure: (String, Throwable) -> Unit,
+  action: () -> Unit,
+) {
+  try {
+    action()
+  } catch (error: Throwable) {
+    runCatching { reportFailure(step, error) }
   }
 }
