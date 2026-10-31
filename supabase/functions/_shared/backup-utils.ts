@@ -221,6 +221,7 @@ export interface BackupLocalState {
     entries: unknown[];
     syncMetadata: Record<string, unknown>;
   };
+  /** Owner-scoped RetryQueue items carry pending unknown-outcome state in lastFailure. */
   retryQueue?: unknown[];
   actionQueue?: unknown;
   deadLetters?: unknown[];

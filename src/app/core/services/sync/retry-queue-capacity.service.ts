@@ -171,6 +171,11 @@ export abstract class RetryQueueCapacityLayer extends RetryQueueItemsLayer {
       return;
     }
 
+    if (pressureReason === 'storage_unknown_outcome') {
+      this.recoverUnknownOutcomeStoragePressure();
+      return;
+    }
+
     if (!pressureReason.startsWith('storage_') || typeof localStorage === 'undefined') {
       return;
     }
@@ -190,6 +195,8 @@ export abstract class RetryQueueCapacityLayer extends RetryQueueItemsLayer {
       this.safeCapacityInfo('存储压力已恢复，重试队列重新开放入队', { pressureReason });
     }
   }
+
+  protected recoverUnknownOutcomeStoragePressure(): void {}
 
   protected isLocalStorageWritable(): boolean {
     const probeKey = `${this.STORAGE_KEY}.probe`;

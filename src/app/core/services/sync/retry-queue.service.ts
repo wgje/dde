@@ -183,7 +183,12 @@ export class RetryQueueService extends RetryQueueStorageLayer {
 
   protected override async loadFromStorage(): Promise<void> {
     await localBackupUiRestoreWriterQuiescence.runContinuationAsync(
-      this.getCurrentOwnerUserId(), 'retry-queue', () => super.loadFromStorage(),
+      this.getCurrentOwnerUserId(),
+      'retry-queue',
+      async () => {
+        await super.loadFromStorage();
+        this.restorePendingUnknownOutcomeFenceAfterStorageLoad();
+      },
     );
   }
 

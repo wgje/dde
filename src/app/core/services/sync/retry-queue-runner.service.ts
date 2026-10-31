@@ -27,20 +27,48 @@ import type {
   RetryQueueSliceRuntime,
 } from './retry-queue.types';
 import { RetryQueueCircuitLayer } from './retry-queue-circuit.service';
-import { markRetryQueueItemUnknownOutcome, settleOrDeferUnknownOutcomeRetryItem } from './retry-queue-unknown-outcome.helpers';
+import { settleOrDeferUnknownOutcomeRetryItem } from './retry-queue-unknown-outcome.helpers';
+import { RetryQueueUnknownOutcomeFenceController } from './retry-queue-unknown-outcome-fence.controller';
 import { createRetryQueueSliceRuntime } from './retry-queue-slice-runtime.factory';
 import { logRetryQueueTerminalPreflightRemoval } from './retry-queue-preflight-logging.helpers';
 import { pushRetryQueueItem } from './retry-queue-item-dispatch.helpers';
 import { persistTerminalRetryQueueRemoval } from './retry-queue-runner-apply-result.helpers';
 import { RetryQueueRunnerFinalizationController } from './retry-queue-runner-finalization.controller';
+import { RetryQueueRunnerSuccessController } from './retry-queue-runner-success.controller';
 import { RetryQueueRunnerLifecycleController } from './retry-queue-runner-lifecycle.controller';
 import {
   createRetryQueueSliceCompletionSummary,
   shouldStopRetryQueueSliceForBudget,
   waitForManualRetryQueueResumeWindow,
 } from './retry-queue-runner-slice.helpers';
+import { getValidRetryQueueSliceItems } from './retry-queue-runner-valid-items.helpers';
 
 export abstract class RetryQueueRunnerLayer extends RetryQueueCircuitLayer {
+  private readonly unknownOutcomeFenceController = new RetryQueueUnknownOutcomeFenceController({
+    getCurrentOwnerUserId: () => this.getCurrentOwnerUserId(),
+    getQueue: () => this.queue,
+    getOperationHandler: () => this.operationHandler,
+    getStorageKey: () => this.STORAGE_KEY,
+    touchQueueState: () => this.touchQueueState(),
+    saveToStorageImmediate: () => this.saveToStorageImmediate(),
+    saveToLocalStorage: () => this.saveToLocalStorage(),
+    isLocalStorageWritable: () => this.isLocalStorageWritable(),
+    enterPressureMode: reason => this.enterPressureMode(reason),
+    clearPressureMode: () => this.clearPressureMode(),
+    getQueuePressureReason: () => this.queuePressureReason(),
+    warn: (message, data) => this.warn(message, data),
+    info: (message, data) => this.logger.info(message, data),
+    tryRecoverStoragePressure: () => this.tryRecoverQueueFullPressure(true),
+  });
+  private readonly runnerSuccess = new RetryQueueRunnerSuccessController({
+    getRefreshedItemDuringProcessing: item => this.getRefreshedItemDuringProcessing(item),
+    wasItemRefreshedDuringProcessing: item => this.wasItemRefreshedDuringProcessing(item),
+    buildBlackBoxRetryDataFingerprint: entry => this.buildBlackBoxRetryDataFingerprint(entry),
+    recordCompletedOperation: item => this.recordCompletedRetryQueueOperation(item),
+    recordCircuitSuccess: () => this.recordCircuitSuccess(),
+    removeItemsDurably: itemIds => this.removeRetryItemsDurably(itemIds),
+    debug: (message, data) => this.logger.debug(message, data),
+  });
   private readonly runnerFinalization = new RetryQueueRunnerFinalizationController({
     getVisibleQueue: () => this.queue,
     getHiddenQueue: () => this.hiddenQueueItems,
@@ -100,6 +128,12 @@ export abstract class RetryQueueRunnerLayer extends RetryQueueCircuitLayer {
   ): Promise<RetryQueueSliceRuntime | RetryQueueSliceResult> {
     if (this.writeGuard && !this.writeGuard.assertWritable('RetryQueue.processQueueSlice')) {
       return this.createSliceResult(startedAt, true);
+    }
+    if (this.unknownOutcomeFenceController.shouldPauseSliceForStorageUnknownOutcome()) {
+      this.logger.info('RetryQueue unknown-outcome 标记尚未获得持久化确认，停止本轮及后续重放', {
+        queueSize: this.queue.length,
+      });
+      return this.createSliceResult(startedAt, false);
     }
     const { maxItems, maxDurationMs } = normalizeRetryQueueSliceBudget(options);
     const processDecision = shouldProcessRetryQueue({
@@ -227,28 +261,18 @@ export abstract class RetryQueueRunnerLayer extends RetryQueueCircuitLayer {
     }
   }
   protected async getValidQueueSliceItems(runtime: RetryQueueSliceRuntime): Promise<RetryQueueItem[]> {
-    const sortedItems = [...runtime.itemsSnapshot].sort((a, b) => {
-      const order: Record<string, number> = { project: 0, task: 1, connection: 2, blackbox: 3 };
-      return order[a.type] - order[b.type];
+    return await getValidRetryQueueSliceItems({
+      runtime,
+      maxItemAge: this.MAX_ITEM_AGE,
+      persistTerminalRetryEvidence: (item, reason) => this.persistTerminalRetryEvidence(item, reason),
+      removeExpiredItems: expiredIds => {
+        this.queue = this.queue.filter(item => !expiredIds.has(item.id));
+        this.touchQueueState();
+        this.saveToStorage();
+        runtime.hadTerminalRemoval = true;
+        this.logger.info('清理过期队列项', { expiredCount: expiredIds.size });
+      },
     });
-    const now = Date.now();
-    const validItems: RetryQueueItem[] = [];
-    for (const item of sortedItems) {
-      // §5.6：过期项先落终态证据（隔离保留，不得静默删除）；证据持久化失败时保留待下轮重试
-      if (item.actionQueueSupersessions?.length || now - item.createdAt <= this.MAX_ITEM_AGE) {
-        validItems.push(item);
-      } else if (await this.persistTerminalRetryEvidence(item, 'expired')) {
-        runtime.expiredIds.add(item.id);
-      }
-    }
-    if (runtime.expiredIds.size > 0) {
-      this.queue = this.queue.filter(item => !runtime.expiredIds.has(item.id));
-      this.touchQueueState();
-      this.saveToStorage();
-      runtime.hadTerminalRemoval = true;
-      this.logger.info('清理过期队列项', { expiredCount: runtime.expiredIds.size });
-    }
-    return validItems;
   }
   protected shouldStopQueueSliceForBudget(runtime: RetryQueueSliceRuntime): boolean {
     return shouldStopRetryQueueSliceForBudget(runtime);
@@ -302,6 +326,9 @@ export abstract class RetryQueueRunnerLayer extends RetryQueueCircuitLayer {
     if (reconcileResult) {
       return reconcileResult;
     }
+    if (!this.isQueueSliceSettlementCurrent(runtime, replayItem)) {
+      return 'break';
+    }
     const replay = await this.replayQueueSliceItem(runtime, replayItem);
     if (replay === 'break' || replay === 'continue') {
       return replay;
@@ -339,14 +366,19 @@ export abstract class RetryQueueRunnerLayer extends RetryQueueCircuitLayer {
       operationHandler: runtime.operationHandler,
       logger: this.logger,
       warn: (message, data) => this.warn(message, data),
-      isSettlementCurrent: () => this.isQueueSliceSettlementCurrent(runtime),
+      isSettlementCurrent: () => this.isQueueSliceSettlementCurrent(runtime, item),
       applyRetryAttemptResult: (success, deferred, serverPressure) => this.applyRetryAttemptResult(runtime, item, success, deferred, serverPressure),
-      persistQueueStateChange: () => this.persistUnknownOutcomeStateChange(),
+      persistQueueStateChange: () => this.unknownOutcomeFenceController.persistStateChange(item),
       handleReconcileError: (error) => this.handleRetryQueueItemError(runtime, item, error),
     });
   }
-  /** unknown-outcome 标记读写后的持久化屏障。 */
-  private async persistUnknownOutcomeStateChange(): Promise<boolean> { this.touchQueueState(); return await this.saveToStorageImmediate(); }
+  protected restorePendingUnknownOutcomeFenceAfterStorageLoad(): void {
+    this.unknownOutcomeFenceController.restoreAfterStorageLoad();
+  }
+
+  protected override recoverUnknownOutcomeStoragePressure(): void {
+    this.unknownOutcomeFenceController.recoverStoragePressure();
+  }
 
   protected handleQueueSliceItemPreflight(
     runtime: RetryQueueSliceRuntime,
@@ -403,9 +435,18 @@ export abstract class RetryQueueRunnerLayer extends RetryQueueCircuitLayer {
     this.warn('sync writer lease 已丢失，停止 RetryQueue 本轮切片并保留未结算项');
     return true;
   }
-  private isQueueSliceSettlementCurrent(runtime: RetryQueueSliceRuntime): boolean {
-    if (runtime.generation === this.queueViewGeneration) return true;
+  private isQueueSliceSettlementCurrent(
+    runtime: RetryQueueSliceRuntime,
+    item?: RetryQueueItem,
+  ): boolean {
+    const currentItem = item ? this.findPersistedItemByQueueId(item.id) : undefined;
+    const itemIsCurrent = !item || (!!currentItem
+      && this.buildRefreshFingerprint(currentItem) === this.buildRefreshFingerprint(item));
+    if (runtime.generation === this.queueViewGeneration && itemIsCurrent) return true;
     runtime.stoppedByBudget = true;
+    if (item && !itemIsCurrent) this.warn('RetryQueue snapshot changed during async processing', {
+      queueItemId: item.id, operationId: item.operationId, currentOperationId: currentItem?.operationId,
+    });
     return false;
   }
   protected logTerminalPreflightRemoval(item: RetryQueueItem, reason: RetryQueueItemTerminalReason): void {
@@ -473,7 +514,16 @@ export abstract class RetryQueueRunnerLayer extends RetryQueueCircuitLayer {
       return 'break';
     }
     if (isRetryQueueServerPressureError(error)) {
-      return await this.deferServerPressureRetry(item, error);
+      if (!this.isQueueSliceSettlementCurrent(runtime)) {
+        this.warn('owner/session 已切换，忽略旧 RetryQueue 切片的晚到未知结果并保留原 owner 条目', {
+          queueItemId: item.id,
+          type: item.type,
+          dataId: item.data.id,
+          sourceUserId: item.sourceUserId,
+        });
+        return 'break';
+      }
+      return await this.unknownOutcomeFenceController.deferServerPressureRetry(runtime, item, error);
     }
     const errorType = (error as { errorType?: string })?.errorType
       || this.classifyErrorType(error as Error);
@@ -484,16 +534,6 @@ export abstract class RetryQueueRunnerLayer extends RetryQueueCircuitLayer {
       return 'break';
     }
     return 'retry-failed';
-  }
-  protected async deferServerPressureRetry(item: RetryQueueItem, error?: unknown): Promise<'deferred-server-pressure'> {
-    // timeout/abort 属于 server-pressure 延后通道，但远端结果未知；
-    // 标记 unknown-outcome 让下一轮重放先对账，避免服务端已写入却被重复提交
-    if (!await markRetryQueueItemUnknownOutcome(item, error, () => this.persistUnknownOutcomeStateChange())) this.warn('unknown-outcome 标记未能持久化，仅保留当前内存副本');
-    this.logger.info('服务端限流或暂时不可用，停止本轮重试切片并保留队列项等待后台退避', {
-      type: item.type,
-      id: item.data.id,
-    });
-    return 'deferred-server-pressure';
   }
   private async handlePermanentRetryQueueItemError(
     runtime: RetryQueueSliceRuntime,
@@ -610,58 +650,13 @@ export abstract class RetryQueueRunnerLayer extends RetryQueueCircuitLayer {
     runtime: RetryQueueSliceRuntime,
     item: RetryQueueItem,
   ): Promise<RetryQueueItemProcessResult> {
-    if (item.type === 'project') {
-      return await this.handleSuccessfulProjectReplay(runtime, item);
-    }
-    const refreshedItem = this.getRefreshedItemDuringProcessing(item);
-    if (refreshedItem) {
-      if (
-        item.type === 'blackbox' &&
-        refreshedItem.type === 'blackbox' &&
-        this.buildBlackBoxRetryDataFingerprint(refreshedItem.data as BlackBoxEntry)
-          === this.buildBlackBoxRetryDataFingerprint(item.data as BlackBoxEntry)
-      ) {
-        this.recordCompletedRetryQueueOperation(item);
-        runtime.successfulReplayCount++;
-        runtime.processedIds.add(item.id);
-        this.recordCircuitSuccess();
-        return 'continue';
-      }
-      this.logger.debug('重试项处理期间已刷新，保留最新快照等待下一轮回放', {
-        type: item.type,
-        queueItemId: item.id,
-        dataId: item.data.id,
-      });
-      this.recordCircuitSuccess();
-      return 'continue';
-    }
-    this.recordCompletedRetryQueueOperation(item);
-    runtime.successfulReplayCount++;
-    runtime.processedIds.add(item.id);
-    this.recordCircuitSuccess();
-    return 'continue';
+    return await this.runnerSuccess.handleSuccessfulReplay(runtime, item);
   }
   protected async handleSuccessfulProjectReplay(
     runtime: RetryQueueSliceRuntime,
     item: RetryQueueItem,
   ): Promise<RetryQueueItemProcessResult> {
-    if (this.wasItemRefreshedDuringProcessing(item)) {
-      this.logger.debug('重试项处理期间已刷新，保留最新快照等待下一轮回放', {
-        type: item.type,
-        queueItemId: item.id,
-        dataId: item.data.id,
-      });
-      this.recordCircuitSuccess();
-      return 'continue';
-    }
-    this.recordCompletedRetryQueueOperation(item);
-    if (!await this.removeRetryItemsDurably(new Set([item.id]))) {
-      runtime.stoppedByBudget = true;
-      return 'break';
-    }
-    runtime.successfulReplayCount++;
-    this.recordCircuitSuccess();
-    return 'continue';
+    return await this.runnerSuccess.handleSuccessfulProjectReplay(runtime, item);
   }
   protected async removeRetryItemsDurably(
     itemIds: Set<string>,
@@ -687,6 +682,12 @@ export abstract class RetryQueueRunnerLayer extends RetryQueueCircuitLayer {
       this.toast.error('部分数据同步失败，请检查网络连接');
     }
     const persistedProcessedRemoval = await this.runnerFinalization.removeProcessedItems(runtime);
+    if (persistedProcessedRemoval) {
+      this.unknownOutcomeFenceController.clearProcessedFences(
+        runtime,
+        itemId => this.findPersistedItemByQueueId(itemId) !== undefined,
+      );
+    }
     const completion = createRetryQueueSliceCompletionSummary(runtime, this.queue.length);
     if (completion.logEntry) {
       this.logger.info('processQueueSlice 完成', completion.logEntry);

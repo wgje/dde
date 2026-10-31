@@ -76,6 +76,26 @@ function createRetryQueueItem(overrides: Partial<TestRetryQueueItem> = {}): Test
   };
 }
 
+function createRetryQueueUnknownOutcomeFence(item: TestRetryQueueItem) {
+  return {
+    schemaVersion: 1,
+    ownerUserId: item.sourceUserId,
+    queueItemId: item.id,
+    entityType: item.type,
+    operation: item.operation,
+    entityId: item.data.id,
+    sourceUserId: item.sourceUserId,
+    operationId: item.operationId,
+    lastFailure: {
+      errorType: 'network',
+      message: 'remote write outcome is unknown',
+      remoteOutcome: 'unknown',
+      recordedAt: 10,
+    },
+    createdAt: 10,
+  } as const;
+}
+
 async function seedRetryQueue(items: TestRetryQueueItem[]): Promise<void> {
   await seedStore(
     'nanoflow-retry-queue',
@@ -162,6 +182,7 @@ async function seedParkedTaskRows(rows: unknown[]): Promise<void> {
 describe('DisasterBackupLocalStateReader', () => {
   beforeEach(async () => {
     localStorage.clear();
+    sessionStorage.clear();
     await Promise.all(TEST_DBS.map(deleteDb));
   });
 
@@ -495,6 +516,71 @@ describe('DisasterBackupLocalStateReader', () => {
       const localState = await createReader().readLocalState('user-1', new Set(['project-1']));
 
       expect(localState.retryQueue).toEqual([fallbackItem]);
+    });
+
+    it.each(['localStorage', 'sessionStorage'] as const)(
+      'exports the pending unknown-outcome marker from %s',
+      async (storageKind) => {
+        const item = createRetryQueueItem();
+        const fence = createRetryQueueUnknownOutcomeFence(item);
+        await seedRetryQueue([item]);
+        const storage = storageKind === 'localStorage' ? localStorage : sessionStorage;
+        storage.setItem(
+          `nanoflow.retry-queue.pending-unknown-outcome.${encodeURIComponent(item.sourceUserId)}`,
+          JSON.stringify(fence),
+        );
+
+        const localState = await createReader().readLocalState('user-1', new Set(['project-1']));
+
+        expect(localState.retryQueue).toEqual([
+          expect.objectContaining({
+            id: item.id,
+            operationId: item.operationId,
+            lastFailure: fence.lastFailure,
+          }),
+        ]);
+      },
+    );
+
+    it('uses the newest matching fence when localStorage and sessionStorage both have a copy', async () => {
+      const item = createRetryQueueItem();
+      const fence = createRetryQueueUnknownOutcomeFence(item);
+      const staleFence = {
+        ...fence,
+        lastFailure: { ...fence.lastFailure, message: 'stale failure', recordedAt: 9 },
+      };
+      await seedRetryQueue([item]);
+      const key = `nanoflow.retry-queue.pending-unknown-outcome.${encodeURIComponent(item.sourceUserId)}`;
+      localStorage.setItem(key, JSON.stringify(fence));
+      sessionStorage.setItem(key, JSON.stringify(staleFence));
+
+      const localState = await createReader().readLocalState('user-1', new Set(['project-1']));
+
+      expect(localState.retryQueue).toEqual([
+        expect.objectContaining({ id: item.id, lastFailure: fence.lastFailure }),
+      ]);
+    });
+
+    it('fails closed without changing malformed owner fence bytes', async () => {
+      const key = 'nanoflow.retry-queue.pending-unknown-outcome.user-1';
+      const malformed = '{broken-json';
+      localStorage.setItem(key, malformed);
+
+      await expect(createReader().readLocalState('user-1', new Set(['project-1'])))
+        .rejects.toThrow(/pending unknown-outcome localStorage has invalid JSON/i);
+      expect(localStorage.getItem(key)).toBe(malformed);
+    });
+
+    it('fails closed when a pending fence has no matching owner queue item', async () => {
+      const item = createRetryQueueItem();
+      const fence = createRetryQueueUnknownOutcomeFence(item);
+      localStorage.setItem(
+        `nanoflow.retry-queue.pending-unknown-outcome.${encodeURIComponent(item.sourceUserId)}`,
+        JSON.stringify(fence),
+      );
+
+      await expect(createReader().readLocalState('user-1', new Set(['project-1'])))
+        .rejects.toThrow(/no matching owner-scoped backup item/i);
     });
 
     it('exports the deterministic union of IndexedDB and fallback writes without duplicating the same item', async () => {

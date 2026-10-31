@@ -41,6 +41,7 @@ const RETRY_QUEUE_DB_NAME = 'nanoflow-retry-queue';
 const RETRY_QUEUE_STORE_NAME = 'offline_mutation_queue';
 const RETRY_QUEUE_STORAGE_KEY = 'nanoflow.retry-queue';
 const RETRY_QUEUE_STORAGE_VERSION = 1;
+const RETRY_QUEUE_UNKNOWN_OUTCOME_FENCE_PREFIX = 'nanoflow.retry-queue.pending-unknown-outcome.';
 
 type UnknownRecord = Record<string, unknown>;
 type RetryQueueExportSource = 'IndexedDB' | 'localStorage';
@@ -56,6 +57,24 @@ interface RetryQueueExportIdentity {
   operationId: string;
   ownerUserId: string;
   entityKey: string;
+}
+
+interface RetryQueueUnknownOutcomeBackupFence {
+  schemaVersion: 1;
+  ownerUserId: string;
+  queueItemId: string;
+  entityType: 'task' | 'project' | 'connection' | 'blackbox';
+  operation: 'upsert' | 'delete';
+  entityId: string;
+  sourceUserId: string | null;
+  operationId: string;
+  lastFailure: {
+    errorType: string;
+    message: string;
+    remoteOutcome: 'unknown';
+    recordedAt: number;
+  };
+  createdAt: number;
 }
 
 export interface DisasterBackupLocalStateReaderDeps {
@@ -415,7 +434,8 @@ export class DisasterBackupLocalStateReader {
         })()
       : [];
 
-    return mergeRetryQueueExportItems(indexedDbItems, fallbackItems, ownerUserId);
+    const items = mergeRetryQueueExportItems(indexedDbItems, fallbackItems, ownerUserId);
+    return applyRetryQueueUnknownOutcomeFences(items, ownerUserId);
   }
 
   private async readActionQueue(ownerUserId: string | null): Promise<unknown> {
@@ -506,6 +526,108 @@ function parseRetryQueueLocalStorageItems(raw: string | null): UnknownRecord[] {
     throw new Error('RetryQueue localStorage contains invalid item(s)');
   }
   return items as UnknownRecord[];
+}
+
+function applyRetryQueueUnknownOutcomeFences(
+  queueItems: UnknownRecord[],
+  ownerUserId: string,
+): UnknownRecord[] {
+  const fences = readRetryQueueUnknownOutcomeBackupFences(ownerUserId);
+  if (fences.length === 0) return queueItems;
+
+  const exportItems = queueItems.map(item => ({ ...item }));
+  for (const fence of fences) {
+    const item = exportItems.find(candidate => matchesRetryQueueUnknownOutcomeBackupFence(candidate, fence));
+    if (!item) {
+      throw new Error('RetryQueue pending unknown-outcome fence has no matching owner-scoped backup item');
+    }
+    item['lastFailure'] = { ...fence.lastFailure };
+  }
+  return exportItems;
+}
+
+function readRetryQueueUnknownOutcomeBackupFences(
+  ownerUserId: string,
+): RetryQueueUnknownOutcomeBackupFence[] {
+  const key = `${RETRY_QUEUE_UNKNOWN_OUTCOME_FENCE_PREFIX}${encodeURIComponent(ownerUserId)}`;
+  const latestByIdentity = new Map<string, RetryQueueUnknownOutcomeBackupFence>();
+
+  for (const storageKind of ['local', 'session'] as const) {
+    let storage: Storage | undefined;
+    try {
+      storage = storageKind === 'local'
+        ? globalThis.localStorage
+        : globalThis.sessionStorage;
+    } catch (error) {
+      throw new Error(`RetryQueue pending unknown-outcome ${storageKind}Storage access failed: ${formatError(error)}`);
+    }
+    if (typeof storage === 'undefined') continue;
+
+    let raw: string | null;
+    try {
+      raw = storage.getItem(key);
+    } catch (error) {
+      throw new Error(`RetryQueue pending unknown-outcome ${storageKind}Storage read failed: ${formatError(error)}`);
+    }
+    if (raw === null) continue;
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw) as unknown;
+    } catch (error) {
+      throw new Error(`RetryQueue pending unknown-outcome ${storageKind}Storage has invalid JSON: ${formatError(error)}`);
+    }
+    if (!isRetryQueueUnknownOutcomeBackupFence(parsed)
+      || parsed.ownerUserId !== ownerUserId) {
+      throw new Error(`RetryQueue pending unknown-outcome ${storageKind}Storage has an invalid fence`);
+    }
+
+    const identity = JSON.stringify([parsed.queueItemId, parsed.operationId]);
+    const existing = latestByIdentity.get(identity);
+    if (!existing || parsed.lastFailure.recordedAt > existing.lastFailure.recordedAt) {
+      latestByIdentity.set(identity, parsed);
+    }
+  }
+
+  return Array.from(latestByIdentity.values());
+}
+
+function isRetryQueueUnknownOutcomeBackupFence(
+  value: unknown,
+): value is RetryQueueUnknownOutcomeBackupFence {
+  if (!isUnknownRecord(value) || !isUnknownRecord(value['lastFailure'])) return false;
+  const lastFailure = value['lastFailure'];
+  return value['schemaVersion'] === 1
+    && typeof value['ownerUserId'] === 'string' && value['ownerUserId'].length > 0
+    && typeof value['queueItemId'] === 'string' && value['queueItemId'].length > 0
+    && (value['entityType'] === 'task'
+      || value['entityType'] === 'project'
+      || value['entityType'] === 'connection'
+      || value['entityType'] === 'blackbox')
+    && (value['operation'] === 'upsert' || value['operation'] === 'delete')
+    && typeof value['entityId'] === 'string' && value['entityId'].length > 0
+    && (value['sourceUserId'] === null
+      || (typeof value['sourceUserId'] === 'string' && value['sourceUserId'].length > 0))
+    && typeof value['operationId'] === 'string' && value['operationId'].length > 0
+    && Number.isFinite(value['createdAt'])
+    && typeof lastFailure['errorType'] === 'string'
+    && typeof lastFailure['message'] === 'string'
+    && lastFailure['remoteOutcome'] === 'unknown'
+    && Number.isFinite(lastFailure['recordedAt']);
+}
+
+function matchesRetryQueueUnknownOutcomeBackupFence(
+  item: UnknownRecord,
+  fence: RetryQueueUnknownOutcomeBackupFence,
+): boolean {
+  const data = item['data'];
+  return item['id'] === fence.queueItemId
+    && item['type'] === fence.entityType
+    && item['operation'] === fence.operation
+    && isUnknownRecord(data)
+    && data['id'] === fence.entityId
+    && (item['sourceUserId'] ?? null) === fence.sourceUserId
+    && item['operationId'] === fence.operationId;
 }
 
 function mergeRetryQueueExportItems(

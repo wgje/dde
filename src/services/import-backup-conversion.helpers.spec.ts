@@ -389,7 +389,14 @@ describe('restoreRetryQueueFromBackup', () => {
   }
 
   it('delegates backup retry queue restore to RetryQueueService without bypassing its safeguards', async () => {
-    const restoredItem = createRetryQueueItem();
+    const restoredItem = createRetryQueueItem({
+      lastFailure: {
+        errorType: 'network',
+        message: 'remote write outcome is unknown',
+        remoteOutcome: 'unknown',
+        recordedAt: 10,
+      },
+    });
     const retryQueue = {
       restoreFromBackupItems: vi.fn(async () => 1),
     };

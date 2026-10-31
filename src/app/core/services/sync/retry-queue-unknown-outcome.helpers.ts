@@ -86,6 +86,9 @@ export async function settleOrDeferUnknownOutcomeRetryItem(
       options.warn('unknown-outcome 标记清除未能持久化，保留队列项等待下一轮', buildLogContext(item));
       return 'break';
     }
+    if (shouldStopForStaleSettlement(options)) {
+      return 'break';
+    }
   }
   return null;
 }
@@ -94,7 +97,7 @@ function shouldStopForStaleSettlement(options: SettleOrDeferUnknownOutcomeOption
   if (options.isSettlementCurrent()) {
     return false;
   }
-  options.warn('owner/session 已切换，忽略旧 RetryQueue 切片的晚到对账结果并保留 unknown marker',
+  options.warn('owner/session 或 RetryQueue 项已变更，忽略旧切片的晚到对账结果并保留当前队列状态',
     buildLogContext(options.item));
   return true;
 }
