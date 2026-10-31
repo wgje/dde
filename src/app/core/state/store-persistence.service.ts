@@ -21,7 +21,6 @@ import { TaskStore, ProjectStore, ConnectionStore } from './stores';
 import { LoggerService } from '../../../services/logger.service';
 import { Project, Task, Connection } from '../../../models';
 import { validateProject } from '../../../utils/validation';
-// Sprint 8 技术债务修复：提取的子服务
 import { IndexedDBService, DataIntegrityService, DB_CONFIG, BackupService, DeltaSyncPersistenceService } from './persistence';
 import { SentryLazyLoaderService } from '../../../services/sentry-lazy-loader.service';
 import { StoreMetadataPersistenceController, type StoreMeta } from './store-metadata-persistence.controller';
@@ -30,15 +29,16 @@ import {
   recoverInterruptedDataSafetyRestoreFromIndexedDb,
   type IndexedDbDataSafetyRestoreRecoveryResult,
 } from '../../../services/data-safety-indexeddb-adapter';
+import {
+  readStorePersistenceFallback,
+  removeStorePersistenceFallback,
+  shouldPreferStorePersistenceFallback,
+  writeStorePersistenceFallback,
+  type ProjectPersistenceSnapshot,
+} from './store-persistence-fallback';
 
 /** 防抖延迟（毫秒） */
 const DEBOUNCE_DELAY = 1000;
-
-interface ProjectPersistenceSnapshot {
-  project: Project;
-  tasks: Task[];
-  connections: Connection[];
-}
 
 interface ProjectPersistenceStores {
   projectStore: IDBObjectStore;
@@ -171,6 +171,7 @@ export class StorePersistenceService {
         return;
       }
 
+      removeStorePersistenceFallback(projectId);
       this.logger.debug('项目数据已保存', { 
         projectId, 
         tasksCount: snapshot.tasks.length,
@@ -317,6 +318,7 @@ export class StorePersistenceService {
       await this.writeProjectSnapshot(db, projectId, { project, tasks, connections }, false);
       const verifyResult = await this.verifyWriteIntegrity(db, projectId, tasks.length, connections.length);
       if (verifyResult.valid) {
+        removeStorePersistenceFallback(projectId);
         this.logger.info('IndexedDB 重试写入成功', { projectId });
         return true;
       }
@@ -337,20 +339,8 @@ export class StorePersistenceService {
     tasks: Task[],
     connections: Connection[]
   ): void {
-    if (typeof localStorage === 'undefined') return;
-    
-    const FALLBACK_KEY = `nanoflow.idb-fallback.${projectId}`;
-    
     try {
-      const fallbackData = {
-        version: 1,
-        timestamp: new Date().toISOString(),
-        project,
-        tasks,
-        connections
-      };
-      
-      localStorage.setItem(FALLBACK_KEY, JSON.stringify(fallbackData));
+      writeStorePersistenceFallback(projectId, { project, tasks, connections });
       this.logger.info('已降级保存到 localStorage', { 
         projectId, 
         tasksCount: tasks.length,
@@ -480,30 +470,64 @@ export class StorePersistenceService {
    * - 警告：尝试修复并继续加载
    */
   async loadProject(projectId: string): Promise<boolean> {
+    const fallbackSnapshot = readStorePersistenceFallback(projectId);
     try {
       const db = await this.initDatabase();
       this.isRestoring = true;
 
       const records = await this.loadProjectRecords(db, projectId);
+      if (
+        fallbackSnapshot
+        && (!records || shouldPreferStorePersistenceFallback(fallbackSnapshot, records.project))
+        && await this.restoreProjectFromFallback(projectId, fallbackSnapshot)
+      ) {
+        return true;
+      }
       if (!records) {
         this.logger.debug('本地无缓存项目', { projectId });
         return false;
       }
 
       if (!await this.validateLoadedProject(projectId, records)) {
+        if (fallbackSnapshot && await this.restoreProjectFromFallback(projectId, fallbackSnapshot)) {
+          return true;
+        }
         await this.deleteProject(projectId);
         return false;
       }
 
       this.restoreProjectRecordsToStores(projectId, records);
+      removeStorePersistenceFallback(projectId);
       return true;
     } catch (err) {
       this.logger.error('恢复项目数据失败', { projectId, error: err });
       this.sentryLazyLoader.captureException(err, { tags: { operation: 'loadProject', projectId } });
-      return false;
+      return fallbackSnapshot
+        ? await this.restoreProjectFromFallback(projectId, fallbackSnapshot)
+        : false;
     } finally {
       this.isRestoring = false;
     }
+  }
+
+  private async restoreProjectFromFallback(
+    projectId: string,
+    snapshot: ProjectPersistenceSnapshot,
+  ): Promise<boolean> {
+    const records: LoadedProjectRecords = {
+      project: snapshot.project,
+      tasks: snapshot.tasks.map(task => ({ ...task, projectId })),
+      connections: snapshot.connections.map(connection => ({ ...connection, projectId })),
+    };
+    if (!await this.validateLoadedProject(projectId, records)) return false;
+
+    this.restoreProjectRecordsToStores(projectId, records);
+    this.logger.warn('IndexedDB 不可用或快照较旧，已从 localStorage fallback 恢复项目', {
+      projectId,
+      tasksCount: records.tasks.length,
+      connectionsCount: records.connections.length,
+    });
+    return true;
   }
 
   private async loadProjectRecords(db: IDBDatabase, projectId: string): Promise<LoadedProjectRecords | null> {

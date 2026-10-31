@@ -133,7 +133,7 @@ export class FlowRightPanelComponent {
 
   /** 处理项目点击 - 切换项目时保持面板显示，只有点击非面板区域才关闭 */
   onProjectClick(projectId: string): void {
-    this.projectState.activeProjectId.set(projectId);
+    this.projectState.setActiveProjectId(projectId);
     // 不再调用 close.emit()，项目切换时面板保持显示
     // 用户需点击背景遮罩区域才会关闭面板
     const currentView = this.uiState.activeView() || 'flow';

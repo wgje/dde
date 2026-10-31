@@ -29,12 +29,43 @@ interface ProjectSyncCursorRecord {
 }
 
 const UNKNOWN_USER_SCOPE = 'anonymous';
+const TIMESTAMPTZ_FRACTION_PATTERN = /\.(\d+)(?=(?:z|[+-]\d{2}(?::?\d{2})?)$)/i;
+
+interface ProjectSyncCursorInstant {
+  epochMilliseconds: number;
+  subMillisecondDigits: string;
+}
+
+function parseProjectSyncCursorInstant(value: string): ProjectSyncCursorInstant | null {
+  const epochMilliseconds = new Date(value).getTime();
+  if (!Number.isFinite(epochMilliseconds)) return null;
+
+  const fractionalDigits = TIMESTAMPTZ_FRACTION_PATTERN.exec(value)?.[1] ?? '';
+  return {
+    epochMilliseconds,
+    subMillisecondDigits: fractionalDigits.slice(3),
+  };
+}
+
+function compareFractionalDigits(left: string, right: string): number {
+  const precision = Math.max(left.length, right.length);
+  const normalizedLeft = left.padEnd(precision, '0');
+  const normalizedRight = right.padEnd(precision, '0');
+  return normalizedLeft === normalizedRight ? 0 : normalizedLeft > normalizedRight ? 1 : -1;
+}
 
 export function compareProjectSyncCursor(left: ProjectSyncCursor, right: ProjectSyncCursor): number {
-  const leftTime = new Date(left.updatedAt).getTime();
-  const rightTime = new Date(right.updatedAt).getTime();
-  if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) {
-    return leftTime - rightTime;
+  const leftInstant = parseProjectSyncCursorInstant(left.updatedAt);
+  const rightInstant = parseProjectSyncCursorInstant(right.updatedAt);
+  if (leftInstant && rightInstant) {
+    const millisecondDelta = leftInstant.epochMilliseconds - rightInstant.epochMilliseconds;
+    if (millisecondDelta !== 0) return millisecondDelta;
+
+    const fractionalDelta = compareFractionalDigits(
+      leftInstant.subMillisecondDigits,
+      rightInstant.subMillisecondDigits,
+    );
+    if (fractionalDelta !== 0) return fractionalDelta;
   }
   const entityRank = (type: ProjectSyncCursorEntityType): number => {
     if (type === 'project') return 0;

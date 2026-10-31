@@ -5,6 +5,11 @@ import { UiStateService } from './ui-state.service';
 import { TaskStore, ProjectStore, ConnectionStore } from '../core-bridge';
 import { SUPERSCRIPT_DIGITS } from '../config';
 import { summarizeMarkdownTodos } from '../utils/markdown-todo';
+import type {
+  ConnectionStoreStateSnapshot,
+  ProjectStoreStateSnapshot,
+  TaskStoreStateSnapshot,
+} from '../app/core/state/store-data-safety.helpers';
 
 /**
  * 任务连接信息（缓存用）
@@ -20,6 +25,52 @@ interface TaskTodoSnapshot {
   total: number;
   completed: number;
   pending: number;
+}
+
+interface ProjectStateStoreSnapshot {
+  tasks: TaskStoreStateSnapshot;
+  projects: ProjectStoreStateSnapshot;
+  connections: ConnectionStoreStateSnapshot;
+}
+
+export type BeforeActiveProjectChangeListener = (
+  previousProjectId: string | null,
+  nextProjectId: string | null,
+) => void;
+
+export type ActiveProjectOwner = Readonly<{
+  projectId: string | null;
+  generation: number;
+}>;
+
+function assertUniqueAuthoritativeIds(projects: Project[]): void {
+  const projectIds = new Set<string>();
+  const taskIds = new Set<string>();
+  const connectionIds = new Set<string>();
+  for (const project of projects) {
+    if (projectIds.has(project.id)) {
+      throw new Error(`Duplicate project id in authoritative replacement: ${project.id}`);
+    }
+    projectIds.add(project.id);
+
+    if (Array.isArray(project.tasks)) {
+      for (const task of project.tasks) {
+        if (taskIds.has(task.id)) {
+          throw new Error(`Duplicate task id in authoritative replacement: ${task.id}`);
+        }
+        taskIds.add(task.id);
+      }
+    }
+
+    if (Array.isArray(project.connections)) {
+      for (const connection of project.connections) {
+        if (connectionIds.has(connection.id)) {
+          throw new Error(`Duplicate connection id in authoritative replacement: ${connection.id}`);
+        }
+        connectionIds.add(connection.id);
+      }
+    }
+  }
 }
 
 /**
@@ -50,21 +101,23 @@ export class ProjectStateService {
   private readonly taskStore = inject(TaskStore);
   private readonly projectStore = inject(ProjectStore);
   private readonly connectionStore = inject(ConnectionStore);
+  private readonly beforeActiveProjectChangeListeners = new Set<BeforeActiveProjectChangeListener>();
+  private activeProjectGeneration = 0;
   
   // ========== 核心数据状态（代理到 Store） ==========
   
   /** 项目列表 - 代理到 ProjectStore */
   readonly projects = computed(() => this.projectStore.projects());
   
-  /** 
-   * 活动项目 ID - 直接暴露 ProjectStore 的 WritableSignal
-   * 保持 .set() 可用性
-   */
-  readonly activeProjectId = this.projectStore.activeProjectId;
+  /** 活动项目 ID；所有写入必须通过 setActiveProjectId。 */
+  readonly activeProjectId = this.projectStore.activeProjectId.asReadonly();
 
   // ========== 计算属性 ==========
 
-  readonly activeProject = computed(() => this.projectStore.activeProject());
+  readonly activeProject = computed(() => {
+    const projectId = this.projectStore.activeProjectId();
+    return projectId ? this.getProjectWithCurrentData(projectId) ?? null : null;
+  });
 
   /** 当前项目的任务列表 - 使用 TaskStore O(1) 查找 */
   readonly tasks = computed(() => {
@@ -382,6 +435,25 @@ export class ProjectStateService {
    * 同时更新 ProjectStore、TaskStore、ConnectionStore
    */
   setProjects(projects: Project[]): void {
+    assertUniqueAuthoritativeIds(projects);
+    const snapshot = this.captureStoreSnapshot();
+    try {
+      this.replaceProjects(projects);
+    } catch (error) {
+      this.restoreStoreSnapshot(snapshot);
+      throw error;
+    }
+  }
+
+  private replaceProjects(projects: Project[]): void {
+    const incomingProjectIds = new Set(projects.map(project => project.id));
+    const activeProjectId = this.projectStore.activeProjectId();
+    if (activeProjectId && !incomingProjectIds.has(activeProjectId)) {
+      this.setActiveProjectId(null);
+    }
+    this.taskStore.clearProjectsExcept(incomingProjectIds);
+    this.connectionStore.clearProjectsExcept(incomingProjectIds);
+
     // 更新 ProjectStore
     this.projectStore.setProjects(projects);
     
@@ -408,6 +480,21 @@ export class ProjectStateService {
     }
   }
 
+  private captureStoreSnapshot(): ProjectStateStoreSnapshot {
+    return {
+      tasks: this.taskStore.captureState(),
+      projects: this.projectStore.captureState(),
+      connections: this.connectionStore.captureState(),
+    };
+  }
+
+  private restoreStoreSnapshot(snapshot: ProjectStateStoreSnapshot): void {
+    this.taskStore.restoreState(snapshot.tasks);
+    this.connectionStore.restoreState(snapshot.connections);
+    this.setActiveProjectId(snapshot.projects.activeProjectId);
+    this.projectStore.restoreState(snapshot.projects);
+  }
+
   /**
    * 仅更新项目元数据（不触碰 TaskStore / ConnectionStore）
    *
@@ -415,6 +502,11 @@ export class ProjectStateService {
    * 空壳项目（tasks: []）不会覆盖 TaskStore 中已加载好的任务数据。
    */
   setProjectsMetadataOnly(projects: Project[]): void {
+    const incomingProjectIds = new Set(projects.map(project => project.id));
+    const activeProjectId = this.projectStore.activeProjectId();
+    if (activeProjectId && !incomingProjectIds.has(activeProjectId)) {
+      this.setActiveProjectId(null);
+    }
     this.projectStore.setProjects(projects);
   }
 
@@ -423,7 +515,9 @@ export class ProjectStateService {
    * 兼容旧的 updater 模式
    */
   updateProjects(updater: (projects: Project[]) => Project[]): void {
-    const currentProjects = this.projectStore.projects();
+    // ProjectStore 只保证项目壳元数据最新；tasks/connections 的权威状态在独立 Store。
+    // updater 若从陈旧壳开始，会把旧 stage/parentId 或缺失任务重新灌回 TaskStore。
+    const currentProjects = this.getProjectsWithCurrentData();
     const updatedProjects = updater(currentProjects);
     this.setProjects(updatedProjects);
   }
@@ -432,7 +526,27 @@ export class ProjectStateService {
    * 设置活动项目 ID
    */
   setActiveProjectId(projectId: string | null): void {
+    const previousProjectId = this.projectStore.activeProjectId();
+    if (previousProjectId === projectId) return;
+    this.activeProjectGeneration += 1;
+    for (const listener of [...this.beforeActiveProjectChangeListeners]) {
+      listener(previousProjectId, projectId);
+    }
     this.projectStore.activeProjectId.set(projectId);
+  }
+
+  captureActiveProjectOwner(): ActiveProjectOwner {
+    return { projectId: this.projectStore.activeProjectId(), generation: this.activeProjectGeneration };
+  }
+
+  isActiveProjectOwnerCurrent(owner: ActiveProjectOwner): boolean {
+    return owner.projectId === this.projectStore.activeProjectId()
+      && owner.generation === this.activeProjectGeneration;
+  }
+
+  registerBeforeActiveProjectChange(listener: BeforeActiveProjectChangeListener): () => void {
+    this.beforeActiveProjectChangeListeners.add(listener);
+    return () => this.beforeActiveProjectChangeListeners.delete(listener);
   }
 
   /**
@@ -456,6 +570,7 @@ export class ProjectStateService {
    * 清空数据
    */
   clearData(): void {
+    this.setActiveProjectId(null);
     this.projectStore.clear();
     this.taskStore.clear();
     this.connectionStore.clear();

@@ -4,7 +4,56 @@ import { LoggerService } from '../../../../services/logger.service';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 import { mockSentryLazyLoaderService } from '../../../../test-setup.mocks';
 import { DB_CONFIG, IndexedDBService } from './indexeddb.service';
-import { SyncCursorPersistenceService } from './sync-cursor-persistence.service';
+import {
+  compareProjectSyncCursor,
+  SyncCursorPersistenceService,
+} from './sync-cursor-persistence.service';
+
+describe('compareProjectSyncCursor', () => {
+  it('orders PostgreSQL fractional seconds beyond millisecond precision', () => {
+    const later = {
+      updatedAt: '2026-04-29T08:00:00.000900Z',
+      entityType: 'task' as const,
+      id: 'id-a',
+    };
+    const earlier = {
+      updatedAt: '2026-04-29T08:00:00.000100Z',
+      entityType: 'task' as const,
+      id: 'id-z',
+    };
+
+    expect(compareProjectSyncCursor(later, earlier)).toBeGreaterThan(0);
+    expect(compareProjectSyncCursor(earlier, later)).toBeLessThan(0);
+  });
+
+  it('normalizes timezone offsets before comparing sub-millisecond instants', () => {
+    const later = {
+      updatedAt: '2026-04-29T07:00:00.000900-01:00',
+      entityType: 'task' as const,
+      id: 'id-a',
+    };
+    const earlier = {
+      updatedAt: '2026-04-29T08:00:00.000100Z',
+      entityType: 'task' as const,
+      id: 'id-z',
+    };
+
+    expect(compareProjectSyncCursor(later, earlier)).toBeGreaterThan(0);
+  });
+
+  it('uses entity type and id tie-breakers for identical raw timestamps', () => {
+    const updatedAt = '2026-04-29T08:00:00.000900Z';
+
+    expect(compareProjectSyncCursor(
+      { updatedAt, entityType: 'task', id: 'id-a' },
+      { updatedAt, entityType: 'project', id: 'id-z' },
+    )).toBeGreaterThan(0);
+    expect(compareProjectSyncCursor(
+      { updatedAt, entityType: 'task', id: 'id-z' },
+      { updatedAt, entityType: 'task', id: 'id-a' },
+    )).toBeGreaterThan(0);
+  });
+});
 
 function deleteRawDatabase(dbName: string): Promise<void> {
   return new Promise((resolve, reject) => {

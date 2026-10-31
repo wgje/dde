@@ -4,6 +4,7 @@ import { TaskOperationAdapterMoveController } from './task-operation-adapter-mov
 import { failure, success } from '../utils/result';
 
 function createController() {
+  let owner = { projectId: 'project-1' as string | null, generation: 1 };
   let task = {
     stage: 1 as number | null,
     parentId: null as string | null,
@@ -26,6 +27,9 @@ function createController() {
     },
     projectState: {
       activeProjectId: vi.fn(() => 'project-1'),
+      captureActiveProjectOwner: vi.fn(() => ({ ...owner })),
+      isActiveProjectOwnerCurrent: vi.fn((candidate: typeof owner) =>
+        candidate.projectId === owner.projectId && candidate.generation === owner.generation),
       getTask: vi.fn(() => task),
     },
     recorder: {
@@ -42,6 +46,9 @@ function createController() {
     options,
     setTask: (next: typeof task) => {
       task = next;
+    },
+    switchProject: (projectId: string) => {
+      if (owner.projectId !== projectId) owner = { projectId, generation: owner.generation + 1 };
     },
   };
 }
@@ -88,7 +95,7 @@ describe('TaskOperationAdapterMoveController', () => {
     expect(options.recorder.setupSyncResultHandler).not.toHaveBeenCalled();
   });
 
-  it('rolls back the snapshot when the durable move fails', async () => {
+  it('discards the snapshot without a workspace rollback when the durable move fails', async () => {
     const { controller, core, options } = createController();
     core.moveTaskToStageDurably.mockResolvedValue(
       failure('OPERATION_FAILED', 'move failed'),
@@ -97,7 +104,28 @@ describe('TaskOperationAdapterMoveController', () => {
     const result = await controller.moveTaskToStage('task-1', 2, null, null);
 
     expect(result.ok).toBe(false);
-    expect(options.optimisticState.rollbackSnapshot).toHaveBeenCalledWith('snapshot-1');
+    expect(options.optimisticState.discardSnapshot).toHaveBeenCalledWith('snapshot-1');
+    expect(options.optimisticState.rollbackSnapshot).not.toHaveBeenCalled();
+    expect(options.recorder.showUndoToast).not.toHaveBeenCalled();
+  });
+
+  it('rejects an A-B-A completion while duplicate-project ownership stays valid', async () => {
+    let finishMove!: () => void;
+    const deferred = new Promise<void>(resolve => { finishMove = resolve; });
+    const { controller, core, options, setTask, switchProject } = createController();
+    core.moveTaskToStageDurably.mockImplementation(async () => {
+      await deferred;
+      setTask({ stage: 2, parentId: null, rank: 1000, x: 0, y: 0 });
+      return success(undefined);
+    });
+    const result = controller.moveTaskToStage('task-1', 2);
+    switchProject('project-1');
+    switchProject('project-2');
+    switchProject('project-1');
+    finishMove();
+
+    await expect(result).resolves.toEqual(success(undefined));
+    expect(options.optimisticState.discardSnapshot).toHaveBeenCalledWith('snapshot-1');
     expect(options.recorder.showUndoToast).not.toHaveBeenCalled();
   });
 });

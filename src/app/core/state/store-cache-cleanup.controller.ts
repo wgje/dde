@@ -1,4 +1,8 @@
 import { DB_CONFIG } from './persistence';
+import {
+  clearStorePersistenceFallbacks,
+  removeStorePersistenceFallback,
+} from './store-persistence-fallback';
 
 export interface StoreCacheCleanupLogger {
   error(message: string, value?: unknown): void;
@@ -25,6 +29,7 @@ export class StoreCacheCleanupController {
       await this.deleteRecordsByProjectId(transaction.objectStore(DB_CONFIG.stores.tasks), projectId);
       await this.deleteRecordsByProjectId(transaction.objectStore(DB_CONFIG.stores.connections), projectId);
       await this.waitForTransaction(transaction);
+      removeStorePersistenceFallback(projectId);
 
       this.options.logger.info('项目本地缓存已删除', { projectId });
     } catch (err) {
@@ -52,6 +57,7 @@ export class StoreCacheCleanupController {
       transaction.objectStore(DB_CONFIG.stores.meta).clear();
       transaction.objectStore(DB_CONFIG.stores.syncCursors).clear();
       await this.waitForTransaction(transaction);
+      clearStorePersistenceFallbacks();
 
       this.options.logger.info('所有本地缓存已清除');
     } catch (err) {
@@ -84,6 +90,9 @@ export class StoreCacheCleanupController {
     return new Promise<void>((resolve, reject) => {
       transaction.oncomplete = () => resolve();
       transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(
+        transaction.error ?? new DOMException('IndexedDB transaction aborted', 'AbortError'),
+      );
     });
   }
 }

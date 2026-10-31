@@ -1,4 +1,5 @@
 import type { OperationError, Result } from '../utils/result';
+import type { ActiveProjectOwner } from './project-state.service';
 
 interface TaskMoveStageParams {
   taskId: string;
@@ -40,10 +41,11 @@ export interface TaskOperationAdapterMoveControllerOptions {
   optimisticState: {
     createTaskSnapshot(taskId: string, label: string): { id: string };
     discardSnapshot(snapshotId: string): void;
-    rollbackSnapshot(snapshotId: string): void;
   };
   projectState: {
     activeProjectId(): string | null;
+    captureActiveProjectOwner(): ActiveProjectOwner;
+    isActiveProjectOwnerCurrent(owner: ActiveProjectOwner): boolean;
     getTask(taskId: string): TaskMoveVisualTask | null | undefined;
   };
   recorder: {
@@ -67,7 +69,7 @@ export class TaskOperationAdapterMoveController {
 
     this.options.markStructureEditing();
 
-    const projectIdBefore = this.options.projectState.activeProjectId();
+    const projectOwner = this.options.projectState.captureActiveProjectOwner();
     const taskBefore = this.options.projectState.getTask(taskId);
     const stageBefore = taskBefore?.stage ?? null;
     const parentIdBefore = taskBefore?.parentId ?? null;
@@ -80,13 +82,15 @@ export class TaskOperationAdapterMoveController {
     });
 
     if (!result.ok) {
-      this.options.optimisticState.rollbackSnapshot(snapshot.id);
+      this.options.optimisticState.discardSnapshot(snapshot.id);
       return result;
     }
 
-    const projectIdAfter = this.options.projectState.activeProjectId();
-    if (projectIdAfter !== projectIdBefore) {
-      this.options.warn('项目在操作期间被切换', { projectIdBefore, projectIdAfter, taskId });
+    if (!this.options.projectState.isActiveProjectOwnerCurrent(projectOwner)) {
+      this.options.warn('项目在操作期间被切换', {
+        projectIdBefore: projectOwner.projectId,
+        projectIdAfter: this.options.projectState.activeProjectId(), taskId,
+      });
       this.options.optimisticState.discardSnapshot(snapshot.id);
       return result;
     }
@@ -118,7 +122,7 @@ export class TaskOperationAdapterMoveController {
 
     this.options.markStructureEditing();
 
-    const projectIdBefore = this.options.projectState.activeProjectId();
+    const projectOwner = this.options.projectState.captureActiveProjectOwner();
     const stateBefore = this.readTaskMoveVisualState(taskId);
     const snapshot = this.options.optimisticState.createTaskSnapshot(taskId, '移动');
     const result = await this.options.core.moveTaskToStageAtPositionDurably({
@@ -133,7 +137,7 @@ export class TaskOperationAdapterMoveController {
     return this.finishMoveTaskAtPositionSnapshot({
       taskId,
       newStage,
-      projectIdBefore,
+      projectOwner,
       stateBefore,
       snapshotId: snapshot.id,
       result,
@@ -154,20 +158,22 @@ export class TaskOperationAdapterMoveController {
   private finishMoveTaskAtPositionSnapshot(context: {
     taskId: string;
     newStage: number | null;
-    projectIdBefore: string | null;
+    projectOwner: ActiveProjectOwner;
     stateBefore: TaskMoveVisualState;
     snapshotId: string;
     result: Result<void, OperationError>;
   }): Result<void, OperationError> {
-    const { taskId, newStage, projectIdBefore, stateBefore, snapshotId, result } = context;
+    const { taskId, newStage, projectOwner, stateBefore, snapshotId, result } = context;
     if (!result.ok) {
-      this.options.optimisticState.rollbackSnapshot(snapshotId);
+      this.options.optimisticState.discardSnapshot(snapshotId);
       return result;
     }
 
-    const projectIdAfter = this.options.projectState.activeProjectId();
-    if (projectIdAfter !== projectIdBefore) {
-      this.options.warn('项目在操作期间被切换', { projectIdBefore, projectIdAfter, taskId });
+    if (!this.options.projectState.isActiveProjectOwnerCurrent(projectOwner)) {
+      this.options.warn('项目在操作期间被切换', {
+        projectIdBefore: projectOwner.projectId,
+        projectIdAfter: this.options.projectState.activeProjectId(), taskId,
+      });
       this.options.optimisticState.discardSnapshot(snapshotId);
       return result;
     }
