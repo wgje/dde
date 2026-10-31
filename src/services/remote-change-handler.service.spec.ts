@@ -19,6 +19,7 @@ import { AuthService } from './auth.service';
 import { LoggerService } from './logger.service';
 import { ChangeTrackerService } from './change-tracker.service';
 import { PermissionDeniedHandlerService } from './permission-denied-handler.service';
+import { UserSessionService } from './user-session.service';
 import { ProjectDataService } from '../app/core/services/sync/project-data.service';
 import type { Connection, Project, Task } from '../models';
 
@@ -77,6 +78,9 @@ describe('RemoteChangeHandlerService', () => {
   let mockSyncCoordinator: {
     setupRemoteChangeCallbacks: SpyFn;
     hasPendingLocalChanges: SpyFn;
+    hasPendingChangesForProject: SpyFn;
+    subscribeToProjectPendingWriteStateChanges: SpyFn;
+    getAccessibleProjectProbe: SpyFn;
     getLastPersistAt: SpyFn;
     getTombstoneIds: SpyFn;
     smartMerge: SpyFn;
@@ -115,6 +119,9 @@ describe('RemoteChangeHandlerService', () => {
         taskChangeCallback = taskCb;
       }),
       hasPendingLocalChanges: vi.fn().mockReturnValue(false),
+      hasPendingChangesForProject: vi.fn().mockReturnValue(false),
+      subscribeToProjectPendingWriteStateChanges: vi.fn(() => () => {}),
+      getAccessibleProjectProbe: vi.fn().mockResolvedValue({ accessible: false, watermark: null }),
       getLastPersistAt: vi.fn().mockReturnValue(0),
       getTombstoneIds: vi.fn().mockResolvedValue(new Set()),
       smartMerge: vi.fn((local, remote) => ({ project: remote, conflictCount: 0 })),
@@ -160,6 +167,13 @@ describe('RemoteChangeHandlerService', () => {
         { provide: ProjectStateService, useValue: mockProjectState },
         { provide: ToastService, useValue: mockToast },
         { provide: AuthService, useValue: { currentUserId: vi.fn().mockReturnValue('user-123') } },
+        { provide: UserSessionService, useValue: {
+          currentUserId: vi.fn().mockReturnValue('user-123'),
+          getCurrentSessionGeneration: vi.fn().mockReturnValue(1),
+          isSessionContextCurrent: vi.fn((generation: number, userId: string) => (
+            generation === 1 && userId === 'user-123'
+          )),
+        } },
         { provide: LoggerService, useValue: { category: () => mockLogger } },
         { provide: ChangeTrackerService, useValue: {
           hasUnsyncedChanges: vi.fn().mockReturnValue(false),

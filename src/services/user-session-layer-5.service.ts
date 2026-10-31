@@ -89,10 +89,13 @@ export abstract class UserSessionLayer5 extends UserSessionLayer4 {
     }
 
     if (this.shouldFlushPendingPersist(context)) {
-      shouldClearOfflineSnapshot = await this.preparePendingPersistForOwnerChange(
+      const pendingPersistPreparation = await this.preparePendingPersistForOwnerChange(
         context,
-        shouldClearOfflineSnapshot,
       );
+      if (pendingPersistPreparation === null) {
+        return null;
+      }
+      shouldClearOfflineSnapshot = pendingPersistPreparation;
     }
 
     if (await this.saveGuestDraftSnapshotIfNeeded(context, preservedGuestProjects, sessionGuard)) {

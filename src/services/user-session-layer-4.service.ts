@@ -97,7 +97,7 @@ export abstract class UserSessionLayer4 extends UserSessionLayer3 {
 
   
   /** 合并单个项目数据（LWW 竞态保护） */
-  protected async mergeSingleProject(cloudProject: Project, _userId: string): Promise<void> {
+  protected async mergeSingleProject(cloudProject: Project, userId: string): Promise<void> {
     const currentProjects = this.projectState.getProjectsWithCurrentData();
     const localProject = currentProjects.find(project => project.id === cloudProject.id);
     
@@ -124,7 +124,7 @@ export abstract class UserSessionLayer4 extends UserSessionLayer3 {
     
     // 【LWW 竞态保护 2026-01-27】
     // 检查是否有本地未同步的修改（脏数据）
-    const hasPendingChanges = this.syncCoordinator.hasPendingChangesForProject(cloudProject.id);
+    const hasPendingChanges = this.syncCoordinator.hasPendingChangesForProject(cloudProject.id, userId);
     
     if (hasPendingChanges) {
       this.logger.debug('检测到本地未同步修改，使用 LWW 合并');

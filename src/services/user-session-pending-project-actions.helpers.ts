@@ -1,4 +1,6 @@
 import type { Connection, Project, Task } from '../models';
+import { getUnsafeTaskWriteFields } from '../utils/task-write-payload-integrity';
+import type { TaskWriteIntent } from './sync-rpc-client.service';
 import type {
   ConnectionPayload,
   ProjectDeletePayload,
@@ -14,6 +16,13 @@ export interface PendingLocalActionProjection {
 }
 
 const COMPLETED_SYNC_STATES = new Set(['synced', 'dead_letter']);
+const TASK_WRITE_INTENTS = new Set<TaskWriteIntent>([
+  'task_full_upsert',
+  'task_text_update',
+  'task_structure_update',
+  'task_soft_delete',
+  'task_attachment_update',
+]);
 
 function isReplayableProjectAction(action: QueuedAction): action is QueuedAction<ProjectPayload | ProjectDeletePayload> {
   return action.entityType === 'project'
@@ -54,9 +63,29 @@ function resolveTaskProjectId(action: QueuedAction<TaskPayload | TaskDeletePaylo
   return payload.projectId ?? null;
 }
 
-function resolveQueuedTask(action: QueuedAction<TaskPayload | TaskDeletePayload>): Task | null {
+interface ResolvedQueuedTask {
+  task: Task;
+  writeIntent: TaskWriteIntent;
+}
+
+function isTaskWriteIntent(value: unknown): value is TaskWriteIntent {
+  return typeof value === 'string' && TASK_WRITE_INTENTS.has(value as TaskWriteIntent);
+}
+
+function hasRequiredTaskIntentPayload(task: Task, writeIntent: TaskWriteIntent): boolean {
+  if (writeIntent === 'task_attachment_update') return Array.isArray(task.attachments);
+  if (writeIntent === 'task_soft_delete') return typeof task.deletedAt === 'string' && task.deletedAt.length > 0;
+  return true;
+}
+
+function resolveQueuedTask(action: QueuedAction<TaskPayload | TaskDeletePayload>): ResolvedQueuedTask | null {
   const payload = action.payload as Partial<TaskPayload>;
-  return payload.task?.id ? payload.task : null;
+  const task = payload.task;
+  if (!task?.id || getUnsafeTaskWriteFields(task).length > 0) return null;
+
+  const writeIntent = action.type === 'create' ? 'task_full_upsert' : payload.writeIntent;
+  if (!isTaskWriteIntent(writeIntent) || !hasRequiredTaskIntentPayload(task, writeIntent)) return null;
+  return { task, writeIntent };
 }
 
 function resolveDeletedTaskId(action: QueuedAction<TaskPayload | TaskDeletePayload>): string {
@@ -64,13 +93,40 @@ function resolveDeletedTaskId(action: QueuedAction<TaskPayload | TaskDeletePaylo
   return payload.taskId ?? action.entityId;
 }
 
-function upsertTask(tasks: Task[], task: Task): Task[] {
+function mergeTaskByWriteIntent(existing: Task, task: Task, writeIntent: TaskWriteIntent): Task {
+  const timestamped = { ...existing, updatedAt: task.updatedAt };
+  switch (writeIntent) {
+    case 'task_text_update':
+      return { ...timestamped, title: task.title, content: task.content };
+    case 'task_structure_update':
+      return {
+        ...timestamped,
+        stage: task.stage,
+        parentId: task.parentId,
+        order: task.order,
+        rank: task.rank,
+        x: task.x,
+        y: task.y,
+      };
+    case 'task_attachment_update':
+      return { ...timestamped, attachments: task.attachments };
+    case 'task_soft_delete':
+      return { ...timestamped, deletedAt: task.deletedAt };
+    case 'task_full_upsert':
+      return task;
+  }
+}
+
+function upsertTask(tasks: Task[], resolved: ResolvedQueuedTask): Task[] {
+  const { task, writeIntent } = resolved;
   const existingIndex = tasks.findIndex(candidate => candidate.id === task.id);
   if (existingIndex === -1) {
     return [...tasks, task];
   }
 
-  return tasks.map((candidate, index) => index === existingIndex ? task : candidate);
+  return tasks.map((candidate, index) => (
+    index === existingIndex ? mergeTaskByWriteIntent(candidate, task, writeIntent) : candidate
+  ));
 }
 
 function applyTaskAction(
@@ -100,15 +156,15 @@ function applyTaskAction(
       };
     }
 
-    const task = resolveQueuedTask(action);
-    if (!task) {
+    const resolvedTask = resolveQueuedTask(action);
+    if (!resolvedTask) {
       applied = false;
       return project;
     }
 
     return {
       ...project,
-      tasks: upsertTask(project.tasks ?? [], task),
+      tasks: upsertTask(project.tasks ?? [], resolvedTask),
     };
   });
 

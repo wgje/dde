@@ -73,13 +73,22 @@ export const FULL_WIPE_INDEXED_DB_NAMES = [
   // Widget 直推 outbox：记录不带 owner，登出必须清空，否则下一个登录账号的
   // 连接恢复 flush 会用新 JWT 重放上一个账号的 focus/black-box 通知
   'nanoflow-dock-direct-widget-notify-outbox',
+  'nanoflow-user-preferences-sync',
+  'nanoflow-pending-preference-outbox',
+  'nanoflow-attachment-upload-outbox',
+  'nanoflow-attachment-cleanup-outbox',
 ] as const;
 
 export const FULL_WIPE_LOCAL_STORAGE_PREFIXES = [
   'nanoflow.project-manifest-watermark',
   'nanoflow.blackbox-manifest-watermark',
+  'nanoflow.idb-fallback.',
   // Widget 直推 outbox 的 localStorage 兜底记录（IDB 写失败时的降级存储）
   'nanoflow.dock-direct-widget-notify.',
+  'nanoflow.userPreferencesBaseline.',
+  'nanoflow.pendingPreferenceOutbox.',
+  'nanoflow.attachment-upload-outbox.',
+  'nanoflow.attachment-cleanup-outbox.',
 ];
 
 export type ProjectHydrationLoadResult =

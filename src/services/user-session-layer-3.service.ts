@@ -101,17 +101,144 @@ export abstract class UserSessionLayer3 extends UserSessionLayer2 {
   }
 
 
+  protected isProjectEntityStateAuthoritativeForMetadataSnapshot(project: Project): boolean {
+    return this.hydratedProjectIds.has(project.id)
+      || project.syncSource === 'local-only'
+      || project.pendingSync === true
+      || this.hasRealLocalChanges(project.id);
+  }
+
+
+  protected collectAuthoritativeMetadataSnapshotProjectIds(projects: Project[]): Set<string> {
+    return new Set(
+      projects
+        .filter(project => this.isProjectEntityStateAuthoritativeForMetadataSnapshot(project))
+        .map(project => project.id),
+    );
+  }
+
+
+  protected getMetadataSnapshotEntityTimestamp(entity: {
+    updatedAt?: string | null;
+    deletedAt?: string | null;
+    createdDate?: string | null;
+  }): number | null {
+    const timestamps = [entity.updatedAt, entity.deletedAt, entity.createdDate]
+      .filter((value): value is string => typeof value === 'string')
+      .map(value => Date.parse(value))
+      .filter(value => !Number.isNaN(value));
+    return timestamps.length > 0 ? Math.max(...timestamps) : null;
+  }
+
+
+  protected mergeMetadataSnapshotEntities<T extends {
+    id: string;
+    updatedAt?: string | null;
+    deletedAt?: string | null;
+    createdDate?: string | null;
+  }>(previousEntities: T[], currentEntities: T[]): T[] {
+    const mergedById = new Map(previousEntities.map(entity => [entity.id, entity] as const));
+    const orderedIds = previousEntities.map(entity => entity.id);
+
+    for (const currentEntity of currentEntities) {
+      const previousEntity = mergedById.get(currentEntity.id);
+      const currentTimestamp = this.getMetadataSnapshotEntityTimestamp(currentEntity);
+      if (!previousEntity) {
+        if (currentTimestamp !== null) {
+          mergedById.set(currentEntity.id, currentEntity);
+          orderedIds.push(currentEntity.id);
+        }
+        continue;
+      }
+
+      const previousTimestamp = this.getMetadataSnapshotEntityTimestamp(previousEntity);
+      if (
+        currentTimestamp !== null
+        && (previousTimestamp === null || currentTimestamp >= previousTimestamp)
+      ) {
+        mergedById.set(currentEntity.id, currentEntity);
+      }
+    }
+
+    return orderedIds
+      .map(id => mergedById.get(id))
+      .filter((entity): entity is T => !!entity);
+  }
+
+
+  protected async buildDurableProjectListMetadataSnapshot(
+    userId: string,
+    authoritativeProjectIds: ReadonlySet<string>,
+  ): Promise<Project[] | null> {
+    const currentProjects = this.projectState.getProjectsWithCurrentData();
+    const unverifiedProjects = currentProjects.filter(project => (
+      !authoritativeProjectIds.has(project.id)
+      && !this.isProjectEntityStateAuthoritativeForMetadataSnapshot(project)
+    ));
+    if (unverifiedProjects.length === 0) {
+      return currentProjects;
+    }
+
+    const previousSnapshot = await this.syncCoordinator.loadStartupOfflineSnapshot({ ownerUserId: userId });
+    const previousProjectsById = new Map(
+      previousSnapshot.projects.map(project => [project.id, project] as const),
+    );
+    const unresolvedProjectIds: string[] = [];
+    const durableProjects = currentProjects.map(project => {
+      if (
+        authoritativeProjectIds.has(project.id)
+        || this.isProjectEntityStateAuthoritativeForMetadataSnapshot(project)
+      ) {
+        return project;
+      }
+
+      const previousProject = previousProjectsById.get(project.id);
+      const hasVerifiedPreviousEntities = !!previousProject
+        && (previousProject.tasks.length > 0 || previousProject.connections.length > 0);
+      if (!hasVerifiedPreviousEntities) {
+        unresolvedProjectIds.push(project.id);
+        return project;
+      }
+
+      return {
+        ...project,
+        tasks: this.mergeMetadataSnapshotEntities(previousProject.tasks, project.tasks),
+        connections: this.mergeMetadataSnapshotEntities(previousProject.connections, project.connections),
+      };
+    });
+
+    if (unresolvedProjectIds.length > 0) {
+      this.logger.warn('项目列表元数据快照缺少可验证实体状态，已跳过持久化', {
+        userId,
+        projectIds: unresolvedProjectIds,
+      });
+      return null;
+    }
+
+    return durableProjects;
+  }
+
+
   protected async persistProjectListMetadataSnapshotIfNeeded(
     shouldPersist: boolean,
     userId: string,
+    authoritativeProjectIds: ReadonlySet<string> = new Set(),
   ): Promise<boolean> {
     if (!shouldPersist) {
       return true;
     }
 
     try {
+      const durableProjects = await this.buildDurableProjectListMetadataSnapshot(
+        userId,
+        authoritativeProjectIds,
+      );
+      if (!durableProjects) {
+        return false;
+      }
+
       await this.saveProjectsToOfflineSnapshot(
-        this.projectState.getProjectsWithCurrentData(),
+        durableProjects,
         userId,
         { allowEmpty: true },
       );
@@ -143,6 +270,7 @@ export abstract class UserSessionLayer3 extends UserSessionLayer2 {
     this.lastProjectListMetadataSyncSucceededState.set(false);
     this.lastProjectListMetadataSyncDurableState.set(false);
     const localProjects = this.projectState.projects();
+    const authoritativeMetadataSnapshotProjectIds = this.collectAuthoritativeMetadataSnapshotProjectIds(localProjects);
     const fallbackIds = new Set(localProjects.map(p => p.id));
 
     const client = await this.supabase.clientAsync();
@@ -187,6 +315,7 @@ export abstract class UserSessionLayer3 extends UserSessionLayer2 {
     const metadataSnapshotDurable = await this.persistProjectListMetadataSnapshotIfNeeded(
       metadataUpdate.hasChanges || forceSnapshotPersist,
       userId,
+      authoritativeMetadataSnapshotProjectIds,
     );
     this.completeProjectListMetadataSync(accessibleProjectIds, metadataSnapshotDurable);
 

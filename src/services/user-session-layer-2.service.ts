@@ -4,12 +4,32 @@ import { SYNC_CONFIG } from '../config/sync.config';
 import { Project } from '../models';
 import type { Database } from '../types/supabase';
 import { isBrowserNetworkSuspendedError, isBrowserNetworkSuspendedWindow } from '../utils/browser-network-suspension';
-import { fetchAllSupabasePages } from '../utils/supabase-pagination';
+import {
+  buildSupabaseKeysetOrFilter,
+  fetchAllSupabaseKeysetPagesByCursor,
+  isSupabaseKeysetCursorAfter,
+  supabaseKeysetCursorKey,
+  type SupabaseKeysetCursor,
+} from '../utils/supabase-pagination';
 import type { ResumeRecoveryProbe } from './sync-coordinator.service';
 import type { SupabaseClient } from '@supabase/supabase-js';
 
 import { UserSessionLayer1 } from './user-session-layer-1.service';
 import { GUEST_DATA_STORAGE_KEY, type BackgroundSyncProbeStageResult, type BackgroundWatermarkProbeResult, type ProjectListMetadataPrimeManifestResult, type ProjectListMetadataQueryResult, type ProjectListMetadataRow, type SessionGuardContext } from './user-session-base.service';
+
+function readProjectListMetadataCursor(row: ProjectListMetadataRow): SupabaseKeysetCursor | null {
+  if (!row.id || !row.updated_at || Number.isNaN(Date.parse(row.updated_at))) return null;
+  return { updatedAt: row.updated_at, id: row.id };
+}
+
+function normalizeProjectListMetadataRows(rows: ProjectListMetadataRow[]): ProjectListMetadataRow[] {
+  const rowsById = new Map<string, ProjectListMetadataRow>();
+  for (const row of rows) rowsById.set(row.id, row);
+  return [...rowsById.values()].sort((left, right) => {
+    const updatedOrder = String(right.updated_at ?? '').localeCompare(String(left.updated_at ?? ''));
+    return updatedOrder !== 0 ? updatedOrder : left.id.localeCompare(right.id);
+  });
+}
 
 export abstract class UserSessionLayer2 extends UserSessionLayer1 {
 
@@ -565,18 +585,25 @@ export abstract class UserSessionLayer2 extends UserSessionLayer1 {
     userId: string,
   ): Promise<ProjectListMetadataQueryResult> {
     try {
-      const response = await fetchAllSupabasePages<ProjectListMetadataRow>(() => client
-        .from('projects')
-        .select('id,title,description,created_date,updated_at,version,owner_id')
-        .eq('owner_id', userId)
-        .is('deleted_at', null)
-        .order('updated_at', { ascending: false })
-        .order('id', { ascending: true }));
+      const response = await fetchAllSupabaseKeysetPagesByCursor<
+        ProjectListMetadataRow,
+        SupabaseKeysetCursor
+      >((cursor) => {
+        let query = client
+          .from('projects')
+          .select('id,title,description,created_date,updated_at,version,owner_id')
+          .eq('owner_id', userId)
+          .is('deleted_at', null);
+        if (cursor) query = query.or(buildSupabaseKeysetOrFilter(cursor));
+        return query
+          .order('updated_at', { ascending: true })
+          .order('id', { ascending: true });
+      }, { readCursor: readProjectListMetadataCursor, cursorKey: supabaseKeysetCursorKey, isCursorAfter: isSupabaseKeysetCursorAfter });
 
       if (!response.error) {
         return {
           status: 'ok',
-          rows: (response.data ?? []) as ProjectListMetadataRow[],
+          rows: normalizeProjectListMetadataRows(response.data ?? []),
         };
       }
 

@@ -2,8 +2,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { AUTH_CONFIG } from '../config/auth.config';
 import type { Project } from '../models';
-import { markTaskContentMissingFromSource } from '../utils/task-content-guard';
 import { createBrowserNetworkSuspendedError } from '../utils/browser-network-suspension';
+import { registerUserSessionMergeSingleProjectContentSpecs } from './user-session-merge-single-project-content.spec-helpers';
+import { registerUserSessionMetadataLocalProjectRetentionSpecs } from './user-session-metadata-local-project-retention.spec-helpers';
 import type { UserSessionServiceSpecContext } from './user-session.service.spec-context';
 import { registerUserSessionSnapshotPrehydrateSpecs } from './user-session-snapshot-prehydrate.spec-helpers';
 
@@ -16,30 +17,79 @@ export function registerUserSessionMetadataAndSnapshotSpecs(getContext: () => Us
 
     describe('syncProjectListMetadata', () => {
       /** 辅助：构建 Supabase client mock，返回指定的服务端项目列表 */
-      function setupSupabaseQuery(serverProjects: Array<Record<string, unknown>>) {
-        const { query, ranges } = createPagedProjectListQuery(serverProjects);
-        const from = vi.fn().mockReturnValue(query);
+      function setupSupabaseQuery(
+        serverProjects: Array<Record<string, unknown>>,
+        moveFirstProjectAfterPage = false,
+      ) {
+        const paged = createPagedProjectListQuery(serverProjects, moveFirstProjectAfterPage);
+        const from = vi.fn(() => paged.createQuery());
         context.mockSupabaseClientService.client.mockReturnValue({ from });
         context.mockSupabaseClientService.clientAsync.mockResolvedValue({ from });
-        return { query, ranges };
+        return paged;
       }
-  
-      function createPagedProjectListQuery(serverProjects: Array<Record<string, unknown>>) {
+
+      function createPagedProjectListQuery(
+        serverProjects: Array<Record<string, unknown>>,
+        moveFirstProjectAfterPage: boolean,
+      ) {
         const ranges: Array<[number, number]> = [];
-        const query = {
-          select: vi.fn().mockReturnThis(),
-          eq: vi.fn().mockReturnThis(),
-          is: vi.fn().mockReturnThis(),
-          order: vi.fn().mockReturnThis(),
-          range: vi.fn(async (from: number, to: number) => {
-            ranges.push([from, to]);
-            return {
-              data: serverProjects.slice(from, to + 1),
-              error: null,
-            };
-          }),
+        const limitCursors: Array<string | null> = [];
+        let pageRequests = 0;
+        const createQuery = () => {
+          let cursor: { updatedAt: string; id: string } | null = null;
+          let updatedAtAscending = true;
+          const readPage = (from: number, to: number) => {
+            const ordered = serverProjects
+              .filter((row) => {
+                if (!cursor) return true;
+                const updatedAt = String(row['updated_at'] ?? '');
+                const id = String(row['id'] ?? '');
+                const updatedOrder = updatedAt.localeCompare(cursor.updatedAt);
+                return updatedAtAscending
+                  ? updatedOrder > 0 || updatedOrder === 0 && id > cursor.id
+                  : updatedOrder < 0 || updatedOrder === 0 && id > cursor.id;
+              })
+              .slice()
+              .sort((left, right) => {
+                const updatedOrder = String(left['updated_at']).localeCompare(String(right['updated_at']));
+                if (updatedOrder !== 0) return updatedAtAscending ? updatedOrder : -updatedOrder;
+                return String(left['id']).localeCompare(String(right['id']));
+              });
+            const page = ordered.slice(from, to + 1).map(row => ({ ...row }));
+            if (moveFirstProjectAfterPage && pageRequests++ === 0) {
+              serverProjects[0] = {
+                ...serverProjects[0],
+                title: 'Project 0 moved',
+                updated_at: '2026-06-09T03:00:00.000Z',
+              };
+            }
+            return Promise.resolve({ data: page, error: null });
+          };
+          const query = {
+            select: vi.fn(() => query),
+            eq: vi.fn(() => query),
+            is: vi.fn(() => query),
+            or: vi.fn((filters: string) => {
+              const match = /^updated_at\.gt\.(.*),and\(updated_at\.eq\.(.*),id\.gt\.(.*)\)$/.exec(filters);
+              if (match) cursor = { updatedAt: match[2], id: match[3] };
+              return query;
+            }),
+            order: vi.fn((column: string, options?: { ascending?: boolean }) => {
+              if (column === 'updated_at') updatedAtAscending = options?.ascending !== false;
+              return query;
+            }),
+            limit: vi.fn((count: number) => {
+              limitCursors.push(cursor ? `${cursor.updatedAt}|${cursor.id}` : null);
+              return readPage(0, count - 1);
+            }),
+            range: vi.fn((from: number, to: number) => {
+              ranges.push([from, to]);
+              return readPage(from, to);
+            }),
+          };
+          return query;
         };
-        return { query, ranges };
+        return { createQuery, ranges, limitCursors };
       }
   
       it('浏览器网络挂起导致项目列表查询失败时应保留本地项目且不告警', async () => {
@@ -52,7 +102,7 @@ export function registerUserSessionMetadataAndSnapshotSpecs(getContext: () => Us
           eq: vi.fn().mockReturnThis(),
           is: vi.fn().mockReturnThis(),
           order: vi.fn().mockReturnThis(),
-          range: vi.fn().mockResolvedValue({
+          limit: vi.fn().mockResolvedValue({
             data: null,
             error: createBrowserNetworkSuspendedError(),
           }),
@@ -130,7 +180,7 @@ export function registerUserSessionMetadataAndSnapshotSpecs(getContext: () => Us
         ]);
       });
   
-      it('项目列表元数据应分页加载超过 Supabase REST 单页上限的项目', async () => {
+      it('项目列表元数据应使用 keyset 加载并发移动后的全部项目', async () => {
         (context.mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue([]);
         const serverProjects = Array.from({ length: 1001 }, (_, index) => ({
           id: `proj-${index.toString().padStart(4, '0')}`,
@@ -141,7 +191,7 @@ export function registerUserSessionMetadataAndSnapshotSpecs(getContext: () => Us
           version: 1,
           owner_id: 'user-1',
         }));
-        const { ranges } = setupSupabaseQuery(serverProjects);
+        const paged = setupSupabaseQuery(serverProjects, true);
   
         const result = await (
           context.service as unknown as {
@@ -150,11 +200,13 @@ export function registerUserSessionMetadataAndSnapshotSpecs(getContext: () => Us
         ).syncProjectListMetadata('user-1');
   
         expect(result.size).toBe(1001);
+        expect(result.has('proj-0000')).toBe(true);
         expect(result.has('proj-1000')).toBe(true);
-        expect(ranges).toEqual([
-          [0, 999],
-          [1000, 1999],
-        ]);
+        expect(paged.limitCursors).toHaveLength(2);
+        expect(paged.ranges).toEqual([]);
+        expect(context.mockProjectState['setProjectsMetadataOnly']).toHaveBeenCalledWith(
+          expect.arrayContaining([expect.objectContaining({ id: 'proj-0000', name: 'Project 0 moved' })]),
+        );
       });
   
       it('当前活跃项目不应被裁剪（由调用方处理）', async () => {
@@ -194,6 +246,258 @@ export function registerUserSessionMetadataAndSnapshotSpecs(getContext: () => Us
         expect(setProjectsCall.some((p: Project) => p.id === 'proj-stale')).toBe(false);
         // proj-new 应被添加为壳
         expect(setProjectsCall.some((p: Project) => p.id === 'proj-new')).toBe(true);
+      });
+
+      it('未 hydration 的 metadata shell 落盘前应继承已有离线快照实体', async () => {
+        const durableTask = context.createTask({
+          id: 'task-durable',
+          title: 'Durable task',
+          content: 'must survive metadata sync',
+        });
+        const durableConnection = {
+          id: 'connection-durable',
+          source: durableTask.id,
+          target: 'task-target',
+          updatedAt: '2026-07-15T01:00:00.000Z',
+        };
+        const durableProject = context.createProject({
+          id: 'proj-durable',
+          name: 'Before metadata sync',
+          tasks: [durableTask],
+          connections: [durableConnection],
+          syncSource: 'synced',
+          updatedAt: '2026-07-15T01:00:00.000Z',
+        });
+        const unhydratedShell = {
+          ...durableProject,
+          tasks: [],
+          connections: [],
+        };
+        (context.mockProjectState['setProjects'] as (projects: Project[]) => void)([unhydratedShell]);
+        (context.mockProjectState['activeProjectId'] as ReturnType<typeof vi.fn>).mockReturnValue(null);
+
+        const syncCore = context.mockSyncCoordinator['core'] as {
+          loadStartupOfflineSnapshot: ReturnType<typeof vi.fn>;
+          saveOfflineSnapshot: ReturnType<typeof vi.fn>;
+        };
+        syncCore.loadStartupOfflineSnapshot.mockResolvedValue({
+          source: 'idb',
+          projectCount: 1,
+          bytes: 512,
+          migratedLegacy: false,
+          ownerUserId: 'user-1',
+          projects: [durableProject],
+        });
+        syncCore.saveOfflineSnapshot.mockClear();
+
+        setupSupabaseQuery([{
+          id: durableProject.id,
+          title: 'After metadata sync',
+          description: durableProject.description,
+          created_date: durableProject.createdDate,
+          updated_at: '2026-07-15T02:00:00.000Z',
+          version: 2,
+          owner_id: 'user-1',
+        }]);
+
+        await (
+          context.service as unknown as {
+            syncProjectListMetadata: (userId: string) => Promise<Set<string>>;
+          }
+        ).syncProjectListMetadata('user-1');
+
+        expect(syncCore.loadStartupOfflineSnapshot).toHaveBeenCalledWith({ ownerUserId: 'user-1' });
+        expect(syncCore.saveOfflineSnapshot).toHaveBeenCalledWith([
+          expect.objectContaining({
+            id: durableProject.id,
+            name: 'After metadata sync',
+            tasks: [durableTask],
+            connections: [durableConnection],
+          }),
+        ], 'user-1');
+      });
+
+      it('未 hydration 项目已有较新内存实体时应与旧快照做保守 LWW 并集', async () => {
+        const previousTask = context.createTask({
+          id: 'task-shared',
+          title: 'Previous task',
+          content: 'previous durable content',
+          updatedAt: '2026-07-15T01:00:00.000Z',
+        });
+        const previousOnlyTask = context.createTask({
+          id: 'task-previous-only',
+          title: 'Previous only',
+          content: 'must not disappear by absence',
+          updatedAt: '2026-07-15T01:30:00.000Z',
+        });
+        const currentTask = context.createTask({
+          id: 'task-shared',
+          title: 'Current task',
+          content: 'newer delta content',
+          updatedAt: '2026-07-15T03:00:00.000Z',
+        });
+        const previousProject = context.createProject({
+          id: 'proj-lww-snapshot',
+          name: 'Before metadata sync',
+          tasks: [previousTask, previousOnlyTask],
+          syncSource: 'synced',
+          updatedAt: '2026-07-15T02:00:00.000Z',
+        });
+        const currentUnhydratedProject = context.createProject({
+          ...previousProject,
+          tasks: [currentTask],
+          connections: [],
+        });
+        (context.mockProjectState['setProjects'] as (projects: Project[]) => void)([currentUnhydratedProject]);
+        (context.mockProjectState['activeProjectId'] as ReturnType<typeof vi.fn>).mockReturnValue(null);
+
+        const syncCore = context.mockSyncCoordinator['core'] as {
+          loadStartupOfflineSnapshot: ReturnType<typeof vi.fn>;
+          saveOfflineSnapshot: ReturnType<typeof vi.fn>;
+        };
+        syncCore.loadStartupOfflineSnapshot.mockResolvedValue({
+          source: 'idb',
+          projectCount: 1,
+          bytes: 768,
+          migratedLegacy: false,
+          ownerUserId: 'user-1',
+          projects: [previousProject],
+        });
+        syncCore.saveOfflineSnapshot.mockClear();
+
+        setupSupabaseQuery([{
+          id: previousProject.id,
+          title: 'After metadata sync',
+          description: previousProject.description,
+          created_date: previousProject.createdDate,
+          updated_at: '2026-07-15T04:00:00.000Z',
+          version: 2,
+          owner_id: 'user-1',
+        }]);
+
+        await (
+          context.service as unknown as {
+            syncProjectListMetadata: (userId: string) => Promise<Set<string>>;
+          }
+        ).syncProjectListMetadata('user-1');
+
+        const persistedProjects = syncCore.saveOfflineSnapshot.mock.calls.at(-1)?.[0] as Project[] | undefined;
+        const persistedTasks = persistedProjects?.[0]?.tasks ?? [];
+        expect(persistedTasks).toHaveLength(2);
+        expect(persistedTasks).toEqual(expect.arrayContaining([
+          expect.objectContaining({
+            id: currentTask.id,
+            content: 'newer delta content',
+            updatedAt: '2026-07-15T03:00:00.000Z',
+          }),
+          expect.objectContaining({
+            id: previousOnlyTask.id,
+            content: 'must not disappear by absence',
+          }),
+        ]));
+      });
+
+      it('无已验证实体来源的新 metadata shell 不应落盘或推进 manifest 水位', async () => {
+        (context.mockProjectState['setProjects'] as (projects: Project[]) => void)([]);
+        (context.mockProjectState['activeProjectId'] as ReturnType<typeof vi.fn>).mockReturnValue(null);
+
+        const syncCore = context.mockSyncCoordinator['core'] as {
+          loadStartupOfflineSnapshot: ReturnType<typeof vi.fn>;
+          saveOfflineSnapshot: ReturnType<typeof vi.fn>;
+        };
+        syncCore.loadStartupOfflineSnapshot.mockResolvedValue({
+          source: 'none',
+          projectCount: 0,
+          bytes: 0,
+          migratedLegacy: false,
+          ownerUserId: 'user-1',
+          projects: [],
+        });
+        syncCore.saveOfflineSnapshot.mockClear();
+        (context.mockSyncCoordinator['commitProjectManifestWatermark'] as ReturnType<typeof vi.fn>).mockClear();
+
+        setupSupabaseQuery([{
+          id: 'proj-new-shell',
+          title: 'Remote project',
+          description: '',
+          created_date: '2026-07-15T01:00:00.000Z',
+          updated_at: '2026-07-15T02:00:00.000Z',
+          version: 1,
+          owner_id: 'user-1',
+        }]);
+
+        await (
+          context.service as unknown as {
+            syncProjectListMetadata: (userId: string) => Promise<Set<string>>;
+          }
+        ).syncProjectListMetadata('user-1');
+        (
+          context.service as unknown as {
+            commitProjectListMetadataPrimeManifest: (
+              userId: string,
+              sessionGuard: undefined,
+              pendingManifestWatermark: string,
+            ) => void;
+          }
+        ).commitProjectListMetadataPrimeManifest('user-1', undefined, 'manifest-watermark-1');
+
+        expect(syncCore.saveOfflineSnapshot).not.toHaveBeenCalled();
+        expect(context.mockSyncCoordinator['commitProjectManifestWatermark']).not.toHaveBeenCalled();
+      });
+
+      it('旧快照同样为空时不应把未 hydration shell 猜成权威空项目', async () => {
+        const emptyShell = context.createProject({
+          id: 'proj-empty-unverified',
+          name: 'Before metadata sync',
+          tasks: [],
+          connections: [],
+          syncSource: 'synced',
+        });
+        (context.mockProjectState['setProjects'] as (projects: Project[]) => void)([emptyShell]);
+        (context.mockProjectState['activeProjectId'] as ReturnType<typeof vi.fn>).mockReturnValue(null);
+
+        const syncCore = context.mockSyncCoordinator['core'] as {
+          loadStartupOfflineSnapshot: ReturnType<typeof vi.fn>;
+          saveOfflineSnapshot: ReturnType<typeof vi.fn>;
+        };
+        syncCore.loadStartupOfflineSnapshot.mockResolvedValue({
+          source: 'idb',
+          projectCount: 1,
+          bytes: 128,
+          migratedLegacy: false,
+          ownerUserId: 'user-1',
+          projects: [emptyShell],
+        });
+        syncCore.saveOfflineSnapshot.mockClear();
+        (context.mockSyncCoordinator['commitProjectManifestWatermark'] as ReturnType<typeof vi.fn>).mockClear();
+
+        setupSupabaseQuery([{
+          id: emptyShell.id,
+          title: 'After metadata sync',
+          description: '',
+          created_date: emptyShell.createdDate,
+          updated_at: '2026-07-15T04:00:00.000Z',
+          version: 2,
+          owner_id: 'user-1',
+        }]);
+
+        await (
+          context.service as unknown as {
+            syncProjectListMetadata: (userId: string) => Promise<Set<string>>;
+          }
+        ).syncProjectListMetadata('user-1');
+        (
+          context.service as unknown as {
+            commitProjectListMetadataPrimeManifest: (
+              userId: string,
+              sessionGuard: undefined,
+              pendingManifestWatermark: string,
+            ) => void;
+          }
+        ).commitProjectListMetadataPrimeManifest('user-1', undefined, 'manifest-empty-project');
+
+        expect(syncCore.saveOfflineSnapshot).not.toHaveBeenCalled();
+        expect(context.mockSyncCoordinator['commitProjectManifestWatermark']).not.toHaveBeenCalled();
       });
   
       it('服务端返回空列表时应裁剪全部不可访问的 synced 项目', async () => {
@@ -438,288 +742,13 @@ export function registerUserSessionMetadataAndSnapshotSpecs(getContext: () => Us
   
         expect(context.service.isProjectAuthoritativelyAccessible('proj-missing')).toBe(false);
       });
-  
-      it('expired guest draft 标记不应阻止 local-only 影子项目被裁剪', async () => {
-        const remoteProject = context.createProject({ id: 'proj-a', name: 'A', syncSource: 'synced' });
-        const shadowProject = context.createProject({
-          id: 'proj-expired-shadow',
-          name: 'Expired Shadow',
-          syncSource: 'local-only',
-          pendingSync: true,
-        });
-        localStorage.setItem('nanoflow.guest-data', JSON.stringify({
-          projects: [shadowProject],
-          version: 2,
-          savedAt: '2026-02-01T00:00:00.000Z',
-          expiresAt: '2026-02-02T00:00:00.000Z',
-        }));
-        (context.mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue([remoteProject, shadowProject]);
-        (context.mockProjectState['activeProjectId'] as ReturnType<typeof vi.fn>).mockReturnValue(null);
-        (context.mockSyncCoordinator['hasPendingChangesForProject'] as ReturnType<typeof vi.fn>).mockReturnValue(false);
-  
-        setupSupabaseQuery([
-          {
-            id: 'proj-a', title: 'A', description: '',
-            created_date: remoteProject.createdDate, updated_at: remoteProject.updatedAt, version: 1,
-          },
-        ]);
-  
-        await (
-          context.service as unknown as {
-            syncProjectListMetadata: (userId: string) => Promise<Set<string>>;
-          }
-        ).syncProjectListMetadata('user-1');
-  
-        const setProjectsCall = (context.mockProjectState['setProjectsMetadataOnly'] as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as Project[] | undefined;
-        expect(setProjectsCall?.map((project: Project) => project.id)).toEqual(['proj-a']);
-      });
-  
-      it('无 guest draft 标记且无真实本地改动的 local-only 影子项目应被裁剪', async () => {
-        const remoteProject = context.createProject({ id: 'proj-a', name: 'A', syncSource: 'synced' });
-        const shadowProject = context.createProject({
-          id: 'proj-shadow-only',
-          name: 'Shadow',
-          syncSource: 'local-only',
-          pendingSync: true,
-        });
-        (context.mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue([remoteProject, shadowProject]);
-        (context.mockProjectState['activeProjectId'] as ReturnType<typeof vi.fn>).mockReturnValue(null);
-        (context.mockSyncCoordinator['hasPendingChangesForProject'] as ReturnType<typeof vi.fn>).mockReturnValue(false);
-  
-        setupSupabaseQuery([
-          {
-            id: 'proj-a', title: 'A', description: '',
-            created_date: remoteProject.createdDate, updated_at: remoteProject.updatedAt, version: 1,
-          },
-        ]);
-  
-        await (
-          context.service as unknown as {
-            syncProjectListMetadata: (userId: string) => Promise<Set<string>>;
-          }
-        ).syncProjectListMetadata('user-1');
-  
-        const setProjectsCall = (context.mockProjectState['setProjectsMetadataOnly'] as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as Project[] | undefined;
-        expect(setProjectsCall?.map((project: Project) => project.id)).toEqual(['proj-a']);
-      });
-  
-      it('存在 ChangeTracker 本地改动时，应继续保留 remote 缺席的 local-only 项目', async () => {
-        const remoteProject = context.createProject({ id: 'proj-a', name: 'A', syncSource: 'synced' });
-        const localOnlyProject = context.createProject({
-          id: 'proj-local-change',
-          name: 'Local Change',
-          syncSource: 'local-only',
-          pendingSync: true,
-        });
-        (context.mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue([remoteProject, localOnlyProject]);
-        (context.mockProjectState['activeProjectId'] as ReturnType<typeof vi.fn>).mockReturnValue(null);
-        (context.mockSyncCoordinator['hasPendingChangesForProject'] as ReturnType<typeof vi.fn>).mockImplementation(
-          (projectId: string) => projectId === 'proj-a'
-        );
-        (context.mockChangeTracker['hasProjectChanges'] as ReturnType<typeof vi.fn>).mockImplementation(
-          (projectId: string) => projectId === 'proj-local-change'
-        );
-  
-        setupSupabaseQuery([
-          {
-            id: 'proj-a', title: 'A', description: '',
-            created_date: remoteProject.createdDate, updated_at: remoteProject.updatedAt, version: 1,
-          },
-        ]);
-  
-        await (
-          context.service as unknown as {
-            syncProjectListMetadata: (userId: string) => Promise<Set<string>>;
-          }
-        ).syncProjectListMetadata('user-1');
-  
-        const setProjectsCall = (context.mockProjectState['setProjectsMetadataOnly'] as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as Project[] | undefined;
-        expect(setProjectsCall?.map((project: Project) => project.id)).toEqual(['proj-a', 'proj-local-change']);
-      });
-  
-      it('裁剪后清理不可访问的 activeProjectId 时应弹提示', async () => {
-        const staleProject = context.createProject({ id: 'proj-stale', name: 'Stale' });
-        (context.mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue([staleProject]);
-        // 注意：activeProjectId 返回 proj-stale，但由于 activeProject 保护，它不会被裁剪
-        // 这里测试裁剪后、已删除项目仍为 active 的场景
-        // 需要 activeProjectId 返回一个不在 updatedProjects 中的 id
-        (context.mockProjectState['activeProjectId'] as ReturnType<typeof vi.fn>).mockReturnValue('proj-gone');
-        (context.mockSyncCoordinator['hasPendingChangesForProject'] as ReturnType<typeof vi.fn>).mockReturnValue(false);
-  
-        setupSupabaseQuery([]); // 空结果 → 安全守卫跳过裁剪
-  
-        await (
-          context.service as unknown as {
-            syncProjectListMetadata: (userId: string) => Promise<Set<string>>;
-          }
-        ).syncProjectListMetadata('user-1');
-  
-        // 安全守卫跳过裁剪时不会触发 toast（因为没有变更）
-        // 真正触发 toast 的是 startBackgroundSync 中的 access preflight
+
+      registerUserSessionMetadataLocalProjectRetentionSpecs({
+        getContext: () => context,
+        setupSupabaseQuery,
       });
     });
   
-    describe('mergeSingleProject content guard', () => {
-      it('远端任务缺少 content 时应在直接覆盖分支保留本地正文', async () => {
-        vi.clearAllMocks();
-  
-        const localTask = context.createTask({
-          id: 'task-1',
-          title: 'Keep Content',
-          content: 'local content should survive',
-          updatedAt: '2026-05-26T08:00:00.000Z',
-        });
-        const localProject = context.createProject({
-          id: 'proj-content-guard',
-          tasks: [localTask],
-          updatedAt: '2026-05-26T08:00:00.000Z',
-        });
-        const shellProject = context.createProject({
-          id: 'proj-content-guard',
-          tasks: [],
-          connections: [],
-          updatedAt: '2026-05-26T08:00:00.000Z',
-        });
-        const remoteTask = markTaskContentMissingFromSource(context.createTask({
-          id: 'task-1',
-          title: 'Keep Content',
-          content: '',
-          updatedAt: '2026-05-27T08:00:00.000Z',
-        }));
-        const remoteProject = context.createProject({
-          id: 'proj-content-guard',
-          tasks: [remoteTask],
-          updatedAt: '2026-05-27T08:00:00.000Z',
-        });
-  
-        (context.mockProjectState['setProjects'] as (projects: Project[]) => void)([shellProject]);
-        (context.mockProjectState['getProjectsWithCurrentData'] as ReturnType<typeof vi.fn>).mockReturnValue([localProject]);
-        (context.mockSyncCoordinator['hasPendingChangesForProject'] as ReturnType<typeof vi.fn>).mockReturnValue(false);
-  
-        await (
-          context.service as unknown as {
-            mergeSingleProject: (cloudProject: Project, userId: string) => Promise<void>;
-          }
-        ).mergeSingleProject(remoteProject, 'user-1');
-  
-        const mergedProject = (context.mockProjectState['projects'] as () => Project[])()
-          .find((project) => project.id === 'proj-content-guard');
-  
-        expect(mergedProject?.tasks[0]?.content).toBe('local content should survive');
-        expect(mergedProject?.tasks[0]?.updatedAt).toBe('2026-05-27T08:00:00.000Z');
-        expect(context.mockLoggerCategory.warn).toHaveBeenCalledWith(
-          'mergeSingleProject: 远端任务缺少 content，已保留本地正文',
-          expect.objectContaining({
-            projectId: 'proj-content-guard',
-            restoredTaskCount: 1,
-          }),
-        );
-      });
-  
-      it('远端显式提交空 content 时不应误用本地正文覆盖', async () => {
-        vi.clearAllMocks();
-  
-        const localTask = context.createTask({
-          id: 'task-2',
-          title: 'Allow Empty',
-          content: 'old content',
-          updatedAt: '2026-05-26T08:00:00.000Z',
-        });
-        const localProject = context.createProject({
-          id: 'proj-explicit-empty',
-          tasks: [localTask],
-          updatedAt: '2026-05-26T08:00:00.000Z',
-        });
-        const shellProject = context.createProject({
-          id: 'proj-explicit-empty',
-          tasks: [],
-          connections: [],
-          updatedAt: '2026-05-26T08:00:00.000Z',
-        });
-        const remoteTask = context.createTask({
-          id: 'task-2',
-          title: 'Allow Empty',
-          content: '',
-          updatedAt: '2026-05-27T08:00:00.000Z',
-        });
-        const remoteProject = context.createProject({
-          id: 'proj-explicit-empty',
-          tasks: [remoteTask],
-          updatedAt: '2026-05-27T08:00:00.000Z',
-        });
-  
-        (context.mockProjectState['setProjects'] as (projects: Project[]) => void)([shellProject]);
-        (context.mockProjectState['getProjectsWithCurrentData'] as ReturnType<typeof vi.fn>).mockReturnValue([localProject]);
-        (context.mockSyncCoordinator['hasPendingChangesForProject'] as ReturnType<typeof vi.fn>).mockReturnValue(false);
-  
-        await (
-          context.service as unknown as {
-            mergeSingleProject: (cloudProject: Project, userId: string) => Promise<void>;
-          }
-        ).mergeSingleProject(remoteProject, 'user-1');
-  
-        const mergedProject = (context.mockProjectState['projects'] as () => Project[])()
-          .find((project) => project.id === 'proj-explicit-empty');
-  
-        expect(mergedProject?.tasks[0]?.content).toBe('');
-        expect(context.mockLoggerCategory.warn).not.toHaveBeenCalledWith(
-          'mergeSingleProject: 远端任务缺少 content，已保留本地正文',
-          expect.anything(),
-        );
-      });
-  
-      it('存在本地待同步修改时也应在 LWW 分支保留缺字段远端正文', async () => {
-        vi.clearAllMocks();
-  
-        const localTask = context.createTask({
-          id: 'task-3',
-          title: 'Pending Merge',
-          content: 'pending local content',
-          updatedAt: '2026-05-26T08:00:00.000Z',
-        });
-        const localProject = context.createProject({
-          id: 'proj-pending-merge',
-          tasks: [localTask],
-          updatedAt: '2026-05-26T08:00:00.000Z',
-        });
-        const shellProject = context.createProject({
-          id: 'proj-pending-merge',
-          tasks: [],
-          connections: [],
-          updatedAt: '2026-05-26T08:00:00.000Z',
-        });
-        const remoteTask = markTaskContentMissingFromSource(context.createTask({
-          id: 'task-3',
-          title: 'Pending Merge',
-          content: '',
-          updatedAt: '2026-05-27T08:00:00.000Z',
-          order: 9,
-        }));
-        const remoteProject = context.createProject({
-          id: 'proj-pending-merge',
-          tasks: [remoteTask],
-          updatedAt: '2026-05-27T08:00:00.000Z',
-        });
-  
-        (context.mockProjectState['setProjects'] as (projects: Project[]) => void)([shellProject]);
-        (context.mockProjectState['getProjectsWithCurrentData'] as ReturnType<typeof vi.fn>).mockReturnValue([localProject]);
-        (context.mockSyncCoordinator['hasPendingChangesForProject'] as ReturnType<typeof vi.fn>).mockReturnValue(true);
-  
-        await (
-          context.service as unknown as {
-            mergeSingleProject: (cloudProject: Project, userId: string) => Promise<void>;
-          }
-        ).mergeSingleProject(remoteProject, 'user-1');
-  
-        const mergedProject = (context.mockProjectState['projects'] as () => Project[])()
-          .find((project) => project.id === 'proj-pending-merge');
-  
-        expect(mergedProject?.tasks[0]?.content).toBe('pending local content');
-        expect(mergedProject?.tasks[0]?.order).toBe(9);
-        expect(mergedProject?.tasks[0]?.updatedAt).toBe('2026-05-27T08:00:00.000Z');
-      });
-  
-    });
-  
+    registerUserSessionMergeSingleProjectContentSpecs(() => context);
     registerUserSessionSnapshotPrehydrateSpecs(() => context);
 }

@@ -1,5 +1,4 @@
-// eslint-disable-next-line no-restricted-imports -- RetryQueueService 尚未迁移到 src/services/，会话切换需直接清理重试队列
-import { RetryQueueService } from '../app/core/services/sync/retry-queue.service';
+import { RetryQueueService } from '../core-bridge';
 import { AUTH_CONFIG } from '../config/auth.config';
 import { FEATURE_FLAGS } from '../config/feature-flags.config';
 import { Project } from '../models';
@@ -16,6 +15,7 @@ import { LoggerService } from './logger.service';
 import { ProjectStateService } from './project-state.service';
 import { StartupPlaceholderStateService } from './startup-placeholder-state.service';
 import { SupabaseClientService } from './supabase-client.service';
+import { SessionRuntimeResetRegistry } from './session-runtime-reset.service';
 import { SyncCoordinatorService } from './sync-coordinator.service';
 import { ToastService } from './toast.service';
 import { UiStateService } from './ui-state.service';
@@ -24,7 +24,7 @@ import { StorePersistenceService } from '../app/core/state/store-persistence.ser
 import type { SessionGuardContext, StartupProjectCatalogStage } from './user-session-base.types';
 import { UndoService } from './undo.service';
 import { buildHintScopedPlaceholderProjects as buildHintScopedPlaceholderProjectsPure, buildPrehydrateProjects as buildPrehydrateProjectsPure, cloneOfflineProjectsForPrehydrate as cloneOfflineProjectsForPrehydratePure } from './user-session-snapshot-projection';
-import { DestroyRef, inject, Injector, OnDestroy, signal } from '@angular/core';
+import { DestroyRef, Directive, inject, Injector, OnDestroy, signal } from '@angular/core';
 
 export {
   DOCK_SNAPSHOT_DB_NAME,
@@ -54,6 +54,7 @@ export type {
   StartupSnapshotResult,
 } from './user-session-base.types';
 
+@Directive()
 export abstract class UserSessionBase implements OnDestroy {
   protected readonly IDLE_TASK_FALLBACK_MS = 1500;
   protected isDestroyed = false;
@@ -95,6 +96,8 @@ export abstract class UserSessionBase implements OnDestroy {
   protected supabase = inject(SupabaseClientService);
 
   protected dockSnapshotPersistence = inject(DockSnapshotPersistenceService);
+
+  protected sessionRuntimeReset = inject(SessionRuntimeResetRegistry);
 
   protected destroyRef = inject(DestroyRef);
 
@@ -219,7 +222,9 @@ export abstract class UserSessionBase implements OnDestroy {
     projects: Project[],
     trustedSnapshotOwnerId: string,
   ): void {
-    this.projectState.setProjects(projects);
+    // Launch snapshots contain project metadata only. A full replacement here would
+    // interpret tasks: [] as authoritative and erase any already-restored TaskStore data.
+    this.projectState.setProjectsMetadataOnly(projects);
     this.projectState.setActiveProjectId(snapshot.activeProjectId ?? projects[0]?.id ?? null);
     this.startupPlaceholderState?.clear();
     this.prehydratedSnapshotApplied = true;
@@ -363,7 +368,13 @@ export abstract class UserSessionBase implements OnDestroy {
       ? preferredProjectId
       : projects[0]?.id ?? null;
 
-    this.projectState.setProjects(projects);
+    if (ownerConfirmed) {
+      this.projectState.setProjects(projects);
+    } else {
+      // Hint-scoped projects intentionally contain no task/connection payload.
+      // Keep them out of authoritative entity stores during owner-transition races.
+      this.projectState.setProjectsMetadataOnly(projects);
+    }
     this.projectState.setActiveProjectId(activeProjectId);
     if (ownerConfirmed) {
       this.startupPlaceholderState?.clear();

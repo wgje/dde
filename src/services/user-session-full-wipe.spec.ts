@@ -12,4 +12,19 @@ describe('登出全量清理清单', () => {
     expect(FULL_WIPE_INDEXED_DB_NAMES).toContain('nanoflow-dock-direct-widget-notify-outbox');
     expect(FULL_WIPE_LOCAL_STORAGE_PREFIXES).toContain('nanoflow.dock-direct-widget-notify.');
   });
+
+  it('必须覆盖偏好与附件 owner-scoped outbox 的 IndexedDB 和 localStorage 镜像', () => {
+    expect(FULL_WIPE_INDEXED_DB_NAMES).toEqual(expect.arrayContaining([
+      'nanoflow-user-preferences-sync',
+      'nanoflow-pending-preference-outbox',
+      'nanoflow-attachment-upload-outbox',
+      'nanoflow-attachment-cleanup-outbox',
+    ]));
+    expect(FULL_WIPE_LOCAL_STORAGE_PREFIXES).toEqual(expect.arrayContaining([
+      'nanoflow.userPreferencesBaseline.',
+      'nanoflow.pendingPreferenceOutbox.',
+      'nanoflow.attachment-upload-outbox.',
+      'nanoflow.attachment-cleanup-outbox.',
+    ]));
+  });
 });

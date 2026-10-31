@@ -16,6 +16,7 @@
  * - 数据流像电路板上的走线一样清晰，互不干扰
  */
 import { Injectable, inject, computed, DestroyRef } from '@angular/core';
+import { AUTH_CONFIG } from '../config/auth.config';
 import { SimpleSyncService, RetryQueueService, SyncStateService, ProjectDataService, RealtimePollingService, TaskSyncOperationsService, ProjectSaveFlightCoordinatorService } from '../core-bridge';
 import { ActionQueueService } from './action-queue.service';
 import { ActionQueueProcessorsService } from './action-queue-processors.service';
@@ -479,10 +480,28 @@ export class SyncCoordinatorService {
    * @param projectId 项目 ID
    * @returns 是否有待同步修改
    */
-  hasPendingChangesForProject(projectId: string): boolean {
-    // 检查 ActionQueue 中是否有该项目的待处理操作
-    const pendingActions = this.actionQueue.getPendingActionsForProject(projectId);
-    return pendingActions.length > 0;
+  hasPendingChangesForProject(projectId: string, ownerUserId?: string): boolean {
+    const resolvedOwnerUserId = ownerUserId
+      ?? this.authService.currentUserId()
+      ?? AUTH_CONFIG.LOCAL_MODE_USER_ID;
+    const actionQueueState = this.actionQueue.getProjectPendingWriteState?.(
+      projectId,
+      resolvedOwnerUserId,
+    ) ?? (this.actionQueue.getPendingActionsForProject(projectId).length > 0 ? 'pending' : 'clear');
+    return actionQueueState !== 'clear'
+      || this.retryQueue.getProjectPendingWriteState(projectId, resolvedOwnerUserId) !== 'clear';
+  }
+
+  subscribeToProjectPendingWriteStateChanges(listener: () => void): () => void {
+    const unsubscribeRetryQueue = this.retryQueue.subscribeToPendingWriteStateChanges(listener);
+    const unsubscribeActionQueue = this.actionQueue.subscribeToQueueSettled(listener);
+    const unsubscribeActionQueueOwnerLoad = this.actionQueue
+      .subscribeToOwnerStorageLoadStateChanges?.(listener);
+    return () => {
+      unsubscribeRetryQueue();
+      unsubscribeActionQueue();
+      unsubscribeActionQueueOwnerLoad?.();
+    };
   }
 
   private hasPendingProjectQueueReplay(projectId: string): boolean {

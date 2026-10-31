@@ -50,7 +50,7 @@ export function registerUserSessionSnapshotPrehydrateSpecs(
       const result = context.service.prehydrateFromSnapshot();
 
       expect(result).toBe(true);
-      expect(context.mockProjectState['setProjects']).toHaveBeenCalledWith(
+      expect(context.mockProjectState['setProjectsMetadataOnly']).toHaveBeenCalledWith(
         expect.arrayContaining([
           expect.objectContaining({
             id: 'a0000000-0000-4000-8000-000000000001',
@@ -60,6 +60,7 @@ export function registerUserSessionSnapshotPrehydrateSpecs(
           }),
         ]),
       );
+      expect(context.mockProjectState['setProjects']).not.toHaveBeenCalled();
       expect(context.mockProjectState['setActiveProjectId']).toHaveBeenCalledWith('a0000000-0000-4000-8000-000000000001');
 
       // 清理全局快照
@@ -121,11 +122,12 @@ export function registerUserSessionSnapshotPrehydrateSpecs(
       const result = context.service.prehydrateFromSnapshot();
 
       expect(result).toBe(true);
-      expect(context.mockProjectState['setProjects']).toHaveBeenCalledWith(
+      expect(context.mockProjectState['setProjectsMetadataOnly']).toHaveBeenCalledWith(
         expect.arrayContaining([
           expect.objectContaining({ id: 'c0000000-0000-4000-8000-000000000001', name: 'LocalStorage Project' }),
         ]),
       );
+      expect(context.mockProjectState['setProjects']).not.toHaveBeenCalled();
     });
 
     it('owner 未通过本地会话确认时不应预填充快照', () => {
@@ -161,6 +163,40 @@ export function registerUserSessionSnapshotPrehydrateSpecs(
       expect(result).toBe(false);
       expect(context.mockProjectState['setProjects']).not.toHaveBeenCalled();
       expect(context.service.startupProjectCatalogStage()).toBe('unresolved');
+    });
+
+    it('owner hint 在离线预水合期间变化时只应安装 metadata shell', () => {
+      const offlineProject = context.createProject({
+        id: 'volatile-owner-project',
+        name: 'Sensitive Offline Project',
+        tasks: [context.createTask({ id: 'volatile-owner-task', content: 'must not materialize' })],
+      });
+      (context.mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue([]);
+      (context.mockAuthService['peekPersistedSessionIdentity'] as ReturnType<typeof vi.fn>)
+        .mockReturnValue(null);
+      (context.mockAuthService['peekPersistedOwnerHint'] as ReturnType<typeof vi.fn>)
+        .mockReturnValueOnce('volatile-user')
+        .mockReturnValue(null);
+      (
+        context.mockSyncCoordinator['core'] as {
+          loadOfflineSnapshot: ReturnType<typeof vi.fn>;
+        }
+      ).loadOfflineSnapshot.mockReturnValue([offlineProject]);
+
+      const result = context.service.prehydrateFromSnapshot();
+
+      expect(result).toBe(true);
+      expect(context.mockProjectState['setProjectsMetadataOnly']).toHaveBeenCalledWith([
+        expect.objectContaining({
+          id: 'volatile-owner-project',
+          name: 'Project 1',
+          tasks: [],
+          connections: [],
+        }),
+      ]);
+      expect(context.mockProjectState['setProjects']).not.toHaveBeenCalled();
+      expect(context.service.startupProjectCatalogStage()).toBe('partial');
+      expect(context.service.trustedPrehydratedSnapshotVisible()).toBe(false);
     });
 
     it('仅有匹配 owner hint 时应信任离线快照并展示完整数据', () => {

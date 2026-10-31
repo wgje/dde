@@ -22,12 +22,14 @@ import { markTaskContentMissingFromSource } from '../utils/task-content-guard';
 import { StartupPlaceholderStateService } from './startup-placeholder-state.service';
 import { blackBoxEntriesMap, gateSnoozeCount, gateState, resetFocusState } from '../state/focus-stores';
 import { StorePersistenceService } from '../app/core/state/store-persistence.service';
+import { SessionRuntimeResetRegistry } from './session-runtime-reset.service';
 import { LocalBackupUiRestoreStartupRecoveryService } from './local-backup-ui-restore-startup-recovery.service';
 import {
   createBrowserNetworkSuspendedError,
   resetBrowserNetworkSuspensionTrackingForTests,
 } from '../utils/browser-network-suspension';
 import { registerUserSessionLoadAndSyncSpecs } from './user-session-load-and-sync.spec-helpers';
+import { registerUserSessionIdleTaskSpecs } from './user-session-idle-task.spec-helpers';
 import { registerUserSessionMetadataAndSnapshotSpecs } from './user-session-metadata-and-snapshot.spec-helpers';
 import { registerUserSessionSetCurrentUserSpecs } from './user-session-set-current-user.spec-helpers';
 import { registerUserSessionSwitchActiveProjectSpecs } from './user-session-switch-active-project.spec-helpers';
@@ -72,12 +74,16 @@ type MockSyncCoordinatorCore = {
   clearOfflineCache: Mock<() => void>;
   clearOfflineSnapshot: Mock<(ownerUserId?: string | null) => void>;
   loadOfflineSnapshot: Mock<(options?: { allowOwnerHint?: boolean }) => Project[] | null>;
-  loadStartupOfflineSnapshot: Mock<() => Promise<{
+  loadStartupOfflineSnapshot: Mock<(options?: {
+    allowOwnerHint?: boolean;
+    ownerUserId?: string | null;
+  }) => Promise<{
     source: string;
     projectCount: number;
     bytes: number;
     migratedLegacy: boolean;
     projects: Project[];
+    ownerUserId?: string | null;
   }>>;
   saveOfflineSnapshot: Mock<(projects: Project[], ownerUserId?: string | null) => void>;
   saveProjectSmart: Mock<(project: Project, userId: string) => Promise<{ ok: boolean }>>;
@@ -180,7 +186,10 @@ describe('UserSessionService', () => {
   let mockRetryQueue: Record<string, unknown>;
   let mockConflictStorage: Record<string, unknown>;
   let mockDockSnapshotPersistence: Record<string, unknown>;
-  let mockLocalBackupUiRestoreStartupRecovery: { recover: ReturnType<typeof vi.fn> };
+  let mockSessionRuntimeReset: { resetAll: ReturnType<typeof vi.fn> };
+  let mockLocalBackupUiRestoreStartupRecovery: {
+    recover: ReturnType<typeof vi.fn>;
+  };
   let mockStartupPlaceholderState: {
     isHintOnlyActive: ReturnType<typeof vi.fn>;
     activate: ReturnType<typeof vi.fn>;
@@ -255,7 +264,11 @@ describe('UserSessionService', () => {
         const activeProject = projectsMock().find((project: Project) => project.id === activeProjectIdState);
         return activeProject?.tasks ?? [];
       }),
-      clearData: vi.fn(),
+      clearData: vi.fn(() => {
+        projectsState = [];
+        activeProjectIdState = null;
+        projectsMock.mockReturnValue(projectsState);
+      }),
       clearAll: vi.fn(),
       setProjectsMetadataOnly: vi.fn((projects: Project[]) => {
         // 只更新项目元数据（与 setProjects 行为一致，但语义上不触碰 TaskStore）
@@ -303,7 +316,9 @@ describe('UserSessionService', () => {
       clearOfflineCache: vi.fn(() => syncCoordinatorCore.clearOfflineCache()),
       clearOfflineSnapshot: vi.fn((ownerUserId?: string | null) => syncCoordinatorCore.clearOfflineSnapshot(ownerUserId)),
       loadOfflineSnapshot: vi.fn((options?: { allowOwnerHint?: boolean }) => syncCoordinatorCore.loadOfflineSnapshot(options)),
-      loadStartupOfflineSnapshot: vi.fn(() => syncCoordinatorCore.loadStartupOfflineSnapshot()),
+      loadStartupOfflineSnapshot: vi.fn((options?: { allowOwnerHint?: boolean; ownerUserId?: string | null }) => (
+        syncCoordinatorCore.loadStartupOfflineSnapshot(options)
+      )),
       saveOfflineSnapshot: vi.fn((projects: Project[], ownerUserId?: string | null) => syncCoordinatorCore.saveOfflineSnapshot(projects, ownerUserId)),
       saveOfflineSnapshotAndWait: vi.fn((projects: Project[], ownerUserId?: string | null) => syncCoordinatorCore.saveOfflineSnapshot(projects, ownerUserId)),
       saveProjectSmart: vi.fn((project: Project, userId: string) => syncCoordinatorCore.saveProjectSmart(project, userId)),
@@ -329,6 +344,7 @@ describe('UserSessionService', () => {
 
     mockActionQueue = {
       clearQueue: vi.fn(),
+      clearQueueForFullWipe: vi.fn(),
       clearDeadLetterQueue: vi.fn(),
       clearCurrentView: vi.fn(),
       reloadFromStorageForCurrentOwner: vi.fn(),
@@ -355,6 +371,9 @@ describe('UserSessionService', () => {
       discardPendingPersist: vi.fn().mockResolvedValue(undefined),
     };
 
+    mockSessionRuntimeReset = {
+      resetAll: vi.fn().mockReturnValue({ ok: true, reason: 'owner-change', attemptedOwners: [], failures: [] }),
+    };
     mockLocalBackupUiRestoreStartupRecovery = {
       recover: vi.fn().mockResolvedValue({ status: 'none' }),
     };
@@ -411,14 +430,15 @@ describe('UserSessionService', () => {
         { provide: AuthService, useValue: mockAuthService },
         { provide: SyncCoordinatorService, useValue: mockSyncCoordinator },
         { provide: StorePersistenceService, useValue: mockStorePersistence },
-        {
-          provide: LocalBackupUiRestoreStartupRecoveryService,
-          useValue: mockLocalBackupUiRestoreStartupRecovery,
-        },
         { provide: ActionQueueService, useValue: mockActionQueue },
         { provide: RetryQueueService, useValue: mockRetryQueue },
         { provide: ConflictStorageService, useValue: mockConflictStorage },
         { provide: DockSnapshotPersistenceService, useValue: mockDockSnapshotPersistence },
+        { provide: SessionRuntimeResetRegistry, useValue: mockSessionRuntimeReset },
+        {
+          provide: LocalBackupUiRestoreStartupRecoveryService,
+          useValue: mockLocalBackupUiRestoreStartupRecovery,
+        },
         { provide: StartupPlaceholderStateService, useValue: mockStartupPlaceholderState },
         { provide: UndoService, useValue: mockUndoService },
         { provide: UiStateService, useValue: mockUiState },
@@ -439,7 +459,7 @@ describe('UserSessionService', () => {
     resetBrowserNetworkSuspensionTrackingForTests();
     delete (window as Window & { __NANOFLOW_LAUNCH_SNAPSHOT__?: unknown }).__NANOFLOW_LAUNCH_SNAPSHOT__;
     delete (window as Window & { __NANOFLOW_SESSION_PREWARM__?: unknown }).__NANOFLOW_SESSION_PREWARM__;
-    resetFocusState();
+    resetFocusState({ cleanupTodayDateInterval: true });
     Object.defineProperty(globalThis, 'localStorage', {
       value: originalLocalStorage,
       configurable: true,
@@ -467,6 +487,7 @@ describe('UserSessionService', () => {
       mockRetryQueue,
       mockConflictStorage,
       mockDockSnapshotPersistence,
+      mockSessionRuntimeReset,
       mockStartupPlaceholderState,
       mockAttachmentService,
       mockLayoutService,
@@ -487,29 +508,6 @@ describe('UserSessionService', () => {
   }
 
   registerUserSessionSwitchActiveProjectSpecs(getUserSessionSpecContext);
-
-  describe('local backup UI restore startup recovery', () => {
-    it('blocks queue and project loading when startup recovery stays frozen', async () => {
-      const ownerUserId = 'phase2c2a-blocked-owner';
-      mockLocalBackupUiRestoreStartupRecovery.recover.mockResolvedValueOnce({
-        status: 'blocked',
-        reason: 'active-or-mutated',
-      });
-      const loadUserDataSpy = vi.spyOn(
-        service as unknown as { loadUserData: (userId: string, sessionGuard?: unknown) => Promise<void> },
-        'loadUserData',
-      ).mockResolvedValue(undefined);
-
-      await service.setCurrentUser(ownerUserId, { forceLoad: true });
-
-      expect(mockLocalBackupUiRestoreStartupRecovery.recover).toHaveBeenCalledWith(ownerUserId);
-      expect(mockStorePersistence['recoverInterruptedDataSafetyRestore']).not.toHaveBeenCalled();
-      expect(mockActionQueue['reloadFromStorageForCurrentOwner']).not.toHaveBeenCalled();
-      expect(mockRetryQueue['reloadFromStorageForCurrentOwner']).not.toHaveBeenCalled();
-      expect(loadUserDataSpy).not.toHaveBeenCalled();
-    });
-  });
-
   describe('clearLocalData', () => {
     it('清除内存态数据', () => {
       service.clearLocalData();
@@ -518,6 +516,76 @@ describe('UserSessionService', () => {
       expect(mockUndoService['clearHistory']).toHaveBeenCalled();
       expect(mockChangeTracker['clearAllChanges']).toHaveBeenCalled();
       expect(mockSyncCoordinator['clearActiveConflict']).toHaveBeenCalled();
+      expect(mockSessionRuntimeReset.resetAll).toHaveBeenCalledWith('clear-local-data');
+    });
+  });
+
+  describe('session runtime reset', () => {
+    it('owner 变化时在加载新会话前广播运行时重置', async () => {
+      userIdSignal.set('old-user');
+
+      await service.setCurrentUser('new-user', {
+        forceLoad: true,
+        skipPersistentReload: true,
+      });
+
+      expect(mockSessionRuntimeReset.resetAll).toHaveBeenCalledWith('owner-change');
+    });
+
+    it('登出时停止 Focus 模块级 interval', async () => {
+      resetFocusState({ cleanupTodayDateInterval: true });
+      vi.useFakeTimers();
+      resetFocusState();
+      expect(vi.getTimerCount()).toBe(2);
+      userIdSignal.set('old-user');
+
+      await service.setCurrentUser(null, { skipPersistentReload: true });
+
+      expect(vi.getTimerCount()).toBe(0);
+      vi.useRealTimers();
+    });
+
+    it('从匿名态登录时重新启动 Focus 模块级 interval', async () => {
+      resetFocusState({ cleanupTodayDateInterval: true });
+      vi.useFakeTimers();
+      expect(vi.getTimerCount()).toBe(0);
+
+      await service.setCurrentUser('new-user', {
+        forceLoad: true,
+        skipPersistentReload: true,
+      });
+
+      expect(vi.getTimerCount()).toBe(2);
+      vi.useRealTimers();
+    });
+  });
+
+  describe('local backup UI restore startup recovery', () => {
+    it('blocks owner queues and project load when startup recovery stays frozen', async () => {
+      const ownerUserId = 'phase2c2a-blocked-owner';
+      mockLocalBackupUiRestoreStartupRecovery.recover.mockResolvedValueOnce({
+        status: 'blocked',
+        reason: 'active-or-mutated',
+      });
+      const loadUserDataSpy = vi.spyOn(
+        service as unknown as {
+          loadUserData: (userId: string, sessionGuard?: unknown) => Promise<void>;
+        },
+        'loadUserData',
+      ).mockResolvedValue(undefined);
+
+      try {
+        await service.setCurrentUser(ownerUserId, { forceLoad: true });
+
+        expect(mockLocalBackupUiRestoreStartupRecovery.recover).toHaveBeenCalledWith(ownerUserId);
+        expect(mockStorePersistence['recoverInterruptedDataSafetyRestore']).not.toHaveBeenCalled();
+        expect(mockActionQueue['reloadFromStorageForCurrentOwner']).not.toHaveBeenCalled();
+        expect(mockRetryQueue['reloadFromStorageForCurrentOwner']).not.toHaveBeenCalled();
+        expect(loadUserDataSpy).not.toHaveBeenCalled();
+      } finally {
+        mockLocalBackupUiRestoreStartupRecovery.recover.mockReset();
+        mockLocalBackupUiRestoreStartupRecovery.recover.mockResolvedValue({ status: 'none' });
+      }
     });
   });
 
@@ -533,6 +601,23 @@ describe('UserSessionService', () => {
       expect(mockProjectState['clearData']).toHaveBeenCalled();
       expect(mockUndoService['clearHistory']).toHaveBeenCalled();
       expect(mockDockSnapshotPersistence['discardPendingPersist']).toHaveBeenCalled();
+    });
+
+    it('late Layer-1 cleanup preserves a newer canonical credential bundle', async () => {
+      const bundle = {
+        'sb-test-auth-token': 'session-b',
+        'sb-test-auth-token-code-verifier': 'verifier-b',
+        'sb-test-auth-token-user': 'user-b',
+      };
+      Object.entries(bundle).forEach(([key, value]) => localStorage.setItem(key, value));
+      (window as Window & { __NANOFLOW_SESSION_PREWARM__?: unknown }).__NANOFLOW_SESSION_PREWARM__ = {
+        status: 'refreshed',
+      };
+
+      await service.clearAllLocalData('user-a');
+
+      Object.entries(bundle).forEach(([key, value]) => expect(localStorage.getItem(key)).toBe(value));
+      expect((window as Window & { __NANOFLOW_SESSION_PREWARM__?: unknown }).__NANOFLOW_SESSION_PREWARM__).toBeUndefined();
     });
 
     it('应清理 sessionStorage 遗留数据', async () => {
@@ -555,7 +640,8 @@ describe('UserSessionService', () => {
       expect(localStorage.getItem('nanoflow.action-queue')).toBeNull();
       expect(localStorage.getItem('nanoflow.dead-letter-queue')).toBeNull();
       expect(localStorage.getItem('nanoflow.local-connection-tombstones')).toBeNull();
-      expect(mockActionQueue['clearQueue']).toHaveBeenCalled();
+      expect(mockActionQueue['clearQueueForFullWipe']).toHaveBeenCalled();
+      expect(mockActionQueue['clearQueue']).not.toHaveBeenCalled();
       expect(mockActionQueue['clearDeadLetterQueue']).toHaveBeenCalled();
       expect(mockRetryQueue['clear']).toHaveBeenCalled();
       expect(mockRetryQueue['closeStorageConnections']).toHaveBeenCalled();
@@ -608,6 +694,16 @@ describe('UserSessionService', () => {
       expect(localStorage.getItem('nanoflow.offline-cache-v2.anonymous')).toBeNull();
     });
 
+    it('应清理 IndexedDB 项目降级 fallback 键', async () => {
+      localStorage.setItem('nanoflow.idb-fallback.project-1', JSON.stringify({ version: 1 }));
+      localStorage.setItem('nanoflow.idb-fallback.project-2', JSON.stringify({ version: 1 }));
+
+      await service.clearAllLocalData();
+
+      expect(localStorage.getItem('nanoflow.idb-fallback.project-1')).toBeNull();
+      expect(localStorage.getItem('nanoflow.idb-fallback.project-2')).toBeNull();
+    });
+
     it('应全量清理 conflict fallback 存储', async () => {
       await service.clearAllLocalData();
 
@@ -638,7 +734,7 @@ describe('UserSessionService', () => {
       await expect(service.clearAllLocalData()).rejects.toThrow('IndexedDB 清理未完成');
 
       expect(mockSupabaseClientService.signOut).not.toHaveBeenCalled();
-      expect(localStorage.getItem('sb-test-auth-token')).toBeNull();
+      expect(localStorage.getItem('sb-test-auth-token')).toBe(JSON.stringify({ access_token: 'token' }));
       expect((window as Window & { __NANOFLOW_LAUNCH_SNAPSHOT__?: unknown }).__NANOFLOW_LAUNCH_SNAPSHOT__).toBeUndefined();
       expect((window as Window & { __NANOFLOW_SESSION_PREWARM__?: unknown }).__NANOFLOW_SESSION_PREWARM__).toBeUndefined();
       expect(mockConflictStorage['clearAllFallbackStorage']).toHaveBeenCalled();
@@ -657,111 +753,8 @@ describe('UserSessionService', () => {
 
   registerUserSessionSetCurrentUserSpecs(getUserSessionSpecContext);
 
-  describe('runIdleTask', () => {
-    it('requestIdleCallback 不触发时应由超时兜底执行任务', () => {
-      vi.useFakeTimers();
-      const originalRic = (window as Window & { requestIdleCallback?: (cb: () => void) => number }).requestIdleCallback;
-      const task = vi.fn();
-
-      Object.defineProperty(window, 'requestIdleCallback', {
-        value: vi.fn(() => 1),
-        configurable: true,
-        writable: true,
-      });
-
-      (
-        service as unknown as {
-          runIdleTask: (task: () => void) => void;
-        }
-      ).runIdleTask(task);
-
-      expect(task).not.toHaveBeenCalled();
-
-      vi.advanceTimersByTime(2000);
-
-      expect(task).toHaveBeenCalledTimes(1);
-
-      Object.defineProperty(window, 'requestIdleCallback', {
-        value: originalRic,
-        configurable: true,
-        writable: true,
-      });
-      vi.useRealTimers();
-    });
-
-    it('DestroyRef 触发后不应再执行等待中的 idle 任务', () => {
-      vi.useFakeTimers();
-      const originalRic = (window as Window & { requestIdleCallback?: (
-        cb: () => void
-      ) => number }).requestIdleCallback;
-      const task = vi.fn();
-
-      Object.defineProperty(window, 'requestIdleCallback', {
-        value: vi.fn(() => 1),
-        configurable: true,
-        writable: true,
-      });
-
-      (
-        service as unknown as {
-          runIdleTask: (task: () => void) => void;
-        }
-      ).runIdleTask(task);
-
-      (service as UserSessionService & { ngOnDestroy(): void }).ngOnDestroy();
-      vi.advanceTimersByTime(2000);
-
-      expect(task).not.toHaveBeenCalled();
-
-      Object.defineProperty(window, 'requestIdleCallback', {
-        value: originalRic,
-        configurable: true,
-        writable: true,
-      });
-      vi.useRealTimers();
-    });
-
-    it('DestroyRef 触发时应取消等待中的 requestIdleCallback', () => {
-      const originalRic = (window as Window & {
-        requestIdleCallback?: (cb: () => void) => number;
-      }).requestIdleCallback;
-      const originalCancelRic = (window as Window & {
-        cancelIdleCallback?: (handle: number) => void;
-      }).cancelIdleCallback;
-      const cancelIdleCallback = vi.fn();
-
-      Object.defineProperty(window, 'requestIdleCallback', {
-        value: vi.fn(() => 42),
-        configurable: true,
-        writable: true,
-      });
-      Object.defineProperty(window, 'cancelIdleCallback', {
-        value: cancelIdleCallback,
-        configurable: true,
-        writable: true,
-      });
-
-      (
-        service as unknown as {
-          runIdleTask: (task: () => void) => void;
-        }
-      ).runIdleTask(vi.fn());
-
-      (service as UserSessionService & { ngOnDestroy(): void }).ngOnDestroy();
-
-      expect(cancelIdleCallback).toHaveBeenCalledWith(42);
-
-      Object.defineProperty(window, 'requestIdleCallback', {
-        value: originalRic,
-        configurable: true,
-        writable: true,
-      });
-      Object.defineProperty(window, 'cancelIdleCallback', {
-        value: originalCancelRic,
-        configurable: true,
-        writable: true,
-      });
-    });
+  registerUserSessionIdleTaskSpecs({
+    service: () => service,
   });
 
   registerUserSessionLoadAndSyncSpecs(getUserSessionSpecContext);

@@ -186,6 +186,8 @@ const mockActionQueueService = {
 const mockRetryQueueService = {
   length: 0,
   getItems: vi.fn().mockReturnValue([]),
+  getProjectPendingWriteState: vi.fn().mockReturnValue('clear'),
+  subscribeToPendingWriteStateChanges: vi.fn(() => () => {}),
   removeByEntities: vi.fn().mockReturnValue([]),
   removeConnectionsReferencingTasks: vi.fn().mockReturnValue([]),
   pressureEvents: 0,

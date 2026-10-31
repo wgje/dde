@@ -6,6 +6,7 @@ export interface UserSessionAttachmentLazyLoaderOptions {
   injector: Injector;
   isDestroyed(): boolean;
   warn(message: string, error: unknown): void;
+  loadService?: () => Promise<AttachmentService>;
 }
 
 export class UserSessionAttachmentLazyLoader {
@@ -41,6 +42,7 @@ export class UserSessionAttachmentLazyLoader {
     }
 
     if (this.attachmentServiceRef) {
+      this.armServiceMonitoring(this.attachmentServiceRef);
       return this.attachmentServiceRef;
     }
 
@@ -48,13 +50,13 @@ export class UserSessionAttachmentLazyLoader {
       return this.attachmentServicePromise;
     }
 
-    const servicePromise = import('./attachment.service')
-      .then((module) => {
-        const service = this.options.injector.get(module.AttachmentService);
+    const servicePromise = this.loadService()
+      .then((service) => {
         if (this.options.isDestroyed()) {
           this.clearDestroyedService(service);
           return null;
         }
+        this.armServiceMonitoring(service);
         this.attachmentServiceRef = service;
         return service;
       })
@@ -75,6 +77,26 @@ export class UserSessionAttachmentLazyLoader {
 
   clearLoadedMonitoring(): void {
     this.attachmentServiceRef?.clearMonitoredAttachments();
+  }
+
+  private armServiceMonitoring(service: AttachmentService): void {
+    try {
+      service.onUserLogin();
+    } catch (error) {
+      this.options.warn(
+        'AttachmentService URL 刷新监控恢复失败，继续提供附件能力',
+        error,
+      );
+    }
+  }
+
+  private loadService(): Promise<AttachmentService> {
+    if (this.options.loadService) {
+      return this.options.loadService();
+    }
+
+    return import('./attachment.service')
+      .then(module => this.options.injector.get(module.AttachmentService));
   }
 
   private clearDestroyedService(service: AttachmentService | null): void {

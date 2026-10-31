@@ -20,6 +20,7 @@ export interface UserSessionServiceSpecContext {
   mockRetryQueue: Record<string, unknown>;
   mockConflictStorage: Record<string, unknown>;
   mockDockSnapshotPersistence: Record<string, unknown>;
+  mockSessionRuntimeReset: { resetAll: TestMock };
   mockStartupPlaceholderState: {
     isHintOnlyActive: TestMock;
     activate: TestMock;

@@ -85,7 +85,7 @@ export abstract class UserSessionLayer1 extends UserSessionBase {
 
   protected forceClearCurrentSessionView(): void {
     this.projectState.setActiveProjectId(null);
-    this.projectState.setProjects([]);
+    this.projectState.clearData();
     this.clearStartupProjectCatalogState();
     this.uiState.clearAllState();
     this.actionQueue.clearCurrentView();
@@ -184,17 +184,21 @@ export abstract class UserSessionLayer1 extends UserSessionBase {
 
   protected async preparePendingPersistForOwnerChange(
     context: SetCurrentUserContext,
-    shouldClearOfflineSnapshot: boolean,
-  ): Promise<boolean> {
+  ): Promise<boolean | null> {
     try {
       return await this.syncCoordinator.preparePendingPersistForOwnerChange(
         context.previousUserId,
         `owner-switch:${context.previousUserId ?? 'anonymous'}->${context.userId ?? 'anonymous'}`
       );
     } catch (persistError) {
-      this.logger.warn('刷盘待持久化数据失败，继续清理', persistError);
-      return shouldClearOfflineSnapshot;
+      return this.handlePendingPersistPreparationFailure(persistError);
     }
+  }
+
+
+  private handlePendingPersistPreparationFailure(persistError: unknown): null {
+    this.logger.warn('刷盘待持久化数据失败，中止 owner 切换并保留旧状态', persistError);
+    return null;
   }
 
 
@@ -241,12 +245,25 @@ export abstract class UserSessionLayer1 extends UserSessionBase {
     context: SetCurrentUserContext,
     preparation: OwnerChangePreparation,
   ): void {
+    const resetResult = this.sessionRuntimeReset.resetAll('owner-change');
+    if (!resetResult.ok) {
+      throw new AggregateError(
+        resetResult.failures.map(failure => failure.error),
+        `Owner transition blocked by session runtime reset failures: ${resetResult.failures
+          .map(failure => failure.owner)
+          .join(', ')}`,
+      );
+    }
+    if (context.isUserChange) {
+      resetFocusState({ cleanupTodayDateInterval: context.userId === null });
+    }
+
     if (this.shouldClearActiveProjectForOwnerChange(context, preparation)) {
       this.projectState.setActiveProjectId(null);
     }
 
     if (this.shouldClearProjectsForOwnerChange(context, preparation)) {
-      this.projectState.setProjects([]);
+      this.projectState.clearData();
       this.clearStartupProjectCatalogState();
     }
 
@@ -261,7 +278,6 @@ export abstract class UserSessionLayer1 extends UserSessionBase {
     if (context.isUserChange && context.previousUserId !== null) {
       this.changeTracker.clearAllChanges();
       this.uiState.clearAllState();
-      resetFocusState();
     }
     this.undoService.clearHistory();
     this.syncCoordinator.clearActiveConflict();
@@ -269,33 +285,36 @@ export abstract class UserSessionLayer1 extends UserSessionBase {
   }
 
 
-  protected reloadCurrentOwnerQueues(skipPersistentReload: boolean): void {
+  protected async reloadCurrentOwnerQueues(skipPersistentReload: boolean): Promise<void> {
     if (skipPersistentReload) {
-      this.runCurrentOwnerQueuePhase(
+      await this.runCurrentOwnerQueuePhase(
         () => this.actionQueue.clearCurrentView(),
         '清理 ActionQueue 当前队列视图失败，静默继续',
       );
-      this.runCurrentOwnerQueuePhase(
+      await this.runCurrentOwnerQueuePhase(
         () => this.retryQueue.clearCurrentView(),
         '清理 RetryQueue 当前队列视图失败，静默继续',
       );
       return;
     }
 
-    this.runCurrentOwnerQueuePhase(
+    await this.runCurrentOwnerQueuePhase(
       () => this.actionQueue.reloadFromStorageForCurrentOwner(),
       '重新加载 ActionQueue 持久化队列失败，静默继续',
     );
-    this.runCurrentOwnerQueuePhase(
+    await this.runCurrentOwnerQueuePhase(
       () => this.retryQueue.reloadFromStorageForCurrentOwner(),
       '重新加载 RetryQueue 持久化队列失败，静默继续',
     );
   }
 
 
-  private runCurrentOwnerQueuePhase(phase: () => void, warnMessage: string): void {
+  private async runCurrentOwnerQueuePhase(
+    phase: () => void | Promise<void>,
+    warnMessage: string,
+  ): Promise<void> {
     try {
-      phase();
+      await phase();
     } catch (queueReloadError) {
       this.warnUserSessionLifecycleSafely(warnMessage, queueReloadError);
     }
@@ -434,11 +453,12 @@ export abstract class UserSessionLayer1 extends UserSessionBase {
   /** 清空本地数据（内存状态），完整登出用 clearAllLocalData() */
   clearLocalData(): void {
     this.invalidateSessionRequestGeneration('clearLocalData');
+    this.sessionRuntimeReset.resetAll('clear-local-data');
     this.projectState.clearData();
     this.uiState.clearAllState();
     this.undoService.clearHistory();
     this.changeTracker.clearAllChanges();
-    resetFocusState();
+    resetFocusState({ cleanupTodayDateInterval: true });
     this.syncCoordinator.clearOfflineCache();
     this.syncCoordinator.clearActiveConflict();
     this.clearStartupProjectCatalogState();
@@ -463,7 +483,7 @@ export abstract class UserSessionLayer1 extends UserSessionBase {
 
   protected async clearFullWipeMemoryAndQueueState(): Promise<void> {
     this.clearLocalData();
-    this.actionQueue.clearQueue();
+    this.actionQueue.clearQueueForFullWipe();
     this.actionQueue.clearDeadLetterQueue();
     this.retryQueue.clear();
     await this.retryQueue.closeStorageConnections();
@@ -491,24 +511,6 @@ export abstract class UserSessionLayer1 extends UserSessionBase {
   }
 
 
-  protected clearSupabaseLocalSessionArtifacts(): void {
-    if (typeof localStorage === 'undefined') {
-      return;
-    }
-
-    const storageKey = this.supabase.getStorageKey();
-    if (!storageKey) {
-      return;
-    }
-
-    try {
-      localStorage.removeItem(storageKey);
-    } catch (e) {
-      this.logger.warn('清理 Supabase 本地凭证失败', e);
-    }
-  }
-
-
   protected clearStartupWindowArtifacts(): void {
     if (typeof window === 'undefined') {
       return;
@@ -524,7 +526,6 @@ export abstract class UserSessionLayer1 extends UserSessionBase {
 
 
   protected async clearSupabaseSessionArtifacts(): Promise<void> {
-    this.clearSupabaseLocalSessionArtifacts();
     this.clearStartupWindowArtifacts();
   }
 

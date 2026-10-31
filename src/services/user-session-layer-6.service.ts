@@ -4,6 +4,7 @@ import { AUTH_CONFIG } from '../config/auth.config';
 import { UserSessionLayer5 } from './user-session-layer-5.service';
 import { type SessionGuardContext, type SetCurrentUserContext, type SetCurrentUserOptions } from './user-session-base.service';
 import { LocalBackupUiRestoreStartupRecoveryService } from './local-backup-ui-restore-startup-recovery.service';
+import { getAuthOwnerTransition } from './auth-owner-transition.controller';
 
 export abstract class UserSessionLayer6 extends UserSessionLayer5 {
   private readonly localBackupUiRestoreStartupRecovery = inject(
@@ -100,9 +101,13 @@ export abstract class UserSessionLayer6 extends UserSessionLayer5 {
     sessionGuard: SessionGuardContext,
   ): Promise<boolean> {
     if (!context.userId) return true;
-    if (this.shouldAbortStaleSession(sessionGuard, 'setCurrentUser:before-data-safety-recovery')) return false;
+    if (this.shouldAbortStaleSession(sessionGuard, 'setCurrentUser:before-data-safety-recovery')) {
+      return false;
+    }
 
-    const localBackupRecovery = await this.localBackupUiRestoreStartupRecovery.recover(context.userId);
+    const localBackupRecovery = await this.localBackupUiRestoreStartupRecovery.recover(
+      context.userId,
+    );
     if (localBackupRecovery.status === 'blocked') {
       this.logger.warn('本地备份还原启动恢复被阻止，保留标记并停止加载本地数据', {
         ownerUserId: context.userId,
@@ -136,34 +141,51 @@ export abstract class UserSessionLayer6 extends UserSessionLayer5 {
    * @param opts.preserveOfflineSnapshot 仅清理内存视图，不清空旧 owner 的离线快照桶。
    */
   async setCurrentUser(userId: string | null, opts?: SetCurrentUserOptions): Promise<void> {
-    const sessionGuard = this.createSessionGuard(userId);
-    const context = this.createSetCurrentUserContext(userId, opts);
+    const ownerTransitionController = getAuthOwnerTransition(this.authService);
+    const ownerTransition = ownerTransitionController.capture(userId);
+    try {
+      const sessionGuard = this.createSessionGuard(userId);
+      const context = this.createSetCurrentUserContext(userId, opts);
 
-    this.logSetCurrentUserContext(context);
-    this.resetSessionAccessStateIfNeeded(context);
+      this.logSetCurrentUserContext(context);
+      this.resetSessionAccessStateIfNeeded(context);
 
-    if (this.shouldPrepareOwnerChange(context)) {
-      const preparation = await this.prepareOwnerChange(context, sessionGuard);
-      if (!preparation) return;
-      this.applyOwnerChangeCleanup(context, preparation);
-    }
+      let applyOwnerChangeCleanup: () => void = () => undefined;
+      if (this.shouldPrepareOwnerChange(context)) {
+        const preparation = await this.prepareOwnerChange(context, sessionGuard);
+        if (!preparation) return;
+        if (this.shouldAbortStaleSessionGeneration(sessionGuard, 'setCurrentUser:after-owner-change-prepare')) {
+          return;
+        }
+        applyOwnerChangeCleanup = () => this.applyOwnerChangeCleanup(context, preparation);
+      }
 
-    this.authService.currentUserId.set(userId);
-    if (this.shouldAbortStaleSession(sessionGuard, 'setCurrentUser:after-auth-set')) return;
+      const ownerCommit = ownerTransitionController.commit(
+        ownerTransition,
+        applyOwnerChangeCleanup,
+      );
+      if (ownerCommit.status === 'stale') return;
+      if (this.shouldAbortStaleSession(sessionGuard, 'setCurrentUser:after-auth-set')) return;
 
-    if (context.skipPersistentReload) {
-      this.reloadCurrentOwnerQueues(context.skipPersistentReload);
+      if (context.skipPersistentReload) {
+        await this.reloadCurrentOwnerQueues(context.skipPersistentReload);
+        await this.refreshConflictCountQuietly();
+        return;
+      }
+
+      const mayLoadLocalData = await this.recoverInterruptedDataSafetyRestoreForCurrentUser(
+        context,
+        sessionGuard,
+      );
+      if (!mayLoadLocalData
+        || this.shouldAbortStaleSession(sessionGuard, 'setCurrentUser:after-data-safety-recovery')) return;
+
+      await this.reloadCurrentOwnerQueues(context.skipPersistentReload);
       await this.refreshConflictCountQuietly();
-      return;
+
+      await this.loadSessionDataForCurrentUser(context, sessionGuard);
+    } finally {
+      ownerTransitionController.discard(ownerTransition);
     }
-
-    const mayLoadLocalData = await this.recoverInterruptedDataSafetyRestoreForCurrentUser(context, sessionGuard);
-    if (!mayLoadLocalData
-      || this.shouldAbortStaleSession(sessionGuard, 'setCurrentUser:after-data-safety-recovery')) return;
-
-    this.reloadCurrentOwnerQueues(context.skipPersistentReload);
-    await this.refreshConflictCountQuietly();
-
-    await this.loadSessionDataForCurrentUser(context, sessionGuard);
   }
 }
