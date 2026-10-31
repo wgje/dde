@@ -10,7 +10,7 @@
  * 从 SimpleSyncService 抽离（技术债务清理 2026-05-13）
  */
 
-import { Injectable, inject, DestroyRef } from '@angular/core';
+import { Injectable, inject, DestroyRef, Injector } from '@angular/core';
 import { SupabaseClientService, type SupabaseConnectivityChange } from '../../../../services/supabase-client.service';
 import { LoggerService } from '../../../../services/logger.service';
 import { SYNC_CONFIG } from '../../../../config/sync.config';
@@ -23,6 +23,7 @@ import { BlackBoxSyncService } from '../../../../services/black-box-sync.service
 import { WidgetBindingService } from '../../../../services/widget-binding.service';
 import { AttachmentCleanupOutboxService } from '../../../../services/attachment-cleanup-outbox.service';
 import { DockDirectWidgetNotifyOutboxService } from '../../../../services/dock-direct-widget-notify-outbox.service';
+import { ActionQueueAttachmentProcessorsService } from '../../../../services/action-queue-attachment-processors.service';
 import {
   getRemainingBrowserNetworkResumeDelayMs,
   isBrowserNetworkSuspendedWindow,
@@ -48,6 +49,7 @@ export class ConnectivityRecoveryService {
   private readonly widgetBinding = inject(WidgetBindingService);
   private readonly attachmentCleanupOutbox = inject(AttachmentCleanupOutboxService);
   private readonly directWidgetNotifyOutbox = inject(DockDirectWidgetNotifyOutboxService);
+  private readonly injector = inject(Injector);
   private readonly destroyRef = inject(DestroyRef);
 
   private connectivityRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -159,7 +161,8 @@ export class ConnectivityRecoveryService {
   async probeRemoteReachability(
     reason: string,
     timeoutMs: number = SYNC_CONFIG.CONNECTIVITY_PROBE_TIMEOUT,
-    force = true
+    force = true,
+    shouldContinue: () => boolean = () => true,
   ): Promise<boolean> {
     if (isBrowserNetworkSuspendedWindow()) {
       const delayMs = Math.max(100, getRemainingBrowserNetworkResumeDelayMs() + 50);
@@ -167,7 +170,7 @@ export class ConnectivityRecoveryService {
         reason,
         delayMs,
       });
-      this.scheduleConnectivityRecovery(`${reason}:network-suspended`, delayMs);
+      if (shouldContinue()) this.scheduleConnectivityRecovery(`${reason}:network-suspended`, delayMs);
       return false;
     }
 
@@ -175,23 +178,28 @@ export class ConnectivityRecoveryService {
     try {
       reachable = await this.supabase.probeReachability({ timeoutMs, force });
     } catch (error) {
+      await this.suspendRealtimeTransportSafely(
+        reason, 'Realtime 传输挂起失败，继续连接恢复流程', shouldContinue);
+      if (!shouldContinue()) return false;
       this.consecutiveProbeFailureCount += 1;
       this.logger.warn('Supabase 远端可达性探测失败，保持连接恢复重试', { reason, error });
       this.syncStateService.setOfflineMode(true);
-      await this.suspendRealtimeTransportSafely(reason, 'Realtime 传输挂起失败，继续连接恢复流程');
       this.scheduleConnectivityRecovery(reason, this.nextProbeRetryDelayMs());
       return false;
     }
 
-    this.syncStateService.setOfflineMode(!reachable);
-
     if (!reachable) {
+      await this.suspendRealtimeTransportSafely(
+        reason, 'Realtime 传输挂起失败，继续连接恢复流程', shouldContinue);
+      if (!shouldContinue()) return false;
       this.consecutiveProbeFailureCount += 1;
+      this.syncStateService.setOfflineMode(true);
       this.logger.info('Supabase 远端暂不可达，保持连接中断模式', { reason });
-      await this.suspendRealtimeTransportSafely(reason, 'Realtime 传输挂起失败，继续连接恢复流程');
       return false;
     }
 
+    if (!shouldContinue()) return false;
+    this.syncStateService.setOfflineMode(false);
     this.consecutiveProbeFailureCount = 0;
     return true;
   }
@@ -199,7 +207,10 @@ export class ConnectivityRecoveryService {
   /**
    * 确保连接恢复会话就绪
    */
-  private async ensureConnectivityRecoverySessionReady(reason: string): Promise<boolean> {
+  private async ensureConnectivityRecoverySessionReady(
+    reason: string,
+    shouldContinue: () => boolean = () => true,
+  ): Promise<boolean> {
     const sessionSnapshot = FEATURE_FLAGS.RESUME_SESSION_SNAPSHOT_V1
       ? this.sessionManager.getRecentValidationSnapshot(10_000)
       : null;
@@ -212,11 +223,13 @@ export class ConnectivityRecoveryService {
     try {
       session = await this.sessionManager.validateOrRefreshOnResume(`connectivity:${reason}`);
     } catch (error) {
+      if (!shouldContinue()) return false;
       this.logger.warn('连接恢复会话校验失败，保持连接恢复重试', { reason, error });
       this.scheduleConnectivityRecovery(reason, SYNC_CONFIG.CONNECTIVITY_PROBE_INTERVAL);
       return false;
     }
 
+    if (!shouldContinue()) return false;
     if (session.deferred) {
       const delayMs = Math.max(100, getRemainingBrowserNetworkResumeDelayMs() + 50);
       this.scheduleConnectivityRecovery(`${reason}:session-deferred`, delayMs);
@@ -335,6 +348,18 @@ export class ConnectivityRecoveryService {
     return true;
   }
 
+  async flushAttachmentCleanupOutboxAfterResume(
+    reason: string,
+    shouldContinue: () => boolean = () => true,
+  ): Promise<void> {
+    await this.flushAttachmentCleanupOutboxForCurrentOwner({
+      reason,
+      shouldContinue,
+      missingOwnerMessage: '页面恢复后附件清理队列缺少已验证 owner，已跳过本次同步',
+      failureMessage: '页面恢复后附件清理队列同步失败',
+    });
+  }
+
   /**
    * 恢复远端连接
    */
@@ -385,7 +410,8 @@ export class ConnectivityRecoveryService {
     });
 
     if (this.supabase.isOfflineMode()) {
-      const reachable = await this.probeRemoteReachability(reason, SYNC_CONFIG.CONNECTIVITY_PROBE_TIMEOUT, true);
+      const reachable = await this.probeRemoteReachability(
+        reason, SYNC_CONFIG.CONNECTIVITY_PROBE_TIMEOUT, true, shouldContinue);
       remoteProbeCompleted = true;
       if (!shouldContinue()) {
         return;
@@ -397,7 +423,7 @@ export class ConnectivityRecoveryService {
       }
     }
 
-    const sessionReady = await this.ensureConnectivityRecoverySessionReady(reason);
+    const sessionReady = await this.ensureConnectivityRecoverySessionReady(reason, shouldContinue);
     if (!shouldContinue()) {
       return;
     }
@@ -407,7 +433,8 @@ export class ConnectivityRecoveryService {
     }
 
     if (!remoteProbeCompleted) {
-      const reachable = await this.probeRemoteReachability(reason, SYNC_CONFIG.CONNECTIVITY_PROBE_TIMEOUT, true);
+      const reachable = await this.probeRemoteReachability(
+        reason, SYNC_CONFIG.CONNECTIVITY_PROBE_TIMEOUT, true, shouldContinue);
       if (!shouldContinue()) {
         return;
       }
@@ -421,6 +448,7 @@ export class ConnectivityRecoveryService {
     try {
       await this.realtimePollingService.resumeTransport();
     } catch (error) {
+      if (!shouldContinue()) return;
       this.logger.warn('Realtime 传输恢复失败，保持连接恢复重试', { reason, error });
       this.scheduleConnectivityRecovery(reason, SYNC_CONFIG.CONNECTIVITY_PROBE_INTERVAL);
       return;
@@ -441,6 +469,7 @@ export class ConnectivityRecoveryService {
         this.realtimePollingService.resumeRealtimeUpdates();
       },
     );
+    this.reconcileAttachmentUploadOutboxAfterConnectivityRestore(reason);
 
     if (this.retryQueueService.length > 0) {
       this.processRetryQueueAfterConnectivityRestore(reason);
@@ -514,27 +543,36 @@ export class ConnectivityRecoveryService {
     );
   }
 
+  private reconcileAttachmentUploadOutboxAfterConnectivityRestore(reason: string): void {
+    this.runConnectivityRestoreFanOutStep(
+      reason,
+      '远端连接恢复后附件上传 Outbox 补队列失败',
+      () => {
+        const attachmentActionProcessors = this.getAttachmentActionProcessors();
+        if (!attachmentActionProcessors) {
+          return;
+        }
+
+        void attachmentActionProcessors.reconcilePendingUploads('connectivity-restore').catch((error: unknown) => {
+          this.logger.warn('远端连接恢复后附件上传 Outbox 补队列失败', {
+            reason,
+            error,
+          });
+        });
+      },
+    );
+  }
+
   private flushAttachmentCleanupOutboxAfterConnectivityRestore(reason: string): void {
     this.runConnectivityRestoreFanOutStep(
       reason,
       '远端连接恢复后附件清理队列同步失败',
       () => {
-        void this.supabase.clientAsync()
-          .then(client => this.attachmentCleanupOutbox.flushPendingCleanups(client))
-          .then((result) => {
-            if (!result.ok) {
-              this.logger.warn('远端连接恢复后附件清理队列同步失败', {
-                reason,
-                error: result.errors.join('; ') || 'unknown attachment cleanup sync failure',
-              });
-            }
-          })
-          .catch((error: unknown) => {
-            this.logger.warn('远端连接恢复后附件清理队列同步失败', {
-              reason,
-              error,
-            });
-          });
+        void this.flushAttachmentCleanupOutboxForCurrentOwner({
+          reason,
+          missingOwnerMessage: '远端连接恢复后附件清理队列缺少已验证 owner，已跳过本次同步',
+          failureMessage: '远端连接恢复后附件清理队列同步失败',
+        });
       },
     );
   }
@@ -579,11 +617,55 @@ export class ConnectivityRecoveryService {
     );
   }
 
-  private async suspendRealtimeTransportSafely(reason: string, failureMessage: string): Promise<void> {
+  private async flushAttachmentCleanupOutboxForCurrentOwner(options: {
+    reason: string;
+    shouldContinue?: () => boolean;
+    missingOwnerMessage: string;
+    failureMessage: string;
+  }): Promise<void> {
+    const shouldContinue = options.shouldContinue ?? (() => true);
+    if (!shouldContinue()) return;
+
+    const ownerUserId = this.getRecentValidatedOwnerUserId();
+    if (!ownerUserId) {
+      if (shouldContinue()) this.logger.warn(options.missingOwnerMessage, { reason: options.reason });
+      return;
+    }
+
+    try {
+      const client = await this.supabase.clientAsync();
+      if (!shouldContinue() || this.getRecentValidatedOwnerUserId() !== ownerUserId) return;
+
+      const result = await this.attachmentCleanupOutbox.flushPendingCleanups(
+        client,
+        { ownerUserId },
+      );
+      if (!shouldContinue() || this.getRecentValidatedOwnerUserId() !== ownerUserId) return;
+
+      if (!result.ok) {
+        this.logger.warn(options.failureMessage, {
+          reason: options.reason,
+          error: result.errors.join('; ') || 'unknown attachment cleanup sync failure',
+        });
+      }
+    } catch (error) {
+      if (!shouldContinue()) return;
+      this.logger.warn(options.failureMessage, {
+        reason: options.reason,
+        error,
+      });
+    }
+  }
+
+  private async suspendRealtimeTransportSafely(
+    reason: string,
+    failureMessage: string,
+    shouldContinue: () => boolean = () => true,
+  ): Promise<void> {
     try {
       await this.realtimePollingService.suspendTransport();
     } catch (error) {
-      this.logger.warn(failureMessage, { reason, error });
+      if (shouldContinue()) this.logger.warn(failureMessage, { reason, error });
     }
   }
 
@@ -597,5 +679,14 @@ export class ConnectivityRecoveryService {
     } catch (error) {
       this.logger.warn(failureMessage, { reason, error });
     }
+  }
+
+  private getAttachmentActionProcessors(): ActionQueueAttachmentProcessorsService | null {
+    return this.injector.get(ActionQueueAttachmentProcessorsService, null);
+  }
+
+  private getRecentValidatedOwnerUserId(): string | undefined {
+    const sessionSnapshot = this.sessionManager.getRecentValidationSnapshot(10_000);
+    return sessionSnapshot?.valid ? sessionSnapshot.userId : undefined;
   }
 }

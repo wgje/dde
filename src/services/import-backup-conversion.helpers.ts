@@ -21,8 +21,17 @@ import type {
   ExportTask,
 } from './export.service';
 
+export * from './import-backup-data-safety-metadata.helpers';
+
+export interface BackupRestoreCheckpointOptions {
+  checkpoint?: () => Promise<void>;
+  runWrite?<T>(write: () => Promise<T>): Promise<T>;
+}
+
 export function convertBackupDataToExportData(backup: BackupData): ExportData | null {
   try {
+    preflightAttachmentUploadOutboxFromBackup(backup);
+    decodeConflictsFromBackup(backup);
     const tasksByProject = groupBackupTasksByProject(backup.tasks ?? []);
     const connectionsByProject = groupBackupConnectionsByProject(backup.connections ?? []);
     const projects = buildExportProjects(backup, tasksByProject, connectionsByProject);
@@ -39,30 +48,68 @@ export function convertBackupDataToExportData(backup: BackupData): ExportData | 
 export async function restoreAttachmentUploadOutboxFromBackup(
   backup: BackupData,
   uploadOutbox: {
-    savePendingUpload(input: SavePendingAttachmentUploadInput): Promise<void>;
+    savePendingUpload(
+      input: SavePendingAttachmentUploadInput,
+      options?: { restoreWriterContinuation?: boolean },
+    ): Promise<void>;
   },
+  options: BackupRestoreCheckpointOptions = {},
 ): Promise<number> {
-  const pendingUploads = backup.localState?.attachmentUploadOutbox ?? [];
+  const pendingUploads = decodeAttachmentUploadOutboxFromBackup(backup);
+  return savePreparedAttachmentUploads(pendingUploads, uploadOutbox, options);
+}
+
+export async function restoreAttachmentUploadOutboxItems(
+  pendingUploads: readonly (
+    BackupPendingAttachmentUpload & { ownerUserId: string; operationId: string }
+  )[],
+  uploadOutbox: {
+    savePendingUpload(
+      input: SavePendingAttachmentUploadInput,
+      options?: { restoreWriterContinuation?: boolean },
+    ): Promise<void>;
+  },
+  options: BackupRestoreCheckpointOptions = {},
+): Promise<number> {
+  const preparedUploads = prepareAttachmentUploadItems(pendingUploads);
+  return savePreparedAttachmentUploads(preparedUploads, uploadOutbox, options);
+}
+
+async function savePreparedAttachmentUploads(
+  pendingUploads: readonly SavePendingAttachmentUploadInput[],
+  uploadOutbox: {
+    savePendingUpload(
+      input: SavePendingAttachmentUploadInput,
+      options?: { restoreWriterContinuation?: boolean },
+    ): Promise<void>;
+  },
+  options: BackupRestoreCheckpointOptions,
+): Promise<number> {
   let restoredCount = 0;
 
   for (const pendingUpload of pendingUploads) {
-    if (!isRestorableAttachmentUpload(pendingUpload)) {
-      continue;
-    }
-
-    await uploadOutbox.savePendingUpload({
-      attachmentId: pendingUpload.attachmentId,
-      blobKey: pendingUpload.blobKey,
-      fileName: pendingUpload.fileName,
-      mimeType: pendingUpload.mimeType,
-      size: pendingUpload.size,
-      createdAt: pendingUpload.createdAt,
-      blob: base64ToBlob(pendingUpload.blobBase64, pendingUpload.mimeType),
+    await options.checkpoint?.();
+    const write = () => uploadOutbox.savePendingUpload(pendingUpload, {
+      restoreWriterContinuation: options.runWrite !== undefined,
     });
+    if (options.runWrite) await options.runWrite(write);
+    else await write();
+    await options.checkpoint?.();
     restoredCount += 1;
   }
 
   return restoredCount;
+}
+
+export function countRestorableAttachmentUploadsFromBackup(backup: BackupData): number {
+  return decodeAttachmentUploadOutboxFromBackup(backup).length;
+}
+
+export function preflightAttachmentUploadOutboxFromBackup(
+  backup: BackupData,
+  expectedOwnerUserId?: string,
+): void {
+  decodeAttachmentUploadOutboxFromBackup(backup, expectedOwnerUserId);
 }
 
 export async function restoreActionQueueFromBackup(
@@ -77,6 +124,7 @@ export async function restoreActionQueueFromBackup(
       ) => QueuedAction[],
     ): Promise<QueuedAction[] | null>;
   },
+  options: BackupRestoreCheckpointOptions = {},
 ): Promise<number> {
   const restoredQueue = extractBackupActionQueueActions(backup.localState?.actionQueue);
   if (restoredQueue.length === 0) {
@@ -84,11 +132,13 @@ export async function restoreActionQueueFromBackup(
   }
 
   let restoredCount = 0;
+  await options.checkpoint?.();
   await queueBackup.updateQueue(ownerUserId, (currentQueue) => {
     const merged = mergeRestoredQueuedActions(currentQueue, restoredQueue);
     restoredCount = merged.restoredCount;
     return merged.queue;
   });
+  await options.checkpoint?.();
   return restoredCount;
 }
 
@@ -98,13 +148,17 @@ export async function restoreRetryQueueFromBackup(
   retryQueue: {
     restoreFromBackupItems(items: unknown[], ownerUserId: string): Promise<number>;
   },
+  options: BackupRestoreCheckpointOptions = {},
 ): Promise<number> {
   const pendingRetryItems = backup.localState?.retryQueue;
   if (!Array.isArray(pendingRetryItems) || pendingRetryItems.length === 0) {
     return 0;
   }
 
-  return retryQueue.restoreFromBackupItems(pendingRetryItems, ownerUserId);
+  await options.checkpoint?.();
+  const restoredCount = await retryQueue.restoreFromBackupItems(pendingRetryItems, ownerUserId);
+  await options.checkpoint?.();
+  return restoredCount;
 }
 
 export function restoreDeadLettersFromBackup(
@@ -126,45 +180,189 @@ export async function restoreConflictsFromBackup(
   backup: BackupData,
   ownerUserId: string,
   conflictStorage: {
-    saveConflict(record: ConflictRecord): Promise<boolean>;
+    saveConflict(
+      record: ConflictRecord,
+      options?: { restoreWriterContinuation?: boolean },
+    ): Promise<boolean>;
   },
+  options: BackupRestoreCheckpointOptions = {},
 ): Promise<number> {
-  const conflicts = backup.localState?.conflicts;
-  if (!Array.isArray(conflicts) || conflicts.length === 0) {
-    return 0;
-  }
+  const conflicts = decodeConflictsFromBackup(backup, ownerUserId);
 
   let restoredCount = 0;
   for (const conflict of conflicts) {
-    if (!isRestorableConflictRecord(conflict, ownerUserId)) {
-      continue;
-    }
-
-    const saved = await conflictStorage.saveConflict({
-      ...conflict,
-      ownerUserId,
+    await options.checkpoint?.();
+    const write = () => conflictStorage.saveConflict(conflict, {
+      restoreWriterContinuation: options.runWrite !== undefined,
     });
-    if (saved) {
-      restoredCount += 1;
+    const saved = options.runWrite ? await options.runWrite(write) : await write();
+    await options.checkpoint?.();
+    if (!saved) {
+      throw invalidConflictRestore(`failed to persist ${conflict.projectId}`);
     }
+    restoredCount += 1;
   }
 
   return restoredCount;
 }
 
-function isRestorableAttachmentUpload(
-  upload: BackupPendingAttachmentUpload,
-): upload is BackupPendingAttachmentUpload {
-  return upload.encoding === 'base64'
-    && !!upload.attachmentId
-    && !!upload.blobKey
-    && !!upload.fileName
-    && !!upload.mimeType
-    && Number.isFinite(upload.size)
-    && typeof upload.blobBase64 === 'string';
+export function decodeConflictsFromBackup(
+  backup: BackupData,
+  expectedOwnerUserId?: string,
+): ConflictRecord[] {
+  const conflicts = backup.localState?.conflicts as unknown;
+  if (conflicts === undefined || (Array.isArray(conflicts) && conflicts.length === 0)) return [];
+  if (!Array.isArray(conflicts)) throw invalidConflictRestore('expected an array');
+
+  const candidates = conflicts.map((candidate, index) => ({
+    candidate,
+    ownerUserId: readConflictOwner(candidate, index),
+  }));
+  const ownerUserId = resolveConflictBackupOwner(backup, candidates.map(item => item.ownerUserId));
+  if (expectedOwnerUserId !== undefined && ownerUserId !== expectedOwnerUserId) {
+    throw invalidConflictRestore('owner does not match the active restore');
+  }
+  assertConflictProjectOwner(backup, ownerUserId);
+
+  const identities = new Set<string>();
+  return candidates.map(({ candidate }, index) => {
+    if (!isRestorableConflictRecord(candidate, ownerUserId)) {
+      throw invalidConflictRestore(`row ${index} is malformed or foreign`);
+    }
+    const identity = JSON.stringify([ownerUserId, candidate.projectId]);
+    if (identities.has(identity)) throw invalidConflictRestore('duplicate storage identity');
+    identities.add(identity);
+    return candidate;
+  });
 }
 
-function isRestorableConflictRecord(
+function readConflictOwner(candidate: unknown, index: number): string {
+  if (!isUnknownRecord(candidate) || !isNonBlankString(candidate['ownerUserId'])) {
+    throw invalidConflictRestore(`row ${index} owner is missing`);
+  }
+  return candidate['ownerUserId'];
+}
+
+function resolveConflictBackupOwner(backup: BackupData, rowOwners: readonly string[]): string {
+  const dataSafety = backup.localState?.dataSafety as unknown;
+  if (dataSafety !== undefined && !isUnknownRecord(dataSafety)) {
+    throw invalidConflictRestore('package owner evidence is malformed');
+  }
+  const hasPackageOwner = isUnknownRecord(dataSafety)
+    && Object.prototype.hasOwnProperty.call(dataSafety, 'ownerUserId');
+  let packageOwnerUserId: string | undefined;
+  if (hasPackageOwner) {
+    const ownerValue = dataSafety['ownerUserId'];
+    if (!isNonBlankString(ownerValue)) {
+      throw invalidConflictRestore('package owner is empty or malformed');
+    }
+    packageOwnerUserId = ownerValue;
+  }
+  const uniqueRowOwners = new Set(rowOwners);
+  const resolvedOwnerUserId = hasPackageOwner
+    ? packageOwnerUserId
+    : uniqueRowOwners.size === 1 ? rowOwners[0] : undefined;
+  if (!resolvedOwnerUserId || uniqueRowOwners.size !== 1
+    || uniqueRowOwners.values().next().value !== resolvedOwnerUserId) {
+    throw invalidConflictRestore('owner evidence is missing or ambiguous');
+  }
+  return resolvedOwnerUserId;
+}
+
+function assertConflictProjectOwner(backup: BackupData, ownerUserId: string): void {
+  const projectOwners = Array.isArray(backup.projects)
+    ? backup.projects.map(project => project.userId)
+    : [];
+  const uniqueProjectOwners = new Set(projectOwners);
+  if (projectOwners.length === 0
+    || projectOwners.some(projectOwner => !isNonBlankString(projectOwner))
+    || uniqueProjectOwners.size !== 1
+    || uniqueProjectOwners.values().next().value !== ownerUserId) {
+    throw invalidConflictRestore('project owner evidence is missing, ambiguous, or mismatched');
+  }
+}
+
+function isNonBlankString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function invalidConflictRestore(reason: string): Error {
+  return new Error(`conflict restore payload is invalid: ${reason}`);
+}
+
+function decodeAttachmentUploadOutboxFromBackup(
+  backup: BackupData,
+  expectedOwnerUserId?: string,
+): SavePendingAttachmentUploadInput[] {
+  const pendingUploads = backup.localState?.attachmentUploadOutbox as unknown;
+  if (pendingUploads === undefined || (Array.isArray(pendingUploads) && pendingUploads.length === 0)) {
+    return [];
+  }
+  if (!Array.isArray(pendingUploads)) throw invalidAttachmentUploadOutbox('expected an array');
+  const ownerUserId = backup.localState?.dataSafety?.ownerUserId;
+  if (!isNonEmptyString(ownerUserId)
+    || (expectedOwnerUserId !== undefined && ownerUserId !== expectedOwnerUserId)) {
+    throw invalidAttachmentUploadOutbox('owner is missing or mismatched');
+  }
+  return prepareAttachmentUploadItems(pendingUploads, ownerUserId);
+}
+
+function prepareAttachmentUploadItems(
+  pendingUploads: readonly unknown[],
+  expectedOwnerUserId?: string,
+): SavePendingAttachmentUploadInput[] {
+  const identities = new Set<string>();
+  return pendingUploads.map((candidate, index) => {
+    if (!isUnknownRecord(candidate)) throw invalidAttachmentUploadOutbox(`row ${index} is malformed`);
+    const ownerUserId = candidate['ownerUserId'];
+    const operationId = candidate['operationId'];
+    const attachmentId = candidate['attachmentId'];
+    const blobKey = candidate['blobKey'];
+    const fileName = candidate['fileName'];
+    const mimeType = candidate['mimeType'];
+    const size = candidate['size'];
+    const createdAt = candidate['createdAt'];
+    const blobBase64 = candidate['blobBase64'];
+    if (!isNonEmptyString(ownerUserId)
+      || (expectedOwnerUserId !== undefined && ownerUserId !== expectedOwnerUserId)
+      || !isNonEmptyString(operationId)
+      || !isNonEmptyString(attachmentId)
+      || !isNonEmptyString(blobKey)
+      || !isNonEmptyString(fileName)
+      || typeof mimeType !== 'string'
+      || typeof size !== 'number' || !Number.isInteger(size) || size < 0
+      || !isNonEmptyString(createdAt)
+      || candidate['encoding'] !== 'base64'
+      || typeof blobBase64 !== 'string') {
+      throw invalidAttachmentUploadOutbox(`row ${index} is malformed`);
+    }
+    const identity = JSON.stringify([ownerUserId, blobKey, operationId]);
+    if (identities.has(identity)) throw invalidAttachmentUploadOutbox('duplicate storage identity');
+    identities.add(identity);
+    let blob: Blob;
+    try {
+      blob = base64ToBlob(blobBase64, mimeType);
+    } catch {
+      throw invalidAttachmentUploadOutbox(`row ${index} has invalid base64`);
+    }
+    if (blob.size !== size) throw invalidAttachmentUploadOutbox(`row ${index} size does not match bytes`);
+    return { ownerUserId, operationId, attachmentId, blobKey, fileName, mimeType, size, createdAt, blob };
+  });
+}
+
+function isUnknownRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0;
+}
+
+function invalidAttachmentUploadOutbox(reason: string): Error {
+  return new Error(`attachment upload outbox is invalid: ${reason}`);
+}
+
+export function isRestorableConflictRecord(
   conflict: unknown,
   ownerUserId: string,
 ): conflict is ConflictRecord {
@@ -173,23 +371,25 @@ function isRestorableConflictRecord(
   }
 
   const record = conflict as Partial<ConflictRecord>;
-  if (record.ownerUserId && record.ownerUserId !== ownerUserId) {
+  if (record.ownerUserId !== ownerUserId) {
     return false;
   }
 
   return typeof record.projectId === 'string'
     && record.projectId.length > 0
-    && !!record.localProject
-    && typeof record.localProject === 'object'
+    && isRestorableConflictProject(record.localProject, record.projectId)
+    && (record.remoteProject === undefined
+      || isRestorableConflictProject(record.remoteProject, record.projectId))
     && typeof record.conflictedAt === 'string'
     && record.conflictedAt.length > 0
     && typeof record.localVersion === 'number'
-    && typeof record.reason === 'string'
-    && isRestorableOperationConflicts(record.operationConflicts);
+    && isRestorableConflictReason(record.reason)
+    && isRestorableOperationConflicts(record.operationConflicts, record.projectId);
 }
 
 function isRestorableOperationConflicts(
   operationConflicts: ConflictRecord['operationConflicts'],
+  projectId: string,
 ): operationConflicts is OperationConflictRecord[] | undefined {
   if (operationConflicts === undefined) {
     return true;
@@ -199,11 +399,12 @@ function isRestorableOperationConflicts(
     return false;
   }
 
-  return operationConflicts.every(isRestorableOperationConflict);
+  return operationConflicts.every(conflict => isRestorableOperationConflict(conflict, projectId));
 }
 
 function isRestorableOperationConflict(
   conflict: unknown,
+  projectId: string,
 ): conflict is OperationConflictRecord {
   if (!conflict || typeof conflict !== 'object') {
     return false;
@@ -214,16 +415,36 @@ function isRestorableOperationConflict(
     && isRestorableOperationEntityType(record.entityType)
     && typeof record.entityId === 'string'
     && record.entityId.length > 0
-    && typeof record.projectId === 'string'
-    && record.projectId.length > 0
-    && !!record.localEntity
-    && typeof record.localEntity === 'object'
-    && (record.remoteEntity === undefined || typeof record.remoteEntity === 'object')
+    && record.projectId === projectId
+    && isRestorableOperationEntity(record.localEntity, record.entityType)
+    && (record.remoteEntity === undefined
+      || isRestorableOperationEntity(record.remoteEntity, record.entityType))
     && typeof record.message === 'string'
     && record.message.length > 0
     && typeof record.conflictedAt === 'string'
     && record.conflictedAt.length > 0
     && isRestorableOperationReason(record.reason);
+}
+
+function isRestorableConflictProject(value: unknown, projectId: string): boolean {
+  return isUnknownRecord(value)
+    && value['id'] === projectId
+    && Array.isArray(value['tasks'])
+    && Array.isArray(value['connections'])
+    && value['tasks'].every(task => isUnknownRecord(task) && typeof task['content'] === 'string');
+}
+
+function isRestorableOperationEntity(value: unknown, entityType: unknown): boolean {
+  return isUnknownRecord(value)
+    && (entityType !== 'task' || typeof value['content'] === 'string');
+}
+
+function isRestorableConflictReason(reason: unknown): reason is ConflictRecord['reason'] {
+  return reason === 'version_mismatch'
+    || reason === 'concurrent_edit'
+    || reason === 'network_recovery'
+    || reason === 'status_conflict'
+    || reason === 'field_conflict';
 }
 
 function isRestorableOperationActionType(
@@ -310,10 +531,14 @@ function buildBackupExportMetadata(backup: BackupData, projectCount: number): Ex
 }
 
 function toExportTask(task: BackupTask): ExportTask {
+  if (typeof task.content !== 'string') {
+    throw new Error(`Backup task ${task.id || '<unknown>'} is missing required content`);
+  }
+
   return {
     id: task.id,
     title: task.title,
-    content: task.content ?? '',
+    content: task.content,
     stage: task.stage ?? null,
     parentId: task.parentId ?? null,
     order: task.order ?? 0,

@@ -114,6 +114,12 @@ export class AuthService {
 
   /** 当前用户 ID */
   readonly currentUserId = signal<string | null>(null);
+
+  /** Stable owner fence used by local backup restore while the UI is awaiting writes. */
+  captureAuthIdentityFence(): string {
+    return `${this.currentUserId() ?? ''}:${this.pendingStorageBridgeSessionIdentity?.userId ?? ''}`;
+  }
+
   /**
    * 【P1 秒开优化 2026-03-31】临时 userId 预设，用于快照预填充阶段。
    * 仅在 currentUserId 为 null 时生效。checkSession 完成后若为同一用户则为 no-op，

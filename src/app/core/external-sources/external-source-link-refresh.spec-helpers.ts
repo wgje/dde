@@ -7,6 +7,8 @@ import { remoteExternalSourceLinkRow } from './external-source-link.service.spec
 interface ExternalSourceLinkRefreshSpecContext {
   clientAsyncMock: () => ReturnType<typeof vi.fn>;
   getSelectCallCount: () => number;
+  getSelectRangeCallCount: () => number;
+  getSelectCursorValues: () => Array<string | null>;
   getUpsertCallCount: () => number;
   setRemoteRows: (rows: unknown[]) => void;
   setSelectError: (error: Error | null) => void;
@@ -72,6 +74,8 @@ export function registerExternalSourceLinkRefreshSpecs(
     expect(service.firstActiveLinkForTask('task-0')?.id).toBe('remote-0000');
     expect(service.firstActiveLinkForTask('task-1000')?.id).toBe('remote-1000');
     expect(context.getSelectCallCount()).toBe(2);
+    expect(context.getSelectRangeCallCount()).toBe(0);
+    expect(context.getSelectCursorValues()).toEqual([null, 'remote-0999']);
   });
 
   it('refreshIfStale does not push local links when the remote pull fails', async () => {

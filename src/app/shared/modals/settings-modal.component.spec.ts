@@ -19,6 +19,12 @@ import { ExternalSourceCacheService } from '../../core/external-sources/external
 import { SiyuanPreviewService } from '../../core/external-sources/siyuan/siyuan-preview.service';
 import type { Project, Task } from '../../../models';
 import type { AttachmentImportItem } from '../../../services/attachment-import.service';
+import { DisasterBackupService } from '../../../services/disaster-backup.service';
+import { BackupDataSafetyMetadataRestoreService } from '../../../services/backup-data-safety-metadata-restore.service';
+import { SessionRuntimeResetRegistry } from '../../../services/session-runtime-reset.service';
+import {
+  registerSettingsModalSiyuanOwnerGenerationSpecs,
+} from './settings-modal-siyuan-owner-generation.spec-helpers';
 
 describe('SettingsModalComponent', () => {
   let fixture: ComponentFixture<SettingsModalComponent>;
@@ -124,6 +130,15 @@ describe('SettingsModalComponent', () => {
     startAutoBackup: vi.fn(),
   };
 
+  const mockDisasterBackupService = {
+    buildLocalBlob: vi.fn(),
+  };
+
+  const mockMetadataRestoreService = {
+    preview: vi.fn(),
+    restore: vi.fn(),
+  };
+
   const mockExportService = {
     isExporting: signal(false),
     exportAndDownload: vi.fn(),
@@ -219,18 +234,29 @@ describe('SettingsModalComponent', () => {
         { provide: AttachmentExportService, useValue: mockAttachmentExportService },
         { provide: AttachmentImportService, useValue: mockAttachmentImportService },
         { provide: LocalBackupService, useValue: mockLocalBackupService },
+        { provide: DisasterBackupService, useValue: mockDisasterBackupService },
+        { provide: BackupDataSafetyMetadataRestoreService, useValue: mockMetadataRestoreService },
         { provide: ThemeService, useValue: mockThemeService },
         { provide: DockEngineService, useValue: mockDockEngine },
         { provide: FocusPreferenceService, useValue: mockFocusPreferenceService },
         { provide: GateService, useValue: mockGateService },
         { provide: ExternalSourceCacheService, useValue: mockSiyuanCache },
         { provide: SiyuanPreviewService, useValue: mockSiyuanPreview },
+        SessionRuntimeResetRegistry,
       ],
     }).compileComponents();
 
     fixture = TestBed.createComponent(SettingsModalComponent);
     component = fixture.componentInstance;
     fixture.detectChanges();
+  });
+
+  registerSettingsModalSiyuanOwnerGenerationSpecs({
+    component: () => component,
+    currentUserId,
+    destroyFixture: () => fixture.destroy(),
+    mockSiyuanCache,
+    sessionRuntimeReset: () => TestBed.inject(SessionRuntimeResetRegistry),
   });
 
   it('should remove the obsolete backup reminder setting from the UI', () => {
@@ -277,6 +303,12 @@ describe('SettingsModalComponent', () => {
       retryQueue: 3,
       deadLetters: 1,
       conflicts: 1,
+      projectCursors: 1,
+      lastSyncTime: 1,
+      replayLog: 2,
+      lastWriteExplain: 1,
+      taskTombstones: 1,
+      connectionTombstones: 1,
     });
     fixture.detectChanges();
 
@@ -287,6 +319,92 @@ describe('SettingsModalComponent', () => {
     expect(text).toContain('待重试 3');
     expect(text).toContain('失败记录 1');
     expect(text).toContain('冲突副本 1');
+    expect(text).toContain('项目游标 1');
+    expect(text).toContain('写入审计 2');
+    expect(text).toContain('最近写入解释 1');
+    expect(text).toContain('任务删除标记 1');
+    expect(text).toContain('连接删除标记 1');
+  });
+
+  it('should await safe restore without invoking the normal project import callback', async () => {
+    const project = createProject('project-1', []);
+    let releaseRestore!: () => void;
+    const restoreCompletion = new Promise<void>(resolve => {
+      releaseRestore = resolve;
+    });
+    const importProject = vi.fn();
+    (component as unknown as { importProject: () => typeof importProject }).importProject =
+      () => importProject;
+    const confirmRestore = vi.spyOn(component.localBackupUI, 'confirmRestore')
+      .mockReturnValue(restoreCompletion);
+    let settled = false;
+
+    const pending = component.confirmRestore().then(() => { settled = true; });
+    await Promise.resolve();
+
+    expect(confirmRestore).toHaveBeenCalledWith(component.projects());
+    expect(importProject).not.toHaveBeenCalled();
+    expect(settled).toBe(false);
+    releaseRestore();
+    await pending;
+    expect(settled).toBe(true);
+  });
+
+  it('should expose portable data-safety export and file restore without directory API support', async () => {
+    const project = createProject('project-1', []);
+    component.projects = signal([project]) as unknown as typeof component.projects;
+    const download = vi.spyOn(component.localBackupUI, 'handleDownloadDataSafetyPackage')
+      .mockResolvedValue(undefined);
+    const loadFile = vi.spyOn(component.localBackupUI, 'loadRestorePreviewFromFile')
+      .mockResolvedValue(undefined);
+    fixture.detectChanges();
+
+    const exportButton = fixture.nativeElement.querySelector(
+      '[data-testid="settings-data-safety-export"]',
+    ) as HTMLButtonElement | null;
+    const restoreInput = fixture.nativeElement.querySelector(
+      '[data-testid="settings-data-safety-restore-input"]',
+    ) as HTMLInputElement | null;
+
+    expect(exportButton).toBeTruthy();
+    expect(restoreInput).toBeTruthy();
+    exportButton!.click();
+    expect(download).toHaveBeenCalledWith([project]);
+
+    const file = new File(['{}'], 'nanoflow-backup.json', { type: 'application/json' });
+    Object.defineProperty(restoreInput!, 'files', {
+      configurable: true,
+      value: [file],
+    });
+    restoreInput!.dispatchEvent(new Event('change'));
+
+    expect(loadFile).toHaveBeenCalledWith(file, [project]);
+  });
+
+  it('should route a full BackupData file selected through ordinary import into safe restore', async () => {
+    const project = createProject('project-1', []);
+    component.projects = signal([project]) as unknown as typeof component.projects;
+    const loadFile = vi.spyOn(component.localBackupUI, 'loadRestorePreviewFromFile')
+      .mockResolvedValue(undefined);
+    const file = new File([JSON.stringify({
+      payloadVersion: '2.0.0',
+      projects: [{ id: 'project-1', userId: 'user-1' }],
+      tasks: [],
+      connections: [],
+      localState: {},
+    })], 'nanoflow-backup.json', { type: 'application/json' });
+    const event = {
+      target: {
+        files: [file],
+        value: 'nanoflow-backup.json',
+      },
+    } as unknown as Event;
+
+    await component.handleFileSelected(event);
+
+    expect(loadFile).toHaveBeenCalledWith(file, [project]);
+    expect(mockImportService.validateFile).not.toHaveBeenCalled();
+    expect(mockImportService.executeImport).not.toHaveBeenCalled();
   });
 
   it('should keep the black box toggle visible and functional', () => {

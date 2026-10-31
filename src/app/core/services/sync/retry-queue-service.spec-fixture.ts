@@ -58,13 +58,16 @@ export interface RetryQueueServiceSpecHarness {
     setTag: ReturnType<typeof vi.fn>;
     setContext: ReturnType<typeof vi.fn>;
   };
-  destroy: () => void;
+  destroy: () => Promise<void>;
+  teardown: () => Promise<void>;
   setOnline: (value: boolean) => void;
 }
 
 export interface RetryQueueServiceSpecHarnessOptions {
   initDb?: () => Promise<IDBDatabase | null>;
   loadFromStorage?: () => Promise<void>;
+  clearLocalStorage?: boolean;
+  useRealLoadFromStorage?: boolean;
 }
 
 type RetryQueueServiceSpecMocks = Pick<
@@ -87,15 +90,18 @@ export function createRetryQueueServiceSpecHarness(
 ): RetryQueueServiceSpecHarness {
   resetRetryQueueServiceSpecEnvironment();
   resetRetryQueueSpecUuidCache();
-  localStorage.clear();
+  if (options.clearLocalStorage !== false) localStorage.clear();
 
   let online = false;
   const mocks = createRetryQueueServiceSpecMocks();
   const { initDbSpy, loadFromStorageSpy } = createRetryQueueStorageSpies(options);
   const injector = createRetryQueueServiceSpecInjector(mocks);
-  const service = runInInjectionContext(
+  const { service, storageInitializationPromise } = createRetryQueueServiceInstance(injector);
+  const { destroy, teardown } = createRetryQueueDestroyLifecycle(
+    service,
     injector,
-    () => injector.get(RetryQueueService),
+    mocks,
+    storageInitializationPromise,
   );
   const saveToStorageSpy = vi.spyOn(
     service as unknown as { saveToStorage: () => Promise<void> },
@@ -103,10 +109,6 @@ export function createRetryQueueServiceSpecHarness(
   ).mockResolvedValue(undefined);
   const handler = createRetryQueueOperationHandler(() => online);
   service.setOperationHandler(handler);
-  const destroy = () => {
-    (injector as unknown as { destroy?: () => void }).destroy?.();
-    mocks.destroy();
-  };
 
   return {
     service,
@@ -123,9 +125,88 @@ export function createRetryQueueServiceSpecHarness(
     syncWriterLeaseMock: mocks.syncWriterLeaseMock,
     sentryLazyLoaderMock: mocks.sentryLazyLoaderMock,
     destroy,
+    teardown,
     setOnline: (value: boolean) => {
       online = value;
     },
+  };
+}
+
+function createRetryQueueServiceInstance(injector: Injector): {
+  service: RetryQueueService;
+  storageInitializationPromise: Promise<void>;
+} {
+  const storageInitialization = captureRetryQueueStorageInitialization();
+  let service: RetryQueueService;
+  try {
+    service = runInInjectionContext(
+      injector,
+      () => injector.get(RetryQueueService),
+    );
+  } finally {
+    storageInitialization.restore();
+  }
+  return {
+    service,
+    storageInitializationPromise: storageInitialization.promise(),
+  };
+}
+
+function createRetryQueueDestroyLifecycle(
+  service: RetryQueueService,
+  injector: Injector,
+  mocks: RetryQueueServiceSpecMocks,
+  storageInitializationPromise: Promise<void>,
+): Pick<RetryQueueServiceSpecHarness, 'destroy' | 'teardown'> {
+  let destroyFlushPromise: Promise<void> | null = null;
+  const serviceWithDestroyFlush = service as unknown as {
+    flushStorageOnDestroy: () => Promise<void>;
+  };
+  const flushStorageOnDestroy = serviceWithDestroyFlush.flushStorageOnDestroy.bind(service);
+  vi.spyOn(serviceWithDestroyFlush, 'flushStorageOnDestroy').mockImplementation(() => {
+    destroyFlushPromise = flushStorageOnDestroy();
+    return destroyFlushPromise;
+  });
+  let destroyPromise: Promise<void> | null = null;
+  const destroy = () => {
+    if (!destroyPromise) {
+      (injector as unknown as { destroy?: () => void }).destroy?.();
+      mocks.destroy();
+      destroyPromise = Promise.all([
+        storageInitializationPromise,
+        destroyFlushPromise ?? Promise.resolve(),
+      ]).then(() => undefined);
+    }
+    return destroyPromise;
+  };
+  const teardown = () => {
+    if (!destroyPromise) {
+      vi.spyOn(service, 'persistNow').mockResolvedValue(true);
+    }
+    return destroy();
+  };
+
+  return { destroy, teardown };
+}
+
+function captureRetryQueueStorageInitialization(): {
+  promise: () => Promise<void>;
+  restore: () => void;
+} {
+  const prototype = RetryQueueService.prototype as unknown as {
+    initializeStorageLoad: () => Promise<void>;
+  };
+  const initializeStorageLoad = prototype.initializeStorageLoad;
+  let captured: Promise<void> | null = null;
+  const spy = vi.spyOn(prototype, 'initializeStorageLoad').mockImplementation(function (
+    this: RetryQueueService,
+  ) {
+    captured = initializeStorageLoad.call(this);
+    return captured;
+  });
+  return {
+    promise: () => captured ?? Promise.resolve(),
+    restore: () => spy.mockRestore(),
   };
 }
 
@@ -197,7 +278,8 @@ function createRetryQueueDestroyRefMock(): Pick<
     },
   };
   const destroy = () => {
-    for (const callback of [...destroyCallbacks]) {
+    const callbacks = destroyCallbacks.splice(0);
+    for (const callback of callbacks) {
       callback();
     }
   };
@@ -234,7 +316,10 @@ function createRetryQueueStorageSpies(
   }, 'initDb').mockImplementation(options.initDb ?? (async () => null));
   const loadFromStorageSpy = vi.spyOn(RetryQueueService.prototype as unknown as {
     loadFromStorage: () => Promise<void>;
-  }, 'loadFromStorage').mockImplementation(options.loadFromStorage ?? (async () => undefined));
+  }, 'loadFromStorage');
+  if (options.useRealLoadFromStorage !== true) {
+    loadFromStorageSpy.mockImplementation(options.loadFromStorage ?? (async () => undefined));
+  }
 
   return { initDbSpy, loadFromStorageSpy };
 }

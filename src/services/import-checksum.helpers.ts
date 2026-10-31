@@ -1,4 +1,37 @@
+import {
+  calculateChecksum,
+  type BackupData,
+} from '../../supabase/functions/_shared/backup-utils';
 import type { ExportData } from './export.service';
+
+export async function verifyBackupDataChecksum(
+  data: unknown,
+  onDigestFailure: (error: unknown) => void,
+): Promise<boolean> {
+  if (!isBackupDataChecksumCandidate(data)) {
+    return true;
+  }
+
+  if (!Object.prototype.hasOwnProperty.call(data, 'checksum')) {
+    return true;
+  }
+
+  const originalChecksum = data.checksum;
+  if (typeof originalChecksum !== 'string' || originalChecksum.length === 0) {
+    return false;
+  }
+
+  try {
+    const calculatedChecksum = await calculateChecksum(JSON.stringify({
+      ...data,
+      checksum: '',
+    }));
+    return calculatedChecksum === originalChecksum;
+  } catch (error) {
+    onDigestFailure(error);
+    return false;
+  }
+}
 
 export async function verifyImportChecksum(
   data: ExportData,
@@ -46,4 +79,19 @@ function simpleHash(str: string): string {
     hash &= hash;
   }
   return `simple-${Math.abs(hash).toString(16)}`;
+}
+
+function isBackupDataChecksumCandidate(data: unknown): data is BackupData {
+  if (!data || typeof data !== 'object') {
+    return false;
+  }
+
+  const candidate = data as Record<string, unknown>;
+  return (
+    typeof candidate['payloadVersion'] === 'string'
+    && Array.isArray(candidate['projects'])
+    && Array.isArray(candidate['tasks'])
+    && Array.isArray(candidate['connections'])
+    && !candidate['metadata']
+  );
 }

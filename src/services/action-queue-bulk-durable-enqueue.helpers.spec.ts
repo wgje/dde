@@ -12,6 +12,11 @@ import type {
 
 type PreferenceEnqueueParams = Extract<EnqueueParams, { entityType: 'preference' }>;
 
+interface Deferred<T> {
+  promise: Promise<T>;
+  resolve(value: T): void;
+}
+
 describe('action-queue-bulk-durable-enqueue.helpers', () => {
   it('does not run durable enqueue completion side effects for duplicate operationId no-op mutations', async () => {
     const existingDuplicateAction = createQueuedPreferenceAction(
@@ -57,8 +62,6 @@ describe('action-queue-bulk-durable-enqueue.helpers', () => {
       persistQueueMutationForOwner: async (_ownerUserId, mutateQueue) =>
         mutateQueue([existingDuplicateAction]),
       processQueue: vi.fn(),
-      readPendingActions: () => [existingDuplicateAction],
-      rollbackFailedBulkDurableEnqueue: vi.fn(),
       warn: vi.fn(),
       warnIfQueueFrozen: vi.fn(),
     } satisfies RunBulkDurableEnqueueOptions);
@@ -79,13 +82,9 @@ describe('action-queue-bulk-durable-enqueue.helpers', () => {
   it('rejects the whole durable batch when any persisted action id is missing', async () => {
     const firstAction = createPreferenceAction('first-operation-id', 'first');
     const missingIdAction = createPreferenceAction('missing-operation-id', 'missing-id');
-    const previousQueue = [
-      createQueuedPreferenceAction('previous-action-id', 'previous-operation-id', 'previous'),
-    ];
     let committedQueue: QueuedAction[] | null = null;
     const applyPersistedCurrentOwnerQueue = vi.fn();
     const completeDurableEnqueueSideEffects = vi.fn();
-    const rollbackFailedBulkDurableEnqueue = vi.fn();
 
     const result = await runBulkDurableEnqueue({
       actions: [firstAction, missingIdAction],
@@ -111,8 +110,6 @@ describe('action-queue-bulk-durable-enqueue.helpers', () => {
         return nextQueue;
       },
       processQueue: vi.fn(),
-      readPendingActions: () => previousQueue,
-      rollbackFailedBulkDurableEnqueue,
       warn: vi.fn(),
       warnIfQueueFrozen: vi.fn(),
     } satisfies RunBulkDurableEnqueueOptions);
@@ -121,9 +118,119 @@ describe('action-queue-bulk-durable-enqueue.helpers', () => {
     expect(committedQueue).toBeNull();
     expect(applyPersistedCurrentOwnerQueue).not.toHaveBeenCalled();
     expect(completeDurableEnqueueSideEffects).not.toHaveBeenCalled();
-    expect(rollbackFailedBulkDurableEnqueue).toHaveBeenCalledWith(previousQueue);
+  });
+
+  it('owner 切换后不应把旧 owner 的批量持久队列应用到新 owner 视图', async () => {
+    const actions = [
+      createPreferenceAction('first-operation-id', 'first'),
+      createPreferenceAction('second-operation-id', 'second'),
+    ];
+    const persisted = createDeferred<QueuedAction[] | null>();
+    const applyPersistedCurrentOwnerQueue = vi.fn();
+    const completeDurableEnqueueSideEffects = vi.fn();
+    const processQueue = vi.fn();
+    let currentOwnerUserId = 'owner-a';
+    let persistedOwnerUserId = '';
+    let ownerAQueue: QueuedAction[] = [];
+
+    const enqueuePromise = runBulkDurableEnqueue({
+      actions,
+      applyPersistedCurrentOwnerQueue,
+      buildCurrentOwnerEnqueueMutation: (queue, _action, queuedAction) => ({
+        nextQueue: [...queue, queuedAction],
+        resolvedActionId: queuedAction.id,
+        wasEnqueued: true,
+        wasMergeShrunk: false,
+      }),
+      completeDurableEnqueueSideEffects,
+      createQueuedAction: action => createQueuedPreferenceAction(
+        `${action.operationId}-queued-id`,
+        action.operationId ?? '',
+        action.entityId,
+      ),
+      enqueueSingle: vi.fn(),
+      getCurrentOwnerUserId: () => currentOwnerUserId,
+      isOnline: () => true,
+      persistQueueMutationForOwner: (ownerUserId, mutateQueue) => {
+        persistedOwnerUserId = ownerUserId;
+        ownerAQueue = mutateQueue([]);
+        return persisted.promise;
+      },
+      processQueue,
+      warn: vi.fn(),
+      warnIfQueueFrozen: vi.fn(),
+    } satisfies RunBulkDurableEnqueueOptions);
+
+    expect(persistedOwnerUserId).toBe('owner-a');
+    currentOwnerUserId = 'owner-b';
+    persisted.resolve(ownerAQueue);
+
+    await expect(enqueuePromise).resolves.toEqual([
+      'first-operation-id-queued-id',
+      'second-operation-id-queued-id',
+    ]);
+    expect(applyPersistedCurrentOwnerQueue).not.toHaveBeenCalled();
+    expect(completeDurableEnqueueSideEffects).not.toHaveBeenCalled();
+    expect(processQueue).not.toHaveBeenCalled();
+  });
+
+  it('批量持久化失败时不应以调用开始时的旧快照删除并发成功 action', async () => {
+    const actions = [
+      createPreferenceAction('first-operation-id', 'first'),
+      createPreferenceAction('second-operation-id', 'second'),
+    ];
+    const persisted = createDeferred<QueuedAction[] | null>();
+    const concurrentAction = createQueuedPreferenceAction(
+      'concurrent-action-id',
+      'concurrent-operation-id',
+      'concurrent',
+    );
+    let currentView: QueuedAction[] = [];
+
+    const enqueuePromise = runBulkDurableEnqueue({
+      actions,
+      applyPersistedCurrentOwnerQueue: queue => {
+        currentView = queue;
+      },
+      buildCurrentOwnerEnqueueMutation: (queue, _action, queuedAction) => ({
+        nextQueue: [...queue, queuedAction],
+        resolvedActionId: queuedAction.id,
+        wasEnqueued: true,
+        wasMergeShrunk: false,
+      }),
+      completeDurableEnqueueSideEffects: vi.fn(),
+      createQueuedAction: action => createQueuedPreferenceAction(
+        `${action.operationId}-queued-id`,
+        action.operationId ?? '',
+        action.entityId,
+      ),
+      enqueueSingle: vi.fn(),
+      getCurrentOwnerUserId: () => 'owner-a',
+      isOnline: () => false,
+      persistQueueMutationForOwner: (_ownerUserId, mutateQueue) => {
+        mutateQueue([]);
+        return persisted.promise;
+      },
+      processQueue: vi.fn(),
+      warn: vi.fn(),
+      warnIfQueueFrozen: vi.fn(),
+    } satisfies RunBulkDurableEnqueueOptions);
+
+    currentView = [concurrentAction];
+    persisted.resolve(null);
+
+    await expect(enqueuePromise).resolves.toEqual([]);
+    expect(currentView).toEqual([concurrentAction]);
   });
 });
+
+function createDeferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(next => {
+    resolve = next;
+  });
+  return { promise, resolve };
+}
 
 function createPreferenceAction(
   operationId: string,

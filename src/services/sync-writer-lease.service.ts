@@ -38,6 +38,8 @@ export interface LeaseHandle {
   readonly lockName: string;
   /** 实际生效的获取模式。 */
   readonly mode: LeaseAcquisitionMode;
+  /** 租约被释放或丢失时 abort；调用方应在批处理边界停止后续写入。 */
+  readonly signal?: AbortSignal;
   /** 释放当前持有的 lease；幂等。 */
   release(): Promise<void>;
 }
@@ -170,17 +172,20 @@ export class SyncWriterLeaseService {
           releaseFn = innerResolve;
           if (alreadyResolved) return;
           alreadyResolved = true;
+          const validityController = new AbortController();
           const handle: LeaseHandle = {
             tabId: this.tabId,
             lockName,
             mode: 'weblocks',
+            signal: validityController.signal,
             release: async () => {
               if (releaseFn) {
                 const fn = releaseFn;
                 releaseFn = null;
                 fn();
               }
-              this.holding.set(null);
+              validityController.abort();
+              this.clearHolding(handle);
               this.addLeaseBreadcrumb('sync_writer_lease_released', 'info', lockName, 'weblocks');
             },
           };
@@ -202,40 +207,106 @@ export class SyncWriterLeaseService {
   private async acquireViaIndexedDb(lockName: string, options: LeaseRequestOptions): Promise<LeaseHandle> {
     const ttlMs = options.ttlMs ?? DEFAULT_LEASE_TTL_MS;
     const db = await this.openLeaseDb();
+    let handleOwnsDb = false;
 
-    // 尝试抢占：只有当 lockName 不存在或当前持有者已过期时才能 take ownership。
-    while (!options.signal?.aborted) {
-      const taken = await this.tryTakeIndexedDbLease(db, lockName, ttlMs);
-      if (taken) {
-        // 启动 heartbeat 定时器维持 lease。
-        const heartbeatTimer = this.startHeartbeat(db, lockName, ttlMs);
-        const handle: LeaseHandle = {
-          tabId: this.tabId,
-          lockName,
-          mode: 'idb-lease',
-          release: async () => {
-            clearInterval(heartbeatTimer);
-            try {
-              await this.releaseIndexedDbLease(db, lockName);
-            } finally {
-              this.holding.set(null);
-              this.addLeaseBreadcrumb('sync_writer_lease_released', 'info', lockName, 'idb-lease');
-            }
-          },
-        };
-        this.holding.set(handle);
-        this.addLeaseBreadcrumb('sync_writer_lease_acquired', 'info', lockName, 'idb-lease');
-        return handle;
+    try {
+      // 尝试抢占：只有当 lockName 不存在或当前持有者已过期时才能 take ownership。
+      while (!options.signal?.aborted) {
+        const acquiredExpiresAt = await this.tryTakeIndexedDbLease(db, lockName, ttlMs);
+        if (acquiredExpiresAt !== null) {
+          if (options.signal?.aborted) {
+            await this.releaseIndexedDbLease(db, lockName);
+            throw new DOMException('Sync writer lease acquisition aborted', 'AbortError');
+          }
+          const handle = this.buildIndexedDbLeaseHandle(db, lockName, ttlMs, acquiredExpiresAt);
+          handleOwnsDb = true;
+          return handle;
+        }
+        // 等待一小段再尝试；abort 时立即跳出。
+        await this.sleepWithAbort(500, options.signal);
       }
-      // 等待一小段再尝试；abort 时立即跳出。
-      await this.sleepWithAbort(500, options.signal);
-    }
 
-    throw new DOMException('Sync writer lease acquisition aborted', 'AbortError');
+      throw new DOMException('Sync writer lease acquisition aborted', 'AbortError');
+    } finally {
+      if (!handleOwnsDb) {
+        db.close();
+      }
+    }
   }
 
-  private async tryTakeIndexedDbLease(db: IDBDatabase, lockName: string, ttlMs: number): Promise<boolean> {
-    return new Promise<boolean>((resolve, reject) => {
+  private buildIndexedDbLeaseHandle(
+    db: IDBDatabase,
+    lockName: string,
+    ttlMs: number,
+    acquiredExpiresAt: number,
+  ): LeaseHandle {
+    const validityController = new AbortController();
+    let stopHeartbeat: (() => void) | null = null;
+    let settled = false;
+    let dbClosed = false;
+
+    const closeDb = () => {
+      if (dbClosed) return;
+      dbClosed = true;
+      db.close();
+    };
+    const revokeLostLease = () => {
+      if (settled) return;
+      settled = true;
+      stopHeartbeat?.();
+      stopHeartbeat = null;
+      validityController.abort();
+      this.clearHolding(handle);
+      closeDb();
+      this.warn('sync_writer_lease_lost', { lockName, mode: 'idb-lease' });
+      this.addLeaseBreadcrumb('sync_writer_lease_lost', 'warning', lockName, 'idb-lease');
+    };
+
+    const handle: LeaseHandle = {
+      tabId: this.tabId,
+      lockName,
+      mode: 'idb-lease',
+      signal: validityController.signal,
+      release: async () => {
+        if (settled) return;
+        settled = true;
+        stopHeartbeat?.();
+        stopHeartbeat = null;
+        try {
+          await this.releaseIndexedDbLease(db, lockName);
+        } finally {
+          validityController.abort();
+          this.clearHolding(handle);
+          closeDb();
+          this.addLeaseBreadcrumb('sync_writer_lease_released', 'info', lockName, 'idb-lease');
+        }
+      },
+    };
+    stopHeartbeat = this.activateIndexedDbLeaseHandle(handle, db, ttlMs, acquiredExpiresAt, revokeLostLease);
+    return handle;
+  }
+
+  private activateIndexedDbLeaseHandle(
+    handle: LeaseHandle,
+    db: IDBDatabase,
+    ttlMs: number,
+    acquiredExpiresAt: number,
+    revokeLostLease: () => void,
+  ): () => void {
+    const stopHeartbeat = this.startHeartbeat(
+      db,
+      handle.lockName,
+      ttlMs,
+      acquiredExpiresAt,
+      revokeLostLease,
+    );
+    this.holding.set(handle);
+    this.addLeaseBreadcrumb('sync_writer_lease_acquired', 'info', handle.lockName, 'idb-lease');
+    return stopHeartbeat;
+  }
+
+  private async tryTakeIndexedDbLease(db: IDBDatabase, lockName: string, ttlMs: number): Promise<number | null> {
+    return new Promise<number | null>((resolve, reject) => {
       const tx = db.transaction([LEASE_STORE_NAME], 'readwrite');
       const store = tx.objectStore(LEASE_STORE_NAME);
       const getReq = store.get(lockName);
@@ -244,50 +315,93 @@ export class SyncWriterLeaseService {
         const existing = getReq.result as LeaseRecord | undefined;
         const expired = !existing || existing.expiresAt <= now;
         if (!expired) {
-          resolve(false);
+          resolve(null);
           return;
         }
+        const expiresAt = now + ttlMs;
         const next: LeaseRecord = {
           ownerTabId: this.tabId,
-          expiresAt: now + ttlMs,
+          expiresAt,
           lastHeartbeatAt: now,
           acquiredAt: now,
         };
         const putReq = store.put(next, lockName);
-        putReq.onsuccess = () => resolve(true);
+        putReq.onsuccess = () => resolve(expiresAt);
         putReq.onerror = () => reject(putReq.error);
       };
       getReq.onerror = () => reject(getReq.error);
     });
   }
 
-  private startHeartbeat(db: IDBDatabase, lockName: string, ttlMs: number): ReturnType<typeof setInterval> {
-    return setInterval(() => {
-      void this.heartbeatIndexedDbLease(db, lockName, ttlMs).catch(err => {
-        this.debug(`lease_heartbeat_failed: ${(err as Error)?.message ?? err}`);
-      });
+  private startHeartbeat(
+    db: IDBDatabase,
+    lockName: string,
+    ttlMs: number,
+    acquiredExpiresAt: number,
+    onLeaseLost: () => void,
+  ): () => void {
+    let stopped = false;
+    let expiryTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const scheduleExpiry = (expiresAt: number) => {
+      if (stopped) return;
+      if (expiryTimer !== null) {
+        clearTimeout(expiryTimer);
+      }
+      expiryTimer = setTimeout(() => {
+        expiryTimer = null;
+        if (!stopped) onLeaseLost();
+      }, Math.max(0, expiresAt - Date.now()));
+    };
+
+    scheduleExpiry(acquiredExpiresAt);
+    const heartbeatTimer = setInterval(() => {
+      void this.heartbeatIndexedDbLease(db, lockName, ttlMs)
+        .then(renewedExpiresAt => {
+          if (stopped) return;
+          if (renewedExpiresAt === null) {
+            onLeaseLost();
+            return;
+          }
+          scheduleExpiry(renewedExpiresAt);
+        })
+        .catch(err => {
+          if (stopped) return;
+          this.debug(`lease_heartbeat_failed: ${(err as Error)?.message ?? err}`);
+        });
     }, HEARTBEAT_INTERVAL_MS);
+
+    return () => {
+      if (stopped) return;
+      stopped = true;
+      clearInterval(heartbeatTimer);
+      if (expiryTimer !== null) {
+        clearTimeout(expiryTimer);
+        expiryTimer = null;
+      }
+    };
   }
 
-  private heartbeatIndexedDbLease(db: IDBDatabase, lockName: string, ttlMs: number): Promise<void> {
-    return new Promise<void>((resolve, reject) => {
+  private heartbeatIndexedDbLease(db: IDBDatabase, lockName: string, ttlMs: number): Promise<number | null> {
+    return new Promise<number | null>((resolve, reject) => {
       const tx = db.transaction([LEASE_STORE_NAME], 'readwrite');
       const store = tx.objectStore(LEASE_STORE_NAME);
       const getReq = store.get(lockName);
       getReq.onsuccess = () => {
         const existing = getReq.result as LeaseRecord | undefined;
         if (!existing || existing.ownerTabId !== this.tabId) {
-          resolve();
+          resolve(null);
           return;
         }
         const now = Date.now();
+        const expiresAt = now + ttlMs;
         const next: LeaseRecord = {
           ...existing,
-          expiresAt: now + ttlMs,
+          expiresAt,
           lastHeartbeatAt: now,
         };
         const putReq = store.put(next, lockName);
-        putReq.onsuccess = () => resolve();
+        putReq.onsuccess = () => resolve(expiresAt);
         putReq.onerror = () => reject(putReq.error);
       };
       getReq.onerror = () => reject(getReq.error);
@@ -337,15 +451,28 @@ export class SyncWriterLeaseService {
   }
 
   private buildNoopHandle(options: LeaseRequestOptions, mode: LeaseAcquisitionMode = 'memory-only'): LeaseHandle {
-    return {
+    const validityController = new AbortController();
+    let released = false;
+    const handle: LeaseHandle = {
       tabId: this.tabId,
       lockName: this.buildLockName(options.userId, options.projectId),
       mode,
+      signal: validityController.signal,
       release: async () => {
-        this.holding.set(null);
+        if (released) return;
+        released = true;
+        validityController.abort();
+        this.clearHolding(handle);
         this.addLeaseBreadcrumb('sync_writer_lease_released', 'info', this.buildLockName(options.userId, options.projectId), mode);
       },
     };
+    return handle;
+  }
+
+  private clearHolding(handle: LeaseHandle): void {
+    if (this.holding() === handle) {
+      this.holding.set(null);
+    }
   }
 
   private addLeaseBreadcrumb(
@@ -406,14 +533,24 @@ export class SyncWriterLeaseService {
 
   private async sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
     return new Promise<void>(resolve => {
+      if (signal?.aborted) {
+        resolve();
+        return;
+      }
+      const onAbort = () => {
+        if (timer !== null) {
+          clearTimeout(timer);
+          timer = null;
+        }
+        signal?.removeEventListener('abort', onAbort);
+        resolve();
+      };
       let timer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
         timer = null;
+        signal?.removeEventListener('abort', onAbort);
         resolve();
       }, ms);
-      signal?.addEventListener('abort', () => {
-        if (timer !== null) clearTimeout(timer);
-        resolve();
-      }, { once: true });
+      signal?.addEventListener('abort', onAbort, { once: true });
     });
   }
 

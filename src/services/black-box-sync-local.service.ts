@@ -2,8 +2,10 @@ import { AUTH_CONFIG } from '../config/auth.config';
 import { type BlackBoxEntry } from '../models/focus';
 import { blackBoxEntriesMap, setBlackBoxEntries, updateBlackBoxEntry } from '../state/focus-stores';
 import { supabaseErrorToError } from '../utils/supabase-error';
+import { createSyncOperationId } from '../utils/sync-operation-id';
 import { isValidUUID } from '../utils/validation';
 import { hasEquivalentEntryState as hasEquivalentEntryStatePure } from './black-box-entry-equivalence';
+import { canonicalizePersistedValue } from './action-queue-identity.helpers';
 import { BlackBoxSyncBase } from './black-box-sync-base.service';
 import { BlackBoxSyncOwnerMismatchController } from './black-box-sync-owner-mismatch.controller';
 import {
@@ -13,6 +15,11 @@ import {
 } from './black-box-sync-local-hydration.helpers';
 import { BlackBoxSyncQueueRealtimeLayer } from './black-box-sync-queue-realtime.service';
 import { type BlackBoxMergeMode, type BlackBoxSupabaseClient, type IDBBlackBoxEntry, type LoadBlackBoxLocalOptions } from './black-box-sync.types';
+import { trackLocalBackupUiRestoreWriterPromise } from './local-backup-ui-restore-writer-quiescence-tracker';
+
+type PersistedBlackBoxEntry = Omit<IDBBlackBoxEntry, '_localVersion'> & {
+  _localVersion?: number | string;
+};
 
 export abstract class BlackBoxSyncLocalLayer extends BlackBoxSyncQueueRealtimeLayer {
   private readonly ownerMismatchController = new BlackBoxSyncOwnerMismatchController({
@@ -32,30 +39,42 @@ export abstract class BlackBoxSyncLocalLayer extends BlackBoxSyncQueueRealtimeLa
       await this.initIndexedDB();
     }
 
-    return new Promise((resolve, reject) => {
+    return trackLocalBackupUiRestoreWriterPromise(entry.userId, 'black-box', () => new Promise((resolve, reject) => {
       if (!this.db) {
         reject(new Error('IndexedDB not initialized'));
         return;
       }
 
       const tx = this.db.transaction(this.STORE_NAME, 'readwrite');
+      let settled = false;
+      const settle = (outcome: 'resolve' | 'reject', error?: unknown): void => {
+        if (settled) return;
+        settled = true;
+        if (outcome === 'resolve') {
+          resolve();
+        } else {
+          reject(error);
+        }
+      };
+      tx.oncomplete = () => settle('resolve');
+      tx.onerror = () => settle('reject', tx.error ?? new Error('IndexedDB transaction failed'));
+      tx.onabort = () => settle('reject', tx.error ?? new Error('IndexedDB transaction aborted'));
       const store = tx.objectStore(this.STORE_NAME);
 
       const putEntry = (entryToPersist: BlackBoxEntry) => {
-        const idbEntry: IDBBlackBoxEntry = {
+        const idbEntry: PersistedBlackBoxEntry = {
           ...entryToPersist,
-          _localVersion: Date.now()
+          _localVersion: createSyncOperationId(),
         };
 
         const request = store.put(idbEntry);
 
-        request.onsuccess = () => resolve();
-        request.onerror = () => reject(request.error);
+        request.onerror = () => settle('reject', request.error ?? new Error('IndexedDB write failed'));
       };
 
       const existingRequest = store.get(entry.id);
       existingRequest.onsuccess = () => {
-        const result = existingRequest.result as IDBBlackBoxEntry | undefined;
+        const result = existingRequest.result as PersistedBlackBoxEntry | undefined;
         const existing = result
           ? (({ _localVersion: _localVersion, ...rest }) => rest)(result)
           : null;
@@ -63,12 +82,12 @@ export abstract class BlackBoxSyncLocalLayer extends BlackBoxSyncQueueRealtimeLa
       };
       existingRequest.onerror = () => {
         if (this.isBlankOrMissingContent(entry.content)) {
-          reject(existingRequest.error ?? new Error('Unable to read existing BlackBox entry before blank-content write'));
+          settle('reject', existingRequest.error ?? new Error('Unable to read existing BlackBox entry before blank-content write'));
           return;
         }
         putEntry(entry);
       };
-    });
+    }));
   }
 
   /**
@@ -308,16 +327,11 @@ export abstract class BlackBoxSyncLocalLayer extends BlackBoxSyncQueueRealtimeLa
     }
   }
 
-  /**
-   * 从本地 IndexedDB 删除指定条目
-   * 用于清理脏数据（如非法 ID 的条目）
-   */
   async deleteFromLocal(id: string): Promise<void> {
-    if (!this.db) {
-      await this.initIndexedDB();
-    }
+    const persisted = await this.loadEntryFromLocal(id);
+    if (!persisted?.userId) throw new Error('BlackBox entry owner unavailable for local delete');
 
-    return new Promise((resolve, reject) => {
+    return trackLocalBackupUiRestoreWriterPromise(persisted.userId, 'black-box', () => new Promise((resolve, reject) => {
       if (!this.db) {
         reject(new Error('IndexedDB not initialized'));
         return;
@@ -325,14 +339,31 @@ export abstract class BlackBoxSyncLocalLayer extends BlackBoxSyncQueueRealtimeLa
 
       const tx = this.db.transaction(this.STORE_NAME, 'readwrite');
       const store = tx.objectStore(this.STORE_NAME);
-      const request = store.delete(id);
+      const read = store.get(id);
+      let failure: unknown = null;
+      const abort = (error: unknown): void => {
+        failure ??= error;
+        try { tx.abort(); } catch { reject(failure); }
+      };
 
-      request.onsuccess = () => resolve();
-      request.onerror = () => reject(request.error);
-    });
+      tx.oncomplete = () => failure ? reject(failure) : resolve();
+      tx.onerror = () => reject(tx.error ?? failure ?? read.error);
+      tx.onabort = () => reject(tx.error ?? failure ?? read.error);
+      read.onerror = () => abort(read.error ?? new Error('IndexedDB delete preflight failed'));
+      read.onsuccess = () => {
+        const current = read.result as PersistedBlackBoxEntry | undefined;
+        if (!current?.userId
+          || canonicalizePersistedValue(current) !== canonicalizePersistedValue(persisted)) {
+          abort(new Error('BlackBox entry changed before local delete'));
+          return;
+        }
+        const request = store.delete(id);
+        request.onerror = () => abort(request.error ?? new Error('IndexedDB delete failed'));
+      };
+    }));
   }
 
-  protected async loadEntryFromLocal(id: string): Promise<BlackBoxEntry | null> {
+  protected async loadEntryFromLocal(id: string): Promise<PersistedBlackBoxEntry | null> {
     let initFailed = false;
     try {
       if (!this.db) {
@@ -356,14 +387,13 @@ export abstract class BlackBoxSyncLocalLayer extends BlackBoxSyncQueueRealtimeLa
       const request = store.get(id);
 
       request.onsuccess = () => {
-        const result = request.result as IDBBlackBoxEntry | undefined;
+        const result = request.result as PersistedBlackBoxEntry | undefined;
         if (!result) {
           resolve(null);
           return;
         }
 
-        const { _localVersion, ...entry } = result;
-        resolve(entry);
+        resolve(result);
       };
       request.onerror = () => resolve(null);
     });
@@ -389,7 +419,8 @@ export abstract class BlackBoxSyncLocalLayer extends BlackBoxSyncQueueRealtimeLa
     }
 
     if (!inMemory || this.isEntryNewer(persisted, inMemory)) {
-      return persisted;
+      const { _localVersion, ...entry } = persisted;
+      return entry;
     }
 
     return inMemory;
@@ -633,6 +664,14 @@ export abstract class BlackBoxSyncLocalLayer extends BlackBoxSyncQueueRealtimeLa
     return this.hydrateLocalEntriesForVisibleUser(entries, options);
   }
 
+  async withLocalRestoreDatabase<T>(
+    operation: (db: IDBDatabase, storeName: string) => Promise<T>,
+  ): Promise<T> {
+    if (!this.db) await this.initIndexedDB();
+    if (!this.db) throw new Error('Black Box IndexedDB is unavailable');
+    return await operation(this.db, this.STORE_NAME);
+  }
+
   protected readAllLocalEntries(): Promise<BlackBoxEntry[]> {
     return new Promise((resolve, reject) => {
       if (!this.db) {
@@ -644,12 +683,12 @@ export abstract class BlackBoxSyncLocalLayer extends BlackBoxSyncQueueRealtimeLa
       const store = tx.objectStore(this.STORE_NAME);
       const request = store.getAll();
 
-      request.onsuccess = () => resolve(this.stripLocalEntryVersions(request.result as IDBBlackBoxEntry[]));
+      request.onsuccess = () => resolve(this.stripLocalEntryVersions(request.result as PersistedBlackBoxEntry[]));
       request.onerror = () => reject(request.error);
     });
   }
 
-  protected stripLocalEntryVersions(entries: IDBBlackBoxEntry[]): BlackBoxEntry[] {
+  protected stripLocalEntryVersions(entries: PersistedBlackBoxEntry[]): BlackBoxEntry[] {
     return entries.map(e => {
       const { _localVersion, ...entry } = e;
       return entry;

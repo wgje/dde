@@ -248,6 +248,10 @@ export interface BackupLocalState {
 }
 
 export interface BackupPendingAttachmentUpload {
+  /** Required for replay; absent legacy rows are quarantined during restore. */
+  ownerUserId?: string;
+  /** Identifies the exact queued upload generation for conditional cleanup. */
+  operationId?: string;
   attachmentId: string;
   blobKey: string;
   fileName: string;

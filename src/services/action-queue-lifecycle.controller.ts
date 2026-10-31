@@ -11,6 +11,7 @@ export class ActionQueueLifecycleController {
   private onStart: (() => void) | null = null;
   private onEnd: (() => void) | null = null;
   private onSettled: ((summary: ActionQueueProcessSettledSummary) => void) | null = null;
+  private readonly settledListeners = new Set<() => void>();
   private activeTokens = new Set<number>();
   private remoteSuccessActionIdsByToken = new Map<number, Set<string>>();
   private resolvedNoOpActionIdsByToken = new Map<number, Set<string>>();
@@ -71,6 +72,14 @@ export class ActionQueueLifecycleController {
     } catch {
       // View callbacks must not interrupt queue lifecycle bookkeeping.
     }
+    for (const listener of this.settledListeners) {
+      this.invokeLifecycleCallback(listener);
+    }
+  }
+
+  subscribeToSettled(listener: () => void): () => void {
+    this.settledListeners.add(listener);
+    return () => this.settledListeners.delete(listener);
   }
 
   trackAction(token: number, actionId: string): void {
@@ -83,7 +92,10 @@ export class ActionQueueLifecycleController {
     }
   }
 
-  untrackAction(actionId: string): void {
+  untrackAction(actionId: string, expectedToken?: number): void {
+    if (expectedToken !== undefined && this.actionTokenById.get(actionId) !== expectedToken) {
+      return;
+    }
     this.actionTokenById.delete(actionId);
   }
 

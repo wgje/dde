@@ -1,4 +1,6 @@
 import type { SyncRpcResult, SyncRpcStatus, TaskWriteIntent } from './sync-rpc-client.service';
+import { buildStoreRestoreOperations } from './data-safety-package-restore-plan.helpers';
+import { validateDataSafetyPackageContents } from './data-safety-package-validation.helpers';
 
 export const DATA_SAFETY_PACKAGE_SCHEMA_VERSION = '1.0.0' as const;
 
@@ -35,7 +37,7 @@ export interface DataSafetyRetryQueueItem extends UnknownRecord {
   data: UnknownRecord;
   retryCount: number;
   createdAt: number;
-  sourceUserId?: string;
+  sourceUserId: string;
   projectId?: string;
   writeIntent?: TaskWriteIntent;
 }
@@ -51,6 +53,11 @@ export interface DataSafetyDeadLetterItem extends UnknownRecord {
   action?: DataSafetyQueuedAction;
 }
 
+export interface DataSafetyOfflineSnapshotMirrors {
+  localStorage?: string | null;
+  indexedDb?: string | null;
+}
+
 export interface DataSafetyLocalStateSnapshot {
   retryQueue: DataSafetyRetryQueueItem[];
   actionQueue: DataSafetyQueuedAction[];
@@ -58,7 +65,7 @@ export interface DataSafetyLocalStateSnapshot {
   conflicts: unknown[];
   taskTombstones: unknown;
   connectionTombstones: unknown;
-  offlineSnapshots?: unknown;
+  offlineSnapshots?: DataSafetyOfflineSnapshotMirrors | null;
 }
 
 export interface DataSafetySyncStateSnapshot extends UnknownRecord {
@@ -130,6 +137,7 @@ export interface DataSafetyReplayEntry {
   entityType: DataSafetyEntityType;
   entityId: string;
   operation: DataSafetyOperation;
+  writeIntent?: TaskWriteIntent;
   sourceUserId?: string;
   localCommittedAt: number;
   baseUpdatedAt?: string | null;
@@ -150,6 +158,7 @@ export interface DataSafetyLastWriteExplain {
     id: string;
   };
   operation: DataSafetyOperation;
+  writeIntent?: TaskWriteIntent;
   localTimestamp: number;
   updatedAtBaseline?: string | null;
   beforeVersion?: string | null;
@@ -285,6 +294,7 @@ export interface BuildLastWriteExplainInput {
   entityType: DataSafetyEntityType;
   entityId: string;
   operation: DataSafetyOperation;
+  writeIntent?: TaskWriteIntent;
   localTimestamp: number;
   updatedAtBaseline?: string | null;
   beforeVersion?: string | null;
@@ -336,8 +346,7 @@ export function validateDataSafetyExportPackage(value: unknown): DataSafetyValid
     return { valid: false, errors: ['package must be an object'] };
   }
 
-  validateDataSafetyPackageMetadata(value, errors);
-  validateDataSafetyPackageSections(value, errors);
+  validateDataSafetyPackageContents(value, DATA_SAFETY_PACKAGE_SCHEMA_VERSION, errors);
 
   if (errors.length === 0 && isDataSafetyExportPackageShape(value)) {
     const expectedChecksum = calculateDeterministicChecksum(value);
@@ -349,101 +358,15 @@ export function validateDataSafetyExportPackage(value: unknown): DataSafetyValid
   return { valid: errors.length === 0, errors };
 }
 
-function validateDataSafetyPackageMetadata(
-  value: UnknownRecord,
-  errors: string[],
-): void {
-  if (value['schemaVersion'] !== DATA_SAFETY_PACKAGE_SCHEMA_VERSION) {
-    errors.push(`schemaVersion must be ${DATA_SAFETY_PACKAGE_SCHEMA_VERSION}`);
-  }
-  if (typeof value['ownerUserId'] !== 'string' || value['ownerUserId'].length === 0) {
-    errors.push('ownerUserId is required');
-  }
-  if (typeof value['exportedAt'] !== 'string' || Number.isNaN(Date.parse(value['exportedAt']))) {
-    errors.push('exportedAt must be an ISO timestamp');
-  }
-}
-
-function validateDataSafetyPackageSections(
-  value: UnknownRecord,
-  errors: string[],
-): void {
-  validateDataSafetyLocalData(value['localData'], errors);
-  validateDataSafetyLocalState(value['localState'], errors);
-  validateDataSafetySyncSnapshot(value['syncSnapshot'], errors);
-  validateDataSafetyReplayPlan(value['replayPlan'], errors);
-  validateDataSafetyIntegrity(value['integrity'], errors);
-}
-
-function validateDataSafetyLocalData(value: unknown, errors: string[]): void {
-  if (!isRecord(value)) {
-    errors.push('localData is required');
-    return;
-  }
-
-  validateArray(value, 'projects', errors);
-  validateArray(value, 'tasks', errors);
-  validateArray(value, 'connections', errors);
-  validateArray(value, 'syncCursors', errors);
-}
-
-function validateDataSafetyLocalState(value: unknown, errors: string[]): void {
-  if (!isRecord(value)) {
-    errors.push('localState is required');
-    return;
-  }
-
-  validateArray(value, 'retryQueue', errors);
-  validateArray(value, 'actionQueue', errors);
-  validateArray(value, 'deadLetters', errors);
-}
-
-function validateDataSafetySyncSnapshot(value: unknown, errors: string[]): void {
-  if (!isRecord(value)) {
-    errors.push('syncSnapshot is required');
-    return;
-  }
-
-  if (!isRecord(value['syncState'])) {
-    errors.push('syncSnapshot.syncState is required');
-  }
-}
-
-function validateDataSafetyIntegrity(value: unknown, errors: string[]): void {
-  if (!isRecord(value)) {
-    errors.push('integrity is required');
-    return;
-  }
-
-  if (typeof value['checksum'] !== 'string') {
-    errors.push('integrity.checksum is required');
-  }
-}
-
-function validateDataSafetyReplayPlan(value: unknown, errors: string[]): void {
-  if (!isRecord(value)) {
-    errors.push('replayPlan is required');
-    return;
-  }
-
-  validateArray(value, 'steps', errors);
-  if (!isRecord(value['summary'])) {
-    errors.push('replayPlan.summary is required');
-  }
-  if (typeof value['idempotencyKey'] !== 'string') {
-    errors.push('replayPlan.idempotencyKey is required');
-  }
-}
-
 export function buildRestorePlan(
   pkg: DataSafetyExportPackage,
   current: DataSafetyCurrentLocalData,
 ): DataSafetyRestorePlan {
   const operations: DataSafetyRestoreOperation[] = [
-    ...buildStoreRestoreOperations('projects', pkg.localData.projects, current.projects),
-    ...buildStoreRestoreOperations('tasks', pkg.localData.tasks, current.tasks),
-    ...buildStoreRestoreOperations('connections', pkg.localData.connections, current.connections),
-    ...buildStoreRestoreOperations('syncCursors', pkg.localData.syncCursors, current.syncCursors),
+    ...buildStoreRestoreOperations('projects', pkg.localData.projects, current.projects, stableStringify),
+    ...buildStoreRestoreOperations('tasks', pkg.localData.tasks, current.tasks, stableStringify),
+    ...buildStoreRestoreOperations('connections', pkg.localData.connections, current.connections, stableStringify),
+    ...buildStoreRestoreOperations('syncCursors', pkg.localData.syncCursors, current.syncCursors, stableStringify),
   ];
   const summary = {
     writes: operations.filter(operation => operation.action === 'put').length,
@@ -508,6 +431,7 @@ export function buildLastWriteExplain(input: BuildLastWriteExplainInput): DataSa
     actor: { sourceUserId: input.sourceUserId },
     entity: { type: input.entityType, id: input.entityId },
     operation: input.operation,
+    writeIntent: input.writeIntent,
     localTimestamp: input.localTimestamp,
     updatedAtBaseline: input.updatedAtBaseline,
     beforeVersion: input.beforeVersion,
@@ -601,12 +525,6 @@ function stableStringify(value: unknown): string {
   return JSON.stringify(value);
 }
 
-function validateArray(record: UnknownRecord, key: string, errors: string[]): void {
-  if (!Array.isArray(record[key])) {
-    errors.push(`${key} must be an array`);
-  }
-}
-
 function isDataSafetyExportPackageShape(value: unknown): value is DataSafetyExportPackage {
   if (!isRecord(value)) {
     return false;
@@ -622,34 +540,6 @@ function isDataSafetyExportPackageShape(value: unknown): value is DataSafetyExpo
     && isRecord(value['replayPlan'])
     && isRecord(value['integrity'])
     && typeof value['integrity']['checksum'] === 'string';
-}
-
-function buildStoreRestoreOperations(
-  store: DataSafetyRestoreStore,
-  incoming: Array<DataSafetyEntityRecord | DataSafetySyncCursorRecord>,
-  current: Array<DataSafetyEntityRecord | DataSafetySyncCursorRecord>,
-): DataSafetyRestoreOperation[] {
-  const currentById = new Map(current.map(item => [getRestoreId(item), item]));
-
-  return incoming.map((item) => {
-    const id = getRestoreId(item);
-    const existing = currentById.get(id);
-    return {
-      store,
-      action: existing && stableStringify(existing) === stableStringify(item) ? 'skip' : 'put',
-      id,
-    };
-  });
-}
-
-function getRestoreId(item: DataSafetyEntityRecord | DataSafetySyncCursorRecord): string {
-  if ('key' in item && typeof item.key === 'string') {
-    return item.key;
-  }
-  if ('id' in item && typeof item.id === 'string') {
-    return item.id;
-  }
-  throw new Error('restore item is missing id/key');
 }
 
 function toAuditReplayPlanStep(entry: DataSafetyReplayEntry): DataSafetyReplayPlanStep {

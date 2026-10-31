@@ -38,6 +38,7 @@ export class DataSafetyAuditLog {
       entityType: explain.entity.type,
       entityId: explain.entity.id,
       operation: explain.operation,
+      writeIntent: explain.writeIntent,
       sourceUserId: explain.actor.sourceUserId,
       localCommittedAt: explain.localTimestamp,
       baseUpdatedAt: explain.updatedAtBaseline,

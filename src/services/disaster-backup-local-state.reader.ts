@@ -1,5 +1,6 @@
 import { FOCUS_CONFIG } from '../config/focus.config';
 import { PARKING_CONFIG } from '../config/parking.config';
+import { isProjectSyncCursor } from '../app/core/state/persistence';
 import type {
   BackupLocalState,
   BackupPendingAttachmentUpload,
@@ -12,7 +13,6 @@ import {
   getByKey,
   openExistingDb,
   readOwnerScopedLocalStorage,
-  resolveRetryQueueItemOwner,
   safeGetLocalStorage,
   safeParseJson,
 } from './disaster-backup-browser-storage.helpers';
@@ -37,12 +37,36 @@ const OFFLINE_SNAPSHOT_STORAGE_KEY = 'nanoflow.offline-cache-v2';
 const OFFLINE_SNAPSHOT_RECORD_PREFIX = 'offline-snapshot:';
 const LAUNCH_SNAPSHOT_STORAGE_KEY_V1 = 'nanoflow.launch-snapshot.v1';
 const LAUNCH_SNAPSHOT_STORAGE_KEY_V2 = 'nanoflow.launch-snapshot.v2';
+const RETRY_QUEUE_DB_NAME = 'nanoflow-retry-queue';
+const RETRY_QUEUE_STORE_NAME = 'offline_mutation_queue';
+const RETRY_QUEUE_STORAGE_KEY = 'nanoflow.retry-queue';
+const RETRY_QUEUE_STORAGE_VERSION = 1;
+
+type UnknownRecord = Record<string, unknown>;
+type RetryQueueExportSource = 'IndexedDB' | 'localStorage';
+
+interface RetryQueueExportEntry {
+  item: UnknownRecord;
+  source: RetryQueueExportSource;
+  identity: RetryQueueExportIdentity;
+}
+
+interface RetryQueueExportIdentity {
+  id: string;
+  operationId: string;
+  ownerUserId: string;
+  entityKey: string;
+}
 
 export interface DisasterBackupLocalStateReaderDeps {
   conflictStorage: Pick<ConflictStorageService, 'getAllConflicts'>;
   externalSourceCache: Pick<ExternalSourceCacheService, 'loadPendingLinks'>;
   attachmentUploadOutbox: Pick<AttachmentUploadOutboxService, 'listPendingUploads'> | null;
   dataSafetyAuditPersistence: DataSafetyAuditPersistence;
+  readSyncState?: () => {
+    lastSyncTime: string | null;
+    pendingCount: number;
+  };
 }
 
 interface DisasterBackupLocalStateParts {
@@ -56,6 +80,7 @@ interface DisasterBackupLocalStateParts {
   conflicts: BackupLocalState['conflicts'];
   externalSourcePendingLinks: BackupLocalState['externalSourcePendingLinks'];
   attachmentUploadOutbox: BackupPendingAttachmentUpload[];
+  projectCursors: unknown[];
 }
 
 export class DisasterBackupLocalStateReader {
@@ -64,14 +89,25 @@ export class DisasterBackupLocalStateReader {
   async readLocalState(
     ownerUserId: string | null,
     visibleProjectIds: Set<string>,
+    snapshotOwnerUserId: string | null = ownerUserId,
   ): Promise<BackupLocalState> {
-    const parts = await this.readLocalStateParts(ownerUserId, visibleProjectIds);
-    return this.buildLocalState(ownerUserId, visibleProjectIds, parts);
+    const parts = await this.readLocalStateParts(
+      ownerUserId,
+      visibleProjectIds,
+      snapshotOwnerUserId,
+    );
+    return this.buildLocalState(
+      ownerUserId,
+      visibleProjectIds,
+      parts,
+      snapshotOwnerUserId,
+    );
   }
 
   private async readLocalStateParts(
     ownerUserId: string | null,
     visibleProjectIds: Set<string>,
+    snapshotOwnerUserId: string | null,
   ): Promise<DisasterBackupLocalStateParts> {
     const [
       indexedSnapshot,
@@ -84,17 +120,19 @@ export class DisasterBackupLocalStateReader {
       conflicts,
       externalSourcePendingLinks,
       attachmentUploadOutbox,
+      projectCursors,
     ] = await Promise.all([
-      this.readSnapshotFromIndexedDb(ownerUserId),
-      this.readDockSnapshot(ownerUserId),
-      this.readLaunchSnapshot(ownerUserId),
-      this.readParkedTaskCache(visibleProjectIds),
+      this.readSnapshotFromIndexedDb(snapshotOwnerUserId),
+      this.readDockSnapshot(snapshotOwnerUserId),
+      this.readLaunchSnapshot(snapshotOwnerUserId),
+      this.readParkedTaskCache(ownerUserId, visibleProjectIds),
       this.readRetryQueue(ownerUserId),
       this.readActionQueue(ownerUserId),
       this.readDeadLetters(ownerUserId),
       this.deps.conflictStorage.getAllConflicts(),
       this.deps.externalSourceCache.loadPendingLinks(),
-      this.readAttachmentUploadOutbox(),
+      this.readAttachmentUploadOutbox(ownerUserId),
+      this.readProjectCursors(ownerUserId, visibleProjectIds),
     ]);
 
     return {
@@ -108,6 +146,7 @@ export class DisasterBackupLocalStateReader {
       conflicts,
       externalSourcePendingLinks,
       attachmentUploadOutbox,
+      projectCursors,
     };
   }
 
@@ -115,10 +154,11 @@ export class DisasterBackupLocalStateReader {
     ownerUserId: string | null,
     visibleProjectIds: Set<string>,
     parts: DisasterBackupLocalStateParts,
+    snapshotOwnerUserId: string | null,
   ): BackupLocalState {
     return {
       offlineSnapshot: {
-        localStorage: this.readOfflineSnapshotFromLocalStorage(ownerUserId),
+        localStorage: this.readOfflineSnapshotFromLocalStorage(snapshotOwnerUserId),
         indexedDb: parts.indexedSnapshot,
       },
       dockSnapshot: parts.dockSnapshot,
@@ -137,18 +177,56 @@ export class DisasterBackupLocalStateReader {
         retryQueue: parts.retryQueue,
         actionQueue: parts.actionQueue,
         deadLetters: parts.deadLetters,
+        syncState: this.deps.readSyncState?.() ?? null,
+        projectCursors: parts.projectCursors,
         dataSafetyAuditPersistence: this.deps.dataSafetyAuditPersistence,
       }),
     };
   }
 
-  private async readAttachmentUploadOutbox(): Promise<BackupPendingAttachmentUpload[]> {
-    if (!this.deps.attachmentUploadOutbox) {
+  private async readProjectCursors(
+    ownerUserId: string | null,
+    visibleProjectIds: Set<string>,
+  ): Promise<unknown[]> {
+    if (!ownerUserId || visibleProjectIds.size === 0) {
       return [];
     }
 
-    const pendingUploads = await this.deps.attachmentUploadOutbox.listPendingUploads();
+    const db = await openExistingDb('nanoflow-store-cache');
+    if (!db) return [];
+
+    try {
+      if (!db.objectStoreNames.contains('sync_cursors')) {
+        return [];
+      }
+
+      const cursors: unknown[] = [];
+      for (const projectId of [...visibleProjectIds].sort()) {
+        const key = `project:${ownerUserId}:${projectId}`;
+        const row = await getByKey<unknown>(db, 'sync_cursors', key);
+        if (row === null) continue;
+        if (!isCanonicalProjectCursorRecord(row, key, ownerUserId, projectId)) {
+          throw new Error(`sync cursor record ${key} is invalid`);
+        }
+        cursors.push({ projectId, userId: ownerUserId, cursor: row['cursor'] });
+      }
+      return cursors;
+    } finally {
+      db.close();
+    }
+  }
+
+  private async readAttachmentUploadOutbox(
+    ownerUserId: string | null,
+  ): Promise<BackupPendingAttachmentUpload[]> {
+    if (!this.deps.attachmentUploadOutbox || !ownerUserId) {
+      return [];
+    }
+
+    const pendingUploads = await this.deps.attachmentUploadOutbox.listPendingUploads(ownerUserId);
     return Promise.all(pendingUploads.map(async (upload) => ({
+      ownerUserId: upload.ownerUserId,
+      operationId: upload.operationId,
       attachmentId: upload.attachmentId,
       blobKey: upload.blobKey,
       fileName: upload.fileName,
@@ -161,12 +239,12 @@ export class DisasterBackupLocalStateReader {
   }
 
   private readTaskTombstones(visibleProjectIds: Set<string>): Record<string, unknown> {
-    const parsed = safeParseJson(safeGetLocalStorage('nanoflow.local-tombstones'));
+    const parsed = readTombstoneLocalStorage('nanoflow.local-tombstones', {});
     return filterTaskTombstonesByVisibleProjects(parsed, visibleProjectIds);
   }
 
   private readConnectionTombstones(visibleProjectIds: Set<string>): unknown[] {
-    const parsed = safeParseJson(safeGetLocalStorage('nanoflow.local-connection-tombstones'));
+    const parsed = readTombstoneLocalStorage('nanoflow.local-connection-tombstones', []);
     return filterConnectionTombstonesByVisibleProjects(parsed, visibleProjectIds);
   }
 
@@ -261,8 +339,13 @@ export class DisasterBackupLocalStateReader {
   }
 
   private async readParkedTaskCache(
+    ownerUserId: string | null,
     visibleProjectIds: Set<string>,
   ): Promise<{ entries: unknown[]; syncMetadata: Record<string, unknown> }> {
+    if (!ownerUserId) {
+      return { entries: [], syncMetadata: {} };
+    }
+
     const db = await openExistingDb(FOCUS_CONFIG.SYNC.IDB_NAME);
     if (!db) {
       return { entries: [], syncMetadata: {} };
@@ -274,19 +357,34 @@ export class DisasterBackupLocalStateReader {
         getAllFromStore<{ key: string; value: unknown }>(db, FOCUS_CONFIG.IDB_STORES.SYNC_METADATA),
       ]);
 
+      const ownerCursorKey = `parking_last_sync_time:${encodeURIComponent(ownerUserId)}`;
       const syncMetadata = Object.fromEntries(
         metadataRows
-          .filter((row): row is { key: string; value: unknown } => !!row && typeof row.key === 'string')
+          .filter((row): row is { key: string; value: unknown } =>
+            !!row && row.key === ownerCursorKey)
           .map((row) => [row.key, row.value]),
       );
 
-      const filteredEntries = entries.filter((entry) => {
-        if (!entry || typeof entry !== 'object') {
-          return false;
-        }
+      const filteredEntries = entries.flatMap((entry) => {
+        if (!isUnknownRecord(entry)) throw new Error('parked task cache contains an invalid owner');
+        const entryOwnerUserId = nonEmptyString(entry['ownerUserId']);
+        if (!entryOwnerUserId) throw new Error('parked task cache contains an invalid owner');
+        if (entryOwnerUserId !== ownerUserId) return [];
 
-        const projectId = 'projectId' in entry ? entry.projectId : null;
-        return typeof projectId === 'string' && visibleProjectIds.has(projectId);
+        const projectId = nonEmptyString(entry['projectId']);
+        if (!projectId) throw new Error('parked task cache contains an invalid project');
+        if (!visibleProjectIds.has(projectId)) return [];
+
+        const task = isUnknownRecord(entry['task']) ? entry['task'] : null;
+        const taskId = nonEmptyString(entry['taskId']);
+        const taskEntityId = task ? nonEmptyString(task['id']) : null;
+        const updatedAt = nonEmptyString(entry['updatedAt']);
+        if (!task || !taskEntityId || typeof task['content'] !== 'string'
+          || taskId !== `${encodeURIComponent(ownerUserId)}:${taskEntityId}`
+          || !updatedAt || !Number.isFinite(Date.parse(updatedAt))) {
+          throw new Error('parked task cache contains an invalid visible entry');
+        }
+        return [entry];
       });
 
       return {
@@ -303,18 +401,21 @@ export class DisasterBackupLocalStateReader {
       return [];
     }
 
-    const db = await openExistingDb('nanoflow-retry-queue');
-    const items = db
+    const fallbackItems = parseRetryQueueLocalStorageItems(
+      readRetryQueueLocalStorageValue(),
+    );
+    const db = await openExistingDb(RETRY_QUEUE_DB_NAME);
+    const indexedDbItems = db
       ? await (async () => {
           try {
-            return await getAllFromStore(db, 'offline_mutation_queue');
+            return await getAllFromStore(db, RETRY_QUEUE_STORE_NAME);
           } finally {
             db.close();
           }
         })()
-      : (safeParseJson(safeGetLocalStorage('nanoflow.retry-queue')) ?? []) as unknown[];
+      : [];
 
-    return items.filter((item) => resolveRetryQueueItemOwner(item) === ownerUserId);
+    return mergeRetryQueueExportItems(indexedDbItems, fallbackItems, ownerUserId);
   }
 
   private async readActionQueue(ownerUserId: string | null): Promise<unknown> {
@@ -352,4 +453,313 @@ export class DisasterBackupLocalStateReader {
       readOwnerScopedLocalStorage(LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY, ownerUserId),
     ) ?? []) as unknown[];
   }
+}
+
+function readRetryQueueLocalStorageValue(): string | null {
+  if (typeof localStorage === 'undefined') return null;
+  try {
+    return localStorage.getItem(RETRY_QUEUE_STORAGE_KEY);
+  } catch (error) {
+    throw new Error(`RetryQueue localStorage read failed: ${formatError(error)}`);
+  }
+}
+
+function readTombstoneLocalStorage(key: string, absentValue: unknown): unknown {
+  let raw: string | null;
+  try {
+    raw = localStorage.getItem(key);
+  } catch (error) {
+    throw new Error(`Tombstone localStorage read failed for ${key}: ${formatError(error)}`);
+  }
+  if (raw === null) return absentValue;
+
+  try {
+    return JSON.parse(raw);
+  } catch (error) {
+    throw new Error(`Tombstone localStorage contains invalid JSON for ${key}: ${formatError(error)}`);
+  }
+}
+
+function parseRetryQueueLocalStorageItems(raw: string | null): UnknownRecord[] {
+  if (raw === null) return [];
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new Error(`RetryQueue localStorage is invalid JSON: ${formatError(error)}`);
+  }
+
+  let items: unknown[] | null = null;
+  if (Array.isArray(parsed)) {
+    items = parsed;
+  } else if (isUnknownRecord(parsed) && Array.isArray(parsed['items'])) {
+    if (parsed['version'] !== RETRY_QUEUE_STORAGE_VERSION) {
+      throw new Error(`RetryQueue localStorage has unsupported version: ${String(parsed['version'])}`);
+    }
+    items = parsed['items'];
+  }
+  if (!items) {
+    throw new Error('RetryQueue localStorage has invalid shape');
+  }
+  if (items.some(item => !isUnknownRecord(item))) {
+    throw new Error('RetryQueue localStorage contains invalid item(s)');
+  }
+  return items as UnknownRecord[];
+}
+
+function mergeRetryQueueExportItems(
+  indexedDbItems: unknown[],
+  fallbackItems: UnknownRecord[],
+  ownerUserId: string,
+): UnknownRecord[] {
+  const merged: RetryQueueExportEntry[] = [];
+  const byId = new Map<string, RetryQueueExportEntry>();
+  const byOperationId = new Map<string, RetryQueueExportEntry>();
+  const byEntity = new Map<string, RetryQueueExportEntry>();
+
+  appendRetryQueueExportItems(
+    merged,
+    byId,
+    byOperationId,
+    byEntity,
+    indexedDbItems,
+    'IndexedDB',
+  );
+  appendRetryQueueExportItems(
+    merged,
+    byId,
+    byOperationId,
+    byEntity,
+    fallbackItems,
+    'localStorage',
+  );
+
+  return merged
+    .filter(entry => entry.identity.ownerUserId === ownerUserId)
+    .map(entry => entry.item)
+    .sort(compareRetryQueueItems);
+}
+
+function appendRetryQueueExportItems(
+  merged: RetryQueueExportEntry[],
+  byId: Map<string, RetryQueueExportEntry>,
+  byOperationId: Map<string, RetryQueueExportEntry>,
+  byEntity: Map<string, RetryQueueExportEntry>,
+  items: unknown[],
+  source: RetryQueueExportSource,
+): void {
+  for (const item of items) {
+    if (!isUnknownRecord(item)) {
+      throw new Error(`RetryQueue ${source} contains invalid item(s)`);
+    }
+    const identity = readRetryQueueExportIdentity(item, source);
+    const idMatch = byId.get(identity.id);
+    const operationIdMatch = byOperationId.get(identity.operationId);
+    const entityMatch = byEntity.get(identity.entityKey);
+    const existing = idMatch ?? operationIdMatch ?? entityMatch;
+    if (existing) {
+      if ((idMatch && idMatch !== existing)
+        || (operationIdMatch && operationIdMatch !== existing)
+        || (entityMatch && entityMatch !== existing)
+        || !sameRetryQueueExportIdentity(existing.identity, identity)) {
+        throwRetryQueueExportDivergence(item, existing, source);
+      }
+
+      const winner = selectRetryQueueExportWinner(existing.item, item);
+      if (!winner) throwRetryQueueExportDivergence(item, existing, source);
+      if (winner === item) {
+        existing.item = item;
+        existing.source = source;
+      }
+      continue;
+    }
+
+    const entry = { item, source, identity };
+    merged.push(entry);
+    byId.set(identity.id, entry);
+    byOperationId.set(identity.operationId, entry);
+    byEntity.set(identity.entityKey, entry);
+  }
+}
+
+function readRetryQueueExportIdentity(
+  item: UnknownRecord,
+  source: RetryQueueExportSource,
+): RetryQueueExportIdentity {
+  const id = requireRetryQueueString(item, 'id', source);
+  const operationId = requireRetryQueueString(item, 'operationId', source);
+  const ownerUserId = requireRetryQueueString(item, 'sourceUserId', source);
+  const type = requireRetryQueueString(item, 'type', source);
+  requireRetryQueueString(item, 'operation', source);
+  const data = item['data'];
+  if (!isUnknownRecord(data)) {
+    throw new Error(`RetryQueue ${source} item ${id} has invalid data`);
+  }
+  const entityId = requireRetryQueueString(data, 'id', source, `item ${id} data`);
+  if (!Number.isInteger(item['retryCount']) || (item['retryCount'] as number) < 0) {
+    throw new Error(`RetryQueue ${source} item ${id} has invalid retryCount`);
+  }
+  if (typeof item['createdAt'] !== 'number' || !Number.isFinite(item['createdAt'])) {
+    throw new Error(`RetryQueue ${source} item ${id} has invalid createdAt`);
+  }
+  return {
+    id,
+    operationId,
+    ownerUserId,
+    entityKey: `${ownerUserId}\u0000${type}\u0000${entityId}`,
+  };
+}
+
+function requireRetryQueueString(
+  item: UnknownRecord,
+  field: string,
+  source: RetryQueueExportSource,
+  label = 'item',
+): string {
+  const value = nonEmptyString(item[field]);
+  if (!value) {
+    throw new Error(`RetryQueue ${source} ${label} requires non-empty ${field}`);
+  }
+  return value;
+}
+
+function sameRetryQueueExportIdentity(
+  left: RetryQueueExportIdentity,
+  right: RetryQueueExportIdentity,
+): boolean {
+  return left.id === right.id
+    && left.operationId === right.operationId
+    && left.ownerUserId === right.ownerUserId
+    && left.entityKey === right.entityKey;
+}
+
+function selectRetryQueueExportWinner(
+  existing: UnknownRecord,
+  incoming: UnknownRecord,
+): UnknownRecord | null {
+  if (canonicalRetryQueueExportItem(existing) === canonicalRetryQueueExportItem(incoming)) {
+    return existing;
+  }
+  if (canonicalRetryQueueExportItem(existing, true) !== canonicalRetryQueueExportItem(incoming, true)) {
+    return null;
+  }
+
+  const existingRetryCount = existing['retryCount'] as number;
+  const incomingRetryCount = incoming['retryCount'] as number;
+  if (existingRetryCount !== incomingRetryCount) {
+    return incomingRetryCount > existingRetryCount ? incoming : existing;
+  }
+  const existingFailureAt = retryQueueFailureRecordedAt(existing);
+  const incomingFailureAt = retryQueueFailureRecordedAt(incoming);
+  if (existingFailureAt !== incomingFailureAt) {
+    return incomingFailureAt > existingFailureAt ? incoming : existing;
+  }
+  return null;
+}
+
+function retryQueueFailureRecordedAt(item: UnknownRecord): number {
+  const failure = item['lastFailure'];
+  return isUnknownRecord(failure)
+    && typeof failure['recordedAt'] === 'number'
+    && Number.isFinite(failure['recordedAt'])
+    ? failure['recordedAt']
+    : -1;
+}
+
+function isCanonicalProjectCursorRecord(
+  value: unknown,
+  expectedKey: string,
+  ownerUserId: string,
+  projectId: string,
+): value is UnknownRecord {
+  if (!isUnknownRecord(value)) return false;
+  const committedAt = value['committedAt'];
+  const cursor = value['cursor'];
+  return value['key'] === expectedKey
+    && value['scope'] === 'project'
+    && value['userId'] === ownerUserId
+    && value['projectId'] === projectId
+    && typeof committedAt === 'string'
+    && Number.isFinite(Date.parse(committedAt))
+    && isProjectSyncCursor(cursor)
+    && Number.isFinite(Date.parse(cursor.updatedAt));
+}
+
+function canonicalRetryQueueExportItem(item: UnknownRecord, omitRetryState = false): string {
+  const comparable: UnknownRecord = { ...item };
+  if (omitRetryState) {
+    delete comparable['retryCount'];
+    delete comparable['lastFailure'];
+  }
+  if (item['type'] === 'task' && isUnknownRecord(item['data'])) {
+    const data = { ...item['data'] };
+    delete data['displayId'];
+    comparable['data'] = data;
+  }
+  return stableStringify(comparable);
+}
+
+function throwRetryQueueExportDivergence(
+  item: UnknownRecord,
+  existing: RetryQueueExportEntry,
+  source: RetryQueueExportSource,
+): never {
+  const id = nonEmptyString(item['id']) ?? 'missing-id';
+  const operationId = nonEmptyString(item['operationId']) ?? 'missing-operationId';
+  throw new Error(
+    `RetryQueue export divergence for id ${id}, operationId ${operationId} between ${existing.source} and ${source}`,
+  );
+}
+
+function compareRetryQueueItems(left: UnknownRecord, right: UnknownRecord): number {
+  const createdAtComparison = numericSortValue(left['createdAt']) - numericSortValue(right['createdAt']);
+  if (createdAtComparison !== 0) return createdAtComparison;
+
+  const idComparison = compareStrings(nonEmptyString(left['id']) ?? '', nonEmptyString(right['id']) ?? '');
+  if (idComparison !== 0) return idComparison;
+  const operationIdComparison = compareStrings(
+    nonEmptyString(left['operationId']) ?? '',
+    nonEmptyString(right['operationId']) ?? '',
+  );
+  return operationIdComparison !== 0
+    ? operationIdComparison
+    : compareStrings(canonicalRetryQueueExportItem(left), canonicalRetryQueueExportItem(right));
+}
+
+function numericSortValue(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? value
+    : Number.MAX_SAFE_INTEGER;
+}
+
+function compareStrings(left: string, right: string): number {
+  if (left === right) return 0;
+  return left < right ? -1 : 1;
+}
+
+function nonEmptyString(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+function isUnknownRecord(value: unknown): value is UnknownRecord {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(item => stableStringify(item)).join(',')}]`;
+  }
+  if (isUnknownRecord(value)) {
+    return `{${Object.keys(value)
+      .filter(key => value[key] !== undefined)
+      .sort()
+      .map(key => `${JSON.stringify(key)}:${stableStringify(value[key])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'undefined';
+}
+
+function formatError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

@@ -6,50 +6,55 @@ import { AuthService } from '../../../services/auth.service';
 import { LoggerService } from '../../../services/logger.service';
 import { SupabaseClientService } from '../../../services/supabase-client.service';
 import { ToastService } from '../../../services/toast.service';
-import {
-  createBrowserNetworkSuspendedError,
-  resetBrowserNetworkSuspensionTrackingForTests,
-} from '../../../utils/browser-network-suspension';
+import { resetBrowserNetworkSuspensionTrackingForTests } from '../../../utils/browser-network-suspension';
 import { ExternalSourceCacheService } from './external-source-cache.service';
 import { ExternalSourceLinkService } from './external-source-link.service';
 import { registerExternalSourceLinkRefreshSpecs } from './external-source-link-refresh.spec-helpers';
+import { registerExternalSourceLinkResumeSyncSpecs } from './external-source-link-resume-sync.spec-helpers';
+import { ExternalSourceLinkStore } from './external-source-link.store';
 import type { ExternalSourceLink } from './external-source.model';
-
 function setVisibilityState(state: 'visible' | 'hidden') {
-  Object.defineProperty(document, 'visibilityState', {
-    value: state,
-    writable: true,
-    configurable: true,
-  });
+  Object.defineProperty(document, 'visibilityState', { value: state, writable: true, configurable: true });
 }
-
 function createDeferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
   let reject!: (reason?: unknown) => void;
   const promise = new Promise<T>((promiseResolve, promiseReject) => {
-    resolve = promiseResolve;
-    reject = promiseReject;
+    resolve = promiseResolve; reject = promiseReject;
   });
   return { promise, reject, resolve };
 }
-
+function externalSourceLink(overrides: Partial<ExternalSourceLink> = {}): ExternalSourceLink {
+  const targetId = overrides.targetId ?? '20260426123456-abc1234';
+  const createdAt = overrides.createdAt ?? '2026-06-08T00:00:00.000Z';
+  return {
+    id: overrides.id ?? '00000000-0000-4000-8000-000000000000',
+    taskId: overrides.taskId ?? 'task-1', sourceType: 'siyuan-block', targetId,
+    uri: overrides.uri ?? `siyuan://blocks/${targetId}?focus=1`, label: overrides.label,
+    hpath: overrides.hpath, role: overrides.role, sortOrder: overrides.sortOrder ?? 0,
+    deletedAt: overrides.deletedAt ?? null, createdAt, updatedAt: overrides.updatedAt ?? createdAt,
+  };
+}
+type UpsertError = { code?: string; status?: number; message: string } | Error;
+type UpsertResult = { error: UpsertError | null };
+const SECOND_OWNER_ID = '00000000-0000-0000-0000-000000000002';
 describe('ExternalSourceLinkService', () => {
   let upsertPayloads: unknown[];
+  let upsertAttempts: Array<{ table: string; payload: unknown }>;
   let upsertCallCount = 0;
   let selectCallCount = 0;
+  let selectRangeCallCount = 0;
+  let selectCursorValues: Array<string | null> = [];
   let authUser = signal('00000000-0000-0000-0000-000000000001');
+  let authFence = signal('auth-fence-a');
   let shouldFailUpsert = false;
-  let upsertError: { code?: string; status?: number; message: string } | Error | null = null;
-  let upsertErrorQueue: Array<{ code?: string; status?: number; message: string } | Error> = [];
+  let upsertError: UpsertError | null = null;
+  let upsertErrorQueue: UpsertError[] = [];
   let selectError: Error | null = null;
   let remoteRows: unknown[] = [];
+  let deferredUpsertCall: { index: number; gate: ReturnType<typeof createDeferred<UpsertResult>> } | null;
   let clientAsyncMock: ReturnType<typeof vi.fn>;
-  let loggerCategoryMock: {
-    warn: ReturnType<typeof vi.fn>;
-    info: ReturnType<typeof vi.fn>;
-    debug: ReturnType<typeof vi.fn>;
-    error: ReturnType<typeof vi.fn>;
-  };
+  let loggerCategoryMock: Record<'warn' | 'info' | 'debug' | 'error', ReturnType<typeof vi.fn>>;
 
   beforeEach(async () => {
     await clear();
@@ -57,30 +62,62 @@ describe('ExternalSourceLinkService', () => {
     resetBrowserNetworkSuspensionTrackingForTests();
     setVisibilityState('visible');
     upsertPayloads = [];
+    upsertAttempts = [];
     upsertCallCount = 0;
     selectCallCount = 0;
+    selectRangeCallCount = 0;
+    selectCursorValues = [];
     authUser = signal('00000000-0000-0000-0000-000000000001');
+    authFence = signal('auth-fence-a');
     shouldFailUpsert = false;
     upsertError = null;
     upsertErrorQueue = [];
+    deferredUpsertCall = null;
     selectError = null;
     remoteRows = [];
     loggerCategoryMock = { warn: vi.fn(), info: vi.fn(), debug: vi.fn(), error: vi.fn() };
     const from = vi.fn((table: string) => ({
       select: vi.fn(() => {
+        let idCursor: string | null = null;
         const query = {
           eq: vi.fn(() => query),
+          gt: vi.fn((column: string, value: string) => {
+            if (column === 'id') idCursor = value;
+            return query;
+          }),
           order: vi.fn(() => query),
           range: vi.fn(async (fromIndex: number, toIndex: number) => {
             selectCallCount += 1;
+            selectRangeCallCount += 1;
             if (selectError) return { data: null, error: selectError };
             return { data: remoteRows.slice(fromIndex, toIndex + 1), error: null };
+          }),
+          limit: vi.fn(async (count: number) => {
+            selectCallCount += 1;
+            selectCursorValues.push(idCursor);
+            if (selectError) return { data: null, error: selectError };
+            const orderedRows = [...remoteRows].sort((left, right) =>
+              String((left as { id?: unknown }).id ?? '')
+                .localeCompare(String((right as { id?: unknown }).id ?? '')),
+            );
+            const visibleRows = idCursor === null
+              ? orderedRows
+              : orderedRows.filter(row =>
+                String((row as { id?: unknown }).id ?? '') > idCursor!,
+              );
+            return { data: visibleRows.slice(0, count), error: null };
           }),
         };
         return query;
       }),
       upsert: vi.fn(async (payload: unknown) => {
         upsertCallCount += 1;
+        upsertAttempts.push({ table, payload });
+        if (deferredUpsertCall?.index === upsertCallCount) {
+          const gate = deferredUpsertCall.gate;
+          deferredUpsertCall = null;
+          return gate.promise;
+        }
         const queuedError = upsertErrorQueue.shift();
         if (queuedError) return { error: queuedError };
         if (upsertError) return { error: upsertError };
@@ -94,7 +131,10 @@ describe('ExternalSourceLinkService', () => {
     TestBed.configureTestingModule({
       providers: [
         ExternalSourceLinkService,
-        { provide: AuthService, useValue: { currentUserId: authUser } },
+        { provide: AuthService, useValue: {
+          currentUserId: authUser,
+          captureAuthIdentityFence: () => authFence(),
+        } },
         { provide: SupabaseClientService, useValue: { clientAsync: clientAsyncMock } },
         { provide: ToastService, useValue: { success: vi.fn(), info: vi.fn(), error: vi.fn() } },
         { provide: LoggerService, useValue: { category: () => loggerCategoryMock } },
@@ -233,7 +273,10 @@ describe('ExternalSourceLinkService', () => {
     TestBed.configureTestingModule({
       providers: [
         ExternalSourceLinkService,
-        { provide: AuthService, useValue: { currentUserId: authUser } },
+        { provide: AuthService, useValue: {
+          currentUserId: authUser,
+          captureAuthIdentityFence: () => authFence(),
+        } },
         { provide: SupabaseClientService, useValue: { clientAsync: clientAsyncMock } },
         { provide: ToastService, useValue: { success: vi.fn(), info: vi.fn(), error: vi.fn() } },
         { provide: LoggerService, useValue: { category: () => loggerCategoryMock } },
@@ -268,6 +311,90 @@ describe('ExternalSourceLinkService', () => {
     expect(await cache.loadLinks()).toHaveLength(0);
     expect(await cache.loadPendingLinks()).toHaveLength(0);
   });
+  it('aborts an import when the owner changes across an await boundary', async () => {
+    clientAsyncMock.mockImplementation(async () => null);
+    const cache = TestBed.inject(ExternalSourceCacheService), ownerALoad = createDeferred<ExternalSourceLink[]>();
+    vi.spyOn(cache, 'loadLinks').mockImplementationOnce(() => ownerALoad.promise);
+    const service = TestBed.inject(ExternalSourceLinkService);
+    const commitProject = vi.fn().mockResolvedValue(undefined);
+    const importPromise = service.importPointers([externalSourceLink()], commitProject);
+    authUser.set('00000000-0000-0000-0000-000000000002');
+    ownerALoad.resolve([]);
+    await expect(importPromise).rejects.toThrow(/owner changed/i);
+    expect(commitProject).not.toHaveBeenCalled();
+    expect(service.links()).toEqual([]);
+    for (const ownerId of ['00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000002']) {
+      authUser.set(ownerId);
+      expect(await Promise.all([cache.loadLinks(), cache.loadPendingLinks()])).toEqual([[], []]);
+    }
+  });
+  it('does not flush staged import links until the project commit succeeds', async () => {
+    const service = TestBed.inject(ExternalSourceLinkService);
+    await service.ensureLoaded();
+    await service.flushPendingLinks();
+    upsertCallCount = 0; upsertPayloads = [];
+    const commitGate = createDeferred<void>();
+    const commitProject = vi.fn(() => commitGate.promise);
+    const importPromise = service.importPointers([externalSourceLink()], commitProject);
+    await vi.waitFor(() => expect(commitProject).toHaveBeenCalledTimes(1));
+    const flushPromise = service.flushPendingLinks();
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(upsertCallCount).toBe(0);
+    commitGate.resolve();
+    await Promise.all([importPromise, flushPromise]);
+    expect(upsertCallCount).toBe(1);
+    expect(upsertPayloads[0]).toEqual(expect.objectContaining({
+      payload: expect.objectContaining({ id: '00000000-0000-4000-8000-000000000000' }),
+    }));
+  });
+  it('restores a duplicate link ID snapshot when the second write fails and preserves a concurrent operation', async () => {
+    clientAsyncMock.mockImplementation(async () => null);
+    const cache = TestBed.inject(ExternalSourceCacheService), store = TestBed.inject(ExternalSourceLinkStore);
+    const existing = externalSourceLink({ id: '11111111-1111-4111-8111-111111111111', targetId: '20260608110000-aaaaaaa', label: 'existing' });
+    await cache.saveLinks([existing]);
+    const existingPending = await cache.upsertPendingLink(existing, { resetRetryCount: true });
+    const service = TestBed.inject(ExternalSourceLinkService);
+    await service.ensureLoaded();
+    const first = externalSourceLink({ ...existing, targetId: '20260608110200-ccccccc', label: 'first duplicate', updatedAt: '2026-06-08T00:01:00.000Z', uri: undefined });
+    const second = externalSourceLink({ ...existing, targetId: '20260608110300-ddddddd', label: 'second duplicate', updatedAt: '2026-06-08T00:02:00.000Z', uri: undefined });
+    const concurrent = externalSourceLink({ id: '22222222-2222-4222-8222-222222222222', targetId: '20260608110400-eeeeeee', label: 'concurrent' });
+    const originalSaveLinks = cache.saveLinks.bind(cache);
+    let saveCallCount = 0, concurrentPending: Awaited<ReturnType<ExternalSourceCacheService['upsertPendingLink']>> | undefined;
+    vi.spyOn(cache, 'saveLinks').mockImplementation(async (links, userId) => {
+      if (++saveCallCount === 2) {
+        const concurrentLinks = [...await cache.loadLinks(userId), concurrent];
+        concurrentPending = await cache.upsertPendingLink(concurrent, { resetRetryCount: true });
+        await originalSaveLinks(concurrentLinks, userId);
+        store.replaceAll(concurrentLinks);
+        throw new Error('second duplicate persist failed');
+      }
+      await originalSaveLinks(links, userId);
+    });
+    await expect(service.importPointers([first, second])).rejects.toThrow('second duplicate persist failed');
+    const localById = new Map((await cache.loadLinks()).map(link => [link.id, link])), storeById = new Map(service.links().map(link => [link.id, link]));
+    const pendingById = new Map((await cache.loadPendingLinks()).map(entry => [entry.link.id, entry]));
+    expect([localById.get(existing.id), storeById.get(existing.id)]).toEqual([existing, existing]);
+    expect([localById.get(concurrent.id), storeById.get(concurrent.id)]).toEqual([concurrent, concurrent]);
+    expect(pendingById.get(existing.id)).toEqual(existingPending);
+    expect(pendingById.get(concurrent.id)).toEqual(concurrentPending);
+  });
+  it('rolls back the imported link batch when the project commit callback fails', async () => {
+    clientAsyncMock.mockImplementation(async () => null);
+    const service = TestBed.inject(ExternalSourceLinkService);
+    const cache = TestBed.inject(ExternalSourceCacheService);
+    const links = [
+      externalSourceLink({ id: '55555555-5555-4555-8555-555555555555',
+        taskId: 'task-project-failure-1', targetId: '20260608110600-ggggggg' }),
+      externalSourceLink({ id: '66666666-6666-4666-8666-666666666666',
+        taskId: 'task-project-failure-2', targetId: '20260608110700-hhhhhhh', sortOrder: 1 }),
+    ];
+    const commitProject = vi.fn().mockRejectedValue(new Error('project persist failed'));
+    await expect(service.importPointers(links, commitProject)).rejects.toThrow('project persist failed');
+    expect(commitProject).toHaveBeenCalledTimes(1);
+    expect(await cache.loadLinks()).toEqual([]);
+    expect(service.links()).toEqual([]);
+    expect(await cache.loadPendingLinks()).toEqual([]);
+  });
 
   it('reloads local links when the current owner changes', async () => {
     const service = TestBed.inject(ExternalSourceLinkService);
@@ -284,24 +411,10 @@ describe('ExternalSourceLinkService', () => {
     const service = TestBed.inject(ExternalSourceLinkService);
     const cache = TestBed.inject(ExternalSourceCacheService);
     const now = new Date().toISOString();
-    const ownerALink: ExternalSourceLink = {
-      id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
-      taskId: 'task-owner-a',
-      sourceType: 'siyuan-block',
-      targetId: '20260614000000-ownerA',
-      uri: 'siyuan://blocks/20260614000000-ownerA?focus=1',
-      sortOrder: 0,
-      deletedAt: null,
-      createdAt: now,
-      updatedAt: now,
-    };
-    const ownerBLink: ExternalSourceLink = {
-      ...ownerALink,
-      id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
-      taskId: 'task-owner-b',
-      targetId: '20260614000000-ownerB',
-      uri: 'siyuan://blocks/20260614000000-ownerB?focus=1',
-    };
+    const ownerALink = externalSourceLink({ id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      taskId: 'task-owner-a', targetId: '20260614000000-ownerA', createdAt: now, updatedAt: now });
+    const ownerBLink = externalSourceLink({ ...ownerALink, id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      taskId: 'task-owner-b', targetId: '20260614000000-ownerB', uri: undefined });
     const ownerALocal = createDeferred<ExternalSourceLink[]>();
     vi.spyOn(cache, 'loadLinks')
       .mockImplementationOnce(() => ownerALocal.promise)
@@ -475,21 +588,12 @@ describe('ExternalSourceLinkService', () => {
 
   it('pushLocalNewerLinks preserves tombstone pending after unique-conflict fallback', async () => {
     const service = TestBed.inject(ExternalSourceLinkService) as unknown as {
-      pushLocalNewerLinks(localLinks: Array<Record<string, unknown>>, remoteLinks: Array<Record<string, unknown>>): Promise<void>;
+      pushLocalNewerLinks(localLinks: ExternalSourceLink[], remoteLinks: ExternalSourceLink[]): Promise<void>;
     };
     const cache = TestBed.inject(ExternalSourceCacheService);
     const now = new Date().toISOString();
-    const link = {
-      id: 'ffffffff-ffff-ffff-ffff-ffffffffffff',
-      taskId: 'task-1',
-      sourceType: 'siyuan-block' as const,
-      targetId: '20260426123456-def5678',
-      uri: 'siyuan://blocks/20260426123456-def5678?focus=1',
-      sortOrder: 0,
-      deletedAt: null,
-      createdAt: now,
-      updatedAt: now,
-    };
+    const link = externalSourceLink({ id: 'ffffffff-ffff-ffff-ffff-ffffffffffff',
+      targetId: '20260426123456-def5678', createdAt: now, updatedAt: now });
     upsertErrorQueue.push(
       { code: '23505', message: 'duplicate key value violates unique constraint' },
       new Error('tombstone offline'),
@@ -506,35 +610,25 @@ describe('ExternalSourceLinkService', () => {
 
   it('pushLocalNewerLinks records a durable pending operation before successful direct push', async () => {
     const service = TestBed.inject(ExternalSourceLinkService) as unknown as {
-      pushLocalNewerLinks(localLinks: Array<Record<string, unknown>>, remoteLinks: Array<Record<string, unknown>>): Promise<void>;
+      pushLocalNewerLinks(localLinks: ExternalSourceLink[], remoteLinks: ExternalSourceLink[]): Promise<void>;
     };
     const cache = TestBed.inject(ExternalSourceCacheService);
     const upsertPendingSpy = vi.spyOn(cache, 'upsertPendingLink');
     const removePendingSpy = vi.spyOn(cache, 'removePendingLink');
     const now = new Date().toISOString();
-    const link = {
-      id: 'eeeeeeee-0000-4000-8000-000000000000',
-      taskId: 'task-local-newer',
-      sourceType: 'siyuan-block' as const,
-      targetId: '20260426123456-abc1234',
-      uri: 'siyuan://blocks/20260426123456-abc1234?focus=1',
-      sortOrder: 0,
-      deletedAt: null,
-      createdAt: now,
-      updatedAt: now,
-    };
+    const link = externalSourceLink({ id: 'eeeeeeee-0000-4000-8000-000000000000',
+      taskId: 'task-local-newer', createdAt: now, updatedAt: now });
 
     await service.pushLocalNewerLinks([link], []);
 
     const pendingEntry = await upsertPendingSpy.mock.results[0]?.value;
     const payload = upsertPayloads[0] as { payload: Record<string, unknown> };
     expect(upsertPendingSpy).toHaveBeenCalledWith(link, { resetRetryCount: false });
-    expect(removePendingSpy).toHaveBeenCalledWith(link.id);
+    expect(removePendingSpy).toHaveBeenCalledWith(link.id, pendingEntry.operationId);
     expect(pendingEntry.operationId).toMatch(/[0-9a-f-]{36}/);
     expect(payload.payload.operation_id).toBe(pendingEntry.operationId);
     expect(await cache.loadPendingLinks()).toHaveLength(0);
   });
-
   it('keeps retry counter so transient failures eventually move to dead letter', async () => {
     const service = TestBed.inject(ExternalSourceLinkService);
     const cache = TestBed.inject(ExternalSourceCacheService);
@@ -548,7 +642,89 @@ describe('ExternalSourceLinkService', () => {
     expect(deadLetters).toHaveLength(1);
     expect(deadLetters[0].retryCount).toBeGreaterThan(5);
   });
-
+  it('lets a changed owner wait for the active flight and then flush its own bucket once', async () => {
+    const service = TestBed.inject(ExternalSourceLinkService);
+    const cache = TestBed.inject(ExternalSourceCacheService);
+    const ownerA = authUser();
+    const linkA = externalSourceLink({ id: 'aaaaaaaa-0000-4000-8000-000000000001', taskId: 'task-a' });
+    const linkB = externalSourceLink({ id: 'bbbbbbbb-0000-4000-8000-000000000002', taskId: 'task-b' });
+    await cache.upsertPendingLink(linkA);
+    const gate = createDeferred<UpsertResult>();
+    deferredUpsertCall = { index: 1, gate };
+    const flushA = service.flushPendingLinks();
+    await vi.waitFor(() => expect(upsertCallCount).toBe(1));
+    authUser.set(SECOND_OWNER_ID); authFence.set('auth-fence-b');
+    await cache.upsertPendingLink(linkB);
+    const flushB = service.flushPendingLinks();
+    gate.resolve({ error: null });
+    await Promise.all([flushA, flushB]);
+    expect((await cache.loadPendingLinks(ownerA)).map(entry => entry.link.id)).toEqual([linkA.id]);
+    expect(await cache.loadPendingLinks(SECOND_OWNER_ID)).toHaveLength(0);
+    expect(upsertAttempts.map(attempt => (attempt.payload as { user_id: string }).user_id))
+      .toEqual([ownerA, SECOND_OWNER_ID]);
+  });
+  it('does not settle a failed A request after A to B to A session changes', async () => {
+    const service = TestBed.inject(ExternalSourceLinkService);
+    const cache = TestBed.inject(ExternalSourceCacheService);
+    const ownerA = authUser();
+    const link = externalSourceLink({ id: 'aaaaaaaa-0000-4000-8000-000000000003' });
+    await cache.upsertPendingLink(link);
+    const gate = createDeferred<UpsertResult>();
+    deferredUpsertCall = { index: 1, gate };
+    const flush = service.flushPendingLinks();
+    await vi.waitFor(() => expect(upsertCallCount).toBe(1));
+    authUser.set(SECOND_OWNER_ID); authFence.set('auth-fence-b');
+    authUser.set(ownerA); authFence.set('auth-fence-a-relogin');
+    gate.resolve({ error: new Error('offline') });
+    await flush;
+    expect((await cache.loadPendingLinks(ownerA))[0]).toMatchObject(
+      { retryCount: 0, link: { id: link.id, targetId: link.targetId, deletedAt: null } });
+    expect(loggerCategoryMock.warn).not.toHaveBeenCalled();
+  });
+  it('keeps 23505 tombstone settlement out of a newly current owner view', async () => {
+    const service = TestBed.inject(ExternalSourceLinkService);
+    const cache = TestBed.inject(ExternalSourceCacheService);
+    const ownerA = authUser();
+    const link = externalSourceLink({ id: 'aaaaaaaa-0000-4000-8000-000000000004' });
+    await cache.upsertPendingLink(link);
+    upsertErrorQueue.push({ code: '23505', message: 'duplicate' });
+    const gate = createDeferred<UpsertResult>();
+    deferredUpsertCall = { index: 2, gate };
+    const deletePreview = vi.spyOn(cache, 'deletePreviewsForLink');
+    const toastInfo = vi.mocked(TestBed.inject(ToastService).info);
+    const flush = service.flushPendingLinks();
+    await vi.waitFor(() => expect(upsertCallCount).toBe(2));
+    authUser.set(SECOND_OWNER_ID); authFence.set('auth-fence-b');
+    gate.resolve({ error: null });
+    await flush;
+    expect((await cache.loadPendingLinks(ownerA))[0]).toMatchObject(
+      { retryCount: 0, link: { id: link.id, targetId: link.targetId, deletedAt: null } });
+    expect(await cache.loadLinks(SECOND_OWNER_ID)).toEqual([]);
+    expect(deletePreview).not.toHaveBeenCalled();
+    expect(toastInfo).not.toHaveBeenCalled();
+    expect(selectCallCount).toBe(0);
+  });
+  it('keeps pushLocalNewerLinks settlement in its captured owner bucket', async () => {
+    const service = TestBed.inject(ExternalSourceLinkService) as unknown as {
+      pushLocalNewerLinks(local: ExternalSourceLink[], remote: ExternalSourceLink[]): Promise<void>;
+    };
+    const cache = TestBed.inject(ExternalSourceCacheService);
+    const ownerA = authUser();
+    const linkA = externalSourceLink({ id: 'aaaaaaaa-0000-4000-8000-000000000005', taskId: 'task-a' });
+    const linkB = externalSourceLink({ ...linkA, taskId: 'task-b', targetId: '20260426123456-bbb0002' });
+    const gate = createDeferred<UpsertResult>();
+    deferredUpsertCall = { index: 1, gate };
+    const push = service.pushLocalNewerLinks([linkA], []);
+    await vi.waitFor(() => expect(upsertCallCount).toBe(1));
+    authUser.set(SECOND_OWNER_ID); authFence.set('auth-fence-b');
+    await cache.upsertPendingLink(linkB);
+    gate.resolve({ error: null });
+    await push;
+    expect((await cache.loadPendingLinks(ownerA))[0]).toMatchObject(
+      { retryCount: 0, link: { id: linkA.id, taskId: linkA.taskId } });
+    expect((await cache.loadPendingLinks(SECOND_OWNER_ID))[0]).toMatchObject(
+      { retryCount: 0, link: { id: linkB.id, taskId: linkB.taskId } });
+  });
   it('dedupes concurrent ensureLoaded calls into a single in-flight promise', async () => {
     const service = TestBed.inject(ExternalSourceLinkService);
     const before = clientAsyncMock.mock.calls.length;
@@ -563,19 +739,8 @@ describe('ExternalSourceLinkService', () => {
   it('does not push local links when the initial remote pull fails', async () => {
     const cache = TestBed.inject(ExternalSourceCacheService);
     const now = new Date().toISOString();
-    await cache.saveLinks([
-      {
-        id: '99999999-9999-4999-8999-999999999999',
-        taskId: 'task-local',
-        sourceType: 'siyuan-block',
-        targetId: '20260426123456-abc1234',
-        uri: 'siyuan://blocks/20260426123456-abc1234?focus=1',
-        sortOrder: 0,
-        deletedAt: null,
-        createdAt: now,
-        updatedAt: now,
-      },
-    ]);
+    await cache.saveLinks([externalSourceLink({ id: '99999999-9999-4999-8999-999999999999',
+      taskId: 'task-local', createdAt: now, updatedAt: now })]);
     selectError = new Error('pull failed');
 
     const service = TestBed.inject(ExternalSourceLinkService);
@@ -595,28 +760,10 @@ describe('ExternalSourceLinkService', () => {
     const cache = TestBed.inject(ExternalSourceCacheService);
     void userId; // ownerId 由 auth mock 保证一致
     await cache.saveLinks([
-      {
-        id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
-        taskId: 'task-old',
-        sourceType: 'siyuan-block',
-        targetId: '20250101120000-old0001',
-        uri: 'siyuan://blocks/20250101120000-old0001?focus=1',
-        sortOrder: 0,
-        deletedAt: ancient,
-        createdAt: ancient,
-        updatedAt: ancient,
-      },
-      {
-        id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
-        taskId: 'task-new',
-        sourceType: 'siyuan-block',
-        targetId: '20260426123456-new0001',
-        uri: 'siyuan://blocks/20260426123456-new0001?focus=1',
-        sortOrder: 0,
-        deletedAt: null,
-        createdAt: fresh,
-        updatedAt: fresh,
-      },
+      externalSourceLink({ id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', taskId: 'task-old',
+        targetId: '20250101120000-old0001', deletedAt: ancient, createdAt: ancient, updatedAt: ancient }),
+      externalSourceLink({ id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', taskId: 'task-new',
+        targetId: '20260426123456-new0001', createdAt: fresh, updatedAt: fresh }),
     ]);
 
     const service = TestBed.inject(ExternalSourceLinkService);
@@ -630,6 +777,8 @@ describe('ExternalSourceLinkService', () => {
   registerExternalSourceLinkRefreshSpecs({
     clientAsyncMock: () => clientAsyncMock,
     getSelectCallCount: () => selectCallCount,
+    getSelectRangeCallCount: () => selectRangeCallCount,
+    getSelectCursorValues: () => selectCursorValues,
     getUpsertCallCount: () => upsertCallCount,
     setRemoteRows: (rows) => { remoteRows = rows; },
     setSelectError: (error) => { selectError = error; },
@@ -637,153 +786,13 @@ describe('ExternalSourceLinkService', () => {
     setVisibilityState,
   });
 
-  it('BrowserNetworkSuspendedError 不应消耗思源锚点 pending 的 retry budget', async () => {
-    const service = TestBed.inject(ExternalSourceLinkService);
-    const cache = TestBed.inject(ExternalSourceCacheService);
-
-    upsertError = createBrowserNetworkSuspendedError();
-    await service.bindSiyuanBlock('task-1', '20260426123456-abc1234');
-    await service.flushPendingLinks();
-
-    const pending = await cache.loadPendingLinks();
-    expect(upsertCallCount).toBeGreaterThan(0);
-    expect(pending).toHaveLength(1);
-    expect(pending[0].retryCount).toBe(0);
-    expect(loggerCategoryMock.warn).not.toHaveBeenCalledWith(
-      '推送思源锚点失败，已保留本机重试',
-      expect.objectContaining({ errorCode: 'browser-network-suspended' }),
-    );
-  });
-
-  it('suspension 延后 pushLocalNewerLinks 时应保留已有 pending retryCount', async () => {
-    const service = TestBed.inject(ExternalSourceLinkService) as unknown as {
-      pushLocalNewerLinks(localLinks: Array<Record<string, unknown>>, remoteLinks: Array<Record<string, unknown>>): Promise<void>;
-    };
-    const cache = TestBed.inject(ExternalSourceCacheService);
-    const now = new Date().toISOString();
-    const link = {
-      id: 'dddddddd-dddd-dddd-dddd-dddddddddddd',
-      taskId: 'task-1',
-      sourceType: 'siyuan-block' as const,
-      targetId: '20260426123456-abc1234',
-      uri: 'siyuan://blocks/20260426123456-abc1234?focus=1',
-      sortOrder: 0,
-      deletedAt: null,
-      createdAt: now,
-      updatedAt: now,
-    };
-
-    await cache.upsertPendingLink(link, { resetRetryCount: true });
-    await cache.recordPendingFailure(link.id, 'offline');
-    setVisibilityState('hidden');
-
-    await service.pushLocalNewerLinks([link], []);
-
-    const pending = await cache.loadPendingLinks();
-    expect(pending).toHaveLength(1);
-    expect(pending[0].retryCount).toBe(1);
-  });
-
-  it('continues opportunistic listener cleanup when one removeEventListener throws', async () => {
-    const service = TestBed.inject(ExternalSourceLinkService);
-    await service.ensureLoaded();
-    const documentRemoveSpy = vi
-      .spyOn(document, 'removeEventListener')
-      .mockImplementationOnce(() => {
-        throw new Error('visibility cleanup failed');
-      });
-    const windowRemoveSpy = vi.spyOn(window, 'removeEventListener');
-    const internals = service as unknown as { opportunisticListenersBound: boolean };
-
-    try {
-      expect(() => TestBed.resetTestingModule()).not.toThrow();
-      expect(windowRemoveSpy).toHaveBeenCalledWith('online', expect.any(Function));
-      expect(internals.opportunisticListenersBound).toBe(false);
-    } finally {
-      documentRemoveSpy.mockRestore();
-      windowRemoveSpy.mockRestore();
-    }
-  });
-
-  it('continues opportunistic listener cleanup when cleanup warning logging throws', async () => {
-    const service = TestBed.inject(ExternalSourceLinkService);
-    await service.ensureLoaded();
-    const documentRemoveSpy = vi
-      .spyOn(document, 'removeEventListener')
-      .mockImplementationOnce(() => {
-        throw new Error('visibility cleanup failed');
-      });
-    const windowRemoveSpy = vi.spyOn(window, 'removeEventListener');
-    loggerCategoryMock.warn.mockImplementationOnce(() => {
-      throw new Error('logger unavailable');
-    });
-    const internals = service as unknown as { opportunisticListenersBound: boolean };
-
-    try {
-      expect(() => TestBed.resetTestingModule()).not.toThrow();
-      expect(windowRemoveSpy).toHaveBeenCalledWith('online', expect.any(Function));
-      expect(internals.opportunisticListenersBound).toBe(false);
-      expect(loggerCategoryMock.warn).toHaveBeenCalledWith(
-        '思源锚点 visibility 监听解绑失败，继续清理其他监听',
-        expect.objectContaining({ message: 'visibility cleanup failed' }),
-      );
-    } finally {
-      documentRemoveSpy.mockRestore();
-      windowRemoveSpy.mockRestore();
-    }
-  });
-
-  it('resume sync timer 注册失败时不应打穿恢复事件链路', async () => {
-    const service = TestBed.inject(ExternalSourceLinkService);
-    await service.ensureLoaded();
-    const scheduleError = new Error('schedule resume sync failed');
-    const setTimeoutSpy = vi
-      .spyOn(window, 'setTimeout')
-      .mockImplementation(() => {
-        throw scheduleError;
-      });
-
-    try {
-      expect(() => {
-        (service as unknown as { scheduleResumeSync: (forceRefresh?: boolean) => void })
-          .scheduleResumeSync(true);
-      }).not.toThrow();
-
-      expect(loggerCategoryMock.warn).toHaveBeenCalledWith(
-        '思源锚点恢复 timer 注册失败，等待下一次恢复事件重试',
-        expect.objectContaining({ message: 'schedule resume sync failed' }),
-      );
-    } finally {
-      setTimeoutSpy.mockRestore();
-    }
-  });
-
-  it('destroy cleanup 清理 resume sync timer 失败时仍应完成销毁', async () => {
-    const service = TestBed.inject(ExternalSourceLinkService);
-    await service.ensureLoaded();
-    const timerId = 456 as unknown as ReturnType<typeof window.setTimeout>;
-    const setTimeoutSpy = vi
-      .spyOn(window, 'setTimeout')
-      .mockImplementation(() => timerId);
-    const clearTimeoutSpy = vi
-      .spyOn(window, 'clearTimeout')
-      .mockImplementation(() => {
-        throw new Error('clear resume sync failed');
-      });
-
-    try {
-      (service as unknown as { scheduleResumeSync: (forceRefresh?: boolean) => void })
-        .scheduleResumeSync(true);
-
-      expect(() => TestBed.resetTestingModule()).not.toThrow();
-      expect(clearTimeoutSpy).toHaveBeenCalledWith(timerId);
-      expect(loggerCategoryMock.warn).toHaveBeenCalledWith(
-        '思源锚点恢复 timer 清理失败，继续清理其他资源',
-        expect.objectContaining({ message: 'clear resume sync failed' }),
-      );
-    } finally {
-      setTimeoutSpy.mockRestore();
-      clearTimeoutSpy.mockRestore();
-    }
+  registerExternalSourceLinkResumeSyncSpecs({
+    service: () => TestBed.inject(ExternalSourceLinkService),
+    cache: () => TestBed.inject(ExternalSourceCacheService),
+    createLink: externalSourceLink,
+    getUpsertCallCount: () => upsertCallCount,
+    setUpsertError: (error) => { upsertError = error; },
+    logger: () => loggerCategoryMock,
+    setVisibilityState,
   });
 });

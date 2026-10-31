@@ -18,6 +18,7 @@ export interface ActionQueueOwnerStorageRuntime {
 export type QueueSnapshot = {
   found: boolean;
   queue: QueuedAction[];
+  removedActionIdentities?: string[];
   corrupted?: boolean;
   storageKey?: string;
   error?: unknown;

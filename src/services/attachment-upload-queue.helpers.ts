@@ -3,7 +3,10 @@ import { ATTACHMENT_CONFIG } from '../config';
 import { SCAN_STATUS } from '../config/virus-scan.config';
 import type { EnqueueParams, AttachmentUploadPayload } from './action-queue.types';
 import { FILE_TYPE_VALIDATION_CONFIG } from './file-type-validator.service';
-import type { SavePendingAttachmentUploadInput } from './attachment-upload-outbox.service';
+import type {
+  PendingAttachmentUploadIdentity,
+  SavePendingAttachmentUploadInput,
+} from './attachment-upload-outbox.service';
 import {
   buildAttachmentStoragePath,
   isValidAttachmentPathSegment,
@@ -22,6 +25,11 @@ export interface AttachmentUploadContext {
 export interface AttachmentUploadSuccess {
   success: true;
   attachment: Attachment;
+  queuedUpload: QueuedAttachmentUploadReceipt;
+}
+
+export interface QueuedAttachmentUploadReceipt extends PendingAttachmentUploadIdentity {
+  actionId: string;
 }
 
 export interface AttachmentUploadFailure {
@@ -42,7 +50,7 @@ interface QueuePendingLocalAttachmentUploadInput {
   taskId: string;
   updateProgress(fileName: string, progress: number, status: 'pending'): void;
   uploadOutbox: {
-    removePendingUpload(blobKey: string): Promise<void>;
+    removePendingUpload(identity: PendingAttachmentUploadIdentity): Promise<void>;
     savePendingUpload(input: SavePendingAttachmentUploadInput): Promise<void>;
   };
   userId: string;
@@ -197,6 +205,8 @@ export async function queuePendingLocalAttachmentUpload(
 
   try {
     await input.uploadOutbox.savePendingUpload({
+      ownerUserId: input.userId,
+      operationId,
       attachmentId: input.context.attachmentId,
       blobKey,
       fileName: input.file.name,
@@ -219,13 +229,30 @@ export async function queuePendingLocalAttachmentUpload(
 
   if (!actionId) {
     if (!enqueueCommitStateUnknown) {
-      await input.uploadOutbox.removePendingUpload(blobKey);
+      await input.uploadOutbox.removePendingUpload({
+        ownerUserId: input.userId,
+        operationId,
+        blobKey,
+      });
     }
     return { success: false, error: '附件上传队列持久化失败' };
   }
 
   input.updateProgress(input.file.name, 0, 'pending');
-  return { success: true, attachment };
+  return {
+    success: true,
+    attachment,
+    queuedUpload: createQueuedAttachmentUploadReceipt(input.userId, actionId, operationId, blobKey),
+  };
+}
+
+function createQueuedAttachmentUploadReceipt(
+  ownerUserId: string,
+  actionId: string,
+  operationId: string,
+  blobKey: string,
+): QueuedAttachmentUploadReceipt {
+  return { actionId, ownerUserId, operationId, blobKey };
 }
 
 async function enqueuePendingLocalAttachmentAction(

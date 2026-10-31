@@ -72,6 +72,16 @@ export function hasProjectRetryForOwner(
   return items.some(item => isProjectRetryForOwner(item, projectId, sourceUserId));
 }
 
+export function hasProtectiveRetryQueueWriteForProject(
+  items: readonly RetryQueueItem[],
+  projectId: string,
+  sourceUserId: string,
+): boolean {
+  return items.some(item => isProjectScopedRetryItem(item, projectId)
+    && item.sourceUserId === sourceUserId
+    && !(item.type === 'project' && item.operation === 'delete'));
+}
+
 export function selectProjectRetryTaskIdsToDeleteForOwner(
   items: readonly RetryQueueItem[],
   projectId: string,

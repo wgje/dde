@@ -2,27 +2,29 @@
 import { Injectable, inject } from '@angular/core';
 import { AUTH_CONFIG } from '../config/auth.config';
 import { AuthService } from './auth.service';
-import { QueueBackupService } from './queue-backup.service';
+import {
+  QueueBackupService,
+  type QueueBackupRestoreSnapshot,
+  type QueueBackupStrictUpdateResult,
+} from './queue-backup.service';
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
+import { trackLocalBackupUiRestoreWriterPromise } from './local-backup-ui-restore-writer-quiescence-tracker';
 import type { DeadLetterItem, QueuedAction } from './action-queue.types';
 import {
   appendCappedDeadLetterItem,
-  buildFailedOwnerDeadLetterReason,
   LOCAL_QUEUE_CONFIG,
   type QueueRetryError,
 } from './action-queue-storage.helpers';
 import type { ActionQueueOwnerStorageRuntime, QueueSnapshot } from './action-queue-owner-storage.types';
 import { ActionQueueOwnerStorageLegacyQuarantine } from './action-queue-owner-storage-legacy-quarantine.helper';
 import {
-  buildFailedActionRetryQueue,
-  createFailedActionSettlement,
   shouldKeepAfterProjectDeleteSettlement,
-  type FailedActionSettlement,
 } from './action-queue-owner-storage-failed-settlement.helpers';
 import {
   extractRestorableDeadLetters,
   mergeRestoredDeadLetters,
+  normalizeStoredDeadLetters,
 } from './action-queue-owner-dead-letter-restore.helpers';
 import {
   normalizeQueueForOutbox,
@@ -31,11 +33,16 @@ import {
   loadPersistedQueueForOwner,
   loadQueueMutationBaseForOwner,
   persistQueueMutationForOwner,
+  saveLocalQueueMirrorForOwner,
   saveQueueSnapshotForOwner,
+  settleFailedOwnerAction,
 } from './action-queue-owner-storage-queue-persistence';
 import {
+  createActionQueueOwnerStorageStagingRuntime,
   loadCurrentQueueFromStorage as loadCurrentQueueFromStorageWithDeps,
+  type ActionQueueOwnerStorageStageResult,
 } from './action-queue-owner-storage-load.helpers';
+import type { OwnerStorageRestoreOutcome } from './action-queue-restore-barrier.controller';
 import {
   handleOwnerQueueLocalStorageWriteFailure,
   handleOwnerQueueQuotaExceeded,
@@ -53,6 +60,7 @@ export class ActionQueueOwnerStorageService {
   private readonly toast = inject(ToastService);
   private readonly authService = inject(AuthService);
   private readonly queueBackup = inject(QueueBackupService);
+  private readonly stagingRuntimes = new WeakSet<ActionQueueOwnerStorageRuntime>();
   private readonly legacyQuarantine = new ActionQueueOwnerStorageLegacyQuarantine({
     getCurrentOwnerUserId: () => this.getCurrentOwnerUserId(),
     getScopedStorageKey: (baseKey, ownerUserId) => this.getScopedStorageKey(baseKey, ownerUserId),
@@ -109,10 +117,10 @@ export class ActionQueueOwnerStorageService {
       this.getScopedStorageKey(baseKey, ownerUserId),
     loadScopedOrLegacyStorage: (baseKey: string, runtime: ActionQueueOwnerStorageRuntime) =>
       this.loadScopedOrLegacyStorage(baseKey, runtime),
-    restoreQueueFromBackup: (
+    restoreQueueSnapshotFromBackup: (
       ownerUserId: string,
       runtime: ActionQueueOwnerStorageRuntime,
-    ) => this.restoreQueueFromBackup(ownerUserId, runtime),
+    ) => this.restoreQueueSnapshotFromBackup(ownerUserId, runtime),
     handleUnrecoverableCorruptQueueSnapshot: (
       ownerUserId: string,
       snapshot: QueueSnapshot,
@@ -120,7 +128,12 @@ export class ActionQueueOwnerStorageService {
     ) => this.handleUnrecoverableCorruptQueueSnapshot(ownerUserId, snapshot, runtime),
   };
   private readonly writeFailureDeps = {
-    queueBackup: this.queueBackup,
+    queueBackup: {
+      backupQueue: (queue: QueuedAction[], ownerUserId?: string) => {
+        const owner = ownerUserId ?? this.getCurrentOwnerUserId();
+        return this.trackBackup(owner, () => this.queueBackup.backupQueue(queue, owner));
+      },
+    },
     logger: this.logger,
     toast: this.toast,
     getCurrentOwnerUserId: () => this.getCurrentOwnerUserId(),
@@ -130,6 +143,12 @@ export class ActionQueueOwnerStorageService {
 
   getCurrentOwnerUserId(): string {
     return this.authService.currentUserId() ?? AUTH_CONFIG.LOCAL_MODE_USER_ID;
+  }
+
+  private trackBackup<T>(ownerUserId: string, backup: () => Promise<T>): Promise<T> {
+    if (typeof localStorage === 'undefined') return backup();
+    return trackLocalBackupUiRestoreWriterPromise(ownerUserId, 'action-queue',
+      backup, { continuation: true });
   }
 
   getScopedStorageKey(baseKey: string, ownerUserId = this.getCurrentOwnerUserId()): string {
@@ -174,6 +193,27 @@ export class ActionQueueOwnerStorageService {
     runtime: ActionQueueOwnerStorageRuntime,
   ): Promise<QueuedAction[] | null> {
     return persistQueueMutationForOwner(ownerUserId, updater, runtime, this.queueMutation);
+  }
+
+  async persistQueueMutationStrictlyForOwner(
+    ownerUserId: string,
+    updater: (queue: QueuedAction[]) => QueuedAction[],
+    runtime: ActionQueueOwnerStorageRuntime,
+  ): Promise<QueueBackupStrictUpdateResult> {
+    try {
+      const result = await this.trackBackup(ownerUserId, () =>
+        this.queueBackup.updateQueueStrictly(
+          ownerUserId,
+          queue => normalizeQueueForOutbox(updater(queue)),
+        ));
+      if (result.status === 'committed') {
+        saveLocalQueueMirrorForOwner(ownerUserId, result.queue, runtime, this.queuePersistence);
+      }
+      return result;
+    } catch (error) {
+      this.logger.warn('IndexedDB owner-scoped strict mutation 失败', { ownerUserId, error });
+      return { status: 'storage-failed' };
+    }
   }
 
   async settleSuccessfulActionForOwner(
@@ -264,97 +304,13 @@ export class ActionQueueOwnerStorageService {
     error: string | QueueRetryError,
     runtime: ActionQueueOwnerStorageRuntime,
   ): Promise<'retry' | 'dead-letter' | 'missing'> {
-    const queue = await loadQueueMutationBaseForOwner(ownerUserId, runtime, this.queueLoad);
-    const existingAction = queue.find(item => item.id === action.id);
-    if (!existingAction) {
-      this.logger.debug('旧 owner 队列中未找到待收口的失败 action', {
-        ownerUserId,
-        actionId: action.id,
-      });
-      return 'missing';
-    }
-
-    const settlement = createFailedActionSettlement(existingAction, error);
-
-    if (settlement.shouldDeadLetter) {
-      await this.moveFailedOwnerActionToDeadLetter(ownerUserId, action.id, existingAction, settlement, runtime);
-      return 'dead-letter';
-    }
-
-    let retried = false;
-    const updatedQueue = await this.persistQueueMutationForOwner(
-      ownerUserId,
-      latestQueue => {
-        retried = latestQueue.some(item => item.id === action.id);
-        return retried
-          ? buildFailedActionRetryQueue(latestQueue, action.id, settlement)
-          : latestQueue;
-      },
-      runtime,
-    );
-
-    if (updatedQueue === null) {
-      throw new Error(`owner-scoped 失败 action 重试收口保存失败: ${ownerUserId}`);
-    }
-
-    if (!retried) {
-      this.logger.debug('旧 owner 队列中未找到待收口的失败 action', {
-        ownerUserId,
-        actionId: action.id,
-      });
-      return 'missing';
-    }
-
-    return 'retry';
-  }
-
-  private async moveFailedOwnerActionToDeadLetter(
-    ownerUserId: string,
-    actionId: string,
-    existingAction: QueuedAction,
-    settlement: FailedActionSettlement,
-    runtime: ActionQueueOwnerStorageRuntime,
-  ): Promise<void> {
-    const deadLetters = await this.buildOwnerDeadLetterQueue(ownerUserId, actionId, {
-      action: {
-        ...existingAction,
-        lastError: settlement.errorMessage,
-        errorType: settlement.errorType,
-        syncState: 'dead_letter',
-      },
-      failedAt: new Date().toISOString(),
-      reason: buildFailedOwnerDeadLetterReason(
-        settlement.errorType,
-        settlement.errorMessage,
-      ),
+    return settleFailedOwnerAction(ownerUserId, action, error, runtime, {
+      logger: this.logger,
+      loadQueue: () => loadQueueMutationBaseForOwner(ownerUserId, runtime, this.queueLoad),
+      persistQueueMutation: updater => this.persistQueueMutationForOwner(ownerUserId, updater, runtime),
+      buildDeadLetterQueue: (actionId, item) => this.buildOwnerDeadLetterQueue(ownerUserId, actionId, item),
+      saveDeadLetterQueue: queue => this.saveDeadLetterSnapshotForOwner(ownerUserId, queue),
     });
-    if (!this.saveDeadLetterSnapshotForOwner(ownerUserId, deadLetters)) {
-      runtime.freezeQueueWrites('storage_failure');
-      runtime.triggerStorageFailureEscapeMode();
-      throw new Error(`owner-scoped dead-letter 保存失败: ${ownerUserId}`);
-    }
-
-    let removed = false;
-    const updatedQueue = await this.persistQueueMutationForOwner(
-      ownerUserId,
-      latestQueue => {
-        const nextQueue = latestQueue.filter(item => item.id !== actionId);
-        removed = nextQueue.length !== latestQueue.length;
-        return nextQueue;
-      },
-      runtime,
-    );
-
-    if (updatedQueue === null) {
-      throw new Error(`owner-scoped dead-letter 队列收口保存失败: ${ownerUserId}`);
-    }
-
-    if (!removed) {
-      this.logger.debug('旧 owner 队列中未找到待移入 dead-letter 的失败 action', {
-        ownerUserId,
-        actionId,
-      });
-    }
   }
 
   async appendActionForOwner(
@@ -390,6 +346,7 @@ export class ActionQueueOwnerStorageService {
     if (legacyValue === null) {
       return null;
     }
+    if (this.stagingRuntimes.has(runtime)) return null;
 
     if (baseKey === LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY) {
       this.legacyQuarantine.quarantineLegacyQueueStorageValue(legacyValue, baseKey, runtime);
@@ -409,6 +366,7 @@ export class ActionQueueOwnerStorageService {
     runtime: ActionQueueOwnerStorageRuntime,
   ): Promise<QueuedAction[] | null> {
     const queue = await this.queueBackup.restoreQueue(ownerUserId, (legacyItems) => {
+      if (this.stagingRuntimes.has(runtime)) return;
       this.legacyQuarantine.quarantineLegacyQueueForReview(
         legacyItems.map((item) => item.action),
         'legacy-idb-backup',
@@ -416,6 +374,23 @@ export class ActionQueueOwnerStorageService {
       );
     });
     return queue ? normalizeQueueForOutbox(queue) : null;
+  }
+
+  private async restoreQueueSnapshotFromBackup(ownerUserId: string, runtime: ActionQueueOwnerStorageRuntime): Promise<QueueBackupRestoreSnapshot | null> {
+    const restoreSnapshot = this.queueBackup.restoreQueueSnapshot?.bind(this.queueBackup);
+    if (!restoreSnapshot) {
+      const actions = await this.restoreQueueFromBackup(ownerUserId, runtime);
+      return actions === null ? null : { recordFound: true, actions, savedAt: null };
+    }
+    const snapshot = await restoreSnapshot(ownerUserId, legacyItems => {
+      if (this.stagingRuntimes.has(runtime)) return;
+      this.legacyQuarantine.quarantineLegacyQueueForReview(
+        legacyItems.map(item => item.action),
+        'legacy-idb-backup',
+        runtime,
+      );
+    });
+    return snapshot ? { ...snapshot, actions: normalizeQueueForOutbox(snapshot.actions) } : null;
   }
 
   backupQueue(queue: QueuedAction[], ownerUserId = this.getCurrentOwnerUserId()): Promise<boolean> {
@@ -429,13 +404,17 @@ export class ActionQueueOwnerStorageService {
     }
 
     try {
-      const queueStorageKey = this.getScopedStorageKey(LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY);
       const queue = runtime.pendingActions();
-      localStorage.setItem(queueStorageKey, JSON.stringify(queue));
-      this.clearLegacyGlobalStorageIfLocalOwner(LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY);
-      void this.queueBackup.backupQueue(queue, this.getCurrentOwnerUserId()).catch((error: unknown) => {
+      const ownerUserId = this.getCurrentOwnerUserId();
+      writeOwnerScopedLocalStorageValue(
+        LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY,
+        this.getCurrentOwnerUserId(),
+        queue,
+        (baseKey, ownerUserId) => this.getScopedStorageKey(baseKey, ownerUserId),
+      );
+      void this.trackBackup(ownerUserId, () => this.queueBackup.backupQueue(queue, ownerUserId)).catch((error: unknown) => {
         this.logger.warn('owner-scoped 队列已写入 localStorage，但 IndexedDB 备份镜像失败', {
-          ownerUserId: this.getCurrentOwnerUserId(),
+          ownerUserId,
           error,
         });
       });
@@ -460,14 +439,41 @@ export class ActionQueueOwnerStorageService {
     restoreOwnerUserId: string,
     getCurrentRestoreGeneration: () => number,
     runtime: ActionQueueOwnerStorageRuntime,
-  ): void {
-    loadCurrentQueueFromStorageWithDeps(
+  ): Promise<OwnerStorageRestoreOutcome> {
+    return loadCurrentQueueFromStorageWithDeps(
       restoreGeneration,
       restoreOwnerUserId,
       getCurrentRestoreGeneration,
       runtime,
       this.currentQueueLoad,
     );
+  }
+
+  async stageCurrentOwnerStorage(
+    restoreGeneration: number,
+    restoreOwnerUserId: string,
+    getCurrentRestoreGeneration: () => number,
+  ): Promise<ActionQueueOwnerStorageStageResult> {
+    const staging = createActionQueueOwnerStorageStagingRuntime();
+    this.stagingRuntimes.add(staging.runtime);
+    const queueOutcome = await this.loadCurrentQueueFromStorage(
+      restoreGeneration,
+      restoreOwnerUserId,
+      getCurrentRestoreGeneration,
+      staging.runtime,
+    );
+    if (queueOutcome !== 'ready') return { outcome: queueOutcome };
+    const deadLetterOutcome = await this.loadCurrentDeadLettersFromStorage(
+      restoreGeneration,
+      restoreOwnerUserId,
+      getCurrentRestoreGeneration,
+      staging.runtime,
+      false,
+    );
+    if (deadLetterOutcome !== 'ready') return { outcome: deadLetterOutcome };
+    if (restoreGeneration !== getCurrentRestoreGeneration()
+      || restoreOwnerUserId !== this.getCurrentOwnerUserId()) return { outcome: 'stale' };
+    return { outcome: 'ready', state: staging.capture() };
   }
 
   private handleUnrecoverableCorruptQueueSnapshot(
@@ -486,7 +492,6 @@ export class ActionQueueOwnerStorageService {
     runtime.freezeQueueWrites('corrupt_local_queue_snapshot');
     runtime.triggerStorageFailureEscapeMode();
   }
-
 
   saveCurrentDeadLettersToStorage(runtime: ActionQueueOwnerStorageRuntime): boolean {
     const ownerUserId = this.getCurrentOwnerUserId();
@@ -510,85 +515,101 @@ export class ActionQueueOwnerStorageService {
     }
   }
 
-  loadCurrentDeadLettersFromStorage(runtime: ActionQueueOwnerStorageRuntime): void {
-    const ownerUserId = this.getCurrentOwnerUserId();
-    let shouldRestoreBackup = true;
-
+  loadCurrentDeadLettersFromStorage(
+    restoreGeneration: number, restoreOwnerUserId: string,
+    getCurrentRestoreGeneration: () => number, runtime: ActionQueueOwnerStorageRuntime, persistRestoredSnapshot = true,
+  ): Promise<OwnerStorageRestoreOutcome> {
+    let localSnapshotCorrupt = false;
     if (typeof localStorage !== 'undefined') {
       try {
         const saved = this.loadScopedOrLegacyStorage(LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY, runtime);
         if (!saved) {
-          this.restoreDeadLetterBackupIntoRuntime(ownerUserId, runtime);
-          return;
+          return this.restoreDeadLetterBackupIntoRuntime(
+            restoreGeneration, restoreOwnerUserId, getCurrentRestoreGeneration, runtime, false,
+            persistRestoredSnapshot,
+          );
         }
-
         const queue = JSON.parse(saved) as DeadLetterItem[];
         if (!Array.isArray(queue)) {
-          this.restoreDeadLetterBackupIntoRuntime(ownerUserId, runtime);
-          return;
+          localSnapshotCorrupt = true;
+          return this.restoreDeadLetterBackupIntoRuntime(
+            restoreGeneration, restoreOwnerUserId, getCurrentRestoreGeneration, runtime, true,
+            persistRestoredSnapshot,
+          );
         }
-
         // §5.6：死信是失败写入的最后一份副本，必须随时可导出/可重放。
         // 超龄条目只提示不删除（等效替用户 dismiss 属于静默丢失），
         // 容量上限 MAX_DEAD_LETTER_SIZE 负责封顶；非法 failedAt 修复为当前时间保留。
-        const now = Date.now();
-        let repairedCount = 0;
-        let agedCount = 0;
-        const validQueue = queue.map(item => {
-          const failedTime = new Date(item.failedAt).getTime();
-          if (!Number.isFinite(failedTime)) {
-            repairedCount += 1;
-            return { ...item, failedAt: new Date(now).toISOString() };
-          }
-          if (now - failedTime >= LOCAL_QUEUE_CONFIG.DEAD_LETTER_TTL) {
-            agedCount += 1;
-          }
-          return item;
-        });
-
-        runtime.setDeadLetterQueue(validQueue);
-        runtime.setDeadLetterSize(validQueue.length);
+        const normalized = normalizeStoredDeadLetters(queue);
+        runtime.setDeadLetterQueue(normalized.queue);
+        runtime.setDeadLetterSize(normalized.queue.length);
         runtime.syncSentryContext();
-        shouldRestoreBackup = false;
-
-        if (repairedCount > 0) {
+        if (normalized.repairedCount > 0 && persistRestoredSnapshot) {
           this.saveCurrentDeadLettersToStorage(runtime);
-          this.logger.warn(`修复了 ${repairedCount} 个死信条目的非法 failedAt 时间戳`);
+          this.logger.warn(`修复了 ${normalized.repairedCount} 个死信条目的非法 failedAt 时间戳`);
         }
-        if (agedCount > 0) {
-          this.logger.info(`${agedCount} 个死信条目已超过 24 小时未处理，仍保留供导出/重试/放弃`);
+        if (normalized.agedCount > 0) {
+          this.logger.info(`${normalized.agedCount} 个死信条目已超过 24 小时未处理，仍保留供导出/重试/放弃`);
         }
+        return Promise.resolve('ready');
       } catch (e) {
+        localSnapshotCorrupt = true;
         this.logger.warn('Failed to load dead letter queue from storage; IndexedDB backup restore will still be attempted', {
           error: e,
         });
       }
     }
-
-    if (shouldRestoreBackup) {
-      this.restoreDeadLetterBackupIntoRuntime(ownerUserId, runtime);
-    }
+    return this.restoreDeadLetterBackupIntoRuntime(
+      restoreGeneration,
+      restoreOwnerUserId,
+      getCurrentRestoreGeneration,
+      runtime,
+      localSnapshotCorrupt,
+      persistRestoredSnapshot,
+    );
   }
-
   private restoreDeadLetterBackupIntoRuntime(
-    ownerUserId: string,
-    runtime: ActionQueueOwnerStorageRuntime,
-  ): void {
-    void this.queueBackup.restoreDeadLetters(ownerUserId).then(backupDeadLetters => {
-      if (!backupDeadLetters || backupDeadLetters.length === 0) {
-        return;
+    restoreGeneration: number, ownerUserId: string,
+    getCurrentRestoreGeneration: () => number, runtime: ActionQueueOwnerStorageRuntime,
+    localSnapshotCorrupt: boolean,
+    persistRestoredSnapshot: boolean,
+  ): Promise<OwnerStorageRestoreOutcome> {
+    return this.queueBackup.restoreDeadLetters(ownerUserId).then(backupDeadLetters => {
+      if (ownerUserId !== this.getCurrentOwnerUserId()) {
+        if (backupDeadLetters && backupDeadLetters.length > 0) {
+          this.restoreDeadLettersFromBackupItems(
+            ownerUserId, backupDeadLetters, runtime, persistRestoredSnapshot,
+          );
+        }
+        return 'stale';
       }
-
-      const restoredCount = this.restoreDeadLettersFromBackupItems(ownerUserId, backupDeadLetters, runtime);
-      if (restoredCount > 0 && ownerUserId === this.getCurrentOwnerUserId()) {
+      if (restoreGeneration !== getCurrentRestoreGeneration()) return 'stale';
+      if (!backupDeadLetters || backupDeadLetters.length === 0) {
+        if (localSnapshotCorrupt) {
+          runtime.freezeQueueWrites('storage_failure');
+          runtime.triggerStorageFailureEscapeMode();
+          return 'failed';
+        }
+        return 'ready';
+      }
+      const restoredCount = this.restoreDeadLettersFromBackupItems(
+        ownerUserId, backupDeadLetters, runtime, persistRestoredSnapshot,
+      );
+      if (restoredCount > 0) {
         this.toast.info('死信队列恢复', `从备用存储恢复了 ${restoredCount} 个失败操作`);
         runtime.clearQueueFreeze();
       }
+      return 'ready';
     }).catch((error: unknown) => {
+      if (restoreGeneration !== getCurrentRestoreGeneration()
+        || ownerUserId !== this.getCurrentOwnerUserId()) return 'stale';
       this.logger.warn('IndexedDB 死信队列备份恢复失败，保留当前死信队列视图', {
         ownerUserId,
         error,
       });
+      runtime.freezeQueueWrites('storage_failure');
+      runtime.triggerStorageFailureEscapeMode();
+      return 'failed';
     });
   }
 
@@ -596,6 +617,7 @@ export class ActionQueueOwnerStorageService {
     ownerUserId: string,
     items: unknown[],
     runtime: ActionQueueOwnerStorageRuntime,
+    persistSnapshot = true,
   ): number {
     const backupDeadLetters = extractRestorableDeadLetters(
       items,
@@ -617,7 +639,7 @@ export class ActionQueueOwnerStorageService {
       return 0;
     }
 
-    if (!this.saveDeadLetterSnapshotForOwner(ownerUserId, mergeResult.queue)) {
+    if (persistSnapshot && !this.saveDeadLetterSnapshotForOwner(ownerUserId, mergeResult.queue)) {
       runtime.freezeQueueWrites('storage_failure');
       runtime.triggerStorageFailureEscapeMode();
       return 0;
@@ -696,7 +718,9 @@ export class ActionQueueOwnerStorageService {
     queue: DeadLetterItem[],
     reason: string,
   ): void {
-    void this.queueBackup.backupDeadLetters(queue, ownerUserId).then(success => {
+    const pending = this.trackBackup(ownerUserId,
+      () => this.queueBackup.backupDeadLetters(queue, ownerUserId));
+    void pending.then(success => {
       if (!success) {
         this.logger.warn('IndexedDB dead-letter 备份失败', {
           ownerUserId,

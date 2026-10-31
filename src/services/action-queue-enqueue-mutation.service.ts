@@ -10,12 +10,44 @@ import {
   QueuedAction,
 } from './action-queue.types';
 import { createSyncOperationId } from '../utils/sync-operation-id';
+import {
+  persistBulkDurableEnqueueMutation,
+  runBulkDurableEnqueue,
+} from './action-queue-bulk-durable-enqueue.helpers';
+import {
+  enqueueActionQueueForForeignOwner,
+  type PersistQueueMutationWithRetrySupersession,
+} from './action-queue-owner-view.helpers';
 
 export interface EnqueueMutationResult {
   nextQueue: QueuedAction[];
   resolvedActionId: string;
   wasEnqueued: boolean;
   wasMergeShrunk: boolean;
+}
+
+export interface ActionQueueDurableEnqueueRuntime {
+  getCurrentOwnerUserId: () => string;
+  enqueueCurrent: (action: EnqueueParams, autoProcess: boolean) => Promise<string>;
+  enqueueManyCurrent: (actions: EnqueueParams[]) => Promise<string[]>;
+  enqueueForOwner: (ownerUserId: string, action: EnqueueParams) => Promise<string>;
+  warnIfQueueFrozen: (action: EnqueueParams) => void;
+  persistQueueMutationForOwner: (
+    ownerUserId: string,
+    updater: (queue: QueuedAction[]) => QueuedAction[],
+  ) => Promise<QueuedAction[] | null>;
+  persistQueueMutationWithRetrySupersession?: PersistQueueMutationWithRetrySupersession;
+  applyPersistedCurrentOwnerQueue: (queue: QueuedAction[]) => void;
+  completeDurableEnqueueSideEffects: (
+    action: EnqueueParams,
+    queuedAction: QueuedAction,
+    resolvedActionId: string,
+    removeRetrySourceOnSuccess: boolean,
+  ) => void;
+  isOnline: () => boolean;
+  processQueue: () => Promise<unknown>;
+  info: (message: string, context: Record<string, unknown>) => void;
+  warn: (message: string, context: unknown) => void;
 }
 
 @Injectable({
@@ -45,6 +77,87 @@ export class ActionQueueEnqueueMutationService {
     };
   }
 
+  enqueueManyDurably(
+    actions: EnqueueParams[],
+    runtime: ActionQueueDurableEnqueueRuntime,
+  ): Promise<string[]> {
+    return runBulkDurableEnqueue({
+      actions,
+      enqueueSingle: action => runtime.enqueueCurrent(action, true),
+      warnIfQueueFrozen: runtime.warnIfQueueFrozen,
+      getCurrentOwnerUserId: runtime.getCurrentOwnerUserId,
+      createQueuedAction: action => this.createQueuedAction(action),
+      buildCurrentOwnerEnqueueMutation: (queue, action, queuedAction) =>
+        this.buildCurrentOwnerEnqueueMutation(queue, action, queuedAction),
+      persistQueueMutationForOwner: runtime.persistQueueMutationForOwner,
+      persistQueueMutationWithRetrySupersession:
+        runtime.persistQueueMutationWithRetrySupersession,
+      applyPersistedCurrentOwnerQueue: runtime.applyPersistedCurrentOwnerQueue,
+      completeDurableEnqueueSideEffects: runtime.completeDurableEnqueueSideEffects,
+      isOnline: runtime.isOnline,
+      processQueue: runtime.processQueue,
+      warn: runtime.warn,
+    });
+  }
+
+  enqueueDurablyForOwner(
+    ownerUserId: string,
+    action: EnqueueParams,
+    runtime: ActionQueueDurableEnqueueRuntime,
+  ): Promise<string> {
+    if (ownerUserId === runtime.getCurrentOwnerUserId()) {
+      return runtime.enqueueCurrent(action, false);
+    }
+    return enqueueActionQueueForForeignOwner({
+      ownerUserId,
+      action,
+      createQueuedAction: currentAction => this.createQueuedAction(currentAction),
+      persistQueueMutationForOwner: runtime.persistQueueMutationForOwner,
+      buildForeignOwnerEnqueueMutation: (queue, currentAction, queuedAction, targetOwnerUserId) =>
+        this.buildForeignOwnerEnqueueMutation(queue, currentAction, queuedAction, targetOwnerUserId),
+      logInfo: runtime.info,
+    });
+  }
+
+  async enqueueManyDurablyForOwner(
+    ownerUserId: string,
+    actions: EnqueueParams[],
+    runtime: ActionQueueDurableEnqueueRuntime,
+  ): Promise<string[]> {
+    if (actions.length === 0) return [];
+    if (ownerUserId === runtime.getCurrentOwnerUserId()) return runtime.enqueueManyCurrent(actions);
+    if (actions.length === 1) {
+      const actionId = await runtime.enqueueForOwner(ownerUserId, actions[0]);
+      return actionId ? [actionId] : [];
+    }
+
+    actions.forEach(runtime.warnIfQueueFrozen);
+    const outcome = await persistBulkDurableEnqueueMutation({
+      actions,
+      getCurrentOwnerUserId: () => ownerUserId,
+      createQueuedAction: action => this.createQueuedAction(action),
+      buildCurrentOwnerEnqueueMutation: (queue, action, queuedAction) =>
+        this.buildForeignOwnerEnqueueMutation(queue, action, queuedAction, ownerUserId),
+      persistQueueMutationForOwner: runtime.persistQueueMutationForOwner,
+    });
+    if (outcome.error || !outcome.persistedQueue || outcome.resolvedActionIds.length !== actions.length) {
+      runtime.warn('ActionQueue owner-scoped bulk durable enqueue 未能完成原子持久化', {
+        ownerUserId,
+        actionCount: actions.length,
+        resolvedActionCount: outcome.resolvedActionIds.length,
+        rejectedEntityType: outcome.rejectedAction?.entityType,
+        rejectedEntityId: outcome.rejectedAction?.entityId,
+        error: outcome.error,
+      });
+      return [];
+    }
+    runtime.info('已将批量离线操作 durably 写入指定 owner 队列', {
+      ownerUserId,
+      actionCount: actions.length,
+    });
+    return [...outcome.resolvedActionIds];
+  }
+
   notifyQueuePressureOnce(title: string, message: string): void {
     const now = Date.now();
     if (now - this.lastQueuePressureNoticeAt < this.QUEUE_PRESSURE_NOTICE_COOLDOWN) {
@@ -72,7 +185,9 @@ export class ActionQueueEnqueueMutationService {
       };
     }
 
-    const existingIndex = this.findMergeableActionIndex(nextQueue, action);
+    const existingIndex = queuedAction.syncState === 'held'
+      ? -1
+      : this.findMergeableActionIndex(nextQueue, action);
 
     if (existingIndex === -1) {
       nextQueue.push(queuedAction);
@@ -129,7 +244,9 @@ export class ActionQueueEnqueueMutationService {
       };
     }
 
-    const existingIndex = this.findMergeableActionIndex(nextQueue, action);
+    const existingIndex = queuedAction.syncState === 'held'
+      ? -1
+      : this.findMergeableActionIndex(nextQueue, action);
 
     if (existingIndex !== -1) {
       const deduped = this.applyExistingActionMerge(nextQueue, existingIndex, action, queuedAction, queue);
@@ -163,7 +280,8 @@ export class ActionQueueEnqueueMutationService {
       existing.entityType === action.entityType &&
       existing.entityId === action.entityId &&
       existing.retryCount === 0 &&
-      existing.syncState !== 'syncing'
+      existing.syncState !== 'syncing' &&
+      existing.syncState !== 'held'
     );
   }
 
@@ -180,6 +298,10 @@ export class ActionQueueEnqueueMutationService {
       return { nextQueue: originalQueue, resolvedActionId: '', wasEnqueued: false, wasMergeShrunk: false };
     }
 
+    if (existing.retryQueueSupersessions?.length && this.hasAttemptedOutboxAction(existing)) {
+      return null;
+    }
+
     if (existing.type === 'update' && action.type === 'update') {
       this.logger.debug(`合并重复的update操作`, { entityType: action.entityType, entityId: action.entityId });
       nextQueue[existingIndex] = this.preserveExistingOutboxIdentity(existing, this.mergeQueuedAction(existing, queuedAction));
@@ -192,6 +314,12 @@ export class ActionQueueEnqueueMutationService {
         existing,
         { ...this.mergeQueuedAction(existing, queuedAction), type: 'create' },
       );
+      return { nextQueue, resolvedActionId: existing.id, wasEnqueued: true, wasMergeShrunk: false };
+    }
+
+    if (existing.type === 'create' && action.type === 'delete'
+      && existing.retryQueueSupersessions?.length) {
+      nextQueue[existingIndex] = this.preserveExistingOutboxIdentity(existing, queuedAction);
       return { nextQueue, resolvedActionId: existing.id, wasEnqueued: true, wasMergeShrunk: false };
     }
 
@@ -290,6 +418,9 @@ export class ActionQueueEnqueueMutationService {
       ...nextPayload,
       userId: nextPayload.userId || existingPayload.userId,
       sourceUserId: nextPayload.sourceUserId ?? existingPayload.sourceUserId,
+      baseUpdatedAt: nextPayload.baseUpdatedAt === undefined
+        ? existingPayload.baseUpdatedAt
+        : nextPayload.baseUpdatedAt,
       preferences: {
         ...existingPayload.preferences,
         ...nextPayload.preferences,
@@ -309,7 +440,22 @@ export class ActionQueueEnqueueMutationService {
       timestamp: existing.timestamp,
       localCommittedAt: existing.localCommittedAt ?? existing.timestamp,
       syncState: existing.syncState ?? 'pending_sync',
+      retryQueueSupersessions: this.mergeRetrySupersessions(
+        existing.retryQueueSupersessions,
+        merged.retryQueueSupersessions,
+      ),
     };
+  }
+
+  private mergeRetrySupersessions(
+    existing: QueuedAction['retryQueueSupersessions'],
+    incoming: QueuedAction['retryQueueSupersessions'],
+  ): QueuedAction['retryQueueSupersessions'] {
+    const merged = new Map(
+      [...(existing ?? []), ...(incoming ?? [])]
+        .map(reservation => [reservation.token, reservation]),
+    );
+    return merged.size > 0 ? Array.from(merged.values()) : undefined;
   }
 
   private hasAttemptedOutboxAction(action: QueuedAction): boolean {

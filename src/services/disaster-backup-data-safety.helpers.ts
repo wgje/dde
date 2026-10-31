@@ -8,6 +8,11 @@ export function buildDisasterBackupDataSafetySnapshot(context: {
   retryQueue: unknown[];
   actionQueue: unknown;
   deadLetters: unknown[];
+  syncState?: {
+    lastSyncTime: string | null;
+    pendingCount: number;
+  } | null;
+  projectCursors?: unknown[];
   dataSafetyAuditPersistence: DataSafetyAuditPersistence;
 }): BackupDataSafetySnapshot | undefined {
   if (!context.ownerUserId) {
@@ -16,7 +21,7 @@ export function buildDisasterBackupDataSafetySnapshot(context: {
 
   const actionQueue = Array.isArray(context.actionQueue) ? context.actionQueue : [];
   const persistedAudit =
-    context.dataSafetyAuditPersistence.load(context.ownerUserId);
+    context.dataSafetyAuditPersistence.loadForExport(context.ownerUserId);
   const replayLog = [
     ...persistedAudit.replayLog,
     ...context.retryQueue.map(item => toDataSafetyReplayEntry(item, 'retryQueue')),
@@ -34,23 +39,39 @@ export function buildDisasterBackupDataSafetySnapshot(context: {
     schemaVersion: '1.0.0',
     exportedAt,
     ownerUserId: context.ownerUserId,
-    syncSnapshot: {
-      syncState: {
-        lastSyncTime: null,
-        pendingCount: context.retryQueue.length + actionQueue.length,
-      },
-      projectCursors: [],
-      queueCounts: {
-        retryQueue: context.retryQueue.length,
-        actionQueue: actionQueue.length,
-        deadLetters: context.deadLetters.length,
-      },
-    },
+    syncSnapshot: buildDataSafetySyncSnapshot({
+      syncState: context.syncState,
+      projectCursors: context.projectCursors,
+      retryQueueCount: context.retryQueue.length,
+      actionQueueCount: actionQueue.length,
+      deadLetterCount: context.deadLetters.length,
+    }),
     replayLog,
     replayPlan,
     lastWriteExplain: persistedAudit.lastWriteExplain ?? (replayLog.length > 0
       ? toDataSafetyLastWriteExplain(replayLog[replayLog.length - 1], context.ownerUserId)
       : null),
+  };
+}
+
+function buildDataSafetySyncSnapshot(input: {
+  syncState?: { lastSyncTime: string | null; pendingCount: number } | null;
+  projectCursors?: unknown[];
+  retryQueueCount: number;
+  actionQueueCount: number;
+  deadLetterCount: number;
+}): BackupDataSafetySnapshot['syncSnapshot'] {
+  return {
+    syncState: input.syncState ?? {
+      lastSyncTime: null,
+      pendingCount: input.retryQueueCount + input.actionQueueCount,
+    },
+    projectCursors: input.projectCursors ?? [],
+    queueCounts: {
+      retryQueue: input.retryQueueCount,
+      actionQueue: input.actionQueueCount,
+      deadLetters: input.deadLetterCount,
+    },
   };
 }
 
@@ -127,10 +148,13 @@ function toDataSafetyReplayEntry(
   const entityId = readDataSafetyEntityId(record, data, payload);
   const entityType = readString(record['entityType']) ?? readString(record['type']);
   const operation = readString(record['operation']) ?? readString(record['type']);
+  const operationId = readString(record['operationId']);
+  if (!operationId) {
+    return null;
+  }
 
   return {
-    operationId: readString(record['operationId'])
-      ?? `${source}:${readString(record['id']) ?? entityId}`,
+    operationId,
     entityType: entityType ?? 'unknown',
     entityId,
     operation: operation ?? 'unknown',

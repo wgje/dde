@@ -1,4 +1,4 @@
-import { Component, inject, output, input, computed, viewChild, ElementRef, isDevMode, ChangeDetectionStrategy, effect, signal } from '@angular/core';
+import { Component, inject, output, input, computed, viewChild, ElementRef, isDevMode, ChangeDetectionStrategy, effect } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { LoggerService } from '../../../services/logger.service';
@@ -14,37 +14,24 @@ import { DockEngineService } from '../../../services/dock-engine.service';
 import { FocusPreferenceService } from '../../../services/focus-preference.service';
 import { GateService } from '../../../services/gate.service';
 import { LocalBackupUIService } from './settings-modal/local-backup-ui.service';
+import { SiyuanSettingsUIService } from './settings-modal/siyuan-settings-ui.service';
 import { SettingsModalAppearanceComponent } from './settings-modal-appearance.component';
 import { ThemeType, ColorMode, Project } from '../../../models';
-import { SIYUAN_CONFIG } from '../../../config/siyuan.config';
-import { ExternalSourceCacheService } from '../../core/external-sources/external-source-cache.service';
-import { SiyuanPreviewService } from '../../core/external-sources/siyuan/siyuan-preview.service';
-import { isTrustedSiyuanDirectBaseUrl } from '../../core/external-sources/siyuan/siyuan-direct-provider';
-import type { SiyuanRuntimeMode } from '../../core/external-sources/external-source.model';
 import {
   runAttachmentImportWorkflow,
 } from './settings-modal-attachment-import.helpers';
-import {
-  formatSiyuanDiagnosisMessage,
-  formatSiyuanExtensionStatusClass,
-  formatSiyuanExtensionStatusMessage,
-  formatSiyuanPushConfigError,
-  formatSiyuanTokenLabel,
-  formatSiyuanTokenPlaceholder,
-  resolveSiyuanExtensionSupported,
-  SIYUAN_TOKEN_MASK,
-  type SiyuanExtensionStatusView,
-} from './settings-modal-siyuan-view.helpers';
 
 @Component({
   selector: 'app-settings-modal',
   standalone: true,
   imports: [CommonModule, FormsModule, SettingsModalAppearanceComponent],
-  providers: [LocalBackupUIService],
+  providers: [LocalBackupUIService, SiyuanSettingsUIService],
   changeDetection: ChangeDetectionStrategy.OnPush,
   templateUrl: './settings-modal.component.html',
 })
 export class SettingsModalComponent {
+  private readonly siyuanUI = inject(SiyuanSettingsUIService);
+
   constructor() {
     // 组件初始化 - 开发日志已移除
     // 设置项目提供者，用于自动备份恢复
@@ -71,8 +58,6 @@ export class SettingsModalComponent {
   readonly themeService = inject(ThemeService);
   readonly focusPreferenceService = inject(FocusPreferenceService);
   readonly gateService = inject(GateService);
-  private readonly siyuanCache = inject(ExternalSourceCacheService);
-  private readonly siyuanPreview = inject(SiyuanPreviewService);
   private readonly logger = inject(LoggerService);
   
   /** 是否开发模式（用于显示开发工具） */
@@ -91,6 +76,7 @@ export class SettingsModalComponent {
   readonly themeChange = output<ThemeType>();
   readonly openDashboard = output<void>();
   readonly importComplete = output<Project>();
+  readonly importProject = input<(project: Project) => void | Promise<void>>();
   readonly routineSlots = computed(() =>
     [...this.dockEngine.dailySlots()].sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
   );
@@ -148,36 +134,23 @@ export class SettingsModalComponent {
 
   /** 是否正在从备份恢复（委托给 localBackupUI） */
   readonly isRestoringFromBackup = this.localBackupUI.isRestoringFromBackup;
-  readonly siyuanRuntimeMode = signal<SiyuanRuntimeMode>('extension-relay');
-  readonly siyuanBaseUrl = signal<string>(SIYUAN_CONFIG.DEFAULT_BASE_URL);
-  readonly siyuanTokenMask = signal('');
-  readonly siyuanConnectionStatus = signal<string>('');
-  readonly defaultSiyuanBaseUrl = SIYUAN_CONFIG.DEFAULT_BASE_URL;
-  /**
-   * 扩展中已保存的配置状态：
-   * - undefined：尚未加载（首次渲染前）
-   * - null：扩展未安装/未注入/旧版本不支持 get-config-status
-    * - 对象：扩展可达，hasToken 反映扩展侧实际授权；configChannelAvailable=false 表示页面配置读写通道不可用；connectionVerified=true 表示预览通道已通过连接测试；readError=true 表示连接可用但状态读取失败
-   */
-  readonly siyuanExtensionStatus = signal<SiyuanExtensionStatusView | null | undefined>(undefined);
-  readonly isSavingSiyuanToExtension = signal(false);
-  /**
-   * relay 模式下用户在输入框中暂存的 token 明文（仅内存，永不写入 IndexedDB）。
-   * 用户点击"保存到扩展"按钮后 push 给扩展并立即清空。
-   */
-  private readonly siyuanPendingToken = signal<string>('');
-
-  readonly siyuanExtensionSupported = computed(() => resolveSiyuanExtensionSupported(this.siyuanExtensionStatus()));
-  readonly siyuanExtensionStatusMessage = computed(() => formatSiyuanExtensionStatusMessage(
-    this.siyuanExtensionStatus(),
-    SIYUAN_CONFIG.DEFAULT_BASE_URL,
-  ));
-  readonly siyuanExtensionStatusClass = computed(() => formatSiyuanExtensionStatusClass(this.siyuanExtensionStatus()));
-  readonly siyuanTokenLabel = computed(() => formatSiyuanTokenLabel(this.siyuanRuntimeMode()));
-  readonly siyuanTokenPlaceholder = computed(() => formatSiyuanTokenPlaceholder(this.siyuanRuntimeMode()));
+  readonly siyuanRuntimeMode = this.siyuanUI.runtimeMode;
+  readonly siyuanBaseUrl = this.siyuanUI.baseUrl;
+  readonly siyuanTokenMask = this.siyuanUI.tokenMask;
+  readonly siyuanConnectionStatus = this.siyuanUI.connectionStatus;
+  readonly defaultSiyuanBaseUrl = this.siyuanUI.defaultBaseUrl;
+  readonly siyuanExtensionStatus = this.siyuanUI.extensionStatus;
+  readonly isSavingSiyuanToExtension = this.siyuanUI.isSavingToExtension;
+  readonly siyuanExtensionSupported = this.siyuanUI.extensionSupported;
+  readonly siyuanExtensionStatusMessage = this.siyuanUI.extensionStatusMessage;
+  readonly siyuanExtensionStatusClass = this.siyuanUI.extensionStatusClass;
+  readonly siyuanTokenLabel = this.siyuanUI.tokenLabel;
+  readonly siyuanTokenPlaceholder = this.siyuanUI.tokenPlaceholder;
   
   /** 文件输入引用 - 使用 viewChild signal 引用模板中的 #fileInput */
   private readonly fileInputRef = viewChild<ElementRef<HTMLInputElement>>('fileInput');
+  /** 个人数据安全包恢复文件输入 */
+  private readonly dataSafetyRestoreInputRef = viewChild<ElementRef<HTMLInputElement>>('dataSafetyRestoreInput');
   /** 附件 ZIP 导入文件输入 */
   private readonly attachmentZipInputRef = viewChild<ElementRef<HTMLInputElement>>('attachmentZipInput');
   
@@ -190,235 +163,39 @@ export class SettingsModalComponent {
   }
 
   async loadSiyuanConfig(): Promise<void> {
-    const config = await this.siyuanCache.loadConfig();
-    this.siyuanRuntimeMode.set(config.runtimeMode);
-    this.siyuanBaseUrl.set(config.baseUrl || SIYUAN_CONFIG.DEFAULT_BASE_URL);
-    // relay 模式下页面端不持久化 token；direct 模式下沿用原有 mask 逻辑。
-    this.siyuanTokenMask.set(config.runtimeMode === 'extension-relay'
-      ? ''
-      : (config.token ? SIYUAN_TOKEN_MASK : ''));
-    this.siyuanPendingToken.set('');
-    if (config.runtimeMode === 'extension-relay') {
-      await this.refreshSiyuanExtensionStatus();
-    } else {
-      this.siyuanExtensionStatus.set(undefined);
-    }
-  }
-
-  /** 拉取扩展中已保存的 baseUrl/hasToken 状态，供徽标渲染。 */
-  private async refreshSiyuanExtensionStatus(options: { connectionVerified?: boolean } = {}): Promise<SiyuanExtensionStatusView | null> {
-    try {
-      const probe = await this.siyuanPreview.probeExtensionConfigStatus();
-      if (probe.kind === 'ok') {
-        this.siyuanExtensionStatus.set(probe.status);
-        // 扩展若已配置 baseUrl，则同步回 UI 显示（不影响 IndexedDB 中保存的 baseUrl）。
-        if (probe.status.baseUrl) {
-          this.siyuanBaseUrl.set(probe.status.baseUrl);
-        }
-        return probe.status;
-      }
-
-      if (probe.kind === 'unsupported') {
-        const unsupportedStatus: SiyuanExtensionStatusView = {
-          baseUrl: this.siyuanBaseUrl() || SIYUAN_CONFIG.DEFAULT_BASE_URL,
-          hasToken: options.connectionVerified === true,
-          configChannelAvailable: false,
-          connectionVerified: options.connectionVerified === true,
-        };
-        this.siyuanExtensionStatus.set(unsupportedStatus);
-        return unsupportedStatus;
-      }
-
-      if (probe.kind === 'unavailable') {
-        this.siyuanExtensionStatus.set(null);
-        return null;
-      }
-
-      const errorStatus: SiyuanExtensionStatusView = {
-        baseUrl: this.siyuanBaseUrl() || SIYUAN_CONFIG.DEFAULT_BASE_URL,
-        hasToken: false,
-        readError: true,
-      };
-      this.logger.warn('SettingsModal', '读取扩展配置状态失败', {
-        code: probe.errorCode,
-      });
-      this.siyuanExtensionStatus.set(errorStatus);
-      return errorStatus;
-    } catch (error) {
-      this.logger.warn('SettingsModal', '读取扩展配置状态失败', {
-        message: error instanceof Error ? error.message : 'unknown',
-      });
-      const errorStatus: SiyuanExtensionStatusView = {
-        baseUrl: this.siyuanBaseUrl() || SIYUAN_CONFIG.DEFAULT_BASE_URL,
-        hasToken: false,
-        readError: true,
-      };
-      this.siyuanExtensionStatus.set(errorStatus);
-      return errorStatus;
-    }
+    await this.siyuanUI.loadConfig();
   }
 
   async updateSiyuanRuntimeMode(event: Event): Promise<void> {
-    const rawValue = (event.target as HTMLSelectElement | null)?.value;
-    if (rawValue !== 'extension-relay' && rawValue !== 'direct' && rawValue !== 'cache-only') return;
-    const value: SiyuanRuntimeMode = rawValue;
-    const config = await this.siyuanCache.loadConfig();
-    // 切到 relay 模式时把 IndexedDB 中残留的 token 清掉，避免 direct 模式遗留 token 与 relay 语义混淆。
-    const nextConfig = value === 'extension-relay'
-      ? { ...config, runtimeMode: value, token: undefined }
-      : { ...config, runtimeMode: value };
-    await this.siyuanCache.saveConfig(nextConfig);
-    this.siyuanRuntimeMode.set(value);
-    this.siyuanConnectionStatus.set('');
-    this.siyuanPendingToken.set('');
-    this.siyuanTokenMask.set(value === 'extension-relay' ? '' : (nextConfig.token ? SIYUAN_TOKEN_MASK : ''));
-    if (value === 'extension-relay') {
-      await this.refreshSiyuanExtensionStatus();
-    } else {
-      this.siyuanExtensionStatus.set(undefined);
-    }
+    await this.siyuanUI.updateRuntimeMode(event);
   }
 
   async updateSiyuanBaseUrl(event: Event): Promise<void> {
-    const value = (event.target as HTMLInputElement | null)?.value.trim() || SIYUAN_CONFIG.DEFAULT_BASE_URL;
-    if (!isTrustedSiyuanDirectBaseUrl(value, typeof window === 'undefined' ? null : window.location)) {
-      // 拒绝可疑 baseUrl 时一并清空已保存的 token，防止下次 testSiyuanConnection 把 token 发到错误的 host。
-      const config = await this.siyuanCache.loadConfig();
-      await this.siyuanCache.saveConfig({ ...config, baseUrl: SIYUAN_CONFIG.DEFAULT_BASE_URL, token: undefined });
-      this.siyuanBaseUrl.set(SIYUAN_CONFIG.DEFAULT_BASE_URL);
-      this.siyuanTokenMask.set('');
-      this.siyuanPendingToken.set('');
-      this.siyuanConnectionStatus.set('仅支持本机思源地址 http://127.0.0.1:6806 或 http://localhost:6806，已重置授权');
-      return;
-    }
-    // relay 模式下 baseUrl 只暂存到 UI signal，真正生效要等用户点"保存到扩展"。
-    // 但仍把 baseUrl 写入 IndexedDB，便于切到 direct 模式时复用，且 baseUrl 本身非敏感。
-    const config = await this.siyuanCache.loadConfig();
-    await this.siyuanCache.saveConfig({ ...config, baseUrl: value });
-    this.siyuanBaseUrl.set(value);
-    this.siyuanConnectionStatus.set('');
+    await this.siyuanUI.updateBaseUrl(event);
   }
 
   async updateSiyuanToken(event: Event): Promise<void> {
-    const value = (event.target as HTMLInputElement | null)?.value.trim() ?? '';
-    if (value === SIYUAN_TOKEN_MASK) return;
-    if (this.siyuanRuntimeMode() === 'extension-relay') {
-      // relay 模式：token 仅在内存暂存，永不写入 IndexedDB；等待"保存到扩展"按钮触发推送。
-      this.siyuanPendingToken.set(value);
-      this.siyuanTokenMask.set(value ? SIYUAN_TOKEN_MASK : '');
-      return;
-    }
-    const config = await this.siyuanCache.loadConfig();
-    await this.siyuanCache.saveConfig({ ...config, token: value || undefined });
-    this.siyuanTokenMask.set(value ? SIYUAN_TOKEN_MASK : '');
+    await this.siyuanUI.updateToken(event);
   }
 
-  /**
-   * 把 UI 输入的 baseUrl/token 单向写入扩展 chrome.storage.local。
-   * - token 在调用结束后从内存 signal 中立即清除；
-   * - 失败按 errorCode 映射到中文提示；
-   * - 旧扩展不支持该消息时按钮已被 disabled，但保险起见同样处理 runtime-not-supported 路径。
-   */
   async saveSiyuanConfigToExtension(): Promise<void> {
-    if (this.siyuanRuntimeMode() !== 'extension-relay') return;
-    if (this.isSavingSiyuanToExtension()) return;
-    const baseUrl = this.siyuanBaseUrl();
-    if (!isTrustedSiyuanDirectBaseUrl(baseUrl, typeof window === 'undefined' ? null : window.location)) {
-      this.siyuanConnectionStatus.set('仅支持本机思源地址 http://127.0.0.1:6806 或 http://localhost:6806');
-      return;
-    }
-    this.isSavingSiyuanToExtension.set(true);
-    const pendingToken = this.siyuanPendingToken();
-    // 用户未在输入框输入 token 时不传 token 字段（语义：仅更新 baseUrl，保留扩展中已有 token）。
-    const tokenForExtension = pendingToken.length > 0 ? pendingToken : undefined;
-    try {
-      const result = await this.siyuanPreview.pushExtensionConfig({
-        baseUrl,
-        token: tokenForExtension,
-      });
-      if (result.ok) {
-        this.siyuanConnectionStatus.set('已写入扩展，可点击"测试连接"验证');
-        this.siyuanPendingToken.set('');
-        this.siyuanTokenMask.set('');
-        await this.refreshSiyuanExtensionStatus();
-        return;
-      }
-      this.siyuanConnectionStatus.set(formatSiyuanPushConfigError(result.errorCode));
-    } catch (error) {
-      this.logger.warn('SettingsModal', '写入扩展配置失败', {
-        message: error instanceof Error ? error.message : 'unknown',
-      });
-      this.siyuanConnectionStatus.set('写入扩展失败，请稍后重试');
-    } finally {
-      this.isSavingSiyuanToExtension.set(false);
-    }
+    await this.siyuanUI.saveConfigToExtension();
   }
 
   onSiyuanConfigSubmit(event: Event): void {
-    // 该 form 仅用于满足浏览器对 password input 的结构化语义要求（避免 DOM 警告）。
-    // relay 模式下真正保存由"保存到扩展"按钮触发；其它模式仍由各字段 (change) 事件就地持久化。
-    event.preventDefault();
+    this.siyuanUI.onConfigSubmit(event);
   }
 
   async testSiyuanConnection(): Promise<void> {
-    this.siyuanConnectionStatus.set('正在检测思源连接…');
-    try {
-      const result = await this.siyuanPreview.diagnoseConnection();
-      if (result.ok) {
-        if (result.mode === 'extension-relay') {
-          const status = await this.refreshSiyuanExtensionStatus({ connectionVerified: true });
-          if (status?.readError) {
-            this.siyuanConnectionStatus.set('思源预览通道可用，但读取扩展配置状态失败，请稍后重试');
-            return;
-          }
-          if (status?.configChannelAvailable === false && status.connectionVerified) {
-            this.siyuanConnectionStatus.set('思源预览通道可用；当前配置由扩展 Options 管理');
-            return;
-          }
-          if (status === null) {
-            this.siyuanConnectionStatus.set('思源预览通道可用，但扩展配置状态已失效，请刷新页面后重试');
-            return;
-          }
-        }
-        this.siyuanConnectionStatus.set(result.mode === 'cache-only' ? '当前为仅缓存与深链模式' : '思源预览通道可用');
-        return;
-      }
-      if (result.mode === 'extension-relay' && result.errorCode === 'extension-unavailable') {
-        this.siyuanExtensionStatus.set(null);
-      }
-      const message = formatSiyuanDiagnosisMessage(result.errorCode);
-      this.siyuanConnectionStatus.set(message);
-    } catch (error) {
-      this.logger.warn('SettingsModal', '思源连接诊断失败', {
-        message: error instanceof Error ? error.message : 'unknown',
-      });
-      this.siyuanConnectionStatus.set('检测失败，请稍后重试');
-    }
+    await this.siyuanUI.testConnection();
   }
 
   async clearSiyuanCache(): Promise<void> {
-    await this.siyuanCache.clearPreviewCache();
-    this.siyuanConnectionStatus.set('已清除当前账号的本机思源缓存');
+    await this.siyuanUI.clearPreviewCache();
   }
 
   async forgetSiyuanConfig(): Promise<void> {
-    // 先尝试通知扩展清除 token（relay 模式下用户期望"忘记"是端到端的）。
-    if (this.siyuanRuntimeMode() === 'extension-relay') {
-      try {
-        await this.siyuanPreview.pushExtensionConfig({
-          baseUrl: this.siyuanBaseUrl() || SIYUAN_CONFIG.DEFAULT_BASE_URL,
-          token: '',
-        });
-      } catch (error) {
-        // 扩展不可达时仍继续本地 forget，避免本地状态卡住。
-        this.logger.warn('SettingsModal', '通知扩展清除 token 失败，继续清除本机授权', {
-          message: error instanceof Error ? error.message : 'unknown',
-        });
-      }
-    }
-    await this.siyuanCache.forgetConfig();
-    await this.loadSiyuanConfig();
-    this.siyuanConnectionStatus.set('已忘记本机思源授权');
+    await this.siyuanUI.forgetConfig();
   }
 
   toggleAutoResolve() {
@@ -473,6 +250,27 @@ export class SettingsModalComponent {
     }
   }
 
+  async handleDataSafetyPackageExport(): Promise<void> {
+    await this.localBackupUI.handleDownloadDataSafetyPackage(this.projects());
+  }
+
+  triggerDataSafetyRestoreFileSelect(): void {
+    const inputRef = this.dataSafetyRestoreInputRef();
+    if (inputRef?.nativeElement) {
+      inputRef.nativeElement.click();
+    } else {
+      this.logger.error('SettingsModal', '个人数据安全包输入元素未找到');
+    }
+  }
+
+  async handleDataSafetyRestoreFileSelected(event: Event): Promise<void> {
+    const input = event.target as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+    input.value = '';
+    await this.localBackupUI.loadRestorePreviewFromFile(file, this.projects());
+  }
+
   /**
    * 触发附件 ZIP 导入文件选择
    */
@@ -496,6 +294,11 @@ export class SettingsModalComponent {
     
     // 清空 input 以便可以再次选择同一文件
     input.value = '';
+
+    if (await this.isPortableDataSafetyBackupFile(file)) {
+      await this.localBackupUI.loadRestorePreviewFromFile(file, this.projects());
+      return;
+    }
     
     // 验证文件
     const validation = await this.importService.validateFile(file);
@@ -525,15 +328,29 @@ export class SettingsModalComponent {
       validation.data,
       this.projects(),
       { conflictStrategy },
-      async (project) => {
-        this.importComplete.emit(project);
-      }
+      project => this.notifyImportComplete(project)
     );
     
     if (result.success) {
       alert(`导入完成！\n成功: ${result.importedCount}\n跳过: ${result.skippedCount}`);
     } else {
       alert(`导入失败：${result.error}`);
+    }
+  }
+
+  private async isPortableDataSafetyBackupFile(file: File): Promise<boolean> {
+    try {
+      const parsed = JSON.parse(await file.text()) as unknown;
+      if (!parsed || typeof parsed !== 'object') return false;
+      const record = parsed as Record<string, unknown>;
+      return typeof record['payloadVersion'] === 'string'
+        && !!record['localState']
+        && typeof record['localState'] === 'object'
+        && Array.isArray(record['projects'])
+        && Array.isArray(record['tasks'])
+        && Array.isArray(record['connections']);
+    } catch {
+      return false;
     }
   }
 
@@ -624,11 +441,22 @@ export class SettingsModalComponent {
     await this.localBackupUI.loadRestorePreview(this.projects());
   }
 
+  backFromRestorePreview(): void {
+    this.localBackupUI.backFromRestorePreview();
+  }
+
   /** 确认恢复 */
   async confirmRestore(): Promise<void> {
-    await this.localBackupUI.confirmRestore(this.projects(), async (project: Project) => {
-      this.importComplete.emit(project);
-    });
+    await this.localBackupUI.confirmRestore(this.projects());
+  }
+
+  private async notifyImportComplete(project: Project): Promise<void> {
+    const importProject = this.importProject();
+    if (importProject) {
+      await importProject(project);
+      return;
+    }
+    this.importComplete.emit(project);
   }
 
   /** 取消/关闭恢复面板 */

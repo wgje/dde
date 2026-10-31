@@ -121,6 +121,73 @@
             </div>
           </div>
 
+          <!-- 个人数据安全包：不依赖目录授权 -->
+          <div class="px-3 py-2.5 flex flex-wrap items-center justify-between gap-x-3 gap-y-2 hover:bg-slate-50 dark:hover:bg-stone-700 transition-colors">
+            <div class="flex-1 min-w-0">
+              <div class="text-xs font-semibold text-slate-700 dark:text-stone-200">个人数据安全</div>
+              <div class="text-[10px] text-slate-400 dark:text-stone-500">完整安全包</div>
+            </div>
+            <div class="flex items-center gap-2 flex-shrink-0">
+              <button
+                type="button"
+                data-testid="settings-data-safety-export"
+                (click)="handleDataSafetyPackageExport()"
+                [disabled]="localBackupUI.isExportingDataSafetyPackage()"
+                class="px-2.5 py-1 bg-white dark:bg-stone-700 border border-emerald-200 dark:border-emerald-800 rounded-md text-[10px] font-bold text-emerald-700 dark:text-emerald-300 hover:bg-emerald-50 dark:hover:bg-emerald-950/30 transition-all disabled:opacity-50 flex items-center gap-1 shadow-sm">
+                @if (localBackupUI.isExportingDataSafetyPackage()) {
+                  <div class="w-2.5 h-2.5 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin"></div>
+                } @else {
+                  <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg>
+                }
+                <span>导出安全包</span>
+              </button>
+              <button
+                type="button"
+                data-testid="settings-data-safety-restore"
+                (click)="triggerDataSafetyRestoreFileSelect()"
+                [disabled]="localBackupUI.isRestoringFromBackup()"
+                class="px-2.5 py-1 bg-white dark:bg-stone-700 border border-emerald-200 dark:border-emerald-800 rounded-md text-[10px] font-bold text-emerald-700 dark:text-emerald-300 hover:bg-emerald-50 dark:hover:bg-emerald-950/30 transition-all disabled:opacity-50 flex items-center gap-1 shadow-sm">
+                <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+                <span>恢复安全包</span>
+              </button>
+              <input
+                #dataSafetyRestoreInput
+                data-testid="settings-data-safety-restore-input"
+                type="file"
+                accept=".json,application/json"
+                class="hidden"
+                (change)="handleDataSafetyRestoreFileSelected($event)" />
+            </div>
+
+            @if (localBackupUI.restoreStep() !== 'idle' && (!localBackupService.isAvailable() || !localBackupService.hasSavedHandle())) {
+              <div class="w-full border-t border-emerald-100 dark:border-emerald-900 pt-2 space-y-2">
+                @if (localBackupUI.restoreStep() === 'loading' || localBackupUI.restoreStep() === 'restoring') {
+                  <div class="flex items-center justify-center gap-2 py-2 text-[10px] text-emerald-700 dark:text-emerald-300">
+                    <div class="w-3 h-3 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin"></div>
+                    <span>{{ localBackupUI.restoreStep() === 'loading' ? '读取安全包...' : '恢复中，请勿关闭...' }}</span>
+                  </div>
+                }
+                @if (localBackupUI.restoreStep() === 'preview' && localBackupUI.restorePreview(); as preview) {
+                  <div class="text-[9px] text-emerald-800 dark:text-emerald-300">
+                    项目 {{ preview.projects }} · 任务 {{ preview.tasks }} · 连接 {{ preview.connections }} · 项目游标 {{ preview.projectCursors }} · 写入审计 {{ preview.replayLog }}
+                  </div>
+                  <div class="flex gap-2">
+                    <button type="button" (click)="cancelRestore()" class="flex-1 py-1 border border-emerald-200 dark:border-emerald-800 rounded text-[10px] font-bold text-emerald-700 dark:text-emerald-300">取消</button>
+                    <button type="button" (click)="confirmRestore()" class="flex-1 py-1 bg-emerald-600 text-white rounded text-[10px] font-bold hover:bg-emerald-700">确认恢复</button>
+                  </div>
+                }
+                @if (localBackupUI.restoreStep() === 'done') {
+                  <div class="text-[10px] text-green-600 dark:text-green-400">{{ localBackupUI.restoreResultMsg() }}</div>
+                  <button type="button" (click)="cancelRestore()" class="text-[10px] font-bold text-emerald-700 dark:text-emerald-300">关闭</button>
+                }
+                @if (localBackupUI.restoreStep() === 'error') {
+                  <div class="text-[10px] text-red-600 dark:text-red-400">{{ localBackupUI.restoreError() }}</div>
+                  <button type="button" (click)="cancelRestore()" class="text-[10px] font-bold text-emerald-700 dark:text-emerald-300">关闭</button>
+                }
+              </div>
+            }
+          </div>
+
           <!-- 附件导出导入 -->
           <div class="px-3 py-2.5 flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5 hover:bg-slate-50 dark:hover:bg-stone-700 transition-colors">
             <div class="flex-1 min-w-0">
@@ -624,7 +691,7 @@
                               <div class="text-[8px] text-amber-600 dark:text-amber-400">连接</div>
                             </div>
                           </div>
-                          @if (preview.attachmentUploads > 0 || preview.actionQueue > 0 || preview.retryQueue > 0 || preview.deadLetters > 0 || preview.conflicts > 0) {
+                          @if (preview.attachmentUploads > 0 || preview.actionQueue > 0 || preview.retryQueue > 0 || preview.deadLetters > 0 || preview.conflicts > 0 || preview.projectCursors > 0 || preview.lastSyncTime > 0 || preview.replayLog > 0 || preview.lastWriteExplain > 0 || preview.taskTombstones > 0 || preview.connectionTombstones > 0) {
                             <div class="bg-white/60 dark:bg-stone-700/60 rounded px-2 py-1.5 space-y-1">
                               <div class="text-[9px] font-bold text-amber-800 dark:text-amber-300">本机待恢复状态</div>
                               <div class="grid grid-cols-2 gap-x-2 gap-y-1 text-[9px] text-amber-700 dark:text-amber-300">
@@ -643,12 +710,30 @@
                                 @if (preview.conflicts > 0) {
                                   <div>冲突副本 {{ preview.conflicts }}</div>
                                 }
+                                @if (preview.projectCursors > 0) {
+                                  <div>项目游标 {{ preview.projectCursors }}</div>
+                                }
+                                @if (preview.lastSyncTime > 0) {
+                                  <div>同步时间快照 {{ preview.lastSyncTime }}</div>
+                                }
+                                @if (preview.replayLog > 0) {
+                                  <div>写入审计 {{ preview.replayLog }}</div>
+                                }
+                                @if (preview.lastWriteExplain > 0) {
+                                  <div>最近写入解释 {{ preview.lastWriteExplain }}</div>
+                                }
+                                @if (preview.taskTombstones > 0) {
+                                  <div>任务删除标记 {{ preview.taskTombstones }}</div>
+                                }
+                                @if (preview.connectionTombstones > 0) {
+                                  <div>连接删除标记 {{ preview.connectionTombstones }}</div>
+                                }
                               </div>
                             </div>
                           }
                           <div class="text-[9px] text-amber-600/80 dark:text-amber-400/70">⚠️ 以合并方式导入，不会删除现有数据</div>
                           <div class="flex gap-2">
-                            <button (click)="localBackupUI.restoreStep.set('list')" class="flex-1 py-1 bg-white dark:bg-stone-700 border border-amber-200 dark:border-amber-700 rounded text-[10px] font-bold text-amber-700 dark:text-amber-300 hover:bg-amber-50 dark:hover:bg-amber-900/30">返回</button>
+                            <button (click)="backFromRestorePreview()" class="flex-1 py-1 bg-white dark:bg-stone-700 border border-amber-200 dark:border-amber-700 rounded text-[10px] font-bold text-amber-700 dark:text-amber-300 hover:bg-amber-50 dark:hover:bg-amber-900/30">返回</button>
                             <button (click)="confirmRestore()" class="flex-1 py-1 bg-amber-500 text-white rounded text-[10px] font-bold hover:bg-amber-600">确认恢复</button>
                           </div>
                         </div>

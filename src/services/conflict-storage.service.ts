@@ -12,25 +12,48 @@ import { Injectable, inject, signal, computed, effect } from '@angular/core';
 import { LoggerService } from './logger.service';
 import { AuthService } from './auth.service';
 import { AUTH_CONFIG } from '../config/auth.config';
+import {
+  beginLocalBackupUiRestoreWriter,
+  trackLocalBackupUiRestoreWriterPromise,
+} from './local-backup-ui-restore-writer-quiescence-tracker';
 export {
   LEGACY_UNKNOWN_OWNER_USER_ID,
   type ConflictRecord,
   type OperationConflictRecord,
+  type AdvanceProjectConflictLocalHandoffInput,
+  type ProjectConflictLocalHandoffMutationResult,
+  type ProjectConflictLocalHandoffReservationResult,
+  type PersistProjectConflictLocalHandoffRequirementInput,
+  type ReserveProjectConflictLocalHandoffInput,
+  type VerifyProjectConflictLocalHandoffInput,
   type StoredConflictRecord,
+  createProjectConflictRecordFingerprint,
   toStoredConflictRecord,
 } from './conflict-storage.helpers';
 import {
   CONFLICT_FALLBACK_KEY_PREFIX,
   LEGACY_UNKNOWN_OWNER_USER_ID,
+  advanceStoredConflictLocalHandoff,
+  deleteCompletedStoredConflictLocalHandoff,
   getConflictFallbackKey,
   getScopedConflictId,
   isConflictRecordVisible,
+  mergeConflictOperationEvidence,
   mergeConflictRecords,
+  persistStoredConflictLocalHandoffRequirement,
+  reserveStoredConflictLocalHandoff,
   resolveConflictOwnerUserId,
   selectPreferredConflictRecord,
   toStoredConflictRecord,
   type ConflictRecord,
+  type AdvanceProjectConflictLocalHandoffInput,
+  type ProjectConflictLocalHandoffMutationResult,
+  type ProjectConflictLocalHandoffReservationResult,
+  type PersistProjectConflictLocalHandoffRequirementInput,
+  type ReserveProjectConflictLocalHandoffInput,
   type StoredConflictRecord,
+  type VerifyProjectConflictLocalHandoffInput,
+  verifyStoredConflictLocalHandoffReservation,
 } from './conflict-storage.helpers';
 import {
   countConflictFallbackForOwner,
@@ -48,6 +71,10 @@ import {
 const DB_NAME = 'nanoflow-conflicts';
 const DB_VERSION = 2;
 const STORE_NAME = 'conflicts';
+
+interface ConflictStorageMutationOptions {
+  restoreWriterContinuation?: boolean;
+}
 
 @Injectable({
   providedIn: 'root'
@@ -192,7 +219,19 @@ export class ConflictStorageService {
    * 当检测到冲突时调用，完整保存本地数据
    * 这样即使用户下周才处理，数据也完好无损
    */
-  async saveConflict(record: ConflictRecord): Promise<boolean> {
+  async saveConflict(
+    record: ConflictRecord,
+    options: ConflictStorageMutationOptions = {},
+  ): Promise<boolean> {
+    const ownerUserId = record.ownerUserId ?? this.getCurrentOwnerUserId();
+    return this.runConflictWriter(
+      ownerUserId,
+      () => this.saveConflictUntracked(record),
+      options.restoreWriterContinuation === true,
+    );
+  }
+
+  private async saveConflictUntracked(record: ConflictRecord): Promise<boolean> {
     const ownerUserId = record.ownerUserId ?? this.getCurrentOwnerUserId();
     let existingRecord: StoredConflictRecord | null = null;
     let fallbackRecord: ConflictRecord | null = null;
@@ -204,7 +243,7 @@ export class ConflictStorageService {
         bypassVisibility: true,
       });
       const recoveredRecord = this.mergeConflictStorageSources(existingRecord, fallbackRecord);
-      const mergedRecord = this.mergeConflictOperationEvidence(
+      const mergedRecord = mergeConflictOperationEvidence(
         mergeConflictRecords(recoveredRecord, {
           ...record,
           ownerUserId,
@@ -227,7 +266,7 @@ export class ConflictStorageService {
         bypassVisibility: true,
       }) ?? fallbackRecord;
       const recoveredRecord = this.mergeConflictStorageSources(existingRecord, fallbackRecord);
-      const mergedRecord = this.mergeConflictOperationEvidence(
+      const mergedRecord = mergeConflictOperationEvidence(
         mergeConflictRecords(recoveredRecord, {
           ...record,
           ownerUserId,
@@ -241,6 +280,94 @@ export class ConflictStorageService {
     }
   }
 
+  async reserveProjectConflictLocalHandoff(
+    input: ReserveProjectConflictLocalHandoffInput,
+  ): Promise<ProjectConflictLocalHandoffReservationResult> {
+    return this.runConflictWriter(input.ownerUserId, () => (
+      this.reserveProjectConflictLocalHandoffUntracked(input)
+    ));
+  }
+
+  private async reserveProjectConflictLocalHandoffUntracked(
+    input: ReserveProjectConflictLocalHandoffInput,
+  ): Promise<ProjectConflictLocalHandoffReservationResult> {
+    try {
+      return await reserveStoredConflictLocalHandoff(
+        await this.getDb(), STORE_NAME, input,
+      );
+    } catch (error) {
+      this.logger.error('预留冲突本地交接失败', error);
+      return { status: 'storage-failed' };
+    }
+  }
+
+  async persistProjectConflictLocalHandoffRequirement(
+    input: PersistProjectConflictLocalHandoffRequirementInput,
+  ): Promise<ProjectConflictLocalHandoffMutationResult> {
+    return this.runConflictWriter(input.ownerUserId, () => (
+      this.persistProjectConflictLocalHandoffRequirementUntracked(input)
+    ));
+  }
+
+  private async persistProjectConflictLocalHandoffRequirementUntracked(
+    input: PersistProjectConflictLocalHandoffRequirementInput,
+  ): Promise<ProjectConflictLocalHandoffMutationResult> {
+    try {
+      return await persistStoredConflictLocalHandoffRequirement(
+        await this.getDb(), STORE_NAME, input,
+      );
+    } catch (error) {
+      this.logger.error('持久化冲突本地交接要求失败', error);
+      return { status: 'storage-failed' };
+    }
+  }
+
+  async verifyProjectConflictLocalHandoffReservation(
+    input: VerifyProjectConflictLocalHandoffInput,
+  ): Promise<ProjectConflictLocalHandoffMutationResult> {
+    try {
+      return await verifyStoredConflictLocalHandoffReservation(await this.getDb(), STORE_NAME, input);
+    } catch {
+      return { status: 'storage-failed' };
+    }
+  }
+
+  async advanceProjectConflictLocalHandoff(
+    input: AdvanceProjectConflictLocalHandoffInput,
+  ): Promise<ProjectConflictLocalHandoffMutationResult> {
+    return this.runConflictWriter(input.ownerUserId, () => (
+      this.advanceProjectConflictLocalHandoffUntracked(input)
+    ));
+  }
+
+  private async advanceProjectConflictLocalHandoffUntracked(
+    input: AdvanceProjectConflictLocalHandoffInput,
+  ): Promise<ProjectConflictLocalHandoffMutationResult> {
+    try {
+      return await advanceStoredConflictLocalHandoff(await this.getDb(), STORE_NAME, input);
+    } catch {
+      return { status: 'storage-failed' };
+    }
+  }
+
+  async deleteCompletedProjectConflictLocalHandoff(
+    input: VerifyProjectConflictLocalHandoffInput,
+  ): Promise<ProjectConflictLocalHandoffMutationResult> {
+    return this.runConflictWriter(input.ownerUserId, () => (
+      this.deleteCompletedProjectConflictLocalHandoffUntracked(input)
+    ));
+  }
+
+  private async deleteCompletedProjectConflictLocalHandoffUntracked(
+    input: VerifyProjectConflictLocalHandoffInput,
+  ): Promise<ProjectConflictLocalHandoffMutationResult> {
+    try {
+      return await deleteCompletedStoredConflictLocalHandoff(await this.getDb(), STORE_NAME, input);
+    } catch {
+      return { status: 'storage-failed' };
+    }
+  }
+
   private mergeConflictStorageSources(
     indexedRecord: ConflictRecord | null,
     fallbackRecord: ConflictRecord | null,
@@ -251,56 +378,11 @@ export class ConflictStorageService {
     }
 
     const secondaryRecord = preferredRecord === indexedRecord ? fallbackRecord : indexedRecord;
-    return this.mergeConflictOperationEvidence(
+    return mergeConflictOperationEvidence(
       mergeConflictRecords(secondaryRecord, preferredRecord),
       secondaryRecord,
       preferredRecord,
     );
-  }
-
-  private mergeConflictOperationEvidence(
-    baseRecord: ConflictRecord,
-    ...sources: Array<ConflictRecord | null | undefined>
-  ): ConflictRecord {
-    const merged = [
-      ...sources.flatMap(source => source?.operationConflicts ?? []),
-      ...(baseRecord.operationConflicts ?? []),
-    ];
-    if (merged.length === 0) {
-      return baseRecord;
-    }
-
-    const operationConflicts = Array.from(
-      merged.reduce((conflicts, conflict) => {
-        conflicts.set(this.getOperationConflictStorageKey(conflict), conflict);
-        return conflicts;
-      }, new Map<string, NonNullable<ConflictRecord['operationConflicts']>[number]>()),
-    )
-      .map(([, conflict]) => conflict)
-      .sort((left, right) => {
-        const timeOrder = left.conflictedAt.localeCompare(right.conflictedAt);
-        if (timeOrder !== 0) {
-          return timeOrder;
-        }
-        return this.getOperationConflictStorageKey(left).localeCompare(this.getOperationConflictStorageKey(right));
-      });
-
-    return {
-      ...baseRecord,
-      operationConflicts,
-    };
-  }
-
-  private getOperationConflictStorageKey(
-    conflict: NonNullable<ConflictRecord['operationConflicts']>[number],
-  ): string {
-    if (conflict.operationId) {
-      return `operation:${conflict.operationId}`;
-    }
-    if (conflict.actionId) {
-      return `action:${conflict.actionId}`;
-    }
-    return `${conflict.entityType}:${conflict.entityId}:${conflict.actionType}:${conflict.conflictedAt}`;
   }
 
   private readStoredConflictRecord(
@@ -489,7 +571,23 @@ export class ConflictStorageService {
   /**
    * 冲突解决后删除记录
    */
-  async deleteConflict(projectId: string, ownerUserId?: string | null): Promise<boolean> {
+  async deleteConflict(
+    projectId: string,
+    ownerUserId?: string | null,
+    options: ConflictStorageMutationOptions = {},
+  ): Promise<boolean> {
+    const writerOwnerUserId = ownerUserId ?? this.getCurrentOwnerUserId();
+    return this.runConflictWriter(
+      writerOwnerUserId,
+      () => this.deleteConflictUntracked(projectId, ownerUserId),
+      options.restoreWriterContinuation === true,
+    );
+  }
+
+  private async deleteConflictUntracked(
+    projectId: string,
+    ownerUserId?: string | null,
+  ): Promise<boolean> {
     try {
       const db = await this.getDb();
       const explicitOwnerUserId = typeof ownerUserId === 'string' && ownerUserId.length > 0
@@ -564,11 +662,19 @@ export class ConflictStorageService {
   }
 
   clearFallbackStorageForOwner(ownerUserId = this.getCurrentOwnerUserId()): void {
+    let writer: ReturnType<typeof beginLocalBackupUiRestoreWriter> | null = null;
     try {
+      writer = beginLocalBackupUiRestoreWriter(ownerUserId, 'conflicts', { heartbeat: false });
       this.getFallbackKeysForOwner(ownerUserId)
         .forEach(key => localStorage.removeItem(key));
     } catch (e) {
       this.logger.warn('清理 owner 作用域的 conflict fallback 失败', { ownerUserId, error: e });
+    } finally {
+      try {
+        writer?.release();
+      } catch (error) {
+        this.logger.warn('释放 conflict fallback writer 失败', { ownerUserId, error });
+      }
     }
   }
 
@@ -616,6 +722,14 @@ export class ConflictStorageService {
     return this.authService.currentUserId() ?? AUTH_CONFIG.LOCAL_MODE_USER_ID;
   }
 
+  private runConflictWriter<T>(
+    ownerUserId: string,
+    write: () => Promise<T>,
+    continuation = false,
+  ): Promise<T> {
+    return trackLocalBackupUiRestoreWriterPromise(ownerUserId, 'conflicts', write, { continuation });
+  }
+
   private isRecordVisible(record: ConflictRecord | null | undefined): record is ConflictRecord {
     return isConflictRecordVisible(record, this.getCurrentOwnerUserId());
   }
@@ -625,6 +739,17 @@ export class ConflictStorageService {
   }
 
   private async promoteFallbackRecordToIndexedDb(db: IDBDatabase, record: ConflictRecord): Promise<void> {
+    const ownerUserId = this.resolveLegacyConflictOwnerUserId(record);
+    return this.runConflictWriter(
+      ownerUserId,
+      () => this.promoteFallbackRecordToIndexedDbUntracked(db, record),
+    );
+  }
+
+  private async promoteFallbackRecordToIndexedDbUntracked(
+    db: IDBDatabase,
+    record: ConflictRecord,
+  ): Promise<void> {
     const ownerUserId = this.resolveLegacyConflictOwnerUserId(record);
     const scopedRecord = toStoredConflictRecord(record, ownerUserId);
 

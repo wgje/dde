@@ -1,9 +1,14 @@
+import { inject } from '@angular/core';
 import { AUTH_CONFIG } from '../config/auth.config';
 
 import { UserSessionLayer5 } from './user-session-layer-5.service';
 import { type SessionGuardContext, type SetCurrentUserContext, type SetCurrentUserOptions } from './user-session-base.service';
+import { LocalBackupUiRestoreStartupRecoveryService } from './local-backup-ui-restore-startup-recovery.service';
 
 export abstract class UserSessionLayer6 extends UserSessionLayer5 {
+  private readonly localBackupUiRestoreStartupRecovery = inject(
+    LocalBackupUiRestoreStartupRecoveryService,
+  );
 
 
   // ========== 私有方法 ==========
@@ -93,9 +98,17 @@ export abstract class UserSessionLayer6 extends UserSessionLayer5 {
   protected async recoverInterruptedDataSafetyRestoreForCurrentUser(
     context: SetCurrentUserContext,
     sessionGuard: SessionGuardContext,
-  ): Promise<void> {
-    if (!context.userId || this.shouldAbortStaleSession(sessionGuard, 'setCurrentUser:before-data-safety-recovery')) {
-      return;
+  ): Promise<boolean> {
+    if (!context.userId) return true;
+    if (this.shouldAbortStaleSession(sessionGuard, 'setCurrentUser:before-data-safety-recovery')) return false;
+
+    const localBackupRecovery = await this.localBackupUiRestoreStartupRecovery.recover(context.userId);
+    if (localBackupRecovery.status === 'blocked') {
+      this.logger.warn('本地备份还原启动恢复被阻止，保留标记并停止加载本地数据', {
+        ownerUserId: context.userId,
+        reason: localBackupRecovery.reason,
+      });
+      return false;
     }
 
     try {
@@ -109,6 +122,7 @@ export abstract class UserSessionLayer6 extends UserSessionLayer5 {
     } catch (error) {
       this.logger.warn('恢复中断的数据安全还原失败，保留标记并继续加载本地数据', error);
     }
+    return true;
   }
 
 
@@ -143,8 +157,9 @@ export abstract class UserSessionLayer6 extends UserSessionLayer5 {
       return;
     }
 
-    await this.recoverInterruptedDataSafetyRestoreForCurrentUser(context, sessionGuard);
-    if (this.shouldAbortStaleSession(sessionGuard, 'setCurrentUser:after-data-safety-recovery')) return;
+    const mayLoadLocalData = await this.recoverInterruptedDataSafetyRestoreForCurrentUser(context, sessionGuard);
+    if (!mayLoadLocalData
+      || this.shouldAbortStaleSession(sessionGuard, 'setCurrentUser:after-data-safety-recovery')) return;
 
     this.reloadCurrentOwnerQueues(context.skipPersistentReload);
     await this.refreshConflictCountQuietly();

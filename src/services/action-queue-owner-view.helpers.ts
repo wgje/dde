@@ -7,11 +7,19 @@ type PersistQueueMutationForOwner = (
   mutateQueue: (queue: QueuedAction[]) => QueuedAction[],
 ) => Promise<QueuedAction[] | null>;
 
+export type PersistQueueMutationWithRetrySupersession = (
+  ownerUserId: string,
+  mutateQueue: (queue: QueuedAction[]) => QueuedAction[],
+  getCandidateActionIds: () => string[],
+  persistWithoutSupersession: () => Promise<QueuedAction[] | null>,
+) => Promise<QueuedAction[] | null>;
+
 export interface PersistActionQueueCurrentOwnerEnqueueMutationParams {
   ownerUserId: string;
   action: EnqueueParams;
   queuedAction: QueuedAction;
   persistQueueMutationForOwner: PersistQueueMutationForOwner;
+  persistQueueMutationWithRetrySupersession?: PersistQueueMutationWithRetrySupersession;
   buildCurrentOwnerEnqueueMutation: (
     queue: QueuedAction[],
     action: EnqueueParams,
@@ -24,14 +32,30 @@ export async function persistActionQueueCurrentOwnerEnqueueMutation({
   action,
   queuedAction,
   persistQueueMutationForOwner,
+  persistQueueMutationWithRetrySupersession,
   buildCurrentOwnerEnqueueMutation,
 }: PersistActionQueueCurrentOwnerEnqueueMutationParams): Promise<DurableEnqueueMutationOutcome> {
   const mutationState: { value: EnqueueMutationResult | null } = { value: null };
-  const persistedQueue = await persistQueueMutationForOwner(ownerUserId, queue => {
+  const mutateQueue = (queue: QueuedAction[]) => {
     const nextMutation = buildCurrentOwnerEnqueueMutation(queue, action, queuedAction);
     mutationState.value = nextMutation;
     return nextMutation.nextQueue;
-  });
+  };
+  const getCandidateActionIds = () => {
+    const mutation = mutationState.value;
+    return mutation?.wasEnqueued && !mutation.wasMergeShrunk && mutation.resolvedActionId
+      ? [mutation.resolvedActionId]
+      : [];
+  };
+  const persistWithoutSupersession = () => persistQueueMutationForOwner(ownerUserId, mutateQueue);
+  const persistedQueue = persistQueueMutationWithRetrySupersession
+    ? await persistQueueMutationWithRetrySupersession(
+      ownerUserId,
+      mutateQueue,
+      getCandidateActionIds,
+      persistWithoutSupersession,
+    )
+    : await persistWithoutSupersession();
 
   return { persistedQueue, mutation: mutationState.value };
 }

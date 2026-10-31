@@ -3,6 +3,11 @@ import type { DeadLetterItem, QueuedAction } from './action-queue.types';
 import { LOCAL_QUEUE_CONFIG } from './action-queue-storage.helpers';
 import type { QueueSnapshot } from './action-queue-owner-storage.types';
 import { normalizeQueueForOutbox } from './action-queue-outbox-normalization.helpers';
+import {
+  filterLocallyRemovedQueuedActions,
+  readOwnerQueueRemovalJournal,
+  recordOwnerQueueRemovalsBeforeSnapshotWrite,
+} from './action-queue-owner-storage-removal-journal';
 
 export interface ActionQueueOwnerStorageLocalLogger {
   warn(message: string, context?: unknown): void;
@@ -31,6 +36,13 @@ export function writeOwnerScopedLocalStorageValue(
   value: unknown,
   getScopedStorageKey: ActionQueueOwnerScopedStorageKeyResolver,
 ): void {
+  if (baseKey === LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY && Array.isArray(value)) {
+    recordOwnerQueueRemovalsBeforeSnapshotWrite(
+      ownerUserId,
+      value as QueuedAction[],
+      getScopedStorageKey,
+    );
+  }
   localStorage.setItem(
     getScopedStorageKey(baseKey, ownerUserId),
     JSON.stringify(value),
@@ -46,9 +58,13 @@ export function readOwnerQueueSnapshotFromLocalStorage(
   }
 
   const storageKey = options.getScopedStorageKey(LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY, options.ownerUserId);
+  const removedActionIdentities = readOwnerQueueRemovalJournal(
+    options.ownerUserId,
+    options.getScopedStorageKey,
+  );
   const scopedValue = localStorage.getItem(storageKey);
   if (scopedValue === null) {
-    return { found: false, queue: [] };
+    return { found: false, queue: [], removedActionIdentities };
   }
 
   try {
@@ -60,16 +76,24 @@ export function readOwnerQueueSnapshotFromLocalStorage(
         storageKey,
         error,
       });
-      return { found: false, queue: [], corrupted: true, storageKey, error };
+      return { found: false, queue: [], removedActionIdentities, corrupted: true, storageKey, error };
     }
-    return { found: true, queue: normalizeQueueForOutbox(queue), storageKey };
+    return {
+      found: true,
+      queue: filterLocallyRemovedQueuedActions(
+        normalizeQueueForOutbox(queue),
+        removedActionIdentities,
+      ),
+      removedActionIdentities,
+      storageKey,
+    };
   } catch (error) {
     warnLocalStorageReadFailure(options, '读取 owner-scoped 队列失败，尝试 IndexedDB 备份恢复', {
       ownerUserId: options.ownerUserId,
       storageKey,
       error,
     });
-    return { found: false, queue: [], corrupted: true, storageKey, error };
+    return { found: false, queue: [], removedActionIdentities, corrupted: true, storageKey, error };
   }
 }
 

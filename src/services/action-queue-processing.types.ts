@@ -7,12 +7,21 @@ export type ActionQueueProcessResult = {
   movedToDeadLetter: number;
 };
 
-export type QueueProcessor = (action: QueuedAction) => Promise<ActionQueueProcessorResult>;
+export type QueueProcessorContext = {
+  leaseSignal?: AbortSignal;
+  isCurrent?: () => boolean;
+};
+
+export type QueueProcessor = (
+  action: QueuedAction,
+  context?: QueueProcessorContext,
+) => Promise<ActionQueueProcessorResult>;
 
 export type QueueProcessContext = {
   processGeneration: number;
   processOwnerUserId: string;
   processLifecycleToken: number;
+  leaseSignal?: AbortSignal;
   queue: QueuedAction[];
   failedCreateEntities: Set<string>;
 };

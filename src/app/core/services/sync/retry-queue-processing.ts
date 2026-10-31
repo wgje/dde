@@ -253,6 +253,7 @@ export interface RetryQueuePreflightItem {
   } | null;
   projectId?: string;
   sourceUserId?: string;
+  writeIntent?: string;
 }
 
 export type RetryQueueItemTerminalReason =
@@ -285,6 +286,42 @@ function isTaskUpsertMissingUpdatedAt(item: RetryQueuePreflightItem): boolean {
   return typeof updatedAt !== 'string' || updatedAt.trim().length === 0;
 }
 
+function isTaskUpsertMissingWriteIntent(item: RetryQueuePreflightItem): boolean {
+  return item.type === 'task'
+    && item.operation === 'upsert'
+    && (typeof item.writeIntent !== 'string' || item.writeIntent.trim().length === 0);
+}
+
+function classifyRetryQueueItemOwnerBoundary(
+  input: RetryQueueItemPreflightInput,
+): RetryQueueItemPreflightDecision | null {
+  const { item } = input;
+  if (item.sourceUserId === input.localModeUserId) {
+    if (input.shouldSilentlyDropUnownedLegacyItem) {
+      return { kind: 'remove-terminal', reason: 'drop-legacy-local-user' };
+    }
+
+    return { kind: 'quarantine', reason: 'legacy local-user 重试项禁止自动上云' };
+  }
+
+  if (item.sourceUserId && input.currentUserId && item.sourceUserId !== input.currentUserId) {
+    return {
+      kind: 'quarantine',
+      reason: `跨账号重试项来源 ${item.sourceUserId} 与当前账号 ${input.currentUserId} 不匹配`,
+    };
+  }
+
+  if (!item.sourceUserId) {
+    if (input.shouldSilentlyDropUnownedLegacyItem) {
+      return { kind: 'remove-terminal', reason: 'drop-legacy-missing-source-user' };
+    }
+
+    return { kind: 'quarantine', reason: 'legacy 重试项缺少来源元数据，无法安全判断归属' };
+  }
+
+  return null;
+}
+
 export function classifyRetryQueueItemPreflight(
   input: RetryQueueItemPreflightInput,
 ): RetryQueueItemPreflightDecision {
@@ -315,27 +352,14 @@ export function classifyRetryQueueItemPreflight(
     return { kind: 'remove-terminal', reason: 'task-upsert-missing-updated-at' };
   }
 
-  if (item.sourceUserId === input.localModeUserId) {
-    if (input.shouldSilentlyDropUnownedLegacyItem) {
-      return { kind: 'remove-terminal', reason: 'drop-legacy-local-user' };
-    }
+  const ownerBoundaryDecision = classifyRetryQueueItemOwnerBoundary(input);
+  if (ownerBoundaryDecision) return ownerBoundaryDecision;
 
-    return { kind: 'quarantine', reason: 'legacy local-user 重试项禁止自动上云' };
-  }
-
-  if (item.sourceUserId && input.currentUserId && item.sourceUserId !== input.currentUserId) {
+  if (isTaskUpsertMissingWriteIntent(item)) {
     return {
       kind: 'quarantine',
-      reason: `跨账号重试项来源 ${item.sourceUserId} 与当前账号 ${input.currentUserId} 不匹配`,
+      reason: 'legacy task upsert 缺少 writeIntent，禁止猜测为 full upsert',
     };
-  }
-
-  if (!item.sourceUserId) {
-    if (input.shouldSilentlyDropUnownedLegacyItem) {
-      return { kind: 'remove-terminal', reason: 'drop-legacy-missing-source-user' };
-    }
-
-    return { kind: 'quarantine', reason: 'legacy 重试项缺少来源元数据，无法安全判断归属' };
   }
 
   return { kind: 'process' };

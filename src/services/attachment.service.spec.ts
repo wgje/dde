@@ -8,6 +8,11 @@ import { SCAN_STATUS } from '../config/virus-scan.config';
 import { ActionQueueService } from './action-queue.service';
 import { AttachmentUploadOutboxService } from './attachment-upload-outbox.service';
 import { AttachmentCleanupOutboxService } from './attachment-cleanup-outbox.service';
+import { registerAttachmentServiceUrlRefreshRaceSpecs } from './attachment-service-url-refresh-race.spec-helpers';
+import {
+  createQueuedAttachmentUploadBarrierHarness,
+  type QueuedAttachmentUploadBarrier,
+} from './action-queue-attachment-processors.spec-helpers';
 
 const mockLoggerCategory = {
   info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(),
@@ -18,6 +23,7 @@ const mockLoggerCategory = {
 
 describe('AttachmentService', () => {
   let service: AttachmentService;
+  let destroyService: () => void = () => undefined;
   type AttachmentServicePrivate = {
     urlRefreshTimer: ReturnType<typeof setInterval> | null;
     startUrlRefreshMonitor: () => void;
@@ -48,6 +54,7 @@ describe('AttachmentService', () => {
       checkBeforeDownload: vi.fn().mockResolvedValue({ success: true }),
     };
 
+    const destroyCallbacks: Array<() => void> = [];
     const injector = Injector.create({
       providers: [
         { provide: AttachmentService, useClass: AttachmentService },
@@ -57,12 +64,22 @@ describe('AttachmentService', () => {
         { provide: VirusScanService, useValue: mockVirusScan },
         { provide: ActionQueueService, useValue: { enqueueDurably: vi.fn().mockResolvedValue('queued') } },
         { provide: AttachmentUploadOutboxService, useValue: { savePendingUpload: vi.fn().mockResolvedValue(undefined) } },
-        { provide: AttachmentCleanupOutboxService, useValue: { enqueuePaths: vi.fn(), removePaths: vi.fn() } },
-        { provide: DestroyRef, useValue: { onDestroy: vi.fn() } },
+        { provide: AttachmentCleanupOutboxService, useValue: { enqueuePaths: vi.fn().mockResolvedValue([]), removePendingCleanups: vi.fn() } },
+        {
+          provide: DestroyRef,
+          useValue: { onDestroy: vi.fn((callback: () => void) => { destroyCallbacks.push(callback); }) },
+        },
       ],
     });
 
     service = injector.get(AttachmentService);
+    let destroyed = false;
+    destroyService = () => {
+      if (destroyed) return;
+      destroyed = true;
+      for (const callback of destroyCallbacks.splice(0)) callback();
+      (injector as Injector & { destroy: () => void }).destroy();
+    };
   });
 
   afterEach(() => {
@@ -83,7 +100,7 @@ describe('AttachmentService', () => {
           { provide: VirusScanService, useValue: mockVirusScan },
           { provide: ActionQueueService, useValue: { enqueueDurably: vi.fn().mockResolvedValue('queued') } },
           { provide: AttachmentUploadOutboxService, useValue: { savePendingUpload: vi.fn().mockResolvedValue(undefined) } },
-          { provide: AttachmentCleanupOutboxService, useValue: { enqueuePaths: vi.fn(), removePaths: vi.fn() } },
+          { provide: AttachmentCleanupOutboxService, useValue: { enqueuePaths: vi.fn().mockResolvedValue([]), removePendingCleanups: vi.fn() } },
           { provide: DestroyRef, useValue: { onDestroy: vi.fn() } },
         ],
       });
@@ -205,7 +222,7 @@ describe('AttachmentService', () => {
           { provide: VirusScanService, useValue: mockVirusScan },
           { provide: ActionQueueService, useValue: { enqueueDurably } },
           { provide: AttachmentUploadOutboxService, useValue: { savePendingUpload, removePendingUpload } },
-          { provide: AttachmentCleanupOutboxService, useValue: { enqueuePaths: vi.fn(), removePaths: vi.fn() } },
+          { provide: AttachmentCleanupOutboxService, useValue: { enqueuePaths: vi.fn().mockResolvedValue([]), removePendingCleanups: vi.fn() } },
           { provide: DestroyRef, useValue: { onDestroy: vi.fn() } },
         ],
       });
@@ -260,7 +277,7 @@ describe('AttachmentService', () => {
           { provide: VirusScanService, useValue: mockVirusScan },
           { provide: ActionQueueService, useValue: { enqueueDurably } },
           { provide: AttachmentUploadOutboxService, useValue: { savePendingUpload, removePendingUpload } },
-          { provide: AttachmentCleanupOutboxService, useValue: { enqueuePaths: vi.fn(), removePaths: vi.fn() } },
+          { provide: AttachmentCleanupOutboxService, useValue: { enqueuePaths: vi.fn().mockResolvedValue([]), removePendingCleanups: vi.fn() } },
           { provide: DestroyRef, useValue: { onDestroy: vi.fn() } },
         ],
       });
@@ -312,7 +329,7 @@ describe('AttachmentService', () => {
           { provide: VirusScanService, useValue: mockVirusScan },
           { provide: ActionQueueService, useValue: { enqueueDurably } },
           { provide: AttachmentUploadOutboxService, useValue: { savePendingUpload, removePendingUpload } },
-          { provide: AttachmentCleanupOutboxService, useValue: { enqueuePaths: vi.fn(), removePaths: vi.fn() } },
+          { provide: AttachmentCleanupOutboxService, useValue: { enqueuePaths: vi.fn().mockResolvedValue([]), removePendingCleanups: vi.fn() } },
           { provide: DestroyRef, useValue: { onDestroy: vi.fn() } },
         ],
       });
@@ -368,7 +385,7 @@ describe('AttachmentService', () => {
           { provide: VirusScanService, useValue: mockVirusScan },
           { provide: ActionQueueService, useValue: { enqueueDurably } },
           { provide: AttachmentUploadOutboxService, useValue: { savePendingUpload, removePendingUpload } },
-          { provide: AttachmentCleanupOutboxService, useValue: { enqueuePaths: vi.fn(), removePaths: vi.fn() } },
+          { provide: AttachmentCleanupOutboxService, useValue: { enqueuePaths: vi.fn().mockResolvedValue([]), removePendingCleanups: vi.fn() } },
           { provide: DestroyRef, useValue: { onDestroy: vi.fn() } },
         ],
       });
@@ -409,7 +426,7 @@ describe('AttachmentService', () => {
           { provide: VirusScanService, useValue: mockVirusScan },
           { provide: ActionQueueService, useValue: { enqueueDurably: vi.fn().mockResolvedValue('queued') } },
           { provide: AttachmentUploadOutboxService, useValue: { savePendingUpload: vi.fn().mockResolvedValue(undefined) } },
-          { provide: AttachmentCleanupOutboxService, useValue: { enqueuePaths: vi.fn(), removePaths: vi.fn() } },
+          { provide: AttachmentCleanupOutboxService, useValue: { enqueuePaths: vi.fn().mockResolvedValue([]), removePendingCleanups: vi.fn() } },
           { provide: DestroyRef, useValue: { onDestroy: vi.fn() } },
         ],
       });
@@ -464,7 +481,7 @@ describe('AttachmentService', () => {
           { provide: VirusScanService, useValue: mockVirusScan },
           { provide: ActionQueueService, useValue: { enqueueDurably: vi.fn().mockResolvedValue('queued') } },
           { provide: AttachmentUploadOutboxService, useValue: { savePendingUpload: vi.fn().mockResolvedValue(undefined) } },
-          { provide: AttachmentCleanupOutboxService, useValue: { enqueuePaths: vi.fn(), removePaths: vi.fn() } },
+          { provide: AttachmentCleanupOutboxService, useValue: { enqueuePaths: vi.fn().mockResolvedValue([]), removePendingCleanups: vi.fn() } },
           { provide: DestroyRef, useValue: { onDestroy: vi.fn() } },
         ],
       });
@@ -498,6 +515,29 @@ describe('AttachmentService', () => {
       expect(createSignedUrl).toHaveBeenCalledWith('user1/proj1/task1/attachment-1.txt', expect.any(Number));
       expect(remove).not.toHaveBeenCalled();
     });
+
+    it.each<QueuedAttachmentUploadBarrier>([
+      'scan',
+      'upload',
+      'signed-url',
+      'thumbnail-url',
+    ])('后台队列 lease 在 %s 阶段失效时不发布用户取消清理', async barrier => {
+      const harness = createQueuedAttachmentUploadBarrierHarness(barrier);
+      const controller = new AbortController();
+      const processing = harness.service.uploadQueuedAttachment(
+        harness.payload,
+        new Blob(['image'], { type: 'image/png' }),
+        {
+          signal: controller.signal,
+          isCurrent: () => !controller.signal.aborted,
+        },
+      );
+      await vi.waitFor(() => expect(harness.reachedBarrier).toHaveBeenCalledWith(barrier));
+      controller.abort();
+      harness.releaseBarrier();
+      await expect(processing).rejects.toMatchObject({ name: 'AbortError' });
+      expect(harness.remove).not.toHaveBeenCalled();
+    });
   });
 
   describe('storage cleanup outbox', () => {
@@ -507,17 +547,22 @@ describe('AttachmentService', () => {
     } = {}): Promise<{
       cleanupService: AttachmentService;
       enqueuePaths: ReturnType<typeof vi.fn>;
-      removePaths: ReturnType<typeof vi.fn>;
+      removePendingCleanups: ReturnType<typeof vi.fn>;
       remove: ReturnType<typeof vi.fn>;
       events: string[];
     }> {
       const { FileTypeValidatorService } = await import('./file-type-validator.service');
       const { VirusScanService } = await import('./virus-scan.service');
       const events: string[] = [];
-      const enqueuePaths = vi.fn(async () => {
+      const enqueuePaths = vi.fn(async (paths: string[], options: { ownerUserId: string }) => {
         events.push('enqueue');
+        return paths.map((path, index) => ({
+          ownerUserId: options.ownerUserId,
+          path,
+          operationId: `cleanup-operation-${index + 1}`,
+        }));
       });
-      const removePaths = vi.fn(async () => {
+      const removePendingCleanups = vi.fn(async () => {
         events.push('remove-pending');
       });
       const remove = options.removeRejects
@@ -540,7 +585,10 @@ describe('AttachmentService', () => {
           { provide: VirusScanService, useValue: mockVirusScan },
           { provide: ActionQueueService, useValue: { enqueueDurably: vi.fn().mockResolvedValue('queued') } },
           { provide: AttachmentUploadOutboxService, useValue: { savePendingUpload: vi.fn().mockResolvedValue(undefined) } },
-          { provide: AttachmentCleanupOutboxService, useValue: { enqueuePaths, removePaths } },
+          {
+            provide: AttachmentCleanupOutboxService,
+            useValue: { enqueuePaths, removePendingCleanups },
+          },
           { provide: DestroyRef, useValue: { onDestroy: vi.fn() } },
         ],
       });
@@ -548,14 +596,14 @@ describe('AttachmentService', () => {
       return {
         cleanupService: injector.get(AttachmentService),
         enqueuePaths,
-        removePaths,
+        removePendingCleanups,
         remove,
         events,
       };
     }
 
     it('deleteFile 先持久化 cleanup outbox，远端删除成功后才清除待处理记录', async () => {
-      const { cleanupService, enqueuePaths, removePaths, remove, events } =
+      const { cleanupService, enqueuePaths, removePendingCleanups, remove, events } =
         await createStorageCleanupService();
 
       const result = await cleanupService.deleteFile(
@@ -568,18 +616,25 @@ describe('AttachmentService', () => {
 
       expect(result).toEqual({ success: true });
       expect(events).toEqual(['enqueue', 'remote-remove', 'remove-pending']);
-      expect(enqueuePaths).toHaveBeenCalledWith(['user1/proj1/task1/attachment-1.txt']);
+      expect(enqueuePaths).toHaveBeenCalledWith(
+        ['user1/proj1/task1/attachment-1.txt'],
+        { ownerUserId: 'user1' },
+      );
       expect(remove).toHaveBeenCalledWith(['user1/proj1/task1/attachment-1.txt']);
-      expect(removePaths).toHaveBeenCalledWith(['user1/proj1/task1/attachment-1.txt']);
+      expect(removePendingCleanups).toHaveBeenCalledWith([{
+        ownerUserId: 'user1',
+        path: 'user1/proj1/task1/attachment-1.txt',
+        operationId: 'cleanup-operation-1',
+      }]);
     });
 
     it('deleteFiles 远端删除失败时保留 cleanup outbox 待恢复，不清除本地记录', async () => {
-      const { cleanupService, enqueuePaths, removePaths, remove, events } =
+      const { cleanupService, enqueuePaths, removePendingCleanups, remove, events } =
         await createStorageCleanupService({
           removeResult: { data: null, error: { message: 'storage timeout' } },
         });
 
-      const result = await cleanupService.deleteFiles([
+      const result = await cleanupService.deleteFiles('user1', [
         'user1/proj1/task1/attachment-a.png',
         'user1/proj1/task1/attachment-b.png',
       ]);
@@ -590,15 +645,18 @@ describe('AttachmentService', () => {
         errors: ['批次 1: storage timeout'],
       });
       expect(events).toEqual(['enqueue', 'remote-remove']);
-      expect(enqueuePaths).toHaveBeenCalledWith([
-        'user1/proj1/task1/attachment-a.png',
-        'user1/proj1/task1/attachment-b.png',
-      ]);
+      expect(enqueuePaths).toHaveBeenCalledWith(
+        [
+          'user1/proj1/task1/attachment-a.png',
+          'user1/proj1/task1/attachment-b.png',
+        ],
+        { ownerUserId: 'user1' },
+      );
       expect(remove).toHaveBeenCalledWith([
         'user1/proj1/task1/attachment-a.png',
         'user1/proj1/task1/attachment-b.png',
       ]);
-      expect(removePaths).not.toHaveBeenCalled();
+      expect(removePendingCleanups).not.toHaveBeenCalled();
     });
   });
 
@@ -625,7 +683,7 @@ describe('AttachmentService', () => {
           { provide: VirusScanService, useValue: mockVirusScan },
           { provide: ActionQueueService, useValue: { enqueueDurably: vi.fn().mockResolvedValue('queued') } },
           { provide: AttachmentUploadOutboxService, useValue: { savePendingUpload: vi.fn().mockResolvedValue(undefined) } },
-          { provide: AttachmentCleanupOutboxService, useValue: { enqueuePaths: vi.fn(), removePaths: vi.fn() } },
+          { provide: AttachmentCleanupOutboxService, useValue: { enqueuePaths: vi.fn().mockResolvedValue([]), removePendingCleanups: vi.fn() } },
           { provide: DestroyRef, useValue: { onDestroy: vi.fn() } },
         ],
       });
@@ -709,5 +767,11 @@ describe('AttachmentService', () => {
       expect(mockVirusScan.checkBeforeDownload).not.toHaveBeenCalled();
       expect(download).toHaveBeenCalledTimes(1);
     });
+  });
+
+  registerAttachmentServiceUrlRefreshRaceSpecs({
+    service: () => service,
+    destroy: () => destroyService(),
+    loggerWarn: mockLoggerCategory.warn,
   });
 });

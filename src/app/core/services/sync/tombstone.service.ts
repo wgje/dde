@@ -12,6 +12,7 @@
 import { Injectable, inject } from '@angular/core';
 import { LoggerService } from '../../../../services/logger.service';
 import { RequestThrottleService } from '../../../../services/request-throttle.service';
+import { SessionRuntimeResetRegistry } from '../../../../services/session-runtime-reset.service';
 import { AttachmentCleanupOutboxService } from '../../../../services/attachment-cleanup-outbox.service';
 import { REQUEST_THROTTLE_CONFIG, SYNC_CONFIG, FIELD_SELECT_CONFIG } from '../../../../config';
 import type { SupabaseClient } from '@supabase/supabase-js';
@@ -20,7 +21,15 @@ import {
   isBrowserNetworkSuspendedError,
   isBrowserNetworkSuspendedWindow,
 } from '../../../../utils/browser-network-suspension';
-import { fetchAllSupabasePages } from '../../../../utils/supabase-pagination';
+import { fetchAllSupabaseKeysetPagesByCursor } from '../../../../utils/supabase-pagination';
+import {
+  buildTaskTombstoneKeysetOrFilter,
+  isTaskTombstoneCursorAfter,
+  readTaskTombstonePageCursor,
+  taskTombstoneCursorKey,
+  type TaskTombstonePageCursor,
+  type TaskTombstonePageRow,
+} from '../../../../utils/task-tombstone-pagination';
 import {
   buildBatchTombstoneCacheData,
   parseLocalTombstoneProjectRecord,
@@ -30,6 +39,13 @@ import {
   type BatchTombstoneResult,
   type TombstoneCache,
 } from './tombstone.helpers';
+import {
+  normalizePersistedConnectionTombstones,
+  serializeLocalTombstones,
+} from './tombstone-persistence.helpers';
+import { deleteRemoteAttachmentFilesFromStorage } from './tombstone-remote-cleanup.helpers';
+
+const BATCH_TOMBSTONE_RPC_LIMIT = 100;
 
 /**
  * 墓碑管理服务
@@ -44,6 +60,7 @@ export class TombstoneService {
   private readonly logger = this.loggerService.category('Tombstone');
   private readonly throttle = inject(RequestThrottleService);
   private readonly attachmentCleanupOutbox = inject(AttachmentCleanupOutboxService);
+  private readonly sessionRuntimeReset = inject(SessionRuntimeResetRegistry);
   
   /** 
    * 本地 tombstone 缓存 
@@ -62,9 +79,22 @@ export class TombstoneService {
   private connectionTombstoneCache = new Map<string, TombstoneCache>();
   
   constructor() {
+    this.sessionRuntimeReset.register('TombstoneService', () => this.resetSessionRuntime());
     this.loadLocalTombstones();
     // 【P1-19 修复】启动时加载连接 tombstone
     this.loadConnectionTombstones();
+  }
+
+  reloadLocalTombstonesFromStorage(): void {
+    this.localTombstones = new Map();
+    this.localConnectionTombstones = new Map();
+    this.loadLocalTombstones();
+    this.loadConnectionTombstones();
+  }
+
+  private resetSessionRuntime(): void {
+    this.tombstoneCache.clear();
+    this.connectionTombstoneCache.clear();
   }
 
   // ==================== 本地 Tombstone 管理 ====================
@@ -107,14 +137,7 @@ export class TombstoneService {
     if (typeof localStorage === 'undefined') return;
     
     try {
-      const data: Record<string, Record<string, number>> = {};
-      this.localTombstones.forEach((taskIds, projectId) => {
-        const serializedTaskIds: Record<string, number> = {};
-        taskIds.forEach((timestamp, taskId) => {
-          serializedTaskIds[taskId] = timestamp;
-        });
-        data[projectId] = serializedTaskIds;
-      });
+      const data = serializeLocalTombstones(this.localTombstones);
       localStorage.setItem(this.LOCAL_TOMBSTONES_KEY, JSON.stringify(data));
     } catch (e) {
       this.logger.warn('保存本地 tombstone 缓存失败', e);
@@ -234,17 +257,17 @@ export class TombstoneService {
    * 获取 Tombstones（带缓存）
    * 
    * 【流量优化】缓存 tombstone 结果，避免每次同步都查询
-   * 缓存有效期：5 分钟（SYNC_CONFIG.TOMBSTONE_CACHE_TTL）
+   * 缓存有效期由 SYNC_CONFIG.TOMBSTONE_CACHE_TTL 控制；完整快照可用 forceRemote 绕过缓存。
    */
   async getTombstonesWithCache(
-    projectId: string, 
-    client: SupabaseClient
+    projectId: string,
+    client: SupabaseClient,
+    options: { forceRemote?: boolean } = {},
   ): Promise<{ data: { task_id: string; deleted_at?: string | null }[] | null; error: Error | null }> {
     const now = Date.now();
     const cached = this.tombstoneCache.get(projectId);
     
-    // 检查缓存是否有效
-    if (cached && (now - cached.timestamp) < SYNC_CONFIG.TOMBSTONE_CACHE_TTL) {
+    if (!options.forceRemote && cached && (now - cached.timestamp) < SYNC_CONFIG.TOMBSTONE_CACHE_TTL) {
       this.logger.debug('使用 Tombstone 缓存', { 
         projectId, 
         count: cached.ids.size,
@@ -257,17 +280,20 @@ export class TombstoneService {
       return { data: null, error: createBrowserNetworkSuspendedError() };
     }
     
-    // 缓存过期或不存在，查询云端
     try {
       const result = await this.throttle.execute(
         `task-tombstones:${projectId}`,
         async () => {
-          return await fetchAllSupabasePages<{ task_id: string; deleted_at?: string | null }, unknown>(() => client
-            .from('task_tombstones')
-            .select(FIELD_SELECT_CONFIG.TOMBSTONE_FIELDS)
-            .eq('project_id', projectId)
-            .order('deleted_at', { ascending: true })
-            .order('task_id', { ascending: true }));
+          return await fetchAllSupabaseKeysetPagesByCursor<
+            TaskTombstonePageRow, TaskTombstonePageCursor, unknown
+          >((cursor) => {
+            let query = client
+              .from('task_tombstones')
+              .select(FIELD_SELECT_CONFIG.TOMBSTONE_FIELDS)
+              .eq('project_id', projectId);
+            if (cursor) query = query.or(buildTaskTombstoneKeysetOrFilter(cursor));
+            return query.order('deleted_at', { ascending: true }).order('task_id', { ascending: true });
+          }, { readCursor: readTaskTombstonePageCursor, cursorKey: taskTombstoneCursorKey, isCursorAfter: isTaskTombstoneCursorAfter });
         },
         { 
           deduplicate: true,
@@ -280,10 +306,7 @@ export class TombstoneService {
         this.updateTaskTombstoneCache(projectId, result.data, now);
       }
       
-      return {
-        data: result.data,
-        error: this.normalizeTombstoneError(result.error),
-      };
+      return { data: result.data, error: this.normalizeTombstoneError(result.error) };
     } catch (e) {
       if (isBrowserNetworkSuspendedError(e) || isBrowserNetworkSuspendedWindow()) {
         return { data: null, error: createBrowserNetworkSuspendedError() };
@@ -437,7 +460,32 @@ export class TombstoneService {
   ): Promise<{ data: unknown; error: unknown }> {
     return await this.throttle.execute(
       'batch-tombstones',
-      async () => client.rpc('batch_get_tombstones', { p_project_ids: staleIds }),
+      async () => {
+        const merged: BatchTombstoneResult = {
+          task_tombstones: [],
+          connection_tombstones: [],
+        };
+
+        for (let offset = 0; offset < staleIds.length; offset += BATCH_TOMBSTONE_RPC_LIMIT) {
+          const projectIds = staleIds.slice(offset, offset + BATCH_TOMBSTONE_RPC_LIMIT);
+          const { data, error } = await client.rpc('batch_get_tombstones', {
+            p_project_ids: projectIds,
+          });
+          if (error || !data) {
+            return { data: null, error };
+          }
+
+          const batch = data as BatchTombstoneResult;
+          if (Array.isArray(batch.task_tombstones)) {
+            merged.task_tombstones!.push(...batch.task_tombstones);
+          }
+          if (Array.isArray(batch.connection_tombstones)) {
+            merged.connection_tombstones!.push(...batch.connection_tombstones);
+          }
+        }
+
+        return { data: merged, error: null };
+      },
       { deduplicate: true, timeout: REQUEST_THROTTLE_CONFIG.BATCH_SYNC_TIMEOUT }
     );
   }
@@ -605,55 +653,12 @@ export class TombstoneService {
   ): Promise<void> {
     if (paths.length === 0) return;
 
-    try {
-      await this.attachmentCleanupOutbox.enqueuePaths(paths);
-    } catch (e) {
-      this.logger.error('deleteAttachmentFilesFromStorage: 清理队列持久化失败', e);
-      return;
-    }
-
-    if (!client) return;
-    
-    try {
-      // 批量删除，每次最多 100 个
-      const batchSize = 100;
-      for (let i = 0; i < paths.length; i += batchSize) {
-        const batch = paths.slice(i, i + batchSize);
-        const { error } = await client.storage
-          .from('attachments')
-          .remove(batch);
-        
-        if (error) {
-          this.logger.warn('deleteAttachmentFilesFromStorage: 批量删除失败', {
-            batch: batch.slice(0, 5),
-            batchSize: batch.length,
-            error: error.message
-          });
-          // 继续删除下一批，不抛出异常
-        } else {
-          this.logger.debug('deleteAttachmentFilesFromStorage: 批量删除成功', {
-            batchIndex: i / batchSize,
-            batchSize: batch.length
-          });
-          try {
-            await this.attachmentCleanupOutbox.removePaths(batch);
-          } catch (removePendingError) {
-            this.logger.warn('deleteAttachmentFilesFromStorage: 清理队列记录删除失败，将保持可重试', {
-              batch: batch.slice(0, 5),
-              batchSize: batch.length,
-              error: removePendingError
-            });
-          }
-        }
-      }
-      
-      this.logger.info('deleteAttachmentFilesFromStorage: 完成', {
-        totalPaths: paths.length
-      });
-    } catch (e) {
-      this.logger.error('deleteAttachmentFilesFromStorage: 异常', e);
-      // 不抛出，因为任务已经删除，附件清理失败只是资源浪费，不影响功能
-    }
+    await deleteRemoteAttachmentFilesFromStorage({
+      client,
+      paths,
+      attachmentCleanupOutbox: this.attachmentCleanupOutbox,
+      logger: this.logger,
+    });
   }
   
   // ==================== 便捷 API ====================
@@ -692,7 +697,10 @@ export class TombstoneService {
   // ==================== 连接 Tombstone 管理 ====================
   
   /** 本地连接 tombstone */
-  private localConnectionTombstones = new Map<string, { id: string; timestamp: number }[]>();
+  private localConnectionTombstones = new Map<
+    string,
+    { id: string; timestamp: number; projectId?: string }[]
+  >();
   
   /** 【P1-19 修复】连接 tombstone 持久化 key */
   private readonly LOCAL_CONNECTION_TOMBSTONES_KEY = 'nanoflow.local-connection-tombstones';
@@ -700,12 +708,12 @@ export class TombstoneService {
   /**
    * 记录连接删除
    */
-  recordConnectionDeletion(connectionId: string, timestamp: number): void {
+  recordConnectionDeletion(connectionId: string, timestamp: number, projectId?: string): void {
     const key = 'global'; // 连接 tombstone 不按项目分组
     if (!this.localConnectionTombstones.has(key)) {
       this.localConnectionTombstones.set(key, []);
     }
-    this.localConnectionTombstones.get(key)!.push({ id: connectionId, timestamp });
+    this.localConnectionTombstones.get(key)!.push({ id: connectionId, timestamp, projectId });
     
     // 清理过期的 tombstone
     const cutoff = Date.now() - SYNC_CONFIG.TOMBSTONE_RETENTION_MS;
@@ -721,7 +729,7 @@ export class TombstoneService {
   /**
    * 获取连接 tombstone 列表
    */
-  getConnectionTombstones(): { id: string; timestamp: number }[] {
+  getConnectionTombstones(): { id: string; timestamp: number; projectId?: string }[] {
     return this.localConnectionTombstones.get('global') || [];
   }
   
@@ -731,10 +739,10 @@ export class TombstoneService {
     try {
       const raw = localStorage.getItem(this.LOCAL_CONNECTION_TOMBSTONES_KEY);
       if (!raw) return;
-      const parsed = JSON.parse(raw) as { id: string; timestamp: number }[];
+      const parsed = JSON.parse(raw) as unknown;
       if (!Array.isArray(parsed)) return;
       const cutoff = Date.now() - SYNC_CONFIG.TOMBSTONE_RETENTION_MS;
-      const valid = parsed.filter(t => t.id && t.timestamp > cutoff);
+      const valid = normalizePersistedConnectionTombstones(parsed, cutoff);
       if (valid.length > 0) {
         this.localConnectionTombstones.set('global', valid);
       }

@@ -22,6 +22,7 @@ import { markTaskContentMissingFromSource } from '../utils/task-content-guard';
 import { StartupPlaceholderStateService } from './startup-placeholder-state.service';
 import { blackBoxEntriesMap, gateSnoozeCount, gateState, resetFocusState } from '../state/focus-stores';
 import { StorePersistenceService } from '../app/core/state/store-persistence.service';
+import { LocalBackupUiRestoreStartupRecoveryService } from './local-backup-ui-restore-startup-recovery.service';
 import {
   createBrowserNetworkSuspendedError,
   resetBrowserNetworkSuspensionTrackingForTests,
@@ -179,6 +180,7 @@ describe('UserSessionService', () => {
   let mockRetryQueue: Record<string, unknown>;
   let mockConflictStorage: Record<string, unknown>;
   let mockDockSnapshotPersistence: Record<string, unknown>;
+  let mockLocalBackupUiRestoreStartupRecovery: { recover: ReturnType<typeof vi.fn> };
   let mockStartupPlaceholderState: {
     isHintOnlyActive: ReturnType<typeof vi.fn>;
     activate: ReturnType<typeof vi.fn>;
@@ -353,6 +355,10 @@ describe('UserSessionService', () => {
       discardPendingPersist: vi.fn().mockResolvedValue(undefined),
     };
 
+    mockLocalBackupUiRestoreStartupRecovery = {
+      recover: vi.fn().mockResolvedValue({ status: 'none' }),
+    };
+
     mockStartupPlaceholderState = {
       isHintOnlyActive: vi.fn(() => false),
       activate: vi.fn(),
@@ -405,6 +411,10 @@ describe('UserSessionService', () => {
         { provide: AuthService, useValue: mockAuthService },
         { provide: SyncCoordinatorService, useValue: mockSyncCoordinator },
         { provide: StorePersistenceService, useValue: mockStorePersistence },
+        {
+          provide: LocalBackupUiRestoreStartupRecoveryService,
+          useValue: mockLocalBackupUiRestoreStartupRecovery,
+        },
         { provide: ActionQueueService, useValue: mockActionQueue },
         { provide: RetryQueueService, useValue: mockRetryQueue },
         { provide: ConflictStorageService, useValue: mockConflictStorage },
@@ -477,6 +487,29 @@ describe('UserSessionService', () => {
   }
 
   registerUserSessionSwitchActiveProjectSpecs(getUserSessionSpecContext);
+
+  describe('local backup UI restore startup recovery', () => {
+    it('blocks queue and project loading when startup recovery stays frozen', async () => {
+      const ownerUserId = 'phase2c2a-blocked-owner';
+      mockLocalBackupUiRestoreStartupRecovery.recover.mockResolvedValueOnce({
+        status: 'blocked',
+        reason: 'active-or-mutated',
+      });
+      const loadUserDataSpy = vi.spyOn(
+        service as unknown as { loadUserData: (userId: string, sessionGuard?: unknown) => Promise<void> },
+        'loadUserData',
+      ).mockResolvedValue(undefined);
+
+      await service.setCurrentUser(ownerUserId, { forceLoad: true });
+
+      expect(mockLocalBackupUiRestoreStartupRecovery.recover).toHaveBeenCalledWith(ownerUserId);
+      expect(mockStorePersistence['recoverInterruptedDataSafetyRestore']).not.toHaveBeenCalled();
+      expect(mockActionQueue['reloadFromStorageForCurrentOwner']).not.toHaveBeenCalled();
+      expect(mockRetryQueue['reloadFromStorageForCurrentOwner']).not.toHaveBeenCalled();
+      expect(loadUserDataSpy).not.toHaveBeenCalled();
+    });
+  });
+
   describe('clearLocalData', () => {
     it('清除内存态数据', () => {
       service.clearLocalData();

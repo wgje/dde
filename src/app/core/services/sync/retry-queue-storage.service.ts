@@ -1,5 +1,11 @@
 import { SYNC_CONFIG } from '../../../../config';
 import { isValidUUID } from '../../../../utils/validation';
+import {
+  beginLocalBackupUiRestoreWriterContinuation,
+  runLocalBackupUiRestoreWriterContinuationSync,
+  trackLocalBackupUiRestoreWriterPromise,
+  type LocalBackupUiRestoreWriterHandle,
+} from '../../../../services/local-backup-ui-restore-writer-quiescence-tracker';
 import { minifyItem as minifyItemPure } from './retry-queue-fingerprint';
 import type {
   DbInitFinalize,
@@ -9,7 +15,19 @@ import type {
 } from './retry-queue.types';
 import { RetryQueueRunnerLayer } from './retry-queue-runner.service';
 
+type RetryQueueLocalStorageEnvelope = { version: number; items: PersistedRetryQueueItem[]; savedAt: number; idbFallbackProof?: unknown };
+type RetryQueueIdbFallbackProof = { version: 1; ownerUserId: string; savedAt: number; itemCount: number; snapshotDigest: string; recordedAt: number };
+type RetryQueueIdbFallbackEnvelopeSnapshot = {
+  envelope: RetryQueueLocalStorageEnvelope;
+  proof: RetryQueueIdbFallbackProof;
+  envelopeItemsDigest: string;
+};
+type RetryQueueIdbFallbackRecoveryPlan = { snapshot: RetryQueueIdbFallbackEnvelopeSnapshot; mergedItems: RetryQueueItem[]; idbDigest: string };
+type RetryQueueIdbSaveCapture = { persistedDigest?: string };
+type RetryQueueIdbLoadResult = { clean: PersistedRetryQueueItem[]; dirtyKeys: string[] };
+
 export abstract class RetryQueueStorageLayer extends RetryQueueRunnerLayer {
+  protected saveDebounceWriter: LocalBackupUiRestoreWriterHandle | null = null;
   // ==================== IndexedDB 支持 ====================
   
   /**
@@ -92,14 +110,20 @@ export abstract class RetryQueueStorageLayer extends RetryQueueRunnerLayer {
    */
   protected async loadFromStorage(): Promise<void> {
     const loadToken = this.captureStorageLoadToken();
-    const db = await this.initDb();
-    if (!this.isStorageLoadTokenCurrent(loadToken)) {
-      this.logStaleStorageLoad(loadToken, 'loadFromStorage:init-db');
-      return;
-    }
+    this.markOwnerStorageLoadStarted(loadToken);
+    try {
+      const db = await this.initDb();
+      if (!this.isStorageLoadTokenCurrent(loadToken)) {
+        this.logStaleStorageLoad(loadToken, 'loadFromStorage:init-db');
+        return;
+      }
 
-    if (db && await this.tryLoadQueueFromIdb(db, loadToken)) return;
-    this.loadQueueFromLocalStorage(loadToken);
+      if (db && await this.tryLoadQueueFromIdb(db, loadToken)) return;
+      this.loadQueueFromLocalStorage(loadToken);
+    } catch (error) {
+      this.markOwnerStorageLoadFailed(loadToken);
+      throw error;
+    }
   }
 
   protected async tryLoadQueueFromIdb(db: IDBDatabase, loadToken: RetryQueueStorageLoadToken): Promise<boolean> {
@@ -113,7 +137,9 @@ export abstract class RetryQueueStorageLayer extends RetryQueueRunnerLayer {
       return true;
     }
 
-    const { safeItems, removedCount, repairedOperationIdCount } = this.sanitizeLoadedItems(items);
+    const recoveryPlan = this.buildIdbFallbackRecoveryPlan(items);
+    const loadItems = recoveryPlan?.mergedItems ?? items;
+    const { safeItems, removedCount, repairedOperationIdCount } = this.sanitizeLoadedItems(loadItems);
     if (!this.isStorageLoadTokenCurrent(loadToken)) {
       this.logStaleStorageLoad(loadToken, 'loadFromStorage:idb-sanitized');
       return true;
@@ -121,7 +147,7 @@ export abstract class RetryQueueStorageLayer extends RetryQueueRunnerLayer {
 
     const duplicateRemovedCount = this.applyLoadedItems(safeItems);
     this.logger.info('从 IndexedDB 加载队列', {
-      count: items.length,
+      count: loadItems.length,
       visibleCount: this.queue.length,
       hiddenCount: this.hiddenQueueItems.length,
       removedCount: removedCount + duplicateRemovedCount,
@@ -129,6 +155,10 @@ export abstract class RetryQueueStorageLayer extends RetryQueueRunnerLayer {
       ownerUserId: this.getCurrentOwnerUserId(),
     });
     this.finishLoadedQueueItems(removedCount + duplicateRemovedCount, repairedOperationIdCount);
+    this.markOwnerStorageLoadSucceeded(loadToken);
+    if (recoveryPlan) {
+      await this.settleRecoveredIdbFallback(db, recoveryPlan);
+    }
     return true;
   }
 
@@ -147,6 +177,7 @@ export abstract class RetryQueueStorageLayer extends RetryQueueRunnerLayer {
 
     const duplicateRemovedCount = this.applyLoadedItems(safeItems);
     this.finishLoadedQueueItems(removedCount + duplicateRemovedCount, repairedOperationIdCount);
+    this.markOwnerStorageLoadSucceeded(loadToken);
   }
 
   protected finishLoadedQueueItems(removedCount: number, repairedOperationIdCount = 0): void {
@@ -172,102 +203,81 @@ export abstract class RetryQueueStorageLayer extends RetryQueueRunnerLayer {
     this.syncPendingCountToState();
   }
   
-  /**
-   * 从 IndexedDB 加载
-   *
-   * 使用 readonly 事务，避免不必要的排他锁阻塞并发读写。
-   * 若存在脏条目需要清理，单独开启 readwrite 事务处理。
-   */
+  /** readonly complete 后发布 IndexedDB 结果，脏条目再由独立事务清理。 */
   protected async loadFromIdb(db: IDBDatabase): Promise<PersistedRetryQueueItem[] | null> {
     return new Promise((resolve) => {
+      let settled = false;
+      const settle = (items: PersistedRetryQueueItem[] | null): boolean => {
+        if (settled) return false;
+        settled = true;
+        resolve(items);
+        return true;
+      };
       try {
         const transaction = db.transaction(this.DB_CONFIG.storeName, 'readonly');
         const store = transaction.objectStore(this.DB_CONFIG.storeName);
         const request = store.getAll();
-        
+        let loaded: RetryQueueIdbLoadResult | null = null;
         request.onsuccess = () => {
-          const raw = request.result || [];
-          const clean: PersistedRetryQueueItem[] = [];
-          const dirtyKeys: string[] = [];
-
-          for (const item of raw) {
-            if (item.data?.id && !isValidUUID(item.data.id)) {
-              this.logger.warn('RetryQueue 加载：丢弃非法 ID 条目', { type: item.type, id: item.data.id });
-              dirtyKeys.push(item.id);
-            } else {
-              clean.push(item);
-            }
-          }
-
-          // 从 IDB 中物理删除脏条目（使用独立 readwrite 事务）
-          if (dirtyKeys.length > 0) {
-            this.logger.warn('RetryQueue 启动清理：从 IDB 删除脏条目', { keys: dirtyKeys });
-            this.logger.info('RetryQueue 加载：已过滤脏数据', { removed: dirtyKeys.length });
-            try {
-              const delTx = db.transaction(this.DB_CONFIG.storeName, 'readwrite');
-              const delStore = delTx.objectStore(this.DB_CONFIG.storeName);
-              for (const key of dirtyKeys) {
-                delStore.delete(key);
-              }
-            } catch (delErr) {
-              this.logger.error('RetryQueue：删除脏条目失败', delErr);
-            }
-          }
-
-          this.logger.debug('从 IndexedDB 加载', { count: clean.length });
-          resolve(clean);
+          loaded = this.filterLoadedIdbItems(request.result || []);
         };
-        
         request.onerror = () => {
-          this.logger.error('IndexedDB 加载失败', request.error);
-          resolve(null);
+          if (settle(null)) this.logger.error('IndexedDB 加载失败', request.error);
+        };
+        transaction.onerror = () => {
+          if (settle(null)) this.logger.error('IndexedDB 加载事务失败', transaction.error);
+        };
+        transaction.onabort = () => {
+          if (settle(null)) this.logger.warn('IndexedDB 加载事务已中止', transaction.error);
+        };
+        transaction.oncomplete = () => {
+          if (loaded === null) {
+            settle(null);
+            return;
+          }
+          if (!settle(loaded.clean)) return;
+          this.deleteDirtyIdbItems(db, loaded.dirtyKeys);
+          this.logger.debug('从 IndexedDB 加载', { count: loaded.clean.length });
         };
       } catch (err) {
-        this.logger.error('IndexedDB 读取异常', err);
-        resolve(null);
+        if (settle(null)) this.logger.error('IndexedDB 读取异常', err);
       }
     });
   }
-  
+
+  private filterLoadedIdbItems(raw: PersistedRetryQueueItem[]): RetryQueueIdbLoadResult {
+    const clean: PersistedRetryQueueItem[] = [];
+    const dirtyKeys: string[] = [];
+    for (const item of raw) {
+      if (item.data?.id && !isValidUUID(item.data.id)) {
+        this.logger.warn('RetryQueue 加载：丢弃非法 ID 条目', { type: item.type, id: item.data.id });
+        dirtyKeys.push(item.id);
+      } else {
+        clean.push(item);
+      }
+    }
+    return { clean, dirtyKeys };
+  }
+  private deleteDirtyIdbItems(db: IDBDatabase, dirtyKeys: string[]): void {
+    if (dirtyKeys.length === 0) return;
+    this.logger.warn('RetryQueue 启动清理：从 IDB 删除脏条目', { keys: dirtyKeys });
+    this.logger.info('RetryQueue 加载：已过滤脏数据', { removed: dirtyKeys.length });
+    try {
+      const transaction = db.transaction(this.DB_CONFIG.storeName, 'readwrite');
+      const store = transaction.objectStore(this.DB_CONFIG.storeName);
+      for (const key of dirtyKeys) store.delete(key);
+    } catch (error) {
+      this.logger.error('RetryQueue：删除脏条目失败', error);
+    }
+  }
+
   /**
    * 从 localStorage 加载
    */
   protected loadFromLocalStorage(): PersistedRetryQueueItem[] {
-    if (typeof localStorage === 'undefined') return [];
-    
-    try {
-      const data = localStorage.getItem(this.STORAGE_KEY);
-      if (!data) return [];
-      
-      const parsed = JSON.parse(data);
-      if (parsed.version === this.VERSION && Array.isArray(parsed.items)) {
-        // 过滤过期项 + 非法 ID 脏数据
-        const now = Date.now();
-        const items = parsed.items.filter((item: PersistedRetryQueueItem) => {
-          if (now - item.createdAt >= this.MAX_ITEM_AGE || item.retryCount >= this.MAX_RETRIES) {
-            // 降级加载路径的终态项同样不得静默丢弃（§5.6）：
-            // 隔离保留证据后再从活动队列剔除（业务边界：不再自动回放）
-            void this.persistTerminalRetryEvidence(
-              this.ensureLoadedItemOperationId({ ...item, data: { ...item.data } }),
-              now - item.createdAt >= this.MAX_ITEM_AGE ? 'expired-on-load' : 'max-retries-on-load',
-            );
-            return false;
-          }
-          // 过滤非法 ID 的脏数据
-          if (item.data?.id && !isValidUUID(item.data.id)) {
-            this.logger.warn('RetryQueue localStorage 加载：丢弃非法 ID', { type: item.type, id: item.data.id });
-            return false;
-          }
-          return true;
-        });
-        this.logger.info('从 localStorage 加载队列', { count: items.length });
-        return items;
-      }
-    } catch (e) {
-      this.logger.error('localStorage 加载失败', e);
-    }
-
-    return [];
+    const envelope = this.readLocalStorageEnvelope();
+    if (!envelope) return [];
+    return this.extractLoadableLocalStorageItems(envelope.items);
   }
   
   /**
@@ -279,24 +289,33 @@ export abstract class RetryQueueStorageLayer extends RetryQueueRunnerLayer {
    */
   protected saveToStorage(): void {
     if (this.saveDebounceTimer !== null) return; // 已有待执行的保存，跳过
+    const writer = beginLocalBackupUiRestoreWriterContinuation(this.getCurrentOwnerUserId(), 'retry-queue');
     const saveDebounceTimer = setTimeout(() => {
       if (this.saveDebounceTimer !== saveDebounceTimer) return;
       this.saveDebounceTimer = null;
-      try {
-        void this.saveToStorageImmediate().catch(error => {
+      const pendingWriter = this.saveDebounceWriter;
+      this.saveDebounceWriter = null;
+      if (!pendingWriter) return;
+      void this.saveToStorageImmediate()
+        .catch(error => {
           this.logger.warn('RetryQueue 防抖保存失败', error);
+        })
+        .finally(() => pendingWriter.release())
+        .catch(error => {
+          this.logger.warn('RetryQueue 防抖 writer 释放失败', error);
         });
-      } catch (error) {
-        this.logger.warn('RetryQueue 防抖保存失败', error);
-      }
     }, this.SAVE_DEBOUNCE_MS);
     this.saveDebounceTimer = saveDebounceTimer;
+    this.saveDebounceWriter = writer;
   }
 
   async persistNow(): Promise<boolean> {
     if (this.saveDebounceTimer !== null) {
       clearTimeout(this.saveDebounceTimer);
       this.saveDebounceTimer = null;
+      const pendingWriter = this.saveDebounceWriter;
+      this.saveDebounceWriter = null;
+      if (pendingWriter) return this.saveToStorageImmediateWithHandle(pendingWriter);
     }
 
     return this.saveToStorageImmediate();
@@ -309,12 +328,32 @@ export abstract class RetryQueueStorageLayer extends RetryQueueRunnerLayer {
    * 注意：调用方故意不 await，采用 fire-and-forget 模式以不阻塞主线程
    */
   protected async saveToStorageImmediate(): Promise<boolean> {
+    return trackLocalBackupUiRestoreWriterPromise(
+      this.getCurrentOwnerUserId(), 'retry-queue', () => this.saveToStorageImmediateCore(),
+      { continuation: true },
+    );
+  }
+
+  private async saveToStorageImmediateWithHandle(
+    writer: LocalBackupUiRestoreWriterHandle,
+  ): Promise<boolean> {
+    try {
+      return await this.saveToStorageImmediate();
+    } finally {
+      writer.release();
+    }
+  }
+
+  private async saveToStorageImmediateCore(): Promise<boolean> {
     try {
       const db = await this.initDb();
       
       if (db) {
-        const success = await this.saveToIdb(db);
+        const fallbackSnapshot = this.readIdbFallbackEnvelopeSnapshot();
+        const saveCapture: RetryQueueIdbSaveCapture = {};
+        const success = await this.saveToIdb(db, saveCapture);
         if (success) {
+          await this.settleSavedIdbFallback(db, fallbackSnapshot, saveCapture.persistedDigest);
           if ((this.queuePressureReason() ?? '').startsWith('storage_')) {
             this.clearPressureMode();
           }
@@ -323,11 +362,11 @@ export abstract class RetryQueueStorageLayer extends RetryQueueRunnerLayer {
       }
       
       // 降级到 localStorage
-      return this.saveToLocalStorage();
+      return this.saveToLocalStorage({ unresolvedIdbFallback: true });
     } catch (e) {
       this.logger.warn('saveToStorage 失败，降级到 localStorage', e);
       try {
-        return this.saveToLocalStorage();
+        return this.saveToLocalStorage({ unresolvedIdbFallback: true });
       } catch {
         // 完全静默：localStorage 也失败时只能丢弃
         return false;
@@ -339,14 +378,20 @@ export abstract class RetryQueueStorageLayer extends RetryQueueRunnerLayer {
    * 同步保存（用于 beforeunload）
    */
   protected saveToStorageSync(): void {
-    // IndexedDB 不支持同步操作，只能保存到 localStorage
-    this.saveToLocalStorage();
+    return runLocalBackupUiRestoreWriterContinuationSync(
+      this.getCurrentOwnerUserId(), 'retry-queue', () => {
+        this.saveToLocalStorage();
+      },
+    );
   }
   
   /**
    * 保存到 IndexedDB
    */
-  protected async saveToIdb(db: IDBDatabase): Promise<boolean> {
+  protected async saveToIdb(
+    db: IDBDatabase,
+    capture: RetryQueueIdbSaveCapture = {},
+  ): Promise<boolean> {
     return new Promise((resolve) => {
       try {
         const transaction = db.transaction(this.DB_CONFIG.storeName, 'readwrite');
@@ -379,6 +424,7 @@ export abstract class RetryQueueStorageLayer extends RetryQueueRunnerLayer {
             ? existingItemsRequest.result as PersistedRetryQueueItem[]
             : [];
           items = this.mergeStoredRetryQueueItems(existingItems, items);
+          capture.persistedDigest = this.computeRetryQueueItemDigest(items);
 
           store.clear();
 
@@ -418,15 +464,26 @@ export abstract class RetryQueueStorageLayer extends RetryQueueRunnerLayer {
   /**
    * 保存到 localStorage
    */
-  protected saveToLocalStorage(): boolean {
+  protected saveToLocalStorage(
+    options: { unresolvedIdbFallback?: boolean } = {},
+  ): boolean {
     if (typeof localStorage === 'undefined') return false;
     
     try {
       const items = this.mergeLocalStorageItemsForFallback(this.getPersistedItems());
-      const data = {
+      const minifiedItems = items.map(item => this.minifyItem(item));
+      const savedAt = Date.now();
+      const existingProof = this.parseIdbFallbackProof(
+        this.readLocalStorageEnvelope({ logErrors: false })?.idbFallbackProof,
+      );
+      const nextProof = options.unresolvedIdbFallback === true || existingProof
+        ? this.buildIdbFallbackProof(minifiedItems, savedAt)
+        : undefined;
+      const data: RetryQueueLocalStorageEnvelope = {
         version: this.VERSION,
-        items: items.map(item => this.minifyItem(item)),
-        savedAt: Date.now()
+        items: minifiedItems,
+        savedAt,
+        ...(nextProof ? { idbFallbackProof: nextProof } : {}),
       };
       
       const json = JSON.stringify(data);
@@ -483,10 +540,218 @@ export abstract class RetryQueueStorageLayer extends RetryQueueRunnerLayer {
     }
 
     for (const item of currentItems) {
-      this.mergeRetryQueueItemByEntityKey(merged, item, { preferIncoming: true });
+      this.mergeRetryQueueItemByEntityKey(merged, item, { preferExistingOnTie: true });
     }
 
     return Array.from(merged.values()).sort((a, b) => a.createdAt - b.createdAt);
+  }
+
+  private buildIdbFallbackRecoveryPlan(
+    idbItems: PersistedRetryQueueItem[],
+  ): RetryQueueIdbFallbackRecoveryPlan | null {
+    const snapshot = this.readIdbFallbackEnvelopeSnapshot();
+    if (!snapshot) return null;
+    return {
+      snapshot,
+      mergedItems: this.mergeRecoveredIdbFallbackItems(
+        idbItems,
+        this.extractLoadableLocalStorageItems(snapshot.envelope.items),
+      ),
+      idbDigest: this.computeRetryQueueItemDigest(idbItems),
+    };
+  }
+
+  private async settleRecoveredIdbFallback(
+    db: IDBDatabase,
+    recoveryPlan: RetryQueueIdbFallbackRecoveryPlan,
+  ): Promise<void> {
+    const currentDigest = this.computeRetryQueueItemDigest(this.getPersistedItems());
+    if (recoveryPlan.idbDigest === currentDigest) {
+      this.replaceIdbFallbackEnvelopeIfCurrent(
+        recoveryPlan.snapshot,
+        this.getPersistedItems(),
+      );
+      return;
+    }
+    const saveCapture: RetryQueueIdbSaveCapture = {};
+    if (!await this.saveToIdb(db, saveCapture)) {
+      this.logger.warn('RetryQueue unresolved IDB fallback 恢复后提升失败，保留 localStorage proof', { ownerUserId: recoveryPlan.snapshot.proof.ownerUserId, itemCount: recoveryPlan.snapshot.proof.itemCount });
+      return;
+    }
+    await this.clearIdbFallbackProofAfterReadback(
+      db,
+      recoveryPlan.snapshot,
+      saveCapture.persistedDigest,
+      '提升',
+    );
+  }
+
+  private mergeRecoveredIdbFallbackItems(
+    idbItems: PersistedRetryQueueItem[],
+    fallbackItems: PersistedRetryQueueItem[],
+  ): RetryQueueItem[] {
+    const merged = new Map<string, RetryQueueItem>();
+    const appendItems = (items: PersistedRetryQueueItem[]): void => {
+      for (const item of items) {
+        if (!this.isMergeableStoredRetryQueueItem(item) || this.locallyRemovedRetryItemIds.has(item.id)) continue;
+        this.mergeRetryQueueItemByEntityKey(merged, this.ensureLoadedItemOperationId(item));
+      }
+    };
+    appendItems(idbItems);
+    appendItems(fallbackItems);
+    return Array.from(merged.values()).sort((a, b) => a.createdAt - b.createdAt);
+  }
+
+  private readLocalStorageEnvelope(
+    options: { logErrors?: boolean } = {},
+  ): RetryQueueLocalStorageEnvelope | null {
+    if (typeof localStorage === 'undefined') return null;
+    let parsed: Partial<RetryQueueLocalStorageEnvelope> | null = null;
+    try {
+      const data = localStorage.getItem(this.STORAGE_KEY);
+      if (!data) return null;
+      parsed = JSON.parse(data) as Partial<RetryQueueLocalStorageEnvelope>;
+    } catch (error) {
+      if (options.logErrors !== false) this.logger.error('localStorage 加载失败', error);
+    }
+    return parsed && parsed.version === this.VERSION && Array.isArray(parsed.items)
+      ? { version: parsed.version, items: parsed.items as PersistedRetryQueueItem[], savedAt: Number.isFinite(parsed.savedAt) ? parsed.savedAt as number : 0, idbFallbackProof: parsed.idbFallbackProof }
+      : null;
+  }
+
+  private extractLoadableLocalStorageItems(
+    items: PersistedRetryQueueItem[],
+  ): PersistedRetryQueueItem[] {
+    const now = Date.now();
+    const loadableItems = items.filter(item => {
+      if (now - item.createdAt >= this.MAX_ITEM_AGE || item.retryCount >= this.MAX_RETRIES) {
+        void this.persistTerminalRetryEvidence(
+        this.ensureLoadedItemOperationId({ ...item, data: { ...item.data } }),
+          now - item.createdAt >= this.MAX_ITEM_AGE ? 'expired-on-load' : 'max-retries-on-load',
+        );
+        return false;
+      }
+      if (item.data?.id && !isValidUUID(item.data.id)) { this.logger.warn('RetryQueue localStorage 加载：丢弃非法 ID', { type: item.type, id: item.data.id }); return false; }
+      return true;
+    });
+    this.logger.info('从 localStorage 加载队列', { count: loadableItems.length });
+    return loadableItems;
+  }
+
+  private buildIdbFallbackProof(
+    items: PersistedRetryQueueItem[],
+    savedAt: number,
+  ): RetryQueueIdbFallbackProof {
+    return { version: 1, ownerUserId: this.getCurrentOwnerUserId(), savedAt, itemCount: items.length, snapshotDigest: this.computeRetryQueueItemDigest(items), recordedAt: Date.now() };
+  }
+
+  private readIdbFallbackEnvelopeSnapshot(): RetryQueueIdbFallbackEnvelopeSnapshot | null {
+    const envelope = this.readLocalStorageEnvelope({ logErrors: false });
+    const proof = this.parseIdbFallbackProof(envelope?.idbFallbackProof);
+    if (!envelope || !proof || proof.ownerUserId !== this.getCurrentOwnerUserId()) return null;
+    const envelopeItemsDigest = this.computeRetryQueueItemDigest(envelope.items);
+    if (proof.savedAt !== envelope.savedAt || proof.itemCount !== envelope.items.length) return null;
+    if (proof.snapshotDigest !== envelopeItemsDigest) return null;
+    return { envelope, proof, envelopeItemsDigest };
+  }
+
+  private parseIdbFallbackProof(proof: unknown): RetryQueueIdbFallbackProof | null {
+    const candidate = proof as Partial<RetryQueueIdbFallbackProof>;
+    return proof && typeof proof === 'object'
+      && candidate.version === 1
+      && typeof candidate.ownerUserId === 'string' && candidate.ownerUserId.length > 0
+      && Number.isFinite(candidate.savedAt) && Number.isFinite(candidate.itemCount)
+      && typeof candidate.snapshotDigest === 'string' && candidate.snapshotDigest.length > 0
+      && Number.isFinite(candidate.recordedAt)
+      ? { version: 1, ownerUserId: candidate.ownerUserId, savedAt: candidate.savedAt as number, itemCount: candidate.itemCount as number, snapshotDigest: candidate.snapshotDigest, recordedAt: candidate.recordedAt as number }
+      : null;
+  }
+
+  private computeRetryQueueItemDigest(
+    items: Array<PersistedRetryQueueItem | RetryQueueItem>,
+  ): string {
+    const normalizedItems = items
+      .map(item => {
+        try {
+          return JSON.stringify(this.minifyItem(item as RetryQueueItem));
+        } catch {
+          return JSON.stringify(item);
+        }
+      })
+      .sort();
+    let hash = 2166136261;
+    for (const normalizedItem of normalizedItems) {
+      for (let index = 0; index < normalizedItem.length; index += 1) {
+        hash ^= normalizedItem.charCodeAt(index);
+        hash = Math.imul(hash, 16777619);
+      }
+    }
+    return `${normalizedItems.length}:${(hash >>> 0).toString(16)}`;
+  }
+
+  private async settleSavedIdbFallback(
+    db: IDBDatabase,
+    snapshot: RetryQueueIdbFallbackEnvelopeSnapshot | null,
+    persistedDigest: string | undefined,
+  ): Promise<void> {
+    if (!snapshot) return;
+    await this.clearIdbFallbackProofAfterReadback(db, snapshot, persistedDigest, '当前写入');
+  }
+
+  private async clearIdbFallbackProofAfterReadback(
+    db: IDBDatabase,
+    snapshot: RetryQueueIdbFallbackEnvelopeSnapshot,
+    persistedDigest: string | undefined,
+    phase: string,
+  ): Promise<void> {
+    if (!persistedDigest) {
+      this.logger.warn(`RetryQueue unresolved IDB fallback ${phase}后缺少持久化摘要，保留 localStorage proof`, { ownerUserId: snapshot.proof.ownerUserId });
+      return;
+    }
+    const reloadedItems = await this.loadFromIdb(db);
+    if (reloadedItems === null) {
+      this.logger.warn(`RetryQueue unresolved IDB fallback ${phase}后回读失败，保留 localStorage proof`, { ownerUserId: snapshot.proof.ownerUserId });
+      return;
+    }
+    if (this.computeRetryQueueItemDigest(reloadedItems) !== persistedDigest) {
+      this.logger.warn(`RetryQueue unresolved IDB fallback ${phase}后回读不一致，保留 localStorage proof`, { ownerUserId: snapshot.proof.ownerUserId });
+      return;
+    }
+    this.replaceIdbFallbackEnvelopeIfCurrent(snapshot, reloadedItems);
+  }
+
+  private replaceIdbFallbackEnvelopeIfCurrent(
+    snapshot: RetryQueueIdbFallbackEnvelopeSnapshot,
+    durableItems: Array<PersistedRetryQueueItem | RetryQueueItem>,
+  ): void {
+    if (typeof localStorage === 'undefined') return;
+    const envelope = this.readLocalStorageEnvelope({ logErrors: false });
+    const currentProof = this.parseIdbFallbackProof(envelope?.idbFallbackProof);
+    if (!envelope || !currentProof || !this.isSameIdbFallbackProof(currentProof, snapshot.proof)) return;
+    if (envelope.version !== snapshot.envelope.version || envelope.savedAt !== snapshot.envelope.savedAt) return;
+    if (this.computeRetryQueueItemDigest(envelope.items) !== snapshot.envelopeItemsDigest) return;
+    try {
+      const settledItems = durableItems.map(item => this.minifyItem(item as RetryQueueItem));
+      if (settledItems.length === 0) {
+        localStorage.removeItem(this.STORAGE_KEY);
+        return;
+      }
+      localStorage.setItem(this.STORAGE_KEY, JSON.stringify({
+        version: envelope.version,
+        items: settledItems,
+        savedAt: Date.now(),
+      } as RetryQueueLocalStorageEnvelope));
+    } catch (error) {
+      this.logger.warn('RetryQueue 清理 unresolved IDB fallback proof 失败，保留下次启动恢复能力', error);
+    }
+  }
+
+  private isSameIdbFallbackProof(
+    left: RetryQueueIdbFallbackProof,
+    right: RetryQueueIdbFallbackProof,
+  ): boolean {
+    return left.version === right.version && left.ownerUserId === right.ownerUserId && left.savedAt === right.savedAt
+      && left.itemCount === right.itemCount && left.snapshotDigest === right.snapshotDigest && left.recordedAt === right.recordedAt;
   }
 
   private isMergeableStoredRetryQueueItem(item: PersistedRetryQueueItem): boolean {
@@ -501,13 +766,17 @@ export abstract class RetryQueueStorageLayer extends RetryQueueRunnerLayer {
   private mergeRetryQueueItemByEntityKey(
     merged: Map<string, RetryQueueItem>,
     item: RetryQueueItem,
-    options: { preferIncoming?: boolean } = {},
+    options: { preferExistingOnTie?: boolean } = {},
   ): void {
     const key = this.getRetryQueueItemStorageKey(item);
     const existing = merged.get(key);
-    if (options.preferIncoming || !existing || item.createdAt >= existing.createdAt) {
+    if (!existing) {
       merged.set(key, item);
+      return;
     }
+    merged.set(key, this.selectRetryQueueEntityWinner(existing, item, {
+      preferCurrentOnTie: options.preferExistingOnTie,
+    }));
   }
 
   private getRetryQueueItemStorageKey(item: RetryQueueItem): string {

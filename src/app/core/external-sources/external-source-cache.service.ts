@@ -15,10 +15,12 @@ import type {
 const LOCAL_STORAGE_LINKS_PREFIX = "nanoflow.externalSource.links.";
 const LOCAL_STORAGE_PENDING_PREFIX = "nanoflow.externalSource.pending.";
 const LOCAL_STORAGE_DEAD_LETTERS_PREFIX = "nanoflow.externalSource.deadLetters.";
+const externalSourceLinkFingerprint = (link: ExternalSourceLink): string => JSON.stringify([link.id, link.taskId, link.sourceType, link.targetId, link.uri, link.label, link.hpath, link.role, link.sortOrder, link.deletedAt, link.createdAt, link.updatedAt]);
 
 @Injectable({ providedIn: "root" })
 export class ExternalSourceCacheService {
   private readonly auth = inject(AuthService);
+  private readonly previewGenerations = new Map<string, number>();
 
   ownerId(): string {
     return this.auth.currentUserId() ?? AUTH_CONFIG.LOCAL_MODE_USER_ID;
@@ -30,6 +32,10 @@ export class ExternalSourceCacheService {
 
   previewKey(linkId: string, blockId: string, userId = this.ownerId()): string {
     return `siyuan-preview-cache:${userId}:${linkId}:${blockId}`;
+  }
+
+  previewGeneration(linkId: string, userId = this.ownerId()): number {
+    return this.previewGenerations.get(this.previewGenerationKey(linkId, userId)) ?? 0;
   }
 
   private legacyPreviewKey(linkId: string, blockId: string): string {
@@ -70,18 +76,36 @@ export class ExternalSourceCacheService {
     }
   }
 
-  async loadPendingLinks(): Promise<PendingExternalSourceLink[]> {
+  async loadPendingLinks(userId = this.ownerId()): Promise<PendingExternalSourceLink[]> {
     let indexedPending: PendingExternalSourceLink[] = [];
     try {
       indexedPending = this.normalizePendingEntries(
-        await get<PendingExternalSourceLink[]>(this.pendingLinksKey()),
+        await get<PendingExternalSourceLink[]>(this.pendingLinksKey(userId)),
       );
     } catch {
       indexedPending = [];
     }
 
-    return this.mergePendingEntries(indexedPending, this.readPendingMirror())
+    return this.mergePendingEntries(indexedPending, this.readPendingMirror(userId))
       .filter((entry) => entry.syncState !== "dead_letter");
+  }
+
+  async replacePendingLinksForOwner(
+    entries: PendingExternalSourceLink[],
+    userId: string,
+  ): Promise<void> {
+    const normalized = this.normalizePendingEntries(entries)
+      .filter(entry => entry.syncState !== "dead_letter");
+    try {
+      await set(this.pendingLinksKey(userId), normalized);
+      if (!this.writePendingMirror(userId, normalized)) {
+        throw new Error("external source pending-link mirror write failed");
+      }
+    } catch (error) {
+      if (!this.writePendingMirror(userId, normalized)) {
+        throw error;
+      }
+    }
   }
 
   private normalizePendingEntry(
@@ -144,26 +168,69 @@ export class ExternalSourceCacheService {
     }
   }
 
-  async removePendingLink(linkId: string): Promise<void> {
+  async removePendingLink(linkId: string, operationId: string): Promise<boolean> {
+    return this.settlePendingOperation(linkId, operationId);
+  }
+
+  async restorePendingLinkSnapshot(
+    linkId: string,
+    operationId: string,
+    previous: PendingExternalSourceLink | undefined,
+  ): Promise<boolean> {
+    return this.settlePendingOperation(linkId, operationId, previous);
+  }
+
+  private async settlePendingOperation(
+    linkId: string,
+    operationId: string,
+    previous?: PendingExternalSourceLink,
+  ): Promise<boolean> {
     const userId = this.ownerId();
-    const mirrorNext = this.readPendingMirror(userId).filter(entry => entry.link.id !== linkId);
+    const mirrorCurrent = this.readPendingMirror(userId);
+    const mirrorOutcome = this.replacePendingSnapshot(mirrorCurrent, linkId, operationId, previous);
+    let rollbackMirror = mirrorCurrent;
 
     try {
-      let persistedNext = mirrorNext;
+      let outcome = mirrorOutcome;
       await update<PendingExternalSourceLink[]>(this.pendingLinksKey(userId), current => {
-        const indexedNext = this.mergePendingEntries(
+        rollbackMirror = this.mergePendingEntries(
           this.normalizePendingEntries(current),
-          mirrorNext,
-        ).filter(entry => entry.link.id !== linkId);
-        persistedNext = indexedNext;
-        this.writePendingMirror(userId, indexedNext);
-        return indexedNext;
+          mirrorCurrent,
+        );
+        outcome = this.replacePendingSnapshot(rollbackMirror, linkId, operationId, previous);
+        this.writePendingMirror(userId, outcome.nextPendingLinks);
+        return outcome.nextPendingLinks;
       });
-      this.writePendingMirror(userId, persistedNext);
+      this.writePendingMirror(userId, outcome.nextPendingLinks);
+      return outcome.matched;
     } catch (error) {
-      if (this.writePendingMirror(userId, mirrorNext)) {
-        return;
-      }
+      this.writePendingMirror(userId, rollbackMirror);
+      throw error;
+    }
+  }
+
+  async replacePendingLinkForRetry(
+    linkId: string,
+    operationId: string,
+    retryLink: ExternalSourceLink,
+    userId = this.ownerId(),
+  ): Promise<PendingExternalSourceLink | null> {
+    const mirrorCurrent = this.readPendingMirror(userId);
+    const mirrorOutcome = this.replacePendingOperation(mirrorCurrent, linkId, operationId, retryLink);
+    try {
+      let outcome = mirrorOutcome;
+      await update<PendingExternalSourceLink[]>(this.pendingLinksKey(userId), current => {
+        outcome = this.replacePendingOperation(this.mergePendingEntries(
+          this.normalizePendingEntries(current),
+          mirrorCurrent,
+        ), linkId, operationId, retryLink);
+        this.writePendingMirror(userId, outcome.nextPendingLinks);
+        return outcome.nextPendingLinks;
+      });
+      this.writePendingMirror(userId, outcome.nextPendingLinks);
+      return outcome.entry;
+    } catch (error) {
+      if (this.writePendingMirror(userId, mirrorOutcome.nextPendingLinks)) return mirrorOutcome.entry;
       throw error;
     }
   }
@@ -171,43 +238,32 @@ export class ExternalSourceCacheService {
   /**
    * 标记一次推送失败，递增 retryCount。超过 PENDING_MAX_RETRIES 则迁出到死信表。
    */
-  async recordPendingFailure(linkId: string, errorCode: string): Promise<void> {
+  async recordPendingFailure(
+    linkId: string,
+    operationId: string,
+    errorCode: string,
+  ): Promise<"retry_scheduled" | "dead_letter" | "stale"> {
     const userId = this.ownerId();
     const mirrorCurrent = this.readPendingMirror(userId);
-    const outcome = this.applyPendingFailureMutation(mirrorCurrent, linkId, errorCode);
-    const mirrorNext = outcome.nextPendingLinks;
-    const movedToDeadLetter = outcome.movedToDeadLetter;
+    const mirrorOutcome = this.applyPendingFailureMutation(mirrorCurrent, linkId, operationId, errorCode);
+    let rollbackMirror = mirrorCurrent;
 
     try {
-      let persistedNext = mirrorNext;
-      let indexedMovedToDeadLetter: PendingExternalSourceLink | null = null;
+      let outcome = mirrorOutcome;
       await update<PendingExternalSourceLink[]>(this.pendingLinksKey(userId), current => {
-        const indexedOutcome = this.applyPendingFailureMutation(
+        rollbackMirror = this.mergePendingEntries(
           this.normalizePendingEntries(current),
-          linkId,
-          errorCode,
+          mirrorCurrent,
         );
-        const indexedNext = this.mergePendingEntries(
-          indexedOutcome.nextPendingLinks,
-          mirrorNext,
-        );
-        persistedNext = indexedNext;
-        indexedMovedToDeadLetter = indexedOutcome.movedToDeadLetter;
-        this.writePendingMirror(userId, indexedNext);
-        return indexedNext;
+        outcome = this.applyPendingFailureMutation(rollbackMirror, linkId, operationId, errorCode);
+        this.writePendingMirror(userId, outcome.nextPendingLinks);
+        return outcome.nextPendingLinks;
       });
-      this.writePendingMirror(userId, persistedNext);
-      const deadLetter = movedToDeadLetter ?? indexedMovedToDeadLetter;
-      if (deadLetter) {
-        await this.appendDeadLetter(deadLetter, userId);
-      }
+      this.writePendingMirror(userId, outcome.nextPendingLinks);
+      if (outcome.movedToDeadLetter) await this.appendDeadLetter(outcome.movedToDeadLetter, userId);
+      return outcome.status;
     } catch (error) {
-      if (this.writePendingMirror(userId, mirrorNext)) {
-        if (movedToDeadLetter) {
-          await this.appendDeadLetter(movedToDeadLetter, userId);
-        }
-        return;
-      }
+      this.writePendingMirror(userId, rollbackMirror);
       throw error;
     }
   }
@@ -257,29 +313,48 @@ export class ExternalSourceCacheService {
   async getPreview(
     linkId: string,
     blockId: string,
+    userId = this.ownerId(),
   ): Promise<LocalSiyuanPreviewCache | null> {
+    const previewGeneration = this.previewGeneration(linkId, userId);
     const value = await get<LocalSiyuanPreviewCache>(
-      this.previewKey(linkId, blockId),
+      this.previewKey(linkId, blockId, userId),
     );
+    if (this.previewGeneration(linkId, userId) !== previewGeneration) return null;
     if (value?.linkId === linkId && value.blockId === blockId) return value;
 
-    if (this.ownerId() !== AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+    if (userId !== AUTH_CONFIG.LOCAL_MODE_USER_ID) {
       return null;
     }
 
     const legacy = await get<LocalSiyuanPreviewCache>(
       this.legacyPreviewKey(linkId, blockId),
     );
+    if (this.previewGeneration(linkId, userId) !== previewGeneration) return null;
     if (!legacy || legacy.linkId !== linkId || legacy.blockId !== blockId)
       return null;
-    await this.savePreview(legacy);
+    if (!(await this.savePreview(legacy, userId, previewGeneration))) return null;
     await del(this.legacyPreviewKey(linkId, blockId));
     return legacy;
   }
 
-  async savePreview(cache: LocalSiyuanPreviewCache): Promise<void> {
-    await set(this.previewKey(cache.linkId, cache.blockId), cache);
-    await this.prunePreviewCache();
+  async savePreview(
+    cache: LocalSiyuanPreviewCache,
+    userId = this.ownerId(),
+    expectedGeneration = this.previewGeneration(cache.linkId, userId),
+  ): Promise<boolean> {
+    const key = this.previewKey(cache.linkId, cache.blockId, userId);
+    if (this.previewGeneration(cache.linkId, userId) !== expectedGeneration) return false;
+    await set(key, cache);
+    if (this.previewGeneration(cache.linkId, userId) !== expectedGeneration) {
+      await del(key);
+      return false;
+    }
+    await this.prunePreviewCache(userId);
+    if (this.previewGeneration(cache.linkId, userId) !== expectedGeneration) {
+      await del(key);
+      return false;
+    }
+    return true;
   }
 
   async deletePreview(linkId: string, blockId: string): Promise<void> {
@@ -290,8 +365,10 @@ export class ExternalSourceCacheService {
   }
 
   async deletePreviewsForLink(linkId: string): Promise<void> {
+    const ownerUserId = this.ownerId();
+    this.invalidatePreviewGeneration(linkId, ownerUserId);
     const allKeys = await keys();
-    const prefix = `siyuan-preview-cache:${this.ownerId()}:${linkId}:`;
+    const prefix = `siyuan-preview-cache:${ownerUserId}:${linkId}:`;
     const legacyPrefix = `siyuan-preview-cache:${linkId}:`;
     await Promise.all(
       allKeys
@@ -305,8 +382,9 @@ export class ExternalSourceCacheService {
   }
 
   async clearPreviewCache(): Promise<void> {
+    const ownerUserId = this.ownerId();
     const allKeys = await keys();
-    const prefix = `siyuan-preview-cache:${this.ownerId()}:`;
+    const prefix = `siyuan-preview-cache:${ownerUserId}:`;
     await Promise.all(
       allKeys
         .filter((key) => typeof key === "string" && key.startsWith(prefix))
@@ -314,8 +392,8 @@ export class ExternalSourceCacheService {
     );
   }
 
-  async loadConfig(): Promise<SiyuanLocalConfig> {
-    const value = await get<SiyuanLocalConfig>(this.configKey());
+  async loadConfig(userId = this.ownerId()): Promise<SiyuanLocalConfig> {
+    const value = await get<SiyuanLocalConfig>(this.configKey(userId));
     return {
       runtimeMode: value?.runtimeMode ?? "extension-relay",
       baseUrl: value?.baseUrl ?? SIYUAN_CONFIG.DEFAULT_BASE_URL,
@@ -333,8 +411,8 @@ export class ExternalSourceCacheService {
     await del(this.configKey());
   }
 
-  private async prunePreviewCache(): Promise<void> {
-    const prefix = `siyuan-preview-cache:${this.ownerId()}:`;
+  private async prunePreviewCache(userId = this.ownerId()): Promise<void> {
+    const prefix = `siyuan-preview-cache:${userId}:`;
     const allKeys = (await keys()).filter(
       (key): key is string => typeof key === "string" && key.startsWith(prefix),
     );
@@ -354,6 +432,15 @@ export class ExternalSourceCacheService {
       entries.length - SIYUAN_CONFIG.MAX_PREVIEW_CACHE_ENTRIES,
     );
     await Promise.all(excess.map((entry) => del(entry.key)));
+  }
+
+  private invalidatePreviewGeneration(linkId: string, userId: string): void {
+    const key = this.previewGenerationKey(linkId, userId);
+    this.previewGenerations.set(key, (this.previewGenerations.get(key) ?? 0) + 1);
+  }
+
+  private previewGenerationKey(linkId: string, userId: string): string {
+    return JSON.stringify([userId, linkId]);
   }
 
   private fetchedAtMs(value: LocalSiyuanPreviewCache | undefined): number {
@@ -563,10 +650,16 @@ export class ExternalSourceCacheService {
   ): PendingExternalSourceLink[] {
     const next = new Map(list.map((entry) => [entry.link.id, entry]));
     const previous = next.get(link.id);
+    const exactRetry = previous !== undefined
+      && externalSourceLinkFingerprint(previous.link) === externalSourceLinkFingerprint(link);
+    const retained = exactRetry ? previous : undefined;
     next.set(link.id, this.normalizePendingEntry({
-      ...previous,
+      ...retained,
       link,
-      retryCount: options.resetRetryCount ? 0 : previous?.retryCount ?? 0,
+      localCommittedAt: exactRetry
+        ? previous.localCommittedAt
+        : Math.max(Date.now(), (previous?.localCommittedAt ?? 0) + 1),
+      retryCount: options.resetRetryCount ? 0 : retained?.retryCount ?? 0,
     }, "pending_sync"));
     return Array.from(next.values());
   }
@@ -581,16 +674,19 @@ export class ExternalSourceCacheService {
   private applyPendingFailureMutation(
     list: PendingExternalSourceLink[],
     linkId: string,
+    operationId: string,
     errorCode: string,
   ): {
     nextPendingLinks: PendingExternalSourceLink[];
     movedToDeadLetter: PendingExternalSourceLink | null;
+    status: "retry_scheduled" | "dead_letter" | "stale";
   } {
     const nextPendingLinks: PendingExternalSourceLink[] = [];
     let movedToDeadLetter: PendingExternalSourceLink | null = null;
+    let status: "retry_scheduled" | "dead_letter" | "stale" = "stale";
 
     for (const entry of list) {
-      if (entry.link.id !== linkId) {
+      if (entry.link.id !== linkId || entry.operationId !== operationId) {
         nextPendingLinks.push(this.normalizePendingEntry(entry, entry.syncState));
         continue;
       }
@@ -599,6 +695,7 @@ export class ExternalSourceCacheService {
       const syncState: PendingExternalSourceLinkSyncState = retryCount > SIYUAN_CONFIG.PENDING_MAX_RETRIES
         ? "dead_letter"
         : "retry_scheduled";
+      status = syncState;
       const updated = this.normalizePendingEntry({
         ...entry,
         retryCount,
@@ -612,7 +709,38 @@ export class ExternalSourceCacheService {
       }
     }
 
-    return { nextPendingLinks, movedToDeadLetter };
+    return { nextPendingLinks, movedToDeadLetter, status };
+  }
+
+  private replacePendingSnapshot(
+    list: PendingExternalSourceLink[],
+    linkId: string,
+    operationId: string,
+    previous?: PendingExternalSourceLink,
+  ): { nextPendingLinks: PendingExternalSourceLink[]; matched: boolean } {
+    const index = list.findIndex(entry => entry.link.id === linkId && entry.operationId === operationId);
+    if (index < 0) return { nextPendingLinks: list, matched: false };
+    const nextPendingLinks = [...list];
+    if (previous) nextPendingLinks.splice(index, 1, this.normalizePendingEntry(previous, previous.syncState));
+    else nextPendingLinks.splice(index, 1);
+    return {
+      nextPendingLinks,
+      matched: true,
+    };
+  }
+
+  private replacePendingOperation(
+    list: PendingExternalSourceLink[],
+    linkId: string,
+    operationId: string,
+    retryLink: ExternalSourceLink,
+  ): { nextPendingLinks: PendingExternalSourceLink[]; entry: PendingExternalSourceLink | null } {
+    const current = this.findPendingEntry(list, linkId);
+    if (retryLink.id !== linkId || current?.operationId !== operationId) {
+      return { nextPendingLinks: list, entry: null };
+    }
+    const nextPendingLinks = this.upsertPendingLinkIntoList(list, retryLink, { resetRetryCount: false });
+    return { nextPendingLinks, entry: this.findPendingEntry(nextPendingLinks, linkId) ?? null };
   }
 
   private timeValue(value?: string): number {

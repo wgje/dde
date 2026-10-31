@@ -1,20 +1,28 @@
-import { Injectable, inject, signal, DestroyRef } from '@angular/core';
+import { Injectable, Injector, inject, signal, DestroyRef } from '@angular/core';
+import { pushStartupTrace } from '../utils/startup-trace';
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
 import { SentryAlertService } from './sentry-alert.service';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
-import { ActionQueueStorageService, type QueueRetryError } from './action-queue-storage.service';
+import {
+  ActionQueueStorageService,
+  type QueueRetryError,
+} from './action-queue-storage.service';
 import { RetryQueueService } from '../core-bridge';
 import { AuthService } from './auth.service';
+import { UserSessionService } from './user-session.service';
 import { WriteGuardService } from './write-guard.service';
 import { AUTH_CONFIG } from '../config/auth.config';
-import { ActionQueueEnqueueMutationService, type EnqueueMutationResult } from './action-queue-enqueue-mutation.service';
+import {
+  ActionQueueEnqueueMutationService,
+  type ActionQueueDurableEnqueueRuntime,
+} from './action-queue-enqueue-mutation.service';
 import { ActionQueueSyncWriterLeaseService } from './action-queue-sync-writer-lease.service';
+import { QueueBackupService } from './queue-backup.service';
 import { ActionQueueViewStateService, type QueueStalePolicy } from './action-queue-view-state.service';
 import {
   buildDeferredActionQueueRetry,
   buildFailedActionQueueRetry,
-  type ActionQueueProcessorResult,
   type DeferredActionQueueRetry,
   type FailedActionQueueRetry,
 } from './action-queue-processor-result.helpers';
@@ -23,32 +31,43 @@ import {
   type ActionQueueProcessSettledSummary,
 } from './action-queue-lifecycle.controller';
 import { ActionQueueProcessorRegistryController } from './action-queue-processor-registry.controller';
-import type {
-  ActionQueueProcessResult,
-} from './action-queue-processing.types';
+import type { ActionQueueProcessResult, QueueProcessor } from './action-queue-processing.types';
 import { ActionQueueProcessingController } from './action-queue-processing.controller';
 import {
   getActionsForEntity as filterActionsForEntity,
   getBlockedActions as selectBlockedActions,
   getPendingActionsForProject as filterPendingActionsForProject,
+  hasDurablePendingTaskMutation as hasDurablePendingTaskMutationPure,
+  hasUnscopedPendingProjectWrite,
   hasUncompletedCreate as hasUncompletedCreateAction,
-  shouldDiscardAfterProjectDeleteSuccess,
 } from './action-queue-query.helpers';
+import { ActionQueueDurableEnqueueController } from './action-queue-durable-enqueue.controller';
 import {
-  persistBulkDurableEnqueueMutation,
-  runBulkDurableEnqueue,
-} from './action-queue-bulk-durable-enqueue.helpers';
-import {
-  type DurableEnqueueMutationOutcome,
-} from './action-queue-state.helpers';
-import {
-  enqueueActionQueueForForeignOwner,
-  persistActionQueueCurrentOwnerEnqueueMutation,
-} from './action-queue-owner-view.helpers';
+  ActionQueueOwnerStorageLoadController,
+  ActionQueueRetrySupersessionController,
+  type ActionQueueOwnerStorageLoadRecord,
+} from './action-queue-retry-supersession.controller';
 import { warnIfActionQueueFrozen } from './action-queue-frozen-warning.helpers';
 import { ActionQueueFrozenPersistenceController } from './action-queue-frozen-persistence.controller';
 import { ActionQueuePendingViewController } from './action-queue-pending-view.controller';
 import { ActionQueueRuntimeSideEffectsController } from './action-queue-runtime-side-effects.helpers';
+import {
+  ActionQueueDurableRemovalController,
+  type AttachmentReplayActionSettlementInput,
+  type AttachmentReplayActionSettlementResult,
+  type ExactCurrentProjectDeleteSettlementResult,
+} from './action-queue-durable-removal.controller';
+import {
+  ActionQueueHeldActionController,
+  type HeldActionReceipt,
+  type HeldActionLocalHandoffSeed,
+  type LocalHandoffIdentity,
+  type LocalHandoffQueueMutationResult,
+  type LocalHandoffTransitionInput,
+} from './action-queue-held-action.controller';
+import { createActionQueueOwnerReloadController } from './action-queue-owner-reload.controller';
+import { localBackupUiRestoreWriterQuiescence } from './local-backup-ui-restore-writer-quiescence.service';
+import { LocalBackupUiRestorePreActionQueueFenceService } from './local-backup-ui-restore-pre-actionqueue-fence.service';
 import {
   QueuedAction,
   EnqueueParams,
@@ -57,6 +76,8 @@ import {
 
 export type { ActionQueueProcessorResult, DeferredActionQueueRetry, FailedActionQueueRetry } from './action-queue-public.types';
 export type { OperationPriority, ActionPayload, ProjectPayload, ProjectDeletePayload, ConnectionPayload, TaskPayload, TaskDeletePayload, PreferencePayload, QueuedAction, EnqueueParams, DeadLetterItem } from './action-queue-public.types';
+
+export type ActionQueueProjectPendingWriteState = 'pending' | 'clear' | 'unknown';
 
 /**
  * 离线操作队列服务
@@ -76,16 +97,15 @@ export class ActionQueueService {
   private readonly sentryAlert = inject(SentryAlertService);
   private readonly authService = inject(AuthService);
   private readonly destroyRef = inject(DestroyRef);
-  /**
-   * 写入闸门：迁移期 export-only / read-only 部署 gate 云端 flush。
-   * 标记 optional：测试 harness 通常不提供，保持向后兼容。
-   * 缺失时默认为可写（与迁移前行为一致）。
-   */
+  private readonly injector = inject(Injector);
+  /** 迁移期 export-only/read-only 部署的可选云端写入闸门。 */
   private readonly writeGuard = inject(WriteGuardService, { optional: true });
   readonly storage = inject(ActionQueueStorageService);
   private readonly enqueueMutations = inject(ActionQueueEnqueueMutationService);
   private readonly syncWriterLeaseGate = inject(ActionQueueSyncWriterLeaseService);
+  private readonly queueBackup = inject(QueueBackupService);
   private readonly queueViewState = inject(ActionQueueViewStateService);
+  private readonly preActionQueueFence = inject(LocalBackupUiRestorePreActionQueueFenceService);
   /** 跨队列去重：当新操作入队时移除 RetryQueue 中同一实体的旧重试 */
   private readonly retryQueue = inject(RetryQueueService);
   
@@ -124,6 +144,32 @@ export class ActionQueueService {
     queueSize: this.queueSize,
     setProcessing: isProcessing => this.isProcessing.set(isProcessing),
   });
+  private readonly durableRemoval = new ActionQueueDurableRemovalController({
+    getPendingActions: () => this.pendingActions(),
+    setPendingActions: queue => this.pendingView.setQueue(queue),
+    filterPendingActions: predicate => this.pendingView.filterQueue(predicate),
+    mapPendingActions: mapper => this.pendingView.mapQueue(mapper),
+    saveQueueToStorage: () => this.storage.saveQueueToStorage(),
+    persistQueueMutationForOwner: (ownerUserId, updater) =>
+      this.storage.persistQueueMutationForOwner(ownerUserId, updater),
+    persistQueueMutationStrictlyForOwner: (ownerUserId, updater) =>
+      this.storage.persistQueueMutationStrictlyForOwner(ownerUserId, updater),
+    updateQueueBackupStrictlyForOwner: (ownerUserId, updater) =>
+      this.queueBackup.updateQueueStrictly(ownerUserId, updater),
+    settleProjectDeleteSuccessForOwner: (ownerUserId, projectId, actionId) =>
+      this.storage.settleProjectDeleteSuccessForOwner(ownerUserId, projectId, actionId),
+    getCurrentOwnerUserId: () => this.getCurrentOwnerUserId(),
+    isQueueViewCurrent: (generation, ownerUserId) =>
+      this.isQueueViewCurrent(generation, ownerUserId),
+    isStaleProcess: generation => this.queueViewState.isStaleProcess(generation),
+    getStaleProcessPolicy: (generation, ownerUserId) =>
+      this.queueViewState.getStaleProcessPolicy(generation, ownerUserId),
+    applyPersistedCurrentOwnerQueue: queue => this.applyPersistedCurrentOwnerQueue(queue),
+    syncSentryContext: () => this.runtimeSideEffects.syncSentryContext(),
+    warn: (message, context) => this.logger.warn(message, context),
+    warnSafely: (message, context) => this.warnSafely(message, context),
+    traceQueueTransitionReason: event => pushStartupTrace(event.source, { reason: event.reason }),
+  });
   /** 处理器函数映射与注册就绪状态 */
   private readonly processorRegistry = new ActionQueueProcessorRegistryController({
     getPendingActions: () => this.pendingActions(),
@@ -133,7 +179,7 @@ export class ActionQueueService {
   });
   /** 队列处理生命周期回调与活动 token 管理 */
   private readonly lifecycle = new ActionQueueLifecycleController();
-  private readonly processingController = new ActionQueueProcessingController({
+  private readonly processingController: ActionQueueProcessingController = new ActionQueueProcessingController({
     logger: this.logger,
     toast: this.toast,
     sentryLazyLoader: this.sentryLazyLoader,
@@ -147,27 +193,136 @@ export class ActionQueueService {
     processors: this.processorRegistry.processors,
     isProcessorRegistrationReady: () => this.processorRegistry.isReady(),
     getCurrentOwnerUserId: () => this.getCurrentOwnerUserId(),
-    dequeue: (actionId) => this.dequeueProcessedAction(actionId),
+    createPersistenceFence: (owner, generation, signal) =>
+      this.retrySupersession.createPersistenceFence(owner, generation, signal),
+    settleRetrySupersession: (action, ownerUserId, generation, signal) =>
+      this.retrySupersession.settleBeforeProcessing(action, ownerUserId, generation, signal),
+    transitionToSyncing: (action, owner, signal, isCurrent) =>
+      this.durableRemoval.transitionExactActionToSyncingForOwner(owner, action, signal, isCurrent),
+    getLastQueueTransitionReason: () => this.durableRemoval.getLastQueueTransitionReason(),
+    settleSuccessfulAction: (action, owner, signal, isCurrent) =>
+      this.durableRemoval.settleExactProcessedActionForOwner(owner, action, signal, isCurrent),
   });
   private readonly frozenPersistence = new ActionQueueFrozenPersistenceController({
     isQueueFrozen: () => this.storage.queueFrozen(),
     saveQueueToStorage: () => this.storage.saveQueueToStorage(),
   });
+  private readonly ownerStorageLoad = new ActionQueueOwnerStorageLoadController({
+    getCurrentOwnerUserId: () => this.getCurrentOwnerUserId(),
+    warn: (message, context) => this.warnSafely(message, context),
+  });
+  private readonly ownerReload = createActionQueueOwnerReloadController({
+    ownerStorageLoad: this.ownerStorageLoad,
+    preActionQueueFence: this.preActionQueueFence,
+    storage: this.storage,
+    retryQueue: this.retryQueue,
+    createRetryBridge: () => this.retrySupersession.createRetryQueueBridge(),
+    warn: (message, context) => this.warnSafely(message, context),
+  });
+  /** 单条 durable enqueue 流水线（持久化确认 → 视图应用 → 副作用）委托给非 DI 控制器 */
+  private readonly durableEnqueue = new ActionQueueDurableEnqueueController({
+    warnIfQueueFrozen: action => this.warnIfQueueFrozen(action),
+    createQueuedAction: action => this.enqueueMutations.createQueuedAction(action),
+    getCurrentOwnerUserId: () => this.getCurrentOwnerUserId(),
+    persistQueueMutationForOwner: (ownerUserId, mutateQueue) =>
+      this.storage.persistQueueMutationForOwner(ownerUserId, mutateQueue),
+    persistQueueMutationWithRetrySupersession: (ownerUserId, mutateQueue, getIds, persist) =>
+      this.retrySupersession.persistMutation({
+        ownerUserId, mutateQueue, getCandidateActionIds: getIds, persistWithoutSupersession: persist,
+      }),
+    buildCurrentOwnerEnqueueMutation: (queue, action, queuedAction) =>
+      this.enqueueMutations.buildCurrentOwnerEnqueueMutation(queue, action, queuedAction),
+    applyPersistedCurrentOwnerQueue: persistedQueue =>
+      this.applyPersistedCurrentOwnerQueue(persistedQueue),
+    runEnqueueSideEffects: input => this.runtimeSideEffects.runEnqueueSideEffects(input),
+    isOnline: () => this.storage.isOnline,
+    scheduleProcessQueue: () => this.scheduleProcessQueue(),
+    warn: (message, context) => this.logger.warn(message, context),
+  });
+  private readonly retrySupersession: ActionQueueRetrySupersessionController = new ActionQueueRetrySupersessionController({
+    isRetrySupersessionSupported: () =>
+      typeof this.retryQueue.inspectActionQueueSupersessionTargets === 'function'
+      && typeof this.retryQueue.reserveActionQueueSupersession === 'function'
+      && typeof this.retryQueue.settleActionQueueSupersessions === 'function',
+    getCurrentOwnerUserId: () => this.getCurrentOwnerUserId(),
+    getQueueGeneration: () => this.queueViewState.currentQueueViewGeneration,
+    getSessionGeneration: () => this.resolveUserSession()?.getCurrentSessionGeneration() ?? -1,
+    captureAuthFence: () => this.authService.captureAuthIdentityFence(),
+    isQueueContextCurrent: (ownerUserId, generation) => this.isQueueViewCurrent(generation, ownerUserId),
+    isSessionContextCurrent: (generation, ownerUserId) =>
+      this.resolveUserSession()?.isSessionContextCurrent(generation, ownerUserId) === true,
+    isOwnerStorageLoaded: ownerUserId => this.isOwnerStorageLoaded(ownerUserId),
+    acquireWriterLease: ownerUserId => this.syncWriterLeaseGate.acquire(ownerUserId),
+    borrowActiveWriterLease: ownerUserId => this.processingController.borrowActiveWriterLease(ownerUserId),
+    restoreQueueSnapshot: ownerUserId => this.queueBackup.restoreQueueSnapshot?.(ownerUserId)
+      ?? this.queueBackup.restoreQueue(ownerUserId).then(actions => ({
+        recordFound: actions !== null,
+        actions: actions ?? [],
+        savedAt: null,
+      })),
+    persistQueueMutationStrictlyForOwner: (ownerUserId, updater) =>
+      this.storage.persistQueueMutationStrictlyForOwner(ownerUserId, updater),
+    inspectRetryTargets: (action, ownerUserId, signal) =>
+      this.retryQueue.inspectActionQueueSupersessionTargets?.(action, ownerUserId, signal)
+        ?? { status: 'ready', retryItems: [] },
+    reserveRetrySupersession: (reservation, signal) =>
+      this.retryQueue.reserveActionQueueSupersession(reservation, signal),
+    settleRetrySupersessions: (action, signal) =>
+      this.retryQueue.settleActionQueueSupersessions(action, signal),
+    applyPersistedCurrentOwnerQueue: queue => this.applyPersistedCurrentOwnerQueue(queue),
+    warn: (message, context) => this.warnSafely(message, { context }),
+  });
+  private readonly heldEnqueue = new ActionQueueHeldActionController({
+    createQueuedAction: action => this.enqueueMutations.createQueuedAction(action),
+    getCurrentOwnerUserId: () => this.getCurrentOwnerUserId(),
+    persistQueueMutationStrictlyForOwner: (ownerUserId, updater) =>
+      this.storage.persistQueueMutationStrictlyForOwner(ownerUserId, updater),
+    buildCurrentOwnerEnqueueMutation: (queue, action, queuedAction) =>
+      this.enqueueMutations.buildCurrentOwnerEnqueueMutation(queue, action, queuedAction),
+    buildForeignOwnerEnqueueMutation: (queue, action, queuedAction, ownerUserId) =>
+      this.enqueueMutations.buildForeignOwnerEnqueueMutation(
+        queue,
+        action,
+        queuedAction,
+        ownerUserId,
+      ),
+    applyPersistedCurrentOwnerQueue: queue => this.applyPersistedCurrentOwnerQueue(queue),
+  });
+  private readonly durableEnqueueRuntime: ActionQueueDurableEnqueueRuntime = {
+    getCurrentOwnerUserId: () => this.getCurrentOwnerUserId(),
+    enqueueCurrent: (action, autoProcess) => this.durableEnqueue.enqueueDurably(action, autoProcess),
+    enqueueManyCurrent: actions => this.enqueueManyDurably(actions),
+    enqueueForOwner: (ownerUserId, action) => this.enqueueDurablyForOwner(ownerUserId, action),
+    warnIfQueueFrozen: action => this.warnIfQueueFrozen(action),
+    persistQueueMutationForOwner: (ownerUserId, updater) =>
+      this.storage.persistQueueMutationForOwner(ownerUserId, updater),
+    persistQueueMutationWithRetrySupersession: (ownerUserId, mutateQueue, getIds, persist) =>
+      this.retrySupersession.persistMutation({
+        ownerUserId, mutateQueue, getCandidateActionIds: getIds, persistWithoutSupersession: persist,
+      }),
+    applyPersistedCurrentOwnerQueue: queue => this.applyPersistedCurrentOwnerQueue(queue),
+    completeDurableEnqueueSideEffects: (action, queuedAction, resolvedActionId, removeRetrySourceOnSuccess) =>
+      this.runtimeSideEffects.runEnqueueSideEffects({
+        action, queuedAction, resolvedActionId, removeRetrySourceOnSuccess,
+      }),
+    isOnline: () => this.storage.isOnline,
+    processQueue: () => this.processQueue(),
+    info: (message, context) => this.logger.info(message, context),
+    warn: (message, context) => this.logger.warn(message, context),
+  };
 
   constructor() {
-    // 初始化 storage 上下文引用
     this.storage.init({
       dequeue: (id) => this.dequeue(id),
       syncSentryContext: () => this.runtimeSideEffects.syncSentryContext(),
       processQueue: () => this.processQueue(),
       pendingActions: this.pendingActions,
       queueSize: this.queueSize,
+      canPersistCurrentOwner: () => this.isOwnerStorageLoaded(this.getCurrentOwnerUserId()),
+      captureCurrentOwnerStorageFence: () =>
+        this.ownerStorageLoad.captureLoadedFence(this.getCurrentOwnerUserId()),
     });
-    
-    this.storage.loadQueueFromStorage();
-    this.storage.loadDeadLetterFromStorage();
-    this.storage.setupNetworkListeners();
-    
+
     this.destroyRef.onDestroy(() => this.storage.removeNetworkListeners());
   }
 
@@ -179,23 +334,21 @@ export class ActionQueueService {
     }
   }
 
-  private syncSentryContextSafely(operation: string): void {
-    try {
-      this.runtimeSideEffects.syncSentryContext();
-    } catch (error) {
-      this.warnSafely('ActionQueue Sentry context 同步失败，已保留队列状态', {
-        operation,
-        error,
-      });
+  private requireOwnerStorageLoaded(ownerUserId: string): void {
+    if (ownerUserId === this.getCurrentOwnerUserId() && !this.isOwnerStorageLoaded(ownerUserId)) {
+      throw new Error('ActionQueue owner storage is unknown');
     }
   }
-  
+  private runOwnerMutationSync<T>(owner: string, operation: () => T): T { this.requireOwnerStorageLoaded(owner); return localBackupUiRestoreWriterQuiescence.runSync(owner, 'action-queue', () => { this.requireOwnerStorageLoaded(owner); return operation(); }); }
+  private async runOwnerMutationAsync<T>(owner: string, operation: () => T | Promise<T>): Promise<T> { this.requireOwnerStorageLoaded(owner); return localBackupUiRestoreWriterQuiescence.runAsync(owner, 'action-queue', async () => { this.requireOwnerStorageLoaded(owner); return operation(); }); }
+  private runOwnerMutationContinuationSync<T>(owner: string, operation: () => T): T { this.requireOwnerStorageLoaded(owner); return localBackupUiRestoreWriterQuiescence.runContinuationSync(owner, 'action-queue', () => { this.requireOwnerStorageLoaded(owner); return operation(); }); }
+
   // ========== 公共方法 ==========
   
   /**
    * 注册操作处理器
    */
-  registerProcessor(type: string, processor: (action: QueuedAction) => Promise<ActionQueueProcessorResult>) {
+  registerProcessor(type: string, processor: QueueProcessor) {
     this.processorRegistry.registerProcessor(type, processor);
   }
 
@@ -241,215 +394,64 @@ export class ActionQueueService {
    * 支持优先级分级 + 智能合并
    */
   enqueue(action: EnqueueParams): string {
-    return this.enqueueInternal(action, true, true);
+    return this.runOwnerMutationSync(this.getCurrentOwnerUserId(), () => this.enqueueInternal(action, true, true));
   }
 
   async enqueueDurably(action: EnqueueParams): Promise<string> {
-    return this.enqueueDurablyInternal(action, true);
+    return this.runOwnerMutationAsync(this.getCurrentOwnerUserId(), () => this.durableEnqueue.enqueueDurably(action, true));
   }
 
-  async enqueueManyDurably(actions: EnqueueParams[]): Promise<string[]> {
-    return runBulkDurableEnqueue({
-      actions,
-      enqueueSingle: action => this.enqueueDurably(action),
-      readPendingActions: () => this.pendingActions(),
-      warnIfQueueFrozen: action => this.warnIfQueueFrozen(action),
-      getCurrentOwnerUserId: () => this.getCurrentOwnerUserId(),
-      createQueuedAction: action => this.enqueueMutations.createQueuedAction(action),
-      buildCurrentOwnerEnqueueMutation: (queue, action, queuedAction) =>
-        this.enqueueMutations.buildCurrentOwnerEnqueueMutation(
-          queue,
-          action,
-          queuedAction,
-        ),
-      persistQueueMutationForOwner: (ownerUserId, mutateQueue) =>
-        this.storage.persistQueueMutationForOwner(ownerUserId, mutateQueue),
-      rollbackFailedBulkDurableEnqueue: previousQueue =>
-        this.rollbackFailedBulkDurableEnqueue(previousQueue),
-      applyPersistedCurrentOwnerQueue: persistedQueue =>
-        this.applyPersistedCurrentOwnerQueue(persistedQueue),
-      completeDurableEnqueueSideEffects: (
-        action,
-        queuedAction,
-        resolvedActionId,
-        removeRetrySourceOnSuccess,
-      ) => this.runtimeSideEffects.runEnqueueSideEffects(
-        {
-          action,
-          queuedAction,
-          resolvedActionId,
-          removeRetrySourceOnSuccess,
-        },
-      ),
-      isOnline: () => this.storage.isOnline,
-      processQueue: () => this.processQueue(),
-      warn: (message, context) => this.logger.warn(message, context),
-    });
-  }
-
-  private async enqueueDurablyInternal(action: EnqueueParams, removeRetrySourceOnSuccess: boolean): Promise<string> {
-    const previousQueue = [...this.pendingActions()];
-    this.warnIfQueueFrozen(action);
-
-    const queuedAction = this.enqueueMutations.createQueuedAction(action);
-    const { persistedQueue, mutation } = await this.persistCurrentOwnerEnqueueMutation(action, queuedAction);
-    if (!mutation) {
-      this.logger.warn('ActionQueue durable enqueue 未能生成队列 mutation', {
-        entityType: action.entityType,
-        entityId: action.entityId,
-      });
-      return '';
-    }
-
-    if (!mutation.wasEnqueued && !mutation.wasMergeShrunk) {
-      return mutation.resolvedActionId;
-    }
-
-    if (!persistedQueue) {
-      this.rollbackFailedDurableEnqueue(action, queuedAction, mutation, previousQueue);
-      return '';
-    }
-
-    this.applyPersistedCurrentOwnerQueue(persistedQueue);
-
-    if (mutation.wasMergeShrunk) {
-      return mutation.resolvedActionId;
-    }
-
-    this.completeDurableEnqueue(action, queuedAction, mutation, removeRetrySourceOnSuccess);
-
-    return mutation.resolvedActionId;
-  }
-
-  private async persistCurrentOwnerEnqueueMutation(
-    action: EnqueueParams,
-    queuedAction: QueuedAction,
-  ): Promise<DurableEnqueueMutationOutcome> {
-    return persistActionQueueCurrentOwnerEnqueueMutation({
-      ownerUserId: this.getCurrentOwnerUserId(),
-      action,
-      queuedAction,
-      persistQueueMutationForOwner: (ownerUserId, mutateQueue) =>
-        this.storage.persistQueueMutationForOwner(ownerUserId, mutateQueue),
-      buildCurrentOwnerEnqueueMutation: (queue, currentAction, currentQueuedAction) =>
-        this.enqueueMutations.buildCurrentOwnerEnqueueMutation(queue, currentAction, currentQueuedAction),
-    });
-  }
-
-  private rollbackFailedDurableEnqueue(
-    action: EnqueueParams,
-    queuedAction: QueuedAction,
-    mutation: EnqueueMutationResult,
-    previousQueue: QueuedAction[],
-  ): void {
-    this.pendingView.setQueue(previousQueue);
-    this.runtimeSideEffects.syncSentryContext();
-    this.logger.warn('ActionQueue durable enqueue 未能完成持久化确认', {
-      actionId: mutation.resolvedActionId || queuedAction.id,
-      entityType: action.entityType,
-      entityId: action.entityId,
-    });
-  }
+  async enqueueManyDurably(actions: EnqueueParams[]): Promise<string[]> { return this.runOwnerMutationAsync(this.getCurrentOwnerUserId(), () =>
+    this.enqueueMutations.enqueueManyDurably(actions, this.durableEnqueueRuntime)); }
 
   private applyPersistedCurrentOwnerQueue(persistedQueue: QueuedAction[]): void {
     this.pendingView.setQueue(persistedQueue);
     this.runtimeSideEffects.syncSentryContext();
   }
 
-  private rollbackFailedBulkDurableEnqueue(previousQueue: QueuedAction[]): void {
-    this.pendingView.setQueue(previousQueue);
-    this.runtimeSideEffects.syncSentryContext();
-  }
+  async enqueueDurablyForOwner(ownerUserId: string, action: EnqueueParams): Promise<string> { return this.runOwnerMutationAsync(ownerUserId, () =>
+    this.enqueueMutations.enqueueDurablyForOwner(ownerUserId, action, this.durableEnqueueRuntime)); }
 
-  private completeDurableEnqueue(
+  enqueueHeldDurablyForOwner(
+    ownerUserId: string,
     action: EnqueueParams,
-    queuedAction: QueuedAction,
-    mutation: EnqueueMutationResult,
-    removeRetrySourceOnSuccess: boolean,
-  ): void {
-    this.runtimeSideEffects.runEnqueueSideEffects({
-      action,
-      queuedAction,
-      resolvedActionId: mutation.resolvedActionId,
-      removeRetrySourceOnSuccess,
-    });
-
-    if (this.storage.isOnline) {
-      this.scheduleProcessQueue();
-    }
-  }
-
-  async enqueueDurablyForOwner(ownerUserId: string, action: EnqueueParams): Promise<string> {
-    if (ownerUserId === this.getCurrentOwnerUserId()) {
-      return this.enqueueDurablyInternal(action, false);
-    }
-
-    return enqueueActionQueueForForeignOwner({
+    localHandoff?: HeldActionLocalHandoffSeed,
+  ): Promise<HeldActionReceipt | null> {
+    return this.runOwnerMutationAsync(
       ownerUserId,
-      action,
-      createQueuedAction: currentAction => this.enqueueMutations.createQueuedAction(currentAction),
-      persistQueueMutationForOwner: (targetOwnerUserId, mutateQueue) =>
-        this.storage.persistQueueMutationForOwner(targetOwnerUserId, mutateQueue),
-      buildForeignOwnerEnqueueMutation: (queue, currentAction, queuedAction, targetOwnerUserId) =>
-        this.enqueueMutations.buildForeignOwnerEnqueueMutation(
-          queue,
-          currentAction,
-          queuedAction,
-          targetOwnerUserId,
-        ),
-      logInfo: (message, context) => this.logger.info(message, context),
-    });
+      () => this.heldEnqueue.enqueueHeldDurablyForOwner(ownerUserId, action, localHandoff),
+    );
   }
 
-  async enqueueManyDurablyForOwner(ownerUserId: string, actions: EnqueueParams[]): Promise<string[]> {
-    if (actions.length === 0) {
-      return [];
-    }
-
-    if (ownerUserId === this.getCurrentOwnerUserId()) {
-      return this.enqueueManyDurably(actions);
-    }
-
-    if (actions.length === 1) {
-      const actionId = await this.enqueueDurablyForOwner(ownerUserId, actions[0]);
-      return actionId ? [actionId] : [];
-    }
-
-    actions.forEach(action => this.warnIfQueueFrozen(action));
-    const outcome = await persistBulkDurableEnqueueMutation({
-      actions,
-      getCurrentOwnerUserId: () => ownerUserId,
-      createQueuedAction: action => this.enqueueMutations.createQueuedAction(action),
-      buildCurrentOwnerEnqueueMutation: (queue, action, queuedAction) =>
-        this.enqueueMutations.buildForeignOwnerEnqueueMutation(
-          queue,
-          action,
-          queuedAction,
-          ownerUserId,
-        ),
-      persistQueueMutationForOwner: (targetOwnerUserId, mutateQueue) =>
-        this.storage.persistQueueMutationForOwner(targetOwnerUserId, mutateQueue),
-    });
-
-    if (outcome.error || !outcome.persistedQueue || outcome.resolvedActionIds.length !== actions.length) {
-      this.logger.warn('ActionQueue owner-scoped bulk durable enqueue 未能完成原子持久化', {
-        ownerUserId,
-        actionCount: actions.length,
-        resolvedActionCount: outcome.resolvedActionIds.length,
-        rejectedEntityType: outcome.rejectedAction?.entityType,
-        rejectedEntityId: outcome.rejectedAction?.entityId,
-        error: outcome.error,
-      });
-      return [];
-    }
-
-    this.logger.info('已将批量离线操作 durably 写入指定 owner 队列', {
-      ownerUserId,
-      actionCount: actions.length,
-    });
-
-    return [...outcome.resolvedActionIds];
+  transitionLocalHandoffStrictlyForOwner(
+    input: LocalHandoffTransitionInput,
+  ): Promise<LocalHandoffQueueMutationResult> {
+    return this.runOwnerMutationAsync(
+      input.ownerUserId,
+      () => this.heldEnqueue.transitionLocalHandoffStrictlyForOwner(input),
+    );
   }
+
+  removeCompletedLocalHandoffStrictlyForOwner(
+    input: LocalHandoffIdentity,
+  ): Promise<LocalHandoffQueueMutationResult> {
+    return this.runOwnerMutationAsync(
+      input.ownerUserId,
+      () => this.heldEnqueue.removeCompletedLocalHandoffStrictlyForOwner(input),
+    );
+  }
+
+  activateLocalHandoffStrictlyForOwner(
+    input: LocalHandoffIdentity,
+  ): Promise<LocalHandoffQueueMutationResult> {
+    return this.runOwnerMutationAsync(
+      input.ownerUserId,
+      () => this.heldEnqueue.activateLocalHandoffStrictlyForOwner(input),
+    );
+  }
+
+  async enqueueManyDurablyForOwner(ownerUserId: string, actions: EnqueueParams[]): Promise<string[]> { return this.runOwnerMutationAsync(ownerUserId, () =>
+    this.enqueueMutations.enqueueManyDurablyForOwner(ownerUserId, actions, this.durableEnqueueRuntime)); }
 
   private enqueueInternal(action: EnqueueParams, autoProcess: boolean, dedupeRetry: boolean): string {
     this.warnIfQueueFrozen(action);
@@ -525,52 +527,11 @@ export class ActionQueueService {
     this.frozenPersistence.persist();
   }
 
-  private async dequeueProcessedAction(actionId: string): Promise<void> {
-    const ownerUserId = this.getCurrentOwnerUserId();
-    const persistedQueue = await this.storage.persistQueueMutationForOwner(
-      ownerUserId,
-      queue => queue.filter(action => action.id !== actionId),
-    );
-
-    if (persistedQueue !== null) {
-      this.applyPersistedCurrentOwnerQueue(persistedQueue);
-      return;
-    }
-
-    this.logger.warn('处理成功后的持久 Outbox 收口失败，保留当前视图等待恢复重放', {
-      actionId,
-      ownerUserId,
-    });
-    this.restoreProcessedActionAfterDurableDequeueFailure(actionId);
-  }
-
-  private restoreProcessedActionAfterDurableDequeueFailure(actionId: string): void {
-    const restored = this.pendingView.mapQueue(action => {
-      if (action.id !== actionId) {
-        return action;
-      }
-
-      return {
-        ...action,
-        syncState: 'pending_sync' as const,
-      };
-    });
-
-    if (!restored) {
-      return;
-    }
-
-    this.storage.saveQueueToStorage();
-    this.runtimeSideEffects.syncSentryContext();
-  }
-  
   /**
    * 从队列中移除操作
    */
   dequeue(actionId: string) {
-    this.pendingView.filterQueue(action => action.id !== actionId);
-    this.storage.saveQueueToStorage();
-    this.runtimeSideEffects.syncSentryContext();
+    return this.runOwnerMutationSync(this.getCurrentOwnerUserId(), () => this.durableRemoval.dequeue(actionId));
   }
   
   /**
@@ -582,6 +543,18 @@ export class ActionQueueService {
     onSettled?: (summary: ActionQueueProcessSettledSummary) => void
   ) {
     this.lifecycle.setCallbacks(onStart, onEnd, onSettled);
+  }
+
+  subscribeToQueueSettled(listener: () => void): () => void {
+    return this.lifecycle.subscribeToSettled(listener);
+  }
+
+  subscribeToOwnerStorageLoadStateChanges(listener: () => void): () => void {
+    return this.ownerStorageLoad.subscribe(listener);
+  }
+
+  getCurrentOwnerStorageLoadState(): ActionQueueOwnerStorageLoadRecord['state'] {
+    return this.ownerStorageLoad.currentState();
   }
 
   markActionSyncedRemotely(actionId: string): void {
@@ -596,6 +569,18 @@ export class ActionQueueService {
     return this.authService.currentUserId() ?? AUTH_CONFIG.LOCAL_MODE_USER_ID;
   }
 
+  private resolveUserSession(): UserSessionService | null {
+    return this.injector.get(UserSessionService, null);
+  }
+
+  private markCurrentOwnerStorageLoadUnknown(): void {
+    this.ownerStorageLoad.markCurrentOwnerUnknown();
+  }
+
+  private isOwnerStorageLoaded(ownerUserId: string): boolean {
+    return this.ownerStorageLoad.isLoaded(ownerUserId);
+  }
+
   private releaseAllQueueProcessLifecycles(reason: string): void {
     if (!this.lifecycle.releaseAll()) {
       return;
@@ -606,9 +591,10 @@ export class ActionQueueService {
 
   private invalidateQueueView(
     reason: string,
-    stalePolicy: QueueStalePolicy = 'discard'
+    stalePolicy: QueueStalePolicy = 'discard',
+    ownerUserId: string | null = null,
   ): number {
-    return this.queueViewState.invalidateQueueView(reason, stalePolicy);
+    return this.queueViewState.invalidateQueueView(reason, stalePolicy, ownerUserId);
   }
 
   private isStaleProcess(processGeneration: number): boolean {
@@ -645,14 +631,30 @@ export class ActionQueueService {
     projectId: string,
     actionId?: string,
   ): Promise<number> {
-    if (ownerUserId === this.getCurrentOwnerUserId()) {
-      return this.discardActions(action =>
-        shouldDiscardAfterProjectDeleteSuccess(action, projectId, actionId));
-    }
-
-    return await this.storage.settleProjectDeleteSuccessForOwner(ownerUserId, projectId, actionId);
+    return await this.runOwnerMutationAsync(ownerUserId, () => this.durableRemoval.settleProjectDeleteSuccessForOwner(
+      ownerUserId,
+      projectId,
+      actionId,
+    ));
   }
-  
+
+  async settleExactCurrentProjectDeleteSuccess(
+    ownerUserId: string, projectId: string, actionId: string, operationId: string,
+  ): Promise<ExactCurrentProjectDeleteSettlementResult> {
+    return await this.runOwnerMutationAsync(ownerUserId, () =>
+      this.durableRemoval.settleExactCurrentProjectDeleteSuccess(
+        ownerUserId, projectId, actionId, operationId,
+      ));
+  }
+  settleAttachmentReplayActionForOwner(
+    ownerUserId: string,
+    input: AttachmentReplayActionSettlementInput,
+  ): Promise<AttachmentReplayActionSettlementResult> {
+    return this.runOwnerMutationAsync(
+      ownerUserId,
+      () => this.durableRemoval.settleAttachmentReplayActionForOwner(ownerUserId, input),
+    );
+  }
   /**
    * 处理队列中的所有操作
    * 
@@ -660,76 +662,89 @@ export class ActionQueueService {
    * Create 操作必须在对应实体的 Update/Delete 操作之前成功
    */
   async processQueue(): Promise<ActionQueueProcessResult> {
-    return this.processingController.processQueue();
+    return this.runOwnerMutationAsync(this.getCurrentOwnerUserId(), () => this.processingController.processQueue());
   }
 
   /** 清空队列 */
   clearQueue() {
-    this.invalidateQueueView('clear-queue', 'discard');
-    this.releaseAllQueueProcessLifecycles('clear-queue');
+    return this.runOwnerMutationSync(this.getCurrentOwnerUserId(), () => this.clearQueueForOwnerScope('clear-queue', this.getCurrentOwnerUserId()));
+  }
+
+  /** full wipe 专用：使所有 owner 的旧处理循环进入 discard。 */
+  clearQueueForFullWipe(): void {
+    return this.runOwnerMutationSync(this.getCurrentOwnerUserId(), () => this.clearQueueForOwnerScope('clear-queue-full-wipe', null));
+  }
+
+  private clearQueueForOwnerScope(reason: string, ownerUserId: string | null): void {
+    this.invalidateQueueView(reason, 'discard', ownerUserId);
+    this.releaseAllQueueProcessLifecycles(reason);
     this.clearPendingQueueView();
     this.storage.saveQueueToStorage();
     this.runtimeSideEffects.syncSentryContext();
   }
   
   /** 清空死信队列 */
-  clearDeadLetterQueue() { this.storage.clearDeadLetterQueue(); }
+  clearDeadLetterQueue() { return this.runOwnerMutationSync(this.getCurrentOwnerUserId(), () => this.storage.clearDeadLetterQueue()); }
 
   /**
    * 仅清空当前内存视图，不覆盖持久化数据。
    * 用于切账号时先断开旧 owner 的可见队列，再按新 owner 重新加载。
    */
-  clearCurrentView(): void {
+  clearCurrentView(): void { return localBackupUiRestoreWriterQuiescence.runSync(this.getCurrentOwnerUserId(), 'action-queue', () => {
     this.invalidateQueueView('clear-current-view', 'settle-owner');
     this.releaseAllQueueProcessLifecycles('clear-current-view');
     this.clearPendingQueueView();
+    this.markCurrentOwnerStorageLoadUnknown();
     this.storage.deadLetterQueue.set([]);
     this.storage.deadLetterSize.set(0);
     this.runtimeSideEffects.syncSentryContext();
-  }
+  }); }
 
   /** 按当前 owner 重新加载持久化队列，避免跨账号会话看到旧队列/死信。 */
-  reloadFromStorageForCurrentOwner(): void {
-    this.clearCurrentView();
-    this.runOwnerReloadPhaseSafely('load-pending', () => this.storage.loadQueueFromStorage());
-    this.runOwnerReloadPhaseSafely('load-dead-letter', () => this.storage.loadDeadLetterFromStorage());
-    this.runOwnerReloadPhaseSafely('sync-sentry', () => this.runtimeSideEffects.syncSentryContext());
-  }
-
-  private runOwnerReloadPhaseSafely(phase: string, run: () => void): void {
-    try {
-      run();
-    } catch (error) {
-      this.warnSafely('ActionQueue owner 队列重新加载阶段失败，已继续后续阶段', {
-        phase,
-        error,
-      });
-    }
+  reloadFromStorageForCurrentOwner(): Promise<void> {
+    return this.ownerReload.reload();
   }
   
   /** 从死信队列重试操作 */
   retryDeadLetter(itemId: string): Promise<boolean> {
-    return this.storage.retryDeadLetter(itemId);
+    return this.runOwnerMutationAsync(this.getCurrentOwnerUserId(), () => this.storage.retryDeadLetter(itemId));
   }
   
   /** 从死信队列删除操作（放弃同步） */
-  dismissDeadLetter(itemId: string) { this.storage.dismissDeadLetter(itemId); }
+  dismissDeadLetter(itemId: string) { return this.runOwnerMutationSync(this.getCurrentOwnerUserId(), () => this.storage.dismissDeadLetter(itemId)); }
 
   /** 将待处理操作直接转入死信队列，保留数据供人工确认或稍后重试 */
   moveToDeadLetter(action: QueuedAction, reason: string): void {
-    this.storage.moveToDeadLetter(action, reason);
+    return this.runOwnerMutationContinuationSync(this.getCurrentOwnerUserId(), () => this.storage.moveToDeadLetter(action, reason));
   }
   
-  /** 获取特定实体的待处理操作 */
   getActionsForEntity(entityType: string, entityId: string): QueuedAction[] {
     return filterActionsForEntity(this.pendingActions(), entityType, entityId);
   }
 
-  /**
-   * 获取特定项目的所有待处理操作
-   */
+  /** 获取特定项目的所有待处理操作。 */
   getPendingActionsForProject(projectId: string): QueuedAction[] {
     return filterPendingActionsForProject(this.pendingActions(), projectId);
+  }
+
+  getProjectPendingWriteState(
+    projectId: string,
+    ownerUserId: string,
+  ): ActionQueueProjectPendingWriteState {
+    if (ownerUserId !== this.getCurrentOwnerUserId()) {
+      return 'unknown';
+    }
+    if (this.getPendingActionsForProject(projectId).length > 0) {
+      return 'pending';
+    }
+    if (hasUnscopedPendingProjectWrite(this.pendingActions())) return 'unknown';
+    return this.isOwnerStorageLoaded(ownerUserId) ? 'clear' : 'unknown';
+  }
+
+  hasDurablePendingTaskMutation(projectId: string, taskId: string): boolean {
+    return hasDurablePendingTaskMutationPure(
+      this.pendingActions(), projectId, taskId, (type, id) => this.retryQueue.hasEntity(type, id),
+    );
   }
 
   /** 检查是否有待处理的操作 */
@@ -739,27 +754,7 @@ export class ActionQueueService {
 
   /** 丢弃满足条件的待处理操作，并立即持久化队列 */
   discardActions(predicate: (action: QueuedAction) => boolean): number {
-    const previousQueue = [...this.pendingActions()];
-    const discardedCount = this.pendingView.filterQueue(action => !predicate(action));
-
-    if (discardedCount === 0) {
-      return 0;
-    }
-
-    try {
-      this.storage.saveQueueToStorage();
-    } catch (error) {
-      this.pendingView.setQueue(previousQueue);
-      this.syncSentryContextSafely('discard-actions-rollback');
-      this.warnSafely('ActionQueue discardActions 持久化失败，已回滚内存队列', {
-        discardedCount,
-        error,
-      });
-      return 0;
-    }
-
-    this.syncSentryContextSafely('discard-actions');
-    return discardedCount;
+    return this.runOwnerMutationSync(this.getCurrentOwnerUserId(), () => this.durableRemoval.discardActions(predicate));
   }
   
   /** 检查是否有死信 */
@@ -782,17 +777,18 @@ export class ActionQueueService {
   /**
    * 显式重置服务状态（测试 / HMR）
    */
-  reset(): void {
+  reset(): void { return localBackupUiRestoreWriterQuiescence.runSync(this.getCurrentOwnerUserId(), 'action-queue', () => {
     this.invalidateQueueView('reset', 'discard');
     this.releaseAllQueueProcessLifecycles('reset');
     this.storage.reset();
     
     this.clearPendingQueueView();
+    this.markCurrentOwnerStorageLoadUnknown();
     this.runtimeSideEffects.syncSentryContext();
     
     this.processorRegistry.clearProcessors();
     this.lifecycle.clearCallbacks();
-  }
+  }); }
 
   private clearPendingQueueView(): void {
     this.pendingView.resetQueueView();

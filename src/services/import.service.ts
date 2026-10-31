@@ -43,7 +43,10 @@ import {
 import { validateImportFilePreflight } from './import-file-validation.helpers';
 import { buildImportProjectPreviews } from './import-preview.helpers';
 import { convertExportTaskToTask } from './import-task-conversion.helpers';
-import { verifyImportChecksum } from './import-checksum.helpers';
+import {
+  verifyBackupDataChecksum,
+  verifyImportChecksum,
+} from './import-checksum.helpers';
 import {
   IMPORT_DATA_VERSION_LIMITS,
   validateImportDataStructure,
@@ -168,6 +171,12 @@ export interface ImportExecutionResult {
   durationMs: number;
 }
 
+export interface LocalBackupRestoreProjectPlan {
+  projects: Project[];
+  externalSourceLinks: ExternalSourceLink[];
+  importedCount: number;
+}
+
 /**
  * 单个项目导入结果
  */
@@ -245,14 +254,19 @@ export class ImportService {
     }
     
     // 4. 解析 JSON
-    let data: ExportData;
+    let data: unknown;
     try {
-      data = JSON.parse(text) as ExportData;
+      data = JSON.parse(text) as unknown;
     } catch (e) {
       return {
         valid: false,
         error: `JSON 解析失败：${(e as Error).message}`,
       };
+    }
+
+    const backupChecksumError = await this.validateBackupChecksum(data);
+    if (backupChecksumError) {
+      return backupChecksumError;
     }
     
     // 5. 验证数据结构（BackupData 格式会被自动转换为 ExportData）
@@ -262,7 +276,7 @@ export class ImportService {
     }
     
     // 使用转换后的数据（BackupData 会被 validateDataStructure 转为 ExportData）
-    const validatedData = structureValidation.data ?? data;
+    const validatedData = structureValidation.data ?? (data as ExportData);
     
     // 6. 验证版本兼容性
     const versionValidation = validateImportVersion(validatedData.metadata.version);
@@ -359,6 +373,43 @@ export class ImportService {
     }
   }
 
+  async prepareLocalBackupRestorePlan(
+    data: ExportData,
+    existingProjects: Project[],
+    checkpoint: () => Promise<void> = async () => undefined,
+  ): Promise<LocalBackupRestoreProjectPlan> {
+    const existingById = new Map(existingProjects.map(project => [project.id, project]));
+    const projects: Project[] = [];
+    const externalSourceLinks: ExternalSourceLink[] = [];
+
+    for (const exportProject of data.projects) {
+      await checkpoint();
+      const plan = resolveImportProjectPlan(exportProject, existingById.get(exportProject.id), {
+        conflictStrategy: 'merge',
+      });
+      if (plan.kind === 'skip') continue;
+
+      if (plan.kind === 'merge') {
+        const prepared = this.prepareMergedProject(plan.exportProject, plan.existingProject);
+        projects.push(prepared.project);
+        externalSourceLinks.push(...this.collectExternalSourceLinks(
+          { ...plan.exportProject, tasks: prepared.newExportTasks },
+          new Map(),
+        ));
+      } else {
+        const converted = this.convertToProject(plan.exportProject, plan.generateNewIds);
+        projects.push(converted.project);
+        externalSourceLinks.push(...this.collectExternalSourceLinks(
+          plan.exportProject,
+          converted.taskIdMap,
+        ));
+      }
+      await checkpoint();
+    }
+
+    return { projects, externalSourceLinks, importedCount: projects.length };
+  }
+
   private async importProjects(
     data: ExportData,
     existingProjects: Project[],
@@ -409,11 +460,11 @@ export class ImportService {
       const conversion = this.convertToProject(plan.exportProject, plan.generateNewIds);
       const project = conversion.project;
       
-      // 调用回调保存项目
-      if (onProjectImported) {
-        await onProjectImported(project);
-      }
-      await this.importExternalSourceLinks(plan.exportProject, conversion.taskIdMap);
+      await this.importExternalSourceLinks(
+        plan.exportProject,
+        conversion.taskIdMap,
+        onProjectImported ? () => onProjectImported(project) : undefined,
+      );
       
       return buildImportedProjectResult(project, plan.action);
     } catch (error) {
@@ -438,12 +489,10 @@ export class ImportService {
     try {
       const preparedMerge = this.prepareMergedProject(exportProject, existingProject);
       
-      if (onProjectImported) {
-        await onProjectImported(preparedMerge.project);
-      }
       await this.importExternalSourceLinks(
         { ...exportProject, tasks: preparedMerge.newExportTasks },
-        new Map()
+        new Map(),
+        onProjectImported ? () => onProjectImported(preparedMerge.project) : undefined,
       );
       
       return {
@@ -583,7 +632,23 @@ export class ImportService {
     return { project: validated, taskIdMap: idMap };
   }
 
-  private async importExternalSourceLinks(exportProject: ExportProject, taskIdMap: Map<string, string>): Promise<void> {
+  private async importExternalSourceLinks(
+    exportProject: ExportProject,
+    taskIdMap: Map<string, string>,
+    commitProject?: () => void | Promise<void>,
+  ): Promise<void> {
+    const links = this.collectExternalSourceLinks(exportProject, taskIdMap);
+    if (links.length === 0) {
+      await commitProject?.();
+      return;
+    }
+    await this.externalSourceLinks.importPointers(links, commitProject);
+  }
+
+  private collectExternalSourceLinks(
+    exportProject: ExportProject,
+    taskIdMap: Map<string, string>,
+  ): ExternalSourceLink[] {
     const links: ExternalSourceLink[] = [];
     for (const task of exportProject.tasks ?? []) {
       const taskId = taskIdMap.get(task.id) ?? task.id;
@@ -593,7 +658,7 @@ export class ImportService {
         if (normalized) links.push(normalized);
       }
     }
-    await this.externalSourceLinks.importPointers(links);
+    return links;
   }
 
   private toExternalSourceLink(
@@ -664,6 +729,15 @@ export class ImportService {
     return verifyImportChecksum(data, error => {
       this.logger.debug('校验和验证失败', { error });
     });
+  }
+
+  private async validateBackupChecksum(data: unknown): Promise<FileValidationResult | null> {
+    const valid = await verifyBackupDataChecksum(data, error => {
+      this.logger.debug('本地备份校验和验证失败', { error });
+    });
+    return valid
+      ? null
+      : { valid: false, error: '本地备份校验和不匹配，数据可能已损坏或被修改' };
   }
   
   /**

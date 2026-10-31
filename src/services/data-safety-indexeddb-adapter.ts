@@ -8,6 +8,7 @@ import {
   type DataSafetyDeadLetterItem,
   type DataSafetyExportPackage,
   type DataSafetyLastWriteExplain,
+  type DataSafetyOfflineSnapshotMirrors,
   type DataSafetyQueuedAction,
   type DataSafetyReplayEntry,
   type DataSafetyRestorePlan,
@@ -15,22 +16,32 @@ import {
 } from './data-safety-package';
 import {
   clearDataSafetyRestoreMarker,
+  claimExpiredDataSafetyRestoreMarker,
+  collectTombstoneRestoreValidationErrors,
   formatRestoreError,
   getAllFromStore,
   getFromStore,
+  hasDataSafetyRestoreMarkerSentinelOwnership,
   isEntityRecord,
+  isDataSafetyRestoreMarkerActive,
   isSyncCursorRecord,
   isUnknownRecord,
+  ownsDataSafetyRestoreMarker,
   readDataSafetyRestoreMarker,
   readLocalStateRestoreSnapshot,
+  renewDataSafetyRestoreMarkerLease,
   restoreLocalState,
   restoreLocalStateSnapshot,
   waitForTransaction,
   writeDataSafetyRestoreMarker,
   type LocalStateRestoreSnapshot,
+  type DataSafetyRestoreMarker,
   type RestorableIndexedDbLocalData,
   type UnknownRecord,
 } from './data-safety-indexeddb-local-state';
+import { DATA_SAFETY_RESTORE_MARKER_HEARTBEAT_MS } from './data-safety-indexeddb-restore-marker-lease';
+import { collectConflictRestoreValidationErrors } from './data-safety-conflict-restore.helpers';
+import { collectOfflineSnapshotRestoreValidationErrors } from './data-safety-offline-snapshot-restore.helpers';
 
 interface IndexedDbDataSafetySnapshotRows {
   projects: UnknownRecord[];
@@ -58,7 +69,7 @@ export interface IndexedDbDataSafetyExportOptions {
   conflicts?: unknown[];
   taskTombstones?: unknown;
   connectionTombstones?: unknown;
-  offlineSnapshots?: unknown;
+  offlineSnapshots?: DataSafetyOfflineSnapshotMirrors | null;
   replayLog?: DataSafetyReplayEntry[];
   lastWriteExplain?: DataSafetyLastWriteExplain | null;
 }
@@ -72,6 +83,55 @@ export interface IndexedDbDataSafetyRestoreResult {
 export interface IndexedDbDataSafetyRestoreRecoveryResult {
   recovered: boolean;
   errors: string[];
+}
+
+class DataSafetyRestoreMarkerOwnershipLostError extends Error {
+  constructor() {
+    super('data-safety restore marker ownership lost');
+    this.name = 'DataSafetyRestoreMarkerOwnershipLostError';
+  }
+}
+
+interface DataSafetyRestoreMarkerHeartbeat {
+  hasOwnership: () => boolean;
+  verifyOwnership: () => Promise<boolean>;
+  stop: () => Promise<void>;
+}
+
+function startDataSafetyRestoreMarkerHeartbeat(
+  marker: DataSafetyRestoreMarker,
+): DataSafetyRestoreMarkerHeartbeat {
+  let ownershipLost = false;
+  let refreshInFlight: Promise<boolean> | null = null;
+  const refresh = (): Promise<boolean> => {
+    if (ownershipLost) return Promise.resolve(false);
+    if (refreshInFlight) return refreshInFlight;
+    const activeRefresh = (async () => {
+      try {
+        ownershipLost ||= !await renewDataSafetyRestoreMarkerLease(marker);
+      } catch {
+        ownershipLost = true;
+      }
+      return !ownershipLost;
+    })();
+    refreshInFlight = activeRefresh;
+    void activeRefresh.finally(() => {
+      if (refreshInFlight === activeRefresh) refreshInFlight = null;
+    });
+    return activeRefresh;
+  };
+  const timer = setInterval(() => {
+    void refresh();
+  }, DATA_SAFETY_RESTORE_MARKER_HEARTBEAT_MS);
+  return {
+    hasOwnership: () => !ownershipLost
+      && hasDataSafetyRestoreMarkerSentinelOwnership(marker),
+    verifyOwnership: refresh,
+    stop: async () => {
+      clearInterval(timer);
+      await refreshInFlight;
+    },
+  };
 }
 
 export async function exportDataSafetyPackageFromIndexedDb(
@@ -152,15 +212,16 @@ export async function restoreDataSafetyPackageToIndexedDb(
   db: IDBDatabase,
   pkg: DataSafetyExportPackage,
 ): Promise<IndexedDbDataSafetyRestoreResult> {
-  const validation = validateDataSafetyExportPackage(pkg);
-  if (!validation.valid) {
-    return {
-      success: false,
-      plan: emptyRestorePlan(validation.errors),
-      errors: validation.errors,
-    };
-  }
+  const validationFailure = validateRestorePackage(pkg);
+  if (validationFailure) return validationFailure;
 
+  return restoreValidatedDataSafetyPackageToIndexedDb(db, pkg);
+}
+
+async function restoreValidatedDataSafetyPackageToIndexedDb(
+  db: IDBDatabase,
+  pkg: DataSafetyExportPackage,
+): Promise<IndexedDbDataSafetyRestoreResult> {
   const pendingRecovery = await recoverInterruptedDataSafetyRestoreFromIndexedDb(db, pkg.ownerUserId);
   if (pendingRecovery.errors.length > 0) {
     return {
@@ -170,35 +231,125 @@ export async function restoreDataSafetyPackageToIndexedDb(
     };
   }
 
+  return executeDataSafetyRestore(db, pkg);
+}
+
+async function executeDataSafetyRestore(
+  db: IDBDatabase,
+  pkg: DataSafetyExportPackage,
+): Promise<IndexedDbDataSafetyRestoreResult> {
   const current = await readCurrentLocalData(db);
   const plan = buildRestorePlan(pkg, current);
-  const unsupportedLocalStateErrors = collectUnsupportedLocalStateRestoreErrors(pkg.localState);
-  if (unsupportedLocalStateErrors.length > 0) {
-    return {
-      success: false,
-      plan: { ...plan, errors: [...plan.errors, ...unsupportedLocalStateErrors] },
-      errors: unsupportedLocalStateErrors,
-    };
+  const localStatePreflightErrors = collectLocalStatePreflightErrors(pkg);
+  if (localStatePreflightErrors.length > 0) {
+    return buildLocalStatePreflightFailure(plan, localStatePreflightErrors);
   }
 
-  const rollbackSnapshot = await readRestorableCurrentLocalData(db);
-  const localStateRollbackSnapshot = await readLocalStateRestoreSnapshot(pkg.ownerUserId);
+  const { rollbackSnapshot, localStateRollbackSnapshot } = await readRestoreRollbackSnapshots(db, pkg);
 
+  let restoreMarker: DataSafetyRestoreMarker | null = null;
+  let markerHeartbeat: DataSafetyRestoreMarkerHeartbeat | null = null;
   try {
-    writeDataSafetyRestoreMarker(pkg.ownerUserId, rollbackSnapshot, localStateRollbackSnapshot);
+    restoreMarker = await writeDataSafetyRestoreMarker(
+      pkg.ownerUserId,
+      rollbackSnapshot,
+      localStateRollbackSnapshot,
+    );
+    markerHeartbeat = startDataSafetyRestoreMarkerHeartbeat(restoreMarker);
     await restorePackageToDatabase(db, pkg);
-    await restoreLocalState(pkg);
-    clearDataSafetyRestoreMarker(pkg.ownerUserId);
+    if (!await markerHeartbeat.verifyOwnership()) {
+      throw new DataSafetyRestoreMarkerOwnershipLostError();
+    }
+    await restoreLocalState(pkg, localStateRollbackSnapshot.retryQueueRestoreItems);
+    if (
+      !await markerHeartbeat.verifyOwnership()
+      || !await clearDataSafetyRestoreMarker(restoreMarker)
+    ) {
+      throw new DataSafetyRestoreMarkerOwnershipLostError();
+    }
   } catch (error) {
-    const errors = await rollbackFailedRestore(db, pkg, rollbackSnapshot, localStateRollbackSnapshot, error);
-    return {
-      success: false,
-      plan: { ...plan, errors: [...plan.errors, ...errors] },
-      errors,
-    };
+    const errors = await resolveDataSafetyRestoreFailure(
+      error,
+      db,
+      pkg,
+      rollbackSnapshot,
+      localStateRollbackSnapshot,
+      restoreMarker,
+      markerHeartbeat,
+    );
+    return { success: false, plan: { ...plan, errors: [...plan.errors, ...errors] }, errors };
+  } finally {
+    await markerHeartbeat?.stop();
   }
 
   return { success: true, plan, errors: [] };
+}
+
+async function resolveDataSafetyRestoreFailure(
+  error: unknown,
+  db: IDBDatabase,
+  pkg: DataSafetyExportPackage,
+  rollbackSnapshot: RestorableIndexedDbLocalData,
+  localStateRollbackSnapshot: LocalStateRestoreSnapshot,
+  restoreMarker: DataSafetyRestoreMarker | null,
+  markerHeartbeat: DataSafetyRestoreMarkerHeartbeat | null,
+): Promise<string[]> {
+  if (error instanceof DataSafetyRestoreMarkerOwnershipLostError) return [error.message];
+  return await rollbackFailedRestore(
+    db,
+    pkg,
+    rollbackSnapshot,
+    localStateRollbackSnapshot,
+    restoreMarker,
+    markerHeartbeat,
+    error,
+  );
+}
+
+async function readRestoreRollbackSnapshots(
+  db: IDBDatabase,
+  pkg: DataSafetyExportPackage,
+): Promise<{
+  rollbackSnapshot: RestorableIndexedDbLocalData;
+  localStateRollbackSnapshot: LocalStateRestoreSnapshot;
+}> {
+  const rollbackSnapshot = await readRestorableCurrentLocalData(db);
+  const localStateRollbackSnapshot = await readLocalStateRestoreSnapshot(
+    pkg.ownerUserId,
+    pkg.localState.retryQueue,
+  );
+  return { rollbackSnapshot, localStateRollbackSnapshot };
+}
+
+function buildLocalStatePreflightFailure(
+  plan: DataSafetyRestorePlan,
+  errors: string[],
+): IndexedDbDataSafetyRestoreResult {
+  return {
+    success: false,
+    plan: { ...plan, errors: [...plan.errors, ...errors] },
+    errors,
+  };
+}
+
+function validateRestorePackage(
+  pkg: DataSafetyExportPackage,
+): IndexedDbDataSafetyRestoreResult | null {
+  const validation = validateDataSafetyExportPackage(pkg);
+  if (validation.valid) return null;
+  return {
+    success: false,
+    plan: emptyRestorePlan(validation.errors),
+    errors: validation.errors,
+  };
+}
+
+function collectLocalStatePreflightErrors(pkg: DataSafetyExportPackage): string[] {
+  return [
+    ...collectTombstoneRestoreValidationErrors(pkg),
+    ...collectConflictRestoreValidationErrors(pkg),
+    ...collectOfflineSnapshotRestoreValidationErrors(pkg),
+  ];
 }
 
 async function rollbackFailedRestore(
@@ -206,13 +357,33 @@ async function rollbackFailedRestore(
   pkg: DataSafetyExportPackage,
   rollbackSnapshot: RestorableIndexedDbLocalData,
   localStateRollbackSnapshot: LocalStateRestoreSnapshot,
+  restoreMarker: DataSafetyRestoreMarker | null,
+  markerHeartbeat: DataSafetyRestoreMarkerHeartbeat | null,
   error: unknown,
 ): Promise<string[]> {
-  const errors = [`local-state restore failed: ${formatRestoreError(error)}`];
+  const restoreFailure = `local-state restore failed: ${formatRestoreError(error)}`;
+  if (!restoreMarker) {
+    return [restoreFailure];
+  }
+  if (!await retainsDataSafetyRestoreMarkerOwnership(restoreMarker, markerHeartbeat)) {
+    return [
+      restoreFailure,
+      'data-safety restore marker ownership lost; rollback skipped',
+    ];
+  }
+  const errors = [restoreFailure];
   try {
-    await restoreLocalStateSnapshot(pkg.ownerUserId, localStateRollbackSnapshot);
+    await restoreLocalStateSnapshot(
+      pkg.ownerUserId,
+      localStateRollbackSnapshot,
+      markerHeartbeat?.hasOwnership ?? (() => true),
+    );
   } catch (localStateRollbackError) {
     errors.push(`local-state rollback failed: ${formatRestoreError(localStateRollbackError)}`);
+  }
+  if (!await retainsDataSafetyRestoreMarkerOwnership(restoreMarker, markerHeartbeat)) {
+    errors.push('data-safety restore marker ownership lost before primary-store rollback');
+    return errors;
   }
   try {
     await restoreLocalDataToDatabase(db, rollbackSnapshot);
@@ -221,7 +392,9 @@ async function rollbackFailedRestore(
   }
   if (errors.length === 1) {
     try {
-      clearDataSafetyRestoreMarker(pkg.ownerUserId);
+      if (!await clearDataSafetyRestoreMarker(restoreMarker)) {
+        errors.push('restore marker ownership lost during rollback clear');
+      }
     } catch (markerClearError) {
       errors.push(`restore marker clear failed: ${formatRestoreError(markerClearError)}`);
     }
@@ -229,20 +402,86 @@ async function rollbackFailedRestore(
   return errors;
 }
 
+async function retainsDataSafetyRestoreMarkerOwnership(
+  marker: DataSafetyRestoreMarker,
+  heartbeat: DataSafetyRestoreMarkerHeartbeat | null,
+): Promise<boolean> {
+  return await ownsDataSafetyRestoreMarker(marker)
+    && (heartbeat === null || await heartbeat.verifyOwnership());
+}
+
 export async function recoverInterruptedDataSafetyRestoreFromIndexedDb(
   db: IDBDatabase,
   ownerUserId: string,
 ): Promise<IndexedDbDataSafetyRestoreRecoveryResult> {
-  const marker = readDataSafetyRestoreMarker(ownerUserId);
-  if (!marker) {
-    return { recovered: false, errors: [] };
+  const claim = await claimInterruptedDataSafetyRestoreMarker(ownerUserId);
+  if (claim.result) return claim.result;
+  const markerHeartbeat = startDataSafetyRestoreMarkerHeartbeat(claim.marker!);
+  try {
+    return await recoverClaimedInterruptedDataSafetyRestore(
+      db,
+      ownerUserId,
+      claim.marker!,
+      markerHeartbeat,
+    );
+  } finally {
+    await markerHeartbeat.stop();
   }
+}
 
+interface InterruptedDataSafetyRestoreMarkerClaim {
+  marker: DataSafetyRestoreMarker | null;
+  result: IndexedDbDataSafetyRestoreRecoveryResult | null;
+}
+
+async function claimInterruptedDataSafetyRestoreMarker(
+  ownerUserId: string,
+): Promise<InterruptedDataSafetyRestoreMarkerClaim> {
+  let marker: DataSafetyRestoreMarker | null;
+  try {
+    marker = await readDataSafetyRestoreMarker(ownerUserId);
+  } catch (error) {
+    return { marker: null, result: {
+      recovered: false,
+      errors: [`restore marker validation failed: ${formatRestoreError(error)}`],
+    } };
+  }
+  if (!marker) {
+    return { marker: null, result: { recovered: false, errors: [] } };
+  }
+  if (isDataSafetyRestoreMarkerActive(marker)) {
+    return { marker: null, result: {
+      recovered: false,
+      errors: ['data-safety restore already in progress for this owner'],
+    } };
+  }
+  marker = await claimExpiredDataSafetyRestoreMarker(marker);
+  if (!marker) {
+    return { marker: null, result: {
+      recovered: false,
+      errors: ['data-safety restore marker ownership lost before interrupted restore recovery'],
+    } };
+  }
+  return { marker, result: null };
+}
+
+async function recoverClaimedInterruptedDataSafetyRestore(
+  db: IDBDatabase,
+  ownerUserId: string,
+  marker: DataSafetyRestoreMarker,
+  markerHeartbeat: DataSafetyRestoreMarkerHeartbeat,
+): Promise<IndexedDbDataSafetyRestoreRecoveryResult> {
   const errors: string[] = [];
   try {
-    await restoreLocalStateSnapshot(ownerUserId, marker.localStateSnapshot);
+    await restoreInterruptedLocalStateSnapshot(ownerUserId, marker, markerHeartbeat);
   } catch (error) {
     errors.push(`local-state interrupted restore recovery failed: ${formatRestoreError(error)}`);
+  }
+  if (!await markerHeartbeat.verifyOwnership()) {
+    return {
+      recovered: false,
+      errors: ['data-safety restore marker ownership lost during interrupted restore recovery'],
+    };
   }
   try {
     await restoreLocalDataToDatabase(db, marker.primaryStoreSnapshot);
@@ -250,12 +489,24 @@ export async function recoverInterruptedDataSafetyRestoreFromIndexedDb(
     errors.push(`primary-store interrupted restore recovery failed: ${formatRestoreError(error)}`);
   }
 
+  if (!await markerHeartbeat.verifyOwnership()) {
+    return {
+      recovered: false,
+      errors: ['data-safety restore marker ownership lost during interrupted restore recovery'],
+    };
+  }
+
   if (errors.length > 0) {
     return { recovered: false, errors };
   }
 
   try {
-    clearDataSafetyRestoreMarker(ownerUserId);
+    if (!await clearDataSafetyRestoreMarker(marker)) {
+      return {
+        recovered: false,
+        errors: ['restore marker ownership lost during interrupted restore recovery'],
+      };
+    }
   } catch (error) {
     return {
       recovered: true,
@@ -266,6 +517,18 @@ export async function recoverInterruptedDataSafetyRestoreFromIndexedDb(
   return { recovered: true, errors: [] };
 }
 
+function restoreInterruptedLocalStateSnapshot(
+  ownerUserId: string,
+  marker: DataSafetyRestoreMarker,
+  markerHeartbeat: DataSafetyRestoreMarkerHeartbeat,
+): Promise<void> {
+  return restoreLocalStateSnapshot(
+    ownerUserId,
+    marker.localStateSnapshot,
+    markerHeartbeat.hasOwnership,
+  );
+}
+
 function emptyRestorePlan(errors: string[]): DataSafetyRestorePlan {
   return {
     idRemappingRequired: false,
@@ -273,49 +536,6 @@ function emptyRestorePlan(errors: string[]): DataSafetyRestorePlan {
     summary: { writes: 0, skips: 0, deletes: 0 },
     errors,
   };
-}
-
-function collectUnsupportedLocalStateRestoreErrors(
-  localState: DataSafetyExportPackage['localState'],
-): string[] {
-  const unsupportedSections: Array<[string, unknown]> = [
-    ['localState.conflicts', localState.conflicts],
-    ['localState.taskTombstones', localState.taskTombstones],
-    ['localState.connectionTombstones', localState.connectionTombstones],
-    ['localState.offlineSnapshots', localState.offlineSnapshots],
-  ];
-
-  return unsupportedSections
-    .filter(([, value]) => hasNonEmptyLocalStatePayload(value))
-    .map(([section, value]) => (
-      `${section} restore is unsupported; package contains ${describeLocalStatePayload(value)}`
-    ));
-}
-
-function hasNonEmptyLocalStatePayload(value: unknown): boolean {
-  if (value === undefined || value === null) {
-    return false;
-  }
-  if (Array.isArray(value)) {
-    return value.length > 0;
-  }
-  if (isUnknownRecord(value)) {
-    return Object.keys(value).length > 0;
-  }
-  if (typeof value === 'string') {
-    return value.length > 0;
-  }
-  return true;
-}
-
-function describeLocalStatePayload(value: unknown): string {
-  if (Array.isArray(value)) {
-    return `${value.length} item(s)`;
-  }
-  if (isUnknownRecord(value)) {
-    return `${Object.keys(value).length} key(s)`;
-  }
-  return 'a non-empty value';
 }
 
 async function readCurrentLocalData(db: IDBDatabase): Promise<DataSafetyCurrentLocalData> {

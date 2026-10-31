@@ -10,7 +10,10 @@ import { VirusScanService } from './virus-scan.service';
 import { ActionQueueService } from './action-queue.service';
 import type { AttachmentUploadPayload } from './action-queue.types';
 import { AttachmentUploadOutboxService } from './attachment-upload-outbox.service';
-import { AttachmentCleanupOutboxService } from './attachment-cleanup-outbox.service';
+import {
+  AttachmentCleanupOutboxService,
+  type PendingAttachmentCleanupRecord,
+} from './attachment-cleanup-outbox.service';
 import { ensureAttachmentSafeForDownload } from './attachment-download-safety.helpers';
 import {
   filterActiveAttachments,
@@ -33,8 +36,18 @@ import {
 } from './attachment-upload-queue.helpers';
 import { AttachmentUploadStateController } from './attachment-upload-state.controller';
 import { isAttachmentImageMimeType, resolveAttachmentType } from './attachment-mime.helpers';
+import {
+  AttachmentUrlRefreshController,
+  type AttachmentUrlRefreshCallback,
+  type MonitoredAttachmentUrlRefreshEntry,
+} from './attachment-url-refresh.helpers';
 
 export type { UploadProgress } from './attachment-upload-state.controller';
+
+export interface QueuedAttachmentUploadFence {
+  signal: AbortSignal;
+  isCurrent: () => boolean;
+}
 
 /**
  * 附件上传服务
@@ -55,6 +68,18 @@ export class AttachmentService {
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('Attachment');
   private readonly uploadState = new AttachmentUploadStateController();
+  private readonly monitoredAttachments = new Map<string, MonitoredAttachmentUrlRefreshEntry>();
+  private readonly urlRefreshController = new AttachmentUrlRefreshController({
+    monitoredAttachments: this.monitoredAttachments,
+    isConfigured: () => this.supabase.isConfigured,
+    refreshUrl: entry => this.refreshUrl(
+      entry.userId,
+      entry.projectId,
+      entry.taskId,
+      entry.attachment,
+    ),
+    warn: (message, data) => this.logger.warn(message, data),
+  });
 
   private buildStoragePath(userId: string, projectId: string, taskId: string, attachmentId: string, fileName: string): string {
     return buildAttachmentStoragePath({ userId, projectId, taskId, attachmentId, fileName });
@@ -69,12 +94,6 @@ export class AttachmentService {
   /** URL 刷新定时器 */
   private urlRefreshTimer: ReturnType<typeof setInterval> | null = null;
   
-  /** URL 刷新回调（由使用者注册） */
-  private urlRefreshCallback: ((refreshedUrls: Map<string, { url: string; thumbnailUrl?: string }>) => void) | null = null;
-  
-  /** 需要监控刷新的附件列表 */
-  private monitoredAttachments: Map<string, { userId: string; projectId: string; taskId: string; attachment: Attachment }> = new Map();
-
   constructor() {
     this.startUrlRefreshMonitor();
     
@@ -82,8 +101,7 @@ export class AttachmentService {
     this.destroyRef.onDestroy(() => {
       this.stopUrlRefreshMonitor();
       this.cancelAllUploads();
-      this.clearUrlRefreshCallback();
-      this.clearMonitoredAttachments();
+      this.urlRefreshController.dispose();
     });
   }
 
@@ -93,8 +111,8 @@ export class AttachmentService {
   private startUrlRefreshMonitor() {
     if (this.urlRefreshTimer !== null) return;
     
-    this.urlRefreshTimer = setInterval(async () => {
-      await this.checkAndRefreshExpiredUrls();
+    this.urlRefreshTimer = setInterval(() => {
+      void this.checkAndRefreshExpiredUrls();
     }, ATTACHMENT_CONFIG.URL_REFRESH_CHECK_INTERVAL);
   }
 
@@ -111,8 +129,8 @@ export class AttachmentService {
   /**
    * 注册 URL 刷新回调
    */
-  setUrlRefreshCallback(callback: (refreshedUrls: Map<string, { url: string; thumbnailUrl?: string }>) => void) {
-    this.urlRefreshCallback = callback;
+  setUrlRefreshCallback(callback: AttachmentUrlRefreshCallback) {
+    this.urlRefreshController.setCallback(callback);
   }
 
   /**
@@ -120,28 +138,28 @@ export class AttachmentService {
    * 在组件销毁时调用，防止内存泄漏
    */
   clearUrlRefreshCallback() {
-    this.urlRefreshCallback = null;
+    this.urlRefreshController.clearCallback();
   }
 
   /**
    * 添加附件到监控列表
    */
   monitorAttachment(userId: string, projectId: string, taskId: string, attachment: Attachment) {
-    this.monitoredAttachments.set(attachment.id, { userId, projectId, taskId, attachment });
+    this.urlRefreshController.monitor(userId, projectId, taskId, attachment);
   }
 
   /**
    * 从监控列表移除附件
    */
   unmonitorAttachment(attachmentId: string) {
-    this.monitoredAttachments.delete(attachmentId);
+    this.urlRefreshController.unmonitor(attachmentId);
   }
 
   /**
    * 清空监控列表
    */
   clearMonitoredAttachments() {
-    this.monitoredAttachments.clear();
+    this.urlRefreshController.clearMonitoring();
   }
 
   /**
@@ -181,44 +199,8 @@ export class AttachmentService {
   /**
    * 检查并刷新过期的 URL
    */
-  private async checkAndRefreshExpiredUrls() {
-    if (this.monitoredAttachments.size === 0 || !this.supabase.isConfigured) return;
-
-    const refreshedUrls = new Map<string, { url: string; thumbnailUrl?: string; signedAt: string }>();
-    const now = Date.now();
-    const expiryBuffer = ATTACHMENT_CONFIG.URL_EXPIRY_BUFFER;
-
-    const monitoredEntries = Array.from(this.monitoredAttachments.entries());
-    for (let index = 0; index < monitoredEntries.length; index += 1) {
-      const [id, { userId, projectId, taskId, attachment }] = monitoredEntries[index]!;
-      // 检查 URL 是否即将过期（优先使用 signedAt，fallback 到 createdAt）
-      const signedAt = attachment.signedAt ? new Date(attachment.signedAt).getTime() : new Date(attachment.createdAt).getTime();
-      const urlAge = now - signedAt;
-      
-      // 如果 URL 年龄超过缓冲时间，刷新它
-      if (urlAge > expiryBuffer) {
-        try {
-          const newUrls = await this.refreshUrl(userId, projectId, taskId, attachment);
-          if (newUrls) {
-            const signedAtNow = new Date().toISOString();
-            refreshedUrls.set(id, { ...newUrls, signedAt: signedAtNow });
-            // 更新监控列表中的附件
-            this.monitoredAttachments.set(id, {
-              userId, projectId, taskId,
-              attachment: { ...attachment, url: newUrls.url, thumbnailUrl: newUrls.thumbnailUrl, signedAt: signedAtNow }
-            });
-          }
-        } catch (e) {
-          // URL 刷新失败，静默处理，下次检查会重试
-          this.logger.warn(`刷新附件 URL 失败: ${id}`, { error: e });
-        }
-      }
-    }
-
-    // 通知回调
-    if (refreshedUrls.size > 0 && this.urlRefreshCallback) {
-      this.urlRefreshCallback(refreshedUrls);
-    }
+  private checkAndRefreshExpiredUrls(): Promise<void> {
+    return this.urlRefreshController.refreshExpiredUrls();
   }
 
   /**
@@ -253,11 +235,14 @@ export class AttachmentService {
   async uploadQueuedAttachment(
     payload: AttachmentUploadPayload,
     blob: Blob,
+    fence?: QueuedAttachmentUploadFence,
   ): Promise<Attachment> {
+    this.assertQueuedReplayFence(fence);
     const file = new File([blob], payload.fileName, {
       type: payload.mimeType || blob.type || 'application/octet-stream',
     });
     const scanResult = await this.virusScan.scanBeforeUpload(file, file.name);
+    this.assertQueuedReplayFence(fence);
     if (!scanResult.success || scanResult.result?.status === SCAN_STATUS.THREAT_DETECTED) {
       throw new Error(scanResult.error || '文件安全扫描未通过');
     }
@@ -266,8 +251,16 @@ export class AttachmentService {
       payload,
       scanResult.result ? this.virusScan.createScanMetadata(scanResult.result) : payload.attachment.scanMetadata,
     );
+    this.assertQueuedReplayFence(fence);
     await this.uploadFileToStorage(file, context);
-    const uploaded = await this.createUploadedAttachment(file, context);
+    this.assertQueuedReplayFence(fence);
+    const uploaded = await this.createUploadedAttachment(
+      file,
+      context,
+      payload.sourceUserId || payload.userId,
+      fence,
+    );
+    this.assertQueuedReplayFence(fence);
     return {
       ...uploaded,
       createdAt: payload.attachment.createdAt,
@@ -411,8 +404,14 @@ export class AttachmentService {
     });
   }
 
-  private async createUploadedAttachment(file: File, context: AttachmentUploadContext): Promise<Attachment> {
-    const url = await this.createSignedUploadUrl(context.filePath);
+  private async createUploadedAttachment(
+    file: File,
+    context: AttachmentUploadContext,
+    ownerUserId: string,
+    fence?: QueuedAttachmentUploadFence,
+  ): Promise<Attachment> {
+    const url = await this.createSignedUploadUrl(context.filePath, ownerUserId, fence);
+    this.assertQueuedReplayFence(fence);
     const attachment: Attachment = {
       id: context.attachmentId,
       type: resolveAttachmentType(file.type),
@@ -426,20 +425,27 @@ export class AttachmentService {
     };
 
     if (isAttachmentImageMimeType(file.type)) {
-      attachment.thumbnailUrl = await this.createThumbnailSignedUrl(context.filePath);
+      attachment.thumbnailUrl = await this.createThumbnailSignedUrl(context.filePath, fence);
+      this.assertQueuedReplayFence(fence);
     }
 
     return attachment;
   }
 
-  private async createSignedUploadUrl(filePath: string): Promise<string> {
+  private async createSignedUploadUrl(
+    filePath: string,
+    ownerUserId: string,
+    fence?: QueuedAttachmentUploadFence,
+  ): Promise<string> {
+    this.assertQueuedReplayFence(fence);
     const { data: urlData, error: signedUrlError } = await this.supabase.client().storage
       .from(ATTACHMENT_CONFIG.BUCKET_NAME)
       .createSignedUrl(filePath, ATTACHMENT_CONFIG.SIGNED_URL_EXPIRY);
+    this.assertQueuedReplayFence(fence);
 
     const url = urlData?.signedUrl;
     if (signedUrlError || !url) {
-      await this.removeUploadedFileAfterMetadataFailure(filePath);
+      await this.removeUploadedFileAfterMetadataFailure(ownerUserId, filePath);
       if (signedUrlError) throw supabaseErrorToError(signedUrlError);
       throw new Error('签名 URL 生成失败');
     }
@@ -447,7 +453,11 @@ export class AttachmentService {
     return url;
   }
 
-  private async createThumbnailSignedUrl(filePath: string): Promise<string | undefined> {
+  private async createThumbnailSignedUrl(
+    filePath: string,
+    fence?: QueuedAttachmentUploadFence,
+  ): Promise<string | undefined> {
+    this.assertQueuedReplayFence(fence);
     const { data: thumbData } = await this.supabase.client().storage
       .from(ATTACHMENT_CONFIG.BUCKET_NAME)
       .createSignedUrl(filePath, ATTACHMENT_CONFIG.SIGNED_URL_EXPIRY, {
@@ -457,7 +467,13 @@ export class AttachmentService {
           resize: 'contain'
         }
       });
+    this.assertQueuedReplayFence(fence);
     return thumbData?.signedUrl;
+  }
+
+  private assertQueuedReplayFence(fence?: QueuedAttachmentUploadFence): void {
+    if (!fence || (!fence.signal.aborted && fence.isCurrent())) return;
+    throw new DOMException('Attachment queue replay fence is stale', 'AbortError');
   }
 
   private handleUploadError(fileName: string, error: unknown): AttachmentUploadFailure {
@@ -474,9 +490,13 @@ export class AttachmentService {
     return { success: false, error: err?.message ?? '上传失败' };
   }
 
-  private async removeUploadedFileAfterMetadataFailure(filePath: string): Promise<void> {
+  private async removeUploadedFileAfterMetadataFailure(
+    ownerUserId: string,
+    filePath: string,
+  ): Promise<void> {
+    let pendingRecords: PendingAttachmentCleanupRecord[] = [];
     try {
-      await this.cleanupOutbox.enqueuePaths([filePath]);
+      pendingRecords = await this.cleanupOutbox.enqueuePaths([filePath], { ownerUserId });
     } catch (error) {
       this.logger.warn('签名 URL 生成失败后清理队列持久化失败，继续尝试即时清理', { filePath, error });
     }
@@ -489,7 +509,7 @@ export class AttachmentService {
         this.logger.warn('签名 URL 生成失败后清理已上传文件失败', { filePath, error });
         return;
       }
-      await this.cleanupOutbox.removePaths([filePath]);
+      await this.cleanupOutbox.removePendingCleanups(pendingRecords);
     } catch (cleanupError) {
       this.logger.warn('签名 URL 生成失败后清理已上传文件异常', { filePath, error: cleanupError });
     }
@@ -592,7 +612,7 @@ export class AttachmentService {
     fileExt: string
   ): Promise<{ success: boolean; error?: string }> {
     const filePath = `${userId}/${projectId}/${taskId}/${attachmentId}.${sanitizeAttachmentPathSegment(fileExt)}`;
-    const result = await this.deleteFiles([filePath]);
+    const result = await this.deleteFiles(userId, [filePath]);
     return result.success
       ? { success: true }
       : { success: false, error: result.errors[0] ?? '删除失败' };
@@ -601,13 +621,17 @@ export class AttachmentService {
   /**
    * 批量硬删除文件（供清理任务使用）
    */
-  async deleteFiles(filePaths: string[]): Promise<{ success: boolean; deletedCount: number; errors: string[] }> {
+  async deleteFiles(
+    ownerUserId: string,
+    filePaths: string[],
+  ): Promise<{ success: boolean; deletedCount: number; errors: string[] }> {
     if (filePaths.length === 0) {
       return { success: true, deletedCount: 0, errors: [] };
     }
 
+    let pendingRecords: PendingAttachmentCleanupRecord[];
     try {
-      await this.cleanupOutbox.enqueuePaths(filePaths);
+      pendingRecords = await this.cleanupOutbox.enqueuePaths(filePaths, { ownerUserId });
     } catch (error) {
       this.logger.error('批量删除文件清理队列持久化失败', { filePaths: filePaths.slice(0, 5), error });
       return { success: false, deletedCount: 0, errors: ['附件清理队列持久化失败'] };
@@ -633,7 +657,10 @@ export class AttachmentService {
           errors.push(`批次 ${Math.floor(i / batchSize) + 1}: ${error.message}`);
         } else {
           deletedCount += batch.length;
-          await this.cleanupOutbox.removePaths(batch);
+          const batchPaths = new Set(batch);
+          await this.cleanupOutbox.removePendingCleanups(
+            pendingRecords.filter(record => batchPaths.has(record.path)),
+          );
         }
       } catch (e: unknown) {
         const err = e as { message?: string };

@@ -3,6 +3,7 @@ import type {
   EnqueueParams,
   QueuedAction,
 } from './action-queue.types';
+import type { PersistQueueMutationWithRetrySupersession } from './action-queue-owner-view.helpers';
 
 export interface BulkDurableEnqueueMutationRecord {
   action: EnqueueParams;
@@ -35,14 +36,13 @@ export interface PersistBulkDurableEnqueueMutationOptions {
     ownerUserId: string,
     mutateQueue: (queue: QueuedAction[]) => QueuedAction[],
   ) => Promise<QueuedAction[] | null>;
+  persistQueueMutationWithRetrySupersession?: PersistQueueMutationWithRetrySupersession;
 }
 
 export interface RunBulkDurableEnqueueOptions
   extends PersistBulkDurableEnqueueMutationOptions {
   enqueueSingle: (action: EnqueueParams) => Promise<string>;
-  readPendingActions: () => QueuedAction[];
   warnIfQueueFrozen: (action: EnqueueParams) => void;
-  rollbackFailedBulkDurableEnqueue: (previousQueue: QueuedAction[]) => void;
   applyPersistedCurrentOwnerQueue: (persistedQueue: QueuedAction[]) => void;
   completeDurableEnqueueSideEffects: (
     action: EnqueueParams,
@@ -67,24 +67,33 @@ export async function runBulkDurableEnqueue(
     return actionId ? [actionId] : [];
   }
 
-  const previousQueue = [...options.readPendingActions()];
+  const ownerUserId = options.getCurrentOwnerUserId();
   options.actions.forEach(action => options.warnIfQueueFrozen(action));
-  const outcome = await persistBulkDurableEnqueueMutation(options);
+  const outcome = await persistBulkDurableEnqueueMutation({
+    ...options,
+    getCurrentOwnerUserId: () => ownerUserId,
+  });
 
   if (outcome.error) {
     logFailedBulkDurableEnqueueMutation(outcome, options.warn);
-    options.rollbackFailedBulkDurableEnqueue(previousQueue);
     return [];
   }
 
   if (!outcome.persistedQueue || outcome.resolvedActionIds.length !== options.actions.length) {
     logUnconfirmedBulkDurableEnqueue(options.actions.length, outcome, options.warn);
-    options.rollbackFailedBulkDurableEnqueue(previousQueue);
     return [];
   }
 
+  if (ownerUserId !== options.getCurrentOwnerUserId()) {
+    return [...outcome.resolvedActionIds];
+  }
+
   options.applyPersistedCurrentOwnerQueue(outcome.persistedQueue);
-  completeBulkDurableEnqueueSideEffects(outcome.acceptedMutations, options);
+  completeBulkDurableEnqueueSideEffects(
+    outcome.acceptedMutations,
+    outcome.persistedQueue,
+    options,
+  );
 
   if (options.isOnline()) {
     void options.processQueue();
@@ -101,10 +110,23 @@ export async function persistBulkDurableEnqueueMutation(
   const state = createBulkDurableEnqueueMutationState();
 
   try {
-    const persistedQueue = await options.persistQueueMutationForOwner(
-      options.getCurrentOwnerUserId(),
-      queue => buildBulkDurableEnqueueMutation(queue, queuedActions, state, options),
-    );
+    const ownerUserId = options.getCurrentOwnerUserId();
+    const mutateQueue = (queue: QueuedAction[]) =>
+      buildBulkDurableEnqueueMutation(queue, queuedActions, state, options);
+    const getCandidateActionIds = () => state.acceptedMutations
+      .filter(record => record.mutation.wasEnqueued && !record.mutation.wasMergeShrunk)
+      .map(record => record.mutation.resolvedActionId)
+      .filter(actionId => actionId.length > 0);
+    const persistWithoutSupersession = () =>
+      options.persistQueueMutationForOwner(ownerUserId, mutateQueue);
+    const persistedQueue = options.persistQueueMutationWithRetrySupersession
+      ? await options.persistQueueMutationWithRetrySupersession(
+        ownerUserId,
+        mutateQueue,
+        getCandidateActionIds,
+        persistWithoutSupersession,
+      )
+      : await persistWithoutSupersession();
 
     return { ...state, persistedQueue, error: null };
   } catch (error) {
@@ -136,6 +158,7 @@ function logUnconfirmedBulkDurableEnqueue(
 
 function completeBulkDurableEnqueueSideEffects(
   acceptedMutations: BulkDurableEnqueueMutationRecord[],
+  persistedQueue: QueuedAction[],
   options: RunBulkDurableEnqueueOptions,
 ): void {
   for (const { action, queuedAction, mutation } of acceptedMutations) {
@@ -146,7 +169,8 @@ function completeBulkDurableEnqueueSideEffects(
       action,
       queuedAction,
       mutation.resolvedActionId || queuedAction.id,
-      true,
+      !persistedQueue.find(item => item.id === mutation.resolvedActionId)
+        ?.retryQueueSupersessions?.length,
     );
   }
 }

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { readActiveLocalBackupUiRestoreWriters } from '../../../../services/local-backup-ui-restore-writer-quiescence-tracker';
 import { RetryQueueItem, RetryQueueService, RetryOperationHandler } from './retry-queue.service';
 import {
   registerRetryQueueBlackBoxReplaySpecs,
@@ -86,7 +87,11 @@ describe('RetryQueueService', () => {
     } = harness);
   });
 
-  afterEach(resetRetryQueueServiceSpecEnvironment);
+  afterEach(async () => {
+    await harness.teardown();
+    expect(readActiveLocalBackupUiRestoreWriters('test-user')).toEqual([]);
+    resetRetryQueueServiceSpecEnvironment();
+  });
 
   function getCapacityAndSliceSpecContext(): RetryQueueCapacityAndSliceSpecContext {
     return {
@@ -298,6 +303,37 @@ describe('RetryQueueService', () => {
       }),
     ]);
     expect(saveToStorageSpy).not.toHaveBeenCalled();
+  });
+
+  it('removeByEntityForOwner 应从 hidden bucket 移除捕获 owner 条目并保留当前 owner 同实体条目', () => {
+    const task = createTask('t-remove-by-entity-captured-owner');
+    const currentOwnerItem: RetryQueueItem = {
+      id: crypto.randomUUID(),
+      type: 'task',
+      operation: 'upsert',
+      data: task,
+      projectId: 'p-current-owner',
+      retryCount: 0,
+      createdAt: Date.now(),
+      sourceUserId: 'test-user',
+      operationId: `test-retry-${crypto.randomUUID()}`,
+    };
+    const capturedOwnerItem: RetryQueueItem = {
+      ...currentOwnerItem,
+      id: crypto.randomUUID(),
+      projectId: 'p-captured-owner',
+      sourceUserId: 'old-user',
+      operationId: `test-retry-${crypto.randomUUID()}`,
+    };
+    (service as unknown as { queue: RetryQueueItem[] }).queue = [currentOwnerItem];
+    (service as unknown as { hiddenQueueItems: RetryQueueItem[] }).hiddenQueueItems = [capturedOwnerItem];
+
+    const removed = service.removeByEntityForOwner('task', task.id, 'old-user');
+
+    expect(removed).toBe(true);
+    expect(service.getItems()).toEqual([currentOwnerItem]);
+    expect(service.findItemForOwner('task', task.id, 'old-user')).toBeUndefined();
+    expect(saveToStorageSpy).toHaveBeenCalledTimes(1);
   });
 
   registerRetryQueueStorageLifecycleSpecs(getStorageLifecycleSpecContext);
@@ -635,6 +671,75 @@ describe('RetryQueueService', () => {
         operationId: currentItem?.operationId,
       }),
     ]);
+  });
+
+  it('旧实例延后 persistNow 不应覆盖 IndexedDB 中同实体的更新业务快照', async () => {
+    saveToStorageSpy.mockRestore();
+    const staleTask = {
+      ...createTask('retry-idb-stale-writer'),
+      title: 'Stale writer task',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    };
+    service.add('task', 'upsert', staleTask, 'p-stale-writer', 'test-user');
+    const staleCurrentItem = service.getItems()[0]!;
+    staleCurrentItem.createdAt = Date.now() + 120_000;
+
+    const storedNewerItem: RetryQueueItem = {
+      ...staleCurrentItem,
+      id: crypto.randomUUID(),
+      data: {
+        ...staleTask,
+        title: 'Stored newer task',
+        updatedAt: '2026-02-01T00:00:00.000Z',
+      },
+      createdAt: Date.now(),
+      operationId: `test-retry-${crypto.randomUUID()}`,
+    };
+    const persistedItems = new Map<string, RetryQueueItem>([
+      [storedNewerItem.id, storedNewerItem],
+    ]);
+    const getAllRequest: {
+      result: RetryQueueItem[];
+      onsuccess: (() => void) | null;
+      onerror: (() => void) | null;
+      error: DOMException | Error | null;
+    } = {
+      result: Array.from(persistedItems.values()),
+      onsuccess: null,
+      onerror: null,
+      error: null,
+    };
+    const store = {
+      getAll: vi.fn(() => getAllRequest),
+      clear: vi.fn(() => persistedItems.clear()),
+      put: vi.fn((item: RetryQueueItem) => persistedItems.set(item.id, item)),
+    };
+    const transaction: FakeIdbTransaction = {
+      objectStore: vi.fn(() => store),
+      oncomplete: null,
+      onerror: null,
+      onabort: null,
+      error: null,
+    };
+    const db = {
+      transaction: vi.fn(() => transaction),
+    } as unknown as IDBDatabase;
+    initDbSpy.mockResolvedValue(db);
+
+    const persisted = service.persistNow();
+    await vi.waitFor(() => expect(db.transaction).toHaveBeenCalled());
+    getAllRequest.onsuccess?.();
+    transaction.oncomplete?.();
+
+    await expect(persisted).resolves.toBe(true);
+    const matchingItems = Array.from(persistedItems.values())
+      .filter(item => item.data.id === staleTask.id);
+    expect(matchingItems).toHaveLength(1);
+    expect(matchingItems[0]).toEqual(expect.objectContaining({
+      id: storedNewerItem.id,
+      data: expect.objectContaining({ title: 'Stored newer task' }),
+    }));
+    expect(matchingItems[0]?.operationId).not.toBe(staleCurrentItem.operationId);
   });
 
   registerRetryQueueBackupRestoreSpecs(getBackupRestoreSpecContext);

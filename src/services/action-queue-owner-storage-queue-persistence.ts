@@ -1,7 +1,15 @@
-import { LOCAL_QUEUE_CONFIG } from './action-queue-storage.helpers';
-import type { QueuedAction } from './action-queue.types';
+import {
+  buildFailedOwnerDeadLetterReason,
+  LOCAL_QUEUE_CONFIG,
+  type QueueRetryError,
+} from './action-queue-storage.helpers';
+import type { DeadLetterItem, QueuedAction } from './action-queue.types';
 import type { CategoryLogger } from './logger.service';
-import type { QueueBackupService } from './queue-backup.service';
+import type {
+  QueueBackupProtectedHandoffReason,
+  QueueBackupService,
+  QueueBackupUpdateContext,
+} from './queue-backup.service';
 import type { ActionQueueOwnerStorageRuntime, QueueSnapshot } from './action-queue-owner-storage.types';
 import { mergeLoadedQueuedActionsWithBackup } from './action-queue-restore.helpers';
 import { resolveAtomicMutationBaseQueue } from './action-queue-owner-storage-mutation-base.helper';
@@ -10,6 +18,16 @@ import {
   type ActionQueueOwnerScopedStorageKeyResolver,
   writeOwnerScopedLocalStorageValue,
 } from './action-queue-owner-storage-local-helpers';
+import { filterLocallyRemovedQueuedActions } from './action-queue-owner-storage-removal-journal';
+import {
+  authorizeDeadLetterHandoffDurably,
+  ProtectedQueueMutationError,
+} from './action-queue-held-action.controller';
+import {
+  buildFailedActionRetryQueue,
+  createFailedActionSettlement,
+  type FailedActionSettlement,
+} from './action-queue-owner-storage-failed-settlement.helpers';
 
 export interface ActionQueueOwnerQueuePersistenceDeps {
   queueBackup: Pick<QueueBackupService, 'backupQueue'>;
@@ -32,7 +50,8 @@ export interface ActionQueueOwnerQueueLoadDeps {
 }
 
 export interface ActionQueueOwnerQueueMutationDeps {
-  queueBackup: Pick<QueueBackupService, 'backupQueue' | 'updateQueue'>;
+  queueBackup: Pick<QueueBackupService, 'backupQueue' | 'updateQueue'>
+    & Partial<Pick<QueueBackupService, 'updateQueueStrictly'>>;
   logger: CategoryLogger;
   getScopedStorageKey: ActionQueueOwnerScopedStorageKeyResolver;
   invalidateLocalQueueSnapshot: (ownerUserId: string) => void;
@@ -50,11 +69,117 @@ export interface ActionQueueOwnerQueueMutationDeps {
   ) => void;
 }
 
+export interface FailedOwnerActionSettlementDeps {
+  logger: CategoryLogger;
+  loadQueue: () => Promise<QueuedAction[]>;
+  persistQueueMutation: (
+    updater: (queue: QueuedAction[]) => QueuedAction[],
+  ) => Promise<QueuedAction[] | null>;
+  buildDeadLetterQueue: (actionId: string, item: DeadLetterItem) => Promise<DeadLetterItem[]>;
+  saveDeadLetterQueue: (queue: DeadLetterItem[]) => boolean;
+}
+
+export async function settleFailedOwnerAction(
+  ownerUserId: string,
+  action: QueuedAction,
+  error: string | QueueRetryError,
+  runtime: ActionQueueOwnerStorageRuntime,
+  deps: FailedOwnerActionSettlementDeps,
+): Promise<'retry' | 'dead-letter' | 'missing'> {
+  const queue = await deps.loadQueue();
+  const existingAction = queue.find(item => item.id === action.id);
+  if (!existingAction) {
+    deps.logger.debug('旧 owner 队列中未找到待收口的失败 action', {
+      ownerUserId,
+      actionId: action.id,
+    });
+    return 'missing';
+  }
+
+  const settlement = createFailedActionSettlement(existingAction, error);
+  if (settlement.shouldDeadLetter) {
+    await moveFailedOwnerActionToDeadLetter(
+      ownerUserId, action.id, existingAction, settlement, runtime, deps,
+    );
+    return 'dead-letter';
+  }
+
+  let retried = false;
+  const updatedQueue = await deps.persistQueueMutation(latestQueue => {
+    retried = latestQueue.some(item => item.id === action.id);
+    return retried
+      ? buildFailedActionRetryQueue(latestQueue, action.id, settlement)
+      : latestQueue;
+  });
+  if (updatedQueue === null) {
+    throw new Error(`owner-scoped 失败 action 重试收口保存失败: ${ownerUserId}`);
+  }
+  if (!retried) {
+    deps.logger.debug('旧 owner 队列中未找到待收口的失败 action', {
+      ownerUserId,
+      actionId: action.id,
+    });
+    return 'missing';
+  }
+  return 'retry';
+}
+
+async function moveFailedOwnerActionToDeadLetter(
+  ownerUserId: string,
+  actionId: string,
+  existingAction: QueuedAction,
+  settlement: FailedActionSettlement,
+  runtime: ActionQueueOwnerStorageRuntime,
+  deps: FailedOwnerActionSettlementDeps,
+): Promise<void> {
+  const authorizedAction = await authorizeDeadLetterHandoffDurably({
+    ownerUserId,
+    action: existingAction,
+    authorizedAt: new Date().toISOString(),
+    persistQueueMutationForOwner: (_owner, updater) => deps.persistQueueMutation(updater),
+  });
+  const deadLetters = await deps.buildDeadLetterQueue(actionId, {
+    action: {
+      ...authorizedAction,
+      lastError: settlement.errorMessage,
+      errorType: settlement.errorType,
+      syncState: 'dead_letter',
+    },
+    failedAt: new Date().toISOString(),
+    reason: buildFailedOwnerDeadLetterReason(settlement.errorType, settlement.errorMessage),
+  });
+  if (!deps.saveDeadLetterQueue(deadLetters)) {
+    runtime.freezeQueueWrites('storage_failure');
+    runtime.triggerStorageFailureEscapeMode();
+    throw new Error(`owner-scoped dead-letter 保存失败: ${ownerUserId}`);
+  }
+
+  let removed = false;
+  const updatedQueue = await deps.persistQueueMutation(latestQueue => {
+    const nextQueue = latestQueue.filter(item => item.id !== actionId);
+    removed = nextQueue.length !== latestQueue.length;
+    return nextQueue;
+  });
+  if (updatedQueue === null) {
+    throw new Error(`owner-scoped dead-letter 队列收口保存失败: ${ownerUserId}`);
+  }
+  if (!removed) {
+    deps.logger.debug('旧 owner 队列中未找到待移入 dead-letter 的失败 action', {
+      ownerUserId,
+      actionId,
+    });
+  }
+}
+
 interface BackupQueueMutationResult {
   updatedQueue: QueuedAction[] | null;
+  fallbackBaseQueue: QueuedAction[] | null;
+  fallbackQueue: QueuedAction[] | null;
   blockedByCorruptLocalSnapshot: boolean;
   updaterError: unknown | null;
   error: unknown | null;
+  protectedReason: QueueBackupProtectedHandoffReason | null;
+  protectedActionIds: string[];
 }
 
 export async function loadPersistedQueueForOwner(
@@ -66,7 +191,10 @@ export async function loadPersistedQueueForOwner(
   const backupQueue = await deps.restoreQueueFromBackup(ownerUserId, runtime);
   if (localSnapshot.found) {
     return backupQueue !== null
-      ? mergeLoadedQueuedActionsWithBackup(localSnapshot.queue, backupQueue).queue
+      ? mergeLoadedQueuedActionsWithBackup(
+        localSnapshot.queue,
+        filterLocallyRemovedQueuedActions(backupQueue, localSnapshot.removedActionIdentities),
+      ).queue
       : localSnapshot.queue;
   }
 
@@ -82,12 +210,12 @@ export async function loadQueueMutationBaseForOwner(
   runtime: ActionQueueOwnerStorageRuntime,
   deps: ActionQueueOwnerQueueLoadDeps,
 ): Promise<QueuedAction[]> {
+  const localSnapshot = deps.readQueueSnapshotFromLocalStorage(ownerUserId);
   const backupQueue = await deps.restoreQueueFromBackup(ownerUserId, runtime);
   if (backupQueue !== null) {
-    return backupQueue;
+    return filterLocallyRemovedQueuedActions(backupQueue, localSnapshot.removedActionIdentities);
   }
 
-  const localSnapshot = deps.readQueueSnapshotFromLocalStorage(ownerUserId);
   if (isUnrecoverableCorruptQueueSnapshot(localSnapshot, null)) {
     deps.handleUnrecoverableCorruptQueueSnapshot(ownerUserId, localSnapshot, runtime);
   }
@@ -119,6 +247,13 @@ export async function persistQueueMutationForOwner(
     throw backupResult.updaterError;
   }
 
+  if (backupResult.protectedReason !== null) {
+    throw new ProtectedQueueMutationError(
+      backupResult.protectedReason,
+      backupResult.protectedActionIds,
+    );
+  }
+
   if (backupResult.error !== null) {
     warnQueuePersistenceFailure(deps.logger, 'IndexedDB owner-scoped 队列 mutation 失败，降级尝试本地快照持久化', {
       ownerUserId,
@@ -137,7 +272,15 @@ export async function persistQueueMutationForOwner(
     return null;
   }
 
-  return persistFallbackQueueMutationForOwner(ownerUserId, localSnapshot, updater, runtime, deps);
+  return persistFallbackQueueMutationForOwner(
+    ownerUserId,
+    localSnapshot,
+    updater,
+    runtime,
+    deps,
+    backupResult.fallbackBaseQueue,
+    backupResult.fallbackQueue,
+  );
 }
 
 export async function saveQueueSnapshotForOwner(
@@ -228,8 +371,10 @@ async function tryPersistQueueMutationInBackup(
 ): Promise<BackupQueueMutationResult> {
   let blockedByCorruptLocalSnapshot = false;
   let updaterError: unknown = null;
+  let fallbackBaseQueue: QueuedAction[] | null = null;
+  let fallbackQueue: QueuedAction[] | null = null;
   try {
-    const updatedQueue = await deps.queueBackup.updateQueue(ownerUserId, (persistedQueue, context) => {
+    const applyUpdate = (persistedQueue: QueuedAction[], context: QueueBackupUpdateContext) => {
       if (isUnrecoverableCorruptQueueSnapshot(localSnapshot, context.recordFound ? persistedQueue : null)) {
         blockedByCorruptLocalSnapshot = true;
         throw new Error('owner-scoped queue snapshot is corrupt and has no recoverable IndexedDB baseline');
@@ -240,15 +385,64 @@ async function tryPersistQueueMutationInBackup(
         context.recordFound,
       );
       try {
-        return normalizeQueueForOutbox(updater(baseQueue));
+        fallbackBaseQueue = baseQueue;
+        fallbackQueue = normalizeQueueForOutbox(updater(baseQueue));
+        return fallbackQueue;
       } catch (error) {
         updaterError = error;
         throw error;
       }
-    });
-    return { updatedQueue, blockedByCorruptLocalSnapshot, updaterError, error: null };
+    };
+    const result = deps.queueBackup.updateQueueStrictly
+      ? await deps.queueBackup.updateQueueStrictly(ownerUserId, applyUpdate)
+      : await deps.queueBackup.updateQueue(ownerUserId, applyUpdate).then(queue => queue === null
+        ? { status: 'storage-failed' as const }
+        : { status: 'committed' as const, queue });
+    if (result.status === 'committed') {
+      return {
+        updatedQueue: result.queue,
+        fallbackBaseQueue,
+        fallbackQueue,
+        blockedByCorruptLocalSnapshot,
+        updaterError,
+        error: null,
+        protectedReason: null,
+        protectedActionIds: [],
+      };
+    }
+    if (result.status === 'protected-handoff') {
+      return {
+        updatedQueue: null,
+        fallbackBaseQueue,
+        fallbackQueue,
+        blockedByCorruptLocalSnapshot,
+        updaterError,
+        error: null,
+        protectedReason: result.reason,
+        protectedActionIds: result.actionIds,
+      };
+    }
+    return {
+      updatedQueue: null,
+      fallbackBaseQueue,
+      fallbackQueue,
+      blockedByCorruptLocalSnapshot,
+      updaterError,
+      error: new Error('IndexedDB owner-scoped queue mutation failed'),
+      protectedReason: null,
+      protectedActionIds: [],
+    };
   } catch (error) {
-    return { updatedQueue: null, blockedByCorruptLocalSnapshot, updaterError, error };
+    return {
+      updatedQueue: null,
+      fallbackBaseQueue,
+      fallbackQueue,
+      blockedByCorruptLocalSnapshot,
+      updaterError,
+      error,
+      protectedReason: null,
+      protectedActionIds: [],
+    };
   }
 }
 
@@ -258,15 +452,32 @@ async function persistFallbackQueueMutationForOwner(
   updater: (queue: QueuedAction[]) => QueuedAction[],
   runtime: ActionQueueOwnerStorageRuntime,
   deps: ActionQueueOwnerQueueMutationDeps,
+  preparedBaseQueue: QueuedAction[] | null,
+  preparedQueue: QueuedAction[] | null,
 ): Promise<QueuedAction[] | null> {
   const fallbackBaseQueue = localSnapshot.found
     ? localSnapshot.queue
     : ownerUserId === deps.getCurrentOwnerUserId()
       ? runtime.pendingActions()
       : [];
-  const fallbackQueue = normalizeQueueForOutbox(updater(fallbackBaseQueue));
+  const baseQueue = preparedBaseQueue ?? fallbackBaseQueue;
+  const fallbackQueue = preparedQueue ?? normalizeQueueForOutbox(updater(baseQueue));
+  if (removesQueueMembership(baseQueue, fallbackQueue)
+    || (baseQueue.length === 0 && fallbackQueue.length === 0)) {
+    warnQueuePersistenceFailure(
+      deps.logger,
+      'IndexedDB mutation 失败后拒绝使用本地镜像执行可能删减队列的 fallback',
+      { ownerUserId },
+    );
+    return null;
+  }
   const saved = await deps.persistQueueSnapshotForOwner(ownerUserId, fallbackQueue, runtime);
   return saved ? fallbackQueue : null;
+}
+
+function removesQueueMembership(before: QueuedAction[], after: QueuedAction[]): boolean {
+  const retained = new Set(after.map(action => `${action.id}\u0000${action.operationId}`));
+  return before.some(action => !retained.has(`${action.id}\u0000${action.operationId}`));
 }
 
 function warnQueuePersistenceFailure(

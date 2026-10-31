@@ -43,6 +43,24 @@ export type SyncRpcStatus =
 export interface SyncRpcResult {
   status: SyncRpcStatus;
   reason?: string;
+  /** 服务端写入判定，保留用于 replay / last-write explain。 */
+  decision?: string;
+  /** 服务端确认的幂等 operation_id；null 表示服务端未能关联写入操作。 */
+  operationId?: string | null;
+  /** 服务端判定本次写入涉及的实体字段。 */
+  changedFields?: string[];
+  /** 服务端隔离记录 ID；null 表示没有对应隔离记录。 */
+  quarantineId?: string | null;
+  /** 服务端写入审计记录 ID；null 表示没有对应审计记录。 */
+  auditId?: string | null;
+  /** 服务端无法验证写入来源时为 true。 */
+  originUnverified?: boolean;
+  /** 当前请求 payload 的服务端摘要。 */
+  payloadDigest?: string | null;
+  /** 写入前服务端 payload 的摘要。 */
+  existingPayloadDigest?: string | null;
+  /** 幂等重放记录中的 payload 摘要。 */
+  replayPayloadDigest?: string | null;
   /** `remote-newer` 时返回服务端当前 updated_at —— 调用方据此触发 pull。 */
   remoteUpdatedAt?: string;
   /** `applied` / `idempotent-replay` 时服务端写入后的 updated_at（若 RPC 返回）。 */
@@ -226,6 +244,7 @@ export class SyncRpcClientService {
     baseUpdatedAt: string | null;
     writeIntent?: TaskWriteIntent;
     abortSignal?: AbortSignal;
+    isCurrent?: () => boolean;
   }): Promise<SyncRpcResult> {
     return this.invokeRpc('sync_upsert_task', {
       operation_id: params.operationId,
@@ -233,7 +252,7 @@ export class SyncRpcClientService {
       base_updated_at: params.baseUpdatedAt,
       task: this.serializeTask(params.task, params.projectId, params.writeIntent),
       ...this.buildAuditFields(),
-    }, params.abortSignal);
+    }, params.abortSignal, params.isCurrent);
   }
 
   /** 客户端 connection upsert RPC 包装。 */
@@ -242,6 +261,7 @@ export class SyncRpcClientService {
     connection: Connection;
     projectId?: string;
     baseUpdatedAt: string | null;
+    abortSignal?: AbortSignal;
   }): Promise<SyncRpcResult> {
     return this.invokeRpc('sync_upsert_connection', {
       operation_id: params.operationId,
@@ -249,7 +269,7 @@ export class SyncRpcClientService {
       base_updated_at: params.baseUpdatedAt,
       connection: this.serializeConnection(params.connection, params.projectId),
       ...this.buildAuditFields(),
-    });
+    }, params.abortSignal);
   }
 
   /** 客户端 blackbox entry upsert RPC 包装。 */
@@ -273,6 +293,7 @@ export class SyncRpcClientService {
     project: Project;
     ownerId: string;
     baseUpdatedAt: string | null;
+    abortSignal?: AbortSignal;
   }): Promise<SyncRpcResult> {
     return this.invokeRpc('sync_upsert_project', {
       operation_id: params.operationId,
@@ -280,7 +301,7 @@ export class SyncRpcClientService {
       base_updated_at: params.baseUpdatedAt,
       project: this.serializeProject(params.project, params.ownerId),
       ...this.buildAuditFields(),
-    });
+    }, params.abortSignal);
   }
 
   /** 客户端 user_preferences upsert RPC 包装。 */
@@ -289,6 +310,8 @@ export class SyncRpcClientService {
     userId: string;
     baseUpdatedAt: string | null;
     preferences: Partial<UserPreferences>;
+    abortSignal?: AbortSignal;
+    isCurrent?: () => boolean;
   }): Promise<SyncRpcResult> {
     return this.invokeRpc('sync_upsert_user_preferences', {
       operation_id: params.operationId,
@@ -297,20 +320,22 @@ export class SyncRpcClientService {
       user_id: params.userId,
       preferences: this.serializeUserPreferences(params.preferences),
       ...this.buildAuditFields(),
-    });
+    }, params.abortSignal, params.isCurrent);
   }
 
   /** 客户端 focus session upsert RPC 包装。 */
   async upsertFocusSession(params: {
     operationId: string;
     record: FocusSessionRecord;
+    abortSignal?: AbortSignal;
+    isCurrent?: () => boolean;
   }): Promise<SyncRpcResult> {
     return this.invokeRpc('sync_upsert_focus_session', {
       operation_id: params.operationId,
       protocol_version: this.clientProtocolVersion(),
       focus_session: this.serializeFocusSession(params.record),
       ...this.buildAuditFields(),
-    });
+    }, params.abortSignal, params.isCurrent);
   }
 
   /** 客户端 routine task upsert RPC 包装。 */
@@ -318,6 +343,8 @@ export class SyncRpcClientService {
     operationId: string;
     userId: string;
     task: RoutineTask;
+    abortSignal?: AbortSignal;
+    isCurrent?: () => boolean;
   }): Promise<SyncRpcResult> {
     return this.invokeRpc('sync_upsert_routine_task', {
       operation_id: params.operationId,
@@ -325,13 +352,15 @@ export class SyncRpcClientService {
       user_id: params.userId,
       routine_task: this.serializeRoutineTask(params.task),
       ...this.buildAuditFields(),
-    });
+    }, params.abortSignal, params.isCurrent);
   }
 
   /** 客户端 routine completion increment RPC 包装。 */
   async incrementRoutineCompletion(params: {
     operationId: string;
     mutation: RoutineCompletionMutation;
+    abortSignal?: AbortSignal;
+    isCurrent?: () => boolean;
   }): Promise<SyncRpcResult> {
     return this.invokeRpc('sync_increment_routine_completion', {
       operation_id: params.operationId,
@@ -339,7 +368,7 @@ export class SyncRpcClientService {
       user_id: params.mutation.userId,
       routine_completion: this.serializeRoutineCompletion(params.mutation),
       ...this.buildAuditFields(),
-    });
+    }, params.abortSignal, params.isCurrent);
   }
 
   /** 客户端 project delete RPC 包装。 */
@@ -370,6 +399,7 @@ export class SyncRpcClientService {
      * null 表示缺少可靠基线；服务端必须跳过该 task，避免无保护删除。
      */
     baseUpdatedAtMap?: Record<string, string | null | undefined>;
+    abortSignal?: AbortSignal;
   }): Promise<SyncRpcResult> {
     const baseMap = this.buildBaseUpdatedAtMap(params.taskIds, params.baseUpdatedAtMap);
     return this.invokeRpc('sync_delete_tasks', {
@@ -381,7 +411,7 @@ export class SyncRpcClientService {
       delete_mode: params.deleteMode ?? 'purge',
       ...(baseMap ? { base_updated_at_map: baseMap } : {}),
       ...this.buildAuditFields(),
-    });
+    }, params.abortSignal);
   }
 
   /**
@@ -414,9 +444,12 @@ export class SyncRpcClientService {
     name: string,
     payload: Record<string, unknown>,
     signal?: AbortSignal,
+    isCurrent?: () => boolean,
   ): Promise<SyncRpcResult> {
     assertSyncOperationId(payload['operation_id']);
+    if (isCurrent && !isCurrent()) return this.replayFenceStaleResult();
     const client = await this.supabase.clientAsync();
+    if (isCurrent && !isCurrent()) return this.replayFenceStaleResult();
     if (client == null) {
       return {
         status: 'unauthorized',
@@ -424,12 +457,16 @@ export class SyncRpcClientService {
         raw: null,
       };
     }
+    if (isCurrent && !isCurrent()) return this.replayFenceStaleResult();
     const rpcBuilder = client.rpc(name as never, { payload } as never);
-    // throttle 超时 abort：终止幽灵 RPC 写入；mock/旧 builder 不支持时按原样等待
-    const abortableBuilder = signal && typeof (rpcBuilder as { abortSignal?: unknown }).abortSignal === 'function'
+    if (signal && typeof (rpcBuilder as { abortSignal?: unknown }).abortSignal !== 'function') {
+      throw new Error(`${name} RPC builder does not support abortSignal`);
+    }
+    const abortableBuilder = signal
       ? (rpcBuilder as unknown as { abortSignal: (signal: AbortSignal) => typeof rpcBuilder }).abortSignal(signal)
       : rpcBuilder;
     const { data, error } = await abortableBuilder;
+    if (isCurrent && !isCurrent()) return this.replayFenceStaleResult();
     if (error) {
       // 网络/服务端错误：保持原始错误向上抛，调用方走 RetryQueue 路径。
       throw error;
@@ -437,10 +474,18 @@ export class SyncRpcClientService {
     return this.parseRpcResult(data);
   }
 
+  private replayFenceStaleResult(): SyncRpcResult {
+    return {
+      status: 'unauthorized',
+      reason: 'replay_fence_stale',
+      raw: null,
+    };
+  }
+
   private parseRpcResult(raw: unknown): SyncRpcResult {
     const obj = (raw && typeof raw === 'object') ? (raw as Record<string, unknown>) : {};
     const status = this.parseStatus(obj['status']);
-    const result: SyncRpcResult = { status, raw };
+    const result: SyncRpcResult = { status, raw, ...this.parseRpcDiagnostics(obj) };
     if (typeof obj['reason'] === 'string') result.reason = obj['reason'] as string;
     if (typeof obj['remote_updated_at'] === 'string') result.remoteUpdatedAt = obj['remote_updated_at'] as string;
     if (typeof obj['updated_at'] === 'string') result.serverUpdatedAt = obj['updated_at'] as string;
@@ -462,6 +507,22 @@ export class SyncRpcClientService {
       result.skippedIds = obj['skipped_ids'].filter((value): value is string => typeof value === 'string');
     }
     return result;
+  }
+
+  private parseRpcDiagnostics(obj: Record<string, unknown>): Partial<SyncRpcResult> {
+    const diagnostics: Partial<SyncRpcResult> = {};
+    if (typeof obj['decision'] === 'string') diagnostics.decision = obj['decision'];
+    if (typeof obj['operation_id'] === 'string' || obj['operation_id'] === null) diagnostics.operationId = obj['operation_id'];
+    if (Array.isArray(obj['changed_fields'])) {
+      diagnostics.changedFields = obj['changed_fields'].filter((value): value is string => typeof value === 'string');
+    }
+    if (typeof obj['quarantine_id'] === 'string' || obj['quarantine_id'] === null) diagnostics.quarantineId = obj['quarantine_id'];
+    if (typeof obj['audit_id'] === 'string' || obj['audit_id'] === null) diagnostics.auditId = obj['audit_id'];
+    if (typeof obj['origin_unverified'] === 'boolean') diagnostics.originUnverified = obj['origin_unverified'];
+    if (typeof obj['payload_digest'] === 'string' || obj['payload_digest'] === null) diagnostics.payloadDigest = obj['payload_digest'];
+    if (typeof obj['existing_payload_digest'] === 'string' || obj['existing_payload_digest'] === null) diagnostics.existingPayloadDigest = obj['existing_payload_digest'];
+    if (typeof obj['replay_payload_digest'] === 'string' || obj['replay_payload_digest'] === null) diagnostics.replayPayloadDigest = obj['replay_payload_digest'];
+    return diagnostics;
   }
 
   private parseStatus(raw: unknown): SyncRpcStatus {

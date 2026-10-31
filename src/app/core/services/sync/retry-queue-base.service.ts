@@ -10,17 +10,32 @@ import { SYNC_CONFIG } from '../../../../config';
 import { AUTH_CONFIG } from '../../../../config/auth.config';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 import { createDerivedSyncOperationId, createSyncOperationId, isSyncOperationId } from '../../../../utils/sync-operation-id';
-import { isValidUUID } from '../../../../utils/validation';
+import {
+  normalizeBackupRetryQueueItem,
+  resolveRetryQueueBackupRestoreValidationNow,
+  type RetryQueueValidatedRestorePolicy,
+  validateRetryQueueBackupRestoreRequest,
+} from './retry-queue-backup-restore.helpers';
 import { buildRefreshFingerprint as buildRefreshFingerprintPure } from './retry-queue-fingerprint';
+import {
+  dedupeRetryQueueItemsByEntity,
+  selectRetryQueueEntityWinner as selectRetryQueueEntityWinnerPure,
+} from './retry-queue-item-selection';
 import type {
   PersistedRetryQueueItem,
   RetryOperationHandler,
   RetryQueueItem,
   RetryQueueSliceOptions,
   RetryQueueSliceResult,
+  RetryQueueStorageLoadToken,
   RetryableEntityType,
   RetryableOperation,
 } from './retry-queue.types';
+
+interface RetryQueueOwnerStorageLoadRecord {
+  generation: number;
+  state: 'loading' | 'loaded' | 'unknown';
+}
 
 const LEGACY_RETRY_QUEUE_OPERATION_ID_PURPOSE = 'legacy-retry-queue-operation-id';
 const RETRY_QUEUE_COMPLETION_MARKER_STORAGE_KEY = 'nanoflow.retry-queue.completed-operations';
@@ -88,6 +103,7 @@ export abstract class RetryQueueBase {
   protected queue: RetryQueueItem[] = [];
   /** 当前 owner 不可见但仍需保留的其它账号条目 */
   protected hiddenQueueItems: RetryQueueItem[] = [];
+  private readonly pendingWriteStateListeners = new Set<() => void>();
   /** 本实例已经确认从内存视图移除的 item，用于 fallback 合并时避免复活旧 localStorage 快照 */
   protected locallyRemovedRetryItemIds = new Set<string>();
 
@@ -154,6 +170,7 @@ export abstract class RetryQueueBase {
   protected lastDrainHadTerminalConflict = false;
   /** 队列内存态代次；本地新增/删除/切账号后用于作废晚到的存储加载结果 */
   protected queueStateGeneration = 0;
+  private readonly ownerStorageLoadRecords = new Map<string, RetryQueueOwnerStorageLoadRecord>();
   protected lifecycleClosed = false;
   protected lastProcessTime = 0;
   /** 队列处理超时保护（120s）—— 副作用是释放 isProcessingQueue 死锁 */
@@ -236,7 +253,11 @@ export abstract class RetryQueueBase {
   }
 
   protected applyLoadedItems(items: RetryQueueItem[]): number {
-    const { items: dedupedItems, removedCount } = this.dedupeLoadedRetryQueueItems(items);
+    const { items: dedupedItems, removedCount } = dedupeRetryQueueItemsByEntity(
+      items,
+      item => this.getRetryQueueRestoreEntityKey(item),
+      (currentWinner, incoming) => this.selectRetryQueueEntityWinner(currentWinner, incoming),
+    );
     const { visible, hidden } = this.partitionItemsForCurrentOwner(dedupedItems);
     this.queue = visible;
     this.hiddenQueueItems = hidden;
@@ -247,79 +268,70 @@ export abstract class RetryQueueBase {
     return removedCount;
   }
 
-  private dedupeLoadedRetryQueueItems(items: RetryQueueItem[]): {
-    items: RetryQueueItem[];
-    removedCount: number;
-  } {
-    const winnersByEntity = new Map<string, RetryQueueItem>();
-    const entityKeysByOrder: string[] = [];
-
-    for (const item of items) {
-      const entityKey = this.getRetryQueueRestoreEntityKey(item);
-      const currentWinner = winnersByEntity.get(entityKey);
-      if (!currentWinner) {
-        winnersByEntity.set(entityKey, item);
-        entityKeysByOrder.push(entityKey);
-        continue;
-      }
-
-      winnersByEntity.set(
-        entityKey,
-        this.selectLoadedRetryQueueEntityWinner(currentWinner, item),
-      );
-    }
-
-    return {
-      items: entityKeysByOrder.map(entityKey => winnersByEntity.get(entityKey)!),
-      removedCount: items.length - winnersByEntity.size,
-    };
-  }
-
-  private selectLoadedRetryQueueEntityWinner(
+  protected selectRetryQueueEntityWinner(
     currentWinner: RetryQueueItem,
     incoming: RetryQueueItem,
+    options: { preferCurrentOnTie?: boolean } = {},
   ): RetryQueueItem {
-    const currentVersion = this.resolveLoadedRetryQueueItemVersion(currentWinner);
-    const incomingVersion = this.resolveLoadedRetryQueueItemVersion(incoming);
-    if (currentVersion !== null && incomingVersion !== null && currentVersion !== incomingVersion) {
-      return incomingVersion > currentVersion ? incoming : currentWinner;
-    }
-    if (currentVersion === null && incomingVersion !== null) {
-      return incoming;
-    }
-    if (currentVersion !== null && incomingVersion === null) {
-      return currentWinner;
-    }
-    if (incoming.createdAt !== currentWinner.createdAt) {
-      return incoming.createdAt > currentWinner.createdAt ? incoming : currentWinner;
-    }
-    return incoming;
-  }
-
-  private resolveLoadedRetryQueueItemVersion(item: RetryQueueItem): number | null {
-    const data = item.data as unknown;
-    const versions = [
-      this.parseLoadedRetryQueueTimestamp(data, 'updatedAt'),
-      this.parseLoadedRetryQueueTimestamp(data, 'deletedAt'),
-      this.parseLoadedRetryQueueTimestamp(data, 'baseUpdatedAt'),
-    ].filter((timestamp): timestamp is number => timestamp !== null);
-    return versions.length > 0 ? Math.max(...versions) : null;
-  }
-
-  private parseLoadedRetryQueueTimestamp(data: unknown, field: 'updatedAt' | 'deletedAt' | 'baseUpdatedAt'): number | null {
-    if (!data || typeof data !== 'object' || !(field in data)) {
-      return null;
-    }
-    const value = (data as Record<string, unknown>)[field];
-    if (typeof value !== 'string' || value.trim().length === 0) {
-      return null;
-    }
-    const timestamp = Date.parse(value);
-    return Number.isFinite(timestamp) ? timestamp : null;
+    return selectRetryQueueEntityWinnerPure(currentWinner, incoming, options);
   }
 
   protected touchQueueState(): void {
     this.queueStateGeneration += 1;
+    this.notifyPendingWriteStateListeners();
+  }
+
+  subscribeToPendingWriteStateChanges(listener: () => void): () => void {
+    this.pendingWriteStateListeners.add(listener);
+    return () => this.pendingWriteStateListeners.delete(listener);
+  }
+
+  protected markOwnerStorageLoadStarted(token: RetryQueueStorageLoadToken): void {
+    this.ownerStorageLoadRecords.set(token.ownerUserId, {
+      generation: token.queueStateGeneration,
+      state: 'loading',
+    });
+  }
+
+  protected markOwnerStorageLoadSucceeded(token: RetryQueueStorageLoadToken): void {
+    this.updateOwnerStorageLoadRecord(token, 'loaded');
+  }
+
+  protected markOwnerStorageLoadFailed(token: RetryQueueStorageLoadToken): void {
+    this.updateOwnerStorageLoadRecord(token, 'unknown');
+  }
+
+  protected markCurrentOwnerStorageLoadUnknown(): void {
+    if (this.ownerStorageLoadRecords.delete(this.getCurrentOwnerUserId())) {
+      this.notifyPendingWriteStateListeners();
+    }
+  }
+
+  protected isOwnerStorageLoadConfirmed(ownerUserId: string): boolean {
+    return this.ownerStorageLoadRecords.get(ownerUserId)?.state === 'loaded';
+  }
+
+  private updateOwnerStorageLoadRecord(
+    token: RetryQueueStorageLoadToken,
+    state: RetryQueueOwnerStorageLoadRecord['state'],
+  ): void {
+    const current = this.ownerStorageLoadRecords.get(token.ownerUserId);
+    if (current?.generation !== token.queueStateGeneration) return;
+    this.ownerStorageLoadRecords.set(token.ownerUserId, {
+      generation: token.queueStateGeneration,
+      state,
+    });
+    this.notifyPendingWriteStateListeners();
+  }
+
+  private notifyPendingWriteStateListeners(): void {
+    for (const listener of this.pendingWriteStateListeners) {
+      try {
+        listener();
+      } catch (error) {
+        this.logger.warn('RetryQueue pending-write 状态监听器失败，已隔离', error);
+      }
+    }
   }
 
   protected captureStorageLoadToken(): {
@@ -533,8 +545,12 @@ export abstract class RetryQueueBase {
     }
   }
 
-  async restoreFromBackupItems(items: unknown[], ownerUserId: string): Promise<number> {
-    const restoredItems = this.extractRestorableBackupRetryQueueItems(items, ownerUserId);
+  async restoreFromBackupItems(
+    items: unknown[],
+    ownerUserId: string,
+    policy?: RetryQueueValidatedRestorePolicy,
+  ): Promise<number> {
+    const restoredItems = this.extractRestorableBackupRetryQueueItems(items, ownerUserId, policy);
     if (restoredItems.length === 0) {
       return 0;
     }
@@ -567,78 +583,37 @@ export abstract class RetryQueueBase {
     return 0;
   }
 
-  private extractRestorableBackupRetryQueueItems(items: unknown[], ownerUserId: string): RetryQueueItem[] {
-    if (!Array.isArray(items) || ownerUserId.length === 0) {
+  private extractRestorableBackupRetryQueueItems(
+    items: unknown[],
+    ownerUserId: string,
+    policy?: RetryQueueValidatedRestorePolicy,
+  ): RetryQueueItem[] {
+    if (!validateRetryQueueBackupRestoreRequest(items, ownerUserId, policy !== undefined)) {
       return [];
     }
 
-    const now = Date.now();
+    const validatedNow = resolveRetryQueueBackupRestoreValidationNow(policy);
+    const now = validatedNow ?? Date.now();
     const restorable: RetryQueueItem[] = [];
     for (const item of items) {
-      const normalized = this.normalizeBackupRetryQueueItem(item, ownerUserId, now);
-      if (normalized) {
-        restorable.push(normalized);
+      const normalized = normalizeBackupRetryQueueItem(
+        item,
+        ownerUserId,
+        now,
+        { maxItemAge: this.MAX_ITEM_AGE, maxRetries: this.MAX_RETRIES },
+        policy !== undefined,
+      );
+      if (normalized.status === 'restorable') {
+        restorable.push(this.ensureLoadedItemOperationId(normalized.item));
+      } else if (normalized.status === 'terminal') {
+        // Legacy restore keeps terminal evidence; validated restore rejects before this branch.
+        void this.persistTerminalRetryEvidence(
+          this.ensureLoadedItemOperationId(normalized.item),
+          normalized.reason,
+        );
       }
     }
     return restorable;
-  }
-
-  private normalizeBackupRetryQueueItem(
-    item: unknown,
-    ownerUserId: string,
-    now: number,
-  ): RetryQueueItem | null {
-    if (!item || typeof item !== 'object') {
-      return null;
-    }
-
-    const candidate = item as Partial<PersistedRetryQueueItem>;
-    if (!this.isRestorableRetryQueueShape(candidate)) {
-      return null;
-    }
-
-    if (candidate.sourceUserId !== ownerUserId) {
-      return null;
-    }
-    if (now - candidate.createdAt >= this.MAX_ITEM_AGE || candidate.retryCount >= this.MAX_RETRIES) {
-      // 超过 24h/重试上限的备份项不再自动回放（业务边界不变），但必须走
-      // 终态证据通道隔离保留（§5.6）：静默跳过会让 IndexedDB 备份在下次
-      // 覆写时永久丢失这些写入
-      const reason = now - candidate.createdAt >= this.MAX_ITEM_AGE
-        ? 'expired-on-restore'
-        : 'max-retries-on-restore';
-      void this.persistTerminalRetryEvidence(
-        this.ensureLoadedItemOperationId({ ...candidate, data: { ...candidate.data } }),
-        reason,
-      );
-      return null;
-    }
-
-    return this.ensureLoadedItemOperationId({
-      ...candidate,
-      data: { ...candidate.data },
-    });
-  }
-
-  private isRestorableRetryQueueShape(
-    item: Partial<PersistedRetryQueueItem>,
-  ): item is PersistedRetryQueueItem {
-    return typeof item.id === 'string'
-      && isValidUUID(item.id)
-      && (item.type === 'task' || item.type === 'project' || item.type === 'connection' || item.type === 'blackbox')
-      && (item.operation === 'upsert' || item.operation === 'delete')
-      && item.data !== undefined
-      && item.data !== null
-      && typeof item.data === 'object'
-      && 'id' in item.data
-      && typeof item.data.id === 'string'
-      && isValidUUID(item.data.id)
-      && typeof item.sourceUserId === 'string'
-      && typeof item.retryCount === 'number'
-      && Number.isFinite(item.retryCount)
-      && item.retryCount >= 0
-      && typeof item.createdAt === 'number'
-      && Number.isFinite(item.createdAt);
   }
 
   private mergeRestoredRetryQueueItems(

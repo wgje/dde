@@ -1,6 +1,7 @@
 import type { QueuedAction } from './action-queue.types';
 import type { QueueSnapshot } from './action-queue-owner-storage.types';
 import { normalizeQueueForOutbox } from './action-queue-outbox-normalization.helpers';
+import { filterLocallyRemovedQueuedActions } from './action-queue-owner-storage-removal-journal';
 
 export function resolveAtomicMutationBaseQueue(
   persistedQueue: QueuedAction[],
@@ -8,7 +9,9 @@ export function resolveAtomicMutationBaseQueue(
   idbRecordFound: boolean,
 ): QueuedAction[] {
   if (idbRecordFound) {
-    const normalizedPersistedQueue = normalizeQueueForOutbox(persistedQueue);
+    const normalizedPersistedQueue = normalizeQueueForOutbox(
+      filterLocallyRemovedQueuedActions(persistedQueue, localSnapshot.removedActionIdentities),
+    );
     if (!localSnapshot.found || localSnapshot.queue.length === 0 || normalizedPersistedQueue.length === 0) {
       return normalizedPersistedQueue;
     }

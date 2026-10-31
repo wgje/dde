@@ -1,6 +1,9 @@
 import type { LeaseHandle } from '../../../../services/sync-writer-lease.service';
 import type { TaskWriteIntent } from '../../../../services/sync-rpc-client.service';
-import type { TaskDeleteBaseUpdatedAtMap } from '../../../../services/action-queue.types';
+import type {
+  RetryQueueSupersessionReservation,
+  TaskDeleteBaseUpdatedAtMap,
+} from '../../../../services/action-queue.types';
 import type { Task, Project, Connection, BlackBoxEntry } from '../../../../models';
 
 export type { TaskDeleteBaseUpdatedAtMap } from '../../../../services/action-queue.types';
@@ -21,6 +24,14 @@ export type RetryableEntityType = 'task' | 'project' | 'connection' | 'blackbox'
 export type RetryableOperation = 'upsert' | 'delete';
 
 export type RetryQueueRemoteOutcome = 'unknown';
+
+/**
+ * unknown-outcome 项重放前对账的判定结果：
+ * - `settled`：服务端已包含本次写（LWW 视角下无需重放），按成功结算并推进；
+ * - `replay`：服务端未包含本次写，按正常路径重放一次；
+ * - `unknown`：对账查询失败或时钟不可靠，保持结果未知状态等待下一轮（不消耗 retryCount）。
+ */
+export type RetryQueueUnknownOutcomeReconcileResult = 'settled' | 'replay' | 'unknown';
 
 export interface RetryQueueLastFailure {
   errorType: string;
@@ -59,6 +70,8 @@ export interface RetryQueueItem {
   writeIntent?: TaskWriteIntent;
   /** 最近一次入队失败上下文，用于区分 timeout 等远端结果未知写入。 */
   lastFailure?: RetryQueueLastFailure;
+  /** Unsettled ownership transfer to a newer durable ActionQueue action. */
+  actionQueueSupersessions?: RetryQueueSupersessionReservation[];
 }
 
 export type PersistedRetryQueueItem = Omit<RetryQueueItem, 'operationId'> & {
@@ -67,6 +80,7 @@ export type PersistedRetryQueueItem = Omit<RetryQueueItem, 'operationId'> & {
 };
 export type RetryQueueData = Task | Project | Connection | BlackBoxEntry | RetryTaskDeleteData;
 export type RetryQueuePersistMode = 'debounced' | 'manual';
+export type RetryQueueProjectPendingWriteState = 'pending' | 'clear' | 'unknown';
 export type RetryQueueStorageLoadToken = {
   ownerUserId: string;
   queueStateGeneration: number;
@@ -146,6 +160,11 @@ export interface RetryOperationHandler {
   pushConnection(connection: Connection, projectId: string, sourceUserId?: string, operationId?: string): Promise<boolean>;
   /** 推送黑匣子条目到服务器（专注模式数据同步） */
   pushBlackBoxEntry?(entry: BlackBoxEntry, sourceUserId?: string, operationId?: string): Promise<boolean>;
+  /**
+   * unknown-outcome（timeout/abort 后服务端结果未知）项重放前对账：
+   * 判定服务端是否已包含该队列项承载的写入。缺省实现视为 `replay`（保持旧行为）。
+   */
+  reconcileUnknownOutcome?(item: RetryQueueItem): Promise<RetryQueueUnknownOutcomeReconcileResult>;
   isSessionExpired(): boolean;
   isOnline(): boolean;
   onProcessingStateChange(processing: boolean, pendingCount: number): void;
@@ -169,6 +188,11 @@ export interface RetryQueueSliceResult {
   remaining: number;
   durationMs: number;
   completed: boolean;
+}
+
+export interface NormalizedQueueSliceOperationIds {
+  itemsSnapshot: RetryQueueItem[];
+  changed: boolean;
 }
 
 export interface RetryQueueSliceRuntime {

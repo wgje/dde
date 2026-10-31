@@ -1,12 +1,18 @@
 import type { Task, Project, Connection, BlackBoxEntry } from '../../../../models';
 import type { TaskWriteIntent } from '../../../../services/sync-rpc-client.service';
+import { localBackupUiRestoreWriterQuiescence } from '../../../../services/local-backup-ui-restore-writer-quiescence.service';
 import { isValidUUID } from '../../../../utils/validation';
 import {
   areStringArraysEqual as areStringArraysEqualPure,
   buildBlackBoxRetryDataFingerprint as buildBlackBoxRetryDataFingerprintPure,
 } from './retry-queue-fingerprint';
 import {
+  buildRefreshedRetryQueueDraft,
+  buildRefreshedRetryQueueOperationContext,
+} from './retry-queue-item-refresh.helpers';
+import {
   getRetryQueueItemsForSelection,
+  hasProtectiveRetryQueueWriteForProject,
   hasProjectRetryForOwner as hasProjectRetryForOwnerPure,
   selectConnectionRetryRemovalForDeletedTasks,
   selectProjectRetryItemIdsForOwner,
@@ -24,6 +30,7 @@ import type {
   RetryQueueData,
   RetryQueueItem,
   RetryQueueLastFailure,
+  RetryQueueProjectPendingWriteState,
   TaskDeleteBaseUpdatedAtMap,
   RetryableEntityType,
   RetryableOperation,
@@ -48,6 +55,17 @@ export abstract class RetryQueueItemsLayer extends RetryQueueBase {
    */
   getItems(): RetryQueueItem[] {
     return [...this.queue];
+  }
+
+  getProjectPendingWriteState(
+    projectId: string,
+    ownerUserId: string,
+  ): RetryQueueProjectPendingWriteState {
+    const items = getRetryQueueItemsForSelection(this.queue, this.hiddenQueueItems);
+    if (hasProtectiveRetryQueueWriteForProject(items, projectId, ownerUserId)) {
+      return 'pending';
+    }
+    return this.isOwnerStorageLoadConfirmed(ownerUserId) ? 'clear' : 'unknown';
   }
 
   findItemForOwner(
@@ -77,7 +95,7 @@ export abstract class RetryQueueItemsLayer extends RetryQueueBase {
    *
    * @returns 是否成功移除
    */
-  removeByEntity(type: RetryableEntityType, entityId: string): boolean {
+  removeByEntity(type: RetryableEntityType, entityId: string): boolean { return localBackupUiRestoreWriterQuiescence.runSync(this.getCurrentOwnerUserId(), 'retry-queue', () => {
     const currentOwnerUserId = this.getCurrentOwnerUserId();
     const index = this.queue.findIndex(item =>
       item.type === type
@@ -95,28 +113,47 @@ export abstract class RetryQueueItemsLayer extends RetryQueueBase {
       sourceUserId: currentOwnerUserId,
     });
     return true;
-  }
+  }); }
+
+  removeByEntityForOwner(type: RetryableEntityType, entityId: string, ownerUserId: string): boolean { return localBackupUiRestoreWriterQuiescence.runSync(ownerUserId, 'retry-queue', () => {
+    const itemIds = new Set(
+      getRetryQueueItemsForSelection(this.queue, this.hiddenQueueItems)
+        .filter(item => item.type === type
+          && item.data.id === entityId
+          && this.resolveItemOwnerUserId(item) === ownerUserId)
+        .map(item => item.id),
+    );
+    if (itemIds.size === 0) return false;
+
+    this.removeItemsFromAllViews(itemIds);
+    this.saveToStorage();
+    this.logger.debug('按捕获 owner 移除 RetryQueue 中的旧条目', { type, entityId, sourceUserId: ownerUserId });
+    return true;
+  }); }
 
   /**
    * 清空队列
    */
   clear(): void {
-    this.queue = [];
-    this.hiddenQueueItems = [];
-    this.touchQueueState();
-    this.clearPressureMode();
-    this.saveToStorage();
-    this.logger.info('重试队列已清空');
+    return localBackupUiRestoreWriterQuiescence.runSync(this.getCurrentOwnerUserId(), 'retry-queue', () => {
+      this.queue = [];
+      this.hiddenQueueItems = [];
+      this.touchQueueState();
+      this.clearPressureMode();
+      this.saveToStorage();
+      this.logger.info('重试队列已清空');
+    });
   }
 
   /**
    * 仅清空当前 owner 的内存视图，不覆盖持久化中的其它账号条目。
    * 用于切账号时立即断开旧账号的可见重试项，再按新 owner 重新加载。
    */
-  clearCurrentView(): void {
+  clearCurrentView(): void { return localBackupUiRestoreWriterQuiescence.runSync(this.getCurrentOwnerUserId(), 'retry-queue', () => {
     this.hiddenQueueItems = this.getPersistedItems();
     this.queue = [];
     this.touchQueueState();
+    this.markCurrentOwnerStorageLoadUnknown();
     this.queueViewGeneration += 1;
     this.isProcessingQueue = false;
     this.lastProcessTime = 0;
@@ -130,9 +167,9 @@ export abstract class RetryQueueItemsLayer extends RetryQueueBase {
         this.logger.warn('clearCurrentView: 同步处理状态失败', error);
       }
     }
-  }
+  }); }
 
-  reloadFromStorageForCurrentOwner(): void {
+  async reloadFromStorageForCurrentOwner(): Promise<void> { return localBackupUiRestoreWriterQuiescence.runAsync(this.getCurrentOwnerUserId(), 'retry-queue', async () => {
     if (this.lifecycleClosed) {
       this.logger.debug('RetryQueue 已销毁，跳过重新加载持久化队列');
       return;
@@ -141,13 +178,11 @@ export abstract class RetryQueueItemsLayer extends RetryQueueBase {
     this.clearCurrentView();
     this.refreshLegacyReviewCount();
     try {
-      void this.loadFromStorage().catch(error => {
-        this.safeItemsWarn('RetryQueue owner 队列重新加载失败，已保留清空后的当前视图', error);
-      });
+      await this.loadFromStorage();
     } catch (error) {
       this.safeItemsWarn('RetryQueue owner 队列重新加载失败，已保留清空后的当前视图', error);
     }
-  }
+  }); }
 
   /**
    * 添加项到队列
@@ -167,9 +202,8 @@ export abstract class RetryQueueItemsLayer extends RetryQueueBase {
     taskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap,
     operationId?: string,
     lastFailure?: RetryQueueLastFailure,
-  ): boolean {
-    return this.addInternal(type, operation, data, projectId, sourceUserId, taskIdsToDelete, writeIntent, taskDeleteBaseUpdatedAtMap, operationId, lastFailure, 'debounced');
-  }
+  ): boolean { return localBackupUiRestoreWriterQuiescence.runSync(sourceUserId ?? this.getCurrentOwnerUserId(), 'retry-queue', () =>
+    this.addInternal(type, operation, data, projectId, sourceUserId, taskIdsToDelete, writeIntent, taskDeleteBaseUpdatedAtMap, operationId, lastFailure, 'debounced')); }
 
   async addDurably(
     type: RetryableEntityType,
@@ -182,7 +216,7 @@ export abstract class RetryQueueItemsLayer extends RetryQueueBase {
     taskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap,
     operationId?: string,
     lastFailure?: RetryQueueLastFailure,
-  ): Promise<boolean> {
+  ): Promise<boolean> { return localBackupUiRestoreWriterQuiescence.runAsync(sourceUserId ?? this.getCurrentOwnerUserId(), 'retry-queue', async () => {
     const previousVisibleQueue = [...this.queue];
     const previousHiddenQueue = [...this.hiddenQueueItems];
     const accepted = this.addInternal(type, operation, data, projectId, sourceUserId, taskIdsToDelete, writeIntent, taskDeleteBaseUpdatedAtMap, operationId, lastFailure, 'manual');
@@ -207,7 +241,7 @@ export abstract class RetryQueueItemsLayer extends RetryQueueBase {
       sourceUserId,
     });
     return false;
-  }
+  }); }
 
   protected addInternal(
     type: RetryableEntityType, operation: RetryableOperation, data: RetryQueueData,
@@ -461,53 +495,42 @@ export abstract class RetryQueueItemsLayer extends RetryQueueBase {
     operationId: string | undefined, lastFailure: RetryQueueLastFailure | undefined,
   ): RefreshedRetryQueueItemDraft {
     const safeData = this.preserveBlackBoxContentWhenBlankSnapshot(type, data, existing.data);
-    const sourceUserId = existing.sourceUserId ?? targetOwnerUserId;
-    const nextTaskIdsToDelete = taskIdsToDelete ?? existing.taskIdsToDelete;
-    const nextTaskDeleteBaseUpdatedAtMap = taskDeleteBaseUpdatedAtMap ?? existing.taskDeleteBaseUpdatedAtMap;
-    const nextLastFailure = this.resolveRefreshedLastFailure(existing, lastFailure);
+    const { operationId: nextOperationIdInput, ...nextFields } = buildRefreshedRetryQueueOperationContext({
+      existing,
+      operation,
+      data: safeData,
+      projectId,
+      targetOwnerUserId,
+      taskIdsToDelete,
+      taskDeleteBaseUpdatedAtMap,
+      writeIntent,
+      explicitOperationId: operationId,
+    });
     const nextOperationId = this.resolveOperationId({
       type,
       operation,
       data: safeData,
-      projectId,
-      sourceUserId: targetOwnerUserId,
-      taskIdsToDelete,
-      taskDeleteBaseUpdatedAtMap,
-      writeIntent,
-      operationId: operationId ?? existing.operationId,
+      projectId: nextFields.projectId,
+      sourceUserId: nextFields.sourceUserId,
+      taskIdsToDelete: nextFields.taskIdsToDelete,
+      taskDeleteBaseUpdatedAtMap: nextFields.taskDeleteBaseUpdatedAtMap,
+      writeIntent: nextFields.writeIntent,
+      operationId: nextOperationIdInput,
       lastFailure,
       persistMode: 'debounced',
     });
     return {
-      item: {
-        ...existing,
+      ...buildRefreshedRetryQueueDraft({
         operation,
         data: safeData,
-        projectId: projectId ?? existing.projectId,
+        existing,
+        nextFields,
+        nextOperationId,
+        lastFailure,
         createdAt: Date.now(),
-        sourceUserId,
-        operationId: nextOperationId,
-        taskIdsToDelete: nextTaskIdsToDelete,
-        taskDeleteBaseUpdatedAtMap: nextTaskDeleteBaseUpdatedAtMap,
-        writeIntent: writeIntent ?? existing.writeIntent,
-        lastFailure: nextLastFailure,
-      },
+      }),
       safeData,
-      sourceUserId,
-      taskIdsToDelete: nextTaskIdsToDelete,
-      taskDeleteBaseUpdatedAtMap: nextTaskDeleteBaseUpdatedAtMap,
-      operationId: nextOperationId,
     };
-  }
-
-  private resolveRefreshedLastFailure(
-    existing: RetryQueueItem,
-    lastFailure: RetryQueueLastFailure | undefined,
-  ): RetryQueueLastFailure | undefined {
-    if (lastFailure !== undefined) {
-      return lastFailure;
-    }
-    return existing.lastFailure?.remoteOutcome === 'unknown' ? existing.lastFailure : undefined;
   }
 
   private isStaleRetryQueueRefresh(
@@ -622,7 +645,7 @@ export abstract class RetryQueueItemsLayer extends RetryQueueBase {
   /**
    * 移除所有匹配的项
    */
-  removeByEntityId(entityId: string): void {
+  removeByEntityId(entityId: string): void { return localBackupUiRestoreWriterQuiescence.runSync(this.getCurrentOwnerUserId(), 'retry-queue', () => {
     const itemIds = selectRetryItemIdsByEntityId(
       getRetryQueueItemsForSelection(this.queue, this.hiddenQueueItems),
       entityId,
@@ -632,10 +655,10 @@ export abstract class RetryQueueItemsLayer extends RetryQueueBase {
       this.removeItemsFromAllViews(itemIds);
       this.saveToStorage();
     }
-  }
+  }); }
 
   /** 移除指定项目相关的所有待重试项，用于冲突解决后的旧 mutation 收口 */
-  removeByProjectId(projectId: string): number {
+  removeByProjectId(projectId: string): number { return localBackupUiRestoreWriterQuiescence.runSync(this.getCurrentOwnerUserId(), 'retry-queue', () => {
     const itemIds = selectRetryItemIdsByProjectId(
       getRetryQueueItemsForSelection(this.queue, this.hiddenQueueItems),
       projectId,
@@ -647,9 +670,9 @@ export abstract class RetryQueueItemsLayer extends RetryQueueBase {
       this.saveToStorage();
     }
     return removedCount;
-  }
+  }); }
 
-  removeByProjectIdForOwner(projectId: string, sourceUserId?: string): number {
+  removeByProjectIdForOwner(projectId: string, sourceUserId?: string): number { return localBackupUiRestoreWriterQuiescence.runSync(sourceUserId ?? this.getCurrentOwnerUserId(), 'retry-queue', () => {
     const itemIds = selectRetryItemIdsByProjectIdForOwner(
       getRetryQueueItemsForSelection(this.queue, this.hiddenQueueItems),
       projectId,
@@ -662,9 +685,9 @@ export abstract class RetryQueueItemsLayer extends RetryQueueBase {
       this.saveToStorage();
     }
     return removedCount;
-  }
+  }); }
 
-  removeByEntities(type: RetryableEntityType, entityIds: string[]): string[] {
+  removeByEntities(type: RetryableEntityType, entityIds: string[]): string[] { return localBackupUiRestoreWriterQuiescence.runSync(this.getCurrentOwnerUserId(), 'retry-queue', () => {
     const selection = selectRetryEntityRemoval(
       getRetryQueueItemsForSelection(this.queue, this.hiddenQueueItems),
       type,
@@ -677,9 +700,9 @@ export abstract class RetryQueueItemsLayer extends RetryQueueBase {
     }
 
     return selection.removedEntityIds;
-  }
+  }); }
 
-  removeProjectRetriesForOwner(projectId: string, sourceUserId?: string): number {
+  removeProjectRetriesForOwner(projectId: string, sourceUserId?: string): number { return localBackupUiRestoreWriterQuiescence.runSync(sourceUserId ?? this.getCurrentOwnerUserId(), 'retry-queue', () => {
     const itemIds = selectProjectRetryItemIdsForOwner(
       getRetryQueueItemsForSelection(this.queue, this.hiddenQueueItems),
       projectId,
@@ -693,7 +716,7 @@ export abstract class RetryQueueItemsLayer extends RetryQueueBase {
     }
 
     return removedCount;
-  }
+  }); }
 
   hasProjectRetryForOwner(projectId: string, sourceUserId?: string): boolean {
     return hasProjectRetryForOwnerPure(
@@ -711,7 +734,7 @@ export abstract class RetryQueueItemsLayer extends RetryQueueBase {
     );
   }
 
-  removeConnectionsReferencingTasks(projectId: string, taskIds: string[]): string[] {
+  removeConnectionsReferencingTasks(projectId: string, taskIds: string[]): string[] { return localBackupUiRestoreWriterQuiescence.runSync(this.getCurrentOwnerUserId(), 'retry-queue', () => {
     const selection = selectConnectionRetryRemovalForDeletedTasks(
       getRetryQueueItemsForSelection(this.queue, this.hiddenQueueItems),
       projectId,
@@ -724,12 +747,12 @@ export abstract class RetryQueueItemsLayer extends RetryQueueBase {
     }
 
     return selection.removedConnectionIds;
-  }
+  }); }
 
   /**
    * 清理过期和超过重试限制的项
    */
-  cleanExpired(): number {
+  cleanExpired(): number { return localBackupUiRestoreWriterQuiescence.runSync(this.getCurrentOwnerUserId(), 'retry-queue', () => {
     const now = Date.now();
     const originalLength = this.queue.length;
     const originalHiddenLength = this.hiddenQueueItems.length;
@@ -771,5 +794,5 @@ export abstract class RetryQueueItemsLayer extends RetryQueueBase {
     }
 
     return cleaned;
-  }
+  }); }
 }

@@ -3,58 +3,38 @@ import { SupabaseClientService } from "../../../services/supabase-client.service
 import { AuthService } from "../../../services/auth.service";
 import { ToastService } from "../../../services/toast.service";
 import { LoggerService } from "../../../services/logger.service";
-import {
-  ExternalSourceLinkRemoteWriterService,
-  type ExternalSourceSupabaseClient,
-} from "../../../services/external-source-link-remote-writer.service";
+import { ExternalSourceLinkRemoteWriterService, type ExternalSourceSupabaseClient } from "../../../services/external-source-link-remote-writer.service";
 import { AUTH_CONFIG } from "../../../config/auth.config";
 import { SIYUAN_CONFIG } from "../../../config/siyuan.config";
 import { ExternalSourceCacheService } from "./external-source-cache.service";
 import { ExternalSourceLinkStore } from "./external-source-link.store";
-import {
-  getRemainingBrowserNetworkResumeDelayMs,
-  isBrowserNetworkSuspendedError,
-  isBrowserNetworkSuspendedWindow,
-} from "../../../utils/browser-network-suspension";
+import { getRemainingBrowserNetworkResumeDelayMs, isBrowserNetworkSuspendedError, isBrowserNetworkSuspendedWindow } from "../../../utils/browser-network-suspension";
 import { createSyncOperationId } from "../../../utils/sync-operation-id";
-import type {
-  ExternalSourceLink,
-  ExternalSourceRole,
-} from "./external-source.model";
+import type { ExternalSourceLink, ExternalSourceRole, PendingExternalSourceLink } from "./external-source.model";
+import { parseSiyuanBlockLink, shortenSiyuanBlockId } from "./siyuan/siyuan-link-parser";
+import { fetchAllSupabaseKeysetPagesByCursor, type SupabasePageResult } from "../../../utils/supabase-pagination";
 import {
-  parseSiyuanBlockLink,
-  shortenSiyuanBlockId,
-} from "./siyuan/siyuan-link-parser";
-import { fetchAllSupabasePages } from "../../../utils/supabase-pagination";
-import {
-  buildExternalSourceUniqueConflictTombstone,
-  classifyExternalSourcePushError,
-  type ExternalSourceLinkRow,
-  mergeExternalSourceLinks,
-  normalizeExternalSourceLink,
-  rowToExternalSourceLink,
-  safeExternalSourceId,
+  buildExternalSourceUniqueConflictTombstone, classifyExternalSourcePushError, type ExternalSourceLinkRow,
+  mergeExternalSourceLinks, normalizeExternalSourceLink, rowToExternalSourceLink, safeExternalSourceId,
 } from "./external-source-link.helpers";
+import { clearExternalSourceLinkResumeSyncTimer, scheduleExternalSourceLinkResumeSyncTimer } from "./external-source-link-resume-sync.helpers";
+import { localBackupUiRestoreWriterQuiescence } from "../../../services/local-backup-ui-restore-writer-quiescence.service";
 
 /** Postgres 唯一约束冲突 errorCode；命名常量便于检索 23505 的所有处理位置。 */
 const POSTGRES_UNIQUE_VIOLATION = "23505";
 const NETWORK_RESUME_RETRY_BUFFER_MS = 50;
-
-type RemotePullResult = {
-  links: ExternalSourceLink[];
-  deferredBySuspension: boolean;
-  failed?: boolean;
-};
+type RemotePullResult = { links: ExternalSourceLink[]; deferredBySuspension: boolean; failed?: boolean };
+const FAILED_REMOTE_PULL: RemotePullResult = { links: [], deferredBySuspension: false, failed: true };
 
 type PushLinkResult =
-  | { outcome: "success" }
-  | { outcome: "drop"; reason: "local-mode" | "no-client" | "duplicate" }
-  | { outcome: "retry"; errorCode: string; deferredBySuspension?: boolean; retryLink?: ExternalSourceLink };
+  | { outcome: "success"; pendingEntry?: PendingExternalSourceLink }
+  | { outcome: "drop"; reason: "local-mode" | "no-client" | "duplicate"; pendingEntry?: PendingExternalSourceLink }
+  | { outcome: "stale-owner" }
+  | { outcome: "retry"; errorCode: string; deferredBySuspension?: boolean; pendingEntry?: PendingExternalSourceLink };
+type AuthIdentityFence = { ownerId: string; authFence: string };
+type ImportLinkSnapshot = { previousLink: ExternalSourceLink | undefined; previousPending: PendingExternalSourceLink | undefined; fingerprints: Set<string>; operationIds: Set<string> };
 
-type UniqueConflictResolution =
-  | { resolved: true }
-  | { resolved: false; retryLink: ExternalSourceLink };
-
+const externalSourceLinkFingerprint = (link: ExternalSourceLink | undefined): string => JSON.stringify(link && [link.id, link.taskId, link.sourceType, link.targetId, link.uri, link.label, link.hpath, link.role, link.sortOrder, link.deletedAt, link.createdAt, link.updatedAt]);
 @Injectable({ providedIn: "root" })
 export class ExternalSourceLinkService {
   private readonly store = inject(ExternalSourceLinkStore);
@@ -63,31 +43,22 @@ export class ExternalSourceLinkService {
   private readonly auth = inject(AuthService);
   private readonly toast = inject(ToastService);
   private readonly remoteWriter = inject(ExternalSourceLinkRemoteWriterService);
-  private readonly logger =
-    inject(LoggerService).category("ExternalSourceLink");
-
+  private readonly logger = inject(LoggerService).category("ExternalSourceLink");
   readonly links = this.store.links;
-  readonly activeLinks = computed(() =>
-    this.links().filter((link) => !link.deletedAt),
-  );
+  readonly activeLinks = computed(() => this.links().filter((link) => !link.deletedAt));
   private initialized = false;
   private loadedOwnerId: string | null = null;
-  private flushPromise: Promise<void> | null = null;
-  /** 缓存正在进行的 ensureLoaded，防止并发 caller 各自跑一次 pull/merge。 */
+  private flushFlight: { token: AuthIdentityFence; promise: Promise<void> } | null = null;
+  private importPromise: Promise<void> | null = null;
   private loadPromise: Promise<void> | null = null;
-  /** 上一次成功 pullRemoteLinks 的时间戳（ms）；用于 refreshIfStale 的陈旧判定。 */
   private lastPullAt = 0;
-  /** 缓存正在进行的 refreshIfStale，避免 visibility/online 事件并发各自 pull 一次。 */
   private refreshPromise: Promise<void> | null = null;
-  /** 浏览器事件监听器解绑句柄，确保 service 销毁时不泄漏。 */
   private opportunisticListenersBound = false;
   private resumeSyncTimer: number | null = null;
   private resumeSyncForceRefresh = false;
   private resumeSyncGeneration = 0;
   private destroyed = false;
-
   constructor() {
-    // 单例 service 在 root 注入器销毁时（HMR/SSR teardown）解绑事件监听器，避免内存泄漏。
     inject(DestroyRef).onDestroy(() => {
       this.destroyed = true;
       this.resumeSyncGeneration += 1;
@@ -95,8 +66,7 @@ export class ExternalSourceLinkService {
       this.unbindOpportunisticListeners();
     });
   }
-
-  async ensureLoaded(): Promise<void> {
+  async ensureLoaded(): Promise<void> { return localBackupUiRestoreWriterQuiescence.runContinuationAsync(this.currentUserId(), 'external-source', async () => {
     if (this.destroyed) return;
     const ownerId = this.currentUserId();
     if (this.initialized && this.loadedOwnerId === ownerId) return;
@@ -108,39 +78,33 @@ export class ExternalSourceLinkService {
     });
     this.loadPromise = loadPromise;
     return this.loadPromise;
-  }
-
+  }); }
   private async runEnsureLoaded(ownerId: string): Promise<void> {
     this.initialized = true;
     this.loadedOwnerId = ownerId;
-
     const localLinks = await this.cache.loadLinks(ownerId);
     if (!this.isCurrentOwner(ownerId)) return;
-
     this.store.replaceAll(mergeExternalSourceLinks(localLinks, []));
     const remotePull = await this.pullRemoteLinks(ownerId);
     if (!this.isCurrentOwner(ownerId)) return;
-
     const merged = mergeExternalSourceLinks(localLinks, remotePull.links);
     this.store.replaceAll(merged);
     await this.cache.saveLinks(merged, ownerId);
     if (!this.isCurrentOwner(ownerId)) return;
-
     if (!remotePull.deferredBySuspension && !remotePull.failed) {
       this.lastPullAt = Date.now();
       await this.pushLocalNewerLinks(merged, remotePull.links);
       if (!this.isCurrentOwner(ownerId)) return;
-      void this.flushPendingLinks();
+      this.runInBackground(this.flushPendingLinks(), "flush after initial load");
     }
     this.bindOpportunisticListeners();
   }
-
   /**
    * 机会式远端刷新：visibility/online 事件 + 显式 force 触发。
    * 当 lastPullAt 早于 REMOTE_REFRESH_STALE_MS 时重新 pull-merge；否则跳过以节省请求。
    * 与 ensureLoaded 共享 owner 切换语义；并发调用复用同一 in-flight promise。
    */
-  async refreshIfStale(force = false): Promise<void> {
+  async refreshIfStale(force = false): Promise<void> { return localBackupUiRestoreWriterQuiescence.runContinuationAsync(this.currentUserId(), 'external-source', async () => {
     if (this.destroyed) return;
     if (!this.initialized) return;
     const ownerId = this.currentUserId();
@@ -154,27 +118,22 @@ export class ExternalSourceLinkService {
     });
     this.refreshPromise = refreshPromise;
     return this.refreshPromise;
-  }
-
+  }); }
   private async runRefresh(ownerId: string): Promise<void> {
     const localLinks = await this.cache.loadLinks(ownerId);
     if (!this.isCurrentOwner(ownerId)) return;
-
     const remotePull = await this.pullRemoteLinks(ownerId);
     if (!this.isCurrentOwner(ownerId)) return;
     if (remotePull.deferredBySuspension || remotePull.failed) {
       return;
     }
-
     this.lastPullAt = Date.now();
     const merged = mergeExternalSourceLinks(localLinks, remotePull.links);
     this.store.replaceAll(merged);
     await this.cache.saveLinks(merged, ownerId);
     if (!this.isCurrentOwner(ownerId)) return;
-
     await this.pushLocalNewerLinks(merged, remotePull.links);
   }
-
   private bindOpportunisticListeners(): void {
     if (this.opportunisticListenersBound || typeof window === "undefined") return;
     this.opportunisticListenersBound = true;
@@ -182,7 +141,6 @@ export class ExternalSourceLinkService {
     document.addEventListener("visibilitychange", this.onVisibilityChange);
     window.addEventListener("online", this.onOnline);
   }
-
   private unbindOpportunisticListeners(): void {
     if (!this.opportunisticListenersBound || typeof window === "undefined") return;
     this.opportunisticListenersBound = false;
@@ -195,7 +153,6 @@ export class ExternalSourceLinkService {
       () => window.removeEventListener("online", this.onOnline),
     );
   }
-
   private removeOpportunisticListener(label: "visibility" | "online", remove: () => void): void {
     try {
       remove();
@@ -203,14 +160,12 @@ export class ExternalSourceLinkService {
     } catch (error) {
       this.warnOpportunisticListenerCleanupFailure(label, error);
     }
-
     try {
       remove();
     } catch (error) {
       this.warnOpportunisticListenerCleanupFailure(label, error);
     }
   }
-
   private warnOpportunisticListenerCleanupFailure(label: "visibility" | "online", error: unknown): void {
     try {
       this.logger.warn(`思源锚点 ${label} 监听解绑失败，继续清理其他监听`, {
@@ -220,7 +175,6 @@ export class ExternalSourceLinkService {
       // Listener cleanup is best-effort; warning sinks must not block remaining unbinds.
     }
   }
-
   private readonly onVisibilityChange = (): void => {
     if (document.visibilityState === "visible") {
       this.scheduleResumeSync(false);
@@ -233,12 +187,12 @@ export class ExternalSourceLinkService {
   };
 
   activeLinksForTask(taskId: string): ExternalSourceLink[] {
-    void this.ensureLoaded();
+    this.runInBackground(this.ensureLoaded(), "load links for task");
     return this.store.activeLinksForTask(taskId);
   }
 
   firstActiveLinkForTask(taskId: string): ExternalSourceLink | null {
-    void this.ensureLoaded();
+    this.runInBackground(this.ensureLoaded(), "load first link for task");
     return this.store.firstActiveLinkForTask(taskId);
   }
 
@@ -275,7 +229,7 @@ export class ExternalSourceLinkService {
       updatedAt: now,
     };
     await this.persistLocalChangeForSync(link, { resetRetryCount: true });
-    void this.flushPendingLinks();
+    this.runInBackground(this.flushPendingLinks(), "flush after bind");
     this.toast.success("已关联思源块");
     return link;
   }
@@ -305,7 +259,7 @@ export class ExternalSourceLinkService {
       const tombstone = { ...existing, deletedAt: now, updatedAt: now };
       await this.persistLocalChangeForSync(tombstone, { resetRetryCount: true });
       await this.cache.deletePreviewsForLink(tombstone.id);
-      void this.flushPendingLinks();
+      this.runInBackground(this.flushPendingLinks(), "flush after duplicate replacement");
       this.toast.info("已切换到已有思源关联");
       return duplicate;
     }
@@ -322,7 +276,7 @@ export class ExternalSourceLinkService {
     });
     await this.persistLocalChangeForSync(link, { resetRetryCount: true });
     await this.cache.deletePreviewsForLink(link.id);
-    void this.flushPendingLinks();
+    this.runInBackground(this.flushPendingLinks(), "flush after replacement");
     this.toast.success("已更新思源关联");
     return link;
   }
@@ -338,7 +292,7 @@ export class ExternalSourceLinkService {
     };
     await this.persistLocalChangeForSync(link, { resetRetryCount: true });
     await this.cache.deletePreviewsForLink(link.id);
-    void this.flushPendingLinks();
+    this.runInBackground(this.flushPendingLinks(), "flush after removal");
     this.toast.info("已解除思源关联");
   }
 
@@ -358,19 +312,58 @@ export class ExternalSourceLinkService {
       updatedAt: new Date().toISOString(),
     });
     await this.persistLocalChangeForSync(link, { resetRetryCount: true });
-    void this.flushPendingLinks();
+    this.runInBackground(this.flushPendingLinks(), "flush after metadata update");
   }
 
-  async importPointers(links: ExternalSourceLink[]): Promise<void> {
-    if (links.length === 0) return;
-    await this.ensureLoaded();
-    for (const rawLink of links) {
-      const link = normalizeExternalSourceLink(rawLink);
-      await this.persistLocalChangeForSync(link, { resetRetryCount: true });
-    }
-    void this.flushPendingLinks();
-  }
-
+  async importPointers(links: ExternalSourceLink[], commit?: () => void | Promise<void>): Promise<void> { return localBackupUiRestoreWriterQuiescence.runContinuationAsync(this.currentUserId(), 'external-source', async () => {
+    if (links.length === 0) return await commit?.();
+    const ownerId = this.currentUserId(), priorImport = this.importPromise, priorFlush = this.flushFlight?.promise;
+    const transaction = Promise.resolve().then(async () => {
+      if (priorImport) await priorImport; if (priorFlush) await priorFlush;
+      this.assertImportOwner(ownerId); await this.ensureLoaded();
+      if (!this.isCurrentOwner(ownerId)) throw new Error("External source link import owner changed");
+      const linksBefore = new Map((await this.cache.loadLinks(ownerId)).map(link => [link.id, link])); this.assertImportOwner(ownerId);
+      const pendingBefore = new Map((await this.cache.loadPendingLinks()).map(entry => [entry.link.id, entry])); this.assertImportOwner(ownerId);
+      const writes = links.map(normalizeExternalSourceLink), snapshots = new Map<string, ImportLinkSnapshot>();
+      for (const link of writes) {
+        const snapshot = snapshots.get(link.id) ?? { previousLink: linksBefore.get(link.id), previousPending: pendingBefore.get(link.id), fingerprints: new Set<string>(), operationIds: new Set<string>() };
+        snapshot.fingerprints.add(externalSourceLinkFingerprint(link)); snapshots.set(link.id, snapshot);
+      }
+      const stagedLinks = new Map(linksBefore);
+      try {
+        for (const link of writes) {
+          this.assertImportOwner(ownerId);
+          const pending = await this.cache.upsertPendingLink(link, { resetRetryCount: false });
+          snapshots.get(link.id)!.operationIds.add(pending.operationId); this.assertImportOwner(ownerId);
+          stagedLinks.set(link.id, link);
+          await this.cache.saveLinks(mergeExternalSourceLinks(Array.from(stagedLinks.values()), []), ownerId);
+          this.assertImportOwner(ownerId);
+        }
+        await commit?.(); if (!this.isCurrentOwner(ownerId)) throw new Error("External source link import owner changed");
+        this.store.replaceAll(mergeExternalSourceLinks(Array.from(stagedLinks.values()), []));
+      } catch (error) {
+        const currentLinks = new Map((await this.cache.loadLinks(ownerId)).map(link => [link.id, link]));
+        for (const [linkId, snapshot] of snapshots) {
+          const current = currentLinks.get(linkId);
+          if (!current || !snapshot.fingerprints.has(externalSourceLinkFingerprint(current))) continue;
+          if (snapshot.previousLink) currentLinks.set(linkId, snapshot.previousLink); else currentLinks.delete(linkId);
+        }
+        const restoredLinks = mergeExternalSourceLinks(Array.from(currentLinks.values()), []); await this.cache.saveLinks(restoredLinks, ownerId);
+        if (this.isCurrentOwner(ownerId)) {
+          this.store.replaceAll(restoredLinks);
+          for (const [linkId, snapshot] of snapshots) {
+            const current = (await this.cache.loadPendingLinks()).find(entry => entry.link.id === linkId);
+            if (!current || !snapshot.operationIds.has(current.operationId) || !snapshot.fingerprints.has(externalSourceLinkFingerprint(current.link))) continue;
+            await this.cache.restorePendingLinkSnapshot(linkId, current.operationId, snapshot.previousPending);
+          }
+        }
+        throw error;
+      }
+    });
+    this.importPromise = transaction;
+    try { await transaction; } finally { if (this.importPromise === transaction) this.importPromise = null; }
+    this.runInBackground(this.flushPendingLinks(), "flush after import");
+  }); }
   openLink(link: ExternalSourceLink): void {
     if (typeof window === "undefined") return;
     const parsed = parseSiyuanBlockLink(link.uri || link.targetId);
@@ -383,76 +376,112 @@ export class ExternalSourceLinkService {
     const opened = window.open(parsed.uri, "_blank", "noopener,noreferrer");
     if (!opened) this.toast.info("浏览器已拦截弹窗，请在原块上右键打开");
   }
-
   async flushPendingLinks(): Promise<void> {
-    if (this.destroyed) return;
-    if (this.flushPromise) return this.flushPromise;
-    this.flushPromise = this.flushPendingLinksInternal().finally(() => {
-      this.flushPromise = null;
+    return localBackupUiRestoreWriterQuiescence.runContinuationAsync(this.currentUserId(), "external-source", async () => {
+      const importPromise = this.importPromise;
+      if (importPromise) await importPromise.catch(() => undefined);
+      if (this.destroyed) return;
+      const token = this.captureAuthIdentityFence();
+      const active = this.flushFlight;
+      if (active) {
+        if (this.sameAuthIdentityFence(active.token, token)) return active.promise;
+        await active.promise.catch(() => undefined);
+        if (!this.isAuthIdentityFenceCurrent(token)) return;
+        const competing = this.flushFlight;
+        if (competing) return this.sameAuthIdentityFence(competing.token, token)
+          ? competing.promise : undefined;
+      }
+      const promise = this.flushPendingLinksInternal(token);
+      this.flushFlight = { token, promise };
+      try { await promise; } finally {
+        if (this.flushFlight?.promise === promise) this.flushFlight = null;
+      }
     });
-    return this.flushPromise;
   }
-
-  private async flushPendingLinksInternal(): Promise<void> {
+  private async flushPendingLinksInternal(token: AuthIdentityFence): Promise<void> {
+    if (!this.isAuthIdentityFenceCurrent(token)) return;
     if (this.deferRemoteWorkForSuspension("浏览器网络挂起，延后刷新思源锚点 pending 队列")) {
       return;
     }
-
-    const pending = await this.cache.loadPendingLinks();
+    const pending = await this.cache.loadPendingLinks(token.ownerId);
+    if (!this.isAuthIdentityFenceCurrent(token)) return;
     for (const entry of pending) {
-      const result = await this.pushLink(entry.link, entry.operationId);
+      if (!this.isAuthIdentityFenceCurrent(token)) return;
+      const result = await this.pushLink(entry.link, entry.operationId, token);
+      if (!this.isAuthIdentityFenceCurrent(token) || result.outcome === "stale-owner") return;
+      const retryEntry = result.pendingEntry ?? entry;
       if (result.outcome === "success" || result.outcome === "drop") {
-        await this.cache.removePendingLink(entry.link.id);
-      } else if (result.deferredBySuspension) {
-        return;
-      } else {
-        const retryLink = result.retryLink ?? entry.link;
-        if (result.retryLink) {
-          await this.cache.upsertPendingLink(retryLink, { resetRetryCount: false });
-        }
-        await this.cache.recordPendingFailure(retryLink.id, result.errorCode);
+        await this.cache.removePendingLink(retryEntry.link.id, retryEntry.operationId);
+        if (!this.isAuthIdentityFenceCurrent(token)) return;
+        continue;
       }
+      if (result.deferredBySuspension) return;
+      await this.cache.recordPendingFailure(retryEntry.link.id, retryEntry.operationId, result.errorCode);
+      if (!this.isAuthIdentityFenceCurrent(token)) return;
     }
   }
-
   private async persistLocal(link: ExternalSourceLink): Promise<void> {
     const links = this.mergeLocalLink(link);
     await this.cache.saveLinks(links);
     this.store.replaceAll(links);
   }
-
-  private async persistLocalChangeForSync(
-    link: ExternalSourceLink,
-    options: { resetRetryCount?: boolean } = {},
-  ): Promise<void> {
-    await this.cache.upsertPendingLink(link, options);
+  private async persistLocalChangeForSync(link: ExternalSourceLink, options: { resetRetryCount?: boolean } = {}, onPending?: (pending: PendingExternalSourceLink) => void): Promise<PendingExternalSourceLink> { return localBackupUiRestoreWriterQuiescence.runContinuationAsync(this.currentUserId(), 'external-source', async () => {
+    const pending = await this.cache.upsertPendingLink(link, options);
+    onPending?.(pending);
     try {
       await this.persistLocal(link);
     } catch (error) {
-      await this.removePendingLinkAfterLocalPersistFailure(link.id, error);
+      await this.removePendingLinkAfterLocalPersistFailure(pending, error);
       throw error;
     }
-  }
+    return pending;
+  }); }
 
-  private async removePendingLinkAfterLocalPersistFailure(linkId: string, error: unknown): Promise<void> {
+  private async removePendingLinkAfterLocalPersistFailure(pending: PendingExternalSourceLink, error: unknown): Promise<void> {
     try {
-      await this.cache.removePendingLink(linkId);
+      await this.cache.removePendingLink(pending.link.id, pending.operationId);
     } catch (cleanupError) {
       this.logger.warn("思源锚点本地持久化失败后清理 pending 队列失败", {
-        linkId: safeExternalSourceId(linkId),
+        linkId: safeExternalSourceId(pending.link.id),
         message: error instanceof Error ? error.message : "unknown",
         cleanupMessage: cleanupError instanceof Error ? cleanupError.message : "unknown",
       });
     }
   }
-
   private mergeLocalLink(link: ExternalSourceLink): ExternalSourceLink[] {
     const next = new Map(this.links().map((item) => [item.id, item]));
     next.set(link.id, link);
     return mergeExternalSourceLinks(Array.from(next.values()), []);
   }
 
-  private async pullRemoteLinks(ownerId = this.currentUserId()): Promise<RemotePullResult> {
+  private async fetchExternalSourceLinkPages(
+    client: ExternalSourceSupabaseClient,
+    userId: string,
+  ): Promise<SupabasePageResult<ExternalSourceLinkRow>> {
+    return await fetchAllSupabaseKeysetPagesByCursor<
+      ExternalSourceLinkRow,
+      string
+    >((cursor) => {
+      let query = client
+        .from("external_source_links")
+        .select(
+          "id,user_id,task_id,source_type,target_id,uri,label,hpath,role,sort_order,deleted_at,created_at,updated_at",
+        )
+        .eq("user_id", userId);
+      if (cursor) {
+        query = query.gt("id", cursor);
+      }
+      return query.order("id", { ascending: true });
+    }, {
+      readCursor: (row) => typeof row.id === "string" && row.id.length > 0
+        ? row.id
+        : null,
+      cursorKey: (cursor) => cursor,
+      isCursorAfter: (previous, next) => next > previous,
+    });
+  }
+
+  private async pullRemoteLinks(ownerId = this.currentUserId(), token?: AuthIdentityFence): Promise<RemotePullResult> {
     const userId = ownerId;
     if (userId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
       return { links: [], deferredBySuspension: false, failed: false };
@@ -461,35 +490,25 @@ export class ExternalSourceLinkService {
     if (this.deferRemoteWorkForSuspension("浏览器网络挂起，延后拉取思源锚点", { userId })) {
       return { links: [], deferredBySuspension: true, failed: false };
     }
-
     const client = await this.getClient();
-    if (!client) {
-      return { links: [], deferredBySuspension: false, failed: true };
-    }
+    if (token && !this.isAuthIdentityFenceCurrent(token)) return FAILED_REMOTE_PULL;
+    if (!client) return FAILED_REMOTE_PULL;
 
     try {
-      const { data, error } = await fetchAllSupabasePages<ExternalSourceLinkRow>(() =>
-        client
-          .from("external_source_links")
-          .select(
-            "id,user_id,task_id,source_type,target_id,uri,label,hpath,role,sort_order,deleted_at,created_at,updated_at",
-          )
-          .eq("user_id", userId)
-          .order("updated_at", { ascending: true })
-          .order("id", { ascending: true }),
-      );
+      const { data, error } = await this.fetchExternalSourceLinkPages(client, userId);
+      if (token && !this.isAuthIdentityFenceCurrent(token)) return FAILED_REMOTE_PULL;
       if (error) throw error;
       return {
-        links: (data ?? []).map((row) => rowToExternalSourceLink(row)),
+        links: (data ?? []).map((row: ExternalSourceLinkRow) => rowToExternalSourceLink(row)),
         deferredBySuspension: false,
         failed: false,
       };
     } catch (error) {
+      if (token && !this.isAuthIdentityFenceCurrent(token)) return FAILED_REMOTE_PULL;
       if (isBrowserNetworkSuspendedError(error) || isBrowserNetworkSuspendedWindow()) {
         this.logSuspensionDeferral("浏览器网络挂起，延后拉取思源锚点", { userId });
         return { links: [], deferredBySuspension: true, failed: false };
       }
-
       this.logger.warn("拉取思源锚点失败，保留本地状态", {
         message: error instanceof Error ? error.message : "unknown",
       });
@@ -501,54 +520,27 @@ export class ExternalSourceLinkService {
     localLinks: ExternalSourceLink[],
     remoteLinks: ExternalSourceLink[],
   ): Promise<void> {
+    const token = this.captureAuthIdentityFence();
     const remoteById = new Map(remoteLinks.map((link) => [link.id, link]));
     const localsToPush = localLinks.filter((local) => {
       const remote = remoteById.get(local.id);
       return !remote || local.updatedAt > remote.updatedAt;
     });
-
-    if (localsToPush.length === 0) {
-      return;
+    for (const local of localsToPush) {
+      if (!this.isAuthIdentityFenceCurrent(token)) return;
+      await this.cache.upsertPendingLink(local, { resetRetryCount: false });
+      if (!this.isAuthIdentityFenceCurrent(token)) return;
     }
-
-    if (this.deferRemoteWorkForSuspension("浏览器网络挂起，延后推送本地较新的思源锚点", {
-      linkCount: localsToPush.length,
-    })) {
-      for (const local of localsToPush) {
-        await this.cache.upsertPendingLink(local, { resetRetryCount: false });
-      }
-      return;
-    }
-
-    for (let index = 0; index < localsToPush.length; index += 1) {
-      const local = localsToPush[index];
-      const pendingEntry = await this.cache.upsertPendingLink(local, { resetRetryCount: false });
-      const result = await this.pushLink(pendingEntry.link, pendingEntry.operationId);
-      if (result.outcome === "success" || result.outcome === "drop") {
-        await this.cache.removePendingLink(local.id);
-        continue;
-      }
-
-      const retryLink = result.retryLink ?? local;
-      if (result.retryLink) {
-        await this.cache.upsertPendingLink(retryLink, { resetRetryCount: false });
-      }
-      if (result.deferredBySuspension) {
-        for (const deferred of localsToPush.slice(index + 1)) {
-          await this.cache.upsertPendingLink(deferred, { resetRetryCount: false });
-        }
-        return;
-      }
-
-      await this.cache.recordPendingFailure(retryLink.id, result.errorCode);
-    }
+    if (localsToPush.length > 0) await this.flushPendingLinksInternal(token);
   }
 
   private async pushLink(
     link: ExternalSourceLink,
     operationId: string,
+    token: AuthIdentityFence,
   ): Promise<PushLinkResult> {
-    const userId = this.currentUserId();
+    const userId = token.ownerId;
+    if (!this.isAuthIdentityFenceCurrent(token)) return { outcome: "stale-owner" };
     if (this.deferRemoteWorkForSuspension("浏览器网络挂起，延后推送思源锚点", {
       linkId: safeExternalSourceId(link.id),
     })) {
@@ -558,20 +550,23 @@ export class ExternalSourceLinkService {
     if (userId === AUTH_CONFIG.LOCAL_MODE_USER_ID)
       return { outcome: "drop", reason: "local-mode" };
     const client = await this.getClient();
+    if (!this.isAuthIdentityFenceCurrent(token)) return { outcome: "stale-owner" };
     if (!client) return { outcome: "retry", errorCode: "no-client" };
     try {
       const { error } = await this.remoteWriter.upsertLink(client, link, userId, operationId);
+      if (!this.isAuthIdentityFenceCurrent(token)) return { outcome: "stale-owner" };
       if (error) {
         const errorCode = (error as { code?: string }).code ?? "unknown";
         // 23505 = Postgres unique_violation：另一端已绑定同一 (task, target)。
         // 不再重试，丢弃 pending 项让下一次 ensureLoaded 重新拉远端真相。
         if (errorCode === POSTGRES_UNIQUE_VIOLATION) {
-          return this.handleUniqueConflict(link, operationId, userId, client);
+          return this.handleUniqueConflict(link, operationId, client, token);
         }
         throw error;
       }
       return { outcome: "success" };
     } catch (error) {
+      if (!this.isAuthIdentityFenceCurrent(token)) return { outcome: "stale-owner" };
       if (isBrowserNetworkSuspendedError(error) || isBrowserNetworkSuspendedWindow()) {
         this.logSuspensionDeferral("浏览器网络挂起，延后推送思源锚点", {
           linkId: safeExternalSourceId(link.id),
@@ -592,89 +587,97 @@ export class ExternalSourceLinkService {
   private async handleUniqueConflict(
     link: ExternalSourceLink,
     operationId: string,
-    userId: string,
     client: ExternalSourceSupabaseClient,
+    token: AuthIdentityFence,
   ): Promise<PushLinkResult> {
+    if (!this.isAuthIdentityFenceCurrent(token)) return { outcome: "stale-owner" };
     this.logger.info("思源锚点唯一冲突，尝试切换到远端已有关联", {
       linkId: safeExternalSourceId(link.id),
     });
-    const resolution = await this.resolveUniqueConflict(link, operationId, userId, client);
-    if (resolution.resolved) {
-      return { outcome: "success" };
-    }
-    return {
-      outcome: "retry",
-      errorCode: POSTGRES_UNIQUE_VIOLATION,
-      retryLink: resolution.retryLink,
-    };
-  }
-
-  private async resolveUniqueConflict(
-    link: ExternalSourceLink,
-    operationId: string,
-    userId: string,
-    client: ExternalSourceSupabaseClient,
-  ): Promise<UniqueConflictResolution> {
     const tombstone = buildExternalSourceUniqueConflictTombstone(link);
+    let pendingEntry: PendingExternalSourceLink | null = null;
     try {
-      await this.upsertUniqueConflictTombstone(tombstone, operationId, userId, client);
-      await this.persistUniqueConflictTombstone(tombstone);
-      await this.refreshAfterUniqueConflict();
+      pendingEntry = await this.cache.replacePendingLinkForRetry(link.id, operationId, tombstone, token.ownerId);
+      if (!pendingEntry) return { outcome: "drop", reason: "duplicate" };
+      if (!this.isAuthIdentityFenceCurrent(token)) return this.rollbackUniqueConflictPending(link, pendingEntry, token);
+      const { error } = await this.remoteWriter.upsertLink(
+        client, pendingEntry.link, token.ownerId, pendingEntry.operationId,
+      );
+      if (!this.isAuthIdentityFenceCurrent(token)) return this.rollbackUniqueConflictPending(link, pendingEntry, token);
+      if (error) throw error;
+      if (!(await this.persistUniqueConflictTombstone(pendingEntry.link, token))) return this.rollbackUniqueConflictPending(link, pendingEntry, token);
+      if (!(await this.refreshAfterUniqueConflict(token))) return this.rollbackUniqueConflictPending(link, pendingEntry, token);
+      if (!this.isAuthIdentityFenceCurrent(token)) return this.rollbackUniqueConflictPending(link, pendingEntry, token);
       this.toast.info("思源锚点已在其他设备建立，已切换到已有关联");
-      return { resolved: true };
+      return { outcome: "success", pendingEntry };
     } catch (error) {
-      await this.keepUniqueConflictTombstonePending(link, tombstone);
+      if (!this.isAuthIdentityFenceCurrent(token)) return pendingEntry
+        ? this.rollbackUniqueConflictPending(link, pendingEntry, token) : { outcome: "stale-owner" };
+      if (pendingEntry && !(await this.keepUniqueConflictTombstonePending(link, pendingEntry.link, token))) return { outcome: "stale-owner" };
+      if (!this.isAuthIdentityFenceCurrent(token)) return { outcome: "stale-owner" };
       this.logger.warn("思源锚点唯一冲突收敛失败，等待下次刷新", {
         linkId: safeExternalSourceId(link.id),
         message: error instanceof Error ? error.message : "unknown",
       });
       this.toast.info("思源锚点已在其他设备建立，稍后自动刷新合并");
-      return { resolved: false, retryLink: tombstone };
+      return { outcome: "retry", errorCode: POSTGRES_UNIQUE_VIOLATION, pendingEntry: pendingEntry ?? undefined };
     }
   }
 
-  private async upsertUniqueConflictTombstone(
-    tombstone: ExternalSourceLink,
-    operationId: string,
-    userId: string,
-    client: ExternalSourceSupabaseClient,
-  ): Promise<void> {
-    const { error } = await this.remoteWriter.upsertLink(client, tombstone, userId, operationId);
-    if (error) throw error;
+  private async rollbackUniqueConflictPending(
+    link: ExternalSourceLink, pending: PendingExternalSourceLink, token: AuthIdentityFence,
+  ): Promise<PushLinkResult> {
+    await this.cache.replacePendingLinkForRetry(
+      link.id, pending.operationId, link, token.ownerId,
+    ).catch(() => null);
+    return { outcome: "stale-owner" };
   }
 
   private async persistUniqueConflictTombstone(
     tombstone: ExternalSourceLink,
-  ): Promise<void> {
-    await this.persistLocal(tombstone);
+    token: AuthIdentityFence,
+  ): Promise<boolean> {
+    if (!this.isAuthIdentityFenceCurrent(token)) return false;
+    const links = this.mergeLocalLink(tombstone);
+    await this.cache.saveLinks(links, token.ownerId);
+    if (!this.isAuthIdentityFenceCurrent(token)) return false;
+    this.store.replaceAll(links);
+    if (!this.isAuthIdentityFenceCurrent(token)) return false;
     await this.cache.deletePreviewsForLink(tombstone.id);
+    return this.isAuthIdentityFenceCurrent(token);
   }
 
-  private async refreshAfterUniqueConflict(): Promise<void> {
-    const remotePull = await this.pullRemoteLinks();
-    if (remotePull.deferredBySuspension || remotePull.failed) {
+  private async refreshAfterUniqueConflict(token: AuthIdentityFence): Promise<boolean> {
+    if (!this.isAuthIdentityFenceCurrent(token)) return false;
+    const remotePull = await this.pullRemoteLinks(token.ownerId, token);
+    if (!this.isAuthIdentityFenceCurrent(token)) return false;
+    if (remotePull.deferredBySuspension || remotePull.failed)
       throw new Error("remote pull unavailable after unique conflict");
-    }
-
     this.lastPullAt = Date.now();
-    const localLinks = await this.cache.loadLinks();
+    const localLinks = await this.cache.loadLinks(token.ownerId);
+    if (!this.isAuthIdentityFenceCurrent(token)) return false;
     const merged = mergeExternalSourceLinks(localLinks, remotePull.links);
+    if (!this.isAuthIdentityFenceCurrent(token)) return false;
     this.store.replaceAll(merged);
-    await this.cache.saveLinks(merged);
+    await this.cache.saveLinks(merged, token.ownerId);
+    return this.isAuthIdentityFenceCurrent(token);
   }
 
   private async keepUniqueConflictTombstonePending(
     link: ExternalSourceLink,
     tombstone: ExternalSourceLink,
-  ): Promise<void> {
+    token: AuthIdentityFence,
+  ): Promise<boolean> {
     try {
-      await this.persistLocalChangeForSync(tombstone, { resetRetryCount: false });
-      await this.cache.deletePreviewsForLink(tombstone.id);
+      if (!this.isAuthIdentityFenceCurrent(token)) return false;
+      return await this.persistUniqueConflictTombstone(tombstone, token);
     } catch (localError) {
+      if (!this.isAuthIdentityFenceCurrent(token)) return false;
       this.logger.warn("思源锚点唯一冲突本地墓碑保留失败", {
         linkId: safeExternalSourceId(link.id),
         message: localError instanceof Error ? localError.message : "unknown",
       });
+      return true;
     }
   }
 
@@ -684,6 +687,22 @@ export class ExternalSourceLinkService {
 
   private currentUserId(): string {
     return this.auth.currentUserId() ?? AUTH_CONFIG.LOCAL_MODE_USER_ID;
+  }
+
+  private captureAuthIdentityFence(): AuthIdentityFence {
+    return { ownerId: this.currentUserId(), authFence: this.auth.captureAuthIdentityFence() };
+  }
+
+  private sameAuthIdentityFence(left: AuthIdentityFence, right: AuthIdentityFence): boolean {
+    return left.ownerId === right.ownerId && left.authFence === right.authFence;
+  }
+
+  private isAuthIdentityFenceCurrent(token: AuthIdentityFence): boolean {
+    return !this.destroyed && this.sameAuthIdentityFence(token, this.captureAuthIdentityFence());
+  }
+
+  private assertImportOwner(ownerId: string): void {
+    if (this.currentUserId() !== ownerId) throw new Error("External source link import owner changed");
   }
 
   private isCurrentOwner(ownerId: string): boolean {
@@ -742,53 +761,44 @@ export class ExternalSourceLinkService {
 
     const delayMs = Math.max(100, getRemainingBrowserNetworkResumeDelayMs() + NETWORK_RESUME_RETRY_BUFFER_MS);
     const generation = this.resumeSyncGeneration;
-    try {
-      this.resumeSyncTimer = window.setTimeout(() => {
+    this.resumeSyncTimer = scheduleExternalSourceLinkResumeSyncTimer(
+      (callback, timeoutMs) => window.setTimeout(callback, timeoutMs),
+      () => {
         if (this.destroyed || generation !== this.resumeSyncGeneration) {
           return;
         }
         const shouldForceRefresh = this.resumeSyncForceRefresh;
         this.resumeSyncForceRefresh = false;
         this.resumeSyncTimer = null;
-        void this.refreshIfStale(shouldForceRefresh);
-        void this.flushPendingLinks();
-      }, delayMs);
-    } catch (error) {
-      this.resumeSyncTimer = null;
-      this.warnResumeSyncTimerScheduleFailure(error);
-    }
+        this.runInBackground(this.refreshIfStale(shouldForceRefresh), "resume refresh");
+        this.runInBackground(this.flushPendingLinks(), "resume flush");
+      },
+      delayMs,
+      this.logger,
+    );
   }
 
   private clearResumeSyncTimer(): void {
     const resumeSyncTimer = this.resumeSyncTimer;
     this.resumeSyncTimer = null;
-    if (resumeSyncTimer != null) {
-      try {
-        clearTimeout(resumeSyncTimer);
-      } catch (error) {
-        this.warnResumeSyncTimerCleanupFailure(error);
-      }
-    }
+    clearExternalSourceLinkResumeSyncTimer(
+      resumeSyncTimer,
+      (timer) => clearTimeout(timer),
+      this.logger,
+    );
     this.resumeSyncForceRefresh = false;
   }
 
-  private warnResumeSyncTimerScheduleFailure(error: unknown): void {
-    try {
-      this.logger.warn("思源锚点恢复 timer 注册失败，等待下一次恢复事件重试", {
-        message: error instanceof Error ? error.message : "unknown",
-      });
-    } catch {
-      // Warning sinks must not interrupt external source resume scheduling.
-    }
-  }
-
-  private warnResumeSyncTimerCleanupFailure(error: unknown): void {
-    try {
-      this.logger.warn("思源锚点恢复 timer 清理失败，继续清理其他资源", {
-        message: error instanceof Error ? error.message : "unknown",
-      });
-    } catch {
-      // Warning sinks must not interrupt external source teardown.
-    }
+  private runInBackground(operation: Promise<void>, label: string): void {
+    void operation.catch(error => {
+      try {
+        this.logger.warn("思源锚点后台操作失败", {
+          operation: label,
+          message: error instanceof Error ? error.message : "unknown",
+        });
+      } catch {
+        // Background error reporting must not create another unhandled rejection.
+      }
+    });
   }
 }

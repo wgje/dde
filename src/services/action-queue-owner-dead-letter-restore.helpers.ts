@@ -5,6 +5,24 @@ import {
   normalizeQueuedActionForOutbox,
 } from './action-queue-outbox-normalization.helpers';
 
+export function normalizeStoredDeadLetters(
+  queue: DeadLetterItem[],
+  now = Date.now(),
+): { queue: DeadLetterItem[]; repairedCount: number; agedCount: number } {
+  let repairedCount = 0;
+  let agedCount = 0;
+  const normalizedQueue = queue.map(item => {
+    const failedTime = new Date(item.failedAt).getTime();
+    if (!Number.isFinite(failedTime)) {
+      repairedCount += 1;
+      return { ...item, failedAt: new Date(now).toISOString() };
+    }
+    if (now - failedTime >= LOCAL_QUEUE_CONFIG.DEAD_LETTER_TTL) agedCount += 1;
+    return item;
+  });
+  return { queue: normalizedQueue, repairedCount, agedCount };
+}
+
 export function extractRestorableDeadLetters(
   items: unknown[],
   ownerUserId: string,
