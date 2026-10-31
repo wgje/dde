@@ -107,9 +107,18 @@ type HarnessOptions = {
   onEvent?: (event: Record<string, unknown>) => unknown;
 };
 
+type RecordedCall = {
+  child: { exit(): void; generation: number };
+  generation: number;
+  key: string;
+  name: string;
+  args: unknown;
+  signal: AbortSignal | undefined;
+};
+
 function createHarness(options: HarnessOptions = {}) {
   const events: Array<Record<string, unknown>> = [];
-  const calls: Array<Record<string, unknown>> = [];
+  const calls: RecordedCall[] = [];
   const outcomes: Array<{ token: Record<string, unknown>; outcome: Record<string, unknown> }> = [];
   const children: any[] = [];
   const previewRoutes = [...(options.previewRoutes ?? [])];

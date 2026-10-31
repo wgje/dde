@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
 import { afterEach, describe, expect, it } from 'vitest';
 
 const require = createRequire(import.meta.url);
@@ -84,7 +84,7 @@ server.connect(new StdioServerTransport()).catch(() => process.exit(29));
   return entryPath;
 }
 
-function runAbortHarness(pidFile: string): ReturnType<typeof spawnSync> {
+function runAbortHarness(pidFile: string): SpawnSyncReturns<string> {
   const root = tempRoot();
   const harnessPath = path.join(root, 'abort-harness.cjs');
   fs.writeFileSync(harnessPath, `'use strict';

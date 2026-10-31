@@ -174,11 +174,10 @@ async function makeStateDir(): Promise<string> {
 }
 
 function fixedStore(stateDir: string, overrides: Parameters<typeof createStateStore>[0] = { stateDir }): StateStore {
-  return createStateStore({
+  return createStateStore(Object.assign({
     stateDir,
     now: () => new Date(NOW_ISO),
-    ...overrides,
-  });
+  }, overrides));
 }
 
 async function readEnvelope(filePath: string): Promise<Envelope> {

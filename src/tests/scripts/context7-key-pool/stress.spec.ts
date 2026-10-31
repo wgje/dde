@@ -55,7 +55,7 @@ async function startParent(stateDir: string, childArgs: string[] = []): Promise<
     env: envFor(stateDir, childArgs),
     stderr: 'pipe',
   });
-  transport.stderr?.resume();
+  transport.stderr?.on('data', () => undefined);
   const client = new Client({ name: 'context7-stress-test', version: '1.0.0' }, { capabilities: {} });
   await client.connect(transport);
   const handle = { client, transport, close: async () => { await client.close().catch(() => undefined); } };
