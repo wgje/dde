@@ -204,6 +204,8 @@ export class StorageQuotaService implements OnDestroy {
    */
   getCleanableItems(): CleanableItem[] {
     const items: CleanableItem[] = [];
+    const storage = this.getAccessibleLocalStorage();
+    if (!storage) return [];
 
     // 扫描 localStorage 中可清理的键
     const safeCleanableKeys = [
@@ -220,29 +222,33 @@ export class StorageQuotaService implements OnDestroy {
       'nanoflow.undo-session',
     ];
 
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i);
-      if (!key) continue;
+    try {
+      for (let i = 0; i < storage.length; i++) {
+        const key = storage.key(i);
+        if (!key) continue;
 
-      // 仅扫描 nanoflow 相关的键
-      if (!key.startsWith('nanoflow.')) continue;
+        // 仅扫描 nanoflow 相关的键
+        if (!key.startsWith('nanoflow.')) continue;
 
-      const value = localStorage.getItem(key);
-      if (!value) continue;
+        const value = storage.getItem(key);
+        if (!value) continue;
 
-      const size = new Blob([value]).size;
-      const isSafe = safeCleanableKeys.some(prefix => key.startsWith(prefix));
-      const isProtected = preserveKeys.some(pk => key === pk);
+        const size = new Blob([value]).size;
+        const isSafe = safeCleanableKeys.some(prefix => key.startsWith(prefix));
+        const isProtected = preserveKeys.some(pk => key === pk);
 
-      if (!isProtected && size > 1024) { // 只列出 > 1KB 的项
-        items.push({
-          type: 'localStorage',
-          key,
-          description: isSafe ? `缓存数据 (${key})` : `应用数据 (${key})`,
-          estimatedSize: size,
-          safe: isSafe,
-        });
+        if (!isProtected && size > 1024) { // 只列出 > 1KB 的项
+          items.push({
+            type: 'localStorage',
+            key,
+            description: isSafe ? `缓存数据 (${key})` : `应用数据 (${key})`,
+            estimatedSize: size,
+            safe: isSafe,
+          });
+        }
       }
+    } catch {
+      return [];
     }
 
     return items;
@@ -314,6 +320,19 @@ export class StorageQuotaService implements OnDestroy {
   }
 
   // ==================== 私有方法 ====================
+
+  /**
+   * 获取可访问的 localStorage 实例
+   * 隐私模式或安全策略可能让 getter 抛错，统一按不可用处理
+   */
+  private getAccessibleLocalStorage(): Storage | null {
+    try {
+      const storage = globalThis.localStorage;
+      return typeof storage === 'undefined' ? null : storage;
+    } catch {
+      return null; // eslint-disable-line no-restricted-syntax -- localStorage getter 抛错时按不可用降级，避免配额 UI 路径外抛
+    }
+  }
 
   /**
    * 测量 localStorage 使用量

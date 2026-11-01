@@ -47,6 +47,28 @@ describe('StorageQuotaService', () => {
     }
   });
 
+  function createDeniedStorage(mode: 'length' | 'key' | 'getItem'): Storage {
+    const key = vi.fn((index: number): string | null => {
+      if (mode === 'key') throw new DOMException('storage denied', 'SecurityError');
+      return index === 0 ? 'nanoflow.temp-cache' : null;
+    });
+    const getItem = vi.fn((_key: string): string => {
+      if (mode === 'getItem') throw new DOMException('storage denied', 'SecurityError');
+      return 'x'.repeat(2048);
+    });
+    return {
+      get length() {
+        if (mode === 'length') throw new DOMException('storage denied', 'SecurityError');
+        return 1;
+      },
+      key,
+      getItem,
+      removeItem: vi.fn(),
+      setItem: vi.fn(),
+      clear: vi.fn(),
+    } as Storage;
+  }
+
   it('does not start periodic quota checks after destroy while startup check is pending', async () => {
     vi.useFakeTimers();
     originalStorageDescriptor = Object.getOwnPropertyDescriptor(navigator, 'storage');
@@ -160,5 +182,162 @@ describe('StorageQuotaService', () => {
     expect(result).toEqual({ cleaned: 0, freedBytes: 0 });
     expect(localStorage.getItem('nanoflow.temp-cache')).not.toBeNull();
     expect(sentryLazyLoader.captureException).not.toHaveBeenCalled();
+  });
+
+  it('returns no candidates when localStorage is unavailable', () => {
+    const originalLocalStorage = globalThis.localStorage;
+    Object.defineProperty(globalThis, 'localStorage', {
+      configurable: true,
+      value: undefined,
+    });
+    try {
+      TestBed.configureTestingModule({
+        providers: [
+          StorageQuotaService,
+          { provide: LoggerService, useValue: logger },
+          { provide: ToastService, useValue: toast },
+          { provide: SentryLazyLoaderService, useValue: sentryLazyLoader },
+        ],
+      });
+      const service = TestBed.inject(StorageQuotaService);
+
+      expect(() => service.getCleanableItems()).not.toThrow();
+      expect(service.getCleanableItems()).toEqual([]);
+    } finally {
+      Object.defineProperty(globalThis, 'localStorage', {
+        configurable: true,
+        value: originalLocalStorage,
+      });
+    }
+  });
+
+  it('returns no candidates when the localStorage getter throws', () => {
+    const originalLocalStorage = globalThis.localStorage;
+    Object.defineProperty(globalThis, 'localStorage', {
+      configurable: true,
+      get() {
+        throw new DOMException('storage denied', 'SecurityError');
+      },
+    });
+    try {
+      TestBed.configureTestingModule({
+        providers: [
+          StorageQuotaService,
+          { provide: LoggerService, useValue: logger },
+          { provide: ToastService, useValue: toast },
+          { provide: SentryLazyLoaderService, useValue: sentryLazyLoader },
+        ],
+      });
+      const service = TestBed.inject(StorageQuotaService);
+
+      expect(() => service.getCleanableItems()).not.toThrow();
+      expect(service.getCleanableItems()).toEqual([]);
+    } finally {
+      Object.defineProperty(globalThis, 'localStorage', {
+        configurable: true,
+        value: originalLocalStorage,
+      });
+    }
+  });
+
+  it.each(['length', 'key', 'getItem'] as const)(
+    'returns no candidates and performs no cleanup when localStorage %s access throws',
+    (mode) => {
+      const storage = createDeniedStorage(mode);
+      const originalLocalStorage = globalThis.localStorage;
+      Object.defineProperty(globalThis, 'localStorage', {
+        configurable: true,
+        value: storage,
+      });
+      try {
+        TestBed.configureTestingModule({
+          providers: [
+            StorageQuotaService,
+            { provide: LoggerService, useValue: logger },
+            { provide: ToastService, useValue: toast },
+            { provide: SentryLazyLoaderService, useValue: sentryLazyLoader },
+          ],
+        });
+        const service = TestBed.inject(StorageQuotaService);
+
+        expect(() => service.getCleanableItems()).not.toThrow();
+        expect(service.getCleanableItems()).toEqual([]);
+        expect(service.emergencyCleanup()).toEqual({ cleaned: 0, freedBytes: 0 });
+        expect(storage.removeItem).not.toHaveBeenCalled();
+      } finally {
+        Object.defineProperty(globalThis, 'localStorage', {
+          configurable: true,
+          value: originalLocalStorage,
+        });
+      }
+    },
+  );
+
+  it('discards partially enumerated candidates when a later storage access throws', () => {
+    const key = vi.fn((index: number): string | null => {
+      if (index === 1) throw new DOMException('storage denied', 'SecurityError');
+      return index === 0 ? 'nanoflow.temp-cache' : null;
+    });
+    const getItem = vi.fn(() => 'x'.repeat(2048));
+    const storage = {
+      get length() {
+        return 2;
+      },
+      key,
+      getItem,
+      removeItem: vi.fn(),
+      setItem: vi.fn(),
+      clear: vi.fn(),
+    } as Storage;
+    const originalLocalStorage = globalThis.localStorage;
+    Object.defineProperty(globalThis, 'localStorage', {
+      configurable: true,
+      value: storage,
+    });
+    try {
+      TestBed.configureTestingModule({
+        providers: [
+          StorageQuotaService,
+          { provide: LoggerService, useValue: logger },
+          { provide: ToastService, useValue: toast },
+          { provide: SentryLazyLoaderService, useValue: sentryLazyLoader },
+        ],
+      });
+      const service = TestBed.inject(StorageQuotaService);
+
+      expect(service.getCleanableItems()).toEqual([]);
+      expect(getItem).toHaveBeenCalledTimes(1);
+      expect(storage.removeItem).not.toHaveBeenCalled();
+    } finally {
+      Object.defineProperty(globalThis, 'localStorage', {
+        configurable: true,
+        value: originalLocalStorage,
+      });
+    }
+  });
+
+  it('keeps safe and protected localStorage classification unchanged', () => {
+    TestBed.configureTestingModule({
+      providers: [
+        StorageQuotaService,
+        { provide: LoggerService, useValue: logger },
+        { provide: ToastService, useValue: toast },
+        { provide: SentryLazyLoaderService, useValue: sentryLazyLoader },
+      ],
+    });
+    const service = TestBed.inject(StorageQuotaService);
+    localStorage.setItem('nanoflow.temp-cache', 'x'.repeat(2048));
+    localStorage.setItem('nanoflow.preferences', 'y'.repeat(2048));
+    localStorage.setItem('other.temp', 'z'.repeat(2048));
+
+    expect(service.getCleanableItems()).toEqual([
+      {
+        type: 'localStorage',
+        key: 'nanoflow.temp-cache',
+        description: '缓存数据 (nanoflow.temp-cache)',
+        estimatedSize: 2048,
+        safe: true,
+      },
+    ]);
   });
 });
