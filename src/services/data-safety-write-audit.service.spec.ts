@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { DataSafetyAuditPersistence } from './data-safety-audit-persistence';
 import { DataSafetyWriteAuditService } from './data-safety-write-audit.service';
 
@@ -87,5 +87,37 @@ describe('DataSafetyWriteAuditService', () => {
     });
 
     expect(localStorage.length).toBe(0);
+  });
+
+  it('reports owner-scoped persistence failure without rejecting the completed write', () => {
+    const onPersistenceFailure = vi.fn();
+    const persistence = {
+      load: vi.fn(() => ({ replayLog: [], lastWriteExplain: null })),
+      save: vi.fn(() => false),
+    } as unknown as DataSafetyAuditPersistence;
+    const service = new DataSafetyWriteAuditService({
+      persistence,
+      onPersistenceFailure,
+    });
+
+    const explain = service.recordWrite({
+      ownerUserId: 'user-1',
+      operationId: 'op-persistence-failed',
+      entityType: 'task',
+      entityId: 'task-1',
+      operation: 'upsert',
+      localTimestamp: 1781539200000,
+      rpcResult: { status: 'applied' },
+      enteredRetryQueue: false,
+      retryCount: 0,
+      lastSyncTimeBefore: null,
+      lastSyncTimeAfter: null,
+    });
+
+    expect(explain.operationId).toBe('op-persistence-failed');
+    expect(onPersistenceFailure).toHaveBeenCalledWith({
+      ownerUserId: 'user-1',
+      operationId: 'op-persistence-failed',
+    });
   });
 });

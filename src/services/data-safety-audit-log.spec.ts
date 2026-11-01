@@ -26,6 +26,7 @@ describe('DataSafetyAuditLog', () => {
       entityType: 'task',
       entityId: 'task-2',
       operation: 'upsert',
+      writeIntent: 'task_text_update',
       localTimestamp: 1781539300000,
       updatedAtBaseline: '2026-06-16T00:00:02.000Z',
       beforeVersion: '2026-06-16T00:00:02.000Z',
@@ -55,6 +56,7 @@ describe('DataSafetyAuditLog', () => {
     expect(log.lastWriteExplain?.operationId).toBe('op-3');
     expect(log.lastWriteExplain?.lwwDecision).toEqual({ decision: 'blocked', reason: 'unauthorized' });
     expect(log.replayLog[0].lastSyncTime.advanced).toBe(false);
+    expect(log.replayLog[0].writeIntent).toBe('task_text_update');
   });
 
   it('can hydrate from persisted replay entries and latest explanation', () => {
