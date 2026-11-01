@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
-import { SpeechToTextOfflineCacheStore } from './speech-to-text-offline-cache.store';
+import {
+  SpeechToTextOfflineCacheStore,
+  SpeechToTextOfflineCacheWriteFailureTracker,
+} from './speech-to-text-offline-cache.store';
 import type { OfflineAudioCacheEntry } from '../models/focus';
 
 type DeferredRequest<T> = {
@@ -206,5 +209,19 @@ describe('SpeechToTextOfflineCacheStore', () => {
       id: 'legacy-audio',
       ownerUserId: '__legacy_unknown_owner__',
     }));
+  });
+});
+
+describe('SpeechToTextOfflineCacheWriteFailureTracker', () => {
+  it('tracks object errors without treating primitive values as marked failures', () => {
+    const tracker = new SpeechToTextOfflineCacheWriteFailureTracker();
+    const error = new Error('cache write failed');
+
+    tracker.mark(error);
+    tracker.mark('primitive failure');
+
+    expect(tracker.has(error)).toBe(true);
+    expect(tracker.has(new Error('cache write failed'))).toBe(false);
+    expect(tracker.has('primitive failure')).toBe(false);
   });
 });

@@ -159,11 +159,10 @@ export function createSpeechToTextServiceSpecContext() {
 export function cleanupSpeechToTextServiceSpecContext(
   context: SpeechToTextServiceSpecContext,
 ): void {
-  if (typeof vi.isFakeTimers === 'function' && vi.isFakeTimers()) {
-    vi.useRealTimers();
-  }
+  const usedFakeTimers = typeof vi.isFakeTimers === 'function' && vi.isFakeTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+  if (usedFakeTimers) vi.useRealTimers();
   context.mockEventBus.onSessionRestored$.complete();
   context.mockEventBus.onSessionInvalidated$.complete();
   setMediaDevices(context.originalMediaDevices);

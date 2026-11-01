@@ -6,7 +6,6 @@
  */
 
 import { Injectable, inject, DestroyRef } from '@angular/core';
-import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { SupabaseClientService } from './supabase-client.service';
 import { AuthService } from './auth.service';
 import { BlackBoxService } from './black-box.service';
@@ -17,28 +16,38 @@ import { EventBusService } from './event-bus.service';
 import { FOCUS_CONFIG } from '../config/focus.config';
 import { ErrorCodes, ErrorMessages } from '../utils/result';
 import { openIndexedDBAdaptive } from '../utils/indexeddb-open';
-// eslint-disable-next-line no-restricted-imports -- SessionManagerService 尚未迁移到 src/services/，语音转写恢复需复用其会话校验能力
-import { SessionManagerService } from '../app/core/services/sync/session-manager.service';
+import { SessionManagerService } from '../core-bridge';
 import { SpeechToTextDurationTickerController } from './speech-to-text-duration-ticker.controller';
-import { SpeechToTextOfflineCacheStore, type OfflineAudioCacheSaveResult } from './speech-to-text-offline-cache.store';
+import {
+  SpeechToTextOfflineCacheStore,
+  SpeechToTextOfflineCacheWriteFailureTracker,
+  type OfflineAudioCacheSaveResult,
+} from './speech-to-text-offline-cache.store';
 import { SpeechToTextOfflineReplayController } from './speech-to-text-offline-replay.controller';
 import { SpeechToTextOwnerSettlementController } from './speech-to-text-owner-settlement.controller';
+import { SpeechToTextRecoveryController } from './speech-to-text-recovery.controller';
+import {
+  checkSpeechMicrophoneAvailability,
+  isSpeechRecordingSupported,
+  releaseSpeechMediaStream,
+  releaseSpeechRecorderStream,
+  resolveSpeechRecordingFallbackMessage,
+  resolveSupportedSpeechAudioMimeType,
+  type RecordingSessionContext,
+  type RecordingStopOperation,
+} from './speech-to-text-recording-support';
 import { SpeechToTextTranscribingStateController } from './speech-to-text-transcribing-state.controller';
 import { createSpeechToTextTranscriber } from './speech-to-text-transcriber-options.factory';
+import { isSpeechToTextStaleAuthorityError } from './speech-to-text-transcriber';
 import {
   buildMediaRecorderOptions,
-  hasAudioInputDevice,
-  isControlledUpstreamRetryableTranscribeError,
   isRetryableTranscribeError,
-  resolveFirstSupportedAudioMimeType,
   resolveOfflineCacheRecordingFeedback,
   resolveRecordedAudioSizeFeedback,
   resolveRecordedAudioSizeIssue,
   resolveRecordingUnavailableFeedback,
   resolveRetryableStopTranscribeFeedback,
-  resolveRetryableTranscribeReplayDelayMs,
   resolveStartRecordingFailureFeedback,
-  shouldScheduleOfflineCacheReplay,
 } from './speech-to-text.helpers';
 import { 
   isRecording, 
@@ -67,11 +76,12 @@ export class SpeechToTextService {
   private recordingOwnerUserId: string | null = null;
   private db: IDBDatabase | null = null;
   private initIndexedDBPromise: Promise<void> | null = null;
-  private onlineHandler: (() => void) | null = null;
   private readonly destroyRef = inject(DestroyRef);
-  private recoveryReplayTimeout: ReturnType<typeof setTimeout> | null = null;
-  private replayOfflineCachePromise: Promise<void> | null = null;
-  private startRecordingPromise: Promise<void> | null = null;
+  private startRecordingPromise: Promise<boolean> | null = null;
+  private recordingSessionGeneration = 0;
+  private pendingRecordingOwnerToken: symbol | null = null;
+  private activeRecordingOwnerToken: symbol | null = null;
+  private readonly stopOperations = new Map<MediaRecorder, RecordingStopOperation>();
   private destroyed = false;
   // 使用 Signal 管理状态，组件直接读取
   readonly isRecording = isRecording;
@@ -107,7 +117,7 @@ export class SpeechToTextService {
     defaultUpstreamRetryDelayMs: this.DEFAULT_UPSTREAM_RETRY_DELAY_MS,
     maxUpstreamRetryDelayMs: this.OFFLINE_REPLAY_CONTINUATION_DELAY_MS,
     getCurrentUserId: () => this.auth.currentUserId(),
-    setControlledRetryDelayMs: value => { this.controlledUpstreamRetryDelayMs = value; },
+    setControlledRetryDelayMs: value => this.recovery.setControlledRetryDelayMs(value),
   });
   private readonly durationTicker = new SpeechToTextDurationTickerController({
     getRecordingStartTime: () => this.recordingStartTime,
@@ -122,6 +132,25 @@ export class SpeechToTextService {
         { reason }
       );
     },
+  });
+  private readonly recovery = new SpeechToTextRecoveryController({
+    currentUserId: () => this.auth.currentUserId(),
+    defaultUpstreamRetryDelayMs: this.DEFAULT_UPSTREAM_RETRY_DELAY_MS,
+    deferUntilSettled: (isSettled, onSettled, reason) =>
+      this.ownerSettlement.deferUntilSettled(isSettled, onSettled, reason),
+    isDestroyed: () => this.destroyed,
+    isOnline: () => this.network.isOnline(),
+    logger: this.logger,
+    networkErrorCode: ErrorCodes.FOCUS_NETWORK_ERROR,
+    notifyReplaySuccess: count =>
+      this.toast.success('离线录音已处理', `已转写 ${count} 条离线录音`),
+    offlineReplayRetryDelayMs: this.OFFLINE_REPLAY_RETRY_DELAY_MS,
+    processOfflineCache: () => this.processOfflineCache(),
+    processReplay: () => this.processOfflineCacheAndCreateEntries(),
+    refreshPendingCount: () => this.updateOfflinePendingCount(),
+    scheduleReplay: (reason, delayMs) => this.scheduleOfflineCacheReplay(reason, delayMs),
+    sessionInvalidated$: this.eventBus.onSessionInvalidated$,
+    sessionRestored$: this.eventBus.onSessionRestored$,
   });
   private readonly transcribingState = new SpeechToTextTranscribingStateController(
     value => isTranscribing.set(value)
@@ -148,13 +177,12 @@ export class SpeechToTextService {
       this.scheduleRetryableTranscribeReplay(error, reason),
     toastWarning: (title, message) => this.toast.warning(title, message),
     transcribeBlob: (blob, expectedOwnerUserId) =>
-      this.transcribeBlob(blob, expectedOwnerUserId),
+      this.transcriber.transcribe(blob, expectedOwnerUserId),
     unknownOwnerUserId: this.UNKNOWN_OFFLINE_AUDIO_OWNER,
     updatePendingCount: () => this.updateOfflinePendingCount(),
     deleteFromCache: id => this.deleteFromCache(id),
   });
-  private readonly offlineCacheWriteFailures = new WeakSet<object>();
-  private controlledUpstreamRetryDelayMs: number | null = null;
+  private readonly offlineCacheWriteFailures = new SpeechToTextOfflineCacheWriteFailureTracker();
   
   constructor() {
     // 初始化 IndexedDB
@@ -162,21 +190,24 @@ export class SpeechToTextService {
       this.logger.warn('SpeechToText', 'Initial IndexedDB setup deferred', error instanceof Error ? error.message : String(error));
     });
     
-    // 监听网络恢复
-    this.setupNetworkListener();
-    this.setupSessionRecoveryListener();
-
     this.destroyRef.onDestroy(() => {
       this.destroyed = true;
       this.cancelRecording();
-
-      if (this.recoveryReplayTimeout) {
-        clearTimeout(this.recoveryReplayTimeout);
-        this.recoveryReplayTimeout = null;
-      }
-
+      this.recovery.destroy();
       this.ownerSettlement.destroy();
     });
+  }
+
+  private get onlineHandler(): (() => void) | null {
+    return this.recovery.onlineHandler;
+  }
+
+  private set onlineHandler(value: (() => void) | null) {
+    this.recovery.onlineHandler = value;
+  }
+
+  private get recoveryReplayTimeout(): ReturnType<typeof setTimeout> | null {
+    return this.recovery.replayTimeout;
   }
   
   /**
@@ -210,97 +241,25 @@ export class SpeechToTextService {
     });
   }
 
-  /**
-   * 设置网络恢复监听
-   * 保存 handler 引用以便在销毁时解绑，避免测试污染
-   */
-  private setupNetworkListener(): void {
-    if (typeof window === 'undefined') return;
-    this.onlineHandler = () => {
-      this.logger.info('SpeechToText', 'Network restored, processing offline audio cache');
-      void this.runOfflineCacheReplay('network-restored');
-    };
-    window.addEventListener('online', this.onlineHandler);
-
-    // 在服务销毁时清理监听器
-    this.destroyRef.onDestroy(() => {
-      if (this.onlineHandler) {
-        window.removeEventListener('online', this.onlineHandler);
-        this.onlineHandler = null;
-      }
-    });
+  private processOfflineCacheAndCreateEntries(): Promise<void> {
+    return this.recovery.processReplayAndNotify();
   }
 
-  private setupSessionRecoveryListener(): void {
-    this.eventBus.onSessionRestored$
-      .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe((event) => {
-        this.ownerSettlement.deferUntilSettled(
-          () => this.auth.currentUserId() === event.userId,
-          () => {
-            void this.updateOfflinePendingCount();
-
-            if (!this.network.isOnline()) {
-              return;
-            }
-
-            this.logger.info('SpeechToText', 'Session restored, replaying offline audio cache');
-            void this.runOfflineCacheReplay('session-restored');
-          },
-          `session-restored:${event.source}`
-        );
-      });
-
-    this.eventBus.onSessionInvalidated$
-      .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe((event) => {
-        this.ownerSettlement.deferUntilSettled(
-          () => event.userId == null || this.auth.currentUserId() !== event.userId,
-          () => {
-            void this.updateOfflinePendingCount();
-          },
-          `session-invalidated:${event.source}`
-        );
-      });
-  }
-
-  /**
-   * 处理离线缓存并创建黑匣子条目
-   */
-  private async processOfflineCacheAndCreateEntries(): Promise<void> {
-    try {
-      const results = await this.processOfflineCache();
-      if (this.destroyed) {
-        return;
-      }
-      if (results.length > 0) {
-        this.toast.success('离线录音已处理', `已转写 ${results.length} 条离线录音`);
-      }
-    } catch (e) {
-      if (this.destroyed) {
-        return;
-      }
-      this.logger.error('SpeechToText', 'Failed to process offline cache',
-        e instanceof Error ? e.message : String(e));
-    }
-  }
-  
-  /**
-   * 检查浏览器是否支持录音
-   */
   isSupported(): boolean {
-    return !!(navigator.mediaDevices?.getUserMedia) && 
-           typeof MediaRecorder !== 'undefined';
+    return isSpeechRecordingSupported(
+      navigator.mediaDevices,
+      typeof MediaRecorder !== 'undefined',
+    );
   }
   
   /**
    * 获取不支持时的降级方案提示
    */
   getFallbackMessage(): string {
-    if (!this.isSupported()) {
-      return ErrorMessages[ErrorCodes.FOCUS_RECORDING_NOT_SUPPORTED];
-    }
-    return '';
+    return resolveSpeechRecordingFallbackMessage(
+      this.isSupported(),
+      ErrorMessages[ErrorCodes.FOCUS_RECORDING_NOT_SUPPORTED],
+    );
   }
   
   /**
@@ -308,9 +267,9 @@ export class SpeechToTextService {
    * iOS Safari 不支持 webm，需要使用 mp4
    */
   private getSupportedMimeType(): string {
-    return resolveFirstSupportedAudioMimeType(
+    return resolveSupportedSpeechAudioMimeType(
       this.config.AUDIO_MIME_TYPES,
-      type => MediaRecorder.isTypeSupported(type)
+      type => MediaRecorder.isTypeSupported(type),
     );
   }
   
@@ -319,96 +278,143 @@ export class SpeechToTextService {
    * 在测试环境或无麦克风设备时返回 false
    */
   async checkMicrophoneAvailability(): Promise<boolean> {
-    try {
-      // 检查是否支持 mediaDevices API
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !navigator.mediaDevices.enumerateDevices) {
-        this.logger.debug('SpeechToText', 'MediaDevices API not supported');
-        return false;
-      }
-
-      // 检查是否有音频输入设备
-      const devices = await navigator.mediaDevices.enumerateDevices();
-      const hasAudioInput = hasAudioInputDevice(devices);
-      
-      if (!hasAudioInput) {
-        this.logger.debug('SpeechToText', 'No audio input devices found');
-        return false;
-      }
-
-      return true;
-    } catch (err) {
-      this.logger.debug('SpeechToText', 'Failed to check microphone availability', err instanceof Error ? err.message : String(err));
-      return false;
-    }
+    return checkSpeechMicrophoneAvailability({
+      debug: (message, detail) => this.logger.debug('SpeechToText', message, detail),
+      mediaDevices: navigator.mediaDevices,
+    });
   }
   
   /**
    * 开始录音
    * ⚠️ iOS Safari 兼容性：需要在用户手势内调用
    */
-  async startRecording(): Promise<void> {
-    if (this.isRecording()) return;
-    if (this.startRecordingPromise) return this.startRecordingPromise;
+  async startRecording(ownerToken?: symbol): Promise<boolean> {
+    if (this.destroyed) return false;
+    if (this.isRecording()) return false;
+    if (this.startRecordingPromise) return false;
 
-    this.startRecordingPromise = this.doStartRecording().finally(() => {
-      this.startRecordingPromise = null;
+    const startGeneration = ++this.recordingSessionGeneration;
+    const normalizedOwnerToken = ownerToken ?? null;
+    this.pendingRecordingOwnerToken = normalizedOwnerToken;
+    const trackedStart = this.doStartRecording(startGeneration, normalizedOwnerToken).finally(() => {
+      if (this.startRecordingPromise === trackedStart) {
+        this.startRecordingPromise = null;
+        if (this.pendingRecordingOwnerToken === normalizedOwnerToken) {
+          this.pendingRecordingOwnerToken = null;
+        }
+      }
     });
+    this.startRecordingPromise = trackedStart;
 
     return this.startRecordingPromise;
   }
 
-  private async doStartRecording(): Promise<void> {
+  private async doStartRecording(
+    startGeneration: number,
+    ownerToken: symbol | null,
+  ): Promise<boolean> {
     const isAvailable = await this.checkMicrophoneAvailability();
+    if (!this.isRecordingStartCurrent(startGeneration)) return false;
     if (!isAvailable) {
       const feedback = resolveRecordingUnavailableFeedback();
       this.logger.warn('SpeechToText', feedback.message);
       this.toast.warning(feedback.title, feedback.message);
-      return;
+      return false;
     }
 
+    let stream: MediaStream | null = null;
+    let recorder: MediaRecorder | null = null;
     try {
       const mimeType = this.getSupportedMimeType();
 
-      const stream = await navigator.mediaDevices.getUserMedia({
+      stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: true,
           noiseSuppression: true,
           sampleRate: this.config.SAMPLE_RATE
         }
       });
+      if (!this.isRecordingStartCurrent(startGeneration)) {
+        releaseSpeechMediaStream(stream);
+        return false;
+      }
 
-      this.mediaRecorder = this.createMediaRecorder(stream, mimeType);
-      this.audioChunks = [];
-      this.recordingStartTime = Date.now();
-      this.recordingOwnerUserId = this.auth.currentUserId();
-
-      this.mediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          this.audioChunks.push(event.data);
-        }
-      };
-
-      this.mediaRecorder.start(1000);
-      isRecording.set(true);
-      this.durationTicker.start();
+      recorder = this.createMediaRecorder(stream, mimeType);
+      this.activateRecorderSession(recorder, startGeneration, ownerToken);
 
       this.logger.debug('SpeechToText', `Recording started with mimeType: ${mimeType}`);
+      return true;
     } catch (err) {
-      this.logger.error('SpeechToText', 'Failed to start recording', err instanceof Error ? err.message : String(err));
-      this.showStartRecordingError(err);
+      this.handleStartRecordingFailure({ err, recorder, startGeneration, stream });
+      return false;
     }
   }
 
-  private createMediaRecorder(stream: MediaStream, mimeType: string): MediaRecorder {
-    try {
-      return new MediaRecorder(
-        stream,
-        buildMediaRecorderOptions(mimeType, this.config.AUDIO_BITS_PER_SECOND)
-      );
-    } catch (recorderErr) {
-      stream.getTracks().forEach(track => track.stop());
-      throw recorderErr;
+  private activateRecorderSession(
+    recorder: MediaRecorder,
+    startGeneration: number,
+    ownerToken: symbol | null,
+  ): void {
+    const audioChunks: Blob[] = [];
+    this.mediaRecorder = recorder;
+    this.audioChunks = audioChunks;
+    this.recordingStartTime = Date.now();
+    this.recordingOwnerUserId = this.auth.currentUserId();
+    this.activeRecordingOwnerToken = ownerToken;
+
+    recorder.ondataavailable = (event) => {
+      if (!this.isRecorderSessionCurrent(recorder, startGeneration)) return;
+      if (event.data.size > 0) {
+        audioChunks.push(event.data);
+      }
+    };
+
+    recorder.start(1000);
+    isRecording.set(true);
+    this.durationTicker.start();
+  }
+
+  private handleStartRecordingFailure(options: {
+    err: unknown;
+    recorder: MediaRecorder | null;
+    startGeneration: number;
+    stream: MediaStream | null;
+  }): void {
+    const { err, recorder, startGeneration, stream } = options;
+    if (recorder) {
+      recorder.ondataavailable = null;
+      recorder.onstop = null;
+      releaseSpeechRecorderStream(recorder);
+    } else if (stream) {
+      releaseSpeechMediaStream(stream);
     }
+    if (!this.isRecordingStartCurrent(startGeneration)) return;
+    if (!recorder || this.mediaRecorder === recorder) {
+      this.mediaRecorder = null;
+      this.audioChunks = [];
+      this.recordingStartTime = 0;
+      this.recordingOwnerUserId = null;
+      this.activeRecordingOwnerToken = null;
+      isRecording.set(false);
+      this.durationTicker.stop();
+    }
+    this.logger.error('SpeechToText', 'Failed to start recording', err instanceof Error ? err.message : String(err));
+    this.showStartRecordingError(err);
+  }
+
+  private isRecordingStartCurrent(startGeneration: number): boolean {
+    return !this.destroyed && this.recordingSessionGeneration === startGeneration;
+  }
+
+  private isRecorderSessionCurrent(recorder: MediaRecorder, generation: number): boolean {
+    return this.mediaRecorder === recorder && this.isRecordingStartCurrent(generation);
+  }
+
+  private createMediaRecorder(stream: MediaStream, mimeType: string): MediaRecorder {
+    return new MediaRecorder(
+      stream,
+      buildMediaRecorderOptions(mimeType, this.config.AUDIO_BITS_PER_SECOND)
+    );
   }
 
   private showStartRecordingError(err: unknown): void {
@@ -436,12 +442,36 @@ export class SpeechToTextService {
    * 取消录音（丢弃所有数据，不转写）
    * 用于用户手指/鼠标超出录音区域时的取消操作
    */
-  cancelRecording(): void {
-    if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
-      // 清除 onstop 回调，防止触发转写
-      this.mediaRecorder.onstop = null;
-      this.mediaRecorder.stop();
-      this.mediaRecorder.stream.getTracks().forEach(track => track.stop());
+  cancelRecording(ownerToken?: symbol): boolean {
+    if (
+      ownerToken !== undefined &&
+      this.pendingRecordingOwnerToken !== ownerToken &&
+      this.activeRecordingOwnerToken !== ownerToken
+    ) {
+      return false;
+    }
+    const hadOwnedSession =
+      this.startRecordingPromise !== null ||
+      this.mediaRecorder !== null ||
+      this.isRecording();
+    this.recordingSessionGeneration += 1;
+    this.startRecordingPromise = null;
+    this.pendingRecordingOwnerToken = null;
+    this.activeRecordingOwnerToken = null;
+    const recorder = this.mediaRecorder;
+    const stopOperation = recorder ? this.stopOperations.get(recorder) : undefined;
+    if (recorder) {
+      // 清除会话回调，防止排队中的最终数据与 stop 事件污染后续会话。
+      if (!stopOperation?.handlingStarted) {
+        recorder.ondataavailable = null;
+        recorder.onstop = null;
+      }
+      if (stopOperation && !stopOperation.handlingStarted) {
+        stopOperation.resolve('');
+      } else if (!stopOperation && recorder.state !== 'inactive') {
+        recorder.stop();
+      }
+      releaseSpeechRecorderStream(recorder);
     }
     // 丢弃所有已收集的音频数据
     this.audioChunks = [];
@@ -450,39 +480,90 @@ export class SpeechToTextService {
     // 【修复 P2-06】清空 mediaRecorder 引用，防止后续误触发
     this.mediaRecorder = null;
     isRecording.set(false);
-    this.transcribingState.reset();
     this.durationTicker.stop();
     this.logger.debug('SpeechToText', 'Recording cancelled, all data discarded');
+    return hadOwnedSession;
   }
   
   /**
    * 停止录音并转写
    */
-  async stopAndTranscribe(): Promise<string> {
+  stopAndTranscribe(ownerToken?: symbol): Promise<string> {
     const recorder = this.mediaRecorder;
     if (!recorder) {
-      throw new Error('未开始录音');
+      return Promise.reject(new Error('未开始录音'));
+    }
+    if (
+      ownerToken !== undefined &&
+      this.activeRecordingOwnerToken !== ownerToken
+    ) {
+      return Promise.reject(new Error('录音会话不属于当前调用方'));
     }
 
-    return new Promise((resolve, reject) => {
-      recorder.onstop = async () => {
-        await this.handleRecorderStop(resolve, reject);
-      };
+    const existingOperation = this.stopOperations.get(recorder);
+    if (existingOperation) {
+      return existingOperation.promise;
+    }
 
-      recorder.stop();
+    const session: RecordingSessionContext = {
+      recorder,
+      audioChunks: this.audioChunks,
+      ownerUserId: this.recordingOwnerUserId,
+      generation: this.recordingSessionGeneration,
+    };
+
+    let resolveOperation!: (value: string | PromiseLike<string>) => void;
+    let rejectOperation!: (reason?: unknown) => void;
+    const promise = new Promise<string>((resolve, reject) => {
+      resolveOperation = resolve;
+      rejectOperation = reject;
     });
+    const operation: RecordingStopOperation = {
+      recorder,
+      promise,
+      resolve: resolveOperation,
+      handlingStarted: false,
+    };
+    this.stopOperations.set(recorder, operation);
+    void promise.then(
+      () => this.clearStopOperation(operation),
+      () => this.clearStopOperation(operation),
+    );
+
+    recorder.onstop = async () => {
+      if (operation.handlingStarted) return;
+      operation.handlingStarted = true;
+      await this.handleRecorderStop(session, resolveOperation, rejectOperation);
+    };
+
+    try {
+      recorder.stop();
+    } catch (error) {
+      rejectOperation(error);
+    }
+
+    return promise;
+  }
+
+  private clearStopOperation(operation: RecordingStopOperation): void {
+    if (this.stopOperations.get(operation.recorder) === operation) {
+      this.stopOperations.delete(operation.recorder);
+    }
   }
 
   private async handleRecorderStop(
+    session: RecordingSessionContext,
     resolve: (value: string | PromiseLike<string>) => void,
     reject: (reason?: unknown) => void
   ): Promise<void> {
-    isRecording.set(false);
+    if (this.isRecorderSessionCurrent(session.recorder, session.generation)) {
+      isRecording.set(false);
+      this.durationTicker.stop();
+    }
     const releaseTranscribing = this.transcribingState.begin();
-    this.durationTicker.stop();
 
-    const expectedOwnerUserId = this.recordingOwnerUserId;
-    const audioBlob = this.createRecordedAudioBlob();
+    const expectedOwnerUserId = session.ownerUserId;
+    const audioBlob = this.createRecordedAudioBlob(session);
 
     try {
       const sizeValidationResult = this.resolveRecordedAudioSize(audioBlob);
@@ -493,18 +574,26 @@ export class SpeechToTextService {
 
       resolve(await this.transcribeOrCacheRecording(audioBlob, expectedOwnerUserId));
     } catch (error) {
-      this.logger.error('SpeechToText', 'Transcription failed', error instanceof Error ? error.message : String(error));
+      if (!isSpeechToTextStaleAuthorityError(error)) {
+        this.logger.error('SpeechToText', 'Transcription failed', error instanceof Error ? error.message : String(error));
+      }
       await this.handleRetryableStopTranscribeError(error, audioBlob, expectedOwnerUserId, resolve, reject);
     } finally {
       releaseTranscribing();
-      this.recordingOwnerUserId = null;
-      this.releaseCurrentRecorderStream();
+      if (this.isRecorderSessionCurrent(session.recorder, session.generation)) {
+        this.mediaRecorder = null;
+        this.audioChunks = [];
+        this.recordingStartTime = 0;
+        this.recordingOwnerUserId = null;
+        this.activeRecordingOwnerToken = null;
+      }
+      releaseSpeechRecorderStream(session.recorder);
     }
   }
 
-  private createRecordedAudioBlob(): Blob {
-    const mimeType = this.mediaRecorder?.mimeType || 'audio/webm';
-    return new Blob(this.audioChunks, { type: mimeType });
+  private createRecordedAudioBlob(session: RecordingSessionContext): Blob {
+    const mimeType = session.recorder.mimeType || 'audio/webm';
+    return new Blob(session.audioChunks, { type: mimeType });
   }
 
   private resolveRecordedAudioSize(audioBlob: Blob): string | null {
@@ -536,13 +625,13 @@ export class SpeechToTextService {
       writeAheadCache = await this.saveToOfflineCache(audioBlob, expectedOwnerUserId);
     } catch (cacheErr) {
       this.toast.error('保存失败', '无法保存录音，请重试');
-      this.markOfflineCacheWriteFailure(cacheErr);
+      this.offlineCacheWriteFailures.mark(cacheErr);
       throw cacheErr;
     }
 
     try {
-      const text = await this.transcribeBlob(audioBlob, expectedOwnerUserId);
-      if (!this.isRecordingOwnerActive(expectedOwnerUserId)) {
+      const text = await this.transcriber.transcribe(audioBlob, expectedOwnerUserId);
+      if (!expectedOwnerUserId || this.auth.currentUserId() !== expectedOwnerUserId) {
         throw new Error(this.RETRYABLE_SESSION_RECOVERY_ERROR);
       }
 
@@ -550,6 +639,9 @@ export class SpeechToTextService {
       void this.updateOfflinePendingCount();
       return text;
     } catch (error) {
+      if (isSpeechToTextStaleAuthorityError(error)) {
+        throw error;
+      }
       if (!this.isRetryableTranscribeError(error)) {
         throw error;
       }
@@ -570,7 +662,7 @@ export class SpeechToTextService {
     } catch (cacheErr) {
       this.logger.error('SpeechToText', '离线缓存失败', cacheErr instanceof Error ? cacheErr.message : String(cacheErr));
       this.toast.error('保存失败', '无法保存录音，请重试');
-      this.markOfflineCacheWriteFailure(cacheErr);
+      this.offlineCacheWriteFailures.mark(cacheErr);
       throw cacheErr;
     }
 
@@ -584,7 +676,11 @@ export class SpeechToTextService {
     resolve: (value: string | PromiseLike<string>) => void,
     reject: (reason?: unknown) => void
   ): Promise<void> {
-    if (this.isOfflineCacheWriteFailure(error)) {
+    if (isSpeechToTextStaleAuthorityError(error)) {
+      reject(error);
+      return;
+    }
+    if (this.offlineCacheWriteFailures.has(error)) {
       reject(error);
       return;
     }
@@ -620,65 +716,12 @@ export class SpeechToTextService {
     return feedback.result;
   }
 
-  private markOfflineCacheWriteFailure(error: unknown): void {
-    if (typeof error === 'object' && error !== null) {
-      this.offlineCacheWriteFailures.add(error);
-    }
-  }
-
-  private isOfflineCacheWriteFailure(error: unknown): boolean {
-    return typeof error === 'object' && error !== null && this.offlineCacheWriteFailures.has(error);
-  }
-
-  private releaseCurrentRecorderStream(): void {
-    this.mediaRecorder?.stream.getTracks().forEach(track => track.stop());
-  }
-
-  /**
-   * 实际调用 Edge Function 进行转写
-   *
-   * ⚠️ 注意：调用前需确保用户已登录，否则请求会被 Supabase 网关拦截
-   *
-   * 使用 fetch 而非 functions.invoke，以保留 multipart/form-data 和超时控制。
-   * token 获取统一走 SessionManager 刷新链路，避免把临期 JWT 直接发送到网关。
-   */
-  private async transcribeBlob(audioBlob: Blob, expectedOwnerUserId: string | null = this.auth.currentUserId()): Promise<string> {
-    return this.transcriber.transcribe(audioBlob, expectedOwnerUserId);
-  }
-
   private scheduleOfflineCacheReplay(reason: string, delayMs = this.OFFLINE_REPLAY_RETRY_DELAY_MS): void {
-    if (!shouldScheduleOfflineCacheReplay(this.destroyed, this.network.isOnline(), !!this.recoveryReplayTimeout)) {
-      return;
-    }
-
-    this.logger.info('SpeechToText', 'Scheduling offline audio replay after transient failure', { reason });
-    this.recoveryReplayTimeout = setTimeout(() => {
-      this.recoveryReplayTimeout = null;
-      void this.runOfflineCacheReplay('delayed-retry');
-    }, delayMs);
+    this.recovery.schedule(reason, delayMs);
   }
 
   private runOfflineCacheReplay(reason: string): Promise<void> {
-    if (this.destroyed) {
-      return Promise.resolve();
-    }
-
-    if (this.replayOfflineCachePromise) {
-      this.logger.debug('SpeechToText', 'Offline audio replay already in progress, reusing existing run', { reason });
-      return this.replayOfflineCachePromise;
-    }
-
-    if (this.recoveryReplayTimeout) {
-      clearTimeout(this.recoveryReplayTimeout);
-      this.recoveryReplayTimeout = null;
-    }
-
-    this.replayOfflineCachePromise = this.processOfflineCacheAndCreateEntries()
-      .finally(() => {
-        this.replayOfflineCachePromise = null;
-      });
-
-    return this.replayOfflineCachePromise;
+    return this.recovery.run(reason);
   }
 
   private isRetryableTranscribeError(error: unknown): boolean {
@@ -691,19 +734,7 @@ export class SpeechToTextService {
   }
 
   private scheduleRetryableTranscribeReplay(error: unknown, reason: string): void {
-    const controlledDelayMs = this.controlledUpstreamRetryDelayMs;
-    this.controlledUpstreamRetryDelayMs = null;
-    const delayMs = resolveRetryableTranscribeReplayDelayMs({
-      isControlledUpstreamRetryableError: isControlledUpstreamRetryableTranscribeError(
-        error,
-        this.network.isOnline(),
-        ErrorCodes.FOCUS_NETWORK_ERROR
-      ),
-      controlledDelayMs,
-      defaultUpstreamRetryDelayMs: this.DEFAULT_UPSTREAM_RETRY_DELAY_MS,
-      offlineReplayRetryDelayMs: this.OFFLINE_REPLAY_RETRY_DELAY_MS,
-    });
-    this.scheduleOfflineCacheReplay(reason, delayMs);
+    this.recovery.scheduleRetryableReplay(error, reason);
   }
 
   /**
@@ -742,10 +773,6 @@ export class SpeechToTextService {
     await this.offlineReplay.deleteFromCache(id);
   }
 
-  private isRecordingOwnerActive(ownerUserId: string | null): boolean {
-    return !!ownerUserId && this.auth.currentUserId() === ownerUserId;
-  }
-  
   /**
    * 更新离线待处理数量
    */

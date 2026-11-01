@@ -12,6 +12,20 @@ type SpeechToTextOfflineCacheStoreOptions = {
   unknownOwnerUserId: string;
 };
 
+export class SpeechToTextOfflineCacheWriteFailureTracker {
+  private readonly failures = new WeakSet<object>();
+
+  mark(error: unknown): void {
+    if (typeof error === 'object' && error !== null) {
+      this.failures.add(error);
+    }
+  }
+
+  has(error: unknown): boolean {
+    return typeof error === 'object' && error !== null && this.failures.has(error);
+  }
+}
+
 export class SpeechToTextOfflineCacheStore {
   private readonly dbProvider: () => IDBDatabase | null;
   private readonly storeName: string;

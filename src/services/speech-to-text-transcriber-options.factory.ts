@@ -3,6 +3,7 @@ import type { Session } from '@supabase/supabase-js';
 import { FOCUS_CONFIG } from '../config/focus.config';
 import { environment } from '../environments/environment';
 import { remainingQuota } from '../state/focus-stores';
+import { getCanonicalAuthStorageAuthority } from './supabase-auth-client-lifecycle.controller';
 import { SpeechToTextTranscriber } from './speech-to-text-transcriber';
 
 export interface SpeechToTextTranscriberFactoryOptions {
@@ -17,6 +18,14 @@ export interface SpeechToTextTranscriberFactoryOptions {
     }>;
   };
   supabaseClient: {
+    client: () => {
+      auth: {
+        getSession: () => Promise<{
+          data: { session: Session | null };
+          error: { message?: string } | null;
+        }>;
+      };
+    };
     clientAsync: () => Promise<{
       auth: {
         getSession: () => Promise<{
@@ -25,6 +34,7 @@ export interface SpeechToTextTranscriberFactoryOptions {
         }>;
       };
     } | null>;
+    getStorageKey: () => string | null;
   };
   toast: {
     error: (title: string, message: string) => void;
@@ -63,6 +73,7 @@ export function createSpeechToTextTranscriber(
     defaultUpstreamRetryDelayMs: options.defaultUpstreamRetryDelayMs,
     maxUpstreamRetryDelayMs: options.maxUpstreamRetryDelayMs,
     getCurrentUserId: options.getCurrentUserId,
+    getCanonicalAuthStorageAuthority,
     setRemainingQuota: value => remainingQuota.set(value),
     setControlledRetryDelayMs: options.setControlledRetryDelayMs,
   });
