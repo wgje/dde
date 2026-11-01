@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import type { BackupData } from '../../supabase/functions/_shared/backup-utils';
 
@@ -50,7 +50,12 @@ const ACTION_QUEUE_RESTORE_IDENTITY = {
 };
 
 describe('createLocalBackupUiRestoreStageOperations', () => {
-  afterEach(() => TestBed.resetTestingModule());
+  beforeEach(async () => clearRetryQueueTestState());
+
+  afterEach(async () => {
+    TestBed.resetTestingModule();
+    await clearRetryQueueTestState();
+  });
 
   it('binds all seven stages to durable read-back and their exact rollback slots', async () => {
     const snapshots = makeSnapshots();
@@ -840,6 +845,18 @@ function readRetryQueueLocalStorageItems(): unknown[] {
   const raw = localStorage.getItem('nanoflow.retry-queue');
   if (!raw) return [];
   return (JSON.parse(raw) as { items: unknown[] }).items;
+}
+
+async function clearRetryQueueTestState(): Promise<void> {
+  localStorage.removeItem('nanoflow.retry-queue');
+  if (typeof indexedDB === 'undefined') return;
+
+  await new Promise<void>((resolve, reject) => {
+    const request = indexedDB.deleteDatabase('nanoflow-retry-queue');
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error ?? new Error('RetryQueue test database deletion failed'));
+    request.onblocked = () => reject(new Error('RetryQueue test database deletion blocked'));
+  });
 }
 
 function snapshotForStage(
