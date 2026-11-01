@@ -26,6 +26,7 @@ import { TaskRow, ConnectionRow } from '../../../../models/supabase-types';
 import { LoggerService } from '../../../../services/logger.service';
 import { ClockSyncService } from '../../../../services/clock-sync.service';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
+import { SessionRuntimeResetRegistry } from '../../../../services/session-runtime-reset.service';
 import { ProjectDataService } from './project-data.service';
 import { SessionManagerService } from './session-manager.service';
 import { supabaseErrorToError } from '../../../../utils/supabase-error';
@@ -70,6 +71,11 @@ interface DeltaQueryRows {
   connectionRows: ConnectionRow[];
 }
 
+interface CursorSessionContext {
+  generation: number;
+  userId: string | null;
+}
+
 /** 获取 Supabase 客户端回调（门面持有离线降级 + sentry 归因语义） */
 export type GetSupabaseClientHandler = () => Promise<SupabaseClient | null>;
 
@@ -81,12 +87,19 @@ export class ProjectSyncCursorService {
   private readonly projectDataService = inject(ProjectDataService);
   private readonly sessionManager = inject(SessionManagerService);
   private readonly syncCursorPersistence = inject(SyncCursorPersistenceService);
+  private readonly sessionRuntimeReset = inject(SessionRuntimeResetRegistry);
 
   /** 由 SimpleSyncService 构造期注入（避免循环 DI）。 */
   getSupabaseClientHandler: GetSupabaseClientHandler | null = null;
 
   private readonly lastSyncTimeByProject: Map<string, string> = new Map();
   private readonly syncCursorByProject: Map<string, ProjectSyncCursor> = new Map();
+  private cacheOwnerUserId: string | null = null;
+  private sessionGeneration = 0;
+
+  constructor() {
+    this.sessionRuntimeReset.register('ProjectSyncCursorService', () => this.resetSessionRuntime());
+  }
 
   async checkForDrift(projectId: string): Promise<ProjectDeltaDrift> {
     if (isBrowserNetworkSuspendedWindow()) {
@@ -99,7 +112,7 @@ export class ProjectSyncCursorService {
     }
 
     const lastCursor = await this.ensureProjectSyncCursorLoaded(projectId);
-    const lastSyncTime = lastCursor?.updatedAt ?? this.lastSyncTimeByProject.get(projectId);
+    const lastSyncTime = lastCursor?.updatedAt ?? this.getLastSyncTime(projectId);
     if (!lastSyncTime) {
       return createEmptyProjectDeltaDrift();
     }
@@ -263,10 +276,12 @@ export class ProjectSyncCursorService {
    * 而不是本地数据水位——本机推送回显会把本地水位抬平，游标之后仍可能有未拉取行。
    */
   async ensureProjectSyncCursorLoaded(projectId: string): Promise<ProjectSyncCursor | null> {
+    const context = this.captureCursorSessionContext();
     const cached = this.syncCursorByProject.get(projectId);
     if (cached) return cached;
 
-    const persisted = await this.syncCursorPersistence.loadProjectCursor(projectId, this.getSyncCursorUserId());
+    const persisted = await this.syncCursorPersistence.loadProjectCursor(projectId, context.userId);
+    if (!this.isCursorSessionContextCurrent(context)) return null;
     if (persisted) {
       this.syncCursorByProject.set(projectId, persisted);
       this.lastSyncTimeByProject.set(projectId, persisted.updatedAt);
@@ -278,23 +293,28 @@ export class ProjectSyncCursorService {
   }
 
   setLastSyncTime(projectId: string, timestamp: string): void {
+    this.captureCursorSessionContext();
     this.lastSyncTimeByProject.set(projectId, timestamp);
     this.syncCursorByProject.delete(projectId);
   }
 
   getLastSyncTime(projectId: string): string | null {
+    this.captureCursorSessionContext();
     return this.lastSyncTimeByProject.get(projectId) || null;
   }
 
   getProjectSyncCursor(projectId: string): ProjectSyncCursor | null {
+    this.captureCursorSessionContext();
     return this.syncCursorByProject.get(projectId) ?? null;
   }
 
   async commitProjectSyncCursor(projectId: string, cursor: ProjectSyncCursor | null | undefined): Promise<void> {
     if (!this.isProjectSyncCursorCommitCandidate(cursor)) return;
+    const context = this.captureCursorSessionContext();
     if (this.shouldIgnoreStaleProjectSyncCursorCommit(projectId, cursor)) return;
 
-    const committed = await this.persistProjectSyncCursor(projectId, cursor);
+    const committed = await this.persistProjectSyncCursor(projectId, context.userId, cursor);
+    if (!this.isCursorSessionContextCurrent(context)) return;
     const nextCursor = this.resolveCommittedProjectSyncCursor(projectId, committed, cursor);
     this.applyProjectSyncCursorCommit(projectId, nextCursor);
   }
@@ -324,12 +344,13 @@ export class ProjectSyncCursorService {
 
   private async persistProjectSyncCursor(
     projectId: string,
+    userId: string | null,
     cursor: ProjectSyncCursor,
   ): Promise<ProjectSyncCursor> {
     try {
       return await this.syncCursorPersistence.commitProjectCursor(
         projectId,
-        this.getSyncCursorUserId(),
+        userId,
         cursor,
       );
     } catch (error) {
@@ -387,8 +408,35 @@ export class ProjectSyncCursorService {
   }
 
   clearLastSyncTime(projectId: string): void {
+    const context = this.captureCursorSessionContext();
     this.lastSyncTimeByProject.delete(projectId);
     this.syncCursorByProject.delete(projectId);
-    void this.syncCursorPersistence.clearProjectCursor(projectId, this.getSyncCursorUserId());
+    void this.syncCursorPersistence.clearProjectCursor(projectId, context.userId);
+  }
+
+  private captureCursorSessionContext(): CursorSessionContext {
+    const userId = this.getSyncCursorUserId();
+    if (userId !== this.cacheOwnerUserId) {
+      this.sessionGeneration += 1;
+      this.cacheOwnerUserId = userId;
+      this.clearMemoryCursors();
+    }
+    return { generation: this.sessionGeneration, userId };
+  }
+
+  private isCursorSessionContextCurrent(context: CursorSessionContext): boolean {
+    return context.generation === this.sessionGeneration
+      && context.userId === this.getSyncCursorUserId();
+  }
+
+  private resetSessionRuntime(): void {
+    this.sessionGeneration += 1;
+    this.cacheOwnerUserId = null;
+    this.clearMemoryCursors();
+  }
+
+  private clearMemoryCursors(): void {
+    this.lastSyncTimeByProject.clear();
+    this.syncCursorByProject.clear();
   }
 }

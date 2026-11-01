@@ -1,11 +1,15 @@
 import { Injector, runInInjectionContext } from '@angular/core';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, type Mock, vi } from 'vitest';
 import { FEATURE_FLAGS } from '../../../../config/feature-flags.config';
 import type { Connection, Task } from '../../../../models';
 import type { ConnectionRow, TaskRow } from '../../../../models/supabase-types';
 import { ClockSyncService } from '../../../../services/clock-sync.service';
 import { LoggerService } from '../../../../services/logger.service';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
+import {
+  SessionRuntimeResetRegistry,
+  type SessionRuntimeResetReason,
+} from '../../../../services/session-runtime-reset.service';
 import { SyncCursorPersistenceService } from '../../state/persistence';
 import type { ProjectSyncCursor } from '../../state/persistence';
 import { ProjectDataService } from './project-data.service';
@@ -138,6 +142,59 @@ describe('ProjectSyncCursorService', () => {
     expect(service.getLastSyncTime('project-1')).toBe(freshCursor.updatedAt);
     expect(service.getProjectSyncCursor('project-1')).toEqual(freshCursor);
   });
+
+  it('owner switch should reload the cursor from the new owner persistence scope', async () => {
+    const ownerOneCursor: ProjectSyncCursor = {
+      updatedAt: '2026-06-09T00:05:00.000Z',
+      entityType: 'task',
+      id: 'owner-1-task',
+    };
+    const ownerTwoCursor: ProjectSyncCursor = {
+      updatedAt: '2026-06-09T00:01:00.000Z',
+      entityType: 'task',
+      id: 'owner-2-task',
+    };
+    const { service, sessionManager, sessionRuntimeReset, syncCursorPersistence } = createService();
+    syncCursorPersistence.loadProjectCursor.mockImplementation(
+      async (_projectId: string, userId: string | null) =>
+        userId === 'user-1' ? ownerOneCursor : ownerTwoCursor,
+    );
+
+    await expect(service.ensureProjectSyncCursorLoaded('project-1')).resolves.toEqual(ownerOneCursor);
+    sessionManager.getRecentValidationSnapshot.mockReturnValue({ userId: 'user-2' });
+    sessionRuntimeReset.resetAll('owner-change');
+
+    await expect(service.ensureProjectSyncCursorLoaded('project-1')).resolves.toEqual(ownerTwoCursor);
+    expect(syncCursorPersistence.loadProjectCursor).toHaveBeenNthCalledWith(1, 'project-1', 'user-1');
+    expect(syncCursorPersistence.loadProjectCursor).toHaveBeenNthCalledWith(2, 'project-1', 'user-2');
+  });
+
+  it('late cursor load from the old owner should not repopulate cache after reset', async () => {
+    const oldOwnerLoad = createDeferred<ProjectSyncCursor | null>();
+    const ownerOneCursor: ProjectSyncCursor = {
+      updatedAt: '2026-06-09T00:05:00.000Z',
+      entityType: 'task',
+      id: 'owner-1-task',
+    };
+    const ownerTwoCursor: ProjectSyncCursor = {
+      updatedAt: '2026-06-09T00:01:00.000Z',
+      entityType: 'task',
+      id: 'owner-2-task',
+    };
+    const { service, sessionManager, sessionRuntimeReset, syncCursorPersistence } = createService();
+    syncCursorPersistence.loadProjectCursor
+      .mockImplementationOnce(() => oldOwnerLoad.promise)
+      .mockResolvedValueOnce(ownerTwoCursor);
+
+    const staleLoad = service.ensureProjectSyncCursorLoaded('project-1');
+    sessionManager.getRecentValidationSnapshot.mockReturnValue({ userId: 'user-2' });
+    sessionRuntimeReset.resetAll('owner-change');
+    await expect(service.ensureProjectSyncCursorLoaded('project-1')).resolves.toEqual(ownerTwoCursor);
+
+    oldOwnerLoad.resolve(ownerOneCursor);
+    await expect(staleLoad).resolves.toBeNull();
+    expect(service.getProjectSyncCursor('project-1')).toEqual(ownerTwoCursor);
+  });
 });
 
 function createService(): {
@@ -146,6 +203,12 @@ function createService(): {
     loadProjectCursor: ReturnType<typeof vi.fn>;
     commitProjectCursor: ReturnType<typeof vi.fn>;
     clearProjectCursor: ReturnType<typeof vi.fn>;
+  };
+  sessionManager: {
+    getRecentValidationSnapshot: ReturnType<typeof vi.fn>;
+  };
+  sessionRuntimeReset: {
+    resetAll: Mock<(reason: SessionRuntimeResetReason) => void>;
   };
 } {
   const logger = {
@@ -160,6 +223,17 @@ function createService(): {
     loadProjectCursor: vi.fn(async () => null),
     commitProjectCursor: vi.fn(async (_projectId, _userId, cursor) => cursor),
     clearProjectCursor: vi.fn(async () => undefined),
+  };
+  const sessionManager = {
+    getRecentValidationSnapshot: vi.fn(() => ({ userId: 'user-1' })),
+  };
+  let sessionResetCallback: ((reason: SessionRuntimeResetReason) => void) | null = null;
+  const sessionRuntimeReset = {
+    register: vi.fn((_owner: string, reset: (reason: SessionRuntimeResetReason) => void) => {
+      sessionResetCallback = reset;
+      return vi.fn();
+    }),
+    resetAll: vi.fn((reason: SessionRuntimeResetReason) => sessionResetCallback?.(reason)),
   };
   const injector = Injector.create({
     providers: [
@@ -203,10 +277,9 @@ function createService(): {
       },
       {
         provide: SessionManagerService,
-        useValue: {
-          getRecentValidationSnapshot: vi.fn(() => ({ userId: 'user-1' })),
-        },
+        useValue: sessionManager,
       },
+      { provide: SessionRuntimeResetRegistry, useValue: sessionRuntimeReset },
       {
         provide: SyncCursorPersistenceService,
         useValue: syncCursorPersistence,
@@ -217,6 +290,8 @@ function createService(): {
   return {
     service: runInInjectionContext(injector, () => injector.get(ProjectSyncCursorService)),
     syncCursorPersistence,
+    sessionManager,
+    sessionRuntimeReset,
   };
 }
 
