@@ -8,6 +8,7 @@ import { LayoutService } from './layout.service';
 import { LoggerService } from './logger.service';
 import { OptimisticStateService } from './optimistic-state.service';
 import { ProjectStateService } from './project-state.service';
+import { SessionRuntimeResetRegistry } from './session-runtime-reset.service';
 import { SyncCoordinatorService } from './sync-coordinator.service';
 import { TaskRecordTrackingService } from './task-record-tracking.service';
 import { ToastService } from './toast.service';
@@ -29,6 +30,8 @@ export interface TaskRecordTrackingSpecHarness {
   mockAuthService: MockRecord;
   mockLoggerCategory: MockRecord;
   mockToastService: MockRecord;
+  sessionRuntimeReset: SessionRuntimeResetRegistry;
+  destroy(): void;
   restoreConsole(): void;
 }
 
@@ -94,8 +97,21 @@ export function createTaskRecordTrackingSpecHarness(): TaskRecordTrackingSpecHar
     warning: vi.fn(),
     info: vi.fn(),
   };
+  let activeOwner = { projectId: 'proj-1' as string | null, generation: 1 };
   const mockProjectState = {
     activeProject: vi.fn().mockReturnValue(createProject()),
+    captureActiveProjectOwner: vi.fn(() => ({ ...activeOwner })),
+    isActiveProjectOwnerCurrent: vi.fn((owner: typeof activeOwner) =>
+      owner.projectId === activeOwner.projectId && owner.generation === activeOwner.generation),
+    setActiveProjectOwner: (projectId: string | null) => {
+      if (activeOwner.projectId !== projectId) {
+        activeOwner = { projectId, generation: activeOwner.generation + 1 };
+      }
+    },
+    getProjectWithCurrentData: vi.fn((projectId: string) => {
+      const project = mockProjectState.activeProject();
+      return project?.id === projectId ? project : undefined;
+    }),
     updateProjects: vi.fn((fn: (projects: Project[]) => Project[]) => {
       fn([createProject()]);
     }),
@@ -136,13 +152,22 @@ export function createTaskRecordTrackingSpecHarness(): TaskRecordTrackingSpecHar
   const mockLayoutService = {
     rebalance: vi.fn((p: Project) => p),
   };
+  const snapshotCreatedAtById = new Map<string, number>();
   const mockOptimisticState = {
-    hasSnapshot: vi.fn().mockReturnValue(false),
-    commitSnapshot: vi.fn(),
+    hasSnapshot: vi.fn((snapshotId: string) => snapshotCreatedAtById.has(snapshotId)),
+    getSnapshotCreatedAt: vi.fn((snapshotId: string) => snapshotCreatedAtById.get(snapshotId) ?? null),
+    commitSnapshot: vi.fn((snapshotId: string) => {
+      snapshotCreatedAtById.delete(snapshotId);
+    }),
+    discardSnapshot: vi.fn((snapshotId: string) => {
+      snapshotCreatedAtById.delete(snapshotId);
+    }),
     rollbackSnapshot: vi.fn(),
     restoreTasksFromSnapshot: vi.fn().mockReturnValue(true),
     getTaskFromSnapshot: vi.fn().mockReturnValue(null),
-    snapshots: new Map(),
+    setSnapshotCreatedAt: (snapshotId: string, createdAt: number) => {
+      snapshotCreatedAtById.set(snapshotId, createdAt);
+    },
   };
   const mockUiState = {
     isMobile: vi.fn().mockReturnValue(false),
@@ -164,6 +189,7 @@ export function createTaskRecordTrackingSpecHarness(): TaskRecordTrackingSpecHar
   const injector = Injector.create({
     providers: [
       TaskRecordTrackingService,
+      SessionRuntimeResetRegistry,
       { provide: ProjectStateService, useValue: mockProjectState },
       { provide: UndoService, useValue: mockUndoService },
       { provide: SyncCoordinatorService, useValue: mockSyncCoordinator },
@@ -178,8 +204,10 @@ export function createTaskRecordTrackingSpecHarness(): TaskRecordTrackingSpecHar
     ],
   });
 
+  let destroyed = false;
   return {
     service: runInInjectionContext(injector, () => injector.get(TaskRecordTrackingService)),
+    sessionRuntimeReset: injector.get(SessionRuntimeResetRegistry),
     mockProjectState,
     mockUndoService,
     mockSyncCoordinator,
@@ -191,6 +219,11 @@ export function createTaskRecordTrackingSpecHarness(): TaskRecordTrackingSpecHar
     mockAuthService,
     mockLoggerCategory,
     mockToastService,
+    destroy: () => {
+      if (destroyed) return;
+      destroyed = true;
+      (injector as Injector & { destroy: () => void }).destroy();
+    },
     restoreConsole: () => {
       consoleWarnSpy.mockRestore();
       consoleErrorSpy.mockRestore();

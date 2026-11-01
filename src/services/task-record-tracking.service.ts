@@ -1,6 +1,7 @@
 /** TaskRecordTrackingService - 任务操作记录、撤销重做、变更追踪与同步结果处理。 */
-import { Injectable, inject } from '@angular/core';
-import { ProjectStateService } from './project-state.service';
+import { DestroyRef, Injectable, inject } from '@angular/core';
+import { ProjectStateService, type ActiveProjectOwner } from './project-state.service';
+import { SessionRuntimeResetRegistry } from './session-runtime-reset.service';
 import { UndoService } from './undo.service';
 import { SyncCoordinatorService } from './sync-coordinator.service';
 import { ChangeTrackerService } from './change-tracker.service';
@@ -11,7 +12,6 @@ import { UiStateService } from './ui-state.service';
 import { LoggerService } from './logger.service';
 import { ActionQueueService } from './action-queue.service';
 import { AuthService } from './auth.service';
-import { POLLING_CHECK_DELAY } from '../config/timeout.config';
 import { Project, Task, Connection } from '../models';
 import type { EnqueueParams } from './action-queue.types';
 import {
@@ -34,11 +34,21 @@ import {
   buildImmediateOfflineSnapshotProjects,
   persistImmediateOfflineSnapshot,
 } from './task-record-tracking-offline-snapshot.helpers';
+import { TaskRecordSyncResultController } from './task-record-sync-result.controller';
+import { createProjectTaskDeleteBatchOperationId } from './project-operation-child-operation-id';
 
 type RecordAndUpdateDurablyOptions = {
   updateType?: 'content' | 'structure' | 'position';
   debouncedUndo?: boolean;
   recordUndo?: boolean;
+};
+
+type RecordUpdateContext = {
+  projectId: string;
+  uiOwner: ActiveProjectOwner;
+  requireCurrentUiOwner: boolean;
+  ownerUserId: string | null;
+  generation: number;
 };
 
 @Injectable({
@@ -57,13 +67,40 @@ export class TaskRecordTrackingService {
   private readonly logger = this.loggerService.category('TaskRecord');
   private readonly actionQueue = inject(ActionQueueService);
   private readonly authService = inject(AuthService);
+  private readonly sessionRuntimeReset = inject(SessionRuntimeResetRegistry);
+  private readonly destroyRef = inject(DestroyRef);
+  private readonly syncResultController = new TaskRecordSyncResultController({
+    currentOwnerUserId: () => this.authService.currentUserId(),
+    getSnapshotCreatedAt: snapshotId => this.optimisticState.getSnapshotCreatedAt(snapshotId),
+    commitSnapshot: snapshotId => this.optimisticState.commitSnapshot(snapshotId),
+    discardSnapshot: snapshotId => this.optimisticState.discardSnapshot(snapshotId),
+    syncError: () => this.syncCoordinator.syncError(),
+    hasPendingLocalChanges: () => this.syncCoordinator.hasPendingLocalChanges(),
+    logger: this.logger,
+  });
 
   /** 更新锁：防止快照和更新之间的竞态条件 */
   private isUpdating = false;
   private recordUpdateTail: Promise<unknown> | null = null;
+  private recordUpdateGeneration = 0;
+
+  /** undo/redo 事务锁：prepare 与 commit 之间只允许一个重放事务，连按快捷键直接忽略 */
+  private undoRedoTransactionInFlight = false;
 
   /** 上次更新类型（由 adapter 在调用 core 方法前设置） */
   lastUpdateType: 'content' | 'structure' | 'position' = 'structure';
+
+  constructor() {
+    const unregisterRuntimeReset = this.sessionRuntimeReset.register(
+      'TaskRecordTrackingService',
+      () => { this.recordUpdateGeneration += 1; },
+    );
+    this.destroyRef.onDestroy(() => {
+      this.recordUpdateGeneration += 1;
+      unregisterRuntimeReset();
+      this.syncResultController.destroy();
+    });
+  }
 
   private normalizeProjectConnections(project: Project): Project {
     return normalizeTaskRecordProjectConnections(project, this.logger);
@@ -86,8 +123,22 @@ export class TaskRecordTrackingService {
     );
   }
 
-  /** 执行撤销操作 */
+  /** 执行撤销操作（并发第二次调用被忽略并返回 false，不排队） */
   async performUndo(): Promise<boolean> {
+    if (this.undoRedoTransactionInFlight) {
+      this.logger.debug('撤销/重做事务进行中，忽略本次撤销请求');
+      return false;
+    }
+
+    this.undoRedoTransactionInFlight = true;
+    try {
+      return await this.runPerformUndo();
+    } finally {
+      this.undoRedoTransactionInFlight = false;
+    }
+  }
+
+  private async runPerformUndo(): Promise<boolean> {
     const activeProject = this.projectState.activeProject();
     const currentVersion = activeProject?.version;
     const result = this.undoService.prepareUndo(currentVersion);
@@ -134,8 +185,22 @@ export class TaskRecordTrackingService {
     return true;
   }
 
-  /** 执行重做操作 */
+  /** 执行重做操作（并发第二次调用被忽略并返回 false，不排队） */
   async performRedo(): Promise<boolean> {
+    if (this.undoRedoTransactionInFlight) {
+      this.logger.debug('撤销/重做事务进行中，忽略本次重做请求');
+      return false;
+    }
+
+    this.undoRedoTransactionInFlight = true;
+    try {
+      return await this.runPerformRedo();
+    } finally {
+      this.undoRedoTransactionInFlight = false;
+    }
+  }
+
+  private async runPerformRedo(): Promise<boolean> {
     const activeProject = this.projectState.activeProject();
     const currentVersion = activeProject?.version;
     const result = this.undoService.prepareRedo(currentVersion);
@@ -210,7 +275,19 @@ export class TaskRecordTrackingService {
     options: RecordAndUpdateDurablyOptions,
     explicitProjectId?: string,
   ): Promise<boolean> {
-    const run = () => this.runRecordAndUpdateDurably(mutator, options, explicitProjectId);
+    const project = explicitProjectId
+      ? this.projectState.getProjectWithCurrentData(explicitProjectId)
+      : this.projectState.activeProject();
+    if (!project) return Promise.resolve(false);
+
+    const context: RecordUpdateContext = {
+      projectId: project.id,
+      uiOwner: this.projectState.captureActiveProjectOwner(),
+      requireCurrentUiOwner: explicitProjectId !== undefined,
+      ownerUserId: this.resolveRecoverableOutboxOwnerUserId(),
+      generation: this.recordUpdateGeneration,
+    };
+    const run = () => this.runRecordAndUpdateDurably(mutator, options, context);
     const currentTail = this.recordUpdateTail;
     const result = currentTail ? currentTail.then(run, run) : run();
     this.recordUpdateTail = result.finally(() => {
@@ -238,43 +315,34 @@ export class TaskRecordTrackingService {
   private async runRecordAndUpdateDurably(
     mutator: (project: Project) => Project,
     options: RecordAndUpdateDurablyOptions,
-    explicitProjectId?: string,
+    context: RecordUpdateContext,
   ): Promise<boolean> {
-    if (this.isUpdating) {
-      this.logger.warn('[TaskRecord] 检测到并发更新，跳过本次操作');
-      return false;
-    }
-
-    this.isUpdating = true;
-
+    const project = this.beginRecordUpdate(context);
+    if (!project) return false;
     try {
-      const project = explicitProjectId
-        ? this.projectState.getProjectWithCurrentData(explicitProjectId)
-        : this.projectState.activeProject();
-      if (!project) return false;
-
       const targetProjectId = project.id;
       const updateType = options.updateType ?? 'structure';
       this.lastUpdateType = updateType;
-
       const beforeSnapshot = this.undoService.createProjectSnapshot(project);
       const currentVersion = project.version ?? 0;
       const beforeTaskMap = new Map(project.tasks.map(t => [t.id, t] as const));
       const beforeConnectionMap = buildTaskRecordTrackingConnectionMap(project.connections, this.logger);
       const afterProject = this.normalizeProjectConnections(mutator(project));
       const outboxActions = this.collectOutboxActions(
-        afterProject,
-        beforeTaskMap,
-        beforeConnectionMap,
+        afterProject, beforeTaskMap, beforeConnectionMap,
+        context.ownerUserId,
       );
       const preCommit = await this.prepareDurableCommit({
         afterProject,
         beforeConnectionMap,
         beforeTaskMap,
         outboxActions,
+        ownerUserId: context.ownerUserId,
+        canPublishUi: () => this.projectState.isActiveProjectOwnerCurrent(context.uiOwner),
         targetProjectId,
       });
       if (!preCommit) return false;
+      if (!this.isRecordUpdateContextCurrent(context)) return false;
 
       this.commitProjectToState(targetProjectId, afterProject);
 
@@ -285,14 +353,28 @@ export class TaskRecordTrackingService {
         beforeTaskMap,
         currentVersion,
         options,
+        ownerUserId: context.ownerUserId,
         preCommit,
         targetProjectId,
         updateType,
       });
-      return true;
+      return !context.requireCurrentUiOwner
+        || this.projectState.isActiveProjectOwnerCurrent(context.uiOwner);
     } finally {
       this.isUpdating = false;
     }
+  }
+
+  private beginRecordUpdate(context: RecordUpdateContext): Project | null {
+    if (!this.isRecordUpdateContextCurrent(context)) return null;
+    if (this.isUpdating) {
+      this.logger.warn('[TaskRecord] 检测到并发更新，跳过本次操作');
+      return null;
+    }
+
+    const project = this.projectState.getProjectWithCurrentData(context.projectId) ?? null;
+    if (project) this.isUpdating = true;
+    return project;
   }
 
   private commitProjectToState(targetProjectId: string, afterProject: Project): void {
@@ -330,7 +412,9 @@ export class TaskRecordTrackingService {
     afterProject: Project;
     beforeConnectionMap: Map<string, Connection>;
     beforeTaskMap: Map<string, Task>;
+    canPublishUi: () => boolean;
     outboxActions: EnqueueParams[];
+    ownerUserId: string | null;
     targetProjectId: string;
   }): Promise<{ localOnlySnapshot: true | 'already-persisted' } | false> {
     if (hasMissingRecoverableTaskRecordTrackingOutboxIntent({
@@ -340,13 +424,14 @@ export class TaskRecordTrackingService {
       outboxActions: input.outboxActions,
       logger: this.logger,
     })) {
-      this.reportMissingRecoverableOutboxIntent(input.targetProjectId);
+      this.reportMissingRecoverableOutboxIntent(input.targetProjectId, input.canPublishUi);
       return false;
     }
 
     const persisted = await this.persistOutboxActionsDurably(
       input.targetProjectId,
       input.outboxActions,
+      input.canPublishUi,
     );
     if (!persisted) return false;
 
@@ -354,6 +439,8 @@ export class TaskRecordTrackingService {
       input.targetProjectId,
       input.afterProject,
       input.outboxActions,
+      input.ownerUserId,
+      input.canPublishUi,
     );
     return localOnlySnapshot ? { localOnlySnapshot } : false;
   }
@@ -365,6 +452,7 @@ export class TaskRecordTrackingService {
     beforeTaskMap: Map<string, Task>;
     currentVersion: number;
     options: RecordAndUpdateDurablyOptions;
+    ownerUserId: string | null;
     preCommit: { localOnlySnapshot: true | 'already-persisted' };
     targetProjectId: string;
     updateType: NonNullable<RecordAndUpdateDurablyOptions['updateType']>;
@@ -390,16 +478,24 @@ export class TaskRecordTrackingService {
     this.syncCoordinator.markLocalChanges(input.updateType);
     this.syncCoordinator.schedulePersist();
     if (input.preCommit.localOnlySnapshot !== 'already-persisted') {
-      await this.persistImmediateOfflineSnapshot(input.targetProjectId, input.afterProject);
+      await this.persistImmediateOfflineSnapshot(
+        input.targetProjectId,
+        input.afterProject,
+        input.ownerUserId,
+      );
     }
   }
 
-  private async persistImmediateOfflineSnapshot(projectId: string, afterProject: Project): Promise<void> {
+  private async persistImmediateOfflineSnapshot(
+    projectId: string,
+    afterProject: Project,
+    ownerUserId: string | null,
+  ): Promise<void> {
     await persistImmediateOfflineSnapshot({
       projectId,
       afterProject,
       currentProjects: this.projectState.getProjectsWithCurrentData(),
-      currentUserId: this.authService.currentUserId(),
+      currentUserId: ownerUserId,
       logger: this.logger,
       saveOfflineSnapshotAndWait: (projects, userId) =>
         this.syncCoordinator.saveOfflineSnapshotAndWait(projects, userId),
@@ -410,6 +506,8 @@ export class TaskRecordTrackingService {
     projectId: string,
     afterProject: Project,
     outboxActions: EnqueueParams[],
+    ownerUserId: string | null,
+    canPublishUi: () => boolean,
   ): Promise<true | 'already-persisted' | false> {
     if (afterProject.syncSource !== 'local-only' || outboxActions.length > 0) {
       return true;
@@ -422,7 +520,7 @@ export class TaskRecordTrackingService {
           targetProjectId: projectId,
           afterProject,
         }),
-        this.authService.currentUserId(),
+        ownerUserId,
       );
       return 'already-persisted';
     } catch (error) {
@@ -430,49 +528,16 @@ export class TaskRecordTrackingService {
         projectId,
         error,
       });
-      this.toastService.error(
-        '本地保存失败',
-        '本地快照未能写入，本次本地变更未提交',
-      );
+      if (canPublishUi()) {
+        this.toastService.error('本地保存失败', '本地快照未能写入，本次本地变更未提交');
+      }
       return false;
     }
   }
 
   /** 监听持久化结果：远端失败不回滚本地已提交快照，等待后台同步收敛。 */
   setupSyncResultHandler(snapshotId: string): void {
-    const checkSync = () => {
-      if (!this.optimisticState.hasSnapshot(snapshotId)) return;
-
-      const snapshot = this.optimisticState['snapshots'].get(snapshotId);
-      const shouldKeepWaiting = !!snapshot && Date.now() - snapshot.createdAt < 30000;
-      const syncError = this.syncCoordinator.syncError();
-      if (syncError) {
-        if (shouldKeepWaiting) {
-          this.logger.warn('同步暂不可用，保留本地快照等待后台重试', { snapshotId, error: syncError });
-          setTimeout(checkSync, POLLING_CHECK_DELAY.CONDITION_READY);
-          return;
-        }
-
-        this.logger.debug('同步错误等待超时，提交本地快照并交由后台重试收敛', { snapshotId, error: syncError });
-        this.optimisticState.commitSnapshot(snapshotId);
-        return;
-      }
-
-      if (!this.syncCoordinator.hasPendingLocalChanges()) {
-        this.logger.debug('同步成功，提交快照', { snapshotId });
-        this.optimisticState.commitSnapshot(snapshotId);
-        return;
-      }
-
-      if (shouldKeepWaiting) {
-        setTimeout(checkSync, POLLING_CHECK_DELAY.CONDITION_READY);
-      } else {
-        this.logger.debug('同步超时，假定成功', { snapshotId });
-        this.optimisticState.commitSnapshot(snapshotId);
-      }
-    };
-
-    setTimeout(checkSync, POLLING_CHECK_DELAY.SYNC_READY);
+    this.syncResultController.track(snapshotId);
   }
 
   /** 追踪项目变更，记录到 ChangeTrackerService */
@@ -527,20 +592,23 @@ export class TaskRecordTrackingService {
     afterProject: Project,
     beforeTaskMap: Map<string, Task>,
     beforeConnectionMap: Map<string, Connection>,
+    ownerUserId: string | null,
   ): EnqueueParams[] {
     return collectTaskRecordTrackingOutboxActions({
       project: afterProject,
       beforeTaskMap,
       beforeConnectionMap,
-      ...this.createOutboxContext(),
+      ...this.createOutboxContext(ownerUserId),
     });
   }
 
-  private reportMissingRecoverableOutboxIntent(projectId: string): void {
-    this.toastService.error(
-      '本地保存失败',
-      '当前认证或归属信息尚未就绪，无法写入可恢复的离线队列，本次本地变更未提交',
-    );
+  private reportMissingRecoverableOutboxIntent(projectId: string, canPublishUi: () => boolean): void {
+    if (canPublishUi()) {
+      this.toastService.error(
+        '本地保存失败',
+        '当前认证或归属信息尚未就绪，无法写入可恢复的离线队列，本次本地变更未提交',
+      );
+    }
     this.logger.error('云项目变更缺少可恢复的离线队列意图，本地变更未提交', { projectId });
   }
 
@@ -556,11 +624,16 @@ export class TaskRecordTrackingService {
     });
   }
 
-  private createOutboxContext(): TaskRecordTrackingOutboxContext {
+  private createOutboxContext(ownerUserId: string | null): TaskRecordTrackingOutboxContext {
     return {
-      sourceUserId: this.resolveRecoverableOutboxOwnerUserId(),
+      sourceUserId: ownerUserId,
       logger: this.logger,
     };
+  }
+
+  private isRecordUpdateContextCurrent(context: RecordUpdateContext): boolean {
+    return context.generation === this.recordUpdateGeneration
+      && context.ownerUserId === this.resolveRecoverableOutboxOwnerUserId();
   }
 
   private resolveRecoverableOutboxOwnerUserId(): string | null {
@@ -568,8 +641,8 @@ export class TaskRecordTrackingService {
   }
 
   private async persistOutboxActionsDurably(
-    projectId: string,
-    actions: EnqueueParams[],
+    projectId: string, actions: EnqueueParams[],
+    canPublishUi: () => boolean,
   ): Promise<boolean> {
     const ownerUserId = this.resolveOutboxQueueOwnerUserId(actions);
     if (actions.length > 1) {
@@ -581,7 +654,7 @@ export class TaskRecordTrackingService {
           actionIds.length !== actions.length ||
           actionIds.some(actionId => typeof actionId !== 'string' || actionId.length === 0)
         ) {
-          this.reportDurableOutboxPreCommitFailure(projectId, actions[0]);
+          this.reportDurableOutboxPreCommitFailure(projectId, actions[0], canPublishUi);
           return false;
         }
         return true;
@@ -591,18 +664,17 @@ export class TaskRecordTrackingService {
           actionCount: actions.length,
           error,
         });
-        this.reportDurableOutboxPreCommitFailure(projectId, actions[0]);
+        this.reportDurableOutboxPreCommitFailure(projectId, actions[0], canPublishUi);
         return false;
       }
     }
-
     for (const action of actions) {
       try {
         const actionId = ownerUserId
           ? await this.actionQueue.enqueueDurablyForOwner(ownerUserId, action)
           : await this.actionQueue.enqueueDurably(action);
         if (!actionId) {
-          this.reportDurableOutboxPreCommitFailure(projectId, action);
+          this.reportDurableOutboxPreCommitFailure(projectId, action, canPublishUi);
           return false;
         }
       } catch (error) {
@@ -612,7 +684,7 @@ export class TaskRecordTrackingService {
           entityId: action.entityId,
           error,
         });
-        this.reportDurableOutboxPreCommitFailure(projectId, action);
+        this.reportDurableOutboxPreCommitFailure(projectId, action, canPublishUi);
         return false;
       }
     }
@@ -635,11 +707,15 @@ export class TaskRecordTrackingService {
     return null;
   }
 
-  private reportDurableOutboxPreCommitFailure(projectId: string, action: EnqueueParams): void {
-    this.toastService.error(
-      '本地保存失败',
-      '离线同步队列未能写入，本次本地变更未提交，请释放浏览器存储空间后重试',
-    );
+  private reportDurableOutboxPreCommitFailure(
+    projectId: string, action: EnqueueParams, canPublishUi: () => boolean,
+  ): void {
+    if (canPublishUi()) {
+      this.toastService.error(
+        '本地保存失败',
+        '离线同步队列未能写入，本次本地变更未提交，请释放浏览器存储空间后重试',
+      );
+    }
     this.logger.error('离线同步队列未能持久化，本地变更未提交', {
       projectId,
       entityType: action.entityType,
@@ -655,23 +731,33 @@ export class TaskRecordTrackingService {
   async triggerServerSideDelete(
     projectId: string,
     explicitIds: string[],
-    snapshotId: string
+    snapshotId: string,
+    canPublishUi: () => boolean = () => true,
   ): Promise<void> {
     try {
-      const project = this.projectState.activeProject();
+      const project = this.projectState.getProjectWithCurrentData(projectId);
       if (!project) return;
 
       const justDeletedTaskIds = collectJustDeletedTaskIds(project.tasks, explicitIds);
       if (justDeletedTaskIds.length === 0) return;
 
+      const tombstoneTimestamps = buildTaskTombstoneTimestamps(project.tasks, justDeletedTaskIds);
+      const baseUpdatedAtMap = buildTaskDeleteBaseUpdatedAtMap(
+        justDeletedTaskIds,
+        (taskId) => this.optimisticState.getTaskFromSnapshot(snapshotId, taskId),
+      );
+      const operationId = createProjectTaskDeleteBatchOperationId(
+        snapshotId,
+        projectId,
+        justDeletedTaskIds,
+        baseUpdatedAtMap,
+      );
       const result = await this.syncCoordinator.softDeleteTasksBatch(
         projectId,
         justDeletedTaskIds,
-        buildTaskTombstoneTimestamps(project.tasks, justDeletedTaskIds),
-        buildTaskDeleteBaseUpdatedAtMap(
-          justDeletedTaskIds,
-          (taskId) => this.optimisticState.getTaskFromSnapshot(snapshotId, taskId),
-        ),
+        tombstoneTimestamps,
+        baseUpdatedAtMap,
+        operationId,
       );
 
       if (result === -1) {
@@ -684,7 +770,9 @@ export class TaskRecordTrackingService {
         this.optimisticState.restoreTasksFromSnapshot(snapshotId, justDeletedTaskIds, {
           showToast: false,
         });
-        this.toastService.warning('删除被服务端阻止', '批量删除超过安全限制，本次涉及的任务已撤回，回收站中其他内容保持不变');
+        if (canPublishUi()) {
+          this.toastService.warning('删除被服务端阻止', '批量删除超过安全限制，本次涉及的任务已撤回，回收站中其他内容保持不变');
+        }
       }
     } catch (e) {
       this.logger.error('服务端删除保护调用失败', e);

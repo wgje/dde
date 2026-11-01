@@ -240,6 +240,26 @@ export function registerTaskRecordTrackingDurableSpecs(
       );
     });
 
+    it('keeps stale durable failure classification but suppresses its project A toast in B', async () => {
+      const queueWrite = createDeferred<string>();
+      const project = createProject({ tasks: [createTask({ title: 'Before' })] });
+      context.mockProjectState().activeProject.mockReturnValue(project);
+      context.mockActionQueue().enqueueDurably.mockReturnValueOnce(queueWrite.promise);
+
+      const result = context.service().recordAndUpdateDurably(current => ({
+        ...current,
+        tasks: current.tasks.map(task => ({ ...task, title: 'After' })),
+      }));
+      await vi.waitFor(() => expect(context.mockActionQueue().enqueueDurably).toHaveBeenCalledOnce());
+      context.mockProjectState().setActiveProjectOwner('project-b');
+      queueWrite.resolve('');
+
+      await expect(result).resolves.toBe(false);
+      expect(context.mockLoggerCategory().error).toHaveBeenCalledWith(
+        '离线同步队列未能持久化，本地变更未提交', expect.any(Object));
+      expect(context.mockToastService().error).not.toHaveBeenCalled();
+    });
+
     it('should leave local UI unchanged when durable task outbox persistence fails', async () => {
       const project = createProject({
         tasks: [

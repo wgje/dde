@@ -39,8 +39,18 @@ describe('task record tracking outbox helpers', () => {
     });
 
     expect(actions).toEqual(expect.arrayContaining([
-      expect.objectContaining({ type: 'update', entityType: 'task', entityId: 'task-existing' }),
-      expect.objectContaining({ type: 'create', entityType: 'task', entityId: 'task-created' }),
+      expect.objectContaining({
+        type: 'update',
+        entityType: 'task',
+        entityId: 'task-existing',
+        payload: expect.objectContaining({ writeIntent: 'task_text_update' }),
+      }),
+      expect.objectContaining({
+        type: 'create',
+        entityType: 'task',
+        entityId: 'task-created',
+        payload: expect.objectContaining({ writeIntent: 'task_full_upsert' }),
+      }),
       expect.objectContaining({
         type: 'delete',
         entityType: 'task',
@@ -80,6 +90,39 @@ describe('task record tracking outbox helpers', () => {
       'attachments',
       'attentionMeta',
     ]));
+  });
+
+  it('marks a stage-to-unassigned task update as an explicit structure write', () => {
+    const beforeTask = createTask({
+      id: 'task-stage-change',
+      stage: 2,
+      updatedAt: '2026-06-13T00:00:00.000Z',
+    });
+    const project = createProject({
+      tasks: [{
+        ...beforeTask,
+        stage: null,
+        updatedAt: '2026-06-13T01:00:00.000Z',
+      }],
+      connections: [],
+    });
+
+    const actions = collectTaskRecordTrackingOutboxActions({
+      project,
+      beforeTaskMap: new Map([[beforeTask.id, beforeTask]]),
+      beforeConnectionMap: new Map(),
+      sourceUserId: 'user-1',
+      logger: { warn: vi.fn(), debug: vi.fn() },
+    });
+
+    expect(actions).toContainEqual(expect.objectContaining({
+      type: 'update',
+      entityType: 'task',
+      entityId: beforeTask.id,
+      payload: expect.objectContaining({
+        writeIntent: 'task_structure_update',
+      }),
+    }));
   });
 
   it('skips outbox actions for local-only projects', () => {

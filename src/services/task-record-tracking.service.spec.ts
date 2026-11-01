@@ -20,6 +20,10 @@ import {
   type TaskRecordTrackingSpecHarness,
 } from './task-record-tracking.service.spec-helpers';
 import { registerTaskRecordTrackingDurableSpecs } from './task-record-tracking-durable.spec-helpers';
+import {
+  registerTaskRecordTrackingQueuedContextSpecs,
+} from './task-record-tracking-queued-context.spec-helpers';
+import { registerTaskRecordTrackingSyncResultSpecs } from './task-record-tracking-sync-result.spec-helpers';
 
 function createDeferred<T = unknown>(): {
   promise: Promise<T>;
@@ -60,6 +64,7 @@ describe('TaskRecordTrackingService', () => {
   });
 
   afterEach(() => {
+    harness.destroy();
     harness.restoreConsole();
   });
 
@@ -324,9 +329,93 @@ describe('TaskRecordTrackingService', () => {
     });
   });
 
+  // ==================== undo/redo 事务并发锁 ====================
+
+  describe('undo/redo transaction in-flight lock', () => {
+    it('并发第二次 performUndo 应被忽略且只 prepare 一次', async () => {
+      const snapshot = { tasks: [createTask()], connections: [] };
+      mockUndoService.prepareUndo.mockReturnValue({
+        type: 'task-update',
+        projectId: 'proj-1',
+        data: { before: snapshot, after: {} },
+      });
+
+      const first = service.performUndo();
+      const second = service.performUndo();
+
+      await expect(second).resolves.toBe(false);
+      await expect(first).resolves.toBe(true);
+      expect(mockUndoService.prepareUndo).toHaveBeenCalledTimes(1);
+      expect(mockUndoService.commitPreparedUndo).toHaveBeenCalledTimes(1);
+
+      // 事务结束后锁应释放：再次 undo 允许重新 prepare
+      await expect(service.performUndo()).resolves.toBe(true);
+      expect(mockUndoService.prepareUndo).toHaveBeenCalledTimes(2);
+    });
+
+    it('并发第二次 performRedo 应被忽略且只 prepare 一次', async () => {
+      const snapshot = { tasks: [createTask()], connections: [] };
+      mockUndoService.prepareRedo.mockReturnValue({
+        type: 'task-update',
+        projectId: 'proj-1',
+        data: { before: {}, after: snapshot },
+      });
+
+      const first = service.performRedo();
+      const second = service.performRedo();
+
+      await expect(second).resolves.toBe(false);
+      await expect(first).resolves.toBe(true);
+      expect(mockUndoService.prepareRedo).toHaveBeenCalledTimes(1);
+      expect(mockUndoService.commitPreparedRedo).toHaveBeenCalledTimes(1);
+    });
+
+    it('undo 事务进行中时并发 performRedo 也应被忽略', async () => {
+      const snapshot = { tasks: [createTask()], connections: [] };
+      mockUndoService.prepareUndo.mockReturnValue({
+        type: 'task-update',
+        projectId: 'proj-1',
+        data: { before: snapshot, after: {} },
+      });
+
+      const undoPromise = service.performUndo();
+      const redoPromise = service.performRedo();
+
+      await expect(redoPromise).resolves.toBe(false);
+      await expect(undoPromise).resolves.toBe(true);
+      expect(mockUndoService.prepareRedo).not.toHaveBeenCalled();
+    });
+  });
+
   // ==================== recordAndUpdate ====================
 
   describe('recordAndUpdate', () => {
+    it('explicit A durable work commits to A but returns false after A→B→A ownership drift', async () => {
+      const queueWrite = createDeferred<string>();
+      const projectA = createProject({
+        id: 'proj-1',
+        tasks: [createTask({ id: 'shared-task', title: 'A before' })],
+      });
+      mockProjectState.activeProject.mockReturnValue(projectA);
+      mockProjectState.getProjectWithCurrentData.mockImplementation((projectId: string) =>
+        projectId === projectA.id ? projectA : undefined);
+      mockActionQueue.enqueueDurably.mockReturnValueOnce(queueWrite.promise);
+
+      const pending = service.recordAndUpdateProjectDurably('proj-1', project => ({
+        ...project,
+        tasks: project.tasks.map(task => task.id === 'shared-task'
+          ? { ...task, title: 'A after', updatedAt: '2026-07-31T00:00:00.000Z' }
+          : task),
+      }), { updateType: 'content' });
+      mockProjectState.setActiveProjectOwner('proj-2');
+      mockProjectState.setActiveProjectOwner('proj-1');
+      queueWrite.resolve('queued-a');
+
+      await expect(pending).resolves.toBe(false);
+      expect(mockProjectState.updateProjects).toHaveBeenCalledOnce();
+      expect(mockToastService.error).not.toHaveBeenCalled();
+    });
+
     it('should apply mutator and record undo action', async () => {
       const mutator = vi.fn((p: Project) => ({ ...p, name: 'Updated' }));
 
@@ -442,6 +531,8 @@ describe('TaskRecordTrackingService', () => {
         title: 'Second',
       }));
     });
+
+    registerTaskRecordTrackingQueuedContextSpecs(() => harness);
 
     it('should skip when no active project', async () => {
       mockProjectState.activeProject.mockReturnValue(null);
@@ -662,29 +753,12 @@ describe('TaskRecordTrackingService', () => {
     mockLoggerCategory: () => mockLoggerCategory,
     mockToastService: () => mockToastService,
   });
-
-  // ==================== setupSyncResultHandler ====================
-
-  describe('setupSyncResultHandler', () => {
-    it('should keep local snapshot instead of rolling back on transient sync error', () => {
-      vi.useFakeTimers();
-      const createdAt = Date.now();
-      mockOptimisticState.hasSnapshot.mockReturnValue(true);
-      mockOptimisticState.snapshots.set('snap-transient', { createdAt });
-      mockSyncCoordinator.syncError.mockReturnValue('Failed to fetch');
-      mockSyncCoordinator.hasPendingLocalChanges.mockReturnValue(true);
-
-      try {
-        service.setupSyncResultHandler('snap-transient');
-
-        vi.runOnlyPendingTimers();
-
-        expect(mockOptimisticState.rollbackSnapshot).not.toHaveBeenCalled();
-        expect(mockOptimisticState.commitSnapshot).not.toHaveBeenCalled();
-      } finally {
-        vi.useRealTimers();
-      }
-    });
+  registerTaskRecordTrackingSyncResultSpecs({
+    service: () => service,
+    destroyHarness: () => harness.destroy(),
+    mockOptimisticState: () => mockOptimisticState,
+    mockSyncCoordinator: () => mockSyncCoordinator,
+    mockAuthService: () => harness.mockAuthService,
   });
 
 });

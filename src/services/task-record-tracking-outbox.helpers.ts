@@ -1,5 +1,6 @@
 import type { Connection, Project, Task } from '../models';
 import type { EnqueueParams } from './action-queue.types';
+import type { TaskWriteIntent } from './sync-rpc-client.service';
 import { TRACKED_CONNECTION_FIELDS, TRACKED_TASK_FIELDS } from './task-record-tracking-fields';
 
 interface TaskRecordOutboxLogger {
@@ -171,7 +172,27 @@ function buildChangedTaskOutboxAction(
 
   return !beforeTask.deletedAt && !!task.deletedAt
     ? buildTaskDeleteOutboxAction(project, task.id, sourceUserId, logger, beforeTask.updatedAt)
-    : buildTaskOutboxAction(project, 'update', task, sourceUserId, logger);
+    : buildTaskOutboxAction(
+      project,
+      'update',
+      task,
+      sourceUserId,
+      logger,
+      resolveTaskRecordWriteIntent(changedFields),
+    );
+}
+
+function resolveTaskRecordWriteIntent(changedFields: string[]): TaskWriteIntent {
+  const hasOnly = (allowed: string[]): boolean => changedFields.every(field => allowed.includes(field));
+  if (hasOnly(['attachments'])) return 'task_attachment_update';
+  if (hasOnly(['title', 'content'])) return 'task_text_update';
+  if (hasOnly(['stage', 'parentId', 'parent_id', 'order', 'rank', 'x', 'y'])) {
+    return 'task_structure_update';
+  }
+  if (changedFields.includes('deletedAt') || changedFields.includes('deleted_at')) {
+    return 'task_soft_delete';
+  }
+  return 'task_full_upsert';
 }
 
 function buildTaskOutboxAction(
@@ -180,6 +201,7 @@ function buildTaskOutboxAction(
   task: Task,
   sourceUserId: string | null | undefined,
   logger: TaskRecordOutboxLogger,
+  writeIntent: TaskWriteIntent = 'task_full_upsert',
 ): EnqueueParams | null {
   if (!sourceUserId) {
     logger.warn('任务变更未写入 ActionQueue：用户认证状态尚未就绪', {
@@ -207,6 +229,7 @@ function buildTaskOutboxAction(
       task,
       projectId: project.id,
       sourceUserId,
+      writeIntent,
     },
   };
 }
