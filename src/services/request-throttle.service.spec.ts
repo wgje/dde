@@ -13,6 +13,7 @@ import { DestroyRef, Injector, runInInjectionContext } from '@angular/core';
 import { RequestThrottleService } from './request-throttle.service';
 import { LoggerService } from './logger.service';
 import { REQUEST_THROTTLE_CONFIG } from '../config';
+import { SessionRuntimeResetRegistry } from './session-runtime-reset.service';
 import {
   ensureBrowserNetworkSuspensionTracking,
   resetBrowserNetworkSuspensionTrackingForTests,
@@ -41,6 +42,7 @@ describe('RequestThrottleService', () => {
   let service: RequestThrottleService;
   let mockLogger: { category: ReturnType<typeof vi.fn> };
   let destroyCallbacks: Array<() => void>;
+  let sessionRuntimeReset: SessionRuntimeResetRegistry;
   let originalVisibilityState: PropertyDescriptor | undefined;
 
   beforeEach(() => {
@@ -70,10 +72,15 @@ describe('RequestThrottleService', () => {
       providers: [
         { provide: LoggerService, useValue: mockLogger },
         { provide: DestroyRef, useValue: destroyRef },
+        SessionRuntimeResetRegistry,
       ],
     });
 
     service = runInInjectionContext(injector, () => new RequestThrottleService());
+    sessionRuntimeReset = runInInjectionContext(
+      injector,
+      () => injector.get(SessionRuntimeResetRegistry),
+    );
   });
 
   afterEach(() => {
@@ -108,6 +115,42 @@ describe('RequestThrottleService', () => {
       await service.execute('test-key', executor);
       
       expect(service.activeRequests()).toBe(0);
+    });
+  });
+
+  describe('会话运行时重置', () => {
+    it('reset 时取消活跃 executor、排队请求和 dedupe 状态', async () => {
+      let activeSignal: AbortSignal | undefined;
+      const active = service.execute(
+        'old-session-active',
+        signal => new Promise<string>(() => { activeSignal = signal; }),
+        { deduplicate: true },
+      );
+      const queued = Array.from({ length: REQUEST_THROTTLE_CONFIG.MAX_CONCURRENT }, (_, index) =>
+        service.execute(`old-session-queued-${index}`, () => new Promise<string>(() => {})),
+      );
+      const settlements = [active, ...queued].map(request => request.then(
+        value => ({ value }),
+        error => ({ error }),
+      ));
+
+      try {
+        await vi.waitFor(() => expect(activeSignal).toBeDefined());
+        sessionRuntimeReset.resetAll('owner-change');
+
+        expect(activeSignal?.aborted).toBe(true);
+        const results = await Promise.all(settlements);
+        expect(results.every(result => 'error' in result && result.error instanceof Error)).toBe(true);
+        await Promise.resolve();
+        expect(service.getStatus()).toEqual({
+          activeCount: 0,
+          queueLength: 0,
+          dedupeCacheSize: 0,
+        });
+      } finally {
+        service.clearAll();
+        await Promise.all(settlements);
+      }
     });
   });
 
@@ -684,6 +727,112 @@ describe('RequestThrottleService', () => {
 
       expect(highPriorityExecutor).toHaveBeenCalledTimes(1);
       expect(results).toContain('被更高优先级请求抢占');
+      expect(results).toContain('high-result');
+    });
+    it('队列满且无低优先级请求时 normal 请求不能突破硬上限', async () => {
+      vi.useFakeTimers();
+
+      const blockers: Array<() => void> = [];
+      const blockingRequests = Array.from(
+        { length: REQUEST_THROTTLE_CONFIG.MAX_CONCURRENT + REQUEST_THROTTLE_CONFIG.MAX_QUEUE_SIZE },
+        (_, i) => {
+          const block = new Promise<void>((resolve) => {
+            blockers.push(resolve);
+          });
+
+          return service.execute(`normal-${i}`, async () => {
+            await block;
+            return i;
+          });
+        }
+      );
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(service.getStatus()).toMatchObject({
+        activeCount: REQUEST_THROTTLE_CONFIG.MAX_CONCURRENT,
+        queueLength: REQUEST_THROTTLE_CONFIG.MAX_QUEUE_SIZE,
+      });
+
+      const overflow = service.execute('overflow-normal', async () => 'normal-result');
+      expect(service.getStatus().queueLength).toBe(REQUEST_THROTTLE_CONFIG.MAX_QUEUE_SIZE);
+      await expect(overflow).rejects.toThrow(/队列已满/);
+
+      blockers.forEach((resolve) => resolve());
+      await Promise.allSettled(blockingRequests);
+    });
+
+    it('队列满且无低优先级请求时 high 请求不能突破硬上限', async () => {
+      vi.useFakeTimers();
+
+      const blockers: Array<() => void> = [];
+      const blockingRequests = Array.from(
+        { length: REQUEST_THROTTLE_CONFIG.MAX_CONCURRENT + REQUEST_THROTTLE_CONFIG.MAX_QUEUE_SIZE },
+        (_, i) => {
+          const block = new Promise<void>((resolve) => {
+            blockers.push(resolve);
+          });
+
+          return service.execute(`normal-${i}`, async () => {
+            await block;
+            return i;
+          });
+        }
+      );
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(service.getStatus()).toMatchObject({
+        activeCount: REQUEST_THROTTLE_CONFIG.MAX_CONCURRENT,
+        queueLength: REQUEST_THROTTLE_CONFIG.MAX_QUEUE_SIZE,
+      });
+
+      const overflow = service.execute('overflow-high', async () => 'high-result', { priority: 'high' });
+      expect(service.getStatus().queueLength).toBe(REQUEST_THROTTLE_CONFIG.MAX_QUEUE_SIZE);
+      await expect(overflow).rejects.toThrow(/队列已满/);
+
+      blockers.forEach((resolve) => resolve());
+      await Promise.allSettled(blockingRequests);
+    });
+
+    it('队列满时只有低优先级请求会被 high 请求抢占', async () => {
+      vi.useFakeTimers();
+
+      const blockers: Array<() => void> = [];
+      const queuePriorities: Array<'low' | 'normal'> = Array.from(
+        { length: REQUEST_THROTTLE_CONFIG.MAX_QUEUE_SIZE },
+        (_, index) => index === 0 ? 'low' : 'normal',
+      );
+      const blockingRequests = Array.from(
+        { length: REQUEST_THROTTLE_CONFIG.MAX_CONCURRENT + REQUEST_THROTTLE_CONFIG.MAX_QUEUE_SIZE },
+        (_, i) => {
+          const block = new Promise<void>((resolve) => {
+            blockers.push(resolve);
+          });
+          const priority = i < REQUEST_THROTTLE_CONFIG.MAX_CONCURRENT
+            ? 'normal'
+            : queuePriorities[i - REQUEST_THROTTLE_CONFIG.MAX_CONCURRENT];
+
+          return service.execute(`mixed-${i}`, async () => {
+            await block;
+            return i;
+          }, { priority })
+            .then(() => 'completed')
+            .catch((error: Error) => error.message);
+        }
+      );
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(service.getStatus().queueLength).toBe(REQUEST_THROTTLE_CONFIG.MAX_QUEUE_SIZE);
+
+      const highPriorityPromise = service.execute('high-mixed', async () => 'high-result', {
+        priority: 'high',
+      });
+      await Promise.resolve();
+      expect(service.getStatus().queueLength).toBe(REQUEST_THROTTLE_CONFIG.MAX_QUEUE_SIZE);
+
+      blockers.forEach((resolve) => resolve());
+      const results = await Promise.all([...blockingRequests, highPriorityPromise]);
+
+      expect(results.filter((result) => result === '被更高优先级请求抢占')).toHaveLength(1);
       expect(results).toContain('high-result');
     });
   });

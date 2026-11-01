@@ -23,6 +23,7 @@
  */
 import { Injectable, inject, signal, DestroyRef } from '@angular/core';
 import { LoggerService } from './logger.service';
+import { SessionRuntimeResetRegistry } from './session-runtime-reset.service';
 import { REQUEST_THROTTLE_CONFIG } from '../config';
 import {
   createBrowserNetworkSuspendedError,
@@ -96,6 +97,8 @@ export class RequestThrottleService {
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('RequestThrottle');
   private readonly destroyRef = inject(DestroyRef);
+  private readonly sessionRuntimeReset = inject(SessionRuntimeResetRegistry);
+  private readonly unregisterSessionRuntimeReset: () => void;
   
   /** 请求队列 */
   private queue: QueuedRequest<unknown>[] = [];
@@ -130,11 +133,16 @@ export class RequestThrottleService {
   readonly queueLength = signal(0);
   
   constructor() {
+    this.unregisterSessionRuntimeReset = this.sessionRuntimeReset.register(
+      'RequestThrottleService',
+      () => this.clearAll(),
+    );
     // 定期清理过期的去重缓存
     const cleanupInterval = setInterval(() => this.cleanupDedupeCache(), 10000);
     
     this.destroyRef.onDestroy(() => {
       clearInterval(cleanupInterval);
+      this.unregisterSessionRuntimeReset();
       this.clearAll();
     });
   }
@@ -189,15 +197,18 @@ export class RequestThrottleService {
     if (options.priority === 'low') {
       throw new Error(`请求队列已满 (${THROTTLE_CONFIG.MAX_QUEUE_SIZE})，低优先级请求被丢弃`);
     }
-    this.evictLowPriorityRequest(key);
+    if (!this.evictLowPriorityRequest(key)) {
+      throw new Error(`请求队列已满 (${THROTTLE_CONFIG.MAX_QUEUE_SIZE})，无低优先级请求可抢占`);
+    }
   }
 
-  private evictLowPriorityRequest(key: string): void {
+  private evictLowPriorityRequest(key: string): boolean {
     const lowPriorityIndex = this.queue.findIndex(request => request.options.priority === 'low');
-    if (lowPriorityIndex < 0) return;
+    if (lowPriorityIndex < 0) return false;
     const removed = this.queue.splice(lowPriorityIndex, 1)[0];
     removed.reject(new Error('被更高优先级请求抢占'));
     this.logger.debug('移除低优先级请求', { key: removed.key, requestedKey: key });
+    return true;
   }
 
   private enqueueRequest<T>(
