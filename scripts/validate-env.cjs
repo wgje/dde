@@ -54,6 +54,7 @@ try {
     processKey: processSupabaseAnonKey,
     localUrl: localEnv.NG_APP_SUPABASE_URL,
     localKey: localEnv.NG_APP_SUPABASE_ANON_KEY,
+    requireHttps: isProduction,
   });
 } catch (error) {
   supabaseCredentialError = error;
@@ -65,7 +66,7 @@ const supabaseAnonKey = supabaseReceipt?.keySource === 'process'
   ? processSupabaseAnonKey
   : supabaseReceipt?.keySource === 'local' ? localEnv.NG_APP_SUPABASE_ANON_KEY : undefined;
 
-// 合并环境变量（进程环境优先，方便 CI/CD）
+// Non-Supabase variables merge with process precedence; Supabase sources are conflict-checked above.
 const env = {
   ...localEnv,
   ...process.env,

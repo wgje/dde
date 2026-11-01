@@ -26,22 +26,28 @@ afterEach(() => {
   for (const root of tempRoots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 
-function base64Url(value: string): string {
+function base64Url(value: string | Uint8Array): string {
   return Buffer.from(value).toString('base64url');
 }
 
-function legacyJwt(payload: object | string): string {
+function legacyJwt(
+  payload: object | string,
+  signature: string | Uint8Array = new Uint8Array(32),
+): string {
   const payloadSource = typeof payload === 'string' ? payload : JSON.stringify(payload);
   return [
     base64Url(JSON.stringify({ alg: 'HS256', typ: 'JWT' })),
     base64Url(payloadSource),
-    base64Url('signature'),
+    base64Url(signature),
   ].join('.');
 }
 
-function runValidateEnv(overrides: Record<string, string>) {
+function runValidateEnv(
+  overrides: Record<string, string>,
+  args: string[] = ['--production'],
+) {
   const fixture = makeValidateEnvFixture();
-  return spawnSync(process.execPath, [fixture.script, '--production'], {
+  return spawnSync(process.execPath, [fixture.script, ...args], {
     cwd: fixture.root,
     env: {
       ...process.env,
@@ -92,17 +98,34 @@ describe('validate-env Supabase API key validation', () => {
     expect(result.stdout).toContain('环境变量验证通过');
   }, 10_000);
 
-  it.each([
-    'http://localhost:54321',
-    'HTTPS://CUSTOM.EXAMPLE',
-  ])('accepts a shared-fence-valid self-host URL %s', url => {
+  it('accepts a shared-fence-valid self-host HTTPS URL in production', () => {
     const result = runValidateEnv({
-      NG_APP_SUPABASE_URL: url,
+      NG_APP_SUPABASE_URL: 'HTTPS://CUSTOM.EXAMPLE',
       NG_APP_SUPABASE_ANON_KEY: fixtureKey,
     });
 
     expect(result.status).toBe(0);
     expect(result.stdout).toContain('环境变量验证通过');
+  }, 10_000);
+
+  it('rejects a non-loopback HTTP URL for production browser builds', () => {
+    const result = runValidateEnv({
+      NG_APP_SUPABASE_URL: 'http://api.example.com',
+      NG_APP_SUPABASE_ANON_KEY: fixtureKey,
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain('Supabase URL 格式异常');
+  }, 10_000);
+
+  it('allows loopback HTTP URLs during development validation', () => {
+    const result = runValidateEnv({
+      NG_APP_SUPABASE_URL: 'http://localhost:54321',
+      NG_APP_SUPABASE_ANON_KEY: fixtureKey,
+    }, []);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).not.toContain('Supabase URL 格式异常');
   }, 10_000);
 
   it('rejects Supabase secret keys for production browser builds', () => {
@@ -132,6 +155,19 @@ describe('validate-env Supabase API key validation', () => {
         role: 'authenticated',
         ref: 'abcdefghijklmnopqrst',
       }),
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain('Supabase legacy anon JWT 格式异常');
+  }, 10_000);
+
+  it('rejects a legacy HS256 JWT with a short signature', () => {
+    const result = runValidateEnv({
+      NG_APP_SUPABASE_ANON_KEY: legacyJwt({
+        iss: 'supabase',
+        role: 'anon',
+        ref: 'abcdefghijklmnopqrst',
+      }, 'short'),
     });
 
     expect(result.status).toBe(1);

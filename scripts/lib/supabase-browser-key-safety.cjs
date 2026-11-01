@@ -176,7 +176,8 @@ function inspectKey(key) {
     || stringIndexOf(key, '.', secondDot + 1) !== -1) fail('supabase-browser-key-invalid');
   const header = parseJsonObject(decodeCanonicalBase64Url(stringSlice(key, 0, firstDot)));
   const payload = parseJsonObject(decodeCanonicalBase64Url(stringSlice(key, firstDot + 1, secondDot)));
-  decodeCanonicalBase64Url(stringSlice(key, secondDot + 1));
+  const signature = decodeCanonicalBase64Url(stringSlice(key, secondDot + 1));
+  if (typedArrayLength(signature) !== 32) fail('supabase-browser-key-invalid');
   if (ownString(header, 'alg') !== 'HS256' || ownString(header, 'typ') !== 'JWT'
     || ownString(payload, 'iss') !== 'supabase' || ownString(payload, 'role') !== 'anon') {
     fail('supabase-browser-key-invalid');
@@ -185,7 +186,7 @@ function inspectKey(key) {
   if (!projectRef || !regexExec(PROJECT_REF_PATTERN, projectRef)) fail('supabase-browser-key-invalid');
   return { kind: 'legacy-anon-jwt', projectRef };
 }
-function inspectUrl(rawUrl) {
+function inspectUrl(rawUrl, requireHttps = false) {
   if (!isPresent(rawUrl)) return { hostedProjectRef: null };
   if (typeof rawUrl !== 'string' || !regexExec(URL_TEXT_PATTERN, rawUrl)) {
     fail('supabase-browser-url-invalid');
@@ -194,6 +195,7 @@ function inspectUrl(rawUrl) {
   const protocol = urlGet.protocol(parsed);
   const rawHostname = urlGet.hostname(parsed);
   if ((protocol !== 'http:' && protocol !== 'https:')
+    || (requireHttps && protocol !== 'https:')
     || urlGet.username(parsed) || urlGet.password(parsed) || !rawHostname
     || urlGet.origin(parsed) === 'null' || urlGet.search(parsed) || urlGet.hash(parsed)
     || urlGet.pathname(parsed) !== '/') {
@@ -231,9 +233,14 @@ function resolveSupabaseBrowserCredentials(sources = {}) {
   const processKey = readSource(sources, 'processKey');
   const localKey = readSource(sources, 'localKey');
   const localEnvSource = readSource(sources, 'localEnvSource');
+  const requireHttps = readSource(sources, 'requireHttps');
+  if (isPresent(requireHttps) && typeof requireHttps !== 'boolean') {
+    fail('supabase-browser-source-invalid');
+  }
+  const enforceHttps = requireHttps === true;
   if (isPresent(localEnvSource)) assertSupabaseBrowserCredentialEnvSource(localEnvSource);
-  const processUrlInfo = inspectUrl(processUrl);
-  const localUrlInfo = inspectUrl(localUrl);
+  const processUrlInfo = inspectUrl(processUrl, enforceHttps);
+  const localUrlInfo = inspectUrl(localUrl, enforceHttps);
   const processKeyInfo = inspectKey(processKey);
   const localKeyInfo = inspectKey(localKey);
   if (isPresent(processUrl) && isPresent(localUrl) && processUrl !== localUrl) {

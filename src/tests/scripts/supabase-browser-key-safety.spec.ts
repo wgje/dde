@@ -40,8 +40,9 @@ function base64Url(value: string | Uint8Array): string {
 function legacyAnonJwt(
   payloadSource = JSON.stringify({ iss: 'supabase', role: 'anon', ref: 'projectref' }),
   headerSource = JSON.stringify({ alg: 'HS256', typ: 'JWT' }),
+  signature: string | Uint8Array = new Uint8Array(32),
 ): string {
-  return [base64Url(headerSource), base64Url(payloadSource), base64Url('signature')].join('.');
+  return [base64Url(headerSource), base64Url(payloadSource), base64Url(signature)].join('.');
 }
 
 function makeFixture(
