@@ -7,6 +7,9 @@ import {
   type TaskRecordTrackingSpecHarness,
 } from './task-record-tracking.service.spec-helpers';
 
+const SYNC_OPERATION_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[45][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 describe('TaskRecordTrackingService triggerServerSideDelete', () => {
   let harness: TaskRecordTrackingSpecHarness;
   let service: TaskRecordTrackingSpecHarness['service'];
@@ -43,7 +46,34 @@ describe('TaskRecordTrackingService triggerServerSideDelete', () => {
         'task-del': deletedTask.deletedAt,
       }),
       undefined,
+      expect.stringMatching(SYNC_OPERATION_ID_PATTERN),
     );
+  });
+
+  it('should reuse the same operation id when the same delete snapshot is retried', async () => {
+    const deletedTask = createTask({
+      id: 'task-stable-operation-id',
+      deletedAt: '2026-07-15T02:00:00.000Z',
+    });
+    mockProjectState.activeProject.mockReturnValue(
+      createProject({ tasks: [deletedTask] }),
+    );
+
+    await service.triggerServerSideDelete(
+      'proj-1',
+      ['task-stable-operation-id'],
+      'snap-stable-operation-id',
+    );
+    await service.triggerServerSideDelete(
+      'proj-1',
+      ['task-stable-operation-id'],
+      'snap-stable-operation-id',
+    );
+
+    const firstOperationId = mockSyncCoordinator.softDeleteTasksBatch.mock.calls[0]?.[4];
+    const secondOperationId = mockSyncCoordinator.softDeleteTasksBatch.mock.calls[1]?.[4];
+    expect(firstOperationId).toMatch(SYNC_OPERATION_ID_PATTERN);
+    expect(secondOperationId).toBe(firstOperationId);
   });
 
   it('should send pre-delete updatedAt from the optimistic snapshot as the delete CAS base', async () => {
@@ -72,6 +102,7 @@ describe('TaskRecordTrackingService triggerServerSideDelete', () => {
       {
         'task-del': '2026-04-01T00:00:00.000Z',
       },
+      expect.stringMatching(SYNC_OPERATION_ID_PATTERN),
     );
   });
 

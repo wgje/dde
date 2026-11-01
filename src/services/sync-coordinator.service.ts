@@ -549,8 +549,15 @@ export class SyncCoordinatorService {
     taskIds: string[],
     tombstoneTimestamps?: Record<string, string | number | null | undefined>,
     baseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap,
+    operationId?: string,
   ): Promise<number> {
-    return this.taskSyncOps.softDeleteTasksBatch(projectId, taskIds, tombstoneTimestamps, baseUpdatedAtMap);
+    return this.taskSyncOps.softDeleteTasksBatch(
+      projectId,
+      taskIds,
+      tombstoneTimestamps,
+      baseUpdatedAtMap,
+      operationId,
+    );
   }
   
   /**

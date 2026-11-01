@@ -578,6 +578,31 @@ describe('SyncCoordinatorService', () => {
     expect(mockRetryQueueService.clear).not.toHaveBeenCalled();
   });
 
+  it('softDeleteTasksBatch 应将 operationId 转发到任务同步服务', async () => {
+    const projectId = 'project-delete-operation';
+    const taskIds = ['task-delete-operation'];
+    const tombstoneTimestamps = { [taskIds[0]]: '2026-11-01T00:00:00.000Z' };
+    const baseUpdatedAtMap = { [taskIds[0]]: '2026-10-31T00:00:00.000Z' };
+    const operationId = '12345678-1234-4234-8234-123456789abc';
+    mockTaskSyncOpsService.softDeleteTasksBatch.mockResolvedValueOnce(1);
+
+    await expect(service.softDeleteTasksBatch(
+      projectId,
+      taskIds,
+      tombstoneTimestamps,
+      baseUpdatedAtMap,
+      operationId,
+    )).resolves.toBe(1);
+
+    expect(mockTaskSyncOpsService.softDeleteTasksBatch).toHaveBeenCalledWith(
+      projectId,
+      taskIds,
+      tombstoneTimestamps,
+      baseUpdatedAtMap,
+      operationId,
+    );
+  });
+
   registerSyncCoordinatorRuntimeSpecs({
     service: () => service,
     mockSyncService: () => mockSyncService,
