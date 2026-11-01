@@ -19,6 +19,9 @@
 const fs = require('fs');
 const path = require('path');
 const dotenv = require('dotenv');
+const {
+  resolveSupabaseBrowserCredentials,
+} = require('./lib/supabase-browser-key-safety.cjs');
 
 // 颜色输出
 const colors = {
@@ -35,17 +38,67 @@ const isProduction = args.includes('--production') || args.includes('-p');
 const isStrict = args.includes('--strict') || args.includes('-s');
 const isDryRun = args.includes('--dry-run');
 
-// 加载环境变量
+// Capture process evidence before parsing .env.local without mutating process.env.
 const envLocalPath = path.resolve(__dirname, '../.env.local');
-const localEnv = fs.existsSync(envLocalPath)
-  ? dotenv.config({ path: envLocalPath }).parsed || {}
-  : {};
+const processSupabaseUrl = process.env.NG_APP_SUPABASE_URL;
+const processSupabaseAnonKey = process.env.NG_APP_SUPABASE_ANON_KEY;
+const localEnvSource = fs.existsSync(envLocalPath) ? fs.readFileSync(envLocalPath) : null;
+let localEnv = {};
+let supabaseCredentialError = null;
+let supabaseReceipt;
+try {
+  if (localEnvSource) resolveSupabaseBrowserCredentials({ localEnvSource });
+  localEnv = localEnvSource ? dotenv.parse(localEnvSource) : {};
+  supabaseReceipt = resolveSupabaseBrowserCredentials({
+    processUrl: processSupabaseUrl,
+    processKey: processSupabaseAnonKey,
+    localUrl: localEnv.NG_APP_SUPABASE_URL,
+    localKey: localEnv.NG_APP_SUPABASE_ANON_KEY,
+  });
+} catch (error) {
+  supabaseCredentialError = error;
+}
+const supabaseUrl = supabaseReceipt?.urlSource === 'process'
+  ? processSupabaseUrl
+  : supabaseReceipt?.urlSource === 'local' ? localEnv.NG_APP_SUPABASE_URL : undefined;
+const supabaseAnonKey = supabaseReceipt?.keySource === 'process'
+  ? processSupabaseAnonKey
+  : supabaseReceipt?.keySource === 'local' ? localEnv.NG_APP_SUPABASE_ANON_KEY : undefined;
 
 // 合并环境变量（进程环境优先，方便 CI/CD）
 const env = {
   ...localEnv,
   ...process.env,
+  NG_APP_SUPABASE_URL: supabaseUrl,
+  NG_APP_SUPABASE_ANON_KEY: supabaseAnonKey,
 };
+
+function credentialErrorCode() {
+  return supabaseCredentialError?.code || supabaseCredentialError?.message || null;
+}
+
+function credentialKeyError() {
+  const code = credentialErrorCode();
+  if (!code || code.startsWith('supabase-browser-url')) return null;
+  if (code === 'supabase-browser-key-source-duplicate') {
+    return 'Supabase browser key 定义重复';
+  }
+  const configuredKeys = [processSupabaseAnonKey, localEnv.NG_APP_SUPABASE_ANON_KEY]
+    .filter(value => typeof value === 'string' && value.length > 0);
+  if (configuredKeys.some(value => value.startsWith('sb_secret_'))) {
+    return '不能使用 Supabase secret key；前端构建只能使用 sb_publishable_* 或旧版 anon JWT';
+  }
+  if (configuredKeys.some(value => value.startsWith('sb_publishable_'))) {
+    return 'Supabase publishable key 格式异常，请检查是否完整复制';
+  }
+  if (code === 'supabase-browser-key-source-conflict') {
+    return '进程环境与 .env.local 的 Supabase browser key 冲突';
+  }
+  if (code === 'supabase-browser-project-ref-mismatch') {
+    return 'Supabase URL 与 legacy anon JWT 项目不匹配';
+  }
+  return 'Supabase legacy anon JWT 格式异常';
+}
 
 /**
  * 环境变量定义
@@ -59,8 +112,8 @@ const envDefinitions = {
       name: 'NG_APP_SUPABASE_URL',
       description: 'Supabase 项目 URL',
       validate: (value) => {
+        if (credentialErrorCode()?.startsWith('supabase-browser-url')) return 'Supabase URL 格式异常';
         if (!value) return '未设置';
-        if (!value.startsWith('https://')) return '必须以 https:// 开头';
         if (value === 'YOUR_SUPABASE_URL') return '仍然是占位符值，请设置真实的 URL';
         return null; // null 表示验证通过
       },
@@ -69,14 +122,10 @@ const envDefinitions = {
       name: 'NG_APP_SUPABASE_ANON_KEY',
       description: 'Supabase 匿名公钥 / publishable key',
       validate: (value) => {
+        const credentialError = credentialKeyError();
+        if (credentialError) return credentialError;
         if (!value) return '未设置';
         if (value === 'YOUR_SUPABASE_ANON_KEY') return '仍然是占位符值，请设置真实的 Key';
-        if (value.startsWith('sb_secret_')) return '不能使用 Supabase secret key；前端构建只能使用 sb_publishable_* 或旧版 anon JWT';
-        if (value.startsWith('sb_publishable_')) {
-          if (!/^sb_publishable_[A-Za-z0-9_-]{20,}$/.test(value)) return 'Supabase publishable key 格式异常，请检查是否完整复制';
-          return null;
-        }
-        if (value.length < 100) return 'Key 长度异常，请检查是否完整复制';
         return null;
       },
     },
@@ -106,59 +155,6 @@ const envDefinitions = {
     },
   ],
 };
-
-function decodeBase64UrlJson(segment) {
-  if (!segment) return null;
-
-  const normalized = segment.replace(/-/g, '+').replace(/_/g, '/');
-  const paddingLength = normalized.length % 4;
-  const padded = paddingLength === 0 ? normalized : `${normalized}${'='.repeat(4 - paddingLength)}`;
-
-  try {
-    const decoded = Buffer.from(padded, 'base64').toString('utf8');
-    return JSON.parse(decoded);
-  } catch {
-    return null;
-  }
-}
-
-function extractSupabaseProjectRefFromUrl(url) {
-  if (!url) return null;
-
-  try {
-    const hostname = new URL(url).hostname;
-    if (!hostname.endsWith('.supabase.co')) {
-      return null;
-    }
-
-    return hostname.split('.')[0] || null;
-  } catch {
-    return null;
-  }
-}
-
-function extractLegacyAnonProjectRef(key) {
-  if (!key) return null;
-
-  const parts = key.split('.');
-  if (parts.length !== 3) {
-    return null;
-  }
-
-  const payload = decodeBase64UrlJson(parts[1]);
-  return typeof payload?.ref === 'string' ? payload.ref : null;
-}
-
-function getSupabaseProjectRefMismatch(url, key) {
-  const urlProjectRef = extractSupabaseProjectRefFromUrl(url);
-  const keyProjectRef = extractLegacyAnonProjectRef(key);
-
-  if (!urlProjectRef || !keyProjectRef || urlProjectRef === keyProjectRef) {
-    return null;
-  }
-
-  return { urlProjectRef, keyProjectRef };
-}
 
 /**
  * 验证环境变量
@@ -247,38 +243,6 @@ function validateEnv() {
       console.log(`    ${colors.yellow(warning)}\n`);
     } else {
       console.log(`  ${colors.green('✓')} ${def.name}`);
-    }
-  }
-
-  const supabaseProjectMismatch = getSupabaseProjectRefMismatch(
-    env.NG_APP_SUPABASE_URL,
-    env.NG_APP_SUPABASE_ANON_KEY,
-  );
-  if (supabaseProjectMismatch) {
-    const issue = {
-      name: 'NG_APP_SUPABASE_URL / NG_APP_SUPABASE_ANON_KEY',
-      description: 'Supabase URL 与 legacy anon JWT 必须来自同一项目',
-      detail: `URL 指向项目 ${supabaseProjectMismatch.urlProjectRef}，但 ANON_KEY 属于项目 ${supabaseProjectMismatch.keyProjectRef}`,
-    };
-
-    if (isProduction) {
-      errors.push({
-        name: issue.name,
-        description: issue.description,
-        error: issue.detail,
-      });
-      console.log(`\n  ${colors.red('✗')} ${issue.name}`);
-      console.log(`    ${colors.red(issue.detail)}`);
-      console.log(`    ${colors.yellow(issue.description)}\n`);
-    } else {
-      warnings.push({
-        name: issue.name,
-        description: issue.description,
-        warning: issue.detail,
-      });
-      console.log(`\n  ${colors.yellow('⚠')} ${issue.name}`);
-      console.log(`    ${colors.yellow(issue.detail)} (开发环境允许继续，但会导致同步打回本地队列)`);
-      console.log(`    ${colors.yellow(issue.description)}\n`);
     }
   }
 

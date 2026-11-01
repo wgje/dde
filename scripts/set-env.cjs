@@ -2,11 +2,61 @@ const fs = require('fs');
 const path = require('path');
 const dotenv = require('dotenv');
 const { writeTextFileIfChanged } = require('./write-file-if-changed.cjs');
+const {
+  resolveSupabaseBrowserCredentials,
+} = require('./lib/supabase-browser-key-safety.cjs');
 
-// 优先读取 .env.local，其次读取进程环境（方便 Vercel/Supabase 等 CI 环境）
-const localEnv = dotenv.config({ path: path.resolve(__dirname, '../.env.local') }).parsed || {};
-const supabaseUrl = process.env.NG_APP_SUPABASE_URL || localEnv.NG_APP_SUPABASE_URL;
-const supabaseAnonKey = process.env.NG_APP_SUPABASE_ANON_KEY || localEnv.NG_APP_SUPABASE_ANON_KEY;
+const processSupabaseUrl = process.env.NG_APP_SUPABASE_URL;
+const processSupabaseAnonKey = process.env.NG_APP_SUPABASE_ANON_KEY;
+const envLocalPath = path.resolve(__dirname, '../.env.local');
+const localEnvSource = fs.existsSync(envLocalPath) ? fs.readFileSync(envLocalPath) : null;
+let localEnv = {};
+let supabaseReceipt;
+try {
+  if (localEnvSource) resolveSupabaseBrowserCredentials({ localEnvSource });
+  localEnv = localEnvSource ? dotenv.parse(localEnvSource) : {};
+  supabaseReceipt = resolveSupabaseBrowserCredentials({
+    processUrl: processSupabaseUrl,
+    processKey: processSupabaseAnonKey,
+    localUrl: localEnv.NG_APP_SUPABASE_URL,
+    localKey: localEnv.NG_APP_SUPABASE_ANON_KEY,
+  });
+} catch (error) {
+  console.error(`❌ Supabase browser credential rejected: ${error.code || error.message}`);
+  process.exit(1);
+}
+const supabaseUrl = supabaseReceipt.urlSource === 'process'
+  ? processSupabaseUrl
+  : supabaseReceipt.urlSource === 'local' ? localEnv.NG_APP_SUPABASE_URL : undefined;
+const supabaseAnonKey = supabaseReceipt.keySource === 'process'
+  ? processSupabaseAnonKey
+  : supabaseReceipt.keySource === 'local' ? localEnv.NG_APP_SUPABASE_ANON_KEY : undefined;
+const sourceIndexHtmlPath = path.resolve(__dirname, '../index.html');
+const generatedIndexHtmlPath = path.resolve(__dirname, '../.tmp/index.generated.html');
+const deriveSupabaseUrlFromIndexHtml = () => {
+  try {
+    const html = fs.readFileSync(sourceIndexHtmlPath, 'utf-8');
+    const preconnectMatch = html.match(/<link\s+rel="preconnect"\s+href="(https:\/\/[a-z0-9-]+\.supabase\.co)"/i);
+    if (preconnectMatch) return preconnectMatch[1];
+    const dnsMatch = html.match(/<link\s+rel="dns-prefetch"\s+href="(https:\/\/[a-z0-9-]+\.supabase\.co)"/i);
+    if (dnsMatch) return dnsMatch[1];
+  } catch {
+    /* index.html unreadable: retain the existing offline placeholder fallback. */
+  }
+  return null;
+};
+const derivedSupabaseUrl = supabaseUrl || deriveSupabaseUrlFromIndexHtml();
+const finalUrl = derivedSupabaseUrl || 'YOUR_SUPABASE_URL';
+const finalKey = supabaseAnonKey || 'YOUR_SUPABASE_ANON_KEY';
+try {
+  resolveSupabaseBrowserCredentials({
+    processUrl: derivedSupabaseUrl,
+    processKey: supabaseAnonKey,
+  });
+} catch (error) {
+  console.error(`❌ Supabase browser credential rejected: ${error.code || error.message}`);
+  process.exit(1);
+}
 const gojsLicenseKey = process.env.NG_APP_GOJS_LICENSE_KEY || localEnv.NG_APP_GOJS_LICENSE_KEY || '';
 const sentryDsn = process.env.NG_APP_SENTRY_DSN
   || process.env.SENTRY_DSN
@@ -51,59 +101,6 @@ function normalizeOriginGateMode(value) {
     ? normalized
     : 'off';
 }
-
-const decodeBase64UrlJson = (segment) => {
-  if (!segment) return null;
-
-  const normalized = segment.replace(/-/g, '+').replace(/_/g, '/');
-  const paddingLength = normalized.length % 4;
-  const padded = paddingLength === 0 ? normalized : `${normalized}${'='.repeat(4 - paddingLength)}`;
-
-  try {
-    const decoded = Buffer.from(padded, 'base64').toString('utf8');
-    return JSON.parse(decoded);
-  } catch {
-    return null;
-  }
-};
-
-const extractSupabaseProjectRefFromUrl = (url) => {
-  if (!url) return null;
-
-  try {
-    const hostname = new URL(url).hostname;
-    if (!hostname.endsWith('.supabase.co')) {
-      return null;
-    }
-
-    return hostname.split('.')[0] || null;
-  } catch {
-    return null;
-  }
-};
-
-const extractLegacyAnonProjectRef = (key) => {
-  if (!key) return null;
-
-  const parts = key.split('.');
-  if (parts.length !== 3) {
-    return null;
-  }
-
-  const payload = decodeBase64UrlJson(parts[1]);
-  return typeof payload?.ref === 'string' ? payload.ref : null;
-};
-
-const getSupabaseProjectRefMismatch = (url, key) => {
-  const urlProjectRef = extractSupabaseProjectRefFromUrl(url);
-  const keyProjectRef = extractLegacyAnonProjectRef(key);
-
-  if (!urlProjectRef || !keyProjectRef || urlProjectRef === keyProjectRef) {
-    return null;
-  }
-
-  return { urlProjectRef, keyProjectRef };
-};
 
 // 启动阶段 Boot Flags（用于 index.html 预加载脚本）
 const disableIndexDataPreloadV1 = parseBooleanEnv(
@@ -267,15 +264,6 @@ if (useOfflineMode) {
   console.log('   如需云端同步功能，请在 .env.local 中设置 NG_APP_SUPABASE_URL 和 NG_APP_SUPABASE_ANON_KEY');
 }
 
-const supabaseProjectMismatch = useOfflineMode ? null : getSupabaseProjectRefMismatch(supabaseUrl, supabaseAnonKey);
-if (supabaseProjectMismatch) {
-  console.error('❌ Supabase 配置错误：URL 和 ANON_KEY 来自不同项目。');
-  console.error(`   NG_APP_SUPABASE_URL -> ${supabaseProjectMismatch.urlProjectRef}`);
-  console.error(`   NG_APP_SUPABASE_ANON_KEY -> ${supabaseProjectMismatch.keyProjectRef}`);
-  console.error('   请保持 NG_APP_SUPABASE_URL 与 NG_APP_SUPABASE_ANON_KEY 来自同一 Supabase 项目。');
-  process.exit(1);
-}
-
 if (!gojsLicenseKey) {
   console.log('ℹ️ 未找到 GoJS License Key，流程图将显示水印。');
   console.log('   如需移除水印，请在 .env.local 中设置 NG_APP_GOJS_LICENSE_KEY');
@@ -293,27 +281,6 @@ const envDir = path.dirname(targetPath);
 if (!fs.existsSync(envDir)) {
   fs.mkdirSync(envDir, { recursive: true });
 }
-
-// 【根因修复 2026-05-15】离线模式下，从 index.html 既有 preconnect 提示派生 Supabase URL 回退值，
-// 保证 `var SUPABASE_URL` 与 `<link rel="preconnect" href="...supabase.co">` 在 CI 中始终对齐，
-// 避免 cloudflare-migration-artifacts.contract.spec.ts 在无 env 时把硬编码的 supabase.co 提示
-// 与占位符 'YOUR_SUPABASE_URL' 拉扯成不一致状态。
-const sourceIndexHtmlPath = path.resolve(__dirname, '../index.html');
-const generatedIndexHtmlPath = path.resolve(__dirname, '../.tmp/index.generated.html');
-const deriveSupabaseUrlFromIndexHtml = () => {
-  try {
-    const html = fs.readFileSync(sourceIndexHtmlPath, 'utf-8');
-    const preconnectMatch = html.match(/<link\s+rel="preconnect"\s+href="(https:\/\/[a-z0-9-]+\.supabase\.co)"/i);
-    if (preconnectMatch) return preconnectMatch[1];
-    const dnsMatch = html.match(/<link\s+rel="dns-prefetch"\s+href="(https:\/\/[a-z0-9-]+\.supabase\.co)"/i);
-    if (dnsMatch) return dnsMatch[1];
-  } catch {
-    /* index.html 不可读时回退到占位符 */
-  }
-  return null;
-};
-const finalUrl = supabaseUrl || deriveSupabaseUrlFromIndexHtml() || 'YOUR_SUPABASE_URL';
-const finalKey = supabaseAnonKey || 'YOUR_SUPABASE_ANON_KEY';
 
 // 开发环境自动登录配置（仅开发环境）
 const devAutoLoginConfig = hasDevAutoLogin 
@@ -410,7 +377,7 @@ try {
     indexHtml = indexHtml.replace(prewarmUrlPattern, `var SUPABASE_URL = ${htmlScriptStringLiteral(finalUrl)};`);
   }
 
-  const supabaseHintUrl = /^https:\/\/[a-z0-9-]+\.supabase\.co$/i.test(finalUrl)
+  const supabaseHintUrl = /^https:\/\/[a-z0-9-]+\.supabase\.co\.?(?::\d+)?\/?$/i.test(finalUrl)
     ? finalUrl
     : null;
   if (supabaseHintUrl) {
@@ -419,6 +386,12 @@ try {
     indexHtml = indexHtml
       .replace(supabasePreconnectPattern, `$1${supabaseHintUrl}$2`)
       .replace(supabaseDnsPrefetchPattern, `$1${supabaseHintUrl}$2`);
+  } else {
+    const supabasePreconnectPattern = /<link\s+rel="preconnect"\s+href="https:\/\/[^"]+\.supabase\.co"[^>]*>/i;
+    const supabaseDnsPrefetchPattern = /<link\s+rel="dns-prefetch"\s+href="https:\/\/[^"]+\.supabase\.co"[^>]*>/i;
+    indexHtml = indexHtml
+      .replace(supabasePreconnectPattern, '')
+      .replace(supabaseDnsPrefetchPattern, '');
   }
   if (prewarmKeyPattern.test(indexHtml)) {
     prewarmKeyPattern.lastIndex = 0;
