@@ -95,6 +95,10 @@ export class ParkingEvictionController {
     }
   }
 
+  resetSession(): void {
+    this.tokens.clear();
+  }
+
   createNotice(items: ParkingNoticeEvictionItem[]): ParkingNotice {
     if (items.length === 1) {
       const item = items[0];

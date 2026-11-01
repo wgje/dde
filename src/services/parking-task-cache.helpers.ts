@@ -1,4 +1,5 @@
 import type { Task } from '../models';
+import { shouldPreferIncoming } from '../utils/lww-merge';
 
 export interface ParkedTaskCacheEntry {
   task: Task;
@@ -18,7 +19,7 @@ export function buildParkedTaskCacheEntries(
 }
 
 export function shouldApplyRemoteParkedTask(local: Task | undefined | null, remote: Task): boolean {
-  return !(local && local.updatedAt && remote.updatedAt && local.updatedAt > remote.updatedAt);
+  return shouldPreferIncoming(remote, local);
 }
 
 export function mergeRemoteParkedTask(local: Task | undefined | null, remote: Task): Task {
@@ -26,8 +27,8 @@ export function mergeRemoteParkedTask(local: Task | undefined | null, remote: Ta
 
   return {
     ...local,
-    ...remote,
-    // Keep local displayId maintained by layout logic.
-    displayId: local.displayId || remote.displayId,
+    // Lightweight parking sync must not replace canonical task structure.
+    parkingMeta: remote.parkingMeta,
+    updatedAt: remote.updatedAt ?? local.updatedAt,
   };
 }

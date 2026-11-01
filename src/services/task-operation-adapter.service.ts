@@ -371,23 +371,50 @@ export class TaskOperationAdapterService {
     }, this.durableFieldRuntime);
   }
 
-  updateTaskParkingMeta(taskId: string, parkingMeta: Task['parkingMeta'] | undefined): Promise<boolean> {
+  updateTaskParkingMeta(taskId: string, parkingMeta: Task['parkingMeta'] | undefined): Promise<boolean>;
+  updateTaskParkingMeta(
+    projectId: string, taskId: string, parkingMeta: Task['parkingMeta'] | undefined,
+  ): Promise<boolean>;
+  updateTaskParkingMeta(
+    projectOrTaskId: string,
+    taskIdOrMeta: string | Task['parkingMeta'] | undefined,
+    explicitMeta?: Task['parkingMeta'],
+  ): Promise<boolean> {
+    const explicitProjectId = typeof taskIdOrMeta === 'string' ? projectOrTaskId : null;
+    const taskId = typeof taskIdOrMeta === 'string' ? taskIdOrMeta : projectOrTaskId;
     return runTaskDurableFieldMutation({
       actionLabel: '更新任务停泊状态',
       failureMessage: '任务停泊状态本地持久化失败，未提交 UI 更新',
-      failureData: { taskId },
-      mutate: () => this.core.updateTaskParkingMetaDurably(taskId, parkingMeta),
+      failureData: { ...(explicitProjectId ? { projectId: explicitProjectId } : {}), taskId },
+      mutate: () => typeof taskIdOrMeta === 'string'
+        ? this.core.updateTaskParkingMetaDurably(projectOrTaskId, taskIdOrMeta, explicitMeta)
+        : this.core.updateTaskParkingMetaDurably(projectOrTaskId, taskIdOrMeta),
     }, this.durableFieldRuntime);
   }
 
   updateTaskParkingMetaBatch(
     updates: Array<{ taskId: string; parkingMeta: Task['parkingMeta'] | undefined }>,
+  ): Promise<boolean>;
+  updateTaskParkingMetaBatch(
+    projectId: string,
+    updates: Array<{ taskId: string; parkingMeta: Task['parkingMeta'] | undefined }>,
+  ): Promise<boolean>;
+  updateTaskParkingMetaBatch(
+    projectOrUpdates: string | Array<{ taskId: string; parkingMeta: Task['parkingMeta'] | undefined }>,
+    explicitUpdates?: Array<{ taskId: string; parkingMeta: Task['parkingMeta'] | undefined }>,
   ): Promise<boolean> {
+    const explicitProjectId = typeof projectOrUpdates === 'string' ? projectOrUpdates : null;
+    const updates = typeof projectOrUpdates === 'string' ? explicitUpdates ?? [] : projectOrUpdates;
     return runTaskDurableFieldMutation({
       actionLabel: '批量更新任务停泊状态',
       failureMessage: '任务停泊状态本地批量持久化失败，未提交 UI 更新',
-      failureData: { taskIds: updates.map(update => update.taskId) },
-      mutate: () => this.core.updateTaskParkingMetaBatchDurably(updates),
+      failureData: {
+        ...(explicitProjectId ? { projectId: explicitProjectId } : {}),
+        taskIds: updates.map(update => update.taskId),
+      },
+      mutate: () => explicitProjectId
+        ? this.core.updateTaskParkingMetaBatchDurably(explicitProjectId, updates)
+        : this.core.updateTaskParkingMetaBatchDurably(updates),
     }, this.durableFieldRuntime);
   }
 

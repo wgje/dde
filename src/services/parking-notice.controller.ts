@@ -53,4 +53,11 @@ export class ParkingNoticeController {
       return next;
     });
   }
+
+  resetSession(): void {
+    this.deferredEvictionNotices.splice(0);
+    this.reminderFadeoutCounts.clear();
+    this.pendingNotices.set([]);
+    this.badgedTaskIds.set(new Set());
+  }
 }

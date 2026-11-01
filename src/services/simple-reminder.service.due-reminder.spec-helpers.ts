@@ -141,7 +141,7 @@ export function registerSimpleReminderDueReminderSpecs(
       expect(activeTimers.has('postponed-reminder')).toBe(true);
     });
 
-    it('两条提醒同时到期时后触发者不应顶替活跃通知（避免先触发者被静默饿死）', () => {
+    it('两条提醒同时到期时后触发者不应顶替活跃通知（避免先触发者被静默饿死）', async () => {
       const { service, mockTaskStore } = loadContext();
       const dueReminder = {
         reminderAt: new Date(Date.now() - 1_000).toISOString(),
@@ -176,10 +176,16 @@ export function registerSimpleReminderDueReminderSpecs(
       // 后续轮询在 A 的通知仍活跃时也不得顶替
       expect(service.activeNotice()).toBe(noticeAfterSecondCheck);
 
-      // A 的通知解决后，B 在下一轮检查中正常触发
-      service.clearActiveNotice();
-      checkSimpleReminderNow(service);
-      expect(service.activeNotice()?.taskId).toBe('due-a');
+      // A 的通知解决后，B 应由生产入口立即排队检查，无需等待 30 秒轮询
+      service.clearActiveNotice(notice!.id, notice!.taskId);
+      await Promise.resolve();
+      const secondNotice = service.activeNotice();
+      expect(secondNotice?.taskId).toBe('due-b');
+
+      // 两条未发生 reminderAt/snoozeCount 变化的提醒都已展示，不应立即循环重现
+      service.clearActiveNotice(secondNotice!.id, secondNotice!.taskId);
+      await Promise.resolve();
+      expect(service.activeNotice()).toBeNull();
     });
 
     it('提醒通知应包含所有操作按钮', () => {

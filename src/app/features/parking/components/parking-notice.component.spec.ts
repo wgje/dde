@@ -7,8 +7,14 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { signal } from '@angular/core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { ParkingNotice, ParkingNoticeActionKey } from '../../../../models';
+import type {
+  ParkingEvictionNotice,
+  ParkingNotice,
+  ParkingNoticeActionKey,
+  ParkingReminderNotice,
+} from '../../../../models';
 import { ParkingNoticeComponent } from '../parking-notice.component';
+import { registerParkingNoticeActionConcurrencySpecs } from './parking-notice-action-concurrency.spec-helpers';
 import { ParkingService } from '../../../../services/parking.service';
 import { SimpleReminderService } from '../../../../services/simple-reminder.service';
 import { UiStateService } from '../../../../services/ui-state.service';
@@ -50,7 +56,9 @@ describe('ParkingNoticeComponent', () => {
     isActive: gateActive,
   };
 
-  const createEvictionNotice = (overrides: Partial<ParkingNotice> = {}): ParkingNotice => ({
+  const createEvictionNotice = (
+    overrides: Partial<Omit<ParkingEvictionNotice, 'type'>> = {},
+  ): ParkingEvictionNotice => ({
     id: 'eviction-1',
     type: 'eviction',
     taskId: 'task-1',
@@ -65,9 +73,12 @@ describe('ParkingNoticeComponent', () => {
     ...overrides,
   });
 
-  const createReminderNotice = (overrides: Partial<ParkingNotice> = {}): ParkingNotice => ({
+  const createReminderNotice = (
+    overrides: Partial<Omit<ParkingReminderNotice, 'type'>> = {},
+  ): ParkingReminderNotice => ({
     id: 'reminder-1',
     type: 'reminder',
+    projectId: 'proj-a',
     taskId: 'task-r',
     taskTitle: '提醒任务',
     minVisibleMs: 10,
@@ -187,6 +198,7 @@ describe('ParkingNoticeComponent', () => {
       fixture.detectChanges();
 
       expect(activeReminder()).toBeNull();
+      expect(mockReminderService.clearActiveNotice).toHaveBeenCalledWith('proj-a', 'reminder-1', 'task-r');
     });
 
     it('进入 interactive 后 eviction 应在外部 input 时 dismiss', () => {
@@ -321,7 +333,7 @@ describe('ParkingNoticeComponent', () => {
       fixture.detectChanges();
 
       await component.handleAction(notice, 'start-work');
-      expect(mockParkingService.startWork).toHaveBeenCalledWith('task-r');
+      expect(mockParkingService.startWork).toHaveBeenCalledWith('proj-a', 'task-r');
     });
 
     it('start-work 本地切换失败时不应关闭通知', async () => {
@@ -332,7 +344,7 @@ describe('ParkingNoticeComponent', () => {
 
       await component.handleAction(notice, 'start-work');
 
-      expect(mockParkingService.startWork).toHaveBeenCalledWith('task-r');
+      expect(mockParkingService.startWork).toHaveBeenCalledWith('proj-a', 'task-r');
       expect(component.isExiting()).toBe(false);
       expect(component.renderNotice()?.id).toBe('reminder-1');
     });
@@ -357,7 +369,7 @@ describe('ParkingNoticeComponent', () => {
       fixture.detectChanges();
 
       await component.handleAction(notice, 'snooze-5m');
-      expect(mockReminderService.snooze5m).toHaveBeenCalledWith('task-r');
+      expect(mockReminderService.snooze5m).toHaveBeenCalledWith('proj-a', 'task-r');
     });
 
     it('snooze-30m 应调用 reminderService.snooze30m', async () => {
@@ -366,7 +378,7 @@ describe('ParkingNoticeComponent', () => {
       fixture.detectChanges();
 
       await component.handleAction(notice, 'snooze-30m');
-      expect(mockReminderService.snooze30m).toHaveBeenCalledWith('task-r');
+      expect(mockReminderService.snooze30m).toHaveBeenCalledWith('proj-a', 'task-r');
     });
 
     it('snooze-2h-later 应调用 reminderService.snooze2h', async () => {
@@ -375,7 +387,7 @@ describe('ParkingNoticeComponent', () => {
       fixture.detectChanges();
 
       await component.handleAction(notice, 'snooze-2h-later');
-      expect(mockReminderService.snooze2h).toHaveBeenCalledWith('task-r');
+      expect(mockReminderService.snooze2h).toHaveBeenCalledWith('proj-a', 'task-r');
     });
 
     it('ignore 应调用 reminderService.cancelReminder', async () => {
@@ -384,7 +396,7 @@ describe('ParkingNoticeComponent', () => {
       fixture.detectChanges();
 
       await component.handleAction(notice, 'ignore');
-      expect(mockReminderService.cancelReminder).toHaveBeenCalledWith('task-r');
+      expect(mockReminderService.cancelReminder).toHaveBeenCalledWith('proj-a', 'task-r');
     });
 
     it('reminder 本地保存失败时不应关闭通知', async () => {
@@ -395,7 +407,7 @@ describe('ParkingNoticeComponent', () => {
 
       await component.handleAction(notice, 'ignore');
 
-      expect(mockReminderService.cancelReminder).toHaveBeenCalledWith('task-r');
+      expect(mockReminderService.cancelReminder).toHaveBeenCalledWith('proj-a', 'task-r');
       expect(component.isExiting()).toBe(false);
       expect(component.renderNotice()?.id).toBe('reminder-1');
     });
@@ -465,6 +477,17 @@ describe('ParkingNoticeComponent', () => {
     });
   });
 
+  registerParkingNoticeActionConcurrencySpecs(() => ({
+    fixture,
+    component,
+    pendingNotices,
+    activeReminder,
+    mockParkingService,
+    mockReminderService,
+    createEvictionNotice,
+    createReminderNotice,
+  }));
+
   // ─── reminder 兜底消散 ───
 
   describe('reminder 兜底消散', () => {
@@ -476,7 +499,7 @@ describe('ParkingNoticeComponent', () => {
       fixture.detectChanges();
 
       vi.advanceTimersByTime(400);
-      expect(mockReminderService.handleNoticeFadeout).toHaveBeenCalledWith('task-r');
+      expect(mockReminderService.handleNoticeFadeout).toHaveBeenCalledWith('proj-a', 'reminder-1', 'task-r');
     });
   });
 

@@ -6,6 +6,7 @@ import { ProjectStore, TaskStore } from '../app/core/state/stores';
 import type { Task } from '../models';
 import { LoggerService } from './logger.service';
 import { ParkingService } from './parking.service';
+import { SessionRuntimeResetRegistry } from './session-runtime-reset.service';
 import { SimpleReminderService } from './simple-reminder.service';
 import { TaskOperationAdapterService } from './task-operation-adapter.service';
 
@@ -39,6 +40,7 @@ export interface SimpleReminderSpecHarness {
     error: SpecMock;
     debug: SpecMock;
   };
+  sessionRuntimeReset: SessionRuntimeResetRegistry;
 }
 
 export function createSimpleReminderSpecTask(overrides: Partial<Task> = {}): Task {
@@ -96,6 +98,7 @@ export function setupSimpleReminderSpecHarness(): SimpleReminderSpecHarness {
   TestBed.configureTestingModule({
     providers: [
       SimpleReminderService,
+      SessionRuntimeResetRegistry,
       { provide: TaskStore, useValue: mockTaskStore },
       { provide: ProjectStore, useValue: mockProjectStore },
       { provide: ParkingService, useValue: mockParkingService },
@@ -111,6 +114,7 @@ export function setupSimpleReminderSpecHarness(): SimpleReminderSpecHarness {
     mockParkingService,
     mockTaskOpsAdapter,
     mockLogger,
+    sessionRuntimeReset: TestBed.inject(SessionRuntimeResetRegistry),
   };
 }
 

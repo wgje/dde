@@ -19,7 +19,16 @@ describe('ParkingNoticeController', () => {
 
   it('shows non-eviction notices immediately and consumes by id', () => {
     const controller = new ParkingNoticeController({ reminderBadgeThreshold: 3 });
-    const notice = { ...evictionNotice('notice-1'), type: 'reminder' as const };
+    const notice: ParkingNotice = {
+      id: 'notice-1',
+      type: 'reminder',
+      projectId: 'project-1',
+      taskId: 'task-1',
+      taskTitle: 'Task 1',
+      minVisibleMs: 100,
+      fallbackTimeoutMs: 1000,
+      actions: [],
+    };
 
     controller.showNotice(notice, true);
     expect(controller.pendingNotices()).toEqual([notice]);

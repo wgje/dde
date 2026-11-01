@@ -17,6 +17,7 @@ interface ParkingLightweightSyncSpecContext {
   syncParkedSignals: () => void;
   taskMap: Map<string, Task>;
   mockProjectDataService: {
+    loadParkedTasksCache: MockFunction;
     pullParkedTasksDelta: MockFunction;
     saveParkedTasksCache: MockFunction;
   };
@@ -227,6 +228,34 @@ export function registerParkingLightweightSyncSpecs(
         .toHaveBeenLastCalledWith(null, [], ['proj-1']);
     });
 
+    it('缓存加载期间切换账号时不应应用旧 owner 的任务或游标', async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      context.mockProjectDataService.loadParkedTasksCache.mockClear();
+      const cached = deferred<{
+        entries: Array<{ task: Task; projectId: string }>;
+        cursor: string | null;
+      }>();
+      const ownerATask = context.createTask({
+        id: 'owner-a-cached-task',
+        parkingMeta: context.createParkingMeta({ state: 'parked' }),
+      });
+      context.currentUserIdSignal.set('owner-a');
+      context.mockProjectDataService.loadParkedTasksCache.mockReturnValueOnce(cached.promise);
+
+      const initializing = doInitParkedLightweightSync(context.getService());
+      context.currentUserIdSignal.set('owner-b');
+      cached.resolve({
+        entries: [{ task: ownerATask, projectId: 'owner-a-project' }],
+        cursor: 'owner-a-cursor',
+      });
+
+      await initializing;
+
+      expect(context.mockProjectDataService.loadParkedTasksCache).toHaveBeenCalledWith('owner-a');
+      expect(context.taskMap.has(ownerATask.id)).toBe(false);
+    });
+
     it('同一账号连续增量同步应继续沿用已推进的游标', async () => {
       context.currentUserIdSignal.set('user-1');
       context.mockProjectDataService.pullParkedTasksDelta.mockResolvedValueOnce({
@@ -316,12 +345,14 @@ export function registerParkingLightweightSyncSpecs(
         removedTasks: Array<{ taskId: string; updatedAt: string | null }>;
         removedTaskIds: string[];
         nextCursor: string | null;
+        isComplete: boolean;
       }>();
       const latestPull = deferred<{
         entries: Array<{ task: Task; projectId: string }>;
         removedTasks: Array<{ taskId: string; updatedAt: string | null }>;
         removedTaskIds: string[];
         nextCursor: string | null;
+        isComplete: boolean;
       }>();
       context.mockProjectDataService.pullParkedTasksDelta
         .mockReturnValueOnce(oldPull.promise)
@@ -335,6 +366,7 @@ export function registerParkingLightweightSyncSpecs(
         removedTasks: [],
         removedTaskIds: [],
         nextCursor: '2026-02-23T10:30:00.000Z',
+        isComplete: true,
       });
       await latestSyncing;
 
@@ -343,6 +375,7 @@ export function registerParkingLightweightSyncSpecs(
         removedTasks: [],
         removedTaskIds: [],
         nextCursor: '2026-02-23T10:05:00.000Z',
+        isComplete: true,
       });
       await oldSyncing;
 
@@ -350,7 +383,9 @@ export function registerParkingLightweightSyncSpecs(
       expect(context.taskMap.has(oldTask.id)).toBe(false);
       expect(context.mockProjectDataService.saveParkedTasksCache).toHaveBeenCalledTimes(1);
       expect(context.mockProjectDataService.saveParkedTasksCache).toHaveBeenCalledWith(
+        'user-1',
         expect.objectContaining({ cursor: '2026-02-23T10:30:00.000Z' }),
+        { retireLegacyOwnerlessCache: true },
       );
     });
   });
@@ -359,6 +394,11 @@ export function registerParkingLightweightSyncSpecs(
 function syncParkedDelta(service: ParkingService): Promise<void> {
   return (service as unknown as { syncParkedDelta: () => Promise<void> })
     .syncParkedDelta();
+}
+
+function doInitParkedLightweightSync(service: ParkingService): Promise<void> {
+  return (service as unknown as { doInitParkedLightweightSync: () => Promise<void> })
+    .doInitParkedLightweightSync();
 }
 
 function scheduleParkedDeltaRefresh(

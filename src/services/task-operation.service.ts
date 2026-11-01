@@ -207,14 +207,34 @@ export class TaskOperationService {
     return this.taskAttr.updateTaskStatusDurably(taskId, status);
   }
 
-  updateTaskParkingMetaDurably(taskId: string, parkingMeta: Task['parkingMeta'] | undefined): Promise<boolean> {
-    return this.taskAttr.updateTaskParkingMetaDurably(taskId, parkingMeta);
+  updateTaskParkingMetaDurably(taskId: string, parkingMeta: Task['parkingMeta'] | undefined): Promise<boolean>;
+  updateTaskParkingMetaDurably(
+    projectId: string, taskId: string, parkingMeta: Task['parkingMeta'] | undefined,
+  ): Promise<boolean>;
+  updateTaskParkingMetaDurably(
+    projectOrTaskId: string,
+    taskIdOrMeta: string | Task['parkingMeta'] | undefined,
+    explicitMeta?: Task['parkingMeta'],
+  ): Promise<boolean> {
+    return typeof taskIdOrMeta === 'string'
+      ? this.taskAttr.updateTaskParkingMetaDurably(projectOrTaskId, taskIdOrMeta, explicitMeta)
+      : this.taskAttr.updateTaskParkingMetaDurably(projectOrTaskId, taskIdOrMeta);
   }
 
   updateTaskParkingMetaBatchDurably(
     updates: Array<{ taskId: string; parkingMeta: Task['parkingMeta'] | undefined }>,
+  ): Promise<boolean>;
+  updateTaskParkingMetaBatchDurably(
+    projectId: string,
+    updates: Array<{ taskId: string; parkingMeta: Task['parkingMeta'] | undefined }>,
+  ): Promise<boolean>;
+  updateTaskParkingMetaBatchDurably(
+    projectOrUpdates: string | Array<{ taskId: string; parkingMeta: Task['parkingMeta'] | undefined }>,
+    explicitUpdates?: Array<{ taskId: string; parkingMeta: Task['parkingMeta'] | undefined }>,
   ): Promise<boolean> {
-    return this.taskAttr.updateTaskParkingMetaBatchDurably(updates);
+    return typeof projectOrUpdates === 'string'
+      ? this.taskAttr.updateTaskParkingMetaBatchDurably(projectOrUpdates, explicitUpdates ?? [])
+      : this.taskAttr.updateTaskParkingMetaBatchDurably(projectOrUpdates);
   }
 
   updateTaskAttachments(taskId: string, attachments: Attachment[]): Promise<boolean> {

@@ -30,7 +30,62 @@ describe('parking-task-cache.helpers', () => {
     )).toBe(true);
   });
 
-  it('merges remote parked tasks while preserving local display ids', () => {
+  it('keeps the local parked task when revisions are equal', () => {
+    const updatedAt = '2026-02-23T10:00:00.000Z';
+    const local = task({
+      stage: 2,
+      parentId: 'parent-1',
+      updatedAt,
+    });
+    const remote = task({
+      stage: null,
+      parentId: null,
+      updatedAt,
+    });
+
+    expect(shouldApplyRemoteParkedTask(local, remote)).toBe(false);
+  });
+
+  it('applies only parking metadata from a newer remote snapshot to an existing task', () => {
+    const local = task({
+      title: 'Local title must survive',
+      content: 'Local content must survive',
+      stage: 2,
+      parentId: 'parent-1',
+      order: 7,
+      rank: 70000,
+      x: 120,
+      y: 240,
+      updatedAt: '2026-02-23T10:00:00.000Z',
+    });
+    const remote = task({
+      title: 'stale remote title',
+      content: '',
+      stage: null,
+      parentId: null,
+      order: 0,
+      rank: 0,
+      x: 0,
+      y: 0,
+      updatedAt: '2026-02-23T10:01:00.000Z',
+      parkingMeta: {
+        state: 'focused',
+        parkedAt: '2026-02-23T10:01:00.000Z',
+        lastVisitedAt: '2026-02-23T10:01:00.000Z',
+        contextSnapshot: null,
+        reminder: null,
+        pinned: true,
+      },
+    });
+
+    expect(mergeRemoteParkedTask(local, remote)).toEqual({
+      ...local,
+      parkingMeta: remote.parkingMeta,
+      updatedAt: remote.updatedAt,
+    });
+  });
+
+  it('uses a complete remote task only when no local task exists', () => {
     const local = task({
       id: 'task-1',
       title: 'Local',
@@ -44,7 +99,7 @@ describe('parking-task-cache.helpers', () => {
 
     expect(mergeRemoteParkedTask(local, remote)).toMatchObject({
       id: 'task-1',
-      title: 'Remote',
+      title: 'Local',
       displayId: 'A-1',
     });
     expect(mergeRemoteParkedTask(null, remote)).toBe(remote);

@@ -9,10 +9,11 @@
 
 import { Injectable, Injector, effect, inject, signal, OnDestroy } from '@angular/core';
 import { TaskStore, ProjectStore } from '../app/core/state/stores';
-import { ParkingReminder, ParkingNotice } from '../models';
+import { ParkingReminder, ParkingNotice, Task } from '../models';
 import { PARKING_CONFIG } from '../config/parking.config';
 import { ParkingService } from './parking.service';
 import { LoggerService } from './logger.service';
+import { SessionRuntimeResetRegistry } from './session-runtime-reset.service';
 import { TaskOperationAdapterService } from './task-operation-adapter.service';
 
 const REMINDER_CHECK_INTERVAL_MS = 30_000;
@@ -26,6 +27,7 @@ export class SimpleReminderService implements OnDestroy {
   private readonly projectStore = inject(ProjectStore);
   private readonly parkingService = inject(ParkingService);
   private readonly logger = inject(LoggerService);
+  private readonly sessionRuntimeReset = inject(SessionRuntimeResetRegistry);
 
   private get taskOpsAdapter(): TaskOperationAdapterService {
     return this.injector.get(TaskOperationAdapterService);
@@ -34,6 +36,12 @@ export class SimpleReminderService implements OnDestroy {
   /** 活跃的提醒定时器 Map<taskId, timeoutId> */
   private readonly activeTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
+  /** 进行中的提醒写操作 Map<`${op}:${taskId}`, promise>：同一任务同类操作并发去重 */
+  private readonly inFlightReminderWrites = new Map<string, Promise<boolean>>();
+
+  /** 最近已展示的提醒修订 Map<taskId, `${reminderAt}|${snoozeCount}`> */
+  private readonly presentedReminderRevisions = new Map<string, string>();
+
   /** 当前显示的提醒通知 */
   readonly activeNotice = signal<ParkingNotice | null>(null);
 
@@ -41,9 +49,17 @@ export class SimpleReminderService implements OnDestroy {
   private checkInterval: ReturnType<typeof setInterval> | null = null;
 
   private reminderCheckQueued = false;
+  private reminderCheckToken = 0;
+  private sessionGeneration = 0;
   private destroyed = false;
+  private readonly unregisterSessionRuntimeReset: () => void;
 
   constructor() {
+    this.unregisterSessionRuntimeReset = this.sessionRuntimeReset.register(
+      'SimpleReminderService',
+      () => this.resetSessionRuntime(),
+    );
+
     effect(() => {
       const reminderSnapshot = this.taskStore.parkedTasks().map(task => ({
         taskId: task.id,
@@ -58,10 +74,10 @@ export class SimpleReminderService implements OnDestroy {
   }
 
   ngOnDestroy(): void {
+    if (this.destroyed) return;
     this.destroyed = true;
-    this.stopCheckInterval();
-    for (const timer of this.activeTimers.values()) clearTimeout(timer);
-    this.activeTimers.clear();
+    this.unregisterSessionRuntimeReset();
+    this.resetSessionRuntime();
   }
 
   // ─── 对外 API ───
@@ -73,6 +89,7 @@ export class SimpleReminderService implements OnDestroy {
    */
   async setReminder(taskId: string, reminderAt: string): Promise<boolean> {
     if (this.destroyed) return false;
+    const generation = this.sessionGeneration;
 
     const reminderTime = this.parseReminderTime(taskId, reminderAt);
     if (reminderTime === null) return false;
@@ -86,7 +103,7 @@ export class SimpleReminderService implements OnDestroy {
     let task = this.taskStore.getTask(taskId);
     if (task && !task.parkingMeta) {
       const parked = await this.parkingService.parkTask(taskId);
-      if (this.destroyed) return false;
+      if (!this.isSessionGenerationCurrent(generation)) return false;
       if (!parked) return false;
       task = this.taskStore.getTask(taskId);
     }
@@ -98,8 +115,8 @@ export class SimpleReminderService implements OnDestroy {
       maxSnoozeCount: PARKING_CONFIG.MAX_SNOOZE_COUNT,
     };
 
-    const saved = await this.updateReminder(taskId, reminder);
-    if (this.destroyed) return false;
+    const saved = await this.updateReminder({ taskId, projectId: this.findProjectId(taskId), explicit: false }, reminder);
+    if (!this.isSessionGenerationCurrent(generation)) return false;
     if (!saved) return false;
     this.scheduleTimer(taskId, reminderAt);
     this.startCheckInterval();
@@ -109,11 +126,34 @@ export class SimpleReminderService implements OnDestroy {
   /**
    * Snooze 提醒——延后到预设时间
    * 软上限 5 次后视觉弱化但不禁止继续
+   * 同一任务的并发 snooze 只生效一次，防止连点导致 snoozeCount 重复递增
    */
-  async snoozeReminder(taskId: string, presetKey: 'QUICK' | 'NORMAL' | 'TWO_HOURS_LATER'): Promise<boolean> {
-    if (this.destroyed) return false;
+  snoozeReminder(taskId: string, presetKey: 'QUICK' | 'NORMAL' | 'TWO_HOURS_LATER'): Promise<boolean> {
+    const target = { taskId, projectId: this.findProjectId(taskId), explicit: false };
+    return this.snoozeTarget(target, presetKey);
+  }
 
-    const task = this.taskStore.getTask(taskId);
+  private snoozeTarget(
+    target: { taskId: string; projectId: string | null; explicit: boolean },
+    presetKey: 'QUICK' | 'NORMAL' | 'TWO_HOURS_LATER',
+  ): Promise<boolean> {
+    const projectId = target.projectId;
+    if (!projectId) return Promise.resolve(false);
+    return this.dedupeReminderWrite(
+      `snooze:${projectId}:${target.taskId}`,
+      () => this.runSnoozeReminder({ ...target, projectId }, presetKey),
+    );
+  }
+
+  private async runSnoozeReminder(
+    target: { taskId: string; projectId: string; explicit: boolean },
+    presetKey: 'QUICK' | 'NORMAL' | 'TWO_HOURS_LATER',
+  ): Promise<boolean> {
+    if (this.destroyed) return false;
+    const generation = this.sessionGeneration;
+    const { projectId, taskId } = target;
+
+    const task = target.explicit ? this.getProjectTask(projectId, taskId) : this.taskStore.getTask(taskId);
     if (!task?.parkingMeta?.reminder) return false;
 
     const delay = PARKING_CONFIG.SNOOZE_PRESETS[presetKey];
@@ -125,32 +165,58 @@ export class SimpleReminderService implements OnDestroy {
       maxSnoozeCount: PARKING_CONFIG.MAX_SNOOZE_COUNT,
     };
 
-    const saved = await this.updateReminder(taskId, reminder);
-    if (this.destroyed) return false;
+    const saved = await this.updateReminder(target, reminder);
+    if (!this.isSessionGenerationCurrent(generation)) return false;
     if (!saved) return false;
+    if (target.explicit && !this.getProjectTask(projectId, taskId)) return false;
     this.scheduleTimer(taskId, newReminderAt);
     this.startCheckInterval();
 
     // 清除活跃通知
-    if (this.activeNotice()?.taskId === taskId) {
+    const activeNotice = this.activeNotice();
+    if (activeNotice?.taskId === taskId && (!target.explicit || activeNotice.projectId === projectId)) {
       this.activeNotice.set(null);
+      this.queueReminderCheck();
     }
 
     // 清除红点
-    this.parkingService.clearBadge(taskId);
+    if (!target.explicit || this.projectStore.activeProjectId() === projectId) {
+      this.parkingService.clearBadge(taskId);
+    }
     return true;
   }
 
   /**
    * 取消提醒——"忽略"语义（A5.3.3）
    * 任务保持停泊状态，reminder 置 null，可重新设置（snoozeCount 重置）
+   * 同一任务的并发取消只生效一次，防止重复写 parkingMeta
    */
-  async cancelReminder(taskId: string): Promise<boolean> {
-    if (this.destroyed) return false;
+  cancelReminder(taskId: string): Promise<boolean>;
+  cancelReminder(projectId: string, taskId: string): Promise<boolean>;
+  cancelReminder(projectOrTaskId: string, explicitTaskId?: string): Promise<boolean> {
+    const target = explicitTaskId === undefined
+      ? { taskId: projectOrTaskId, projectId: this.findProjectId(projectOrTaskId), explicit: false }
+      : { taskId: explicitTaskId, projectId: projectOrTaskId, explicit: true };
+    if (!target.projectId) return Promise.resolve(false);
+    const projectId = target.projectId;
+    return this.dedupeReminderWrite(
+      `cancel:${target.projectId}:${target.taskId}`,
+      () => this.runCancelReminder({ ...target, projectId }),
+    );
+  }
 
-    const saved = await this.updateReminder(taskId, null);
+  private async runCancelReminder(
+    target: { taskId: string; projectId: string; explicit: boolean },
+  ): Promise<boolean> {
     if (this.destroyed) return false;
+    const generation = this.sessionGeneration;
+    const { projectId, taskId } = target;
+    if (target.explicit && !this.getProjectTask(projectId, taskId)) return false;
+
+    const saved = await this.updateReminder(target, null);
+    if (!this.isSessionGenerationCurrent(generation)) return false;
     if (!saved) return false;
+    if (target.explicit && !this.getProjectTask(projectId, taskId)) return false;
 
     // 取消定时器
     if (this.activeTimers.has(taskId)) {
@@ -160,28 +226,44 @@ export class SimpleReminderService implements OnDestroy {
     this.syncCheckInterval(taskId);
 
     // 清除活跃通知
-    if (this.activeNotice()?.taskId === taskId) {
+    const activeNotice = this.activeNotice();
+    if (activeNotice?.taskId === taskId && (!target.explicit || activeNotice.projectId === projectId)) {
       this.activeNotice.set(null);
+      this.queueReminderCheck();
     }
 
     // 清除红点
-    this.parkingService.clearBadge(taskId);
+    if (!target.explicit || this.projectStore.activeProjectId() === projectId) {
+      this.parkingService.clearBadge(taskId);
+    }
     return true;
   }
 
   /**
    * 快速 snooze 方法（用于通知按钮）
    */
-  snooze5m(taskId: string): Promise<boolean> {
-    return this.snoozeReminder(taskId, 'QUICK');
+  snooze5m(taskId: string): Promise<boolean>;
+  snooze5m(projectId: string, taskId: string): Promise<boolean>;
+  snooze5m(projectOrTaskId: string, explicitTaskId?: string): Promise<boolean> {
+    return explicitTaskId === undefined
+      ? this.snoozeReminder(projectOrTaskId, 'QUICK')
+      : this.snoozeTarget({ projectId: projectOrTaskId, taskId: explicitTaskId, explicit: true }, 'QUICK');
   }
 
-  snooze30m(taskId: string): Promise<boolean> {
-    return this.snoozeReminder(taskId, 'NORMAL');
+  snooze30m(taskId: string): Promise<boolean>;
+  snooze30m(projectId: string, taskId: string): Promise<boolean>;
+  snooze30m(projectOrTaskId: string, explicitTaskId?: string): Promise<boolean> {
+    return explicitTaskId === undefined
+      ? this.snoozeReminder(projectOrTaskId, 'NORMAL')
+      : this.snoozeTarget({ projectId: projectOrTaskId, taskId: explicitTaskId, explicit: true }, 'NORMAL');
   }
 
-  snooze2h(taskId: string): Promise<boolean> {
-    return this.snoozeReminder(taskId, 'TWO_HOURS_LATER');
+  snooze2h(taskId: string): Promise<boolean>;
+  snooze2h(projectId: string, taskId: string): Promise<boolean>;
+  snooze2h(projectOrTaskId: string, explicitTaskId?: string): Promise<boolean> {
+    return explicitTaskId === undefined
+      ? this.snoozeReminder(projectOrTaskId, 'TWO_HOURS_LATER')
+      : this.snoozeTarget({ projectId: projectOrTaskId, taskId: explicitTaskId, explicit: true }, 'TWO_HOURS_LATER');
   }
 
   // ─── 提醒检查 ───
@@ -191,19 +273,29 @@ export class SimpleReminderService implements OnDestroy {
 
     const now = Date.now();
     const parkedTasks = this.taskStore.parkedTasks();
+    const reminderTaskIds = new Set<string>();
 
     for (const task of parkedTasks) {
       if (!task.parkingMeta?.reminder) continue;
+      reminderTaskIds.add(task.id);
+      const projectId = this.taskStore.getTaskProjectId(task.id);
+      if (!projectId) continue;
 
       const reminderTime = this.parseReminderTime(task.id, task.parkingMeta.reminder.reminderAt);
       if (reminderTime === null) continue;
 
       if (reminderTime <= now) {
         // 提醒到期
-        this.triggerReminder(task.id, task.title, task.parkingMeta.reminder);
+        this.triggerReminder(task.id, task.title, task.parkingMeta.reminder, projectId);
       } else if (!this.activeTimers.has(task.id)) {
         // 尚未到期但没有定时器，设置一个
         this.scheduleTimer(task.id, task.parkingMeta.reminder.reminderAt);
+      }
+    }
+
+    for (const taskId of this.presentedReminderRevisions.keys()) {
+      if (!reminderTaskIds.has(taskId)) {
+        this.presentedReminderRevisions.delete(taskId);
       }
     }
 
@@ -212,6 +304,7 @@ export class SimpleReminderService implements OnDestroy {
 
   private scheduleTimer(taskId: string, reminderAt: string): void {
     if (this.destroyed) return;
+    const generation = this.sessionGeneration;
 
     // 取消已有定时器
     if (this.activeTimers.has(taskId)) {
@@ -226,7 +319,7 @@ export class SimpleReminderService implements OnDestroy {
 
     const delay = Math.max(0, reminderTime - Date.now());
     const timer = setTimeout(() => {
-      if (this.destroyed) return;
+      if (!this.isSessionGenerationCurrent(generation)) return;
       if (this.activeTimers.get(taskId) !== timer) return;
 
       const task = this.taskStore.getTask(taskId);
@@ -239,7 +332,8 @@ export class SimpleReminderService implements OnDestroy {
           return;
         }
         if (currentReminderTime !== null) {
-          this.triggerReminder(taskId, task.title, currentReminder);
+          const projectId = this.taskStore.getTaskProjectId(taskId);
+          if (projectId) this.triggerReminder(taskId, task.title, currentReminder, projectId);
         }
       }
       if (this.activeTimers.get(taskId) === timer) {
@@ -254,11 +348,21 @@ export class SimpleReminderService implements OnDestroy {
   /**
    * 触发提醒通知——三阶段渐进消散（A6.3）
    */
-  private triggerReminder(taskId: string, title: string, reminder: ParkingReminder): void {
+  private triggerReminder(
+    taskId: string,
+    title: string,
+    reminder: ParkingReminder,
+    projectId: string | null = this.findProjectId(taskId),
+  ): void {
     if (this.destroyed) return;
+    if (!projectId) return;
+
+    const reminderRevision = `${reminder.reminderAt}|${reminder.snoozeCount}`;
+    if (this.presentedReminderRevisions.get(taskId) === reminderRevision) return;
 
     const currentNotice = this.activeNotice();
-    if (currentNotice?.type === 'reminder' && currentNotice.taskId === taskId) return;
+    if (currentNotice?.type === 'reminder'
+      && currentNotice.projectId === projectId && currentNotice.taskId === taskId) return;
 
     // 单活跃通知规则：另一条提醒还在展示时不得同 tick 顶替——否则被顶掉的提醒
     // 永远不会渲染也不会留下淡出徽标（静默饿死），而顶替者的通知周期被反复重置。
@@ -270,6 +374,7 @@ export class SimpleReminderService implements OnDestroy {
     const notice: ParkingNotice = {
       id: crypto.randomUUID(),
       type: 'reminder',
+      projectId,
       taskId,
       taskTitle: title,
       minVisibleMs: PARKING_CONFIG.REMINDER_IMMUNE_MS,
@@ -284,36 +389,82 @@ export class SimpleReminderService implements OnDestroy {
     };
 
     this.activeNotice.set(notice);
+    this.presentedReminderRevisions.set(taskId, reminderRevision);
   }
 
   /**
    * 通知被兜底淡出时调用
    */
-  handleNoticeFadeout(taskId: string): void {
+  handleNoticeFadeout(noticeId: string, taskId: string): void;
+  handleNoticeFadeout(projectId: string, noticeId: string, taskId: string): void;
+  handleNoticeFadeout(projectOrNoticeId: string, noticeOrTaskId: string, explicitTaskId?: string): void {
+    const projectId = explicitTaskId === undefined ? null : projectOrNoticeId;
+    const noticeId = explicitTaskId === undefined ? projectOrNoticeId : noticeOrTaskId;
+    const taskId = explicitTaskId ?? noticeOrTaskId;
+    const currentNotice = this.activeNotice();
+    if (currentNotice?.id !== noticeId || currentNotice.taskId !== taskId
+      || projectId && currentNotice.projectId !== projectId) return;
+
     this.parkingService.recordReminderFadeout(taskId);
     this.activeNotice.set(null);
+    this.queueReminderCheck();
   }
 
   /**
    * 清除当前活跃通知（外部组件不可直接操作 activeNotice signal）
    */
-  clearActiveNotice(): void {
+  clearActiveNotice(noticeId: string, taskId: string): void;
+  clearActiveNotice(projectId: string, noticeId: string, taskId: string): void;
+  clearActiveNotice(projectOrNoticeId: string, noticeOrTaskId: string, explicitTaskId?: string): void {
+    const projectId = explicitTaskId === undefined ? null : projectOrNoticeId;
+    const noticeId = explicitTaskId === undefined ? projectOrNoticeId : noticeOrTaskId;
+    const taskId = explicitTaskId ?? noticeOrTaskId;
+    const currentNotice = this.activeNotice();
+    if (currentNotice?.id !== noticeId || currentNotice.taskId !== taskId
+      || projectId && currentNotice.projectId !== projectId) return;
+
     this.activeNotice.set(null);
+    this.queueReminderCheck();
   }
 
   // ─── 内部辅助 ───
 
-  private updateReminder(taskId: string, reminder: ParkingReminder | null): Promise<boolean> {
-    const task = this.taskStore.getTask(taskId);
+  /** 按 reminder/task id 去重进行中的写操作：同一 key 的并发调用复用同一个进行中 Promise */
+  private dedupeReminderWrite(key: string, run: () => Promise<boolean>): Promise<boolean> {
+    const inFlight = this.inFlightReminderWrites.get(key);
+    if (inFlight) return inFlight;
+
+    const operation = run().finally(() => {
+      if (this.inFlightReminderWrites.get(key) === operation) {
+        this.inFlightReminderWrites.delete(key);
+      }
+    });
+    this.inFlightReminderWrites.set(key, operation);
+    return operation;
+  }
+
+  private updateReminder(
+    target: { taskId: string; projectId: string | null; explicit: boolean },
+    reminder: ParkingReminder | null,
+  ): Promise<boolean> {
+    const { projectId, taskId } = target;
+    if (!projectId) return Promise.resolve(false);
+    const task = target.explicit ? this.getProjectTask(projectId, taskId) : this.taskStore.getTask(taskId);
     if (!task?.parkingMeta) return Promise.resolve(false);
 
-    const projectId = this.findProjectId(taskId);
-    if (!projectId) return Promise.resolve(false);
-
-    return this.taskOpsAdapter.updateTaskParkingMeta(taskId, {
+    const parkingMeta = {
       ...task.parkingMeta,
       reminder,
-    });
+    };
+    return target.explicit
+      ? this.taskOpsAdapter.updateTaskParkingMeta(projectId, taskId, parkingMeta)
+      : this.taskOpsAdapter.updateTaskParkingMeta(taskId, parkingMeta);
+  }
+
+  private getProjectTask(projectId: string, taskId: string): Task | undefined {
+    return this.projectStore.projects()
+      .find(project => project.id === projectId)
+      ?.tasks.find(task => task.id === taskId);
   }
 
   private findProjectId(taskId: string): string | null {
@@ -335,7 +486,12 @@ export class SimpleReminderService implements OnDestroy {
   private startCheckInterval(): void {
     if (this.destroyed) return;
     if (this.checkInterval !== null) return;
-    this.checkInterval = setInterval(() => this.checkReminders(), REMINDER_CHECK_INTERVAL_MS);
+    const generation = this.sessionGeneration;
+    this.checkInterval = setInterval(() => {
+      if (this.isSessionGenerationCurrent(generation)) {
+        this.checkReminders();
+      }
+    }, REMINDER_CHECK_INTERVAL_MS);
   }
 
   private stopCheckInterval(): void {
@@ -363,9 +519,28 @@ export class SimpleReminderService implements OnDestroy {
   private queueReminderCheck(): void {
     if (this.destroyed || this.reminderCheckQueued) return;
     this.reminderCheckQueued = true;
+    const token = ++this.reminderCheckToken;
+    const generation = this.sessionGeneration;
     Promise.resolve().then(() => {
+      if (token !== this.reminderCheckToken) return;
       this.reminderCheckQueued = false;
-      if (!this.destroyed) this.checkReminders();
+      if (this.isSessionGenerationCurrent(generation)) this.checkReminders();
     });
+  }
+
+  private resetSessionRuntime(): void {
+    this.sessionGeneration += 1;
+    this.reminderCheckToken += 1;
+    this.reminderCheckQueued = false;
+    this.stopCheckInterval();
+    for (const timer of this.activeTimers.values()) clearTimeout(timer);
+    this.activeTimers.clear();
+    this.activeNotice.set(null);
+    this.presentedReminderRevisions.clear();
+    this.inFlightReminderWrites.clear();
+  }
+
+  private isSessionGenerationCurrent(generation: number): boolean {
+    return !this.destroyed && generation === this.sessionGeneration;
   }
 }

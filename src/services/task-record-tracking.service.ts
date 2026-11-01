@@ -208,8 +208,9 @@ export class TaskRecordTrackingService {
   private enqueueRecordUpdate(
     mutator: (project: Project) => Project,
     options: RecordAndUpdateDurablyOptions,
+    explicitProjectId?: string,
   ): Promise<boolean> {
-    const run = () => this.runRecordAndUpdateDurably(mutator, options);
+    const run = () => this.runRecordAndUpdateDurably(mutator, options, explicitProjectId);
     const currentTail = this.recordUpdateTail;
     const result = currentTail ? currentTail.then(run, run) : run();
     this.recordUpdateTail = result.finally(() => {
@@ -226,9 +227,18 @@ export class TaskRecordTrackingService {
     return this.enqueueRecordUpdate(mutator, options);
   }
 
+  recordAndUpdateProjectDurably(
+    projectId: string,
+    mutator: (project: Project) => Project,
+    options: RecordAndUpdateDurablyOptions = {},
+  ): Promise<boolean> {
+    return this.enqueueRecordUpdate(mutator, options, projectId);
+  }
+
   private async runRecordAndUpdateDurably(
     mutator: (project: Project) => Project,
     options: RecordAndUpdateDurablyOptions,
+    explicitProjectId?: string,
   ): Promise<boolean> {
     if (this.isUpdating) {
       this.logger.warn('[TaskRecord] 检测到并发更新，跳过本次操作');
@@ -238,7 +248,10 @@ export class TaskRecordTrackingService {
     this.isUpdating = true;
 
     try {
-      const project = this.projectState.activeProject(); if (!project) return false;
+      const project = explicitProjectId
+        ? this.projectState.getProjectWithCurrentData(explicitProjectId)
+        : this.projectState.activeProject();
+      if (!project) return false;
 
       const targetProjectId = project.id;
       const updateType = options.updateType ?? 'structure';

@@ -26,7 +26,11 @@ export { SessionManagerService } from './app/core/services/sync/session-manager.
 
 // ProjectDataService — 被 parking 轻量停泊任务加载、delta-sync-coordinator 使用
 export { ProjectDataService } from './app/core/services/sync/project-data.service';
-export type { ParkedTaskRemoval } from './app/core/services/sync/project-data.service';
+export type {
+  ParkedTaskCacheSaveOptions,
+  ParkedTaskDeltaResult,
+  ParkedTaskRemoval,
+} from './app/core/services/sync/project-parked-tasks-data.service';
 
 // ProjectSyncCursorService — 被 delta-sync-coordinator 使用（checkForDrift + commitProjectSyncCursor）
 export { ProjectSyncCursorService } from './app/core/services/sync/project-sync-cursor.service';

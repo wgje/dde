@@ -35,9 +35,16 @@ export class ContextRestoreService {
    * 保存当前任务的上下文快照
    * 在停泊或关闭页面前调用
    */
-  async saveSnapshot(taskId: string): Promise<void> {
+  async saveSnapshot(taskId: string): Promise<void>;
+  async saveSnapshot(projectId: string, taskId: string): Promise<void>;
+  async saveSnapshot(projectOrTaskId: string, explicitTaskId?: string): Promise<void> {
+    const taskId = explicitTaskId ?? projectOrTaskId;
+    const expectedProjectId = explicitTaskId === undefined ? null : projectOrTaskId;
     const task = this.taskStore.getTask(taskId);
     if (!task) return;
+
+    const projectId = this.findProjectId(taskId);
+    if (!projectId || (expectedProjectId !== null && projectId !== expectedProjectId)) return;
 
     const viewMode = this.uiState.activeView() === 'flow' ? 'flow' : 'text';
     const contentHash = this.computeContentHash(task.content);
@@ -56,17 +63,14 @@ export class ContextRestoreService {
 
     // 将快照写入 parkingMeta
     if (task.parkingMeta) {
-      const projectId = this.findProjectId(taskId);
-      if (projectId) {
-        this.taskStore.setTask(
-          {
-            ...task,
-            parkingMeta: { ...task.parkingMeta, contextSnapshot: snapshot },
-            updatedAt: new Date().toISOString(),
-          },
-          projectId
-        );
-      }
+      this.taskStore.setTask(
+        {
+          ...task,
+          parkingMeta: { ...task.parkingMeta, contextSnapshot: snapshot },
+          updatedAt: new Date().toISOString(),
+        },
+        projectId,
+      );
     }
   }
 
@@ -74,7 +78,17 @@ export class ContextRestoreService {
    * 恢复任务上下文
    * 先判断 contentHash 是否匹配，不匹配走四级 fallback
    */
-  restore(taskId: string, snapshot: ParkingSnapshot): void {
+  restore(taskId: string, snapshot: ParkingSnapshot): void;
+  restore(projectId: string, taskId: string, snapshot: ParkingSnapshot): void;
+  restore(
+    projectOrTaskId: string,
+    snapshotOrTaskId: ParkingSnapshot | string,
+    explicitSnapshot?: ParkingSnapshot,
+  ): void {
+    const expectedProjectId = explicitSnapshot === undefined ? null : projectOrTaskId;
+    const taskId = explicitSnapshot === undefined ? projectOrTaskId : snapshotOrTaskId as string;
+    const snapshot = explicitSnapshot ?? snapshotOrTaskId as ParkingSnapshot;
+    if (expectedProjectId !== null && this.findProjectId(taskId) !== expectedProjectId) return;
     const task = this.taskStore.getTask(taskId);
     if (!task) return;
 

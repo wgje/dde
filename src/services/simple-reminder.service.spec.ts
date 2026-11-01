@@ -14,12 +14,13 @@ import {
   setupSimpleReminderSpecHarness,
   type SimpleReminderSpecHarness,
 } from './simple-reminder.service.spec-helpers';
-import { registerSimpleReminderDueReminderSpecs } from './simple-reminder.service.due-reminder.spec-helpers';
+import { registerSimpleReminderRuntimeSpecs } from './simple-reminder-runtime.spec-helpers';
 
 describe('SimpleReminderService', () => {
   let harness: SimpleReminderSpecHarness;
   let service: SimpleReminderSpecHarness['service'];
   let mockTaskStore: SimpleReminderSpecHarness['mockTaskStore'];
+  let mockProjectStore: SimpleReminderSpecHarness['mockProjectStore'];
   let mockParkingService: SimpleReminderSpecHarness['mockParkingService'];
   let mockTaskOpsAdapter: SimpleReminderSpecHarness['mockTaskOpsAdapter'];
   let mockLogger: SimpleReminderSpecHarness['mockLogger'];
@@ -41,6 +42,7 @@ describe('SimpleReminderService', () => {
     ({
       service,
       mockTaskStore,
+      mockProjectStore,
       mockParkingService,
       mockTaskOpsAdapter,
       mockLogger,
@@ -478,238 +480,147 @@ describe('SimpleReminderService', () => {
     });
   });
 
-  // ─── 轮询兜底启停 ───
+  // ─── 并发去重 ───
 
-  describe('提醒兜底轮询', () => {
-    it('无活跃提醒时不启动 30s 兜底轮询', () => {
-      expect(getCheckInterval()).toBeNull();
+  describe('snooze/cancel 并发去重', () => {
+    const createReminderTask = (id: string) => createTask({
+      id,
+      parkingMeta: {
+        state: 'parked',
+        parkedAt: new Date().toISOString(),
+        lastVisitedAt: new Date().toISOString(),
+        contextSnapshot: null,
+        reminder: {
+          reminderAt: new Date().toISOString(),
+          snoozeCount: 0,
+          maxSnoozeCount: 5,
+        },
+        pinned: false,
+      },
     });
 
-    it('发现持久化未来提醒时启动兜底轮询并安排精确定时器', () => {
-      const task = createTask({
-        id: 'persisted-future-reminder',
-        parkingMeta: {
-          state: 'parked',
-          parkedAt: new Date().toISOString(),
-          lastVisitedAt: new Date().toISOString(),
-          contextSnapshot: null,
-          reminder: {
-            reminderAt: new Date(Date.now() + 60_000).toISOString(),
-            snoozeCount: 0,
-            maxSnoozeCount: 5,
-          },
-          pinned: false,
+    it('同一任务并发 snooze 只写一次，防止 snoozeCount 重复递增', async () => {
+      const task = createReminderTask('dedup-snooze');
+      mockTaskStore.getTask.mockReturnValue(task);
+      let resolveWrite!: (value: boolean) => void;
+      mockTaskOpsAdapter.updateTaskParkingMeta.mockReturnValueOnce(
+        new Promise<boolean>(resolve => { resolveWrite = resolve; })
+      );
+
+      const first = service.snooze5m('dedup-snooze');
+      const second = service.snooze5m('dedup-snooze');
+
+      resolveWrite(true);
+      await expect(first).resolves.toBe(true);
+      await expect(second).resolves.toBe(true);
+      expect(mockTaskOpsAdapter.updateTaskParkingMeta).toHaveBeenCalledTimes(1);
+      const updatedMeta = mockTaskOpsAdapter.updateTaskParkingMeta.mock.calls[0][1];
+      expect(updatedMeta.reminder.snoozeCount).toBe(1);
+
+      // 完成后释放：再次 snooze 应重新写入
+      await expect(service.snooze5m('dedup-snooze')).resolves.toBe(true);
+      expect(mockTaskOpsAdapter.updateTaskParkingMeta).toHaveBeenCalledTimes(2);
+    });
+
+    it('同一任务并发 cancel 只写一次', async () => {
+      const task = createReminderTask('dedup-cancel');
+      mockTaskStore.getTask.mockReturnValue(task);
+      let resolveWrite!: (value: boolean) => void;
+      mockTaskOpsAdapter.updateTaskParkingMeta.mockReturnValueOnce(
+        new Promise<boolean>(resolve => { resolveWrite = resolve; })
+      );
+
+      const first = service.cancelReminder('dedup-cancel');
+      const second = service.cancelReminder('dedup-cancel');
+
+      resolveWrite(true);
+      await expect(first).resolves.toBe(true);
+      await expect(second).resolves.toBe(true);
+      expect(mockTaskOpsAdapter.updateTaskParkingMeta).toHaveBeenCalledTimes(1);
+    });
+
+    it('不同任务的并发 snooze 互不阻塞', async () => {
+      mockTaskStore.getTask.mockImplementation((taskId: string) => createReminderTask(taskId));
+
+      await Promise.all([
+        service.snooze5m('dedup-task-a'),
+        service.snooze5m('dedup-task-b'),
+      ]);
+
+      expect(mockTaskOpsAdapter.updateTaskParkingMeta).toHaveBeenCalledTimes(2);
+      expect(mockTaskOpsAdapter.updateTaskParkingMeta).toHaveBeenCalledWith('dedup-task-a', expect.anything());
+      expect(mockTaskOpsAdapter.updateTaskParkingMeta).toHaveBeenCalledWith('dedup-task-b', expect.anything());
+    });
+  });
+
+  describe('explicit project ownership', () => {
+    const reminderTask = (projectId: string, snoozeCount: number) => createTask({
+      id: 'shared-task',
+      title: projectId,
+      parkingMeta: {
+        state: 'parked',
+        parkedAt: new Date().toISOString(),
+        lastVisitedAt: new Date().toISOString(),
+        contextSnapshot: null,
+        reminder: {
+          reminderAt: new Date().toISOString(),
+          snoozeCount,
+          maxSnoozeCount: 5,
         },
-      });
-      mockTaskStore.parkedTasks.set([task]);
+        pinned: false,
+      },
+    });
+
+    it('snoozes the captured A task when B has the same task id', async () => {
+      const taskA = reminderTask('project-a', 1);
+      const taskB = reminderTask('project-b', 7);
+      mockProjectStore.projects.set([
+        { id: 'project-a', tasks: [taskA] },
+        { id: 'project-b', tasks: [taskB] },
+      ]);
+      mockTaskStore.getTask.mockReturnValue(taskB);
+
+      await expect(service.snooze5m('project-a', 'shared-task')).resolves.toBe(true);
+
+      expect(mockTaskOpsAdapter.updateTaskParkingMeta).toHaveBeenCalledWith(
+        'project-a',
+        'shared-task',
+        expect.objectContaining({ reminder: expect.objectContaining({ snoozeCount: 2 }) }),
+      );
+    });
+
+    it('cancels only through the strict explicit-project durable API', async () => {
+      const taskA = reminderTask('project-a', 2);
+      mockProjectStore.projects.set([{ id: 'project-a', tasks: [taskA] }]);
+      mockTaskStore.getTask.mockReturnValue(undefined);
+
+      await expect(service.cancelReminder('project-a', 'shared-task')).resolves.toBe(true);
+
+      expect(mockTaskOpsAdapter.updateTaskParkingMeta).toHaveBeenCalledWith(
+        'project-a', 'shared-task', expect.objectContaining({ reminder: null }),
+      );
+    });
+
+    it('publishes reminder notices with immutable source project ownership', () => {
+      const taskA = reminderTask('project-a', 0);
+      mockProjectStore.projects.set([{ id: 'project-a', tasks: [taskA] }]);
+      mockTaskStore.parkedTasks.set([taskA]);
+      mockTaskStore.getTaskProjectId.mockReturnValue('project-a');
 
       checkRemindersNow();
 
-      const activeTimers = (service as unknown as { activeTimers: Map<string, unknown> }).activeTimers;
-      expect(activeTimers.has('persisted-future-reminder')).toBe(true);
-      expect(getCheckInterval()).not.toBeNull();
-    });
-
-    it('同一任务旧 timer handle 为 0 时重新安排提醒也应清理旧 timer', async () => {
-      const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout')
-        .mockReturnValueOnce(0 as unknown as ReturnType<typeof setTimeout>)
-        .mockReturnValueOnce(17 as unknown as ReturnType<typeof setTimeout>);
-      const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout').mockImplementation(() => undefined);
-      const task = createTask({
-        id: 'zero-timer-reschedule',
-        parkingMeta: {
-          state: 'parked',
-          parkedAt: new Date().toISOString(),
-          lastVisitedAt: new Date().toISOString(),
-          contextSnapshot: null,
-          reminder: null,
-          pinned: false,
-        },
-      });
-      mockTaskStore.getTask.mockReturnValue(task);
-
-      try {
-        await expect(
-          service.setReminder('zero-timer-reschedule', new Date(Date.now() + 60_000).toISOString()),
-        ).resolves.toBe(true);
-        await expect(
-          service.setReminder('zero-timer-reschedule', new Date(Date.now() + 120_000).toISOString()),
-        ).resolves.toBe(true);
-
-        expect(clearTimeoutSpy).toHaveBeenCalledWith(0);
-      } finally {
-        setTimeoutSpy.mockRestore();
-        clearTimeoutSpy.mockRestore();
-      }
-    });
-
-    it('parkedTasks 在服务构造后异步恢复提醒时应自动启动检查', async () => {
-      const task = createTask({
-        id: 'async-restored-reminder',
-        parkingMeta: {
-          state: 'parked',
-          parkedAt: new Date().toISOString(),
-          lastVisitedAt: new Date().toISOString(),
-          contextSnapshot: null,
-          reminder: {
-            reminderAt: new Date(Date.now() + 60_000).toISOString(),
-            snoozeCount: 0,
-            maxSnoozeCount: 5,
-          },
-          pinned: false,
-        },
-      });
-
-      expect(getCheckInterval()).toBeNull();
-
-      mockTaskStore.parkedTasks.set([task]);
-      await flushReminderEffects();
-
-      const activeTimers = (service as unknown as { activeTimers: Map<string, unknown> }).activeTimers;
-      expect(activeTimers.has('async-restored-reminder')).toBe(true);
-      expect(getCheckInterval()).not.toBeNull();
-    });
-
-    it('取消最后一个提醒后停止兜底轮询，即使本地 store 仍短暂保留旧 reminder', async () => {
-      const task = createTask({
-        id: 'cancel-last-reminder',
-        parkingMeta: {
-          state: 'parked',
-          parkedAt: new Date().toISOString(),
-          lastVisitedAt: new Date().toISOString(),
-          contextSnapshot: null,
-          reminder: {
-            reminderAt: new Date(Date.now() + 60_000).toISOString(),
-            snoozeCount: 0,
-            maxSnoozeCount: 5,
-          },
-          pinned: false,
-        },
-      });
-      mockTaskStore.getTask.mockReturnValue(task);
-      mockTaskStore.parkedTasks.set([task]);
-
-      checkRemindersNow();
-      expect(getCheckInterval()).not.toBeNull();
-
-      await expect(service.cancelReminder('cancel-last-reminder')).resolves.toBe(true);
-
-      expect(getCheckInterval()).toBeNull();
-    });
-
-    it('取消最后一个 timer handle 为 0 的提醒时应清理 timer 并停止兜底轮询', async () => {
-      const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout')
-        .mockReturnValueOnce(0 as unknown as ReturnType<typeof setTimeout>);
-      const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout').mockImplementation(() => undefined);
-      const task = createTask({
-        id: 'cancel-zero-timer',
-        parkingMeta: {
-          state: 'parked',
-          parkedAt: new Date().toISOString(),
-          lastVisitedAt: new Date().toISOString(),
-          contextSnapshot: null,
-          reminder: null,
-          pinned: false,
-        },
-      });
-      mockTaskStore.getTask.mockReturnValue(task);
-
-      try {
-        await expect(
-          service.setReminder('cancel-zero-timer', new Date(Date.now() + 60_000).toISOString()),
-        ).resolves.toBe(true);
-        expect(getCheckInterval()).not.toBeNull();
-
-        await expect(service.cancelReminder('cancel-zero-timer')).resolves.toBe(true);
-
-        const activeTimers = (service as unknown as { activeTimers: Map<string, unknown> }).activeTimers;
-        expect(clearTimeoutSpy).toHaveBeenCalledWith(0);
-        expect(activeTimers.has('cancel-zero-timer')).toBe(false);
-        expect(getCheckInterval()).toBeNull();
-      } finally {
-        setTimeoutSpy.mockRestore();
-        clearTimeoutSpy.mockRestore();
-      }
+      expect(service.activeNotice()).toEqual(expect.objectContaining({
+        type: 'reminder', projectId: 'project-a', taskId: 'shared-task',
+      }));
     });
   });
 
-  // ─── handleNoticeFadeout ───
-
-  describe('handleNoticeFadeout', () => {
-    it('淡出应记录到 ParkingService', () => {
-      service.handleNoticeFadeout('fadeout-task');
-
-      expect(mockParkingService.recordReminderFadeout).toHaveBeenCalledWith('fadeout-task');
-    });
-
-    it('淡出应清除活跃通知', () => {
-      const task = createTask({
-        id: 'fadeout-2',
-        parkingMeta: {
-          state: 'parked',
-          parkedAt: new Date().toISOString(),
-          lastVisitedAt: new Date().toISOString(),
-          contextSnapshot: null,
-          reminder: {
-            reminderAt: new Date().toISOString(),
-            snoozeCount: 0,
-            maxSnoozeCount: 5,
-          },
-          pinned: false,
-        },
-      });
-      mockTaskStore.getTask.mockReturnValue(task);
-
-      (service as unknown as { triggerReminder: (id: string, title: string, reminder: unknown) => void })
-        .triggerReminder('fadeout-2', '测试', task.parkingMeta!.reminder!);
-      expect(service.activeNotice()).toBeTruthy();
-
-      service.handleNoticeFadeout('fadeout-2');
-      expect(service.activeNotice()).toBeNull();
-    });
-  });
-
-  // ─── 初始状态 ───
-
-  describe('activeNotice', () => {
-    it('初始为 null', () => {
-      expect(service.activeNotice()).toBeNull();
-    });
-  });
-
-  // ─── 提醒到期触发 ───
-
-  registerSimpleReminderDueReminderSpecs(() => ({ service, mockTaskStore, mockLogger }));
-
-  // ─── ngOnDestroy 清理 ───
-
-  describe('ngOnDestroy', () => {
-    it('销毁时应清理所有定时器', async () => {
-      const task = createTask({
-        id: 'destroy-test',
-        parkingMeta: {
-          state: 'parked',
-          parkedAt: new Date().toISOString(),
-          lastVisitedAt: new Date().toISOString(),
-          contextSnapshot: null,
-          reminder: {
-            reminderAt: new Date(Date.now() + 3600_000).toISOString(),
-            snoozeCount: 0,
-            maxSnoozeCount: 5,
-          },
-          pinned: false,
-        },
-      });
-      mockTaskStore.getTask.mockReturnValue(task);
-      await expect(
-        service.setReminder('destroy-test', new Date(Date.now() + 3600_000).toISOString()),
-      ).resolves.toBe(true);
-
-      service.ngOnDestroy();
-
-      // 销毁后推进时间不应触发提醒
-      vi.advanceTimersByTime(3600_000 + 1);
-      expect(service.activeNotice()).toBeNull();
-    });
-  });
+  registerSimpleReminderRuntimeSpecs(() => ({
+    service,
+    mockTaskStore,
+    mockParkingService,
+    mockTaskOpsAdapter,
+    mockLogger,
+    sessionRuntimeReset: harness.sessionRuntimeReset,
+  }));
 });

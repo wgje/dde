@@ -40,6 +40,14 @@ export class TaskAttributeService {
     return this.recorder.recordAndUpdateDurably(mutator, options);
   }
 
+  private recordAndUpdateProjectDurably(
+    projectId: string,
+    mutator: (project: Project) => Project,
+    options: { updateType: 'content' | 'structure' | 'position'; debouncedUndo?: boolean },
+  ): Promise<boolean> {
+    return this.recorder.recordAndUpdateProjectDurably(projectId, mutator, options);
+  }
+
   private getActiveProject(): Project | null {
     return this.projectState.activeProject();
   }
@@ -271,34 +279,69 @@ export class TaskAttributeService {
     return saved;
   }
 
-  updateTaskParkingMetaDurably(taskId: string, parkingMeta: Task['parkingMeta'] | undefined): Promise<boolean> {
+  updateTaskParkingMetaDurably(taskId: string, parkingMeta: Task['parkingMeta'] | undefined): Promise<boolean>;
+  updateTaskParkingMetaDurably(
+    projectId: string, taskId: string, parkingMeta: Task['parkingMeta'] | undefined,
+  ): Promise<boolean>;
+  updateTaskParkingMetaDurably(
+    projectOrTaskId: string,
+    taskIdOrMeta: string | Task['parkingMeta'] | undefined,
+    explicitMeta?: Task['parkingMeta'],
+  ): Promise<boolean> {
+    const explicitProjectId = typeof taskIdOrMeta === 'string' ? projectOrTaskId : null;
+    const taskId = typeof taskIdOrMeta === 'string' ? taskIdOrMeta : projectOrTaskId;
+    const parkingMeta = typeof taskIdOrMeta === 'string' ? explicitMeta : taskIdOrMeta;
+    if (explicitProjectId && !this.projectState.getProjectWithCurrentData(explicitProjectId)
+      ?.tasks.some(task => task.id === taskId)) return Promise.resolve(false);
+
     const now = new Date().toISOString();
-    return this.recordAndUpdateDurably(p => ({
+    const mutate = (p: Project): Project => ({
       ...p,
       tasks: p.tasks.map(t =>
         t.id === taskId
           ? { ...t, parkingMeta, updatedAt: now }
           : t,
       )
-    }), { updateType: 'content' });
+    });
+    return explicitProjectId
+      ? this.recordAndUpdateProjectDurably(explicitProjectId, mutate, { updateType: 'content' })
+      : this.recordAndUpdateDurably(mutate, { updateType: 'content' });
   }
 
   updateTaskParkingMetaBatchDurably(
     updates: Array<{ taskId: string; parkingMeta: Task['parkingMeta'] | undefined }>,
+  ): Promise<boolean>;
+  updateTaskParkingMetaBatchDurably(
+    projectId: string,
+    updates: Array<{ taskId: string; parkingMeta: Task['parkingMeta'] | undefined }>,
+  ): Promise<boolean>;
+  updateTaskParkingMetaBatchDurably(
+    projectOrUpdates: string | Array<{ taskId: string; parkingMeta: Task['parkingMeta'] | undefined }>,
+    explicitUpdates?: Array<{ taskId: string; parkingMeta: Task['parkingMeta'] | undefined }>,
   ): Promise<boolean> {
+    const explicitProjectId = typeof projectOrUpdates === 'string' ? projectOrUpdates : null;
+    const updates = typeof projectOrUpdates === 'string' ? explicitUpdates ?? [] : projectOrUpdates;
     if (updates.length === 0) return Promise.resolve(false);
+    if (explicitProjectId) {
+      const taskIds = new Set(this.projectState.getProjectWithCurrentData(explicitProjectId)
+        ?.tasks.map(task => task.id) ?? []);
+      if (updates.some(update => !taskIds.has(update.taskId))) return Promise.resolve(false);
+    }
 
     const now = new Date().toISOString();
     const updatesByTaskId = new Map(updates.map(update => [update.taskId, update.parkingMeta]));
 
-    return this.recordAndUpdateDurably(p => ({
+    const mutate = (p: Project): Project => ({
       ...p,
       tasks: p.tasks.map(t =>
         updatesByTaskId.has(t.id)
           ? { ...t, parkingMeta: updatesByTaskId.get(t.id), updatedAt: now }
           : t,
       )
-    }), { updateType: 'content' });
+    });
+    return explicitProjectId
+      ? this.recordAndUpdateProjectDurably(explicitProjectId, mutate, { updateType: 'content' })
+      : this.recordAndUpdateDurably(mutate, { updateType: 'content' });
   }
 
   /**

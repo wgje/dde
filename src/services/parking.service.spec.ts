@@ -22,7 +22,9 @@ import { PARKING_CONFIG } from '../config/parking.config';
 import { AUTH_CONFIG } from '../config/auth.config';
 import { AuthService } from './auth.service';
 import { TaskOperationAdapterService } from './task-operation-adapter.service';
+import { SessionRuntimeResetRegistry } from './session-runtime-reset.service';
 import { resetBrowserNetworkSuspensionTrackingForTests } from '../utils/browser-network-suspension';
+import { registerParkingCleanupSpecs } from './parking-cleanup.spec-helpers';
 import { registerParkingLightweightSyncSpecs } from './parking-lightweight-sync.spec-helpers';
 import { registerParkingNoteAndKeepSpecs } from './parking-note-and-keep.spec-helpers';
 import { registerParkingPinnedSpecs } from './parking-pinned.spec-helpers';
@@ -32,6 +34,7 @@ import { registerParkingTaskActionsSpecs } from './parking-task-actions.spec-hel
 
 describe('ParkingService', () => {
   let service: ParkingService;
+  let sessionRuntimeReset: SessionRuntimeResetRegistry;
   let onlineSpy: ReturnType<typeof vi.spyOn> | null = null;
 
   const taskMap = new Map<string, Task>();
@@ -91,7 +94,7 @@ describe('ParkingService', () => {
       taskMap.set(task.id, task);
       syncParkedSignals();
     }),
-    getTaskProjectId: vi.fn(() => 'proj-1'),
+    getTaskProjectId: vi.fn((_taskId?: string) => 'proj-1'),
   };
 
   const mockTaskOpsAdapter = {
@@ -107,8 +110,10 @@ describe('ParkingService', () => {
       return true;
     }),
     updateTaskParkingMetaBatch: vi.fn(async (
-      updates: Array<{ taskId: string; parkingMeta: TaskParkingMeta | undefined }>,
+      projectOrUpdates: string | Array<{ taskId: string; parkingMeta: TaskParkingMeta | undefined }>,
+      explicitUpdates?: Array<{ taskId: string; parkingMeta: TaskParkingMeta | undefined }>,
     ) => {
+      const updates = typeof projectOrUpdates === 'string' ? explicitUpdates ?? [] : projectOrUpdates;
       for (const update of updates) {
         const current = taskMap.get(update.taskId);
         if (!current) return false;
@@ -140,7 +145,7 @@ describe('ParkingService', () => {
   const mockProjectStore = {
     activeProjectId: signal<string | null>('proj-1'),
     projects: projectListSignal,
-    getProject: vi.fn((projectId: string) => ({
+    getProject: vi.fn((projectId: string): Project => ({
       id: projectId,
       name: '测试项目',
       description: '',
@@ -240,6 +245,11 @@ describe('ParkingService', () => {
     localStorage.removeItem(AUTH_CONFIG.LOCAL_MODE_CACHE_KEY);
     localStorage.removeItem(PARKING_CONFIG.SNAPSHOT_DRAFT_KEY);
     vi.clearAllMocks();
+    mockTaskStore.getTaskProjectId.mockReturnValue('proj-1');
+    mockProjectStore.getProject.mockImplementation((projectId: string) => ({
+      ...createProject(projectId),
+      tasks: Array.from(taskMap.values()),
+    }));
     mockTaskOpsAdapter.updateTaskParkingMeta.mockImplementation(async (taskId: string, parkingMeta: TaskParkingMeta | undefined) => {
       const current = taskMap.get(taskId);
       if (!current) return false;
@@ -252,8 +262,10 @@ describe('ParkingService', () => {
       return true;
     });
     mockTaskOpsAdapter.updateTaskParkingMetaBatch.mockImplementation(async (
-      updates: Array<{ taskId: string; parkingMeta: TaskParkingMeta | undefined }>,
+      projectOrUpdates: string | Array<{ taskId: string; parkingMeta: TaskParkingMeta | undefined }>,
+      explicitUpdates?: Array<{ taskId: string; parkingMeta: TaskParkingMeta | undefined }>,
     ) => {
+      const updates = typeof projectOrUpdates === 'string' ? explicitUpdates ?? [] : projectOrUpdates;
       for (const update of updates) {
         const current = taskMap.get(update.taskId);
         if (!current) return false;
@@ -284,6 +296,7 @@ describe('ParkingService', () => {
     TestBed.configureTestingModule({
       providers: [
         ParkingService,
+        SessionRuntimeResetRegistry,
         { provide: TaskStore, useValue: mockTaskStore },
         { provide: ProjectStore, useValue: mockProjectStore },
         { provide: ToastService, useValue: mockToastService },
@@ -300,6 +313,7 @@ describe('ParkingService', () => {
     });
 
     service = TestBed.inject(ParkingService);
+    sessionRuntimeReset = TestBed.inject(SessionRuntimeResetRegistry);
   });
 
   afterEach(() => {
@@ -360,6 +374,26 @@ describe('ParkingService', () => {
   // ─── P-02: startWork 切换任务 ───
 
   describe('P-02: startWork', () => {
+    const arrangeCrossProjectSameId = () => {
+      const focused = createTask({ id: 'shared', parkingMeta: createParkingMeta({ state: 'focused' }) });
+      const target = createTask({ id: 'shared', parkingMeta: createParkingMeta() });
+      const projectTasks = new Map([['project-a', target], ['project-b', focused]]);
+      taskMap.set(focused.id, focused);
+      syncParkedSignals();
+      mockTaskStore.getTaskProjectId.mockReturnValue('project-b');
+      mockProjectStore.getProject.mockImplementation((projectId: string) => ({
+        ...createProject(projectId),
+        tasks: [projectTasks.get(projectId)!],
+      }));
+      return {
+        applyUpdates: (projectId: string, updates: Array<{ taskId: string; parkingMeta: TaskParkingMeta | undefined }>) => {
+          const current = projectTasks.get(projectId)!;
+          const update = updates.find(candidate => candidate.taskId === current.id)!;
+          projectTasks.set(projectId, { ...current, parkingMeta: update.parkingMeta });
+        },
+      };
+    };
+
     it('切换到目标任务并将当前 focused 停泊', async () => {
       const currentFocused = createTask({
         id: 'focused-1',
@@ -399,6 +433,125 @@ describe('ParkingService', () => {
       await service.startWork(target.id);
 
       expect(mockContextRestoreService.saveSnapshot).toHaveBeenCalledWith('focused-save');
+    });
+
+    it('same-project startWork uses one explicit-project durable batch', async () => {
+      const focused = createTask({ id: 'focused-a', parkingMeta: createParkingMeta({ state: 'focused' }) });
+      const target = createTask({ id: 'target-a', parkingMeta: createParkingMeta() });
+      taskMap.set(focused.id, focused);
+      taskMap.set(target.id, target);
+      syncParkedSignals();
+      mockTaskStore.getTaskProjectId.mockReturnValue('project-a');
+      mockProjectStore.getProject.mockReturnValue(createProject('project-a'));
+
+      await expect(service.startWork('project-a', target.id)).resolves.toBe(true);
+
+      expect(mockTaskOpsAdapter.updateTaskParkingMetaBatch).toHaveBeenCalledTimes(1);
+      expect(mockTaskOpsAdapter.updateTaskParkingMetaBatch).toHaveBeenCalledWith(
+        'project-a',
+        expect.arrayContaining([
+          expect.objectContaining({ taskId: focused.id }),
+          expect.objectContaining({ taskId: target.id }),
+        ]),
+      );
+    });
+
+    it('cross-project startWork commits demotion before promotion and reports partial failure', async () => {
+      const focused = createTask({ id: 'focused-b', parkingMeta: createParkingMeta({ state: 'focused' }) });
+      const target = createTask({ id: 'target-a', parkingMeta: createParkingMeta() });
+      taskMap.set(focused.id, focused);
+      taskMap.set(target.id, target);
+      syncParkedSignals();
+      mockTaskStore.getTaskProjectId.mockImplementation((taskId?: string) =>
+        taskId === focused.id ? 'project-b' : 'project-a');
+      mockProjectStore.getProject.mockImplementation((projectId: string) => ({
+        ...createProject(projectId),
+        tasks: Array.from(taskMap.values()).filter(task =>
+          projectId === 'project-b' ? task.id === focused.id : task.id === target.id),
+      }));
+      mockTaskOpsAdapter.updateTaskParkingMetaBatch.mockImplementation(async (
+        projectIdOrUpdates: string | Array<{ taskId: string; parkingMeta: TaskParkingMeta | undefined }>,
+        explicitUpdates?: Array<{ taskId: string; parkingMeta: TaskParkingMeta | undefined }>,
+      ) => {
+        if (typeof projectIdOrUpdates !== 'string' || !explicitUpdates) return true;
+        if (projectIdOrUpdates === 'project-a') return false;
+        for (const update of explicitUpdates) {
+          taskMap.set(update.taskId, { ...taskMap.get(update.taskId)!, parkingMeta: update.parkingMeta });
+        }
+        return true;
+      });
+
+      await expect(service.startWork('project-a', target.id)).resolves.toBe(false);
+
+      expect(mockTaskOpsAdapter.updateTaskParkingMetaBatch.mock.calls.map(call => call[0]))
+        .toEqual(['project-b', 'project-a']);
+      expect(mockUndoService.recordAction).toHaveBeenCalledTimes(1);
+      expect(mockUndoService.recordAction).toHaveBeenCalledWith(expect.objectContaining({ projectId: 'project-b' }));
+      expect(mockToastService.success).not.toHaveBeenCalled();
+    });
+
+    it('cross-project startWork demotes the exact same-id B task before promoting A', async () => {
+      const { applyUpdates } = arrangeCrossProjectSameId();
+      const calls: Array<{
+        projectId: string;
+        updates: Array<{ taskId: string; parkingMeta: TaskParkingMeta | undefined }>;
+      }> = [];
+      mockTaskOpsAdapter.updateTaskParkingMetaBatch.mockImplementation(async (
+        projectIdOrUpdates: string | Array<{ taskId: string; parkingMeta: TaskParkingMeta | undefined }>,
+        explicitUpdates?: Array<{ taskId: string; parkingMeta: TaskParkingMeta | undefined }>,
+      ) => {
+        if (typeof projectIdOrUpdates !== 'string' || !explicitUpdates) return false;
+        calls.push({ projectId: projectIdOrUpdates, updates: explicitUpdates });
+        applyUpdates(projectIdOrUpdates, explicitUpdates);
+        return true;
+      });
+
+      await expect(service.startWork('project-a', 'shared')).resolves.toBe(true);
+
+      expect(calls.map(call => call.projectId)).toEqual(['project-b', 'project-a']);
+      expect(calls[0]?.updates).toEqual([
+        expect.objectContaining({ taskId: 'shared', parkingMeta: expect.objectContaining({ state: 'parked' }) }),
+      ]);
+      expect(calls[1]?.updates).toEqual([
+        expect.objectContaining({ taskId: 'shared', parkingMeta: expect.objectContaining({ state: 'focused' }) }),
+      ]);
+      expect(mockContextRestoreService.saveSnapshot).toHaveBeenCalledWith('project-b', 'shared');
+      expect(mockUndoService.recordAction).toHaveBeenCalledTimes(2);
+    });
+
+    it('cross-project same-id startWork stops before A promotion when B demotion fails', async () => {
+      arrangeCrossProjectSameId();
+      const projects: string[] = [];
+      mockTaskOpsAdapter.updateTaskParkingMetaBatch.mockImplementation(async (projectIdOrUpdates) => {
+        if (typeof projectIdOrUpdates !== 'string') return false;
+        projects.push(projectIdOrUpdates);
+        return false;
+      });
+
+      await expect(service.startWork('project-a', 'shared')).resolves.toBe(false);
+
+      expect(projects).toEqual(['project-b']);
+      expect(mockUndoService.recordAction).not.toHaveBeenCalled();
+      expect(mockToastService.success).not.toHaveBeenCalled();
+    });
+
+    it('cross-project same-id startWork retains only B undo when A promotion fails', async () => {
+      const { applyUpdates } = arrangeCrossProjectSameId();
+      const projects: string[] = [];
+      mockTaskOpsAdapter.updateTaskParkingMetaBatch.mockImplementation(async (projectIdOrUpdates, explicitUpdates) => {
+        if (typeof projectIdOrUpdates !== 'string' || !explicitUpdates) return false;
+        projects.push(projectIdOrUpdates);
+        if (projectIdOrUpdates !== 'project-b') return false;
+        applyUpdates(projectIdOrUpdates, explicitUpdates);
+        return true;
+      });
+
+      await expect(service.startWork('project-a', 'shared')).resolves.toBe(false);
+
+      expect(projects).toEqual(['project-b', 'project-a']);
+      expect(mockUndoService.recordAction).toHaveBeenCalledTimes(1);
+      expect(mockUndoService.recordAction).toHaveBeenCalledWith(expect.objectContaining({ projectId: 'project-b' }));
+      expect(mockToastService.success).not.toHaveBeenCalled();
     });
 
     it('应恢复目标任务的上下文快照', async () => {
@@ -502,210 +655,21 @@ describe('ParkingService', () => {
     });
   });
 
-  // ─── P-09/P-10: 72h 衰老清理与撤回 ───
-
-  describe('P-09/P-10: 衰老清理', () => {
-    it('72h 未访问任务应在 durable 清理成功后发出通知', async () => {
-      const staleTask = createTask({ id: 'stale-72h', parkingMeta: createParkingMeta() });
-      taskMap.set(staleTask.id, staleTask);
-      syncParkedSignals();
-
-      await runEvictionCheck();
-
-      expect(taskMap.get('stale-72h')?.parkingMeta).toBeUndefined();
-      expect(service.pendingNotices().length).toBe(1);
-    });
-
-    it('清理通知包含撤回按钮', async () => {
-      const staleTask = createTask({ id: 'stale-undo', title: '可撤回', parkingMeta: createParkingMeta() });
-      taskMap.set(staleTask.id, staleTask);
-      syncParkedSignals();
-
-      await runEvictionCheck();
-
-      const notice = service.pendingNotices()[0];
-      expect(notice.type).toBe('eviction');
-      expect(notice.actions.some(a => a.key === 'undo-eviction')).toBe(true);
-    });
-
-    it('本地 durable 清理失败时不应生成通知或可撤回 token', async () => {
-      const staleTask = createTask({
-        id: 'stale-clear-fail',
-        title: '清理失败任务',
-        parkingMeta: createParkingMeta(),
-      });
-      taskMap.set(staleTask.id, staleTask);
-      syncParkedSignals();
-      mockTaskOpsAdapter.updateTaskParkingMeta.mockResolvedValueOnce(false);
-
-      await runEvictionCheck();
-
-      expect(taskMap.get('stale-clear-fail')?.parkingMeta).toBeTruthy();
-      expect(service.pendingNotices().length).toBe(0);
-      expect(mockTaskOpsAdapter.updateTaskParkingMeta).toHaveBeenCalledWith(
-        'stale-clear-fail',
-        undefined,
-      );
-    });
-
-    it('撤回应通过本地 durable restore 恢复原始停泊状态', async () => {
-      const staleTask = createTask({
-        id: 'stale-restore',
-        parkingMeta: createParkingMeta({ pinned: false }),
-      });
-      taskMap.set(staleTask.id, staleTask);
-      syncParkedSignals();
-
-      await runEvictionCheck();
-
-      const notice = service.pendingNotices()[0];
-      const tokenId = notice.evictionTokenId!;
-      await expect(service.undoEviction(tokenId)).resolves.toBe(true);
-
-      const restored = taskMap.get('stale-restore');
-      expect(restored?.parkingMeta?.state).toBe('parked');
-    });
-
-    it('撤回本地 durable restore 失败时不应消费 token，允许后续重试', async () => {
-      const staleTask = createTask({
-        id: 'stale-restore-fail',
-        parkingMeta: createParkingMeta({ pinned: false }),
-      });
-      taskMap.set(staleTask.id, staleTask);
-      syncParkedSignals();
-
-      await runEvictionCheck();
-
-      const notice = service.pendingNotices()[0];
-      const tokenId = notice.evictionTokenId!;
-      mockTaskOpsAdapter.updateTaskParkingMeta.mockResolvedValueOnce(false);
-
-      await expect(service.undoEviction(tokenId)).resolves.toBe(false);
-      expect(taskMap.get('stale-restore-fail')?.parkingMeta).toBeUndefined();
-
-      await expect(service.undoEviction(tokenId)).resolves.toBe(true);
-      expect(taskMap.get('stale-restore-fail')?.parkingMeta?.state).toBe('parked');
-    });
-  });
-
-  // ─── P-11: 手动移除可撤回 ───
-
-  describe('P-11: removeParkedTask', () => {
-    it('本地 durable 移除后应显示 5s 撤回 Snackbar', async () => {
-      const task = createTask({
-        id: 'remove-1',
-        title: '将移除的任务',
-        parkingMeta: createParkingMeta({ state: 'parked' }),
-      });
-      taskMap.set(task.id, task);
-      syncParkedSignals();
-
-      await expect(service.removeParkedTask('remove-1')).resolves.toBe(true);
-
-      expect(taskMap.get('remove-1')?.parkingMeta).toBeUndefined();
-      expect(mockToastService.info).toHaveBeenCalled();
-      const call = mockToastService.info.mock.calls[0];
-      expect(call[0]).toContain('将移除的任务');
-    });
-
-    it('移除时若正在预览应在 durable 成功后清除预览状态', async () => {
-      const task = createTask({
-        id: 'remove-preview',
-        parkingMeta: createParkingMeta(),
-      });
-      taskMap.set(task.id, task);
-      syncParkedSignals();
-      await service.previewTask('remove-preview');
-
-      await expect(service.removeParkedTask('remove-preview')).resolves.toBe(true);
-
-      expect(service.previewingTaskId()).toBeNull();
-    });
-
-    it('本地 durable 移除失败时不应清除停泊状态或显示撤回提示', async () => {
-      const task = createTask({
-        id: 'remove-fail',
-        title: '失败任务',
-        parkingMeta: createParkingMeta({ state: 'parked' }),
-      });
-      taskMap.set(task.id, task);
-      syncParkedSignals();
-      await service.previewTask('remove-fail');
-      mockTaskOpsAdapter.updateTaskParkingMeta.mockResolvedValueOnce(false);
-
-      await expect(service.removeParkedTask('remove-fail')).resolves.toBe(false);
-
-      expect(taskMap.get('remove-fail')?.parkingMeta?.state).toBe('parked');
-      expect(service.previewingTaskId()).toBe('remove-fail');
-      expect(mockToastService.info).not.toHaveBeenCalledWith(
-        expect.stringContaining('失败任务'),
-        undefined,
-        expect.anything(),
-      );
-    });
-  });
-
-  // ─── P-16: 离线保护 ───
-
-  describe('P-16: 离线清理保护', () => {
-    it('离线时不执行衰老清理', async () => {
-      const staleTask = createTask({ id: 'offline-1', parkingMeta: createParkingMeta() });
-      taskMap.set(staleTask.id, staleTask);
-      syncParkedSignals();
-
-      const onlineSpy = vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
-      await runEvictionCheck();
-
-      expect(taskMap.get('offline-1')?.parkingMeta).toBeTruthy();
-      expect(service.pendingNotices().length).toBe(0);
-      onlineSpy.mockRestore();
-    });
-
-    it('恢复在线后应立即重新执行衰老清理并发出通知', async () => {
-      const staleTask = createTask({ id: 'offline-retry-1', parkingMeta: createParkingMeta() });
-      taskMap.set(staleTask.id, staleTask);
-      syncParkedSignals();
-
-      let isOnline = false;
-      const onlineSpy = vi.spyOn(navigator, 'onLine', 'get').mockImplementation(() => isOnline);
-
-      await runEvictionCheck();
-
-      expect(taskMap.get('offline-retry-1')?.parkingMeta).toBeTruthy();
-      expect(service.pendingNotices().length).toBe(0);
-
-      isOnline = true;
-      window.dispatchEvent(new Event('online'));
-      await flushBackgroundEvictionCheck();
-
-      expect(taskMap.get('offline-retry-1')?.parkingMeta).toBeUndefined();
-      expect(service.pendingNotices().length).toBe(1);
-      expect(service.pendingNotices()[0].type).toBe('eviction');
-
-      onlineSpy.mockRestore();
-    });
-  });
-
-  describe('停泊后台增量同步异常隔离', () => {
-    it('恢复可见后的后台增量补拉失败应记录日志且不泄露 timer rejection', async () => {
-      await flushBackgroundEvictionCheck();
-      vi.clearAllMocks();
-      currentUserIdSignal.set('user-1');
-      const deltaFailure = new Error('parked delta unavailable');
-      mockProjectDataService.pullParkedTasksDelta.mockRejectedValueOnce(deltaFailure);
-
-      setVisibilityState('visible');
-      document.dispatchEvent(new Event('visibilitychange'));
-      await vi.advanceTimersByTimeAsync(1800);
-      await flushBackgroundEvictionCheck();
-
-      expect(mockProjectDataService.pullParkedTasksDelta).toHaveBeenCalledTimes(1);
-      expect(mockLoggerService.warn).toHaveBeenCalledWith(
-        'ParkingService',
-        'background parked delta sync failed',
-        deltaFailure,
-      );
-    });
+  registerParkingCleanupSpecs({
+    getService: () => service,
+    createTask,
+    createParkingMeta,
+    currentUserIdSignal,
+    setVisibilityState,
+    syncParkedSignals,
+    runEvictionCheck,
+    flushBackgroundEvictionCheck,
+    taskMap,
+    mockTaskOpsAdapter,
+    mockToastService,
+    mockProjectDataService,
+    mockLoggerService,
+    getSessionRuntimeReset: () => sessionRuntimeReset,
   });
 
   registerParkingLightweightSyncSpecs({
