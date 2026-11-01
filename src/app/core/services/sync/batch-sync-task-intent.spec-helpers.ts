@@ -156,7 +156,8 @@ export function registerBatchSyncTaskIntentSpecs(
     mockClient.auth.getSession.mockResolvedValue({
       data: { session: { user: { id: 'user-a' } } },
     });
-    callbacks.pushTaskPosition = vi.fn().mockResolvedValue(false);
+    const pushTaskPosition = vi.fn().mockResolvedValue(false);
+    callbacks.pushTaskPosition = pushTaskPosition;
     service.setCallbacks(callbacks);
 
     const result = await service.saveProjectToCloud(
@@ -239,6 +240,54 @@ export function registerBatchSyncTaskIntentSpecs(
     );
   });
 
+  it('position-only 无父 operationId 时应让位置 RPC 与完整 task fallback 复用同一幂等键', async () => {
+    const { service, callbacks, mockClient, mockChangeTracker } = getContext();
+    const task: Task = {
+      id: 'task-position-generated-operation-id-fallback',
+      title: 'Task Position Generated Operation Fallback',
+      content: '',
+      stage: 0,
+      parentId: null,
+      order: 0,
+      rank: 42,
+      status: 'active',
+      x: 10,
+      y: 20,
+      displayId: '1',
+      createdDate: '2026-03-31T00:00:00.000Z',
+      updatedAt: '2026-06-12T00:07:00.000Z',
+    };
+    const project = createProject({
+      id: 'project-position-generated-operation-id-fallback',
+      tasks: [task],
+    });
+    mockChangeTracker.getProjectChanges.mockReturnValueOnce(createProjectChanges({
+      tasksToUpdate: [task],
+      taskUpdateFieldsById: { [task.id]: ['x', 'y', 'rank'] },
+    }));
+    mockClient.auth.getSession.mockResolvedValue({
+      data: { session: { user: { id: 'user-a' } } },
+    });
+    const pushTaskPosition = vi.fn().mockResolvedValue(false);
+    callbacks.pushTaskPosition = pushTaskPosition;
+    service.setCallbacks(callbacks);
+
+    const result = await service.saveProjectToCloud(project, 'user-a');
+    const positionOperationId = pushTaskPosition.mock.calls[0]?.[6];
+
+    expect(result.success).toBe(true);
+    expect(positionOperationId).toEqual(expect.any(String));
+    expect(callbacks.pushTask).toHaveBeenCalledWith(
+      task,
+      'project-position-generated-operation-id-fallback',
+      true,
+      false,
+      'user-a',
+      'task_structure_update',
+      positionOperationId,
+    );
+  });
+
   it('position-only 推送遇到浏览器挂起时应入 RetryQueue 并保留结构写入意图', async () => {
     const { service, callbacks, mockClient, mockChangeTracker } = getContext();
     const task: Task = {
@@ -266,13 +315,15 @@ export function registerBatchSyncTaskIntentSpecs(
     mockClient.auth.getSession.mockResolvedValue({
       data: { session: { user: { id: 'user-a' } } },
     });
-    callbacks.pushTaskPosition = vi.fn().mockImplementation(async () => {
+    const pushTaskPosition = vi.fn().mockImplementation(async () => {
       setVisibilityState('hidden');
       return false;
     });
+    callbacks.pushTaskPosition = pushTaskPosition;
     service.setCallbacks(callbacks);
 
     const result = await service.saveProjectToCloud(project, 'user-a');
+    const positionOperationId = pushTaskPosition.mock.calls[0]?.[6];
 
     expect(result.success).toBe(false);
     expect(result.failedTaskIds).toEqual([task.id]);
@@ -286,6 +337,8 @@ export function registerBatchSyncTaskIntentSpecs(
       'user-a',
       undefined,
       'task_structure_update',
+      undefined,
+      positionOperationId,
     );
   });
 
@@ -316,14 +369,16 @@ export function registerBatchSyncTaskIntentSpecs(
     mockClient.auth.getSession.mockResolvedValue({
       data: { session: { user: { id: 'user-a' } } },
     });
-    callbacks.pushTaskPosition = vi.fn().mockImplementation(async () => {
+    const pushTaskPosition = vi.fn().mockImplementation(async () => {
       setVisibilityState('hidden');
       return false;
     });
+    callbacks.pushTaskPosition = pushTaskPosition;
     callbacks.addToRetryQueueDurably = vi.fn().mockResolvedValue(false);
     service.setCallbacks(callbacks);
 
     const result = await service.saveProjectToCloud(project, 'user-a');
+    const positionOperationId = pushTaskPosition.mock.calls[0]?.[6];
 
     expect(result.success).toBe(false);
     expect(result.failedTaskIds).toEqual([task.id]);
@@ -336,6 +391,8 @@ export function registerBatchSyncTaskIntentSpecs(
       'user-a',
       undefined,
       'task_structure_update',
+      undefined,
+      positionOperationId,
     );
   });
 

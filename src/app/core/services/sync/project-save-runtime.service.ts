@@ -146,20 +146,56 @@ export class ProjectSaveRuntimeService {
   ): Promise<BatchSyncResult | null> {
     try {
       let { data: { session } } = await client.auth.getSession();
+      if (!context.isSessionCurrent()) {
+        return this.projectSaveSessionChangedResult(context);
+      }
       let sessionUserId = session?.user?.id ?? null;
 
       if (!sessionUserId) {
         const refreshed = await this.sessionManager.tryRefreshSession('saveProjectToCloud.getSession');
+        if (!context.isSessionCurrent()) {
+          return this.projectSaveSessionChangedResult(context);
+        }
         if (refreshed) {
           ({ data: { session } } = await client.auth.getSession());
+          if (!context.isSessionCurrent()) {
+            return this.projectSaveSessionChangedResult(context);
+          }
           sessionUserId = session?.user?.id ?? null;
         }
       }
 
       return this.handleProjectSaveSessionUser(sessionUserId, context);
     } catch (error) {
+      if (!context.isSessionCurrent()) {
+        return this.projectSaveSessionChangedResult(context);
+      }
       return this.handleProjectSaveSessionValidationError(error, client, context);
     }
+  }
+
+  private async projectSaveSessionChangedResult(
+    context: ProjectSaveRuntimeContext | ProjectSaveRetryContext,
+  ): Promise<BatchSyncResult> {
+    const state = 'state' in context ? context.state : context;
+    const enqueueProjectRetry = 'retryTracker' in context
+      ? context.retryTracker.enqueueProjectRetry
+      : context.enqueueProjectRetry;
+    if (!state.retryEnqueued.includes(`project:${context.project.id}`)) {
+      await enqueueProjectRetry();
+    }
+    this.logger.info('项目同步 session 代际已变化，预检结果失效并回退原 owner 重试', {
+      projectId: context.project.id,
+      userId: context.userId,
+    });
+    return {
+      success: false,
+      failedTaskIds: state.failedTaskIds,
+      failedConnectionIds: state.failedConnectionIds,
+      retryEnqueued: state.retryEnqueued,
+      projectPushed: state.projectPushed,
+      failureReason: 'project sync session changed',
+    };
   }
 
   private async handleProjectSaveSessionUser(
@@ -244,6 +280,9 @@ export class ProjectSaveRuntimeService {
       errorCode,
     });
     const refreshed = await this.sessionManager.tryRefreshSession('saveProjectToCloud.getSession');
+    if (!context.isSessionCurrent()) {
+      return this.projectSaveSessionChangedResult(context);
+    }
 
     if (refreshed) {
       return this.retryRefreshedProjectSaveSession({
@@ -256,6 +295,7 @@ export class ProjectSaveRuntimeService {
         failedConnectionIds: context.state.failedConnectionIds,
         projectPushed: context.state.projectPushed,
         enqueueProjectRetry: context.retryTracker.enqueueProjectRetry,
+        isSessionCurrent: context.isSessionCurrent,
       });
     }
 
@@ -286,6 +326,9 @@ export class ProjectSaveRuntimeService {
   ): Promise<BatchSyncResult | null> {
     try {
       const { data: { session } } = await context.client.auth.getSession();
+      if (!context.isSessionCurrent()) {
+        return this.projectSaveSessionChangedResult(context);
+      }
       return this.handleRefreshedProjectSaveSession({
         ...context,
         sessionUserId: session?.user?.id ?? null,
@@ -399,6 +442,7 @@ export class ProjectSaveRuntimeService {
       failedConnectionIds: context.state.failedConnectionIds,
       projectPushed: context.state.projectPushed,
       enqueueProjectRetry: context.retryTracker.enqueueProjectRetry,
+      isSessionCurrent: context.isSessionCurrent,
     }, reason);
   }
 

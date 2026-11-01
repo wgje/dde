@@ -14,6 +14,7 @@ import type { Project } from '../../../../models';
 import { ChangeTrackerService } from '../../../../services/change-tracker.service';
 import type { ProjectChangeSummary } from '../../../../services/change-tracker.types';
 import { LoggerService } from '../../../../services/logger.service';
+import { SessionRuntimeResetRegistry } from '../../../../services/session-runtime-reset.service';
 import {
   type BatchSyncCallbacks,
   type BatchSyncResult,
@@ -38,9 +39,17 @@ export class BatchSyncService {
   private readonly entityState = inject(ProjectSaveEntityStateService);
   private readonly runtime = inject(ProjectSaveRuntimeService);
   private readonly batchExecutor = inject(ProjectSaveBatchExecutorService);
+  private readonly sessionRuntimeReset = inject(SessionRuntimeResetRegistry);
+  private sessionGeneration = 0;
 
   /** 回调函数（由 SimpleSyncService 注入） */
   private callbacks: BatchSyncCallbacks | null = null;
+
+  constructor() {
+    this.sessionRuntimeReset.register('BatchSyncService', () => {
+      this.sessionGeneration += 1;
+    });
+  }
 
   /**
    * 设置回调函数（由 SimpleSyncService 调用）
@@ -62,6 +71,7 @@ export class BatchSyncService {
     taskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap,
     operationId?: string,
   ): Promise<BatchSyncResult> {
+    const sessionGeneration = this.sessionGeneration;
     const state = this.createProjectSaveState();
     const callbacks = this.callbacks;
     if (!callbacks) {
@@ -76,6 +86,7 @@ export class BatchSyncService {
       taskIdsToDelete,
       taskDeleteBaseUpdatedAtMap,
       operationId,
+      () => sessionGeneration === this.sessionGeneration,
     );
     const preflight = await this.runtime.runProjectSavePreflight(runtimeContext);
     if (preflight.result) {
@@ -105,6 +116,7 @@ export class BatchSyncService {
     taskIdsToDelete?: string[],
     taskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap,
     operationId?: string,
+    isSessionCurrent: () => boolean = () => true,
   ): ProjectSaveRuntimeContext {
     const changes = this.normalizeProjectChanges(this.changeTracker.getProjectChanges(project.id));
     const pendingTaskIdsToDelete = taskIdsToDelete ?? changes.taskIdsToDelete;
@@ -130,6 +142,7 @@ export class BatchSyncService {
       taskDeleteBaseUpdatedAtMap: effectiveTaskDeleteBaseUpdatedAtMap,
       state,
       retryTracker,
+      isSessionCurrent,
     };
   }
 

@@ -12,6 +12,10 @@ import { RetryQueueService } from './retry-queue.service';
 import { SessionManagerService } from './session-manager.service';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 import { ConflictStorageService } from '../../../../services/conflict-storage.service';
+import {
+  SessionRuntimeResetRegistry,
+  type SessionRuntimeResetReason,
+} from '../../../../services/session-runtime-reset.service';
 import { ProjectSaveBatchExecutorService } from './project-save-batch-executor.service';
 import { ProjectSaveConnectionBatchService } from './project-save-connection-batch.service';
 import { ProjectSaveEntityStateService } from './project-save-entity-state.service';
@@ -25,6 +29,7 @@ import {
   registerBatchSyncPurgeHandoffSpecs,
 } from './batch-sync-connection-purge.spec-helpers';
 import { registerBatchSyncTaskIntentSpecs } from './batch-sync-task-intent.spec-helpers';
+import { registerBatchSyncSessionGenerationSpecs } from './batch-sync-session-generation.spec-helpers';
 import { createProject, createProjectChanges, setVisibilityState } from './batch-sync.test-harness';
 import { createDerivedSyncOperationId } from '../../../../utils/sync-operation-id';
 
@@ -33,6 +38,7 @@ describe('BatchSyncService owner isolation', () => {
   let service: BatchSyncService;
   let callbacks: BatchSyncCallbacks;
   let taskLookupRows: Array<{ id: string }>;
+  let sessionResetCallbacks: Map<string, (reason: SessionRuntimeResetReason) => void>;
 
   const mockClient = {
     auth: {
@@ -120,11 +126,17 @@ describe('BatchSyncService owner isolation', () => {
     saveConflict: vi.fn().mockResolvedValue(true),
   };
 
+  const mockRetryQueue = {
+    removeByEntity: vi.fn(),
+    removeByEntityForOwner: vi.fn(),
+  };
+
   beforeEach(() => {
     vi.clearAllMocks();
     resetBrowserNetworkSuspensionTrackingForTests();
     setVisibilityState('visible');
     taskLookupRows = [];
+    sessionResetCallbacks = new Map();
     mockClient.auth.getSession.mockReset();
     mockSessionManager.tryRefreshSession.mockReset();
     mockSessionManager.tryRefreshSession.mockImplementation(async () => false);
@@ -150,10 +162,19 @@ describe('BatchSyncService owner isolation', () => {
         { provide: ChangeTrackerService, useValue: mockChangeTracker },
         { provide: MobileSyncStrategyService, useValue: mockMobileSync },
         { provide: SyncStateService, useValue: mockSyncState },
-        { provide: RetryQueueService, useValue: { removeByEntity: vi.fn() } },
+        { provide: RetryQueueService, useValue: mockRetryQueue },
         { provide: SessionManagerService, useValue: mockSessionManager },
         { provide: SentryLazyLoaderService, useValue: mockSentry },
         { provide: ConflictStorageService, useValue: mockConflictStorageService },
+        {
+          provide: SessionRuntimeResetRegistry,
+          useValue: {
+            register: vi.fn((owner: string, reset: (reason: SessionRuntimeResetReason) => void) => {
+              sessionResetCallbacks.set(owner, reset);
+              return vi.fn();
+            }),
+          },
+        },
       ],
     });
 
@@ -266,6 +287,26 @@ describe('BatchSyncService owner isolation', () => {
       'user-a',
       ['task-delete-a'],
     );
+  });
+
+  it('任务删除前应按批次捕获 owner 清理 RetryQueue，避免账号切换后误删当前 owner 条目', async () => {
+    const project = createProject({ id: 'project-owner-scoped-retry-cleanup' });
+    mockChangeTracker.getProjectChanges.mockReturnValueOnce(createProjectChanges({
+      taskIdsToDelete: ['task-delete-owner-scoped'],
+      taskUpdateFieldsById: {},
+    }));
+    mockClient.auth.getSession.mockResolvedValue({
+      data: { session: { user: { id: 'user-a' } } },
+    });
+
+    await service.saveProjectToCloud(project, 'user-a');
+
+    expect(mockRetryQueue.removeByEntityForOwner).toHaveBeenCalledWith(
+      'task',
+      'task-delete-owner-scoped',
+      'user-a',
+    );
+    expect(mockRetryQueue.removeByEntity).not.toHaveBeenCalled();
   });
 
   it('saveProjectToCloud 应将 task 删除 CAS map 透传给 pushProject 回调', async () => {
@@ -491,6 +532,9 @@ describe('BatchSyncService owner isolation', () => {
       false,
       'user-a',
     );
+    expect(mockRetryQueue.removeByEntityForOwner).toHaveBeenCalledWith('task', task.id, 'user-a');
+    expect(mockRetryQueue.removeByEntityForOwner).toHaveBeenCalledWith('connection', connection.id, 'user-a');
+    expect(mockRetryQueue.removeByEntity).not.toHaveBeenCalled();
   });
 
   it('saveProjectToCloud 携带父 operationId 时应为 task 与 connection 子写入派生 operationId', async () => {
@@ -612,6 +656,11 @@ describe('BatchSyncService owner isolation', () => {
     callbacks,
     mockClient,
     mockChangeTracker,
+  }));
+
+  registerBatchSyncSessionGenerationSpecs(() => ({
+    service, callbacks, mockClient, mockChangeTracker, mockSyncState,
+    mockCircuitBreaker, sessionResetCallbacks,
   }));
 
   registerBatchSyncConnectionValidationSpecs(() => ({

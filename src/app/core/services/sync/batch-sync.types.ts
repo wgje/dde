@@ -29,6 +29,7 @@ export interface ProjectSaveRetryContext {
   failedConnectionIds: string[];
   projectPushed: boolean;
   enqueueProjectRetry: () => Promise<boolean>;
+  isSessionCurrent: () => boolean;
 }
 
 export interface RefreshedProjectSaveSessionContext extends ProjectSaveRetryContext {
@@ -75,6 +76,7 @@ export interface ProjectSaveRuntimeContext {
   taskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap;
   state: ProjectSaveState;
   retryTracker: ProjectSaveRetryTracker;
+  isSessionCurrent: () => boolean;
 }
 
 export type ProjectSavePreflightResult =

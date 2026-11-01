@@ -31,15 +31,30 @@ export class ProjectSaveBatchExecutorService {
   async runProjectSaveBatch(context: ProjectSaveBatchContext): Promise<BatchSyncResult> {
     try {
       const prepared = await this.prepareProjectSaveBatch(context);
+      if (!context.isSessionCurrent()) {
+        return this.createProjectSessionChangedResult(context);
+      }
       const projectPushResult = await this.pushProjectMetadata(context);
       if (projectPushResult) {
         return projectPushResult;
       }
 
       await this.purgeDeletedTasks(context);
+      if (!context.isSessionCurrent()) {
+        return this.createProjectSessionChangedResult(context);
+      }
       await this.connectionBatch.pushDeletedConnections(context, prepared.connectionTombstoneIds);
+      if (!context.isSessionCurrent()) {
+        return this.createProjectSessionChangedResult(context);
+      }
       const successfulTaskIds = await this.taskBatch.pushProjectTasks(context, prepared.tasksToSync);
+      if (!context.isSessionCurrent()) {
+        return this.createProjectSessionChangedResult(context);
+      }
       await this.connectionBatch.pushActiveConnections(context, prepared, successfulTaskIds);
+      if (!context.isSessionCurrent()) {
+        return this.createProjectSessionChangedResult(context);
+      }
 
       return this.finishProjectSaveBatch(context, prepared.tasksToSync.length);
     } catch (error) {
@@ -49,6 +64,13 @@ export class ProjectSaveBatchExecutorService {
 
   private async prepareProjectSaveBatch(context: ProjectSaveBatchContext): Promise<PreparedProjectSaveBatch> {
     const tombstoneIds = await context.callbacks.getTombstoneIds(context.projectSnapshot.id);
+    if (!context.isSessionCurrent()) {
+      return {
+        tasksToSync: [],
+        connectionTombstoneIds: new Set<string>(),
+        connectionUpsertIds: new Set<string>(),
+      };
+    }
     const { preparation, projectSnapshot, project, state } = context;
     const savePlan = preparation.savePlan;
     const taskUpsertIds = new Set(savePlan.taskUpsertIds);
@@ -102,6 +124,9 @@ export class ProjectSaveBatchExecutorService {
 
   private async pushProjectMetadata(context: ProjectSaveBatchContext): Promise<BatchSyncResult | null> {
     const projectPushResult = await this.pushProjectForMetadata(context);
+    if (!context.isSessionCurrent()) {
+      return this.createProjectSessionChangedResult(context);
+    }
     context.state.projectPushed = projectPushResult.success;
 
     if (projectPushResult.conflict) {
@@ -117,6 +142,24 @@ export class ProjectSaveBatchExecutorService {
     }
     const failureReason = projectPushResult.failureReason ?? 'project metadata sync failed';
     return this.createProjectMetadataFailureResult(context, projectPushResult, failureReason);
+  }
+
+  private async createProjectSessionChangedResult(context: ProjectSaveBatchContext): Promise<BatchSyncResult> {
+    if (!context.state.retryEnqueued.includes(`project:${context.project.id}`)) {
+      await context.retryTracker.enqueueProjectRetry();
+    }
+    this.logger.info('项目批同步会话已切换，旧批次停止并回退到原 owner 重试队列', {
+      projectId: context.project.id,
+      userId: context.userId,
+    });
+    return {
+      success: false,
+      projectPushed: false,
+      failedTaskIds: context.state.failedTaskIds,
+      failedConnectionIds: context.state.failedConnectionIds,
+      retryEnqueued: context.state.retryEnqueued,
+      failureReason: 'project sync session changed',
+    };
   }
 
   private pushProjectForMetadata(
@@ -208,12 +251,15 @@ export class ProjectSaveBatchExecutorService {
 
     const trackedTaskDeleteIds = new Set(context.changes.taskIdsToDelete);
     for (const taskId of taskDeleteIds) {
-      this.retryQueue.removeByEntity('task', taskId);
+      this.retryQueue.removeByEntityForOwner('task', taskId, context.userId);
     }
     const taskDeleteBaseUpdatedAtMap = this.buildTaskDeleteBaseUpdatedAtMap(context, taskDeleteIds);
     const purgeResult = taskDeleteBaseUpdatedAtMap === undefined
       ? await this.purgeTasksWithoutBaseUpdatedAtMap(context, taskDeleteIds)
       : await this.purgeTasksWithBaseUpdatedAtMap(context, taskDeleteIds, taskDeleteBaseUpdatedAtMap);
+    if (!context.isSessionCurrent()) {
+      return;
+    }
     const deletedTaskIds = purgeResult.deletedTaskIds ?? (purgeResult.success ? taskDeleteIds : []);
     context.state.taskPurgeSucceeded = purgeResult.success;
     for (const taskId of deletedTaskIds) {

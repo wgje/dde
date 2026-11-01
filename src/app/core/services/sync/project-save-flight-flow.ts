@@ -1,4 +1,5 @@
 export interface ProjectSaveFlightKeyParts {
+  sessionGeneration?: number;
   userId?: string;
   projectId: string;
 }
@@ -41,16 +42,22 @@ export interface QueuedProjectSaveRequestMergeInput {
 }
 
 export function parseProjectSaveFlightKey(key: string): ProjectSaveFlightKeyParts {
-  const separatorIndex = key.indexOf(':');
+  const generationSeparatorIndex = key.indexOf('|');
+  const generationText = generationSeparatorIndex >= 0 ? key.slice(0, generationSeparatorIndex) : '';
+  const sessionGeneration = /^\d+$/.test(generationText) ? Number(generationText) : undefined;
+  const scopedKey = generationSeparatorIndex >= 0 ? key.slice(generationSeparatorIndex + 1) : key;
+  const separatorIndex = scopedKey.indexOf(':');
 
   return separatorIndex >= 0
     ? {
-        userId: key.slice(0, separatorIndex),
-        projectId: key.slice(separatorIndex + 1),
+        ...(sessionGeneration === undefined ? {} : { sessionGeneration }),
+        userId: scopedKey.slice(0, separatorIndex),
+        projectId: scopedKey.slice(separatorIndex + 1),
       }
     : {
+        ...(sessionGeneration === undefined ? {} : { sessionGeneration }),
         userId: undefined,
-        projectId: key,
+        projectId: scopedKey,
       };
 }
 

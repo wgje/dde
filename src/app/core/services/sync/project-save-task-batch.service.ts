@@ -11,6 +11,7 @@ import {
 } from '../../../../utils/browser-network-suspension';
 import { isPermanentFailureError } from '../../../../utils/permanent-failure-error';
 import { createProjectTaskUpsertOperationId } from '../../../../services/project-operation-child-operation-id';
+import { createSyncOperationId } from '../../../../utils/sync-operation-id';
 import { RetryQueueService } from './retry-queue.service';
 import type { ProjectSaveBatchContext, ProjectSaveTaskPushContext } from './batch-sync.types';
 import { decidePositionOnlyTaskPushFailure } from './project-save-plan';
@@ -29,6 +30,9 @@ export class ProjectSaveTaskBatchService {
     let paceNextPush = false;
 
     for (let i = 0; i < sortedTasks.length; i++) {
+      if (!context.isSessionCurrent()) {
+        break;
+      }
       if (await this.deferRemainingTasksOnSuspension(context, sortedTasks, i, 'sortedTasks')) {
         break;
       }
@@ -36,6 +40,9 @@ export class ProjectSaveTaskBatchService {
       // 无条件 200ms 串行延迟会把 10 任务的正常保存人为拉长 1.8s，
       // 弱网 RTT 下推送窗口被拖得更长，切后台时整批进重试队列的概率随之上升
       if (i > 0 && paceNextPush) await this.delay(200);
+      if (!context.isSessionCurrent()) {
+        break;
+      }
 
       const failedCountBefore = context.state.failedTaskIds.length;
       await this.pushProjectTask(context, sortedTasks, i, successfulTaskIds);
@@ -115,7 +122,7 @@ export class ProjectSaveTaskBatchService {
   ): Promise<void> {
     try {
       const task = sortedTasks[index];
-      this.retryQueue.removeByEntity('task', task.id);
+      this.retryQueue.removeByEntityForOwner('task', task.id, context.userId);
       const changedFields = context.changes.taskUpdateFieldsById[task.id];
       const taskResult = await this.pushTaskForProjectSaveBatch({
         callbacks: context.callbacks,
@@ -127,6 +134,9 @@ export class ProjectSaveTaskBatchService {
         writeIntent: this.getTaskWriteIntent(changedFields),
         failedTaskIds: context.state.failedTaskIds,
       });
+      if (!context.isSessionCurrent()) {
+        return;
+      }
 
       if (!taskResult.continueBatch) {
         if (taskResult.retryEnqueued) {
@@ -170,6 +180,7 @@ export class ProjectSaveTaskBatchService {
       };
     }
 
+    const taskOperationId = createSyncOperationId();
     const positionSuccess = await context.callbacks.pushTaskPosition(
       context.task.id,
       context.task.x,
@@ -177,17 +188,19 @@ export class ProjectSaveTaskBatchService {
       context.projectId,
       context.task,
       context.userId,
+      taskOperationId,
     );
 
     if (positionSuccess) {
       return { success: true, continueBatch: true };
     }
 
-    return this.handlePositionOnlyTaskPushFailure(context);
+    return this.handlePositionOnlyTaskPushFailure(context, taskOperationId);
   }
 
   private async handlePositionOnlyTaskPushFailure(
     context: ProjectSaveTaskPushContext,
+    taskOperationId: string,
   ): Promise<{ success: boolean; retryEnqueued?: boolean; continueBatch: boolean }> {
     const decision = decidePositionOnlyTaskPushFailure({
       browserSuspendedWindow: isBrowserNetworkSuspendedWindow(),
@@ -203,6 +216,7 @@ export class ProjectSaveTaskBatchService {
         context,
         context.task,
         context.writeIntent,
+        taskOperationId,
       );
       return { success: false, retryEnqueued, continueBatch: false };
     }
@@ -212,14 +226,27 @@ export class ProjectSaveTaskBatchService {
       taskId: context.task.id,
     });
     return {
-      ...(await this.pushTaskWithOptionalOperationId(context)),
+      ...(await this.pushTaskWithOptionalOperationId(context, taskOperationId)),
       continueBatch: true,
     };
   }
 
   private pushTaskWithOptionalOperationId(
     context: ProjectSaveTaskPushContext,
+    taskOperationIdOverride?: string,
   ): Promise<{ success: boolean; retryEnqueued?: boolean }> {
+    if (taskOperationIdOverride !== undefined) {
+      return context.callbacks.pushTask(
+        context.task,
+        context.projectId,
+        true,
+        false,
+        context.userId,
+        context.writeIntent,
+        taskOperationIdOverride,
+      );
+    }
+
     if (context.operationId === undefined) {
       return context.callbacks.pushTask(
         context.task,
@@ -251,9 +278,24 @@ export class ProjectSaveTaskBatchService {
     context: ProjectSaveBatchContext | ProjectSaveTaskPushContext,
     task: Task,
     writeIntent: TaskWriteIntent | undefined,
+    taskOperationIdOverride?: string,
   ): Promise<boolean> {
     const projectId = 'projectSnapshot' in context ? context.projectSnapshot.id : context.projectId;
     const userId = 'projectSnapshot' in context ? context.userId : context.userId;
+
+    if (taskOperationIdOverride !== undefined) {
+      return await context.callbacks.addToRetryQueueDurably(
+        'task',
+        'upsert',
+        task,
+        projectId,
+        userId,
+        undefined,
+        writeIntent,
+        undefined,
+        taskOperationIdOverride,
+      );
+    }
 
     if (context.operationId === undefined) {
       return await context.callbacks.addToRetryQueueDurably(
@@ -294,6 +336,9 @@ export class ProjectSaveTaskBatchService {
     if (isPermanentFailureError(error)) {
       const task = sortedTasks[index];
       const conflictSaved = await this.persistTaskTerminalConflict(context, task, error);
+      if (!context.isSessionCurrent()) {
+        return;
+      }
       const canClearDirtyMarker = conflictSaved !== false;
       const clearedDirtyMarker = canClearDirtyMarker
         && this.entityState.shouldClearDirtyMarkerAfterPermanentFailure(error);

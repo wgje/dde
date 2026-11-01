@@ -35,10 +35,16 @@ export class ProjectSaveConnectionBatchService {
   ): Promise<void> {
     const deletedConnections = this.getDeletedConnections(context, connectionTombstoneIds);
     for (let i = 0; i < deletedConnections.length; i++) {
+      if (!context.isSessionCurrent()) {
+        break;
+      }
       if (await this.deferRemainingConnectionsOnSuspension(context, deletedConnections, i, 'deletedConnections')) {
         break;
       }
       if (i > 0) await this.delay(200);
+      if (!context.isSessionCurrent()) {
+        break;
+      }
 
       await this.pushDeletedConnection(context, deletedConnections, i);
     }
@@ -51,6 +57,9 @@ export class ProjectSaveConnectionBatchService {
   ): Promise<void> {
     const activeConnections = this.getActiveConnections(context, prepared);
     const readiness = await this.buildConnectionReadiness(context, activeConnections, successfulTaskIds);
+    if (!context.isSessionCurrent()) {
+      return;
+    }
 
     if (readiness.deferredBySuspension) {
       await this.deferActiveConnectionsBySuspension(context, activeConnections, readiness.purgedTaskIds);
@@ -59,10 +68,16 @@ export class ProjectSaveConnectionBatchService {
 
     const connectionsToSync = await this.deferBlockedConnections(context, activeConnections, readiness);
     for (let i = 0; i < connectionsToSync.length; i++) {
+      if (!context.isSessionCurrent()) {
+        break;
+      }
       if (await this.deferRemainingConnectionsOnSuspension(context, connectionsToSync, i, 'connectionsToSync')) {
         break;
       }
       if (i > 0) await this.delay(200);
+      if (!context.isSessionCurrent()) {
+        break;
+      }
 
       await this.pushActiveConnection(context, connectionsToSync, i);
     }
@@ -108,6 +123,9 @@ export class ProjectSaveConnectionBatchService {
       resumeDelayMs: getRemainingBrowserNetworkResumeDelayMs(),
     });
     for (const conn of remaining) {
+      if (!context.isSessionCurrent()) {
+        break;
+      }
       context.state.failedConnectionIds.push(conn.id);
       if (await this.addConnectionRetryWithOptionalOperationId(context, conn)) {
         context.state.retryEnqueued.push(`connection:${conn.id}`);
@@ -123,8 +141,11 @@ export class ProjectSaveConnectionBatchService {
   ): Promise<void> {
     try {
       const connection = deletedConnections[index];
-      this.retryQueue.removeByEntity('connection', connection.id);
+      this.retryQueue.removeByEntityForOwner('connection', connection.id, context.userId);
       const connectionResult = await this.pushConnectionWithOptionalOperationId(context, connection);
+      if (!context.isSessionCurrent()) {
+        return;
+      }
       if (!connectionResult.success) {
         context.state.failedConnectionIds.push(connection.id);
         if (connectionResult.retryEnqueued) {
@@ -152,6 +173,9 @@ export class ProjectSaveConnectionBatchService {
     if (isPermanentFailureError(error)) {
       const connection = deletedConnections[index];
       const conflictSaved = await this.persistConnectionTerminalConflict(context, connection, error);
+      if (!context.isSessionCurrent()) {
+        return;
+      }
       const canClearDirtyMarker = conflictSaved !== false;
       const clearedDirtyMarker = canClearDirtyMarker
         && this.entityState.shouldClearDirtyMarkerAfterPermanentFailure(error);
@@ -322,6 +346,9 @@ export class ProjectSaveConnectionBatchService {
     });
 
     for (const connection of activeConnections) {
+      if (!context.isSessionCurrent()) {
+        break;
+      }
       if (this.clearConnectionCoveredByTaskPurge(context, connection, purgedTaskIds)) {
         continue;
       }
@@ -340,6 +367,9 @@ export class ProjectSaveConnectionBatchService {
   ): Promise<Connection[]> {
     const connectionsToSync: Connection[] = [];
     for (const connection of activeConnections) {
+      if (!context.isSessionCurrent()) {
+        break;
+      }
       if (readiness.allSyncedTaskIds.has(connection.source) && readiness.allSyncedTaskIds.has(connection.target)) {
         connectionsToSync.push(connection);
         continue;
@@ -396,8 +426,11 @@ export class ProjectSaveConnectionBatchService {
   ): Promise<void> {
     try {
       const connection = connectionsToSync[index];
-      this.retryQueue.removeByEntity('connection', connection.id);
+      this.retryQueue.removeByEntityForOwner('connection', connection.id, context.userId);
       const connectionResult = await this.pushConnectionWithOptionalOperationId(context, connection);
+      if (!context.isSessionCurrent()) {
+        return;
+      }
       this.handleConnectionPushResult(
         connection,
         context.projectSnapshot.id,
@@ -528,6 +561,9 @@ export class ProjectSaveConnectionBatchService {
     failedConnectionIds: string[],
   ): Promise<void> {
     const conflictSaved = await this.persistConnectionTerminalConflict(context, connection, error);
+    if (!context.isSessionCurrent()) {
+      return;
+    }
     const canClearDirtyMarker = conflictSaved !== false;
     const clearedDirtyMarker = canClearDirtyMarker
       && this.entityState.shouldClearDirtyMarkerAfterPermanentFailure(error);

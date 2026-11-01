@@ -2,15 +2,21 @@ import { Injectable, inject } from '@angular/core';
 import type { Connection, Task } from '../../../../models';
 import { ChangeTrackerService } from '../../../../services/change-tracker.service';
 import { LoggerService } from '../../../../services/logger.service';
+import { SessionRuntimeResetRegistry } from '../../../../services/session-runtime-reset.service';
 import { isPermanentFailureError } from '../../../../utils/permanent-failure-error';
 
 @Injectable({ providedIn: 'root' })
 export class ProjectSaveEntityStateService {
   private readonly changeTracker = inject(ChangeTrackerService);
   private readonly logger = inject(LoggerService).category('BatchSync');
+  private readonly sessionRuntimeReset = inject(SessionRuntimeResetRegistry);
 
   private readonly suppressedTaskIds = new Map<string, Map<string, string>>();
   private readonly suppressedConnectionIds = new Map<string, Map<string, string>>();
+
+  constructor() {
+    this.sessionRuntimeReset.register('ProjectSaveEntityStateService', () => this.resetSessionRuntime());
+  }
 
   getBatchChangeRevision(): number {
     const tracker = this.changeTracker as unknown as {
@@ -128,6 +134,11 @@ export class ProjectSaveEntityStateService {
     }
 
     return operation === 'pushTaskTombstone' || operation === 'pushConnection.remoteTombstone';
+  }
+
+  private resetSessionRuntime(): void {
+    this.suppressedTaskIds.clear();
+    this.suppressedConnectionIds.clear();
   }
 
   private suppressEntityUntilFingerprintChanges(

@@ -18,6 +18,14 @@ describe('project save flight flow helpers', () => {
     });
   });
 
+  it('parses session-scoped flight keys without leaking generation into owner identity', () => {
+    expect(parseProjectSaveFlightKey('7|user-1:project-1')).toEqual({
+      sessionGeneration: 7,
+      userId: 'user-1',
+      projectId: 'project-1',
+    });
+  });
+
   it('clears terminal retry markers and deletes the flight when no request is queued', () => {
     expect(decideFailedProjectSaveFlightSettlement({
       conflict: true,

@@ -1,26 +1,9 @@
-/**
- * ProjectSaveFlightCoordinatorService
- *
- * 从 SimpleSyncService「下切」出的项目云端持久化「单飞 + 折叠 + 重试协调」状态机。
- *
- * 职责单一：
- * - 同一 (userId, projectId) 的保存请求合并到一条飞行（single-flight）
- * - 飞行进行中到达的新请求按新鲜度折叠为单个排队请求（fold）
- * - 飞行结算后按结果（成功/冲突/终止/可重试）推进队列或刷新 durable 重试快照
- *
- * 为什么抽离：
- * - AGENTS.md §12 单文件 ≤ 800 行硬线；SimpleSyncService 长期越界，文件头要求只做「下切」。
- * - 本状态机是自洽的横切责任：持有自己的 flights Map，依赖均可注入。
- * - 唯一对门面的反向依赖是 durable 重试入队（`addToRetryQueueDurably`），通过
- *   `durableRetryHandler` 回调注入，避免与 SimpleSyncService 形成循环 DI。
- *
- * 验证：SimpleSyncService.spec 通过公开 API `saveProjectToCloud()` 端到端覆盖本状态机，
- * 门面 `saveProjectToCloud()` 改为委托 `coordinator.save()` 后该套用例继续校验零回归。
- */
+/** 同一 owner/project 的云端保存单飞、折叠与 durable retry 协调器。 */
 import { Injectable, inject } from '@angular/core';
 import { Task, Project, Connection } from '../../../../models';
 import { LoggerService } from '../../../../services/logger.service';
 import { ChangeTrackerService } from '../../../../services/change-tracker.service';
+import { SessionRuntimeResetRegistry } from '../../../../services/session-runtime-reset.service';
 import { BatchSyncService } from './batch-sync.service';
 import {
   RetryQueueService,
@@ -97,6 +80,9 @@ interface ProjectSaveRequestSnapshot {
   taskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap;
 }
 
+const addOperationIdToSaveSignature = (signature: string, operationId?: string): string =>
+  `${operationId ?? 'legacy'}|${signature}`;
+
 @Injectable({ providedIn: 'root' })
 export class ProjectSaveFlightCoordinatorService {
   private readonly logger = inject(LoggerService).category('ProjectSaveFlight');
@@ -105,11 +91,19 @@ export class ProjectSaveFlightCoordinatorService {
   private readonly retryQueueService = inject(RetryQueueService);
   private readonly syncStateService = inject(SyncStateService);
   private readonly sessionManager = inject(SessionManagerService);
+  private readonly sessionRuntimeReset = inject(SessionRuntimeResetRegistry);
+  private sessionGeneration = 0;
 
   /** 由 SimpleSyncService 在构造期注入：durable 重试入队（避免循环 DI）。 */
   durableRetryHandler: DurableRetryHandler | null = null;
 
   private readonly projectSaveFlights = new Map<string, ProjectSaveFlight>();
+
+  constructor() {
+    this.sessionRuntimeReset.register('ProjectSaveFlightCoordinatorService', () => {
+      this.sessionGeneration += 1;
+    });
+  }
 
   /** 公开入口：单飞 + 折叠 + 重试协调地保存项目到云端。 */
   save(
@@ -242,8 +236,9 @@ export class ProjectSaveFlightCoordinatorService {
   private async refreshQueuedProjectRetryPayload(
     queuedRequest: QueuedProjectSaveRequest,
     retryEnqueued?: string[],
+    force = false,
   ): Promise<boolean> {
-    if (!this.hasProjectRetryMarker(queuedRequest.project.id, queuedRequest.userId, retryEnqueued)) {
+    if (!force && !this.hasProjectRetryMarker(queuedRequest.project.id, queuedRequest.userId, retryEnqueued)) {
       return false;
     }
 
@@ -292,22 +287,20 @@ export class ProjectSaveFlightCoordinatorService {
     key: string,
     project: Project,
     userId: string,
-    signature: string,
-    taskIdsToDelete?: string[],
-    taskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap,
+    request: ProjectSaveRequestSnapshot,
     operationId?: string,
     flight?: ProjectSaveFlight,
     queuedRequest?: QueuedProjectSaveRequest,
   ): Promise<ProjectSaveResult> {
     const targetFlight = flight ?? {
-      activeSignature: signature,
-      activeTaskIdsToDelete: taskIdsToDelete ?? queuedRequest?.taskIdsToDelete,
-      activeTaskDeleteBaseUpdatedAtMap: taskDeleteBaseUpdatedAtMap ?? queuedRequest?.taskDeleteBaseUpdatedAtMap,
+      activeSignature: request.signature,
+      activeTaskIdsToDelete: request.taskIdsToDelete,
+      activeTaskDeleteBaseUpdatedAtMap: request.taskDeleteBaseUpdatedAtMap,
       activePromise: Promise.resolve({ success: false }),
       queuedRequest: null,
     };
-    const effectiveTaskIdsToDelete = taskIdsToDelete ?? queuedRequest?.taskIdsToDelete;
-    const effectiveTaskDeleteBaseUpdatedAtMap = taskDeleteBaseUpdatedAtMap ?? queuedRequest?.taskDeleteBaseUpdatedAtMap;
+    const effectiveTaskIdsToDelete = request.taskIdsToDelete;
+    const effectiveTaskDeleteBaseUpdatedAtMap = request.taskDeleteBaseUpdatedAtMap;
     const effectiveOperationId = operationId ?? queuedRequest?.operationId;
     const basePromise = this.startProjectSaveRequest(
       project,
@@ -318,7 +311,7 @@ export class ProjectSaveFlightCoordinatorService {
     );
     const activePromise = this.bindQueuedProjectSaveResult(basePromise, queuedRequest);
 
-    targetFlight.activeSignature = signature;
+    targetFlight.activeSignature = request.signature;
     targetFlight.activeTaskIdsToDelete = effectiveTaskIdsToDelete;
     targetFlight.activeTaskDeleteBaseUpdatedAtMap = effectiveTaskDeleteBaseUpdatedAtMap;
     targetFlight.activePromise = activePromise;
@@ -335,15 +328,14 @@ export class ProjectSaveFlightCoordinatorService {
     taskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap,
     operationId?: string,
   ): Promise<ProjectSaveResult> {
-    if (taskDeleteBaseUpdatedAtMap !== undefined) {
-      return operationId === undefined
-        ? this.batchSyncService.saveProjectToCloud(project, userId, taskIdsToDelete, taskDeleteBaseUpdatedAtMap)
-        : this.batchSyncService.saveProjectToCloud(project, userId, taskIdsToDelete, taskDeleteBaseUpdatedAtMap, operationId);
+    if (operationId !== undefined) {
+      return this.batchSyncService.saveProjectToCloud(
+        project, userId, taskIdsToDelete, taskDeleteBaseUpdatedAtMap, operationId,
+      );
     }
-
-    return operationId === undefined
+    return taskDeleteBaseUpdatedAtMap === undefined
       ? this.batchSyncService.saveProjectToCloud(project, userId, taskIdsToDelete)
-      : this.batchSyncService.saveProjectToCloud(project, userId, taskIdsToDelete, undefined, operationId);
+      : this.batchSyncService.saveProjectToCloud(project, userId, taskIdsToDelete, taskDeleteBaseUpdatedAtMap);
   }
 
   private bindQueuedProjectSaveResult(
@@ -388,6 +380,10 @@ export class ProjectSaveFlightCoordinatorService {
       return;
     }
 
+    if (await this.settleStaleProjectSaveFlight(key, flight, result)) {
+      return;
+    }
+
     if (!result.success) {
       const queuedRequest = flight.queuedRequest;
       const retryPayloadRefreshed = queuedRequest && !result.conflict && !result.terminal
@@ -421,6 +417,27 @@ export class ProjectSaveFlightCoordinatorService {
     }
 
     await this.advanceProjectSaveFlight(key, flight);
+  }
+
+  private async settleStaleProjectSaveFlight(
+    key: string,
+    flight: ProjectSaveFlight,
+    result: ProjectSaveResult,
+  ): Promise<boolean> {
+    const { sessionGeneration } = parseProjectSaveFlightKey(key);
+    if (sessionGeneration === undefined || sessionGeneration === this.sessionGeneration) return false;
+
+    const queuedRequest = flight.queuedRequest;
+    if (!queuedRequest) {
+      this.projectSaveFlights.delete(key);
+      return true;
+    }
+    const retryPayloadRefreshed = await this.refreshQueuedProjectRetryPayload(queuedRequest, result.retryEnqueued, true);
+    const staleResult: ProjectSaveResult = { success: false, failureReason: 'project sync session changed' };
+    if (retryPayloadRefreshed) staleResult.retryEnqueued = [`project:${queuedRequest.project.id}`];
+    else if (result.retryEnqueued) staleResult.retryEnqueued = result.retryEnqueued;
+    this.settleQueuedProjectSaveRequest(key, flight, queuedRequest, staleResult, 'retry-handoff');
+    return true;
   }
 
   private settleQueuedProjectSaveRequest(
@@ -506,9 +523,7 @@ export class ProjectSaveFlightCoordinatorService {
       key,
       queuedRequest.project,
       queuedRequest.userId,
-      queuedRequest.signature,
-      queuedRequest.taskIdsToDelete,
-      queuedRequest.taskDeleteBaseUpdatedAtMap,
+      queuedRequest,
       queuedRequest.operationId,
       flight,
       queuedRequest,
@@ -523,23 +538,17 @@ export class ProjectSaveFlightCoordinatorService {
     taskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap,
     operationId?: string,
   ): Promise<ProjectSaveResult> {
-    const effectiveTaskIdsToDelete = this.captureEffectiveTaskIdsToDelete(project.id, taskIdsToDelete);
-    const effectiveTaskDeleteBaseUpdatedAtMap = this.captureEffectiveTaskDeleteBaseUpdatedAtMap(
-      project.id,
-      taskDeleteBaseUpdatedAtMap,
-    );
-    const signature = buildProjectSaveSignature(
+    const requestSnapshot = this.buildProjectSaveRequestSnapshot(
       project,
-      effectiveTaskIdsToDelete,
-      effectiveTaskDeleteBaseUpdatedAtMap,
+      taskIdsToDelete,
+      taskDeleteBaseUpdatedAtMap,
+      operationId,
     );
     return this.startProjectSaveFlight(
       key,
       project,
       userId,
-      signature,
-      effectiveTaskIdsToDelete,
-      effectiveTaskDeleteBaseUpdatedAtMap,
+      requestSnapshot,
       operationId,
     );
   }
@@ -573,6 +582,7 @@ export class ProjectSaveFlightCoordinatorService {
     project: Project,
     taskIdsToDelete?: string[],
     taskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap,
+    operationId?: string,
     fallbackTaskIdsToDelete?: string[],
     fallbackTaskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap,
   ): ProjectSaveRequestSnapshot {
@@ -588,7 +598,10 @@ export class ProjectSaveFlightCoordinatorService {
     );
 
     return {
-      signature: buildProjectSaveSignature(project, effectiveTaskIdsToDelete, effectiveTaskDeleteBaseUpdatedAtMap),
+      signature: addOperationIdToSaveSignature(
+        buildProjectSaveSignature(project, effectiveTaskIdsToDelete, effectiveTaskDeleteBaseUpdatedAtMap),
+        operationId,
+      ),
       taskIdsToDelete: effectiveTaskIdsToDelete,
       taskDeleteBaseUpdatedAtMap: effectiveTaskDeleteBaseUpdatedAtMap,
     };
@@ -601,7 +614,7 @@ export class ProjectSaveFlightCoordinatorService {
     taskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap,
     operationId?: string,
   ): Promise<ProjectSaveResult> {
-    const key = buildProjectSaveFlightKey(project.id, userId);
+    const key = `${this.sessionGeneration}|${buildProjectSaveFlightKey(project.id, userId)}`;
     const existingFlight = this.projectSaveFlights.get(key);
 
     if (!existingFlight) {
@@ -612,6 +625,7 @@ export class ProjectSaveFlightCoordinatorService {
       project,
       taskIdsToDelete,
       taskDeleteBaseUpdatedAtMap,
+      operationId,
       existingFlight.activeTaskIdsToDelete,
       existingFlight.activeTaskDeleteBaseUpdatedAtMap,
     );
@@ -665,13 +679,17 @@ export class ProjectSaveFlightCoordinatorService {
       project,
       taskIdsToDelete,
       taskDeleteBaseUpdatedAtMap,
+      operationId,
       queuedRequest.taskIdsToDelete ?? existingFlight.activeTaskIdsToDelete,
       queuedRequest.taskDeleteBaseUpdatedAtMap ?? existingFlight.activeTaskDeleteBaseUpdatedAtMap,
     );
-    const refreshedQueuedSignature = buildProjectSaveSignature(
-      queuedRequest.project,
-      queuedSnapshot.taskIdsToDelete,
-      queuedSnapshot.taskDeleteBaseUpdatedAtMap,
+    const refreshedQueuedSignature = addOperationIdToSaveSignature(
+      buildProjectSaveSignature(
+        queuedRequest.project,
+        queuedSnapshot.taskIdsToDelete,
+        queuedSnapshot.taskDeleteBaseUpdatedAtMap,
+      ),
+      queuedRequest.operationId,
     );
     const mergeDecision = decideQueuedProjectSaveRequestMerge({
       incomingSignature: signature,
