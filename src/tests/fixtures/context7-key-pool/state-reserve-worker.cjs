@@ -11,7 +11,7 @@ const identities = [1, 2, 3, 4].map(slot => ({
 }));
 
 async function main() {
-  const [stateDir, isoTime] = process.argv.slice(2);
+  const [stateDir, isoTime, reportMode] = process.argv.slice(2);
   const fixedNow = new Date(isoTime);
   if (!stateDir || Number.isNaN(fixedNow.getTime())) throw new Error('invalid-worker-input');
 
@@ -22,7 +22,16 @@ async function main() {
   });
   const context = { identities, timeZone: 'UTC' };
   const preview = await store.preview(context);
-  await store.reserveExpected(context, preview.route);
+  let reserved = await store.reserveExpected(context, preview.route);
+  for (let attempt = 1; reserved.kind === 'retry' && attempt < 8; attempt += 1) {
+    reserved = await store.reserveExpected(context, reserved.route);
+  }
+  if (reserved.kind !== 'keyed' || !reserved.token) {
+    throw new Error('state-reserve-worker-not-keyed');
+  }
+  if (reportMode === '--report') {
+    process.stdout.write(JSON.stringify({ kind: reserved.kind, route: reserved.route, token: reserved.token }) + '\n');
+  }
 }
 
 main().catch(() => {

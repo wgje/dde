@@ -1,6 +1,7 @@
 'use strict';
 
 const SOFT_LIMIT = 950;
+const MAX_KEY_SLOTS = 4;
 const FINGERPRINT = /^[0-9a-f]{64}$/;
 const PERIOD_ID = /^(\d{4})-(0[1-9]|1[0-2])$/;
 const SAFE_REASON = /^(?:all-keyed-slots-unavailable|state-unavailable-fail-closed)$/;
@@ -169,12 +170,12 @@ function previousPeriodId(periodId) {
 }
 
 function validateIdentityList(identities) {
-  if (!Array.isArray(identities) || identities.length > 4) fail('invalid-identities');
+  if (!Array.isArray(identities) || identities.length > MAX_KEY_SLOTS) fail('invalid-identities');
   const slots = new Set();
   const fingerprints = new Set();
   const normalized = identities.map(identity => {
     assertExactKeys(identity, ['slot', 'fingerprintSha256'], 'invalid-identity');
-    if (!Number.isInteger(identity.slot) || identity.slot < 1 || identity.slot > 4) fail('invalid-identity-slot');
+    if (!Number.isInteger(identity.slot) || identity.slot < 1 || identity.slot > MAX_KEY_SLOTS) fail('invalid-identity-slot');
     if (!FINGERPRINT.test(identity.fingerprintSha256)) fail('invalid-identity-fingerprint');
     if (slots.has(identity.slot)) fail('duplicate-identity-slot');
     if (fingerprints.has(identity.fingerprintSha256)) fail('duplicate-identity-fingerprint');
@@ -417,7 +418,7 @@ function validateKeyedRoute(route) {
   assertExactKeys(route, ['kind', 'periodId', 'slot', 'fingerprintSha256'], 'invalid-keyed-route');
   if (route.kind !== 'keyed') fail('invalid-keyed-route');
   parsePeriodId(route.periodId);
-  if (!Number.isInteger(route.slot) || route.slot < 1 || route.slot > 4) fail('invalid-keyed-route');
+  if (!Number.isInteger(route.slot) || route.slot < 1 || route.slot > MAX_KEY_SLOTS) fail('invalid-keyed-route');
   if (!FINGERPRINT.test(route.fingerprintSha256)) fail('invalid-keyed-route');
 }
 
@@ -468,7 +469,7 @@ function validateReservationToken(token) {
   } catch {
     fail('invalid-reservation-token');
   }
-  if (!Number.isInteger(token.slot) || token.slot < 1 || token.slot > 4
+  if (!Number.isInteger(token.slot) || token.slot < 1 || token.slot > MAX_KEY_SLOTS
     || !FINGERPRINT.test(token.fingerprintSha256)
     || !Number.isInteger(token.attemptOrdinal)
     || token.attemptOrdinal < 1 || token.attemptOrdinal > SOFT_LIMIT) {

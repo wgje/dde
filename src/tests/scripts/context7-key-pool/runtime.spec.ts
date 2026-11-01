@@ -17,6 +17,7 @@ const runtimeModule = require(runtimePath) as {
     callTool: (name: string, args: unknown, options?: { signal?: AbortSignal }) => Promise<any>;
     getPublicRuntime: () => Record<string, unknown>;
     getRouteOverride: () => Record<string, unknown> | null;
+    hasAppliedCredentials: () => boolean;
     close: () => Promise<void>;
   };
   outcomeForClassification: (classification: Record<string, unknown> | null) => Record<string, unknown>;
@@ -90,6 +91,17 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+type ChildDescriptor = {
+  key: string;
+  generation: number;
+  tools: unknown[];
+  closed: boolean;
+  close: () => Promise<void>;
+  onExit: (listener: () => void) => () => boolean;
+  exit: () => void;
+  callTool: (name: string, args: unknown, options?: { signal?: AbortSignal }) => Promise<unknown>;
+};
+
 type HarnessOptions = {
   responses?: Record<string, Array<unknown>>;
   previewRoutes?: Array<Record<string, unknown>>;
@@ -107,20 +119,11 @@ type HarnessOptions = {
   onEvent?: (event: Record<string, unknown>) => unknown;
 };
 
-type RecordedCall = {
-  child: { exit(): void; generation: number };
-  generation: number;
-  key: string;
-  name: string;
-  args: unknown;
-  signal: AbortSignal | undefined;
-};
-
 function createHarness(options: HarnessOptions = {}) {
   const events: Array<Record<string, unknown>> = [];
-  const calls: RecordedCall[] = [];
+  const calls: Array<Record<string, unknown> & { child: ChildDescriptor }> = [];
   const outcomes: Array<{ token: Record<string, unknown>; outcome: Record<string, unknown> }> = [];
-  const children: any[] = [];
+  const children: ChildDescriptor[] = [];
   const previewRoutes = [...(options.previewRoutes ?? [])];
   const reserveResults = [...(options.reserveResults ?? [])];
   const responses = Object.fromEntries(
@@ -170,7 +173,7 @@ function createHarness(options: HarnessOptions = {}) {
     const key = route.kind === 'keyed' ? String(route.slot) : 'anonymous';
     const generation = factoryCalls;
     const exitListeners = new Set<() => void>();
-    const child = {
+    const child: ChildDescriptor = {
       key,
       generation,
       tools: structuredClone(options.schemaByFactoryCall?.[factoryCalls - 1] ?? TOOLS),
@@ -689,13 +692,22 @@ describe('Context7 pool runtime', () => {
 
   it('returns fresh exact public counters containing only actual dispatch counts', async () => {
     const harness = createHarness();
-    expect(Object.keys(harness.pool)).toEqual(['listTools', 'callTool', 'getPublicRuntime', 'getRouteOverride', 'close']);
+    expect(Object.keys(harness.pool)).toEqual([
+      'listTools',
+      'callTool',
+      'getPublicRuntime',
+      'getRouteOverride',
+      'hasAppliedCredentials',
+      'close',
+    ]);
+    expect(harness.pool.hasAppliedCredentials()).toBe(false);
     const before = harness.pool.getPublicRuntime();
     expect(Object.keys(before).sort()).toEqual(['anonymousDispatches', 'instanceId_12', 'keyedDispatches', 'startedAt']);
     expect(before).toMatchObject({ keyedDispatches: 0, anonymousDispatches: 0, startedAt: '2026-07-31T00:00:00.000Z' });
     expect(String(before.instanceId_12)).toMatch(/^[0-9a-f]{12}$/);
     await harness.pool.callTool('query-docs', { libraryId: '/secret', query: 'secret query' });
     const after = harness.pool.getPublicRuntime();
+    expect(harness.pool.hasAppliedCredentials()).toBe(true);
     expect(after).not.toBe(before);
     expect(after).toMatchObject({ instanceId_12: before.instanceId_12, keyedDispatches: 1, anonymousDispatches: 0 });
     expect(JSON.stringify(after)).not.toContain('secret');

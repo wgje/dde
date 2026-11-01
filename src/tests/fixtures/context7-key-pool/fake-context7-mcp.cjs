@@ -76,6 +76,13 @@ function fixtureTools() {
 
 const pidFile = option('--pid-file');
 if (pidFile) fs.writeFileSync(pidFile, String(process.pid));
+const instanceLog = option('--instance-log');
+if (instanceLog) {
+  fs.appendFileSync(instanceLog, `${JSON.stringify({
+    pid: process.pid,
+    instanceId: crypto.randomUUID(),
+  })}\n`);
+}
 if (has('--immediate-exit')) process.exit(19);
 const stderrBytes = Number(option('--stderr-bytes', '0'));
 if (stderrBytes > 0) fs.writeSync(2, Buffer.alloc(stderrBytes, 120));
@@ -121,7 +128,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       _meta: { fixture: marker, nested: { kept: true } },
     };
   }
-  return { content: [{ type: 'text', text: 'fixture-ok' }] };
+  const result = { content: [{ type: 'text', text: 'fixture-ok' }] };
+  if (request.params.name === 'query-docs') {
+    result.structuredContent = { answer: 'fixture-ok' };
+  }
+  return result;
 });
 
 (async () => {

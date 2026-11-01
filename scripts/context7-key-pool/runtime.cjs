@@ -281,6 +281,7 @@ function createPoolRuntime(options) {
   let closing = false;
   let closePromise = null;
   let storageFaultLatched = false;
+  let credentialsApplied = false;
 
   function emit(event, fields = {}) {
     if (typeof onEvent !== 'function') return;
@@ -511,6 +512,7 @@ function createPoolRuntime(options) {
   async function listToolsOperation(operation) {
     throwIfAborted(operation);
     const preview = await awaitExternal(operation, () => store.preview(context, {}));
+    credentialsApplied = true;
     throwIfAborted(operation);
     const prepared = await prepareChild(preview.route, operation);
     return clone(prepared.child.tools);
@@ -576,6 +578,7 @@ function createPoolRuntime(options) {
       throwIfAborted(operation);
       const routeOptions = { excludeFingerprints: [...excludedFingerprints] };
       const preview = await awaitExternal(operation, () => store.preview(context, routeOptions));
+      credentialsApplied = true;
       throwIfAborted(operation);
       // Attempt two is pinned to the first transient route, but reserveExpected
       // remains the durable eligibility fence. A changed store returns retry,
@@ -713,6 +716,10 @@ function createPoolRuntime(options) {
       : null;
   }
 
+  function hasAppliedCredentials() {
+    return credentialsApplied;
+  }
+
   function close() {
     if (closePromise) return closePromise;
     closing = true;
@@ -726,7 +733,7 @@ function createPoolRuntime(options) {
     return closePromise;
   }
 
-  return { listTools, callTool, getPublicRuntime, getRouteOverride, close };
+  return { listTools, callTool, getPublicRuntime, getRouteOverride, hasAppliedCredentials, close };
 }
 
 module.exports = {

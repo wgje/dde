@@ -47,12 +47,31 @@ describe('Context7 credential boundary', () => {
     }
   });
 
-  it('rejects every missing slot and duplicate fingerprint', () => {
-    for (let slot = 1; slot <= 4; slot += 1) {
+  it('accepts any contiguous 1..4 prefix and keeps original slot identities', () => {
+    for (let count = 1; count <= 4; count += 1) {
       const env = fixtureEnv();
-      delete env[`CONTEXT7_API_KEY_${slot}`];
-      expect(() => loadCredentialPool(env)).toThrow(`missing-context7-key-slot:${slot}`);
+      for (const name of KEY_NAMES) delete env[name];
+      for (let slot = 1; slot <= count; slot += 1) {
+        env[`CONTEXT7_API_KEY_${slot}`] = `fixture-secret-prefix-${slot}`;
+      }
+      const pool = loadCredentialPool(env);
+      expect(pool.map(entry => entry.slot)).toEqual([...Array(count)].map((_, index) => index + 1));
+      expect(pool.map(entry => entry.name)).toEqual(KEY_NAMES.slice(0, count));
+      expect(pool.every(entry => entry.publicIdentity.slot === entry.slot)).toBe(true);
     }
+  });
+
+  it('rejects empty pools, gaps and duplicate fingerprints', () => {
+    const empty = fixtureEnv();
+    for (const name of KEY_NAMES) delete empty[name];
+    expect(() => loadCredentialPool(empty)).toThrow('missing-context7-key-slot:1');
+
+    for (const gapSlot of [1, 2, 3]) {
+      const env = fixtureEnv();
+      delete env[`CONTEXT7_API_KEY_${gapSlot}`];
+      expect(() => loadCredentialPool(env)).toThrow();
+    }
+
     const duplicate = fixtureEnv();
     duplicate.CONTEXT7_API_KEY_4 = duplicate.CONTEXT7_API_KEY_2;
     expect(() => loadCredentialPool(duplicate)).toThrow('duplicate-context7-key-slots:2,4');

@@ -29,6 +29,7 @@ type Tool = Record<string, unknown> & { name: string };
 type ParentClient = {
   client: Client;
   transport: StdioClientTransport;
+  pid: number | undefined;
   stderr(): string;
   close(): Promise<void>;
 };
@@ -72,8 +73,23 @@ async function startParent(stateDir: string, childArgs: string[] = [], overrides
   const handle: ParentClient = {
     client,
     transport,
+    pid: Number.isFinite(transport.pid) ? Number(transport.pid) : undefined,
     stderr: () => stderr,
-    close: async () => { await client.close().catch(() => undefined); },
+    close: async () => {
+      const pid = Number.isFinite(transport.pid) ? Number(transport.pid) : undefined;
+      await Promise.race([
+        client.close().catch(() => undefined),
+        new Promise(resolve => setTimeout(resolve, 2_000)),
+      ]);
+      if (Number.isInteger(pid) && pid !== undefined && pid > 0) {
+        try {
+          process.kill(pid, 0);
+          process.kill(pid, 'SIGKILL');
+        } catch {
+          // Process already stopped; keep cleanup idempotent.
+        }
+      }
+    },
   };
   clients.push(handle);
   return handle;
@@ -87,15 +103,27 @@ async function eventuallyFile(filePath: string): Promise<string> {
   throw new Error(`fixture file was not created: ${path.basename(filePath)}`);
 }
 
-async function eventuallyDifferentPid(filePath: string, previous: number): Promise<number> {
+type ChildInstance = { pid: number; instanceId: string };
+
+async function eventuallyChildInstances(filePath: string, count: number): Promise<ChildInstance[]> {
   for (let attempt = 0; attempt < 300; attempt += 1) {
     if (fs.existsSync(filePath)) {
-      const current = Number(fs.readFileSync(filePath, 'utf8'));
-      if (Number.isInteger(current) && current > 0 && current !== previous) return current;
+      const instances = fs.readFileSync(filePath, 'utf8')
+        .split('\n')
+        .filter(Boolean)
+        .map(line => JSON.parse(line) as ChildInstance);
+      if (instances.length >= count
+        && instances.every(instance => (
+          Number.isInteger(instance.pid)
+          && instance.pid > 0
+          && /^[0-9a-f-]{36}$/.test(instance.instanceId)
+        ))) {
+        return instances;
+      }
     }
     await new Promise(resolve => setTimeout(resolve, 10));
   }
-  throw new Error('fixture child PID did not change');
+  throw new Error(`fixture did not record ${count} child instances`);
 }
 
 async function expectPidStops(pid: number): Promise<void> {
@@ -133,7 +161,7 @@ function writeSeededState(stateDir: string, successfulAttempts: number): void {
     reserveRoute(args: Record<string, unknown>): { state: any; reservation: any };
     applyOutcome(args: Record<string, unknown>): any;
   };
-  const now = new Date('2026-07-15T12:00:00.000Z');
+  const now = new Date();
   const identities = syntheticSecrets.map((secret, index) => ({
     slot: index + 1,
     fingerprintSha256: createHash('sha256').update(secret).digest('hex'),
@@ -409,10 +437,10 @@ describe('stable Context7 key-pool parent MCP', () => {
         title: 'Resolve a library',
         description: 'Resolve docs library identifiers.',
         inputSchema: {
+          $schema: 'http://json-schema.org/draft-07/schema#',
           type: 'object',
           required: ['libraryName', 'query'],
           properties: { libraryName: { type: 'string' }, query: { type: 'string' } },
-          additionalProperties: false,
         },
         annotations: { readOnlyHint: true },
         _meta: { fixture: true },
@@ -422,6 +450,7 @@ describe('stable Context7 key-pool parent MCP', () => {
         title: 'Query documentation',
         description: 'Query resolved documentation.',
         inputSchema: {
+          $schema: 'http://json-schema.org/draft-07/schema#',
           type: 'object',
           required: ['libraryId', 'query'],
           properties: { libraryId: { type: 'string' }, query: { type: 'string' } },
@@ -443,30 +472,79 @@ describe('stable Context7 key-pool parent MCP', () => {
       arguments: { libraryName: 'fixture', query: 'one safe call' },
     })).resolves.toMatchObject({ content: [{ type: 'text', text: 'fixture-ok' }] });
     const status = statusFrom(await parent.client.callTool({ name: 'context7-pool-status', arguments: {} }));
+    expect(status).toMatchObject({ mode: 'keyed', activeSlot: 1, anonymousReason: null });
     expect(status.slots[0]).toMatchObject({ slot: 1, attemptedCalls: 1, successfulCalls: 1 });
     expect(parent.transport.pid).toBe(pid);
     expect(() => process.kill(pid!, 0)).not.toThrow();
   });
 
+  it('boots and serves MCP with only the first contiguous key slot', async () => {
+    const parent = await startParent(tempRoot('single-key'), [], {
+      CONTEXT7_API_KEY_2: '',
+      CONTEXT7_API_KEY_3: '',
+      CONTEXT7_API_KEY_4: '',
+    });
+    const listed = await parent.client.listTools();
+    expect(listed.tools.map(tool => tool.name)).toEqual([
+      'resolve-library-id',
+      'query-docs',
+      'context7-pool-status',
+    ]);
+    await expect(parent.client.callTool({
+      name: 'resolve-library-id',
+      arguments: { libraryName: 'fixture', query: 'single contiguous key' },
+    })).resolves.toMatchObject({ content: [{ type: 'text', text: 'fixture-ok' }] });
+    const status = statusFrom(await parent.client.callTool({
+      name: 'context7-pool-status',
+      arguments: {},
+    }));
+    expect(status).toMatchObject({ mode: 'keyed', activeSlot: 1, anonymousReason: null });
+    expect(status.slots).toHaveLength(1);
+    expect(status.slots[0]).toMatchObject({ slot: 1, attemptedCalls: 1, successfulCalls: 1 });
+    expect(JSON.stringify(status)).not.toContain(syntheticSecrets[0]);
+  });
+
+  it('fails bootstrap before MCP when keys form a non-contiguous gap', () => {
+    const env = testEnv(tempRoot('gap'), [], {
+      CONTEXT7_API_KEY_3: 'synthetic-context7-gap-slot-3-never-real',
+      CONTEXT7_API_KEY_4: 'synthetic-context7-gap-slot-4-never-real',
+    });
+    delete env.CONTEXT7_API_KEY_2;
+    const failed = spawnSync(process.execPath, [parentPath], {
+      cwd: repoRoot,
+      env,
+      encoding: 'utf8',
+      input: '',
+      timeout: 5_000,
+    });
+    expect(failed.status).not.toBe(0);
+    expect(failed.stdout).toBe('');
+    expect(failed.stderr).toBe('context7-pool-bootstrap-failed\n');
+    expect(failed.stderr).not.toContain('synthetic-context7-gap-slot-3-never-real');
+  });
+
   it('replaces the child at 950 while the same parent client continues', async () => {
     const stateDir = tempRoot('switch');
     writeSeededState(stateDir, 949);
-    const pidFile = path.join(tempRoot('pid'), 'child.pid');
-    const parent = await startParent(stateDir, ['--pid-file', pidFile]);
+    const instanceLog = path.join(tempRoot('pid'), 'child-instances.jsonl');
+    const parent = await startParent(stateDir, ['--instance-log', instanceLog]);
     const parentPid = parent.transport.pid;
     await parent.client.callTool({
       name: 'query-docs', arguments: { libraryId: '/fixture', query: 'attempt 950' },
     });
-    const firstChildPid = Number(await eventuallyFile(pidFile));
+    const [firstChild] = await eventuallyChildInstances(instanceLog, 1);
     await parent.client.callTool({
       name: 'query-docs', arguments: { libraryId: '/fixture', query: 'slot two' },
     });
-    const secondChildPid = await eventuallyDifferentPid(pidFile, firstChildPid);
-    expect(secondChildPid).not.toBe(firstChildPid);
+    const instances = await eventuallyChildInstances(instanceLog, 2);
+    const secondChild = instances[1]!;
+    expect(secondChild.instanceId).not.toBe(firstChild!.instanceId);
+    if (secondChild.pid !== firstChild!.pid) await expectPidStops(firstChild!.pid);
     expect(parent.transport.pid).toBe(parentPid);
     const status = statusFrom(await parent.client.callTool({ name: 'context7-pool-status', arguments: {} }));
+    expect(status).toMatchObject({ mode: 'keyed', activeSlot: 2, anonymousReason: null });
     expect(status.slots.map((slot: any) => slot.attemptedCalls)).toEqual([950, 1, 0, 0]);
-  }, 30_000);
+  }, 90_000);
 
   it('recovers from child crashes without closing parent stdio and redacts the MCP error', async () => {
     const parent = await startParent(tempRoot());

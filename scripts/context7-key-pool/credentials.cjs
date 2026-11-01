@@ -14,10 +14,18 @@ function fingerprint(value) {
 }
 
 function loadCredentialPool(env = process.env) {
-  const pool = KEY_NAMES.map((name, index) => {
+  const rawValues = KEY_NAMES.map(name => (typeof env[name] === 'string' ? env[name] : ''));
+  const maxPresentSlot = rawValues.reduce(
+    (maximum, value, index) => (value ? index + 1 : maximum),
+    0,
+  );
+  if (maxPresentSlot === 0) throw new Error('missing-context7-key-slot:1');
+  for (let slot = 1; slot <= maxPresentSlot; slot += 1) {
+    if (!rawValues[slot - 1]) throw new Error(`missing-context7-key-slot:${slot}`);
+  }
+  const pool = rawValues.slice(0, maxPresentSlot).map((value, index) => {
     const slot = index + 1;
-    const value = typeof env[name] === 'string' ? env[name] : '';
-    if (!value) throw new Error(`missing-context7-key-slot:${slot}`);
+    const name = KEY_NAMES[index];
     if (!value.trim() || value !== value.trim()) {
       throw new Error(`invalid-context7-key-whitespace-slot:${slot}`);
     }

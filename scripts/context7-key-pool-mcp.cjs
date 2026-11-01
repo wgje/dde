@@ -132,12 +132,17 @@ function createStore(env, redact) {
   });
 }
 
-async function inspectedPublicStatus(store, runtime = null, routeOverride = null) {
+async function inspectedPublicStatus(
+  store,
+  runtime = null,
+  routeOverride = null,
+  reconciliationOverride = null,
+) {
   const inspected = await store.inspectStored();
   const storedSnapshot = {
     state: inspected.state,
     health: inspected.health,
-    reconciliation: inspected.reconciliation,
+    reconciliation: reconciliationOverride ?? inspected.reconciliation,
     now: new Date(),
   };
   return projectPublicStatus({
@@ -148,7 +153,12 @@ async function inspectedPublicStatus(store, runtime = null, routeOverride = null
 }
 
 async function livePublicStatus(store, runtime) {
-  return inspectedPublicStatus(store, runtime.getPublicRuntime(), runtime.getRouteOverride());
+  return inspectedPublicStatus(
+    store,
+    runtime.getPublicRuntime(),
+    runtime.getRouteOverride(),
+    runtime.hasAppliedCredentials() ? 'applied' : null,
+  );
 }
 
 async function runStatus(env) {

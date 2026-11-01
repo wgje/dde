@@ -173,11 +173,12 @@ async function makeStateDir(): Promise<string> {
   return stateDir;
 }
 
-function fixedStore(stateDir: string, overrides: Parameters<typeof createStateStore>[0] = { stateDir }): StateStore {
-  return createStateStore(Object.assign({
+function fixedStore(stateDir: string, overrides: Omit<Parameters<typeof createStateStore>[0], 'stateDir'> = {}): StateStore {
+  return createStateStore({
     stateDir,
     now: () => new Date(NOW_ISO),
-  }, overrides));
+    ...overrides,
+  });
 }
 
 async function readEnvelope(filePath: string): Promise<Envelope> {
@@ -190,9 +191,11 @@ async function writePair(stateDir: string, envelope: Envelope): Promise<void> {
   await writeFile(join(stateDir, 'state.backup.json'), serialized, 'utf8');
 }
 
-async function worker(stateDir: string): Promise<{ code: number | null; stdout: string; stderr: string }> {
+async function worker(stateDir: string, report = false): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [workerPath, stateDir, NOW_ISO], {
+    const args = [workerPath, stateDir, NOW_ISO];
+    if (report) args.push('--report');
+    const child = spawn(process.execPath, args, {
       cwd: process.cwd(),
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
@@ -230,6 +233,32 @@ afterEach(async () => {
 });
 
 describe('Context7 key-pool state store', () => {
+  it.each([1, 2, 3, 4])('reconciles and routes a contiguous %s-key identity prefix through the store', async slotCount => {
+    const stateDir = await makeStateDir();
+    const oneToN: Identity[] = Array.from({ length: slotCount }, (_, index) => ({
+      slot: index + 1,
+      fingerprintSha256: String(index + 1).repeat(64),
+    }));
+    const store = fixedStore(stateDir);
+    const preview = await store.preview({ identities: oneToN, timeZone: 'UTC' });
+    expect(preview.route.kind).toBe('keyed');
+    expect(preview.route).toMatchObject({ slot: 1, fingerprintSha256: oneToN[0]!.fingerprintSha256 });
+    expect(preview.state.activeSlots).toEqual(oneToN);
+    expect(Object.keys(preview.state.records)).toHaveLength(slotCount);
+    for (const identity of oneToN) {
+      expect(preview.state.records[identity.fingerprintSha256]).toMatchObject({
+        fingerprintSha256: identity.fingerprintSha256,
+        attemptedCalls: 0,
+        successfulCalls: 0,
+      });
+    }
+    const reserved = await store.reserveExpected({ identities: oneToN, timeZone: 'UTC' }, preview.route);
+    expect(reserved.kind).toBe('keyed');
+    expect(reserved.token).toMatchObject({ slot: 1, fingerprintSha256: oneToN[0]!.fingerprintSha256, attemptOrdinal: 1 });
+    const persisted = await readEnvelope(join(stateDir, 'state.json'));
+    expect(persisted.payload.activeSlots).toEqual(oneToN);
+  });
+
   it('persists both replicas before returning a reservation', async () => {
     const stateDir = await makeStateDir();
     const store = fixedStore(stateDir);
@@ -553,7 +582,7 @@ describe('Context7 key-pool state store', () => {
     await utimes(ownerPath, old, old);
     await utimes(lockDir, old, old);
     const store = fixedStore(stateDir, {
-      stateDir,
+
       lockWaitMs: 30,
       staleLockMs: 1,
       processExists: () => true,
@@ -583,7 +612,7 @@ describe('Context7 key-pool state store', () => {
     );
     await utimes(liveCandidatePath, old, old);
     const liveCandidateRead = await fixedStore(liveCandidateStateDir, {
-      stateDir: liveCandidateStateDir,
+
       staleLockMs: 1,
       processExists: () => true,
     }).read(context);
@@ -599,7 +628,7 @@ describe('Context7 key-pool state store', () => {
     await mkdir(malformedCandidatePath);
     await utimes(malformedCandidatePath, old, old);
     const malformedCandidateRead = await fixedStore(malformedCandidateStateDir, {
-      stateDir: malformedCandidateStateDir,
+
       staleLockMs: 1,
       processExists: () => true,
     }).read(context);
@@ -620,7 +649,7 @@ describe('Context7 key-pool state store', () => {
     }), 'utf8');
     await utimes(mismatchedCandidatePath, old, old);
     const mismatchedCandidateRead = await fixedStore(mismatchedCandidateStateDir, {
-      stateDir: mismatchedCandidateStateDir,
+
       staleLockMs: 1,
       processExists: () => true,
     }).read(context);
@@ -646,7 +675,7 @@ describe('Context7 key-pool state store', () => {
     await writeFile(join(abaLockDir, 'owner.json'), JSON.stringify(deadOwner), 'utf8');
     let replacementPublished = false;
     const abaStore = fixedStore(abaDir, {
-      stateDir: abaDir,
+
       lockWaitMs: 30,
       staleLockMs: 1,
       processExists: async pid => {
@@ -724,7 +753,7 @@ describe('Context7 key-pool state store', () => {
     };
     try {
       const store = fixedStore(stateDir, {
-        stateDir,
+
         staleLockMs: 1,
         processExists: pid => ![424_242, abandonedCandidateOwner.pid].includes(pid),
       });
@@ -755,7 +784,7 @@ describe('Context7 key-pool state store', () => {
     await utimes(ownerPath, old, old);
     await utimes(lockDir, old, old);
     const store = fixedStore(stateDir, {
-      stateDir,
+
       lockWaitMs: 30,
       staleLockMs: 1,
       processExists: () => false,
@@ -772,7 +801,7 @@ describe('Context7 key-pool state store', () => {
     await mkdir(guardPath);
     await utimes(guardPath, old, old);
     const guardedStore = fixedStore(guardedDir, {
-      stateDir: guardedDir,
+
       lockWaitMs: 30,
       sleep: milliseconds => new Promise(resolve => setTimeout(resolve, Math.min(milliseconds, 5))),
     });
@@ -816,9 +845,34 @@ describe('Context7 key-pool state store', () => {
   it('serializes 40 reservation worker processes with an exact total of 40', async () => {
     const stateDir = await makeStateDir();
 
-    const results = await Promise.all(Array.from({ length: 40 }, () => worker(stateDir)));
+    const results = await Promise.all(Array.from({ length: 40 }, () => worker(stateDir, true)));
 
-    expect(results.every(result => result.code === 0 && result.stdout === '' && result.stderr === '')).toBe(true);
+    expect(results.every(result => result.code === 0 && result.stderr === '')).toBe(true);
+    const reports = results.map(result => JSON.parse(result.stdout) as {
+      kind: string;
+      route: { kind: string; periodId: string; slot: number; fingerprintSha256: string };
+      token: {
+        kind: string;
+        periodId: string;
+        slot: number;
+        fingerprintSha256: string;
+        attemptOrdinal: number;
+        stateRevision: number;
+      };
+    });
+    expect(reports).toHaveLength(40);
+    for (const report of reports) {
+      expect(report.kind).toBe('keyed');
+      expect(report.route.kind).toBe('keyed');
+      expect(report.token.kind).toBe('keyed');
+      expect(report.token.periodId).toBe(report.route.periodId);
+      expect(report.token.slot).toBe(report.route.slot);
+      expect(report.token.fingerprintSha256).toBe(report.route.fingerprintSha256);
+      expect(report.token.attemptOrdinal).toBeGreaterThanOrEqual(1);
+      expect(report.token.stateRevision).toBeGreaterThanOrEqual(0);
+      expect(report.token.fingerprintSha256).toMatch(/^[0-9a-f]{64}$/);
+    }
+    expect(new Set(reports.map(report => report.token.attemptOrdinal))).toHaveLength(40);
     const inspected = await fixedStore(stateDir).inspectStored();
     expect(inspected.health.status).toBe('healthy');
     expect(Object.values(inspected.state!.records)
@@ -953,7 +1007,7 @@ describe('Context7 key-pool state store', () => {
     await expect(stat(join(noRedactorDir, 'events.jsonl'))).rejects.toMatchObject({ code: 'ENOENT' });
     let redactCalls = 0;
     const store = fixedStore(stateDir, {
-      stateDir,
+
       maxEventBytes: 220,
       redact: value => {
         redactCalls += 1;

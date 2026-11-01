@@ -55,7 +55,7 @@ async function startParent(stateDir: string, childArgs: string[] = []): Promise<
     env: envFor(stateDir, childArgs),
     stderr: 'pipe',
   });
-  transport.stderr?.on('data', () => undefined);
+  (transport.stderr as { resume?: () => void } | null)?.resume?.();
   const client = new Client({ name: 'context7-stress-test', version: '1.0.0' }, { capabilities: {} });
   await client.connect(transport);
   const handle = { client, transport, close: async () => { await client.close().catch(() => undefined); } };
@@ -142,7 +142,7 @@ describe.sequential('Context7 key-pool parent stress and crash durability', () =
     await callMany(restarted, 1, 'restart');
     const restartedStatus = await status(restarted);
     expect(restartedStatus.slots.map((slot: any) => slot.attemptedCalls)).toEqual([950, 51, 0, 0]);
-    expect(restartedStatus).toMatchObject({ mode: 'stored-unreconciled', activeSlot: null });
+    expect(restartedStatus).toMatchObject({ mode: 'keyed', activeSlot: 2, anonymousReason: null });
     const persisted = JSON.parse(fs.readFileSync(path.join(stateDir, 'state.json'), 'utf8'));
     const slotTwo = persisted.payload.activeSlots.find((identity: any) => identity.slot === 2);
     expect(persisted.payload.records[slotTwo.fingerprintSha256]).toMatchObject({
