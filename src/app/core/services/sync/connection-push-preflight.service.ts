@@ -8,6 +8,10 @@ import { createBrowserNetworkSuspendedError, isBrowserNetworkSuspendedWindow } f
 import { RetryQueueService } from './retry-queue.service';
 import { SessionManagerService } from './session-manager.service';
 import { SyncStateService } from './sync-state.service';
+import {
+  assertConnectionReplayFenceCurrent,
+  type ConnectionActionQueueReplayFence,
+} from './connection-sync-operations.helpers';
 
 export type ConnectionPushRequest = {
   connection: Connection;
@@ -18,6 +22,8 @@ export type ConnectionPushRequest = {
   sourceUserId?: string;
   operationId?: string;
   requireSyncRpc?: boolean;
+  replayFence?: ConnectionActionQueueReplayFence;
+  replayHandoff?: boolean;
 };
 
 export type ConnectionPreflightRetryEnqueueHandler = (
@@ -40,6 +46,7 @@ export class ConnectionPushPreflightService {
     request: ConnectionPushRequest,
     enqueueRetry: ConnectionPreflightRetryEnqueueHandler,
   ): Promise<boolean> {
+    assertConnectionReplayFenceCurrent(request.replayFence);
     return await this.shouldDeferConnectionForExpiredSession(request, enqueueRetry)
       || await this.shouldDeferConnectionForCircuitBreaker(request, enqueueRetry);
   }
@@ -49,12 +56,14 @@ export class ConnectionPushPreflightService {
     request: ConnectionPushRequest,
     enqueueRetry: ConnectionPreflightRetryEnqueueHandler,
   ): Promise<boolean> {
+    assertConnectionReplayFenceCurrent(request.replayFence);
     if (client) {
       return false;
     }
 
     if (!request.fromRetryQueue) {
       await enqueueRetry(request.connection, request.projectId, request.sourceUserId, undefined, request.operationId);
+      assertConnectionReplayFenceCurrent(request.replayFence);
     }
     return true;
   }
@@ -64,12 +73,16 @@ export class ConnectionPushPreflightService {
     request: ConnectionPushRequest,
     enqueueRetry: ConnectionPreflightRetryEnqueueHandler,
   ): Promise<boolean> {
+    assertConnectionReplayFenceCurrent(request.replayFence);
     let sessionUserId = await this.getConnectionPushSessionUserId(client);
+    assertConnectionReplayFenceCurrent(request.replayFence);
     if (!sessionUserId) {
+      if (request.replayFence) return await this.handleMissingConnectionPushSession(request, enqueueRetry);
       const refreshed = await this.sessionManager.tryRefreshSession('pushConnection.getSession');
       if (refreshed) {
         sessionUserId = await this.getConnectionPushSessionUserId(client);
       }
+      assertConnectionReplayFenceCurrent(request.replayFence);
     }
 
     if (!sessionUserId) {
@@ -84,11 +97,13 @@ export class ConnectionPushPreflightService {
     context: string,
     enqueueRetry: ConnectionPreflightRetryEnqueueHandler,
   ): Promise<boolean> {
+    assertConnectionReplayFenceCurrent(request.replayFence);
     if (request.fromRetryQueue) {
       throw createBrowserNetworkSuspendedError();
     }
 
     await enqueueRetry(request.connection, request.projectId, request.sourceUserId, true, request.operationId);
+    assertConnectionReplayFenceCurrent(request.replayFence);
 
     this.logger.info('浏览器网络挂起，延后连接同步', {
       connectionId: request.connection.id,
@@ -107,6 +122,11 @@ export class ConnectionPushPreflightService {
     request: ConnectionPushRequest,
     enqueueRetry: ConnectionPreflightRetryEnqueueHandler,
   ): Promise<boolean> {
+    if (request.replayFence) {
+      await enqueueRetry(request.connection, request.projectId, request.sourceUserId, true, request.operationId);
+      assertConnectionReplayFenceCurrent(request.replayFence);
+      return false;
+    }
     if (isBrowserNetworkSuspendedWindow()) {
       return await this.preserveConnectionUpsertForBrowserSuspension(
         request,
@@ -129,6 +149,7 @@ export class ConnectionPushPreflightService {
     sessionUserId: string,
     enqueueRetry: ConnectionPreflightRetryEnqueueHandler,
   ): Promise<boolean> {
+    assertConnectionReplayFenceCurrent(request.replayFence);
     if (!request.sourceUserId || sessionUserId === request.sourceUserId) {
       return true;
     }
@@ -141,6 +162,7 @@ export class ConnectionPushPreflightService {
     });
     if (!request.fromRetryQueue) {
       await enqueueRetry(request.connection, request.projectId, request.sourceUserId, undefined, request.operationId);
+      assertConnectionReplayFenceCurrent(request.replayFence);
     }
     return false;
   }
@@ -149,6 +171,7 @@ export class ConnectionPushPreflightService {
     request: ConnectionPushRequest,
     enqueueRetry: ConnectionPreflightRetryEnqueueHandler,
   ): Promise<boolean> {
+    assertConnectionReplayFenceCurrent(request.replayFence);
     if (!this.syncStateService.isSessionExpired()) {
       return false;
     }
@@ -156,6 +179,7 @@ export class ConnectionPushPreflightService {
     this.logger.warn('会话已过期，连接同步被阻止', { connectionId: request.connection.id });
     if (!request.fromRetryQueue) {
       await enqueueRetry(request.connection, request.projectId, request.sourceUserId, true, request.operationId);
+      assertConnectionReplayFenceCurrent(request.replayFence);
     }
     return true;
   }
@@ -164,6 +188,7 @@ export class ConnectionPushPreflightService {
     request: ConnectionPushRequest,
     enqueueRetry: ConnectionPreflightRetryEnqueueHandler,
   ): Promise<boolean> {
+    assertConnectionReplayFenceCurrent(request.replayFence);
     if (this.retryQueueService.checkCircuitBreaker()) {
       return false;
     }
@@ -171,6 +196,7 @@ export class ConnectionPushPreflightService {
     this.logger.debug('Circuit Breaker: 熔断中，跳过连接推送', { connectionId: request.connection.id });
     if (!request.fromRetryQueue) {
       await enqueueRetry(request.connection, request.projectId, request.sourceUserId, undefined, request.operationId);
+      assertConnectionReplayFenceCurrent(request.replayFence);
     }
     return true;
   }

@@ -5,7 +5,7 @@ import type { Connection } from '../../../../models';
 export type ConnectionTombstoneResult = { data: { connection_id: string; deleted_at?: string | null } | null; error: unknown | null };
 export type ConnectionEndpointTombstoneResult = { data: { deleted_at: string } | null; error: unknown | null };
 export type LegacyConnectionTombstoneResult = {
-  data: { deleted_at: string; source_id: string | null; target_id: string | null } | null;
+  data: { deleted_at: string } | null;
   error: unknown | null;
 };
 export type TaskExistenceResult = { data: Array<{ id: string }>; error: unknown | null };

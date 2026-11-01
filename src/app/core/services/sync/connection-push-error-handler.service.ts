@@ -39,34 +39,19 @@ export class ConnectionPushErrorHandlerService {
     }
 
     const enhanced = this.ensureEnhancedError(error);
-    this.recordRetryableConnectionFailure(enhanced);
+    this.recordRetryableConnectionFailure(enhanced, fromRetryQueue);
 
-    if (enhanced.errorType === 'BrowserNetworkSuspendedError') {
-      return await this.handleConnectionBrowserNetworkSuspendedError(
-        enhanced,
-        connection,
-        projectId,
-        fromRetryQueue,
-        sourceUserId,
-        operationId,
-        enqueueRetry,
-      );
-    }
-
-    if (enhanced.errorType === 'VersionConflictError') {
-      this.throwConnectionVersionConflict(enhanced, connection, projectId);
-    }
-
-    if (this.isConnectionForeignKeyError(enhanced)) {
-      return await this.handleConnectionForeignKeyError(
-        enhanced,
-        connection,
-        projectId,
-        fromRetryQueue,
-        sourceUserId,
-        operationId,
-        enqueueRetry,
-      );
+    const classifiedResult = this.routeClassifiedConnectionPushError(
+      enhanced,
+      connection,
+      projectId,
+      fromRetryQueue,
+      sourceUserId,
+      operationId,
+      enqueueRetry,
+    );
+    if (classifiedResult !== null) {
+      return await classifiedResult;
     }
 
     if (fromRetryQueue && enhanced.isRetryable) {
@@ -87,6 +72,47 @@ export class ConnectionPushErrorHandlerService {
     return false;
   }
 
+  /** 按已分类错误类型路由到专用处理分支；未命中返回 null 走通用失败路径 */
+  private routeClassifiedConnectionPushError(
+    enhanced: EnhancedError,
+    connection: Connection,
+    projectId: string,
+    fromRetryQueue: boolean,
+    sourceUserId: string | undefined,
+    operationId: string | undefined,
+    enqueueRetry: ConnectionRetryEnqueueHandler,
+  ): Promise<boolean> | null {
+    if (enhanced.errorType === 'BrowserNetworkSuspendedError') {
+      return this.handleConnectionBrowserNetworkSuspendedError(
+        enhanced,
+        connection,
+        projectId,
+        fromRetryQueue,
+        sourceUserId,
+        operationId,
+        enqueueRetry,
+      );
+    }
+
+    if (enhanced.errorType === 'VersionConflictError') {
+      this.throwConnectionVersionConflict(enhanced, connection, projectId);
+    }
+
+    if (this.isConnectionForeignKeyError(enhanced)) {
+      return this.handleConnectionForeignKeyError(
+        enhanced,
+        connection,
+        projectId,
+        fromRetryQueue,
+        sourceUserId,
+        operationId,
+        enqueueRetry,
+      );
+    }
+
+    return null;
+  }
+
   private ensureEnhancedError(error: unknown): EnhancedError {
     if (
       error instanceof Error
@@ -99,8 +125,11 @@ export class ConnectionPushErrorHandlerService {
     return supabaseErrorToError(error);
   }
 
-  private recordRetryableConnectionFailure(error?: EnhancedError): void {
-    if (!error?.isRetryable) {
+  private recordRetryableConnectionFailure(
+    error: EnhancedError | undefined,
+    fromRetryQueue: boolean,
+  ): void {
+    if (!error?.isRetryable || fromRetryQueue) {
       return;
     }
 

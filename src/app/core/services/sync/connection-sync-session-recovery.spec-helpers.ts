@@ -23,6 +23,10 @@ export interface ConnectionSyncSessionRecoverySpecContext {
   mockSessionManager: {
     tryRefreshSession: MockFn;
   };
+  mockSyncRpcClient: {
+    isFeatureEnabled: MockFn;
+    upsertConnection: MockFn;
+  };
   mockSyncState: {
     setSessionExpired: MockFn;
   };
@@ -49,13 +53,14 @@ export function registerConnectionSyncSessionRecoverySpecs(
   });
 
   it('首次缺少 session 时应先尝试 refresh，再继续连接同步', async () => {
-    const { service, mockClient, mockSessionManager, mockSyncState } = getContext();
+    const { service, mockClient, mockSessionManager, mockSyncRpcClient, mockSyncState } = getContext();
     const connection: Connection = {
       id: 'connection-refresh-before-expire',
       source: 'task-a',
       target: 'task-b',
     };
     mockSessionManager.tryRefreshSession.mockResolvedValueOnce(true);
+    mockSyncRpcClient.isFeatureEnabled.mockReturnValue(true);
     mockClient.auth.getSession
       .mockResolvedValueOnce({ data: { session: null as any } })
       .mockResolvedValueOnce({ data: { session: { user: { id: 'user-1' } } } });
@@ -72,6 +77,7 @@ export function registerConnectionSyncSessionRecoverySpecs(
 
     expect(result).toBe(true);
     expect(mockSessionManager.tryRefreshSession).toHaveBeenCalledWith('pushConnection.getSession');
+    expect(mockSyncRpcClient.upsertConnection).toHaveBeenCalled();
     expect(mockSyncState.setSessionExpired).not.toHaveBeenCalled();
   });
 }

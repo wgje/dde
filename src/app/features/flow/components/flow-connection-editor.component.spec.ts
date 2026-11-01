@@ -98,6 +98,54 @@ describe('FlowConnectionEditorComponent', () => {
     };
   }
 
+  it('为每次新的连接编辑会话分配递增代次，包括关闭后重开同一连接', () => {
+    const connectionA = {
+      sourceId: 'source-a',
+      targetId: 'target-a',
+      title: 'Connection A',
+      description: 'Description A',
+      x: 160,
+      y: 240,
+      isCrossTree: true,
+      mode: 'edit',
+    };
+    const data = signal<any>(connectionA);
+    (component as any).data = data;
+
+    const sessionIdentity = (component as any).sessionIdentity;
+    expect(sessionIdentity).toBeTypeOf('function');
+    if (typeof sessionIdentity !== 'function') {
+      return;
+    }
+
+    fixture.detectChanges();
+    expect(sessionIdentity()).toEqual({
+      key: 'source-a->target-a@160,240',
+      generation: 1,
+    });
+
+    data.set({
+      ...connectionA,
+      sourceId: 'source-b',
+      targetId: 'target-b',
+      title: 'Connection B',
+    });
+    fixture.detectChanges();
+    expect(sessionIdentity()).toEqual({
+      key: 'source-b->target-b@160,240',
+      generation: 2,
+    });
+
+    data.set(null);
+    fixture.detectChanges();
+    data.set(connectionA);
+    fixture.detectChanges();
+    expect(sessionIdentity()).toEqual({
+      key: 'source-a->target-a@160,240',
+      generation: 3,
+    });
+  });
+
   it('标题变化重排保存时应清理 handle 为 0 的旧 save timer', () => {
     const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
     const internal = getTimerInternals();

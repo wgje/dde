@@ -15,23 +15,32 @@ import {
   createConnectionEditorSaveContext,
   resizeConnectionEditorTextarea,
   resolveConnectionEditorBlurAction,
-  resolveConnectionEditorComposingClickAction,
   resolveConnectionEditorDocumentInteraction,
   resolveConnectionEditorSaveContext,
   resolveConnectionEditorSavePayload,
   shouldSkipConnectionEditorContentSync,
-  type ConnectionEditorDocumentInteractionContext,
   type ConnectionEditorSavePayload,
   type ConnectionEditorSaveContext,
+  type ConnectionEditorSessionIdentity,
   type ConnectionEditorSessionState,
   type ConnectionTasks,
 } from './flow-connection-editor.helpers';
+import { FlowConnectionEditorDocumentInteractionController } from './flow-connection-editor-document-interaction.controller';
+import { FlowConnectionEditorSaveController } from './flow-connection-editor-save.controller';
 
 export { ConnectionEditorData, ConnectionEditorMode };
 export type { ConnectionTasks, ConnectionEditorSavePayload };
+export type { ConnectionEditorSessionIdentity };
 
 const OPEN_CLICK_GUARD_MS = 50;
 const MODE_SWITCH_CLICK_GUARD_MS = 220;
+const COMPOSITION_DATA_SYNC_FALLBACK_MS = 1000;
+
+type PendingCompositionAction = {
+  kind: 'exit-edit' | 'save-and-close';
+  sessionKey: string | null;
+  context: ConnectionEditorSaveContext | null;
+};
 
 /**
  * 联系块编辑器组件
@@ -64,6 +73,11 @@ export class FlowConnectionEditorComponent implements OnInit, OnDestroy {
   readonly position = input<{ x: number; y: number }>({ x: 0, y: 0 });
   readonly readOnly = input(false);
   readonly connectionTasks = input<ConnectionTasks>({ source: null, target: null });
+  private readonly retainedConnectionData = signal<ConnectionEditorData | null>(null);
+  readonly renderedData = computed(() => this.data() ?? this.retainedConnectionData());
+  private sessionGeneration = 0;
+  private readonly activeSessionIdentity = signal<ConnectionEditorSessionIdentity | null>(null);
+  readonly sessionIdentity = this.activeSessionIdentity.asReadonly();
 
   readonly close = output<void>();
   /** 保存事件：发送 { sourceId, targetId, title, description } */
@@ -88,16 +102,15 @@ export class FlowConnectionEditorComponent implements OnInit, OnDestroy {
   editingTitle = '';
   editingDescription = '';
 
-  // 防抖保存定时器
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
   private focusTimer: ReturnType<typeof setTimeout> | null = null;
+  private compositionDataSyncFallbackTimer: ReturnType<typeof setTimeout> | null = null;
   private lastSessionKey: string | null = null;
   private lastEmittedPayloadKey: string | null = null;
   private activeSessionContext: ConnectionEditorSaveContext | null = null;
 
   // 防止"打开编辑器的同一次点击"触发 document:click 立即关闭
   private ignoreOutsideUntil = 0;
-  private closeRequested = false;
   private deleteRequested = false;
   private isDestroyed = false;
 
@@ -107,23 +120,80 @@ export class FlowConnectionEditorComponent implements OnInit, OnDestroy {
     title: false,
     description: false,
   };
+  private pendingCompositionAction: PendingCompositionAction | null = null;
+  private pendingCompositionDataSync = false;
+  private readonly saveController = new FlowConnectionEditorSaveController({
+    close: () => this.close.emit(),
+    debug: message => this.logger.debug(message),
+    getActiveSessionContext: () => this.activeSessionContext,
+    getNow: () => Date.now(),
+    getSaveTimer: () => this.saveTimer,
+    isComposing: () => this.isComposing(),
+    isDestroyed: () => this.isDestroyed,
+    isEditMode: () => this.isEditMode(),
+    queueCompositionAction: kind => this.queueCompositionAction(kind),
+    refocusInput: () => this.scheduleFocusInput(),
+    saveContent: context => this.saveContent(context),
+    setSaveTimer: timer => {
+      this.saveTimer = timer;
+    },
+    setIgnoreOutsideUntil: timestamp => {
+      this.ignoreOutsideUntil = timestamp;
+    },
+    syncEditorStateFromDom: () => {
+      this.syncEditorStateFromDom();
+    },
+  });
+  private readonly documentInteraction = new FlowConnectionEditorDocumentInteractionController({
+    closeRequested: () => this.saveController.isCloseRequested(),
+    currentSessionKey: () => this.lastSessionKey,
+    debug: message => this.logger.debug(message),
+    exitEditMode: () => this.exitEditMode(),
+    isComposing: () => this.isComposing(),
+    isDestroyed: () => this.isDestroyed,
+    isEditMode: () => this.isEditMode(),
+    queueCompositionAction: kind => this.queueCompositionAction(kind),
+    resolveInteraction: target => this.getDocumentInteractionContext(target),
+    saveAndClose: () => this.saveController.saveAndClose(),
+  });
 
   // 当 data 变化时：按会话/模式精细同步，避免移动端误吞外部点击
   private readonly dataSyncEffect = effect(() => {
-    const data = this.data();
-    const readOnly = this.readOnly();
+    this.syncConnectionData(this.data(), this.readOnly());
+  });
+
+  private syncConnectionData(data: ConnectionEditorData | null, readOnly: boolean): void {
     const previousSessionKey = this.lastSessionKey;
     const previousContext = this.activeSessionContext;
 
     if (!data) {
+      if (this.shouldDeferDataSyncForComposition(previousSessionKey, previousContext)) {
+        this.syncEditorStateFromDom();
+        this.pendingCompositionDataSync = true;
+        this.scheduleCompositionDataSyncFallback();
+        return;
+      }
+      this.clearCompositionDataSyncFallback();
+      this.pendingCompositionDataSync = false;
       this.handleMissingConnectionData(previousSessionKey, previousContext);
       return;
     }
 
     const state = this.buildConnectionSessionState(data, readOnly, previousSessionKey, previousContext);
+    if (
+      this.shouldDeferDataSyncForComposition(previousSessionKey, previousContext) &&
+      (state.isNewSession || (state.currentIsEditMode && !state.nextIsEditMode))
+    ) {
+      this.syncEditorStateFromDom();
+      this.pendingCompositionDataSync = true;
+      return;
+    }
+    this.clearCompositionDataSyncFallback();
+    this.pendingCompositionDataSync = false;
+    this.retainedConnectionData.set(data);
     this.refreshOutsideGuardIfNeeded(state);
     if (previousSessionKey && previousContext && state.isNewSession && this.canPersistBeforeSessionSwitch()) {
-      this.persistCurrentEdits(previousContext);
+      this.saveController.persistCurrentEdits(previousContext);
     }
 
     if (state.isNewSession) {
@@ -136,7 +206,17 @@ export class FlowConnectionEditorComponent implements OnInit, OnDestroy {
     }
 
     this.finalizeConnectionDataSync(data, state.sessionKey);
-  });
+  }
+
+  private shouldDeferDataSyncForComposition(
+    previousSessionKey: string | null,
+    previousContext: ConnectionEditorSaveContext | null,
+  ): boolean {
+    return this.isComposing() &&
+      !this.deleteRequested &&
+      previousSessionKey !== null &&
+      previousContext !== null;
+  }
 
   // 预览态显示已持久化的内容（data），而非未保存的 editingTitle/Description。
   // 过去使用 `editingTitle || data?.title || ''` 有两个坑：
@@ -151,14 +231,16 @@ export class FlowConnectionEditorComponent implements OnInit, OnDestroy {
     previousContext: ConnectionEditorSaveContext | null,
   ): void {
     if (previousSessionKey && previousContext && this.canPersistBeforeSessionSwitch()) {
-      this.persistCurrentEdits(previousContext);
+      this.saveController.persistCurrentEdits(previousContext);
     }
 
     this.activeSessionContext = null;
+    this.activeSessionIdentity.set(null);
     this.lastSessionKey = null;
     this.lastEmittedPayloadKey = null;
-    this.closeRequested = false;
+    this.saveController.resetCloseRequested();
     this.deleteRequested = false;
+    this.retainedConnectionData.set(null);
   }
 
   private buildConnectionSessionState(
@@ -177,7 +259,7 @@ export class FlowConnectionEditorComponent implements OnInit, OnDestroy {
   }
 
   private canPersistBeforeSessionSwitch(): boolean {
-    return !this.closeRequested && !this.deleteRequested;
+    return !this.saveController.isCloseRequested() && !this.deleteRequested;
   }
 
   private refreshOutsideGuardIfNeeded(state: ConnectionEditorSessionState): void {
@@ -189,11 +271,16 @@ export class FlowConnectionEditorComponent implements OnInit, OnDestroy {
   private startConnectionEditorSession(state: ConnectionEditorSessionState): void {
     const { data, nextIsEditMode } = state;
 
+    this.sessionGeneration += 1;
+    this.activeSessionIdentity.set({
+      key: state.sessionKey,
+      generation: this.sessionGeneration,
+    });
     this.activeSessionContext = createConnectionEditorSaveContext(data);
     this.editingTitle = data.title || '';
     this.editingDescription = data.description || '';
     this.isEditMode.set(nextIsEditMode);
-    this.closeRequested = false;
+    this.saveController.resetCloseRequested();
     this.deleteRequested = false;
     this.lastEmittedPayloadKey = null;
 
@@ -231,7 +318,7 @@ export class FlowConnectionEditorComponent implements OnInit, OnDestroy {
         this.editingDescription = state.data.description || '';
         this.lastEmittedPayloadKey = null;
       } else {
-        this.persistCurrentEdits(state.previousContext ?? undefined);
+        this.saveController.persistCurrentEdits(state.previousContext ?? undefined);
       }
       this.ignoreOutsideUntil = Date.now() + MODE_SWITCH_CLICK_GUARD_MS;
     }
@@ -293,23 +380,14 @@ export class FlowConnectionEditorComponent implements OnInit, OnDestroy {
       return;
     }
 
-    // 销毁前 flush 一次，避免 500ms 防抖期内因切换/关闭丢字。
-    // 使用 activeSessionContext 作为基准，配合 lastEmittedPayloadKey 去重，不会重复 emit。
-    if (this.saveTimer !== null) {
-      clearTimeout(this.saveTimer);
-      this.saveTimer = null;
-      if (this.activeSessionContext && !this.deleteRequested) {
-        try {
-          this.saveContent(this.activeSessionContext);
-        } catch {
-          // 销毁期间忽略保存异常，避免阻塞组件销毁
-        }
-      }
-    }
+    this.saveController.flushPendingSaveOnDestroy(
+      this.deleteRequested ? null : this.activeSessionContext,
+    );
     if (this.focusTimer !== null) {
       clearTimeout(this.focusTimer);
       this.focusTimer = null;
     }
+    this.clearCompositionDataSyncFallback();
     this.isDestroyed = true;
   }
 
@@ -320,17 +398,7 @@ export class FlowConnectionEditorComponent implements OnInit, OnDestroy {
    */
   @HostListener('document:click', ['$event'])
   onDocumentClick(event: MouseEvent): void {
-    const context = this.getDocumentInteractionContext(event.target);
-    if (!context) return;
-
-    if (this.isEditMode()) {
-      this.handleDocumentClickInEditMode(context);
-      return;
-    }
-
-    if (!context.clickedInside && Date.now() >= this.ignoreOutsideUntil) {
-      this.saveAndClose();
-    }
+    this.documentInteraction.handleClick(event.target);
   }
 
   /**
@@ -341,105 +409,24 @@ export class FlowConnectionEditorComponent implements OnInit, OnDestroy {
    */
   @HostListener('document:touchstart', ['$event'])
   onDocumentTouchStart(event: TouchEvent): void {
-    if (this.isDestroyed) return;
-
-    const context = this.getDocumentInteractionContext(event.target);
-    if (!context) return;
-
-    // 在事件开始时捕获当前模式状态，防止 GoJS backgroundClick 事件先修改模式导致竞争条件
-    const wasEditMode = this.isEditMode();
-
-    // 如果正在 IME 输入中，使用更长的延迟等待 compositionend
-    const delayMs = this.isComposing() ? 100 : 50;
-    if (this.isComposing()) {
-      this.logger.debug('正在 IME 输入中，使用更长延迟处理触摸事件');
-    }
-
-    if (wasEditMode) {
-      this.handleDocumentTouchInEditMode(context, delayMs);
-      return;
-    }
-
-    if (!context.clickedInside && Date.now() >= this.ignoreOutsideUntil) {
-      this.saveAndClose();
-    }
+    this.documentInteraction.handleTouchStart(event.target);
   }
 
   private getDocumentInteractionContext(target: EventTarget | null) {
     return resolveConnectionEditorDocumentInteraction({
       target,
       editorElement: this.editorContainer?.nativeElement,
-      closeRequested: this.closeRequested,
+      closeRequested: this.saveController.isCloseRequested(),
       ignoreOutsideUntil: this.ignoreOutsideUntil,
       isSelecting: this.isSelecting,
       now: Date.now(),
     });
   }
 
-  private handleDocumentClickInEditMode(
-    context: ConnectionEditorDocumentInteractionContext,
-  ): void {
-    if (context.isInteractiveElement) {
-      this.logger.debug('点击可交互元素，保持编辑模式');
-      return;
-    }
-
-    if (this.isComposing()) {
-      this.deferComposingDocumentClick(context.clickedInside);
-      return;
-    }
-
-    if (context.clickedInside) {
-      this.logger.debug('点击编辑器空白区域，退出编辑模式');
-      this.exitEditMode();
-      return;
-    }
-
-    this.logger.debug('点击编辑器外部，保存并关闭');
-    this.saveAndClose();
-  }
-
-  private deferComposingDocumentClick(clickedInside: boolean): void {
-    const sessionKey = this.lastSessionKey;
-    setTimeout(() => {
-      const action = resolveConnectionEditorComposingClickAction({
-        canRunDelayedAction: this.canRunDelayedOpenSessionAction(sessionKey),
-        clickedInside,
-        isEditMode: this.isEditMode(),
-      });
-      if (action === 'force-exit-edit') {
-        this.exitEditMode(true);
-      } else if (action === 'save-and-close') {
-        this.saveAndClose();
-      }
-    }, 100);
-  }
-
-  private handleDocumentTouchInEditMode(
-    context: ConnectionEditorDocumentInteractionContext,
-    delayMs: number,
-  ): void {
-    if (context.isInteractiveElement) {
-      this.logger.debug('触摸可交互元素，保持编辑模式');
-      return;
-    }
-
-    this.logger.debug(
-      context.clickedInside
-        ? '触摸编辑器空白区域，退出编辑模式'
-        : '触摸编辑器外部，保存并切换到预览模式'
-    );
-    const sessionKey = this.lastSessionKey;
-    setTimeout(() => {
-      if (!this.canRunDelayedOpenSessionAction(sessionKey)) return;
-      this.exitEditMode(this.isComposing());
-    }, delayMs);
-  }
-
   private canRunDelayedOpenSessionAction(sessionKey: string | null): boolean {
     return canRunDelayedConnectionEditorAction({
       isDestroyed: this.isDestroyed,
-      closeRequested: this.closeRequested,
+      closeRequested: this.saveController.isCloseRequested(),
       sessionKey,
       lastSessionKey: this.lastSessionKey,
     });
@@ -499,7 +486,7 @@ export class FlowConnectionEditorComponent implements OnInit, OnDestroy {
    * 若正在 IME 输入（compositionstart ~ compositionend 之间），需等待组合完成再读取 DOM value，
    * 否则最后一个中文字符未 commit 就被保存，表现为“吞字”。
    */
-  exitEditMode(force = false): void {
+  exitEditMode(): void {
     if (this.isDestroyed) {
       return;
     }
@@ -507,33 +494,16 @@ export class FlowConnectionEditorComponent implements OnInit, OnDestroy {
     if (!this.isEditMode()) {
       return;
     }
-    if (this.isComposing() && !force) {
-      this.logger.debug('exitEditMode: IME 输入中，延迟等待组合结束');
-      const sessionKey = this.lastSessionKey;
-      setTimeout(() => {
-        if (this.isDestroyed) {
-          return;
-        }
-
-        if (sessionKey === null || sessionKey !== this.lastSessionKey) {
-          return;
-        }
-
-        if (this.isEditMode()) {
-          this.exitEditMode();
-        }
-      }, 100);
+    if (this.isComposing()) {
+      this.logger.debug('exitEditMode: IME 输入中，等待 compositionend');
+      this.queueCompositionAction('exit-edit');
       return;
-    }
-    if (force && this.isComposing()) {
-      this.composingState.title = false;
-      this.composingState.description = false;
     }
     // 先同步 DOM 状态（此时输入框还存在）
     this.syncEditorStateFromDom();
     // 先保存，再切回预览，确保预览内容立即显示新值
     // 使用 activeSessionContext 作为比较基准，避免 debounced save 更新信号后跳过最终保存
-    this.persistCurrentEdits(this.activeSessionContext ?? undefined);
+    this.saveController.persistCurrentEdits(this.activeSessionContext ?? undefined);
     this.isEditMode.set(false);
     this.modeChange.emit('preview');
   }
@@ -542,11 +512,26 @@ export class FlowConnectionEditorComponent implements OnInit, OnDestroy {
     this.composingState[field] = true;
   }
 
-  onCompositionEnd(field: 'title' | 'description'): void {
+  onCompositionEnd(field: 'title' | 'description', committedValue?: string): void {
     this.composingState[field] = false;
+    if (committedValue !== undefined) {
+      if (field === 'title') {
+        this.editingTitle = committedValue;
+      } else {
+        this.editingDescription = committedValue;
+      }
+    }
     this.lastEmittedPayloadKey = null;
     this.syncEditorStateFromDom();
-    this.scheduleDebouncedSave();
+    if (this.isComposing()) {
+      return;
+    }
+    this.clearCompositionDataSyncFallback();
+    if (this.pendingCompositionAction || this.pendingCompositionDataSync) {
+      this.flushPendingCompositionWork();
+      return;
+    }
+    this.saveController.scheduleDebouncedSave();
   }
 
   /**
@@ -554,6 +539,79 @@ export class FlowConnectionEditorComponent implements OnInit, OnDestroy {
    */
   private isComposing(): boolean {
     return this.composingState.title || this.composingState.description;
+  }
+
+  private queueCompositionAction(kind: PendingCompositionAction['kind']): void {
+    if (this.pendingCompositionAction?.kind === 'save-and-close') {
+      return;
+    }
+    this.pendingCompositionAction = {
+      kind,
+      sessionKey: this.lastSessionKey,
+      context: this.activeSessionContext,
+    };
+  }
+
+  private flushPendingCompositionWork(): void {
+    if (this.isDestroyed || this.isComposing()) {
+      return;
+    }
+    this.clearCompositionDataSyncFallback();
+
+    const action = this.pendingCompositionAction;
+    this.pendingCompositionAction = null;
+    let closed = false;
+
+    if (action?.kind === 'save-and-close') {
+      if (
+        !this.deleteRequested &&
+        (this.lastSessionKey === action.sessionKey || this.lastSessionKey === null)
+      ) {
+        this.saveController.completeSaveAndClose(action.context);
+        closed = true;
+      }
+    } else if (
+      action?.kind === 'exit-edit' &&
+      action.sessionKey !== null &&
+      action.sessionKey === this.lastSessionKey &&
+      this.isEditMode()
+    ) {
+      this.exitEditMode();
+    }
+
+    const shouldSyncPendingData = this.pendingCompositionDataSync && (!closed || this.data() === null);
+    this.pendingCompositionDataSync = false;
+    if (shouldSyncPendingData) {
+      this.syncConnectionData(this.data(), this.readOnly());
+    }
+  }
+
+  private scheduleCompositionDataSyncFallback(): void {
+    this.clearCompositionDataSyncFallback();
+    const sessionKey = this.lastSessionKey;
+    this.compositionDataSyncFallbackTimer = setTimeout(() => {
+      this.compositionDataSyncFallbackTimer = null;
+      if (
+        this.isDestroyed ||
+        !this.pendingCompositionDataSync ||
+        this.data() !== null ||
+        sessionKey !== this.lastSessionKey
+      ) {
+        return;
+      }
+
+      this.syncEditorStateFromDom();
+      this.composingState.title = false;
+      this.composingState.description = false;
+      this.flushPendingCompositionWork();
+    }, COMPOSITION_DATA_SYNC_FALLBACK_MS);
+  }
+
+  private clearCompositionDataSyncFallback(): void {
+    if (this.compositionDataSyncFallbackTimer !== null) {
+      clearTimeout(this.compositionDataSyncFallbackTimer);
+      this.compositionDataSyncFallbackTimer = null;
+    }
   }
 
   /**
@@ -592,7 +650,7 @@ export class FlowConnectionEditorComponent implements OnInit, OnDestroy {
   onTitleChange(value: string): void {
     this.editingTitle = value;
     this.lastEmittedPayloadKey = null;
-    this.scheduleDebouncedSave();
+    this.saveController.scheduleDebouncedSave();
   }
 
   /**
@@ -607,7 +665,7 @@ export class FlowConnectionEditorComponent implements OnInit, OnDestroy {
       resizeConnectionEditorTextarea(this.descInput.nativeElement);
     }
 
-    this.scheduleDebouncedSave();
+    this.saveController.scheduleDebouncedSave();
   }
 
   /**
@@ -634,66 +692,12 @@ export class FlowConnectionEditorComponent implements OnInit, OnDestroy {
     this.save.emit(savePayload);
   }
 
-  /**
-   * 保存并关闭
-   * 如果正在 IME 输入中，等待 compositionend 后再保存
-   *
-   * 使用 activeSessionContext 作为保存上下文，确保最终保存总是与会话开始时的原始值比较，
-   * 避免中间的 debounced save 更新了 connectionEditorData 后导致最终保存被跳过。
-   */
-  private saveAndClose(): void {
-    if (this.isDestroyed) return;
-    if (this.closeRequested) return;
-    this.closeRequested = true;
-    this.ignoreOutsideUntil = Date.now() + 250;
-
-    // 立即从 DOM 读取最新值（此时输入框还存在）
-    this.syncEditorStateFromDom();
-
-    // 如果正在 IME 输入中，延迟保存以等待 compositionend
-    if (this.isComposing()) {
-      this.logger.debug('IME 输入中，延迟保存');
-      setTimeout(() => {
-        if (this.isDestroyed) {
-          return;
-        }
-
-        this.syncEditorStateFromDom();
-        this.persistCurrentEdits(this.activeSessionContext ?? undefined);
-        this.close.emit();
-      }, 100);
-    } else {
-      this.persistCurrentEdits(this.activeSessionContext ?? undefined);
-      this.close.emit();
+  resumeAfterSaveFailure(): void {
+    if (this.isDestroyed) {
+      return;
     }
-  }
-
-  private persistCurrentEdits(context?: ConnectionEditorSaveContext): void {
-    if (this.saveTimer !== null) {
-      clearTimeout(this.saveTimer);
-      this.saveTimer = null;
-    }
-    this.syncEditorStateFromDom();
-    this.saveContent(context);
-  }
-
-  private scheduleDebouncedSave(): void {
-    if (this.isDestroyed) return;
-
-    if (this.saveTimer !== null) {
-      clearTimeout(this.saveTimer);
-    }
-    this.saveTimer = setTimeout(() => {
-      if (this.isDestroyed) {
-        return;
-      }
-
-      this.saveTimer = null;
-      if (this.isComposing()) {
-        return;
-      }
-      this.saveContent();
-    }, 500);
+    this.lastEmittedPayloadKey = null;
+    this.saveController.resumeAfterSaveFailure();
   }
 
   private syncEditorStateFromDom(): { title: string; description: string } {

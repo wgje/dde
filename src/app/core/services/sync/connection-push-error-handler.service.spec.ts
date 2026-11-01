@@ -160,7 +160,25 @@ describe('ConnectionPushErrorHandlerService', () => {
       enqueueRetry,
     )).rejects.toBe(error);
 
-    expect(retryQueue.recordCircuitFailure).toHaveBeenCalledWith('BrowserNetworkSuspendedError');
+    expect(retryQueue.recordCircuitFailure).not.toHaveBeenCalled();
+    expect(enqueueRetry).not.toHaveBeenCalled();
+  });
+
+  it('leaves retry replay circuit accounting to the queue runner', async () => {
+    const enqueueRetry = vi.fn(async () => true);
+    const error = createEnhancedError('gateway unavailable', 'GatewayError', true);
+
+    await expect(service.handlePushConnectionError(
+      error,
+      connection,
+      'project-1',
+      true,
+      'user-1',
+      'operation-1',
+      enqueueRetry,
+    )).rejects.toBe(error);
+
+    expect(retryQueue.recordCircuitFailure).not.toHaveBeenCalled();
     expect(enqueueRetry).not.toHaveBeenCalled();
   });
 });

@@ -9,6 +9,10 @@ import { supabaseWithRetry } from '../../../../utils/timeout';
 import { RetryQueueService } from './retry-queue.service';
 import { SessionManagerService } from './session-manager.service';
 import { TombstoneService } from './tombstone.service';
+import {
+  assertConnectionReplayFenceCurrent,
+  type ConnectionActionQueueReplayFence,
+} from './connection-sync-operations.helpers';
 
 type TaskValidationFailureReason = 'missing-task' | 'query-error' | 'permission-denied';
 
@@ -43,11 +47,14 @@ export class ConnectionEndpointTaskValidationService {
     connection: Connection,
     fromRetryQueue: boolean,
     handleMissingDeletedEndpoint: MissingEndpointTaskHandler,
+    replayFence?: ConnectionActionQueueReplayFence,
   ): Promise<TaskValidationResult> {
-    let queryResult = await this.queryExistingTaskIds(client, projectId, connection);
+    assertConnectionReplayFenceCurrent(replayFence);
+    let queryResult = await this.queryExistingTaskIds(client, projectId, connection, replayFence);
+    assertConnectionReplayFenceCurrent(replayFence);
     let retriedAfterRefresh = false;
 
-    if (queryResult.error && this.sessionManager.isSessionExpiredError(queryResult.error)) {
+    if (!replayFence && queryResult.error && this.sessionManager.isSessionExpiredError(queryResult.error)) {
       const refreshed = await this.sessionManager.handleAuthErrorWithRefresh('pushConnection.validateTasksExist', {
         connectionId: connection.id,
         projectId,
@@ -68,6 +75,7 @@ export class ConnectionEndpointTaskValidationService {
         projectId,
         fromRetryQueue,
         retriedAfterRefresh,
+        replayFence,
       );
     }
 
@@ -77,6 +85,7 @@ export class ConnectionEndpointTaskValidationService {
       projectId,
       fromRetryQueue,
       handleMissingDeletedEndpoint,
+      replayFence,
     );
   }
 
@@ -86,6 +95,7 @@ export class ConnectionEndpointTaskValidationService {
     projectId: string,
     fromRetryQueue: boolean,
     handleMissingDeletedEndpoint: MissingEndpointTaskHandler,
+    replayFence?: ConnectionActionQueueReplayFence,
   ): TaskValidationResult {
     const existingTaskIds = new Set(existingTasks.map(task => task.id));
     const sourceExists = existingTaskIds.has(connection.source);
@@ -100,6 +110,7 @@ export class ConnectionEndpointTaskValidationService {
           sourceExists,
           targetExists,
           handleMissingDeletedEndpoint,
+          replayFence,
         );
   }
 
@@ -109,6 +120,7 @@ export class ConnectionEndpointTaskValidationService {
     projectId: string,
     fromRetryQueue: boolean,
     retriedAfterRefresh: boolean,
+    replayFence?: ConnectionActionQueueReplayFence,
   ): TaskValidationResult {
     if (retriedAfterRefresh && this.sessionManager.isRlsPolicyViolation(error)) {
       this.logger.info('刷新会话后任务存在性查询仍无权限，停止重放陈旧连接', {
@@ -126,8 +138,10 @@ export class ConnectionEndpointTaskValidationService {
       };
     }
 
-    this.logTaskValidationQueryError(error, connection, projectId, fromRetryQueue, retriedAfterRefresh);
-    this.recordRetryableConnectionFailure(error);
+    if (!replayFence) {
+      this.logTaskValidationQueryError(error, connection, projectId, fromRetryQueue, retriedAfterRefresh);
+      this.recordRetryableConnectionFailure(error);
+    }
     return {
       valid: false,
       shouldRetry: true,
@@ -179,6 +193,7 @@ export class ConnectionEndpointTaskValidationService {
     sourceExists: boolean,
     targetExists: boolean,
     handleMissingDeletedEndpoint: MissingEndpointTaskHandler,
+    replayFence?: ConnectionActionQueueReplayFence,
   ): TaskValidationResult {
     const localTombstones = this.tombstoneService.getLocalTombstones(projectId);
     const referencesDeletedTask = localTombstones.has(connection.source) || localTombstones.has(connection.target);
@@ -192,6 +207,7 @@ export class ConnectionEndpointTaskValidationService {
     );
 
     if (referencesDeletedTask) {
+      assertConnectionReplayFenceCurrent(replayFence);
       handleMissingDeletedEndpoint(connection, projectId, 'endpoint_tombstone');
     }
 
@@ -234,8 +250,10 @@ export class ConnectionEndpointTaskValidationService {
     client: SupabaseClient,
     projectId: string,
     connection: Connection,
+    replayFence?: ConnectionActionQueueReplayFence,
   ): Promise<{ data: Array<{ id: string }>; error: EnhancedError | null }> {
     try {
+      assertConnectionReplayFenceCurrent(replayFence);
       const result = await supabaseWithRetry(
         () => client
           .from('tasks')
@@ -248,6 +266,7 @@ export class ConnectionEndpointTaskValidationService {
           maxRetries: 2,
         },
       ) as { data: Array<{ id: string }> | null; error: unknown | null };
+      assertConnectionReplayFenceCurrent(replayFence);
 
       if (result.error) {
         return { data: [], error: supabaseErrorToError(result.error) };

@@ -21,6 +21,7 @@ describe('FlowLinkConnectionEditorController', () => {
   ) => Promise<boolean>>>;
   let removeConnection: ReturnType<typeof vi.fn<(sourceId: string, targetId: string) => Promise<boolean>>>;
   let detachTask: ReturnType<typeof vi.fn<(taskId: string) => Promise<boolean>>>;
+  let ownerGeneration: number;
   let controller: FlowLinkConnectionEditorController;
 
   beforeEach(() => {
@@ -37,6 +38,7 @@ describe('FlowLinkConnectionEditorController', () => {
     ) => Promise<boolean>>().mockResolvedValue(true);
     removeConnection = vi.fn<(sourceId: string, targetId: string) => Promise<boolean>>().mockResolvedValue(true);
     detachTask = vi.fn<(taskId: string) => Promise<boolean>>().mockResolvedValue(true);
+    ownerGeneration = 1;
 
     controller = new FlowLinkConnectionEditorController({
       connectionEditorData,
@@ -58,6 +60,9 @@ describe('FlowLinkConnectionEditorController', () => {
         info: vi.fn(),
         warn: vi.fn(),
       },
+      captureOperationOwner: () => ({ projectId: 'project-1', generation: ownerGeneration }),
+      isOperationOwnerCurrent: owner =>
+        owner.projectId === 'project-1' && owner.generation === ownerGeneration,
     });
   });
 
@@ -119,6 +124,182 @@ describe('FlowLinkConnectionEditorController', () => {
     });
   });
 
+  it('does not publish a save into the same editor reopened after close', async () => {
+    const save = createDeferred<boolean>();
+    connectionEditorData.set(editor({ title: 'Original A' }));
+    updateConnectionContent.mockReturnValueOnce(save.promise);
+
+    const pending = controller.saveContent('source-task', 'target-task', 'Saved A', 'Saved A description');
+    controller.close();
+    connectionEditorData.set(editor({ title: 'Reopened A', description: 'Reopened description' }));
+    save.resolve(true);
+
+    await expect(pending).resolves.toBe(true);
+    expect(connectionEditorData()).toMatchObject({
+      title: 'Reopened A',
+      description: 'Reopened description',
+    });
+  });
+
+  it('does not publish a save into the same editor reopened after reset', async () => {
+    const save = createDeferred<boolean>();
+    connectionEditorData.set(editor({ title: 'Original A' }));
+    updateConnectionContent.mockReturnValueOnce(save.promise);
+
+    const pending = controller.saveContent('source-task', 'target-task', 'Saved A', 'Saved A description');
+    controller.reset();
+    connectionEditorData.set(editor({ title: 'Reset A', description: 'Reset description' }));
+    save.resolve(true);
+
+    await expect(pending).resolves.toBe(true);
+    expect(connectionEditorData()).toMatchObject({
+      title: 'Reset A',
+      description: 'Reset description',
+    });
+  });
+
+  it('does not publish a save after A to B editor replacement', async () => {
+    const save = createDeferred<boolean>();
+    connectionEditorData.set(editor({ title: 'Editor A' }));
+    updateConnectionContent.mockReturnValueOnce(save.promise);
+
+    const pending = controller.saveContent('source-task', 'target-task', 'Saved A', 'Saved A description');
+    connectionEditorData.set(editor({
+      sourceId: 'source-b',
+      targetId: 'target-b',
+      title: 'Editor B',
+    }));
+    save.resolve(true);
+
+    await expect(pending).resolves.toBe(true);
+    expect(connectionEditorData()).toMatchObject({
+      sourceId: 'source-b',
+      targetId: 'target-b',
+      title: 'Editor B',
+    });
+  });
+
+  it('does not publish a save after A to B to A session reuse', async () => {
+    const save = createDeferred<boolean>();
+    controller.open('source-task', 'target-task', 'Original description', 100, 100, 'Original A');
+    updateConnectionContent.mockReturnValueOnce(save.promise);
+
+    const pending = controller.saveContent('source-task', 'target-task', 'Saved A', 'Saved A description');
+    controller.open('source-b', 'target-b', 'B description', 120, 120, 'Editor B');
+    controller.open('source-task', 'target-task', 'Newest description', 140, 140, 'Newest A');
+    save.resolve(true);
+
+    await expect(pending).resolves.toBe(true);
+    expect(connectionEditorData()).toMatchObject({
+      sourceId: 'source-task',
+      targetId: 'target-task',
+      title: 'Newest A',
+      description: 'Newest description',
+    });
+  });
+
+  it('rejects direct same-key editor instance replacement while a save is pending', async () => {
+    const save = createDeferred<boolean>();
+    connectionEditorData.set(editor({ title: 'Original instance' }));
+    updateConnectionContent.mockReturnValueOnce(save.promise);
+
+    const pending = controller.saveContent('source-task', 'target-task', 'Saved A', 'Saved A description');
+    connectionEditorData.set(editor({ title: 'Replacement instance', description: 'Replacement description' }));
+    save.resolve(true);
+
+    await expect(pending).resolves.toBe(true);
+    expect(connectionEditorData()).toMatchObject({
+      title: 'Replacement instance',
+      description: 'Replacement description',
+    });
+  });
+
+  it('serializes connection content saves so an older request cannot settle after a newer draft', async () => {
+    const firstSave = createDeferred<boolean>();
+    const secondSave = createDeferred<boolean>();
+    connectionEditorData.set(editor());
+    updateConnectionContent
+      .mockReturnValueOnce(firstSave.promise)
+      .mockReturnValueOnce(secondSave.promise);
+
+    const first = controller.saveContent('source-task', 'target-task', 'First title', 'First description');
+    const second = controller.saveContent('source-task', 'target-task', 'Second title', 'Second description');
+
+    expect(updateConnectionContent).toHaveBeenCalledTimes(1);
+
+    firstSave.resolve(true);
+    await expect(first).resolves.toBe(true);
+    await Promise.resolve();
+
+    expect(updateConnectionContent).toHaveBeenCalledTimes(2);
+    expect(connectionEditorData()).toMatchObject({
+      title: 'Old title',
+      description: 'Old description',
+    });
+    expect(updateConnectionContent).toHaveBeenLastCalledWith(
+      'source-task',
+      'target-task',
+      'Second title',
+      'Second description',
+    );
+
+    secondSave.resolve(true);
+    await expect(second).resolves.toBe(true);
+    expect(connectionEditorData()).toMatchObject({
+      title: 'Second title',
+      description: 'Second description',
+    });
+  });
+
+  it('isolates save queues by connection while preserving order within each connection', async () => {
+    const firstConnectionSave = createDeferred<boolean>();
+    const secondConnectionSave = createDeferred<boolean>();
+    const laterFirstConnectionSave = createDeferred<boolean>();
+    updateConnectionContent
+      .mockReturnValueOnce(firstConnectionSave.promise)
+      .mockReturnValueOnce(secondConnectionSave.promise)
+      .mockReturnValueOnce(laterFirstConnectionSave.promise);
+
+    const first = controller.saveContent('source-a', 'target-a', 'A1', 'A1 description');
+    const second = controller.saveContent('source-b', 'target-b', 'B1', 'B1 description');
+    const laterFirst = controller.saveContent('source-a', 'target-a', 'A2', 'A2 description');
+
+    expect(updateConnectionContent).toHaveBeenCalledTimes(2);
+    expect(updateConnectionContent).toHaveBeenNthCalledWith(
+      1,
+      'source-a',
+      'target-a',
+      'A1',
+      'A1 description',
+    );
+    expect(updateConnectionContent).toHaveBeenNthCalledWith(
+      2,
+      'source-b',
+      'target-b',
+      'B1',
+      'B1 description',
+    );
+
+    secondConnectionSave.resolve(true);
+    await expect(second).resolves.toBe(true);
+    expect(updateConnectionContent).toHaveBeenCalledTimes(2);
+
+    firstConnectionSave.resolve(true);
+    await expect(first).resolves.toBe(true);
+    await Promise.resolve();
+
+    expect(updateConnectionContent).toHaveBeenCalledTimes(3);
+    expect(updateConnectionContent).toHaveBeenLastCalledWith(
+      'source-a',
+      'target-a',
+      'A2',
+      'A2 description',
+    );
+
+    laterFirstConnectionSave.resolve(true);
+    await expect(laterFirst).resolves.toBe(true);
+  });
+
   it('deletes the current cross-tree connection and closes the editor', async () => {
     connectionEditorData.set(editor({ isCrossTree: true }));
 
@@ -139,6 +320,117 @@ describe('FlowLinkConnectionEditorController', () => {
       sourceId: 'source-task',
       targetId: 'target-task',
     });
+  });
+
+  it('does not let a stale delete close an A editor reopened after A to B to A', async () => {
+    const deletion = createDeferred<boolean>();
+    controller.open('source-task', 'target-task', 'Original description', 100, 100, 'Original A');
+    removeConnection.mockReturnValueOnce(deletion.promise);
+
+    const pending = controller.deleteCurrent();
+    controller.open('source-b', 'target-b', 'B description', 120, 120, 'Editor B');
+    controller.open('source-task', 'target-task', 'Newest description', 140, 140, 'Newest A');
+    deletion.resolve(true);
+
+    await expect(pending).resolves.toBe(true);
+    expect(connectionEditorData()).toMatchObject({
+      sourceId: 'source-task',
+      targetId: 'target-task',
+      title: 'Newest A',
+    });
+  });
+
+  it('allows only the latest delete attempt in a session to close the editor', async () => {
+    const firstDelete = createDeferred<boolean>();
+    const secondDelete = createDeferred<boolean>();
+    connectionEditorData.set(editor());
+    removeConnection
+      .mockReturnValueOnce(firstDelete.promise)
+      .mockReturnValueOnce(secondDelete.promise);
+
+    const first = controller.deleteCurrent();
+    const second = controller.deleteCurrent();
+    firstDelete.resolve(true);
+
+    await expect(first).resolves.toBe(true);
+    expect(connectionEditorData()).toMatchObject({ sourceId: 'source-task' });
+
+    secondDelete.resolve(true);
+    await expect(second).resolves.toBe(true);
+    expect(connectionEditorData()).toBeNull();
+  });
+
+  it('keeps save and delete attempt ownership independent', async () => {
+    const save = createDeferred<boolean>();
+    const deletion = createDeferred<boolean>();
+    connectionEditorData.set(editor());
+    updateConnectionContent.mockReturnValueOnce(save.promise);
+    removeConnection.mockReturnValueOnce(deletion.promise);
+
+    const pendingSave = controller.saveContent('source-task', 'target-task', 'Saved title', 'Saved description');
+    const pendingDelete = controller.deleteCurrent();
+    save.resolve(true);
+
+    await expect(pendingSave).resolves.toBe(true);
+    expect(connectionEditorData()).toMatchObject({ title: 'Saved title' });
+
+    deletion.resolve(true);
+    await expect(pendingDelete).resolves.toBe(true);
+    expect(connectionEditorData()).toBeNull();
+  });
+
+  it('preserves operation results while owner drift suppresses save and delete publication', async () => {
+    const save = createDeferred<boolean>();
+    const deletion = createDeferred<boolean>();
+    connectionEditorData.set(editor());
+    updateConnectionContent.mockReturnValueOnce(save.promise);
+    removeConnection.mockReturnValueOnce(deletion.promise);
+
+    const pendingSave = controller.saveContent('source-task', 'target-task', 'Saved title', 'Saved description');
+    const pendingDelete = controller.deleteCurrent();
+    ownerGeneration += 1;
+    save.resolve(true);
+    deletion.resolve(true);
+
+    await expect(pendingSave).resolves.toBe(true);
+    await expect(pendingDelete).resolves.toBe(true);
+    expect(connectionEditorData()).toMatchObject({
+      title: 'Old title',
+      description: 'Old description',
+    });
+  });
+
+  it('detaches a replacement editor save from the retired same-key queue', async () => {
+    const saveA = createDeferred<boolean>();
+    const saveB = createDeferred<boolean>();
+    updateConnectionContent.mockReturnValueOnce(saveA.promise).mockReturnValueOnce(saveB.promise);
+    connectionEditorData.set(editor({ title: 'A title', description: 'A description' }));
+    const pendingA = controller.saveContent('source-task', 'target-task', 'Saved A', 'Saved A description');
+
+    controller.dispose();
+    connectionEditorData.set(editor({ title: 'B title', description: 'B description' }));
+    const pendingB = controller.saveContent('source-task', 'target-task', 'Saved B', 'Saved B description');
+
+    expect(updateConnectionContent).toHaveBeenCalledTimes(2);
+    saveB.resolve(true);
+    await expect(pendingB).resolves.toBe(true);
+    saveA.resolve(true);
+    await expect(pendingA).resolves.toBe(true);
+    expect(connectionEditorData()).toMatchObject({ title: 'Saved B', description: 'Saved B description' });
+  });
+
+  it('does not let a retired delete close its replacement editor', async () => {
+    const deleteA = createDeferred<boolean>();
+    removeConnection.mockReturnValueOnce(deleteA.promise);
+    connectionEditorData.set(editor({ title: 'A title' }));
+    const pendingA = controller.deleteCurrent();
+
+    controller.dispose();
+    connectionEditorData.set(editor({ title: 'B title' }));
+    deleteA.resolve(true);
+
+    await expect(pendingA).resolves.toBe(true);
+    expect(connectionEditorData()).toMatchObject({ title: 'B title' });
   });
 
   it('returns source and target tasks for the current editor', () => {
@@ -196,4 +488,15 @@ function task(id: string): Task {
     updatedAt: '2026-06-09T00:00:00.000Z',
     displayId: id,
   };
+}
+
+function createDeferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+} {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
 }

@@ -1,4 +1,4 @@
-import { expect, it } from 'vitest';
+import { expect, it, vi } from 'vitest';
 
 import type { Connection } from '../../../../models';
 import { PermanentFailureError } from '../../../../utils/permanent-failure-error';
@@ -49,6 +49,16 @@ export interface ConnectionSyncRpcUpsertSpecContext {
       lastSyncTime: { before: string | null; after: string | null; advanced: boolean };
     } | null;
   };
+  setMockProjects(projects: Array<{
+    id: string;
+    connections: Connection[];
+    tasks: unknown[];
+  }>): void;
+  getMockProjects(): Array<{
+    id: string;
+    connections: Connection[];
+    tasks: unknown[];
+  }>;
 }
 
 export function registerConnectionSyncRpcUpsertSpecs(
@@ -109,7 +119,7 @@ export function registerConnectionSyncRpcUpsertSpecs(
     expect(mockRetryQueue.recordCircuitSuccess).not.toHaveBeenCalled();
   });
 
-  it('pushConnection 从 RetryQueue 重放且 sync RPC 不可用时应保留原队列项并禁止直接 table upsert', async () => {
+  it('pushConnection 从 RetryQueue 重放且 sync RPC 不可用时应受控延后并禁止直接 table upsert', async () => {
     const { service, mockSyncRpcClient, mockConnectionsUpsert, mockRetryQueue } = getContext();
     mockSyncRpcClient.isFeatureEnabled.mockReturnValue(false);
     const operationId = '00000000-0000-4000-8000-000000000302';
@@ -120,7 +130,7 @@ export function registerConnectionSyncRpcUpsertSpecs(
       updatedAt: '2026-06-13T00:00:00.000Z',
     };
 
-    const result = await service.pushConnection(
+    await expect(service.pushConnection(
       connection,
       'project-1',
       true,
@@ -128,10 +138,8 @@ export function registerConnectionSyncRpcUpsertSpecs(
       true,
       'user-1',
       operationId,
-      true,
-    );
+    )).rejects.toSatisfy(isRetryDeferredError);
 
-    expect(result).toBe(false);
     expect(mockSyncRpcClient.upsertConnection).not.toHaveBeenCalled();
     expect(mockConnectionsUpsert).not.toHaveBeenCalled();
     expect(mockRetryQueue.add).not.toHaveBeenCalled();
@@ -258,6 +266,52 @@ export function registerConnectionSyncRpcUpsertSpecs(
     expect(mockConnectionsUpsert).not.toHaveBeenCalled();
     expect(mockRetryQueue.recordCircuitSuccess).toHaveBeenCalled();
     expect(connection.updatedAt).toBe('2026-04-30T00:02:00.000Z');
+  });
+
+  it('pushConnection 的旧成功响应不应倒退请求期间被再次编辑的本地连接版本', async () => {
+    const { service, mockSyncRpcClient, setMockProjects, getMockProjects } = getContext();
+    const requestUpdatedAt = '2026-04-30T00:00:00.000Z';
+    const serverUpdatedAt = '2026-04-30T00:15:00.000Z';
+    const latestLocalUpdatedAt = '2026-04-30T00:10:00.000Z';
+    const operationId = '00000000-0000-4000-8000-000000000113';
+    let resolveRpc!: (result: ReturnType<typeof createSyncRpcResult>) => void;
+    mockSyncRpcClient.isFeatureEnabled.mockReturnValue(true);
+    mockSyncRpcClient.upsertConnection.mockImplementationOnce(() => new Promise(resolve => {
+      resolveRpc = resolve;
+    }));
+    const connection: Connection = {
+      id: 'connection-rpc-late-applied',
+      source: 'task-a',
+      target: 'task-b',
+      updatedAt: requestUpdatedAt,
+    };
+    setMockProjects([{ id: 'project-1', connections: [connection], tasks: [] }]);
+
+    const pendingPush = service.pushConnection(
+      connection,
+      'project-1',
+      false,
+      false,
+      false,
+      'user-1',
+      operationId,
+    );
+    await vi.waitFor(() => expect(mockSyncRpcClient.upsertConnection).toHaveBeenCalled());
+
+    connection.updatedAt = latestLocalUpdatedAt;
+    setMockProjects([{
+      id: 'project-1',
+      connections: [{ ...connection }],
+      tasks: [],
+    }]);
+    resolveRpc(createSyncRpcResult({
+      entityId: connection.id,
+      serverUpdatedAt,
+    }));
+
+    await expect(pendingPush).resolves.toBe(true);
+    expect(connection.updatedAt).toBe(latestLocalUpdatedAt);
+    expect(getMockProjects()[0]?.connections[0]?.updatedAt).toBe(latestLocalUpdatedAt);
   });
 
   it('pushConnection sync RPC 成功后应持久化最近写入解释和 replay entry', async () => {

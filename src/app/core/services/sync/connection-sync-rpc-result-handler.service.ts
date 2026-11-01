@@ -7,6 +7,10 @@ import type { SyncRpcResult } from '../../../../services/sync-rpc-client.service
 import { PermanentFailureError } from '../../../../utils/permanent-failure-error';
 import { createRemoteNewerConflictError } from './connection-sync-conflict.helpers';
 import { SyncStateService } from './sync-state.service';
+import {
+  assertConnectionReplayFenceCurrent,
+  type ConnectionActionQueueReplayFence,
+} from './connection-sync-operations.helpers';
 
 export type ConnectionRpcNormalizeUpdatedAtHandler = (
   projectId: string,
@@ -43,7 +47,9 @@ export class ConnectionSyncRpcResultHandlerService {
       discardInvalid: ConnectionRpcDiscardInvalidHandler;
       enqueueRetry: ConnectionRpcRetryEnqueueHandler;
     },
+    replayFence?: ConnectionActionQueueReplayFence,
   ): Promise<boolean> {
+    assertConnectionReplayFenceCurrent(replayFence);
     if (result.status === 'applied' || result.status === 'idempotent-replay') {
       if (result.serverUpdatedAt) {
         handlers.normalizeUpdatedAt(projectId, connection, result.serverUpdatedAt);
@@ -57,7 +63,9 @@ export class ConnectionSyncRpcResultHandlerService {
     }
 
     if (result.status === 'remote-newer') {
-      await this.handleConnectionSyncRemoteNewer(result, connection, projectId, fromRetryQueue, sourceUserId, handlers.enqueueRetry);
+      await this.handleConnectionSyncRemoteNewer(
+        result, connection, projectId, fromRetryQueue, sourceUserId, handlers.enqueueRetry, replayFence,
+      );
       return false;
     }
 
@@ -66,7 +74,9 @@ export class ConnectionSyncRpcResultHandlerService {
       return false;
     }
 
-    await this.handleConnectionSyncRejected(result, connection, projectId, fromRetryQueue, sourceUserId, handlers.enqueueRetry);
+    await this.handleConnectionSyncRejected(
+      result, connection, projectId, fromRetryQueue, sourceUserId, handlers.enqueueRetry, replayFence,
+    );
     return false;
   }
 
@@ -77,7 +87,23 @@ export class ConnectionSyncRpcResultHandlerService {
     fromRetryQueue: boolean,
     sourceUserId: string | undefined,
     enqueueRetry: ConnectionRpcRetryEnqueueHandler,
+    replayFence?: ConnectionActionQueueReplayFence,
   ): Promise<void> {
+    assertConnectionReplayFenceCurrent(replayFence);
+    if (replayFence) {
+      const conflictError = createRemoteNewerConflictError(
+        connection.id,
+        projectId,
+        result.remoteUpdatedAt ?? null,
+        'remote-newer',
+        { localConnection: connection },
+      );
+      throw new PermanentFailureError(
+        'Connection remote is newer; conflict evidence must be persisted before ActionQueue settlement',
+        conflictError,
+        { operation: 'pushConnection.remoteNewer', connectionId: connection.id, projectId },
+      );
+    }
     this.logger.warn('pushConnection: sync RPC CAS 拒绝，远端版本更新', {
       connectionId: connection.id,
       projectId,
@@ -121,20 +147,24 @@ export class ConnectionSyncRpcResultHandlerService {
     fromRetryQueue: boolean,
     sourceUserId: string | undefined,
     enqueueRetry: ConnectionRpcRetryEnqueueHandler,
+    replayFence?: ConnectionActionQueueReplayFence,
   ): Promise<void> {
-    this.syncStateService.setSyncError(this.getConnectionSyncRejectionMessage(result));
-    this.logger.warn('pushConnection: sync RPC 拒绝写入', {
-      connectionId: connection.id,
-      projectId,
-      status: result.status,
-      reason: result.reason,
-      minProtocolVersion: result.minProtocolVersion,
-    });
-    this.sentryLazyLoader.captureMessage('sync_rpc_connection_rejected', {
-      level: 'warning',
-      tags: { operation: 'pushConnection', entityType: 'connection', status: result.status },
-      extra: { connectionId: connection.id, projectId, reason: result.reason, minProtocolVersion: result.minProtocolVersion },
-    });
+    assertConnectionReplayFenceCurrent(replayFence);
+    if (!replayFence) {
+      this.syncStateService.setSyncError(this.getConnectionSyncRejectionMessage(result));
+      this.logger.warn('pushConnection: sync RPC 拒绝写入', {
+        connectionId: connection.id,
+        projectId,
+        status: result.status,
+        reason: result.reason,
+        minProtocolVersion: result.minProtocolVersion,
+      });
+      this.sentryLazyLoader.captureMessage('sync_rpc_connection_rejected', {
+        level: 'warning',
+        tags: { operation: 'pushConnection', entityType: 'connection', status: result.status },
+        extra: { connectionId: connection.id, projectId, reason: result.reason, minProtocolVersion: result.minProtocolVersion },
+      });
+    }
     if (result.status === 'client-version-rejected') {
       return;
     }

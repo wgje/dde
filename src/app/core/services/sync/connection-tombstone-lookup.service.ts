@@ -8,6 +8,8 @@ import {
   isBrowserNetworkSuspendedError,
   isBrowserNetworkSuspendedWindow,
 } from '../../../../utils/browser-network-suspension';
+import { fetchAllSupabaseKeysetPagesByCursor } from '../../../../utils/supabase-pagination';
+import { isValidUUID } from '../../../../utils/validation';
 import { RetryQueueService } from './retry-queue.service';
 import { SessionManagerService } from './session-manager.service';
 import { TombstoneService } from './tombstone.service';
@@ -15,6 +17,10 @@ import {
   getConnectionFreshnessTimestamp,
   isRemoteTombstoneAtLeastAsFresh,
 } from './connection-sync-freshness.helpers';
+import {
+  assertConnectionReplayFenceCurrent,
+  type ConnectionActionQueueReplayFence,
+} from './connection-sync-operations.helpers';
 
 export type ConnectionTombstoneCheckResult =
   | { ok: true; tombstoneFound: boolean }
@@ -30,6 +36,39 @@ type ConnectionIdTombstoneRow = {
   deleted_at?: string | null;
 };
 
+type ConnectionTombstonePageRow = {
+  connection_id: string;
+  deleted_at: string;
+};
+
+type ConnectionTombstonePageCursor = {
+  connectionId: string;
+  deletedAt: string;
+};
+
+function buildConnectionTombstoneKeysetOrFilter(
+  cursor: ConnectionTombstonePageCursor,
+): string {
+  return `deleted_at.gt.${cursor.deletedAt},and(deleted_at.eq.${cursor.deletedAt},connection_id.gt.${cursor.connectionId})`;
+}
+
+function readConnectionTombstonePageCursor(
+  row: ConnectionTombstonePageRow,
+): ConnectionTombstonePageCursor {
+  if (
+    !isValidUUID(row.connection_id)
+    || typeof row.deleted_at !== 'string'
+    || !Number.isFinite(Date.parse(row.deleted_at))
+  ) {
+    throw new Error('connection tombstone page returned an invalid keyset cursor');
+  }
+
+  return {
+    connectionId: row.connection_id,
+    deletedAt: row.deleted_at,
+  };
+}
+
 @Injectable({ providedIn: 'root' })
 export class ConnectionTombstoneLookupService {
   private readonly logger = inject(LoggerService).category('ConnectionSyncOps');
@@ -42,11 +81,14 @@ export class ConnectionTombstoneLookupService {
     projectId: string,
     connection: Connection,
     fromRetryQueue: boolean,
+    replayFence?: ConnectionActionQueueReplayFence,
   ): Promise<ConnectionTombstoneCheckResult> {
-    let queryResult = await this.queryConnectionTombstone(client, projectId, connection);
+    assertConnectionReplayFenceCurrent(replayFence);
+    let queryResult = await this.queryConnectionTombstone(client, projectId, connection, replayFence);
+    assertConnectionReplayFenceCurrent(replayFence);
     let retriedAfterRefresh = false;
 
-    if (queryResult.error && this.sessionManager.isSessionExpiredError(queryResult.error)) {
+    if (!replayFence && queryResult.error && this.sessionManager.isSessionExpiredError(queryResult.error)) {
       const refreshed = await this.sessionManager.handleAuthErrorWithRefresh('pushConnection.connectionTombstoneLookup', {
         connectionId: connection.id,
         projectId,
@@ -77,7 +119,7 @@ export class ConnectionTombstoneLookupService {
         message: queryResult.error.message,
         retriedAfterRefresh,
       });
-      this.recordRetryableConnectionFailure(queryResult.error);
+      if (!replayFence) this.recordRetryableConnectionFailure(queryResult.error);
       return { ok: false, shouldRetry: true, error: queryResult.error };
     }
 
@@ -115,10 +157,27 @@ export class ConnectionTombstoneLookupService {
     tombstoneIds: Set<string>,
   ): Promise<Set<string>> {
     try {
-      const { data, error } = await client
-        .from('connection_tombstones')
-        .select('connection_id')
-        .eq('project_id', projectId);
+      const { data, error } = await fetchAllSupabaseKeysetPagesByCursor<
+        ConnectionTombstonePageRow,
+        ConnectionTombstonePageCursor
+      >((cursor) => {
+        let query = client
+          .from('connection_tombstones')
+          .select('connection_id,deleted_at')
+          .eq('project_id', projectId)
+          .order('deleted_at', { ascending: true })
+          .order('connection_id', { ascending: true });
+
+        if (cursor) {
+          query = query.or(buildConnectionTombstoneKeysetOrFilter(cursor));
+        }
+
+        return query;
+      }, {
+        readCursor: readConnectionTombstonePageCursor,
+        cursorKey: (cursor) => `${cursor.deletedAt}:${cursor.connectionId}`,
+        isCursorAfter: (previous, next) => next.deletedAt > previous.deletedAt || (next.deletedAt === previous.deletedAt && next.connectionId > previous.connectionId),
+      });
 
       if (error) {
         return this.handleConnectionTombstoneIdsError(projectId, tombstoneIds, error);
@@ -182,10 +241,15 @@ export class ConnectionTombstoneLookupService {
     client: SupabaseClient,
     projectId: string,
     connection: Connection,
+    replayFence?: ConnectionActionQueueReplayFence,
   ): Promise<ConnectionTombstoneQueryResult> {
     try {
+      assertConnectionReplayFenceCurrent(replayFence);
       const localFreshnessTimestamp = getConnectionFreshnessTimestamp(connection.updatedAt, connection.deletedAt);
-      const idResult = await this.queryConnectionIdTombstone(client, connection.id, localFreshnessTimestamp);
+      const idResult = await this.queryConnectionIdTombstone(
+        client, connection.id, localFreshnessTimestamp, replayFence,
+      );
+      assertConnectionReplayFenceCurrent(replayFence);
       if (idResult.error || idResult.tombstoneFound) return idResult;
 
       const endpointResult = await this.queryEndpointConnectionTombstone(
@@ -193,10 +257,16 @@ export class ConnectionTombstoneLookupService {
         projectId,
         connection,
         localFreshnessTimestamp,
+        replayFence,
       );
+      assertConnectionReplayFenceCurrent(replayFence);
       if (endpointResult.error || endpointResult.tombstoneFound) return endpointResult;
 
-      return await this.queryLegacyEndpointlessConnectionTombstone(client, projectId, localFreshnessTimestamp);
+      const legacy = await this.queryLegacyEndpointlessConnectionTombstone(
+        client, projectId, localFreshnessTimestamp, replayFence,
+      );
+      assertConnectionReplayFenceCurrent(replayFence);
+      return legacy;
     } catch (error) {
       return { tombstoneFound: false, error: supabaseErrorToError(error) };
     }
@@ -206,12 +276,15 @@ export class ConnectionTombstoneLookupService {
     client: SupabaseClient,
     connectionId: string,
     localFreshnessTimestamp: number,
+    replayFence?: ConnectionActionQueueReplayFence,
   ): Promise<ConnectionTombstoneQueryResult> {
+    assertConnectionReplayFenceCurrent(replayFence);
     const { data, error } = await client
       .from('connection_tombstones')
       .select('connection_id,deleted_at')
       .eq('connection_id', connectionId)
       .maybeSingle() as { data: ConnectionIdTombstoneRow | null; error: unknown };
+    assertConnectionReplayFenceCurrent(replayFence);
 
     if (error) {
       return { tombstoneFound: false, error: supabaseErrorToError(error) };
@@ -236,7 +309,9 @@ export class ConnectionTombstoneLookupService {
     projectId: string,
     connection: Connection,
     localFreshnessTimestamp: number,
+    replayFence?: ConnectionActionQueueReplayFence,
   ): Promise<ConnectionTombstoneQueryResult> {
+    assertConnectionReplayFenceCurrent(replayFence);
     const { data, error } = await client
       .from('connection_tombstones')
       .select('deleted_at')
@@ -246,6 +321,7 @@ export class ConnectionTombstoneLookupService {
       .order('deleted_at', { ascending: false })
       .limit(1)
       .maybeSingle();
+    assertConnectionReplayFenceCurrent(replayFence);
 
     if (error) {
       return { tombstoneFound: false, error: supabaseErrorToError(error) };
@@ -261,16 +337,19 @@ export class ConnectionTombstoneLookupService {
     client: SupabaseClient,
     projectId: string,
     localFreshnessTimestamp: number,
+    replayFence?: ConnectionActionQueueReplayFence,
   ): Promise<ConnectionTombstoneQueryResult> {
+    assertConnectionReplayFenceCurrent(replayFence);
     const { data, error } = await client
       .from('connection_tombstones')
-      .select('deleted_at,source_id,target_id')
+      .select('deleted_at')
       .eq('project_id', projectId)
       .is('source_id', null)
       .is('target_id', null)
       .order('deleted_at', { ascending: false })
       .limit(1)
       .maybeSingle();
+    assertConnectionReplayFenceCurrent(replayFence);
 
     if (error) {
       return { tombstoneFound: false, error: supabaseErrorToError(error) };

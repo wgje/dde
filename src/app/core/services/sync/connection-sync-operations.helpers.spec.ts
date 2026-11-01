@@ -4,6 +4,7 @@ import type { SyncRpcResult } from '../../../../services/sync-rpc-client.service
 import {
   createConnectionSyncRpcResultHandlers,
   createPendingConnectionPushExecutionResult,
+  persistConnectionRpcReplayConflict,
 } from './connection-sync-operations.helpers';
 
 describe('connection-sync-operations.helpers', () => {
@@ -69,5 +70,89 @@ describe('connection-sync-operations.helpers', () => {
     expect(enteredRetryQueue).toBe(true);
     expect(audit.enteredRetryQueue).toBe(true);
     expect(audit.retryCount).toBe(1);
+  });
+
+  it('persists RPC replay conflicts from the authoritative task and connection stores', async () => {
+    const taskA = {
+      id: 'task-a',
+      title: 'Task A',
+      content: 'Current task A content',
+      stage: null,
+      parentId: null,
+      order: 0,
+      rank: 0,
+      status: 'active' as const,
+      x: 0,
+      y: 0,
+      createdDate: '2026-06-29T00:00:00.000Z',
+      displayId: 'T1',
+    };
+    const taskB = {
+      ...taskA,
+      id: 'task-b',
+      title: 'Task B',
+      content: 'Current task B content',
+      order: 1,
+      rank: 1,
+      displayId: 'T2',
+    };
+    const localConnection = {
+      id: 'connection-1',
+      source: taskA.id,
+      target: taskB.id,
+      title: 'Local connection',
+      updatedAt: '2026-06-29T01:00:00.000Z',
+    };
+    const concurrentConnection = {
+      id: 'connection-concurrent',
+      source: taskB.id,
+      target: taskA.id,
+      title: 'Concurrent connection',
+    };
+    const staleProjectShell = {
+      id: 'project-1',
+      name: 'Project',
+      description: '',
+      createdDate: '2026-06-29T00:00:00.000Z',
+      tasks: [{ ...taskA, content: 'Stale shell content' }],
+      connections: [],
+    };
+    const authoritativeProject = {
+      ...staleProjectShell,
+      tasks: [taskA, taskB],
+      connections: [{ ...localConnection, title: 'Previous local connection' }, concurrentConnection],
+    };
+    const getProjectWithCurrentData = vi.fn(() => authoritativeProject);
+    const saveConflict = vi.fn(async () => true);
+
+    await expect(persistConnectionRpcReplayConflict({
+      input: {
+        connection: localConnection,
+        projectId: 'project-1',
+        sourceUserId: 'user-1',
+        operationId: 'operation-1',
+        result: {
+          status: 'remote-newer',
+          remoteUpdatedAt: '2026-06-29T02:00:00.000Z',
+        } as SyncRpcResult,
+      },
+      evidence: {
+        code: 'CONNECTION_REMOTE_NEWER',
+        message: 'Remote connection is newer',
+        remoteEntity: { ...localConnection, title: 'Remote connection' },
+        reason: 'remote-newer',
+      },
+      conflictStorage: { saveConflict },
+      projectState: { getProjectWithCurrentData },
+      logger: { error: vi.fn() },
+    })).resolves.toBe(true);
+
+    expect(saveConflict).toHaveBeenCalledWith(expect.objectContaining({
+      localProject: expect.objectContaining({
+        tasks: [taskA, taskB],
+        connections: [localConnection, concurrentConnection],
+      }),
+    }));
+    expect(getProjectWithCurrentData).toHaveBeenCalledWith('project-1');
   });
 });

@@ -8,6 +8,10 @@ import {
   type EndpointConnectionMatch,
 } from './connection-canonical-identity.service';
 import { pickNewestDeletedEndpointMatch } from './connection-sync-conflict.helpers';
+import {
+  assertConnectionReplayFenceCurrent,
+  type ConnectionActionQueueReplayFence,
+} from './connection-sync-operations.helpers';
 
 @Injectable({ providedIn: 'root' })
 export class ConnectionCanonicalPrecheckService {
@@ -18,13 +22,19 @@ export class ConnectionCanonicalPrecheckService {
     client: SupabaseClient,
     projectId: string,
     connection: Connection,
+    replayFence?: ConnectionActionQueueReplayFence,
   ): Promise<void> {
-    const canonicalEndpointMatch = await this.lookupCanonicalEndpointMatch(client, projectId, connection);
+    assertConnectionReplayFenceCurrent(replayFence);
+    const canonicalEndpointMatch = await this.lookupCanonicalEndpointMatch(
+      client, projectId, connection, replayFence,
+    );
+    assertConnectionReplayFenceCurrent(replayFence);
     if (!canonicalEndpointMatch) {
       return;
     }
 
     if (canonicalEndpointMatch.id !== connection.id) {
+      assertConnectionReplayFenceCurrent(replayFence);
       this.logger.info('检测到远端同端点连接，复用既有 id 继续同步', {
         connectionId: connection.id,
         existingConnectionId: canonicalEndpointMatch.id,
@@ -39,6 +49,7 @@ export class ConnectionCanonicalPrecheckService {
     }
 
     if (this.canonicalIdentity.isCanonicalMatchAtLeastAsFresh(canonicalEndpointMatch, connection)) {
+      assertConnectionReplayFenceCurrent(replayFence);
       this.canonicalIdentity.applyCanonicalConnectionState(projectId, connection, canonicalEndpointMatch);
     }
   }
@@ -47,17 +58,20 @@ export class ConnectionCanonicalPrecheckService {
     client: SupabaseClient,
     projectId: string,
     connection: Connection,
+    replayFence?: ConnectionActionQueueReplayFence,
   ): Promise<EndpointConnectionMatch | null> {
     // canonical-match 查询是 upsert 前的软优化；网络/CORS 抛错时降级为未匹配，
     // 让 upsert 的唯一约束和后续 23505 分支继续兜底。
     let data: EndpointConnectionMatch[] | null = null;
     try {
+      assertConnectionReplayFenceCurrent(replayFence);
       const response = await client
         .from('connections')
         .select('id,deleted_at,updated_at,title,description')
         .eq('project_id', projectId)
         .eq('source_id', connection.source)
         .eq('target_id', connection.target);
+      assertConnectionReplayFenceCurrent(replayFence);
 
       if (response.error) {
         return null;

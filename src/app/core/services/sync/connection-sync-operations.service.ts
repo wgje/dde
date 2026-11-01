@@ -41,21 +41,28 @@ import {
 import {
   ConnectionSyncRpcResultHandlerService,
 } from './connection-sync-rpc-result-handler.service';
-import { ConnectionRestPersistenceService } from './connection-rest-persistence.service';
 import {
+  createConnectionSyncRpcExecutionResult,
   createConnectionRpcWriteAudit,
-  createConnectionRestRemoteNewerConflict,
   createConnectionSyncRpcResultHandlers,
   createConnectionSyncRpcOperationId,
+  buildConnectionReplayPayloadSignature,
+  createConnectionReplayRetryHandler,
+  createConnectionActionQueuePushRequest,
   createPendingConnectionPushExecutionResult,
+  assertConnectionReplayFenceCurrent,
+  combineConnectionReplayAbortSignals,
   persistConnectionRpcReplayConflict,
+  runConnectionActionQueueReplay,
   shouldUseConnectionSyncRpc,
   type ConnectionRpcWriteAudit,
   type ConnectionPushExecutionResult,
+  type ConnectionActionQueueReplayInput,
+  type ConnectionActionQueueReplayResult,
 } from './connection-sync-operations.helpers';
 import { ConnectionCanonicalPrecheckService } from './connection-canonical-precheck.service';
 import { ConnectionTerminalRejectionService } from './connection-terminal-rejection.service';
-import { ConnectionRestConflictRecoveryService } from './connection-rest-conflict-recovery.service';
+import { captureSyncResponseVersion, type SyncResponseVersionSnapshot } from './sync-response-version-guard';
 
 @Injectable({
   providedIn: 'root'
@@ -77,13 +84,12 @@ export class ConnectionSyncOperationsService {
   private readonly canonicalIdentity = inject(ConnectionCanonicalIdentityService);
   private readonly connectionPreflight = inject(ConnectionPushPreflightService);
   private readonly connectionRpcResultHandler = inject(ConnectionSyncRpcResultHandlerService);
-  private readonly connectionRestPersistence = inject(ConnectionRestPersistenceService);
   private readonly canonicalPrecheck = inject(ConnectionCanonicalPrecheckService);
   private readonly terminalRejection = inject(ConnectionTerminalRejectionService);
-  private readonly restConflictRecovery = inject(ConnectionRestConflictRecoveryService);
   private readonly conflictStorage = inject(ConflictStorageService);
   private readonly projectState = inject(ProjectStateService);
   private readonly dataSafetyWriteAudit = new DataSafetyWriteAuditService();
+  readonly buildActionQueueReplayPayloadSignature = buildConnectionReplayPayloadSignature;
 
   private readonly enqueueConnectionRetry = (
     connection: Connection,
@@ -102,6 +108,15 @@ export class ConnectionSyncOperationsService {
       lastFailure,
     );
   };
+
+  private createConnectionRetryHandler(request: ConnectionPushRequest) {
+    return createConnectionReplayRetryHandler({
+      request,
+      enqueue: this.enqueueConnectionRetry,
+      enqueueFromActionQueue: fence =>
+        this.connectionRetryEnqueue.enqueueConnectionUpsertFromActionQueue(fence),
+    });
+  }
 
   private recordConnectionRpcWriteAudit(input: ConnectionRpcWriteAudit): void {
     this.dataSafetyWriteAudit.recordWrite({
@@ -125,34 +140,31 @@ export class ConnectionSyncOperationsService {
   /**
    * 获取 Supabase 客户端，离线模式返回 null
    */
-  private getSupabaseClient(): SupabaseClient | null {
+  private getSupabaseClient(reportFailure = true): SupabaseClient | null {
     if (!this.supabase.isConfigured) {
       const failure = classifySupabaseClientFailure(false);
-      this.logger.warn('无法获取 Supabase 客户端', failure);
-      this.syncStateService.setSyncError(failure.message);
+      if (reportFailure) {
+        this.logger.warn('无法获取 Supabase 客户端', failure);
+        this.syncStateService.setSyncError(failure.message);
+      }
       return null;
     }
     try {
       return this.supabase.client();
     } catch (error) {
       const failure = classifySupabaseClientFailure(true, error);
-      this.logger.warn('无法获取 Supabase 客户端', {
-        category: failure.category,
-        message: failure.message
-      });
-      this.syncStateService.setSyncError(failure.message);
+      if (reportFailure) {
+        this.logger.warn('无法获取 Supabase 客户端', {
+          category: failure.category,
+          message: failure.message
+        });
+        this.syncStateService.setSyncError(failure.message);
+      }
       // eslint-disable-next-line no-restricted-syntax -- 维持调用方约定：客户端不可用时返回 null 走降级链路
       return null;
     }
   }
 
-  /**
-   * 推送连接到云端
-   *
-   * @param skipTombstoneCheck 跳过 tombstone 检查（调用方已批量过滤时使用）
-   * @param skipTaskExistenceCheck 跳过任务存在性检查（调用方已验证时使用）
-   * @param fromRetryQueue 是否从 processRetryQueue 调用，为 true 时不自动入队
-   */
   async pushConnection(
     connection: Connection,
     projectId: string,
@@ -174,18 +186,39 @@ export class ConnectionSyncOperationsService {
       requireSyncRpc,
     };
 
+    return await this.pushConnectionRequest(request, true);
+  }
+
+  async pushConnectionFromActionQueue(
+    input: ConnectionActionQueueReplayInput,
+  ): Promise<ConnectionActionQueueReplayResult> {
+    return runConnectionActionQueueReplay(input, async (connection, replayFence) => {
+      const request: ConnectionPushRequest = createConnectionActionQueuePushRequest(
+        connection,
+        replayFence,
+      );
+      const pushed = await this.pushConnectionRequest(request, false);
+      return { pushed, handoff: request.replayHandoff === true };
+    });
+  }
+
+  private async pushConnectionRequest(
+    request: ConnectionPushRequest,
+    handleErrors: boolean,
+  ): Promise<boolean> {
+
     if (await this.connectionPreflight.shouldDeferConnectionBeforeClientLookup(
       request,
-      this.enqueueConnectionRetry,
+      this.createConnectionRetryHandler(request),
     )) {
       return false;
     }
 
-    const client = this.getSupabaseClient();
+    const client = this.getSupabaseClient(request.replayFence === undefined);
     if (await this.connectionPreflight.shouldDeferConnectionForMissingClient(
       client,
       request,
-      this.enqueueConnectionRetry,
+      this.createConnectionRetryHandler(request),
     )) {
       return false;
     }
@@ -196,6 +229,7 @@ export class ConnectionSyncOperationsService {
     try {
       return await this.pushConnectionWithClient(client, request);
     } catch (e) {
+      if (!handleErrors) throw e;
       return await this.handlePushConnectionException(e, request);
     }
   }
@@ -207,7 +241,7 @@ export class ConnectionSyncOperationsService {
     if (!(await this.connectionPreflight.validateConnectionPushSession(
       client,
       request,
-      this.enqueueConnectionRetry,
+      this.createConnectionRetryHandler(request),
     ))) {
       return false;
     }
@@ -220,16 +254,13 @@ export class ConnectionSyncOperationsService {
       return false;
     }
 
-    await this.canonicalPrecheck.applyCanonicalEndpointPrecheck(client, request.projectId, request.connection);
-    const execution = await this.executeConnectionPush(
+    await this.canonicalPrecheck.applyCanonicalEndpointPrecheck(
       client,
-      request.connection,
       request.projectId,
-      request.fromRetryQueue,
-      request.sourceUserId,
-      request.operationId,
-      request.requireSyncRpc === true,
+      request.connection,
+      request.replayFence,
     );
+    const execution = await this.executeConnectionPush(request);
     return this.finalizeConnectionPushExecution(request.projectId, request.connection, execution);
   }
 
@@ -242,7 +273,7 @@ export class ConnectionSyncOperationsService {
       return await this.connectionPreflight.preserveConnectionUpsertForBrowserSuspension(
         request,
         'pushConnection',
-        this.enqueueConnectionRetry,
+        this.createConnectionRetryHandler(request),
       );
     }
 
@@ -286,11 +317,20 @@ export class ConnectionSyncOperationsService {
     }
 
     if (execution.persistedUpdatedAt) {
-      this.canonicalIdentity.normalizeLocalConnectionUpdatedAt(
-        projectId,
-        connection,
-        execution.persistedUpdatedAt,
-      );
+      if (execution.requestVersion) {
+        this.canonicalIdentity.normalizeLocalConnectionUpdatedAt(
+          projectId,
+          connection,
+          execution.persistedUpdatedAt,
+          execution.requestVersion,
+        );
+      } else {
+        this.logger.warn('连接写入成功但缺少请求版本快照，跳过 updatedAt 回写', {
+          connectionId: connection.id,
+          projectId,
+          serverUpdatedAt: execution.persistedUpdatedAt,
+        });
+      }
     }
 
     this.retryQueueService.recordCircuitSuccess();
@@ -318,6 +358,7 @@ export class ConnectionSyncOperationsService {
       request.projectId,
       request.connection,
       request.fromRetryQueue,
+      request.replayFence,
     );
 
     if (tombstoneStatus.ok === false) {
@@ -344,7 +385,11 @@ export class ConnectionSyncOperationsService {
       request.projectId,
       request.connection,
       request.fromRetryQueue,
-      (connection, projectId, reason) => this.terminalRejection.discardInvalidConnectionLocally(connection, projectId, reason),
+      (connection, projectId, reason) => {
+        assertConnectionReplayFenceCurrent(request.replayFence);
+        this.terminalRejection.discardInvalidConnectionLocally(connection, projectId, reason);
+      },
+      request.replayFence,
     );
 
     if (validationResult.valid) {
@@ -399,7 +444,7 @@ export class ConnectionSyncOperationsService {
       throw tombstoneStatus.error;
     }
 
-    await this.enqueueConnectionRetry(
+    await this.createConnectionRetryHandler(request)(
       request.connection,
       request.projectId,
       request.sourceUserId,
@@ -438,7 +483,7 @@ export class ConnectionSyncOperationsService {
     }
 
     if (!request.fromRetryQueue) {
-      await this.enqueueConnectionRetry(
+      await this.createConnectionRetryHandler(request)(
         request.connection,
         request.projectId,
         request.sourceUserId,
@@ -449,51 +494,40 @@ export class ConnectionSyncOperationsService {
     return false;
   }
 
-  private async executeConnectionPush(
-    client: SupabaseClient,
-    connection: Connection,
-    projectId: string,
-    fromRetryQueue: boolean,
-    sourceUserId: string | undefined,
-    operationId: string | undefined,
-    requireSyncRpc: boolean,
-  ): Promise<ConnectionPushExecutionResult> {
+  private async executeConnectionPush(request: ConnectionPushRequest): Promise<ConnectionPushExecutionResult> {
     let result = createPendingConnectionPushExecutionResult();
 
     await this.throttle.execute(
-      `push-connection:${connection.id}`,
-      async () => {
-        result = await this.executeConnectionPushWithRetry(
-          client,
-          connection,
-          projectId,
-          fromRetryQueue,
-          sourceUserId,
-          operationId,
-          requireSyncRpc,
+      `push-connection:${request.connection.id}`,
+      async throttleSignal => {
+        assertConnectionReplayFenceCurrent(request.replayFence);
+        const combined = combineConnectionReplayAbortSignals(
+          throttleSignal,
+          request.replayFence?.leaseSignal,
         );
+        try {
+          result = await this.executeConnectionPushWithRetry(request, combined.signal);
+        } finally {
+          combined.dispose();
+        }
       },
       { priority: 'normal', retries: 0, timeout: REQUEST_THROTTLE_CONFIG.INDIVIDUAL_OPERATION_TIMEOUT }
     );
-
+    assertConnectionReplayFenceCurrent(request.replayFence);
     return result;
   }
 
   private async executeConnectionPushWithRetry(
-    client: SupabaseClient,
-    connection: Connection,
-    projectId: string,
-    fromRetryQueue: boolean,
-    sourceUserId: string | undefined,
-    operationId: string | undefined,
-    requireSyncRpc: boolean,
+    request: ConnectionPushRequest,
+    abortSignal?: AbortSignal,
   ): Promise<ConnectionPushExecutionResult> {
     let result = createPendingConnectionPushExecutionResult();
 
     await this.syncOpHelper.retryWithBackoff(async () => {
+      assertConnectionReplayFenceCurrent(request.replayFence);
       if (shouldUseConnectionSyncRpc(this.syncRpcClient)) {
-        if (operationId === undefined) {
-          await this.deferConnectionPushMissingOperationId(connection, projectId, fromRetryQueue, sourceUserId);
+        if (request.operationId === undefined) {
+          await this.deferConnectionPushMissingOperationId(request);
           result = {
             pushed: false,
             blockedBySyncRpc: true,
@@ -501,12 +535,12 @@ export class ConnectionSyncOperationsService {
           };
           return;
         }
-        result = await this.pushConnectionViaSyncRpc(connection, projectId, fromRetryQueue, sourceUserId, operationId);
+        result = await this.pushConnectionViaSyncRpc(request, abortSignal);
         return;
       }
 
-      if (operationId === undefined) {
-        await this.deferConnectionPushMissingOperationId(connection, projectId, fromRetryQueue, sourceUserId);
+      if (request.operationId === undefined) {
+        await this.deferConnectionPushMissingOperationId(request);
         result = {
           pushed: false,
           blockedBySyncRpc: true,
@@ -514,72 +548,79 @@ export class ConnectionSyncOperationsService {
         };
         return;
       }
-
-      if (!fromRetryQueue) {
-        await this.enqueueConnectionRetry(connection, projectId, sourceUserId, false, operationId);
-      }
-
-      if (!fromRetryQueue || requireSyncRpc) {
-        result = {
-          pushed: false,
-          blockedBySyncRpc: true,
-          persistedUpdatedAt: null,
-        };
-        return;
-      }
-
-      result = await this.pushConnectionViaRest(client, connection, projectId);
+      result = await this.resolveUnavailableConnectionSyncRpcPush(request);
     });
-
+    assertConnectionReplayFenceCurrent(request.replayFence);
     return result;
   }
 
-  private async deferConnectionPushMissingOperationId(
-    connection: Connection,
-    projectId: string,
-    fromRetryQueue: boolean,
-    sourceUserId: string | undefined,
-  ): Promise<void> {
+  private async resolveUnavailableConnectionSyncRpcPush(
+    request: ConnectionPushRequest,
+  ): Promise<ConnectionPushExecutionResult> {
+    if (!request.fromRetryQueue) {
+      await this.createConnectionRetryHandler(request)(
+        request.connection, request.projectId, request.sourceUserId, false, request.operationId,
+      );
+      return {
+        pushed: false,
+        blockedBySyncRpc: true,
+        persistedUpdatedAt: null,
+      };
+    }
+
+    this.logger.warn('pushConnection: sync RPC 不可用，已禁止 connections 直接写入', {
+      connectionId: request.connection.id,
+      projectId: request.projectId,
+      requireSyncRpc: request.requireSyncRpc,
+    });
+    throw createRetryDeferredError(
+      'Connection sync RPC is unavailable; keeping the original RetryQueue item.',
+    );
+  }
+
+  private async deferConnectionPushMissingOperationId(request: ConnectionPushRequest): Promise<void> {
     this.logger.warn('pushConnection: 缺少 operationId，已延后到 RetryQueue 以避免临时 RPC 幂等键', {
-      connectionId: connection.id,
-      projectId,
-      fromRetryQueue,
+      connectionId: request.connection.id,
+      projectId: request.projectId,
+      fromRetryQueue: request.fromRetryQueue,
     });
 
-    if (fromRetryQueue) {
+    if (request.fromRetryQueue) {
       throw createRetryDeferredError(
         'Connection retry item is missing operationId; keeping it in RetryQueue until operationId repair can persist.',
       );
     }
 
-    await this.enqueueConnectionRetry(
-      connection,
-      projectId,
-      sourceUserId,
+    await this.createConnectionRetryHandler(request)(
+      request.connection,
+      request.projectId,
+      request.sourceUserId,
       false,
       createConnectionSyncRpcOperationId(),
     );
   }
 
   private async pushConnectionViaSyncRpc(
-    connection: Connection,
-    projectId: string,
-    fromRetryQueue: boolean,
-    sourceUserId: string | undefined,
-    operationId: string,
+    request: ConnectionPushRequest,
+    abortSignal?: AbortSignal,
   ): Promise<ConnectionPushExecutionResult> {
-    const beforeVersion = connection.updatedAt ?? null;
+    const operationId = request.operationId;
+    if (operationId === undefined) return createPendingConnectionPushExecutionResult();
+    const requestVersion = captureSyncResponseVersion(request.connection);
+    const beforeVersion = requestVersion.updatedAt;
     const lastSyncTimeBefore = this.syncStateService.syncState().lastSyncTime;
     const result = await this.syncRpcClient!.upsertConnection({
       operationId,
-      connection,
-      projectId,
+      connection: request.connection,
+      projectId: request.projectId,
       baseUpdatedAt: beforeVersion,
+      abortSignal,
     });
+    assertConnectionReplayFenceCurrent(request.replayFence);
     const audit = createConnectionRpcWriteAudit({
       operationId,
-      sourceUserId,
-      connection,
+      sourceUserId: request.sourceUserId,
+      connection: request.connection,
       result,
       beforeVersion,
       lastSyncTimeBefore,
@@ -588,26 +629,23 @@ export class ConnectionSyncOperationsService {
     try {
       const pushed = await this.connectionRpcResultHandler.handleConnectionSyncRpcResult(
         result,
-        connection,
-        projectId,
-        fromRetryQueue,
-        sourceUserId,
-        this.createConnectionRpcResultHandlers(operationId, audit),
+        request.connection,
+        request.projectId,
+        request.fromRetryQueue,
+        request.sourceUserId,
+        this.createConnectionRpcResultHandlers(request, operationId, audit, requestVersion),
+        request.replayFence,
       );
       this.recordConnectionRpcWriteAudit(audit);
 
-      return {
-        pushed,
-        blockedBySyncRpc: !pushed,
-        persistedUpdatedAt: null,
-      };
+      return createConnectionSyncRpcExecutionResult(pushed);
     } catch (error) {
       this.recordConnectionRpcWriteAudit(audit);
       throw await this.resolveConnectionRpcReplayError(error, {
-        connection,
-        projectId,
-        fromRetryQueue,
-        sourceUserId,
+        connection: request.connection,
+        projectId: request.projectId,
+        fromRetryQueue: request.fromRetryQueue,
+        sourceUserId: request.sourceUserId,
         operationId,
         result,
       });
@@ -658,49 +696,30 @@ export class ConnectionSyncOperationsService {
   }
 
   private createConnectionRpcResultHandlers(
+    request: ConnectionPushRequest,
     operationId: string,
     audit: ConnectionRpcWriteAudit,
+    requestVersion: SyncResponseVersionSnapshot,
   ) {
     return createConnectionSyncRpcResultHandlers({
       operationId,
       audit,
-      normalizeLocalConnectionUpdatedAt: (projectId, connection, serverUpdatedAt) => {
-        this.canonicalIdentity.normalizeLocalConnectionUpdatedAt(projectId, connection, serverUpdatedAt);
+      requestVersion,
+      normalizeLocalConnectionUpdatedAt: (projectId, connection, serverUpdatedAt, responseVersion?) => {
+        assertConnectionReplayFenceCurrent(request.replayFence);
+        this.canonicalIdentity.normalizeLocalConnectionUpdatedAt(
+          projectId,
+          connection,
+          serverUpdatedAt,
+          responseVersion,
+        );
       },
       discardInvalidConnectionLocally: (connection, projectId, reason) => {
+        assertConnectionReplayFenceCurrent(request.replayFence);
         this.terminalRejection.discardInvalidConnectionLocally(connection, projectId, reason);
       },
-      enqueueConnectionRetry: this.enqueueConnectionRetry,
+      enqueueConnectionRetry: this.createConnectionRetryHandler(request),
     });
-  }
-
-  private async pushConnectionViaRest(
-    client: SupabaseClient,
-    connection: Connection,
-    projectId: string,
-  ): Promise<ConnectionPushExecutionResult> {
-    const remoteConnection = await this.connectionRestPersistence.loadRemoteConnectionFreshness(
-      client,
-      connection.id,
-      projectId,
-    );
-    await this.restConflictRecovery.assertRemoteConnectionNotNewer(connection, projectId, remoteConnection);
-
-    try {
-      return {
-        pushed: true,
-        blockedBySyncRpc: false,
-        persistedUpdatedAt: await this.connectionRestPersistence.upsertConnectionReturningUpdatedAt(
-          client,
-          connection,
-          projectId,
-          remoteConnection,
-          createConnectionRestRemoteNewerConflict,
-        ),
-      };
-    } catch (upsertError) {
-      return await this.restConflictRecovery.recoverConnectionUpsertConflict(client, connection, projectId, upsertError);
-    }
   }
 
   /** 处理 pushConnection 错误 */

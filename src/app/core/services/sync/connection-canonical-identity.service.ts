@@ -2,7 +2,12 @@ import { Injectable, inject } from '@angular/core';
 
 import { Connection, Project } from '../../../../models';
 import { ProjectStateService } from '../../../../services/project-state.service';
+import { LoggerService } from '../../../../services/logger.service';
 import { getConnectionFreshnessTimestamp } from './connection-sync-freshness.helpers';
+import {
+  isSyncResponseVersionCurrent,
+  type SyncResponseVersionSnapshot,
+} from './sync-response-version-guard';
 
 export interface EndpointConnectionMatch {
   id: string;
@@ -20,6 +25,7 @@ type ConnectionIdentityRebindResult = {
 @Injectable({ providedIn: 'root' })
 export class ConnectionCanonicalIdentityService {
   private readonly projectState = inject(ProjectStateService);
+  private readonly logger = inject(LoggerService).category('ConnectionCanonicalIdentity');
 
   updateProjectsFromCurrentData(mutator: (projects: Project[]) => Project[]): void {
     const projectState = this.projectState as ProjectStateService & {
@@ -39,28 +45,97 @@ export class ConnectionCanonicalIdentityService {
     projectId: string,
     connection: Connection,
     serverUpdatedAt?: string | null,
+    requestVersion?: SyncResponseVersionSnapshot,
   ): void {
     if (!serverUpdatedAt) {
       return;
     }
 
-    connection.updatedAt = serverUpdatedAt;
     const connectionId = connection.id;
+    if (this.shouldSkipConnectionObjectUpdatedAtWriteback(
+      projectId,
+      connection,
+      connectionId,
+      serverUpdatedAt,
+      requestVersion,
+    )) {
+      return;
+    }
+
+    if (this.applyConnectionUpdatedAtToLocalStore(
+      projectId,
+      connectionId,
+      serverUpdatedAt,
+      requestVersion,
+    )) {
+      this.logSkippedConnectionStoreUpdatedAtWriteback(
+        connectionId,
+        projectId,
+        serverUpdatedAt,
+        requestVersion,
+      );
+      return;
+    }
+
+    connection.updatedAt = serverUpdatedAt;
+  }
+
+  private shouldSkipConnectionObjectUpdatedAtWriteback(
+    projectId: string,
+    connection: Connection,
+    connectionId: string,
+    serverUpdatedAt: string,
+    requestVersion?: SyncResponseVersionSnapshot,
+  ): boolean {
+    if (!requestVersion || isSyncResponseVersionCurrent(requestVersion, [connection])) {
+      return false;
+    }
+
+    this.logger.debug('跳过旧 connection 成功响应的对象时间戳回写', {
+      connectionId,
+      projectId,
+      requestUpdatedAt: requestVersion.updatedAt,
+      requestDeletedAt: requestVersion.deletedAt,
+      currentUpdatedAt: connection.updatedAt ?? null,
+      currentDeletedAt: connection.deletedAt ?? null,
+      serverUpdatedAt,
+    });
+    return true;
+  }
+
+  private applyConnectionUpdatedAtToLocalStore(
+    projectId: string,
+    connectionId: string,
+    serverUpdatedAt: string,
+    requestVersion?: SyncResponseVersionSnapshot,
+  ): boolean {
+    let localVersionChanged = false;
 
     this.updateProjectsFromCurrentData(projects => projects.map(project => {
       if (project.id !== projectId) {
         return project;
       }
 
+      const projectConnections = project.connections ?? [];
+      const currentConnection = projectConnections.find(item => item.id === connectionId);
+      if (
+        requestVersion
+        && currentConnection
+        && !isSyncResponseVersionCurrent(requestVersion, [currentConnection])
+      ) {
+        localVersionChanged = true;
+        return project;
+      }
+
       let changed = false;
-      const connections = (project.connections || []).map(connection => {
-        if (connection.id !== connectionId || connection.updatedAt === serverUpdatedAt) {
-          return connection;
+      const connections = projectConnections.map(item => {
+        if (item.id !== connectionId || item.updatedAt === serverUpdatedAt) {
+          return item;
         }
 
         changed = true;
         return {
-          ...connection,
+          ...item,
           updatedAt: serverUpdatedAt,
         };
       });
@@ -72,6 +147,23 @@ export class ConnectionCanonicalIdentityService {
           }
         : project;
     }));
+
+    return localVersionChanged;
+  }
+
+  private logSkippedConnectionStoreUpdatedAtWriteback(
+    connectionId: string,
+    projectId: string,
+    serverUpdatedAt: string,
+    requestVersion?: SyncResponseVersionSnapshot,
+  ): void {
+    this.logger.debug('跳过旧 connection 成功响应的 store 时间戳回写', {
+      connectionId,
+      projectId,
+      requestUpdatedAt: requestVersion?.updatedAt ?? null,
+      requestDeletedAt: requestVersion?.deletedAt ?? null,
+      serverUpdatedAt,
+    });
   }
 
   applyCanonicalConnectionIdentity(

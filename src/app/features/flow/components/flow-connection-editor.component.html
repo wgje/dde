@@ -1,4 +1,4 @@
-@if (data(); as connData) {
+@if (renderedData(); as connData) {
   <div
     class="fixed z-[100] animate-scale-in"
     #editorContainer
@@ -90,7 +90,7 @@
                 [(ngModel)]="editingTitle"
                 (ngModelChange)="onTitleChange($event)"
                 (compositionstart)="onCompositionStart('title')"
-                (compositionend)="onCompositionEnd('title')"
+                (compositionend)="onCompositionEnd('title', $any($event.target).value)"
                 (keydown.escape)="exitEditMode()"
                 (blur)="onInputBlur($event)"
                 spellcheck="false"
@@ -106,7 +106,7 @@
                 [(ngModel)]="editingDescription"
                 (ngModelChange)="onDescriptionChange($event)"
                 (compositionstart)="onCompositionStart('description')"
-                (compositionend)="onCompositionEnd('description')"
+                (compositionend)="onCompositionEnd('description', $any($event.target).value)"
                 (keydown.escape)="exitEditMode()"
                 (blur)="onInputBlur($event)"
                 (mousedown)="isSelecting = true"

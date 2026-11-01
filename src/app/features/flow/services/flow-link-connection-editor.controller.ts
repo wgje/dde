@@ -38,6 +38,11 @@ interface FlowLinkConnectionEditorLogger {
   warn(message: string, context?: unknown): void;
 }
 
+interface FlowLinkEditorOperationOwner {
+  projectId: string | null;
+  generation: number;
+}
+
 interface FlowLinkConnectionEditorControllerOptions {
   connectionEditorData: WritableSignal<ConnectionEditorData | null>;
   connectionEditorPos: WritableSignal<PanelPosition>;
@@ -55,13 +60,30 @@ interface FlowLinkConnectionEditorControllerOptions {
   detachTask: (taskId: string) => void | boolean | Promise<boolean>;
   logger: FlowLinkConnectionEditorLogger;
   isDestroyed?: () => boolean;
+  captureOperationOwner?: () => FlowLinkEditorOperationOwner;
+  isOperationOwnerCurrent?: (owner: FlowLinkEditorOperationOwner) => boolean;
+}
+
+interface FlowLinkEditorPublicationTicket {
+  readonly operation: 'save' | 'delete';
+  readonly sessionGeneration: number;
+  readonly instanceGeneration: number;
+  readonly attemptGeneration: number;
 }
 
 export class FlowLinkConnectionEditorController {
   private connectionEditorIgnoreCloseUntil = 0;
   private lifecycleGeneration = 0;
+  private editorSessionGeneration = 0;
+  private editorInstanceGeneration = 0;
+  private saveAttemptGeneration = 0;
+  private deleteAttemptGeneration = 0;
+  private observedEditorData: ConnectionEditorData | null;
+  private readonly saveTails = new Map<string, Promise<void>>();
 
-  constructor(private readonly options: FlowLinkConnectionEditorControllerOptions) {}
+  constructor(private readonly options: FlowLinkConnectionEditorControllerOptions) {
+    this.observedEditorData = options.connectionEditorData();
+  }
 
   open(
     sourceId: string,
@@ -88,7 +110,7 @@ export class FlowLinkConnectionEditorController {
 
     const requestedMode = openOptions.mode;
     const editorMode = this.resolveMode(requestedMode);
-    const currentEditor = this.options.connectionEditorData();
+    const currentEditor = this.observeEditorData();
 
     if (isSameConnectionEditor(currentEditor, sourceId, targetId, openOptions.isCrossTree)) {
       this.applyExistingAction(resolveExistingConnectionEditorAction({
@@ -108,11 +130,11 @@ export class FlowLinkConnectionEditorController {
 
   close(): void {
     this.options.logger.debug('closeConnectionEditor 被调用');
-    this.options.connectionEditorData.set(null);
+    this.replaceEditorData(null);
   }
 
   setMode(mode: ConnectionEditorMode): void {
-    const data = this.options.connectionEditorData();
+    const data = this.observeEditorData();
     if (!data || data.mode === mode) {
       return;
     }
@@ -122,7 +144,7 @@ export class FlowLinkConnectionEditorController {
     }
 
     this.armBackgroundCloseGuard();
-    this.options.connectionEditorData.set({
+    this.setEditorData({
       ...data,
       mode,
     });
@@ -137,25 +159,44 @@ export class FlowLinkConnectionEditorController {
       return false;
     }
 
-    const saved = await this.options.updateConnectionContent(sourceId, targetId, title, description);
-    if (saved === false) {
-      return false;
-    }
+    const generation = this.lifecycleGeneration;
+    const owner = this.options.captureOperationOwner?.();
+    const ticket = this.issuePublicationTicket('save');
+    const save = async (): Promise<boolean> => {
+      const saved = await this.options.updateConnectionContent(sourceId, targetId, title, description);
+      if (saved === false) {
+        return false;
+      }
+      if (generation !== this.lifecycleGeneration
+        || (owner && this.options.isOperationOwnerCurrent?.(owner) === false)
+        || !this.isPublicationTicketCurrent(ticket)) return true;
 
-    const data = this.options.connectionEditorData();
-    if (data && data.sourceId === sourceId && data.targetId === targetId) {
-      this.options.connectionEditorData.set({
-        ...data,
-        title,
-        description,
-      });
-    }
+      const data = this.observeEditorData();
+      if (data && data.sourceId === sourceId && data.targetId === targetId) {
+        this.setEditorData({
+          ...data,
+          title,
+          description,
+        });
+      }
 
-    return true;
+      return true;
+    };
+    const saveKey = JSON.stringify([generation, owner?.generation, owner?.projectId, sourceId, targetId]);
+    const previousTail = this.saveTails.get(saveKey);
+    const result = previousTail ? previousTail.then(save, save) : save();
+    const tail = result.then(() => undefined, () => undefined);
+    this.saveTails.set(saveKey, tail);
+    void tail.then(() => {
+      if (this.saveTails.get(saveKey) === tail) {
+        this.saveTails.delete(saveKey);
+      }
+    });
+    return await result;
   }
 
   async deleteCurrent(): Promise<boolean> {
-    const data = this.options.connectionEditorData();
+    const data = this.observeEditorData();
     if (!data) {
       this.options.logger.warn('deleteCurrentConnection: 没有当前编辑的连接数据');
       return false;
@@ -164,6 +205,9 @@ export class FlowLinkConnectionEditorController {
     if (this.options.guardMutation('删除关联')) {
       return false;
     }
+    const generation = this.lifecycleGeneration;
+    const owner = this.options.captureOperationOwner?.();
+    const ticket = this.issuePublicationTicket('delete');
 
     if (data.isCrossTree) {
       this.options.logger.info('删除跨树连接', { sourceId: data.sourceId, targetId: data.targetId });
@@ -179,12 +223,14 @@ export class FlowLinkConnectionEditorController {
       }
     }
 
-    this.close();
+    if (generation === this.lifecycleGeneration
+      && (!owner || this.options.isOperationOwnerCurrent?.(owner) !== false)
+      && this.isPublicationTicketCurrent(ticket)) this.close();
     return true;
   }
 
   getTasks(): { source: Task | null; target: Task | null } {
-    const data = this.options.connectionEditorData();
+    const data = this.observeEditorData();
     if (!data) return { source: null, target: null };
 
     return {
@@ -202,7 +248,7 @@ export class FlowLinkConnectionEditorController {
   }
 
   reset(): void {
-    this.options.connectionEditorData.set(null);
+    this.replaceEditorData(null);
     this.options.connectionEditorPos.set({ x: 0, y: 0 });
     this.connectionEditorIgnoreCloseUntil = 0;
     this.options.drag.dispose();
@@ -210,6 +256,7 @@ export class FlowLinkConnectionEditorController {
 
   dispose(): void {
     this.lifecycleGeneration++;
+    this.saveTails.clear();
     this.reset();
   }
 
@@ -246,7 +293,7 @@ export class FlowLinkConnectionEditorController {
       this.armBackgroundCloseGuard();
     }
 
-    this.options.connectionEditorData.set(action.data);
+    this.setEditorData(action.data);
   }
 
   private promoteMobilePreview(nextData: ConnectionEditorData): void {
@@ -256,7 +303,7 @@ export class FlowLinkConnectionEditorController {
 
     this.options.logger.debug('移动端同一跨树关联二次点击，切换到编辑态');
     this.armBackgroundCloseGuard();
-    this.options.connectionEditorData.set(nextData);
+    this.setEditorData(nextData);
   }
 
   private resolveNewPosition(x: number, y: number): PanelPosition {
@@ -302,7 +349,7 @@ export class FlowLinkConnectionEditorController {
     });
     this.options.logger.debug('设置 connectionEditorData', editorData);
     this.armBackgroundCloseGuard();
-    this.options.connectionEditorData.set(editorData);
+    this.replaceEditorData(editorData);
     this.options.connectionEditorPos.set(position);
     const generation = this.lifecycleGeneration;
     scheduleConnectionEditorTextareaResize(() =>
@@ -330,5 +377,51 @@ export class FlowLinkConnectionEditorController {
 
   private armBackgroundCloseGuard(durationMs: number = 300): void {
     this.connectionEditorIgnoreCloseUntil = Date.now() + durationMs;
+  }
+
+  private issuePublicationTicket(
+    operation: FlowLinkEditorPublicationTicket['operation']
+  ): FlowLinkEditorPublicationTicket {
+    this.observeEditorData();
+    const attemptGeneration = operation === 'save'
+      ? ++this.saveAttemptGeneration
+      : ++this.deleteAttemptGeneration;
+    return {
+      operation,
+      sessionGeneration: this.editorSessionGeneration,
+      instanceGeneration: this.editorInstanceGeneration,
+      attemptGeneration,
+    };
+  }
+
+  private isPublicationTicketCurrent(ticket: FlowLinkEditorPublicationTicket): boolean {
+    this.observeEditorData();
+    const attemptGeneration = ticket.operation === 'save'
+      ? this.saveAttemptGeneration
+      : this.deleteAttemptGeneration;
+    return ticket.sessionGeneration === this.editorSessionGeneration
+      && ticket.instanceGeneration === this.editorInstanceGeneration
+      && ticket.attemptGeneration === attemptGeneration;
+  }
+
+  private observeEditorData(): ConnectionEditorData | null {
+    const data = this.options.connectionEditorData();
+    if (data !== this.observedEditorData) {
+      this.editorSessionGeneration++;
+      this.editorInstanceGeneration++;
+      this.observedEditorData = data;
+    }
+    return data;
+  }
+
+  private replaceEditorData(data: ConnectionEditorData | null): void {
+    this.editorSessionGeneration++;
+    this.editorInstanceGeneration++;
+    this.setEditorData(data);
+  }
+
+  private setEditorData(data: ConnectionEditorData | null): void {
+    this.observedEditorData = data;
+    this.options.connectionEditorData.set(data);
   }
 }

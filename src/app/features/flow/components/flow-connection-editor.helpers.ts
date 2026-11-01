@@ -8,6 +8,11 @@ import {
 
 export type ConnectionEditorSaveContext = Pick<ConnectionEditorData, 'sourceId' | 'targetId' | 'title' | 'description'>;
 
+export interface ConnectionEditorSessionIdentity {
+  readonly key: string;
+  readonly generation: number;
+}
+
 export interface ConnectionTasks {
   source: Task | null;
   target: Task | null;

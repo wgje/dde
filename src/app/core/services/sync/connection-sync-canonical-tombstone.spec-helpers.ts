@@ -1,13 +1,11 @@
-import { expect, it, vi } from 'vitest';
+import { beforeEach, expect, it, vi } from 'vitest';
 
 import type { Connection } from '../../../../models';
 import { PermanentFailureError } from '../../../../utils/permanent-failure-error';
 import type { ConnectionSyncOperationsService } from './connection-sync-operations.service';
 import type {
   ConnectionEndpointTombstoneResult,
-  ConnectionFreshnessResult,
   ConnectionTombstoneResult,
-  ConnectionWriteResult,
   EndpointDedupResponse,
   LegacyConnectionTombstoneResult,
   ProjectConnectionState,
@@ -17,9 +15,9 @@ type MockFn = ReturnType<typeof vi.fn>;
 
 export interface ConnectionSyncCanonicalTombstoneSpecContext {
   service: ConnectionSyncOperationsService;
-  mockConnectionsUpsert: MockFn;
-  mockProjectState: {
-    updateProjects: MockFn;
+  mockSyncRpcClient: {
+    isFeatureEnabled: MockFn;
+    upsertConnection: MockFn;
   };
   mockRetryQueue: {
     add: MockFn;
@@ -27,10 +25,6 @@ export interface ConnectionSyncCanonicalTombstoneSpecContext {
   setEndpointDedupResponses(responses: EndpointDedupResponse[]): void;
   setMockProjects(projects: ProjectConnectionState[]): void;
   getMockProjects(): ProjectConnectionState[];
-  setConnectionFreshnessResult(result: ConnectionFreshnessResult): void;
-  setConnectionUpsertResult(result: ConnectionWriteResult): void;
-  setConnectionUpdateResult(result: ConnectionWriteResult): void;
-  getConnectionReadbackQueryCount(): number;
   setConnectionTombstoneResult(result: ConnectionTombstoneResult): void;
   setConnectionEndpointTombstoneResult(result: ConnectionEndpointTombstoneResult): void;
   setLegacyConnectionTombstoneResult(result: LegacyConnectionTombstoneResult): void;
@@ -40,16 +34,11 @@ export function registerConnectionSyncCanonicalTombstoneSpecs(
   getContext: () => ConnectionSyncCanonicalTombstoneSpecContext,
 ): void {
   let service: ConnectionSyncOperationsService;
-  let mockConnectionsUpsert: MockFn;
-  let mockProjectState: ConnectionSyncCanonicalTombstoneSpecContext['mockProjectState'];
+  let mockSyncRpcClient: ConnectionSyncCanonicalTombstoneSpecContext['mockSyncRpcClient'];
   let mockRetryQueue: ConnectionSyncCanonicalTombstoneSpecContext['mockRetryQueue'];
   let setEndpointDedupResponses: ConnectionSyncCanonicalTombstoneSpecContext['setEndpointDedupResponses'];
   let setMockProjects: ConnectionSyncCanonicalTombstoneSpecContext['setMockProjects'];
   let getMockProjects: ConnectionSyncCanonicalTombstoneSpecContext['getMockProjects'];
-  let setConnectionFreshnessResult: ConnectionSyncCanonicalTombstoneSpecContext['setConnectionFreshnessResult'];
-  let setConnectionUpsertResult: ConnectionSyncCanonicalTombstoneSpecContext['setConnectionUpsertResult'];
-  let setConnectionUpdateResult: ConnectionSyncCanonicalTombstoneSpecContext['setConnectionUpdateResult'];
-  let getConnectionReadbackQueryCount: ConnectionSyncCanonicalTombstoneSpecContext['getConnectionReadbackQueryCount'];
   let setConnectionTombstoneResult: ConnectionSyncCanonicalTombstoneSpecContext['setConnectionTombstoneResult'];
   let setConnectionEndpointTombstoneResult: ConnectionSyncCanonicalTombstoneSpecContext['setConnectionEndpointTombstoneResult'];
   let setLegacyConnectionTombstoneResult: ConnectionSyncCanonicalTombstoneSpecContext['setLegacyConnectionTombstoneResult'];
@@ -57,16 +46,12 @@ export function registerConnectionSyncCanonicalTombstoneSpecs(
   function loadContext(): void {
     const context = getContext();
     service = context.service;
-    mockConnectionsUpsert = context.mockConnectionsUpsert;
-    mockProjectState = context.mockProjectState;
+    mockSyncRpcClient = context.mockSyncRpcClient;
+    mockSyncRpcClient.isFeatureEnabled.mockReturnValue(true);
     mockRetryQueue = context.mockRetryQueue;
     setEndpointDedupResponses = context.setEndpointDedupResponses;
     setMockProjects = context.setMockProjects;
     getMockProjects = context.getMockProjects;
-    setConnectionFreshnessResult = context.setConnectionFreshnessResult;
-    setConnectionUpsertResult = context.setConnectionUpsertResult;
-    setConnectionUpdateResult = context.setConnectionUpdateResult;
-    getConnectionReadbackQueryCount = context.getConnectionReadbackQueryCount;
     setConnectionTombstoneResult = context.setConnectionTombstoneResult;
     setConnectionEndpointTombstoneResult = context.setConnectionEndpointTombstoneResult;
     setLegacyConnectionTombstoneResult = context.setLegacyConnectionTombstoneResult;
@@ -77,6 +62,13 @@ export function registerConnectionSyncCanonicalTombstoneSpecs(
     operationId = '00000000-0000-4000-8000-000000000701',
   ): Promise<boolean> {
     return service.pushConnection(connection, 'project-1', false, false, true, 'user-1', operationId);
+  }
+
+  function expectRpcConnection(expected: Record<string, unknown>): void {
+    expect(mockSyncRpcClient.upsertConnection).toHaveBeenCalledWith(expect.objectContaining({
+      projectId: 'project-1',
+      connection: expect.objectContaining(expected),
+    }));
   }
 
   beforeEach(loadContext);
@@ -103,12 +95,7 @@ export function registerConnectionSyncCanonicalTombstoneSpecs(
       const result = await pushConnectionFromRetryQueue(connection);
 
       expect(result).toBe(true);
-      expect(mockConnectionsUpsert).toHaveBeenCalledWith(
-        expect.objectContaining({
-          id: 'connection-remote-soft-deleted',
-        }),
-        expect.any(Object)
-      );
+      expectRpcConnection({ id: 'connection-remote-soft-deleted' });
       expect(getMockProjects()[0].connections[0].id).toBe('connection-remote-soft-deleted');
     });
 
@@ -143,12 +130,7 @@ export function registerConnectionSyncCanonicalTombstoneSpecs(
       const result = await pushConnectionFromRetryQueue(connection);
 
       expect(result).toBe(true);
-      expect(mockConnectionsUpsert).toHaveBeenCalledWith(
-        expect.objectContaining({
-          id: 'connection-remote-active',
-        }),
-        expect.any(Object)
-      );
+      expectRpcConnection({ id: 'connection-remote-active' });
       expect(getMockProjects()[0].connections[0].id).toBe('connection-remote-active');
     });
 
@@ -176,13 +158,10 @@ export function registerConnectionSyncCanonicalTombstoneSpecs(
       const result = await pushConnectionFromRetryQueue(connection);
 
       expect(result).toBe(true);
-      expect(mockConnectionsUpsert).toHaveBeenCalledWith(
-        expect.objectContaining({
-          id: 'connection-remote-active',
-          deleted_at: '2026-04-11T00:02:00.000Z',
-        }),
-        expect.any(Object)
-      );
+      expectRpcConnection({
+        id: 'connection-remote-active',
+        deletedAt: '2026-04-11T00:02:00.000Z',
+      });
       expect(getMockProjects()[0].connections[0].id).toBe('connection-remote-active');
     });
 
@@ -214,15 +193,12 @@ export function registerConnectionSyncCanonicalTombstoneSpecs(
       const result = await pushConnectionFromRetryQueue(connection);
 
       expect(result).toBe(true);
-      expect(mockConnectionsUpsert).toHaveBeenCalledWith(
-        expect.objectContaining({
-          id: 'connection-same-id-stale-active',
-          deleted_at: '2026-04-11T00:03:00.000Z',
-          title: 'server title',
-          description: 'server description',
-        }),
-        expect.any(Object)
-      );
+      expectRpcConnection({
+        id: 'connection-same-id-stale-active',
+        deletedAt: '2026-04-11T00:03:00.000Z',
+        title: 'server title',
+        description: 'server description',
+      });
       expect(getMockProjects()[0].connections[0]).toEqual(expect.objectContaining({
         id: 'connection-same-id-stale-active',
         deletedAt: '2026-04-11T00:03:00.000Z',
@@ -255,15 +231,12 @@ export function registerConnectionSyncCanonicalTombstoneSpecs(
       const result = await pushConnectionFromRetryQueue(connection);
 
       expect(result).toBe(true);
-      expect(mockConnectionsUpsert).toHaveBeenCalledWith(
-        expect.objectContaining({
-          id: 'connection-same-id-stale-deleted',
-          deleted_at: null,
-          title: null,
-          description: null,
-        }),
-        expect.any(Object)
-      );
+      expectRpcConnection({
+        id: 'connection-same-id-stale-deleted',
+        deletedAt: undefined,
+        title: undefined,
+        description: undefined,
+      });
     });
 
     it('canonical id 重绑到本地已存在记录时应合并为单条连接', async () => {
@@ -347,15 +320,12 @@ export function registerConnectionSyncCanonicalTombstoneSpecs(
       const result = await pushConnectionFromRetryQueue(connection);
 
       expect(result).toBe(true);
-      expect(mockConnectionsUpsert).toHaveBeenCalledWith(
-        expect.objectContaining({
-          id: 'connection-canonical-fresher-local-delete',
-          deleted_at: '2026-04-12T00:00:00.000Z',
-          title: 'server title',
-          description: 'server description',
-        }),
-        expect.any(Object)
-      );
+      expectRpcConnection({
+        id: 'connection-canonical-fresher-local-delete',
+        deletedAt: '2026-04-12T00:00:00.000Z',
+        title: 'server title',
+        description: 'server description',
+      });
     });
 
     it('precheck canonical row 若服务端删除时间更晚则不应被本地旧 active 状态复活', async () => {
@@ -394,15 +364,12 @@ export function registerConnectionSyncCanonicalTombstoneSpecs(
       const result = await pushConnectionFromRetryQueue(connection);
 
       expect(result).toBe(true);
-      expect(mockConnectionsUpsert).toHaveBeenCalledWith(
-        expect.objectContaining({
-          id: 'connection-canonical-deleted-newer',
-          deleted_at: '2026-04-11T00:02:00.000Z',
-          title: 'server title',
-          description: 'server description',
-        }),
-        expect.any(Object)
-      );
+      expectRpcConnection({
+        id: 'connection-canonical-deleted-newer',
+        deletedAt: '2026-04-11T00:02:00.000Z',
+        title: 'server title',
+        description: 'server description',
+      });
       expect(getMockProjects()[0].connections.find(item => item.id === 'connection-canonical-deleted-newer')).toEqual(
         expect.objectContaining({
           deletedAt: '2026-04-11T00:02:00.000Z',
@@ -437,15 +404,11 @@ export function registerConnectionSyncCanonicalTombstoneSpecs(
       const result = await pushConnectionFromRetryQueue(connection);
 
       expect(result).toBe(true);
-      expect(mockConnectionsUpsert).toHaveBeenCalledWith(
-        expect.objectContaining({
-          id: 'connection-same-id-local-active-newer',
-          deleted_at: null,
-          title: 'fresh local title',
-          description: 'fresh local description',
-        }),
-        expect.any(Object)
-      );
+      expectRpcConnection({
+        id: 'connection-same-id-local-active-newer',
+        title: 'fresh local title',
+        description: 'fresh local description',
+      });
       expect(mockRetryQueue.add).not.toHaveBeenCalled();
       expect(getMockProjects()[0].connections[0]).toEqual(expect.objectContaining({
         id: 'connection-same-id-local-active-newer',
@@ -484,14 +447,11 @@ export function registerConnectionSyncCanonicalTombstoneSpecs(
       const result = await pushConnectionFromRetryQueue(connection);
 
       expect(result).toBe(true);
-      expect(mockConnectionsUpsert).toHaveBeenCalledWith(
-        expect.objectContaining({
-          id: 'connection-canonical-only',
-          title: 'canonical title',
-          description: 'canonical description',
-        }),
-        expect.any(Object)
-      );
+      expectRpcConnection({
+        id: 'connection-canonical-only',
+        title: 'canonical title',
+        description: 'canonical description',
+      });
     });
 
     it('stale replay 在本地 canonical row 缺失且本地内容更新更晚时不应被远端旧空内容覆盖', async () => {
@@ -522,14 +482,11 @@ export function registerConnectionSyncCanonicalTombstoneSpecs(
       const result = await pushConnectionFromRetryQueue(connection);
 
       expect(result).toBe(true);
-      expect(mockConnectionsUpsert).toHaveBeenCalledWith(
-        expect.objectContaining({
-          id: 'connection-canonical-older-empty',
-          title: 'fresh title',
-          description: 'fresh description',
-        }),
-        expect.any(Object)
-      );
+      expectRpcConnection({
+        id: 'connection-canonical-older-empty',
+        title: 'fresh title',
+        description: 'fresh description',
+      });
     });
 
     it('stale replay 在旧 id 已不在本地时不应清空 canonical row 的 deletedAt', async () => {
@@ -561,13 +518,10 @@ export function registerConnectionSyncCanonicalTombstoneSpecs(
       const result = await pushConnectionFromRetryQueue(connection);
 
       expect(result).toBe(true);
-      expect(mockConnectionsUpsert).toHaveBeenCalledWith(
-        expect.objectContaining({
-          id: 'connection-canonical-deleted',
-          deleted_at: '2026-04-11T00:02:00.000Z',
-        }),
-        expect.any(Object)
-      );
+      expectRpcConnection({
+        id: 'connection-canonical-deleted',
+        deletedAt: '2026-04-11T00:02:00.000Z',
+      });
     });
 
     it('不同 id 的旧连接重放遇到更新的端点 tombstone 时不应复活已删连接', async () => {
@@ -585,7 +539,7 @@ export function registerConnectionSyncCanonicalTombstoneSpecs(
       await expect(pushConnectionFromRetryQueue(connection))
         .rejects.toBeInstanceOf(PermanentFailureError);
 
-      expect(mockConnectionsUpsert).not.toHaveBeenCalled();
+      expect(mockSyncRpcClient.upsertConnection).not.toHaveBeenCalled();
       expect(mockRetryQueue.add).not.toHaveBeenCalled();
     });
 
@@ -599,8 +553,6 @@ export function registerConnectionSyncCanonicalTombstoneSpecs(
       setLegacyConnectionTombstoneResult({
         data: {
           deleted_at: '2026-04-11T00:04:00.000Z',
-          source_id: null,
-          target_id: null,
         },
         error: null,
       });
@@ -608,7 +560,7 @@ export function registerConnectionSyncCanonicalTombstoneSpecs(
       await expect(pushConnectionFromRetryQueue(connection))
         .rejects.toBeInstanceOf(PermanentFailureError);
 
-      expect(mockConnectionsUpsert).not.toHaveBeenCalled();
+      expect(mockSyncRpcClient.upsertConnection).not.toHaveBeenCalled();
     });
 
     it('端点 tombstone 新旧比较应考虑 local deletedAt，避免误丢更晚的删除重放', async () => {
@@ -626,13 +578,10 @@ export function registerConnectionSyncCanonicalTombstoneSpecs(
       const result = await pushConnectionFromRetryQueue(connection);
 
       expect(result).toBe(true);
-      expect(mockConnectionsUpsert).toHaveBeenCalledWith(
-        expect.objectContaining({
-          id: 'connection-delete-without-updated-at',
-          deleted_at: '2026-04-11T00:03:00.000Z',
-        }),
-        expect.any(Object)
-      );
+      expectRpcConnection({
+        id: 'connection-delete-without-updated-at',
+        deletedAt: '2026-04-11T00:03:00.000Z',
+      });
     });
 
     it('local canonical row 缺失时应使用服务端 canonical metadata 避免清空远端状态', async () => {
@@ -660,15 +609,12 @@ export function registerConnectionSyncCanonicalTombstoneSpecs(
       const result = await pushConnectionFromRetryQueue(connection);
 
       expect(result).toBe(true);
-      expect(mockConnectionsUpsert).toHaveBeenCalledWith(
-        expect.objectContaining({
-          id: 'connection-server-only-canonical',
-          deleted_at: '2026-04-11T00:02:00.000Z',
-          title: 'server title',
-          description: 'server description',
-        }),
-        expect.any(Object)
-      );
+      expectRpcConnection({
+        id: 'connection-server-only-canonical',
+        deletedAt: '2026-04-11T00:02:00.000Z',
+        title: 'server title',
+        description: 'server description',
+      });
     });
 
 }
