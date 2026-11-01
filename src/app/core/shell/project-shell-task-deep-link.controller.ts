@@ -2,13 +2,20 @@ import type { Router } from '@angular/router';
 
 import type { FlowCommandService } from '../../features/flow/services/flow-command.service';
 import type { TaskOperationAdapterService } from '../../../services/task-operation-adapter.service';
-import { reloadViaForceClearCache } from '../../../utils/force-clear-cache';
+import type { ActiveProjectOwner } from '../../../services/project-state.service';
+import { ProjectShellTaskDeepLinkAttemptController } from './project-shell-task-deep-link-attempt.controller';
+import {
+  ProjectShellTaskDeepLinkRecoveryController,
+  type ProjectShellDeepLinkTaskState,
+} from './project-shell-task-deep-link-recovery.controller';
 
 export type ProjectShellTaskDeepLinkRouteResult = 'flow' | 'workspace' | 'pending';
 
 interface DeepLinkRetryState {
   taskId: string;
   generation: number;
+  owner: ActiveProjectOwner | null;
+  deferCenter: boolean;
   retries: number;
   maxRetries: number;
   baseDelay: number;
@@ -16,15 +23,12 @@ interface DeepLinkRetryState {
   degradeToWorkspaceOnMissing: boolean;
 }
 
-interface DeepLinkTaskState {
-  task: unknown;
-  isLoading: boolean;
-}
-
 export interface ProjectShellTaskDeepLinkControllerOptions {
   projectState: {
     tasks(): unknown[];
     getTask(taskId: string): unknown;
+    captureActiveProjectOwner?(): ActiveProjectOwner;
+    isActiveProjectOwnerCurrent?(owner: ActiveProjectOwner): boolean;
   };
   syncCoordinator: {
     isLoadingRemote?: () => boolean;
@@ -42,20 +46,56 @@ export interface ProjectShellTaskDeepLinkControllerOptions {
 }
 
 export class ProjectShellTaskDeepLinkController {
-  private isDestroyed = false;
-  private deepLinkGeneration = 0;
-  private deepLinkRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly attempt = new ProjectShellTaskDeepLinkAttemptController();
+  private readonly rejectedNavigationGenerations: number[] = [];
+  private readonly recovery: ProjectShellTaskDeepLinkRecoveryController;
+  private readonly recoveryPublicationStack: number[] = [];
+  private activeAttemptOwner: Readonly<{
+    generation: number;
+    owner: ActiveProjectOwner | null;
+  }> | null = null;
 
-  constructor(private readonly options: ProjectShellTaskDeepLinkControllerOptions) {}
+  constructor(private readonly options: ProjectShellTaskDeepLinkControllerOptions) {
+    this.recovery = new ProjectShellTaskDeepLinkRecoveryController({
+      activateFlowIntent: source => this.publishRecoverySideEffect(
+        () => options.activateFlowIntent(source),
+      ),
+      isAttemptCurrent: generation => this.isAttemptCurrent(generation),
+      router: { navigate: commands => this.navigateForRecovery(commands) },
+      setActiveView: view => this.publishRecoverySideEffect(() => options.setActiveView(view)),
+      taskOpsAdapter: options.taskOpsAdapter,
+      toast: {
+        info: (title, message, toastOptions) => this.publishRecoverySideEffect(() => {
+          if (toastOptions === undefined) options.toast.info(title, message);
+          else options.toast.info(title, message, toastOptions);
+        }),
+        success: title => this.publishRecoverySideEffect(() => options.toast.success(title)),
+        warning: (title, message, toastOptions) => {
+          const navigationGeneration = title === '返回工作区失败'
+            && message === '请稍后重试或手动返回项目列表'
+            ? (this.rejectedNavigationGenerations.shift() ?? null)
+            : null;
+          this.publishRecoverySideEffect(() => {
+            if (toastOptions === undefined) options.toast.warning(title, message);
+            else options.toast.warning(title, message, toastOptions);
+          }, navigationGeneration);
+        },
+      },
+    });
+  }
 
   handleTaskDeepLink(
     taskId: string,
-    options?: { degradeToWorkspaceOnMissing?: boolean },
+    options?: { degradeToWorkspaceOnMissing?: boolean; deferCenter?: boolean },
   ): ProjectShellTaskDeepLinkRouteResult {
-    const generation = this.beginDeepLinkAttempt();
+    const generation = this.attempt.beginAttempt();
+    const owner = this.options.projectState.captureActiveProjectOwner?.() ?? null;
+    this.activeAttemptOwner = Object.freeze({ generation, owner });
     const retryState: DeepLinkRetryState = {
       taskId,
       generation,
+      owner,
+      deferCenter: options?.deferCenter === true,
       retries: 0,
       maxRetries: 10,
       baseDelay: 100,
@@ -75,27 +115,18 @@ export class ProjectShellTaskDeepLinkController {
     return initialResult;
   }
 
+  retirePendingAttempt(): void {
+    this.attempt.beginAttempt();
+    this.activeAttemptOwner = null;
+  }
+
   destroy(): void {
-    this.isDestroyed = true;
-    this.deepLinkGeneration += 1;
-    this.clearDeepLinkTimer();
-  }
-
-  private beginDeepLinkAttempt(): number {
-    this.deepLinkGeneration += 1;
-    this.clearDeepLinkTimer();
-    return this.deepLinkGeneration;
-  }
-
-  private clearDeepLinkTimer(): void {
-    if (this.deepLinkRetryTimer === null) return;
-
-    clearTimeout(this.deepLinkRetryTimer);
-    this.deepLinkRetryTimer = null;
+    this.attempt.destroy();
+    this.activeAttemptOwner = null;
   }
 
   private tryFocusDeepLinkTask(retryState: DeepLinkRetryState): void {
-    if (this.isDestroyed || retryState.generation !== this.deepLinkGeneration) {
+    if (!this.isAttemptCurrent(retryState.generation)) {
       return;
     }
 
@@ -103,11 +134,19 @@ export class ProjectShellTaskDeepLinkController {
     const taskState = this.resolveDeepLinkTaskState(retryState.taskId);
 
     if (taskState.task) {
-      this.focusDeepLinkTask(retryState.taskId, retryState.generation);
+      this.focusDeepLinkTask(
+        retryState.taskId,
+        retryState.generation,
+        retryState.owner,
+        retryState.deferCenter,
+      );
       return;
     }
 
-    if (!taskState.isLoading && this.maybeDegradeMissingDeepLinkToWorkspace(retryState)) {
+    if (!taskState.isLoading && this.isAttemptCurrent(retryState.generation)
+      && this.withRecoveryPublication(retryState.generation, () => (
+        this.recovery.degradeMissingTaskToWorkspace(retryState.degradeToWorkspaceOnMissing)
+      ))) {
       return;
     }
 
@@ -116,10 +155,12 @@ export class ProjectShellTaskDeepLinkController {
       return;
     }
 
-    this.showDeepLinkFallbackToast(taskState);
+    if (this.isAttemptCurrent(retryState.generation)) {
+      this.showDeepLinkFallbackToast(taskState, retryState.generation);
+    }
   }
 
-  private resolveDeepLinkTaskState(taskId: string): DeepLinkTaskState {
+  private resolveDeepLinkTaskState(taskId: string): ProjectShellDeepLinkTaskState {
     const tasks = this.options.projectState.tasks();
     return {
       task: this.options.projectState.getTask(taskId),
@@ -127,34 +168,68 @@ export class ProjectShellTaskDeepLinkController {
     };
   }
 
-  private focusDeepLinkTask(taskId: string, generation: number): void {
+  private focusDeepLinkTask(
+    taskId: string,
+    generation: number,
+    owner: ActiveProjectOwner | null,
+    deferCenter: boolean,
+  ): void {
+    if (!this.isPublicationCurrent(generation, owner)) return;
     this.options.activateFlowIntent('deeplink');
+    if (!this.isPublicationCurrent(generation, owner)) return;
     this.options.setActiveView('flow');
-
-    this.deepLinkRetryTimer = setTimeout(() => {
-      if (this.isDestroyed || generation !== this.deepLinkGeneration) {
-        return;
-      }
-      this.deepLinkRetryTimer = null;
-      this.options.flowCommand.centerOnNode(taskId, true);
-    }, 100);
+    if (!this.isPublicationCurrent(generation, owner)) return;
+    if (deferCenter) {
+      this.attempt.schedule(generation, 100, () => {
+        if (!this.isPublicationCurrent(generation, owner)) return;
+        this.options.flowCommand.centerOnNode(taskId, true);
+      });
+      return;
+    }
+    this.options.flowCommand.centerOnNode(taskId, true);
   }
 
-  private maybeDegradeMissingDeepLinkToWorkspace(retryState: DeepLinkRetryState): boolean {
-    if (!retryState.degradeToWorkspaceOnMissing) {
-      return false;
-    }
+  private isPublicationCurrent(generation: number, owner: ActiveProjectOwner | null): boolean {
+    return this.isAttemptCurrent(generation) && this.activeAttemptOwner?.owner === owner;
+  }
 
-    this.options.toast.warning('任务不存在', '请求的任务已失效，已返回工作区');
+  private isAttemptCurrent(generation: number): boolean {
+    const active = this.activeAttemptOwner;
+    return this.attempt.isCurrent(generation)
+      && active?.generation === generation
+      && active.owner !== null
+      && this.options.projectState.isActiveProjectOwnerCurrent?.(active.owner) === true;
+  }
+
+  private publishRecoverySideEffect(effect: () => void, exactGeneration: number | null = null): void {
+    const generation = exactGeneration ?? this.recoveryPublicationStack.at(-1)
+      ?? this.activeAttemptOwner?.generation;
+    if (generation !== undefined && this.isAttemptCurrent(generation)) effect();
+  }
+
+  private navigateForRecovery(
+    commands: Parameters<Router['navigate']>[0],
+  ): ReturnType<Router['navigate']> {
+    const generation = this.recoveryPublicationStack.at(-1);
+    if (generation === undefined || !this.isAttemptCurrent(generation)) return Promise.resolve(false);
     try {
-      void Promise.resolve(this.options.router.navigate(['/projects']))
-        .catch(() => {
-          this.options.toast.warning('返回工作区失败', '请稍后重试或手动返回项目列表');
-        });
-    } catch {
-      this.options.toast.warning('返回工作区失败', '请稍后重试或手动返回项目列表');
+      return Promise.resolve(this.options.router.navigate(commands)).catch(error => {
+        this.rejectedNavigationGenerations.push(generation);
+        throw error;
+      });
+    } catch (error) {
+      this.rejectedNavigationGenerations.push(generation);
+      throw error;
     }
-    return true;
+  }
+
+  private withRecoveryPublication<T>(generation: number, publish: () => T): T {
+    this.recoveryPublicationStack.push(generation);
+    try {
+      return publish();
+    } finally {
+      this.recoveryPublicationStack.pop();
+    }
   }
 
   private scheduleDeepLinkRetry(retryState: DeepLinkRetryState): void {
@@ -162,79 +237,15 @@ export class ProjectShellTaskDeepLinkController {
       retryState.baseDelay * Math.pow(1.5, retryState.retries - 1),
       retryState.maxDelay,
     );
-    this.clearDeepLinkTimer();
-    this.deepLinkRetryTimer = setTimeout(() => {
-      if (retryState.generation !== this.deepLinkGeneration) {
-        return;
-      }
-      this.deepLinkRetryTimer = null;
+    this.attempt.schedule(retryState.generation, delay, () => {
       this.tryFocusDeepLinkTask(retryState);
-    }, delay);
+    });
   }
 
-  private showDeepLinkFallbackToast(taskState: DeepLinkTaskState): void {
-    this.options.activateFlowIntent('deeplink');
-    this.options.setActiveView('flow');
-
-    if (!taskState.isLoading && !taskState.task) {
-      this.showMissingDeepLinkTaskToast(this.deepLinkGeneration);
-      return;
-    }
-
-    this.showDeepLinkTimeoutToast();
-  }
-
-  private showMissingDeepLinkTaskToast(generation: number): void {
-    this.options.toast.warning(
-      '任务不存在',
-      '请求的任务可能已被删除或您没有访问权限',
-      {
-        duration: 10000,
-        action: {
-          label: '新建任务',
-          onClick: () => {
-            void this.createFallbackTaskFromDeepLink(generation);
-          },
-        },
-      },
-    );
-  }
-
-  private async createFallbackTaskFromDeepLink(generation: number): Promise<void> {
-    if (this.isDestroyed || generation !== this.deepLinkGeneration) {
-      return;
-    }
-
-    let saved = false;
-    try {
-      saved = await this.options.taskOpsAdapter.addFloatingTask('新任务', '', 100, 100);
-    } catch {
-      saved = false;
-    }
-
-    if (this.isDestroyed || generation !== this.deepLinkGeneration) {
-      return;
-    }
-
-    if (saved) {
-      this.options.toast.success('已创建新任务');
-      return;
-    }
-
-    this.options.toast.warning('创建任务失败', '本地持久化暂不可用，请稍后重试');
-  }
-
-  private showDeepLinkTimeoutToast(): void {
-    this.options.toast.info(
-      '加载超时',
-      '数据仍在加载中',
-      {
-        duration: 8000,
-        action: {
-          label: '刷新页面',
-          onClick: () => reloadViaForceClearCache(),
-        },
-      },
-    );
+  private showDeepLinkFallbackToast(
+    taskState: ProjectShellDeepLinkTaskState,
+    generation: number,
+  ): void {
+    this.withRecoveryPublication(generation, () => this.recovery.showFallback(taskState, generation));
   }
 }

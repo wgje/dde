@@ -1,30 +1,22 @@
 import type { ActivatedRoute, Router } from '@angular/router';
 import { FEATURE_FLAGS } from '../../../config/feature-flags.config';
 import {
-  shouldDegradeMobileStartupRoute,
   type HandoffCoordinatorService,
-  type HandoffResult,
 } from '../../../services/handoff-coordinator.service';
 import type { FlowCommandService } from '../../features/flow/services/flow-command.service';
 import type { TaskOperationAdapterService } from '../../../services/task-operation-adapter.service';
-import { resolveStartupEntryIntent } from '../../../utils/startup-entry-intent';
+import type { ActiveProjectOwner } from '../../../services/project-state.service';
 import type { LaunchSnapshot } from '../../../models/launch-shell';
 import {
   ProjectShellTaskDeepLinkController,
   type ProjectShellTaskDeepLinkRouteResult,
 } from './project-shell-task-deep-link.controller';
 import { ProjectShellFlowRestoreController } from './project-shell-flow-restore.controller';
-
-type StartupEntryIntent = ReturnType<typeof resolveStartupEntryIntent>;
-
-interface ProjectShellRouteState {
-  projectId?: string;
-  taskId?: string;
-  currentUrl: string;
-  startupEntryIntent: StartupEntryIntent;
-  handoffResult: HandoffResult;
-  degradeMobileStartupRoute: boolean;
-}
+import {
+  ProjectShellRouteStateController,
+  type ProjectShellRouteState,
+} from './project-shell-route-state.controller';
+import { ProjectShellRouteViewController } from './project-shell-route-view.controller';
 
 type SignalSetter<T> = {
   set(value: T): void;
@@ -53,6 +45,8 @@ export interface ProjectShellRouteControllerOptions {
     projects(): Array<{ id: string }>;
     tasks(): unknown[];
     getTask(taskId: string): unknown;
+    captureActiveProjectOwner?(): ActiveProjectOwner;
+    isActiveProjectOwnerCurrent?(owner: ActiveProjectOwner): boolean;
   };
   syncCoordinator: {
     isLoadingRemote?: () => boolean;
@@ -69,22 +63,40 @@ export interface ProjectShellRouteControllerOptions {
     success(title: string): void;
   };
   taskOpsAdapter: Pick<TaskOperationAdapterService, 'addFloatingTask'>;
-  flowCommand: Pick<FlowCommandService, 'centerOnNode'>;
+  flowCommand: Pick<FlowCommandService, 'centerOnNode'>
+    & Partial<Pick<FlowCommandService, 'clearAllCommands'>>;
   activateFlowIntent(source: 'click' | 'route' | 'deeplink' | 'restore-idle'): void;
 }
 
 export class ProjectShellRouteController {
-  private startupRouteDecisionResolved = false;
   private readonly flowRestore: ProjectShellFlowRestoreController;
+  private readonly routeState: ProjectShellRouteStateController;
+  private readonly routeView: ProjectShellRouteViewController;
   private readonly taskDeepLink: ProjectShellTaskDeepLinkController;
 
   constructor(private readonly options: ProjectShellRouteControllerOptions) {
+    this.routeState = new ProjectShellRouteStateController({
+      handoffCoordinator: options.handoffCoordinator,
+      isMobile: () => options.uiState.isMobile(),
+      route: options.route,
+      router: options.router,
+      snapshotHandoffEnabled: FEATURE_FLAGS.SNAPSHOT_HANDOFF_V2,
+      startupLaunchSnapshot: options.startupLaunchSnapshot,
+    });
     this.flowRestore = new ProjectShellFlowRestoreController({
       flowStateAwareRestoreEnabled: options.flowStateAwareRestoreEnabled,
       flowIntentActivated: options.flowIntentActivated,
       flowPrefetchOnlyActivated: options.flowPrefetchOnlyActivated,
       uiState: options.uiState,
       activateFlowIntent: source => options.activateFlowIntent(source),
+    });
+    this.routeView = new ProjectShellRouteViewController({
+      activateFlowIntent: source => options.activateFlowIntent(source),
+      flowRestore: this.flowRestore,
+      projectState: options.projectState,
+      startupLaunchSnapshot: options.startupLaunchSnapshot,
+      toast: options.toast,
+      userSession: options.userSession,
     });
     this.taskDeepLink = new ProjectShellTaskDeepLinkController({
       projectState: options.projectState,
@@ -99,16 +111,18 @@ export class ProjectShellRouteController {
   }
 
   handleRouteChange(): void {
-    const routeState = this.resolveRouteChangeState();
-    this.syncProjectFromRoute(routeState.projectId);
+    const routeState = this.routeState.resolveRouteChangeState();
+    const previousActiveProjectId = this.options.projectState.activeProjectId();
+    this.taskDeepLink.retirePendingAttempt();
+    this.syncProjectFromRoute(routeState.projectId, previousActiveProjectId);
     const taskDeepLinkResult = this.resolveTaskDeepLinkResult(routeState);
-    this.startupRouteDecisionResolved = true;
-    this.applyResolvedRouteView(routeState, taskDeepLinkResult);
+    this.routeState.markStartupRouteDecisionResolved();
+    this.routeView.applyResolvedRouteView(routeState, taskDeepLinkResult);
   }
 
   handleTaskDeepLink(
     taskId: string,
-    options?: { degradeToWorkspaceOnMissing?: boolean }
+    options?: { degradeToWorkspaceOnMissing?: boolean; deferCenter?: boolean }
   ): ProjectShellTaskDeepLinkRouteResult {
     return this.taskDeepLink.handleTaskDeepLink(taskId, options);
   }
@@ -130,70 +144,15 @@ export class ProjectShellRouteController {
     this.taskDeepLink.destroy();
   }
 
-  private resolveRouteChangeState(): ProjectShellRouteState {
-    const snapshot = this.options.route.snapshot;
-    const projectId = snapshot.params['projectId'] as string | undefined;
-    const taskId = snapshot.firstChild?.params['taskId'] as string | undefined;
-    const currentUrl = this.options.router.url;
-    const startupEntryIntent = resolveStartupEntryIntent(currentUrl);
-    const handoffResult = this.options.handoffCoordinator.result();
-    const snapshotMatchesCurrentRoute = this.matchesStartupSnapshotIntent(
-      startupEntryIntent,
-      projectId,
-      taskId,
-      currentUrl,
-    );
-
-    return {
-      projectId,
-      taskId,
-      currentUrl,
-      startupEntryIntent,
-      handoffResult,
-      degradeMobileStartupRoute: this.shouldDegradeStartupRoute(
-        currentUrl,
-        startupEntryIntent,
-        handoffResult,
-        snapshotMatchesCurrentRoute,
-      ),
-    };
-  }
-
-  private matchesStartupSnapshotIntent(
-    startupEntryIntent: StartupEntryIntent,
+  private syncProjectFromRoute(
     projectId: string | undefined,
-    taskId: string | undefined,
-    currentUrl: string,
-  ): boolean {
-    const snapshotRouteIntent = startupEntryIntent ? null : this.options.startupLaunchSnapshot?.routeIntent;
-    if (!snapshotRouteIntent || snapshotRouteIntent.projectId !== projectId) return false;
-
-    if (snapshotRouteIntent.kind === 'task') return snapshotRouteIntent.taskId === taskId;
-    if (snapshotRouteIntent.kind === 'flow') return currentUrl.endsWith('/flow');
-    if (snapshotRouteIntent.kind === 'text') return currentUrl.endsWith('/text');
-    return snapshotRouteIntent.kind === 'project';
-  }
-
-  private shouldDegradeStartupRoute(
-    currentUrl: string,
-    startupEntryIntent: StartupEntryIntent,
-    handoffResult: HandoffResult,
-    snapshotMatchesCurrentRoute: boolean,
-  ): boolean {
-    if (!FEATURE_FLAGS.SNAPSHOT_HANDOFF_V2 || this.startupRouteDecisionResolved || startupEntryIntent) {
-      return false;
-    }
-
-    return handoffResult.kind === 'degraded-to-text'
-      || (this.options.startupLaunchSnapshot?.mobileDegraded === true && snapshotMatchesCurrentRoute)
-      || shouldDegradeMobileStartupRoute(currentUrl, this.options.uiState.isMobile());
-  }
-
-  private syncProjectFromRoute(projectId: string | undefined): void {
-    if (!projectId || projectId === this.options.projectState.activeProjectId()) {
+    previousActiveProjectId: string | null,
+  ): void {
+    if (!projectId || projectId === previousActiveProjectId) {
       return;
     }
 
+    this.options.flowCommand.clearAllCommands?.();
     this.options.userSession.switchActiveProject(projectId);
     const project = this.options.projectState.getProject(projectId);
     if (project) {
@@ -210,70 +169,8 @@ export class ProjectShellRouteController {
 
     return this.handleTaskDeepLink(routeState.taskId, {
       degradeToWorkspaceOnMissing: routeState.startupEntryIntent !== null,
+      deferCenter: true,
     });
   }
 
-  private applyResolvedRouteView(
-    routeState: ProjectShellRouteState,
-    taskDeepLinkResult: ProjectShellTaskDeepLinkRouteResult | null,
-  ): void {
-    if (routeState.degradeMobileStartupRoute) {
-      this.applyDegradedStartupRoute(routeState.handoffResult);
-      return;
-    }
-
-    if (this.shouldOpenFlowRoute(routeState.currentUrl, taskDeepLinkResult)) {
-      this.applyFlowRouteView(routeState.currentUrl);
-      return;
-    }
-
-    if (taskDeepLinkResult === 'pending' || taskDeepLinkResult === 'workspace') {
-      return;
-    }
-
-    if (routeState.currentUrl.endsWith('/text')) {
-      this.cancelFlowStateAwareTimers();
-      this.setActiveView('text');
-      return;
-    }
-
-    this.applyStateAwareFlowRestore(routeState.currentUrl, routeState.projectId);
-  }
-
-  private applyDegradedStartupRoute(handoffResult: HandoffResult): void {
-    this.cancelFlowStateAwareTimers();
-    this.setActiveView('text');
-    this.options.toast.info('已切换到文本视图', this.resolveStartupDegradeMessage());
-    this.switchToFallbackProjectIfNeeded(handoffResult);
-  }
-
-  private resolveStartupDegradeMessage(): string {
-    return this.options.startupLaunchSnapshot?.degradeReason === 'mobile-default-text'
-      ? '手机端启动默认进入文本视图，可稍后手动切换流程图'
-      : '启动阶段已回退到更稳定的文本视图';
-  }
-
-  private switchToFallbackProjectIfNeeded(handoffResult: HandoffResult): void {
-    if (handoffResult.kind !== 'degraded-to-project' || this.options.projectState.activeProjectId()) {
-      return;
-    }
-
-    const fallbackProjectId = this.options.projectState.projects()[0]?.id ?? null;
-    if (fallbackProjectId) {
-      this.options.userSession.switchActiveProject(fallbackProjectId);
-    }
-  }
-
-  private shouldOpenFlowRoute(
-    currentUrl: string,
-    taskDeepLinkResult: ProjectShellTaskDeepLinkRouteResult | null,
-  ): boolean {
-    return currentUrl.endsWith('/flow') || taskDeepLinkResult === 'flow';
-  }
-
-  private applyFlowRouteView(currentUrl: string): void {
-    this.cancelFlowStateAwareTimers();
-    this.options.activateFlowIntent(currentUrl.includes('/task/') ? 'deeplink' : 'route');
-    this.setActiveView('flow');
-  }
 }

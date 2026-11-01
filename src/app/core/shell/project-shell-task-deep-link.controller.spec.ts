@@ -5,14 +5,14 @@ import {
   type ProjectShellTaskDeepLinkControllerOptions,
 } from './project-shell-task-deep-link.controller';
 
+type ControllerOptionsOverrides = Omit<Partial<ProjectShellTaskDeepLinkControllerOptions>, 'projectState'> & {
+  projectState?: Partial<ProjectShellTaskDeepLinkControllerOptions['projectState']>;
+};
+
 function createControllerOptions(
-  overrides: Partial<ProjectShellTaskDeepLinkControllerOptions> = {},
+  overrides: ControllerOptionsOverrides = {},
 ): ProjectShellTaskDeepLinkControllerOptions {
   return {
-    projectState: {
-      tasks: () => [],
-      getTask: () => null,
-    },
     syncCoordinator: {
       isLoadingRemote: () => false,
     },
@@ -33,6 +33,13 @@ function createControllerOptions(
     activateFlowIntent: vi.fn(),
     setActiveView: vi.fn(),
     ...overrides,
+    projectState: {
+      tasks: () => [],
+      getTask: () => null,
+      captureActiveProjectOwner: () => ({ projectId: 'project-a', generation: 1 }),
+      isActiveProjectOwnerCurrent: owner => owner.projectId === 'project-a' && owner.generation === 1,
+      ...overrides.projectState,
+    },
   };
 }
 
@@ -43,8 +50,8 @@ describe('ProjectShellTaskDeepLinkController', () => {
 
   afterEach(() => {
     vi.runOnlyPendingTimers();
-    vi.useRealTimers();
     vi.restoreAllMocks();
+    vi.useRealTimers();
   });
 
   it('returns workspace and navigates back when startup shortcut targets a missing task', () => {
@@ -96,6 +103,31 @@ describe('ProjectShellTaskDeepLinkController', () => {
     expect(navigate).toHaveBeenCalledWith(['/projects']);
     expect(warning).toHaveBeenCalledWith('任务不存在', '请求的任务已失效，已返回工作区');
     expect(warning).toHaveBeenCalledWith('返回工作区失败', '请稍后重试或手动返回项目列表');
+  });
+
+  it('suppresses a late workspace navigation failure after a newer attempt starts', async () => {
+    let rejectNavigation!: (reason?: unknown) => void;
+    const warning = vi.fn();
+    const navigate = vi.fn(() => new Promise<boolean>((_resolve, reject) => {
+      rejectNavigation = reject;
+    }));
+    const controller = new ProjectShellTaskDeepLinkController(createControllerOptions({
+      projectState: {
+        tasks: () => [],
+        getTask: taskId => taskId === 'task-new' ? { id: taskId } : null,
+      },
+      router: { navigate },
+      toast: { warning, info: vi.fn(), success: vi.fn() },
+    }));
+
+    controller.handleTaskDeepLink('task-missing', { degradeToWorkspaceOnMissing: true });
+    warning.mockClear();
+    controller.handleTaskDeepLink('task-new');
+    rejectNavigation(new Error('stale navigation failure'));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(warning).not.toHaveBeenCalled();
   });
 
   it('contains synchronous workspace fallback navigation failures from missing startup shortcuts', async () => {
@@ -199,6 +231,119 @@ describe('ProjectShellTaskDeepLinkController', () => {
     expect(warning).toHaveBeenCalledTimes(1);
   });
 
+  it('suppresses missing-task fallback after the issuance owner becomes stale', () => {
+    let isLoadingRemote = true;
+    let ownerGeneration = 1;
+    const warning = vi.fn();
+    const activateFlowIntent = vi.fn();
+    const setActiveView = vi.fn();
+    const controller = new ProjectShellTaskDeepLinkController(createControllerOptions({
+      projectState: {
+        tasks: () => [],
+        getTask: () => null,
+        captureActiveProjectOwner: () => ({ projectId: 'project-a', generation: ownerGeneration }),
+        isActiveProjectOwnerCurrent: owner => owner.generation === ownerGeneration,
+      },
+      syncCoordinator: { isLoadingRemote: () => isLoadingRemote },
+      toast: { warning, info: vi.fn(), success: vi.fn() },
+      activateFlowIntent,
+      setActiveView,
+    }));
+    controller.handleTaskDeepLink('task-stale');
+    ownerGeneration += 1;
+    isLoadingRemote = false;
+
+    vi.advanceTimersByTime(100);
+
+    expect(warning).not.toHaveBeenCalled();
+    expect(activateFlowIntent).not.toHaveBeenCalled();
+    expect(setActiveView).not.toHaveBeenCalled();
+  });
+
+  it('suppresses workspace degradation when owner authority is lost during task resolution', () => {
+    let ownerGeneration = 1;
+    let taskReads = 0;
+    const warning = vi.fn();
+    const navigate = vi.fn();
+    const controller = new ProjectShellTaskDeepLinkController(createControllerOptions({
+      projectState: {
+        tasks: () => [],
+        getTask: () => {
+          taskReads += 1;
+          if (taskReads === 2) ownerGeneration += 1;
+          return null;
+        },
+        captureActiveProjectOwner: () => ({ projectId: 'project-a', generation: ownerGeneration }),
+        isActiveProjectOwnerCurrent: owner => owner.generation === ownerGeneration,
+      },
+      router: { navigate },
+      toast: { warning, info: vi.fn(), success: vi.fn() },
+    }));
+
+    controller.handleTaskDeepLink('task-stale', { degradeToWorkspaceOnMissing: true });
+
+    expect(warning).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it('suppresses fallback publication when owner authority is lost during task resolution', () => {
+    let ownerGeneration = 1;
+    let taskReads = 0;
+    const warning = vi.fn();
+    const activateFlowIntent = vi.fn();
+    const setActiveView = vi.fn();
+    const controller = new ProjectShellTaskDeepLinkController(createControllerOptions({
+      projectState: {
+        tasks: () => [],
+        getTask: () => {
+          taskReads += 1;
+          if (taskReads === 2) ownerGeneration += 1;
+          return null;
+        },
+        captureActiveProjectOwner: () => ({ projectId: 'project-a', generation: ownerGeneration }),
+        isActiveProjectOwnerCurrent: owner => owner.generation === ownerGeneration,
+      },
+      toast: { warning, info: vi.fn(), success: vi.fn() },
+      activateFlowIntent,
+      setActiveView,
+    }));
+
+    controller.handleTaskDeepLink('task-stale');
+
+    expect(activateFlowIntent).not.toHaveBeenCalled();
+    expect(setActiveView).not.toHaveBeenCalled();
+    expect(warning).not.toHaveBeenCalled();
+  });
+
+  it('stops fallback publication when activation supersedes the attempt', () => {
+    const warning = vi.fn();
+    const info = vi.fn();
+    const setActiveView = vi.fn();
+    const centerOnNode = vi.fn();
+    let controller!: ProjectShellTaskDeepLinkController;
+    const activateFlowIntent = vi.fn().mockImplementationOnce(
+      () => controller.handleTaskDeepLink('task-new'),
+    );
+    controller = new ProjectShellTaskDeepLinkController(createControllerOptions({
+      projectState: {
+        tasks: () => [],
+        getTask: taskId => taskId === 'task-new' ? { id: taskId } : null,
+      },
+      toast: { warning, info, success: vi.fn() },
+      flowCommand: { centerOnNode },
+      activateFlowIntent,
+      setActiveView,
+    }));
+
+    controller.handleTaskDeepLink('task-stale');
+
+    expect(activateFlowIntent).toHaveBeenCalledTimes(2);
+    expect(setActiveView).toHaveBeenCalledTimes(1);
+    expect(centerOnNode).toHaveBeenCalledWith('task-new', true);
+    expect(warning).not.toHaveBeenCalled();
+    expect(info).not.toHaveBeenCalled();
+  });
+
   it('focuses an existing task through the Flow command buffer', () => {
     const centerOnNode = vi.fn();
     const activateFlowIntent = vi.fn();
@@ -220,10 +365,72 @@ describe('ProjectShellTaskDeepLinkController', () => {
     expect(result).toBe('flow');
     expect(activateFlowIntent).toHaveBeenCalledWith('deeplink');
     expect(setActiveView).toHaveBeenCalledWith('flow');
-
-    vi.advanceTimersByTime(100);
-
     expect(centerOnNode).toHaveBeenCalledWith('task-1', true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('checks generation after Flow activation before changing view or publishing', () => {
+    const centerOnNode = vi.fn();
+    let controller!: ProjectShellTaskDeepLinkController;
+    const setActiveView = vi.fn();
+    const activateFlowIntent = vi.fn(() => controller.retirePendingAttempt());
+    controller = new ProjectShellTaskDeepLinkController(createControllerOptions({
+      projectState: {
+        tasks: () => [{ id: 'task-a' }, { id: 'task-b' }],
+        getTask: taskId => ({ id: taskId }),
+      },
+      flowCommand: { centerOnNode },
+      activateFlowIntent,
+      setActiveView,
+    }));
+
+    controller.handleTaskDeepLink('task-a');
+    expect(centerOnNode).not.toHaveBeenCalled();
+    expect(setActiveView).not.toHaveBeenCalled();
+
+    activateFlowIntent.mockImplementation(() => undefined);
+    controller.handleTaskDeepLink('task-b');
+    expect(centerOnNode).toHaveBeenCalledOnce();
+    expect(centerOnNode).toHaveBeenCalledWith('task-b', true);
+  });
+
+  it('checks generation after the view switch immediately before publication', () => {
+    const centerOnNode = vi.fn();
+    let controller!: ProjectShellTaskDeepLinkController;
+    controller = new ProjectShellTaskDeepLinkController(createControllerOptions({
+      projectState: {
+        tasks: () => [{ id: 'task-a' }],
+        getTask: () => ({ id: 'task-a' }),
+      },
+      flowCommand: { centerOnNode },
+      setActiveView: vi.fn(() => controller.retirePendingAttempt()),
+    }));
+
+    controller.handleTaskDeepLink('task-a');
+
+    expect(centerOnNode).not.toHaveBeenCalled();
+  });
+
+  it('checks the issuance-time project owner immediately before publication', () => {
+    let ownerGeneration = 1;
+    const centerOnNode = vi.fn();
+    const projectState = {
+      tasks: () => [{ id: 'task-a' }],
+      getTask: () => ({ id: 'task-a' }),
+      captureActiveProjectOwner: () => ({ projectId: 'project-a', generation: ownerGeneration }),
+      isActiveProjectOwnerCurrent: (owner: { projectId: string | null; generation: number }) => (
+        owner.projectId === 'project-a' && owner.generation === ownerGeneration
+      ),
+    } as ProjectShellTaskDeepLinkControllerOptions['projectState'];
+    const controller = new ProjectShellTaskDeepLinkController(createControllerOptions({
+      projectState,
+      flowCommand: { centerOnNode },
+      setActiveView: vi.fn(() => { ownerGeneration += 1; }),
+    }));
+
+    controller.handleTaskDeepLink('task-a');
+
+    expect(centerOnNode).not.toHaveBeenCalled();
   });
 
   it('creates the fallback task durably before showing success from the missing-task action', async () => {

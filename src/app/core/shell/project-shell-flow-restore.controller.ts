@@ -1,4 +1,7 @@
 import { STARTUP_PERF_CONFIG } from '../../../config/startup-performance.config';
+import {
+  ProjectShellFlowRestoreSchedulerController,
+} from './project-shell-flow-restore-scheduler.controller';
 
 interface NetworkInformationLike {
   effectiveType?: '4g' | '3g' | '2g' | 'slow-2g';
@@ -22,17 +25,36 @@ export interface ProjectShellFlowRestoreControllerOptions {
     persistActiveView(view: 'text' | 'flow'): void;
   };
   activateFlowIntent(source: 'route' | 'restore-idle'): void;
+  scheduler?: Pick<
+    ProjectShellFlowRestoreSchedulerController,
+    | 'cancel'
+    | 'destroy'
+    | 'scheduleFlowIdleRestore'
+    | 'scheduleWeakNetworkIdlePreload'
+  >;
 }
 
 export class ProjectShellFlowRestoreController {
-  private isDestroyed = false;
-  private flowRestoreTimer: ReturnType<typeof setTimeout> | null = null;
-  private flowIdlePreloadTimer: ReturnType<typeof setTimeout> | null = null;
-  private flowRestoreIdleCallbackId: number | null = null;
-  private flowPreloadIdleCallbackId: number | null = null;
   private lastFlowRestoreProjectId: string | null = null;
+  private readonly scheduler: Pick<
+    ProjectShellFlowRestoreSchedulerController,
+    | 'cancel'
+    | 'destroy'
+    | 'scheduleFlowIdleRestore'
+    | 'scheduleWeakNetworkIdlePreload'
+  >;
 
-  constructor(private readonly options: ProjectShellFlowRestoreControllerOptions) {}
+  constructor(private readonly options: ProjectShellFlowRestoreControllerOptions) {
+    this.scheduler = options.scheduler
+      ?? new ProjectShellFlowRestoreSchedulerController({
+        activateFlowIntent: source => options.activateFlowIntent(source),
+        flowIntentActivated: options.flowIntentActivated,
+        reportFlowRestoreMode: (mode, data) => this.reportFlowRestoreMode(mode, data),
+        setActiveView: view => this.setActiveView(view),
+        setFlowPrefetchOnlyActivated: value =>
+          options.flowPrefetchOnlyActivated.set(value),
+      });
+  }
 
   applyStateAwareFlowRestore(currentUrl: string, projectId?: string): void {
     if (!projectId) {
@@ -78,7 +100,7 @@ export class ProjectShellFlowRestoreController {
     const weakNetwork = this.isWeakNetworkForFlowRestore();
     if (weakNetwork) {
       this.options.uiState.activeView.set('text');
-      this.scheduleWeakNetworkIdlePreload(projectId);
+      this.scheduler.scheduleWeakNetworkIdlePreload(projectId);
       this.reportFlowRestoreMode('degraded', {
         reason: 'weak-network-preload-only',
         projectId,
@@ -86,7 +108,7 @@ export class ProjectShellFlowRestoreController {
       return;
     }
 
-    this.scheduleFlowIdleRestore(projectId);
+    this.scheduler.scheduleFlowIdleRestore(projectId);
   }
 
   setActiveView(view: 'text' | 'flow'): void {
@@ -96,94 +118,11 @@ export class ProjectShellFlowRestoreController {
   }
 
   cancelFlowStateAwareTimers(): void {
-    if (this.flowRestoreTimer !== null) {
-      clearTimeout(this.flowRestoreTimer);
-      this.flowRestoreTimer = null;
-    }
-    if (this.flowIdlePreloadTimer !== null) {
-      clearTimeout(this.flowIdlePreloadTimer);
-      this.flowIdlePreloadTimer = null;
-    }
-    if (
-      this.flowRestoreIdleCallbackId !== null &&
-      typeof window !== 'undefined' &&
-      'cancelIdleCallback' in window
-    ) {
-      (window as Window & { cancelIdleCallback: (handle: number) => void })
-        .cancelIdleCallback(this.flowRestoreIdleCallbackId);
-      this.flowRestoreIdleCallbackId = null;
-    }
-    if (
-      this.flowPreloadIdleCallbackId !== null &&
-      typeof window !== 'undefined' &&
-      'cancelIdleCallback' in window
-    ) {
-      (window as Window & { cancelIdleCallback: (handle: number) => void })
-        .cancelIdleCallback(this.flowPreloadIdleCallbackId);
-      this.flowPreloadIdleCallbackId = null;
-    }
+    this.scheduler.cancel();
   }
 
   destroy(): void {
-    this.isDestroyed = true;
-    this.cancelFlowStateAwareTimers();
-  }
-
-  private scheduleFlowIdleRestore(projectId: string): void {
-    const triggerRestore = () => {
-      if (this.isDestroyed) return;
-      this.options.activateFlowIntent('restore-idle');
-      this.setActiveView('flow');
-      this.reportFlowRestoreMode('applied', {
-        reason: 'desktop-idle-restore',
-        projectId,
-      });
-    };
-
-    this.flowRestoreTimer = setTimeout(() => {
-      this.flowRestoreTimer = null;
-      if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
-        const requestIdle = (window as Window & {
-          requestIdleCallback: (cb: IdleRequestCallback, options?: IdleRequestOptions) => number;
-        }).requestIdleCallback;
-
-        this.flowRestoreIdleCallbackId = requestIdle(() => {
-          this.flowRestoreIdleCallbackId = null;
-          triggerRestore();
-        }, { timeout: STARTUP_PERF_CONFIG.FLOW_RESTORE_IDLE_DELAY_MS });
-        return;
-      }
-
-      triggerRestore();
-    }, STARTUP_PERF_CONFIG.FLOW_RESTORE_IDLE_DELAY_MS);
-  }
-
-  private scheduleWeakNetworkIdlePreload(projectId: string): void {
-    const triggerPreload = () => {
-      if (this.isDestroyed || this.options.flowIntentActivated()) return;
-      this.options.flowPrefetchOnlyActivated.set(true);
-      this.reportFlowRestoreMode('degraded', {
-        reason: 'weak-network-idle-preload',
-        projectId,
-      });
-    };
-
-    this.flowIdlePreloadTimer = setTimeout(() => {
-      this.flowIdlePreloadTimer = null;
-
-      if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
-        const requestIdle = (window as Window & {
-          requestIdleCallback: (cb: IdleRequestCallback, options?: IdleRequestOptions) => number;
-        }).requestIdleCallback;
-        this.flowPreloadIdleCallbackId = requestIdle(() => {
-          this.flowPreloadIdleCallbackId = null;
-          triggerPreload();
-        }, { timeout: STARTUP_PERF_CONFIG.FLOW_RESTORE_IDLE_DELAY_MS });
-        return;
-      }
-
-      triggerPreload();
-    }, STARTUP_PERF_CONFIG.FLOW_IDLE_PRELOAD_DELAY_MS);
+    this.scheduler.destroy();
   }
 
   private isWeakNetworkForFlowRestore(): boolean {

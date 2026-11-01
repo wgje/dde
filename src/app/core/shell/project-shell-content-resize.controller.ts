@@ -1,5 +1,20 @@
-import { signal } from '@angular/core';
 import { UiStateService } from '../../../services/ui-state.service';
+import {
+  ProjectShellContentResizeAnimationController,
+} from './project-shell-content-resize-animation.controller';
+import {
+  ProjectShellContentResizeFrameController,
+} from './project-shell-content-resize-frame.controller';
+
+type ContentResizeAnimationController = Pick<
+  ProjectShellContentResizeAnimationController,
+  'animating' | 'clear' | 'enable'
+>;
+
+type ContentResizeFrameController = Pick<
+  ProjectShellContentResizeFrameController,
+  'clear' | 'schedule'
+>;
 
 /** Manages desktop text-column resize state for ProjectShellComponent. */
 export class ProjectShellContentResizeController {
@@ -9,19 +24,29 @@ export class ProjectShellContentResizeController {
   private startX = 0;
   private startRatio = 0;
   private mainContentWidth = 0;
-  private resizeRafId: number | null = null;
-  private resizeFrameGeneration = 0;
   private isDragCollapsed = false;
-  private collapseAnimTimer: ReturnType<typeof setTimeout> | null = null;
-  private collapseAnimationGeneration = 0;
+  private readonly collapseAnimation: ContentResizeAnimationController;
+  private readonly resizeFrame: ContentResizeFrameController;
 
-  readonly collapseAnimating = signal(false);
+  readonly collapseAnimating: ContentResizeAnimationController['animating'];
 
-  constructor(private readonly uiState: UiStateService) {}
+  constructor(
+    private readonly uiState: UiStateService,
+    collapseAnimation?: ContentResizeAnimationController,
+    resizeFrame?: ContentResizeFrameController,
+  ) {
+    this.collapseAnimation = collapseAnimation
+      ?? new ProjectShellContentResizeAnimationController();
+    this.collapseAnimating = this.collapseAnimation.animating;
+    this.resizeFrame = resizeFrame
+      ?? new ProjectShellContentResizeFrameController({
+        applyMove: clientX => this.applyMoveFrame(clientX),
+      });
+  }
 
   start(e: MouseEvent): void {
     e.preventDefault();
-    this.clearPendingMoveFrame();
+    this.resizeFrame.clear();
     const doc = this.getDocument();
     if (!doc) {
       return;
@@ -42,21 +67,7 @@ export class ProjectShellContentResizeController {
   move(e: MouseEvent): void {
     if (!this.isResizingContent) return;
     e.preventDefault();
-    if (this.resizeRafId !== null) return;
-
-    const clientX = e.clientX;
-    const resizeFrameGeneration = this.resizeFrameGeneration + 1;
-    this.resizeFrameGeneration = resizeFrameGeneration;
-    let resizeRafId: number | null = null;
-    try {
-      resizeRafId = this.requestFrame(() =>
-        this.applyScheduledMoveFrame(clientX, resizeRafId, resizeFrameGeneration));
-    } catch {
-      this.resizeRafId = null;
-      this.applyMoveFrame(clientX);
-      return;
-    }
-    this.resizeRafId = resizeRafId;
+    this.resizeFrame.schedule(e.clientX);
   }
 
   end(): void {
@@ -65,14 +76,13 @@ export class ProjectShellContentResizeController {
     const shouldAnimateCollapsed = this.isDragCollapsed;
     this.cleanup();
     if (shouldAnimateCollapsed) {
-      this.enableCollapseAnimation();
+      this.collapseAnimation.enable();
     }
   }
 
   cleanup(): void {
-    this.clearPendingMoveFrame();
-    this.clearCollapseAnimationTimer();
-    this.collapseAnimating.set(false);
+    this.resizeFrame.clear();
+    this.collapseAnimation.clear();
     this.isDragCollapsed = false;
     this.isResizingContent = false;
     this.uiState.isResizing.set(false);
@@ -87,52 +97,7 @@ export class ProjectShellContentResizeController {
     return typeof document === 'undefined' ? null : document;
   }
 
-  private requestFrame(callback: FrameRequestCallback): number {
-    return typeof requestAnimationFrame === 'function'
-      ? requestAnimationFrame(callback)
-      : setTimeout(() => callback(Date.now()), 16) as unknown as number;
-  }
-
-  private cancelFrame(id: number): void {
-    if (typeof cancelAnimationFrame === 'function') {
-      cancelAnimationFrame(id);
-      return;
-    }
-
-    clearTimeout(id);
-  }
-
-  private clearPendingMoveFrame(): void {
-    if (this.resizeRafId === null) return;
-
-    const resizeRafId = this.resizeRafId;
-    this.resizeFrameGeneration += 1;
-    this.resizeRafId = null;
-    try {
-      this.cancelFrame(resizeRafId);
-    } catch {
-      // Cancel failures are best-effort; generation invalidation prevents the
-      // stale frame from mutating drag state if the browser still runs it.
-    }
-  }
-
-  private applyScheduledMoveFrame(
-    clientX: number,
-    resizeRafId: number | null,
-    resizeFrameGeneration: number,
-  ): void {
-    if (
-      this.resizeFrameGeneration !== resizeFrameGeneration ||
-      this.resizeRafId !== resizeRafId
-    ) {
-      return;
-    }
-
-    this.applyMoveFrame(clientX);
-  }
-
   private applyMoveFrame(clientX: number): void {
-    this.resizeRafId = null;
     const delta = clientX - this.startX;
     const deltaPercent = (delta / this.mainContentWidth) * 100;
     const rawRatio = this.startRatio + deltaPercent;
@@ -154,61 +119,19 @@ export class ProjectShellContentResizeController {
     if (this.isDragCollapsed) return;
 
     this.isDragCollapsed = true;
-    this.enableCollapseAnimation();
+    this.collapseAnimation.enable();
     this.uiState.textColumnRatio.set(0);
     this.uiState.isTextColumnCollapsed.set(true);
   }
 
   private applyExpandedDragState(rawRatio: number): void {
     this.isDragCollapsed = false;
-    this.enableCollapseAnimation();
+    this.collapseAnimation.enable();
     this.uiState.isTextColumnCollapsed.set(false);
     this.uiState.textColumnRatio.set(this.clampTextColumnRatio(rawRatio));
   }
 
   private clampTextColumnRatio(rawRatio: number): number {
     return Math.max(25, Math.min(75, rawRatio));
-  }
-
-  private enableCollapseAnimation(): void {
-    this.clearCollapseAnimationTimer();
-    const collapseAnimationGeneration = this.collapseAnimationGeneration + 1;
-    this.collapseAnimationGeneration = collapseAnimationGeneration;
-    this.collapseAnimating.set(true);
-    let collapseAnimTimer: ReturnType<typeof setTimeout> | null = null;
-    try {
-      collapseAnimTimer = setTimeout(() => {
-        if (
-          this.collapseAnimationGeneration !== collapseAnimationGeneration ||
-          this.collapseAnimTimer !== collapseAnimTimer
-        ) {
-          return;
-        }
-
-        this.collapseAnimating.set(false);
-        this.collapseAnimTimer = null;
-      }, 320);
-    } catch {
-      if (this.collapseAnimationGeneration === collapseAnimationGeneration) {
-        this.collapseAnimating.set(false);
-        this.collapseAnimTimer = null;
-      }
-      return;
-    }
-    this.collapseAnimTimer = collapseAnimTimer;
-  }
-
-  private clearCollapseAnimationTimer(): void {
-    if (!this.collapseAnimTimer) return;
-
-    const collapseAnimTimer = this.collapseAnimTimer;
-    this.collapseAnimTimer = null;
-    this.collapseAnimationGeneration += 1;
-    try {
-      clearTimeout(collapseAnimTimer);
-    } catch {
-      // Stale collapse timers are invalidated before best-effort cleanup so
-      // delayed callbacks cannot clear a newer animation state.
-    }
   }
 }

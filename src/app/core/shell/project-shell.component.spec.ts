@@ -45,6 +45,10 @@ function createRouteControllerOptions(
       projects: () => [],
       tasks: () => [],
       getTask: () => null,
+      captureActiveProjectOwner: () => ({ projectId: 'project-1', generation: 1 }),
+      isActiveProjectOwnerCurrent: owner => (
+        owner.projectId === 'project-1' && owner.generation === 1
+      ),
     },
     syncCoordinator: {
       isLoadingRemote: () => false,
@@ -112,6 +116,10 @@ describe('ProjectShellRouteController route project selection', () => {
         projects: () => [{ id: 'project-1', name: 'Real Project' }],
         tasks: () => [],
         getTask: () => null,
+        captureActiveProjectOwner: () => ({ projectId: 'project-1', generation: 1 }),
+        isActiveProjectOwnerCurrent: owner => (
+          owner.projectId === 'project-1' && owner.generation === 1
+        ),
       },
       userSession: {
         switchActiveProject,
@@ -161,6 +169,10 @@ describe('ProjectShellRouteController route project selection', () => {
         projects: () => [{ id: 'project-1', name: 'Real Project' }],
         tasks: () => [],
         getTask: () => null,
+        captureActiveProjectOwner: () => ({ projectId: 'project-1', generation: 1 }),
+        isActiveProjectOwnerCurrent: owner => (
+          owner.projectId === 'project-1' && owner.generation === 1
+        ),
       },
       activateFlowIntent,
     }));
@@ -229,27 +241,6 @@ describe('ProjectShellComponent content resize lifecycle', () => {
     expect(() => controller.cleanup()).not.toThrow();
     expect(isResizing()).toBe(false);
     expect(controller.collapseAnimating()).toBe(false);
-  });
-});
-
-describe('ProjectShellComponent mobile swipe lifecycle', () => {
-  it('ngOnDestroy 应销毁 text view swipe controller', () => {
-    const swipeDestroy = vi.fn();
-    const context = {
-      textViewSwipe: {
-        destroy: swipeDestroy,
-      },
-      routeController: {
-        destroy: vi.fn(),
-      },
-      contentResize: {
-        cleanup: vi.fn(),
-      },
-    };
-
-    ProjectShellComponent.prototype.ngOnDestroy.call(context);
-
-    expect(swipeDestroy).toHaveBeenCalledOnce();
   });
 });
 

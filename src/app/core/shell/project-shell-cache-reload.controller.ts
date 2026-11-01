@@ -16,6 +16,10 @@ export class ProjectShellCacheReloadController {
   constructor(private readonly options: ProjectShellCacheReloadControllerOptions) {}
 
   reloadPage(): void {
+    if (this.navigatorRef?.onLine === false) {
+      return;
+    }
+
     this.options.logger.warn('Triggering force cache clear due to @defer error');
 
     const forceClearCache = (this.windowRef as ForceClearCacheWindow)

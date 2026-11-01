@@ -77,6 +77,34 @@ describe('ProjectShellCacheReloadController', () => {
     expect(windowRef.location.reload).toHaveBeenCalledTimes(1);
   });
 
+  it('preserves offline recovery state without clearing caches or service workers', async () => {
+    const forceClear = vi.fn();
+    const windowRef = createWindow({
+      __NANOFLOW_FORCE_CLEAR_CACHE__: forceClear,
+    } as Partial<Window>);
+    const cachesRef = {
+      keys: vi.fn().mockResolvedValue(['ngsw']),
+      delete: vi.fn().mockResolvedValue(true),
+    } as unknown as CacheStorage;
+    const registration = { unregister: vi.fn().mockResolvedValue(true) };
+    const getRegistrations = vi.fn().mockResolvedValue([registration]);
+    const navigatorRef = {
+      onLine: false,
+      serviceWorker: { getRegistrations },
+    } as unknown as Navigator;
+    const controller = createController({ cachesRef, navigatorRef, windowRef });
+
+    controller.reloadPage();
+    await flushProjectShellCacheReloadMicrotasks();
+
+    expect(forceClear).not.toHaveBeenCalled();
+    expect(cachesRef.keys).not.toHaveBeenCalled();
+    expect(cachesRef.delete).not.toHaveBeenCalled();
+    expect(getRegistrations).not.toHaveBeenCalled();
+    expect(registration.unregister).not.toHaveBeenCalled();
+    expect(windowRef.location.reload).not.toHaveBeenCalled();
+  });
+
   it('clears browser caches and unregisters service workers before fallback reload', async () => {
     const windowRef = createWindow();
     const cachesRef = {

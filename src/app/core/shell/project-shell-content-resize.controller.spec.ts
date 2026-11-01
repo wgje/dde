@@ -2,6 +2,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { signal } from '@angular/core';
 
 import { ProjectShellContentResizeController } from './project-shell-content-resize.controller';
+import type {
+  ProjectShellContentResizeAnimationController,
+} from './project-shell-content-resize-animation.controller';
+import type {
+  ProjectShellContentResizeFrameController,
+} from './project-shell-content-resize-frame.controller';
 import type { UiStateService } from '../../../services/ui-state.service';
 
 function createMouseEvent(clientX: number): MouseEvent {
@@ -19,9 +25,15 @@ function createUiState() {
   } as unknown as UiStateService;
 }
 
-function createControllerWithMain() {
+function createControllerWithMain(
+  animation?: Pick<
+    ProjectShellContentResizeAnimationController,
+    'animating' | 'clear' | 'enable'
+  >,
+  frame?: Pick<ProjectShellContentResizeFrameController, 'clear' | 'schedule'>,
+) {
   const uiState = createUiState();
-  const controller = new ProjectShellContentResizeController(uiState);
+  const controller = new ProjectShellContentResizeController(uiState, animation, frame);
 
   document.body.innerHTML = '<main style="width: 1000px"></main>';
   Object.defineProperty(document.querySelector('main'), 'clientWidth', {
@@ -214,5 +226,44 @@ describe('ProjectShellContentResizeController', () => {
     expect(uiState.textColumnRatio()).toBe(0);
     expect(uiState.isTextColumnCollapsed()).toBe(true);
     expect(controller.collapseAnimating()).toBe(false);
+  });
+
+  it('delegates collapse animation state and cleanup to the animation controller', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn((callback: FrameRequestCallback) => {
+      callback(performance.now());
+      return 1;
+    }));
+    vi.stubGlobal('cancelAnimationFrame', vi.fn());
+    const animation = {
+      animating: signal(false),
+      clear: vi.fn(),
+      enable: vi.fn(),
+    };
+    const { controller } = createControllerWithMain(animation);
+
+    controller.start(createMouseEvent(500));
+    controller.move(createMouseEvent(0));
+    controller.cleanup();
+
+    expect(controller.collapseAnimating).toBe(animation.animating);
+    expect(animation.enable).toHaveBeenCalledTimes(1);
+    expect(animation.clear).toHaveBeenCalledTimes(1);
+  });
+
+  it('delegates move frame scheduling and cleanup to the frame controller', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn(() => 1));
+    vi.stubGlobal('cancelAnimationFrame', vi.fn());
+    const frame = {
+      clear: vi.fn(),
+      schedule: vi.fn(),
+    };
+    const { controller } = createControllerWithMain(undefined, frame);
+
+    controller.start(createMouseEvent(0));
+    controller.move(createMouseEvent(100));
+    controller.cleanup();
+
+    expect(frame.schedule).toHaveBeenCalledWith(100);
+    expect(frame.clear).toHaveBeenCalledTimes(2);
   });
 });

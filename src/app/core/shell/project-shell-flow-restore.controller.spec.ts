@@ -35,8 +35,8 @@ describe('ProjectShellFlowRestoreController', () => {
 
   afterEach(() => {
     vi.runOnlyPendingTimers();
-    vi.useRealTimers();
     vi.restoreAllMocks();
+    vi.useRealTimers();
   });
 
   it('keeps mobile root restore in Text even when state-aware restore is disabled', () => {
@@ -217,5 +217,41 @@ describe('ProjectShellFlowRestoreController', () => {
     vi.advanceTimersByTime(STARTUP_PERF_CONFIG.FLOW_IDLE_PRELOAD_DELAY_MS);
 
     expect(setPrefetchOnly).toHaveBeenLastCalledWith(true);
+  });
+
+  it('delegates weak-network deferred work and lifecycle cleanup to the scheduler', () => {
+    Object.defineProperty(navigator, 'connection', {
+      configurable: true,
+      value: {
+        effectiveType: '2g',
+      },
+    });
+    const scheduler = {
+      cancel: vi.fn(),
+      destroy: vi.fn(),
+      scheduleFlowIdleRestore: vi.fn(),
+      scheduleWeakNetworkIdlePreload: vi.fn(),
+    };
+    const controller = new ProjectShellFlowRestoreController(createControllerOptions({
+      scheduler,
+      uiState: {
+        isMobile: () => false,
+        activeView: {
+          set: vi.fn(),
+        },
+        getLastActiveView: () => 'flow',
+        persistActiveView: vi.fn(),
+      },
+    }));
+
+    controller.applyStateAwareFlowRestore('/projects/project-1', 'project-1');
+    expect(scheduler.scheduleWeakNetworkIdlePreload).toHaveBeenCalledWith('project-1');
+
+    scheduler.cancel.mockClear();
+    controller.cancelFlowStateAwareTimers();
+    controller.destroy();
+
+    expect(scheduler.cancel).toHaveBeenCalledTimes(1);
+    expect(scheduler.destroy).toHaveBeenCalledTimes(1);
   });
 });
