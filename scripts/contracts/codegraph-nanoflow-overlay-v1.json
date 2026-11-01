@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "schemaDigest": "3d4c1049024c8895f5e2fe5504bf2814b87d66211d93a9ff22bc901be8db9031",
+  "schemaDigest": "5132af08c96287a8808840b6667fe2df8e0a4d6a57e471c9aada686d0f2e3250",
   "digestDomain": "nanoflow-overlay-schema-v1",
   "sourcePolicyDigest": "ca78ea5e17d32399faac676bcab26fc1d7f48186a89792774d37a6b8549d0ca3",
   "encoding": {
@@ -147,9 +147,9 @@
     "typescript": "cd2538e77f1abbe5aabe750e0a4ecda1807e006cecc2fc6acc03296dd7f2eabf",
     "angular-support": "a68c9feed371bb4d107b7e458559431df0197a013e0434350f63285b38027bbc",
     "supabase-android": "7deba66271dd9253c05ff74b2000a3a6124a793da35c2c490d0e7bb03ae16e9d",
-    "graph": "d351740e73e31bca9cb065ca104c5840275b7ed00d19bca5aa5c4088812f316a"
+    "graph": "63f663485bdbcf3465ae17ba939589d0a8632ab1e29e2b9d3ec67ca85502498b"
   },
-  "descriptorManifestDigest": "a236349b6620e636a59263585ff532e7788c9706ea5de59774be233137edc5a6",
+  "descriptorManifestDigest": "245dade46ea7b39cd068f2c6ce7c160a05c04238341d9d78e5e54fee9c64b2a5",
   "authority": {
     "generator": {
       "sourcePath": "scripts/generate-codegraph-nanoflow-overlay.mjs",
@@ -262,7 +262,7 @@
     ],
     "graphRepositoryFileSelection": "canonical repository-file path with a shared bounded case-collision witness",
     "graphWitnessField": "graph.nodes[].filePath",
-    "externalGraphFilePathFormats": ["https-url", "node-builtin", "bare-package-specifier"],
+    "externalGraphFilePathFormats": ["https-url", "node-builtin", "bare-package-specifier", "npm-package-specifier"],
     "projectRootComparison": "slash-normalized, trailing-slash-insensitive, ordinal case-sensitive"
   },
   "nodeIdentity": {

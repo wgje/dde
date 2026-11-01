@@ -134,7 +134,7 @@ export function registerCodegraphAdapterDoctorConfigSpecs(
       codegraphServerConfigured: true,
       command: 'node',
       wrapperScriptExists: true,
-      codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+      codegraphTarget: '@colbymchenry/codegraph@1.6.2',
     }));
     expect(report.checks).toEqual(expect.arrayContaining([
       expect.objectContaining({ name: 'mcp-config:wrapper-script', ok: true }),
@@ -218,7 +218,7 @@ export function registerCodegraphAdapterDoctorConfigSpecs(
     writeFileSync(projectConfigPath, [
       '[mcp_servers.codegraph]',
       'command = "node"',
-      `args = [${JSON.stringify(path.join(root, 'scripts', 'codegraph-nanoflow-mcp-stdio.cjs'))}, "@colbymchenry/codegraph@1.5.0", "serve", "--mcp", "--path", ${JSON.stringify(otherRoot)}]`,
+      `args = [${JSON.stringify(path.join(root, 'scripts', 'codegraph-nanoflow-mcp-stdio.cjs'))}, "@colbymchenry/codegraph@1.6.2", "serve", "--mcp", "--path", ${JSON.stringify(otherRoot)}]`,
       '',
       '[mcp_servers.codegraph.env]',
       'CODEGRAPH_NO_DAEMON = "0"',
@@ -245,7 +245,7 @@ export function registerCodegraphAdapterDoctorConfigSpecs(
       projectConfigPath,
       appliesToRoot: false,
       codegraphServerConfigured: true,
-      codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+      codegraphTarget: '@colbymchenry/codegraph@1.6.2',
       contractMatchesRequired: false,
       contractMismatches: expect.arrayContaining([
         expect.objectContaining({ field: 'appliesToRoot', expected: true, actual: false }),
@@ -302,7 +302,7 @@ export function registerCodegraphAdapterDoctorConfigSpecs(
     expect(updated).toContain('[mcp_servers.context7]');
     expect(updated).toContain('[mcp_servers.codegraph.tools.nanoflow_context_pack]');
     expect(updated).toContain('tool_timeout_sec = 120');
-    expect(updated).toContain('"@colbymchenry/codegraph@1.5.0"');
+    expect(updated).toContain('"@colbymchenry/codegraph@1.6.2"');
     expect(updated).toContain('CODEGRAPH_NO_DAEMON = "0"');
     expect(updated).toContain('CODEGRAPH_NO_WATCH = "0"');
     expect(updated).toContain('CODEGRAPH_DAEMON_IDLE_TIMEOUT_MS = "300000"');
@@ -320,7 +320,7 @@ export function registerCodegraphAdapterDoctorConfigSpecs(
     expect(report.mcpConfig).toEqual(expect.objectContaining({
       scope: 'project',
       path: projectConfigPath,
-      codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+      codegraphTarget: '@colbymchenry/codegraph@1.6.2',
       contractMatchesRequired: true,
       repair: expect.objectContaining({
         changed: true,

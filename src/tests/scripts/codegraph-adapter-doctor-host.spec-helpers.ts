@@ -79,7 +79,7 @@ export function registerCodegraphAdapterDoctorHostSpecs(
         {
           pid: 43000,
           parentPid: 13880,
-          commandLine: `"${process.execPath}" ${wrapperPath} @colbymchenry/codegraph@1.5.0 serve --mcp --path ${root}`,
+          commandLine: `"${process.execPath}" ${wrapperPath} @colbymchenry/codegraph@1.6.2 serve --mcp --path ${root}`,
         },
       ]),
     });
@@ -111,7 +111,7 @@ export function registerCodegraphAdapterDoctorHostSpecs(
           event: 'wrapper.start',
           scriptPath: wrapperPath,
           scriptSha256: sha256(wrapperContents),
-          codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+          codegraphTarget: '@colbymchenry/codegraph@1.6.2',
           env: {
             NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '30000',
             NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE: '0',
@@ -226,7 +226,7 @@ export function registerCodegraphAdapterDoctorHostSpecs(
           event: 'wrapper.start',
           scriptPath: wrapperPath,
           scriptSha256: sha256(wrapperContents),
-          codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+          codegraphTarget: '@colbymchenry/codegraph@1.6.2',
           env: {
             NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '30000',
             NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE: '0',
@@ -344,7 +344,7 @@ export function registerCodegraphAdapterDoctorHostSpecs(
         event: 'wrapper.start',
         scriptPath: wrapperPath,
         scriptSha256: sha256(wrapperContents),
-        codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+        codegraphTarget: '@colbymchenry/codegraph@1.6.2',
       })}\n`,
     );
     const codexConfigDir = mkdtempSync(path.join(tmpdir(), 'nanoflow-codex-doctor-config-'));
@@ -411,7 +411,7 @@ export function registerCodegraphAdapterDoctorHostSpecs(
           event: 'wrapper.start',
           scriptPath: wrapperPath,
           scriptSha256: sha256(wrapperContents),
-          codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+          codegraphTarget: '@colbymchenry/codegraph@1.6.2',
           env: {
             NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '30000',
             NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE: '0',
@@ -429,7 +429,7 @@ export function registerCodegraphAdapterDoctorHostSpecs(
             wrapperPid: 43011,
             scriptPath: wrapperPath,
             scriptSha256: sha256(wrapperContents),
-            codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+            codegraphTarget: '@colbymchenry/codegraph@1.6.2',
             env: {
               NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '30000',
               NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE: '0',
@@ -534,12 +534,12 @@ export function registerCodegraphAdapterDoctorHostSpecs(
         {
           pid: 43001,
           parentPid: 13880,
-          commandLine: `"${process.execPath}" ${wrapperPath} @colbymchenry/codegraph@1.5.0 serve --mcp --path ${root}`,
+          commandLine: `"${process.execPath}" ${wrapperPath} @colbymchenry/codegraph@1.6.2 serve --mcp --path ${root}`,
         },
         {
           pid: 43002,
           parentPid: 13880,
-          commandLine: `"${process.execPath}" ${wrapperPath} @colbymchenry/codegraph@1.5.0 serve --mcp --path ${root}`,
+          commandLine: `"${process.execPath}" ${wrapperPath} @colbymchenry/codegraph@1.6.2 serve --mcp --path ${root}`,
         },
       ]),
     };
@@ -568,7 +568,7 @@ export function registerCodegraphAdapterDoctorHostSpecs(
     const wrapperPath = path.join(root, 'scripts', 'codegraph-nanoflow-mcp-stdio.cjs');
     const wrapperContents = 'fresh wrapper\n';
     const wrapperHash = sha256(wrapperContents);
-    const target = '@colbymchenry/codegraph@1.5.0';
+    const target = '@colbymchenry/codegraph@1.6.2';
     const staleEnv = {
       CODEGRAPH_NO_DAEMON: '0',
       CODEGRAPH_NO_WATCH: '0',
@@ -719,12 +719,12 @@ export function registerCodegraphAdapterDoctorHostSpecs(
         {
           pid: 43003,
           parentPid: 13880,
-          commandLine: `"${process.execPath}" ${wrapperPath} @colbymchenry/codegraph@1.5.0 serve --mcp --path ${root}`,
+          commandLine: `"${process.execPath}" ${wrapperPath} @colbymchenry/codegraph@1.6.2 serve --mcp --path ${root}`,
         },
         {
           pid: 43004,
           parentPid: 13880,
-          commandLine: `"${process.execPath}" ${wrapperPath} @colbymchenry/codegraph@1.5.0 serve --mcp --path ${root}`,
+          commandLine: `"${process.execPath}" ${wrapperPath} @colbymchenry/codegraph@1.6.2 serve --mcp --path ${root}`,
         },
       ]),
     };

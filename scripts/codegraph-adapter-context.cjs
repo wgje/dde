@@ -18,7 +18,7 @@ const {
   parseNanoFlowContextOutcomeV1,
 } = require('./lib/codegraph-context-outcome.cjs');
 
-const DEFAULT_CODEGRAPH_TARGET = '@colbymchenry/codegraph@1.5.0';
+const DEFAULT_CODEGRAPH_TARGET = '@colbymchenry/codegraph@1.6.2';
 const REQUIRED_FRESH_FALLBACK_ENV = {
   NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '30000',
   NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE: '0',

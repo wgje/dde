@@ -2,7 +2,7 @@
   "schemaVersion": 2,
   "hotspotParts": ["codegraph-nanoflow-dedup-contract-android-kotlin.json"],
   "dependencyLeafSources": ["scripts/lib/codegraph-overlay-baseline.cjs", "scripts/lib/codegraph-source-policy.cjs"],
-  "upstreamCodeGraphVersion": "@colbymchenry/codegraph@1.5.0",
+  "upstreamCodeGraphVersion": "@colbymchenry/codegraph@1.6.2",
   "fixedVersionUpgradeProbe": "--codegraph-target @colbymchenry/codegraph@<new-version>",
   "nativeDelegationContract": {
     "delegatedGenericCapabilities": [

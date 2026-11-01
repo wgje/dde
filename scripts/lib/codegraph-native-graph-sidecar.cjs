@@ -9,7 +9,7 @@ const {
   readOverlayCurrentReceipt,
 } = require('./codegraph-overlay-current-receipt.cjs');
 
-const EXPECTED_SCHEMA_VERSION = 8;
+const EXPECTED_SCHEMA_VERSION = 11;
 const NATIVE_DB_ACCESS_ENV = 'NANOFLOW_CODEGRAPH_NATIVE_DB_ACCESS';
 const NATIVE_DB_PATH_ENV = 'NANOFLOW_CODEGRAPH_NATIVE_DB_PATH';
 const COORDINATED_NATIVE_DB_ACCESS = 'coordinated';
@@ -49,6 +49,7 @@ const NATIVE_SOURCE_FILE_COLUMNS = new Map([
     ['content_hash', 'TEXT'],
     ['language', 'TEXT'],
     ['size', 'INTEGER'],
+    ['generated', 'INTEGER'],
   ])],
 ]);
 const ANDROID_IMPORT_ENDPOINT_COLUMNS = NATIVE_SOURCE_FILE_COLUMNS;

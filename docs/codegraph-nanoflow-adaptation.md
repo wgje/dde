@@ -233,7 +233,7 @@ CodeGraph AST index does not fully model:
   `metadata.relation = "android-kotlin-annotation"`, and strict native
   JSON/Markdown keep the relation evidence through closed edges and focused
   source blocks while stripping NanoFlow metadata.
-- Android Kotlin member graph summary: 174 androidKotlinClasses, 71 androidKotlinDataClasses, 7 androidKotlinSealedClasses, 7 androidKotlinInterfaces, 0 androidKotlinInterfaceEdges, 9 androidKotlinExtendsEdges, 20 androidKotlinImplementsEdges, 20 androidKotlinObjects, 20 androidKotlinObjectEdges, 8 androidKotlinCompanionObjects, 8 androidKotlinCompanionObjectEdges, 19 androidKotlinEnums, 79 androidKotlinEnumMembers, 79 androidKotlinEnumMemberEdges, 487 androidKotlinImports, 487 androidKotlinImportEdges, 86 androidKotlinConstructors, 86 androidKotlinConstructorEdges, 1750 androidKotlinProperties, 1750 androidKotlinPropertyEdges, 622 androidKotlinMethods, 622 androidKotlinMethodEdges, 32 androidKotlinFunctions, 32 androidKotlinFunctionEdges, 74 androidKotlinOverrideEdges, 720 androidKotlinTypeReferenceEdges, 1171 androidKotlinCalls, 1171 androidKotlinCallEdges, 34 androidKotlinAnnotations, and 34 androidKotlinAnnotationEdges.
+- Android Kotlin member graph summary: 175 androidKotlinClasses, 71 androidKotlinDataClasses, 7 androidKotlinSealedClasses, 7 androidKotlinInterfaces, 0 androidKotlinInterfaceEdges, 9 androidKotlinExtendsEdges, 20 androidKotlinImplementsEdges, 20 androidKotlinObjects, 20 androidKotlinObjectEdges, 8 androidKotlinCompanionObjects, 8 androidKotlinCompanionObjectEdges, 19 androidKotlinEnums, 79 androidKotlinEnumMembers, 79 androidKotlinEnumMemberEdges, 495 androidKotlinImports, 495 androidKotlinImportEdges, 86 androidKotlinConstructors, 86 androidKotlinConstructorEdges, 1758 androidKotlinProperties, 1758 androidKotlinPropertyEdges, 622 androidKotlinMethods, 622 androidKotlinMethodEdges, 32 androidKotlinFunctions, 32 androidKotlinFunctionEdges, 74 androidKotlinOverrideEdges, 720 androidKotlinTypeReferenceEdges, 1171 androidKotlinCalls, 1171 androidKotlinCallEdges, 36 androidKotlinAnnotations, and 36 androidKotlinAnnotationEdges.
 - Android packaging/resource graph summary: 7 androidManifestComponents, 3 androidManifestPermissions, 3 androidManifestUsesPermissionEdges, 3 androidManifestQueries, 3 androidManifestQueryEdges, 1 androidManifestComponentPermissions, 1 androidManifestComponentPermissionEdges, 6 androidManifestIntentFilters, 6 androidManifestIntentFilterActions, 6 androidManifestIntentFilterActionEdges, 3 androidManifestIntentFilterCategories, 3 androidManifestIntentFilterCategoryEdges, 1 androidManifestIntentFilterData, 1 androidManifestIntentFilterDataEdges, 1 androidWidgetProviders, 46 androidResourceReferences, 276 androidKotlinResourceReferences, and 276 androidKotlinResourceReferenceEdges.
 - Android App Widget provider metadata is emitted as native `references` edges
   from the resolved receiver class to the `res/xml/*.xml` provider file with
@@ -809,7 +809,7 @@ This MCP tool asks CodeGraph for the base `codegraph_explore` result, queries th
 NanoFlow overlay, and returns one native CodeGraph-style Markdown response:
 
 - The original `codegraph_explore` sections when CodeGraph returns them. The
-  pinned `@colbymchenry/codegraph@1.5.0` base explore renderer uses
+  pinned `@colbymchenry/codegraph@1.6.2` base explore renderer uses
   `**Exploration: ...**`, `**Relationships**`, and `**Source Code**`; the
   wrapper still recognizes legacy `## Exploration` / `### Source Code` output
   from older fixtures and stale hosts.
@@ -1511,9 +1511,9 @@ relationship counts below.
   `host-binding`, and `host-listener` relationships with the static value or
   expression preserved in edge metadata. The current real tree has 6 host-attribute edges, 5 host-binding edges, and 24 host-listener edges.
 - 9 Supabase Edge Functions with 37 env-var references after following relative
-  helper imports under `supabase/functions`, 24 followed source/helper files
-  counted per Edge Function (`14` unique files), 16 recorded source import
-  relations, 16 native `edge-function-source` import edges, 9 generated
+  helper imports under `supabase/functions`, 25 followed source/helper files
+  counted per Edge Function (`14` unique files), 17 recorded source import
+  relations, 17 native `edge-function-source` import edges, 9 generated
   `/functions/v1/<name>` route nodes/edges, 31 explicit `req.method` method
   and CORS allowed-method references currently found in the real tree
   (`method-equality=7`, `method-inequality-guard=8`,
@@ -1563,7 +1563,7 @@ relationship counts below.
   structured `policyDetails` array currently contains 109 parsed policy detail
   records, `functionDetails` contains 151 parsed SQL function definitions,
   `triggerDetails` contains 40 parsed SQL trigger definitions, and
-  `indexDetails` contains 87 parsed SQL index definitions, and
+  `indexDetails` contains 90 parsed SQL index definitions, and
   `constraintDetails` contains 63 parsed SQL constraints.
   `constraintValidationDetails` contains 8 parsed SQL constraint validation
   statements and reuses the corresponding constraint nodes instead of creating
@@ -1572,10 +1572,10 @@ relationship counts below.
   statements, backed by 480 privilege nodes, 472 privilege-object nodes, and
   650 privilege-role nodes.
   Supabase structured detail summary: 42 edgeFunctionTests, 151 migrationFunctionDetails, 40 migrationTriggers, 109 migrationRlsDetails, 173 migrationTests, and 109 policyDetails.
-  The Supabase migration node summary is 151 SQL function nodes, 151 SQL function edges, 40 trigger edges, 40 trigger-function edges, 87 migration-index nodes, 87 migration-index edges, 63 migration-constraint nodes, 63 migration-constraint edges, 0 migration-constraint-validation nodes, 8 migration-constraint-validation edges, and 109 migration-rls edges.
+  The Supabase migration node summary is 151 SQL function nodes, 151 SQL function edges, 40 trigger edges, 40 trigger-function edges, 90 migration-index nodes, 90 migration-index edges, 63 migration-constraint nodes, 63 migration-constraint edges, 0 migration-constraint-validation nodes, 8 migration-constraint-validation edges, and 109 migration-rls edges.
   The Supabase policy/privilege node summary is 179 policy nodes, 108 policy-command edges, 108 policy-type edges, 108 policy-role edges, 86 policy-using edges, 47 policy-with-check edges, 706 privilege nodes, 684 privilege-object nodes, 425 privilege-grant edges, 720 privilege-revoke edges, 684 privilege-object edges, 1055 privilege-role nodes, and 1055 privilege-role edges.
   The Supabase migration test summary is 173 migration tests and 173 migration test edges.
-  The migration graph summary is 151 SQL function edges, 40 trigger-function edges, 87 migration-index edges, 63 migration-constraint edges, 8 migration-constraint-validation edges, and 109 migration-rls edges. The policy and privilege graph summary
+  The migration graph summary is 151 SQL function edges, 40 trigger-function edges, 90 migration-index edges, 63 migration-constraint edges, 8 migration-constraint-validation edges, and 109 migration-rls edges. The policy and privilege graph summary
   is 108 policy-command edges, 108 policy-type edges, 108 policy-role edges, 86 policy-using edges, 47 policy-with-check edges, 425 privilege-grant edges, 720 privilege-revoke edges, 684 privilege-object edges, and 1055 privilege-role edges.
   Statement-level `ALTER PUBLICATION <name> ADD|DROP|SET TABLE` entries are
   split on top-level commas into per-table `migration-realtime-publication`
@@ -1629,7 +1629,7 @@ relationship counts below.
 - The Supabase Edge Function header layer adds 46 `edge-function-header`
   native-shaped `variable` nodes and 46 native `references` edges across
   request auth, CORS, content-length, webhook-signature, and proxy-IP headers.
-- A synced diagnostic run reported 144,248 graph nodes and 273,138 graph edges in the native-shaped projection. `codegraph:overlay:sync` refreshes this
+- A synced diagnostic run reported 146,739 graph nodes and 278,583 graph edges in the native-shaped projection. `codegraph:overlay:sync` refreshes this
   top-level diagnostic summary, while the validator only requires the summary to
   be present because this document and `AGENTS.md` both participate in the graph
   and exact totals would otherwise oscillate as self-referential helper rows.
@@ -1716,7 +1716,7 @@ automation cannot mistake a required Codex MCP host restart for recovery.
 ## Upstream Version And De-Duplication Boundary
 
 The upstream CodeGraph fixed version for NanoFlow is
-`@colbymchenry/codegraph@1.5.0`. Upgrade probes must run through
+`@colbymchenry/codegraph@1.6.2`. Upgrade probes must run through
 `--codegraph-target @colbymchenry/codegraph@<new-version>` first, using
 `npm run codegraph:adapter:context` and `node scripts/smoke-codegraph-mcp-wrapper.cjs`,
 before changing the pinned target in the doctor-resolved active Codex config,
@@ -1977,7 +1977,7 @@ retry `npm run codegraph:adapter:context -- --query "<same search>" --max-files 
 only then fall through to `codegraph:overlay:query --skip-refresh` or native
 CodeGraph CLI location plus targeted disk reads.
 Only when those NanoFlow adapter fallbacks also fail should the agent use
-`npx -y @colbymchenry/codegraph@1.5.0 ...` as a final native CodeGraph CLI
+`npx -y @colbymchenry/codegraph@1.6.2 ...` as a final native CodeGraph CLI
 degradation, and that native result is only a locator until the overlay semantic
 layer is restored or explicitly reported unavailable.
 
@@ -2006,7 +2006,7 @@ Default package mode:
 
 ```json
 "${workspaceFolder}/scripts/codegraph-nanoflow-mcp-stdio.cjs",
-"@colbymchenry/codegraph@1.5.0",
+"@colbymchenry/codegraph@1.6.2",
 "serve",
 "--mcp",
 "--path",
@@ -2038,7 +2038,7 @@ is a runtime artifact only: it is not the adaptation layer and it is not the
 optional upstream source clone.
 
 In the default configuration, MCP calls still run the pinned
-`@colbymchenry/codegraph@1.5.0` package through the NanoFlow wrapper. The wrapper
+`@colbymchenry/codegraph@1.6.2` package through the NanoFlow wrapper. The wrapper
 queries the overlay, injects `nanoflow_context_pack` and
 `nanoflow_overlay_query`, and logs the effective target mode/version to
 `.codegraph/nanoflow-mcp-wrapper.log`. Changes under `D:\Code\tools\codegraph`

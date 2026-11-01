@@ -80,7 +80,7 @@ export function registerCodegraphAdapterDoctorCleanupSpecs(
     const wrapperSource = 'current wrapper\n';
     writeFileSync(wrapperPath, wrapperSource);
     const currentHash = sha256(wrapperSource);
-    const expectedTarget = '@colbymchenry/codegraph@1.5.0';
+    const expectedTarget = '@colbymchenry/codegraph@1.6.2';
     const configuredEnv = {
       CODEGRAPH_NO_DAEMON: '0',
       CODEGRAPH_NO_WATCH: '0',

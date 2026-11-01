@@ -619,7 +619,7 @@ describe('codegraph-adapter-context CLI', () => {
       configContractMismatches?: Array<{ field?: string }>;
     };
     expect(invocation).toEqual(expect.objectContaining({
-      codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+      codegraphTarget: '@colbymchenry/codegraph@1.6.2',
       configScope: 'project',
       configPath: path.join(projectRoot, '.codex', 'config.toml'),
       configContractOverride: true,
@@ -644,7 +644,7 @@ describe('codegraph-adapter-context CLI', () => {
     fs.writeFileSync(path.join(projectCodexDir, 'config.toml'), [
       '[mcp_servers.codegraph]',
       'command = "node"',
-      `args = [${JSON.stringify(path.join(projectRoot, 'scripts', 'codegraph-nanoflow-mcp-stdio.cjs'))}, "@colbymchenry/codegraph@1.5.0", "serve", "--mcp", "--path", ${JSON.stringify(path.join(projectRoot, 'other-root'))}]`,
+      `args = [${JSON.stringify(path.join(projectRoot, 'scripts', 'codegraph-nanoflow-mcp-stdio.cjs'))}, "@colbymchenry/codegraph@1.6.2", "serve", "--mcp", "--path", ${JSON.stringify(path.join(projectRoot, 'other-root'))}]`,
       '',
     ].join('\n'));
     const probe = [

@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 const repoRoot = process.cwd();
 const wrapperPath = path.join(repoRoot, 'scripts', 'codegraph-mcp-stdio.cjs');
-const target = '@colbymchenry/codegraph@1.5.0';
+const target = '@colbymchenry/codegraph@1.6.2';
 const tempRoots: string[] = [];
 
 interface ExitScenario {

@@ -54,7 +54,7 @@ function writeCodexConfig(
   root: string,
   codexConfigPath: string,
   command = 'node',
-  codegraphTarget = '@colbymchenry/codegraph@1.5.0',
+  codegraphTarget = '@colbymchenry/codegraph@1.6.2',
 ): void {
   const tomlString = (value: string) => JSON.stringify(value);
   writeFileSync(
@@ -362,7 +362,7 @@ describe('codegraph-adapter-doctor', () => {
       codegraphServerConfigured: true,
       command: 'node',
       wrapperScriptExists: true,
-      codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+      codegraphTarget: '@colbymchenry/codegraph@1.6.2',
       runtimeToolDiscoveryVisible: 'unknown-host-state',
     }));
     expect(report.checks).toEqual(expect.arrayContaining([
@@ -393,7 +393,7 @@ describe('codegraph-adapter-doctor', () => {
         'command = "node"',
         'args = [',
         `  ${JSON.stringify(path.join(root, 'scripts', 'codegraph-nanoflow-mcp-stdio.cjs'))},`,
-        '  "@colbymchenry/codegraph@1.5.0",',
+        '  "@colbymchenry/codegraph@1.6.2",',
         '  "serve",',
         '  "--mcp",',
         `  ${JSON.stringify('--path')},`,

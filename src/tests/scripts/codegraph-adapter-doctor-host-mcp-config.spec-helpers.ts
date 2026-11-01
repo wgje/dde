@@ -94,7 +94,7 @@ export function registerCodegraphAdapterDoctorHostMcpConfigSpecs(
         'command = "node"',
         'args = [',
         `  ${JSON.stringify(path.join(root, 'scripts', 'codegraph-nanoflow-mcp-stdio.cjs'))},`,
-        '  "@colbymchenry/codegraph@1.5.0",',
+        '  "@colbymchenry/codegraph@1.6.2",',
         '  "serve",',
         '  "--mcp",',
         `  ${JSON.stringify('--path')},`,

@@ -232,7 +232,7 @@ export function writeDedupContractFixture(root: string): void {
     path.join(root, 'docs', 'codegraph-nanoflow-dedup-contract.json'),
     JSON.stringify({
       schemaVersion: 1,
-      upstreamCodeGraphVersion: '@colbymchenry/codegraph@1.5.0',
+      upstreamCodeGraphVersion: '@colbymchenry/codegraph@1.6.2',
       fixedVersionUpgradeProbe: '--codegraph-target @colbymchenry/codegraph@<new-version>',
       nativeDelegationContract: {
         delegatedGenericCapabilities: [

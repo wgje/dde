@@ -3,7 +3,7 @@ import { expect, it } from 'vitest';
 import type { CodegraphOverlaySpecContext } from './codegraph-nanoflow-overlay.spec-context';
 
 export function registerCodegraphOverlayModuleRelationSpecs(context: CodegraphOverlaySpecContext): void {
-  const { makeFixture, queryOverlay, expectSpawnSuccess } = context;
+  const { makeFixture, queryOverlay, runOverlay, writeFile, expectSpawnSuccess } = context;
 
   it('selects graph nodes by exact edge relation queries', () => {
     const root = makeFixture();
@@ -43,6 +43,47 @@ export function registerCodegraphOverlayModuleRelationSpecs(context: CodegraphOv
       }),
     ]));
     expect(response.markdown).toContain('type-literal-member');
+  });
+
+  it('accepts Deno npm module imports as external file targets', () => {
+    const root = makeFixture();
+    const sourceFile = 'src/app/features/sample/external-module.ts';
+    const moduleSpecifier = 'npm:@langfuse/otel@5.10.0';
+    writeFile(root, sourceFile, [
+      `import { LangfuseSpanProcessor } from '${moduleSpecifier}';`,
+      'export const processor = LangfuseSpanProcessor;',
+      '',
+    ].join('\n'));
+
+    const result = runOverlay(root);
+
+    expectSpawnSuccess(result);
+    const overlay = JSON.parse(result.stdout);
+    const externalTarget = overlay.graph.nodes.find((node: {
+      kind: string;
+      name: string;
+      filePath: string;
+      metadata?: { relation?: string };
+    }) => node.name === moduleSpecifier);
+    expect(externalTarget).toMatchObject({
+      kind: 'file',
+      name: moduleSpecifier,
+      filePath: moduleSpecifier,
+      metadata: { relation: 'import' },
+    });
+    expect(overlay.graph.nodes.filter((node: { filePath: string }) => (
+      node.filePath === moduleSpecifier
+    ))).toHaveLength(1);
+    expect(overlay.graph.edges).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'imports',
+        target: externalTarget.id,
+        metadata: expect.objectContaining({
+          relation: 'import',
+          importedName: 'LangfuseSpanProcessor',
+        }),
+      }),
+    ]));
   });
 
   it('extracts TypeScript tuple contract string literal names as native type alias methods', () => {

@@ -95,7 +95,7 @@ export function registerCodegraphAdapterDoctorHostMcpSpecs(
           event: 'wrapper.start',
           scriptPath: wrapperPath,
           scriptSha256: wrapperSha256,
-          codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+          codegraphTarget: '@colbymchenry/codegraph@1.6.2',
           env: {
             CODEGRAPH_NO_DAEMON: '0',
             CODEGRAPH_NO_WATCH: '0',
@@ -140,7 +140,7 @@ export function registerCodegraphAdapterDoctorHostMcpSpecs(
         {
           pid: 43001,
           parentPid: 13880,
-          commandLine: `"${process.execPath}" ${wrapperPath} @colbymchenry/codegraph@1.5.0 serve --mcp --path ${root}`,
+          commandLine: `"${process.execPath}" ${wrapperPath} @colbymchenry/codegraph@1.6.2 serve --mcp --path ${root}`,
         },
       ]),
     });
@@ -201,7 +201,7 @@ export function registerCodegraphAdapterDoctorHostMcpSpecs(
           event: 'wrapper.start',
           scriptPath: wrapperPath,
           scriptSha256: wrapperSha256,
-          codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+          codegraphTarget: '@colbymchenry/codegraph@1.6.2',
           env: {
             NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '30000',
             NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE: '0',
@@ -234,7 +234,7 @@ export function registerCodegraphAdapterDoctorHostMcpSpecs(
         {
           pid: 41000,
           parentPid: 13880,
-          commandLine: `"${process.execPath}" ${wrapperPath} @colbymchenry/codegraph@1.5.0 serve --mcp --path ${root}`,
+          commandLine: `"${process.execPath}" ${wrapperPath} @colbymchenry/codegraph@1.6.2 serve --mcp --path ${root}`,
         },
       ]),
     });
@@ -288,7 +288,7 @@ export function registerCodegraphAdapterDoctorHostMcpSpecs(
           event: 'wrapper.start',
           scriptPath: wrapperPath,
           scriptSha256: wrapperSha256,
-          codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+          codegraphTarget: '@colbymchenry/codegraph@1.6.2',
           env: {
             NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '30000',
             NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE: '0',
@@ -328,7 +328,7 @@ export function registerCodegraphAdapterDoctorHostMcpSpecs(
         {
           pid: 41003,
           parentPid: 13880,
-          commandLine: `"${process.execPath}" ${wrapperPath} @colbymchenry/codegraph@1.5.0 serve --mcp --path ${root}`,
+          commandLine: `"${process.execPath}" ${wrapperPath} @colbymchenry/codegraph@1.6.2 serve --mcp --path ${root}`,
         },
       ]),
     });
@@ -381,7 +381,7 @@ export function registerCodegraphAdapterDoctorHostMcpSpecs(
           event: 'wrapper.start',
           scriptPath: wrapperPath,
           scriptSha256: wrapperSha256,
-          codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+          codegraphTarget: '@colbymchenry/codegraph@1.6.2',
           env: {
             CODEGRAPH_NO_DAEMON: '0',
             CODEGRAPH_NO_WATCH: '0',
@@ -437,7 +437,7 @@ export function registerCodegraphAdapterDoctorHostMcpSpecs(
         {
           pid: 41004,
           parentPid: 13880,
-          commandLine: `"${process.execPath}" ${wrapperPath} @colbymchenry/codegraph@1.5.0 serve --mcp --path ${root}`,
+          commandLine: `"${process.execPath}" ${wrapperPath} @colbymchenry/codegraph@1.6.2 serve --mcp --path ${root}`,
         },
       ]),
     });
@@ -477,7 +477,7 @@ export function registerCodegraphAdapterDoctorHostMcpSpecs(
     const wrapperSource = 'fresh wrapper\n';
     writeFileSync(wrapperPath, wrapperSource);
     const wrapperSha256 = sha256(wrapperSource);
-    const expectedTarget = '@colbymchenry/codegraph@1.5.0';
+    const expectedTarget = '@colbymchenry/codegraph@1.6.2';
     writeFileSync(
       path.join(root, '.codegraph', 'nanoflow-mcp-wrapper.log'),
       [
@@ -610,7 +610,7 @@ export function registerCodegraphAdapterDoctorHostMcpSpecs(
     const wrapperSource = 'fresh wrapper\n';
     writeFileSync(wrapperPath, wrapperSource);
     const wrapperSha256 = sha256(wrapperSource);
-    const expectedTarget = '@colbymchenry/codegraph@1.5.0';
+    const expectedTarget = '@colbymchenry/codegraph@1.6.2';
     const warningText = 'CodeGraph auto-sync is DISABLED - live file watching stopped, so the index is frozen.';
     const wrapperEvents = Array.from({ length: 7 }, (_, index) => {
       const pid = 42000 + index;
@@ -682,7 +682,7 @@ export function registerCodegraphAdapterDoctorHostMcpSpecs(
     const wrapperSource = 'fresh wrapper\n';
     writeFileSync(wrapperPath, wrapperSource);
     const wrapperSha256 = sha256(wrapperSource);
-    const expectedTarget = '@colbymchenry/codegraph@1.5.0';
+    const expectedTarget = '@colbymchenry/codegraph@1.6.2';
     writeFileSync(
       path.join(root, '.codegraph', 'nanoflow-mcp-wrapper.log'),
       [

@@ -192,7 +192,8 @@ function createNativeDatabase(
       modified_at INTEGER NOT NULL,
       indexed_at INTEGER NOT NULL,
       node_count INTEGER DEFAULT 0,
-      errors TEXT
+      errors TEXT,
+      generated INTEGER NOT NULL DEFAULT 0
     );
     \`);
     const insertNode = db.prepare(\`
@@ -235,7 +236,7 @@ function createNativeDatabase(
     );
     db.prepare(
       'INSERT INTO schema_versions (version, applied_at, description) VALUES (?, ?, ?)',
-    ).run(8, 1, 'fixture schema');
+    ).run(11, 1, 'fixture schema');
     db.close();
   `);
 }
@@ -504,7 +505,8 @@ function createNativeFunctionDatabase(
       modified_at INTEGER NOT NULL,
       indexed_at INTEGER NOT NULL,
       node_count INTEGER DEFAULT 0,
-      errors TEXT
+      errors TEXT,
+      generated INTEGER NOT NULL DEFAULT 0
     );
     \`);
     const insertNode = db.prepare(\`
@@ -555,7 +557,7 @@ function createNativeFunctionDatabase(
     }
     db.prepare(
       'INSERT INTO schema_versions (version, applied_at, description) VALUES (?, ?, ?)',
-    ).run(8, 1, 'fixture schema');
+    ).run(11, 1, 'fixture schema');
     db.close();
   `);
 }
@@ -782,7 +784,7 @@ describe('CodeGraph native graph sidecar', () => {
       database: expect.objectContaining({
         readOnly: true,
         queryOnly: 1,
-        schemaVersion: 8,
+        schemaVersion: 11,
       }),
       nativeGraph: { nodes: 1, edges: 1 },
       overlayGraph: { nodes: 1, edges: 0 },
@@ -833,6 +835,30 @@ describe('CodeGraph native graph sidecar', () => {
     }));
   });
 
+  it('fails closed when the native schema version is below the pinned contract', () => {
+    const root = makeFixture();
+    const databasePath = path.join(root, '.codegraph', 'codegraph.db');
+    runSqliteFixtureScript(`
+      const db = new DatabaseSync(${JSON.stringify(databasePath)});
+      db.exec('UPDATE schema_versions SET version = 10 WHERE version = 11');
+      db.close();
+    `);
+
+    const failure = parseFailure(runSidecar(root));
+
+    expect(failure).toEqual(expect.objectContaining({
+      ok: false,
+      error: expect.objectContaining({
+        code: 'native-schema-drift',
+        details: expect.objectContaining({
+          table: 'schema_versions',
+          expectedVersion: 11,
+          actualVersion: 10,
+        }),
+      }),
+    }));
+  });
+
   it('fails closed when the overlay has no Android imports', () => {
     const root = makeFixture({ androidImports: [] });
 
@@ -878,7 +904,7 @@ describe('CodeGraph native graph sidecar', () => {
         path: '.codegraph/codegraph.db',
         readOnly: true,
         queryOnly: 1,
-        schemaVersion: 8,
+        schemaVersion: 11,
       },
       endpoints: [
         {
@@ -1454,7 +1480,7 @@ describe('CodeGraph native graph sidecar', () => {
         path: '.codegraph/codegraph.db',
         readOnly: true,
         queryOnly: 1,
-        schemaVersion: 8,
+        schemaVersion: 11,
       });
       expect(result.endpoints.map(item => ({
         file: item.file,

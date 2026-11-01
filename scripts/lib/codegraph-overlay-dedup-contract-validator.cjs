@@ -233,8 +233,8 @@ function installDedupContractValidator(runtime) {
         errors.push(`${DEDUP_CONTRACT_MANIFEST_PATH} dependencyLeafSources must explicitly attribute baseline and SourcePolicy leaves`);
       }
     }
-    if (manifest.upstreamCodeGraphVersion !== '@colbymchenry/codegraph@1.5.0') {
-      errors.push(`${DEDUP_CONTRACT_MANIFEST_PATH} upstreamCodeGraphVersion must be @colbymchenry/codegraph@1.5.0`);
+    if (manifest.upstreamCodeGraphVersion !== '@colbymchenry/codegraph@1.6.2') {
+      errors.push(`${DEDUP_CONTRACT_MANIFEST_PATH} upstreamCodeGraphVersion must be @colbymchenry/codegraph@1.6.2`);
     }
     if (manifest.fixedVersionUpgradeProbe !== '--codegraph-target @colbymchenry/codegraph@<new-version>') {
       errors.push(`${DEDUP_CONTRACT_MANIFEST_PATH} fixedVersionUpgradeProbe must use --codegraph-target @colbymchenry/codegraph@<new-version>`);

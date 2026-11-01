@@ -50,7 +50,7 @@ export function registerValidateCodegraphOverlayDocsDedupContractSpecs(): void {
         filePath,
         fs.readFileSync(filePath, 'utf8')
           .replace(/upstream CodeGraph fixed version/g, 'upstream-codegraph-fixed-version')
-          .replace(/@colbymchenry\/codegraph@1\.5\.0/g, '@colbymchenry/codegraph@1.1.1')
+          .replace(/@colbymchenry\/codegraph@1\.6\.2/g, '@colbymchenry/codegraph@1.1.1')
           .replace(/--codegraph-target @colbymchenry\/codegraph@<new-version>/g, '--codegraph-target @colbymchenry/codegraph@latest')
           .replace(/delegates generic TypeScript symbol\/import\/export\/call\/impact/g, 'duplicates generic TypeScript graph extraction')
           .replace(/must not reimplement native auto-sync, indexing, generic search ranking, or callers\/callees\/impact/g, 'may replace native indexing and search')
@@ -62,7 +62,7 @@ export function registerValidateCodegraphOverlayDocsDedupContractSpecs(): void {
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain('docs/codegraph-nanoflow-adaptation.md missing upstream CodeGraph boundary contract');
-    expect(result.stderr).toContain('@colbymchenry/codegraph@1.5.0');
+    expect(result.stderr).toContain('@colbymchenry/codegraph@1.6.2');
     expect(result.stderr).toContain('--codegraph-target @colbymchenry/codegraph@<new-version>');
     expect(result.stderr).toContain('delegates generic TypeScript symbol/import/export/call/impact');
     expect(result.stderr).toContain('must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact');

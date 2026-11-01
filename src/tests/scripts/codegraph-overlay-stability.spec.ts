@@ -370,7 +370,7 @@ describe('CodeGraph stable generation runner', () => {
       "const compatibilityDigest = crypto.createHash('sha256').update(compatibility).digest('hex');",
       "fs.mkdirSync(path.dirname(compatibilityPath), { recursive: true });",
       "fs.writeFileSync(compatibilityPath, compatibility);",
-      "const current = { compatibilityDigest, contractDigest: '8ea13a94e966e16efe3d91821a891a2f8b3c2e696d5ff812093760260d98464f', generationId, manifestDigest: '1'.repeat(64), overlaySchemaDigest: '3d4c1049024c8895f5e2fe5504bf2814b87d66211d93a9ff22bc901be8db9031', protocol: 'codegraph-overlay-generation-v1', publishedAt: '2026-08-03T00:00:00.000Z', receiptDigest: '3'.repeat(64), schemaVersion: 1, sequence: '1', sourcePolicyDigest: 'ca78ea5e17d32399faac676bcab26fc1d7f48186a89792774d37a6b8549d0ca3' };",
+      "const current = { compatibilityDigest, contractDigest: '84b36416a722fc14848df06caedc09d71e821b1f1d270ed7db8b68b1a34ace03', generationId, manifestDigest: '1'.repeat(64), overlaySchemaDigest: '5132af08c96287a8808840b6667fe2df8e0a4d6a57e471c9aada686d0f2e3250', protocol: 'codegraph-overlay-generation-v1', publishedAt: '2026-08-03T00:00:00.000Z', receiptDigest: '3'.repeat(64), schemaVersion: 1, sequence: '1', sourcePolicyDigest: 'ca78ea5e17d32399faac676bcab26fc1d7f48186a89792774d37a6b8549d0ca3' };",
       "fs.writeFileSync(path.join(generationRoot, 'CURRENT.json'), JSON.stringify(current) + '\\n');",
       `fs.writeFileSync(${JSON.stringify(invocationPath)}, JSON.stringify({ args, token: process.env.NANOFLOW_CODEGRAPH_STABILITY_PARTICIPANT_TOKEN, plan: process.env.NANOFLOW_CODEGRAPH_STABILITY_PLAN_DIGEST }));`,
       "process.stdout.write('[codegraph-overlay] ' + JSON.stringify({ compatibilityDigest, generationId, sequence: '1' }) + '\\n');",
@@ -425,7 +425,7 @@ describe('CodeGraph stable generation runner', () => {
       "const compatibilityPath = path.join(generationRoot, generationId, 'compatibility', 'nanoflow-overlay.json');",
       "fs.mkdirSync(path.dirname(compatibilityPath), { recursive: true });",
       "fs.writeFileSync(compatibilityPath, compatibility);",
-      "const current = { compatibilityDigest, contractDigest: '8ea13a94e966e16efe3d91821a891a2f8b3c2e696d5ff812093760260d98464f', generationId, manifestDigest: '1'.repeat(64), overlaySchemaDigest: '3d4c1049024c8895f5e2fe5504bf2814b87d66211d93a9ff22bc901be8db9031', protocol: 'codegraph-overlay-generation-v1', publishedAt: '2026-08-03T00:00:00.000Z', receiptDigest: '3'.repeat(64), schemaVersion: 1, sequence: '1', sourcePolicyDigest: 'ca78ea5e17d32399faac676bcab26fc1d7f48186a89792774d37a6b8549d0ca3' };",
+      "const current = { compatibilityDigest, contractDigest: '84b36416a722fc14848df06caedc09d71e821b1f1d270ed7db8b68b1a34ace03', generationId, manifestDigest: '1'.repeat(64), overlaySchemaDigest: '5132af08c96287a8808840b6667fe2df8e0a4d6a57e471c9aada686d0f2e3250', protocol: 'codegraph-overlay-generation-v1', publishedAt: '2026-08-03T00:00:00.000Z', receiptDigest: '3'.repeat(64), schemaVersion: 1, sequence: '1', sourcePolicyDigest: 'ca78ea5e17d32399faac676bcab26fc1d7f48186a89792774d37a6b8549d0ca3' };",
       "fs.writeFileSync(path.join(generationRoot, 'CURRENT.json'), JSON.stringify(current) + '\\n');",
       "process.stdout.write('[codegraph-overlay] ' + JSON.stringify({ compatibilityDigest, generationId: 'g-' + 'c'.repeat(64), sequence: '1' }) + '\\n');",
     ].join('\n'));

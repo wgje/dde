@@ -62,7 +62,7 @@ export function registerCodegraphAdapterDoctorHostRuntimeSpecs(
           event: 'wrapper.start',
           scriptPath: wrapperPath,
           scriptSha256: wrapperHash,
-          codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+          codegraphTarget: '@colbymchenry/codegraph@1.6.2',
           env: configuredEnv,
           effectiveChildEnv: configuredEnv,
           runtimeTopology: {
@@ -124,7 +124,7 @@ export function registerCodegraphAdapterDoctorHostRuntimeSpecs(
         {
           pid: 43210,
           parentPid: 13880,
-          commandLine: `"${process.execPath}" ${wrapperPath} @colbymchenry/codegraph@1.5.0 serve --mcp --path ${root}`,
+          commandLine: `"${process.execPath}" ${wrapperPath} @colbymchenry/codegraph@1.6.2 serve --mcp --path ${root}`,
         },
       ]),
     });

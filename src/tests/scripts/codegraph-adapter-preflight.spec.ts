@@ -20,7 +20,7 @@ function seedRoot(root: string): void {
   mkdirSync(path.join(root, 'scripts'), { recursive: true });
   mkdirSync(path.join(root, 'tmp'), { recursive: true });
   writeFileSync(path.join(root, 'scripts', 'codegraph-nanoflow-mcp-stdio.cjs'), 'fixture wrapper\n');
-  writeFileSync(path.join(root, '.codegraph', 'codex-config.toml'), `[mcp_servers.codegraph]\ncommand = "node"\nargs = [${JSON.stringify(path.join(root, 'scripts', 'codegraph-nanoflow-mcp-stdio.cjs'))}, "@colbymchenry/codegraph@1.5.0", "serve", "--mcp", "--path", ${JSON.stringify(root)}]\n\n[mcp_servers.codegraph.env]\nCODEGRAPH_NO_DAEMON = "0"\nCODEGRAPH_NO_WATCH = "0"\nCODEGRAPH_DAEMON_IDLE_TIMEOUT_MS = "300000"\nCODEGRAPH_DAEMON_MAX_IDLE_MS = "1800000"\nNANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS = "30000"\nNANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE = "0"\n`);
+  writeFileSync(path.join(root, '.codegraph', 'codex-config.toml'), `[mcp_servers.codegraph]\ncommand = "node"\nargs = [${JSON.stringify(path.join(root, 'scripts', 'codegraph-nanoflow-mcp-stdio.cjs'))}, "@colbymchenry/codegraph@1.6.2", "serve", "--mcp", "--path", ${JSON.stringify(root)}]\n\n[mcp_servers.codegraph.env]\nCODEGRAPH_NO_DAEMON = "0"\nCODEGRAPH_NO_WATCH = "0"\nCODEGRAPH_DAEMON_IDLE_TIMEOUT_MS = "300000"\nCODEGRAPH_DAEMON_MAX_IDLE_MS = "1800000"\nNANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS = "30000"\nNANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE = "0"\n`);
   writeFileSync(
     path.join(root, 'package.json'),
     JSON.stringify({

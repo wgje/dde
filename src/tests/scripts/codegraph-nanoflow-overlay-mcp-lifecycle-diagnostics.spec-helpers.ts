@@ -90,7 +90,7 @@ export function registerCodegraphOverlayMcpLifecycleDiagnosticSpecs(
     tempRoots.push(path.dirname(logPath));
     const child = spawn(
       process.execPath,
-      [wrapperScriptPath, '@colbymchenry/codegraph@1.5.0', 'serve', '--mcp', '--path', repoRoot],
+      [wrapperScriptPath, '@colbymchenry/codegraph@1.6.2', 'serve', '--mcp', '--path', repoRoot],
       {
         cwd: repoRoot,
         stdio: ['pipe', 'pipe', 'pipe'],
@@ -110,8 +110,8 @@ export function registerCodegraphOverlayMcpLifecycleDiagnosticSpecs(
       const spawnEvent = await waitForLogEvent(logPath, 'child.spawn');
       expect(spawnEvent).toEqual(expect.objectContaining({
         mode: 'npx-package',
-        target: '@colbymchenry/codegraph@1.5.0',
-        packageVersion: '1.5.0',
+        target: '@colbymchenry/codegraph@1.6.2',
+        packageVersion: '1.6.2',
         env: expect.objectContaining({
           CODEGRAPH_NO_DAEMON: '0',
           CODEGRAPH_NO_WATCH: '0',
@@ -140,7 +140,7 @@ export function registerCodegraphOverlayMcpLifecycleDiagnosticSpecs(
       'command = "node"',
       'args = [',
       `  ${JSON.stringify(wrapperScriptPath)},`,
-      '  "@colbymchenry/codegraph@1.5.0",',
+      '  "@colbymchenry/codegraph@1.6.2",',
       '  "serve",',
       '  "--mcp",',
       `  ${JSON.stringify(repoRoot)}`,
@@ -186,7 +186,7 @@ export function registerCodegraphOverlayMcpLifecycleDiagnosticSpecs(
         source: 'startup',
         failureClass: 'mcp-host-config-mismatch',
         expected: expect.objectContaining({
-          codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+          codegraphTarget: '@colbymchenry/codegraph@1.6.2',
           env: expect.objectContaining({
             NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '30000',
           }),
@@ -200,7 +200,7 @@ export function registerCodegraphOverlayMcpLifecycleDiagnosticSpecs(
         mismatches: expect.arrayContaining([
           expect.objectContaining({
             field: 'codegraphTarget',
-            expected: '@colbymchenry/codegraph@1.5.0',
+            expected: '@colbymchenry/codegraph@1.6.2',
             actual: fakeCodegraph,
           }),
           expect.objectContaining({

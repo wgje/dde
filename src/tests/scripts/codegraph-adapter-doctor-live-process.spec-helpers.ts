@@ -26,7 +26,7 @@ function registerWindowsNativeProcessEnumerationSpec(makeRoot: () => string): vo
     writeFileSync(wrapperPath, 'setInterval(() => {}, 1_000);\n');
     const child = spawn(
       process.execPath,
-      [wrapperPath, '@colbymchenry/codegraph@1.5.0', 'serve', '--mcp', '--path', root],
+      [wrapperPath, '@colbymchenry/codegraph@1.6.2', 'serve', '--mcp', '--path', root],
       { stdio: 'ignore', windowsHide: true },
     );
     await new Promise<void>((resolve, reject) => {
@@ -118,7 +118,7 @@ export function registerCodegraphAdapterDoctorLiveProcessSpecs(
           parentName: 'codex.exe',
           parentCommandLine: 'codex.exe app-server',
           startedAt: '2026-07-13T20:41:17.000Z',
-          commandLine: 'node scripts/codegraph-nanoflow-mcp-stdio.cjs @colbymchenry/codegraph@1.5.0',
+          commandLine: 'node scripts/codegraph-nanoflow-mcp-stdio.cjs @colbymchenry/codegraph@1.6.2',
         }]),
       },
     });
@@ -148,7 +148,7 @@ export function registerCodegraphAdapterDoctorLiveProcessSpecs(
     const wrapperSource = 'fresh wrapper\n';
     writeFileSync(wrapperPath, wrapperSource);
     const wrapperSha256 = sha256(wrapperSource);
-    const expectedTarget = '@colbymchenry/codegraph@1.5.0';
+    const expectedTarget = '@colbymchenry/codegraph@1.6.2';
     writeFileSync(
       path.join(root, '.codegraph', 'nanoflow-mcp-wrapper.log'),
       [
@@ -305,7 +305,7 @@ export function registerCodegraphAdapterDoctorLiveProcessSpecs(
         {
           pid: 7772,
           parentPid: 13880,
-          commandLine: `"C:\\nvm4w\\nodejs\\node.exe" ${wrapperPath} @colbymchenry/codegraph@1.5.0 serve --mcp --path ${root}`,
+          commandLine: `"C:\\nvm4w\\nodejs\\node.exe" ${wrapperPath} @colbymchenry/codegraph@1.6.2 serve --mcp --path ${root}`,
         },
       ]),
     });
@@ -340,7 +340,7 @@ export function registerCodegraphAdapterDoctorLiveProcessSpecs(
     const wrapperPath = path.join(root, 'scripts', 'codegraph-nanoflow-mcp-stdio.cjs');
     const wrapperSource = 'fresh wrapper\n';
     const wrapperSha256 = sha256(wrapperSource);
-    const expectedTarget = '@colbymchenry/codegraph@1.5.0';
+    const expectedTarget = '@colbymchenry/codegraph@1.6.2';
     const configuredEnv = {
       CODEGRAPH_NO_DAEMON: '0',
       CODEGRAPH_NO_WATCH: '0',
@@ -454,7 +454,7 @@ export function registerCodegraphAdapterDoctorLiveProcessSpecs(
         'command = "node"',
         'args = [',
         `  ${JSON.stringify(wrapperPath)},`,
-        '  "@colbymchenry/codegraph@1.5.0",',
+        '  "@colbymchenry/codegraph@1.6.2",',
         '  "serve",',
         '  "--mcp",',
         `  ${JSON.stringify('--path')},`,
@@ -476,7 +476,7 @@ export function registerCodegraphAdapterDoctorLiveProcessSpecs(
         {
           pid: 7774,
           parentPid: 13880,
-          commandLine: `"${process.execPath}" ${wrapperPath} @colbymchenry/codegraph@1.5.0 serve --mcp --path ${root}`,
+          commandLine: `"${process.execPath}" ${wrapperPath} @colbymchenry/codegraph@1.6.2 serve --mcp --path ${root}`,
         },
       ]),
     });
@@ -535,7 +535,7 @@ export function registerCodegraphAdapterDoctorLiveProcessSpecs(
           event: 'wrapper.start',
           scriptPath: wrapperPath,
           scriptSha256: wrapperSha256,
-          codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+          codegraphTarget: '@colbymchenry/codegraph@1.6.2',
         }),
       ].join('\n') + '\n',
     );
@@ -735,7 +735,7 @@ export function registerCodegraphAdapterDoctorLiveProcessSpecs(
     expect(explainResult.stdout).toContain('host MCP root cause:');
     expect(explainResult.stdout).toContain('status=direct-mcp-host-stale-or-index-frozen');
     expect(explainResult.stdout).toContain('adapterFailureLikely=false');
-    expect(explainResult.stdout).toContain('codegraphTarget expected=@colbymchenry/codegraph@1.5.0 current=@colbymchenry/codegraph@1.1.1');
+    expect(explainResult.stdout).toContain('codegraphTarget expected=@colbymchenry/codegraph@1.6.2 current=@colbymchenry/codegraph@1.1.1');
     expect(explainResult.stdout).toContain('configuredWrapper current=<missing> context=<missing>');
     expect(explainResult.stdout).toContain(
       'envMismatches=2 current-wrapper.NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS expected=30000 actual=60000; current-context-wrapper.NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS expected=30000 actual=60000',
@@ -760,7 +760,7 @@ export function registerCodegraphAdapterDoctorLiveProcessSpecs(
       ]),
     }));
     expect(report.hostMcp.rootCauseSummary.expected).toEqual(expect.objectContaining({
-      codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+      codegraphTarget: '@colbymchenry/codegraph@1.6.2',
     }));
     expect(report.hostMcp.rootCauseSummary.observed).toEqual(expect.objectContaining({
       currentWrapperTarget: '@colbymchenry/codegraph@1.1.1',

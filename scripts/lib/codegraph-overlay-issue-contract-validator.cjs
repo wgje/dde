@@ -218,7 +218,7 @@ function installIssueContractValidator(runtime) {
       'codegraph:overlay:query',
       '--skip-refresh',
       'final native CodeGraph CLI',
-      '@colbymchenry/codegraph@1.5.0',
+      '@colbymchenry/codegraph@1.6.2',
       'only a locator',
     ];
     const missing = required.filter(term => !text.includes(term));
@@ -230,7 +230,7 @@ function installIssueContractValidator(runtime) {
   function validateUpstreamCodeGraphBoundaryContract(text, file) {
     const required = [
       'upstream CodeGraph fixed version',
-      '@colbymchenry/codegraph@1.5.0',
+      '@colbymchenry/codegraph@1.6.2',
       '--codegraph-target @colbymchenry/codegraph@<new-version>',
       'delegates generic TypeScript symbol/import/export/call/impact',
       'native Markdown/JSON formatter section order',

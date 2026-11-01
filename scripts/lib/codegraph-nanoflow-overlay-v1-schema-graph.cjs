@@ -636,6 +636,9 @@ function createGraphRuntime({ contract, canonicalJson, canonicalRepositoryPath, 
     if (/^https:\/\/[A-Za-z0-9.-]+(?::\d+)?\/[!-~]+$/.test(value) || /^node:[a-z0-9_./-]+$/i.test(value)) {
       return true;
     }
+    if (/^npm:(?:@[a-z0-9_.-]+\/)?[a-z0-9_][a-z0-9_.-]*(?:@[a-z0-9_*.+~-]+)?(?:\/[a-z0-9_.-]+)*$/i.test(value)) {
+      return true;
+    }
     return !/^(?:src|scripts|docs|android|supabase|public|e2e|\.github)\//.test(value)
       && /^(?:@[a-z0-9_.-]+\/)?[a-z0-9_][a-z0-9_.-]*(?:\/[a-z0-9_.-]+)*$/i.test(value);
   }
@@ -788,7 +791,7 @@ function createGraphRuntime({ contract, canonicalJson, canonicalRepositoryPath, 
     validateEdge,
   });
 }
-const DESCRIPTOR_DIGEST = "d351740e73e31bca9cb065ca104c5840275b7ed00d19bca5aa5c4088812f316a";
+const DESCRIPTOR_DIGEST = "63f663485bdbcf3465ae17ba939589d0a8632ab1e29e2b9d3ec67ca85502498b";
 const DESCRIPTOR = {
   name: "graph",
   descriptorDigest: DESCRIPTOR_DIGEST,
