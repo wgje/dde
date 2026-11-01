@@ -56,8 +56,9 @@ export class FlowDiagramEffectsService {
         }
         // 使用 untracked 避免在 rAF 回调中读取 signal 时建立新的依赖
         const currentTasks = untracked(() => this.projectState.tasks());
-        this.diagram.updateDiagram(currentTasks, this.diagramUpdatePending);
+        const forceUpdatePending = this.diagramUpdatePending;
         this.diagramUpdatePending = false;
+        this.diagram.updateDiagram(currentTasks, forceUpdatePending);
       });
     });
   }
@@ -84,8 +85,9 @@ export class FlowDiagramEffectsService {
     scheduleRafDiagramUpdate: (tasks: Task[], forceRefresh: boolean) => void
   ): EffectRef {
     return effect(() => {
+      const activeProjectId = this.projectState.activeProjectId();
       const tasks = this.projectState.tasks();
-      if (this.diagram.isInitialized) {
+      if (activeProjectId !== null && this.diagram.isInitialized) {
         scheduleRafDiagramUpdate(tasks, false);
       }
     }, { injector });
@@ -203,12 +205,15 @@ export class FlowDiagramEffectsService {
     executeCenterOnNode: (taskId: string, openDetail: boolean) => void
   ): EffectRef {
     return effect(() => {
+      const isViewReady = this.flowCommand.isViewReady();
       const cmd = this.flowCommand.centerNodeCommand();
-      if (cmd) {
+      if (isViewReady && cmd) {
         untracked(() => {
           if (this.diagram.isInitialized) {
-            executeCenterOnNode(cmd.taskId, cmd.openDetail);
-            this.flowCommand.clearCenterCommand();
+            const claim = this.flowCommand.claimPendingCenterCommand();
+            if (!claim) return;
+            executeCenterOnNode(claim.payload.taskId, claim.payload.openDetail);
+            this.flowCommand.acknowledgePendingCenterCommand(claim);
           }
         });
       }

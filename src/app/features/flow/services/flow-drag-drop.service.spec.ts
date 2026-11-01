@@ -17,9 +17,14 @@ type MockOperationReturn = MockOperationResult | Promise<MockOperationResult>;
 
 describe('FlowDragDropService', () => {
   let service: FlowDragDropService;
+  let projectOwner = { projectId: 'project-a' as string | null, generation: 1 };
   const tasksSignal = signal<Task[]>([]);
   const mockProjectState = {
     tasks: tasksSignal,
+    activeProjectId: vi.fn(() => projectOwner.projectId),
+    captureActiveProjectOwner: vi.fn(() => ({ ...projectOwner })),
+    isActiveProjectOwnerCurrent: vi.fn((owner: typeof projectOwner) =>
+      owner.projectId === projectOwner.projectId && owner.generation === projectOwner.generation),
     getTask: vi.fn((_: string): Task | null => null),
     unassignedTasks: vi.fn(() => [] as Task[]),
   };
@@ -43,6 +48,23 @@ describe('FlowDragDropService', () => {
     parkingMeta: null,
     ...overrides,
   });
+
+  const createTaskDragEvent = (taskId: string, target: EventTarget | null): DragEvent => {
+    const dataTransfer = new DataTransfer();
+    dataTransfer.setData('application/x-nanoflow-task', JSON.stringify({
+      v: 1,
+      type: 'task',
+      taskId,
+      projectId: projectOwner.projectId,
+      projectOwner,
+      source: 'flow',
+    }));
+    return {
+      preventDefault: vi.fn(),
+      dataTransfer,
+      target,
+    } as unknown as DragEvent;
+  };
 
   const mockTaskOps = {
     isHintOnlyStartupReadOnly: vi.fn(() => false),
@@ -76,8 +98,27 @@ describe('FlowDragDropService', () => {
     error: vi.fn(),
   };
 
+  const createDockPanel = (): HTMLDivElement => {
+    const panel = document.createElement('div');
+    panel.setAttribute('data-testid', 'dock-v3-panel');
+    vi.spyOn(panel, 'getBoundingClientRect').mockReturnValue({ left: 0, top: 0, right: 200,
+      bottom: 200, width: 200, height: 200, x: 0, y: 0, toJSON: () => ({}) } as DOMRect);
+    document.body.appendChild(panel);
+    return panel;
+  };
+
+  const dockDragInternal = () => service as unknown as {
+    dragToDockTaskIds: string[];
+    dragToDockOwner: typeof projectOwner | null;
+    onAltDragUp: (event: PointerEvent) => void;
+  };
+  const releaseDockDrag = (): void => {
+    dockDragInternal().onAltDragUp({ clientX: 100, clientY: 100 } as PointerEvent);
+  };
+
   beforeEach(() => {
     vi.clearAllMocks();
+    projectOwner = { projectId: 'project-a', generation: 1 };
     mockTaskOps.isHintOnlyStartupReadOnly.mockReturnValue(false);
     mockTaskOps.detachTask.mockResolvedValue(true);
     mockTaskOps.updateTaskPosition.mockReset();
@@ -113,6 +154,22 @@ describe('FlowDragDropService', () => {
     });
 
     service = TestBed.inject(FlowDragDropService);
+  });
+
+  it('suppresses stale move UI after A-B-A and releases the operation claim', async () => {
+    const task = createTask({ stage: 1 });
+    let finish!: (result: MockOperationResult) => void;
+    mockProjectState.getTask.mockReturnValue(createTask({ id: 'parent', stage: 1 }));
+    mockTaskOps.moveTaskToStageAtPosition.mockReturnValueOnce(
+      new Promise<MockOperationResult>(resolve => { finish = resolve; }));
+    const first = service.processDrop(task, { parentId: 'parent' }, new go.Point(4, 8));
+    projectOwner = { projectId: 'project-b', generation: 2 };
+    projectOwner = { projectId: 'project-a', generation: 3 };
+    finish({ ok: false, error: { code: 'FAILED', message: 'late A' } });
+    await first;
+    expect(mockToast.error).not.toHaveBeenCalled();
+    await service.processDrop(task, { parentId: 'parent' }, new go.Point(4, 8));
+    expect(mockTaskOps.moveTaskToStageAtPosition).toHaveBeenCalledTimes(2);
   });
 
   afterEach(() => {
@@ -400,6 +457,8 @@ describe('FlowDragDropService', () => {
       v: 1,
       type: 'task',
       taskId: 'task-1',
+      projectId: projectOwner.projectId,
+      projectOwner,
       source: 'flow',
     }));
 
@@ -420,6 +479,65 @@ describe('FlowDragDropService', () => {
 
     expect(succeeded).toBe(true);
     expect(mockToast.success).toHaveBeenCalledWith('已移至待分配', '任务 "Assigned task" 已解除分配');
+  });
+
+  it('待分配任务应挂到实际落点卡片，而不是候选列表首项', async () => {
+    const draggedTask = createTask({ id: 'dragged-task' });
+    const firstCandidate = createTask({ id: 'first-candidate' });
+    const targetTask = createTask({ id: 'actual-target' });
+    const tasksById = new Map([draggedTask, firstCandidate, targetTask].map(task => [task.id, task]));
+    mockProjectState.getTask.mockImplementation((taskId: string) => tasksById.get(taskId) ?? null);
+    mockProjectState.unassignedTasks.mockReturnValue([draggedTask, firstCandidate, targetTask]);
+    const targetCard = document.createElement('div');
+    targetCard.dataset['unassignedTaskId'] = targetTask.id;
+    const targetText = document.createElement('span');
+    targetCard.append(targetText);
+
+    const moved = await service.handleFullUnassignedDrop(
+      createTaskDragEvent(draggedTask.id, targetText),
+    );
+
+    expect(moved).toBe(true);
+    expect(mockTaskOps.moveTaskToStage).toHaveBeenCalledWith(
+      draggedTask.id,
+      null,
+      undefined,
+      targetTask.id,
+    );
+  });
+
+  it('待分配任务落在空白区域时不应猜测目标并改变父子关系', async () => {
+    const draggedTask = createTask({ id: 'dragged-task' });
+    const candidate = createTask({ id: 'candidate-task' });
+    mockProjectState.getTask.mockImplementation((taskId: string) => (
+      taskId === draggedTask.id ? draggedTask : candidate
+    ));
+    mockProjectState.unassignedTasks.mockReturnValue([draggedTask, candidate]);
+
+    const moved = await service.handleFullUnassignedDrop(
+      createTaskDragEvent(draggedTask.id, document.createElement('div')),
+    );
+
+    expect(moved).toBe(false);
+    expect(mockTaskOps.moveTaskToStage).not.toHaveBeenCalled();
+  });
+
+  it('卡片身份指向非待分配任务时不应执行重挂载', async () => {
+    const draggedTask = createTask({ id: 'dragged-task' });
+    const candidate = createTask({ id: 'candidate-task' });
+    const assignedTarget = createTask({ id: 'assigned-target', stage: 2 });
+    const tasksById = new Map([draggedTask, candidate, assignedTarget].map(task => [task.id, task]));
+    mockProjectState.getTask.mockImplementation((taskId: string) => tasksById.get(taskId) ?? null);
+    mockProjectState.unassignedTasks.mockReturnValue([draggedTask, candidate]);
+    const targetCard = document.createElement('div');
+    targetCard.dataset['unassignedTaskId'] = assignedTarget.id;
+
+    const moved = await service.handleFullUnassignedDrop(
+      createTaskDragEvent(draggedTask.id, targetCard),
+    );
+
+    expect(moved).toBe(false);
+    expect(mockTaskOps.moveTaskToStage).not.toHaveBeenCalled();
   });
 
   it('插入连接线应以单次 durable 提交持久化结构和落点位置', async () => {
@@ -470,29 +588,11 @@ describe('FlowDragDropService', () => {
     const task = createTask({ id: 'task-1', stage: 1 });
     mockProjectState.getTask.mockReturnValue(task);
 
-    const dockPanel = document.createElement('div');
-    dockPanel.setAttribute('data-testid', 'dock-v3-panel');
-    vi.spyOn(dockPanel, 'getBoundingClientRect').mockReturnValue({
-      left: 0,
-      top: 0,
-      right: 200,
-      bottom: 200,
-      width: 200,
-      height: 200,
-      x: 0,
-      y: 0,
-      toJSON: () => ({}),
-    } as DOMRect);
-    document.body.appendChild(dockPanel);
+    const dockPanel = createDockPanel();
 
     try {
-      const internal = service as unknown as {
-        dragToDockTaskIds: string[];
-        onAltDragUp: (event: PointerEvent) => void;
-      };
-      internal.dragToDockTaskIds = ['task-1'];
-
-      internal.onAltDragUp({ clientX: 100, clientY: 100 } as PointerEvent);
+      service.startDragToDock(['task-1'], 0, 0);
+      releaseDockDrag();
 
       expect(mockDockEngine.dockTaskFromExternalDrag).not.toHaveBeenCalled();
       expect(mockToast.info).toHaveBeenCalledWith('会话确认中', '拖入停泊坞暂不可用，owner 确认完成前保持只读');
@@ -506,29 +606,11 @@ describe('FlowDragDropService', () => {
     mockProjectState.getTask.mockReturnValue(task);
     mockDockEngine.dockTaskFromExternalDrag.mockReturnValue(false);
 
-    const dockPanel = document.createElement('div');
-    dockPanel.setAttribute('data-testid', 'dock-v3-panel');
-    vi.spyOn(dockPanel, 'getBoundingClientRect').mockReturnValue({
-      left: 0,
-      top: 0,
-      right: 200,
-      bottom: 200,
-      width: 200,
-      height: 200,
-      x: 0,
-      y: 0,
-      toJSON: () => ({}),
-    } as DOMRect);
-    document.body.appendChild(dockPanel);
+    const dockPanel = createDockPanel();
 
     try {
-      const internal = service as unknown as {
-        dragToDockTaskIds: string[];
-        onAltDragUp: (event: PointerEvent) => void;
-      };
-      internal.dragToDockTaskIds = ['task-1'];
-
-      internal.onAltDragUp({ clientX: 100, clientY: 100 } as PointerEvent);
+      service.startDragToDock(['task-1'], 0, 0);
+      releaseDockDrag();
 
       expect(mockDockEngine.dockTaskFromExternalDrag).toHaveBeenCalledWith('task-1', 'flow');
       expect(mockToast.success).not.toHaveBeenCalled();
@@ -545,32 +627,15 @@ describe('FlowDragDropService', () => {
       resolveDock = resolve;
     }));
 
-    const dockPanel = document.createElement('div');
-    dockPanel.setAttribute('data-testid', 'dock-v3-panel');
-    vi.spyOn(dockPanel, 'getBoundingClientRect').mockReturnValue({
-      left: 0,
-      top: 0,
-      right: 200,
-      bottom: 200,
-      width: 200,
-      height: 200,
-      x: 0,
-      y: 0,
-      toJSON: () => ({}),
-    } as DOMRect);
-    document.body.appendChild(dockPanel);
+    const dockPanel = createDockPanel();
 
     try {
-      const internal = service as unknown as {
-        dragToDockTaskIds: string[];
-        onAltDragUp: (event: PointerEvent) => void;
-      };
-      internal.dragToDockTaskIds = ['task-1'];
-      internal.onAltDragUp({ clientX: 100, clientY: 100 } as PointerEvent);
+      service.startDragToDock(['task-1'], 0, 0);
+      releaseDockDrag();
       await Promise.resolve();
 
-      internal.dragToDockTaskIds = ['task-1'];
-      internal.onAltDragUp({ clientX: 100, clientY: 100 } as PointerEvent);
+      service.startDragToDock(['task-1'], 0, 0);
+      releaseDockDrag();
       await Promise.resolve();
 
       expect(mockDockEngine.dockTaskFromExternalDrag).toHaveBeenCalledTimes(1);
@@ -578,6 +643,63 @@ describe('FlowDragDropService', () => {
       resolveDock(true);
       await flushAsyncWork();
       expect(mockToast.success).toHaveBeenCalledWith('已加入停泊坞', '任务已从流程图拖入停泊坞');
+    } finally {
+      dockPanel.remove();
+    }
+  });
+
+  it.each([
+    ['A to B', { projectId: 'project-b', generation: 2 }, false],
+    ['A to B to A', { projectId: 'project-a', generation: 3 }, false],
+    ['duplicate A', { projectId: 'project-a', generation: 1 }, true],
+  ] as const)('release-time ownership rejects %s before same-id task resolution', (_label, nextOwner, valid) => {
+    mockProjectState.getTask.mockReturnValue(createTask({ id: 'task-1', stage: 1 }));
+    const dockPanel = createDockPanel();
+    try {
+      service.startDragToDock(['task-1'], 0, 0);
+      mockProjectState.getTask.mockClear();
+      projectOwner = { ...nextOwner };
+      releaseDockDrag();
+      expect(mockProjectState.getTask).toHaveBeenCalledTimes(valid ? 1 : 0);
+      expect(mockDockEngine.dockTaskFromExternalDrag).toHaveBeenCalledTimes(valid ? 1 : 0);
+    } finally {
+      dockPanel.remove();
+    }
+  });
+
+  it('rejects ownerless pointer release and clears task-owner state together', () => {
+    mockProjectState.getTask.mockReturnValue(createTask({ id: 'task-1', stage: 1 }));
+    const dockPanel = createDockPanel();
+    try {
+      dockDragInternal().dragToDockTaskIds = ['task-1'];
+      releaseDockDrag();
+      expect(mockProjectState.getTask).not.toHaveBeenCalled();
+      expect(mockDockEngine.dockTaskFromExternalDrag).not.toHaveBeenCalled();
+      expect(dockDragInternal().dragToDockTaskIds).toEqual([]);
+      expect(dockDragInternal().dragToDockOwner).toBeNull();
+    } finally {
+      dockPanel.remove();
+    }
+  });
+
+  it('lets durable A docking finish after A-B-A but suppresses its stale success UI', async () => {
+    let resolveDock!: (docked: boolean) => void;
+    mockProjectState.getTask.mockReturnValue(createTask({ id: 'task-1', stage: 1 }));
+    mockDockEngine.dockTaskFromExternalDrag.mockReturnValue(new Promise<boolean>(resolve => {
+      resolveDock = resolve;
+    }));
+    const dockPanel = createDockPanel();
+    try {
+      service.startDragToDock(['task-1'], 0, 0);
+      releaseDockDrag();
+      await Promise.resolve();
+      projectOwner = { projectId: 'project-a', generation: 3 };
+      resolveDock(true);
+      await flushAsyncWork();
+      expect(mockDockEngine.dockTaskFromExternalDrag).toHaveBeenCalledOnce();
+      expect(mockToast.success).not.toHaveBeenCalled();
+      expect(dockDragInternal().dragToDockOwner).toBeNull();
+      expect(dockDragInternal().dragToDockTaskIds).toEqual([]);
     } finally {
       dockPanel.remove();
     }
@@ -599,29 +721,11 @@ describe('FlowDragDropService', () => {
       return true;
     });
 
-    const dockPanel = document.createElement('div');
-    dockPanel.setAttribute('data-testid', 'dock-v3-panel');
-    vi.spyOn(dockPanel, 'getBoundingClientRect').mockReturnValue({
-      left: 0,
-      top: 0,
-      right: 200,
-      bottom: 200,
-      width: 200,
-      height: 200,
-      x: 0,
-      y: 0,
-      toJSON: () => ({}),
-    } as DOMRect);
-    document.body.appendChild(dockPanel);
+    const dockPanel = createDockPanel();
 
     try {
-      const internal = service as unknown as {
-        dragToDockTaskIds: string[];
-        onAltDragUp: (event: PointerEvent) => void;
-      };
-      internal.dragToDockTaskIds = ['task-1', 'task-2'];
-
-      internal.onAltDragUp({ clientX: 100, clientY: 100 } as PointerEvent);
+      service.startDragToDock(['task-1', 'task-2'], 0, 0);
+      releaseDockDrag();
       await Promise.resolve();
       await Promise.resolve();
 
@@ -644,29 +748,11 @@ describe('FlowDragDropService', () => {
       resolveDock = resolve;
     }));
 
-    const dockPanel = document.createElement('div');
-    dockPanel.setAttribute('data-testid', 'dock-v3-panel');
-    vi.spyOn(dockPanel, 'getBoundingClientRect').mockReturnValue({
-      left: 0,
-      top: 0,
-      right: 200,
-      bottom: 200,
-      width: 200,
-      height: 200,
-      x: 0,
-      y: 0,
-      toJSON: () => ({}),
-    } as DOMRect);
-    document.body.appendChild(dockPanel);
+    const dockPanel = createDockPanel();
 
     try {
-      const internal = service as unknown as {
-        dragToDockTaskIds: string[];
-        onAltDragUp: (event: PointerEvent) => void;
-      };
-      internal.dragToDockTaskIds = ['task-1'];
-
-      internal.onAltDragUp({ clientX: 100, clientY: 100 } as PointerEvent);
+      service.startDragToDock(['task-1'], 0, 0);
+      releaseDockDrag();
       await Promise.resolve();
 
       expect(mockDockEngine.dockTaskFromExternalDrag).toHaveBeenCalledWith('task-1', 'flow');

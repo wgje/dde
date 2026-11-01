@@ -1,5 +1,5 @@
 import { Injectable, Injector, inject, signal, NgZone, DestroyRef, OnDestroy } from '@angular/core';
-import { ProjectStateService } from '../../../../services/project-state.service';
+import { ProjectStateService, type ActiveProjectOwner } from '../../../../services/project-state.service';
 import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
 import { DockEngineService } from '../../../../services/dock-engine.service';
 import { FlowLayoutService } from './flow-layout.service';
@@ -93,12 +93,14 @@ export class FlowDragDropService implements OnDestroy {
    */
   startDrag(event: DragEvent, task: Task): void {
     if (event.dataTransfer) {
+      const projectOwner = this.projectState.captureActiveProjectOwner();
       writeTaskDragPayload(event.dataTransfer, {
         v: 1,
         type: 'task',
         taskId: task.id,
-        projectId: this.projectState.activeProjectId(),
-        fromProjectId: this.projectState.activeProjectId(),
+        projectId: projectOwner.projectId,
+        projectOwner,
+        fromProjectId: projectOwner.projectId,
         source: 'flow',
       });
       event.dataTransfer.effectAllowed = "move";
@@ -156,8 +158,9 @@ export class FlowDragDropService implements OnDestroy {
         return false;
       }
 
+      const owner = this.projectState.captureActiveProjectOwner();
       const detached = await this.taskOps.detachTask(task.id);
-      if (this.destroyed) return false;
+      if (!this.canPublish(owner)) return false;
       if (!detached) {
         return false;
       }
@@ -283,6 +286,7 @@ export class FlowDragDropService implements OnDestroy {
     
     this.logger.info('插入任务到连接线', { taskId, sourceId, targetId });
     
+    const owner = this.projectState.captureActiveProjectOwner();
     const result = await this.taskOps.insertTaskBetweenAtPosition(
       taskId,
       sourceId,
@@ -290,7 +294,7 @@ export class FlowDragDropService implements OnDestroy {
       loc.x,
       loc.y,
     );
-    if (this.destroyed) return false;
+    if (!this.canPublish(owner)) return false;
     if (!result.ok) {
       this.toast.error('插入失败', getErrorMessage(result.error));
       return false;
@@ -384,8 +388,10 @@ export class FlowDragDropService implements OnDestroy {
         await this.moveTaskBesideSibling(task, insertInfo, docPoint);
         this.dropOperationGuard.release(dropClaim.key);
       } else {
+        const owner = this.projectState.captureActiveProjectOwner();
         try {
           const saved = await this.taskOps.updateTaskPosition(task.id, docPoint.x, docPoint.y);
+          if (!this.canPublish(owner)) return;
           if (!saved) {
             throw new Error('Task position local persistence failed');
           }
@@ -412,8 +418,9 @@ export class FlowDragDropService implements OnDestroy {
   }
 
   private async moveUnassignedTaskToPoint(task: Task, docPoint: go.Point): Promise<void> {
+    const owner = this.projectState.captureActiveProjectOwner();
     const saved = await this.taskOps.updateTaskPosition(task.id, docPoint.x, docPoint.y);
-    if (this.destroyed) return;
+    if (!this.canPublish(owner)) return;
     if (!saved) {
       throw new Error('Task position local persistence failed');
     }
@@ -425,6 +432,7 @@ export class FlowDragDropService implements OnDestroy {
     insertInfo: InsertPositionInfo,
     docPoint: go.Point,
   ): Promise<boolean> {
+    const owner = this.projectState.captureActiveProjectOwner();
     const parentTask = this.projectState.getTask(insertInfo.parentId!);
     if (!parentTask) return false;
 
@@ -437,7 +445,7 @@ export class FlowDragDropService implements OnDestroy {
       docPoint.x,
       docPoint.y,
     );
-    if (this.destroyed) return false;
+    if (!this.canPublish(owner)) return false;
     if (!result.ok) {
       this.toast.error('移动任务失败', getErrorMessage(result.error));
       return false;
@@ -451,6 +459,7 @@ export class FlowDragDropService implements OnDestroy {
     insertInfo: InsertPositionInfo,
     docPoint: go.Point,
   ): Promise<boolean> {
+    const owner = this.projectState.captureActiveProjectOwner();
     const refTask = this.projectState.getTask(insertInfo.beforeTaskId || insertInfo.afterTaskId!);
     if (!refTask?.stage) return false;
 
@@ -465,7 +474,7 @@ export class FlowDragDropService implements OnDestroy {
       docPoint.x,
       docPoint.y,
     );
-    if (this.destroyed) return false;
+    if (!this.canPublish(owner)) return false;
     if (!result.ok) {
       this.toast.error('移动任务失败', getErrorMessage(result.error));
       return false;
@@ -499,47 +508,45 @@ export class FlowDragDropService implements OnDestroy {
         return false;
       }
 
-      const unassignedTasks = this.projectState.unassignedTasks();
-      const targetCandidates = unassignedTasks.filter(t => t.id !== draggedTask.id);
+      const targetTask = this.resolveUnassignedDropTarget(event, draggedTask.id);
+      if (!targetTask) return false;
 
-      if (targetCandidates.length > 0) {
-        const targetTask = targetCandidates[0];
-        const result = await this.taskOps.moveTaskToStage(draggedTask.id, null, undefined, targetTask.id);
-        if (this.destroyed) return false;
-        if (!result.ok) {
-          this.toast.error('重新挂载失败', getErrorMessage(result.error));
-        } else {
-          this.toast.success('已重新挂载', `"${draggedTask.title}" 已移到 "${targetTask.title}" 下`);
-        }
-        return result.ok;
+      const owner = this.projectState.captureActiveProjectOwner();
+      const result = await this.taskOps.moveTaskToStage(draggedTask.id, null, undefined, targetTask.id);
+      if (!this.canPublish(owner)) return false;
+      if (!result.ok) {
+        this.toast.error('重新挂载失败', getErrorMessage(result.error));
+      } else {
+        this.toast.success('已重新挂载', `"${draggedTask.title}" 已移到 "${targetTask.title}" 下`);
       }
+      return result.ok;
     }
     return false;
+  }
+
+  private resolveUnassignedDropTarget(event: DragEvent, draggedTaskId: string): Task | null {
+    const targetElement = event.target instanceof Element ? event.target : null;
+    const targetTaskId = targetElement
+      ?.closest<HTMLElement>('[data-unassigned-task-id]')
+      ?.dataset['unassignedTaskId'];
+    if (!targetTaskId || targetTaskId === draggedTaskId) return null;
+
+    const targetTask = this.projectState.getTask(targetTaskId);
+    return targetTask?.stage === null && !targetTask.deletedAt ? targetTask : null;
   }
 
   private resolveDroppedTask(dataTransfer: DataTransfer | null | undefined): Task | null {
     if (!dataTransfer) return null;
 
     const payload = readTaskDragPayload(dataTransfer);
-    if (payload) {
-      const task = this.projectState.getTask(payload.taskId);
-      if (task) return task;
-    }
-
-    const jsonData = dataTransfer.getData("application/json") || dataTransfer.getData("text");
-    if (!jsonData) return null;
-
-    try {
-      const raw = JSON.parse(jsonData) as Partial<Task> & { id?: unknown };
-      const candidateId = typeof raw.id === 'string' ? raw.id : null;
-      if (candidateId) {
-        return this.projectState.getTask(candidateId) ?? (raw as Task);
-      }
+    if (!payload?.projectOwner || !this.projectState.isActiveProjectOwnerCurrent(payload.projectOwner)) {
       return null;
-    } catch {
-      // legacy plain task id
-      return this.projectState.getTask(jsonData) ?? null;
     }
+    return this.projectState.getTask(payload.taskId) ?? null;
+  }
+
+  private canPublish(owner: ActiveProjectOwner): boolean {
+    return !this.destroyed && this.projectState.isActiveProjectOwnerCurrent(owner);
   }
 
   /**
@@ -555,8 +562,8 @@ export class FlowDragDropService implements OnDestroy {
 
   private readonly dockEngine = inject(DockEngineService);
 
-  /** 拖拽到停泊坞状态：当前正在拖拽的任务ID（单个） */
-  private altDragTaskId: string | null = null;
+  /** 拖拽到停泊坞状态：任务身份所属的项目 generation。 */
+  private dragToDockOwner: ActiveProjectOwner | null = null;
   /** 拖拽到停泊坞状态：当前正在拖拽的任务ID列表（多选） */
   private dragToDockTaskIds: string[] = [];
   /** 拖拽到停泊坞状态：幽灵指示元素 */
@@ -576,15 +583,17 @@ export class FlowDragDropService implements OnDestroy {
     // 清理可能残留的前一次拖拽
     this.endAltDragToDock();
 
+    const owner = this.projectState.captureActiveProjectOwner();
+    if (!owner.projectId) return;
     // 过滤有效任务
     const validTasks = taskIds
       .map(id => this.projectState.getTask(id))
       .filter((t): t is Task => t !== null && t !== undefined && t.status === 'active');
 
-    if (validTasks.length === 0) return;
+    if (validTasks.length === 0 || !this.canPublish(owner)) return;
 
+    this.dragToDockOwner = owner;
     this.dragToDockTaskIds = validTasks.map(t => t.id);
-    this.altDragTaskId = this.dragToDockTaskIds[0];
     this.isAltDragActive.set(true);
 
     // 创建幽灵提示元素（使用 DOM API 构建，避免 innerHTML/XSS 风险）
@@ -617,6 +626,10 @@ export class FlowDragDropService implements OnDestroy {
   }
 
   private onAltDragMove(e: PointerEvent): void {
+    if (!this.dragToDockOwner || !this.canPublish(this.dragToDockOwner)) {
+      this.endAltDragToDock();
+      return;
+    }
     if (!this.altDragGhost) return;
     this.altDragGhost.style.left = `${e.clientX + 12}px`;
     this.altDragGhost.style.top = `${e.clientY - 16}px`;
@@ -650,14 +663,15 @@ export class FlowDragDropService implements OnDestroy {
   }
 
   private onAltDragUp(e: PointerEvent): void {
+    const owner = this.dragToDockOwner;
     const taskIds = [...this.dragToDockTaskIds];
-    if (taskIds.length === 0) {
+    if (!owner?.projectId || !this.canPublish(owner) || taskIds.length === 0) {
       this.endAltDragToDock();
       return;
     }
 
     if (this.isPointerOverDock(e)) {
-      this.commitAltDragToDock(taskIds);
+      this.commitAltDragToDock(taskIds, owner);
     }
 
     this.endAltDragToDock();
@@ -678,8 +692,8 @@ export class FlowDragDropService implements OnDestroy {
       e.clientY >= rect.top && e.clientY <= rect.bottom;
   }
 
-  private commitAltDragToDock(taskIds: string[]): void {
-    const dockDropKey = this.createDockDropKey(taskIds);
+  private commitAltDragToDock(taskIds: string[], owner: ActiveProjectOwner): void {
+    const dockDropKey = this.createDockDropKey(taskIds, owner);
     if (this.activeDockDropKeys.has(dockDropKey)) {
       this.logger.debug('跳过重复拖入停泊坞事件', { taskIds, dockDropKey });
       this.endAltDragToDock();
@@ -691,7 +705,7 @@ export class FlowDragDropService implements OnDestroy {
       try {
         // Flow 视图销毁后（@defer teardown / 视图切换）不得再发起停泊坞变更：
         // pointerup 的 document 监听可能在销毁后仍触发一次提交
-        if (this.destroyed) {
+        if (!this.canPublish(owner)) {
           return;
         }
 
@@ -702,6 +716,7 @@ export class FlowDragDropService implements OnDestroy {
         }
 
         const dockResults = await Promise.all(taskIds.map(async taskId => {
+          if (!this.canPublish(owner)) return false;
           const task = this.projectState.getTask(taskId);
           if (!task) return false;
           try {
@@ -711,7 +726,7 @@ export class FlowDragDropService implements OnDestroy {
             return false;
           }
         }));
-        if (this.destroyed) return;
+        if (!this.canPublish(owner)) return;
 
         const dockedCount = dockResults.filter(Boolean).length;
         if (dockedCount > 0) {
@@ -726,13 +741,13 @@ export class FlowDragDropService implements OnDestroy {
     });
   }
 
-  private createDockDropKey(taskIds: string[]): string {
-    return taskIds.slice().sort().join('|');
+  private createDockDropKey(taskIds: string[], owner: ActiveProjectOwner): string {
+    return `${owner.projectId}:${owner.generation}:${taskIds.slice().sort().join('|')}`;
   }
 
   /** 结束拖拽到停泊坞，清理所有状态和 DOM */
   private endAltDragToDock(): void {
-    this.altDragTaskId = null;
+    this.dragToDockOwner = null;
     this.dragToDockTaskIds = [];
     this.isAltDragActive.set(false);
 

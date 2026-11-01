@@ -5,6 +5,10 @@ export interface TaskDragPayloadV1 {
   type: 'task';
   taskId: string;
   projectId: string | null;
+  projectOwner?: {
+    projectId: string | null;
+    generation: number;
+  };
   source: 'text' | 'flow' | 'dock';
   laneHint?: DockLane | null;
   fromProjectId?: string | null;
@@ -39,6 +43,17 @@ function normalizeTaskId(value: unknown): string | null {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
 }
 
+function normalizeProjectOwner(value: unknown): TaskDragPayloadV1['projectOwner'] {
+  if (!isPlainObject(value)) return undefined;
+  const projectId = value['projectId'];
+  const generation = value['generation'];
+  if ((typeof projectId !== 'string' && projectId !== null)
+    || typeof generation !== 'number' || !Number.isInteger(generation) || generation < 0) {
+    return undefined;
+  }
+  return { projectId, generation };
+}
+
 function toPayloadFromUnknown(raw: unknown): TaskDragPayloadV1 | null {
   if (!isPlainObject(raw)) return null;
 
@@ -47,7 +62,7 @@ function toPayloadFromUnknown(raw: unknown): TaskDragPayloadV1 | null {
   const rawTaskId = raw['taskId'];
 
   if (rawV === 1 && rawType === 'task' && typeof rawTaskId === 'string' && rawTaskId.trim()) {
-    return {
+    const payload: TaskDragPayloadV1 = {
       v: 1,
       type: 'task',
       taskId: rawTaskId.trim(),
@@ -56,12 +71,15 @@ function toPayloadFromUnknown(raw: unknown): TaskDragPayloadV1 | null {
       laneHint: normalizeLaneHint(raw['laneHint'] ?? raw['relationHint']),
       fromProjectId: normalizeProjectId(raw['fromProjectId'] ?? raw['projectId']),
     };
+    const projectOwner = normalizeProjectOwner(raw['projectOwner']);
+    if (projectOwner) payload.projectOwner = projectOwner;
+    return payload;
   }
 
   const legacyTaskId = normalizeTaskId(raw['id']);
   if (!legacyTaskId) return null;
 
-  return {
+  const payload: TaskDragPayloadV1 = {
     v: 1,
     type: 'task',
     taskId: legacyTaskId,
@@ -70,6 +88,9 @@ function toPayloadFromUnknown(raw: unknown): TaskDragPayloadV1 | null {
     laneHint: normalizeLaneHint(raw['laneHint'] ?? raw['relationHint']),
     fromProjectId: normalizeProjectId(raw['fromProjectId'] ?? raw['projectId'] ?? raw['sourceProjectId']),
   };
+  const projectOwner = normalizeProjectOwner(raw['projectOwner']);
+  if (projectOwner) payload.projectOwner = projectOwner;
+  return payload;
 }
 
 function safeSetData(dataTransfer: DataTransfer, mime: string, value: string): void {
@@ -113,6 +134,8 @@ export function writeTaskDragPayload(dataTransfer: DataTransfer, payload: TaskDr
     laneHint: normalizeLaneHint(payload.laneHint),
     fromProjectId: normalizeProjectId(payload.fromProjectId ?? payload.projectId),
   };
+  const projectOwner = normalizeProjectOwner(payload.projectOwner);
+  if (projectOwner) normalized.projectOwner = projectOwner;
 
   const json = JSON.stringify(normalized);
   safeSetData(dataTransfer, MIME_TASK, json);

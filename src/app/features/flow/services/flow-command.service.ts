@@ -1,5 +1,9 @@
-import { Injectable, signal, computed, effect } from '@angular/core';
+import { Injectable, signal, computed, effect, inject } from '@angular/core';
 import { LoggerService } from '../../../../services/logger.service';
+import {
+  ProjectStateService,
+  type ActiveProjectOwner,
+} from '../../../../services/project-state.service';
 
 /**
  * 流程图命令类型枚举
@@ -47,6 +51,12 @@ export interface CenterNodePayload extends Record<string, unknown> {
   openDetail: boolean;
 }
 
+export interface CenterNodeCommandClaim {
+  readonly commandId: number;
+  readonly owner: ActiveProjectOwner;
+  readonly payload: CenterNodePayload;
+}
+
 /**
  * 流程图命令服务
  * 
@@ -73,6 +83,7 @@ export interface CenterNodePayload extends Record<string, unknown> {
 @Injectable({ providedIn: 'root' })
 export class FlowCommandService {
   private readonly logger = new LoggerService().category('FlowCommand');
+  private readonly projectState = inject(ProjectStateService);
 
   // ========== 命令队列信号 ==========
   
@@ -98,8 +109,13 @@ export class FlowCommandService {
    * 居中到节点命令信号
    * 每次写入触发 FlowViewComponent 响应
    */
-  private readonly _centerNodeCommand = signal<CenterNodePayload | null>(null);
-  readonly centerNodeCommand = this._centerNodeCommand.asReadonly();
+  private readonly _pendingCenterCommand = signal<CenterNodeCommandClaim | null>(null);
+  readonly centerNodeCommand = computed(() => {
+    const command = this._pendingCenterCommand();
+    return command && this.projectState.isActiveProjectOwnerCurrent(command.owner)
+      ? command.payload
+      : null;
+  });
 
   /**
    * 重试初始化命令信号
@@ -114,13 +130,14 @@ export class FlowCommandService {
    * 待执行的居中命令
    * FlowView 未加载时缓存，初始化后执行
    */
-  private pendingCenterCommand: CenterNodePayload | null = null;
+  private nextCenterCommandId = 0;
 
-  /**
-   * FlowView 是否已就绪
-   */
-  private readonly _isViewReady = signal(false);
-  readonly isViewReady = this._isViewReady.asReadonly();
+  /** 只有发布 readiness 的精确 ActiveProjectOwner 仍有效时才可消费命令。 */
+  private readonly _readyOwner = signal<ActiveProjectOwner | null>(null);
+  readonly isViewReady = computed(() => {
+    const owner = this._readyOwner();
+    return owner !== null && this.projectState.isActiveProjectOwnerCurrent(owner);
+  });
 
   constructor() {
     // 调试日志
@@ -145,12 +162,12 @@ export class FlowCommandService {
    */
   centerOnNode(taskId: string, openDetail: boolean = true): void {
     const payload: CenterNodePayload = { taskId, openDetail };
-    
-    // 1. 设置专用信号（供 effect 响应）
-    this._centerNodeCommand.set(payload);
-    
-    // 2. 缓存待执行命令（应对 View 未就绪情况）
-    this.pendingCenterCommand = payload;
+    const command = Object.freeze({
+      commandId: ++this.nextCenterCommandId,
+      owner: Object.freeze({ ...this.projectState.captureActiveProjectOwner() }),
+      payload: Object.freeze(payload),
+    });
+    this._pendingCenterCommand.set(command);
     
     // 3. 同时加入通用队列（用于调试和日志）
     this.dispatch(FlowCommandType.CenterOnNode, payload);
@@ -198,13 +215,11 @@ export class FlowCommandService {
 
   // ========== View 端 API ==========
 
-  /**
-   * 标记 FlowView 已就绪
-   * 由 FlowViewComponent 在 InitialLayoutCompleted 后调用
-   */
-  markViewReady(): void {
-    this._isViewReady.set(true);
-    this.logger.debug('FlowView 已就绪');
+  /** 仅接受由 viewport controller 在 settlement issuance 时捕获的 owner。 */
+  markViewReady(owner: ActiveProjectOwner = this.projectState.captureActiveProjectOwner()): void {
+    if (owner.projectId === null || !this.projectState.isActiveProjectOwnerCurrent(owner)) return;
+    this._readyOwner.set(Object.freeze({ ...owner }));
+    this.logger.debug('FlowView 已就绪', owner);
   }
 
   /**
@@ -212,31 +227,28 @@ export class FlowCommandService {
    * 由 FlowViewComponent 在 ngOnDestroy 时调用
    */
   markViewDestroyed(): void {
-    this._isViewReady.set(false);
+    this._readyOwner.set(null);
     this.logger.debug('FlowView 已销毁');
   }
 
-  /**
-   * 获取并清除待执行的居中命令
-   * FlowView 初始化完成后调用
-   * 
-   * @returns 待执行的命令，如果没有则返回 null
-   */
-  consumePendingCenterCommand(): CenterNodePayload | null {
-    const cmd = this.pendingCenterCommand;
-    this.pendingCenterCommand = null;
-    if (cmd) {
-      this.logger.debug('消费待执行命令', cmd);
+  /** 非破坏性领取；失效 owner 的命令会被退休。 */
+  claimPendingCenterCommand(): CenterNodeCommandClaim | null {
+    const command = this._pendingCenterCommand();
+    if (!command) return null;
+    if (!this.projectState.isActiveProjectOwnerCurrent(command.owner)) {
+      this._pendingCenterCommand.set(null);
+      return null;
     }
-    return cmd;
+    return command;
   }
 
-  /**
-   * 清除居中命令信号
-   * 防止重复执行
-   */
-  clearCenterCommand(): void {
-    this._centerNodeCommand.set(null);
+  /** 仅确认精确领取对象，迟到确认不得清除后继命令。 */
+  acknowledgePendingCenterCommand(command: CenterNodeCommandClaim): boolean {
+    if (this._pendingCenterCommand() !== command
+      || !this.projectState.isActiveProjectOwnerCurrent(command.owner)) return false;
+    this._pendingCenterCommand.set(null);
+    this.logger.debug('确认居中命令', { commandId: command.commandId });
+    return true;
   }
 
   /**
@@ -265,8 +277,7 @@ export class FlowCommandService {
    */
   clearAllCommands(): void {
     this._commandQueue.set([]);
-    this.pendingCenterCommand = null;
-    this._centerNodeCommand.set(null);
+    this._pendingCenterCommand.set(null);
     this.logger.debug('已清空所有命令');
   }
 }

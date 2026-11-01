@@ -7,7 +7,13 @@ import { LoggerService } from '../../../../services/logger.service';
 import { ToastService } from '../../../../services/toast.service';
 import { DockEngineService } from '../../../../services/dock-engine.service';
 import { FlowDiagramConfigService, type FlowRelationDisplayMode, type GoJSDiagramData } from './flow-diagram-config.service';
-import { FlowZoomService } from './flow-zoom.service';
+import { FlowZoomService, type ViewState } from './flow-zoom.service';
+import { FlowCommandService } from './flow-command.service';
+import {
+  FlowDiagramViewportReadinessController,
+  type FlowDiagramReadinessToken,
+  type FlowDiagramViewportApplicationProof,
+} from './flow-diagram-viewport-readiness.controller';
 import { Project, Task } from '../../../../models';
 import * as go from 'gojs';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
@@ -27,6 +33,7 @@ interface DiagramUpdateContext {
   dockFingerprint: string;
   connSig: string;
   relationDisplaySignature: string;
+  viewState: ViewState | null;
   hasTaskDataChange: boolean;
   hasTaskVisualChange: boolean;
 }
@@ -57,6 +64,18 @@ export class FlowDiagramDataService {
   private readonly dockEngine = inject(DockEngineService);
   private readonly configService = inject(FlowDiagramConfigService);
   private readonly zoomService = inject(FlowZoomService);
+  private readonly flowCommand = inject(FlowCommandService);
+  private readonly viewportReadiness = new FlowDiagramViewportReadinessController({
+    activeView: () => this.uiState.activeView(),
+    captureActiveProjectOwner: () => this.projectState.captureActiveProjectOwner(),
+    isActiveProjectOwnerCurrent: owner => this.projectState.isActiveProjectOwnerCurrent(owner),
+    fitToContents: owner => this.zoomService.fitToContents(owner),
+    markViewDestroyed: () => this.flowCommand.markViewDestroyed(),
+    markViewReady: owner => this.flowCommand.markViewReady(owner),
+    markLocalChanges: type => this.syncCoordinator.markLocalChanges(type),
+    schedulePersist: () => this.syncCoordinator.schedulePersist(),
+    updateViewState: (projectId, viewState) => this.projectState.updateViewState(projectId, viewState),
+  });
   private readonly sidecarExpansion = new FlowDiagramSidecarExpansionController();
   private readonly exportController = new FlowDiagramExportController({
     projectName: () => this.projectState.activeProject()?.name ?? '未命名项目',
@@ -73,18 +92,8 @@ export class FlowDiagramDataService {
   // ========== GoJS Diagram 引用 ==========
   private diagram: go.Diagram | null = null;
 
-  // ========== 定时器 ==========
-  private viewStateSaveTimer: ReturnType<typeof setTimeout> | null = null;
-  private restoreViewStateTimer: ReturnType<typeof setTimeout> | null = null;
-  private autoFitTimer: ReturnType<typeof setTimeout> | null = null;
-  private initialFitTimer: ReturnType<typeof setTimeout> | null = null;
-  private flowActivationFitRafIds: number[] = [];
-  private lifecycleGeneration = 0;
-
   // ========== 标志 ==========
-  private isFirstLoad = true;
   private _familyColorLogged = false;
-  private pendingAutoFitToContents = false;
 
   // ========== 【2026-02-25 性能优化】增量更新缓存 ==========
   /**
@@ -107,14 +116,13 @@ export class FlowDiagramDataService {
    */
   setDiagram(diagram: go.Diagram | null): void {
     if (this.diagram !== diagram) {
-      this.lifecycleGeneration += 1;
+      this.zoomService.cancelPendingViewStateSave();
     }
     const wasDetached = this.diagram === null;
     this.diagram = diagram;
+    this.viewportReadiness.setDiagram(diagram);
     if (diagram && wasDetached) {
-      this.isFirstLoad = true;
       this._familyColorLogged = false;
-      this.pendingAutoFitToContents = false;
     }
   }
 
@@ -211,35 +219,42 @@ export class FlowDiagramDataService {
   /**
    * 更新图表数据
    */
-  updateDiagram(tasks: Task[], forceRefresh: boolean = false): void {
+  updateDiagram(tasks: Task[], forceRefresh: boolean = false): boolean {
+    let readinessToken: FlowDiagramReadinessToken | null = null;
     try {
       const context = this.createDiagramUpdateContext(tasks);
-      if (!context) return;
+      if (!context) return false;
 
       // 【2026-04-24 性能优化】先做最便宜的指纹短路，避免 30+ 任务场景下
       // 每次 signal emission 都执行 O(n) 的 currentNodeMap 构建 + detectStructuralChange。
       // 指纹已覆盖 title/updatedAt/displayId/parentId/stage/status/parkingMeta，再叠加连接与
       // docks/search 指纹，足以判断“任何影响图表显示的字段是否变化”。
-      if (this.canSkipByFingerprint(context, forceRefresh)) return;
+      if (this.canSkipByFingerprint(context, forceRefresh)) return true;
 
       // 仅在可能需要重建时才构建 node 映射，并复用为 existingNodeMap（避免两次 O(n) 扫描）
       const maps = collectCurrentDiagramMaps(context.model);
       const hasStructuralChange = this.detectStructuralChange(maps.currentNodeMap, context.activeTasks);
 
-      if (this.canSkipPositionOnlyUpdate(context, forceRefresh, hasStructuralChange)) return;
+      if (this.canSkipPositionOnlyUpdate(context, forceRefresh, hasStructuralChange)) return true;
 
       const diagramData = this.buildUpdatedDiagramData(context, maps.currentNodeMap);
       this.pruneSidecarExpandedTaskIds(diagramData.nodeDataArray);
+      readinessToken = this.viewportReadiness.beginProjectUpdate(context.project, context.viewState);
+      if (!readinessToken) return false;
       applyDiagramData(context.diagram, context.model, diagramData, maps);
       this.updateDiagramFingerprints(context);
       this.restoreSelectionAfterDataMerge(context.diagram, this.collectSelectedKeys(context.diagram));
 
       this.logFirstFamilyColorLink(context.model);
-      this.scheduleInitialFitIfNeeded(diagramData);
+      const committed = this.viewportReadiness.commitProjectUpdate(readinessToken);
+      if (!committed) this.viewportReadiness.abortProjectUpdate(readinessToken);
+      return committed;
     } catch (error) {
+      if (readinessToken) this.viewportReadiness.abortProjectUpdate(readinessToken);
       this.sentryLazyLoader.captureException(error, { tags: { operation: 'updateDiagram' } });
       this.logger.error('❌ 更新流程图失败', error);
       this.toast.error('流程图错误', '更新流程图失败。请刷新页面重试。');
+      return false;
     }
   }
 
@@ -272,13 +287,15 @@ export class FlowDiagramDataService {
       dockFingerprint,
       connSig,
       relationDisplaySignature,
+      viewState: project.viewState ? { ...project.viewState } : null,
       hasTaskDataChange: taskFingerprint !== this.lastTaskFingerprint,
       hasTaskVisualChange: taskVisualFingerprint !== this.lastTaskVisualFingerprint,
     };
   }
 
   private canSkipByFingerprint(context: DiagramUpdateContext, forceRefresh: boolean): boolean {
-    return !forceRefresh
+    return this.viewportReadiness.lastSuccessfulProjectId === context.project.id
+      && !forceRefresh
       && !context.hasTaskDataChange
       && context.connSig === this.lastConnectionSignatureForData
       && context.searchQuery === this.lastSearchQuery
@@ -291,7 +308,8 @@ export class FlowDiagramDataService {
     forceRefresh: boolean,
     hasStructuralChange: boolean,
   ): boolean {
-    return context.lastUpdateType === 'position'
+    return this.viewportReadiness.lastSuccessfulProjectId === context.project.id
+      && context.lastUpdateType === 'position'
       && !forceRefresh
       && !hasStructuralChange
       && !context.hasTaskVisualChange;
@@ -358,36 +376,6 @@ export class FlowDiagramDataService {
     }
   }
 
-  private scheduleInitialFitIfNeeded(diagramData: GoJSDiagramData): void {
-    if (!this.isFirstLoad || diagramData.nodeDataArray.length === 0) return;
-    if (!this.diagram) return;
-
-    this.isFirstLoad = false;
-    const scheduledDiagram = this.diagram;
-    const scheduledGeneration = this.lifecycleGeneration;
-    if (this.initialFitTimer !== null) {
-      clearTimeout(this.initialFitTimer);
-      this.initialFitTimer = null;
-    }
-    const initialFitTimer = setTimeout(() => {
-      if (this.initialFitTimer === initialFitTimer) {
-        this.initialFitTimer = null;
-      }
-      if (this.diagram !== scheduledDiagram || this.lifecycleGeneration !== scheduledGeneration) return;
-      const viewState = this.projectState.getViewState();
-      if (!viewState) {
-        if (this.uiState.activeView() !== 'flow') {
-          this.pendingAutoFitToContents = true;
-          return;
-        }
-        if (this.diagram === scheduledDiagram && this.lifecycleGeneration === scheduledGeneration) {
-          this.zoomService.fitToContents();
-        }
-      }
-    }, 100);
-    this.initialFitTimer = initialFitTimer;
-  }
-
   setRelationDisplayMode(mode: FlowRelationDisplayMode, focusedTaskId: string | null): boolean {
     const previousSignature = this.computeRelationDisplaySignature();
     this.relationDisplayMode = mode;
@@ -445,115 +433,20 @@ export class FlowDiagramDataService {
    * 保存当前视图状态（缩放/位置），防抖 1s
    */
   saveViewState(): void {
-    if (!this.diagram) return;
-
-    if (this.viewStateSaveTimer !== null) {
-      clearTimeout(this.viewStateSaveTimer);
-    }
-
-    const viewStateSaveTimer = setTimeout(() => {
-      if (this.viewStateSaveTimer !== viewStateSaveTimer) return;
-      try {
-        if (!this.diagram) return;
-
-        const projectId = this.projectState.activeProjectId();
-        if (!projectId) return;
-
-        const scale = this.diagram.scale;
-        const pos = this.diagram.position;
-
-        this.projectState.updateViewState(projectId, {
-          scale,
-          positionX: pos.x,
-          positionY: pos.y
-        });
-        this.syncCoordinator.markLocalChanges('position');
-        this.syncCoordinator.schedulePersist();
-      } finally {
-        if (this.viewStateSaveTimer === viewStateSaveTimer) {
-          this.viewStateSaveTimer = null;
-        }
-      }
-    }, 1000);
-    this.viewStateSaveTimer = viewStateSaveTimer;
+    const project = this.projectState.activeProject();
+    if (project) this.viewportReadiness.saveViewState(project);
   }
 
   cancelPendingViewStateSave(): void {
-    if (this.viewStateSaveTimer !== null) {
-      clearTimeout(this.viewStateSaveTimer);
-      this.viewStateSaveTimer = null;
-    }
+    this.viewportReadiness.cancelPendingViewStateSave();
   }
 
   /**
    * 恢复上次保存的视图状态
    */
   restoreViewState(): void {
-    if (!this.diagram) return;
-
-    const immediateViewState = this.projectState.getViewState();
-    if (immediateViewState) {
-      this.applyViewState(immediateViewState);
-      return;
-    }
-
-    if (this.restoreViewStateTimer !== null) {
-      clearTimeout(this.restoreViewStateTimer);
-      this.restoreViewStateTimer = null;
-    }
-
-    const restoreViewStateTimer = setTimeout(() => {
-      if (this.restoreViewStateTimer !== restoreViewStateTimer) return;
-      try {
-        if (!this.diagram) return;
-
-        const viewState = this.projectState.getViewState();
-
-        if (viewState) {
-          this.applyViewState(viewState);
-          return;
-        }
-
-        if (this.uiState.activeView() !== 'flow') {
-          this.pendingAutoFitToContents = true;
-          return;
-        }
-
-        this.scheduleAutoFitToContents();
-      } finally {
-        if (this.restoreViewStateTimer === restoreViewStateTimer) {
-          this.restoreViewStateTimer = null;
-        }
-      }
-    }, 200);
-    this.restoreViewStateTimer = restoreViewStateTimer;
-  }
-
-  private applyViewState(viewState: { scale: number; positionX: number; positionY: number }): void {
-    this.pendingAutoFitToContents = false;
-    if (!this.diagram) return;
-    this.diagram.scale = viewState.scale;
-    this.diagram.position = new go.Point(viewState.positionX, viewState.positionY);
-  }
-
-  private scheduleAutoFitToContents(): void {
-    if (this.autoFitTimer !== null) {
-      clearTimeout(this.autoFitTimer);
-      this.autoFitTimer = null;
-    }
-
-    const autoFitTimer = setTimeout(() => {
-      if (this.autoFitTimer !== autoFitTimer) return;
-      try {
-        if (!this.diagram) return;
-        this.zoomService.fitToContents();
-      } finally {
-        if (this.autoFitTimer === autoFitTimer) {
-          this.autoFitTimer = null;
-        }
-      }
-    }, 300);
-    this.autoFitTimer = autoFitTimer;
+    const project = this.projectState.activeProject();
+    if (project) this.viewportReadiness.restoreViewState(project, this.projectState.getViewState());
   }
 
   // ========== Flow 视图激活 ==========
@@ -562,32 +455,8 @@ export class FlowDiagramDataService {
    * 由外部在 Flow 视图激活时调用
    */
   onFlowActivated(): void {
-    if (!this.diagram) return;
-    if (this.uiState.activeView() !== 'flow') return;
-    if (!this.pendingAutoFitToContents) return;
-
-    const viewState = this.projectState.getViewState();
-    if (viewState) {
-      this.pendingAutoFitToContents = false;
-      this.diagram.scale = viewState.scale;
-      this.diagram.position = new go.Point(viewState.positionX, viewState.positionY);
-      return;
-    }
-
-    this.pendingAutoFitToContents = false;
-    const scheduledDiagram = this.diagram;
-    const scheduledGeneration = this.lifecycleGeneration;
-    const firstRafId = requestAnimationFrame(() => {
-      this.flowActivationFitRafIds = this.flowActivationFitRafIds.filter(id => id !== firstRafId);
-      if (this.diagram !== scheduledDiagram || this.lifecycleGeneration !== scheduledGeneration) return;
-      const secondRafId = requestAnimationFrame(() => {
-        this.flowActivationFitRafIds = this.flowActivationFitRafIds.filter(id => id !== secondRafId);
-        if (this.diagram !== scheduledDiagram || this.lifecycleGeneration !== scheduledGeneration) return;
-        this.zoomService.fitToContents();
-      });
-      this.flowActivationFitRafIds.push(secondRafId);
-    });
-    this.flowActivationFitRafIds.push(firstRafId);
+    const project = this.projectState.activeProject();
+    if (project) this.viewportReadiness.onFlowActivated(project, this.projectState.getViewState());
   }
 
   // ========== 清理 ==========
@@ -596,38 +465,35 @@ export class FlowDiagramDataService {
    * 清理所有内部定时器
    */
   clearTimers(): void {
-    if (this.viewStateSaveTimer !== null) {
-      clearTimeout(this.viewStateSaveTimer);
-      this.viewStateSaveTimer = null;
-    }
-    if (this.restoreViewStateTimer !== null) {
-      clearTimeout(this.restoreViewStateTimer);
-      this.restoreViewStateTimer = null;
-    }
-    if (this.autoFitTimer !== null) {
-      clearTimeout(this.autoFitTimer);
-      this.autoFitTimer = null;
-    }
-    if (this.initialFitTimer !== null) {
-      clearTimeout(this.initialFitTimer);
-      this.initialFitTimer = null;
-    }
-    for (const rafId of this.flowActivationFitRafIds) {
-      cancelAnimationFrame(rafId);
-    }
-    this.flowActivationFitRafIds = [];
+    this.viewportReadiness.clearTimers();
+  }
+
+  beginHardRecovery(): boolean {
+    return this.viewportReadiness.beginHardRecovery();
+  }
+
+  applyHardRecoveryViewport(
+    viewState: ViewState | null,
+    complete: (proof: FlowDiagramViewportApplicationProof | null) => void,
+  ): boolean {
+    return this.viewportReadiness.applyHardRecoveryViewport(viewState, complete);
+  }
+
+  completeHardRecovery(proof: FlowDiagramViewportApplicationProof | null): boolean {
+    return this.viewportReadiness.completeHardRecovery(proof);
+  }
+
+  abortHardRecovery(): void {
+    this.viewportReadiness.abortHardRecovery();
   }
 
   /**
    * 销毁时重置状态
    */
   dispose(): void {
-    this.lifecycleGeneration += 1;
-    this.clearTimers();
+    this.viewportReadiness.dispose();
     this.diagram = null;
-    this.isFirstLoad = true;
     this._familyColorLogged = false;
-    this.pendingAutoFitToContents = false;
     this.lastTaskFingerprint = '';
     this.lastTaskVisualFingerprint = '';
     this.lastConnectionSignatureForData = '';

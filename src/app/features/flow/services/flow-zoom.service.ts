@@ -25,6 +25,12 @@ export interface ViewState {
   positionY: number;
 }
 
+export interface FlowViewportOwner {
+  projectId: string;
+  diagram: go.Diagram;
+  isCurrent: () => boolean;
+}
+
 @Injectable({
   providedIn: 'root'
 })
@@ -39,6 +45,7 @@ export class FlowZoomService {
   
   /** 视图状态保存定时器 */
   private viewStateSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  private viewStateSaveGeneration = 0;
   private viewStatePersistenceGuard: (() => boolean) | null = null;
   
   /** 默认缩放范围 */
@@ -51,6 +58,7 @@ export class FlowZoomService {
    * 由 FlowDiagramService 在初始化时调用
    */
   setDiagram(diagram: go.Diagram | null): void {
+    if (this.diagram !== diagram) this.cancelPendingViewStateSave();
     this.diagram = diagram;
   }
 
@@ -59,6 +67,7 @@ export class FlowZoomService {
   }
 
   cancelPendingViewStateSave(): void {
+    this.viewStateSaveGeneration += 1;
     // 显式 null 判断：浏览器 timer handle 可能为 0，truthiness 判断会漏清理并让 stale 保存在 teardown 后写回
     if (this.viewStateSaveTimer !== null) {
       clearTimeout(this.viewStateSaveTimer);
@@ -133,14 +142,16 @@ export class FlowZoomService {
    * 适应内容：将所有节点缩放并居中显示在视口中
    * 主要用于移动端首次加载时确保节点可见
    */
-  fitToContents(): void {
-    if (!this.diagram) return;
+  fitToContents(expectedOwner?: FlowViewportOwner): void {
+    const owner = this.captureOwner(expectedOwner);
+    if (!owner || !this.isOwnerCurrent(owner)) return;
+    const diagram = owner.diagram;
     
     // 获取所有节点的边界
-    const bounds = this.diagram.documentBounds;
+    const bounds = diagram.documentBounds;
     if (!bounds.isReal() || bounds.width === 0 || bounds.height === 0) {
       // 如果没有有效的边界，尝试滚动到原点
-      this.diagram.scrollToRect(new go.Rect(0, 0, 100, 100));
+      diagram.scrollToRect(new go.Rect(0, 0, 100, 100));
       return;
     }
     
@@ -149,8 +160,8 @@ export class FlowZoomService {
     const paddedBounds = bounds.copy().inflate(padding, padding);
     
     // 计算需要的缩放比例
-    const viewportWidth = this.diagram.viewportBounds.width;
-    const viewportHeight = this.diagram.viewportBounds.height;
+    const viewportWidth = diagram.viewportBounds.width;
+    const viewportHeight = diagram.viewportBounds.height;
     
     if (viewportWidth <= 0 || viewportHeight <= 0) {
       return; // 视口无效
@@ -164,12 +175,12 @@ export class FlowZoomService {
     scale = Math.max(0.3, Math.min(1.5, scale));
     
     // 应用缩放
-    this.diagram.scale = scale;
+    diagram.scale = scale;
     
     // 居中显示
-    this.diagram.centerRect(bounds);
+    diagram.centerRect(bounds);
     
-    this.scheduleSaveViewState();
+    this.scheduleSaveViewState(owner);
   }
   
   /**
@@ -221,16 +232,9 @@ export class FlowZoomService {
    * 保存视图状态到 Store
    */
   saveViewState(): void {
-    if (!this.isViewStatePersistenceAllowed()) return;
-
-    const viewState = this.getCurrentViewState();
-    const projectId = this.projectState.activeProjectId();
-    if (viewState && projectId) {
-      this.projectState.updateViewState(projectId, viewState);
-      this.syncCoordinator.markLocalChanges('position');
-      this.syncCoordinator.schedulePersist();
-      this.logger.debug('视图状态已保存', viewState);
-    }
+    const owner = this.captureOwner();
+    const viewState = owner ? this.captureViewState(owner.diagram) : null;
+    if (owner && viewState) this.persistViewState(owner, viewState);
   }
   
   /**
@@ -250,13 +254,46 @@ export class FlowZoomService {
   /**
    * 延迟保存视图状态（防抖）
    */
-  private scheduleSaveViewState(): void {
+  private scheduleSaveViewState(expectedOwner?: FlowViewportOwner): void {
+    const owner = this.captureOwner(expectedOwner);
+    const viewState = owner ? this.captureViewState(owner.diagram) : null;
+    if (!owner || !viewState) return;
     this.cancelPendingViewStateSave();
-    
-    this.viewStateSaveTimer = setTimeout(() => {
-      this.saveViewState();
-      this.viewStateSaveTimer = null;
+    const generation = this.viewStateSaveGeneration;
+    const timer = setTimeout(() => {
+      if (this.viewStateSaveTimer !== timer || this.viewStateSaveGeneration !== generation) return;
+      try {
+        this.persistViewState(owner, viewState);
+      } finally {
+        if (this.viewStateSaveTimer === timer) this.viewStateSaveTimer = null;
+      }
     }, 300);
+    this.viewStateSaveTimer = timer;
+  }
+
+  private captureOwner(expected?: FlowViewportOwner): FlowViewportOwner | null {
+    const diagram = this.diagram;
+    const projectId = expected?.projectId ?? this.projectState.activeProjectId();
+    if (!diagram || !projectId || (expected && expected.diagram !== diagram)) return null;
+    return expected ?? { projectId, diagram, isCurrent: () => true };
+  }
+
+  private captureViewState(diagram: go.Diagram): ViewState {
+    return { scale: diagram.scale, positionX: diagram.position.x, positionY: diagram.position.y };
+  }
+
+  private isOwnerCurrent(owner: FlowViewportOwner): boolean {
+    return this.diagram === owner.diagram
+      && this.projectState.activeProjectId() === owner.projectId
+      && owner.isCurrent();
+  }
+
+  private persistViewState(owner: FlowViewportOwner, viewState: ViewState): void {
+    if (!this.isOwnerCurrent(owner) || !this.isViewStatePersistenceAllowed()) return;
+    this.projectState.updateViewState(owner.projectId, viewState);
+    this.syncCoordinator.markLocalChanges('position');
+    this.syncCoordinator.schedulePersist();
+    this.logger.debug('视图状态已保存', viewState);
   }
 
   private isViewStatePersistenceAllowed(): boolean {

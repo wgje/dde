@@ -59,20 +59,8 @@ function handleFlowDiagramDrop(event: DragEvent, input: FlowDiagramDropHandlersI
 
 function resolveDroppedTask(dataTransfer: DataTransfer, projectState: ProjectStateService): Task | null {
   const payload = readTaskDragPayload(dataTransfer);
-  const payloadTask = payload ? projectState.getTask(payload.taskId) ?? null : null;
-  if (payloadTask) return payloadTask;
-
-  const jsonData = dataTransfer.getData('application/json');
-  const textData = dataTransfer.getData('text');
-  const data = jsonData || textData;
-  if (!data) return null;
-
-  const trimmed = data.trim();
-  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) {
-    return projectState.getTask(trimmed) ?? null;
+  if (!payload?.projectOwner || !projectState.isActiveProjectOwnerCurrent(payload.projectOwner)) {
+    return null;
   }
-
-  const raw = JSON.parse(data) as Partial<Task> & { id?: unknown };
-  const candidateId = typeof raw.id === 'string' ? raw.id : null;
-  return candidateId ? projectState.getTask(candidateId) ?? (raw as Task) : null;
+  return projectState.getTask(payload.taskId) ?? null;
 }

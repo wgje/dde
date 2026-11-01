@@ -140,15 +140,6 @@ export class FlowViewDiagramLifecycleController {
     this.options.scheduleTimer(() => {
       if (this.options.diagram.isInitialized) {
         this.options.diagram.updateDiagram(this.options.projectTasks());
-        this.options.flowCommand.markViewReady();
-
-        const pendingCmd = this.options.flowCommand.consumePendingCenterCommand();
-        if (pendingCmd) {
-          this.options.scheduleTimer(() => {
-            this.options.executeCenterOnNode(pendingCmd.taskId, pendingCmd.openDetail);
-            this.options.flowCommand.clearCenterCommand();
-          }, 100);
-        }
       }
     }, delayMs);
   }
