@@ -5,6 +5,7 @@ import {
   getProcessor,
   mockActionQueueService,
   mockConflictStorageService,
+  mockProjectStateService,
   mockRetryQueueService,
   mockSyncService,
   type QueuedAction,
@@ -34,13 +35,18 @@ export function registerActionQueueProcessorsTaskSpecs(): void {
       expect(result).toBe(true);
     });
 
-    it('task:update should call pushTask with sourceUserId', async () => {
+    it('task:update should call pushTask with sourceUserId and explicit full intent', async () => {
       const handler = getProcessor('task:update');
       const task = { id: 't-2', title: 'Task update' };
 
       const result = await handler({
         operationId: 'op-task-update',
-        payload: { task, projectId: 'p-2', sourceUserId: 'test-user' },
+        payload: {
+          task,
+          projectId: 'p-2',
+          sourceUserId: 'test-user',
+          writeIntent: 'task_full_upsert',
+        },
       } as QueuedAction);
 
       expect(mockSyncService.pushTask).toHaveBeenCalledWith(
@@ -50,10 +56,34 @@ export function registerActionQueueProcessorsTaskSpecs(): void {
         false,
         'test-user',
         true,
-        undefined,
+        'task_full_upsert',
         'op-task-update',
       );
       expect(result).toBe(true);
+    });
+
+    it('task:update should quarantine a legacy full snapshot without writeIntent', async () => {
+      const handler = getProcessor('task:update');
+      const action = {
+        id: 'action-missing-task-intent',
+        operationId: 'op-missing-task-intent',
+        entityType: 'task',
+        entityId: 'task-missing-intent',
+        payload: {
+          task: { id: 'task-missing-intent', stage: null },
+          projectId: 'project-1',
+          sourceUserId: 'test-user',
+        },
+      } as QueuedAction;
+
+      const result = await handler(action);
+
+      expect(result).toBe(true);
+      expect(mockSyncService.pushTask).not.toHaveBeenCalled();
+      expect(mockActionQueueService.moveToDeadLetter).toHaveBeenCalledWith(
+        action,
+        expect.stringContaining('writeIntent'),
+      );
     });
 
     it('task:update should pass queued writeIntent into pushTask', async () => {
@@ -98,6 +128,7 @@ export function registerActionQueueProcessorsTaskSpecs(): void {
           task: { id: 'task-tombstoned' },
           projectId: 'project-1',
           sourceUserId: 'test-user',
+          writeIntent: 'task_full_upsert',
         },
       } as QueuedAction);
 
@@ -107,6 +138,48 @@ export function registerActionQueueProcessorsTaskSpecs(): void {
     });
 
     it('task:update should persist remote-newer conflicts before resolving the ActionQueue item locally', async () => {
+      const localTask = {
+        id: 'task-remote-newer',
+        title: 'Local task title',
+        content: 'Current local content',
+        stage: null,
+        parentId: null,
+        order: 0,
+        rank: 0,
+        status: 'active' as const,
+        x: 0,
+        y: 0,
+        createdDate: '2026-06-25T00:00:00.000Z',
+        updatedAt: '2026-06-25T00:00:00.000Z',
+        displayId: 'T1',
+      };
+      const concurrentTask = {
+        ...localTask,
+        id: 'task-concurrent',
+        title: 'Concurrent task',
+        content: 'Content only present in TaskStore',
+        order: 1,
+        rank: 1,
+        displayId: 'T2',
+      };
+      const currentConnection = {
+        id: 'connection-current',
+        source: localTask.id,
+        target: concurrentTask.id,
+      };
+      const staleProjectShell = {
+        id: 'project-1',
+        name: 'Project',
+        description: '',
+        createdDate: '2026-06-25T00:00:00.000Z',
+        tasks: [{ ...localTask, content: 'Stale shell content' }],
+        connections: [],
+      };
+      const authoritativeProject = {
+        ...staleProjectShell,
+        tasks: [localTask, concurrentTask],
+        connections: [currentConnection],
+      };
       const remoteTask = {
         id: 'task-remote-newer',
         title: 'Remote task title',
@@ -127,15 +200,18 @@ export function registerActionQueueProcessorsTaskSpecs(): void {
           { operation: 'pushTask', taskId: 'task-remote-newer', projectId: 'project-1' },
         ),
       );
+      mockProjectStateService.getProject.mockReturnValueOnce(staleProjectShell);
+      mockProjectStateService.getProjectWithCurrentData.mockReturnValueOnce(authoritativeProject);
       const handler = getProcessor('task:update');
 
       const result = await handler({
         id: 'action-remote-newer',
         operationId: 'op-task-remote-newer',
         payload: {
-          task: { id: 'task-remote-newer', title: 'Local task title', updatedAt: '2026-06-25T00:00:00.000Z' },
+          task: localTask,
           projectId: 'project-1',
           sourceUserId: 'test-user',
+          writeIntent: 'task_full_upsert',
         },
       } as QueuedAction);
 
@@ -144,6 +220,10 @@ export function registerActionQueueProcessorsTaskSpecs(): void {
         projectId: 'project-1',
         ownerUserId: 'test-user',
         reason: 'version_mismatch',
+        localProject: expect.objectContaining({
+          tasks: [localTask, concurrentTask],
+          connections: [currentConnection],
+        }),
         operationConflicts: [
           expect.objectContaining({
             actionId: 'action-remote-newer',
@@ -158,6 +238,7 @@ export function registerActionQueueProcessorsTaskSpecs(): void {
           }),
         ],
       }));
+      expect(mockProjectStateService.getProjectWithCurrentData).toHaveBeenCalledWith('project-1');
       expect(mockActionQueueService.markActionResolvedWithoutRemote).toHaveBeenCalledWith('action-remote-newer');
       expect(mockActionQueueService.failRetry).not.toHaveBeenCalled();
     });
@@ -171,11 +252,17 @@ export function registerActionQueueProcessorsTaskSpecs(): void {
         data: task,
         projectId: 'project-1',
         sourceUserId: 'test-user',
+        writeIntent: 'task_full_upsert',
       });
       const handler = getProcessor('task:update');
 
       const result = await handler({
-        payload: { task, projectId: 'project-1', sourceUserId: 'test-user' },
+        payload: {
+          task,
+          projectId: 'project-1',
+          sourceUserId: 'test-user',
+          writeIntent: 'task_full_upsert',
+        },
       } as QueuedAction);
 
       expect(result).toBe(true);
@@ -192,13 +279,19 @@ export function registerActionQueueProcessorsTaskSpecs(): void {
         data: task,
         projectId: 'project-1',
         sourceUserId: 'test-user',
+        writeIntent: 'task_full_upsert',
         operationId: 'op-old-task-handoff',
       });
       const handler = getProcessor('task:update');
 
       const result = await handler({
         operationId: 'op-new-task-handoff',
-        payload: { task, projectId: 'project-1', sourceUserId: 'test-user' },
+        payload: {
+          task,
+          projectId: 'project-1',
+          sourceUserId: 'test-user',
+          writeIntent: 'task_full_upsert',
+        },
       } as QueuedAction);
 
       expect(result).toEqual(expect.objectContaining({ outcome: 'failed' }));
@@ -220,12 +313,18 @@ export function registerActionQueueProcessorsTaskSpecs(): void {
         data: task,
         projectId: 'project-1',
         sourceUserId: 'test-user',
+        writeIntent: 'task_full_upsert',
         operationId: 'retry-op-task-handoff',
       });
       const handler = getProcessor('task:update');
 
       const result = await handler({
-        payload: { task, projectId: 'project-1', sourceUserId: 'test-user' },
+        payload: {
+          task,
+          projectId: 'project-1',
+          sourceUserId: 'test-user',
+          writeIntent: 'task_full_upsert',
+        },
       } as QueuedAction);
 
       expect(result).toEqual(expect.objectContaining({ outcome: 'failed' }));
@@ -247,6 +346,7 @@ export function registerActionQueueProcessorsTaskSpecs(): void {
           task: { id: 'task-no-handoff' },
           projectId: 'project-1',
           sourceUserId: 'test-user',
+          writeIntent: 'task_full_upsert',
         },
       } as QueuedAction);
 

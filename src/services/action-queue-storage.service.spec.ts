@@ -281,13 +281,10 @@ describe('ActionQueueStorageService', () => {
         mockQueueBackupService.backupQueue.mockResolvedValue(true);
         mockQueueBackupService.restoreQueue.mockResolvedValue([freshAction]);
 
-        await (service as unknown as {
-          saveQueueSnapshotForOwner: (ownerUserId: string, queue: QueuedAction[]) => Promise<void>;
-        }).saveQueueSnapshotForOwner('user-a', [freshAction]);
+        const saved = await service.persistQueueSnapshotForOwner('user-a', [freshAction]);
+        expect(saved).toBe(true);
 
-        const loaded = await (service as unknown as {
-          loadPersistedQueueForOwner: (ownerUserId: string) => Promise<QueuedAction[]>;
-        }).loadPersistedQueueForOwner('user-a');
+        const loaded = await service.loadQueueSnapshotForOwner('user-a');
 
         expect(globalThis.localStorage.getItem(scopedKey)).toBeNull();
         expect(loaded).toEqual([freshAction]);
@@ -386,6 +383,108 @@ describe('ActionQueueStorageService', () => {
       expect(ctx.queueSize()).toBe(3);
     });
 
+    it('loadQueueFromStorage should not revive an action removed while backup restore is pending', async () => {
+      const action = createMockAction({ id: 'removed-during-restore', operationId: 'op-removed-during-restore' });
+      let resolveRestore: (queue: QueuedAction[]) => void = () => {};
+      mockQueueBackupService.restoreQueue.mockReturnValueOnce(new Promise(resolve => { resolveRestore = resolve; }));
+      localStorage.setItem(`${LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY}.user-a`, JSON.stringify([action]));
+
+      service.loadQueueFromStorage();
+      ctx.pendingActions.set([]);
+      ctx.queueSize.set(0);
+      service.saveQueueToStorage();
+      resolveRestore([action]);
+      await flushQueueBackupRestore();
+
+      expect(ctx.pendingActions()).toEqual([]);
+      expect(ctx.queueSize()).toBe(0);
+    });
+
+    it('loadQueueFromStorage should not persist a transient runtime snapshot before backup restore settles', async () => {
+      const durableAction = createMockAction({
+        id: 'durable-action-hidden-during-restore',
+        operationId: '33333333-3333-4333-8333-333333333333',
+      });
+      let resolveRestore: (queue: QueuedAction[]) => void = () => {};
+      const restorePromise = new Promise<QueuedAction[]>((resolve) => {
+        resolveRestore = resolve;
+      });
+      mockQueueBackupService.restoreQueue.mockReturnValueOnce(restorePromise);
+
+      service.loadQueueFromStorage();
+      service.saveQueueToStorage();
+
+      expect(localStorage.getItem(`${LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY}.user-a`)).toBeNull();
+      expect(mockQueueBackupService.backupQueue).not.toHaveBeenCalled();
+
+      resolveRestore([durableAction]);
+      await vi.waitFor(() => {
+        expect(ctx.pendingActions()).toEqual([durableAction]);
+        expect(JSON.parse(
+          localStorage.getItem(`${LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY}.user-a`) ?? '[]',
+        )).toEqual([durableAction]);
+        expect(mockQueueBackupService.backupQueue).toHaveBeenLastCalledWith([durableAction], 'user-a');
+      });
+    });
+
+    it('requestQueueProcessing should emit distinguishable storage request diagnostics and forward to scheduler', () => {
+      const action = createMockAction();
+      ctx.pendingActions.set([action]);
+      ctx.queueSize.set(1);
+
+      service.requestQueueProcessing('storage-event');
+
+      expect(window.__NANOFLOW_STARTUP_TRACE__).toEqual(expect.arrayContaining([
+        expect.objectContaining({ event: 'action_queue.storage_request', data: { reason: 'storage-event' } }),
+        expect.objectContaining({ event: 'action_queue.storage_decision', data: { reason: 'storage-event', decision: 'scheduler-forward', pending: 1 } }),
+      ]));
+      expect(mockLoggerCategory.debug).toHaveBeenCalledWith(
+        'ActionQueue storage request',
+        expect.objectContaining({ reason: 'storage-event' }),
+      );
+      expect(mockLoggerCategory.debug).toHaveBeenCalledWith(
+        'ActionQueue storage scheduler forward',
+        expect.objectContaining({ reason: 'storage-event', pending: 1 }),
+      );
+      expect(ctx.processQueue).toHaveBeenCalledTimes(1);
+    });
+
+    it('requestQueueProcessing should emit empty-queue suppression diagnostics', () => {
+      service.requestQueueProcessing('empty-event');
+
+      expect(window.__NANOFLOW_STARTUP_TRACE__).toEqual(expect.arrayContaining([
+        expect.objectContaining({ event: 'action_queue.storage_request', data: { reason: 'empty-event' } }),
+        expect.objectContaining({ event: 'action_queue.storage_decision', data: { reason: 'empty-event', decision: 'empty' } }),
+      ]));
+      expect(mockLoggerCategory.debug).toHaveBeenCalledWith(
+        'ActionQueue storage request',
+        expect.objectContaining({ reason: 'empty-event' }),
+      );
+      expect(mockLoggerCategory.debug).toHaveBeenCalledWith(
+        'ActionQueue storage empty suppression',
+        expect.objectContaining({ reason: 'empty-event', pending: 0 }),
+      );
+      expect(ctx.processQueue).not.toHaveBeenCalled();
+    });
+
+    it('requestQueueProcessing should wait until backup restore settles', async () => {
+      let resolveRestore: (queue: QueuedAction[]) => void = () => {};
+      const restorePromise = new Promise<QueuedAction[]>((resolve) => {
+        resolveRestore = resolve;
+      });
+      mockQueueBackupService.restoreQueue.mockReturnValueOnce(restorePromise);
+
+      service.loadQueueFromStorage();
+      service.requestQueueProcessing('online-during-restore');
+
+      expect(ctx.processQueue).not.toHaveBeenCalled();
+
+      resolveRestore([]);
+      await vi.waitFor(() => {
+        expect(ctx.processQueue).toHaveBeenCalledOnce();
+      });
+    });
+
     it('loadQueueFromStorage should preserve foreground updates to existing actions while IndexedDB restore is pending', async () => {
       const localAction = createMockAction({
         id: 'local-action-before-restore-update',
@@ -450,6 +549,15 @@ describe('ActionQueueStorageService', () => {
       );
       expect(ctx.pendingActions()).toEqual([]);
       expect(ctx.queueSize()).toBe(0);
+      expect(service.queueFrozen()).toBe(true);
+      expect(service.storageFailure()).toBe(true);
+
+      service.saveQueueToStorage();
+      service.requestQueueProcessing('after-failed-restore');
+
+      expect(localStorage.getItem(`${LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY}.user-a`)).toBeNull();
+      expect(mockQueueBackupService.backupQueue).not.toHaveBeenCalled();
+      expect(ctx.processQueue).not.toHaveBeenCalled();
     });
 
     it('loadQueueFromStorage should recover interrupted syncing actions as pending_sync', () => {
@@ -630,72 +738,52 @@ describe('ActionQueueStorageService', () => {
       expect(ctx.queueSize()).toBe(0);
     });
 
-    it('saveDeadLetterToStorage should persist dead letter queue', () => {
-      const action = createMockAction();
-      service.moveToDeadLetter(action, 'test');
-
-      const saved = localStorage.getItem(`${LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY}.user-a`);
-      expect(saved).toBeTruthy();
-      const parsed = JSON.parse(saved!);
-      expect(parsed).toHaveLength(1);
-    });
-
-    it('saveDeadLetterToStorage should freeze and expose escape data when dead-letter persistence fails', () => {
-      const originalLocalStorage = globalThis.localStorage;
-      const storageData = new Map<string, string>();
-      const failingStorage = {
-        getItem: (key: string) => storageData.get(key) ?? null,
-        setItem: (key: string, value: string) => {
-          if (key === `${LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY}.user-a`) {
-            throw new DOMException('quota exceeded', 'QuotaExceededError');
-          }
-          storageData.set(key, String(value));
-        },
-        removeItem: (key: string) => {
-          storageData.delete(key);
-        },
-        clear: () => {
-          storageData.clear();
-        },
-        key: (index: number) => Array.from(storageData.keys())[index] ?? null,
-        get length() {
-          return storageData.size;
-        },
-      } as Storage;
-      const storageFailureCallback = vi.fn();
-
-      Object.defineProperty(globalThis, 'localStorage', {
-        value: failingStorage,
-        configurable: true,
-        writable: true,
+    it('loadQueueFromStorage should let an authoritative empty backup clear a stale valid local mirror', async () => {
+      const scopedKey = `${LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY}.user-a`;
+      const staleAction = createMockAction();
+      localStorage.setItem(scopedKey, JSON.stringify([staleAction]));
+      const queueBackupWithSnapshot = mockQueueBackupService as typeof mockQueueBackupService & {
+        restoreQueueSnapshot?: ReturnType<typeof vi.fn>;
+      };
+      queueBackupWithSnapshot.restoreQueueSnapshot = vi.fn().mockResolvedValue({
+        recordFound: true,
+        actions: [],
+        savedAt: new Date(staleAction.timestamp + 1_000).toISOString(),
       });
 
       try {
-        const action = createMockAction({ id: 'dead-letter-save-failure' });
-        service.onStorageFailure(storageFailureCallback);
+        service.loadQueueFromStorage();
+        expect(ctx.pendingActions()).toEqual([staleAction]);
+        await flushQueueBackupRestore();
 
-        service.moveToDeadLetter(action, 'quota');
-
-        expect(service.queueFrozen()).toBe(true);
-        expect(service.queueFreezeReason()).toBe('storage_failure');
-        expect(storageFailureCallback).toHaveBeenCalledWith({
-          queue: [],
-          deadLetter: [
-            expect.objectContaining({
-              action: expect.objectContaining({
-                id: action.id,
-                syncState: 'dead_letter',
-              }),
-            }),
-          ],
-        });
-        expect(globalThis.localStorage.getItem(`${LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY}.user-a`)).toBeNull();
+        expect(ctx.pendingActions()).toEqual([]);
+        expect(ctx.queueSize()).toBe(0);
+        expect(JSON.parse(localStorage.getItem(scopedKey) ?? 'null')).toEqual([]);
       } finally {
-        Object.defineProperty(globalThis, 'localStorage', {
-          value: originalLocalStorage,
-          configurable: true,
-          writable: true,
-        });
+        delete queueBackupWithSnapshot.restoreQueueSnapshot;
+      }
+    });
+
+    it('loadQueueFromStorage should preserve a local action newer than an empty backup record', async () => {
+      const scopedKey = `${LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY}.user-a`;
+      const freshLocalAction = createMockAction();
+      localStorage.setItem(scopedKey, JSON.stringify([freshLocalAction]));
+      const queueBackupWithSnapshot = mockQueueBackupService as typeof mockQueueBackupService & {
+        restoreQueueSnapshot?: ReturnType<typeof vi.fn>;
+      };
+      queueBackupWithSnapshot.restoreQueueSnapshot = vi.fn().mockResolvedValue({
+        recordFound: true,
+        actions: [],
+        savedAt: new Date(freshLocalAction.timestamp - 1_000).toISOString(),
+      });
+
+      try {
+        service.loadQueueFromStorage();
+        await flushQueueBackupRestore();
+        expect(ctx.pendingActions()).toEqual([freshLocalAction]);
+        expect(JSON.parse(localStorage.getItem(scopedKey) ?? 'null')).toEqual([freshLocalAction]);
+      } finally {
+        delete queueBackupWithSnapshot.restoreQueueSnapshot;
       }
     });
 
@@ -713,7 +801,11 @@ describe('ActionQueueStorageService', () => {
       setCurrentUserId: userId => currentUserId.set(userId),
       backupDeadLetters: (ownerUserId, items) =>
         mockQueueBackupService.backupDeadLetters(items, ownerUserId),
+      backupDeadLettersMock: mockQueueBackupService.backupDeadLetters,
       flushBackupRestore: flushQueueBackupRestore,
+      getContext: () => ctx,
+      setRestoreDeadLettersResult: result =>
+        mockQueueBackupService.restoreDeadLetters.mockReturnValueOnce(result),
     });
   });
 

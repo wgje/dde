@@ -81,7 +81,8 @@ export function getQueuedActionOperationIdentity(operationId: unknown): string |
 
 function normalizePendingActionSyncState(syncState: unknown): OutboxSyncState {
   if (
-    syncState === 'retry_scheduled'
+    syncState === 'held'
+    || syncState === 'retry_scheduled'
     || syncState === 'conflict_detected'
     || syncState === 'conflict_saved'
     || syncState === 'blocked_by_auth'

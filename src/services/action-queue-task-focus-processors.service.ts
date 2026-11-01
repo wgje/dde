@@ -1,4 +1,4 @@
-import { Injectable, inject } from '@angular/core';
+import { Injectable, Injector, inject } from '@angular/core';
 import {
   FocusConsoleSyncService,
   RetryQueueService,
@@ -17,16 +17,16 @@ import {
   buildTaskProcessorRetryError,
   buildTaskSyncRetryError,
   isDeferredQueueError,
-  isStaleTaskUpsertNoOp,
   resolveActionSourceUserId,
 } from './action-queue-retry-errors';
 import {
   resolveDeferredEntityId,
   type TaskRetryItem,
   wasTaskDeleteTransferredToRetryQueue as wasTaskDeleteTransferredToRetryQueuePure,
-  wasTaskUpsertTransferredToRetryQueue as wasTaskUpsertTransferredToRetryQueuePure,
 } from './action-queue-task-focus-processors.helpers';
 import { resolveRemoteVersionConflictEvidence } from './action-queue-operation-conflict.helpers';
+import { buildActionQueuePayloadSignature } from './action-queue-identity.helpers';
+import type { QueueProcessorContext } from './action-queue-processing.types';
 import { ActionQueueService, type ActionQueueProcessorResult } from './action-queue.service';
 import {
   FocusSessionPayload,
@@ -43,7 +43,7 @@ import type { OperationConflictActionType } from './conflict-storage.helpers';
 import { LoggerService } from './logger.service';
 import { ProjectStateService } from './project-state.service';
 import { ToastService } from './toast.service';
-
+import { UserSessionService } from './user-session.service';
 type FocusSessionActionType = 'focus-session:create' | 'focus-session:update';
 type RoutineTaskActionType = 'routine-task:create' | 'routine-task:update';
 type RoutineCompletionActionType = 'routine-completion:create' | 'routine-completion:update';
@@ -63,6 +63,7 @@ export class ActionQueueTaskFocusProcessorsService {
   private readonly authService = inject(AuthService);
   private readonly conflictStorage = inject(ConflictStorageService);
   private readonly toast = inject(ToastService);
+  private readonly injector = inject(Injector);
   private legacyQueueWarningShown = false;
 
   setupProcessors(): void {
@@ -109,14 +110,6 @@ export class ActionQueueTaskFocusProcessorsService {
       taskId,
       this.resolveQueueOwnerUserId(sourceUserId),
     ) as TaskRetryItem | undefined;
-  }
-
-  private wasTaskUpsertTransferredToRetryQueue(payload: TaskPayload, operationId?: string): boolean {
-    return wasTaskUpsertTransferredToRetryQueuePure(
-      this.getTaskRetryItem(payload.task.id, payload.sourceUserId),
-      payload,
-      operationId,
-    );
   }
 
   private wasTaskDeleteTransferredToRetryQueue(payload: TaskDeletePayload, operationId?: string): boolean {
@@ -185,12 +178,12 @@ export class ActionQueueTaskFocusProcessorsService {
   }
 
   private setupTaskProcessors(): void {
-    this.actionQueue.registerProcessor('task:create', async (action) => {
-      return this.processTaskUpsert(action, 'task:create');
+    this.actionQueue.registerProcessor('task:create', async (action, context) => {
+      return this.processTaskUpsert(action, 'task:create', context);
     });
 
-    this.actionQueue.registerProcessor('task:update', async (action) => {
-      return this.processTaskUpsert(action, 'task:update');
+    this.actionQueue.registerProcessor('task:update', async (action, context) => {
+      return this.processTaskUpsert(action, 'task:update', context);
     });
 
     this.actionQueue.registerProcessor('task:delete', async (action) => {
@@ -201,6 +194,7 @@ export class ActionQueueTaskFocusProcessorsService {
   private async processTaskUpsert(
     action: QueuedAction,
     actionType: 'task:create' | 'task:update',
+    context?: QueueProcessorContext,
   ): Promise<ActionQueueProcessorResult> {
     const payload = action.payload as TaskPayload;
     const userId = this.authService.currentUserId();
@@ -209,15 +203,19 @@ export class ActionQueueTaskFocusProcessorsService {
       return this.actionQueue.deferRetry(buildAuthPendingRetryError(actionType, payload.task.id));
     }
 
+    const leaseSignal = context?.leaseSignal;
+    if ((!leaseSignal || leaseSignal.aborted) && typeof payload.sourceUserId === 'string') return this.deferTaskReplay(actionType, payload);
     const mutationType = actionType === 'task:create' ? 'create' : 'update';
-    if (this.shouldStopTaskMutation(action, userId, payload, mutationType)) {
-      return true;
-    }
-
+    if (this.shouldStopTaskMutation(action, userId, payload, mutationType)) return true;
+    if (!leaseSignal || leaseSignal.aborted) return this.deferTaskReplay(actionType, payload);
+    const isFenceCurrent = this.createTaskReplayFence(action, payload, userId, context!);
+    if (!isFenceCurrent()) return this.deferTaskReplay(actionType, payload);
     try {
-      return await this.flushTaskUpsert(action, payload, actionType);
+      return await this.flushTaskUpsert(action, payload, actionType, leaseSignal, isFenceCurrent);
     } catch (error) {
-      return this.handleTaskUpsertError(action, payload, actionType, error);
+      if (!isFenceCurrent()) return this.deferTaskReplay(actionType, payload);
+      this.logProcessorFailure(actionType, error, { taskId: payload.task.id, projectId: payload.projectId });
+      throw error;
     }
   }
 
@@ -225,52 +223,82 @@ export class ActionQueueTaskFocusProcessorsService {
     action: QueuedAction,
     payload: TaskPayload,
     actionType: 'task:create' | 'task:update',
+    leaseSignal: AbortSignal,
+    isFenceCurrent: () => boolean,
   ): Promise<ActionQueueProcessorResult> {
-    const success = await this.taskSyncOps.pushTask(
-      payload.task,
-      payload.projectId,
-      false,
-      false,
-      payload.sourceUserId,
-      true,
-      payload.writeIntent,
-      action.operationId,
-    );
-    if (success) {
+    const result = await this.taskSyncOps.pushTaskFromActionQueue({
+      actionId: action.id,
+      actionOperationId: action.operationId ?? '',
+      task: payload.task,
+      projectId: payload.projectId,
+      sourceUserId: payload.sourceUserId ?? '',
+      writeIntent: payload.writeIntent,
+      leaseSignal,
+      isFenceCurrent,
+    });
+    if (!isFenceCurrent()) return this.deferTaskReplay(actionType, payload);
+    if (result.outcome === 'applied') {
       return this.markRemoteActionSuccess(action.id);
     }
-    if (this.wasTaskUpsertTransferredToRetryQueue(payload, action.operationId)) {
-      this.logger.info(`${actionType} 已转交 RetryQueue，当前 ActionQueue 项视为完成`, {
-        taskId: payload.task.id,
-        projectId: payload.projectId,
-      });
-      return true;
-    }
-    return this.actionQueue.failRetry(
-      buildTaskSyncRetryError(actionType, payload.task.id, payload.projectId),
-    );
-  }
-
-  private async handleTaskUpsertError(
-    action: QueuedAction,
-    payload: TaskPayload,
-    actionType: 'task:create' | 'task:update',
-    error: unknown,
-  ): Promise<ActionQueueProcessorResult> {
-    if (isStaleTaskUpsertNoOp(error)) {
-      this.actionQueue.markActionResolvedWithoutRemote(action.id);
-      this.logger.info(`${actionType} 命中远端较新状态，丢弃过期 upsert`, { taskId: payload.task.id });
-      return true;
-    }
-    if (await this.persistTaskOperationConflict(action, payload, actionType, error)) {
+    if (result.outcome === 'handoff') return true;
+    if (result.outcome === 'conflict'
+      && await this.persistTaskOperationConflict(action, payload, actionType, result.error)
+      && isFenceCurrent()) {
       this.actionQueue.markActionResolvedWithoutRemote(action.id);
       this.toast.warning('检测到任务同步冲突', '本地任务修改已转入冲突中心等待处理');
       return true;
     }
-    this.logProcessorFailure(actionType, error, { taskId: payload.task.id, projectId: payload.projectId });
-    return this.actionQueue.failRetry(
-      buildTaskProcessorRetryError(error, actionType, payload.task.id, payload.projectId),
+    return this.deferTaskReplay(actionType, payload);
+  }
+
+  private deferTaskReplay(
+    actionType: 'task:create' | 'task:update',
+    payload: TaskPayload,
+  ): ActionQueueProcessorResult {
+    return this.actionQueue.deferRetry(
+      buildTaskSyncRetryError(actionType, payload.task.id, payload.projectId),
     );
+  }
+
+  private createTaskReplayFence(
+    action: QueuedAction,
+    payload: TaskPayload,
+    ownerUserId: string,
+    context: QueueProcessorContext,
+  ): () => boolean {
+    const { id: actionId, operationId, type: queuedActionType } = action;
+    const payloadSignature = buildActionQueuePayloadSignature(action.payload);
+    const queueGeneration = this.actionQueue.getCurrentQueueViewGeneration();
+    const projectGeneration = this.actionQueue.getProjectMutationViewGeneration(
+      payload.projectId,
+      ownerUserId,
+    );
+    const userSession = this.injector.get(UserSessionService, null);
+    const sessionGeneration = userSession?.getCurrentSessionGeneration() ?? -1;
+    const authFence = this.authService.captureAuthIdentityFence();
+    let stale = false;
+    return () => {
+      stale ||= context.leaseSignal?.aborted !== false
+        || context.isCurrent?.() !== true
+        || action.id !== actionId
+        || typeof actionId !== 'string'
+        || actionId.length === 0
+        || action.operationId !== operationId
+        || typeof operationId !== 'string'
+        || operationId.length === 0
+        || action.type !== queuedActionType
+        || action.entityType !== 'task'
+        || action.entityId !== payload.task.id
+        || payload.sourceUserId !== ownerUserId
+        || payloadSignature !== buildActionQueuePayloadSignature(action.payload)
+        || this.authService.currentUserId() !== ownerUserId
+        || this.authService.captureAuthIdentityFence() !== authFence
+        || userSession?.isSessionContextCurrent(sessionGeneration, ownerUserId) !== true
+        || !this.actionQueue.isQueueViewCurrent(queueGeneration, ownerUserId)
+        || this.actionQueue.getProjectMutationViewGeneration(payload.projectId, ownerUserId)
+          !== projectGeneration;
+      return !stale;
+    };
   }
 
   private async persistTaskOperationConflict(
@@ -325,7 +353,7 @@ export class ActionQueueTaskFocusProcessorsService {
   }
 
   private buildTaskConflictProject(payload: TaskPayload): Project {
-    const currentProject = this.projectState.getProject(payload.projectId);
+    const currentProject = this.projectState.getProjectWithCurrentData(payload.projectId);
     if (currentProject) {
       return {
         ...currentProject,
@@ -444,7 +472,20 @@ export class ActionQueueTaskFocusProcessorsService {
       return true;
     }
 
-    return false;
+    return this.shouldQuarantineMissingTaskWriteIntent(action, actionType, payload);
+  }
+
+  private shouldQuarantineMissingTaskWriteIntent(
+    action: QueuedAction,
+    actionType: 'create' | 'update',
+    payload: TaskPayload,
+  ): boolean {
+    if (actionType !== 'update' || payload.writeIntent) return false;
+    this.quarantineLegacyQueueAction(
+      action,
+      'task:update legacy 队列项缺少 writeIntent，禁止猜测为 full upsert，已转入失败记录',
+    );
+    return true;
   }
 
   private shouldStopTaskDelete(action: QueuedAction, userId: string, payload: TaskDeletePayload): boolean {
@@ -493,7 +534,10 @@ export class ActionQueueTaskFocusProcessorsService {
   }
 
   private setupPreferenceProcessors(): void {
-    this.actionQueue.registerProcessor('preference:update', async (action) => {
+    this.actionQueue.registerProcessor('preference:update', async (action, context?: QueueProcessorContext) => {
+      const leaseSignal = context?.leaseSignal;
+      const isCurrent = context?.isCurrent;
+      if (!leaseSignal || leaseSignal.aborted || !isCurrent?.()) return false;
       const payload = action.payload as PreferencePayload;
       const userId = this.authService.currentUserId();
       if (!userId) {
@@ -521,12 +565,16 @@ export class ActionQueueTaskFocusProcessorsService {
           sourceUserId,
           payload.preferences,
           action.operationId,
+          payload.baseUpdatedAt,
+          context,
         );
-        if (success) {
+        if (!isCurrent()) return false;
+        if (success && isCurrent()) {
           this.actionQueue.markActionSyncedRemotely(action.id);
         }
         return success;
       } catch (error) {
+        if (!isCurrent()) return false;
         this.logger.error('preference:update 异常', { error });
         return false;
       }
@@ -548,30 +596,32 @@ export class ActionQueueTaskFocusProcessorsService {
   }
 
   private setupFocusConsoleProcessors(): void {
-    this.actionQueue.registerProcessor('focus-session:create', action =>
-      this.processFocusSessionMutation(action, 'focus-session:create')
+    this.actionQueue.registerProcessor('focus-session:create', (action, context) =>
+      this.processFocusSessionMutation(action, 'focus-session:create', context)
     );
-    this.actionQueue.registerProcessor('focus-session:update', action =>
-      this.processFocusSessionMutation(action, 'focus-session:update')
+    this.actionQueue.registerProcessor('focus-session:update', (action, context) =>
+      this.processFocusSessionMutation(action, 'focus-session:update', context)
     );
-    this.actionQueue.registerProcessor('routine-task:create', action =>
-      this.processRoutineTaskMutation(action, 'routine-task:create')
+    this.actionQueue.registerProcessor('routine-task:create', (action, context) =>
+      this.processRoutineTaskMutation(action, 'routine-task:create', context)
     );
-    this.actionQueue.registerProcessor('routine-task:update', action =>
-      this.processRoutineTaskMutation(action, 'routine-task:update')
+    this.actionQueue.registerProcessor('routine-task:update', (action, context) =>
+      this.processRoutineTaskMutation(action, 'routine-task:update', context)
     );
-    this.actionQueue.registerProcessor('routine-completion:create', action =>
-      this.processRoutineCompletionMutation(action, 'routine-completion:create')
+    this.actionQueue.registerProcessor('routine-completion:create', (action, context) =>
+      this.processRoutineCompletionMutation(action, 'routine-completion:create', context)
     );
-    this.actionQueue.registerProcessor('routine-completion:update', action =>
-      this.processRoutineCompletionMutation(action, 'routine-completion:update')
+    this.actionQueue.registerProcessor('routine-completion:update', (action, context) =>
+      this.processRoutineCompletionMutation(action, 'routine-completion:update', context)
     );
   }
 
   private async processFocusSessionMutation(
     action: QueuedAction,
     actionType: FocusSessionActionType,
+    context?: QueueProcessorContext,
   ): Promise<ActionQueueProcessorResult> {
+    if (!this.isFocusConsoleReplayCurrent(action, context)) return false;
     const payload = action.payload as FocusSessionPayload;
     const userId = this.authService.currentUserId();
     if (!userId) {
@@ -597,18 +647,21 @@ export class ActionQueueTaskFocusProcessorsService {
       const record: FocusSessionRecord = payload.record.userId
         ? payload.record
         : { ...payload.record, userId: sourceUserId };
-      const result = await this.focusConsoleSync.saveFocusSession(record, action.operationId);
-      return this.resolveFocusConsoleResult(action.id, result);
+      const result = context
+        ? await this.focusConsoleSync.saveFocusSession(record, action.operationId, context)
+        : await this.focusConsoleSync.saveFocusSession(record, action.operationId);
+      return this.resolveFocusConsoleResult(action, result, context);
     } catch (error) {
-      this.logProcessorFailure(actionType, error);
-      throw error;
+      return this.handleFocusConsoleReplayError(action, context, actionType, error);
     }
   }
 
   private async processRoutineTaskMutation(
     action: QueuedAction,
     actionType: RoutineTaskActionType,
+    context?: QueueProcessorContext,
   ): Promise<ActionQueueProcessorResult> {
+    if (!this.isFocusConsoleReplayCurrent(action, context)) return false;
     const payload = action.payload as RoutineTaskPayload;
     const userId = this.authService.currentUserId();
     if (!userId) {
@@ -633,22 +686,21 @@ export class ActionQueueTaskFocusProcessorsService {
     }
 
     try {
-      const result = await this.focusConsoleSync.upsertRoutineTask(
-        sourceUserId,
-        payload.routineTask,
-        action.operationId,
-      );
-      return this.resolveFocusConsoleResult(action.id, result);
+      const result = context
+        ? await this.focusConsoleSync.upsertRoutineTask(sourceUserId, payload.routineTask, action.operationId, context)
+        : await this.focusConsoleSync.upsertRoutineTask(sourceUserId, payload.routineTask, action.operationId);
+      return this.resolveFocusConsoleResult(action, result, context);
     } catch (error) {
-      this.logProcessorFailure(actionType, error);
-      throw error;
+      return this.handleFocusConsoleReplayError(action, context, actionType, error);
     }
   }
 
   private async processRoutineCompletionMutation(
     action: QueuedAction,
     actionType: RoutineCompletionActionType,
+    context?: QueueProcessorContext,
   ): Promise<ActionQueueProcessorResult> {
+    if (!this.isFocusConsoleReplayCurrent(action, context)) return false;
     const payload = action.payload as RoutineCompletionPayload;
     const userId = this.authService.currentUserId();
     if (!userId) {
@@ -687,14 +739,12 @@ export class ActionQueueTaskFocusProcessorsService {
       const completion: RoutineCompletionMutation = payload.completion.userId
         ? payload.completion
         : { ...payload.completion, userId: sourceUserId };
-      const result = await this.focusConsoleSync.incrementRoutineCompletion(
-        completion,
-        action.operationId,
-      );
-      return this.resolveFocusConsoleResult(action.id, result);
+      const result = context
+        ? await this.focusConsoleSync.incrementRoutineCompletion(completion, action.operationId, context)
+        : await this.focusConsoleSync.incrementRoutineCompletion(completion, action.operationId);
+      return this.resolveFocusConsoleResult(action, result, context);
     } catch (error) {
-      this.logProcessorFailure(actionType, error);
-      throw error;
+      return this.handleFocusConsoleReplayError(action, context, actionType, error);
     }
   }
 
@@ -710,13 +760,38 @@ export class ActionQueueTaskFocusProcessorsService {
   }
 
   private resolveFocusConsoleResult(
-    actionId: string,
+    action: QueuedAction,
     result: { ok: true } | { ok: false; error: { code: string; message: string; details?: Record<string, unknown> } },
-  ): true {
+    context?: QueueProcessorContext,
+  ): ActionQueueProcessorResult {
+    if (!this.isFocusConsoleReplayCurrent(action, context)) return false;
     if (!result.ok) {
       throw buildOperationError(result.error);
     }
 
-    return this.markRemoteActionSuccess(actionId);
+    return this.markRemoteActionSuccess(action.id);
+  }
+
+  private isFocusConsoleReplayCurrent(action: QueuedAction, context?: QueueProcessorContext): boolean {
+    const isDurableReplay = typeof action.id === 'string'
+      && typeof action.operationId === 'string'
+      && typeof action.entityId === 'string'
+      && (action.type === 'create' || action.type === 'update')
+      && ['focus-session', 'routine-task', 'routine-completion'].includes(action.entityType);
+    if (!isDurableReplay && !context) return true;
+    return !!context?.leaseSignal
+      && !context.leaseSignal.aborted
+      && context.isCurrent?.() === true;
+  }
+
+  private handleFocusConsoleReplayError(
+    action: QueuedAction,
+    context: QueueProcessorContext | undefined,
+    actionType: string,
+    error: unknown,
+  ): false {
+    if (!this.isFocusConsoleReplayCurrent(action, context)) return false;
+    this.logProcessorFailure(actionType, error);
+    throw error;
   }
 }

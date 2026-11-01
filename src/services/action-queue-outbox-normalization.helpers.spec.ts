@@ -41,6 +41,32 @@ describe('action-queue-outbox-normalization.helpers', () => {
       'legacy-outbox-missing-action-id',
     ));
   });
+
+  it('preserves canonical held state and its durable local handoff evidence', () => {
+    const localHandoff = {
+      kind: 'resolved-project-conflict',
+      state: 'required',
+      ownerUserId: 'user-1',
+      projectId: 'project-1',
+      actionId: 'held-action',
+      operationId: '11111111-1111-4111-8111-111111111111',
+      payloadDigest: 'payload-digest',
+      conflictFingerprint: 'conflict-fingerprint',
+    };
+    const heldAction = {
+      ...createQueuedPreferenceAction({
+        id: 'held-action',
+        operationId: localHandoff.operationId,
+      }),
+      syncState: 'held',
+      localHandoff,
+    } as unknown as QueuedAction;
+
+    const [normalized] = normalizeQueueForOutbox([heldAction]);
+
+    expect(normalized.syncState).toBe('held');
+    expect((normalized as typeof heldAction).localHandoff).toEqual(localHandoff);
+  });
 });
 
 function createQueuedPreferenceAction(

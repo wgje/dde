@@ -7,6 +7,7 @@ import {
   getRemainingBrowserNetworkResumeDelayMs,
   isBrowserNetworkSuspendedWindow,
 } from '../utils/browser-network-suspension';
+import { pushStartupTrace } from '../utils/startup-trace';
 
 export interface ActionQueueSchedulerRuntime {
   isOnline: () => boolean;
@@ -93,25 +94,11 @@ export class ActionQueueSchedulerService {
   }
 
   requestQueueProcessing(reason: string, runtime: ActionQueueSchedulerRuntime): void {
-    if (!runtime.isOnline()) {
-      return;
-    }
-
-    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
-      this.debug('页面仍处于后台，延后队列处理直到重新可见', { reason });
-      return;
-    }
-
-    if (isBrowserNetworkSuspendedWindow()) {
-      this.scheduleDeferredQueueProcessing(reason, runtime);
-      return;
-    }
-
-    if (this.queueProcessingActive) {
-      this.queueProcessingPendingReason = reason;
-      this.debug('队列处理已在进行，合并重复触发', { reason });
-      return;
-    }
+    pushStartupTrace('action_queue.scheduler_request', { reason });
+    const decision = this.resolveSchedulerDecision(reason, runtime);
+    pushStartupTrace('action_queue.scheduler_decision', { reason, decision });
+    this.debug('ActionQueue scheduler request', { reason, decision });
+    if (decision !== 'accepted') return;
 
     this.queueProcessingActive = true;
     const requestGeneration = this.lifecycleGeneration;
@@ -120,25 +107,60 @@ export class ActionQueueSchedulerService {
     } catch (error) {
       this.warn('队列处理前清理重试定时器失败，继续处理队列', { reason, error });
     }
-    void this.runQueueProcessing(runtime)
+    pushStartupTrace('action_queue.scheduler_process_invoked', { reason });
+    void this.runQueueProcessing(reason, runtime)
       .catch((error: unknown) => {
         if (requestGeneration !== this.lifecycleGeneration) {
           return;
         }
+        pushStartupTrace('action_queue.scheduler_process_rejected', { reason });
         this.handleQueueProcessingFailure(reason, runtime, error);
       })
       .finally(() => {
         if (requestGeneration !== this.lifecycleGeneration) {
           return;
         }
+        pushStartupTrace('action_queue.scheduler_process_finished', { reason });
         this.finishQueueProcessing(runtime);
       });
   }
 
-  private runQueueProcessing(runtime: ActionQueueSchedulerRuntime): Promise<unknown> {
+  private resolveSchedulerDecision(
+    reason: string,
+    runtime: ActionQueueSchedulerRuntime,
+  ): 'offline' | 'hidden' | 'suspended' | 'coalesced' | 'accepted' {
+    if (!runtime.isOnline()) return 'offline';
+    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+      this.debug('页面仍处于后台，延后队列处理直到重新可见', { reason });
+      return 'hidden';
+    }
+    if (isBrowserNetworkSuspendedWindow()) {
+      this.scheduleDeferredQueueProcessing(reason, runtime);
+      return 'suspended';
+    }
+    if (this.queueProcessingActive) {
+      this.queueProcessingPendingReason = reason;
+      this.debug('队列处理已在进行，合并重复触发', { reason });
+      return 'coalesced';
+    }
+    return 'accepted';
+  }
+
+  private runQueueProcessing(reason: string, runtime: ActionQueueSchedulerRuntime): Promise<unknown> {
     try {
-      return Promise.resolve(runtime.processQueue());
+      const result = runtime.processQueue();
+      this.debug('ActionQueue scheduler runtime processQueue invoked', { reason, decision: 'accepted' });
+      return Promise.resolve(result)
+        .then(resultValue => {
+          this.debug('ActionQueue scheduler runtime processQueue resolved', { reason, decision: 'accepted' });
+          return resultValue;
+        })
+        .catch((error: unknown) => {
+          this.debug('ActionQueue scheduler runtime processQueue rejected', { reason, decision: 'rejected' });
+          throw error;
+        });
     } catch (error) {
+      this.debug('ActionQueue scheduler runtime processQueue rejected', { reason, decision: 'rejected' });
       return Promise.reject(error);
     }
   }
@@ -237,4 +259,5 @@ export class ActionQueueSchedulerService {
       // Scheduler deferral and coalescing paths must not depend on the logging sink.
     }
   }
+
 }

@@ -41,8 +41,8 @@ describe('ActionQueueFrozenRetryController', () => {
 
   afterEach(() => {
     controller.stop();
-    vi.useRealTimers();
     vi.restoreAllMocks();
+    vi.useRealTimers();
   });
 
   it('停止后迟到的冻结重试 timer 不应再次落盘', () => {

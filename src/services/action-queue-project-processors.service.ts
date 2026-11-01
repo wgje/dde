@@ -1,4 +1,4 @@
-import { Injectable, inject } from '@angular/core';
+import { Injectable, Injector, inject, type OnDestroy } from '@angular/core';
 import { ProjectDataService, ProjectDeleteCoordinatorService, ProjectSaveFlightCoordinatorService, RetryQueueService, TaskSyncOperationsService } from '../core-bridge';
 import { AUTH_CONFIG } from '../config/auth.config';
 import type { Project } from '../models';
@@ -26,11 +26,15 @@ import {
   type ProjectRetryPayloadCandidate,
 } from './action-queue-project-retry-payload.helpers';
 import { ActionQueueService, type ActionQueueProcessorResult } from './action-queue.service';
+import { ActionQueueSyncWriterLeaseService } from './action-queue-sync-writer-lease.service';
+import type { QueueProcessorContext } from './action-queue-processing.types';
 import type { ProjectDeletePayload, ProjectPayload, QueuedAction } from './action-queue.types';
 import {
+  buildProjectDeleteDependentCleanupError,
   buildConflictingOwnerHintsReason,
   resolveProjectDeleteStopDecision,
   resolveProjectMutationStopDecision,
+  settleProjectDeleteDependentMutations,
   type ProjectProcessorStopDecision,
 } from './action-queue-project-processors.helpers';
 import type {
@@ -41,20 +45,32 @@ import type {
   ProjectMutationStaleness,
 } from './action-queue-project-processors.types';
 import { AuthService } from './auth.service';
-import { ConflictStorageService } from './conflict-storage.service';
+import {
+  ConflictStorageService,
+} from './conflict-storage.service';
 import { LoggerService } from './logger.service';
+import { captureActionQueueConflict } from './project-conflict-capture.service';
+import { ProjectConflictDirectSyncService } from './project-conflict-direct-sync.service';
 import {
   createProjectTaskDeleteHandoffOperationId,
   createProjectTaskDeleteOperationId,
 } from './project-operation-child-operation-id';
 import { ProjectStateService } from './project-state.service';
 import { ToastService } from './toast.service';
+import { UserSessionService } from './user-session.service';
+import {
+  ActionQueueProjectConflictHandoffRecoveryController,
+  createActionQueueProjectConflictHandoffSettlement,
+  runActivatedProjectHandoff,
+  type ActionQueueProjectConflictHandoffInput,
+} from './project-operation-conflict-retry-settlement.controller';
 
 @Injectable({ providedIn: 'root' })
-export class ActionQueueProjectProcessorsService {
+export class ActionQueueProjectProcessorsService implements OnDestroy {
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('ActionQueueProjectProcessors');
   private readonly actionQueue = inject(ActionQueueService);
+  private readonly syncWriterLease = inject(ActionQueueSyncWriterLeaseService, { optional: true });
   private readonly taskSyncOps = inject(TaskSyncOperationsService);
   private readonly projectSaveCoordinator = inject(ProjectSaveFlightCoordinatorService);
   private readonly projectDelete = inject(ProjectDeleteCoordinatorService);
@@ -64,21 +80,73 @@ export class ActionQueueProjectProcessorsService {
   private readonly authService = inject(AuthService);
   private readonly conflictStorage = inject(ConflictStorageService);
   private readonly toast = inject(ToastService);
+  private readonly injector = inject(Injector);
+  private readonly settleProjectConflictHandoff = createActionQueueProjectConflictHandoffSettlement({
+    isFenceCurrent: input => this.isProjectHandoffFenceCurrent(input),
+    getCurrentProjects: () => this.projectState.getProjectsWithCurrentData(),
+    getPendingProjectActions: projectId => this.actionQueue.getPendingActionsForProject(projectId),
+    persistProjects: projects => this.projectData.saveOfflineSnapshotAndWait(projects),
+    publishProjects: projects => this.projectState.updateProjects(() => projects),
+    reserveConflictLocalHandoff: input => this.conflictStorage.reserveProjectConflictLocalHandoff(input),
+    transitionActionLocalHandoff: input => this.actionQueue.transitionLocalHandoffStrictlyForOwner(input),
+    verifyConflictReservation: input => this.conflictStorage.verifyProjectConflictLocalHandoffReservation(input),
+    advanceConflictLocalHandoff: input => this.conflictStorage.advanceProjectConflictLocalHandoff(input),
+    clearCompletedConflict: input => this.conflictStorage.deleteCompletedProjectConflictLocalHandoff(input),
+    removeCompletedAction: input => this.actionQueue.removeCompletedLocalHandoffStrictlyForOwner(input),
+    now: () => new Date().toISOString(),
+  });
   private projectConflictHandler: ProjectConflictHandler | null = null;
   private legacyQueueWarningShown = false;
   private processorsInitialized = false;
+  private ownerStorageUnsubscribe: (() => void) | null = null;
+  private readonly heldHandoffRecovery = new ActionQueueProjectConflictHandoffRecoveryController({
+    isOwnerStorageLoaded: () => this.actionQueue.getCurrentOwnerStorageLoadState() === 'loaded',
+    getCurrentOwnerUserId: () => this.authService.currentUserId(),
+    getSessionGeneration: () => this.resolveUserSession()?.getCurrentSessionGeneration() ?? -1,
+    captureAuthFence: () => this.authService.captureAuthIdentityFence(),
+    getQueueViewGeneration: () => this.actionQueue.getCurrentQueueViewGeneration(),
+    isSessionContextCurrent: (generation, ownerUserId) =>
+      this.resolveUserSession()?.isSessionContextCurrent(generation, ownerUserId) === true,
+    isQueueViewCurrent: (generation, ownerUserId) =>
+      this.actionQueue.isQueueViewCurrent(generation, ownerUserId),
+    getPendingActions: () => this.actionQueue.pendingActions(),
+    acquireLease: ownerUserId => this.syncWriterLease?.acquire(ownerUserId) ?? Promise.resolve(null),
+    persistRequirement: input => this.conflictStorage.persistProjectConflictLocalHandoffRequirement(input),
+    reserveConflictHandoff: input => this.conflictStorage.reserveProjectConflictLocalHandoff(input),
+    verifyConflictReservation: input =>
+      this.conflictStorage.verifyProjectConflictLocalHandoffReservation(input),
+    transitionActionHandoff: input => this.actionQueue.transitionLocalHandoffStrictlyForOwner(input),
+    activateHandoff: input => this.actionQueue.activateLocalHandoffStrictlyForOwner(input),
+    processQueue: () => this.actionQueue.processQueue(),
+    scheduleRetry: (callback, delayMs) => setTimeout(callback, delayMs),
+    clearRetry: handle => clearTimeout(handle as ReturnType<typeof setTimeout>),
+    now: () => new Date().toISOString(),
+  });
 
   setupProcessors(): void {
     if (this.processorsInitialized) return;
 
-    this.actionQueue.registerProcessor('project:update', action =>
-      this.processProjectMutation(action, 'project:update', 'update')
+    this.actionQueue.registerProcessor('project:update', (action, context?: QueueProcessorContext) =>
+      this.processProjectMutation(action, 'project:update', 'update', context)
     );
     this.actionQueue.registerProcessor('project:delete', action => this.processProjectDelete(action));
     this.actionQueue.registerProcessor('project:create', action =>
       this.processProjectMutation(action, 'project:create', 'create')
     );
+    this.ownerStorageUnsubscribe = this.actionQueue.subscribeToOwnerStorageLoadStateChanges(() =>
+      queueMicrotask(() => this.heldHandoffRecovery.request()));
     this.processorsInitialized = true;
+    queueMicrotask(() => this.heldHandoffRecovery.request());
+  }
+
+  ngOnDestroy(): void {
+    this.ownerStorageUnsubscribe?.();
+    this.ownerStorageUnsubscribe = null;
+    this.heldHandoffRecovery.destroy();
+  }
+
+  private resolveUserSession(): UserSessionService | null {
+    return this.injector.get(UserSessionService, null);
   }
 
   setProjectConflictHandler(handler: ProjectConflictHandler): void {
@@ -275,6 +343,7 @@ export class ActionQueueProjectProcessorsService {
     ownerUserId: string,
     projectId: string,
     actionType: ProjectMutationActionType,
+    requiresIdentityFence: boolean,
   ): ProjectMutationContext {
     return {
       actionType,
@@ -282,7 +351,20 @@ export class ActionQueueProjectProcessorsService {
       projectId,
       queueViewGeneration: this.actionQueue.getCurrentQueueViewGeneration(),
       projectMutationViewGeneration: this.actionQueue.getProjectMutationViewGeneration(projectId, ownerUserId),
+      sessionGeneration: requiresIdentityFence
+        ? this.resolveUserSession()?.getCurrentSessionGeneration() ?? -1
+        : 0,
+      authFence: requiresIdentityFence ? this.authService.captureAuthIdentityFence() : '',
     };
+  }
+
+  private isProjectHandoffFenceCurrent(input: ActionQueueProjectConflictHandoffInput): boolean {
+    return this.authService.currentUserId() === input.ownerUserId
+      && this.authService.captureAuthIdentityFence() === input.authFence
+      && this.resolveUserSession()?.isSessionContextCurrent(input.sessionGeneration, input.ownerUserId) === true
+      && this.actionQueue.isQueueViewCurrent(input.queueViewGeneration, input.ownerUserId)
+      && this.actionQueue.getProjectMutationViewGeneration(input.resolvedProject.id, input.ownerUserId)
+        === input.projectMutationViewGeneration;
   }
 
   private getProjectMutationStaleness(context: ProjectMutationContext): ProjectMutationStaleness {
@@ -338,9 +420,18 @@ export class ActionQueueProjectProcessorsService {
         projectId,
         sourceUserId,
         action.operationId,
+        payload.baseUpdatedAt,
       );
       if (result.ok) {
-        await this.discardProjectDependentMutations(sourceUserId, projectId, action.id);
+        const settled = await settleProjectDeleteDependentMutations(
+          () => this.retryQueue.removeByProjectIdDurablyForOwner(projectId, sourceUserId),
+          () => this.actionQueue.settleExactCurrentProjectDeleteSuccess(sourceUserId, projectId, action.id, action.operationId),
+        );
+        if (!settled) {
+          return this.actionQueue.deferRetry(
+            buildProjectDeleteDependentCleanupError(projectId, action.operationId),
+          );
+        }
         return this.markRemoteActionSuccess(action.id);
       }
 
@@ -355,6 +446,7 @@ export class ActionQueueProjectProcessorsService {
     action: QueuedAction,
     actionType: ProjectMutationActionType,
     mutationKind: ProjectMutationKind,
+    processorContext?: QueueProcessorContext,
   ): Promise<ActionQueueProcessorResult> {
     const userId = this.authService.currentUserId();
     const payload = action.payload as ProjectPayload;
@@ -363,7 +455,12 @@ export class ActionQueueProjectProcessorsService {
       return this.actionQueue.deferRetry(buildAuthPendingRetryErrorPure(actionType, payload.project.id));
     }
 
-    const mutationContext = this.captureProjectMutationContext(userId, payload.project.id, actionType);
+    const mutationContext = this.captureProjectMutationContext(
+      userId, payload.project.id, actionType, action.localHandoff !== undefined,
+    );
+    if (action.localHandoff || payload.conflictHandoff) {
+      return this.processActivatedProjectHandoff(action, payload, mutationContext, processorContext);
+    }
     if (this.shouldStopProjectMutation(action, userId, payload, mutationKind)) {
       return true;
     }
@@ -377,31 +474,43 @@ export class ActionQueueProjectProcessorsService {
     }
   }
 
+  private async processActivatedProjectHandoff(
+    action: QueuedAction,
+    payload: ProjectPayload,
+    mutationContext: ProjectMutationContext,
+    processorContext?: QueueProcessorContext,
+  ): Promise<ActionQueueProcessorResult> {
+    return runActivatedProjectHandoff<ActionQueueProcessorResult>({
+      leaseSignal: processorContext?.leaseSignal, action, ownerUserId: mutationContext.ownerUserId,
+      execute: async signal => await this.injector.get(ProjectConflictDirectSyncService, null)
+        ?.executeActivatedHandoff({ action, abortSignal: signal, ...mutationContext }) ?? null,
+      settle: fence => this.settleProjectConflictHandoff({
+        action, resolvedProject: payload.project, ...mutationContext,
+      }, fence),
+      complete: () => this.markRemoteActionSuccess(action.id),
+      defer: outcome => this.actionQueue.deferRetry(buildProjectProcessorRetryErrorPure(
+        new Error(`project conflict local handoff ${outcome}`),
+        mutationContext.actionType, mutationContext.projectId,
+      )),
+    });
+  }
+
   private saveProjectMutation(
     payload: ProjectPayload,
     userId: string,
     operationId?: string,
   ): Promise<ProjectSyncResult> {
-    if (payload.taskDeleteBaseUpdatedAtMap) {
-      return operationId === undefined
-        ? this.projectSaveCoordinator.save(
-            payload.project,
-            userId,
-            payload.taskIdsToDelete,
-            payload.taskDeleteBaseUpdatedAtMap,
-          )
-        : this.projectSaveCoordinator.save(
-            payload.project,
-            userId,
-            payload.taskIdsToDelete,
-            payload.taskDeleteBaseUpdatedAtMap,
-            operationId,
-          );
+    if (operationId !== undefined) {
+      return this.projectSaveCoordinator.save(
+        payload.project, userId, payload.taskIdsToDelete, payload.taskDeleteBaseUpdatedAtMap, operationId,
+      );
     }
-
-    return operationId === undefined
-      ? this.projectSaveCoordinator.save(payload.project, userId, payload.taskIdsToDelete)
-      : this.projectSaveCoordinator.save(payload.project, userId, payload.taskIdsToDelete, undefined, operationId);
+    if (payload.taskDeleteBaseUpdatedAtMap !== undefined) {
+      return this.projectSaveCoordinator.save(
+        payload.project, userId, payload.taskIdsToDelete, payload.taskDeleteBaseUpdatedAtMap,
+      );
+    }
+    return this.projectSaveCoordinator.save(payload.project, userId, payload.taskIdsToDelete);
   }
 
   private async resolveProjectMutationResult(
@@ -585,15 +694,6 @@ export class ActionQueueProjectProcessorsService {
     );
   }
 
-  private async discardProjectDependentMutations(
-    ownerUserId: string,
-    projectId: string,
-    currentActionId?: string,
-  ): Promise<void> {
-    await this.actionQueue.settleProjectDeleteSuccessForOwner(ownerUserId, projectId, currentActionId);
-    this.retryQueue.removeByProjectId(projectId);
-  }
-
   private wasProjectFailureTransferredToRetryQueue(
     result: ProjectSyncResult,
     payload: ProjectPayload,
@@ -655,70 +755,18 @@ export class ActionQueueProjectProcessorsService {
     pendingTaskDeleteIds?: string[],
     pendingTaskDeleteBaseUpdatedAtMap?: ProjectPayload['taskDeleteBaseUpdatedAtMap'],
   ): Promise<boolean> {
-    const remoteProject = await this.projectData.loadFullProjectOptimized(localProject.id).catch(() => null);
-    if (this.getProjectMutationStaleness(mutationContext) !== 'current') {
-      return true;
-    }
-
-    if (remoteProject) {
-      return this.persistConflictWithRemote(
-        localProject,
-        remoteProject,
-        mutationContext,
-        pendingTaskDeleteIds,
-        pendingTaskDeleteBaseUpdatedAtMap,
-      );
-    }
-
-    await this.conflictStorage.saveConflict({
-      projectId: localProject.id,
+    return captureActionQueueConflict({
       localProject,
       ownerUserId: mutationContext.ownerUserId,
-      conflictedAt: new Date().toISOString(),
-      localVersion: localProject.version ?? 0,
-      reason: 'version_mismatch',
       pendingTaskDeleteIds,
       pendingTaskDeleteBaseUpdatedAtMap,
-      acknowledged: false,
+      isCurrent: () => this.getProjectMutationStaleness(mutationContext) === 'current',
+      loadRemoteProject: () => this.projectData.loadFullProjectOptimized(localProject.id),
+      remoteHandler: this.projectConflictHandler,
+    }, {
+      saveConflict: record => this.conflictStorage.saveConflict(record),
+      warn: (title, message) => this.toast.warning(title, message),
     });
-    this.toast.warning('检测到数据冲突', '远端详情暂不可用，已转入冲突中心等待处理');
-    return true;
-  }
-
-  private async persistConflictWithRemote(
-    localProject: Project,
-    remoteProject: Project,
-    mutationContext: ProjectMutationContext,
-    pendingTaskDeleteIds?: string[],
-    pendingTaskDeleteBaseUpdatedAtMap?: ProjectPayload['taskDeleteBaseUpdatedAtMap'],
-  ): Promise<boolean> {
-    if (this.projectConflictHandler) {
-      this.projectConflictHandler(
-        localProject,
-        remoteProject,
-        mutationContext.ownerUserId,
-        pendingTaskDeleteIds,
-        pendingTaskDeleteBaseUpdatedAtMap,
-      );
-      return true;
-    }
-
-    await this.conflictStorage.saveConflict({
-      projectId: localProject.id,
-      localProject,
-      remoteProject,
-      ownerUserId: mutationContext.ownerUserId,
-      remoteSnapshotFresh: true,
-      conflictedAt: new Date().toISOString(),
-      localVersion: localProject.version ?? 0,
-      remoteVersion: remoteProject.version ?? 0,
-      reason: 'version_mismatch',
-      pendingTaskDeleteIds,
-      pendingTaskDeleteBaseUpdatedAtMap,
-      acknowledged: false,
-    });
-    this.toast.warning('检测到数据冲突', '已补拉远端版本，冲突详情已转入冲突中心');
-    return true;
   }
 
   private shouldStopProjectDelete(

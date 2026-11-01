@@ -220,12 +220,12 @@ export function registerActionQueueStorageTailSpecs(context: ActionQueueStorageT
 
       context.getService().isOnline = true;
       context.getService().loadQueueFromStorage();
-      await flushQueueBackupRestore();
-
-      expect(context.getContext().pendingActions().map(action => action.id)).toEqual([
-        'backup-restored-action-drains-immediately',
-      ]);
-      expect(context.getContext().processQueue).toHaveBeenCalledTimes(1);
+      await vi.waitFor(() => {
+        expect(context.getContext().pendingActions().map(action => action.id)).toEqual([
+          'backup-restored-action-drains-immediately',
+        ]);
+        expect(context.getContext().processQueue).toHaveBeenCalledTimes(1);
+      });
     });
   });
 
@@ -553,6 +553,92 @@ export function registerActionQueueStorageRetrySpecs(context: ActionQueueStorage
       expect(ctx.pendingActions().find(a => a.id === action.id)?.retryCount).toBe(LOCAL_QUEUE_CONFIG.MAX_RETRIES);
       expect(ctx.pendingActions().find(a => a.id === action.id)?.syncState).toBe('retry_scheduled');
     });
+
+    it('should dead-letter structured stale payload terminal errors without scheduling retry', () => {
+      const service = context.getService();
+      const ctx = context.getContext();
+      const action = context.createMockAction({ retryCount: 1 });
+      ctx.pendingActions.set([action]);
+      const scheduleRetrySpy = vi.spyOn(service, 'scheduleRetry');
+
+      const result = service.handleRetry(action, {
+        code: 'FOCUS_CONSOLE_INCREMENT_FAILED',
+        message: '远端已保留更新版本，本地旧操作不可继续重试',
+        details: {
+          retryable: false,
+          reason: 'stale-payload-preserved-remotely',
+          operationId: action.operationId,
+        },
+      });
+
+      expect(result).toBe('dead-letter');
+      expect(scheduleRetrySpy).not.toHaveBeenCalled();
+      expect(service.hasDeadLetters()).toBe(true);
+      expect(ctx.pendingActions().find(a => a.id === action.id)?.retryCount).toBe(1);
+    });
+
+    it('should defer 5xx server pressure without consuming retry budget', () => {
+      const service = context.getService();
+      const ctx = context.getContext();
+      const action = context.createMockAction({ retryCount: LOCAL_QUEUE_CONFIG.MAX_RETRIES });
+      ctx.pendingActions.set([action]);
+      const scheduleRetrySpy = vi.spyOn(service, 'scheduleRetry');
+
+      const result = service.handleRetry(action, {
+        code: 'HTTP_503',
+        message: 'Service Unavailable',
+        details: {
+          status: 503,
+          reason: 'server-pressure',
+          retryAfterMs: 876,
+        },
+      } as never);
+
+      expect(result).toBe('retry');
+      expect(scheduleRetrySpy).toHaveBeenCalledWith(876);
+      expect(service.hasDeadLetters()).toBe(false);
+      expect(ctx.pendingActions().find(a => a.id === action.id)?.retryCount)
+        .toBe(LOCAL_QUEUE_CONFIG.MAX_RETRIES);
+      expect(ctx.pendingActions().find(a => a.id === action.id)?.syncState).toBe('retry_scheduled');
+    });
+
+    it('durably retries A without overwriting concurrently persisted B', async () => {
+      const service = context.getService();
+      const ctx = context.getContext();
+      const actionA = context.createMockAction({ id: 'retry-a', retryCount: 0 });
+      const actionB = context.createMockAction({ id: 'concurrent-b' });
+      await service.persistQueueSnapshotForOwner('user-a', [actionA, actionB]);
+      ctx.pendingActions.set([actionA]);
+      vi.spyOn(service, 'scheduleRetry').mockImplementation(() => undefined);
+
+      expect(await service.handleRetryDurably(actionA, 'Network timeout')).toBe('retry');
+
+      const durableQueue = await service.loadQueueSnapshotForOwner('user-a');
+      expect(durableQueue.map(action => action.id)).toEqual(['retry-a', 'concurrent-b']);
+      expect(durableQueue[0]?.retryCount).toBe(1);
+      expect(ctx.pendingActions().map(action => action.id)).toEqual(['retry-a', 'concurrent-b']);
+    });
+
+    it('durably dead-letters only A while preserving concurrently persisted B', async () => {
+      const service = context.getService();
+      const ctx = context.getContext();
+      const actionA = context.createMockAction({ id: 'terminal-a' });
+      const actionB = context.createMockAction({ id: 'concurrent-b' });
+      await service.persistQueueSnapshotForOwner('user-a', [actionA, actionB]);
+      ctx.pendingActions.set([actionA]);
+
+      expect(await service.handleRetryDurably(actionA, {
+        code: 'FOCUS_CONSOLE_INCREMENT_FAILED',
+        message: 'stale payload preserved remotely',
+        details: { retryable: false, reason: 'stale-payload-preserved-remotely' },
+      })).toBe('dead-letter');
+
+      expect((await service.loadQueueSnapshotForOwner('user-a')).map(action => action.id))
+        .toEqual(['concurrent-b']);
+      expect(service.deadLetterQueue().filter(item =>
+        item.action.id === actionA.id && item.action.operationId === actionA.operationId
+      )).toHaveLength(1);
+    });
   });
 }
 
@@ -584,6 +670,42 @@ export function registerActionQueueStoragePureHelperSpecs(
           operationId: '11111111-1111-4111-8111-111111111111',
         },
       })).toBe('deferred');
+    });
+
+    it('classifies structured stale payload terminal reasons as business errors', () => {
+      expect(classifyQueueRetryError({
+        code: 'FOCUS_CONSOLE_INCREMENT_FAILED',
+        message: '远端已保留更新版本，本地旧操作不可继续重试',
+        details: {
+          retryable: false,
+          reason: 'stale-payload-preserved-remotely',
+        },
+      })).toBe('business');
+    });
+
+    it('classifies structured operation-id payload mismatches as business errors', () => {
+      expect(classifyQueueRetryError({
+        code: 'FOCUS_CONSOLE_INCREMENT_FAILED',
+        message: '操作幂等键与既有远端载荷不一致',
+        details: {
+          retryable: false,
+          rpcReason: 'operation_id_payload_mismatch',
+        },
+      })).toBe('business');
+    });
+
+    it('classifies structured and flattened 5xx server pressure as deferred', () => {
+      expect(classifyQueueRetryError({
+        code: 'HTTP_504',
+        message: 'Gateway Timeout',
+        details: { statusCode: 504, retryable: true },
+      })).toBe('deferred');
+      expect(classifyQueueRetryError('HTTP 502 Bad Gateway')).toBe('deferred');
+      expect(classifyQueueRetryError({
+        code: 'HTTP_503',
+        message: 'Service Unavailable',
+        details: { status: 503, retryable: false },
+      })).toBe('unknown');
     });
 
     it('classifies invalid sync operation ids as business errors so the outbox does not retry forever', () => {

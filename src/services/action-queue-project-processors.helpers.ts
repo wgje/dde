@@ -1,9 +1,46 @@
 import { AUTH_CONFIG } from '../config/auth.config';
+import type { ExactCurrentProjectDeleteSettlementResult } from './action-queue-durable-removal.controller';
 
 export type ProjectProcessorStopDecision =
   | { kind: 'continue' }
   | { kind: 'warn'; message: string; data: Record<string, unknown> }
   | { kind: 'quarantine'; reason: string };
+
+export async function settleProjectDeleteDependentMutations(
+  removeRetryQueueItems: () => Promise<boolean>,
+  settleActionQueueItems: () => Promise<number | ExactCurrentProjectDeleteSettlementResult>,
+): Promise<boolean> {
+  try {
+    if (!await removeRetryQueueItems()) {
+      return false;
+    }
+    const settlement = await settleActionQueueItems();
+    return typeof settlement === 'number'
+      ? settlement > 0
+      : settlement.status === 'current' || settlement.status === 'committed';
+  } catch {
+    return false;
+  }
+}
+
+export function buildProjectDeleteDependentCleanupError(
+  projectId: string,
+  operationId: string,
+): {
+  code: 'SYNC_RETRY_HANDOFF_PENDING';
+  message: string;
+  details: Record<string, unknown>;
+} {
+  return {
+    code: 'SYNC_RETRY_HANDOFF_PENDING',
+    message: '项目删除已远端生效，等待本地依赖队列完成持久收口',
+    details: {
+      reason: 'project-delete-dependent-cleanup',
+      projectId,
+      operationId,
+    },
+  };
+}
 
 export function buildConflictingOwnerHintsReason(
   actionType: string,

@@ -1,25 +1,13 @@
-/**
- * ActionQueueService 单元测试（Vitest + Injector 隔离模式）
- * 
- * 注意：该服务使用 effect()，需要注入上下文，因此使用 runInInjectionContext。
- * 
- * 测试覆盖：
- * 1. 基本入队/出队操作
- * 2. 断网时操作队列化
- * 3. 网络恢复后自动重试
- * 4. 重试失败后的回滚/死信队列
- * 5. 业务错误 vs 网络错误的区分
- * 6. 指数退避重试策略
- * 7. 队列持久化和恢复
- * 8. 死信队列的 TTL 清理
- */
+/** ActionQueueService 单元测试（Vitest + Injector 隔离模式）。 */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { runInInjectionContext, signal } from '@angular/core';
+import { Injector, runInInjectionContext, signal } from '@angular/core';
 import { ActionQueueService, EnqueueParams } from './action-queue.service';
 import type { PreferencePayload, QueuedAction } from './action-queue.types';
 import { createMockDestroyRef } from '../test-setup.mocks';
 import { mockSentryLazyLoaderService } from '../test-setup.mocks';
 import { resetBrowserNetworkSuspensionTrackingForTests } from '../utils/browser-network-suspension';
+import { AuthService } from './auth.service';
+import { UserSessionService } from './user-session.service';
 import { registerActionQueueBasicOperationSpecs } from './action-queue-basic-operations.spec-helpers';
 import { registerActionQueueDependentPauseSpecs } from './action-queue-dependent-pause.spec-helpers';
 import { installWindowEventBridge } from './action-queue-dom-event-bridge.spec-helpers';
@@ -31,6 +19,8 @@ import {
   createActionQueueServiceTestInjector,
   createMockProject,
   createMockTask,
+  installMockQueueBackupStrictUpdate,
+  markActionQueueCurrentOwnerStorageLoadedForTests,
   mockLoggerCategory,
   mockLeaseRelease,
   mockQueueBackupService,
@@ -38,9 +28,9 @@ import {
   mockSentryAlertService,
   mockSyncWriterLeaseService,
   mockToastService,
+  registerActionQueueStorageAdmissionSpecs,
   resetActionQueueServiceMocks,
 } from './action-queue-service-test-harness.spec-helpers';
-
 describe('ActionQueueService', () => {
   let service: ActionQueueService;
   let currentUserIdSignal = signal<string | null>('test-user');
@@ -48,7 +38,6 @@ describe('ActionQueueService', () => {
   let consoleErrorSpy: ReturnType<typeof vi.spyOn> | undefined;
   let destroyRefCleanup: (() => void) | undefined;
   let restoreWindowEvents: (() => void) | undefined;
-
   // 辅助函数：模拟网络状态（不触发事件）
   function setNetworkStatus(online: boolean) {
     Object.defineProperty(navigator, 'onLine', {
@@ -111,14 +100,35 @@ describe('ActionQueueService', () => {
     };
   }
 
-  beforeEach(() => {
+  function createTestAttachmentReplayAction(): EnqueueParams {
+    return {
+      type: 'create',
+      entityType: 'attachment',
+      entityId: 'attachment-1',
+      payload: {
+        attachment: {
+          id: 'attachment-1',
+          type: 'document',
+          name: 'attachment.txt',
+          url: 'nanoflow-local-attachment://attachment-1',
+          createdAt: '2026-06-15T01:00:00.000Z',
+        },
+        blobKey: 'attachment-1',
+        fileName: 'attachment.txt',
+        mimeType: 'text/plain',
+        projectId: 'project-1',
+        taskId: 'task-1',
+        userId: 'test-user',
+        sourceUserId: 'test-user',
+      },
+    };
+  }
+  beforeEach(async () => {
     resetBrowserNetworkSuspensionTrackingForTests();
-
     // 重置 localStorage
     localStorage.clear();
     vi.clearAllMocks();
     resetActionQueueServiceMocks();
-
     // 测试默认静默：避免业务错误分支写入 stderr。
     consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -138,14 +148,33 @@ describe('ActionQueueService', () => {
     const { destroyRef, destroy } = createMockDestroyRef();
     destroyRefCleanup = destroy;
 
-    const injector = createActionQueueServiceTestInjector(
+    const baseInjector = createActionQueueServiceTestInjector(
       currentUserIdSignal,
       destroyRef,
     );
+    const injector = Injector.create({ parent: baseInjector, providers: [
+      ActionQueueService,
+      { provide: AuthService, useValue: {
+        currentUserId: currentUserIdSignal,
+        captureAuthIdentityFence: () => `auth:${currentUserIdSignal()}`,
+      } },
+      { provide: UserSessionService, useValue: {
+        getCurrentSessionGeneration: () => 0,
+        isSessionContextCurrent: (generation: number, owner: string) =>
+          generation === 0 && owner === currentUserIdSignal(),
+      } },
+    ] });
 
     runInInjectionContext(injector, () => {
       service = injector.get(ActionQueueService);
     });
+    await service.reloadFromStorageForCurrentOwner();
+    const clearCurrentView = service.clearCurrentView.bind(service);
+    vi.spyOn(service, 'clearCurrentView').mockImplementation(() => {
+      clearCurrentView();
+      markActionQueueCurrentOwnerStorageLoadedForTests(service);
+    });
+    vi.clearAllMocks();
   });
 
   afterEach(() => {
@@ -166,6 +195,7 @@ describe('ActionQueueService', () => {
     createMockProject,
     mockToastService,
   });
+  registerActionQueueStorageAdmissionSpecs(() => service, owner => currentUserIdSignal.set(owner));
 
   describe('Sentry context 边界', () => {
     it('enqueue breadcrumb 和告警日志都失败时仍保留已入队 action', () => {
@@ -242,26 +272,40 @@ describe('ActionQueueService', () => {
   });
 
   describe('reloadFromStorageForCurrentOwner 边界', () => {
-    it('主队列加载抛错时应继续尝试加载死信队列并保留已清空视图', () => {
+    it('主队列加载抛错时应继续尝试加载死信队列并保留已清空视图', async () => {
       const loadError = new Error('queue load failed');
       setNetworkStatus(false);
       service.enqueue(createTestProjectAction());
-      const loadQueueSpy = vi.spyOn(service.storage, 'loadQueueFromStorage')
-        .mockImplementationOnce(() => {
-          throw loadError;
-        });
-      const loadDeadLetterSpy = vi.spyOn(service.storage, 'loadDeadLetterFromStorage');
+      const stageSpy = vi.spyOn(service.storage, 'stageCurrentOwnerStorage')
+        .mockRejectedValueOnce(loadError);
 
-      expect(() => service.reloadFromStorageForCurrentOwner()).not.toThrow();
+      await expect(service.reloadFromStorageForCurrentOwner()).resolves.toBeUndefined();
 
-      expect(loadQueueSpy).toHaveBeenCalledOnce();
-      expect(loadDeadLetterSpy).toHaveBeenCalledOnce();
-      expect(service.queueSize()).toBe(0);
-      expect(service.hasPendingActions()).toBe(false);
+      expect(stageSpy).toHaveBeenCalledOnce();
+      expect(service.queueSize()).toBe(1);
+      expect(service.hasPendingActions()).toBe(true);
+      expect((service as unknown as {
+        getProjectPendingWriteState?: (projectId: string, ownerUserId: string) => string;
+      }).getProjectPendingWriteState?.('project-load-failed', 'test-user')).toBe('unknown');
       expect(mockLoggerCategory.warn).toHaveBeenCalledWith(
-        'ActionQueue owner 队列重新加载阶段失败，已继续后续阶段',
-        expect.objectContaining({ phase: 'load-pending', error: loadError }),
+        'ActionQueue owner storage staging failed',
+        expect.objectContaining({ phase: 'staging', error: loadError }),
       );
+    });
+
+    it('只有 owner 队列权威加载完成后空视图才可判定为 clear', async () => {
+      const storage = service.storage as unknown as {
+        loadQueueFromStorage: () => Promise<'ready' | 'failed' | 'stale'>;
+      };
+      vi.spyOn(storage, 'loadQueueFromStorage').mockResolvedValueOnce('ready');
+      const readPendingState = () => (service as unknown as {
+        getProjectPendingWriteState?: (projectId: string, ownerUserId: string) => string;
+      }).getProjectPendingWriteState?.('project-empty', 'test-user');
+
+      service.reloadFromStorageForCurrentOwner();
+
+      expect(readPendingState()).toBe('unknown');
+      await vi.waitFor(() => expect(readPendingState()).toBe('clear'));
     });
   });
 
@@ -447,7 +491,12 @@ describe('ActionQueueService', () => {
   });
 
   registerActionQueueOutboxStateSpecs({
-    service: () => service,
+    service: () => {
+      service.reloadFromStorageForCurrentOwner = () => (
+        service.storage.loadQueueFromStorage().then(() => undefined)
+      );
+      return service;
+    },
     setNetworkStatus,
     createTestTaskAction,
     createMockTask,
@@ -588,10 +637,99 @@ describe('ActionQueueService', () => {
     });
   });
 
+  describe('attachment replay exact settlement', () => {
+    it.each([
+      ['current result', false],
+      ['stale result', true],
+    ])('bypasses generic syncing and action-ID dequeue for a %s', async (_label, makeStale) => {
+      const markSyncing = vi.spyOn(service.storage, 'markActionSyncState');
+      const strictUpdate = installMockQueueBackupStrictUpdate();
+      service.registerProcessor('attachment:create', async action => {
+        const settled = await service.settleAttachmentReplayActionForOwner(
+          'test-user',
+          {
+            mode: 'remove-attachment-create',
+            actionId: action.id,
+            operationId: action.operationId,
+            entityType: 'attachment',
+            type: 'create',
+            entityId: action.entityId,
+            payload: action.payload,
+            signal: new AbortController().signal,
+            isCurrent: () => true,
+          },
+        );
+        expect(settled).toEqual({ status: 'committed' });
+        if (makeStale) service.clearCurrentView();
+        return true;
+      });
+      setNetworkStatus(false);
+      service.enqueue(createTestAttachmentReplayAction());
+      mockQueueBackupState.persistedQueue = [...service.pendingActions()];
+      mockQueueBackupState.recordFound = true;
+
+      setNetworkStatus(true);
+      await service.processQueue();
+
+      expect(markSyncing).not.toHaveBeenCalled();
+      expect(strictUpdate).toHaveBeenCalledOnce();
+      expect(mockQueueBackupService.updateQueue).not.toHaveBeenCalled();
+      expect(service.queueSize()).toBe(0);
+    });
+  });
+
   // ==================== 并发处理保护 ====================
   
   describe('并发处理保护', () => {
+    it('persists syncing before RPC and preserves a preference update enqueued during replay', async () => {
+      const strictUpdate = installMockQueueBackupStrictUpdate();
+      const leaseController = new AbortController();
+      mockSyncWriterLeaseService.isFeatureEnabled.mockReturnValue(true);
+      mockSyncWriterLeaseService.requestLease.mockImplementation(async () => ({
+        tabId: 'tab-preference-replay',
+        lockName: 'nanoflow-sync:test:test-user:__global__',
+        mode: 'idb-lease' as const,
+        signal: leaseController.signal,
+        release: mockLeaseRelease,
+      }));
+      setNetworkStatus(false);
+      const actionId = await service.enqueueDurably({
+        operationId: '10000000-0000-4000-8000-000000000101',
+        type: 'update', entityType: 'preference', entityId: 'test-user',
+        payload: { sourceUserId: 'test-user', userId: 'test-user', preferences: { theme: 'default' } },
+      });
+      mockSyncWriterLeaseService.requestLease.mockClear();
+      mockQueueBackupService.backupQueue.mockResolvedValueOnce(false);
+      service.registerProcessor('preference:update', async action => {
+        expect(mockQueueBackupState.persistedQueue.find(current => current.id === actionId)?.syncState)
+          .toBe('syncing');
+        setNetworkStatus(false);
+        await service.enqueueDurably({
+          operationId: '10000000-0000-4000-8000-000000000102',
+          type: 'update', entityType: 'preference', entityId: 'test-user',
+          payload: { sourceUserId: 'test-user', userId: 'test-user', preferences: { theme: 'ocean' } },
+        });
+        setNetworkStatus(true);
+        return true;
+      });
+
+      setNetworkStatus(true);
+      await service.processQueue();
+
+      expect(strictUpdate).toHaveBeenCalled();
+      expect(mockSyncWriterLeaseService.requestLease).toHaveBeenCalledOnce();
+      expect(service.pendingActions()).toEqual([
+        expect.objectContaining({
+          operationId: '10000000-0000-4000-8000-000000000102',
+          payload: expect.objectContaining({ preferences: { theme: 'ocean' } }),
+        }),
+      ]);
+    });
+
     it('正在处理时不应该重复处理', async () => {
+      await vi.waitFor(() => {
+        expect(service.getCurrentOwnerStorageLoadState()).toBe('loaded');
+      });
       vi.useFakeTimers();
 
       const processor = vi.fn().mockImplementation(async () => {
@@ -609,6 +747,9 @@ describe('ActionQueueService', () => {
       const promise1 = service.processQueue();
       const promise2 = service.processQueue();
 
+      await vi.waitFor(() => {
+        expect(processor).toHaveBeenCalledTimes(1);
+      });
       await vi.advanceTimersByTimeAsync(100);
       
       await Promise.all([promise1, promise2]);

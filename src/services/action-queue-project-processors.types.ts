@@ -11,6 +11,8 @@ export type ProjectMutationContext = {
   projectId: string;
   queueViewGeneration: number;
   projectMutationViewGeneration: number;
+  sessionGeneration: number;
+  authFence: string;
 };
 
 export type ProjectConflictHandler = (

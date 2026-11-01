@@ -12,6 +12,7 @@ export interface ActionQueuePersistenceSpecContext {
   createMockTask(overrides?: Partial<Task>): Task;
   mockQueueBackupService: {
     updateQueue: Mock;
+    updateQueueStrictly: Mock;
   };
   getMockQueueBackupPersistedQueue(): QueuedAction[];
   setMockQueueBackupPersistedQueue(queue: QueuedAction[]): void;
@@ -46,7 +47,7 @@ export function registerActionQueuePersistenceSpecs(context: ActionQueuePersiste
 
     it('durable 入队持久化确认失败时不应留下本地队列残余', async () => {
       setNetworkStatus(false);
-      vi.spyOn(service().storage, 'persistQueueMutationForOwner').mockResolvedValueOnce(null);
+      mockQueueBackupService.updateQueueStrictly.mockResolvedValueOnce({ status: 'storage-failed' });
 
       const actionId = await service().enqueueDurably(createTestTaskAction());
 
@@ -58,7 +59,7 @@ export function registerActionQueuePersistenceSpecs(context: ActionQueuePersiste
 
     it('enqueueForOwner 写入当前 owner 时应要求 durable 持久化确认', async () => {
       setNetworkStatus(false);
-      vi.spyOn(service().storage, 'persistQueueMutationForOwner').mockResolvedValueOnce(null);
+      mockQueueBackupService.updateQueueStrictly.mockResolvedValueOnce({ status: 'storage-failed' });
 
       const actionId = await service().enqueueForOwner('test-user', createTestTaskAction());
 
@@ -99,7 +100,7 @@ export function registerActionQueuePersistenceSpecs(context: ActionQueuePersiste
       });
 
       expect(actionId).toEqual(expect.any(String));
-      expect(mockQueueBackupService.updateQueue).toHaveBeenCalledWith('test-user', expect.any(Function));
+      expect(mockQueueBackupService.updateQueueStrictly).toHaveBeenCalledWith('test-user', expect.any(Function));
       expect(persistedQueue().map(action => action.entityId).sort()).toEqual([
         'task-current-tab',
         'task-from-other-tab',
@@ -171,22 +172,21 @@ export function registerActionQueuePersistenceSpecs(context: ActionQueuePersiste
       localStorage.setItem('nanoflow.action-queue.test-user', '{bad json');
 
       service().reloadFromStorageForCurrentOwner();
-      await Promise.resolve();
-      await Promise.resolve();
-
-      expect(service().pendingActions()).toEqual([
-        expect.objectContaining({
-          id: 'backup-action',
-          entityId: 'task-from-idb-backup',
-          syncState: 'pending_sync',
-        }),
-      ]);
+      await vi.waitFor(() => {
+        expect(service().pendingActions()).toEqual([
+          expect.objectContaining({
+            id: 'backup-action',
+            entityId: 'task-from-idb-backup',
+            syncState: 'pending_sync',
+          }),
+        ]);
+      });
       expect(service().queueSize()).toBe(1);
     });
 
-    it('IndexedDB mutation 抛错但 localStorage 可用时 durable 入队应降级持久化成功', async () => {
+    it('current-owner IndexedDB strict mutation failure must not fall back to localStorage', async () => {
       setNetworkStatus(false);
-      mockQueueBackupService.updateQueue.mockRejectedValueOnce(new Error('idb transaction blocked'));
+      mockQueueBackupService.updateQueueStrictly.mockRejectedValueOnce(new Error('idb transaction blocked'));
 
       const actionId = await service().enqueueDurably({
         type: 'update',
@@ -198,17 +198,12 @@ export function registerActionQueuePersistenceSpecs(context: ActionQueuePersiste
         },
       });
 
-      expect(actionId).toEqual(expect.any(String));
-      expect(service().pendingActions()).toEqual([
-        expect.objectContaining({
-          id: actionId,
-          entityId: 'task-idb-fallback',
-          syncState: 'pending_sync',
-        }),
-      ]);
-      expect(service().queueSize()).toBe(1);
-      expect(localStorage.getItem('nanoflow.action-queue.test-user')).toContain('task-idb-fallback');
-      expect(persistedQueue().map(action => action.entityId)).toEqual(['task-idb-fallback']);
+      expect(actionId).toBe('');
+      expect(service().pendingActions()).toEqual([]);
+      expect(service().queueSize()).toBe(0);
+      expect(localStorage.getItem('nanoflow.action-queue.test-user')).toBeNull();
+      expect(persistedQueue()).toEqual([]);
+      expect(mockQueueBackupService.updateQueue).not.toHaveBeenCalled();
     });
 
     it('foreign owner durable fallback 不应把当前 owner 队列混入目标 owner outbox', async () => {
@@ -222,7 +217,7 @@ export function registerActionQueuePersistenceSpecs(context: ActionQueuePersiste
           projectId: 'proj-1',
         },
       });
-      mockQueueBackupService.updateQueue.mockRejectedValueOnce(new Error('idb blocked for owner-b'));
+      mockQueueBackupService.updateQueueStrictly.mockRejectedValueOnce(new Error('idb blocked for owner-b'));
 
       const actionId = await service().enqueueDurablyForOwner('owner-b', {
         type: 'update',
@@ -261,7 +256,7 @@ export function registerActionQueuePersistenceSpecs(context: ActionQueuePersiste
         },
       });
 
-      mockQueueBackupService.updateQueue.mockRejectedValueOnce(new Error('idb blocked for owner-b bulk'));
+      mockQueueBackupService.updateQueueStrictly.mockRejectedValueOnce(new Error('idb blocked for owner-b bulk'));
 
       const actionIds = await service().enqueueManyDurablyForOwner('owner-b', [
         {
@@ -293,7 +288,10 @@ export function registerActionQueuePersistenceSpecs(context: ActionQueuePersiste
       const ownerBQueue = await service().storage.loadQueueSnapshotForOwner('owner-b');
 
       expect(actionIds).toHaveLength(2);
-      expect(mockQueueBackupService.updateQueue).toHaveBeenLastCalledWith('owner-b', expect.any(Function));
+      expect(mockQueueBackupService.updateQueueStrictly).toHaveBeenLastCalledWith(
+        'owner-b',
+        expect.any(Function),
+      );
       expect(service().pendingActions().map(action => action.entityId)).toEqual(['task-current-owner-only']);
       expect(ownerBQueue.map(action => action.entityId).sort()).toEqual([
         'connection-owner-b-bulk',
@@ -345,7 +343,7 @@ export function registerActionQueuePersistenceSpecs(context: ActionQueuePersiste
       ]);
 
       expect(actionIds).toHaveLength(2);
-      expect(mockQueueBackupService.updateQueue).toHaveBeenCalledTimes(1);
+      expect(mockQueueBackupService.updateQueueStrictly).toHaveBeenCalledTimes(1);
       expect(persistedQueue().map(action => action.entityId).sort()).toEqual([
         'connection-bulk-b',
         'task-bulk-a',
@@ -431,7 +429,10 @@ export function registerActionQueuePersistenceSpecs(context: ActionQueuePersiste
     });
 
     it('处理成功但持久 Outbox 收口失败时应保留 action 等待恢复重放', async () => {
-      const processor = vi.fn().mockResolvedValue(true);
+      const processor = vi.fn().mockImplementation(() => {
+        mockQueueBackupService.updateQueueStrictly.mockResolvedValueOnce({ status: 'storage-failed' });
+        return true;
+      });
       service().registerProcessor('task:update', processor);
       setNetworkStatus(false);
       const actionId = await service().enqueueDurably({
@@ -445,8 +446,6 @@ export function registerActionQueuePersistenceSpecs(context: ActionQueuePersiste
       });
       expect(persistedQueue().map(action => action.entityId)).toEqual(['task-durable-retained']);
 
-      vi.spyOn(service().storage, 'persistQueueMutationForOwner').mockResolvedValueOnce(null);
-
       setNetworkStatus(true);
       const result = await service().processQueue();
 
@@ -456,7 +455,7 @@ export function registerActionQueuePersistenceSpecs(context: ActionQueuePersiste
         expect.objectContaining({
           id: actionId,
           entityId: 'task-durable-retained',
-          syncState: 'pending_sync',
+          syncState: 'syncing',
         }),
       ]);
       expect(service().queueSize()).toBe(1);
@@ -488,6 +487,44 @@ export function registerActionQueuePersistenceSpecs(context: ActionQueuePersiste
       expect(persistedQueue()).toEqual([]);
       expect(localStorage.getItem('nanoflow.action-queue.test-user')).toBe('[]');
       expect(localStorage.getItem('nanoflow.dead-letter-queue.test-user')).toContain('task-dead-letter-drained');
+    });
+
+    it('durable terminal settlement cannot stage or remove an incomplete local handoff', async () => {
+      const action: QueuedAction = {
+        id: 'protected-handoff-action',
+        operationId: '88888888-8888-4888-8888-888888888888',
+        type: 'update',
+        entityType: 'project',
+        entityId: 'project-protected',
+        payload: createTestProjectAction().payload,
+        timestamp: 1,
+        localCommittedAt: 1,
+        syncState: 'held',
+        retryCount: 0,
+        priority: 'critical',
+        localHandoff: {
+          kind: 'resolved-project-conflict',
+          state: 'required',
+          ownerUserId: 'test-user',
+          projectId: 'project-protected',
+          actionId: 'protected-handoff-action',
+          operationId: '88888888-8888-4888-8888-888888888888',
+          payloadDigest: 'payload-digest',
+          conflictFingerprint: 'conflict-fingerprint',
+        },
+      };
+      setPersistedQueue([action]);
+      context.setMockQueueBackupRecordFound(true);
+
+      const result = await service().storage.handleRetryDurably(action, {
+        message: 'operation identity mismatch',
+        details: { reason: 'operation_id_payload_mismatch' },
+      });
+
+      expect(result).toBe('persistence-failed');
+      expect(persistedQueue()).toEqual([action]);
+      expect(service().deadLetterQueue()).toEqual([]);
+      expect(localStorage.getItem('nanoflow.dead-letter-queue.test-user')).toBeNull();
     });
 
     it('应该持久化死信队列', async () => {

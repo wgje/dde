@@ -1,7 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   LOCAL_QUEUE_CONFIG,
+  type ActionQueueContext,
   type ActionQueueStorageService,
 } from './action-queue-storage.service';
 import type { DeadLetterItem, QueuedAction } from './action-queue.types';
@@ -12,7 +13,10 @@ interface ActionQueueStorageDeadLetterRestoreSpecContext {
   createMockAction: (overrides?: Partial<QueuedAction>) => QueuedAction;
   setCurrentUserId: (userId: string | null) => void;
   backupDeadLetters: (ownerUserId: string, items: DeadLetterItem[]) => Promise<boolean>;
+  backupDeadLettersMock: ReturnType<typeof vi.fn>;
   flushBackupRestore: () => Promise<void>;
+  getContext: () => ActionQueueContext;
+  setRestoreDeadLettersResult: (result: Promise<DeadLetterItem[]>) => void;
 }
 
 export function registerActionQueueStorageDeadLetterRestoreSpecs(
@@ -239,6 +243,107 @@ export function registerActionQueueStorageDeadLetterRestoreSpecs(
       expect(restored?.action.id).toBe('legacy-non-uuid-dead-letter');
       expect(restored?.action.operationId).not.toBe('op-legacy-non-uuid');
       expect(isSyncOperationId(restored?.action.operationId)).toBe(true);
+    });
+
+    it('loadDeadLetterFromStorage should guard transient saves and processing until backup restore settles', async () => {
+      const service = context.getService();
+      const durableDeadLetter: DeadLetterItem = {
+        action: {
+          ...context.createMockAction({ id: 'durable-dead-letter-hidden-during-restore' }),
+          syncState: 'dead_letter',
+        },
+        failedAt: new Date().toISOString(),
+        reason: 'durable backup',
+      };
+      let resolveRestore: (items: DeadLetterItem[]) => void = () => {};
+      const restorePromise = new Promise<DeadLetterItem[]>((resolve) => {
+        resolveRestore = resolve;
+      });
+      context.setRestoreDeadLettersResult(restorePromise);
+
+      service.loadDeadLetterFromStorage();
+      const savedWhileRestoring = service.saveDeadLetterToStorage();
+      service.requestQueueProcessing('dead-letter-restore-pending');
+
+      expect(savedWhileRestoring).toBe(false);
+      expect(localStorage.getItem(`${LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY}.user-a`)).toBeNull();
+      expect(context.backupDeadLettersMock).not.toHaveBeenCalled();
+      expect(context.getContext().processQueue).not.toHaveBeenCalled();
+
+      resolveRestore([durableDeadLetter]);
+      await context.flushBackupRestore();
+
+      expect(service.deadLetterQueue()).toEqual([durableDeadLetter]);
+      expect(localStorage.getItem(`${LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY}.user-a`))
+        .toContain('durable-dead-letter-hidden-during-restore');
+      expect(context.backupDeadLettersMock)
+        .toHaveBeenLastCalledWith([durableDeadLetter], 'user-a');
+      expect(context.getContext().processQueue).toHaveBeenCalledOnce();
+    });
+
+    it('saveDeadLetterToStorage should persist dead letter queue', () => {
+      const service = context.getService();
+      service.moveToDeadLetter(context.createMockAction(), 'test');
+
+      const saved = localStorage.getItem(`${LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY}.user-a`);
+      expect(saved).toBeTruthy();
+      expect(JSON.parse(saved!)).toHaveLength(1);
+    });
+
+    it('saveDeadLetterToStorage should freeze and expose escape data when dead-letter persistence fails', () => {
+      const service = context.getService();
+      const originalLocalStorage = globalThis.localStorage;
+      const storageData = new Map<string, string>();
+      const failingStorage = {
+        getItem: (key: string) => storageData.get(key) ?? null,
+        setItem: (key: string, value: string) => {
+          if (key === `${LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY}.user-a`) {
+            throw new DOMException('quota exceeded', 'QuotaExceededError');
+          }
+          storageData.set(key, String(value));
+        },
+        removeItem: (key: string) => storageData.delete(key),
+        clear: () => storageData.clear(),
+        key: (index: number) => Array.from(storageData.keys())[index] ?? null,
+        get length() {
+          return storageData.size;
+        },
+      } as Storage;
+      const storageFailureCallback = vi.fn();
+
+      Object.defineProperty(globalThis, 'localStorage', {
+        value: failingStorage,
+        configurable: true,
+        writable: true,
+      });
+
+      try {
+        const action = context.createMockAction({ id: 'dead-letter-save-failure' });
+        service.onStorageFailure(storageFailureCallback);
+
+        service.moveToDeadLetter(action, 'quota');
+
+        expect(service.queueFrozen()).toBe(true);
+        expect(service.queueFreezeReason()).toBe('storage_failure');
+        expect(storageFailureCallback).toHaveBeenCalledWith({
+          queue: [],
+          deadLetter: [
+            expect.objectContaining({
+              action: expect.objectContaining({
+                id: action.id,
+                syncState: 'dead_letter',
+              }),
+            }),
+          ],
+        });
+        expect(globalThis.localStorage.getItem(`${LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY}.user-a`)).toBeNull();
+      } finally {
+        Object.defineProperty(globalThis, 'localStorage', {
+          value: originalLocalStorage,
+          configurable: true,
+          writable: true,
+        });
+      }
     });
   });
 }

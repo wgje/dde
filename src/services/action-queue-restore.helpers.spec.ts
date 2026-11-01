@@ -122,6 +122,34 @@ describe('action-queue-restore.helpers', () => {
     expect(restoredCount).toBe(0);
     expect(queue).toEqual([]);
   });
+
+  it('restores held actions without downgrading their handoff evidence to pending', () => {
+    const localHandoff = {
+      kind: 'resolved-project-conflict',
+      state: 'reserved',
+      ownerUserId: 'user-1',
+      projectId: 'project-1',
+      actionId: 'held-action',
+      operationId: '66666666-6666-4666-8666-666666666666',
+      payloadDigest: 'payload-digest',
+      conflictFingerprint: 'conflict-fingerprint',
+      reservationId: 'reservation-1',
+    };
+    const heldAction = {
+      ...createQueuedPreferenceAction({
+        id: localHandoff.actionId,
+        operationId: localHandoff.operationId,
+      }),
+      syncState: 'held',
+      localHandoff,
+    } as unknown as QueuedAction;
+
+    const restored = extractBackupActionQueueActions([heldAction]);
+
+    expect(restored).toHaveLength(1);
+    expect(restored[0].syncState).toBe('held');
+    expect((restored[0] as typeof heldAction).localHandoff).toEqual(localHandoff);
+  });
 });
 
 function createPreferencePayload(theme: NonNullable<PreferencePayload['preferences']['theme']>): PreferencePayload {

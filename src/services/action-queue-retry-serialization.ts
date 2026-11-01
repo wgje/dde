@@ -21,7 +21,18 @@ export type DeferredRetryReason =
   | 'partial-retry-handoff'
   | 'auth-pending'
   | 'rate-limit'
+  | 'server-pressure'
   | 'sync-rpc-unavailable';
+
+const SERVER_PRESSURE_MESSAGE_FRAGMENTS = [
+  'internal server error',
+  'bad gateway',
+  'service unavailable',
+  'gateway timeout',
+  'server pressure',
+  '服务暂时不可用',
+  '服务端错误',
+] as const;
 
 export function parseRetryErrorMessage(message: string): QueueRetryError {
   const parts = message.split('|').map(part => part.trim()).filter(part => part.length > 0);
@@ -111,6 +122,25 @@ export function isRateLimitRetryError(error: QueueRetryError): boolean {
     || msg.includes('请求过多');
 }
 
+export function isServerPressureRetryError(error: QueueRetryError): boolean {
+  if (error.details?.['retryable'] === false) return false;
+  if (error.details?.['reason'] === 'server-pressure') return true;
+
+  const status = readHttpStatus(error);
+  if (Number.isInteger(status) && status >= 500 && status <= 599) return true;
+
+  const msg = `${error.code ?? ''} ${error.message}`.toLowerCase();
+  return /\b5\d{2}\b/.test(msg)
+    || SERVER_PRESSURE_MESSAGE_FRAGMENTS.some(fragment => msg.includes(fragment));
+}
+
+function readHttpStatus(error: QueueRetryError): number {
+  const rawStatus = error.details?.['status']
+    ?? error.details?.['statusCode']
+    ?? error.details?.['httpStatus'];
+  return typeof rawStatus === 'number' ? rawStatus : Number(rawStatus);
+}
+
 export function isSyncRpcCapabilityRetryError(error: QueueRetryError): boolean {
   return error.details?.['reason'] === 'sync-rpc-unavailable'
     && error.details?.['deferred'] === true
@@ -158,7 +188,7 @@ function resolveRateLimitRetryDelay(error: QueueRetryError): number {
 }
 
 export function resolveDeferredRetryDelay(error: QueueRetryError): number {
-  if (isRateLimitRetryError(error)) {
+  if (isRateLimitRetryError(error) || isServerPressureRetryError(error)) {
     return resolveRateLimitRetryDelay(error);
   }
 
@@ -188,6 +218,10 @@ export function describeDeferredRetryReason(
 ): DeferredRetryReason {
   if (isRateLimitRetryError(error)) {
     return 'rate-limit';
+  }
+
+  if (isServerPressureRetryError(error)) {
+    return 'server-pressure';
   }
 
   if (isSyncRpcCapabilityRetryError(error)) {

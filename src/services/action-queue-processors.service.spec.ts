@@ -15,20 +15,28 @@ import {
   mockAuthService,
   mockConflictStorageService,
   mockLoggerCategory,
+  mockProjectStateService,
   mockRetryQueueService,
   mockSyncService,
   mockToastService,
+  registerActionQueueProjectDeleteDurabilitySpecs,
   setupActionQueueProcessorsHarness,
   type QueuedAction,
 } from './action-queue-processors.spec-helpers';
+import { registerActionQueueConnectionProcessorSpecs } from './action-queue-connection-processors.spec-helpers';
 import { registerActionQueueProcessorsOwnerPreferenceSpecs } from './action-queue-processors-owner-preference.spec-helpers';
-import { registerActionQueueProcessorsTaskSpecs } from './action-queue-processors-task.spec-helpers';
+import { registerActionQueueProcessorsFocusReplayFenceSpecs } from './action-queue-processors-focus-replay-fence.spec-helpers';
+import {
+  registerActionQueueProcessorsTaskReplayFenceSpecs,
+  resetActionQueueTaskReplayMocks,
+} from './action-queue-processors-task-replay-fence.spec-helpers';
 
 describe('ActionQueueProcessorsService', () => {
   let service: ActionQueueProcessorsService;
 
   beforeEach(() => {
     service = setupActionQueueProcessorsHarness().service;
+    resetActionQueueTaskReplayMocks();
   });
 
   // ── Registration ───────────────────────────────────────────
@@ -343,15 +351,136 @@ describe('ActionQueueProcessorsService', () => {
     const handler = getProcessor('project:delete');
 
     const result = await handler({
+      id: 'action-project-delete',
       operationId: 'op-project-delete',
       entityId: 'p-1',
       payload: { projectId: 'p-1', userId: 'test-user', sourceUserId: 'test-user' },
     } as QueuedAction);
 
-    expect(mockSyncService.deleteProjectFromCloud).toHaveBeenCalledWith('p-1', 'test-user', 'op-project-delete');
+    expect(mockSyncService.deleteProjectFromCloud).toHaveBeenCalledWith(
+      'p-1',
+      'test-user',
+      'op-project-delete',
+      undefined,
+    );
     expect(result).toBe(true);
-    expect(mockActionQueueService.settleProjectDeleteSuccessForOwner).toHaveBeenCalledWith('test-user', 'p-1', undefined);
-    expect(mockRetryQueueService.removeByProjectId).toHaveBeenCalledWith('p-1');
+    expect(mockActionQueueService.settleExactCurrentProjectDeleteSuccess).toHaveBeenCalledWith(
+      'test-user', 'p-1', 'action-project-delete', 'op-project-delete',
+    );
+    expect(mockActionQueueService.settleProjectDeleteSuccessForOwner).not.toHaveBeenCalled();
+    expect(mockRetryQueueService.removeByProjectIdDurablyForOwner).toHaveBeenCalledWith(
+      'p-1',
+      'test-user',
+    );
+  });
+
+  registerActionQueueProjectDeleteDurabilitySpecs();
+
+  it('project:delete waits for durable RetryQueue cleanup before settlement and acknowledgement', async () => {
+    let resolveCleanup!: (value: boolean) => void;
+    const cleanup = new Promise<boolean>(resolve => { resolveCleanup = resolve; });
+    mockRetryQueueService.removeByProjectIdDurablyForOwner.mockReturnValueOnce(cleanup);
+    const handler = getProcessor('project:delete');
+
+    const resultPromise = handler({
+      id: 'action-project-delete-pending-cleanup',
+      operationId: 'operation-project-delete-pending-cleanup',
+      entityId: 'p-pending-cleanup',
+      payload: {
+        projectId: 'p-pending-cleanup',
+        userId: 'test-user',
+        sourceUserId: 'test-user',
+      },
+    } as QueuedAction);
+    await Promise.resolve();
+
+    expect(mockActionQueueService.settleProjectDeleteSuccessForOwner).not.toHaveBeenCalled();
+    expect(mockActionQueueService.markActionSyncedRemotely).not.toHaveBeenCalled();
+
+    resolveCleanup(true);
+    await expect(resultPromise).resolves.toBe(true);
+    expect(mockActionQueueService.settleExactCurrentProjectDeleteSuccess).toHaveBeenCalledOnce();
+    expect(mockActionQueueService.markActionSyncedRemotely).toHaveBeenCalledWith(
+      'action-project-delete-pending-cleanup',
+    );
+  });
+
+  it.each([
+    ['cleanup failed', async () => false, null],
+    ['cleanup threw', async () => { throw new Error('retry storage failed'); }, null],
+    ['settlement missing', async () => true, { status: 'missing' as const }],
+    ['settlement identity mismatch', async () => true, { status: 'identity-mismatch' as const }],
+    ['settlement protected handoff', async () => true, { status: 'protected-handoff' as const }],
+    ['settlement persistence failed', async () => true, { status: 'persistence-failed' as const }],
+  ])('project:delete defers without spending retry budget when %s', async (
+    _label,
+    cleanup,
+    settlementResult,
+  ) => {
+    mockRetryQueueService.removeByProjectIdDurablyForOwner.mockImplementationOnce(cleanup);
+    if (settlementResult) {
+      mockActionQueueService.settleExactCurrentProjectDeleteSuccess.mockResolvedValueOnce(
+        settlementResult,
+      );
+    }
+    const handler = getProcessor('project:delete');
+    const action = {
+      id: 'action-project-delete-deferred-cleanup',
+      operationId: 'operation-project-delete-deferred-cleanup',
+      retryCount: 4,
+      entityId: 'p-deferred-cleanup',
+      payload: {
+        projectId: 'p-deferred-cleanup',
+        userId: 'test-user',
+        sourceUserId: 'test-user',
+      },
+    } as QueuedAction;
+
+    const result = await handler(action);
+
+    expect(result).toEqual({
+      outcome: 'defer-retry',
+      error: expect.objectContaining({
+        code: 'SYNC_RETRY_HANDOFF_PENDING',
+        details: expect.objectContaining({
+          reason: 'project-delete-dependent-cleanup',
+          projectId: 'p-deferred-cleanup',
+          operationId: 'operation-project-delete-deferred-cleanup',
+        }),
+      }),
+    });
+    expect(action.retryCount).toBe(4);
+    expect(mockActionQueueService.failRetry).not.toHaveBeenCalled();
+    expect(mockActionQueueService.moveToDeadLetter).not.toHaveBeenCalled();
+    expect(mockActionQueueService.markActionSyncedRemotely).not.toHaveBeenCalled();
+    expect(mockSyncService.deleteProjectFromCloud).toHaveBeenCalledWith(
+      'p-deferred-cleanup',
+      'test-user',
+      'operation-project-delete-deferred-cleanup',
+      undefined,
+    );
+  });
+
+  it('project:delete defers when dependent ActionQueue settlement throws', async () => {
+    mockActionQueueService.settleExactCurrentProjectDeleteSuccess.mockRejectedValueOnce(
+      new Error('action queue storage failed'),
+    );
+    const handler = getProcessor('project:delete');
+
+    const result = await handler({
+      id: 'action-project-delete-settlement-throw',
+      operationId: 'operation-project-delete-settlement-throw',
+      entityId: 'p-settlement-throw',
+      payload: {
+        projectId: 'p-settlement-throw',
+        userId: 'test-user',
+        sourceUserId: 'test-user',
+      },
+    } as QueuedAction);
+
+    expect(result).toEqual(expect.objectContaining({ outcome: 'defer-retry' }));
+    expect(mockRetryQueueService.removeByProjectIdDurablyForOwner).toHaveBeenCalledOnce();
+    expect(mockActionQueueService.markActionSyncedRemotely).not.toHaveBeenCalled();
   });
 
   it('project:delete should throw typed sync errors so queue can classify them', async () => {
@@ -407,117 +536,58 @@ describe('ActionQueueProcessorsService', () => {
     expect(mockSyncService.saveProjectSmart).not.toHaveBeenCalled();
   });
 
-  registerActionQueueProcessorsTaskSpecs();
-
-  // ── connection:create / update / delete ────────────────────
-
-  it('connection:create should call pushConnection with queued operationId', async () => {
-    const handler = getProcessor('connection:create');
-    const connection = { id: 'connection-create-1', source: 'task-a', target: 'task-b' };
-
-    const result = await handler({
-      id: 'action-connection-create',
-      operationId: 'op-connection-create',
-      payload: { connection, projectId: 'p-1', sourceUserId: 'test-user' },
-    } as QueuedAction);
-
-    expect(mockSyncService.pushConnection).toHaveBeenCalledWith(
-      connection,
-      'p-1',
-      false,
-      false,
-      false,
-      'test-user',
-      'op-connection-create',
-    );
-    expect(mockActionQueueService.markActionSyncedRemotely).toHaveBeenCalledWith('action-connection-create');
-    expect(result).toBe(true);
-  });
-
-  it('connection:delete should replay the queued tombstone with queued operationId', async () => {
-    const handler = getProcessor('connection:delete');
-    const connection = {
-      id: 'connection-delete-1',
-      source: 'task-a',
-      target: 'task-b',
-      deletedAt: '2026-06-13T00:00:00.000Z',
-    };
-
-    const result = await handler({
-      id: 'action-connection-delete',
-      operationId: 'op-connection-delete',
-      payload: { connection, projectId: 'p-1', sourceUserId: 'test-user' },
-    } as QueuedAction);
-
-    expect(mockSyncService.pushConnection).toHaveBeenCalledWith(
-      connection,
-      'p-1',
-      false,
-      false,
-      false,
-      'test-user',
-      'op-connection-delete',
-    );
-    expect(mockActionQueueService.markActionSyncedRemotely).toHaveBeenCalledWith('action-connection-delete');
-    expect(result).toBe(true);
-  });
-
-  it('connection:create should not complete handoff when RetryQueue operationId differs', async () => {
-    const handler = getProcessor('connection:create');
-    const connection = { id: 'connection-handoff-op-mismatch', source: 'task-a', target: 'task-b' };
-    mockSyncService.pushConnection.mockResolvedValueOnce(false);
-    mockRetryQueueService.findItemForOwner.mockReturnValueOnce({
-      type: 'connection',
-      operation: 'upsert',
-      data: connection,
-      projectId: 'project-1',
-      sourceUserId: 'test-user',
-      operationId: 'op-old-connection-handoff',
-    });
-
-    const result = await handler({
-      operationId: 'op-new-connection-handoff',
-      payload: { connection, projectId: 'project-1', sourceUserId: 'test-user' },
-    } as QueuedAction);
-
-    expect(result).toEqual(expect.objectContaining({ outcome: 'failed' }));
-    expect(mockActionQueueService.failRetry).toHaveBeenCalledWith(expect.objectContaining({
-      code: 'SYNC_CONNECTION_WRITE_FAILED',
-      details: expect.objectContaining({
-        connectionId: 'connection-handoff-op-mismatch',
-        projectId: 'project-1',
-      }),
-    }));
-  });
-
-  it('connection:create should not complete legacy handoff when RetryQueue has operationId', async () => {
-    const handler = getProcessor('connection:create');
-    const connection = { id: 'connection-legacy-handoff-op', source: 'task-a', target: 'task-b' };
-    mockSyncService.pushConnection.mockResolvedValueOnce(false);
-    mockRetryQueueService.findItemForOwner.mockReturnValueOnce({
-      type: 'connection',
-      operation: 'upsert',
-      data: connection,
-      projectId: 'project-1',
-      sourceUserId: 'test-user',
-      operationId: 'retry-op-connection-handoff',
-    });
-
-    const result = await handler({
-      payload: { connection, projectId: 'project-1', sourceUserId: 'test-user' },
-    } as QueuedAction);
-
-    expect(result).toEqual(expect.objectContaining({ outcome: 'failed' }));
-    expect(mockActionQueueService.failRetry).toHaveBeenCalledWith(expect.objectContaining({
-      code: 'SYNC_CONNECTION_WRITE_FAILED',
-      details: expect.objectContaining({
-        connectionId: 'connection-legacy-handoff-op',
-        projectId: 'project-1',
-      }),
-    }));
-  });
+  registerActionQueueConnectionProcessorSpecs();
 
   it('connection:update should persist remote-newer conflicts before resolving the ActionQueue item locally', async () => {
+    const taskA = {
+      id: 'task-a',
+      title: 'Task A',
+      content: 'Current task A content',
+      stage: null,
+      parentId: null,
+      order: 0,
+      rank: 0,
+      status: 'active' as const,
+      x: 0,
+      y: 0,
+      createdDate: '2026-06-25T00:00:00.000Z',
+      displayId: 'T1',
+    };
+    const taskB = {
+      ...taskA,
+      id: 'task-b',
+      title: 'Task B',
+      content: 'Current task B content',
+      order: 1,
+      rank: 1,
+      displayId: 'T2',
+    };
+    const localConnection = {
+      id: 'connection-remote-newer',
+      source: taskA.id,
+      target: taskB.id,
+      title: 'Local connection title',
+      updatedAt: '2026-06-25T00:00:00.000Z',
+    };
+    const concurrentConnection = {
+      id: 'connection-concurrent',
+      source: taskB.id,
+      target: taskA.id,
+      title: 'Connection only present in ConnectionStore',
+    };
+    const staleProjectShell = {
+      id: 'project-1',
+      name: 'Project',
+      description: '',
+      createdDate: '2026-06-25T00:00:00.000Z',
+      tasks: [{ ...taskA, content: 'Stale shell content' }],
+      connections: [],
+    };
+    const authoritativeProject = {
+      ...staleProjectShell,
+      tasks: [taskA, taskB],
+      connections: [{ ...localConnection, title: 'Previous local connection title' }, concurrentConnection],
+    };
     const remoteConnection = {
       id: 'connection-remote-newer',
       source: 'task-a',
@@ -533,36 +603,40 @@ describe('ActionQueueProcessorsService', () => {
         remoteUpdatedAt: remoteConnection.updatedAt,
       },
     });
-    mockSyncService.pushConnection.mockRejectedValueOnce(
-      new PermanentFailureError(
+    mockSyncService.pushConnectionFromActionQueue.mockResolvedValueOnce({
+      outcome: 'conflict',
+      error: new PermanentFailureError(
         'Version conflict',
         remoteNewerError,
         { operation: 'pushConnection', connectionId: 'connection-remote-newer', projectId: 'project-1' },
       ),
-    );
+    });
+    mockProjectStateService.getProject.mockReturnValue(staleProjectShell);
+    mockProjectStateService.getProjectWithCurrentData.mockReturnValueOnce(authoritativeProject);
     const handler = getProcessor('connection:update');
 
     const result = await handler({
       id: 'action-connection-remote-newer',
       operationId: 'op-connection-remote-newer',
+      type: 'update',
+      entityType: 'connection',
+      entityId: localConnection.id,
       payload: {
-        connection: {
-          id: 'connection-remote-newer',
-          source: 'task-a',
-          target: 'task-b',
-          title: 'Local connection title',
-          updatedAt: '2026-06-25T00:00:00.000Z',
-        },
+        connection: localConnection,
         projectId: 'project-1',
         sourceUserId: 'test-user',
       },
-    } as QueuedAction);
+    } as QueuedAction, { leaseSignal: new AbortController().signal });
 
     expect(result).toBe(true);
     expect(mockConflictStorageService.saveConflict).toHaveBeenCalledWith(expect.objectContaining({
       projectId: 'project-1',
       ownerUserId: 'test-user',
       reason: 'version_mismatch',
+      localProject: expect.objectContaining({
+        tasks: [taskA, taskB],
+        connections: [localConnection, concurrentConnection],
+      }),
       operationConflicts: [
         expect.objectContaining({
           actionId: 'action-connection-remote-newer',
@@ -577,10 +651,13 @@ describe('ActionQueueProcessorsService', () => {
         }),
       ],
     }));
+    expect(mockProjectStateService.getProjectWithCurrentData).toHaveBeenCalledWith('project-1');
     expect(mockActionQueueService.markActionResolvedWithoutRemote).toHaveBeenCalledWith('action-connection-remote-newer');
     expect(mockActionQueueService.failRetry).not.toHaveBeenCalled();
   });
 
+  registerActionQueueProcessorsFocusReplayFenceSpecs();
   registerActionQueueProcessorsOwnerPreferenceSpecs();
+  registerActionQueueProcessorsTaskReplayFenceSpecs();
 
 });

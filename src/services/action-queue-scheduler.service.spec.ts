@@ -221,6 +221,10 @@ describe('ActionQueueSchedulerService', () => {
 
     expect(runtime.clearRetryTimer).toHaveBeenCalledOnce();
     expect(runtime.scheduleRetry).toHaveBeenCalledWith(0);
+    expect(logger.debug).toHaveBeenCalledWith(
+      'ActionQueue scheduler runtime processQueue rejected',
+      expect.objectContaining({ reason: 'online' }),
+    );
     expect(logger.warn).toHaveBeenCalledWith(
       '队列处理触发失败，保留重试调度',
       expect.objectContaining({ reason: 'online', error: processError }),
@@ -433,6 +437,81 @@ describe('ActionQueueSchedulerService', () => {
     await flushMicrotasks();
 
     expect(processQueue).toHaveBeenCalledTimes(2);
+  });
+
+  it('emits distinguishable scheduler diagnostics for offline, hidden, suspended, coalesced, and accepted requests', async () => {
+    const hiddenRuntime = createRuntime();
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+    service.requestQueueProcessing('visibilitychange', hiddenRuntime);
+    expect(window.__NANOFLOW_STARTUP_TRACE__).toEqual(expect.arrayContaining([
+      expect.objectContaining({ event: 'action_queue.scheduler_decision', data: { reason: 'visibilitychange', decision: 'hidden' } }),
+    ]));
+    expect(logger.debug).toHaveBeenCalledWith(
+      'ActionQueue scheduler request',
+      expect.objectContaining({ reason: 'visibilitychange', decision: 'hidden' }),
+    );
+
+    const suspendedRuntime = createRuntime();
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+    vi.spyOn(Date, 'now').mockReturnValue(1000);
+    isBrowserNetworkSuspendedError(createBrowserNetworkSuspendedError());
+    service.requestQueueProcessing('online', suspendedRuntime);
+    expect(window.__NANOFLOW_STARTUP_TRACE__).toEqual(expect.arrayContaining([
+      expect.objectContaining({ event: 'action_queue.scheduler_decision', data: { reason: 'online', decision: 'suspended' } }),
+    ]));
+    expect(logger.debug).toHaveBeenCalledWith(
+      'ActionQueue scheduler request',
+      expect.objectContaining({ reason: 'online', decision: 'suspended' }),
+    );
+    expect(suspendedRuntime.processQueue).not.toHaveBeenCalled();
+    resetBrowserNetworkSuspensionTrackingForTests();
+
+    const offlineRuntime = createRuntime({ isOnline: () => false });
+    service.requestQueueProcessing('online', offlineRuntime);
+    expect(window.__NANOFLOW_STARTUP_TRACE__).toEqual(expect.arrayContaining([
+      expect.objectContaining({ event: 'action_queue.scheduler_decision', data: { reason: 'online', decision: 'offline' } }),
+    ]));
+    expect(logger.debug).toHaveBeenCalledWith(
+      'ActionQueue scheduler request',
+      expect.objectContaining({ reason: 'online', decision: 'offline' }),
+    );
+
+    const acceptedRuntime = createRuntime();
+    service.requestQueueProcessing('storage-event', acceptedRuntime);
+    expect(window.__NANOFLOW_STARTUP_TRACE__).toEqual(expect.arrayContaining([
+      expect.objectContaining({ event: 'action_queue.scheduler_decision', data: { reason: 'storage-event', decision: 'accepted' } }),
+      expect.objectContaining({ event: 'action_queue.scheduler_process_invoked', data: { reason: 'storage-event' } }),
+    ]));
+    expect(logger.debug).toHaveBeenCalledWith(
+      'ActionQueue scheduler request',
+      expect.objectContaining({ reason: 'storage-event', decision: 'accepted' }),
+    );
+    expect(logger.debug).toHaveBeenCalledWith(
+      'ActionQueue scheduler runtime processQueue invoked',
+      expect.objectContaining({ reason: 'storage-event', decision: 'accepted' }),
+    );
+    expect(acceptedRuntime.processQueue).toHaveBeenCalledTimes(1);
+    await Promise.resolve();
+    expect(window.__NANOFLOW_STARTUP_TRACE__).toEqual(expect.arrayContaining([
+      expect.objectContaining({ event: 'action_queue.scheduler_process_finished', data: { reason: 'storage-event' } }),
+    ]));
+    expect(logger.debug).toHaveBeenCalledWith(
+      'ActionQueue scheduler runtime processQueue resolved',
+      expect.objectContaining({ reason: 'storage-event' }),
+    );
+
+    const activeRuntime = createRuntime({
+      processQueue: vi.fn().mockImplementation(() => new Promise<void>(() => {})),
+    });
+    service.requestQueueProcessing('online', activeRuntime);
+    service.requestQueueProcessing('pageshow', activeRuntime);
+    expect(window.__NANOFLOW_STARTUP_TRACE__).toEqual(expect.arrayContaining([
+      expect.objectContaining({ event: 'action_queue.scheduler_decision', data: { reason: 'pageshow', decision: 'coalesced' } }),
+    ]));
+    expect(logger.debug).toHaveBeenCalledWith(
+      'ActionQueue scheduler request',
+      expect.objectContaining({ reason: 'pageshow', decision: 'coalesced' }),
+    );
   });
 
   it('coalesces event-triggered queue processing while a previous run is still active', async () => {

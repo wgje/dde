@@ -122,9 +122,7 @@ export function resetQueueBackupMocks(): void {
 }
 
 export async function flushQueueBackupRestore(): Promise<void> {
-  await Promise.resolve();
-  await Promise.resolve();
-  await Promise.resolve();
+  await new Promise<void>(resolve => setTimeout(resolve, 0));
 }
 
 export function createMockAction(overrides: Partial<QueuedAction> = {}): QueuedAction {

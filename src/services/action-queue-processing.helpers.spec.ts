@@ -90,4 +90,19 @@ describe('action-queue-processing.helpers', () => {
       entityKey: 'project:project-1',
     });
   });
+
+  it('durably held actions are skipped by queue processing until explicitly activated', () => {
+    const action = queuedAction({ syncState: 'held' as never });
+
+    expect(getQueuedActionSkipDecision({
+      action,
+      currentPendingActions: [action],
+      processQueueSnapshot: [action],
+      failedCreateEntities: new Set(),
+    })).toEqual({
+      shouldSkip: true,
+      reason: 'held',
+      entityKey: 'project:project-1',
+    });
+  });
 });

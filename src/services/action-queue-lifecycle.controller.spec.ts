@@ -121,6 +121,23 @@ describe('ActionQueueLifecycleController', () => {
     expect(lifecycle.markActionResolvedWithoutRemote('action-2')).toBe(false);
   });
 
+  it('stale token untrack should not remove a newer binding for the same action id', () => {
+    const lifecycle = new ActionQueueLifecycleController();
+    const staleToken = lifecycle.begin();
+    lifecycle.trackAction(staleToken, 'replayed-action');
+    lifecycle.releaseAll();
+
+    const currentToken = lifecycle.begin();
+    lifecycle.trackAction(currentToken, 'replayed-action');
+    lifecycle.untrackAction('replayed-action', staleToken);
+
+    expect(lifecycle.markActionSyncedRemotely('replayed-action')).toBe(true);
+    expect(lifecycle.getActionOutcomeCounts(currentToken)).toEqual({
+      remoteSuccessCount: 1,
+      resolvedNoOpCount: 0,
+    });
+  });
+
   it('隔离 lifecycle 回调异常，避免处理 token 卡在活动状态', () => {
     const lifecycle = new ActionQueueLifecycleController();
     let token = 0;

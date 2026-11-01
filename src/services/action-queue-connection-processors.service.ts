@@ -1,13 +1,10 @@
-import { Injectable, inject } from '@angular/core';
-import {
-  ConnectionSyncOperationsService,
-  RetryQueueService,
-} from '../core-bridge';
+import { Injectable, Injector, inject } from '@angular/core';
+import { ConnectionSyncOperationsService } from '../core-bridge';
 import { AUTH_CONFIG } from '../config/auth.config';
 import type { Connection, Project } from '../models';
 import { resolveRemoteVersionConflictEvidence } from './action-queue-operation-conflict.helpers';
 import { ActionQueueService, type ActionQueueProcessorResult } from './action-queue.service';
-import { retryOperationIdMatches } from './action-queue-retry-operation-id.helpers';
+import type { QueueProcessorContext } from './action-queue-processing.types';
 import type { QueueRetryError } from './action-queue-storage.service';
 import type { ConnectionPayload, QueuedAction } from './action-queue.types';
 import { AuthService } from './auth.service';
@@ -15,6 +12,7 @@ import { ConflictStorageService } from './conflict-storage.service';
 import { LoggerService } from './logger.service';
 import { ProjectStateService } from './project-state.service';
 import { ToastService } from './toast.service';
+import { UserSessionService } from './user-session.service';
 
 type ConnectionActionType = 'connection:create' | 'connection:update' | 'connection:delete';
 
@@ -23,24 +21,24 @@ export class ActionQueueConnectionProcessorsService {
   private readonly logger = inject(LoggerService).category('ActionQueueConnectionProcessors');
   private readonly actionQueue = inject(ActionQueueService);
   private readonly connectionSyncOps = inject(ConnectionSyncOperationsService);
-  private readonly retryQueue = inject(RetryQueueService);
   private readonly projectState = inject(ProjectStateService);
   private readonly authService = inject(AuthService);
   private readonly conflictStorage = inject(ConflictStorageService);
   private readonly toast = inject(ToastService);
+  private readonly injector = inject(Injector);
   private legacyQueueWarningShown = false;
 
   setupProcessors(): void {
-    this.actionQueue.registerProcessor('connection:create', async (action) => {
-      return this.processConnectionMutation(action, 'connection:create', 'create');
+    this.actionQueue.registerProcessor('connection:create', async (action, context?: QueueProcessorContext) => {
+      return this.processConnectionMutation(action, 'connection:create', 'create', context);
     });
 
-    this.actionQueue.registerProcessor('connection:update', async (action) => {
-      return this.processConnectionMutation(action, 'connection:update', 'update');
+    this.actionQueue.registerProcessor('connection:update', async (action, context?: QueueProcessorContext) => {
+      return this.processConnectionMutation(action, 'connection:update', 'update', context);
     });
 
-    this.actionQueue.registerProcessor('connection:delete', async (action) => {
-      return this.processConnectionMutation(action, 'connection:delete', 'delete');
+    this.actionQueue.registerProcessor('connection:delete', async (action, context?: QueueProcessorContext) => {
+      return this.processConnectionMutation(action, 'connection:delete', 'delete', context);
     });
   }
 
@@ -48,8 +46,16 @@ export class ActionQueueConnectionProcessorsService {
     action: QueuedAction,
     actionType: ConnectionActionType,
     mutationType: 'create' | 'update' | 'delete',
+    processorContext?: QueueProcessorContext,
   ): Promise<ActionQueueProcessorResult> {
     const payload = action.payload as ConnectionPayload;
+    const leaseSignal = processorContext?.leaseSignal;
+    if (!leaseSignal || leaseSignal.aborted) {
+      return this.actionQueue.deferRetry(
+        this.buildConnectionSyncRetryError(actionType, payload.connection.id, payload.projectId),
+      );
+    }
+
     const userId = this.authService.currentUserId();
     if (!userId) {
       this.logger.warn(`${actionType} 延后：用户认证状态尚未就绪`);
@@ -60,8 +66,17 @@ export class ActionQueueConnectionProcessorsService {
       return true;
     }
 
+    const isFenceCurrent = this.createConnectionReplayFence(
+      action, payload, userId, leaseSignal,
+    );
+    if (!isFenceCurrent()) {
+      return this.actionQueue.deferRetry(
+        this.buildConnectionSyncRetryError(actionType, payload.connection.id, payload.projectId),
+      );
+    }
+
     try {
-      return await this.flushConnectionMutation(action, payload, actionType);
+      return await this.flushConnectionMutation(action, payload, actionType, leaseSignal, isFenceCurrent);
     } catch (error) {
       if (await this.persistConnectionOperationConflict(action, payload, actionType, error)) {
         this.actionQueue.markActionResolvedWithoutRemote(action.id);
@@ -131,7 +146,7 @@ export class ActionQueueConnectionProcessorsService {
   }
 
   private buildConnectionConflictProject(payload: ConnectionPayload): Project {
-    const currentProject = this.projectState.getProject(payload.projectId);
+    const currentProject = this.projectState.getProjectWithCurrentData(payload.projectId);
     if (currentProject) {
       return {
         ...currentProject,
@@ -172,72 +187,47 @@ export class ActionQueueConnectionProcessorsService {
     action: QueuedAction,
     payload: ConnectionPayload,
     actionType: ConnectionActionType,
+    leaseSignal: AbortSignal,
+    isFenceCurrent: () => boolean,
   ): Promise<ActionQueueProcessorResult> {
-    const success = await this.connectionSyncOps.pushConnection(
-      payload.connection,
-      payload.projectId,
-      false,
-      false,
-      false,
-      payload.sourceUserId,
-      action.operationId,
-    );
-    if (success) {
+    const result = await this.connectionSyncOps.pushConnectionFromActionQueue({
+      actionId: action.id,
+      actionOperationId: action.operationId ?? '',
+      connection: payload.connection,
+      projectId: payload.projectId,
+      sourceUserId: payload.sourceUserId ?? '',
+      leaseSignal,
+      isFenceCurrent,
+    });
+    if (!isFenceCurrent()) return this.deferConnectionReplay(actionType, payload);
+    if (result.outcome === 'applied') {
       this.actionQueue.markActionSyncedRemotely(action.id);
       return true;
     }
-
-    if (this.wasConnectionTransferredToRetryQueue(payload, action.operationId)) {
+    if (result.outcome === 'handoff') {
       this.logger.info(`${actionType} 已转交 RetryQueue，当前 ActionQueue 项视为完成`, {
         connectionId: payload.connection.id,
         projectId: payload.projectId,
       });
       return true;
     }
+    if (result.outcome === 'conflict'
+      && await this.persistConnectionOperationConflict(action, payload, actionType, result.error)
+      && isFenceCurrent()) {
+      this.actionQueue.markActionResolvedWithoutRemote(action.id);
+      this.toast.warning('检测到连接同步冲突', '本地连接修改已转入冲突中心等待处理');
+      return true;
+    }
+    return this.deferConnectionReplay(actionType, payload);
+  }
 
-    return this.actionQueue.failRetry(
+  private deferConnectionReplay(
+    actionType: ConnectionActionType,
+    payload: ConnectionPayload,
+  ): ActionQueueProcessorResult {
+    return this.actionQueue.deferRetry(
       this.buildConnectionSyncRetryError(actionType, payload.connection.id, payload.projectId),
     );
-  }
-
-  private wasConnectionTransferredToRetryQueue(payload: ConnectionPayload, operationId?: string): boolean {
-    const retryItem = this.retryQueue.findItemForOwner(
-      'connection',
-      payload.connection.id,
-      this.resolveQueueOwnerUserId(payload.sourceUserId),
-    ) as {
-      operation?: unknown;
-      projectId?: unknown;
-      data?: unknown;
-      sourceUserId?: unknown;
-      operationId?: unknown;
-    } | undefined;
-    if (!retryItem || retryItem.projectId !== payload.projectId) {
-      return false;
-    }
-
-    if (retryItem.operation !== 'upsert' && retryItem.operation !== 'delete') {
-      return false;
-    }
-
-    if (!retryOperationIdMatches(retryItem, operationId)) {
-      return false;
-    }
-
-    return this.buildConnectionRetryPayloadSignature(retryItem.data, retryItem.projectId, retryItem.sourceUserId)
-      === this.buildConnectionRetryPayloadSignature(payload.connection, payload.projectId, payload.sourceUserId);
-  }
-
-  private buildConnectionRetryPayloadSignature(
-    connection: unknown,
-    projectId: unknown,
-    sourceUserId: unknown,
-  ): string {
-    return JSON.stringify({
-      connection,
-      projectId: typeof projectId === 'string' ? projectId : null,
-      sourceUserId: typeof sourceUserId === 'string' ? sourceUserId : null,
-    });
   }
 
   private shouldStopConnectionMutation(
@@ -290,10 +280,51 @@ export class ActionQueueConnectionProcessorsService {
     return false;
   }
 
-  private resolveQueueOwnerUserId(sourceUserId?: string | null): string {
-    return (typeof sourceUserId === 'string' && sourceUserId.length > 0)
-      ? sourceUserId
-      : this.authService.currentUserId() ?? AUTH_CONFIG.LOCAL_MODE_USER_ID;
+  private createConnectionReplayFence(
+    action: QueuedAction,
+    payload: ConnectionPayload,
+    ownerUserId: string,
+    leaseSignal: AbortSignal,
+  ): () => boolean {
+    const actionId = action.id;
+    const operationId = action.operationId;
+    const payloadSignature = this.connectionSyncOps.buildActionQueueReplayPayloadSignature(
+      payload.connection,
+      payload.projectId,
+      payload.sourceUserId,
+    );
+    const queueGeneration = this.actionQueue.getCurrentQueueViewGeneration();
+    const projectGeneration = this.actionQueue.getProjectMutationViewGeneration(
+      payload.projectId,
+      ownerUserId,
+    );
+    const sessionGeneration = this.resolveUserSession()?.getCurrentSessionGeneration() ?? -1;
+    const authFence = this.authService.captureAuthIdentityFence();
+    return () => !leaseSignal.aborted
+      && action.id === actionId
+      && action.operationId === operationId
+      && action.entityType === 'connection'
+      && action.entityId === payload.connection.id
+      && typeof actionId === 'string'
+      && actionId.length > 0
+      && typeof operationId === 'string'
+      && operationId.length > 0
+      && payload.sourceUserId === ownerUserId
+      && payloadSignature === this.connectionSyncOps.buildActionQueueReplayPayloadSignature(
+        payload.connection,
+        payload.projectId,
+        payload.sourceUserId,
+      )
+      && this.authService.currentUserId() === ownerUserId
+      && this.authService.captureAuthIdentityFence() === authFence
+      && this.resolveUserSession()?.isSessionContextCurrent(sessionGeneration, ownerUserId) === true
+      && this.actionQueue.isQueueViewCurrent(queueGeneration, ownerUserId)
+      && this.actionQueue.getProjectMutationViewGeneration(payload.projectId, ownerUserId)
+        === projectGeneration;
+  }
+
+  private resolveUserSession(): UserSessionService | null {
+    return this.injector.get(UserSessionService, null);
   }
 
   private buildAuthPendingRetryError(actionType: string, connectionId: string): QueueRetryError {

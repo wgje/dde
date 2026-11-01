@@ -10,6 +10,7 @@ import {
   isBrowserSuspensionError as isBrowserSuspensionErrorPure,
   isPartialRetryHandoffError as isPartialRetryHandoffErrorPure,
   isRateLimitRetryError as isRateLimitRetryErrorPure,
+  isServerPressureRetryError as isServerPressureRetryErrorPure,
   isSyncRpcCapabilityRetryError as isSyncRpcCapabilityRetryErrorPure,
   normalizeRetryError as normalizeRetryErrorPure,
 } from './action-queue-retry-serialization';
@@ -125,17 +126,35 @@ const QUEUE_RETRY_ERROR_KEYWORDS: ReadonlyArray<{
   },
 ];
 
+const STRUCTURED_TERMINAL_BUSINESS_REASONS = new Set([
+  'stale-payload-preserved-remotely',
+  'operation_id_payload_mismatch',
+]);
+
 function includesAnyKeyword(message: string, keywords: readonly string[]): boolean {
   return keywords.some(keyword => message.includes(keyword));
 }
 
+function isStructuredTerminalBusinessError(error: QueueRetryError): boolean {
+  const reason = error.details?.['reason'];
+  const rpcReason = error.details?.['rpcReason'];
+  return [reason, rpcReason].some(value =>
+    typeof value === 'string' && STRUCTURED_TERMINAL_BUSINESS_REASONS.has(value)
+  );
+}
+
 export function classifyQueueRetryError(error: string | QueueRetryError): QueueRetryErrorClassification {
   const normalizedError = normalizeRetryErrorPure(error);
+  if (isStructuredTerminalBusinessError(normalizedError)) {
+    return 'business';
+  }
+
   if (
     isBrowserSuspensionErrorPure(normalizedError)
     || isPartialRetryHandoffErrorPure(normalizedError)
     || isAuthPendingRetryErrorPure(normalizedError)
     || isRateLimitRetryErrorPure(normalizedError)
+    || isServerPressureRetryErrorPure(normalizedError)
     || isSyncRpcCapabilityRetryErrorPure(normalizedError)
   ) {
     return 'deferred';

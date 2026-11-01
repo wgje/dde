@@ -1,7 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import type { Task } from '../models';
-import type { ActionQueueService, EnqueueParams, TaskPayload } from './action-queue.service';
+import type {
+  ActionQueueService,
+  EnqueueParams,
+  ProjectDeletePayload,
+  TaskPayload,
+} from './action-queue.service';
 
 export interface ActionQueueOutboxStateSpecContext {
   service: () => ActionQueueService;
@@ -177,6 +182,32 @@ export function registerActionQueueOutboxStateSpecs(context: ActionQueueOutboxSt
       service.reloadFromStorageForCurrentOwner();
 
       expect(service.pendingActions()[0].operationId).toBe(originalOperationId);
+    });
+
+    it('项目删除从持久化恢复时应保留创建删除意图时的 baseUpdatedAt', () => {
+      const service = context.service();
+      context.setNetworkStatus(false);
+      const operationId = '11111111-1111-4111-8111-111111111111';
+      service.enqueue({
+        operationId,
+        type: 'delete',
+        entityType: 'project',
+        entityId: 'project-delete-durable-baseline',
+        payload: {
+          projectId: 'project-delete-durable-baseline',
+          userId: 'test-user',
+          sourceUserId: 'test-user',
+          baseUpdatedAt: '2026-07-14T01:00:00.000Z',
+        },
+      });
+
+      service.clearCurrentView();
+      service.reloadFromStorageForCurrentOwner();
+
+      const [restored] = service.pendingActions();
+      expect(restored.operationId).toBe(operationId);
+      expect((restored.payload as ProjectDeletePayload).baseUpdatedAt)
+        .toBe('2026-07-14T01:00:00.000Z');
     });
   });
 

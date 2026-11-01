@@ -5,6 +5,7 @@ import {
 } from './action-queue-outbox-normalization.helpers';
 
 const RESTORABLE_SYNC_STATES = new Set<OutboxSyncState>([
+  'held',
   'retry_scheduled',
   'conflict_detected',
   'conflict_saved',
@@ -219,6 +220,8 @@ function getQueuedActionPreservationScore(action: QueuedAction): number {
 
 function getSyncStatePreservationRank(syncState: OutboxSyncState | undefined): number {
   switch (syncState) {
+    case 'held':
+      return 110;
     case 'conflict_saved':
       return 100;
     case 'conflict_detected':
