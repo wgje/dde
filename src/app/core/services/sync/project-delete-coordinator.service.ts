@@ -168,6 +168,7 @@ export class ProjectDeleteCoordinatorService {
     projectId: string,
     userId: string,
     operationId: string,
+    baseUpdatedAt: string | null,
   ): Promise<Result<void, OperationError>> {
     const sessionUserId = await this.resolveProjectDeleteSessionUserId(client);
 
@@ -195,7 +196,7 @@ export class ProjectDeleteCoordinatorService {
     }
 
     if (this.shouldUseSyncRpc()) {
-      return await this.deleteProjectWithSyncRpc(projectId, userId, operationId);
+      return await this.deleteProjectWithSyncRpc(projectId, userId, operationId, baseUpdatedAt);
     }
 
     return this.buildProjectDeleteSyncRpcUnavailableFailure(projectId, userId, operationId);
@@ -246,10 +247,27 @@ export class ProjectDeleteCoordinatorService {
     projectId: string,
     userId: string,
     operationId: string,
+    baseUpdatedAt: string | null,
   ): Promise<Result<void, OperationError>> {
+    if (baseUpdatedAt === null) {
+      const message = '项目删除缺少已确认的远端版本，已保留删除意图等待人工处理';
+      this.syncStateService.setSyncError(message);
+      this.logger.warn('deleteProjectFromCloud: 缺少 baseUpdatedAt，已拒绝危险的无条件远端删除', {
+        projectId,
+        userId,
+        operationId,
+      });
+      return failure(ErrorCodes.SYNC_CONFLICT, message, {
+        projectId,
+        userId,
+        operationId,
+        retryable: false,
+        reason: 'missing_base_updated_at',
+      });
+    }
+
     const localTimestamp = Date.now();
     const lastSyncTimeBefore = this.syncState().lastSyncTime;
-    const baseUpdatedAt = this.projectStore?.getProject(projectId)?.updatedAt ?? null;
     const result = await this.syncRpcClient!.deleteProject({
       operationId,
       projectId,
@@ -354,10 +372,20 @@ export class ProjectDeleteCoordinatorService {
     );
   }
 
+  private resolveProjectDeleteBaseUpdatedAt(
+    projectId: string,
+    durableBaseUpdatedAt: string | null | undefined,
+  ): string | null {
+    return durableBaseUpdatedAt === undefined
+      ? this.projectStore?.getProject(projectId)?.updatedAt ?? null
+      : durableBaseUpdatedAt;
+  }
+
   async deleteProjectFromCloud(
     projectId: string,
     userId: string,
     operationId?: string,
+    durableBaseUpdatedAt?: string | null,
   ): Promise<Result<void, OperationError>> {
     if (operationId === undefined) {
       return this.buildProjectDeleteMissingOperationIdFailure(projectId, userId);
@@ -374,6 +402,8 @@ export class ProjectDeleteCoordinatorService {
       return this.buildProjectDeleteBrowserSuspendedFailure(projectId, userId);
     }
 
+    const baseUpdatedAt = this.resolveProjectDeleteBaseUpdatedAt(projectId, durableBaseUpdatedAt);
+
     const client = this.getSupabaseClientHandler ? await this.getSupabaseClientHandler() : null;
     if (!client) {
       return this.buildProjectDeleteRetryableFailure('当前离线，删除将在恢复连接后重试', {
@@ -384,7 +414,7 @@ export class ProjectDeleteCoordinatorService {
     }
 
     try {
-      return await this.executeProjectDelete(client, projectId, userId, operationId);
+      return await this.executeProjectDelete(client, projectId, userId, operationId, baseUpdatedAt);
     } catch (e) {
       if (isBrowserNetworkSuspendedError(e)) {
         return this.buildProjectDeleteBrowserSuspendedFailure(projectId, userId);
@@ -393,7 +423,14 @@ export class ProjectDeleteCoordinatorService {
       const enhanced = supabaseErrorToError(e);
 
       if (this.sessionManager.isSessionExpiredError(enhanced)) {
-        return await this.handleProjectDeleteAuthError(client, projectId, userId, enhanced.code, operationId);
+        return await this.handleProjectDeleteAuthError(
+          client,
+          projectId,
+          userId,
+          enhanced.code,
+          operationId,
+          baseUpdatedAt,
+        );
       }
 
       if (enhanced.errorType === 'PermissionError') {
@@ -410,6 +447,7 @@ export class ProjectDeleteCoordinatorService {
     userId: string,
     errorCode: unknown,
     operationId: string,
+    baseUpdatedAt: string | null,
   ): Promise<Result<void, OperationError>> {
     const canRetry = await this.sessionManager.handleAuthErrorWithRefresh('deleteProjectFromCloud', {
       projectId,
@@ -425,7 +463,7 @@ export class ProjectDeleteCoordinatorService {
     }
 
     try {
-      return await this.executeProjectDelete(client, projectId, userId, operationId);
+      return await this.executeProjectDelete(client, projectId, userId, operationId, baseUpdatedAt);
     } catch (retryError) {
       return this.handleProjectDeleteRetryAfterRefreshError(projectId, userId, retryError);
     }

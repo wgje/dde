@@ -707,6 +707,7 @@ export class SyncCoordinatorService {
     ownerUserId?: string | null,
     pendingTaskDeleteIds?: string[],
     pendingTaskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap,
+    isCurrent?: () => boolean,
   ): Promise<void> {
     await this.conflictCoordinator.captureConflict(
       localProject,
@@ -714,6 +715,7 @@ export class SyncCoordinatorService {
       ownerUserId,
       pendingTaskDeleteIds,
       pendingTaskDeleteBaseUpdatedAtMap,
+      isCurrent,
     );
   }
 

@@ -21,6 +21,8 @@ import {
   isBrowserNetworkSuspendedWindow,
 } from '../../../../utils/browser-network-suspension';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { UserPreferencesBaselineStore } from '../../../../services/user-preferences-baseline.store';
+import type { QueueProcessorContext } from '../../../../services/action-queue-processing.types';
 
 @Injectable({
   providedIn: 'root'
@@ -31,6 +33,7 @@ export class UserPreferencesSyncService {
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('UserPrefsSync');
   private readonly dataSafetyWriteAudit = new DataSafetyWriteAuditService();
+  private readonly baselineStore = inject(UserPreferencesBaselineStore);
 
   private shouldDeferForBrowserSuspension(
     operation: '加载' | '保存',
@@ -98,17 +101,6 @@ export class UserPreferencesSyncService {
       && !this.syncRpc.isClientRejected();
   }
 
-  private resolvePreferencesUpdatedAtBaseline(preferences: Partial<UserPreferences>): string | null {
-    const focusUpdatedAt = preferences.focusPreferences?.updatedAt;
-    if (typeof focusUpdatedAt === 'string' && focusUpdatedAt.length > 0) {
-      return focusUpdatedAt;
-    }
-    if (typeof preferences.lastBackupProofAt === 'string' && preferences.lastBackupProofAt.length > 0) {
-      return preferences.lastBackupProofAt;
-    }
-    return null;
-  }
-
   private recordUserPreferencesRpcWriteAudit(input: {
     operationId: string;
     userId: string;
@@ -164,12 +156,13 @@ export class UserPreferencesSyncService {
     try {
       const { data, error } = await client
         .from('user_preferences')
-        .select('theme,layout_direction,floating_window_pref,color_mode,auto_resolve_conflicts,local_backup_enabled,local_backup_interval_ms,last_backup_proof_at,focus_preferences')
+        .select('theme,layout_direction,floating_window_pref,color_mode,auto_resolve_conflicts,local_backup_enabled,local_backup_interval_ms,last_backup_proof_at,focus_preferences,updated_at')
         .eq('user_id', userId)
         .maybeSingle();
       
       if (error) throw supabaseErrorToError(error);
       if (!data) return null;
+      await this.persistConfirmedBaseline(userId, data.updated_at);
       
       // 解析 focusPreferences（JSONB → 领域模型）
       const focusPreferences = this.parseFocusPreferences(data.focus_preferences);
@@ -206,7 +199,10 @@ export class UserPreferencesSyncService {
     userId: string,
     preferences: Partial<UserPreferences>,
     operationId?: string,
+    baseUpdatedAt?: string | null,
+    replayContext?: QueueProcessorContext,
   ): Promise<boolean> {
+    if (!this.isReplayCurrent(replayContext)) return false;
     if (this.shouldDeferForBrowserSuspension('保存', userId)) {
       return false;
     }
@@ -216,7 +212,13 @@ export class UserPreferencesSyncService {
       const hasOperationId = typeof operationId === 'string' && operationId.length > 0;
 
       if (hasOperationId && this.canUseSyncRpc()) {
-        return await this.saveUserPreferencesViaSyncRpc(userId, normalizedPreferences, operationId);
+        return await this.saveUserPreferencesViaSyncRpc(
+          userId,
+          normalizedPreferences,
+          operationId,
+          baseUpdatedAt,
+          replayContext,
+        );
       }
 
       this.logger.warn('保存用户偏好跳过 legacy upsert：缺少可用 Sync RPC，保留本地队列等待重试', {
@@ -228,6 +230,7 @@ export class UserPreferencesSyncService {
       });
       return false;
     } catch (e) {
+      if (!this.isReplayCurrent(replayContext)) return false;
       if (this.shouldDeferForBrowserSuspension('保存', userId, e)) {
         return false;
       }
@@ -241,15 +244,81 @@ export class UserPreferencesSyncService {
     userId: string,
     preferences: Partial<UserPreferences>,
     operationId: string,
+    baseUpdatedAt: string | null | undefined,
+    replayContext?: QueueProcessorContext,
   ): Promise<boolean> {
     const localTimestamp = Date.now();
-    const updatedAtBaseline = this.resolvePreferencesUpdatedAtBaseline(preferences);
+    if (!this.isReplayCurrent(replayContext)) return false;
+    let updatedAtBaseline = baseUpdatedAt;
+    if (updatedAtBaseline === undefined) {
+      updatedAtBaseline = await this.baselineStore.read(userId);
+      if (!this.isReplayCurrent(replayContext)) return false;
+    }
+    if (!this.isReplayCurrent(replayContext)) return false;
     const result = await this.syncRpc.upsertUserPreferences({
       operationId,
       userId,
       baseUpdatedAt: updatedAtBaseline,
       preferences,
+      abortSignal: replayContext?.leaseSignal,
+      isCurrent: replayContext?.isCurrent,
     });
+    if (!this.isReplayCurrent(replayContext)) return false;
+    if (result.status === 'applied' || result.status === 'idempotent-replay') {
+      if (!await this.persistReplayBaseline(
+        userId, operationId, result.serverUpdatedAt, replayContext,
+      )) return false;
+      if (!this.isReplayCurrent(replayContext)) return false;
+      this.recordReplayAudit(
+        operationId, userId, preferences, result, localTimestamp, updatedAtBaseline,
+      );
+      if (!this.isReplayCurrent(replayContext)) return false;
+      return true;
+    }
+    if (!this.isReplayCurrent(replayContext)) return false;
+    this.recordReplayAudit(
+      operationId, userId, preferences, result, localTimestamp, updatedAtBaseline,
+    );
+    if (!this.isReplayCurrent(replayContext)) return false;
+    this.logger.warn(`保存用户偏好 RPC 未应用：${result.status}`, {
+      userId,
+      operationId,
+      reason: result.reason,
+    });
+    return false;
+  }
+
+  private async persistReplayBaseline(
+    userId: string,
+    operationId: string,
+    serverUpdatedAt: string | undefined,
+    replayContext?: QueueProcessorContext,
+  ): Promise<boolean> {
+    if (!serverUpdatedAt) return this.isReplayCurrent(replayContext);
+    try {
+      if (!this.isReplayCurrent(replayContext)) return false;
+      await this.baselineStore.save(userId, serverUpdatedAt);
+      return this.isReplayCurrent(replayContext);
+    } catch (error) {
+      if (!this.isReplayCurrent(replayContext)) return false;
+      this.logger.error('偏好 RPC 已应用但新 baseline 本地持久化失败，保留队列等待幂等重放', {
+        userId,
+        operationId,
+        serverUpdatedAt,
+        error,
+      });
+      return false;
+    }
+  }
+
+  private recordReplayAudit(
+    operationId: string,
+    userId: string,
+    preferences: Partial<UserPreferences>,
+    result: SyncRpcResult,
+    localTimestamp: number,
+    updatedAtBaseline: string | null,
+  ): void {
     this.recordUserPreferencesRpcWriteAudit({
       operationId,
       userId,
@@ -258,14 +327,27 @@ export class UserPreferencesSyncService {
       localTimestamp,
       updatedAtBaseline,
     });
-    if (result.status === 'applied' || result.status === 'idempotent-replay') {
-      return true;
+  }
+
+  private isReplayCurrent(context?: QueueProcessorContext): boolean {
+    return context === undefined
+      || (context.leaseSignal !== undefined
+        && !context.leaseSignal.aborted
+        && context.isCurrent?.() === true);
+  }
+
+  private async persistConfirmedBaseline(userId: string, updatedAt: unknown): Promise<void> {
+    if (typeof updatedAt !== 'string' || updatedAt.length === 0) {
+      return;
     }
-    this.logger.warn(`保存用户偏好 RPC 未应用：${result.status}`, {
-      userId,
-      operationId,
-      reason: result.reason,
-    });
-    return false;
+    try {
+      await this.baselineStore.save(userId, updatedAt);
+    } catch (error) {
+      this.logger.warn('云端偏好已加载，但 confirmed baseline 持久化失败', {
+        userId,
+        updatedAt,
+        error,
+      });
+    }
   }
 }

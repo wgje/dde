@@ -68,7 +68,9 @@ export class SyncCoordinatorConflictService {
     ownerUserId?: string | null,
     pendingTaskDeleteIds?: string[],
     pendingTaskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap,
+    isCurrent?: () => boolean,
   ): Promise<void> {
+    if (isCurrent?.() === false) return;
     const activeConflict = this.syncStateService.syncState().conflictData;
     if (this.isDuplicateActiveConflict(
       activeConflict,
@@ -87,6 +89,7 @@ export class SyncCoordinatorConflictService {
           pendingTaskDeleteBaseUpdatedAtMap,
           activeConflict?.conflictedAt,
         );
+        if (isCurrent?.() === false) return;
       } catch (error) {
         this.logger.warn('保存重复冲突隔离区记录失败', { error, projectId: localProject.id });
       }
@@ -100,18 +103,21 @@ export class SyncCoordinatorConflictService {
       ownerUserId,
       pendingTaskDeleteIds,
       pendingTaskDeleteBaseUpdatedAtMap,
+      isCurrent,
     );
   }
 
-  private publishNewConflict(
+  private async publishNewConflict(
     localProject: Project,
     remoteProject: Project,
     ownerUserId: string | null | undefined,
     pendingTaskDeleteIds: string[] | undefined,
     pendingTaskDeleteBaseUpdatedAtMap: TaskDeleteBaseUpdatedAtMap | undefined,
+    isCurrent?: () => boolean,
   ): Promise<void> {
+    if (isCurrent?.() === false) return;
     const conflictedAt = new Date().toISOString();
-    return this.saveConflictSilently(
+    await this.saveConflictSilently(
       localProject,
       remoteProject,
       [],
@@ -123,6 +129,7 @@ export class SyncCoordinatorConflictService {
       this.logger.warn('保存冲突隔离区记录失败', { error, projectId: localProject.id });
       return false;
     }).then(saved => {
+      if (isCurrent?.() === false) return;
       if (!saved) {
         this.logger.warn('冲突隔离区记录未持久化，跳过 active conflict 发布以避免刷新后丢失双方数据', {
           projectId: localProject.id,
@@ -225,7 +232,9 @@ export class SyncCoordinatorConflictService {
     ownerUserId?: string | null,
     pendingTaskDeleteIds?: string[],
     pendingTaskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap,
+    isCurrent?: () => boolean,
   ): Promise<void> {
+    if (isCurrent?.() === false) return;
     if (remoteProject) {
       await this.publishConflict(
         localProject,
@@ -233,10 +242,12 @@ export class SyncCoordinatorConflictService {
         ownerUserId,
         pendingTaskDeleteIds,
         pendingTaskDeleteBaseUpdatedAtMap,
+        isCurrent,
       );
       return;
     }
 
+    if (isCurrent?.() === false) return;
     await this.saveConflictSilently(
       localProject,
       undefined,

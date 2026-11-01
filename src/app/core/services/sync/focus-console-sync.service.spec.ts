@@ -8,6 +8,10 @@ import { SessionManagerService } from './session-manager.service';
 import { SyncRpcClientService } from '../../../../services/sync-rpc-client.service';
 import { DataSafetyAuditPersistence } from '../../../../services/data-safety-audit-persistence';
 import {
+  SessionRuntimeResetRegistry,
+  type SessionRuntimeResetReason,
+} from '../../../../services/session-runtime-reset.service';
+import {
   ensureBrowserNetworkSuspensionTracking,
   resetBrowserNetworkSuspensionTrackingForTests,
 } from '../../../../utils/browser-network-suspension';
@@ -15,6 +19,7 @@ import { registerFocusConsoleRoutineSyncSpecs } from './focus-console-sync.servi
 
 describe('FocusConsoleSyncService', () => {
   let service: FocusConsoleSyncService;
+  let sessionResetCallback: ((reason: SessionRuntimeResetReason) => void) | null;
   const mockClient = {
     from: vi.fn(),
     rpc: vi.fn(),
@@ -66,6 +71,14 @@ describe('FocusConsoleSyncService', () => {
     category: vi.fn(() => mockLoggerCategory),
   };
 
+  const mockSessionRuntimeReset = {
+    register: vi.fn((_owner: string, reset: (reason: SessionRuntimeResetReason) => void) => {
+      sessionResetCallback = reset;
+      return vi.fn();
+    }),
+    resetAll: vi.fn((reason: SessionRuntimeResetReason) => sessionResetCallback?.(reason)),
+  };
+
   const setVisibilityState = (state: DocumentVisibilityState): void => {
     Object.defineProperty(document, 'visibilityState', {
       configurable: true,
@@ -75,6 +88,7 @@ describe('FocusConsoleSyncService', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    sessionResetCallback = null;
     mockClient.from.mockReset();
     mockClient.rpc.mockReset();
     mockSupabaseClientService.client.mockClear();
@@ -84,6 +98,11 @@ describe('FocusConsoleSyncService', () => {
     mockAuthService.authState.mockClear();
     mockAuthService.runtimeState.mockClear();
     mockAuthService.peekPersistedSessionIdentity.mockClear();
+    mockAuthService.currentUserId.mockReturnValue('user-1');
+    mockAuthService.sessionInitialized.mockReturnValue(true);
+    mockAuthService.authState.mockReturnValue({ isCheckingSession: false });
+    mockAuthService.runtimeState.mockReturnValue('ready');
+    mockAuthService.peekPersistedSessionIdentity.mockReturnValue({ userId: 'user-1' });
     mockSessionManager.isSessionExpiredError.mockClear();
     mockSessionManager.tryRefreshSessionWithSession.mockClear();
     mockSyncRpc.isFeatureEnabled.mockReturnValue(true);
@@ -113,6 +132,7 @@ describe('FocusConsoleSyncService', () => {
         { provide: SessionManagerService, useValue: mockSessionManager },
         { provide: LoggerService, useValue: mockLogger },
         { provide: SyncRpcClientService, useValue: mockSyncRpc },
+        { provide: SessionRuntimeResetRegistry, useValue: mockSessionRuntimeReset },
       ],
     });
 
@@ -186,6 +206,165 @@ describe('FocusConsoleSyncService', () => {
     await expect(first).resolves.toEqual({ ok: true, value: null });
     await expect(second).resolves.toEqual({ ok: true, value: null });
     expect(maybeSingle).toHaveBeenCalledTimes(1);
+  });
+
+  it('loadFocusSession should not reuse an inflight result across different LWW baselines', async () => {
+    const maybeSingle = vi.fn().mockResolvedValue({
+      data: {
+        id: 'session-lww',
+        user_id: 'user-1',
+        started_at: '2026-03-03T00:00:00.000Z',
+        ended_at: null,
+        updated_at: '2026-03-03T10:00:00.000Z',
+        session_state: { version: 6, entries: [] },
+      },
+      error: null,
+    });
+    const limit = vi.fn(() => ({ maybeSingle }));
+    const order = vi.fn(() => ({ limit }));
+    const eq = vi.fn(() => ({ order }));
+    const select = vi.fn(() => ({ eq }));
+    mockClient.from.mockReturnValue({ select });
+
+    const [olderBaseline, newerBaseline] = await Promise.all([
+      service.loadFocusSession('user-1', '2026-03-03T09:00:00.000Z'),
+      service.loadFocusSession('user-1', '2026-03-03T11:00:00.000Z'),
+    ]);
+
+    expect(olderBaseline.ok && olderBaseline.value).not.toBeNull();
+    expect(newerBaseline).toEqual({ ok: true, value: null });
+    expect(maybeSingle).toHaveBeenCalledTimes(2);
+  });
+
+  it('loadFocusSession should discard a remote result after the session owner changes', async () => {
+    let resolveMaybeSingle!: (value: {
+      data: {
+        id: string;
+        user_id: string;
+        started_at: string;
+        ended_at: null;
+        updated_at: string;
+        session_state: { version: number; entries: never[] };
+      };
+      error: null;
+    }) => void;
+    const maybeSingle = vi.fn(() => new Promise<{
+      data: {
+        id: string;
+        user_id: string;
+        started_at: string;
+        ended_at: null;
+        updated_at: string;
+        session_state: { version: number; entries: never[] };
+      };
+      error: null;
+    }>(resolve => {
+      resolveMaybeSingle = resolve;
+    }));
+    const limit = vi.fn(() => ({ maybeSingle }));
+    const order = vi.fn(() => ({ limit }));
+    const eq = vi.fn(() => ({ order }));
+    const select = vi.fn(() => ({ eq }));
+    mockClient.from.mockReturnValue({ select });
+
+    const pending = service.loadFocusSession('user-1');
+    mockAuthService.currentUserId.mockReturnValue('user-2');
+    resolveMaybeSingle({
+      data: {
+        id: 'session-old-owner',
+        user_id: 'user-1',
+        started_at: '2026-03-03T00:00:00.000Z',
+        ended_at: null,
+        updated_at: '2026-03-03T10:00:00.000Z',
+        session_state: { version: 6, entries: [] },
+      },
+      error: null,
+    });
+
+    await expect(pending).resolves.toEqual({ ok: true, value: null });
+  });
+
+  it('loadFocusSession should preserve a newer same-user inflight request after session reset', async () => {
+    type QueryResult = { data: null; error: null };
+    let resolveOld!: (value: QueryResult) => void;
+    let resolveNew!: (value: QueryResult) => void;
+    const maybeSingle = vi.fn()
+      .mockImplementationOnce(() => new Promise<QueryResult>(resolve => {
+        resolveOld = resolve;
+      }))
+      .mockImplementationOnce(() => new Promise<QueryResult>(resolve => {
+        resolveNew = resolve;
+      }));
+    const limit = vi.fn(() => ({ maybeSingle }));
+    const order = vi.fn(() => ({ limit }));
+    const eq = vi.fn(() => ({ order }));
+    const select = vi.fn(() => ({ eq }));
+    mockClient.from.mockReturnValue({ select });
+
+    const oldRequest = service.loadFocusSession('user-1');
+    mockSessionRuntimeReset.resetAll('owner-change');
+    const newRequest = service.loadFocusSession('user-1');
+    expect(maybeSingle).toHaveBeenCalledTimes(2);
+
+    resolveOld({ data: null, error: null });
+    await expect(oldRequest).resolves.toEqual({ ok: true, value: null });
+
+    const reusedNewRequest = service.loadFocusSession('user-1');
+    expect(maybeSingle).toHaveBeenCalledTimes(2);
+    resolveNew({ data: null, error: null });
+
+    await expect(newRequest).resolves.toEqual({ ok: true, value: null });
+    await expect(reusedNewRequest).resolves.toEqual({ ok: true, value: null });
+  });
+
+  it('listRoutineTasks should discard rows after the session owner changes', async () => {
+    let resolveLimit!: (value: {
+      data: Array<{
+        id: string;
+        user_id: string;
+        title: string;
+        max_times_per_day: number;
+        is_enabled: boolean;
+        updated_at: string;
+      }>;
+      error: null;
+    }) => void;
+    const limit = vi.fn(() => new Promise<{
+      data: Array<{
+        id: string;
+        user_id: string;
+        title: string;
+        max_times_per_day: number;
+        is_enabled: boolean;
+        updated_at: string;
+      }>;
+      error: null;
+    }>(resolve => {
+      resolveLimit = resolve;
+    }));
+    const query = {
+      select: vi.fn(() => query),
+      eq: vi.fn(() => query),
+      order: vi.fn(() => query),
+      limit,
+    };
+    mockClient.from.mockReturnValue(query);
+
+    const pending = service.listRoutineTasks('user-1');
+    mockAuthService.currentUserId.mockReturnValue('user-2');
+    resolveLimit({
+      data: [{
+        id: 'routine-old-owner',
+        user_id: 'user-1',
+        title: 'Old owner routine',
+        max_times_per_day: 1,
+        is_enabled: true,
+        updated_at: '2026-03-03T10:00:00.000Z',
+      }],
+      error: null,
+    });
+
+    await expect(pending).resolves.toEqual({ ok: true, value: [] });
   });
 
   it('saveFocusSession should reject missing operationId before legacy REST write', async () => {

@@ -15,16 +15,90 @@ interface FocusConsoleSyncRoutineSpecContext {
   };
 }
 
+function createMutableRoutineTaskPages(rows: Array<{
+  id: string;
+  user_id: string;
+  title: string;
+  max_times_per_day: number;
+  is_enabled: boolean;
+  updated_at: string;
+}>): {
+  createQuery: () => Record<string, unknown>;
+  limitCursors: Array<string | null>;
+  rangeStarts: number[];
+} {
+  const limitCursors: Array<string | null> = [];
+  const rangeStarts: number[] = [];
+  let pageRequests = 0;
+
+  const createQuery = () => {
+    let cursor: { updatedAt: string; id: string } | null = null;
+    let updatedAtAscending = true;
+    const readPage = (from: number, to: number) => {
+      const ordered = rows
+        .filter((row) => {
+          if (!cursor) return true;
+          const updatedOrder = row.updated_at.localeCompare(cursor.updatedAt);
+          return updatedAtAscending
+            ? updatedOrder > 0 || updatedOrder === 0 && row.id > cursor.id
+            : updatedOrder < 0 || updatedOrder === 0 && row.id > cursor.id;
+        })
+        .slice()
+        .sort((left, right) => {
+          const updatedOrder = left.updated_at.localeCompare(right.updated_at);
+          if (updatedOrder !== 0) return updatedAtAscending ? updatedOrder : -updatedOrder;
+          return left.id.localeCompare(right.id);
+        });
+      const page = ordered.slice(from, to + 1).map(row => ({ ...row }));
+      if (pageRequests++ === 0) {
+        rows[0] = {
+          ...rows[0],
+          title: 'Routine 0 moved',
+          updated_at: '2026-06-09T03:00:00.000Z',
+        };
+      }
+      return Promise.resolve({ data: page, error: null });
+    };
+    const query = {
+      select: vi.fn(() => query),
+      eq: vi.fn(() => query),
+      or: vi.fn((filters: string) => {
+        const match = /^updated_at\.gt\.(.*),and\(updated_at\.eq\.(.*),id\.gt\.(.*)\)$/.exec(filters);
+        if (match) cursor = { updatedAt: match[2], id: match[3] };
+        return query;
+      }),
+      order: vi.fn((column: string, options?: { ascending?: boolean }) => {
+        if (column === 'updated_at') updatedAtAscending = options?.ascending !== false;
+        return query;
+      }),
+      limit: vi.fn((count: number) => {
+        limitCursors.push(cursor ? `${cursor.updatedAt}|${cursor.id}` : null);
+        return readPage(0, count - 1);
+      }),
+      range: vi.fn((from: number, to: number) => {
+        rangeStarts.push(from);
+        return readPage(from, to);
+      }),
+    };
+    return query;
+  };
+
+  return { createQuery, limitCursors, rangeStarts };
+}
+
 export function registerFocusConsoleRoutineSyncSpecs(context: FocusConsoleSyncRoutineSpecContext): void {
   const { mockClient, mockSyncRpc } = context;
   const service = () => context.service();
 
   it('listRoutineTasks should return success([]) when browser IO is suspended mid-request', async () => {
-    const range = vi.fn().mockRejectedValue(createBrowserNetworkSuspendedError());
-    const order = vi.fn(() => ({ range }));
-    const eq = vi.fn(() => ({ order }));
-    const select = vi.fn(() => ({ eq }));
-    mockClient.from.mockReturnValue({ select });
+    const limit = vi.fn().mockRejectedValue(createBrowserNetworkSuspendedError());
+    const query = {
+      select: vi.fn(() => query),
+      eq: vi.fn(() => query),
+      order: vi.fn(() => query),
+      limit,
+    };
+    mockClient.from.mockReturnValue(query);
 
     const result = await service().listRoutineTasks('user-1');
 
@@ -35,7 +109,7 @@ export function registerFocusConsoleRoutineSyncSpecs(context: FocusConsoleSyncRo
     }
   });
 
-  it('listRoutineTasks should read all Supabase REST pages', async () => {
+  it('listRoutineTasks should keyset-page mutable rows without skipping or duplicates', async () => {
     const rows = Array.from({ length: 1001 }, (_, index) => ({
       id: `routine-${index.toString().padStart(4, '0')}`,
       user_id: 'user-1',
@@ -44,28 +118,22 @@ export function registerFocusConsoleRoutineSyncSpecs(context: FocusConsoleSyncRo
       is_enabled: true,
       updated_at: new Date(Date.UTC(2026, 5, 9, 0, 0, index)).toISOString(),
     }));
-    const ranges: Array<[number, number]> = [];
-    const range = vi.fn(async (from: number, to: number) => {
-      ranges.push([from, to]);
-      return { data: rows.slice(from, to + 1), error: null };
-    });
-    const order = vi.fn(() => ({ range }));
-    const eq = vi.fn(() => ({ order }));
-    const select = vi.fn(() => ({ eq }));
-    mockClient.from.mockReturnValue({ select });
+    const paged = createMutableRoutineTaskPages(rows);
+    mockClient.from.mockImplementation(() => paged.createQuery());
 
     const result = await service().listRoutineTasks('user-1');
 
     expect(result.ok).toBe(true);
     if (result.ok) {
+      const routineIds = result.value.map(routine => routine.routineId);
       expect(result.value).toHaveLength(1001);
+      expect(new Set(routineIds).size).toBe(1001);
+      expect(routineIds).toContain('routine-1000');
       expect(result.value[0].routineId).toBe('routine-0000');
-      expect(result.value[1000].routineId).toBe('routine-1000');
+      expect(result.value[0].title).toBe('Routine 0 moved');
     }
-    expect(ranges).toEqual([
-      [0, 999],
-      [1000, 1999],
-    ]);
+    expect(paged.limitCursors).toHaveLength(2);
+    expect(paged.rangeStarts).toEqual([]);
   });
 
   it('upsertRoutineTask should use Sync RPC when operationId is provided', async () => {
@@ -194,11 +262,9 @@ export function registerFocusConsoleRoutineSyncSpecs(context: FocusConsoleSyncRo
     expect(mockClient.from).not.toHaveBeenCalled();
   });
 
-  // TODO(L-28): Add test for listRoutineTasks — verify it maps RoutineTaskRow to RoutineTask[]
-  // TODO(L-28): Add test for upsertRoutineTask — verify upsert payload shape and error handling
-  // TODO(L-28): Add test for importLegacyDockSnapshot — verify it reads from user_preferences table
-  // TODO(L-28): Add test for saveFocusSession success path — verify it returns true and upsert payload
-  // TODO(L-28): Add test for incrementRoutineCompletion 挂起窗口外的 retry-queue 协同行为
+  // L-28 债务清偿说明：listRoutineTasks 映射、upsertRoutineTask 错误处理、saveFocusSession 成功路径、
+  // incrementRoutineCompletion retry-queue 协同用例见同目录 focus-console-sync.service.routine-coverage.spec.ts；
+  // importLegacyDockSnapshot 已不存在于 FocusConsoleSyncService（对应 TODO 过期作废）。
 
   it('incrementRoutineCompletion should reject missing operationId before legacy atomic rpc', async () => {
     const result = await service().incrementRoutineCompletion({

@@ -6,6 +6,7 @@ import { LoggerService } from '../../../../services/logger.service';
 import { SyncRpcClientService } from '../../../../services/sync-rpc-client.service';
 import { DataSafetyAuditPersistence } from '../../../../services/data-safety-audit-persistence';
 import { resetBrowserNetworkSuspensionTrackingForTests } from '../../../../utils/browser-network-suspension';
+import { UserPreferencesBaselineStore } from '../../../../services/user-preferences-baseline.store';
 
 function setVisibilityState(state: DocumentVisibilityState): void {
   Object.defineProperty(document, 'visibilityState', {
@@ -28,6 +29,17 @@ describe('UserPreferencesSyncService', () => {
       raw: {},
     }),
   };
+  const baselineStore = {
+    read: vi.fn().mockResolvedValue(null),
+    save: vi.fn().mockResolvedValue(undefined),
+  };
+
+  function createReplayContext(isCurrent = vi.fn(() => true)) {
+    return {
+      leaseSignal: new AbortController().signal,
+      isCurrent,
+    };
+  }
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -41,6 +53,8 @@ describe('UserPreferencesSyncService', () => {
       status: 'applied',
       raw: {},
     });
+    baselineStore.read.mockResolvedValue(null);
+    baselineStore.save.mockResolvedValue(undefined);
     new DataSafetyAuditPersistence().save('user-1', { replayLog: [], lastWriteExplain: null });
 
     TestBed.configureTestingModule({
@@ -65,6 +79,7 @@ describe('UserPreferencesSyncService', () => {
           },
         },
         { provide: SyncRpcClientService, useValue: syncRpc },
+        { provide: UserPreferencesBaselineStore, useValue: baselineStore },
       ],
     });
   });
@@ -89,6 +104,7 @@ describe('UserPreferencesSyncService', () => {
           restReminderHighLoadMinutes: 120,
           restReminderLowLoadMinutes: 20,
         },
+        updated_at: '2026-04-23T10:05:00.000Z',
         dock_snapshot: { version: 4 },
       },
       error: null,
@@ -104,6 +120,7 @@ describe('UserPreferencesSyncService', () => {
     expect(prefs?.focusPreferences?.routineResetHourLocal).toBe(5);
     expect(prefs?.focusPreferences?.restReminderHighLoadMinutes).toBe(120);
     expect(prefs?.focusPreferences?.restReminderLowLoadMinutes).toBe(20);
+    expect(baselineStore.save).toHaveBeenCalledWith('user-1', '2026-04-23T10:05:00.000Z');
   });
 
   it('loadUserPreferences should preserve focus preference updatedAt for LWW merge checks', async () => {
@@ -170,6 +187,7 @@ describe('UserPreferencesSyncService', () => {
         },
       },
       'op-preference-runtime-field',
+      '2026-04-23T10:30:00.000Z',
     );
 
     expect(ok).toBe(true);
@@ -177,7 +195,7 @@ describe('UserPreferencesSyncService', () => {
     expect(syncRpc.upsertUserPreferences).toHaveBeenCalledWith({
       operationId: 'op-preference-runtime-field',
       userId: 'user-1',
-      baseUpdatedAt: '2026-04-23T11:00:00.000Z',
+      baseUpdatedAt: '2026-04-23T10:30:00.000Z',
       preferences: {
         lastBackupProofAt: '2026-04-23T11:00:00.000Z',
       },
@@ -214,6 +232,7 @@ describe('UserPreferencesSyncService', () => {
         },
       },
       'op-preference',
+      '2026-04-23T10:00:00.000Z',
     );
 
     expect(ok).toBe(true);
@@ -221,7 +240,7 @@ describe('UserPreferencesSyncService', () => {
     expect(syncRpc.upsertUserPreferences).toHaveBeenCalledWith({
       operationId: 'op-preference',
       userId: 'user-1',
-      baseUpdatedAt: null,
+      baseUpdatedAt: '2026-04-23T10:00:00.000Z',
       preferences: {
         theme: 'ocean',
         colorMode: 'dark',
@@ -229,7 +248,7 @@ describe('UserPreferencesSyncService', () => {
     });
   });
 
-  it('saveUserPreferences should pass focus preference updatedAt as the Sync RPC LWW baseline', async () => {
+  it('saveUserPreferences should use the explicit durable row baseline instead of focus field timestamps', async () => {
     const service = TestBed.inject(UserPreferencesSyncService);
     const ok = await service.saveUserPreferences(
       'user-1',
@@ -246,13 +265,14 @@ describe('UserPreferencesSyncService', () => {
         },
       },
       'op-preference-lww',
+      '2026-06-15T01:30:00.000Z',
     );
 
     expect(ok).toBe(true);
     expect(syncRpc.upsertUserPreferences).toHaveBeenCalledWith(expect.objectContaining({
       operationId: 'op-preference-lww',
       userId: 'user-1',
-      baseUpdatedAt: '2026-06-15T01:59:00.000Z',
+      baseUpdatedAt: '2026-06-15T01:30:00.000Z',
     }));
   });
 
@@ -280,6 +300,7 @@ describe('UserPreferencesSyncService', () => {
         },
       },
       'op-preference-audit',
+      '2026-06-15T01:30:00.000Z',
     );
 
     expect(ok).toBe(true);
@@ -289,8 +310,8 @@ describe('UserPreferencesSyncService', () => {
       actor: { sourceUserId: 'user-1' },
       entity: { type: 'preference', id: 'user-1' },
       operation: 'upsert',
-      updatedAtBaseline: '2026-06-15T01:59:00.000Z',
-      beforeVersion: '2026-06-15T01:59:00.000Z',
+      updatedAtBaseline: '2026-06-15T01:30:00.000Z',
+      beforeVersion: '2026-06-15T01:30:00.000Z',
       afterVersion: '2026-06-15T02:00:00.000Z',
       queueResult: { enteredRetryQueue: false, retryCount: 0 },
       rpcResult: { status: 'applied', serverUpdatedAt: '2026-06-15T02:00:00.000Z' },
@@ -302,11 +323,104 @@ describe('UserPreferencesSyncService', () => {
       entityType: 'preference',
       entityId: 'user-1',
       operation: 'upsert',
-      baseUpdatedAt: '2026-06-15T01:59:00.000Z',
+      baseUpdatedAt: '2026-06-15T01:30:00.000Z',
       queue: { enteredRetryQueue: false, retryCount: 0 },
       rpc: { status: 'applied', serverUpdatedAt: '2026-06-15T02:00:00.000Z' },
       lww: { decision: 'local-applied', reason: 'applied' },
     });
+    expect(baselineStore.save).toHaveBeenCalledWith('user-1', '2026-06-15T02:00:00.000Z');
+  });
+
+  it('saveUserPreferences should stop after baseline read when the replay fence drifts', async () => {
+    let current = true;
+    const context = createReplayContext(vi.fn(() => current));
+    baselineStore.read.mockImplementationOnce(async () => {
+      current = false;
+      return '2026-06-15T01:30:00.000Z';
+    });
+    const service = TestBed.inject(UserPreferencesSyncService);
+
+    const ok = await service.saveUserPreferences(
+      'user-1',
+      { theme: 'ocean' },
+      'op-preference-baseline-drift',
+      undefined,
+      context,
+    );
+
+    expect(ok).toBe(false);
+    expect(syncRpc.upsertUserPreferences).not.toHaveBeenCalled();
+    expect(new DataSafetyAuditPersistence().load('user-1').lastWriteExplain).toBeNull();
+  });
+
+  it('saveUserPreferences should suppress audit and baseline mutation after RPC fence drift', async () => {
+    let current = true;
+    const context = createReplayContext(vi.fn(() => current));
+    syncRpc.upsertUserPreferences.mockImplementationOnce(async () => {
+      current = false;
+      return {
+        status: 'applied',
+        serverUpdatedAt: '2026-06-15T02:00:00.000Z',
+        raw: {},
+      };
+    });
+    const service = TestBed.inject(UserPreferencesSyncService);
+
+    const ok = await service.saveUserPreferences(
+      'user-1',
+      { theme: 'ocean' },
+      'op-preference-rpc-drift',
+      '2026-06-15T01:30:00.000Z',
+      context,
+    );
+
+    expect(ok).toBe(false);
+    expect(baselineStore.save).not.toHaveBeenCalled();
+    expect(new DataSafetyAuditPersistence().load('user-1').lastWriteExplain).toBeNull();
+  });
+
+  it('saveUserPreferences should suppress audit when the fence drifts across baseline save', async () => {
+    let current = true;
+    const context = createReplayContext(vi.fn(() => current));
+    syncRpc.upsertUserPreferences.mockResolvedValueOnce({
+      status: 'applied',
+      serverUpdatedAt: '2026-06-15T02:00:00.000Z',
+      raw: {},
+    });
+    baselineStore.save.mockImplementationOnce(async () => {
+      current = false;
+    });
+    const service = TestBed.inject(UserPreferencesSyncService);
+
+    const ok = await service.saveUserPreferences(
+      'user-1',
+      { theme: 'ocean' },
+      'op-preference-baseline-save-drift',
+      '2026-06-15T01:30:00.000Z',
+      context,
+    );
+
+    expect(ok).toBe(false);
+    expect(new DataSafetyAuditPersistence().load('user-1').lastWriteExplain).toBeNull();
+  });
+
+  it('saveUserPreferences should pass the exact lease signal into the preference RPC', async () => {
+    const context = createReplayContext();
+    const service = TestBed.inject(UserPreferencesSyncService);
+
+    const ok = await service.saveUserPreferences(
+      'user-1',
+      { theme: 'ocean' },
+      'op-preference-abort-signal',
+      '2026-06-15T01:30:00.000Z',
+      context,
+    );
+
+    expect(ok).toBe(true);
+    expect(syncRpc.upsertUserPreferences).toHaveBeenCalledWith(expect.objectContaining({
+      abortSignal: context.leaseSignal,
+      isCurrent: context.isCurrent,
+    }));
   });
 
   it('saveUserPreferences should reject missing operationId before legacy upsert', async () => {
