@@ -43,6 +43,7 @@ function createTask(overrides: Partial<Task>): Task {
     y: 0,
     displayId: 'T-S',
     createdDate: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
     deletedAt: null,
     ...overrides,
   };

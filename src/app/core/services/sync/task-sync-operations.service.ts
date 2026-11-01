@@ -3,8 +3,15 @@ import { FLOATING_TREE_CONFIG } from '../../../../config';
 import type { Task } from '../../../../models';
 import { LoggerService } from '../../../../services/logger.service';
 import type { TaskWriteIntent } from '../../../../services/sync-rpc-client.service';
+import type { RetryQueueUnknownOutcomeReconcileResult } from './retry-queue.types';
 import { TaskSyncDeleteService } from './task-sync-delete.service';
-import type { TaskPurgeResult, TombstoneQueryResult, TopologicalSortFrame } from './task-sync-operations.types';
+import type {
+  TaskActionQueueReplayInput,
+  TaskActionQueueReplayResult,
+  TaskPurgeResult,
+  TombstoneQueryResult,
+  TopologicalSortFrame,
+} from './task-sync-operations.types';
 import { TaskSyncPositionService } from './task-sync-position.service';
 import { TaskSyncPushService } from './task-sync-push.service';
 import { TaskSyncQueryService } from './task-sync-query.service';
@@ -41,6 +48,20 @@ export class TaskSyncOperationsService {
       writeIntent,
       operationId,
     );
+  }
+
+  async pushTaskFromActionQueue(
+    input: TaskActionQueueReplayInput,
+  ): Promise<TaskActionQueueReplayResult> {
+    return await this.pushOps.pushTaskFromActionQueue(input);
+  }
+
+  /** unknown-outcome（timeout/abort）任务写入的重放前对账（委托 TaskSyncPushService）。 */
+  async reconcileTaskPushUnknownOutcome(
+    task: Task,
+    projectId: string,
+  ): Promise<RetryQueueUnknownOutcomeReconcileResult> {
+    return await this.pushOps.reconcileTaskPushUnknownOutcome(task, projectId);
   }
 
   async pushTaskPosition(

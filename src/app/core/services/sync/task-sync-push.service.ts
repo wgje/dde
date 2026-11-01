@@ -4,20 +4,61 @@ import { REQUEST_THROTTLE_CONFIG } from '../../../../config';
 import type { Task } from '../../../../models';
 import { nowISO } from '../../../../utils/date';
 import { isPermanentFailureError, PermanentFailureError } from '../../../../utils/permanent-failure-error';
-import { markTaskCompletedAtColumnUnavailable, getCompatibleTaskWriteRow } from '../../../../utils/task-schema-compat';
+import { createRetryDeferredError, isRetryDeferredError } from '../../../../utils/retry-deferred-error';
+import {
+  getCompatibleTaskSelectFields,
+  getCompatibleTaskWriteRow,
+  markTaskCompletedAtColumnUnavailable,
+} from '../../../../utils/task-schema-compat';
+import { getUnsafeTaskWriteFields } from '../../../../utils/task-write-payload-integrity';
 import { supabaseErrorToError, type EnhancedError } from '../../../../utils/supabase-error';
 import { TaskSyncOperationsBase } from './task-sync-operations-base.service';
 import type {
-  RemoteTaskFreshness,
+  TaskActionQueueReplayInput,
+  TaskActionQueueReplayResult,
   TaskPushExecutionOutcome,
   TaskPushRequest,
   TaskWriteRow,
 } from './task-sync-operations.types';
 import type { TaskWriteIntent } from '../../../../services/sync-rpc-client.service';
-import { createRetryQueueLastFailure } from './retry-queue-failure-context';
+import type { RetryQueueUnknownOutcomeReconcileResult } from './retry-queue.types';
+import { TaskSyncPushFailureController } from './task-sync-push-failure.controller';
+import { captureSyncResponseVersion } from './sync-response-version-guard';
+
+type TaskPushEntryGuardResult =
+  | { status: 'blocked'; result: boolean }
+  | { status: 'ready'; client: SupabaseClient };
 
 @Injectable({ providedIn: 'root' })
 export class TaskSyncPushService extends TaskSyncOperationsBase {
+  private readonly pushFailureController = new TaskSyncPushFailureController({
+    isSessionExpiredError: error => this.sessionManager.isSessionExpiredError(error),
+    isRlsPolicyViolation: error => this.sessionManager.isRlsPolicyViolation(error),
+    preserveForSessionExpiry: (request, context, details) =>
+      this.preserveTaskPushForSessionExpiry(request, context, details),
+    throwVersionConflict: (error, task, projectId) =>
+      this.throwTaskSyncVersionConflict(error, task, projectId),
+    recordCircuitFailure: errorType =>
+      this.retryQueueService.recordCircuitFailure(errorType),
+    reportFailure: (error, task, projectId) =>
+      this.reportPushTaskFailure(error, task, projectId),
+    queueForRetry: async (request, options) => {
+      await this.safeAddToRetryQueue(
+        'task',
+        'upsert',
+        request.task,
+        request.projectId,
+        request.sourceUserId,
+        options.allowWhenSessionExpired,
+        request.writeIntent,
+        request.operationId,
+        options.lastFailure,
+      );
+    },
+    logInfo: (message, context) => this.logger.info(message, context),
+    logWarn: (message, context) => this.logger.warn(message, context),
+  });
+
   /** 推送任务到云端（LWW upsert，支持 tombstone 检查和重试队列） */
   async pushTask(
     task: Task,
@@ -29,6 +70,8 @@ export class TaskSyncPushService extends TaskSyncOperationsBase {
     writeIntent?: TaskWriteIntent,
     operationId?: string,
   ): Promise<boolean> {
+    this.assertTaskWritePayloadSafe(task, projectId);
+
     const request: TaskPushRequest = {
       task,
       projectId,
@@ -40,42 +83,154 @@ export class TaskSyncPushService extends TaskSyncOperationsBase {
       operationId,
     };
 
-    // 会话过期检查
-    if (this.syncStateService.isSessionExpired()) {
-      return await this.preserveTaskPushForSessionExpiry(request, 'pushTask');
+    const entryGuard = await this.guardTaskPushEntry(request);
+    if (entryGuard.status === 'blocked') {
+      return entryGuard.result;
     }
-    
-    // Circuit Breaker 检查
-    if (!this.retryQueueService.checkCircuitBreaker()) {
-      this.logger.debug('Circuit Breaker: 熔断中，跳过推送', { taskId: task.id });
-      if (!fromRetryQueue) {
-        await this.safeAddToRetryQueue('task', 'upsert', task, projectId, sourceUserId, false, writeIntent, operationId);
-      }
-      return false;
-    }
-    
-    const client = this.getSupabaseClient();
-    if (!client) {
-      if (!fromRetryQueue) {
-        await this.safeAddToRetryQueue('task', 'upsert', task, projectId, sourceUserId, false, writeIntent, operationId);
-      }
-      return false;
-    }
-    
+    const { client } = entryGuard;
+
     try {
       return await this.executeTaskPush(client, request);
     } catch (e) {
+      if (isRetryDeferredError(e)) {
+        throw e;
+      }
       if (isPermanentFailureError(e)) {
         throw e;
       }
 
       const enhanced = this.toEnhancedError(e);
       if (!this.sessionManager.isSessionExpiredError(enhanced)) {
-        return await this.handlePushTaskError(enhanced, task, projectId, fromRetryQueue, sourceUserId, writeIntent, operationId);
+        return await this.pushFailureController.handlePushError(enhanced, request);
       }
 
       return await this.retryTaskPushAfterAuthError(client, request, enhanced);
     }
+  }
+
+  async pushTaskFromActionQueue(
+    input: TaskActionQueueReplayInput,
+  ): Promise<TaskActionQueueReplayResult> {
+    this.assertTaskWritePayloadSafe(input.task, input.projectId);
+    const fence = this.createTaskReplayFence(input);
+    if (!fence.isCurrent()) return { outcome: 'stale' };
+
+    let client: SupabaseClient | null = null;
+    try {
+      client = this.supabase.isConfigured ? this.supabase.client() : null;
+    } catch {
+      client = null;
+    }
+    if (!fence.isCurrent()) return { outcome: 'stale' };
+    if (client) {
+      await this.primeTaskSyncRpcCapability();
+      if (!fence.isCurrent()) return { outcome: 'stale' };
+    }
+    if (!client || !this.shouldUseSyncRpc()) return await this.handoffTaskReplay(fence);
+
+    try {
+      const { data: { session } } = await client.auth.getSession();
+      if (!fence.isCurrent()) return { outcome: 'stale' };
+      if (session?.user?.id !== fence.sourceUserId) return await this.handoffTaskReplay(fence);
+
+      const request: TaskPushRequest = {
+        task: fence.durableTask,
+        projectId: fence.projectId,
+        skipTombstoneCheck: false,
+        fromRetryQueue: false,
+        sourceUserId: fence.sourceUserId,
+        treatTombstoneAsPermanent: true,
+        writeIntent: fence.writeIntent,
+        operationId: fence.actionOperationId,
+        replayFence: fence,
+      };
+      if (await this.isTaskRemoteTombstoned(client, request, fence.leaseSignal)) {
+        return fence.isCurrent() ? { outcome: 'deferred' } : { outcome: 'stale' };
+      }
+      if (!fence.isCurrent()) return { outcome: 'stale' };
+
+      const requestVersion = captureSyncResponseVersion(fence.durableTask);
+      const result = await this.syncRpcClient!.upsertTask({
+        operationId: fence.actionOperationId,
+        task: fence.durableTask,
+        projectId: fence.projectId,
+        baseUpdatedAt: requestVersion.updatedAt,
+        writeIntent: fence.writeIntent,
+        abortSignal: fence.leaseSignal,
+        isCurrent: fence.isCurrent,
+      });
+      return this.classifyTaskReplayResult(result, fence)
+        ?? await this.handoffTaskReplay(fence);
+    } catch {
+      return fence.isCurrent()
+        ? await this.handoffTaskReplay(fence)
+        : { outcome: 'stale' };
+    }
+  }
+
+  private assertTaskWritePayloadSafe(task: Task, projectId: string): void {
+    const unsafeFields = getUnsafeTaskWriteFields(task);
+    if (unsafeFields.length === 0) {
+      return;
+    }
+
+    throw new PermanentFailureError(
+      'Task write payload is incomplete; refusing queue or RPC write',
+      undefined,
+      {
+        operation: 'pushTaskPayloadValidation',
+        taskId: typeof task?.id === 'string' ? task.id : null,
+        projectId,
+        unsafeFields,
+      },
+    );
+  }
+
+  private async guardTaskPushEntry(request: TaskPushRequest): Promise<TaskPushEntryGuardResult> {
+    // 会话过期检查
+    if (this.syncStateService.isSessionExpired()) {
+      return {
+        status: 'blocked',
+        result: await this.preserveTaskPushForSessionExpiry(request, 'pushTask'),
+      };
+    }
+
+    // Circuit Breaker 检查
+    if (!this.retryQueueService.checkCircuitBreaker()) {
+      this.logger.debug('Circuit Breaker: 熔断中，跳过推送', { taskId: request.task.id });
+      if (!request.fromRetryQueue) {
+        await this.safeAddToRetryQueue(
+          'task',
+          'upsert',
+          request.task,
+          request.projectId,
+          request.sourceUserId,
+          false,
+          request.writeIntent,
+          request.operationId,
+        );
+      }
+      return { status: 'blocked', result: false };
+    }
+
+    const client = this.getSupabaseClient();
+    if (!client) {
+      if (!request.fromRetryQueue) {
+        await this.safeAddToRetryQueue(
+          'task',
+          'upsert',
+          request.task,
+          request.projectId,
+          request.sourceUserId,
+          false,
+          request.writeIntent,
+          request.operationId,
+        );
+      }
+      return { status: 'blocked', result: false };
+    }
+
+    return { status: 'ready', client };
   }
 
   private toEnhancedError(error: unknown): EnhancedError {
@@ -185,56 +340,13 @@ export class TaskSyncPushService extends TaskSyncOperationsBase {
     try {
       return await this.executeTaskPush(client, request);
     } catch (retryError) {
-      return await this.handleTaskPushRetryError(request, this.toEnhancedError(retryError));
-    }
-  }
-
-  private async handleTaskPushRetryError(
-    request: TaskPushRequest,
-    retryEnhanced: EnhancedError,
-  ): Promise<boolean> {
-    if (!this.sessionManager.isSessionExpiredError(retryEnhanced)) {
-      return await this.handlePushTaskError(
-        retryEnhanced,
-        request.task,
-        request.projectId,
-        request.fromRetryQueue,
-        request.sourceUserId,
-        request.writeIntent,
-        request.operationId,
+      return await this.pushFailureController.handleRetryError(
+        request,
+        this.toEnhancedError(retryError),
       );
     }
-
-    if (this.sessionManager.isRlsPolicyViolation(retryEnhanced)) {
-      return this.handleTaskPushRetryRlsViolation(request, retryEnhanced);
-    }
-
-    return await this.preserveTaskPushForSessionExpiry(request, 'pushTask.retryAfterRefresh', {
-      taskId: request.task.id,
-      projectId: request.projectId,
-      errorCode: retryEnhanced.code,
-    });
   }
 
-  private handleTaskPushRetryRlsViolation(
-    request: TaskPushRequest,
-    retryEnhanced: EnhancedError,
-  ): boolean {
-    this.logger.warn('刷新会话后重试仍获 RLS 违规，判定为权限不足', {
-      taskId: request.task.id,
-      projectId: request.projectId,
-      errorCode: retryEnhanced.code,
-    });
-    if (request.fromRetryQueue) {
-      throw new PermanentFailureError(
-        'Task tombstone lookup denied after refresh',
-        retryEnhanced,
-        { operation: 'pushTask.retryAfterRefresh', taskId: request.task.id, projectId: request.projectId },
-      );
-    }
-    return false;
-  }
-  
   /** 执行任务推送操作 */
   private async doTaskPush(
     client: SupabaseClient,
@@ -262,7 +374,7 @@ export class TaskSyncPushService extends TaskSyncOperationsBase {
     if (outcome !== 'pushed') {
       return false;
     }
-    
+
     this.retryQueueService.recordCircuitSuccess();
     this.syncStateService.advanceLastSyncTimeIfIdle(nowISO());
     this.recordTaskRpcWriteAudit(request);
@@ -280,7 +392,7 @@ export class TaskSyncPushService extends TaskSyncOperationsBase {
 
     let outcome: TaskPushExecutionOutcome = 'not-pushed';
     await this.syncOpHelper.retryWithBackoff(async () => {
-      outcome = await this.executeTaskPushAttempt(client, request, signal);
+      outcome = await this.executeTaskPushAttempt(request, signal);
     });
     return outcome;
   }
@@ -321,65 +433,78 @@ export class TaskSyncPushService extends TaskSyncOperationsBase {
   }
 
   private async executeTaskPushAttempt(
-    client: SupabaseClient,
     request: TaskPushRequest,
     signal?: AbortSignal,
   ): Promise<TaskPushExecutionOutcome> {
     await this.primeTaskSyncRpcCapability();
 
     if (this.syncRpcClient?.isClientRejected() === true) {
-      this.reportTaskSyncRpcClientRejected('pushTask', {
-        taskId: request.task.id,
-        projectId: request.projectId,
-      });
-      if (!request.fromRetryQueue) {
-        await this.safeAddToRetryQueue(
-          'task',
-          'upsert',
-          request.task,
-          request.projectId,
-          request.sourceUserId,
-          false,
-          request.writeIntent,
-          request.operationId,
-        );
-      }
+      return await this.blockTaskPushForRejectedClient(request);
+    }
+
+    if (!this.shouldUseSyncRpc()) {
+      return await this.deferTaskPushForUnavailableSyncRpc(request);
+    }
+
+    if (!request.operationId) {
+      await this.deferTaskPushMissingOperationId(request);
       return 'blocked-by-sync-rpc';
     }
 
-    if (this.shouldUseSyncRpc()) {
-      if (!request.operationId) {
-        await this.deferTaskPushMissingOperationId(request);
-        return 'blocked-by-sync-rpc';
-      }
-      const pushed = await this.pushTaskViaSyncRpc(request, signal);
-      return pushed ? 'pushed' : 'blocked-by-sync-rpc';
-    }
+    const pushed = await this.pushTaskViaSyncRpc(request, signal);
+    return pushed ? 'pushed' : 'blocked-by-sync-rpc';
+  }
 
-    if (request.operationId) {
-      if (request.fromRetryQueue) {
-        // 回放降级对齐 project/connection：RPC 能力不可用（探针失败/未启用）时
-        // 走带 LWW CAS 守卫的 REST 直连，而不是返回 blocked 消耗重试预算——
-        // "探针瞬时失败被缓存 + 回放永远 blocked"的组合会在网络恢复后
-        // 约 30 秒内把任务项打入隔离区
-        await this.pushTaskViaSupabase(client, request.task, request.projectId, signal);
-        return 'pushed';
-      }
-      await this.safeAddToRetryQueue(
-        'task',
-        'upsert',
-        request.task,
-        request.projectId,
-        request.sourceUserId,
-        false,
-        request.writeIntent,
-        request.operationId,
+  /** sync RPC 探测判定客户端已过期：停止云端写入，非回放路径保留到 RetryQueue。 */
+  private async blockTaskPushForRejectedClient(request: TaskPushRequest): Promise<TaskPushExecutionOutcome> {
+    this.reportTaskSyncRpcClientRejected('pushTask', {
+      taskId: request.task.id,
+      projectId: request.projectId,
+    });
+    if (request.fromRetryQueue) {
+      throw createRetryDeferredError(
+        'Task sync RPC client was rejected; keeping the original RetryQueue item.',
       );
-      return 'blocked-by-sync-rpc';
+    }
+    await this.safeAddToRetryQueue(
+      'task',
+      'upsert',
+      request.task,
+      request.projectId,
+      request.sourceUserId,
+      false,
+      request.writeIntent,
+      request.operationId,
+    );
+    return 'blocked-by-sync-rpc';
+  }
+
+  private async deferTaskPushForUnavailableSyncRpc(
+    request: TaskPushRequest,
+  ): Promise<TaskPushExecutionOutcome> {
+    this.logger.warn('pushTask: sync RPC 不可用，已禁止 tasks 直接写入', {
+      taskId: request.task.id,
+      projectId: request.projectId,
+      fromRetryQueue: request.fromRetryQueue,
+    });
+
+    if (request.fromRetryQueue) {
+      throw createRetryDeferredError(
+        'Task sync RPC is unavailable; keeping the original RetryQueue item.',
+      );
     }
 
-    await this.pushTaskViaSupabase(client, request.task, request.projectId, signal);
-    return 'pushed';
+    await this.safeAddToRetryQueue(
+      'task',
+      'upsert',
+      request.task,
+      request.projectId,
+      request.sourceUserId,
+      false,
+      request.writeIntent,
+      request.operationId ?? this.createSyncRpcOperationId(),
+    );
+    return 'blocked-by-sync-rpc';
   }
 
   private async deferTaskPushMissingOperationId(request: TaskPushRequest): Promise<void> {
@@ -390,7 +515,9 @@ export class TaskSyncPushService extends TaskSyncOperationsBase {
     });
 
     if (request.fromRetryQueue) {
-      return;
+      throw createRetryDeferredError(
+        'Task retry item is missing operationId; keeping it in RetryQueue until repair can persist.',
+      );
     }
 
     await this.safeAddToRetryQueue(
@@ -414,21 +541,23 @@ export class TaskSyncPushService extends TaskSyncOperationsBase {
       });
       return false;
     }
+    const requestVersion = captureSyncResponseVersion(request.task);
     const result = await this.syncRpcClient!.upsertTask({
       operationId,
       task: request.task,
       projectId: request.projectId,
-      baseUpdatedAt: request.task.updatedAt ?? null,
+      baseUpdatedAt: requestVersion.updatedAt,
       writeIntent: request.writeIntent,
       abortSignal: signal,
     });
 
-    this.beginTaskRpcWriteAudit(request, operationId, result);
+    this.beginTaskRpcWriteAudit(request, operationId, result, requestVersion);
     try {
       const pushed = await this.handleTaskSyncRpcResult(
         result,
         request.task,
         request.projectId,
+        requestVersion,
         request.fromRetryQueue,
         request.sourceUserId,
         request.writeIntent,
@@ -445,69 +574,6 @@ export class TaskSyncPushService extends TaskSyncOperationsBase {
     }
   }
 
-  private async pushTaskViaSupabase(
-    client: SupabaseClient,
-    task: Task,
-    projectId: string,
-    signal?: AbortSignal,
-  ): Promise<void> {
-    const remoteTask = await this.loadRemoteTaskFreshness(client, task.id, projectId, signal);
-    await this.rejectRemoteNewerTask(task, projectId, remoteTask);
-
-    const result = await this.writeCompatibleTaskRow(client, task, projectId, remoteTask, signal);
-    if (result.error) throw supabaseErrorToError(result.error);
-
-    if (result.data?.updated_at) {
-      this.normalizeLocalTaskUpdatedAt(task, projectId, result.data.updated_at);
-    }
-  }
-
-  private async rejectRemoteNewerTask(
-    task: Task,
-    projectId: string,
-    remoteTask: RemoteTaskFreshness | null,
-  ): Promise<void> {
-    const remoteHasTombstone = !!remoteTask?.deletedAt;
-    const remoteIsNewer = await this.isRemoteTaskNewer(task, projectId, remoteTask);
-
-    if (remoteHasTombstone || remoteIsNewer) {
-      throw this.createRemoteNewerConflictError(
-        task.id,
-        projectId,
-        remoteTask?.updatedAt ?? remoteTask?.deletedAt ?? null,
-        remoteHasTombstone ? 'remote-tombstone' : 'remote-newer',
-      );
-    }
-  }
-
-  private async isRemoteTaskNewer(
-    task: Task,
-    projectId: string,
-    remoteTask: RemoteTaskFreshness | null,
-  ): Promise<boolean> {
-    const remoteUpdatedAt = remoteTask?.updatedAt ?? null;
-    const localUpdatedAt = task.updatedAt ?? null;
-    if (!remoteUpdatedAt || !localUpdatedAt) {
-      return false;
-    }
-
-    const rawRemoteMs = new Date(remoteUpdatedAt).getTime();
-    const rawLocalMs = new Date(localUpdatedAt).getTime();
-    if (!Number.isFinite(rawRemoteMs) || !Number.isFinite(rawLocalMs)) {
-      return false;
-    }
-
-    if (rawLocalMs === rawRemoteMs) {
-      return false;
-    }
-
-    const clockSyncResult = await this.clockSync.ensureSynced().catch(() => null);
-    if (!clockSyncResult?.reliable) {
-      throw this.createClockUncertainError(task.id, projectId, localUpdatedAt, remoteUpdatedAt);
-    }
-
-    return this.clockSync.compareTimestamps(localUpdatedAt, remoteUpdatedAt) < 0;
-  }
 
   private createTaskWriteRow(task: Task, projectId: string): TaskWriteRow {
     return {
@@ -537,192 +603,131 @@ export class TaskSyncPushService extends TaskSyncOperationsBase {
     };
   }
 
-  private async writeCompatibleTaskRow(
-    client: SupabaseClient,
-    task: Task,
-    projectId: string,
-    remoteTask: RemoteTaskFreshness | null,
-    signal?: AbortSignal,
-  ): Promise<{ data: { updated_at?: string | null } | null; error: unknown }> {
-    const row = this.createTaskWriteRow(task, projectId);
-    const maxSchemaFallbackAttempts = 3;
-    let result = await this.writeTaskRow(client, task, projectId, remoteTask, getCompatibleTaskWriteRow(row), signal);
 
-    for (let attempt = 1; result.error && attempt < maxSchemaFallbackAttempts; attempt += 1) {
-      if (!markTaskCompletedAtColumnUnavailable(result.error)) {
-        break;
-      }
-      this.logger.warn('tasks 可选字段缺失，任务推送已降级为旧 schema 写入', {
-        taskId: task.id,
-        projectId,
-        error: result.error,
-      });
-      result = await this.writeTaskRow(client, task, projectId, remoteTask, getCompatibleTaskWriteRow(row), signal);
-    }
-
-    return result;
-  }
-
-  private async writeTaskRow(
-    client: SupabaseClient,
-    task: Task,
-    projectId: string,
-    remoteTask: RemoteTaskFreshness | null,
-    payload: TaskWriteRow | Omit<TaskWriteRow, 'completed_at' | 'attention_meta'>,
-    signal?: AbortSignal,
-  ): Promise<{ data: { updated_at?: string | null } | null; error: unknown }> {
-    if (remoteTask?.updatedAt) {
-      return await this.updateExistingTaskRow(client, task, projectId, remoteTask.updatedAt, payload, signal);
-    }
-
-    if (remoteTask) {
-      throw this.createRemoteNewerConflictError(
-        task.id,
-        projectId,
-        remoteTask.updatedAt ?? remoteTask.deletedAt ?? null,
-        'remote-newer',
-      );
-    }
-
-    return await this.insertNewTaskRow(client, task, projectId, payload, signal);
-  }
-
-  private async updateExistingTaskRow(
-    client: SupabaseClient,
-    task: Task,
-    projectId: string,
-    remoteUpdatedAt: string,
-    payload: TaskWriteRow | Omit<TaskWriteRow, 'completed_at' | 'attention_meta'>,
-    signal?: AbortSignal,
-  ): Promise<{ data: { updated_at?: string | null } | null; error: unknown }> {
-    const { data, error } = await this.applyOptionalAbortSignal(
-      client
-        .from('tasks')
-        .update(payload)
-        .eq('id', task.id)
-        .eq('project_id', projectId)
-        .eq('updated_at', remoteUpdatedAt),
-      signal,
-    )
-      .select('updated_at')
-      .maybeSingle();
-
-    if (!error && !data) {
-      throw this.createRemoteNewerConflictError(task.id, projectId, remoteUpdatedAt, 'remote-newer');
-    }
-
-    return { data, error };
-  }
-
-  private async insertNewTaskRow(
-    client: SupabaseClient,
-    task: Task,
-    projectId: string,
-    payload: TaskWriteRow | Omit<TaskWriteRow, 'completed_at' | 'attention_meta'>,
-    signal?: AbortSignal,
-  ): Promise<{ data: { updated_at?: string | null } | null; error: unknown }> {
-    const result = await this.applyOptionalAbortSignal(
-      client
-        .from('tasks')
-        .insert(payload),
-      signal,
-    )
-      .select('updated_at')
-      .maybeSingle();
-
-    const code = (result.error as { code?: string | number } | null)?.code;
-    if (result.error && (code === '23505' || code === 23505)) {
-      throw this.createRemoteNewerConflictError(task.id, projectId, task.updatedAt ?? null, 'remote-newer');
-    }
-
-    if (!result.error && !result.data) {
-      throw this.createRemoteNewerConflictError(task.id, projectId, task.updatedAt ?? null, 'remote-newer');
-    }
-
-    return result;
-  }
-
-  /** 处理 pushTask 错误 */
-  private async handlePushTaskError(
-    enhanced: EnhancedError,
-    task: Task,
-    projectId: string,
-    fromRetryQueue = false,
-    sourceUserId?: string,
-    writeIntent?: TaskWriteIntent,
-    operationId?: string,
-  ): Promise<boolean> {
-    if (enhanced.errorType === 'BrowserNetworkSuspendedError') {
-      return await this.handlePushTaskBrowserSuspension(enhanced, task, projectId, fromRetryQueue, sourceUserId, writeIntent, operationId);
-    }
-
-    if (enhanced.errorType === 'VersionConflictError') {
-      this.throwTaskSyncVersionConflict(enhanced, task, projectId);
-    }
-    
-    this.retryQueueService.recordCircuitFailure(enhanced.errorType);
-
-    if (fromRetryQueue && enhanced.isRetryable) {
-      // 回放路径的可重试基础设施失败（断网/超时/网关/门户劫持等）必须抛回
-      // runner 的 server-pressure 延后 / 熔断分类通道；吞成 false 会被计入
-      // retryCount，弱网 flap 数轮即把队列项烧进隔离区
-      throw enhanced;
-    }
-
+  /** pushTask 失败的可观测性上报（日志 + Sentry，自动清洗 PII）。 */
+  private reportPushTaskFailure(enhanced: EnhancedError, task: Task, projectId: string): void {
     if (enhanced.isRetryable) {
       this.logger.debug(`推送任务失败 (${enhanced.errorType})，已加入重试队列`, enhanced.message);
     } else {
       this.logger.error('推送任务失败', enhanced);
     }
-    
+
     this.captureExceptionWithContext(enhanced, 'pushTask', {
       taskId: task.id,
       projectId,
       errorType: enhanced.errorType,
       isRetryable: enhanced.isRetryable
     });
-    
-    if (enhanced.isRetryable && !fromRetryQueue) {
-      await this.safeAddToRetryQueue(
-        'task',
-        'upsert',
-        task,
-        projectId,
-        sourceUserId,
-        false,
-        writeIntent,
-        operationId,
-        createRetryQueueLastFailure(enhanced),
-      );
-    } else if (!enhanced.isRetryable) {
-      this.logger.warn('不可重试的错误，不加入重试队列', {
-        taskId: task.id,
-        errorType: enhanced.errorType,
-        message: enhanced.message
-      });
-    }
-    return false;
   }
 
-  private async handlePushTaskBrowserSuspension(
-    enhanced: EnhancedError,
+  /**
+   * unknown-outcome（timeout/abort 后远端结果未知）任务写入的重放前探测（§5.2/§5.6）。
+   *
+   * 完整远端 payload 与本地写入意图一致时可安全结算；不一致时仅在 RPC 幂等边界
+   * 可用时进入 replay。RPC 不可用或查询失败时保持 `unknown`，不得用时间戳或
+   * 已退役的 REST CAS 边界冒充本次 payload 的身份证明。
+   */
+  async reconcileTaskPushUnknownOutcome(
     task: Task,
     projectId: string,
-    fromRetryQueue: boolean,
-    sourceUserId?: string,
-    writeIntent?: TaskWriteIntent,
-    operationId?: string,
-  ): Promise<boolean> {
-    if (fromRetryQueue) {
-      throw enhanced;
+  ): Promise<RetryQueueUnknownOutcomeReconcileResult> {
+    await this.primeTaskSyncRpcCapability();
+    const syncRpcAvailable = this.shouldUseSyncRpc();
+    const client = this.getSupabaseClient();
+    if (!client) {
+      return 'unknown';
     }
 
-    this.logger.info('浏览器网络挂起，延后任务同步', {
-      taskId: task.id,
-      projectId,
-    });
-    await this.safeAddToRetryQueue('task', 'upsert', task, projectId, sourceUserId, true, writeIntent, operationId);
-    return false;
+    try {
+      const { remoteRow, expectedRow } = await this.loadRemoteTaskWriteSnapshot(
+        client,
+        task,
+        projectId,
+      );
+      if (remoteRow && this.doesRemoteTaskMatchExpectedWrite(remoteRow, expectedRow)) {
+        return 'settled';
+      }
+      if (syncRpcAvailable) {
+        return 'replay';
+      }
+
+      this.logger.info('pushTask unknown-outcome 对账时 sync RPC 不可用，保持结果未知状态', {
+        taskId: task.id,
+        projectId,
+        remoteRowFound: remoteRow !== null,
+      });
+      return 'unknown';
+    } catch (error) {
+      this.logger.info('pushTask unknown-outcome 对账查询失败，保持结果未知状态等待下一轮', {
+        taskId: task.id,
+        projectId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return 'unknown';
+    }
+  }
+
+  private async loadRemoteTaskWriteSnapshot(
+    client: SupabaseClient,
+    task: Task,
+    projectId: string,
+  ): Promise<{
+    remoteRow: Record<string, unknown> | null;
+    expectedRow: Record<string, unknown>;
+  }> {
+    const maxSchemaFallbackAttempts = 3;
+    let lastError: unknown = null;
+
+    for (let attempt = 0; attempt < maxSchemaFallbackAttempts; attempt += 1) {
+      const expectedRow = getCompatibleTaskWriteRow(
+        this.createTaskWriteRow(task, projectId),
+      ) as Record<string, unknown>;
+      const selectFields = getCompatibleTaskSelectFields(
+        `updated_at,${Object.keys(expectedRow).join(',')}`,
+      );
+      const { data, error } = await client
+        .from('tasks')
+        .select(selectFields)
+        .eq('id', task.id)
+        .eq('project_id', projectId)
+        .maybeSingle();
+
+      if (!error) {
+        return {
+          remoteRow: data ? data as unknown as Record<string, unknown> : null,
+          expectedRow,
+        };
+      }
+      lastError = error;
+      if (!markTaskCompletedAtColumnUnavailable(error)) {
+        break;
+      }
+    }
+
+    throw supabaseErrorToError(lastError);
+  }
+
+  private doesRemoteTaskMatchExpectedWrite(
+    remoteRow: Record<string, unknown>,
+    expectedRow: Record<string, unknown>,
+  ): boolean {
+    return Object.entries(expectedRow).every(([key, expectedValue]) => (
+      expectedValue === undefined ||
+      this.stableTaskWriteValue(remoteRow[key]) === this.stableTaskWriteValue(expectedValue)
+    ));
+  }
+
+  private stableTaskWriteValue(value: unknown): string {
+    if (Array.isArray(value)) {
+      return `[${value.map(item => this.stableTaskWriteValue(item)).join(',')}]`;
+    }
+    if (value && typeof value === 'object') {
+      const record = value as Record<string, unknown>;
+      return `{${Object.keys(record).sort().map(key => (
+        `${JSON.stringify(key)}:${this.stableTaskWriteValue(record[key])}`
+      )).join(',')}}`;
+    }
+    return JSON.stringify(value) ?? 'undefined';
   }
 
 }

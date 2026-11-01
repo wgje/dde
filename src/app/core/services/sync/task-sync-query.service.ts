@@ -4,7 +4,10 @@ import { FIELD_SELECT_CONFIG } from '../../../../config';
 import type { Task } from '../../../../models';
 import type { TaskRow } from '../../../../models/supabase-types';
 import { isBrowserNetworkSuspendedError, isBrowserNetworkSuspendedWindow } from '../../../../utils/browser-network-suspension';
-import { fetchAllSupabasePages } from '../../../../utils/supabase-pagination';
+import {
+  buildSupabaseKeysetOrFilter,
+  fetchAllSupabaseKeysetPages,
+} from '../../../../utils/supabase-pagination';
 import { getCompatibleTaskSelectFields, markTaskCompletedAtColumnUnavailable } from '../../../../utils/task-schema-compat';
 import { supabaseErrorToError } from '../../../../utils/supabase-error';
 import { TaskSyncOperationsBase } from './task-sync-operations-base.service';
@@ -31,28 +34,35 @@ export class TaskSyncQueryService extends TaskSyncOperationsBase {
       const tasksResult = await this.retryTaskRowsWithSchemaFallback(client, projectId, since, initialTasksResult);
 
       if (tasksResult.error) throw supabaseErrorToError(tasksResult.error);
+      if (tombstonesResult.error) throw supabaseErrorToError(tombstonesResult.error);
 
       const remoteTombstoneTimestamps = this.createRemoteTombstoneTimestampMap(tombstonesResult);
       const allTasks = ((tasksResult.data || []) as unknown as TaskRow[]).map(row => this.projectDataService.rowToTask(row));
       return allTasks.map(task => this.materializePulledTaskTombstone(projectId, task, remoteTombstoneTimestamps));
     } catch (e) {
       this.logger.error('拉取任务失败', e);
-      return [];
+      throw e;
     }
   }
 
   private async loadTaskRows(client: SupabaseClient, projectId: string, since?: string) {
-    return await fetchAllSupabasePages<TaskRow>(() => {
+    return await fetchAllSupabaseKeysetPages<TaskRow>((cursor) => {
       let tasksQuery = client
         .from('tasks')
         .select(getCompatibleTaskSelectFields(FIELD_SELECT_CONFIG.TASK_LIST_FIELDS))
         .eq('project_id', projectId);
 
-      if (since) {
-        tasksQuery = tasksQuery.gt('updated_at', since);
+      if (cursor) {
+        tasksQuery = tasksQuery.or(buildSupabaseKeysetOrFilter(cursor));
+      } else if (since) {
+        // Legacy callers only provide a timestamp, not the final row id. Include
+        // the boundary and let LWW absorb duplicates so equal-time rows cannot be lost.
+        tasksQuery = tasksQuery.gte('updated_at', since);
       }
 
-      return tasksQuery;
+      return tasksQuery
+        .order('updated_at', { ascending: true })
+        .order('id', { ascending: true });
     });
   }
 

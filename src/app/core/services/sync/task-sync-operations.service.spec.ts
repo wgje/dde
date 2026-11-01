@@ -33,9 +33,9 @@ import {
   type TaskSyncOperationsDeleteRpcSpecContext,
 } from './task-sync-operations-delete-rpc.spec-helpers';
 import {
-  registerTaskSyncOperationsDirectUpsertSpecs,
-  type TaskSyncOperationsDirectUpsertSpecContext,
-} from './task-sync-operations-direct-upsert.spec-helpers';
+  registerTaskSyncOperationsPositionSpecs,
+  type TaskSyncOperationsPositionSpecContext,
+} from './task-sync-operations-position.spec-helpers';
 import {
   registerTaskSyncOperationsRpcUpsertSpecs,
   type TaskSyncOperationsRpcUpsertSpecContext,
@@ -58,6 +58,10 @@ function createSyncRpcResult(overrides: Partial<SyncRpcResult> = {}): SyncRpcRes
     raw: {},
     ...overrides,
   };
+}
+
+function taskUuid(index: number): string {
+  return `00000000-0000-4000-8000-${index.toString().padStart(12, '0')}`;
 }
 
 const upsertTaskRpcMock = vi.fn<SyncRpcClientService['upsertTask']>();
@@ -102,6 +106,7 @@ describe('TaskSyncOperationsService', () => {
     length: 0,
     recordCircuitSuccess: vi.fn(),
     recordCircuitFailure: vi.fn(),
+    commitTaskReplay: vi.fn(async () => ({ status: 'committed' as const })),
     removeByEntities: vi.fn((_entityType: string, _entityIds: string[]): string[] => []),
     removeConnectionsReferencingTasks: vi.fn((_projectId: string, _taskIds: string[]): string[] => []),
   };
@@ -174,24 +179,12 @@ describe('TaskSyncOperationsService', () => {
     };
   }
 
-  function getDirectUpsertSpecContext(): TaskSyncOperationsDirectUpsertSpecContext {
+  function getPositionSpecContext(): TaskSyncOperationsPositionSpecContext {
     return {
       service,
-      getUpsertPayload: () => upsertPayload,
-      setUpsertPayload: payload => {
-        upsertPayload = payload;
-      },
-      setTaskFreshnessResult: result => {
-        taskFreshnessResult = result;
-      },
-      setTaskInsertResult: result => {
-        taskInsertResult = result;
-      },
-      setTaskUpdateResult: result => {
-        taskUpdateResult = result;
-      },
+      createSyncRpcResult,
       mockClient,
-      mockRetryQueue,
+      mockSyncRpcClient,
       mockTaskStore,
     };
   }
@@ -205,6 +198,7 @@ describe('TaskSyncOperationsService', () => {
       mockSyncRpcClient,
       mockRetryQueue,
       mockSyncState,
+      mockTaskStore,
     };
   }
 
@@ -217,9 +211,9 @@ describe('TaskSyncOperationsService', () => {
       mockClient,
       mockSyncRpcClient,
       mockTaskStore,
-      mockTaskDeleteConflictCapture,
       mockRetryQueue,
       mockTombstoneService,
+      mockTaskDeleteConflictCapture,
     };
   }
 
@@ -319,6 +313,7 @@ describe('TaskSyncOperationsService', () => {
     taskInsertResult = { data: { updated_at: new Date().toISOString() }, error: null };
     taskUpdateResult = { data: { updated_at: new Date().toISOString() }, error: null };
     const defaultUpsertTaskRpcResult: SyncRpcResult = createSyncRpcResult({ entityId: 'task-1' });
+    mockSyncRpcClient.upsertTask.mockReset();
     mockSyncRpcClient.upsertTask.mockImplementation(async () => defaultUpsertTaskRpcResult);
     mockTaskStore.getTask.mockReturnValue(undefined);
     mockTaskStore.setTask.mockReset();
@@ -415,191 +410,7 @@ describe('TaskSyncOperationsService', () => {
     service = TestBed.inject(TaskSyncOperationsService);
   });
 
-  it('pushTaskPosition 在 sync RPC 开启且有任务快照时应走受 CAS 保护的 task upsert', async () => {
-    mockSyncRpcClient.isFeatureEnabled.mockReturnValue(true);
-    const rpcResult: SyncRpcResult = createSyncRpcResult({
-      entityId: 'task-position-rpc',
-      serverUpdatedAt: '2026-04-30T08:00:00.000Z',
-    });
-    mockSyncRpcClient.upsertTask.mockImplementationOnce(async () => rpcResult);
-    const fallbackTask = {
-      id: 'task-position-rpc',
-      title: 'Position task',
-      content: 'Position task',
-      x: 1,
-      y: 2,
-      updatedAt: '2026-04-30T07:00:00.000Z',
-    } as Task;
-    mockTaskStore.getTask.mockReturnValue({ ...fallbackTask });
-
-    const result = await service.pushTaskPosition(
-      'task-position-rpc',
-      10,
-      20,
-      'project-1',
-      fallbackTask,
-      'user-1',
-    );
-
-    expect(result).toBe(true);
-    expect(mockSyncRpcClient.upsertTask).toHaveBeenCalledWith(expect.objectContaining({
-      task: expect.objectContaining({
-        id: 'task-position-rpc',
-        x: 10,
-        y: 20,
-      }),
-      projectId: 'project-1',
-      baseUpdatedAt: '2026-04-30T07:00:00.000Z',
-      writeIntent: 'task_structure_update',
-    }));
-    expect(mockClient.from).not.toHaveBeenCalledWith('tasks');
-    expect(fallbackTask.x).toBe(10);
-    expect(fallbackTask.y).toBe(20);
-    expect(fallbackTask.updatedAt).toBe('2026-04-30T08:00:00.000Z');
-    expect(mockTaskStore.setTask).toHaveBeenCalledWith(
-      expect.objectContaining({
-        id: 'task-position-rpc',
-        x: 10,
-        y: 20,
-        updatedAt: '2026-04-30T08:00:00.000Z',
-      }),
-      'project-1',
-    );
-  });
-
-  it('pushTaskPosition 收到本地操作 operationId 时应复用同一个 RPC 幂等键', async () => {
-    mockSyncRpcClient.isFeatureEnabled.mockReturnValue(true);
-    const operationId = '11111111-1111-4111-8111-111111111111';
-    const rpcResult: SyncRpcResult = createSyncRpcResult({
-      entityId: 'task-position-rpc-operation-id',
-      serverUpdatedAt: '2026-04-30T08:10:00.000Z',
-    });
-    mockSyncRpcClient.upsertTask.mockImplementationOnce(async () => rpcResult);
-    const fallbackTask = {
-      id: 'task-position-rpc-operation-id',
-      title: 'Position task with operationId',
-      content: 'Position task with operationId',
-      x: 1,
-      y: 2,
-      updatedAt: '2026-04-30T08:00:00.000Z',
-    } as Task;
-    mockTaskStore.getTask.mockReturnValue({ ...fallbackTask });
-
-    const result = await service.pushTaskPosition(
-      'task-position-rpc-operation-id',
-      30,
-      40,
-      'project-1',
-      fallbackTask,
-      'user-1',
-      operationId,
-    );
-
-    expect(result).toBe(true);
-    expect(mockSyncRpcClient.upsertTask).toHaveBeenCalledWith(expect.objectContaining({
-      operationId,
-      task: expect.objectContaining({
-        id: 'task-position-rpc-operation-id',
-        x: 30,
-        y: 40,
-      }),
-      projectId: 'project-1',
-      baseUpdatedAt: '2026-04-30T08:00:00.000Z',
-      writeIntent: 'task_structure_update',
-    }));
-  });
-
-  it('pushTaskPosition 直接更新成功后应把 x/y/rank 与服务端 canonical updated_at 写回 fallback 任务', async () => {
-    const serverUpdatedAt = '2026-04-30T08:10:00.000Z';
-    mockClient.from.mockImplementationOnce((table: string) => {
-      if (table !== 'tasks') {
-        throw new Error(`Unexpected table: ${table}`);
-      }
-
-      return {
-        select: vi.fn(() => ({
-          eq: vi.fn(() => ({
-            eq: vi.fn(() => ({
-              maybeSingle: vi.fn(async () => ({
-                data: {
-                  id: 'task-position-direct',
-                  updated_at: '2026-04-30T07:00:00.000Z',
-                  deleted_at: null,
-                },
-                error: null,
-              })),
-            })),
-          })),
-        })),
-      };
-    });
-    mockClient.from.mockImplementationOnce((table: string) => {
-      if (table !== 'tasks') {
-        throw new Error(`Unexpected table: ${table}`);
-      }
-
-      return {
-        update: vi.fn((payload: Record<string, unknown>) => ({
-          eq: vi.fn((firstColumn: string, firstValue: string) => ({
-            eq: vi.fn((secondColumn: string, secondValue: string) => ({
-              eq: vi.fn((thirdColumn: string, thirdValue: string) => ({
-                select: vi.fn(async () => ({
-                  data:
-                    firstColumn === 'id'
-                    && firstValue === 'task-position-direct'
-                    && secondColumn === 'project_id'
-                    && secondValue === 'project-1'
-                    && thirdColumn === 'updated_at'
-                    && thirdValue === '2026-04-30T07:00:00.000Z'
-                    && payload['x'] === 10
-                    && payload['y'] === 20
-                    && payload['rank'] === 42
-                      ? [{ updated_at: serverUpdatedAt }]
-                      : [],
-                  error: null,
-                })),
-              })),
-            })),
-          })),
-        })),
-      };
-    });
-    const fallbackTask = {
-      id: 'task-position-direct',
-      title: 'Position task',
-      content: 'Position task',
-      x: 1,
-      y: 2,
-      rank: 42,
-      updatedAt: '2026-04-30T07:00:00.000Z',
-    } as Task;
-    mockTaskStore.getTask.mockReturnValueOnce({ ...fallbackTask });
-
-    const result = await service.pushTaskPosition(
-      'task-position-direct',
-      10,
-      20,
-      'project-1',
-      fallbackTask,
-      'user-1',
-    );
-
-    expect(result).toBe(true);
-    expect(fallbackTask.x).toBe(10);
-    expect(fallbackTask.y).toBe(20);
-    expect(fallbackTask.rank).toBe(42);
-    expect(fallbackTask.updatedAt).toBe(serverUpdatedAt);
-    expect(mockTaskStore.setTask).toHaveBeenCalledWith(
-      expect.objectContaining({
-        id: 'task-position-direct',
-        x: 10,
-        y: 20,
-        rank: 42,
-        updatedAt: serverUpdatedAt,
-      }),
-      'project-1',
-    );
-  });
+  registerTaskSyncOperationsPositionSpecs(getPositionSpecContext);
 
   it('sourceUserId 与当前会话不匹配时应拒绝写云端并按原 owner 入队', async () => {
     const task: Task = {
@@ -615,6 +426,7 @@ describe('TaskSyncOperationsService', () => {
       y: 0,
       displayId: 'T-2',
       createdDate: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
       deletedAt: null,
     };
     mockClient.auth.getSession.mockResolvedValueOnce({
@@ -706,14 +518,15 @@ describe('TaskSyncOperationsService', () => {
     mockClient.from.mockImplementationOnce((table: string) => {
       if (table === 'tasks') {
         return {
-          select: vi.fn(() => ({
-            eq: vi.fn(() => ({
-              range: vi.fn(async () => ({
-                data: [restoredTask],
-                error: null,
-              })),
-            })),
-          })),
+          select: vi.fn(() => {
+            const query = {
+              eq: vi.fn(() => query),
+              order: vi.fn(() => query),
+              range: vi.fn(async () => ({ data: [restoredTask], error: null })),
+              limit: vi.fn(async () => ({ data: [restoredTask], error: null })),
+            };
+            return query;
+          }),
         };
       }
 
@@ -755,27 +568,74 @@ describe('TaskSyncOperationsService', () => {
     expect(result.deletedAtByTaskId?.has('task-remote-missing-deleted-at')).toBe(false);
   });
 
-  it('pullTasks 应读取完整 Supabase REST 分页', async () => {
+  it('pullTasks 应使用 (updated_at,id) keyset 且不得漏掉 since 同时间戳任务', async () => {
+    const since = '2026-06-09T00:01:00.000Z';
     const rows = Array.from({ length: 1001 }, (_, index) => ({
-      id: `task-${index.toString().padStart(4, '0')}`,
+      id: taskUuid(index),
       title: `Task ${index}`,
       content: `Content ${index}`,
-      updatedAt: new Date(Date.UTC(2026, 5, 9, 0, 1, index)).toISOString(),
-    })) as Task[];
-    const ranges: Array<[number, number]> = [];
+      stage: 0,
+      parentId: null,
+      order: index,
+      rank: 10000 + index,
+      status: 'active',
+      x: 0,
+      y: 0,
+      displayId: `T-${index}`,
+      createdDate: '2026-06-09T00:00:00.000Z',
+      deletedAt: null,
+      updatedAt: since,
+      updated_at: since,
+    })) as Array<Task & { updated_at: string }>;
+    const lowerBounds: Array<{ operator: 'gt' | 'gte'; column: string; value: string }> = [];
+    const keysetFilters: string[] = [];
+    const orders: Array<{ column: string; ascending: boolean }> = [];
 
     mockClient.from.mockImplementation((table: string) => {
       if (table === 'tasks') {
         return {
           select: vi.fn(() => {
-            const query = {
-              eq: vi.fn(() => query),
-              gt: vi.fn(() => query),
-              range: vi.fn(async (from: number, to: number) => {
-                ranges.push([from, to]);
-                return { data: rows.slice(from, to + 1), error: null };
-              }),
+            let lowerBound: 'gt' | 'gte' | null = null;
+            let keysetFilter: string | null = null;
+            const visibleRows = () => {
+              if (keysetFilter) {
+                const cursorId = /id\.gt\.([^)]+)/.exec(keysetFilter)?.[1] ?? '';
+                return rows.filter(row => row.id > cursorId);
+              }
+              return lowerBound === 'gt'
+                ? rows.filter(row => row.updated_at > since)
+                : rows.filter(row => row.updated_at >= since);
             };
+            const query: Record<string, ReturnType<typeof vi.fn>> = {};
+            Object.assign(query, {
+              eq: vi.fn(() => query),
+              gt: vi.fn((column: string, value: string) => {
+                lowerBound = 'gt';
+                lowerBounds.push({ operator: 'gt', column, value });
+                return query;
+              }),
+              gte: vi.fn((column: string, value: string) => {
+                lowerBound = 'gte';
+                lowerBounds.push({ operator: 'gte', column, value });
+                return query;
+              }),
+              or: vi.fn((filter: string) => {
+                keysetFilter = filter;
+                keysetFilters.push(filter);
+                return query;
+              }),
+              order: vi.fn((column: string, options: { ascending: boolean }) => {
+                orders.push({ column, ascending: options.ascending });
+                return query;
+              }),
+              range: vi.fn(async (from: number, to: number) => {
+                return { data: visibleRows().slice(from, to + 1), error: null };
+              }),
+              limit: vi.fn(async (count: number) => ({
+                data: visibleRows().slice(0, count),
+                error: null,
+              })),
+            });
             return query;
           }),
         };
@@ -785,18 +645,100 @@ describe('TaskSyncOperationsService', () => {
     });
     mockTombstoneService.getTombstonesWithCache.mockResolvedValueOnce({ data: [], error: null });
 
-    const result = await service.pullTasks('project-1');
+    const result = await service.pullTasks('project-1', since);
 
     expect(result).toHaveLength(1001);
-    expect(result[0]?.id).toBe('task-0000');
-    expect(result[1000]?.id).toBe('task-1000');
-    expect(ranges).toEqual([
-      [0, 999],
-      [1000, 1999],
+    expect(result[0]?.id).toBe(taskUuid(0));
+    expect(result[1000]?.id).toBe(taskUuid(1000));
+    expect(lowerBounds).toEqual([
+      { operator: 'gte', column: 'updated_at', value: since },
+    ]);
+    expect(keysetFilters).toEqual([
+      `updated_at.gt.${since},and(updated_at.eq.${since},id.gt.${taskUuid(999)})`,
+    ]);
+    expect(orders).toEqual([
+      { column: 'updated_at', ascending: true },
+      { column: 'id', ascending: true },
+      { column: 'updated_at', ascending: true },
+      { column: 'id', ascending: true },
     ]);
   });
 
-  registerTaskSyncOperationsDirectUpsertSpecs(getDirectUpsertSpecContext);
+  it('pullTasks 查询失败时必须抛出，不能伪装成远端空结果', async () => {
+    const queryError = { message: 'network failed' };
+    mockClient.from.mockImplementationOnce((table: string) => {
+      if (table !== 'tasks') throw new Error(`Unexpected table: ${table}`);
+      return {
+        select: vi.fn(() => {
+          const query = {
+            eq: vi.fn(() => query),
+            order: vi.fn(() => query),
+            range: vi.fn(async () => ({ data: null, error: queryError })),
+            limit: vi.fn(async () => ({ data: null, error: queryError })),
+          };
+          return query;
+        }),
+      };
+    });
+    mockTombstoneService.getTombstonesWithCache.mockResolvedValueOnce({ data: [], error: null });
+
+    await expect(service.pullTasks('project-1')).rejects.toMatchObject({
+      message: 'network failed',
+    });
+  });
+
+  it('pullTasks tombstone 读取失败时必须抛出，不能冒险复活已删除任务', async () => {
+    mockClient.from.mockImplementationOnce((table: string) => {
+      if (table !== 'tasks') throw new Error(`Unexpected table: ${table}`);
+      return {
+        select: vi.fn(() => {
+          const query = {
+            eq: vi.fn(() => query),
+            order: vi.fn(() => query),
+            range: vi.fn(async () => ({ data: [], error: null })),
+            limit: vi.fn(async () => ({ data: [], error: null })),
+          };
+          return query;
+        }),
+      };
+    });
+    mockTombstoneService.getTombstonesWithCache.mockResolvedValueOnce({
+      data: null,
+      error: new Error('tombstone read failed'),
+    });
+
+    await expect(service.pullTasks('project-1')).rejects.toThrow('tombstone read failed');
+  });
+
+  it('pullTasks 行映射失败时必须抛出，不能把损坏行解释为空结果', async () => {
+    const row = {
+      id: taskUuid(1),
+      title: 'Malformed task row',
+      content: 'content',
+      updated_at: '2026-06-09T00:01:00.000Z',
+    };
+    mockClient.from.mockImplementationOnce((table: string) => {
+      if (table !== 'tasks') throw new Error(`Unexpected table: ${table}`);
+      return {
+        select: vi.fn(() => {
+          const query = {
+            eq: vi.fn(() => query),
+            order: vi.fn(() => query),
+            range: vi.fn(async () => ({ data: [row], error: null })),
+            limit: vi.fn(async () => ({ data: [row], error: null })),
+          };
+          return query;
+        }),
+      };
+    });
+    mockTombstoneService.getTombstonesWithCache.mockResolvedValueOnce({ data: [], error: null });
+    mockProjectDataService.rowToTask.mockImplementationOnce(() => {
+      throw new Error('invalid task row');
+    });
+
+    await expect(service.pullTasks('project-1')).rejects.toThrow('invalid task row');
+  });
+
   registerTaskSyncOperationsRpcUpsertSpecs(getRpcUpsertSpecContext);
   registerTaskSyncOperationsDeleteRpcSpecs(getDeleteRpcSpecContext);
   registerTaskSyncOperationsBrowserSuspensionSpecs(getBrowserSuspensionSpecContext);

@@ -22,7 +22,31 @@ export interface TaskPushRequest {
   treatTombstoneAsPermanent: boolean;
   writeIntent?: TaskWriteIntent;
   operationId?: string;
+  replayFence?: TaskActionQueueReplayFence;
+  replayHandoff?: boolean;
+  replayOutcome?: 'stale' | 'deferred';
 }
+
+export type TaskActionQueueReplayInput = {
+  actionId: string;
+  actionOperationId: string;
+  task: Task;
+  projectId: string;
+  sourceUserId: string;
+  writeIntent?: TaskWriteIntent;
+  leaseSignal: AbortSignal;
+  isFenceCurrent: () => boolean;
+};
+
+export type TaskActionQueueReplayFence = TaskActionQueueReplayInput & {
+  durableTask: Task;
+  payloadSignature: string;
+  isCurrent: () => boolean;
+};
+
+export type TaskActionQueueReplayResult =
+  | { outcome: 'applied' | 'handoff' | 'stale' | 'deferred' }
+  | { outcome: 'conflict'; error: unknown };
 
 export type TaskPushExecutionOutcome = 'pushed' | 'blocked-by-tombstone' | 'blocked-by-sync-rpc' | 'not-pushed';
 

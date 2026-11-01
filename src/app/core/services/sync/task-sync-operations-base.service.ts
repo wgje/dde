@@ -33,6 +33,11 @@ import { SyncOperationHelperService } from './sync-operation-helper.service';
 import { SyncStateService } from './sync-state.service';
 import { TombstoneService } from './tombstone.service';
 import {
+  isSyncResponseVersionCurrent,
+  type SyncResponseVersionSnapshot,
+} from './sync-response-version-guard';
+import { TaskSyncPositionSnapshotController } from './task-sync-position-snapshot.controller';
+import {
   MISSING_TASK_TIMESTAMP_REASON,
   createClockUncertainError as createClockUncertainErrorPure,
   createMissingTaskTimestampConflictError as createMissingTaskTimestampConflictErrorPure,
@@ -40,7 +45,9 @@ import {
   isMissingTaskTimestampRejection as isMissingTaskTimestampRejectionPure,
 } from './task-sync-conflict-errors';
 import type { RetryTaskDeleteData } from './retry-queue.types';
-import type { RemoteTaskFreshness, TaskPushRequest } from './task-sync-operations.types';
+import { buildActionQueuePayloadSignature } from '../../../../services/action-queue-identity.helpers';
+import type { RemoteTaskFreshness, TaskActionQueueReplayFence, TaskActionQueueReplayInput,
+  TaskActionQueueReplayResult, TaskPushRequest } from './task-sync-operations.types';
 
 export abstract class TaskSyncOperationsBase {
 
@@ -60,6 +67,10 @@ export abstract class TaskSyncOperationsBase {
   protected readonly taskStore = inject(TaskStore, { optional: true });
   protected readonly syncRpcClient = inject(SyncRpcClientService, { optional: true });
   protected readonly dataSafetyWriteAudit = new DataSafetyWriteAuditService();
+  private readonly taskPositionSnapshotController = new TaskSyncPositionSnapshotController({
+    taskStore: this.taskStore,
+    logDebug: (message, context) => this.logger.debug(message, context),
+  });
 
   /**
    * 安全添加到重试队列（含会话和数据有效性检查）
@@ -175,12 +186,32 @@ export abstract class TaskSyncOperationsBase {
     this.logger.debug('添加本地 tombstones', { projectId, count: taskIds.length });
   }
 
-  protected normalizeLocalTaskUpdatedAt(task: Task, projectId: string, serverUpdatedAt?: string | null): void {
+  protected normalizeLocalTaskUpdatedAt(
+    task: Task,
+    projectId: string,
+    serverUpdatedAt: string | null | undefined,
+    requestVersion: SyncResponseVersionSnapshot,
+  ): void {
     if (!serverUpdatedAt) {
       return;
     }
 
     const currentTask = this.taskStore?.getTask(task.id);
+    const currentEntities = currentTask ? [task, currentTask] : [task];
+    if (!isSyncResponseVersionCurrent(requestVersion, currentEntities)) {
+      this.logger.debug('跳过旧 task 成功响应的 updatedAt 回写', {
+        taskId: task.id,
+        projectId,
+        requestUpdatedAt: requestVersion.updatedAt,
+        requestDeletedAt: requestVersion.deletedAt,
+        taskUpdatedAt: task.updatedAt ?? null,
+        currentUpdatedAt: currentTask?.updatedAt ?? null,
+        serverUpdatedAt,
+      });
+      this.clockSync.recordServerTimestamp(serverUpdatedAt, task.id);
+      return;
+    }
+
     if (currentTask) {
       this.taskStore?.setTask({ ...currentTask, updatedAt: serverUpdatedAt }, projectId);
     }
@@ -238,14 +269,22 @@ export abstract class TaskSyncOperationsBase {
     result: SyncRpcResult,
     task: Task,
     projectId: string,
+    requestVersion: SyncResponseVersionSnapshot,
     fromRetryQueue: boolean,
     sourceUserId: string | undefined,
     writeIntent: TaskWriteIntent | undefined,
     operationId?: string,
     auditRequest?: TaskPushRequest,
+    normalizeAppliedTaskUpdatedAt = true,
   ): Promise<boolean> {
     if (result.status === 'applied' || result.status === 'idempotent-replay') {
-      return this.handleAppliedTaskSyncRpcResult(result, task, projectId);
+      return this.handleAppliedTaskSyncRpcResult(
+        result,
+        task,
+        projectId,
+        requestVersion,
+        normalizeAppliedTaskUpdatedAt,
+      );
     }
 
     if (result.status === 'remote-newer') {
@@ -268,13 +307,84 @@ export abstract class TaskSyncOperationsBase {
     );
   }
 
+  protected createTaskReplayFence(input: TaskActionQueueReplayInput): TaskActionQueueReplayFence {
+    const durableTask = structuredClone(input.task);
+    const { displayId: _displayId, ...persistedTask } = durableTask;
+    const payloadSignature = buildActionQueuePayloadSignature({
+      task: persistedTask,
+      projectId: input.projectId,
+      sourceUserId: input.sourceUserId,
+      writeIntent: input.writeIntent,
+    });
+    let rejected = false;
+    const isCurrent = (): boolean => {
+      rejected ||= input.leaseSignal.aborted
+        || !input.isFenceCurrent()
+        || payloadSignature !== buildActionQueuePayloadSignature({
+          task: persistedTask,
+          projectId: input.projectId,
+          sourceUserId: input.sourceUserId,
+          writeIntent: input.writeIntent,
+        });
+      return !rejected;
+    };
+    return { ...input, task: durableTask, durableTask, payloadSignature, isCurrent };
+  }
+
+  protected classifyTaskReplayResult(
+    result: SyncRpcResult,
+    fence: TaskActionQueueReplayFence,
+  ): TaskActionQueueReplayResult | null {
+    if (!fence.isCurrent() || result.reason === 'replay_fence_stale') return { outcome: 'stale' };
+    const exactReceipt = result.entityId === fence.durableTask.id
+      && (result.raw as { task_id?: unknown } | null)?.task_id === fence.durableTask.id
+      && result.operationId === fence.actionOperationId;
+    if (result.status === 'remote-newer') {
+      if (!exactReceipt) return null;
+      return {
+        outcome: 'conflict',
+        error: this.createRemoteNewerConflictError(
+          fence.durableTask.id,
+          fence.projectId,
+          result.remoteUpdatedAt ?? null,
+          'remote-newer',
+        ),
+      };
+    }
+    return (result.status === 'applied' || result.status === 'idempotent-replay')
+      && exactReceipt
+      ? { outcome: 'applied' }
+      : null;
+  }
+
+  protected async handoffTaskReplay(fence: TaskActionQueueReplayFence): Promise<TaskActionQueueReplayResult> {
+    if (!fence.isCurrent()) return { outcome: 'stale' };
+    const result = await this.retryQueueService.commitTaskReplay({
+      actionId: fence.actionId,
+      actionOperationId: fence.actionOperationId,
+      task: fence.durableTask,
+      projectId: fence.projectId,
+      sourceUserId: fence.sourceUserId,
+      writeIntent: fence.writeIntent,
+      payloadSignature: fence.payloadSignature,
+      leaseSignal: fence.leaseSignal,
+      isFenceCurrent: fence.isCurrent,
+    });
+    if (!fence.isCurrent()) return { outcome: 'stale' };
+    return result.status === 'current' || result.status === 'committed'
+      ? { outcome: 'handoff' }
+      : { outcome: 'deferred' };
+  }
+
   protected handleAppliedTaskSyncRpcResult(
     result: SyncRpcResult,
     task: Task,
     projectId: string,
+    requestVersion: SyncResponseVersionSnapshot,
+    normalizeUpdatedAt = true,
   ): boolean {
-    if (result.serverUpdatedAt) {
-      this.normalizeLocalTaskUpdatedAt(task, projectId, result.serverUpdatedAt);
+    if (normalizeUpdatedAt && result.serverUpdatedAt) {
+      this.normalizeLocalTaskUpdatedAt(task, projectId, result.serverUpdatedAt, requestVersion);
     }
     this.logger.debug('pushTask: sync RPC 写入成功', {
       taskId: task.id,
@@ -323,13 +433,14 @@ export abstract class TaskSyncOperationsBase {
     request: TaskPushRequest,
     operationId: string,
     result: SyncRpcResult,
+    requestVersion: SyncResponseVersionSnapshot,
   ): void {
     request.dataSafetyRpcAudit = {
       operationId,
       result,
       localTimestamp: Date.now(),
-      updatedAtBaseline: request.task.updatedAt ?? null,
-      beforeVersion: request.task.updatedAt ?? null,
+      updatedAtBaseline: requestVersion.updatedAt,
+      beforeVersion: requestVersion.updatedAt,
       enteredRetryQueue: false,
       retryCount: 0,
       lastSyncTimeBefore: this.syncStateService.syncState().lastSyncTime,
@@ -362,6 +473,7 @@ export abstract class TaskSyncOperationsBase {
       entityType: 'task',
       entityId: request.task.id,
       operation: 'upsert',
+      writeIntent: request.writeIntent,
       localTimestamp: audit.localTimestamp,
       updatedAtBaseline: audit.updatedAtBaseline,
       beforeVersion: audit.beforeVersion,
@@ -503,30 +615,17 @@ export abstract class TaskSyncOperationsBase {
     x: number,
     y: number,
     serverUpdatedAt?: string | null,
+    requestVersion?: SyncResponseVersionSnapshot,
   ): void {
-    const rank = fallbackTask?.rank;
-    if (projectId) {
-      const currentTask = this.taskStore?.getTask(taskId);
-      if (currentTask) {
-        this.taskStore?.setTask({
-          ...currentTask,
-          x,
-          y,
-          ...(rank !== undefined ? { rank } : {}),
-          ...(serverUpdatedAt ? { updatedAt: serverUpdatedAt } : {}),
-        }, projectId);
-      }
-    }
-
-    if (!fallbackTask) {
-      return;
-    }
-
-    fallbackTask.x = x;
-    fallbackTask.y = y;
-    if (serverUpdatedAt) {
-      fallbackTask.updatedAt = serverUpdatedAt;
-    }
+    this.taskPositionSnapshotController.applySnapshot({
+      taskId,
+      projectId,
+      fallbackTask,
+      x,
+      y,
+      serverUpdatedAt,
+      requestVersion,
+    });
   }
 
   protected markSessionExpiredWithoutThrow(

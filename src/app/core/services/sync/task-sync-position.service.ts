@@ -1,9 +1,20 @@
 import { Injectable } from '@angular/core';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { Task } from '../../../../models';
+import type { SyncRpcResult } from '../../../../services/sync-rpc-client.service';
 import { isBrowserNetworkSuspendedWindow } from '../../../../utils/browser-network-suspension';
 import { TaskSyncOperationsBase } from './task-sync-operations-base.service';
-import type { RemoteTaskFreshness, TaskPositionPushRequest } from './task-sync-operations.types';
+import type { TaskPositionPushRequest, TaskPushRequest } from './task-sync-operations.types';
+import {
+  captureSyncResponseVersion,
+  type SyncResponseVersionSnapshot,
+} from './sync-response-version-guard';
+
+type CompleteTaskPositionPushRequest = TaskPositionPushRequest & {
+  projectId: string;
+  fallbackTask: Task;
+  operationId: string;
+};
 
 @Injectable({ providedIn: 'root' })
 export class TaskSyncPositionService extends TaskSyncOperationsBase {
@@ -26,14 +37,7 @@ export class TaskSyncPositionService extends TaskSyncOperationsBase {
       sourceUserId,
       operationId,
     };
-
-    if (this.syncStateService.isSessionExpired()) {
-      this.logger.debug('pushTaskPosition: 会话已过期，跳过推送');
-      return false;
-    }
-    
-    if (!this.retryQueueService.checkCircuitBreaker()) {
-      this.logger.debug('Circuit Breaker: 熔断中，跳过位置推送', { taskId });
+    if (!this.canStartTaskPositionPush(taskId)) {
       return false;
     }
     
@@ -60,7 +64,26 @@ export class TaskSyncPositionService extends TaskSyncOperationsBase {
       return await this.pushTaskPositionViaSyncRpc(request);
     }
 
-    return await this.pushTaskPositionDirect(client, request);
+    this.logger.warn('pushTaskPosition: sync RPC 不可用，已拒绝 tasks 直接更新', {
+      taskId: request.taskId,
+      projectId: request.projectId ?? null,
+      hasOperationId: request.operationId !== undefined,
+    });
+    return false;
+  }
+
+  private canStartTaskPositionPush(taskId: string): boolean {
+    if (this.syncStateService.isSessionExpired()) {
+      this.logger.debug('pushTaskPosition: 会话已过期，跳过推送');
+      return false;
+    }
+
+    if (!this.retryQueueService.checkCircuitBreaker()) {
+      this.logger.debug('Circuit Breaker: 熔断中，跳过位置推送', { taskId });
+      return false;
+    }
+
+    return true;
   }
 
   private async ensureTaskPositionPushSessionOwner(
@@ -136,32 +159,78 @@ export class TaskSyncPositionService extends TaskSyncOperationsBase {
     return false;
   }
 
+  private hasTaskPositionOperationId(
+    request: TaskPositionPushRequest,
+  ): request is TaskPositionPushRequest & { operationId: string } {
+    if (request.operationId) {
+      return true;
+    }
+
+    this.logger.warn('pushTaskPosition: 缺少 operationId，拒绝生成仅限单次 RPC 的临时幂等键', {
+      taskId: request.taskId,
+      projectId: request.projectId,
+    });
+    return false;
+  }
+
   private async pushTaskPositionViaSyncRpc(request: TaskPositionPushRequest): Promise<boolean> {
     if (!this.hasTaskPositionSnapshot(request, 'sync RPC 开启但缺少任务快照，跳过未受保护的位置直写')) {
       return false;
     }
+    if (!this.hasTaskPositionOperationId(request)) {
+      return false;
+    }
 
     try {
+      const requestVersion = captureSyncResponseVersion(request.fallbackTask);
       const taskForRpc = {
         ...request.fallbackTask,
         x: request.x,
         y: request.y,
       };
       const result = await this.syncRpcClient!.upsertTask({
-        operationId: request.operationId ?? this.createSyncRpcOperationId(),
+        operationId: request.operationId,
         task: taskForRpc,
         projectId: request.projectId,
-        baseUpdatedAt: request.fallbackTask.updatedAt ?? null,
+        baseUpdatedAt: requestVersion.updatedAt,
         writeIntent: 'task_structure_update',
       });
+      return await this.handleTaskPositionSyncRpcResult(request, taskForRpc, requestVersion, result);
+    } catch (error) {
+      return this.handleTaskPositionRpcError(request, error);
+    }
+  }
 
+  private async handleTaskPositionSyncRpcResult(
+    request: CompleteTaskPositionPushRequest,
+    taskForRpc: Task,
+    requestVersion: SyncResponseVersionSnapshot,
+    result: SyncRpcResult,
+  ): Promise<boolean> {
+    const auditRequest: TaskPushRequest = {
+      task: taskForRpc,
+      projectId: request.projectId,
+      skipTombstoneCheck: true,
+      fromRetryQueue: false,
+      sourceUserId: request.sourceUserId,
+      treatTombstoneAsPermanent: false,
+      writeIntent: 'task_structure_update',
+      operationId: request.operationId,
+    };
+    this.beginTaskRpcWriteAudit(auditRequest, request.operationId, result, requestVersion);
+
+    try {
       const pushed = await this.handleTaskSyncRpcResult(
         result,
         taskForRpc,
         request.projectId,
+        requestVersion,
         false,
         request.sourceUserId,
         'task_structure_update',
+        request.operationId,
+        auditRequest,
+        false,
       );
       if (pushed) {
         this.applyTaskPositionSnapshot(
@@ -170,12 +239,13 @@ export class TaskSyncPositionService extends TaskSyncOperationsBase {
           request.fallbackTask,
           request.x,
           request.y,
-          taskForRpc.updatedAt ?? result.serverUpdatedAt ?? null,
+          result.serverUpdatedAt ?? taskForRpc.updatedAt ?? null,
+          requestVersion,
         );
       }
       return pushed;
-    } catch (error) {
-      return this.handleTaskPositionRpcError(request, error);
+    } finally {
+      this.recordTaskRpcWriteAudit(auditRequest);
     }
   }
 
@@ -190,139 +260,5 @@ export class TaskSyncPositionService extends TaskSyncOperationsBase {
 
     this.logger.debug('pushTaskPosition sync RPC 异常', { taskId: request.taskId, error });
     return false;
-  }
-
-  private async pushTaskPositionDirect(
-    client: SupabaseClient,
-    request: TaskPositionPushRequest,
-  ): Promise<boolean> {
-    if (!this.hasTaskPositionSnapshot(request, '缺少任务快照或 projectId，跳过未受保护的位置直写')) {
-      return false;
-    }
-
-    try {
-      return await this.tryUpdateTaskPositionDirect(client, request);
-    } catch (error) {
-      if (isBrowserNetworkSuspendedWindow()) {
-        this.logger.info('浏览器网络挂起，延后任务位置同步', {
-          taskId: request.taskId,
-          projectId: request.projectId,
-        });
-        return false;
-      }
-
-      this.logger.debug('pushTaskPosition 异常', { taskId: request.taskId, error });
-      return false;
-    }
-  }
-
-  private async tryUpdateTaskPositionDirect(
-    client: SupabaseClient,
-    request: TaskPositionPushRequest & { projectId: string; fallbackTask: Task },
-  ): Promise<boolean> {
-    const remoteTask = await this.loadRemoteTaskFreshness(client, request.taskId, request.projectId);
-    const remoteUpdatedAt = remoteTask?.updatedAt ?? null;
-    if (!await this.canDirectlyUpdateTaskPosition(request, remoteTask)) {
-      return false;
-    }
-
-    const { data, error } = await client
-      .from('tasks')
-      .update({ x: request.x, y: request.y, rank: request.fallbackTask.rank })
-      .eq('id', request.taskId)
-      .eq('project_id', request.projectId)
-      .eq('updated_at', remoteUpdatedAt)
-      .select('updated_at');
-
-    if (error) {
-      this.logger.debug('pushTaskPosition 失败', { taskId: request.taskId, error: error.message });
-      return false;
-    }
-
-    const updatedAt = Array.isArray(data) && data.length > 0
-      ? String((data[0] as { updated_at?: string | null }).updated_at ?? '')
-      : '';
-    if (!updatedAt) {
-      this.logger.warn('pushTaskPosition 未命中远端任务，需回退完整推送', {
-        taskId: request.taskId,
-        projectId: request.projectId,
-      });
-      return false;
-    }
-
-    this.clockSync.recordServerTimestamp(updatedAt, request.taskId);
-    this.applyTaskPositionSnapshot(
-      request.taskId,
-      request.projectId,
-      request.fallbackTask,
-      request.x,
-      request.y,
-      updatedAt,
-    );
-
-    this.retryQueueService.recordCircuitSuccess();
-    return true;
-  }
-
-  private async canDirectlyUpdateTaskPosition(
-    request: TaskPositionPushRequest & { projectId: string; fallbackTask: Task },
-    remoteTask: RemoteTaskFreshness | null,
-  ): Promise<boolean> {
-    const remoteUpdatedAt = remoteTask?.updatedAt ?? null;
-    const localUpdatedAt = request.fallbackTask.updatedAt ?? null;
-    const remoteHasTombstone = !!remoteTask?.deletedAt;
-    const remoteNewerStatus = await this.getTaskPositionRemoteNewerStatus(request, remoteTask);
-
-    if (remoteNewerStatus === 'clock-unreliable') {
-      this.logger.warn('pushTaskPosition 时钟基线不可靠，延后位置同步避免洗白陈旧快照', {
-        taskId: request.taskId,
-        projectId: request.projectId,
-        localUpdatedAt,
-        remoteUpdatedAt,
-      });
-      return false;
-    }
-
-    if (remoteHasTombstone || remoteNewerStatus === 'remote-newer' || !remoteUpdatedAt) {
-      this.logger.warn('pushTaskPosition 预检阻止未受保护的位置直写，需回退完整推送', {
-        taskId: request.taskId,
-        projectId: request.projectId,
-        remoteHasTombstone,
-        remoteUpdatedAt,
-        localUpdatedAt,
-        reason: remoteHasTombstone
-          ? 'remote-tombstone'
-          : remoteNewerStatus === 'remote-newer' ? 'remote-newer' : 'remote-missing',
-      });
-      return false;
-    }
-
-    return true;
-  }
-
-  private async getTaskPositionRemoteNewerStatus(
-    request: TaskPositionPushRequest & { projectId: string; fallbackTask: Task },
-    remoteTask: RemoteTaskFreshness | null,
-  ): Promise<'same-or-local-newer' | 'remote-newer' | 'clock-unreliable'> {
-    const remoteUpdatedAt = remoteTask?.updatedAt ?? null;
-    const localUpdatedAt = request.fallbackTask.updatedAt ?? null;
-    if (!remoteUpdatedAt || !localUpdatedAt) {
-      return 'same-or-local-newer';
-    }
-
-    const rawRemoteMs = new Date(remoteUpdatedAt).getTime();
-    const rawLocalMs = new Date(localUpdatedAt).getTime();
-    if (!Number.isFinite(rawRemoteMs) || !Number.isFinite(rawLocalMs) || rawLocalMs === rawRemoteMs) {
-      return 'same-or-local-newer';
-    }
-
-    const clockSyncResult = await this.clockSync.ensureSynced().catch(() => null);
-    if (!clockSyncResult?.reliable) {
-      return 'clock-unreliable';
-    }
-
-    return this.clockSync.compareTimestamps(localUpdatedAt, remoteUpdatedAt) < 0
-      ? 'remote-newer'
-      : 'same-or-local-newer';
   }
 }

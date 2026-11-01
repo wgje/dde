@@ -2,6 +2,7 @@ import { expect, it, type Mock, vi } from 'vitest';
 
 import type { Task } from '../../../../models';
 import { PermanentFailureError } from '../../../../utils/permanent-failure-error';
+import { isRetryDeferredError } from '../../../../utils/retry-deferred-error';
 import type { TaskSyncOperationsService } from './task-sync-operations.service';
 
 type MockFn = Mock<(...args: any[]) => any>;
@@ -50,6 +51,7 @@ function createTask(overrides: Partial<Task>): Task {
     y: 0,
     displayId: 'T-R',
     createdDate: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
     deletedAt: null,
     ...overrides,
   };
@@ -257,35 +259,12 @@ export function registerTaskSyncOperationsRetryGuardSpecs(
     }));
   });
 
-  it('sync RPC 不可用时应保留耐久删除意图且不调用 legacy purge RPC', async () => {
+  it('sync RPC 不可用时应仅保留耐久删除意图，不得调用 legacy RPC 或 REST CAS', async () => {
     const { service, mockClient, mockRetryQueue, mockSyncRpcClient, mockTaskStore } = getContext();
     mockSyncRpcClient.isFeatureEnabled.mockReturnValue(false);
     mockTaskStore.getTask.mockReturnValue({
       id: 'task-legacy-cas',
       updatedAt: '2026-04-01T00:00:00.000Z',
-    });
-    let updateEqCount = 0;
-    mockClient.from.mockImplementation((table: string) => {
-      if (table !== 'tasks') throw new Error(`Unexpected table: ${table}`);
-      return {
-        select: vi.fn(() => ({
-          eq: vi.fn(() => ({
-            in: vi.fn(async () => ({ data: [{ id: 'task-legacy-cas' }], error: null })),
-          })),
-        })),
-        update: vi.fn(() => {
-          const chain = {
-            eq: vi.fn(() => {
-              updateEqCount += 1;
-              return chain;
-            }),
-            select: vi.fn(() => ({
-              maybeSingle: vi.fn(async () => ({ data: { id: 'task-legacy-cas' }, error: null })),
-            })),
-          };
-          return chain;
-        }),
-      };
     });
 
     const result = await service.purgeTasksFromCloud('project-1', ['task-legacy-cas'], 'user-1');
@@ -293,17 +272,22 @@ export function registerTaskSyncOperationsRetryGuardSpecs(
     expect(result).toBe(false);
     expect(mockClient.rpc).not.toHaveBeenCalledWith('purge_tasks_v3', expect.anything());
     expect(mockClient.rpc).not.toHaveBeenCalledWith('purge_tasks_v2', expect.anything());
-    expect(updateEqCount).toBe(0);
+    expect(mockClient.from).not.toHaveBeenCalled();
     expect(mockRetryQueue.addDurably).toHaveBeenCalledWith(
       'task',
       'delete',
-      { id: 'task-legacy-cas', baseUpdatedAt: '2026-04-01T00:00:00.000Z' },
+      {
+        id: 'task-legacy-cas',
+        baseUpdatedAt: '2026-04-01T00:00:00.000Z',
+      },
       'project-1',
       'user-1',
       undefined,
       undefined,
       undefined,
-      expect.any(String),
+      expect.stringMatching(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[45][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+      ),
     );
   });
 
@@ -344,19 +328,16 @@ export function registerTaskSyncOperationsRetryGuardSpecs(
     expect(mockRetryQueue.add).not.toHaveBeenCalled();
   });
 
-  it('重试队列回放 task upsert 在 sync RPC 不可用时应降级 REST 直连而不是空转消耗重试预算', async () => {
-    // P0 回归：RPC 能力探针失败被缓存后 shouldUseSyncRpc()=false，
-    // 回放若只返回 blocked-by-sync-rpc，每 5s 一轮秒败烧 retryCount，
-    // ~30s 内任务项被打入隔离区。project/connection 回放都有 REST 兜底，task 必须对齐。
+  it('重试队列回放 task upsert 在 sync RPC 不可用时应受控延后且禁止 REST 直连', async () => {
     const { service, getUpsertPayload, mockRetryQueue } = getContext();
 
-    const result = await service.pushTask(createTask({
+    await expect(service.pushTask(createTask({
       id: 'task-replay-rest-fallback',
       displayId: 'T-7',
-    }), 'project-1', false, true, 'user-1', false, undefined, '00000000-0000-4000-8000-000000000777');
+    }), 'project-1', false, true, 'user-1', false, undefined, '00000000-0000-4000-8000-000000000777'))
+      .rejects.toSatisfy(isRetryDeferredError);
 
-    expect(result).toBe(true);
-    expect(getUpsertPayload()).not.toBeNull();
+    expect(getUpsertPayload()).toBeNull();
     expect(mockRetryQueue.add).not.toHaveBeenCalled();
     expect(mockRetryQueue.addDurably).not.toHaveBeenCalled();
   });
@@ -410,7 +391,9 @@ export function registerTaskSyncOperationsRetryGuardSpecs(
       undefined,
       undefined,
       undefined,
-      expect.any(String),
+      expect.stringMatching(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[45][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+      ),
     );
   });
 }
