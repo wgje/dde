@@ -35,16 +35,16 @@ export class TextTaskEditorSubmittedTextController {
     value: string,
     submit: () => Promise<boolean>,
   ): Promise<boolean> {
-    const lastSubmitted = this.lastSubmittedValues.get(field);
-    if (lastSubmitted?.taskId === taskId && lastSubmitted.value === value) {
-      return true;
-    }
-
     if (this.inFlightFields.has(field)) {
       return new Promise<boolean>(resolve => {
         this.pendingSubmissions.get(field)?.resolve(false);
         this.pendingSubmissions.set(field, { taskId, value, submit, resolve });
       });
+    }
+
+    const lastSubmitted = this.lastSubmittedValues.get(field);
+    if (lastSubmitted?.taskId === taskId && lastSubmitted.value === value) {
+      return true;
     }
 
     return this.runSubmission(field, taskId, value, submit);
@@ -127,22 +127,40 @@ export class TextTaskEditorSubmittedTextController {
   ): Promise<boolean> {
     this.inFlightFields.add(field);
     this.lastSubmittedValues.set(field, { taskId, value });
-    const saved = await submit();
-    if (!saved) {
-      const currentSubmitted = this.lastSubmittedValues.get(field);
-      if (currentSubmitted?.taskId === taskId && currentSubmitted.value === value) {
-        this.lastSubmittedValues.delete(field);
+    let saved = false;
+    try {
+      saved = await submit();
+      if (!saved) {
+        this.clearSubmittedValueIfMatches(field, taskId, value);
+      }
+      return saved;
+    } catch (error) {
+      this.clearSubmittedValueIfMatches(field, taskId, value);
+      throw error;
+    } finally {
+      this.inFlightFields.delete(field);
+
+      const pending = this.pendingSubmissions.get(field);
+      if (pending) {
+        this.pendingSubmissions.delete(field);
+        if (saved && pending.taskId === taskId && pending.value === value) {
+          pending.resolve(true);
+        } else {
+          void this.runSubmission(field, pending.taskId, pending.value, pending.submit)
+            .then(pending.resolve, () => pending.resolve(false));
+        }
       }
     }
-    this.inFlightFields.delete(field);
+  }
 
-    const pending = this.pendingSubmissions.get(field);
-    if (pending) {
-      this.pendingSubmissions.delete(field);
-      void this.runSubmission(field, pending.taskId, pending.value, pending.submit)
-        .then(pending.resolve);
+  private clearSubmittedValueIfMatches(
+    field: TextTaskEditorSubmittedField,
+    taskId: string,
+    value: string,
+  ): void {
+    const currentSubmitted = this.lastSubmittedValues.get(field);
+    if (currentSubmitted?.taskId === taskId && currentSubmitted.value === value) {
+      this.lastSubmittedValues.delete(field);
     }
-
-    return saved;
   }
 }

@@ -18,6 +18,8 @@ import { registerTextTaskEditorAttentionSpecs } from './text-task-editor-attenti
 import { registerTextTaskEditorMarkdownLinkSpecs } from './text-task-editor-markdown-link.spec-helpers';
 import { registerTextTaskEditorPlannerSpecs } from './text-task-editor-planner.spec-helpers';
 import { registerTextTaskEditorPreviewStateSpecs } from './text-task-editor-preview-state.spec-helpers';
+import { createTextTaskEditorProjectStateHarness, registerTextTaskEditorProjectOwnershipSpecs } from './text-task-editor-project-ownership.spec-helpers';
+import { registerTextTaskEditorSelectionSpecs } from './text-task-editor-selection.spec-helpers';
 
 describe('TextTaskEditorComponent', () => {
   let fixture: ComponentFixture<TextTaskEditorComponent>;
@@ -42,12 +44,8 @@ describe('TextTaskEditorComponent', () => {
     markEditing: vi.fn(),
   };
 
-  const mockProjectState = {
-    activeProjectId: vi.fn<() => string | null>(() => null),
-    compressDisplayId: vi.fn((displayId: string) => displayId),
-    getTask: vi.fn(() => null),
-  };
-
+  const projectOwnership = createTextTaskEditorProjectStateHarness();
+  const mockProjectState = projectOwnership.service;
   const mockAttachmentService = {
     uploadFile: vi.fn(),
     markAsDeleted: vi.fn(),
@@ -68,8 +66,11 @@ describe('TextTaskEditorComponent', () => {
     taskOverrides: Partial<Task> = {},
     inputOverrides: { userId?: string | null; projectId?: string | null } = {},
   ) => {
+    if (inputOverrides.projectId) projectOwnership.setCurrentProject(inputOverrides.projectId);
     fixture = TestBed.createComponent(TextTaskEditorComponent);
     const currentTask = signal(createTask(taskOverrides));
+    const currentUserId = signal(inputOverrides.userId === undefined ? 'user-1' : inputOverrides.userId);
+    const currentProjectId = signal(inputOverrides.projectId ?? null);
     const component = fixture.componentInstance as unknown as {
       task: () => Task;
       connections: () => TaskConnectionInfo | null;
@@ -82,21 +83,22 @@ describe('TextTaskEditorComponent', () => {
     component.task = currentTask;
     component.connections = () => null;
     component.isMobile = () => false;
-    component.userId = () => inputOverrides.userId ?? null;
-    component.projectId = () => inputOverrides.projectId ?? null;
+    component.userId = currentUserId;
+    component.projectId = currentProjectId;
     component.initialPreview = () => true;
     fixture.detectChanges();
 
     return {
-      setTask(nextTask: Task): void {
-        currentTask.set(nextTask);
-      },
+      setTask: (nextTask: Task) => currentTask.set(nextTask),
+      setUserId: (nextUserId: string | null) => currentUserId.set(nextUserId),
+      setProjectId: (nextProjectId: string | null) => currentProjectId.set(nextProjectId),
     };
   };
 
   beforeEach(async () => {
     vi.clearAllMocks();
     localStorage.clear();
+    projectOwnership.reset();
     mockProjectState.getTask.mockReturnValue(null);
     mockUndoService.appliedReplay.set(null);
     mockTaskAdapter.updateTaskTitle.mockResolvedValue(true);
@@ -125,6 +127,44 @@ describe('TextTaskEditorComponent', () => {
         add: { imports: [KnowledgeAnchorStubComponent] },
       })
       .compileComponents();
+  });
+
+  registerTextTaskEditorProjectOwnershipSpecs({ getFixture: () => fixture, render,
+    switchProject: projectOwnership.switchProject, currentProjectId: projectOwnership.currentProjectId,
+    updateTaskTitle: mockTaskAdapter.updateTaskTitle, updateTaskContent: mockTaskAdapter.updateTaskContent,
+    updateTaskExpectedMinutes: mockTaskAdapter.updateTaskExpectedMinutes,
+    updateTaskAttentionItems: mockTaskAdapter.updateTaskAttentionItems,
+  });
+
+  it('restores same-owner title, content, and attention drafts after recreation', async () => {
+    mockTaskAdapter.updateTaskTitle.mockResolvedValue(false);
+    mockTaskAdapter.updateTaskContent.mockResolvedValue(false);
+    mockTaskAdapter.updateTaskAttentionItems.mockResolvedValue(false);
+    const task = createTask({
+      id: 'draft-recovery', title: '旧标题', content: '旧内容',
+      attentionMeta: { items: [], updatedAt: '2026-06-05T00:00:00.000Z' },
+    });
+    render(task, { userId: 'user-1', projectId: 'project-a' });
+    let component = fixture.componentInstance as unknown as {
+      onTitleInput(value: string): void;
+      onContentInput(value: string): void;
+      onAttentionInput(value: string): void;
+    };
+    component.onTitleInput('恢复标题');
+    component.onContentInput('恢复正文');
+    component.onAttentionInput('恢复注意');
+    await Promise.resolve();
+    fixture.destroy();
+
+    render(task, { userId: 'user-1', projectId: 'project-a' });
+    component = fixture.componentInstance as typeof component;
+    const restored = component as unknown as {
+      localTitle(): string;
+      localContent(): string;
+      localAttentionDraft(): string;
+    };
+    expect([restored.localTitle(), restored.localContent(), restored.localAttentionDraft()])
+      .toEqual(['恢复标题', '恢复正文', '恢复注意']);
   });
 
   registerTextTaskEditorMarkdownLinkSpecs({
@@ -330,87 +370,57 @@ describe('TextTaskEditorComponent', () => {
     }
   });
 
-  it('should restore unsaved title and content drafts after the editor is destroyed and recreated', async () => {
-    mockTaskAdapter.updateTaskTitle.mockResolvedValue(false);
-    mockTaskAdapter.updateTaskContent.mockResolvedValue(false);
-    render(
-      { id: 'task-draft-recovery', title: '旧标题', content: '旧内容' },
-      { userId: 'user-1', projectId: 'project-1' },
-    );
+  it('should settle a rejected title save as failed and allow the same draft to retry', async () => {
+    const submitError = new Error('title save rejected');
+    mockTaskAdapter.updateTaskTitle
+      .mockRejectedValueOnce(submitError)
+      .mockResolvedValueOnce(true);
+    render({ title: '旧标题' });
     const component = fixture.componentInstance as unknown as {
-      isPreview: { set(value: boolean): void };
       onTitleInput(value: string): void;
-      onContentInput(value: string): void;
-      localTitle(): string;
-      localContent(): string;
-    };
-    component.isPreview.set(false);
-    fixture.detectChanges();
-
-    component.onTitleInput('刷新后仍在的标题草稿');
-    component.onContentInput('刷新后仍在的正文草稿');
-    await Promise.resolve();
-    fixture.destroy();
-
-    render(
-      { id: 'task-draft-recovery', title: '旧标题', content: '旧内容' },
-      { userId: 'user-1', projectId: 'project-1' },
-    );
-    const restored = fixture.componentInstance as unknown as {
-      localTitle(): string;
-      localContent(): string;
+      textSaveState(): 'idle' | 'saving' | 'failed';
     };
 
-    expect(restored.localTitle()).toBe('刷新后仍在的标题草稿');
-    expect(restored.localContent()).toBe('刷新后仍在的正文草稿');
+    component.onTitleInput('可重试标题');
+    await vi.waitFor(() => {
+      expect(component.textSaveState()).toBe('failed');
+    });
+
+    component.onTitleInput('可重试标题');
+    await vi.waitFor(() => {
+      expect(mockTaskAdapter.updateTaskTitle).toHaveBeenCalledTimes(2);
+      expect(component.textSaveState()).toBe('idle');
+    });
   });
 
-  it('should restore unsaved attention row drafts after the editor is destroyed and recreated', async () => {
-    mockTaskAdapter.updateTaskAttentionItems.mockResolvedValue(false);
-    const attentionMeta = {
-      items: [
-        {
-          id: 'attention-1',
-          text: '旧注意',
-          level: 'warning' as const,
-          done: false,
-          createdAt: '2026-06-05T00:00:00.000Z',
-          updatedAt: '2026-06-05T00:00:00.000Z',
-        },
-      ],
-      updatedAt: '2026-06-05T00:00:00.000Z',
-    };
-    render(
-      { id: 'task-attention-draft-recovery', attentionMeta },
-      { userId: 'user-1', projectId: 'project-1' },
-    );
+  it('should keep a same-value retry pending until an in-flight rejected title save settles', async () => {
+    const submitError = new Error('title save rejected');
+    let rejectFirst!: (error: Error) => void;
+    mockTaskAdapter.updateTaskTitle
+      .mockImplementationOnce(() => new Promise<boolean>((_, reject) => {
+        rejectFirst = reject;
+      }))
+      .mockResolvedValueOnce(true);
+    render({ title: '旧标题' });
     const component = fixture.componentInstance as unknown as {
-      isPreview: { set(value: boolean): void };
+      onTitleInput(value: string): void;
+      textSaveState(): 'idle' | 'saving' | 'failed';
     };
-    component.isPreview.set(false);
-    fixture.detectChanges();
-    const input = fixture.nativeElement.querySelector(
-      '[data-testid="task-attention-input"]',
-    ) as HTMLInputElement;
 
-    input.value = '刷新后仍在的注意草稿';
-    input.dispatchEvent(new Event('input'));
+    component.onTitleInput('可重试标题');
+    component.onTitleInput('可重试标题');
     await Promise.resolve();
-    fixture.destroy();
+    await Promise.resolve();
 
-    render(
-      { id: 'task-attention-draft-recovery', attentionMeta },
-      { userId: 'user-1', projectId: 'project-1' },
-    );
-    const restored = fixture.componentInstance as unknown as {
-      localAttentionDraft(): string;
-      attentionDraftRows(): Array<{ text: string }>;
-    };
+    expect(mockTaskAdapter.updateTaskTitle).toHaveBeenCalledTimes(1);
+    expect(component.textSaveState()).toBe('saving');
 
-    expect(restored.localAttentionDraft()).toBe('刷新后仍在的注意草稿');
-    expect(restored.attentionDraftRows().map(row => row.text)).toEqual([
-      '刷新后仍在的注意草稿',
-    ]);
+    rejectFirst(submitError);
+
+    await vi.waitFor(() => {
+      expect(mockTaskAdapter.updateTaskTitle).toHaveBeenCalledTimes(2);
+      expect(component.textSaveState()).toBe('idle');
+    });
   });
 
   it('should unlock the blurred content field for the original task and project after selection changes', () => {
@@ -561,6 +571,141 @@ describe('TextTaskEditorComponent', () => {
     expect(focusSpy).not.toHaveBeenCalled();
   });
 
+  it('should serialize quick todo triggers while a durable add is pending', async () => {
+    let resolveFirstAdd!: (saved: boolean) => void;
+    mockTaskAdapter.addTodoItem
+      .mockImplementationOnce(() => new Promise<boolean>(resolve => {
+        resolveFirstAdd = resolve;
+      }))
+      .mockResolvedValueOnce(true);
+    render();
+
+    const titlePreview = fixture.nativeElement.querySelector('[data-testid="task-title-preview"]') as HTMLButtonElement;
+    titlePreview.click();
+    fixture.detectChanges();
+
+    const input = fixture.nativeElement.querySelector('input[placeholder^="输入待办内容"]') as HTMLInputElement;
+    const addButton = fixture.nativeElement.querySelector('button[title="添加待办"]') as HTMLButtonElement;
+    const focusSpy = vi.spyOn(input, 'focus');
+    input.value = '  待确认条目  ';
+
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    fixture.detectChanges();
+    addButton.click();
+
+    expect(mockTaskAdapter.addTodoItem).toHaveBeenCalledTimes(1);
+    expect(mockTaskAdapter.addTodoItem).toHaveBeenCalledWith('task-1', '待确认条目');
+    expect(input.value).toBe('  待确认条目  ');
+    expect(addButton.disabled).toBe(true);
+    expect(addButton.getAttribute('aria-busy')).toBe('true');
+
+    resolveFirstAdd(false);
+    await vi.waitFor(() => {
+      fixture.detectChanges();
+      expect(addButton.disabled).toBe(false);
+      expect(addButton.getAttribute('aria-busy')).toBe('false');
+    });
+
+    expect(input.value).toBe('  待确认条目  ');
+    expect(focusSpy).not.toHaveBeenCalled();
+
+    addButton.click();
+    await vi.waitFor(() => {
+      fixture.detectChanges();
+      expect(mockTaskAdapter.addTodoItem).toHaveBeenCalledTimes(2);
+      expect(input.value).toBe('');
+      expect(focusSpy).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('should preserve a newer quick todo input value when an older add succeeds', async () => {
+    let resolveAdd!: (saved: boolean) => void;
+    mockTaskAdapter.addTodoItem.mockImplementationOnce(() => new Promise<boolean>(resolve => {
+      resolveAdd = resolve;
+    }));
+    render();
+    const input = document.createElement('input');
+    input.value = '  原待办  ';
+    const focusSpy = vi.spyOn(input, 'focus');
+    const component = fixture.componentInstance as unknown as {
+      addQuickTodo(inputElement: HTMLInputElement): Promise<boolean>;
+    };
+    const addPromise = component.addQuickTodo(input);
+    input.value = '新待办草稿';
+    resolveAdd(true);
+    await expect(addPromise).resolves.toBe(true);
+    expect(mockTaskAdapter.addTodoItem).toHaveBeenCalledWith('task-1', '原待办');
+    expect(input.value).toBe('新待办草稿');
+    expect(focusSpy).not.toHaveBeenCalled();
+  });
+
+  it('should not clear or focus a stale quick todo input after the task changes', async () => {
+    let resolveAdd!: (saved: boolean) => void;
+    mockTaskAdapter.addTodoItem.mockImplementationOnce(() => new Promise<boolean>(resolve => {
+      resolveAdd = resolve;
+    }));
+    const { setTask } = render();
+    const input = document.createElement('input');
+    input.value = '旧任务待办';
+    const focusSpy = vi.spyOn(input, 'focus');
+    const component = fixture.componentInstance as unknown as {
+      addQuickTodo(inputElement: HTMLInputElement): Promise<boolean>;
+    };
+    const addPromise = component.addQuickTodo(input);
+    setTask(createTask({ id: 'task-2' }));
+    fixture.detectChanges();
+    resolveAdd(true);
+    await expect(addPromise).resolves.toBe(true);
+    expect(mockTaskAdapter.addTodoItem).toHaveBeenCalledWith('task-1', '旧任务待办');
+    expect(input.value).toBe('旧任务待办');
+    expect(focusSpy).not.toHaveBeenCalled();
+  });
+
+  it('should not clear or focus quick todo input after the component is destroyed', async () => {
+    let resolveAdd!: (saved: boolean) => void;
+    mockTaskAdapter.addTodoItem.mockImplementationOnce(() => new Promise<boolean>(resolve => {
+      resolveAdd = resolve;
+    }));
+    render();
+    const input = document.createElement('input');
+    input.value = '销毁前待办';
+    const focusSpy = vi.spyOn(input, 'focus');
+    const component = fixture.componentInstance as unknown as {
+      addQuickTodo(inputElement: HTMLInputElement): Promise<boolean>;
+    };
+    const addPromise = component.addQuickTodo(input);
+    fixture.destroy();
+    resolveAdd(true);
+    await expect(addPromise).resolves.toBe(true);
+    expect(input.value).toBe('销毁前待办');
+    expect(focusSpy).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['rejects', () => Promise.reject(new Error('quick todo rejected'))],
+    ['throws', () => { throw new Error('quick todo threw'); }],
+  ] as const)('should fail closed and allow retry when durable add %s', async (_failureMode, failAdd) => {
+    mockTaskAdapter.addTodoItem.mockReset();
+    mockTaskAdapter.addTodoItem
+      .mockImplementationOnce(failAdd)
+      .mockResolvedValueOnce(true);
+    render();
+    const input = document.createElement('input');
+    input.value = '  可重试待办  ';
+    const focusSpy = vi.spyOn(input, 'focus');
+    const component = fixture.componentInstance as unknown as {
+      addQuickTodo(inputElement: HTMLInputElement): Promise<boolean>;
+    };
+    await expect(component.addQuickTodo(input)).resolves.toBe(false);
+    expect(input.value).toBe('  可重试待办  ');
+    expect(focusSpy).not.toHaveBeenCalled();
+    await expect(component.addQuickTodo(input)).resolves.toBe(true);
+    expect(mockTaskAdapter.addTodoItem).toHaveBeenCalledTimes(2);
+    expect(input.value).toBe('');
+    expect(focusSpy).toHaveBeenCalledTimes(1);
+  });
+
   it('should keep local todo checkbox preview unchanged when durable content update fails', async () => {
     render({ content: '- [ ] 本地优先' });
     mockTaskAdapter.updateTaskContent.mockResolvedValueOnce(false);
@@ -579,167 +724,9 @@ describe('TextTaskEditorComponent', () => {
     expect(component.localContent()).toBe('- [ ] 本地优先');
   });
 
-  it('should clear selected editor text on the first outside click and collapse on the next click', () => {
-    vi.useFakeTimers();
-    try {
-      render({ content: '联系供应商确认规格。' });
-
-      const component = fixture.componentInstance as unknown as {
-        onDocumentClick: (event: MouseEvent) => void;
-        isPreview: () => boolean;
-      };
-      const titlePreview = fixture.nativeElement.querySelector('[data-testid="task-title-preview"]') as HTMLButtonElement | null;
-      titlePreview?.click();
-      fixture.detectChanges();
-      vi.runAllTimers();
-      fixture.detectChanges();
-
-      const removeAllRanges = vi.fn();
-      const getSelectionSpy = vi.spyOn(window, 'getSelection').mockReturnValue({
-        toString: () => '零件',
-        rangeCount: 1,
-        isCollapsed: false,
-        removeAllRanges,
-      } as unknown as Selection);
-
-      try {
-        component.onDocumentClick(createClickEvent(Date.now(), document.body));
-        fixture.detectChanges();
-
-        expect(removeAllRanges).toHaveBeenCalledTimes(1);
-        expect(component.isPreview()).toBe(false);
-      } finally {
-        getSelectionSpy.mockRestore();
-      }
-
-      component.onDocumentClick(createClickEvent(Date.now(), document.body));
-      fixture.detectChanges();
-
-      expect(component.isPreview()).toBe(true);
-    } finally {
-      vi.runOnlyPendingTimers();
-      vi.useRealTimers();
-    }
-  });
-
-  it('should collapse native input selection before leaving edit mode on outside click', () => {
-    vi.useFakeTimers();
-    const activeElementDescriptor = Object.getOwnPropertyDescriptor(document, 'activeElement');
-
-    try {
-      render({ content: '联系供应商确认规格。' });
-
-      const component = fixture.componentInstance as unknown as {
-        onDocumentClick: (event: MouseEvent) => void;
-        isPreview: () => boolean;
-      };
-      const titlePreview = fixture.nativeElement.querySelector('[data-testid="task-title-preview"]') as HTMLButtonElement | null;
-      titlePreview?.click();
-      fixture.detectChanges();
-      vi.runAllTimers();
-      fixture.detectChanges();
-
-      const titleInput = fixture.nativeElement.querySelector('[data-testid="task-title-input"]') as HTMLInputElement | null;
-      expect(titleInput).not.toBeNull();
-
-      const setSelectionRangeSpy = vi.spyOn(titleInput!, 'setSelectionRange');
-      Object.defineProperty(titleInput!, 'selectionStart', {
-        configurable: true,
-        get: () => 0,
-      });
-      Object.defineProperty(titleInput!, 'selectionEnd', {
-        configurable: true,
-        get: () => 2,
-      });
-      Object.defineProperty(document, 'activeElement', {
-        configurable: true,
-        get: () => titleInput,
-      });
-
-      const getSelectionSpy = vi.spyOn(window, 'getSelection').mockReturnValue(null);
-
-      try {
-        component.onDocumentClick(createClickEvent(Date.now(), document.body));
-        fixture.detectChanges();
-
-        expect(setSelectionRangeSpy).toHaveBeenCalledWith(2, 2);
-        expect(component.isPreview()).toBe(false);
-      } finally {
-        getSelectionSpy.mockRestore();
-        setSelectionRangeSpy.mockRestore();
-      }
-    } finally {
-      if (activeElementDescriptor) {
-        Object.defineProperty(document, 'activeElement', activeElementDescriptor);
-      }
-      vi.runOnlyPendingTimers();
-      vi.useRealTimers();
-    }
-  });
-
-  it('should clear selection and collapse immediately when the outside target is a button', () => {
-    vi.useFakeTimers();
-    try {
-      render({ content: '联系供应商确认规格。' });
-
-      const component = fixture.componentInstance as unknown as {
-        onDocumentClick: (event: MouseEvent) => void;
-        isPreview: () => boolean;
-      };
-      const titlePreview = fixture.nativeElement.querySelector('[data-testid="task-title-preview"]') as HTMLButtonElement | null;
-      titlePreview?.click();
-      fixture.detectChanges();
-      vi.runAllTimers();
-      fixture.detectChanges();
-
-      const removeAllRanges = vi.fn();
-      const getSelectionSpy = vi.spyOn(window, 'getSelection').mockReturnValue({
-        toString: () => '规格',
-        rangeCount: 1,
-        isCollapsed: false,
-        removeAllRanges,
-      } as unknown as Selection);
-
-      try {
-        const outsideButton = document.createElement('button');
-        component.onDocumentClick(createClickEvent(Date.now(), outsideButton));
-        fixture.detectChanges();
-
-        expect(removeAllRanges).toHaveBeenCalledTimes(1);
-        expect(component.isPreview()).toBe(true);
-      } finally {
-        getSelectionSpy.mockRestore();
-      }
-    } finally {
-      vi.runOnlyPendingTimers();
-      vi.useRealTimers();
-    }
-  });
-
-  it('should suppress the same document click when entering content editing from the empty preview button', () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date('2026-04-05T00:00:00.000Z'));
-    try {
-      render({ content: '' });
-
-      const component = fixture.componentInstance as unknown as {
-        onDocumentClick: (event: MouseEvent) => void;
-        isPreview: () => boolean;
-      };
-      const emptyPreview = fixture.nativeElement.querySelector('[data-testid="task-content-empty"]') as HTMLButtonElement | null;
-      const editorRoot = fixture.nativeElement.querySelector('.animate-collapse-open') as HTMLElement | null;
-
-      emptyPreview?.click();
-      fixture.detectChanges();
-
-      component.onDocumentClick(createPathClickEvent(emptyPreview!, [emptyPreview!, editorRoot!, document.body, document, window]));
-      fixture.detectChanges();
-
-      expect(component.isPreview()).toBe(false);
-    } finally {
-      vi.runOnlyPendingTimers();
-      vi.useRealTimers();
-    }
+  registerTextTaskEditorSelectionSpecs({
+    getFixture: () => fixture,
+    render,
   });
 
   registerTextTaskEditorAttentionSpecs({

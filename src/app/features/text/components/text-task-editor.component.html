@@ -133,7 +133,10 @@
           [ngClass]="{'text-xs py-1.5 px-2': !isMobile(), 'text-[11px] py-1 px-1.5': isMobile()}"
           placeholder="输入待办内容，按回车添加...">
         <button
+          type="button"
           (click)="addQuickTodo(quickTodoInput)"
+          [disabled]="quickTodoSavePending()"
+          [attr.aria-busy]="quickTodoSavePending()"
           class="flex-shrink-0 bg-retro-rust/10 hover:bg-retro-rust text-retro-rust hover:text-white rounded transition-colors flex items-center justify-center"
           [ngClass]="{'p-1.5 mr-0.5': !isMobile(), 'p-1 mr-0.5': isMobile()}"
           title="添加待办">

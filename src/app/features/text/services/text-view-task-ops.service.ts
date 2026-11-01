@@ -11,6 +11,10 @@ import { Task } from '../../../../models';
 import { getErrorMessage, isFailure } from '../../../../utils/result';
 import { TextViewDragDropService } from './text-view-drag-drop.service';
 import { TextViewNestedScrollHandoffController } from './text-view-nested-scroll-handoff.controller';
+import {
+  TextViewTaskCreateOwnershipController,
+  type TextViewTaskCreateOwner,
+} from './text-view-task-create-ownership.controller';
 import { PARKING_CONFIG } from '../../../../config/parking.config';
 import { clearActiveTextSelection, isInteractiveSelectionTarget } from '../../../../utils/text-selection';
 
@@ -50,6 +54,7 @@ export interface TextViewOpsContext {
 export class TextViewTaskOpsService {
   private readonly injector = inject(Injector);
   private readonly projectState = inject(ProjectStateService);
+  private readonly createOwnership = new TextViewTaskCreateOwnershipController(this.projectState);
   private readonly uiState = inject(UiStateService);
   private readonly userSession = inject(UserSessionService);
   private readonly toast = inject(ToastService);
@@ -70,8 +75,9 @@ export class TextViewTaskOpsService {
 
   /** 待清理的定时器列表（防止内存泄漏） */
   readonly pendingTimers: ReturnType<typeof setTimeout>[] = [];
+  private readonly pendingAnimationFrames = new Set<number>();
+  private destroyed = false;
   private pendingContainerClickGuardTaskId: string | null = null;
-  private readonly pendingCreateKeys = new Set<string>();
 
   /** 初始化：接收组件 signal 和 ViewChild 引用 */
   init(ctx: TextViewOpsContext): void {
@@ -87,13 +93,39 @@ export class TextViewTaskOpsService {
     return true;
   }
 
-  /** 销毁：清理定时器 */
+  /** 销毁：清理异步调度 */
   destroy(): void {
+    this.destroyed = true;
     this.nestedScrollHandoff.detach();
+    this.pendingAnimationFrames.forEach(animationFrameId => cancelAnimationFrame(animationFrameId));
+    this.pendingAnimationFrames.clear();
     this.pendingTimers.forEach(timer => clearTimeout(timer));
     this.pendingTimers.length = 0;
     this.pendingContainerClickGuardTaskId = null;
-    this.pendingCreateKeys.clear();
+    this.createOwnership.destroy();
+  }
+
+  private scheduleAnimationFrame(callback: FrameRequestCallback): void {
+    if (this.destroyed) return;
+
+    let animationFrameId: number | null = null;
+    let completedSynchronously = false;
+    animationFrameId = requestAnimationFrame(timestamp => {
+      completedSynchronously = true;
+      if (animationFrameId !== null) {
+        this.pendingAnimationFrames.delete(animationFrameId);
+      }
+      if (this.destroyed) return;
+
+      callback(timestamp);
+    });
+
+    if (completedSynchronously) return;
+    if (this.destroyed) {
+      cancelAnimationFrame(animationFrameId);
+      return;
+    }
+    this.pendingAnimationFrames.add(animationFrameId);
   }
 
   armContainerClickGuard(taskId: string): void {
@@ -277,7 +309,7 @@ export class TextViewTaskOpsService {
 
   scrollToElementById(selector: string): void {
     this.ngZone.runOutsideAngular(() => {
-      requestAnimationFrame(() => {
+      this.scheduleAnimationFrame(() => {
         const el = this.elementRef.nativeElement.querySelector(selector);
         if (el) {
           el.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -287,16 +319,26 @@ export class TextViewTaskOpsService {
   }
 
   scrollToTaskAndFocus(taskId: string, inputSelector?: string): void {
+    this.scrollToTaskAndFocusWhen(taskId, inputSelector, () => !this.destroyed);
+  }
+
+  private scrollToTaskAndFocusWhen(
+    taskId: string,
+    inputSelector: string | undefined,
+    canPublishUi: () => boolean,
+  ): void {
     this.ngZone.runOutsideAngular(() => {
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
+      this.scheduleAnimationFrame(() => {
+        if (!canPublishUi()) return;
+        this.scheduleAnimationFrame(() => {
+          if (!canPublishUi()) return;
           const el = this.elementRef.nativeElement.querySelector(`[data-task-id="${taskId}"]`)
             ?? this.elementRef.nativeElement.querySelector(`[data-unassigned-task="${taskId}"]`);
           if (el) {
             el.scrollIntoView({ behavior: 'smooth', block: 'center' });
             if (inputSelector) {
               const focusTimer = setTimeout(() => {
-                this.focusTaskInput(el, inputSelector);
+                if (canPublishUi()) this.focusTaskInput(el, inputSelector);
                 this.removeTimer(focusTimer);
               }, 100);
               this.pendingTimers.push(focusTimer);
@@ -396,7 +438,7 @@ export class TextViewTaskOpsService {
     }
     if (!merged.length) return;
     const uniqueStages = Array.from(new Set(merged));
-    requestAnimationFrame(() => {
+    this.scheduleAnimationFrame(() => {
       uniqueStages.forEach(stage => stagesRef?.collapseStage(stage));
     });
   }
@@ -419,7 +461,7 @@ export class TextViewTaskOpsService {
     const stagesRef = this.ctx.getStagesRef();
     const stageToRestore = this.dragDropService.consumeAutoCollapsedSourceStage();
     if (stageToRestore === null) return;
-    requestAnimationFrame(() => stagesRef?.expandStage(stageToRestore));
+    this.scheduleAnimationFrame(() => stagesRef?.expandStage(stageToRestore));
   }
 
   // ========== 待办事项处理 ==========
@@ -472,13 +514,15 @@ export class TextViewTaskOpsService {
       return;
     }
 
-    await this.runCreateOnce('unassigned', async () => {
-      const result = await this.taskOpsAdapter.addTask('', '', null, null, false);
+    await this.createOwnership.run('unassigned', async owner => {
+      const canPublishUi = this.uiOwner(owner);
+      const result = await this.taskOpsAdapter.addTaskForUiOwner('', '', null, null, false, canPublishUi);
+      if (!canPublishUi()) return;
       if (isFailure(result)) {
         this.toast.error('创建任务失败', getErrorMessage(result.error));
       } else {
         await this.ctx.getUnassignedRef()?.setEditingTask(result.value, true);
-        this.scrollToTaskAndFocus(result.value, 'input');
+        if (canPublishUi()) this.scrollToTaskAndFocusWhen(result.value, 'input', canPublishUi);
       }
     });
   }
@@ -508,10 +552,10 @@ export class TextViewTaskOpsService {
    */
   scrollToTaskAfterExpand(taskId: string): void {
     this.ngZone.runOutsideAngular(() => {
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
+      this.scheduleAnimationFrame(() => {
+        this.scheduleAnimationFrame(() => {
           const timer = setTimeout(() => {
-            requestAnimationFrame(() => {
+            this.scheduleAnimationFrame(() => {
               const el = this.elementRef.nativeElement.querySelector(`[data-task-id="${taskId}"]`)
                 ?? this.elementRef.nativeElement.querySelector(`[data-unassigned-task="${taskId}"]`);
               if (el) {
@@ -531,14 +575,16 @@ export class TextViewTaskOpsService {
       return;
     }
 
-    await this.runCreateOnce(`sibling:${task.id}`, async () => {
-      const result = await this.taskOpsAdapter.addTask('', '', task.stage, task.parentId, true);
+    await this.createOwnership.run(`sibling:${task.id}`, async owner => {
+      const canPublishUi = this.uiOwner(owner);
+      const result = await this.taskOpsAdapter.addTaskForUiOwner('', '', task.stage, task.parentId, true, canPublishUi);
+      if (!canPublishUi()) return;
       if (isFailure(result)) {
         this.toast.error('添加任务失败', getErrorMessage(result.error));
       } else {
-        this.navigateToNewTask(result.value, task.stage);
+        this.navigateToNewTask(result.value, task.stage, canPublishUi);
       }
-    });
+    }, task.id);
   }
 
   async onAddChild(task: Task): Promise<void> {
@@ -546,15 +592,17 @@ export class TextViewTaskOpsService {
       return;
     }
 
-    await this.runCreateOnce(`child:${task.id}`, async () => {
+    await this.createOwnership.run(`child:${task.id}`, async owner => {
+      const canPublishUi = this.uiOwner(owner);
       const newStage = (task.stage || 0) + 1;
-      const result = await this.taskOpsAdapter.addTask('', '', newStage, task.id, false);
+      const result = await this.taskOpsAdapter.addTaskForUiOwner('', '', newStage, task.id, false, canPublishUi);
+      if (!canPublishUi()) return;
       if (isFailure(result)) {
         this.toast.error('添加任务失败', getErrorMessage(result.error));
       } else {
-        this.navigateToNewTask(result.value, newStage);
+        this.navigateToNewTask(result.value, newStage, canPublishUi);
       }
-    });
+    }, task.id);
   }
 
   onDeleteTask(task: Task): void {
@@ -635,29 +683,30 @@ export class TextViewTaskOpsService {
       return;
     }
 
-    const stages = this.projectState.stages();
-    if (
-      stages.length > 0
-      && stages.every(stage => stage.stageNumber !== 1)
-      && stages.some(stage => stage.tasks.some(task => !task.deletedAt && task.status !== 'archived'))
-    ) {
-      const repaired = await this.taskOpsAdapter.repairMissingStageOne();
-      if (repaired) {
-        this.uiState.setStageFilter('all');
+    await this.createOwnership.run('stage', async owner => {
+      const canPublishUi = this.uiOwner(owner);
+      const stages = this.projectState.stages();
+      if (
+        stages.length > 0
+        && stages.every(stage => stage.stageNumber !== 1)
+        && stages.some(stage => stage.tasks.some(task => !task.deletedAt && task.status !== 'archived'))
+      ) {
+        const repaired = await this.taskOpsAdapter.repairMissingStageOneForUiOwner(canPublishUi);
+        if (canPublishUi() && repaired) this.uiState.setStageFilter('all');
+        return;
       }
-      return;
-    }
 
-    await this.runCreateOnce('stage', async () => {
       const nextStage = Math.max(...stages.map(stage => stage.stageNumber), 0) + 1;
-      const result = await this.taskOpsAdapter.addTask('', '', nextStage, null, false);
+      const result = await this.taskOpsAdapter.addTaskForUiOwner('', '', nextStage, null, false, canPublishUi);
+      if (!canPublishUi()) return;
       if (isFailure(result)) {
         this.toast.error('创建阶段失败', getErrorMessage(result.error));
-      } else { this.navigateToNewTask(result.value, nextStage); }
+      } else { this.navigateToNewTask(result.value, nextStage, canPublishUi); }
     });
   }
 
-  navigateToNewTask(taskId: string, stage: number | null): void {
+  private navigateToNewTask(taskId: string, stage: number | null, canPublishUi: () => boolean): void {
+    if (!canPublishUi()) return;
     if (stage) {
       this.ctx.getStagesRef()?.expandStage(stage);
       if (this.uiState.stageFilter() !== 'all' && this.uiState.stageFilter() !== stage) {
@@ -665,20 +714,11 @@ export class TextViewTaskOpsService {
       }
     }
     this.ctx.selectedTaskId.set(taskId);
-    this.scrollToTaskAndFocus(taskId, 'input[data-title-input]');
+    this.scrollToTaskAndFocusWhen(taskId, 'input[data-title-input]', canPublishUi);
   }
 
-  private async runCreateOnce(key: string, operation: () => Promise<void>): Promise<void> {
-    if (this.pendingCreateKeys.has(key)) {
-      return;
-    }
-
-    this.pendingCreateKeys.add(key);
-    try {
-      await operation();
-    } finally {
-      this.pendingCreateKeys.delete(key);
-    }
+  private uiOwner(owner: TextViewTaskCreateOwner): () => boolean {
+    return () => this.createOwnership.canPublish(owner);
   }
 
   hasChildren(task: Task): boolean {

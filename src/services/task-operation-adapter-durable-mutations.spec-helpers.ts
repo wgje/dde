@@ -14,6 +14,7 @@ type DurableMutationOperationMock = {
   addTaskAttachmentDurably: Mock;
   removeTaskAttachment: Mock;
   removeTaskAttachmentDurably: Mock;
+  updateTaskParkingMetaDurably: Mock;
   updateTaskParkingMetaBatchDurably: Mock;
   updateTaskTags: Mock;
   updateTaskTagsDurably: Mock;
@@ -64,7 +65,7 @@ export interface TaskOperationAdapterDurableMutationsSpecContext {
     showUndoToast: Mock;
     setupSyncResultHandler: Mock;
   };
-  mockOptimisticStateService(): { rollbackSnapshot: Mock };
+  mockOptimisticStateService(): { discardSnapshot: Mock; rollbackSnapshot: Mock };
   mockLoggerCategory(): { warn: Mock };
   mockSyncCoordinatorService(): { markLocalChanges: Mock };
 }
@@ -171,6 +172,18 @@ export function registerTaskOperationAdapterDurableMutationsSpecs(
     expect(context.mockRecorderService().lastUpdateType).toBe('content');
     expect(context.mockTaskOperationService().updateTaskParkingMetaBatchDurably)
       .toHaveBeenCalledWith(updates);
+  });
+
+  it('parking meta mutations preserve explicit project identity through the adapter', async () => {
+    const updates = [{ taskId: 'shared-task', parkingMeta: null }];
+
+    await context.service().updateTaskParkingMeta('project-a', 'shared-task', null);
+    await context.service().updateTaskParkingMetaBatch('project-a', updates);
+
+    expect(context.mockTaskOperationService().updateTaskParkingMetaDurably)
+      .toHaveBeenCalledWith('project-a', 'shared-task', null);
+    expect(context.mockTaskOperationService().updateTaskParkingMetaBatchDurably)
+      .toHaveBeenCalledWith('project-a', updates);
   });
 
   it('parking meta batch mutation should return false when durable update fails', async () => {
@@ -296,6 +309,57 @@ export function registerTaskOperationAdapterDurableMutationsSpecs(
     expect(context.mockTaskOperationService().emptyTrash).not.toHaveBeenCalled();
   });
 
+  it('batch delete keeps durable settlement but suppresses stale UI and count', async () => {
+    const canPublishUi = () => false;
+
+    const deletedCount = await context.service().deleteTasksBatch(['task-1', 'task-2'], canPublishUi);
+
+    expect(deletedCount).toBe(0);
+    expect(context.mockRecorderService().showUndoToast).not.toHaveBeenCalled();
+    expect(context.mockRecorderService().setupSyncResultHandler).toHaveBeenCalledWith('snapshot-1');
+  });
+
+  it('stale batch persistence failure discards its snapshot without full-project rollback', async () => {
+    context.mockTaskOperationService().deleteTasksBatchDurably.mockResolvedValueOnce({
+      saved: false,
+      deletedTaskIds: new Set(['task-1', 'task-2']),
+      deletedConnectionIds: [],
+    });
+
+    await context.service().deleteTasksBatch(['task-1', 'task-2'], () => false);
+
+    expect(context.mockOptimisticStateService().rollbackSnapshot).not.toHaveBeenCalled();
+    expect(context.mockOptimisticStateService().discardSnapshot).toHaveBeenCalledWith('snapshot-1');
+    expect(context.mockLoggerCategory().warn).toHaveBeenCalledWith(
+      '批量删除本地持久化失败，未提交 UI 更新',
+      { explicitIds: ['task-1', 'task-2'] },
+    );
+  });
+
+  it('stale permanent and empty-trash failures discard snapshots without rolling back the current project', async () => {
+    context.mockTaskOperationService().permanentlyDeleteTaskDurably.mockResolvedValueOnce({
+      saved: false, deletedTaskIds: new Set(['task-1']), deletedConnectionIds: [],
+    });
+    context.mockTaskOperationService().emptyTrashDurably.mockResolvedValueOnce({
+      saved: false, deletedTaskIds: new Set(['task-1']), deletedConnectionIds: [],
+    });
+    const canPublishUi = () => false;
+
+    await context.service().permanentlyDeleteTask('task-1', canPublishUi);
+    await context.service().emptyTrash(canPublishUi);
+
+    expect(context.mockOptimisticStateService().rollbackSnapshot).not.toHaveBeenCalled();
+    expect(context.mockOptimisticStateService().discardSnapshot).toHaveBeenCalledTimes(2);
+    expect(context.mockOptimisticStateService().discardSnapshot).toHaveBeenNthCalledWith(1, 'snapshot-1');
+    expect(context.mockOptimisticStateService().discardSnapshot).toHaveBeenNthCalledWith(2, 'snapshot-1');
+    expect(context.mockLoggerCategory().warn).toHaveBeenCalledWith(
+      '任务永久删除本地持久化失败，未提交 UI 更新', { taskId: 'task-1' },
+    );
+    expect(context.mockLoggerCategory().warn).toHaveBeenCalledWith(
+      '清空回收站本地持久化失败，未提交 UI 更新', {},
+    );
+  });
+
   it('deleteTask should rollback snapshot when local persistence fails', async () => {
     context.mockTaskOperationService().deleteTaskDurably.mockResolvedValueOnce({
       saved: false,
@@ -346,6 +410,22 @@ export function registerTaskOperationAdapterDurableMutationsSpecs(
     expect(repaired).toBe(true);
     expect(context.mockTaskOperationService().repairMissingStageOneDurably).toHaveBeenCalledTimes(1);
     expect(context.mockTaskOperationService().repairMissingStageOne).not.toHaveBeenCalled();
+  });
+
+  it('repairMissingStageOne should settle stale durable repair without publishing undo UI', async () => {
+    let resolveRepair!: (value: boolean) => void;
+    let canPublish = true;
+    context.mockTaskOperationService().repairMissingStageOneDurably.mockReturnValueOnce(
+      new Promise<boolean>(resolve => { resolveRepair = resolve; }),
+    );
+
+    const completion = context.service().repairMissingStageOneForUiOwner(() => canPublish);
+    canPublish = false;
+    resolveRepair(true);
+
+    expect(await completion).toBe(true);
+    expect(context.mockRecorderService().showUndoToast).not.toHaveBeenCalled();
+    expect(context.mockRecorderService().setupSyncResultHandler).toHaveBeenCalledWith('snapshot-1');
   });
 
   it('repairMissingStageOne should report false when local durable repair fails', async () => {

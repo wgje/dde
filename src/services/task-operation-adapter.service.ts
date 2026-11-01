@@ -26,7 +26,10 @@ import { Task, Attachment, TaskAttentionDraftItem } from '../models';
 import { ErrorCodes, failure, Result, OperationError } from '../utils/result';
 import { blockTaskMutation, type TaskMutationBlockOptions } from './task-operation-mutation-guard.helpers';
 import { runTaskDurableFieldMutation } from './task-operation-durable-field.helpers';
-import { TaskOperationTrashAdapterController } from './task-operation-trash-adapter.controller';
+import {
+  TaskOperationTrashAdapterController,
+  type TaskOperationUiOwner,
+} from './task-operation-trash-adapter.controller';
 import {
   addTaskAttachmentToProjectState,
   enqueueTaskAttachmentProjectUpdateIfNeeded,
@@ -93,8 +96,8 @@ export class TaskOperationAdapterService {
     optimisticState: this.optimisticState,
     projectState: this.projectState,
     recorder: this.recorder,
-    rollbackSnapshotAfterDurableFailure: (snapshotId, message, data) =>
-      this.rollbackSnapshotAfterDurableFailure(snapshotId, message, data),
+    rollbackSnapshotAfterDurableFailure: (snapshotId, message, data, canPublishUi) =>
+      this.rollbackSnapshotAfterDurableFailure(snapshotId, message, data, canPublishUi),
   });
   private readonly warmupController = new TaskOperationAdapterWarmupController({
     activeProjectId: () => this.projectState.activeProjectId(),
@@ -172,8 +175,10 @@ export class TaskOperationAdapterService {
     snapshotId: string,
     message: string,
     data: Record<string, unknown>,
+    canPublishUi: TaskOperationUiOwner = () => true,
   ): void {
-    this.optimisticState.rollbackSnapshot(snapshotId);
+    if (canPublishUi()) this.optimisticState.rollbackSnapshot(snapshotId);
+    else this.optimisticState.discardSnapshot(snapshotId);
     this.logger.warn(message, data);
   }
 
@@ -339,7 +344,11 @@ export class TaskOperationAdapterService {
 
   // ========== 任务状态操作 ==========
 
-  async updateTaskStatus(taskId: string, status: Task['status']): Promise<boolean> {
+  async updateTaskStatus(
+    taskId: string,
+    status: Task['status'],
+    projectId: string | null = this.projectState.activeProjectId(),
+  ): Promise<boolean> {
     if (this.blockLocalMutation('更新任务状态')) {
       return false;
     }
@@ -352,10 +361,9 @@ export class TaskOperationAdapterService {
       return false;
     }
 
-    const project = this.projectState.activeProject();
-    if (project) {
-      const task = this.projectState.getTask(taskId);
-      if (task) this.changeTracker.lockTaskField(taskId, project.id, 'status');
+    const project = projectId ? this.projectState.getProjectWithCurrentData(projectId) : undefined;
+    if (projectId && project?.tasks.some(task => task.id === taskId)) {
+      this.changeTracker.lockTaskField(taskId, projectId, 'status');
     }
     return true;
   }
@@ -550,6 +558,28 @@ export class TaskOperationAdapterService {
     parentId: string | null,
     isSibling: boolean
   ): Promise<Result<string, OperationError>> {
+    return this.addTaskWithUiOwner(title, content, targetStage, parentId, isSibling, () => true);
+  }
+
+  addTaskForUiOwner(
+    title: string,
+    content: string,
+    targetStage: number | null,
+    parentId: string | null,
+    isSibling: boolean,
+    canPublishUi: TaskOperationUiOwner,
+  ): Promise<Result<string, OperationError>> {
+    return this.addTaskWithUiOwner(title, content, targetStage, parentId, isSibling, canPublishUi);
+  }
+
+  private async addTaskWithUiOwner(
+    title: string,
+    content: string,
+    targetStage: number | null,
+    parentId: string | null,
+    isSibling: boolean,
+    canPublishUi: TaskOperationUiOwner,
+  ): Promise<Result<string, OperationError>> {
     const blocked = this.blockLocalMutationResult<string>('创建任务');
     if (blocked) return blocked;
 
@@ -559,10 +589,11 @@ export class TaskOperationAdapterService {
     const result = await this.core.addTaskDurably({ title, content, targetStage, parentId, isSibling });
 
     if (result.ok) {
-      this.recorder.showUndoToast(`已创建 "${title || '新任务'}"`);
+      if (canPublishUi()) this.recorder.showUndoToast(`已创建 "${title || '新任务'}"`);
       this.recorder.setupSyncResultHandler(snapshot.id);
     } else {
-      this.optimisticState.rollbackSnapshot(snapshot.id);
+      if (canPublishUi()) this.optimisticState.rollbackSnapshot(snapshot.id);
+      else this.optimisticState.discardSnapshot(snapshot.id);
     }
     return result;
   }
@@ -594,13 +625,15 @@ export class TaskOperationAdapterService {
   }
 
   /** 永久删除任务（从回收站中删除） */
-  async permanentlyDeleteTask(taskId: string): Promise<boolean> {
-    return this.trashAdapter.permanentlyDeleteTask(taskId);
+  async permanentlyDeleteTask(taskId: string, canPublishUi?: TaskOperationUiOwner): Promise<boolean> {
+    return this.trashAdapter.permanentlyDeleteTask(taskId, canPublishUi);
   }
 
   /** 批量删除任务（原子操作，P0 熔断层） */
-  async deleteTasksBatch(explicitIds: string[]): Promise<number> {
-    return this.trashAdapter.deleteTasksBatch(explicitIds);
+  async deleteTasksBatch(
+    explicitIds: string[], canPublishUi?: TaskOperationUiOwner,
+  ): Promise<number> {
+    return this.trashAdapter.deleteTasksBatch(explicitIds, canPublishUi);
   }
 
   calculateBatchDeleteImpact(explicitIds: string[]): { total: number; explicit: number; cascaded: number } {
@@ -613,8 +646,8 @@ export class TaskOperationAdapterService {
   }
 
   /** 清空回收站 */
-  async emptyTrash(): Promise<boolean> {
-    return this.trashAdapter.emptyTrash();
+  async emptyTrash(canPublishUi?: TaskOperationUiOwner): Promise<boolean> {
+    return this.trashAdapter.emptyTrash(canPublishUi);
   }
 
   // ========== 任务结构操作 ==========
@@ -733,7 +766,11 @@ export class TaskOperationAdapterService {
 
   /** 修复阶段 1 缺失导致的阶段链漂移。 */
   async repairMissingStageOne(): Promise<boolean> {
-    return this.structureAdapter.repairMissingStageOne();
+    return this.structureAdapter.repairMissingStageOne(() => true);
+  }
+
+  repairMissingStageOneForUiOwner(canPublishUi: TaskOperationUiOwner): Promise<boolean> {
+    return this.structureAdapter.repairMissingStageOne(canPublishUi);
   }
 
   // ========== 查询方法 ==========

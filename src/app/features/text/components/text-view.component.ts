@@ -1,4 +1,4 @@
-import { Component, Injector, inject, signal, computed, Output, EventEmitter, OnInit, OnDestroy, ElementRef, ViewChild, NgZone, ChangeDetectionStrategy, effect } from '@angular/core';
+import { Component, Injector, inject, signal, computed, Output, EventEmitter, OnInit, OnDestroy, ElementRef, ViewChild, NgZone, ChangeDetectionStrategy, effect, untracked } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { LoggerService } from '../../../../services/logger.service';
 import { UiStateService } from '../../../../services/ui-state.service';
@@ -19,6 +19,13 @@ import { TextStagesComponent } from './text-stages.component';
 import { TextDeleteDialogComponent } from './text-delete-dialog.component';
 import { TextViewDragDropService } from '../services/text-view-drag-drop.service';
 import { TextViewTaskOpsService } from '../services/text-view-task-ops.service';
+
+export function registerTextViewProjectRetirement(
+  projectState: Pick<ProjectStateService, 'registerBeforeActiveProjectChange'>,
+  retire: () => void,
+): () => void {
+  return projectState.registerBeforeActiveProjectChange(() => retire());
+}
 
 /**
  * 文本视图容器组件
@@ -144,6 +151,7 @@ export class TextViewComponent implements OnInit, OnDestroy {
 
   /** 移动端视图切换追踪（用于切换时收起编辑态） */
   private lastMobileActiveView: 'text' | 'flow' | null = null;
+  private readonly unregisterProjectRetirement: () => void;
   private isGlobalTouchMoveListening = false;
   
   @ViewChild('scrollContainer', { static: true }) scrollContainerRef!: ElementRef<HTMLElement>;
@@ -173,6 +181,9 @@ export class TextViewComponent implements OnInit, OnDestroy {
   });
   
   constructor() {
+    this.unregisterProjectRetirement = registerTextViewProjectRetirement(
+      this.projectState, () => this.resetTextEditingState(),
+    );
     // effect() 必须在注入上下文中调用（构造函数），否则抛 NG0203
     this.setupSignalEffects();
   }
@@ -187,7 +198,9 @@ export class TextViewComponent implements OnInit, OnDestroy {
       const activeView = this.uiState.activeView();
 
       if (!isMobile) {
+        const isInitialView = this.lastMobileActiveView === null;
         this.lastMobileActiveView = activeView;
+        if (isInitialView) this.resetTextEditingState();
         return;
       }
 
@@ -202,17 +215,6 @@ export class TextViewComponent implements OnInit, OnDestroy {
       }
 
       this.resetTextEditingState();
-    });
-    
-    // 监听项目切换：切换项目时重置编辑状态
-    effect(() => {
-      const projectId = this.projectState.activeProjectId();
-      
-      // 项目切换时重置所有编辑状态
-      // 避免带着上一个项目的编辑状态进入新项目
-      if (projectId) {
-        this.resetTextEditingState();
-      }
     });
   }
   
@@ -292,6 +294,7 @@ export class TextViewComponent implements OnInit, OnDestroy {
   }
   
   ngOnDestroy() {
+    this.unregisterProjectRetirement();
     this.resetTextEditingState();
     
     document.removeEventListener('touchend', this.boundGlobalTouchEnd, { capture: true } as EventListenerOptions);
@@ -308,10 +311,13 @@ export class TextViewComponent implements OnInit, OnDestroy {
   }
 
   private resetTextEditingState(): void {
-    this.selectedTaskId.set(null);
-    this.deleteConfirmTask.set(null);
-    this.deleteKeepChildren.set(false);
-    this.unassignedRef?.resetEditState();
+    // Child reset methods read edit signals synchronously; keep those reads out of caller effects.
+    untracked(() => {
+      this.selectedTaskId.set(null);
+      this.deleteConfirmTask.set(null);
+      this.deleteKeepChildren.set(false);
+      this.unassignedRef?.resetEditState();
+    });
   }
   
   // ========== 鼠标拖拽处理 ==========

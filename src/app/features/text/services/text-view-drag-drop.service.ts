@@ -15,6 +15,7 @@ import {
   removeDragGhostElement,
   type TouchMoveMetrics,
 } from './text-view-drag-drop.helpers';
+import { TextViewMouseDragWatchdogController } from './text-view-drag-watchdog.controller';
 
 interface TouchDragStartOptions {
   gestureMode?: TouchDragGestureMode;
@@ -67,14 +68,12 @@ export class TextViewDragDropService {
   /** 拖拽激活时间戳 - 用于防止 pointerup 过早触发 */
   private dragActivationTime: number | null = null;
 
-  /**
-   * 鼠标拖拽丢失看门狗：拖拽源节点在拖拽中被移除（远端同步删移/项目切换重渲染）时
-   * Chrome 不会派发 dragend，document dragover 监听与 rAF 自动滚动会一直滞留。
-   * 以 dragover 心跳（活跃拖拽在窗口内每 ~350ms 持续触发）静默 + 源节点缺失双条件自愈，
-   * 避免把「拖出窗口」（源节点仍在）误判为拖拽丢失
-   */
-  private mouseDragWatchdogTimer: ReturnType<typeof setTimeout> | null = null;
-  private static readonly MOUSE_DRAG_WATCHDOG_MS = 1500;
+  /** 鼠标拖拽丢失看门狗（心跳静默 + 源节点缺失双条件自愈）委托给非 DI 控制器 */
+  private readonly mouseDragWatchdog = new TextViewMouseDragWatchdogController({
+    logger: this.logger,
+    getDraggingTaskId: () => this.draggingTaskId(),
+    isTouchDragging: () => this.touchState.isDragging,
+  });
 
   /** 开始鼠标拖拽 */
   startDrag(task: Task) {
@@ -572,7 +571,7 @@ export class TextViewDragDropService {
     this.autoScrollState.lastClientY = clientY;
     this.autoScrollState.stickyScrollAmount = null;
     document.addEventListener('dragover', this.boundHandleDragAutoScroll);
-    this.armMouseDragWatchdog();
+    this.mouseDragWatchdog.arm();
     this.ensureAutoScrollLoop();
   }
 
@@ -608,52 +607,7 @@ export class TextViewDragDropService {
   private handleDragAutoScroll(e: DragEvent) {
     this.autoScrollState.lastClientY = e.clientY;
     // dragover 心跳：拖拽仍存活，重置丢失看门狗
-    this.armMouseDragWatchdog();
-  }
-
-  private armMouseDragWatchdog(): void {
-    this.clearMouseDragWatchdog();
-    this.mouseDragWatchdogTimer = setTimeout(() => {
-      this.mouseDragWatchdogTimer = null;
-      this.checkMouseDragStillAlive();
-    }, TextViewDragDropService.MOUSE_DRAG_WATCHDOG_MS);
-  }
-
-  private clearMouseDragWatchdog(): void {
-    if (this.mouseDragWatchdogTimer !== null) {
-      clearTimeout(this.mouseDragWatchdogTimer);
-      this.mouseDragWatchdogTimer = null;
-    }
-  }
-
-  private checkMouseDragStillAlive(): void {
-    const draggingTaskId = this.draggingTaskId();
-    if (!draggingTaskId || this.touchState.isDragging) {
-      return;
-    }
-
-    // 源节点仍在 DOM：dragover 静默大概率只是拖出了浏览器窗口（跨窗口拖拽），
-    // dragend 之后仍会送达源节点，继续等待而不是误清理
-    if (this.isDragSourceElementPresent(draggingTaskId)) {
-      this.armMouseDragWatchdog();
-      return;
-    }
-
-    this.logger.warn('[MouseDrag] 拖拽源节点已被移除且 dragover 静默，dragend 可能已丢失，触发自愈清理', {
-      draggingTaskId,
-    });
-    document.dispatchEvent(new CustomEvent('mouseDragLost'));
-  }
-
-  private isDragSourceElementPresent(taskId: string): boolean {
-    if (typeof document === 'undefined') {
-      return true;
-    }
-
-    const escapedId = typeof CSS !== 'undefined' && typeof CSS.escape === 'function'
-      ? CSS.escape(taskId)
-      : taskId;
-    return document.querySelector(`[data-task-id="${escapedId}"], [data-unassigned-task="${escapedId}"]`) !== null;
+    this.mouseDragWatchdog.arm();
   }
   
   private ensureAutoScrollLoop() {
@@ -719,7 +673,7 @@ export class TextViewDragDropService {
   
   private stopAutoScroll() {
     document.removeEventListener('dragover', this.boundHandleDragAutoScroll);
-    this.clearMouseDragWatchdog();
+    this.mouseDragWatchdog.clear();
     this.stopAutoScrollLoop(true);
   }
   

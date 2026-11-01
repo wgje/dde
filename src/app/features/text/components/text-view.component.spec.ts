@@ -1,7 +1,11 @@
+import { signal, type WritableSignal } from '@angular/core';
+import { TestBed } from '@angular/core/testing';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+import { registerTextViewProjectRetirement, TextViewComponent } from './text-view.component';
 
 function getMethodBody(source: string, methodName: string): string {
   const marker = `${methodName}(`;
@@ -25,6 +29,90 @@ function getMethodBody(source: string, methodName: string): string {
 }
 
 describe('text-view.component.ts', () => {
+  afterEach(() => {
+    TestBed.resetTestingModule();
+  });
+
+  it('项目切换 effect 不应订阅子组件编辑态并在用户进入编辑时再次重置', () => {
+    const childEditMode = signal(false);
+    const resetEditState = vi.fn(() => {
+      childEditMode();
+      return Promise.resolve(true);
+    });
+    const component = Object.create(TextViewComponent.prototype) as {
+      uiState: {
+        isMobile: WritableSignal<boolean>;
+        activeView: WritableSignal<'text' | 'flow'>;
+      };
+      projectState: {
+        activeProjectId: WritableSignal<string | null>;
+      };
+      lastMobileActiveView: 'text' | 'flow' | null;
+      selectedTaskId: WritableSignal<string | null>;
+      deleteConfirmTask: WritableSignal<null>;
+      deleteKeepChildren: WritableSignal<boolean>;
+      unassignedRef: { resetEditState: () => Promise<boolean> };
+      setupSignalEffects: () => void;
+    };
+
+    component.uiState = {
+      isMobile: signal(false),
+      activeView: signal<'text' | 'flow'>('text'),
+    };
+    component.projectState = { activeProjectId: signal<string | null>('project-1') };
+    component.lastMobileActiveView = null;
+    component.selectedTaskId = signal<string | null>(null);
+    component.deleteConfirmTask = signal(null);
+    component.deleteKeepChildren = signal(false);
+    component.unassignedRef = { resetEditState };
+
+    TestBed.configureTestingModule({});
+    TestBed.runInInjectionContext(() => component.setupSignalEffects());
+    TestBed.flushEffects();
+    expect(resetEditState).toHaveBeenCalledTimes(1);
+
+    resetEditState.mockClear();
+    childEditMode.set(true);
+    TestBed.flushEffects();
+
+    expect(resetEditState).not.toHaveBeenCalled();
+  });
+
+  it('真实项目切换应在新项目 ID 可见前同步退休文本编辑态，重复项目保持现状', () => {
+    let activeProjectId = 'project-a';
+    let listener: ((previousId: string | null, nextId: string | null) => void) | null = null;
+    const selectedTaskId = signal<string | null>('task-a');
+    const deleteConfirmTask = signal<{ id: string } | null>({ id: 'task-a' });
+    const unregister = vi.fn();
+    const retire = vi.fn(() => {
+      expect(activeProjectId).toBe('project-a');
+      selectedTaskId.set(null);
+      deleteConfirmTask.set(null);
+    });
+    const dispose = registerTextViewProjectRetirement({
+      registerBeforeActiveProjectChange: callback => {
+        listener = callback;
+        return unregister;
+      },
+    }, retire);
+    const switchProject = (nextProjectId: string): void => {
+      if (activeProjectId === nextProjectId) return;
+      const previousProjectId = activeProjectId;
+      listener?.(previousProjectId, nextProjectId);
+      activeProjectId = nextProjectId;
+    };
+
+    switchProject('project-b');
+    expect(retire).toHaveBeenCalledTimes(1);
+    expect(selectedTaskId()).toBeNull();
+    expect(deleteConfirmTask()).toBeNull();
+
+    switchProject('project-b');
+    expect(retire).toHaveBeenCalledTimes(1);
+    dispose();
+    expect(unregister).toHaveBeenCalledTimes(1);
+  });
+
   it('应将文本视图中的任务链接输出绑定到共享跳转逻辑', () => {
     const sourcePath = join(process.cwd(), 'src/app/features/text/components/text-view.component.ts');
     const source = readFileSync(sourcePath, 'utf8');

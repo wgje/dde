@@ -11,6 +11,15 @@ interface DurableDeleteResultLike {
 
 interface DurableRestoreResultLike {
   saved: boolean;
+  blockedReason?: 'missing-deleted-meta';
+  blockedTaskIds?: Set<string>;
+}
+
+export type TaskOperationUiOwner = () => boolean;
+
+export interface ProjectUiOwner {
+  readonly projectId: string;
+  readonly generation: number;
 }
 
 export interface TaskOperationTrashAdapterControllerOptions {
@@ -43,12 +52,16 @@ export interface TaskOperationTrashAdapterControllerOptions {
     lastUpdateType: 'content' | 'structure' | 'position';
     setupSyncResultHandler(snapshotId: string): void;
     showUndoToast(message: string): void;
-    triggerServerSideDelete(projectId: string, explicitIds: string[], snapshotId: string): void;
+    triggerServerSideDelete(
+      projectId: string, explicitIds: string[], snapshotId: string,
+      canPublishUi?: TaskOperationUiOwner,
+    ): void;
   };
   rollbackSnapshotAfterDurableFailure(
     snapshotId: string,
     message: string,
     data: Record<string, unknown>,
+    canPublishUi?: TaskOperationUiOwner,
   ): void;
 }
 
@@ -79,7 +92,9 @@ export class TaskOperationTrashAdapterController {
     return true;
   }
 
-  async permanentlyDeleteTask(taskId: string): Promise<boolean> {
+  async permanentlyDeleteTask(
+    taskId: string, canPublishUi: TaskOperationUiOwner = () => true,
+  ): Promise<boolean> {
     if (this.options.blockLocalMutation('删除任务')) {
       return false;
     }
@@ -92,6 +107,7 @@ export class TaskOperationTrashAdapterController {
         snapshot.id,
         '任务永久删除本地持久化失败，未提交 UI 更新',
         { taskId },
+        canPublishUi,
       );
       return false;
     }
@@ -100,7 +116,9 @@ export class TaskOperationTrashAdapterController {
     return true;
   }
 
-  async deleteTasksBatch(explicitIds: string[]): Promise<number> {
+  async deleteTasksBatch(
+    explicitIds: string[], canPublishUi: TaskOperationUiOwner = () => true,
+  ): Promise<number> {
     if (explicitIds.length === 0) return 0;
     const projectId = this.options.projectState.activeProjectId();
     if (!projectId) return 0;
@@ -116,15 +134,17 @@ export class TaskOperationTrashAdapterController {
         snapshot.id,
         '批量删除本地持久化失败，未提交 UI 更新',
         { explicitIds },
+        canPublishUi,
       );
       return 0;
     }
 
     const deletedCount = result.deletedTaskIds.size;
-    this.options.recorder.triggerServerSideDelete(projectId, explicitIds, snapshot.id);
-    this.options.recorder.showUndoToast(`已删除 ${deletedCount} 个任务`);
+    this.options.recorder.triggerServerSideDelete(projectId, explicitIds, snapshot.id, canPublishUi);
+    const publishUi = canPublishUi();
+    if (publishUi) this.options.recorder.showUndoToast(`已删除 ${deletedCount} 个任务`);
     this.options.recorder.setupSyncResultHandler(snapshot.id);
-    return deletedCount;
+    return publishUi ? deletedCount : 0;
   }
 
   calculateBatchDeleteImpact(explicitIds: string[]): {
@@ -143,6 +163,15 @@ export class TaskOperationTrashAdapterController {
     this.markStructureEditing();
     const result = await this.options.core.restoreTaskDurably(taskId);
     if (!result.saved) {
+      if (result.blockedReason === 'missing-deleted-meta') {
+        this.options.logger.warn('任务恢复被数据安全门禁阻止', {
+          taskId,
+          reason: result.blockedReason,
+          blockedTaskIds: [...(result.blockedTaskIds ?? [])],
+        });
+        return false;
+      }
+
       this.options.logger.warn('任务恢复本地持久化失败，未提交 UI 更新', { taskId });
       return false;
     }
@@ -150,7 +179,7 @@ export class TaskOperationTrashAdapterController {
     return true;
   }
 
-  async emptyTrash(): Promise<boolean> {
+  async emptyTrash(canPublishUi: TaskOperationUiOwner = () => true): Promise<boolean> {
     if (this.options.blockLocalMutation('清空回收站')) {
       return false;
     }
@@ -163,6 +192,7 @@ export class TaskOperationTrashAdapterController {
         snapshot.id,
         '清空回收站本地持久化失败，未提交 UI 更新',
         {},
+        canPublishUi,
       );
       return false;
     }

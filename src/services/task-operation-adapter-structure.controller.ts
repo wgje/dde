@@ -148,7 +148,7 @@ export class TaskOperationAdapterStructureController {
     return this.options.core.getDirectChildren(taskId);
   }
 
-  async repairMissingStageOne(): Promise<boolean> {
+  async repairMissingStageOne(canPublishUi: () => boolean): Promise<boolean> {
     if (this.options.blockLocalMutation('恢复阶段')) {
       return false;
     }
@@ -158,7 +158,7 @@ export class TaskOperationAdapterStructureController {
     const repaired = await this.options.core.repairMissingStageOneDurably();
 
     if (repaired) {
-      this.options.recorder.showUndoToast('已补回阶段 1');
+      if (canPublishUi()) this.options.recorder.showUndoToast('已补回阶段 1');
       this.options.recorder.setupSyncResultHandler(snapshot.id);
     } else {
       this.options.optimisticState.discardSnapshot(snapshot.id);

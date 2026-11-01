@@ -18,11 +18,13 @@ import {
   getAttachmentFileExtension,
 } from './text-task-editor.helpers';
 import { TextTaskEditorAttachmentController } from './text-task-editor-attachment.controller';
-import { TextTaskEditorDraftPersistenceController } from './text-task-editor-draft-persistence.controller';
+import {
+  TextTaskEditorDraftPersistenceController,
+  type TextTaskEditorDraftOwner,
+} from './text-task-editor-draft-persistence.controller';
 import { TextTaskEditorFocusController } from './text-task-editor-focus.controller';
 import { TextTaskEditorPreviewController } from './text-task-editor-preview.controller';
 import { TextTaskEditorSidecarDraftController } from './text-task-editor-sidecar-draft.controller';
-import { TextTaskEditorSubmittedTextController } from './text-task-editor-submitted-text.controller';
 
 /**
  * 任务编辑器组件（展开态）
@@ -114,15 +116,25 @@ export class TextTaskEditorComponent implements OnDestroy {
   protected readonly localContent = signal('');
   protected readonly previewTitle = computed(() => this.localTitle().trim() || 'Untitled task');
   protected readonly hasPreviewContent = computed(() => this.localContent().trim().length > 0);
-  private readonly submittedText = new TextTaskEditorSubmittedTextController();
-  protected readonly textSaveState = this.submittedText.saveState;
+  protected readonly quickTodoSavePending = signal(false);
   private readonly sidecarDraft = new TextTaskEditorSidecarDraftController();
   private readonly draftPersistence = new TextTaskEditorDraftPersistenceController({
     getTask: () => this.task(),
     getUserId: () => this.userId(),
-    resolveProjectId: () => this.resolveProjectId(),
+    captureOwner: taskId => this.captureTextOwner(taskId),
+    isOwnerCurrent: owner => this.isTextOwnerCurrent(owner),
+    retireSidecarSaveState: () => {
+      this.sidecarDraft.plannerSaveState.set('idle');
+      this.sidecarDraft.attentionSaveState.set('idle');
+    },
+    startPlannerSave: () => this.sidecarDraft.startPlannerSave(),
+    finishPlannerSave: saved => this.sidecarDraft.finishPlannerSave(saved),
+    startAttentionSave: () => this.sidecarDraft.startAttentionSave(),
+    finishAttentionSave: (sequence, saved) => this.sidecarDraft.finishAttentionSave(sequence, saved),
     areAttentionRowsEqual: (left, right) => this.sidecarDraft.areAttentionRowsEqual(left, right),
+    markForCheck: () => this.cdr.markForCheck(),
   });
+  protected readonly textSaveState = this.draftPersistence.textSaveState;
   protected readonly localExpectedMinutes = this.sidecarDraft.localExpectedMinutes;
   protected readonly localWaitMinutes = this.sidecarDraft.localWaitMinutes;
   protected readonly localCognitiveLoad = this.sidecarDraft.localCognitiveLoad;
@@ -139,6 +151,10 @@ export class TextTaskEditorComponent implements OnDestroy {
   private isTitleFocused = false;
   /** 内容输入框是否聚焦 */
   private isContentFocused = false;
+  private isComponentLive = false;
+  private textOwner: TextTaskEditorDraftOwner | null = null;
+  private isRetiringTextOwner = false;
+  private unregisterProjectRetirement = () => {};
   private readonly focusController = new TextTaskEditorFocusController({
     elementRef: this.elementRef,
     taskId: () => this.task().id,
@@ -160,8 +176,10 @@ export class TextTaskEditorComponent implements OnDestroy {
     // 这样可避免用户输入时被远程更新覆盖
     try {
       effect(() => {
+        this.draftPersistence.observeUserId(this.userId());
         const task = this.task();
         if (task) {
+          this.refreshTextOwner(task.id);
           this.syncLocalDraftFromTask(
             task,
             !this.isTitleFocused,
@@ -203,9 +221,11 @@ export class TextTaskEditorComponent implements OnDestroy {
   }
 
   ngOnDestroy(): void {
-    // 【关键】组件销毁前，确保当前编辑的内容被保存
-    // 这是修复手机端点击关联块编辑后无法自动保存的核心逻辑
+    this.isComponentLive = false;
     this.persistCurrentEdits();
+    this.textOwner = null;
+    this.draftPersistence.retireCurrentOwner();
+    this.unregisterProjectRetirement();
     this.focusController.clearFocusRequestTimer();
     this.focusController.clearDocumentClickGuard();
 
@@ -225,7 +245,9 @@ export class TextTaskEditorComponent implements OnDestroy {
     if (!task) return;
 
     // 从 DOM 直接读取最新值（绕过 Angular 数据绑定的延迟）
-    const titleEl = this.titleInputRef()?.nativeElement;
+    const titleEl = this.elementRef.nativeElement.querySelector(
+      '[data-testid="task-title-input"]',
+    ) as HTMLInputElement | null;
     const contentEl = this.contentInputRef()?.nativeElement;
 
     const currentTitle = titleEl?.value ?? this.localTitle();
@@ -242,36 +264,15 @@ export class TextTaskEditorComponent implements OnDestroy {
   }
 
   private submitTaskTitle(taskId: string, value: string): Promise<boolean> {
-    return this.submitTextValue('title', taskId, value, () =>
+    return this.draftPersistence.submitText('title', taskId, value, () =>
       this.taskOpsAdapter.updateTaskTitle(taskId, value),
     );
   }
 
   private submitTaskContent(taskId: string, value: string): Promise<boolean> {
-    return this.submitTextValue('content', taskId, value, () =>
+    return this.draftPersistence.submitText('content', taskId, value, () =>
       this.taskOpsAdapter.updateTaskContent(taskId, value),
     );
-  }
-
-  private submitTextValue(
-    field: 'title' | 'content',
-    taskId: string,
-    value: string,
-    submit: () => Promise<boolean>,
-  ): Promise<boolean> {
-    const saveSequence = this.submittedText.startProtectedSubmission(field, taskId, value);
-    this.draftPersistence.persistTextDraftField(field, taskId, value);
-
-    return this.submittedText.submit(field, taskId, value, submit)
-      .then(saved => {
-        if (saved) {
-          this.draftPersistence.clearPersistedStringDraftFieldIfMatches(field, taskId, value);
-        }
-        if (this.submittedText.finishProtectedSubmission(saveSequence, saved, field, taskId, value)) {
-          this.cdr.markForCheck();
-        }
-        return saved;
-      });
   }
 
   private persistVisibleAttentionInputs(): void {
@@ -323,6 +324,30 @@ export class TextTaskEditorComponent implements OnDestroy {
 
   private resolveProjectId(): string | null {
     return this.projectId() || this.projectState.activeProjectId();
+  }
+
+  private refreshTextOwner(taskId: string): void {
+    const owner = this.projectState.captureActiveProjectOwner();
+    const current = this.textOwner;
+    if (owner.projectId !== this.resolveProjectId()) {
+      this.textOwner = null;
+    } else if (!current || current.projectId !== owner.projectId
+      || current.generation !== owner.generation || current.taskId !== taskId) {
+      this.textOwner = { ...owner, taskId };
+    }
+  }
+
+  private captureTextOwner(taskId = this.task().id): TextTaskEditorDraftOwner | null {
+    const owner = this.textOwner;
+    if (!owner || owner.taskId !== taskId || this.resolveProjectId() !== owner.projectId) return null;
+    const projectCurrent = this.isRetiringTextOwner
+      ? this.projectState.activeProjectId() === owner.projectId
+      : this.projectState.isActiveProjectOwnerCurrent(owner);
+    return projectCurrent ? owner : null;
+  }
+
+  private isTextOwnerCurrent(owner: TextTaskEditorDraftOwner): boolean {
+    return this.captureTextOwner(owner.taskId) === owner;
   }
 
   private scheduleUnlock(field: string, unlock: () => void): void {
@@ -379,6 +404,19 @@ export class TextTaskEditorComponent implements OnDestroy {
   }
 
   ngOnInit() {
+    this.isComponentLive = true;
+    this.draftPersistence.observeUserId(this.userId());
+    this.refreshTextOwner(this.task().id);
+    this.unregisterProjectRetirement = this.projectState.registerBeforeActiveProjectChange(previousProjectId => {
+      if (!this.textOwner || this.textOwner.projectId !== previousProjectId) return;
+      this.isRetiringTextOwner = true;
+      try { this.persistCurrentEdits(); }
+      finally {
+        this.isRetiringTextOwner = false;
+        this.textOwner = null;
+        this.draftPersistence.retireCurrentOwner();
+      }
+    });
     this.isPreview.set(this.initialPreview());
     this.syncLocalDraftFromTask(this.task(), true, true, true);
   }
@@ -547,48 +585,25 @@ export class TextTaskEditorComponent implements OnDestroy {
   async onExpectedMinutesChange(value: string): Promise<boolean> {
     const taskId = this.task().id;
     const draftValue = this.sidecarDraft.setExpectedMinutes(value);
-    this.draftPersistence.persistPlannerDraftField('expectedMinutes', taskId, draftValue);
-    const saved = await this.persistPlannerField(
+    return this.draftPersistence.submitPlanner('expectedMinutes', taskId, draftValue,
       () => this.taskOpsAdapter.updateTaskExpectedMinutes(taskId, parseOptionalMinutes(value)),
     );
-    if (saved) {
-      this.draftPersistence.clearPersistedStringDraftFieldIfMatches('expectedMinutes', taskId, draftValue);
-    }
-    return saved;
   }
 
   async onWaitMinutesChange(value: string): Promise<boolean> {
     const taskId = this.task().id;
     const draftValue = this.sidecarDraft.setWaitMinutes(value);
-    this.draftPersistence.persistPlannerDraftField('waitMinutes', taskId, draftValue);
-    const saved = await this.persistPlannerField(
+    return this.draftPersistence.submitPlanner('waitMinutes', taskId, draftValue,
       () => this.taskOpsAdapter.updateTaskWaitMinutes(taskId, parseOptionalMinutes(value)),
     );
-    if (saved) {
-      this.draftPersistence.clearPersistedStringDraftFieldIfMatches('waitMinutes', taskId, draftValue);
-    }
-    return saved;
   }
 
   async onCognitiveLoadChange(value: string): Promise<boolean> {
     const taskId = this.task().id;
     const { draftValue, persistedValue } = this.sidecarDraft.setCognitiveLoad(value);
-    this.draftPersistence.persistPlannerDraftField('cognitiveLoad', taskId, draftValue);
-    const saved = await this.persistPlannerField(
+    return this.draftPersistence.submitPlanner('cognitiveLoad', taskId, draftValue,
       () => this.taskOpsAdapter.updateTaskCognitiveLoad(taskId, persistedValue),
     );
-    if (saved) {
-      this.draftPersistence.clearPersistedStringDraftFieldIfMatches('cognitiveLoad', taskId, draftValue);
-    }
-    return saved;
-  }
-
-  private async persistPlannerField(save: () => Promise<boolean>): Promise<boolean> {
-    this.sidecarDraft.startPlannerSave();
-    const saved = await save();
-    this.sidecarDraft.finishPlannerSave(saved);
-    this.cdr.markForCheck();
-    return saved;
   }
 
   onAttentionInput(value: string): void {
@@ -620,44 +635,25 @@ export class TextTaskEditorComponent implements OnDestroy {
     const persistedDraft = this.draftPersistence.readDraft(task.id);
     if (syncTitle) {
       const title = persistedDraft?.title ?? task.title ?? '';
-      if (!this.submittedText.shouldKeepProtectedDraft('title', task.id, title)) {
-        this.localTitle.set(title);
-        this.submittedText.reconcile('title', task.id, title);
-      }
+      this.draftPersistence.syncTextField('title', task.id, title, next => this.localTitle.set(next));
     }
     if (syncContent) {
       const content = persistedDraft?.content ?? task.content ?? '';
-      if (!this.submittedText.shouldKeepProtectedDraft('content', task.id, content)) {
-        this.localContent.set(content);
-        this.submittedText.reconcile('content', task.id, content);
-      }
+      this.draftPersistence.syncTextField('content', task.id, content, next => this.localContent.set(next));
     }
-    this.clearSettledTextFailures(task);
-    this.sidecarDraft.syncFromTask({ task, persistedDraft, syncAttention });
+    this.draftPersistence.settleTextFailures(task);
+    if (!this.draftPersistence.shouldKeepSidecarDraft(task.id)) {
+      this.sidecarDraft.syncFromTask({ task, persistedDraft, syncAttention });
+    }
   }
 
-  private async persistAttentionDraftRows(rows: TaskAttentionDraftItem[]): Promise<boolean> {
+  private persistAttentionDraftRows(rows: TaskAttentionDraftItem[]): Promise<boolean> {
     const currentTask = this.task();
     this.sidecarDraft.markAttentionCommitted(currentTask.id);
-    this.draftPersistence.persistAttentionDraftRowsField(currentTask.id, rows);
-    const saveSequence = this.sidecarDraft.startAttentionSave();
-    const saved = await this.taskOpsAdapter.updateTaskAttentionItems(
-      currentTask.id,
-      rows,
+    return this.draftPersistence.submitAttention(
+      currentTask.id, rows,
+      () => this.taskOpsAdapter.updateTaskAttentionItems(currentTask.id, rows),
     );
-    if (saved) {
-      this.draftPersistence.clearPersistedAttentionDraftRowsIfMatches(currentTask.id, rows);
-    }
-    if (this.sidecarDraft.finishAttentionSave(saveSequence, saved)) {
-      this.cdr.markForCheck();
-    }
-    return saved;
-  }
-
-  private clearSettledTextFailures(task: Task): void {
-    this.submittedText.clearSettledProtection('title', task.id, task.title || '');
-    this.submittedText.clearSettledProtection('content', task.id, task.content || '');
-    this.submittedText.clearFailedSaveStateWhenSettled();
   }
 
   onAttentionFocus(): void {
@@ -698,14 +694,32 @@ export class TextTaskEditorComponent implements OnDestroy {
   }
 
   async addQuickTodo(inputElement: HTMLInputElement): Promise<boolean> {
-    const text = inputElement.value.trim();
+    if (this.quickTodoSavePending()) return false;
+
+    const submittedValue = inputElement.value;
+    const text = submittedValue.trim();
     if (!text) return false;
 
-    const saved = await this.taskOpsAdapter.addTodoItem(this.task().id, text);
-    if (!saved) return false;
-    inputElement.value = '';
-    inputElement.focus();
-    return true;
+    const taskId = this.task().id;
+    this.quickTodoSavePending.set(true);
+    try {
+      const saved = await this.taskOpsAdapter.addTodoItem(taskId, text);
+      if (!saved) return false;
+
+      if (
+        this.isComponentLive &&
+        this.task().id === taskId &&
+        inputElement.value === submittedValue
+      ) {
+        inputElement.value = '';
+        inputElement.focus();
+      }
+      return true;
+    } catch {
+      return false;
+    } finally {
+      this.quickTodoSavePending.set(false);
+    }
   }
 
   async onAttachmentsChange(attachments: Attachment[]): Promise<void> {

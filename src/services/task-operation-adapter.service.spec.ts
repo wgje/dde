@@ -59,6 +59,7 @@ const createProject = (overrides: Partial<Project> = {}): Project => ({
 
 let mockProjectsSignal = signal<Project[]>([]);
 let mockActiveProjectIdSignal = signal<string | null>(null);
+let mockProjectOwnerGeneration = 0;
 
 const mockProjectStateService = {
   projects: () => mockProjectsSignal(),
@@ -67,10 +68,21 @@ const mockProjectStateService = {
     return mockProjectsSignal().find(p => p.id === projectId) || null;
   },
   activeProjectId: () => mockActiveProjectIdSignal(),
+  captureActiveProjectOwner: () => ({
+    projectId: mockActiveProjectIdSignal(), generation: mockProjectOwnerGeneration,
+  }),
+  isActiveProjectOwnerCurrent: (owner: { projectId: string | null; generation: number }) =>
+    owner.projectId === mockActiveProjectIdSignal() && owner.generation === mockProjectOwnerGeneration,
+  setActiveProjectId: (projectId: string | null) => {
+    if (mockActiveProjectIdSignal() === projectId) return;
+    mockProjectOwnerGeneration += 1;
+    mockActiveProjectIdSignal.set(projectId);
+  },
   getTask: (taskId: string) => {
     const project = mockProjectStateService.activeProject();
     return project?.tasks.find(t => t.id === taskId);
   },
+  getProjectWithCurrentData: (projectId: string) => mockProjectsSignal().find(project => project.id === projectId),
   getProjectsWithCurrentData: vi.fn(() => mockProjectsSignal()),
   setProjects: vi.fn((projects: Project[]) => {
     mockProjectsSignal.set(projects);
@@ -107,6 +119,7 @@ const mockTaskOperationService = {
   updateTaskDraftDurably: vi.fn().mockResolvedValue(true),
   updateTaskContentDurably: vi.fn().mockResolvedValue(true),
   updateTaskTitleDurably: vi.fn().mockResolvedValue(true),
+  updateTaskParkingMetaDurably: vi.fn().mockResolvedValue(true),
   updateTaskParkingMetaBatchDurably: vi.fn().mockResolvedValue(true),
   updateTaskPositionDurably: vi.fn().mockResolvedValue(true),
   updateTaskPositionWithRankSyncDurably: vi.fn().mockResolvedValue(true),
@@ -285,6 +298,7 @@ describe('TaskOperationAdapterService - moveTaskToStage', () => {
     project = createProject({ id: 'proj-1', tasks: [task1, task2] });
     
     mockProjectsSignal.set([project]);
+    mockProjectOwnerGeneration = 0;
     mockActiveProjectIdSignal.set('proj-1');
     mockUserSessionService.isHintOnlyStartupPlaceholderVisible.mockReturnValue(false);
     mockWriteGuardService.isExportOnly.mockReturnValue(false);
@@ -357,6 +371,15 @@ describe('TaskOperationAdapterService - moveTaskToStage', () => {
     mockLoggerCategory: () => mockLoggerCategory,
     mockChangeTrackerService: () => mockChangeTrackerService,
     mockSyncCoordinatorService: () => mockSyncCoordinatorService,
+    switchActiveProject: projectId => {
+      if (!mockProjectsSignal().some(project => project.id === projectId)) {
+        mockProjectsSignal.update(projects => [
+          ...projects,
+          createProject({ id: projectId, tasks: [createTask({ id: 'task-1' })] }),
+        ]);
+      }
+      mockProjectStateService.setActiveProjectId(projectId);
+    },
   });
 
   registerTaskOperationAdapterDurableMutationsSpecs({
@@ -508,7 +531,7 @@ describe('TaskOperationAdapterService - moveTaskToStage', () => {
     expect(mockOptimisticStateService.discardSnapshot).toHaveBeenCalledWith('snapshot-1');
   });
 
-  it('should rollback snapshot when operation fails', async () => {
+  it('should discard the snapshot without workspace rollback when operation fails', async () => {
     // 模拟操作失败
     const failureResult = { ok: false, error: { code: 'ERROR', message: '操作失败' } };
     mockTaskOperationService.moveTaskToStageDurably.mockResolvedValue(failureResult);
@@ -518,11 +541,12 @@ describe('TaskOperationAdapterService - moveTaskToStage', () => {
     expect(result.ok).toBe(false);
     expect(mockTaskOperationService.moveTaskToStage).not.toHaveBeenCalled();
     expect(mockRecorderService.showUndoToast).not.toHaveBeenCalled();
-    expect(mockOptimisticStateService.rollbackSnapshot).toHaveBeenCalledWith('snapshot-1');
+    expect(mockOptimisticStateService.discardSnapshot).toHaveBeenCalledWith('snapshot-1');
+    expect(mockOptimisticStateService.rollbackSnapshot).not.toHaveBeenCalled();
     expect(mockSyncCoordinatorService.markLocalChanges).not.toHaveBeenCalled();
   });
 
-  it('should rollback snapshot on conflict error (LWW 冲突)', async () => {
+  it('should discard snapshot on conflict error without workspace rollback', async () => {
     const conflictResult = { ok: false, error: { code: 'CONFLICT', message: '版本冲突' } };
     mockTaskOperationService.moveTaskToStageDurably.mockResolvedValue(conflictResult);
 
@@ -530,7 +554,8 @@ describe('TaskOperationAdapterService - moveTaskToStage', () => {
 
     expect(result.ok).toBe(false);
     expect(mockTaskOperationService.moveTaskToStage).not.toHaveBeenCalled();
-    expect(mockOptimisticStateService.rollbackSnapshot).toHaveBeenCalledWith('snapshot-1');
+    expect(mockOptimisticStateService.discardSnapshot).toHaveBeenCalledWith('snapshot-1');
+    expect(mockOptimisticStateService.rollbackSnapshot).not.toHaveBeenCalled();
   });
 
   it('should show toast when moving to unassigned area', async () => {

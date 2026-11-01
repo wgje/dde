@@ -1,7 +1,7 @@
 import { expect, it, type Mock } from 'vitest';
 
 import type { TaskOperationAdapterService } from './task-operation-adapter.service';
-import { ErrorCodes, failure } from '../utils/result';
+import { ErrorCodes, failure, success } from '../utils/result';
 
 type CoreTaskOperationMock = {
   addTask: Mock;
@@ -31,11 +31,13 @@ export interface TaskOperationAdapterCoreMutationsSpecContext {
     recordAndUpdateDurably: Mock;
   };
   mockOptimisticStateService(): {
+    discardSnapshot: Mock;
     rollbackSnapshot: Mock;
   };
   mockLoggerCategory(): { warn: Mock };
   mockChangeTrackerService(): { lockTaskField: Mock };
   mockSyncCoordinatorService(): { markLocalChanges: Mock };
+  switchActiveProject(projectId: string): void;
 }
 
 export function registerTaskOperationAdapterCoreMutationsSpecs(
@@ -73,6 +75,40 @@ export function registerTaskOperationAdapterCoreMutationsSpecs(
     expect(context.mockRecorderService().showUndoToast).not.toHaveBeenCalled();
     expect(context.mockRecorderService().setupSyncResultHandler).not.toHaveBeenCalled();
     expect(context.mockSyncCoordinatorService().markLocalChanges).not.toHaveBeenCalled();
+  });
+
+  it('addTask should settle durable A creation without publishing stale success UI', async () => {
+    let resolveCreate!: (result: ReturnType<typeof success<string>>) => void;
+    let canPublish = true;
+    context.mockTaskOperationService().addTaskDurably.mockReturnValueOnce(
+      new Promise(resolve => { resolveCreate = resolve; }),
+    );
+
+    const completion = context.service().addTaskForUiOwner(
+      'Durable task', 'body', 1, null, false, () => canPublish,
+    );
+    canPublish = false;
+    resolveCreate(success('task-a'));
+
+    expect((await completion).ok).toBe(true);
+    expect(context.mockRecorderService().showUndoToast).not.toHaveBeenCalled();
+    expect(context.mockRecorderService().setupSyncResultHandler).toHaveBeenCalledWith('snapshot-1');
+  });
+
+  it('addTask should discard stale failure snapshots instead of rolling back the current project', async () => {
+    let canPublish = true;
+    context.mockTaskOperationService().addTaskDurably.mockResolvedValueOnce(
+      failure(ErrorCodes.OPERATION_FAILED, '任务本地持久化失败'),
+    );
+
+    const completion = context.service().addTaskForUiOwner(
+      'Durable task', 'body', 1, null, false, () => canPublish,
+    );
+    canPublish = false;
+
+    expect((await completion).ok).toBe(false);
+    expect(context.mockOptimisticStateService().discardSnapshot).toHaveBeenCalledWith('snapshot-1');
+    expect(context.mockOptimisticStateService().rollbackSnapshot).not.toHaveBeenCalled();
   });
 
   it('addFloatingTask should use durable-first core creation before showing undo toast', async () => {
@@ -248,6 +284,25 @@ export function registerTaskOperationAdapterCoreMutationsSpecs(
     expect(saved).toBe(true);
     expect(context.mockChangeTrackerService().lockTaskField)
       .toHaveBeenCalledWith('task-1', 'proj-1', 'status');
+  });
+
+  it('updateTaskStatus should keep the captured project owner when the active project changes while saving', async () => {
+    let resolveStatus!: () => void;
+    context.mockTaskOperationService().updateTaskStatusDurably.mockReturnValueOnce(
+      new Promise<boolean>(resolve => {
+        resolveStatus = () => resolve(true);
+      }),
+    );
+
+    const completion = context.service().updateTaskStatus('task-1', 'completed');
+    context.switchActiveProject('proj-2');
+    resolveStatus();
+
+    expect(await completion).toBe(true);
+    expect(context.mockChangeTrackerService().lockTaskField)
+      .toHaveBeenCalledWith('task-1', 'proj-1', 'status');
+    expect(context.mockChangeTrackerService().lockTaskField)
+      .not.toHaveBeenCalledWith('task-1', 'proj-2', 'status');
   });
 
   it('updateTaskStatus should return false and skip status lock when local persistence fails', async () => {

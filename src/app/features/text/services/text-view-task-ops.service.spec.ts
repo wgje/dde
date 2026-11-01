@@ -10,7 +10,11 @@ import {
   type StageFixture,
 } from './text-view-task-ops.test-helpers';
 import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
-import { ProjectStateService } from '../../../../services/project-state.service';
+import {
+  ProjectStateService,
+  type ActiveProjectOwner,
+  type BeforeActiveProjectChangeListener,
+} from '../../../../services/project-state.service';
 import { UiStateService } from '../../../../services/ui-state.service';
 import { ToastService } from '../../../../services/toast.service';
 import { LoggerService } from '../../../../services/logger.service';
@@ -26,9 +30,14 @@ describe('TextViewTaskOpsService', () => {
   let outerScrollContainer: HTMLElement;
   let stageScrollContainer: HTMLElement;
   let stageTaskList: HTMLElement;
+  const addTask = vi.fn();
+  const repairMissingStageOne = vi.fn();
   const mockTaskOpsAdapter = {
-    addTask: vi.fn(),
-    repairMissingStageOne: vi.fn(),
+    addTask,
+    addTaskForUiOwner: vi.fn((...args: Parameters<TaskOperationAdapterService['addTaskForUiOwner']>) =>
+      addTask(...args.slice(0, 5))),
+    repairMissingStageOne,
+    repairMissingStageOneForUiOwner: vi.fn(() => repairMissingStageOne()),
   };
   const mockToast = {
     info: vi.fn(),
@@ -48,11 +57,31 @@ describe('TextViewTaskOpsService', () => {
   const stageViewRootFilter = signal<'all' | string>('all');
   const isTextUnassignedOpen = signal(false);
   let currentStages: StageFixture[] = [];
+  let activeProjectId: string | null = 'project-a';
+  let activeProjectGeneration = 0;
+  const beforeProjectChangeListeners = new Set<BeforeActiveProjectChangeListener>();
   const mockProjectState = {
     getTask: vi.fn((_id?: string): Task | null => null),
     stages: vi.fn((): StageFixture[] => currentStages),
-    tasks: vi.fn(() => []),
+    tasks: vi.fn((): Task[] => []),
     unassignedTasks: vi.fn(() => []),
+    captureActiveProjectOwner: vi.fn((): ActiveProjectOwner => ({
+      projectId: activeProjectId,
+      generation: activeProjectGeneration,
+    })),
+    isActiveProjectOwnerCurrent: vi.fn((owner: ActiveProjectOwner) =>
+      owner.projectId === activeProjectId && owner.generation === activeProjectGeneration),
+    registerBeforeActiveProjectChange: vi.fn((listener: BeforeActiveProjectChangeListener) => {
+      beforeProjectChangeListeners.add(listener);
+      return () => beforeProjectChangeListeners.delete(listener);
+    }),
+  };
+  const switchActiveProject = (nextProjectId: string): void => {
+    if (activeProjectId === nextProjectId) return;
+    const previousProjectId = activeProjectId;
+    activeProjectGeneration += 1;
+    [...beforeProjectChangeListeners].forEach(listener => listener(previousProjectId, nextProjectId));
+    activeProjectId = nextProjectId;
   };
   const mockUiState = {
     stageFilter,
@@ -80,17 +109,22 @@ describe('TextViewTaskOpsService', () => {
   };
 
   beforeEach(() => {
+    window.getSelection()?.removeAllRanges();
+    activeProjectId = 'project-a';
+    activeProjectGeneration = 0;
+    beforeProjectChangeListeners.clear();
+    mockProjectState.captureActiveProjectOwner.mockClear();
+    mockProjectState.isActiveProjectOwnerCurrent.mockClear();
+    mockProjectState.registerBeforeActiveProjectChange.mockClear();
     hostElement = document.createElement('div');
     hostElement.innerHTML = `
       <div class="text-view-scroll-container"></div>
       <div data-stage-scroll-container></div>
       <div data-stage-task-list="1"></div>
     `;
-
     outerScrollContainer = hostElement.querySelector('.text-view-scroll-container') as HTMLElement;
     stageScrollContainer = hostElement.querySelector('[data-stage-scroll-container]') as HTMLElement;
     stageTaskList = hostElement.querySelector('[data-stage-task-list="1"]') as HTMLElement;
-
     Object.defineProperty(stageTaskList, 'scrollTop', {
       configurable: true,
       writable: true,
@@ -101,7 +135,6 @@ describe('TextViewTaskOpsService', () => {
       writable: true,
       value: 0,
     });
-
     Object.defineProperty(outerScrollContainer, 'clientHeight', {
       configurable: true,
       value: 480,
@@ -118,10 +151,8 @@ describe('TextViewTaskOpsService', () => {
       configurable: true,
       value: 720,
     });
-
     mockRect(stageTaskList, 100, 180);
     mockRect(stageScrollContainer, 80, 320);
-
     TestBed.configureTestingModule({
       providers: [
         TextViewTaskOpsService,
@@ -153,20 +184,25 @@ describe('TextViewTaskOpsService', () => {
         },
       ],
     });
-
     service = TestBed.inject(TextViewTaskOpsService);
   stageFilter.set('all');
   stageViewRootFilter.set('all');
   isTextUnassignedOpen.set(false);
   currentStages = [];
   mockProjectState.getTask.mockReturnValue(null);
-  mockProjectState.tasks.mockReturnValue([]);
+  mockProjectState.tasks.mockReturnValue([
+    createTask({ id: 'source-task', stage: 2, parentId: 'parent-1' }),
+    createTask({ id: 'source-a', stage: 2, parentId: 'parent-a' }),
+    createTask({ id: 'source-b', stage: 2, parentId: 'parent-b' }),
+  ]);
   mockProjectState.unassignedTasks.mockReturnValue([]);
   mockUiState.setStageFilter.mockClear();
     mockUserSession.isHintOnlyStartupPlaceholderVisible.mockReturnValue(false);
     mockTaskOpsAdapter.addTask.mockReset();
+    mockTaskOpsAdapter.addTaskForUiOwner.mockClear();
     mockTaskOpsAdapter.repairMissingStageOne.mockReset();
     mockTaskOpsAdapter.repairMissingStageOne.mockResolvedValue(true);
+    mockTaskOpsAdapter.repairMissingStageOneForUiOwner.mockClear();
     mockToast.info.mockReset();
     mockToast.warning.mockReset();
     mockToast.error.mockReset();
@@ -182,7 +218,6 @@ describe('TextViewTaskOpsService', () => {
     stageScrollContainer: () => stageScrollContainer,
     stageTaskList: () => stageTaskList,
   });
-
   registerTextViewTaskOpsCreateSpecs({
     service: () => service,
     mockTaskOpsAdapter: () => mockTaskOpsAdapter,
@@ -193,6 +228,30 @@ describe('TextViewTaskOpsService', () => {
     setCurrentStages: stages => {
       currentStages = stages;
     },
+  });
+
+  it('should wire exact project ownership and unregister synchronous retirement', async () => {
+    initOpsContext();
+    let resolveCreate!: (value: { ok: true; value: string }) => void;
+    mockTaskOpsAdapter.addTask.mockReturnValue(new Promise(resolve => { resolveCreate = resolve; }));
+
+    const completion = service.onCreateUnassigned();
+
+    expect(mockProjectState.registerBeforeActiveProjectChange).toHaveBeenCalledTimes(1);
+    expect(mockProjectState.captureActiveProjectOwner).toHaveBeenCalled();
+    const canPublishUi = mockTaskOpsAdapter.addTaskForUiOwner.mock.calls[0]?.[5];
+    expect(canPublishUi).toEqual(expect.any(Function));
+    expect(canPublishUi()).toBe(true);
+    let projectVisibleDuringListener: string | null = null;
+    beforeProjectChangeListeners.add(() => { projectVisibleDuringListener = activeProjectId; });
+    switchActiveProject('project-b');
+    expect(projectVisibleDuringListener).toBe('project-a');
+    expect(canPublishUi()).toBe(false);
+    resolveCreate({ ok: true, value: 'task-a' });
+    await completion;
+
+    service.destroy();
+    expect(beforeProjectChangeListeners.size).toBe(1);
   });
 
   it('should keep task selected when parking rejects the task', async () => {

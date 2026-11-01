@@ -5,6 +5,10 @@ import {
   type TaskOperationTrashAdapterControllerOptions,
 } from './task-operation-trash-adapter.controller';
 
+type DeleteTasksBatchDurably =
+  TaskOperationTrashAdapterControllerOptions['core']['deleteTasksBatchDurably'];
+type BatchDeleteResult = Awaited<ReturnType<DeleteTasksBatchDurably>>;
+
 function createOptions(
   overrides: Partial<TaskOperationTrashAdapterControllerOptions> = {},
 ): TaskOperationTrashAdapterControllerOptions {
@@ -92,8 +96,94 @@ describe('TaskOperationTrashAdapterController', () => {
       'project-1',
       ['task-1', 'task-2'],
       'snapshot-1',
+      expect.any(Function),
     );
     expect(options.recorder.showUndoToast).toHaveBeenCalledWith('已删除 2 个任务');
+  });
+
+  it('continues A settlement but returns zero when its UI owner becomes stale', async () => {
+    let resolveDelete!: (result: BatchDeleteResult) => void;
+    const options = createOptions({
+      core: {
+        ...createOptions().core,
+        deleteTasksBatchDurably: vi.fn<DeleteTasksBatchDurably>(
+          () => new Promise<BatchDeleteResult>(resolve => { resolveDelete = resolve; }),
+        ),
+      },
+    });
+    let current = true;
+    const canPublishUi = () => current;
+    const controller = new TaskOperationTrashAdapterController(options);
+
+    const pending = controller.deleteTasksBatch(['task-1', 'task-2'], canPublishUi);
+    current = false;
+    resolveDelete({ deletedTaskIds: new Set(['task-1', 'task-2']), saved: true });
+
+    await expect(pending).resolves.toBe(0);
+    expect(options.recorder.triggerServerSideDelete).toHaveBeenCalledWith(
+      'project-1', ['task-1', 'task-2'], 'snapshot-1', canPublishUi,
+    );
+    expect(options.recorder.setupSyncResultHandler).toHaveBeenCalledWith('snapshot-1');
+    expect(options.recorder.showUndoToast).not.toHaveBeenCalled();
+  });
+
+  it('passes stale ownership to durable-failure cleanup', async () => {
+    const options = createOptions({
+      core: {
+        ...createOptions().core,
+        deleteTasksBatchDurably: vi.fn().mockResolvedValue({
+          deletedTaskIds: new Set(['task-1']), saved: false,
+        }),
+      },
+    });
+    const canPublishUi = () => false;
+    const controller = new TaskOperationTrashAdapterController(options);
+
+    await controller.deleteTasksBatch(['task-1'], canPublishUi);
+
+    expect(options.rollbackSnapshotAfterDurableFailure).toHaveBeenCalledWith(
+      'snapshot-1', '批量删除本地持久化失败，未提交 UI 更新',
+      { explicitIds: ['task-1'] }, canPublishUi,
+    );
+  });
+
+  it('passes permanent-delete ownership to durable-failure cleanup', async () => {
+    const options = createOptions({
+      core: {
+        ...createOptions().core,
+        permanentlyDeleteTaskDurably: vi.fn().mockResolvedValue({
+          deletedTaskIds: new Set(['task-1']), saved: false,
+        }),
+      },
+    });
+    const canPublishUi = () => false;
+    const controller = new TaskOperationTrashAdapterController(options);
+
+    await controller.permanentlyDeleteTask('task-1', canPublishUi);
+
+    expect(options.rollbackSnapshotAfterDurableFailure).toHaveBeenCalledWith(
+      'snapshot-1', '任务永久删除本地持久化失败，未提交 UI 更新',
+      { taskId: 'task-1' }, canPublishUi,
+    );
+  });
+
+  it('passes empty-trash ownership to durable-failure cleanup', async () => {
+    const options = createOptions({
+      core: {
+        ...createOptions().core,
+        emptyTrashDurably: vi.fn().mockResolvedValue({
+          deletedTaskIds: new Set(['task-1']), saved: false,
+        }),
+      },
+    });
+    const canPublishUi = () => false;
+    const controller = new TaskOperationTrashAdapterController(options);
+
+    await controller.emptyTrash(canPublishUi);
+
+    expect(options.rollbackSnapshotAfterDurableFailure).toHaveBeenCalledWith(
+      'snapshot-1', '清空回收站本地持久化失败，未提交 UI 更新', {}, canPublishUi,
+    );
   });
 
   it('rolls back the optimistic snapshot when durable delete fails', async () => {
@@ -118,5 +208,33 @@ describe('TaskOperationTrashAdapterController', () => {
       { taskId: 'task-1' },
     );
     expect(options.recorder.showUndoToast).not.toHaveBeenCalled();
+  });
+
+  it('logs an explainable data-safety reason when restore lacks deleted metadata', async () => {
+    const options = createOptions({
+      core: {
+        ...createOptions().core,
+        restoreTaskDurably: vi.fn().mockResolvedValue({
+          restoredConnectionIds: [],
+          restoredTaskIds: new Set<string>(),
+          saved: false,
+          blockedReason: 'missing-deleted-meta',
+          blockedTaskIds: new Set(['task-1', 'task-child']),
+        }),
+      },
+    });
+    const controller = new TaskOperationTrashAdapterController(options);
+
+    const restored = await controller.restoreTask('task-1');
+
+    expect(restored).toBe(false);
+    expect(options.logger.warn).toHaveBeenCalledWith(
+      '任务恢复被数据安全门禁阻止',
+      {
+        taskId: 'task-1',
+        reason: 'missing-deleted-meta',
+        blockedTaskIds: ['task-1', 'task-child'],
+      },
+    );
   });
 });
