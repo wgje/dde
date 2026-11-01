@@ -381,9 +381,9 @@ export class SyncCoordinatorProjectRefreshService {
   }
 
   private applyDownloadedProjects(mergedProjects: Project[]): void {
+    const previousActiveProjectId = this.projectState.activeProjectId() ?? this.projectState.activeProject()?.id ?? null;
     this.projectState.setProjects(mergedProjects);
-    const activeProjectId = this.projectState.activeProjectId() ?? this.projectState.activeProject()?.id ?? null;
-    if (activeProjectId && !mergedProjects.some(project => project.id === activeProjectId)) {
+    if (previousActiveProjectId && !mergedProjects.some(project => project.id === previousActiveProjectId)) {
       this.projectState.setActiveProjectId(mergedProjects[0]?.id ?? null);
     }
     this.projectData.saveOfflineSnapshot(mergedProjects);

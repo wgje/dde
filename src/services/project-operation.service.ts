@@ -192,7 +192,7 @@ export class ProjectOperationService {
     snapshotId: string,
     nextProjects: Project[],
     sessionContext: ProjectOperationSessionContext,
-    options: { queuedActionId?: string } = {},
+    options: { queuedActionId?: string; canPublishUi?: () => boolean } = {},
   ): Promise<{ success: false; error: string } | null> {
     if (!this.isSessionContextCurrent(sessionContext)) {
       return this.discardStaleProjectOperation(snapshotId);
@@ -209,8 +209,11 @@ export class ProjectOperationService {
         return this.discardStaleProjectOperation(snapshotId);
       }
       this.discardQueuedAction(options.queuedActionId);
-      this.optimisticState.rollbackSnapshot(snapshotId, false);
-      this.toastService.error('本地保存失败', '离线快照未能写入，请释放浏览器存储空间后重试');
+      if (options.canPublishUi?.() === false) this.optimisticState.discardSnapshot(snapshotId);
+      else {
+        this.optimisticState.rollbackSnapshot(snapshotId, false);
+        this.toastService.error('本地保存失败', '离线快照未能写入，请释放浏览器存储空间后重试');
+      }
       return { success: false, error: '离线快照未能写入' };
     }
   }
@@ -302,7 +305,10 @@ export class ProjectOperationService {
   /**
    * 删除项目
    */
-  async deleteProject(projectId: string): Promise<{ success: boolean; error?: string }> {
+  async deleteProject(
+    projectId: string,
+    options: { canPublishUi?: () => boolean } = {},
+  ): Promise<{ success: boolean; error?: string }> {
     const blocked = this.blockProjectMutation('删除项目');
     if (blocked) return blocked;
 
@@ -313,7 +319,6 @@ export class ProjectOperationService {
     
     // 创建快照（乐观更新前）
     const snapshot = this.optimisticState.createSnapshot('project-delete', '删除项目');
-    const activeProjectId = this.projectState.activeProjectId();
     const deleteProjectUpdater = (projects: Project[]) => projects.filter(project => project.id !== projectId);
     const remainingProjects = deleteProjectUpdater(this.currentProjects());
     
@@ -324,8 +329,11 @@ export class ProjectOperationService {
         return this.discardStaleProjectOperation(snapshot.id);
       }
       if (!actionId) {
-        this.optimisticState.rollbackSnapshot(snapshot.id, false);
-        this.toastService.error('本地保存失败', '离线删除队列未能写入，请释放浏览器存储空间后重试');
+        if (options.canPublishUi?.() === false) this.optimisticState.discardSnapshot(snapshot.id);
+        else {
+          this.optimisticState.rollbackSnapshot(snapshot.id, false);
+          this.toastService.error('本地保存失败', '离线删除队列未能写入，请释放浏览器存储空间后重试');
+        }
         this.projectData.saveOfflineSnapshot(this.currentProjects());
         return { success: false, error: '离线删除队列未能写入' };
       }
@@ -335,7 +343,7 @@ export class ProjectOperationService {
       snapshot.id,
       remainingProjects,
       sessionContext,
-      { queuedActionId: isCloudBackedUser ? actionId : undefined },
+      { queuedActionId: isCloudBackedUser ? actionId : undefined, canPublishUi: options.canPublishUi },
     );
     if (snapshotFailure) {
       return snapshotFailure;
@@ -346,8 +354,8 @@ export class ProjectOperationService {
     }
     this.projectState.updateProjects(deleteProjectUpdater);
 
-    if (activeProjectId === projectId) {
-      this.projectState.setActiveProjectId(remainingProjects[0]?.id ?? null);
+    if (this.projectState.activeProjectId() === projectId) {
+      this.projectState.setActiveProjectId(deleteProjectUpdater(this.currentProjects())[0]?.id ?? null);
     }
 
     this.finalizeDurableLocalProjectMutation(snapshot.id);

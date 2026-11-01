@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   createPendingTaskDeleteOperationId,
+  resolveRefreshedPendingTaskDeleteBaseUpdatedAtMap,
   resolveEffectivePendingTaskDeleteBaseUpdatedAtMap,
   resolveEffectivePendingTaskDeleteIds,
 } from './project-operation-conflict-pending-task-deletes';
@@ -75,6 +76,37 @@ describe('project-operation-conflict-pending-task-deletes', () => {
     expect(baseUpdatedAtMap).toBeUndefined();
   });
 
+  it('refreshes pending delete baselines from the fresh remote task snapshot', () => {
+    const baseUpdatedAtMap = resolveRefreshedPendingTaskDeleteBaseUpdatedAtMap(
+      {
+        tasks: [
+          { id: 'remote-task', updatedAt: '2026-06-15T04:00:00.000Z' },
+        ],
+      },
+      ['remote-task', 'missing-task'],
+      {
+        'remote-task': '2026-06-15T02:00:00.000Z',
+        'missing-task': '2026-06-15T01:00:00.000Z',
+      },
+    );
+
+    expect(baseUpdatedAtMap).toEqual({
+      'remote-task': '2026-06-15T04:00:00.000Z',
+      'missing-task': '2026-06-15T01:00:00.000Z',
+    });
+  });
+
+  it('uses compatibility remoteUpdatedAt for a single remotely deleted task', () => {
+    expect(resolveRefreshedPendingTaskDeleteBaseUpdatedAtMap(
+      { tasks: [] },
+      ['deleted-task'],
+      { 'deleted-task': '2026-06-15T01:00:00.000Z' },
+      '2026-06-15T05:00:00.000Z',
+    )).toEqual({
+      'deleted-task': '2026-06-15T05:00:00.000Z',
+    });
+  });
+
   it('creates a stable operation id for the same pending task delete intent', () => {
     const project = {
       id: 'project-id',
@@ -112,5 +144,32 @@ describe('project-operation-conflict-pending-task-deletes', () => {
 
     expect(localOwnerOperationId).not.toBe(remoteOwnerOperationId);
     expect(localOwnerOperationId).toBe(basedOperationId);
+  });
+
+  it('creates a new operation id after project or task baseline advances', () => {
+    const project = {
+      id: 'project-id',
+      version: 12,
+      updatedAt: '2026-06-15T03:00:00.000Z',
+    };
+    const firstOperationId = createPendingTaskDeleteOperationId(
+      project,
+      'task-id',
+      'user-id',
+      '2026-06-15T02:00:00.000Z',
+    );
+
+    expect(createPendingTaskDeleteOperationId(
+      { ...project, version: 13 },
+      'task-id',
+      'user-id',
+      '2026-06-15T02:00:00.000Z',
+    )).not.toBe(firstOperationId);
+    expect(createPendingTaskDeleteOperationId(
+      project,
+      'task-id',
+      'user-id',
+      '2026-06-15T04:00:00.000Z',
+    )).not.toBe(firstOperationId);
   });
 });

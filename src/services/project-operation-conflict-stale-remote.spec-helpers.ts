@@ -31,6 +31,7 @@ export interface ProjectOperationConflictStaleRemoteSpecContext {
   mockActionQueue: {
     enqueueDurably: MockFn;
   };
+  mockProjectConflictDirectSync: { executeDurably: MockFn };
   mockToast: {
     error: MockFn;
   };
@@ -46,6 +47,7 @@ export function registerProjectOperationConflictStaleRemoteSpecs(
       mockProjectState,
       mockSyncCoordinator,
       mockUserSession,
+      mockProjectConflictDirectSync,
     } = getContext();
     const existingRemote = createProject({ id: 'proj-conflict', name: 'Remote Existing', version: 4 });
     mockSyncCoordinator.conflictData.mockReturnValueOnce({
@@ -66,22 +68,13 @@ export function registerProjectOperationConflictStaleRemoteSpecs(
       value: createProject({ id: 'proj-conflict', name: 'Resolved Local', version: 5 }),
     });
     mockUserSession.currentUserId.mockReturnValue('user-1');
-    mockSyncCoordinator.core.saveProjectSmart.mockResolvedValueOnce({
-      success: false,
-      conflict: true,
-    });
+    mockProjectConflictDirectSync.executeDurably.mockResolvedValueOnce({ status: 'deferred' });
 
     await service.resolveConflict('proj-conflict', 'local');
 
-    expect(mockConflictStorage.saveConflict).toHaveBeenCalledWith(expect.objectContaining({
-      projectId: 'proj-conflict',
-      localProject: expect.objectContaining({ id: 'proj-conflict', name: 'Resolved Local', version: 5 }),
-      remoteProject: expect.objectContaining({ id: 'proj-conflict', name: 'Remote Existing', version: 4 }),
-      remoteSnapshotFresh: false,
-      pendingTaskDeleteIds: ['task-delete-1'],
-    }));
+    expect(mockConflictStorage.saveConflict).not.toHaveBeenCalled();
     expect(mockSyncCoordinator.captureConflict).not.toHaveBeenCalled();
-    expect(mockSyncCoordinator.clearActiveConflict).toHaveBeenCalled();
+    expect(mockSyncCoordinator.clearActiveConflict).not.toHaveBeenCalled();
   });
 
   it('解决冲突后的二次冲突若已属于旧会话，不应写入当前冲突链', async () => {
@@ -162,10 +155,7 @@ export function registerProjectOperationConflictStaleRemoteSpecs(
     const result = await service.resolveConflict('proj-conflict-fallback-stale', 'local');
 
     expect(result).toBe(true);
-    expect(mockConflictStorage.saveConflict).toHaveBeenCalledWith(expect.objectContaining({
-      projectId: 'proj-conflict-fallback-stale',
-      remoteSnapshotFresh: false,
-    }));
+    expect(mockConflictStorage.saveConflict).not.toHaveBeenCalled();
     expect(mockSyncCoordinator.clearActiveConflict).not.toHaveBeenCalled();
     expect(mockToast.error).not.toHaveBeenCalledWith('同步冲突', expect.any(String));
   });

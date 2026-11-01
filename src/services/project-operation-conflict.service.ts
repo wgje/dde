@@ -3,19 +3,20 @@ import { ProjectStateService } from './project-state.service';
 import { SyncCoordinatorService } from './sync-coordinator.service';
 import {
   ProjectDataService,
-  ProjectSaveFlightCoordinatorService,
   RetryQueueService,
   TaskSyncOperationsService,
-  type ProjectSaveResult,
 } from '../core-bridge';
 import { UserSessionService } from './user-session.service';
 import { ActionQueueService } from './action-queue.service';
-import { ConflictStorageService } from './conflict-storage.service';
+import { ConflictStorageService, type ConflictRecord } from './conflict-storage.service';
+import { AuthService } from './auth.service';
 import { UndoService } from './undo.service';
 import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
 import { ChangeTrackerService } from './change-tracker.service';
 import { ProjectConflictCaptureService } from './project-conflict-capture.service';
+import { ProjectConflictDirectSyncService } from './project-conflict-direct-sync.service';
+import { createProjectConflictHandoffSettlement } from './project-operation-conflict-retry-settlement.controller';
 import { Project } from '../models';
 import {
   captureConflictFingerprint,
@@ -43,7 +44,6 @@ import { AUTH_CONFIG } from '../config/auth.config';
 import { EnqueueParams, TaskDeleteBaseUpdatedAtMap } from './action-queue.types';
 import type {
   ConflictResolutionContext,
-  ConflictSaveFlowOutcome,
   ProjectConflictFingerprint,
   ProjectConflictSnapshot,
   ProjectSessionContext,
@@ -51,6 +51,7 @@ import type {
   ResolvedConflictSaveContext,
 } from './project-operation-conflict.types';
 
+type PendingTaskDeleteHandoffResult = { ok: boolean; actionId?: string };
 @Injectable({ providedIn: 'root' })
 export class ProjectOperationConflictService {
   private readonly loggerService = inject(LoggerService);
@@ -58,7 +59,6 @@ export class ProjectOperationConflictService {
   private readonly projectState = inject(ProjectStateService);
   private readonly syncCoordinator = inject(SyncCoordinatorService);
   private readonly projectData = inject(ProjectDataService);
-  private readonly projectSaveCoordinator = inject(ProjectSaveFlightCoordinatorService);
   private readonly taskSyncOps = inject(TaskSyncOperationsService);
   private readonly userSession = inject(UserSessionService);
   private readonly actionQueue = inject(ActionQueueService);
@@ -68,13 +68,34 @@ export class ProjectOperationConflictService {
   private readonly changeTracker = inject(ChangeTrackerService);
   private readonly retryQueue = inject(RetryQueueService);
   private readonly conflictCapture = inject(ProjectConflictCaptureService);
-
+  private readonly auth = inject(AuthService);
+  private readonly directConflictSync = inject(ProjectConflictDirectSyncService);
+  private readonly settleProjectConflictHandoff = createProjectConflictHandoffSettlement({
+    isFenceCurrent: input => this.auth.currentUserId() === input.ownerUserId
+      && this.auth.captureAuthIdentityFence() === input.authFence
+      && this.userSession.isSessionContextCurrent(input.sessionGeneration, input.ownerUserId),
+    getCurrentProjects: () => this.projectState.getProjectsWithCurrentData(),
+    getPendingProjectActions: projectId => this.actionQueue.getPendingActionsForProject(projectId),
+    persistProjects: projects => this.projectData.saveOfflineSnapshotAndWait(projects),
+    publishProjects: projects => this.projectState.updateProjects(() => projects),
+    reserveConflictLocalHandoff: input => this.conflictStorage.reserveProjectConflictLocalHandoff(input),
+    transitionActionLocalHandoff: input => this.actionQueue.transitionLocalHandoffStrictlyForOwner(input),
+    verifyConflictReservation: input => this.conflictStorage.verifyProjectConflictLocalHandoffReservation(input),
+    advanceConflictLocalHandoff: input => this.conflictStorage.advanceProjectConflictLocalHandoff(input),
+    clearCompletedConflict: input => this.conflictStorage.deleteCompletedProjectConflictLocalHandoff(input),
+    removeCompletedAction: input => this.actionQueue.removeCompletedLocalHandoffStrictlyForOwner(input),
+    now: () => new Date().toISOString(),
+  });
   isProjectSessionContextCurrent(
     context: ProjectSessionContext,
     stage: string,
     projectId: string
   ): boolean {
-    if (this.userSession.isSessionContextCurrent(context.sessionGeneration, context.ownerUserId)) {
+    const authCurrent = !context.authFence || (
+      this.auth.currentUserId() === context.ownerUserId
+      && this.auth.captureAuthIdentityFence() === context.authFence
+    );
+    if (authCurrent && this.userSession.isSessionContextCurrent(context.sessionGeneration, context.ownerUserId)) {
       return true;
     }
 
@@ -92,20 +113,29 @@ export class ProjectOperationConflictService {
     context: ProjectSessionContext,
     action: EnqueueParams,
     stage: string
-  ): Promise<boolean> {
+  ): Promise<string | null> {
     if (!context.ownerUserId || context.ownerUserId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
-      return false;
+      return null;
     }
-
     try {
-      await this.actionQueue.enqueueForOwner(context.ownerUserId, action);
+      const actionId = await this.actionQueue.enqueueForOwner(context.ownerUserId, action);
+      if (!actionId) {
+        this.logger.error('过期项目 CRUD 写回原 owner 队列未确认持久化', {
+          stage,
+          ownerUserId: context.ownerUserId,
+          actionType: action.type,
+          entityId: action.entityId,
+        });
+        return null;
+      }
       this.logger.info('过期项目 CRUD 已写回原 owner 队列', {
         stage,
         ownerUserId: context.ownerUserId,
         actionType: action.type,
         entityId: action.entityId,
+        actionId,
       });
-      return true;
+      return actionId;
     } catch (error) {
       this.logger.error('过期项目 CRUD 写回原 owner 队列失败', {
         stage,
@@ -114,28 +144,49 @@ export class ProjectOperationConflictService {
         entityId: action.entityId,
         error,
       });
-      return false;
     }
+    return null;
   }
-
   private async clearResolvedConflictState(
     projectId: string,
     ownerUserId: string | null,
     activeConflict?: ProjectConflictSnapshot,
     conflictFingerprint?: ProjectConflictFingerprint,
-  ): Promise<void> {
+    sessionContext?: ProjectSessionContext,
+  ): Promise<boolean> {
+    if (sessionContext && !this.canSettleConflictStateForOwner(sessionContext, projectId, 'resolveConflict:delete-conflict')) {
+      return false;
+    }
     const currentStoredConflict = await this.conflictStorage.getConflict(projectId);
+    if (sessionContext && !this.canSettleConflictStateForOwner(sessionContext, projectId, 'resolveConflict:after-get-conflict')) {
+      return false;
+    }
     const canDeleteStoredConflict = !conflictFingerprint
       || !currentStoredConflict
       || doesStoredConflictMatchFingerprint(currentStoredConflict, conflictFingerprint);
 
     if (currentStoredConflict && canDeleteStoredConflict) {
       await this.conflictStorage.deleteConflict(projectId, ownerUserId);
+      if (sessionContext && !this.canSettleConflictStateForOwner(sessionContext, projectId, 'resolveConflict:after-delete-conflict')) {
+        return false;
+      }
+    }
+    if (sessionContext && !this.isProjectSessionContextCurrent(sessionContext, 'resolveConflict:clear-active-conflict', projectId)) {
+      return false;
     }
     const currentActiveConflict = this.syncCoordinator.conflictData();
     if (doesActiveConflictMatchSnapshot(currentActiveConflict, activeConflict)) {
       this.syncCoordinator.clearActiveConflict();
     }
+    return true;
+  }
+  private canSettleConflictStateForOwner(
+    sessionContext: ProjectSessionContext,
+    projectId: string,
+    stage: string,
+  ): boolean {
+    return this.isProjectSessionContextCurrent(sessionContext, stage, projectId)
+      || canSettleStaleProjectLocally(sessionContext, this.userSession.currentUserId());
   }
   async resolveConflict(
     projectId: string,
@@ -172,10 +223,12 @@ export class ProjectOperationConflictService {
   }
 
   private async resolveConflictInternal(options: ResolveConflictInternalOptions): Promise<boolean> {
-    const sessionContext = createProjectSessionContext(
-      this.userSession.currentUserId(),
-      this.userSession.getCurrentSessionGeneration(),
-    );
+    const sessionContext = {
+      ...createProjectSessionContext(
+        this.userSession.currentUserId(), this.userSession.getCurrentSessionGeneration(),
+      ),
+      authFence: this.auth.captureAuthIdentityFence(),
+    };
     const context = await this.loadConflictResolutionContext(options, sessionContext);
     if (!context) return false;
 
@@ -205,14 +258,21 @@ export class ProjectOperationConflictService {
       storedConflict,
       pendingTaskDeleteIds,
     );
-    const localProject = this.projectState.getProject(projectId) ?? storedConflict?.localProject;
+    const localProject = this.projectState.getProjectWithCurrentData(projectId) ?? storedConflict?.localProject;
     if (!localProject) return null;
 
     const remoteProject = await this.resolveConflictRemoteProject(options, sessionContext, localProject, conflictData, storedConflict);
     if (remoteProject === null) return null;
 
     const latestStoredConflict = await this.conflictStorage.getConflict(projectId);
+    if (!this.isProjectSessionContextCurrent(sessionContext, 'resolveConflict:get-latest-conflict', projectId)) {
+      return null;
+    }
     const conflictFingerprint = captureConflictFingerprint(latestStoredConflict, conflictData, sessionContext.ownerUserId);
+    const conflictRecord = this.buildConflictRecord(
+      projectId, sessionContext.ownerUserId, localProject, remoteProject,
+      pendingTaskDeleteIds, pendingTaskDeleteBaseUpdatedAtMap, latestStoredConflict, conflictData,
+    );
 
     return {
       projectId,
@@ -223,6 +283,28 @@ export class ProjectOperationConflictService {
       pendingTaskDeleteBaseUpdatedAtMap,
       activeConflict,
       conflictFingerprint,
+      conflictRecord,
+    };
+  }
+
+  private buildConflictRecord(
+    projectId: string,
+    ownerUserId: string | null,
+    localProject: Project,
+    remoteProject: Project | undefined,
+    pendingTaskDeleteIds: string[],
+    pendingTaskDeleteBaseUpdatedAtMap: TaskDeleteBaseUpdatedAtMap | undefined,
+    storedConflict: ConflictRecord | null,
+    activeConflict: ProjectConflictSnapshot,
+  ): ConflictRecord {
+    if (storedConflict) return { ...storedConflict, ownerUserId: ownerUserId ?? undefined };
+    return {
+      projectId, ownerUserId: ownerUserId ?? undefined, localProject, remoteProject,
+      remoteSnapshotFresh: remoteProject !== undefined,
+      conflictedAt: activeConflict?.conflictedAt ?? new Date().toISOString(),
+      localVersion: localProject.version ?? 0, remoteVersion: remoteProject?.version,
+      reason: 'version_mismatch', pendingTaskDeleteIds, pendingTaskDeleteBaseUpdatedAtMap,
+      operationConflicts: activeConflict?.operationConflicts, acknowledged: false,
     };
   }
 
@@ -288,10 +370,14 @@ export class ProjectOperationConflictService {
 
     const userId = context.sessionContext.ownerUserId;
     if (!userId || userId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
-      const persisted = await this.persistResolvedLocalProjectSnapshot(context.projectId, resolvedProject, {
+      const persisted = await this.persistResolvedLocalProjectSnapshot(context.sessionContext, context.projectId, resolvedProject, {
         pendingSync: false,
       });
-      if (!persisted) {
+      if (!persisted || !this.isProjectSessionContextCurrent(
+        context.sessionContext,
+        'resolveConflict:after-local-snapshot',
+        context.projectId,
+      )) {
         return false;
       }
       this.finalizeResolvedProject(context.projectId, resolvedProject, { pendingSync: false }, context.sessionContext.ownerUserId);
@@ -299,20 +385,7 @@ export class ProjectOperationConflictService {
     }
 
     const saveContext = this.toResolvedConflictSaveContext(context, resolvedProject, userId);
-    if (options.backgroundPersist) {
-      const retryQueued = await this.enqueueResolvedConflictRetry(saveContext);
-      if (!retryQueued) {
-        return false;
-      }
-      await this.clearResolvedConflictState(context.projectId, userId, context.activeConflict, context.conflictFingerprint);
-      void this.persistResolvedConflictCloudSave(saveContext);
-      return true;
-    }
-
-    const saveOutcome = await this.persistResolvedConflictSave(saveContext);
-    if (saveOutcome === 'stop-success') return true;
-    if (saveOutcome === 'stop-failure') return false;
-    return this.clearResolvedConflictSaveState(saveContext);
+    return this.persistResolvedConflictDurably(saveContext, options.backgroundPersist);
   }
 
   private finalizeRemoteResolvedConflict(context: ConflictResolutionContext, resolvedProject: Project): boolean {
@@ -339,230 +412,72 @@ export class ProjectOperationConflictService {
       sessionContext: context.sessionContext,
       activeConflict: context.activeConflict,
       conflictFingerprint: context.conflictFingerprint,
+      conflictRecord: context.conflictRecord,
     };
   }
 
-  private async persistResolvedConflictSave(context: ResolvedConflictSaveContext): Promise<ConflictSaveFlowOutcome> {
-    const { projectId, userId, resolvedProject, sessionContext } = context;
-
-    try {
-      const syncResult = await this.projectSaveCoordinator.save(resolvedProject, userId);
-      const persistedProject = syncResult.newVersion !== undefined
-        ? { ...resolvedProject, version: syncResult.newVersion }
-        : resolvedProject;
-
-      if (!this.isProjectSessionContextCurrent(sessionContext, 'resolveConflict:saveProjectSmart', projectId)) {
-        return await this.handleStaleResolvedConflictSave(context, syncResult, persistedProject);
-      }
-
-      if (syncResult.terminal) {
-        this.handleTerminalResolvedConflictSave(context, syncResult.failureReason);
-      } else if (!syncResult.success && !syncResult.conflict) {
-        const retryQueued = await this.enqueueResolvedConflictRetry(context, '冲突已解决，但同步失败，稍后将自动重试');
-        if (!retryQueued) {
-          return 'stop-failure';
-        }
-      } else if (syncResult.conflict) {
-        return await this.captureResolvedConflictSaveConflict(context, syncResult);
-      } else {
-        await this.finalizeResolvedConflictSaveSuccess(context, syncResult, persistedProject);
-      }
-    } catch (_e) {
-      if (!this.isProjectSessionContextCurrent(sessionContext, 'resolveConflict:saveProjectSmart-error', projectId)) {
-        return 'stop-success';
-      }
-
-      const retryQueued = await this.enqueueResolvedConflictRetry(context);
-      if (!retryQueued) {
-        return 'stop-failure';
-      }
-    }
-
-    return 'continue-cleanup';
-  }
-
-  private async captureResolvedConflictSaveConflict(
+  private async persistResolvedConflictDurably(
     context: ResolvedConflictSaveContext,
-    syncResult: ProjectSaveResult,
-  ): Promise<ConflictSaveFlowOutcome> {
-    const captured = await this.conflictCapture.captureConflictWithRemoteFallback(
-      context.resolvedProject,
-      syncResult.remoteData,
-      context.remoteProject,
-      context.sessionContext,
-      context.pendingTaskDeleteIds,
-      context.pendingTaskDeleteBaseUpdatedAtMap,
-    );
-    if (!captured) {
-      return 'stop-success';
-    }
-
-    this.toastService.error('同步冲突', '解决冲突后又发生新冲突，请稍后重试');
-    return 'stop-failure';
-  }
-
-  private async finalizeResolvedConflictSaveSuccess(
-    context: ResolvedConflictSaveContext,
-    syncResult: ProjectSaveResult,
-    persistedProject: Project,
-  ): Promise<void> {
-    await this.replayPendingTaskDeletes(
-      persistedProject,
-      context.pendingTaskDeleteIds,
-      context.sessionContext,
-      context.pendingTaskDeleteBaseUpdatedAtMap,
-    );
-    this.finalizeResolvedProject(context.projectId, context.resolvedProject, {
-      version: syncResult.newVersion ?? context.resolvedProject.version,
-      pendingSync: false,
-    }, context.sessionContext.ownerUserId);
-  }
-
-  private async handleStaleResolvedConflictSave(
-    context: ResolvedConflictSaveContext,
-    syncResult: ProjectSaveResult,
-    persistedProject: Project,
-  ): Promise<ConflictSaveFlowOutcome> {
-    const {
-      projectId,
-      resolvedProject,
-      pendingTaskDeleteIds,
-      pendingTaskDeleteBaseUpdatedAtMap,
-      sessionContext,
-      activeConflict,
-      conflictFingerprint,
-    } = context;
-    const hasDeferredDeleteWork = pendingTaskDeleteIds.length > 0;
-    if (
-      syncResult.success
-      && !(await this.handoffPendingTaskDeletes(
-        sessionContext,
-        persistedProject,
-        pendingTaskDeleteIds,
-        pendingTaskDeleteBaseUpdatedAtMap,
-      ))
-    ) {
-      return 'stop-failure';
-    }
-
-    if (canSettleStaleProjectLocally(sessionContext, this.userSession.currentUserId())) {
-      if (syncResult.success) {
-        const currentMatchesResolved = this.doesCurrentProjectMatchSnapshot(projectId, resolvedProject);
-        this.finalizeResolvedProjectCurrentState(projectId, {
-          pendingSync: hasDeferredDeleteWork || !currentMatchesResolved,
-          clearProjectChanges: currentMatchesResolved,
-          version: syncResult.newVersion,
-        }, sessionContext.ownerUserId);
-        await this.clearResolvedConflictState(projectId, sessionContext.ownerUserId, activeConflict, conflictFingerprint);
-      } else if (syncResult.terminal) {
-        const currentMatchesResolved = this.doesCurrentProjectMatchSnapshot(projectId, resolvedProject);
-        this.finalizeResolvedProjectCurrentState(projectId, {
-          pendingSync: !currentMatchesResolved,
-          clearProjectChanges: currentMatchesResolved,
-        }, sessionContext.ownerUserId);
-        await this.clearResolvedConflictState(projectId, sessionContext.ownerUserId, activeConflict, conflictFingerprint);
-      }
-    }
-
-    return 'stop-success';
-  }
-
-  private handleTerminalResolvedConflictSave(
-    context: ResolvedConflictSaveContext,
-    failureReason: string | undefined,
-  ): void {
-    const currentMatchesResolved = this.doesCurrentProjectMatchSnapshot(context.projectId, context.resolvedProject);
-    if (currentMatchesResolved) {
-      this.finalizeResolvedProject(context.projectId, context.resolvedProject, {
-        pendingSync: false,
-      }, context.sessionContext.ownerUserId);
-    } else {
-      this.finalizeResolvedProjectCurrentState(context.projectId, {
-        pendingSync: true,
-        clearProjectChanges: false,
-      }, context.sessionContext.ownerUserId);
-    }
-    this.toastService.warning('同步已停止', failureReason ?? '冲突已在本地解决，但不会自动同步到云端');
-  }
-
-  private async enqueueResolvedConflictRetry(
-    context: ResolvedConflictSaveContext,
-    toastMessage?: string,
+    background: boolean,
   ): Promise<boolean> {
-    let actionId = '';
-    try {
-      actionId = await this.actionQueue.enqueueDurably({
-        type: 'update',
-        entityType: 'project',
-        entityId: context.projectId,
-        payload: {
-          project: context.resolvedProject,
-          sourceUserId: context.userId,
-          taskIdsToDelete: context.pendingTaskDeleteIds,
-          taskDeleteBaseUpdatedAtMap: pickTaskDeleteBaseUpdatedAtMap(
-            context.pendingTaskDeleteBaseUpdatedAtMap,
-            context.pendingTaskDeleteIds,
-          ),
-        }
-      });
-    } catch (error) {
-      this.logger.error('冲突解决结果写入离线同步队列异常', {
-        projectId: context.projectId,
-        userId: context.userId,
-        error,
-      });
-    }
-    if (!actionId) {
-      this.toastService.error('本地保存失败', '冲突解决结果未能写入离线同步队列，请释放浏览器存储空间后重试');
+    const { sessionContext } = context;
+    if (!sessionContext.authFence
+      || !this.isProjectSessionContextCurrent(sessionContext, 'resolveConflict:before-durable-sync', context.projectId)) {
       return false;
     }
-
-    this.finalizeResolvedProject(context.projectId, context.resolvedProject, {
-      pendingSync: true,
-    }, context.sessionContext.ownerUserId);
-    if (toastMessage) {
-      this.toastService.warning('同步待重试', toastMessage);
+    try {
+      const result = await this.directConflictSync.executeDurably({
+        resolvedProject: context.resolvedProject,
+        remoteProject: context.remoteProject,
+        ownerUserId: context.userId,
+        sessionGeneration: sessionContext.sessionGeneration,
+        authFence: sessionContext.authFence,
+        conflictRecord: context.conflictRecord,
+        taskIdsToDelete: context.pendingTaskDeleteIds,
+        taskDeleteBaseUpdatedAtMap: context.pendingTaskDeleteBaseUpdatedAtMap ?? {},
+        background,
+      }, this.settleProjectConflictHandoff);
+      if (!this.isProjectSessionContextCurrent(sessionContext, 'resolveConflict:after-durable-sync', context.projectId)) {
+        return false;
+      }
+      if (result.status === 'storage-failed') {
+        this.toastService.error(
+          '本地保存失败',
+          '冲突解决结果未能写入离线同步队列，请释放浏览器存储空间后重试',
+        );
+      }
+      return result.status === 'complete' || (background && result.status === 'queued');
+    } catch (error) {
+      this.logger.error('冲突解决 durable handoff 失败', { projectId: context.projectId, error });
+      this.toastService.error(
+        '本地保存失败',
+        '冲突解决结果未能写入离线同步队列，请释放浏览器存储空间后重试',
+      );
+      return false;
     }
-    return true;
-  }
-
-  private async persistResolvedConflictCloudSave(context: ResolvedConflictSaveContext): Promise<void> {
-    const userId = context.sessionContext.ownerUserId;
-    if (!userId || userId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
-      return;
-    }
-
-    const saveOutcome = await this.persistResolvedConflictSave({ ...context, userId });
-    if (saveOutcome !== 'continue-cleanup') {
-      return;
-    }
-
-    await this.clearResolvedConflictSaveState(context);
   }
 
   private async clearResolvedConflictSaveState(context: ResolvedConflictSaveContext): Promise<boolean> {
     const { projectId, sessionContext, activeConflict, conflictFingerprint } = context;
-    const checks = ['resolveConflict:delete-conflict', 'resolveConflict:clear-active-conflict'] as const;
-
-    for (const check of checks) {
-      if (this.isProjectSessionContextCurrent(sessionContext, check, projectId)) continue;
-      if (canSettleStaleProjectLocally(sessionContext, this.userSession.currentUserId())) {
-        await this.clearResolvedConflictState(projectId, sessionContext.ownerUserId, activeConflict, conflictFingerprint);
-        return true;
-      }
-      return false;
-    }
-
-    await this.clearResolvedConflictState(projectId, sessionContext.ownerUserId, activeConflict, conflictFingerprint);
-    return true;
+    return this.clearResolvedConflictState(
+      projectId,
+      sessionContext.ownerUserId,
+      activeConflict,
+      conflictFingerprint,
+      sessionContext,
+    );
   }
 
   private async persistResolvedLocalProjectSnapshot(
+    sessionContext: ProjectSessionContext,
     projectId: string,
     project: Project,
     options: { version?: number; pendingSync: boolean },
   ): Promise<boolean> {
-    const currentProjects = this.projectState.projects();
+    if (!this.isProjectSessionContextCurrent(sessionContext, 'resolveConflict:before-local-snapshot', projectId)) {
+      return false;
+    }
+    const currentProjects = this.projectState.getProjectsWithCurrentData();
     const hasExistingProject = currentProjects.some(current => current.id === projectId);
     const nextProjects = hasExistingProject
       ? currentProjects.map(current =>
@@ -576,8 +491,11 @@ export class ProjectOperationConflictService {
       ];
 
     try {
-      await this.projectData.saveOfflineSnapshotAndWait(nextProjects);
-      return true;
+      await this.projectData.saveOfflineSnapshotAndWait(
+        nextProjects,
+        sessionContext.ownerUserId ?? AUTH_CONFIG.LOCAL_MODE_USER_ID,
+      );
+      return this.isProjectSessionContextCurrent(sessionContext, 'resolveConflict:after-local-snapshot', projectId);
     } catch {
       this.toastService.error('本地保存失败', '离线快照未能写入，请释放浏览器存储空间后重试');
       return false;
@@ -607,6 +525,7 @@ export class ProjectOperationConflictService {
     project: Project,
     options: { version?: number; pendingSync: boolean },
     ownerUserId: string | null,
+    preservedActionId?: string,
   ): void {
     this.projectState.updateProjects(projects => {
       const hasExistingProject = projects.some(current => current.id === projectId);
@@ -623,11 +542,11 @@ export class ProjectOperationConflictService {
           : current
       );
     });
-    this.projectData.saveOfflineSnapshot(this.projectState.projects());
+    this.projectData.saveOfflineSnapshot(this.projectState.getProjectsWithCurrentData());
     if (this.projectState.activeProjectId() === projectId) {
       this.undoService.clearHistory(projectId);
     }
-    this.discardStaleProjectMutations(projectId, ownerUserId);
+    this.discardStaleProjectMutations(projectId, ownerUserId, preservedActionId);
     this.changeTracker.clearProjectFieldLocks(projectId);
     this.changeTracker.clearProjectChanges(projectId);
   }
@@ -636,14 +555,15 @@ export class ProjectOperationConflictService {
     projectId: string,
     options: { pendingSync: boolean; clearProjectChanges?: boolean; version?: number },
     ownerUserId?: string | null,
+    preservedActionId?: string,
   ): void {
     this.projectState.updateProjects(projects => projects.map(current =>
       current.id === projectId
         ? settleProjectSyncState(current, options)
         : current
     ));
-    this.projectData.saveOfflineSnapshot(this.projectState.projects());
-    this.discardStaleProjectMutations(projectId, ownerUserId);
+    this.projectData.saveOfflineSnapshot(this.projectState.getProjectsWithCurrentData());
+    this.discardStaleProjectMutations(projectId, ownerUserId, preservedActionId);
     this.changeTracker.clearProjectFieldLocks(projectId);
     if (options.clearProjectChanges !== false) {
       this.changeTracker.clearProjectChanges(projectId);
@@ -659,11 +579,11 @@ export class ProjectOperationConflictService {
         ? settleProjectSyncState(current, options)
         : current
     ));
-    this.projectData.saveOfflineSnapshot(this.projectState.projects());
+    this.projectData.saveOfflineSnapshot(this.projectState.getProjectsWithCurrentData());
   }
 
   doesCurrentProjectMatchSnapshot(projectId: string, snapshot: Project): boolean {
-    const currentProject = this.projectState.getProject(projectId);
+    const currentProject = this.projectState.getProjectWithCurrentData(projectId);
     if (!currentProject) {
       return false;
     }
@@ -693,21 +613,19 @@ export class ProjectOperationConflictService {
     pendingTaskDeleteIds: string[],
     sessionContext: { ownerUserId: string | null; sessionGeneration: number },
     pendingTaskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap,
-  ): Promise<void> {
+  ): Promise<PendingTaskDeleteHandoffResult & { sessionStale: boolean }> {
     if (pendingTaskDeleteIds.length === 0) {
-      return;
+      return { ok: true, sessionStale: false };
     }
 
     for (let index = 0; index < pendingTaskDeleteIds.length; index++) {
       const remainingTaskDeleteIds = pendingTaskDeleteIds.slice(index);
       if (!this.isProjectSessionContextCurrent(sessionContext, 'resolveConflict:replayPendingTaskDeletes', project.id)) {
-        await this.handoffPendingTaskDeletes(
-          sessionContext,
-          project,
-          remainingTaskDeleteIds,
+        const handoff = await this.handoffPendingTaskDeletes(
+          sessionContext, project, remainingTaskDeleteIds,
           pendingTaskDeleteBaseUpdatedAtMap,
         );
-        return;
+        return { ...handoff, sessionStale: true };
       }
 
       const taskId = remainingTaskDeleteIds[0];
@@ -732,7 +650,21 @@ export class ProjectOperationConflictService {
           userId: sessionContext.ownerUserId,
         });
       }
+      if (!this.isProjectSessionContextCurrent(
+        sessionContext,
+        'resolveConflict:after-pending-task-delete',
+        project.id,
+      )) {
+        const handoff = await this.handoffPendingTaskDeletes(
+          sessionContext,
+          project,
+          remainingTaskDeleteIds.slice(1),
+          pendingTaskDeleteBaseUpdatedAtMap,
+        );
+        return { ...handoff, sessionStale: true };
+      }
     }
+    return { ok: true, sessionStale: false };
   }
 
   private async handoffPendingTaskDeletes(
@@ -740,12 +672,12 @@ export class ProjectOperationConflictService {
     project: Project,
     pendingTaskDeleteIds: string[],
     pendingTaskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap,
-  ): Promise<boolean> {
+  ): Promise<PendingTaskDeleteHandoffResult> {
     if (pendingTaskDeleteIds.length === 0) {
-      return true;
+      return { ok: true };
     }
 
-    return this.settleStaleProjectCrudFailure(
+    const actionId = await this.settleStaleProjectCrudFailure(
       sessionContext,
       {
         type: 'update',
@@ -763,10 +695,17 @@ export class ProjectOperationConflictService {
       },
       'resolveConflict:replayPendingTaskDeletes',
     );
+    return actionId ? { ok: true, actionId } : { ok: false };
   }
 
-  discardStaleProjectMutations(projectId: string, ownerUserId?: string | null): void {
-    const discardedCount = this.actionQueue.discardActions(action => isProjectMutationForProject(action, projectId));
+  discardStaleProjectMutations(
+    projectId: string,
+    ownerUserId?: string | null,
+    preservedActionId?: string,
+  ): void {
+    const discardedCount = this.actionQueue.discardActions(action =>
+      action.id !== preservedActionId && isProjectMutationForProject(action, projectId)
+    );
     if (discardedCount > 0) {
       this.actionQueue.invalidateProjectMutationView(projectId, ownerUserId);
     }

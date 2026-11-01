@@ -36,6 +36,7 @@ export interface ProjectOperationDeleteSpecContext {
   mockOptimisticState: {
     commitSnapshot: MockFn;
     rollbackSnapshot: MockFn;
+    discardSnapshot: MockFn;
   };
   mockToast: {
     error: MockFn;
@@ -51,10 +52,17 @@ export function registerProjectOperationDeleteSpecs(
         service,
         mockActionQueue,
         mockOptimisticState,
+        mockProjectState,
         mockSyncCoordinator,
         mockUserSession,
       } = getContext();
       mockUserSession.currentUserId.mockReturnValue('user-1');
+      mockProjectState.projects.mockReturnValue([
+        createProject({
+          id: 'proj-delete-cloud',
+          updatedAt: '2026-07-14T01:00:00.000Z',
+        }),
+      ]);
 
       const result = await service.deleteProject('proj-delete-cloud');
 
@@ -67,6 +75,7 @@ export function registerProjectOperationDeleteSpecs(
           projectId: 'proj-delete-cloud',
           userId: 'user-1',
           sourceUserId: 'user-1',
+          baseUpdatedAt: '2026-07-14T01:00:00.000Z',
         }),
       }));
       expect(mockSyncCoordinator.core.deleteProjectFromCloud).not.toHaveBeenCalled();
@@ -217,6 +226,67 @@ export function registerProjectOperationDeleteSpecs(
       ]);
       expect(mockProjectState.setActiveProjectId).toHaveBeenCalledWith('proj-local-stays');
       expect(mockOptimisticState.commitSnapshot).toHaveBeenCalledWith('snap-1');
+    });
+
+    it('durable A deletion preserves a B project selected while persistence is pending', async () => {
+      const { service, mockActionQueue, mockProjectState, mockUserSession } = getContext();
+      const queueWrite = createDeferred<string>();
+      let activeProjectId = 'project-a';
+      mockUserSession.currentUserId.mockReturnValue('user-1');
+      mockProjectState.projects.mockReturnValue([
+        createProject({ id: 'project-a' }), createProject({ id: 'project-b' }),
+      ]);
+      mockProjectState.activeProjectId.mockImplementation(() => activeProjectId);
+      mockActionQueue.enqueueDurably.mockReturnValueOnce(queueWrite.promise);
+
+      const deletion = service.deleteProject('project-a');
+      activeProjectId = 'project-b';
+      queueWrite.resolve('queued-action-id');
+      await expect(deletion).resolves.toEqual({ success: true });
+
+      expect(mockProjectState.updateProjects).toHaveBeenCalledOnce();
+      expect(mockProjectState.setActiveProjectId).not.toHaveBeenCalled();
+    });
+
+    it('selects fallback from the current post-update project list when deleted A remains active', async () => {
+      const { service, mockActionQueue, mockProjectState, mockUserSession } = getContext();
+      const queueWrite = createDeferred<string>();
+      let currentProjects: Project[] = [
+        createProject({ id: 'project-a' }), createProject({ id: 'stale-project' }),
+      ];
+      mockUserSession.currentUserId.mockReturnValue('user-1');
+      mockProjectState.activeProjectId.mockReturnValue('project-a');
+      mockProjectState.projects.mockImplementation(() => currentProjects);
+      mockActionQueue.enqueueDurably.mockReturnValueOnce(queueWrite.promise);
+      const deletion = service.deleteProject('project-a');
+
+      currentProjects = [
+        createProject({ id: 'project-a' }), createProject({ id: 'current-project' }),
+      ];
+      mockProjectState.updateProjects.mockImplementationOnce(updater => {
+        currentProjects = updater(currentProjects);
+      });
+      queueWrite.resolve('queued-action-id');
+      await expect(deletion).resolves.toEqual({ success: true });
+
+      expect(mockProjectState.setActiveProjectId).toHaveBeenCalledWith('current-project');
+    });
+
+    it('stale delete failure discards its unused snapshot without rollback or toast', async () => {
+      const { service, mockActionQueue, mockOptimisticState, mockToast, mockUserSession } = getContext();
+      const queueWrite = createDeferred<string>();
+      let canPublishUi = true;
+      mockUserSession.currentUserId.mockReturnValue('user-1');
+      mockActionQueue.enqueueDurably.mockReturnValueOnce(queueWrite.promise);
+
+      const deletion = service.deleteProject('project-a', { canPublishUi: () => canPublishUi });
+      canPublishUi = false;
+      queueWrite.resolve('');
+      await expect(deletion).resolves.toEqual({ success: false, error: '离线删除队列未能写入' });
+
+      expect(mockOptimisticState.discardSnapshot).toHaveBeenCalledWith('snap-1');
+      expect(mockOptimisticState.rollbackSnapshot).not.toHaveBeenCalled();
+      expect(mockToast.error).not.toHaveBeenCalled();
     });
   });
 }

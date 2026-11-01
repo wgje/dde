@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Project } from '../models';
+import type { Connection, Project, Task } from '../models';
 import { AUTH_CONFIG } from '../config/auth.config';
 import { createDeferred, createProject, getLastProjectUpdater, replayProjectUpdates } from './project-operation.test-harness';
 import type { ProjectOperationConflictResolutionSpecContext } from './project-operation-conflict-resolution.spec-context';
@@ -16,6 +16,7 @@ export function registerProjectOperationConflictResolutionSpecs(
   let mockSyncCoordinator: ProjectOperationConflictResolutionSpecContext['mockSyncCoordinator'];
   let mockUserSession: ProjectOperationConflictResolutionSpecContext['mockUserSession'];
   let mockConflictStorage: ProjectOperationConflictResolutionSpecContext['mockConflictStorage'];
+  let mockProjectConflictDirectSync: ProjectOperationConflictResolutionSpecContext['mockProjectConflictDirectSync'];
   let mockActionQueue: ProjectOperationConflictResolutionSpecContext['mockActionQueue'];
   let mockRetryQueue: ProjectOperationConflictResolutionSpecContext['mockRetryQueue'];
   let mockChangeTracker: ProjectOperationConflictResolutionSpecContext['mockChangeTracker'];
@@ -28,6 +29,7 @@ export function registerProjectOperationConflictResolutionSpecs(
     mockSyncCoordinator = context.mockSyncCoordinator;
     mockUserSession = context.mockUserSession;
     mockConflictStorage = context.mockConflictStorage;
+    mockProjectConflictDirectSync = context.mockProjectConflictDirectSync;
     mockActionQueue = context.mockActionQueue;
     mockRetryQueue = context.mockRetryQueue;
     mockChangeTracker = context.mockChangeTracker;
@@ -79,20 +81,131 @@ export function registerProjectOperationConflictResolutionSpecs(
       });
       mockSyncCoordinator.core.saveOfflineSnapshotAndWait?.mockReturnValueOnce(snapshotWrite.promise);
       const resultPromise = service.resolveConflict('proj-local-conflict', 'local');
-      await new Promise(resolve => setTimeout(resolve, 0));
-      expect(mockSyncCoordinator.core.saveOfflineSnapshotAndWait).toHaveBeenCalledWith([
-        expect.objectContaining({
-          id: 'proj-local-conflict',
-          name: 'Resolved Local Conflict',
-          pendingSync: false,
-        }),
-      ]);
+      await vi.waitFor(() => {
+        expect(mockSyncCoordinator.core.saveOfflineSnapshotAndWait).toHaveBeenCalledWith([
+          expect.objectContaining({
+            id: 'proj-local-conflict',
+            name: 'Resolved Local Conflict',
+            pendingSync: false,
+          }),
+        ], AUTH_CONFIG.LOCAL_MODE_USER_ID);
+      });
       expect(mockProjectState.updateProjects).not.toHaveBeenCalled();
       expect(mockConflictStorage.deleteConflict).not.toHaveBeenCalled();
       snapshotWrite.resolve();
       await expect(resultPromise).resolves.toBe(true);
       expect(mockProjectState.updateProjects).toHaveBeenCalledOnce();
       expect(mockConflictStorage.deleteConflict).toHaveBeenCalledWith('proj-local-conflict', AUTH_CONFIG.LOCAL_MODE_USER_ID);
+    });
+    it('resolveConflict 选择本地版本时应向离线快照终态持久化全量 tasks 和 connections', async () => {
+      const projectId = 'proj-authoritative-local';
+      const taskAlpha: Task = {
+        id: 'task-alpha',
+        title: 'Alpha',
+        content: 'authoritative local task alpha',
+        stage: 1,
+        parentId: null,
+        order: 0,
+        rank: 1,
+        status: 'active',
+        x: 0,
+        y: 0,
+        createdDate: '2026-04-10T08:00:00.000Z',
+        updatedAt: '2026-04-10T08:00:00.000Z',
+        displayId: '1',
+      };
+      const taskBeta: Task = {
+        id: 'task-beta',
+        title: 'Beta',
+        content: 'authoritative local task beta',
+        stage: 1,
+        parentId: null,
+        order: 1,
+        rank: 2,
+        status: 'active',
+        x: 120,
+        y: 0,
+        createdDate: '2026-04-10T08:05:00.000Z',
+        updatedAt: '2026-04-10T08:05:00.000Z',
+        displayId: '2',
+      };
+      const connection: Connection = {
+        id: 'conn-authoritative',
+        source: 'task-alpha',
+        target: 'task-beta',
+      };
+      const shellProject = createProject({
+        id: projectId,
+        name: 'Local Shell Only',
+        pendingSync: true,
+        tasks: [],
+        connections: [],
+      });
+      let shellProjects = [shellProject];
+      let authoritativeProjects = [createProject({
+        id: projectId,
+        name: 'Local Authoritative',
+        pendingSync: true,
+        tasks: [taskAlpha, taskBeta],
+        connections: [connection],
+      })];
+
+      mockProjectState.projects.mockImplementation(() => shellProjects);
+      mockProjectState.getProject.mockImplementation((id: string) =>
+        shellProjects.find(project => project.id === id));
+      mockProjectState.getProjectsWithCurrentData.mockImplementation(() => authoritativeProjects);
+      mockProjectState.getProjectWithCurrentData.mockImplementation((id: string) =>
+        authoritativeProjects.find(project => project.id === id));
+      mockProjectState.updateProjects.mockImplementation((updater: (projects: Project[]) => Project[]) => {
+        authoritativeProjects = updater(authoritativeProjects);
+      });
+
+      mockConflictStorage.getConflict.mockResolvedValueOnce({
+        projectId,
+        localProject: shellProject,
+        remoteProject: createProject({ id: projectId, name: 'Remote Snapshot', version: 3 }),
+      });
+      mockUserSession.currentUserId.mockReturnValue('user-1');
+      mockSyncCoordinator.resolveConflict.mockImplementationOnce(async (
+        _resolvedProjectId: string,
+        _choice: 'local' | 'remote' | 'merge',
+        localProject: Project,
+      ) => ({
+        ok: true,
+        value: {
+          ...localProject,
+          pendingSync: true,
+          version: 4,
+        },
+      }));
+      const resolved = await service.resolveConflict(projectId, 'local');
+
+      expect(resolved).toBe(true);
+      expect(mockProjectConflictDirectSync.executeDurably).toHaveBeenCalledWith(
+        expect.objectContaining({
+          resolvedProject: expect.objectContaining({
+          id: projectId,
+          tasks: [
+            expect.objectContaining({
+              id: 'task-alpha',
+              content: 'authoritative local task alpha',
+            }),
+            expect.objectContaining({
+              id: 'task-beta',
+              content: 'authoritative local task beta',
+            }),
+          ],
+          connections: [
+            expect.objectContaining({
+              id: 'conn-authoritative',
+              source: 'task-alpha',
+              target: 'task-beta',
+            }),
+          ],
+          }),
+        }),
+        expect.any(Function),
+      );
     });
     it('remote 解决冲突前应尝试补拉远端版本', async () => {
       mockSyncCoordinator.conflictData.mockReturnValue({
@@ -376,27 +489,16 @@ export function registerProjectOperationConflictResolutionSpecs(
         value: createProject({ id: 'proj-success', name: 'Resolved Success', version: 4, pendingSync: true }),
       });
       mockUserSession.currentUserId.mockReturnValue('user-1');
-      mockSyncCoordinator.core.saveProjectSmart.mockResolvedValueOnce({
-        success: true,
-        newVersion: 9,
-      });
       await service.resolveConflict('proj-success', 'local');
-      const updater = getLastProjectUpdater(updateProjectsMock());
-      expect(updater([createProject({ id: 'proj-success', name: 'Resolved Success', pendingSync: true })])).toEqual([
+      expect(mockProjectConflictDirectSync.executeDurably).toHaveBeenCalledWith(
         expect.objectContaining({
-          id: 'proj-success',
-          version: 9,
-          syncSource: 'synced',
-          pendingSync: false,
+          resolvedProject: expect.objectContaining({ id: 'proj-success', name: 'Resolved Success' }),
+          taskIdsToDelete: ['task-delete-1'],
         }),
-      ]);
-      expect(mockActionQueue.discardActions).toHaveBeenCalled();
-      expect(mockRetryQueue.removeByProjectIdForOwner).toHaveBeenCalledWith('proj-success', 'user-1');
-      expect(mockChangeTracker.clearProjectFieldLocks).toHaveBeenCalledWith('proj-success');
-      expect(mockChangeTracker.clearProjectChanges).toHaveBeenCalledWith('proj-success');
-      expectDeleteTaskWithOperationId('task-delete-1', 'proj-success', 'user-1');
+        expect.any(Function),
+      );
     });
-    it('resolveConflict 命中可重试同步失败时应 durably 写入 ActionQueue', async () => {
+    it('resolveConflict direct retry outcome keeps durable handoff pending', async () => {
       mockConflictStorage.getConflict.mockResolvedValue({
         projectId: 'proj-retry-resolve',
         localProject: createProject({ id: 'proj-retry-resolve', name: 'Local Conflict', pendingSync: true }),
@@ -409,25 +511,13 @@ export function registerProjectOperationConflictResolutionSpecs(
         value: createProject({ id: 'proj-retry-resolve', name: 'Resolved Retry', version: 4, pendingSync: true }),
       });
       mockUserSession.currentUserId.mockReturnValue('user-1');
-      mockSyncCoordinator.core.saveProjectSmart.mockResolvedValueOnce({
-        success: false,
-        failureReason: 'Network timeout',
-      });
+      mockProjectConflictDirectSync.executeDurably.mockResolvedValueOnce({ status: 'deferred' });
       const resolved = await service.resolveConflict('proj-retry-resolve', 'local');
-      expect(resolved).toBe(true);
+      expect(resolved).toBe(false);
       expect(mockActionQueue.enqueue).not.toHaveBeenCalled();
-      expect(mockActionQueue.enqueueDurably).toHaveBeenCalledWith(expect.objectContaining({
-        type: 'update',
-        entityType: 'project',
-        entityId: 'proj-retry-resolve',
-        payload: expect.objectContaining({
-          sourceUserId: 'user-1',
-          taskIdsToDelete: ['task-delete-retry'],
-        }),
-      }));
-      expect(mockToast.warning).toHaveBeenCalledWith(
-        '同步待重试',
-        '冲突已解决，但同步失败，稍后将自动重试',
+      expect(mockActionQueue.enqueueDurably).not.toHaveBeenCalled();
+      expect(mockProjectConflictDirectSync.executeDurably).toHaveBeenCalledWith(
+        expect.objectContaining({ taskIdsToDelete: ['task-delete-retry'] }), expect.any(Function),
       );
     });
     it('resolveConflict 可重试同步失败但 durable 入队失败时应保留冲突记录', async () => {
@@ -442,11 +532,7 @@ export function registerProjectOperationConflictResolutionSpecs(
         value: createProject({ id: 'proj-retry-queue-fail', name: 'Resolved Retry', version: 4, pendingSync: true }),
       });
       mockUserSession.currentUserId.mockReturnValue('user-1');
-      mockSyncCoordinator.core.saveProjectSmart.mockResolvedValueOnce({
-        success: false,
-        failureReason: 'Network timeout',
-      });
-      mockActionQueue.enqueueDurably.mockResolvedValueOnce('');
+      mockProjectConflictDirectSync.executeDurably.mockResolvedValueOnce({ status: 'storage-failed' });
       const resolved = await service.resolveConflict('proj-retry-queue-fail', 'local');
       expect(resolved).toBe(false);
       expect(mockProjectState.updateProjects).not.toHaveBeenCalled();
@@ -470,14 +556,10 @@ export function registerProjectOperationConflictResolutionSpecs(
         value: createProject({ id: 'proj-retry-queue-throw', name: 'Resolved Retry', version: 4, pendingSync: true }),
       });
       mockUserSession.currentUserId.mockReturnValue('user-1');
-      mockSyncCoordinator.core.saveProjectSmart.mockResolvedValueOnce({
-        success: false,
-        failureReason: 'Network timeout',
-      });
-      mockActionQueue.enqueueDurably.mockRejectedValueOnce(new Error('idb unavailable'));
+      mockProjectConflictDirectSync.executeDurably.mockRejectedValueOnce(new Error('idb unavailable'));
       const resolved = await service.resolveConflict('proj-retry-queue-throw', 'local');
       expect(resolved).toBe(false);
-      expect(mockActionQueue.enqueueDurably).toHaveBeenCalledOnce();
+      expect(mockActionQueue.enqueueDurably).not.toHaveBeenCalled();
       expect(mockProjectState.updateProjects).not.toHaveBeenCalled();
       expect(mockConflictStorage.deleteConflict).not.toHaveBeenCalledWith('proj-retry-queue-throw', 'user-1');
       expect(mockChangeTracker.clearProjectFieldLocks).not.toHaveBeenCalledWith('proj-retry-queue-throw');
@@ -487,41 +569,29 @@ export function registerProjectOperationConflictResolutionSpecs(
         '冲突解决结果未能写入离线同步队列，请释放浏览器存储空间后重试',
       );
     });
-    it('resolveConflict 命中 terminal 同步失败时不应重新进入 ActionQueue', async () => {
+    it('resolveConflict direct deferred outcome does not terminal-settle local evidence', async () => {
+      const currentProject = createProject({ id: 'proj-terminal-resolve', name: 'Local Conflict', pendingSync: true });
+      const resolvedProject = createProject({ id: 'proj-terminal-resolve', name: 'Resolved Terminal', version: 4, pendingSync: true });
       mockConflictStorage.getConflict.mockResolvedValue({
         projectId: 'proj-terminal-resolve',
-        localProject: createProject({ id: 'proj-terminal-resolve', name: 'Local Conflict', pendingSync: true }),
+        localProject: currentProject,
         remoteProject: createProject({ id: 'proj-terminal-resolve', name: 'Remote Conflict', version: 3 }),
         pendingTaskDeleteIds: ['task-delete-1'],
       });
-      mockProjectState.getProject
-        .mockReturnValueOnce(createProject({ id: 'proj-terminal-resolve', name: 'Local Conflict', pendingSync: true }))
-        .mockReturnValue(createProject({ id: 'proj-terminal-resolve', name: 'Resolved Terminal', version: 4, pendingSync: true, syncSource: 'synced' }));
+      mockProjectState.getProjectWithCurrentData
+        .mockReturnValueOnce(currentProject)
+        .mockReturnValue(resolvedProject);
       mockSyncCoordinator.resolveConflict.mockResolvedValueOnce({
         ok: true,
-        value: createProject({ id: 'proj-terminal-resolve', name: 'Resolved Terminal', version: 4, pendingSync: true }),
+        value: resolvedProject,
       });
       mockUserSession.currentUserId.mockReturnValue('user-1');
-      mockSyncCoordinator.core.saveProjectSmart.mockResolvedValueOnce({
-        success: false,
-        terminal: true,
-        failureReason: '当前客户端同步协议已过期，请刷新后重试',
-      });
+      mockProjectConflictDirectSync.executeDurably.mockResolvedValueOnce({ status: 'deferred' });
       const resolved = await service.resolveConflict('proj-terminal-resolve', 'local');
-      expect(resolved).toBe(true);
-      const updater = getLastProjectUpdater(updateProjectsMock());
+      expect(resolved).toBe(false);
       expect(mockActionQueue.enqueue).not.toHaveBeenCalled();
-      expect(mockToast.warning).toHaveBeenCalledWith('同步已停止', '当前客户端同步协议已过期，请刷新后重试');
-      expect(mockConflictStorage.deleteConflict).toHaveBeenCalledWith('proj-terminal-resolve', 'user-1');
-      expect(mockChangeTracker.clearProjectFieldLocks).toHaveBeenCalledWith('proj-terminal-resolve');
-      expect(mockChangeTracker.clearProjectChanges).toHaveBeenCalledWith('proj-terminal-resolve');
-      expect(updater([createProject({ id: 'proj-terminal-resolve', pendingSync: true, syncSource: 'synced' })])).toEqual([
-        expect.objectContaining({
-          id: 'proj-terminal-resolve',
-          pendingSync: false,
-          syncSource: 'synced',
-        }),
-      ]);
+      expect(mockConflictStorage.deleteConflict).not.toHaveBeenCalled();
+      expect(mockProjectState.updateProjects).not.toHaveBeenCalled();
     });
     it('resolveConflict live session terminal 且当前项目已继续演化时不应清空新变更', async () => {
       mockConflictStorage.getConflict.mockResolvedValue({
@@ -529,7 +599,7 @@ export function registerProjectOperationConflictResolutionSpecs(
         localProject: createProject({ id: 'proj-terminal-resolve-diverged', name: 'Local Conflict', pendingSync: true }),
         remoteProject: createProject({ id: 'proj-terminal-resolve-diverged', name: 'Remote Conflict', version: 3 }),
       });
-      mockProjectState.getProject
+      mockProjectState.getProjectWithCurrentData
         .mockReturnValueOnce(createProject({ id: 'proj-terminal-resolve-diverged', name: 'Local Conflict', pendingSync: true }))
         .mockReturnValue(createProject({ id: 'proj-terminal-resolve-diverged', name: 'Newest Local Conflict', version: 7, pendingSync: true, syncSource: 'synced' }));
       mockSyncCoordinator.resolveConflict.mockResolvedValueOnce({
@@ -537,28 +607,12 @@ export function registerProjectOperationConflictResolutionSpecs(
         value: createProject({ id: 'proj-terminal-resolve-diverged', name: 'Resolved Conflict', version: 4, pendingSync: true }),
       });
       mockUserSession.currentUserId.mockReturnValue('user-1');
-      mockSyncCoordinator.core.saveProjectSmart.mockResolvedValueOnce({
-        success: false,
-        terminal: true,
-        failureReason: '当前客户端同步协议已过期，请刷新后重试',
-      });
+      mockProjectConflictDirectSync.executeDurably.mockResolvedValueOnce({ status: 'deferred' });
       const resolved = await service.resolveConflict('proj-terminal-resolve-diverged', 'local');
-      expect(resolved).toBe(true);
-      const updater = getLastProjectUpdater(updateProjectsMock());
-      expect(mockActionQueue.discardActions).toHaveBeenCalledTimes(1);
-      expect(mockRetryQueue.removeByProjectIdForOwner).toHaveBeenCalledTimes(1);
-      expect(mockConflictStorage.deleteConflict).toHaveBeenCalledWith('proj-terminal-resolve-diverged', 'user-1');
-      expect(mockChangeTracker.clearProjectFieldLocks).toHaveBeenCalledWith('proj-terminal-resolve-diverged');
-      expect(mockChangeTracker.clearProjectChanges).not.toHaveBeenCalledWith('proj-terminal-resolve-diverged');
-      expect(updater([createProject({ id: 'proj-terminal-resolve-diverged', name: 'Newest Local Conflict', version: 7, pendingSync: true, syncSource: 'synced' })])).toEqual([
-        expect.objectContaining({
-          id: 'proj-terminal-resolve-diverged',
-          name: 'Newest Local Conflict',
-          version: 7,
-          pendingSync: true,
-          syncSource: 'synced',
-        }),
-      ]);
+      expect(resolved).toBe(false);
+      expect(mockActionQueue.discardActions).not.toHaveBeenCalled();
+      expect(mockConflictStorage.deleteConflict).not.toHaveBeenCalled();
+      expect(mockProjectState.updateProjects).not.toHaveBeenCalled();
     });
     it('后置待删任务回放遇到会话切换时应把剩余删除意图写回原 owner 队列', async () => {
       mockUserSession.isSessionContextCurrent
@@ -579,6 +633,29 @@ export function registerProjectOperationConflictResolutionSpecs(
           taskIdsToDelete: ['task-delete-2'],
         }),
       }));
+    });
+    it('后置待删任务回放在最后一次删除等待期间切换会话时应标记为 stale', async () => {
+      const deleteTask = createDeferred<boolean>();
+      const projectId = 'proj-replay-last-delete-session-switch';
+      mockUserSession.currentUserId.mockReturnValue('user-a');
+      mockUserSession.isSessionContextCurrent.mockReturnValue(true);
+      mockSyncCoordinator.core.deleteTask.mockReturnValueOnce(deleteTask.promise);
+
+      const replayPromise = projectConflict.replayPendingTaskDeletes(
+        createProject({ id: projectId, version: 9 }),
+        ['task-delete-last'],
+        { ownerUserId: 'user-a', sessionGeneration: 1 },
+      );
+      await expect.poll(() => mockSyncCoordinator.core.deleteTask.mock.calls.length).toBe(1);
+
+      mockUserSession.currentUserId.mockReturnValue('user-b');
+      mockUserSession.isSessionContextCurrent.mockReturnValue(false);
+      deleteTask.resolve(true);
+
+      await expect(replayPromise).resolves.toEqual({ ok: true, sessionStale: true });
+      expectDeleteTaskWithOperationId('task-delete-last', projectId, 'user-a');
+      expect(mockActionQueue.enqueue).not.toHaveBeenCalled();
+      expect(mockActionQueue.enqueueForOwner).not.toHaveBeenCalled();
     });
     it('后置待删任务回放应为同一待删意图传入稳定 operationId', async () => {
       const project = createProject({
@@ -635,19 +712,16 @@ export function registerProjectOperationConflictResolutionSpecs(
         value: createProject({ id: 'proj-active-pending-delete', name: 'Resolved Conflict', version: 4 }),
       });
       mockUserSession.currentUserId.mockReturnValue('user-1');
-      mockSyncCoordinator.core.saveProjectSmart.mockResolvedValueOnce({
-        success: true,
-        newVersion: 10,
-      });
       const resolved = await service.resolveConflict('proj-active-pending-delete', 'local');
       expect(resolved).toBe(true);
-      expect(mockSyncCoordinator.core.deleteTask).toHaveBeenCalledWith(
-        'task-delete-fast-click',
-        'proj-active-pending-delete',
-        'user-1',
-        false,
-        '2026-04-01T00:00:00.000Z',
-        expect.any(String),
+      expect(mockProjectConflictDirectSync.executeDurably).toHaveBeenCalledWith(
+        expect.objectContaining({
+          taskIdsToDelete: ['task-delete-fast-click'],
+          taskDeleteBaseUpdatedAtMap: {
+            'task-delete-fast-click': '2026-04-01T00:00:00.000Z',
+          },
+        }),
+        expect.any(Function),
       );
     });
     registerProjectOperationConflictResolutionStaleCleanupSpecs(getContext);

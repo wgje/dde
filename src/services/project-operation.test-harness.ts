@@ -11,12 +11,14 @@ import {
 } from '../core-bridge';
 import type { Project } from '../models';
 import { ActionQueueService } from './action-queue.service';
+import { AuthService } from './auth.service';
 import { ChangeTrackerService } from './change-tracker.service';
 import { ConflictStorageService } from './conflict-storage.service';
 import { LayoutService } from './layout.service';
 import { LoggerService } from './logger.service';
 import { OptimisticStateService } from './optimistic-state.service';
 import { ProjectConflictCaptureService } from './project-conflict-capture.service';
+import { ProjectConflictDirectSyncService } from './project-conflict-direct-sync.service';
 import { ProjectOperationConflictService } from './project-operation-conflict.service';
 import { ProjectOperationService } from './project-operation.service';
 import { ProjectStateService } from './project-state.service';
@@ -69,6 +71,10 @@ export interface ProjectOperationServiceSpecContext {
     isSessionContextCurrent: Mock<() => boolean>;
     isHintOnlyStartupPlaceholderVisible: Mock<() => boolean>;
   };
+  mockAuth: {
+    currentUserId: Mock<() => string | null>;
+    captureAuthIdentityFence: Mock<() => string>;
+  };
   mockWriteGuard: {
     isExportOnly: Mock<() => boolean>;
   };
@@ -88,6 +94,7 @@ export interface ProjectOperationServiceSpecContext {
     saveConflict: MockFn;
     deleteConflict: MockFn;
   };
+  mockProjectConflictDirectSync: { executeDurably: MockFn };
   mockOptimisticState: {
     createSnapshot: MockFn;
     commitSnapshot: MockFn;
@@ -208,14 +215,19 @@ function createSyncCoordinatorMock(): SyncCoordinatorMock {
 }
 
 function createProjectOperationMocks(): ProjectOperationMocks {
+  const mockUserSession = {
+    currentUserId: vi.fn((): string => AUTH_CONFIG.LOCAL_MODE_USER_ID),
+    getCurrentSessionGeneration: vi.fn(() => 1),
+    isSessionContextCurrent: vi.fn(() => true),
+    isHintOnlyStartupPlaceholderVisible: vi.fn(() => false),
+  };
   return {
     mockProjectState: createProjectStateMock(),
     mockSyncCoordinator: createSyncCoordinatorMock(),
-    mockUserSession: {
-      currentUserId: vi.fn((): string => AUTH_CONFIG.LOCAL_MODE_USER_ID),
-      getCurrentSessionGeneration: vi.fn(() => 1),
-      isSessionContextCurrent: vi.fn(() => true),
-      isHintOnlyStartupPlaceholderVisible: vi.fn(() => false),
+    mockUserSession,
+    mockAuth: {
+      currentUserId: vi.fn((): string | null => mockUserSession.currentUserId()),
+      captureAuthIdentityFence: vi.fn(() => 'auth-fence-local'),
     },
     mockWriteGuard: { isExportOnly: vi.fn(() => false) },
     mockActionQueue: {
@@ -233,6 +245,9 @@ function createProjectOperationMocks(): ProjectOperationMocks {
       getConflict: vi.fn().mockResolvedValue(null),
       saveConflict: vi.fn().mockResolvedValue(true),
       deleteConflict: vi.fn().mockResolvedValue(true),
+    },
+    mockProjectConflictDirectSync: {
+      executeDurably: vi.fn().mockResolvedValue({ status: 'complete' }),
     },
     mockOptimisticState: {
       createSnapshot: vi.fn(() => ({ id: 'snap-1' })),
@@ -285,9 +300,11 @@ function createProjectOperationProviders(mocks: ProjectOperationMocks): StaticPr
       },
     },
     { provide: UserSessionService, useValue: mocks.mockUserSession },
+    { provide: AuthService, useValue: mocks.mockAuth },
     { provide: ActionQueueService, useValue: mocks.mockActionQueue },
     { provide: RetryQueueService, useValue: mocks.mockRetryQueue },
     { provide: ConflictStorageService, useValue: mocks.mockConflictStorage },
+    { provide: ProjectConflictDirectSyncService, useValue: mocks.mockProjectConflictDirectSync },
     { provide: OptimisticStateService, useValue: mocks.mockOptimisticState },
     { provide: LayoutService, useValue: mocks.mockLayout },
     { provide: UndoService, useValue: mocks.mockUndo },

@@ -1,11 +1,12 @@
 import type { Project } from '../models';
 import type { Result, OperationError } from '../utils/result';
 import type { TaskDeleteBaseUpdatedAtMap } from './action-queue.types';
-import type { OperationConflictRecord } from './conflict-storage.helpers';
+import type { ConflictRecord, OperationConflictRecord } from './conflict-storage.helpers';
 
 export type ProjectSessionContext = {
   ownerUserId: string | null;
   sessionGeneration: number;
+  authFence?: string;
 };
 
 export type ProjectConflictSnapshot = {
@@ -53,6 +54,7 @@ export interface ResolvedConflictSaveContext {
   sessionContext: ProjectSessionContext;
   activeConflict: ProjectConflictSnapshot;
   conflictFingerprint?: ProjectConflictFingerprint;
+  conflictRecord: ConflictRecord;
 }
 
 export interface ConflictResolutionContext {
@@ -64,4 +66,5 @@ export interface ConflictResolutionContext {
   pendingTaskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap;
   activeConflict: ProjectConflictSnapshot;
   conflictFingerprint?: ProjectConflictFingerprint;
+  conflictRecord: ConflictRecord;
 }

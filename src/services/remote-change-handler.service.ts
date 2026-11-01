@@ -264,8 +264,9 @@ export class RemoteChangeHandlerService {
   private applyRemoteProjectDelete(projectId: string): void {
     this.undoService.clearOutdatedHistory(projectId, Number.MAX_SAFE_INTEGER);
 
+    const wasActiveProject = this.projectState.activeProjectId() === projectId;
     this.projectState.updateProjects(ps => ps.filter(p => p.id !== projectId));
-    if (this.projectState.activeProjectId() === projectId) {
+    if (wasActiveProject) {
       const remaining = this.projectState.projects();
       this.projectState.setActiveProjectId(remaining[0]?.id ?? null);
     }
