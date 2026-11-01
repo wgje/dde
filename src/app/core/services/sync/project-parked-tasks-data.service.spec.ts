@@ -1,9 +1,15 @@
 import { TestBed } from '@angular/core/testing';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { FOCUS_CONFIG } from '../../../../config/focus.config';
 import type { Task } from '../../../../models';
 import { LoggerService } from '../../../../services/logger.service';
+import {
+  LocalBackupUiRestoreWriterPausedError,
+  LocalBackupUiRestoreWriterQuiescenceService,
+} from '../../../../services/local-backup-ui-restore-writer-quiescence.service';
+import { registerProjectParkedTasksDataDeltaSpecs } from './project-parked-tasks-data-delta.spec-helpers';
 import { ProjectParkedTasksDataService } from './project-parked-tasks-data.service';
 
 type QueryFilter =
@@ -11,27 +17,38 @@ type QueryFilter =
   | { kind: 'not'; column: string; operator: string; value: unknown }
   | { kind: 'in'; column: string; values: readonly string[] }
   | { kind: 'gt'; column: string; value: string }
+  | { kind: 'gte'; column: string; value: string }
   | { kind: 'or'; filters: string };
 
 interface QueryCall {
   table: string;
   filters: QueryFilter[];
+  limitCounts: number[];
+  rangeStarts: number[];
 }
 
 interface FakeSupabaseOptions {
   knownIdErrors?: Record<string, { message: string }>;
+  knownIdRows?: Record<string, unknown[]>;
   parkedRows?: unknown[];
 }
 
 class FakeSupabaseQuery {
   readonly filters: QueryFilter[] = [];
+  readonly limitCounts: number[] = [];
+  readonly rangeStarts: number[] = [];
 
   constructor(
     private readonly table: string,
     private readonly calls: QueryCall[],
     private readonly options: FakeSupabaseOptions,
   ) {
-    this.calls.push({ table, filters: this.filters });
+    this.calls.push({
+      table,
+      filters: this.filters,
+      limitCounts: this.limitCounts,
+      rangeStarts: this.rangeStarts,
+    });
   }
 
   select(): this {
@@ -58,6 +75,11 @@ class FakeSupabaseQuery {
     return this;
   }
 
+  gte(column: string, value: string): this {
+    this.filters.push({ kind: 'gte', column, value });
+    return this;
+  }
+
   or(filters: string): this {
     this.filters.push({ kind: 'or', filters });
     return this;
@@ -67,7 +89,23 @@ class FakeSupabaseQuery {
     return this;
   }
 
-  range(): { data: unknown[] | null; error: { message: string } | null } {
+  limit(count: number): { data: unknown[] | null; error: { message: string } | null } {
+    this.limitCounts.push(count);
+    return this.readRows(0, count - 1);
+  }
+
+  range(from = 0, to = Number.MAX_SAFE_INTEGER): {
+    data: unknown[] | null;
+    error: { message: string } | null;
+  } {
+    this.rangeStarts.push(from);
+    return this.readRows(from, to);
+  }
+
+  private readRows(from: number, to: number): {
+    data: unknown[] | null;
+    error: { message: string } | null;
+  } {
     if (this.table === 'projects') {
       return { data: [{ id: 'project-1' }], error: null };
     }
@@ -81,6 +119,16 @@ class FakeSupabaseQuery {
       return {
         data: null,
         error: this.options.knownIdErrors![failedKnownId],
+      };
+    }
+
+    const configuredKnownIds = idFilter?.values.filter(id => (
+      Object.prototype.hasOwnProperty.call(this.options.knownIdRows ?? {}, id)
+    ));
+    if (configuredKnownIds?.length) {
+      return {
+        data: configuredKnownIds.flatMap(id => this.options.knownIdRows?.[id] ?? []),
+        error: null,
       };
     }
 
@@ -102,8 +150,19 @@ class FakeSupabaseQuery {
         filter.kind === 'in' && filter.column === 'project_id',
     );
     if (projectFilter) {
+      const rows = this.applyFilters(this.options.parkedRows ?? [])
+        .slice()
+        .sort((left, right) => {
+          const leftRow = left as Record<string, unknown>;
+          const rightRow = right as Record<string, unknown>;
+          const updatedOrder = String(leftRow['updated_at'] ?? '')
+            .localeCompare(String(rightRow['updated_at'] ?? ''));
+          return updatedOrder !== 0
+            ? updatedOrder
+            : String(leftRow['id'] ?? '').localeCompare(String(rightRow['id'] ?? ''));
+        });
       return {
-        data: this.applyFilters(this.options.parkedRows ?? []),
+        data: rows.slice(from, to + 1),
         error: null,
       };
     }
@@ -130,6 +189,8 @@ class FakeSupabaseQuery {
         return filter.values.includes(String(row[filter.column]));
       case 'gt':
         return String(row[filter.column] ?? '') > filter.value;
+      case 'gte':
+        return String(row[filter.column] ?? '') >= filter.value;
       case 'or':
         return this.matchesCompositeCursorFilter(row, filter.filters);
     }
@@ -157,6 +218,150 @@ function createSupabaseClient(options: FakeSupabaseOptions = {}): { client: Supa
   return { client, calls };
 }
 
+function createMutablePagedTaskClient(rows: Array<Record<string, unknown>>): {
+  client: SupabaseClient;
+  limitCursors: Array<string | null>;
+  rangeStarts: number[];
+} {
+  const limitCursors: Array<string | null> = [];
+  const rangeStarts: number[] = [];
+  let pageRequests = 0;
+
+  const readPage = (
+    cursor: { updatedAt: string; id: string } | null,
+    from: number,
+    to: number,
+  ) => {
+    const ordered = rows
+      .filter((row) => {
+        if (!cursor) return true;
+        const updatedAt = String(row['updated_at'] ?? '');
+        const id = String(row['id'] ?? '');
+        return updatedAt > cursor.updatedAt
+          || updatedAt === cursor.updatedAt && id > cursor.id;
+      })
+      .slice()
+      .sort((left, right) => {
+        const updatedOrder = String(left['updated_at']).localeCompare(String(right['updated_at']));
+        return updatedOrder !== 0
+          ? updatedOrder
+          : String(left['id']).localeCompare(String(right['id']));
+      });
+    const page = ordered.slice(from, to + 1);
+    if (pageRequests++ === 0) {
+      rows[0]['updated_at'] = '2026-06-02T01:00:00.000Z';
+    }
+    return { data: page, error: null };
+  };
+
+  const client = {
+    from(table: string) {
+      if (table !== 'tasks') throw new Error(`Unexpected table: ${table}`);
+      let cursor: { updatedAt: string; id: string } | null = null;
+      const query = {
+        select: () => query,
+        not: () => query,
+        is: () => query,
+        in: () => query,
+        order: () => query,
+        gt: (column: string, value: string) => {
+          if (column === 'updated_at') cursor = { updatedAt: value, id: '' };
+          return query;
+        },
+        gte: (column: string, value: string) => {
+          if (column === 'updated_at') cursor = { updatedAt: value, id: '' };
+          return query;
+        },
+        or: (filters: string) => {
+          const match = /^updated_at\.gt\.(.*),and\(updated_at\.eq\.(.*),id\.gt\.(.*)\)$/.exec(filters);
+          if (match) cursor = { updatedAt: match[2], id: match[3] };
+          return query;
+        },
+        limit: (count: number) => {
+          limitCursors.push(cursor ? `${cursor.updatedAt}|${cursor.id}` : null);
+          return readPage(cursor, 0, count - 1);
+        },
+        range: (from: number, to: number) => {
+          rangeStarts.push(from);
+          return readPage(cursor, from, to);
+        },
+      };
+      return query;
+    },
+  } as unknown as SupabaseClient;
+
+  return { client, limitCursors, rangeStarts };
+}
+
+function createMutablePagedProjectClient(rows: Array<{ id: string }>, earlierId: string): {
+  client: SupabaseClient;
+  projectPageCursors: Array<string | null>;
+  projectRangeStarts: number[];
+  queriedProjectIds: string[];
+} {
+  const projectPageCursors: Array<string | null> = [];
+  const projectRangeStarts: number[] = [];
+  const queriedProjectIds: string[] = [];
+  let projectPageRequests = 0;
+
+  const readProjectPage = (cursor: string | null, from: number, to: number) => {
+    const ordered = rows
+      .filter(row => !cursor || row.id > cursor)
+      .slice()
+      .sort((left, right) => left.id.localeCompare(right.id));
+    const page = ordered.slice(from, to + 1);
+    if (projectPageRequests++ === 0) {
+      rows.push({ id: earlierId });
+    }
+    return { data: page, error: null };
+  };
+
+  const client = {
+    from(table: string) {
+      let idCursor: string | null = null;
+      const query = {
+        select: () => query,
+        not: () => query,
+        is: () => query,
+        order: () => query,
+        or: () => query,
+        gt: (column: string, value: string) => {
+          if (table === 'projects' && column === 'id') idCursor = value;
+          return query;
+        },
+        in: (column: string, values: readonly string[]) => {
+          if (table === 'tasks' && column === 'project_id') {
+            queriedProjectIds.push(...values);
+          }
+          return query;
+        },
+        limit: (count: number) => {
+          if (table === 'projects') {
+            projectPageCursors.push(idCursor);
+            return readProjectPage(idCursor, 0, count - 1);
+          }
+          return { data: [], error: null };
+        },
+        range: (from: number, to: number) => {
+          if (table === 'projects') {
+            projectRangeStarts.push(from);
+            return readProjectPage(null, from, to);
+          }
+          return { data: [], error: null };
+        },
+      };
+      return query;
+    },
+  } as unknown as SupabaseClient;
+
+  return {
+    client,
+    projectPageCursors,
+    projectRangeStarts,
+    queriedProjectIds,
+  };
+}
+
 function createTask(id: string): Task {
   return {
     id,
@@ -175,188 +380,287 @@ function createTask(id: string): Task {
   };
 }
 
+interface RawParkingStores {
+  parkedRows: Array<Record<string, unknown>>;
+  metadataRows: Array<{ key: string; value: unknown }>;
+}
+
+const LEGACY_PARKING_CURSOR_KEY = 'parking_last_sync_time';
+
+function ownerParkingCursorKey(ownerUserId: string): string {
+  return `${LEGACY_PARKING_CURSOR_KEY}:${encodeURIComponent(ownerUserId)}`;
+}
+
+function ownerParkedTaskKey(ownerUserId: string, taskId: string): string {
+  return `${encodeURIComponent(ownerUserId)}:${taskId}`;
+}
+
+async function openParkingTestDatabase(): Promise<IDBDatabase> {
+  return await new Promise<IDBDatabase>((resolve, reject) => {
+    const request = indexedDB.open(
+      FOCUS_CONFIG.SYNC.IDB_NAME,
+      FOCUS_CONFIG.SYNC.IDB_VERSION,
+    );
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(FOCUS_CONFIG.IDB_STORES.PARKED_TASKS)) {
+        db.createObjectStore(FOCUS_CONFIG.IDB_STORES.PARKED_TASKS, { keyPath: 'taskId' });
+      }
+      if (!db.objectStoreNames.contains(FOCUS_CONFIG.IDB_STORES.SYNC_METADATA)) {
+        db.createObjectStore(FOCUS_CONFIG.IDB_STORES.SYNC_METADATA, { keyPath: 'key' });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function mutateParkingStores(
+  mutate: (parkedStore: IDBObjectStore, metadataStore: IDBObjectStore) => void,
+): Promise<void> {
+  const db = await openParkingTestDatabase();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(
+        [FOCUS_CONFIG.IDB_STORES.PARKED_TASKS, FOCUS_CONFIG.IDB_STORES.SYNC_METADATA],
+        'readwrite',
+      );
+      mutate(
+        tx.objectStore(FOCUS_CONFIG.IDB_STORES.PARKED_TASKS),
+        tx.objectStore(FOCUS_CONFIG.IDB_STORES.SYNC_METADATA),
+      );
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+    });
+  } finally {
+    db.close();
+  }
+}
+
+async function seedParkingStores(
+  parkedRows: Array<Record<string, unknown>>,
+  metadataRows: Array<{ key: string; value: unknown }>,
+): Promise<void> {
+  await mutateParkingStores((parkedStore, metadataStore) => {
+    for (const row of parkedRows) parkedStore.put(row);
+    for (const row of metadataRows) metadataStore.put(row);
+  });
+}
+
+async function readParkingStores(): Promise<RawParkingStores> {
+  const db = await openParkingTestDatabase();
+  try {
+    return await new Promise<RawParkingStores>((resolve, reject) => {
+      const tx = db.transaction(
+        [FOCUS_CONFIG.IDB_STORES.PARKED_TASKS, FOCUS_CONFIG.IDB_STORES.SYNC_METADATA],
+        'readonly',
+      );
+      const parkedRequest = tx.objectStore(FOCUS_CONFIG.IDB_STORES.PARKED_TASKS).getAll();
+      const metadataRequest = tx.objectStore(FOCUS_CONFIG.IDB_STORES.SYNC_METADATA).getAll();
+      tx.oncomplete = () => resolve({
+        parkedRows: parkedRequest.result as Array<Record<string, unknown>>,
+        metadataRows: metadataRequest.result as Array<{ key: string; value: unknown }>,
+      });
+      tx.onerror = () => reject(tx.error);
+    });
+  } finally {
+    db.close();
+  }
+}
+
+function createService(): ProjectParkedTasksDataService {
+  TestBed.configureTestingModule({
+    providers: [
+      ProjectParkedTasksDataService,
+      {
+        provide: LoggerService,
+        useValue: {
+          category: () => ({
+            debug: vi.fn(),
+            warn: vi.fn(),
+          }),
+        },
+      },
+    ],
+  });
+  return TestBed.inject(ProjectParkedTasksDataService);
+}
+
 describe('ProjectParkedTasksDataService', () => {
-  it('should remove cached parked tasks on cold start when known ids are no longer parked remotely', async () => {
-    const { client, calls } = createSupabaseClient();
-    TestBed.configureTestingModule({
-      providers: [
-        ProjectParkedTasksDataService,
-        {
-          provide: LoggerService,
-          useValue: {
-            category: () => ({
-              debug: vi.fn(),
-              warn: vi.fn(),
-            }),
-          },
-        },
-      ],
+  beforeEach(async () => {
+    vi.useRealTimers();
+    await mutateParkingStores((parkedStore, metadataStore) => {
+      parkedStore.clear();
+      metadataStore.clear();
     });
-    const service = TestBed.inject(ProjectParkedTasksDataService);
+  });
 
-    const result = await service.pullParkedTasksDelta(null, ['cached-task'], ['project-1'], {
-      getClient: async () => client,
-      withAuthRetry: async (_context, fn) => fn(),
-      rowToTask: row => createTask(String(row.id)),
-      normalizeIds: ids => ids.map(String).filter(Boolean),
-      chunkIds: (ids, size) => {
-        const chunks: string[][] = [];
-        for (let index = 0; index < ids.length; index += size) {
-          chunks.push(ids.slice(index, index + size).map(String));
-        }
-        return chunks;
-      },
-    });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
 
-    expect(calls.some(call => call.filters.some(
-      filter => filter.kind === 'in' && filter.column === 'id' && filter.values.includes('cached-task'),
-    ))).toBe(true);
-    expect(result.removedTaskIds).toEqual(['cached-task']);
-    expect(result.removedTasks).toEqual([{
-      taskId: 'cached-task',
-      updatedAt: '2026-06-01T00:00:00.000Z',
+  it('does not expose ownerless legacy rows or the global cursor to either owner', async () => {
+    const legacyTask = createTask('legacy-task');
+    await seedParkingStores([{
+      taskId: legacyTask.id,
+      projectId: 'legacy-project',
+      task: legacyTask,
+      updatedAt: legacyTask.updatedAt,
+    }], [{
+      key: LEGACY_PARKING_CURSOR_KEY,
+      value: 'legacy-global-cursor',
     }]);
-  });
+    const service = createService();
 
-  it('本地项目 id 提示非空时应直接使用，不再每 tick 远端查询 projects 表', async () => {
-    // 优化回归：停泊增量此前每个周期 tick 都全量查一次 projects.select('id')，
-    // 而调用方已经传入了本地项目 id 列表；另一设备新建的项目会先经
-    // 主项目清单同步进入本地列表，下一轮 tick 自然覆盖
-    const { client, calls } = createSupabaseClient();
-    TestBed.configureTestingModule({
-      providers: [
-        ProjectParkedTasksDataService,
-        {
-          provide: LoggerService,
-          useValue: {
-            category: () => ({
-              debug: vi.fn(),
-              warn: vi.fn(),
-            }),
-          },
-        },
-      ],
+    await expect(service.loadParkedTasksCache('owner-a')).resolves.toEqual({
+      entries: [],
+      cursor: null,
     });
-    const service = TestBed.inject(ProjectParkedTasksDataService);
-    const dependencies = {
-      getClient: async () => client,
-      withAuthRetry: async (_context: string, fn: () => Promise<never>) => fn(),
-      rowToTask: (row: { id: unknown }) => createTask(String(row.id)),
-      normalizeIds: (ids: readonly string[]) => ids.map(String).filter(Boolean),
-      chunkIds: (ids: readonly string[], size: number) => {
-        const chunks: string[][] = [];
-        for (let index = 0; index < ids.length; index += size) {
-          chunks.push(ids.slice(index, index + size).map(String));
-        }
-        return chunks;
-      },
-    };
-
-    await service.pullParkedTasksDelta(null, [], ['project-1'], dependencies as never);
-    expect(calls.some(call => call.table === 'projects')).toBe(false);
-
-    calls.length = 0;
-    await service.pullParkedTasksDelta(null, [], [], dependencies as never);
-    // 本地列表为空（冷启动未就绪）时仍回退远端查询
-    expect(calls.some(call => call.table === 'projects')).toBe(true);
-  });
-
-  it('should keep the incremental cursor filter for known parked task checks after cold start', async () => {
-    const { client, calls } = createSupabaseClient();
-    TestBed.configureTestingModule({
-      providers: [
-        ProjectParkedTasksDataService,
-        {
-          provide: LoggerService,
-          useValue: {
-            category: () => ({
-              debug: vi.fn(),
-              warn: vi.fn(),
-            }),
-          },
-        },
-      ],
-    });
-    const service = TestBed.inject(ProjectParkedTasksDataService);
-
-    await service.pullParkedTasksDelta('2026-05-01T00:00:00.000Z', ['cached-task'], ['project-1'], {
-      getClient: async () => client,
-      withAuthRetry: async (_context, fn) => fn(),
-      rowToTask: row => createTask(String(row.id)),
-      normalizeIds: ids => ids.map(String).filter(Boolean),
-      chunkIds: (ids, size) => {
-        const chunks: string[][] = [];
-        for (let index = 0; index < ids.length; index += size) {
-          chunks.push(ids.slice(index, index + size).map(String));
-        }
-        return chunks;
-      },
-    });
-
-    const knownIdQuery = calls.find(call => call.filters.some(
-      filter => filter.kind === 'in' && filter.column === 'id' && filter.values.includes('cached-task'),
-    ));
-    expect(knownIdQuery?.filters).toContainEqual({
-      kind: 'gt',
-      column: 'updated_at',
-      value: '2026-05-01T00:00:00.000Z',
+    await expect(service.loadParkedTasksCache('owner-b')).resolves.toEqual({
+      entries: [],
+      cursor: null,
     });
   });
 
-  it('should keep loaded parked rows and retry the cursor when known id checks fail', async () => {
-    const since = '2026-06-01T00:00:00.000Z';
-    const { client } = createSupabaseClient({
-      knownIdErrors: {
-        'known-id-failure': { message: 'known id chunk failed' },
-      },
-      parkedRows: [{
-        id: 'fresh-parked-task',
-        project_id: 'project-1',
-        parking_meta: { parkedAt: '2026-06-02T00:00:00.000Z' },
-        deleted_at: null,
-        updated_at: '2026-06-02T00:00:00.000Z',
-      }],
-    });
-    TestBed.configureTestingModule({
-      providers: [
-        ProjectParkedTasksDataService,
-        {
-          provide: LoggerService,
-          useValue: {
-            category: () => ({
-              debug: vi.fn(),
-              warn: vi.fn(),
-            }),
-          },
-        },
-      ],
-    });
-    const service = TestBed.inject(ProjectParkedTasksDataService);
-
-    const result = await service.pullParkedTasksDelta(since, ['known-id-failure'], ['project-1'], {
-      getClient: async () => client,
-      withAuthRetry: async (_context, fn) => fn(),
-      rowToTask: row => createTask(String(row.id)),
-      normalizeIds: ids => ids.map(String).filter(Boolean),
-      chunkIds: (ids, size) => {
-        const chunks: string[][] = [];
-        for (let index = 0; index < ids.length; index += size) {
-          chunks.push(ids.slice(index, index + size).map(String));
-        }
-        return chunks;
-      },
-    });
-
-    expect(result.entries).toEqual([{
-      projectId: 'project-1',
-      task: expect.objectContaining({ id: 'fresh-parked-task' }),
+  it('preserves ownerless legacy data and other owners during a normal owner-scoped save', async () => {
+    const legacyTask = createTask('legacy-task');
+    const ownerATask = createTask('owner-a-task');
+    const ownerBTask = createTask('owner-b-task');
+    await seedParkingStores([{
+      taskId: legacyTask.id,
+      projectId: 'legacy-project',
+      task: legacyTask,
+      updatedAt: legacyTask.updatedAt,
+    }, {
+      ownerUserId: 'owner-b',
+      taskId: ownerParkedTaskKey('owner-b', ownerBTask.id),
+      projectId: 'owner-b-project',
+      task: ownerBTask,
+      updatedAt: ownerBTask.updatedAt,
+    }], [{
+      key: LEGACY_PARKING_CURSOR_KEY,
+      value: 'legacy-global-cursor',
+    }, {
+      key: ownerParkingCursorKey('owner-b'),
+      value: 'owner-b-cursor',
     }]);
-    expect(result.removedTaskIds).toEqual([]);
-    expect(result.nextCursor).toBe(since);
+    const service = createService();
+
+    await service.saveParkedTasksCache('owner-a', {
+      entries: [{ task: ownerATask, projectId: 'owner-a-project' }],
+      cursor: 'owner-a-cursor',
+    });
+
+    const stored = await readParkingStores();
+    const storedLegacyRow = stored.parkedRows.find(row => row['taskId'] === legacyTask.id);
+    expect(storedLegacyRow).toBeDefined();
+    expect(storedLegacyRow).not.toHaveProperty('ownerUserId');
+    expect(stored.parkedRows).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        taskId: ownerParkedTaskKey('owner-a', ownerATask.id),
+        ownerUserId: 'owner-a',
+      }),
+      expect.objectContaining({
+        taskId: ownerParkedTaskKey('owner-b', ownerBTask.id),
+        ownerUserId: 'owner-b',
+      }),
+    ]));
+    expect(stored.metadataRows).toEqual(expect.arrayContaining([
+      { key: LEGACY_PARKING_CURSOR_KEY, value: 'legacy-global-cursor' },
+      { key: ownerParkingCursorKey('owner-a'), value: 'owner-a-cursor' },
+      { key: ownerParkingCursorKey('owner-b'), value: 'owner-b-cursor' },
+    ]));
   });
 
-  it('should continue after same timestamp parked rows using the cursor tie-breaker', async () => {
-    const timestamp = '2026-06-02T00:00:00.000Z';
+  it('retires ownerless legacy data only when explicitly requested and preserves another owner', async () => {
+    const legacyTask = createTask('legacy-task');
+    const ownerATask = createTask('owner-a-task');
+    const ownerBTask = createTask('owner-b-task');
+    await seedParkingStores([{
+      taskId: legacyTask.id,
+      projectId: 'legacy-project',
+      task: legacyTask,
+      updatedAt: legacyTask.updatedAt,
+    }, {
+      ownerUserId: 'owner-b',
+      taskId: ownerParkedTaskKey('owner-b', ownerBTask.id),
+      projectId: 'owner-b-project',
+      task: ownerBTask,
+      updatedAt: ownerBTask.updatedAt,
+    }], [{
+      key: LEGACY_PARKING_CURSOR_KEY,
+      value: 'legacy-global-cursor',
+    }, {
+      key: ownerParkingCursorKey('owner-b'),
+      value: 'owner-b-cursor',
+    }]);
+    const service = createService();
+
+    await service.saveParkedTasksCache('owner-a', {
+      entries: [{ task: ownerATask, projectId: 'owner-a-project' }],
+      cursor: 'owner-a-cursor',
+    }, { retireLegacyOwnerlessCache: true });
+
+    const stored = await readParkingStores();
+    expect(stored.parkedRows).not.toContainEqual(expect.objectContaining({ taskId: legacyTask.id }));
+    expect(stored.parkedRows).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        taskId: ownerParkedTaskKey('owner-a', ownerATask.id),
+        ownerUserId: 'owner-a',
+      }),
+      expect.objectContaining({
+        taskId: ownerParkedTaskKey('owner-b', ownerBTask.id),
+        ownerUserId: 'owner-b',
+      }),
+    ]));
+    expect(stored.metadataRows).not.toContainEqual(expect.objectContaining({
+      key: LEGACY_PARKING_CURSOR_KEY,
+    }));
+    expect(stored.metadataRows).toEqual(expect.arrayContaining([
+      { key: ownerParkingCursorKey('owner-a'), value: 'owner-a-cursor' },
+      { key: ownerParkingCursorKey('owner-b'), value: 'owner-b-cursor' },
+    ]));
+  });
+
+  it('waits for an in-flight parked-task cache save before quiescing and rejects new owner writes after freeze', async () => {
+    const service = createService();
+    let releaseOpen!: () => void;
+    vi.spyOn(service as never as { openFocusModeDB(): Promise<never> }, 'openFocusModeDB')
+      .mockImplementation(async () => {
+        await new Promise<void>(resolve => {
+          releaseOpen = resolve;
+        });
+        throw new Error('focus db blocked');
+      });
+    const quiescence = new LocalBackupUiRestoreWriterQuiescenceService({ pollIntervalMs: 1 });
+    const save = service.saveParkedTasksCache('owner-a', {
+      entries: [{ task: createTask('owner-a-task'), projectId: 'owner-a-project' }],
+      cursor: 'owner-a-cursor',
+    });
+    await vi.waitFor(() => expect(releaseOpen).toBeTypeOf('function'));
+
+    let prepared = false;
+    const preparing = quiescence.prepare('owner-a').then(handle => {
+      prepared = true;
+      return handle;
+    });
+
+    await new Promise(resolve => setTimeout(resolve, 5));
+    expect(prepared).toBe(false);
+
+    releaseOpen();
+    await save;
+    const handle = await preparing;
+
+    await expect(service.saveParkedTasksCache('owner-a', {
+      entries: [{ task: createTask('owner-a-blocked'), projectId: 'owner-a-project' }],
+      cursor: 'owner-a-cursor-next',
+    })).rejects.toBeInstanceOf(LocalBackupUiRestoreWriterPausedError);
+    await handle.abortBeforeMutation();
+  });
+
+  it('应按 owner 隔离停泊任务缓存和增量游标', async () => {
     TestBed.configureTestingModule({
       providers: [
         ProjectParkedTasksDataService,
@@ -372,53 +676,33 @@ describe('ProjectParkedTasksDataService', () => {
       ],
     });
     const service = TestBed.inject(ProjectParkedTasksDataService);
-    const dependencies = {
-      withAuthRetry: async <T>(_context: string, fn: () => Promise<T>) => fn(),
-      rowToTask: (row: { id?: unknown }) => createTask(String(row.id)),
-      normalizeIds: (ids: readonly string[]) => ids.map(String).filter(Boolean),
-      chunkIds: (ids: readonly string[], size: number) => {
-        const chunks: string[][] = [];
-        for (let index = 0; index < ids.length; index += size) {
-          chunks.push(ids.slice(index, index + size).map(String));
-        }
-        return chunks;
-      },
-    };
+    const ownerATask = createTask('owner-a-task');
+    const ownerBTask = createTask('owner-b-task');
 
-    const firstClient = createSupabaseClient({
-      parkedRows: [{
-        id: 'task-a',
-        project_id: 'project-1',
-        parking_meta: { parkedAt: timestamp },
-        deleted_at: null,
-        updated_at: timestamp,
-      }],
-    }).client;
-    const firstDelta = await service.pullParkedTasksDelta(null, [], ['project-1'], {
-      getClient: async () => firstClient,
-      ...dependencies,
+    await service.saveParkedTasksCache('owner-a', {
+      entries: [{ task: ownerATask, projectId: 'owner-a-project' }],
+      cursor: 'owner-a-cursor',
+    });
+    await service.saveParkedTasksCache('owner-b', {
+      entries: [{ task: ownerBTask, projectId: 'owner-b-project' }],
+      cursor: 'owner-b-cursor',
     });
 
-    const secondClient = createSupabaseClient({
-      parkedRows: [{
-        id: 'task-a',
-        project_id: 'project-1',
-        parking_meta: { parkedAt: timestamp },
-        deleted_at: null,
-        updated_at: timestamp,
-      }, {
-        id: 'task-b',
-        project_id: 'project-1',
-        parking_meta: { parkedAt: timestamp },
-        deleted_at: null,
-        updated_at: timestamp,
-      }],
-    }).client;
-    const secondDelta = await service.pullParkedTasksDelta(firstDelta.nextCursor, [], ['project-1'], {
-      getClient: async () => secondClient,
-      ...dependencies,
+    await expect(service.loadParkedTasksCache('owner-a')).resolves.toEqual({
+      entries: [{ task: ownerATask, projectId: 'owner-a-project' }],
+      cursor: 'owner-a-cursor',
     });
+    await expect(service.loadParkedTasksCache('owner-b')).resolves.toEqual({
+      entries: [{ task: ownerBTask, projectId: 'owner-b-project' }],
+      cursor: 'owner-b-cursor',
+    });
+  });
 
-    expect(secondDelta.entries.map(entry => entry.task.id)).toEqual(['task-b']);
+  registerProjectParkedTasksDataDeltaSpecs({
+    createMutablePagedProjectClient,
+    createMutablePagedTaskClient,
+    createService,
+    createSupabaseClient,
+    createTask,
   });
 });

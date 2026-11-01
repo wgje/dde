@@ -71,7 +71,9 @@ export function setVisibilityState(state: DocumentVisibilityState): void {
 }
 
 export function createProjectDataPagedQuery<Row>(responses: Array<{ data: Row[] | null; error: unknown }>) {
-  const range = vi.fn(async () => responses.shift() ?? { data: [], error: null });
+  const readPage = vi.fn(async () => responses.shift() ?? { data: [], error: null });
+  const range = vi.fn(async () => readPage());
+  const limit = vi.fn(async () => readPage());
   const query = {
     select: vi.fn(),
     eq: vi.fn(),
@@ -81,6 +83,7 @@ export function createProjectDataPagedQuery<Row>(responses: Array<{ data: Row[] 
     is: vi.fn(),
     order: vi.fn(),
     range,
+    limit,
   };
 
   query.select.mockReturnValue(query);

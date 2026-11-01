@@ -6,9 +6,16 @@ import type { Task } from '../../../../models';
 import type { TaskRow } from '../../../../models/supabase-types';
 import { LoggerService } from '../../../../services/logger.service';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
-import { fetchAllSupabasePages } from '../../../../utils/supabase-pagination';
+import { fetchAllSupabaseKeysetPagesByCursor } from '../../../../utils/supabase-pagination';
 import { supabaseErrorToError } from '../../../../utils/supabase-error';
 import { hasTaskContentMissingFromSource, markTaskContentMissingFromSource } from '../../../../utils/task-content-guard';
+import {
+  buildTaskCreatedKeysetOrFilter,
+  isTaskCreatedCursorAfter,
+  readTaskCreatedPageCursor,
+  taskCreatedCursorKey,
+  type TaskCreatedPageCursor,
+} from '../../../../utils/task-created-pagination';
 import {
   getCompatibleTaskSelectFields,
   markTaskCompletedAtColumnUnavailable,
@@ -17,6 +24,7 @@ import { RequestThrottleService } from '../../../../services/request-throttle.se
 import { TombstoneService } from './tombstone.service';
 
 export type ProjectTaskRowMapper = (row: TaskRow | Partial<TaskRow>) => Task;
+export type ProjectTaskAuthRetryHandler = <T>(context: string, fn: () => Promise<T>) => Promise<T>;
 
 @Injectable({ providedIn: 'root' })
 export class ProjectTaskDataService {
@@ -29,6 +37,8 @@ export class ProjectTaskDataService {
     projectId: string,
     client: SupabaseClient,
     rowToTask: ProjectTaskRowMapper,
+    ownerScope = 'anonymous',
+    withAuthRetry?: ProjectTaskAuthRetryHandler,
   ): Promise<Task[]> {
     this.sentryLazyLoader.addBreadcrumb({
       category: 'sync',
@@ -37,18 +47,31 @@ export class ProjectTaskDataService {
       data: { projectId },
     });
 
+    const loadTaskRows = async () => this.loadTaskRowsWithSchemaFallback(projectId, client);
+    const executeTaskLoad = withAuthRetry
+      ? async () => withAuthRetry('loadFullProject.tasks', async () => {
+          const result = await loadTaskRows();
+          if (result.error) throw supabaseErrorToError(result.error);
+          return result;
+        })
+      : loadTaskRows;
     const tasksResult = await this.throttle.execute(
-      `tasks-data:${projectId}`,
-      async () => this.loadTaskRowsWithSchemaFallback(projectId, client),
+      `tasks-data:${ownerScope}:${projectId}`,
+      executeTaskLoad,
       {
         deduplicate: true,
         timeout: REQUEST_THROTTLE_CONFIG.BATCH_SYNC_TIMEOUT,
       },
     );
 
-    const tombstonesResult = await this.tombstoneService.getTombstonesWithCache(projectId, client);
+    const tombstonesResult = await this.tombstoneService.getTombstonesWithCache(
+      projectId,
+      client,
+      { forceRemote: true },
+    );
 
     if (tasksResult.error) throw supabaseErrorToError(tasksResult.error);
+    if (tombstonesResult.error) throw supabaseErrorToError(tombstonesResult.error);
 
     const remoteTombstoneTimestamps = this.buildRemoteTombstoneTimestamps(tombstonesResult);
     const allTasks = ((tasksResult.data || []) as unknown as TaskRow[]).map(row => rowToTask(row));
@@ -72,12 +95,19 @@ export class ProjectTaskDataService {
     projectId: string,
     client: SupabaseClient,
   ): Promise<{ data: TaskRow[] | null; error: unknown }> {
-    const loadTasks = async () => await fetchAllSupabasePages<TaskRow>(() => client
-      .from('tasks')
-      .select(getCompatibleTaskSelectFields(FIELD_SELECT_CONFIG.TASK_LIST_FIELDS))
-      .eq('project_id', projectId)
-      .order('created_at', { ascending: true })
-      .order('id', { ascending: true }));
+    const loadTasks = async () => await fetchAllSupabaseKeysetPagesByCursor<
+      TaskRow,
+      TaskCreatedPageCursor
+    >((cursor) => {
+      let query = client
+        .from('tasks')
+        .select(getCompatibleTaskSelectFields(FIELD_SELECT_CONFIG.TASK_LIST_FIELDS))
+        .eq('project_id', projectId);
+      if (cursor) query = query.or(buildTaskCreatedKeysetOrFilter(cursor));
+      return query
+        .order('created_at', { ascending: true })
+        .order('id', { ascending: true });
+    }, { readCursor: readTaskCreatedPageCursor, cursorKey: taskCreatedCursorKey, isCursorAfter: isTaskCreatedCursorAfter });
 
     const maxSchemaFallbackAttempts = 3;
     let result = await loadTasks();

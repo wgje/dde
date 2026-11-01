@@ -38,6 +38,7 @@ import {
 import {
   ProjectParkedTasksDataService,
   type ParkedTaskCacheSnapshot,
+  type ParkedTaskCacheSaveOptions,
   type ParkedTaskDeltaResult,
   type ParkedTaskEntry,
   type ParkedTaskRemoval,
@@ -414,7 +415,13 @@ export class ProjectDataService {
    * 拉取任务（带限流和 tombstone 处理）
    */
   private async pullTasksThrottled(projectId: string, client: SupabaseClient): Promise<Task[]> {
-    return await this.taskData.pullTasksThrottled(projectId, client, (row) => this.rowToTask(row));
+    return await this.taskData.pullTasksThrottled(
+      projectId,
+      client,
+      (row) => this.rowToTask(row),
+      this.resolveRemoteSessionUserId() ?? 'anonymous',
+      (context, fn) => this.withAuthRetry(context, fn),
+    );
   }
   
   addLocalTombstones(
@@ -483,15 +490,31 @@ export class ProjectDataService {
   /**
    * 从 IndexedDB 读取停泊任务轻量缓存与同步游标
    */
-  async loadParkedTasksCache(): Promise<ParkedTaskCacheSnapshot> {
-    return await this.parkedTasksData.loadParkedTasksCache();
+  async loadParkedTasksCache(ownerUserId?: string): Promise<ParkedTaskCacheSnapshot> {
+    const resolvedOwner = ownerUserId ?? this.resolveRemoteSessionUserId();
+    if (!resolvedOwner) return { entries: [], cursor: null };
+    return await this.parkedTasksData.loadParkedTasksCache(resolvedOwner);
   }
 
   /**
    * 保存停泊任务轻量缓存与同步游标
    */
-  async saveParkedTasksCache(snapshot: ParkedTaskCacheSnapshot): Promise<void> {
-    await this.parkedTasksData.saveParkedTasksCache(snapshot);
+  async saveParkedTasksCache(
+    ownerUserIdOrSnapshot: string | ParkedTaskCacheSnapshot,
+    snapshotOrOptions?: ParkedTaskCacheSnapshot | ParkedTaskCacheSaveOptions,
+    options?: ParkedTaskCacheSaveOptions,
+  ): Promise<void> {
+    const ownerUserId = typeof ownerUserIdOrSnapshot === 'string'
+      ? ownerUserIdOrSnapshot
+      : this.resolveRemoteSessionUserId();
+    const snapshot = typeof ownerUserIdOrSnapshot === 'string'
+      ? snapshotOrOptions as ParkedTaskCacheSnapshot
+      : ownerUserIdOrSnapshot;
+    const saveOptions = typeof ownerUserIdOrSnapshot === 'string'
+      ? options
+      : snapshotOrOptions as ParkedTaskCacheSaveOptions | undefined;
+    if (!ownerUserId || !snapshot) return;
+    await this.parkedTasksData.saveParkedTasksCache(ownerUserId, snapshot, saveOptions);
   }
 
   /**

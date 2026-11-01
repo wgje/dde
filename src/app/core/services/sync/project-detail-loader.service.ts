@@ -132,9 +132,21 @@ export class ProjectDetailLoaderService {
         return null;
       }
 
+      const taskOwnerScope = typeof expectedUserId === 'string'
+        && expectedUserId.length > 0
+        && expectedUserId !== AUTH_CONFIG.LOCAL_MODE_USER_ID
+        ? expectedUserId
+        : 'anonymous';
+
       return this.buildSequentialProject({
         projectData,
-        tasks: await this.taskData.pullTasksThrottled(projectId, client, dependencies.rowToTask),
+        tasks: await this.taskData.pullTasksThrottled(
+          projectId,
+          client,
+          dependencies.rowToTask,
+          taskOwnerScope,
+          dependencies.withAuthRetry,
+        ),
         connectionsData: await this.loadConnectionsThrottled(client, projectId),
       }, dependencies);
     } catch (error) {

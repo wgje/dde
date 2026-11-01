@@ -11,11 +11,15 @@ import {
   isBrowserNetworkSuspendedWindow,
 } from '../../../../utils/browser-network-suspension';
 import { openIndexedDBAdaptive } from '../../../../utils/indexeddb-open';
-import { fetchAllSupabasePages } from '../../../../utils/supabase-pagination';
+import {
+  fetchAllSupabaseKeysetPagesByCursor,
+} from '../../../../utils/supabase-pagination';
 import { getCompatibleTaskSelectFields, markTaskCompletedAtColumnUnavailable } from '../../../../utils/task-schema-compat';
 import { supabaseErrorToError } from '../../../../utils/supabase-error';
+import { trackLocalBackupUiRestoreWriterPromise } from '../../../../services/local-backup-ui-restore-writer-quiescence-tracker';
 
 interface ParkedTaskCacheRecord {
+  ownerUserId?: string;
   taskId: string;
   projectId: string;
   task: Task;
@@ -25,6 +29,8 @@ interface ParkedTaskCacheRecord {
 interface ParkedTaskDeltaRow extends Partial<TaskRow> {
   project_id?: string;
 }
+
+type ParkedTaskDeltaDisposition = 'parked' | 'removed' | 'incomplete';
 
 interface ParkedTaskDeltaState {
   updatedRows: ParkedTaskDeltaRow[];
@@ -49,6 +55,7 @@ interface ParkedTaskCursor {
 
 interface ParkedTaskCursorQuery {
   gt: (column: string, value: string) => unknown;
+  gte: (column: string, value: string) => unknown;
   or: (filters: string) => unknown;
 }
 
@@ -62,11 +69,16 @@ export interface ParkedTaskCacheSnapshot {
   cursor: string | null;
 }
 
+export interface ParkedTaskCacheSaveOptions {
+  retireLegacyOwnerlessCache?: boolean;
+}
+
 export interface ParkedTaskDeltaResult {
   entries: ParkedTaskEntry[];
   removedTasks: ParkedTaskRemoval[];
   removedTaskIds: string[];
   nextCursor: string | null;
+  isComplete: boolean;
 }
 
 export interface ParkedTaskRemoval {
@@ -85,7 +97,7 @@ export class ProjectParkedTasksDataService {
   private readonly PARKING_SYNC_CURSOR_KEY = 'parking_last_sync_time';
   private readonly PARKING_SYNC_CURSOR_V2_PREFIX = 'parked-task-cursor:v1:';
 
-  async loadParkedTasksCache(): Promise<ParkedTaskCacheSnapshot> {
+  async loadParkedTasksCache(ownerUserId: string): Promise<ParkedTaskCacheSnapshot> {
     if (typeof indexedDB === 'undefined') {
       return { entries: [], cursor: null };
     }
@@ -102,7 +114,7 @@ export class ProjectParkedTasksDataService {
         const metaStore = tx.objectStore(FOCUS_CONFIG.IDB_STORES.SYNC_METADATA);
 
         const parkedReq = parkedStore.getAll();
-        const cursorReq = metaStore.get(this.PARKING_SYNC_CURSOR_KEY);
+        const cursorReq = metaStore.get(this.getParkingSyncCursorKey(ownerUserId));
 
         tx.oncomplete = () => {
           const rows = Array.isArray(parkedReq.result) ? parkedReq.result : [];
@@ -110,10 +122,12 @@ export class ProjectParkedTasksDataService {
             .filter((row): row is ParkedTaskCacheRecord =>
               !!row &&
               typeof row === 'object' &&
+              'ownerUserId' in row &&
               'taskId' in row &&
               'projectId' in row &&
               'task' in row
             )
+            .filter(row => row.ownerUserId === ownerUserId)
             .map((row) => ({
               task: row.task,
               projectId: row.projectId,
@@ -134,40 +148,91 @@ export class ProjectParkedTasksDataService {
     }
   }
 
-  async saveParkedTasksCache(snapshot: ParkedTaskCacheSnapshot): Promise<void> {
-    if (typeof indexedDB === 'undefined') return;
+  async saveParkedTasksCache(
+    ownerUserId: string,
+    snapshot: ParkedTaskCacheSnapshot,
+    options: ParkedTaskCacheSaveOptions = {},
+  ): Promise<void> {
+    return await trackLocalBackupUiRestoreWriterPromise(
+      ownerUserId,
+      'parked-task-cache',
+      async () => {
+        if (typeof indexedDB === 'undefined') return;
 
-    try {
-      const db = await this.openFocusModeDB();
-      await new Promise<void>((resolve, reject) => {
-        const tx = db.transaction(
-          [FOCUS_CONFIG.IDB_STORES.PARKED_TASKS, FOCUS_CONFIG.IDB_STORES.SYNC_METADATA],
-          'readwrite',
-        );
-        const parkedStore = tx.objectStore(FOCUS_CONFIG.IDB_STORES.PARKED_TASKS);
-        const metaStore = tx.objectStore(FOCUS_CONFIG.IDB_STORES.SYNC_METADATA);
+        try {
+          const db = await this.openFocusModeDB();
+          await new Promise<void>((resolve, reject) => {
+            const tx = db.transaction(
+              [FOCUS_CONFIG.IDB_STORES.PARKED_TASKS, FOCUS_CONFIG.IDB_STORES.SYNC_METADATA],
+              'readwrite',
+            );
+            const parkedStore = tx.objectStore(FOCUS_CONFIG.IDB_STORES.PARKED_TASKS);
+            const metaStore = tx.objectStore(FOCUS_CONFIG.IDB_STORES.SYNC_METADATA);
 
-        parkedStore.clear();
-        for (const entry of snapshot.entries) {
-          const updatedAt = entry.task.updatedAt ?? new Date().toISOString();
-          parkedStore.put({
-            taskId: entry.task.id,
-            projectId: entry.projectId,
-            task: entry.task,
-            updatedAt,
-          } as ParkedTaskCacheRecord);
+            const cursorRequest = parkedStore.openCursor();
+            cursorRequest.onsuccess = () => {
+              const cursor = cursorRequest.result;
+              if (cursor) {
+                const row = cursor.value as Partial<ParkedTaskCacheRecord> | null;
+                if (this.shouldDeleteParkedTaskCacheRow(row, ownerUserId, options)) {
+                  cursor.delete();
+                }
+                cursor.continue();
+                return;
+              }
+
+              this.putOwnerParkedTaskEntries(parkedStore, ownerUserId, snapshot.entries);
+              if (options.retireLegacyOwnerlessCache) {
+                metaStore.delete(this.PARKING_SYNC_CURSOR_KEY);
+              }
+              metaStore.put({
+                key: this.getParkingSyncCursorKey(ownerUserId),
+                value: snapshot.cursor ?? null,
+              });
+            };
+
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+          });
+        } catch (error) {
+          this.logger.warn('保存停泊任务缓存失败（不阻断主流程）', { error });
         }
-        metaStore.put({
-          key: this.PARKING_SYNC_CURSOR_KEY,
-          value: snapshot.cursor ?? null,
-        });
+      },
+    );
+  }
 
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => reject(tx.error);
-      });
-    } catch (error) {
-      this.logger.warn('保存停泊任务缓存失败（不阻断主流程）', { error });
+  private putOwnerParkedTaskEntries(
+    parkedStore: IDBObjectStore,
+    ownerUserId: string,
+    entries: ParkedTaskEntry[],
+  ): void {
+    for (const entry of entries) {
+      parkedStore.put({
+        ownerUserId,
+        taskId: this.getParkedTaskCacheKey(ownerUserId, entry.task.id),
+        projectId: entry.projectId,
+        task: entry.task,
+        updatedAt: entry.task.updatedAt ?? new Date().toISOString(),
+      } as ParkedTaskCacheRecord);
     }
+  }
+
+  private shouldDeleteParkedTaskCacheRow(
+    row: Partial<ParkedTaskCacheRecord> | null,
+    ownerUserId: string,
+    options: ParkedTaskCacheSaveOptions,
+  ): boolean {
+    const isLegacyOwnerlessRow = typeof row?.ownerUserId !== 'string' || !row.ownerUserId;
+    return row?.ownerUserId === ownerUserId ||
+      !!options.retireLegacyOwnerlessCache && isLegacyOwnerlessRow;
+  }
+
+  private getParkingSyncCursorKey(ownerUserId: string): string {
+    return `${this.PARKING_SYNC_CURSOR_KEY}:${encodeURIComponent(ownerUserId)}`;
+  }
+
+  private getParkedTaskCacheKey(ownerUserId: string, taskId: string): string {
+    return `${encodeURIComponent(ownerUserId)}:${taskId}`;
   }
 
   async pullParkedTasksDelta(
@@ -235,7 +300,7 @@ export class ProjectParkedTasksDataService {
         since,
         localProjectCount: localProjectIdHints.length,
       });
-      return this.emptyDelta(since);
+      return { ...this.emptyDelta(since), isComplete: true };
     }
 
     const state: ParkedTaskDeltaState = {
@@ -290,6 +355,7 @@ export class ProjectParkedTasksDataService {
       nextCursor: state.knownTaskChecksIncomplete
         ? since
         : this.computeParkedCursor(since, state.updatedRows),
+      isComplete: !state.knownTaskChecksIncomplete,
     };
   }
 
@@ -323,7 +389,8 @@ export class ProjectParkedTasksDataService {
     const rows: ParkedTaskDeltaRow[] = [];
 
     for (const projectChunk of projectChunks) {
-      const result = await fetchAllSupabasePages<ParkedTaskDeltaRow>(() => {
+      const initialCursor = this.parseParkedCursor(since);
+      const result = await fetchAllSupabaseKeysetPagesByCursor<ParkedTaskDeltaRow, ParkedTaskCursor>((pageCursor) => {
         let parkedQuery = client
           .from('tasks')
           .select(selectFields())
@@ -331,11 +398,15 @@ export class ProjectParkedTasksDataService {
           .is('deleted_at', null)
           .in('project_id', projectChunk);
 
-        parkedQuery = this.applyParkedCursorFilter(parkedQuery, since);
+        parkedQuery = this.applyParsedParkedCursorFilter(parkedQuery, pageCursor ?? initialCursor);
 
         return parkedQuery
           .order('updated_at', { ascending: true })
           .order('id', { ascending: true });
+      }, {
+        readCursor: row => this.readParkedTaskPageCursor(row),
+        cursorKey: (cursor) => `${cursor.updatedAt}:${cursor.id}`,
+        isCursorAfter: (previous, next) => next.updatedAt > previous.updatedAt || (next.updatedAt === previous.updatedAt && String(next.id ?? '') > String(previous.id ?? '')),
       });
       if (result.error) {
         return { data: null, error: result.error };
@@ -363,18 +434,17 @@ export class ProjectParkedTasksDataService {
     for (const chunk of dependencies.chunkIds(knownParkedTaskIds, 100)) {
       let changedRows: ParkedTaskDeltaRow[] | null = null;
       try {
-        const { data, error } = await fetchAllSupabasePages<ParkedTaskDeltaRow>(() => {
-          let changedQuery = client
-            .from('tasks')
-            .select(selectFields())
-            .in('id', chunk);
+        let changedQuery = client
+          .from('tasks')
+          .select(selectFields())
+          .in('id', chunk);
 
-          changedQuery = this.applyParkedCursorFilter(changedQuery, since);
+        changedQuery = this.applyParkedCursorFilter(changedQuery, since);
 
-          return changedQuery
-            .order('updated_at', { ascending: true })
-            .order('id', { ascending: true });
-        });
+        const { data, error } = await changedQuery
+          .order('updated_at', { ascending: true })
+          .order('id', { ascending: true })
+          .limit(chunk.length);
 
         if (error) {
           this.markKnownParkedTaskCheckIncomplete(state, since, chunk, error);
@@ -419,40 +489,82 @@ export class ProjectParkedTasksDataService {
     rowToTask: TaskRowMapper,
   ): void {
     for (const rawRow of changedRows) {
-      state.updatedRows.push(rawRow);
-      if (!rawRow.id) continue;
+      const disposition = this.classifyParkedTaskDeltaRow(rawRow);
+      const rowCursor = this.readParkedTaskPageCursor(rawRow);
+      const projectId = rawRow.project_id ? String(rawRow.project_id) : '';
+      if (disposition === 'incomplete' || !rowCursor || disposition === 'parked' && !projectId) {
+        this.markKnownParkedTaskRowIncomplete(state, rawRow);
+        continue;
+      }
 
-      if (!this.isParkedTaskDeltaRow(rawRow)) {
+      state.updatedRows.push(rawRow);
+      if (disposition === 'removed') {
         const taskId = String(rawRow.id);
         state.removedTasks.set(taskId, {
           taskId,
           updatedAt: rawRow.updated_at ? String(rawRow.updated_at) : null,
         });
-        state.entryMap.delete(String(rawRow.id));
+        state.entryMap.delete(taskId);
         continue;
       }
 
-      const projectId = rawRow.project_id ? String(rawRow.project_id) : '';
-      if (!projectId) continue;
       const task = rowToTask(rawRow);
       state.entryMap.set(task.id, { task, projectId });
     }
   }
 
-  private isParkedTaskDeltaRow(row: ParkedTaskDeltaRow): boolean {
-    const parkingMeta = (row as { parking_meta?: unknown }).parking_meta;
-    return parkingMeta !== null && parkingMeta !== undefined && row.deleted_at === null;
+  private classifyParkedTaskDeltaRow(row: ParkedTaskDeltaRow): ParkedTaskDeltaDisposition {
+    const record = row as Record<string, unknown>;
+    const hasParkingMeta = Object.prototype.hasOwnProperty.call(record, 'parking_meta');
+    const hasDeletedAt = Object.prototype.hasOwnProperty.call(record, 'deleted_at');
+    const parkingMeta = record['parking_meta'];
+    const deletedAt = record['deleted_at'];
+
+    if (hasParkingMeta && parkingMeta === null) return 'removed';
+    if (hasDeletedAt && typeof deletedAt === 'string' && deletedAt.trim()) return 'removed';
+    if (hasParkingMeta && parkingMeta !== undefined && hasDeletedAt && deletedAt === null) {
+      return 'parked';
+    }
+    return 'incomplete';
+  }
+
+  private markKnownParkedTaskRowIncomplete(
+    state: ParkedTaskDeltaState,
+    row: ParkedTaskDeltaRow,
+  ): void {
+    const record = row as Record<string, unknown>;
+    state.knownTaskChecksIncomplete = true;
+    this.logger.warn('停泊任务 known-id 行字段不完整，保留缓存并保持增量游标', {
+      taskId: typeof row.id === 'string' ? row.id : null,
+      hasParkingMeta: Object.prototype.hasOwnProperty.call(record, 'parking_meta'),
+      hasDeletedAt: Object.prototype.hasOwnProperty.call(record, 'deleted_at'),
+      hasProjectId: typeof row.project_id === 'string' && row.project_id.length > 0,
+      hasValidCursor: this.readParkedTaskPageCursor(row) !== null,
+    });
   }
 
   private applyParkedCursorFilter<T>(
     query: T,
     cursorText: string | null,
   ): T {
-    const cursor = this.parseParkedCursor(cursorText);
+    return this.applyParsedParkedCursorFilter(query, this.parseParkedCursor(cursorText));
+  }
+
+  private applyParsedParkedCursorFilter<T>(
+    query: T,
+    cursor: ParkedTaskCursor | null,
+  ): T {
     if (!cursor) return query;
     const cursorQuery = query as unknown as ParkedTaskCursorQuery;
-    if (!cursor.id) return cursorQuery.gt('updated_at', cursor.updatedAt) as T;
+    if (!cursor.id) return cursorQuery.gte('updated_at', cursor.updatedAt) as T;
     return cursorQuery.or(`updated_at.gt.${cursor.updatedAt},and(updated_at.eq.${cursor.updatedAt},id.gt.${cursor.id})`) as T;
+  }
+
+  private readParkedTaskPageCursor(row: ParkedTaskDeltaRow): ParkedTaskCursor | null {
+    if (!row.updated_at || !row.id) return null;
+    const updatedAt = String(row.updated_at);
+    if (Number.isNaN(Date.parse(updatedAt))) return null;
+    return { updatedAt, id: String(row.id) };
   }
 
   private computeParkedCursor(since: string | null, rows: ParkedTaskDeltaRow[]): string | null {
@@ -506,11 +618,20 @@ export class ProjectParkedTasksDataService {
     client: SupabaseClient,
     normalizeIds: (ids: readonly string[]) => string[],
   ): Promise<string[]> {
-    const { data, error } = await fetchAllSupabasePages<ProjectIdRow>(() => client
-      .from('projects')
-      .select('id')
-      .is('deleted_at', null)
-      .order('id', { ascending: true }));
+    const { data, error } = await fetchAllSupabaseKeysetPagesByCursor<ProjectIdRow, string>((cursor) => {
+      let query = client
+        .from('projects')
+        .select('id')
+        .is('deleted_at', null);
+      if (cursor) {
+        query = query.gt('id', cursor);
+      }
+      return query.order('id', { ascending: true });
+    }, {
+      readCursor: row => typeof row.id === 'string' && row.id.length > 0 ? row.id : null,
+      cursorKey: (cursor) => cursor,
+      isCursorAfter: (previous, next) => next > previous,
+    });
 
     if (error) {
       throw supabaseErrorToError(error);
@@ -542,6 +663,12 @@ export class ProjectParkedTasksDataService {
   }
 
   private emptyDelta(since: string | null): ParkedTaskDeltaResult {
-    return { entries: [], removedTasks: [], removedTaskIds: [], nextCursor: since };
+    return {
+      entries: [],
+      removedTasks: [],
+      removedTaskIds: [],
+      nextCursor: since,
+      isComplete: false,
+    };
   }
 }

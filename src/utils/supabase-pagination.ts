@@ -72,15 +72,11 @@ export async function fetchAllSupabasePages<Row, ErrorType = unknown>(
   for (let from = 0; ; from += pageSize) {
     const to = from + pageSize - 1;
     const { data, error } = await buildQuery().range(from, to);
-    if (error) {
-      return { data: null, error };
-    }
+    if (error) return { data: null, error };
 
     const page = (data ?? []) as Row[];
     rows.push(...page);
-    if (page.length < pageSize) {
-      return { data: rows, error: null };
-    }
+    if (page.length < pageSize) return { data: rows, error: null };
   }
 }
 

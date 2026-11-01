@@ -127,7 +127,13 @@ export function registerProjectDataCloudLoadSpecs(): void {
         const service = injector.get(ProjectDataService);
         const result = await service.pullParkedTasksDelta(null, []);
 
-        expect(result).toEqual({ entries: [], removedTasks: [], removedTaskIds: [], nextCursor: null });
+        expect(result).toEqual({
+          entries: [],
+          removedTasks: [],
+          removedTaskIds: [],
+          nextCursor: null,
+          isComplete: false,
+        });
         expect(clientAsync).not.toHaveBeenCalled();
       });
 
