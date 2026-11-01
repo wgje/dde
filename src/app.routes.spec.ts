@@ -22,19 +22,43 @@ vi.mock('./services/guards/project.guard', () => ({
 import {
   routes,
   requireAuthGuardLazy,
+  requireAuthThenRestoreFenceGuardLazy,
   projectExistsGuardLazy,
   unsavedChangesGuardLazy,
 } from './app.routes';
+import { AuthService } from './services/auth.service';
+import { LocalBackupUiRestorePreActionQueueFenceService } from './services/local-backup-ui-restore-pre-actionqueue-fence.service';
 import { UnsavedChangesGuard } from './services/guards/unsaved-changes.guard';
 
 describe('app.routes lazy guard wrappers', () => {
+  let currentUserId: string | null;
+  let authFence: string;
+  const restoreFenceRun = vi.fn();
+
   beforeEach(() => {
     vi.clearAllMocks();
+    currentUserId = 'owner-a';
+    authFence = 'auth-generation-a';
+    restoreFenceRun.mockResolvedValue({
+      status: 'CLEAR', ownerUserId: currentUserId,
+      recovered: false, terminalResultDigest: null,
+    });
     TestBed.configureTestingModule({
       providers: [
         {
           provide: UnsavedChangesGuard,
           useValue: { canDeactivate: canDeactivateMock },
+        },
+        {
+          provide: AuthService,
+          useValue: {
+            currentUserId: () => currentUserId,
+            captureAuthIdentityFence: () => authFence,
+          },
+        },
+        {
+          provide: LocalBackupUiRestorePreActionQueueFenceService,
+          useValue: { run: restoreFenceRun },
         },
       ],
     });
@@ -42,11 +66,22 @@ describe('app.routes lazy guard wrappers', () => {
 
   it('路由配置应使用 lazy guard wrapper', () => {
     const projectsRoute = routes.find((route) => route.path === 'projects');
-    expect(projectsRoute?.canActivate?.[0]).toBe(requireAuthGuardLazy);
+    expect(projectsRoute?.canActivate).toEqual([requireAuthThenRestoreFenceGuardLazy]);
 
     const projectDetailRoute = projectsRoute?.children?.find((route) => route.path === ':projectId');
     expect(projectDetailRoute?.canActivate?.[0]).toBe(projectExistsGuardLazy);
     expect(projectDetailRoute?.canDeactivate?.[0]).toBe(unsavedChangesGuardLazy);
+  });
+
+  it('registers an unguarded isolated auth callback route before the wildcard', () => {
+    const callbackIndex = routes.findIndex((route) => route.path === 'auth/callback');
+    const wildcardIndex = routes.findIndex((route) => route.path === '**');
+    const callbackRoute = routes[callbackIndex];
+
+    expect(callbackIndex).toBeGreaterThan(-1);
+    expect(callbackIndex).toBeLessThan(wildcardIndex);
+    expect(callbackRoute?.canActivate).toBeUndefined();
+    expect(callbackRoute?.loadComponent).toBeTypeOf('function');
   });
 
   it('requireAuthGuardLazy 应转调 requireAuthGuard 并返回结果', async () => {
@@ -58,6 +93,39 @@ describe('app.routes lazy guard wrappers', () => {
 
     expect(result).toBe(true);
     expect(requireAuthGuardMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('runs auth and restore fence sequentially before allowing the workspace shell', async () => {
+    let releaseAuth!: () => void;
+    requireAuthGuardMock.mockReturnValueOnce(new Promise<boolean>(resolve => {
+      releaseAuth = () => resolve(true);
+    }));
+
+    const guarded = TestBed.runInInjectionContext(() =>
+      requireAuthThenRestoreFenceGuardLazy({} as never, { url: '/projects' } as never)
+    );
+    await vi.waitFor(() => expect(requireAuthGuardMock).toHaveBeenCalledOnce());
+    expect(restoreFenceRun).not.toHaveBeenCalled();
+    releaseAuth();
+
+    await expect(guarded).resolves.toBe(true);
+    expect(restoreFenceRun).toHaveBeenCalledOnce();
+    const input = restoreFenceRun.mock.calls[0][0];
+    expect(input.ownerUserId).toBe('owner-a');
+    expect(input.isCurrent()).toBe(true);
+    authFence = 'auth-generation-b';
+    expect(input.isCurrent()).toBe(false);
+  });
+
+  it('allows offline shell rendering when the early fence returns HOLD', async () => {
+    requireAuthGuardMock.mockResolvedValueOnce(true);
+    restoreFenceRun.mockResolvedValueOnce({
+      status: 'HOLD', ownerUserId: 'owner-a', reason: 'RECOVERY_BLOCKED',
+    });
+
+    await expect(TestBed.runInInjectionContext(() =>
+      requireAuthThenRestoreFenceGuardLazy({} as never, { url: '/projects' } as never)
+    )).resolves.toBe(true);
   });
 
   it('projectExistsGuardLazy 应转调 projectExistsGuard 并返回结果', async () => {

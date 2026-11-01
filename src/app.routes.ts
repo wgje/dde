@@ -13,6 +13,9 @@ const ROUTE_GUARD_LAZY_IMPORT_ENABLED = readBootFlag('ROUTE_GUARD_LAZY_IMPORT_V1
 let authGuardModulePromise: Promise<typeof import('./services/guards/auth.guard')> | null = null;
 let projectGuardModulePromise: Promise<typeof import('./services/guards/project.guard')> | null = null;
 let unsavedChangesGuardModulePromise: Promise<typeof import('./services/guards/unsaved-changes.guard')> | null = null;
+let restoreFenceModulePromise: Promise<
+  typeof import('./services/local-backup-ui-restore-pre-actionqueue-fence.service')
+> | null = null;
 
 const loadAuthGuardModule = () =>
   (authGuardModulePromise ??= import('./services/guards/auth.guard'));
@@ -20,12 +23,17 @@ const loadProjectGuardModule = () =>
   (projectGuardModulePromise ??= import('./services/guards/project.guard'));
 const loadUnsavedChangesGuardModule = () =>
   (unsavedChangesGuardModulePromise ??= import('./services/guards/unsaved-changes.guard'));
+const loadRestoreFenceModule = () =>
+  (restoreFenceModulePromise ??= import(
+    './services/local-backup-ui-restore-pre-actionqueue-fence.service'
+  ));
 
 if (!ROUTE_GUARD_LAZY_IMPORT_ENABLED) {
   // 运行时回滚：立即预热守卫模块，逼近旧路径行为（不阻塞构建）。
   void loadAuthGuardModule();
   void loadProjectGuardModule();
   void loadUnsavedChangesGuardModule();
+  void loadRestoreFenceModule();
 }
 
 /**
@@ -52,6 +60,49 @@ export const requireAuthGuardLazy: CanActivateFn = async (route, state) => {
     // 启动壳卡死且无安全超时。允许挂载，壳层自行处理登录 UI。
     return true;
   }
+};
+
+export const preActionQueueRestoreFenceGuardLazy: CanActivateFn = async () => {
+  const injector = inject(Injector);
+  try {
+    const [fenceModule, authModule, authConfigModule] = await Promise.all([
+      loadRestoreFenceModule(),
+      import('./services/auth.service'),
+      import('./config/auth.config'),
+    ]);
+    const auth = injector.get(authModule.AuthService);
+    const ownerUserId = auth.currentUserId() ?? authConfigModule.AUTH_CONFIG.LOCAL_MODE_USER_ID;
+    const identityFence = auth.captureAuthIdentityFence();
+    await injector.get(fenceModule.LocalBackupUiRestorePreActionQueueFenceService).run({
+      ownerUserId,
+      isCurrent: () => (
+        (auth.currentUserId() ?? authConfigModule.AUTH_CONFIG.LOCAL_MODE_USER_ID) === ownerUserId
+        && auth.captureAuthIdentityFence() === identityFence
+      ),
+    });
+  } catch {
+    // ActionQueue's sole activation path repeats the fail-closed fence before storage load.
+  }
+  return true;
+};
+
+export const requireAuthThenRestoreFenceGuardLazy: CanActivateFn = async (route, state) => {
+  const injector = inject(Injector);
+  const authResultValue = runInInjectionContext(
+    injector,
+    () => requireAuthGuardLazy(route, state),
+  );
+  const authResult = isObservable(authResultValue)
+    ? await firstValueFrom(authResultValue)
+    : await authResultValue;
+  if (authResult !== true) return authResult;
+  const fenceResult = runInInjectionContext(
+    injector,
+    () => preActionQueueRestoreFenceGuardLazy(route, state),
+  );
+  return isObservable(fenceResult)
+    ? await firstValueFrom(fenceResult)
+    : await fenceResult;
 };
 
 export const projectExistsGuardLazy: CanActivateFn = async (route, state) => {
@@ -121,7 +172,7 @@ export const routes: Routes = [
   // 项目列表/主视图 - WorkspaceShell 懒加载承载重型工作区
   { 
     path: 'projects', 
-    canActivate: [requireAuthGuardLazy],
+    canActivate: [requireAuthThenRestoreFenceGuardLazy],
     loadComponent: () => import('./workspace-shell.component').then(m => m.WorkspaceShellComponent),
     children: [
       // 项目列表首页（无选中项目）
@@ -159,6 +210,11 @@ export const routes: Routes = [
   { 
     path: 'reset-password', 
     loadComponent: () => import('./app/shared/components/reset-password.component').then(m => m.ResetPasswordComponent)
+  },
+
+  {
+    path: 'auth/callback',
+    loadComponent: () => import('./app/shared/components/auth-callback.component').then(m => m.AuthCallbackComponent)
   },
   
   // 致命错误页面
