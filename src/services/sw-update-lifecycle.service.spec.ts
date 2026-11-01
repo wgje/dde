@@ -1,8 +1,9 @@
 import { vi, describe, it, expect, beforeAll, afterEach, afterAll } from 'vitest';
 import { Subject } from 'rxjs';
 import { APP_LIFECYCLE_CONFIG } from '../config/app-lifecycle.config';
+import type { AppLifecycleReloadCoordinator } from './app-lifecycle-reload.coordinator';
 import { SwUpdateLifecycleService, type SwUpdateCheckReason } from './sw-update-lifecycle.service';
-import type { ToastService } from './toast.service';
+import type { ToastAction } from './toast.service';
 
 type SwUpdateLifecyclePrivate = {
   initialize: () => void;
@@ -13,6 +14,9 @@ type SwUpdateLifecyclePrivate = {
   swUpdateInitialCheckTimer: ReturnType<typeof setTimeout> | null;
   swUpdatePollTimer: ReturnType<typeof setInterval> | null;
   swUpdateCheckInFlight: boolean;
+  swUpdateCheckGeneration: number;
+  versionReloadState: 'idle' | 'prompted' | 'in-flight' | 'retry-pending' | 'completed';
+  versionReloadRetryTimer: ReturnType<typeof setTimeout> | null;
   lastSwUpdateCheckAt: number;
   versionUpdatesSubscribed: boolean;
   stopped: boolean;
@@ -29,11 +33,13 @@ type SwUpdateLifecyclePrivate = {
     warn: ReturnType<typeof vi.fn>;
     debug: ReturnType<typeof vi.fn>;
   };
-  toast: Pick<ToastService, 'info'>;
+  toast: { info: ReturnType<typeof vi.fn> };
   appLifecycle: { markVersionReady: ReturnType<typeof vi.fn> };
+  reloadCoordinator: { triggerVersionReload: AppLifecycleReloadCoordinator['triggerVersionReload'] };
   handleSwUpdateVisibilityCheck: EventListener;
   handleSwUpdateFocusCheck: EventListener;
   handleSwUpdateOnlineCheck: EventListener;
+  onSwUpdateOnline: () => void;
 };
 
 function createSwUpdateCheckContext(checkForUpdate = vi.fn().mockResolvedValue(false)): SwUpdateLifecyclePrivate {
@@ -41,6 +47,9 @@ function createSwUpdateCheckContext(checkForUpdate = vi.fn().mockResolvedValue(f
   context.swUpdateInitialCheckTimer = null;
   context.swUpdatePollTimer = null;
   context.swUpdateCheckInFlight = false;
+  context.swUpdateCheckGeneration = 0;
+  context.versionReloadState = 'idle';
+  context.versionReloadRetryTimer = null;
   context.lastSwUpdateCheckAt = 0;
   context.versionUpdatesSubscribed = false;
   context.stopped = false;
@@ -59,14 +68,24 @@ function createSwUpdateCheckContext(checkForUpdate = vi.fn().mockResolvedValue(f
   };
   context.toast = { info: vi.fn() };
   context.appLifecycle = { markVersionReady: vi.fn() };
+  context.reloadCoordinator = { triggerVersionReload: vi.fn().mockResolvedValue(undefined) };
   context.handleSwUpdateVisibilityCheck = vi.fn();
   context.handleSwUpdateFocusCheck = vi.fn();
   context.handleSwUpdateOnlineCheck = vi.fn();
   return context;
 }
 
+function emitVersionReady(context: SwUpdateLifecyclePrivate): void {
+  context.swUpdate.versionUpdates.next({ type: 'VERSION_READY' });
+}
+function latestReloadAction(context: SwUpdateLifecyclePrivate): ToastAction {
+  const options = context.toast.info.mock.calls.at(-1)?.[2] as { action?: ToastAction } | undefined;
+  if (!options?.action) throw new Error('Expected version reload action');
+  return options.action;
+}
 let originalVisibilityStateDescriptor: PropertyDescriptor | undefined;
-
+let originalOnlineDescriptor: PropertyDescriptor | undefined;
+let originalForceClearDescriptor: PropertyDescriptor | undefined;
 function setDocumentVisibilityState(state: DocumentVisibilityState): void {
   Object.defineProperty(document, 'visibilityState', {
     configurable: true,
@@ -88,10 +107,16 @@ function restoreDocumentVisibilityState(): void {
 describe('SwUpdateLifecycleService 版本更新检查', () => {
   beforeAll(() => {
     originalVisibilityStateDescriptor = Object.getOwnPropertyDescriptor(document, 'visibilityState');
+    originalOnlineDescriptor = Object.getOwnPropertyDescriptor(navigator, 'onLine');
+    originalForceClearDescriptor = Object.getOwnPropertyDescriptor(window, '__NANOFLOW_FORCE_CLEAR_CACHE__');
   });
 
   afterEach(() => {
     restoreDocumentVisibilityState();
+    if (originalOnlineDescriptor) Object.defineProperty(navigator, 'onLine', originalOnlineDescriptor);
+    else Reflect.deleteProperty(navigator, 'onLine');
+    if (originalForceClearDescriptor) Object.defineProperty(window, '__NANOFLOW_FORCE_CLEAR_CACHE__', originalForceClearDescriptor);
+    else Reflect.deleteProperty(window, '__NANOFLOW_FORCE_CLEAR_CACHE__');
     vi.restoreAllMocks();
     vi.useRealTimers();
   });
@@ -286,6 +311,149 @@ describe('SwUpdateLifecycleService 版本更新检查', () => {
     } finally {
       context.teardown();
     }
+  });
+
+  it('旧生命周期的在途检查不应阻塞或回写重新 initialize 后的新检查', async () => {
+    vi.useFakeTimers();
+    setDocumentVisibilityState('visible');
+    let resolveFirstCheck!: (value: boolean) => void;
+    let resolveSecondCheck!: (value: boolean) => void;
+    const firstCheckResult = new Promise<boolean>(resolve => {
+      resolveFirstCheck = resolve;
+    });
+    const secondCheckResult = new Promise<boolean>(resolve => {
+      resolveSecondCheck = resolve;
+    });
+    const checkForUpdate = vi.fn()
+      .mockReturnValueOnce(firstCheckResult)
+      .mockReturnValueOnce(secondCheckResult);
+    const context = createSwUpdateCheckContext(checkForUpdate);
+
+    try {
+      context.initialize();
+      const firstCheck = context.checkForSwUpdate('startup', true);
+      expect(context.swUpdateCheckInFlight).toBe(true);
+
+      context.teardown();
+      context.initialize();
+      const secondCheck = context.checkForSwUpdate('startup', true);
+
+      expect(checkForUpdate).toHaveBeenCalledTimes(2);
+      expect(context.swUpdateCheckInFlight).toBe(true);
+
+      resolveFirstCheck(false);
+      await firstCheck;
+
+      expect(context.swUpdateCheckInFlight).toBe(true);
+      expect(context.lastSwUpdateCheckAt).toBe(0);
+      expect(context.logger.debug).not.toHaveBeenCalled();
+
+      resolveSecondCheck(false);
+      await secondCheck;
+
+      expect(context.swUpdateCheckInFlight).toBe(false);
+      expect(context.lastSwUpdateCheckAt).toBeGreaterThan(0);
+      expect(context.logger.debug).toHaveBeenCalledTimes(1);
+      expect(context.logger.debug).toHaveBeenCalledWith(
+        'SwUpdate checkForUpdate completed without new version',
+        { reason: 'startup' },
+      );
+    } finally {
+      context.teardown();
+    }
+  });
+
+  it('离线点击应仅重置意图，重连与重复版本事件不重复 prompt', async () => {
+    vi.useFakeTimers();
+    Object.defineProperty(navigator, 'onLine', { configurable: true, value: false });
+    const activateUpdate = vi.fn().mockResolvedValue(true);
+    const forceClear = vi.fn();
+    Object.defineProperty(window, '__NANOFLOW_FORCE_CLEAR_CACHE__', { configurable: true, value: forceClear });
+    const context = createSwUpdateCheckContext();
+    context.swUpdate.activateUpdate = activateUpdate;
+    context.reloadCoordinator = { triggerVersionReload: vi.fn(async (_breadcrumb, reset) => {
+      Object.defineProperty(navigator, 'onLine', { configurable: true, value: true });
+      context.onSwUpdateOnline();
+      reset();
+    }) };
+    context.initialize();
+    emitVersionReady(context);
+    await latestReloadAction(context).onClick();
+    expect(activateUpdate).not.toHaveBeenCalled();
+    expect(forceClear).not.toHaveBeenCalled();
+    expect(context.toast.info).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(0);
+    context.onSwUpdateOnline();
+    emitVersionReady(context);
+    expect(context.toast.info).toHaveBeenCalledTimes(2);
+    context.teardown();
+  });
+
+  it('激活在途转离线时不应 force-clear', async () => {
+    Object.defineProperty(navigator, 'onLine', { configurable: true, value: true });
+    let resolveActivation!: () => void;
+    const activateUpdate = vi.fn(() => new Promise<boolean>(resolve => { resolveActivation = () => resolve(true); }));
+    const forceClear = vi.fn();
+    Object.defineProperty(window, '__NANOFLOW_FORCE_CLEAR_CACHE__', { configurable: true, value: forceClear });
+    const context = createSwUpdateCheckContext();
+    context.swUpdate.activateUpdate = activateUpdate;
+    context.reloadCoordinator = {
+      triggerVersionReload: vi.fn(async (_breadcrumb, reset) => { await activateUpdate(); reset(); }),
+    };
+    context.initialize();
+    emitVersionReady(context);
+    const action = latestReloadAction(context).onClick();
+
+    Object.defineProperty(navigator, 'onLine', { configurable: true, value: false });
+    resolveActivation();
+    await action;
+    expect(forceClear).not.toHaveBeenCalled();
+    context.teardown();
+  });
+
+  it('teardown 应让旧 prompt action 失效', async () => {
+    const context = createSwUpdateCheckContext();
+    context.initialize();
+    emitVersionReady(context);
+    const action = latestReloadAction(context);
+    context.teardown();
+    await action.onClick();
+    expect(context.swUpdate.activateUpdate).not.toHaveBeenCalled();
+    expect(context.reloadCoordinator.triggerVersionReload).not.toHaveBeenCalled();
+  });
+
+  it('在线时应先激活再 force-clear，且日志异常不得阻断激活失败回退', async () => {
+    Object.defineProperty(navigator, 'onLine', { configurable: true, value: true });
+    const events: string[] = [];
+    const activateUpdate = vi.fn().mockImplementationOnce(async () => { events.push('activate'); return true; })
+      .mockImplementationOnce(async () => { events.push('reject'); throw new Error('activation failed'); });
+    const forceClear = vi.fn(() => { events.push('force-clear'); });
+    Object.defineProperty(window, '__NANOFLOW_FORCE_CLEAR_CACHE__', { configurable: true, value: forceClear });
+    const context = createSwUpdateCheckContext();
+    context.swUpdate.activateUpdate = activateUpdate;
+    context.reloadCoordinator = {
+      triggerVersionReload: vi.fn(async (breadcrumb) => {
+        try {
+          await activateUpdate();
+          breadcrumb('lifecycle.version-reload.activate-ok', 'manual', {});
+        } catch (error) {
+          breadcrumb('lifecycle.version-reload.activate-failed', 'manual', { error: String(error) });
+        }
+        forceClear();
+      }),
+    };
+    context.initialize();
+    emitVersionReady(context);
+
+    await latestReloadAction(context).onClick();
+    expect(events).toEqual(['activate', 'force-clear']);
+    context.teardown();
+    context.initialize();
+    context.logger.warn.mockImplementation(() => { throw new Error('logger failed'); });
+    emitVersionReady(context);
+    await expect(latestReloadAction(context).onClick()).resolves.toBeUndefined();
+    expect(events).toEqual(['activate', 'force-clear', 'reject', 'force-clear']);
+    context.teardown();
   });
 
   it('teardown 后不应再响应 VERSION_READY 更新事件', () => {

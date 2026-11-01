@@ -22,11 +22,12 @@ import { SwUpdate, VersionReadyEvent } from '@angular/service-worker';
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
 import { AppLifecycleOrchestratorService } from './app-lifecycle-orchestrator.service';
+import { AppLifecycleReloadCoordinator } from './app-lifecycle-reload.coordinator';
 import { APP_LIFECYCLE_CONFIG } from '../config/app-lifecycle.config';
-import { reloadViaForceClearCache } from '../utils/force-clear-cache';
 
 /** 触发版本检查的时机来源（记入日志，便于诊断更新链路） */
 export type SwUpdateCheckReason = 'startup' | 'periodic' | 'visibility' | 'focus' | 'online';
+type VersionReloadState = 'idle' | 'prompted' | 'in-flight' | 'retry-pending' | 'completed';
 
 @Injectable({ providedIn: 'root' })
 export class SwUpdateLifecycleService {
@@ -34,11 +35,15 @@ export class SwUpdateLifecycleService {
   private readonly toast = inject(ToastService);
   private readonly logger = inject(LoggerService).category('SwUpdate');
   private readonly appLifecycle = inject(AppLifecycleOrchestratorService);
+  private readonly reloadCoordinator = inject(AppLifecycleReloadCoordinator);
   private readonly destroyRef = inject(DestroyRef);
 
   private swUpdateInitialCheckTimer: ReturnType<typeof setTimeout> | null = null;
   private swUpdatePollTimer: ReturnType<typeof setInterval> | null = null;
   private swUpdateCheckInFlight = false;
+  private swUpdateCheckGeneration = 0;
+  private versionReloadState: VersionReloadState = 'idle';
+  private versionReloadRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private lastSwUpdateCheckAt = 0;
   private initialized = false;
   private versionUpdatesSubscribed = false;
@@ -56,8 +61,13 @@ export class SwUpdateLifecycleService {
     void this.checkForSwUpdate('focus');
   };
   private readonly handleSwUpdateOnlineCheck = () => {
-    void this.checkForSwUpdate('online');
+    this.onSwUpdateOnline();
   };
+
+  private onSwUpdateOnline(): void {
+    this.showVersionReloadPrompt(this.swUpdateCheckGeneration, 'retry-pending');
+    void this.checkForSwUpdate('online');
+  }
 
   /** 启动：订阅版本更新事件并开启周期/事件驱动的检查。 */
   initialize(): void {
@@ -75,33 +85,7 @@ export class SwUpdateLifecycleService {
         )
         .subscribe(() => {
           this.appLifecycle.markVersionReady();
-          // 使用 ToastService 显示更新通知，带操作按钮。
-          //
-          // 关键修复（2026-05-15）：onClick 现在先调用 swUpdate.activateUpdate()
-          // 让 waiting SW 真正进入 active 状态，然后再走 reloadViaForceClearCache。
-          // 历史实现只清缓存 + reload，在 cache 清理超时被跳过时旧 SW 仍是 controller，
-          // reload 会命中旧 ngsw 缓存返回旧 HTML/JS，UI 看起来「没反应」。
-          this.toast.info(
-            '🚀 发现新版本',
-            '软件有更新可用，点击刷新获取最新功能',
-            {
-              duration: 0, // 不自动关闭
-              action: {
-                label: '立即刷新',
-                pendingLabel: '正在刷新…',
-                onClick: async () => {
-                  try {
-                    await this.swUpdate.activateUpdate();
-                    this.logger.info('SwUpdate activateUpdate succeeded');
-                  } catch (err) {
-                    // activateUpdate 在跨域 / 第三方 SW 拦截下可能失败；仍兜底走 reload。
-                    this.logger.warn('SwUpdate activateUpdate failed; falling back to force-clear-cache', err);
-                  }
-                  reloadViaForceClearCache();
-                }
-              }
-            }
-          );
+          this.showVersionReloadPrompt(this.swUpdateCheckGeneration, 'idle');
         });
       this.versionUpdatesSubscribed = true;
     }
@@ -121,6 +105,11 @@ export class SwUpdateLifecycleService {
   /** 销毁：置位 stopped 并清理定时器与监听器。 */
   teardown(): void {
     this.stopped = true;
+    this.swUpdateCheckGeneration += 1;
+    this.swUpdateCheckInFlight = false;
+    this.versionReloadState = 'idle';
+    if (this.versionReloadRetryTimer !== null) clearTimeout(this.versionReloadRetryTimer);
+    this.versionReloadRetryTimer = null;
     this.initialized = false;
     this.unsubscribeVersionUpdates();
     this.teardownSwUpdateChecks();
@@ -181,9 +170,12 @@ export class SwUpdateLifecycleService {
       return;
     }
 
+    const checkGeneration = this.swUpdateCheckGeneration;
     this.swUpdateCheckInFlight = true;
     try {
       const updateFound = await this.swUpdate.checkForUpdate();
+      if (!this.isCurrentLifecycleGeneration(checkGeneration)) return;
+
       this.lastSwUpdateCheckAt = now;
       if (updateFound) {
         this.logger.info('SwUpdate checkForUpdate detected a deploy version', { reason });
@@ -191,12 +183,68 @@ export class SwUpdateLifecycleService {
         this.logger.debug('SwUpdate checkForUpdate completed without new version', { reason });
       }
     } catch (error) {
+      if (!this.isCurrentLifecycleGeneration(checkGeneration)) return;
+
       this.logger.warn('SwUpdate checkForUpdate failed', {
         reason,
         message: error instanceof Error ? error.message : String(error),
       });
     } finally {
-      this.swUpdateCheckInFlight = false;
+      if (this.swUpdateCheckGeneration === checkGeneration) {
+        this.swUpdateCheckInFlight = false;
+      }
+    }
+  }
+
+  private isCurrentLifecycleGeneration(checkGeneration: number): boolean {
+    return !this.stopped && this.swUpdateCheckGeneration === checkGeneration;
+  }
+
+  private showVersionReloadPrompt(generation: number, expectedState: 'idle' | 'retry-pending'): void {
+    if (!this.isCurrentLifecycleGeneration(generation) || this.versionReloadState !== expectedState) return;
+    this.versionReloadState = 'prompted';
+    this.toast.info('🚀 发现新版本', '软件有更新可用，点击刷新获取最新功能', {
+      duration: 0,
+      action: {
+        label: '立即刷新',
+        pendingLabel: '正在刷新…',
+        onClick: () => this.runVersionReload(generation),
+      },
+    });
+  }
+
+  private async runVersionReload(generation: number): Promise<void> {
+    if (!this.isCurrentLifecycleGeneration(generation) || this.versionReloadState !== 'prompted') return;
+    this.versionReloadState = 'in-flight';
+    let retryRequested = false;
+    await this.reloadCoordinator.triggerVersionReload(
+      (message, _reason, extra) => this.logVersionReloadResult(message, extra),
+      () => {
+        if (this.isCurrentLifecycleGeneration(generation) && this.versionReloadState === 'in-flight') {
+          retryRequested = true;
+        }
+      },
+    );
+    if (!this.isCurrentLifecycleGeneration(generation) || this.versionReloadState !== 'in-flight') return;
+    if (!retryRequested) {
+      this.versionReloadState = 'completed';
+      return;
+    }
+    this.versionReloadState = 'retry-pending';
+    if (typeof navigator === 'undefined' || navigator.onLine !== false) {
+      this.versionReloadRetryTimer = setTimeout(() => {
+        this.versionReloadRetryTimer = null;
+        this.showVersionReloadPrompt(generation, 'retry-pending');
+      }, 0);
+    }
+  }
+
+  private logVersionReloadResult(message: string, extra?: Record<string, unknown>): void {
+    try {
+      if (message === 'lifecycle.version-reload.activate-ok') this.logger.info('SwUpdate activateUpdate succeeded');
+      else this.logger.warn('SwUpdate activateUpdate failed; falling back to force-clear-cache', extra);
+    } catch {
+      // Diagnostic sinks cannot block the coordinator's force-clear fallback.
     }
   }
 
