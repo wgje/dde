@@ -3,6 +3,7 @@ import {
   getQueuedActionOperationIdentity,
   normalizeQueuedActionOperationId,
 } from './action-queue-outbox-normalization.helpers';
+import { isSyncOperationId } from '../utils/sync-operation-id';
 
 const RESTORABLE_SYNC_STATES = new Set<OutboxSyncState>([
   'held',
@@ -21,7 +22,7 @@ export interface RestoredQueuedActionMergeResult {
 
 export function extractBackupActionQueueActions(source: unknown): QueuedAction[] {
   if (Array.isArray(source)) {
-    return source.filter(isRestorablePendingQueuedAction).map(normalizeRestoredQueuedAction);
+    return source.filter(isRestorablePendingQueuedAction).map(normalizeBackupQueuedAction);
   }
 
   if (!source || typeof source !== 'object') {
@@ -30,11 +31,11 @@ export function extractBackupActionQueueActions(source: unknown): QueuedAction[]
 
   const record = source as Record<string, unknown>;
   if (Array.isArray(record['actions'])) {
-    return record['actions'].filter(isRestorablePendingQueuedAction).map(normalizeRestoredQueuedAction);
+    return record['actions'].filter(isRestorablePendingQueuedAction).map(normalizeBackupQueuedAction);
   }
 
   if (Array.isArray(record['queue'])) {
-    return record['queue'].filter(isRestorablePendingQueuedAction).map(normalizeRestoredQueuedAction);
+    return record['queue'].filter(isRestorablePendingQueuedAction).map(normalizeBackupQueuedAction);
   }
 
   return [];
@@ -318,6 +319,17 @@ function normalizeRestoredQueuedAction(action: QueuedAction): QueuedAction {
     retryCount: typeof legacy.retryCount === 'number' ? legacy.retryCount : 0,
     syncState: normalizeRestoredSyncState(legacy.syncState),
   };
+}
+
+function normalizeBackupQueuedAction(action: QueuedAction): QueuedAction {
+  const candidate = action as QueuedAction & { operationId?: unknown };
+  if (!Object.prototype.hasOwnProperty.call(candidate, 'operationId')
+    || !isSyncOperationId(candidate.operationId)) {
+    throw new Error(
+      'Backup ActionQueue operationId must be a UUID; restore was blocked to preserve operation identity',
+    );
+  }
+  return normalizeRestoredQueuedAction(action);
 }
 
 function getQueuedActionRestoreIdentity(action: QueuedAction): string | null {

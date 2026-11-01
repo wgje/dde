@@ -184,9 +184,10 @@ describe('LocalBackupUIService queue restore', () => {
       tasks: [],
       connections: [],
       localState: {
+        dataSafety: { ownerUserId: 'user-1' },
         actionQueue: [{
           id: 'restored-action',
-          operationId: 'op-restored',
+          operationId: '99999999-9999-4999-8999-999999999999',
           type: 'update',
           entityType: 'task',
           entityId: 'task-restored',
@@ -255,7 +256,7 @@ describe('LocalBackupUIService queue restore', () => {
       retryCount: 0,
       createdAt: 1,
       sourceUserId: 'user-1',
-      operationId: 'op-retry-restored',
+      operationId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
     };
     const backupData = {
       payloadVersion: '2.0.0',
@@ -263,6 +264,7 @@ describe('LocalBackupUIService queue restore', () => {
       tasks: [],
       connections: [],
       localState: {
+        dataSafety: { ownerUserId: 'user-1' },
         retryQueue: [retryQueueItem],
       },
     } as unknown as BackupData;
@@ -315,7 +317,7 @@ describe('LocalBackupUIService queue restore', () => {
     const deadLetter = {
       action: {
         id: 'dead-letter-action',
-        operationId: 'op-dead-letter-action',
+        operationId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
         type: 'update',
         entityType: 'task',
         entityId: 'task-dead-letter',
@@ -337,6 +339,7 @@ describe('LocalBackupUIService queue restore', () => {
       tasks: [],
       connections: [],
       localState: {
+        dataSafety: { ownerUserId: 'user-1' },
         deadLetters: [deadLetter],
       },
     } as unknown as BackupData;
@@ -410,6 +413,7 @@ describe('LocalBackupUIService queue restore', () => {
       tasks: [],
       connections: [],
       localState: {
+        dataSafety: { ownerUserId: 'user-1' },
         conflicts: [conflict],
       },
     } as unknown as BackupData;

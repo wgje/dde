@@ -312,6 +312,7 @@ describe('LocalBackupUIService', () => {
       tasks: [],
       connections: [],
       localState: {
+        dataSafety: { ownerUserId: 'user-1' },
         attachmentUploadOutbox: [{
           operationId: 'attachment:create:attachment-1',
           attachmentId: 'attachment-1',
@@ -351,7 +352,10 @@ describe('LocalBackupUIService', () => {
   it('rejects malformed conflicts before preview or transaction preparation', async () => {
     const backupData = {
       payloadVersion: '2.0.0', projects: [], tasks: [], connections: [],
-      localState: { conflicts: [{ projectId: 'broken', ownerUserId: 'user-1' }] },
+      localState: {
+        dataSafety: { ownerUserId: 'user-1' },
+        conflicts: [{ projectId: 'broken', ownerUserId: 'user-1' }],
+      },
     } as unknown as BackupData;
     importServiceMock.validateFile.mockImplementation(async candidate => {
       const data = convertBackupDataToExportData(JSON.parse(await candidate.text()) as BackupData);
@@ -369,7 +373,7 @@ describe('LocalBackupUIService', () => {
   it('aborts preparation when post-preview conflict tampering fails stage creation', async () => {
     const backupData = {
       payloadVersion: '2.0.0', projects: [], tasks: [], connections: [],
-      localState: { conflicts: [] },
+      localState: { dataSafety: { ownerUserId: 'user-1' }, conflicts: [] },
     } as unknown as BackupData;
     await prepareRestorePreview(backupData, createExportDataForRestore());
     backupData.localState!.conflicts = [{ ownerUserId: 'other-owner' }];
@@ -493,11 +497,12 @@ describe('LocalBackupUIService', () => {
       tasks: [],
       connections: [],
       localState: {
+        dataSafety: { ownerUserId: 'user-1' },
         actionQueue: {
           actions: [
             {
               id: 'action-1',
-              operationId: 'op-action-1',
+              operationId: '88888888-8888-4888-8888-888888888888',
               type: 'update',
               entityType: 'task',
               entityId: 'task-1',
@@ -745,6 +750,75 @@ describe('LocalBackupUIService', () => {
     expect(service.restoreError()).toContain('其他账号');
     expect(service.restorePreview()).toBeNull();
     expect(importServiceMock.generatePreview).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      name: 'owner evidence is missing',
+      projects: [],
+      localState: {},
+    },
+    {
+      name: 'project owners disagree with the safety owner',
+      projects: [{ id: 'project-1', userId: 'other-user' }],
+      localState: { dataSafety: { ownerUserId: 'user-1' } },
+    },
+    {
+      name: 'projects contain multiple owners',
+      projects: [
+        { id: 'project-1', userId: 'user-1' },
+        { id: 'project-2', userId: 'other-user' },
+      ],
+      localState: { dataSafety: { ownerUserId: 'user-1' } },
+    },
+  ])('fails closed before preview when $name', async ({ projects, localState }) => {
+    const backupData = {
+      payloadVersion: '2.0.0',
+      projects,
+      tasks: [],
+      connections: [],
+      localState,
+    } as unknown as BackupData;
+    await prepareRestorePreview(backupData, createExportDataForRestore());
+    const service = TestBed.inject(LocalBackupUIService);
+
+    expect(service.restoreStep()).toBe('error');
+    expect(service.restoreError()).toContain('无法验证本地备份所属账号');
+    expect(service.restorePreview()).toBeNull();
+    expect(importServiceMock.generatePreview).not.toHaveBeenCalled();
+    expect(metadataRestoreMock.preview).not.toHaveBeenCalled();
+    expect(restoreTransactionMock.prepare).not.toHaveBeenCalled();
+  });
+
+  it('rejects unsupported ActionQueue operationIds before transaction preparation', async () => {
+    const backupData = {
+      payloadVersion: '2.0.0',
+      projects: [{ id: 'project-1', userId: 'user-1' }],
+      tasks: [],
+      connections: [],
+      localState: {
+        dataSafety: { ownerUserId: 'user-1' },
+        actionQueue: [{
+          id: 'action-1',
+          operationId: 'legacy-operation-7',
+          type: 'update',
+          entityType: 'task',
+          entityId: 'task-1',
+          payload: { projectId: 'project-1' },
+          timestamp: 1,
+          retryCount: 0,
+        }],
+      },
+    } as unknown as BackupData;
+    await prepareRestorePreview(backupData, createExportDataForRestore());
+    const service = TestBed.inject(LocalBackupUIService);
+
+    await service.confirmRestore([]);
+
+    expect(service.restoreStep()).toBe('error');
+    expect(service.restoreError()).toContain('ActionQueue operationId 格式无效');
+    expect(restoreTransactionMock.prepare).not.toHaveBeenCalled();
+    expect(restoreStageMock.createOperations).not.toHaveBeenCalled();
   });
 
   function createExportDataForRestore(): ExportData {

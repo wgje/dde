@@ -8,6 +8,23 @@ import {
 import type { PreferencePayload, QueuedAction } from './action-queue.types';
 
 describe('action-queue-restore.helpers', () => {
+  it('preserves a valid backup operationId and rejects unsupported identities instead of remapping', () => {
+    const operationId = '77777777-7777-4777-8777-777777777777';
+    const [restored] = extractBackupActionQueueActions([
+      createQueuedPreferenceAction({ operationId }),
+    ]);
+
+    expect(restored?.operationId).toBe(operationId);
+    expect(() => extractBackupActionQueueActions([
+      createQueuedPreferenceAction({ operationId: 'legacy-operation-7' }),
+    ])).toThrow(/operationId must be a UUID/);
+
+    const missingOperationId = createQueuedPreferenceAction();
+    Reflect.deleteProperty(missingOperationId, 'operationId');
+    expect(() => extractBackupActionQueueActions([missingOperationId]))
+      .toThrow(/operationId must be a UUID/);
+  });
+
   it('does not revive dead_letter actions from backup actionQueue as pending_sync', () => {
     const deadLetterAction = createQueuedPreferenceAction({
       id: 'dead-letter-action',

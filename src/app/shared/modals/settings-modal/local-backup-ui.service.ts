@@ -334,9 +334,12 @@ export class LocalBackupUIService {
       }
       if (error instanceof RestoreContextChangedError
         || !this.isRestoreContextCurrent(context)) return;
-      this.logger.error('从本地备份恢复失败', error instanceof Error ? error.message : String(error));
-      this.restoreError.set('恢复过程中发生错误');
-      this.restoreStep.set('error');
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      this.logger.error('从本地备份恢复失败', errorMessage);
+      const userMessage = errorMessage.includes('operationId must be a UUID')
+        ? '备份中的 ActionQueue operationId 格式无效，已停止恢复以保留操作身份。'
+        : '恢复过程中发生错误';
+      this.setRestoreError(userMessage);
     } finally {
       this.isRestoringFromBackup.set(false);
       if (this.pendingRestoreContext === context) {
@@ -614,7 +617,7 @@ export class LocalBackupUIService {
   ): string | null {
     const backupOwnerUserId = this.resolveBackupOwnerUserId(backupData);
     if (!backupOwnerUserId) {
-      return null;
+      return '无法验证本地备份所属账号，或备份内的账号标识相互矛盾；已阻止恢复以避免跨账号写入。请使用由单一账号导出的完整备份。';
     }
 
     if (backupOwnerUserId === currentOwnerUserId) {
@@ -625,24 +628,37 @@ export class LocalBackupUIService {
   }
 
   private resolveBackupOwnerUserId(backupData: BackupData | null): string | null {
-    const dataSafetyOwner = backupData?.localState?.dataSafety?.ownerUserId;
-    if (typeof dataSafetyOwner === 'string' && dataSafetyOwner.length > 0) {
-      return dataSafetyOwner;
-    }
-
-    const projectOwners = new Set(
-      (backupData?.projects ?? [])
-        .map(project => project.userId)
-        .filter((ownerUserId): ownerUserId is string =>
-          typeof ownerUserId === 'string' && ownerUserId.length > 0
-        )
-    );
-
-    if (projectOwners.size !== 1) {
+    const rawDataSafetyOwner: unknown = backupData?.localState?.dataSafety?.ownerUserId;
+    const dataSafetyOwner = typeof rawDataSafetyOwner === 'string'
+      && rawDataSafetyOwner.length > 0
+      && rawDataSafetyOwner.trim() === rawDataSafetyOwner
+      ? rawDataSafetyOwner
+      : null;
+    if (rawDataSafetyOwner !== undefined && dataSafetyOwner === null) {
       return null;
     }
 
-    return Array.from(projectOwners)[0];
+    const projects: unknown = backupData?.projects ?? [];
+    if (!Array.isArray(projects)) return null;
+
+    const projectOwners = new Set<string>();
+    for (const project of projects) {
+      if (project === null || typeof project !== 'object') return null;
+      const rawProjectOwner: unknown = (project as { userId?: unknown }).userId;
+      if (rawProjectOwner === undefined || rawProjectOwner === null) continue;
+      if (typeof rawProjectOwner !== 'string'
+        || rawProjectOwner.length === 0
+        || rawProjectOwner.trim() !== rawProjectOwner) {
+        return null;
+      }
+      projectOwners.add(rawProjectOwner);
+    }
+
+    if (projectOwners.size > 1) return null;
+    const projectOwner = projectOwners.values().next().value ?? null;
+    if (dataSafetyOwner && projectOwner && dataSafetyOwner !== projectOwner) return null;
+
+    return dataSafetyOwner ?? projectOwner;
   }
 
   private buildRestoreSuccessMessage(
