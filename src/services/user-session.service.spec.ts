@@ -593,6 +593,15 @@ describe('UserSessionService', () => {
         status: 'blocked',
         reason: 'active-or-mutated',
       });
+      const loadSessionDataSpy = vi.spyOn(
+        service as unknown as {
+          loadSessionDataForCurrentUser: (
+            context: unknown,
+            sessionGuard: unknown,
+          ) => Promise<void>;
+        },
+        'loadSessionDataForCurrentUser',
+      ).mockResolvedValue(undefined);
 
       await service.setCurrentUser(null, { forceLoad: true });
 
@@ -601,6 +610,7 @@ describe('UserSessionService', () => {
       expect(mockStorePersistence['recoverInterruptedDataSafetyRestore']).not.toHaveBeenCalled();
       expect(mockActionQueue['reloadFromStorageForCurrentOwner']).not.toHaveBeenCalled();
       expect(mockRetryQueue['reloadFromStorageForCurrentOwner']).not.toHaveBeenCalled();
+      expect(loadSessionDataSpy).not.toHaveBeenCalled();
     });
   });
 
