@@ -16,92 +16,27 @@ import { NetworkAwarenessService } from '../../services/network-awareness.servic
 import { AuthService } from '../../services/auth.service';
 import { QueueBackupService } from '../../services/queue-backup.service';
 import { RetryQueueService } from '../../app/core/services/sync/retry-queue.service';
+import { LocalBackupUiRestorePreActionQueueFenceService } from '../../services/local-backup-ui-restore-pre-actionqueue-fence.service';
+import { SyncWriterLeaseService } from '../../services/sync-writer-lease.service';
+import { UserSessionService } from '../../services/user-session.service';
+import { WriteGuardService } from '../../services/write-guard.service';
+import {
+  mockLocalBackupUiRestorePreActionQueueFence,
+  mockLoggerCategory,
+  mockLoggerService,
+  mockNetworkAwarenessService,
+  mockQueueBackupService,
+  mockRetryQueueService,
+  mockSentryAlertService,
+  mockSyncWriterLeaseService,
+  mockToastService,
+  mockWriteGuardService,
+  resetActionQueueServiceMocks,
+} from '../../services/action-queue-service-test-harness.spec-helpers';
 import { createMockDestroyRef, mockSentryLazyLoaderService } from '../../test-setup.mocks';
 import { SYNC_CONFIG, SYNC_DURABILITY_CONFIG } from '../../config';
 import type { Task, Connection } from '../../models';
-import type { DeadLetterItem, QueuedAction } from '../../services/action-queue.types';
 import { resetBrowserNetworkSuspensionTrackingForTests } from '../../utils/browser-network-suspension';
-
-const mockLoggerCategory = {
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
-  debug: vi.fn(),
-};
-
-const mockLoggerService = {
-  category: vi.fn(() => mockLoggerCategory),
-};
-
-const mockToastService = {
-  success: vi.fn(),
-  error: vi.fn(),
-  warning: vi.fn(),
-  info: vi.fn(),
-};
-
-const mockSentryAlertService = {
-  captureException: vi.fn(),
-  captureMessage: vi.fn(),
-  setContext: vi.fn(),
-  updateSyncContext: vi.fn(),
-};
-
-const mockNetworkAwarenessService = {
-  setStoragePressure: vi.fn(),
-};
-
-const mockQueueBackupState = {
-  persistedQueue: [] as QueuedAction[],
-  persistedDeadLetters: [] as DeadLetterItem[],
-  recordFound: false,
-  deadLetterRecordFound: false,
-};
-
-const mockQueueBackupService = {
-  backupQueue: vi.fn(async (queue: QueuedAction[]) => {
-    mockQueueBackupState.persistedQueue = queue;
-    mockQueueBackupState.recordFound = true;
-    return true;
-  }),
-  restoreQueue: vi.fn(async () => (
-    mockQueueBackupState.recordFound
-      ? mockQueueBackupState.persistedQueue
-      : null
-  )),
-  backupDeadLetters: vi.fn(async (deadLetters: DeadLetterItem[]) => {
-    mockQueueBackupState.persistedDeadLetters = deadLetters;
-    mockQueueBackupState.deadLetterRecordFound = true;
-    return true;
-  }),
-  restoreDeadLetters: vi.fn(async () => (
-    mockQueueBackupState.deadLetterRecordFound
-      ? mockQueueBackupState.persistedDeadLetters
-      : null
-  )),
-  updateQueue: vi.fn(async (
-    _ownerUserId: string,
-    updater: (
-      queue: QueuedAction[],
-      context: { recordFound: boolean },
-    ) => QueuedAction[],
-  ) => {
-    const recordFound = (
-      mockQueueBackupState.recordFound ||
-      mockQueueBackupState.persistedQueue.length > 0
-    );
-    mockQueueBackupState.persistedQueue = updater(
-      mockQueueBackupState.persistedQueue,
-      { recordFound },
-    );
-    mockQueueBackupState.recordFound = true;
-    return mockQueueBackupState.persistedQueue;
-  }),
-};
-
-const mockRetryQueueService = {
-  removeByEntity: vi.fn(() => false),
-};
 
 const createTask = (id: string, overrides?: Partial<Task>): Task => ({
   id,
@@ -133,14 +68,11 @@ describe('Sync Integrity Invariants (2026-02-07)', () => {
   let changeTracker: ChangeTrackerService;
   let destroyRefCleanup: (() => void) | undefined;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     resetBrowserNetworkSuspensionTrackingForTests();
     localStorage.clear();
     vi.clearAllMocks();
-    mockQueueBackupState.persistedQueue = [];
-    mockQueueBackupState.persistedDeadLetters = [];
-    mockQueueBackupState.recordFound = false;
-    mockQueueBackupState.deadLetterRecordFound = false;
+    resetActionQueueServiceMocks();
     Object.defineProperty(document, 'visibilityState', {
       value: 'visible',
       writable: true,
@@ -167,7 +99,28 @@ describe('Sync Integrity Invariants (2026-02-07)', () => {
         { provide: NetworkAwarenessService, useValue: mockNetworkAwarenessService },
         { provide: QueueBackupService, useValue: mockQueueBackupService },
         { provide: RetryQueueService, useValue: mockRetryQueueService },
-        { provide: AuthService, useValue: { currentUserId: signal<string | null>('test-user') } },
+        { provide: WriteGuardService, useValue: mockWriteGuardService },
+        { provide: SyncWriterLeaseService, useValue: mockSyncWriterLeaseService },
+        {
+          provide: LocalBackupUiRestorePreActionQueueFenceService,
+          useValue: mockLocalBackupUiRestorePreActionQueueFence,
+        },
+        {
+          provide: AuthService,
+          useValue: {
+            currentUserId: signal<string | null>('test-user'),
+            captureAuthIdentityFence: () => 'auth:test-user',
+          },
+        },
+        {
+          provide: UserSessionService,
+          useValue: {
+            getCurrentSessionGeneration: () => 0,
+            isSessionContextCurrent: (generation: number, ownerUserId: string) => (
+              generation === 0 && ownerUserId === 'test-user'
+            ),
+          },
+        },
         { provide: DestroyRef, useValue: destroyRef },
       ],
     });
@@ -177,6 +130,8 @@ describe('Sync Integrity Invariants (2026-02-07)', () => {
       actionQueueStorage = injector.get(ActionQueueStorageService);
       changeTracker = injector.get(ChangeTrackerService);
     });
+    await actionQueue.reloadFromStorageForCurrentOwner();
+    vi.clearAllMocks();
   });
 
   afterEach(() => {
@@ -459,7 +414,7 @@ describe('Sync Integrity Invariants (2026-02-07)', () => {
     });
 
     // 添加 create 和 update 到同一实体
-    actionQueueStorage.isOnline = true;
+    actionQueueStorage.isOnline = false;
 
     actionQueue.enqueue({
       type: 'create',
@@ -476,6 +431,9 @@ describe('Sync Integrity Invariants (2026-02-07)', () => {
     });
 
     // processQueue 应先处理 create，失败后跳过 update
+    expect(actionQueue.getCurrentOwnerStorageLoadState()).toBe('loaded');
+    expect(actionQueue.queueSize()).toBe(1);
+    actionQueueStorage.isOnline = true;
     await actionQueue.processQueue();
 
     expect(createCallCount).toBe(1);
