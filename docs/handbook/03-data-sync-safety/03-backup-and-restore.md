@@ -2,7 +2,7 @@
 title: 备份与恢复
 status: canonical
 audience: user, operator
-last_verified: 2026-07-15
+last_verified: 2026-11-03
 category: data-sync-safety
 source_paths:
   - src/services/export.service.ts
@@ -351,10 +351,13 @@ NanoFlow 现在有多条恢复通道，但它们不是同一件事。你需要�
 
 ### 当前恢复策略的真实边界
 
-当前“从本地增强备份恢复”不是强制覆盖，而是两段式恢复:
+当前“从本地增强备份恢复”不是强制覆盖，而是一个 owner-scoped 事务:
 
-1. 项目结构部分走导入器，并使用 `merge` 冲突策略；
-2. 成功后再把待上传附件、Action Queue、Retry Queue、dead letters 和 conflicts 分别恢复回对应存储。
+1. 写入前校验当前账号、备份校验和与 Action Queue 恢复身份，并捕获受影响本机存储的恢复前状态；
+2. 按项目、附件 outbox、Action Queue、Retry Queue、dead letters、conflicts、元数据的顺序恢复；
+3. 每个阶段持久化后都会读回验证，全部阶段完成后才报告恢复成功。阶段失败时按逆序补偿已完成的阶段。
+
+恢复期间本机写入和 Action Queue 回放会暂时停住。若补偿失败，或恢复日志与本机 marker 身份不一致，系统会停止恢复并保留日志和诊断证据；不要清理浏览器数据或手动删除恢复记录。启动恢复只会在账号、日志、队列身份和静默 marker 一致且租约过期后接管，不匹配时继续阻止恢复。
 
 对同 ID 的现有项目，当前 `merge` 行为是:
 
