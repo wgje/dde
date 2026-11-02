@@ -45,6 +45,7 @@ describe('PendingPreferenceOutboxService', () => {
         colorMode: 'dark',
       },
       operationId: '00000000-0000-4000-8000-000000000001',
+      baseUpdatedAt: '2026-06-14T23:59:00.000Z',
       updatedAt: '2026-06-15T00:00:00.000Z',
     });
 
@@ -55,6 +56,7 @@ describe('PendingPreferenceOutboxService', () => {
         colorMode: 'dark',
       },
       operationId: '00000000-0000-4000-8000-000000000001',
+      baseUpdatedAt: '2026-06-14T23:59:00.000Z',
       updatedAt: '2026-06-15T00:00:00.000Z',
     });
 
@@ -93,6 +95,7 @@ describe('PendingPreferenceOutboxService', () => {
         colorMode: 'dark',
       },
       operationId: '00000000-0000-4000-8000-000000000001',
+      baseUpdatedAt: '2026-06-14T23:59:00.000Z',
       updatedAt: '2026-06-15T00:00:00.000Z',
     });
     localStorage.setItem('nanoflow.pendingPreferenceOutbox.user-1', JSON.stringify({
@@ -114,6 +117,7 @@ describe('PendingPreferenceOutboxService', () => {
         lastBackupProofAt: '2026-06-15T01:00:00.000Z',
       },
       operationId: '00000000-0000-4000-8000-000000000002',
+      baseUpdatedAt: '2026-06-14T23:59:00.000Z',
       updatedAt: '2026-06-15T00:01:00.000Z',
     });
   });
@@ -126,6 +130,7 @@ describe('PendingPreferenceOutboxService', () => {
         colorMode: 'dark',
       },
       operationId: '00000000-0000-4000-8000-000000000001',
+      baseUpdatedAt: '2026-06-14T23:59:00.000Z',
       updatedAt: '2026-06-15T00:00:00.000Z',
     });
 
@@ -151,6 +156,7 @@ describe('PendingPreferenceOutboxService', () => {
         lastBackupProofAt: '2026-06-15T01:00:00.000Z',
       },
       operationId: '00000000-0000-4000-8000-000000000002',
+      baseUpdatedAt: '2026-06-14T23:59:00.000Z',
       updatedAt: '2026-06-15T00:01:00.000Z',
     });
   });

@@ -6,6 +6,7 @@ export interface PendingPreferenceRecord {
   userId: string;
   preferences: Partial<UserPreferences>;
   operationId: string;
+  baseUpdatedAt?: string | null;
   updatedAt: string;
 }
 
@@ -56,6 +57,9 @@ export class PendingPreferenceOutboxService {
         ...input.preferences,
       },
       operationId: input.operationId,
+      baseUpdatedAt: input.baseUpdatedAt === undefined
+        ? existing?.baseUpdatedAt
+        : input.baseUpdatedAt,
       updatedAt: input.updatedAt ?? new Date().toISOString(),
     };
   }
@@ -137,10 +141,25 @@ export class PendingPreferenceOutboxService {
     const indexedTime = new Date(indexedRecord.updatedAt).getTime();
     const mirrorTime = new Date(localMirrorRecord.updatedAt).getTime();
     if (Number.isFinite(indexedTime) && Number.isFinite(mirrorTime)) {
-      return mirrorTime > indexedTime ? localMirrorRecord : indexedRecord;
+      return mirrorTime > indexedTime
+        ? this.preserveFallbackBaseline(localMirrorRecord, indexedRecord)
+        : this.preserveFallbackBaseline(indexedRecord, localMirrorRecord);
     }
 
-    return indexedRecord;
+    return this.preserveFallbackBaseline(indexedRecord, localMirrorRecord);
+  }
+
+  private preserveFallbackBaseline(
+    preferred: PendingPreferenceRecord,
+    fallback: PendingPreferenceRecord,
+  ): PendingPreferenceRecord {
+    if (preferred.baseUpdatedAt !== undefined) {
+      return preferred;
+    }
+    return {
+      ...preferred,
+      baseUpdatedAt: fallback.baseUpdatedAt,
+    };
   }
 
   private removeLocalMirror(userId: string): void {
@@ -186,6 +205,11 @@ export class PendingPreferenceOutboxService {
     return record.userId === expectedUserId
       && typeof record.operationId === 'string'
       && record.operationId.length > 0
+      && (
+        record.baseUpdatedAt === undefined
+        || record.baseUpdatedAt === null
+        || typeof record.baseUpdatedAt === 'string'
+      )
       && typeof record.updatedAt === 'string'
       && !!record.preferences
       && typeof record.preferences === 'object';

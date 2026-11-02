@@ -23,6 +23,7 @@ import { ThemeType, UserPreferences } from '../models';
 import { AUTH_CONFIG } from '../config/auth.config';
 import { PendingPreferenceOutboxService } from './pending-preference-outbox.service';
 import { createSyncOperationId } from '../utils/sync-operation-id';
+import { UserPreferencesBaselineStore } from './user-preferences-baseline.store';
 
 /** 本地存储键前缀 */
 const PREFERENCE_KEY_PREFIX = 'nanoflow.preference';
@@ -45,6 +46,7 @@ export class PreferenceService {
   private authService = inject(AuthService);
   private themeService = inject(ThemeService);
   private pendingPreferenceOutbox = inject(PendingPreferenceOutboxService);
+  private preferencesBaselineStore = inject(UserPreferencesBaselineStore);
 
   /** 当前主题 */
   readonly theme = this.themeService.theme;
@@ -173,6 +175,9 @@ export class PreferenceService {
   ): Promise<boolean> {
     const operationId = createSyncOperationId();
     const pending = await this.readPendingPreferenceForMerge(userId);
+    const baseUpdatedAt = pending?.baseUpdatedAt === undefined
+      ? await this.preferencesBaselineStore.read(userId)
+      : pending.baseUpdatedAt;
     const preferencesToQueue = pending
       ? { ...pending.preferences, ...preferences }
       : preferences;
@@ -183,11 +188,16 @@ export class PreferenceService {
         type: 'update',
         entityType: 'preference',
         entityId: userId,
-        payload: { preferences: preferencesToQueue, userId, sourceUserId: userId },
+        payload: {
+          preferences: preferencesToQueue,
+          userId,
+          sourceUserId: userId,
+          baseUpdatedAt,
+        },
       });
       if (actionId) {
         if (pending) {
-          await this.removeMergedPendingPreference(userId, preferencesToQueue, operationId);
+          await this.removeMergedPendingPreference(userId, preferencesToQueue, operationId, baseUpdatedAt);
         }
         return true;
       }
@@ -197,6 +207,7 @@ export class PreferenceService {
         userId,
         preferences: preferencesToQueue,
         operationId,
+        baseUpdatedAt,
       });
       return false;
     }
@@ -206,6 +217,7 @@ export class PreferenceService {
       userId,
       preferences: preferencesToQueue,
       operationId,
+      baseUpdatedAt,
     });
     return false;
   }
@@ -224,6 +236,7 @@ export class PreferenceService {
     userId: string,
     preferences: Partial<UserPreferences>,
     operationId: string,
+    baseUpdatedAt: string | null,
   ): Promise<void> {
     try {
       await this.pendingPreferenceOutbox.removePendingPreference(userId);
@@ -233,6 +246,7 @@ export class PreferenceService {
         userId,
         preferences,
         operationId,
+        baseUpdatedAt,
       });
     }
   }
@@ -253,6 +267,7 @@ export class PreferenceService {
           preferences: pending.preferences,
           userId,
           sourceUserId: userId,
+          baseUpdatedAt: pending.baseUpdatedAt,
         },
       });
 

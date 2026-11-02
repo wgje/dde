@@ -14,6 +14,7 @@ import { AuthService } from './auth.service';
 import { ThemeService } from './theme.service';
 import { AUTH_CONFIG } from '../config/auth.config';
 import { PendingPreferenceOutboxService } from './pending-preference-outbox.service';
+import { UserPreferencesBaselineStore } from './user-preferences-baseline.store';
 
 const mockLoggerCategory = {
   info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(),
@@ -35,6 +36,10 @@ const mockPendingPreferenceOutbox = {
   savePendingPreference: vi.fn(),
   readPendingPreference: vi.fn(),
   removePendingPreference: vi.fn(),
+};
+
+const mockBaselineStore = {
+  read: vi.fn().mockResolvedValue('2026-07-14T01:00:00.000Z'),
 };
 
 const mockThemeService = {
@@ -65,6 +70,7 @@ describe('PreferenceService', () => {
     mockPendingPreferenceOutbox.savePendingPreference.mockResolvedValue(undefined);
     mockPendingPreferenceOutbox.readPendingPreference.mockResolvedValue(null);
     mockPendingPreferenceOutbox.removePendingPreference.mockResolvedValue(undefined);
+    mockBaselineStore.read.mockResolvedValue('2026-07-14T01:00:00.000Z');
     localStorage.clear();
     currentUserId = null;
     const injector = Injector.create({
@@ -75,6 +81,7 @@ describe('PreferenceService', () => {
         { provide: UserPreferencesSyncService, useValue: mockSyncService },
         { provide: ActionQueueService, useValue: mockActionQueue },
         { provide: PendingPreferenceOutboxService, useValue: mockPendingPreferenceOutbox },
+        { provide: UserPreferencesBaselineStore, useValue: mockBaselineStore },
         { provide: AuthService, useValue: { currentUserId: vi.fn(() => currentUserId) } },
         { provide: ThemeService, useValue: mockThemeService },
         { provide: ChangeDetectionScheduler, useValue: mockChangeDetectionScheduler },
@@ -132,6 +139,7 @@ describe('PreferenceService', () => {
             preferences: { theme: 'default' },
             userId: 'user-1',
             sourceUserId: 'user-1',
+            baseUpdatedAt: '2026-07-14T01:00:00.000Z',
           },
         }),
       );
@@ -145,6 +153,7 @@ describe('PreferenceService', () => {
           localBackupEnabled: true,
         },
         operationId: '00000000-0000-4000-8000-000000000011',
+        baseUpdatedAt: '2026-06-14T23:00:00.000Z',
         updatedAt: '2026-06-15T00:00:00.000Z',
       });
       mockActionQueue.enqueueDurablyForOwner.mockResolvedValueOnce('queued-preference');
@@ -165,6 +174,7 @@ describe('PreferenceService', () => {
             },
             userId: 'user-1',
             sourceUserId: 'user-1',
+            baseUpdatedAt: '2026-06-14T23:00:00.000Z',
           },
         }),
       );
@@ -183,6 +193,7 @@ describe('PreferenceService', () => {
         userId: 'user-1',
         preferences: { theme: 'ocean' },
         operationId: expect.any(String),
+        baseUpdatedAt: '2026-07-14T01:00:00.000Z',
       });
       expect(mockLoggerCategory.error).toHaveBeenCalledWith(
         '用户偏好写入离线队列失败',
@@ -201,6 +212,7 @@ describe('PreferenceService', () => {
         userId: 'user-1',
         preferences: { localBackupEnabled: true },
         operationId: expect.any(String),
+        baseUpdatedAt: '2026-07-14T01:00:00.000Z',
       });
       expect(mockLoggerCategory.error).toHaveBeenCalledWith(
         '用户偏好写入离线队列异常',
@@ -227,6 +239,7 @@ describe('PreferenceService', () => {
           },
         },
         operationId: '00000000-0000-4000-8000-000000000003',
+        baseUpdatedAt: '2026-06-14T22:00:00.000Z',
         updatedAt: '2026-06-15T00:00:00.000Z',
       });
       mockActionQueue.enqueueDurablyForOwner.mockResolvedValueOnce('restored-preference');
@@ -241,6 +254,7 @@ describe('PreferenceService', () => {
           entityId: 'user-1',
           payload: expect.objectContaining({
             sourceUserId: 'user-1',
+            baseUpdatedAt: '2026-06-14T22:00:00.000Z',
           }),
         }),
       );
