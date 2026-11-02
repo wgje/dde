@@ -201,13 +201,20 @@ export abstract class BlackBoxSyncLifecycleLayer extends BlackBoxSyncBase {
     return computeBlackBoxCursorFromRowsPure(rows);
   }
 
-  protected async commitBlackBoxCursorFromRows(rows: Array<Record<string, unknown>>): Promise<void> {
+  protected async commitBlackBoxCursorFromRows(
+    rows: Array<Record<string, unknown>>,
+    expectedUserId: string,
+  ): Promise<void> {
     const nextCursor = this.computeBlackBoxCursorFromRows(rows);
-    await this.commitBlackBoxCursor(nextCursor);
+    await this.commitBlackBoxCursor(nextCursor, expectedUserId);
   }
 
-  protected async commitBlackBoxCursor(nextCursor: BlackBoxSyncCursor | null): Promise<void> {
+  protected async commitBlackBoxCursor(
+    nextCursor: BlackBoxSyncCursor | null,
+    expectedUserId: string,
+  ): Promise<void> {
     if (!nextCursor) return;
+    if (this.currentSyncUserId !== expectedUserId) return;
     if (this.lastSyncCursor && this.compareBlackBoxCursor(nextCursor, this.lastSyncCursor) < 0) {
       this.sentryLazyLoader.addBreadcrumb({
         category: 'sync',
@@ -220,16 +227,19 @@ export abstract class BlackBoxSyncLifecycleLayer extends BlackBoxSyncBase {
 
     const committed = await this.persistBlackBoxCursorIfNewer(nextCursor);
     if (!committed) return;
+    if (this.currentSyncUserId !== expectedUserId) return;
 
     this.lastSyncCursor = committed;
     this.lastSyncTime = committed.updatedAt;
   }
 
-  // ==================== RetryQueue 集成 ====================
+  async forceSync(): Promise<void> {
+    if (this.pushDebounceTimer) {
+      clearTimeout(this.pushDebounceTimer);
+      this.pushDebounceTimer = null;
+    }
+    await this.flushPendingToRetryQueue();
 
-  /**
-   * 设置 RetryQueue 处理器
-   * 由 SimpleSyncService 在初始化时调用，将黑匣子同步集成到主同步体系
-   */
-
+    await this.pullChanges({ reason: 'manual', force: true });
+  }
 }

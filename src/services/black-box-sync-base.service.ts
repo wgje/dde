@@ -87,8 +87,14 @@ export abstract class BlackBoxSyncBase {
   protected abstract parseStoredSyncCursor(value: unknown): BlackBoxSyncCursor | null;
   protected abstract compareBlackBoxCursor(left: BlackBoxSyncCursor, right: BlackBoxSyncCursor): number;
   protected abstract computeBlackBoxCursorFromRows(rows: Array<Record<string, unknown>>): BlackBoxSyncCursor | null;
-  protected abstract commitBlackBoxCursorFromRows(rows: Array<Record<string, unknown>>): Promise<void>;
-  protected abstract commitBlackBoxCursor(nextCursor: BlackBoxSyncCursor | null): Promise<void>;
+  protected abstract commitBlackBoxCursorFromRows(
+    rows: Array<Record<string, unknown>>,
+    expectedUserId: string,
+  ): Promise<void>;
+  protected abstract commitBlackBoxCursor(
+    nextCursor: BlackBoxSyncCursor | null,
+    expectedUserId: string,
+  ): Promise<void>;
   abstract setRetryQueueHandler(handler: RetryQueueHandler): void;
   protected abstract recoverPendingEntries(): Promise<void>;
   protected abstract getValidPendingEntries(entries: BlackBoxEntry[]): BlackBoxEntry[];
@@ -279,17 +285,24 @@ export abstract class BlackBoxSyncBase {
     rows: Record<string, unknown>[],
     context: BlackBoxDeltaPullContext,
   ): Promise<boolean>;
-  protected abstract resolveNextBlackBoxDeltaPageCursor(rows: Record<string, unknown>[], currentCursor: BlackBoxSyncCursor | null): Promise<BlackBoxDeltaPageCursorOutcome>;
+  protected abstract resolveNextBlackBoxDeltaPageCursor(
+    rows: Record<string, unknown>[],
+    expectedUserId: string,
+  ): Promise<BlackBoxDeltaPageCursorOutcome>;
   protected abstract handleBlackBoxPullError(error: unknown): Promise<boolean>;
   protected abstract prepareBlackBoxRemotePull(expectedUserId?: string, expectedRealtimeGeneration?: number): Promise<BlackBoxRemotePullPreparationOutcome>;
-  protected abstract resolveBlackBoxPullCursorWindow(client: BlackBoxSupabaseClient, expectedUserId?: string, expectedRealtimeGeneration?: number): Promise<BlackBoxPullCursorWindowOutcome>;
+  protected abstract resolveBlackBoxPullCursorWindow(
+    client: BlackBoxSupabaseClient,
+    expectedUserId: string,
+    expectedRealtimeGeneration?: number,
+  ): Promise<BlackBoxPullCursorWindowOutcome>;
   protected abstract resolveBlackBoxWatermarkFastPath(
     remoteWatermark: string | null,
     remoteMs: number,
     localMs: number,
     effectiveLastSync: string,
     pendingEntriesNeedRemoteReconciliation: boolean,
-    expectedUserId?: string,
+    expectedUserId: string,
     expectedRealtimeGeneration?: number,
   ): Promise<BlackBoxPullCursorWindowOutcome | null>;
   protected abstract fetchBlackBoxDeltaPage(

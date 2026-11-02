@@ -384,6 +384,12 @@ export function resolveBlackBoxMergeDecision(
   return { action: 'keep-local', local };
 }
 
+function assertBlackBoxPageSize(pageSize: number): void {
+  if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 1000) {
+    throw new Error('SUPABASE_PAGE_SIZE_INVALID');
+  }
+}
+
 export async function fetchBlackBoxDeltaPageQuery(
   options: BlackBoxDeltaPageQueryOptions,
 ): Promise<BlackBoxDeltaPage> {
@@ -395,6 +401,8 @@ export async function fetchBlackBoxDeltaPageQuery(
     options.warn('黑匣子增量拉取缺少用户作用域，跳过远端读取');
     return { data: null, error: options.scopedQueryUnavailableError };
   }
+
+  assertBlackBoxPageSize(options.pageSize);
 
   let cursor = options.cursor;
   if (!isValidBlackBoxCursor(cursor)) {
@@ -427,17 +435,16 @@ export async function fetchBlackBoxDeltaPageQuery(
     query = lteQuery('updated_at', options.upperWatermark);
   }
 
-  const orderedQuery = (query as {
-    order(column: string, options: { ascending: boolean }): unknown;
-  })
-    .order('updated_at', { ascending: true }) as {
-      order(column: string, options: { ascending: boolean }): unknown;
-    };
-  const orderedByIdQuery = orderedQuery.order('id', { ascending: true });
+  interface BlackBoxOrderedQuery {
+    order(column: string, options: { ascending: boolean }): BlackBoxOrderedQuery;
+  }
+  const orderedByIdQuery = (query as BlackBoxOrderedQuery)
+    .order('updated_at', { ascending: true })
+    .order('id', { ascending: true });
   const limitQuery = options.getOptionalQueryMethod<[number]>(orderedByIdQuery, 'limit');
 
   if (typeof limitQuery !== 'function') {
-    return orderedByIdQuery as Promise<BlackBoxDeltaPage>;
+    return orderedByIdQuery as unknown as Promise<BlackBoxDeltaPage>;
   }
 
   return limitQuery(options.pageSize) as Promise<BlackBoxDeltaPage>;

@@ -118,18 +118,76 @@ export function createIdbReadWriteTransaction<TResult>(
     getAllResult: TResult[];
     getResult: (mode?: IDBTransactionMode) => TResult | null;
     put?: ReturnType<typeof vi.fn>;
+    requestOutcome?: 'success' | 'manual';
+    autoComplete?: boolean;
   },
 ): {
   transaction: ReturnType<typeof vi.fn>;
   put: ReturnType<typeof vi.fn>;
+  succeedRequest: () => void;
+  failRequest: (error: DOMException) => void;
+  complete: () => void;
+  failTransaction: (error: DOMException) => void;
+  abort: (error: DOMException) => void;
 } {
-  const put = options.put ?? vi.fn(() => createSuccessfulIdbRequest(undefined));
-  const transaction = vi.fn((_storeName: string, mode?: IDBTransactionMode) => ({
-    objectStore: vi.fn(() => ({
-      getAll: () => createSuccessfulIdbRequest(options.getAllResult),
-      get: () => createSuccessfulIdbRequest(options.getResult(mode)),
-      put,
-    })),
-  }));
-  return { transaction, put };
+  const request = {
+    result: undefined,
+    error: null as DOMException | null,
+    onsuccess: null as ((this: IDBRequest<undefined>, ev: Event) => unknown) | null,
+    onerror: null as ((this: IDBRequest<undefined>, ev: Event) => unknown) | null,
+  };
+  let activeTransaction: {
+    error: DOMException | null;
+    oncomplete: ((this: IDBTransaction, ev: Event) => unknown) | null;
+    onerror: ((this: IDBTransaction, ev: Event) => unknown) | null;
+    onabort: ((this: IDBTransaction, ev: Event) => unknown) | null;
+    objectStore: ReturnType<typeof vi.fn>;
+  } | null = null;
+  const dispatchRequest = (type: 'success' | 'error'): void => {
+    request[`on${type}`]?.call(request as unknown as IDBRequest<undefined>, new Event(type));
+  };
+  const dispatchTransaction = (type: 'complete' | 'error' | 'abort'): void => {
+    activeTransaction?.[`on${type}`]?.call(activeTransaction as unknown as IDBTransaction, new Event(type));
+  };
+  const complete = (): void => dispatchTransaction('complete');
+  const put = options.put ?? vi.fn(() => {
+    if (options.requestOutcome !== 'manual') {
+      queueMicrotask(() => {
+        dispatchRequest('success');
+        if (options.autoComplete !== false) queueMicrotask(complete);
+      });
+    }
+    return request as unknown as IDBRequest<undefined>;
+  });
+  const transaction = vi.fn((_storeName: string, mode?: IDBTransactionMode) => {
+    const transactionState = {
+      error: null,
+      oncomplete: null,
+      onerror: null,
+      onabort: null,
+      objectStore: vi.fn(() => ({
+        getAll: () => createSuccessfulIdbRequest(options.getAllResult),
+        get: () => createSuccessfulIdbRequest(options.getResult(mode)),
+        put,
+      })),
+    };
+    activeTransaction = transactionState;
+    return transactionState;
+  });
+  const setTransactionError = (error: DOMException, type: 'error' | 'abort'): void => {
+    if (activeTransaction) activeTransaction.error = error;
+    dispatchTransaction(type);
+  };
+  return {
+    transaction,
+    put,
+    succeedRequest: () => dispatchRequest('success'),
+    failRequest: error => {
+      request.error = error;
+      dispatchRequest('error');
+    },
+    complete,
+    failTransaction: error => setTransactionError(error, 'error'),
+    abort: error => setTransactionError(error, 'abort'),
+  };
 }

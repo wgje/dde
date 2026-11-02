@@ -6,11 +6,15 @@ import type { BlackBoxEntry } from "../models/focus";
 import { blackBoxEntriesMap, setBlackBoxEntries } from "../state/focus-stores";
 import { SupabaseClientService } from "./supabase-client.service";
 import { BlackBoxSyncService } from "./black-box-sync.service";
+import { readActiveLocalBackupUiRestoreWriters } from "./local-backup-ui-restore-writer-quiescence-tracker";
+import { prepareLocalBackupUiBlackBoxRestore } from './local-backup-ui-black-box-restore.service';
+import { createBlackBoxRestoreDependencies, makeBackup, resetBlackBoxRestoreSpecDatabase, seedBlackBoxRows, SOURCE_DIGEST, toBackupEntry } from './local-backup-ui-black-box-restore.spec-helpers';
 import {
   createEntry,
   createIdbReadOnlyTransaction,
   createIdbReadWriteTransaction,
   createPreflightQuery,
+  createSuccessfulIdbRequest,
   flushMicrotasks,
 } from "./black-box-sync.spec-helpers";
 
@@ -80,6 +84,14 @@ const blackBoxSyncLocalPushSpecs: readonly BlackBoxSyncLocalPushSpec[] = [
     "recoverPendingEntries 检测到 owner-mismatch pending 时不再灌入 RetryQueue，而是走 selfHeal 路径",
     runBlackBoxSyncLocalPushSpec12,
   ],
+  ["saveToLocal 只应在 IDB transaction complete 后完成", runBlackBoxSyncLocalPushSpec13],
+  ["saveToLocal request error 应只拒绝一次", tools => runBlackBoxSyncLocalPushFailureSpec(tools, "request")],
+  ["saveToLocal transaction error 应只拒绝一次", tools => runBlackBoxSyncLocalPushFailureSpec(tools, "transaction")],
+  ["saveToLocal transaction abort 应只拒绝一次", tools => runBlackBoxSyncLocalPushFailureSpec(tools, "abort")],
+  ["saveToLocal 应在事务完成前保持 black-box writer fence", runBlackBoxSyncLocalPushWriterFenceSpec],
+  ['restore preparation accepts the exact persisted output of saveToLocal', runBlackBoxWriterRestoreGenerationSpec],
+  ["deleteFromLocal 应按持久化 owner 跟踪事务并拒绝未知 owner", runBlackBoxSyncLocalDeleteFenceSpec],
+  ["scheduleSync 应先提交 pending 事务再 detached push，重启仍可恢复", runBlackBoxSyncLocalPushSpec14],
 ];
 
 export function registerBlackBoxSyncLocalPushSpecs(
@@ -556,4 +568,231 @@ async function runBlackBoxSyncLocalPushSpec12(
       syncStatus: "conflict",
     }),
   );
+}
+
+async function runBlackBoxSyncLocalPushSpec13(
+  tools: BlackBoxSyncLocalPushSpecTools,
+): Promise<void> {
+  const entry = createEntry({ id: crypto.randomUUID(), syncStatus: "pending" });
+  const controls = createIdbReadWriteTransaction({
+    getAllResult: [],
+    getResult: () => null,
+    requestOutcome: "manual",
+    autoComplete: false,
+  });
+  (tools.service() as unknown as { db: unknown }).db = { transaction: controls.transaction };
+  let settled = false;
+  const pending = tools.service().saveToLocal(entry).then(() => { settled = true; });
+
+  await flushMicrotasks();
+  controls.succeedRequest();
+  await flushMicrotasks();
+  expect(controls.put).toHaveBeenCalledTimes(1);
+  expect(settled).toBe(false);
+
+  controls.complete();
+  await pending;
+  expect(settled).toBe(true);
+}
+
+async function runBlackBoxSyncLocalPushFailureSpec(
+  tools: BlackBoxSyncLocalPushSpecTools,
+  failureKind: "request" | "transaction" | "abort",
+): Promise<void> {
+  const controls = createIdbReadWriteTransaction({
+    getAllResult: [],
+    getResult: () => null,
+    requestOutcome: "manual",
+    autoComplete: false,
+  });
+  (tools.service() as unknown as { db: unknown }).db = { transaction: controls.transaction };
+  let rejectionCount = 0;
+  const settlement = tools.service().saveToLocal(createEntry({ id: crypto.randomUUID() })).then(
+    () => "resolved" as const,
+    () => { rejectionCount += 1; return "rejected" as const; },
+  );
+  await flushMicrotasks();
+  const error = new DOMException(`${failureKind} failed`, "UnknownError");
+  if (failureKind === "request") controls.failRequest(error);
+  if (failureKind === "transaction") controls.failTransaction(error);
+  if (failureKind === "abort") controls.abort(error);
+  await flushMicrotasks();
+
+  expect(await Promise.race([settlement, Promise.resolve("pending" as const)])).toBe("rejected");
+  controls.failRequest(error);
+  controls.failTransaction(error);
+  controls.abort(error);
+  await flushMicrotasks();
+  expect(rejectionCount).toBe(1);
+}
+
+async function runBlackBoxSyncLocalPushWriterFenceSpec(
+  tools: BlackBoxSyncLocalPushSpecTools,
+): Promise<void> {
+  const entry = createEntry({ id: crypto.randomUUID() });
+  const controls = createIdbReadWriteTransaction({
+    getAllResult: [], getResult: () => null, requestOutcome: "manual", autoComplete: false,
+  });
+  (tools.service() as unknown as { db: unknown }).db = { transaction: controls.transaction };
+  const pending = tools.service().saveToLocal(entry);
+  await flushMicrotasks();
+  expect(readActiveLocalBackupUiRestoreWriters(entry.userId))
+    .toEqual([expect.objectContaining({ ownerUserId: entry.userId, source: "black-box" })]);
+  controls.succeedRequest();
+  controls.complete();
+  await pending;
+  expect(readActiveLocalBackupUiRestoreWriters(entry.userId)).toEqual([]);
+}
+
+async function runBlackBoxWriterRestoreGenerationSpec(
+  tools: BlackBoxSyncLocalPushSpecTools,
+): Promise<void> {
+  const entry = createEntry({ id: crypto.randomUUID(), userId: 'owner-a' });
+  const controls = createIdbReadWriteTransaction({ getAllResult: [], getResult: () => null });
+  (tools.service() as unknown as { db: unknown }).db = { transaction: controls.transaction };
+  await tools.service().saveToLocal(entry);
+  const persisted = controls.put.mock.calls[0][0] as BlackBoxEntry & { _localVersion: unknown };
+  expect(persisted._localVersion).toMatch(/^[0-9a-f-]{36}$/i);
+
+  await resetBlackBoxRestoreSpecDatabase();
+  try {
+    await seedBlackBoxRows([persisted as never]);
+    const freshGeneration = crypto.randomUUID();
+    const snapshot = await prepareLocalBackupUiBlackBoxRestore({
+      ownerUserId: entry.userId, sourceDigest: SOURCE_DIGEST,
+      backup: makeBackup([toBackupEntry({ ...entry, content: 'restored' })]),
+    }, createBlackBoxRestoreDependencies([], [], () => freshGeneration));
+    expect(snapshot.before[0]._localVersion).toBe(persisted._localVersion);
+    expect(snapshot.target[0]._localVersion).toBe(freshGeneration);
+  } finally {
+    await resetBlackBoxRestoreSpecDatabase();
+  }
+}
+
+async function runBlackBoxSyncLocalDeleteFenceSpec(
+  tools: BlackBoxSyncLocalPushSpecTools,
+): Promise<void> {
+  const entry = createEntry({ id: crypto.randomUUID() });
+  const persistedEntry = { ...entry, _localVersion: 'generation-a' };
+  const deleteRequest = {
+    error: null, onerror: null,
+  } as unknown as IDBRequest<undefined>;
+  const deleteEntry = vi.fn(() => deleteRequest);
+  let currentWriteEntry = persistedEntry;
+  let readFails = false;
+  const failedRead = {
+    result: undefined, error: null, onsuccess: null, onerror: null,
+  } as unknown as IDBRequest<unknown>;
+  const readCurrent = vi.fn(() => readFails
+    ? failedRead
+    : createSuccessfulIdbRequest(currentWriteEntry));
+  let transactionError: DOMException | null = null;
+  const abortTransaction = vi.fn();
+  const writeTransaction = {
+    get error() { return transactionError; }, oncomplete: null, onerror: null, onabort: null,
+    abort: abortTransaction,
+    objectStore: vi.fn(() => ({ get: readCurrent, delete: deleteEntry })),
+  } as unknown as IDBTransaction;
+  const transaction = vi.fn((_store: string, mode?: IDBTransactionMode) => mode === "readonly"
+    ? { objectStore: () => ({ get: () => createSuccessfulIdbRequest(persistedEntry) }) }
+    : writeTransaction);
+  (tools.service() as unknown as { db: unknown }).db = { transaction };
+  const latest = await (tools.service() as unknown as {
+    resolveLatestLocalEntry: (id: string) => Promise<BlackBoxEntry | null>;
+  }).resolveLatestLocalEntry(entry.id);
+  expect(latest).toEqual(entry);
+  const pending = tools.service().deleteFromLocal(entry.id);
+  await flushMicrotasks();
+  expect(readActiveLocalBackupUiRestoreWriters(entry.userId)).toHaveLength(1);
+  writeTransaction.oncomplete?.call(writeTransaction, new Event("complete"));
+  await pending;
+  expect(deleteEntry).toHaveBeenCalledWith(entry.id);
+  expect(readActiveLocalBackupUiRestoreWriters(entry.userId)).toEqual([]);
+
+  deleteEntry.mockClear();
+  const replacement = { ...persistedEntry, _localVersion: 'generation-b' };
+  currentWriteEntry = replacement;
+  const staleDelete = tools.service().deleteFromLocal(entry.id);
+  await flushMicrotasks();
+  expect(abortTransaction).toHaveBeenCalledTimes(1);
+  writeTransaction.onabort?.call(writeTransaction, new Event('abort'));
+  await expect(staleDelete).rejects.toThrow(/changed/i);
+  expect(readCurrent).toHaveBeenLastCalledWith(entry.id);
+  expect(deleteEntry).not.toHaveBeenCalled();
+  expect(readActiveLocalBackupUiRestoreWriters(entry.userId)).toEqual([]);
+
+  abortTransaction.mockClear();
+  currentWriteEntry = persistedEntry;
+  readFails = true;
+  const readFailure = tools.service().deleteFromLocal(entry.id);
+  await flushMicrotasks();
+  (failedRead as { error: DOMException | null }).error = new DOMException('read failed');
+  failedRead.onerror?.call(failedRead, new Event('error'));
+  expect(abortTransaction).toHaveBeenCalledTimes(1);
+  expect(readActiveLocalBackupUiRestoreWriters(entry.userId)).toHaveLength(1);
+  writeTransaction.onabort?.call(writeTransaction, new Event('abort'));
+  await expect(readFailure).rejects.toThrow(/read failed/i);
+  expect(deleteEntry).not.toHaveBeenCalled();
+
+  readFails = false;
+  abortTransaction.mockClear();
+  const deleteFailure = tools.service().deleteFromLocal(entry.id);
+  await flushMicrotasks();
+  (deleteRequest as { error: DOMException | null }).error = new DOMException('delete failed');
+  deleteRequest.onerror?.call(deleteRequest, new Event('error'));
+  expect(abortTransaction).toHaveBeenCalledTimes(1);
+  writeTransaction.onabort?.call(writeTransaction, new Event('abort'));
+  await expect(deleteFailure).rejects.toThrow(/delete failed/i);
+
+  abortTransaction.mockClear();
+  const aborted = tools.service().deleteFromLocal(entry.id);
+  await flushMicrotasks();
+  transactionError = new DOMException('transaction aborted');
+  writeTransaction.onabort?.call(writeTransaction, new Event('abort'));
+  await expect(aborted).rejects.toThrow(/transaction aborted/i);
+  expect(readActiveLocalBackupUiRestoreWriters(entry.userId)).toEqual([]);
+
+  const missing = createIdbReadWriteTransaction({ getAllResult: [], getResult: () => null });
+  (tools.service() as unknown as { db: unknown }).db = { transaction: missing.transaction };
+  await expect(tools.service().deleteFromLocal("missing-owner")).rejects.toThrow(/owner/i);
+  expect(missing.transaction).toHaveBeenCalledTimes(1);
+}
+
+async function runBlackBoxSyncLocalPushSpec14(
+  tools: BlackBoxSyncLocalPushSpecTools,
+): Promise<void> {
+  const entry = createEntry({ id: crypto.randomUUID(), syncStatus: "pending" });
+  const controls = createIdbReadWriteTransaction({
+    getAllResult: [],
+    getResult: () => null,
+    requestOutcome: "manual",
+    autoComplete: false,
+  });
+  const service = tools.service();
+  (service as unknown as { db: unknown }).db = { transaction: controls.transaction };
+  const push = vi.spyOn(service, "pushToServer").mockImplementation(() => new Promise<boolean>(() => {}));
+  let scheduleSettled = false;
+  const scheduled = service.scheduleSync(entry, { immediate: true }).then(() => { scheduleSettled = true; });
+
+  await flushMicrotasks();
+  controls.succeedRequest();
+  await flushMicrotasks();
+  expect(scheduleSettled).toBe(false);
+  expect(push).not.toHaveBeenCalled();
+
+  controls.complete();
+  await scheduled;
+  const committed = controls.put.mock.calls[0]?.[0] as BlackBoxEntry;
+  expect(committed).toEqual(expect.objectContaining({ id: entry.id, syncStatus: "pending" }));
+  expect(push).toHaveBeenCalledWith(expect.objectContaining({ id: entry.id, syncStatus: "pending" }), "user-1");
+
+  const enqueue = vi.fn().mockResolvedValue(true);
+  setBlackBoxEntries([]);
+  vi.spyOn(service, "loadFromLocal").mockResolvedValue([committed]);
+  vi.spyOn(service as unknown as {
+    resolvePendingEntriesForRecovery: (entries: BlackBoxEntry[]) => Promise<BlackBoxEntry[]>;
+  }, "resolvePendingEntriesForRecovery").mockResolvedValue([committed]);
+  (service as unknown as { retryQueueHandler: typeof enqueue }).retryQueueHandler = enqueue;
+  await (service as unknown as { recoverPendingEntries: () => Promise<void> }).recoverPendingEntries();
+  expect(enqueue).toHaveBeenCalledWith(expect.objectContaining({ id: entry.id, syncStatus: "pending" }));
 }

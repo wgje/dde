@@ -384,7 +384,7 @@ describe('black-box-sync-pull.helpers', () => {
 
     await expect(fetchBlackBoxDeltaPageQuery({
       client: { from: vi.fn() },
-      cursor: { updatedAt: '2026-06-09T00:00:00.000Z', id: '' },
+      cursor: { updatedAt: '2026-06-09T00:00:00.000Z', id: '00000000-0000-4000-8000-000000000001' },
       upperWatermark: null,
       expectedUserId: '',
       selectColumns: 'id',
@@ -394,5 +394,154 @@ describe('black-box-sync-pull.helpers', () => {
       getOptionalQueryMethod: () => undefined,
     })).resolves.toEqual({ data: null, error: scopedError });
     expect(warn).toHaveBeenCalledWith('黑匣子增量拉取缺少用户作用域，跳过远端读取');
+  });
+
+  it('client null short-circuits before pageSize validation with no query call', async () => {
+    const warn = vi.fn();
+
+    await expect(fetchBlackBoxDeltaPageQuery({
+      client: null,
+      cursor: { updatedAt: '2026-06-09T00:00:00.000Z', id: '' },
+      upperWatermark: null,
+      expectedUserId: 'user-1',
+      selectColumns: 'id',
+      pageSize: 1001,
+      scopedQueryUnavailableError: new Error('scoped'),
+      warn,
+      getOptionalQueryMethod: () => undefined,
+    })).resolves.toEqual({ data: null, error: null });
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('empty expectedUserId short-circuits with scoped error before pageSize validation', async () => {
+    const scopedError = new Error('blackbox_delta_missing_user_scope_query');
+    const warn = vi.fn();
+    const from = vi.fn();
+
+    await expect(fetchBlackBoxDeltaPageQuery({
+      client: { from },
+      cursor: { updatedAt: '2026-06-09T00:00:00.000Z', id: '' },
+      upperWatermark: null,
+      expectedUserId: '',
+      selectColumns: 'id',
+      pageSize: 1001,
+      scopedQueryUnavailableError: scopedError,
+      warn,
+      getOptionalQueryMethod: () => undefined,
+    })).resolves.toEqual({ data: null, error: scopedError });
+    expect(from).not.toHaveBeenCalled();
+  });
+
+  it('missing limit method returns fully ordered query result without throwing', async () => {
+    const warn = vi.fn();
+    const orderedResult = { data: [], error: null };
+    const chain: Record<string, unknown> = {
+      select: vi.fn(),
+      eq: vi.fn(),
+      or: vi.fn(),
+      gt: vi.fn(),
+      lte: vi.fn(),
+      order: vi.fn(),
+    };
+    for (const method of ['select', 'eq', 'or', 'gt', 'lte', 'order']) {
+      (chain[method] as ReturnType<typeof vi.fn>).mockReturnValue(chain);
+    }
+    (chain.order as ReturnType<typeof vi.fn>).mockImplementation(
+      (column: string) => column === 'updated_at' ? chain : orderedResult,
+    );
+    const client = { from: vi.fn().mockReturnValue(chain) };
+
+    const result = await fetchBlackBoxDeltaPageQuery({
+      client,
+      cursor: {
+        updatedAt: '2026-06-09T00:00:00.000Z',
+        id: '00000000-0000-4000-8000-000000000001',
+      },
+      upperWatermark: null,
+      expectedUserId: 'user-1',
+      selectColumns: 'id',
+      pageSize: 200,
+      scopedQueryUnavailableError: new Error('scoped'),
+      warn,
+      getOptionalQueryMethod: (_target, method) => {
+        if (method === 'eq' || method === 'or' || method === 'gt' || method === 'lte') {
+          return chain[method] as (...args: unknown[]) => unknown;
+        }
+        return undefined;
+      },
+    });
+
+    expect(result).toEqual(orderedResult);
+    expect(chain.order).toHaveBeenCalledWith('updated_at', { ascending: true });
+    expect(chain.order).toHaveBeenCalledWith('id', { ascending: true });
+    expect(chain.or).toHaveBeenCalled();
+  });
+
+  it.each([1.5, 0, 1001])('invalid pageSize %s fails closed with stable code', async (pageSize) => {
+    const warn = vi.fn();
+    const from = vi.fn();
+
+    await expect(fetchBlackBoxDeltaPageQuery({
+      client: { from },
+     cursor: { updatedAt: '2026-06-09T00:00:00.000Z', id: '' },
+      upperWatermark: null,
+      expectedUserId: 'user-1',
+      selectColumns: 'id',
+      pageSize,
+      scopedQueryUnavailableError: new Error('scoped'),
+      warn,
+      getOptionalQueryMethod: () => undefined,
+    })).rejects.toThrow('SUPABASE_PAGE_SIZE_INVALID');
+    expect(from).not.toHaveBeenCalled();
+  });
+
+  it('valid pageSize 200 proceeds through existing keyset/order/limit behavior', async () => {
+    const warn = vi.fn();
+    const limit = vi.fn().mockResolvedValue({ data: [], error: null });
+    const chain: Record<string, unknown> = {
+      select: vi.fn(),
+      eq: vi.fn(),
+      or: vi.fn(),
+      gt: vi.fn(),
+      lte: vi.fn(),
+      order: vi.fn(),
+      limit,
+    };
+    for (const method of ['select', 'eq', 'or', 'gt', 'lte', 'order']) {
+      (chain[method] as ReturnType<typeof vi.fn>).mockReturnValue(chain);
+    }
+    const client = { from: vi.fn().mockReturnValue(chain) };
+
+    const result = await fetchBlackBoxDeltaPageQuery({
+      client,
+      cursor: {
+        updatedAt: '2026-06-09T00:00:00.000Z',
+        id: '00000000-0000-4000-8000-000000000001',
+      },
+      upperWatermark: null,
+      expectedUserId: 'user-1',
+      selectColumns: 'id',
+      pageSize: 200,
+      scopedQueryUnavailableError: new Error('scoped'),
+      warn,
+      getOptionalQueryMethod: (_target, method) => {
+        if (
+          method === 'eq'
+          || method === 'or'
+          || method === 'gt'
+          || method === 'lte'
+          || method === 'limit'
+        ) {
+          return chain[method] as (...args: unknown[]) => unknown;
+        }
+        return undefined;
+      },
+    });
+
+    expect(result).toEqual({ data: [], error: null });
+    expect(limit).toHaveBeenCalledWith(200);
+    expect(chain.order).toHaveBeenCalledWith('updated_at', { ascending: true });
+    expect(chain.order).toHaveBeenCalledWith('id', { ascending: true });
+    expect(chain.or).toHaveBeenCalled();
   });
 });

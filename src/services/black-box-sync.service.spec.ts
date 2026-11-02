@@ -182,6 +182,48 @@ describe('BlackBoxSyncService', () => {
     getService: () => service,
   });
 
+  it('旧用户游标持久化晚到时不应覆盖新用户的内存游标', async () => {
+    type Cursor = { updatedAt: string; id: string };
+    let resolvePersist!: (cursor: Cursor | null) => void;
+    const staleUserCursor: Cursor = {
+      updatedAt: '2026-03-04T00:00:01.000Z',
+      id: 'user-1-entry',
+    };
+    const currentUserCursor: Cursor = {
+      updatedAt: '2026-03-04T00:00:02.000Z',
+      id: 'user-2-entry',
+    };
+    const internals = service as unknown as {
+      currentSyncUserId: string | null;
+      lastSyncCursor: Cursor | null;
+      lastSyncTime: string | null;
+      commitBlackBoxCursor: (cursor: Cursor | null, expectedUserId: string) => Promise<void>;
+    };
+    vi.spyOn(
+      service as unknown as {
+        persistBlackBoxCursorIfNewer: (cursor: Cursor) => Promise<Cursor | null>;
+      },
+      'persistBlackBoxCursorIfNewer',
+    ).mockReturnValueOnce(new Promise<Cursor | null>(resolve => {
+      resolvePersist = resolve;
+    }));
+    internals.currentSyncUserId = 'user-1';
+    internals.lastSyncCursor = null;
+    internals.lastSyncTime = null;
+
+    const staleCommit = internals.commitBlackBoxCursor(staleUserCursor, 'user-1');
+    internals.currentSyncUserId = 'user-2';
+    internals.lastSyncCursor = currentUserCursor;
+    internals.lastSyncTime = currentUserCursor.updatedAt;
+    resolvePersist(staleUserCursor);
+
+    await staleCommit;
+
+    expect(internals.currentSyncUserId).toBe('user-2');
+    expect(internals.lastSyncCursor).toEqual(currentUserCursor);
+    expect(internals.lastSyncTime).toBe(currentUserCursor.updatedAt);
+  });
+
   it('scheduleSync should reject when the local pending snapshot cannot be persisted', async () => {
     const entry = createEntry({ id: crypto.randomUUID(), userId: 'user-1' });
     vi.spyOn(service, 'saveToLocal').mockRejectedValueOnce(new Error('idb write failed'));
@@ -345,36 +387,6 @@ describe('BlackBoxSyncService', () => {
       content: 'accepted local pending content',
       syncStatus: 'pending',
     }));
-  });
-
-  it('forceSync should await pending push flush before manual pull', async () => {
-    const entry = createEntry({
-      id: crypto.randomUUID(),
-      userId: 'user-1',
-      syncStatus: 'pending',
-    });
-    let resolveFlush: (() => void) | null = null;
-    const retryQueueHandler = vi.fn(() => new Promise<boolean>(resolve => {
-      resolveFlush = () => resolve(true);
-    }));
-    const pullChangesSpy = vi.spyOn(service, 'pullChanges').mockResolvedValue(undefined);
-    const internals = service as unknown as {
-      pendingPushEntries: Map<string, BlackBoxEntry>;
-      retryQueueHandler: (queuedEntry: BlackBoxEntry) => Promise<boolean>;
-    };
-    internals.pendingPushEntries.set(entry.id, entry);
-    internals.retryQueueHandler = retryQueueHandler;
-
-    const forceSyncPromise = service.forceSync();
-    await flushMicrotasks();
-
-    expect(retryQueueHandler).toHaveBeenCalledWith(entry);
-    expect(pullChangesSpy).not.toHaveBeenCalled();
-
-    resolveFlush!();
-    await forceSyncPromise;
-
-    expect(pullChangesSpy).toHaveBeenCalledWith({ reason: 'manual', force: true });
   });
 
   it('should reuse in-flight pull promise (single-flight)', async () => {

@@ -341,7 +341,7 @@ export abstract class BlackBoxSyncPullLayer extends BlackBoxSyncPushLayer {
       }
       const { client, scopedUserId } = preparation.context;
 
-      const cursorWindow = await this.resolveBlackBoxPullCursorWindow(client, expectedUserId, expectedRealtimeGeneration);
+      const cursorWindow = await this.resolveBlackBoxPullCursorWindow(client, scopedUserId, expectedRealtimeGeneration);
       if (cursorWindow.status === 'done') {
         return cursorWindow.result;
       }
@@ -355,7 +355,7 @@ export abstract class BlackBoxSyncPullLayer extends BlackBoxSyncPushLayer {
         effectiveLastSync,
         preferRemoteForSyncedLocalDuringPull,
         repairingFutureCursor: cursorWindow.repairingFutureCursor,
-        expectedUserId,
+        expectedUserId: scopedUserId,
         expectedRealtimeGeneration,
       };
       const deltaPull = await this.pullBlackBoxDeltaPages(deltaPullContext);
@@ -431,7 +431,7 @@ export abstract class BlackBoxSyncPullLayer extends BlackBoxSyncPushLayer {
         return { status: 'aborted', result: false };
       }
 
-      const cursorOutcome = await this.resolveNextBlackBoxDeltaPageCursor(pageRows);
+      const cursorOutcome = await this.resolveNextBlackBoxDeltaPageCursor(pageRows, context.scopedUserId);
       if (cursorOutcome.status === 'done') {
         break;
       }
@@ -496,9 +496,10 @@ export abstract class BlackBoxSyncPullLayer extends BlackBoxSyncPushLayer {
 
   protected async resolveNextBlackBoxDeltaPageCursor(
     pageRows: Record<string, unknown>[],
+    expectedUserId: string,
   ): Promise<BlackBoxDeltaPageCursorOutcome> {
     if (pageRows.length > 0) {
-      await this.commitBlackBoxCursorFromRows(pageRows);
+      await this.commitBlackBoxCursorFromRows(pageRows, expectedUserId);
     }
 
     const decision = resolveNextBlackBoxDeltaPageCursorPure(pageRows, this.BLACKBOX_PULL_PAGE_SIZE);
@@ -567,7 +568,7 @@ export abstract class BlackBoxSyncPullLayer extends BlackBoxSyncPushLayer {
 
   protected async resolveBlackBoxPullCursorWindow(
     client: BlackBoxSupabaseClient,
-    expectedUserId?: string,
+    expectedUserId: string,
     expectedRealtimeGeneration?: number,
   ): Promise<BlackBoxPullCursorWindowOutcome> {
     let effectiveLastSync = this.lastSyncCursor?.updatedAt ?? this.lastSyncTime ?? '1970-01-01T00:00:00Z';
@@ -612,7 +613,7 @@ export abstract class BlackBoxSyncPullLayer extends BlackBoxSyncPushLayer {
     localMs: number,
     effectiveLastSync: string,
     pendingEntriesNeedRemoteReconciliation: boolean,
-    expectedUserId?: string,
+    expectedUserId: string,
     expectedRealtimeGeneration?: number,
   ): Promise<BlackBoxPullCursorWindowOutcome | null> {
     if (!remoteWatermark || !shouldUseBlackBoxWatermarkFastPath({
@@ -631,7 +632,17 @@ export abstract class BlackBoxSyncPullLayer extends BlackBoxSyncPushLayer {
       return { status: 'done', result: false };
     }
 
-    await this.commitBlackBoxCursor(this.lastSyncCursor ?? { updatedAt: remoteWatermark, id: '' });
+    await this.commitBlackBoxCursor(
+      this.lastSyncCursor ?? { updatedAt: remoteWatermark, id: '' },
+      expectedUserId,
+    );
+    if (
+      this.currentSyncUserId !== expectedUserId
+      || !this.isExpectedRealtimeContextCurrent(expectedUserId, expectedRealtimeGeneration)
+    ) {
+      this.logger.info('黑匣子 watermark 快路在游标持久化后中止：用户上下文已变化');
+      return { status: 'done', result: false };
+    }
     this.logger.debug('BlackBox watermark 快路命中，跳过明细拉取', {
       remoteWatermark,
       localCursor: effectiveLastSync
@@ -777,20 +788,6 @@ export abstract class BlackBoxSyncPullLayer extends BlackBoxSyncPushLayer {
    */
   getPendingSyncCount(): number {
     return this.pendingPushEntries.size;
-  }
-
-  /**
-   * 强制同步
-   */
-  async forceSync(): Promise<void> {
-    // 立即刷新防抖中的条目
-    if (this.pushDebounceTimer) {
-      clearTimeout(this.pushDebounceTimer);
-      this.pushDebounceTimer = null;
-    }
-    await this.flushPendingToRetryQueue();
-
-    await this.pullChanges({ reason: 'manual', force: true });
   }
 
 }

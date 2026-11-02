@@ -1,11 +1,13 @@
 import { expect, it, vi } from 'vitest';
 
+import type { BlackBoxEntry } from '../models/focus';
 import type { BlackBoxSyncService } from './black-box-sync.service';
 import type { SupabaseClientService } from './supabase-client.service';
 import { setBlackBoxEntries } from '../state/focus-stores';
 import { createBrowserNetworkSuspendedError } from '../utils/browser-network-suspension';
 import {
   createEntry,
+  flushMicrotasks,
 } from './black-box-sync.spec-helpers';
 
 interface BlackBoxSyncPullBehaviorSpecContext {
@@ -171,5 +173,35 @@ export function registerBlackBoxSyncPullBehaviorSpecs(
     await service().pullChanges({ reason: 'panel-open' });
     expect(doPullSpy).toHaveBeenCalledTimes(2);
     expect(context.getMockSentry().captureMessage).not.toHaveBeenCalled();
+  });
+
+  it('forceSync should await pending push flush before manual pull', async () => {
+    const entry = createEntry({
+      id: crypto.randomUUID(),
+      userId: 'user-1',
+      syncStatus: 'pending',
+    });
+    let resolveFlush: (() => void) | null = null;
+    const retryQueueHandler = vi.fn(() => new Promise<boolean>(resolve => {
+      resolveFlush = () => resolve(true);
+    }));
+    const pullChangesSpy = vi.spyOn(service(), 'pullChanges').mockResolvedValue(undefined);
+    const internals = service() as unknown as {
+      pendingPushEntries: Map<string, BlackBoxEntry>;
+      retryQueueHandler: (queuedEntry: BlackBoxEntry) => Promise<boolean>;
+    };
+    internals.pendingPushEntries.set(entry.id, entry);
+    internals.retryQueueHandler = retryQueueHandler;
+
+    const forceSyncPromise = service().forceSync();
+    await flushMicrotasks();
+
+    expect(retryQueueHandler).toHaveBeenCalledWith(entry);
+    expect(pullChangesSpy).not.toHaveBeenCalled();
+
+    resolveFlush!();
+    await forceSyncPromise;
+
+    expect(pullChangesSpy).toHaveBeenCalledWith({ reason: 'manual', force: true });
   });
 }
