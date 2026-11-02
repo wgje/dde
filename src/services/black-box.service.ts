@@ -77,9 +77,18 @@ export class BlackBoxService {
   }
 
   async createDurably(data: Partial<BlackBoxEntry>): Promise<Result<BlackBoxEntry, OperationError>> {
+    const expectedUserId = this.resolveEffectiveUserId();
+    const expectedAuthFence = this.auth.captureAuthIdentityFence();
+    if (data.userId !== undefined && data.userId !== expectedUserId) {
+      return failure(ErrorCodes.SYNC_AUTH_EXPIRED, '身份已切换，未提交黑匣子本地状态');
+    }
+
     const result = this.prepareCreatedEntry(data);
     if (!result.ok) {
       return result;
+    }
+    if (!expectedUserId || result.value.userId !== expectedUserId) {
+      return failure(ErrorCodes.SYNC_AUTH_EXPIRED, '身份已切换，未提交黑匣子本地状态');
     }
 
     if (blackBoxEntriesMap().has(result.value.id)) {
@@ -94,6 +103,12 @@ export class BlackBoxService {
       if (!durableExisting.ok) {
         return durableExisting;
       }
+      if (
+        this.resolveEffectiveUserId() !== expectedUserId
+        || this.auth.captureAuthIdentityFence() !== expectedAuthFence
+      ) {
+        return failure(ErrorCodes.SYNC_AUTH_EXPIRED, '身份已切换，已保留待重放记录但未提交当前视图');
+      }
       if (durableExisting.value) {
         updateBlackBoxEntry(durableExisting.value);
         return success(durableExisting.value);
@@ -103,6 +118,12 @@ export class BlackBoxService {
     const persisted = await this.persistAfterLocalChangeDurably(result.value);
     if (!persisted.ok) {
       return persisted;
+    }
+    if (
+      this.resolveEffectiveUserId() !== expectedUserId
+      || this.auth.captureAuthIdentityFence() !== expectedAuthFence
+    ) {
+      return failure(ErrorCodes.SYNC_AUTH_EXPIRED, '身份已切换，已保留待重放记录但未提交当前视图');
     }
 
     updateBlackBoxEntry(result.value);
@@ -289,14 +310,25 @@ export class BlackBoxService {
     updates: Partial<BlackBoxEntry>,
     syncOptions?: ScheduleBlackBoxSyncOptions,
   ): Promise<Result<BlackBoxEntry, OperationError>> {
+    const expectedUserId = this.resolveEffectiveUserId();
+    const expectedAuthFence = this.auth.captureAuthIdentityFence();
     const result = this.prepareUpdatedEntry(id, updates);
     if (!result.ok) {
       return result;
+    }
+    if (!expectedUserId || result.value.userId !== expectedUserId) {
+      return failure(ErrorCodes.SYNC_AUTH_EXPIRED, '身份已切换，未提交黑匣子本地状态');
     }
 
     const persisted = await this.persistAfterLocalChangeDurably(result.value, syncOptions);
     if (!persisted.ok) {
       return persisted;
+    }
+    if (
+      this.resolveEffectiveUserId() !== expectedUserId
+      || this.auth.captureAuthIdentityFence() !== expectedAuthFence
+    ) {
+      return failure(ErrorCodes.SYNC_AUTH_EXPIRED, '身份已切换，已保留待重放记录但未提交当前视图');
     }
 
     updateBlackBoxEntry(result.value);
@@ -452,14 +484,25 @@ export class BlackBoxService {
   }
 
   async deleteDurably(id: string): Promise<Result<void, OperationError>> {
+    const expectedUserId = this.resolveEffectiveUserId();
+    const expectedAuthFence = this.auth.captureAuthIdentityFence();
     const result = this.prepareDeletedEntry(id);
     if (!result.ok) {
       return result;
+    }
+    if (!expectedUserId || result.value.userId !== expectedUserId) {
+      return failure(ErrorCodes.SYNC_AUTH_EXPIRED, '身份已切换，未提交黑匣子本地状态');
     }
 
     const persisted = await this.persistAfterLocalChangeDurably(result.value);
     if (!persisted.ok) {
       return persisted;
+    }
+    if (
+      this.resolveEffectiveUserId() !== expectedUserId
+      || this.auth.captureAuthIdentityFence() !== expectedAuthFence
+    ) {
+      return failure(ErrorCodes.SYNC_AUTH_EXPIRED, '身份已切换，已保留待重放记录但未提交当前视图');
     }
 
     updateBlackBoxEntry(result.value);

@@ -19,6 +19,10 @@ import {
   registerBlackBoxLocalHydrationSpecs,
   type BlackBoxLocalHydrationSpecContext,
 } from './black-box-local-hydration.spec-helpers';
+import {
+  registerBlackBoxCreateDurableOwnerFenceSpecs,
+  type BlackBoxCreateDurableOwnerFenceSpecContext,
+} from './black-box-create-durable-owner-fence.spec-helpers';
 
 describe('BlackBoxService', () => {
   let service: BlackBoxService;
@@ -36,6 +40,7 @@ describe('BlackBoxService', () => {
     runtimeState: ReturnType<typeof vi.fn>;
     peekPersistedSessionIdentity: ReturnType<typeof vi.fn>;
     peekPersistedOwnerHint: ReturnType<typeof vi.fn>;
+    captureAuthIdentityFence: ReturnType<typeof vi.fn>;
   };
   let mockProjectStateService: {
     activeProjectId: ReturnType<typeof signal>;
@@ -61,6 +66,7 @@ describe('BlackBoxService', () => {
       runtimeState: vi.fn().mockReturnValue('ready'),
       peekPersistedSessionIdentity: vi.fn().mockReturnValue(null),
       peekPersistedOwnerHint: vi.fn().mockReturnValue(null),
+      captureAuthIdentityFence: vi.fn().mockReturnValue('fence-a'),
     };
 
     mockProjectStateService = {
@@ -99,6 +105,10 @@ describe('BlackBoxService', () => {
       service,
       mockSyncService,
     };
+  }
+
+  function getCreateDurableOwnerFenceSpecContext(): BlackBoxCreateDurableOwnerFenceSpecContext {
+    return { service, mockAuthService, mockSyncService };
   }
 
   describe('create', () => {
@@ -648,25 +658,32 @@ describe('BlackBoxService', () => {
       expect(service.entriesMap().get(createResult.value.id)?.completedAt).toBeNull();
     });
 
-    it('should expose completed state only after durable persistence succeeds', async () => {
+    it.each([
+      { identity: 'stable', transitions: [], publishes: true },
+      { identity: 'A→B', transitions: [['user-b', 'fence-b']], publishes: false },
+      { identity: 'A→B→A', transitions: [['user-b', 'fence-b'], ['test-user', 'fence-a2']], publishes: false },
+      { identity: 'same-owner relogin', transitions: [['test-user', 'fence-a2']], publishes: false },
+    ])('publishes only for a stable $identity identity fence', async ({ transitions, publishes }) => {
       const createResult = service.create({ content: '待完成内容' });
       if (!createResult.ok) throw new Error('Create failed');
       mockSyncService.scheduleSync.mockClear();
-      let resolveScheduleSync: (() => void) | null = null;
-      mockSyncService.scheduleSync.mockImplementationOnce(() => new Promise<void>((resolve) => {
-        resolveScheduleSync = resolve;
-      }));
+      const resolvers: Array<() => void> = [];
+      mockSyncService.scheduleSync.mockImplementationOnce(() => new Promise<void>(resolve => resolvers.push(resolve)));
 
       const pending = service.markAsCompletedDurably(createResult.value.id);
 
       expect(service.entriesMap().get(createResult.value.id)?.isCompleted).toBe(false);
-      expect(service.entriesMap().get(createResult.value.id)?.completedAt).toBeNull();
-      resolveScheduleSync!();
+      for (const [owner, fence] of transitions) {
+        mockAuthService.currentUserId.mockReturnValue(owner);
+        mockAuthService.captureAuthIdentityFence.mockReturnValue(fence);
+      }
+      const [resolveScheduleSync] = resolvers;
+      if (!resolveScheduleSync) throw new Error('scheduleSync resolver was not captured');
+      resolveScheduleSync();
       const result = await pending;
 
-      expect(result.ok).toBe(true);
-      expect(service.entriesMap().get(createResult.value.id)?.isCompleted).toBe(true);
-      expect(service.entriesMap().get(createResult.value.id)?.completedAt).toEqual(expect.any(String));
+      expect(result.ok).toBe(publishes);
+      expect(service.entriesMap().get(createResult.value.id)?.isCompleted).toBe(publishes);
     });
   });
 
@@ -770,4 +787,5 @@ describe('BlackBoxService', () => {
   });
 
   registerBlackBoxLocalHydrationSpecs(getLocalHydrationSpecContext);
+  registerBlackBoxCreateDurableOwnerFenceSpecs(getCreateDurableOwnerFenceSpecContext);
 });
