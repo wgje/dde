@@ -9,6 +9,25 @@ import {
   type DataSafetyExportPackage,
 } from './data-safety-package';
 
+type TaskRecordFixture = Record<string, unknown> & { id: string };
+
+function makeTaskRecord(): TaskRecordFixture {
+  return {
+    id: 'task-1',
+    title: 'Task 1',
+    content: 'keep content',
+    stage: 0,
+    parentId: null,
+    order: 0,
+    rank: 10000,
+    status: 'active',
+    x: 0,
+    y: 0,
+    createdDate: '2026-06-15T23:59:00.000Z',
+    updatedAt: '2026-06-16T00:00:00.000Z',
+  };
+}
+
 function makePackage(overrides: Partial<DataSafetyExportPackage> = {}): DataSafetyExportPackage {
   const pkg = buildDataSafetyExportPackage({
     exportedAt: '2026-06-16T00:00:00.000Z',
@@ -20,7 +39,7 @@ function makePackage(overrides: Partial<DataSafetyExportPackage> = {}): DataSafe
     },
     localData: {
       projects: [{ id: 'project-1', name: 'P1' }],
-      tasks: [{ id: 'task-1', projectId: 'project-1', content: 'keep content', updatedAt: '2026-06-16T00:00:00.000Z' }],
+      tasks: [{ ...makeTaskRecord(), projectId: 'project-1' }],
       connections: [{ id: 'connection-1', projectId: 'project-1', source: 'task-1', target: 'task-1' }],
       syncCursors: [{ key: 'project:user-1:project-1', cursor: { updatedAt: '2026-06-16T00:00:00.000Z', entityType: 'task', id: 'task-1' } }],
       meta: { activeProjectId: 'project-1' },
@@ -32,7 +51,7 @@ function makePackage(overrides: Partial<DataSafetyExportPackage> = {}): DataSafe
           operationId: 'op-1',
           type: 'task',
           operation: 'upsert',
-          data: { id: 'task-1', updatedAt: '2026-06-16T00:00:00.000Z' },
+          data: makeTaskRecord(),
           retryCount: 0,
           createdAt: 1781539200000,
           sourceUserId: 'user-1',
@@ -132,6 +151,206 @@ describe('data safety export package', () => {
     expect(
       validateDataSafetyExportPackage(makePackage({ ownerUserId: '' })).errors,
     ).toContain('ownerUserId is required');
+  });
+
+  it('rejects RetryQueue rows without complete stable replay identity before restore', () => {
+    const missingOperationId = structuredClone(makePackage());
+    delete (missingOperationId.localState.retryQueue[0] as Partial<{
+      operationId: string;
+    }>).operationId;
+    expect(validateDataSafetyExportPackage(missingOperationId).errors).toContain(
+      'localState.retryQueue[0].operationId is required',
+    );
+
+    const missingOwner = structuredClone(makePackage());
+    delete (missingOwner.localState.retryQueue[0] as Partial<{
+      sourceUserId: string;
+    }>).sourceUserId;
+    expect(validateDataSafetyExportPackage(missingOwner).errors).toContain(
+      'localState.retryQueue[0].sourceUserId is required',
+    );
+
+    const missingEntityId = structuredClone(makePackage());
+    delete (missingEntityId.localState.retryQueue[0].data as Partial<{
+      id: string;
+    }>).id;
+    expect(validateDataSafetyExportPackage(missingEntityId).errors).toContain(
+      'localState.retryQueue[0].data.id is required',
+    );
+
+    const wrongOwner = structuredClone(makePackage());
+    wrongOwner.localState.retryQueue[0].sourceUserId = 'user-2';
+    expect(validateDataSafetyExportPackage(wrongOwner).errors).toContain(
+      'localState.retryQueue[0].sourceUserId must match ownerUserId',
+    );
+  });
+
+  it('rejects task RetryQueue upserts with an incomplete task write payload', () => {
+    const missingStage = structuredClone(makePackage());
+    delete missingStage.localState.retryQueue[0].data['stage'];
+
+    expect(validateDataSafetyExportPackage(missingStage).errors).toContain(
+      'localState.retryQueue[0].data.stage must be a valid task write field',
+    );
+  });
+
+  it('rejects ActionQueue rows without complete stable replay identity before restore', () => {
+    const pkg = structuredClone(makePackage());
+    pkg.localState.actionQueue = [{
+      id: 'action-without-operation-id',
+      operationId: '',
+      entityType: 'task',
+      entityId: 'task-1',
+      type: 'update',
+      payload: { task: makeTaskRecord(), projectId: 'project-1' },
+      retryCount: 0,
+      timestamp: 1781539200000,
+    }];
+
+    expect(validateDataSafetyExportPackage(pkg).errors).toContain(
+      'localState.actionQueue[0].operationId is required',
+    );
+  });
+
+  it.each(['create', 'update'] as const)(
+    'rejects task ActionQueue %s actions with an incomplete task write payload',
+    (type) => {
+      const pkg = structuredClone(makePackage());
+      const task = makeTaskRecord();
+      delete task['content'];
+      pkg.localState.actionQueue = [{
+        id: `action-${type}`,
+        operationId: `operation-${type}`,
+        entityType: 'task',
+        entityId: 'task-1',
+        type,
+        payload: { task, projectId: 'project-1' },
+        retryCount: 0,
+        timestamp: 1781539200000,
+      }];
+
+      expect(validateDataSafetyExportPackage(pkg).errors).toContain(
+        'localState.actionQueue[0].payload.task.content must be a valid task write field',
+      );
+    },
+  );
+
+  it('rejects restore packages when any task is missing required content', () => {
+    const pkg = makePackage();
+    const withoutTaskContent = buildDataSafetyExportPackage({
+      exportedAt: pkg.exportedAt,
+      ownerUserId: pkg.ownerUserId,
+      app: pkg.app,
+      localData: {
+        ...pkg.localData,
+        tasks: [{ id: 'task-without-content', projectId: 'project-1' }],
+      },
+      localState: pkg.localState,
+      syncSnapshot: pkg.syncSnapshot,
+      replayLog: pkg.replayLog,
+      lastWriteExplain: pkg.lastWriteExplain,
+    });
+
+    expect(validateDataSafetyExportPackage(withoutTaskContent).errors).toContain(
+      'localData.tasks[0].content must be a string',
+    );
+  });
+
+  it.each([
+    {
+      store: 'tasks' as const,
+      row: makeTaskRecord(),
+      expectedError: 'localData.tasks[0].projectId is required',
+    },
+    {
+      store: 'tasks' as const,
+      row: { ...makeTaskRecord(), projectId: 'missing-project' },
+      expectedError: 'localData.tasks[0].projectId must reference localData.projects',
+    },
+    {
+      store: 'connections' as const,
+      row: { id: 'connection-without-project', source: 'task-1', target: 'task-1' },
+      expectedError: 'localData.connections[0].projectId is required',
+    },
+    {
+      store: 'connections' as const,
+      row: {
+        id: 'connection-with-missing-project',
+        projectId: 'missing-project',
+        source: 'task-1',
+        target: 'task-1',
+      },
+      expectedError: 'localData.connections[0].projectId must reference localData.projects',
+    },
+  ])('rejects $store rows whose IndexedDB project ownership cannot be restored', ({
+    store,
+    row,
+    expectedError,
+  }) => {
+    const base = makePackage();
+    const invalidPackage = buildDataSafetyExportPackage({
+      exportedAt: base.exportedAt,
+      ownerUserId: base.ownerUserId,
+      app: base.app,
+      localData: {
+        ...base.localData,
+        [store]: [row],
+      },
+      localState: base.localState,
+      syncSnapshot: base.syncSnapshot,
+      replayLog: base.replayLog,
+      lastWriteExplain: base.lastWriteExplain,
+    });
+
+    expect(validateDataSafetyExportPackage(invalidPackage).errors).toContain(expectedError);
+  });
+
+  it('rejects local data rows without stable restore ids or cursor keys', () => {
+    const pkg = makePackage();
+    const withoutStableIds = buildDataSafetyExportPackage({
+      exportedAt: pkg.exportedAt,
+      ownerUserId: pkg.ownerUserId,
+      app: pkg.app,
+      localData: {
+        ...pkg.localData,
+        projects: [{
+          name: 'missing project id',
+        } as unknown as DataSafetyExportPackage['localData']['projects'][number]],
+        syncCursors: [{
+          cursor: {},
+        } as unknown as DataSafetyExportPackage['localData']['syncCursors'][number]],
+      },
+      localState: pkg.localState,
+      syncSnapshot: pkg.syncSnapshot,
+      replayLog: pkg.replayLog,
+      lastWriteExplain: pkg.lastWriteExplain,
+    });
+
+    expect(validateDataSafetyExportPackage(withoutStableIds).errors).toEqual(expect.arrayContaining([
+      'localData.projects[0].id is required',
+      'localData.syncCursors[0].key is required',
+    ]));
+  });
+
+  it('rejects non-array conflict state before adapter preflight', () => {
+    const pkg = makePackage();
+    const invalidConflictState = buildDataSafetyExportPackage({
+      exportedAt: pkg.exportedAt,
+      ownerUserId: pkg.ownerUserId,
+      app: pkg.app,
+      localData: pkg.localData,
+      localState: {
+        ...pkg.localState,
+        conflicts: {} as unknown as DataSafetyExportPackage['localState']['conflicts'],
+      },
+      syncSnapshot: pkg.syncSnapshot,
+      replayLog: pkg.replayLog,
+      lastWriteExplain: pkg.lastWriteExplain,
+    });
+
+    expect(validateDataSafetyExportPackage(invalidConflictState).errors).toContain(
+      'conflicts must be an array',
+    );
   });
 
   it('rejects packages whose integrity checksum no longer matches the payload', () => {
@@ -297,6 +516,7 @@ describe('data safety export package', () => {
       entityType: 'task',
       entityId: 'task-2',
       operation: 'upsert',
+      writeIntent: 'task_structure_update',
       localTimestamp: 1781539300000,
       updatedAtBaseline: '2026-06-16T00:00:00.000Z',
       beforeVersion: '2026-06-16T00:00:00.000Z',
@@ -308,6 +528,7 @@ describe('data safety export package', () => {
     });
 
     expect(explain.afterVersion).toBe('2026-06-16T00:02:00.000Z');
+    expect(explain.writeIntent).toBe('task_structure_update');
     expect(explain.queueResult.enteredRetryQueue).toBe(true);
     expect(explain.rpcResult.status).toBe('remote-newer');
     expect(explain.lwwDecision).toEqual({ decision: 'remote-kept', reason: 'remote-newer' });
