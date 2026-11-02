@@ -610,16 +610,31 @@ export class BlackBoxService {
     });
   }
 
-  async snoozeDurably(id: string, until?: string): Promise<Result<BlackBoxEntry, OperationError>> {
+  async snoozeDurably(
+    id: string,
+    until?: string,
+    targetSnoozeCount?: number,
+  ): Promise<Result<BlackBoxEntry, OperationError>> {
     const entry = blackBoxEntriesMap().get(id);
     if (!entry) {
       return failure(ErrorCodes.FOCUS_ENTRY_NOT_FOUND, '条目不存在');
     }
 
     const snoozeUntil = until ?? this.getTomorrowDate();
+    const currentSnoozeCount = entry.snoozeCount ?? 0;
+    const resolvedTargetSnoozeCount = targetSnoozeCount ?? (
+      entry.snoozeUntil === snoozeUntil && currentSnoozeCount > 0
+        ? currentSnoozeCount
+        : currentSnoozeCount + 1
+    );
+    if (!Number.isSafeInteger(resolvedTargetSnoozeCount) || resolvedTargetSnoozeCount < 1) {
+      return failure(ErrorCodes.OPERATION_FAILED, '稍后提醒计数无效');
+    }
+    const operationAlreadyAppliedOrSuperseded = currentSnoozeCount >= resolvedTargetSnoozeCount;
+
     return this.updateDurably(id, {
-      snoozeUntil,
-      snoozeCount: (entry.snoozeCount ?? 0) + 1,
+      snoozeUntil: operationAlreadyAppliedOrSuperseded ? entry.snoozeUntil : snoozeUntil,
+      snoozeCount: Math.max(currentSnoozeCount, resolvedTargetSnoozeCount),
     });
   }
 

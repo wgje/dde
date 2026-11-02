@@ -506,6 +506,37 @@ describe('BlackBoxService', () => {
       expect(service.entriesMap().get(createResult.value.id)?.snoozeUntil).toBe('2026-06-17');
       expect(service.entriesMap().get(createResult.value.id)?.snoozeCount).toBe(1);
     });
+
+    it('replays a persisted snooze target without incrementing the count twice', async () => {
+      const createResult = service.create({ content: '恢复稍后提醒' });
+      if (!createResult.ok) throw new Error('Create failed');
+      mockSyncService.scheduleSync.mockClear();
+
+      const first = await service.snoozeDurably(createResult.value.id, '2026-06-17', 1);
+      expect(first.ok).toBe(true);
+      expect(first.ok && first.value.snoozeCount).toBe(1);
+
+      const replay = await service.snoozeDurably(createResult.value.id, '2026-06-17', 1);
+
+      expect(replay.ok).toBe(true);
+      expect(replay.ok && replay.value.snoozeUntil).toBe('2026-06-17');
+      expect(replay.ok && replay.value.snoozeCount).toBe(1);
+      expect(mockSyncService.scheduleSync).toHaveBeenCalledTimes(2);
+    });
+
+    it('recognizes a legacy snooze marker whose target date is already persisted', async () => {
+      const createResult = service.create({ content: '旧版稍后提醒恢复' });
+      if (!createResult.ok) throw new Error('Create failed');
+      const first = await service.snoozeDurably(createResult.value.id, '2026-06-17', 1);
+      if (!first.ok) throw new Error('Initial snooze failed');
+      mockSyncService.scheduleSync.mockClear();
+
+      const replay = await service.snoozeDurably(createResult.value.id, '2026-06-17');
+
+      expect(replay.ok).toBe(true);
+      expect(replay.ok && replay.value.snoozeCount).toBe(1);
+      expect(mockSyncService.scheduleSync).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('archiveDurably', () => {

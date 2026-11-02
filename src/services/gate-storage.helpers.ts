@@ -7,6 +7,17 @@ interface GateStorageLogger {
 const GATE_LAST_CHECK_DATE_KEY = 'focus_gate_last_check_date';
 const GATE_SNOOZE_RESET_DATE_KEY = 'focus_gate_snooze_reset_date';
 
+function getOwnerScopedKey(baseKey: string, ownerUserId: string | null): string | null {
+  const normalizedOwnerUserId = ownerUserId?.trim();
+  return normalizedOwnerUserId
+    ? `${baseKey}.${encodeURIComponent(normalizedOwnerUserId)}`
+    : null;
+}
+
+function clearLegacyHandledDate(): void {
+  localStorage.removeItem(GATE_LAST_CHECK_DATE_KEY);
+}
+
 export function resetDailyGateSnoozeCount(logger: GateStorageLogger): void {
   const today = getTodayDate();
   const lastResetDate = localStorage.getItem(GATE_SNOOZE_RESET_DATE_KEY);
@@ -18,10 +29,12 @@ export function resetDailyGateSnoozeCount(logger: GateStorageLogger): void {
   }
 }
 
-export function isGateHandledToday(logger: GateStorageLogger): boolean {
+export function isGateHandledToday(ownerUserId: string | null, logger: GateStorageLogger): boolean {
   if (typeof localStorage === 'undefined') return false;
   try {
-    return localStorage.getItem(GATE_LAST_CHECK_DATE_KEY) === getTodayDate();
+    clearLegacyHandledDate();
+    const storageKey = getOwnerScopedKey(GATE_LAST_CHECK_DATE_KEY, ownerUserId);
+    return storageKey !== null && localStorage.getItem(storageKey) === getTodayDate();
   } catch (error) {
     logger.debug(
       'Gate',
@@ -32,10 +45,14 @@ export function isGateHandledToday(logger: GateStorageLogger): boolean {
   }
 }
 
-export function persistGateHandledToday(logger: GateStorageLogger): void {
+export function persistGateHandledToday(ownerUserId: string | null, logger: GateStorageLogger): void {
   if (typeof localStorage === 'undefined') return;
   try {
-    localStorage.setItem(GATE_LAST_CHECK_DATE_KEY, getTodayDate());
+    clearLegacyHandledDate();
+    const storageKey = getOwnerScopedKey(GATE_LAST_CHECK_DATE_KEY, ownerUserId);
+    if (storageKey !== null) {
+      localStorage.setItem(storageKey, getTodayDate());
+    }
   } catch (error) {
     logger.debug(
       'Gate',
@@ -45,7 +62,11 @@ export function persistGateHandledToday(logger: GateStorageLogger): void {
   }
 }
 
-export function clearGateHandledToday(): void {
+export function clearGateHandledToday(ownerUserId: string | null): void {
   if (typeof localStorage === 'undefined') return;
-  localStorage.removeItem(GATE_LAST_CHECK_DATE_KEY);
+  clearLegacyHandledDate();
+  const storageKey = getOwnerScopedKey(GATE_LAST_CHECK_DATE_KEY, ownerUserId);
+  if (storageKey !== null) {
+    localStorage.removeItem(storageKey);
+  }
 }

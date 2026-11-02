@@ -50,6 +50,8 @@ describe('GateService', () => {
     d.setDate(d.getDate() + days);
     return d.toISOString().split('T')[0];
   };
+  const handledDateKey = (ownerUserId = 'test-user'): string =>
+    `focus_gate_last_check_date.${encodeURIComponent(ownerUserId)}`;
 
   const createMockEntry = (overrides: Partial<BlackBoxEntry> = {}): BlackBoxEntry => ({
     id: crypto.randomUUID(),
@@ -124,6 +126,41 @@ describe('GateService', () => {
   });
 
   describe('checkGate', () => {
+    it('does not reuse another owner handled-today marker', () => {
+      mockBlackBoxService.getExpectedSyncUserId.mockReturnValue('user-a');
+      service.forceBypass();
+
+      mockBlackBoxService.getExpectedSyncUserId.mockReturnValue('user-b');
+      resetGateState();
+      setBlackBoxEntries([createMockEntry({
+        id: 'user-b-pending-entry',
+        userId: 'user-b',
+        date: getDateOffset(-1),
+      })]);
+
+      service.checkGate();
+
+      expect(gateState()).toBe('reviewing');
+      expect(gatePendingItems().map(item => item.id)).toEqual(['user-b-pending-entry']);
+    });
+
+    it('persists gate action intent under the current effective owner', () => {
+      const entry = createMockEntry({
+        id: 'owner-scoped-gate-intent',
+        userId: 'test-user',
+        date: getDateOffset(-1),
+      });
+      setBlackBoxEntries([entry]);
+      service.checkGate();
+      service.onEnteringComplete();
+
+      service.markAsRead();
+
+      expect(localStorage.getItem('nanoflow.gate.deferred-mutation.v1')).toBeNull();
+      expect(localStorage.getItem('nanoflow.gate.deferred-mutation.v1.test-user'))
+        .toContain('owner-scoped-gate-intent');
+    });
+
     it('无待处理项目时应该跳过大门', () => {
       service.checkGate();
 
@@ -295,7 +332,7 @@ describe('GateService', () => {
     });
 
     it('从小组件显式进入工作区时应绕过今日已处理标记并复核大门', () => {
-      localStorage.setItem('focus_gate_last_check_date', getDateOffset(0));
+      localStorage.setItem(handledDateKey(), getDateOffset(0));
       const entry = createMockEntry({
         id: 'widget-open-workspace-entry',
         date: getDateOffset(-1),
@@ -319,7 +356,7 @@ describe('GateService', () => {
         d.setDate(d.getDate() - 1);
         return d.toISOString().split('T')[0];
       })();
-      localStorage.setItem('focus_gate_last_check_date', yesterday);
+      localStorage.setItem(handledDateKey(), yesterday);
 
       const entry = createMockEntry({
         id: 'next-day-entry',
@@ -402,7 +439,7 @@ describe('GateService', () => {
       expect(gateState()).toBe('reviewing');
       expect(gatePendingItems().map(item => item.id)).toEqual([entry.id]);
       expect(gateCurrentIndex()).toBe(0);
-      expect(localStorage.getItem('focus_gate_last_check_date')).toBeNull();
+      expect(localStorage.getItem(handledDateKey())).toBeNull();
       expect(service.cardAnimation()).toBe('idle');
     });
 
@@ -670,6 +707,26 @@ describe('GateService', () => {
   });
 
   describe('snooze compatibility', () => {
+    it('persists a fixed snooze count target with the owner-scoped deferred mutation', () => {
+      const entry = createMockEntry({ date: getDateOffset(-1), snoozeCount: 4 });
+      gatePendingItems.set([entry]);
+      gateCurrentIndex.set(0);
+      gateState.set('reviewing');
+
+      const result = service.snooze();
+      const persisted = localStorage.getItem('nanoflow.gate.deferred-mutation.v1.test-user');
+
+      expect(result.ok).toBe(true);
+      expect(persisted).not.toBeNull();
+      expect(JSON.parse(persisted!)).toMatchObject({
+        kind: 'snooze',
+        entryId: entry.id,
+        snoozeUntil: expect.any(String),
+        targetSnoozeCount: 5,
+        ownerUserId: 'test-user',
+      });
+    });
+
     it('跳过次数上限后返回错误', () => {
       const entry = createMockEntry({ date: getDateOffset(-1) });
       gatePendingItems.set([entry]);

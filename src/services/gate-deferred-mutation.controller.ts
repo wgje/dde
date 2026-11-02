@@ -9,9 +9,15 @@ import {
 import type { BlackBoxService } from './black-box.service';
 
 type DeferredGateMutation =
-  | { kind: 'mark-read'; entryId: string }
-  | { kind: 'mark-completed'; entryId: string }
-  | { kind: 'snooze'; entryId: string; snoozeUntil: string };
+  | { kind: 'mark-read'; entryId: string; ownerUserId: string | null }
+  | { kind: 'mark-completed'; entryId: string; ownerUserId: string | null }
+  | {
+      kind: 'snooze';
+      entryId: string;
+      snoozeUntil: string;
+      targetSnoozeCount?: number;
+      ownerUserId: string | null;
+    };
 
 interface GateDeferredMutationLogger {
   warn(scope: string, message: string, data?: unknown): void;
@@ -23,6 +29,7 @@ export interface GateDeferredMutationControllerOptions {
     'markAsReadDurably' | 'markAsCompletedDurably' | 'snoozeDurably'
   >;
   logger: GateDeferredMutationLogger;
+  getOwnerUserId: () => string | null;
 }
 
 /**
@@ -42,23 +49,37 @@ export class GateDeferredMutationController {
   }
 
   setMarkRead(entryId: string): void {
-    this.mutation = { kind: 'mark-read', entryId };
+    this.mutation = { kind: 'mark-read', entryId, ownerUserId: this.getCurrentOwnerUserId() };
     this.persistPendingMutation();
   }
 
   setMarkCompleted(entryId: string): void {
-    this.mutation = { kind: 'mark-completed', entryId };
+    this.mutation = { kind: 'mark-completed', entryId, ownerUserId: this.getCurrentOwnerUserId() };
     this.persistPendingMutation();
   }
 
-  setSnooze(entryId: string, snoozeUntil: string): void {
-    this.mutation = { kind: 'snooze', entryId, snoozeUntil };
+  setSnooze(entryId: string, snoozeUntil: string, targetSnoozeCount?: number): void {
+    this.mutation = {
+      kind: 'snooze',
+      entryId,
+      snoozeUntil,
+      targetSnoozeCount,
+      ownerUserId: this.getCurrentOwnerUserId(),
+    };
     this.persistPendingMutation();
   }
 
   clear(): void {
+    const mutationOwnerUserId = this.mutation?.ownerUserId ?? null;
+    const currentOwnerUserId = this.getCurrentOwnerUserId();
     this.mutation = null;
-    this.clearPersistedMutation();
+    this.discardLegacyPersistedMutation();
+    if (currentOwnerUserId !== null) {
+      this.clearPersistedMutation(currentOwnerUserId);
+    }
+    if (mutationOwnerUserId !== null && mutationOwnerUserId === currentOwnerUserId) {
+      this.clearPersistedMutation(mutationOwnerUserId);
+    }
   }
 
   /**
@@ -67,9 +88,11 @@ export class GateDeferredMutationController {
    * 保留毒化暂存会让每次 checkGate 重复失败。无暂存时等价于 clear()。
    */
   async restorePersistedMutation(): Promise<void> {
-    const stored = this.readPersistedMutation();
+    this.discardLegacyPersistedMutation();
+    const ownerUserId = this.getCurrentOwnerUserId();
+    const stored = ownerUserId === null ? null : this.readPersistedMutation(ownerUserId);
     if (!stored) {
-      this.clear();
+      this.mutation = null;
       return;
     }
 
@@ -86,48 +109,70 @@ export class GateDeferredMutationController {
   }
 
   private persistPendingMutation(): void {
-    if (typeof localStorage === 'undefined' || this.mutation === null) {
+    const mutation = this.mutation;
+    if (typeof localStorage === 'undefined' || mutation?.ownerUserId == null) {
       return;
     }
     try {
-      localStorage.setItem(GATE_DEFERRED_MUTATION_STORAGE_KEY, JSON.stringify(this.mutation));
+      this.discardLegacyPersistedMutation();
+      localStorage.setItem(this.getStorageKey(mutation.ownerUserId), JSON.stringify(mutation));
     } catch {
       // 暂存失败不阻断大门流程：退化为旧行为（决策仅存内存）
     }
   }
 
-  private clearPersistedMutation(): void {
+  private clearPersistedMutation(ownerUserId: string): void {
     if (typeof localStorage === 'undefined') {
       return;
     }
     try {
-      localStorage.removeItem(GATE_DEFERRED_MUTATION_STORAGE_KEY);
+      localStorage.removeItem(this.getStorageKey(ownerUserId));
     } catch {
       // 清除失败留给下次补写路径按无效暂存处理
     }
   }
 
-  private readPersistedMutation(): DeferredGateMutation | null {
+  private readPersistedMutation(ownerUserId: string): DeferredGateMutation | null {
     if (typeof localStorage === 'undefined') {
       return null;
     }
     try {
-      const raw = localStorage.getItem(GATE_DEFERRED_MUTATION_STORAGE_KEY);
+      const storageKey = this.getStorageKey(ownerUserId);
+      const raw = localStorage.getItem(storageKey);
       if (!raw) return null;
       const parsed = JSON.parse(raw) as Partial<DeferredGateMutation>;
       if (
         typeof parsed?.entryId !== 'string'
         || parsed.entryId.length === 0
+        || parsed.ownerUserId !== ownerUserId
         || (parsed.kind !== 'mark-read' && parsed.kind !== 'mark-completed' && parsed.kind !== 'snooze')
       ) {
+        localStorage.removeItem(storageKey);
         return null;
       }
       if (parsed.kind === 'snooze') {
         const snoozeUntil = (parsed as { snoozeUntil?: unknown }).snoozeUntil;
-        if (typeof snoozeUntil !== 'string' || snoozeUntil.length === 0) return null;
-        return { kind: 'snooze', entryId: parsed.entryId, snoozeUntil };
+        const targetSnoozeCount = (parsed as { targetSnoozeCount?: unknown }).targetSnoozeCount;
+        if (typeof snoozeUntil !== 'string' || snoozeUntil.length === 0) {
+          localStorage.removeItem(storageKey);
+          return null;
+        }
+        if (targetSnoozeCount !== undefined
+          && (typeof targetSnoozeCount !== 'number'
+            || !Number.isSafeInteger(targetSnoozeCount)
+            || targetSnoozeCount < 1)) {
+          localStorage.removeItem(storageKey);
+          return null;
+        }
+        return {
+          kind: 'snooze',
+          entryId: parsed.entryId,
+          snoozeUntil,
+          ...(typeof targetSnoozeCount === 'number' ? { targetSnoozeCount } : {}),
+          ownerUserId,
+        };
       }
-      return { kind: parsed.kind, entryId: parsed.entryId };
+      return { kind: parsed.kind, entryId: parsed.entryId, ownerUserId };
     } catch {
       // eslint-disable-next-line no-restricted-syntax -- 返回 null 语义正确：暂存解析失败按无有效延迟操作处理
       return null;
@@ -140,15 +185,21 @@ export class GateDeferredMutationController {
       return success(null);
     }
 
+    if (mutation.ownerUserId === null || mutation.ownerUserId !== this.getCurrentOwnerUserId()) {
+      return this.failOwnerChangedMutation(mutation, 'before');
+    }
     let result: Result<BlackBoxEntry, OperationError>;
-
     try {
       if (mutation.kind === 'mark-read') {
         result = await this.options.blackBoxService.markAsReadDurably(mutation.entryId);
       } else if (mutation.kind === 'mark-completed') {
         result = await this.options.blackBoxService.markAsCompletedDurably(mutation.entryId);
       } else {
-        result = await this.options.blackBoxService.snoozeDurably(mutation.entryId, mutation.snoozeUntil);
+        result = await this.options.blackBoxService.snoozeDurably(
+          mutation.entryId,
+          mutation.snoozeUntil,
+          mutation.targetSnoozeCount,
+        );
       }
     } catch (error) {
       this.options.logger.warn('Gate', 'Deferred gate mutation threw', {
@@ -172,8 +223,54 @@ export class GateDeferredMutationController {
       return result;
     }
 
+    if (this.mutation !== mutation || mutation.ownerUserId !== this.getCurrentOwnerUserId()) {
+      return this.failOwnerChangedMutation(mutation, 'during');
+    }
+
     this.mutation = null;
-    this.clearPersistedMutation();
+    this.clearPersistedMutation(mutation.ownerUserId);
     return result;
+  }
+
+  private failOwnerChangedMutation(
+    mutation: DeferredGateMutation,
+    phase: 'before' | 'during',
+  ): Result<BlackBoxEntry | null, OperationError> {
+    if (this.mutation === mutation) {
+      this.mutation = null;
+    }
+    const beforeFlush = phase === 'before';
+    this.options.logger.warn('Gate', beforeFlush
+      ? 'Deferred gate mutation owner changed before flush'
+      : 'Deferred gate mutation owner changed during flush', {
+      kind: mutation.kind,
+      entryId: mutation.entryId,
+      ownerUserId: mutation.ownerUserId,
+    });
+    return failure(
+      ErrorCodes.OPERATION_FAILED,
+      beforeFlush ? '大门延迟操作所属账号已切换' : '大门延迟操作完成时账号已切换',
+    );
+  }
+
+  private getCurrentOwnerUserId(): string | null {
+    const ownerUserId = this.options.getOwnerUserId()?.trim();
+    return ownerUserId || null;
+  }
+
+  private getStorageKey(ownerUserId: string): string {
+    return `${GATE_DEFERRED_MUTATION_STORAGE_KEY}.${encodeURIComponent(ownerUserId)}`;
+  }
+
+  private discardLegacyPersistedMutation(): void {
+    if (typeof localStorage === 'undefined') return;
+    try {
+      if (localStorage.getItem(GATE_DEFERRED_MUTATION_STORAGE_KEY) !== null) {
+        localStorage.removeItem(GATE_DEFERRED_MUTATION_STORAGE_KEY);
+        this.options.logger.warn('Gate', 'Dropped ownerless legacy deferred gate mutation');
+      }
+    } catch {
+      // Legacy cleanup is best-effort; scoped state remains authoritative.
+    }
   }
 }

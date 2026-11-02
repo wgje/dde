@@ -108,6 +108,7 @@ export class GateService {
   private readonly deferredMutationController = new GateDeferredMutationController({
     blackBoxService: this.blackBoxService,
     logger: this.logger,
+    getOwnerUserId: () => this.blackBoxService.getExpectedSyncUserId(),
   });
 
   /** 当前动作动画（用于防止 timeout + animationend 双触发） */
@@ -539,7 +540,11 @@ export class GateService {
     }
 
     const tomorrow = getTomorrowDate();
-    this.deferredMutationController.setSnooze(current.id, tomorrow);
+    this.deferredMutationController.setSnooze(
+      current.id,
+      tomorrow,
+      (current.snoozeCount ?? 0) + 1,
+    );
     gateSnoozeCount.update(c => c + 1);
 
     // 兼容路径：在新门体里统一使用 heave_read 过渡
@@ -668,12 +673,12 @@ export class GateService {
    * 用于阻止后台恢复链路里 local→remote 两次 checkGate 造成的二次弹门
    */
   private isGateHandledToday(): boolean {
-    return isGateHandledToday(this.logger);
+    return isGateHandledToday(this.blackBoxService.getExpectedSyncUserId(), this.logger);
   }
 
   /** 标记今日大门已处理 */
   private persistGateHandledToday(): void {
-    persistGateHandledToday(this.logger);
+    persistGateHandledToday(this.blackBoxService.getExpectedSyncUserId(), this.logger);
   }
 
   /**
@@ -701,7 +706,7 @@ export class GateService {
     this.clearAnimationTimeout();
     this.cardAnimation.set('idle');
     resetGateState();
-    clearGateHandledToday();
+    clearGateHandledToday(this.blackBoxService.getExpectedSyncUserId());
     this.logger.debug('Gate', 'Gate state reset');
   }
 
@@ -750,7 +755,7 @@ export class GateService {
   private prepareDevGate(): void {
     this.devForceActive.set(true);
     this.stopReviewingRemoteSync();
-    clearGateHandledToday();
+    clearGateHandledToday(this.blackBoxService.getExpectedSyncUserId());
 
     if (!focusPreferences().gateEnabled) {
       focusPreferences.update(p => ({ ...p, gateEnabled: true }));
