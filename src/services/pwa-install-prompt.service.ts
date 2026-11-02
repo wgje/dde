@@ -105,13 +105,18 @@ export class PwaInstallPromptService {
     this.appInstalledHandler = this.createAppInstalledHandler(listenerGeneration);
     this.displayModeHandler = this.createDisplayModeHandler(listenerGeneration);
 
-    window.addEventListener('beforeinstallprompt', this.beforeInstallPromptHandler as EventListener);
-    window.addEventListener('appinstalled', this.appInstalledHandler);
+    try {
+      window.addEventListener('beforeinstallprompt', this.beforeInstallPromptHandler as EventListener);
+      window.addEventListener('appinstalled', this.appInstalledHandler);
 
-    this.displayModeMedia = window.matchMedia('(display-mode: standalone)');
-    this.displayModeMedia.addEventListener('change', this.displayModeHandler);
+      this.displayModeMedia = window.matchMedia('(display-mode: standalone)');
+      this.displayModeMedia.addEventListener('change', this.displayModeHandler);
 
-    this.initialized = true;
+      this.initialized = true;
+    } catch (error) {
+      this.cleanup();
+      throw error;
+    }
     this.debugSafely('PWA 安装提示服务已初始化', {
       standalone: this.isStandaloneMode(),
       ios: this.isIos(),

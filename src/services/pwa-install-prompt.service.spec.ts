@@ -132,6 +132,29 @@ describe('PwaInstallPromptService', () => {
     expect(beforeInstallCalls.length).toBe(1);
   });
 
+  it('display-mode 监听注册失败时应回滚窗口监听并允许重试初始化', () => {
+    const addSpy = vi.spyOn(window, 'addEventListener');
+    const removeSpy = vi.spyOn(window, 'removeEventListener');
+    vi.mocked(matchMediaList.addEventListener)
+      .mockImplementationOnce(() => {
+        throw new Error('display mode listener registration failed');
+      })
+      .mockImplementationOnce(() => undefined);
+
+    expect(() => service.initialize()).toThrow('display mode listener registration failed');
+
+    expect(removeSpy).toHaveBeenCalledWith('beforeinstallprompt', expect.any(Function));
+    expect(removeSpy).toHaveBeenCalledWith('appinstalled', expect.any(Function));
+    expect((service as unknown as { beforeInstallPromptHandler: unknown }).beforeInstallPromptHandler).toBeNull();
+    expect((service as unknown as { appInstalledHandler: unknown }).appInstalledHandler).toBeNull();
+    expect((service as unknown as { displayModeHandler: unknown }).displayModeHandler).toBeNull();
+    expect((service as unknown as { initialized: boolean }).initialized).toBe(false);
+
+    expect(() => service.initialize()).not.toThrow();
+    expect(addSpy.mock.calls.filter(call => call[0] === 'beforeinstallprompt')).toHaveLength(2);
+    expect(addSpy.mock.calls.filter(call => call[0] === 'appinstalled')).toHaveLength(2);
+  });
+
   // --- beforeinstallprompt 事件 ---
 
   it('捕获 beforeinstallprompt 事件后 canInstall 应为 true', () => {
