@@ -2,6 +2,9 @@ import type {
   WorkspaceShellCriticalFeatureFlagsDelegate,
   WorkspaceShellCriticalFeatureFlagsLazyLoadDelegateOptions,
 } from './workspace-shell-critical-feature-flags-lazy-load-delegate.factory';
+import {
+  WorkspaceShellCriticalFeatureFlagsDelegateLoaderController,
+} from './workspace-shell-critical-feature-flags-delegate-loader.controller';
 
 type WorkspaceShellCriticalFeatureFlagsWarning =
   WorkspaceShellCriticalFeatureFlagsLazyLoadDelegateOptions['warning'];
@@ -32,24 +35,12 @@ export function createWorkspaceShellCriticalFeatureFlagsDelegates(
     return options.createCriticalFeatureFlagsLazyLoad(lazyOptions);
   }
 
-  let delegatePromise: Promise<WorkspaceShellCriticalFeatureFlagsDelegate> | null = null;
-  return {
-    validate: () => {
-      void (delegatePromise ??= import('./workspace-shell-critical-feature-flags-lazy-load-delegate.factory')
-        .then(({ createWorkspaceShellCriticalFeatureFlagsLazyLoadDelegate }) =>
-          createWorkspaceShellCriticalFeatureFlagsLazyLoadDelegate(lazyOptions))
-        .catch(error => {
-          delegatePromise = null;
-          options.warn(
-            '关键安全开关 lazy-load delegate 加载失败，已跳过本次启动校验',
-            error,
-          );
-          throw error;
-        }))
-        .then(delegate => delegate.validate())
-        .catch(() => undefined);
-    },
-  };
+  return new WorkspaceShellCriticalFeatureFlagsDelegateLoaderController({
+    loadDelegate: () => import('./workspace-shell-critical-feature-flags-lazy-load-delegate.factory')
+      .then(({ createWorkspaceShellCriticalFeatureFlagsLazyLoadDelegate }) =>
+        createWorkspaceShellCriticalFeatureFlagsLazyLoadDelegate(lazyOptions)),
+    warn: options.warn,
+  });
 }
 
 function readBrowserHostname(): string | undefined {

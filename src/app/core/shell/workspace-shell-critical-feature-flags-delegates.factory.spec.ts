@@ -47,7 +47,7 @@ describe('createWorkspaceShellCriticalFeatureFlagsDelegates', () => {
     vi.unstubAllGlobals();
   });
 
-  it('keeps the critical feature flags lazy validator behind a dynamic import boundary', async () => {
+  it('keeps the lazy validator behind a dynamic import and moves loader state to a controller', async () => {
     const source = readFileSync(
       join(__dirname, 'workspace-shell-critical-feature-flags-delegates.factory.ts'),
       'utf8',
@@ -59,6 +59,10 @@ describe('createWorkspaceShellCriticalFeatureFlagsDelegates', () => {
     expect(source).toContain(
       "import('./workspace-shell-critical-feature-flags-lazy-load-delegate.factory')",
     );
+    expect(source).toContain(
+      'WorkspaceShellCriticalFeatureFlagsDelegateLoaderController',
+    );
+    expect(source).not.toContain('let delegatePromise');
   });
 
   it('adapts shell toast and hostname overrides into lazy-load options', async () => {
