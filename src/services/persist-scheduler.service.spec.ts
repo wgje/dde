@@ -57,6 +57,7 @@ describe('PersistSchedulerService', () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.useRealTimers();
   });
 
