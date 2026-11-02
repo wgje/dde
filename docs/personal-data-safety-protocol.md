@@ -62,6 +62,8 @@ flowchart LR
 
 The user-facing restore transaction received an incremental verification on 2026-11-02: 21 related spec files passed serially (447/447 tests), `npm run typecheck` passed, and `git diff --check` passed. This evidence closes only the restore transaction scope described above; the remaining data-safety groups stay open.
 
+Terminal cleanup also performs a second durable ActionQueue receipt read-back before clearing the restore journal. A mismatch retains the journal and defers the quiescence heartbeat so startup can take over only after the lease expires.
+
 ### 2.2 Remaining gaps
 
 Only the four gaps below remain. The user-facing restore transaction and the previously listed offline-snapshot replacement and sync-RPC-unavailable local task-deletion audit gaps are closed for the exact scopes and evidence named in section 2.1; the other data-safety groups remain open.

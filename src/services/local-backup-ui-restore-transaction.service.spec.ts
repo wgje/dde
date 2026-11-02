@@ -151,9 +151,9 @@ describe('prepareLocalBackupUiRestoreTransaction', () => {
       'queue-backup.rollback',
       'queue-backup.read-provider',
       'marker-heartbeat.stop',
+      'queue-backup.read-provider',
       'journal.clear',
       'journal.read',
-      'queue-backup.read-provider',
       'quiescence.abort',
     ]);
   });
@@ -182,11 +182,58 @@ describe('prepareLocalBackupUiRestoreTransaction', () => {
       'queue-backup.finalize',
       'queue-backup.read-provider',
       'marker-heartbeat.stop',
+      'queue-backup.read-provider',
       'journal.clear',
       'journal.read',
-      'queue-backup.read-provider',
       'quiescence.release',
     ]);
+  });
+
+  it('retains the journal and writer freeze when final terminal read-back changes', async () => {
+    const order: string[] = [];
+    const markerStore = { current: null as unknown };
+    const dependencies = makeDependencies(order, markerStore);
+    const handle = await prepareLocalBackupUiRestoreTransaction({
+      ownerUserId: OWNER_USER_ID,
+      source: { kind: 'local-file', reference: 'backup.json', checksum: SOURCE_DIGEST },
+      touchedProjectIds: ['project-1'], currentProjects: [], retryQueueRestoreItems: [],
+      restoredActionQueueItems: [], blackBoxBackup: makeBackup([]),
+    }, dependencies);
+    useDriftingTerminalReadback(dependencies, order, 'finalize');
+    order.length = 0;
+
+    await expect(handle.run(makeOperations())).resolves.toMatchObject({
+      status: 'blocked',
+      error: expect.objectContaining({
+        message: expect.stringMatching(/terminal evidence changed/i),
+      }),
+    });
+
+    expect(markerStore.current).toMatchObject({ state: 'completed', phase: 'finalizing' });
+    expect(order).toContain('quiescence.defer');
+    expect(order).not.toContain('journal.clear');
+    expect(order).not.toContain('quiescence.release');
+  });
+
+  it('retains prepared evidence when abort terminal read-back changes', async () => {
+    const order: string[] = [];
+    const markerStore = { current: null as unknown };
+    const dependencies = makeDependencies(order, markerStore);
+    const handle = await prepareLocalBackupUiRestoreTransaction({
+      ownerUserId: OWNER_USER_ID,
+      source: { kind: 'local-file', reference: null, checksum: SOURCE_DIGEST },
+      touchedProjectIds: ['project-1'], currentProjects: [], retryQueueRestoreItems: [],
+      restoredActionQueueItems: [], blackBoxBackup: makeBackup([]),
+    }, dependencies);
+    useDriftingTerminalReadback(dependencies, order, 'rollback');
+    order.length = 0;
+
+    await expect(handle.abortBeforeMutation()).rejects.toThrow(/terminal evidence changed/i);
+
+    expect(markerStore.current).toMatchObject({ state: 'prepared', phase: 'pre-image-captured' });
+    expect(order).toContain('quiescence.defer');
+    expect(order).not.toContain('journal.clear');
+    expect(order).not.toContain('quiescence.abort');
   });
 
   it('retains the marker and writer freeze when terminal storage lacks readback confirmation', async () => {
@@ -681,6 +728,20 @@ function makeProviderEvidence(receipt: Record<string, unknown>): QueueBackupRest
     },
     snapshotSignature: 'snapshot',
   } as unknown as QueueBackupRestoreProviderResult;
+}
+
+function useDriftingTerminalReadback(
+  dependencies: LocalBackupUiRestoreTransactionDependencies,
+  order: string[],
+  command: 'finalize' | 'rollback',
+): void {
+  let readCount = 0;
+  dependencies.queueBackup.readPersonalRestoreProviderEvidence = vi.fn(async () => {
+    order.push('queue-backup.read-provider');
+    const receipt = makeTerminalReceipt(command);
+    if (readCount++ > 0) receipt['completedAt'] = '2026-07-27T00:00:01.000Z';
+    return makeProviderEvidence(receipt);
+  });
 }
 
 function makeRecoveryQueueBackupPort(): LocalBackupUiRestoreTransactionDependencies['queueBackup'] {

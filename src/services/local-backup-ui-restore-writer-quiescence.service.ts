@@ -327,7 +327,9 @@ class LocalBackupUiRestoreQuiescenceLease {
   }
 
   private async deferForStartupRecovery(): Promise<void> {
-    if (this.markerValue.state !== 'quiesced') {
+    if (this.markerValue.state !== 'quiesced'
+      && this.markerValue.state !== 'finalizing-completed'
+      && this.markerValue.state !== 'finalizing-rolled-back') {
       throw new Error('local backup UI restore quiescence cannot be deferred from this state');
     }
     await this.stopHeartbeat();

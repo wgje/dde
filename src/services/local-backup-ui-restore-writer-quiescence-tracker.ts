@@ -463,63 +463,96 @@ export async function finalizeLocalBackupUiRestoreTerminal(
   context: LocalBackupUiRestoreTerminalContext,
   outcome: LocalBackupUiRestoreFinalOutcome,
 ): Promise<void> {
-  if (!await context.verifyOwnership()) throw new LocalBackupUiRestoreOwnershipLostError();
-  await context.quiescence.prepareFinalization(outcome);
-  if (!await context.state.markerHeartbeat.verifyOwnership()) {
-    throw new LocalBackupUiRestoreOwnershipLostError();
+  try {
+    if (!await context.verifyOwnership()) throw new LocalBackupUiRestoreOwnershipLostError();
+    await context.quiescence.prepareFinalization(outcome);
+    if (!await context.state.markerHeartbeat.verifyOwnership()) {
+      throw new LocalBackupUiRestoreOwnershipLostError();
+    }
+    const marker = context.state.markerHeartbeat.marker();
+    const terminal = await settleAndVerifyLocalBackupUiRestoreQueueBackup(
+      marker.actionQueueRestoreIdentity,
+      marker.ownerUserId,
+      context.queueBackup,
+      outcome === 'completed' ? 'finalized' : 'rolled-back',
+    );
+    await context.state.markerHeartbeat.stop();
+    await verifyQueueBackupTerminalReadback(
+      marker.actionQueueRestoreIdentity,
+      marker.ownerUserId,
+      context.queueBackup,
+      terminal,
+    );
+    if (!await context.journal.clear(marker)) {
+      throw new LocalBackupUiRestoreOwnershipLostError('restore marker final clear failed');
+    }
+    if (await context.journal.read() !== null) {
+      throw new LocalBackupUiRestoreOwnershipLostError('restore marker final absence read-back failed');
+    }
+    await context.quiescence.releaseFinalized();
+    context.state.closed = true;
+  } catch (error) {
+    await retainLocalBackupUiRestoreEvidenceForStartup(context, error);
+    throw error;
   }
-  const marker = context.state.markerHeartbeat.marker();
-  const terminal = await settleAndVerifyLocalBackupUiRestoreQueueBackup(
-    marker.actionQueueRestoreIdentity,
-    marker.ownerUserId,
-    context.queueBackup,
-    outcome === 'completed' ? 'finalized' : 'rolled-back',
-  );
-  await context.state.markerHeartbeat.stop();
-  if (!await context.journal.clear(marker)) {
-    throw new LocalBackupUiRestoreOwnershipLostError('restore marker final clear failed');
-  }
-  if (await context.journal.read() !== null) {
-    throw new LocalBackupUiRestoreOwnershipLostError('restore marker final absence read-back failed');
-  }
-  await verifyQueueBackupTerminalReadback(
-    marker.actionQueueRestoreIdentity,
-    marker.ownerUserId,
-    context.queueBackup,
-    terminal,
-  );
-  await context.quiescence.releaseFinalized();
-  context.state.closed = true;
 }
 
 export async function abortLocalBackupUiRestoreTerminal(
   context: LocalBackupUiRestoreTerminalContext,
 ): Promise<void> {
-  if (!await context.verifyOwnership()) {
-    throw new Error('local backup UI restore prepared transaction ownership lost');
+  try {
+    if (!await context.verifyOwnership()) {
+      throw new Error('local backup UI restore prepared transaction ownership lost');
+    }
+    const marker = context.state.markerHeartbeat.marker();
+    const terminal = await settleAndVerifyLocalBackupUiRestoreQueueBackup(
+      marker.actionQueueRestoreIdentity,
+      marker.ownerUserId,
+      context.queueBackup,
+      'rolled-back',
+    );
+    await context.state.markerHeartbeat.stop();
+    await verifyQueueBackupTerminalReadback(
+      marker.actionQueueRestoreIdentity,
+      marker.ownerUserId,
+      context.queueBackup,
+      terminal,
+    );
+    if (!await context.journal.clear(marker)) {
+      throw new Error('local backup UI restore prepared marker clear failed');
+    }
+    if (await context.journal.read() !== null) {
+      throw new Error('local backup UI restore prepared marker absence read-back failed');
+    }
+    await context.quiescence.abortBeforeMutation();
+    context.state.closed = true;
+  } catch (error) {
+    await retainLocalBackupUiRestoreEvidenceForStartup(context, error);
+    throw error;
   }
-  const marker = context.state.markerHeartbeat.marker();
-  const terminal = await settleAndVerifyLocalBackupUiRestoreQueueBackup(
-    marker.actionQueueRestoreIdentity,
-    marker.ownerUserId,
-    context.queueBackup,
-    'rolled-back',
-  );
-  await context.state.markerHeartbeat.stop();
-  if (!await context.journal.clear(marker)) {
-    throw new Error('local backup UI restore prepared marker clear failed');
+}
+
+async function retainLocalBackupUiRestoreEvidenceForStartup(
+  context: LocalBackupUiRestoreTerminalContext,
+  cause: unknown,
+): Promise<void> {
+  const cleanupErrors: unknown[] = [];
+  try {
+    await context.state.markerHeartbeat.stop();
+  } catch (error) {
+    cleanupErrors.push(error);
   }
-  if (await context.journal.read() !== null) {
-    throw new Error('local backup UI restore prepared marker absence read-back failed');
+  try {
+    await context.quiescence.deferForStartupRecovery();
+  } catch (error) {
+    cleanupErrors.push(error);
   }
-  await verifyQueueBackupTerminalReadback(
-    marker.actionQueueRestoreIdentity,
-    marker.ownerUserId,
-    context.queueBackup,
-    terminal,
-  );
-  await context.quiescence.abortBeforeMutation();
-  context.state.closed = true;
+  if (cleanupErrors.length > 0) {
+    throw new AggregateError(
+      [cause, ...cleanupErrors],
+      'local backup UI restore evidence could not be handed off to startup recovery',
+    );
+  }
 }
 
 interface VerifiedQueueBackupTerminal {
