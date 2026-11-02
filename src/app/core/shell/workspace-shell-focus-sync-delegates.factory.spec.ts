@@ -74,24 +74,24 @@ function createMountState(): WorkspaceShellMountStateController {
 }
 
 describe('createWorkspaceShellFocusSyncDelegates', () => {
-  it('maps focus sync lazy host operations into public delegates', async () => {
+  it('preserves the public delegate surface while mapping non-pulse operations', () => {
     const { host, lazyHosts } = createLazyHosts();
     const delegates = createWorkspaceShellFocusSyncDelegates({
       lazyHosts,
       mountState: createMountState(),
     });
 
+    expect(Object.keys(delegates)).toEqual([
+      'focusMountIntent',
+      'focusEntrySyncPulse',
+      'syncPulseLifecycle',
+      'mobileFocusGate',
+      'focusProbeController',
+      'startupTierHydration',
+    ]);
+
     delegates.focusMountIntent.setup();
     delegates.focusMountIntent.teardown();
-    delegates.focusEntrySyncPulse.clearRetry();
-    delegates.focusEntrySyncPulse.dispatchIfReady();
-    delegates.focusEntrySyncPulse.handleOwnerChange('owner-1');
-    delegates.syncPulseLifecycle.initialize();
-    delegates.syncPulseLifecycle.sync();
-    delegates.syncPulseLifecycle.syncEffect();
-    delegates.syncPulseLifecycle.dispatchFocusEntrySyncPulseIfReady();
-    delegates.syncPulseLifecycle.clearFocusEntrySyncPulseRetry();
-    delegates.syncPulseLifecycle.destroy();
     delegates.mobileFocusGate.checkGateForMobileProjectEntry();
     delegates.mobileFocusGate.flushPendingMobileProjectGateCheck();
     delegates.mobileFocusGate.warmMobileProjectGateSnapshot();
@@ -100,49 +100,14 @@ describe('createWorkspaceShellFocusSyncDelegates', () => {
     delegates.startupTierHydration.startSyncHydrationIfReady();
     delegates.startupTierHydration.warmupInteractionIfReady();
 
-    await expect(delegates.syncPulseLifecycle.trigger('focus-entry'))
-      .resolves.toEqual({ status: 'success' });
-
     expect(host.focusMountIntent.setup).toHaveBeenCalledOnce();
     expect(host.focusMountIntent.teardown).toHaveBeenCalledOnce();
-    expect(host.focusEntrySyncPulse.clearRetry).toHaveBeenCalledOnce();
-    expect(host.focusEntrySyncPulse.dispatchIfReady).toHaveBeenCalledOnce();
-    expect(host.focusEntrySyncPulse.handleOwnerChange).toHaveBeenCalledWith('owner-1');
-    expect(host.syncPulseLifecycle.initialize).toHaveBeenCalledOnce();
-    expect(host.syncPulseLifecycle.sync).toHaveBeenCalledOnce();
-    expect(host.syncPulseLifecycle.trigger).toHaveBeenCalledWith('focus-entry');
+    expect(host.mobileFocusGate.checkGateForMobileProjectEntry).toHaveBeenCalledOnce();
+    expect(host.mobileFocusGate.flushPendingMobileProjectGateCheck).toHaveBeenCalledOnce();
     expect(host.mobileFocusGate.warmMobileProjectGateSnapshot).toHaveBeenCalledOnce();
     expect(host.focusProbeController.sync).toHaveBeenCalledOnce();
+    expect(host.startupTierHydration.markAuthReadyIfReady).toHaveBeenCalledOnce();
+    expect(host.startupTierHydration.startSyncHydrationIfReady).toHaveBeenCalledOnce();
     expect(host.startupTierHydration.warmupInteractionIfReady).toHaveBeenCalledOnce();
-  });
-
-  it('resets focus entry sync pulse through mount state and loaded host', () => {
-    const { host, lazyHosts } = createLazyHosts();
-    const mountState = createMountState();
-    const delegates = createWorkspaceShellFocusSyncDelegates({
-      lazyHosts,
-      mountState,
-    });
-
-    delegates.focusEntrySyncPulse.reset(true);
-    delegates.syncPulseLifecycle.resetFocusEntrySyncPulse(false);
-
-    expect(mountState.focusModeIntentActivated.set).toHaveBeenCalledTimes(2);
-    expect(host.focusEntrySyncPulse.reset).toHaveBeenNthCalledWith(1, true);
-    expect(host.focusEntrySyncPulse.reset).toHaveBeenNthCalledWith(2, false);
-  });
-
-  it('reports sync pulse readiness from the loaded delegate only', () => {
-    const { host, lazyHosts } = createLazyHosts();
-    const delegates = createWorkspaceShellFocusSyncDelegates({
-      lazyHosts,
-      mountState: createMountState(),
-    });
-
-    expect(delegates.syncPulseLifecycle.isReady()).toBe(true);
-    lazyHosts.loadedDelegate = null;
-
-    expect(delegates.syncPulseLifecycle.isReady()).toBe(false);
-    expect(host.syncPulseLifecycle.isReady).toHaveBeenCalledOnce();
   });
 });

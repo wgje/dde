@@ -1,18 +1,12 @@
 import type { WritableSignal } from '@angular/core';
+import {
+  WorkspaceShellFocusEntrySyncPulseRetryController,
+  type WorkspaceShellFocusEntrySyncPulseSkipReason,
+} from './workspace-shell-focus-entry-sync-pulse-retry.controller';
 
-const MAX_SAFE_TIMER_DELAY_MS = 2_147_483_647;
-
-export type WorkspaceShellFocusEntrySyncPulseSkipReason =
-  | 'disabled'
-  | 'cooldown'
-  | 'offline'
-  | 'hidden'
-  | 'unauthenticated'
-  | 'resuming'
-  | 'compensating'
-  | 'post-heavy-cooldown'
-  | 'same-ticket'
-  | 'in-flight';
+export type {
+  WorkspaceShellFocusEntrySyncPulseSkipReason,
+} from './workspace-shell-focus-entry-sync-pulse-retry.controller';
 
 export type WorkspaceShellFocusEntrySyncPulseResult = {
   status: 'success' | 'failed' | 'skipped';
@@ -29,6 +23,10 @@ export interface WorkspaceShellFocusEntrySyncPulseControllerOptions {
   teardownFocusMountIntentListener: () => void;
   cooldownDelayMs: number;
   postHeavyCooldownDelayMs: number;
+  retryController?: Pick<
+    WorkspaceShellFocusEntrySyncPulseRetryController,
+    'clear' | 'schedule'
+  >;
 }
 
 export class WorkspaceShellFocusEntrySyncPulseController {
@@ -36,9 +34,19 @@ export class WorkspaceShellFocusEntrySyncPulseController {
   private generation = 0;
   private dispatched = false;
   private pending = false;
-  private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly retryController: Pick<
+    WorkspaceShellFocusEntrySyncPulseRetryController,
+    'clear' | 'schedule'
+  >;
 
-  constructor(private readonly options: WorkspaceShellFocusEntrySyncPulseControllerOptions) {}
+  constructor(private readonly options: WorkspaceShellFocusEntrySyncPulseControllerOptions) {
+    this.retryController = options.retryController
+      ?? new WorkspaceShellFocusEntrySyncPulseRetryController({
+        cooldownDelayMs: options.cooldownDelayMs,
+        postHeavyCooldownDelayMs: options.postHeavyCooldownDelayMs,
+        retry: () => this.dispatchIfReady(),
+      });
+  }
 
   handleOwnerChange(ownerId: string | null): void {
     if (this.ownerScope === undefined) {
@@ -103,7 +111,7 @@ export class WorkspaceShellFocusEntrySyncPulseController {
 
         if (!result) {
           this.pending = false;
-          this.scheduleRetry('cooldown');
+          this.retryController.schedule('cooldown');
           return;
         }
 
@@ -114,13 +122,13 @@ export class WorkspaceShellFocusEntrySyncPulseController {
 
         if (result.status === 'failed') {
           this.pending = false;
-          this.scheduleRetry('cooldown');
+          this.retryController.schedule('cooldown');
           return;
         }
 
         if (result.status === 'skipped') {
           this.pending = false;
-          this.scheduleRetry(result.skipReason, result.retryAfterMs);
+          this.retryController.schedule(result.skipReason, result.retryAfterMs);
         }
       })
       .finally(() => {
@@ -131,49 +139,6 @@ export class WorkspaceShellFocusEntrySyncPulseController {
   }
 
   clearRetry(): void {
-    if (this.retryTimer === null) {
-      return;
-    }
-
-    const retryTimer = this.retryTimer;
-    this.retryTimer = null;
-    try {
-      clearTimeout(retryTimer);
-    } catch {
-      // Timer cleanup must not interrupt reset or recovery dispatch paths.
-    }
-  }
-
-  private scheduleRetry(
-    skipReason?: WorkspaceShellFocusEntrySyncPulseSkipReason,
-    retryAfterMs?: number,
-  ): void {
-    const fallbackDelay = skipReason === 'cooldown'
-      ? this.options.cooldownDelayMs
-      : skipReason === 'post-heavy-cooldown'
-        ? this.options.postHeavyCooldownDelayMs
-        : null;
-    const requestedDelay = retryAfterMs ?? fallbackDelay;
-    const delay = requestedDelay !== null && Number.isFinite(requestedDelay) && requestedDelay > 0
-      ? requestedDelay
-      : fallbackDelay;
-
-    if (delay === null) {
-      return;
-    }
-
-    const safeDelay = Math.min(delay, MAX_SAFE_TIMER_DELAY_MS);
-
-    this.clearRetry();
-    const generation = this.generation;
-    const retryTimer = setTimeout(() => {
-      if (generation !== this.generation || this.retryTimer !== retryTimer) {
-        return;
-      }
-
-      this.retryTimer = null;
-      this.dispatchIfReady();
-    }, safeDelay);
-    this.retryTimer = retryTimer;
+    this.retryController.clear();
   }
 }

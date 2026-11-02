@@ -13,6 +13,39 @@ describe('WorkspaceShellFocusEntrySyncPulseController', () => {
     vi.useRealTimers();
   });
 
+  it('delegates skipped pulse retries and retry cleanup', async () => {
+    const clearRetry = vi.fn();
+    const scheduleRetry = vi.fn();
+    const retryController = {
+      clear: clearRetry,
+      schedule: scheduleRetry,
+    };
+    const controller = new WorkspaceShellFocusEntrySyncPulseController({
+      focusModeIntentActivated: signal(true),
+      isReady: () => true,
+      isThrottledFocusStartup: () => false,
+      triggerSyncPulse: vi.fn().mockResolvedValue({
+        status: 'skipped' as const,
+        skipReason: 'offline' as const,
+      }),
+      setupFocusMountIntentListener: vi.fn(),
+      teardownFocusMountIntentListener: vi.fn(),
+      cooldownDelayMs: 1000,
+      postHeavyCooldownDelayMs: 2000,
+      retryController,
+    });
+
+    controller.dispatchIfReady();
+    await flushMicrotasks();
+
+    expect(scheduleRetry).toHaveBeenCalledWith('offline', undefined);
+
+    clearRetry.mockClear();
+    controller.clearRetry();
+
+    expect(clearRetry).toHaveBeenCalledTimes(1);
+  });
+
   it('隔离 sync pulse reject 并释放 pending，允许后续重新触发', async () => {
     const focusModeIntentActivated = signal(true);
     const triggerSyncPulse = vi.fn()
@@ -100,92 +133,6 @@ describe('WorkspaceShellFocusEntrySyncPulseController', () => {
     expect(triggerSyncPulse).toHaveBeenCalledTimes(2);
   });
 
-  it('sync pulse 返回非正 retryAfterMs 时不应在 0ms timer 中立即重入', async () => {
-    vi.useFakeTimers();
-    const focusModeIntentActivated = signal(true);
-    const triggerSyncPulse = vi.fn()
-      .mockResolvedValueOnce({ status: 'skipped' as const, skipReason: 'cooldown' as const, retryAfterMs: 0 })
-      .mockResolvedValueOnce({ status: 'success' as const });
-    const controller = new WorkspaceShellFocusEntrySyncPulseController({
-      focusModeIntentActivated,
-      isReady: () => true,
-      isThrottledFocusStartup: () => false,
-      triggerSyncPulse,
-      setupFocusMountIntentListener: vi.fn(),
-      teardownFocusMountIntentListener: vi.fn(),
-      cooldownDelayMs: 1000,
-      postHeavyCooldownDelayMs: 2000,
-    });
-
-    controller.dispatchIfReady();
-    await flushMicrotasks();
-
-    await vi.advanceTimersByTimeAsync(0);
-    await flushMicrotasks();
-
-    expect(triggerSyncPulse).toHaveBeenCalledTimes(1);
-
-    await vi.advanceTimersByTimeAsync(1000);
-    await flushMicrotasks();
-
-    expect(triggerSyncPulse).toHaveBeenCalledTimes(2);
-  });
-
-  it('sync pulse 返回非有限 retryAfterMs 时回退到 cooldown 避免 timer 溢出重入', async () => {
-    const retryTimer = 1 as unknown as ReturnType<typeof setTimeout>;
-    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(() => retryTimer);
-    const focusModeIntentActivated = signal(true);
-    const triggerSyncPulse = vi.fn()
-      .mockResolvedValueOnce({
-        status: 'skipped' as const,
-        skipReason: 'cooldown' as const,
-        retryAfterMs: Number.POSITIVE_INFINITY,
-      });
-    const controller = new WorkspaceShellFocusEntrySyncPulseController({
-      focusModeIntentActivated,
-      isReady: () => true,
-      isThrottledFocusStartup: () => false,
-      triggerSyncPulse,
-      setupFocusMountIntentListener: vi.fn(),
-      teardownFocusMountIntentListener: vi.fn(),
-      cooldownDelayMs: 1000,
-      postHeavyCooldownDelayMs: 2000,
-    });
-
-    controller.dispatchIfReady();
-    await flushMicrotasks();
-
-    expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), 1000);
-  });
-
-  it('sync pulse 返回超过运行时安全上限的 retryAfterMs 时限制到最大安全 timer delay', async () => {
-    const maxSafeTimerDelayMs = 2_147_483_647;
-    const retryTimer = 1 as unknown as ReturnType<typeof setTimeout>;
-    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(() => retryTimer);
-    const focusModeIntentActivated = signal(true);
-    const triggerSyncPulse = vi.fn()
-      .mockResolvedValueOnce({
-        status: 'skipped' as const,
-        skipReason: 'cooldown' as const,
-        retryAfterMs: maxSafeTimerDelayMs + 1,
-      });
-    const controller = new WorkspaceShellFocusEntrySyncPulseController({
-      focusModeIntentActivated,
-      isReady: () => true,
-      isThrottledFocusStartup: () => false,
-      triggerSyncPulse,
-      setupFocusMountIntentListener: vi.fn(),
-      teardownFocusMountIntentListener: vi.fn(),
-      cooldownDelayMs: 1000,
-      postHeavyCooldownDelayMs: 2000,
-    });
-
-    controller.dispatchIfReady();
-    await flushMicrotasks();
-
-    expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), maxSafeTimerDelayMs);
-  });
-
   it('隔离 sync pulse 同步异常并按 cooldown 自动重试', async () => {
     vi.useFakeTimers();
     const focusModeIntentActivated = signal(true);
@@ -244,64 +191,6 @@ describe('WorkspaceShellFocusEntrySyncPulseController', () => {
     expect(triggerSyncPulse).toHaveBeenCalledTimes(2);
   });
 
-  it('reset clears a pending retry even when the browser timer handle is 0', async () => {
-    const retryTimer = 0 as unknown as ReturnType<typeof setTimeout>;
-    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(() => retryTimer);
-    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout').mockImplementation(() => undefined);
-    const focusModeIntentActivated = signal(true);
-    const triggerSyncPulse = vi.fn().mockResolvedValue(null);
-    const controller = new WorkspaceShellFocusEntrySyncPulseController({
-      focusModeIntentActivated,
-      isReady: () => true,
-      isThrottledFocusStartup: () => false,
-      triggerSyncPulse,
-      setupFocusMountIntentListener: vi.fn(),
-      teardownFocusMountIntentListener: vi.fn(),
-      cooldownDelayMs: 1000,
-      postHeavyCooldownDelayMs: 2000,
-    });
-
-    controller.dispatchIfReady();
-    await flushMicrotasks();
-    controller.reset();
-
-    expect(setTimeoutSpy).toHaveBeenCalledOnce();
-    expect(clearTimeoutSpy).toHaveBeenCalledWith(0);
-  });
-
-  it('reset continues when clearing a pending retry timer throws', async () => {
-    const retryTimer = 1 as unknown as ReturnType<typeof setTimeout>;
-    vi.spyOn(globalThis, 'setTimeout').mockImplementation(() => retryTimer);
-    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout').mockImplementation(() => {
-      throw new Error('clear timeout failed');
-    });
-    const focusModeIntentActivated = signal(true);
-    const setupFocusMountIntentListener = vi.fn();
-    const teardownFocusMountIntentListener = vi.fn();
-    const triggerSyncPulse = vi.fn().mockResolvedValue(null);
-    const controller = new WorkspaceShellFocusEntrySyncPulseController({
-      focusModeIntentActivated,
-      isReady: () => true,
-      isThrottledFocusStartup: () => false,
-      triggerSyncPulse,
-      setupFocusMountIntentListener,
-      teardownFocusMountIntentListener,
-      cooldownDelayMs: 1000,
-      postHeavyCooldownDelayMs: 2000,
-    });
-
-    controller.dispatchIfReady();
-    await flushMicrotasks();
-    focusModeIntentActivated.set(false);
-
-    expect(() => controller.reset()).not.toThrow();
-
-    expect(clearTimeoutSpy).toHaveBeenCalledWith(retryTimer);
-    expect(focusModeIntentActivated()).toBe(true);
-    expect(teardownFocusMountIntentListener).toHaveBeenCalledTimes(1);
-    expect(setupFocusMountIntentListener).toHaveBeenCalledTimes(1);
-  });
-
   it('reset continues rearming the focus mount listener when teardown throws', () => {
     const focusModeIntentActivated = signal(false);
     const teardownError = new Error('focus mount listener teardown failed');
@@ -352,42 +241,4 @@ describe('WorkspaceShellFocusEntrySyncPulseController', () => {
     expect(setupFocusMountIntentListener).toHaveBeenCalledTimes(1);
   });
 
-  it('ignores a stale retry timer after a newer retry is scheduled', async () => {
-    const queuedTimeouts = new Map<number, () => void>();
-    let nextTimerId = 1;
-    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout')
-      .mockImplementation((callback: TimerHandler) => {
-        const timerId = nextTimerId++;
-        queuedTimeouts.set(timerId, callback as () => void);
-        return timerId as unknown as ReturnType<typeof setTimeout>;
-      });
-    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout').mockImplementation(() => undefined);
-    const focusModeIntentActivated = signal(true);
-    const triggerSyncPulse = vi.fn()
-      .mockResolvedValueOnce({ status: 'failed' as const })
-      .mockResolvedValueOnce({ status: 'failed' as const })
-      .mockResolvedValueOnce({ status: 'success' as const });
-    const controller = new WorkspaceShellFocusEntrySyncPulseController({
-      focusModeIntentActivated,
-      isReady: () => true,
-      isThrottledFocusStartup: () => false,
-      triggerSyncPulse,
-      setupFocusMountIntentListener: vi.fn(),
-      teardownFocusMountIntentListener: vi.fn(),
-      cooldownDelayMs: 1000,
-      postHeavyCooldownDelayMs: 2000,
-    });
-
-    controller.dispatchIfReady();
-    await flushMicrotasks();
-    controller.dispatchIfReady();
-    await flushMicrotasks();
-    queuedTimeouts.get(1)?.();
-    controller.reset();
-
-    expect(setTimeoutSpy).toHaveBeenCalledTimes(2);
-    expect(triggerSyncPulse).toHaveBeenCalledTimes(2);
-    expect(clearTimeoutSpy).toHaveBeenCalledWith(1);
-    expect(clearTimeoutSpy).toHaveBeenCalledWith(2);
-  });
 });
