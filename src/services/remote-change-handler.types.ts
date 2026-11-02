@@ -1,3 +1,5 @@
+import type { Task } from '../models';
+
 /**
  * 远程项目变更载荷。
  */
@@ -27,6 +29,9 @@ export interface RemoteTaskUpdateContext {
   eventType: RemoteTaskChangePayload['eventType'];
   taskId: string;
   targetProjectId: string;
+  ownerUserId: string;
+  sessionGeneration: number;
+  permissionDeniedTaskSnapshot: Task | null;
   requestId: number;
   currentProjectId: string | null;
 }

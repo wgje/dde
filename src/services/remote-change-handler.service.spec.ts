@@ -91,6 +91,9 @@ describe('RemoteChangeHandlerService', () => {
   let mockLogger: { debug: SpyFn; info: SpyFn; warn: SpyFn; error: SpyFn };
   let mockToast: { info: SpyFn; warning: SpyFn };
   let mockPermissionDeniedHandler: { handlePermissionDenied: SpyFn };
+  let currentAuthUserId: string | null;
+  let currentSessionUserId: string | null;
+  let currentSessionGeneration: number;
   let localProjects: Project[];
   let mockProjectState: {
     projects: SpyFn;
@@ -105,6 +108,9 @@ describe('RemoteChangeHandlerService', () => {
   beforeEach(() => {
     projectChangeCallback = null;
     taskChangeCallback = null;
+    currentAuthUserId = 'user-123';
+    currentSessionUserId = 'user-123';
+    currentSessionGeneration = 1;
     
     mockLogger = {
       debug: vi.fn(),
@@ -166,12 +172,12 @@ describe('RemoteChangeHandlerService', () => {
         { provide: UiStateService, useValue: mockUiState },
         { provide: ProjectStateService, useValue: mockProjectState },
         { provide: ToastService, useValue: mockToast },
-        { provide: AuthService, useValue: { currentUserId: vi.fn().mockReturnValue('user-123') } },
+        { provide: AuthService, useValue: { currentUserId: vi.fn(() => currentAuthUserId) } },
         { provide: UserSessionService, useValue: {
-          currentUserId: vi.fn().mockReturnValue('user-123'),
-          getCurrentSessionGeneration: vi.fn().mockReturnValue(1),
+          currentUserId: vi.fn(() => currentSessionUserId),
+          getCurrentSessionGeneration: vi.fn(() => currentSessionGeneration),
           isSessionContextCurrent: vi.fn((generation: number, userId: string) => (
-            generation === 1 && userId === 'user-123'
+            generation === currentSessionGeneration && userId === currentSessionUserId
           )),
         } },
         { provide: LoggerService, useValue: { category: () => mockLogger } },
@@ -497,10 +503,80 @@ describe('RemoteChangeHandlerService', () => {
           code: '42501',
           status: 401,
         }),
-        [affectedTask],
+        [expect.objectContaining({ id: 'task-1', title: 'Local task' })],
         'project-1',
+        expect.objectContaining({ ownerUserId: 'user-123', shouldNotify: expect.any(Function) }),
       );
       expect(mockToast.warning).not.toHaveBeenCalled();
+    });
+
+    it('账号切换后仍按请求起点保全任务快照，且不向新会话提示', async () => {
+      const originalTask = createTask({ id: 'task-1', title: 'Owner A task' });
+      localProjects = [createProject({ id: 'project-1', tasks: [originalTask] })];
+      mockProjectState.activeProjectId.mockReturnValue('project-1');
+
+      let rejectLoad: (error: unknown) => void = () => undefined;
+      mockSyncCoordinator.core.loadSingleProject.mockImplementationOnce(() => new Promise<Project | null>((_resolve, reject) => {
+        rejectLoad = reject;
+      }));
+
+      service.setupCallbacks(vi.fn().mockResolvedValue(undefined));
+      taskChangeCallback!({ eventType: 'UPDATE', taskId: 'task-1', projectId: 'project-1' });
+
+      currentAuthUserId = 'user-456';
+      currentSessionUserId = 'user-456';
+      currentSessionGeneration = 2;
+      localProjects = [createProject({
+        id: 'project-1',
+        tasks: [createTask({ id: 'task-1', title: 'Owner B task' })],
+      })];
+
+      rejectLoad({ code: '42501', message: 'permission denied for table tasks', status: 401 });
+      await flushPromises();
+      await flushPromises();
+
+      const call = mockPermissionDeniedHandler.handlePermissionDenied.mock.calls[0];
+      expect(call).toBeDefined();
+      expect(call?.[1]).toEqual([expect.objectContaining({ id: 'task-1', title: 'Owner A task' })]);
+      expect(call?.[2]).toBe('project-1');
+      const context = call?.[3] as { ownerUserId: string; shouldNotify: () => boolean };
+      expect(context.ownerUserId).toBe('user-123');
+      expect(context.shouldNotify()).toBe(false);
+      expect(mockToast.warning).not.toHaveBeenCalled();
+    });
+
+    it('账号切换后旧会话成功响应不会覆盖新 owner 的同 ID 任务', async () => {
+      localProjects = [createProject({
+        id: 'project-1',
+        tasks: [createTask({ id: 'task-1', title: 'Owner A task' })],
+      })];
+      mockProjectState.activeProjectId.mockReturnValue('project-1');
+
+      let resolveLoad: (project: Project) => void = () => undefined;
+      mockSyncCoordinator.core.loadSingleProject.mockImplementationOnce(() => new Promise<Project | null>(resolve => {
+        resolveLoad = project => resolve(project);
+      }));
+
+      service.setupCallbacks(vi.fn().mockResolvedValue(undefined));
+      taskChangeCallback!({ eventType: 'UPDATE', taskId: 'task-1', projectId: 'project-1' });
+
+      currentAuthUserId = 'user-456';
+      currentSessionUserId = 'user-456';
+      currentSessionGeneration = 2;
+      localProjects = [createProject({
+        id: 'project-1',
+        tasks: [createTask({ id: 'task-1', title: 'Owner B task' })],
+      })];
+
+      resolveLoad(createProject({
+        id: 'project-1',
+        tasks: [createTask({ id: 'task-1', title: 'Owner A remote task' })],
+      }));
+      await flushPromises();
+      await flushPromises();
+
+      expect(localProjects[0]?.tasks[0]?.title).toBe('Owner B task');
+      expect(mockSyncCoordinator.getTombstoneIds).not.toHaveBeenCalled();
     });
 
     it('tombstone 加载期间被新请求取代的任务更新不应再写入本地项目', async () => {

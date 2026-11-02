@@ -482,12 +482,21 @@ export class RemoteChangeHandlerService {
     targetProjectId: string
   ): void {
     const userId = this.authService.currentUserId();
-    if (!userId) return;
+    const ownerUserId = this.userSession.currentUserId();
+    if (!userId || !ownerUserId || userId !== ownerUserId) return;
+
+    const sessionGeneration = this.userSession.getCurrentSessionGeneration();
+    const localTask = this.projectState.getProject(targetProjectId)?.tasks.find(task => task.id === taskId);
+    const permissionDeniedTaskSnapshot = localTask ? structuredClone(localTask) : null;
+    if (!this.userSession.isSessionContextCurrent(sessionGeneration, ownerUserId)) return;
 
     const context: RemoteTaskUpdateContext = {
       eventType,
       taskId,
       targetProjectId,
+      ownerUserId,
+      sessionGeneration,
+      permissionDeniedTaskSnapshot,
       currentProjectId: this.projectState.activeProjectId(),
       requestId: ++this.taskUpdateRequestId
     };
@@ -531,6 +540,16 @@ export class RemoteChangeHandlerService {
   }
 
   private canApplyTaskUpdateResult(context: RemoteTaskUpdateContext): boolean {
+    if (!this.userSession.isSessionContextCurrent(context.sessionGeneration, context.ownerUserId)) {
+      this.logger.debug('远程任务更新所属会话已失效', {
+        taskId: context.taskId,
+        projectId: context.targetProjectId,
+        ownerUserId: context.ownerUserId,
+        sessionGeneration: context.sessionGeneration,
+      });
+      return false;
+    }
+
     const decision = canApplyRemoteTaskUpdateResult({
       requestId: context.requestId,
       currentRequestId: this.taskUpdateRequestId,
@@ -708,12 +727,17 @@ export class RemoteChangeHandlerService {
   }
 
   private async handleRemoteTaskUpdateError(error: unknown, context: RemoteTaskUpdateContext): Promise<void> {
-    if (context.requestId !== this.taskUpdateRequestId || this.isDestroyed) return;
+    const supabaseError = supabaseErrorToError(error);
+    const isPermissionDenied = this.isPermissionDeniedError(supabaseError);
+    if (!isPermissionDenied && (
+      context.requestId !== this.taskUpdateRequestId
+      || this.isDestroyed
+      || !this.userSession.isSessionContextCurrent(context.sessionGeneration, context.ownerUserId)
+    )) return;
 
     this.logger.error('处理远程任务更新失败', error);
 
-    const supabaseError = supabaseErrorToError(error);
-    if (this.isPermissionDeniedError(supabaseError)) {
+    if (isPermissionDenied) {
       await this.handlePermissionDeniedTaskUpdate(supabaseError, context);
       return;
     }
@@ -751,14 +775,19 @@ export class RemoteChangeHandlerService {
       errorCode: supabaseError.code
     });
 
-    const localProject = this.projectState.getProject(context.targetProjectId);
-    const affectedTask = localProject?.tasks.find(t => t.id === context.taskId);
+    const affectedTask = context.permissionDeniedTaskSnapshot;
     if (!affectedTask) return;
 
     await this.permissionDeniedHandler.handlePermissionDenied(
       supabaseError as SupabaseError,
       [affectedTask],
-      context.targetProjectId
+      context.targetProjectId,
+      {
+        ownerUserId: context.ownerUserId,
+        shouldNotify: () => context.requestId === this.taskUpdateRequestId
+          && !this.isDestroyed
+          && this.userSession.isSessionContextCurrent(context.sessionGeneration, context.ownerUserId),
+      },
     );
   }
 
