@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   WorkspaceShellFlowPrewarmController,
@@ -18,67 +18,126 @@ function runScheduled(callback: (() => void) | null): void {
 }
 
 describe('WorkspaceShellFlowPrewarmController', () => {
-  let previousTrace: unknown;
+  it('records the after-view-init prewarm intent as scheduled while the P1 gate is closed', async () => {
+    const traceEvents: Array<[FlowPrewarmStatus, string]> = [];
+    const prewarmFlow = vi.fn().mockResolvedValue({ warmed: true });
+    let releaseGate: (() => void) | undefined;
+    const controller = new WorkspaceShellFlowPrewarmController({
+      isDestroyed: () => false,
+      prewarmFlow,
+      schedule: callback => {
+        callback();
+        return 1;
+      },
+      clearScheduled: vi.fn(),
+      gateScheduledPrewarm: resume => {
+        releaseGate = resume;
+      },
+      trace: {
+        record: (status, reason) => traceEvents.push([status, reason]),
+      },
+      warn: vi.fn(),
+    });
 
-  function readRawFlowPrewarmTrace(): unknown {
-    return (
-      globalThis as typeof globalThis & {
-        __NANOFLOW_FLOW_PREWARM_TRACE__?: unknown;
-      }
-    ).__NANOFLOW_FLOW_PREWARM_TRACE__;
-  }
+    controller.scheduleAggressivePrewarm('workspace-after-view-init');
+    await flushMicrotasks();
 
-  function readFlowPrewarmTrace(): Array<{
-    status: FlowPrewarmStatus;
-    reason: string;
-    at: number;
-  }> | undefined {
-    return (
-      globalThis as typeof globalThis & {
-        __NANOFLOW_FLOW_PREWARM_TRACE__?: Array<{
-          status: FlowPrewarmStatus;
-          reason: string;
-          at: number;
-        }>;
-      }
-    ).__NANOFLOW_FLOW_PREWARM_TRACE__;
-  }
-
-  function clearFlowPrewarmTrace(): void {
-    delete (
-      globalThis as typeof globalThis & {
-        __NANOFLOW_FLOW_PREWARM_TRACE__?: unknown;
-      }
-    ).__NANOFLOW_FLOW_PREWARM_TRACE__;
-  }
-
-  function restoreFlowPrewarmTrace(): void {
-    if (previousTrace === undefined) {
-      delete (
-        globalThis as typeof globalThis & {
-          __NANOFLOW_FLOW_PREWARM_TRACE__?: unknown;
-        }
-      ).__NANOFLOW_FLOW_PREWARM_TRACE__;
-      return;
-    }
-
-    (
-      globalThis as typeof globalThis & {
-        __NANOFLOW_FLOW_PREWARM_TRACE__?: unknown;
-      }
-    ).__NANOFLOW_FLOW_PREWARM_TRACE__ = previousTrace;
-  }
-
-  beforeEach(() => {
-    previousTrace = readRawFlowPrewarmTrace();
-    clearFlowPrewarmTrace();
+    expect(releaseGate).toEqual(expect.any(Function));
+    expect(prewarmFlow).not.toHaveBeenCalled();
+    expect(controller.status()).toBe('scheduled');
+    expect(traceEvents).toEqual([
+      ['scheduled', 'workspace-after-view-init'],
+    ]);
   });
 
-  afterEach(() => {
-    restoreFlowPrewarmTrace();
+  it('advances a retained after-view-init prewarm intent when the P1 gate opens', async () => {
+    const traceEvents: Array<[FlowPrewarmStatus, string]> = [];
+    const prewarmFlow = vi.fn().mockResolvedValue({ warmed: true });
+    let releaseGate: (() => void) | undefined;
+    const controller = new WorkspaceShellFlowPrewarmController({
+      isDestroyed: () => false,
+      prewarmFlow,
+      schedule: callback => {
+        callback();
+        return 1;
+      },
+      clearScheduled: vi.fn(),
+      gateScheduledPrewarm: resume => {
+        releaseGate = resume;
+      },
+      trace: {
+        record: (status, reason) => traceEvents.push([status, reason]),
+      },
+      warn: vi.fn(),
+    });
+
+    controller.scheduleAggressivePrewarm('workspace-after-view-init');
+    await flushMicrotasks();
+
+    expect(releaseGate).toEqual(expect.any(Function));
+    expect(prewarmFlow).not.toHaveBeenCalled();
+    expect(controller.status()).toBe('scheduled');
+
+    releaseGate?.();
+    await flushMicrotasks();
+
+    expect(prewarmFlow).toHaveBeenCalledTimes(1);
+    expect(controller.status()).toBe('ready');
+    expect(traceEvents).toEqual([
+      ['scheduled', 'workspace-after-view-init'],
+      ['loading', 'workspace-after-view-init'],
+      ['ready', 'workspace-after-view-init'],
+    ]);
   });
 
-  it('records browser trace events with the scheduled prewarm reason', async () => {
+  it('ignores a deferred gate resume after teardown and cleans up the gate once', async () => {
+    const traceEvents: Array<[FlowPrewarmStatus, string]> = [];
+    const prewarmFlow = vi.fn().mockResolvedValue({ warmed: true });
+    const releaseGate = vi.fn();
+    let deferredResume: (() => void) | undefined;
+    const controller = new WorkspaceShellFlowPrewarmController({
+      isDestroyed: () => false,
+      prewarmFlow,
+      schedule: callback => {
+        callback();
+        return 1;
+      },
+      clearScheduled: vi.fn(),
+      gateScheduledPrewarm: resume => {
+        deferredResume = resume;
+        return releaseGate;
+      },
+      trace: {
+        record: (status, reason) => traceEvents.push([status, reason]),
+      },
+      warn: vi.fn(),
+    });
+
+    controller.scheduleAggressivePrewarm('workspace-after-view-init');
+    await flushMicrotasks();
+
+    expect(deferredResume).toEqual(expect.any(Function));
+    expect(prewarmFlow).not.toHaveBeenCalled();
+    expect(traceEvents).toEqual([
+      ['scheduled', 'workspace-after-view-init'],
+    ]);
+
+    controller.teardown();
+    controller.teardown();
+    deferredResume?.();
+    await flushMicrotasks();
+
+    expect(releaseGate).toHaveBeenCalledTimes(1);
+    expect(prewarmFlow).not.toHaveBeenCalled();
+    expect(traceEvents).toEqual([
+      ['scheduled', 'workspace-after-view-init'],
+    ]);
+    expect(traceEvents.map(([status]) => status)).not.toContain('loading');
+    expect(controller.status()).toBe('idle');
+  });
+
+  it('records state transitions with the scheduled prewarm reason', async () => {
+    const traceEvents: Array<[FlowPrewarmStatus, string]> = [];
     const controller = new WorkspaceShellFlowPrewarmController({
       isDestroyed: () => false,
       prewarmFlow: vi.fn().mockResolvedValue({ warmed: true }),
@@ -87,17 +146,20 @@ describe('WorkspaceShellFlowPrewarmController', () => {
         return 1;
       },
       clearScheduled: vi.fn(),
+      trace: {
+        record: (status, reason) => traceEvents.push([status, reason]),
+      },
       warn: vi.fn(),
     });
 
     controller.scheduleAggressivePrewarm('text-ready');
     await flushMicrotasks();
 
-    const trace = readFlowPrewarmTrace();
-
-    expect(trace?.map(entry => entry.status)).toEqual(['scheduled', 'loading', 'ready']);
-    expect(trace?.map(entry => entry.reason)).toEqual(['text-ready', 'text-ready', 'text-ready']);
-    expect(trace?.every(entry => typeof entry.at === 'number' && Number.isFinite(entry.at))).toBe(true);
+    expect(traceEvents).toEqual([
+      ['scheduled', 'text-ready'],
+      ['loading', 'text-ready'],
+      ['ready', 'text-ready'],
+    ]);
   });
 
   it('coalesces repeated aggressive prewarm requests into one load', async () => {
@@ -186,6 +248,7 @@ describe('WorkspaceShellFlowPrewarmController', () => {
       .mockRejectedValueOnce(error)
       .mockResolvedValueOnce({ warmed: true });
     const warn = vi.fn();
+    const traceEvents: Array<[FlowPrewarmStatus, string]> = [];
     const controller = new WorkspaceShellFlowPrewarmController({
       isDestroyed: () => false,
       prewarmFlow,
@@ -194,6 +257,9 @@ describe('WorkspaceShellFlowPrewarmController', () => {
         return 1;
       },
       clearScheduled: vi.fn(),
+      trace: {
+        record: (status, reason) => traceEvents.push([status, reason]),
+      },
       warn,
     });
 
@@ -201,15 +267,10 @@ describe('WorkspaceShellFlowPrewarmController', () => {
     await flushMicrotasks();
     expect(controller.status()).toBe('failed');
 
-    expect(readFlowPrewarmTrace()?.map(entry => entry.status)).toEqual([
-      'scheduled',
-      'loading',
-      'failed',
-    ]);
-    expect(readFlowPrewarmTrace()?.map(entry => entry.reason)).toEqual([
-      'text-ready',
-      'text-ready',
-      'text-ready',
+    expect(traceEvents).toEqual([
+      ['scheduled', 'text-ready'],
+      ['loading', 'text-ready'],
+      ['failed', 'text-ready'],
     ]);
 
     controller.scheduleAggressivePrewarm('retry');

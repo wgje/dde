@@ -1,4 +1,6 @@
-import { describe, expect, it, vi } from 'vitest';
+import { Injector, signal } from '@angular/core';
+import { TestBed } from '@angular/core/testing';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   createWorkspaceShellLifecycleStartupOptions,
@@ -11,21 +13,26 @@ import {
 } from './workspace-shell-source.spec-helpers';
 
 describe('workspace shell lifecycle startup options', () => {
+  afterEach(() => TestBed.resetTestingModule());
+
   it('builds shared startup lazy lifecycle options from the shell runtime context', () => {
     const injector = { get: vi.fn() };
     const destroyed = vi.fn(() => false);
+    const startupTier = {
+      isTierReady: vi.fn((tier: 'p1' | 'p2') => tier === 'p1'),
+    };
     const warn = vi.fn();
 
     const options = createWorkspaceShellLifecycleStartupOptions({
       injector,
       destroyed,
+      startupTier,
       warn,
     });
 
-    expect(options.flowPrewarm).toEqual({
-      isDestroyed: destroyed,
-      warn,
-    });
+    expect(options.flowPrewarm.isDestroyed).toBe(destroyed);
+    expect(options.flowPrewarm.warn).toBe(warn);
+    expect(options.flowPrewarm.gateScheduledPrewarm).toEqual(expect.any(Function));
     expect(options.lazyLifecycles).toEqual({
       injector,
       runtime: { destroyed },
@@ -35,6 +42,79 @@ describe('workspace shell lifecycle startup options', () => {
       injector,
       warn,
     });
+
+    const resume = vi.fn();
+    options.flowPrewarm.gateScheduledPrewarm?.(resume);
+    expect(startupTier.isTierReady).toHaveBeenCalledWith('p1');
+    expect(resume).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps flow prewarm on the legacy path when P1 gating cannot observe readiness', () => {
+    const destroyed = vi.fn(() => false);
+    const startupTier = {
+      isTierReady: vi.fn(() => false),
+    };
+    const warn = vi.fn();
+
+    const options = createWorkspaceShellLifecycleStartupOptions({
+      destroyed,
+      startupTier,
+      warn,
+    });
+
+    expect(options.flowPrewarm.gateScheduledPrewarm).toBeUndefined();
+    expect(
+      Object.prototype.hasOwnProperty.call(options.flowPrewarm, 'gateScheduledPrewarm'),
+    ).toBe(false);
+  });
+
+  it('resumes gated prewarm when the P1 readiness signal changes', () => {
+    const p1Ready = signal(false);
+    const startupTier = {
+      isTierReady: vi.fn((tier: 'p1' | 'p2') => tier === 'p1' && p1Ready()),
+    };
+    const options = createWorkspaceShellLifecycleStartupOptions({
+      injector: TestBed.inject(Injector),
+      destroyed: vi.fn(() => false),
+      startupTier,
+      warn: vi.fn(),
+    });
+    const resume = vi.fn();
+
+    options.flowPrewarm.gateScheduledPrewarm?.(resume);
+    TestBed.flushEffects();
+    expect(resume).not.toHaveBeenCalled();
+
+    p1Ready.set(true);
+    TestBed.flushEffects();
+    expect(resume).toHaveBeenCalledOnce();
+
+    p1Ready.set(false);
+    p1Ready.set(true);
+    TestBed.flushEffects();
+    expect(resume).toHaveBeenCalledOnce();
+  });
+
+  it('cancels the pending P1 readiness effect when the gate is released', () => {
+    const p1Ready = signal(false);
+    const startupTier = {
+      isTierReady: vi.fn((tier: 'p1' | 'p2') => tier === 'p1' && p1Ready()),
+    };
+    const options = createWorkspaceShellLifecycleStartupOptions({
+      injector: TestBed.inject(Injector),
+      destroyed: vi.fn(() => false),
+      startupTier,
+      warn: vi.fn(),
+    });
+    const resume = vi.fn();
+
+    const release = options.flowPrewarm.gateScheduledPrewarm?.(resume);
+    TestBed.flushEffects();
+    release?.();
+    p1Ready.set(true);
+    TestBed.flushEffects();
+
+    expect(resume).not.toHaveBeenCalled();
   });
 
   it('keeps startup lazy lifecycle option wiring outside WorkspaceShellComponent', () => {

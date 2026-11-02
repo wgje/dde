@@ -1,4 +1,16 @@
-export type FlowPrewarmStatus = 'idle' | 'scheduled' | 'loading' | 'ready' | 'failed';
+import {
+  WorkspaceShellFlowPrewarmSchedulerController,
+  type WorkspaceShellFlowPrewarmScheduledHandle,
+} from './workspace-shell-flow-prewarm-scheduler.controller';
+import {
+  WorkspaceShellFlowPrewarmTraceController,
+  type FlowPrewarmStatus,
+} from './workspace-shell-flow-prewarm-trace.controller';
+
+export type {
+  FlowPrewarmStatus,
+  FlowPrewarmTraceEvent,
+} from './workspace-shell-flow-prewarm-trace.controller';
 
 export interface WorkspaceShellFlowPrewarmResult {
   warmed: boolean;
@@ -8,25 +20,29 @@ export interface WorkspaceShellFlowPrewarmResult {
 export interface WorkspaceShellFlowPrewarmControllerOptions {
   isDestroyed: () => boolean;
   prewarmFlow?: () => Promise<WorkspaceShellFlowPrewarmResult>;
-  schedule?: (callback: () => void) => ReturnType<typeof setTimeout> | number;
-  clearScheduled?: (handle: ReturnType<typeof setTimeout> | number) => void;
+  schedule?: (callback: () => void) => WorkspaceShellFlowPrewarmScheduledHandle;
+  clearScheduled?: (handle: WorkspaceShellFlowPrewarmScheduledHandle) => void;
+  gateScheduledPrewarm?: (resume: () => void) => (() => void) | void;
+  trace?: Pick<WorkspaceShellFlowPrewarmTraceController, 'record'>;
   warn: (message: string, error: unknown) => void;
-}
-
-export interface FlowPrewarmTraceEvent {
-  status: FlowPrewarmStatus;
-  reason: string;
-  at: number;
 }
 
 export class WorkspaceShellFlowPrewarmController {
   private currentStatus: FlowPrewarmStatus = 'idle';
-  private scheduledHandle: ReturnType<typeof setTimeout> | number | null = null;
   private prewarmPromise: Promise<WorkspaceShellFlowPrewarmResult> | null = null;
   private generation = 0;
   private currentReason = '';
+  private readonly scheduler: WorkspaceShellFlowPrewarmSchedulerController;
+  private readonly trace: Pick<WorkspaceShellFlowPrewarmTraceController, 'record'>;
+  private gateRelease: (() => void) | null = null;
 
-  constructor(private readonly options: WorkspaceShellFlowPrewarmControllerOptions) {}
+  constructor(private readonly options: WorkspaceShellFlowPrewarmControllerOptions) {
+    this.scheduler = new WorkspaceShellFlowPrewarmSchedulerController({
+      schedule: options.schedule,
+      clearScheduled: options.clearScheduled,
+    });
+    this.trace = options.trace ?? new WorkspaceShellFlowPrewarmTraceController();
+  }
 
   status(): FlowPrewarmStatus {
     return this.currentStatus;
@@ -44,23 +60,48 @@ export class WorkspaceShellFlowPrewarmController {
 
     this.currentStatus = 'scheduled';
     this.currentReason = reason;
-    this.recordTrace('scheduled', reason);
-    let ranScheduledCallbackSynchronously = false;
+    this.trace.record('scheduled', reason);
+    if (this.options.gateScheduledPrewarm) {
+      this.registerScheduledGate(reason);
+      return;
+    }
+
+    this.schedulePrewarm(reason);
+  }
+
+  private registerScheduledGate(reason: string): void {
     try {
-      const scheduledHandle = this.schedule(() => {
+      const gateRelease = this.options.gateScheduledPrewarm?.(() => {
         if (this.currentStatus !== 'scheduled') {
           return;
         }
-        ranScheduledCallbackSynchronously = true;
-        this.scheduledHandle = null;
+        this.gateRelease = null;
+        this.schedulePrewarm(reason);
+      });
+      if (this.currentStatus === 'scheduled' && typeof gateRelease === 'function') {
+        this.gateRelease = gateRelease;
+      }
+    } catch (error) {
+      if (this.currentStatus === 'scheduled') {
+        this.currentStatus = 'failed';
+        this.trace.record('failed', reason);
+      }
+      this.warn('Flow 预热 P1 gate 注册失败，已允许稍后重试', error);
+    }
+  }
+
+  private schedulePrewarm(reason: string): void {
+    try {
+      this.scheduler.schedule(() => {
+        if (this.currentStatus !== 'scheduled') {
+          return;
+        }
         this.startPrewarm(reason);
       });
-      this.scheduledHandle = ranScheduledCallbackSynchronously ? null : scheduledHandle;
     } catch (error) {
-      this.scheduledHandle = null;
-      if (!ranScheduledCallbackSynchronously && this.currentStatus === 'scheduled') {
+      if (this.currentStatus === 'scheduled') {
         this.currentStatus = 'failed';
-        this.recordTrace('failed', reason);
+        this.trace.record('failed', reason);
       }
       this.warn('Flow 预热调度失败，已允许稍后重试', error);
     }
@@ -68,13 +109,16 @@ export class WorkspaceShellFlowPrewarmController {
 
   teardown(): void {
     this.generation += 1;
-    if (this.scheduledHandle !== null) {
-      try {
-        this.clearScheduled(this.scheduledHandle);
-      } catch (error) {
-        this.warn('Flow 预热调度清理失败，已继续清理', error);
-      }
-      this.scheduledHandle = null;
+    try {
+      this.gateRelease?.();
+    } catch (error) {
+      this.warn('Flow 预热 P1 gate 清理失败，已继续清理', error);
+    }
+    this.gateRelease = null;
+    try {
+      this.scheduler.clear();
+    } catch (error) {
+      this.warn('Flow 预热调度清理失败，已继续清理', error);
     }
     this.prewarmPromise = null;
     this.currentStatus = 'idle';
@@ -87,15 +131,16 @@ export class WorkspaceShellFlowPrewarmController {
       return;
     }
 
+    this.gateRelease = null;
     this.currentStatus = 'loading';
-    this.recordTrace('loading', this.currentReason || reason);
+    this.trace.record('loading', this.currentReason || reason);
     const generation = this.generation;
     this.prewarmPromise = Promise.resolve()
       .then(() => this.prewarmFlow())
       .then(result => {
         if (this.isCurrentGeneration(generation)) {
           this.currentStatus = result.warmed ? 'ready' : 'failed';
-          this.recordTrace(this.currentStatus, this.currentReason || reason);
+          this.trace.record(this.currentStatus, this.currentReason || reason);
           this.prewarmPromise = null;
         }
         return result;
@@ -104,7 +149,7 @@ export class WorkspaceShellFlowPrewarmController {
         if (this.isCurrentGeneration(generation)) {
           this.prewarmPromise = null;
           this.currentStatus = 'failed';
-          this.recordTrace('failed', this.currentReason || reason);
+          this.trace.record('failed', this.currentReason || reason);
           this.warn('Flow 预热失败，已允许稍后重试', error);
         }
         throw error;
@@ -126,34 +171,6 @@ export class WorkspaceShellFlowPrewarmController {
     return generation === this.generation && !this.options.isDestroyed();
   }
 
-  private schedule(callback: () => void): ReturnType<typeof setTimeout> | number {
-    if (this.options.schedule) {
-      return this.options.schedule(callback);
-    }
-
-    const requestIdle = globalThis.requestIdleCallback;
-    if (typeof requestIdle === 'function') {
-      return requestIdle(callback, { timeout: 750 });
-    }
-
-    return setTimeout(callback, 0);
-  }
-
-  private clearScheduled(handle: ReturnType<typeof setTimeout> | number): void {
-    if (this.options.clearScheduled) {
-      this.options.clearScheduled(handle);
-      return;
-    }
-
-    const cancelIdle = globalThis.cancelIdleCallback;
-    if (typeof cancelIdle === 'function' && typeof handle === 'number') {
-      cancelIdle(handle);
-      return;
-    }
-
-    clearTimeout(handle as ReturnType<typeof setTimeout>);
-  }
-
   private warn(message: string, error: unknown): void {
     try {
       this.options.warn(message, error);
@@ -162,26 +179,4 @@ export class WorkspaceShellFlowPrewarmController {
     }
   }
 
-  private recordTrace(status: FlowPrewarmStatus, reason: string): void {
-    try {
-      const target = globalThis as typeof globalThis & {
-        __NANOFLOW_FLOW_PREWARM_TRACE__?: FlowPrewarmTraceEvent[];
-      };
-      const records = Array.isArray(target.__NANOFLOW_FLOW_PREWARM_TRACE__)
-        ? target.__NANOFLOW_FLOW_PREWARM_TRACE__
-        : [];
-      target.__NANOFLOW_FLOW_PREWARM_TRACE__ = [
-        ...records,
-        {
-          status,
-          reason,
-          at: typeof performance !== 'undefined' && typeof performance.now === 'function'
-            ? performance.now()
-            : Date.now(),
-        },
-      ];
-    } catch {
-      // E2E trace only; never affect production behavior.
-    }
-  }
 }

@@ -137,7 +137,11 @@ describe('workspace shell lifecycle surface', () => {
       sessionLaunchControllers: { sessionTransition },
       signalEffects: { setup: vi.fn(), teardown: vi.fn() },
       startupEntryControllers,
-      startupTier: { destroy: vi.fn(), initialize: vi.fn() },
+      startupTier: {
+        destroy: vi.fn(),
+        initialize: vi.fn(),
+        isTierReady: vi.fn((tier: 'p1' | 'p2') => tier === 'p1'),
+      },
       storageEscape: { setup: vi.fn(), teardown: vi.fn() },
       syncCoordinator,
       toast,
@@ -157,7 +161,11 @@ describe('workspace shell lifecycle surface', () => {
     expect(createSidebarToggleEventController).toHaveBeenCalledWith({
       isSidebarOpen: uiState.sidebarOpen,
     });
-    expect(mappedOptions.flowPrewarm).toEqual({ isDestroyed: destroyed, warn });
+    expect(mappedOptions.flowPrewarm).toEqual({
+      isDestroyed: destroyed,
+      gateScheduledPrewarm: expect.any(Function),
+      warn,
+    });
     expect(mappedOptions.lazyLifecycles).toEqual({
       injector,
       runtime: { destroyed },
