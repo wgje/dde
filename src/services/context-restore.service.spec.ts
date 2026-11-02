@@ -5,16 +5,33 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { TestBed } from '@angular/core/testing';
-import { signal } from '@angular/core';
+import { signal, type WritableSignal } from '@angular/core';
 import { ContextRestoreService } from './context-restore.service';
 import { TaskStore, ProjectStore } from '../app/core/state/stores';
 import { UiStateService } from './ui-state.service';
 import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
 import { Task, ParkingSnapshot } from '../models';
+import { SessionRuntimeResetRegistry } from './session-runtime-reset.service';
+import { ProjectStateService, type ActiveProjectOwner } from './project-state.service';
+
+vi.mock('../app/features/flow/services/flow-diagram.service', () => ({
+  FlowDiagramService: class FlowDiagramService {},
+}));
+vi.mock('../app/features/flow/services/flow-zoom.service', () => ({
+  FlowZoomService: class FlowZoomService {},
+}));
 
 describe('ContextRestoreService', () => {
   let service: ContextRestoreService;
+  let sessionResetCallback: (() => void) | null;
+  let mockSessionRuntimeReset: Pick<SessionRuntimeResetRegistry, 'register' | 'resetAll'>;
+  let projectGeneration: number;
+  let mockProjectState: {
+    captureActiveProjectOwner: ReturnType<typeof vi.fn>;
+    isActiveProjectOwnerCurrent: ReturnType<typeof vi.fn>;
+    getProjectWithCurrentData: ReturnType<typeof vi.fn>;
+  };
 
   const createTask = (overrides: Partial<Task> = {}): Task => ({
     id: crypto.randomUUID(),
@@ -35,15 +52,15 @@ describe('ContextRestoreService', () => {
   });
 
   let mockTaskStore: {
-    getTask: ReturnType<typeof vi.fn>;
+    getTask: ReturnType<typeof vi.fn<(taskId: string) => Task | undefined>>;
     setTask: ReturnType<typeof vi.fn>;
     parkedTaskIds: ReturnType<typeof signal>;
     getTaskProjectId: ReturnType<typeof vi.fn>;
   };
 
   let mockProjectStore: {
-    projects: ReturnType<typeof signal>;
-    activeProjectId: ReturnType<typeof signal>;
+    projects: WritableSignal<Array<{ id: string; tasks: Task[] }>>;
+    activeProjectId: WritableSignal<string>;
   };
 
   let mockUiState: {
@@ -65,16 +82,40 @@ describe('ContextRestoreService', () => {
   };
 
   beforeEach(() => {
+    sessionResetCallback = null;
+    mockSessionRuntimeReset = {
+      register: vi.fn((_owner: string, reset: () => void) => {
+        sessionResetCallback = reset;
+        return vi.fn();
+      }),
+      resetAll: vi.fn((reason) => {
+        sessionResetCallback?.();
+        return { ok: true, reason, attemptedOwners: [], failures: [] };
+      }),
+    };
     mockTaskStore = {
-      getTask: vi.fn(),
+      getTask: vi.fn<(taskId: string) => Task | undefined>(),
       setTask: vi.fn(),
       parkedTaskIds: signal(new Set<string>()),
       getTaskProjectId: vi.fn(() => 'proj-1'),
     };
 
     mockProjectStore = {
-      projects: signal([]),
-      activeProjectId: signal('proj-1'),
+      projects: signal<Array<{ id: string; tasks: Task[] }>>([]),
+      activeProjectId: signal<string>('proj-1'),
+    };
+    projectGeneration = 0;
+    mockProjectState = {
+      captureActiveProjectOwner: vi.fn((): ActiveProjectOwner => ({
+        projectId: mockProjectStore.activeProjectId(), generation: projectGeneration,
+      })),
+      isActiveProjectOwnerCurrent: vi.fn((owner: ActiveProjectOwner) =>
+        owner.projectId === mockProjectStore.activeProjectId() && owner.generation === projectGeneration),
+      getProjectWithCurrentData: vi.fn((projectId: string) => {
+        const project = mockProjectStore.projects().find((item: { id: string }) => item.id === projectId);
+        const task = mockTaskStore.getTask('__project-probe__');
+        return project ?? { id: projectId, tasks: task ? [task] : [] };
+      }),
     };
 
     mockUiState = {
@@ -103,6 +144,8 @@ describe('ContextRestoreService', () => {
         { provide: UiStateService, useValue: mockUiState },
         { provide: ToastService, useValue: mockToastService },
         { provide: LoggerService, useValue: mockLogger },
+        { provide: SessionRuntimeResetRegistry, useValue: mockSessionRuntimeReset },
+        { provide: ProjectStateService, useValue: mockProjectState },
       ],
     });
 
@@ -116,6 +159,12 @@ describe('ContextRestoreService', () => {
   // ─── P-03: saveSnapshot ───
 
   describe('P-03: saveSnapshot', () => {
+    const switchProject = (projectId: string): void => {
+      if (mockProjectStore.activeProjectId() === projectId) return;
+      projectGeneration += 1;
+      mockProjectStore.activeProjectId.set(projectId);
+    };
+
     it('应为停泊任务保存快照到 parkingMeta', async () => {
       const task = createTask({
         id: 'task-1',
@@ -202,6 +251,52 @@ describe('ContextRestoreService', () => {
       const snapshot = mockTaskStore.setTask.mock.calls[0][0].parkingMeta.contextSnapshot;
       expect(snapshot.viewMode).toBe('flow');
     });
+
+    it('A→B during viewport capture cannot write A snapshot into same-ID B', async () => {
+      const taskA = createTask({ id: 'shared-task', content: 'A', parkingMeta: {
+        state: 'focused', parkedAt: null, lastVisitedAt: null,
+        contextSnapshot: null, reminder: null, pinned: false,
+      } });
+      const taskB = createTask({ ...taskA, content: 'B' });
+      mockProjectStore.projects.set([
+        { id: 'proj-1', tasks: [taskA] },
+        { id: 'proj-2', tasks: [taskB] },
+      ]);
+      mockTaskStore.getTask.mockReturnValue(taskB);
+      mockUiState.activeView.set('flow');
+      let resolveViewport!: (value: null) => void;
+      vi.spyOn(service as unknown as { captureFlowViewport: () => Promise<null> }, 'captureFlowViewport')
+        .mockReturnValue(new Promise(resolve => { resolveViewport = resolve; }));
+
+      const pending = service.saveSnapshot('proj-1', 'shared-task');
+      switchProject('proj-2');
+      resolveViewport(null);
+      await pending;
+
+      expect(mockTaskStore.setTask).not.toHaveBeenCalled();
+    });
+
+    it('A→B→A rejects the old capture while duplicate A preserves it', async () => {
+      const taskA = createTask({ id: 'shared-task', content: 'A', parkingMeta: {
+        state: 'focused', parkedAt: null, lastVisitedAt: null,
+        contextSnapshot: null, reminder: null, pinned: false,
+      } });
+      mockProjectStore.projects.set([{ id: 'proj-1', tasks: [taskA] }]);
+      mockTaskStore.getTask.mockReturnValue(taskA);
+      mockUiState.activeView.set('flow');
+      let resolveViewport!: (value: null) => void;
+      vi.spyOn(service as unknown as { captureFlowViewport: () => Promise<null> }, 'captureFlowViewport')
+        .mockReturnValue(new Promise(resolve => { resolveViewport = resolve; }));
+
+      const pending = service.saveSnapshot('proj-1', 'shared-task');
+      switchProject('proj-1');
+      switchProject('proj-2');
+      switchProject('proj-1');
+      resolveViewport(null);
+      await pending;
+
+      expect(mockTaskStore.setTask).not.toHaveBeenCalled();
+    });
   });
 
   // ─── P-04: restore（内容变更降级） ───
@@ -283,6 +378,99 @@ describe('ContextRestoreService', () => {
       };
 
       expect(() => service.restore('empty-snap', snapshot)).not.toThrow();
+    });
+
+    it('Flow 动态导入晚到时若已切换视图不得恢复旧视口', async () => {
+      const task = createTask({ id: 'flow-late-view-switch' });
+      mockTaskStore.getTask.mockReturnValue(task);
+      mockUiState.activeView.set('flow');
+      const flowService = { selectNode: vi.fn() };
+      const zoomService = { setZoom: vi.fn() };
+      const injector = (service as unknown as { injector: { get: (...args: unknown[]) => unknown } }).injector;
+      vi.spyOn(injector, 'get')
+        .mockReturnValueOnce(flowService)
+        .mockReturnValueOnce(zoomService);
+      const restoreFlow = vi.spyOn(
+        service as unknown as { restoreFlowView: (...args: unknown[]) => Promise<void> },
+        'restoreFlowView',
+      );
+      const snapshot: ParkingSnapshot = {
+        savedAt: new Date().toISOString(),
+        contentHash: 'flow-hash',
+        viewMode: 'flow',
+        cursorPosition: null,
+        scrollAnchor: null,
+        structuralAnchor: null,
+        flowViewport: { scale: 1.5, selectedNodeId: 'node-1' },
+      };
+
+      service.restore(task.id, snapshot);
+      const pendingRestore = restoreFlow.mock.results[0]?.value;
+      mockUiState.activeView.set('text');
+      await pendingRestore;
+
+      expect(zoomService.setZoom).not.toHaveBeenCalled();
+      expect(flowService.selectNode).not.toHaveBeenCalled();
+    });
+
+    it('会话 reset 后 Flow 动态导入晚到不得恢复旧 owner 视口', async () => {
+      const task = createTask({ id: 'flow-late-owner-reset' });
+      mockTaskStore.getTask.mockReturnValue(task);
+      mockUiState.activeView.set('flow');
+      const flowService = { selectNode: vi.fn() };
+      const zoomService = { setZoom: vi.fn() };
+      const injector = (service as unknown as { injector: { get: (...args: unknown[]) => unknown } }).injector;
+      vi.spyOn(injector, 'get')
+        .mockReturnValueOnce(flowService)
+        .mockReturnValueOnce(zoomService);
+      const restoreFlow = vi.spyOn(
+        service as unknown as { restoreFlowView: (...args: unknown[]) => Promise<void> },
+        'restoreFlowView',
+      );
+      const snapshot: ParkingSnapshot = {
+        savedAt: new Date().toISOString(),
+        contentHash: 'flow-hash',
+        viewMode: 'flow',
+        cursorPosition: null,
+        scrollAnchor: null,
+        structuralAnchor: null,
+        flowViewport: { scale: 1.2, selectedNodeId: 'node-2' },
+      };
+
+      service.restore(task.id, snapshot);
+      const pendingRestore = restoreFlow.mock.results[0]?.value;
+      mockSessionRuntimeReset.resetAll('owner-change');
+      await pendingRestore;
+
+      expect(zoomService.setZoom).not.toHaveBeenCalled();
+      expect(flowService.selectNode).not.toHaveBeenCalled();
+    });
+
+    it('连续 restore 与会话 reset 应移除旧文本高亮避免重复叠加', () => {
+      const task = createTask({ id: 'text-highlight-reset', content: '第一行\n第二行' });
+      mockTaskStore.getTask.mockReturnValue(task);
+      const container = document.createElement('div');
+      container.className = 'text-column';
+      document.body.appendChild(container);
+      const snapshot: ParkingSnapshot = {
+        savedAt: new Date().toISOString(),
+        contentHash: 'stale-hash',
+        viewMode: 'text',
+        cursorPosition: { line: 2, column: 1 },
+        scrollAnchor: null,
+        structuralAnchor: { type: 'line', label: '第二行', line: 2 },
+        flowViewport: null,
+      };
+
+      service.restore(task.id, snapshot);
+      expect(container.querySelectorAll('.parking-restore-highlight')).toHaveLength(1);
+
+      service.restore(task.id, snapshot);
+      expect(container.querySelectorAll('.parking-restore-highlight')).toHaveLength(1);
+
+      mockSessionRuntimeReset.resetAll('owner-change');
+      expect(container.querySelectorAll('.parking-restore-highlight')).toHaveLength(0);
+      container.remove();
     });
   });
 
