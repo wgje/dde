@@ -147,7 +147,7 @@ describe('LocalBackupUiRestoreStartupRecoveryService', () => {
     ['rolling-back', ['projects']],
     ['rollback-failed', ['projects']],
   ] as const)(
-    'blocks an expired %s marker and retains both durable sentinels',
+    'recovers an expired %s marker after taking over matching durable sentinels',
     async (state, completedStages) => {
       vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
       vi.setSystemTime(STARTED_AT);
