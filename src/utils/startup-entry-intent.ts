@@ -34,6 +34,7 @@ export interface AndroidWidgetBootstrapRequest {
   sizeBucket: string;
   bootstrapNonce: string;
   pendingPushToken: string | null;
+  originOwnerUserId?: string;
 }
 
 function buildAndroidWidgetBootstrapRequest(input: {
@@ -47,6 +48,7 @@ function buildAndroidWidgetBootstrapRequest(input: {
   sizeBucket: string | null;
   bootstrapNonce: string | null;
   pendingPushToken: string | null;
+  originOwnerUserId: string | null;
 }): AndroidWidgetBootstrapRequest | null {
   if (!isAndroidBootstrapCallbackUri(input.callbackUri)) {
     return null;
@@ -60,7 +62,7 @@ function buildAndroidWidgetBootstrapRequest(input: {
     return null;
   }
 
-  return {
+  const request: AndroidWidgetBootstrapRequest = {
     callbackUri: input.callbackUri,
     installationId: input.installationId,
     deviceId: input.deviceId,
@@ -72,6 +74,12 @@ function buildAndroidWidgetBootstrapRequest(input: {
     bootstrapNonce: input.bootstrapNonce,
     pendingPushToken: isNonEmptyText(input.pendingPushToken, 4096) ? input.pendingPushToken.trim() : null,
   };
+
+  if (isNonEmptyText(input.originOwnerUserId, 128)) {
+    request.originOwnerUserId = input.originOwnerUserId.trim();
+  }
+
+  return request;
 }
 
 function readStartupEntryParams(routeUrl: string | null): URLSearchParams | null {
@@ -231,6 +239,7 @@ export function resolveAndroidWidgetBootstrapRequest(routeUrl: string | null): A
     sizeBucket,
     bootstrapNonce,
     pendingPushToken,
+    originOwnerUserId: null,
   });
 }
 
@@ -251,6 +260,9 @@ export function normalizeAndroidWidgetBootstrapRequest(value: unknown): AndroidW
     sizeBucket: typeof record.sizeBucket === 'string' ? record.sizeBucket : null,
     bootstrapNonce: typeof record.bootstrapNonce === 'string' ? record.bootstrapNonce : null,
     pendingPushToken: typeof record.pendingPushToken === 'string' ? record.pendingPushToken : null,
+    originOwnerUserId: typeof record.originOwnerUserId === 'string'
+      ? record.originOwnerUserId
+      : null,
   });
 }
 

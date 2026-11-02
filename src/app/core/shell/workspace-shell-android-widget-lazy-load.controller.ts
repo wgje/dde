@@ -8,7 +8,11 @@ import type {
   StartupEntryIntent,
 } from '../../../utils/startup-entry-intent';
 import { WorkspaceShellAndroidWidgetBootstrapController } from './workspace-shell-android-widget-bootstrap.controller';
-import { WorkspaceShellAndroidWidgetBootstrapProcessingController } from './workspace-shell-android-widget-bootstrap-processing.controller';
+import {
+  currentWidgetBootstrapAttempt,
+  isWidgetBootstrapAttemptCurrent,
+  WorkspaceShellAndroidWidgetBootstrapProcessingController,
+} from './workspace-shell-android-widget-bootstrap-processing.controller';
 import { WorkspaceShellAndroidWidgetBootstrapStorageController } from './workspace-shell-android-widget-bootstrap-storage.controller';
 import { WorkspaceShellAndroidWidgetManualCallbackController } from './workspace-shell-android-widget-manual-callback.controller';
 
@@ -44,6 +48,8 @@ export class WorkspaceShellAndroidWidgetLazyLoadController {
   private readonly manualCallback: WorkspaceShellAndroidWidgetManualCallbackController;
   private readonly bootstrap: WorkspaceShellAndroidWidgetBootstrapController;
   private readonly processing: WorkspaceShellAndroidWidgetBootstrapProcessingController;
+  private completionGeneration: number | null = null;
+  private captureMutationActive = false;
 
   constructor(private readonly options: WorkspaceShellAndroidWidgetLazyLoadControllerOptions) {
     this.storage = new WorkspaceShellAndroidWidgetBootstrapStorageController({
@@ -63,20 +69,28 @@ export class WorkspaceShellAndroidWidgetLazyLoadController {
 
     this.bootstrap = new WorkspaceShellAndroidWidgetBootstrapController({
       getPendingBootstrap: () => this.options.pendingBootstrap(),
-      setPendingBootstrap: request => this.options.pendingBootstrap.set(request),
-      setDeferredStartupEntryIntent: startupEntryIntent =>
-        this.options.deferredStartupEntryIntent.set(startupEntryIntent),
-      persistPendingBootstrap: request => this.storage.persistPendingBootstrap(request),
-      persistDeferredStartupEntryIntent: startupEntryIntent =>
-        this.storage.persistDeferredStartupEntryIntent(startupEntryIntent),
+      setPendingBootstrap: request => this.mutateBootstrapState(() =>
+        this.options.pendingBootstrap.set(request)),
+      setDeferredStartupEntryIntent: startupEntryIntent => this.mutateBootstrapState(() =>
+        this.options.deferredStartupEntryIntent.set(startupEntryIntent)),
+      persistPendingBootstrap: request => this.mutateBootstrapState(() =>
+        this.storage.persistPendingBootstrap(request)),
+      persistDeferredStartupEntryIntent: startupEntryIntent => this.mutateBootstrapState(() =>
+        this.storage.persistDeferredStartupEntryIntent(startupEntryIntent)),
       consumeStartupEntryIntent: this.options.consumeStartupEntryIntent,
-      completeAndroidBootstrap: this.options.completeAndroidBootstrap,
+      completeAndroidBootstrap: request => this.completeCurrentBootstrap(request),
       currentUserId: this.options.currentUserId,
       isSessionInitialized: this.options.isSessionInitialized,
-      navigateToCallback: callback => this.manualCallback.navigate(callback),
+      navigateToCallback: callback => {
+        if (this.canPublishCompletion()) this.manualCallback.navigate(callback);
+      },
       readRuntimePlatform: this.options.readRuntimePlatform,
-      warn: (message, context) => this.options.logger.warn(message, context),
-      warningToast: this.options.warningToast,
+      warn: (message, context) => {
+        if (this.canPublishCompletion()) this.options.logger.warn(message, context);
+      },
+      warningToast: (title, message) => {
+        if (this.canPublishCompletion()) this.options.warningToast(title, message);
+      },
     });
 
     this.processing = new WorkspaceShellAndroidWidgetBootstrapProcessingController({
@@ -84,7 +98,10 @@ export class WorkspaceShellAndroidWidgetLazyLoadController {
       currentUserId: this.options.currentUserId,
       isSessionInitialized: this.options.isSessionInitialized,
       isInFlight: () => this.bootstrap.isInFlight(),
-      completeAndroidWidgetBootstrap: bootstrapRequest => this.complete(bootstrapRequest),
+      preparePendingBootstrap: (request, ownerUserId, isCurrent) =>
+        this.storage.preparePendingBootstrap(request, ownerUserId, isCurrent),
+      completeAndroidWidgetBootstrap: (bootstrapRequest, generation) =>
+        this.complete(bootstrapRequest, generation),
     });
   }
 
@@ -101,15 +118,29 @@ export class WorkspaceShellAndroidWidgetLazyLoadController {
   }
 
   captureFromRoute(routeUrl: string | null): boolean {
-    return this.bootstrap.captureFromRoute(routeUrl);
+    this.captureMutationActive = true;
+    try {
+      return this.bootstrap.captureFromRoute(routeUrl);
+    } finally {
+      this.captureMutationActive = false;
+    }
   }
 
-  syncProcessing(): void {
-    this.processing.sync();
+  syncProcessing(generation = currentWidgetBootstrapAttempt()): void {
+    this.processing.sync(generation);
   }
 
-  complete(bootstrapRequest: AndroidWidgetBootstrapRequest): Promise<void> {
-    return this.bootstrap.complete(bootstrapRequest);
+  complete(
+    bootstrapRequest: AndroidWidgetBootstrapRequest,
+    generation = currentWidgetBootstrapAttempt(),
+  ): Promise<void> {
+    if (!isWidgetBootstrapAttemptCurrent(generation) || this.bootstrap.isInFlight()) {
+      return Promise.resolve();
+    }
+    this.completionGeneration = generation;
+    return this.bootstrap.complete(bootstrapRequest).finally(() => {
+      if (this.completionGeneration === generation) this.completionGeneration = null;
+    });
   }
 
   continueManualCallback(): void {
@@ -125,4 +156,27 @@ export class WorkspaceShellAndroidWidgetLazyLoadController {
   }
 
   teardown(): void {}
+
+  private async completeCurrentBootstrap(
+    request: AndroidWidgetBootstrapRequest,
+  ): Promise<AndroidWidgetBootstrapCompleteResult> {
+    const generation = this.completionGeneration;
+    if (generation === null || !isWidgetBootstrapAttemptCurrent(generation)) {
+      throw new Error('stale Android widget bootstrap attempt');
+    }
+    const result = await this.options.completeAndroidBootstrap(request);
+    if (!isWidgetBootstrapAttemptCurrent(generation)) {
+      throw new Error('stale Android widget bootstrap result');
+    }
+    return result;
+  }
+
+  private canPublishCompletion(): boolean {
+    return this.completionGeneration === null
+      || isWidgetBootstrapAttemptCurrent(this.completionGeneration);
+  }
+
+  private mutateBootstrapState(action: () => void): void {
+    if (this.captureMutationActive || this.canPublishCompletion()) action();
+  }
 }

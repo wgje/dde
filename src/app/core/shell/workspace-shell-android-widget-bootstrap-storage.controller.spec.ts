@@ -54,6 +54,11 @@ const bootstrapRequest: AndroidWidgetBootstrapRequest = {
   pendingPushToken: 'fcm-token',
 };
 
+const stampedBootstrapRequest: AndroidWidgetBootstrapRequest = {
+  ...bootstrapRequest,
+  originOwnerUserId: 'user-a',
+};
+
 const startupEntryIntent: StartupEntryIntent = {
   entry: 'twa',
   intent: 'open-focus-tools',
@@ -80,12 +85,12 @@ function createController(storage: Storage | null = new MemoryStorage()) {
 describe('WorkspaceShellAndroidWidgetBootstrapStorageController', () => {
   it('restoreAll 应恢复 pending bootstrap 和 deferred startup intent', () => {
     const { controller, deferredStartupEntryIntent, pendingAndroidWidgetBootstrap, storage } = createController();
-    storage!.setItem(ANDROID_WIDGET_BOOTSTRAP_STORAGE_KEY, JSON.stringify(bootstrapRequest));
+    storage!.setItem(ANDROID_WIDGET_BOOTSTRAP_STORAGE_KEY, JSON.stringify(stampedBootstrapRequest));
     storage!.setItem(ANDROID_WIDGET_STARTUP_INTENT_STORAGE_KEY, JSON.stringify(startupEntryIntent));
 
     controller.restoreAll();
 
-    expect(pendingAndroidWidgetBootstrap()).toEqual(bootstrapRequest);
+    expect(pendingAndroidWidgetBootstrap()).toEqual(stampedBootstrapRequest);
     expect(deferredStartupEntryIntent()).toEqual(startupEntryIntent);
   });
 
@@ -113,12 +118,13 @@ describe('WorkspaceShellAndroidWidgetBootstrapStorageController', () => {
   });
 
   it('persistPendingBootstrap 和 persistDeferredStartupEntryIntent 应写入和删除 storage', () => {
-    const { controller, storage } = createController();
+    const { controller, pendingAndroidWidgetBootstrap, storage } = createController();
+    pendingAndroidWidgetBootstrap.set(stampedBootstrapRequest);
 
-    controller.persistPendingBootstrap(bootstrapRequest);
+    controller.persistPendingBootstrap(stampedBootstrapRequest);
     controller.persistDeferredStartupEntryIntent(startupEntryIntent);
 
-    expect(JSON.parse(storage!.getItem(ANDROID_WIDGET_BOOTSTRAP_STORAGE_KEY)!)).toEqual(bootstrapRequest);
+    expect(JSON.parse(storage!.getItem(ANDROID_WIDGET_BOOTSTRAP_STORAGE_KEY)!)).toEqual(stampedBootstrapRequest);
     expect(JSON.parse(storage!.getItem(ANDROID_WIDGET_STARTUP_INTENT_STORAGE_KEY)!)).toEqual(startupEntryIntent);
 
     controller.persistPendingBootstrap(null);
@@ -136,5 +142,53 @@ describe('WorkspaceShellAndroidWidgetBootstrapStorageController', () => {
       controller.persistPendingBootstrap(bootstrapRequest);
       controller.persistDeferredStartupEntryIntent(startupEntryIntent);
     }).not.toThrow();
+  });
+
+  it('keeps a fresh ownerless capture in memory and clears restored legacy ownerless state', () => {
+    const { controller, deferredStartupEntryIntent, pendingAndroidWidgetBootstrap, storage } = createController();
+    storage!.setItem(ANDROID_WIDGET_BOOTSTRAP_STORAGE_KEY, JSON.stringify(stampedBootstrapRequest));
+    storage!.setItem(ANDROID_WIDGET_STARTUP_INTENT_STORAGE_KEY, JSON.stringify(startupEntryIntent));
+    pendingAndroidWidgetBootstrap.set(bootstrapRequest);
+
+    controller.persistPendingBootstrap(bootstrapRequest);
+    controller.persistDeferredStartupEntryIntent(startupEntryIntent);
+
+    expect(storage!.length).toBe(0);
+    storage!.setItem(ANDROID_WIDGET_BOOTSTRAP_STORAGE_KEY, JSON.stringify(bootstrapRequest));
+    storage!.setItem(ANDROID_WIDGET_STARTUP_INTENT_STORAGE_KEY, JSON.stringify(startupEntryIntent));
+    controller.restoreAll();
+    expect(pendingAndroidWidgetBootstrap()).toBeNull();
+    expect(deferredStartupEntryIntent()).toBeNull();
+    expect(storage!.length).toBe(0);
+  });
+
+  it('stamps, persists and reads back only the exact current owner', () => {
+    const { controller, pendingAndroidWidgetBootstrap, storage } = createController();
+    pendingAndroidWidgetBootstrap.set(bootstrapRequest);
+
+    const result = controller.preparePendingBootstrap(bootstrapRequest, 'user-a', () => true);
+
+    expect(result).toEqual({ kind: 'ready', request: stampedBootstrapRequest });
+    expect(pendingAndroidWidgetBootstrap()).toEqual(stampedBootstrapRequest);
+    expect(JSON.parse(storage!.getItem(ANDROID_WIDGET_BOOTSTRAP_STORAGE_KEY)!))
+      .toEqual(stampedBootstrapRequest);
+  });
+
+  it('clears restored bootstrap provenance owned by another user', () => {
+    const { controller, pendingAndroidWidgetBootstrap, storage } = createController();
+    pendingAndroidWidgetBootstrap.set(stampedBootstrapRequest);
+    storage!.setItem(
+      ANDROID_WIDGET_BOOTSTRAP_STORAGE_KEY,
+      JSON.stringify(stampedBootstrapRequest),
+    );
+
+    const result = controller.preparePendingBootstrap(
+      stampedBootstrapRequest,
+      'user-b',
+      () => true,
+    );
+    expect(result).toEqual({ kind: 'rejected-stale' });
+    expect(pendingAndroidWidgetBootstrap()).toBeNull();
+    expect(storage!.getItem(ANDROID_WIDGET_BOOTSTRAP_STORAGE_KEY)).toBeNull();
   });
 });

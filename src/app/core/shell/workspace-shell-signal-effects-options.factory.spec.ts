@@ -1,4 +1,6 @@
-import { describe, expect, it, vi } from 'vitest';
+import { effect, signal } from '@angular/core';
+import { TestBed } from '@angular/core/testing';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type {
   WorkspaceShellSignalEffectsDelegatesOptions,
@@ -7,7 +9,6 @@ import type {
   WorkspaceShellSignalEffectsLazyLoadDelegate,
   WorkspaceShellSignalEffectsLazyLoadDelegateOptions,
 } from './workspace-shell-signal-effects-lazy-load-delegate.factory';
-import { GlobalErrorHandler } from '../../../services/global-error-handler.service';
 import {
   readWorkspaceShellControllerGraphCallOptions,
   readWorkspaceShellControllerGraphSource,
@@ -28,8 +29,6 @@ type WorkspaceShellSignalEffectsDelegateFactory = (
 async function loadFactories(): Promise<{
   createWorkspaceShellSignalEffectsDelegate?:
     WorkspaceShellSignalEffectsDelegateFactory;
-  createWorkspaceShellSignalEffectsSurface?:
-    WorkspaceShellSignalEffectsDelegateFactory;
   createWorkspaceShellSignalEffectsOptions?:
     WorkspaceShellSignalEffectsOptionsFactory;
 }> {
@@ -39,8 +38,6 @@ async function loadFactories(): Promise<{
 
   return module as {
     createWorkspaceShellSignalEffectsDelegate?:
-      WorkspaceShellSignalEffectsDelegateFactory;
-    createWorkspaceShellSignalEffectsSurface?:
       WorkspaceShellSignalEffectsDelegateFactory;
     createWorkspaceShellSignalEffectsOptions?:
       WorkspaceShellSignalEffectsOptionsFactory;
@@ -55,9 +52,9 @@ function createSignalEffectsDelegate(): WorkspaceShellSignalEffectsLazyLoadDeleg
 }
 
 describe('workspace shell signal effects options', () => {
+  afterEach(() => TestBed.resetTestingModule());
   it('builds signal-effects delegate options from shell dependencies', async () => {
     const { createWorkspaceShellSignalEffectsOptions } = await loadFactories();
-
     expect(createWorkspaceShellSignalEffectsOptions).toEqual(expect.any(Function));
 
     const injector = { get: vi.fn() };
@@ -75,9 +72,14 @@ describe('workspace shell signal effects options', () => {
       activeProjectId: vi.fn(() => 'project-1'),
     };
     const routeSyncController = { syncStateFromRoute: vi.fn() };
+    const callOrder: string[] = [];
+    const bootstrapGenerations: number[] = [];
     const androidWidgetLazyLoad = {
       captureFromRoute: vi.fn(),
-      syncProcessing: vi.fn(),
+      syncProcessing: vi.fn((generation: number) => {
+        callOrder.push('sync');
+        bootstrapGenerations.push(generation);
+      }),
     };
     const startupEntryIntentController = { sync: vi.fn() };
     const startupEntryControllers = {
@@ -114,7 +116,18 @@ describe('workspace shell signal effects options', () => {
     const remoteCallbacks = { registerIfReady: vi.fn() };
     const projectSubscription = { sync: vi.fn() };
     const destroyed = vi.fn(() => false);
-    const userSession = { currentUserId: vi.fn(() => 'user-1') };
+    const sessionInitialized = signal(false);
+    const currentOwner = signal<string | null>(null);
+    const authService = {
+      sessionInitialized: vi.fn(() => {
+        callOrder.push('session');
+        return sessionInitialized();
+      }),
+    };
+    const userSession = { currentUserId: vi.fn(() => {
+      callOrder.push('owner');
+      return currentOwner();
+    }) };
     const sessionTransition = { setupSessionHandlers: vi.fn() };
     const sessionLaunchControllers = {
       launchSnapshotController,
@@ -139,6 +152,7 @@ describe('workspace shell signal effects options', () => {
       remoteCallbacks,
       projectSubscription,
       destroyed,
+      authService,
       userSession,
       warn,
     });
@@ -153,7 +167,12 @@ describe('workspace shell signal effects options', () => {
         projectState,
         routeSyncController,
       },
-      runtime: { androidWidgetLazyLoad },
+      runtime: {
+        androidWidgetLazyLoad: {
+          captureFromRoute: expect.any(Function),
+          syncProcessing: expect.any(Function),
+        },
+      },
       startupEntryIntent: startupEntryIntentController,
       handoff: {
         effect: handoffEffect,
@@ -180,11 +199,27 @@ describe('workspace shell signal effects options', () => {
       warn,
     });
     expect(options?.startupTierState.coreDataLoaded()).toBe(true);
+    void options?.runtime.androidWidgetLazyLoad.captureFromRoute('/widget');
+    expect(androidWidgetLazyLoad.captureFromRoute).toHaveBeenCalledWith('/widget');
+    TestBed.configureTestingModule({});
+    TestBed.runInInjectionContext(() => {
+      effect(() => options?.runtime.androidWidgetLazyLoad.syncProcessing());
+    });
+    TestBed.flushEffects();
+    sessionInitialized.set(true);
+    currentOwner.set('user-a');
+    TestBed.flushEffects();
+    currentOwner.set('user-b');
+    TestBed.flushEffects();
+    currentOwner.set('user-a');
+    TestBed.flushEffects();
+    expect(callOrder).toEqual(Array(4).fill(['session', 'owner', 'sync']).flat());
+    expect(bootstrapGenerations).toHaveLength(4);
+    expect(new Set(bootstrapGenerations).size).toBe(4);
   });
 
   it('creates signal-effects delegates from shell dependencies in one factory call', async () => {
     const { createWorkspaceShellSignalEffectsDelegate } = await loadFactories();
-
     expect(createWorkspaceShellSignalEffectsDelegate).toEqual(expect.any(Function));
 
     let mappedOptions!: WorkspaceShellSignalEffectsLazyLoadDelegateOptions;
@@ -266,139 +301,6 @@ describe('workspace shell signal effects options', () => {
     }
     expect(mappedOptions.currentUserId()).toBe('user-1');
     expect(mappedOptions.coreDataLoaded?.()).toBe(true);
-    expect(mappedOptions.isStartupTierReady?.('p1')).toBe(false);
-    expect(mappedOptions.isStartupTierReady?.('p2')).toBe(true);
-  });
-
-  it('creates signal-effects delegates from grouped shell surfaces', async () => {
-    const { createWorkspaceShellSignalEffectsSurface } = await loadFactories();
-
-    expect(createWorkspaceShellSignalEffectsSurface).toEqual(expect.any(Function));
-
-    let mappedOptions!: WorkspaceShellSignalEffectsLazyLoadDelegateOptions;
-    const delegate = createSignalEffectsDelegate();
-    const routeUrl = vi.fn(() => '/projects/project-1/text');
-    const routeSyncController = { syncStateFromRoute: vi.fn() };
-    const warn = vi.fn();
-    const errorHandler = { recoverableError: vi.fn(() => null) };
-    const modal = {
-      isOpen: vi.fn((type: 'login' | 'migration') => type === 'login'),
-      getData: vi.fn(() => ({ returnUrl: '/projects/project-1/text' })),
-      closeByType: vi.fn(),
-    };
-    const modalCoord = {
-      loginReturnUrl: null as string | null,
-      loginModalRef: null,
-      openErrorRecoveryModal: vi.fn(),
-      openLoginModal: vi.fn(),
-      openMigrationModal: vi.fn(),
-    };
-    const dataProtectionReminderController = { syncFromState: vi.fn() };
-    const createDataProtectionReminderController = vi.fn()
-      .mockResolvedValue(dataProtectionReminderController);
-    const userSession = { currentUserId: vi.fn(() => 'user-1') };
-    const lazyServiceRefs = {
-      exportService: { needsExportReminder: vi.fn(() => false) },
-    };
-    const toast = {
-      dismiss: vi.fn(),
-      info: vi.fn(),
-      messages: vi.fn(() => []),
-      warning: vi.fn(),
-    };
-    const dataProtectionReminder = {
-      createDataProtectionReminderController,
-    };
-    const startupTier = {
-      isTierReady: vi.fn((tier: 'p1' | 'p2') => tier === 'p2'),
-    };
-    const focusSyncControllers = {
-      focusEntrySyncPulse: { handleOwnerChange: vi.fn() },
-      focusProbeController: { sync: vi.fn() },
-      mountState: {
-        coreDataLoaded: vi.fn(() => true),
-      },
-      startupTierHydration: {
-        markAuthReadyIfReady: vi.fn(),
-        warmupInteractionIfReady: vi.fn(),
-        startSyncHydrationIfReady: vi.fn(),
-      },
-      syncPulseLifecycle: { sync: vi.fn() },
-    };
-    const injector = {
-      get: vi.fn((token: unknown) => {
-        if (token === GlobalErrorHandler) {
-          return errorHandler;
-        }
-        throw new Error(`Unexpected injector token: ${String(token)}`);
-      }),
-    };
-
-    const result = createWorkspaceShellSignalEffectsSurface?.({
-      injector,
-      registerEffect: vi.fn(),
-      modal,
-      modalCoord,
-      dataProtectionReminder,
-      lazyServiceRefs,
-      toast,
-      sessionLaunchControllers: {
-        launchSnapshotController: { sync: vi.fn() },
-        sessionTransition: { setupSessionHandlers: vi.fn() },
-      },
-      routing: {
-        router: {},
-        routeUrl,
-        routeSyncController,
-      },
-      projectState: {
-        projects: vi.fn(() => [{ id: 'project-1' }]),
-        activeProjectId: vi.fn(() => 'project-1'),
-      },
-      startupEntryControllers: {
-        androidWidgetLazyLoad: {
-          captureFromRoute: vi.fn(),
-          syncProcessing: vi.fn(),
-        },
-        startupEntryIntentController: { sync: vi.fn() },
-      },
-      handoffControllers: {
-        effect: { sync: vi.fn() },
-        readiness: { commitWorkspaceHandoffIfReady: vi.fn() },
-      },
-      bootStage: { isWorkspaceHandoffReady: vi.fn(() => true) },
-      focusSyncControllers,
-      startupTier,
-      remoteCallbacks: { registerIfReady: vi.fn() },
-      projectSubscription: { sync: vi.fn() },
-      destroyed: vi.fn(() => false),
-      userSession,
-      warn,
-      createSignalEffectsLazyLoadDelegate: (
-        options: WorkspaceShellSignalEffectsLazyLoadDelegateOptions,
-      ) => {
-        mappedOptions = options;
-        return delegate;
-      },
-    });
-
-    expect(result).toBe(delegate);
-    expect(injector.get).toHaveBeenCalledWith(GlobalErrorHandler);
-    expect(mappedOptions.routeUrl?.()).toBe('/projects/project-1/text');
-    mappedOptions.syncStateFromRoute?.();
-    expect(routeSyncController.syncStateFromRoute).toHaveBeenCalledTimes(1);
-    expect(mappedOptions.modalEffects).toEqual(expect.any(Object));
-    mappedOptions.modalEffects?.syncLoginRequest();
-    expect(modal.closeByType).toHaveBeenCalledWith('login');
-    expect(modalCoord.loginReturnUrl).toBe('/projects/project-1/text');
-    expect(modalCoord.openLoginModal).toHaveBeenCalledTimes(1);
-    expect(mappedOptions.dataProtectionReminder?.syncFromState)
-      .toEqual(expect.any(Function));
-    mappedOptions.dataProtectionReminder?.syncFromState();
-    await vi.waitFor(() => {
-      expect(createDataProtectionReminderController).toHaveBeenCalledTimes(1);
-      expect(dataProtectionReminderController.syncFromState).toHaveBeenCalledTimes(1);
-    });
     expect(mappedOptions.isStartupTierReady?.('p1')).toBe(false);
     expect(mappedOptions.isStartupTierReady?.('p2')).toBe(true);
   });

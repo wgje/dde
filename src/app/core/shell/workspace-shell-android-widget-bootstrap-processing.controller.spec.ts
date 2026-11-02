@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  startWidgetBootstrapAttempt,
   WorkspaceShellAndroidWidgetBootstrapProcessingController,
   type WorkspaceShellAndroidWidgetBootstrapProcessingControllerOptions,
 } from './workspace-shell-android-widget-bootstrap-processing.controller';
@@ -20,6 +21,11 @@ const BOOTSTRAP_REQUEST: AndroidWidgetBootstrapRequest = {
   pendingPushToken: null,
 };
 
+const STAMPED_BOOTSTRAP_REQUEST: AndroidWidgetBootstrapRequest = {
+  ...BOOTSTRAP_REQUEST,
+  originOwnerUserId: 'user-1',
+};
+
 function createController(overrides: Partial<WorkspaceShellAndroidWidgetBootstrapProcessingControllerOptions> = {}) {
   const completeAndroidWidgetBootstrap = vi.fn();
   let pendingBootstrap: AndroidWidgetBootstrapRequest | null = BOOTSTRAP_REQUEST;
@@ -32,6 +38,10 @@ function createController(overrides: Partial<WorkspaceShellAndroidWidgetBootstra
     currentUserId: () => currentUserId,
     isSessionInitialized: () => sessionInitialized,
     isInFlight: () => inFlight,
+    preparePendingBootstrap: vi.fn(() => ({
+      kind: 'ready' as const,
+      request: STAMPED_BOOTSTRAP_REQUEST,
+    })),
     completeAndroidWidgetBootstrap,
     ...overrides,
   });
@@ -105,8 +115,48 @@ describe('WorkspaceShellAndroidWidgetBootstrapProcessingController', () => {
 
     controller.sync();
 
-    expect(completeAndroidWidgetBootstrap).toHaveBeenCalledWith(BOOTSTRAP_REQUEST);
+    expect(completeAndroidWidgetBootstrap).toHaveBeenCalledWith(
+      STAMPED_BOOTSTRAP_REQUEST,
+      expect.any(Number),
+    );
   });
+
+  it('rejects deferred A attempts superseded by A to B to A before preparation', () => {
+    const preparePendingBootstrap = vi.fn(() => ({
+      kind: 'ready' as const,
+      request: STAMPED_BOOTSTRAP_REQUEST,
+    }));
+    const { completeAndroidWidgetBootstrap, controller } = createController({
+      preparePendingBootstrap,
+    });
+    const deferred: Array<() => void> = [];
+
+    startWidgetBootstrapAttempt(generation => deferred.push(() => controller.sync(generation)));
+    startWidgetBootstrapAttempt(generation => deferred.push(() => controller.sync(generation)));
+    startWidgetBootstrapAttempt(generation => deferred.push(() => controller.sync(generation)));
+
+    deferred[0]();
+    deferred[1]();
+    expect(preparePendingBootstrap).not.toHaveBeenCalled();
+    expect(completeAndroidWidgetBootstrap).not.toHaveBeenCalled();
+
+    deferred[2]();
+    expect(preparePendingBootstrap).toHaveBeenCalledTimes(1);
+    expect(completeAndroidWidgetBootstrap).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['retry-unconfirmed', 'rejected-stale'] as const)(
+    'publishes nothing when preparation is %s',
+    kind => {
+      const { completeAndroidWidgetBootstrap, controller } = createController({
+        preparePendingBootstrap: vi.fn(() => ({ kind })),
+      });
+
+      controller.sync();
+
+      expect(completeAndroidWidgetBootstrap).not.toHaveBeenCalled();
+    },
+  );
 
   it('isolates rejected bootstrap completion and remains retryable', () => {
     const { completeAndroidWidgetBootstrap, controller } = createController();
@@ -127,6 +177,7 @@ describe('WorkspaceShellAndroidWidgetBootstrapProcessingController', () => {
     controller.sync();
 
     expect(completeAndroidWidgetBootstrap).toHaveBeenCalledTimes(2);
-    expect(completeAndroidWidgetBootstrap).toHaveBeenNthCalledWith(2, BOOTSTRAP_REQUEST);
+    expect(completeAndroidWidgetBootstrap)
+      .toHaveBeenNthCalledWith(2, STAMPED_BOOTSTRAP_REQUEST, expect.any(Number));
   });
 });

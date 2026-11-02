@@ -1,4 +1,16 @@
-export type WorkspaceShellEffectRegistrar = (callback: () => void) => void;
+import {
+  WorkspaceShellSignalEffectRegistrarController,
+  type WorkspaceShellEffectRegistrar,
+} from './workspace-shell-signal-effect-registrar.controller';
+import { WorkspaceShellAndroidWidgetSignalEffectsController } from './workspace-shell-android-widget-signal-effects.controller';
+import { WorkspaceShellFocusSyncSignalEffectsController } from './workspace-shell-focus-sync-signal-effects.controller';
+import { WorkspaceShellHandoffSignalEffectsController } from './workspace-shell-handoff-signal-effects.controller';
+import { WorkspaceShellSessionSyncSignalEffectsController } from './workspace-shell-session-sync-signal-effects.controller';
+import { WorkspaceShellStartupRouteSignalEffectsController } from './workspace-shell-startup-route-signal-effects.controller';
+import { WorkspaceShellStartupTierSignalEffectsController } from './workspace-shell-startup-tier-signal-effects.controller';
+import { WorkspaceShellUiSignalEffectsController } from './workspace-shell-ui-signal-effects.controller';
+
+export type { WorkspaceShellEffectRegistrar } from './workspace-shell-signal-effect-registrar.controller';
 
 export interface WorkspaceShellSignalEffectsControllerOptions {
   registerEffect: WorkspaceShellEffectRegistrar;
@@ -40,198 +52,106 @@ export interface WorkspaceShellSignalEffectsControllerOptions {
   onAsyncEffectError?: (effect: string, error: unknown) => void;
 }
 
+function createSignalEffectRegistrar(
+  options: WorkspaceShellSignalEffectsControllerOptions,
+): WorkspaceShellSignalEffectRegistrarController {
+  return new WorkspaceShellSignalEffectRegistrarController({
+    registerEffect: options.registerEffect,
+    onEffectError: options.onEffectError,
+    onAsyncEffectError: options.onAsyncEffectError,
+  });
+}
+
+function createStartupSignalEffectGroups(
+  options: WorkspaceShellSignalEffectsControllerOptions,
+  effectRegistrar: WorkspaceShellSignalEffectRegistrarController,
+) {
+  return {
+    androidWidgetEffects: new WorkspaceShellAndroidWidgetSignalEffectsController({
+      effectRegistrar,
+      routeUrl: options.routeUrl,
+      captureAndroidWidgetBootstrapFromRoute:
+        options.captureAndroidWidgetBootstrapFromRoute,
+      syncAndroidWidgetBootstrapProcessing:
+        options.syncAndroidWidgetBootstrapProcessing,
+    }),
+    handoffSignalEffects: new WorkspaceShellHandoffSignalEffectsController({
+      effectRegistrar,
+      handoffEffect: options.handoffEffect,
+      isWorkspaceHandoffReady: options.isWorkspaceHandoffReady,
+      commitWorkspaceHandoff: options.commitWorkspaceHandoff,
+    }),
+    startupRouteEffects: new WorkspaceShellStartupRouteSignalEffectsController({
+      effectRegistrar,
+      launchSnapshotController: options.launchSnapshotController,
+      routeUrl: options.routeUrl,
+      projects: options.projects,
+      activeProjectId: options.activeProjectId,
+      syncStateFromRoute: options.syncStateFromRoute,
+      startupEntryIntentController: options.startupEntryIntentController,
+    }),
+    startupTierEffects: new WorkspaceShellStartupTierSignalEffectsController({
+      effectRegistrar,
+      currentUserId: options.currentUserId,
+      coreDataLoaded: options.coreDataLoaded,
+      isStartupTierReady: options.isStartupTierReady,
+      startupTierHydration: options.startupTierHydration,
+    }),
+  };
+}
+
+function createRuntimeSignalEffectGroups(
+  options: WorkspaceShellSignalEffectsControllerOptions,
+  effectRegistrar: WorkspaceShellSignalEffectRegistrarController,
+) {
+  return {
+    focusSyncEffects: new WorkspaceShellFocusSyncSignalEffectsController({
+      effectRegistrar,
+      focusProbeController: options.focusProbeController,
+      currentUserId: options.currentUserId,
+      destroyed: options.destroyed,
+      focusEntrySyncPulse: options.focusEntrySyncPulse,
+      syncPulseEffect: options.syncPulseEffect,
+    }),
+    sessionSyncEffects: new WorkspaceShellSessionSyncSignalEffectsController({
+      effectRegistrar,
+      remoteCallbacks: options.remoteCallbacks,
+      projectSubscription: options.projectSubscription,
+      sessionTransition: options.sessionTransition,
+    }),
+    uiEffects: new WorkspaceShellUiSignalEffectsController({
+      effectRegistrar,
+      modalEffects: options.modalEffects,
+      dataProtectionReminder: options.dataProtectionReminder,
+    }),
+  };
+}
+
+function createSignalEffectGroups(options: WorkspaceShellSignalEffectsControllerOptions) {
+  const effectRegistrar = createSignalEffectRegistrar(options);
+  return {
+    ...createStartupSignalEffectGroups(options, effectRegistrar),
+    ...createRuntimeSignalEffectGroups(options, effectRegistrar),
+  };
+}
+
 export class WorkspaceShellSignalEffectsController {
-  constructor(private readonly options: WorkspaceShellSignalEffectsControllerOptions) {}
+  private readonly groups: ReturnType<typeof createSignalEffectGroups>;
+
+  constructor(options: WorkspaceShellSignalEffectsControllerOptions) {
+    this.groups = createSignalEffectGroups(options);
+  }
 
   setup(): void {
-    this.setupModalEffects();
-    this.setupDataProtectionEffect();
-    this.setupLaunchSnapshotEffect();
-    this.setupRouteProjectSelectionEffect();
-    this.setupAndroidWidgetBootstrapCaptureEffect();
-    this.setupAndroidWidgetBootstrapProcessingEffect();
-    this.setupStartupEntryIntentEffect();
-    this.setupHandoffEffect();
-    this.setupWorkspaceReadyEffect();
-    this.setupFocusProbeEffect();
-    this.setupStartupTierEffects();
-    this.setupRemoteCallbackEffect();
-    this.setupSubscriptionEffect();
-    this.setupFocusEntryOwnerEffect();
-    this.setupSyncPulseEffect();
-    this.setupSessionTransitionHandlers();
-  }
-
-  private setupModalEffects(): void {
-    this.registerEffect('modal-recoverable-error', () => {
-      this.options.modalEffects.syncRecoverableError();
-    });
-
-    this.registerEffect('modal-login-request', () => {
-      this.options.modalEffects.syncLoginRequest();
-    });
-
-    this.registerEffect('modal-migration-request', () => {
-      this.options.modalEffects.syncMigrationRequest();
-    });
-  }
-
-  private setupDataProtectionEffect(): void {
-    this.registerEffect('data-protection-reminder', () => {
-      this.options.dataProtectionReminder.syncFromState();
-    });
-  }
-
-  private setupLaunchSnapshotEffect(): void {
-    this.registerEffect('launch-snapshot', () => {
-      this.options.launchSnapshotController.sync();
-    });
-  }
-
-  private setupRouteProjectSelectionEffect(): void {
-    this.registerEffect('route-project-selection', () => {
-      this.options.routeUrl();
-      this.options.projects();
-      this.options.activeProjectId();
-      this.options.syncStateFromRoute();
-    });
-  }
-
-  private setupAndroidWidgetBootstrapCaptureEffect(): void {
-    this.registerEffect('android-widget-bootstrap-capture', () => {
-      const routeUrl = this.options.routeUrl();
-      void this.options.captureAndroidWidgetBootstrapFromRoute(
-        typeof routeUrl === 'string' ? routeUrl : null,
-      ).catch(error => {
-        this.reportAsyncEffectError('android-widget-bootstrap-capture', error);
-      });
-    });
-  }
-
-  private setupAndroidWidgetBootstrapProcessingEffect(): void {
-    this.registerEffect('android-widget-bootstrap-processing', () => {
-      this.options.syncAndroidWidgetBootstrapProcessing();
-    });
-  }
-
-  private setupStartupEntryIntentEffect(): void {
-    this.registerEffect('startup-entry-intent', () => {
-      this.options.startupEntryIntentController.sync();
-    });
-  }
-
-  private setupHandoffEffect(): void {
-    this.registerEffect('workspace-handoff', () => {
-      this.options.handoffEffect.sync();
-    });
-  }
-
-  private setupWorkspaceReadyEffect(): void {
-    this.registerEffect('workspace-ready', () => {
-      if (!this.options.isWorkspaceHandoffReady()) {
-        return;
-      }
-
-      this.options.commitWorkspaceHandoff();
-    });
-  }
-
-  private setupFocusProbeEffect(): void {
-    this.registerEffect('focus-probe', () => {
-      this.options.focusProbeController.sync();
-    });
-  }
-
-  private setupStartupTierEffects(): void {
-    this.registerEffect('startup-tier-auth-ready', () => {
-      this.options.currentUserId();
-      this.options.coreDataLoaded();
-      this.options.startupTierHydration.markAuthReadyIfReady();
-    });
-
-    this.registerEffect('startup-tier-p1', () => {
-      this.options.isStartupTierReady('p1');
-      this.options.startupTierHydration.warmupInteractionIfReady();
-    });
-
-    this.registerEffect('startup-tier-p2', () => {
-      this.options.isStartupTierReady('p2');
-      this.options.startupTierHydration.startSyncHydrationIfReady();
-    });
-  }
-
-  private setupRemoteCallbackEffect(): void {
-    this.registerEffect('remote-callback-registration', () => {
-      this.options.remoteCallbacks.registerIfReady();
-    });
-  }
-
-  private setupSubscriptionEffect(): void {
-    this.registerEffect('project-subscription', () => {
-      this.options.projectSubscription.sync();
-    });
-  }
-
-  private setupFocusEntryOwnerEffect(): void {
-    this.registerEffect('focus-entry-owner', () => {
-      const ownerId = this.options.currentUserId();
-      if (!this.options.destroyed()) {
-        this.options.focusEntrySyncPulse.handleOwnerChange(ownerId);
-      }
-    });
-  }
-
-  private setupSyncPulseEffect(): void {
-    this.registerEffect('sync-pulse', () => {
-      this.options.syncPulseEffect.sync();
-    });
-  }
-
-  private setupSessionTransitionHandlers(): void {
-    try {
-      this.options.sessionTransition.setupSessionHandlers();
-    } catch (error) {
-      this.reportEffectError('session-transition-handlers', error);
-    }
-  }
-
-  private registerEffect(effectName: string, callback: () => void): void {
-    try {
-      this.options.registerEffect(() => {
-        try {
-          callback();
-        } catch (error) {
-          this.reportEffectError(effectName, error);
-        }
-      });
-    } catch (error) {
-      this.reportEffectError(`${effectName}:register`, error);
-    }
-  }
-
-  private reportEffectError(effectName: string, error: unknown): void {
-    const reportError = this.options.onEffectError ?? this.options.onAsyncEffectError;
-    if (!reportError) {
-      return;
-    }
-
-    try {
-      reportError(effectName, error);
-    } catch {
-      // Effect diagnostics must not create a second shell effect failure.
-    }
-  }
-
-  private reportAsyncEffectError(effectName: string, error: unknown): void {
-    const reportError = this.options.onAsyncEffectError ?? this.options.onEffectError;
-    if (!reportError) {
-      return;
-    }
-
-    try {
-      reportError(effectName, error);
-    } catch {
-      // Async effect diagnostics must not create a second shell effect failure.
-    }
+    this.groups.uiEffects.setup();
+    this.groups.startupRouteEffects.setupLaunchAndRoute();
+    this.groups.androidWidgetEffects.setup();
+    this.groups.startupRouteEffects.setupStartupEntryIntent();
+    this.groups.handoffSignalEffects.setup();
+    this.groups.focusSyncEffects.setupProbe();
+    this.groups.startupTierEffects.setup();
+    this.groups.sessionSyncEffects.setupEffects();
+    this.groups.focusSyncEffects.setupOwnerAndSyncPulse();
+    this.groups.sessionSyncEffects.setupSessionTransitionHandlers();
   }
 }

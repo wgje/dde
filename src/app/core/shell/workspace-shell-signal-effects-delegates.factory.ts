@@ -24,7 +24,7 @@ export interface WorkspaceShellSignalEffectsDelegatesOptions {
   runtime: {
     androidWidgetLazyLoad: {
       captureFromRoute(routeUrl: string | null): Promise<boolean>;
-      syncProcessing(): void;
+      syncProcessing(generation?: number): void;
     };
   };
   startupEntryIntent:

@@ -10,18 +10,7 @@ import type {
 import type {
   WorkspaceShellSessionLaunchControllers,
 } from './workspace-shell-session-launch.factory';
-import type {
-  WorkspaceShellRoutingSurface,
-} from './workspace-shell-routing-surface.factory';
-import {
-  createWorkspaceShellDataProtectionReminderLazyLoadDelegate,
-  type WorkspaceShellDataProtectionReminderLazyLoadDelegateOptions,
-} from './workspace-shell-data-protection-reminder-lazy-load-delegate.factory';
-import { GlobalErrorHandler } from '../../../services/global-error-handler.service';
-import {
-  createWorkspaceShellModalEffectsController,
-  type WorkspaceShellModalEffectsFactoryOptions,
-} from './workspace-shell-modal-effects.factory';
+import { startWidgetBootstrapAttempt } from './workspace-shell-android-widget-bootstrap-processing.controller';
 
 export interface WorkspaceShellSignalEffectsStartupEntryControllers {
   readonly androidWidgetLazyLoad:
@@ -41,6 +30,7 @@ type WorkspaceShellSignalEffectsFocusSyncControllers = Pick<
 
 export interface WorkspaceShellSignalEffectsOptionsFactoryOptions {
   injector: Injector;
+  authService: { sessionInitialized(): boolean };
   registerEffect?: WorkspaceShellSignalEffectsDelegatesOptions['registerEffect'];
   modalEffects: WorkspaceShellSignalEffectsDelegatesOptions['modalEffects'];
   dataProtectionReminder:
@@ -82,36 +72,6 @@ export interface WorkspaceShellSignalEffectsOptionsFactoryOptions {
     WorkspaceShellSignalEffectsDelegatesOptions['createSignalEffectsController'];
 }
 
-export type WorkspaceShellSignalEffectsSurfaceOptions =
-  Omit<
-    WorkspaceShellSignalEffectsOptionsFactoryOptions,
-    | 'dataProtectionReminder'
-    | 'modalEffects'
-    | 'routeUrl'
-    | 'routeSyncController'
-    | 'startupTierState'
-  > & {
-    readonly dataProtectionReminder?: Pick<
-      WorkspaceShellDataProtectionReminderLazyLoadDelegateOptions,
-      'createDataProtectionReminderController'
-    >;
-    readonly lazyServiceRefs: {
-      readonly exportService:
-        WorkspaceShellDataProtectionReminderLazyLoadDelegateOptions['exportService'];
-    };
-    readonly modal: WorkspaceShellModalEffectsFactoryOptions['modal'];
-    readonly modalCoord: WorkspaceShellModalEffectsFactoryOptions['modalCoord'];
-    readonly routing: Pick<
-      WorkspaceShellRoutingSurface,
-      'routeUrl' | 'routeSyncController'
-    >;
-    readonly startupTier: {
-      isTierReady:
-        WorkspaceShellSignalEffectsDelegatesOptions['startupTierState']['isTierReady'];
-    };
-    readonly toast: WorkspaceShellDataProtectionReminderLazyLoadDelegateOptions['toast'];
-  };
-
 type OptionalSignalEffectsFactories = Pick<
   WorkspaceShellSignalEffectsDelegatesOptions,
   | 'createSignalEffectsLazyLoadDelegate'
@@ -138,6 +98,22 @@ function createOptionalSignalEffectsFactories(
   };
 }
 
+function createAndroidWidgetEffectBridge(
+  options: WorkspaceShellSignalEffectsOptionsFactoryOptions,
+): WorkspaceShellSignalEffectsDelegatesOptions['runtime']['androidWidgetLazyLoad'] {
+  const delegate = options.startupEntryControllers.androidWidgetLazyLoad;
+  return {
+    captureFromRoute: routeUrl => delegate.captureFromRoute(routeUrl),
+    syncProcessing: () => {
+      startWidgetBootstrapAttempt(generation => {
+        options.authService.sessionInitialized();
+        options.userSession.currentUserId();
+        delegate.syncProcessing(generation);
+      });
+    },
+  };
+}
+
 export function createWorkspaceShellSignalEffectsOptions(
   options: WorkspaceShellSignalEffectsOptionsFactoryOptions,
 ): WorkspaceShellSignalEffectsDelegatesOptions {
@@ -155,7 +131,7 @@ export function createWorkspaceShellSignalEffectsOptions(
       routeSyncController: options.routeSyncController,
     },
     runtime: {
-      androidWidgetLazyLoad: options.startupEntryControllers.androidWidgetLazyLoad,
+      androidWidgetLazyLoad: createAndroidWidgetEffectBridge(options),
     },
     startupEntryIntent:
       options.startupEntryControllers.startupEntryIntentController,
@@ -193,33 +169,4 @@ export function createWorkspaceShellSignalEffectsDelegate(
   return createWorkspaceShellSignalEffectsDelegates(
     createWorkspaceShellSignalEffectsOptions(options),
   );
-}
-
-export function createWorkspaceShellSignalEffectsSurface(
-  options: WorkspaceShellSignalEffectsSurfaceOptions,
-): ReturnType<typeof createWorkspaceShellSignalEffectsDelegate> {
-  const errorHandler = options.injector.get(GlobalErrorHandler);
-
-  return createWorkspaceShellSignalEffectsDelegate({
-    ...options,
-    modalEffects: createWorkspaceShellModalEffectsController({
-      errorHandler,
-      modal: options.modal,
-      modalCoord: options.modalCoord,
-      warn: options.warn,
-    }),
-    dataProtectionReminder:
-      createWorkspaceShellDataProtectionReminderLazyLoadDelegate({
-        userSession: options.userSession,
-        exportService: options.lazyServiceRefs.exportService,
-        toast: options.toast,
-        ...options.dataProtectionReminder,
-        warn: options.warn,
-      }),
-    routeUrl: options.routing.routeUrl,
-    routeSyncController: options.routing.routeSyncController,
-    startupTierState: {
-      isTierReady: tier => options.startupTier.isTierReady(tier),
-    },
-  });
 }

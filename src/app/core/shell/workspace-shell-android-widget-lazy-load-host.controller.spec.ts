@@ -101,7 +101,7 @@ describe('WorkspaceShellAndroidWidgetLazyLoadHostController', () => {
     await expect(controller.captureFromRoute('/projects?entry=twa')).resolves.toBe(true);
     await controller.complete(BOOTSTRAP_REQUEST);
     controller.restoreAll();
-    controller.syncProcessing();
+    controller.syncProcessing(17);
     controller.continueManualCallback();
     controller.useIntentFallback();
     controller.dismissManualCallback();
@@ -113,7 +113,7 @@ describe('WorkspaceShellAndroidWidgetLazyLoadHostController', () => {
     expect(resolver.captureFromRoute).toHaveBeenCalledWith('/projects?entry=twa');
     expect(resolver.complete).toHaveBeenCalledWith(BOOTSTRAP_REQUEST);
     expect(resolver.restoreAll).toHaveBeenCalledTimes(1);
-    expect(resolver.syncProcessing).toHaveBeenCalledTimes(1);
+    expect(resolver.syncProcessing).toHaveBeenCalledExactlyOnceWith(17);
     expect(resolver.continueManualCallback).toHaveBeenCalledTimes(1);
     expect(resolver.useIntentFallback).toHaveBeenCalledTimes(1);
     expect(resolver.dismissManualCallback).toHaveBeenCalledTimes(1);

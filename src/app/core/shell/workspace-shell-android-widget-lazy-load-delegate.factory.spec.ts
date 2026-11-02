@@ -84,7 +84,7 @@ describe('createWorkspaceShellAndroidWidgetLazyLoadDelegate', () => {
     await expect(delegate.captureFromRoute('/projects?entry=twa')).resolves.toBe(true);
     await delegate.complete(BOOTSTRAP_REQUEST);
     delegate.restoreAll();
-    delegate.syncProcessing();
+    delegate.syncProcessing(23);
     delegate.continueManualCallback();
     delegate.useIntentFallback();
     delegate.dismissManualCallback();
@@ -96,7 +96,7 @@ describe('createWorkspaceShellAndroidWidgetLazyLoadDelegate', () => {
     expect(androidWidget.captureFromRoute).toHaveBeenCalledWith('/projects?entry=twa');
     expect(androidWidget.complete).toHaveBeenCalledWith(BOOTSTRAP_REQUEST);
     expect(androidWidget.restoreAll).toHaveBeenCalledTimes(1);
-    expect(androidWidget.syncProcessing).toHaveBeenCalledTimes(1);
+    expect(androidWidget.syncProcessing).toHaveBeenCalledExactlyOnceWith(23);
     expect(androidWidget.continueManualCallback).toHaveBeenCalledTimes(1);
     expect(androidWidget.useIntentFallback).toHaveBeenCalledTimes(1);
     expect(androidWidget.dismissManualCallback).toHaveBeenCalledTimes(1);

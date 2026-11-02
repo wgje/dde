@@ -13,7 +13,7 @@ import {
 import {
   createWorkspaceShellSignalEffectsSurface,
   type WorkspaceShellSignalEffectsSurfaceOptions,
-} from './workspace-shell-signal-effects-options.factory';
+} from './workspace-shell-signal-effects-surface.factory';
 
 export type WorkspaceShellSessionLifecycleSurfaceOptions =
   WorkspaceShellProjectSubscriptionOptionsFactoryOptions &
