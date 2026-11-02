@@ -152,7 +152,8 @@ export async function prepareLocalBackupUiRestoreTransaction(
 ): Promise<PreparedLocalBackupUiRestoreTransaction> {
   const touchedProjectIds = normalizeProjectIds(input.touchedProjectIds);
   const quiescence = await dependencies.prepareQuiescence(input.ownerUserId);
-  let markerCreated = false;
+  let journal: LocalBackupUiRestoreJournal | null = null;
+  let marker: LocalBackupUiRestoreMarker | null = null;
   let markerHeartbeat: LocalBackupUiRestoreMarkerHeartbeat | null = null;
   let preparedHandle: PreparedLocalBackupUiRestoreTransaction | null = null;
   try {
@@ -172,16 +173,15 @@ export async function prepareLocalBackupUiRestoreTransaction(
       blackBox: blackBox as unknown as LocalBackupUiRestorePreImage['blackBox'],
     };
     const queueIdentity = await createPreparedQueueIdentity(input, quiescence, dependencies);
-    const marker = buildPreparedMarker(
+    marker = buildPreparedMarker(
       input,
       touchedProjectIds,
       preImage,
       quiescence,
       queueIdentity,
     );
-    const journal = dependencies.createJournal(input.ownerUserId);
+    journal = dependencies.createJournal(input.ownerUserId);
     await journal.create(marker);
-    markerCreated = true;
     const readBack = await journal.read();
     if (!readBack || JSON.stringify(readBack) !== JSON.stringify(marker)) {
       throw new Error('local backup UI restore marker read-back verification failed');
@@ -206,9 +206,7 @@ export async function prepareLocalBackupUiRestoreTransaction(
     ));
     return preparedHandle;
   } catch (error) {
-    if (!markerCreated) {
-      await quiescence.abortBeforeMutation();
-    } else if (preparedHandle) {
+    if (preparedHandle) {
       try {
         await preparedHandle.abortBeforeMutation();
       } catch (cleanupError) {
@@ -217,10 +215,41 @@ export async function prepareLocalBackupUiRestoreTransaction(
           'local backup UI restore prepare cleanup failed',
         );
       }
-    } else if (markerHeartbeat) {
-      await markerHeartbeat.stop();
+    } else {
+      let safeToReleaseQuiescence = journal === null || marker === null;
+      if (journal && marker) {
+        try {
+          const markerOwnershipIntact = markerHeartbeat?.hasOwnership() ?? true;
+          await markerHeartbeat?.stop();
+          safeToReleaseQuiescence = markerOwnershipIntact
+            && await clearUnmutatedPreparedMarker(journal, marker);
+        } catch {
+          safeToReleaseQuiescence = false;
+        }
+      }
+      if (safeToReleaseQuiescence) {
+        await quiescence.abortBeforeMutation();
+      } else {
+        await quiescence.deferForStartupRecovery();
+      }
     }
     throw error;
+  }
+}
+
+async function clearUnmutatedPreparedMarker(
+  journal: LocalBackupUiRestoreJournal,
+  marker: LocalBackupUiRestoreMarker,
+): Promise<boolean> {
+  try {
+    const current = await journal.read();
+    if (!current) return true;
+    if (JSON.stringify(current) !== JSON.stringify(marker)
+      || !await journal.verifyOwnership(current)) return false;
+    if (!await journal.clear(current)) return false;
+    return await journal.read() === null;
+  } catch {
+    return false;
   }
 }
 

@@ -184,10 +184,14 @@ async function createMarker(
     }
     writeSentinel(persistedMarker);
   } catch (error) {
-    const removed = await journal.clear(marker).catch(() => false);
+    let cleanupError: unknown;
+    const removed = await journal.clear(marker).catch(error => {
+      cleanupError = error;
+      return false;
+    });
     if (!removed) {
       throw new AggregateError(
-        [error],
+        cleanupError === undefined ? [error] : [error, cleanupError],
         'local backup UI restore marker verification failed and the owned marker could not be removed',
       );
     }

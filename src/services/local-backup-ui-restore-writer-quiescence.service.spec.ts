@@ -243,6 +243,32 @@ describe('LocalBackupUiRestoreWriterQuiescenceService', () => {
     }
   });
 
+  it('stops heartbeat but retains quiescence evidence until startup recovery takes over', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
+    vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+    try {
+      const service = new LocalBackupUiRestoreWriterQuiescenceService({ leaseMs: 1_000 });
+      const handle = await service.prepare(OWNER_USER_ID);
+      const marker = handle.marker();
+
+      await handle.deferForStartupRecovery();
+      expect(() => service.runSync(OWNER_USER_ID, 'action-queue', () => undefined))
+        .toThrow(LocalBackupUiRestoreWriterPausedError);
+      vi.setSystemTime(new Date(Date.parse(marker.leaseExpiresAt) + 1));
+
+      await expect(service.readStartupRecoveryEvidence(OWNER_USER_ID)).resolves.toEqual(marker);
+      await expect(service.recoverExpiredPreMarkerQuiescence(OWNER_USER_ID))
+        .resolves.toEqual({ status: 'recovered' });
+      expect(localStorage.getItem(
+        getLocalBackupUiRestoreQuiescenceSentinelStorageKey(OWNER_USER_ID),
+      )).toBeNull();
+      expect(() => service.runSync(OWNER_USER_ID, 'action-queue', () => undefined)).not.toThrow();
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
   it('retains expired quiescence while an exact owner writer is active', async () => {
     vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
     vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));

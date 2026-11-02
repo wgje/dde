@@ -392,6 +392,40 @@ describe('createLocalBackupUiRestoreStageOperations', () => {
     }
   });
 
+  it('rejects duplicate RetryQueue records within one durable storage', async () => {
+    const item = makeRetryQueueItem(
+      '77777777-7777-4777-8777-777777777777',
+      '88888888-8888-4888-8888-888888888888',
+    );
+    item.createdAt = Date.now();
+    const marker = makeStageMarker(item);
+    marker.state = 'restoring';
+    const service = makeStageService();
+    const operations = service.createOperations({
+      ownerUserId: OWNER_USER_ID,
+      data: {} as never,
+      backup: {
+        localState: { dataSafety: { ownerUserId: OWNER_USER_ID } },
+      } as BackupData,
+      existingProjects: [],
+      actionQueueRestore: makeActionQueueRestore(),
+    });
+    const context = makeContext(marker);
+    operations.decodePreImage(marker);
+    await operations.apply('retry-queue', context);
+    localStorage.setItem('nanoflow.retry-queue', JSON.stringify({
+      version: 1,
+      items: [item, item],
+    }));
+
+    try {
+      await expect(operations.verifyApplied('retry-queue', context))
+        .rejects.toThrow(/retry-queue/i);
+    } finally {
+      localStorage.removeItem('nanoflow.retry-queue');
+    }
+  });
+
   it('creates startup recovery operations that roll back from marker pre-image without runtime backup input', async () => {
     const markerItem = makeRetryQueueItem(
       '99999999-9999-4999-8999-999999999999',

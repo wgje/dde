@@ -208,7 +208,8 @@ describe('prepareLocalBackupUiRestoreTransaction', () => {
     }, dependencies);
     order.length = 0;
 
-    await expect(handle.run(makeOperations())).resolves.toMatchObject({
+    const operations = makeOperations();
+    await expect(handle.run(operations)).resolves.toMatchObject({
       status: 'blocked',
       error: expect.objectContaining({
         message: expect.stringMatching(/authoritative/i),
@@ -216,6 +217,8 @@ describe('prepareLocalBackupUiRestoreTransaction', () => {
     });
 
     expect(markerStore.current).not.toBeNull();
+    expect(markerStore.current).toMatchObject({ state: 'completed', phase: 'finalizing' });
+    expect(operations.rollback).not.toHaveBeenCalled();
     expect(order).not.toContain('journal.clear');
     expect(order).not.toContain('quiescence.release');
   });
@@ -244,6 +247,43 @@ describe('prepareLocalBackupUiRestoreTransaction', () => {
 
     expect(order).not.toContain('journal.clear');
     expect(order).not.toContain('quiescence.abort');
+    expect(order).toContain('quiescence.defer');
+  });
+
+  it('retains quiescence when journal creation cleanup cannot confirm marker removal', async () => {
+    const order: string[] = [];
+    const markerStore = { current: null as unknown };
+    const dependencies = makeDependencies(order, markerStore);
+    dependencies.createJournal = ownerUserId => ({
+      ...makeJournal(order, markerStore, ownerUserId),
+      create: vi.fn(async marker => {
+        markerStore.current = marker;
+        throw new AggregateError(
+          [new Error('journal read-back failed'), new Error('journal cleanup failed')],
+          'journal create cleanup failed',
+        );
+      }),
+      clear: vi.fn(async () => {
+        order.push('journal.clear');
+        return false;
+      }),
+    });
+
+    await expect(prepareLocalBackupUiRestoreTransaction({
+      ownerUserId: OWNER_USER_ID,
+      source: { kind: 'local-file', reference: null, checksum: SOURCE_DIGEST },
+      touchedProjectIds: ['project-1'],
+      currentProjects: [],
+      retryQueueRestoreItems: [],
+      restoredActionQueueItems: [],
+      blackBoxBackup: makeBackup([]),
+    }, dependencies)).rejects.toThrow(/journal create cleanup failed/i);
+
+    expect(markerStore.current).not.toBeNull();
+    expect(order).toContain('journal.clear');
+    expect(order).toContain('quiescence.defer');
+    expect(order).not.toContain('quiescence.abort');
+    expect(order).not.toContain('queue-backup.prepare');
   });
 
   it('settles queue evidence and releases the writer freeze when queue prepare fails', async () => {
@@ -697,6 +737,9 @@ function makeQuiescence(order: string[]): PreparedLocalBackupUiRestoreWriterQuie
     }),
     abortBeforeMutation: vi.fn(async () => {
       order.push('quiescence.abort');
+    }),
+    deferForStartupRecovery: vi.fn(async () => {
+      order.push('quiescence.defer');
     }),
   };
 }

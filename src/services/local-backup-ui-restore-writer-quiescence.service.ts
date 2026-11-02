@@ -50,6 +50,7 @@ export interface PreparedLocalBackupUiRestoreWriterQuiescence {
   prepareFinalization(outcome: LocalBackupUiRestoreQuiescenceFinalOutcome): Promise<void>;
   releaseFinalized(): Promise<void>;
   abortBeforeMutation(): Promise<void>;
+  deferForStartupRecovery(): Promise<void>;
 }
 
 interface WriterQuiescenceOptions {
@@ -321,7 +322,15 @@ class LocalBackupUiRestoreQuiescenceLease {
       prepareFinalization: outcome => this.prepareFinalization(outcome),
       releaseFinalized: () => this.releaseFinalized(),
       abortBeforeMutation: () => this.abortBeforeMutation(),
+      deferForStartupRecovery: () => this.deferForStartupRecovery(),
     };
+  }
+
+  private async deferForStartupRecovery(): Promise<void> {
+    if (this.markerValue.state !== 'quiesced') {
+      throw new Error('local backup UI restore quiescence cannot be deferred from this state');
+    }
+    await this.stopHeartbeat();
   }
 
   private runMutation<T>(

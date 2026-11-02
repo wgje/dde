@@ -108,6 +108,43 @@ describe('local backup UI restore stage protocol', () => {
     expect(context.runtime.finalize).not.toHaveBeenCalled();
   });
 
+  it('retains completed finalization evidence without rolling back when terminal cleanup fails', async () => {
+    const context = createContext();
+    context.runtime.finalize = vi.fn(async () => {
+      context.order.push('finalize:completed');
+      throw new Error('terminal cleanup failed');
+    });
+
+    const result = await runLocalBackupUiRestoreStageProtocol(context.runtime, context.operations);
+
+    expect(result).toMatchObject({ status: 'blocked', ownershipLost: false, dataState: 'completed' });
+    expect(context.runtime.marker()).toMatchObject({ state: 'completed', phase: 'finalizing' });
+    expect(context.operations.rollback).not.toHaveBeenCalled();
+    expect(context.runtime.finalize).toHaveBeenCalledTimes(1);
+  });
+
+  it('retains rolled-back finalization evidence when terminal cleanup fails', async () => {
+    const context = createContext('attachment-outbox');
+    context.runtime.finalize = vi.fn(async () => {
+      context.order.push('finalize:rolled-back');
+      throw new Error('terminal cleanup failed');
+    });
+
+    const result = await runLocalBackupUiRestoreStageProtocol(context.runtime, context.operations);
+
+    expect(result).toMatchObject({ status: 'blocked', ownershipLost: false, dataState: 'rolled-back' });
+    expect(context.runtime.marker()).toMatchObject({
+      state: 'rolled-back',
+      phase: 'finalizing',
+      rollbackErrors: [],
+    });
+    expect(context.runtime.marker().rollbackCompletedStages).toEqual([
+      'attachment-outbox',
+      'projects',
+    ]);
+    expect(context.runtime.finalize).toHaveBeenCalledTimes(1);
+  });
+
   it('stops on ownership loss without rolling back, clearing, or reopening writers', async () => {
     const context = createContext();
     context.operations.apply = vi.fn(async stage => {

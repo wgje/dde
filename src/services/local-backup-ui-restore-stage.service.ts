@@ -1013,6 +1013,10 @@ function verifyRetryQueueReadback(
       return false;
     }
   }
+  const indexedDbItems = actual['indexedDb'] as unknown[];
+  if (!hasUniquePersistedItems(indexedDbItems) || !hasUniquePersistedItems(localItems)) {
+    return false;
+  }
   let target: unknown[];
   try {
     target = projectLocalBackupUiRestoreRetryQueueItems(preImage, restoredItems, ownerUserId);
@@ -1030,7 +1034,7 @@ function verifyRetryQueueReadback(
     return false;
   }
   return samePersistedItemSet(
-    [...(actual['indexedDb'] as unknown[]), ...localItems],
+    [...indexedDbItems, ...localItems],
     target,
   ) && samePersistedItemSet(actual['restoredItems'], expectedRestoredItems);
 }
@@ -1087,6 +1091,11 @@ function samePersistedItemSet(left: readonly unknown[], right: readonly unknown[
   const leftSet = new Set(left.map(item => canonicalizePersistedValue(item)));
   const rightSet = new Set(right.map(item => canonicalizePersistedValue(item)));
   return leftSet.size === rightSet.size && [...leftSet].every(item => rightSet.has(item));
+}
+
+function hasUniquePersistedItems(items: readonly unknown[]): boolean {
+  const identities = new Set(items.map(item => canonicalizePersistedValue(item)));
+  return identities.size === items.length;
 }
 
 function isRecordValue(value: unknown): value is Record<string, unknown> {
