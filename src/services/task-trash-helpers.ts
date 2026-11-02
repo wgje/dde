@@ -23,6 +23,15 @@ export interface TrashRestoreMutationResult {
   restoredConnectionIds: string[];
 }
 
+export class TrashRestoreIntegrityError extends Error {
+  readonly code = 'TRASH_RESTORE_MISSING_DELETED_META';
+
+  constructor(readonly taskIds: string[]) {
+    super(`Cannot restore tasks with missing deletedMeta: ${taskIds.join(', ')}`);
+    this.name = 'TrashRestoreIntegrityError';
+  }
+}
+
 export function createTrashTaskMap(tasks: Task[]): Map<string, Task> {
   return new Map(tasks.map((task) => [task.id, task] as const));
 }
@@ -164,6 +173,14 @@ export function collectTrashRestoreTaskIds(taskId: string, tasks: Task[]): Set<s
 export function applyTrashRestoreMutation(
   options: TrashRestoreMutationOptions,
 ): TrashRestoreMutationResult {
+  const missingMetadataTaskIds = collectTrashRestoreMissingMetadataTaskIds(
+    options.project.tasks,
+    options.idsToRestore,
+  );
+  if (missingMetadataTaskIds.size > 0) {
+    throw new TrashRestoreIntegrityError([...missingMetadataTaskIds]);
+  }
+
   const restoredDraftById = createRestoredDrafts(
     options.project.tasks,
     options.idsToRestore,
@@ -194,6 +211,32 @@ export function applyTrashRestoreMutation(
       connections: [...options.project.connections, ...connectionsToRestore],
     }),
   };
+}
+
+export function collectTrashRestoreMissingMetadataTaskIds(
+  tasks: Task[],
+  idsToRestore: ReadonlySet<string>,
+): Set<string> {
+  const missingTaskIds = new Set<string>();
+  for (const task of tasks) {
+    if (idsToRestore.has(task.id) && !hasCompleteTrashDeletedTaskMeta(task.deletedMeta)) {
+      missingTaskIds.add(task.id);
+    }
+  }
+  return missingTaskIds;
+}
+
+export function hasCompleteTrashDeletedTaskMeta(meta: Task['deletedMeta']): meta is TrashDeletedTaskMeta {
+  if (!meta || typeof meta !== 'object') return false;
+
+  return Object.prototype.hasOwnProperty.call(meta, 'parentId')
+    && (meta.parentId === null || typeof meta.parentId === 'string')
+    && Object.prototype.hasOwnProperty.call(meta, 'stage')
+    && (meta.stage === null || Number.isFinite(meta.stage))
+    && Number.isFinite(meta.order)
+    && Number.isFinite(meta.rank)
+    && Number.isFinite(meta.x)
+    && Number.isFinite(meta.y);
 }
 
 function createRestoredTaskDraft(task: Task, now: string): Task {

@@ -2,6 +2,8 @@ import { Component, Injector, inject, signal, Output, EventEmitter, Input, compu
 import { CommonModule } from '@angular/common';
 import { ProjectStateService } from '../../../services/project-state.service';
 import { TaskOperationAdapterService } from '../../../services/task-operation-adapter.service';
+import type { ProjectUiOwner } from '../../../services/task-operation-trash-adapter.controller';
+import { hasCompleteTrashDeletedTaskMeta } from '../../../services/task-trash-helpers';
 import { ToastService } from '../../../services/toast.service';
 import { Task } from '../../../models';
 import { FLOATING_TREE_CONFIG, TRASH_CONFIG } from '../../../config';
@@ -195,18 +197,7 @@ interface TrashChildCountIndex {
           <div class="px-5 py-3 border-t border-stone-100 dark:border-stone-700 flex justify-between items-center flex-shrink-0 bg-stone-50/50 dark:bg-stone-800/50">
             @if (activeTab() === 'deleted') {
               <p class="text-[10px] text-stone-400 dark:text-stone-500">
-                任务将在删除 {{ autoCleanupDays }} 天后自动清除
-              </p>
-              @if (deletedTasks().length > 0) {
-                <button 
-                  (click)="confirmEmptyTrash()"
-                  class="px-3 py-1.5 bg-red-500 hover:bg-red-600 text-white text-xs font-medium rounded-lg transition-all">
-                  清空回收站
-                </button>
-              }
-            } @else {
-              <p class="text-[10px] text-violet-500">
-                归档任务不会自动删除
+                任务…128 tokens truncated…删除
               </p>
             }
           </div>
@@ -292,6 +283,8 @@ interface TrashChildCountIndex {
 })
 export class TrashModalComponent {
   @Input() show = false;
+  @Input() projectOwner: ProjectUiOwner | null = null;
+  @Input() canPublishUi: () => boolean = () => false;
   @Output() close = new EventEmitter<void>();
   
   private readonly injector = inject(Injector);
@@ -300,6 +293,22 @@ export class TrashModalComponent {
 
   private get taskOpsAdapter(): TaskOperationAdapterService {
     return this.injector.get(TaskOperationAdapterService);
+  }
+
+  private captureOwner(taskId?: string): { owner: ProjectUiOwner; canPublishUi: () => boolean } | null {
+    const owner = this.projectOwner;
+    const canPublishUi = this.canPublishUi;
+    const activeProject = this.projectState.activeProject();
+    if (!owner || !activeProject || !this.isOwnerCurrent(owner, canPublishUi)) return null;
+    if (taskId && !activeProject.tasks.some(task => task.id === taskId)) return null;
+    return { owner, canPublishUi };
+  }
+
+  private isOwnerCurrent(owner: ProjectUiOwner, canPublishUi: () => boolean): boolean {
+    return this.projectOwner === owner
+      && this.canPublishUi === canPublishUi
+      && this.projectState.activeProject()?.id === owner.projectId
+      && canPublishUi();
   }
   
   // 当前激活的标签页
@@ -477,7 +486,17 @@ export class TrashModalComponent {
    * 恢复任务
    */
   async restoreTask(task: Task): Promise<void> {
+    const captured = this.captureOwner(task.id);
+    if (!captured) return;
+    if (!hasCompleteTrashDeletedTaskMeta(task.deletedMeta)) {
+      this.toast.warning(
+        '无法恢复任务',
+        '原始结构信息缺失，任务仍保留在回收站中。',
+      );
+      return;
+    }
     const restored = await this.taskOpsAdapter.restoreTask(task.id);
+    if (!this.isOwnerCurrent(captured.owner, captured.canPublishUi)) return;
     if (restored) {
       this.toast.success('已恢复', `任务 "${task.title}" 已恢复`);
       return;
@@ -489,7 +508,10 @@ export class TrashModalComponent {
    * 取消归档任务
    */
   async unarchiveTask(task: Task): Promise<void> {
-    const restored = await this.taskOpsAdapter.updateTaskStatus(task.id, 'active');
+    const captured = this.captureOwner(task.id);
+    if (!captured) return;
+    const restored = await this.taskOpsAdapter.updateTaskStatus(task.id, 'active', captured.owner.projectId);
+    if (!this.isOwnerCurrent(captured.owner, captured.canPublishUi)) return;
     if (restored) {
       this.toast.success('已取消归档', `任务 "${task.title}" 已恢复到主视图`);
       return;
@@ -501,6 +523,7 @@ export class TrashModalComponent {
    * 确认永久删除
    */
   confirmPermanentDelete(task: Task) {
+    if (!this.captureOwner(task.id)) return;
     this.confirmDeleteTask.set(task);
   }
   
@@ -509,12 +532,13 @@ export class TrashModalComponent {
    */
   async executePermanentDelete(): Promise<void> {
     const task = this.confirmDeleteTask();
-    if (task) {
-      const deleted = await this.taskOpsAdapter.permanentlyDeleteTask(task.id);
-      if (deleted) {
-        this.toast.success('已删除', `任务 "${task.title}" 已永久删除`);
-      }
-    }
+    if (!task) return;
+    const captured = this.captureOwner(task.id);
+    if (!captured) return;
+    const canPublishUi = () => this.isOwnerCurrent(captured.owner, captured.canPublishUi);
+    const deleted = await this.taskOpsAdapter.permanentlyDeleteTask(task.id, canPublishUi);
+    if (!canPublishUi()) return;
+    if (deleted) this.toast.success('已删除', `任务 "${task.title}" 已永久删除`);
     this.confirmDeleteTask.set(null);
   }
   
@@ -522,6 +546,7 @@ export class TrashModalComponent {
    * 确认清空回收站
    */
   confirmEmptyTrash() {
+    if (!this.captureOwner()) return;
     this.showEmptyConfirm.set(true);
   }
   
@@ -529,7 +554,11 @@ export class TrashModalComponent {
    * 执行清空回收站
    */
   async executeEmptyTrash(): Promise<void> {
-    const emptied = await this.taskOpsAdapter.emptyTrash();
+    const captured = this.captureOwner();
+    if (!captured) return;
+    const canPublishUi = () => this.isOwnerCurrent(captured.owner, captured.canPublishUi);
+    const emptied = await this.taskOpsAdapter.emptyTrash(canPublishUi);
+    if (!canPublishUi()) return;
     if (emptied) {
       this.showEmptyConfirm.set(false);
       this.toast.success('已清空', '回收站已清空');

@@ -26,6 +26,7 @@ import { TRASH_CONFIG } from '../config';
 import {
   applyTrashRestoreMutation,
   buildTrashChildrenByParent,
+  collectTrashRestoreMissingMetadataTaskIds,
   collectTrashRestoreTaskIds,
   collectTrashSavedConnections,
   collectTrashCascadeTaskIds,
@@ -49,6 +50,8 @@ export interface DeleteResult {
 export interface RestoreResult {
   restoredTaskIds: Set<string>;
   restoredConnectionIds: string[];
+  blockedReason?: 'missing-deleted-meta';
+  blockedTaskIds?: Set<string>;
 }
 
 export interface DurableDeleteResult extends DeleteResult {
@@ -112,6 +115,24 @@ export class TaskTrashService {
 
   private createDurableRestoreResult(result: RestoreResult, saved: boolean): DurableRestoreResult {
     return { ...result, saved };
+  }
+
+  private rejectRestoreForMissingMetadata(
+    taskId: string,
+    projectId: string,
+    blockedTaskIds: Set<string>
+  ): DurableRestoreResult {
+    this.logger.warn('任务恢复缺少原始结构元数据，已拒绝恢复', {
+      taskId,
+      projectId,
+      blockedTaskIds: [...blockedTaskIds],
+      reason: 'missing-deleted-meta',
+    });
+    return this.createDurableRestoreResult({
+      ...this.createEmptyRestoreResult(),
+      blockedReason: 'missing-deleted-meta',
+      blockedTaskIds,
+    }, false);
   }
 
   private createDeletedTaskDraft(
@@ -448,6 +469,10 @@ export class TaskTrashService {
     }
 
     const idsToRestore = collectTrashRestoreTaskIds(taskId, activeP.tasks);
+    const blockedTaskIds = collectTrashRestoreMissingMetadataTaskIds(activeP.tasks, idsToRestore);
+    if (blockedTaskIds.size > 0) {
+      return this.rejectRestoreForMissingMetadata(taskId, activeP.id, blockedTaskIds);
+    }
     const savedConnections = collectTrashSavedConnections(activeP.tasks, idsToRestore);
     let restoredConnectionIds: string[] = [];
     const now = new Date().toISOString();

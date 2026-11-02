@@ -537,6 +537,28 @@ describe('TaskTrashService', () => {
       expect(restoredTask?.content).toBe('有内容');
     });
 
+    it('缺少 deletedMeta 时应拒绝恢复并保留回收站中的原任务', async () => {
+      const task = createTask({
+        id: 'task-missing-deleted-meta',
+        deletedAt: '2026-04-23T01:00:00.000Z',
+        stage: null,
+        parentId: null,
+        deletedMeta: undefined,
+      });
+      currentProject = createProject([task]);
+
+      const result = await service.restoreTask('task-missing-deleted-meta');
+
+      expect(result.saved).toBe(false);
+      expect(result.blockedReason).toBe('missing-deleted-meta');
+      expect(result.blockedTaskIds).toEqual(new Set(['task-missing-deleted-meta']));
+      expect(result.restoredTaskIds).toEqual(new Set());
+      expect(recordAndUpdateDurably).not.toHaveBeenCalled();
+      expect(mockLayoutService.rebalance).not.toHaveBeenCalled();
+      expect(mockTombstoneService.clearLocalTombstones).not.toHaveBeenCalled();
+      expect(currentProject.tasks[0]).toEqual(task);
+    });
+
     it('restoreTaskDurably 本地持久化成功后才清理本地 tombstone', async () => {
       const task = createTask({
         id: 'task-1',

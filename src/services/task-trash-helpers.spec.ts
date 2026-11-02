@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { Task, Connection, Project } from '../models';
 import {
   applyTrashRestoreMutation,
@@ -145,5 +145,33 @@ describe('task-trash-helpers', () => {
         stage: 3,
       }),
     ]);
+  });
+
+  it('缺少 deletedMeta 时必须拒绝恢复而不是沿用 stage null 猜测原结构', () => {
+    const deletedTask = task('task-without-meta', null, '2026-01-02T00:00:00.000Z', {
+      stage: null,
+      parentId: null,
+      deletedMeta: undefined,
+    });
+    const project: Project = {
+      id: 'project-1',
+      name: 'Project',
+      description: '',
+      createdDate: '2026-01-01T00:00:00.000Z',
+      tasks: [deletedTask],
+      connections: [],
+    };
+    const rebalance = vi.fn((draft: Project) => draft);
+
+    expect(() => applyTrashRestoreMutation({
+      idsToRestore: new Set([deletedTask.id]),
+      now: '2026-01-03T00:00:00.000Z',
+      project,
+      rebalance,
+      savedConnections: [],
+    })).toThrowError(/missing deletedMeta.*task-without-meta/i);
+
+    expect(rebalance).not.toHaveBeenCalled();
+    expect(project.tasks[0]).toEqual(deletedTask);
   });
 });
