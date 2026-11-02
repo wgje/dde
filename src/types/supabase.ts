@@ -1895,7 +1895,6 @@ export type Database = {
       }
       get_black_box_sync_watermark: { Args: never; Returns: string | null }
       get_dashboard_stats: { Args: never; Returns: Json }
-      get_full_project_data: { Args: { p_project_id: string }; Returns: Json }
       get_project_sync_watermark: {
         Args: { p_project_id: string }
         Returns: string | null

@@ -2,8 +2,7 @@ import { Injectable, inject } from '@angular/core';
 import type { SupabaseClient } from '@supabase/supabase-js';
 
 import { AUTH_CONFIG } from '../../../../config/auth.config';
-import { FEATURE_FLAGS } from '../../../../config/feature-flags.config';
-import { CIRCUIT_BREAKER_CONFIG, FIELD_SELECT_CONFIG, REQUEST_THROTTLE_CONFIG } from '../../../../config/sync.config';
+import { FIELD_SELECT_CONFIG, REQUEST_THROTTLE_CONFIG } from '../../../../config/sync.config';
 import type { Connection, Project, Task } from '../../../../models';
 import type { ConnectionRow, ProjectRow, TaskRow } from '../../../../models/supabase-types';
 import { LoggerService } from '../../../../services/logger.service';
@@ -15,9 +14,8 @@ import {
   isBrowserNetworkSuspendedError,
   isBrowserNetworkSuspendedWindow,
 } from '../../../../utils/browser-network-suspension';
-import { fetchAllSupabasePages } from '../../../../utils/supabase-pagination';
+import { fetchAllSupabaseKeysetPagesByCursor } from '../../../../utils/supabase-pagination';
 import { supabaseErrorToError } from '../../../../utils/supabase-error';
-import { isBatchRpcMissingError as isBatchRpcMissingErrorPure } from './project-data-projection';
 import { ProjectTaskDataService } from './project-task-data.service';
 
 export type ProjectDetailClientProvider = (expectedUserId?: string) => Promise<SupabaseClient | null>;
@@ -29,26 +27,9 @@ export type ConnectionRowMapper = (row: ConnectionRow | Partial<ConnectionRow>) 
 export interface ProjectDetailLoadDependencies {
   getClient: ProjectDetailClientProvider;
   withAuthRetry: ProjectDetailAuthRetryHandler;
-  isSessionExpiredError: (error: ReturnType<typeof supabaseErrorToError>) => boolean;
-  tryRefreshSessionWithSession: (context: string) => Promise<{ refreshed: boolean }>;
   rowToProject: ProjectRowMapper;
   rowToTask: TaskRowMapper;
   rowToConnection: ConnectionRowMapper;
-}
-
-interface FullProjectRpcData {
-  project?: ProjectRow | Partial<ProjectRow> | null;
-  tasks?: TaskRow[] | null;
-  connections?: ConnectionRow[] | null;
-  task_tombstones?: string[] | null;
-  connection_tombstones?: string[] | null;
-}
-
-interface SupabaseLikeError {
-  code?: string;
-  message?: string;
-  details?: string;
-  hint?: string;
 }
 
 interface FullProjectSequentialData {
@@ -57,55 +38,23 @@ interface FullProjectSequentialData {
   connectionsData: Array<Record<string, unknown>>;
 }
 
+interface ConnectionPageCursor {
+  id: string;
+}
+
 @Injectable({ providedIn: 'root' })
 export class ProjectDetailLoaderService {
   private readonly logger = inject(LoggerService).category('ProjectData');
   private readonly throttle = inject(RequestThrottleService);
   private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly taskData = inject(ProjectTaskDataService);
-  /** 会话级熔断：当批量 RPC 不存在时，后续直接走顺序加载。 */
-  private batchRpcUnavailable = false;
-  /** 瞬时故障短熔断：504/timeout 时短时间跳过批量 RPC，避免控制台持续刷屏。 */
-  private batchRpcTransientCooldownUntil = 0;
 
   async loadFullProjectOptimized(
     projectId: string,
     expectedUserId: string | undefined,
     dependencies: ProjectDetailLoadDependencies,
   ): Promise<Project | null> {
-    if (!FEATURE_FLAGS.PROJECT_FULL_DATA_RPC_V1) {
-      this.logger.debug('完整项目批量 RPC 已关闭，使用分段加载', { projectId });
-      return this.loadFullProject(projectId, expectedUserId, dependencies);
-    }
-
-    const client = await dependencies.getClient(expectedUserId);
-    if (!client) return null;
-
-    if (this.batchRpcUnavailable) {
-      this.logger.debug('批量 RPC 已熔断，直接走顺序加载', { projectId });
-      return this.loadFullProject(projectId, expectedUserId, dependencies);
-    }
-
-    if (this.isBatchRpcTransientCircuitOpen()) {
-      this.logger.debug('批量 RPC 短时熔断中，直接走顺序加载', {
-        projectId,
-        remainingMs: this.getBatchRpcTransientCooldownRemainingMs(),
-      });
-      return this.loadFullProject(projectId, expectedUserId, dependencies);
-    }
-
-    try {
-      const { data, error } = await this.callFullProjectRpcWithRetry(client, projectId, dependencies);
-
-      if (error) {
-        return this.handleFullProjectRpcError(error, projectId, expectedUserId, dependencies);
-      }
-
-      this.batchRpcTransientCooldownUntil = 0;
-      return this.buildProjectFromFullProjectRpcData(data as FullProjectRpcData | null, projectId, dependencies);
-    } catch (error) {
-      return this.handleFullProjectRpcException(error, projectId, expectedUserId, dependencies);
-    }
+    return this.loadFullProject(projectId, expectedUserId, dependencies);
   }
 
   async loadFullProject(
@@ -132,11 +81,7 @@ export class ProjectDetailLoaderService {
         return null;
       }
 
-      const taskOwnerScope = typeof expectedUserId === 'string'
-        && expectedUserId.length > 0
-        && expectedUserId !== AUTH_CONFIG.LOCAL_MODE_USER_ID
-        ? expectedUserId
-        : 'anonymous';
+      const ownerScope = this.resolveRequestOwnerScope(expectedUserId).throttleOwnerScope;
 
       return this.buildSequentialProject({
         projectData,
@@ -144,180 +89,20 @@ export class ProjectDetailLoaderService {
           projectId,
           client,
           dependencies.rowToTask,
-          taskOwnerScope,
+          ownerScope,
           dependencies.withAuthRetry,
         ),
-        connectionsData: await this.loadConnectionsThrottled(client, projectId),
+        connectionsData: await this.loadConnectionsThrottled(
+          client,
+          projectId,
+          ownerScope,
+          dependencies.withAuthRetry,
+        ),
       }, dependencies);
     } catch (error) {
       return this.handleSequentialProjectLoadFailure(error, projectId);
     }
   }
-
-  private async callFullProjectRpcWithRetry(
-    client: SupabaseClient,
-    projectId: string,
-    dependencies: ProjectDetailLoadDependencies,
-  ): Promise<{ data: unknown; error: SupabaseLikeError | null }> {
-    this.logger.debug('使用 RPC 批量加载项目', { projectId });
-
-    let result = await client.rpc('get_full_project_data', {
-      p_project_id: projectId,
-    }) as { data: unknown; error: SupabaseLikeError | null };
-
-    if (!result.error) {
-      return result;
-    }
-
-    const enhanced = supabaseErrorToError(result.error);
-    if (!dependencies.isSessionExpiredError(enhanced)) {
-      return result;
-    }
-
-    const refreshResult = await dependencies.tryRefreshSessionWithSession('loadFullProjectOptimized');
-    if (!refreshResult.refreshed) {
-      return result;
-    }
-
-    this.logger.info('loadFullProjectOptimized 会话已刷新，重试 RPC', { projectId });
-    result = await client.rpc('get_full_project_data', {
-      p_project_id: projectId,
-    }) as { data: unknown; error: SupabaseLikeError | null };
-
-    return result;
-  }
-
-  private handleFullProjectRpcError(
-    error: SupabaseLikeError,
-    projectId: string,
-    expectedUserId: string | undefined,
-    dependencies: ProjectDetailLoadDependencies,
-  ): Promise<Project | null> | null {
-    if (isBatchRpcMissingErrorPure(error)) {
-      this.recordMissingFullProjectRpc(error, projectId);
-      return this.loadFullProject(projectId, expectedUserId, dependencies);
-    }
-
-    if (this.isFullProjectRpcAccessDenied(error)) {
-      this.recordFullProjectRpcAccessDenied(error, projectId);
-      return null;
-    }
-
-    const rpcErrEnhanced = supabaseErrorToError(error);
-    if (isBrowserNetworkSuspendedError(rpcErrEnhanced) || isBrowserNetworkSuspendedWindow()) {
-      this.logger.debug('浏览器网络挂起，跳过 RPC 回退', { projectId });
-      return null;
-    }
-
-    if (this.isTransientMetadataLoadFailure(rpcErrEnhanced)) {
-      this.tripBatchRpcTransientCircuit(projectId, rpcErrEnhanced);
-      return this.loadFullProject(projectId, expectedUserId, dependencies);
-    }
-
-    this.logger.warn('RPC 调用失败，回退到顺序加载', { error: error.message });
-    return this.loadFullProject(projectId, expectedUserId, dependencies);
-  }
-
-  private recordMissingFullProjectRpc(error: SupabaseLikeError, projectId: string): void {
-    this.batchRpcUnavailable = true;
-    this.logger.warn('批量 RPC 不可用，切换到顺序加载并启用会话熔断', {
-      projectId,
-      errorCode: error.code,
-      error: error.message,
-    });
-    this.sentryLazyLoader.captureMessage('RPC get_full_project_data unavailable, fallback enabled', {
-      level: 'warning',
-      tags: {
-        operation: 'loadFullProjectOptimized',
-        classification: 'rpc_missing',
-      },
-      extra: {
-        projectId,
-        errorCode: error.code ?? 'unknown',
-        errorMessage: error.message ?? '',
-      },
-    });
-  }
-
-  private isFullProjectRpcAccessDenied(error: SupabaseLikeError): boolean {
-    return error.code === 'P0001' || error.message?.includes('Access denied') === true;
-  }
-
-  private recordFullProjectRpcAccessDenied(error: SupabaseLikeError, projectId: string): void {
-    this.logger.warn('项目访问被拒绝，跳过该项目（不走 fallback）', { projectId, errorCode: error.code });
-    this.sentryLazyLoader.addBreadcrumb({
-      category: 'sync.rpc',
-      message: `RPC Access Denied: projectId=${projectId}`,
-      level: 'warning',
-      data: { projectId, errorCode: error.code },
-    });
-    this.sentryLazyLoader.captureMessage('RPC Access Denied (P0001, no fallback)', {
-      level: 'warning',
-      tags: {
-        operation: 'loadFullProjectOptimized',
-        classification: 'access_denied',
-      },
-      extra: {
-        projectId,
-        errorCode: error.code ?? 'P0001',
-      },
-    });
-  }
-
-  private buildProjectFromFullProjectRpcData(
-    data: FullProjectRpcData | null,
-    projectId: string,
-    dependencies: ProjectDetailLoadDependencies,
-  ): Project | null {
-    if (!data?.project) {
-      this.logger.warn('RPC 返回空数据', { projectId });
-      return null;
-    }
-
-    const project = dependencies.rowToProject(data.project);
-    const taskTombstoneSet = new Set<string>(data.task_tombstones || []);
-    const connectionTombstoneSet = new Set<string>(data.connection_tombstones || []);
-
-    project.tasks = (data.tasks || [])
-      .filter((taskRow) => !taskTombstoneSet.has(taskRow.id))
-      .map((taskRow) => dependencies.rowToTask(taskRow));
-
-    project.connections = (data.connections || [])
-      .filter((connectionRow) => !connectionTombstoneSet.has(connectionRow.id))
-      .map((connectionRow) => dependencies.rowToConnection(connectionRow));
-
-    this.logger.info('RPC 批量加载成功', {
-      projectId,
-      tasksCount: project.tasks.length,
-      connectionsCount: project.connections.length,
-    });
-
-    return project;
-  }
-
-  private handleFullProjectRpcException(
-    error: unknown,
-    projectId: string,
-    expectedUserId: string | undefined,
-    dependencies: ProjectDetailLoadDependencies,
-  ): Promise<Project | null> | null {
-    const err = supabaseErrorToError(error);
-    if (isBrowserNetworkSuspendedError(err) || isBrowserNetworkSuspendedWindow()) {
-      this.logger.debug('浏览器网络挂起，跳过批量加载', { projectId });
-      return null;
-    }
-    if (this.isTransientMetadataLoadFailure(err)) {
-      this.tripBatchRpcTransientCircuit(projectId, err);
-      return this.loadFullProject(projectId, expectedUserId, dependencies);
-    }
-    this.logger.error('批量加载项目失败', err);
-    this.sentryLazyLoader.captureException(err, {
-      tags: { operation: 'loadFullProjectOptimized' },
-      extra: { projectId },
-    });
-    return this.loadFullProject(projectId, expectedUserId, dependencies);
-  }
-
 
   private shouldSkipSequentialProjectLoad(projectId: string): boolean {
     if (!isBrowserNetworkSuspendedWindow()) {
@@ -337,10 +122,7 @@ export class ProjectDetailLoaderService {
     expectedUserId: string | undefined,
     withAuthRetry: ProjectDetailAuthRetryHandler,
   ): Promise<ProjectRow | Partial<ProjectRow> | null> {
-    const hasRemoteOwnerScope = typeof expectedUserId === 'string'
-      && expectedUserId.length > 0
-      && expectedUserId !== AUTH_CONFIG.LOCAL_MODE_USER_ID;
-    const throttleOwnerScope = hasRemoteOwnerScope ? expectedUserId : 'anonymous';
+    const { hasRemoteOwnerScope, throttleOwnerScope } = this.resolveRequestOwnerScope(expectedUserId);
 
     return this.throttle.execute(
       `project-meta:${throttleOwnerScope}:${projectId}`,
@@ -371,16 +153,34 @@ export class ProjectDetailLoaderService {
   private async loadConnectionsThrottled(
     client: SupabaseClient,
     projectId: string,
+    ownerScope: string,
+    withAuthRetry: ProjectDetailAuthRetryHandler,
   ): Promise<Array<Record<string, unknown>>> {
     return this.throttle.execute(
-      `connections:${projectId}`,
-      async () => this.queryConnectionsForProject(client, projectId),
+      `connections:${ownerScope}:${projectId}`,
+      async () => withAuthRetry(
+        'loadFullProject.connections',
+        async () => this.queryConnectionsForProject(client, projectId),
+      ),
       {
         deduplicate: true,
         priority: 'normal',
         timeout: REQUEST_THROTTLE_CONFIG.BATCH_SYNC_TIMEOUT,
       },
     );
+  }
+
+  private resolveRequestOwnerScope(expectedUserId: string | undefined): {
+    hasRemoteOwnerScope: boolean;
+    throttleOwnerScope: string;
+  } {
+    const hasRemoteOwnerScope = typeof expectedUserId === 'string'
+      && expectedUserId.length > 0
+      && expectedUserId !== AUTH_CONFIG.LOCAL_MODE_USER_ID;
+    return {
+      hasRemoteOwnerScope,
+      throttleOwnerScope: hasRemoteOwnerScope ? expectedUserId : 'anonymous',
+    };
   }
 
   private async queryConnectionsForProject(
@@ -392,15 +192,24 @@ export class ProjectDetailLoaderService {
       throw createBrowserNetworkSuspendedError();
     }
 
-    const { data, error } = await fetchAllSupabasePages<Record<string, unknown>>(() => client
-      .from('connections')
-      .select(FIELD_SELECT_CONFIG.CONNECTION_FIELDS)
-      .eq('project_id', projectId)
-      .order('updated_at', { ascending: true })
-      .order('id', { ascending: true }));
+    const { data, error } = await fetchAllSupabaseKeysetPagesByCursor<
+      Record<string, unknown>,
+      ConnectionPageCursor
+    >((cursor) => {
+      let query = client
+        .from('connections')
+        .select(FIELD_SELECT_CONFIG.CONNECTION_FIELDS)
+        .eq('project_id', projectId);
+      if (cursor) query = query.gt('id', cursor.id);
+      return query.order('id', { ascending: true });
+    }, {
+      readCursor: row => this.readConnectionPageCursor(row),
+      cursorKey: cursor => cursor.id,
+      isCursorAfter: (previous, next) => next.id > previous.id,
+    });
 
     if (!error) {
-      return data || [];
+      return this.deduplicateConnectionRows(data || []);
     }
 
     const enhanced = supabaseErrorToError(error);
@@ -411,6 +220,39 @@ export class ProjectDetailLoaderService {
 
     this.logger.error('连接查询失败', { projectId, error: enhanced.message });
     throw enhanced;
+  }
+
+  private readConnectionPageCursor(row: Record<string, unknown>): ConnectionPageCursor | null {
+    const id = typeof row['id'] === 'string' ? row['id'] : null;
+    return id ? { id } : null;
+  }
+
+  private deduplicateConnectionRows(
+    rows: Array<Record<string, unknown>>,
+  ): Array<Record<string, unknown>> {
+    const rowsById = new Map<string, Record<string, unknown>>();
+    const rowsWithoutId: Array<Record<string, unknown>> = [];
+    for (const row of rows) {
+      const id = typeof row['id'] === 'string' && row['id'].length > 0 ? row['id'] : null;
+      if (id) rowsById.set(id, row);
+      else rowsWithoutId.push(row);
+    }
+
+    return [...rowsById.values(), ...rowsWithoutId].sort((left, right) => {
+      const updatedOrder = this.compareNullableConnectionValue(left['updated_at'], right['updated_at']);
+      return updatedOrder !== 0
+        ? updatedOrder
+        : this.compareNullableConnectionValue(left['id'], right['id']);
+    });
+  }
+
+  private compareNullableConnectionValue(left: unknown, right: unknown): number {
+    const leftValue = typeof left === 'string' ? left : null;
+    const rightValue = typeof right === 'string' ? right : null;
+    if (leftValue === rightValue) return 0;
+    if (leftValue === null) return 1;
+    if (rightValue === null) return -1;
+    return leftValue.localeCompare(rightValue);
   }
 
   private logSuspendedConnectionQuery(projectId: string): void {
@@ -442,47 +284,6 @@ export class ProjectDetailLoaderService {
       extra: { projectId },
     });
     return null;
-  }
-
-  private getBatchRpcTransientCooldownRemainingMs(): number {
-    return Math.max(0, this.batchRpcTransientCooldownUntil - Date.now());
-  }
-
-  private isBatchRpcTransientCircuitOpen(): boolean {
-    return this.getBatchRpcTransientCooldownRemainingMs() > 0;
-  }
-
-  private tripBatchRpcTransientCircuit(projectId: string, error: Error): void {
-    const cooldownMs = CIRCUIT_BREAKER_CONFIG.RECOVERY_TIME;
-    const alreadyOpen = this.isBatchRpcTransientCircuitOpen();
-
-    this.batchRpcTransientCooldownUntil = Date.now() + cooldownMs;
-
-    this.logger.warn('批量 RPC 瞬时失败，短时熔断并回退到顺序加载', {
-      projectId,
-      cooldownMs,
-      reason: error.message,
-      alreadyOpen,
-    });
-  }
-
-  private isTransientMetadataLoadFailure(error: Error): boolean {
-    const retryableError = error as Error & { isRetryable?: boolean; errorType?: string; code?: string | number };
-    if (retryableError.isRetryable === true) {
-      return true;
-    }
-
-    const message = error.message.toLowerCase();
-
-    return (
-      message.includes('请求超时') ||
-      message.includes('timeout') ||
-      message.includes('failed to fetch') ||
-      message.includes('network') ||
-      message.includes('429') ||
-      message.includes('503') ||
-      message.includes('504')
-    );
   }
 
 }

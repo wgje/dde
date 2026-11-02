@@ -64,14 +64,20 @@ export class ProjectTaskDataService {
       },
     );
 
-    const tombstonesResult = await this.tombstoneService.getTombstonesWithCache(
-      projectId,
-      client,
-      { forceRemote: true },
-    );
+    const loadTombstones = async () => {
+      const result = await this.tombstoneService.getTombstonesWithCache(
+        projectId,
+        client,
+        { forceRemote: true },
+      );
+      if (result.error) throw supabaseErrorToError(result.error);
+      return result;
+    };
+    const tombstonesResult = withAuthRetry
+      ? await withAuthRetry('loadFullProject.taskTombstones', loadTombstones)
+      : await loadTombstones();
 
     if (tasksResult.error) throw supabaseErrorToError(tasksResult.error);
-    if (tombstonesResult.error) throw supabaseErrorToError(tombstonesResult.error);
 
     const remoteTombstoneTimestamps = this.buildRemoteTombstoneTimestamps(tombstonesResult);
     const allTasks = ((tasksResult.data || []) as unknown as TaskRow[]).map(row => rowToTask(row));

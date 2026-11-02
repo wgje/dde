@@ -251,8 +251,7 @@ export class ProjectDataService {
   /**
    * 加载完整项目数据。
    *
-   * 默认走分段读取，避免大项目在 get_full_project_data JSON 聚合阶段触发网关 504。
-   * 批量 RPC 快路仅通过 PROJECT_FULL_DATA_RPC_V1 显式打开，便于服务端优化后灰度恢复。
+   * 完整项目统一通过分页查询读取，避免单次 JSON 聚合受网关响应大小与时限限制。
    */
   async loadFullProjectOptimized(projectId: string, expectedUserId?: string): Promise<Project | null> {
     return await this.detailLoader.loadFullProjectOptimized(
@@ -278,8 +277,6 @@ export class ProjectDataService {
     return {
       getClient: (expectedUserId) => this.getSupabaseClient(expectedUserId),
       withAuthRetry: <T>(context: string, fn: () => Promise<T>) => this.withAuthRetry(context, fn),
-      isSessionExpiredError: error => this.isSessionExpiredError(error),
-      tryRefreshSessionWithSession: context => this.tryRefreshSessionWithSession(context),
       rowToProject: row => this.rowToProject(row),
       rowToTask: row => this.rowToTask(row),
       rowToConnection: row => this.rowToConnection(row),

@@ -622,7 +622,7 @@ async function flushAuthAutoRefresh(service: SupabaseClientService): Promise<voi
         .mockResolvedValueOnce(new Response('{"ok":true}', { status: 200 }));
 
       const responsePromise = mutable.buildClientOptions().global.fetch(
-        'https://example.supabase.co/rest/v1/rpc/get_full_project_data',
+        'https://example.supabase.co/rest/v1/rpc/get_project_sync_watermark',
         { method: 'POST', body: '{"p_project_id":"proj-1"}' }
       );
 
@@ -730,7 +730,7 @@ async function flushAuthAutoRefresh(service: SupabaseClientService): Promise<voi
       fetchSpy.mockResolvedValueOnce(new Response('Gateway timeout', { status: 504 }));
 
       const response = await mutable.buildClientOptions().global.fetch(
-        'https://example.supabase.co/rest/v1/rpc/get_full_project_data%E0%A4%A',
+        'https://example.supabase.co/rest/v1/rpc/get_project_sync_watermark%E0%A4%A',
         { method: 'POST', body: '{"p_project_id":"proj-1"}' }
       );
 

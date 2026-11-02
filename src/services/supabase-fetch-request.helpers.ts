@@ -2,7 +2,6 @@ const READ_ONLY_RPC_FUNCTIONS = new Set([
   'batch_get_tombstones',
   'get_accessible_project_probe',
   'get_black_box_sync_watermark',
-  'get_full_project_data',
   'get_project_sync_watermark',
   'get_resume_recovery_probe',
   'get_server_time',

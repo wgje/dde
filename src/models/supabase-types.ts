@@ -290,11 +290,6 @@ export interface Database {
         };
         Returns: number;
       };
-      /** 获取完整项目数据（任务 + 连接） */
-      get_full_project_data: {
-        Args: { p_project_id: string };
-        Returns: Json;
-      };
       /** 获取单项目聚合同步水位 */
       get_project_sync_watermark: {
         Args: { p_project_id: string };

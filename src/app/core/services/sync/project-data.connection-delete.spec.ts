@@ -15,16 +15,8 @@ import { SyncStateService } from './sync-state.service';
 import { TombstoneService } from './tombstone.service';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 import { resetBrowserNetworkSuspensionTrackingForTests } from '../../../../utils/browser-network-suspension';
-import { FEATURE_FLAGS } from '../../../../config/feature-flags.config';
 
 const OFFLINE_SNAPSHOT_LOCAL_STORAGE_KEY = 'nanoflow.offline-cache-v2';
-
-type MutableProjectDataFeatureFlags = {
-  PROJECT_FULL_DATA_RPC_V1: boolean;
-};
-
-const projectDataFeatureFlags = FEATURE_FLAGS as unknown as MutableProjectDataFeatureFlags;
-const initialProjectFullDataRpcFlag = FEATURE_FLAGS.PROJECT_FULL_DATA_RPC_V1;
 
 function setVisibilityState(state: DocumentVisibilityState): void {
   Object.defineProperty(document, 'visibilityState', {
@@ -40,42 +32,81 @@ interface PagedQuery<Row> extends PromiseLike<{ data: Row[]; error: null }> {
   in: ReturnType<typeof vi.fn>;
   gt: ReturnType<typeof vi.fn>;
   not: ReturnType<typeof vi.fn>;
+  or: ReturnType<typeof vi.fn>;
   order: ReturnType<typeof vi.fn>;
-  range: ReturnType<typeof vi.fn>;
+  limit: ReturnType<typeof vi.fn>;
 }
 
 function createPagedQuery<Row>(
   rows: Row[],
-  rangeCalls: Array<[number, number]> = [],
+  pageCursorIds: Array<string | null> = [],
 ): PagedQuery<Row> {
-  const resolveDefaultPage = () => Promise.resolve({ data: rows.slice(0, 1000), error: null });
+  let connectionCursorId: string | null = null;
+  let taskCursor: { createdAt: string; id: string } | null = null;
+  const orderColumns: string[] = [];
+  const recordRows = rows as Array<Record<string, unknown>>;
   const query = {
     select: vi.fn(),
     eq: vi.fn(),
     is: vi.fn(),
     in: vi.fn(),
-    gt: vi.fn(),
+    gt: vi.fn((column: string, value: string) => {
+      if (column === 'id') connectionCursorId = value;
+      return query;
+    }),
     not: vi.fn(),
-    order: vi.fn(),
-    range: vi.fn((from: number, to: number) => {
-      rangeCalls.push([from, to]);
-      return Promise.resolve({ data: rows.slice(from, to + 1), error: null });
+    or: vi.fn((filter: string) => {
+      const match = /created_at\.gt\.([^,]+),and\(created_at\.eq\.[^,]+,id\.gt\.([^)]+)\)/.exec(filter);
+      if (match) taskCursor = { createdAt: match[1], id: match[2] };
+      return query;
+    }),
+    order: vi.fn((column: string) => {
+      orderColumns.push(column);
+      return query;
+    }),
+    limit: vi.fn((count: number) => {
+      const page = recordRows
+        .filter((row) => {
+          if (connectionCursorId) return String(row['id']) > connectionCursorId;
+          if (!taskCursor) return true;
+          const createdAt = String(row['created_at']);
+          return createdAt > taskCursor.createdAt
+            || (createdAt === taskCursor.createdAt && String(row['id']) > taskCursor.id);
+        })
+        .slice()
+        .sort((left, right) => {
+          for (const column of orderColumns) {
+            const leftValue = left[column];
+            const rightValue = right[column];
+            if (leftValue === rightValue) continue;
+            if (leftValue === null || leftValue === undefined) return 1;
+            if (rightValue === null || rightValue === undefined) return -1;
+            const order = String(leftValue).localeCompare(String(rightValue));
+            if (order !== 0) return order;
+          }
+          return 0;
+        })
+        .slice(0, count);
+      pageCursorIds.push(taskCursor?.id ?? connectionCursorId);
+      return Promise.resolve({ data: page as Row[], error: null });
     }),
     then: (
       onfulfilled?: ((value: { data: Row[]; error: null }) => unknown) | null,
       onrejected?: ((reason: unknown) => unknown) | null,
-    ) => resolveDefaultPage().then(onfulfilled, onrejected),
+    ) => Promise.resolve({ data: rows.slice(0, 1000), error: null }).then(onfulfilled, onrejected),
   } as unknown as PagedQuery<Row>;
 
   query.select.mockReturnValue(query);
   query.eq.mockReturnValue(query);
   query.is.mockReturnValue(query);
   query.in.mockReturnValue(query);
-  query.gt.mockReturnValue(query);
   query.not.mockReturnValue(query);
-  query.order.mockReturnValue(query);
 
   return query;
+}
+
+function taskId(index: number): string {
+  return `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`;
 }
 
 function createProjectDataService(options: {
@@ -152,17 +183,12 @@ function createProjectDataService(options: {
 
 describe('ProjectDataService connection delete regressions', () => {
   beforeEach(() => {
-    projectDataFeatureFlags.PROJECT_FULL_DATA_RPC_V1 = false;
     localStorage.clear();
     setVisibilityState('visible');
     resetBrowserNetworkSuspensionTrackingForTests();
   });
 
-  afterEach(() => {
-    projectDataFeatureFlags.PROJECT_FULL_DATA_RPC_V1 = initialProjectFullDataRpcFlag;
-  });
-
-  it('loadFullProject fallback 应保留 soft-deleted connections', async () => {
+  it('分段加载应保留 soft-deleted connections', async () => {
     const projectRow = {
       id: 'proj-1',
       owner_id: 'user-1',
@@ -224,7 +250,7 @@ describe('ProjectDataService connection delete regressions', () => {
     expect(connectionQuery.eq).toHaveBeenCalledWith('project_id', 'proj-1');
   });
 
-  it('loadFullProject fallback 应用 expectedUserId 约束项目元数据查询', async () => {
+  it('分段加载应对项目元数据查询应用 expectedUserId 约束', async () => {
     const projectRow = {
       id: 'proj-owner',
       owner_id: 'user-owner',
@@ -264,7 +290,7 @@ describe('ProjectDataService connection delete regressions', () => {
     expect(projectQuery.eq).toHaveBeenCalledWith('owner_id', 'user-owner');
   });
 
-  it('loadFullProject fallback 应分页加载超过 1000 条 tasks 和 connections', async () => {
+  it('分段加载应通过 keyset 分页完整读取超过 1000 条 tasks 和 connections', async () => {
     const projectRow = {
       id: 'proj-large',
       owner_id: 'user-1',
@@ -276,7 +302,7 @@ describe('ProjectDataService connection delete regressions', () => {
       version: 1,
     };
     const taskRows = Array.from({ length: 1001 }, (_, index) => ({
-      id: `task-${index}`,
+      id: taskId(index),
       title: `Task ${index}`,
       content: `Content ${index}`,
       stage: 1,
@@ -301,9 +327,9 @@ describe('ProjectDataService connection delete regressions', () => {
       attention_meta: null,
     }));
     const connectionRows = Array.from({ length: 1001 }, (_, index) => ({
-      id: `conn-${index}`,
-      source_id: `task-${index}`,
-      target_id: `task-${(index + 1) % 1001}`,
+      id: `conn-${String(index).padStart(4, '0')}`,
+      source_id: taskId(index),
+      target_id: taskId((index + 1) % 1001),
       title: `Connection ${index}`,
       description: '',
       deleted_at: null,
@@ -313,10 +339,10 @@ describe('ProjectDataService connection delete regressions', () => {
     const projectMaybeSingle = vi.fn().mockResolvedValue({ data: projectRow, error: null });
     const projectIs = vi.fn().mockReturnValue({ maybeSingle: projectMaybeSingle });
     const projectEq = vi.fn().mockReturnValue({ is: projectIs });
-    const taskRangeCalls: Array<[number, number]> = [];
-    const connectionRangeCalls: Array<[number, number]> = [];
-    const taskQuery = createPagedQuery(taskRows, taskRangeCalls);
-    const connectionQuery = createPagedQuery(connectionRows, connectionRangeCalls);
+    const taskPageCursorIds: Array<string | null> = [];
+    const connectionPageCursorIds: Array<string | null> = [];
+    const taskQuery = createPagedQuery(taskRows, taskPageCursorIds);
+    const connectionQuery = createPagedQuery(connectionRows, connectionPageCursorIds);
 
     const client = {
       from: vi.fn((table: string) => {
@@ -336,15 +362,14 @@ describe('ProjectDataService connection delete regressions', () => {
 
     expect(project?.tasks).toHaveLength(1001);
     expect(project?.connections).toHaveLength(1001);
-    expect(project?.tasks[1000]?.id).toBe('task-1000');
-    expect(project?.connections[1000]?.id).toBe('conn-1000');
-    expect(taskRangeCalls).toEqual([[0, 999], [1000, 1999]]);
-    expect(connectionRangeCalls).toEqual([[0, 999], [1000, 1999]]);
+    expect(project?.tasks[1000]?.id).toBe(taskId(1000));
+    expect(project?.connections.map(connection => connection.id)).toContain('conn-1000');
+    expect(new Set(project?.connections.map(connection => connection.id)).size).toBe(1001);
+    expect(taskPageCursorIds).toEqual([null, taskId(999)]);
+    expect(connectionPageCursorIds).toEqual([null, 'conn-0999']);
   });
 
-  it('loadFullProjectOptimized 主 RPC 路径应保留未 tombstone 的 soft-deleted connection', async () => {
-    projectDataFeatureFlags.PROJECT_FULL_DATA_RPC_V1 = true;
-
+  it('优化入口应走分段加载并保留 soft-deleted connection', async () => {
     const deletedConnectionRow = {
       id: 'conn-rpc-1',
       source_id: 'task-1',
@@ -354,25 +379,33 @@ describe('ProjectDataService connection delete regressions', () => {
       deleted_at: '2026-04-11T01:00:00.000Z',
       updated_at: '2026-04-11T01:00:00.000Z',
     };
+    const projectMaybeSingle = vi.fn().mockResolvedValue({
+      data: {
+        id: 'proj-1',
+        owner_id: 'user-1',
+        title: 'Project 1',
+        description: '',
+        created_date: '2026-04-11T00:00:00.000Z',
+        updated_at: '2026-04-11T00:00:00.000Z',
+        deleted_at: null,
+        version: 1,
+      },
+      error: null,
+    });
+    const projectIs = vi.fn().mockReturnValue({ maybeSingle: projectMaybeSingle });
+    const projectEq = vi.fn().mockReturnValue({ is: projectIs });
+    const taskQuery = createPagedQuery([]);
+    const connectionQuery = createPagedQuery([deletedConnectionRow]);
+    const rpc = vi.fn();
     const client = {
-      rpc: vi.fn().mockResolvedValue({
-        data: {
-          project: {
-            id: 'proj-1',
-            owner_id: 'user-1',
-            title: 'Project 1',
-            description: '',
-            created_date: '2026-04-11T00:00:00.000Z',
-            updated_at: '2026-04-11T00:00:00.000Z',
-            deleted_at: null,
-            version: 1,
-          },
-          tasks: [],
-          connections: [deletedConnectionRow],
-          task_tombstones: [],
-          connection_tombstones: [],
-        },
-        error: null,
+      rpc,
+      from: vi.fn((table: string) => {
+        if (table === 'projects') {
+          return { select: vi.fn().mockReturnValue({ eq: projectEq }) };
+        }
+        if (table === 'tasks') return taskQuery;
+        if (table === 'connections') return connectionQuery;
+        throw new Error(`Unexpected table: ${table}`);
       }),
     };
 
@@ -386,9 +419,8 @@ describe('ProjectDataService connection delete regressions', () => {
         updatedAt: '2026-04-11T01:00:00.000Z',
       }),
     ]);
-    expect((client.rpc as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith('get_full_project_data', {
-      p_project_id: 'proj-1',
-    });
+    expect(rpc).not.toHaveBeenCalled();
+    expect(connectionQuery.eq).toHaveBeenCalledWith('project_id', 'proj-1');
   });
 
   it('saveOfflineSnapshot 应保留活跃任务之间的已删连接', async () => {
@@ -401,8 +433,36 @@ describe('ProjectDataService connection delete regressions', () => {
         description: '',
         createdDate: '2026-04-11T00:00:00.000Z',
         tasks: [
-          { id: 'task-1', deletedAt: null },
-          { id: 'task-2', deletedAt: null },
+          {
+            id: 'task-1',
+            title: 'Task 1',
+            content: '',
+            displayId: '1',
+            createdDate: '2026-04-11T00:00:00.000Z',
+            stage: 1,
+            order: 0,
+            rank: 0,
+            x: 0,
+            y: 0,
+            status: 'active',
+            parentId: null,
+            deletedAt: null,
+          },
+          {
+            id: 'task-2',
+            title: 'Task 2',
+            content: '',
+            displayId: '2',
+            createdDate: '2026-04-11T00:00:00.000Z',
+            stage: 1,
+            order: 0,
+            rank: 0,
+            x: 0,
+            y: 0,
+            status: 'active',
+            parentId: null,
+            deletedAt: null,
+          },
         ],
         connections: [
           {

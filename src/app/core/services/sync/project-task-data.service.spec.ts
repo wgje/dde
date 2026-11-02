@@ -39,7 +39,9 @@ describe('ProjectTaskDataService owner/auth boundaries', () => {
     query.order.mockReturnValue(query);
     const client = { from: vi.fn(() => query) };
     const execute = vi.fn(async (_key: string, operation: () => Promise<unknown>) => operation());
-    const getTombstonesWithCache = vi.fn().mockResolvedValue({ data: [], error: null });
+    const getTombstonesWithCache = vi.fn()
+      .mockResolvedValueOnce({ data: null, error: { code: 'PGRST301', message: 'JWT expired' } })
+      .mockResolvedValueOnce({ data: [], error: null });
     const service = Injector.create({
       providers: [
         { provide: ProjectTaskDataService, useClass: ProjectTaskDataService },
@@ -96,7 +98,9 @@ describe('ProjectTaskDataService owner/auth boundaries', () => {
     expect(limit).toHaveBeenNthCalledWith(2, 1000);
     expect(query.or).not.toHaveBeenCalled();
     expect(withAuthRetry).toHaveBeenCalledWith('loadFullProject.tasks', expect.any(Function));
+    expect(withAuthRetry).toHaveBeenCalledWith('loadFullProject.taskTombstones', expect.any(Function));
     expect(getTombstonesWithCache).toHaveBeenCalledWith('project-1', client, { forceRemote: true });
+    expect(getTombstonesWithCache).toHaveBeenCalledTimes(2);
   });
 
   it('完整项目加载在 tombstone 查询失败时应 fail closed，禁止导入可能已删除的任务', async () => {

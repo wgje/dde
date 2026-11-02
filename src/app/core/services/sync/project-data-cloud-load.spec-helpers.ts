@@ -18,7 +18,6 @@ import {
   createProjectDataPagedQuery,
   createProjectDataRangeQuery,
   describe,
-  enableProjectFullDataRpcForTest,
   expect,
   it,
   setVisibilityState,
@@ -110,7 +109,7 @@ function createProjectDataCloudLoadInjector(options: ProjectDataCloudLoadInjecto
 
 
 export function registerProjectDataCloudLoadSpecs(): void {
-  describe('cloud load and RPC fallback', () => {
+  describe('cloud load and paginated project details', () => {
       it('挂起窗口内 pullParkedTasksDelta 应直接跳过远端请求', async () => {
         setVisibilityState('hidden');
         const clientAsync = vi.fn(async () => ({
@@ -135,36 +134,6 @@ export function registerProjectDataCloudLoadSpecs(): void {
           isComplete: false,
         });
         expect(clientAsync).not.toHaveBeenCalled();
-      });
-
-      it('P0001 Access Denied 时不应 fallback 到 loadFullProject', async () => {
-        enableProjectFullDataRpcForTest();
-
-        const rpc = vi.fn().mockResolvedValue({
-          data: null,
-          error: {
-            code: 'P0001',
-            message: 'Access denied',
-          },
-        });
-
-        const injector = createProjectDataCloudLoadInjector({
-          supabase: {
-            isConfigured: true,
-            clientAsync: vi.fn(async () => ({ rpc })),
-          },
-        });
-
-        const service = injector.get(ProjectDataService);
-        const fallbackSpy = vi.spyOn(
-          service as unknown as { loadFullProject: (projectId: string) => Promise<unknown> },
-          'loadFullProject'
-        ).mockResolvedValue(null);
-
-        const result = await service.loadFullProjectOptimized('proj-denied');
-
-        expect(result).toBeNull();
-        expect(fallbackSpy).not.toHaveBeenCalled();
       });
 
       it('getProjectSyncWatermark 应返回远端聚合水位', async () => {
@@ -222,144 +191,7 @@ export function registerProjectDataCloudLoadSpecs(): void {
         expect(syncState.setSyncError).not.toHaveBeenCalled();
       });
 
-      it('RPC 函数不存在时应回退并熔断后续 RPC 调用', async () => {
-        enableProjectFullDataRpcForTest();
-
-        const rpc = vi
-          .fn()
-          .mockResolvedValueOnce({
-            data: null,
-            error: {
-              code: '42883',
-              message: 'function public.get_full_project_data(uuid) does not exist',
-            },
-          })
-          .mockResolvedValue({
-            data: {
-              id: 'proj-1',
-              owner_id: 'user-1',
-              title: 'Project 1',
-              created_at: '2026-03-22T00:00:00.000Z',
-              updated_at: '2026-03-22T00:00:00.000Z',
-            },
-            error: null,
-          });
-
-        const maybeSingle = vi.fn().mockResolvedValue({
-          data: {
-            id: 'proj-1',
-            owner_id: 'user-1',
-            title: 'Project 1',
-            created_at: '2026-03-22T00:00:00.000Z',
-            updated_at: '2026-03-22T00:00:00.000Z',
-          },
-          error: null,
-        });
-        const isProjectAvailable = vi.fn().mockReturnValue({ maybeSingle });
-        const select = vi.fn().mockReturnValue({
-          eq: vi.fn().mockReturnValue({ is: isProjectAvailable }),
-        });
-
-        const from = vi.fn((table: string) => {
-          if (table === 'projects') {
-            return { select };
-          }
-          return createProjectDataPagedQuery([]);
-        });
-
-        const injector = createProjectDataCloudLoadInjector({
-          supabase: {
-            isConfigured: true,
-            clientAsync: vi.fn(async () => ({ rpc, from })),
-          },
-          requestThrottle: {
-            execute: vi.fn(async (_key: string, work: () => Promise<unknown>) => work()),
-          },
-        });
-
-        const service = injector.get(ProjectDataService);
-
-        const first = await service.loadFullProjectOptimized('proj-1');
-        const second = await service.loadFullProjectOptimized('proj-1');
-
-        expect(first?.id).toBe('proj-1');
-        expect(second?.id).toBe('proj-1');
-        expect(rpc).toHaveBeenCalledTimes(1);
-        expect(from).toHaveBeenCalledWith('projects');
-        expect(isProjectAvailable).toHaveBeenCalledWith('deleted_at', null);
-      });
-
-      it('PGRST202 schema cache miss 时应识别为 RPC 缺失并回退', async () => {
-        enableProjectFullDataRpcForTest();
-
-        const rpc = vi.fn().mockResolvedValue({
-          data: null,
-          error: {
-            code: 'PGRST202',
-            message: 'Could not find the function public.get_full_project_data(p_project_id) in the schema cache',
-          },
-        });
-
-        const from = vi.fn((table: string) => {
-          if (table === 'projects') {
-            return {
-              select: vi.fn().mockReturnValue({
-                eq: vi.fn().mockReturnValue({
-                  maybeSingle: vi.fn().mockResolvedValue({ data: null, error: null }),
-                }),
-              }),
-            };
-          }
-          return createProjectDataPagedQuery([]);
-        });
-
-        const injector = createProjectDataCloudLoadInjector({
-          supabase: {
-            isConfigured: true,
-            clientAsync: vi.fn(async () => ({ rpc, from })),
-          },
-          requestThrottle: {
-            execute: vi.fn(async (_key: string, work: () => Promise<unknown>) => work()),
-          },
-        });
-
-        const service = injector.get(ProjectDataService);
-        const result = await service.loadFullProjectOptimized('proj-missing-rpc');
-
-        expect(result).toBeNull();
-        expect(rpc).toHaveBeenCalledTimes(1);
-      });
-
-      it('RPC 504 时应短时熔断批量 RPC，并在冷却期内直接走顺序加载', async () => {
-        enableProjectFullDataRpcForTest();
-
-        const rpc = vi.fn().mockResolvedValue({
-          data: null,
-          error: {
-            code: '504',
-            message: '504 Gateway Timeout',
-          },
-        });
-
-        const injector = createProjectDataCloudLoadInjector({
-          supabase: {
-            isConfigured: true,
-            clientAsync: vi.fn(async () => ({ rpc })),
-          },
-        });
-
-        const service = injector.get(ProjectDataService);
-        const detailLoader = injector.get(ProjectDetailLoaderService);
-        const fallbackSpy = vi.spyOn(detailLoader, 'loadFullProject').mockResolvedValue(null);
-
-        await service.loadFullProjectOptimized('proj-timeout');
-        await service.loadFullProjectOptimized('proj-timeout');
-
-        expect(rpc).toHaveBeenCalledTimes(1);
-        expect(fallbackSpy).toHaveBeenCalledTimes(2);
-      });
-
-      it('默认应绕开完整项目批量 RPC，直接使用分段加载以避免首发 504', async () => {
+      it('优化入口应始终委托给分段加载并完全跳过聚合 RPC', async () => {
         const rpc = vi.fn();
         const injector = createProjectDataCloudLoadInjector({
           supabase: {
@@ -622,21 +454,13 @@ export function registerProjectDataCloudLoadSpecs(): void {
         ]);
       });
 
-      it('loadProjectsFromCloud 首个项目触发 RPC 504 后，后续项目应命中短熔断不再重复调用 batch RPC', async () => {
-        enableProjectFullDataRpcForTest();
-
+      it('loadProjectsFromCloud 为每个项目委托分段加载', async () => {
         const projectsQuery = createProjectDataRangeQuery([
-          { id: 'proj-rpc-timeout-1' },
-          { id: 'proj-rpc-timeout-2' },
-          { id: 'proj-rpc-timeout-3' },
+          { id: 'proj-sequential-1' },
+          { id: 'proj-sequential-2' },
+          { id: 'proj-sequential-3' },
         ]);
-        const rpc = vi.fn().mockResolvedValue({
-          data: null,
-          error: {
-            code: '504',
-            message: '504 Gateway Timeout',
-          },
-        });
+        const rpc = vi.fn();
         const from = vi.fn((table: string) => {
           if (table === 'projects') {
             return projectsQuery;
@@ -670,14 +494,14 @@ export function registerProjectDataCloudLoadSpecs(): void {
         const detailLoader = injector.get(ProjectDetailLoaderService);
         const fallbackSpy = vi.spyOn(detailLoader, 'loadFullProject').mockResolvedValue(null);
 
-        const result = await service.loadProjectsFromCloud('user-batch-timeout');
+        const result = await service.loadProjectsFromCloud('user-sequential');
 
         expect(result).toEqual([]);
-        expect(rpc).toHaveBeenCalledTimes(1);
+        expect(rpc).not.toHaveBeenCalled();
         expect(fallbackSpy).toHaveBeenCalledTimes(3);
-        expect(fallbackSpy).toHaveBeenNthCalledWith(1, 'proj-rpc-timeout-1', 'user-batch-timeout', expect.any(Object));
-        expect(fallbackSpy).toHaveBeenNthCalledWith(2, 'proj-rpc-timeout-2', 'user-batch-timeout', expect.any(Object));
-        expect(fallbackSpy).toHaveBeenNthCalledWith(3, 'proj-rpc-timeout-3', 'user-batch-timeout', expect.any(Object));
+        expect(fallbackSpy).toHaveBeenNthCalledWith(1, 'proj-sequential-1', 'user-sequential', expect.any(Object));
+        expect(fallbackSpy).toHaveBeenNthCalledWith(2, 'proj-sequential-2', 'user-sequential', expect.any(Object));
+        expect(fallbackSpy).toHaveBeenNthCalledWith(3, 'proj-sequential-3', 'user-sequential', expect.any(Object));
       });
 
       it('loadProjectsFromCloud 不应等待首个项目完整结束后才启动剩余项目加载', async () => {

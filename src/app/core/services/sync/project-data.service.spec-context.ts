@@ -1,5 +1,4 @@
 import { vi } from 'vitest';
-import { FEATURE_FLAGS } from '../../../../config/feature-flags.config';
 
 export { Injector } from '@angular/core';
 export { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -31,25 +30,6 @@ export const OFFLINE_SNAPSHOT_DB_NAME = 'nanoflow-offline-snapshots';
 export const OFFLINE_SNAPSHOT_STORE_NAME = 'snapshots';
 export const OFFLINE_SNAPSHOT_RECORD_ID = 'offline-snapshot';
 export const OFFLINE_SNAPSHOT_LOCAL_STORAGE_KEY = 'nanoflow.offline-cache-v2';
-
-type MutableProjectDataFeatureFlags = {
-  PROJECT_FULL_DATA_RPC_V1: boolean;
-};
-
-export const projectDataFeatureFlags = FEATURE_FLAGS as unknown as MutableProjectDataFeatureFlags;
-export const initialProjectFullDataRpcFlag = FEATURE_FLAGS.PROJECT_FULL_DATA_RPC_V1;
-
-export function enableProjectFullDataRpcForTest(): void {
-  projectDataFeatureFlags.PROJECT_FULL_DATA_RPC_V1 = true;
-}
-
-export function disableProjectFullDataRpcForTest(): void {
-  projectDataFeatureFlags.PROJECT_FULL_DATA_RPC_V1 = false;
-}
-
-export function restoreProjectFullDataRpcFlagForTest(): void {
-  projectDataFeatureFlags.PROJECT_FULL_DATA_RPC_V1 = initialProjectFullDataRpcFlag;
-}
 
 export function getOfflineSnapshotRecordId(ownerUserId?: string | null): string {
   return typeof ownerUserId === 'string' && ownerUserId.length > 0
