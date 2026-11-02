@@ -116,6 +116,32 @@ describe('SyncCoordinatorConflictService', () => {
     expect(events).toHaveLength(1);
   });
 
+  it('冲突证据持久化完成前会话失效时不应报告成功', async () => {
+    const saveConflict = createDeferred<boolean>();
+    const save = vi.fn(() => saveConflict.promise);
+    const localProject = createProject({ name: 'Local stale', version: 2 });
+    const remoteProject = createProject({ name: 'Remote stale', version: 3 });
+    const { service } = createService({ saveConflict: save });
+    let current = true;
+
+    const pending = service.saveConflictSilently(
+      localProject,
+      remoteProject,
+      [],
+      'user-1',
+      undefined,
+      undefined,
+      undefined,
+      () => current,
+    );
+    expect(save).toHaveBeenCalledOnce();
+
+    current = false;
+    saveConflict.resolve(true);
+
+    await expect(pending).resolves.toBe(false);
+  });
+
   it('publishConflict 在冲突隔离区未能持久化时不应发布 active conflict', async () => {
     const localProject = createProject({ name: 'Local Unsafe', version: 2 });
     const remoteProject = createProject({ name: 'Remote Unsafe', version: 3 });

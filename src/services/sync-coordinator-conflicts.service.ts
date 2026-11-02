@@ -44,8 +44,10 @@ export class SyncCoordinatorConflictService {
     pendingTaskDeleteIds?: string[],
     pendingTaskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap,
     conflictedAt?: string,
+    isCurrent?: () => boolean,
   ): Promise<boolean> {
-    return await this.conflictStorage.saveConflict({
+    if (isCurrent?.() === false) return false;
+    const saved = await this.conflictStorage.saveConflict({
       projectId: localProject.id,
       localProject,
       remoteProject,
@@ -60,6 +62,7 @@ export class SyncCoordinatorConflictService {
       pendingTaskDeleteBaseUpdatedAtMap,
       acknowledged: false,
     });
+    return isCurrent?.() === false ? false : saved;
   }
 
   async publishConflict(
@@ -88,6 +91,7 @@ export class SyncCoordinatorConflictService {
           pendingTaskDeleteIds,
           pendingTaskDeleteBaseUpdatedAtMap,
           activeConflict?.conflictedAt,
+          isCurrent,
         );
         if (isCurrent?.() === false) return;
       } catch (error) {
@@ -125,6 +129,7 @@ export class SyncCoordinatorConflictService {
       pendingTaskDeleteIds,
       pendingTaskDeleteBaseUpdatedAtMap,
       conflictedAt,
+      isCurrent,
     ).catch(error => {
       this.logger.warn('保存冲突隔离区记录失败', { error, projectId: localProject.id });
       return false;
@@ -255,6 +260,8 @@ export class SyncCoordinatorConflictService {
       ownerUserId,
       pendingTaskDeleteIds,
       pendingTaskDeleteBaseUpdatedAtMap,
+      undefined,
+      isCurrent,
     );
   }
 
