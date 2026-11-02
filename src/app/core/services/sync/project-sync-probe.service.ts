@@ -14,6 +14,8 @@ export interface ProjectHead {
   version: number;
 }
 
+export const PROJECT_HEAD_PAGE_SIZE = 100;
+
 export interface AccessibleProjectProbe {
   projectId: string;
   accessible: boolean;
@@ -110,38 +112,73 @@ export class ProjectSyncProbeService {
 
   async listProjectHeadsSince(
     watermark: string | null,
+    upperWatermark: string,
     dependencies: ProjectSyncProbeDependencies,
-  ): Promise<ProjectHead[]> {
+  ): Promise<ProjectHead[] | null> {
     if (isBrowserNetworkSuspendedWindow()) {
-      return [];
+      return null;
     }
 
     const client = await dependencies.getClient();
-    if (!client) return [];
+    if (!client) return null;
 
     try {
-      return await dependencies.withAuthRetry('listProjectHeadsSince', async () => {
-        const { data, error } = await client.rpc('list_project_heads_since', {
-          p_since: watermark,
-        });
-        if (error) {
-          throw supabaseErrorToError(error);
-        }
-
-        const rows = Array.isArray(data) ? data : [];
-        return rows
-          .map((row) => this.toProjectHead(row))
-          .filter((row): row is ProjectHead => row !== null);
-      });
+      return await dependencies.withAuthRetry(
+        'listProjectHeadsSince',
+        () => this.loadProjectHeadPages(client, watermark, upperWatermark),
+      );
     } catch (error) {
       if (this.isSuspended(error)) {
-        return [];
+        return null;
       }
       this.logger.warn('拉取项目头信息失败', {
         watermark,
+        upperWatermark,
         error: supabaseErrorToError(error).message,
       });
-      return [];
+      // eslint-disable-next-line no-restricted-syntax -- null keeps page failure distinct from an empty page so callers cannot advance the watermark
+      return null;
+    }
+  }
+
+  private async loadProjectHeadPages(
+    client: SupabaseClient,
+    watermark: string | null,
+    upperWatermark: string,
+  ): Promise<ProjectHead[]> {
+    const heads: ProjectHead[] = [];
+    let afterUpdatedAt: string | null = null;
+    let afterProjectId: string | null = null;
+
+    for (;;) {
+      const { data, error } = await client.rpc('list_project_heads_page', {
+        p_since: watermark,
+        p_until: upperWatermark,
+        p_after_updated_at: afterUpdatedAt,
+        p_after_project_id: afterProjectId,
+        p_limit: PROJECT_HEAD_PAGE_SIZE,
+      });
+      if (error) throw supabaseErrorToError(error);
+      if (!Array.isArray(data)) {
+        throw new Error('Project head page returned a non-array payload');
+      }
+
+      const page = data.map((row) => this.toProjectHead(row));
+      if (page.some((head) => head === null)) {
+        throw new Error('Project head page returned an invalid row');
+      }
+      const validPage = page as ProjectHead[];
+      heads.push(...validPage);
+
+      if (data.length < PROJECT_HEAD_PAGE_SIZE) return heads;
+
+      const lastHead = validPage.at(-1);
+      if (!lastHead
+        || (lastHead.updatedAt === afterUpdatedAt && lastHead.id === afterProjectId)) {
+        throw new Error('Project head page cursor did not advance');
+      }
+      afterUpdatedAt = lastHead.updatedAt;
+      afterProjectId = lastHead.id;
     }
   }
 

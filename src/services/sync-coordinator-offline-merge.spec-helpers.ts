@@ -669,7 +669,10 @@ export function registerSyncCoordinatorOfflineMergeSpecs(context: SyncCoordinato
         watermark: '2026-02-15T08:20:00.000Z',
       });
       expect(mockSyncService.getUserProjectsWatermark).not.toHaveBeenCalled();
-      expect(mockSyncService.listProjectHeadsSince).toHaveBeenCalledWith('2026-02-15T08:00:00.000Z');
+      expect(mockSyncService.listProjectHeadsSince).toHaveBeenCalledWith(
+        '2026-02-15T08:00:00.000Z',
+        '2026-02-15T08:20:00.000Z',
+      );
       expect(localStorage.getItem('nanoflow.project-manifest-watermark.user-123')).toBe('2026-02-15T08:00:00.000Z');
     });
 
@@ -701,7 +704,10 @@ export function registerSyncCoordinatorOfflineMergeSpecs(context: SyncCoordinato
         skipped: false,
         watermark: '2026-02-15T08:20:00.000Z',
       });
-      expect(mockSyncService.listProjectHeadsSince).toHaveBeenCalledWith('2026-02-15T08:00:00.000Z');
+      expect(mockSyncService.listProjectHeadsSince).toHaveBeenCalledWith(
+        '2026-02-15T08:00:00.000Z',
+        '2026-02-15T08:20:00.000Z',
+      );
     });
 
     it('refreshProjectManifestIfNeeded 远端有更新时应拉取头信息并更新本地水位', async () => {
@@ -730,11 +736,31 @@ export function registerSyncCoordinatorOfflineMergeSpecs(context: SyncCoordinato
         skipped: false,
         watermark: '2026-02-15T08:20:00.000Z',
       });
-      expect(mockSyncService.listProjectHeadsSince).toHaveBeenCalledWith('2026-02-15T08:00:00.000Z');
+      expect(mockSyncService.listProjectHeadsSince).toHaveBeenCalledWith(
+        '2026-02-15T08:00:00.000Z',
+        '2026-02-15T08:20:00.000Z',
+      );
       const updated = mockProjectStateService.projects()[0];
       expect(updated?.updatedAt).toBe('2026-02-15T08:19:00.000Z');
       expect(updated?.version).toBe(3);
       expect(localStorage.getItem('nanoflow.project-manifest-watermark.user-123')).toBe('2026-02-15T08:20:00.000Z');
+    });
+
+    it('refreshProjectManifestIfNeeded heads 分页失败时不应推进本地水位', async () => {
+      (FEATURE_FLAGS as unknown as Record<string, boolean>).USER_PROJECTS_WATERMARK_RPC_V1 = true;
+      mockAuthService.currentUserId.mockReturnValue('user-123');
+      localStorage.setItem('nanoflow.project-manifest-watermark.user-123', '2026-02-15T08:00:00.000Z');
+      mockSyncService.getUserProjectsWatermark.mockResolvedValueOnce('2026-02-15T08:20:00.000Z');
+      mockSyncService.listProjectHeadsSince.mockResolvedValueOnce(null);
+
+      const result = await service.refreshProjectManifestIfNeeded('manifest:page-failed');
+
+      expect(result).toEqual({ skipped: false });
+      expect(mockSyncService.listProjectHeadsSince).toHaveBeenCalledWith(
+        '2026-02-15T08:00:00.000Z',
+        '2026-02-15T08:20:00.000Z',
+      );
+      expect(localStorage.getItem('nanoflow.project-manifest-watermark.user-123')).toBe('2026-02-15T08:00:00.000Z');
     });
 
     it('refreshProjectManifestIfNeeded 远端水位返回前 owner 变化时不应应用旧结果', async () => {

@@ -694,7 +694,12 @@ export class SimpleSyncService {
 
   async getUserProjectsWatermark(): Promise<string | null> { return this.projectDataService.getUserProjectsWatermark(); }
 
-  async listProjectHeadsSince(watermark: string | null): Promise<Array<{ id: string; updatedAt: string; version: number }>> { return this.projectDataService.listProjectHeadsSince(watermark); }
+  async listProjectHeadsSince(
+    watermark: string | null,
+    upperWatermark: string,
+  ): Promise<Array<{ id: string; updatedAt: string; version: number }> | null> {
+    return this.projectDataService.listProjectHeadsSince(watermark, upperWatermark);
+  }
 
   async getAccessibleProjectProbe(projectId: string): Promise<{
     projectId: string;

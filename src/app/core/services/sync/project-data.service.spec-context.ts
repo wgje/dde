@@ -59,6 +59,7 @@ export function createProjectDataPagedQuery<Row>(responses: Array<{ data: Row[] 
     eq: vi.fn(),
     in: vi.fn(),
     gt: vi.fn(),
+    or: vi.fn(),
     not: vi.fn(),
     is: vi.fn(),
     order: vi.fn(),
@@ -70,6 +71,7 @@ export function createProjectDataPagedQuery<Row>(responses: Array<{ data: Row[] 
   query.eq.mockReturnValue(query);
   query.in.mockReturnValue(query);
   query.gt.mockReturnValue(query);
+  query.or.mockReturnValue(query);
   query.not.mockReturnValue(query);
   query.is.mockReturnValue(query);
   query.order.mockReturnValue(query);
@@ -82,14 +84,24 @@ export function createProjectDataRangeQuery<Row>(
   ranges: Array<[number, number]> = [],
 ) {
   const resolveDefaultPage = () => Promise.resolve({ data: rows.slice(0, 1000), error: null });
+  let limitFrom = 0;
   const query = {
     select: vi.fn(),
     eq: vi.fn(),
     in: vi.fn(),
     gt: vi.fn(),
+    or: vi.fn(),
     not: vi.fn(),
     is: vi.fn(),
     order: vi.fn(),
+    limit: vi.fn(async (count: number) => {
+      const from = limitFrom;
+      const to = from + count - 1;
+      ranges.push([from, to]);
+      const data = rows.slice(from, to + 1);
+      limitFrom += data.length;
+      return { data, error: null };
+    }),
     range: vi.fn(async (from: number, to: number) => {
       ranges.push([from, to]);
       return { data: rows.slice(from, to + 1), error: null };
@@ -104,6 +116,7 @@ export function createProjectDataRangeQuery<Row>(
   query.eq.mockReturnValue(query);
   query.in.mockReturnValue(query);
   query.gt.mockReturnValue(query);
+  query.or.mockReturnValue(query);
   query.not.mockReturnValue(query);
   query.is.mockReturnValue(query);
   query.order.mockReturnValue(query);

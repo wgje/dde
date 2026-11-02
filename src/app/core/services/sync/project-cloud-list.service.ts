@@ -14,7 +14,11 @@ import {
   isBrowserNetworkSuspendedError,
   isBrowserNetworkSuspendedWindow,
 } from '../../../../utils/browser-network-suspension';
-import { fetchAllSupabasePages } from '../../../../utils/supabase-pagination';
+import {
+  buildSupabaseKeysetOrFilter,
+  fetchAllSupabaseKeysetPages,
+  fetchAllSupabaseKeysetPagesByCursor,
+} from '../../../../utils/supabase-pagination';
 import { supabaseErrorToError } from '../../../../utils/supabase-error';
 
 export interface ProjectListMetadataLoadOptions {
@@ -56,6 +60,25 @@ interface ProjectBatchLoadSummary {
 
 export const PROJECT_BATCH_RPC_PROBE_GRACE_MS = 120;
 
+export function sortProjectRowsNewestFirst<
+  Row extends { id?: unknown; updated_at?: unknown },
+>(rows: readonly Row[]): Row[] {
+  return [...rows].sort((left, right) => {
+    const leftUpdatedAt = typeof left.updated_at === 'string' ? left.updated_at : '';
+    const rightUpdatedAt = typeof right.updated_at === 'string' ? right.updated_at : '';
+    const updatedAtOrder = rightUpdatedAt.localeCompare(leftUpdatedAt);
+    if (updatedAtOrder !== 0) return updatedAtOrder;
+
+    const leftId = typeof left.id === 'string' ? left.id : '';
+    const rightId = typeof right.id === 'string' ? right.id : '';
+    return leftId.localeCompare(rightId);
+  });
+}
+
+function readProjectIdCursor(row: Partial<ProjectRow>): string | null {
+  return typeof row.id === 'string' && row.id.length > 0 ? row.id : null;
+}
+
 @Injectable({ providedIn: 'root' })
 export class ProjectCloudListService {
   private readonly logger = inject(LoggerService).category('ProjectData');
@@ -73,13 +96,12 @@ export class ProjectCloudListService {
       return [];
     }
 
-    const client = await dependencies.getClient(userId);
-    if (!client) return null;
-
     const timeout = Math.max(TIMEOUT_CONFIG.QUICK, options.timeout ?? TIMEOUT_CONFIG.QUICK);
     const retries = Math.max(0, options.retries ?? 0);
 
     try {
+      const client = await dependencies.getClient(userId);
+      if (!client) return null;
       const projectList = await this.queryProjectListMetadata(client, userId, timeout, retries, options, dependencies);
       return projectList.map(row => dependencies.rowToProject(row));
     } catch (error) {
@@ -101,16 +123,19 @@ export class ProjectCloudListService {
       return null;
     }
 
-    const client = await dependencies.getClient(userId);
-    if (!client) return null;
-
     this.syncState.setLoadingRemote(true);
 
     try {
+      const client = await dependencies.getClient(userId);
+      if (!client) return null;
       const projectList = await this.loadCloudProjectRows(client, userId, dependencies.withAuthRetry);
       const results = await this.loadCloudProjectBatchResults(projectList, userId, dependencies);
       const summary = this.summarizeCloudProjectBatch(projectList, results);
       this.logCloudProjectBatchSummary(projectList.length, summary);
+      if (projectList.length > 0 && summary.projects.length === 0
+        && (summary.failedCount > 0 || summary.suspendedCount > 0)) {
+        return null;
+      }
       return summary.projects;
     } catch (error) {
       return this.handleCloudProjectListLoadFailure(error);
@@ -128,13 +153,17 @@ export class ProjectCloudListService {
 
     try {
       const userId = dependencies.getRecentValidatedUserId();
-      const { data, error } = await fetchAllSupabasePages<ProjectRow>(() => {
+      const { data, error } = await fetchAllSupabaseKeysetPages<ProjectRow>((cursor) => {
         let query = client
           .from('projects')
           .select(FIELD_SELECT_CONFIG.PROJECT_LIST_FIELDS)
           .is('deleted_at', null);
         if (userId) query = query.eq('owner_id', userId);
-        if (since) query = query.gt('updated_at', since);
+        if (cursor) {
+          query = query.or(buildSupabaseKeysetOrFilter(cursor));
+        } else if (since) {
+          query = query.gt('updated_at', since);
+        }
         return query
           .order('updated_at', { ascending: true })
           .order('id', { ascending: true });
@@ -159,16 +188,10 @@ export class ProjectCloudListService {
     return this.throttle.execute(
       this.buildProjectListMetadataRequestKey(userId, timeout, retries),
       async () => dependencies.withAuthRetry('loadProjectListMetadataFromCloud', async () => {
-        const { data, error } = await fetchAllSupabasePages<Partial<ProjectRow>>(() => client
-          .from('projects')
-          .select(FIELD_SELECT_CONFIG.PROJECT_LIST_FIELDS)
-          .eq('owner_id', userId)
-          .is('deleted_at', null)
-          .order('updated_at', { ascending: false })
-          .order('id', { ascending: true }));
+        const { data, error } = await this.fetchActiveProjectRowsById(client, userId);
 
         if (error) throw supabaseErrorToError(error);
-        return data || [];
+        return sortProjectRowsNewestFirst(data ?? []);
       }),
       {
         deduplicate: true,
@@ -187,6 +210,11 @@ export class ProjectCloudListService {
     dependencies: ProjectCloudListDependencies,
   ): null {
     const err = supabaseErrorToError(error);
+
+    if (isBrowserNetworkSuspendedError(err) || isBrowserNetworkSuspendedWindow()) {
+      this.logger.debug('浏览器网络挂起，跳过云端项目元数据加载', { userId });
+      return null;
+    }
 
     if (options.treatTransientFailureAsSoft && dependencies.isTransientMetadataLoadFailure(err)) {
       this.logger.info('项目元数据列表拉取暂时不可用，已降级为软失败', {
@@ -223,16 +251,10 @@ export class ProjectCloudListService {
     return this.throttle.execute(
       `project-list:${userId}`,
       async () => withAuthRetry('loadProjectsFromCloud', async () => {
-        const { data, error } = await fetchAllSupabasePages<ProjectRow | Partial<ProjectRow>>(() => client
-          .from('projects')
-          .select(FIELD_SELECT_CONFIG.PROJECT_LIST_FIELDS)
-          .eq('owner_id', userId)
-          .is('deleted_at', null)
-          .order('updated_at', { ascending: false })
-          .order('id', { ascending: true }));
+        const { data, error } = await this.fetchActiveProjectRowsById(client, userId);
 
         if (error) throw supabaseErrorToError(error);
-        return data || [];
+        return sortProjectRowsNewestFirst(data ?? []);
       }),
       {
         deduplicate: true,
@@ -241,6 +263,27 @@ export class ProjectCloudListService {
         retries: 5,
       },
     );
+  }
+
+  private async fetchActiveProjectRowsById(
+    client: SupabaseClient,
+    userId: string,
+  ) {
+    return await fetchAllSupabaseKeysetPagesByCursor<Partial<ProjectRow>, string>((cursor) => {
+      let query = client
+        .from('projects')
+        .select(FIELD_SELECT_CONFIG.PROJECT_LIST_FIELDS)
+        .eq('owner_id', userId)
+        .is('deleted_at', null);
+      if (cursor) {
+        query = query.gt('id', cursor);
+      }
+      return query.order('id', { ascending: true });
+    }, {
+      readCursor: readProjectIdCursor,
+      cursorKey: (cursor) => cursor,
+      isCursorAfter: (previous, next) => next > previous,
+    });
   }
 
   private async loadCloudProjectBatchResults(

@@ -326,14 +326,15 @@ export interface Database {
         Args: Record<string, never>;
         Returns: string | null;
       };
-      /** 获取用户项目元数据（增量同步） */
-      get_user_projects_meta: {
-        Args: { p_since_timestamp?: string };
-        Returns: Json;
-      };
-      /** 列出指定水位后的项目头变更 */
-      list_project_heads_since: {
-        Args: { p_since?: string | null };
+      /** 分页列出固定水位范围内的项目头变更 */
+      list_project_heads_page: {
+        Args: {
+          p_since: string | null;
+          p_until: string;
+          p_after_updated_at: string | null;
+          p_after_project_id: string | null;
+          p_limit: number;
+        };
         Returns: { project_id: string; updated_at: string; version: number }[];
       };
       /** 获取服务器时间（时钟同步） */

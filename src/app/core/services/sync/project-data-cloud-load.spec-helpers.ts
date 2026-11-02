@@ -398,14 +398,15 @@ export function registerProjectDataCloudLoadSpecs(): void {
         expect(projects).not.toBeNull();
         if (!projects) throw new Error('Expected paged project load to return projects');
         expect(projects).toHaveLength(1001);
-        expect(projects[1000]?.id).toBe('proj-page-1000');
+        expect(projects.some(project => project.id === 'proj-page-1000')).toBe(true);
         expect(loadSpy).toHaveBeenCalledWith('proj-page-1000', 'user-project-pages');
+        expect(projectsQuery.gt).toHaveBeenCalledWith('id', 'proj-page-999');
         expect(ranges).toEqual([[0, 999], [1000, 1999]]);
       });
 
       it('pullProjects 应分页拉取项目列表并保留 owner/since 过滤', async () => {
         const rows = Array.from({ length: 1001 }, (_, index) => ({
-          id: `project-${index.toString().padStart(4, '0')}`,
+          id: `00000000-0000-4000-8000-${index.toString().padStart(12, '0')}`,
           title: `Project ${index}`,
           description: '',
           created_date: '2026-06-09T00:00:00.000Z',
@@ -443,9 +444,12 @@ export function registerProjectDataCloudLoadSpecs(): void {
         });
 
         expect(projects).toHaveLength(1001);
-        expect(projects[1000]?.id).toBe('project-1000');
+        expect(projects[1000]?.id).toBe('00000000-0000-4000-8000-000000001000');
         expect(query.eq).toHaveBeenCalledWith('owner_id', 'user-1');
         expect(query.gt).toHaveBeenCalledWith('updated_at', '2026-06-01T00:00:00.000Z');
+        expect(query.or).toHaveBeenCalledWith(
+          'updated_at.gt.2026-06-09T00:16:39.000Z,and(updated_at.eq.2026-06-09T00:16:39.000Z,id.gt.00000000-0000-4000-8000-000000000999)',
+        );
         expect(query.order).toHaveBeenCalledWith('updated_at', { ascending: true });
         expect(query.order).toHaveBeenCalledWith('id', { ascending: true });
         expect(ranges).toEqual([
@@ -454,7 +458,7 @@ export function registerProjectDataCloudLoadSpecs(): void {
         ]);
       });
 
-      it('loadProjectsFromCloud 为每个项目委托分段加载', async () => {
+      it('loadProjectsFromCloud 全部项目详细数据加载失败时应返回 null', async () => {
         const projectsQuery = createProjectDataRangeQuery([
           { id: 'proj-sequential-1' },
           { id: 'proj-sequential-2' },
@@ -496,7 +500,7 @@ export function registerProjectDataCloudLoadSpecs(): void {
 
         const result = await service.loadProjectsFromCloud('user-sequential');
 
-        expect(result).toEqual([]);
+        expect(result).toBeNull();
         expect(rpc).not.toHaveBeenCalled();
         expect(fallbackSpy).toHaveBeenCalledTimes(3);
         expect(fallbackSpy).toHaveBeenNthCalledWith(1, 'proj-sequential-1', 'user-sequential', expect.any(Object));

@@ -212,7 +212,8 @@ export function registerProjectDataMetadataListSpecs(): void {
         const projects = await service.loadProjectListMetadataFromCloud('user-meta-pages');
 
         expect(projects).toHaveLength(1001);
-        expect(projects?.[1000]?.id).toBe('proj-meta-page-1000');
+        expect(projects?.some(project => project.id === 'proj-meta-page-1000')).toBe(true);
+        expect(projectsQuery.gt).toHaveBeenCalledWith('id', 'proj-meta-page-999');
         expect(ranges).toEqual([[0, 999], [1000, 1999]]);
       });
 

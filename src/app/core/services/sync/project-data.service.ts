@@ -363,9 +363,14 @@ export class ProjectDataService {
    * 拉取给定水位之后发生变化的项目头信息
    */
   async listProjectHeadsSince(
-    watermark: string | null
-  ): Promise<ProjectHead[]> {
-    return await this.syncProbes.listProjectHeadsSince(watermark, this.syncProbeDependencies());
+    watermark: string | null,
+    upperWatermark: string,
+  ): Promise<ProjectHead[] | null> {
+    return await this.syncProbes.listProjectHeadsSince(
+      watermark,
+      upperWatermark,
+      this.syncProbeDependencies(),
+    );
   }
 
   /**

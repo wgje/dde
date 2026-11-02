@@ -158,9 +158,16 @@ export class SyncCoordinatorProjectRefreshService {
       return this.deferColdProjectManifestRefresh(reason, remoteWatermark, userId, options?.deferCommit);
     }
 
-    const changedProjects = await this.applyProjectManifestHeadsSince(localWatermark, userId);
+    const changedProjects = await this.applyProjectManifestHeadsSince(
+      localWatermark,
+      remoteWatermark,
+      userId,
+    );
     if (!this.isRefreshOwnerCurrent(userId)) {
       return { skipped: true, watermark: remoteWatermark };
+    }
+    if (changedProjects === null) {
+      return { skipped: false };
     }
     this.finishProjectManifestRefresh(reason, localWatermark, remoteWatermark, userId, changedProjects, options?.deferCommit);
     return { skipped: false, watermark: remoteWatermark };
@@ -673,9 +680,14 @@ export class SyncCoordinatorProjectRefreshService {
     return { skipped: false, watermark: remoteWatermark };
   }
 
-  private async applyProjectManifestHeadsSince(localWatermark: string, userId: string): Promise<number> {
-    const heads = await this.projectData.listProjectHeadsSince(localWatermark);
+  private async applyProjectManifestHeadsSince(
+    localWatermark: string,
+    remoteWatermark: string,
+    userId: string,
+  ): Promise<number | null> {
+    const heads = await this.projectData.listProjectHeadsSince(localWatermark, remoteWatermark);
     if (!this.isRefreshOwnerCurrent(userId)) return 0;
+    if (heads === null) return null;
     if (heads.length > 0) {
       const headsById = new Map(heads.map(head => [head.id, head]));
       this.projectState.updateProjects(projects => projects.map(project => {

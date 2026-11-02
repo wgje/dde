@@ -32,6 +32,7 @@ import { BlackBoxSyncService } from '../../../services/black-box-sync.service';
 import { WidgetBindingService } from '../../../services/widget-binding.service';
 import { AttachmentCleanupOutboxService } from '../../../services/attachment-cleanup-outbox.service';
 import { DockDirectWidgetNotifyOutboxService } from '../../../services/dock-direct-widget-notify-outbox.service';
+import { SessionRuntimeResetRegistry } from '../../../services/session-runtime-reset.service';
 import {
   ensureBrowserNetworkSuspensionTracking,
   resetBrowserNetworkSuspensionTrackingForTests,
@@ -701,6 +702,7 @@ describe('SimpleSyncService', () => {
           },
         },
         { provide: ConnectivityRecoveryService, useClass: ConnectivityRecoveryService },
+        SessionRuntimeResetRegistry,
         // Sentry 懒加载服务 mock
         { provide: SentryLazyLoaderService, useValue: mockSentryLazyLoaderService }
       ]
@@ -718,6 +720,21 @@ describe('SimpleSyncService', () => {
     windowAddEventListenerSpy.mockRestore();
     windowRemoveEventListenerSpy.mockRestore();
     enablePollutionGuard();
+  });
+
+  it('listProjectHeadsSince 应向探针传递固定上限水位', async () => {
+    const listProjectHeadsSince = vi.fn().mockResolvedValue(null);
+    Reflect.set(service, 'projectDataService', { listProjectHeadsSince });
+
+    await expect(service.listProjectHeadsSince(
+      '2026-02-15T08:00:00.000Z',
+      '2026-02-15T08:20:00.000Z',
+    )).resolves.toBeNull();
+
+    expect(listProjectHeadsSince).toHaveBeenCalledWith(
+      '2026-02-15T08:00:00.000Z',
+      '2026-02-15T08:20:00.000Z',
+    );
   });
 
   registerSimpleSyncSuiteSpecs({
