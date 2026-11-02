@@ -25,8 +25,9 @@ export function unionWorldRect(
 }
 
 /**
- * React Flow MiniMap 同款 viewBox 公式（已用真实样本逐位验证）。
- * viewScale = max(宽比, 高比)，保证内容完整可见且不变形；offset = 5*viewScale 留固定边距。
+ * Constellation viewBox：沿用 React Flow 的等比完整可见公式，但为星图保留短边
+ * 12.5% 的视觉呼吸区。这样桌面 180×140 与移动 100×80 都维持相同比例，
+ * 不会让超大视口框贴边压扁节点层次。
  */
 export function computeViewBox(
   bounding: MinimapWorldRect,
@@ -38,7 +39,8 @@ export function computeViewBox(
   const scaleW = bounding.w / safeElW;
   const scaleH = bounding.h / safeElH;
   const viewScale = Math.max(scaleW, scaleH, 1e-6);
-  const offset = 5 * viewScale;
+  const visualPadding = Math.min(safeElW, safeElH) * 0.125;
+  const offset = visualPadding * viewScale;
   const viewW = viewScale * safeElW;
   const viewH = viewScale * safeElH;
   return {
@@ -82,6 +84,27 @@ export interface MinimapPip {
   color: string;
 }
 
+export const MINIMAP_LEGEND_CATEGORIES = [
+  'sidecar',
+  'siyuan',
+  'docked',
+  'parked',
+  'focused',
+  'search',
+] as const;
+
+export type MinimapLegendCategory = (typeof MINIMAP_LEGEND_CATEGORIES)[number];
+
+/** Constellation 图层中的非颜色语义标记。 */
+export interface MinimapSemanticMarker extends MinimapWorldRect {
+  key: string;
+  kind: MinimapLegendCategory;
+  cx: number;
+  cy: number;
+  /** 角标与准星的世界坐标尺寸。 */
+  size: number;
+}
+
 /** 节点 data 中本组件关心的字段子集 */
 export interface MinimapNodeData {
   color?: string;
@@ -114,6 +137,9 @@ export const VIEWPORT_FILL = 'none';
 export const MINIMAP_ZOOM_STEP = 1;
 export const MINIMAP_KEYBOARD_PAN_PX = 32;
 export const MINIMAP_KEYBOARD_ZOOM_FACTOR = 1.1;
+export const MINIMAP_PARKED_OUTLINE_SCALE = 0.52;
+export const MINIMAP_FOCUSED_OUTLINE_SCALE = 0.8;
+export const MINIMAP_SEARCH_CROSSHAIR_SCALE = 1.7;
 /** 视口越界时的安全兜底世界范围 */
 export const FALLBACK_WORLD: MinimapWorldRect = { x: -250, y: -250, w: 500, h: 500 };
 /**
@@ -173,4 +199,85 @@ export function buildDecorationPips(
   if (data.isDocked)
     pips.push({ key: `${nodeKey}:docked`, cx: bounds.x, cy: bounds.y, r, color: PIP_DOCKED });
   return pips;
+}
+
+/**
+ * 将节点状态投影为六类几何标记。颜色由主题 CSS 决定，数据层只保留稳定语义和坐标。
+ */
+export function buildMinimapSemanticMarkers(
+  bounds: MinimapWorldRect,
+  data: MinimapNodeData,
+  nodeKey: string,
+): MinimapSemanticMarker[] {
+  const size = Math.max(2, Math.min(bounds.w, bounds.h) * 0.16);
+  const centerX = bounds.x + bounds.w / 2;
+  const centerY = bounds.y + bounds.h / 2;
+  const markers: MinimapSemanticMarker[] = [];
+
+  const add = (kind: MinimapLegendCategory, cx: number, cy: number): void => {
+    markers.push({
+      key: `${nodeKey}:${kind}`,
+      kind,
+      x: bounds.x,
+      y: bounds.y,
+      w: bounds.w,
+      h: bounds.h,
+      cx,
+      cy,
+      size,
+    });
+  };
+
+  if (data.sidecarHasSignals) add('sidecar', bounds.x + bounds.w, bounds.y);
+  if (data.hasSiyuanLink) add('siyuan', bounds.x + bounds.w, bounds.y + bounds.h);
+  if (data.isDocked) add('docked', bounds.x, bounds.y);
+  if (data.isParked) add('parked', centerX, centerY);
+  if (data.isDockFocused) add('focused', centerX, centerY);
+  if (data.isSearchMatch) add('search', centerX, centerY);
+  return markers;
+}
+
+/** 返回语义标记的完整世界坐标外接矩形，供 viewBox 预留稳定空间。 */
+export function resolveMinimapSemanticMarkerBounds(
+  marker: MinimapSemanticMarker,
+): MinimapWorldRect {
+  if (marker.kind === 'parked' || marker.kind === 'focused') {
+    const scale = marker.kind === 'parked'
+      ? MINIMAP_PARKED_OUTLINE_SCALE
+      : MINIMAP_FOCUSED_OUTLINE_SCALE;
+    const pad = marker.size * scale;
+    return {
+      x: marker.x - pad,
+      y: marker.y - pad,
+      w: marker.w + pad * 2,
+      h: marker.h + pad * 2,
+    };
+  }
+
+  const radius = marker.kind === 'search'
+    ? marker.size * MINIMAP_SEARCH_CROSSHAIR_SCALE
+    : marker.size;
+  return {
+    x: marker.cx - radius,
+    y: marker.cy - radius,
+    w: radius * 2,
+    h: radius * 2,
+  };
+}
+
+export function toggleMinimapLegendCategory(
+  hiddenCategories: ReadonlySet<MinimapLegendCategory>,
+  category: MinimapLegendCategory,
+): Set<MinimapLegendCategory> {
+  const next = new Set(hiddenCategories);
+  if (next.has(category)) next.delete(category);
+  else next.add(category);
+  return next;
+}
+
+export function filterMinimapSemanticMarkers(
+  markers: readonly MinimapSemanticMarker[],
+  hiddenCategories: ReadonlySet<MinimapLegendCategory>,
+): MinimapSemanticMarker[] {
+  return markers.filter(marker => !hiddenCategories.has(marker.kind));
 }

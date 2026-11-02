@@ -46,6 +46,9 @@ export interface FlowViewDiagramLifecycleControllerOptions {
 
 export class FlowViewDiagramLifecycleController {
   private overviewResizeTimer: ReturnType<typeof setTimeout> | null = null;
+  private legacyOverviewExpandFrame: number | null = null;
+  private legacyOverviewExpandTimer: ReturnType<typeof setTimeout> | null = null;
+  private legacyOverviewExpandGeneration = 0;
 
   constructor(private readonly options: FlowViewDiagramLifecycleControllerOptions) {}
 
@@ -55,6 +58,7 @@ export class FlowViewDiagramLifecycleController {
 
   clearOverviewResizeTimer(): void {
     this.overviewResizeTimer = null;
+    this.cancelPendingLegacyOverviewExpand();
   }
 
   handleResize(): void {
@@ -115,25 +119,85 @@ export class FlowViewDiagramLifecycleController {
   toggleOverviewCollapse(): void {
     const wasCollapsed = this.options.isOverviewCollapsed();
     this.options.isOverviewCollapsed.set(!wasCollapsed);
+    this.cancelPendingLegacyOverviewExpand();
 
     if (this.options.useSvgMinimap()) return;
 
     if (wasCollapsed) {
-      requestAnimationFrame(() => {
-        this.options.scheduleTimer(() => {
-          this.options.diagram.scheduleOverviewInit(
-            this.options.overviewDiv(),
-            this.options.isOverviewVisible(),
-            false,
-            this.options.zone,
-            this.options.scheduleTimer,
-            true,
-          );
-        }, 100);
-      });
+      this.scheduleLegacyOverviewExpand();
     } else {
       this.options.diagram.disposeOverview();
     }
+  }
+
+  handleLegacyOverviewHostChange(host: ElementRef | undefined): void {
+    this.cancelPendingLegacyOverviewExpand();
+    if (this.options.isDestroyed() || this.options.useSvgMinimap() || !host) {
+      this.options.diagram.disposeOverview();
+      return;
+    }
+    if (!this.options.isOverviewVisible() || this.options.isOverviewCollapsed()) return;
+
+    this.options.diagram.scheduleOverviewInit(
+      host,
+      true,
+      false,
+      this.options.zone,
+      this.options.scheduleTimer,
+      true,
+    );
+  }
+
+  private scheduleLegacyOverviewExpand(): void {
+    const generation = this.legacyOverviewExpandGeneration;
+    const afterFrame = (): void => {
+      if (generation !== this.legacyOverviewExpandGeneration) return;
+      this.legacyOverviewExpandFrame = null;
+      if (!this.canInitializeLegacyOverview()) return;
+
+      this.legacyOverviewExpandTimer = this.options.scheduleTimer(() => {
+        if (generation !== this.legacyOverviewExpandGeneration) return;
+        this.legacyOverviewExpandTimer = null;
+        if (!this.canInitializeLegacyOverview()) return;
+        const host = this.options.overviewDiv();
+        if (!host) return;
+        this.options.diagram.scheduleOverviewInit(
+          host,
+          true,
+          false,
+          this.options.zone,
+          this.options.scheduleTimer,
+          true,
+        );
+      }, 100);
+    };
+
+    const requestFrame = globalThis.requestAnimationFrame;
+    if (typeof requestFrame === 'function') {
+      this.legacyOverviewExpandFrame = requestFrame(afterFrame);
+      return;
+    }
+    afterFrame();
+  }
+
+  private cancelPendingLegacyOverviewExpand(): void {
+    this.legacyOverviewExpandGeneration += 1;
+    if (this.legacyOverviewExpandFrame !== null) {
+      const cancelFrame = globalThis.cancelAnimationFrame;
+      if (typeof cancelFrame === 'function') cancelFrame(this.legacyOverviewExpandFrame);
+      this.legacyOverviewExpandFrame = null;
+    }
+    if (this.legacyOverviewExpandTimer !== null) {
+      clearTimeout(this.legacyOverviewExpandTimer);
+      this.legacyOverviewExpandTimer = null;
+    }
+  }
+
+  private canInitializeLegacyOverview(): boolean {
+    return !this.options.isDestroyed()
+      && !this.options.useSvgMinimap()
+      && this.options.isOverviewVisible()
+      && !this.options.isOverviewCollapsed();
   }
 
   private onDiagramInitialized(delayMs: number = UI_CONFIG.MEDIUM_DELAY): void {

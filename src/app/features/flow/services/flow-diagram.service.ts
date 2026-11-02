@@ -38,7 +38,7 @@ import {
 import {
   isSafeFlowDiagramSize,
 } from './flow-diagram-view-state.helpers';
-import { FlowDiagramRecoveryController } from './flow-diagram-recovery.controller';
+import { FlowDiagramRecoveryController, type FlowDiagramHardRecoveryToken } from './flow-diagram-recovery.controller';
 import type { FlowTheme } from '../../../../config/flow-styles';
 import { Task } from '../../../../models';
 import { environment } from '../../../../environments/environment';
@@ -96,6 +96,8 @@ export class FlowDiagramService {
   private diagramDiv: HTMLDivElement | null = null;
   private resizeObserver: ResizeObserver | null = null;
   private isDestroyed = false;
+  private hardRecoveryGeneration = 0;
+  private readonly hardRecoveryHold = signal<FlowDiagramHardRecoveryToken | null>(null);
   
   // ========== 定时器 ==========
   private resizeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -111,10 +113,16 @@ export class FlowDiagramService {
       getShouldRestoreOverview: () => this.overviewCoordinator.shouldRestore,
       getOverviewContainer: () => this.overviewCoordinator.container,
       updateDiagram: forceRefresh => this.updateDiagram(this.projectState.tasks(), forceRefresh),
+      applyHardRecoveryViewport: (viewState, complete) => this.dataService.applyHardRecoveryViewport(viewState, complete),
+      completeHardRecovery: proof => this.dataService.completeHardRecovery(proof),
+      abortHardRecovery: token => this.abortHardRecovery(token),
       restoreOverviewAfterRecovery: container => this.restoreOverviewAfterRecovery(container),
       attemptPendingOverviewRestore: () => this.attemptPendingOverviewRestore(),
       teardownDiagramForRecovery: () => this.teardownDiagramForRecovery(),
-      initializeOutsideZone: container => this._initializeOutsideZone(container),
+      initializeOutsideZone: (container, token) => this._initializeOutsideZone(container, token),
+      beginHardRecovery: () => this.beginHardRecovery(),
+      isHardRecoveryCurrent: token => this.isHardRecoveryCurrent(token),
+      releaseHardRecovery: token => this.releaseHardRecovery(token),
       cleanupFailedHardRecovery: () => this.cleanupFailedHardDiagramRecovery(),
       restoreDropHandler: () => {
         if (this.diagramDropHandler) this.setupDropHandler(this.diagramDropHandler);
@@ -176,7 +184,16 @@ export class FlowDiagramService {
   }
   
   get isInitialized(): boolean {
+    const hold = this.hardRecoveryHold();
+    if (!hold) return this.diagram !== null && !this.isDestroyed;
+    if (this.projectState.isActiveProjectOwnerCurrent(hold.owner)) return false;
+    this.hardRecoveryHold.set(null);
+    this.dataService.abortHardRecovery();
     return this.diagram !== null && !this.isDestroyed;
+  }
+
+  get activeProjectId(): string | null {
+    return this.projectState.activeProjectId();
   }
   
   get isSuspendedMode(): boolean {
@@ -206,6 +223,7 @@ export class FlowDiagramService {
       return false;
     }
 
+    this.retireHardRecovery();
     this.recovery.resetForInitialize(container);
     
     // 【性能关键】在 Angular Zone 外部创建和配置 GoJS Diagram
@@ -216,9 +234,9 @@ export class FlowDiagramService {
   /**
    * 在 NgZone 外部执行的 Diagram 初始化逻辑
    */
-  private _initializeOutsideZone(container: HTMLDivElement): boolean {
+  private _initializeOutsideZone(container: HTMLDivElement, recoveryToken?: FlowDiagramHardRecoveryToken): boolean {
     try {
-      this.prepareDiagramInitialization(container);
+      this.prepareDiagramInitialization(container, recoveryToken);
       this.diagram = createFlowDiagram(container);
       const isMobile = this.uiState.isMobile();
 
@@ -237,10 +255,10 @@ export class FlowDiagramService {
     }
   }
 
-  private prepareDiagramInitialization(container: HTMLDivElement): void {
+  private prepareDiagramInitialization(container: HTMLDivElement, recoveryToken?: FlowDiagramHardRecoveryToken): void {
     this.isDestroyed = false;
     this.diagramDiv = container;
-    this.recovery.resetForInitialize(container);
+    this.recovery.resetForInitialize(container, recoveryToken);
 
     if (environment.gojsLicenseKey) {
       (go.Diagram as unknown as { licenseKey: string }).licenseKey = environment.gojsLicenseKey;
@@ -451,6 +469,7 @@ export class FlowDiagramService {
 
   dispose(): void {
     this.isDestroyed = true;
+    this.retireHardRecovery();
     this.recovery.resetForDispose();
     this.overviewCoordinator.reset();
     
@@ -557,8 +576,8 @@ export class FlowDiagramService {
   /**
    * 更新图表数据
    */
-  updateDiagram(tasks: Task[], forceRefresh: boolean = false): void {
-    this.dataService.updateDiagram(tasks, forceRefresh);
+  updateDiagram(tasks: Task[], forceRefresh: boolean = false): boolean {
+    return this.dataService.updateDiagram(tasks, forceRefresh);
   }
 
   setRelationDisplayMode(mode: FlowRelationDisplayMode, focusedTaskId: string | null): void {
@@ -714,6 +733,41 @@ export class FlowDiagramService {
 
   private canPersistViewState(): boolean {
     return this.recovery.canPersistViewState();
+  }
+  private beginHardRecovery(): FlowDiagramHardRecoveryToken | null {
+    const owner = this.projectState.captureActiveProjectOwner();
+    if (!owner.projectId || !this.projectState.isActiveProjectOwnerCurrent(owner)
+      || !this.dataService.beginHardRecovery()) return null;
+    const token = { projectId: owner.projectId, generation: ++this.hardRecoveryGeneration, owner: Object.freeze({ ...owner }) };
+    this.hardRecoveryHold.set(token);
+    return token;
+  }
+
+  private isHardRecoveryCurrent(token: FlowDiagramHardRecoveryToken): boolean {
+    const current = this.hardRecoveryHold();
+    if (current && !this.projectState.isActiveProjectOwnerCurrent(current.owner)) {
+      this.hardRecoveryHold.set(null);
+      this.dataService.abortHardRecovery();
+    }
+    return this.hardRecoveryHold() === token
+      && this.projectState.isActiveProjectOwnerCurrent(token.owner);
+  }
+
+  private releaseHardRecovery(token: FlowDiagramHardRecoveryToken): boolean {
+    if (!this.isHardRecoveryCurrent(token)) return false;
+    this.hardRecoveryHold.set(null);
+    return true;
+  }
+
+  private retireHardRecovery(): void {
+    if (this.hardRecoveryHold()) this.dataService.abortHardRecovery();
+    this.hardRecoveryHold.set(null);
+  }
+
+  private abortHardRecovery(token: FlowDiagramHardRecoveryToken): void {
+    if (this.hardRecoveryHold() !== token) return;
+    this.dataService.abortHardRecovery();
+    this.hardRecoveryHold.set(null);
   }
   
   private handleError(userMessage: string, error: unknown): void {

@@ -2,12 +2,15 @@ import * as go from 'gojs';
 
 import {
   buildDecorationPips,
+  buildMinimapSemanticMarkers,
   resolveNodeFill,
   resolveNodeStroke,
   resolveNodeStrokeWidth,
+  resolveMinimapSemanticMarkerBounds,
   unionWorldRect,
   type MinimapNodeData,
   type MinimapPip,
+  type MinimapSemanticMarker,
   type MinimapWorldRect,
 } from './flow-minimap-geometry';
 
@@ -37,6 +40,7 @@ export interface MinimapLinkShape {
 export interface MinimapNodeSnapshot {
   shapes: MinimapNodeShape[];
   pips: MinimapPip[];
+  markers: MinimapSemanticMarker[];
   bounds: MinimapWorldRect | null;
 }
 
@@ -57,6 +61,7 @@ export function collectMinimapNodeSnapshot(
 ): MinimapNodeSnapshot {
   const shapes: MinimapNodeShape[] = [];
   const pips: MinimapPip[] = [];
+  const markers: MinimapSemanticMarker[] = [];
   let bounds: MinimapWorldRect | null = null;
 
   diagram.nodes.each((node) => {
@@ -77,9 +82,17 @@ export function collectMinimapNodeSnapshot(
     });
     bounds = unionWorldRect(bounds, rect);
     if (options.showDecorationPips) pips.push(...buildDecorationPips(rect, data, key));
+    const semanticMarkers = buildMinimapSemanticMarkers(rect, data, key);
+    for (const marker of semanticMarkers) {
+      bounds = unionWorldRect(bounds, resolveMinimapSemanticMarkerBounds(marker));
+    }
+    markers.push(...semanticMarkers.filter(marker => (
+      options.showDecorationPips
+      || (marker.kind !== 'sidecar' && marker.kind !== 'siyuan' && marker.kind !== 'docked')
+    )));
   });
 
-  return { shapes, pips, bounds };
+  return { shapes, pips, markers, bounds };
 }
 
 export function collectMinimapLinks(

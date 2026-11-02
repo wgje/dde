@@ -399,6 +399,7 @@ export class FlowOverviewPointerController {
 
   private handlePointerDown(container: HTMLDivElement, state: OverviewPointerState, ev: PointerEvent): void {
     if (this.host.isDestroyed()) return;
+    if (ev.button !== 0 || (ev.isPrimary === false && ev.pointerType !== '')) return;
     if (this.tryBeginPointerBoxDrag(container, state, ev)) return;
     state.isDraggingBox = false;
     state.suppressNextOverviewClick = false;
@@ -478,6 +479,7 @@ export class FlowOverviewPointerController {
 
   private handleMouseDown(container: HTMLDivElement, state: OverviewPointerState, ev: MouseEvent): void {
     if (this.host.isDestroyed()) return;
+    if (ev.button !== 0) return;
     if (this.tryBeginMouseBoxDrag(container, state, ev)) return;
   }
 

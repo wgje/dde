@@ -36,6 +36,11 @@ type FlowMinimapInternals = {
   viewportHandler: DiagramListener | null;
   documentHandler: DiagramListener | null;
   modelHandler: ModelListener | null;
+  dragging: boolean;
+  dragRafId: unknown | null;
+  windowPointerMoveHandler: ((event: PointerEvent) => void) | null;
+  windowPointerUpHandler: ((event: PointerEvent) => void) | null;
+  windowPointerCancelHandler: ((event: PointerEvent) => void) | null;
 };
 
 type DiagramListener = (event: go.DiagramEvent) => void;
@@ -93,12 +98,25 @@ class FakeMinimapDiagram {
   }
 }
 
-function createPointerEvent(type: string, init: { pointerId: number; clientX: number; clientY: number }): PointerEvent {
+function createPointerEvent(
+  type: string,
+  init: {
+    pointerId: number;
+    clientX: number;
+    clientY: number;
+    button?: number;
+    isPrimary?: boolean;
+    pointerType?: string;
+  },
+): PointerEvent {
   const event = new Event(type, { bubbles: true, cancelable: true }) as PointerEvent;
   Object.defineProperties(event, {
     pointerId: { value: init.pointerId },
     clientX: { value: init.clientX },
     clientY: { value: init.clientY },
+    button: { value: init.button ?? 0 },
+    isPrimary: { value: init.isPrimary ?? true },
+    pointerType: { value: init.pointerType ?? 'mouse' },
   });
   return event;
 }
@@ -372,6 +390,138 @@ describe('FlowMinimapComponent frame scheduling', () => {
     }
   });
 
+  it('辅助鼠标键不得启动小地图拖动或夺取指针捕获', () => {
+    const diagram = new FakeMinimapDiagram();
+    const { component } = createFlowMinimapHarness(diagram as unknown as go.Diagram);
+    const internals = component as unknown as FlowMinimapInternals;
+    internals.attachTo(diagram as unknown as go.Diagram);
+    const setPointerCapture = vi.fn();
+    internals.svgEl = {
+      setPointerCapture,
+      getBoundingClientRect: () => ({
+        left: 0,
+        top: 0,
+        width: 100,
+        height: 100,
+        right: 100,
+        bottom: 100,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      }),
+    } as unknown as SVGSVGElement;
+    const event = createPointerEvent('pointerdown', {
+      pointerId: 7,
+      clientX: 10,
+      clientY: 10,
+      button: 2,
+    });
+
+    component.onPointerDown(event);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(internals.dragging).toBe(false);
+    expect(setPointerCapture).not.toHaveBeenCalled();
+    expect(internals.windowPointerMoveHandler).toBeNull();
+
+    internals.ngOnDestroy();
+    TestBed.resetTestingModule();
+  });
+
+  it('非主指针不得启动小地图拖动或夺取指针捕获', () => {
+    const diagram = new FakeMinimapDiagram();
+    const { component } = createFlowMinimapHarness(diagram as unknown as go.Diagram);
+    const internals = component as unknown as FlowMinimapInternals;
+    internals.attachTo(diagram as unknown as go.Diagram);
+    const setPointerCapture = vi.fn();
+    internals.svgEl = {
+      setPointerCapture,
+      getBoundingClientRect: () => ({
+        left: 0,
+        top: 0,
+        width: 100,
+        height: 100,
+        right: 100,
+        bottom: 100,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      }),
+    } as unknown as SVGSVGElement;
+    const event = createPointerEvent('pointerdown', {
+      pointerId: 12,
+      clientX: 10,
+      clientY: 10,
+      isPrimary: false,
+      pointerType: 'touch',
+    });
+
+    component.onPointerDown(event);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(internals.dragging).toBe(false);
+    expect(setPointerCapture).not.toHaveBeenCalled();
+    expect(internals.windowPointerMoveHandler).toBeNull();
+
+    internals.ngOnDestroy();
+    TestBed.resetTestingModule();
+  });
+
+  it('capture fallback 拖出 stage 后 window move 不重入 pointerInside，window up 完全收口', () => {
+    vi.useFakeTimers();
+    const diagram = new FakeMinimapDiagram();
+    diagram.viewportBounds = new go.Rect(0, 0, 100, 100);
+    const { component } = createFlowMinimapHarness(diagram as unknown as go.Diagram);
+    const internals = component as unknown as FlowMinimapInternals;
+    internals.attachTo(diagram as unknown as go.Diagram);
+    internals.svgEl = {
+      getBoundingClientRect: () => ({
+        left: 0,
+        top: 0,
+        width: 100,
+        height: 100,
+        right: 100,
+        bottom: 100,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      }),
+      setPointerCapture: () => {
+        throw new Error('pointer capture unavailable');
+      },
+      releasePointerCapture: vi.fn(),
+    } as unknown as SVGSVGElement;
+
+    const raf = installQueuedAnimationFrame();
+    try {
+      component.onAttentionPointerEnter();
+      component.onPointerDown(createPointerEvent('pointerdown', { pointerId: 17, clientX: 10, clientY: 10 }));
+      component.onAttentionPointerLeave();
+      window.dispatchEvent(createPointerEvent('pointermove', { pointerId: 17, clientX: 140, clientY: 130 }));
+      expect(component.attentionActive()).toBe(false);
+      vi.advanceTimersByTime(240);
+      expect(component.attentionActive()).toBe(false);
+
+      window.dispatchEvent(createPointerEvent('pointerup', { pointerId: 17, clientX: 140, clientY: 130 }));
+      raf.flushNext();
+      raf.flushNext();
+
+      expect(component.attentionActive()).toBe(false);
+      expect(component.attentionLegendVisible()).toBe(false);
+      expect(component.attentionLens()).toBeNull();
+      expect(internals.dragging).toBe(false);
+      expect(internals.dragRafId).toBeNull();
+      expect(internals.windowPointerMoveHandler).toBeNull();
+      expect(internals.windowPointerUpHandler).toBeNull();
+      expect(internals.windowPointerCancelHandler).toBeNull();
+    } finally {
+      vi.useRealTimers();
+      raf.restore();
+      internals.ngOnDestroy();
+      TestBed.resetTestingModule();
+    }
+  });
+
   it('pointercancel 应取消待处理拖动帧而不是提交最终平移', () => {
     const diagram = new FakeMinimapDiagram();
     diagram.viewportBounds = new go.Rect(0, 0, 100, 100);
@@ -480,17 +630,16 @@ describe('unionWorldRect', () => {
   });
 });
 
-describe('computeViewBox（对标 React Flow MiniMap）', () => {
-  it('高主导：viewScale = 高比，宽方向 letterbox 居中', () => {
+describe('computeViewBox（Constellation 星图留白）', () => {
+  it('高主导时保留短边 12.5% 的瓷白留白并让 letterbox 居中', () => {
     // 高瘦内容：宽比 0.5、高比 2 → viewScale=2
     const bounding: MinimapWorldRect = { x: 0, y: 0, w: 100, h: 300 };
     const vb = computeViewBox(bounding, 200, 150);
-    // viewScale=2, offset=10, viewW=400, viewH=300
-    // vbX = 0 - (400-100)/2 - 10 = -160 ; vbY = 0 - (300-300)/2 - 10 = -10
-    expect(vb.x).toBeCloseTo(-160, 5);
-    expect(vb.y).toBeCloseTo(-10, 5);
-    expect(vb.w).toBeCloseTo(420, 5); // 400 + 20
-    expect(vb.h).toBeCloseTo(320, 5); // 300 + 20
+    // 短边 150px × 12.5% = 18.75px；世界坐标 offset = 18.75 × 2 = 37.5
+    expect(vb.x).toBeCloseTo(-187.5, 5);
+    expect(vb.y).toBeCloseTo(-37.5, 5);
+    expect(vb.w).toBeCloseTo(475, 5);
+    expect(vb.h).toBeCloseTo(375, 5);
   });
 
   it('内容完整可见且不变形（取 max 比例而非 min）', () => {
@@ -503,15 +652,10 @@ describe('computeViewBox（对标 React Flow MiniMap）', () => {
     expect(vb.y + vb.h).toBeGreaterThanOrEqual(bounding.y + bounding.h);
   });
 
-  it('逐位匹配真实 React Flow 样本（Supabase Schema Visualizer）', () => {
-    // 样本：elW/elH=200/150；boundingRect ≈ {0,0,854.786844,5764.5}
-    // 样本 viewBox="-3607.756577886388 -192.15 8070.3 6148.8"
-    const bounding: MinimapWorldRect = { x: 0, y: 0, w: 854.786844, h: 5764.5 };
-    const vb = computeViewBox(bounding, 200, 150);
-    expect(vb.x).toBeCloseTo(-3607.7566, 2);
-    expect(vb.y).toBeCloseTo(-192.15, 2);
-    expect(vb.w).toBeCloseTo(8070.3, 1);
-    expect(vb.h).toBeCloseTo(6148.8, 1);
+  it('180×140 桌面星图让高度主导的视口占据约 80% 画面', () => {
+    const bounding: MinimapWorldRect = { x: 0, y: 0, w: 654, h: 943 };
+    const vb = computeViewBox(bounding, 180, 140);
+    expect((bounding.h / vb.h) * 140).toBeCloseTo(112, 5);
   });
 
   it('elW/elH 为 0 时不抛错（兜底为 1）', () => {

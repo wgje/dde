@@ -1,4 +1,4 @@
-import { Component, inject, signal, computed, ElementRef, viewChild, AfterViewInit, OnDestroy, NgZone, HostListener, output, ChangeDetectionStrategy, Injector, EffectRef } from '@angular/core';
+import { Component, inject, signal, computed, effect, untracked, ElementRef, viewChild, AfterViewInit, OnDestroy, NgZone, HostListener, output, ChangeDetectionStrategy, Injector, EffectRef } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { UiStateService } from '../../../../services/ui-state.service';
@@ -44,13 +44,13 @@ import { FlowViewDiagramLifecycleController } from './flow-view-diagram-lifecycl
 import { FlowViewLinkActionsController } from './flow-view-link-actions.controller';
 import { FlowViewMobileInteractionController } from './flow-view-mobile-interaction.controller';
 import { FlowViewNavigationController } from './flow-view-navigation.controller';
-import { FlowViewTaskDetailPersistenceController } from './flow-view-task-detail-persistence.controller';
+import { FlowTaskDetailOwnerTracker, FlowViewTaskDetailPersistenceController, type FlowTaskDetailOwner } from './flow-view-task-detail-persistence.controller';
 import { MobileDrawerContainerComponent } from './mobile-drawer-container.component';
 import { MobileTodoDrawerComponent } from './mobile-todo-drawer.component';
 import { MobileBlackBoxDrawerComponent } from './mobile-black-box-drawer.component';
 import { FlowRightPanelComponent } from './flow-right-panel.component';
 import { FlowBatchToolbarComponent } from './flow-batch-toolbar.component';
-import { FlowMinimapComponent } from './flow-minimap.component';
+import { FlowOverviewPanelComponent } from './flow-overview-panel.component';
 
 import * as go from 'gojs';
 
@@ -76,7 +76,7 @@ import * as go from 'gojs';
     MobileBlackBoxDrawerComponent,
     FlowRightPanelComponent,
     FlowBatchToolbarComponent,
-    FlowMinimapComponent
+    FlowOverviewPanelComponent
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   styleUrls: ['./flow-view.component.scss'],
@@ -84,7 +84,8 @@ import * as go from 'gojs';
 })
 export class FlowViewComponent implements AfterViewInit, OnDestroy {
   readonly diagramDiv = viewChild<ElementRef>('diagramDiv');
-  readonly overviewDiv = viewChild<ElementRef>('overviewDiv');
+  readonly legacyOverviewHost = signal<ElementRef | undefined>(undefined);
+  readonly connectionEditor = viewChild(FlowConnectionEditorComponent);
   readonly goBackToText = output<void>();
   
   // ========== P2-1 迁移：直接注入子服务 ==========
@@ -97,6 +98,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   
   // 命令服务（解耦与 ProjectShellComponent 的通信）
   private readonly flowCommand = inject(FlowCommandService);
+  readonly isFlowViewReady = this.flowCommand.isViewReady;
   
   // 核心服务
   readonly diagram = inject(FlowDiagramService);
@@ -108,7 +110,6 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   readonly touch = inject(FlowTouchService);
   readonly link = inject(FlowLinkService);
   readonly taskOps = inject(FlowTaskOperationsService);
-  readonly taskDetailPersistence = new FlowViewTaskDetailPersistenceController(this.taskOps);
   private readonly swipeGesture = inject(FlowSwipeGestureService);
   readonly cascadeAssign = inject(FlowCascadeAssignService);
   private readonly keyboard = inject(FlowKeyboardService);
@@ -174,23 +175,14 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   /** 详情面板布局版本：移动端页面/层切换后递增，驱动详情高度重测 */
   readonly detailLayoutTick = signal(0);
   
-  readonly overviewSize = computed(() =>
-    this.uiState.isMobile() ? { width: 100, height: 80 } : { width: 180, height: 140 }
-  );
-
-  readonly overviewBottomPosition = computed(() =>
-    this.uiState.isMobile() ? '8px' : '16px'
-  );
-
   /** 图表初始化重试次数 - 委托给 diagramRetry 服务管理 */
   
   /** 选中的任务对象 */
   readonly selectedTask = computed(() => {
     const id = this.selectedTaskId();
     if (!id) return null;
-    return this.projectState.getTask(id) || null;
+    return this.projectState.tasks().find(task => task.id === id) ?? null;
   });
-
   /** 移动端待分配拖拽会话是否仍处于活动状态。 */
   readonly hasPendingUnassignedTouchDrag = computed(() =>
     this.unassignedTouchDrop.hasPending
@@ -206,6 +198,15 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   
   // ========== 私有状态 ==========
   private isDestroyed = false;
+  private deleteConfirmOwner: FlowTaskDetailOwner | null = null;
+  private readonly taskDetailOwner = new FlowTaskDetailOwnerTracker({
+    activeProjectId: () => this.projectState.activeProjectId(),
+    activeTaskId: () => this.selectedTask()?.id ?? null,
+    isTaskCurrent: (taskId, task) => this.projectState.tasks().some(current =>
+      current.id === taskId && (!task || current === task)),
+    retire: projectChanged => this.retireTaskDetailUi(projectChanged),
+  });
+  readonly taskDetailPersistence = new FlowViewTaskDetailPersistenceController(this.taskOps, this.taskDetailOwner);
 
   /** 【2026-02-24】所有通过组件 injector 创建的 EffectRef，ngOnDestroy 时主动销毁 */
   private readonly managedEffectRefs: EffectRef[] = [];
@@ -243,6 +244,9 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     link: this.link,
     logger: this.logger,
     refreshDiagram: () => this.refreshDiagram(),
+    getConnectionEditorSessionIdentity: () => this.connectionEditor()?.sessionIdentity() ?? null,
+    closeConnectionEditor: () => this.link.closeConnectionEditor(),
+    restoreConnectionEditorAfterSaveFailure: () => this.connectionEditor()?.resumeAfterSaveFailure(),
   });
 
   private readonly diagramLifecycle = new FlowViewDiagramLifecycleController({
@@ -256,7 +260,7 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     isPaletteOpen: this.isPaletteOpen,
     isMobile: () => this.uiState.isMobile(),
     logger: this.logger,
-    overviewDiv: () => this.overviewDiv(),
+    overviewDiv: () => this.legacyOverviewHost(),
     diagramDiv: () => this.diagramDiv(),
     projectTasks: () => this.projectState.tasks(),
     scheduleTimer: this.scheduleTimer.bind(this),
@@ -285,11 +289,17 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   }
   
   constructor() {
+    const setSelectedTaskId = this.selectedTaskId.set.bind(this.selectedTaskId);
+    this.selectedTaskId.set = taskId => { setSelectedTaskId(taskId); this.taskDetailOwner.sync(); };
+    this.managedEffectRefs.push(effect(() => {
+      this.projectState.activeProjectId();
+      this.selectedTask();
+      untracked(() => this.taskDetailOwner.sync());
+    }));
     this.setupDiagramEffects();
     this.setupMobileDrawerEffects();
     this.setupMobileViewSwitchEffect();
   }
-
   private setupDiagramEffects(): void {
     // 【2026-02-24 修复】isDestroyed 使用 getter 函数，避免 rAF 回调捕获过期布尔值
     const scheduleRaf = (tasks: Task[], forceUpdate: boolean) =>
@@ -381,11 +391,9 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
     this.diagramLifecycle.toggleOverviewCollapse();
   }
 
-  onOverviewTogglePointerDown(e: PointerEvent): void {
-    // 重要：GoJS 会在 canvas 上处理指针事件；这里提前截断，避免事件被 Overview 抢走导致按钮无响应。
-    e.preventDefault();
-    e.stopPropagation();
-    this.toggleOverviewCollapse();
+  onLegacyOverviewHostChange(host: ElementRef | undefined): void {
+    this.legacyOverviewHost.set(host);
+    this.diagramLifecycle.handleLegacyOverviewHostChange(host);
   }
 
   retryInitDiagram(): void {
@@ -552,8 +560,12 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   }
   
   /** 保存联系块的标题和描述 */
-  async saveConnectionDescription(data: ConnectionEditorSavePayload): Promise<void> {
-    await this.linkActions.saveConnectionDescription(data);
+  async saveConnectionDescription(data: ConnectionEditorSavePayload): Promise<boolean> {
+    return await this.linkActions.saveConnectionDescription(data);
+  }
+
+  async requestConnectionEditorClose(): Promise<boolean> {
+    return await this.linkActions.requestConnectionEditorClose();
   }
   
   async deleteConnection(): Promise<void> {
@@ -582,60 +594,68 @@ export class FlowViewComponent implements AfterViewInit, OnDestroy {
   }
   
   // ========== 任务操作 ==========
-  
+  private retireTaskDetailUi(projectChanged: boolean): void {
+    if (projectChanged) this.selectedTaskId.set(null);
+    this.deleteConfirmTask.set(null);
+    this.deleteKeepChildren.set(false);
+    this.deleteConfirmOwner = null;
+  }
+  private captureTaskOwner(task: Task): FlowTaskDetailOwner | null {
+    const owner = this.taskDetailOwner.captureOwner();
+    return this.taskDetailOwner.isTaskCurrent(task.id, task) ? owner : null;
+  }
   createUnassigned(): void {
     void this.taskOps.createUnassignedTask('新任务');
   }
-  
-  async addSiblingTask(_eventTask: Task): Promise<void> {
-    // 使用当前 selectedTask 信号值，避免模板变量在快速切换时可能的过期引用
-    const task = this.selectedTask() ?? _eventTask;
+  async addSiblingTask(task: Task): Promise<void> {
+    const owner = this.captureTaskOwner(task);
+    if (!owner) return;
     const newTaskId = await this.taskOps.addSiblingTask(task);
-    if (newTaskId) {
-      // 设置 selectedTaskId 会触发 effect 自动选中节点（包含重试逻辑）
+    if (newTaskId && this.taskDetailOwner.isOwnerCurrent(owner)) {
       this.selectedTaskId.set(newTaskId);
       this.taskOps.focusTitleInput(this.elementRef);
     }
   }
-  
-  async addChildTask(_eventTask: Task): Promise<void> {
-    // 使用当前 selectedTask 信号值，避免模板变量在快速切换时可能的过期引用
-    const task = this.selectedTask() ?? _eventTask;
+  async addChildTask(task: Task): Promise<void> {
+    const owner = this.captureTaskOwner(task);
+    if (!owner) return;
     const newTaskId = await this.taskOps.addChildTask(task);
-    if (newTaskId) {
-      // 设置 selectedTaskId 会触发 effect 自动选中节点（包含重试逻辑）
+    if (newTaskId && this.taskDetailOwner.isOwnerCurrent(owner)) {
       this.selectedTaskId.set(newTaskId);
       this.taskOps.focusTitleInput(this.elementRef);
     }
   }
-  
   async archiveTask(task: Task): Promise<void> {
+    const owner = this.captureTaskOwner(task);
+    if (!owner) return;
     const newStatus = await this.taskOps.archiveTask(task);
-    if (newStatus === 'archived') {
+    if (newStatus === 'archived' && this.taskDetailOwner.isOwnerCurrent(owner)) {
       this.selectedTaskId.set(null);
     }
   }
-  
+  parkTaskAction(task: Task): void {
+    const currentTask = this.selectedTask();
+    if (currentTask?.id === task.id && this.captureTaskOwner(currentTask)) this.selectedTaskId.set(null);
+  }
   deleteTask(task: Task): void {
+    const owner = this.captureTaskOwner(task);
+    if (!owner) return;
+    this.deleteConfirmOwner = owner;
     this.deleteConfirmTask.set(task);
   }
-
   async confirmDelete(keepChildren: boolean): Promise<void> {
     const task = this.deleteConfirmTask();
-    if (task) {
-      const deleted = await this.taskOps.deleteTask(task.id, keepChildren);
-      if (!deleted) {
-        return;
-      }
-
-      this.selectedTaskId.set(null);
-      this.deleteConfirmTask.set(null);
-      this.deleteKeepChildren.set(false);
-      
-      // 强制刷新图表
-      if (this.diagram.isInitialized) {
-        this.diagram.updateDiagram(this.projectState.tasks(), true);
-      }
+    const owner = this.deleteConfirmOwner;
+    if (!task || !owner || !this.taskDetailOwner.isOwnerCurrent(owner)
+      || !this.taskDetailOwner.isTaskCurrent(task.id)) return;
+    const deleted = await this.taskOps.deleteTask(task.id, keepChildren);
+    if (!deleted || !this.taskDetailOwner.isOwnerCurrent(owner)) return;
+    this.selectedTaskId.set(null);
+    this.deleteConfirmTask.set(null);
+    this.deleteKeepChildren.set(false);
+    this.deleteConfirmOwner = null;
+    if (this.diagram.isInitialized) {
+      this.diagram.updateDiagram(this.projectState.tasks(), true);
     }
   }
   

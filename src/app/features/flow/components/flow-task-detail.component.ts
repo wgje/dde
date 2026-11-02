@@ -16,8 +16,10 @@ import { KnowledgeAnchorComponent } from '../../../shared/components/knowledge-a
 import type { TaskSidecarBadge } from '../../../../utils/task-sidecar';
 import { parseOptionalMinutes } from '../../parking/utils/dock-format';
 import { FlowTaskDetailAttentionDraftController } from './flow-task-detail-attention-draft.helpers';
+import { FlowTaskDetailPlannerSaveController } from './flow-task-detail-planner-save.controller';
 import { FlowTaskDetailSidecarPreviewController } from './flow-task-detail-sidecar-preview.controller';
 import { buildFlowTaskDetailSidecarSummary } from './flow-task-detail-summary.helpers';
+import { FlowTaskDetailOwnerTracker } from './flow-view-task-detail-persistence.controller';
 import {
   computeTaskDetailAutoDrawerHeightVh,
   computeTaskDetailDragPosition,
@@ -71,7 +73,6 @@ export class FlowTaskDetailComponent implements OnDestroy {
   private static readonly MOBILE_DRAWER_MAX_VH = 70;
   private static readonly MOBILE_DRAWER_HEIGHT_EPSILON_VH = 0.3;
   readonly showReminderMenu = signal(false);
-  readonly plannerSaveState = signal<'idle' | 'saving' | 'failed'>('idle');
   readonly reminderPresets = [
     { label: '5m', minutes: 5 },
     { label: '30m', minutes: 30 },
@@ -141,23 +142,42 @@ export class FlowTaskDetailComponent implements OnDestroy {
   private ignorePreviewClicksUntil = 0;
   private suppressedDocumentClickStamp: number | null = null;
   private readonly sidecarBadgePreview = new FlowTaskDetailSidecarPreviewController();
+  private readonly projectOwner = new FlowTaskDetailOwnerTracker({
+    activeProjectId: () => this.projectState.activeProjectId(),
+    activeTaskId: () => this.task()?.id ?? null,
+    isTaskCurrent: (taskId, task) => this.projectState.tasks().some(current =>
+      current.id === taskId && (!task || current === task)),
+    retire: () => this.retireProjectTaskUi(),
+  });
+  private readonly plannerSave = new FlowTaskDetailPlannerSaveController({
+    isScopeActive: taskId =>
+      !this.isComponentDestroyed
+      && this.uiState.isFlowDetailOpen()
+      && this.task()?.id === taskId
+      && this.projectOwner.isTaskCurrent(taskId, this.task() ?? undefined),
+    markForCheck: () => this.cdr.markForCheck(),
+  });
+  readonly plannerSaveState = this.plannerSave.state;
   
   constructor() {
-    // Split-Brain 核心逻辑：委托给 formService
-    this.formService.initSyncEffect(() => this.task());
-
     effect(() => {
+      this.projectState.activeProjectId();
+      untracked(() => this.projectOwner.sync());
       const currentTask = this.task();
       const taskId = currentTask?.id ?? null;
       if (this.attentionDraft.shouldSyncFromTask(taskId)) {
         this.attentionDraft.setFromMeta(currentTask?.attentionMeta, taskId);
       }
     });
+    // Split-Brain 核心逻辑：先退役旧 owner，再由 formService 同步当前任务。
+    this.formService.initSyncEffect(() => this.task());
 
     // 任务切换或详情面板重新打开后，短时间内忽略预览区点击，避免选择任务的同一击穿透到编辑态。
     effect(() => {
       const taskId = this.task()?.id ?? null;
       const isOpen = this.uiState.isFlowDetailOpen();
+      const plannerScopeTaskId = isOpen ? taskId : null;
+      this.plannerSave.setScope(plannerScopeTaskId);
 
       if (!isOpen) {
         this.ignorePreviewClicksUntil = 0;
@@ -165,7 +185,6 @@ export class FlowTaskDetailComponent implements OnDestroy {
       }
 
       if (taskId) {
-        this.plannerSaveState.set('idle');
         untracked(() => this.armPreviewEntryGuard());
       }
     });
@@ -281,13 +300,17 @@ export class FlowTaskDetailComponent implements OnDestroy {
   
   /** 输入框聚焦处理 */
   onInputFocus(field: 'title' | 'content') {
+    const task = this.task();
+    if (!task || !this.projectOwner.isTaskCurrent(task.id, task)) return;
     this.uiState.markEditing();
-    this.formService.onInputFocus(field, this.task());
+    this.formService.onInputFocus(field, task);
   }
 
   /** 输入框失焦处理 */
   onInputBlur(field: 'title' | 'content') {
-    const result = this.formService.onInputBlur(field, this.task());
+    const task = this.task();
+    if (!task || !this.projectOwner.isTaskCurrent(task.id, task)) return;
+    const result = this.formService.onInputBlur(field, task);
     if (result) {
       if (result.field === 'title') {
         this.titleChange.emit({ taskId: result.taskId, title: result.value });
@@ -299,27 +322,27 @@ export class FlowTaskDetailComponent implements OnDestroy {
   
   /** 本地标题变更 */
   onLocalTitleChange(value: string) {
-    const result = this.formService.onLocalTitleChange(value, this.task());
-    if (result) {
-      this.titleChange.emit(result);
-    }
+    const task = this.task();
+    if (!task || !this.projectOwner.isTaskCurrent(task.id, task)) return;
+    const result = this.formService.onLocalTitleChange(value, task);
+    if (result) this.titleChange.emit(result);
   }
 
   /** 本地内容变更 */
   onLocalContentChange(value: string) {
-    const result = this.formService.onLocalContentChange(value, this.task());
-    if (result) {
-      this.contentChange.emit(result);
-    }
+    const task = this.task();
+    if (!task || !this.projectOwner.isTaskCurrent(task.id, task)) return;
+    const result = this.formService.onLocalContentChange(value, task);
+    if (result) this.contentChange.emit(result);
   }
 
   onLocalAttentionDraftChange(value: string): void {
-    const currentTask = this.task();
-    this.emitAttentionDraftRows(this.attentionDraft.setRowsFromText(value, currentTask?.attentionMeta));
+    this.emitAttentionDraftRows(() =>
+      this.attentionDraft.setRowsFromText(value, this.task()?.attentionMeta));
   }
 
   onAttentionDraftRowChange(index: number, value: string): void {
-    this.emitAttentionDraftRows(this.attentionDraft.updateRow(index, value));
+    this.emitAttentionDraftRows(() => this.attentionDraft.updateRow(index, value));
   }
 
   addAttentionDraftRow(): void {
@@ -331,12 +354,13 @@ export class FlowTaskDetailComponent implements OnDestroy {
   }
 
   removeAttentionDraftRow(index: number): void {
-    this.emitAttentionDraftRows(this.attentionDraft.removeRow(index));
+    this.emitAttentionDraftRows(() => this.attentionDraft.removeRow(index));
   }
 
-  private emitAttentionDraftRows(rows: TaskAttentionDraftItem[]): void {
+  private emitAttentionDraftRows(update: () => TaskAttentionDraftItem[]): void {
     const currentTask = this.task();
-    if (!currentTask) return;
+    if (!currentTask || !this.projectOwner.isTaskCurrent(currentTask.id, currentTask)) return;
+    const rows = update();
     this.attentionDraft.markCommittedTask(currentTask.id);
     this.attentionChange.emit({
       taskId: currentTask.id,
@@ -356,61 +380,44 @@ export class FlowTaskDetailComponent implements OnDestroy {
   }
 
   async onExpectedMinutesChange(taskId: string, raw: string | number | null): Promise<boolean> {
-    return this.persistPlannerField(
-      () => this.taskOpsAdapter.updateTaskExpectedMinutes(taskId, parseOptionalMinutes(raw)),
-    );
+    return this.plannerSave.persist(taskId, () => this.projectOwner.runOperation(
+      taskId, this.task(), () => this.taskOpsAdapter.updateTaskExpectedMinutes(taskId, parseOptionalMinutes(raw)),
+    ));
   }
 
   async onWaitMinutesChange(taskId: string, raw: string | number | null): Promise<boolean> {
-    return this.persistPlannerField(
-      () => this.taskOpsAdapter.updateTaskWaitMinutes(taskId, parseOptionalMinutes(raw)),
-    );
+    return this.plannerSave.persist(taskId, () => this.projectOwner.runOperation(
+      taskId, this.task(), () => this.taskOpsAdapter.updateTaskWaitMinutes(taskId, parseOptionalMinutes(raw)),
+    ));
   }
 
   async onCognitiveLoadChange(taskId: string, raw: string | null): Promise<boolean> {
     const normalized = raw === 'high' || raw === 'low' ? raw : null;
-    return this.persistPlannerField(
-      () => this.taskOpsAdapter.updateTaskCognitiveLoad(taskId, normalized),
-    );
+    return this.plannerSave.persist(taskId, () => this.projectOwner.runOperation(
+      taskId, this.task(), () => this.taskOpsAdapter.updateTaskCognitiveLoad(taskId, normalized),
+    ));
   }
 
-  private async persistPlannerField(save: () => Promise<boolean>): Promise<boolean> {
-    this.plannerSaveState.set('saving');
-    const saved = await save();
-    this.plannerSaveState.set(saved ? 'idle' : 'failed');
-    this.cdr.markForCheck();
-    return saved;
-  }
-
-  showSidecarBadgePreview(event: Event, badge: TaskSidecarBadge): void {
-    this.sidecarBadgePreview.show(event, badge);
-  }
-
-  hideSidecarBadgePreview(): void {
-    this.sidecarBadgePreview.hide();
-  }
+  showSidecarBadgePreview(event: Event, badge: TaskSidecarBadge): void { this.sidecarBadgePreview.show(event, badge); }
+  hideSidecarBadgePreview(): void { this.sidecarBadgePreview.hide(); }
 
   async onParkTaskClick(task: Task, event?: Event): Promise<void> {
     event?.stopPropagation();
-    const parked = await this.flowTaskOps.parkTask(task);
-    if (!parked) return;
+    const operation = this.projectOwner.startOperation(task.id, task, () => this.flowTaskOps.parkTask(task));
+    if (!operation || !(await operation.result) || !operation.isCurrent()) return;
     this.parkTask.emit(task);
     this.cdr.markForCheck();
   }
 
-  toggleReminderMenu(): void {
-    this.showReminderMenu.update(value => !value);
-  }
+  toggleReminderMenu(): void { this.showReminderMenu.update(value => !value); }
 
-  closeReminderMenu(): void {
-    this.showReminderMenu.set(false);
-  }
-
+  closeReminderMenu(): void { this.showReminderMenu.set(false); }
   async onReminderTriggerClick(task: Task, event?: Event): Promise<void> {
     event?.stopPropagation();
+    if (!this.projectOwner.isTaskCurrent(task.id, task)) return;
     if (task.parkingMeta?.state !== 'parked') {
-      const parked = await this.flowTaskOps.parkTask(task);
-      if (!parked) return;
+      const operation = this.projectOwner.startOperation(task.id, task, () => this.flowTaskOps.parkTask(task));
+      if (!operation || !(await operation.result) || !operation.isCurrent()) return;
       this.parkTask.emit(task);
     }
     this.toggleReminderMenu();
@@ -419,20 +426,21 @@ export class FlowTaskDetailComponent implements OnDestroy {
   async setReminderPreset(taskId: string, minutes: number): Promise<void> {
     const currentTask = this.task();
     if (currentTask?.id === taskId && currentTask.parkingMeta?.state !== 'parked') {
-      const parked = await this.flowTaskOps.parkTask(currentTask);
-      if (!parked) return;
+      const operation = this.projectOwner.startOperation(taskId, currentTask, () => this.flowTaskOps.parkTask(currentTask));
+      if (!operation || !(await operation.result) || !operation.isCurrent()) return;
       this.parkTask.emit(currentTask);
     }
-    const reminderAt = new Date(Date.now() + minutes * 60_000).toISOString();
-    const saved = await this.reminderService.setReminder(taskId, reminderAt);
-    if (!saved) return;
+    const reminderTask = this.projectState.tasks().find(task => task.id === taskId) ?? null;
+    const operation = this.projectOwner.startOperation(taskId, reminderTask,
+      () => this.reminderService.setReminder(taskId, new Date(Date.now() + minutes * 60_000).toISOString()));
+    if (!operation || !(await operation.result) || !operation.isCurrent()) return;
     this.showReminderMenu.set(false);
     this.cdr.markForCheck();
   }
 
   async clearReminder(taskId: string): Promise<void> {
-    const saved = await this.reminderService.cancelReminder(taskId);
-    if (!saved) return;
+    const operation = this.projectOwner.startOperation(taskId, this.task(), () => this.reminderService.cancelReminder(taskId));
+    if (!operation || !(await operation.result) || !operation.isCurrent()) return;
     this.showReminderMenu.set(false);
     this.cdr.markForCheck();
   }
@@ -447,8 +455,10 @@ export class FlowTaskDetailComponent implements OnDestroy {
     this.toggleEditMode();
   }
 
-  /** 切换编辑模式 */
-  toggleEditMode(): void { this.formService.toggleEditMode(); }
+  toggleEditMode(): void {
+    const task = this.task();
+    if (task && this.projectOwner.isTaskCurrent(task.id, task)) this.formService.toggleEditMode();
+  }
 
   /**
    * Markdown 预览区域点击处理
@@ -458,15 +468,19 @@ export class FlowTaskDetailComponent implements OnDestroy {
     if (this.handlePreviewLinkClick(event)) {
       return;
     }
+    const task = this.task();
+    if (!task || !this.projectOwner.isTaskCurrent(task.id, task)) return;
 
     event.stopPropagation();
     const todoIndex = getTodoIndexFromClick(event);
     if (todoIndex !== null) {
-      const currentTask = this.task();
-      if (!currentTask) return;
-      const currentContent = this.formService.localContent() || currentTask.content || '';
+      const currentContent = this.formService.localContent() || task.content || '';
       const newContent = toggleMarkdownTodo(currentContent, todoIndex);
-      const saved = await this.taskOpsAdapter.updateTaskContent(currentTask.id, newContent);
+      const operation = this.projectOwner.startOperation(task.id, task,
+        () => this.taskOpsAdapter.updateTaskContent(task.id, newContent));
+      if (!operation) return;
+      const saved = await operation.result;
+      if (!operation.isCurrent()) return;
       if (!saved) {
         this.cdr.markForCheck();
         return;
@@ -748,17 +762,31 @@ export class FlowTaskDetailComponent implements OnDestroy {
     const text = inputEl.value.trim();
     if (!text) return false;
 
-    const saved = await this.flowTaskOps.addQuickTodo(taskId, text);
-    if (!saved) return false;
+    const operation = this.projectOwner.startOperation(taskId, this.task(),
+      () => this.flowTaskOps.addQuickTodo(taskId, text));
+    if (!operation || !(await operation.result) || !operation.isCurrent()) return false;
     inputEl.value = '';
     inputEl.focus();
     return true;
   }
-
+  private retireProjectTaskUi(): void {
+    this.showReminderMenu.set(false);
+    this.plannerSave.setScope(null);
+    this.formService.cleanup();
+    this.localTitle.set('');
+    this.localContent.set('');
+    this.isEditMode.set(false);
+    this.isTogglingMode.set(false);
+    this.attentionDraft.setFromMeta(undefined, null);
+    this.ignorePreviewClicksUntil = 0;
+    this.suppressedDocumentClickStamp = null;
+    this.hideSidecarBadgePreview();
+  }
 
   // ========== 生命周期管理 ==========
   ngOnDestroy(): void {
     this.isComponentDestroyed = true;
+    this.plannerSave.destroy();
     this.hideSidecarBadgePreview();
     this.cancelPendingAutoHeight();
     this.stopDrag();

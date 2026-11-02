@@ -13,15 +13,16 @@ import {
   Component,
   ChangeDetectionStrategy,
   ElementRef,
+  Input,
   NgZone,
   AfterViewInit,
   OnDestroy,
   inject,
-  input,
   signal,
   computed,
   effect,
 } from '@angular/core';
+
 import { FlowDiagramService } from '../services/flow-diagram.service';
 import { FlowDiagramConfigService } from '../services/flow-diagram-config.service';
 import { LoggerService } from '../../../../services/logger.service';
@@ -34,14 +35,21 @@ import {
   FALLBACK_WORLD,
   MINIMAP_KEYBOARD_PAN_PX,
   MINIMAP_KEYBOARD_ZOOM_FACTOR,
+  MINIMAP_FOCUSED_OUTLINE_SCALE,
+  MINIMAP_PARKED_OUTLINE_SCALE,
   MINIMAP_REBIND_INTERVAL_MS,
+  MINIMAP_SEARCH_CROSSHAIR_SCALE,
   MINIMAP_ZOOM_STEP,
   requestMinimapFrame,
   unionWorldRect,
   VIEWPORT_FILL,
   VIEWPORT_STROKE,
+  filterMinimapSemanticMarkers,
+  toggleMinimapLegendCategory,
   type MinimapFrameHandle,
+  type MinimapLegendCategory,
   type MinimapPip,
+  type MinimapSemanticMarker,
   type MinimapWorldRect,
 } from './flow-minimap-geometry';
 import {
@@ -50,6 +58,18 @@ import {
   type MinimapLinkShape,
   type MinimapNodeShape,
 } from './flow-minimap-snapshot.helpers';
+import {
+  FlowMinimapAttentionController,
+  projectMinimapAttentionPoint,
+  type MinimapAttentionPoint,
+} from './flow-minimap-attention.controller';
+import {
+  FLOW_MINIMAP_STYLES,
+  FLOW_MINIMAP_TEMPLATE,
+  FlowMinimapLegendComponent,
+} from './flow-minimap-legend.component';
+
+let nextMinimapAttentionId = 1;
 
 export {
   buildDecorationPips,
@@ -66,138 +86,72 @@ export {
 @Component({
   selector: 'app-flow-minimap',
   standalone: true,
+  imports: [FlowMinimapLegendComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
-  template: `
-    <svg
-      class="minimap-svg"
-      [attr.viewBox]="viewBoxStr()"
-      preserveAspectRatio="xMidYMid meet"
-      role="application"
-      tabindex="0"
-      aria-label="流程图小地图（拖动平移，滚轮缩放，方向键平移，+/- 缩放）"
-      (pointerdown)="onPointerDown($event)"
-      (pointermove)="onPointerMove($event)"
-      (pointerup)="onPointerUp($event)"
-      (pointercancel)="onPointerCancel($event)"
-      (wheel)="onWheel($event)"
-      (keydown)="onKeyDown($event)"
-    >
-      <title>流程图小地图</title>
-      @if (showLinks()) {
-        @for (link of linkShapes(); track link.key) {
-          <line
-            [attr.x1]="link.x1"
-            [attr.y1]="link.y1"
-            [attr.x2]="link.x2"
-            [attr.y2]="link.y2"
-            [attr.stroke]="link.color"
-            [attr.stroke-dasharray]="link.dashed ? '4 3' : null"
-            stroke-width="1.5"
-            vector-effect="non-scaling-stroke"
-          />
-        }
-      }
-
-      @for (node of nodeShapes(); track node.key) {
-        <rect
-          [attr.x]="node.x"
-          [attr.y]="node.y"
-          [attr.width]="node.w"
-          [attr.height]="node.h"
-          rx="2"
-          shape-rendering="crispEdges"
-          [attr.fill]="node.fill"
-          [attr.stroke]="node.stroke"
-          [attr.stroke-width]="node.strokeW"
-          vector-effect="non-scaling-stroke"
-        />
-      }
-
-      @if (showDecorationPips()) {
-        @for (pip of pipShapes(); track pip.key) {
-          <circle [attr.cx]="pip.cx" [attr.cy]="pip.cy" [attr.r]="pip.r" [attr.fill]="pip.color" />
-        }
-      }
-
-      <path
-        class="minimap-mask"
-        [attr.d]="maskPath()"
-        fill-rule="evenodd"
-        pointer-events="none"
-      />
-      <rect
-        [attr.x]="viewportRect().x"
-        [attr.y]="viewportRect().y"
-        [attr.width]="viewportRect().w"
-        [attr.height]="viewportRect().h"
-        [attr.fill]="viewportFill"
-        [attr.stroke]="viewportStroke"
-        stroke-width="1.5"
-        vector-effect="non-scaling-stroke"
-        pointer-events="none"
-      />
-    </svg>
-  `,
-  styles: [
-    `
-      :host {
-        display: block;
-        width: 100%;
-        height: 100%;
-      }
-      .minimap-svg {
-        display: block;
-        width: 100%;
-        height: 100%;
-        touch-action: none;
-        user-select: none;
-        cursor: grab;
-      }
-      .minimap-svg:active {
-        cursor: grabbing;
-      }
-      .minimap-svg:focus-visible {
-        outline: 2px solid #818cf8;
-        outline-offset: 2px;
-      }
-      .minimap-mask {
-        fill: rgba(0, 0, 0, 0.18);
-      }
-      :host-context([data-color-mode='dark']) .minimap-mask {
-        fill: rgba(0, 0, 0, 0.32);
-      }
-    `,
-  ],
+  template: FLOW_MINIMAP_TEMPLATE,
+  styles: [FLOW_MINIMAP_STYLES],
 })
 export class FlowMinimapComponent implements AfterViewInit, OnDestroy {
   /** SVG 显示尺寸（px），同时作为 viewBox 宽高比基准。桌面 180×140 / 移动 100×80。 */
-  readonly width = input<number>(180);
-  readonly height = input<number>(140);
-  /** 是否绘制连线（关联块），默认开。 */
-  readonly showLinks = input<boolean>(true);
-  /** 是否绘制装饰 pip（僚机/思源/入坞），默认开。 */
-  readonly showDecorationPips = input<boolean>(true);
+  private readonly widthInput = signal(180);
+  private readonly heightInput = signal(140);
+  private readonly showLinksInput = signal(true);
+  private readonly showDecorationPipsInput = signal(true);
 
+  @Input()
+  set width(value: number) { this.widthInput.set(value); }
+  get width(): number { return this.widthInput(); }
+  @Input()
+  set height(value: number) { this.heightInput.set(value); }
+  get height(): number { return this.heightInput(); }
+
+  @Input() mobile = false;
+  /** 是否绘制连线（关联块），默认开。 */
+  @Input()
+  set showLinks(value: boolean) { this.showLinksInput.set(value); }
+  get showLinks(): boolean { return this.showLinksInput(); }
+  /** 是否绘制装饰 pip（僚机/思源/入坞），默认开。 */
+  @Input()
+  set showDecorationPips(value: boolean) { this.showDecorationPipsInput.set(value); }
+  get showDecorationPips(): boolean { return this.showDecorationPipsInput(); }
   readonly viewportStroke = VIEWPORT_STROKE;
   readonly viewportFill = VIEWPORT_FILL;
-
+  readonly focusedOutlineScale = MINIMAP_FOCUSED_OUTLINE_SCALE;
   private readonly diagram = inject(FlowDiagramService);
   private readonly config = inject(FlowDiagramConfigService);
   private readonly zone = inject(NgZone);
   private readonly host = inject(ElementRef);
   private readonly logger = inject(LoggerService).category('FlowMinimap');
-
   // ===== 渲染快照 signals =====
   private readonly nodeShapesSig = signal<MinimapNodeShape[]>([]);
   private readonly linkShapesSig = signal<MinimapLinkShape[]>([]);
   private readonly pipShapesSig = signal<MinimapPip[]>([]);
+  private readonly semanticMarkerShapesSig = signal<MinimapSemanticMarker[]>([]);
   private readonly nodesBounds = signal<MinimapWorldRect | null>(null);
   private readonly viewport = signal<MinimapWorldRect | null>(null);
-
   readonly nodeShapes = this.nodeShapesSig.asReadonly();
   readonly linkShapes = this.linkShapesSig.asReadonly();
   readonly pipShapes = this.pipShapesSig.asReadonly();
-
+  readonly semanticMarkerShapes = this.semanticMarkerShapesSig.asReadonly();
+  readonly hiddenCategories = signal<ReadonlySet<MinimapLegendCategory>>(new Set());
+  readonly visibleSemanticMarkers = computed(() => (
+    filterMinimapSemanticMarkers(this.semanticMarkerShapes(), this.hiddenCategories())
+  ));
+  readonly attentionLens = signal<MinimapAttentionPoint | null>(null);
+  readonly attentionActive = signal(false);
+  readonly attentionLegendVisible = signal(false);
+  readonly mobileLegendOpen = signal(false);
+  readonly attentionGradientId = `flow-minimap-attention-gradient-${nextMinimapAttentionId}`;
+  readonly attentionMaskId = `flow-minimap-attention-mask-${nextMinimapAttentionId++}`;
+  readonly attentionLensGradientId = `${this.attentionGradientId}-lens`;
+  readonly attentionGradientFill = `url(#${this.attentionGradientId})`;
+  readonly attentionMaskFill = `url(#${this.attentionMaskId})`;
+  readonly attentionLensGradientFill = `url(#${this.attentionLensGradientId})`;
+  private readonly attention = new FlowMinimapAttentionController({
+    setLens: point => this.attentionLens.set(point),
+    setActive: active => this.attentionActive.set(active),
+    setLegendVisible: visible => this.attentionLegendVisible.set(visible),
+  });
   /**
    * viewBox 世界矩形 = computeViewBox(nodes ∪ viewport)，**实时**（对齐 React Flow）。
    * 拖动预览框使 viewport 移出节点群 → union 扩大 → viewBox 放大 → 预览框自动缩小（自动放缩✓）。
@@ -206,16 +160,24 @@ export class FlowMinimapComponent implements AfterViewInit, OnDestroy {
    */
   readonly viewBox = computed<MinimapWorldRect>(() => {
     const bounding = unionWorldRect(this.nodesBounds(), this.viewport()) ?? FALLBACK_WORLD;
-    return computeViewBox(bounding, this.width(), this.height());
+    return computeViewBox(bounding, this.widthInput(), this.heightInput());
   });
-
   readonly viewBoxStr = computed<string>(() => {
     const v = this.viewBox();
     return `${v.x} ${v.y} ${v.w} ${v.h}`;
   });
-
   /** 预览框世界矩形 = 真实主图视口（union 保证 viewport ⊆ viewBox，无需 clamp）。 */
   readonly viewportRect = computed<MinimapWorldRect>(() => this.viewport() ?? FALLBACK_WORLD);
+
+  readonly attentionGradient = computed(() => {
+    const view = this.viewBox();
+    const lens = this.attentionLens() ?? { x: 0.5, y: 0.5 };
+    return {
+      cx: view.x + view.w * lens.x,
+      cy: view.y + view.h * lens.y,
+      r: Math.max(view.w, view.h) * 0.62,
+    };
+  });
 
   /** evenodd 遮罩：外框（viewBox 外扩一圈）减去视口孔 → 框外暗化。 */
   readonly maskPath = computed<string>(() => {
@@ -266,8 +228,8 @@ export class FlowMinimapComponent implements AfterViewInit, OnDestroy {
     // currentStyles() 依赖 themeService.theme()，故主题切换会触发本 effect。
     effect(() => {
       this.config.currentStyles();
-      this.showLinks();
-      this.showDecorationPips();
+      this.showLinksInput();
+      this.showDecorationPipsInput();
       if (!this.destroyed) this.scheduleRebuild();
     });
   }
@@ -279,6 +241,9 @@ export class FlowMinimapComponent implements AfterViewInit, OnDestroy {
 
   ngOnDestroy(): void {
     this.destroyed = true;
+    this.attention.destroy();
+    this.hiddenCategories.set(new Set());
+    this.mobileLegendOpen.set(false);
     if (this.dragging && this.dragPointerId !== null) {
       this.cancelDrag(this.dragPointerId);
     } else {
@@ -411,18 +376,124 @@ export class FlowMinimapComponent implements AfterViewInit, OnDestroy {
   private rebuildSnapshot(): void {
     const diagram = this.diagram.diagramInstance;
     if (!diagram) return;
-    const { shapes, pips, bounds } = collectMinimapNodeSnapshot(diagram, {
-      showDecorationPips: this.showDecorationPips(),
+    const { shapes, pips, markers, bounds } = collectMinimapNodeSnapshot(diagram, {
+      showDecorationPips: this.showDecorationPips,
     });
-    const links = this.showLinks()
+    const links = this.showLinks
       ? collectMinimapLinks(diagram, this.config.currentStyles().link)
       : [];
     this.zone.run(() => {
       this.nodeShapesSig.set(shapes);
       this.linkShapesSig.set(links);
       this.pipShapesSig.set(pips);
+      this.semanticMarkerShapesSig.set(markers);
       this.nodesBounds.set(bounds);
     });
+  }
+
+  // ===================== Constellation 注意力与图例 =====================
+
+  onAttentionPointerEnter(): void {
+    this.attention.pointerEntered();
+  }
+
+  onAttentionPointerLeave(): void {
+    this.attention.pointerLeft();
+  }
+
+  onAttentionFocus(): void {
+    this.attention.focused();
+  }
+
+  onAttentionFocusOut(event: FocusEvent): void {
+    const stage = event.currentTarget;
+    const next = event.relatedTarget;
+    if (stage instanceof Node && next instanceof Node && stage.contains(next)) return;
+    this.attention.blurred();
+  }
+
+  toggleLegendCategory(category: MinimapLegendCategory): void {
+    const next = toggleMinimapLegendCategory(this.hiddenCategories(), category);
+    this.hiddenCategories.set(next);
+    this.attention.setLegendPinned(next.size > 0 || this.mobileLegendOpen());
+  }
+
+  toggleMobileLegend(): void {
+    const next = !this.mobileLegendOpen();
+    this.mobileLegendOpen.set(next);
+    this.attention.setLegendPinned(next || this.hiddenCategories().size > 0);
+  }
+
+  starPath(marker: MinimapSemanticMarker): string {
+    const { cx, cy, size } = marker;
+    const inner = size * 0.34;
+    return [
+      `M${cx},${cy - size}`,
+      `L${cx + inner},${cy - inner}`,
+      `L${cx + size},${cy}`,
+      `L${cx + inner},${cy + inner}`,
+      `L${cx},${cy + size}`,
+      `L${cx - inner},${cy + inner}`,
+      `L${cx - size},${cy}`,
+      `L${cx - inner},${cy - inner}`,
+      'Z',
+    ].join(' ');
+  }
+
+  diamondPath(marker: MinimapSemanticMarker): string {
+    const { cx, cy, size } = marker;
+    return `M${cx},${cy - size} L${cx + size},${cy} L${cx},${cy + size} L${cx - size},${cy} Z`;
+  }
+
+  openSquarePath(marker: MinimapSemanticMarker): string {
+    const { cx, cy, size } = marker;
+    const right = cx + size;
+    return [
+      `M${right},${cy - size}`,
+      `H${cx - size}`,
+      `V${cy + size}`,
+      `H${right}`,
+      `V${cy + size * 0.25}`,
+    ].join(' ');
+  }
+
+  crosshairPath(marker: MinimapSemanticMarker): string {
+    const { cx, cy, size } = marker;
+    const outer = size * MINIMAP_SEARCH_CROSSHAIR_SCALE;
+    return [
+      `M${cx},${cy - outer} V${cy - size}`,
+      `M${cx},${cy + size} V${cy + outer}`,
+      `M${cx - outer},${cy} H${cx - size}`,
+      `M${cx + size},${cy} H${cx + outer}`,
+    ].join(' ');
+  }
+
+  outlineRect(
+    marker: MinimapSemanticMarker,
+    scale = MINIMAP_PARKED_OUTLINE_SCALE,
+  ): MinimapWorldRect {
+    const pad = marker.size * scale;
+    return {
+      x: marker.x - pad,
+      y: marker.y - pad,
+      w: marker.w + pad * 2,
+      h: marker.h + pad * 2,
+    };
+  }
+
+  private updateAttentionFromClientPoint(
+    event: Pick<PointerEvent | WheelEvent, 'clientX' | 'clientY'>,
+    marksPointerInside: boolean,
+  ): void {
+    if (!this.svgEl) return;
+    const point = projectMinimapAttentionPoint(
+      event.clientX,
+      event.clientY,
+      this.svgEl.getBoundingClientRect(),
+    );
+    if (!point) return;
+    if (marksPointerInside) this.attention.pointerMoved(point);
+    else this.attention.interacted(point);
   }
 
   // ===================== 指针交互（对齐 React Flow MiniMap：相对拖动平移 + 滚轮缩放） =====================
@@ -461,6 +532,7 @@ export class FlowMinimapComponent implements AfterViewInit, OnDestroy {
     }
 
     if (handled) {
+      this.attention.interacted({ x: 0.5, y: 0.5 });
       ev.preventDefault();
     }
   }
@@ -513,8 +585,10 @@ export class FlowMinimapComponent implements AfterViewInit, OnDestroy {
    */
   onPointerDown(ev: PointerEvent): void {
     if (this.destroyed) return;
+    if (ev.button !== 0 || (ev.isPrimary === false && ev.pointerType !== '')) return;
     const diagram = this.diagram.diagramInstance;
     if (!diagram) return;
+    this.attention.interacted();
     ev.preventDefault();
     this.dragging = true;
     this.dragPointerId = ev.pointerId;
@@ -540,16 +614,24 @@ export class FlowMinimapComponent implements AfterViewInit, OnDestroy {
    * 造成主线程拥堵 → 卡手。rAF 合流把同一帧内多次 move 折叠为一次主图位移 + 一次重绘。
    */
   onPointerMove(ev: PointerEvent): void {
-    if (this.destroyed || !this.dragging) return;
-    if (this.dragPointerId !== null && ev.pointerId !== this.dragPointerId) return;
-    ev.preventDefault();
-    this.pendingClientX = ev.clientX;
-    this.pendingClientY = ev.clientY;
-    if (this.dragRafId !== null) return;
-    this.dragRafId = requestMinimapFrame(() => {
-      this.dragRafId = null;
-      this.flushDragDelta();
-    });
+    this.handlePointerMove(ev, true);
+  }
+
+  private handlePointerMove(ev: PointerEvent, marksPointerInside: boolean): void {
+    if (this.destroyed) return;
+    if (this.dragging && (this.dragPointerId === null || ev.pointerId === this.dragPointerId)) {
+      ev.preventDefault();
+      this.pendingClientX = ev.clientX;
+      this.pendingClientY = ev.clientY;
+      if (this.dragRafId === null) {
+        // 保持主图拖动回调先进入同帧队列，避免注意力镜头延后已有导航手感。
+        this.dragRafId = requestMinimapFrame(() => {
+          this.dragRafId = null;
+          this.flushDragDelta();
+        });
+      }
+    }
+    this.updateAttentionFromClientPoint(ev, marksPointerInside);
   }
 
   onPointerUp(ev: PointerEvent): void {
@@ -581,9 +663,17 @@ export class FlowMinimapComponent implements AfterViewInit, OnDestroy {
 
   private installWindowDragListeners(): void {
     if (this.windowPointerMoveHandler || this.windowPointerUpHandler || this.windowPointerCancelHandler) return;
-    this.windowPointerMoveHandler = (event: PointerEvent) => this.onPointerMove(event);
-    this.windowPointerUpHandler = (event: PointerEvent) => this.onPointerUp(event);
-    this.windowPointerCancelHandler = (event: PointerEvent) => this.onPointerCancel(event);
+    this.windowPointerMoveHandler = (event: PointerEvent) => this.handlePointerMove(event, false);
+    this.windowPointerUpHandler = (event: PointerEvent) => {
+      const shouldSettleAttention = this.isCurrentDragPointer(event);
+      this.onPointerUp(event);
+      if (shouldSettleAttention) this.attention.pointerLeft();
+    };
+    this.windowPointerCancelHandler = (event: PointerEvent) => {
+      const shouldSettleAttention = this.isCurrentDragPointer(event);
+      this.onPointerCancel(event);
+      if (shouldSettleAttention) this.attention.pointerLeft();
+    };
     window.addEventListener('pointermove', this.windowPointerMoveHandler, { passive: false });
     window.addEventListener('pointerup', this.windowPointerUpHandler, { passive: false });
     window.addEventListener('pointercancel', this.windowPointerCancelHandler, { passive: false });
@@ -602,6 +692,10 @@ export class FlowMinimapComponent implements AfterViewInit, OnDestroy {
       window.removeEventListener('pointercancel', this.windowPointerCancelHandler);
       this.windowPointerCancelHandler = null;
     }
+  }
+
+  private isCurrentDragPointer(event: PointerEvent): boolean {
+    return this.dragging && (this.dragPointerId === null || event.pointerId === this.dragPointerId);
   }
 
   private cancelDrag(pointerId: number): void {
@@ -650,6 +744,7 @@ export class FlowMinimapComponent implements AfterViewInit, OnDestroy {
   onWheel(ev: WheelEvent): void {
     const diagram = this.diagram.diagramInstance;
     if (!diagram) return;
+    this.updateAttentionFromClientPoint(ev, false);
     ev.preventDefault();
     const vbBefore = diagram.viewportBounds;
     if (!vbBefore.isReal()) return;

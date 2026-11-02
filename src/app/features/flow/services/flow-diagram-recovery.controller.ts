@@ -1,7 +1,9 @@
 import type { NgZone } from '@angular/core';
 import * as go from 'gojs';
 
+import type { ActiveProjectOwner } from '../../../../services/project-state.service';
 import type { ViewState } from './flow-zoom.service';
+import type { FlowDiagramViewportApplicationProof } from './flow-diagram-viewport-readiness.controller';
 import {
   applyFlowViewState,
   canPersistFlowViewState,
@@ -17,6 +19,12 @@ import {
   resolveFlowDiagramRecoveryVerificationAction,
 } from './flow-diagram-recovery.helpers';
 
+export interface FlowDiagramHardRecoveryToken {
+  readonly projectId: string;
+  readonly generation: number;
+  readonly owner: ActiveProjectOwner;
+}
+
 interface FlowDiagramRecoveryRuntime {
   getDiagram: () => go.Diagram | null;
   getDiagramDiv: () => HTMLDivElement | null;
@@ -25,11 +33,20 @@ interface FlowDiagramRecoveryRuntime {
   getSelectedNodeKeys: () => string[];
   getShouldRestoreOverview: () => boolean;
   getOverviewContainer: () => HTMLDivElement | null;
-  updateDiagram: (forceRefresh: boolean) => void;
+  updateDiagram: (forceRefresh: boolean) => boolean;
+  applyHardRecoveryViewport: (
+    viewState: ViewState | null,
+    complete: (proof: FlowDiagramViewportApplicationProof | null) => void,
+  ) => boolean;
+  completeHardRecovery: (proof: FlowDiagramViewportApplicationProof) => boolean;
+  abortHardRecovery: (token: FlowDiagramHardRecoveryToken) => void;
   restoreOverviewAfterRecovery: (container: HTMLDivElement) => void;
   attemptPendingOverviewRestore: () => void;
   teardownDiagramForRecovery: () => void;
-  initializeOutsideZone: (container: HTMLDivElement) => boolean;
+  initializeOutsideZone: (container: HTMLDivElement, token: FlowDiagramHardRecoveryToken) => boolean;
+  beginHardRecovery: () => FlowDiagramHardRecoveryToken | null;
+  isHardRecoveryCurrent: (token: FlowDiagramHardRecoveryToken) => boolean;
+  releaseHardRecovery: (token: FlowDiagramHardRecoveryToken) => boolean;
   cleanupFailedHardRecovery: () => void;
   restoreDropHandler: () => void;
   selectMultiple: (keys: string[]) => void;
@@ -51,6 +68,8 @@ export class FlowDiagramRecoveryController {
   private lastKnownDevicePixelRatio = 1;
   private hardRecoveryAttemptCount = 0;
   private hardRecoveryInProgress = false;
+  private hardRecoveryToken: FlowDiagramHardRecoveryToken | null = null;
+  private hardRecoveryViewState: ViewState | null = null;
   private recoveryFitFallbackUsed = false;
 
   constructor(
@@ -63,9 +82,16 @@ export class FlowDiagramRecoveryController {
     return this.hardRecoveryInProgress;
   }
 
-  resetForInitialize(container: HTMLDivElement): void {
-    this.hardRecoveryAttemptCount = 0;
-    this.hardRecoveryInProgress = false;
+  resetForInitialize(container: HTMLDivElement, token?: FlowDiagramHardRecoveryToken): void {
+    const preserveHardRecovery = token !== undefined
+      && token === this.hardRecoveryToken
+      && this.runtime.isHardRecoveryCurrent(token);
+    if (!preserveHardRecovery) {
+      this.hardRecoveryAttemptCount = 0;
+      this.hardRecoveryInProgress = false;
+      this.hardRecoveryToken = null;
+      this.hardRecoveryViewState = null;
+    }
     this.resizeRecoveryArmed = !isSafeFlowDiagramSize(container.clientWidth, container.clientHeight);
     this.lastRecoverableViewState = null;
     this.lastStableViewState = null;
@@ -81,6 +107,8 @@ export class FlowDiagramRecoveryController {
     this.lastKnownDevicePixelRatio = 1;
     this.hardRecoveryAttemptCount = 0;
     this.hardRecoveryInProgress = false;
+    this.hardRecoveryToken = null;
+    this.hardRecoveryViewState = null;
     this.recoveryFitFallbackUsed = false;
   }
 
@@ -193,7 +221,18 @@ export class FlowDiagramRecoveryController {
     this.scheduleRecoveryVerification(true);
   }
 
-  completeRecoveryVerification(allowHardRecovery: boolean): void {
+  completeRecoveryVerification(
+    allowHardRecovery: boolean,
+    expectedToken: FlowDiagramHardRecoveryToken | null = this.hardRecoveryToken,
+  ): void {
+    if (expectedToken && (expectedToken !== this.hardRecoveryToken
+      || !this.runtime.isHardRecoveryCurrent(expectedToken))) {
+      if (expectedToken === this.hardRecoveryToken) {
+        this.hardRecoveryInProgress = false;
+        this.hardRecoveryToken = null;
+      }
+      return;
+    }
     const diagram = this.runtime.getDiagram();
     const diagramDiv = this.runtime.getDiagramDiv();
     if (!diagram || !diagramDiv || this.runtime.isDestroyed()) {
@@ -212,7 +251,7 @@ export class FlowDiagramRecoveryController {
         this.hardRecoveryInProgress = false;
         return;
       case 'finish':
-        this.finishResizeRecovery();
+        this.finishResizeRecovery(expectedToken);
         return;
       case 'hard-recovery':
         if (this.tryHardDiagramRecovery()) return;
@@ -221,7 +260,7 @@ export class FlowDiagramRecoveryController {
         this.recoveryFitFallbackUsed = true;
         this.runtime.requestFitToContents();
         this.runtime.getDiagram()?.requestUpdate();
-        this.scheduleRecoveryVerification(false);
+        this.scheduleRecoveryVerification(false, expectedToken);
         return;
       case 'keep-armed':
         break;
@@ -261,8 +300,11 @@ export class FlowDiagramRecoveryController {
       return false;
     }
 
+    const recoveryToken = this.runtime.beginHardRecovery();
+    if (!recoveryToken) return false;
     this.hardRecoveryAttemptCount += 1;
     this.hardRecoveryInProgress = true;
+    this.hardRecoveryToken = recoveryToken;
 
     const container = this.runtime.getDiagramDiv();
     const selectionKeys = this.runtime.getSelectedNodeKeys();
@@ -271,6 +313,7 @@ export class FlowDiagramRecoveryController {
     const overviewContainer = shouldRestoreOverview ? this.runtime.getOverviewContainer() : null;
     if (!container) {
       this.runtime.cleanupFailedHardRecovery();
+      this.runtime.abortHardRecovery(recoveryToken);
       this.hardRecoveryInProgress = false;
       return false;
     }
@@ -282,16 +325,24 @@ export class FlowDiagramRecoveryController {
 
       this.runtime.teardownDiagramForRecovery();
 
-      const initialized = this.runtime.initializeOutsideZone(container);
+      const initialized = this.runtime.initializeOutsideZone(container, recoveryToken);
       if (!initialized || !this.runtime.getDiagram()) {
         this.runtime.cleanupFailedHardRecovery();
+        this.runtime.abortHardRecovery(recoveryToken);
         this.hardRecoveryInProgress = false;
         return false;
       }
+      if (!this.runtime.isHardRecoveryCurrent(recoveryToken)) {
+        this.hardRecoveryInProgress = false;
+        this.hardRecoveryToken = null;
+        return false;
+      }
 
-      this.restoreHardRecoveredDiagram(selectionKeys, recoveryViewState, shouldRestoreOverview, overviewContainer);
-      return true;
+      return this.restoreHardRecoveredDiagram(
+        selectionKeys, recoveryViewState, shouldRestoreOverview, overviewContainer, recoveryToken,
+      );
     } catch (error) {
+      this.runtime.abortHardRecovery(recoveryToken);
       this.hardRecoveryInProgress = false;
       this.runtime.error('流程图原地重建失败', error);
       this.runtime.captureException(error, { tags: { operation: 'hardResizeRecovery' } });
@@ -323,16 +374,15 @@ export class FlowDiagramRecoveryController {
     recoveryViewState: ViewState | null,
     shouldRestoreOverview: boolean,
     overviewContainer: HTMLDivElement | null,
-  ): void {
+    recoveryToken: FlowDiagramHardRecoveryToken,
+  ): boolean {
     this.resizeRecoveryArmed = true;
-    this.runtime.updateDiagram(true);
-
-    if (recoveryViewState) {
-      applyFlowViewState(this.runtime.getDiagram(), recoveryViewState);
-    } else {
-      this.runtime.requestFitToContents();
+    if (!this.runtime.updateDiagram(true) || !this.runtime.isHardRecoveryCurrent(recoveryToken)) {
+      this.runtime.abortHardRecovery(recoveryToken);
+      this.hardRecoveryInProgress = false;
+      return false;
     }
-
+    this.hardRecoveryViewState = recoveryViewState;
     this.runtime.getDiagram()?.requestUpdate();
 
     if (selectionKeys.length > 0) {
@@ -345,10 +395,14 @@ export class FlowDiagramRecoveryController {
       this.runtime.restoreOverviewAfterRecovery(overviewContainer);
     }
 
-    this.scheduleRecoveryVerification(false);
+    this.scheduleRecoveryVerification(false, recoveryToken);
+    return true;
   }
 
-  private scheduleRecoveryVerification(allowHardRecovery: boolean): void {
+  private scheduleRecoveryVerification(
+    allowHardRecovery: boolean,
+    expectedToken: FlowDiagramHardRecoveryToken | null = this.hardRecoveryToken,
+  ): void {
     if (!this.runtime.getDiagram() || !this.runtime.getDiagramDiv() || this.runtime.isDestroyed()) {
       return;
     }
@@ -358,7 +412,7 @@ export class FlowDiagramRecoveryController {
     this.zone.runOutsideAngular(() => {
       this.resizeRecoveryRafId = requestAnimationFrame(() => {
         this.resizeRecoveryRafId = null;
-        this.completeRecoveryVerification(allowHardRecovery);
+        this.completeRecoveryVerification(allowHardRecovery, expectedToken);
       });
     });
   }
@@ -372,15 +426,42 @@ export class FlowDiagramRecoveryController {
     });
   }
 
-  private finishResizeRecovery(): void {
+  private finishResizeRecovery(expectedToken: FlowDiagramHardRecoveryToken | null): void {
     if (!this.runtime.getDiagram() || this.runtime.isDestroyed()) {
       return;
     }
+    if (!expectedToken) {
+      this.completeResizeRecovery();
+      return;
+    }
+    const scheduled = this.runtime.applyHardRecoveryViewport(this.hardRecoveryViewState, proof => {
+      if (!proof || !this.runtime.completeHardRecovery(proof)
+        || !this.runtime.releaseHardRecovery(expectedToken)) {
+        this.failHardRecovery(expectedToken);
+        return;
+      }
+      this.completeResizeRecovery();
+    });
+    if (!scheduled) this.failHardRecovery(expectedToken);
+  }
 
+  private failHardRecovery(expectedToken: FlowDiagramHardRecoveryToken): void {
+    this.runtime.abortHardRecovery(expectedToken);
+    this.hardRecoveryInProgress = false;
+    if (expectedToken === this.hardRecoveryToken) this.hardRecoveryToken = null;
+    this.hardRecoveryViewState = null;
+  }
+
+  private completeResizeRecovery(): void {
+    if (!this.runtime.getDiagram() || this.runtime.isDestroyed()) {
+      return;
+    }
     this.runtime.attemptPendingOverviewRestore();
     this.runtime.refreshOverview();
     this.resizeRecoveryArmed = false;
     this.hardRecoveryInProgress = false;
+    this.hardRecoveryToken = null;
+    this.hardRecoveryViewState = null;
     this.hardRecoveryAttemptCount = 0;
     this.recoveryFitFallbackUsed = false;
     this.captureStableViewState();

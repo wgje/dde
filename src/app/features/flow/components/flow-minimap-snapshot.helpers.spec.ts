@@ -33,7 +33,7 @@ function node(key: string, bounds: go.Rect, data: MinimapNodeData = {}): FakeNod
 }
 
 describe('flow-minimap-snapshot.helpers', () => {
-  it('单趟采集节点 shape、装饰 pip 和世界 bounds', () => {
+  it('单趟采集节点 shape、Constellation 标记和世界 bounds', () => {
     const diagram = new FakeDiagram();
     diagram.nodeEntries = [
       node('task-1', new go.Rect(0, 0, 80, 40), {
@@ -76,13 +76,20 @@ describe('flow-minimap-snapshot.helpers', () => {
       },
     ]);
     expect(snapshot.pips.map(pip => pip.key)).toEqual(['task-1:sidecar']);
-    expect(snapshot.bounds).toEqual({ x: 0, y: 0, w: 160, h: 100 });
+    expect(snapshot.markers.map(marker => marker.key)).toEqual([
+      'task-1:sidecar',
+      'task-2:focused',
+    ]);
+    expect(snapshot.bounds?.x).toBe(0);
+    expect(snapshot.bounds?.y).toBeCloseTo(-6.4);
+    expect(snapshot.bounds?.w).toBeCloseTo(165.12);
+    expect(snapshot.bounds?.h).toBeCloseTo(111.52);
   });
 
-  it('关闭装饰 pip 时仅保留节点 shape 和 bounds', () => {
+  it('关闭装饰标记时仍保留停泊/专注/搜索注意标记', () => {
     const diagram = new FakeDiagram();
     diagram.nodeEntries = [
-      node('task-1', new go.Rect(0, 0, 80, 40), { isDocked: true }),
+      node('task-1', new go.Rect(0, 0, 80, 40), { isDocked: true, isParked: true }),
     ];
 
     const snapshot = collectMinimapNodeSnapshot(diagram as unknown as go.Diagram, {
@@ -91,7 +98,12 @@ describe('flow-minimap-snapshot.helpers', () => {
 
     expect(snapshot.shapes).toHaveLength(1);
     expect(snapshot.pips).toEqual([]);
-    expect(snapshot.bounds).toEqual({ x: 0, y: 0, w: 80, h: 40 });
+    expect(snapshot.markers.map(marker => marker.key)).toEqual(['task-1:parked']);
+    // 即使关闭装饰展示，也保留入坞角标外接范围，避免切换时 viewBox 跳动。
+    expect(snapshot.bounds?.x).toBeCloseTo(-6.4);
+    expect(snapshot.bounds?.y).toBeCloseTo(-6.4);
+    expect(snapshot.bounds?.w).toBeCloseTo(89.728);
+    expect(snapshot.bounds?.h).toBeCloseTo(49.728);
   });
 
   it('采集连线中心点、跨树虚线和 familyColor 回退', () => {

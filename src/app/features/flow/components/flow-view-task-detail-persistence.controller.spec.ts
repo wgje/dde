@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 
 import type { Attachment, Task, TaskAttentionDraftItem } from '../../../../models';
-import { FlowViewTaskDetailPersistenceController } from './flow-view-task-detail-persistence.controller';
+import { FlowTaskDetailOwnerTracker, FlowViewTaskDetailPersistenceController } from './flow-view-task-detail-persistence.controller';
 
 type TaskDetailOperations = ConstructorParameters<typeof FlowViewTaskDetailPersistenceController>[0];
 
@@ -61,10 +61,25 @@ function createTaskOps(): MockTaskOps {
 describe('FlowViewTaskDetailPersistenceController', () => {
   let taskOps: MockTaskOps;
   let controller: FlowViewTaskDetailPersistenceController;
+  let projectId: string;
+  let generation: number;
+  let selectedTaskId: string;
+  let taskGeneration: number;
+  let currentTaskIds: Set<string>;
 
   beforeEach(() => {
     taskOps = createTaskOps();
-    controller = new FlowViewTaskDetailPersistenceController(taskOps);
+    projectId = 'project-a';
+    generation = 0;
+    selectedTaskId = 'task-1';
+    taskGeneration = 0;
+    currentTaskIds = new Set(['task-1']);
+    controller = new FlowViewTaskDetailPersistenceController(taskOps, {
+      captureOwner: () => ({ projectId, generation, taskId: selectedTaskId, taskGeneration }),
+      isOwnerCurrent: owner => owner.projectId === projectId && owner.generation === generation
+        && owner.taskId === selectedTaskId && owner.taskGeneration === taskGeneration,
+      isTaskCurrent: taskId => taskId === selectedTaskId && currentTaskIds.has(taskId),
+    });
   });
 
   it('routes task detail changes through the matching awaited task operation', async () => {
@@ -126,5 +141,76 @@ describe('FlowViewTaskDetailPersistenceController', () => {
     expect(taskOps.handleTaskDetailPersistError).toHaveBeenCalledWith(
       '任务详情本地保存失败：任务内容本地保存失败，请释放浏览器存储空间后重试',
     );
+  });
+
+  it('blocks stale task detail mutations before dispatch', async () => {
+    currentTaskIds = new Set(['task-b']);
+
+    await controller.persistTitle({ taskId: 'task-1', title: 'Stale title' });
+    await controller.persistStatusToggle(createTask());
+
+    expect(taskOps.updateTaskTitle).not.toHaveBeenCalled();
+    expect(taskOps.toggleTaskStatus).not.toHaveBeenCalled();
+    expect(taskOps.handleTaskDetailPersistError).not.toHaveBeenCalled();
+  });
+
+  it('lets durable A work finish but suppresses its stale A-to-B-to-A error UI', async () => {
+    let resolveSave!: (saved: boolean) => void;
+    taskOps.updateTaskTitle.mockReturnValueOnce(new Promise(resolve => { resolveSave = resolve; }));
+
+    const pending = controller.persistTitle({ taskId: 'task-1', title: 'A title' });
+    projectId = 'project-b';
+    generation++;
+    selectedTaskId = 'task-b';
+    taskGeneration++;
+    currentTaskIds = new Set(['task-b']);
+    projectId = 'project-a';
+    generation++;
+    selectedTaskId = 'task-1';
+    taskGeneration++;
+    currentTaskIds = new Set(['task-1']);
+    resolveSave(false);
+    await pending;
+
+    expect(taskOps.updateTaskTitle).toHaveBeenCalledOnce();
+    expect(taskOps.handleTaskDetailPersistError).not.toHaveBeenCalled();
+  });
+
+  it('keeps a same-owner operation current when persistence replaces its task object', async () => {
+    const task = createTask();
+    let currentTask = task;
+    const tracker = new FlowTaskDetailOwnerTracker({
+      activeProjectId: () => projectId,
+      activeTaskId: () => task.id,
+      isTaskCurrent: (taskId, expected) => currentTask.id === taskId && (!expected || expected === currentTask),
+      retire: vi.fn(),
+    });
+    const operation = tracker.startOperation(task.id, task, async () => true);
+    currentTask = { ...task, title: 'Saved title' };
+
+    expect(await operation?.result).toBe(true);
+    expect(operation?.isCurrent()).toBe(true);
+  });
+
+  it('suppresses a same-project A-to-B-to-A late failure by task generation', async () => {
+    const taskA = createTask(), taskB = createTask({ id: 'task-b' });
+    let selectedTask = taskA, resolveSave!: (saved: boolean) => void;
+    const tracker = new FlowTaskDetailOwnerTracker({
+      activeProjectId: () => projectId,
+      activeTaskId: () => selectedTask.id,
+      isTaskCurrent: (taskId, expected) => selectedTask.id === taskId && (!expected || expected === selectedTask),
+      retire: vi.fn(),
+    });
+    controller = new FlowViewTaskDetailPersistenceController(taskOps, tracker);
+    taskOps.updateTaskTitle.mockReturnValueOnce(new Promise(resolve => { resolveSave = resolve; }));
+
+    const pending = controller.persistTitle({ taskId: taskA.id, title: 'A title' });
+    selectedTask = taskB; tracker.sync();
+    selectedTask = { ...taskA, title: 'Current A' }; tracker.sync();
+    resolveSave(false);
+    await pending;
+
+    expect(taskOps.updateTaskTitle).toHaveBeenCalledOnce();
+    expect(taskOps.handleTaskDetailPersistError).not.toHaveBeenCalled();
   });
 });

@@ -58,42 +58,13 @@
         
         <!-- 小地图/导航器 -->
         @if (isOverviewVisible()) {
-          <!--
-            【2026-05-15 性能修复 P1】移除 `backdrop-blur`，改用不透明背景。
-            backdrop-filter: blur 会强制浏览器对容器身后像素做模糊采样合成；
-            当容器内部 GoJS Overview canvas 与主图 canvas 同时每帧重绘时，
-            Chrome/Safari 合成器会复用上一帧的模糊缓冲，呈现拖尾/虚影。
-            回滚：把 class 换回 `bg-white/90 dark:bg-stone-800/90 backdrop-blur`。
-          -->
-          <div 
-            class="absolute z-20 pointer-events-auto bg-white dark:bg-stone-800 rounded-lg shadow-md border border-stone-200/60 dark:border-stone-700/60 select-none"
-            style="overflow: hidden;"
-            [ngClass]="{ 'opacity-40 hover:opacity-100': isOverviewCollapsed() }"
-            [style.right.px]="8"
-            [style.bottom]="'8px'"
-            [style.width.px]="isOverviewCollapsed() ? 24 : overviewSize().width"
-            [style.height.px]="isOverviewCollapsed() ? 24 : overviewSize().height">
-            @if (!isOverviewCollapsed()) {
-              @if (useSvgMinimap()) {
-                <app-flow-minimap [width]="overviewSize().width" [height]="overviewSize().height" />
-              } @else {
-                <div #overviewDiv class="w-full h-full relative z-0" style="overflow: hidden; position: relative;"></div>
-              }
-            }
-            <button
-              (pointerdown)="onOverviewTogglePointerDown($event)"
-              type="button"
-              class="absolute top-0.5 right-0.5 z-10 pointer-events-auto rounded bg-white/80 dark:bg-stone-700/80 hover:bg-stone-100 dark:hover:bg-stone-600 flex items-center justify-center transition-colors w-6 h-6"
-              [title]="isOverviewCollapsed() ? '展开小地图' : '折叠小地图'">
-              <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" class="w-3 h-3 text-stone-500 dark:text-stone-400">
-                @if (isOverviewCollapsed()) {
-                  <path stroke-linecap="round" stroke-linejoin="round" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
-                } @else {
-                  <path stroke-linecap="round" stroke-linejoin="round" d="M6 12h12" />
-                }
-              </svg>
-            </button>
-          </div>
+          <app-flow-overview-panel
+            [mobile]="true"
+            [collapsed]="isOverviewCollapsed()"
+            [useSvgMinimap]="useSvgMinimap()"
+            (collapseToggle)="toggleOverviewCollapse()"
+            (legacyOverviewHostChange)="onLegacyOverviewHostChange($event)"
+          />
         }
       } @else {
         <!-- 流程图加载失败降级 UI -->
@@ -208,7 +179,7 @@
     <!-- 流程图区域 -->
   <div class="flex-1 min-h-0 relative overflow-hidden dark:bg-stone-950 md:border-t md:border-[#78716C]/50" [style.backgroundColor]="'var(--theme-bg, #F5F2E9)'">
     @if (!diagram.error()) {
-      <div #diagramDiv data-testid="flow-diagram" role="img" aria-label="流程图" class="absolute inset-0 w-full h-full z-0 flow-canvas-container"></div>
+      <div #diagramDiv data-testid="flow-diagram" role="img" aria-label="流程图" [attr.aria-busy]="!isFlowViewReady()" class="absolute inset-0 w-full h-full z-0 flow-canvas-container"></div>
       
       <!-- 移动端导航按钮 -->
       @if (uiState.isMobile()) {
@@ -240,59 +211,13 @@
       
       <!-- 小地图/导航器 -->
       @if (isOverviewVisible()) {
-        <!--
-          【2026-05-15 性能修复 P1】移除 `backdrop-blur`，改用不透明背景。
-          见上方同位说明：合成器拖尾的主元凶。
-        -->
-        <div 
-          class="absolute z-20 pointer-events-auto bg-white dark:bg-stone-800 rounded-lg shadow-md border border-stone-200/60 dark:border-stone-700/60 select-none"
-          style="overflow: hidden;"
-          [ngClass]="{
-            'opacity-40 hover:opacity-100': isOverviewCollapsed()
-          }"
-          [style.right.px]="uiState.isMobile() ? 8 : 16"
-          [style.bottom]="overviewBottomPosition()"
-          [style.width.px]="isOverviewCollapsed() ? (uiState.isMobile() ? 24 : 28) : overviewSize().width"
-          [style.height.px]="isOverviewCollapsed() ? (uiState.isMobile() ? 24 : 28) : overviewSize().height">
-          
-          <!-- 小地图内容 -->
-          @if (!isOverviewCollapsed()) {
-            @if (useSvgMinimap()) {
-              <app-flow-minimap [width]="overviewSize().width" [height]="overviewSize().height" />
-            } @else {
-              <!-- 让 Overview 画布在更低层级渲染，避免覆盖右上角折叠按钮的点击区域 -->
-              <!-- 添加明确的尺寸和 overflow 设置，确保 Canvas 正确渲染 -->
-              <div #overviewDiv
-                class="w-full h-full relative z-0"
-                style="overflow: hidden; position: relative;"></div>
-            }
-          }
-          
-          <!-- 折叠/展开按钮 -->
-          <button
-            (pointerdown)="onOverviewTogglePointerDown($event)"
-            type="button"
-            class="absolute top-0.5 right-0.5 z-10 pointer-events-auto rounded bg-white/80 dark:bg-stone-700/80 hover:bg-stone-100 dark:hover:bg-stone-600 flex items-center justify-center transition-colors"
-            [class.w-5]="!uiState.isMobile()"
-            [class.h-5]="!uiState.isMobile()"
-             [class.w-6]="uiState.isMobile()"
-             [class.h-6]="uiState.isMobile()"
-            [title]="isOverviewCollapsed() ? '展开小地图' : '折叠小地图'">
-            <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"
-                 [class.w-3]="!uiState.isMobile()"
-                 [class.h-3]="!uiState.isMobile()"
-               [class.w-3]="uiState.isMobile()"
-               [class.h-3]="uiState.isMobile()"
-                 class="text-stone-500 dark:text-stone-400">
-              @if (isOverviewCollapsed()) {
-                <path stroke-linecap="round" stroke-linejoin="round" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
-              } @else {
-                <!-- 折叠图标：用"最小化"横线替代叉叉，避免误解为关闭按钮 -->
-                <path stroke-linecap="round" stroke-linejoin="round" d="M6 12h12" />
-              }
-            </svg>
-          </button>
-        </div>
+        <app-flow-overview-panel
+          [mobile]="false"
+          [collapsed]="isOverviewCollapsed()"
+          [useSvgMinimap]="useSvgMinimap()"
+          (collapseToggle)="toggleOverviewCollapse()"
+          (legacyOverviewHostChange)="onLegacyOverviewHostChange($event)"
+        />
       }
     } @else {
       <!-- 流程图加载失败时的降级 UI -->
@@ -454,7 +379,7 @@
   [position]="link.connectionEditorPos()"
   [readOnly]="link.isHintOnlyStartupReadOnly()"
   [connectionTasks]="link.getConnectionTasks()"
-  (close)="link.closeConnectionEditor()"
+  (close)="requestConnectionEditorClose()"
   (save)="saveConnectionDescription($event)"
   (modeChange)="link.setConnectionEditorMode($event)"
   (delete)="deleteConnection()"

@@ -116,6 +116,56 @@ describe('FlowOverviewPointerController', () => {
     expect(requestAnimationFrame).toHaveBeenCalledTimes(1);
   });
 
+  it('ignores auxiliary pointer buttons and non-primary pointers', () => {
+    const controller = createController();
+    controller.attach(container);
+
+    const auxiliaryPointer = createPointerEvent('pointerdown', {
+      clientX: 10,
+      clientY: 10,
+      pointerId: 7,
+      button: 2,
+    });
+    const secondaryTouch = createPointerEvent('pointerdown', {
+      clientX: 10,
+      clientY: 10,
+      pointerId: 8,
+      isPrimary: false,
+      pointerType: 'touch',
+    });
+    container.dispatchEvent(auxiliaryPointer);
+    container.dispatchEvent(secondaryTouch);
+
+    expect(auxiliaryPointer.defaultPrevented).toBe(false);
+    expect(secondaryTouch.defaultPrevented).toBe(false);
+    expect(container.setPointerCapture).not.toHaveBeenCalled();
+    expect(hostState.isOverviewBoxDragging).toBe(false);
+    expect(hostState.isOverviewInteracting).toBe(false);
+    expect(hostState.clearViewportBindings).not.toHaveBeenCalled();
+
+    controller.detach();
+  });
+
+  it('ignores auxiliary mouse buttons in the no-PointerEvent fallback', () => {
+    vi.stubGlobal('PointerEvent', undefined);
+    const controller = createController();
+    controller.attach(container);
+    const auxiliaryMouse = createMouseEvent('mousedown', {
+      clientX: 10,
+      clientY: 10,
+      button: 1,
+    });
+
+    container.dispatchEvent(auxiliaryMouse);
+
+    expect(auxiliaryMouse.defaultPrevented).toBe(false);
+    expect(hostState.isOverviewBoxDragging).toBe(false);
+    expect(hostState.isOverviewInteracting).toBe(false);
+    expect(hostState.clearViewportBindings).not.toHaveBeenCalled();
+
+    controller.detach();
+  });
+
   it('cancels manual overview drag without committing the pointercancel position', () => {
     const controller = createController();
     controller.attach(container);
@@ -204,10 +254,14 @@ describe('FlowOverviewPointerController', () => {
 
 class TestPointerEvent extends MouseEvent {
   readonly pointerId: number;
+  readonly isPrimary: boolean;
+  readonly pointerType: string;
 
   constructor(type: string, init: PointerEventInit = {}) {
     super(type, init);
     this.pointerId = init.pointerId ?? 1;
+    this.isPrimary = init.isPrimary ?? true;
+    this.pointerType = init.pointerType ?? 'mouse';
   }
 }
 

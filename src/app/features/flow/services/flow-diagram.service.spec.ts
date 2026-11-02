@@ -1,5 +1,5 @@
 import { TestBed } from '@angular/core/testing';
-import { NgZone, signal } from '@angular/core';
+import { Injector, NgZone, signal } from '@angular/core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as go from 'gojs';
 
@@ -17,6 +17,9 @@ import { FlowLinkTemplateService } from './flow-link-template.service';
 import { FlowOverviewService } from './flow-overview.service';
 import { FlowDiagramDataService } from './flow-diagram-data.service';
 import { FlowTouchService } from './flow-touch.service';
+import { FlowCommandService } from './flow-command.service';
+import { FlowDiagramEffectsService } from './flow-diagram-effects.service';
+import { PreferenceService } from '../../../../services/preference.service';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 import { flowTemplateEventHandlers } from './flow-template-events';
@@ -26,6 +29,9 @@ describe('FlowDiagramService', () => {
   let container: HTMLDivElement;
   let currentWidth = 800;
   let currentHeight = 600;
+  const activeProjectId = signal<string | null>('project-a');
+  let activeProjectGeneration = 1;
+  const projectTasks = signal([]);
 
   const mockDataService = {
     saveViewState: vi.fn(),
@@ -36,6 +42,16 @@ describe('FlowDiagramService', () => {
     clearTimers: vi.fn(),
     onFlowActivated: vi.fn(),
     updateDiagram: vi.fn(),
+    beginHardRecovery: vi.fn(() => true),
+    applyHardRecoveryViewport: vi.fn((
+      _viewState: unknown,
+      complete: (proof: { kind: 'FIT_TO_CONTENTS_APPLIED' }) => void,
+    ) => {
+      complete({ kind: 'FIT_TO_CONTENTS_APPLIED' });
+      return true;
+    }),
+    completeHardRecovery: vi.fn(() => true),
+    abortHardRecovery: vi.fn(),
     exportToPng: vi.fn(),
     exportToSvg: vi.fn(),
   };
@@ -65,7 +81,21 @@ describe('FlowDiagramService', () => {
   };
 
   const mockProjectState = {
+    activeProjectId,
+    tasks: projectTasks,
+    captureActiveProjectOwner: () => ({
+      projectId: activeProjectId(),
+      generation: activeProjectGeneration,
+    }),
+    isActiveProjectOwnerCurrent: (owner: { projectId: string | null; generation: number }) => (
+      owner.projectId === activeProjectId() && owner.generation === activeProjectGeneration
+    ),
     getViewState: vi.fn(() => null as ViewState | null),
+  };
+
+  const switchProject = (projectId: string): void => {
+    if (activeProjectId() !== projectId) activeProjectGeneration += 1;
+    activeProjectId.set(projectId);
   };
 
   const mockTouchService = {
@@ -88,6 +118,9 @@ describe('FlowDiagramService', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.clearAllMocks();
+    activeProjectId.set('project-a');
+    activeProjectGeneration = 1;
+    projectTasks.set([]);
     currentWidth = 800;
     currentHeight = 600;
 
@@ -106,15 +139,18 @@ describe('FlowDiagramService', () => {
     TestBed.configureTestingModule({
       providers: [
         FlowDiagramService,
+        FlowCommandService,
+        FlowDiagramEffectsService,
         { provide: UiStateService, useValue: { isMobile: signal(false), activeView: signal<'text' | 'flow' | null>('flow') } },
         { provide: LoggerService, useValue: { category: () => mockLogger } },
         { provide: ToastService, useValue: { error: vi.fn(), info: vi.fn(), success: vi.fn(), warning: vi.fn() } },
         { provide: ThemeService, useValue: { isDark: signal(false), theme: signal('paper') } },
+        { provide: PreferenceService, useValue: { theme: signal('paper') } },
         { provide: FlowLayoutService, useValue: { setDiagram: vi.fn(), dispose: vi.fn() } },
         { provide: FlowSelectionService, useValue: mockSelectionService },
         { provide: FlowZoomService, useValue: mockZoomService },
         { provide: FlowEventService, useValue: { setDiagram: vi.fn(), dispose: vi.fn() } },
-        { provide: FlowTemplateService, useValue: { ensureDiagramLayers: vi.fn(), setupNodeTemplate: vi.fn() } },
+        { provide: FlowTemplateService, useValue: { ensureDiagramLayers: vi.fn(), setupNodeTemplate: vi.fn(), closeSiyuanPopover: vi.fn() } },
         { provide: FlowLinkTemplateService, useValue: { setupLinkTemplate: vi.fn() } },
         { provide: FlowOverviewService, useValue: mockOverviewService },
         { provide: FlowDiagramDataService, useValue: mockDataService },
@@ -126,6 +162,12 @@ describe('FlowDiagramService', () => {
     });
 
     service = TestBed.inject(FlowDiagramService);
+    mockDataService.abortHardRecovery.mockImplementation(() => {
+      TestBed.inject(FlowCommandService).markViewDestroyed();
+    });
+    mockDataService.dispose.mockImplementation(() => {
+      TestBed.inject(FlowCommandService).markViewDestroyed();
+    });
 
     container = document.createElement('div');
     Object.defineProperty(container, 'clientWidth', {
@@ -197,6 +239,188 @@ describe('FlowDiagramService', () => {
 
     return diagram;
   }
+
+  type RecoveryToken = Readonly<{ projectId: string; generation: number }>;
+  type RecoveryInternals = {
+    abortHardRecovery: (token: RecoveryToken) => void;
+    beginHardRecovery: () => RecoveryToken | null;
+    releaseHardRecovery: (token: RecoveryToken) => boolean;
+    hardRecoveryHold: () => RecoveryToken | null;
+    recovery: {
+      hardRecoveryInProgress: boolean;
+      hardRecoveryToken: RecoveryToken | null;
+      armResizeRecovery: () => void;
+      resetForInitialize: (container: HTMLDivElement, token?: RecoveryToken) => void;
+      completeRecoveryVerification: (allowHardRecovery: boolean, token?: RecoveryToken) => void;
+      tryHardDiagramRecovery: () => boolean;
+      runtime: {
+        initializeOutsideZone: (container: HTMLDivElement, token: RecoveryToken) => boolean;
+        teardownDiagramForRecovery: () => void;
+        updateDiagram: (forceRefresh: boolean) => boolean;
+      };
+    };
+  };
+
+  const recoveryInternals = () => service as unknown as RecoveryInternals;
+
+  function stubHardRecovery(initializeResult: boolean, updateResult: boolean) {
+    const diagram = attachDiagram(new go.Point(1200, 900), 0.45);
+    (diagram as typeof diagram & { clear: () => void }).clear = vi.fn();
+    const internal = recoveryInternals();
+    let resetPreservedOwnership = false;
+    internal.recovery.runtime.teardownDiagramForRecovery = vi.fn();
+    internal.recovery.runtime.initializeOutsideZone = vi.fn((target, token) => {
+      internal.recovery.resetForInitialize(target, token);
+      resetPreservedOwnership = internal.recovery.hardRecoveryInProgress;
+      return initializeResult;
+    });
+    internal.recovery.runtime.updateDiagram = vi.fn(() => updateResult);
+    return { diagram, internal, resetPreservedOwnership: () => resetPreservedOwnership };
+  }
+
+  it('exposes the active project identity for lifecycle readiness fencing', () => {
+    expect(service.activeProjectId).toBe('project-a');
+
+    switchProject('project-b');
+
+    expect(service.activeProjectId).toBe('project-b');
+  });
+
+  it('terminally aborts a failed hard recovery while preserving its pending center command', () => {
+    const harness = stubHardRecovery(true, false);
+    mockDataService.updateDiagram.mockReturnValue(true);
+    const effects = TestBed.inject(FlowDiagramEffectsService);
+    const commands = TestBed.inject(FlowCommandService);
+    const injector = TestBed.inject(Injector);
+    const executeCenter = vi.fn();
+    commands.markViewReady(mockProjectState.captureActiveProjectOwner());
+    const taskEffect = effects.createTasksEffect(injector, (tasks, force) =>
+      effects.scheduleRafDiagramUpdate(tasks, force, () => false));
+    const centerEffect = effects.createCenterCommandEffect(injector, executeCenter);
+    TestBed.flushEffects();
+    expect(harness.internal.recovery.tryHardDiagramRecovery()).toBe(false);
+    const token = harness.internal.recovery.hardRecoveryToken!;
+    commands.centerOnNode('task-1', false);
+    TestBed.flushEffects(); vi.runOnlyPendingTimers(); TestBed.flushEffects();
+    expect(harness.internal.hardRecoveryHold()).toBeNull();
+    expect(mockDataService.abortHardRecovery).toHaveBeenCalled();
+    expect(executeCenter).not.toHaveBeenCalled();
+    expect(commands.centerNodeCommand()).not.toBeNull();
+
+    (service as unknown as { _initializeOutsideZone: () => boolean })._initializeOutsideZone = vi.fn(() => true);
+    expect(service.initialize(container)).toBe(true);
+    expect(harness.internal.hardRecoveryHold()).toBeNull();
+    expect(harness.internal.releaseHardRecovery(token)).toBe(false);
+    TestBed.flushEffects(); vi.runOnlyPendingTimers(); TestBed.flushEffects();
+    expect(mockDataService.updateDiagram).toHaveBeenCalledTimes(1);
+    expect(executeCenter).not.toHaveBeenCalled();
+    commands.markViewReady(mockProjectState.captureActiveProjectOwner());
+    TestBed.flushEffects();
+    expect(executeCenter).toHaveBeenCalledWith('task-1', false);
+    expect(commands.centerNodeCommand()).toBeNull();
+    taskEffect.destroy(); centerEffect.destroy();
+  });
+
+  it.each([
+    ['initialization failure', false, true],
+    ['model update failure', true, false],
+  ])('publishes a terminal abort after %s', (_label, initializeResult, updateResult) => {
+    const harness = stubHardRecovery(initializeResult, updateResult);
+    expect(harness.internal.recovery.tryHardDiagramRecovery()).toBe(false);
+    expect(harness.internal.hardRecoveryHold()).toBeNull();
+    expect(mockDataService.abortHardRecovery).toHaveBeenCalled();
+    expect(mockZoomService.fitToContents).not.toHaveBeenCalled();
+    expect(mockSelectionService.selectMultiple).not.toHaveBeenCalled();
+    expect(harness.resetPreservedOwnership()).toBe(true);
+    const matchingToken = harness.internal.recovery.hardRecoveryToken!;
+    harness.internal.recovery.resetForInitialize(container, { ...matchingToken });
+    expect(harness.internal.recovery.hardRecoveryToken).toBeNull();
+  });
+
+  it('keeps invisible fallback held and releases once after visible verification', () => {
+    const { diagram, internal } = stubHardRecovery(true, true);
+    const viewportProofPublisher: {
+      current: ((proof: { kind: 'FIT_TO_CONTENTS_APPLIED' }) => void) | null;
+    } = { current: null };
+    mockDataService.applyHardRecoveryViewport.mockImplementationOnce((
+      _viewState: unknown,
+      complete: (proof: { kind: 'FIT_TO_CONTENTS_APPLIED' }) => void,
+    ) => {
+      viewportProofPublisher.current = complete;
+      return true;
+    });
+
+    expect(internal.recovery.tryHardDiagramRecovery()).toBe(true);
+    const token = internal.recovery.hardRecoveryToken!;
+    expect(service.isInitialized).toBe(false);
+    expect(mockDataService.applyHardRecoveryViewport).not.toHaveBeenCalled();
+    vi.runOnlyPendingTimers();
+    expect(mockZoomService.fitToContents).toHaveBeenCalledTimes(1);
+    expect(service.isInitialized).toBe(false);
+
+    diagram.position = new go.Point(0, 0);
+    Object.defineProperty(diagram, 'viewportBounds', {
+      configurable: true, value: { isReal: () => true, width: 800, height: 600, intersectsRect: () => true },
+    });
+    expect(internal.recovery.hardRecoveryToken).toBe(token);
+    expect(internal.hardRecoveryHold()).toBe(token);
+    internal.recovery.completeRecoveryVerification(false, token);
+    expect(mockDataService.applyHardRecoveryViewport).toHaveBeenCalledOnce();
+    expect(mockDataService.completeHardRecovery).not.toHaveBeenCalled();
+    expect(service.isInitialized).toBe(false);
+    expect(internal.hardRecoveryHold()).toBe(token);
+    viewportProofPublisher.current?.({ kind: 'FIT_TO_CONTENTS_APPLIED' });
+    expect(mockDataService.completeHardRecovery).toHaveBeenCalledOnce();
+    expect(service.isInitialized).toBe(true);
+    expect(internal.hardRecoveryHold()).toBeNull();
+    vi.runOnlyPendingTimers();
+    expect(mockZoomService.fitToContents).toHaveBeenCalledTimes(1);
+  });
+
+  it('irreversibly retires stale project tokens without clearing a newer hold', () => {
+    attachDiagram();
+    const internal = recoveryInternals();
+    const commands = TestBed.inject(FlowCommandService);
+    const tokenA = internal.beginHardRecovery()!;
+    switchProject('project-b');
+    switchProject('project-a');
+    expect(internal.releaseHardRecovery(tokenA)).toBe(false);
+    expect(mockDataService.abortHardRecovery).toHaveBeenCalledOnce();
+
+    const observedTokenA = internal.beginHardRecovery()!;
+    switchProject('project-b');
+    expect(service.isInitialized).toBe(true);
+    expect(mockDataService.abortHardRecovery).toHaveBeenCalledTimes(2);
+    commands.markViewReady(mockProjectState.captureActiveProjectOwner());
+    switchProject('project-a');
+    expect(internal.releaseHardRecovery(observedTokenA)).toBe(false);
+    switchProject('project-b');
+    expect(commands.isViewReady()).toBe(false);
+    const tokenB = internal.beginHardRecovery()!;
+    mockDataService.abortHardRecovery.mockClear();
+    internal.abortHardRecovery(tokenA);
+    expect(mockDataService.abortHardRecovery).not.toHaveBeenCalled();
+    expect(internal.hardRecoveryHold()).toBe(tokenB);
+    expect(service.isInitialized).toBe(false);
+    internal.abortHardRecovery(tokenB);
+    expect(mockDataService.abortHardRecovery).toHaveBeenCalledOnce();
+    expect(internal.hardRecoveryHold()).toBeNull();
+  });
+
+  it('clears a held token on disposal while ordinary resize recovery leaves readiness intact', () => {
+    attachDiagram();
+    const commands = TestBed.inject(FlowCommandService);
+    commands.markViewReady(mockProjectState.captureActiveProjectOwner());
+    recoveryInternals().recovery.armResizeRecovery();
+    expect(service.isInitialized).toBe(true);
+    expect(commands.isViewReady()).toBe(true);
+
+    (service as unknown as { diagram: null }).diagram = null;
+    const token = recoveryInternals().beginHardRecovery()!;
+    service.dispose();
+    expect(recoveryInternals().releaseHardRecovery(token)).toBe(false);
+    expect(commands.isViewReady()).toBe(false);
+  });
 
   it('clearAllTimers 应清理 handle 为 0 的 resize debounce timer', () => {
     const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
@@ -503,5 +727,16 @@ describe('FlowDiagramService', () => {
     expect(dragOutHandler).toHaveBeenCalledWith(['task-1'], 100, 660);
     expect(diagram.startTransaction).toHaveBeenCalledWith('restore-drag-positions');
     expect(diagram.commitTransaction).toHaveBeenCalledWith('restore-drag-positions');
+  });
+
+  it('propagates the diagram data update outcome unchanged', () => {
+    mockDataService.updateDiagram
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(true);
+
+    expect(service.updateDiagram([])).toBe(false);
+    expect(service.updateDiagram([], true)).toBe(true);
+    expect(mockDataService.updateDiagram).toHaveBeenNthCalledWith(1, [], false);
+    expect(mockDataService.updateDiagram).toHaveBeenNthCalledWith(2, [], true);
   });
 });
