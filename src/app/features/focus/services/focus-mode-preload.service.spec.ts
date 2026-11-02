@@ -75,8 +75,8 @@ describe('FocusModePreloadService', () => {
   afterEach(() => {
     injector?.destroy?.();
     injector = undefined;
-    vi.useRealTimers();
     vi.restoreAllMocks();
+    vi.useRealTimers();
 
     if (originalRequestIdleCallback) {
       Object.defineProperty(window, 'requestIdleCallback', originalRequestIdleCallback);

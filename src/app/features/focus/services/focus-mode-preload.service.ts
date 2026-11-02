@@ -4,8 +4,7 @@
  * 从 WorkspaceShellComponent 抽离的 Focus 模式懒预热调度。
  *
  * 职责单一：
- * - 在浏览器空闲时机拉取 `FocusModeComponent` 的 chunk
- * - 调用其静态 `preloadAssets()` 以便首次进入 Focus 时瞬开
+ * - 在浏览器空闲时机拉取 `FocusModeComponent` 及其静态样式
  * - 记录 Sentry breadcrumb 便于启动性能归因
  *
  * 为什么抽离：
@@ -48,11 +47,7 @@ export class FocusModePreloadService {
     if (this.preloadPromise) return this.preloadPromise;
 
     this.preloadPromise = import('../focus-mode.component')
-      .then(async (module) => {
-        const focusModeComponent = module.FocusModeComponent;
-        if (typeof focusModeComponent?.preloadAssets === 'function') {
-          await focusModeComponent.preloadAssets();
-        }
+      .then(() => {
         this.sentryLazyLoader.addBreadcrumb({
           category: 'startup',
           message: 'focus-mode.preload',

@@ -12,7 +12,8 @@ import {
   OnInit,
   OnDestroy,
   computed,
-  NgZone
+  NgZone,
+  ViewEncapsulation,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { GateOverlayComponent } from './components/gate/gate-overlay.component';
@@ -42,12 +43,11 @@ import { STARTUP_PERF_CONFIG } from '../../../config/startup-performance.config'
       </app-gate-overlay>
     }
   `,
-  changeDetection: ChangeDetectionStrategy.OnPush
+  styleUrl: './focus.animations.css',
+  encapsulation: ViewEncapsulation.None,
+  changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class FocusModeComponent implements OnInit, OnDestroy {
-  private static focusAnimationStyleLoaded = false;
-  private static focusAnimationStyleLoadPromise: Promise<void> | null = null;
-
   private readonly gateService = inject(GateService);
   private readonly blackBoxSyncService = inject(BlackBoxSyncService);
   private readonly logger = inject(LoggerService);
@@ -73,7 +73,6 @@ export class FocusModeComponent implements OnInit, OnDestroy {
 
   ngOnInit(): void {
     this.isDestroyed = false;
-    this.ensureFocusAnimationStyleLoaded();
     this.logger.debug('FocusMode', '初始化');
 
     // [DEV] 开发强制模式下跳过 loadFromLocal + checkGate，防止覆盖模拟数据
@@ -93,39 +92,6 @@ export class FocusModeComponent implements OnInit, OnDestroy {
     this.scheduleLegacyInitialGateCheck();
     // 旧兜底路径仍保留恢复时 gate 检查，便于紧急回滚
     this.setupVisibilityListener();
-  }
-
-  private ensureFocusAnimationStyleLoaded(): void {
-    void FocusModeComponent.preloadAssets().catch((error: unknown) => {
-      this.logger.warn(
-        'FocusMode',
-        'focus 动画样式按需加载失败，降级继续',
-        error instanceof Error ? error.message : String(error)
-      );
-    });
-  }
-
-  static preloadAssets(): Promise<void> {
-    if (FocusModeComponent.focusAnimationStyleLoaded) {
-      return Promise.resolve();
-    }
-    if (FocusModeComponent.focusAnimationStyleLoadPromise) {
-      return FocusModeComponent.focusAnimationStyleLoadPromise;
-    }
-
-    FocusModeComponent.focusAnimationStyleLoadPromise = import('./focus.animations.css')
-      .then(() => {
-        FocusModeComponent.focusAnimationStyleLoaded = true;
-      })
-      .catch((error: unknown) => {
-        FocusModeComponent.focusAnimationStyleLoaded = false;
-        throw error;
-      })
-      .finally(() => {
-        FocusModeComponent.focusAnimationStyleLoadPromise = null;
-      });
-
-    return FocusModeComponent.focusAnimationStyleLoadPromise;
   }
 
   ngOnDestroy(): void {
