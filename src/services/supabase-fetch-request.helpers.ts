@@ -6,7 +6,7 @@ const READ_ONLY_RPC_FUNCTIONS = new Set([
   'get_resume_recovery_probe',
   'get_server_time',
   'get_user_projects_watermark',
-  'list_project_heads_since',
+  'list_project_heads_page',
   'sync_check_protocol',
 ]);
 
@@ -38,7 +38,7 @@ export function buildSupabaseFetch401RetryKey(url: RequestInfo | URL, options: R
 
 export function buildSupabaseRequestSignature(url: RequestInfo | URL, options: RequestInit): string {
   const body = typeof options.body === 'string' ? options.body : '';
-  return `${options.method?.toUpperCase() ?? 'GET'}:${getRequestUrl(url)}:${body.substring(0, 100)}`;
+  return `${getSupabaseRequestMethod(url, options)}:${getRequestUrl(url)}:${body.substring(0, 100)}`;
 }
 
 export function redactSupabaseRequestUrl(url: RequestInfo | URL): string {
