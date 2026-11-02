@@ -21,6 +21,7 @@ import { EventBusService, type SessionInvalidatedEvent } from '../../../services
 import { SyncStateService } from './sync/sync-state.service';
 import { pushStartupTrace } from '../../../utils/startup-trace';
 import { AppAuthSignOutController } from './app-auth-sign-out.controller';
+import { AppAuthPostLoginController } from './app-auth-post-login.controller';
 import {
   buildSuccessfulLoginCompletionPlan,
   type AuthFormStatePatch,
@@ -30,7 +31,6 @@ import {
   getAuthFormModePatch,
   getAuthFailureMessage,
   isAuthLoadCurrent,
-  isMigrationCheckCurrent,
   resolveAppAuthLazyService,
   resolveSafePostAuthNavigationTarget,
   shouldShowLoginRequired,
@@ -86,6 +86,25 @@ export class AppAuthCoordinatorService {
     showError: (title, message) => this.toast.error(title, message),
     showWarning: (title, message) => this.toast.warning(title, message),
   });
+  private readonly postLoginController = new AppAuthPostLoginController({
+    storeCurrentUserId: userId => localStorage.setItem('currentUserId', userId),
+    loadPostAuthUserData: (userId, previousUserIdHint) =>
+      this.loadPostAuthUserDataWithTimeout(userId, '[Login]', previousUserIdHint),
+    isAuthSubmissionCurrent: (generation, allowedCurrentUserIds) =>
+      this.isAuthSubmissionCurrent(generation, allowedCurrentUserIds),
+    showLoginSuccess: () => this.toast.success('登录成功', '欢迎回来'),
+    nextMigrationGeneration: () => ++this.migrationCheckGeneration,
+    setReloginMode: enabled => this.isReloginMode.set(enabled),
+    finishSuccessfulLogin: (userId, options) => this.finishSuccessfulLogin(userId, options),
+    currentMigrationGeneration: () => this.migrationCheckGeneration,
+    currentUserId: () => this.userSession.currentUserId(),
+    localModeUserId: AUTH_CONFIG.LOCAL_MODE_USER_ID,
+    getMigrationService: () => this.getMigrationServiceLazy(),
+    getProjectDataService: () => this.getProjectDataServiceLazy(),
+    warn: (message, error) => error === undefined
+      ? this.logger.warn(message) : this.logger.warn(message, error),
+    showMigrationModal: () => this.modal.show('migration'),
+  });
 
   // ========== 认证状态 Signals ==========
   readonly authEmail = signal('');
@@ -134,9 +153,17 @@ export class AppAuthCoordinatorService {
   private authLoadGeneration = 0;
   /** 登录后迁移探测的会话代次；每次登录/登出切换都会递增以作废旧探测 */
   private migrationCheckGeneration = 0;
+  private authSubmissionGeneration = 0;
+  private activeAuthSubmissionGeneration: number | null = null;
+  private destroyed = false;
 
   constructor() {
     this.registerSessionInvalidationTeardown();
+    this.destroyRef.onDestroy(() => {
+      this.destroyed = true;
+      this.invalidateAuthSubmissions();
+      this.cancelPostLoginMigrationChecks();
+    });
 
     // 回滚开关关闭时，恢复旧策略：启动阶段预热重型依赖。
     if (!FEATURE_FLAGS.ROOT_STARTUP_DEP_PRUNE_V1) {
@@ -154,6 +181,8 @@ export class AppAuthCoordinatorService {
   }
 
   private async handleSessionInvalidated(event: SessionInvalidatedEvent): Promise<void> {
+    this.invalidateAuthSubmissions();
+    this.cancelPostLoginMigrationChecks();
     try {
       await this.userSession.setCurrentUser(null, {
         skipPersistentReload: true,
@@ -398,6 +427,7 @@ export class AppAuthCoordinatorService {
     opts?: { closeSettings?: boolean; skipPostAuthNavigation?: boolean },
   ): Promise<void> {
     event?.preventDefault();
+    if (this.isAuthLoading()) return;
     const preflightError = getAuthCredentialPreflightError('login',
       { isConfigured: this.auth.isConfigured, email: this.authEmail(), password: this.authPassword() });
     if (preflightError) {
@@ -407,8 +437,16 @@ export class AppAuthCoordinatorService {
     this.authError.set(null);
     this.isAuthLoading.set(true);
     const previousUserIdHint = this.capturePreviousUserIdHint();
+    const submissionGeneration = this.beginAuthSubmission();
     try {
-      const result = await this.auth.signIn(this.authEmail(), this.authPassword());
+      const result = await this.auth.signIn(
+        this.authEmail(),
+        this.authPassword(),
+        () => this.isAuthSubmissionCurrent(submissionGeneration, [previousUserIdHint]),
+      );
+      if (!this.isAuthSubmissionCurrent(submissionGeneration, [previousUserIdHint])) {
+        return;
+      }
       if (isFailure(result)) {
         throw new Error(getAuthFailureMessage(result.error));
       }
@@ -422,22 +460,22 @@ export class AppAuthCoordinatorService {
         throw new Error('登录成功，但会话初始化失败，请重新登录。');
       }
 
-      localStorage.setItem('currentUserId', userId);
-      await this.loadPostAuthUserDataWithTimeout(userId, '[Login]', previousUserIdHint);
-      this.toast.success('登录成功', `欢迎回来`);
-      const migrationGeneration = ++this.migrationCheckGeneration;
-      this.isReloginMode.set(false);
-      this.finishSuccessfulLogin(userId, opts);
-      setTimeout(() => {
-        void this.checkMigrationAfterLogin(userId, migrationGeneration).catch(error => {
-          this.logger.warn('登录后迁移检查失败，已跳过本次迁移提示', error);
-        });
-      }, 0);
+      await this.postLoginController.initializeSuccessfulLoginSession(
+        userId,
+        previousUserIdHint,
+        submissionGeneration,
+        opts,
+      );
     } catch (e: unknown) {
-      this.authError.set(getAuthFlowErrorMessage(e));
+      if (this.isAuthSubmissionCurrent(submissionGeneration)) {
+        this.authError.set(getAuthFlowErrorMessage(e));
+      }
     } finally {
-      this.isAuthLoading.set(false);
-      this.isCheckingSession.set(false);
+      if (this.activeAuthSubmissionGeneration === submissionGeneration) {
+        this.activeAuthSubmissionGeneration = null;
+        this.isAuthLoading.set(false);
+        this.isCheckingSession.set(false);
+      }
     }
   }
 
@@ -634,8 +672,9 @@ export class AppAuthCoordinatorService {
     * 返回 true 表示登出完成；返回 false 表示远端吊销失败，调用方必须保留当前登录态
    */
   async signOut(): Promise<boolean> {
+    this.invalidateAuthSubmissions();
     this.authLoadGeneration++;
-    this.migrationCheckGeneration++;
+    this.cancelPostLoginMigrationChecks();
     return this.signOutController.signOut();
   }
 
@@ -672,6 +711,8 @@ export class AppAuthCoordinatorService {
 
   /** 处理本地模式选择 */
   async handleLocalModeFromModal(): Promise<void> {
+    this.invalidateAuthSubmissions();
+    this.cancelPostLoginMigrationChecks();
     const previousUserIdHint = this.auth.currentUserId();
     enableLocalMode();
     await this.userSession.setCurrentUser(AUTH_CONFIG.LOCAL_MODE_USER_ID, {
@@ -687,16 +728,6 @@ export class AppAuthCoordinatorService {
 
   // ========== 迁移检查 ==========
 
-  private isMigrationCheckCurrent(userId: string | null, generation: number): boolean {
-    return isMigrationCheckCurrent(
-      generation,
-      this.migrationCheckGeneration,
-      userId,
-      this.userSession.currentUserId(),
-      AUTH_CONFIG.LOCAL_MODE_USER_ID
-    );
-  }
-
   private isAuthLoadCurrent(userId: string | null, generation: number): boolean {
     return isAuthLoadCurrent(
       generation,
@@ -706,48 +737,32 @@ export class AppAuthCoordinatorService {
     );
   }
 
-  private async checkMigrationAfterLogin(
-    userId: string | null = this.userSession.currentUserId(),
-    generation: number = this.migrationCheckGeneration
-  ): Promise<void> {
-    if (!this.isMigrationCheckCurrent(userId, generation)) {
-      return;
-    }
+  private beginAuthSubmission(): number {
+    this.authSubmissionGeneration += 1;
+    this.activeAuthSubmissionGeneration = this.authSubmissionGeneration;
+    return this.authSubmissionGeneration;
+  }
 
-    const migrationService = await this.getMigrationServiceLazy();
-    if (!migrationService) return;
+  private invalidateAuthSubmissions(): void {
+    this.authSubmissionGeneration += 1;
+  }
 
-    if (!this.isMigrationCheckCurrent(userId, generation)) {
-      return;
-    }
+  private cancelPostLoginMigrationChecks(): void {
+    this.migrationCheckGeneration += 1;
+    this.postLoginController.cancelPendingMigrationCheck();
+  }
 
-    const projectDataService = await this.getProjectDataServiceLazy();
-    if (!projectDataService) {
-      return;
+  private isAuthSubmissionCurrent(
+    generation: number,
+    allowedCurrentUserIds?: readonly (string | null)[],
+  ): boolean {
+    if (this.destroyed || generation !== this.authSubmissionGeneration) {
+      return false;
     }
-
-    if (!this.isMigrationCheckCurrent(userId, generation)) {
-      return;
+    if (!allowedCurrentUserIds) {
+      return true;
     }
-
-    if (!userId) {
-      return;
-    }
-
-    const remoteProjects = await projectDataService.loadProjectListMetadataFromCloud(userId);
-    if (!this.isMigrationCheckCurrent(userId, generation)) {
-      return;
-    }
-
-    if (remoteProjects === null) {
-      this.logger.warn('登录后迁移检查无法确认云端项目，已跳过本次迁移提示');
-      return;
-    }
-
-    const needsMigration = migrationService.checkMigrationNeeded(remoteProjects);
-    if (needsMigration && this.isMigrationCheckCurrent(userId, generation)) {
-      this.modal.show('migration');
-    }
+    return allowedCurrentUserIds.includes(this.userSession.currentUserId());
   }
 
   handleMigrationComplete(): void {

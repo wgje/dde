@@ -51,6 +51,14 @@ async function flushAsyncTimers(): Promise<void> {
   await new Promise(resolve => setTimeout(resolve, 0));
 }
 
+function createDeferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(promiseResolve => {
+    resolve = promiseResolve;
+  });
+  return { promise, resolve };
+}
+
 export function setup(options?: {
   injectorGet?: (token: unknown) => unknown;
 }) {
@@ -380,6 +388,65 @@ describe('session invalidation handling', () => {
       preserveOfflineSnapshot: true,
     });
     expect(userId()).toBeNull();
+  });
+
+  it('迟到登录在 owner 已切换后不得写入旧 owner', async () => {
+    const { service, authMock, userSessionMock, modalMock, userId } = setup();
+    userId.set('owner-before-login');
+    const signIn = createDeferred<unknown>();
+    authMock.signIn.mockReturnValue(signIn.promise);
+    const setItem = vi.spyOn(localStorage, 'setItem');
+    service.authEmail.set('test@example.com');
+    service.authPassword.set('password123');
+
+    try {
+      const loginPromise = service.handleLogin();
+      await Promise.resolve();
+      userId.set('owner-b');
+      signIn.resolve({ ok: true, value: { userId: 'owner-a' } });
+      await loginPromise;
+
+      const canCommit = authMock.signIn.mock.calls[0]?.[2] as (() => boolean) | undefined;
+      expect(canCommit?.()).toBe(false);
+      expect(setItem).not.toHaveBeenCalledWith('currentUserId', 'owner-a');
+      expect(userSessionMock.setCurrentUser).not.toHaveBeenCalledWith('owner-a', expect.anything());
+      expect(modalMock.closeByType).not.toHaveBeenCalledWith('login', {
+        success: true,
+        userId: 'owner-a',
+      });
+    } finally {
+      setItem.mockRestore();
+    }
+  });
+
+  it('session invalidation 后不得提交在途登录的 owner', async () => {
+    const { service, authMock, eventBus, userSessionMock, modalMock, userId } = setup();
+    userId.set('owner-before-login');
+    const signIn = createDeferred<unknown>();
+    authMock.signIn.mockReturnValue(signIn.promise);
+    const setItem = vi.spyOn(localStorage, 'setItem');
+    service.authEmail.set('test@example.com');
+    service.authPassword.set('password123');
+
+    try {
+      const loginPromise = service.handleLogin();
+      await Promise.resolve();
+      eventBus.publishSessionInvalidated('test', 'owner-before-login');
+      await Promise.resolve();
+      signIn.resolve({ ok: true, value: { userId: 'owner-a' } });
+      await loginPromise;
+
+      const canCommit = authMock.signIn.mock.calls[0]?.[2] as (() => boolean) | undefined;
+      expect(canCommit?.()).toBe(false);
+      expect(setItem).not.toHaveBeenCalledWith('currentUserId', 'owner-a');
+      expect(userSessionMock.setCurrentUser).not.toHaveBeenCalledWith('owner-a', expect.anything());
+      expect(modalMock.closeByType).not.toHaveBeenCalledWith('login', {
+        success: true,
+        userId: 'owner-a',
+      });
+    } finally {
+      setItem.mockRestore();
+    }
   });
 });
 
